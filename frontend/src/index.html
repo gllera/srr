@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+   <head>
+      <title>SRR</title>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+      <meta name="theme-color" content="#fafaf7" media="(prefers-color-scheme: light)" />
+      <meta name="theme-color" content="#111110" media="(prefers-color-scheme: dark)" />
+      <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8' fill='%23f26522'><circle cx='1' cy='7' r='1'/><path d='M0 3v1a4 4 0 014 4h1A5 5 0 000 3z'/><path d='M0 0v1a7 7 0 017 7h1A8 8 0 000 0z'/></svg>" />
+      <link rel="stylesheet" href="styles.css" />
+      <base target="_blank" />
+   </head>
+   <body>
+      <div class="srr-popup" role="dialog" aria-modal="true" aria-live="assertive">
+         <span class="srr-popup-text"></span>
+         <button class="srr-popup-retry srr-hidden">Retry</button>
+         <button class="srr-popup-close" aria-label="Close">&times;</button>
+      </div>
+      <main class="srr-container">
+         <div class="srr-title-row">
+            <a class="srr-title-link">
+               <div class="srr-title" tabindex="-1"></div>
+            </a>
+         </div>
+         <div class="srr-content"></div>
+         <nav class="srr-toolbar" aria-label="Feed navigation">
+            <div class="srr-toolbar-left">
+               <div class="srr-dropdown">
+                  <button class="srr-dropdown-btn srr-source" aria-expanded="false"></button>
+                  <div id="srr-source-menu" class="srr-dropdown-menu" role="menu"></div>
+               </div>
+            </div>
+            <div class="srr-toolbar-right">
+               <div class="srr-dropdown">
+                  <button class="srr-dropdown-btn srr-floor-btn" aria-expanded="false" aria-label="Set navigation floor">&#x230A;</button>
+                  <div id="srr-floor-menu" class="srr-dropdown-menu" role="menu"></div>
+               </div>
+               <div class="srr-date"></div>
+               <span class="srr-counter"></span>
+               <button class="srr-prev" disabled aria-label="Previous feed">
+                  <div class="srr-prev-icon"></div>
+               </button>
+               <button class="srr-next" disabled aria-label="Next feed">
+                  <div class="srr-next-icon"></div>
+               </button>
+               <button class="srr-last" aria-label="Latest feed">
+                  <div class="srr-last-icon"></div>
+               </button>
+            </div>
+         </nav>
+      </main>
+      <noscript><p style="text-align: center; margin: 2rem">JavaScript is required to load feeds.</p></noscript>
+      <script src="js/app.ts" type="module"></script>
+   </body>
+</html>

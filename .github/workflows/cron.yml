@@ -1,0 +1,25 @@
+name: Cron
+
+on:
+  workflow_dispatch:
+  schedule:
+  - cron: '*/5 * * * *'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment: cron
+    steps:
+      - name: Fetch
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_ENDPOINT_URL: ${{ secrets.AWS_ENDPOINT_URL }}
+          AWS_DEFAULT_REGION: weur
+          SRR_S3_URL: ${{ vars.SRR_S3_URL }}
+        run: |
+          set -x
+          BIN=$( curl -s "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/latest" | jq -r '.assets[].browser_download_url' )
+          wget -qO srr "$BIN"
+          chmod +x srr
+          ./srr fetch -do "$SRR_S3_URL"

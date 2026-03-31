@@ -1,0 +1,9 @@
+{
+    "compilerOptions": {
+        "strict": true,
+        "module": "NodeNext",
+        "moduleResolution": "nodenext",
+        "typeRoots": ["./src/js"],
+        "target": "es2022"
+    }
+}

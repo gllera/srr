@@ -1,0 +1,52 @@
+declare namespace NodeJS {
+   interface ProcessEnv {
+      SRR_CDN_URL: string
+   }
+}
+
+interface IDB {
+   data_tog: boolean
+   ts_tog: boolean
+   fetched_at: number
+   first_fetched: number
+   sub_seq: number
+   total_art: number
+   next_pid: number
+   pack_off: number
+   subscriptions: ISub[]
+   subs_mapped: Map<number, ISub>
+}
+
+interface ISub {
+   id: number
+   title: string
+   url: string
+   pipe?: string[]
+   ferr?: string
+   stop_guid?: number
+   etag?: string
+   last_modified?: string
+   total_art?: number
+   last_added?: number
+   tag?: string
+}
+
+interface IIdxEntry {
+   fetched_at: number
+   pack_id: number
+   pack_offset: number
+   sub_id: number
+   published: number
+   title: string
+   link: string
+}
+
+interface IShowFeed {
+   has_left: boolean
+   has_right: boolean
+   filtered: boolean
+   floor: boolean
+   article: IIdxEntry
+   sub: ISub | undefined
+   countLeft: number | null
+}
