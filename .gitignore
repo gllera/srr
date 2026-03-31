@@ -1,0 +1,11 @@
+packs/
+.vscode/
+
+# Backend
+backend/backend
+backend/debug/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.parcel-cache/

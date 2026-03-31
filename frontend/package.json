@@ -1,0 +1,27 @@
+{
+  "name": "frontend",
+  "version": "1.0.0",
+  "source": "src/index.html",
+  "scripts": {
+    "dev": "concurrently -k npm:serve npm:servep",
+    "serve": "SRR_CDN_URL=http://localhost:3000 parcel serve --no-cache --dist-dir ../dist --cache-dir ../.parcel-cache",
+    "servep": "npx serve --cors ../packs",
+    "build": "parcel build --public-url . --no-cache --no-source-maps --dist-dir dist",
+    "test": "vitest run",
+    "lint": "eslint src/js",
+    "format": "prettier --write src",
+    "format-check": "prettier --check src"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "concurrently": "^9.2.1",
+    "eslint": "^10.0.3",
+    "eslint-config-prettier": "^10.1.8",
+    "jsdom": "^28.1.0",
+    "parcel": "^2.16.4",
+    "prettier": "^3.8.1",
+    "serve": "^14.2.6",
+    "typescript-eslint": "^8.57.0",
+    "vitest": "^4.0.18"
+  }
+}
