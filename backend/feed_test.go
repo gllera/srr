@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gllera/srr/backend/mod"
+	"srrb/mod"
 )
 
 func collectFeed(t *testing.T, data string) []*mod.RawItem {

@@ -9,7 +9,7 @@ import (
 
 	"github.com/alecthomas/kong"
 	kongyaml "github.com/alecthomas/kong-yaml"
-	"github.com/gllera/srr/backend/store"
+	"srrb/store"
 )
 
 var version = "development"

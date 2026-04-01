@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gllera/srr/backend/mod"
+	"srrb/mod"
 )
 
 type FetchCmd struct {

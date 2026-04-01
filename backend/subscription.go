@@ -12,7 +12,7 @@ import (
 
 	"github.com/microcosm-cc/bluemonday"
 
-	"github.com/gllera/srr/backend/mod"
+	"srrb/mod"
 )
 
 var titlePolicy = bluemonday.StrictPolicy()

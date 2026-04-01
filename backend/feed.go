@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gllera/srr/backend/mod"
+	"srrb/mod"
 )
 
 var ErrStopFeed = errors.New("stop feed")

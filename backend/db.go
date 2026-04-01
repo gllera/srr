@@ -10,7 +10,7 @@ import (
 	"log/slog"
 	"slices"
 
-	"github.com/gllera/srr/backend/store"
+	"srrb/store"
 )
 
 func jsonEncode(v any) ([]byte, error) {

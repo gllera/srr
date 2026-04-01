@@ -11,7 +11,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/gllera/srr/backend/mod"
+	"srrb/mod"
 )
 
 type PreviewCmd struct {

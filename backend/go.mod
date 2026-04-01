@@ -1,4 +1,4 @@
-module github.com/gllera/srr/backend
+module srrb
 
 go 1.26.0
 
