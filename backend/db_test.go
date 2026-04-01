@@ -296,10 +296,7 @@ func TestCommitAndReadDB(t *testing.T) {
 	}
 
 	// Read it back
-	data, err := os.ReadFile(filepath.Join(dir, "db.json"))
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
+	data := decompressGz(t, filepath.Join(dir, "db.gz"))
 
 	var core DBCore
 	if err := json.Unmarshal(data, &core); err != nil {
@@ -699,12 +696,12 @@ func TestDBOpenCorruptedJSON(t *testing.T) {
 	dir := t.TempDir()
 	globals = &Globals{PackSize: 1, Store: dir}
 
-	// Write invalid db.json
-	os.WriteFile(filepath.Join(dir, "db.json"), []byte("not json"), 0644)
+	// Write invalid db.gz
+	os.WriteFile(filepath.Join(dir, "db.gz"), []byte("not gzip"), 0644)
 
 	_, err := NewDB(ctx, false)
 	if err == nil {
-		t.Error("expected error for corrupted db.json")
+		t.Error("expected error for corrupted db.gz")
 	}
 }
 
@@ -712,7 +709,7 @@ func TestDBOpenEmptyDir(t *testing.T) {
 	dir := t.TempDir()
 	globals = &Globals{PackSize: 1, Store: dir}
 
-	// Fresh DB with no db.json should work
+	// Fresh DB with no db.gz should work
 	db, err := NewDB(ctx, false)
 	if err != nil {
 		t.Fatalf("NewDB: %v", err)

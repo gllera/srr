@@ -35,11 +35,11 @@ Low-level storage interface: `Get`/`Put`/`AtomicPut`/`Rm`/`Close`. Registry sele
 
 ### Pack Storage (`db.go`)
 
-See root `CLAUDE.md` Data Contract for pack format spec (idx/, data/, ts/ series), db.json schema, CDN layout, and file-based locking.
+See root `CLAUDE.md` Data Contract for pack format spec (idx/, data/, ts/ series), db.gz schema, CDN layout, and file-based locking.
 
 Backend-specific:
 - `PutArticles`, `UpdateTS`, `savePack` manage the three series. Order: `PutArticles` → `UpdateTS` → `Commit`.
-- `Commit` serializes `DBCore` via `AtomicPut`. `db.json` uses short JSON keys — read `DBCore` struct tags for full schema.
+- `Commit` serializes `DBCore` via `AtomicPut`. `db.gz` is gzip-compressed JSON with short keys — read `DBCore` struct tags for full schema.
 - `data_tog`/`ts_tog` toggle alternating pack filenames for atomic updates.
 - `first_fetched` (`FirstFetchedAt`): unix timestamp of the first fetch that produced articles.
 

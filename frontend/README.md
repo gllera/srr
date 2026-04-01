@@ -48,7 +48,7 @@ Entry point: `src/index.html` -> `src/js/app.ts`. Bundled with Parcel 2.
 |--------|------|
 | `app.ts` | UI rendering, events, dropdowns, dark mode, error popup. All async actions go through a `guard()` mutex. |
 | `nav.ts` | Navigation state machine: hash routing, traversal, filtering, floor. Returns `IShowFeed`. |
-| `data.ts` | CDN data layer: fetches `db.json`, streams gzip TSV idx packs, loads null-delimited data packs. Dual LRU caches. |
+| `data.ts` | CDN data layer: fetches `db.gz`, streams gzip TSV idx packs, loads null-delimited data packs. Dual LRU caches. |
 | `ts.ts` | Time-series layer: fetches/caches weekly ts/ packs, provides `findCandidateIdxPacks` for filtered navigation. |
 | `cache.ts` | Generic LRU cache factory. |
 | `fmt.ts` | Pure utilities: HTML sanitization, relative time, date formatting. |

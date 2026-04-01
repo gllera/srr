@@ -24,7 +24,7 @@ func jsonEncode(v any) ([]byte, error) {
 }
 
 const (
-	dbFileKey   = "db.json"
+	dbFileKey   = "db.gz"
 	dbLockKey   = ".locked"
 	idxPackSize = 1000
 )
@@ -82,6 +82,17 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 	}
 
 	if len(data) != 0 {
+		r, err := gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			db.Close(ctx)
+			return nil, fmt.Errorf("decompress %s: %w", dbFileKey, err)
+		}
+		data, err = io.ReadAll(r)
+		r.Close()
+		if err != nil {
+			db.Close(ctx)
+			return nil, fmt.Errorf("decompress %s: %w", dbFileKey, err)
+		}
 		if err := json.Unmarshal(data, &db.core); err != nil {
 			db.Close(ctx)
 			return nil, fmt.Errorf("decode %s: %w", dbFileKey, err)
@@ -111,7 +122,15 @@ func (o *DB) Commit(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return o.AtomicPut(ctx, dbFileKey, data)
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write(data); err != nil {
+		return err
+	}
+	if err := gz.Close(); err != nil {
+		return err
+	}
+	return o.AtomicPut(ctx, dbFileKey, buf.Bytes())
 }
 
 func (o *DB) Subscriptions() []*Subscription {

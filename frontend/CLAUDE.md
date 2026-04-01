@@ -16,7 +16,7 @@ Dependency chain: `app → nav → data`, `app → ts → data`, `nav → ts →
 
 | Module | Role |
 |---|---|
-| `data.ts` | CDN data layer: fetches `db.json`, gzip TSV idx packs, gzip null-delimited data packs. Exports live-binding state (`db`, `articles`, `idxPack`) read by nav. Dual LRU caches (size 5). |
+| `data.ts` | CDN data layer: fetches `db.gz`, gzip TSV idx packs, gzip null-delimited data packs. Exports live-binding state (`db`, `articles`, `idxPack`) read by nav. Dual LRU caches (size 5). |
 | `ts.ts` | Time-series optimization for filtered navigation. Fetches/caches ts/ weekly packs. Exports `findCandidateIdxPacks` (used by nav) and `findChronForTimestamp` (used by app for floor). |
 | `nav.ts` | Navigation state machine: hash routing (`#chronIdx[~floor][!tokens]`), traversal, filtering, floor. Returns `IShowFeed`. Uses `pushState`/`replaceState`. Tokens are sub IDs or tag names. |
 | `cache.ts` | Generic LRU cache factory (`makeLRU`). Used by data.ts and ts.ts. |
@@ -28,7 +28,7 @@ CSS: native nesting, `srr-` prefix on all classes, dark mode via `prefers-color-
 
 ## Data Structures
 
-See root `CLAUDE.md` Data Contract for db.json, ISub, IIdxEntry, pack format, CDN layout, and chronIdx.
+See root `CLAUDE.md` Data Contract for db.gz, ISub, IIdxEntry, pack format, CDN layout, and chronIdx.
 
 Frontend-specific additions:
 - `subs_mapped` — computed at runtime: `Map<id, ISub>`
@@ -39,7 +39,7 @@ Frontend-specific additions:
 
 **guard() mutex** (app.ts): all async UI actions go through it. Drops concurrent calls. On error → popup with retry.
 
-**Eager fetch**: `data.ts` starts `fetch("db.json")` at module load (before `init()` call).
+**Eager fetch**: `data.ts` starts `fetch("db.gz")` at module load (before `init()` call).
 
 **Caching**: LRU(5) for idx + LRU(5) for data, keyed by pack number. HTTP `force-cache` for finalized. Latest packs use `data_tog` filename toggle.
 

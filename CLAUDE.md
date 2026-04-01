@@ -32,7 +32,7 @@ All commands run from the repo root via `make`:
 
 Shared format between backend (writer) and frontend (reader).
 
-### `db.json`
+### `db.gz`
 
 ```
 { data_tog, ts_tog, fetched_at, sub_seq, total_art, next_pid, pack_off, subscriptions[] }
@@ -72,7 +72,7 @@ Three gzip-compressed series under the feed directory:
 
 ### CDN Layout / Pack Addressing
 
-Each feed directory: `db.json` + `idx/` + `data/` + `ts/`.
+Each feed directory: `db.gz` + `idx/` + `data/` + `ts/`.
 
 - **Finalized packs**: `0.gz`..`N-1.gz` (0-indexed), immutable, HTTP `force-cache`
 - **Latest pack**: `true.gz` or `false.gz` (toggled by `data_tog`/`ts_tog`)

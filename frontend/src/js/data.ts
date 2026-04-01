@@ -4,7 +4,7 @@ export const PACK_SIZE = 1000
 
 const DB_URL = new URL(process.env.SRR_CDN_URL as string, window.location.href)
 // Start fetching before init() is called so network and JS parsing overlap
-const dbFetch = fetch(new URL("db.json", DB_URL))
+const dbFetch = fetch(new URL("db.gz", DB_URL))
 
 export let db: IDB
 export let articles: IIdxEntry[] = []
@@ -14,7 +14,8 @@ const idxCache = makeLRU<IIdxEntry[]>(5)
 const dataCache = makeLRU<string[]>(5)
 
 export async function init() {
-   const raw: IDB = await (await dbFetch).json()
+   const res = await dbFetch
+   const raw: IDB = await new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).json()
    raw.subscriptions ??= []
    raw.subs_mapped = new Map(raw.subscriptions.map((sub) => [sub.id, sub]))
    db = raw

@@ -7,7 +7,7 @@ color: pink
 
 Update CLAUDE.md files to reflect the current state of the codebase. There are three files:
 
-- **Root `CLAUDE.md`** — canonical data contract (db.json, pack format, CDN layout)
+- **Root `CLAUDE.md`** — canonical data contract (db.gz, pack format, CDN layout)
 - **`backend/CLAUDE.md`** — backend-specific (references root for shared format)
 - **`frontend/CLAUDE.md`** — frontend-specific (references root for shared format)
 
