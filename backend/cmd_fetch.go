@@ -30,6 +30,10 @@ func (o *FetchCmd) Run() error {
 
 	client := &http.Client{
 		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConnsPerHost: globals.Workers,
+			MaxConnsPerHost:     globals.Workers,
+		},
 	}
 	processor := mod.New()
 
@@ -62,7 +66,11 @@ loop:
 	close(ch)
 	wg.Wait()
 
-	var articles []*Item
+	total := 0
+	for _, s := range db.Subscriptions() {
+		total += len(s.newItems)
+	}
+	articles := make([]*Item, 0, total)
 	for _, s := range db.Subscriptions() {
 		articles = append(articles, s.newItems...)
 	}

@@ -25,14 +25,23 @@ type Globals struct {
 	Debug       bool   `short:"d"                    env:"SRR_DEBUG"         help:"Enable debug mode."`
 }
 
+type SubGroup struct {
+	Add    AddCmd    `cmd:"" help:"Subscribe to RSS or update an existing subscription."`
+	Rm     RmCmd     `cmd:"" help:"Unsubscribe from RSS(s)."`
+	Ls     LsCmd     `cmd:"" help:"List subscriptions."`
+	Import ImportCmd `cmd:"" help:"Import opml subscriptions file."`
+}
+
+type ArtGroup struct {
+	Fetch FetchCmd `cmd:"" help:"Fetch subscriptions articles."`
+	Ls    ArtCmd   `cmd:"" help:"List stored articles."`
+}
+
 type CLI struct {
 	Globals
-	Add     AddCmd     `cmd:"" help:"Subscribe to RSS or update an existing subscription."`
-	Rm      RmCmd      `cmd:"" help:"Unsubscribe from RSS(s)."`
-	Ls      LsCmd      `cmd:"" help:"List subscriptions."`
-	Fetch   FetchCmd   `cmd:"" help:"Fetch subscriptions articles."`
-	Import  ImportCmd  `cmd:"" help:"Import opml subscriptions file."`
-	Preview PreviewCmd `cmd:"" help:"Preview processed feed articles in a browser."`
+	Sub     SubGroup   `cmd:"" aliases:"s" help:"Subscription management."`
+	Art     ArtGroup   `cmd:"" aliases:"a" help:"Article management."`
+	Preview PreviewCmd `cmd:"" aliases:"p" help:"Preview processed feed articles in a browser."`
 	Version VersionCmd `cmd:"" help:"Print version information."`
 }
 

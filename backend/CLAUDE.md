@@ -10,10 +10,11 @@
 
 ## Architecture
 
-- **`main.go`** — CLI via `alecthomas/kong` + YAML config (`$SRR_CONFIG` or `$XDG_CONFIG_HOME/srr/srr.yaml`). `Globals` struct for flags. Inline `version` subcommand.
+- **`main.go`** — CLI via `alecthomas/kong` + YAML config (`$SRR_CONFIG` or `$XDG_CONFIG_HOME/srr/srr.yaml`). `Globals` struct for flags. Command groups: `sub` (alias `s`): `add`, `rm`, `ls`, `import`; `art` (alias `a`): `fetch`, `ls`; `preview` (alias `p`); `version`.
 - **`cmd_fetch.go`** — `signal.NotifyContext` for graceful shutdown, channel-based worker pool (`globals.Workers` goroutines). Articles sorted by published time (ascending) before storage. Order: `PutArticles` → `UpdateTS` → `Commit`.
 - **`feed.go`** — Streaming XML parser, auto-detects RSS/Atom/RDF. GUIDs: FNV-32a → `uint32` (fallback: GUID → ID → Link → empty hash).
-- **`cmd_subs.go`** — `AddCmd` (add/update subscription via `--upd`, `-t/--title`, `-u/--url`, `-g/--tag`, `-p/--parsers`), `RmCmd`, `LsCmd` (filter by `-g/--tag`, yaml/json output).
+- **`cmd_subs.go`** — `AddCmd` (`srr sub add`, add/update subscription via `--upd`, `-t/--title`, `-u/--url`, `-g/--tag`, `-p/--parsers`), `RmCmd` (`srr sub rm`), `LsCmd` (`srr sub ls`, filter by `-g/--tag`, yaml/json output).
+- **`cmd_art.go`** — `ArtCmd` (`srr art ls`): lists stored articles newest-first with cursor pagination (`-b/--before`), filter by sub ID (`-i`) or tag (`-g`), optional full content (`-f/--full`). Outputs JSON.
 - **`cmd_import.go`** — OPML import with hierarchical ID selection (`-a` all, `-i` specific). OPML group hierarchy auto-resolves to hierarchical tags; `-g/--tag` overrides. `-n/--dry-run` lists resulting subscriptions without importing.
 - **`opml.go`** — OPML XML parsing. `ParseOPMLTree` builds `OPMLNode` tree from file. `normalizeGroupName` converts group names to tag-safe identifiers.
 - **`cmd_preview.go`** — `preview` subcommand: fetches a feed URL, runs module pipeline (`-p`), serves rendered articles via local HTTP server (`-a/--addr`).

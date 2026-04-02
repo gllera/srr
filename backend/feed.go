@@ -17,7 +17,7 @@ var ErrStopFeed = errors.New("stop feed")
 
 func hash(s string) uint32 {
 	h := fnv.New32a()
-	h.Write([]byte(s))
+	io.WriteString(h, s)
 	return h.Sum32()
 }
 
@@ -68,11 +68,19 @@ func parseLink(r rawFeedItem) string {
 	return fallback
 }
 
-func parseDate(r rawFeedItem) time.Time {
+func parseDate(r rawFeedItem, hint *[2]string) time.Time {
+	if hint[0] != "" {
+		for _, f := range r[hint[0]] {
+			if t, err := time.Parse(hint[1], f.Txt); err == nil {
+				return t.UTC()
+			}
+		}
+	}
 	for _, key := range dateFields {
 		for _, f := range r[key] {
 			for _, layout := range dateFormats {
 				if t, err := time.Parse(layout, f.Txt); err == nil {
+					hint[0], hint[1] = key, layout
 					return t.UTC()
 				}
 			}
@@ -81,9 +89,9 @@ func parseDate(r rawFeedItem) time.Time {
 	return time.Now().UTC()
 }
 
-func rawToFeedItem(r rawFeedItem) *mod.RawItem {
+func rawToFeedItem(r rawFeedItem, dateHint *[2]string) *mod.RawItem {
 	link := parseLink(r)
-	published := parseDate(r)
+	published := parseDate(r, dateHint)
 
 	guid := r.text("guid", "id")
 	if guid == "" {
@@ -124,6 +132,7 @@ func parseFeed(data []byte, fn func(*mod.RawItem) error) error {
 		}
 	}
 
+	var dateHint [2]string
 	for {
 		tok, err := dec.Token()
 		if err == io.EOF {
@@ -140,7 +149,7 @@ func parseFeed(data []byte, fn func(*mod.RawItem) error) error {
 		if err != nil {
 			return err
 		}
-		if err := fn(rawToFeedItem(raw.Chld)); errors.Is(err, ErrStopFeed) {
+		if err := fn(rawToFeedItem(raw.Chld, &dateHint)); errors.Is(err, ErrStopFeed) {
 			return nil
 		} else if err != nil {
 			return err
@@ -157,6 +166,7 @@ func parseElement(dec *xml.Decoder, start xml.StartElement) (rawField, error) {
 		}
 	}
 
+	var txt strings.Builder
 	for {
 		tok, err := dec.Token()
 		if err != nil {
@@ -164,9 +174,9 @@ func parseElement(dec *xml.Decoder, start xml.StartElement) (rawField, error) {
 		}
 		switch t := tok.(type) {
 		case xml.CharData:
-			f.Txt += string(t)
+			txt.Write(t)
 		case xml.EndElement:
-			f.Txt = strings.TrimSpace(f.Txt)
+			f.Txt = strings.TrimSpace(txt.String())
 			return f, nil
 		case xml.StartElement:
 			child, err := parseElement(dec, t)

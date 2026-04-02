@@ -112,7 +112,7 @@ func (s *Subscription) Fetch(ctx context.Context, client *http.Client, buf []byt
 		return err
 	}
 
-	s.newItems = nil
+	s.newItems = s.newItems[:0]
 	var last *mod.RawItem
 
 	err = parseFeed(buf[:n], func(i *mod.RawItem) error {

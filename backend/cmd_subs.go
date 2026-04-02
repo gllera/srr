@@ -27,6 +27,15 @@ func printFormatted(format string, v any) error {
 	return nil
 }
 
+func printJSON(v any) error {
+	output, err := jsonEncode(v)
+	if err != nil {
+		return fmt.Errorf("encoding json: %w", err)
+	}
+	fmt.Print(string(output))
+	return nil
+}
+
 type AddCmd struct {
 	Upd     *int      `          optional:"" help:"Update existing subscription id instead."`
 	Title   *string   `short:"t" optional:"" help:"Subscription title."`
@@ -116,7 +125,7 @@ func (o *RmCmd) Run() error {
 
 type LsCmd struct {
 	Tag    *string `short:"g" optional:"" help:"Filter by tag."`
-	Format string  `short:"f" default:"yaml" enum:"yaml,json" help:"Output format."`
+	Format string  `short:"f" default:"json" enum:"yaml,json" help:"Output format."`
 }
 
 func (o *LsCmd) Run() error {

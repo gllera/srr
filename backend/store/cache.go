@@ -32,7 +32,7 @@ func NewCache(remote Backend, cacheDir, storeURL string) (*Cache, error) {
 }
 
 func (c *Cache) Get(ctx context.Context, key string, ignoreMissing bool) ([]byte, error) {
-	if key == "db.json" {
+	if key == "db.gz" {
 		return c.getDB(ctx, ignoreMissing)
 	}
 
@@ -58,19 +58,19 @@ func (c *Cache) Get(ctx context.Context, key string, ignoreMissing bool) ([]byte
 }
 
 func (c *Cache) getDB(ctx context.Context, ignoreMissing bool) ([]byte, error) {
-	remoteData, err := c.remote.Get(ctx, "db.json", ignoreMissing)
+	remoteData, err := c.remote.Get(ctx, "db.gz", ignoreMissing)
 	if err != nil {
 		return nil, err
 	}
 
-	cachedData, _ := c.local.Get(ctx, "db.json", true)
+	cachedData, _ := c.local.Get(ctx, "db.gz", true)
 	c.valid = bytes.Equal(cachedData, remoteData)
 	if !c.valid {
 		slog.Debug("cache invalidated")
 	}
 
 	if remoteData != nil {
-		c.local.Put(ctx, "db.json", remoteData, true)
+		c.local.Put(ctx, "db.gz", remoteData, true)
 	}
 
 	return remoteData, nil
