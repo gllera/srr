@@ -55,6 +55,14 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 		return nil, err
 	}
 
+	if globals.Cache != "" {
+		backend, err = store.NewCache(backend, globals.Cache, globals.Store)
+		if err != nil {
+			backend.Close()
+			return nil, fmt.Errorf("initialize cache: %w", err)
+		}
+	}
+
 	db := &DB{
 		Backend: backend,
 		locked:  locked,

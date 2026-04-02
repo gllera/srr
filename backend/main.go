@@ -20,6 +20,7 @@ type Globals struct {
 	PackSize    int    `short:"s" default:"200"      env:"SRR_PACK_SIZE"     help:"Target pack size in KB."`
 	MaxFeedSize int    `short:"m" default:"5000"     env:"SRR_MAX_FEED_SIZE" help:"Max feed download size in KB."`
 	Store       string `short:"o" default:"packs"    env:"SRR_STORE"         help:"Storage destination path."`
+	Cache       string `short:"c"                    env:"SRR_CACHE"         help:"Local cache directory for remote stores."`
 	Force       bool   `                             env:"SRR_FORCE"         help:"Override DB write lock if needed."`
 	Debug       bool   `short:"d"                    env:"SRR_DEBUG"         help:"Enable debug mode."`
 }
