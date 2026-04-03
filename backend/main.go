@@ -7,9 +7,10 @@ import (
 	"path/filepath"
 	"runtime"
 
+	"srrb/store"
+
 	"github.com/alecthomas/kong"
 	kongyaml "github.com/alecthomas/kong-yaml"
-	"srrb/store"
 )
 
 var version = "development"
@@ -23,6 +24,7 @@ type Globals struct {
 	Cache       string `short:"c"                    env:"SRR_CACHE"         help:"Local cache directory for remote stores."`
 	Force       bool   `                             env:"SRR_FORCE"         help:"Override DB write lock if needed."`
 	Debug       bool   `short:"d"                    env:"SRR_DEBUG"         help:"Enable debug mode."`
+	CdnURL      string `hidden:""                    env:"SRR_CDN_URL"       help:"CDN URL for frontend builds."`
 }
 
 type SubGroup struct {
@@ -42,6 +44,7 @@ type CLI struct {
 	Sub     SubGroup   `cmd:"" aliases:"s" help:"Subscription management."`
 	Art     ArtGroup   `cmd:"" aliases:"a" help:"Article management."`
 	Preview PreviewCmd `cmd:"" aliases:"p" help:"Preview processed feed articles in a browser."`
+	Config  ConfigCmd  `cmd:"" aliases:"c" help:"Print resolved configuration."`
 	Version VersionCmd `cmd:"" help:"Print version information."`
 }
 

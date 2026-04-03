@@ -2,11 +2,17 @@
   "name": "frontend",
   "version": "1.0.0",
   "source": "src/index.html",
+  "targets": {
+    "default": {
+      "distDir": "dist",
+      "publicUrl": "."
+    }
+  },
   "scripts": {
     "dev": "concurrently -k npm:serve npm:servep",
-    "serve": "SRR_CDN_URL=http://localhost:3000 parcel serve --no-cache --dist-dir ../dist --cache-dir ../.parcel-cache",
+    "serve": "parcel serve --no-cache",
     "servep": "npx serve --cors ../packs",
-    "build": "parcel build --public-url . --no-cache --no-source-maps --dist-dir dist",
+    "build": "parcel build --no-cache --no-source-maps",
     "test": "vitest run",
     "lint": "eslint src/js",
     "format": "prettier --write src",

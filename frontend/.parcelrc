@@ -1,0 +1,7 @@
+{
+  "extends": "@parcel/config-default",
+  "runtimes": ["./parcel/runtime-cdn-url.js", "..."],
+  "optimizers": {
+    "*.html": ["./parcel/optimizer-preload-db.js", "..."]
+  }
+}

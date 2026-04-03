@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"reflect"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -45,26 +47,58 @@ func RegisterConfig(scheme string, cfg any) {
 // into registered config structs. Missing file or missing sections are ignored.
 func LoadConfigs(configPath string) error {
 	data, err := os.ReadFile(configPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
+	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("reading config %s: %w", configPath, err)
 	}
 
-	var raw map[string]yaml.Node
-	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return fmt.Errorf("parsing config %s: %w", configPath, err)
-	}
-
-	for scheme, cfg := range configs {
-		if node, ok := raw[scheme]; ok {
-			if err := node.Decode(cfg); err != nil {
-				return fmt.Errorf("decoding %q config: %w", scheme, err)
+	if len(data) > 0 {
+		var raw map[string]yaml.Node
+		if err := yaml.Unmarshal(data, &raw); err != nil {
+			return fmt.Errorf("parsing config %s: %w", configPath, err)
+		}
+		for scheme, cfg := range configs {
+			if node, ok := raw[scheme]; ok {
+				if err := node.Decode(cfg); err != nil {
+					return fmt.Errorf("decoding %q config: %w", scheme, err)
+				}
 			}
 		}
 	}
+
+	for scheme, cfg := range configs {
+		loadEnv(scheme, cfg)
+	}
 	return nil
+}
+
+// loadEnv overrides config fields with SRR_<SCHEME>_<FIELD> env vars.
+func loadEnv(scheme string, cfg any) {
+	v := reflect.ValueOf(cfg).Elem()
+	t := v.Type()
+	prefix := "SRR_" + strings.ToUpper(scheme) + "_"
+	for i := range t.NumField() {
+		tag, _, _ := strings.Cut(t.Field(i).Tag.Get("yaml"), ",")
+		if tag == "" {
+			continue
+		}
+		envKey := prefix + strings.ToUpper(strings.ReplaceAll(tag, "-", "_"))
+		val, ok := os.LookupEnv(envKey)
+		if !ok {
+			continue
+		}
+		f := v.Field(i)
+		switch f.Kind() {
+		case reflect.String:
+			f.SetString(val)
+		case reflect.Bool:
+			f.SetBool(val == "true" || val == "1")
+		}
+	}
+}
+
+// Configs returns the registered backend config structs keyed by scheme.
+func Configs() map[string]any {
+	return configs
 }
 
 func Open(ctx context.Context, outputPath string) (Backend, error) {

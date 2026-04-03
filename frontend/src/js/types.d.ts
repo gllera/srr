@@ -1,8 +1,4 @@
-declare namespace NodeJS {
-   interface ProcessEnv {
-      SRR_CDN_URL: string
-   }
-}
+declare const SRR_CDN_URL: string
 
 interface IDB {
    data_tog: boolean

@@ -68,7 +68,7 @@ Three gzip-compressed series under the feed directory:
 
 **idx/ entries** (`IIdxEntry`): `published` is unix seconds, `0` if unknown. `title`/`link` may be `""`.
 
-**ts/ format**: First line per pack is absolute `0 \t TotalArticles [\t subID \t subTotalArticles \t subLastAddedAt]*` (first field always 0, week encoded in filename); subsequent lines are `deltaTS \t TotalArticles [\t subID \t subTotalArticles]*` where `deltaTS` is `FetchedAt % 604800` (absolute week offset) and all counts are absolute (no subLastAddedAt in delta lines). Week-start snapshots include all subs and finalize previous pack; mid-week only dirty subs; multi-week gaps produce one finalized pack per missing week.
+**ts/ format**: First line per pack is an absolute snapshot of the **previous week's final state**: `0 \t TotalArticles [\t subID \t subTotalArticles \t subLastAddedAt]*` (first field always 0, week encoded in filename); subsequent lines are `deltaTS \t TotalArticles [\t subID \t subTotalArticles]*` where `deltaTS` is `FetchedAt % 604800` (absolute week offset) and all counts are absolute (no subLastAddedAt in delta lines). Week-start snapshots include all subs and finalize previous pack; mid-week only dirty subs; multi-week gaps produce one finalized pack per missing week.
 
 ### CDN Layout / Pack Addressing
 

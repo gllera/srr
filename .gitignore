@@ -1,11 +1,7 @@
-packs/
-.vscode/
-
-# Backend
-backend/backend
-backend/debug/
+/packs/
+/.vscode/
 
 # Frontend
-frontend/node_modules/
-frontend/dist/
-frontend/.parcel-cache/
+/frontend/node_modules/
+/frontend/.parcel-cache/
+/frontend/dist/

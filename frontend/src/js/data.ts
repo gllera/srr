@@ -2,8 +2,8 @@ import { makeLRU } from "./cache"
 
 export const PACK_SIZE = 1000
 
-const DB_URL = new URL(process.env.SRR_CDN_URL as string, window.location.href)
-// Start fetching before init() is called so network and JS parsing overlap
+const DB_URL = new URL(SRR_CDN_URL, window.location.href)
+// Reuses the browser's preloaded response from <link rel="preload"> in the built HTML
 const dbFetch = fetch(new URL("db.gz", DB_URL))
 
 export let db: IDB
