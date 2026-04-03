@@ -723,3 +723,388 @@ func TestDBOpenEmptyDir(t *testing.T) {
 		t.Errorf("SubSeq = %d, want 0", db.core.SubSeq)
 	}
 }
+
+func TestPutArticlesIdxPackSplitAtBoundary(t *testing.T) {
+	dir := t.TempDir()
+	globals = &Globals{PackSize: 1024, Store: dir} // large enough that data doesn't split
+
+	db, err := NewDB(ctx, false)
+	if err != nil {
+		t.Fatalf("NewDB: %v", err)
+	}
+	defer db.Close(ctx)
+
+	sub := &Subscription{ID: 1}
+	db.core.Subscriptions = []*Subscription{sub}
+	db.core.FetchedAt = 1700000000
+
+	articles := make([]*Item, idxPackSize)
+	for i := range articles {
+		articles[i] = &Item{Sub: sub, Title: fmt.Sprintf("A%d", i), Content: "c", Published: int64(i)}
+	}
+	if err := db.PutArticles(ctx, articles); err != nil {
+		t.Fatalf("PutArticles: %v", err)
+	}
+
+	if db.core.TotalArticles != idxPackSize {
+		t.Fatalf("TotalArticles = %d, want %d", db.core.TotalArticles, idxPackSize)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "idx/0.gz")); !os.IsNotExist(err) {
+		t.Error("idx/0.gz should not exist yet at exactly 1000 articles")
+	}
+
+	if err := db.PutArticles(ctx, []*Item{
+		{Sub: sub, Title: "A1001", Content: "c", Published: 1001},
+	}); err != nil {
+		t.Fatalf("PutArticles: %v", err)
+	}
+
+	if db.core.TotalArticles != idxPackSize+1 {
+		t.Fatalf("TotalArticles = %d, want %d", db.core.TotalArticles, idxPackSize+1)
+	}
+
+	idxPath := filepath.Join(dir, "idx/0.gz")
+	if _, err := os.Stat(idxPath); os.IsNotExist(err) {
+		t.Fatal("idx/0.gz should exist after 1001 articles")
+	}
+
+	finalizedArticles := readArticles(t, dir, idxPath)
+	if len(finalizedArticles) != idxPackSize {
+		t.Errorf("finalized idx pack has %d entries, want %d", len(finalizedArticles), idxPackSize)
+	}
+
+	latestArticles := readAllArticles(t, dir, db.core.DataToggle)
+	if len(latestArticles) != 1 {
+		t.Errorf("latest idx pack has %d entries, want 1", len(latestArticles))
+	}
+	if latestArticles[0].Title != "A1001" {
+		t.Errorf("latest article title = %q, want %q", latestArticles[0].Title, "A1001")
+	}
+}
+
+func TestUpdateTSMultiWeekGap(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	sub := &Subscription{ID: 1}
+	c.Subscriptions = []*Subscription{sub}
+
+	c.FetchedAt = 2800 * 604800
+	c.oFetchedAt = 2800 * 604800
+	articles := []*Item{
+		{Sub: sub, Title: "A1", Content: "C1", Published: 1000},
+	}
+	if err := db.PutArticles(ctx, articles); err != nil {
+		t.Fatalf("PutArticles: %v", err)
+	}
+	if err := db.UpdateTS(ctx); err != nil {
+		t.Fatalf("UpdateTS: %v", err)
+	}
+
+	sub.oTotalArticles = sub.TotalArticles
+	c.oFetchedAt = c.FetchedAt
+	c.oTotalArticles = c.TotalArticles
+	c.FetchedAt = 2803 * 604800
+
+	articles = []*Item{
+		{Sub: sub, Title: "A2", Content: "C2", Published: 2000},
+	}
+	if err := db.PutArticles(ctx, articles); err != nil {
+		t.Fatalf("PutArticles: %v", err)
+	}
+	if err := db.UpdateTS(ctx); err != nil {
+		t.Fatalf("UpdateTS: %v", err)
+	}
+
+	for _, w := range []int{2800, 2801, 2802} {
+		path := filepath.Join(dir, fmt.Sprintf("ts/%d.gz", w))
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			t.Errorf("expected ts/%d.gz to exist for multi-week gap", w)
+		}
+	}
+
+	for _, w := range []int{2801, 2802} {
+		lines := readTsLines(t, filepath.Join(dir, fmt.Sprintf("ts/%d.gz", w)))
+		if len(lines) != 1 {
+			t.Errorf("ts/%d.gz: expected 1 line (absolute snapshot), got %d", w, len(lines))
+			continue
+		}
+		if lines[0][0] != "0" {
+			t.Errorf("ts/%d.gz: first field = %q, want %q (absolute line)", w, lines[0][0], "0")
+		}
+	}
+}
+
+func TestUpdateTSTSToggleFlips(t *testing.T) {
+	db, c, _ := setupTestDB(t)
+	sub := &Subscription{ID: 1}
+	c.Subscriptions = []*Subscription{sub}
+	c.FetchedAt = 1700000000
+
+	articles := []*Item{
+		{Sub: sub, Title: "A1", Content: "C1", Published: 1000},
+	}
+	if err := db.PutArticles(ctx, articles); err != nil {
+		t.Fatalf("PutArticles: %v", err)
+	}
+
+	initial := c.TSToggle
+	if err := db.UpdateTS(ctx); err != nil {
+		t.Fatalf("UpdateTS: %v", err)
+	}
+	if c.TSToggle != !initial {
+		t.Errorf("TSToggle should flip from %v to %v", initial, !initial)
+	}
+
+	sub.oTotalArticles = sub.TotalArticles
+	c.oFetchedAt = c.FetchedAt
+	c.oTotalArticles = c.TotalArticles
+	c.FetchedAt += 100
+	articles = []*Item{
+		{Sub: sub, Title: "A2", Content: "C2", Published: 2000},
+	}
+	if err := db.PutArticles(ctx, articles); err != nil {
+		t.Fatalf("PutArticles: %v", err)
+	}
+
+	if err := db.UpdateTS(ctx); err != nil {
+		t.Fatalf("UpdateTS: %v", err)
+	}
+	if c.TSToggle != initial {
+		t.Errorf("TSToggle should flip back to %v", initial)
+	}
+}
+
+func TestUpdateTSFirstFetchedAtNotSetWhenNoArticles(t *testing.T) {
+	db, c, _ := setupTestDB(t)
+	sub := &Subscription{ID: 1}
+	c.Subscriptions = []*Subscription{sub}
+	c.FetchedAt = 1700000000
+
+	if err := db.UpdateTS(ctx); err != nil {
+		t.Fatalf("UpdateTS: %v", err)
+	}
+	if c.FirstFetchedAt != 0 {
+		t.Errorf("FirstFetchedAt = %d, want 0 when no articles added", c.FirstFetchedAt)
+	}
+}
+
+func TestPutArticlesEmptyTitleAndLink(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	sub := &Subscription{ID: 1}
+	c.Subscriptions = []*Subscription{sub}
+
+	articles := []*Item{
+		{Sub: sub, Title: "", Content: "body", Link: "", Published: 0},
+	}
+	if err := db.PutArticles(ctx, articles); err != nil {
+		t.Fatalf("PutArticles: %v", err)
+	}
+
+	result := readAllArticles(t, dir, c.DataToggle)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 article, got %d", len(result))
+	}
+	if result[0].Title != "" {
+		t.Errorf("Title = %q, want empty", result[0].Title)
+	}
+	if result[0].Link != "" {
+		t.Errorf("Link = %q, want empty", result[0].Link)
+	}
+	if result[0].Published != 0 {
+		t.Errorf("Published = %d, want 0", result[0].Published)
+	}
+	if result[0].Content != "body" {
+		t.Errorf("Content = %q, want %q", result[0].Content, "body")
+	}
+}
+
+func TestDBNullSubscriptionsInJSON(t *testing.T) {
+	dir := t.TempDir()
+	globals = &Globals{PackSize: 1, Store: dir}
+
+	core := `{"data_tog":false,"ts_tog":false,"fetched_at":0,"sub_seq":0,"total_art":0,"next_pid":0,"pack_off":0,"subscriptions":null}` + "\n"
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	gz.Write([]byte(core))
+	gz.Close()
+	os.WriteFile(filepath.Join(dir, "db.gz"), buf.Bytes(), 0644)
+
+	db, err := NewDB(ctx, false)
+	if err != nil {
+		t.Fatalf("NewDB: %v", err)
+	}
+	defer db.Close(ctx)
+
+	for range db.Subscriptions() {
+	}
+	if len(db.Subscriptions()) != 0 {
+		t.Errorf("Subscriptions len = %d, want 0", len(db.Subscriptions()))
+	}
+}
+
+func TestPutArticlesDataPackSplitResetsPackOffset(t *testing.T) {
+	db, c, _ := setupTestDB(t)
+	globals.PackSize = 0 // split after every article
+
+	sub := &Subscription{ID: 1}
+	c.Subscriptions = []*Subscription{sub}
+	c.FetchedAt = 1700000000
+
+	articles := []*Item{
+		{Sub: sub, Title: "A1", Content: "Content1", Published: 1000},
+		{Sub: sub, Title: "A2", Content: "Content2", Published: 2000},
+	}
+	if err := db.PutArticles(ctx, articles); err != nil {
+		t.Fatalf("PutArticles: %v", err)
+	}
+
+	if c.NextPackID < 2 {
+		t.Errorf("NextPackID = %d, want >= 2", c.NextPackID)
+	}
+	if c.PackOffset != 1 {
+		t.Errorf("PackOffset = %d, want 1 (one entry in latest data pack)", c.PackOffset)
+	}
+}
+
+func TestPutArticlesResumption(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	sub := &Subscription{ID: 1}
+	c.Subscriptions = []*Subscription{sub}
+	c.FetchedAt = 1700000000
+
+	if err := db.PutArticles(ctx, []*Item{
+		{Sub: sub, Title: "A1", Content: "C1", Published: 1000},
+	}); err != nil {
+		t.Fatalf("PutArticles(1): %v", err)
+	}
+
+	savedPO := c.PackOffset
+	savedNPID := c.NextPackID
+	savedTotal := c.TotalArticles
+
+	if err := db.PutArticles(ctx, []*Item{
+		{Sub: sub, Title: "A2", Content: "C2", Published: 2000},
+	}); err != nil {
+		t.Fatalf("PutArticles(2): %v", err)
+	}
+
+	if c.TotalArticles != savedTotal+1 {
+		t.Errorf("TotalArticles = %d, want %d", c.TotalArticles, savedTotal+1)
+	}
+	if c.PackOffset != savedPO+1 {
+		t.Errorf("PackOffset = %d, want %d (resumed)", c.PackOffset, savedPO+1)
+	}
+	if c.NextPackID != savedNPID {
+		t.Errorf("NextPackID = %d, want %d (no split)", c.NextPackID, savedNPID)
+	}
+
+	result := readAllArticles(t, dir, c.DataToggle)
+	if len(result) != 2 {
+		t.Fatalf("got %d articles, want 2", len(result))
+	}
+	if result[0].Title != "A1" || result[1].Title != "A2" {
+		t.Errorf("articles = [%q, %q], want [A1, A2]", result[0].Title, result[1].Title)
+	}
+}
+
+func TestCommitAndReopenDirtinessTracking(t *testing.T) {
+	dir := t.TempDir()
+	globals = &Globals{PackSize: 1, Store: dir}
+
+	db, err := NewDB(ctx, false)
+	if err != nil {
+		t.Fatalf("NewDB: %v", err)
+	}
+
+	sub := &Subscription{Title: "Feed", URL: "http://example.com"}
+	db.AddSubscription(sub)
+	db.core.FetchedAt = 1700000000
+
+	if err := db.PutArticles(ctx, []*Item{
+		{Sub: sub, Title: "A1", Content: "C1", Published: 1000},
+	}); err != nil {
+		t.Fatalf("PutArticles: %v", err)
+	}
+	if err := db.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	db.Close(ctx)
+
+	db2, err := NewDB(ctx, false)
+	if err != nil {
+		t.Fatalf("NewDB reopen: %v", err)
+	}
+	defer db2.Close(ctx)
+
+	s := db2.Subscriptions()[0]
+	if s.oTotalArticles != s.TotalArticles {
+		t.Errorf("oTotalArticles = %d, want %d (same as TotalArticles after reopen)", s.oTotalArticles, s.TotalArticles)
+	}
+	if s.oLastAddedAt != s.LastAddedAt {
+		t.Errorf("oLastAddedAt = %d, want %d", s.oLastAddedAt, s.LastAddedAt)
+	}
+}
+
+func TestDBOpenCorruptedGzipValidInner(t *testing.T) {
+	dir := t.TempDir()
+	globals = &Globals{PackSize: 1, Store: dir}
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	gz.Write([]byte("{invalid json"))
+	gz.Close()
+	os.WriteFile(filepath.Join(dir, "db.gz"), buf.Bytes(), 0644)
+
+	_, err := NewDB(ctx, false)
+	if err == nil {
+		t.Error("expected error for valid gzip wrapping invalid JSON")
+	}
+}
+
+func TestUpdateTSSubsWithZeroArticlesExcludedFromAbsSnapshot(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	sub1 := &Subscription{ID: 1, TotalArticles: 5}
+	sub1.oTotalArticles = 5
+	sub2 := &Subscription{ID: 2}
+	sub2.oTotalArticles = 0
+	c.Subscriptions = []*Subscription{sub1, sub2}
+
+	c.oFetchedAt = 2800 * 604800
+	c.FetchedAt = 2801 * 604800
+	c.oTotalArticles = 5
+
+	// Make sub1 dirty so we actually get a ts line
+	sub1.TotalArticles = 6
+
+	if err := db.UpdateTS(ctx); err != nil {
+		t.Fatalf("UpdateTS: %v", err)
+	}
+
+	tsPath := filepath.Join(dir, fmt.Sprintf("ts/%v.gz", c.TSToggle))
+	lines := readTsLines(t, tsPath)
+	if len(lines) < 1 {
+		t.Fatal("expected at least 1 ts line")
+	}
+
+	absLine := lines[0]
+	if absLine[0] != "0" {
+		t.Fatalf("first line should be absolute (field 0 = %q)", absLine[0])
+	}
+	lineStr := strings.Join(absLine, "\t")
+	found1, found2 := false, false
+	for i := 2; i+2 < len(absLine); i += 3 {
+		id, _ := strconv.Atoi(absLine[i])
+		if id == 1 {
+			found1 = true
+		}
+		if id == 2 {
+			found2 = true
+		}
+	}
+	if !found1 {
+		t.Errorf("absolute snapshot should include sub1 (oTotalArticles>0), got: %s", lineStr)
+	}
+	if found2 {
+		t.Errorf("absolute snapshot should exclude sub2 (oTotalArticles=0), got: %s", lineStr)
+	}
+}

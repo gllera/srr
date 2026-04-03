@@ -1569,3 +1569,152 @@ describe("getCurrentFilterKey", () => {
       expect(nav.getCurrentFilterKey()).toBe("")
    })
 })
+
+describe("first() with floor+filter", () => {
+   it("navigates to floor chronIdx in filter mode", async () => {
+      data.db.total_art = 4
+      data.articles.push(
+         makeEntry({ sub_id: 1, title: "A" }),
+         makeEntry({ sub_id: 2, title: "B" }),
+         makeEntry({ sub_id: 1, title: "C" }),
+         makeEntry({ sub_id: 1, title: "D" }),
+      )
+      nav.setFilterSubs(new Set([1]))
+      nav.setFloorChron(2)
+      await nav.load(3)
+      const result = await nav.first()
+      expect(result.article.title).toBe("C")
+   })
+
+   it("returns current article when floor is 0 in filter mode", async () => {
+      data.db.total_art = 3
+      data.articles.push(
+         makeEntry({ sub_id: 1, title: "A" }),
+         makeEntry({ sub_id: 2, title: "B" }),
+         makeEntry({ sub_id: 1, title: "C" }),
+      )
+      nav.setFilterSubs(new Set([1]))
+      await nav.load(2)
+      const result = await nav.first()
+      expect(result.article.title).toBe("C")
+   })
+})
+
+describe("jumpToEnd with filter", () => {
+   it("jumps to last article and snaps to filter", async () => {
+      data.db.total_art = 3
+      data.articles.push(
+         makeEntry({ sub_id: 1, title: "A" }),
+         makeEntry({ sub_id: 1, title: "B" }),
+         makeEntry({ sub_id: 2, title: "C" }),
+      )
+      nav.setFilterSubs(new Set([1]))
+      await nav.load(0)
+      const result = await nav.jumpToEnd()
+      expect(result.article.title).toBe("B")
+   })
+})
+
+describe("load with NaN/Infinity", () => {
+   it("clamps NaN to last article", async () => {
+      data.articles.push(makeEntry({ title: "A" }), makeEntry({ title: "B" }))
+      const result = await nav.load(NaN)
+      expect(result.article.title).toBe("B")
+   })
+
+   it("clamps Infinity to last article", async () => {
+      data.articles.push(makeEntry({ title: "A" }), makeEntry({ title: "B" }))
+      const result = await nav.load(Infinity)
+      expect(result.article.title).toBe("B")
+   })
+})
+
+describe("setFloorAt", () => {
+   it("sets floor and returns showFeed", async () => {
+      const pushSpy = vi.spyOn(history, "pushState")
+      data.articles.push(makeEntry({ title: "A" }), makeEntry({ title: "B" }))
+      await nav.load(1)
+      pushSpy.mockClear()
+      const result = nav.setFloorAt(0)
+      expect(result.floor).toBe(false)
+      expect(nav.floorChron).toBe(0)
+      pushSpy.mockRestore()
+   })
+
+   it("sets nonzero floor correctly", async () => {
+      const pushSpy = vi.spyOn(history, "pushState")
+      data.articles.push(makeEntry({ title: "A" }), makeEntry({ title: "B" }))
+      await nav.load(1)
+      pushSpy.mockClear()
+      const result = nav.setFloorAt(1)
+      expect(result.floor).toBe(true)
+      expect(nav.floorChron).toBe(1)
+      expect(pushSpy).toHaveBeenCalledWith(null, "", "#1~1")
+      pushSpy.mockRestore()
+   })
+})
+
+describe("countLeft edge cases", () => {
+   it("filtered: returns 0 when current is the only match in pack", async () => {
+      data.db.total_art = 3
+      data.articles.push(
+         makeEntry({ sub_id: 2, title: "A" }),
+         makeEntry({ sub_id: 2, title: "B" }),
+         makeEntry({ sub_id: 1, title: "C" }),
+      )
+      nav.setFilterSubs(new Set([1]))
+      const r = await nav.load(2)
+      expect(r.countLeft).toBe(0)
+   })
+
+   it("unfiltered with floor at same position: returns 0", async () => {
+      data.articles.push(makeEntry({ title: "A" }), makeEntry({ title: "B" }))
+      nav.setFloorChron(1)
+      const r = await nav.load(1)
+      expect(r.countLeft).toBe(0)
+   })
+})
+
+describe("fromHash edge cases", () => {
+   it("hash with ! before ~ ignores tilde in filter portion", async () => {
+      data.articles.push(makeEntry({ sub_id: 1, title: "A" }))
+      const result = await nav.fromHash("0!1~5")
+      expect(result.floor).toBe(false)
+      expect(nav.floorChron).toBe(0)
+   })
+
+   it("hash with only tilde", async () => {
+      data.articles.push(makeEntry({ title: "A" }))
+      const result = await nav.fromHash("~")
+      expect(result.floor).toBe(false)
+   })
+
+   it("hash with empty tokens between plus signs", async () => {
+      data.articles.push(makeEntry({ sub_id: 1, title: "A" }))
+      const result = await nav.fromHash("0!1++3")
+      expect(result.filtered).toBe(true)
+   })
+})
+
+describe("resolveTokens via fromHash", () => {
+   it("resolves token '0' as sub ID 0", async () => {
+      data.db.subscriptions = [makeSub({ id: 0, title: "Zero" })]
+      data.db.subs_mapped.set(0, data.db.subscriptions[0])
+      data.articles.push(makeEntry({ sub_id: 0, title: "A" }))
+      const result = await nav.fromHash("0!0")
+      expect(result.filtered).toBe(true)
+   })
+})
+
+describe("nextIdxPack edge cases", () => {
+   it("right does not cross pack boundary when no next pack exists", async () => {
+      data.db.total_art = 3
+      data.articles.push(makeEntry({ title: "A" }), makeEntry({ title: "B" }), makeEntry({ title: "C" }))
+      await nav.load(2)
+      data.loadIdxPack.mockClear()
+      const result = await nav.right()
+      expect(result.article.title).toBe("C")
+      expect(result.has_right).toBe(false)
+      expect(data.loadIdxPack).not.toHaveBeenCalled()
+   })
+})

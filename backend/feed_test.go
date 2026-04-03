@@ -439,3 +439,118 @@ func TestParseRawFieldPreserved(t *testing.T) {
 		t.Error("Raw field should be preserved")
 	}
 }
+
+func TestParseAtomUpdatedFallback(t *testing.T) {
+	items := collectFeed(t, `<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>Updated Only</title>
+    <updated>2024-03-15T08:00:00Z</updated>
+  </entry>
+</feed>`)
+
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1", len(items))
+	}
+	if items[0].Published.Year() != 2024 || items[0].Published.Month() != 3 {
+		t.Errorf("published = %v, want 2024-03 (from <updated> fallback)", items[0].Published)
+	}
+}
+
+func TestParseLinkAtomAlternateWinsOverEnclosure(t *testing.T) {
+	items := collectFeed(t, `<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>Entry</title>
+    <link href="http://example.com/enclosure" rel="enclosure"/>
+    <link href="http://example.com/alternate" rel="alternate"/>
+  </entry>
+</feed>`)
+
+	if items[0].Link != "http://example.com/alternate" {
+		t.Errorf("link = %q, want alternate href to win over enclosure", items[0].Link)
+	}
+}
+
+func TestParseDateHintReusedAcrossItems(t *testing.T) {
+	items := collectFeed(t, `<rss version="2.0"><channel>
+    <item>
+      <title>First</title>
+      <pubDate>Mon, 02 Jan 2006 15:04:05 +0000</pubDate>
+    </item>
+    <item>
+      <title>Second</title>
+      <pubDate>Tue, 03 Jan 2006 10:00:00 +0000</pubDate>
+    </item>
+  </channel></rss>`)
+
+	if len(items) != 2 {
+		t.Fatalf("got %d items, want 2", len(items))
+	}
+	if items[0].Published.Year() != 2006 || items[0].Published.Day() != 2 {
+		t.Errorf("first item date wrong: %v", items[0].Published)
+	}
+	if items[1].Published.Year() != 2006 || items[1].Published.Day() != 3 {
+		t.Errorf("second item date wrong: %v", items[1].Published)
+	}
+}
+
+func TestParseGUIDPriorityOverID(t *testing.T) {
+	items := collectFeed(t, `<rss version="2.0"><channel>
+    <item>
+      <title>Both IDs</title>
+      <guid>guid-value</guid>
+      <id>id-value</id>
+    </item>
+  </channel></rss>`)
+
+	if items[0].GUID != hash("guid-value") {
+		t.Errorf("GUID = %d, want hash of %q (guid wins over id)", items[0].GUID, "guid-value")
+	}
+}
+
+func TestParseContentEncodedPriorityOverDescription(t *testing.T) {
+	items := collectFeed(t, `<rss version="2.0"><channel>
+    <item>
+      <title>Priority</title>
+      <content:encoded><![CDATA[<p>Full</p>]]></content:encoded>
+      <description>Short</description>
+    </item>
+  </channel></rss>`)
+
+	if items[0].Content != "<p>Full</p>" {
+		t.Errorf("content = %q, want content:encoded to win over description", items[0].Content)
+	}
+}
+
+func TestParseNamespacePrefixStripping(t *testing.T) {
+	items := collectFeed(t, `<?xml version="1.0"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns="http://purl.org/rss/1.0/"
+         xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel/>
+  <item>
+    <title>NS Test</title>
+    <link>http://example.com</link>
+    <dc:date>2023-06-15</dc:date>
+  </item>
+</rdf:RDF>`)
+
+	if items[0].Published.Year() != 2023 || items[0].Published.Month() != 6 {
+		t.Errorf("published = %v, want 2023-06 from dc:date", items[0].Published)
+	}
+}
+
+func TestParseRSSItemGUIDFallbackChain(t *testing.T) {
+	items := collectFeed(t, `<rss version="2.0"><channel>
+    <item>
+      <title>Only Link</title>
+      <guid></guid>
+      <link>http://example.com/linkonly</link>
+    </item>
+  </channel></rss>`)
+
+	if items[0].GUID != hash("http://example.com/linkonly") {
+		t.Errorf("GUID should fall back to link hash when guid is empty")
+	}
+}

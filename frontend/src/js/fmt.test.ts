@@ -90,6 +90,23 @@ describe("sanitizeHtml", () => {
    it("handles plain text without tags", () => {
       expect(sanitizeHtml("hello world")).toBe("hello world")
    })
+
+   it("preserves self-closing tags like br", () => {
+      const result = sanitizeHtml("<p>line1<br>line2</p>")
+      expect(result).toContain("<br>")
+      expect(result).toContain("line1")
+      expect(result).toContain("line2")
+   })
+
+   it("adds rel to anchor without href", () => {
+      const result = sanitizeHtml("<a>link</a>")
+      expect(result).toContain('rel="noopener noreferrer"')
+   })
+
+   it("strips javascript: with whitespace between keyword and colon", () => {
+      const result = sanitizeHtml('<a href="javascript :alert(1)">click</a>')
+      expect(result).not.toContain("javascript")
+   })
 })
 
 describe("timeAgo", () => {
@@ -153,6 +170,21 @@ describe("timeAgo", () => {
    it("handles 0 seconds ago", () => {
       const result = timeAgo(now)
       expect(result).toMatch(/0/)
+   })
+
+   it("boundary: exactly 2592000 seconds (30 days) shows months", () => {
+      const result = timeAgo(now - 2592000)
+      expect(result).toMatch(/1/)
+   })
+
+   it("boundary: exactly 31536000 seconds (365 days) shows years", () => {
+      const result = timeAgo(now - 31536000)
+      expect(result).toMatch(/1/)
+   })
+
+   it("handles future timestamp (negative elapsed)", () => {
+      const result = timeAgo(now + 60)
+      expect(result).toBeDefined()
    })
 })
 

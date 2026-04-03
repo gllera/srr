@@ -69,4 +69,27 @@ describe("makeLRU", () => {
       expect(lru.get(2)).toBeUndefined()
       expect(lru.get(3)).toBe("c")
    })
+
+   it("handles key 0 correctly", () => {
+      const lru = makeLRU<string>(3)
+      lru.put(0, "zero")
+      expect(lru.get(0)).toBe("zero")
+   })
+
+   it("stores and retrieves empty string value", () => {
+      const lru = makeLRU<string>(3)
+      lru.put(1, "")
+      expect(lru.get(1)).toBe("")
+   })
+
+   it("get does not promote missing keys", () => {
+      const lru = makeLRU<string>(2)
+      lru.put(1, "a")
+      lru.put(2, "b")
+      lru.get(99)
+      lru.put(3, "c")
+      expect(lru.get(1)).toBeUndefined()
+      expect(lru.get(2)).toBe("b")
+      expect(lru.get(3)).toBe("c")
+   })
 })

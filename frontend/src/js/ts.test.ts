@@ -227,4 +227,68 @@ describe("findChronForTimestamp edge cases", () => {
       const result = await findChronForTimestamp(week * SECS_PER_WEEK + 99999)
       expect(result).toBe(500)
    })
+
+   it("returns total from single-line pack", async () => {
+      const week = 600 + nextWeek
+      data.streamSplit.mockResolvedValueOnce([makeTsLine(0, 42, [1])])
+      data.db.first_fetched = (week - 1) * SECS_PER_WEEK
+      data.db.fetched_at = (week + 1) * SECS_PER_WEEK
+      const result = await findChronForTimestamp(week * SECS_PER_WEEK + 300)
+      expect(result).toBe(42)
+   })
+
+   it("returns null when week is before first_fetched", async () => {
+      data.db.first_fetched = 200 * SECS_PER_WEEK
+      const result = await findChronForTimestamp(100 * SECS_PER_WEEK + 50)
+      expect(result).toBeNull()
+   })
+
+   it("returns null when week is after fetched_at", async () => {
+      data.db.fetched_at = 200 * SECS_PER_WEEK
+      const result = await findChronForTimestamp(300 * SECS_PER_WEEK + 50)
+      expect(result).toBeNull()
+   })
+
+   it("selects line at exact offset boundary", async () => {
+      const week = 700 + nextWeek
+      data.streamSplit.mockResolvedValueOnce([
+         makeTsLine(0, 100, [1]),
+         makeTsLine(200, 300, [1]),
+         makeTsLine(400, 500, [1]),
+      ])
+      data.db.first_fetched = (week - 1) * SECS_PER_WEEK
+      data.db.fetched_at = (week + 1) * SECS_PER_WEEK
+      const result = await findChronForTimestamp(week * SECS_PER_WEEK + 200)
+      expect(result).toBe(300)
+   })
+})
+
+describe("findCandidateIdxPacks edge cases", () => {
+   it("returns empty when sub never appears in ts data", async () => {
+      const week = 800 + nextWeek
+      const fetchedAt = week * SECS_PER_WEEK + 300
+      data.streamSplit.mockResolvedValueOnce([makeTsLine(0, 1000, [2], new Map()), makeTsLine(200, 2000, [2])])
+      data.db.first_fetched = week * SECS_PER_WEEK
+      data.db.fetched_at = (week + 1) * SECS_PER_WEEK
+      const result = await findCandidateIdxPacks(fetchedAt, 4, new Set([99]), -1)
+      expect(result).toEqual([])
+   })
+
+   it("backward scan returns candidates in order from nearest to furthest", async () => {
+      const week = 900 + nextWeek
+      const fetchedAt = week * SECS_PER_WEEK + 500
+      data.streamSplit.mockResolvedValueOnce([
+         makeTsLine(0, 0, [1], new Map()),
+         makeTsLine(100, 1000, [1]),
+         makeTsLine(200, 2000, [1]),
+         makeTsLine(400, 3000, [1]),
+      ])
+      data.db.first_fetched = (week - 1) * SECS_PER_WEEK
+      data.db.fetched_at = (week + 1) * SECS_PER_WEEK
+      const result = await findCandidateIdxPacks(fetchedAt, 4, new Set([1]), -1)
+      expect(result).not.toBeNull()
+      for (let i = 1; i < result!.length; i++) {
+         expect(result![i]).toBeLessThanOrEqual(result![i - 1])
+      }
+   })
 })
