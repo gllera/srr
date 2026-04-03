@@ -1073,9 +1073,6 @@ func TestUpdateTSSubsWithZeroArticlesExcludedFromAbsSnapshot(t *testing.T) {
 	c.FetchedAt = 2801 * 604800
 	c.oTotalArticles = 5
 
-	// Make sub1 dirty so we actually get a ts line
-	sub1.TotalArticles = 6
-
 	if err := db.UpdateTS(ctx); err != nil {
 		t.Fatalf("UpdateTS: %v", err)
 	}
@@ -1106,5 +1103,113 @@ func TestUpdateTSSubsWithZeroArticlesExcludedFromAbsSnapshot(t *testing.T) {
 	}
 	if found2 {
 		t.Errorf("absolute snapshot should exclude sub2 (oTotalArticles=0), got: %s", lineStr)
+	}
+}
+
+func TestUpdateTSIdxBoundaryLines(t *testing.T) {
+	dir := t.TempDir()
+	globals = &Globals{PackSize: 1024, Store: dir}
+
+	db, err := NewDB(ctx, false)
+	if err != nil {
+		t.Fatalf("NewDB: %v", err)
+	}
+	defer db.Close(ctx)
+
+	sub1 := &Subscription{ID: 1}
+	sub2 := &Subscription{ID: 2}
+	db.core.Subscriptions = []*Subscription{sub1, sub2}
+	db.core.FetchedAt = 1700000000
+	db.core.oFetchedAt = 1700000000
+
+	// Create articles spanning an idx boundary: sub1 gets first 600, sub2 gets next 410
+	articles := make([]*Item, idxPackSize+10)
+	for i := range articles {
+		sub := sub1
+		if i >= 600 {
+			sub = sub2
+		}
+		articles[i] = &Item{Sub: sub, Title: fmt.Sprintf("A%d", i), Content: "c", Published: int64(i)}
+	}
+	if err := db.PutArticles(ctx, articles); err != nil {
+		t.Fatalf("PutArticles: %v", err)
+	}
+	if err := db.UpdateTS(ctx); err != nil {
+		t.Fatalf("UpdateTS: %v", err)
+	}
+
+	tsPath := filepath.Join(dir, fmt.Sprintf("ts/%v.gz", db.core.TSToggle))
+	lines := readTsLines(t, tsPath)
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 ts lines (boundary + final), got %d", len(lines))
+	}
+
+	// First line: idx boundary at idxPackSize
+	boundaryTotal, _ := strconv.Atoi(lines[0][1])
+	if boundaryTotal != idxPackSize {
+		t.Errorf("boundary totalArticles = %d, want %d", boundaryTotal, idxPackSize)
+	}
+
+	// Second line: final state
+	finalTotal, _ := strconv.Atoi(lines[1][1])
+	if finalTotal != idxPackSize+10 {
+		t.Errorf("final totalArticles = %d, want %d", finalTotal, idxPackSize+10)
+	}
+
+	// Boundary line: sub1=600, sub2=400 (first 1000 articles)
+	boundarySubs := map[int]int{}
+	for i := 2; i+1 < len(lines[0]); i += 2 {
+		id, _ := strconv.Atoi(lines[0][i])
+		total, _ := strconv.Atoi(lines[0][i+1])
+		boundarySubs[id] = total
+	}
+	if boundarySubs[1] != 600 {
+		t.Errorf("boundary sub1 = %d, want 600", boundarySubs[1])
+	}
+	if boundarySubs[2] != 400 {
+		t.Errorf("boundary sub2 = %d, want 400", boundarySubs[2])
+	}
+
+	// Final line: sub1=600, sub2=410
+	finalSubs := map[int]int{}
+	for i := 2; i+1 < len(lines[1]); i += 2 {
+		id, _ := strconv.Atoi(lines[1][i])
+		total, _ := strconv.Atoi(lines[1][i+1])
+		finalSubs[id] = total
+	}
+	if finalSubs[1] != 600 {
+		t.Errorf("final sub1 = %d, want 600", finalSubs[1])
+	}
+	if finalSubs[2] != 410 {
+		t.Errorf("final sub2 = %d, want 410", finalSubs[2])
+	}
+}
+
+func TestUpdateTSNoBoundaryWhenNoCrossing(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	sub := &Subscription{ID: 1}
+	c.Subscriptions = []*Subscription{sub}
+	c.FetchedAt = 1700000000
+	c.oFetchedAt = 1700000000
+
+	articles := []*Item{
+		{Sub: sub, Title: "A1", Content: "C1", Published: 1000},
+		{Sub: sub, Title: "A2", Content: "C2", Published: 2000},
+	}
+	if err := db.PutArticles(ctx, articles); err != nil {
+		t.Fatalf("PutArticles: %v", err)
+	}
+	if err := db.UpdateTS(ctx); err != nil {
+		t.Fatalf("UpdateTS: %v", err)
+	}
+
+	tsPath := filepath.Join(dir, fmt.Sprintf("ts/%v.gz", c.TSToggle))
+	lines := readTsLines(t, tsPath)
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 ts line (final only, no boundary), got %d", len(lines))
+	}
+	total, _ := strconv.Atoi(lines[0][1])
+	if total != 2 {
+		t.Errorf("totalArticles = %d, want 2", total)
 	}
 }

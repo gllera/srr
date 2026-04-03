@@ -40,6 +40,7 @@ See root `CLAUDE.md` Data Contract for pack format spec (idx/, data/, ts/ series
 
 Backend-specific:
 - `PutArticles`, `UpdateTS`, `savePack` manage the three series. Order: `PutArticles` → `UpdateTS` → `Commit`.
+- `PutArticles` records idx boundary snapshots (`idxBoundaries`) at each 1000-article split; `UpdateTS` emits them as ts/ delta lines before the final delta.
 - `Commit` serializes `DBCore` via `AtomicPut`. `db.gz` is gzip-compressed JSON with short keys — read `DBCore` struct tags for full schema.
 - `data_tog`/`ts_tog` toggle alternating pack filenames for atomic updates.
 - `first_fetched` (`FirstFetchedAt`): unix timestamp of the first fetch that produced articles.

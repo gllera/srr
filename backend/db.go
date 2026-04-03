@@ -31,8 +31,19 @@ const (
 
 type DB struct {
 	store.Backend
-	core   DBCore
-	locked bool
+	core          DBCore
+	locked        bool
+	idxBoundaries []idxBoundary
+}
+
+type idxBoundary struct {
+	totalArticles int
+	subs          []idxBoundarySub
+}
+
+type idxBoundarySub struct {
+	id            int
+	totalArticles int
 }
 
 type DBCore struct {
@@ -252,13 +263,7 @@ func (o *DB) UpdateTS(ctx context.Context) error {
 	prevWeek := c.oFetchedAt / 604800
 	full := prevWeek != week
 
-	var dirtySubs []*Subscription
-	for _, s := range c.Subscriptions {
-		if s.TotalArticles > s.oTotalArticles {
-			dirtySubs = append(dirtySubs, s)
-		}
-	}
-	if !full && len(dirtySubs) == 0 {
+	if !full && len(o.idxBoundaries) == 0 {
 		return nil
 	}
 
@@ -295,13 +300,14 @@ func (o *DB) UpdateTS(ctx context.Context) error {
 		c.FirstFetchedAt = c.FetchedAt
 	}
 
-	if len(dirtySubs) > 0 {
-		delta := []any{c.FetchedAt % 604800, c.TotalArticles}
-		for _, s := range dirtySubs {
-			delta = append(delta, s.ID, s.TotalArticles)
+	for _, b := range o.idxBoundaries {
+		delta := []any{c.FetchedAt % 604800, b.totalArticles}
+		for _, s := range b.subs {
+			delta = append(delta, s.id, s.totalArticles)
 		}
 		ts.writeTSV(delta...)
 	}
+	o.idxBoundaries = nil
 
 	c.TSToggle = !c.TSToggle
 	return o.savePack(ctx, fmt.Sprintf("ts/%v.gz", c.TSToggle), ts)
@@ -326,6 +332,14 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 
 	for _, item := range articles {
 		if c.TotalArticles > 0 && c.TotalArticles%idxPackSize == 0 {
+			var bSubs []idxBoundarySub
+			for _, s := range c.Subscriptions {
+				if s.TotalArticles > s.oTotalArticles {
+					bSubs = append(bSubs, idxBoundarySub{s.ID, s.TotalArticles})
+				}
+			}
+			o.idxBoundaries = append(o.idxBoundaries, idxBoundary{c.TotalArticles, bSubs})
+
 			if err := o.savePack(ctx, fmt.Sprintf("idx/%d.gz", c.TotalArticles/idxPackSize-1), meta); err != nil {
 				return err
 			}
@@ -352,7 +366,14 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 		c.PackOffset++
 	}
 
-	// Toggle and save both latest packs
+	var bSubs []idxBoundarySub
+	for _, s := range c.Subscriptions {
+		if s.TotalArticles > s.oTotalArticles {
+			bSubs = append(bSubs, idxBoundarySub{s.ID, s.TotalArticles})
+		}
+	}
+	o.idxBoundaries = append(o.idxBoundaries, idxBoundary{c.TotalArticles, bSubs})
+
 	c.DataToggle = !c.DataToggle
 	latest = fmt.Sprintf("%v.gz", o.core.DataToggle)
 	if err := o.savePack(ctx, "idx/"+latest, meta); err != nil {
