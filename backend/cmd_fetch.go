@@ -78,5 +78,10 @@ loop:
 		return err
 	}
 
-	return db.Commit(ctx)
+	if err = db.Commit(ctx); err != nil {
+		return err
+	}
+
+	slog.Info("fetch complete", "new_articles", db.core.TotalArticles-db.core.oTotalArticles)
+	return nil
 }
