@@ -160,21 +160,34 @@ type Item struct {
 	Published int64
 }
 
-type pack struct{ bytes.Buffer }
+type pack struct {
+	buf bytes.Buffer
+	gz  *gzip.Writer
+}
+
+func newPack() *pack {
+	p := &pack{}
+	p.gz = gzip.NewWriter(&p.buf)
+	return p
+}
+
+func (p *pack) Len() int { return p.buf.Len() }
 
 func (p *pack) writeTSV(fields ...any) {
 	for i, f := range fields {
 		if i > 0 {
-			p.WriteByte('\t')
+			p.gz.Write([]byte{'\t'})
 		}
-		fmt.Fprint(p, f)
+		fmt.Fprint(p.gz, f)
 	}
-	p.WriteByte('\n')
+	p.gz.Write([]byte{'\n'})
+	p.gz.Flush()
 }
 
 func (p *pack) writeEntry(s string) {
-	io.WriteString(p, s)
-	p.WriteByte(0)
+	io.WriteString(p.gz, s)
+	p.gz.Write([]byte{0})
+	p.gz.Flush()
 }
 
 func (o *DB) readGz(ctx context.Context, key string) ([]byte, error) {
@@ -195,7 +208,7 @@ func (o *DB) readGz(ctx context.Context, key string) ([]byte, error) {
 }
 
 func (o *DB) loadPack(ctx context.Context, key string) (*pack, error) {
-	p := &pack{}
+	p := newPack()
 	data, err := o.Get(ctx, key, true)
 	if err != nil {
 		return nil, err
@@ -207,27 +220,29 @@ func (o *DB) loadPack(ctx context.Context, key string) (*pack, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, err = io.Copy(p, r)
+	raw, err := io.ReadAll(r)
 	r.Close()
 	if err != nil {
+		return nil, err
+	}
+	if _, err := p.gz.Write(raw); err != nil {
+		return nil, err
+	}
+	if err := p.gz.Flush(); err != nil {
 		return nil, err
 	}
 	return p, nil
 }
 
 func (o *DB) savePack(ctx context.Context, key string, p *pack) error {
-	var compressed bytes.Buffer
-	gz := gzip.NewWriter(&compressed)
-	if _, err := gz.Write(p.Bytes()); err != nil {
+	if err := p.gz.Close(); err != nil {
 		return err
 	}
-	if err := gz.Close(); err != nil {
+	if err := o.Put(ctx, key, p.buf.Bytes(), true); err != nil {
 		return err
 	}
-	if err := o.Put(ctx, key, compressed.Bytes(), true); err != nil {
-		return err
-	}
-	p.Reset()
+	p.buf.Reset()
+	p.gz.Reset(&p.buf)
 	return nil
 }
 
@@ -265,7 +280,7 @@ func (o *DB) UpdateTS(ctx context.Context) error {
 				return err
 			}
 			for w := prevWeek + 1; w < week; w++ {
-				p := &pack{}
+				p := newPack()
 				p.writeTSV(absSnap...)
 				if err := o.savePack(ctx, fmt.Sprintf("ts/%d.gz", w), p); err != nil {
 					return err
@@ -316,7 +331,7 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 			}
 		}
 
-		if data.Len() >= globals.PackSize<<10 {
+		if data.Len() > 0 && data.Len() >= globals.PackSize<<10 {
 			if err := o.savePack(ctx, fmt.Sprintf("data/%d.gz", c.NextPackID), data); err != nil {
 				return err
 			}
