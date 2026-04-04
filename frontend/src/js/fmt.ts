@@ -20,7 +20,17 @@ export function sanitizeHtml(html: string): string {
          if (attr.name.startsWith("on") || JS_PROTO.test(attr.value)) node.removeAttribute(attr.name)
       }
       if (node.tagName === "A") node.setAttribute("rel", "noopener noreferrer")
-      if (node.tagName === "IMG") node.setAttribute("loading", "lazy")
+      if (node.tagName === "IMG") {
+         node.removeAttribute("srcset")
+         node.setAttribute("loading", "lazy")
+         const src = node.getAttribute("src")
+         if (src && /^https?:\/\//i.test(src)) {
+            node.setAttribute(
+               "src",
+               "https://wsrv.nl/?&output=webp&w=600&h=600&fit=inside&we&url=" + encodeURIComponent(src),
+            )
+         }
+      }
    }
    for (const n of toRemove) n.remove()
    return tmpl.innerHTML
