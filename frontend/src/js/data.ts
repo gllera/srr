@@ -2,6 +2,12 @@ import { makeLRU } from "./cache"
 
 export const PACK_SIZE = 1000
 
+let fetchController = new AbortController()
+export function abortPending() {
+   fetchController.abort()
+   fetchController = new AbortController()
+}
+
 const DB_URL = new URL(SRR_CDN_URL, window.location.href)
 // Reuses the browser's preloaded response from <link rel="preload"> in the built HTML
 const dbFetch = fetch(new URL("db.gz", DB_URL))
@@ -39,6 +45,7 @@ export async function streamSplit<T>(
 ): Promise<T[]> {
    const opts: RequestInit = {}
    if (isFinalized) opts.cache = "force-cache"
+   opts.signal = fetchController.signal
    const res = await fetch(new URL(path, DB_URL), opts)
    const reader = res
       .body!.pipeThrough(new DecompressionStream("gzip"))

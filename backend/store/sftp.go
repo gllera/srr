@@ -128,7 +128,7 @@ func (d *SFTP) sftpPath(op, key string) string {
 	return full
 }
 
-func (d *SFTP) Get(_ context.Context, key string, ignoreMissing bool) ([]byte, error) {
+func (d *SFTP) Get(_ context.Context, key string, ignoreMissing bool) (io.ReadCloser, error) {
 	file := d.sftpPath("read", key)
 	fs, err := d.client.Open(file)
 	if os.IsNotExist(err) && ignoreMissing {
@@ -137,16 +137,10 @@ func (d *SFTP) Get(_ context.Context, key string, ignoreMissing bool) ([]byte, e
 	if err != nil {
 		return nil, fmt.Errorf("opening file %s: %w", file, err)
 	}
-	defer fs.Close()
-
-	data, err := io.ReadAll(fs)
-	if err != nil {
-		return nil, fmt.Errorf("reading file %s: %w", file, err)
-	}
-	return data, nil
+	return fs, nil
 }
 
-func (d *SFTP) Put(_ context.Context, key string, val []byte, ignoreExisting bool) error {
+func (d *SFTP) Put(_ context.Context, key string, r io.Reader, ignoreExisting bool) error {
 	file := d.sftpPath("write", key)
 
 	fs, err := d.client.OpenFile(file, writeOpenFlags(ignoreExisting))
@@ -155,13 +149,13 @@ func (d *SFTP) Put(_ context.Context, key string, val []byte, ignoreExisting boo
 	}
 	defer fs.Close()
 
-	if _, err := fs.Write(val); err != nil {
+	if _, err := io.Copy(fs, r); err != nil {
 		return fmt.Errorf("writing file %s: %w", file, err)
 	}
 	return nil
 }
 
-func (d *SFTP) AtomicPut(_ context.Context, key string, val []byte) error {
+func (d *SFTP) AtomicPut(_ context.Context, key string, r io.Reader) error {
 	file := d.sftpPath("atomic write", key)
 	tmpFile := file + ".tmp"
 
@@ -170,7 +164,7 @@ func (d *SFTP) AtomicPut(_ context.Context, key string, val []byte) error {
 		return fmt.Errorf("opening file %s: %w", tmpFile, err)
 	}
 
-	if _, err := fs.Write(val); err != nil {
+	if _, err := io.Copy(fs, r); err != nil {
 		fs.Close()
 		return fmt.Errorf("writing file %s: %w", tmpFile, err)
 	}

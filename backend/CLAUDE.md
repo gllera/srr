@@ -11,7 +11,7 @@
 ## Architecture
 
 - **`main.go`** — CLI via `alecthomas/kong` + YAML config (`$SRR_CONFIG` or `$XDG_CONFIG_HOME/srr/srr.yaml`). `Globals` struct for flags. Command groups: `sub` (alias `s`): `add`, `rm`, `ls`, `import`; `art` (alias `a`): `fetch`, `ls`; `preview` (alias `p`); `version`.
-- **`cmd_fetch.go`** — `signal.NotifyContext` for graceful shutdown, channel-based worker pool (`globals.Workers` goroutines). Articles sorted by published time (ascending) before storage. Order: `PutArticles` → `UpdateTS` → `Commit`.
+- **`cmd_fetch.go`** — `signal.NotifyContext` for graceful shutdown. `errgroup` (`golang.org/x/sync/errgroup`) with `SetLimit(globals.Workers)` and a `sync.Pool` for feed buffers. Articles sorted by published time (ascending) before storage. Order: `PutArticles` → `UpdateTS` → `Commit`. `--interval` / `SRR_FETCH_INTERVAL` duration flag runs fetch in a loop. Error summary (fetched/failed counts) logged at end.
 - **`feed.go`** — Streaming XML parser, auto-detects RSS/Atom/RDF. GUIDs: FNV-32a → `uint32` (fallback: GUID → ID → Link → empty hash).
 - **`cmd_subs.go`** — `AddCmd` (`srr sub add`, add/update subscription via `--upd`, `-t/--title`, `-u/--url`, `-g/--tag`, `-p/--parsers`), `RmCmd` (`srr sub rm`), `LsCmd` (`srr sub ls`, filter by `-g/--tag`, yaml/json output).
 - **`cmd_art.go`** — `ArtCmd` (`srr art ls`): lists stored articles newest-first with cursor pagination (`-b/--before`), filter by sub ID (`-i`) or tag (`-g`), optional full content (`-f/--full`). Outputs JSON.
@@ -24,11 +24,11 @@
 
 Low-level storage interface: `Get`/`Put`/`AtomicPut`/`Rm`/`Close`. Registry selects by URL scheme; local = empty scheme `""`. Config registry: backends call `RegisterConfig` in `init()` with a config struct pointer; `LoadConfigs` reads YAML sections into them.
 
-| Method | Behavior |
-|---|---|
-| `Get(ignoreMissing)` | Controls error-on-missing |
-| `Put(ignoreExisting)` | Controls overwrite vs exclusive create |
-| `AtomicPut` | temp-then-rename (local/SFTP); overwrite (S3) |
+| Method | Signature | Behavior |
+|---|---|---|
+| `Get(ignoreMissing)` | returns `io.ReadCloser` | Controls error-on-missing; streaming read |
+| `Put(ignoreExisting)` | accepts `io.Reader` | Controls overwrite vs exclusive create; streaming write |
+| `AtomicPut` | accepts `io.Reader` | temp-then-rename (local/SFTP); overwrite (S3); streaming write |
 
 - **`local.go`** — Auto-creates subdirs via `os.MkdirAll`.
 - **`s3.go`** — `IfNoneMatch` precondition headers + CRC32 checksums. `S3Config`: region, endpoint, profile, static credentials.
@@ -44,6 +44,7 @@ Backend-specific:
 - `Commit` serializes `DBCore` via `AtomicPut`. `db.gz` is gzip-compressed JSON with short keys — read `DBCore` struct tags for full schema.
 - `data_tog`/`ts_tog` toggle alternating pack filenames for atomic updates.
 - `first_fetched` (`FirstFetchedAt`): unix timestamp of the first fetch that produced articles.
+- `DB.snapshot` (`fetchSnapshot`) — populated in `NewDB()` from the loaded `DBCore`; captures `TotalArticles`, `FetchedAt`, and per-sub `TotalArticles`/`LastAddedAt`. Used by `UpdateTS` and `PutArticles` to detect changes without shadow fields on `DBCore` or `Subscription`.
 
 ### Module System (`mod/`)
 

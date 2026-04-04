@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"os"
@@ -37,16 +38,16 @@ func (d *Local) localPath(op, key string) string {
 	return full
 }
 
-func (d *Local) Get(_ context.Context, key string, ignoreMissing bool) ([]byte, error) {
+func (d *Local) Get(_ context.Context, key string, ignoreMissing bool) (io.ReadCloser, error) {
 	file := d.localPath("read", key)
-	data, err := os.ReadFile(file)
+	f, err := os.Open(file)
 	if os.IsNotExist(err) && ignoreMissing {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("reading file %s: %w", file, err)
+		return nil, fmt.Errorf("opening file %s: %w", file, err)
 	}
-	return data, nil
+	return f, nil
 }
 
 func writeOpenFlags(ignoreExisting bool) int {
@@ -65,7 +66,7 @@ func (d *Local) ensureDir(file string) error {
 	return nil
 }
 
-func (d *Local) Put(_ context.Context, key string, val []byte, ignoreExisting bool) error {
+func (d *Local) Put(_ context.Context, key string, r io.Reader, ignoreExisting bool) error {
 	file := d.localPath("write", key)
 	if err := d.ensureDir(file); err != nil {
 		return err
@@ -76,13 +77,13 @@ func (d *Local) Put(_ context.Context, key string, val []byte, ignoreExisting bo
 	}
 	defer fs.Close()
 
-	if _, err := fs.Write(val); err != nil {
+	if _, err := io.Copy(fs, r); err != nil {
 		return fmt.Errorf("writing file %s: %w", file, err)
 	}
 	return nil
 }
 
-func (d *Local) AtomicPut(_ context.Context, key string, val []byte) error {
+func (d *Local) AtomicPut(_ context.Context, key string, r io.Reader) error {
 	file := d.localPath("atomic write", key)
 	if err := d.ensureDir(file); err != nil {
 		return err
@@ -94,7 +95,7 @@ func (d *Local) AtomicPut(_ context.Context, key string, val []byte) error {
 		return fmt.Errorf("opening file %s: %w", tmpFile, err)
 	}
 
-	if _, err := fs.Write(val); err != nil {
+	if _, err := io.Copy(fs, r); err != nil {
 		fs.Close()
 		return fmt.Errorf("writing file %s: %w", tmpFile, err)
 	}

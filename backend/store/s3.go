@@ -1,10 +1,10 @@
 package store
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"path"
@@ -90,7 +90,7 @@ func apiErrorCode(err error) string {
 	return ""
 }
 
-func (d *S3) Get(ctx context.Context, key string, ignoreMissing bool) ([]byte, error) {
+func (d *S3) Get(ctx context.Context, key string, ignoreMissing bool) (io.ReadCloser, error) {
 	key = d.s3path("read", key)
 
 	res, err := d.client.GetObject(ctx, &s3.GetObjectInput{
@@ -112,16 +112,10 @@ func (d *S3) Get(ctx context.Context, key string, ignoreMissing bool) ([]byte, e
 		return nil, fmt.Errorf("s3 get %q: %w", key, err)
 	}
 
-	defer res.Body.Close()
-	buf := new(bytes.Buffer)
-	if _, err := buf.ReadFrom(res.Body); err != nil {
-		return nil, fmt.Errorf("reading s3 response body: %w", err)
-	}
-
-	return buf.Bytes(), nil
+	return res.Body, nil
 }
 
-func (d *S3) Put(ctx context.Context, key string, val []byte, ignoreExisting bool) error {
+func (d *S3) Put(ctx context.Context, key string, r io.Reader, ignoreExisting bool) error {
 	key = d.s3path("write", key)
 
 	var condition *string
@@ -132,7 +126,7 @@ func (d *S3) Put(ctx context.Context, key string, val []byte, ignoreExisting boo
 	_, err := d.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:            aws.String(d.bucket),
 		Key:               aws.String(key),
-		Body:              bytes.NewReader(val),
+		Body:              r,
 		IfNoneMatch:       condition,
 		ChecksumAlgorithm: types.ChecksumAlgorithmCrc32,
 	})
@@ -150,8 +144,8 @@ func (d *S3) Put(ctx context.Context, key string, val []byte, ignoreExisting boo
 	return nil
 }
 
-func (d *S3) AtomicPut(ctx context.Context, key string, val []byte) error {
-	return d.Put(ctx, key, val, true)
+func (d *S3) AtomicPut(ctx context.Context, key string, r io.Reader) error {
+	return d.Put(ctx, key, r, true)
 }
 
 func (d *S3) Rm(ctx context.Context, key string) error {

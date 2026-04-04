@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -27,18 +29,31 @@ func TestLocalRmNonExistent(t *testing.T) {
 	}
 }
 
+func readAllClose(t *testing.T, rc io.ReadCloser) string {
+	t.Helper()
+	if rc == nil {
+		return ""
+	}
+	defer rc.Close()
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	return string(data)
+}
+
 func TestLocalPutCreatesSubdirectories(t *testing.T) {
 	b, dir := setupLocalStore(t)
 
-	if err := b.Put(ctx, "sub/dir/file.txt", []byte("data"), true); err != nil {
+	if err := b.Put(ctx, "sub/dir/file.txt", strings.NewReader("data"), true); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	data, err := b.Get(ctx, "sub/dir/file.txt", false)
+	rc, err := b.Get(ctx, "sub/dir/file.txt", false)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if string(data) != "data" {
-		t.Errorf("content = %q, want %q", data, "data")
+	if got := readAllClose(t, rc); got != "data" {
+		t.Errorf("content = %q, want %q", got, "data")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "sub", "dir")); os.IsNotExist(err) {
 		t.Error("subdirectories should have been auto-created")
@@ -48,10 +63,10 @@ func TestLocalPutCreatesSubdirectories(t *testing.T) {
 func TestLocalPutExclusiveCreateReturnsError(t *testing.T) {
 	b, _ := setupLocalStore(t)
 
-	if err := b.Put(ctx, "file.txt", []byte("first"), false); err != nil {
+	if err := b.Put(ctx, "file.txt", strings.NewReader("first"), false); err != nil {
 		t.Fatalf("Put(first): %v", err)
 	}
-	if err := b.Put(ctx, "file.txt", []byte("second"), false); err == nil {
+	if err := b.Put(ctx, "file.txt", strings.NewReader("second"), false); err == nil {
 		t.Error("Put(ignoreExisting=false) on existing file should fail")
 	}
 }
@@ -59,31 +74,34 @@ func TestLocalPutExclusiveCreateReturnsError(t *testing.T) {
 func TestLocalAtomicPutNoTempFileRemains(t *testing.T) {
 	b, dir := setupLocalStore(t)
 
-	if err := b.AtomicPut(ctx, "atomic.txt", []byte("content")); err != nil {
+	if err := b.AtomicPut(ctx, "atomic.txt", strings.NewReader("content")); err != nil {
 		t.Fatalf("AtomicPut: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "atomic.txt.tmp")); !os.IsNotExist(err) {
 		t.Error("temp file should not remain after AtomicPut")
 	}
-	data, _ := b.Get(ctx, "atomic.txt", false)
-	if string(data) != "content" {
-		t.Errorf("content = %q, want %q", data, "content")
+	rc, _ := b.Get(ctx, "atomic.txt", false)
+	if got := readAllClose(t, rc); got != "content" {
+		t.Errorf("content = %q, want %q", got, "content")
 	}
 }
 
 func TestLocalGetMissingIgnored(t *testing.T) {
 	b, _ := setupLocalStore(t)
 
-	data, err := b.Get(ctx, "missing.txt", true)
-	if err != nil || data != nil {
-		t.Errorf("Get(missing, ignoreMissing=true) = (%v, %v), want (nil, nil)", data, err)
+	rc, err := b.Get(ctx, "missing.txt", true)
+	if err != nil || rc != nil {
+		t.Errorf("Get(missing, ignoreMissing=true) = (%v, %v), want (nil, nil)", rc, err)
 	}
 }
 
 func TestLocalGetMissingErrors(t *testing.T) {
 	b, _ := setupLocalStore(t)
 
-	_, err := b.Get(ctx, "missing.txt", false)
+	rc, err := b.Get(ctx, "missing.txt", false)
+	if rc != nil {
+		rc.Close()
+	}
 	if err == nil {
 		t.Error("Get(missing, ignoreMissing=false) should return error")
 	}

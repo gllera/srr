@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path"
@@ -31,7 +32,26 @@ func NewCache(remote Backend, cacheDir, storeURL string) (*Cache, error) {
 	}, nil
 }
 
-func (c *Cache) Get(ctx context.Context, key string, ignoreMissing bool) ([]byte, error) {
+func drainClose(rc io.ReadCloser, err error) ([]byte, error) {
+	if rc != nil {
+		defer rc.Close()
+	}
+	if err != nil {
+		return nil, err
+	}
+	if rc == nil {
+		return nil, nil
+	}
+	return io.ReadAll(rc)
+}
+
+func (c *Cache) cacheLocally(ctx context.Context, key string, data []byte) {
+	if putErr := c.local.Put(ctx, key, bytes.NewReader(data), true); putErr != nil {
+		slog.Warn("cache write failed", "key", key, "error", putErr)
+	}
+}
+
+func (c *Cache) Get(ctx context.Context, key string, ignoreMissing bool) (io.ReadCloser, error) {
 	if key == "db.gz" {
 		return c.getDB(ctx, ignoreMissing)
 	}
@@ -40,61 +60,69 @@ func (c *Cache) Get(ctx context.Context, key string, ignoreMissing bool) ([]byte
 	useCache := c.valid || (base != "true.gz" && base != "false.gz")
 
 	if useCache {
-		if data, err := c.local.Get(ctx, key, true); data != nil && err == nil {
+		if rc, err := c.local.Get(ctx, key, true); rc != nil && err == nil {
 			slog.Debug("cache hit", "key", key)
-			return data, nil
+			return rc, nil
 		}
 	}
 
-	data, err := c.remote.Get(ctx, key, ignoreMissing)
+	data, err := drainClose(c.remote.Get(ctx, key, ignoreMissing))
 	if err != nil || data == nil {
-		return data, err
+		return nil, err
 	}
 
-	if putErr := c.local.Put(ctx, key, data, true); putErr != nil {
-		slog.Warn("cache write failed", "key", key, "error", putErr)
-	}
-	return data, nil
+	c.cacheLocally(ctx, key, data)
+	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
-func (c *Cache) getDB(ctx context.Context, ignoreMissing bool) ([]byte, error) {
-	remoteData, err := c.remote.Get(ctx, "db.gz", ignoreMissing)
+func (c *Cache) getDB(ctx context.Context, ignoreMissing bool) (io.ReadCloser, error) {
+	remoteData, err := drainClose(c.remote.Get(ctx, "db.gz", ignoreMissing))
 	if err != nil {
 		return nil, err
 	}
 
-	cachedData, _ := c.local.Get(ctx, "db.gz", true)
+	cachedData, _ := drainClose(c.local.Get(ctx, "db.gz", true))
+
 	c.valid = bytes.Equal(cachedData, remoteData)
 	if !c.valid {
 		slog.Debug("cache invalidated")
 	}
 
 	if remoteData != nil {
-		c.local.Put(ctx, "db.gz", remoteData, true)
+		c.cacheLocally(ctx, "db.gz", remoteData)
 	}
 
-	return remoteData, nil
+	if remoteData == nil {
+		return nil, nil
+	}
+	return io.NopCloser(bytes.NewReader(remoteData)), nil
 }
 
-func (c *Cache) Put(ctx context.Context, key string, val []byte, ignoreExisting bool) error {
-	if err := c.remote.Put(ctx, key, val, ignoreExisting); err != nil {
+func (c *Cache) Put(ctx context.Context, key string, r io.Reader, ignoreExisting bool) error {
+	data, err := io.ReadAll(r)
+	if err != nil {
 		return err
 	}
 
-	if putErr := c.local.Put(ctx, key, val, true); putErr != nil {
-		slog.Warn("cache write failed", "key", key, "error", putErr)
+	if err := c.remote.Put(ctx, key, bytes.NewReader(data), ignoreExisting); err != nil {
+		return err
 	}
+
+	c.cacheLocally(ctx, key, data)
 	return nil
 }
 
-func (c *Cache) AtomicPut(ctx context.Context, key string, val []byte) error {
-	if err := c.remote.AtomicPut(ctx, key, val); err != nil {
+func (c *Cache) AtomicPut(ctx context.Context, key string, r io.Reader) error {
+	data, err := io.ReadAll(r)
+	if err != nil {
 		return err
 	}
 
-	if putErr := c.local.Put(ctx, key, val, true); putErr != nil {
-		slog.Warn("cache write failed", "key", key, "error", putErr)
+	if err := c.remote.AtomicPut(ctx, key, bytes.NewReader(data)); err != nil {
+		return err
 	}
+
+	c.cacheLocally(ctx, key, data)
 	return nil
 }
 

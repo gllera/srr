@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"reflect"
@@ -13,9 +14,9 @@ import (
 
 // Backend defines the storage operations used by the application.
 type Backend interface {
-	Get(ctx context.Context, key string, ignoreMissing bool) ([]byte, error)
-	Put(ctx context.Context, key string, val []byte, ignoreExisting bool) error
-	AtomicPut(ctx context.Context, key string, val []byte) error
+	Get(ctx context.Context, key string, ignoreMissing bool) (io.ReadCloser, error)
+	Put(ctx context.Context, key string, r io.Reader, ignoreExisting bool) error
+	AtomicPut(ctx context.Context, key string, r io.Reader) error
 	Rm(ctx context.Context, key string) error
 	Close() error
 }

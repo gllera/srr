@@ -36,6 +36,27 @@ func setupTestDB(t *testing.T) (*DB, *DBCore, string) {
 	return db, &db.core, dir
 }
 
+func readAllClose(t *testing.T, rc io.ReadCloser) string {
+	t.Helper()
+	if rc == nil {
+		return ""
+	}
+	defer rc.Close()
+	d, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	return string(d)
+}
+
+func snapshotFrom(db *DB) fetchSnapshot {
+	subs := make(map[int]subSnapshot)
+	for _, s := range db.core.Subscriptions {
+		subs[s.ID] = subSnapshot{totalArticles: s.TotalArticles, lastAddedAt: s.LastAddedAt}
+	}
+	return fetchSnapshot{totalArticles: db.core.TotalArticles, fetchedAt: db.core.FetchedAt, subs: subs}
+}
+
 func decompressGz(t *testing.T, path string) []byte {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -318,35 +339,35 @@ func TestDBLocalCRUD(t *testing.T) {
 	db, _, _ := setupTestDB(t)
 
 	// Put + Get
-	if err := db.Put(ctx, "test.txt", []byte("hello"), false); err != nil {
+	if err := db.Put(ctx, "test.txt", strings.NewReader("hello"), false); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	data, err := db.Get(ctx, "test.txt", false)
+	rc, err := db.Get(ctx, "test.txt", false)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if string(data) != "hello" {
-		t.Errorf("Get = %q, want %q", data, "hello")
+	if got := readAllClose(t, rc); got != "hello" {
+		t.Errorf("Get = %q, want %q", got, "hello")
 	}
 
 	// Put with ignoreExisting=false should fail (file exists)
-	if err := db.Put(ctx, "test.txt", []byte("world"), false); err == nil {
+	if err := db.Put(ctx, "test.txt", strings.NewReader("world"), false); err == nil {
 		t.Error("expected error for duplicate put with ignoreExisting=false")
 	}
 
 	// Put with ignoreExisting=true should overwrite
-	if err := db.Put(ctx, "test.txt", []byte("world"), true); err != nil {
+	if err := db.Put(ctx, "test.txt", strings.NewReader("world"), true); err != nil {
 		t.Fatalf("Put(overwrite): %v", err)
 	}
-	data, _ = db.Get(ctx, "test.txt", false)
-	if string(data) != "world" {
-		t.Errorf("Get after overwrite = %q, want %q", data, "world")
+	rc, _ = db.Get(ctx, "test.txt", false)
+	if got := readAllClose(t, rc); got != "world" {
+		t.Errorf("Get after overwrite = %q, want %q", got, "world")
 	}
 
 	// Get missing file with ignoreMissing=true
-	data, err = db.Get(ctx, "missing.txt", true)
-	if err != nil || data != nil {
-		t.Errorf("Get(missing, ignore): data=%v, err=%v", data, err)
+	rc, err = db.Get(ctx, "missing.txt", true)
+	if err != nil || rc != nil {
+		t.Errorf("Get(missing, ignore): rc=%v, err=%v", rc, err)
 	}
 
 	// Get missing file with ignoreMissing=false
@@ -359,8 +380,9 @@ func TestDBLocalCRUD(t *testing.T) {
 	if err := db.Rm(ctx, "test.txt"); err != nil {
 		t.Fatalf("Rm: %v", err)
 	}
-	data, _ = db.Get(ctx, "test.txt", true)
-	if data != nil {
+	rc, _ = db.Get(ctx, "test.txt", true)
+	if rc != nil {
+		rc.Close()
 		t.Error("file still exists after Rm")
 	}
 }
@@ -402,7 +424,7 @@ func TestJSONEncodeNoHTMLEscape(t *testing.T) {
 func TestAtomicPut(t *testing.T) {
 	db, _, dir := setupTestDB(t)
 
-	if err := db.AtomicPut(ctx, "state.json", []byte(`{"ok":true}`)); err != nil {
+	if err := db.AtomicPut(ctx, "state.json", strings.NewReader(`{"ok":true}`)); err != nil {
 		t.Fatalf("AtomicPut: %v", err)
 	}
 
@@ -551,10 +573,9 @@ func TestCommitAndReopen(t *testing.T) {
 func TestUpdateTSNoDirtySubs(t *testing.T) {
 	db, c, dir := setupTestDB(t)
 	sub := &Subscription{ID: 1, TotalArticles: 5}
-	sub.oTotalArticles = 5 // not dirty
 	c.Subscriptions = []*Subscription{sub}
 	c.FetchedAt = 100
-	c.oFetchedAt = 100 // same week
+	db.snapshot = fetchSnapshot{totalArticles: 5, fetchedAt: 100, subs: map[int]subSnapshot{1: {totalArticles: 5}}}
 
 	if err := db.UpdateTS(ctx); err != nil {
 		t.Fatalf("UpdateTS: %v", err)
@@ -597,7 +618,7 @@ func TestUpdateTSWeekBoundary(t *testing.T) {
 
 	// First fetch: week 2800 (epoch seconds ~1693440000)
 	c.FetchedAt = 2800 * 604800
-	c.oFetchedAt = 2800 * 604800
+	db.snapshot = fetchSnapshot{fetchedAt: 2800 * 604800, subs: map[int]subSnapshot{1: {}}}
 	articles := []*Item{
 		{Sub: sub, Title: "A1", Content: "C1", Published: 1000},
 	}
@@ -609,9 +630,7 @@ func TestUpdateTSWeekBoundary(t *testing.T) {
 	}
 
 	// Simulate next fetch in a different week
-	sub.oTotalArticles = sub.TotalArticles
-	c.oFetchedAt = c.FetchedAt
-	c.oTotalArticles = c.TotalArticles
+	db.snapshot = snapshotFrom(db)
 	c.FetchedAt = 2801 * 604800 // next week
 
 	articles = []*Item{
@@ -789,7 +808,7 @@ func TestUpdateTSMultiWeekGap(t *testing.T) {
 	c.Subscriptions = []*Subscription{sub}
 
 	c.FetchedAt = 2800 * 604800
-	c.oFetchedAt = 2800 * 604800
+	db.snapshot = fetchSnapshot{fetchedAt: 2800 * 604800, subs: map[int]subSnapshot{1: {}}}
 	articles := []*Item{
 		{Sub: sub, Title: "A1", Content: "C1", Published: 1000},
 	}
@@ -800,9 +819,7 @@ func TestUpdateTSMultiWeekGap(t *testing.T) {
 		t.Fatalf("UpdateTS: %v", err)
 	}
 
-	sub.oTotalArticles = sub.TotalArticles
-	c.oFetchedAt = c.FetchedAt
-	c.oTotalArticles = c.TotalArticles
+	db.snapshot = snapshotFrom(db)
 	c.FetchedAt = 2803 * 604800
 
 	articles = []*Item{
@@ -855,9 +872,7 @@ func TestUpdateTSTSToggleFlips(t *testing.T) {
 		t.Errorf("TSToggle should flip from %v to %v", initial, !initial)
 	}
 
-	sub.oTotalArticles = sub.TotalArticles
-	c.oFetchedAt = c.FetchedAt
-	c.oTotalArticles = c.TotalArticles
+	db.snapshot = snapshotFrom(db)
 	c.FetchedAt += 100
 	articles = []*Item{
 		{Sub: sub, Title: "A2", Content: "C2", Published: 2000},
@@ -1037,11 +1052,12 @@ func TestCommitAndReopenDirtinessTracking(t *testing.T) {
 	defer db2.Close(ctx)
 
 	s := db2.Subscriptions()[0]
-	if s.oTotalArticles != s.TotalArticles {
-		t.Errorf("oTotalArticles = %d, want %d (same as TotalArticles after reopen)", s.oTotalArticles, s.TotalArticles)
+	snap := db2.snapshot.subs[s.ID]
+	if snap.totalArticles != s.TotalArticles {
+		t.Errorf("snapshot.totalArticles = %d, want %d (same as TotalArticles after reopen)", snap.totalArticles, s.TotalArticles)
 	}
-	if s.oLastAddedAt != s.LastAddedAt {
-		t.Errorf("oLastAddedAt = %d, want %d", s.oLastAddedAt, s.LastAddedAt)
+	if snap.lastAddedAt != s.LastAddedAt {
+		t.Errorf("snapshot.lastAddedAt = %d, want %d", snap.lastAddedAt, s.LastAddedAt)
 	}
 }
 
@@ -1064,14 +1080,11 @@ func TestDBOpenCorruptedGzipValidInner(t *testing.T) {
 func TestUpdateTSSubsWithZeroArticlesExcludedFromAbsSnapshot(t *testing.T) {
 	db, c, dir := setupTestDB(t)
 	sub1 := &Subscription{ID: 1, TotalArticles: 5}
-	sub1.oTotalArticles = 5
 	sub2 := &Subscription{ID: 2}
-	sub2.oTotalArticles = 0
 	c.Subscriptions = []*Subscription{sub1, sub2}
 
-	c.oFetchedAt = 2800 * 604800
 	c.FetchedAt = 2801 * 604800
-	c.oTotalArticles = 5
+	db.snapshot = fetchSnapshot{totalArticles: 5, fetchedAt: 2800 * 604800, subs: map[int]subSnapshot{1: {totalArticles: 5}, 2: {totalArticles: 0}}}
 
 	if err := db.UpdateTS(ctx); err != nil {
 		t.Fatalf("UpdateTS: %v", err)
@@ -1120,7 +1133,7 @@ func TestUpdateTSIdxBoundaryLines(t *testing.T) {
 	sub2 := &Subscription{ID: 2}
 	db.core.Subscriptions = []*Subscription{sub1, sub2}
 	db.core.FetchedAt = 1700000000
-	db.core.oFetchedAt = 1700000000
+	db.snapshot = fetchSnapshot{fetchedAt: 1700000000, subs: map[int]subSnapshot{1: {}, 2: {}}}
 
 	// Create articles spanning an idx boundary: sub1 gets first 600, sub2 gets next 410
 	articles := make([]*Item, idxPackSize+10)
@@ -1190,7 +1203,7 @@ func TestUpdateTSNoBoundaryWhenNoCrossing(t *testing.T) {
 	sub := &Subscription{ID: 1}
 	c.Subscriptions = []*Subscription{sub}
 	c.FetchedAt = 1700000000
-	c.oFetchedAt = 1700000000
+	db.snapshot = fetchSnapshot{fetchedAt: 1700000000, subs: map[int]subSnapshot{1: {}}}
 
 	articles := []*Item{
 		{Sub: sub, Title: "A1", Content: "C1", Published: 1000},

@@ -45,20 +45,18 @@ func stripControlKeepWS(r rune) rune {
 }
 
 type Subscription struct {
-	ID             int      `json:"id"`
-	Title          string   `json:"title"`
-	URL            string   `json:"url"`
-	Tag            string   `json:"tag,omitempty"`
-	Pipeline       []string `json:"pipe,omitempty"`
-	FetchError     string   `json:"ferr,omitempty"`
-	StopGUID       uint32   `json:"stop_guid,omitempty"`
-	ETag           string   `json:"etag,omitempty"`
-	LastModified   string   `json:"last_modified,omitempty"`
-	TotalArticles  int      `json:"total_art,omitempty"`
-	LastAddedAt    int64    `json:"last_added,omitempty"`
-	newItems       []*Item
-	oTotalArticles int
-	oLastAddedAt   int64
+	ID            int      `json:"id"`
+	Title         string   `json:"title"`
+	URL           string   `json:"url"`
+	Tag           string   `json:"tag,omitempty"`
+	Pipeline      []string `json:"pipe,omitempty"`
+	FetchError    string   `json:"ferr,omitempty"`
+	StopGUID      uint32   `json:"stop_guid,omitempty"`
+	ETag          string   `json:"etag,omitempty"`
+	LastModified  string   `json:"last_modified,omitempty"`
+	TotalArticles int      `json:"total_art,omitempty"`
+	LastAddedAt   int64    `json:"last_added,omitempty"`
+	newItems      []*Item
 }
 
 func (s Subscription) LogValue() slog.Value {

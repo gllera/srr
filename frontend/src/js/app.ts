@@ -88,8 +88,8 @@ function clearContentTransition() {
 let renderGen = 0
 
 function render(o: IShowFeed) {
-   // Cancel in-flight resource loads (images, etc.) from the previous article
-   if (renderGen > 0) window.stop()
+   // Cancel in-flight data/pack fetches from the previous article
+   if (renderGen > 0) data.abortPending()
    const gen = ++renderGen
    el.title.textContent = o.article.title
    el.content.style.transition = "none"
@@ -294,6 +294,9 @@ function cycleFilter(dir: number) {
 }
 
 async function init() {
+   if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register(new URL("../sw.ts", import.meta.url), { type: "module" })
+   }
    try {
       await data.init()
    } catch (e) {

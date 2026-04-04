@@ -34,6 +34,18 @@ type DB struct {
 	core          DBCore
 	locked        bool
 	idxBoundaries []idxBoundary
+	snapshot      fetchSnapshot
+}
+
+type fetchSnapshot struct {
+	totalArticles int
+	fetchedAt     int64
+	subs          map[int]subSnapshot
+}
+
+type subSnapshot struct {
+	totalArticles int
+	lastAddedAt   int64
 }
 
 type idxBoundary struct {
@@ -56,8 +68,6 @@ type DBCore struct {
 	PackOffset     int             `json:"pack_off"`
 	FirstFetchedAt int64           `json:"first_fetched,omitempty"`
 	Subscriptions  []*Subscription `json:"subscriptions"`
-	oTotalArticles int
-	oFetchedAt     int64
 }
 
 func NewDB(ctx context.Context, locked bool) (*DB, error) {
@@ -80,26 +90,27 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 	}
 
 	if locked {
-		if err := db.Put(ctx, dbLockKey, nil, globals.Force); err != nil {
+		if err := db.Put(ctx, dbLockKey, bytes.NewReader(nil), globals.Force); err != nil {
 			db.Backend.Close()
 			return nil, fmt.Errorf("create lock file: %w", err)
 		}
 	}
 
-	data, err := db.Get(ctx, dbFileKey, true)
+	rc, err := db.Get(ctx, dbFileKey, true)
 	if err != nil {
 		db.Close(ctx)
 		return nil, err
 	}
-
-	if len(data) != 0 {
-		r, err := gzip.NewReader(bytes.NewReader(data))
+	if rc != nil {
+		r, err := gzip.NewReader(rc)
 		if err != nil {
+			rc.Close()
 			db.Close(ctx)
 			return nil, fmt.Errorf("decompress %s: %w", dbFileKey, err)
 		}
-		data, err = io.ReadAll(r)
+		data, err := io.ReadAll(r)
 		r.Close()
+		rc.Close()
 		if err != nil {
 			db.Close(ctx)
 			return nil, fmt.Errorf("decompress %s: %w", dbFileKey, err)
@@ -108,14 +119,19 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 			db.Close(ctx)
 			return nil, fmt.Errorf("decode %s: %w", dbFileKey, err)
 		}
-		for _, s := range db.core.Subscriptions {
-			s.oTotalArticles = s.TotalArticles
-			s.oLastAddedAt = s.LastAddedAt
-		}
 	}
 
-	db.core.oFetchedAt = db.core.FetchedAt
-	db.core.oTotalArticles = db.core.TotalArticles
+	db.snapshot = fetchSnapshot{
+		totalArticles: db.core.TotalArticles,
+		fetchedAt:     db.core.FetchedAt,
+		subs:          make(map[int]subSnapshot),
+	}
+	for _, s := range db.core.Subscriptions {
+		db.snapshot.subs[s.ID] = subSnapshot{
+			totalArticles: s.TotalArticles,
+			lastAddedAt:   s.LastAddedAt,
+		}
+	}
 	return db, nil
 }
 
@@ -141,7 +157,7 @@ func (o *DB) Commit(ctx context.Context) error {
 	if err := gz.Close(); err != nil {
 		return err
 	}
-	return o.AtomicPut(ctx, dbFileKey, buf.Bytes())
+	return o.AtomicPut(ctx, dbFileKey, &buf)
 }
 
 func (o *DB) Subscriptions() []*Subscription {
@@ -202,11 +218,12 @@ func (p *pack) writeEntry(s string) {
 }
 
 func (o *DB) readGz(ctx context.Context, key string) ([]byte, error) {
-	data, err := o.Get(ctx, key, false)
+	rc, err := o.Get(ctx, key, false)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", key, err)
 	}
-	r, err := gzip.NewReader(bytes.NewReader(data))
+	defer rc.Close()
+	r, err := gzip.NewReader(rc)
 	if err != nil {
 		return nil, fmt.Errorf("decompress %s: %w", key, err)
 	}
@@ -220,14 +237,15 @@ func (o *DB) readGz(ctx context.Context, key string) ([]byte, error) {
 
 func (o *DB) loadPack(ctx context.Context, key string) (*pack, error) {
 	p := newPack()
-	data, err := o.Get(ctx, key, true)
+	rc, err := o.Get(ctx, key, true)
 	if err != nil {
 		return nil, err
 	}
-	if len(data) == 0 {
+	if rc == nil {
 		return p, nil
 	}
-	r, err := gzip.NewReader(bytes.NewReader(data))
+	defer rc.Close()
+	r, err := gzip.NewReader(rc)
 	if err != nil {
 		return nil, err
 	}
@@ -249,7 +267,7 @@ func (o *DB) savePack(ctx context.Context, key string, p *pack) error {
 	if err := p.gz.Close(); err != nil {
 		return err
 	}
-	if err := o.Put(ctx, key, p.buf.Bytes(), true); err != nil {
+	if err := o.Put(ctx, key, &p.buf, true); err != nil {
 		return err
 	}
 	p.buf.Reset()
@@ -260,7 +278,7 @@ func (o *DB) savePack(ctx context.Context, key string, p *pack) error {
 func (o *DB) UpdateTS(ctx context.Context) error {
 	c := &o.core
 	week := c.FetchedAt / 604800
-	prevWeek := c.oFetchedAt / 604800
+	prevWeek := o.snapshot.fetchedAt / 604800
 	full := prevWeek != week
 
 	if !full && len(o.idxBoundaries) == 0 {
@@ -273,14 +291,15 @@ func (o *DB) UpdateTS(ctx context.Context) error {
 	}
 
 	if full {
-		absSnap := []any{0, c.oTotalArticles}
+		absSnap := []any{0, o.snapshot.totalArticles}
 		for _, s := range c.Subscriptions {
-			if s.oTotalArticles > 0 {
-				absSnap = append(absSnap, s.ID, s.oTotalArticles, s.oLastAddedAt)
+			snap := o.snapshot.subs[s.ID]
+			if snap.totalArticles > 0 {
+				absSnap = append(absSnap, s.ID, snap.totalArticles, snap.lastAddedAt)
 			}
 		}
 
-		if c.oFetchedAt != 0 {
+		if o.snapshot.fetchedAt != 0 {
 			if err := o.savePack(ctx, fmt.Sprintf("ts/%d.gz", prevWeek), ts); err != nil {
 				return err
 			}
@@ -313,6 +332,16 @@ func (o *DB) UpdateTS(ctx context.Context) error {
 	return o.savePack(ctx, fmt.Sprintf("ts/%v.gz", c.TSToggle), ts)
 }
 
+func (o *DB) recordBoundary() {
+	var bSubs []idxBoundarySub
+	for _, s := range o.core.Subscriptions {
+		if s.TotalArticles > o.snapshot.subs[s.ID].totalArticles {
+			bSubs = append(bSubs, idxBoundarySub{s.ID, s.TotalArticles})
+		}
+	}
+	o.idxBoundaries = append(o.idxBoundaries, idxBoundary{o.core.TotalArticles, bSubs})
+}
+
 func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 	if len(articles) == 0 {
 		return nil
@@ -332,13 +361,7 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 
 	for _, item := range articles {
 		if c.TotalArticles > 0 && c.TotalArticles%idxPackSize == 0 {
-			var bSubs []idxBoundarySub
-			for _, s := range c.Subscriptions {
-				if s.TotalArticles > s.oTotalArticles {
-					bSubs = append(bSubs, idxBoundarySub{s.ID, s.TotalArticles})
-				}
-			}
-			o.idxBoundaries = append(o.idxBoundaries, idxBoundary{c.TotalArticles, bSubs})
+			o.recordBoundary()
 
 			if err := o.savePack(ctx, fmt.Sprintf("idx/%d.gz", c.TotalArticles/idxPackSize-1), meta); err != nil {
 				return err
@@ -366,13 +389,7 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 		c.PackOffset++
 	}
 
-	var bSubs []idxBoundarySub
-	for _, s := range c.Subscriptions {
-		if s.TotalArticles > s.oTotalArticles {
-			bSubs = append(bSubs, idxBoundarySub{s.ID, s.TotalArticles})
-		}
-	}
-	o.idxBoundaries = append(o.idxBoundaries, idxBoundary{c.TotalArticles, bSubs})
+	o.recordBoundary()
 
 	c.DataToggle = !c.DataToggle
 	latest = fmt.Sprintf("%v.gz", o.core.DataToggle)

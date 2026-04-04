@@ -16,12 +16,13 @@ Dependency chain: `app → nav → data`, `app → ts → data`, `nav → ts →
 
 | Module | Role |
 |---|---|
-| `data.ts` | CDN data layer: fetches `db.gz`, gzip TSV idx packs, gzip null-delimited data packs. Exports live-binding state (`db`, `articles`, `idxPack`) read by nav. Dual LRU caches (size 5). |
+| `data.ts` | CDN data layer: fetches `db.gz`, gzip TSV idx packs, gzip null-delimited data packs. Exports live-binding state (`db`, `articles`, `idxPack`) read by nav. Dual LRU caches (size 5). Exports `abortPending()` to cancel in-flight fetches. |
 | `ts.ts` | Time-series optimization for filtered navigation. Fetches/caches ts/ weekly packs. Exports `findCandidateIdxPacks` (used by nav) and `findChronForTimestamp` (used by app for floor). |
 | `nav.ts` | Navigation state machine: hash routing (`#chronIdx[~floor][!tokens]`), traversal, filtering, floor. Returns `IShowFeed`. Uses `pushState`/`replaceState`. Tokens are sub IDs or tag names. |
 | `cache.ts` | Generic LRU cache factory (`makeLRU`). Used by data.ts and ts.ts. |
-| `fmt.ts` | Pure utilities (no imports): `sanitizeHtml`, `timeAgo`, `formatDate`. |
-| `app.ts` | UI: DOM rendering, events, dropdowns, error popup, loading, dark mode. All async handlers via `guard()` mutex. Position persisted to localStorage. |
+| `fmt.ts` | Pure utilities (no imports): `sanitizeHtml`, `timeAgo`, `formatDate`. `sanitizeHtml` strips dangerous elements/attributes for defense-in-depth. |
+| `app.ts` | UI: DOM rendering, events, dropdowns, error popup, loading, dark mode. All async handlers via `guard()` mutex. Position persisted to localStorage. Registers service worker (`sw.ts`) on init. |
+| `sw.ts` | Service worker. Three caching strategies: `cacheFirst` for finalized packs (`N.gz`), `staleWhileRevalidate` for `db.gz`, `networkFirst` for latest packs (`true.gz`/`false.gz`). Cache name: `srr-v1`. |
 | `types.d.ts` | Ambient types: `IDB`, `ISub`, `IIdxEntry`, `IShowFeed`. |
 
 CSS: native nesting, `srr-` prefix on all classes, dark mode via `prefers-color-scheme`.
@@ -47,9 +48,7 @@ Frontend-specific additions:
 
 **Lazy content**: `render()` shows metadata immediately, loads content async via `getContent()`. Generation counter discards stale loads.
 
-**Sanitization**: `<template>` element (no script exec). Removes: script/style/iframe/embed/object/form/link/meta/base. Strips: `on*` attrs, `javascript:` URLs. Adds: `rel="noopener noreferrer"`, `loading="lazy"`.
-
-**Content fade-in**: double `requestAnimationFrame` for opacity transition. `window.stop()` cancels prior resource loads.
+**Content fade-in**: double `requestAnimationFrame` for opacity transition. `data.abortPending()` cancels in-flight fetches (replaces `window.stop()`) when a new article is rendered.
 
 ## State Machines (nav.ts)
 
