@@ -208,7 +208,13 @@ function showFeed(): IShowFeed {
       has_right = np !== -1 || findEntryRight(packPos + 1, filter.subs) !== -1
 
       const earliestPackInRange = floorTarget !== null ? floorTarget.pack : 0
-      countLeft = data.idxPack === earliestPackInRange ? subCountBefore : null
+      if (data.idxPack === earliestPackInRange) {
+         countLeft = subCountBefore
+      } else {
+         const packStart = idxPackToChron(data.idxPack, 0)
+         const est = ts.estimateSubCount(floorChron, packStart, filter.subs)
+         countLeft = est !== null ? subCountBefore + est : null
+      }
    }
 
    return {

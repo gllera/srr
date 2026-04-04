@@ -10,6 +10,9 @@ export function makeLRU<T>(maxSize: number) {
          }
          return entry
       },
+      peek(id: number): T | undefined {
+         return map.get(id)
+      },
       put(id: number, val: T) {
          map.delete(id)
          map.set(id, val)

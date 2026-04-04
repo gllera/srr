@@ -103,6 +103,62 @@ export async function findChronForTimestamp(ts: number): Promise<number | null> 
    return best.total
 }
 
+export function estimateSubCount(fromTotal: number, toTotal: number, subs: Set<number>): number | null {
+   if (fromTotal >= toTotal || subs.size === 0) return 0
+
+   const firstWeek = Math.floor(db.first_fetched / SECS_PER_WEEK)
+   const currentWeek = Math.floor(db.fetched_at / SECS_PER_WEEK)
+
+   // Each pack starts with an absolute snapshot, so earlier packs are irrelevant.
+   // Scan backwards to find the latest cached pack starting at or before fromTotal.
+   let startWeek = firstWeek
+   for (let w = currentWeek; w >= firstWeek; w--) {
+      const lines = tsCache.peek(w)
+      if (!lines || lines.length === 0) continue
+      if (lines[0].total <= fromTotal) {
+         startWeek = w
+         break
+      }
+   }
+
+   const subState = new Map<number, number>()
+   let fromCounts: Map<number, number> | null = fromTotal === 0 ? new Map() : null
+   let toCounts: Map<number, number> | null = null
+
+   scan: for (let w = startWeek; w <= currentWeek; w++) {
+      const lines = tsCache.peek(w)
+      if (!lines || lines.length === 0) continue
+
+      for (const line of lines) {
+         if (line.offset === 0) {
+            subState.clear()
+            for (const [id, count] of line.subs) subState.set(id, count)
+         } else {
+            for (const [id, count] of line.subs) subState.set(id, count)
+         }
+
+         if (line.total <= fromTotal) {
+            fromCounts = new Map()
+            for (const s of subs) fromCounts.set(s, subState.get(s) ?? 0)
+         }
+         if (line.total <= toTotal) {
+            toCounts = new Map()
+            for (const s of subs) toCounts.set(s, subState.get(s) ?? 0)
+         } else {
+            break scan
+         }
+      }
+   }
+
+   if (fromCounts === null || toCounts === null) return null
+
+   let count = 0
+   for (const s of subs) {
+      count += (toCounts.get(s) ?? 0) - (fromCounts.get(s) ?? 0)
+   }
+   return Math.max(0, count)
+}
+
 export async function findCandidateIdxPacks(
    fetchedAt: number,
    currentPack: number,

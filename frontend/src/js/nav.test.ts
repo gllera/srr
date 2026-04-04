@@ -55,6 +55,7 @@ vi.mock("./data", () => data)
 const tsMock = vi.hoisted(() => ({
    findCandidateIdxPacks: vi.fn().mockResolvedValue(null),
    findChronForTimestamp: vi.fn().mockResolvedValue(null),
+   estimateSubCount: vi.fn().mockReturnValue(null),
 }))
 
 vi.mock("./ts", () => tsMock)
@@ -1077,7 +1078,7 @@ describe("countLeft", () => {
    })
 
    describe("filtered, floor in different pack", () => {
-      it("returns null when floor is in an earlier pack", async () => {
+      it("returns null when floor is in an earlier pack and no ts estimate", async () => {
          data.db.total_art = 2003
          data.articles.push(makeEntry({ sub_id: 1 }), makeEntry({ sub_id: 1 }), makeEntry({ sub_id: 1 }))
          data.db.subs_mapped.set(1, makeSub({ id: 1 }))
@@ -1087,6 +1088,19 @@ describe("countLeft", () => {
          mockIdxLoad([makeEntry({ sub_id: 1 }), makeEntry({ sub_id: 1 }), makeEntry({ sub_id: 1 })])
          const r = await nav.load(2002)
          expect(r.countLeft).toBeNull()
+      })
+
+      it("uses ts estimate when floor is in an earlier pack", async () => {
+         data.db.total_art = 2003
+         data.articles.push(makeEntry({ sub_id: 1 }), makeEntry({ sub_id: 2 }), makeEntry({ sub_id: 1 }))
+         data.db.subs_mapped.set(1, makeSub({ id: 1 }))
+         nav.setFilterSubs(new Set([1]))
+         nav.setFloorChron(500)
+         tsMock.estimateSubCount.mockReturnValueOnce(10)
+         mockIdxLoad([makeEntry({ sub_id: 1 }), makeEntry({ sub_id: 2 }), makeEntry({ sub_id: 1 })])
+         const r = await nav.load(2002)
+         // 1 matching article before packPos in current pack + 10 from ts estimate
+         expect(r.countLeft).toBe(11)
       })
    })
 
