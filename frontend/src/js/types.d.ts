@@ -1,4 +1,5 @@
 declare const SRR_CDN_URL: string
+declare const process: { env: { NODE_ENV: string } }
 
 interface IDB {
    data_tog: boolean

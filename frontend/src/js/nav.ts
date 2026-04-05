@@ -6,6 +6,9 @@ const { PACK_SIZE } = data
 let packPos = -1
 let filter: { subs: Set<number>; tokens: string[] } | undefined
 export let floorChron = 0
+let filterCountLeft: number | null = null
+let filterAbsAtFloor = 0
+let filterAbsEnd = 0
 
 function resolveTokens(tokens: string[]): Set<number> {
    const ids = new Set<number>()
@@ -171,8 +174,43 @@ export async function load(chronIdx: number, replace = false): Promise<IShowFeed
       }
    }
 
+   await computeFilterCount()
    updateHash(replace)
    return showFeed()
+}
+
+async function filteredAbsCount(chron: number, subs: Set<number>): Promise<number | null> {
+   const entry = data.peekIdxEntry(chron)
+   if (!entry) return null
+   const result = await ts.filteredCountBefore(chron, entry.fetched_at, subs)
+   if (!result) return null
+   let count = result.count
+   const target = chronToIdxPack(chron)
+   const entries = data.peekIdxPack(target.pack)
+   if (entries) {
+      const packStart = chron - target.pos
+      for (let i = Math.max(0, result.total - packStart); i < target.pos; i++) {
+         if (subs.has(entries[i].sub_id)) count++
+      }
+   }
+   return count
+}
+
+async function computeFilterCount(): Promise<void> {
+   filterCountLeft = null
+   filterAbsAtFloor = 0
+   filterAbsEnd = 0
+   if (filter === undefined) return
+   const { subs } = filter
+   const absCountP = filteredAbsCount(currentChronIdx(), subs)
+   const floorAbsP = floorChron > 0 ? filteredAbsCount(floorChron, subs) : null
+   const absCount = await absCountP
+   if (absCount === null) return
+   filterAbsAtFloor = (await floorAbsP) ?? 0
+   filterCountLeft = absCount - filterAbsAtFloor
+   for (const sub of data.db.subscriptions) {
+      if (subs.has(sub.id)) filterAbsEnd += sub.total_art ?? 0
+   }
 }
 
 function showFeed(): IShowFeed {
@@ -187,34 +225,20 @@ function showFeed(): IShowFeed {
       has_right = chron < data.db.total_art - 1
       countLeft = chron - floorChron
    } else {
-      // Single backward pass: find nearest left match and count matching articles
-      const floorTarget = floorChron > 0 ? chronToIdxPack(floorChron) : null
-      const floorInPack = floorTarget !== null && floorTarget.pack === data.idxPack
-      const startPos = floorInPack ? floorTarget.pos : 0
-      const arts = data.articles
-      let nearestLeft = -1
-      let subCountBefore = 0
-      for (let i = packPos - 1; i >= startPos; i--) {
-         if (filter.subs.has(arts[i].sub_id)) {
-            if (nearestLeft === -1) nearestLeft = i
-            subCountBefore++
-         }
-      }
-      const foundLeft = nearestLeft !== -1 && idxPackToChron(data.idxPack, nearestLeft) >= floorChron
-      const pp = prevIdxPack(data.idxPack)
-      has_left = foundLeft || (pp !== -1 && idxPackToChron(pp, PACK_SIZE - 1) >= floorChron)
-
-      const np = nextIdxPack(data.idxPack)
-      has_right = np !== -1 || findEntryRight(packPos + 1, filter.subs) !== -1
-
-      const earliestPackInRange = floorTarget !== null ? floorTarget.pack : 0
-      if (data.idxPack === earliestPackInRange) {
-         countLeft = subCountBefore
+      if (filterCountLeft !== null) {
+         has_left = filterCountLeft > 0
+         has_right = filterCountLeft < filterAbsEnd - filterAbsAtFloor - 1
       } else {
-         const packStart = idxPackToChron(data.idxPack, 0)
-         const est = ts.estimateSubCount(floorChron, packStart, filter.subs)
-         countLeft = est !== null ? subCountBefore + est : null
+         const nearestLeft = findEntryLeft(packPos - 1, filter.subs)
+         const foundLeft = nearestLeft !== -1 && idxPackToChron(data.idxPack, nearestLeft) >= floorChron
+         const pp = prevIdxPack(data.idxPack)
+         has_left = foundLeft || (pp !== -1 && idxPackToChron(pp, PACK_SIZE - 1) >= floorChron)
+
+         const np = nextIdxPack(data.idxPack)
+         has_right = np !== -1 || findEntryRight(packPos + 1, filter.subs) !== -1
       }
+
+      countLeft = filterCountLeft
    }
 
    return {
@@ -230,12 +254,14 @@ function showFeed(): IShowFeed {
 
 export async function left(): Promise<IShowFeed> {
    if (filter !== undefined) {
+      const prevChron = currentChronIdx()
       const found = findEntryLeft(packPos - 1, filter.subs)
       if (found !== -1 && idxPackToChron(data.idxPack, found) >= floorChron) {
          packPos = found
       } else {
          await scanFilteredPacks(-1, filter.subs)
       }
+      if (filterCountLeft !== null && currentChronIdx() !== prevChron) filterCountLeft--
    } else {
       const chron = currentChronIdx()
       if (chron > floorChron) {
@@ -257,12 +283,14 @@ export async function left(): Promise<IShowFeed> {
 
 export async function right(): Promise<IShowFeed> {
    if (filter !== undefined) {
+      const prevChron = currentChronIdx()
       const found = findEntryRight(packPos + 1, filter.subs)
       if (found !== -1) {
          packPos = found
       } else {
          await scanFilteredPacks(1, filter.subs)
       }
+      if (filterCountLeft !== null && currentChronIdx() !== prevChron) filterCountLeft++
    } else {
       const chron = currentChronIdx()
       if (chron < data.db.total_art - 1) {
@@ -349,16 +377,18 @@ export async function last(subId?: string): Promise<IShowFeed> {
       return load(Number.MAX_SAFE_INTEGER)
    }
 
+   await computeFilterCount()
    updateHash()
    return showFeed()
 }
 
-export function toggleFilter(): IShowFeed {
+export async function toggleFilter(): Promise<IShowFeed> {
    if (filter === undefined) {
       filter = filterForSub(data.articles[packPos].sub_id)
    } else {
       filter = undefined
    }
+   await computeFilterCount()
    updateHash()
    return showFeed()
 }
@@ -389,26 +419,42 @@ export async function applyFilter(tokens: string[] | undefined): Promise<IShowFe
    if (filter !== undefined && !filter.subs.has(data.articles[packPos].sub_id)) {
       return load(currentChronIdx())
    }
+   await computeFilterCount()
    updateHash()
    return showFeed()
 }
 
 export function setFloorChron(idx: number) {
    floorChron = idx
+   filterAbsAtFloor = 0
 }
 
-export function setFloorAt(idx: number): IShowFeed {
+export async function setFloorAt(idx: number): Promise<IShowFeed> {
    floorChron = idx
+   filterAbsAtFloor = 0
+   await computeFilterCount()
    updateHash()
    return showFeed()
 }
 
 export function setFloorHere(): IShowFeed {
-   return setFloorAt(currentChronIdx())
+   floorChron = currentChronIdx()
+   if (filterCountLeft !== null) {
+      filterAbsAtFloor += filterCountLeft
+      filterCountLeft = 0
+   }
+   updateHash()
+   return showFeed()
 }
 
 export function clearFloor(): IShowFeed {
-   return setFloorAt(0)
+   floorChron = 0
+   if (filterCountLeft !== null) {
+      filterCountLeft += filterAbsAtFloor
+   }
+   filterAbsAtFloor = 0
+   updateHash()
+   return showFeed()
 }
 
 export function getFilterEntries(): string[] {

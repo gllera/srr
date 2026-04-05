@@ -71,10 +71,14 @@ export async function streamSplit<T>(
    return result
 }
 
+export function peekIdxPack(pack: number): IIdxEntry[] | undefined {
+   return idxCache.peek(pack)
+}
+
 export function peekIdxEntry(chronIdx: number): IIdxEntry | undefined {
    const nf = numFinalizedIdx()
    const pack = Math.min(Math.floor(chronIdx / PACK_SIZE), nf)
-   const entries = idxCache.peek(pack)
+   const entries = peekIdxPack(pack)
    if (!entries) return undefined
    const pos = pack < nf ? chronIdx - pack * PACK_SIZE : chronIdx - nf * PACK_SIZE
    return pos >= 0 && pos < entries.length ? entries[pos] : undefined

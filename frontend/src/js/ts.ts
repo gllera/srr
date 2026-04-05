@@ -1,5 +1,5 @@
 import { makeLRU } from "./cache"
-import { PACK_SIZE, db, numFinalizedIdx, peekIdxEntry, streamSplit } from "./data"
+import { PACK_SIZE, db, numFinalizedIdx, streamSplit } from "./data"
 
 const SECS_PER_WEEK = 604800
 
@@ -103,50 +103,28 @@ export async function findChronForTimestamp(ts: number): Promise<number | null> 
    return best.total
 }
 
-// Get per-sub counts from the cached ts/ pack at the week containing `total`
-function subCountsAt(total: number, subs: Set<number>): Map<number, number> | null {
-   const entry = peekIdxEntry(total)
-   if (!entry) return null
-   const lines = tsCache.peek(Math.floor(entry.fetched_at / SECS_PER_WEEK))
+// Returns { count, total } where total is the chronIdx boundary the ts data covers;
+// the caller scans remaining idx entries from total to chron.
+export async function filteredCountBefore(
+   chron: number,
+   fetchedAt: number,
+   subs: Set<number>,
+): Promise<{ count: number; total: number } | null> {
+   const lines = await loadTsPack(Math.floor(fetchedAt / SECS_PER_WEEK))
    if (!lines || lines.length === 0) return null
 
    const state = new Map<number, number>()
-   let found = false
+   let total = 0
    for (const line of lines) {
-      if (line.total > total) break
-      if (line.offset === 0) {
-         state.clear()
-         for (const [id, count] of line.subs) state.set(id, count)
-      } else {
-         for (const [id, count] of line.subs) state.set(id, count)
-      }
-      found = true
+      if (line.total > chron) break
+      if (line.offset === 0) state.clear()
+      for (const [id, count] of line.subs) state.set(id, count)
+      total = line.total
    }
-   if (!found) return null
-
-   const counts = new Map<number, number>()
-   for (const s of subs) counts.set(s, state.get(s) ?? 0)
-   return counts
-}
-
-export function estimateSubCount(fromTotal: number, toTotal: number, subs: Set<number>): number | null {
-   if (fromTotal >= toTotal || subs.size === 0) return 0
-
-   const toCounts = subCountsAt(toTotal, subs)
-   if (!toCounts) return null
-
-   if (fromTotal === 0) {
-      let count = 0
-      for (const s of subs) count += toCounts.get(s) ?? 0
-      return count
-   }
-
-   const fromCounts = subCountsAt(fromTotal, subs)
-   if (!fromCounts) return null
 
    let count = 0
-   for (const s of subs) count += (toCounts.get(s) ?? 0) - (fromCounts.get(s) ?? 0)
-   return Math.max(0, count)
+   for (const s of subs) count += state.get(s) ?? 0
+   return { count, total }
 }
 
 export async function findCandidateIdxPacks(

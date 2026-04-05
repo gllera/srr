@@ -1,3 +1,5 @@
+export const log = process.env.NODE_ENV === "development" ? console.log.bind(console) : () => {}
+
 const rtf = new Intl.RelativeTimeFormat("en", { numeric: "always", style: "narrow" })
 const JS_PROTO = /^\s*javascript\s*:/i
 const DANGEROUS_TAGS = new Set(["SCRIPT", "STYLE", "IFRAME", "EMBED", "OBJECT", "FORM", "LINK", "META", "BASE"])

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest"
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 
 const data = vi.hoisted(() => ({
    PACK_SIZE: 1000 as const,
@@ -43,6 +43,17 @@ const data = vi.hoisted(() => ({
    latestIdxCount(): number {
       return this.db.total_art - this.numFinalizedIdx() * 1000
    },
+   peekIdxPack(pack: number): IIdxEntry[] | undefined {
+      return pack === this.idxPack ? this.articles : undefined
+   },
+   peekIdxEntry(chronIdx: number): IIdxEntry | undefined {
+      const nf = this.numFinalizedIdx()
+      const pack = Math.min(Math.floor(chronIdx / 1000), nf)
+      const entries = this.peekIdxPack(pack)
+      if (!entries) return undefined
+      const pos = pack < nf ? chronIdx - pack * 1000 : chronIdx - nf * 1000
+      return pos >= 0 && pos < entries.length ? entries[pos] : undefined
+   },
    activeSubs(): ISub[] {
       return Array.from(this.db.subs_mapped.values())
          .filter((sub: ISub) => (sub.total_art ?? 0) > 0)
@@ -55,7 +66,7 @@ vi.mock("./data", () => data)
 const tsMock = vi.hoisted(() => ({
    findCandidateIdxPacks: vi.fn().mockResolvedValue(null),
    findChronForTimestamp: vi.fn().mockResolvedValue(null),
-   estimateSubCount: vi.fn().mockReturnValue(null),
+   filteredCountBefore: vi.fn().mockResolvedValue({ count: 0, total: 0 }),
 }))
 
 vi.mock("./ts", () => tsMock)
@@ -91,6 +102,7 @@ function mockIdxLoadOnce(entries: IIdxEntry[]) {
 }
 
 beforeEach(() => {
+   vi.useFakeTimers()
    data.idxPack = -1
    data.db.total_art = 3
    data.db.data_tog = true
@@ -103,6 +115,10 @@ beforeEach(() => {
    tsMock.findCandidateIdxPacks.mockResolvedValue(null)
    nav.setFilterSubs(undefined)
    nav.setFloorChron(0)
+})
+
+afterEach(() => {
+   vi.useRealTimers()
 })
 
 describe("load", () => {
@@ -136,16 +152,9 @@ describe("load", () => {
       const pushSpy = vi.spyOn(history, "pushState")
       data.articles.push(makeEntry())
       await nav.load(0)
+      vi.runAllTimers()
       expect(pushSpy).toHaveBeenCalledWith(null, "", "#0")
       pushSpy.mockRestore()
-   })
-
-   it("uses replaceState when replace is true", async () => {
-      const replaceSpy = vi.spyOn(history, "replaceState")
-      data.articles.push(makeEntry())
-      await nav.load(0, true)
-      expect(replaceSpy).toHaveBeenCalledWith(null, "", "#0")
-      replaceSpy.mockRestore()
    })
 
    it("loads position 0 correctly", async () => {
@@ -457,6 +466,7 @@ describe("right", () => {
       await nav.load(0)
       pushSpy.mockClear()
       await nav.right()
+      vi.runAllTimers()
       expect(pushSpy).toHaveBeenCalledWith(null, "", "#1")
       pushSpy.mockRestore()
    })
@@ -482,10 +492,10 @@ describe("toggleFilter", () => {
       data.articles.push(makeEntry())
       await nav.load(0)
 
-      let result = nav.toggleFilter()
+      let result = await nav.toggleFilter()
       expect(result.filtered).toBe(true)
 
-      result = nav.toggleFilter()
+      result = await nav.toggleFilter()
       expect(result.filtered).toBe(false)
    })
 
@@ -494,7 +504,8 @@ describe("toggleFilter", () => {
       data.articles.push(makeEntry())
       await nav.load(0)
       pushSpy.mockClear()
-      nav.toggleFilter()
+      await nav.toggleFilter()
+      vi.runAllTimers()
       expect(pushSpy).toHaveBeenCalledWith(null, "", "#0!1")
       pushSpy.mockRestore()
    })
@@ -503,9 +514,10 @@ describe("toggleFilter", () => {
       const pushSpy = vi.spyOn(history, "pushState")
       data.articles.push(makeEntry())
       await nav.load(0)
-      nav.toggleFilter()
+      await nav.toggleFilter()
       pushSpy.mockClear()
-      nav.toggleFilter()
+      await nav.toggleFilter()
+      vi.runAllTimers()
       expect(pushSpy).toHaveBeenCalledWith(null, "", "#0")
       pushSpy.mockRestore()
    })
@@ -517,8 +529,8 @@ describe("toggleFilter", () => {
          makeEntry({ sub_id: 1, title: "C" }),
       )
       await nav.load(2)
-      nav.toggleFilter()
-      const result = nav.toggleFilter()
+      await nav.toggleFilter()
+      const result = await nav.toggleFilter()
       expect(result.filtered).toBe(false)
       expect(result.article.title).toBe("C")
    })
@@ -528,7 +540,7 @@ describe("toggleFilter", () => {
       data.db.subs_mapped.set(1, sub)
       data.articles.push(makeEntry({ sub_id: 1 }))
       await nav.load(0)
-      const result = nav.toggleFilter()
+      const result = await nav.toggleFilter()
       expect(result.article.sub_id).toBe(1)
       expect(result.sub).toBe(sub)
    })
@@ -594,6 +606,7 @@ describe("fromHash", () => {
       expect(result.floor).toBe(true)
       expect(result.filtered).toBe(true)
       expect(nav.floorChron).toBe(2)
+      vi.runAllTimers()
       expect(replaceSpy).toHaveBeenCalledWith(null, "", "#0~2!1")
       replaceSpy.mockRestore()
    })
@@ -615,6 +628,7 @@ describe("fromHash", () => {
       const replaceSpy = vi.spyOn(history, "replaceState")
       data.articles.push(makeEntry({ title: "A" }))
       await nav.fromHash("0")
+      vi.runAllTimers()
       expect(replaceSpy).toHaveBeenCalled()
       replaceSpy.mockRestore()
    })
@@ -742,10 +756,11 @@ describe("showFeed", () => {
          expect(result.has_left).toBe(false)
       })
 
-      it("true in filter mode when earlier packs exist", async () => {
+      it("true in filter mode when earlier packs have matching articles", async () => {
          data.db.total_art = 1001
          data.articles.push(makeEntry({ sub_id: 1 }))
          data.idxPack = -1
+         tsMock.filteredCountBefore.mockResolvedValueOnce({ count: 5, total: 1000 })
          const result = await nav.fromHash("1000!1")
          expect(result.has_left).toBe(true)
       })
@@ -785,6 +800,7 @@ describe("showFeed", () => {
       })
 
       it("true in filter mode with later in-pack entries of same sub", async () => {
+         data.db.subscriptions = [makeSub({ id: 1, total_art: 2 }), makeSub({ id: 2, total_art: 1 })]
          data.articles.push(makeEntry({ sub_id: 1 }), makeEntry({ sub_id: 2 }), makeEntry({ sub_id: 1 }))
          const result = await nav.fromHash("0!1")
          expect(result.has_right).toBe(true)
@@ -799,6 +815,7 @@ describe("showFeed", () => {
 
       it("true in filter mode when later packs exist", async () => {
          data.db.total_art = 1001
+         data.db.subscriptions = [makeSub({ id: 1, total_art: 2 })]
          mockIdxLoadOnce([makeEntry({ sub_id: 1 })])
          const result = await nav.fromHash("0!1")
          expect(result.has_right).toBe(true)
@@ -806,6 +823,7 @@ describe("showFeed", () => {
 
       it("true in filter mode when next pack exists even if no match in current pack", async () => {
          data.db.total_art = 1001
+         data.db.subscriptions = [makeSub({ id: 1, total_art: 2 })]
          mockIdxLoadOnce([makeEntry({ sub_id: 1 }), makeEntry({ sub_id: 2 })])
          const result = await nav.fromHash("0!1")
          expect(result.has_right).toBe(true)
@@ -840,6 +858,7 @@ describe("showFeed", () => {
          const replaceSpy = vi.spyOn(history, "replaceState")
          data.articles.push(makeEntry())
          await nav.fromHash("0!1")
+         vi.runAllTimers()
          expect(replaceSpy).toHaveBeenCalledWith(null, "", "#0!1")
          replaceSpy.mockRestore()
       })
@@ -848,6 +867,7 @@ describe("showFeed", () => {
          const replaceSpy = vi.spyOn(history, "replaceState")
          data.articles.push(makeEntry())
          await nav.fromHash("0~2")
+         vi.runAllTimers()
          expect(replaceSpy).toHaveBeenCalledWith(null, "", "#0~2")
          replaceSpy.mockRestore()
       })
@@ -856,6 +876,7 @@ describe("showFeed", () => {
          const replaceSpy = vi.spyOn(history, "replaceState")
          data.articles.push(makeEntry())
          await nav.fromHash("0~2!1")
+         vi.runAllTimers()
          expect(replaceSpy).toHaveBeenCalledWith(null, "", "#0~2!1")
          replaceSpy.mockRestore()
       })
@@ -864,6 +885,7 @@ describe("showFeed", () => {
          const pushSpy = vi.spyOn(history, "pushState")
          data.articles.push(makeEntry({ title: "A" }), makeEntry({ title: "B" }))
          await nav.load(1)
+         vi.runAllTimers()
          expect(pushSpy).toHaveBeenCalledWith(null, "", "#1")
          pushSpy.mockRestore()
       })
@@ -874,6 +896,7 @@ describe("showFeed", () => {
          await nav.load(2)
          pushSpy.mockClear()
          await nav.left()
+         vi.runAllTimers()
          expect(pushSpy).toHaveBeenCalledWith(null, "", "#1")
          pushSpy.mockRestore()
       })
@@ -921,6 +944,7 @@ describe("floor", () => {
       await nav.load(1)
       const pushSpy = vi.spyOn(history, "pushState")
       const result = nav.setFloorHere()
+      vi.runAllTimers()
       expect(result.floor).toBe(true)
       expect(nav.floorChron).toBe(1)
       expect(pushSpy).toHaveBeenCalledWith(null, "", "#1~1")
@@ -1077,29 +1101,28 @@ describe("countLeft", () => {
       })
    })
 
-   describe("filtered, floor in different pack", () => {
-      it("returns null when floor is in an earlier pack and no ts estimate", async () => {
+   describe("filtered, cross-pack", () => {
+      it("returns null when filteredCountBefore returns null", async () => {
          data.db.total_art = 2003
          data.articles.push(makeEntry({ sub_id: 1 }), makeEntry({ sub_id: 1 }), makeEntry({ sub_id: 1 }))
          data.db.subs_mapped.set(1, makeSub({ id: 1 }))
          nav.setFilterSubs(new Set([1]))
-         // Floor at chronIdx 500 is in pack 0, but we load pack 2 (latest)
-         nav.setFloorChron(500)
+         tsMock.filteredCountBefore.mockResolvedValueOnce(null)
          mockIdxLoad([makeEntry({ sub_id: 1 }), makeEntry({ sub_id: 1 }), makeEntry({ sub_id: 1 })])
          const r = await nav.load(2002)
          expect(r.countLeft).toBeNull()
       })
 
-      it("uses ts estimate when floor is in an earlier pack", async () => {
+      it("uses ts count + remainder from idx pack", async () => {
          data.db.total_art = 2003
-         data.articles.push(makeEntry({ sub_id: 1 }), makeEntry({ sub_id: 2 }), makeEntry({ sub_id: 1 }))
+         data.articles.push(makeEntry({ sub_id: 1 }), makeEntry({ sub_id: 1 }), makeEntry({ sub_id: 1 }))
          data.db.subs_mapped.set(1, makeSub({ id: 1 }))
          nav.setFilterSubs(new Set([1]))
-         nav.setFloorChron(500)
-         tsMock.estimateSubCount.mockReturnValueOnce(10)
-         mockIdxLoad([makeEntry({ sub_id: 1 }), makeEntry({ sub_id: 2 }), makeEntry({ sub_id: 1 })])
+         // ts covers up to total=2001 (chronIdx 0-2000), with 10 matching articles for sub 1
+         tsMock.filteredCountBefore.mockResolvedValueOnce({ count: 10, total: 2001 })
+         mockIdxLoad([makeEntry({ sub_id: 1 }), makeEntry({ sub_id: 1 }), makeEntry({ sub_id: 1 })])
          const r = await nav.load(2002)
-         // 1 matching article before packPos in current pack + 10 from ts estimate
+         // 10 from ts + 1 matching at pos 1 (chronIdx 2001, between total and packPos)
          expect(r.countLeft).toBe(11)
       })
    })
@@ -1127,6 +1150,7 @@ describe("multi-sub filter", () => {
       data.articles.push(makeEntry({ sub_id: 3 }))
       nav.setFilterSubs(new Set([3, 1]))
       await nav.load(0)
+      vi.runAllTimers()
       expect(pushSpy).toHaveBeenCalledWith(null, "", "#0!1+3")
       pushSpy.mockRestore()
    })
@@ -1191,6 +1215,7 @@ describe("tag tokens", () => {
       data.db.subscriptions = [makeSub({ id: 1, tag: "tech" }), makeSub({ id: 2, tag: "tech" })]
       data.articles.push(makeEntry({ sub_id: 1 }))
       await nav.fromHash("0!tech")
+      vi.runAllTimers()
       expect(replaceSpy).toHaveBeenCalledWith(null, "", "#0!tech")
       replaceSpy.mockRestore()
    })
@@ -1217,6 +1242,7 @@ describe("tag tokens", () => {
       data.articles.push(makeEntry({ sub_id: 1, title: "T1" }))
       nav.setFilterTokens(["tech"])
       const result = await nav.last()
+      vi.runAllTimers()
       expect(result.filtered).toBe(true)
       expect(pushSpy).toHaveBeenCalledWith(null, "", "#0!tech")
       pushSpy.mockRestore()
@@ -1227,7 +1253,8 @@ describe("tag tokens", () => {
       data.articles.push(makeEntry({ sub_id: 7 }))
       await nav.load(0)
       pushSpy.mockClear()
-      nav.toggleFilter()
+      await nav.toggleFilter()
+      vi.runAllTimers()
       expect(pushSpy).toHaveBeenCalledWith(null, "", "#0!7")
       pushSpy.mockRestore()
    })
@@ -1237,6 +1264,7 @@ describe("tag tokens", () => {
       data.db.subscriptions = [makeSub({ id: 1, tag: "tech" }), makeSub({ id: 2 })]
       data.articles.push(makeEntry({ sub_id: 1, title: "A" }), makeEntry({ sub_id: 2, title: "B" }))
       await nav.fromHash("1!tech+2")
+      vi.runAllTimers()
       expect(replaceSpy).toHaveBeenCalledWith(null, "", "#1!tech+2")
       replaceSpy.mockRestore()
    })
@@ -1649,7 +1677,7 @@ describe("setFloorAt", () => {
       data.articles.push(makeEntry({ title: "A" }), makeEntry({ title: "B" }))
       await nav.load(1)
       pushSpy.mockClear()
-      const result = nav.setFloorAt(0)
+      const result = await nav.setFloorAt(0)
       expect(result.floor).toBe(false)
       expect(nav.floorChron).toBe(0)
       pushSpy.mockRestore()
@@ -1660,7 +1688,8 @@ describe("setFloorAt", () => {
       data.articles.push(makeEntry({ title: "A" }), makeEntry({ title: "B" }))
       await nav.load(1)
       pushSpy.mockClear()
-      const result = nav.setFloorAt(1)
+      const result = await nav.setFloorAt(1)
+      vi.runAllTimers()
       expect(result.floor).toBe(true)
       expect(nav.floorChron).toBe(1)
       expect(pushSpy).toHaveBeenCalledWith(null, "", "#1~1")
