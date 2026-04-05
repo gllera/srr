@@ -1,5 +1,5 @@
 import { makeLRU } from "./cache"
-import { PACK_SIZE, db, numFinalizedIdx, streamSplit } from "./data"
+import { PACK_SIZE, db, numFinalizedIdx, peekIdxEntry, streamSplit } from "./data"
 
 const SECS_PER_WEEK = 604800
 
@@ -103,59 +103,49 @@ export async function findChronForTimestamp(ts: number): Promise<number | null> 
    return best.total
 }
 
+// Get per-sub counts from the cached ts/ pack at the week containing `total`
+function subCountsAt(total: number, subs: Set<number>): Map<number, number> | null {
+   const entry = peekIdxEntry(total)
+   if (!entry) return null
+   const lines = tsCache.peek(Math.floor(entry.fetched_at / SECS_PER_WEEK))
+   if (!lines || lines.length === 0) return null
+
+   const state = new Map<number, number>()
+   let found = false
+   for (const line of lines) {
+      if (line.total > total) break
+      if (line.offset === 0) {
+         state.clear()
+         for (const [id, count] of line.subs) state.set(id, count)
+      } else {
+         for (const [id, count] of line.subs) state.set(id, count)
+      }
+      found = true
+   }
+   if (!found) return null
+
+   const counts = new Map<number, number>()
+   for (const s of subs) counts.set(s, state.get(s) ?? 0)
+   return counts
+}
+
 export function estimateSubCount(fromTotal: number, toTotal: number, subs: Set<number>): number | null {
    if (fromTotal >= toTotal || subs.size === 0) return 0
 
-   const firstWeek = Math.floor(db.first_fetched / SECS_PER_WEEK)
-   const currentWeek = Math.floor(db.fetched_at / SECS_PER_WEEK)
+   const toCounts = subCountsAt(toTotal, subs)
+   if (!toCounts) return null
 
-   // Each pack starts with an absolute snapshot, so earlier packs are irrelevant.
-   // Scan backwards to find the latest cached pack starting at or before fromTotal.
-   let startWeek = firstWeek
-   for (let w = currentWeek; w >= firstWeek; w--) {
-      const lines = tsCache.peek(w)
-      if (!lines || lines.length === 0) continue
-      if (lines[0].total <= fromTotal) {
-         startWeek = w
-         break
-      }
+   if (fromTotal === 0) {
+      let count = 0
+      for (const s of subs) count += toCounts.get(s) ?? 0
+      return count
    }
 
-   const subState = new Map<number, number>()
-   let fromCounts: Map<number, number> | null = fromTotal === 0 ? new Map() : null
-   let toCounts: Map<number, number> | null = null
-
-   scan: for (let w = startWeek; w <= currentWeek; w++) {
-      const lines = tsCache.peek(w)
-      if (!lines || lines.length === 0) continue
-
-      for (const line of lines) {
-         if (line.offset === 0) {
-            subState.clear()
-            for (const [id, count] of line.subs) subState.set(id, count)
-         } else {
-            for (const [id, count] of line.subs) subState.set(id, count)
-         }
-
-         if (line.total <= fromTotal) {
-            fromCounts = new Map()
-            for (const s of subs) fromCounts.set(s, subState.get(s) ?? 0)
-         }
-         if (line.total <= toTotal) {
-            toCounts = new Map()
-            for (const s of subs) toCounts.set(s, subState.get(s) ?? 0)
-         } else {
-            break scan
-         }
-      }
-   }
-
-   if (fromCounts === null || toCounts === null) return null
+   const fromCounts = subCountsAt(fromTotal, subs)
+   if (!fromCounts) return null
 
    let count = 0
-   for (const s of subs) {
-      count += (toCounts.get(s) ?? 0) - (fromCounts.get(s) ?? 0)
-   }
+   for (const s of subs) count += (toCounts.get(s) ?? 0) - (fromCounts.get(s) ?? 0)
    return Math.max(0, count)
 }
 
@@ -231,8 +221,8 @@ export async function findCandidateIdxPacks(
       }
    } else {
       // Scan forward through weeks using relevant-weeks chain
-      let prevTotal = lines[startLine].total
-      let i = startLine + 1
+      let prevTotal = startLine > 0 ? lines[startLine - 1].total : 0
+      let i = startLine
       let week = startWeek
       let fwdWeeks: number[] | undefined
       let fwdIdx = 0

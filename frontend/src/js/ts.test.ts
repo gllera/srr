@@ -274,6 +274,19 @@ describe("findCandidateIdxPacks edge cases", () => {
       expect(result).toEqual([])
    })
 
+   it("forward scan includes packs from current ts line range", async () => {
+      const week = 850 + nextWeek
+      const fetchedAt = week * SECS_PER_WEEK + 300
+      // Single ts line covers articles 0-1999 (packs 0 and 1)
+      // currentPack=0, so pack 1 should be a candidate
+      data.db.total_art = 2000
+      data.streamSplit.mockResolvedValueOnce([makeTsLine(0, 2000, [1], new Map())])
+      data.db.first_fetched = week * SECS_PER_WEEK
+      data.db.fetched_at = (week + 1) * SECS_PER_WEEK
+      const result = await findCandidateIdxPacks(fetchedAt, 0, new Set([1]), 1)
+      expect(result).toContain(1)
+   })
+
    it("backward scan returns candidates in order from nearest to furthest", async () => {
       const week = 900 + nextWeek
       const fetchedAt = week * SECS_PER_WEEK + 500
