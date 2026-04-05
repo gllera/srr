@@ -41,33 +41,26 @@ export async function init() {
    const fAt = new Uint32Array(db.total_art)
    const bounds: { packId: number; startChron: number }[] = []
 
-   let globalOffset = 0
-   for (let p = 0; p < totalPacks; p++) {
-      const isFinalized = p < nf
-      const path = `idx/${isFinalized ? p.toString() : String(db.data_tog)}.gz`
-      const entries = await streamSplitIdx(path, isFinalized)
+   const bufs = await Promise.all(
+      Array.from({ length: totalPacks }, (_, p) => {
+         const isFinalized = p < nf
+         const path = `idx/${isFinalized ? p.toString() : String(db.data_tog)}.gz`
+         const opts: RequestInit = {}
+         if (isFinalized) opts.cache = "force-cache"
+         return fetch(new URL(path, DB_URL), opts).then((res) =>
+            new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer(),
+         )
+      }),
+   )
+   const state = { globalOffset: 0, packId: 0, fetchedAt: Math.trunc(db.first_fetched / 28800) * 28800 }
+   for (const buf of bufs) {
+      parseIdxPack(buf, sIds, fAt, bounds, state)
+   }
 
-      let packId = 0
-      let fetchedAt = 0
-      for (let i = 0; i < entries.length; i++) {
-         const e = entries[i]
-         if (i === 0) {
-            packId = e.packId
-            fetchedAt = e.fetchedAt
-         } else {
-            if (e.delta > 0) packId += e.delta
-            fetchedAt += e.fetchedAt // delta
-         }
-
-         sIds[globalOffset] = e.subId
-         fAt[globalOffset] = fetchedAt
-
-         if (bounds.length === 0 || bounds[bounds.length - 1].packId !== packId) {
-            bounds.push({ packId, startChron: globalOffset })
-         }
-
-         globalOffset++
-      }
+   for (const sub of db.subscriptions) sub.total_art = 0
+   for (let i = 0; i < db.total_art; i++) {
+      const sub = db.subs_mapped.get(sIds[i])
+      if (sub && i >= (sub.add_idx ?? 0)) sub.total_art!++
    }
 
    subIds = sIds
@@ -75,51 +68,26 @@ export async function init() {
    packBounds = bounds
 }
 
-interface IdxRaw {
-   subId: number
-   packId: number
-   packOffset: number
-   delta: number
-   fetchedAt: number
-}
+function parseIdxPack(
+   buf: ArrayBuffer,
+   sIds: Uint32Array,
+   fAt: Uint32Array,
+   bounds: { packId: number; startChron: number }[],
+   s: { globalOffset: number; packId: number; fetchedAt: number },
+): void {
+   const view = new DataView(buf)
+   for (let off = 0; off + 2 <= buf.byteLength; off += 2) {
+      const packed = view.getUint8(off + 1)
+      if (packed >> 7) s.packId++
+      s.fetchedAt += (packed & 0x7f) * 28800
 
-async function streamSplitIdx(path: string, isFinalized: boolean): Promise<IdxRaw[]> {
-   const opts: RequestInit = {}
-   if (isFinalized) opts.cache = "force-cache"
-   const res = await fetch(new URL(path, DB_URL), opts)
-   const reader = res
-      .body!.pipeThrough(new DecompressionStream("gzip"))
-      .pipeThrough(new TextDecoderStream())
-      .getReader()
-   const result: IdxRaw[] = []
-   let remainder = ""
-   let lineNum = 0
-   while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      const chunk = remainder ? remainder + value : value
-      remainder = ""
-      let start = 0
-      let idx: number
-      while ((idx = chunk.indexOf("\n", start)) !== -1) {
-         const line = chunk.substring(start, idx)
-         start = idx + 1
-         if (line) {
-            result.push(parseIdxLine(line, lineNum++))
-         }
+      sIds[s.globalOffset] = view.getUint8(off)
+      fAt[s.globalOffset] = s.fetchedAt
+      if (bounds.length === 0 || bounds[bounds.length - 1].packId !== s.packId) {
+         bounds.push({ packId: s.packId, startChron: s.globalOffset })
       }
-      if (start < chunk.length) remainder = chunk.substring(start)
+      s.globalOffset++
    }
-   if (remainder.length > 0) result.push(parseIdxLine(remainder, lineNum))
-   return result
-}
-
-function parseIdxLine(line: string, lineNum: number): IdxRaw {
-   const f = line.split("\t")
-   if (lineNum === 0) {
-      return { subId: Number(f[0]), packId: Number(f[1]), packOffset: Number(f[2]), delta: 0, fetchedAt: Number(f[3]) }
-   }
-   return { subId: Number(f[0]), packId: 0, packOffset: 0, delta: Number(f[1]), fetchedAt: Number(f[2]) }
 }
 
 export function numFinalizedIdx(): number {

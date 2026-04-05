@@ -71,7 +71,9 @@ func (o *ImportCmd) Run() error {
 	defer db.Close(ctx)
 
 	for _, s := range newSubs {
-		db.AddSubscription(s)
+		if err := db.AddSubscription(s); err != nil {
+			return err
+		}
 	}
 
 	return db.Commit(ctx)

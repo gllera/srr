@@ -57,12 +57,7 @@ func (o *AddCmd) Run() error {
 		if *o.Upd <= 0 {
 			return fmt.Errorf("subscription id must be greater than 0")
 		}
-		for _, e := range db.Subscriptions() {
-			if e.ID == *o.Upd {
-				sub = e
-				break
-			}
-		}
+		sub = db.Subscriptions()[*o.Upd]
 		if sub == nil {
 			return fmt.Errorf("subscription id %d not found", *o.Upd)
 		}
@@ -74,7 +69,9 @@ func (o *AddCmd) Run() error {
 			return fmt.Errorf("url is required for new subscription")
 		}
 		sub = &Subscription{}
-		db.AddSubscription(sub)
+		if err := db.AddSubscription(sub); err != nil {
+			return err
+		}
 	}
 
 	if o.Title != nil {
@@ -152,7 +149,7 @@ func (o *LsCmd) Run() error {
 		subsList = append(subsList, &SubscriptionLS{
 			Title: s.Title,
 			URL:   s.URL,
-			ID:    s.ID,
+			ID:    s.id,
 			Tag:   s.Tag,
 			Error: s.FetchError,
 		})

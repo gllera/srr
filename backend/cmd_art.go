@@ -6,8 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strconv"
-	"strings"
+	"sort"
 )
 
 type ArtCmd struct {
@@ -19,6 +18,7 @@ type ArtCmd struct {
 }
 
 type idxEntry struct {
+	ChronIdx   int
 	FetchedAt  int64
 	PackID     int
 	PackOffset int
@@ -60,11 +60,6 @@ func (o *ArtCmd) Run() error {
 		return printJSON(&articlesOutput{Articles: []articleOutput{}, Total: 0})
 	}
 
-	subMap := map[int]*Subscription{}
-	for _, s := range db.Subscriptions() {
-		subMap[s.ID] = s
-	}
-
 	// Build filter set (nil = accept all)
 	var filter map[int]bool
 	if len(o.ID) > 0 || len(o.Tag) > 0 {
@@ -75,75 +70,52 @@ func (o *ArtCmd) Run() error {
 		for _, tag := range o.Tag {
 			for _, s := range db.Subscriptions() {
 				if s.Tag == tag {
-					filter[s.ID] = true
+					filter[s.id] = true
 				}
 			}
 		}
 	}
 
-	filteredTotal := total
-	if filter != nil {
-		filteredTotal = 0
-		for id := range filter {
-			if sub := subMap[id]; sub != nil {
-				filteredTotal += sub.TotalArticles
-			}
+	entries, err := readAllIdx(ctx, db)
+	if err != nil {
+		return err
+	}
+
+	filteredTotal := 0
+	for _, e := range entries {
+		if filter == nil || filter[e.SubID] {
+			filteredTotal++
 		}
 	}
 
-	startID := total - 1
+	startIdx := len(entries) - 1
 	if o.Before != nil {
-		startID = *o.Before - 1
+		startIdx = sort.Search(len(entries), func(i int) bool {
+			return entries[i].ChronIdx >= *o.Before
+		}) - 1
 	}
-	if startID < 0 {
+	if startIdx < 0 {
 		return printJSON(&articlesOutput{Articles: []articleOutput{}, Total: filteredTotal})
 	}
-	if startID >= total {
-		startID = total - 1
-	}
-
-	numFinalized := (total - 1) / idxPackSize
-
-	packNum := startID / idxPackSize
-	pos := startID % idxPackSize
 
 	var results []articleResult
 	lastID := -1
 
-	for packNum >= 0 && len(results) < o.Limit {
-		entries, err := readIdxPack(ctx, db, packNum, numFinalized)
-		if err != nil {
-			return err
+	for i := startIdx; i >= 0 && len(results) < o.Limit; i-- {
+		e := &entries[i]
+		if filter != nil && !filter[e.SubID] {
+			continue
 		}
-
-		if pos >= len(entries) {
-			pos = len(entries) - 1
-		}
-
-		baseID := packNum * idxPackSize
-
-		for i := pos; i >= 0 && len(results) < o.Limit; i-- {
-			e := &entries[i]
-			if filter != nil && !filter[e.SubID] {
-				continue
-			}
-
-			artID := baseID + i
-			ar := articleResult{
-				packID:     e.PackID,
-				packOffset: e.PackOffset,
-				output: articleOutput{
-					ID:        artID,
-					FetchedAt: e.FetchedAt,
-					SubID:     e.SubID,
-				},
-			}
-			results = append(results, ar)
-			lastID = artID
-		}
-
-		packNum--
-		pos = idxPackSize - 1
+		results = append(results, articleResult{
+			packID:     e.PackID,
+			packOffset: e.PackOffset,
+			output: articleOutput{
+				ID:        e.ChronIdx,
+				FetchedAt: e.FetchedAt,
+				SubID:     e.SubID,
+			},
+		})
+		lastID = e.ChronIdx
 	}
 
 	if len(results) > 0 {
@@ -166,51 +138,55 @@ func (o *ArtCmd) Run() error {
 	return printJSON(out)
 }
 
-func readIdxPack(ctx context.Context, db *DB, packNum, numFinalized int) ([]idxEntry, error) {
-	var key string
-	if packNum < numFinalized {
-		key = fmt.Sprintf("idx/%d.gz", packNum)
-	} else {
-		key = fmt.Sprintf("idx/%v.gz", db.core.DataToggle)
+func readAllIdx(ctx context.Context, db *DB) ([]idxEntry, error) {
+	total := db.core.TotalArticles
+	numFinalized := 0
+	if total > 0 {
+		numFinalized = (total - 1) / idxPackSize
 	}
 
-	data, err := db.readGz(ctx, key)
-	if err != nil {
-		return nil, err
-	}
+	packID := 0
+	packOffset := 0
+	fetchedAt := db.core.FirstFetchedAt / 28800 * 28800
+	chronIdx := 0
 
-	var entries []idxEntry
-	var packID, packOffset int
-	var fetchedAt int64
-	scanner := bufio.NewScanner(bytes.NewReader(data))
-	for i := 0; scanner.Scan(); i++ {
-		fields := strings.Split(scanner.Text(), "\t")
-		if i == 0 {
-			if len(fields) != 4 {
-				continue
-			}
-			subID, _ := strconv.Atoi(fields[0])
-			packID, _ = strconv.Atoi(fields[1])
-			packOffset, _ = strconv.Atoi(fields[2])
-			fetchedAt, _ = strconv.ParseInt(fields[3], 10, 64)
-			entries = append(entries, idxEntry{FetchedAt: fetchedAt, PackID: packID, PackOffset: packOffset, SubID: subID})
+	entries := make([]idxEntry, 0, total)
+	for p := 0; p <= numFinalized; p++ {
+		var key string
+		if p < numFinalized {
+			key = fmt.Sprintf("idx/%d.gz", p)
 		} else {
-			if len(fields) != 3 {
-				continue
-			}
-			subID, _ := strconv.Atoi(fields[0])
-			delta, _ := strconv.Atoi(fields[1])
-			deltaFetched, _ := strconv.ParseInt(fields[2], 10, 64)
-			fetchedAt += deltaFetched
-			if delta > 0 {
-				packID += delta
+			key = fmt.Sprintf("idx/%v.gz", db.core.DataToggle)
+		}
+
+		data, err := db.readGz(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+
+		for off := 0; off+2 <= len(data); off += 2 {
+			packed := data[off+1]
+			fetchedAt += int64(packed&0x7F) * 28800
+			if packed>>7 != 0 {
+				packID++
 				packOffset = 0
 			} else {
 				packOffset++
 			}
-			entries = append(entries, idxEntry{FetchedAt: fetchedAt, PackID: packID, PackOffset: packOffset, SubID: subID})
+			subID := int(data[off])
+			if sub := db.Subscriptions()[subID]; sub != nil && chronIdx >= sub.AddIdx {
+				entries = append(entries, idxEntry{
+					ChronIdx:   chronIdx,
+					SubID:      subID,
+					PackID:     packID,
+					PackOffset: packOffset,
+					FetchedAt:  fetchedAt,
+				})
+			}
+			chronIdx++
 		}
 	}
+
 	return entries, nil
 }
 

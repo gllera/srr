@@ -42,7 +42,7 @@ Frontend-specific additions:
 
 **Eager fetch**: `data.ts` starts `fetch("db.gz")` at module load (before `init()` call).
 
-**Init**: `data.init()` loads all idx packs sequentially, parses delta-encoded TSV into `subIds`/`fetchedAts` typed arrays and builds `packBounds`. LRU(5) cache for data packs keyed by pack ID. HTTP `force-cache` for finalized packs. Latest packs use `data_tog` filename toggle.
+**Init**: `data.init()` loads all idx packs sequentially, parses binary idx packs into `subIds`/`fetchedAts` typed arrays and builds `packBounds`. LRU(5) cache for data packs keyed by pack ID. HTTP `force-cache` for finalized packs. Latest packs use `data_tog` filename toggle.
 
 **Article loading**: `loadArticle(chronIdx)` resolves pack+offset via binary search on `packBounds`, fetches and parses JSONL data pack. `getArticleSync(chronIdx)` returns from cache only (no fetch).
 

@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"slices"
-
 	"srrb/store"
 )
 
@@ -40,20 +38,18 @@ type ArticleData struct {
 
 type DB struct {
 	store.Backend
-	core          DBCore
-	locked        bool
-	startTotalArt int
+	core   DBCore
+	locked bool
 }
 
 type DBCore struct {
-	DataToggle     bool            `json:"data_tog"`
-	FetchedAt      int64           `json:"fetched_at"`
-	SubSeq         int             `json:"sub_seq"`
-	TotalArticles  int             `json:"total_art"`
-	NextPackID     int             `json:"next_pid"`
-	PackOffset     int             `json:"pack_off"`
-	FirstFetchedAt int64           `json:"first_fetched,omitempty"`
-	Subscriptions  []*Subscription `json:"subscriptions"`
+	DataToggle     bool                  `json:"data_tog"`
+	FetchedAt      int64                 `json:"fetched_at"`
+	TotalArticles  int                   `json:"total_art"`
+	NextPackID     int                   `json:"next_pid"`
+	PackOffset     int                   `json:"pack_off"`
+	FirstFetchedAt int64                 `json:"first_fetched,omitempty"`
+	Subscriptions  map[int]*Subscription `json:"subscriptions"`
 }
 
 func NewDB(ctx context.Context, locked bool) (*DB, error) {
@@ -107,7 +103,9 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 		}
 	}
 
-	db.startTotalArt = db.core.TotalArticles
+	for id, s := range db.core.Subscriptions {
+		s.id = id
+	}
 	return db, nil
 }
 
@@ -136,23 +134,27 @@ func (o *DB) Commit(ctx context.Context) error {
 	return o.AtomicPut(ctx, dbFileKey, &buf)
 }
 
-func (o *DB) Subscriptions() []*Subscription {
+func (o *DB) Subscriptions() map[int]*Subscription {
 	return o.core.Subscriptions
 }
 
-func (o *DB) AddSubscription(s *Subscription) {
-	o.core.SubSeq++
-	s.ID = o.core.SubSeq
-	o.core.Subscriptions = append(o.core.Subscriptions, s)
+func (o *DB) AddSubscription(s *Subscription) error {
+	if o.core.Subscriptions == nil {
+		o.core.Subscriptions = map[int]*Subscription{}
+	}
+	for id := 0; id <= 255; id++ {
+		if _, ok := o.core.Subscriptions[id]; !ok {
+			s.id = id
+			s.AddIdx = o.core.TotalArticles
+			o.core.Subscriptions[id] = s
+			return nil
+		}
+	}
+	return fmt.Errorf("maximum number of subscriptions reached (256)")
 }
 
 func (o *DB) RemoveSubscription(id int) {
-	for i, s := range o.core.Subscriptions {
-		if s.ID == id {
-			o.core.Subscriptions = slices.Delete(o.core.Subscriptions, i, i+1)
-			return
-		}
-	}
+	delete(o.core.Subscriptions, id)
 }
 
 type Item struct {
@@ -176,15 +178,8 @@ func newPack() *pack {
 
 func (p *pack) Len() int { return p.buf.Len() }
 
-func (p *pack) writeTSV(fields ...any) {
-	for i, f := range fields {
-		if i > 0 {
-			p.gz.Write([]byte{'\t'})
-		}
-		fmt.Fprint(p.gz, f)
-	}
-	p.gz.Write([]byte{'\n'})
-	p.gz.Flush()
+func (p *pack) writeIdx(subID, deltaPack, deltaFetched int) {
+	p.gz.Write([]byte{byte(subID), byte(deltaFetched) | byte(deltaPack)<<7})
 }
 
 func (p *pack) writeArticle(ad *ArticleData) error {
@@ -193,7 +188,6 @@ func (p *pack) writeArticle(ad *ArticleData) error {
 		return err
 	}
 	p.gz.Write(data)
-	p.gz.Flush()
 	return nil
 }
 
@@ -237,9 +231,6 @@ func (o *DB) loadPack(ctx context.Context, key string) (*pack, error) {
 	if _, err := p.gz.Write(raw); err != nil {
 		return nil, err
 	}
-	if err := p.gz.Flush(); err != nil {
-		return nil, err
-	}
 	return p, nil
 }
 
@@ -272,16 +263,19 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 		return err
 	}
 
+	if c.FirstFetchedAt == 0 {
+		c.FirstFetchedAt = c.FetchedAt
+	}
+
 	prevPackID := c.NextPackID
-	prevFetchedAt := c.FetchedAt
-	isFirstInIdxPack := meta.Len() == 0
+	prevFetchedTS := c.FetchedAt / 28800
+	var fetchedCarry int64
 
 	for _, item := range articles {
 		if c.TotalArticles > 0 && c.TotalArticles%idxPackSize == 0 {
 			if err := o.savePack(ctx, fmt.Sprintf("idx/%d.gz", c.TotalArticles/idxPackSize-1), meta); err != nil {
 				return err
 			}
-			isFirstInIdxPack = true
 		}
 
 		if data.Len() > 0 && data.Len() >= globals.PackSize<<10 {
@@ -295,17 +289,22 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 			c.PackOffset = 0
 		}
 
-		if isFirstInIdxPack {
-			meta.writeTSV(item.Sub.ID, c.NextPackID, c.PackOffset, c.FetchedAt)
-			isFirstInIdxPack = false
+		delta := c.FetchedAt/28800 - prevFetchedTS + fetchedCarry
+		if delta > 0x7F {
+			fetchedCarry = delta - 0x7F
+			delta = 0x7F
+		} else if delta < 0 {
+			fetchedCarry = delta
+			delta = 0
 		} else {
-			meta.writeTSV(item.Sub.ID, c.NextPackID-prevPackID, c.FetchedAt-prevFetchedAt)
+			fetchedCarry = 0
 		}
+		meta.writeIdx(item.Sub.id, c.NextPackID-prevPackID, int(delta))
 		prevPackID = c.NextPackID
-		prevFetchedAt = c.FetchedAt
+		prevFetchedTS = c.FetchedAt / 28800
 
 		if err := data.writeArticle(&ArticleData{
-			SubID:     item.Sub.ID,
+			SubID:     item.Sub.id,
 			FetchedAt: c.FetchedAt,
 			Published: item.Published,
 			Title:     item.Title,
@@ -315,15 +314,8 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 			return err
 		}
 
-		item.Sub.TotalArticles++
-		item.Sub.LastAddedAt = c.FetchedAt
-
 		c.TotalArticles++
 		c.PackOffset++
-	}
-
-	if c.FirstFetchedAt == 0 && c.TotalArticles > 0 {
-		c.FirstFetchedAt = c.FetchedAt
 	}
 
 	c.DataToggle = !c.DataToggle

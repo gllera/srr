@@ -14,7 +14,7 @@
 - **`cmd_fetch.go`** — `signal.NotifyContext` for graceful shutdown. `errgroup` (`golang.org/x/sync/errgroup`) with `SetLimit(globals.Workers)` and a `sync.Pool` for feed buffers. Articles sorted by published time (ascending) before storage. Order: `PutArticles` → `Commit`. `--interval` / `SRR_FETCH_INTERVAL` duration flag runs fetch in a loop. Error summary (fetched/failed counts) logged at end.
 - **`feed.go`** — Streaming XML parser, auto-detects RSS/Atom/RDF. GUIDs: FNV-32a → `uint32` (fallback: GUID → ID → Link → empty hash).
 - **`cmd_subs.go`** — `AddCmd` (`srr sub add`, add/update subscription via `--upd`, `-t/--title`, `-u/--url`, `-g/--tag`, `-p/--parsers`), `RmCmd` (`srr sub rm`), `LsCmd` (`srr sub ls`, filter by `-g/--tag`, yaml/json output).
-- **`cmd_art.go`** — `ArtCmd` (`srr art ls`): lists stored articles newest-first with cursor pagination (`-b/--before`), filter by sub ID (`-i`) or tag (`-g`), optional full content (`-f/--full`). Outputs JSON. `readIdxPack` parses delta-encoded idx format; `loadContent` parses JSONL data packs to resolve title, link, published, and optionally content.
+- **`cmd_art.go`** — `ArtCmd` (`srr art ls`): lists stored articles newest-first with cursor pagination (`-b/--before`), filter by sub ID (`-i`) or tag (`-g`), optional full content (`-f/--full`). Outputs JSON. `readAllIdx` parses binary idx format using `db.Subscriptions()` directly; `loadContent` parses JSONL data packs to resolve title, link, published, and optionally content.
 - **`cmd_import.go`** — OPML import with hierarchical ID selection (`-a` all, `-i` specific). OPML group hierarchy auto-resolves to hierarchical tags; `-g/--tag` overrides. `-n/--dry-run` lists resulting subscriptions without importing.
 - **`opml.go`** — OPML XML parsing. `ParseOPMLTree` builds `OPMLNode` tree from file. `normalizeGroupName` converts group names to tag-safe identifiers.
 - **`cmd_preview.go`** — `preview` subcommand: fetches a feed URL, runs module pipeline (`-p`), serves rendered articles via local HTTP server (`-a/--addr`).
@@ -40,11 +40,11 @@ See root `CLAUDE.md` Data Contract for pack format spec (idx/, data/ series), db
 
 Backend-specific:
 - `PutArticles` and `savePack` manage the two series. Order: `PutArticles` → `Commit`.
-- `PutArticles` writes delta-encoded idx TSV and JSONL data directly; splits idx packs at every 50,000 articles; sets `FirstFetchedAt` on first run that produces articles.
+- `PutArticles` writes binary idx and JSONL data directly; splits idx packs at every 50,000 articles; sets `FirstFetchedAt` on first run that produces articles.
 - `ArticleData` struct: `{ SubID, FetchedAt, Published, Title, Link, Content }` — serialized as JSONL with short keys `s/a/p/t/l/c`.
+- `DBCore.Subscriptions` is `map[int]*Subscription`; serialized as a JSON object keyed by subscription ID. `AddSubscription` assigns the first free ID in [0, 255] and returns an error if all 256 slots are taken. `RemoveSubscription` uses `delete`.
 - `Commit` serializes `DBCore` via `AtomicPut`. `db.gz` is gzip-compressed JSON with short keys — read `DBCore` struct tags for full schema.
 - `data_tog` toggles alternating pack filenames for atomic updates (used for both idx/ and data/ latest packs).
-- `DB.startTotalArt` — captured in `NewDB()` from the loaded `DBCore.TotalArticles`; used by `cmd_fetch.go` to log new article count.
 
 ### Module System (`mod/`)
 

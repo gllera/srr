@@ -10,7 +10,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -68,59 +67,52 @@ func decompressGz(t *testing.T, path string) []byte {
 	return content
 }
 
-// readArticles reads articles from idx/ and data/ packs in a test directory.
-// metaPath is the path to an idx/ gzip file (delta-encoded TSV format).
-// latestToggle is the current DataToggle value, used to find the latest data pack.
-func readArticles(t *testing.T, dir string, metaPath string, latestToggle bool) []*Item {
+// readAllArticles reads all articles across all idx/ and data/ packs.
+func readAllArticles(t *testing.T, dir string, c *DBCore) []*Item {
 	t.Helper()
-	metaBytes := decompressGz(t, metaPath)
 
-	// Parse delta-encoded idx entries
 	type idxRef struct {
 		subID      int
 		packID     int
 		packOffset int
 	}
+
+	numFinalized := 0
+	if c.TotalArticles > 0 {
+		numFinalized = (c.TotalArticles - 1) / idxPackSize
+	}
+
+	packID := 0
+	packOffset := 0
 	var refs []idxRef
-	var packID, packOffset int
-	scanner := bufio.NewScanner(bytes.NewReader(metaBytes))
-	for i := 0; scanner.Scan(); i++ {
-		fields := strings.Split(scanner.Text(), "\t")
-		if i == 0 {
-			if len(fields) != 4 {
-				t.Fatalf("expected 4 TSV fields on line 0, got %d: %q", len(fields), scanner.Text())
-			}
-			subID, _ := strconv.Atoi(fields[0])
-			packID, _ = strconv.Atoi(fields[1])
-			packOffset, _ = strconv.Atoi(fields[2])
-			refs = append(refs, idxRef{subID, packID, packOffset})
+
+	for p := 0; p <= numFinalized; p++ {
+		var name string
+		if p < numFinalized {
+			name = fmt.Sprintf("idx/%d.gz", p)
 		} else {
-			if len(fields) != 3 {
-				t.Fatalf("expected 3 TSV fields on line %d, got %d: %q", i, len(fields), scanner.Text())
-			}
-			subID, _ := strconv.Atoi(fields[0])
-			delta, _ := strconv.Atoi(fields[1])
-			if delta > 0 {
-				packID += delta
+			name = fmt.Sprintf("idx/%v.gz", c.DataToggle)
+		}
+		metaBytes := decompressGz(t, filepath.Join(dir, name))
+		for off := 0; off+2 <= len(metaBytes); off += 2 {
+			if metaBytes[off+1]>>7 != 0 {
+				packID++
 				packOffset = 0
 			} else {
 				packOffset++
 			}
-			refs = append(refs, idxRef{subID, packID, packOffset})
+			refs = append(refs, idxRef{int(metaBytes[off]), packID, packOffset})
 		}
 	}
 
-	// Cache for data packs: packID -> []ArticleData
 	dataCache := map[int][]ArticleData{}
-
 	var articles []*Item
 	for _, ref := range refs {
 		if _, ok := dataCache[ref.packID]; !ok {
 			var dataBytes []byte
-			// Try numbered pack first, then current toggle (latest)
 			for _, name := range []string{
 				fmt.Sprintf("data/%d.gz", ref.packID),
-				fmt.Sprintf("data/%v.gz", latestToggle),
+				fmt.Sprintf("data/%v.gz", c.DataToggle),
 			} {
 				path := filepath.Join(dir, name)
 				if _, err := os.Stat(path); err == nil {
@@ -153,7 +145,7 @@ func readArticles(t *testing.T, dir string, metaPath string, latestToggle bool) 
 		}
 
 		articles = append(articles, &Item{
-			Sub:       &Subscription{ID: ref.subID},
+			Sub:       &Subscription{id: ref.subID},
 			Title:     ad.Title,
 			Content:   ad.Content,
 			Link:      ad.Link,
@@ -163,17 +155,10 @@ func readArticles(t *testing.T, dir string, metaPath string, latestToggle bool) 
 	return articles
 }
 
-// readAllArticles reads all articles from the latest idx/ pack.
-func readAllArticles(t *testing.T, dir string, latest bool) []*Item {
-	t.Helper()
-	metaPath := filepath.Join(dir, fmt.Sprintf("idx/%v.gz", latest))
-	return readArticles(t, dir, metaPath, latest)
-}
-
 func TestPutArticlesBasic(t *testing.T) {
 	db, c, dir := setupTestDB(t)
-	sub1 := &Subscription{ID: 1}
-	c.Subscriptions = []*Subscription{sub1}
+	sub1 := &Subscription{id: 1}
+	c.Subscriptions = map[int]*Subscription{sub1.id: sub1}
 
 	articles := []*Item{
 		{Sub: sub1, Title: "A1", Content: "C1", Link: "http://example.com/1", Published: 1000},
@@ -184,7 +169,7 @@ func TestPutArticlesBasic(t *testing.T) {
 		t.Fatalf("PutArticles: %v", err)
 	}
 
-	result := readAllArticles(t, dir, c.DataToggle)
+	result := readAllArticles(t, dir, c)
 	if len(result) < 1 {
 		t.Fatal("expected at least 1 article in latest pack")
 	}
@@ -209,8 +194,8 @@ func TestPutArticlesEmpty(t *testing.T) {
 
 func TestPutArticlesMultipleSubs(t *testing.T) {
 	db, c, dir := setupTestDB(t)
-	sub1, sub2 := &Subscription{ID: 1}, &Subscription{ID: 2}
-	c.Subscriptions = []*Subscription{sub1, sub2}
+	sub1, sub2 := &Subscription{id: 1}, &Subscription{id: 2}
+	c.Subscriptions = map[int]*Subscription{sub1.id: sub1, sub2.id: sub2}
 
 	articles := []*Item{
 		{Sub: sub1, Title: "Sub1-A", Published: 1000},
@@ -221,11 +206,11 @@ func TestPutArticlesMultipleSubs(t *testing.T) {
 		t.Fatalf("PutArticles: %v", err)
 	}
 
-	result := readAllArticles(t, dir, c.DataToggle)
+	result := readAllArticles(t, dir, c)
 
 	subIds := map[int]bool{}
 	for _, a := range result {
-		subIds[a.Sub.ID] = true
+		subIds[a.Sub.id] = true
 	}
 	if !subIds[1] || !subIds[2] {
 		t.Errorf("expected articles from both subs, got subIds: %v", subIds)
@@ -237,8 +222,8 @@ func TestPutArticlesPackSplitting(t *testing.T) {
 	// Very small pack size to force content splitting
 	globals.PackSize = 0 // 0 KB -> split after every flush
 
-	sub1 := &Subscription{ID: 1}
-	c.Subscriptions = []*Subscription{sub1}
+	sub1 := &Subscription{id: 1}
+	c.Subscriptions = map[int]*Subscription{sub1.id: sub1}
 
 	articles := []*Item{
 		{Sub: sub1, Title: "A1", Content: "Content 1", Published: 1000},
@@ -266,8 +251,8 @@ func TestPackMetadata(t *testing.T) {
 	db, c, _ := setupTestDB(t)
 	globals.PackSize = 0 // force content split after every article
 
-	sub1, sub2 := &Subscription{ID: 1}, &Subscription{ID: 2}
-	c.Subscriptions = []*Subscription{sub1, sub2}
+	sub1, sub2 := &Subscription{id: 1}, &Subscription{id: 2}
+	c.Subscriptions = map[int]*Subscription{sub1.id: sub1, sub2.id: sub2}
 
 	articles := []*Item{
 		{Sub: sub1, Title: "A1", Content: "Content 1", Published: 1000},
@@ -279,24 +264,16 @@ func TestPackMetadata(t *testing.T) {
 		t.Fatalf("PutArticles: %v", err)
 	}
 
-	// Verify cumulative counts
 	if c.TotalArticles != 3 {
-		t.Errorf("NArticles = %d, want 3", c.TotalArticles)
-	}
-	if c.Subscriptions[0].TotalArticles != 2 {
-		t.Errorf("Sub[1].TotalArticles = %d, want 2", c.Subscriptions[0].TotalArticles)
-	}
-	if c.Subscriptions[1].TotalArticles != 1 {
-		t.Errorf("Sub[2].TotalArticles = %d, want 1", c.Subscriptions[1].TotalArticles)
+		t.Errorf("TotalArticles = %d, want 3", c.TotalArticles)
 	}
 }
 
 func TestCommitAndReadDB(t *testing.T) {
 	db, c, dir := setupTestDB(t)
-	c.Subscriptions = []*Subscription{
-		{ID: 1, Title: "Test Feed", URL: "http://example.com/feed"},
+	c.Subscriptions = map[int]*Subscription{
+		1: {id: 1, Title: "Test Feed", URL: "http://example.com/feed"},
 	}
-	c.SubSeq = 2
 
 	if err := db.Commit(ctx); err != nil {
 		t.Fatalf("CommitDB: %v", err)
@@ -310,14 +287,11 @@ func TestCommitAndReadDB(t *testing.T) {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 
-	if core.SubSeq != 2 {
-		t.Errorf("SubSeq = %d, want 2", core.SubSeq)
-	}
 	if len(core.Subscriptions) != 1 {
 		t.Fatalf("Subscriptions len = %d, want 1", len(core.Subscriptions))
 	}
-	if core.Subscriptions[0].Title != "Test Feed" {
-		t.Errorf("Sub title = %q, want %q", core.Subscriptions[0].Title, "Test Feed")
+	if core.Subscriptions[1].Title != "Test Feed" {
+		t.Errorf("Sub title = %q, want %q", core.Subscriptions[1].Title, "Test Feed")
 	}
 }
 
@@ -475,40 +449,47 @@ func TestDBLockingForce(t *testing.T) {
 }
 
 func TestAddRemoveSubscription(t *testing.T) {
-	db, c, _ := setupTestDB(t)
+	db, _, _ := setupTestDB(t)
 
 	s1 := &Subscription{Title: "Feed 1", URL: "http://example.com/1"}
 	s2 := &Subscription{Title: "Feed 2", URL: "http://example.com/2"}
-	db.AddSubscription(s1)
-	db.AddSubscription(s2)
-
-	if s1.ID != 1 || s2.ID != 2 {
-		t.Errorf("IDs = (%d, %d), want (1, 2)", s1.ID, s2.ID)
+	if err := db.AddSubscription(s1); err != nil {
+		t.Fatalf("AddSubscription(s1): %v", err)
 	}
-	if c.SubSeq != 2 {
-		t.Errorf("SubSeq = %d, want 2", c.SubSeq)
+	if err := db.AddSubscription(s2); err != nil {
+		t.Fatalf("AddSubscription(s2): %v", err)
+	}
+
+	if s1.id != 0 || s2.id != 1 {
+		t.Errorf("IDs = (%d, %d), want (0, 1)", s1.id, s2.id)
 	}
 	if len(db.Subscriptions()) != 2 {
 		t.Fatalf("len(Subscriptions) = %d, want 2", len(db.Subscriptions()))
 	}
 
-	db.RemoveSubscription(1)
+	db.RemoveSubscription(0)
 	if len(db.Subscriptions()) != 1 {
 		t.Fatalf("len(Subscriptions) after remove = %d, want 1", len(db.Subscriptions()))
 	}
-	if db.Subscriptions()[0].ID != 2 {
-		t.Errorf("remaining sub ID = %d, want 2", db.Subscriptions()[0].ID)
+	if db.Subscriptions()[1].id != 1 {
+		t.Errorf("remaining sub ID = %d, want 1", db.Subscriptions()[1].id)
 	}
 
-	// SubSeq should not decrease on removal
-	if c.SubSeq != 2 {
-		t.Errorf("SubSeq after remove = %d, want 2", c.SubSeq)
+	// Adding after removal should reuse freed ID
+	s3 := &Subscription{Title: "Feed 3", URL: "http://example.com/3"}
+	if err := db.AddSubscription(s3); err != nil {
+		t.Fatalf("AddSubscription(s3): %v", err)
+	}
+	if s3.id != 0 {
+		t.Errorf("reused ID = %d, want 0", s3.id)
 	}
 }
 
 func TestRemoveNonExistentSubscription(t *testing.T) {
 	db, _, _ := setupTestDB(t)
-	db.AddSubscription(&Subscription{Title: "Feed", URL: "http://example.com"})
+	if err := db.AddSubscription(&Subscription{Title: "Feed", URL: "http://example.com"}); err != nil {
+		t.Fatalf("AddSubscription: %v", err)
+	}
 
 	// Should not panic or error
 	db.RemoveSubscription(999)
@@ -526,7 +507,9 @@ func TestCommitAndReopen(t *testing.T) {
 		t.Fatalf("NewDB: %v", err)
 	}
 
-	db.AddSubscription(&Subscription{Title: "Persist Feed", URL: "http://example.com/feed"})
+	if err := db.AddSubscription(&Subscription{Title: "Persist Feed", URL: "http://example.com/feed"}); err != nil {
+		t.Fatalf("AddSubscription: %v", err)
+	}
 	db.core.FetchedAt = 1234567890
 	db.core.TotalArticles = 42
 
@@ -569,40 +552,27 @@ func TestLoadPackCorruptedGzip(t *testing.T) {
 	}
 }
 
-func TestPutArticlesSubTotalArticlesIncrement(t *testing.T) {
+func TestAddSubscriptionSetsAddIdx(t *testing.T) {
 	db, c, _ := setupTestDB(t)
-	sub1 := &Subscription{ID: 1}
-	sub2 := &Subscription{ID: 2}
-	c.Subscriptions = []*Subscription{sub1, sub2}
-	c.FetchedAt = 1700000000
+	c.TotalArticles = 100
 
-	articles := []*Item{
-		{Sub: sub1, Title: "A1", Content: "C1", Published: 1000},
-		{Sub: sub1, Title: "A2", Content: "C2", Published: 2000},
-		{Sub: sub2, Title: "B1", Content: "D1", Published: 3000},
-	}
-	if err := db.PutArticles(ctx, articles); err != nil {
-		t.Fatalf("PutArticles: %v", err)
+	s := &Subscription{Title: "Feed", URL: "http://example.com"}
+	if err := db.AddSubscription(s); err != nil {
+		t.Fatalf("AddSubscription: %v", err)
 	}
 
-	if sub1.TotalArticles != 2 {
-		t.Errorf("sub1.TotalArticles = %d, want 2", sub1.TotalArticles)
+	if s.AddIdx != 100 {
+		t.Errorf("AddIdx = %d, want 100", s.AddIdx)
 	}
-	if sub2.TotalArticles != 1 {
-		t.Errorf("sub2.TotalArticles = %d, want 1", sub2.TotalArticles)
-	}
-	if sub1.LastAddedAt != c.FetchedAt {
-		t.Errorf("sub1.LastAddedAt = %d, want %d", sub1.LastAddedAt, c.FetchedAt)
-	}
-	if sub2.LastAddedAt != c.FetchedAt {
-		t.Errorf("sub2.LastAddedAt = %d, want %d", sub2.LastAddedAt, c.FetchedAt)
+	if s.id != 0 {
+		t.Errorf("ID = %d, want 0", s.id)
 	}
 }
 
 func TestPutArticlesToggle(t *testing.T) {
 	db, c, _ := setupTestDB(t)
-	sub := &Subscription{ID: 1}
-	c.Subscriptions = []*Subscription{sub}
+	sub := &Subscription{id: 1}
+	c.Subscriptions = map[int]*Subscription{sub.id: sub}
 
 	initialToggle := c.DataToggle
 	articles := []*Item{
@@ -644,9 +614,6 @@ func TestDBOpenEmptyDir(t *testing.T) {
 	if len(db.Subscriptions()) != 0 {
 		t.Errorf("Subscriptions = %d, want 0", len(db.Subscriptions()))
 	}
-	if db.core.SubSeq != 0 {
-		t.Errorf("SubSeq = %d, want 0", db.core.SubSeq)
-	}
 }
 
 func TestPutArticlesIdxPackSplitAtBoundary(t *testing.T) {
@@ -659,8 +626,8 @@ func TestPutArticlesIdxPackSplitAtBoundary(t *testing.T) {
 	}
 	defer db.Close(ctx)
 
-	sub := &Subscription{ID: 1}
-	db.core.Subscriptions = []*Subscription{sub}
+	sub := &Subscription{id: 1}
+	db.core.Subscriptions = map[int]*Subscription{sub.id: sub}
 	db.core.FetchedAt = 1700000000
 
 	articles := make([]*Item, idxPackSize)
@@ -694,24 +661,19 @@ func TestPutArticlesIdxPackSplitAtBoundary(t *testing.T) {
 		t.Fatal("idx/0.gz should exist after 1001 articles")
 	}
 
-	finalizedArticles := readArticles(t, dir, idxPath, db.core.DataToggle)
-	if len(finalizedArticles) != idxPackSize {
-		t.Errorf("finalized idx pack has %d entries, want %d", len(finalizedArticles), idxPackSize)
+	allArticles := readAllArticles(t, dir, &db.core)
+	if len(allArticles) != idxPackSize+1 {
+		t.Fatalf("total articles = %d, want %d", len(allArticles), idxPackSize+1)
 	}
-
-	latestArticles := readAllArticles(t, dir, db.core.DataToggle)
-	if len(latestArticles) != 1 {
-		t.Errorf("latest idx pack has %d entries, want 1", len(latestArticles))
-	}
-	if latestArticles[0].Title != "A1001" {
-		t.Errorf("latest article title = %q, want %q", latestArticles[0].Title, "A1001")
+	if allArticles[idxPackSize].Title != "A1001" {
+		t.Errorf("latest article title = %q, want %q", allArticles[idxPackSize].Title, "A1001")
 	}
 }
 
 func TestPutArticlesEmptyTitleAndLink(t *testing.T) {
 	db, c, dir := setupTestDB(t)
-	sub := &Subscription{ID: 1}
-	c.Subscriptions = []*Subscription{sub}
+	sub := &Subscription{id: 1}
+	c.Subscriptions = map[int]*Subscription{sub.id: sub}
 
 	articles := []*Item{
 		{Sub: sub, Title: "", Content: "body", Link: "", Published: 0},
@@ -720,7 +682,7 @@ func TestPutArticlesEmptyTitleAndLink(t *testing.T) {
 		t.Fatalf("PutArticles: %v", err)
 	}
 
-	result := readAllArticles(t, dir, c.DataToggle)
+	result := readAllArticles(t, dir, c)
 	if len(result) != 1 {
 		t.Fatalf("expected 1 article, got %d", len(result))
 	}
@@ -742,7 +704,7 @@ func TestDBNullSubscriptionsInJSON(t *testing.T) {
 	dir := t.TempDir()
 	globals = &Globals{PackSize: 1, Store: dir}
 
-	core := `{"data_tog":false,"fetched_at":0,"sub_seq":0,"total_art":0,"next_pid":0,"pack_off":0,"subscriptions":null}` + "\n"
+	core := `{"data_tog":false,"fetched_at":0,"total_art":0,"next_pid":0,"pack_off":0,"subscriptions":null}` + "\n"
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	gz.Write([]byte(core))
@@ -766,8 +728,8 @@ func TestPutArticlesDataPackSplitResetsPackOffset(t *testing.T) {
 	db, c, _ := setupTestDB(t)
 	globals.PackSize = 0 // split after every article
 
-	sub := &Subscription{ID: 1}
-	c.Subscriptions = []*Subscription{sub}
+	sub := &Subscription{id: 1}
+	c.Subscriptions = map[int]*Subscription{sub.id: sub}
 	c.FetchedAt = 1700000000
 
 	articles := []*Item{
@@ -788,8 +750,8 @@ func TestPutArticlesDataPackSplitResetsPackOffset(t *testing.T) {
 
 func TestPutArticlesResumption(t *testing.T) {
 	db, c, dir := setupTestDB(t)
-	sub := &Subscription{ID: 1}
-	c.Subscriptions = []*Subscription{sub}
+	sub := &Subscription{id: 1}
+	c.Subscriptions = map[int]*Subscription{sub.id: sub}
 	c.FetchedAt = 1700000000
 
 	if err := db.PutArticles(ctx, []*Item{
@@ -818,7 +780,7 @@ func TestPutArticlesResumption(t *testing.T) {
 		t.Errorf("NextPackID = %d, want %d (no split)", c.NextPackID, savedNPID)
 	}
 
-	result := readAllArticles(t, dir, c.DataToggle)
+	result := readAllArticles(t, dir, c)
 	if len(result) != 2 {
 		t.Fatalf("got %d articles, want 2", len(result))
 	}
@@ -845,8 +807,8 @@ func TestDBOpenCorruptedGzipValidInner(t *testing.T) {
 
 func TestPutArticlesFirstFetchedAt(t *testing.T) {
 	db, c, _ := setupTestDB(t)
-	sub := &Subscription{ID: 1}
-	c.Subscriptions = []*Subscription{sub}
+	sub := &Subscription{id: 1}
+	c.Subscriptions = map[int]*Subscription{sub.id: sub}
 	c.FetchedAt = 1700000000
 
 	if err := db.PutArticles(ctx, []*Item{

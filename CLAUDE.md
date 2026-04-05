@@ -61,13 +61,14 @@ Two gzip-compressed series under the feed directory:
 
 | Series | Format | Split rule |
 |---|---|---|
-| `idx/` | Delta-encoded TSV (see below) | Every 50,000 articles (`idxPackSize`) |
+| `idx/` | Binary (see below) | Every 50,000 articles (`idxPackSize`) |
 | `data/` | JSONL — one `ArticleData` object per line | At `PackSize` (tracked by `next_pid`/`pack_off`) |
 
-**idx/ format** — delta-encoded TSV, two line types:
-- Line 0 (absolute, 4 fields): `sub_id \t pack_id \t pack_offset \t fetched_at`
-- Lines 1+ (delta, 3 fields): `sub_id \t delta_pack_id \t fetched_at`
-  - `delta_pack_id == 0` → offset++ (same pack); `delta_pack_id > 0` → pack advances by delta, offset resets to 0
+**idx/ format** — binary, little-endian, timestamps in 8-hour blocks (÷28800 on write, ×28800 on read):
+- All entries (2 bytes each): `sub_id:u8 | delta_pack_id:1 << 7 | delta_fetched_at:7`
+  - Base state: pack_id=0, pack_offset=0, fetched_at=`first_fetched`÷28800×28800
+  - `delta_pack_id == 0` → offset++ (same pack); `delta_pack_id == 1` → pack advances by 1, offset resets to 0
+  - `delta_fetched_at` clamped to [0, 127]; excess carry rolls into subsequent entries
 
 **data/ format** — JSONL, each line: `{"s":sub_id,"a":fetched_at,"p":published,"t":"title","l":"link","c":"content"}`
 

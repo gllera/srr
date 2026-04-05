@@ -110,7 +110,7 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 		}
 	}
 	slog.Info("fetch complete",
-		"new_articles", db.core.TotalArticles-db.startTotalArt,
+		"new_articles", len(articles),
 		"fetched", len(db.Subscriptions())-failed,
 		"failed", failed,
 	)

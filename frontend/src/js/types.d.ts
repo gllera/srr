@@ -5,7 +5,6 @@ interface IDB {
    data_tog: boolean
    fetched_at: number
    first_fetched: number
-   sub_seq: number
    total_art: number
    next_pid: number
    pack_off: number
@@ -23,7 +22,7 @@ interface ISub {
    etag?: string
    last_modified?: string
    total_art?: number
-   last_added?: number
+   add_idx?: number
    tag?: string
 }
 
