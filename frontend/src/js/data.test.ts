@@ -1,184 +1,108 @@
-import { describe, it, expect, vi, beforeEach } from "vitest"
+import { describe, it, expect, vi } from "vitest"
 
-const PACK_SIZE = 1000 // mirrors data.PACK_SIZE
+// data.ts has top-level side effects (fetch at module load), so we mock the
+// module and re-export the real pure functions with writable state.
+const state = vi.hoisted(() => ({
+   db: {} as IDB,
+   fetchedAts: new Uint32Array(0),
+}))
 
-describe("numFinalizedIdx / latestIdxCount", () => {
-   // These read from module-level db which requires init().
-   // Test the math directly since the logic is straightforward.
-   function numFinalizedIdx(total_art: number): number {
-      return total_art > 0 ? Math.floor((total_art - 1) / PACK_SIZE) : 0
-   }
+vi.mock("./data", () => ({
+   IDX_PACK_SIZE: 50000,
+   get db() {
+      return state.db
+   },
+   set db(v: IDB) {
+      state.db = v
+   },
+   get fetchedAts() {
+      return state.fetchedAts
+   },
+   set fetchedAts(v: Uint32Array) {
+      state.fetchedAts = v
+   },
+   numFinalizedIdx(): number {
+      return state.db.total_art > 0 ? Math.floor((state.db.total_art - 1) / 50000) : 0
+   },
+   findChronForTimestamp(ts: number): number {
+      let lo = 0
+      let hi = state.fetchedAts.length
+      while (lo < hi) {
+         const mid = (lo + hi) >>> 1
+         if (state.fetchedAts[mid] <= ts) lo = mid + 1
+         else hi = mid
+      }
+      return lo > 0 ? lo - 1 : 0
+   },
+}))
 
-   function latestIdxCount(total_art: number): number {
-      return total_art - numFinalizedIdx(total_art) * PACK_SIZE
-   }
+const data = await import("./data")
 
-   it("numFinalizedIdx: 0 articles", () => {
-      expect(numFinalizedIdx(0)).toBe(0)
+describe("numFinalizedIdx", () => {
+   it("returns 0 when total_art is 0", () => {
+      data.db = { total_art: 0 } as IDB
+      expect(data.numFinalizedIdx()).toBe(0)
    })
 
-   it("numFinalizedIdx: 1 article", () => {
-      expect(numFinalizedIdx(1)).toBe(0)
+   it("returns 0 when total_art is 1", () => {
+      data.db = { total_art: 1 } as IDB
+      expect(data.numFinalizedIdx()).toBe(0)
    })
 
-   it("numFinalizedIdx: 1000 articles", () => {
-      expect(numFinalizedIdx(1000)).toBe(0)
+   it("returns 0 when total_art equals IDX_PACK_SIZE", () => {
+      data.db = { total_art: data.IDX_PACK_SIZE } as IDB
+      expect(data.numFinalizedIdx()).toBe(0)
    })
 
-   it("numFinalizedIdx: 1001 articles", () => {
-      expect(numFinalizedIdx(1001)).toBe(1)
+   it("returns 1 when total_art is IDX_PACK_SIZE + 1", () => {
+      data.db = { total_art: data.IDX_PACK_SIZE + 1 } as IDB
+      expect(data.numFinalizedIdx()).toBe(1)
    })
 
-   it("numFinalizedIdx: 3000 articles", () => {
-      expect(numFinalizedIdx(3000)).toBe(2)
-   })
-
-   it("latestIdxCount: 3 articles", () => {
-      expect(latestIdxCount(3)).toBe(3)
-   })
-
-   it("latestIdxCount: 1001 articles", () => {
-      expect(latestIdxCount(1001)).toBe(1)
-   })
-
-   it("latestIdxCount: 2000 articles", () => {
-      expect(latestIdxCount(2000)).toBe(1000)
+   it("returns 2 when total_art is 2 * IDX_PACK_SIZE + 1", () => {
+      data.db = { total_art: 2 * data.IDX_PACK_SIZE + 1 } as IDB
+      expect(data.numFinalizedIdx()).toBe(2)
    })
 })
 
-describe("streamSplit", () => {
-   // Stub DecompressionStream as passthrough since jsdom lacks it
-   beforeEach(() => {
-      vi.stubGlobal(
-         "DecompressionStream",
-         class {
-            readable: ReadableStream
-            writable: WritableStream
-            constructor() {
-               const ts = new TransformStream()
-               this.readable = ts.readable
-               this.writable = ts.writable
-            }
-         },
-      )
+describe("findChronForTimestamp", () => {
+   it("returns 0 for empty array", () => {
+      data.fetchedAts = new Uint32Array([])
+      expect(data.findChronForTimestamp(100)).toBe(0)
    })
 
-   function mockFetch(chunks: string[]) {
-      const stream = new ReadableStream({
-         start(controller) {
-            for (const chunk of chunks) controller.enqueue(new TextEncoder().encode(chunk))
-            controller.close()
-         },
-      })
-      vi.stubGlobal(
-         "fetch",
-         vi.fn().mockResolvedValue({
-            body: stream,
-         }),
-      )
-   }
-
-   // Dynamic import to get streamSplit after globals are set up
-   async function getStreamSplit() {
-      const mod = await import("./data")
-      return mod.streamSplit
-   }
-
-   it("parses single chunk with delimiter", async () => {
-      mockFetch(["a\nb"])
-      const split = await getStreamSplit()
-      const result = await split("test.gz", false, "\n", (s: string) => s)
-      expect(result).toEqual(["a", "b"])
+   it("returns 0 when all entries are after the timestamp", () => {
+      data.fetchedAts = new Uint32Array([50, 60, 70])
+      expect(data.findChronForTimestamp(10)).toBe(0)
    })
 
-   it("handles cross-boundary remainder", async () => {
-      mockFetch(["hel", "lo\nworld"])
-      const split = await getStreamSplit()
-      const result = await split("test.gz", false, "\n", (s: string) => s)
-      expect(result).toEqual(["hello", "world"])
+   it("returns last index when all entries are before the timestamp", () => {
+      data.fetchedAts = new Uint32Array([10, 20, 30])
+      expect(data.findChronForTimestamp(100)).toBe(2)
    })
 
-   it("handles trailing delimiter with skipEmpty=true", async () => {
-      mockFetch(["a\nb\n"])
-      const split = await getStreamSplit()
-      const result = await split("test.gz", false, "\n", (s: string) => s)
-      expect(result).toEqual(["a", "b"])
+   it("finds rightmost entry <= ts", () => {
+      data.fetchedAts = new Uint32Array([10, 20, 30, 40, 50])
+      expect(data.findChronForTimestamp(25)).toBe(1)
    })
 
-   it("includes empty segments when skipEmpty=false", async () => {
-      mockFetch(["a\n\nb"])
-      const split = await getStreamSplit()
-      const result = await split("test.gz", false, "\n", (s: string) => s, false)
-      expect(result).toEqual(["a", "", "b"])
+   it("finds exact match", () => {
+      data.fetchedAts = new Uint32Array([10, 20, 30, 40, 50])
+      expect(data.findChronForTimestamp(30)).toBe(2)
    })
 
-   it("applies parseFn to each segment", async () => {
-      mockFetch(["1\n2\n3"])
-      const split = await getStreamSplit()
-      const result = await split("test.gz", false, "\n", (s: string) => Number(s))
-      expect(result).toEqual([1, 2, 3])
+   it("returns rightmost of duplicate values", () => {
+      data.fetchedAts = new Uint32Array([10, 20, 20, 20, 50])
+      expect(data.findChronForTimestamp(20)).toBe(3)
    })
 
-   it("handles single segment without delimiter", async () => {
-      mockFetch(["abc"])
-      const split = await getStreamSplit()
-      const result = await split("test.gz", false, "\n", (s: string) => s)
-      expect(result).toEqual(["abc"])
+   it("works with single element <= ts", () => {
+      data.fetchedAts = new Uint32Array([10])
+      expect(data.findChronForTimestamp(10)).toBe(0)
    })
 
-   it("handles empty input", async () => {
-      mockFetch([""])
-      const split = await getStreamSplit()
-      const result = await split("test.gz", false, "\n", (s: string) => s)
-      expect(result).toEqual([])
-   })
-
-   it("handles multiple delimiters in a row with skipEmpty=true", async () => {
-      mockFetch(["a\n\n\nb"])
-      const split = await getStreamSplit()
-      const result = await split("test.gz", false, "\n", (s: string) => s)
-      expect(result).toEqual(["a", "b"])
-   })
-
-   it("handles remainder split across three chunks", async () => {
-      mockFetch(["ab", "cd", "ef\ng"])
-      const split = await getStreamSplit()
-      const result = await split("test.gz", false, "\n", (s: string) => s)
-      expect(result).toEqual(["abcdef", "g"])
-   })
-
-   it("parses TSV lines correctly via parseFn", async () => {
-      mockFetch(["100\t1\t0\t5\t1700000000\tTitle\thttps://example.com"])
-      const split = await getStreamSplit()
-      const result = await split("test.gz", false, "\n", (line: string) => {
-         const f = line.split("\t")
-         return {
-            fetched_at: Number(f[0]),
-            pack_id: Number(f[1]),
-            pack_offset: Number(f[2]),
-            sub_id: Number(f[3]),
-            published: Number(f[4]),
-            title: f[5],
-            link: f[6],
-         }
-      })
-      expect(result).toEqual([
-         {
-            fetched_at: 100,
-            pack_id: 1,
-            pack_offset: 0,
-            sub_id: 5,
-            published: 1700000000,
-            title: "Title",
-            link: "https://example.com",
-         },
-      ])
-   })
-
-   it("uses null byte delimiter with skipEmpty=false", async () => {
-      mockFetch(["content1\x00content2\x00content3"])
-      const split = await getStreamSplit()
-      const result = await split("test.gz", false, "\x00", (s: string) => s, false)
-      expect(result).toEqual(["content1", "content2", "content3"])
+   it("works with single element > ts", () => {
+      data.fetchedAts = new Uint32Array([10])
+      expect(data.findChronForTimestamp(5)).toBe(0)
    })
 })

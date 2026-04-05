@@ -1,7 +1,6 @@
 import * as data from "./data"
 import { formatDate, sanitizeHtml, timeAgo } from "./fmt"
 import * as nav from "./nav"
-import { findChronForTimestamp } from "./ts"
 
 const el = {
    title: document.querySelector(".srr-title") as HTMLElement,
@@ -85,57 +84,33 @@ function clearContentTransition() {
    el.content.style.transform = ""
 }
 
-let renderGen = 0
-
 function render(o: IShowFeed) {
-   // Cancel in-flight data/pack fetches from the previous article
-   if (renderGen > 0) data.abortPending()
-   const gen = ++renderGen
-   el.title.textContent = o.article.title
+   data.abortPending()
+   el.title.textContent = o.article.t
    el.content.style.transition = "none"
    el.content.style.opacity = "0"
    el.content.style.transform = "translateY(6px)"
-   el.content.replaceChildren()
-   el.titleLink.href = o.article.link
+   el.content.innerHTML = sanitizeHtml(o.article.c)
+   el.titleLink.href = o.article.l
    el.prev.disabled = !o.has_left
    el.next.disabled = !o.has_right
 
-   currentPublished = o.article.published
+   currentPublished = o.article.p
    el.date.textContent = timeAgo(currentPublished)
    el.date.title = formatDate(currentPublished)
 
    el.source.textContent = o.sub?.title || "[DELETED]"
    el.source.classList.toggle("srr-filtered", o.filtered)
    el.floorBtn.classList.toggle("srr-floor-active", o.floor)
-   el.counter.textContent = o.countLeft !== null ? String(o.countLeft) : "?"
+   el.counter.textContent = String(o.countLeft)
 
-   document.title = "SRR - " + o.article.title
+   document.title = "SRR - " + o.article.t
    window.scrollTo(0, 0)
    el.title.focus()
 
-   function showContent(content: string) {
-      el.content.innerHTML = sanitizeHtml(content)
-      // Double rAF: first ensures the browser has painted with opacity:0,
-      // second re-enables transitions so the fade-in animates
-      requestAnimationFrame(() => requestAnimationFrame(clearContentTransition))
-   }
-
-   const cached = data.getContentSync(o.article)
-   if (cached !== undefined) {
-      showContent(cached)
-   } else {
-      data.getContent(o.article).then(
-         (content) => {
-            if (gen !== renderGen) return
-            showContent(content)
-         },
-         (e) => {
-            if (gen !== renderGen) return
-            clearContentTransition()
-            showError(e, () => guard(() => nav.fromHash(location.hash.substring(1))))
-         },
-      )
-   }
+   // Double rAF: first ensures the browser has painted with opacity:0,
+   // second re-enables transitions so the fade-in animates
+   requestAnimationFrame(() => requestAnimationFrame(clearContentTransition))
 
    try {
       localStorage.setItem("srr-hash", location.hash)
@@ -258,8 +233,7 @@ function showFloor() {
          }
          return guard(async () => {
             const ts = Math.floor(Date.now() / 1000) - Number(value)
-            const chron = await findChronForTimestamp(ts)
-            if (chron === null) throw new Notice("No data available for that time range")
+            const chron = data.findChronForTimestamp(ts)
             if (chron === 0) throw new Notice("All articles are within that time range")
             return nav.setFloorAt(chron)
          })

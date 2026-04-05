@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -22,9 +23,6 @@ type idxEntry struct {
 	PackID     int
 	PackOffset int
 	SubID      int
-	Published  int64
-	Title      string
-	Link       string
 }
 
 type articleResult struct {
@@ -137,10 +135,7 @@ func (o *ArtCmd) Run() error {
 				output: articleOutput{
 					ID:        artID,
 					FetchedAt: e.FetchedAt,
-					Published: e.Published,
 					SubID:     e.SubID,
-					Title:     e.Title,
-					Link:      e.Link,
 				},
 			}
 			results = append(results, ar)
@@ -151,8 +146,8 @@ func (o *ArtCmd) Run() error {
 		pos = idxPackSize - 1
 	}
 
-	if o.Full && len(results) > 0 {
-		if err := loadContent(ctx, db, results); err != nil {
+	if len(results) > 0 {
+		if err := loadContent(ctx, db, results, o.Full); err != nil {
 			return err
 		}
 	}
@@ -185,36 +180,45 @@ func readIdxPack(ctx context.Context, db *DB, packNum, numFinalized int) ([]idxE
 	}
 
 	var entries []idxEntry
+	var packID, packOffset int
+	var fetchedAt int64
 	scanner := bufio.NewScanner(bytes.NewReader(data))
-	for scanner.Scan() {
+	for i := 0; scanner.Scan(); i++ {
 		fields := strings.Split(scanner.Text(), "\t")
-		if len(fields) != 7 {
-			continue
+		if i == 0 {
+			if len(fields) != 4 {
+				continue
+			}
+			subID, _ := strconv.Atoi(fields[0])
+			packID, _ = strconv.Atoi(fields[1])
+			packOffset, _ = strconv.Atoi(fields[2])
+			fetchedAt, _ = strconv.ParseInt(fields[3], 10, 64)
+			entries = append(entries, idxEntry{FetchedAt: fetchedAt, PackID: packID, PackOffset: packOffset, SubID: subID})
+		} else {
+			if len(fields) != 3 {
+				continue
+			}
+			subID, _ := strconv.Atoi(fields[0])
+			delta, _ := strconv.Atoi(fields[1])
+			deltaFetched, _ := strconv.ParseInt(fields[2], 10, 64)
+			fetchedAt += deltaFetched
+			if delta > 0 {
+				packID += delta
+				packOffset = 0
+			} else {
+				packOffset++
+			}
+			entries = append(entries, idxEntry{FetchedAt: fetchedAt, PackID: packID, PackOffset: packOffset, SubID: subID})
 		}
-		fetchedAt, _ := strconv.ParseInt(fields[0], 10, 64)
-		packID, _ := strconv.Atoi(fields[1])
-		packOffset, _ := strconv.Atoi(fields[2])
-		subID, _ := strconv.Atoi(fields[3])
-		published, _ := strconv.ParseInt(fields[4], 10, 64)
-
-		entries = append(entries, idxEntry{
-			FetchedAt:  fetchedAt,
-			PackID:     packID,
-			PackOffset: packOffset,
-			SubID:      subID,
-			Published:  published,
-			Title:      fields[5],
-			Link:       fields[6],
-		})
 	}
 	return entries, nil
 }
 
-func loadContent(ctx context.Context, db *DB, results []articleResult) error {
-	dataCache := map[int][][]byte{}
+func loadContent(ctx context.Context, db *DB, results []articleResult, full bool) error {
+	dataCache := map[int][]ArticleData{}
 	for i := range results {
 		ref := &results[i]
-		parts, ok := dataCache[ref.packID]
+		articles, ok := dataCache[ref.packID]
 		if !ok {
 			var key string
 			if ref.packID < db.core.NextPackID {
@@ -226,15 +230,29 @@ func loadContent(ctx context.Context, db *DB, results []articleResult) error {
 			if err != nil {
 				return err
 			}
-			parts = bytes.Split(data, []byte{0})
-			if len(parts) > 0 && len(parts[len(parts)-1]) == 0 {
-				parts = parts[:len(parts)-1]
+			scanner := bufio.NewScanner(bytes.NewReader(data))
+			for scanner.Scan() {
+				line := scanner.Bytes()
+				if len(line) == 0 {
+					continue
+				}
+				var ad ArticleData
+				if err := json.Unmarshal(line, &ad); err != nil {
+					continue
+				}
+				articles = append(articles, ad)
 			}
-			dataCache[ref.packID] = parts
+			dataCache[ref.packID] = articles
 		}
-		if ref.packOffset < len(parts) {
-			s := string(parts[ref.packOffset])
-			ref.output.Content = &s
+		if ref.packOffset < len(articles) {
+			ad := &articles[ref.packOffset]
+			ref.output.Published = ad.Published
+			ref.output.Title = ad.Title
+			ref.output.Link = ad.Link
+			if full {
+				s := ad.Content
+				ref.output.Content = &s
+			}
 		}
 	}
 	return nil

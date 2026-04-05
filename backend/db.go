@@ -26,41 +26,27 @@ func jsonEncode(v any) ([]byte, error) {
 const (
 	dbFileKey   = "db.gz"
 	dbLockKey   = ".locked"
-	idxPackSize = 1000
+	idxPackSize = 50000
 )
+
+type ArticleData struct {
+	SubID     int    `json:"s"`
+	FetchedAt int64  `json:"a"`
+	Published int64  `json:"p,omitempty"`
+	Title     string `json:"t,omitempty"`
+	Link      string `json:"l,omitempty"`
+	Content   string `json:"c"`
+}
 
 type DB struct {
 	store.Backend
 	core          DBCore
 	locked        bool
-	idxBoundaries []idxBoundary
-	snapshot      fetchSnapshot
-}
-
-type fetchSnapshot struct {
-	totalArticles int
-	fetchedAt     int64
-	subs          map[int]subSnapshot
-}
-
-type subSnapshot struct {
-	totalArticles int
-	lastAddedAt   int64
-}
-
-type idxBoundary struct {
-	totalArticles int
-	subs          []idxBoundarySub
-}
-
-type idxBoundarySub struct {
-	id            int
-	totalArticles int
+	startTotalArt int
 }
 
 type DBCore struct {
 	DataToggle     bool            `json:"data_tog"`
-	TSToggle       bool            `json:"ts_tog"`
 	FetchedAt      int64           `json:"fetched_at"`
 	SubSeq         int             `json:"sub_seq"`
 	TotalArticles  int             `json:"total_art"`
@@ -121,17 +107,7 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 		}
 	}
 
-	db.snapshot = fetchSnapshot{
-		totalArticles: db.core.TotalArticles,
-		fetchedAt:     db.core.FetchedAt,
-		subs:          make(map[int]subSnapshot),
-	}
-	for _, s := range db.core.Subscriptions {
-		db.snapshot.subs[s.ID] = subSnapshot{
-			totalArticles: s.TotalArticles,
-			lastAddedAt:   s.LastAddedAt,
-		}
-	}
+	db.startTotalArt = db.core.TotalArticles
 	return db, nil
 }
 
@@ -211,10 +187,14 @@ func (p *pack) writeTSV(fields ...any) {
 	p.gz.Flush()
 }
 
-func (p *pack) writeEntry(s string) {
-	io.WriteString(p.gz, s)
-	p.gz.Write([]byte{0})
+func (p *pack) writeArticle(ad *ArticleData) error {
+	data, err := jsonEncode(ad)
+	if err != nil {
+		return err
+	}
+	p.gz.Write(data)
 	p.gz.Flush()
+	return nil
 }
 
 func (o *DB) readGz(ctx context.Context, key string) ([]byte, error) {
@@ -275,73 +255,6 @@ func (o *DB) savePack(ctx context.Context, key string, p *pack) error {
 	return nil
 }
 
-func (o *DB) UpdateTS(ctx context.Context) error {
-	c := &o.core
-	week := c.FetchedAt / 604800
-	prevWeek := o.snapshot.fetchedAt / 604800
-	full := prevWeek != week
-
-	if !full && len(o.idxBoundaries) == 0 {
-		return nil
-	}
-
-	ts, err := o.loadPack(ctx, fmt.Sprintf("ts/%v.gz", c.TSToggle))
-	if err != nil {
-		return err
-	}
-
-	if full {
-		absSnap := []any{0, o.snapshot.totalArticles}
-		for _, s := range c.Subscriptions {
-			snap := o.snapshot.subs[s.ID]
-			if snap.totalArticles > 0 {
-				absSnap = append(absSnap, s.ID, snap.totalArticles, snap.lastAddedAt)
-			}
-		}
-
-		if o.snapshot.fetchedAt != 0 {
-			if err := o.savePack(ctx, fmt.Sprintf("ts/%d.gz", prevWeek), ts); err != nil {
-				return err
-			}
-			for w := prevWeek + 1; w < week; w++ {
-				p := newPack()
-				p.writeTSV(absSnap...)
-				if err := o.savePack(ctx, fmt.Sprintf("ts/%d.gz", w), p); err != nil {
-					return err
-				}
-			}
-		}
-
-		ts.writeTSV(absSnap...)
-	}
-
-	if c.FirstFetchedAt == 0 && c.TotalArticles > 0 {
-		c.FirstFetchedAt = c.FetchedAt
-	}
-
-	for _, b := range o.idxBoundaries {
-		delta := []any{c.FetchedAt % 604800, b.totalArticles}
-		for _, s := range b.subs {
-			delta = append(delta, s.id, s.totalArticles)
-		}
-		ts.writeTSV(delta...)
-	}
-	o.idxBoundaries = nil
-
-	c.TSToggle = !c.TSToggle
-	return o.savePack(ctx, fmt.Sprintf("ts/%v.gz", c.TSToggle), ts)
-}
-
-func (o *DB) recordBoundary() {
-	var bSubs []idxBoundarySub
-	for _, s := range o.core.Subscriptions {
-		if s.TotalArticles > o.snapshot.subs[s.ID].totalArticles {
-			bSubs = append(bSubs, idxBoundarySub{s.ID, s.TotalArticles})
-		}
-	}
-	o.idxBoundaries = append(o.idxBoundaries, idxBoundary{o.core.TotalArticles, bSubs})
-}
-
 func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 	if len(articles) == 0 {
 		return nil
@@ -359,13 +272,16 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 		return err
 	}
 
+	prevPackID := c.NextPackID
+	prevFetchedAt := c.FetchedAt
+	isFirstInIdxPack := meta.Len() == 0
+
 	for _, item := range articles {
 		if c.TotalArticles > 0 && c.TotalArticles%idxPackSize == 0 {
-			o.recordBoundary()
-
 			if err := o.savePack(ctx, fmt.Sprintf("idx/%d.gz", c.TotalArticles/idxPackSize-1), meta); err != nil {
 				return err
 			}
+			isFirstInIdxPack = true
 		}
 
 		if data.Len() > 0 && data.Len() >= globals.PackSize<<10 {
@@ -379,8 +295,25 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 			c.PackOffset = 0
 		}
 
-		meta.writeTSV(c.FetchedAt, c.NextPackID, c.PackOffset, item.Sub.ID, item.Published, item.Title, item.Link)
-		data.writeEntry(item.Content)
+		if isFirstInIdxPack {
+			meta.writeTSV(item.Sub.ID, c.NextPackID, c.PackOffset, c.FetchedAt)
+			isFirstInIdxPack = false
+		} else {
+			meta.writeTSV(item.Sub.ID, c.NextPackID-prevPackID, c.FetchedAt-prevFetchedAt)
+		}
+		prevPackID = c.NextPackID
+		prevFetchedAt = c.FetchedAt
+
+		if err := data.writeArticle(&ArticleData{
+			SubID:     item.Sub.ID,
+			FetchedAt: c.FetchedAt,
+			Published: item.Published,
+			Title:     item.Title,
+			Link:      item.Link,
+			Content:   item.Content,
+		}); err != nil {
+			return err
+		}
 
 		item.Sub.TotalArticles++
 		item.Sub.LastAddedAt = c.FetchedAt
@@ -389,7 +322,9 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 		c.PackOffset++
 	}
 
-	o.recordBoundary()
+	if c.FirstFetchedAt == 0 && c.TotalArticles > 0 {
+		c.FirstFetchedAt = c.FetchedAt
+	}
 
 	c.DataToggle = !c.DataToggle
 	latest = fmt.Sprintf("%v.gz", o.core.DataToggle)

@@ -3,7 +3,6 @@ declare const process: { env: { NODE_ENV: string } }
 
 interface IDB {
    data_tog: boolean
-   ts_tog: boolean
    fetched_at: number
    first_fetched: number
    sub_seq: number
@@ -28,14 +27,13 @@ interface ISub {
    tag?: string
 }
 
-interface IIdxEntry {
-   fetched_at: number
-   pack_id: number
-   pack_offset: number
-   sub_id: number
-   published: number
-   title: string
-   link: string
+interface IArticle {
+   s: number
+   a: number
+   p: number
+   t: string
+   l: string
+   c: string
 }
 
 interface IShowFeed {
@@ -43,7 +41,7 @@ interface IShowFeed {
    has_right: boolean
    filtered: boolean
    floor: boolean
-   article: IIdxEntry
+   article: IArticle
    sub: ISub | undefined
-   countLeft: number | null
+   countLeft: number
 }
