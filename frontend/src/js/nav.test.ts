@@ -268,7 +268,8 @@ describe("last", () => {
       setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 1 }, { subId: 2 }])
       data.db.subscriptions[1] = makeSub({ id: 1, total_art: 2 })
       await nav.load(0)
-      const result = await nav.last("1")
+      nav.filter.set(["1"])
+      const result = await nav.last()
       expect(result.article.s).toBe(1)
       expect(result.filtered).toBe(true)
       expect(data.loadArticle).toHaveBeenLastCalledWith(2)
@@ -279,14 +280,16 @@ describe("last", () => {
       setupIndex([{ subId: 1 }, { subId: 2 }])
       data.db.subscriptions[5] = makeSub({ id: 5, total_art: 0 })
       await nav.load(0)
-      const result = await nav.last("5")
+      nav.filter.set(["5"])
+      const result = await nav.last()
       expect(result.filtered).toBe(false)
    })
 
    it("goes to last article when sub not found in subscriptions", async () => {
       setupIndex([{ subId: 1 }, { subId: 2 }])
       await nav.load(0)
-      const result = await nav.last("999")
+      nav.filter.set(["999"])
+      const result = await nav.last()
       expect(result.filtered).toBe(false)
    })
 
@@ -306,25 +309,31 @@ describe("last", () => {
       expect(result.filtered).toBe(false)
    })
 
-   it("falls back to latest unfiltered when sub not found in any entry", async () => {
+   it("returns no-match article when sub not found in any entry", async () => {
       setupIndex([{ subId: 3 }, { subId: 4 }])
       data.db.subscriptions[5] = makeSub({ id: 5, total_art: 1 })
       await nav.load(0)
-      const result = await nav.last("5")
-      expect(result.filtered).toBe(false)
+      nav.filter.set(["5"])
+      const result = await nav.last()
+      expect(result.filtered).toBe(true)
+      expect(result.article.t).toBe("(no matching articles)")
+      expect(result.has_left).toBe(false)
+      expect(result.has_right).toBe(false)
    })
 
-   it("last with empty string subId clears filter and goes to latest", async () => {
+   it("filter.set with empty string auto-clears", async () => {
       setupIndex([{ subId: 1 }, { subId: 2 }])
       await nav.load(0)
-      const result = await nav.last("")
+      nav.filter.set([""])
+      const result = await nav.last()
       expect(result.filtered).toBe(false)
    })
 
-   it("last with NaN subId goes to latest unfiltered", async () => {
+   it("filter.set with NaN auto-clears", async () => {
       setupIndex([{ subId: 1 }])
       await nav.load(0)
-      const result = await nav.last("abc")
+      nav.filter.set(["abc"])
+      const result = await nav.last()
       expect(result.filtered).toBe(false)
    })
 
@@ -332,7 +341,8 @@ describe("last", () => {
       setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 2 }, { subId: 2 }])
       data.db.subscriptions[1] = makeSub({ id: 1, total_art: 1 })
       await nav.load(3)
-      const result = await nav.last("1")
+      nav.filter.set(["1"])
+      const result = await nav.last()
       expect(data.loadArticle).toHaveBeenLastCalledWith(0)
       expect(result.article.s).toBe(1)
    })
@@ -825,7 +835,7 @@ describe("getFilterEntries", () => {
          untagged: [sub3],
       })
       const entries = nav.getFilterEntries()
-      expect(entries).toEqual(["", "tag:alpha", "tag:beta", "3"])
+      expect(entries).toEqual(["", "alpha", "beta", "3"])
    })
 
    it("returns single tag entry for multiple subs with same tag", () => {
@@ -835,7 +845,7 @@ describe("getFilterEntries", () => {
          untagged: [],
       })
       const entries = nav.getFilterEntries()
-      expect(entries).toEqual(["", "tag:tech"])
+      expect(entries).toEqual(["", "tech"])
    })
 })
 
@@ -852,11 +862,11 @@ describe("getCurrentFilterKey", () => {
       expect(nav.getCurrentFilterKey()).toBe("5")
    })
 
-   it("returns tag:name for tag filter", () => {
+   it("returns tag name for tag filter", () => {
       const sub1 = makeSub({ id: 1, title: "Sub1", tag: "news" })
       data.db.subscriptions = { "1": sub1 }
       nav.filter.set(["news"])
-      expect(nav.getCurrentFilterKey()).toBe("tag:news")
+      expect(nav.getCurrentFilterKey()).toBe("news")
    })
 
    it("returns tag for multi-ID filter matching a tag group", () => {
@@ -864,7 +874,7 @@ describe("getCurrentFilterKey", () => {
       const sub2 = makeSub({ id: 2, title: "Sub2", tag: "tech" })
       data.db.subscriptions = { "1": sub1, "2": sub2 }
       nav.filter.set(["1", "2"])
-      expect(nav.getCurrentFilterKey()).toBe("tag:tech")
+      expect(nav.getCurrentFilterKey()).toBe("tech")
    })
 
    it("returns empty string for multi-ID filter not matching any tag", () => {
@@ -933,11 +943,11 @@ describe("filter mutations", () => {
    })
 })
 
-describe("jumpToEnd", () => {
+describe("jumpToEnd via last()", () => {
    it("navigates to last article", async () => {
       setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 3 }])
       await nav.load(0)
-      const result = await nav.jumpToEnd()
+      const result = await nav.last()
       expect(data.loadArticle).toHaveBeenLastCalledWith(2)
       expect(result.article.s).toBe(3)
    })
@@ -945,7 +955,7 @@ describe("jumpToEnd", () => {
    it("returns last article when already at end", async () => {
       setupIndex([{ subId: 1 }])
       await nav.load(0)
-      const result = await nav.jumpToEnd()
+      const result = await nav.last()
       expect(data.loadArticle).toHaveBeenLastCalledWith(0)
       expect(result.article.s).toBe(1)
    })
@@ -954,7 +964,7 @@ describe("jumpToEnd", () => {
       setupIndex([{ subId: 1 }, { subId: 1 }, { subId: 2 }])
       nav.filter.set(["1"])
       await nav.load(0)
-      const result = await nav.jumpToEnd()
+      const result = await nav.last()
       expect(data.loadArticle).toHaveBeenLastCalledWith(1)
       expect(result.article.s).toBe(1)
    })
@@ -1008,12 +1018,12 @@ describe("cycleFilter", () => {
 })
 
 describe("first", () => {
-   it("returns current article when floor is 0", async () => {
+   it("navigates to first article when floor is 0", async () => {
       setupIndex([{ subId: 1 }, { subId: 2 }])
       await nav.load(1)
       const result = await nav.first()
-      expect(data.loadArticle).toHaveBeenLastCalledWith(1)
-      expect(result.article.s).toBe(2)
+      expect(data.loadArticle).toHaveBeenLastCalledWith(0)
+      expect(result.article.s).toBe(1)
    })
 
    it("navigates to floor chronIdx when floor is set", async () => {
@@ -1035,11 +1045,11 @@ describe("first", () => {
       expect(result.article.s).toBe(1)
    })
 
-   it("returns current article when floor is 0 in filter mode", async () => {
+   it("navigates to first filtered article when floor is 0", async () => {
       setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 1 }])
       nav.filter.set(["1"])
       await nav.load(2)
       await nav.first()
-      expect(data.loadArticle).toHaveBeenLastCalledWith(2)
+      expect(data.loadArticle).toHaveBeenLastCalledWith(0)
    })
 })

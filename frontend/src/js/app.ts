@@ -161,7 +161,7 @@ function showSubs() {
             const group = tagged.get(tag)!
             const div = document.createElement("div")
             div.className = "srr-tag-group srr-tag-collapsed"
-            const header = createLink("tag:" + tag, tag, "srr-tag-header")
+            const header = createLink(tag, tag, "srr-tag-header")
             const toggle = document.createElement("span")
             toggle.className = "srr-tag-toggle"
             toggle.addEventListener("click", (e) => {
@@ -182,14 +182,11 @@ function showSubs() {
          for (const sub of untagged) frag.appendChild(createLink(String(sub.id), sub.title))
       },
       (value) => {
-         if (value.startsWith("tag:")) {
-            const tag = value.substring(4)
-            return guard(async () => {
-               nav.filter.set([tag])
-               return nav.last()
-            })
-         }
-         return guard(() => nav.last(value))
+         if (!value) return guard(() => nav.applyFilter(undefined))
+         return guard(() => {
+            nav.filter.set([value])
+            return nav.last()
+         })
       },
    )
 }
@@ -235,7 +232,7 @@ const KEY_ACTIONS: Record<string, () => void> = {
    ArrowDown: () => nav.getFilterEntries().length > 1 && guard(() => nav.cycleFilter(1)),
    s: () => nav.getFilterEntries().length > 1 && guard(() => nav.cycleFilter(1)),
    q: () => guard(() => nav.first()),
-   e: () => guard(() => nav.jumpToEnd()),
+   e: () => guard(() => nav.last()),
 }
 
 async function init() {

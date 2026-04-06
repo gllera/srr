@@ -150,36 +150,33 @@ export async function right(): Promise<IShowFeed> {
 }
 
 export async function first(): Promise<IShowFeed> {
-   if (floorChron === 0) {
-      const article = await data.loadArticle(pos)
-      return showFeed(article)
-   }
-   return load(floorChron)
-}
-
-export async function jumpToEnd(): Promise<IShowFeed> {
-   return load(data.db.total_art - 1)
-}
-
-export async function last(subId?: string): Promise<IShowFeed> {
-   if (subId !== undefined || !filter.active) {
-      const id = Number(subId ?? "")
-      const sub = data.db.subscriptions[id]
-      if (!sub || sub.total_art === 0) {
-         filter.clear()
-         return load(Number.MAX_SAFE_INTEGER)
-      }
-      filter.set([id.toString()])
-   }
-
-   const found = findLeft(data.db.total_art - 1, 0)
-   if (found === -1) {
-      filter.clear()
-      return load(Number.MAX_SAFE_INTEGER)
-   }
-
+   let start = Infinity
+   for (const addIdx of filter.subs.values()) if (addIdx < start) start = addIdx
+   if (start === Infinity) return noMatch()
+   if (floorChron > start) start = floorChron
+   const found = findRight(start)
+   if (found === -1) return noMatch()
    pos = found
    return resolve()
+}
+
+export async function last(): Promise<IShowFeed> {
+   const found = findLeft(data.db.total_art - 1, floorChron)
+   if (found === -1) return noMatch()
+   pos = found
+   return resolve()
+}
+
+function noMatch(): IShowFeed {
+   return {
+      article: { s: 0, a: 0, p: 0, t: "(no matching articles)", l: "", c: "" },
+      has_left: false,
+      has_right: false,
+      filtered: filter.active,
+      floor: floorChron > 0,
+      sub: undefined,
+      countLeft: 0,
+   }
 }
 
 export async function toggleFilter(): Promise<IShowFeed> {
@@ -232,20 +229,20 @@ export function clearFloor(): IShowFeed {
 export function getFilterEntries(): string[] {
    const { sortedTags, untagged } = data.groupSubsByTag()
    const entries = [""]
-   for (const tag of sortedTags) entries.push("tag:" + tag)
+   for (const tag of sortedTags) entries.push(tag)
    for (const sub of untagged) entries.push(String(sub.id))
    return entries
 }
 
-// Map current filter state to a key matching getFilterEntries() format (""|"tag:x"|"id")
+// Map current filter state to a key matching getFilterEntries() format (""|"tagName"|"id")
 export function getCurrentFilterKey(): string {
    if (!filter.active) return ""
-   if (filter.tokens.length === 1 && !Number.isFinite(Number(filter.tokens[0]))) return "tag:" + filter.tokens[0]
+   if (filter.tokens.length === 1 && !Number.isFinite(Number(filter.tokens[0]))) return filter.tokens[0]
    if (filter.tokens.length === 1) return filter.tokens[0]
    // Multiple numeric tokens — check if they match a tag group
    const ids = new Set(filter.tokens.map(Number))
    for (const sub of Object.values(data.db.subscriptions)) {
-      if (sub.tag && ids.has(sub.id)) return "tag:" + sub.tag
+      if (sub.tag && ids.has(sub.id)) return sub.tag
    }
    return ""
 }
@@ -257,7 +254,7 @@ export async function cycleFilter(dir: number): Promise<IShowFeed> {
    if (idx === -1) idx = 0
    idx = (idx + dir + entries.length) % entries.length
    const value = entries[idx]
-   return applyFilter(value === "" ? undefined : [value.startsWith("tag:") ? value.substring(4) : value])
+   return applyFilter(value === "" ? undefined : [value])
 }
 
 function updateHash(replace = false) {
