@@ -181,13 +181,7 @@ function showSubs() {
          }
          for (const sub of untagged) frag.appendChild(createLink(String(sub.id), sub.title))
       },
-      (value) => {
-         if (!value) return guard(() => nav.applyFilter(undefined))
-         return guard(() => {
-            nav.filter.set([value])
-            return nav.last()
-         })
-      },
+      (value) => guard(() => nav.last(value)),
    )
 }
 

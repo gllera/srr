@@ -15,9 +15,6 @@ vi.mock("./data", () => ({
    set db(v: IDB) {
       state.db = v
    },
-   numFinalizedIdx(): number {
-      return state.db.total_art > 0 ? Math.floor((state.db.total_art - 1) / 50000) : 0
-   },
    findChronForTimestamp(ts: number): number {
       let lo = 0
       let hi = state.fetchedAts.length
@@ -28,15 +25,13 @@ vi.mock("./data", () => ({
       }
       return lo > 0 ? lo - 1 : 0
    },
-   activeSubs(): ISub[] {
-      return Object.values(state.db.subscriptions ?? {})
+   groupSubsByTag(): { tagged: Map<string, ISub[]>; sortedTags: string[]; untagged: ISub[] } {
+      const active = Object.values(state.db.subscriptions ?? {})
          .filter((sub: ISub) => sub.total_art > 0)
          .sort((a: ISub, b: ISub) => (a.title < b.title ? -1 : 1))
-   },
-   groupSubsByTag(): { tagged: Map<string, ISub[]>; sortedTags: string[]; untagged: ISub[] } {
       const tagged = new Map<string, ISub[]>()
       const untagged: ISub[] = []
-      for (const sub of this.activeSubs()) {
+      for (const sub of active) {
          if (sub.tag) {
             let group = tagged.get(sub.tag)
             if (!group) {
@@ -53,33 +48,6 @@ vi.mock("./data", () => ({
 }))
 
 const data = await import("./data")
-
-describe("numFinalizedIdx", () => {
-   it("returns 0 when total_art is 0", () => {
-      data.db = { total_art: 0 } as IDB
-      expect(data.numFinalizedIdx()).toBe(0)
-   })
-
-   it("returns 0 when total_art is 1", () => {
-      data.db = { total_art: 1 } as IDB
-      expect(data.numFinalizedIdx()).toBe(0)
-   })
-
-   it("returns 0 when total_art equals IDX_PACK_SIZE", () => {
-      data.db = { total_art: data.IDX_PACK_SIZE } as IDB
-      expect(data.numFinalizedIdx()).toBe(0)
-   })
-
-   it("returns 1 when total_art is IDX_PACK_SIZE + 1", () => {
-      data.db = { total_art: data.IDX_PACK_SIZE + 1 } as IDB
-      expect(data.numFinalizedIdx()).toBe(1)
-   })
-
-   it("returns 2 when total_art is 2 * IDX_PACK_SIZE + 1", () => {
-      data.db = { total_art: 2 * data.IDX_PACK_SIZE + 1 } as IDB
-      expect(data.numFinalizedIdx()).toBe(2)
-   })
-})
 
 describe("findChronForTimestamp", () => {
    it("returns 0 for empty array", () => {

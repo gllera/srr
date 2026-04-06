@@ -55,11 +55,9 @@ State: `pos` (chronIdx), `filter` (object with `active`, `subs`, `tokens`, `matc
 
 **`filter`** — inactive when `tokens` is empty (`ALL_SUBS` proxy matches everything); active when tokens set:
 - `toggleFilter()`: inactive ↔ single-sub filter on current article's sub
-- `last(subId)`: sets filter to single sub
-- `last()` when filtered: preserves current filter
+- `last(token?)`: optional token — undefined = no filter change, `""` = clear filter, otherwise sets filter via `filter.set([token])`; always jumps to last matching article
 - `filter.set(tokens)`: resolves tokens (numeric sub IDs or tag names) into `subs` map (`sub_id → add_idx`)
-- `applyFilter(tokens)`: calls `filter.set()` or `filter.clear()`, then navigates
-- `cycleFilter(dir)`: steps through `getFilterEntries()` list by `dir` (+1/-1), calls `applyFilter()`
+- `cycleFilter(dir)`: steps through `getFilterEntries()` list by `dir` (+1/-1), calls `last()`
 - `getFilterEntries()`: returns `["", "tag:x", ..., "subId", ...]` built via `data.groupSubsByTag()`
 - `getCurrentFilterKey()`: maps current filter state to a key matching `getFilterEntries()` format
 - Navigation uses `findLeft`/`findRight` — synchronous linear scans via `data.getSubId()`

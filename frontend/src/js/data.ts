@@ -44,7 +44,7 @@ export async function init() {
    )
 }
 
-export function numFinalizedIdx(): number {
+function numFinalizedIdx(): number {
    return db.total_art > 0 ? Math.floor((db.total_art - 1) / IDX_PACK_SIZE) : 0
 }
 
@@ -141,7 +141,7 @@ export async function loadArticle(chronIdx: number): Promise<IArticle> {
 
 // db is immutable after init(); cache is safe for the app's lifetime
 let activeSubsCache: ISub[] | null = null
-export function activeSubs(): ISub[] {
+function activeSubs(): ISub[] {
    if (activeSubsCache) return activeSubsCache
    activeSubsCache = Object.values(db.subscriptions)
       .filter((sub) => sub.total_art > 0)

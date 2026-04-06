@@ -86,88 +86,8 @@ async function resolve(replace = false): Promise<IShowFeed> {
    return showFeed(article)
 }
 
-export async function fromHash(hash: string): Promise<IShowFeed> {
-   const bangIdx = hash.indexOf("!")
-   const main = bangIdx === -1 ? hash : hash.substring(0, bangIdx)
-   const commaIdx = main.indexOf(",")
-   const floorStr = commaIdx === -1 ? "" : main.substring(0, commaIdx)
-   const posStr = commaIdx === -1 ? main : main.substring(commaIdx + 1)
-   const chronIdx = Number(posStr)
-
-   filter.clear()
-   if (bangIdx !== -1 && bangIdx < hash.length - 1) {
-      const tokens = hash
-         .substring(bangIdx + 1)
-         .split("+")
-         .filter((t) => t.length > 0)
-      if (tokens.length > 0) filter.set(tokens)
-   }
-
-   floorChron = commaIdx !== -1 ? Math.max(0, Number(floorStr)) || 0 : 0
-   return load(chronIdx, true)
-}
-
-export async function load(chronIdx: number, replace = false): Promise<IShowFeed> {
-   if (data.db.total_art === 0) throw new Error("no articles")
-
-   if (!Number.isFinite(chronIdx) || chronIdx < 0 || chronIdx >= data.db.total_art) chronIdx = data.db.total_art - 1
-
-   pos = chronIdx
-
-   if (!filter.matches(data.getSubId(pos), pos)) {
-      let found = findLeft(pos, floorChron)
-      if (found !== -1) {
-         pos = found
-      } else {
-         found = findRight(pos)
-         if (found !== -1) pos = found
-      }
-   }
-
-   return resolve(replace)
-}
-
-export async function left(): Promise<IShowFeed> {
-   const found = findLeft(pos - 1, floorChron)
-   if (found !== -1) {
-      pos = found
-      filteredLeft--
-   }
-   const article = await data.loadArticle(pos)
+function resolveNoMatch(): IShowFeed {
    updateHash()
-   return showFeed(article)
-}
-
-export async function right(): Promise<IShowFeed> {
-   const found = findRight(pos + 1)
-   if (found !== -1) {
-      pos = found
-      filteredLeft++
-   }
-   const article = await data.loadArticle(pos)
-   updateHash()
-   return showFeed(article)
-}
-
-export async function first(): Promise<IShowFeed> {
-   let start = Infinity
-   for (const addIdx of filter.subs.values()) if (addIdx < start) start = addIdx
-   if (start === Infinity) return noMatch()
-   if (floorChron > start) start = floorChron
-   const found = findRight(start)
-   if (found === -1) return noMatch()
-   pos = found
-   return resolve()
-}
-
-export async function last(): Promise<IShowFeed> {
-   const found = findLeft(data.db.total_art - 1, floorChron)
-   if (found === -1) return noMatch()
-   pos = found
-   return resolve()
-}
-
-function noMatch(): IShowFeed {
    return {
       article: { s: 0, a: 0, p: 0, t: "(no matching articles)", l: "", c: "" },
       has_left: false,
@@ -179,26 +99,69 @@ function noMatch(): IShowFeed {
    }
 }
 
-export async function toggleFilter(): Promise<IShowFeed> {
-   if (filter.active) {
-      filter.clear()
-   } else {
-      filter.set([String(data.getSubId(pos))])
+export async function fromHash(hash: string): Promise<IShowFeed> {
+   const bangIdx = hash.indexOf("!")
+   const main = bangIdx === -1 ? hash : hash.substring(0, bangIdx)
+   const commaIdx = main.indexOf(",")
+   const floorStr = commaIdx === -1 ? "" : main.substring(0, commaIdx)
+   const posStr = commaIdx === -1 ? main : main.substring(commaIdx + 1)
+
+   filter.clear()
+   if (bangIdx !== -1) {
+      const tokens = hash
+         .substring(bangIdx + 1)
+         .split("+")
+         .filter((t) => t.length > 0)
+      if (tokens.length > 0) filter.set(tokens)
    }
+
+   floorChron = Math.max(0, Number(floorStr)) || 0
+
+   if (data.db.total_art === 0) throw new Error("no articles")
+
+   pos = Number(posStr)
+   if (!Number.isFinite(pos) || pos < 0 || pos >= data.db.total_art) pos = data.db.total_art - 1
+
+   if (!filter.matches(data.getSubId(pos), pos)) return last()
+   return resolve(true)
+}
+
+export async function left(): Promise<IShowFeed> {
+   const found = findLeft(pos - 1, floorChron)
+   if (found === -1) throw new Error("no left match")
+   pos = found
+   filteredLeft--
    return resolve()
 }
 
-export async function applyFilter(tokens: string[] | undefined): Promise<IShowFeed> {
-   if (!tokens) filter.clear()
-   else filter.set(tokens)
-   if (!filter.matches(data.getSubId(pos), pos)) {
-      return load(pos)
-   }
+export async function right(): Promise<IShowFeed> {
+   const found = findRight(pos + 1)
+   if (found === -1) throw new Error("no right match")
+   pos = found
+   filteredLeft++
    return resolve()
 }
 
-export function setFloorChron(idx: number) {
-   floorChron = idx
+export async function first(): Promise<IShowFeed> {
+   let start = Infinity
+   for (const addIdx of filter.subs.values()) if (addIdx < start) start = addIdx
+   if (start === Infinity) return resolveNoMatch()
+   if (floorChron > start) start = floorChron
+   const found = findRight(start)
+   if (found === -1) return resolveNoMatch()
+   pos = found
+   return resolve()
+}
+
+export async function last(token?: string): Promise<IShowFeed> {
+   if (token !== undefined) {
+      if (token === "") filter.clear()
+      else filter.set([token])
+   }
+   const found = findLeft(data.db.total_art - 1, floorChron)
+   if (found === -1) return resolveNoMatch()
+   pos = found
+   return resolve()
 }
 
 export async function setFloorAt(idx: number): Promise<IShowFeed> {
@@ -235,7 +198,7 @@ export function getFilterEntries(): string[] {
 }
 
 // Map current filter state to a key matching getFilterEntries() format (""|"tagName"|"id")
-export function getCurrentFilterKey(): string {
+function getCurrentFilterKey(): string {
    if (!filter.active) return ""
    if (filter.tokens.length === 1 && !Number.isFinite(Number(filter.tokens[0]))) return filter.tokens[0]
    if (filter.tokens.length === 1) return filter.tokens[0]
@@ -253,8 +216,7 @@ export async function cycleFilter(dir: number): Promise<IShowFeed> {
    let idx = entries.indexOf(current)
    if (idx === -1) idx = 0
    idx = (idx + dir + entries.length) % entries.length
-   const value = entries[idx]
-   return applyFilter(value === "" ? undefined : [value])
+   return last(entries[idx])
 }
 
 function updateHash(replace = false) {
