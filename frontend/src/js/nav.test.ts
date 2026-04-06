@@ -6,14 +6,13 @@ const data = vi.hoisted(() => ({
       total_art: 0,
       subscriptions: {} as Record<number, ISub>,
    } as unknown as IDB,
-   subIds: new Uint32Array(0),
-   fetchedAts: new Uint32Array(0),
    loadArticle: vi.fn<(chronIdx: number) => Promise<IArticle>>(),
    getArticleSync: vi.fn<(chronIdx: number) => IArticle | undefined>(),
    activeSubs: vi.fn(() => [] as ISub[]),
    abortPending: vi.fn(),
    findChronForTimestamp: vi.fn(() => 0),
    numFinalizedIdx: vi.fn(() => 0),
+   getSubId: vi.fn<(chronIdx: number) => number>(),
 }))
 
 vi.mock("./data", () => data)
@@ -30,23 +29,19 @@ function makeSub(overrides: Partial<ISub> = {}): ISub {
 
 function setupIndex(entries: Array<{ subId: number; fetchedAt?: number }>) {
    data.db.total_art = entries.length
-   data.subIds = new Uint32Array(entries.map((e) => e.subId))
-   data.fetchedAts = new Uint32Array(entries.map((e) => e.fetchedAt ?? 0))
-   data.loadArticle.mockImplementation(async (idx: number) =>
-      makeArticle({ s: data.subIds[idx], a: data.fetchedAts[idx] }),
-   )
-   data.getArticleSync.mockImplementation((idx: number) =>
-      makeArticle({ s: data.subIds[idx], a: data.fetchedAts[idx] }),
-   )
+   const sIds = new Uint32Array(entries.map((e) => e.subId))
+   const fAts = new Uint32Array(entries.map((e) => e.fetchedAt ?? 0))
+   data.loadArticle.mockImplementation(async (idx: number) => makeArticle({ s: sIds[idx], a: fAts[idx] }))
+   data.getArticleSync.mockImplementation((idx: number) => makeArticle({ s: sIds[idx], a: fAts[idx] }))
+   data.getSubId.mockImplementation((idx: number) => sIds[idx])
 }
 
 beforeEach(() => {
    data.db.total_art = 0
    data.db.subscriptions = {}
-   data.subIds = new Uint32Array(0)
-   data.fetchedAts = new Uint32Array(0)
    data.loadArticle.mockReset()
    data.getArticleSync.mockReset()
+   data.getSubId.mockReset()
    nav.setFilterSubs(undefined)
    nav.setFloorChron(0)
    vi.spyOn(history, "pushState").mockImplementation(() => {})

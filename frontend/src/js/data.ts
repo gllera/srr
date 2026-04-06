@@ -1,6 +1,7 @@
 import { makeLRU } from "./cache"
 
 export const IDX_PACK_SIZE = 50000
+const IDX_HEADER_SIZE = 259 * 4 // 3 state uint32 + 256 subCounts uint32
 
 let fetchController = new AbortController()
 export function abortPending() {
@@ -14,12 +15,54 @@ const dbFetch = fetch(new URL("db.gz", DB_URL))
 
 export let db: IDB
 
-// Compact navigation index — built at init from all idx packs
-export let subIds = new Uint32Array(0)
-export let fetchedAts = new Uint32Array(0)
+interface IdxPack {
+   subIds: Uint8Array
+   fetchedAts: Uint16Array
+   bounds: { packId: number; startChron: number }[]
+   parse(): void
+}
 
-// Data pack boundaries: packBounds[i] = { packId, startChron }
-let packBounds: { packId: number; startChron: number }[] = []
+function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: number): IdxPack {
+   let rawBuf: ArrayBuffer | null = buf
+   const pack: IdxPack = {
+      subIds: new Uint8Array(0),
+      fetchedAts: new Uint16Array(0),
+      bounds: [],
+      parse() {
+         if (!rawBuf) return
+         const h = new Uint32Array(rawBuf, 0, IDX_HEADER_SIZE / 4)
+         let fetchedAt = h[0]
+         let packId = h[1]
+         const packOff = h[2]
+         const baseChron = packIndex * IDX_PACK_SIZE
+
+         if (packOff > 0) {
+            pack.bounds.push({ packId, startChron: baseChron - packOff })
+         }
+
+         pack.subIds = new Uint8Array(packSize)
+         pack.fetchedAts = new Uint16Array(packSize)
+         let localOff = 0
+         const view = new DataView(rawBuf)
+         for (let off = IDX_HEADER_SIZE; off + 2 <= rawBuf.byteLength; off += 2) {
+            const packed = view.getUint8(off + 1)
+            if (packed >> 7) packId++
+            fetchedAt += packed & 0x7f
+
+            pack.subIds[localOff] = view.getUint8(off)
+            pack.fetchedAts[localOff] = fetchedAt
+            if (pack.bounds.length === 0 || pack.bounds[pack.bounds.length - 1].packId !== packId) {
+               pack.bounds.push({ packId, startChron: baseChron + localOff })
+            }
+            localOff++
+         }
+         rawBuf = null
+      },
+   }
+   return pack
+}
+
+let idxPacks: IdxPack[] = []
 
 const dataCache = makeLRU<IArticle[]>(5)
 
@@ -32,84 +75,65 @@ export async function init() {
 
    if (db.total_art === 0) return
 
-   // Build compact navigation index from all idx packs
    const nf = numFinalizedIdx()
-   const hasLatest = db.total_art - nf * IDX_PACK_SIZE > 0
-   const totalPacks = nf + (hasLatest ? 1 : 0)
 
-   const sIds = new Uint32Array(db.total_art)
-   const fAt = new Uint32Array(db.total_art)
-   const bounds: { packId: number; startChron: number }[] = []
-
-   const bufs = await Promise.all(
-      Array.from({ length: totalPacks }, (_, p) => {
+   idxPacks = await Promise.all(
+      Array.from({ length: nf + 1 }, (_, p) => {
          const isFinalized = p < nf
          const path = `idx/${isFinalized ? p.toString() : String(db.data_tog)}.gz`
          const opts: RequestInit = {}
          if (isFinalized) opts.cache = "force-cache"
-         return fetch(new URL(path, DB_URL), opts).then((res) =>
-            new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer(),
-         )
+         const size = isFinalized ? IDX_PACK_SIZE : db.total_art - p * IDX_PACK_SIZE
+         return fetch(new URL(path, DB_URL), opts)
+            .then((res) => new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer())
+            .then((buf) => makeIdxPack(buf, p, size))
       }),
    )
-   const state = { globalOffset: 0, packId: 0, fetchedAt: Math.trunc(db.first_fetched / 28800) * 28800 }
-   for (const buf of bufs) {
-      parseIdxPack(buf, sIds, fAt, bounds, state)
-   }
-
-   subIds = sIds
-   fetchedAts = fAt
-   packBounds = bounds
-}
-
-function parseIdxPack(
-   buf: ArrayBuffer,
-   sIds: Uint32Array,
-   fAt: Uint32Array,
-   bounds: { packId: number; startChron: number }[],
-   s: { globalOffset: number; packId: number; fetchedAt: number },
-): void {
-   const view = new DataView(buf)
-   for (let off = 0; off + 2 <= buf.byteLength; off += 2) {
-      const packed = view.getUint8(off + 1)
-      if (packed >> 7) s.packId++
-      s.fetchedAt += (packed & 0x7f) * 28800
-
-      sIds[s.globalOffset] = view.getUint8(off)
-      fAt[s.globalOffset] = s.fetchedAt
-      if (bounds.length === 0 || bounds[bounds.length - 1].packId !== s.packId) {
-         bounds.push({ packId: s.packId, startChron: s.globalOffset })
-      }
-      s.globalOffset++
-   }
 }
 
 export function numFinalizedIdx(): number {
    return db.total_art > 0 ? Math.floor((db.total_art - 1) / IDX_PACK_SIZE) : 0
 }
 
-// Binary search on fetchedAts for rightmost entry where fetchedAts[i] <= ts
+function packIdx(chronIdx: number): number {
+   return Math.min(Math.floor(chronIdx / IDX_PACK_SIZE), idxPacks.length - 1)
+}
+
+export function getSubId(chronIdx: number): number {
+   const n = packIdx(chronIdx)
+   const pack = idxPacks[n]
+   pack.parse()
+   return pack.subIds[chronIdx - n * IDX_PACK_SIZE]
+}
+
+// Binary search for rightmost entry where fetchedAt <= ts
 export function findChronForTimestamp(ts: number): number {
+   for (const p of idxPacks) p.parse()
+   const tsBlocks = Math.trunc(ts / 28800) - Math.trunc(db.first_fetched / 28800)
    let lo = 0
-   let hi = fetchedAts.length
+   let hi = db.total_art
    while (lo < hi) {
       const mid = (lo + hi) >>> 1
-      if (fetchedAts[mid] <= ts) lo = mid + 1
+      const n = packIdx(mid)
+      if (idxPacks[n].fetchedAts[mid - n * IDX_PACK_SIZE] <= tsBlocks) lo = mid + 1
       else hi = mid
    }
    return lo > 0 ? lo - 1 : 0
 }
 
 function getPackRef(chronIdx: number): { packId: number; offset: number } {
-   // Binary search packBounds for largest startChron <= chronIdx
+   const n = packIdx(chronIdx)
+   const pack = idxPacks[n]
+   pack.parse()
+   const bounds = pack.bounds
    let lo = 0
-   let hi = packBounds.length
+   let hi = bounds.length
    while (lo < hi) {
       const mid = (lo + hi) >>> 1
-      if (packBounds[mid].startChron <= chronIdx) lo = mid + 1
+      if (bounds[mid].startChron <= chronIdx) lo = mid + 1
       else hi = mid
    }
-   const bound = packBounds[lo - 1]
+   const bound = bounds[lo - 1]
    return { packId: bound.packId, offset: chronIdx - bound.startChron }
 }
 

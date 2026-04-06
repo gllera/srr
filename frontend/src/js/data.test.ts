@@ -15,12 +15,6 @@ vi.mock("./data", () => ({
    set db(v: IDB) {
       state.db = v
    },
-   get fetchedAts() {
-      return state.fetchedAts
-   },
-   set fetchedAts(v: Uint32Array) {
-      state.fetchedAts = v
-   },
    numFinalizedIdx(): number {
       return state.db.total_art > 0 ? Math.floor((state.db.total_art - 1) / 50000) : 0
    },
@@ -67,42 +61,42 @@ describe("numFinalizedIdx", () => {
 
 describe("findChronForTimestamp", () => {
    it("returns 0 for empty array", () => {
-      data.fetchedAts = new Uint32Array([])
+      state.fetchedAts = new Uint32Array([])
       expect(data.findChronForTimestamp(100)).toBe(0)
    })
 
    it("returns 0 when all entries are after the timestamp", () => {
-      data.fetchedAts = new Uint32Array([50, 60, 70])
+      state.fetchedAts = new Uint32Array([50, 60, 70])
       expect(data.findChronForTimestamp(10)).toBe(0)
    })
 
    it("returns last index when all entries are before the timestamp", () => {
-      data.fetchedAts = new Uint32Array([10, 20, 30])
+      state.fetchedAts = new Uint32Array([10, 20, 30])
       expect(data.findChronForTimestamp(100)).toBe(2)
    })
 
    it("finds rightmost entry <= ts", () => {
-      data.fetchedAts = new Uint32Array([10, 20, 30, 40, 50])
+      state.fetchedAts = new Uint32Array([10, 20, 30, 40, 50])
       expect(data.findChronForTimestamp(25)).toBe(1)
    })
 
    it("finds exact match", () => {
-      data.fetchedAts = new Uint32Array([10, 20, 30, 40, 50])
+      state.fetchedAts = new Uint32Array([10, 20, 30, 40, 50])
       expect(data.findChronForTimestamp(30)).toBe(2)
    })
 
    it("returns rightmost of duplicate values", () => {
-      data.fetchedAts = new Uint32Array([10, 20, 20, 20, 50])
+      state.fetchedAts = new Uint32Array([10, 20, 20, 20, 50])
       expect(data.findChronForTimestamp(20)).toBe(3)
    })
 
    it("works with single element <= ts", () => {
-      data.fetchedAts = new Uint32Array([10])
+      state.fetchedAts = new Uint32Array([10])
       expect(data.findChronForTimestamp(10)).toBe(0)
    })
 
    it("works with single element > ts", () => {
-      data.fetchedAts = new Uint32Array([10])
+      state.fetchedAts = new Uint32Array([10])
       expect(data.findChronForTimestamp(5)).toBe(0)
    })
 })

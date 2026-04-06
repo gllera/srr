@@ -24,19 +24,19 @@ function filterForSub(id: number) {
 }
 
 function findLeft(from: number, subs: Set<number>, floor: number): number {
-   for (let i = from; i >= floor; i--) if (subs.has(data.subIds[i])) return i
+   for (let i = from; i >= floor; i--) if (subs.has(data.getSubId(i))) return i
    return -1
 }
 
 function findRight(from: number, subs: Set<number>): number {
    const end = data.db.total_art
-   for (let i = from; i < end; i++) if (subs.has(data.subIds[i])) return i
+   for (let i = from; i < end; i++) if (subs.has(data.getSubId(i))) return i
    return -1
 }
 
 function countFiltered(from: number, to: number, subs: Set<number>): number {
    let count = 0
-   for (let i = from; i < to; i++) if (subs.has(data.subIds[i])) count++
+   for (let i = from; i < to; i++) if (subs.has(data.getSubId(i))) count++
    return count
 }
 
@@ -95,7 +95,7 @@ export async function load(chronIdx: number, replace = false): Promise<IShowFeed
 
    pos = chronIdx
 
-   if (filter !== undefined && !filter.subs.has(data.subIds[pos])) {
+   if (filter !== undefined && !filter.subs.has(data.getSubId(pos))) {
       let found = findLeft(pos, filter.subs, floorChron)
       if (found !== -1) {
          pos = found
@@ -173,7 +173,7 @@ export async function last(subId?: string): Promise<IShowFeed> {
 
 export async function toggleFilter(): Promise<IShowFeed> {
    if (filter === undefined) {
-      filter = filterForSub(data.subIds[pos])
+      filter = filterForSub(data.getSubId(pos))
    } else {
       filter = undefined
    }
@@ -205,7 +205,7 @@ export function setFilterTokens(tokens: string[] | undefined) {
 
 export async function applyFilter(tokens: string[] | undefined): Promise<IShowFeed> {
    setFilterTokens(tokens)
-   if (filter !== undefined && !filter.subs.has(data.subIds[pos])) {
+   if (filter !== undefined && !filter.subs.has(data.getSubId(pos))) {
       return load(pos)
    }
    const article = await data.loadArticle(pos)
