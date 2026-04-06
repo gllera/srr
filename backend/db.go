@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,9 +23,10 @@ func jsonEncode(v any) ([]byte, error) {
 }
 
 const (
-	dbFileKey   = "db.gz"
-	dbLockKey   = ".locked"
-	idxPackSize = 50000
+	dbFileKey     = "db.gz"
+	dbLockKey     = ".locked"
+	idxPackSize   = 50000
+	idxHeaderSize = 259 * 4 // 3 state fields + 256 subCounts, all uint32 LE
 )
 
 type ArticleData struct {
@@ -49,6 +51,7 @@ type DBCore struct {
 	NextPackID     int                   `json:"next_pid"`
 	PackOffset     int                   `json:"pack_off"`
 	FirstFetchedAt int64                 `json:"first_fetched,omitempty"`
+	IdxBlock       int                   `json:"idx_blk,omitempty"`
 	Subscriptions  map[int]*Subscription `json:"subscriptions"`
 }
 
@@ -176,10 +179,24 @@ func newPack() *pack {
 	return p
 }
 
-func (p *pack) Len() int { return p.buf.Len() }
+func (p *pack) Len() int                    { return p.buf.Len() }
+func (p *pack) Write(b []byte) (int, error) { return p.gz.Write(b) }
 
-func (p *pack) writeIdx(subID, deltaPack, deltaFetched int) {
-	p.gz.Write([]byte{byte(subID), byte(deltaFetched) | byte(deltaPack)<<7})
+func (p *pack) writeIdx(subID, deltaPack, deltaFetched int) error {
+	_, err := p.Write([]byte{byte(subID), byte(deltaFetched) | byte(deltaPack)<<7})
+	return err
+}
+
+func writeIdxHeader(p *pack, block, packID, packOff int, subs map[int]*Subscription) error {
+	var buf [idxHeaderSize]byte
+	binary.LittleEndian.PutUint32(buf[0:], uint32(block))
+	binary.LittleEndian.PutUint32(buf[4:], uint32(packID))
+	binary.LittleEndian.PutUint32(buf[8:], uint32(packOff))
+	for id, sub := range subs {
+		binary.LittleEndian.PutUint32(buf[12+id*4:], uint32(sub.TotalArt))
+	}
+	_, err := p.Write(buf[:])
+	return err
 }
 
 func (p *pack) writeArticle(ad *ArticleData) error {
@@ -187,8 +204,8 @@ func (p *pack) writeArticle(ad *ArticleData) error {
 	if err != nil {
 		return err
 	}
-	p.gz.Write(data)
-	return nil
+	_, err = p.Write(data)
+	return err
 }
 
 func (o *DB) readGz(ctx context.Context, key string) ([]byte, error) {
@@ -228,7 +245,7 @@ func (o *DB) loadPack(ctx context.Context, key string) (*pack, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := p.gz.Write(raw); err != nil {
+	if _, err := p.Write(raw); err != nil {
 		return nil, err
 	}
 	return p, nil
@@ -278,6 +295,12 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 			}
 		}
 
+		if meta.Len() == 0 {
+			if err := writeIdxHeader(meta, c.IdxBlock, c.NextPackID, c.PackOffset, c.Subscriptions); err != nil {
+				return err
+			}
+		}
+
 		if data.Len() > 0 && data.Len() >= globals.PackSize<<10 {
 			if err := o.savePack(ctx, fmt.Sprintf("data/%d.gz", c.NextPackID), data); err != nil {
 				return err
@@ -299,7 +322,11 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 		} else {
 			fetchedCarry = 0
 		}
-		meta.writeIdx(item.Sub.id, c.NextPackID-prevPackID, int(delta))
+		if err := meta.writeIdx(item.Sub.id, c.NextPackID-prevPackID, int(delta)); err != nil {
+			return err
+		}
+
+		c.IdxBlock += int(delta)
 		prevPackID = c.NextPackID
 		prevFetchedTS = c.FetchedAt / 28800
 
@@ -315,6 +342,7 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 		}
 
 		c.TotalArticles++
+		item.Sub.TotalArt++
 		c.PackOffset++
 	}
 

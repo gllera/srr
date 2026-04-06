@@ -54,7 +54,8 @@ type Subscription struct {
 	StopGUID     uint32   `json:"stop_guid,omitempty"`
 	ETag         string   `json:"etag,omitempty"`
 	LastModified string   `json:"last_modified,omitempty"`
-	AddIdx       int      `json:"add_idx,omitempty"`
+	TotalArt     int      `json:"total_art"`
+	AddIdx       int      `json:"add_idx"`
 	newItems     []*Item
 }
 

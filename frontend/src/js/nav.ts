@@ -11,7 +11,7 @@ function resolveTokens(tokens: string[]): Set<number> {
       if (Number.isFinite(num)) {
          ids.add(num)
       } else {
-         for (const sub of data.db.subscriptions) {
+         for (const sub of Object.values(data.db.subscriptions)) {
             if (sub.tag === token) ids.add(sub.id)
          }
       }
@@ -48,7 +48,7 @@ function showFeed(article: IArticle): IShowFeed {
          has_right: pos < data.db.total_art - 1,
          filtered: false,
          floor: floorChron > 0,
-         sub: data.db.subs_mapped.get(article.s),
+         sub: data.db.subscriptions[article.s],
          countLeft: pos - floorChron,
       }
    }
@@ -60,7 +60,7 @@ function showFeed(article: IArticle): IShowFeed {
       has_right: findRight(pos + 1, subs) !== -1,
       filtered: true,
       floor: floorChron > 0,
-      sub: data.db.subs_mapped.get(article.s),
+      sub: data.db.subscriptions[article.s],
       countLeft,
    }
 }
@@ -151,7 +151,7 @@ export async function jumpToEnd(): Promise<IShowFeed> {
 export async function last(subId?: string): Promise<IShowFeed> {
    if (subId !== undefined || filter === undefined) {
       const id = Number(subId ?? "")
-      const sub = data.db.subs_mapped.get(id)
+      const sub = data.db.subscriptions[id]
       if (!sub || sub.total_art === 0) {
          filter = undefined
          return load(Number.MAX_SAFE_INTEGER)
@@ -259,7 +259,7 @@ export function getCurrentFilterKey(): string {
    if (filter.tokens.length === 1) return filter.tokens[0]
    // Multiple numeric tokens — check if they match a tag group
    const ids = new Set(filter.tokens.map(Number))
-   for (const sub of data.db.subscriptions) {
+   for (const sub of Object.values(data.db.subscriptions)) {
       if (sub.tag && ids.has(sub.id)) return "tag:" + sub.tag
    }
    return ""

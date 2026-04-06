@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -94,7 +93,7 @@ func readAllArticles(t *testing.T, dir string, c *DBCore) []*Item {
 			name = fmt.Sprintf("idx/%v.gz", c.DataToggle)
 		}
 		metaBytes := decompressGz(t, filepath.Join(dir, name))
-		for off := 0; off+2 <= len(metaBytes); off += 2 {
+		for off := idxHeaderSize; off+2 <= len(metaBytes); off += 2 {
 			if metaBytes[off+1]>>7 != 0 {
 				packID++
 				packOffset = 0
@@ -124,15 +123,11 @@ func readAllArticles(t *testing.T, dir string, c *DBCore) []*Item {
 				t.Fatalf("data pack %d not found", ref.packID)
 			}
 			var ads []ArticleData
-			dscanner := bufio.NewScanner(bytes.NewReader(dataBytes))
-			for dscanner.Scan() {
-				line := dscanner.Bytes()
-				if len(line) == 0 {
-					continue
-				}
+			dec := json.NewDecoder(bytes.NewReader(dataBytes))
+			for dec.More() {
 				var ad ArticleData
-				if err := json.Unmarshal(line, &ad); err != nil {
-					t.Fatalf("unmarshal article: %v", err)
+				if err := dec.Decode(&ad); err != nil {
+					t.Fatalf("decode article: %v", err)
 				}
 				ads = append(ads, ad)
 			}

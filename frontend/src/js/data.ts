@@ -26,8 +26,8 @@ const dataCache = makeLRU<IArticle[]>(5)
 export async function init() {
    const res = await dbFetch
    const raw: IDB = await new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).json()
-   raw.subscriptions ??= []
-   raw.subs_mapped = new Map(raw.subscriptions.map((sub) => [sub.id, sub]))
+   raw.subscriptions ??= {}
+   for (const [k, sub] of Object.entries(raw.subscriptions)) sub.id = Number(k)
    db = raw
 
    if (db.total_art === 0) return
@@ -55,12 +55,6 @@ export async function init() {
    const state = { globalOffset: 0, packId: 0, fetchedAt: Math.trunc(db.first_fetched / 28800) * 28800 }
    for (const buf of bufs) {
       parseIdxPack(buf, sIds, fAt, bounds, state)
-   }
-
-   for (const sub of db.subscriptions) sub.total_art = 0
-   for (let i = 0; i < db.total_art; i++) {
-      const sub = db.subs_mapped.get(sIds[i])
-      if (sub && i >= (sub.add_idx ?? 0)) sub.total_art!++
    }
 
    subIds = sIds
@@ -170,8 +164,8 @@ export async function loadArticle(chronIdx: number): Promise<IArticle> {
 let activeSubsCache: ISub[] | null = null
 export function activeSubs(): ISub[] {
    if (activeSubsCache) return activeSubsCache
-   activeSubsCache = Array.from(db.subs_mapped.values())
-      .filter((sub) => (sub.total_art ?? 0) > 0)
+   activeSubsCache = Object.values(db.subscriptions)
+      .filter((sub) => sub.total_art > 0)
       .sort((a, b) => (a.title < b.title ? -1 : 1))
    return activeSubsCache
 }

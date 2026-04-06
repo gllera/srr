@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -14,7 +13,6 @@ type ArtCmd struct {
 	Tag    []string `short:"g" optional:"" help:"Filter by tag(s)."`
 	Limit  int      `short:"l" default:"50" help:"Max articles to return."`
 	Before *int     `short:"b" optional:"" help:"Return articles before this artID (exclusive). Omit for newest."`
-	Full   bool     `short:"f"             help:"Include article content."`
 }
 
 type idxEntry struct {
@@ -26,23 +24,14 @@ type idxEntry struct {
 }
 
 type articleResult struct {
-	output     articleOutput
+	ArticleData
+	Idx        int `json:"x"`
 	packID     int
 	packOffset int
 }
 
-type articleOutput struct {
-	ID        int     `json:"id"`
-	FetchedAt int64   `json:"fetched_at"`
-	Published int64   `json:"published"`
-	SubID     int     `json:"sub_id"`
-	Title     string  `json:"title"`
-	Link      string  `json:"link,omitempty"`
-	Content   *string `json:"content,omitempty"`
-}
-
 type articlesOutput struct {
-	Articles   []articleOutput `json:"articles"`
+	Articles   []articleResult `json:"articles"`
 	Total      int             `json:"total"`
 	NextCursor *int            `json:"next_cursor,omitempty"`
 }
@@ -57,7 +46,7 @@ func (o *ArtCmd) Run() error {
 
 	total := db.core.TotalArticles
 	if total == 0 {
-		return printJSON(&articlesOutput{Articles: []articleOutput{}, Total: 0})
+		return printJSON(&articlesOutput{Articles: []articleResult{}, Total: 0})
 	}
 
 	// Build filter set (nil = accept all)
@@ -95,7 +84,7 @@ func (o *ArtCmd) Run() error {
 		}) - 1
 	}
 	if startIdx < 0 {
-		return printJSON(&articlesOutput{Articles: []articleOutput{}, Total: filteredTotal})
+		return printJSON(&articlesOutput{Articles: []articleResult{}, Total: filteredTotal})
 	}
 
 	var results []articleResult
@@ -107,29 +96,22 @@ func (o *ArtCmd) Run() error {
 			continue
 		}
 		results = append(results, articleResult{
+			Idx:        e.ChronIdx,
 			packID:     e.PackID,
 			packOffset: e.PackOffset,
-			output: articleOutput{
-				ID:        e.ChronIdx,
-				FetchedAt: e.FetchedAt,
-				SubID:     e.SubID,
-			},
 		})
 		lastID = e.ChronIdx
 	}
 
 	if len(results) > 0 {
-		if err := loadContent(ctx, db, results, o.Full); err != nil {
+		if err := loadContent(ctx, db, results); err != nil {
 			return err
 		}
 	}
 
 	out := &articlesOutput{
-		Articles: make([]articleOutput, len(results)),
+		Articles: results,
 		Total:    filteredTotal,
-	}
-	for i := range results {
-		out.Articles[i] = results[i].output
 	}
 	if lastID > 0 && len(results) == o.Limit {
 		out.NextCursor = &lastID
@@ -164,7 +146,7 @@ func readAllIdx(ctx context.Context, db *DB) ([]idxEntry, error) {
 			return nil, err
 		}
 
-		for off := 0; off+2 <= len(data); off += 2 {
+		for off := idxHeaderSize; off+2 <= len(data); off += 2 {
 			packed := data[off+1]
 			fetchedAt += int64(packed&0x7F) * 28800
 			if packed>>7 != 0 {
@@ -190,7 +172,7 @@ func readAllIdx(ctx context.Context, db *DB) ([]idxEntry, error) {
 	return entries, nil
 }
 
-func loadContent(ctx context.Context, db *DB, results []articleResult, full bool) error {
+func loadContent(ctx context.Context, db *DB, results []articleResult) error {
 	dataCache := map[int][]ArticleData{}
 	for i := range results {
 		ref := &results[i]
@@ -206,29 +188,18 @@ func loadContent(ctx context.Context, db *DB, results []articleResult, full bool
 			if err != nil {
 				return err
 			}
-			scanner := bufio.NewScanner(bytes.NewReader(data))
-			for scanner.Scan() {
-				line := scanner.Bytes()
-				if len(line) == 0 {
-					continue
-				}
+			dec := json.NewDecoder(bytes.NewReader(data))
+			for dec.More() {
 				var ad ArticleData
-				if err := json.Unmarshal(line, &ad); err != nil {
-					continue
+				if err := dec.Decode(&ad); err != nil {
+					return err
 				}
 				articles = append(articles, ad)
 			}
 			dataCache[ref.packID] = articles
 		}
 		if ref.packOffset < len(articles) {
-			ad := &articles[ref.packOffset]
-			ref.output.Published = ad.Published
-			ref.output.Title = ad.Title
-			ref.output.Link = ad.Link
-			if full {
-				s := ad.Content
-				ref.output.Content = &s
-			}
+			ref.ArticleData = articles[ref.packOffset]
 		}
 	}
 	return nil

@@ -31,7 +31,7 @@ CSS: native nesting, `srr-` prefix on all classes, dark mode via `prefers-color-
 See root `CLAUDE.md` Data Contract for db.gz, ISub, IArticle, pack format, CDN layout, and chronIdx.
 
 Frontend-specific additions:
-- `subs_mapped` — computed at runtime: `Map<id, ISub>`
+- `subscriptions` in `IDB` is `Record<number, ISub>` (JSON object keyed by subscription ID); defaults to `{}` if absent. `sub.id` is populated from object keys at init.
 - **IArticle**: `{ s, a, p, t, l, c }` — sub_id, fetched_at, published, title, link, content. Loaded from JSONL data packs.
 - **IShowFeed**: `{ article, has_left, has_right, filtered, floor, sub, countLeft }` — `countLeft`: always `number` (never null).
 - Dev: `../packs/` sibling directory served on port 3000 with CORS.

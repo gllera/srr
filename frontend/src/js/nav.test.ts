@@ -4,8 +4,7 @@ const data = vi.hoisted(() => ({
    IDX_PACK_SIZE: 50000 as const,
    db: {
       total_art: 0,
-      subscriptions: [] as ISub[],
-      subs_mapped: new Map<number, ISub>(),
+      subscriptions: {} as Record<number, ISub>,
    } as unknown as IDB,
    subIds: new Uint32Array(0),
    fetchedAts: new Uint32Array(0),
@@ -43,8 +42,7 @@ function setupIndex(entries: Array<{ subId: number; fetchedAt?: number }>) {
 
 beforeEach(() => {
    data.db.total_art = 0
-   data.db.subscriptions = []
-   data.db.subs_mapped = new Map()
+   data.db.subscriptions = {}
    data.subIds = new Uint32Array(0)
    data.fetchedAts = new Uint32Array(0)
    data.loadArticle.mockReset()
@@ -305,7 +303,7 @@ describe("right", () => {
 describe("last", () => {
    it("finds last matching entry for a sub", async () => {
       setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 1 }, { subId: 2 }])
-      data.db.subs_mapped.set(1, makeSub({ id: 1, total_art: 2 }))
+      data.db.subscriptions[1] = makeSub({ id: 1, total_art: 2 })
       await nav.load(0)
       const result = await nav.last("1")
       expect(result.article.s).toBe(1)
@@ -315,13 +313,13 @@ describe("last", () => {
 
    it("goes to last article when sub has no articles", async () => {
       setupIndex([{ subId: 1 }, { subId: 2 }])
-      data.db.subs_mapped.set(5, makeSub({ id: 5, total_art: 0 }))
+      data.db.subscriptions[5] = makeSub({ id: 5, total_art: 0 })
       await nav.load(0)
       const result = await nav.last("5")
       expect(result.filtered).toBe(false)
    })
 
-   it("goes to last article when sub not found in subs_mapped", async () => {
+   it("goes to last article when sub not found in subscriptions", async () => {
       setupIndex([{ subId: 1 }, { subId: 2 }])
       await nav.load(0)
       const result = await nav.last("999")
@@ -330,7 +328,7 @@ describe("last", () => {
 
    it("uses current filter when called without subId in filter mode", async () => {
       setupIndex([{ subId: 1 }, { subId: 2 }])
-      data.db.subs_mapped.set(1, makeSub({ id: 1, total_art: 1 }))
+      data.db.subscriptions[1] = makeSub({ id: 1, total_art: 1 })
       await nav.fromHash("0!1")
       const result = await nav.last()
       expect(result.article.s).toBe(1)
@@ -346,7 +344,7 @@ describe("last", () => {
 
    it("falls back to latest unfiltered when sub not found in any entry", async () => {
       setupIndex([{ subId: 3 }, { subId: 4 }])
-      data.db.subs_mapped.set(5, makeSub({ id: 5, total_art: 1 }))
+      data.db.subscriptions[5] = makeSub({ id: 5, total_art: 1 })
       await nav.load(0)
       const result = await nav.last("5")
       expect(result.filtered).toBe(false)
@@ -368,7 +366,7 @@ describe("last", () => {
 
    it("scans backward to find last matching entry", async () => {
       setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 2 }, { subId: 2 }])
-      data.db.subs_mapped.set(1, makeSub({ id: 1, total_art: 1 }))
+      data.db.subscriptions[1] = makeSub({ id: 1, total_art: 1 })
       await nav.load(3)
       const result = await nav.last("1")
       expect(data.loadArticle).toHaveBeenLastCalledWith(0)
@@ -377,8 +375,8 @@ describe("last", () => {
 
    it("preserves multi-sub filter set when called with no arg", async () => {
       setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 3 }])
-      data.db.subs_mapped.set(1, makeSub({ id: 1, total_art: 1 }))
-      data.db.subs_mapped.set(3, makeSub({ id: 3, total_art: 1 }))
+      data.db.subscriptions[1] = makeSub({ id: 1, total_art: 1 })
+      data.db.subscriptions[3] = makeSub({ id: 3, total_art: 1 })
       await nav.fromHash("0!1+3")
       const result = await nav.last()
       expect(result.article.s).toBe(3)
@@ -432,7 +430,7 @@ describe("toggleFilter", () => {
 
    it("returns correct sub after toggle", async () => {
       const sub = makeSub({ id: 1, title: "MySub" })
-      data.db.subs_mapped.set(1, sub)
+      data.db.subscriptions[1] = sub
       setupIndex([{ subId: 1 }])
       await nav.load(0)
       const result = await nav.toggleFilter()
@@ -480,7 +478,8 @@ describe("fromHash", () => {
    })
 
    it("parses tag filter (#123!tag:news)", async () => {
-      data.db.subscriptions = [makeSub({ id: 1, tag: "news" }), makeSub({ id: 2, tag: "news" })]
+      data.db.subscriptions = { "1": makeSub({ id: 1, tag: "news" }), "2": makeSub({ id: 2, tag: "news" }) }
+      for (const [k, s] of Object.entries(data.db.subscriptions)) s.id = Number(k)
       setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 3 }])
       const result = await nav.fromHash("1!news")
       expect(result.filtered).toBe(true)
@@ -558,21 +557,23 @@ describe("fromHash", () => {
    })
 
    it("tag with no matching subs clears filter", async () => {
-      data.db.subscriptions = []
+      data.db.subscriptions = {}
       setupIndex([{ subId: 1 }])
       const result = await nav.fromHash("0!nonexistent")
       expect(result.filtered).toBe(false)
    })
 
    it("hash preserves tag token instead of expanding to sub IDs", async () => {
-      data.db.subscriptions = [makeSub({ id: 1, tag: "tech" }), makeSub({ id: 2, tag: "tech" })]
+      data.db.subscriptions = { "1": makeSub({ id: 1, tag: "tech" }), "2": makeSub({ id: 2, tag: "tech" }) }
+      for (const [k, s] of Object.entries(data.db.subscriptions)) s.id = Number(k)
       setupIndex([{ subId: 1 }])
       await nav.fromHash("0!tech")
       expect(history.replaceState).toHaveBeenCalledWith(null, "", "#0!tech")
    })
 
    it("mixed tag and sub ID tokens in hash", async () => {
-      data.db.subscriptions = [makeSub({ id: 1, tag: "tech" }), makeSub({ id: 2 })]
+      data.db.subscriptions = { "1": makeSub({ id: 1, tag: "tech" }), "2": makeSub({ id: 2 }) }
+      for (const [k, s] of Object.entries(data.db.subscriptions)) s.id = Number(k)
       setupIndex([{ subId: 1 }, { subId: 2 }])
       await nav.fromHash("1!tech+2")
       expect(history.replaceState).toHaveBeenCalledWith(null, "", "#1!tech+2")
@@ -586,8 +587,7 @@ describe("fromHash", () => {
    })
 
    it("resolves token '0' as sub ID 0", async () => {
-      data.db.subscriptions = [makeSub({ id: 0, title: "Zero" })]
-      data.db.subs_mapped.set(0, data.db.subscriptions[0])
+      data.db.subscriptions = { "0": makeSub({ id: 0, title: "Zero" }) }
       setupIndex([{ subId: 0 }])
       const result = await nav.fromHash("0!0")
       expect(result.filtered).toBe(true)
@@ -746,7 +746,7 @@ describe("countLeft", () => {
 
    it("correct count in filtered mode", async () => {
       setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 1 }, { subId: 1 }])
-      data.db.subs_mapped.set(1, makeSub({ id: 1 }))
+      data.db.subscriptions[1] = makeSub({ id: 1 })
       nav.setFilterSubs(new Set([1]))
       const result = await nav.load(3)
       expect(result.countLeft).toBe(2)
@@ -754,7 +754,7 @@ describe("countLeft", () => {
 
    it("filtered: returns 0 at the first match", async () => {
       setupIndex([{ subId: 2 }, { subId: 1 }])
-      data.db.subs_mapped.set(1, makeSub({ id: 1 }))
+      data.db.subscriptions[1] = makeSub({ id: 1 })
       nav.setFilterSubs(new Set([1]))
       const result = await nav.load(1)
       expect(result.countLeft).toBe(0)
@@ -762,7 +762,7 @@ describe("countLeft", () => {
 
    it("filtered with floor: counts from floor", async () => {
       setupIndex([{ subId: 2 }, { subId: 1 }, { subId: 1 }, { subId: 1 }])
-      data.db.subs_mapped.set(1, makeSub({ id: 1 }))
+      data.db.subscriptions[1] = makeSub({ id: 1 })
       nav.setFilterSubs(new Set([1]))
       nav.setFloorChron(1)
       const result = await nav.load(3)
@@ -837,15 +837,15 @@ describe("showFeed", () => {
       expect(result.has_left).toBe(false)
    })
 
-   it("sub is looked up from subs_mapped", async () => {
+   it("sub is looked up from subscriptions", async () => {
       const sub = makeSub({ id: 1, title: "MySub", url: "http://sub.com" })
-      data.db.subs_mapped.set(1, sub)
+      data.db.subscriptions[1] = sub
       setupIndex([{ subId: 1 }])
       const result = await nav.load(0)
       expect(result.sub).toBe(sub)
    })
 
-   it("sub is undefined when not in subs_mapped", async () => {
+   it("sub is undefined when not in subscriptions", async () => {
       setupIndex([{ subId: 99 }])
       const result = await nav.load(0)
       expect(result.sub).toBeUndefined()
@@ -921,8 +921,7 @@ describe("getCurrentFilterKey", () => {
 
    it("returns tag:name for tag filter", () => {
       const sub1 = makeSub({ id: 1, title: "Sub1", tag: "news" })
-      data.db.subs_mapped = new Map([[1, sub1]])
-      data.db.subscriptions = [sub1]
+      data.db.subscriptions = { "1": sub1 }
       nav.setFilterTokens(["news"])
       expect(nav.getCurrentFilterKey()).toBe("tag:news")
    })
@@ -930,11 +929,7 @@ describe("getCurrentFilterKey", () => {
    it("returns tag for multi-ID filter matching a tag group", () => {
       const sub1 = makeSub({ id: 1, title: "Sub1", tag: "tech" })
       const sub2 = makeSub({ id: 2, title: "Sub2", tag: "tech" })
-      data.db.subs_mapped = new Map([
-         [1, sub1],
-         [2, sub2],
-      ])
-      data.db.subscriptions = [sub1, sub2]
+      data.db.subscriptions = { "1": sub1, "2": sub2 }
       nav.setFilterSubs(new Set([1, 2]))
       expect(nav.getCurrentFilterKey()).toBe("tag:tech")
    })
@@ -942,11 +937,7 @@ describe("getCurrentFilterKey", () => {
    it("returns empty string for multi-ID filter not matching any tag", () => {
       const sub1 = makeSub({ id: 1, title: "Sub1" })
       const sub2 = makeSub({ id: 2, title: "Sub2" })
-      data.db.subs_mapped = new Map([
-         [1, sub1],
-         [2, sub2],
-      ])
-      data.db.subscriptions = [sub1, sub2]
+      data.db.subscriptions = { "1": sub1, "2": sub2 }
       nav.setFilterSubs(new Set([1, 2]))
       expect(nav.getCurrentFilterKey()).toBe("")
    })
@@ -979,7 +970,8 @@ describe("applyFilter", () => {
    })
 
    it("applies tag filter via tokens", async () => {
-      data.db.subscriptions = [makeSub({ id: 5, tag: "news" }), makeSub({ id: 6, tag: "news" })]
+      data.db.subscriptions = { "5": makeSub({ id: 5, tag: "news" }), "6": makeSub({ id: 6, tag: "news" }) }
+      for (const [k, s] of Object.entries(data.db.subscriptions)) s.id = Number(k)
       setupIndex([{ subId: 5 }, { subId: 6 }])
       await nav.load(0)
       const result = await nav.applyFilter(["news"])
@@ -989,7 +981,8 @@ describe("applyFilter", () => {
 
 describe("cycleFilter", () => {
    it("setFilterTokens resolves tag and sets filter", async () => {
-      data.db.subscriptions = [makeSub({ id: 5, tag: "news" }), makeSub({ id: 6, tag: "news" })]
+      data.db.subscriptions = { "5": makeSub({ id: 5, tag: "news" }), "6": makeSub({ id: 6, tag: "news" }) }
+      for (const [k, s] of Object.entries(data.db.subscriptions)) s.id = Number(k)
       setupIndex([{ subId: 5 }, { subId: 6 }])
       nav.setFilterTokens(["news"])
       const result = await nav.load(1)
@@ -1088,8 +1081,8 @@ describe("hash updates", () => {
    })
 
    it("last() preserves tag token in hash", async () => {
-      data.db.subscriptions = [makeSub({ id: 1, tag: "tech", total_art: 1 })]
-      data.db.subs_mapped.set(1, data.db.subscriptions[0])
+      data.db.subscriptions = { "1": makeSub({ id: 1, tag: "tech", total_art: 1 }) }
+
       setupIndex([{ subId: 1 }])
       nav.setFilterTokens(["tech"])
       await nav.last()
@@ -1123,7 +1116,7 @@ describe("hash updates", () => {
 
    it("last updates hash", async () => {
       setupIndex([{ subId: 1 }, { subId: 2 }])
-      data.db.subs_mapped.set(1, makeSub({ id: 1, total_art: 1 }))
+      data.db.subscriptions[1] = makeSub({ id: 1, total_art: 1 })
       await nav.load(0)
       ;(history.pushState as ReturnType<typeof vi.fn>).mockClear()
       await nav.last("1")
@@ -1197,7 +1190,12 @@ describe("first", () => {
 
 describe("tag tokens", () => {
    it("fromHash resolves tag token to sub IDs", async () => {
-      data.db.subscriptions = [makeSub({ id: 1, tag: "tech" }), makeSub({ id: 2, tag: "tech" }), makeSub({ id: 3 })]
+      data.db.subscriptions = {
+         "1": makeSub({ id: 1, tag: "tech" }),
+         "2": makeSub({ id: 2, tag: "tech" }),
+         "3": makeSub({ id: 3 }),
+      }
+      for (const [k, s] of Object.entries(data.db.subscriptions)) s.id = Number(k)
       setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 3 }])
       const result = await nav.fromHash("1!tech")
       expect(result.filtered).toBe(true)
@@ -1205,8 +1203,8 @@ describe("tag tokens", () => {
    })
 
    it("last() preserves tag token in hash", async () => {
-      data.db.subscriptions = [makeSub({ id: 1, tag: "tech", total_art: 1 })]
-      data.db.subs_mapped.set(1, data.db.subscriptions[0])
+      data.db.subscriptions = { "1": makeSub({ id: 1, tag: "tech", total_art: 1 }) }
+
       setupIndex([{ subId: 1 }])
       nav.setFilterTokens(["tech"])
       const result = await nav.last()

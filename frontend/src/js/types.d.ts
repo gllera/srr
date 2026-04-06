@@ -8,8 +8,7 @@ interface IDB {
    total_art: number
    next_pid: number
    pack_off: number
-   subscriptions: ISub[]
-   subs_mapped: Map<number, ISub>
+   subscriptions: Record<number, ISub>
 }
 
 interface ISub {
@@ -21,8 +20,8 @@ interface ISub {
    stop_guid?: number
    etag?: string
    last_modified?: string
-   total_art?: number
-   add_idx?: number
+   total_art: number
+   add_idx: number
    tag?: string
 }
 

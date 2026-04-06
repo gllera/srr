@@ -35,25 +35,24 @@ Shared format between backend (writer) and frontend (reader).
 ### `db.gz`
 
 ```
-{ data_tog, fetched_at, sub_seq, total_art, next_pid, pack_off, subscriptions[] }
+{ data_tog, fetched_at, total_art, next_pid, pack_off, subscriptions{}, first_fetched }
 ```
 
 | Field | Type | Description |
 |---|---|---|
 | `data_tog` | bool | Toggles latest pack filename (`true.gz`/`false.gz`) to bust cache; used for both `idx/` and `data/` latest packs |
 | `fetched_at` | int | Unix timestamp of last fetch |
-| `sub_seq` | int | Subscription sequence counter |
 | `total_art` | int | Total article count across all packs |
 | `next_pid` | int | Next data pack ID; packs with `id < next_pid` are finalized/immutable |
 | `pack_off` | int | Current offset in latest data pack |
-| `subscriptions` | array | May be `undefined` in JSON (default `[]`) |
+| `subscriptions` | object | JSON object keyed by subscription ID (string); may be `null` in JSON (default `{}`) |
 | `first_fetched` | int | Unix timestamp of first fetch that produced articles |
 
 ### Subscriptions (`ISub`)
 
-`{ id, title, url, pipe?:string[], ferr?, stop_guid?, etag?, last_modified?, total_art?, last_added?, tag? }`
+`{ id, title, url, pipe?:string[], ferr?, stop_guid?, etag?, last_modified?, total_art?, add_idx?, tag? }`
 
-Backend struct: `Subscription` with ETag, Last-Modified, StopGUID, Tag, Pipeline fields. JSON uses short keys (`pipe`, `ferr`, etc.) — see `DBCore` struct tags.
+`subscriptions` is a JSON object (`Record<string, ISub>`) keyed by subscription ID as a string. Backend struct: `Subscription` with ETag, Last-Modified, StopGUID, Tag, Pipeline fields. JSON uses short keys (`pipe`, `ferr`, etc.) — see `DBCore` struct tags.
 
 ### Pack Storage
 
