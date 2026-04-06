@@ -1,7 +1,7 @@
 import { makeLRU } from "./cache"
+import { IDX_PACK_SIZE, makeIdxPack, type IdxPack } from "./idx"
 
-export const IDX_PACK_SIZE = 50000
-const IDX_HEADER_SIZE = 259 * 4 // 3 state uint32 + 256 subCounts uint32
+export { IDX_PACK_SIZE }
 
 let fetchController = new AbortController()
 export function abortPending() {
@@ -14,53 +14,6 @@ const DB_URL = new URL(SRR_CDN_URL, window.location.href)
 const dbFetch = fetch(new URL("db.gz", DB_URL))
 
 export let db: IDB
-
-interface IdxPack {
-   subIds: Uint8Array
-   fetchedAts: Uint16Array
-   bounds: { packId: number; startChron: number }[]
-   parse(): void
-}
-
-function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: number): IdxPack {
-   let rawBuf: ArrayBuffer | null = buf
-   const pack: IdxPack = {
-      subIds: new Uint8Array(0),
-      fetchedAts: new Uint16Array(0),
-      bounds: [],
-      parse() {
-         if (!rawBuf) return
-         const h = new Uint32Array(rawBuf, 0, IDX_HEADER_SIZE / 4)
-         let fetchedAt = h[0]
-         let packId = h[1]
-         const packOff = h[2]
-         const baseChron = packIndex * IDX_PACK_SIZE
-
-         if (packOff > 0) {
-            pack.bounds.push({ packId, startChron: baseChron - packOff })
-         }
-
-         pack.subIds = new Uint8Array(packSize)
-         pack.fetchedAts = new Uint16Array(packSize)
-         let localOff = 0
-         const view = new DataView(rawBuf)
-         for (let off = IDX_HEADER_SIZE; off + 2 <= rawBuf.byteLength; off += 2) {
-            const packed = view.getUint8(off + 1)
-            if (packed >> 7) packId++
-            fetchedAt += packed & 0x7f
-
-            pack.subIds[localOff] = view.getUint8(off)
-            pack.fetchedAts[localOff] = fetchedAt
-            if (pack.bounds.length === 0 || pack.bounds[pack.bounds.length - 1].packId !== packId) {
-               pack.bounds.push({ packId, startChron: baseChron + localOff })
-            }
-            localOff++
-         }
-         rawBuf = null
-      },
-   }
-   return pack
-}
 
 let idxPacks: IdxPack[] = []
 
@@ -101,9 +54,8 @@ function packIdx(chronIdx: number): number {
 
 export function getSubId(chronIdx: number): number {
    const n = packIdx(chronIdx)
-   const pack = idxPacks[n]
-   pack.parse()
-   return pack.subIds[chronIdx - n * IDX_PACK_SIZE]
+   const subIds = idxPacks[n].parse().subIds
+   return subIds[chronIdx - n * IDX_PACK_SIZE]
 }
 
 // Binary search for rightmost entry where fetchedAt <= ts
@@ -121,11 +73,14 @@ export function findChronForTimestamp(ts: number): number {
    return lo > 0 ? lo - 1 : 0
 }
 
+export function countLeft(chronIdx: number, subs: Map<number, number>): number {
+   const n = packIdx(chronIdx)
+   return idxPacks[n].countLeft(chronIdx, subs)
+}
+
 function getPackRef(chronIdx: number): { packId: number; offset: number } {
    const n = packIdx(chronIdx)
-   const pack = idxPacks[n]
-   pack.parse()
-   const bounds = pack.bounds
+   const bounds = idxPacks[n].parse().bounds
    let lo = 0
    let hi = bounds.length
    while (lo < hi) {
@@ -192,4 +147,22 @@ export function activeSubs(): ISub[] {
       .filter((sub) => sub.total_art > 0)
       .sort((a, b) => (a.title < b.title ? -1 : 1))
    return activeSubsCache
+}
+
+export function groupSubsByTag(): { tagged: Map<string, ISub[]>; sortedTags: string[]; untagged: ISub[] } {
+   const tagged = new Map<string, ISub[]>()
+   const untagged: ISub[] = []
+   for (const sub of activeSubs()) {
+      if (sub.tag) {
+         let group = tagged.get(sub.tag)
+         if (!group) {
+            group = []
+            tagged.set(sub.tag, group)
+         }
+         group.push(sub)
+      } else {
+         untagged.push(sub)
+      }
+   }
+   return { tagged, sortedTags: Array.from(tagged.keys()).sort(), untagged }
 }

@@ -28,6 +28,28 @@ vi.mock("./data", () => ({
       }
       return lo > 0 ? lo - 1 : 0
    },
+   activeSubs(): ISub[] {
+      return Object.values(state.db.subscriptions ?? {})
+         .filter((sub: ISub) => sub.total_art > 0)
+         .sort((a: ISub, b: ISub) => (a.title < b.title ? -1 : 1))
+   },
+   groupSubsByTag(): { tagged: Map<string, ISub[]>; sortedTags: string[]; untagged: ISub[] } {
+      const tagged = new Map<string, ISub[]>()
+      const untagged: ISub[] = []
+      for (const sub of this.activeSubs()) {
+         if (sub.tag) {
+            let group = tagged.get(sub.tag)
+            if (!group) {
+               group = []
+               tagged.set(sub.tag, group)
+            }
+            group.push(sub)
+         } else {
+            untagged.push(sub)
+         }
+      }
+      return { tagged, sortedTags: Array.from(tagged.keys()).sort(), untagged }
+   },
 }))
 
 const data = await import("./data")
@@ -98,5 +120,64 @@ describe("findChronForTimestamp", () => {
    it("works with single element > ts", () => {
       state.fetchedAts = new Uint32Array([10])
       expect(data.findChronForTimestamp(5)).toBe(0)
+   })
+})
+
+describe("groupSubsByTag", () => {
+   it("returns empty collections when no subscriptions", () => {
+      state.db = { subscriptions: {} } as IDB
+      const result = data.groupSubsByTag()
+      expect(result.tagged.size).toBe(0)
+      expect(result.sortedTags).toEqual([])
+      expect(result.untagged).toEqual([])
+   })
+
+   it("separates tagged and untagged subs", () => {
+      state.db = {
+         subscriptions: {
+            1: { id: 1, title: "A", total_art: 1, tag: "news" },
+            2: { id: 2, title: "B", total_art: 1 },
+         },
+      } as unknown as IDB
+      const result = data.groupSubsByTag()
+      expect(result.sortedTags).toEqual(["news"])
+      expect(result.tagged.get("news")!.length).toBe(1)
+      expect(result.untagged.length).toBe(1)
+      expect(result.untagged[0].id).toBe(2)
+   })
+
+   it("sorts tags alphabetically", () => {
+      state.db = {
+         subscriptions: {
+            1: { id: 1, title: "A", total_art: 1, tag: "zebra" },
+            2: { id: 2, title: "B", total_art: 1, tag: "alpha" },
+         },
+      } as unknown as IDB
+      const result = data.groupSubsByTag()
+      expect(result.sortedTags).toEqual(["alpha", "zebra"])
+   })
+
+   it("groups multiple subs under same tag", () => {
+      state.db = {
+         subscriptions: {
+            1: { id: 1, title: "A", total_art: 1, tag: "tech" },
+            2: { id: 2, title: "B", total_art: 1, tag: "tech" },
+         },
+      } as unknown as IDB
+      const result = data.groupSubsByTag()
+      expect(result.tagged.get("tech")!.length).toBe(2)
+      expect(result.sortedTags).toEqual(["tech"])
+   })
+
+   it("excludes subs with zero articles", () => {
+      state.db = {
+         subscriptions: {
+            1: { id: 1, title: "A", total_art: 0, tag: "news" },
+            2: { id: 2, title: "B", total_art: 1 },
+         },
+      } as unknown as IDB
+      const result = data.groupSubsByTag()
+      expect(result.tagged.size).toBe(0)
+      expect(result.untagged.length).toBe(1)
    })
 })

@@ -64,9 +64,9 @@ Two gzip-compressed series under the feed directory:
 | `data/` | JSONL — one `ArticleData` object per line | At `PackSize` (tracked by `next_pid`/`pack_off`) |
 
 **idx/ format** — binary, little-endian, timestamps in 8-hour blocks (÷28800 on write, ×28800 on read):
-- All entries (2 bytes each): `sub_id:u8 | delta_pack_id:1 << 7 | delta_fetched_at:7`
-  - Base state: pack_id=0, pack_offset=0, fetched_at=`first_fetched`÷28800×28800
-  - `delta_pack_id == 0` → offset++ (same pack); `delta_pack_id == 1` → pack advances by 1, offset resets to 0
+- Header: 259 × uint32 — `fetchedAt_base`, `packId_base`, `packOff_base`, then 256 subCount values (one per possible sub_id byte)
+- Entries (2 bytes each, after header): `sub_id:u8`, `delta_pack_id:1 << 7 | delta_fetched_at:7`
+  - `delta_pack_id == 0` → same pack, offset++; `delta_pack_id == 1` → pack advances by 1, offset resets to 0
   - `delta_fetched_at` clamped to [0, 127]; excess carry rolls into subsequent entries
 
 **data/ format** — JSONL, each line: `{"s":sub_id,"a":fetched_at,"p":published,"t":"title","l":"link","c":"content"}`

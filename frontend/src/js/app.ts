@@ -151,24 +151,7 @@ function toggleDropdown(
 }
 
 function showSubs() {
-   const subs = data.activeSubs()
-
-   const tagged = new Map<string, ISub[]>()
-   const untagged: ISub[] = []
-   for (const sub of subs) {
-      if (sub.tag) {
-         let group = tagged.get(sub.tag)
-         if (!group) {
-            group = []
-            tagged.set(sub.tag, group)
-         }
-         group.push(sub)
-      } else {
-         untagged.push(sub)
-      }
-   }
-
-   const sortedTags = Array.from(tagged.keys()).sort()
+   const { tagged, sortedTags, untagged } = data.groupSubsByTag()
 
    toggleDropdown(
       "srr-source-menu",
@@ -202,7 +185,7 @@ function showSubs() {
          if (value.startsWith("tag:")) {
             const tag = value.substring(4)
             return guard(async () => {
-               nav.setFilterTokens([tag])
+               nav.filter.set([tag])
                return nav.last()
             })
          }
@@ -247,24 +230,12 @@ const KEY_ACTIONS: Record<string, () => void> = {
    a: () => !el.prev.disabled && guard(() => nav.left()),
    ArrowRight: () => !el.next.disabled && guard(() => nav.right()),
    d: () => !el.next.disabled && guard(() => nav.right()),
-   ArrowUp: () => cycleFilter(-1),
-   w: () => cycleFilter(-1),
-   ArrowDown: () => cycleFilter(1),
-   s: () => cycleFilter(1),
+   ArrowUp: () => nav.getFilterEntries().length > 1 && guard(() => nav.cycleFilter(-1)),
+   w: () => nav.getFilterEntries().length > 1 && guard(() => nav.cycleFilter(-1)),
+   ArrowDown: () => nav.getFilterEntries().length > 1 && guard(() => nav.cycleFilter(1)),
+   s: () => nav.getFilterEntries().length > 1 && guard(() => nav.cycleFilter(1)),
    q: () => guard(() => nav.first()),
    e: () => guard(() => nav.jumpToEnd()),
-}
-
-// Step through filters (all → tags → individual subs) in the given direction
-function cycleFilter(dir: number) {
-   const entries = nav.getFilterEntries()
-   if (entries.length <= 1) return
-   const current = nav.getCurrentFilterKey()
-   let idx = entries.indexOf(current)
-   if (idx === -1) idx = 0
-   idx = (idx + dir + entries.length) % entries.length
-   const value = entries[idx]
-   guard(() => nav.applyFilter(value === "" ? undefined : [value.startsWith("tag:") ? value.substring(4) : value]))
 }
 
 async function init() {
