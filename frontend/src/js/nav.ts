@@ -50,17 +50,6 @@ export const filter = {
    },
 }
 
-function findLeft(from: number, floor: number): number {
-   for (let i = from; i >= floor; i--) if (filter.matches(data.getSubId(i), i)) return i
-   return -1
-}
-
-function findRight(from: number): number {
-   const end = data.db.total_art
-   for (let i = from; i < end; i++) if (filter.matches(data.getSubId(i), i)) return i
-   return -1
-}
-
 function recount() {
    floorCount = floorChron > 0 ? data.countLeft(floorChron, filter.subs) : 0
    filteredTotal = filter.subTotal - floorCount
@@ -127,7 +116,7 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
 }
 
 export async function left(): Promise<IShowFeed> {
-   const found = findLeft(pos - 1, floorChron)
+   const found = data.findLeft(pos - 1, floorChron, filter.subs)
    if (found === -1) throw new Error("no left match")
    pos = found
    filteredLeft--
@@ -135,7 +124,7 @@ export async function left(): Promise<IShowFeed> {
 }
 
 export async function right(): Promise<IShowFeed> {
-   const found = findRight(pos + 1)
+   const found = data.findRight(pos + 1, filter.subs)
    if (found === -1) throw new Error("no right match")
    pos = found
    filteredLeft++
@@ -147,7 +136,7 @@ export async function first(): Promise<IShowFeed> {
    for (const addIdx of filter.subs.values()) if (addIdx < start) start = addIdx
    if (start === Infinity) return resolveNoMatch()
    if (floorChron > start) start = floorChron
-   const found = findRight(start)
+   const found = data.findRight(start, filter.subs)
    if (found === -1) return resolveNoMatch()
    pos = found
    return resolve()
@@ -158,7 +147,7 @@ export async function last(token?: string): Promise<IShowFeed> {
       if (token === "") filter.clear()
       else filter.set([token])
    }
-   const found = findLeft(data.db.total_art - 1, floorChron)
+   const found = data.findLeft(data.db.total_art - 1, floorChron, filter.subs)
    if (found === -1) return resolveNoMatch()
    pos = found
    return resolve()

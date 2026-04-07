@@ -78,6 +78,26 @@ export function countLeft(chronIdx: number, subs: Map<number, number>): number {
    return idxPacks[n].countLeft(chronIdx, subs)
 }
 
+export function findLeft(from: number, floor: number, subs: Map<number, number>): number {
+   if (from < floor || idxPacks.length === 0) return -1
+   for (let p = packIdx(from); p >= 0; p--) {
+      const found = idxPacks[p].findLeft(from, floor, subs)
+      if (found !== -1) return found
+      if (p * IDX_PACK_SIZE <= floor) return -1
+   }
+   return -1
+}
+
+export function findRight(from: number, subs: Map<number, number>): number {
+   const end = db.total_art - 1
+   if (from > end || idxPacks.length === 0) return -1
+   for (let p = packIdx(from); p < idxPacks.length; p++) {
+      const found = idxPacks[p].findRight(from, end, subs)
+      if (found !== -1) return found
+   }
+   return -1
+}
+
 function getPackRef(chronIdx: number): { packId: number; offset: number } {
    const n = packIdx(chronIdx)
    const bounds = idxPacks[n].parse().bounds

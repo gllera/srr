@@ -21,6 +21,23 @@ const data = vi.hoisted(() => ({
       }
       return count
    }),
+   findLeft: vi.fn((from: number, floor: number, subs: Map<number, number>) => {
+      for (let i = from; i >= floor; i--) {
+         const subId = data.getSubId(i)
+         const addIdx = subs.get(subId)
+         if (addIdx !== undefined && i >= addIdx) return i
+      }
+      return -1
+   }),
+   findRight: vi.fn((from: number, subs: Map<number, number>) => {
+      const end = data.db.total_art
+      for (let i = from; i < end; i++) {
+         const subId = data.getSubId(i)
+         const addIdx = subs.get(subId)
+         if (addIdx !== undefined && i >= addIdx) return i
+      }
+      return -1
+   }),
 }))
 
 vi.mock("./data", () => data)
@@ -55,6 +72,8 @@ beforeEach(() => {
    data.loadArticle.mockReset()
    data.getArticleSync.mockReset()
    data.getSubId.mockReset()
+   data.findLeft.mockClear()
+   data.findRight.mockClear()
    nav.filter.clear()
    vi.spyOn(history, "pushState").mockImplementation(() => {})
    vi.spyOn(history, "replaceState").mockImplementation(() => {})
