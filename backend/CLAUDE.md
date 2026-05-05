@@ -2,7 +2,7 @@
 
 ## Project
 
-**SRR Backend** — Static RSS Reader Backend. Go CLI that fetches RSS/Atom/RDF feeds into gzip-compressed pack series (idx/, data/, ts/). Backends: local filesystem, S3, SFTP.
+**SRR Backend** — Static RSS Reader Backend. Go CLI that fetches RSS/Atom/RDF feeds into gzip-compressed pack series (idx/, data/). Backends: local filesystem, S3, SFTP.
 
 ## Commands
 
@@ -11,10 +11,10 @@
 ## Architecture
 
 - **`main.go`** — CLI via `alecthomas/kong` + YAML config (`$SRR_CONFIG` or `$XDG_CONFIG_HOME/srr/srr.yaml`). `Globals` struct for flags. Command groups: `sub` (alias `s`): `add`, `rm`, `ls`, `import`; `art` (alias `a`): `fetch`, `ls`; `preview` (alias `p`); `version`.
-- **`cmd_fetch.go`** — `signal.NotifyContext` for graceful shutdown. `errgroup` (`golang.org/x/sync/errgroup`) with `SetLimit(globals.Workers)` and a `sync.Pool` for feed buffers. Articles sorted by published time (ascending) before storage. Order: `PutArticles` → `UpdateTS` → `Commit`. `--interval` / `SRR_FETCH_INTERVAL` duration flag runs fetch in a loop. Error summary (fetched/failed counts) logged at end.
+- **`cmd_fetch.go`** — `signal.NotifyContext` for graceful shutdown. `errgroup` (`golang.org/x/sync/errgroup`) with `SetLimit(globals.Workers)` and a `sync.Pool` for feed buffers. Articles sorted by published time (ascending) before storage. Order: `PutArticles` → `Commit`. `--interval` / `SRR_FETCH_INTERVAL` duration flag runs fetch in a loop. Error summary (fetched/failed counts) logged at end.
 - **`feed.go`** — Streaming XML parser, auto-detects RSS/Atom/RDF. GUIDs: FNV-32a → `uint32` (fallback: GUID → ID → Link → empty hash).
 - **`cmd_subs.go`** — `AddCmd` (`srr sub add`, add/update subscription via `--upd`, `-t/--title`, `-u/--url`, `-g/--tag`, `-p/--parsers`), `RmCmd` (`srr sub rm`), `LsCmd` (`srr sub ls`, filter by `-g/--tag`, yaml/json output).
-- **`cmd_art.go`** — `ArtCmd` (`srr art ls`): lists stored articles newest-first with cursor pagination (`-b/--before`), filter by sub ID (`-i`) or tag (`-g`), optional full content (`-f/--full`). Outputs JSON.
+- **`cmd_art.go`** — `ArtCmd` (`srr art ls`): lists stored articles newest-first with cursor pagination (`-b/--before`), filter by sub ID (`-i`) or tag (`-g`), optional full content (`-f/--full`). Outputs JSON. `readAllIdx` parses binary idx format using `db.Subscriptions()` directly; `loadContent` parses JSONL data packs to resolve title, link, published, and optionally content.
 - **`cmd_import.go`** — OPML import with hierarchical ID selection (`-a` all, `-i` specific). OPML group hierarchy auto-resolves to hierarchical tags; `-g/--tag` overrides. `-n/--dry-run` lists resulting subscriptions without importing.
 - **`opml.go`** — OPML XML parsing. `ParseOPMLTree` builds `OPMLNode` tree from file. `normalizeGroupName` converts group names to tag-safe identifiers.
 - **`cmd_preview.go`** — `preview` subcommand: fetches a feed URL, runs module pipeline (`-p`), serves rendered articles via local HTTP server (`-a/--addr`).
@@ -32,19 +32,20 @@ Low-level storage interface: `Get`/`Put`/`AtomicPut`/`Rm`/`Close`. Registry sele
 
 - **`local.go`** — Auto-creates subdirs via `os.MkdirAll`.
 - **`s3.go`** — `IfNoneMatch` precondition headers + CRC32 checksums. `S3Config`: region, endpoint, profile, static credentials.
-- **`sftp.go`** — Auth chain: URL password → config password → config/default private key → `~/.ssh/` keys → SSH agent → error. Host key verification via `~/.ssh/known_hosts` by default (`SFTPConfig.Insecure` to skip).
+- **`sftp.go`** — Auto-creates subdirs via `client.MkdirAll`. Auth chain: URL password → config password → config/default private key → `~/.ssh/` keys → SSH agent → error. Host key verification via `~/.ssh/known_hosts` by default (`SFTPConfig.Insecure` to skip).
 
 ### Pack Storage (`db.go`)
 
-See root `CLAUDE.md` Data Contract for pack format spec (idx/, data/, ts/ series), db.gz schema, CDN layout, and file-based locking.
+See root `CLAUDE.md` Data Contract for pack format spec (idx/, data/ series), db.gz schema, CDN layout, and file-based locking.
 
 Backend-specific:
-- `PutArticles`, `UpdateTS`, `savePack` manage the three series. Order: `PutArticles` → `UpdateTS` → `Commit`.
-- `PutArticles` records idx boundary snapshots (`idxBoundaries`) at each 1000-article split; `UpdateTS` emits them as ts/ delta lines before the final delta.
+- `PutArticles` and `savePack` manage the two series. Order: `PutArticles` → `Commit`.
+- `PutArticles` writes binary idx and JSONL data directly; splits idx packs at every 50,000 articles; sets `FirstFetchedAt` on first run that produces articles.
+- Per-entry `delta_fetched_at` is computed against `prevFetchedTS = FirstFetchedAt/28800 + FetchedAtCursor` so the first entry of each batch records the elapsed time since the previous fetch (clamped to 7 bits with carry).
+- `ArticleData` struct: `{ SubID, FetchedAt, Published, Title, Link, Content }` — serialized as JSONL with short keys `s/a/p/t/l/c`.
+- `DBCore.Subscriptions` is `map[int]*Subscription`; serialized as a JSON object keyed by subscription ID. `AddSubscription` assigns the first free ID in [0, 255] and returns an error if all 256 slots are taken. `RemoveSubscription` uses `delete`.
 - `Commit` serializes `DBCore` via `AtomicPut`. `db.gz` is gzip-compressed JSON with short keys — read `DBCore` struct tags for full schema.
-- `data_tog`/`ts_tog` toggle alternating pack filenames for atomic updates.
-- `first_fetched` (`FirstFetchedAt`): unix timestamp of the first fetch that produced articles.
-- `DB.snapshot` (`fetchSnapshot`) — populated in `NewDB()` from the loaded `DBCore`; captures `TotalArticles`, `FetchedAt`, and per-sub `TotalArticles`/`LastAddedAt`. Used by `UpdateTS` and `PutArticles` to detect changes without shadow fields on `DBCore` or `Subscription`.
+- `data_tog` toggles alternating pack filenames for atomic updates (used for both idx/ and data/ latest packs).
 
 ### Module System (`mod/`)
 

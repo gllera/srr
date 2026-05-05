@@ -1,7 +1,6 @@
 import * as data from "./data"
 import { formatDate, sanitizeHtml, timeAgo } from "./fmt"
 import * as nav from "./nav"
-import { findChronForTimestamp } from "./ts"
 
 const el = {
    title: document.querySelector(".srr-title") as HTMLElement,
@@ -85,57 +84,33 @@ function clearContentTransition() {
    el.content.style.transform = ""
 }
 
-let renderGen = 0
-
 function render(o: IShowFeed) {
-   // Cancel in-flight data/pack fetches from the previous article
-   if (renderGen > 0) data.abortPending()
-   const gen = ++renderGen
-   el.title.textContent = o.article.title
+   data.abortPending()
+   el.title.textContent = o.article.t
    el.content.style.transition = "none"
    el.content.style.opacity = "0"
    el.content.style.transform = "translateY(6px)"
-   el.content.replaceChildren()
-   el.titleLink.href = o.article.link
+   el.content.innerHTML = sanitizeHtml(o.article.c)
+   el.titleLink.href = o.article.l
    el.prev.disabled = !o.has_left
    el.next.disabled = !o.has_right
 
-   currentPublished = o.article.published
+   currentPublished = o.article.p
    el.date.textContent = timeAgo(currentPublished)
    el.date.title = formatDate(currentPublished)
 
    el.source.textContent = o.sub?.title || "[DELETED]"
    el.source.classList.toggle("srr-filtered", o.filtered)
    el.floorBtn.classList.toggle("srr-floor-active", o.floor)
-   el.counter.textContent = o.countLeft !== null ? String(o.countLeft) : "?"
+   el.counter.textContent = String(o.countLeft)
 
-   document.title = "SRR - " + o.article.title
+   document.title = "SRR - " + o.article.t
    window.scrollTo(0, 0)
    el.title.focus()
 
-   function showContent(content: string) {
-      el.content.innerHTML = sanitizeHtml(content)
-      // Double rAF: first ensures the browser has painted with opacity:0,
-      // second re-enables transitions so the fade-in animates
-      requestAnimationFrame(() => requestAnimationFrame(clearContentTransition))
-   }
-
-   const cached = data.getContentSync(o.article)
-   if (cached !== undefined) {
-      showContent(cached)
-   } else {
-      data.getContent(o.article).then(
-         (content) => {
-            if (gen !== renderGen) return
-            showContent(content)
-         },
-         (e) => {
-            if (gen !== renderGen) return
-            clearContentTransition()
-            showError(e, () => guard(() => nav.fromHash(location.hash.substring(1))))
-         },
-      )
-   }
+   // Double rAF: first ensures the browser has painted with opacity:0,
+   // second re-enables transitions so the fade-in animates
+   requestAnimationFrame(() => requestAnimationFrame(clearContentTransition))
 
    try {
       localStorage.setItem("srr-hash", location.hash)
@@ -176,24 +151,7 @@ function toggleDropdown(
 }
 
 function showSubs() {
-   const subs = data.activeSubs()
-
-   const tagged = new Map<string, ISub[]>()
-   const untagged: ISub[] = []
-   for (const sub of subs) {
-      if (sub.tag) {
-         let group = tagged.get(sub.tag)
-         if (!group) {
-            group = []
-            tagged.set(sub.tag, group)
-         }
-         group.push(sub)
-      } else {
-         untagged.push(sub)
-      }
-   }
-
-   const sortedTags = Array.from(tagged.keys()).sort()
+   const { tagged, sortedTags, untagged } = data.groupSubsByTag()
 
    toggleDropdown(
       "srr-source-menu",
@@ -203,7 +161,7 @@ function showSubs() {
             const group = tagged.get(tag)!
             const div = document.createElement("div")
             div.className = "srr-tag-group srr-tag-collapsed"
-            const header = createLink("tag:" + tag, tag, "srr-tag-header")
+            const header = createLink(tag, tag, "srr-tag-header")
             const toggle = document.createElement("span")
             toggle.className = "srr-tag-toggle"
             toggle.addEventListener("click", (e) => {
@@ -223,16 +181,7 @@ function showSubs() {
          }
          for (const sub of untagged) frag.appendChild(createLink(String(sub.id), sub.title))
       },
-      (value) => {
-         if (value.startsWith("tag:")) {
-            const tag = value.substring(4)
-            return guard(async () => {
-               nav.setFilterTokens([tag])
-               return nav.last()
-            })
-         }
-         return guard(() => nav.last(value))
-      },
+      (value) => guard(() => nav.last(value)),
    )
 }
 
@@ -249,17 +198,16 @@ function showFloor() {
       },
       (value) => {
          if (value === "here") {
-            render(nav.setFloorHere())
+            if (!busy) render(nav.setFloorHere())
             return Promise.resolve()
          }
          if (value === "clear") {
-            render(nav.clearFloor())
+            if (!busy) render(nav.clearFloor())
             return Promise.resolve()
          }
          return guard(async () => {
             const ts = Math.floor(Date.now() / 1000) - Number(value)
-            const chron = await findChronForTimestamp(ts)
-            if (chron === null) throw new Notice("No data available for that time range")
+            const chron = data.findChronForTimestamp(ts)
             if (chron === 0) throw new Notice("All articles are within that time range")
             return nav.setFloorAt(chron)
          })
@@ -268,29 +216,19 @@ function showFloor() {
 }
 
 const KEY_ACTIONS: Record<string, () => void> = {
-   " ": () => render(nav.floorChron > 0 ? nav.clearFloor() : nav.setFloorHere()),
+   " ": () => {
+      if (!busy) render(nav.floorChron > 0 ? nav.clearFloor() : nav.setFloorHere())
+   },
    ArrowLeft: () => !el.prev.disabled && guard(() => nav.left()),
    a: () => !el.prev.disabled && guard(() => nav.left()),
    ArrowRight: () => !el.next.disabled && guard(() => nav.right()),
    d: () => !el.next.disabled && guard(() => nav.right()),
-   ArrowUp: () => cycleFilter(-1),
-   w: () => cycleFilter(-1),
-   ArrowDown: () => cycleFilter(1),
-   s: () => cycleFilter(1),
+   ArrowUp: () => nav.getFilterEntries().length > 1 && guard(() => nav.cycleFilter(-1)),
+   w: () => nav.getFilterEntries().length > 1 && guard(() => nav.cycleFilter(-1)),
+   ArrowDown: () => nav.getFilterEntries().length > 1 && guard(() => nav.cycleFilter(1)),
+   s: () => nav.getFilterEntries().length > 1 && guard(() => nav.cycleFilter(1)),
    q: () => guard(() => nav.first()),
-   e: () => guard(() => nav.jumpToEnd()),
-}
-
-// Step through filters (all → tags → individual subs) in the given direction
-function cycleFilter(dir: number) {
-   const entries = nav.getFilterEntries()
-   if (entries.length <= 1) return
-   const current = nav.getCurrentFilterKey()
-   let idx = entries.indexOf(current)
-   if (idx === -1) idx = 0
-   idx = (idx + dir + entries.length) % entries.length
-   const value = entries[idx]
-   guard(() => nav.applyFilter(value === "" ? undefined : [value.startsWith("tag:") ? value.substring(4) : value]))
+   e: () => guard(() => nav.last()),
 }
 
 async function init() {

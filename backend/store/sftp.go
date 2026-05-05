@@ -128,6 +128,17 @@ func (d *SFTP) sftpPath(op, key string) string {
 	return full
 }
 
+func (d *SFTP) ensureDir(file string) error {
+	dir := path.Dir(file)
+	if dir == d.path || dir == "." || dir == "/" {
+		return nil
+	}
+	if err := d.client.MkdirAll(dir); err != nil {
+		return fmt.Errorf("creating directory %s: %w", dir, err)
+	}
+	return nil
+}
+
 func (d *SFTP) Get(_ context.Context, key string, ignoreMissing bool) (io.ReadCloser, error) {
 	file := d.sftpPath("read", key)
 	fs, err := d.client.Open(file)
@@ -142,6 +153,9 @@ func (d *SFTP) Get(_ context.Context, key string, ignoreMissing bool) (io.ReadCl
 
 func (d *SFTP) Put(_ context.Context, key string, r io.Reader, ignoreExisting bool) error {
 	file := d.sftpPath("write", key)
+	if err := d.ensureDir(file); err != nil {
+		return err
+	}
 
 	fs, err := d.client.OpenFile(file, writeOpenFlags(ignoreExisting))
 	if err != nil {
@@ -157,6 +171,9 @@ func (d *SFTP) Put(_ context.Context, key string, r io.Reader, ignoreExisting bo
 
 func (d *SFTP) AtomicPut(_ context.Context, key string, r io.Reader) error {
 	file := d.sftpPath("atomic write", key)
+	if err := d.ensureDir(file); err != nil {
+		return err
+	}
 	tmpFile := file + ".tmp"
 
 	fs, err := d.client.OpenFile(tmpFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)

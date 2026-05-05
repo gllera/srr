@@ -99,10 +99,6 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 		return err
 	}
 
-	if err = db.UpdateTS(ctx); err != nil {
-		return err
-	}
-
 	if err = db.Commit(ctx); err != nil {
 		return err
 	}
@@ -114,7 +110,7 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 		}
 	}
 	slog.Info("fetch complete",
-		"new_articles", db.core.TotalArticles-db.snapshot.totalArticles,
+		"new_articles", len(articles),
 		"fetched", len(db.Subscriptions())-failed,
 		"failed", failed,
 	)

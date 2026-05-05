@@ -1,16 +1,14 @@
 declare const SRR_CDN_URL: string
+declare const process: { env: { NODE_ENV: string } }
 
 interface IDB {
    data_tog: boolean
-   ts_tog: boolean
    fetched_at: number
    first_fetched: number
-   sub_seq: number
    total_art: number
    next_pid: number
    pack_off: number
-   subscriptions: ISub[]
-   subs_mapped: Map<number, ISub>
+   subscriptions: Record<number, ISub>
 }
 
 interface ISub {
@@ -22,19 +20,18 @@ interface ISub {
    stop_guid?: number
    etag?: string
    last_modified?: string
-   total_art?: number
-   last_added?: number
+   total_art: number
+   add_idx: number
    tag?: string
 }
 
-interface IIdxEntry {
-   fetched_at: number
-   pack_id: number
-   pack_offset: number
-   sub_id: number
-   published: number
-   title: string
-   link: string
+interface IArticle {
+   s: number
+   a: number
+   p: number
+   t: string
+   l: string
+   c: string
 }
 
 interface IShowFeed {
@@ -42,7 +39,7 @@ interface IShowFeed {
    has_right: boolean
    filtered: boolean
    floor: boolean
-   article: IIdxEntry
+   article: IArticle
    sub: ISub | undefined
-   countLeft: number | null
+   countLeft: number
 }

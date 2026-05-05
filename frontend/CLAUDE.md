@@ -12,28 +12,29 @@ SRR Frontend — single-page RSS reader. Zero runtime deps. Parcel + TypeScript 
 
 Entry: `src/index.html` → `src/styles.css` + `src/js/app.ts`. Bundler: Parcel 2. `SRR_CDN_URL` replaced at build time.
 
-Dependency chain: `app → nav → data`, `app → ts → data`, `nav → ts → data`, `app → fmt`. All in `src/js/`, strict mode.
+Dependency chain: `app → nav → data → idx`, `data → cache`, `app → fmt`. All in `src/js/`, strict mode.
 
 | Module | Role |
 |---|---|
-| `data.ts` | CDN data layer: fetches `db.gz`, gzip TSV idx packs, gzip null-delimited data packs. Exports live-binding state (`db`, `articles`, `idxPack`) read by nav. Dual LRU caches (size 5). Exports `abortPending()` to cancel in-flight fetches. |
-| `ts.ts` | Time-series optimization for filtered navigation. Fetches/caches ts/ weekly packs. Exports `findCandidateIdxPacks` (used by nav) and `findChronForTimestamp` (used by app for floor). |
-| `nav.ts` | Navigation state machine: hash routing (`#chronIdx[~floor][!tokens]`), traversal, filtering, floor. Returns `IShowFeed`. Uses `pushState`/`replaceState`. Tokens are sub IDs or tag names. |
-| `cache.ts` | Generic LRU cache factory (`makeLRU`). Used by data.ts and ts.ts. |
+| `idx.ts` | Binary idx pack parsing. Exports `IDX_PACK_SIZE` (50000), `IdxPack` interface, `makeIdxPack()`. |
+| `data.ts` | CDN data layer: fetches `db.gz`, loads all idx packs at init via `makeIdxPack()`. Loads JSONL data packs on demand (LRU cache, size 5). Exports `loadArticle(chronIdx)`, `getArticleSync(chronIdx)`, `findChronForTimestamp(ts)`, `abortPending()`, `groupSubsByTag()`. Re-exports `IDX_PACK_SIZE`. |
+| `nav.ts` | Navigation state machine: hash routing (`#floor,pos[!tokens]`), traversal, filtering, floor. Returns `IShowFeed`. Uses `pushState`/`replaceState`. Tokens are sub IDs or tag names. Exports `cycleFilter(dir)`, `getFilterEntries()`, `getCurrentFilterKey()`. |
+| `cache.ts` | Generic LRU cache factory (`makeLRU`). Used by data.ts. |
 | `fmt.ts` | Pure utilities (no imports): `sanitizeHtml`, `timeAgo`, `formatDate`. `sanitizeHtml` strips dangerous elements/attributes for defense-in-depth. |
 | `app.ts` | UI: DOM rendering, events, dropdowns, error popup, loading, dark mode. All async handlers via `guard()` mutex. Position persisted to localStorage. Registers service worker (`sw.ts`) on init. |
-| `sw.ts` | Service worker. Three caching strategies: `cacheFirst` for finalized packs (`N.gz`), `staleWhileRevalidate` for `db.gz`, `networkFirst` for latest packs (`true.gz`/`false.gz`). Cache name: `srr-v1`. |
-| `types.d.ts` | Ambient types: `IDB`, `ISub`, `IIdxEntry`, `IShowFeed`. |
+| `sw.ts` | Service worker. Caching strategies: `cacheFirst` for finalized packs (`N.gz`), custom `getDB` (stale-while-revalidate with validity flag) for `db.gz`, `cacheFirst`/`networkFirst` for latest packs (`true.gz`/`false.gz`) depending on DB validity. Cache name: `srr-v1`. |
+| `types.d.ts` | Ambient types: `IDB`, `ISub`, `IArticle`, `IShowFeed`. |
 
 CSS: native nesting, `srr-` prefix on all classes, dark mode via `prefers-color-scheme`.
 
 ## Data Structures
 
-See root `CLAUDE.md` Data Contract for db.gz, ISub, IIdxEntry, pack format, CDN layout, and chronIdx.
+See root `CLAUDE.md` Data Contract for db.gz, ISub, IArticle, pack format, CDN layout, and chronIdx.
 
 Frontend-specific additions:
-- `subs_mapped` — computed at runtime: `Map<id, ISub>`
-- **IShowFeed**: `{ article, has_left, has_right, filtered, floor, sub, countLeft }` — `countLeft`: `number | null` (`null` when earlier packs unscanned in filtered mode). Respects floor.
+- `subscriptions` in `IDB` is `Record<number, ISub>` (JSON object keyed by subscription ID); defaults to `{}` if absent. `sub.id` is populated from object keys at init.
+- **IArticle**: `{ s, a, p, t, l, c }` — sub_id, fetched_at, published, title, link, content. Loaded from JSONL data packs.
+- **IShowFeed**: `{ article, has_left, has_right, filtered, floor, sub, countLeft }` — `countLeft`: always `number` (never null).
 - Dev: `../packs/` sibling directory served on port 3000 with CORS.
 
 ## Key Behaviors
@@ -42,38 +43,42 @@ Frontend-specific additions:
 
 **Eager fetch**: `data.ts` starts `fetch("db.gz")` at module load (before `init()` call).
 
-**Caching**: LRU(5) for idx + LRU(5) for data, keyed by pack number. HTTP `force-cache` for finalized. Latest packs use `data_tog` filename toggle.
+**Init**: `data.init()` loads all idx packs in parallel, calls `makeIdxPack()` (from `idx.ts`) to lazily parse each binary pack into `subIds`/`fetchedAts` typed arrays and `bounds`. LRU(5) cache for data packs keyed by pack ID. HTTP `force-cache` for finalized packs. Latest packs use `data_tog` filename toggle.
 
-**Streaming TSV**: `loadIdxPack` streams `DecompressionStream → TextDecoderStream`, handles partial lines via remainder buffer.
+**Article loading**: `loadArticle(chronIdx)` resolves pack+offset via binary search on `IdxPack.bounds`, fetches and parses JSONL data pack. `getArticleSync(chronIdx)` returns from cache only (no fetch).
 
-**Lazy content**: `render()` shows metadata immediately, loads content async via `getContent()`. Generation counter discards stale loads.
-
-**Content fade-in**: double `requestAnimationFrame` for opacity transition. `data.abortPending()` cancels in-flight fetches (replaces `window.stop()`) when a new article is rendered.
+**Content fade-in**: double `requestAnimationFrame` for opacity transition. `data.abortPending()` cancels in-flight fetches when a new article is rendered.
 
 ## State Machines (nav.ts)
 
-**`filterSubs`** — `undefined` (all articles) or `Set<number>` (filtered subs):
-- `toggleFilter()`: `undefined` ↔ `Set([current sub_id])`
-- `last(subId)`: → `Set([id])`
-- `last()` when filtered: preserves current set
-- `setFilterSubs(set)`: direct setter (rebuilds `filterTokens` from numeric IDs)
-- `setFilterTokens(tokens)`: resolves tokens (numeric sub IDs or tag names) into `filterSubs`
-- Hash: `!` segment, `+`-separated tokens (sub IDs or tag names)
+State: `pos` (chronIdx), `filter` (object with `active`, `subs`, `tokens`, `matches()`, `clear()`, `set(tokens)`), `floorChron`.
+
+**`filter`** — active when `tokens` non-empty:
+- `filter.clear()`: empties tokens, repopulates `subs` from all subscriptions with `total_art > 0`
+- `filter.set(tokens)`: resolves tokens (numeric sub IDs or tag names) into `subs` map (`sub_id → add_idx`); falls back to `clear()` if no token resolves
+- `last(token?)`: undefined = no filter change, `""` = clear filter, otherwise `filter.set([token])`; always jumps to last matching article
+- `cycleFilter(dir)`: steps through `getFilterEntries()` by `dir` (+1/-1), calls `last()`
+- `getFilterEntries()`: returns `["", "tagName", ..., "subId", ...]` built via `data.groupSubsByTag()`
+- `getCurrentFilterKey()`: returns `""`, the single token, or `""` for multi-token filters (URL-only edge case)
+- Navigation uses `findLeft`/`findRight` — synchronous linear scans via `data.getSubId()`
+- Hash: `!` segment, `+`-separated tokens, each `encodeURIComponent`-wrapped to survive special chars in tag names
 
 **`floorChron`** — `0` (no floor) or chronIdx lower bound:
-- Constrains `left()` and `has_left`; does NOT prevent `load()` below floor
-- Hash: `~floorChron` segment
-- `setFloorHere()` / `clearFloor()` — synchronous, return `IShowFeed`
+- Soft floor: constrains `left()` and `has_left`; does NOT prevent `load()`/`right()` below floor. `showFeed` clamps the displayed `countLeft` to `≥ 0` so soft-floor positions don't surface a negative counter.
+- Hash: always the `floor` part before the comma (e.g. `#0,pos` when no floor, `#N,pos` when set)
+- `setFloorHere()` / `clearFloor()` — synchronous, return `IShowFeed`. Callers must skip when the `guard()` mutex is busy (`app.ts` checks `busy`) — they call `data.getArticleSync(pos)` which returns undefined while a navigation fetch is in flight.
 
 ## Test Patterns
 
-`src/js/nav.test.ts` — ~107 cases. Only nav.ts is tested.
+`src/js/nav.test.ts` — large nav suite. `src/js/data.test.ts` — pure-function cases only.
 
-- **Mock**: `vi.hoisted()` + `vi.mock("./data", ...)` with same shape as data.ts exports. `loadIdxPack` default just sets `data.idxPack`.
-- **Reset**: `beforeEach` resets all data state + `nav.setFilterSubs(undefined)` + `nav.setFloorChron(0)`
-- **Helpers**: `makeEntry(overrides)`, `makeSub(overrides)` — factory with defaults. `mockIdxLoad(entries)` / `mockIdxLoadOnce(entries)` — also reassign `data.articles`.
-- **Hash checks**: spy on `history.pushState`/`replaceState`
-- **Cross-pack**: chain `mockIdxLoadOnce` calls
+**nav.test.ts**:
+- **Mock**: `vi.hoisted()` + `vi.mock("./data", ...)` with same shape as data.ts exports. Mocks `getSubId`, `loadArticle`, `getArticleSync`, `groupSubsByTag`, `findLeft`, `findRight`, `countLeft`, `findChronForTimestamp`.
+- **Reset**: `beforeEach` resets data state, calls `nav.filter.clear()`, and re-spies `history.pushState`/`replaceState`. `floorChron` carries over between tests — set it explicitly via the hash when relevant.
+- **Helpers**: `makeArticle(overrides)`, `makeSub(overrides)` — factory with defaults. `setupIndex(entries)` — populates `db.subscriptions` and wires `getSubId`/`loadArticle`/`getArticleSync` mocks.
+- **Hash checks**: spy on `history.pushState`/`replaceState` (note the spy accumulates across tests in the same describe).
+
+**data.test.ts**: mocks the module, re-exports pure functions (`numFinalizedIdx`, `findChronForTimestamp`) with writable `db`/`fetchedAts` state.
 
 ## Conventions
 

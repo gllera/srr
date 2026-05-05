@@ -1,5 +1,8 @@
 const rtf = new Intl.RelativeTimeFormat("en", { numeric: "always", style: "narrow" })
-const JS_PROTO = /^\s*javascript\s*:/i
+// Mirror the backend bluemonday allowlist (mailto, http, https) for defense-in-depth.
+// data:/vbscript:/javascript:/file: in href or src are XSS or info-leak vectors
+// (data:text/html executes script; data:image/svg+xml runs <script> in SVG).
+const URL_DENY = /^\s*(?:javascript|data|vbscript|file)\s*:/i
 const DANGEROUS_TAGS = new Set(["SCRIPT", "STYLE", "IFRAME", "EMBED", "OBJECT", "FORM", "LINK", "META", "BASE"])
 
 // <template> parses HTML without executing scripts, unlike a div
@@ -17,7 +20,7 @@ export function sanitizeHtml(html: string): string {
       const attrs = node.attributes
       for (let i = attrs.length - 1; i >= 0; i--) {
          const attr = attrs[i]
-         if (attr.name.startsWith("on") || JS_PROTO.test(attr.value)) node.removeAttribute(attr.name)
+         if (attr.name.startsWith("on") || URL_DENY.test(attr.value)) node.removeAttribute(attr.name)
       }
       if (node.tagName === "A") node.setAttribute("rel", "noopener noreferrer")
       if (node.tagName === "IMG") {
@@ -30,6 +33,7 @@ export function sanitizeHtml(html: string): string {
                "https://wsrv.nl/?&output=webp&w=600&h=600&fit=inside&we&url=" + encodeURIComponent(src),
             )
          }
+         // URL_DENY-matching src already stripped by the attribute loop above
       }
    }
    for (const n of toRemove) n.remove()
