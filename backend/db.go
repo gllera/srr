@@ -45,14 +45,14 @@ type DB struct {
 }
 
 type DBCore struct {
-	DataToggle     bool                  `json:"data_tog"`
-	FetchedAt      int64                 `json:"fetched_at"`
-	TotalArticles  int                   `json:"total_art"`
-	NextPackID     int                   `json:"next_pid"`
-	PackOffset     int                   `json:"pack_off"`
-	FirstFetchedAt int64                 `json:"first_fetched,omitempty"`
-	IdxBlock       int                   `json:"idx_blk,omitempty"`
-	Subscriptions  map[int]*Subscription `json:"subscriptions"`
+	DataToggle      bool                  `json:"data_tog"`
+	FetchedAt       int64                 `json:"fetched_at"`
+	TotalArticles   int                   `json:"total_art"`
+	NextPackID      int                   `json:"next_pid"`
+	PackOffset      int                   `json:"pack_off"`
+	FirstFetchedAt  int64                 `json:"first_fetched,omitempty"`
+	FetchedAtCursor int                   `json:"fetched_at_cur,omitempty"`
+	Subscriptions   map[int]*Subscription `json:"subscriptions"`
 }
 
 func NewDB(ctx context.Context, locked bool) (*DB, error) {
@@ -285,7 +285,7 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 	}
 
 	prevPackID := c.NextPackID
-	prevFetchedTS := c.FetchedAt / 28800
+	prevFetchedTS := c.FirstFetchedAt/28800 + int64(c.FetchedAtCursor)
 	var fetchedCarry int64
 
 	for _, item := range articles {
@@ -296,7 +296,7 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 		}
 
 		if meta.Len() == 0 {
-			if err := writeIdxHeader(meta, c.IdxBlock, c.NextPackID, c.PackOffset, c.Subscriptions); err != nil {
+			if err := writeIdxHeader(meta, c.FetchedAtCursor, c.NextPackID, c.PackOffset, c.Subscriptions); err != nil {
 				return err
 			}
 		}
@@ -326,7 +326,7 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 			return err
 		}
 
-		c.IdxBlock += int(delta)
+		c.FetchedAtCursor += int(delta)
 		prevPackID = c.NextPackID
 		prevFetchedTS = c.FetchedAt / 28800
 

@@ -3,6 +3,10 @@ const sw = self as unknown as ServiceWorkerGlobalScope
 
 const cache = caches.open("srr-v1")
 let valid = false
+// Tracks an in-flight db.gz check so latest-pack handlers wait for the validity
+// flag to settle. Without this, a parallel true.gz/false.gz handler would read
+// `valid = false` before getDB() has finished comparing against the cache.
+let dbFlight: Promise<unknown> = Promise.resolve()
 
 sw.addEventListener("install", () => sw.skipWaiting())
 sw.addEventListener("activate", (e) => e.waitUntil(sw.clients.claim()))
@@ -10,9 +14,13 @@ sw.addEventListener("activate", (e) => e.waitUntil(sw.clients.claim()))
 sw.addEventListener("fetch", (e) => {
    const filename = new URL(e.request.url).pathname.split("/").pop() || ""
    if (/^\d+\.gz$/.test(filename)) e.respondWith(cacheFirst(e.request))
-   else if (filename === "db.gz") e.respondWith(getDB(e.request))
-   else if (filename === "true.gz" || filename === "false.gz")
-      e.respondWith(valid ? cacheFirst(e.request) : networkFirst(e.request))
+   else if (filename === "db.gz") {
+      const p = getDB(e.request)
+      dbFlight = p.catch(() => {})
+      e.respondWith(p)
+   } else if (filename === "true.gz" || filename === "false.gz") {
+      e.respondWith(dbFlight.then(() => (valid ? cacheFirst(e.request) : networkFirst(e.request))))
+   }
 })
 
 async function cachedFetch(req: Request): Promise<Response> {

@@ -33,7 +33,8 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
          let fetchedAt = h[0]
          let packId = h[1]
          const packOff = h[2]
-         pack.subCounts = new Uint32Array(rawBuf, 3 * 4, 256)
+         // Copy out so the raw buffer can be GC'd after parse() returns
+         pack.subCounts = new Uint32Array(new Uint32Array(rawBuf, 3 * 4, 256))
          pack.ownSubCounts = new Uint32Array(256)
          const baseChron = packIndex * IDX_PACK_SIZE
 

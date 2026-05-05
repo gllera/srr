@@ -53,30 +53,30 @@ Frontend-specific additions:
 
 State: `pos` (chronIdx), `filter` (object with `active`, `subs`, `tokens`, `matches()`, `clear()`, `set(tokens)`), `floorChron`.
 
-**`filter`** — inactive when `tokens` is empty (`ALL_SUBS` proxy matches everything); active when tokens set:
-- `toggleFilter()`: inactive ↔ single-sub filter on current article's sub
-- `last(token?)`: optional token — undefined = no filter change, `""` = clear filter, otherwise sets filter via `filter.set([token])`; always jumps to last matching article
-- `filter.set(tokens)`: resolves tokens (numeric sub IDs or tag names) into `subs` map (`sub_id → add_idx`)
-- `cycleFilter(dir)`: steps through `getFilterEntries()` list by `dir` (+1/-1), calls `last()`
-- `getFilterEntries()`: returns `["", "tag:x", ..., "subId", ...]` built via `data.groupSubsByTag()`
-- `getCurrentFilterKey()`: maps current filter state to a key matching `getFilterEntries()` format
+**`filter`** — active when `tokens` non-empty:
+- `filter.clear()`: empties tokens, repopulates `subs` from all subscriptions with `total_art > 0`
+- `filter.set(tokens)`: resolves tokens (numeric sub IDs or tag names) into `subs` map (`sub_id → add_idx`); falls back to `clear()` if no token resolves
+- `last(token?)`: undefined = no filter change, `""` = clear filter, otherwise `filter.set([token])`; always jumps to last matching article
+- `cycleFilter(dir)`: steps through `getFilterEntries()` by `dir` (+1/-1), calls `last()`
+- `getFilterEntries()`: returns `["", "tagName", ..., "subId", ...]` built via `data.groupSubsByTag()`
+- `getCurrentFilterKey()`: returns `""`, the single token, or `""` for multi-token filters (URL-only edge case)
 - Navigation uses `findLeft`/`findRight` — synchronous linear scans via `data.getSubId()`
-- Hash: `!` segment, `+`-separated tokens (sub IDs or tag names)
+- Hash: `!` segment, `+`-separated tokens, each `encodeURIComponent`-wrapped to survive special chars in tag names
 
 **`floorChron`** — `0` (no floor) or chronIdx lower bound:
-- Constrains `left()` and `has_left`; does NOT prevent `load()` below floor
+- Soft floor: constrains `left()` and `has_left`; does NOT prevent `load()`/`right()` below floor. `showFeed` clamps the displayed `countLeft` to `≥ 0` so soft-floor positions don't surface a negative counter.
 - Hash: always the `floor` part before the comma (e.g. `#0,pos` when no floor, `#N,pos` when set)
-- `setFloorHere()` / `clearFloor()` — synchronous, return `IShowFeed`
+- `setFloorHere()` / `clearFloor()` — synchronous, return `IShowFeed`. Callers must skip when the `guard()` mutex is busy (`app.ts` checks `busy`) — they call `data.getArticleSync(pos)` which returns undefined while a navigation fetch is in flight.
 
 ## Test Patterns
 
-`src/js/nav.test.ts` — ~141 cases. `src/js/data.test.ts` — 13 cases (pure functions only).
+`src/js/nav.test.ts` — large nav suite. `src/js/data.test.ts` — pure-function cases only.
 
 **nav.test.ts**:
-- **Mock**: `vi.hoisted()` + `vi.mock("./data", ...)` with same shape as data.ts exports. Mocks `getSubId`, `loadArticle`, `getArticleSync`, `groupSubsByTag`, `activeSubs`.
-- **Reset**: `beforeEach` resets all data state + `nav.filter.clear()` + `nav.setFloorChron(0)`
+- **Mock**: `vi.hoisted()` + `vi.mock("./data", ...)` with same shape as data.ts exports. Mocks `getSubId`, `loadArticle`, `getArticleSync`, `groupSubsByTag`, `findLeft`, `findRight`, `countLeft`, `findChronForTimestamp`.
+- **Reset**: `beforeEach` resets data state, calls `nav.filter.clear()`, and re-spies `history.pushState`/`replaceState`. `floorChron` carries over between tests — set it explicitly via the hash when relevant.
 - **Helpers**: `makeArticle(overrides)`, `makeSub(overrides)` — factory with defaults. `setupIndex(entries)` — populates `db.subscriptions` and wires `getSubId`/`loadArticle`/`getArticleSync` mocks.
-- **Hash checks**: spy on `history.pushState`/`replaceState`
+- **Hash checks**: spy on `history.pushState`/`replaceState` (note the spy accumulates across tests in the same describe).
 
 **data.test.ts**: mocks the module, re-exports pure functions (`numFinalizedIdx`, `findChronForTimestamp`) with writable `db`/`fetchedAts` state.
 

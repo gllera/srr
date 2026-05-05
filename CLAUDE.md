@@ -35,7 +35,7 @@ Shared format between backend (writer) and frontend (reader).
 ### `db.gz`
 
 ```
-{ data_tog, fetched_at, total_art, next_pid, pack_off, subscriptions{}, first_fetched }
+{ data_tog, fetched_at, total_art, next_pid, pack_off, subscriptions{}, first_fetched, fetched_at_cur? }
 ```
 
 | Field | Type | Description |
@@ -47,6 +47,7 @@ Shared format between backend (writer) and frontend (reader).
 | `pack_off` | int | Current offset in latest data pack |
 | `subscriptions` | object | JSON object keyed by subscription ID (string); may be `null` in JSON (default `{}`) |
 | `first_fetched` | int | Unix timestamp of first fetch that produced articles |
+| `fetched_at_cur` | int | Running idx-time cursor in 8-hour blocks since `first_fetched`; persists `prevFetchedTS` across `PutArticles` calls so per-entry `delta_fetched_at` reflects real elapsed time. `omitempty` |
 
 ### Subscriptions (`ISub`)
 
@@ -64,10 +65,11 @@ Two gzip-compressed series under the feed directory:
 | `data/` | JSONL — one `ArticleData` object per line | At `PackSize` (tracked by `next_pid`/`pack_off`) |
 
 **idx/ format** — binary, little-endian, timestamps in 8-hour blocks (÷28800 on write, ×28800 on read):
-- Header: 259 × uint32 — `fetchedAt_base`, `packId_base`, `packOff_base`, then 256 subCount values (one per possible sub_id byte)
+- Header: 259 × uint32 — `fetchedAt_base` (= `fetched_at_cur` at pack start, blocks since `first_fetched`), `packId_base`, `packOff_base`, then 256 subCount values (one per possible sub_id byte)
 - Entries (2 bytes each, after header): `sub_id:u8`, `delta_pack_id:1 << 7 | delta_fetched_at:7`
   - `delta_pack_id == 0` → same pack, offset++; `delta_pack_id == 1` → pack advances by 1, offset resets to 0
   - `delta_fetched_at` clamped to [0, 127]; excess carry rolls into subsequent entries
+  - First entry of a batch carries the gap since the prior fetch (writer derives `prevFetchedTS = first_fetched/28800 + fetched_at_cur`)
 
 **data/ format** — JSONL, each line: `{"s":sub_id,"a":fetched_at,"p":published,"t":"title","l":"link","c":"content"}`
 

@@ -107,6 +107,13 @@ describe("sanitizeHtml", () => {
       const result = sanitizeHtml('<a href="javascript :alert(1)">click</a>')
       expect(result).not.toContain("javascript")
    })
+
+   it("strips data:, vbscript:, file: from href and src", () => {
+      expect(sanitizeHtml('<a href="data:text/html,<script>alert(1)</script>">x</a>')).not.toContain("data:")
+      expect(sanitizeHtml('<img src="data:image/svg+xml,<svg onload=alert(1)></svg>">')).not.toContain("data:")
+      expect(sanitizeHtml('<a href="vbscript:msgbox(1)">x</a>')).not.toContain("vbscript")
+      expect(sanitizeHtml('<a href="file:///etc/passwd">x</a>')).not.toContain("file:")
+   })
 })
 
 describe("timeAgo", () => {

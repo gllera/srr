@@ -32,7 +32,7 @@ Low-level storage interface: `Get`/`Put`/`AtomicPut`/`Rm`/`Close`. Registry sele
 
 - **`local.go`** — Auto-creates subdirs via `os.MkdirAll`.
 - **`s3.go`** — `IfNoneMatch` precondition headers + CRC32 checksums. `S3Config`: region, endpoint, profile, static credentials.
-- **`sftp.go`** — Auth chain: URL password → config password → config/default private key → `~/.ssh/` keys → SSH agent → error. Host key verification via `~/.ssh/known_hosts` by default (`SFTPConfig.Insecure` to skip).
+- **`sftp.go`** — Auto-creates subdirs via `client.MkdirAll`. Auth chain: URL password → config password → config/default private key → `~/.ssh/` keys → SSH agent → error. Host key verification via `~/.ssh/known_hosts` by default (`SFTPConfig.Insecure` to skip).
 
 ### Pack Storage (`db.go`)
 
@@ -41,6 +41,7 @@ See root `CLAUDE.md` Data Contract for pack format spec (idx/, data/ series), db
 Backend-specific:
 - `PutArticles` and `savePack` manage the two series. Order: `PutArticles` → `Commit`.
 - `PutArticles` writes binary idx and JSONL data directly; splits idx packs at every 50,000 articles; sets `FirstFetchedAt` on first run that produces articles.
+- Per-entry `delta_fetched_at` is computed against `prevFetchedTS = FirstFetchedAt/28800 + FetchedAtCursor` so the first entry of each batch records the elapsed time since the previous fetch (clamped to 7 bits with carry).
 - `ArticleData` struct: `{ SubID, FetchedAt, Published, Title, Link, Content }` — serialized as JSONL with short keys `s/a/p/t/l/c`.
 - `DBCore.Subscriptions` is `map[int]*Subscription`; serialized as a JSON object keyed by subscription ID. `AddSubscription` assigns the first free ID in [0, 255] and returns an error if all 256 slots are taken. `RemoveSubscription` uses `delete`.
 - `Commit` serializes `DBCore` via `AtomicPut`. `db.gz` is gzip-compressed JSON with short keys — read `DBCore` struct tags for full schema.

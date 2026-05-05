@@ -64,7 +64,8 @@ function showFeed(article: IArticle): IShowFeed {
       filtered: filter.active,
       floor: floorChron > 0,
       sub: data.db.subscriptions[article.s],
-      countLeft: filteredLeft,
+      // Clamp: pos can sit below floor (soft floor); raw filteredLeft can be negative
+      countLeft: Math.max(0, filteredLeft),
    }
 }
 
@@ -101,6 +102,7 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
          .substring(bangIdx + 1)
          .split("+")
          .filter((t) => t.length > 0)
+         .map(decodeURIComponent)
       if (tokens.length > 0) filter.set(tokens)
    }
 
@@ -119,7 +121,6 @@ export async function left(): Promise<IShowFeed> {
    const found = data.findLeft(pos - 1, floorChron, filter.subs)
    if (found === -1) throw new Error("no left match")
    pos = found
-   filteredLeft--
    return resolve()
 }
 
@@ -127,7 +128,6 @@ export async function right(): Promise<IShowFeed> {
    const found = data.findRight(pos + 1, filter.subs)
    if (found === -1) throw new Error("no right match")
    pos = found
-   filteredLeft++
    return resolve()
 }
 
@@ -189,13 +189,7 @@ export function getFilterEntries(): string[] {
 // Map current filter state to a key matching getFilterEntries() format (""|"tagName"|"id")
 function getCurrentFilterKey(): string {
    if (!filter.active) return ""
-   if (filter.tokens.length === 1 && !Number.isFinite(Number(filter.tokens[0]))) return filter.tokens[0]
    if (filter.tokens.length === 1) return filter.tokens[0]
-   // Multiple numeric tokens — check if they match a tag group
-   const ids = new Set(filter.tokens.map(Number))
-   for (const sub of Object.values(data.db.subscriptions)) {
-      if (sub.tag && ids.has(sub.id)) return sub.tag
-   }
    return ""
 }
 
@@ -209,7 +203,7 @@ export async function cycleFilter(dir: number): Promise<IShowFeed> {
 }
 
 function updateHash(replace = false) {
-   const tokens = filter.active ? "!" + filter.tokens.join("+") : ""
+   const tokens = filter.active ? "!" + filter.tokens.map(encodeURIComponent).join("+") : ""
    const hash = `#${floorChron},${pos}${tokens}`
    history[replace ? "replaceState" : "pushState"](null, "", hash)
 }

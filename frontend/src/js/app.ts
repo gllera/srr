@@ -198,11 +198,11 @@ function showFloor() {
       },
       (value) => {
          if (value === "here") {
-            render(nav.setFloorHere())
+            if (!busy) render(nav.setFloorHere())
             return Promise.resolve()
          }
          if (value === "clear") {
-            render(nav.clearFloor())
+            if (!busy) render(nav.clearFloor())
             return Promise.resolve()
          }
          return guard(async () => {
@@ -216,7 +216,9 @@ function showFloor() {
 }
 
 const KEY_ACTIONS: Record<string, () => void> = {
-   " ": () => render(nav.floorChron > 0 ? nav.clearFloor() : nav.setFloorHere()),
+   " ": () => {
+      if (!busy) render(nav.floorChron > 0 ? nav.clearFloor() : nav.setFloorHere())
+   },
    ArrowLeft: () => !el.prev.disabled && guard(() => nav.left()),
    a: () => !el.prev.disabled && guard(() => nav.left()),
    ArrowRight: () => !el.next.disabled && guard(() => nav.right()),

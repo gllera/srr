@@ -54,8 +54,8 @@ func (o *AddCmd) Run() error {
 
 	var sub *Subscription
 	if o.Upd != nil {
-		if *o.Upd <= 0 {
-			return fmt.Errorf("subscription id must be greater than 0")
+		if *o.Upd < 0 || *o.Upd > 255 {
+			return fmt.Errorf("subscription id must be in [0, 255]")
 		}
 		sub = db.Subscriptions()[*o.Upd]
 		if sub == nil {

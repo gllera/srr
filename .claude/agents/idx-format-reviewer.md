@@ -10,7 +10,7 @@ You are a binary idx-pack format auditor for the SRR project. The idx pack forma
 ## The Format (authoritative spec lives in root CLAUDE.md "Data Contract")
 
 - **Header**: 259 × `uint32` little-endian = 1036 bytes
-  - `[0]` = `IdxBlock` base (cumulative `delta_fetched_at` count up to the start of this pack — semantically the "fetchedAt block base")
+  - `[0]` = `FetchedAtCursor` base (cumulative `delta_fetched_at` count up to the start of this pack — semantically the "fetchedAt block base")
   - `[1]` = `NextPackID` base (data pack ID at the start of this idx pack)
   - `[2]` = `PackOffset` base (offset into that data pack)
   - `[3..258]` = `subCounts[256]` — one `uint32` per possible sub_id, snapshotting per-sub article totals at the start of this idx pack
@@ -74,7 +74,7 @@ Audit each of the following and report any failure:
 - The 8-hour block divisor (`28800`) must be identical in both `db.go` (`/ 28800`) and `data.ts` (`Math.trunc(... / 28800)`)
 
 **B. Header layout**
-- Writer puts `IdxBlock` at `buf[0:]`, `NextPackID` at `buf[4:]`, `PackOffset` at `buf[8:]`
+- Writer puts `FetchedAtCursor` at `buf[0:]`, `NextPackID` at `buf[4:]`, `PackOffset` at `buf[8:]`
 - Reader reads `h[0]`, `h[1]`, `h[2]` in the same order
 - Writer puts `subs[id].TotalArt` at `buf[12 + id*4:]` for each id in `0..255`
 - Reader reads `subCounts = new Uint32Array(rawBuf, 3 * 4, 256)` — note `3*4 = 12`, matching offset
@@ -90,8 +90,8 @@ Audit each of the following and report any failure:
 - Writer: when `delta > 0x7F`, emits `0x7F` and carries `delta - 0x7F` into the next iteration via `fetchedCarry`
 - Writer: when `delta < 0` (clock skew between fetches?), emits `0`, carries the negative remainder
 - Reader: simply accumulates `fetchedAt += packed & 0x7f` per entry
-- Verify: the running sum on the reader equals the writer's true cumulative `c.IdxBlock` after each entry, **including** carry rollovers. The reader has no concept of carry — the writer must spread the excess across enough subsequent entries that the cumulative sum still matches.
-- Note `fetchedAts: Uint16Array` on the reader: this is a 16-bit buffer storing what is in principle a growing block index. **Latent overflow risk** if `IdxBlock` ever exceeds 65535 — that happens when `(latest_fetch - first_fetch) / 28800 > 65535`, i.e., ~60 years worth of 8-hour blocks. Flag any change that affects this storage.
+- Verify: the running sum on the reader equals the writer's true cumulative `c.FetchedAtCursor` after each entry, **including** carry rollovers. The reader has no concept of carry — the writer must spread the excess across enough subsequent entries that the cumulative sum still matches.
+- Note `fetchedAts: Uint16Array` on the reader: this is a 16-bit buffer storing what is in principle a growing block index. **Latent overflow risk** if `FetchedAtCursor` ever exceeds 65535 — that happens when `(latest_fetch - first_fetch) / 28800 > 65535`, i.e., ~60 years worth of 8-hour blocks. Flag any change that affects this storage.
 
 **E. Pack split boundary**
 - Writer split: `if c.TotalArticles > 0 && c.TotalArticles%idxPackSize == 0 { savePack("idx/<TotalArticles/idxPackSize - 1>.gz", meta) }` — note the `-1`
