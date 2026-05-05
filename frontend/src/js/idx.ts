@@ -45,13 +45,14 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
          pack.subIds = new Uint8Array(packSize)
          pack.fetchedAts = new Uint16Array(packSize)
          let localOff = 0
-         const view = new DataView(rawBuf)
-         for (let off = IDX_HEADER_SIZE; off + 2 <= rawBuf.byteLength; off += 2) {
-            const packed = view.getUint8(off + 1)
+         const bytes = new Uint8Array(rawBuf)
+         const limit = bytes.length - 1
+         for (let off = IDX_HEADER_SIZE; off < limit; off += 2) {
+            const packed = bytes[off + 1]
             if (packed >> 7) packId++
             fetchedAt += packed & 0x7f
 
-            const subId = view.getUint8(off)
+            const subId = bytes[off]
             pack.subIds[localOff] = subId
             pack.fetchedAts[localOff] = fetchedAt
             pack.ownSubCounts[subId]++

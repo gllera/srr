@@ -1,5 +1,6 @@
 import { makeLRU } from "./cache"
 import { IDX_PACK_SIZE, makeIdxPack, type IdxPack } from "./idx"
+import { evictFromCache } from "./sw-cache"
 
 export { IDX_PACK_SIZE }
 
@@ -12,9 +13,6 @@ export function abortPending() {
 const DB_URL = new URL(SRR_CDN_URL, window.location.href)
 // Reuses the browser's preloaded response from <link rel="preload"> in the built HTML
 const dbFetch = fetch(new URL("db.gz", DB_URL))
-
-// Must match the cache name in src/sw.ts
-const SW_CACHE = "srr-v1"
 
 export let db: IDB
 
@@ -61,16 +59,16 @@ export function getSubId(chronIdx: number): number {
    return subIds[chronIdx - n * IDX_PACK_SIZE]
 }
 
-// Binary search for rightmost entry where fetchedAt <= ts
+// Binary search for rightmost entry where fetchedAt <= ts.
 export function findChronForTimestamp(ts: number): number {
-   for (const p of idxPacks) p.parse()
    const tsBlocks = Math.trunc(ts / 28800) - Math.trunc(db.first_fetched / 28800)
    let lo = 0
    let hi = db.total_art
    while (lo < hi) {
       const mid = (lo + hi) >>> 1
       const n = packIdx(mid)
-      if (idxPacks[n].fetchedAts[mid - n * IDX_PACK_SIZE] <= tsBlocks) lo = mid + 1
+      const p = idxPacks[n].parse()
+      if (p.fetchedAts[mid - n * IDX_PACK_SIZE] <= tsBlocks) lo = mid + 1
       else hi = mid
    }
    return lo > 0 ? lo - 1 : 0
@@ -170,14 +168,9 @@ export async function loadArticle(chronIdx: number): Promise<IArticle> {
 
 async function evictPack(packId: number): Promise<void> {
    dataCache.drop(packId)
-   try {
-      const isFinalized = packId < db.next_pid
-      const name = isFinalized ? packId.toString() : String(db.data_tog)
-      const c = await caches.open(SW_CACHE)
-      await c.delete(new URL(`data/${name}.gz`, DB_URL))
-   } catch {
-      // caches API unavailable (e.g., insecure context) — in-memory drop is enough
-   }
+   const isFinalized = packId < db.next_pid
+   const name = isFinalized ? packId.toString() : String(db.data_tog)
+   await evictFromCache(new URL(`data/${name}.gz`, DB_URL))
 }
 
 // db is immutable after init(); cache is safe for the app's lifetime
