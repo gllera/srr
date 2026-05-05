@@ -13,6 +13,9 @@ const DB_URL = new URL(SRR_CDN_URL, window.location.href)
 // Reuses the browser's preloaded response from <link rel="preload"> in the built HTML
 const dbFetch = fetch(new URL("db.gz", DB_URL))
 
+// Must match the cache name in src/sw.ts
+const SW_CACHE = "srr-v1"
+
 export let db: IDB
 
 let idxPacks: IdxPack[] = []
@@ -156,7 +159,25 @@ export function getArticleSync(chronIdx: number): IArticle | undefined {
 export async function loadArticle(chronIdx: number): Promise<IArticle> {
    const ref = getPackRef(chronIdx)
    const entries = await loadDataPack(ref.packId)
+   if (ref.offset >= entries.length) {
+      // Stale or truncated pack (most often a SW cache entry from a prior
+      // pack state). Evict both layers so a Retry hits the network.
+      await evictPack(ref.packId)
+      throw new Error(`pack ${ref.packId} out of sync (offset ${ref.offset} of ${entries.length}); retry to refresh`)
+   }
    return entries[ref.offset]
+}
+
+async function evictPack(packId: number): Promise<void> {
+   dataCache.drop(packId)
+   try {
+      const isFinalized = packId < db.next_pid
+      const name = isFinalized ? packId.toString() : String(db.data_tog)
+      const c = await caches.open(SW_CACHE)
+      await c.delete(new URL(`data/${name}.gz`, DB_URL))
+   } catch {
+      // caches API unavailable (e.g., insecure context) — in-memory drop is enough
+   }
 }
 
 // db is immutable after init(); cache is safe for the app's lifetime

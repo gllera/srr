@@ -18,5 +18,8 @@ export function makeLRU<T>(maxSize: number) {
          map.set(id, val)
          if (map.size > maxSize) map.delete(map.keys().next().value!)
       },
+      drop(id: number) {
+         map.delete(id)
+      },
    }
 }

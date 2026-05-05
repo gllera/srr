@@ -45,6 +45,7 @@ type CLI struct {
 	Art     ArtGroup   `cmd:"" aliases:"a" help:"Article management."`
 	Preview PreviewCmd `cmd:"" aliases:"p" help:"Preview processed feed articles in a browser."`
 	Config  ConfigCmd  `cmd:"" aliases:"c" help:"Print resolved configuration."`
+	Inspect InspectCmd `cmd:"" aliases:"i" help:"Inspect pack consistency (validate idx<->data, debug chronIdx lookup)."`
 	Version VersionCmd `cmd:"" help:"Print version information."`
 }
 

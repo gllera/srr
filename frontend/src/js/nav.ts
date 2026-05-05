@@ -69,9 +69,11 @@ function showFeed(article: IArticle): IShowFeed {
    }
 }
 
-async function resolve(replace = false): Promise<IShowFeed> {
+async function resolve(target: number, replace = false): Promise<IShowFeed> {
+   // Load first; commit pos only on success so a Retry replays the same chron.
+   const article = await data.loadArticle(target)
+   pos = target
    recount()
-   const article = await data.loadArticle(pos)
    updateHash(replace)
    return showFeed(article)
 }
@@ -110,25 +112,23 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
 
    if (data.db.total_art === 0) throw new Error("no articles")
 
-   pos = Number(posStr)
-   if (!Number.isFinite(pos) || pos < 0 || pos >= data.db.total_art) pos = data.db.total_art - 1
+   let target = Number(posStr)
+   if (!Number.isFinite(target) || target < 0 || target >= data.db.total_art) target = data.db.total_art - 1
 
-   if (!filter.matches(data.getSubId(pos), pos)) return last()
-   return resolve(true)
+   if (!filter.matches(data.getSubId(target), target)) return last()
+   return resolve(target, true)
 }
 
 export async function left(): Promise<IShowFeed> {
    const found = data.findLeft(pos - 1, floorChron, filter.subs)
    if (found === -1) throw new Error("no left match")
-   pos = found
-   return resolve()
+   return resolve(found)
 }
 
 export async function right(): Promise<IShowFeed> {
    const found = data.findRight(pos + 1, filter.subs)
    if (found === -1) throw new Error("no right match")
-   pos = found
-   return resolve()
+   return resolve(found)
 }
 
 export async function first(): Promise<IShowFeed> {
@@ -138,8 +138,7 @@ export async function first(): Promise<IShowFeed> {
    if (floorChron > start) start = floorChron
    const found = data.findRight(start, filter.subs)
    if (found === -1) return resolveNoMatch()
-   pos = found
-   return resolve()
+   return resolve(found)
 }
 
 export async function last(token?: string): Promise<IShowFeed> {
@@ -149,13 +148,12 @@ export async function last(token?: string): Promise<IShowFeed> {
    }
    const found = data.findLeft(data.db.total_art - 1, floorChron, filter.subs)
    if (found === -1) return resolveNoMatch()
-   pos = found
-   return resolve()
+   return resolve(found)
 }
 
 export async function setFloorAt(idx: number): Promise<IShowFeed> {
    floorChron = idx
-   return resolve()
+   return resolve(pos)
 }
 
 export function setFloorHere(): IShowFeed {

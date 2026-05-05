@@ -6,7 +6,7 @@ SRR Frontend — single-page RSS reader. Zero runtime deps. Parcel + TypeScript 
 
 ## Commands
 
-`npm run dev|build|test|lint|format` — dev server, production build (`dist/`), vitest+jsdom, ESLint, Prettier.
+`npm run dev|build|test|lint|format` — dev server, production build (`../dist/srrf/`), vitest+jsdom, ESLint, Prettier.
 
 ## Architecture
 
