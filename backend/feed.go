@@ -86,7 +86,9 @@ func parseDate(r rawFeedItem, hint *[2]string) time.Time {
 			}
 		}
 	}
-	return time.Now().UTC()
+	// Zero time signals "no date"; callers translate to Published=0 (omitempty).
+	// Falling back to time.Now() would non-deterministically reorder undated items.
+	return time.Time{}
 }
 
 func rawToFeedItem(r rawFeedItem, dateHint *[2]string) *mod.RawItem {

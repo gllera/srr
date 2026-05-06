@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"testing"
-	"time"
 
 	"srrb/mod"
 )
@@ -150,13 +149,13 @@ func TestParseGUIDFallbackToLink(t *testing.T) {
 	}
 }
 
-func TestParseDateFallbackToNow(t *testing.T) {
+func TestParseDateUnparseableIsZero(t *testing.T) {
 	items := collectFeed(t, `<rss version="2.0"><channel>
     <item><title>No Date</title></item>
   </channel></rss>`)
 
-	if time.Since(*items[0].Published) > time.Second {
-		t.Errorf("published = %v, expected ~now", items[0].Published)
+	if !items[0].Published.IsZero() {
+		t.Errorf("published = %v, expected zero time for unparseable date", items[0].Published)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/microcosm-cc/bluemonday"
 
@@ -111,11 +112,20 @@ func (s *Subscription) Fetch(ctx context.Context, client *http.Client, buf []byt
 	}
 
 	s.newItems = s.newItems[:0]
-	var last *mod.RawItem
+	// Track the GUID of the item with the latest Published time so the next
+	// fetch halts at it whether the feed is descending (RSS, most Atom) or
+	// ascending (some Atom generators). Capture by value: the pipeline can
+	// mutate i.Published in-place, and a pointer to a previous item could
+	// nil-deref on the next iteration's comparison.
+	var newestPub time.Time
+	var newestGUID uint32
+	var hasNewest bool
 
 	err = parseFeed(buf[:n], func(i *mod.RawItem) error {
-		if last == nil {
-			last = i
+		if i.Published != nil && (!hasNewest || i.Published.After(newestPub)) {
+			newestPub = *i.Published
+			newestGUID = i.GUID
+			hasNewest = true
 		}
 		if s.StopGUID == i.GUID {
 			return ErrStopFeed
@@ -124,12 +134,16 @@ func (s *Subscription) Fetch(ctx context.Context, client *http.Client, buf []byt
 			return err
 		}
 
+		var publishedUnix int64
+		if i.Published != nil && !i.Published.IsZero() {
+			publishedUnix = i.Published.Unix()
+		}
 		s.newItems = append(s.newItems, &Item{
 			Sub:       s,
 			Title:     i.Title,
 			Content:   i.Content,
 			Link:      i.Link,
-			Published: i.Published.Unix(),
+			Published: publishedUnix,
 		})
 		return nil
 	})
@@ -137,8 +151,8 @@ func (s *Subscription) Fetch(ctx context.Context, client *http.Client, buf []byt
 	if err != nil {
 		return err
 	}
-	if last != nil {
-		s.StopGUID = last.GUID
+	if hasNewest {
+		s.StopGUID = newestGUID
 	}
 	s.ETag = etag
 	s.LastModified = lastModified

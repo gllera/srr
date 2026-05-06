@@ -1,5 +1,5 @@
 import * as data from "./data"
-import { formatDate, sanitizeHtml, timeAgo } from "./fmt"
+import { formatDate, sanitizeHtml, timeAgo, URL_DENY } from "./fmt"
 import * as nav from "./nav"
 
 const el = {
@@ -13,7 +13,6 @@ const el = {
    source: document.querySelector(".srr-source") as HTMLButtonElement,
    date: document.querySelector(".srr-date") as HTMLElement,
    counter: document.querySelector(".srr-counter") as HTMLElement,
-   floorBtn: document.querySelector(".srr-floor-btn") as HTMLButtonElement,
    popupText: document.querySelector(".srr-popup-text") as HTMLElement,
    popupRetry: document.querySelector(".srr-popup-retry") as HTMLButtonElement,
    popupClose: document.querySelector(".srr-popup-close") as HTMLElement,
@@ -26,6 +25,8 @@ class Notice extends Error {}
 let busy = false
 let retryFn: (() => void) | null = null
 let currentPublished = 0
+let currentSource = { id: 0, title: "", tag: "" }
+let lastSourceLabel = ""
 let previousFocus: HTMLElement | null = null
 let dropdownOpen = false
 const ddMenus = document.querySelectorAll<HTMLElement>(".srr-dropdown-menu")
@@ -91,17 +92,32 @@ function render(o: IShowFeed) {
    el.content.style.opacity = "0"
    el.content.style.transform = "translateY(6px)"
    el.content.innerHTML = sanitizeHtml(o.article.c)
-   el.titleLink.href = o.article.l
+   // Reject javascript:/data:/vbscript:/file: in case the writer pipeline let one through
+   if (o.article.l && !URL_DENY.test(o.article.l)) el.titleLink.href = o.article.l
+   else el.titleLink.removeAttribute("href")
    el.prev.disabled = !o.has_left
    el.next.disabled = !o.has_right
 
-   currentPublished = o.article.p
-   el.date.textContent = timeAgo(currentPublished)
-   el.date.title = formatDate(currentPublished)
+   // p is omitted (=> undefined) when the writer couldn't parse a date
+   currentPublished = o.article.p ?? 0
+   el.date.textContent = currentPublished ? timeAgo(currentPublished) : ""
+   el.date.title = currentPublished ? formatDate(currentPublished) : ""
 
-   el.source.textContent = o.sub?.title || "[DELETED]"
-   el.source.classList.toggle("srr-filtered", o.filtered)
-   el.floorBtn.classList.toggle("srr-floor-active", o.floor)
+   currentSource = {
+      id: o.sub?.id ?? 0,
+      title: o.sub?.title || "[DELETED]",
+      tag: o.sub?.tag || "",
+   }
+   refreshSourceLabel()
+   if (o.floor && !data.getArticleSync(nav.floorChron)) {
+      const target = nav.floorChron
+      data
+         .loadArticle(target)
+         .then((a) => {
+            if (nav.floorChron === target && a) refreshSourceLabel()
+         })
+         .catch(() => {})
+   }
    el.counter.textContent = String(o.countLeft)
 
    document.title = "SRR - " + o.article.t
@@ -117,11 +133,50 @@ function render(o: IShowFeed) {
    } catch {}
 }
 
+function refreshSourceLabel() {
+   const tagFiltered = nav.isSingleFilter(currentSource.tag)
+   const subFiltered = nav.isSingleFilter(String(currentSource.id))
+   const floorArticle = nav.floorChron > 0 ? data.getArticleSync(nav.floorChron) : null
+   const floorText = floorArticle ? timeAgo(floorArticle.a) : ""
+
+   // Skip DOM rebuild when nothing visible changed (60s tick is the hot caller)
+   const key = `${nav.floorChron}|${floorText}|${currentSource.tag}|${currentSource.title}|${tagFiltered}|${subFiltered}`
+   if (key === lastSourceLabel) return
+   lastSourceLabel = key
+
+   const parts: HTMLSpanElement[] = []
+   const aria: string[] = []
+   const push = (text: string, on: boolean, label: string) => {
+      const s = document.createElement("span")
+      s.textContent = text
+      if (on) s.className = "srr-filter-on"
+      parts.push(s)
+      aria.push(label)
+   }
+
+   if (nav.floorChron > 0) push(floorText || "●", false, `floor ${floorText || "loading"}`)
+   if (currentSource.tag) {
+      const tag = currentSource.tag
+      push((tag[0] + tag[tag.length - 1]).toUpperCase(), tagFiltered, `tag ${tag}${tagFiltered ? " active" : ""}`)
+   }
+   push(currentSource.title, subFiltered, `source ${currentSource.title}${subFiltered ? " active" : ""}`)
+
+   const children: (HTMLSpanElement | string)[] = []
+   parts.forEach((p, i) => {
+      if (i > 0) children.push(" · ")
+      children.push(p)
+   })
+   el.source.replaceChildren(...children)
+   el.source.title = currentSource.tag ? `Tag: ${currentSource.tag}` : ""
+   el.source.setAttribute("aria-label", `Filter: ${aria.join(", ")}`)
+}
+
 function createLink(value: string, text: string, className?: string): HTMLAnchorElement {
    const a = document.createElement("a")
    a.href = "#"
    a.dataset.value = value
    a.textContent = text
+   a.setAttribute("role", "menuitem")
    if (className) a.className = className
    return a
 }
@@ -140,7 +195,6 @@ function toggleDropdown(
    dd.replaceChildren()
    const frag = document.createDocumentFragment()
    buildContent(frag)
-   frag.querySelectorAll("a").forEach((a) => a.setAttribute("role", "menuitem"))
    dd.onclick = (e) => {
       const a = (e.target as HTMLElement).closest("a[data-value]") as HTMLAnchorElement | null
       if (!a) return
@@ -150,18 +204,37 @@ function toggleDropdown(
    dd.appendChild(frag)
 }
 
-function showSubs() {
-   const { tagged, sortedTags, untagged } = data.groupSubsByTag()
+function divEl(className: string): HTMLDivElement {
+   const d = document.createElement("div")
+   d.className = className
+   return d
+}
+
+function showMenu() {
+   const { tagged, sortedTags, untagged } = data.groupSubsByTag(nav.floorChron)
+   const current = nav.getCurrentFilterKey()
+   const cls = (base: string, v: string) => (v === current ? `${base} srr-active`.trim() : base)
 
    toggleDropdown(
       "srr-source-menu",
       (frag) => {
-         frag.appendChild(createLink("", "[ALL]"))
+         const since = divEl("srr-chip-row")
+         since.appendChild(createLink("f:here", "Here"))
+         since.appendChild(createLink("f:43200", "12h"))
+         since.appendChild(createLink("f:86400", "1d"))
+         since.appendChild(createLink("f:604800", "7d"))
+         since.appendChild(createLink("f:2592000", "1mo"))
+         if (nav.floorChron > 0) since.appendChild(createLink("f:clear", "Clear"))
+         frag.appendChild(since)
+
+         frag.appendChild(divEl("srr-tag-sep"))
+
+         frag.appendChild(createLink("", "[ALL]", cls("", "")))
          for (const tag of sortedTags) {
             const group = tagged.get(tag)!
-            const div = document.createElement("div")
-            div.className = "srr-tag-group srr-tag-collapsed"
-            const header = createLink(tag, tag, "srr-tag-header")
+            const expanded = tag === current || tag === currentSource.tag
+            const div = divEl(expanded ? "srr-tag-group" : "srr-tag-group srr-tag-collapsed")
+            const header = createLink(tag, tag, cls("srr-tag-header", tag))
             const toggle = document.createElement("span")
             toggle.className = "srr-tag-toggle"
             toggle.addEventListener("click", (e) => {
@@ -171,44 +244,34 @@ function showSubs() {
             })
             header.appendChild(toggle)
             div.appendChild(header)
-            for (const sub of group) div.appendChild(createLink(String(sub.id), sub.title, "srr-tag-item"))
+            for (const sub of group) {
+               const sid = String(sub.id)
+               div.appendChild(createLink(sid, sub.title, cls("srr-tag-item", sid)))
+            }
             frag.appendChild(div)
          }
-         if (sortedTags.length > 0 && untagged.length > 0) {
-            const sep = document.createElement("div")
-            sep.className = "srr-tag-sep"
-            frag.appendChild(sep)
+         if (sortedTags.length > 0 && untagged.length > 0) frag.appendChild(divEl("srr-tag-sep"))
+         for (const sub of untagged) {
+            const sid = String(sub.id)
+            frag.appendChild(createLink(sid, sub.title, cls("", sid)))
          }
-         for (const sub of untagged) frag.appendChild(createLink(String(sub.id), sub.title))
-      },
-      (value) => guard(() => nav.last(value)),
-   )
-}
-
-function showFloor() {
-   toggleDropdown(
-      "srr-floor-menu",
-      (frag) => {
-         frag.appendChild(createLink("here", "Set here"))
-         frag.appendChild(createLink("21600", "6 hours"))
-         frag.appendChild(createLink("86400", "1 day"))
-         frag.appendChild(createLink("604800", "7 days"))
-         frag.appendChild(createLink("2592000", "1 month"))
-         if (nav.floorChron > 0) frag.appendChild(createLink("clear", "Clear"))
       },
       (value) => {
-         if (value === "here") {
+         if (!value.startsWith("f:")) return guard(() => nav.last(value))
+         const v = value.slice(2)
+         if (v === "here") {
             if (!busy) render(nav.setFloorHere())
             return Promise.resolve()
          }
-         if (value === "clear") {
+         if (v === "clear") {
             if (!busy) render(nav.clearFloor())
             return Promise.resolve()
          }
          return guard(async () => {
-            const ts = Math.floor(Date.now() / 1000) - Number(value)
+            const ts = Math.floor(Date.now() / 1000) - Number(v)
             const chron = data.findChronForTimestamp(ts)
             if (chron === 0) throw new Notice("All articles are within that time range")
+            await data.loadArticle(chron)
             return nav.setFloorAt(chron)
          })
       },
@@ -229,6 +292,12 @@ const KEY_ACTIONS: Record<string, () => void> = {
    s: () => nav.getFilterEntries().length > 1 && guard(() => nav.cycleFilter(1)),
    q: () => guard(() => nav.first()),
    e: () => guard(() => nav.last()),
+   f: () => {
+      if (!el.titleLink.getAttribute("href")) return
+      el.titleLink.dispatchEvent(
+         new MouseEvent("click", { bubbles: true, cancelable: true, ctrlKey: true, metaKey: true }),
+      )
+   },
 }
 
 async function init() {
@@ -245,8 +314,7 @@ async function init() {
    el.prev.addEventListener("click", () => guard(() => nav.left()))
    el.next.addEventListener("click", () => guard(() => nav.right()))
    el.last.addEventListener("click", () => guard(() => nav.last()))
-   el.source.addEventListener("click", () => showSubs())
-   el.floorBtn.addEventListener("click", () => showFloor())
+   el.source.addEventListener("click", () => showMenu())
    el.popup.querySelector(".srr-popup-close")!.addEventListener("click", closePopup)
    el.popupRetry.addEventListener("click", () => {
       closePopup()
@@ -294,17 +362,45 @@ async function init() {
 
    let touchStartX = 0
    let touchStartY = 0
+   let twoFingerStartY = 0
+   let twoFingerDy = 0
+   let twoFinger = false
    document.addEventListener(
       "touchstart",
       (e) => {
-         touchStartX = e.touches[0].clientX
-         touchStartY = e.touches[0].clientY
+         if (e.touches.length === 2) {
+            twoFinger = true
+            twoFingerStartY = (e.touches[0].clientY + e.touches[1].clientY) / 2
+            twoFingerDy = 0
+         } else if (e.touches.length === 1) {
+            twoFinger = false
+            touchStartX = e.touches[0].clientX
+            touchStartY = e.touches[0].clientY
+         }
       },
       { passive: true },
    )
    document.addEventListener(
+      "touchmove",
+      (e) => {
+         if (twoFinger && e.touches.length === 2) {
+            e.preventDefault()
+            twoFingerDy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - twoFingerStartY
+         }
+      },
+      { passive: false },
+   )
+   document.addEventListener(
       "touchend",
       (e) => {
+         if (twoFinger) {
+            if (e.touches.length === 0) {
+               twoFinger = false
+               if (Math.abs(twoFingerDy) >= 50 && nav.getFilterEntries().length > 1)
+                  guard(() => nav.cycleFilter(twoFingerDy < 0 ? -1 : 1))
+            }
+            return
+         }
          const dx = e.changedTouches[0].clientX - touchStartX
          const dy = e.changedTouches[0].clientY - touchStartY
          if (Math.abs(dx) < 50 || Math.abs(dy) > Math.abs(dx)) return
@@ -332,9 +428,11 @@ async function init() {
    )
 
    setInterval(() => {
-      if (!currentPublished) return
-      const next = timeAgo(currentPublished)
-      if (el.date.textContent !== next) el.date.textContent = next
+      if (currentPublished) {
+         const next = timeAgo(currentPublished)
+         if (el.date.textContent !== next) el.date.textContent = next
+      }
+      if (nav.floorChron > 0) refreshSourceLabel()
    }, 60000)
 
    let hash = location.hash.substring(1)

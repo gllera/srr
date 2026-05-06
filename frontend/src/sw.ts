@@ -50,10 +50,16 @@ async function networkFirst(req: Request): Promise<Response> {
    }
 }
 
-function buffersEqual(a: ArrayBuffer, b: ArrayBuffer): boolean {
-   const va = new Uint8Array(a),
-      vb = new Uint8Array(b)
-   return va.length === vb.length && va.every((v, i) => v === vb[i])
+// "valid" means the cached true.gz/false.gz are still aligned with the latest
+// db.gz. Latest packs only change when PutArticles runs (which advances total_art
+// and flips data_tog), so compare those fields rather than raw gzipped bytes.
+async function dbSig(res: Response): Promise<string | null> {
+   try {
+      const body = await new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).json()
+      return `${body.total_art ?? 0}|${!!body.data_tog}`
+   } catch {
+      return null
+   }
 }
 
 async function getDB(req: Request): Promise<Response> {
@@ -61,7 +67,12 @@ async function getDB(req: Request): Promise<Response> {
    try {
       const res = await cachedFetch(req)
       if (!res.ok) throw new Error()
-      valid = !!cached && buffersEqual(await res.clone().arrayBuffer(), await cached.arrayBuffer())
+      if (cached) {
+         const [a, b] = await Promise.all([dbSig(res.clone()), dbSig(cached.clone())])
+         valid = a !== null && a === b
+      } else {
+         valid = false
+      }
       return res
    } catch {
       if (cached) {

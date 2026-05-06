@@ -183,10 +183,22 @@ function activeSubs(): ISub[] {
    return activeSubsCache
 }
 
-export function groupSubsByTag(): { tagged: Map<string, ISub[]>; sortedTags: string[]; untagged: ISub[] } {
+function subActiveAbove(floorChron: number): Set<number> {
+   const active = new Set<number>()
+   for (let p = packIdx(floorChron); p < idxPacks.length; p++) idxPacks[p].collectSubsAbove(active, floorChron)
+   return active
+}
+
+type GroupResult = { tagged: Map<string, ISub[]>; sortedTags: string[]; untagged: ISub[] }
+let groupCache: { floor: number; result: GroupResult } | null = null
+
+export function groupSubsByTag(floorChron = 0): GroupResult {
+   if (groupCache?.floor === floorChron) return groupCache.result
    const tagged = new Map<string, ISub[]>()
    const untagged: ISub[] = []
+   const active = floorChron > 0 ? subActiveAbove(floorChron) : null
    for (const sub of activeSubs()) {
+      if (active && !active.has(sub.id)) continue
       if (sub.tag) {
          let group = tagged.get(sub.tag)
          if (!group) {
@@ -198,5 +210,7 @@ export function groupSubsByTag(): { tagged: Map<string, ISub[]>; sortedTags: str
          untagged.push(sub)
       }
    }
-   return { tagged, sortedTags: Array.from(tagged.keys()).sort(), untagged }
+   const result: GroupResult = { tagged, sortedTags: Array.from(tagged.keys()).sort(), untagged }
+   groupCache = { floor: floorChron, result }
+   return result
 }

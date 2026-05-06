@@ -98,15 +98,16 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
    const floorStr = commaIdx === -1 ? "" : main.substring(0, commaIdx)
    const posStr = commaIdx === -1 ? main : main.substring(commaIdx + 1)
 
-   filter.clear()
-   if (bangIdx !== -1) {
-      const tokens = hash
-         .substring(bangIdx + 1)
-         .split("+")
-         .filter((t) => t.length > 0)
-         .map(decodeURIComponent)
-      if (tokens.length > 0) filter.set(tokens)
-   }
+   const tokens =
+      bangIdx === -1
+         ? []
+         : hash
+              .substring(bangIdx + 1)
+              .split("+")
+              .filter((t) => t.length > 0)
+              .map(decodeURIComponent)
+   if (tokens.length > 0) filter.set(tokens)
+   else filter.clear()
 
    floorChron = Math.max(0, Number(floorStr)) || 0
 
@@ -177,7 +178,7 @@ export function clearFloor(): IShowFeed {
 }
 
 export function getFilterEntries(): string[] {
-   const { sortedTags, untagged } = data.groupSubsByTag()
+   const { sortedTags, untagged } = data.groupSubsByTag(floorChron)
    const entries = [""]
    for (const tag of sortedTags) entries.push(tag)
    for (const sub of untagged) entries.push(String(sub.id))
@@ -185,10 +186,16 @@ export function getFilterEntries(): string[] {
 }
 
 // Map current filter state to a key matching getFilterEntries() format (""|"tagName"|"id")
-function getCurrentFilterKey(): string {
+export function getCurrentFilterKey(): string {
    if (!filter.active) return ""
    if (filter.tokens.length === 1) return filter.tokens[0]
    return ""
+}
+
+// "" guard: callers pass currentSource.tag/id which can be empty when no sub is set;
+// without it, an active filter on "" (impossible) or callers' "" would falsely match.
+export function isSingleFilter(token: string): boolean {
+   return token !== "" && filter.tokens.length === 1 && filter.tokens[0] === token
 }
 
 export async function cycleFilter(dir: number): Promise<IShowFeed> {

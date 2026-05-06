@@ -11,6 +11,7 @@ export interface IdxPack {
    countLeft(chronIdx: number, subs: Map<number, number>): number
    findLeft(chronFrom: number, chronFloor: number, subs: Map<number, number>): number
    findRight(chronFrom: number, chronTo: number, subs: Map<number, number>): number
+   collectSubsAbove(out: Set<number>, chronFloor: number): void
 }
 
 export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: number): IdxPack {
@@ -106,6 +107,15 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
             if (addIdx !== undefined && chron >= addIdx) return chron
          }
          return -1
+      },
+      collectSubsAbove(out: Set<number>, chronFloor: number): void {
+         pack.parse()
+         const baseChron = packIndex * IDX_PACK_SIZE
+         if (chronFloor <= baseChron) {
+            for (let s = 0; s < 256; s++) if (pack.ownSubCounts[s] > 0) out.add(s)
+         } else {
+            for (let i = chronFloor - baseChron; i < pack.subIds.length; i++) out.add(pack.subIds[i])
+         }
       },
    }
    return pack

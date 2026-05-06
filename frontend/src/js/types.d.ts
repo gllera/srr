@@ -28,7 +28,7 @@ interface ISub {
 interface IArticle {
    s: number
    a: number
-   p: number
+   p?: number
    t: string
    l: string
    c: string

@@ -5,6 +5,7 @@ import { describe, it, expect, vi } from "vitest"
 const state = vi.hoisted(() => ({
    db: {} as IDB,
    fetchedAts: new Uint32Array(0),
+   floorActive: new Map<number, Set<number>>(),
 }))
 
 vi.mock("./data", () => ({
@@ -25,13 +26,15 @@ vi.mock("./data", () => ({
       }
       return lo > 0 ? lo - 1 : 0
    },
-   groupSubsByTag(): { tagged: Map<string, ISub[]>; sortedTags: string[]; untagged: ISub[] } {
-      const active = Object.values(state.db.subscriptions ?? {})
+   groupSubsByTag(floorChron = 0): { tagged: Map<string, ISub[]>; sortedTags: string[]; untagged: ISub[] } {
+      const active = floorChron > 0 ? (state.floorActive.get(floorChron) ?? new Set<number>()) : null
+      const subs = Object.values(state.db.subscriptions ?? {})
          .filter((sub: ISub) => sub.total_art > 0)
+         .filter((sub: ISub) => !active || active.has(sub.id))
          .sort((a: ISub, b: ISub) => (a.title < b.title ? -1 : 1))
       const tagged = new Map<string, ISub[]>()
       const untagged: ISub[] = []
-      for (const sub of active) {
+      for (const sub of subs) {
          if (sub.tag) {
             let group = tagged.get(sub.tag)
             if (!group) {
@@ -147,5 +150,43 @@ describe("groupSubsByTag", () => {
       const result = data.groupSubsByTag()
       expect(result.tagged.size).toBe(0)
       expect(result.untagged.length).toBe(1)
+   })
+
+   it("hides subs with no articles above floor", () => {
+      state.db = {
+         subscriptions: {
+            1: { id: 1, title: "A", total_art: 5 },
+            2: { id: 2, title: "B", total_art: 3 },
+         },
+      } as unknown as IDB
+      state.floorActive.set(100, new Set([1]))
+      const result = data.groupSubsByTag(100)
+      expect(result.untagged.length).toBe(1)
+      expect(result.untagged[0].id).toBe(1)
+   })
+
+   it("hides tags whose subs are all below floor", () => {
+      state.db = {
+         subscriptions: {
+            1: { id: 1, title: "A", total_art: 5, tag: "news" },
+            2: { id: 2, title: "B", total_art: 3, tag: "tech" },
+         },
+      } as unknown as IDB
+      state.floorActive.set(100, new Set([2]))
+      const result = data.groupSubsByTag(100)
+      expect(result.sortedTags).toEqual(["tech"])
+      expect(result.tagged.get("tech")!.length).toBe(1)
+   })
+
+   it("does not filter when floor is 0", () => {
+      state.db = {
+         subscriptions: {
+            1: { id: 1, title: "A", total_art: 1 },
+            2: { id: 2, title: "B", total_art: 1 },
+         },
+      } as unknown as IDB
+      state.floorActive.set(100, new Set([1]))
+      const result = data.groupSubsByTag(0)
+      expect(result.untagged.length).toBe(2)
    })
 })
