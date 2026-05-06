@@ -13,7 +13,6 @@ All commands run from the repo root via `make`:
 
 | Command | What it does |
 |---|---|
-| `make install` | Install frontend dependencies (`npm ci`) |
 | `make verify` | Full check: lint + format + test + build (both projects) |
 | `make verify-fe` | Frontend pipeline only |
 | `make verify-be` | Backend pipeline only |
@@ -23,7 +22,7 @@ All commands run from the repo root via `make`:
 | `make format-fe` | Prettier write |
 | `make format-check-fe` | Prettier check only |
 | `make dev-fe` | Frontend dev server |
-| `make build-fe` | Production frontend build |
+| `make build-fe` | Production frontend build (auto `npm ci` if `node_modules` is stale) |
 | `make build-be` | Go build |
 | `make vet-be` | Go vet |
 | `make clean` | Remove build artifacts |

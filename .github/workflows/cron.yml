@@ -8,15 +8,13 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    environment: cron
+    environment: ci
     steps:
     - name: Fetch
       env:
         GH_TOKEN: ${{ github.token }}
-        SRR_CONF: ${{ secrets.SRR_CONF }}
-        SRR_CONFIG: srr.yaml
+        SRR_CONFIG_INLINE: ${{ secrets.SRR_CONFIG_INLINE }}
       run: |
-        printf '%s' "$SRR_CONF" > "$SRR_CONFIG"
         gh release download --pattern srr-linux-amd64 --output srr
         chmod +x srr
         ./srr fetch -d

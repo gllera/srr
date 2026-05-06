@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"log/slog"
 	"os"
@@ -61,18 +62,43 @@ func fatal(msg string, attr ...any) {
 	os.Exit(1)
 }
 
+// readConfig returns YAML config bytes from $SRR_CONFIG_INLINE if set, otherwise
+// reads the file at $SRR_CONFIG (default $XDG_CONFIG_HOME/srr/srr.yaml).
+// A missing file yields empty bytes, not an error.
+func readConfig() ([]byte, error) {
+	if conf := os.Getenv("SRR_CONFIG_INLINE"); conf != "" {
+		return []byte(conf), nil
+	}
+
+	configPath := os.Getenv("SRR_CONFIG")
+	if configPath == "" {
+		configDir := os.Getenv("XDG_CONFIG_HOME")
+		if configDir == "" {
+			home, _ := os.UserHomeDir()
+			configDir = filepath.Join(home, ".config")
+		}
+		configPath = filepath.Join(configDir, "srr", "srr.yaml")
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("reading config %s: %w", configPath, err)
+	}
+	return data, nil
+}
+
 func main() {
 	var cli CLI
 	globals = &cli.Globals
 
-	configDir := os.Getenv("XDG_CONFIG_HOME")
-	if configDir == "" {
-		home, _ := os.UserHomeDir()
-		configDir = filepath.Join(home, ".config")
+	configData, err := readConfig()
+	if err != nil {
+		fatal(err.Error())
 	}
-	configPath := os.Getenv("SRR_CONFIG")
-	if configPath == "" {
-		configPath = filepath.Join(configDir, "srr", "srr.yaml")
+
+	resolver, err := kongyaml.Loader(bytes.NewReader(configData))
+	if err != nil {
+		fatal("parsing config", "err", err)
 	}
 
 	ctx := kong.Parse(&cli,
@@ -81,7 +107,7 @@ func main() {
 		},
 		kong.Name("srr"),
 		kong.Description("Static RSS Reader backend."),
-		kong.Configuration(kongyaml.Loader, configPath),
+		kong.Resolvers(resolver),
 		kong.ShortUsageOnError(),
 		kong.ConfigureHelp(kong.HelpOptions{
 			Compact:             true,
@@ -90,7 +116,7 @@ func main() {
 		}),
 	)
 
-	if err := store.LoadConfigs(configPath); err != nil {
+	if err := store.LoadConfigs(configData); err != nil {
 		fatal("loading backend configs", "err", err)
 	}
 

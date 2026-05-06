@@ -10,7 +10,7 @@ SRR Frontend — single-page RSS reader. Zero runtime deps. Parcel + TypeScript 
 
 ## Architecture
 
-Entry: `src/index.html` → `src/styles.css` + `src/js/app.ts`. Bundler: Parcel 2. `SRR_CDN_URL` replaced at build time.
+Entry: `src/index.html` → `src/styles.css` + `src/js/app.ts`. Bundler: Parcel 2. `SRR_CDN_URL` replaced at build time via `parcel/resolve-cdn-url.js`. Resolution: `$SRR_CDN_URL` → `cdn-url:` from `$SRR_CONFIG_INLINE` (raw YAML) → `cdn-url:` from `$SRR_CONFIG` (file path, default `$XDG_CONFIG_HOME/srr/srr.yaml`) → `http://localhost:3000`.
 
 Dependency chain: `app → nav → data → idx`, `data → cache`, `app → fmt`. All in `src/js/`, strict mode.
 
@@ -87,4 +87,4 @@ State: `pos` (chronIdx), `filter` (object with `active`, `subs`, `tokens`, `matc
 
 ## Deployment
 
-GitHub Actions (`gh-pages.yml`): version tags (`v*.*.*`) or manual. Deploys to GitHub Pages. Uses `SRR_CDN_URL` repo variable.
+GitHub Actions (`release.yml` `pages` job): version tags (`v*.*.*`) or manual. Deploys to GitHub Pages. Uses `SRR_CDN_URL` repo variable.

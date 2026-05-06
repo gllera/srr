@@ -87,13 +87,14 @@ srr preview https://example.com/feed.xml -p "#sanitize" -p "#minify"
 Global flags can also be set via environment variables (prefixed `SRR_`, e.g. `SRR_WORKERS`) or in a YAML config file using their long flag names as keys:
 
 ```yaml
-# $XDG_CONFIG_HOME/srr/srr.yaml (or override path with $SRR_CONFIG)
+# $XDG_CONFIG_HOME/srr/srr.yaml (or override path with $SRR_CONFIG,
+# or pass the YAML content directly via $SRR_CONFIG_INLINE)
 workers: 4
 pack-size: 500
 store: /path/to/packs
 ```
 
-Precedence: CLI flags > env vars > config file > defaults.
+Precedence: CLI flags > env vars > config file > defaults. `$SRR_CONFIG_INLINE`, when set, supersedes `$SRR_CONFIG`.
 
 ## Storage Backends
 

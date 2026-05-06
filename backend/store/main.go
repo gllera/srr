@@ -44,18 +44,14 @@ func RegisterConfig(scheme string, cfg any) {
 	configs[scheme] = cfg
 }
 
-// LoadConfigs reads a YAML file and unmarshals backend-specific sections
-// into registered config structs. Missing file or missing sections are ignored.
-func LoadConfigs(configPath string) error {
-	data, err := os.ReadFile(configPath)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("reading config %s: %w", configPath, err)
-	}
-
+// LoadConfigs decodes YAML config bytes and unmarshals backend-specific
+// sections into registered config structs. Empty input is allowed; env
+// var overrides still apply.
+func LoadConfigs(data []byte) error {
 	if len(data) > 0 {
 		var raw map[string]yaml.Node
 		if err := yaml.Unmarshal(data, &raw); err != nil {
-			return fmt.Errorf("parsing config %s: %w", configPath, err)
+			return fmt.Errorf("parsing config: %w", err)
 		}
 		for scheme, cfg := range configs {
 			if node, ok := raw[scheme]; ok {

@@ -61,7 +61,6 @@ frontend/   TypeScript SPA -- static feed reader
 ## Development
 
 ```bash
-make install        # npm ci for frontend
 make verify         # full check: lint + format + test + build (both projects)
 make dev-fe         # frontend dev server
 make test-be        # backend unit tests
