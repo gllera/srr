@@ -15,6 +15,6 @@ jobs:
         GH_TOKEN: ${{ github.token }}
         SRR_CONFIG_INLINE: ${{ secrets.SRR_CONFIG_INLINE }}
       run: |
-        gh release download --pattern srr-linux-amd64 --output srr
+        gh release download --repo ${{ github.repository }} --pattern srr-linux-amd64 --output srr
         chmod +x srr
-        ./srr fetch -d
+        ./srr a fetch -d
