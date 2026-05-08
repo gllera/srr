@@ -34,7 +34,7 @@ export function sanitizeHtml(html: string): string {
       const attrs = node.attributes
       for (let i = attrs.length - 1; i >= 0; i--) {
          const attr = attrs[i]
-         if (attr.name === "style" || attr.name.startsWith("on") || URL_DENY.test(attr.value))
+         if (attr.name === "style" || attr.name === "class" || attr.name.startsWith("on") || URL_DENY.test(attr.value))
             node.removeAttribute(attr.name)
       }
       if (node.tagName === "A") node.setAttribute("rel", "noopener noreferrer")

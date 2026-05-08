@@ -31,6 +31,25 @@ func TestModuleBuiltinSanitize(t *testing.T) {
 	}
 }
 
+func TestModuleBuiltinSanitizeStripsClass(t *testing.T) {
+	m := New()
+
+	now := time.Now()
+	item := &RawItem{
+		GUID:      1,
+		Title:     "T",
+		Content:   `<p class="x">a</p><div class="y z">b</div><span class="c">c</span>`,
+		Link:      "http://example.com",
+		Published: &now,
+	}
+	if err := m.Process(context.Background(), "#sanitize", item); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if want := `<p>a</p><div>b</div><span>c</span>`; item.Content != want {
+		t.Errorf("content = %q, want %q", item.Content, want)
+	}
+}
+
 func TestModuleBuiltinMinify(t *testing.T) {
 	m := New()
 

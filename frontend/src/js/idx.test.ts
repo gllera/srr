@@ -138,34 +138,27 @@ describe("makeIdxPack.findLeft", () => {
    it("returns the rightmost match scanning leftward from chronFrom", () => {
       const pack = buildPack()
       const subs = new Map([[1, 0]])
-      expect(pack.findLeft(4, 0, subs)).toBe(4)
-      expect(pack.findLeft(3, 0, subs)).toBe(2)
-      expect(pack.findLeft(1, 0, subs)).toBe(0)
-   })
-
-   it("respects floor (chronFloor)", () => {
-      const pack = buildPack()
-      const subs = new Map([[1, 0]])
-      expect(pack.findLeft(4, 3, subs)).toBe(4)
-      expect(pack.findLeft(3, 3, subs)).toBe(-1)
+      expect(pack.findLeft(4, subs)).toBe(4)
+      expect(pack.findLeft(3, subs)).toBe(2)
+      expect(pack.findLeft(1, subs)).toBe(0)
    })
 
    it("respects sub addIdx (entries before addIdx don't match)", () => {
       const pack = buildPack()
       const subs = new Map([[1, 3]])
-      expect(pack.findLeft(4, 0, subs)).toBe(4)
-      expect(pack.findLeft(2, 0, subs)).toBe(-1)
+      expect(pack.findLeft(4, subs)).toBe(4)
+      expect(pack.findLeft(2, subs)).toBe(-1)
    })
 
    it("returns -1 when no sub matches", () => {
       const pack = buildPack()
-      expect(pack.findLeft(4, 0, new Map([[99, 0]]))).toBe(-1)
+      expect(pack.findLeft(4, new Map([[99, 0]]))).toBe(-1)
    })
 
    it("returns -1 when chronFrom < baseChron", () => {
       const buf = buildBuf({ entries: [e(1)] })
       const pack = makeIdxPack(buf, 1, 1)
-      expect(pack.findLeft(IDX_PACK_SIZE - 1, 0, new Map([[1, 0]]))).toBe(-1)
+      expect(pack.findLeft(IDX_PACK_SIZE - 1, new Map([[1, 0]]))).toBe(-1)
    })
 })
 
@@ -175,26 +168,25 @@ describe("makeIdxPack.findRight", () => {
    it("returns the leftmost match scanning rightward from chronFrom", () => {
       const pack = buildPack()
       const subs = new Map([[1, 0]])
-      expect(pack.findRight(0, 4, subs)).toBe(0)
-      expect(pack.findRight(1, 4, subs)).toBe(2)
-      expect(pack.findRight(3, 4, subs)).toBe(4)
-   })
-
-   it("respects upper bound chronTo", () => {
-      const pack = buildPack()
-      expect(pack.findRight(3, 3, new Map([[1, 0]]))).toBe(-1)
-      expect(pack.findRight(0, 1, new Map([[1, 0]]))).toBe(0)
+      expect(pack.findRight(0, subs)).toBe(0)
+      expect(pack.findRight(1, subs)).toBe(2)
+      expect(pack.findRight(3, subs)).toBe(4)
    })
 
    it("respects sub addIdx", () => {
       const pack = buildPack()
-      expect(pack.findRight(0, 4, new Map([[1, 3]]))).toBe(4)
-      expect(pack.findRight(0, 2, new Map([[1, 3]]))).toBe(-1)
+      expect(pack.findRight(0, new Map([[1, 3]]))).toBe(4)
+   })
+
+   it("returns -1 when no sub matches addIdx within pack", () => {
+      const buf = buildBuf({ entries: [e(1), e(1), e(1)] })
+      const pack = makeIdxPack(buf, 0, 3)
+      expect(pack.findRight(0, new Map([[1, 5]]))).toBe(-1)
    })
 
    it("returns -1 when no sub matches", () => {
       const pack = buildPack()
-      expect(pack.findRight(0, 4, new Map([[99, 0]]))).toBe(-1)
+      expect(pack.findRight(0, new Map([[99, 0]]))).toBe(-1)
    })
 })
 

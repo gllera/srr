@@ -9,7 +9,6 @@ const el = {
    toolbar: document.querySelector(".srr-toolbar") as HTMLElement,
    prev: document.querySelector(".srr-prev") as HTMLButtonElement,
    next: document.querySelector(".srr-next") as HTMLButtonElement,
-   last: document.querySelector(".srr-last") as HTMLButtonElement,
    source: document.querySelector(".srr-source") as HTMLButtonElement,
    date: document.querySelector(".srr-date") as HTMLElement,
    counter: document.querySelector(".srr-counter") as HTMLElement,
@@ -18,9 +17,6 @@ const el = {
    popupClose: document.querySelector(".srr-popup-close") as HTMLElement,
    popup: document.querySelector(".srr-popup") as HTMLElement,
 }
-
-// Distinguished from Error so guard() shows it as a dismissible notice, not a retryable error
-class Notice extends Error {}
 
 let busy = false
 let retryFn: (() => void) | null = null
@@ -36,11 +32,9 @@ function showError(e: unknown, retry?: () => void) {
    el.popupText.textContent = e instanceof Error ? e.message : String(e)
    retryFn = retry ?? null
    el.popupRetry.classList.toggle("srr-hidden", !retry)
-   el.popupClose.classList.remove("srr-hidden")
    previousFocus = document.activeElement as HTMLElement
    el.popup.classList.add("srr-open")
-   const focusTarget = retry ? el.popupRetry : (el.popup.querySelector(".srr-popup-close") as HTMLElement)
-   focusTarget.focus()
+   ;(retry ? el.popupRetry : el.popupClose).focus()
 }
 
 function closeAllDropdowns() {
@@ -50,17 +44,8 @@ function closeAllDropdowns() {
    dropdownOpen = false
 }
 
-function showNotice(msg: string) {
-   el.popupText.textContent = msg
-   retryFn = null
-   el.popupRetry.classList.add("srr-hidden")
-   el.popupClose.classList.add("srr-hidden")
-   el.popup.classList.add("srr-open")
-}
-
 function closePopup() {
    el.popup.classList.remove("srr-open")
-   el.popupClose.classList.remove("srr-hidden")
    previousFocus?.focus()
 }
 
@@ -71,8 +56,7 @@ async function guard(fn: () => Promise<IShowFeed>) {
    try {
       render(await fn())
    } catch (e) {
-      if (e instanceof Notice) showNotice(e.message)
-      else showError(e, () => guard(fn))
+      showError(e, () => guard(fn))
    } finally {
       document.body.classList.remove("srr-loading")
       busy = false
@@ -109,16 +93,7 @@ function render(o: IShowFeed) {
       tag: o.sub?.tag || "",
    }
    refreshSourceLabel()
-   if (o.floor && !data.getArticleSync(nav.floorChron)) {
-      const target = nav.floorChron
-      data
-         .loadArticle(target)
-         .then((a) => {
-            if (nav.floorChron === target && a) refreshSourceLabel()
-         })
-         .catch(() => {})
-   }
-   el.counter.textContent = String(o.countLeft)
+   el.counter.textContent = String(o.countRight)
 
    document.title = "SRR - " + o.article.t
    window.scrollTo(0, 0)
@@ -136,11 +111,8 @@ function render(o: IShowFeed) {
 function refreshSourceLabel() {
    const tagFiltered = nav.isSingleFilter(currentSource.tag)
    const subFiltered = nav.isSingleFilter(String(currentSource.id))
-   const floorArticle = nav.floorChron > 0 ? data.getArticleSync(nav.floorChron) : null
-   const floorText = floorArticle ? timeAgo(floorArticle.a) : ""
 
-   // Skip DOM rebuild when nothing visible changed (60s tick is the hot caller)
-   const key = `${nav.floorChron}|${floorText}|${currentSource.tag}|${currentSource.title}|${tagFiltered}|${subFiltered}`
+   const key = `${currentSource.tag}|${currentSource.title}|${tagFiltered}|${subFiltered}`
    if (key === lastSourceLabel) return
    lastSourceLabel = key
 
@@ -154,7 +126,6 @@ function refreshSourceLabel() {
       aria.push(label)
    }
 
-   if (nav.floorChron > 0) push(floorText || "●", false, `floor ${floorText || "loading"}`)
    if (currentSource.tag) {
       const tag = currentSource.tag
       push((tag[0] + tag[tag.length - 1]).toUpperCase(), tagFiltered, `tag ${tag}${tagFiltered ? " active" : ""}`)
@@ -211,7 +182,7 @@ function divEl(className: string): HTMLDivElement {
 }
 
 function showMenu() {
-   const { tagged, sortedTags, untagged } = data.groupSubsByTag(nav.floorChron)
+   const { tagged, sortedTags, untagged } = data.groupSubsByTag()
    const current = nav.getCurrentFilterKey()
    const cls = (base: string, v: string) => (v === current ? `${base} srr-active`.trim() : base)
 
@@ -219,12 +190,11 @@ function showMenu() {
       "srr-source-menu",
       (frag) => {
          const since = divEl("srr-chip-row")
-         since.appendChild(createLink("f:here", "Here"))
-         since.appendChild(createLink("f:43200", "12h"))
-         since.appendChild(createLink("f:86400", "1d"))
-         since.appendChild(createLink("f:604800", "7d"))
-         since.appendChild(createLink("f:2592000", "1mo"))
-         if (nav.floorChron > 0) since.appendChild(createLink("f:clear", "Clear"))
+         since.appendChild(createLink("!last", "last"))
+         since.appendChild(createLink("t:43200", "12h"))
+         since.appendChild(createLink("t:86400", "1d"))
+         since.appendChild(createLink("t:604800", "7d"))
+         since.appendChild(createLink("t:2592000", "1mo"))
          frag.appendChild(since)
 
          frag.appendChild(divEl("srr-tag-sep"))
@@ -256,32 +226,19 @@ function showMenu() {
             frag.appendChild(createLink(sid, sub.title, cls("", sid)))
          }
       },
-      (value) => {
-         if (!value.startsWith("f:")) return guard(() => nav.last(value))
-         const v = value.slice(2)
-         if (v === "here") {
-            if (!busy) render(nav.setFloorHere())
-            return Promise.resolve()
-         }
-         if (v === "clear") {
-            if (!busy) render(nav.clearFloor())
-            return Promise.resolve()
-         }
-         return guard(async () => {
-            const ts = Math.floor(Date.now() / 1000) - Number(v)
-            const chron = data.findChronForTimestamp(ts)
-            if (chron === 0) throw new Notice("All articles are within that time range")
-            await data.loadArticle(chron)
-            return nav.setFloorAt(chron)
-         })
-      },
+      (value) =>
+         guard(() => {
+            if (value === "!last") return nav.last()
+            if (value.startsWith("t:")) {
+               const ts = Math.floor(Date.now() / 1000) - Number(value.slice(2))
+               return nav.goTo(data.findChronForTimestamp(ts))
+            }
+            return nav.switchFilter(value)
+         }),
    )
 }
 
 const KEY_ACTIONS: Record<string, () => void> = {
-   " ": () => {
-      if (!busy) render(nav.floorChron > 0 ? nav.clearFloor() : nav.setFloorHere())
-   },
    ArrowLeft: () => !el.prev.disabled && guard(() => nav.left()),
    a: () => !el.prev.disabled && guard(() => nav.left()),
    ArrowRight: () => !el.next.disabled && guard(() => nav.right()),
@@ -310,12 +267,12 @@ async function init() {
       showError(e, () => location.reload())
       return
    }
+   nav.pruneSeen()
 
    el.prev.addEventListener("click", () => guard(() => nav.left()))
    el.next.addEventListener("click", () => guard(() => nav.right()))
-   el.last.addEventListener("click", () => guard(() => nav.last()))
    el.source.addEventListener("click", () => showMenu())
-   el.popup.querySelector(".srr-popup-close")!.addEventListener("click", closePopup)
+   el.popupClose.addEventListener("click", closePopup)
    el.popupRetry.addEventListener("click", () => {
       closePopup()
       if (retryFn) retryFn()
@@ -432,7 +389,6 @@ async function init() {
          const next = timeAgo(currentPublished)
          if (el.date.textContent !== next) el.date.textContent = next
       }
-      if (nav.floorChron > 0) refreshSourceLabel()
    }, 60000)
 
    let hash = location.hash.substring(1)

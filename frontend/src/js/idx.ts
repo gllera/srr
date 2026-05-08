@@ -9,9 +9,8 @@ export interface IdxPack {
    bounds: { packId: number; startChron: number }[]
    parse(): IdxPack
    countLeft(chronIdx: number, subs: Map<number, number>): number
-   findLeft(chronFrom: number, chronFloor: number, subs: Map<number, number>): number
-   findRight(chronFrom: number, chronTo: number, subs: Map<number, number>): number
-   collectSubsAbove(out: Set<number>, chronFloor: number): void
+   findLeft(chronFrom: number, subs: Map<number, number>): number
+   findRight(chronFrom: number, subs: Map<number, number>): number
 }
 
 export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: number): IdxPack {
@@ -80,42 +79,31 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
          }
          return count
       },
-      findLeft(chronFrom: number, chronFloor: number, subs: Map<number, number>): number {
+      findLeft(chronFrom: number, subs: Map<number, number>): number {
          pack.parse()
          const baseChron = packIndex * IDX_PACK_SIZE
          const packEnd = baseChron + packSize
          if (!hasCandidate(subs, packEnd)) return -1
          const hi = Math.min(chronFrom, packEnd - 1)
-         const lo = Math.max(chronFloor, baseChron)
-         for (let chron = hi; chron >= lo; chron--) {
+         for (let chron = hi; chron >= baseChron; chron--) {
             const subId = pack.subIds[chron - baseChron]
             const addIdx = subs.get(subId)
             if (addIdx !== undefined && chron >= addIdx) return chron
          }
          return -1
       },
-      findRight(chronFrom: number, chronTo: number, subs: Map<number, number>): number {
+      findRight(chronFrom: number, subs: Map<number, number>): number {
          pack.parse()
          const baseChron = packIndex * IDX_PACK_SIZE
          const packEnd = baseChron + packSize
          if (!hasCandidate(subs, packEnd)) return -1
          const lo = Math.max(chronFrom, baseChron)
-         const hi = Math.min(chronTo, packEnd - 1)
-         for (let chron = lo; chron <= hi; chron++) {
+         for (let chron = lo; chron < packEnd; chron++) {
             const subId = pack.subIds[chron - baseChron]
             const addIdx = subs.get(subId)
             if (addIdx !== undefined && chron >= addIdx) return chron
          }
          return -1
-      },
-      collectSubsAbove(out: Set<number>, chronFloor: number): void {
-         pack.parse()
-         const baseChron = packIndex * IDX_PACK_SIZE
-         if (chronFloor <= baseChron) {
-            for (let s = 0; s < 256; s++) if (pack.ownSubCounts[s] > 0) out.add(s)
-         } else {
-            for (let i = chronFloor - baseChron; i < pack.subIds.length; i++) out.add(pack.subIds[i])
-         }
       },
    }
    return pack

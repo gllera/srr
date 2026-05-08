@@ -38,8 +38,7 @@ interface IShowFeed {
    has_left: boolean
    has_right: boolean
    filtered: boolean
-   floor: boolean
    article: IArticle
    sub: ISub | undefined
-   countLeft: number
+   countRight: number
 }

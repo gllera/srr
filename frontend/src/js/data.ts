@@ -79,21 +79,19 @@ export function countLeft(chronIdx: number, subs: Map<number, number>): number {
    return idxPacks[n].countLeft(chronIdx, subs)
 }
 
-export function findLeft(from: number, floor: number, subs: Map<number, number>): number {
-   if (from < floor || idxPacks.length === 0) return -1
+export function findLeft(from: number, subs: Map<number, number>): number {
+   if (from < 0 || idxPacks.length === 0) return -1
    for (let p = packIdx(from); p >= 0; p--) {
-      const found = idxPacks[p].findLeft(from, floor, subs)
+      const found = idxPacks[p].findLeft(from, subs)
       if (found !== -1) return found
-      if (p * IDX_PACK_SIZE <= floor) return -1
    }
    return -1
 }
 
 export function findRight(from: number, subs: Map<number, number>): number {
-   const end = db.total_art - 1
-   if (from > end || idxPacks.length === 0) return -1
+   if (from >= db.total_art || idxPacks.length === 0) return -1
    for (let p = packIdx(from); p < idxPacks.length; p++) {
-      const found = idxPacks[p].findRight(from, end, subs)
+      const found = idxPacks[p].findRight(from, subs)
       if (found !== -1) return found
    }
    return -1
@@ -183,22 +181,14 @@ function activeSubs(): ISub[] {
    return activeSubsCache
 }
 
-function subActiveAbove(floorChron: number): Set<number> {
-   const active = new Set<number>()
-   for (let p = packIdx(floorChron); p < idxPacks.length; p++) idxPacks[p].collectSubsAbove(active, floorChron)
-   return active
-}
-
 type GroupResult = { tagged: Map<string, ISub[]>; sortedTags: string[]; untagged: ISub[] }
-let groupCache: { floor: number; result: GroupResult } | null = null
+let groupCache: GroupResult | null = null
 
-export function groupSubsByTag(floorChron = 0): GroupResult {
-   if (groupCache?.floor === floorChron) return groupCache.result
+export function groupSubsByTag(): GroupResult {
+   if (groupCache) return groupCache
    const tagged = new Map<string, ISub[]>()
    const untagged: ISub[] = []
-   const active = floorChron > 0 ? subActiveAbove(floorChron) : null
    for (const sub of activeSubs()) {
-      if (active && !active.has(sub.id)) continue
       if (sub.tag) {
          let group = tagged.get(sub.tag)
          if (!group) {
@@ -210,7 +200,6 @@ export function groupSubsByTag(floorChron = 0): GroupResult {
          untagged.push(sub)
       }
    }
-   const result: GroupResult = { tagged, sortedTags: Array.from(tagged.keys()).sort(), untagged }
-   groupCache = { floor: floorChron, result }
-   return result
+   groupCache = { tagged, sortedTags: Array.from(tagged.keys()).sort(), untagged }
+   return groupCache
 }

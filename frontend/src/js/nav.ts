@@ -1,10 +1,6 @@
 import * as data from "./data"
 
-export let floorChron = 0
 let pos = -1
-let filteredLeft = 0
-let filteredTotal = 0
-let floorCount = 0
 
 export const filter = {
    subs: new Map<number, number>(),
@@ -50,22 +46,25 @@ export const filter = {
    },
 }
 
-function recount() {
-   floorCount = floorChron > 0 ? data.countLeft(floorChron, filter.subs) : 0
-   filteredTotal = filter.subTotal - floorCount
-   filteredLeft = data.countLeft(pos, filter.subs) - floorCount
-}
-
 function showFeed(article: IArticle): IShowFeed {
+   let filteredLeft: number, total: number, matchesPos: number
+   if (filter.active) {
+      filteredLeft = data.countLeft(pos, filter.subs)
+      total = filter.subTotal
+      matchesPos = filter.matches(article.s, pos) ? 1 : 0
+   } else {
+      filteredLeft = pos
+      total = data.db.total_art
+      matchesPos = 1
+   }
+   const countRight = total - filteredLeft - matchesPos
    return {
       article,
       has_left: filteredLeft > 0,
-      has_right: filteredLeft + (filter.matches(data.getSubId(pos), pos) ? 1 : 0) < filteredTotal,
+      has_right: countRight > 0,
       filtered: filter.active,
-      floor: floorChron > 0,
       sub: data.db.subscriptions[article.s],
-      // Clamp: pos can sit below floor (soft floor); raw filteredLeft can be negative
-      countLeft: Math.max(0, filteredLeft),
+      countRight,
    }
 }
 
@@ -73,9 +72,59 @@ async function resolve(target: number, replace = false): Promise<IShowFeed> {
    // Load first; commit pos only on success so a Retry replays the same chron.
    const article = await data.loadArticle(target)
    pos = target
-   recount()
    updateHash(replace)
+   recordSeen(article)
    return showFeed(article)
+}
+
+const SEEN_KEY = "srr-seen"
+
+function readSeen(): Record<string, number> {
+   try {
+      const raw = localStorage.getItem(SEEN_KEY)
+      return raw ? JSON.parse(raw) : {}
+   } catch {
+      return {}
+   }
+}
+
+function getSeen(token: string): number | undefined {
+   const seen = readSeen()
+   const n = Number(token)
+   return Number.isFinite(n) ? seen["sub:" + n] : seen["tag:" + token]
+}
+
+function recordSeen(article: IArticle) {
+   const sub = data.db.subscriptions[article.s]
+   if (!sub) return
+   try {
+      const seen = readSeen()
+      const subKey = "sub:" + article.s
+      const tagKey = sub.tag ? "tag:" + sub.tag : null
+      if (seen[subKey] === pos && (!tagKey || seen[tagKey] === pos)) return
+      seen[subKey] = pos
+      if (tagKey) seen[tagKey] = pos
+      localStorage.setItem(SEEN_KEY, JSON.stringify(seen))
+   } catch {}
+}
+
+export function pruneSeen() {
+   try {
+      const seen = readSeen()
+      const tags = new Set<string>()
+      for (const sub of Object.values(data.db.subscriptions)) if (sub.tag) tags.add(sub.tag)
+      let changed = false
+      for (const key of Object.keys(seen)) {
+         const stale =
+            (key.startsWith("sub:") && !data.db.subscriptions[Number(key.slice(4))]) ||
+            (key.startsWith("tag:") && !tags.has(key.slice(4)))
+         if (stale) {
+            delete seen[key]
+            changed = true
+         }
+      }
+      if (changed) localStorage.setItem(SEEN_KEY, JSON.stringify(seen))
+   } catch {}
 }
 
 function resolveNoMatch(): IShowFeed {
@@ -85,18 +134,14 @@ function resolveNoMatch(): IShowFeed {
       has_left: false,
       has_right: false,
       filtered: filter.active,
-      floor: floorChron > 0,
       sub: undefined,
-      countLeft: 0,
+      countRight: 0,
    }
 }
 
 export async function fromHash(hash: string): Promise<IShowFeed> {
    const bangIdx = hash.indexOf("!")
-   const main = bangIdx === -1 ? hash : hash.substring(0, bangIdx)
-   const commaIdx = main.indexOf(",")
-   const floorStr = commaIdx === -1 ? "" : main.substring(0, commaIdx)
-   const posStr = commaIdx === -1 ? main : main.substring(commaIdx + 1)
+   const posStr = bangIdx === -1 ? hash : hash.substring(0, bangIdx)
 
    const tokens =
       bangIdx === -1
@@ -109,8 +154,6 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
    if (tokens.length > 0) filter.set(tokens)
    else filter.clear()
 
-   floorChron = Math.max(0, Number(floorStr)) || 0
-
    if (data.db.total_art === 0) throw new Error("no articles")
 
    let target = Number(posStr)
@@ -121,7 +164,7 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
 }
 
 export async function left(): Promise<IShowFeed> {
-   const found = data.findLeft(pos - 1, floorChron, filter.subs)
+   const found = data.findLeft(pos - 1, filter.subs)
    if (found === -1) throw new Error("no left match")
    return resolve(found)
 }
@@ -133,13 +176,10 @@ export async function right(): Promise<IShowFeed> {
 }
 
 export async function first(): Promise<IShowFeed> {
-   let start = Infinity
-   for (const addIdx of filter.subs.values()) if (addIdx < start) start = addIdx
-   if (start === Infinity) return resolveNoMatch()
-   if (floorChron > start) start = floorChron
-   const found = data.findRight(start, filter.subs)
-   if (found === -1) return resolveNoMatch()
-   return resolve(found)
+   // No article from a sub with add_idx N exists below chronIdx N, so the
+   // earliest matching article is at or after the smallest add_idx in filter.
+   const start = filter.subs.size > 0 ? Math.min(...filter.subs.values()) : 0
+   return goTo(start)
 }
 
 export async function last(token?: string): Promise<IShowFeed> {
@@ -147,38 +187,36 @@ export async function last(token?: string): Promise<IShowFeed> {
       if (token === "") filter.clear()
       else filter.set([token])
    }
-   const found = data.findLeft(data.db.total_art - 1, floorChron, filter.subs)
+   const found = data.findLeft(data.db.total_art - 1, filter.subs)
    if (found === -1) return resolveNoMatch()
    return resolve(found)
 }
 
-export async function setFloorAt(idx: number): Promise<IShowFeed> {
-   floorChron = idx
-   return resolve(pos)
+function isValidSeen(idx: number): boolean {
+   return idx >= 0 && idx < data.db.total_art && filter.matches(data.getSubId(idx), idx)
 }
 
-export function setFloorHere(): IShowFeed {
-   floorChron = pos
-   floorCount += filteredLeft
-   filteredTotal -= filteredLeft
-   filteredLeft = 0
-   const article = data.getArticleSync(pos)!
-   updateHash()
-   return showFeed(article)
+export async function switchFilter(token: string): Promise<IShowFeed> {
+   if (token === "") {
+      filter.clear()
+      return last()
+   }
+   filter.set([token])
+   if (!filter.active) return last()
+   const seenIdx = getSeen(token)
+   if (seenIdx !== undefined && isValidSeen(seenIdx)) return resolve(seenIdx)
+   return first()
 }
 
-export function clearFloor(): IShowFeed {
-   floorChron = 0
-   filteredLeft += floorCount
-   filteredTotal += floorCount
-   floorCount = 0
-   const article = data.getArticleSync(pos)!
-   updateHash()
-   return showFeed(article)
+// Jump to chronIdx, snapping forward to next match if filter is active.
+export async function goTo(idx: number): Promise<IShowFeed> {
+   if (idx < 0 || idx >= data.db.total_art) return last()
+   const found = data.findRight(idx, filter.subs)
+   return found === -1 ? last() : resolve(found)
 }
 
 export function getFilterEntries(): string[] {
-   const { sortedTags, untagged } = data.groupSubsByTag(floorChron)
+   const { sortedTags, untagged } = data.groupSubsByTag()
    const entries = [""]
    for (const tag of sortedTags) entries.push(tag)
    for (const sub of untagged) entries.push(String(sub.id))
@@ -204,11 +242,11 @@ export async function cycleFilter(dir: number): Promise<IShowFeed> {
    let idx = entries.indexOf(current)
    if (idx === -1) idx = 0
    idx = (idx + dir + entries.length) % entries.length
-   return last(entries[idx])
+   return switchFilter(entries[idx])
 }
 
 function updateHash(replace = false) {
    const tokens = filter.active ? "!" + filter.tokens.map(encodeURIComponent).join("+") : ""
-   const hash = `#${floorChron},${pos}${tokens}`
+   const hash = `#${pos}${tokens}`
    history[replace ? "replaceState" : "pushState"](null, "", hash)
 }

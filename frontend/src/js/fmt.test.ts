@@ -75,6 +75,13 @@ describe("sanitizeHtml", () => {
       expect(result).toContain("ok")
    })
 
+   it("strips class attribute (mirrors backend bluemonday allowlist)", () => {
+      const result = sanitizeHtml('<p class="highlight">text</p><div class="a b">x</div>')
+      expect(result).not.toContain("class")
+      expect(result).toContain("text")
+      expect(result).toContain("x")
+   })
+
    it("preserves safe attributes", () => {
       const result = sanitizeHtml('<img src="img.png" alt="photo" width="100">')
       expect(result).toContain('src="img.png"')
