@@ -57,7 +57,7 @@ func (o *ImportCmd) Run() error {
 		fmt.Fprintf(w, "\nTitle\tURL\tTag\n")
 		fmt.Fprintf(w, "-----\t---\t---\n")
 		for _, s := range newSubs {
-			fmt.Fprintf(w, "%s\t%s\t%s\n", s.Title, s.URL, s.Tag)
+			fmt.Fprintf(w, "%s\t%s\t%s\n", s.Title, s.URLs(), s.Tag)
 		}
 		w.Flush()
 		return nil
@@ -105,7 +105,7 @@ func (iw *importWalker) walk(nodes []*OPMLNode, prefix, indent string, groupPath
 		id := prefix + strconv.Itoa(i+1)
 
 		if n.Sub != nil && len(n.Children) == 0 {
-			fmt.Fprintf(iw.w, "%s\t%s%s\t%s\n", id, indent, n.Name, n.Sub.URL)
+			fmt.Fprintf(iw.w, "%s\t%s%s\t%s\n", id, indent, n.Name, n.Sub.URLs())
 			if iw.isSelected(id, importAll) {
 				if err := selectSub(n.Sub); err != nil {
 					return nil, err
@@ -116,7 +116,7 @@ func (iw *importWalker) walk(nodes []*OPMLNode, prefix, indent string, groupPath
 
 			if n.Sub != nil {
 				subID := id + ".0"
-				fmt.Fprintf(iw.w, "%s\t%s  %s\t%s\n", subID, indent, n.Name, n.Sub.URL)
+				fmt.Fprintf(iw.w, "%s\t%s  %s\t%s\n", subID, indent, n.Name, n.Sub.URLs())
 				if iw.isSelected(subID, importAll) || iw.isSelected(id, false) {
 					if err := selectSub(n.Sub); err != nil {
 						return nil, err

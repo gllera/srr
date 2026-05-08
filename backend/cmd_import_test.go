@@ -52,8 +52,8 @@ func TestIsSelected(t *testing.T) {
 
 func TestImportWalkerBasic(t *testing.T) {
 	nodes := []*OPMLNode{
-		{Name: "Feed A", Sub: &Subscription{Title: "Feed A", URL: "http://example.com/a"}},
-		{Name: "Feed B", Sub: &Subscription{Title: "Feed B", URL: "http://example.com/b"}},
+		{Name: "Feed A", Sub: &Subscription{Title: "Feed A", Sources: []*Source{{URL: "http://example.com/a"}}}},
+		{Name: "Feed B", Sub: &Subscription{Title: "Feed B", Sources: []*Source{{URL: "http://example.com/b"}}}},
 	}
 
 	iw := &importWalker{w: io.Discard, selectedIDs: nil}
@@ -69,9 +69,9 @@ func TestImportWalkerBasic(t *testing.T) {
 
 func TestImportWalkerSelectiveImport(t *testing.T) {
 	nodes := []*OPMLNode{
-		{Name: "Feed A", Sub: &Subscription{Title: "Feed A", URL: "http://example.com/a"}},
-		{Name: "Feed B", Sub: &Subscription{Title: "Feed B", URL: "http://example.com/b"}},
-		{Name: "Feed C", Sub: &Subscription{Title: "Feed C", URL: "http://example.com/c"}},
+		{Name: "Feed A", Sub: &Subscription{Title: "Feed A", Sources: []*Source{{URL: "http://example.com/a"}}}},
+		{Name: "Feed B", Sub: &Subscription{Title: "Feed B", Sources: []*Source{{URL: "http://example.com/b"}}}},
+		{Name: "Feed C", Sub: &Subscription{Title: "Feed C", Sources: []*Source{{URL: "http://example.com/c"}}}},
 	}
 
 	// Nodes are sorted case-insensitively, so order is A=1, B=2, C=3
@@ -94,7 +94,7 @@ func TestImportWalkerNestedGroup(t *testing.T) {
 		{
 			Name: "Tech",
 			Children: []*OPMLNode{
-				{Name: "Blog", Sub: &Subscription{Title: "Blog", URL: "http://example.com/blog"}},
+				{Name: "Blog", Sub: &Subscription{Title: "Blog", Sources: []*Source{{URL: "http://example.com/blog"}}}},
 			},
 		},
 	}
@@ -115,7 +115,7 @@ func TestImportWalkerNestedGroup(t *testing.T) {
 
 func TestImportWalkerNoSelection(t *testing.T) {
 	nodes := []*OPMLNode{
-		{Name: "Feed A", Sub: &Subscription{Title: "Feed A", URL: "http://example.com/a"}},
+		{Name: "Feed A", Sub: &Subscription{Title: "Feed A", Sources: []*Source{{URL: "http://example.com/a"}}}},
 	}
 
 	iw := &importWalker{w: io.Discard, selectedIDs: nil}
@@ -134,8 +134,8 @@ func TestImportWalkerGroupSelectsChildren(t *testing.T) {
 		{
 			Name: "Tech",
 			Children: []*OPMLNode{
-				{Name: "Blog A", Sub: &Subscription{Title: "Blog A", URL: "http://example.com/a"}},
-				{Name: "Blog B", Sub: &Subscription{Title: "Blog B", URL: "http://example.com/b"}},
+				{Name: "Blog A", Sub: &Subscription{Title: "Blog A", Sources: []*Source{{URL: "http://example.com/a"}}}},
+				{Name: "Blog B", Sub: &Subscription{Title: "Blog B", Sources: []*Source{{URL: "http://example.com/b"}}}},
 			},
 		},
 	}
@@ -154,9 +154,9 @@ func TestImportWalkerGroupSelectsChildren(t *testing.T) {
 
 func TestImportWalkerSorting(t *testing.T) {
 	nodes := []*OPMLNode{
-		{Name: "Zebra", Sub: &Subscription{Title: "Zebra", URL: "http://example.com/z"}},
-		{Name: "alpha", Sub: &Subscription{Title: "alpha", URL: "http://example.com/a"}},
-		{Name: "Beta", Sub: &Subscription{Title: "Beta", URL: "http://example.com/b"}},
+		{Name: "Zebra", Sub: &Subscription{Title: "Zebra", Sources: []*Source{{URL: "http://example.com/z"}}}},
+		{Name: "alpha", Sub: &Subscription{Title: "alpha", Sources: []*Source{{URL: "http://example.com/a"}}}},
+		{Name: "Beta", Sub: &Subscription{Title: "Beta", Sources: []*Source{{URL: "http://example.com/b"}}}},
 	}
 
 	iw := &importWalker{w: io.Discard, selectedIDs: nil}

@@ -36,8 +36,8 @@ func TestParseOPMLTreeGrouped(t *testing.T) {
 	if len(tech.Children) != 2 {
 		t.Fatalf("Tech children: got %d, want 2", len(tech.Children))
 	}
-	if tech.Children[0].Sub.URL != "http://example.com/a.xml" {
-		t.Errorf("first tech URL = %q", tech.Children[0].Sub.URL)
+	if got := tech.Children[0].Sub.Sources[0].URL; got != "http://example.com/a.xml" {
+		t.Errorf("first tech URL = %q", got)
 	}
 
 	news := nodes[1]
@@ -169,8 +169,8 @@ func TestParseOPMLTreeNested(t *testing.T) {
 	if topFeed == nil || topFeed.Sub == nil {
 		t.Fatal("expected Top Feed as leaf subscription")
 	}
-	if topFeed.Sub.URL != "http://example.com/top.xml" {
-		t.Errorf("top feed URL = %q", topFeed.Sub.URL)
+	if got := topFeed.Sub.Sources[0].URL; got != "http://example.com/top.xml" {
+		t.Errorf("top feed URL = %q", got)
 	}
 }
 

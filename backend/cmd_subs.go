@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/url"
+	"slices"
 	"sort"
 	"strings"
 
@@ -37,11 +37,35 @@ func printJSON(v any) error {
 }
 
 type AddCmd struct {
-	Upd     *int      `          optional:"" help:"Update existing subscription id instead."`
-	Title   *string   `short:"t" optional:"" help:"Subscription title."`
-	URL     *url.URL  `short:"u" optional:"" help:"Subscription RSS url."`
-	Tag     *string   `short:"g" optional:"" help:"Subscription tag. Empty (\"\") to clear."`
-	Parsers *[]string `short:"p" optional:"" help:"Subscription parsers commands. Empty (\"\") for default."`
+	Upd     *int      `          optional:""              help:"Update existing subscription id instead."`
+	Title   *string   `short:"t" optional:""              help:"Subscription title."`
+	URLs    *[]string `short:"u" optional:"" name:"url"   help:"Subscription RSS url(s); repeat to merge multiple sources under one id."`
+	Tag     *string   `short:"g" optional:""              help:"Subscription tag. Empty (\"\") to clear."`
+	Parsers *[]string `short:"p" optional:""              help:"Subscription parsers commands. Empty (\"\") for default."`
+}
+
+// parseSources validates URL flag values and reuses any prior Source whose URL
+// survives the update so per-source state (ETag, StopGUID, etc.) is preserved.
+func parseSources(urls []string, prev []*Source) ([]*Source, error) {
+	if len(urls) == 0 {
+		return nil, fmt.Errorf("at least one --url is required")
+	}
+	out := make([]*Source, 0, len(urls))
+	for _, raw := range urls {
+		if !validFeedURL(raw) {
+			return nil, fmt.Errorf("invalid url %q", raw)
+		}
+		if slices.ContainsFunc(out, func(s *Source) bool { return s.URL == raw }) {
+			return nil, fmt.Errorf("duplicate url %q", raw)
+		}
+		i := slices.IndexFunc(prev, func(s *Source) bool { return s.URL == raw })
+		if i >= 0 {
+			out = append(out, prev[i])
+		} else {
+			out = append(out, &Source{URL: raw})
+		}
+	}
+	return out, nil
 }
 
 func (o *AddCmd) Run() error {
@@ -54,19 +78,16 @@ func (o *AddCmd) Run() error {
 
 	var sub *Subscription
 	if o.Upd != nil {
-		if *o.Upd < 0 || *o.Upd > 255 {
-			return fmt.Errorf("subscription id must be in [0, 255]")
-		}
-		sub = db.Subscriptions()[*o.Upd]
-		if sub == nil {
-			return fmt.Errorf("subscription id %d not found", *o.Upd)
+		sub, err = db.SubByID(*o.Upd)
+		if err != nil {
+			return err
 		}
 	} else {
 		if o.Title == nil {
 			return fmt.Errorf("title is required for new subscription")
 		}
-		if o.URL == nil {
-			return fmt.Errorf("url is required for new subscription")
+		if o.URLs == nil {
+			return fmt.Errorf("at least one --url is required for new subscription")
 		}
 		sub = &Subscription{}
 		if err := db.AddSubscription(sub); err != nil {
@@ -80,11 +101,12 @@ func (o *AddCmd) Run() error {
 		}
 		sub.Title = *o.Title
 	}
-	if o.URL != nil {
-		if o.URL.String() == "" {
-			return fmt.Errorf("url cannot be empty")
+	if o.URLs != nil {
+		sources, err := parseSources(*o.URLs, sub.Sources)
+		if err != nil {
+			return err
 		}
-		sub.URL = o.URL.String()
+		sub.Sources = sources
 	}
 	if o.Tag != nil {
 		sub.Tag = *o.Tag
@@ -98,6 +120,80 @@ func (o *AddCmd) Run() error {
 		}
 	}
 
+	return db.Commit(ctx)
+}
+
+type AddSrcCmd struct {
+	ID   int      `arg:""              help:"Subscription id."`
+	URLs []string `arg:"" name:"url"   help:"URL(s) to add."`
+}
+
+// add-src is idempotent: URLs already on the sub or duplicated within args
+// are silently skipped (mkdir -p semantics). Only invalid URL formats fail.
+func (o *AddSrcCmd) Run() error {
+	ctx := context.Background()
+	db, err := NewDB(ctx, true)
+	if err != nil {
+		return err
+	}
+	defer db.Close(ctx)
+
+	sub, err := db.SubByID(o.ID)
+	if err != nil {
+		return err
+	}
+
+	seen := make(map[string]bool, len(sub.Sources)+len(o.URLs))
+	for _, s := range sub.Sources {
+		seen[s.URL] = true
+	}
+	for _, u := range o.URLs {
+		if !validFeedURL(u) {
+			return fmt.Errorf("invalid url %q", u)
+		}
+		if seen[u] {
+			continue
+		}
+		seen[u] = true
+		sub.Sources = append(sub.Sources, &Source{URL: u})
+	}
+	return db.Commit(ctx)
+}
+
+type RmSrcCmd struct {
+	ID   int      `arg:""              help:"Subscription id."`
+	URLs []string `arg:"" name:"url"   help:"URL(s) to remove."`
+}
+
+func (o *RmSrcCmd) Run() error {
+	ctx := context.Background()
+	db, err := NewDB(ctx, true)
+	if err != nil {
+		return err
+	}
+	defer db.Close(ctx)
+
+	sub, err := db.SubByID(o.ID)
+	if err != nil {
+		return err
+	}
+
+	rmSet := make(map[string]bool, len(o.URLs))
+	for _, u := range o.URLs {
+		if rmSet[u] {
+			return fmt.Errorf("duplicate url %q", u)
+		}
+		rmSet[u] = true
+		if !slices.ContainsFunc(sub.Sources, func(s *Source) bool { return s.URL == u }) {
+			return fmt.Errorf("url %q is not a source of subscription %d", u, o.ID)
+		}
+	}
+
+	if len(rmSet) == len(sub.Sources) {
+		return fmt.Errorf("subscription %d would have no sources after removal", o.ID)
+	}
+
+	sub.Sources = slices.DeleteFunc(sub.Sources, func(s *Source) bool { return rmSet[s.URL] })
 	return db.Commit(ctx)
 }
 
@@ -133,25 +229,31 @@ func (o *LsCmd) Run() error {
 	}
 	defer db.Close(ctx)
 
-	type SubscriptionLS struct {
-		ID    int    `json:"id"`
-		Title string `json:"title"`
-		URL   string `json:"url"`
-		Tag   string `json:"tag,omitempty" yaml:"tag,omitempty"`
+	type lsSource struct {
+		URL   string `json:"url" yaml:"url"`
 		Error string `json:"error,omitempty" yaml:"error,omitempty"`
 	}
+	type lsSub struct {
+		ID      int        `json:"id" yaml:"id"`
+		Title   string     `json:"title" yaml:"title"`
+		Sources []lsSource `json:"sources" yaml:"sources"`
+		Tag     string     `json:"tag,omitempty" yaml:"tag,omitempty"`
+	}
 
-	subsList := make([]*SubscriptionLS, 0, len(db.Subscriptions()))
+	subsList := make([]*lsSub, 0, len(db.Subscriptions()))
 	for _, s := range db.Subscriptions() {
 		if o.Tag != nil && s.Tag != *o.Tag {
 			continue
 		}
-		subsList = append(subsList, &SubscriptionLS{
-			Title: s.Title,
-			URL:   s.URL,
-			ID:    s.id,
-			Tag:   s.Tag,
-			Error: s.FetchError,
+		sources := make([]lsSource, len(s.Sources))
+		for i, src := range s.Sources {
+			sources[i] = lsSource{URL: src.URL, Error: src.FetchError}
+		}
+		subsList = append(subsList, &lsSub{
+			ID:      s.id,
+			Title:   s.Title,
+			Sources: sources,
+			Tag:     s.Tag,
 		})
 	}
 

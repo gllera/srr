@@ -29,45 +29,58 @@ srr <command> [flags]
 
 ### Commands
 
-| Command   | Description                                      |
-|-----------|--------------------------------------------------|
-| `add`     | Subscribe to a feed or update an existing one     |
-| `rm`      | Unsubscribe from feed(s)                          |
-| `ls`      | List subscriptions (`-g` tag filter, `-f` format) |
-| `fetch`   | Fetch new articles from all subscriptions         |
-| `import`  | Import subscriptions from an OPML file            |
-| `preview` | Preview processed feed articles in a browser      |
-| `version` | Print version information                         |
+Commands are grouped under `sub` (subscription management), `art` (articles), `preview`, `inspect`, `config`, and `version`. Group names have short aliases (`s`, `a`, `p`, `i`, `c`).
+
+| Command            | Description                                        |
+|--------------------|----------------------------------------------------|
+| `sub add`          | Subscribe to a feed or update an existing one      |
+| `sub rm`           | Unsubscribe from subscription(s) by id             |
+| `sub add-src`      | Add URL(s) to an existing subscription             |
+| `sub rm-src`       | Remove URL(s) from an existing subscription        |
+| `sub ls`           | List subscriptions (`-g` tag filter, `-f` format)  |
+| `sub import`       | Import subscriptions from an OPML file             |
+| `art fetch`        | Fetch new articles from all subscriptions          |
+| `art ls`           | List stored articles                               |
+| `preview`          | Preview processed feed articles in a browser       |
+| `inspect`          | Validate pack consistency / debug chronIdx lookups |
+| `config`           | Print resolved configuration                       |
+| `version`          | Print version information                          |
 
 ### Examples
 
 ```bash
 # Add a subscription
-srr add -t "Tech News" -u https://example.com/feed.xml -g tech/news
+srr sub add -t "Tech News" -u https://example.com/feed.xml -g tech/news
 
 # Add with processing pipeline
-srr add -t "Blog" -u https://example.com/rss -p "#sanitize" -p "#minify"
+srr sub add -t "Blog" -u https://example.com/rss -p "#sanitize" -p "#minify"
 
-# Update an existing subscription
-srr add --upd 1 -p "#sanitize"
+# Add a second source URL to an existing subscription (idempotent)
+srr sub add-src 1 https://example.com/alt-feed.xml
+
+# Remove a source URL from a subscription
+srr sub rm-src 1 https://example.com/alt-feed.xml
+
+# Update an existing subscription's pipeline
+srr sub add --upd 1 -p "#sanitize"
 
 # List subscriptions (filter by tag)
-srr ls -g tech
+srr sub ls -g tech
 
 # List subscriptions as JSON
-srr ls -f json
+srr sub ls -f json
 
 # Fetch all feeds
-srr fetch
+srr art fetch
 
 # Fetch with 8 concurrent workers
-srr -w 8 fetch
+srr -w 8 art fetch
 
 # Import from OPML (all feeds)
-srr import feeds.opml -a
+srr sub import feeds.opml -a
 
 # Import selectively with dry-run
-srr import feeds.opml -i "1" -i "2.3" -n
+srr sub import feeds.opml -i "1" -i "2.3" -n
 
 # Preview a feed with processors
 srr preview https://example.com/feed.xml -p "#sanitize" -p "#minify"
@@ -149,11 +162,12 @@ srr add -t "Feed" -u https://example.com/rss \
 
 ## Pack Format
 
-Articles are stored in three gzip-compressed series:
+Articles are stored in two gzip-compressed series under each feed directory, alongside a `db.gz` metadata file:
 
-- **`idx/`** — TSV metadata index (split every 1000 articles)
-- **`data/`** — Article content, null-byte separated (split at target pack size)
-- **`ts/`** — Timestamped delta snapshots (split by week)
+- **`idx/`** — Binary index (header + 2-byte entries per article); split every 50,000 articles.
+- **`data/`** — JSONL article content (one record per line); split when the gzip-compressed pack exceeds `--pack-size` KB.
+
+Finalized packs are immutable and named `0.gz`..`N-1.gz`; the latest (mutable) pack rotates between `true.gz` and `false.gz` via a `data_tog` flag in `db.gz` so CDNs can serve finalized packs with `force-cache`.
 
 This format is optimized for static file hosting with efficient incremental client sync.
 

@@ -31,6 +31,8 @@ type Globals struct {
 type SubGroup struct {
 	Add    AddCmd    `cmd:"" help:"Subscribe to RSS or update an existing subscription."`
 	Rm     RmCmd     `cmd:"" help:"Unsubscribe from RSS(s)."`
+	AddSrc AddSrcCmd `cmd:"" help:"Add URL(s) to an existing subscription."`
+	RmSrc  RmSrcCmd  `cmd:"" help:"Remove URL(s) from an existing subscription."`
 	Ls     LsCmd     `cmd:"" help:"List subscriptions."`
 	Import ImportCmd `cmd:"" help:"Import opml subscriptions file."`
 }

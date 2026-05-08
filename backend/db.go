@@ -160,6 +160,17 @@ func (o *DB) RemoveSubscription(id int) {
 	delete(o.core.Subscriptions, id)
 }
 
+func (o *DB) SubByID(id int) (*Subscription, error) {
+	if id < 0 || id > 255 {
+		return nil, fmt.Errorf("subscription id must be in [0, 255]")
+	}
+	sub := o.core.Subscriptions[id]
+	if sub == nil {
+		return nil, fmt.Errorf("subscription id %d not found", id)
+	}
+	return sub, nil
+}
+
 type Item struct {
 	Sub       *Subscription
 	Title     string

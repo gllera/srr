@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/xml"
 	"fmt"
-	"net/url"
 	"os"
 	"strings"
 )
@@ -37,11 +36,13 @@ func outlineDisplayName(o Outline) string {
 }
 
 func outlineToSub(o Outline) *Subscription {
-	u, err := url.Parse(o.XMLURL)
-	if err != nil || u.Scheme == "" || u.Host == "" {
+	if !validFeedURL(o.XMLURL) {
 		return nil
 	}
-	return &Subscription{Title: outlineDisplayName(o), URL: o.XMLURL}
+	return &Subscription{
+		Title:   outlineDisplayName(o),
+		Sources: []*Source{{URL: o.XMLURL}},
+	}
 }
 
 func normalizeGroupName(name string) (string, error) {

@@ -72,12 +72,7 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 		g.Go(func() error {
 			buf := bufPool.Get().([]byte)
 			defer bufPool.Put(buf)
-			s.FetchError = ""
-			if err := s.Fetch(gctx, client, buf, processor); err != nil {
-				s.FetchError = err.Error()
-				s.newItems = nil
-				slog.Error("fetch failed", "sub", s, "err", err)
-			}
+			s.Fetch(gctx, client, buf, processor)
 			return nil
 		})
 	}
@@ -103,15 +98,18 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 		return err
 	}
 
-	var failed int
+	var failed, totalSrc int
 	for _, s := range db.Subscriptions() {
-		if s.FetchError != "" {
-			failed++
+		for _, src := range s.Sources {
+			totalSrc++
+			if src.FetchError != "" {
+				failed++
+			}
 		}
 	}
 	slog.Info("fetch complete",
 		"new_articles", len(articles),
-		"fetched", len(db.Subscriptions())-failed,
+		"fetched", totalSrc-failed,
 		"failed", failed,
 	)
 	return nil

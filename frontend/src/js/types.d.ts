@@ -11,15 +11,19 @@ interface IDB {
    subscriptions: Record<number, ISub>
 }
 
-interface ISub {
-   id: number
-   title: string
+interface ISource {
    url: string
-   pipe?: string[]
    ferr?: string
    stop_guid?: number
    etag?: string
    last_modified?: string
+}
+
+interface ISub {
+   id: number
+   title: string
+   src: ISource[]
+   pipe?: string[]
    total_art: number
    add_idx: number
    tag?: string

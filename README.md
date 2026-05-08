@@ -5,8 +5,8 @@ Static RSS Reader -- a self-hosted RSS reader designed for static file hosting. 
 ## How It Works
 
 ```
-srr fetch  --->  pack files (idx/ + data/ + ts/)  --->  static SPA reader
-  (CLI)           stored on S3 / SFTP / local            served via CDN
+srr art fetch  --->  pack files (idx/ + data/ + db.gz)  --->  static SPA reader
+   (CLI)             stored on S3 / SFTP / local              served via CDN
 ```
 
 1. **Backend CLI** fetches RSS/Atom/RDF feeds and writes articles into gzip-compressed pack series optimized for incremental sync and HTTP caching.
@@ -25,13 +25,13 @@ curl -sL "$(curl -s https://api.github.com/repos/gllera/srr/releases/latest \
 chmod +x srr
 
 # Add a feed
-./srr add -t "Hacker News" -u https://hnrss.org/frontpage
+./srr sub add -t "Hacker News" -u https://hnrss.org/frontpage
 
 # Fetch articles to local directory
-./srr fetch
+./srr art fetch
 
 # Or fetch to S3
-./srr -o s3://my-bucket/feeds fetch
+./srr -o s3://my-bucket/feeds art fetch
 ```
 
 ### Serve the reader

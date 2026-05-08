@@ -50,9 +50,11 @@ Shared format between backend (writer) and frontend (reader).
 
 ### Subscriptions (`ISub`)
 
-`{ id, title, url, pipe?:string[], ferr?, stop_guid?, etag?, last_modified?, total_art?, add_idx?, tag? }`
+`{ id, title, src:ISource[], pipe?:string[], total_art?, add_idx?, tag? }`
 
-`subscriptions` is a JSON object (`Record<string, ISub>`) keyed by subscription ID as a string. Backend struct: `Subscription` with ETag, Last-Modified, StopGUID, Tag, Pipeline fields. JSON uses short keys (`pipe`, `ferr`, etc.) — see `DBCore` struct tags.
+Each `ISource` is `{ url, ferr?, stop_guid?, etag?, last_modified? }`. Multiple sources merge under one `sub_id` so a subscription is not bound to a single feed URL — useful when the 256-id ceiling matters or when several feeds form one logical channel. Per-source state (incremental fetch headers, stop GUID, last error) lives on the source, not the subscription.
+
+`subscriptions` is a JSON object (`Record<string, ISub>`) keyed by subscription ID as a string. Backend struct: `Subscription` holds `Sources []*Source`. JSON uses short keys (`src`, `pipe`, `ferr`, etc.) — see `DBCore` struct tags. Legacy single-source DBs (top-level `url`/`etag`/`last_modified`/`stop_guid`/`ferr`) auto-migrate into one `Source` on read via `Subscription.UnmarshalJSON`.
 
 ### Pack Storage
 

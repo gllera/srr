@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -45,56 +47,116 @@ func stripControlKeepWS(r rune) rune {
 	return r
 }
 
-type Subscription struct {
-	id           int
-	Title        string   `json:"title"`
-	URL          string   `json:"url"`
-	Tag          string   `json:"tag,omitempty"`
-	Pipeline     []string `json:"pipe,omitempty"`
-	FetchError   string   `json:"ferr,omitempty"`
-	StopGUID     uint32   `json:"stop_guid,omitempty"`
-	ETag         string   `json:"etag,omitempty"`
-	LastModified string   `json:"last_modified,omitempty"`
-	TotalArt     int      `json:"total_art"`
-	AddIdx       int      `json:"add_idx"`
-	newItems     []*Item
+func validFeedURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && u.Scheme != "" && u.Host != ""
 }
 
-func (s Subscription) LogValue() slog.Value {
+type Source struct {
+	URL          string `json:"url"`
+	ETag         string `json:"etag,omitempty"`
+	LastModified string `json:"last_modified,omitempty"`
+	StopGUID     uint32 `json:"stop_guid,omitempty"`
+	FetchError   string `json:"ferr,omitempty"`
+}
+
+type Subscription struct {
+	id       int
+	Title    string    `json:"title"`
+	Sources  []*Source `json:"src"`
+	Tag      string    `json:"tag,omitempty"`
+	Pipeline []string  `json:"pipe,omitempty"`
+	TotalArt int       `json:"total_art"`
+	AddIdx   int       `json:"add_idx"`
+	newItems []*Item
+}
+
+// UnmarshalJSON folds the pre-Sources DB layout (url/etag/last_modified/
+// stop_guid/ferr at the subscription level) into a single Source. Without
+// this, upgrading an existing pack silently drops StopGUID/ETag and re-fetches
+// the entire feed history on the next run.
+func (s *Subscription) UnmarshalJSON(data []byte) error {
+	type alias Subscription
+	aux := &struct {
+		URL          string `json:"url,omitempty"`
+		ETag         string `json:"etag,omitempty"`
+		LastModified string `json:"last_modified,omitempty"`
+		StopGUID     uint32 `json:"stop_guid,omitempty"`
+		FetchError   string `json:"ferr,omitempty"`
+		*alias
+	}{alias: (*alias)(s)}
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+	if len(s.Sources) == 0 && aux.URL != "" {
+		s.Sources = []*Source{{
+			URL:          aux.URL,
+			ETag:         aux.ETag,
+			LastModified: aux.LastModified,
+			StopGUID:     aux.StopGUID,
+			FetchError:   aux.FetchError,
+		}}
+	}
+	return nil
+}
+
+func (s *Subscription) URLs() string {
+	urls := make([]string, len(s.Sources))
+	for i, src := range s.Sources {
+		urls[i] = src.URL
+	}
+	return strings.Join(urls, ", ")
+}
+
+func (s *Subscription) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.Int("id", s.id),
-		slog.String("url", s.URL),
+		slog.String("urls", s.URLs()),
 	)
 }
 
-func (s *Subscription) Fetch(ctx context.Context, client *http.Client, buf []byte, processor *mod.Module) error {
-	slog.Debug("downloading subscription", "sub", s)
+func (s *Subscription) Fetch(ctx context.Context, client *http.Client, buf []byte, processor *mod.Module) {
+	s.newItems = s.newItems[:0]
+	for _, src := range s.Sources {
+		items, err := src.fetch(ctx, client, buf, processor, s)
+		if err != nil {
+			src.FetchError = err.Error()
+			slog.Error("source fetch failed", "sub", s, "url", src.URL, "err", err)
+			continue
+		}
+		src.FetchError = ""
+		s.newItems = append(s.newItems, items...)
+	}
+}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", s.URL, nil)
+func (src *Source) fetch(ctx context.Context, client *http.Client, buf []byte, processor *mod.Module, sub *Subscription) ([]*Item, error) {
+	slog.Debug("downloading source", "url", src.URL, "sub", sub)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", src.URL, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("User-Agent", "SRR/"+version)
-	if s.ETag != "" {
-		req.Header.Set("If-None-Match", s.ETag)
+	if src.ETag != "" {
+		req.Header.Set("If-None-Match", src.ETag)
 	}
-	if s.LastModified != "" {
-		req.Header.Set("If-Modified-Since", s.LastModified)
+	if src.LastModified != "" {
+		req.Header.Set("If-Modified-Since", src.LastModified)
 	}
 
 	res, err := client.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer res.Body.Close()
 
 	if res.StatusCode == http.StatusNotModified {
-		slog.Debug("subscription not modified", "sub", s)
-		return nil
+		slog.Debug("source not modified", "url", src.URL)
+		return nil, nil
 	}
 
 	if res.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected HTTP status: %s", res.Status)
+		return nil, fmt.Errorf("unexpected HTTP status: %s", res.Status)
 	}
 
 	etag := res.Header.Get("ETag")
@@ -102,16 +164,15 @@ func (s *Subscription) Fetch(ctx context.Context, client *http.Client, buf []byt
 
 	n, err := io.ReadFull(res.Body, buf)
 	if err == nil {
-		return fmt.Errorf("subscription file bigger than %d bytes", cap(buf)-1)
+		return nil, fmt.Errorf("subscription file bigger than %d bytes", cap(buf)-1)
 	}
 	if errors.Is(err, io.EOF) {
-		return fmt.Errorf("empty response from subscription")
+		return nil, fmt.Errorf("empty response from subscription")
 	}
 	if !errors.Is(err, io.ErrUnexpectedEOF) {
-		return err
+		return nil, err
 	}
 
-	s.newItems = s.newItems[:0]
 	// Track the GUID of the item with the latest Published time so the next
 	// fetch halts at it whether the feed is descending (RSS, most Atom) or
 	// ascending (some Atom generators). Capture by value: the pipeline can
@@ -120,6 +181,7 @@ func (s *Subscription) Fetch(ctx context.Context, client *http.Client, buf []byt
 	var newestPub time.Time
 	var newestGUID uint32
 	var hasNewest bool
+	var items []*Item
 
 	err = parseFeed(buf[:n], func(i *mod.RawItem) error {
 		if i.Published != nil && (!hasNewest || i.Published.After(newestPub)) {
@@ -127,10 +189,10 @@ func (s *Subscription) Fetch(ctx context.Context, client *http.Client, buf []byt
 			newestGUID = i.GUID
 			hasNewest = true
 		}
-		if s.StopGUID == i.GUID {
+		if src.StopGUID == i.GUID {
 			return ErrStopFeed
 		}
-		if err := processItem(ctx, processor, s.Pipeline, i); err != nil {
+		if err := processItem(ctx, processor, sub.Pipeline, i); err != nil {
 			return err
 		}
 
@@ -138,8 +200,8 @@ func (s *Subscription) Fetch(ctx context.Context, client *http.Client, buf []byt
 		if i.Published != nil && !i.Published.IsZero() {
 			publishedUnix = i.Published.Unix()
 		}
-		s.newItems = append(s.newItems, &Item{
-			Sub:       s,
+		items = append(items, &Item{
+			Sub:       sub,
 			Title:     i.Title,
 			Content:   i.Content,
 			Link:      i.Link,
@@ -149,12 +211,12 @@ func (s *Subscription) Fetch(ctx context.Context, client *http.Client, buf []byt
 	})
 
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if hasNewest {
-		s.StopGUID = newestGUID
+		src.StopGUID = newestGUID
 	}
-	s.ETag = etag
-	s.LastModified = lastModified
-	return nil
+	src.ETag = etag
+	src.LastModified = lastModified
+	return items, nil
 }

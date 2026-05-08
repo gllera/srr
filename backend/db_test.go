@@ -267,7 +267,7 @@ func TestPackMetadata(t *testing.T) {
 func TestCommitAndReadDB(t *testing.T) {
 	db, c, dir := setupTestDB(t)
 	c.Subscriptions = map[int]*Subscription{
-		1: {id: 1, Title: "Test Feed", URL: "http://example.com/feed"},
+		1: {id: 1, Title: "Test Feed", Sources: []*Source{{URL: "http://example.com/feed"}}},
 	}
 
 	if err := db.Commit(ctx); err != nil {
@@ -446,8 +446,8 @@ func TestDBLockingForce(t *testing.T) {
 func TestAddRemoveSubscription(t *testing.T) {
 	db, _, _ := setupTestDB(t)
 
-	s1 := &Subscription{Title: "Feed 1", URL: "http://example.com/1"}
-	s2 := &Subscription{Title: "Feed 2", URL: "http://example.com/2"}
+	s1 := &Subscription{Title: "Feed 1", Sources: []*Source{{URL: "http://example.com/1"}}}
+	s2 := &Subscription{Title: "Feed 2", Sources: []*Source{{URL: "http://example.com/2"}}}
 	if err := db.AddSubscription(s1); err != nil {
 		t.Fatalf("AddSubscription(s1): %v", err)
 	}
@@ -471,7 +471,7 @@ func TestAddRemoveSubscription(t *testing.T) {
 	}
 
 	// Adding after removal should reuse freed ID
-	s3 := &Subscription{Title: "Feed 3", URL: "http://example.com/3"}
+	s3 := &Subscription{Title: "Feed 3", Sources: []*Source{{URL: "http://example.com/3"}}}
 	if err := db.AddSubscription(s3); err != nil {
 		t.Fatalf("AddSubscription(s3): %v", err)
 	}
@@ -482,7 +482,7 @@ func TestAddRemoveSubscription(t *testing.T) {
 
 func TestRemoveNonExistentSubscription(t *testing.T) {
 	db, _, _ := setupTestDB(t)
-	if err := db.AddSubscription(&Subscription{Title: "Feed", URL: "http://example.com"}); err != nil {
+	if err := db.AddSubscription(&Subscription{Title: "Feed", Sources: []*Source{{URL: "http://example.com"}}}); err != nil {
 		t.Fatalf("AddSubscription: %v", err)
 	}
 
@@ -502,7 +502,7 @@ func TestCommitAndReopen(t *testing.T) {
 		t.Fatalf("NewDB: %v", err)
 	}
 
-	if err := db.AddSubscription(&Subscription{Title: "Persist Feed", URL: "http://example.com/feed"}); err != nil {
+	if err := db.AddSubscription(&Subscription{Title: "Persist Feed", Sources: []*Source{{URL: "http://example.com/feed"}}}); err != nil {
 		t.Fatalf("AddSubscription: %v", err)
 	}
 	db.core.FetchedAt = 1234567890
@@ -551,7 +551,7 @@ func TestAddSubscriptionSetsAddIdx(t *testing.T) {
 	db, c, _ := setupTestDB(t)
 	c.TotalArticles = 100
 
-	s := &Subscription{Title: "Feed", URL: "http://example.com"}
+	s := &Subscription{Title: "Feed", Sources: []*Source{{URL: "http://example.com"}}}
 	if err := db.AddSubscription(s); err != nil {
 		t.Fatalf("AddSubscription: %v", err)
 	}

@@ -49,7 +49,7 @@ function makeArticle(overrides: Partial<IArticle> = {}): IArticle {
 }
 
 function makeSub(overrides: Partial<ISub> = {}): ISub {
-   return { id: 1, title: "Test", url: "http://test.com", total_art: 1, ...overrides } as ISub
+   return { id: 1, title: "Test", src: [{ url: "http://test.com" }], total_art: 1, ...overrides } as ISub
 }
 
 function setupIndex(entries: Array<{ subId: number; fetchedAt?: number }>) {
@@ -512,7 +512,7 @@ describe("showFeed", () => {
    })
 
    it("sub is looked up from subscriptions", async () => {
-      const sub = makeSub({ id: 1, title: "MySub", url: "http://sub.com" })
+      const sub = makeSub({ id: 1, title: "MySub", src: [{ url: "http://sub.com" }] })
       data.db.subscriptions[1] = sub
       setupIndex([{ subId: 1 }])
       const result = await nav.fromHash("0")
