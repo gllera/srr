@@ -19,7 +19,7 @@
 - **`cmd_import.go`** — OPML import with hierarchical ID selection (`-a` all, `-i` specific). OPML group hierarchy auto-resolves to hierarchical tags; `-g/--tag` overrides. `-n/--dry-run` lists resulting subscriptions without importing.
 - **`opml.go`** — OPML XML parsing. `ParseOPMLTree` builds `OPMLNode` tree from file. `normalizeGroupName` converts group names to tag-safe identifiers.
 - **`cmd_preview.go`** — `preview` subcommand: fetches a feed URL, runs module pipeline (`-p`), serves rendered articles via local HTTP server (`-a/--addr`).
-- **`subscription.go`** — `Subscription` (Title, Tag, Pipeline, `Sources []*Source`) and `Source` (URL, ETag, Last-Modified, StopGUID, FetchError). `Subscription.Fetch` iterates sources sequentially, sharing the buffer pool slot; per-source errors record into `Source.FetchError` while items from successful sources still commit. `Source.fetch` owns the HTTP/304/StopGUID/pipeline path. `UnmarshalJSON` migrates legacy top-level url/etag/last_modified/stop_guid/ferr into a single `Source` entry. Also contains `processItem`, `validFeedURL`, `URLs`, and text sanitization helpers.
+- **`subscription.go`** — `Subscription` (Title, Tag, Pipeline, `Sources []*Source`) and `Source` (URL, ETag, Last-Modified, Watermark, BoundaryGUIDs, FetchError). `Subscription.Fetch` iterates sources sequentially, sharing the buffer pool slot; per-source errors record into `Source.FetchError` while items from successful sources still commit. `Source.fetch` owns the HTTP/304/dedup/pipeline path. Dedup model per source: `Watermark` is the max published unix-second ever seen and `BoundaryGUIDs` is the union of (GUIDs at `Watermark` in the most recent fetch) and (dateless GUIDs in the most recent fetch). Repopulated each non-empty fetch from the current response (no carry-over) so its size stays bounded by what the publisher currently exposes; a 200 OK with zero items preserves prior `Watermark`/`BoundaryGUIDs` so the dedup state survives a transient empty channel. An item is new iff its GUID isn't in the prior fetch's `BoundaryGUIDs` AND (`pub == 0` OR `pub >= Watermark`). Item `pub` is clamped to `fetchedAt` so a publisher CMS bug that ships a far-future date can't poison `Watermark`. Within-fetch dedup uses a per-GUID set checked first so duplicate items in one feed response are collapsed and can't pollute `Watermark`/`BoundaryGUIDs`. Trade-off: items at `Watermark` or dateless items that disappear from the feed for one fetch and reappear later are re-ingested as duplicates (snapshot semantics over carry-over). `Subscription.UnmarshalJSON` migrates legacy top-level url/etag/last_modified/ferr into a single `Source`; legacy `stop_guid` is silently dropped. Also contains `processItem`, `validFeedURL`, `URLs`, and text sanitization helpers.
 
 ### Store (`store/`)
 
@@ -54,7 +54,8 @@ Pipeline per-subscription during fetch. Factory pattern: `New()` returns fresh s
 
 - `#sanitize` — bluemonday, content-only.
 - `#minify` — tdewolff/minify, content-only.
-- External modules: `/bin/sh -c`, stdin/stdout JSON (`RawItem`), stderr passthrough. GUID is immutable (change = error).
+- External modules: `/bin/sh -c`, stdin/stdout JSON (`RawItem`), stderr passthrough.
+- `GUID` and `Published` are immutable for all modules (built-in or external; change = error). Enforced in `processItem` after each pipeline step — the captured value before the step is compared to the post-step value, attributing changes to the offending module.
 
 ## Conventions
 
@@ -65,5 +66,5 @@ Pipeline per-subscription during fetch. Factory pattern: `New()` returns fresh s
 
 - File-based DB lock (`.locked`) with `--force` override
 - Env vars prefixed `SRR_`
-- `ErrStopFeed` sentinel halts feed on `StopGUID` match
+- `ErrStopFeed` sentinel is part of the `parseFeed` callback contract for early-exit (currently unused in production code; kept for the API)
 

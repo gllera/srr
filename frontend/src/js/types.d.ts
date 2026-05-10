@@ -14,7 +14,8 @@ interface IDB {
 interface ISource {
    url: string
    ferr?: string
-   stop_guid?: number
+   wm?: number
+   bg?: number[]
    etag?: string
    last_modified?: string
 }

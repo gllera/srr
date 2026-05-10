@@ -17,8 +17,8 @@ func setupSubsTestDB(t *testing.T) {
 	if err := db.AddSubscription(&Subscription{
 		Title: "Test",
 		Sources: []*Source{
-			{URL: "https://a.example.com/feed", ETag: "etag-a", StopGUID: 111},
-			{URL: "https://b.example.com/feed", ETag: "etag-b", StopGUID: 222},
+			{URL: "https://a.example.com/feed", ETag: "etag-a", Watermark: 0x111},
+			{URL: "https://b.example.com/feed", ETag: "etag-b", Watermark: 0x222},
 		},
 	}); err != nil {
 		t.Fatalf("AddSubscription: %v", err)
@@ -71,8 +71,8 @@ func TestAddSrcCmdAppendsAndPreservesState(t *testing.T) {
 	if sub.Sources[0].ETag != "etag-a" || sub.Sources[1].ETag != "etag-b" {
 		t.Errorf("existing per-source state lost: ETags = %q, %q", sub.Sources[0].ETag, sub.Sources[1].ETag)
 	}
-	if sub.Sources[0].StopGUID != 111 || sub.Sources[1].StopGUID != 222 {
-		t.Errorf("existing StopGUIDs lost: %d, %d", sub.Sources[0].StopGUID, sub.Sources[1].StopGUID)
+	if sub.Sources[0].Watermark != 0x111 || sub.Sources[1].Watermark != 0x222 {
+		t.Errorf("existing Watermarks lost: %#x, %#x", sub.Sources[0].Watermark, sub.Sources[1].Watermark)
 	}
 }
 
@@ -178,8 +178,8 @@ func TestRmSrcCmdRemovesAndPreservesState(t *testing.T) {
 	if sub.Sources[0].URL != "https://b.example.com/feed" {
 		t.Errorf("remaining URL = %q, want b.example.com/feed", sub.Sources[0].URL)
 	}
-	if sub.Sources[0].ETag != "etag-b" || sub.Sources[0].StopGUID != 222 {
-		t.Errorf("per-source state lost on remaining source: ETag=%q StopGUID=%d", sub.Sources[0].ETag, sub.Sources[0].StopGUID)
+	if sub.Sources[0].ETag != "etag-b" || sub.Sources[0].Watermark != 0x222 {
+		t.Errorf("per-source state lost on remaining source: ETag=%q Watermark=%#x", sub.Sources[0].ETag, sub.Sources[0].Watermark)
 	}
 }
 

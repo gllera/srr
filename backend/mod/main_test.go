@@ -98,25 +98,6 @@ func TestModuleExternalProcessor(t *testing.T) {
 	}
 }
 
-func TestModuleGUIDImmutability(t *testing.T) {
-	m := New()
-
-	now := time.Now()
-	item := &RawItem{
-		GUID:      12345,
-		Title:     "Test",
-		Content:   "content",
-		Link:      "http://example.com",
-		Published: &now,
-	}
-
-	// Try to change GUID via external processor
-	err := m.Process(context.Background(), `jq -c '.guid = 99999'`, item)
-	if err == nil {
-		t.Error("expected error when GUID is changed")
-	}
-}
-
 func TestModuleExternalProcessorFailure(t *testing.T) {
 	m := New()
 

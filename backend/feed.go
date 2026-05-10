@@ -86,9 +86,10 @@ func parseDate(r rawFeedItem, hint *[2]string) time.Time {
 			}
 		}
 	}
-	// Zero time signals "no date"; callers translate to Published=0 (omitempty).
-	// Falling back to time.Now() would non-deterministically reorder undated items.
-	return time.Time{}
+	// Unix(0,0) sentinel for "no date". time.Time{}.Unix() is -62135596800,
+	// which would leak negative timestamps into pack data and the watermark;
+	// time.Now() would non-deterministically reorder undated items.
+	return time.Unix(0, 0).UTC()
 }
 
 func rawToFeedItem(r rawFeedItem, dateHint *[2]string) *mod.RawItem {
