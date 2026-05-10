@@ -1,8 +1,324 @@
 package main
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strings"
 	"testing"
+
+	"srrb/mod"
 )
+
+func fetchOnce(t *testing.T, src *Source, sub *Subscription, srv *httptest.Server) []*Item {
+	t.Helper()
+	buf := make([]byte, 1<<20)
+	src.ETag, src.LastModified = "", ""
+	// Far enough in the future that test-fixture pubDates of 2024 always pass
+	// the future-clamp without affecting the dedup expectations the tests check.
+	const fetchedAt int64 = 4_102_444_800 // 2100-01-01
+	items, err := src.fetch(context.Background(), srv.Client(), buf, mod.New(), sub, fetchedAt)
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	return items
+}
+
+// Items the publisher gave no parseable date for must be stored with
+// Published=0 so the frontend renders an empty date (its `p ?? 0` fallback).
+func TestFetchDatelessItemHasZeroPublished(t *testing.T) {
+	feed := `<rss version="2.0"><channel>
+		<item><title>Dateless</title><guid>a</guid></item>
+	</channel></rss>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(feed))
+	}))
+	defer srv.Close()
+
+	src := &Source{URL: srv.URL}
+	sub := &Subscription{Title: "T", Sources: []*Source{src}}
+
+	items := fetchOnce(t, src, sub, srv)
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1", len(items))
+	}
+	if items[0].Published != 0 {
+		t.Errorf("Published = %d, want 0", items[0].Published)
+	}
+}
+
+// Same (pub, guid) appearing twice in one response must be collapsed to one
+// stored article.
+func TestFetchWithinFetchDuplicateDeduped(t *testing.T) {
+	feed := `<rss version="2.0"><channel>
+		<item><title>Dup</title><guid>same</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
+		<item><title>Dup</title><guid>same</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
+	</channel></rss>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(feed))
+	}))
+	defer srv.Close()
+
+	src := &Source{URL: srv.URL}
+	sub := &Subscription{Title: "T", Sources: []*Source{src}}
+
+	items := fetchOnce(t, src, sub, srv)
+	if len(items) != 1 {
+		t.Errorf("got %d items, want 1", len(items))
+	}
+}
+
+// A brand-new GUID published at the same second as a prior boundary item must
+// be ingested. The earlier tuple-watermark scheme dropped same-second items
+// whose GUID hash sorted below the boundary; the boundary-set model has no
+// hash dependency.
+func TestFetchSameSecondDifferentGUIDIsIngested(t *testing.T) {
+	feed1 := `<rss version="2.0"><channel>
+		<item><title>First</title><guid>a</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
+	</channel></rss>`
+	feed2 := `<rss version="2.0"><channel>
+		<item><title>Second</title><guid>b</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
+	</channel></rss>`
+
+	current := feed1
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(current))
+	}))
+	defer srv.Close()
+
+	src := &Source{URL: srv.URL}
+	sub := &Subscription{Title: "T", Sources: []*Source{src}}
+
+	if got := fetchOnce(t, src, sub, srv); len(got) != 1 {
+		t.Fatalf("fetch1: got %d items, want 1", len(got))
+	}
+
+	current = feed2
+	if got := fetchOnce(t, src, sub, srv); len(got) != 1 {
+		t.Errorf("fetch2: got %d items, want 1 (same-second item with new GUID dropped)", len(got))
+	}
+}
+
+// Once a dateless GUID lands in BoundaryGUIDs, future occurrences must stay
+// deduped even if the publisher later adds a date — there's no other dedup
+// path for items the publisher initially ships dateless.
+func TestFetchDatelessRemainsSkippedWhenLaterDated(t *testing.T) {
+	feedWithoutDate := `<rss version="2.0"><channel>
+		<item><title>D</title><guid>permanent</guid></item>
+	</channel></rss>`
+	feedWithDate := `<rss version="2.0"><channel>
+		<item><title>D</title><guid>permanent</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
+	</channel></rss>`
+
+	current := feedWithoutDate
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(current))
+	}))
+	defer srv.Close()
+
+	src := &Source{URL: srv.URL}
+	sub := &Subscription{Title: "T", Sources: []*Source{src}}
+
+	if got := fetchOnce(t, src, sub, srv); len(got) != 1 {
+		t.Fatalf("fetch1: got %d, want 1", len(got))
+	}
+	current = feedWithDate
+	if got := fetchOnce(t, src, sub, srv); len(got) != 0 {
+		t.Errorf("fetch2: got %d, want 0 (re-ingested previously-dateless item once it gained a date)", len(got))
+	}
+}
+
+// Items at the prior watermark second that were already in BoundaryGUIDs must
+// be skipped on subsequent fetches.
+func TestFetchPriorBoundaryStillDedupes(t *testing.T) {
+	feed := `<rss version="2.0"><channel>
+		<item><title>A</title><guid>a</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
+		<item><title>B</title><guid>b</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
+	</channel></rss>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(feed))
+	}))
+	defer srv.Close()
+
+	src := &Source{URL: srv.URL}
+	sub := &Subscription{Title: "T", Sources: []*Source{src}}
+
+	if got := fetchOnce(t, src, sub, srv); len(got) != 2 {
+		t.Fatalf("fetch1: got %d, want 2", len(got))
+	}
+	if len(src.BoundaryGUIDs) != 2 {
+		t.Errorf("BoundaryGUIDs = %v, want 2", src.BoundaryGUIDs)
+	}
+	if got := fetchOnce(t, src, sub, srv); len(got) != 0 {
+		t.Errorf("fetch2: got %d, want 0", len(got))
+	}
+}
+
+// When the new fetch contains both the prior boundary item and a new sibling
+// at the same watermark second, both must end up in the snapshot boundary.
+func TestFetchSiblingsAtBoundarySecondBothInBoundary(t *testing.T) {
+	feed1 := `<rss version="2.0"><channel>
+		<item><title>A</title><guid>a</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
+	</channel></rss>`
+	feed2 := `<rss version="2.0"><channel>
+		<item><title>A</title><guid>a</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
+		<item><title>B</title><guid>b</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
+	</channel></rss>`
+
+	current := feed1
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(current))
+	}))
+	defer srv.Close()
+
+	src := &Source{URL: srv.URL}
+	sub := &Subscription{Title: "T", Sources: []*Source{src}}
+
+	if got := fetchOnce(t, src, sub, srv); len(got) != 1 {
+		t.Fatalf("fetch1: got %d, want 1", len(got))
+	}
+
+	current = feed2
+	if got := fetchOnce(t, src, sub, srv); len(got) != 1 {
+		t.Errorf("fetch2: got %d, want 1 (B is new at the same second)", len(got))
+	}
+	if len(src.BoundaryGUIDs) != 2 {
+		t.Errorf("BoundaryGUIDs = %v, want 2", src.BoundaryGUIDs)
+	}
+}
+
+// A transient empty fetch must preserve prior dedup state — Watermark and
+// BoundaryGUIDs — otherwise items at the watermark second get re-ingested
+// when the feed recovers.
+func TestFetchEmptyResponsePreservesDedupState(t *testing.T) {
+	feedWithItem := `<rss version="2.0"><channel>
+		<item><title>A</title><guid>a</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
+	</channel></rss>`
+	feedEmpty := `<rss version="2.0"><channel></channel></rss>`
+
+	current := feedWithItem
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(current))
+	}))
+	defer srv.Close()
+
+	src := &Source{URL: srv.URL}
+	sub := &Subscription{Title: "T", Sources: []*Source{src}}
+
+	if got := fetchOnce(t, src, sub, srv); len(got) != 1 {
+		t.Fatalf("fetch1: got %d, want 1", len(got))
+	}
+	priorWatermark := src.Watermark
+	priorBoundary := append([]uint32(nil), src.BoundaryGUIDs...)
+
+	current = feedEmpty
+	if got := fetchOnce(t, src, sub, srv); len(got) != 0 {
+		t.Fatalf("fetch2: got %d, want 0", len(got))
+	}
+	if src.Watermark != priorWatermark {
+		t.Errorf("Watermark = %d, want %d (preserved across empty fetch)", src.Watermark, priorWatermark)
+	}
+	if !slices.Equal(src.BoundaryGUIDs, priorBoundary) {
+		t.Errorf("BoundaryGUIDs = %v, want %v (preserved across empty fetch)", src.BoundaryGUIDs, priorBoundary)
+	}
+
+	current = feedWithItem
+	if got := fetchOnce(t, src, sub, srv); len(got) != 0 {
+		t.Errorf("fetch3: got %d, want 0 (item re-ingested after empty fetch)", len(got))
+	}
+}
+
+// A within-fetch duplicate GUID with a lower pub on the later occurrence must
+// not corrupt BoundaryGUIDs. The first occurrence wins for boundary state, so
+// the GUID stays in the snapshot and subsequent fetches still dedup it.
+func TestFetchWithinFetchDuplicateLowerPubKeepsBoundary(t *testing.T) {
+	feed := `<rss version="2.0"><channel>
+		<item><title>A1</title><guid>x</guid><pubDate>Mon, 01 Jan 2024 00:05:00 GMT</pubDate></item>
+		<item><title>A2</title><guid>x</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
+	</channel></rss>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(feed))
+	}))
+	defer srv.Close()
+
+	src := &Source{URL: srv.URL}
+	sub := &Subscription{Title: "T", Sources: []*Source{src}}
+
+	if got := fetchOnce(t, src, sub, srv); len(got) != 1 {
+		t.Fatalf("fetch1: got %d, want 1", len(got))
+	}
+	if len(src.BoundaryGUIDs) != 1 {
+		t.Errorf("BoundaryGUIDs = %v, want 1 entry (GUID dropped → re-ingestion next fetch)", src.BoundaryGUIDs)
+	}
+	if got := fetchOnce(t, src, sub, srv); len(got) != 0 {
+		t.Errorf("fetch2: got %d, want 0 (dup ingested because boundary lost the GUID)", len(got))
+	}
+}
+
+// A within-fetch duplicate GUID with a higher pub on the later occurrence must
+// not advance Watermark past the first occurrence's pub. Otherwise a legit
+// item between the two pubs gets permanently skipped on later fetches.
+func TestFetchWithinFetchDuplicateHigherPubKeepsWatermark(t *testing.T) {
+	feed1 := `<rss version="2.0"><channel>
+		<item><title>A1</title><guid>x</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
+		<item><title>A2</title><guid>x</guid><pubDate>Mon, 01 Jan 2024 00:10:00 GMT</pubDate></item>
+	</channel></rss>`
+	feed2 := `<rss version="2.0"><channel>
+		<item><title>B</title><guid>y</guid><pubDate>Mon, 01 Jan 2024 00:05:00 GMT</pubDate></item>
+	</channel></rss>`
+
+	current := feed1
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(current))
+	}))
+	defer srv.Close()
+
+	src := &Source{URL: srv.URL}
+	sub := &Subscription{Title: "T", Sources: []*Source{src}}
+
+	if got := fetchOnce(t, src, sub, srv); len(got) != 1 {
+		t.Fatalf("fetch1: got %d, want 1", len(got))
+	}
+
+	current = feed2
+	if got := fetchOnce(t, src, sub, srv); len(got) != 1 {
+		t.Errorf("fetch2: got %d, want 1 (B at 00:05 skipped because watermark jumped to 00:10 on a dup)", len(got))
+	}
+}
+
+// A publisher bug that ships a far-future pubDate must not push Watermark
+// past fetchedAt — otherwise every subsequent real item is silently skipped
+// for years. The clamp also guarantees the stored Published value never
+// exceeds the moment we fetched.
+func TestFetchFutureDatedItemClampedToFetchedAt(t *testing.T) {
+	feed := `<rss version="2.0"><channel>
+		<item><title>FromTheFuture</title><guid>fut</guid><pubDate>Fri, 01 Jan 2999 00:00:00 GMT</pubDate></item>
+	</channel></rss>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(feed))
+	}))
+	defer srv.Close()
+
+	src := &Source{URL: srv.URL}
+	sub := &Subscription{Title: "T", Sources: []*Source{src}}
+
+	const fetchedAt int64 = 1_700_000_000
+	buf := make([]byte, 1<<20)
+	items, err := src.fetch(context.Background(), srv.Client(), buf, mod.New(), sub, fetchedAt)
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1", len(items))
+	}
+	if items[0].Published != fetchedAt {
+		t.Errorf("Published = %d, want %d (clamped to fetchedAt)", items[0].Published, fetchedAt)
+	}
+	if src.Watermark != fetchedAt {
+		t.Errorf("Watermark = %d, want %d (clamped)", src.Watermark, fetchedAt)
+	}
+}
 
 func TestStripControl(t *testing.T) {
 	tests := []struct {
@@ -23,7 +339,7 @@ func TestStripControl(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got := runStripControl(tt.input)
+		got := strings.Map(stripControl, tt.input)
 		if got != tt.want {
 			t.Errorf("stripControl(%q) = %q, want %q", tt.input, got, tt.want)
 		}
@@ -49,28 +365,9 @@ func TestStripControlKeepWS(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got := runStripControlKeepWS(tt.input)
+		got := strings.Map(stripControlKeepWS, tt.input)
 		if got != tt.want {
 			t.Errorf("stripControlKeepWS(%q) = %q, want %q", tt.input, got, tt.want)
 		}
 	}
-}
-
-// Helpers to invoke strings.Map with the package functions
-func runStripControl(s string) string {
-	return stringMap(stripControl, s)
-}
-
-func runStripControlKeepWS(s string) string {
-	return stringMap(stripControlKeepWS, s)
-}
-
-func stringMap(mapping func(rune) rune, s string) string {
-	var b []rune
-	for _, r := range s {
-		if mr := mapping(r); mr >= 0 {
-			b = append(b, mr)
-		}
-	}
-	return string(b)
 }

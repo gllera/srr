@@ -45,7 +45,7 @@ type AddCmd struct {
 }
 
 // parseSources validates URL flag values and reuses any prior Source whose URL
-// survives the update so per-source state (ETag, StopGUID, etc.) is preserved.
+// survives the update so per-source state (ETag, Watermark, etc.) is preserved.
 func parseSources(urls []string, prev []*Source) ([]*Source, error) {
 	if len(urls) == 0 {
 		return nil, fmt.Errorf("at least one --url is required")

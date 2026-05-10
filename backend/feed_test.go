@@ -1,11 +1,29 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"srrb/mod"
 )
+
+func init() {
+	mod.Register("test-mutate-guid", func() func(*mod.RawItem) error {
+		return func(i *mod.RawItem) error {
+			i.GUID++
+			return nil
+		}
+	})
+	mod.Register("test-mutate-published", func() func(*mod.RawItem) error {
+		return func(i *mod.RawItem) error {
+			t := time.Unix(1, 0)
+			i.Published = &t
+			return nil
+		}
+	})
+}
 
 func collectFeed(t *testing.T, data string) []*mod.RawItem {
 	t.Helper()
@@ -149,13 +167,13 @@ func TestParseGUIDFallbackToLink(t *testing.T) {
 	}
 }
 
-func TestParseDateUnparseableIsZero(t *testing.T) {
+func TestParseDateUnparseableIsUnixZero(t *testing.T) {
 	items := collectFeed(t, `<rss version="2.0"><channel>
     <item><title>No Date</title></item>
   </channel></rss>`)
 
-	if !items[0].Published.IsZero() {
-		t.Errorf("published = %v, expected zero time for unparseable date", items[0].Published)
+	if got := items[0].Published.Unix(); got != 0 {
+		t.Errorf("published.Unix() = %d, want 0 for unparseable date", got)
 	}
 }
 
@@ -551,5 +569,26 @@ func TestParseRSSItemGUIDFallbackChain(t *testing.T) {
 
 	if items[0].GUID != hash("http://example.com/linkonly") {
 		t.Errorf("GUID should fall back to link hash when guid is empty")
+	}
+}
+
+func TestProcessItemRejectsImmutableFieldChange(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	tests := []struct {
+		name   string
+		module string
+		want   string
+	}{
+		{"internal GUID", "#test-mutate-guid", "changed GUID"},
+		{"internal Published", "#test-mutate-published", "changed Published"},
+		{"external GUID", `jq -c '.guid = 99999'`, "changed GUID"},
+		{"external Published", `jq -c '.published = "2000-01-01T00:00:00Z"'`, "changed Published"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			item := &mod.RawItem{GUID: 42, Title: "t", Content: "c", Link: "http://example.com", Published: &now}
+			err := processItem(context.Background(), mod.New(), []string{tt.module}, item)
+			wantErr(t, err, tt.want)
+		})
 	}
 }
