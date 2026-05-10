@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
@@ -101,34 +100,6 @@ type Subscription struct {
 	TotalArt int       `json:"total_art"`
 	AddIdx   int       `json:"add_idx"`
 	newItems []*Item
-}
-
-// UnmarshalJSON migrates the pre-Sources layout (top-level url/etag/last_modified/ferr)
-// into a single Source so upgraded packs keep their ETag instead of re-fetching the full
-// feed. Legacy `stop_guid` is dropped — without a paired published time it can't lift
-// into the watermark, so the next fetch re-ingests the feed window once before dedup
-// resumes.
-func (s *Subscription) UnmarshalJSON(data []byte) error {
-	type alias Subscription
-	aux := &struct {
-		URL          string `json:"url,omitempty"`
-		ETag         string `json:"etag,omitempty"`
-		LastModified string `json:"last_modified,omitempty"`
-		FetchError   string `json:"ferr,omitempty"`
-		*alias
-	}{alias: (*alias)(s)}
-	if err := json.Unmarshal(data, aux); err != nil {
-		return err
-	}
-	if len(s.Sources) == 0 && aux.URL != "" {
-		s.Sources = []*Source{{
-			URL:          aux.URL,
-			ETag:         aux.ETag,
-			LastModified: aux.LastModified,
-			FetchError:   aux.FetchError,
-		}}
-	}
-	return nil
 }
 
 func (s *Subscription) URLs() string {
