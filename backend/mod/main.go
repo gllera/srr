@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -59,7 +58,6 @@ func (o *Module) Process(ctx context.Context, args string, i *RawItem) error {
 	}
 
 	var out bytes.Buffer
-	GUID := i.GUID
 
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", args)
 	cmd.Stdin = &buf
@@ -71,13 +69,5 @@ func (o *Module) Process(ctx context.Context, args string, i *RawItem) error {
 		return err
 	}
 
-	if err := json.Unmarshal(out.Bytes(), i); err != nil {
-		return err
-	}
-
-	if GUID != i.GUID {
-		return fmt.Errorf("field GUID cannot be updated")
-	}
-
-	return nil
+	return json.Unmarshal(out.Bytes(), i)
 }

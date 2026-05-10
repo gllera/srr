@@ -72,7 +72,7 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 		g.Go(func() error {
 			buf := bufPool.Get().([]byte)
 			defer bufPool.Put(buf)
-			s.Fetch(gctx, client, buf, processor)
+			s.Fetch(gctx, client, buf, processor, db.core.FetchedAt)
 			return nil
 		})
 	}
