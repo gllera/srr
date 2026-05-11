@@ -30,8 +30,14 @@ sw.addEventListener("fetch", (e) => {
    }
 })
 
-async function cachedFetch(req: Request): Promise<Response> {
-   const res = await fetch(req)
+// "no-cache" forces a conditional request (If-None-Match) so the browser HTTP
+// cache can't serve a stale db.gz/latest-pack from a CDN Cache-Control max-age.
+// Freshness is managed at the SW layer via dbSig comparison; HTTP cache would
+// hide writer updates for up to its max-age, delaying new articles.
+const revalidate: RequestInit = { cache: "no-cache" }
+
+async function cachedFetch(req: Request, init?: RequestInit): Promise<Response> {
+   const res = await fetch(init ? new Request(req, init) : req)
    if (res.ok) (await cache).put(req, res.clone())
    return res
 }
@@ -42,7 +48,7 @@ async function cacheFirst(req: Request): Promise<Response> {
 
 async function networkFirst(req: Request): Promise<Response> {
    try {
-      return await cachedFetch(req)
+      return await cachedFetch(req, revalidate)
    } catch {
       const cached = await (await cache).match(req)
       if (cached) return cached
@@ -65,7 +71,7 @@ async function dbSig(res: Response): Promise<string | null> {
 async function getDB(req: Request): Promise<Response> {
    const cached = await (await cache).match(req)
    try {
-      const res = await cachedFetch(req)
+      const res = await cachedFetch(req, revalidate)
       if (!res.ok) throw new Error()
       if (cached) {
          const [a, b] = await Promise.all([dbSig(res.clone()), dbSig(cached.clone())])
