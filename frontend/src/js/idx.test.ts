@@ -130,6 +130,11 @@ describe("makeIdxPack.parse", () => {
       expect(pack.bounds[0]).toEqual({ packId: 5, startChron: 0 })
       expect(pack.bounds[1]).toEqual({ packId: 6, startChron: 1 })
    })
+
+   it("rejects a buffer shorter than header + packSize*2", () => {
+      const buf = buildBuf({ entries: [e(1), e(2)] })
+      expect(() => makeIdxPack(buf, 0, 7)).toThrow(/short body/)
+   })
 })
 
 describe("makeIdxPack.findLeft", () => {

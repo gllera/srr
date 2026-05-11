@@ -464,6 +464,23 @@ describe("countRight", () => {
       const result = await nav.fromHash("0!1+3")
       expect(result.countRight).toBe(3)
    })
+
+   it("counter ignores sub.total_art when it exceeds real idx entries", async () => {
+      setupIndex([{ subId: 1 }, { subId: 1 }])
+      data.db.subscriptions[1].total_art = 5
+      const result = await nav.fromHash("1!1")
+      expect(result.countRight).toBe(0)
+      expect(result.has_right).toBe(false)
+      await expect(nav.right()).rejects.toThrow("no right match")
+   })
+
+   it("counter excludes unknown sub_id entries in unfiltered mode", async () => {
+      setupIndex([{ subId: 1 }, { subId: 99 }])
+      delete data.db.subscriptions[99]
+      const result = await nav.fromHash("0")
+      expect(result.countRight).toBe(0)
+      expect(result.has_right).toBe(false)
+   })
 })
 
 describe("showFeed", () => {

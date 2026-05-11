@@ -13,51 +13,35 @@ export const filter = {
       const addIdx = this.subs.get(subId)
       return addIdx !== undefined && chronIdx >= addIdx
    },
+   // subTotal is derived from the idx scan so it matches findRight/findLeft
+   // reachability — sum-of-total_art can overstate when idx and db.gz disagree.
    clear() {
       this.subs = new Map<number, number>()
-      this.subTotal = 0
-      for (const sub of Object.values(data.db.subscriptions))
-         if (sub.total_art) {
-            this.subs.set(sub.id, sub.add_idx ?? 0)
-            this.subTotal += sub.total_art
-         }
+      for (const sub of Object.values(data.db.subscriptions)) if (sub.total_art) this.subs.set(sub.id, sub.add_idx ?? 0)
+      this.subTotal = data.countLeft(data.db.total_art, this.subs)
       this.tokens = []
    },
    set(tokens: string[]) {
       this.tokens = tokens
       this.subs = new Map<number, number>()
-      this.subTotal = 0
       for (const token of tokens) {
          const num = Number(token)
          if (Number.isFinite(num)) {
             const sub = data.db.subscriptions[num]
-            if (sub?.total_art && !this.subs.has(num)) {
-               this.subs.set(num, sub.add_idx ?? 0)
-               this.subTotal += sub.total_art
-            }
+            if (sub?.total_art && !this.subs.has(num)) this.subs.set(num, sub.add_idx ?? 0)
          } else
             for (const sub of Object.values(data.db.subscriptions))
-               if (sub.tag === token && sub.total_art && !this.subs.has(sub.id)) {
-                  this.subs.set(sub.id, sub.add_idx ?? 0)
-                  this.subTotal += sub.total_art
-               }
+               if (sub.tag === token && sub.total_art && !this.subs.has(sub.id)) this.subs.set(sub.id, sub.add_idx ?? 0)
       }
       if (this.subs.size === 0) this.clear()
+      else this.subTotal = data.countLeft(data.db.total_art, this.subs)
    },
 }
 
 function showFeed(article: IArticle): IShowFeed {
-   let filteredLeft: number, total: number, matchesPos: number
-   if (filter.active) {
-      filteredLeft = data.countLeft(pos, filter.subs)
-      total = filter.subTotal
-      matchesPos = filter.matches(article.s, pos) ? 1 : 0
-   } else {
-      filteredLeft = pos
-      total = data.db.total_art
-      matchesPos = 1
-   }
-   const countRight = total - filteredLeft - matchesPos
+   const filteredLeft = data.countLeft(pos, filter.subs)
+   const matchesPos = filter.matches(article.s, pos) ? 1 : 0
+   const countRight = filter.subTotal - filteredLeft - matchesPos
    return {
       article,
       has_left: filteredLeft > 0,
