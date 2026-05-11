@@ -38,9 +38,20 @@ export async function init() {
          const opts: RequestInit = {}
          if (isFinalized) opts.cache = "force-cache"
          const size = isFinalized ? IDX_PACK_SIZE : db.total_art - p * IDX_PACK_SIZE
-         return fetch(new URL(path, DB_URL), opts)
+         const url = new URL(path, DB_URL)
+         return fetch(url, opts)
             .then((res) => new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer())
-            .then((buf) => makeIdxPack(buf, p, size))
+            .then((buf) => {
+               try {
+                  return makeIdxPack(buf, p, size)
+               } catch (e) {
+                  // Stale SW/CDN entry that disagrees with db.gz on entry count.
+                  // Evict so a Retry refetches from origin and re-aligns the two.
+                  return evictFromCache(url).then(() => {
+                     throw e
+                  })
+               }
+            })
       }),
    )
 }

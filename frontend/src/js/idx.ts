@@ -14,6 +14,16 @@ export interface IdxPack {
 }
 
 export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: number): IdxPack {
+   // Defends against cached idx pack vs cached db.gz disagreeing on entry count
+   // (the SW or an upstream CDN can refresh the two at different times). Without
+   // this guard the parser silently consumes whatever bytes exist and leaves the
+   // tail of subIds/fetchedAts at Uint8Array's default 0, which then makes
+   // findRight/findLeft return -1 even though showFeed advertises remaining
+   // articles — surfacing as "no right match" while the counter is non-zero.
+   const expected = IDX_HEADER_SIZE + packSize * 2
+   if (buf.byteLength < expected) {
+      throw new Error(`idx pack ${packIndex}: short body, got ${buf.byteLength}B, want ${expected}B`)
+   }
    let rawBuf: ArrayBuffer | null = buf
    function hasCandidate(subs: Map<number, number>, packEnd: number): boolean {
       for (const [subId, addIdx] of subs) {
