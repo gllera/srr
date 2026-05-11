@@ -27,6 +27,7 @@ html {
    padding: 1rem 1.5rem;
    scrollbar-width: thin;
    overflow-y: scroll;
+   overflow-x: hidden;
    scroll-padding-bottom: 4rem;
    background: var(--bg);
    color: var(--fg);
@@ -67,6 +68,7 @@ img {
    padding-bottom: 0.6rem;
    border-bottom: 1px solid var(--faint);
    margin-bottom: 1rem;
+   overflow-wrap: anywhere;
 }
 
 .srr-title-link {
@@ -221,6 +223,9 @@ img {
       border-collapse: collapse;
       font-size: 0.875em;
       margin: 1em 0;
+      display: block;
+      max-width: 100%;
+      overflow-x: auto;
    }
    & th,
    & td {
