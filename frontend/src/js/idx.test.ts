@@ -130,6 +130,14 @@ describe("makeIdxPack.parse", () => {
       expect(pack.bounds[0]).toEqual({ packId: 5, startChron: 0 })
       expect(pack.bounds[1]).toEqual({ packId: 6, startChron: 1 })
    })
+
+   it("rejects a buffer shorter than header + packSize*2", () => {
+      // Simulates a cached idx pack that disagrees with the cached db.gz's
+      // total_art (SW/CDN can refresh the two at different times). Without
+      // this guard the parser silently zero-fills the missing tail of subIds.
+      const buf = buildBuf({ entries: [e(1), e(2)] }) // 2 actual entries on the wire
+      expect(() => makeIdxPack(buf, 0, 7)).toThrow(/short body/) // db.gz claims 7
+   })
 })
 
 describe("makeIdxPack.findLeft", () => {
