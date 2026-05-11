@@ -107,6 +107,94 @@ func TestLocalGetMissingErrors(t *testing.T) {
 	}
 }
 
+func newTestCache(t *testing.T) (*Cache, string) {
+	t.Helper()
+	remote, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatalf("Open remote: %v", err)
+	}
+	t.Cleanup(func() { remote.Close() })
+	cacheDir := t.TempDir()
+	return &Cache{remote: remote, local: &Local{path: cacheDir}, valid: true}, cacheDir
+}
+
+func TestCachePutWritesAtomically(t *testing.T) {
+	c, cacheDir := newTestCache(t)
+
+	if err := c.Put(ctx, "x.gz", strings.NewReader("hello"), true); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	cacheFile := filepath.Join(cacheDir, "x.gz")
+	got, err := os.ReadFile(cacheFile)
+	if err != nil {
+		t.Fatalf("ReadFile cache: %v", err)
+	}
+	if string(got) != "hello" {
+		t.Errorf("cache content = %q, want %q", got, "hello")
+	}
+	if _, err := os.Stat(cacheFile + ".tmp"); !os.IsNotExist(err) {
+		t.Error(".tmp file should not remain after successful cacheLocally")
+	}
+}
+
+func TestCachePutReplacesAtomically(t *testing.T) {
+	c, cacheDir := newTestCache(t)
+
+	if err := c.Put(ctx, "x.gz", strings.NewReader("v1"), true); err != nil {
+		t.Fatalf("Put v1: %v", err)
+	}
+	if err := c.Put(ctx, "x.gz", strings.NewReader("version-two-longer"), true); err != nil {
+		t.Fatalf("Put v2: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(cacheDir, "x.gz"))
+	if err != nil {
+		t.Fatalf("ReadFile cache: %v", err)
+	}
+	if string(got) != "version-two-longer" {
+		t.Errorf("cache content = %q, want %q", got, "version-two-longer")
+	}
+}
+
+func TestCacheEvictsLocalOnWriteFailure(t *testing.T) {
+	c, cacheDir := newTestCache(t)
+
+	if err := c.Put(ctx, "x.gz", strings.NewReader("v1"), true); err != nil {
+		t.Fatalf("Put v1: %v", err)
+	}
+	cacheFile := filepath.Join(cacheDir, "x.gz")
+	if _, err := os.Stat(cacheFile); err != nil {
+		t.Fatalf("cache file should exist after Put v1: %v", err)
+	}
+
+	// Replace the cache file with a directory so AtomicPut's rename fails
+	// (can't rename a regular file over a non-empty directory). Rm of the
+	// directory will succeed via os.Remove since it's empty.
+	if err := os.Remove(cacheFile); err != nil {
+		t.Fatalf("Remove cache file: %v", err)
+	}
+	if err := os.Mkdir(cacheFile, 0o755); err != nil {
+		t.Fatalf("Mkdir as cache file: %v", err)
+	}
+
+	if err := c.Put(ctx, "x.gz", strings.NewReader("v2"), true); err != nil {
+		t.Fatalf("Put v2 (remote succeeds even if cache write fails): %v", err)
+	}
+
+	if _, err := os.Stat(cacheFile); !os.IsNotExist(err) {
+		t.Errorf("expected cache entry evicted after local write failure, stat err=%v", err)
+	}
+
+	rc, err := c.Get(ctx, "x.gz", false)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := readAllClose(t, rc); got != "v2" {
+		t.Errorf("Get content = %q, want %q", got, "v2")
+	}
+}
+
 func TestOpenUnsupportedScheme(t *testing.T) {
 	_, err := Open(ctx, "ftp://example.com/path")
 	if err == nil {

@@ -541,9 +541,32 @@ func TestLoadPackCorruptedGzip(t *testing.T) {
 	os.MkdirAll(filepath.Join(dir, "data"), 0755)
 	os.WriteFile(filepath.Join(dir, "data/corrupt.gz"), []byte("not gzip data"), 0644)
 
-	_, err := db.loadPack(ctx, "data/corrupt.gz")
+	_, _, err := db.loadPack(ctx, "data/corrupt.gz")
 	if err == nil {
 		t.Error("expected error for corrupted gzip data")
+	}
+}
+
+func TestPutArticlesRejectsStaleLatestIdx(t *testing.T) {
+	db, c, _ := setupTestDB(t)
+	sub1 := &Subscription{id: 1}
+	c.Subscriptions = map[int]*Subscription{sub1.id: sub1}
+
+	if err := db.PutArticles(ctx, []*Item{
+		{Sub: sub1, Title: "A1", Published: 1000},
+		{Sub: sub1, Title: "A2", Published: 2000},
+	}); err != nil {
+		t.Fatalf("PutArticles seed: %v", err)
+	}
+
+	c.TotalArticles = 5
+
+	err := db.PutArticles(ctx, []*Item{{Sub: sub1, Title: "A3", Published: 3000}})
+	if err == nil {
+		t.Fatal("expected PutArticles to refuse a stale latest idx pack")
+	}
+	if !strings.Contains(err.Error(), "expects") {
+		t.Errorf("error %q should mention the expected size mismatch", err.Error())
 	}
 }
 

@@ -237,29 +237,38 @@ func (o *DB) readGz(ctx context.Context, key string) ([]byte, error) {
 	return out, nil
 }
 
-func (o *DB) loadPack(ctx context.Context, key string) (*pack, error) {
+func (o *DB) loadPack(ctx context.Context, key string) (*pack, int, error) {
 	p := newPack()
 	rc, err := o.Get(ctx, key, true)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if rc == nil {
-		return p, nil
+		return p, 0, nil
 	}
 	defer rc.Close()
 	r, err := gzip.NewReader(rc)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	raw, err := io.ReadAll(r)
 	r.Close()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if _, err := p.Write(raw); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return p, nil
+	return p, len(raw), nil
+}
+
+func expectedLatestIdxSize(totalArticles int) int {
+	if totalArticles == 0 {
+		return 0
+	}
+	numFinalized := (totalArticles - 1) / idxPackSize
+	latestEntries := totalArticles - numFinalized*idxPackSize
+	return idxHeaderSize + latestEntries*2
 }
 
 func (o *DB) savePack(ctx context.Context, key string, p *pack) error {
@@ -282,11 +291,14 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 	c := &o.core
 	latest := fmt.Sprintf("%v.gz", c.DataToggle)
 
-	meta, err := o.loadPack(ctx, "idx/"+latest)
+	meta, metaSize, err := o.loadPack(ctx, "idx/"+latest)
 	if err != nil {
 		return err
 	}
-	data, err := o.loadPack(ctx, "data/"+latest)
+	if expected := expectedLatestIdxSize(c.TotalArticles); metaSize != expected {
+		return fmt.Errorf("idx/%s has %d bytes but db.gz expects %d (cache may be stale; clear SRR_CACHE)", latest, metaSize, expected)
+	}
+	data, _, err := o.loadPack(ctx, "data/"+latest)
 	if err != nil {
 		return err
 	}
