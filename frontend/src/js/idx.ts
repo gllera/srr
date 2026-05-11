@@ -14,6 +14,13 @@ export interface IdxPack {
 }
 
 export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: number): IdxPack {
+   // Refuse a short body so the caller can evict + retry. Silently parsing
+   // fewer bytes than packSize claims leaves the subIds tail at default 0,
+   // which findRight skips while showFeed still counts those slots.
+   const expected = IDX_HEADER_SIZE + packSize * 2
+   if (buf.byteLength < expected) {
+      throw new Error(`idx pack ${packIndex}: short body, got ${buf.byteLength}B, want ${expected}B`)
+   }
    let rawBuf: ArrayBuffer | null = buf
    function hasCandidate(subs: Map<number, number>, packEnd: number): boolean {
       for (const [subId, addIdx] of subs) {

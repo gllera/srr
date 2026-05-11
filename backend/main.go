@@ -44,12 +44,13 @@ type ArtGroup struct {
 
 type CLI struct {
 	Globals
-	Sub     SubGroup   `cmd:"" aliases:"s" help:"Subscription management."`
-	Art     ArtGroup   `cmd:"" aliases:"a" help:"Article management."`
-	Preview PreviewCmd `cmd:"" aliases:"p" help:"Preview processed feed articles in a browser."`
-	Config  ConfigCmd  `cmd:"" aliases:"c" help:"Print resolved configuration."`
-	Inspect InspectCmd `cmd:"" aliases:"i" help:"Inspect pack consistency (validate idx<->data, debug chronIdx lookup)."`
-	Version VersionCmd `cmd:"" help:"Print version information."`
+	Sub        SubGroup      `cmd:"" aliases:"s" help:"Subscription management."`
+	Art        ArtGroup      `cmd:"" aliases:"a" help:"Article management."`
+	Preview    PreviewCmd    `cmd:"" aliases:"p" help:"Preview processed feed articles in a browser."`
+	Config     ConfigCmd     `cmd:"" aliases:"c" help:"Print resolved configuration."`
+	Inspect    InspectCmd    `cmd:"" aliases:"i" help:"Inspect pack consistency (validate idx<->data, debug chronIdx lookup)."`
+	ClearCache ClearCacheCmd `cmd:"" help:"Remove the local cache directory."`
+	Version    VersionCmd    `cmd:"" help:"Print version information."`
 }
 
 type VersionCmd struct{}

@@ -18,9 +18,15 @@ type Cache struct {
 	valid  bool
 }
 
-func NewCache(remote Backend, cacheDir, storeURL string) (*Cache, error) {
+// cacheSubdir keys the cache by storeURL so multiple stores share one
+// SRR_CACHE root without colliding.
+func cacheSubdir(cacheDir, storeURL string) string {
 	hash := sha256.Sum256([]byte(storeURL))
-	subdir := filepath.Join(cacheDir, fmt.Sprintf("%x", hash[:8]))
+	return filepath.Join(cacheDir, fmt.Sprintf("%x", hash[:8]))
+}
+
+func NewCache(remote Backend, cacheDir, storeURL string) (*Cache, error) {
+	subdir := cacheSubdir(cacheDir, storeURL)
 
 	if err := os.MkdirAll(subdir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating cache directory %s: %w", subdir, err)
@@ -45,9 +51,15 @@ func drainClose(rc io.ReadCloser, err error) ([]byte, error) {
 	return io.ReadAll(rc)
 }
 
+// Rm on failure so a stale prior entry isn't served while remote has the new
+// content (c.valid=true after a successful db.gz update would otherwise hide
+// the staleness).
 func (c *Cache) cacheLocally(ctx context.Context, key string, data []byte) {
-	if putErr := c.local.Put(ctx, key, bytes.NewReader(data), true); putErr != nil {
-		slog.Warn("cache write failed", "key", key, "error", putErr)
+	if err := c.local.AtomicPut(ctx, key, bytes.NewReader(data)); err != nil {
+		slog.Warn("cache write failed", "key", key, "error", err)
+		if rmErr := c.local.Rm(ctx, key); rmErr != nil {
+			slog.Warn("cache evict failed", "key", key, "error", rmErr)
+		}
 	}
 }
 

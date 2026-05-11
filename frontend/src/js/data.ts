@@ -38,9 +38,18 @@ export async function init() {
          const opts: RequestInit = {}
          if (isFinalized) opts.cache = "force-cache"
          const size = isFinalized ? IDX_PACK_SIZE : db.total_art - p * IDX_PACK_SIZE
-         return fetch(new URL(path, DB_URL), opts)
+         const url = new URL(path, DB_URL)
+         return fetch(url, opts)
             .then((res) => new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer())
-            .then((buf) => makeIdxPack(buf, p, size))
+            .then(async (buf) => {
+               try {
+                  return makeIdxPack(buf, p, size)
+               } catch (e) {
+                  // Stale SW/CDN entry: evict so a Retry refetches from origin.
+                  await evictFromCache(url)
+                  throw e
+               }
+            })
       }),
    )
 }
@@ -75,6 +84,7 @@ export function findChronForTimestamp(ts: number): number {
 }
 
 export function countLeft(chronIdx: number, subs: Map<number, number>): number {
+   if (idxPacks.length === 0) return 0
    const n = packIdx(chronIdx)
    return idxPacks[n].countLeft(chronIdx, subs)
 }
