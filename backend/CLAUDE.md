@@ -62,8 +62,10 @@ Pipeline per-subscription during fetch. Factory pattern: `New()` returns fresh s
 
 - `#sanitize` — bluemonday, content-only.
 - `#minify` — tdewolff/minify, content-only.
+- `#youtube` — replaces `Content` with a thumbnail-link card (`https://i.ytimg.com/vi/<id>/hqdefault.jpg` linked to `watch?v=<id>`) plus the description; description source preference is `media:group/media:description` → entry-level `description`/`summary` → existing `Content`. Recognises `youtube.com` (`watch?v=`, `/embed/`, `/v/`, `/shorts/`, `/live/`), `youtu.be`, `m./music.` and `youtube-nocookie.com`. Non-YouTube `Link`s are skipped (Content untouched), so the module is safe in mixed pipelines.
 - External modules: `/bin/sh -c`, stdin/stdout JSON (`RawItem`), stderr passthrough.
 - `GUID` and `Published` are immutable for all modules (built-in or external; change = error). Enforced in `processItem` after each pipeline step — the captured value before the step is compared to the post-step value, attributing changes to the offending module.
+- `RawItem.Raw` is set by `feed.go` to the parsed entry as `mod.RawFeedItem` (`map[string][]mod.RawField`); modules can type-assert it for typed access. External (shell) modules see the same data as JSON via the short keys `@`/`$`/`+` (text/attrs/children).
 
 ## Conventions
 
