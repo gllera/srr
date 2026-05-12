@@ -78,7 +78,7 @@ State: `pos` (chronIdx), `filter` (object with `active`, `subs`, `subTotal`, `to
 - **Helpers**: `makeArticle(overrides)`, `makeSub(overrides)` — factory with defaults. `setupIndex(entries)` — populates `db.subscriptions` and wires `getSubId`/`loadArticle` mocks.
 - **Hash checks**: spy on `history.pushState`/`replaceState` (note the spy accumulates across tests in the same describe).
 
-**data.test.ts**: mocks the module, re-exports pure functions (`numFinalizedIdx`, `findChronForTimestamp`) with writable `db`/`fetchedAts` state.
+**data.test.ts**: mocks `./data` with inline reimplementations of `findChronForTimestamp` and `groupSubsByTag` driven by writable `db`/`fetchedAts` state — data.ts's module-load `fetch` would otherwise fire under jsdom.
 
 ## Conventions
 
