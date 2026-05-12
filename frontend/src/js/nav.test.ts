@@ -878,4 +878,43 @@ describe("goTo", () => {
       const result = await nav.goTo(99)
       expect(result.article.s).toBe(2)
    })
+
+   it("commits resolved chronIdx to URL hash when no filter", async () => {
+      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 3 }])
+      await nav.fromHash("0")
+      await nav.goTo(2)
+      expect(history.pushState).toHaveBeenLastCalledWith(null, "", "#2")
+   })
+
+   it("commits target chronIdx to URL hash when active filter matches", async () => {
+      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 1 }])
+      await nav.fromHash("0!1")
+      const result = await nav.goTo(2)
+      expect(data.loadArticle).toHaveBeenLastCalledWith(2)
+      expect(result.article.s).toBe(1)
+      expect(history.pushState).toHaveBeenLastCalledWith(null, "", "#2!1")
+   })
+
+   it("commits snapped chronIdx (not input) to URL hash when filter forces a snap", async () => {
+      setupIndex([{ subId: 2 }, { subId: 1 }, { subId: 1 }])
+      await nav.fromHash("2!1")
+      await nav.goTo(0)
+      expect(history.pushState).toHaveBeenLastCalledWith(null, "", "#1!1")
+   })
+
+   it("lands on findChronForTimestamp result chronIdx", async () => {
+      setupIndex([
+         { subId: 1, fetchedAt: 10 },
+         { subId: 2, fetchedAt: 20 },
+         { subId: 3, fetchedAt: 30 },
+      ])
+      data.findChronForTimestamp.mockReturnValueOnce(1)
+      await nav.fromHash("0")
+      const target = data.findChronForTimestamp(25)
+      const result = await nav.goTo(target)
+      expect(target).toBe(1)
+      expect(data.loadArticle).toHaveBeenLastCalledWith(1)
+      expect(result.article.s).toBe(2)
+      expect(history.pushState).toHaveBeenLastCalledWith(null, "", "#1")
+   })
 })
