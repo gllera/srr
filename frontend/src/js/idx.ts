@@ -53,7 +53,10 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
          pack.fetchedAts = new Uint16Array(packSize)
          let localOff = 0
          const bytes = new Uint8Array(rawBuf)
-         const limit = bytes.length - 1
+         // Cap at packSize so an oversized body (e.g. stale SW cache with
+         // entries from a newer total_art than db.gz claims) can't push ghost
+         // rows into ownSubCounts/bounds and skew countLeft/findLeft/Right.
+         const limit = IDX_HEADER_SIZE + packSize * 2
          for (let off = IDX_HEADER_SIZE; off < limit; off += 2) {
             const packed = bytes[off + 1]
             if (packed >> 7) packId++
