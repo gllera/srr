@@ -12,7 +12,7 @@ SRR Frontend — single-page RSS reader. Zero runtime deps. Parcel + TypeScript 
 
 Entry: `src/index.html` → `src/styles.css` + `src/js/app.ts`. Bundler: Parcel 2. `SRR_CDN_URL` replaced at build time via `parcel/resolve-cdn-url.js`. Resolution: `$SRR_CDN_URL` → `cdn-url:` from `$SRR_CONFIG_INLINE` (raw YAML) → `cdn-url:` from `$SRR_CONFIG` (file path, default `$XDG_CONFIG_HOME/srr/srr.yaml`) → `http://localhost:3000`.
 
-Dependency chain: `app → nav → data → idx`, `app → fmt`, `app → dropdown → {data, nav}`, `app → gestures → {nav, dropdown}`. All in `src/js/`, strict mode.
+Dependency chain: `app → nav → data → {idx, cache}`, `app → fmt`, `app → dropdown → {data, nav}`, `app → gestures → {nav, dropdown}`. All in `src/js/`, strict mode.
 
 | Module | Role |
 |---|---|
@@ -46,13 +46,13 @@ Frontend-specific additions:
 
 **Init**: `data.init()` loads all idx packs in parallel, calls `makeIdxPack()` (from `idx.ts`) to lazily parse each binary pack into `subIds`/`fetchedAts` typed arrays and `bounds`. Latest packs use `data_tog` filename toggle.
 
-**Article loading**: `loadArticle(chronIdx)` resolves pack+offset via binary search on `IdxPack.bounds`, fetches and parses the JSONL data pack on every call.
+**Article loading**: `loadArticle(chronIdx)` resolves pack+offset via binary search on `IdxPack.bounds`, fetches and parses the JSONL data pack (LRU-cached by pack ID, max 20 packs).
 
 **Content fade-in**: double `requestAnimationFrame` for opacity transition.
 
 ## State Machines (nav.ts)
 
-State: `pos` (chronIdx), `filter` (object with `active`, `subs`, `tokens`, `matches()`, `clear()`, `set(tokens)`).
+State: `pos` (chronIdx), `filter` (object with `active`, `subs`, `subTotal`, `tokens`, `matches()`, `clear()`, `set(tokens)`).
 
 **`filter`** — active when `tokens` non-empty:
 - `filter.clear()`: empties tokens, repopulates `subs` from all subscriptions with `total_art > 0`
@@ -66,7 +66,7 @@ State: `pos` (chronIdx), `filter` (object with `active`, `subs`, `tokens`, `matc
 - Navigation uses `findLeft`/`findRight` — synchronous linear scans via `data.getSubId()`
 - Hash: `#pos[!tokens]` — `!` segment, `+`-separated tokens, each `encodeURIComponent`-wrapped to survive special chars in tag names.
 
-**Time-range jumps** (app.ts menu): "12h"/"1d"/"7d"/"1mo" chips compute `Date.now() - seconds`, look up `data.findChronForTimestamp(ts)`, and call `nav.goTo(chron)` so the user lands at the article from that point and can navigate right.
+**Time-range jumps** (dropdown.ts source menu): "12h"/"1d"/"7d"/"1mo" chips compute `Date.now() - seconds`, look up `data.findChronForTimestamp(ts)`, and call `nav.goTo(chron)` so the user lands at the article from that point and can navigate right.
 
 ## Test Patterns
 
