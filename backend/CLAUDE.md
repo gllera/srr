@@ -19,7 +19,9 @@
 - **`cmd_import.go`** — OPML import with hierarchical ID selection (`-a` all, `-i` specific). OPML group hierarchy auto-resolves to hierarchical tags; `-g/--tag` overrides. `-n/--dry-run` lists resulting subscriptions without importing.
 - **`opml.go`** — OPML XML parsing. `ParseOPMLTree` builds `OPMLNode` tree from file. `normalizeGroupName` converts group names to tag-safe identifiers.
 - **`cmd_preview.go`** — `preview` subcommand: fetches a feed URL, runs module pipeline (`-p`), serves rendered articles via local HTTP server (`-a/--addr`).
-- **`subscription.go`** — `Subscription` (Title, Tag, Pipeline, `Sources []*Source`) and `Source` (URL, ETag, Last-Modified, Watermark, BoundaryGUIDs, FetchError). `Subscription.Fetch` iterates sources sequentially, sharing the buffer pool slot; per-source errors record into `Source.FetchError` while items from successful sources still commit. `Source.fetch` owns the HTTP/304/dedup/pipeline path. Dedup model per source: `Watermark` is the max published unix-second ever seen and `BoundaryGUIDs` is the union of (GUIDs at `Watermark` in the most recent fetch) and (dateless GUIDs in the most recent fetch). Repopulated each non-empty fetch from the current response (no carry-over) so its size stays bounded by what the publisher currently exposes; a 200 OK with zero items preserves prior `Watermark`/`BoundaryGUIDs` so the dedup state survives a transient empty channel. An item is new iff its GUID isn't in the prior fetch's `BoundaryGUIDs` AND (`pub == 0` OR `pub >= Watermark`). Item `pub` is clamped to `fetchedAt` so a publisher CMS bug that ships a far-future date can't poison `Watermark`. Within-fetch dedup uses a per-GUID set checked first so duplicate items in one feed response are collapsed and can't pollute `Watermark`/`BoundaryGUIDs`. Trade-off: items at `Watermark` or dateless items that disappear from the feed for one fetch and reappear later are re-ingested as duplicates (snapshot semantics over carry-over). Also contains `processItem`, `validFeedURL`, `URLs`, and text sanitization helpers.
+- **`subscription.go`** — `Subscription` (Title, Tag, Pipeline, `Sources []*Source`) and `Source` (URL, ETag, Last-Modified, Watermark, BoundaryGUIDs, FetchError). `Subscription.Fetch` iterates sources sequentially, sharing the buffer pool slot; per-source errors record into `Source.FetchError` while items from successful sources still commit. Pure type + orchestration; per-source HTTP/dedup logic lives in `source_fetch.go`.
+- **`source_fetch.go`** — `Source.fetch` owns the HTTP/304/dedup/pipeline path. Dedup model per source: `Watermark` is the max published unix-second ever seen and `BoundaryGUIDs` is the union of (GUIDs at `Watermark` in the most recent fetch) and (dateless GUIDs in the most recent fetch). Repopulated each non-empty fetch from the current response (no carry-over) so its size stays bounded by what the publisher currently exposes; a 200 OK with zero items preserves prior `Watermark`/`BoundaryGUIDs` so the dedup state survives a transient empty channel. An item is new iff its GUID isn't in the prior fetch's `BoundaryGUIDs` AND (`pub == 0` OR `pub >= Watermark`). Item `pub` is clamped to `fetchedAt` so a publisher CMS bug that ships a far-future date can't poison `Watermark`. Within-fetch dedup uses a per-GUID set checked first so duplicate items in one feed response are collapsed and can't pollute `Watermark`/`BoundaryGUIDs`. Trade-off: items at `Watermark` or dateless items that disappear from the feed for one fetch and reappear later are re-ingested as duplicates (snapshot semantics over carry-over).
+- **`processing.go`** — Per-item transformation utilities shared by `Source.fetch` and `PreviewCmd`: `processItem` runs the module pipeline, enforces GUID/Published immutability, then normalises Title (via `bluemonday` strict policy + whitespace collapse) and strips control chars from Link/Content. Also hosts `validFeedURL` (used by `cmd_subs.go` and `opml.go`).
 
 ### Store (`store/`)
 
@@ -35,24 +37,22 @@ Low-level storage interface: `Get`/`Put`/`AtomicPut`/`Rm`/`Close`. Registry sele
 - **`s3.go`** — `IfNoneMatch` precondition headers + CRC32 checksums. `S3Config`: region, endpoint, profile, static credentials.
 - **`sftp.go`** — Auto-creates subdirs via `client.MkdirAll`. Auth chain: URL password → config password → config/default private key → `~/.ssh/` keys → SSH agent → error. Host key verification via `~/.ssh/known_hosts` by default (`SFTPConfig.Insecure` to skip).
 
-### Pack Storage (`db.go`)
+### Pack Storage (`db.go` + `db_pack.go`)
 
 See root `CLAUDE.md` Data Contract for pack format spec (idx/, data/ series), db.gz schema, CDN layout, and file-based locking.
 
-Backend-specific:
+Split across two files by concern:
+- **`db.go`** — `DB`, `DBCore`, lifecycle (`NewDB`/`Close`/`Commit`), subscription CRUD (`AddSubscription`/`RemoveSubscription`/`SubByID`/`Subscriptions`), `withDB`/`withDBCtx` boilerplate wrappers, and shared utilities (`gunzip`, `readGz`, `jsonEncode`). `Commit` serializes `DBCore` via `AtomicPut`.
+- **`db_pack.go`** — Binary idx + JSONL data pack writer. Contains `ArticleData` and `Item` types, the `pack` struct (`newPack`/`writeIdx`/`writeIdxHeader`/`writeArticle`), `loadPack`/`savePack`/`expectedLatestIdxSize`, and the `PutArticles` driver. Also `dataKeyFor` and `parseDataPack` (used by `cmd_art.go` and `cmd_inspect.go` for read-side access).
+
+Backend-specific behavior:
 - `PutArticles` and `savePack` manage the two series. Order: `PutArticles` → `Commit`.
 - `PutArticles` writes binary idx and JSONL data directly; splits idx packs at every 50,000 articles; sets `FirstFetchedAt` on first run that produces articles.
 - Per-entry `delta_fetched_at` is computed against `prevFetchedTS = FirstFetchedAt/28800 + FetchedAtCursor` so the first entry of each batch records the elapsed time since the previous fetch (clamped to 7 bits with carry).
 - `ArticleData` struct: `{ SubID, FetchedAt, Published, Title, Link, Content }` — serialized as JSONL with short keys `s/a/p/t/l/c`.
 - `DBCore.Subscriptions` is `map[int]*Subscription`; serialized as a JSON object keyed by subscription ID. `AddSubscription` assigns the first free ID in [0, 255] and returns an error if all 256 slots are taken. `RemoveSubscription` uses `delete`.
-- `Commit` serializes `DBCore` via `AtomicPut`. `db.gz` is gzip-compressed JSON with short keys — read `DBCore` struct tags for full schema.
 - `data_tog` toggles alternating pack filenames for atomic updates (used for both idx/ and data/ latest packs).
-
-Shared helpers in `db.go` used across commands:
-- `withDB(locked, fn)` / `withDBCtx(ctx, locked, fn)` — open DB, run `fn`, ensure Close. Most cmd Run() methods are now a single `withDB` call wrapping the work.
-- `gunzip(r io.Reader) ([]byte, error)` — decompress a gzip stream; used by `db.readGz`, `db.loadPack`, and the HTTP fetcher in `cmd_inspect.go`.
-- `dataKeyFor(core, packID)` — resolve data-pack key (numeric vs `data_tog`-suffixed). Used by `cmd_art.go` and `cmd_inspect.go`.
-- `parseDataPack(data []byte) ([]ArticleData, error)` — decode JSONL bytes into `[]ArticleData`.
+- `withDB(locked, fn)` / `withDBCtx(ctx, locked, fn)`: most cmd `Run()` methods are now a single `withDB` call wrapping the work.
 
 ### Module System (`mod/`)
 
