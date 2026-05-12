@@ -25,17 +25,12 @@ func (o *ClearCacheCmd) Run() error {
 		return nil
 	}
 
-	ctx := context.Background()
-	db, err := NewDB(ctx, true)
-	if err != nil {
-		return err
-	}
-	defer db.Close(ctx)
-
-	db.core.Version++
-	if err := db.Commit(ctx); err != nil {
-		return fmt.Errorf("commit db.gz: %w", err)
-	}
-	slog.Info("cache version bumped", "version", db.core.Version)
-	return nil
+	return withDB(true, func(ctx context.Context, db *DB) error {
+		db.core.Version++
+		if err := db.Commit(ctx); err != nil {
+			return fmt.Errorf("commit db.gz: %w", err)
+		}
+		slog.Info("cache version bumped", "version", db.core.Version)
+		return nil
+	})
 }

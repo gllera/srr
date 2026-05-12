@@ -22,6 +22,40 @@ func jsonEncode(v any) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// gunzip decompresses a gzip stream into a single byte slice.
+func gunzip(r io.Reader) ([]byte, error) {
+	gz, err := gzip.NewReader(r)
+	if err != nil {
+		return nil, err
+	}
+	defer gz.Close()
+	return io.ReadAll(gz)
+}
+
+// dataKeyFor resolves a data pack key from a packID: finalized packs
+// (id < NextPackID) use the numeric filename; otherwise the toggle name.
+func dataKeyFor(core *DBCore, packID int) string {
+	if packID < core.NextPackID {
+		return fmt.Sprintf("data/%d.gz", packID)
+	}
+	return fmt.Sprintf("data/%v.gz", core.DataToggle)
+}
+
+// parseDataPack decodes a JSONL data pack (one ArticleData per line)
+// from its decompressed bytes.
+func parseDataPack(data []byte) ([]ArticleData, error) {
+	var entries []ArticleData
+	dec := json.NewDecoder(bytes.NewReader(data))
+	for dec.More() {
+		var a ArticleData
+		if err := dec.Decode(&a); err != nil {
+			return nil, err
+		}
+		entries = append(entries, a)
+	}
+	return entries, nil
+}
+
 const (
 	dbFileKey     = "db.gz"
 	dbLockKey     = ".locked"
@@ -54,6 +88,23 @@ type DBCore struct {
 	FetchedAtCursor int                   `json:"fetched_at_cur,omitempty"`
 	Version         int                   `json:"version,omitempty"`
 	Subscriptions   map[int]*Subscription `json:"subscriptions"`
+}
+
+// withDB opens the DB, runs fn, and ensures Close. Use for commands that
+// don't need to manage the parent context themselves.
+func withDB(locked bool, fn func(ctx context.Context, db *DB) error) error {
+	return withDBCtx(context.Background(), locked, fn)
+}
+
+// withDBCtx is the variant for callers that already have a context
+// (e.g. signal-aware contexts in long-running commands).
+func withDBCtx(ctx context.Context, locked bool, fn func(ctx context.Context, db *DB) error) error {
+	db, err := NewDB(ctx, locked)
+	if err != nil {
+		return err
+	}
+	defer db.Close(ctx)
+	return fn(ctx, db)
 }
 
 func NewDB(ctx context.Context, locked bool) (*DB, error) {
@@ -225,12 +276,7 @@ func (o *DB) readGz(ctx context.Context, key string) ([]byte, error) {
 		return nil, fmt.Errorf("read %s: %w", key, err)
 	}
 	defer rc.Close()
-	r, err := gzip.NewReader(rc)
-	if err != nil {
-		return nil, fmt.Errorf("decompress %s: %w", key, err)
-	}
-	defer r.Close()
-	out, err := io.ReadAll(r)
+	out, err := gunzip(rc)
 	if err != nil {
 		return nil, fmt.Errorf("decompress %s: %w", key, err)
 	}
@@ -247,12 +293,7 @@ func (o *DB) loadPack(ctx context.Context, key string) (*pack, int, error) {
 		return p, 0, nil
 	}
 	defer rc.Close()
-	r, err := gzip.NewReader(rc)
-	if err != nil {
-		return nil, 0, err
-	}
-	raw, err := io.ReadAll(r)
-	r.Close()
+	raw, err := gunzip(rc)
 	if err != nil {
 		return nil, 0, err
 	}
