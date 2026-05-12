@@ -1,3 +1,4 @@
+import { makeLRU } from "./cache"
 import { IDX_PACK_SIZE, makeIdxPack, type IdxPack } from "./idx"
 
 export { IDX_PACK_SIZE }
@@ -104,7 +105,20 @@ function getPackRef(chronIdx: number): { packId: number; offset: number } {
    return { packId: bound.packId, offset: chronIdx - bound.startChron }
 }
 
-async function loadDataPack(packId: number): Promise<IArticle[]> {
+const dataCache = makeLRU<Promise<IArticle[]>>(20)
+
+function loadDataPack(packId: number): Promise<IArticle[]> {
+   const cached = dataCache.get(packId)
+   if (cached) return cached
+   const entries = fetchDataPack(packId)
+   dataCache.put(packId, entries)
+   entries.catch(() => {
+      if (dataCache.peek(packId) === entries) dataCache.drop(packId)
+   })
+   return entries
+}
+
+async function fetchDataPack(packId: number): Promise<IArticle[]> {
    const isFinalized = packId < db.next_pid
    const name = isFinalized ? packId.toString() : String(db.data_tog)
    const opts: RequestInit = {}
@@ -142,6 +156,8 @@ export async function loadArticle(chronIdx: number): Promise<IArticle> {
    const ref = getPackRef(chronIdx)
    const entries = await loadDataPack(ref.packId)
    if (ref.offset >= entries.length) {
+      // Backend cron may have rewritten the pack; drop the cache so a retry refetches.
+      dataCache.drop(ref.packId)
       throw new Error(`pack ${ref.packId} out of sync (offset ${ref.offset} of ${entries.length}); retry to refresh`)
    }
    return entries[ref.offset]
