@@ -38,13 +38,13 @@ chmod +x srr
 
 ```bash
 cd frontend && npm ci && npm run build
-# Deploy frontend/dist/ to any static host
+# Deploy dist/srrf/ (at the repo root) to any static host
 # Set SRR_CDN_URL at build time to point at your pack storage
 ```
 
 ### Automate
 
-The included GitHub Actions workflow (`cron.yml`) runs `srr fetch` on a schedule, and `gh-pages.yml` deploys the frontend on version tags.
+The included GitHub Actions workflow (`cron.yml`) runs `srr art fetch` on manual dispatch, and the `pages` job in `release.yml` deploys the frontend on version tags.
 
 ## Project Structure
 
@@ -81,6 +81,6 @@ See [backend/README.md](backend/README.md) and [frontend/README.md](frontend/REA
 
 | Workflow | Trigger | Action |
 |----------|---------|--------|
-| `release.yml` | `v*.*.*` tag | Tests backend, builds cross-platform binaries, creates GitHub release |
-| `gh-pages.yml` | `v*.*.*` tag or manual | Builds and deploys frontend to GitHub Pages |
-| `cron.yml` | Every 5 minutes or manual | Fetches feeds to S3 |
+| `release.yml` (`release` job) | `v*.*.*` tag | Cross-compiles backend binaries, creates GitHub release |
+| `release.yml` (`pages` job) | `v*.*.*` tag or manual | Builds and deploys frontend to GitHub Pages |
+| `cron.yml` | Manual dispatch | Downloads latest `srr` binary and runs `srr a fetch` against the configured store |

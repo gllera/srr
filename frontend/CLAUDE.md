@@ -87,4 +87,4 @@ State: `pos` (chronIdx), `filter` (object with `active`, `subs`, `subTotal`, `to
 
 ## Deployment
 
-GitHub Actions (`release.yml` `pages` job): version tags (`v*.*.*`) or manual. Deploys to GitHub Pages. Uses `SRR_CDN_URL` repo variable.
+GitHub Actions (`release.yml` `pages` job): version tags (`v*.*.*`) or manual. Deploys to GitHub Pages. Reads `SRR_CONFIG_INLINE` (a `ci` environment secret carrying YAML config) and extracts `cdn-url:` from it at build time.
