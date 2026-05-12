@@ -62,10 +62,10 @@ export function showSourceMenu(currentTag: string, guard: (fn: () => Promise<ISh
       (frag) => {
          const since = divEl("srr-chip-row")
          since.appendChild(createLink("!last", "last"))
-         since.appendChild(createLink("t:43200", "12h"))
+         since.appendChild(createLink("t:28800", "8h"))
+         since.appendChild(createLink("t:57600", "16h"))
          since.appendChild(createLink("t:86400", "1d"))
          since.appendChild(createLink("t:604800", "7d"))
-         since.appendChild(createLink("t:2592000", "1mo"))
          frag.appendChild(since)
 
          frag.appendChild(divEl("srr-tag-sep"))
@@ -73,7 +73,7 @@ export function showSourceMenu(currentTag: string, guard: (fn: () => Promise<ISh
          frag.appendChild(createLink("", "[ALL]", cls("", "")))
          for (const tag of sortedTags) {
             const group = tagged.get(tag)!
-            const expanded = tag === current || tag === currentTag
+            const expanded = tag === currentTag && tag !== current
             const div = divEl(expanded ? "srr-tag-group" : "srr-tag-group srr-tag-collapsed")
             const header = createLink(tag, tag, cls("srr-tag-header", tag))
             const toggle = document.createElement("span")
