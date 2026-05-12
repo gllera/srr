@@ -54,12 +54,17 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 			MaxConnsPerHost:     globals.Workers,
 		},
 	}
-	processor := mod.New()
-
 	bufPool := sync.Pool{
 		New: func() any {
 			return make([]byte, globals.MaxFeedSize*(1<<10)+1)
 		},
+	}
+	// Per-worker module processors: built-in processors hold mutable state
+	// (minify reuses internal buffers and is not goroutine-safe), so a single
+	// shared *mod.Module across workers is unsafe. Workers also amortize their
+	// own bluemonday/minify allocations across the items they process.
+	procPool := sync.Pool{
+		New: func() any { return mod.New() },
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
@@ -72,6 +77,8 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 		g.Go(func() error {
 			buf := bufPool.Get().([]byte)
 			defer bufPool.Put(buf)
+			processor := procPool.Get().(*mod.Module)
+			defer procPool.Put(processor)
 			s.Fetch(gctx, client, buf, processor, db.core.FetchedAt)
 			return nil
 		})
