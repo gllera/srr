@@ -7,9 +7,7 @@ const data = vi.hoisted(() => ({
       subscriptions: {} as Record<number, ISub>,
    } as unknown as IDB,
    loadArticle: vi.fn<(chronIdx: number) => Promise<IArticle>>(),
-   getArticleSync: vi.fn<(chronIdx: number) => IArticle | undefined>(),
    groupSubsByTag: vi.fn(() => ({ tagged: new Map(), sortedTags: [] as string[], untagged: [] as ISub[] })),
-   abortPending: vi.fn(),
    findChronForTimestamp: vi.fn(() => 0),
    getSubId: vi.fn<(chronIdx: number) => number>(),
    countLeft: vi.fn((chronIdx: number, subs: Map<number, number>) => {
@@ -57,7 +55,6 @@ function setupIndex(entries: Array<{ subId: number; fetchedAt?: number }>) {
    const sIds = new Uint32Array(entries.map((e) => e.subId))
    const fAts = new Uint32Array(entries.map((e) => e.fetchedAt ?? 0))
    data.loadArticle.mockImplementation(async (idx: number) => makeArticle({ s: sIds[idx], a: fAts[idx] }))
-   data.getArticleSync.mockImplementation((idx: number) => makeArticle({ s: sIds[idx], a: fAts[idx] }))
    data.getSubId.mockImplementation((idx: number) => sIds[idx])
    const counts = new Map<number, number>()
    for (const e of entries) counts.set(e.subId, (counts.get(e.subId) ?? 0) + 1)
@@ -70,7 +67,6 @@ beforeEach(() => {
    data.db.total_art = 0
    data.db.subscriptions = {}
    data.loadArticle.mockReset()
-   data.getArticleSync.mockReset()
    data.getSubId.mockReset()
    data.findLeft.mockClear()
    data.findRight.mockClear()
