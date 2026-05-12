@@ -8,6 +8,7 @@ interface IDB {
    total_art: number
    next_pid: number
    pack_off: number
+   version?: number
    subscriptions: Record<number, ISub>
 }
 

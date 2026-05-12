@@ -52,6 +52,7 @@ type DBCore struct {
 	PackOffset      int                   `json:"pack_off"`
 	FirstFetchedAt  int64                 `json:"first_fetched,omitempty"`
 	FetchedAtCursor int                   `json:"fetched_at_cur,omitempty"`
+	Version         int                   `json:"version,omitempty"`
 	Subscriptions   map[int]*Subscription `json:"subscriptions"`
 }
 
@@ -62,11 +63,12 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 	}
 
 	if globals.Cache != "" {
-		backend, err = store.NewCache(backend, globals.Cache, globals.Store)
+		cached, err := store.NewCache(backend, globals.Cache, globals.Store)
 		if err != nil {
 			backend.Close()
 			return nil, fmt.Errorf("initialize cache: %w", err)
 		}
+		backend = cached
 	}
 
 	db := &DB{
@@ -296,7 +298,11 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 		return err
 	}
 	if expected := expectedLatestIdxSize(c.TotalArticles); metaSize != expected {
-		return fmt.Errorf("idx/%s has %d bytes but db.gz expects %d (cache may be stale; clear SRR_CACHE)", latest, metaSize, expected)
+		hint := ""
+		if globals.Cache != "" {
+			hint = " (local cache may be stale; run 'srr clear-cache')"
+		}
+		return fmt.Errorf("idx/%s has %d bytes but db.gz expects %d%s", latest, metaSize, expected, hint)
 	}
 	data, _, err := o.loadPack(ctx, "data/"+latest)
 	if err != nil {
