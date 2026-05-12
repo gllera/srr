@@ -19,6 +19,31 @@ type RawItem struct {
 	Raw       any        `json:"raw"`
 }
 
+// RawField is one element of a parsed feed entry: text content, attributes,
+// and any nested children. JSON keys are short ("@", "$", "+") so external
+// shell modules see a compact form.
+type RawField struct {
+	Txt  string            `json:"@,omitempty"`
+	Attr map[string]string `json:"$,omitempty"`
+	Chld RawFeedItem       `json:"+,omitempty"`
+}
+
+// RawFeedItem is the parsed children of a feed <item>/<entry>, keyed by
+// element local name. Each name maps to all occurrences in document order.
+type RawFeedItem map[string][]RawField
+
+// Text returns the first non-empty text value among the given child names.
+func (r RawFeedItem) Text(names ...string) string {
+	for _, name := range names {
+		for _, f := range r[name] {
+			if f.Txt != "" {
+				return f.Txt
+			}
+		}
+	}
+	return ""
+}
+
 var registry = map[string]func() func(*RawItem) error{}
 
 // Register registers a built-in processor available as "#name".

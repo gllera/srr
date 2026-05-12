@@ -152,6 +152,7 @@ Subscriptions can define a processing pipeline that transforms articles during f
 
 - `#sanitize` — HTML sanitization (bluemonday)
 - `#minify` — HTML minification (tdewolff/minify)
+- `#youtube` — turns YouTube channel-feed entries into a thumbnail-link card with the video description (no-op for non-YouTube links)
 
 **Custom modules** — any shell command that reads/writes JSON via stdin/stdout:
 
