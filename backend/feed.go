@@ -21,25 +21,6 @@ func hash(s string) uint32 {
 	return h.Sum32()
 }
 
-type rawField struct {
-	Txt  string            `json:"@,omitempty"`
-	Attr map[string]string `json:"$,omitempty"`
-	Chld rawFeedItem       `json:"+,omitempty"`
-}
-
-type rawFeedItem map[string][]rawField
-
-func (r rawFeedItem) text(names ...string) string {
-	for _, name := range names {
-		for _, f := range r[name] {
-			if f.Txt != "" {
-				return f.Txt
-			}
-		}
-	}
-	return ""
-}
-
 var dateFields = []string{"pubDate", "published", "issued", "date", "created", "updated", "modified"}
 
 var dateFormats = []string{
@@ -51,7 +32,7 @@ var dateFormats = []string{
 	"2006-01-02",
 }
 
-func parseLink(r rawFeedItem) string {
+func parseLink(r mod.RawFeedItem) string {
 	var fallback string
 	for _, f := range r["link"] {
 		if href := f.Attr["href"]; href != "" {
@@ -68,7 +49,7 @@ func parseLink(r rawFeedItem) string {
 	return fallback
 }
 
-func parseDate(r rawFeedItem, hint *[2]string) time.Time {
+func parseDate(r mod.RawFeedItem, hint *[2]string) time.Time {
 	if hint[0] != "" {
 		for _, f := range r[hint[0]] {
 			if t, err := time.Parse(hint[1], f.Txt); err == nil {
@@ -92,22 +73,22 @@ func parseDate(r rawFeedItem, hint *[2]string) time.Time {
 	return time.Unix(0, 0).UTC()
 }
 
-func rawToFeedItem(r rawFeedItem, dateHint *[2]string) *mod.RawItem {
+func rawToFeedItem(r mod.RawFeedItem, dateHint *[2]string) *mod.RawItem {
 	link := parseLink(r)
 	published := parseDate(r, dateHint)
 
-	guid := r.text("guid", "id")
+	guid := r.Text("guid", "id")
 	if guid == "" {
 		guid = link
 	}
 
 	return &mod.RawItem{
 		GUID:      hash(guid),
-		Title:     r.text("title"),
-		Content:   r.text("content", "encoded", "description", "summary"),
+		Title:     r.Text("title"),
+		Content:   r.Text("content", "encoded", "description", "summary"),
 		Link:      link,
 		Published: &published,
-		Raw:       &r,
+		Raw:       r,
 	}
 }
 
@@ -160,8 +141,8 @@ func parseFeed(data []byte, fn func(*mod.RawItem) error) error {
 	}
 }
 
-func parseElement(dec *xml.Decoder, start xml.StartElement) (rawField, error) {
-	var f rawField
+func parseElement(dec *xml.Decoder, start xml.StartElement) (mod.RawField, error) {
+	var f mod.RawField
 	if len(start.Attr) > 0 {
 		f.Attr = make(map[string]string, len(start.Attr))
 		for _, a := range start.Attr {
@@ -187,7 +168,7 @@ func parseElement(dec *xml.Decoder, start xml.StartElement) (rawField, error) {
 				return f, err
 			}
 			if f.Chld == nil {
-				f.Chld = make(rawFeedItem)
+				f.Chld = make(mod.RawFeedItem)
 			}
 			f.Chld[t.Name.Local] = append(f.Chld[t.Name.Local], child)
 		}
