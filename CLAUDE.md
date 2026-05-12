@@ -25,6 +25,7 @@ All commands run from the repo root via `make`:
 | `make build-fe` | Production frontend build (auto `npm ci` if `node_modules` is stale) |
 | `make build-be` | Go build |
 | `make vet-be` | Go vet |
+| `make release` | Cross-compile backend for all platforms (requires `VERSION=`) |
 | `make clean` | Remove build artifacts |
 
 ## Data Contract
@@ -44,17 +45,17 @@ Shared format between backend (writer) and frontend (reader).
 | `total_art` | int | Total article count across all packs |
 | `next_pid` | int | Next data pack ID; packs with `id < next_pid` are finalized/immutable |
 | `pack_off` | int | Current offset in latest data pack |
-| `subscriptions` | object | JSON object keyed by subscription ID (string); may be `null` in JSON (default `{}`) |
-| `first_fetched` | int | Unix timestamp of first fetch that produced articles |
+| `subscriptions` | object | JSON object keyed by subscription ID (number); may be `null` in JSON (default `{}`) |
+| `first_fetched` | int | Unix timestamp of first fetch that produced articles. `omitempty` |
 | `fetched_at_cur` | int | Running idx-time cursor in 8-hour blocks since `first_fetched`; persists `prevFetchedTS` across `PutArticles` calls so per-entry `delta_fetched_at` reflects real elapsed time. `omitempty` |
 
 ### Subscriptions (`ISub`)
 
-`{ id, title, src:ISource[], pipe?:string[], total_art?, add_idx?, tag? }`
+`{ id, title, src:ISource[], total_art, add_idx, pipe?:string[], tag? }`
 
-Each `ISource` is `{ url, ferr?, etag?, last_modified? }`. Multiple sources merge under one `sub_id` so a subscription is not bound to a single feed URL — useful when the 256-id ceiling matters or when several feeds form one logical channel. Per-source state (incremental fetch headers, last error) lives on the source, not the subscription.
+Each `ISource` is `{ url, ferr?, etag?, last_modified?, wm?, bg? }`. `wm` (Watermark) is the max published unix-second ever seen; `bg` (BoundaryGUIDs) is the FNV-32a hash array used for dedup. Multiple sources merge under one `sub_id` so a subscription is not bound to a single feed URL — useful when the 256-id ceiling matters or when several feeds form one logical channel. Per-source state (incremental fetch headers, last error, dedup watermark) lives on the source, not the subscription.
 
-`subscriptions` is a JSON object (`Record<string, ISub>`) keyed by subscription ID as a string. Backend struct: `Subscription` holds `Sources []*Source`. JSON uses short keys (`src`, `pipe`, `ferr`, etc.) — see `DBCore` struct tags.
+`subscriptions` is a JSON object (`Record<number, ISub>`) keyed by subscription ID. Backend struct: `Subscription` holds `Sources []*Source`. JSON uses short keys (`src`, `pipe`, `ferr`, `wm`, `bg`, etc.) — see `DBCore` struct tags.
 
 ### Pack Storage
 
@@ -74,7 +75,7 @@ Two gzip-compressed series under the feed directory:
 
 **data/ format** — JSONL, each line: `{"s":sub_id,"a":fetched_at,"p":published,"t":"title","l":"link","c":"content"}`
 
-Short keys: `s`=sub_id, `a`=fetched_at, `p`=published (unix seconds, omitted if 0), `t`=title, `l`=link, `c`=content. Contains all article info.
+Short keys: `s`=sub_id, `a`=fetched_at, `p`=published (unix seconds, omitted if 0), `t`=title (omitted if empty), `l`=link (omitted if empty), `c`=content. Contains all article info.
 
 ### CDN Layout / Pack Addressing
 
