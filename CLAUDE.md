@@ -34,7 +34,7 @@ Shared format between backend (writer) and frontend (reader).
 ### `db.gz`
 
 ```
-{ data_tog, fetched_at, total_art, next_pid, pack_off, subscriptions{}, first_fetched, fetched_at_cur? }
+{ data_tog, fetched_at, total_art, next_pid, pack_off, subscriptions{}, first_fetched, fetched_at_cur?, version? }
 ```
 
 | Field | Type | Description |
@@ -47,6 +47,7 @@ Shared format between backend (writer) and frontend (reader).
 | `subscriptions` | object | JSON object keyed by subscription ID (string); may be `null` in JSON (default `{}`) |
 | `first_fetched` | int | Unix timestamp of first fetch that produced articles |
 | `fetched_at_cur` | int | Running idx-time cursor in 8-hour blocks since `first_fetched`; persists `prevFetchedTS` across `PutArticles` calls so per-entry `delta_fetched_at` reflects real elapsed time. `omitempty` |
+| `version` | int | Cache invalidation epoch. Bumped by `srr clear-cache --all`; frontend SW rotates its `srr-v<N>` data cache and backend `store.Cache` wipes its local subdir when this disagrees with the cached copy. `omitempty` |
 
 ### Subscriptions (`ISub`)
 

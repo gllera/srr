@@ -1,7 +1,10 @@
 package store
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -265,5 +268,230 @@ func TestLoadEnvHyphenatedTag(t *testing.T) {
 	loadEnv("test", cfg)
 	if cfg.AccessKey != "mykey" {
 		t.Errorf("AccessKey = %q, want %q", cfg.AccessKey, "mykey")
+	}
+}
+
+func openCache(t *testing.T, cacheDir, storeURL string) (*Cache, string) {
+	t.Helper()
+	remote, err := Open(ctx, storeURL)
+	if err != nil {
+		t.Fatalf("Open remote: %v", err)
+	}
+	t.Cleanup(func() { remote.Close() })
+	c, err := NewCache(remote, cacheDir, storeURL)
+	if err != nil {
+		t.Fatalf("NewCache: %v", err)
+	}
+	return c, c.local.path
+}
+
+// Mirrors DBCore's omitempty serialization so a version=0 input matches what
+// the backend actually writes (field absent) rather than an explicit zero.
+func gzipJSONDB(t *testing.T, version int) []byte {
+	t.Helper()
+	m := map[string]any{
+		"data_tog":      false,
+		"fetched_at":    0,
+		"total_art":     0,
+		"next_pid":      0,
+		"pack_off":      0,
+		"subscriptions": map[string]any{},
+	}
+	if version != 0 {
+		m["version"] = version
+	}
+	body, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("json marshal: %v", err)
+	}
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write(body); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func TestCacheWipesSubdirOnVersionBump(t *testing.T) {
+	cacheDir := t.TempDir()
+	storeURL := t.TempDir()
+	c, subdir := openCache(t, cacheDir, storeURL)
+
+	// Seed remote + cache with version=1 and a sibling entry.
+	if err := c.AtomicPut(ctx, "db.gz", bytes.NewReader(gzipJSONDB(t, 1))); err != nil {
+		t.Fatalf("seed db.gz: %v", err)
+	}
+	if err := c.Put(ctx, "x.gz", strings.NewReader("hello"), true); err != nil {
+		t.Fatalf("Put x.gz: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(subdir, "x.gz")); err != nil {
+		t.Fatalf("seed x.gz missing from cache: %v", err)
+	}
+
+	// Bump the remote db.gz version out-of-band (simulating another writer).
+	remote := c.remote
+	if err := remote.AtomicPut(ctx, "db.gz", bytes.NewReader(gzipJSONDB(t, 2))); err != nil {
+		t.Fatalf("bump remote db.gz: %v", err)
+	}
+
+	// Next read of db.gz should detect the mismatch and wipe the cache.
+	rc, err := c.Get(ctx, "db.gz", false)
+	if err != nil {
+		t.Fatalf("Get db.gz: %v", err)
+	}
+	rc.Close()
+
+	if _, err := os.Stat(filepath.Join(subdir, "x.gz")); !os.IsNotExist(err) {
+		t.Errorf("x.gz should be wiped on version bump, stat err = %v", err)
+	}
+}
+
+func TestCachePreservesEntriesWhenVersionUnchanged(t *testing.T) {
+	cacheDir := t.TempDir()
+	storeURL := t.TempDir()
+	c, subdir := openCache(t, cacheDir, storeURL)
+
+	if err := c.AtomicPut(ctx, "db.gz", bytes.NewReader(gzipJSONDB(t, 1))); err != nil {
+		t.Fatalf("seed db.gz: %v", err)
+	}
+	if err := c.Put(ctx, "x.gz", strings.NewReader("hello"), true); err != nil {
+		t.Fatalf("Put x.gz: %v", err)
+	}
+
+	rc, err := c.Get(ctx, "db.gz", false)
+	if err != nil {
+		t.Fatalf("Get db.gz: %v", err)
+	}
+	rc.Close()
+
+	if _, err := os.Stat(filepath.Join(subdir, "x.gz")); err != nil {
+		t.Errorf("cached entry should survive same-version re-read: %v", err)
+	}
+}
+
+// Regression: a failed wipeSubdir used to leave c.valid=false but useCache=true
+// for finalized packs, so the next Get would happily serve old-version cached
+// packs alongside the just-updated db.gz. The compromised flag bypasses local
+// reads (and skips writes) so the process re-fetches everything from remote.
+func TestCacheCompromisedAfterWipeFailureBypassesLocal(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("read-only chmod doesn't constrain root; skipping")
+	}
+
+	cacheDir := t.TempDir()
+	storeURL := t.TempDir()
+	c, subdir := openCache(t, cacheDir, storeURL)
+
+	if err := c.AtomicPut(ctx, "db.gz", bytes.NewReader(gzipJSONDB(t, 1))); err != nil {
+		t.Fatalf("seed db.gz: %v", err)
+	}
+	if err := c.Put(ctx, "5.gz", strings.NewReader("stale"), true); err != nil {
+		t.Fatalf("seed 5.gz: %v", err)
+	}
+
+	// Bump remote out-of-band and rewrite the finalized pack (simulating a
+	// cron rewrite that triggered `srr clear-cache --all`).
+	remote := c.remote
+	if err := remote.AtomicPut(ctx, "db.gz", bytes.NewReader(gzipJSONDB(t, 2))); err != nil {
+		t.Fatalf("bump remote: %v", err)
+	}
+	if err := remote.Put(ctx, "5.gz", strings.NewReader("fresh"), true); err != nil {
+		t.Fatalf("rewrite remote 5.gz: %v", err)
+	}
+
+	// Make the cache subdir read-only so wipeSubdir's RemoveAll fails.
+	if err := os.Chmod(subdir, 0o500); err != nil {
+		t.Fatalf("chmod subdir: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(subdir, 0o755) })
+
+	rc, err := c.Get(ctx, "db.gz", false)
+	if err != nil {
+		t.Fatalf("Get db.gz: %v", err)
+	}
+	rc.Close()
+
+	if !c.compromised {
+		t.Fatal("compromised flag should be set after wipe failure")
+	}
+
+	rc, err = c.Get(ctx, "5.gz", false)
+	if err != nil {
+		t.Fatalf("Get 5.gz: %v", err)
+	}
+	if got := readAllClose(t, rc); got != "fresh" {
+		t.Errorf("Get 5.gz = %q, want %q (cache should be bypassed)", got, "fresh")
+	}
+}
+
+// Directly exercises the flag so the bypass semantics stay locked in even if
+// the wipe path is refactored.
+func TestCompromisedBypassesFinalizedAndLatestPacks(t *testing.T) {
+	c, _ := newTestCache(t)
+
+	if err := c.Put(ctx, "5.gz", strings.NewReader("stale-finalized"), true); err != nil {
+		t.Fatalf("Put 5.gz: %v", err)
+	}
+	if err := c.Put(ctx, "true.gz", strings.NewReader("stale-latest"), true); err != nil {
+		t.Fatalf("Put true.gz: %v", err)
+	}
+	if err := c.remote.Put(ctx, "5.gz", strings.NewReader("fresh-finalized"), true); err != nil {
+		t.Fatalf("remote 5.gz: %v", err)
+	}
+	if err := c.remote.Put(ctx, "true.gz", strings.NewReader("fresh-latest"), true); err != nil {
+		t.Fatalf("remote true.gz: %v", err)
+	}
+
+	c.compromised = true
+
+	rc, err := c.Get(ctx, "5.gz", false)
+	if err != nil {
+		t.Fatalf("Get 5.gz: %v", err)
+	}
+	if got := readAllClose(t, rc); got != "fresh-finalized" {
+		t.Errorf("5.gz = %q, want fresh-finalized (bypassed)", got)
+	}
+
+	rc, err = c.Get(ctx, "true.gz", false)
+	if err != nil {
+		t.Fatalf("Get true.gz: %v", err)
+	}
+	if got := readAllClose(t, rc); got != "fresh-latest" {
+		t.Errorf("true.gz = %q, want fresh-latest (bypassed)", got)
+	}
+}
+
+// Locks in readVersion's (version, ok) semantics: a malformed remote response
+// (corrupt gzip, partial body, invalid JSON) must NOT trigger a wipe just
+// because the parse failed. Reverting readVersion to return a bare int would
+// silently regress to "transient CDN glitch nukes the local pack cache."
+func TestCachePreservesEntriesOnMalformedRemote(t *testing.T) {
+	cacheDir := t.TempDir()
+	storeURL := t.TempDir()
+	c, subdir := openCache(t, cacheDir, storeURL)
+
+	if err := c.AtomicPut(ctx, "db.gz", bytes.NewReader(gzipJSONDB(t, 5))); err != nil {
+		t.Fatalf("seed db.gz: %v", err)
+	}
+	if err := c.Put(ctx, "x.gz", strings.NewReader("hello"), true); err != nil {
+		t.Fatalf("Put x.gz: %v", err)
+	}
+
+	// Replace remote db.gz with bytes that can't be parsed.
+	if err := c.remote.AtomicPut(ctx, "db.gz", bytes.NewReader([]byte("not gzip"))); err != nil {
+		t.Fatalf("malformed remote: %v", err)
+	}
+
+	rc, err := c.Get(ctx, "db.gz", false)
+	if err != nil {
+		t.Fatalf("Get db.gz: %v", err)
+	}
+	rc.Close()
+
+	if _, err := os.Stat(filepath.Join(subdir, "x.gz")); err != nil {
+		t.Errorf("x.gz should survive malformed remote response: %v", err)
 	}
 }

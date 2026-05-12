@@ -22,7 +22,7 @@ Dependency chain: `app → nav → data → idx`, `data → cache`, `app → fmt
 | `cache.ts` | Generic LRU cache factory (`makeLRU`). Used by data.ts. |
 | `fmt.ts` | Pure utilities (no imports): `sanitizeHtml`, `timeAgo`, `formatDate`. `sanitizeHtml` strips dangerous elements/attributes for defense-in-depth. |
 | `app.ts` | UI: DOM rendering, events, dropdowns, error popup, loading, dark mode. All async handlers via `guard()` mutex. Position persisted to localStorage. Registers service worker (`sw.ts`) on init. |
-| `sw.ts` | Service worker. Caching strategies: `cacheFirst` for finalized packs (`N.gz`), custom `getDB` (stale-while-revalidate with validity flag) for `db.gz`, `cacheFirst`/`networkFirst` for latest packs (`true.gz`/`false.gz`) depending on DB validity. Cache name: `srr-v1`. |
+| `sw.ts` | Service worker. Caching strategies: `cacheFirst` for finalized packs (`N.gz`), custom `getDB` (stale-while-revalidate with validity flag) for `db.gz`, `cacheFirst`/`networkFirst` for latest packs (`true.gz`/`false.gz`) depending on DB validity. Two caches: `srr-db` (db.gz only) and `srr-v<N>` (everything else), where `N` is `db.version`; `switchDataCache` rotates the data cache and deletes stale `srr-v*` when `version` changes. |
 | `types.d.ts` | Ambient types: `IDB`, `ISub`, `IArticle`, `IShowFeed`. |
 
 CSS: native nesting, `srr-` prefix on all classes, dark mode via `prefers-color-scheme`.
