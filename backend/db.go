@@ -12,6 +12,11 @@ import (
 	"srrb/store"
 )
 
+// gzipLevel trades ~10% compression ratio for ~3-4x faster encode on the
+// HTML-heavy article content that dominates pack contents and on the small
+// JSON db.gz file written every fetch.
+const gzipLevel = gzip.BestSpeed
+
 func jsonEncode(v any) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -124,13 +129,14 @@ func (o *DB) Close(ctx context.Context) error {
 }
 
 func (o *DB) Commit(ctx context.Context) error {
-	data, err := jsonEncode(&o.core)
+	var buf bytes.Buffer
+	gz, err := gzip.NewWriterLevel(&buf, gzipLevel)
 	if err != nil {
 		return err
 	}
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	if _, err := gz.Write(data); err != nil {
+	enc := json.NewEncoder(gz)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(&o.core); err != nil {
 		return err
 	}
 	if err := gz.Close(); err != nil {
@@ -184,11 +190,15 @@ type Item struct {
 type pack struct {
 	buf bytes.Buffer
 	gz  *gzip.Writer
+	enc *json.Encoder
 }
 
 func newPack() *pack {
 	p := &pack{}
-	p.gz = gzip.NewWriter(&p.buf)
+	// gzipLevel error is impossible at compile-time-known constant levels.
+	p.gz, _ = gzip.NewWriterLevel(&p.buf, gzipLevel)
+	p.enc = json.NewEncoder(p.gz)
+	p.enc.SetEscapeHTML(false)
 	return p
 }
 
@@ -213,12 +223,9 @@ func writeIdxHeader(p *pack, block, packID, packOff int, subs map[int]*Subscript
 }
 
 func (p *pack) writeArticle(ad *ArticleData) error {
-	data, err := jsonEncode(ad)
-	if err != nil {
-		return err
-	}
-	_, err = p.Write(data)
-	return err
+	// json.Encoder writes a trailing newline (JSONL) directly into the gzip
+	// writer, avoiding a per-article bytes.Buffer + Encoder allocation.
+	return p.enc.Encode(ad)
 }
 
 func (o *DB) readGz(ctx context.Context, key string) ([]byte, error) {
