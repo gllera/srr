@@ -140,7 +140,9 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
 
    if (data.db.total_art === 0) throw new Error("no articles")
 
-   let target = Number(posStr)
+   // Empty posStr → Number("")=0 would land on the oldest article; treat it
+   // as "no target" so a first-time visitor with no stored hash sees latest.
+   let target = posStr === "" ? NaN : Number(posStr)
    if (!Number.isFinite(target) || target < 0 || target >= data.db.total_art) target = data.db.total_art - 1
 
    if (!filter.matches(data.getSubId(target), target)) return last()
