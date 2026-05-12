@@ -73,10 +73,12 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
          // rows into ownSubCounts/bounds and skew countLeft/findLeft/Right.
          const limit = IDX_HEADER_SIZE + packSize * 2
          for (let off = IDX_HEADER_SIZE; off < limit; off += 2) {
+            const subId = bytes[off]
             const packed = bytes[off + 1]
             if (packed >> 7) packId++
             fetchedAt += packed & 0x7f
 
+            const i = (off - IDX_HEADER_SIZE) >> 1
             subIds[i] = subId
             fetchedAts[i] = fetchedAt
             ownSubCounts[subId]++
