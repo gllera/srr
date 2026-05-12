@@ -11,8 +11,8 @@ npm ci
 ## Development
 
 ```bash
-npm run dev       # Dev server + static file server for ../packs/ on port 3000
-npm run build     # Production build to dist/
+npm run dev       # Parcel dev server (default :1234) + `serve` for ../packs/ with CORS (default :3000)
+npm run build     # Production build to ../dist/srrf/
 npm test          # Unit tests (vitest + jsdom)
 npm run lint      # ESLint
 npm run format       # Prettier write
@@ -34,7 +34,7 @@ make verify-fe    # Full pipeline: lint + format check + test + build
 npm run build
 ```
 
-Output goes to `dist/`. Set the `SRR_CDN_URL` environment variable at build time to point at your pack storage:
+Output goes to `../dist/srrf/` (repo-root `dist/srrf/`). Set the `SRR_CDN_URL` environment variable at build time to point at your pack storage:
 
 ```bash
 SRR_CDN_URL=https://cdn.example.com/feeds npm run build
@@ -46,48 +46,48 @@ Entry point: `src/index.html` -> `src/js/app.ts`. Bundled with Parcel 2.
 
 | Module | Role |
 |--------|------|
-| `app.ts` | UI rendering, events, dropdowns, dark mode, error popup. All async actions go through a `guard()` mutex. |
-| `nav.ts` | Navigation state machine: hash routing, traversal, filtering, floor. Returns `IShowFeed`. |
-| `data.ts` | CDN data layer: fetches `db.gz`, streams gzip TSV idx packs, loads null-delimited data packs. Dual LRU caches. |
-| `ts.ts` | Time-series layer: fetches/caches weekly ts/ packs, provides `findCandidateIdxPacks` for filtered navigation. |
-| `cache.ts` | Generic LRU cache factory. |
-| `fmt.ts` | Pure utilities: HTML sanitization, relative time, date formatting. |
-| `types.d.ts` | Ambient types: `IDB`, `ISub`, `IIdxEntry`, `IShowFeed`. |
+| `app.ts` | UI rendering, events, keyboard shortcuts, error popup. All async actions go through a `guard()` mutex. |
+| `nav.ts` | Navigation state machine: hash routing, traversal, filtering. Returns `IShowFeed`. |
+| `data.ts` | CDN data layer: fetches `db.gz`, loads binary idx packs at init, fetches JSONL data packs on demand (LRU-cached). |
+| `idx.ts` | Binary idx pack parser: lazy `parse()` into `subIds`/`fetchedAts` typed arrays + `bounds`; per-pack `findLeft`/`findRight`/`countLeft`. |
+| `dropdown.ts` | Source-menu dropdown (subscription/tag picker + time-range chips). |
+| `gestures.ts` | Touch swipes (prev/next, cycle filter) + scroll-based toolbar hide. |
+| `cache.ts` | Generic LRU cache factory (`makeLRU`). |
+| `fmt.ts` | Pure utilities: HTML sanitization (proxies images through wsrv.nl), relative time, date formatting. |
+| `types.d.ts` | Ambient types: `IDB`, `ISub`, `ISource`, `IArticle`, `IShowFeed`. |
 
 ### Data Flow
 
 ```
-app  -->  nav  -->  data  (CDN fetches)
-          nav  -->  ts   -->  data
-app  -->  ts
+app  -->  nav  -->  data  -->  idx
+          nav  -->  data  (LRU-cached data packs)
+app  -->  dropdown  -->  {data, nav}
+app  -->  gestures  -->  {nav, dropdown}
 app  -->  fmt
 ```
 
 ## Features
 
-- **Streaming decompression** -- idx packs are streamed through `DecompressionStream` + `TextDecoderStream` with partial-line buffering
-- **Lazy content loading** -- metadata renders immediately, article content loads async with generation counter to discard stale loads
-- **Aggressive caching** -- finalized packs use HTTP `force-cache`; latest packs use filename toggle (`true.gz`/`false.gz`) for cache busting
+- **Streaming decompression** -- pack bodies pass through `DecompressionStream`; idx packs decode into an `ArrayBuffer`, data packs go through `TextDecoderStream` with partial-line buffering for JSONL.
+- **Aggressive caching** -- finalized packs use HTTP `force-cache`; latest packs use filename toggle (`true.gz`/`false.gz`) for cache busting; data packs are kept in an in-memory LRU (max 20).
 - **Filtering** -- filter by subscription or tag via URL hash filter segment (sub IDs or tag names, `+`-separated after `!`)
-- **Floor** -- set a lower bound on navigation to skip old articles (`~chronIdx` in hash)
 - **Dark mode** -- automatic via `prefers-color-scheme`
 - **No runtime deps** -- the built bundle has zero npm dependencies
 
 ## URL Hash Format
 
 ```
-#chronIdx~floor!token1+token2
+#chronIdx!token1+token2
 ```
 
 | Segment | Description |
 |---------|-------------|
 | `chronIdx` | Current article position (0-based) |
-| `~floor` | Optional navigation floor (lower bound) |
-| `!tokens` | Optional `+`-separated filter tokens (sub IDs or tag names) |
+| `!tokens` | Optional `+`-separated filter tokens (sub IDs or tag names); each `encodeURIComponent`-wrapped |
 
 ## Deployment
 
-The GitHub Actions workflow (`gh-pages.yml`) builds and deploys to GitHub Pages on version tags (`v*.*.*`) or manual trigger. It uses the `SRR_CDN_URL` repository variable.
+The `release.yml` workflow's `pages` job builds and deploys to GitHub Pages on version tags (`v*.*.*`) or manual trigger. It reads `SRR_CONFIG_INLINE` from the `ci` environment secret and extracts `cdn-url:` from that YAML at build time.
 
 ## Stack
 
