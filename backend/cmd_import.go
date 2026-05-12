@@ -63,20 +63,14 @@ func (o *ImportCmd) Run() error {
 		return nil
 	}
 
-	ctx := context.Background()
-	db, err := NewDB(ctx, true)
-	if err != nil {
-		return err
-	}
-	defer db.Close(ctx)
-
-	for _, s := range newSubs {
-		if err := db.AddSubscription(s); err != nil {
-			return err
+	return withDB(true, func(ctx context.Context, db *DB) error {
+		for _, s := range newSubs {
+			if err := db.AddSubscription(s); err != nil {
+				return err
+			}
 		}
-	}
-
-	return db.Commit(ctx)
+		return db.Commit(ctx)
+	})
 }
 
 type importWalker struct {
