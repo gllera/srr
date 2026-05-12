@@ -51,7 +51,7 @@ export function getSubId(chronIdx: number): number {
    return subIds[chronIdx - n * IDX_PACK_SIZE]
 }
 
-// Binary search for rightmost entry where fetchedAt <= ts.
+// Binary search for leftmost entry where fetchedAt >= ts.
 export function findChronForTimestamp(ts: number): number {
    const tsBlocks = Math.trunc(ts / 28800) - Math.trunc(db.first_fetched / 28800)
    let lo = 0
@@ -60,10 +60,10 @@ export function findChronForTimestamp(ts: number): number {
       const mid = (lo + hi) >>> 1
       const n = packIdx(mid)
       const p = idxPacks[n].parse()
-      if (p.fetchedAts[mid - n * IDX_PACK_SIZE] <= tsBlocks) lo = mid + 1
+      if (p.fetchedAts[mid - n * IDX_PACK_SIZE] < tsBlocks) lo = mid + 1
       else hi = mid
    }
-   return lo > 0 ? lo - 1 : 0
+   return lo < db.total_art ? lo : Math.max(0, db.total_art - 1)
 }
 
 export function countLeft(chronIdx: number, subs: Map<number, number>): number {
