@@ -1,6 +1,9 @@
 import * as data from "./data"
+import { extractImageUrls, wsrvProxy } from "./fmt"
 
 let pos = -1
+let nextLeft: number | undefined
+let nextRight: number | undefined
 
 export const filter = {
    subs: new Map<number, number>(),
@@ -56,9 +59,44 @@ async function resolve(target: number, replace = false): Promise<IShowFeed> {
    // Load first; commit pos only on success so a Retry replays the same chron.
    const article = await data.loadArticle(target)
    pos = target
+   nextLeft = nextRight = undefined
    updateHash(replace)
    recordSeen(article)
    return showFeed(article)
+}
+
+// Holds refs to the last neighbor's prefetched Image objects so we can both
+// abort their in-flight loads (img.src = "" per WHATWG image-update steps)
+// and drop the references, bounding memory to one neighbor at a time. Array
+// identity also acts as the freshness token: a pending idle callback that
+// finds `my !== currentPrefetch` bails instead of pushing into a stale array.
+let currentPrefetch: HTMLImageElement[] | null = null
+
+function schedulePrefetch(target: number) {
+   if (target === -1 || typeof window.requestIdleCallback !== "function") return
+   const my: HTMLImageElement[] = []
+   if (currentPrefetch)
+      for (const img of currentPrefetch) img.src = ""
+   currentPrefetch = my
+   window.requestIdleCallback(
+      async () => {
+         if (my !== currentPrefetch) return
+         try {
+            const art = await data.loadArticle(target)
+            if (my !== currentPrefetch) return
+            for (const raw of extractImageUrls(art.c)) {
+               const img = new Image()
+               img.fetchPriority = "low"
+               img.decoding = "async"
+               img.src = wsrvProxy(raw)
+               my.push(img)
+            }
+         } catch {
+            // Best-effort; errors surface on user nav.
+         }
+      },
+      { timeout: 500 },
+   )
 }
 
 const SEEN_KEY = "srr-seen"
@@ -150,15 +188,21 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
 }
 
 export async function left(): Promise<IShowFeed> {
-   const found = data.findLeft(pos - 1, filter.subs)
-   if (found === -1) throw new Error("no left match")
-   return resolve(found)
+   const target = nextLeft ?? data.findLeft(pos - 1, filter.subs)
+   if (target === -1) throw new Error("no left match")
+   const result = await resolve(target)
+   nextLeft = data.findLeft(pos - 1, filter.subs)
+   schedulePrefetch(nextLeft)
+   return result
 }
 
 export async function right(): Promise<IShowFeed> {
-   const found = data.findRight(pos + 1, filter.subs)
-   if (found === -1) throw new Error("no right match")
-   return resolve(found)
+   const target = nextRight ?? data.findRight(pos + 1, filter.subs)
+   if (target === -1) throw new Error("no right match")
+   const result = await resolve(target)
+   nextRight = data.findRight(pos + 1, filter.subs)
+   schedulePrefetch(nextRight)
+   return result
 }
 
 export async function first(): Promise<IShowFeed> {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
-import { sanitizeHtml, timeAgo, formatDate } from "./fmt"
+import { extractImageUrls, sanitizeHtml, timeAgo, formatDate, wsrvProxy } from "./fmt"
 
 describe("sanitizeHtml", () => {
    it("removes script elements", () => {
@@ -42,11 +42,6 @@ describe("sanitizeHtml", () => {
    it("adds rel=noopener noreferrer to anchors", () => {
       const result = sanitizeHtml('<a href="https://example.com">link</a>')
       expect(result).toContain('rel="noopener noreferrer"')
-   })
-
-   it("adds loading=lazy to images", () => {
-      const result = sanitizeHtml('<img src="img.png">')
-      expect(result).toContain('loading="lazy"')
    })
 
    it("handles nested dangerous elements inside safe containers", () => {
@@ -199,6 +194,33 @@ describe("timeAgo", () => {
    it("handles future timestamp (negative elapsed)", () => {
       const result = timeAgo(now + 60)
       expect(result).toBeDefined()
+   })
+})
+
+describe("extractImageUrls", () => {
+   it("returns all http(s) image URLs", () => {
+      const html = '<p>x</p><img src="http://a.com/1.jpg"><img src="https://b.com/2.png"><img src="http://c.com/3.gif">'
+      expect(extractImageUrls(html)).toEqual(["http://a.com/1.jpg", "https://b.com/2.png", "http://c.com/3.gif"])
+   })
+
+   it("ignores non-http schemes", () => {
+      const html = '<img src="data:image/png;base64,xx"><img src="//cdn/x.jpg"><img src="https://ok.com/x.jpg">'
+      expect(extractImageUrls(html)).toEqual(["https://ok.com/x.jpg"])
+   })
+
+   it("returns empty for no images or empty input", () => {
+      expect(extractImageUrls("<p>no images</p>")).toEqual([])
+      expect(extractImageUrls("")).toEqual([])
+   })
+
+   it("matches the exact URL sanitizeHtml writes (so preload hrefs share cache)", () => {
+      // Serialized HTML escapes & as &amp;; the browser decodes it on parse, so
+      // compare the parsed attribute value (not the serialized string).
+      const raw = "http://example.com/pic.jpg"
+      const t = document.createElement("template")
+      t.innerHTML = sanitizeHtml(`<img src="${raw}">`)
+      const img = t.content.querySelector("img")!
+      expect(img.getAttribute("src")).toBe(wsrvProxy(raw))
    })
 })
 

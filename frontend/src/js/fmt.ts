@@ -8,6 +8,12 @@ export const URL_DENY = /^\s*(?:javascript|data|vbscript|file)\s*:/i
 // so we don't need a separate case-folding pass.
 const DANGEROUS_SELECTOR = "script,style,iframe,embed,object,form,link,meta,base,svg,math"
 
+const HTTP_RE = /^https?:\/\//i
+const WSRV_PREFIX = "https://wsrv.nl/?&output=webp&w=600&h=600&fit=inside&we&url="
+export function wsrvProxy(url: string): string {
+   return WSRV_PREFIX + encodeURIComponent(url)
+}
+
 // <template> parses HTML without executing scripts, unlike a div
 const tmpl = document.createElement("template")
 export function sanitizeHtml(html: string): string {
@@ -28,18 +34,21 @@ export function sanitizeHtml(html: string): string {
       if (tag === "A") node.setAttribute("rel", "noopener noreferrer")
       else if (tag === "IMG") {
          node.removeAttribute("srcset")
-         node.setAttribute("loading", "lazy")
          const src = node.getAttribute("src")
-         if (src && /^https?:\/\//i.test(src)) {
-            node.setAttribute(
-               "src",
-               "https://wsrv.nl/?&output=webp&w=600&h=600&fit=inside&we&url=" + encodeURIComponent(src),
-            )
-         }
+         if (src && HTTP_RE.test(src)) node.setAttribute("src", wsrvProxy(src))
          // URL_DENY-matching src already stripped by the attribute loop above
       }
    }
    return tmpl.innerHTML
+}
+
+// Regex (not DOM parse) keeps this cheap; sanitization runs on actual render.
+const IMG_SRC_RE = /<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/gi
+export function extractImageUrls(html: string): string[] {
+   const out: string[] = []
+   if (!html) return out
+   for (const m of html.matchAll(IMG_SRC_RE)) if (HTTP_RE.test(m[1])) out.push(m[1])
+   return out
 }
 
 export function timeAgo(unix: number): string {
