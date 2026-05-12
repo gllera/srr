@@ -92,4 +92,50 @@ describe("makeLRU", () => {
       expect(lru.get(2)).toBe("b")
       expect(lru.get(3)).toBe("c")
    })
+
+   it("peek returns the value without affecting recency order", () => {
+      const lru = makeLRU<string>(2)
+      lru.put(1, "a")
+      lru.put(2, "b")
+      expect(lru.peek(1)).toBe("a")
+      // After peek, key 1 should still be the oldest — adding a third entry evicts it.
+      lru.put(3, "c")
+      expect(lru.get(1)).toBeUndefined()
+      expect(lru.get(2)).toBe("b")
+      expect(lru.get(3)).toBe("c")
+   })
+
+   it("peek returns undefined for missing key", () => {
+      const lru = makeLRU<string>(2)
+      lru.put(1, "a")
+      expect(lru.peek(99)).toBeUndefined()
+   })
+
+   it("drop removes an entry without affecting other entries", () => {
+      const lru = makeLRU<string>(3)
+      lru.put(1, "a")
+      lru.put(2, "b")
+      lru.put(3, "c")
+      lru.drop(2)
+      expect(lru.get(2)).toBeUndefined()
+      expect(lru.get(1)).toBe("a")
+      expect(lru.get(3)).toBe("c")
+   })
+
+   it("drop on missing key is a no-op", () => {
+      const lru = makeLRU<string>(2)
+      lru.put(1, "a")
+      lru.drop(99)
+      expect(lru.get(1)).toBe("a")
+   })
+
+   it("drop frees a slot so the next put does not evict survivors", () => {
+      const lru = makeLRU<string>(2)
+      lru.put(1, "a")
+      lru.put(2, "b")
+      lru.drop(1)
+      lru.put(3, "c") // no eviction now — slot 1 is free
+      expect(lru.get(2)).toBe("b")
+      expect(lru.get(3)).toBe("c")
+   })
 })
