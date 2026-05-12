@@ -100,6 +100,7 @@ export function findLeft(from: number, subs: Map<number, number>): number {
 }
 
 export function findRight(from: number, subs: Map<number, number>): number {
+   if (from < 0) from = 0
    if (from >= db.total_art || idxPacks.length === 0) return -1
    for (let p = packIdx(from); p < idxPacks.length; p++) {
       const found = idxPacks[p].findRight(from, subs)
