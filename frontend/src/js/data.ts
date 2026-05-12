@@ -1,6 +1,6 @@
 import { makeLRU } from "./cache"
 import { IDX_PACK_SIZE, makeIdxPack, type IdxPack } from "./idx"
-import { evictFromCache } from "./sw-cache"
+import { evictFromDataCache } from "./sw-cache"
 
 export { IDX_PACK_SIZE }
 
@@ -45,8 +45,9 @@ export async function init() {
                try {
                   return makeIdxPack(buf, p, size)
                } catch (e) {
-                  // Stale SW/CDN entry: evict so a Retry refetches from origin.
-                  await evictFromCache(url)
+                  // Stale SW/CDN entry that disagrees with db.gz on entry count.
+                  // Evict so a Retry refetches from origin and re-aligns the two.
+                  await evictFromDataCache(url)
                   throw e
                }
             })
@@ -178,7 +179,7 @@ async function evictPack(packId: number): Promise<void> {
    dataCache.drop(packId)
    const isFinalized = packId < db.next_pid
    const name = isFinalized ? packId.toString() : String(db.data_tog)
-   await evictFromCache(new URL(`data/${name}.gz`, DB_URL))
+   await evictFromDataCache(new URL(`data/${name}.gz`, DB_URL))
 }
 
 // db is immutable after init(); cache is safe for the app's lifetime
