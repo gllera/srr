@@ -1,5 +1,7 @@
 import * as data from "./data"
+import { closeAllDropdowns, showSourceMenu } from "./dropdown"
 import { formatDate, sanitizeHtml, timeAgo, URL_DENY } from "./fmt"
+import { setupGestures } from "./gestures"
 import * as nav from "./nav"
 
 const el = {
@@ -24,9 +26,6 @@ let currentPublished = 0
 let currentSource = { id: 0, title: "", tag: "" }
 let lastSourceLabel = ""
 let previousFocus: HTMLElement | null = null
-let dropdownOpen = false
-const ddMenus = document.querySelectorAll<HTMLElement>(".srr-dropdown-menu")
-const ddBtns = document.querySelectorAll<HTMLElement>(".srr-dropdown-btn")
 
 function showError(e: unknown, retry?: () => void) {
    el.popupText.textContent = e instanceof Error ? e.message : String(e)
@@ -35,13 +34,6 @@ function showError(e: unknown, retry?: () => void) {
    previousFocus = document.activeElement as HTMLElement
    el.popup.classList.add("srr-open")
    ;(retry ? el.popupRetry : el.popupClose).focus()
-}
-
-function closeAllDropdowns() {
-   if (!dropdownOpen) return
-   ddMenus.forEach((m) => m.classList.remove("srr-open"))
-   ddBtns.forEach((b) => b.setAttribute("aria-expanded", "false"))
-   dropdownOpen = false
 }
 
 function closePopup() {
@@ -141,102 +133,6 @@ function refreshSourceLabel() {
    el.source.setAttribute("aria-label", `Filter: ${aria.join(", ")}`)
 }
 
-function createLink(value: string, text: string, className?: string): HTMLAnchorElement {
-   const a = document.createElement("a")
-   a.href = "#"
-   a.dataset.value = value
-   a.textContent = text
-   a.setAttribute("role", "menuitem")
-   if (className) a.className = className
-   return a
-}
-
-function toggleDropdown(
-   id: string,
-   buildContent: (frag: DocumentFragment) => void,
-   onClick: (value: string) => Promise<void>,
-) {
-   const dd = document.getElementById(id)!
-   const btn = dd.previousElementSibling as HTMLElement
-   const opened = dd.classList.toggle("srr-open")
-   if (opened) dropdownOpen = true
-   btn?.setAttribute("aria-expanded", String(opened))
-   if (!opened) return
-   dd.replaceChildren()
-   const frag = document.createDocumentFragment()
-   buildContent(frag)
-   dd.onclick = (e) => {
-      const a = (e.target as HTMLElement).closest("a[data-value]") as HTMLAnchorElement | null
-      if (!a) return
-      e.preventDefault()
-      onClick(a.dataset.value!)
-   }
-   dd.appendChild(frag)
-}
-
-function divEl(className: string): HTMLDivElement {
-   const d = document.createElement("div")
-   d.className = className
-   return d
-}
-
-function showMenu() {
-   const { tagged, sortedTags, untagged } = data.groupSubsByTag()
-   const current = nav.getCurrentFilterKey()
-   const cls = (base: string, v: string) => (v === current ? `${base} srr-active`.trim() : base)
-
-   toggleDropdown(
-      "srr-source-menu",
-      (frag) => {
-         const since = divEl("srr-chip-row")
-         since.appendChild(createLink("!last", "last"))
-         since.appendChild(createLink("t:43200", "12h"))
-         since.appendChild(createLink("t:86400", "1d"))
-         since.appendChild(createLink("t:604800", "7d"))
-         since.appendChild(createLink("t:2592000", "1mo"))
-         frag.appendChild(since)
-
-         frag.appendChild(divEl("srr-tag-sep"))
-
-         frag.appendChild(createLink("", "[ALL]", cls("", "")))
-         for (const tag of sortedTags) {
-            const group = tagged.get(tag)!
-            const expanded = tag === current || tag === currentSource.tag
-            const div = divEl(expanded ? "srr-tag-group" : "srr-tag-group srr-tag-collapsed")
-            const header = createLink(tag, tag, cls("srr-tag-header", tag))
-            const toggle = document.createElement("span")
-            toggle.className = "srr-tag-toggle"
-            toggle.addEventListener("click", (e) => {
-               e.preventDefault()
-               e.stopPropagation()
-               div.classList.toggle("srr-tag-collapsed")
-            })
-            header.appendChild(toggle)
-            div.appendChild(header)
-            for (const sub of group) {
-               const sid = String(sub.id)
-               div.appendChild(createLink(sid, sub.title, cls("srr-tag-item", sid)))
-            }
-            frag.appendChild(div)
-         }
-         if (sortedTags.length > 0 && untagged.length > 0) frag.appendChild(divEl("srr-tag-sep"))
-         for (const sub of untagged) {
-            const sid = String(sub.id)
-            frag.appendChild(createLink(sid, sub.title, cls("", sid)))
-         }
-      },
-      (value) =>
-         guard(() => {
-            if (value === "!last") return nav.last()
-            if (value.startsWith("t:")) {
-               const ts = Math.floor(Date.now() / 1000) - Number(value.slice(2))
-               return nav.goTo(data.findChronForTimestamp(ts))
-            }
-            return nav.switchFilter(value)
-         }),
-   )
-}
-
 const KEY_ACTIONS: Record<string, () => void> = {
    ArrowLeft: () => !el.prev.disabled && guard(() => nav.left()),
    a: () => !el.prev.disabled && guard(() => nav.left()),
@@ -267,7 +163,7 @@ async function init() {
 
    el.prev.addEventListener("click", () => guard(() => nav.left()))
    el.next.addEventListener("click", () => guard(() => nav.right()))
-   el.source.addEventListener("click", () => showMenu())
+   el.source.addEventListener("click", () => showSourceMenu(currentSource.tag, guard))
    el.popupClose.addEventListener("click", closePopup)
    el.popupRetry.addEventListener("click", () => {
       closePopup()
@@ -313,72 +209,7 @@ async function init() {
       }
    })
 
-   let touchStartX = 0
-   let touchStartY = 0
-   let twoFingerStartY = 0
-   let twoFingerDy = 0
-   let twoFinger = false
-   document.addEventListener(
-      "touchstart",
-      (e) => {
-         if (e.touches.length === 2) {
-            twoFinger = true
-            twoFingerStartY = (e.touches[0].clientY + e.touches[1].clientY) / 2
-            twoFingerDy = 0
-         } else if (e.touches.length === 1) {
-            twoFinger = false
-            touchStartX = e.touches[0].clientX
-            touchStartY = e.touches[0].clientY
-         }
-      },
-      { passive: true },
-   )
-   document.addEventListener(
-      "touchmove",
-      (e) => {
-         if (twoFinger && e.touches.length === 2) {
-            e.preventDefault()
-            twoFingerDy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - twoFingerStartY
-         }
-      },
-      { passive: false },
-   )
-   document.addEventListener(
-      "touchend",
-      (e) => {
-         if (twoFinger) {
-            if (e.touches.length === 0) {
-               twoFinger = false
-               if (Math.abs(twoFingerDy) >= 50 && nav.getFilterEntries().length > 1)
-                  guard(() => nav.cycleFilter(twoFingerDy < 0 ? -1 : 1))
-            }
-            return
-         }
-         const dx = e.changedTouches[0].clientX - touchStartX
-         const dy = e.changedTouches[0].clientY - touchStartY
-         if (Math.abs(dx) < 50 || Math.abs(dy) > Math.abs(dx)) return
-         if (dx > 0 && !el.prev.disabled) guard(() => nav.left())
-         if (dx < 0 && !el.next.disabled) guard(() => nav.right())
-      },
-      { passive: true },
-   )
-
-   let lastScrollY = 0
-   let toolbarHidden = false
-   window.addEventListener(
-      "scroll",
-      () => {
-         const y = window.scrollY
-         const hide = y > 50 && y > lastScrollY
-         if (hide !== toolbarHidden) {
-            el.toolbar.classList.toggle("srr-toolbar-slide", hide)
-            toolbarHidden = hide
-         }
-         if (hide) closeAllDropdowns()
-         lastScrollY = y
-      },
-      { passive: true },
-   )
+   setupGestures({ prev: el.prev, next: el.next, toolbar: el.toolbar, guard })
 
    setInterval(() => {
       if (currentPublished) {

@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
 )
@@ -37,87 +35,82 @@ type articlesOutput struct {
 }
 
 func (o *ArtCmd) Run() error {
-	ctx := context.Background()
-	db, err := NewDB(ctx, false)
-	if err != nil {
-		return err
-	}
-	defer db.Close(ctx)
-
-	total := db.core.TotalArticles
-	if total == 0 {
-		return printJSON(&articlesOutput{Articles: []articleResult{}, Total: 0})
-	}
-
-	// Build filter set (nil = accept all)
-	var filter map[int]bool
-	if len(o.ID) > 0 || len(o.Tag) > 0 {
-		filter = map[int]bool{}
-		for _, id := range o.ID {
-			filter[id] = true
+	return withDB(false, func(ctx context.Context, db *DB) error {
+		total := db.core.TotalArticles
+		if total == 0 {
+			return printJSON(&articlesOutput{Articles: []articleResult{}, Total: 0})
 		}
-		for _, tag := range o.Tag {
-			for _, s := range db.Subscriptions() {
-				if s.Tag == tag {
-					filter[s.id] = true
+
+		// Build filter set (nil = accept all)
+		var filter map[int]bool
+		if len(o.ID) > 0 || len(o.Tag) > 0 {
+			filter = map[int]bool{}
+			for _, id := range o.ID {
+				filter[id] = true
+			}
+			for _, tag := range o.Tag {
+				for _, s := range db.Subscriptions() {
+					if s.Tag == tag {
+						filter[s.id] = true
+					}
 				}
 			}
 		}
-	}
 
-	entries, err := readAllIdx(ctx, db)
-	if err != nil {
-		return err
-	}
-
-	filteredTotal := 0
-	for _, e := range entries {
-		if filter == nil || filter[e.SubID] {
-			filteredTotal++
-		}
-	}
-
-	startIdx := len(entries) - 1
-	if o.Before != nil {
-		startIdx = sort.Search(len(entries), func(i int) bool {
-			return entries[i].ChronIdx >= *o.Before
-		}) - 1
-	}
-	if startIdx < 0 {
-		return printJSON(&articlesOutput{Articles: []articleResult{}, Total: filteredTotal})
-	}
-
-	var results []articleResult
-	lastID := -1
-
-	for i := startIdx; i >= 0 && len(results) < o.Limit; i-- {
-		e := &entries[i]
-		if filter != nil && !filter[e.SubID] {
-			continue
-		}
-		results = append(results, articleResult{
-			Idx:        e.ChronIdx,
-			packID:     e.PackID,
-			packOffset: e.PackOffset,
-		})
-		lastID = e.ChronIdx
-	}
-
-	if len(results) > 0 {
-		if err := loadContent(ctx, db, results); err != nil {
+		entries, err := readAllIdx(ctx, db)
+		if err != nil {
 			return err
 		}
-	}
 
-	out := &articlesOutput{
-		Articles: results,
-		Total:    filteredTotal,
-	}
-	if lastID > 0 && len(results) == o.Limit {
-		out.NextCursor = &lastID
-	}
+		filteredTotal := 0
+		for _, e := range entries {
+			if filter == nil || filter[e.SubID] {
+				filteredTotal++
+			}
+		}
 
-	return printJSON(out)
+		startIdx := len(entries) - 1
+		if o.Before != nil {
+			startIdx = sort.Search(len(entries), func(i int) bool {
+				return entries[i].ChronIdx >= *o.Before
+			}) - 1
+		}
+		if startIdx < 0 {
+			return printJSON(&articlesOutput{Articles: []articleResult{}, Total: filteredTotal})
+		}
+
+		var results []articleResult
+		lastID := -1
+
+		for i := startIdx; i >= 0 && len(results) < o.Limit; i-- {
+			e := &entries[i]
+			if filter != nil && !filter[e.SubID] {
+				continue
+			}
+			results = append(results, articleResult{
+				Idx:        e.ChronIdx,
+				packID:     e.PackID,
+				packOffset: e.PackOffset,
+			})
+			lastID = e.ChronIdx
+		}
+
+		if len(results) > 0 {
+			if err := loadContent(ctx, db, results); err != nil {
+				return err
+			}
+		}
+
+		out := &articlesOutput{
+			Articles: results,
+			Total:    filteredTotal,
+		}
+		if lastID > 0 && len(results) == o.Limit {
+			out.NextCursor = &lastID
+		}
+
+		return printJSON(out)
+	})
 }
 
 func readAllIdx(ctx context.Context, db *DB) ([]idxEntry, error) {
@@ -178,23 +171,13 @@ func loadContent(ctx context.Context, db *DB, results []articleResult) error {
 		ref := &results[i]
 		articles, ok := dataCache[ref.packID]
 		if !ok {
-			var key string
-			if ref.packID < db.core.NextPackID {
-				key = fmt.Sprintf("data/%d.gz", ref.packID)
-			} else {
-				key = fmt.Sprintf("data/%v.gz", db.core.DataToggle)
-			}
-			data, err := db.readGz(ctx, key)
+			data, err := db.readGz(ctx, dataKeyFor(&db.core, ref.packID))
 			if err != nil {
 				return err
 			}
-			dec := json.NewDecoder(bytes.NewReader(data))
-			for dec.More() {
-				var ad ArticleData
-				if err := dec.Decode(&ad); err != nil {
-					return err
-				}
-				articles = append(articles, ad)
+			articles, err = parseDataPack(data)
+			if err != nil {
+				return err
 			}
 			dataCache[ref.packID] = articles
 		}

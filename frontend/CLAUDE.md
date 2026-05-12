@@ -12,7 +12,7 @@ SRR Frontend — single-page RSS reader. Zero runtime deps. Parcel + TypeScript 
 
 Entry: `src/index.html` → `src/styles.css` + `src/js/app.ts`. Bundler: Parcel 2. `SRR_CDN_URL` replaced at build time via `parcel/resolve-cdn-url.js`. Resolution: `$SRR_CDN_URL` → `cdn-url:` from `$SRR_CONFIG_INLINE` (raw YAML) → `cdn-url:` from `$SRR_CONFIG` (file path, default `$XDG_CONFIG_HOME/srr/srr.yaml`) → `http://localhost:3000`.
 
-Dependency chain: `app → nav → data → idx`, `app → fmt`. All in `src/js/`, strict mode.
+Dependency chain: `app → nav → data → idx`, `app → fmt`, `app → dropdown → {data, nav}`, `app → gestures → {nav, dropdown}`. All in `src/js/`, strict mode.
 
 | Module | Role |
 |---|---|
@@ -20,7 +20,9 @@ Dependency chain: `app → nav → data → idx`, `app → fmt`. All in `src/js/
 | `data.ts` | CDN data layer: fetches `db.gz`, loads all idx packs at init via `makeIdxPack()`. Fetches JSONL data packs on demand. Exports `loadArticle(chronIdx)`, `findChronForTimestamp(ts)`, `groupSubsByTag()`. Re-exports `IDX_PACK_SIZE`. |
 | `nav.ts` | Navigation state machine: hash routing (`#pos[!tokens]`), traversal, filtering. Returns `IShowFeed`. Uses `pushState`/`replaceState`. Tokens are sub IDs or tag names. Exports `cycleFilter(dir)`, `getFilterEntries()`, `getCurrentFilterKey()`, `goTo(idx)`. |
 | `fmt.ts` | Pure utilities (no imports): `sanitizeHtml`, `timeAgo`, `formatDate`. `sanitizeHtml` strips dangerous elements/attributes for defense-in-depth. |
-| `app.ts` | UI: DOM rendering, events, dropdowns, error popup, loading, dark mode. All async handlers via `guard()` mutex. Position persisted to localStorage. |
+| `dropdown.ts` | Source-menu dropdown: own DOM lookups + open/close state. Exports `closeAllDropdowns()` and `showSourceMenu(currentTag, guard)`. The currently-shown article's tag and the `guard` mutex are passed in from `app.ts` to keep state ownership clear. |
+| `gestures.ts` | Touch and scroll handlers: one-finger swipe = prev/next, two-finger vertical swipe = cycle filter, scroll-down hides toolbar. Exports `setupGestures({ prev, next, toolbar, guard })`. |
+| `app.ts` | UI orchestrator: DOM lookups, render, source-label refresh, error popup, keyboard handler, `guard()` mutex, init. Async handlers always go through `guard()`. Position persisted to localStorage. |
 | `types.d.ts` | Ambient types: `IDB`, `ISub`, `IArticle`, `IShowFeed`. |
 
 CSS: native nesting, `srr-` prefix on all classes, dark mode via `prefers-color-scheme`.
