@@ -25,6 +25,7 @@ All commands run from the repo root via `make`:
 | `make build-fe` | Production frontend build (auto `npm ci` if `node_modules` is stale) |
 | `make build-be` | Go build |
 | `make vet-be` | Go vet |
+| `make release` | Cross-compile backend for all platforms (requires `VERSION=`) |
 | `make clean` | Remove build artifacts |
 
 ## Data Contract
@@ -50,7 +51,7 @@ Shared format between backend (writer) and frontend (reader).
 
 ### Subscriptions (`ISub`)
 
-`{ id, title, src:ISource[], pipe?:string[], total_art?, add_idx?, tag? }`
+`{ id, title, src:ISource[], total_art, add_idx, pipe?:string[], tag? }`
 
 Each `ISource` is `{ url, ferr?, etag?, last_modified?, wm?, bg? }`. `wm` (Watermark) is the max published unix-second ever seen; `bg` (BoundaryGUIDs) is the FNV-32a hash array used for dedup. Multiple sources merge under one `sub_id` so a subscription is not bound to a single feed URL — useful when the 256-id ceiling matters or when several feeds form one logical channel. Per-source state (incremental fetch headers, last error, dedup watermark) lives on the source, not the subscription.
 

@@ -33,6 +33,7 @@ Low-level storage interface: `Get`/`Put`/`AtomicPut`/`Rm`/`Close`. Registry sele
 | `Get(ignoreMissing)` | returns `io.ReadCloser` | Controls error-on-missing; streaming read |
 | `Put(ignoreExisting)` | accepts `io.Reader` | Controls overwrite vs exclusive create; streaming write |
 | `AtomicPut` | accepts `io.Reader` | temp-then-rename (local/SFTP); overwrite (S3); streaming write |
+| `Rm` | — | Silent on missing (local/SFTP warn + return nil; S3 unconditional delete) |
 
 - **`local.go`** — Auto-creates subdirs via `os.MkdirAll`.
 - **`s3.go`** — `IfNoneMatch` precondition headers + CRC32 checksums. `S3Config`: region, endpoint, profile, static credentials.
