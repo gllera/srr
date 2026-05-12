@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest"
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 
 const data = vi.hoisted(() => ({
    IDX_PACK_SIZE: 50000 as const,
@@ -832,11 +832,10 @@ describe("first", () => {
    it("starts findRight from min add_idx (skips packs before any filter sub existed)", async () => {
       setupIndex([{ subId: 1 }, { subId: 1 }, { subId: 2 }, { subId: 2 }])
       data.db.subscriptions[2].add_idx = 2
-      data.findRight.mockClear()
       await nav.fromHash("3!2")
+      data.findRight.mockClear()
       await nav.first()
-      const lastCall = data.findRight.mock.calls.at(-1)!
-      expect(lastCall[0]).toBe(2)
+      expect(data.findRight).toHaveBeenCalledWith(2, expect.any(Map))
    })
 })
 
@@ -916,5 +915,92 @@ describe("goTo", () => {
       expect(data.loadArticle).toHaveBeenLastCalledWith(1)
       expect(result.article.s).toBe(2)
       expect(history.pushState).toHaveBeenLastCalledWith(null, "", "#1")
+   })
+})
+
+describe("prefetch abort", () => {
+   const RealImage = window.Image
+   const RealRIC = window.requestIdleCallback
+   let images: HTMLImageElement[]
+   let pendingIdle: Array<() => Promise<void>>
+
+   beforeEach(() => {
+      images = []
+      pendingIdle = []
+      window.Image = function () {
+         const img = new RealImage()
+         images.push(img)
+         return img
+      } as unknown as typeof Image
+      window.requestIdleCallback = ((cb: () => unknown) => {
+         pendingIdle.push(cb as () => Promise<void>)
+         return 0
+      }) as unknown as typeof window.requestIdleCallback
+   })
+
+   afterEach(() => {
+      window.Image = RealImage
+      window.requestIdleCallback = RealRIC
+   })
+
+   async function flushIdle() {
+      while (pendingIdle.length) {
+         const cb = pendingIdle.shift()!
+         await cb()
+      }
+   }
+
+   it("creates Image objects with proxied src for the neighbor article", async () => {
+      setupIndex([{ subId: 1 }, { subId: 1 }, { subId: 1 }])
+      data.loadArticle.mockImplementation(async (idx: number) =>
+         makeArticle({ c: `<img src="http://example.com/${idx}.jpg">` }),
+      )
+      await nav.fromHash("0")
+      await nav.right()
+      await flushIdle()
+      expect(images).toHaveLength(1)
+      expect(images[0].src).toContain(encodeURIComponent("http://example.com/2.jpg"))
+   })
+
+   it("sets src='' on previously prefetched images when the next navigation lands", async () => {
+      setupIndex([{ subId: 1 }, { subId: 1 }, { subId: 1 }])
+      data.loadArticle.mockImplementation(async (idx: number) =>
+         makeArticle({ c: `<img src="http://example.com/${idx}.jpg">` }),
+      )
+      await nav.fromHash("0")
+      await nav.right()
+      await flushIdle()
+      const prefetched = images[0]
+      expect(prefetched.getAttribute("src")).not.toBe("")
+
+      await nav.left()
+      expect(prefetched.getAttribute("src")).toBe("")
+   })
+
+   it("bails the stale idle callback so no Image is created after an abort", async () => {
+      setupIndex([{ subId: 1 }, { subId: 1 }, { subId: 1 }])
+      data.loadArticle.mockImplementation(async (idx: number) =>
+         makeArticle({ c: `<img src="http://example.com/${idx}.jpg">` }),
+      )
+      await nav.fromHash("0")
+      await nav.right()
+      await nav.left()
+      await flushIdle()
+      expect(images).toHaveLength(0)
+   })
+
+   it("aborts the prior prefetch when goTo navigates away (no left/right re-schedule)", async () => {
+      setupIndex([{ subId: 1 }, { subId: 1 }, { subId: 1 }, { subId: 1 }])
+      data.loadArticle.mockImplementation(async (idx: number) =>
+         makeArticle({ c: `<img src="http://example.com/${idx}.jpg">` }),
+      )
+      await nav.fromHash("0")
+      await nav.right()
+      await flushIdle()
+      const prefetched = images[0]
+      expect(prefetched.getAttribute("src")).not.toBe("")
+
+      await nav.goTo(3)
+      expect(prefetched.getAttribute("src")).toBe("")
    })
 })
