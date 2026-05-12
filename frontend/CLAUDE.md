@@ -66,7 +66,7 @@ State: `pos` (chronIdx), `filter` (object with `active`, `subs`, `subTotal`, `to
 - Navigation uses `findLeft`/`findRight` — synchronous linear scans via `data.getSubId()`
 - Hash: `#pos[!tokens]` — `!` segment, `+`-separated tokens, each `encodeURIComponent`-wrapped to survive special chars in tag names.
 
-**Time-range jumps** (dropdown.ts source menu): "12h"/"1d"/"7d"/"1mo" chips compute `Date.now() - seconds`, look up `data.findChronForTimestamp(ts)`, and call `nav.goTo(chron)` so the user lands at the article from that point and can navigate right.
+**Time-range jumps** (dropdown.ts source menu): "8h"/"16h"/"1d"/"7d" chips compute `Date.now() - seconds`, look up `data.findChronForTimestamp(ts)`, and call `nav.goTo(chron)` so the user lands at the article from that point and can navigate right.
 
 ## Test Patterns
 
