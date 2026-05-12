@@ -81,7 +81,7 @@ Short keys: `s`=sub_id, `a`=fetched_at, `p`=published (unix seconds, omitted if 
 
 Each feed directory: `db.gz` + `idx/` + `data/`.
 
-- **Finalized packs**: `0.gz`..`N-1.gz` (0-indexed), immutable, HTTP `force-cache`
+- **Finalized packs**: immutable, HTTP `force-cache`. `idx/` packs are 0-indexed (`idx/0.gz`..`idx/N-1.gz`); `data/` packs start at id `1` (`data/1.gz`..) — the writer increments `next_pid` before writing the first entry, so `data/0.gz` is never produced.
 - **Latest pack**: `true.gz` or `false.gz` (toggled by `data_tog`)
 - **Finalized idx count**: `total_art > 0 ? Math.floor((total_art - 1) / 50000) : 0`
 - **Finalized data packs**: `id < next_pid`

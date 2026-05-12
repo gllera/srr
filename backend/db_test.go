@@ -661,7 +661,7 @@ func TestPutArticlesIdxPackSplitAtBoundary(t *testing.T) {
 	}
 
 	if _, err := os.Stat(filepath.Join(dir, "idx/0.gz")); !os.IsNotExist(err) {
-		t.Error("idx/0.gz should not exist yet at exactly 1000 articles")
+		t.Errorf("idx/0.gz should not exist yet at exactly %d articles", idxPackSize)
 	}
 
 	if err := db.PutArticles(ctx, []*Item{
