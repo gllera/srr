@@ -70,7 +70,6 @@ function clearContentTransition() {
 }
 
 function render(o: IShowFeed) {
-   data.abortPending()
    el.title.textContent = o.article.t
    el.content.style.transition = "none"
    el.content.style.opacity = "0"
@@ -297,9 +296,6 @@ const KEY_ACTIONS: Record<string, () => void> = {
 }
 
 async function init() {
-   if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register(new URL("../sw.ts", import.meta.url), { type: "module" })
-   }
    try {
       await data.init()
    } catch (e) {
