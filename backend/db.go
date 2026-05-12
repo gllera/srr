@@ -12,11 +12,6 @@ import (
 	"srrb/store"
 )
 
-// gzipLevel trades ~10% compression ratio for ~3-4x faster encode on the
-// HTML-heavy article content that dominates pack contents and on the small
-// JSON db.gz file written every fetch.
-const gzipLevel = gzip.BestSpeed
-
 func jsonEncode(v any) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -130,10 +125,7 @@ func (o *DB) Close(ctx context.Context) error {
 
 func (o *DB) Commit(ctx context.Context) error {
 	var buf bytes.Buffer
-	gz, err := gzip.NewWriterLevel(&buf, gzipLevel)
-	if err != nil {
-		return err
-	}
+	gz := gzip.NewWriter(&buf)
 	enc := json.NewEncoder(gz)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(&o.core); err != nil {
@@ -195,8 +187,7 @@ type pack struct {
 
 func newPack() *pack {
 	p := &pack{}
-	// gzipLevel error is impossible at compile-time-known constant levels.
-	p.gz, _ = gzip.NewWriterLevel(&p.buf, gzipLevel)
+	p.gz = gzip.NewWriter(&p.buf)
 	p.enc = json.NewEncoder(p.gz)
 	p.enc.SetEscapeHTML(false)
 	return p
