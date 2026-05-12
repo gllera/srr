@@ -13,6 +13,15 @@ export interface IdxPack {
    findRight(chronFrom: number, subs: Map<number, number>): number
 }
 
+// Sub IDs are uint8 (0..255), so a 256-entry typed array beats Map.get in the
+// hot scan loops: no hashing, predictable cache locality, and the JIT can
+// keep the loaded value in a register. -1 sentinel = "not in filter".
+function subsToLookup(subs: Map<number, number>): Int32Array {
+   const arr = new Int32Array(256).fill(-1)
+   for (const [subId, addIdx] of subs) arr[subId] = addIdx
+   return arr
+}
+
 export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: number): IdxPack {
    // Refuse a short body so the caller can evict + retry. Silently parsing
    // fewer bytes than packSize claims leaves the subIds tail at default 0,
@@ -22,6 +31,7 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
       throw new Error(`idx pack ${packIndex}: short body, got ${buf.byteLength}B, want ${expected}B`)
    }
    let rawBuf: ArrayBuffer | null = buf
+   const baseChron = packIndex * IDX_PACK_SIZE
    function hasCandidate(subs: Map<number, number>, packEnd: number): boolean {
       for (const [subId, addIdx] of subs) {
          if (pack.ownSubCounts[subId] > 0 && addIdx < packEnd) return true
@@ -42,16 +52,21 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
          const packOff = h[2]
          // Copy out so the raw buffer can be GC'd after parse() returns
          pack.subCounts = new Uint32Array(new Uint32Array(rawBuf, 3 * 4, 256))
-         pack.ownSubCounts = new Uint32Array(256)
-         const baseChron = packIndex * IDX_PACK_SIZE
+         const ownSubCounts = new Uint32Array(256)
+         pack.ownSubCounts = ownSubCounts
 
+         let lastPackId: number
          if (packOff > 0) {
             pack.bounds.push({ packId, startChron: baseChron - packOff })
+            lastPackId = packId
+         } else {
+            lastPackId = -1
          }
 
-         pack.subIds = new Uint8Array(packSize)
-         pack.fetchedAts = new Uint16Array(packSize)
-         let localOff = 0
+         const subIds = new Uint8Array(packSize)
+         const fetchedAts = new Uint16Array(packSize)
+         pack.subIds = subIds
+         pack.fetchedAts = fetchedAts
          const bytes = new Uint8Array(rawBuf)
          // Cap at packSize so an oversized body (e.g. stale SW cache with
          // entries from a newer total_art than db.gz claims) can't push ghost
@@ -62,56 +77,56 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
             if (packed >> 7) packId++
             fetchedAt += packed & 0x7f
 
-            const subId = bytes[off]
-            pack.subIds[localOff] = subId
-            pack.fetchedAts[localOff] = fetchedAt
-            pack.ownSubCounts[subId]++
-            if (pack.bounds.length === 0 || pack.bounds[pack.bounds.length - 1].packId !== packId) {
-               pack.bounds.push({ packId, startChron: baseChron + localOff })
+            subIds[i] = subId
+            fetchedAts[i] = fetchedAt
+            ownSubCounts[subId]++
+            if (packId !== lastPackId) {
+               pack.bounds.push({ packId, startChron: baseChron + i })
+               lastPackId = packId
             }
-            localOff++
          }
          rawBuf = null
          return pack
       },
       countLeft(chronIdx: number, subs: Map<number, number>): number {
          pack.parse()
-         const baseChron = packIndex * IDX_PACK_SIZE
          let count = 0
          for (const [subId, addIdx] of subs) {
             if (addIdx < baseChron) count += pack.subCounts[subId]
          }
          const limit = Math.min(chronIdx - baseChron, packSize)
+         if (limit <= 0) return count
+         const lookup = subsToLookup(subs)
+         const subIds = pack.subIds
          for (let i = 0; i < limit; i++) {
-            const subId = pack.subIds[i]
-            const addIdx = subs.get(subId)
-            if (addIdx !== undefined && baseChron + i >= addIdx) count++
+            const addIdx = lookup[subIds[i]]
+            if (addIdx !== -1 && baseChron + i >= addIdx) count++
          }
          return count
       },
       findLeft(chronFrom: number, subs: Map<number, number>): number {
          pack.parse()
-         const baseChron = packIndex * IDX_PACK_SIZE
          const packEnd = baseChron + packSize
          if (!hasCandidate(subs, packEnd)) return -1
-         const hi = Math.min(chronFrom, packEnd - 1)
-         for (let chron = hi; chron >= baseChron; chron--) {
-            const subId = pack.subIds[chron - baseChron]
-            const addIdx = subs.get(subId)
-            if (addIdx !== undefined && chron >= addIdx) return chron
+         const lookup = subsToLookup(subs)
+         const subIds = pack.subIds
+         const hi = Math.min(chronFrom, packEnd - 1) - baseChron
+         for (let i = hi; i >= 0; i--) {
+            const addIdx = lookup[subIds[i]]
+            if (addIdx !== -1 && baseChron + i >= addIdx) return baseChron + i
          }
          return -1
       },
       findRight(chronFrom: number, subs: Map<number, number>): number {
          pack.parse()
-         const baseChron = packIndex * IDX_PACK_SIZE
          const packEnd = baseChron + packSize
          if (!hasCandidate(subs, packEnd)) return -1
-         const lo = Math.max(chronFrom, baseChron)
-         for (let chron = lo; chron < packEnd; chron++) {
-            const subId = pack.subIds[chron - baseChron]
-            const addIdx = subs.get(subId)
-            if (addIdx !== undefined && chron >= addIdx) return chron
+         const lookup = subsToLookup(subs)
+         const subIds = pack.subIds
+         const lo = Math.max(chronFrom, baseChron) - baseChron
+         for (let i = lo; i < packSize; i++) {
+            const addIdx = lookup[subIds[i]]
+            if (addIdx !== -1 && baseChron + i >= addIdx) return baseChron + i
          }
          return -1
       },
