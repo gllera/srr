@@ -34,12 +34,12 @@ Shared format between backend (writer) and frontend (reader).
 ### `db.gz`
 
 ```
-{ data_tog, fetched_at, total_art, next_pid, pack_off, subscriptions{}, first_fetched, fetched_at_cur?, version? }
+{ data_tog, fetched_at, total_art, next_pid, pack_off, subscriptions{}, first_fetched, fetched_at_cur? }
 ```
 
 | Field | Type | Description |
 |---|---|---|
-| `data_tog` | bool | Toggles latest pack filename (`true.gz`/`false.gz`) to bust cache; used for both `idx/` and `data/` latest packs |
+| `data_tog` | bool | Toggles latest pack filename (`true.gz`/`false.gz`); used for both `idx/` and `data/` latest packs |
 | `fetched_at` | int | Unix timestamp of last fetch |
 | `total_art` | int | Total article count across all packs |
 | `next_pid` | int | Next data pack ID; packs with `id < next_pid` are finalized/immutable |
@@ -47,7 +47,6 @@ Shared format between backend (writer) and frontend (reader).
 | `subscriptions` | object | JSON object keyed by subscription ID (string); may be `null` in JSON (default `{}`) |
 | `first_fetched` | int | Unix timestamp of first fetch that produced articles |
 | `fetched_at_cur` | int | Running idx-time cursor in 8-hour blocks since `first_fetched`; persists `prevFetchedTS` across `PutArticles` calls so per-entry `delta_fetched_at` reflects real elapsed time. `omitempty` |
-| `version` | int | Cache invalidation epoch. Bumped by `srr clear-cache --all`; frontend SW rotates its `srr-v<N>` data cache and backend `store.Cache` wipes its local subdir when this disagrees with the cached copy. `omitempty` |
 
 ### Subscriptions (`ISub`)
 
@@ -81,7 +80,7 @@ Short keys: `s`=sub_id, `a`=fetched_at, `p`=published (unix seconds, omitted if 
 
 Each feed directory: `db.gz` + `idx/` + `data/`.
 
-- **Finalized packs**: immutable, HTTP `force-cache`. `idx/` packs are 0-indexed (`idx/0.gz`..`idx/N-1.gz`); `data/` packs start at id `1` (`data/1.gz`..) — the writer increments `next_pid` before writing the first entry, so `data/0.gz` is never produced.
+- **Finalized packs**: immutable, fetched with `cache: "force-cache"`. `idx/` packs are 0-indexed (`idx/0.gz`..`idx/N-1.gz`); `data/` packs start at id `1` (`data/1.gz`..) — the writer increments `next_pid` before writing the first entry, so `data/0.gz` is never produced.
 - **Latest pack**: `true.gz` or `false.gz` (toggled by `data_tog`)
 - **Finalized idx count**: `total_art > 0 ? Math.floor((total_art - 1) / 50000) : 0`
 - **Finalized data packs**: `id < next_pid`

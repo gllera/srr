@@ -1,14 +1,6 @@
-import { makeLRU } from "./cache"
 import { IDX_PACK_SIZE, makeIdxPack, type IdxPack } from "./idx"
-import { evictFromDataCache } from "./sw-cache"
 
 export { IDX_PACK_SIZE }
-
-let fetchController = new AbortController()
-export function abortPending() {
-   fetchController.abort()
-   fetchController = new AbortController()
-}
 
 const DB_URL = new URL(SRR_CDN_URL, window.location.href)
 // Reuses the browser's preloaded response from <link rel="preload"> in the built HTML
@@ -17,8 +9,6 @@ const dbFetch = fetch(new URL("db.gz", DB_URL))
 export let db: IDB
 
 let idxPacks: IdxPack[] = []
-
-const dataCache = makeLRU<IArticle[]>(5)
 
 export async function init() {
    const res = await dbFetch
@@ -35,22 +25,13 @@ export async function init() {
       Array.from({ length: nf + 1 }, (_, p) => {
          const isFinalized = p < nf
          const path = `idx/${isFinalized ? p.toString() : String(db.data_tog)}.gz`
-         const opts: RequestInit = {}
-         if (isFinalized) opts.cache = "force-cache"
          const size = isFinalized ? IDX_PACK_SIZE : db.total_art - p * IDX_PACK_SIZE
          const url = new URL(path, DB_URL)
+         const opts: RequestInit = {}
+         if (isFinalized) opts.cache = "force-cache"
          return fetch(url, opts)
             .then((res) => new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer())
-            .then(async (buf) => {
-               try {
-                  return makeIdxPack(buf, p, size)
-               } catch (e) {
-                  // Stale SW/CDN entry that disagrees with db.gz on entry count.
-                  // Evict so a Retry refetches from origin and re-aligns the two.
-                  await evictFromDataCache(url)
-                  throw e
-               }
-            })
+            .then((buf) => makeIdxPack(buf, p, size))
       }),
    )
 }
@@ -124,19 +105,17 @@ function getPackRef(chronIdx: number): { packId: number; offset: number } {
 }
 
 async function loadDataPack(packId: number): Promise<IArticle[]> {
-   let entries = dataCache.get(packId)
-   if (!entries) {
-      const isFinalized = packId < db.next_pid
-      const name = isFinalized ? packId.toString() : String(db.data_tog)
-      const opts: RequestInit = {}
-      if (isFinalized) opts.cache = "force-cache"
-      opts.signal = fetchController.signal
-      const res = await fetch(new URL(`data/${name}.gz`, DB_URL), opts)
-      const reader = res
-         .body!.pipeThrough(new DecompressionStream("gzip"))
-         .pipeThrough(new TextDecoderStream())
-         .getReader()
-      entries = []
+   const isFinalized = packId < db.next_pid
+   const name = isFinalized ? packId.toString() : String(db.data_tog)
+   const opts: RequestInit = {}
+   if (isFinalized) opts.cache = "force-cache"
+   const res = await fetch(new URL(`data/${name}.gz`, DB_URL), opts)
+   const reader = res
+      .body!.pipeThrough(new DecompressionStream("gzip"))
+      .pipeThrough(new TextDecoderStream())
+      .getReader()
+   try {
+      const entries: IArticle[] = []
       let remainder = ""
       while (true) {
          const { done, value } = await reader.read()
@@ -153,37 +132,21 @@ async function loadDataPack(packId: number): Promise<IArticle[]> {
          if (start < chunk.length) remainder = chunk.substring(start)
       }
       if (remainder.length > 0) entries.push(JSON.parse(remainder) as IArticle)
-      dataCache.put(packId, entries)
+      return entries
+   } finally {
+      reader.cancel().catch(() => {})
    }
-   return entries
-}
-
-export function getArticleSync(chronIdx: number): IArticle | undefined {
-   const ref = getPackRef(chronIdx)
-   const cached = dataCache.peek(ref.packId)
-   return cached?.[ref.offset]
 }
 
 export async function loadArticle(chronIdx: number): Promise<IArticle> {
    const ref = getPackRef(chronIdx)
    const entries = await loadDataPack(ref.packId)
    if (ref.offset >= entries.length) {
-      // Stale or truncated pack (most often a SW cache entry from a prior
-      // pack state). Evict both layers so a Retry hits the network.
-      await evictPack(ref.packId)
       throw new Error(`pack ${ref.packId} out of sync (offset ${ref.offset} of ${entries.length}); retry to refresh`)
    }
    return entries[ref.offset]
 }
 
-async function evictPack(packId: number): Promise<void> {
-   dataCache.drop(packId)
-   const isFinalized = packId < db.next_pid
-   const name = isFinalized ? packId.toString() : String(db.data_tog)
-   await evictFromDataCache(new URL(`data/${name}.gz`, DB_URL))
-}
-
-// db is immutable after init(); cache is safe for the app's lifetime
 let activeSubsCache: ISub[] | null = null
 function activeSubs(): ISub[] {
    if (activeSubsCache) return activeSubsCache

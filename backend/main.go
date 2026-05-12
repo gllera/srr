@@ -22,7 +22,6 @@ type Globals struct {
 	PackSize    int    `short:"s" default:"200"      env:"SRR_PACK_SIZE"     help:"Target pack size in KB."`
 	MaxFeedSize int    `short:"m" default:"5000"     env:"SRR_MAX_FEED_SIZE" help:"Max feed download size in KB."`
 	Store       string `short:"o" default:"packs"    env:"SRR_STORE"         help:"Storage destination path."`
-	Cache       string `short:"c"                    env:"SRR_CACHE"         help:"Local cache directory for remote stores."`
 	Force       bool   `                             env:"SRR_FORCE"         help:"Override DB write lock if needed."`
 	Debug       bool   `short:"d"                    env:"SRR_DEBUG"         help:"Enable debug mode."`
 	CdnURL      string `hidden:""                    env:"SRR_CDN_URL"       help:"CDN URL for frontend builds."`
@@ -44,13 +43,12 @@ type ArtGroup struct {
 
 type CLI struct {
 	Globals
-	Sub        SubGroup      `cmd:"" aliases:"s" help:"Subscription management."`
-	Art        ArtGroup      `cmd:"" aliases:"a" help:"Article management."`
-	Preview    PreviewCmd    `cmd:"" aliases:"p" help:"Preview processed feed articles in a browser."`
-	Config     ConfigCmd     `cmd:"" aliases:"c" help:"Print resolved configuration."`
-	Inspect    InspectCmd    `cmd:"" aliases:"i" help:"Inspect pack consistency (validate idx<->data, debug chronIdx lookup)."`
-	ClearCache ClearCacheCmd `cmd:"" help:"Remove the local cache directory."`
-	Version    VersionCmd    `cmd:"" help:"Print version information."`
+	Sub     SubGroup   `cmd:"" aliases:"s" help:"Subscription management."`
+	Art     ArtGroup   `cmd:"" aliases:"a" help:"Article management."`
+	Preview PreviewCmd `cmd:"" aliases:"p" help:"Preview processed feed articles in a browser."`
+	Config  ConfigCmd  `cmd:"" aliases:"c" help:"Print resolved configuration."`
+	Inspect InspectCmd `cmd:"" aliases:"i" help:"Inspect pack consistency (validate idx<->data, debug chronIdx lookup)."`
+	Version VersionCmd `cmd:"" help:"Print version information."`
 }
 
 type VersionCmd struct{}
