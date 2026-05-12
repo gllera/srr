@@ -20,10 +20,10 @@ vi.mock("./data", () => ({
       let hi = state.fetchedAts.length
       while (lo < hi) {
          const mid = (lo + hi) >>> 1
-         if (state.fetchedAts[mid] <= ts) lo = mid + 1
+         if (state.fetchedAts[mid] < ts) lo = mid + 1
          else hi = mid
       }
-      return lo > 0 ? lo - 1 : 0
+      return lo < state.fetchedAts.length ? lo : Math.max(0, state.fetchedAts.length - 1)
    },
    groupSubsByTag(): { tagged: Map<string, ISub[]>; sortedTags: string[]; untagged: ISub[] } {
       const subs = Object.values(state.db.subscriptions ?? {})
@@ -65,9 +65,9 @@ describe("findChronForTimestamp", () => {
       expect(data.findChronForTimestamp(100)).toBe(2)
    })
 
-   it("finds rightmost entry <= ts", () => {
+   it("finds leftmost entry >= ts", () => {
       state.fetchedAts = new Uint32Array([10, 20, 30, 40, 50])
-      expect(data.findChronForTimestamp(25)).toBe(1)
+      expect(data.findChronForTimestamp(25)).toBe(2)
    })
 
    it("finds exact match", () => {
@@ -75,9 +75,9 @@ describe("findChronForTimestamp", () => {
       expect(data.findChronForTimestamp(30)).toBe(2)
    })
 
-   it("returns rightmost of duplicate values", () => {
+   it("returns leftmost of duplicate values", () => {
       state.fetchedAts = new Uint32Array([10, 20, 20, 20, 50])
-      expect(data.findChronForTimestamp(20)).toBe(3)
+      expect(data.findChronForTimestamp(20)).toBe(1)
    })
 
    it("works with single element <= ts", () => {
