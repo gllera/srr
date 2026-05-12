@@ -3,42 +3,30 @@
 // (data:text/html executes script; data:image/svg+xml runs <script> in SVG).
 export const URL_DENY = /^\s*(?:javascript|data|vbscript|file)\s*:/i
 // SVG/MATH carry their own script + foreign-content surface; bluemonday strips
-// them server-side, so mirror that here. Stored uppercase; tagName is compared
-// as toUpperCase() because SVG/MathML elements report case-preserved names.
-const DANGEROUS_TAGS = new Set([
-   "SCRIPT",
-   "STYLE",
-   "IFRAME",
-   "EMBED",
-   "OBJECT",
-   "FORM",
-   "LINK",
-   "META",
-   "BASE",
-   "SVG",
-   "MATH",
-])
+// them server-side, so mirror that here. CSS selector — querySelectorAll matches
+// case-insensitively for HTML and matches SVG/MathML by their normalized names,
+// so we don't need a separate case-folding pass.
+const DANGEROUS_SELECTOR = "script,style,iframe,embed,object,form,link,meta,base,svg,math"
 
 // <template> parses HTML without executing scripts, unlike a div
 const tmpl = document.createElement("template")
 export function sanitizeHtml(html: string): string {
    tmpl.innerHTML = html
+   // Drop dangerous subtrees first so the attribute pass below never visits
+   // their (now-detached) descendants — saves work on e.g. <svg><script>...
+   for (const n of tmpl.content.querySelectorAll(DANGEROUS_SELECTOR)) n.remove()
    const walker = document.createTreeWalker(tmpl.content, NodeFilter.SHOW_ELEMENT)
-   const toRemove: Element[] = []
    let node: Element | null
    while ((node = walker.nextNode() as Element | null)) {
-      if (DANGEROUS_TAGS.has(node.tagName.toUpperCase())) {
-         toRemove.push(node)
-         continue
-      }
       const attrs = node.attributes
       for (let i = attrs.length - 1; i >= 0; i--) {
          const attr = attrs[i]
          if (attr.name === "style" || attr.name === "class" || attr.name.startsWith("on") || URL_DENY.test(attr.value))
             node.removeAttribute(attr.name)
       }
-      if (node.tagName === "A") node.setAttribute("rel", "noopener noreferrer")
-      if (node.tagName === "IMG") {
+      const tag = node.tagName
+      if (tag === "A") node.setAttribute("rel", "noopener noreferrer")
+      else if (tag === "IMG") {
          node.removeAttribute("srcset")
          node.setAttribute("loading", "lazy")
          const src = node.getAttribute("src")
@@ -51,7 +39,6 @@ export function sanitizeHtml(html: string): string {
          // URL_DENY-matching src already stripped by the attribute loop above
       }
    }
-   for (const n of toRemove) n.remove()
    return tmpl.innerHTML
 }
 
