@@ -17,9 +17,10 @@ Dependency chain: `app → nav → data → idx`, `app → fmt`, `app → dropdo
 | Module | Role |
 |---|---|
 | `idx.ts` | Binary idx pack parsing. Exports `IDX_PACK_SIZE` (50000), `IdxPack` interface, `makeIdxPack()`. |
-| `data.ts` | CDN data layer: fetches `db.gz`, loads all idx packs at init via `makeIdxPack()`. Fetches JSONL data packs on demand. Exports `loadArticle(chronIdx)`, `findChronForTimestamp(ts)`, `groupSubsByTag()`. Re-exports `IDX_PACK_SIZE`. |
-| `nav.ts` | Navigation state machine: hash routing (`#pos[!tokens]`), traversal, filtering. Returns `IShowFeed`. Uses `pushState`/`replaceState`. Tokens are sub IDs or tag names. Exports `cycleFilter(dir)`, `getFilterEntries()`, `getCurrentFilterKey()`, `goTo(idx)`. |
-| `fmt.ts` | Pure utilities (no imports): `sanitizeHtml`, `timeAgo`, `formatDate`. `sanitizeHtml` strips dangerous elements/attributes for defense-in-depth. |
+| `data.ts` | CDN data layer: fetches `db.gz`, loads all idx packs at init via `makeIdxPack()`. Fetches JSONL data packs on demand. Exports `db`, `init`, `loadArticle(chronIdx)`, `getSubId(chronIdx)`, `findChronForTimestamp(ts)`, `findLeft`, `findRight`, `countLeft`, `groupSubsByTag()`. Re-exports `IDX_PACK_SIZE`. |
+| `nav.ts` | Navigation state machine: hash routing (`#pos[!tokens]`), traversal, filtering. Returns `IShowFeed`. Uses `pushState`/`replaceState`. Tokens are sub IDs or tag names. Exports `filter`, `fromHash`, `left`, `right`, `first`, `last`, `switchFilter`, `goTo`, `cycleFilter`, `getFilterEntries`, `getCurrentFilterKey`, `isSingleFilter`, `pruneSeen`. |
+| `cache.ts` | `makeLRU<T>(maxSize)`: LRU cache via Map insertion order. Used by `data.ts` for data-pack caching. |
+| `fmt.ts` | Pure utilities (no DOM imports): `sanitizeHtml`, `timeAgo`, `formatDate`, `URL_DENY`. `sanitizeHtml` strips dangerous elements/attributes for defense-in-depth; proxies images through wsrv.nl. |
 | `dropdown.ts` | Source-menu dropdown: own DOM lookups + open/close state. Exports `closeAllDropdowns()` and `showSourceMenu(currentTag, guard)`. The currently-shown article's tag and the `guard` mutex are passed in from `app.ts` to keep state ownership clear. |
 | `gestures.ts` | Touch and scroll handlers: one-finger swipe = prev/next, two-finger vertical swipe = cycle filter, scroll-down hides toolbar. Exports `setupGestures({ prev, next, toolbar, guard })`. |
 | `app.ts` | UI orchestrator: DOM lookups, render, source-label refresh, error popup, keyboard handler, `guard()` mutex, init. Async handlers always go through `guard()`. Position persisted to localStorage. |
@@ -56,9 +57,10 @@ State: `pos` (chronIdx), `filter` (object with `active`, `subs`, `tokens`, `matc
 **`filter`** — active when `tokens` non-empty:
 - `filter.clear()`: empties tokens, repopulates `subs` from all subscriptions with `total_art > 0`
 - `filter.set(tokens)`: resolves tokens (numeric sub IDs or tag names) into `subs` map (`sub_id → add_idx`); falls back to `clear()` if no token resolves
-- `last(token?)`: undefined = no filter change, `""` = clear filter, otherwise `filter.set([token])`; always jumps to last matching article
+- `last(token?)`: no arg = use current filter; `""` = clear filter; otherwise `filter.set([token])`; always jumps to last matching article
 - `goTo(idx)`: navigate to chronIdx; if filter active and target doesn't match, snap forward to next match; falls back to `last()` if none
-- `cycleFilter(dir)`: steps through `getFilterEntries()` by `dir` (+1/-1), calls `last()`
+- `switchFilter(token)`: sets filter to token (or clears if `""`); resumes at last seen position for that sub/tag if valid, otherwise jumps to `first()`
+- `cycleFilter(dir)`: steps through `getFilterEntries()` by `dir` (+1/-1), calls `switchFilter()`
 - `getFilterEntries()`: returns `["", "tagName", ..., "subId", ...]` built via `data.groupSubsByTag()`
 - `getCurrentFilterKey()`: returns `""`, the single token, or `""` for multi-token filters (URL-only edge case)
 - Navigation uses `findLeft`/`findRight` — synchronous linear scans via `data.getSubId()`
@@ -68,7 +70,7 @@ State: `pos` (chronIdx), `filter` (object with `active`, `subs`, `tokens`, `matc
 
 ## Test Patterns
 
-`src/js/nav.test.ts` — large nav suite. `src/js/data.test.ts` — pure-function cases only.
+`src/js/nav.test.ts` — large nav suite. `src/js/data.test.ts` — pure-function cases only. `src/js/idx.test.ts` — idx binary-parsing unit tests. `src/js/fmt.test.ts` — sanitizeHtml / timeAgo / formatDate tests. `src/js/cache.test.ts` — LRU cache tests.
 
 **nav.test.ts**:
 - **Mock**: `vi.hoisted()` + `vi.mock("./data", ...)` with same shape as data.ts exports. Mocks `getSubId`, `loadArticle`, `groupSubsByTag`, `findLeft`, `findRight`, `countLeft`, `findChronForTimestamp`.
