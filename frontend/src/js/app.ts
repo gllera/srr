@@ -132,11 +132,10 @@ function preloadImages(html: string) {
 
 async function preloadOne(idx: number) {
    try {
-      const article = data.getArticleSync(idx) ?? (await data.loadArticle(idx))
+      const article = await data.loadArticle(idx)
       preloadImages(article.c)
    } catch {
-      // Preload is best-effort: aborts and stale-pack errors are expected
-      // (abortPending() on the next render cancels in-flight pack fetches).
+      // Preload is best-effort: network/stale-pack errors should not surface.
    }
 }
 
