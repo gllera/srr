@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
-import { sanitizeHtml, timeAgo, formatDate } from "./fmt"
+import { getPreloadUrls, sanitizeHtml, timeAgo, formatDate } from "./fmt"
 
 describe("sanitizeHtml", () => {
    it("removes script elements", () => {
@@ -120,6 +120,50 @@ describe("sanitizeHtml", () => {
       expect(sanitizeHtml('<img src="data:image/svg+xml,<svg onload=alert(1)></svg>">')).not.toContain("data:")
       expect(sanitizeHtml('<a href="vbscript:msgbox(1)">x</a>')).not.toContain("vbscript")
       expect(sanitizeHtml('<a href="file:///etc/passwd">x</a>')).not.toContain("file:")
+   })
+})
+
+describe("getPreloadUrls", () => {
+   it("rewrites http(s) image src through the wsrv proxy", () => {
+      const urls = getPreloadUrls('<p>x</p><img src="https://example.com/a.png"><img src="http://b.test/c.jpg">')
+      expect(urls).toHaveLength(2)
+      expect(urls[0]).toBe(
+         "https://wsrv.nl/?&output=webp&w=600&h=600&fit=inside&we&url=" +
+            encodeURIComponent("https://example.com/a.png"),
+      )
+      expect(urls[1]).toContain(encodeURIComponent("http://b.test/c.jpg"))
+   })
+
+   it("skips images with no src", () => {
+      expect(getPreloadUrls("<img><p>ok</p>")).toEqual([])
+   })
+
+   it("skips non-http(s) srcs (javascript:, data:, relative)", () => {
+      expect(
+         getPreloadUrls('<img src="javascript:alert(1)"><img src="data:image/png,abc"><img src="/local.png">'),
+      ).toEqual([])
+   })
+
+   it("returns URLs matching sanitizeHtml's rewritten <img src>", () => {
+      const html = '<p>x</p><img src="https://example.com/a.png">'
+      const t = document.createElement("template")
+      t.innerHTML = sanitizeHtml(html)
+      const sanitizedSrc = t.content.querySelector("img")!.getAttribute("src")
+      const [preload] = getPreloadUrls(html)
+      expect(preload).toBe(sanitizedSrc)
+   })
+
+   it("returns empty for input without images", () => {
+      expect(getPreloadUrls("<p>no images</p>")).toEqual([])
+   })
+
+   it("handles multiple images including those inside nested elements", () => {
+      const urls = getPreloadUrls(
+         '<div><p>x</p><figure><img src="https://a/1.png"></figure></div><img src="https://b/2.png">',
+      )
+      expect(urls).toHaveLength(2)
+      expect(urls[0]).toContain(encodeURIComponent("https://a/1.png"))
+      expect(urls[1]).toContain(encodeURIComponent("https://b/2.png"))
    })
 })
 

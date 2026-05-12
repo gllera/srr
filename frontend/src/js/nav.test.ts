@@ -883,3 +883,33 @@ describe("goTo", () => {
       expect(result.article.s).toBe(2)
    })
 })
+
+describe("peekAdjacent", () => {
+   it("returns chronIdx of neighbors without changing pos", async () => {
+      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 3 }])
+      await nav.fromHash("1")
+      const before = location.hash
+      const { left, right } = nav.peekAdjacent()
+      expect(left).toBe(0)
+      expect(right).toBe(2)
+      // Did not navigate
+      expect(data.loadArticle).toHaveBeenCalledTimes(1)
+      expect(location.hash).toBe(before)
+   })
+
+   it("returns -1 at the boundaries", async () => {
+      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 3 }])
+      await nav.fromHash("0")
+      expect(nav.peekAdjacent().left).toBe(-1)
+      await nav.fromHash("2")
+      expect(nav.peekAdjacent().right).toBe(-1)
+   })
+
+   it("respects active filter", async () => {
+      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 1 }, { subId: 2 }, { subId: 1 }])
+      await nav.fromHash("2!1")
+      const { left, right } = nav.peekAdjacent()
+      expect(left).toBe(0)
+      expect(right).toBe(4)
+   })
+})

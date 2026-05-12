@@ -1,5 +1,5 @@
 import * as data from "./data"
-import { formatDate, sanitizeHtml, timeAgo, URL_DENY } from "./fmt"
+import { formatDate, getPreloadUrls, sanitizeHtml, timeAgo, URL_DENY } from "./fmt"
 import * as nav from "./nav"
 
 const el = {
@@ -106,6 +106,45 @@ function render(o: IShowFeed) {
    try {
       localStorage.setItem("srr-hash", location.hash)
    } catch {}
+
+   preloadAdjacent()
+}
+
+// Keep refs alive so the browser doesn't GC an Image whose load is still
+// in flight (MDN: preload via `new Image()` requires holding the reference).
+// Bounded FIFO — Map preserves insertion order, so deleting the first key
+// evicts the oldest preload.
+const preloadedImages = new Map<string, HTMLImageElement>()
+const PRELOAD_CAP = 64
+
+function preloadImages(html: string) {
+   for (const url of getPreloadUrls(html)) {
+      if (preloadedImages.has(url)) continue
+      const img = new Image()
+      img.src = url
+      preloadedImages.set(url, img)
+   }
+   while (preloadedImages.size > PRELOAD_CAP) {
+      const oldest = preloadedImages.keys().next().value
+      if (oldest === undefined) break
+      preloadedImages.delete(oldest)
+   }
+}
+
+async function preloadOne(idx: number) {
+   try {
+      const article = data.getArticleSync(idx) ?? (await data.loadArticle(idx))
+      preloadImages(article.c)
+   } catch {
+      // Preload is best-effort: aborts and stale-pack errors are expected
+      // (abortPending() on the next render cancels in-flight pack fetches).
+   }
+}
+
+function preloadAdjacent() {
+   const { left, right } = nav.peekAdjacent()
+   if (right !== -1) preloadOne(right)
+   if (left !== -1) preloadOne(left)
 }
 
 function refreshSourceLabel() {

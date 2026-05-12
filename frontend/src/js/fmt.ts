@@ -2,6 +2,8 @@
 // data:/vbscript:/javascript:/file: in href or src are XSS or info-leak vectors
 // (data:text/html executes script; data:image/svg+xml runs <script> in SVG).
 export const URL_DENY = /^\s*(?:javascript|data|vbscript|file)\s*:/i
+const HTTP_URL = /^https?:\/\//i
+const WSRV_PROXY = "https://wsrv.nl/?&output=webp&w=600&h=600&fit=inside&we&url="
 // SVG/MATH carry their own script + foreign-content surface; bluemonday strips
 // them server-side, so mirror that here. CSS selector — querySelectorAll matches
 // case-insensitively for HTML and matches SVG/MathML by their normalized names,
@@ -30,16 +32,24 @@ export function sanitizeHtml(html: string): string {
          node.removeAttribute("srcset")
          node.setAttribute("loading", "lazy")
          const src = node.getAttribute("src")
-         if (src && /^https?:\/\//i.test(src)) {
-            node.setAttribute(
-               "src",
-               "https://wsrv.nl/?&output=webp&w=600&h=600&fit=inside&we&url=" + encodeURIComponent(src),
-            )
-         }
+         if (src && HTTP_URL.test(src)) node.setAttribute("src", WSRV_PROXY + encodeURIComponent(src))
          // URL_DENY-matching src already stripped by the attribute loop above
       }
    }
    return tmpl.innerHTML
+}
+
+// Separate template so callers can extract from one HTML doc without
+// clobbering the shared sanitize template mid-walk.
+const preloadTmpl = document.createElement("template")
+export function getPreloadUrls(html: string): string[] {
+   preloadTmpl.innerHTML = html
+   const urls: string[] = []
+   for (const img of preloadTmpl.content.querySelectorAll("img")) {
+      const src = img.getAttribute("src")
+      if (src && HTTP_URL.test(src)) urls.push(WSRV_PROXY + encodeURIComponent(src))
+   }
+   return urls
 }
 
 export function timeAgo(unix: number): string {

@@ -149,6 +149,15 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
    return resolve(target, true)
 }
 
+// chronIdx of the next match on each side (-1 if none), without changing pos.
+// Used by the UI to preload adjacent articles' data packs and images.
+export function peekAdjacent(): { left: number; right: number } {
+   return {
+      left: data.findLeft(pos - 1, filter.subs),
+      right: data.findRight(pos + 1, filter.subs),
+   }
+}
+
 export async function left(): Promise<IShowFeed> {
    const found = data.findLeft(pos - 1, filter.subs)
    if (found === -1) throw new Error("no left match")
