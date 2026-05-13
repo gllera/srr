@@ -451,6 +451,155 @@ func TestChannelURLsEmpty(t *testing.T) {
 	}
 }
 
+func TestChanUpdReplaceFeedsPreservingState(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &UpdCmd{
+		ID: 0,
+		URLs: sliceStrPtr([]string{
+			"https://a.example.com/feed", // kept (must preserve etag-a)
+			"https://c.example.com/feed", // new
+		}),
+	}
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	ch := reopenDB(t).Channels()[0]
+	if len(ch.Feeds) != 2 {
+		t.Fatalf("Feeds len = %d, want 2", len(ch.Feeds))
+	}
+	if ch.Feeds[0].URL != "https://a.example.com/feed" || ch.Feeds[0].ETag != "etag-a" {
+		t.Errorf("kept feed state lost: %+v", ch.Feeds[0])
+	}
+	if ch.Feeds[0].Watermark != 0x111 {
+		t.Errorf("kept feed Watermark lost: %#x, want %#x", ch.Feeds[0].Watermark, 0x111)
+	}
+	if ch.Feeds[1].URL != "https://c.example.com/feed" || ch.Feeds[1].ETag != "" {
+		t.Errorf("new feed not fresh: %+v", ch.Feeds[1])
+	}
+}
+
+func TestChanUpdReplaceRejectsInvalidURL(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &UpdCmd{ID: 0, URLs: sliceStrPtr([]string{"not-a-url"})}
+	wantErr(t, cmd.Run(), "invalid url")
+}
+
+func TestChanUpdReplaceRejectsDuplicateURLs(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &UpdCmd{ID: 0, URLs: sliceStrPtr([]string{
+		"https://x.example.com/feed",
+		"https://x.example.com/feed",
+	})}
+	wantErr(t, cmd.Run(), "duplicate url")
+}
+
+func TestChanUpdAddURLAppendsAndPreservesState(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &UpdCmd{ID: 0, AddURLs: sliceStrPtr([]string{
+		"https://c.example.com/feed",
+		"https://d.example.com/feed",
+	})}
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	ch := reopenDB(t).Channels()[0]
+	if len(ch.Feeds) != 4 {
+		t.Fatalf("Feeds len = %d, want 4", len(ch.Feeds))
+	}
+	if ch.Feeds[0].ETag != "etag-a" || ch.Feeds[1].ETag != "etag-b" {
+		t.Errorf("existing state lost: %q, %q", ch.Feeds[0].ETag, ch.Feeds[1].ETag)
+	}
+	if ch.Feeds[0].Watermark != 0x111 || ch.Feeds[1].Watermark != 0x222 {
+		t.Errorf("existing Watermarks lost: %#x, %#x", ch.Feeds[0].Watermark, ch.Feeds[1].Watermark)
+	}
+}
+
+func TestChanUpdAddURLIdempotent(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &UpdCmd{ID: 0, AddURLs: sliceStrPtr([]string{"https://a.example.com/feed"})}
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	ch := reopenDB(t).Channels()[0]
+	if len(ch.Feeds) != 2 {
+		t.Errorf("Feeds len = %d, want 2 (no-op)", len(ch.Feeds))
+	}
+	if ch.Feeds[0].ETag != "etag-a" {
+		t.Errorf("state clobbered: %q", ch.Feeds[0].ETag)
+	}
+}
+
+func TestChanUpdAddURLInvalid(t *testing.T) {
+	setupChannelsTestDB(t)
+	wantErr(t, (&UpdCmd{ID: 0, AddURLs: sliceStrPtr([]string{"not-a-url"})}).Run(), "invalid url")
+}
+
+func TestChanUpdRmURLRemovesAndPreservesState(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &UpdCmd{ID: 0, RmURLs: sliceStrPtr([]string{"https://a.example.com/feed"})}
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	ch := reopenDB(t).Channels()[0]
+	if len(ch.Feeds) != 1 {
+		t.Fatalf("Feeds len = %d, want 1", len(ch.Feeds))
+	}
+	if ch.Feeds[0].URL != "https://b.example.com/feed" || ch.Feeds[0].ETag != "etag-b" || ch.Feeds[0].Watermark != 0x222 {
+		t.Errorf("state lost on survivor: %+v", ch.Feeds[0])
+	}
+}
+
+func TestChanUpdRmURLNotAFeed(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &UpdCmd{ID: 0, RmURLs: sliceStrPtr([]string{"https://nope.example.com/feed"})}
+	wantErr(t, cmd.Run(), "not a feed")
+}
+
+func TestChanUpdRmURLEmptyingFeedListRejected(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &UpdCmd{ID: 0, RmURLs: sliceStrPtr([]string{
+		"https://a.example.com/feed",
+		"https://b.example.com/feed",
+	})}
+	wantErr(t, cmd.Run(), "no feeds")
+	if len(reopenDB(t).Channels()[0].Feeds) != 2 {
+		t.Errorf("Feeds changed despite error")
+	}
+}
+
+func TestChanUpdRmURLDuplicateArgs(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &UpdCmd{ID: 0, RmURLs: sliceStrPtr([]string{
+		"https://a.example.com/feed",
+		"https://a.example.com/feed",
+	})}
+	wantErr(t, cmd.Run(), "duplicate")
+}
+
+func TestChanUpdMutexUrlFlags(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &UpdCmd{
+		ID:      0,
+		URLs:    sliceStrPtr([]string{"https://x.example.com/feed"}),
+		AddURLs: sliceStrPtr([]string{"https://y.example.com/feed"}),
+	}
+	wantErr(t, cmd.Run(), "--url cannot be combined")
+
+	cmd2 := &UpdCmd{
+		ID:      0,
+		AddURLs: sliceStrPtr([]string{"https://y.example.com/feed"}),
+		RmURLs:  sliceStrPtr([]string{"https://a.example.com/feed"}),
+	}
+	wantErr(t, cmd2.Run(), "--url cannot be combined")
+
+	cmd3 := &UpdCmd{
+		ID:     0,
+		URLs:   sliceStrPtr([]string{"https://x.example.com/feed"}),
+		RmURLs: sliceStrPtr([]string{"https://a.example.com/feed"}),
+	}
+	wantErr(t, cmd3.Run(), "--url cannot be combined")
+}
+
 func TestChanUpdRequiresFieldFlag(t *testing.T) {
 	setupChannelsTestDB(t)
 	cmd := &UpdCmd{ID: 0}

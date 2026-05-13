@@ -102,17 +102,36 @@ func (o *AddCmd) Run() error {
 }
 
 type UpdCmd struct {
-	ID      int       `arg:""              help:"Channel id to update."`
-	Title   *string   `short:"t" optional:""              help:"Channel title (empty rejected)."`
-	Tag     *string   `short:"g" optional:""              help:"Channel tag. Empty (\"\") to clear."`
-	Parsers *[]string `short:"p" optional:""              help:"Channel parsers commands. Empty (\"\") to clear."`
-	Ingest  *string   `short:"i" optional:""              help:"Channel ingest strategy. Empty (\"\") to clear."`
+	ID      int       `arg:""                                 help:"Channel id to update."`
+	Title   *string   `short:"t" optional:""                  help:"Channel title (empty rejected)."`
+	URLs    *[]string `short:"u" optional:"" name:"url"       help:"Replace the feed list. Per-URL state preserved for surviving URLs. Mutually exclusive with --add-url and --rm-url."`
+	AddURLs *[]string `           optional:"" name:"add-url"   help:"Append URL(s) (idempotent). Mutually exclusive with -u and --rm-url."`
+	RmURLs  *[]string `           optional:"" name:"rm-url"    help:"Remove URL(s) (strict). Mutually exclusive with -u and --add-url."`
+	Tag     *string   `short:"g" optional:""                  help:"Channel tag. Empty (\"\") to clear."`
+	Parsers *[]string `short:"p" optional:""                  help:"Channel parsers commands. Empty (\"\") to clear."`
+	Ingest  *string   `short:"i" optional:""                  help:"Channel ingest strategy. Empty (\"\") to clear."`
 }
 
 func (o *UpdCmd) Run() error {
-	if o.Title == nil && o.Tag == nil && o.Parsers == nil && o.Ingest == nil {
+	// Mutex on the three feed-list flags.
+	urlFlagCount := 0
+	if o.URLs != nil {
+		urlFlagCount++
+	}
+	if o.AddURLs != nil {
+		urlFlagCount++
+	}
+	if o.RmURLs != nil {
+		urlFlagCount++
+	}
+	if urlFlagCount > 1 {
+		return fmt.Errorf("--url cannot be combined with --add-url/--rm-url")
+	}
+
+	if o.Title == nil && o.Tag == nil && o.Parsers == nil && o.Ingest == nil && urlFlagCount == 0 {
 		return fmt.Errorf("nothing to update")
 	}
+
 	return withDB(true, func(ctx context.Context, db *DB) error {
 		ch, err := db.ChannelByID(o.ID)
 		if err != nil {
@@ -138,8 +157,66 @@ func (o *UpdCmd) Run() error {
 		if o.Ingest != nil {
 			ch.Ingest = *o.Ingest
 		}
+
+		switch {
+		case o.URLs != nil:
+			feeds, err := parseFeeds(*o.URLs, ch.Feeds)
+			if err != nil {
+				return err
+			}
+			ch.Feeds = feeds
+		case o.AddURLs != nil:
+			if err := appendURLs(ch, *o.AddURLs); err != nil {
+				return err
+			}
+		case o.RmURLs != nil:
+			if err := removeURLs(ch, *o.RmURLs); err != nil {
+				return err
+			}
+		}
+
 		return db.Commit(ctx)
 	})
+}
+
+// appendURLs adds urls to ch.Feeds idempotently (silent skip on duplicates
+// or URLs already on the channel). Invalid URL formats fail.
+func appendURLs(ch *Channel, urls []string) error {
+	seen := make(map[string]bool, len(ch.Feeds)+len(urls))
+	for _, f := range ch.Feeds {
+		seen[f.URL] = true
+	}
+	for _, u := range urls {
+		if !validFeedURL(u) {
+			return fmt.Errorf("invalid url %q", u)
+		}
+		if seen[u] {
+			continue
+		}
+		seen[u] = true
+		ch.Feeds = append(ch.Feeds, &Feed{URL: u})
+	}
+	return nil
+}
+
+// removeURLs strict-removes urls from ch.Feeds. Errors if any url is not a
+// current feed, on duplicate args, or if all feeds would be removed.
+func removeURLs(ch *Channel, urls []string) error {
+	rmSet := make(map[string]bool, len(urls))
+	for _, u := range urls {
+		if rmSet[u] {
+			return fmt.Errorf("duplicate url %q", u)
+		}
+		rmSet[u] = true
+		if !slices.ContainsFunc(ch.Feeds, func(f *Feed) bool { return f.URL == u }) {
+			return fmt.Errorf("url %q is not a feed of channel %d", u, ch.id)
+		}
+	}
+	if len(rmSet) == len(ch.Feeds) {
+		return fmt.Errorf("channel %d would have no feeds after removal", ch.id)
+	}
+	ch.Feeds = slices.DeleteFunc(ch.Feeds, func(f *Feed) bool { return rmSet[f.URL] })
+	return nil
 }
 
 type AddFeedCmd struct {
