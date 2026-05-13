@@ -124,9 +124,8 @@ func (o *AddCmd) Run() error {
 }
 
 type AddFeedCmd struct {
-	ID     int      `arg:""              help:"Channel id."`
-	URLs   []string `arg:"" name:"url"   help:"URL(s) to add."`
-	Ingest *string  `short:"i" optional:"" help:"Ingest strategy to apply to the URL(s) being added. Empty (\"\") to clear (use channel/global default)."`
+	ID   int      `arg:""            help:"Channel id."`
+	URLs []string `arg:"" name:"url" help:"URL(s) to add."`
 }
 
 // add-feed is idempotent: URLs already on the channel or duplicated within args
@@ -150,11 +149,7 @@ func (o *AddFeedCmd) Run() error {
 				continue
 			}
 			seen[u] = true
-			feed := &Feed{URL: u}
-			if o.Ingest != nil {
-				feed.Ingest = *o.Ingest
-			}
-			ch.Feeds = append(ch.Feeds, feed)
+			ch.Feeds = append(ch.Feeds, &Feed{URL: u})
 		}
 		return db.Commit(ctx)
 	})
@@ -213,9 +208,8 @@ type LsCmd struct {
 func (o *LsCmd) Run() error {
 	return withDB(false, func(_ context.Context, db *DB) error {
 		type lsFeed struct {
-			URL    string `json:"url" yaml:"url"`
-			Ingest string `json:"ingest,omitempty" yaml:"ingest,omitempty"`
-			Error  string `json:"error,omitempty" yaml:"error,omitempty"`
+			URL   string `json:"url" yaml:"url"`
+			Error string `json:"error,omitempty" yaml:"error,omitempty"`
 		}
 		type lsChannel struct {
 			ID     int      `json:"id" yaml:"id"`
@@ -232,7 +226,7 @@ func (o *LsCmd) Run() error {
 			}
 			feeds := make([]lsFeed, len(ch.Feeds))
 			for i, f := range ch.Feeds {
-				feeds[i] = lsFeed{URL: f.URL, Ingest: f.Ingest, Error: f.FetchError}
+				feeds[i] = lsFeed{URL: f.URL, Error: f.FetchError}
 			}
 			channelsList = append(channelsList, &lsChannel{
 				ID:     ch.id,
