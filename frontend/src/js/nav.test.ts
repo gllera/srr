@@ -194,6 +194,16 @@ describe("fromHash", () => {
       expect(data.loadArticle).toHaveBeenLastCalledWith(2)
    })
 
+   it("uses replaceState (not pushState) when snapping to a different position", async () => {
+      // hashchange fires after the browser commits the URL; if the snap pushes
+      // a new entry, pressing Back returns to the un-snapped URL and snaps
+      // again, trapping the user in a loop. The snap must replace.
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 1 }])
+      await nav.fromHash("1!1")
+      expect(history.replaceState).toHaveBeenCalledWith(null, "", "#2!1")
+      expect(history.pushState).not.toHaveBeenCalled()
+   })
+
    it("resolves token '0' as sub ID 0", async () => {
       data.db.channels = { "0": makeChannel({ id: 0, title: "Zero" }) }
       setupIndex([{ chanId: 0 }])

@@ -61,6 +61,7 @@ async function resolve(target: number, replace = false): Promise<IShowFeed> {
    const article = await data.loadArticle(target)
    pos = target
    nextLeft = nextRight = undefined
+   abortPrefetch()
    updateHash(replace)
    recordSeen(article)
    return showFeed(article)
@@ -73,10 +74,14 @@ async function resolve(target: number, replace = false): Promise<IShowFeed> {
 // finds `my !== currentPrefetch` bails instead of pushing into a stale array.
 let currentPrefetch: HTMLImageElement[] | null = null
 
+function abortPrefetch() {
+   if (currentPrefetch) for (const img of currentPrefetch) img.src = ""
+   currentPrefetch = null
+}
+
 function schedulePrefetch(target: number) {
    if (target === -1 || typeof window.requestIdleCallback !== "function") return
    const my: HTMLImageElement[] = []
-   if (currentPrefetch) for (const img of currentPrefetch) img.src = ""
    currentPrefetch = my
    window.requestIdleCallback(
       async () => {
@@ -149,8 +154,8 @@ export function pruneSeen() {
    } catch {}
 }
 
-function resolveNoMatch(): IShowFeed {
-   updateHash()
+function resolveNoMatch(replace = false): IShowFeed {
+   updateHash(replace)
    return {
       article: { s: 0, a: 0, p: 0, t: "(no matching articles)", l: "", c: "" },
       has_left: false,
@@ -183,7 +188,7 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
    let target = posStr === "" ? NaN : Number(posStr)
    if (!Number.isFinite(target) || target < 0 || target >= data.db.total_art) target = data.db.total_art - 1
 
-   if (!filter.matches(data.getChannelId(target), target)) return last()
+   if (!filter.matches(data.getChannelId(target), target)) return last(undefined, true)
    return resolve(target, true)
 }
 
@@ -212,14 +217,14 @@ export async function first(): Promise<IShowFeed> {
    return goTo(start)
 }
 
-export async function last(token?: string): Promise<IShowFeed> {
+export async function last(token?: string, replace = false): Promise<IShowFeed> {
    if (token !== undefined) {
       if (token === "") filter.clear()
       else filter.set([token])
    }
    const found = data.findLeft(data.db.total_art - 1, filter.channels)
-   if (found === -1) return resolveNoMatch()
-   return resolve(found)
+   if (found === -1) return resolveNoMatch(replace)
+   return resolve(found, replace)
 }
 
 function isValidSeen(idx: number): boolean {
