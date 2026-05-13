@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 )
@@ -193,6 +194,29 @@ func TestParseFeedsReusesPriorFeedByURL(t *testing.T) {
 	}
 }
 
+func TestLsCmdEmitsPipe(t *testing.T) {
+	setupEmptyDB(t)
+	mustRun := func(c interface{ Run() error }) {
+		t.Helper()
+		if err := c.Run(); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	}
+	mustRun(&AddCmd{Title: strPtr("A"), URLs: sliceStrPtr([]string{"https://a.example.com/feed"}), Parsers: sliceStrPtr([]string{"#sanitize"})})
+
+	var out bytes.Buffer
+	saved := stdout
+	stdout = &out
+	t.Cleanup(func() { stdout = saved })
+
+	if err := (&LsCmd{Format: "json"}).Run(); err != nil {
+		t.Fatalf("LsCmd: %v", err)
+	}
+	if !strings.Contains(out.String(), `"pipe":["#sanitize"]`) {
+		t.Errorf("ls output missing pipe field: %s", out.String())
+	}
+}
+
 func TestLsCmdFiltersByTag(t *testing.T) {
 	setupEmptyDB(t)
 	mustRun := func(c interface{ Run() error }) {
@@ -203,27 +227,21 @@ func TestLsCmdFiltersByTag(t *testing.T) {
 	}
 	mustRun(&AddCmd{Title: strPtr("A"), URLs: sliceStrPtr([]string{"https://a.example.com/feed"}), Tag: strPtr("tech")})
 	mustRun(&AddCmd{Title: strPtr("B"), URLs: sliceStrPtr([]string{"https://b.example.com/feed"}), Tag: strPtr("news")})
-	mustRun(&AddCmd{Title: strPtr("C"), URLs: sliceStrPtr([]string{"https://c.example.com/feed"})})
 
-	// LsCmd writes via printFormatted -> fmt.Print; we only verify it doesn't error.
-	// Behavior of the tag filter is verified via the underlying db reads instead.
-	if err := (&LsCmd{Format: "json"}).Run(); err != nil {
-		t.Fatalf("LsCmd no filter: %v", err)
-	}
-	if err := (&LsCmd{Format: "yaml", Tag: strPtr("tech")}).Run(); err != nil {
-		t.Fatalf("LsCmd tag filter: %v", err)
-	}
+	var out bytes.Buffer
+	saved := stdout
+	stdout = &out
+	t.Cleanup(func() { stdout = saved })
 
-	// Independent check: ensure the data the filter would see is what we expect.
-	db := reopenDB(t)
-	tagged := 0
-	for _, ch := range db.Channels() {
-		if ch.Tag == "tech" {
-			tagged++
-		}
+	if err := (&LsCmd{Format: "json", Tag: strPtr("tech")}).Run(); err != nil {
+		t.Fatalf("LsCmd: %v", err)
 	}
-	if tagged != 1 {
-		t.Errorf("expected 1 channel tagged 'tech', got %d", tagged)
+	body := out.String()
+	if !strings.Contains(body, `"title":"A"`) {
+		t.Errorf("expected channel A in filtered output: %s", body)
+	}
+	if strings.Contains(body, `"title":"B"`) {
+		t.Errorf("did not expect channel B in tech-filtered output: %s", body)
 	}
 }
 
