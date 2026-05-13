@@ -37,12 +37,11 @@ func printJSON(v any) error {
 }
 
 type AddCmd struct {
-	Upd     *int      `          optional:""              help:"Update existing channel id instead."`
-	Title   *string   `short:"t" optional:""              help:"Channel title."`
-	URLs    *[]string `short:"u" optional:"" name:"url"   help:"Channel RSS url(s); repeat to merge multiple feeds under one id."`
-	Tag     *string   `short:"g" optional:""              help:"Channel tag. Empty (\"\") to clear."`
+	Title   *string   `short:"t" required:""              help:"Channel title."`
+	URLs    *[]string `short:"u" required:"" name:"url"   help:"Channel RSS url(s); repeat to merge multiple feeds under one id."`
+	Tag     *string   `short:"g" optional:""              help:"Channel tag."`
 	Parsers *[]string `short:"p" optional:""              help:"Channel parsers commands. Empty (\"\") for default."`
-	Ingest  *string   `short:"i" optional:""              help:"Ingest strategy: built-in ('#rss', '#telegram') or shell command. Empty (\"\") to clear and fall through to global default."`
+	Ingest  *string   `short:"i" optional:""              help:"Ingest strategy: built-in ('#rss', '#telegram') or shell command."`
 }
 
 // parseFeeds validates URL flag values and reuses any prior Feed whose URL
@@ -71,44 +70,21 @@ func parseFeeds(urls []string, prev []*Feed) ([]*Feed, error) {
 
 func (o *AddCmd) Run() error {
 	return withDB(true, func(ctx context.Context, db *DB) error {
-		var ch *Channel
-		if o.Upd != nil {
-			c, err := db.ChannelByID(*o.Upd)
-			if err != nil {
-				return err
-			}
-			ch = c
-		} else {
-			if o.Title == nil {
-				return fmt.Errorf("title is required for new channel")
-			}
-			if o.URLs == nil {
-				return fmt.Errorf("at least one --url is required for new channel")
-			}
-			ch = &Channel{}
-			if err := db.AddChannel(ch); err != nil {
-				return err
-			}
+		if o.Title == nil || *o.Title == "" {
+			return fmt.Errorf("title is required")
 		}
-
-		if o.Title != nil {
-			if *o.Title == "" {
-				return fmt.Errorf("title cannot be empty")
-			}
-			ch.Title = *o.Title
+		if o.URLs == nil {
+			return fmt.Errorf("--url is required")
 		}
-		if o.URLs != nil {
-			feeds, err := parseFeeds(*o.URLs, ch.Feeds)
-			if err != nil {
-				return err
-			}
-			ch.Feeds = feeds
+		feeds, err := parseFeeds(*o.URLs, nil)
+		if err != nil {
+			return err
 		}
+		ch := &Channel{Title: *o.Title, Feeds: feeds}
 		if o.Tag != nil {
 			ch.Tag = *o.Tag
 		}
 		if o.Parsers != nil {
-			ch.Pipeline = []string{}
 			for _, p := range *o.Parsers {
 				if p != "" {
 					ch.Pipeline = append(ch.Pipeline, p)
@@ -118,7 +94,9 @@ func (o *AddCmd) Run() error {
 		if o.Ingest != nil {
 			ch.Ingest = *o.Ingest
 		}
-
+		if err := db.AddChannel(ch); err != nil {
+			return err
+		}
 		return db.Commit(ctx)
 	})
 }
