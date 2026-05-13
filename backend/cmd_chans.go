@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -308,4 +309,130 @@ func (o *ShowCmd) Run() error {
 		}
 		return printFormatted(o.Format, viewOf(ch))
 	})
+}
+
+type ApplyCmd struct {
+	File string `short:"f" type:"path" help:"Read JSON from PATH instead of stdin."`
+
+	in io.Reader // test seam; defaults to os.Stdin
+}
+
+func (o *ApplyCmd) Run() error {
+	src := o.in
+	if src == nil {
+		if o.File == "" || o.File == "-" {
+			src = os.Stdin
+		} else {
+			f, err := os.Open(o.File)
+			if err != nil {
+				return fmt.Errorf("open %s: %w", o.File, err)
+			}
+			defer f.Close()
+			src = f
+		}
+	}
+
+	data, err := io.ReadAll(src)
+	if err != nil {
+		return fmt.Errorf("read input: %w", err)
+	}
+
+	views, err := parseApplyInput(data)
+	if err != nil {
+		return err
+	}
+
+	return withDB(true, func(ctx context.Context, db *DB) error {
+		// Disk writes are atomic: Commit is only called after all entries
+		// apply successfully. The validation loop catches the cheap shape
+		// errors (missing title/feeds, unknown id) before any mutation
+		// happens; per-URL validation runs inside parseFeeds during apply.
+		// A late URL-validation failure rolls back in-memory state by
+		// abandoning the closure without committing.
+		type pending struct {
+			view *channelView
+			ch   *Channel // existing channel for update; nil for create
+		}
+		ops := make([]pending, 0, len(views))
+		for i, v := range views {
+			if v == nil {
+				return fmt.Errorf("channel #%d: null entry", i)
+			}
+			if v.Title == "" {
+				return fmt.Errorf("channel #%d: title required", i)
+			}
+			if len(v.Feeds) == 0 {
+				return fmt.Errorf("channel #%d: feeds required", i)
+			}
+			if v.ID == nil {
+				ops = append(ops, pending{view: v})
+				continue
+			}
+			ch, err := db.ChannelByID(*v.ID)
+			if err != nil {
+				return err
+			}
+			ops = append(ops, pending{view: v, ch: ch})
+		}
+
+		// Apply.
+		for _, op := range ops {
+			urls := make([]string, len(op.view.Feeds))
+			for i, f := range op.view.Feeds {
+				urls[i] = f.URL
+			}
+			var prevFeeds []*Feed
+			if op.ch != nil {
+				prevFeeds = op.ch.Feeds
+			}
+			feeds, err := parseFeeds(urls, prevFeeds)
+			if err != nil {
+				return err
+			}
+
+			if op.ch == nil {
+				ch := &Channel{
+					Title:    op.view.Title,
+					Feeds:    feeds,
+					Tag:      op.view.Tag,
+					Pipeline: append([]string(nil), op.view.Pipe...),
+					Ingest:   op.view.Ingest,
+				}
+				if err := db.AddChannel(ch); err != nil {
+					return err
+				}
+			} else {
+				op.ch.Title = op.view.Title
+				op.ch.Feeds = feeds
+				op.ch.Tag = op.view.Tag
+				op.ch.Pipeline = append([]string(nil), op.view.Pipe...)
+				op.ch.Ingest = op.view.Ingest
+			}
+		}
+		return db.Commit(ctx)
+	})
+}
+
+// parseApplyInput accepts either a single channelView or an array.
+// Auto-detect on the first non-whitespace byte.
+func parseApplyInput(data []byte) ([]*channelView, error) {
+	trim := bytes.TrimLeft(data, " \t\r\n")
+	if len(trim) == 0 {
+		return nil, fmt.Errorf("input must be a channel object or array of channel objects")
+	}
+	if trim[0] == '[' {
+		var views []*channelView
+		if err := json.Unmarshal(data, &views); err != nil {
+			return nil, fmt.Errorf("decode array: %w", err)
+		}
+		return views, nil
+	}
+	if trim[0] == '{' {
+		var view channelView
+		if err := json.Unmarshal(data, &view); err != nil {
+			return nil, fmt.Errorf("decode object: %w", err)
+		}
+		return []*channelView{&view}, nil
+	}
+	return nil, fmt.Errorf("input must be a channel object or array of channel objects")
 }
