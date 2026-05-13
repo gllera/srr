@@ -233,7 +233,6 @@ func TestRmFeedCmdIDTooLarge(t *testing.T) {
 
 // strPtr returns a pointer to its argument; useful for CLI flag-pointer fields.
 func strPtr(s string) *string          { return &s }
-func intPtr(n int) *int                { return &n }
 func sliceStrPtr(v []string) *[]string { return &v }
 
 func setupEmptyDB(t *testing.T) {
@@ -242,7 +241,7 @@ func setupEmptyDB(t *testing.T) {
 	globals = &Globals{PackSize: 1, Store: dir}
 }
 
-func TestAddCmdCreatesChannel(t *testing.T) {
+func TestChanAddCreates(t *testing.T) {
 	setupEmptyDB(t)
 	cmd := &AddCmd{
 		Title: strPtr("News"),
@@ -257,7 +256,6 @@ func TestAddCmdCreatesChannel(t *testing.T) {
 	if len(db.Channels()) != 1 {
 		t.Fatalf("Channels len = %d, want 1", len(db.Channels()))
 	}
-	// New channel is assigned id 0 (first free slot).
 	ch := db.Channels()[0]
 	if ch == nil {
 		t.Fatal("expected channel at id 0")
@@ -273,19 +271,19 @@ func TestAddCmdCreatesChannel(t *testing.T) {
 	}
 }
 
-func TestAddCmdCreateRequiresTitle(t *testing.T) {
+func TestChanAddRequiresTitle(t *testing.T) {
 	setupEmptyDB(t)
 	cmd := &AddCmd{URLs: sliceStrPtr([]string{"https://feed.example.com/rss"})}
 	wantErr(t, cmd.Run(), "title is required")
 }
 
-func TestAddCmdCreateRequiresURL(t *testing.T) {
+func TestChanAddRequiresURL(t *testing.T) {
 	setupEmptyDB(t)
 	cmd := &AddCmd{Title: strPtr("News")}
 	wantErr(t, cmd.Run(), "--url is required")
 }
 
-func TestAddCmdCreateMultipleURLs(t *testing.T) {
+func TestChanAddMultipleURLs(t *testing.T) {
 	setupEmptyDB(t)
 	cmd := &AddCmd{
 		Title: strPtr("News"),
@@ -301,119 +299,6 @@ func TestAddCmdCreateMultipleURLs(t *testing.T) {
 	if len(ch.Feeds) != 2 {
 		t.Errorf("Feeds len = %d, want 2", len(ch.Feeds))
 	}
-}
-
-func TestAddCmdUpdateChangesTitle(t *testing.T) {
-	setupChannelsTestDB(t)
-	cmd := &AddCmd{Upd: intPtr(0), Title: strPtr("New Title")}
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	ch := reopenDB(t).Channels()[0]
-	if ch.Title != "New Title" {
-		t.Errorf("Title = %q, want %q", ch.Title, "New Title")
-	}
-	// Existing feeds are preserved.
-	if len(ch.Feeds) != 2 {
-		t.Errorf("Feeds len = %d, want 2", len(ch.Feeds))
-	}
-}
-
-func TestAddCmdUpdateEmptyTitleRejected(t *testing.T) {
-	setupChannelsTestDB(t)
-	cmd := &AddCmd{Upd: intPtr(0), Title: strPtr("")}
-	wantErr(t, cmd.Run(), "title cannot be empty")
-}
-
-func TestAddCmdUpdateClearsTag(t *testing.T) {
-	setupChannelsTestDB(t)
-	// First assign a tag.
-	if err := (&AddCmd{Upd: intPtr(0), Tag: strPtr("tech")}).Run(); err != nil {
-		t.Fatalf("set tag: %v", err)
-	}
-	if reopenDB(t).Channels()[0].Tag != "tech" {
-		t.Fatal("setup: tag not set")
-	}
-	// Empty Tag must clear it.
-	if err := (&AddCmd{Upd: intPtr(0), Tag: strPtr("")}).Run(); err != nil {
-		t.Fatalf("clear tag: %v", err)
-	}
-	if got := reopenDB(t).Channels()[0].Tag; got != "" {
-		t.Errorf("Tag = %q, want \"\" (cleared)", got)
-	}
-}
-
-func TestAddCmdUpdateSetsPipeline(t *testing.T) {
-	setupChannelsTestDB(t)
-	cmd := &AddCmd{Upd: intPtr(0), Parsers: sliceStrPtr([]string{"#sanitize", "#minify"})}
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	ch := reopenDB(t).Channels()[0]
-	if len(ch.Pipeline) != 2 || ch.Pipeline[0] != "#sanitize" || ch.Pipeline[1] != "#minify" {
-		t.Errorf("Pipeline = %v, want [#sanitize #minify]", ch.Pipeline)
-	}
-}
-
-func TestAddCmdUpdateClearsPipeline(t *testing.T) {
-	setupChannelsTestDB(t)
-	if err := (&AddCmd{Upd: intPtr(0), Parsers: sliceStrPtr([]string{"#sanitize"})}).Run(); err != nil {
-		t.Fatalf("set pipeline: %v", err)
-	}
-	// An empty-string entry in --parsers clears the pipeline (CLI convention).
-	if err := (&AddCmd{Upd: intPtr(0), Parsers: sliceStrPtr([]string{""})}).Run(); err != nil {
-		t.Fatalf("clear pipeline: %v", err)
-	}
-	ch := reopenDB(t).Channels()[0]
-	if len(ch.Pipeline) != 0 {
-		t.Errorf("Pipeline = %v, want empty (cleared)", ch.Pipeline)
-	}
-}
-
-func TestAddCmdUpdateReplacesFeedsPreservingState(t *testing.T) {
-	setupChannelsTestDB(t)
-	// Replace one URL, keep the other.
-	cmd := &AddCmd{
-		Upd: intPtr(0),
-		URLs: sliceStrPtr([]string{
-			"https://a.example.com/feed", // kept (must preserve etag-a)
-			"https://c.example.com/feed", // new
-		}),
-	}
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	ch := reopenDB(t).Channels()[0]
-	if len(ch.Feeds) != 2 {
-		t.Fatalf("Feeds len = %d, want 2", len(ch.Feeds))
-	}
-	if ch.Feeds[0].URL != "https://a.example.com/feed" || ch.Feeds[0].ETag != "etag-a" {
-		t.Errorf("kept feed state lost: %+v", ch.Feeds[0])
-	}
-	if ch.Feeds[1].URL != "https://c.example.com/feed" || ch.Feeds[1].ETag != "" {
-		t.Errorf("new feed not fresh: %+v", ch.Feeds[1])
-	}
-}
-
-func TestAddCmdUpdateRejectsInvalidURL(t *testing.T) {
-	setupChannelsTestDB(t)
-	cmd := &AddCmd{Upd: intPtr(0), URLs: sliceStrPtr([]string{"not-a-url"})}
-	wantErr(t, cmd.Run(), "invalid url")
-}
-
-func TestAddCmdUpdateRejectsDuplicateURLs(t *testing.T) {
-	setupChannelsTestDB(t)
-	cmd := &AddCmd{Upd: intPtr(0), URLs: sliceStrPtr([]string{
-		"https://x.example.com/feed",
-		"https://x.example.com/feed",
-	})}
-	wantErr(t, cmd.Run(), "duplicate url")
-}
-
-func TestAddCmdUpdateChannelNotFound(t *testing.T) {
-	setupChannelsTestDB(t)
-	cmd := &AddCmd{Upd: intPtr(99), Title: strPtr("X")}
-	wantErr(t, cmd.Run(), "not found")
 }
 
 func TestRmCmdRemovesChannels(t *testing.T) {
