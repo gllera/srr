@@ -12,7 +12,15 @@ func init() {
 
 		policy.AllowLists()
 		policy.AllowTables()
-		policy.AllowImages()
+		// Equivalent of policy.AllowImages() but without srcset — the frontend
+		// strips it defensively (frontend/src/js/fmt.ts) and there is no use
+		// case for it in stored feed content.
+		policy.AllowAttrs("align").Matching(bluemonday.ImageAlign).OnElements("img")
+		policy.AllowAttrs("alt").Matching(bluemonday.Paragraph).OnElements("img")
+		policy.AllowAttrs("height", "width").Matching(bluemonday.NumberOrPercent).OnElements("img")
+		policy.AllowAttrs("src").OnElements("img")
+		policy.AllowAttrs("title").Matching(bluemonday.Paragraph).OnElements("img")
+		policy.AllowElements("img")
 
 		policy.RequireParseableURLs(true)
 		policy.AllowRelativeURLs(true)
