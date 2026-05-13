@@ -6,7 +6,6 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"log/slog"
 	"net/http"
@@ -49,7 +48,7 @@ func init() {
 				return Result{}, fmt.Errorf("unexpected HTTP status: %s", res.Status)
 			}
 
-			data, err := readBody(res.Body, buf, "subscription file")
+			data, err := readBody(res.Body, buf, "feed")
 			if err != nil {
 				return Result{}, err
 			}
@@ -78,10 +77,19 @@ func init() {
 // without error. Currently unused in production code; kept for the API.
 var ErrStopFeed = errors.New("stop feed")
 
+// hash is FNV-32a, inlined to avoid the per-call hash.Hash32 allocation
+// (this runs once per parsed item across every fetch).
 func hash(s string) uint32 {
-	h := fnv.New32a()
-	io.WriteString(h, s)
-	return h.Sum32()
+	const (
+		offset32 = 2166136261
+		prime32  = 16777619
+	)
+	h := uint32(offset32)
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= prime32
+	}
+	return h
 }
 
 var dateFields = []string{"pubDate", "published", "issued", "date", "created", "updated", "modified"}

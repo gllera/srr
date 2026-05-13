@@ -26,24 +26,17 @@ func printFormatted(format string, v any) error {
 	case "yaml":
 		output, err = yaml.Marshal(v)
 	case "json":
-		output, err = json.Marshal(v)
+		output, err = jsonEncode(v)
 	}
 	if err != nil {
 		return fmt.Errorf("encoding %s: %w", format, err)
 	}
-	if _, err := fmt.Fprintf(stdout, "%s\n", output); err != nil {
-		return err
-	}
-	return nil
+	_, err = fmt.Fprint(stdout, string(output))
+	return err
 }
 
 func printJSON(v any) error {
-	output, err := jsonEncode(v)
-	if err != nil {
-		return fmt.Errorf("encoding json: %w", err)
-	}
-	_, err = fmt.Fprint(stdout, string(output))
-	return err
+	return printFormatted("json", v)
 }
 
 type AddCmd struct {
@@ -95,11 +88,7 @@ func (o *AddCmd) Run() error {
 			ch.Tag = *o.Tag
 		}
 		if o.Parsers != nil {
-			for _, p := range *o.Parsers {
-				if p != "" {
-					ch.Pipeline = append(ch.Pipeline, p)
-				}
-			}
+			ch.Pipeline = filterPipe(*o.Parsers)
 		}
 		if o.Ingest != nil {
 			ch.Ingest = *o.Ingest
@@ -191,12 +180,7 @@ func (o *UpdCmd) Run() error {
 			ch.Tag = *o.Tag
 		}
 		if o.Parsers != nil {
-			ch.Pipeline = ch.Pipeline[:0]
-			for _, p := range *o.Parsers {
-				if p != "" {
-					ch.Pipeline = append(ch.Pipeline, p)
-				}
-			}
+			ch.Pipeline = filterPipe(*o.Parsers)
 		}
 		if o.Ingest != nil {
 			ch.Ingest = *o.Ingest
