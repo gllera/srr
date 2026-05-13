@@ -6,51 +6,52 @@ let nextLeft: number | undefined
 let nextRight: number | undefined
 
 export const filter = {
-   subs: new Map<number, number>(),
-   subTotal: 0,
+   channels: new Map<number, number>(),
+   chanTotal: 0,
    tokens: [] as string[],
    get active() {
       return this.tokens.length > 0
    },
-   matches(subId: number, chronIdx: number) {
-      const addIdx = this.subs.get(subId)
+   matches(chanId: number, chronIdx: number) {
+      const addIdx = this.channels.get(chanId)
       return addIdx !== undefined && chronIdx >= addIdx
    },
-   // subTotal is derived from the idx scan so it matches findRight/findLeft
+   // chanTotal is derived from the idx scan so it matches findRight/findLeft
    // reachability — sum-of-total_art can overstate when idx and db.gz disagree.
    clear() {
-      this.subs = new Map<number, number>()
-      for (const sub of Object.values(data.db.subscriptions)) if (sub.total_art) this.subs.set(sub.id, sub.add_idx ?? 0)
-      this.subTotal = data.countLeft(data.db.total_art, this.subs)
+      this.channels = new Map<number, number>()
+      for (const ch of Object.values(data.db.channels)) if (ch.total_art) this.channels.set(ch.id, ch.add_idx ?? 0)
+      this.chanTotal = data.countLeft(data.db.total_art, this.channels)
       this.tokens = []
    },
    set(tokens: string[]) {
       this.tokens = tokens
-      this.subs = new Map<number, number>()
+      this.channels = new Map<number, number>()
       for (const token of tokens) {
          const num = Number(token)
          if (Number.isFinite(num)) {
-            const sub = data.db.subscriptions[num]
-            if (sub?.total_art && !this.subs.has(num)) this.subs.set(num, sub.add_idx ?? 0)
+            const ch = data.db.channels[num]
+            if (ch?.total_art && !this.channels.has(num)) this.channels.set(num, ch.add_idx ?? 0)
          } else
-            for (const sub of Object.values(data.db.subscriptions))
-               if (sub.tag === token && sub.total_art && !this.subs.has(sub.id)) this.subs.set(sub.id, sub.add_idx ?? 0)
+            for (const ch of Object.values(data.db.channels))
+               if (ch.tag === token && ch.total_art && !this.channels.has(ch.id))
+                  this.channels.set(ch.id, ch.add_idx ?? 0)
       }
-      if (this.subs.size === 0) this.clear()
-      else this.subTotal = data.countLeft(data.db.total_art, this.subs)
+      if (this.channels.size === 0) this.clear()
+      else this.chanTotal = data.countLeft(data.db.total_art, this.channels)
    },
 }
 
 function showFeed(article: IArticle): IShowFeed {
-   const filteredLeft = data.countLeft(pos, filter.subs)
+   const filteredLeft = data.countLeft(pos, filter.channels)
    const matchesPos = filter.matches(article.s, pos) ? 1 : 0
-   const countRight = filter.subTotal - filteredLeft - matchesPos
+   const countRight = filter.chanTotal - filteredLeft - matchesPos
    return {
       article,
       has_left: filteredLeft > 0,
       has_right: countRight > 0,
       filtered: filter.active,
-      sub: data.db.subscriptions[article.s],
+      channel: data.db.channels[article.s],
       countRight,
    }
 }
@@ -75,8 +76,7 @@ let currentPrefetch: HTMLImageElement[] | null = null
 function schedulePrefetch(target: number) {
    if (target === -1 || typeof window.requestIdleCallback !== "function") return
    const my: HTMLImageElement[] = []
-   if (currentPrefetch)
-      for (const img of currentPrefetch) img.src = ""
+   if (currentPrefetch) for (const img of currentPrefetch) img.src = ""
    currentPrefetch = my
    window.requestIdleCallback(
       async () => {
@@ -113,18 +113,18 @@ function readSeen(): Record<string, number> {
 function getSeen(token: string): number | undefined {
    const seen = readSeen()
    const n = Number(token)
-   return Number.isFinite(n) ? seen["sub:" + n] : seen["tag:" + token]
+   return Number.isFinite(n) ? seen["chan:" + n] : seen["tag:" + token]
 }
 
 function recordSeen(article: IArticle) {
-   const sub = data.db.subscriptions[article.s]
-   if (!sub) return
+   const ch = data.db.channels[article.s]
+   if (!ch) return
    try {
       const seen = readSeen()
-      const subKey = "sub:" + article.s
-      const tagKey = sub.tag ? "tag:" + sub.tag : null
-      if (seen[subKey] === pos && (!tagKey || seen[tagKey] === pos)) return
-      seen[subKey] = pos
+      const chanKey = "chan:" + article.s
+      const tagKey = ch.tag ? "tag:" + ch.tag : null
+      if (seen[chanKey] === pos && (!tagKey || seen[tagKey] === pos)) return
+      seen[chanKey] = pos
       if (tagKey) seen[tagKey] = pos
       localStorage.setItem(SEEN_KEY, JSON.stringify(seen))
    } catch {}
@@ -134,11 +134,11 @@ export function pruneSeen() {
    try {
       const seen = readSeen()
       const tags = new Set<string>()
-      for (const sub of Object.values(data.db.subscriptions)) if (sub.tag) tags.add(sub.tag)
+      for (const ch of Object.values(data.db.channels)) if (ch.tag) tags.add(ch.tag)
       let changed = false
       for (const key of Object.keys(seen)) {
          const stale =
-            (key.startsWith("sub:") && !data.db.subscriptions[Number(key.slice(4))]) ||
+            (key.startsWith("chan:") && !data.db.channels[Number(key.slice(5))]) ||
             (key.startsWith("tag:") && !tags.has(key.slice(4)))
          if (stale) {
             delete seen[key]
@@ -156,7 +156,7 @@ function resolveNoMatch(): IShowFeed {
       has_left: false,
       has_right: false,
       filtered: filter.active,
-      sub: undefined,
+      channel: undefined,
       countRight: 0,
    }
 }
@@ -183,32 +183,32 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
    let target = posStr === "" ? NaN : Number(posStr)
    if (!Number.isFinite(target) || target < 0 || target >= data.db.total_art) target = data.db.total_art - 1
 
-   if (!filter.matches(data.getSubId(target), target)) return last()
+   if (!filter.matches(data.getChannelId(target), target)) return last()
    return resolve(target, true)
 }
 
 export async function left(): Promise<IShowFeed> {
-   const target = nextLeft ?? data.findLeft(pos - 1, filter.subs)
+   const target = nextLeft ?? data.findLeft(pos - 1, filter.channels)
    if (target === -1) throw new Error("no left match")
    const result = await resolve(target)
-   nextLeft = data.findLeft(pos - 1, filter.subs)
+   nextLeft = data.findLeft(pos - 1, filter.channels)
    schedulePrefetch(nextLeft)
    return result
 }
 
 export async function right(): Promise<IShowFeed> {
-   const target = nextRight ?? data.findRight(pos + 1, filter.subs)
+   const target = nextRight ?? data.findRight(pos + 1, filter.channels)
    if (target === -1) throw new Error("no right match")
    const result = await resolve(target)
-   nextRight = data.findRight(pos + 1, filter.subs)
+   nextRight = data.findRight(pos + 1, filter.channels)
    schedulePrefetch(nextRight)
    return result
 }
 
 export async function first(): Promise<IShowFeed> {
-   // No article from a sub with add_idx N exists below chronIdx N, so the
+   // No article from a channel with add_idx N exists below chronIdx N, so the
    // earliest matching article is at or after the smallest add_idx in filter.
-   const start = filter.subs.size > 0 ? Math.min(...filter.subs.values()) : 0
+   const start = filter.channels.size > 0 ? Math.min(...filter.channels.values()) : 0
    return goTo(start)
 }
 
@@ -217,13 +217,13 @@ export async function last(token?: string): Promise<IShowFeed> {
       if (token === "") filter.clear()
       else filter.set([token])
    }
-   const found = data.findLeft(data.db.total_art - 1, filter.subs)
+   const found = data.findLeft(data.db.total_art - 1, filter.channels)
    if (found === -1) return resolveNoMatch()
    return resolve(found)
 }
 
 function isValidSeen(idx: number): boolean {
-   return idx >= 0 && idx < data.db.total_art && filter.matches(data.getSubId(idx), idx)
+   return idx >= 0 && idx < data.db.total_art && filter.matches(data.getChannelId(idx), idx)
 }
 
 export async function switchFilter(token: string): Promise<IShowFeed> {
@@ -241,15 +241,15 @@ export async function switchFilter(token: string): Promise<IShowFeed> {
 // Jump to chronIdx, snapping forward to next match if filter is active.
 export async function goTo(idx: number): Promise<IShowFeed> {
    if (idx < 0 || idx >= data.db.total_art) return last()
-   const found = data.findRight(idx, filter.subs)
+   const found = data.findRight(idx, filter.channels)
    return found === -1 ? last() : resolve(found)
 }
 
 export function getFilterEntries(): string[] {
-   const { sortedTags, untagged } = data.groupSubsByTag()
+   const { sortedTags, untagged } = data.groupChannelsByTag()
    const entries = [""]
    for (const tag of sortedTags) entries.push(tag)
-   for (const sub of untagged) entries.push(String(sub.id))
+   for (const ch of untagged) entries.push(String(ch.id))
    return entries
 }
 
@@ -260,7 +260,7 @@ export function getCurrentFilterKey(): string {
    return ""
 }
 
-// "" guard: callers pass currentSource.tag/id which can be empty when no sub is set;
+// "" guard: callers pass currentChannel.tag/id which can be empty when no channel is set;
 // without it, an active filter on "" (impossible) or callers' "" would falsely match.
 export function isSingleFilter(token: string): boolean {
    return token !== "" && filter.tokens.length === 1 && filter.tokens[0] === token

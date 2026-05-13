@@ -35,7 +35,7 @@ Shared format between backend (writer) and frontend (reader).
 ### `db.gz`
 
 ```
-{ data_tog, fetched_at, total_art, next_pid, pack_off, subscriptions{}, first_fetched, fetched_at_cur? }
+{ data_tog, fetched_at, total_art, next_pid, pack_off, channels{}, first_fetched, fetched_at_cur? }
 ```
 
 | Field | Type | Description |
@@ -45,17 +45,17 @@ Shared format between backend (writer) and frontend (reader).
 | `total_art` | int | Total article count across all packs |
 | `next_pid` | int | Next data pack ID; packs with `id < next_pid` are finalized/immutable |
 | `pack_off` | int | Current offset in latest data pack |
-| `subscriptions` | object | JSON object keyed by subscription ID (number); may be `null` in JSON (default `{}`) |
+| `channels` | object | JSON object keyed by channel ID (number); may be `null` in JSON (default `{}`) |
 | `first_fetched` | int | Unix timestamp of first fetch that produced articles. `omitempty` |
 | `fetched_at_cur` | int | Running idx-time cursor in 8-hour blocks since `first_fetched`; persists `prevFetchedTS` across `PutArticles` calls so per-entry `delta_fetched_at` reflects real elapsed time. `omitempty` |
 
-### Subscriptions (`ISub`)
+### Channels (`IChannel`)
 
-`{ id, title, src:ISource[], total_art, add_idx, pipe?:string[], tag? }`
+`{ id, title, feeds:IFeed[], total_art, add_idx, pipe?:string[], tag? }`
 
-Each `ISource` is `{ url, ferr?, etag?, last_modified?, wm?, bg? }`. `wm` (Watermark) is the max published unix-second ever seen; `bg` (BoundaryGUIDs) is the FNV-32a hash array used for dedup. Multiple sources merge under one `sub_id` so a subscription is not bound to a single feed URL — useful when the 256-id ceiling matters or when several feeds form one logical channel. Per-source state (incremental fetch headers, last error, dedup watermark) lives on the source, not the subscription.
+Each `IFeed` is `{ url, ferr?, etag?, last_modified?, wm?, bg? }`. `wm` (Watermark) is the max published unix-second ever seen; `bg` (BoundaryGUIDs) is the FNV-32a hash array used for dedup. Multiple feeds merge under one `chan_id` so a channel is not bound to a single feed URL — useful when the 256-id ceiling matters or when several feeds form one logical channel. Per-feed state (incremental fetch headers, last error, dedup watermark) lives on the feed, not the channel.
 
-`subscriptions` is a JSON object (`Record<number, ISub>`) keyed by subscription ID. Backend struct: `Subscription` holds `Sources []*Source`. JSON uses short keys (`src`, `pipe`, `ferr`, `wm`, `bg`, etc.) — see `DBCore` struct tags.
+`channels` is a JSON object (`Record<number, IChannel>`) keyed by channel ID. Backend struct: `Channel` holds `Feeds []*Feed`. JSON uses short keys for per-feed state (`feeds`, `pipe`, `ferr`, `wm`, `bg`, etc.) — see `DBCore` struct tags.
 
 ### Pack Storage
 
@@ -67,19 +67,19 @@ Two gzip-compressed series under the feed directory:
 | `data/` | JSONL — one `ArticleData` object per line | At `PackSize` (tracked by `next_pid`/`pack_off`) |
 
 **idx/ format** — binary, little-endian, timestamps in 8-hour blocks (÷28800 on write, ×28800 on read):
-- Header: 259 × uint32 — `fetchedAt_base` (= `fetched_at_cur` at pack start, blocks since `first_fetched`), `packId_base`, `packOff_base`, then 256 subCount values (one per possible sub_id byte)
-- Entries (2 bytes each, after header): `sub_id:u8`, `delta_pack_id:1 << 7 | delta_fetched_at:7`
+- Header: 259 × uint32 — `fetchedAt_base` (= `fetched_at_cur` at pack start, blocks since `first_fetched`), `packId_base`, `packOff_base`, then 256 chanCount values (one per possible chan_id byte)
+- Entries (2 bytes each, after header): `chan_id:u8`, `delta_pack_id:1 << 7 | delta_fetched_at:7`
   - `delta_pack_id == 0` → same pack, offset++; `delta_pack_id == 1` → pack advances by 1, offset resets to 0
   - `delta_fetched_at` clamped to [0, 127]; excess carry rolls into subsequent entries
   - First entry of a batch carries the gap since the prior fetch (writer derives `prevFetchedTS = first_fetched/28800 + fetched_at_cur`)
 
-**data/ format** — JSONL, each line: `{"s":sub_id,"a":fetched_at,"p":published,"t":"title","l":"link","c":"content"}`
+**data/ format** — JSONL, each line: `{"s":chan_id,"a":fetched_at,"p":published,"t":"title","l":"link","c":"content"}`
 
-Short keys: `s`=sub_id, `a`=fetched_at, `p`=published (unix seconds, omitted if 0), `t`=title (omitted if empty), `l`=link (omitted if empty), `c`=content. Contains all article info.
+Short keys: `s`=chan_id, `a`=fetched_at, `p`=published (unix seconds, omitted if 0), `t`=title (omitted if empty), `l`=link (omitted if empty), `c`=content. Contains all article info.
 
 ### CDN Layout / Pack Addressing
 
-Each feed directory: `db.gz` + `idx/` + `data/`.
+Each channel directory: `db.gz` + `idx/` + `data/`.
 
 - **Finalized packs**: immutable, fetched with `cache: "force-cache"`. `idx/` packs are 0-indexed (`idx/0.gz`..`idx/N-1.gz`); `data/` packs start at id `1` (`data/1.gz`..) — the writer increments `next_pid` before writing the first entry, so `data/0.gz` is never produced.
 - **Latest pack**: `true.gz` or `false.gz` (toggled by `data_tog`)

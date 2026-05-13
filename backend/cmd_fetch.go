@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"srrb/ingest"
 	"srrb/mod"
 
 	"golang.org/x/sync/errgroup"
@@ -62,11 +63,14 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 		procPool := sync.Pool{
 			New: func() any { return mod.New() },
 		}
+		// Built-in FetchFuncs are stateless and external (shell) fetchers spawn
+		// per-call subprocesses, so one *ingest.Fetcher is concurrent-safe.
+		engine := ingest.New()
 
 		g, gctx := errgroup.WithContext(ctx)
 		g.SetLimit(globals.Workers)
 
-		for _, s := range db.Subscriptions() {
+		for _, ch := range db.Channels() {
 			if ctx.Err() != nil {
 				break
 			}
@@ -75,19 +79,19 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 				defer bufPool.Put(buf)
 				processor := procPool.Get().(*mod.Module)
 				defer procPool.Put(processor)
-				s.Fetch(gctx, client, buf, processor, db.core.FetchedAt)
+				ch.Fetch(gctx, client, buf, processor, engine, db.core.FetchedAt)
 				return nil
 			})
 		}
 		g.Wait()
 
 		total := 0
-		for _, s := range db.Subscriptions() {
-			total += len(s.newItems)
+		for _, ch := range db.Channels() {
+			total += len(ch.newItems)
 		}
 		articles := make([]*Item, 0, total)
-		for _, s := range db.Subscriptions() {
-			articles = append(articles, s.newItems...)
+		for _, ch := range db.Channels() {
+			articles = append(articles, ch.newItems...)
 		}
 		sort.SliceStable(articles, func(i, j int) bool {
 			return articles[i].Published < articles[j].Published
@@ -100,18 +104,18 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 			return err
 		}
 
-		var failed, totalSrc int
-		for _, s := range db.Subscriptions() {
-			for _, src := range s.Sources {
-				totalSrc++
-				if src.FetchError != "" {
+		var failed, totalFeeds int
+		for _, ch := range db.Channels() {
+			for _, feed := range ch.Feeds {
+				totalFeeds++
+				if feed.FetchError != "" {
 					failed++
 				}
 			}
 		}
 		slog.Info("fetch complete",
 			"new_articles", len(articles),
-			"fetched", totalSrc-failed,
+			"fetched", totalFeeds-failed,
 			"failed", failed,
 		)
 		return nil
