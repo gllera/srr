@@ -85,11 +85,7 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 		}
 		g.Wait()
 
-		total := 0
-		for _, ch := range db.Channels() {
-			total += len(ch.newItems)
-		}
-		articles := make([]*Item, 0, total)
+		var articles []*Item
 		for _, ch := range db.Channels() {
 			articles = append(articles, ch.newItems...)
 		}
