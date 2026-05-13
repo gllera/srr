@@ -12,21 +12,19 @@ import (
 func TestSelectPrecedence(t *testing.T) {
 	tests := []struct {
 		name          string
-		srcFetcher    string
-		subFetcher    string
+		chanFetcher   string
 		globalFetcher string
 		want          string
 	}{
-		{"source-wins", "src", "sub", "glob", "src"},
-		{"sub-wins-over-global", "", "sub", "glob", "sub"},
-		{"global-when-nothing-else", "", "", "glob", "glob"},
-		{"default-when-all-empty", "", "", "", "#rss"},
-		{"sub-overrides-default", "", "#telegram", "", "#telegram"},
+		{"channel-wins", "chan", "glob", "chan"},
+		{"global-when-channel-empty", "", "glob", "glob"},
+		{"default-when-all-empty", "", "", "#rss"},
+		{"channel-overrides-default", "#telegram", "", "#telegram"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := Select(tt.srcFetcher, tt.subFetcher, tt.globalFetcher); got != tt.want {
+			if got := Select(tt.chanFetcher, tt.globalFetcher); got != tt.want {
 				t.Errorf("got %q, want %q", got, tt.want)
 			}
 		})

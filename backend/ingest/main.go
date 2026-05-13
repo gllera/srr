@@ -89,10 +89,10 @@ func Register(name string, init func() FetchFunc) {
 	registry[name] = init
 }
 
-// Select applies the caller's precedence rule: source > subscription >
-// global default > built-in "#rss". Empty strings fall through.
-func Select(sourceFetcher, subFetcher, globalFetcher string) string {
-	for _, name := range []string{sourceFetcher, subFetcher, globalFetcher} {
+// Select applies the caller's precedence rule: channel > global default
+// > built-in "#rss". Empty strings fall through.
+func Select(channelFetcher, globalFetcher string) string {
+	for _, name := range []string{channelFetcher, globalFetcher} {
 		if name != "" {
 			return name
 		}

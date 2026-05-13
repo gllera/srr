@@ -38,21 +38,6 @@ func dispatchOnce(t *testing.T, feed *Feed, ch *Channel) []*Item {
 	return items
 }
 
-// Setting Feed.Ingest routes through ingest.New regardless of URL
-// shape — proves dedup+pipeline run on whatever items the strategy
-// returns, not on an RSS-only assumption.
-func TestFeedFetchDispatchesByIngestField(t *testing.T) {
-	feed := &Feed{URL: "irrelevant://value", Ingest: "#test-stub"}
-	ch := &Channel{Title: "T", Feeds: []*Feed{feed}}
-	items := dispatchOnce(t, feed, ch)
-	if len(items) != 2 {
-		t.Fatalf("got %d items, want 2 from stub", len(items))
-	}
-	if items[0].Title != "stub-1" || items[1].Title != "stub-2" {
-		t.Errorf("dispatcher returned items in unexpected order: %+v", items)
-	}
-}
-
 // Channel.Ingest takes effect when Feed.Ingest is empty.
 func TestFeedFetchInheritsFromChannel(t *testing.T) {
 	feed := &Feed{URL: "irrelevant://value"}
@@ -70,7 +55,7 @@ func TestPickIngestNilGlobals(t *testing.T) {
 	defer func() { globals = saved }()
 	globals = nil
 
-	if got := pickIngest(&Feed{}, &Channel{}); got != "#rss" {
+	if got := pickIngest(&Channel{}); got != "#rss" {
 		t.Errorf("got %q, want %q", got, "#rss")
 	}
 }
@@ -80,7 +65,7 @@ func TestPickIngestReadsGlobalDefault(t *testing.T) {
 	defer func() { globals = saved }()
 	globals = &Globals{DefaultIngest: "#telegram"}
 
-	if got := pickIngest(&Feed{}, &Channel{}); got != "#telegram" {
+	if got := pickIngest(&Channel{}); got != "#telegram" {
 		t.Errorf("got %q, want %q", got, "#telegram")
 	}
 }

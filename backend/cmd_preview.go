@@ -71,7 +71,7 @@ func (o *PreviewCmd) Run() error {
 	engine := ingest.New()
 
 	buf := make([]byte, globals.MaxFeedSize*(1<<10)+1)
-	name := ingest.Select(o.Ingest, "", globals.DefaultIngest)
+	name := ingest.Select(o.Ingest, globals.DefaultIngest)
 
 	result, err := engine.Fetch(ctx, name, client, buf, ingest.Request{
 		URL:     o.URL.String(),
