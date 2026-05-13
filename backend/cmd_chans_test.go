@@ -46,191 +46,6 @@ func wantErr(t *testing.T, err error, substr string) {
 	}
 }
 
-func TestAddFeedCmdAppendsAndPreservesState(t *testing.T) {
-	setupChannelsTestDB(t)
-	cmd := &AddFeedCmd{ID: 0, URLs: []string{"https://c.example.com/feed", "https://d.example.com/feed"}}
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-
-	ch := reopenDB(t).Channels()[0]
-	if len(ch.Feeds) != 4 {
-		t.Fatalf("Feeds len = %d, want 4", len(ch.Feeds))
-	}
-	wantURLs := []string{
-		"https://a.example.com/feed",
-		"https://b.example.com/feed",
-		"https://c.example.com/feed",
-		"https://d.example.com/feed",
-	}
-	for i, want := range wantURLs {
-		if ch.Feeds[i].URL != want {
-			t.Errorf("Feeds[%d].URL = %q, want %q", i, ch.Feeds[i].URL, want)
-		}
-	}
-	if ch.Feeds[0].ETag != "etag-a" || ch.Feeds[1].ETag != "etag-b" {
-		t.Errorf("existing per-feed state lost: ETags = %q, %q", ch.Feeds[0].ETag, ch.Feeds[1].ETag)
-	}
-	if ch.Feeds[0].Watermark != 0x111 || ch.Feeds[1].Watermark != 0x222 {
-		t.Errorf("existing Watermarks lost: %#x, %#x", ch.Feeds[0].Watermark, ch.Feeds[1].Watermark)
-	}
-}
-
-func TestAddFeedCmdIdempotentDuplicateInArgs(t *testing.T) {
-	setupChannelsTestDB(t)
-	cmd := &AddFeedCmd{ID: 0, URLs: []string{"https://c.example.com/feed", "https://c.example.com/feed"}}
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-
-	ch := reopenDB(t).Channels()[0]
-	if len(ch.Feeds) != 3 {
-		t.Errorf("Feeds len = %d, want 3 (deduped)", len(ch.Feeds))
-	}
-}
-
-func TestAddFeedCmdIdempotentAlreadyAFeed(t *testing.T) {
-	setupChannelsTestDB(t)
-	cmd := &AddFeedCmd{ID: 0, URLs: []string{"https://a.example.com/feed"}}
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-
-	ch := reopenDB(t).Channels()[0]
-	if len(ch.Feeds) != 2 {
-		t.Errorf("Feeds len = %d, want 2 (no-op)", len(ch.Feeds))
-	}
-	if ch.Feeds[0].ETag != "etag-a" {
-		t.Errorf("existing feed state clobbered: ETag = %q, want %q", ch.Feeds[0].ETag, "etag-a")
-	}
-}
-
-func TestAddFeedCmdMixedNewAndExisting(t *testing.T) {
-	setupChannelsTestDB(t)
-	cmd := &AddFeedCmd{ID: 0, URLs: []string{
-		"https://a.example.com/feed", // already exists
-		"https://c.example.com/feed", // new
-		"https://c.example.com/feed", // dup of arg
-		"https://b.example.com/feed", // already exists
-	}}
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-
-	ch := reopenDB(t).Channels()[0]
-	if len(ch.Feeds) != 3 {
-		t.Fatalf("Feeds len = %d, want 3", len(ch.Feeds))
-	}
-	if ch.Feeds[2].URL != "https://c.example.com/feed" {
-		t.Errorf("appended URL = %q, want c.example.com/feed", ch.Feeds[2].URL)
-	}
-}
-
-func TestAddFeedCmdInvalidURL(t *testing.T) {
-	setupChannelsTestDB(t)
-	cmd := &AddFeedCmd{ID: 0, URLs: []string{"not-a-url"}}
-	wantErr(t, cmd.Run(), "invalid url")
-}
-
-func TestAddFeedCmdChannelNotFound(t *testing.T) {
-	setupChannelsTestDB(t)
-	cmd := &AddFeedCmd{ID: 99, URLs: []string{"https://c.example.com/feed"}}
-	wantErr(t, cmd.Run(), "not found")
-}
-
-func TestAddFeedCmdIDTooLarge(t *testing.T) {
-	setupChannelsTestDB(t)
-	cmd := &AddFeedCmd{ID: 256, URLs: []string{"https://c.example.com/feed"}}
-	wantErr(t, cmd.Run(), "[0, 255]")
-}
-
-func TestAddFeedCmdIDNegative(t *testing.T) {
-	setupChannelsTestDB(t)
-	cmd := &AddFeedCmd{ID: -1, URLs: []string{"https://c.example.com/feed"}}
-	wantErr(t, cmd.Run(), "[0, 255]")
-}
-
-func TestAddFeedCmdAtomicOnError(t *testing.T) {
-	setupChannelsTestDB(t)
-	// Second URL is invalid — whole call must fail without appending the first.
-	cmd := &AddFeedCmd{ID: 0, URLs: []string{"https://c.example.com/feed", "not-a-url"}}
-	if err := cmd.Run(); err == nil {
-		t.Fatal("expected error")
-	}
-
-	ch := reopenDB(t).Channels()[0]
-	if len(ch.Feeds) != 2 {
-		t.Errorf("Feeds len = %d, want 2 (rollback)", len(ch.Feeds))
-	}
-}
-
-func TestRmFeedCmdRemovesAndPreservesState(t *testing.T) {
-	setupChannelsTestDB(t)
-	cmd := &RmFeedCmd{ID: 0, URLs: []string{"https://a.example.com/feed"}}
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-
-	ch := reopenDB(t).Channels()[0]
-	if len(ch.Feeds) != 1 {
-		t.Fatalf("Feeds len = %d, want 1", len(ch.Feeds))
-	}
-	if ch.Feeds[0].URL != "https://b.example.com/feed" {
-		t.Errorf("remaining URL = %q, want b.example.com/feed", ch.Feeds[0].URL)
-	}
-	if ch.Feeds[0].ETag != "etag-b" || ch.Feeds[0].Watermark != 0x222 {
-		t.Errorf("per-feed state lost on remaining feed: ETag=%q Watermark=%#x", ch.Feeds[0].ETag, ch.Feeds[0].Watermark)
-	}
-}
-
-func TestRmFeedCmdNotAFeed(t *testing.T) {
-	setupChannelsTestDB(t)
-	cmd := &RmFeedCmd{ID: 0, URLs: []string{"https://nope.example.com/feed"}}
-	wantErr(t, cmd.Run(), "not a feed")
-}
-
-func TestRmFeedCmdLeavesEmpty(t *testing.T) {
-	setupChannelsTestDB(t)
-	cmd := &RmFeedCmd{ID: 0, URLs: []string{
-		"https://a.example.com/feed",
-		"https://b.example.com/feed",
-	}}
-	wantErr(t, cmd.Run(), "no feeds")
-
-	// And nothing was committed.
-	ch := reopenDB(t).Channels()[0]
-	if len(ch.Feeds) != 2 {
-		t.Errorf("Feeds len = %d, want 2 (rollback)", len(ch.Feeds))
-	}
-}
-
-func TestRmFeedCmdDuplicateInArgs(t *testing.T) {
-	setupChannelsTestDB(t)
-	cmd := &RmFeedCmd{ID: 0, URLs: []string{
-		"https://a.example.com/feed",
-		"https://a.example.com/feed",
-	}}
-	wantErr(t, cmd.Run(), "duplicate")
-}
-
-func TestRmFeedCmdChannelNotFound(t *testing.T) {
-	setupChannelsTestDB(t)
-	cmd := &RmFeedCmd{ID: 99, URLs: []string{"https://a.example.com/feed"}}
-	wantErr(t, cmd.Run(), "not found")
-}
-
-func TestRmFeedCmdIDNegative(t *testing.T) {
-	setupChannelsTestDB(t)
-	cmd := &RmFeedCmd{ID: -1, URLs: []string{"https://a.example.com/feed"}}
-	wantErr(t, cmd.Run(), "[0, 255]")
-}
-
-func TestRmFeedCmdIDTooLarge(t *testing.T) {
-	setupChannelsTestDB(t)
-	cmd := &RmFeedCmd{ID: 256, URLs: []string{"https://a.example.com/feed"}}
-	wantErr(t, cmd.Run(), "[0, 255]")
-}
-
 // strPtr returns a pointer to its argument; useful for CLI flag-pointer fields.
 func strPtr(s string) *string          { return &s }
 func sliceStrPtr(v []string) *[]string { return &v }
@@ -529,6 +344,20 @@ func TestChanUpdAddURLIdempotent(t *testing.T) {
 	}
 }
 
+func TestChanUpdAddURLIdempotentDuplicateInArgs(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &UpdCmd{ID: 0, AddURLs: sliceStrPtr([]string{
+		"https://c.example.com/feed",
+		"https://c.example.com/feed",
+	})}
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := len(reopenDB(t).Channels()[0].Feeds); got != 3 {
+		t.Errorf("Feeds len = %d, want 3 (dup in args silently skipped)", got)
+	}
+}
+
 func TestChanUpdAddURLInvalid(t *testing.T) {
 	setupChannelsTestDB(t)
 	wantErr(t, (&UpdCmd{ID: 0, AddURLs: sliceStrPtr([]string{"not-a-url"})}).Run(), "invalid url")
@@ -715,5 +544,32 @@ func TestChanUpdNoFeedFlagsLeavesFeedsUntouched(t *testing.T) {
 	}
 	if ch.Feeds[0].Watermark != 0x111 || ch.Feeds[1].Watermark != 0x222 {
 		t.Errorf("Watermarks changed: %#x, %#x", ch.Feeds[0].Watermark, ch.Feeds[1].Watermark)
+	}
+}
+
+func TestChanUpdIDTooLarge(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &UpdCmd{ID: 256, AddURLs: sliceStrPtr([]string{"https://x.example.com/feed"})}
+	wantErr(t, cmd.Run(), "[0, 255]")
+}
+
+func TestChanUpdIDNegative(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &UpdCmd{ID: -1, AddURLs: sliceStrPtr([]string{"https://x.example.com/feed"})}
+	wantErr(t, cmd.Run(), "[0, 255]")
+}
+
+func TestChanUpdAddURLAtomicOnError(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &UpdCmd{ID: 0, AddURLs: sliceStrPtr([]string{
+		"https://c.example.com/feed",
+		"not-a-url",
+	})}
+	if err := cmd.Run(); err == nil {
+		t.Fatal("expected error")
+	}
+	ch := reopenDB(t).Channels()[0]
+	if len(ch.Feeds) != 2 {
+		t.Errorf("Feeds len = %d, want 2 (rollback)", len(ch.Feeds))
 	}
 }
