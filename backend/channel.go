@@ -16,8 +16,8 @@ type Channel struct {
 	Feeds    []*Feed  `json:"feeds"`
 	Tag      string   `json:"tag,omitempty"`
 	Pipeline []string `json:"pipe,omitempty"`
-	// Ingest is the channel-level default for feeds whose own
-	// Ingest field is empty. See Feed.Ingest.
+	// Ingest is the channel-level extraction strategy. Empty falls through
+	// to Globals.DefaultIngest → built-in "#rss".
 	Ingest   string `json:"ingest,omitempty"`
 	TotalArt int    `json:"total_art"`
 	AddIdx   int    `json:"add_idx"`

@@ -38,7 +38,7 @@ func dispatchOnce(t *testing.T, feed *Feed, ch *Channel) []*Item {
 	return items
 }
 
-// Channel.Ingest takes effect when Feed.Ingest is empty.
+// Channel-level ingest strategy is inherited by all feeds.
 func TestFeedFetchInheritsFromChannel(t *testing.T) {
 	feed := &Feed{URL: "irrelevant://value"}
 	ch := &Channel{Title: "T", Ingest: "#test-stub", Feeds: []*Feed{feed}}

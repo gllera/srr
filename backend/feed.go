@@ -12,12 +12,7 @@ import (
 )
 
 type Feed struct {
-	URL string `json:"url"`
-	// Ingest selects an extraction strategy: empty falls through to
-	// Channel.Ingest → Globals.DefaultIngest → built-in "#rss". "#name"
-	// resolves to a built-in (registered in the ingest package); anything
-	// else is treated as a shell command per the external-ingest protocol.
-	Ingest       string `json:"ingest,omitempty"`
+	URL          string `json:"url"`
 	ETag         string `json:"etag,omitempty"`
 	LastModified string `json:"last_modified,omitempty"`
 	// Watermark is the max published unix-second ever seen across fetches.
