@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"slices"
 	"sort"
 	"strings"
@@ -435,4 +436,108 @@ func parseApplyInput(data []byte) ([]*channelView, error) {
 		return []*channelView{&view}, nil
 	}
 	return nil, fmt.Errorf("input must be a channel object or array of channel objects")
+}
+
+type EditCmd struct {
+	ID int `arg:"" help:"Channel id to edit."`
+}
+
+func (o *EditCmd) Run() error {
+	editor := resolveEditor()
+	if editor == "" {
+		return fmt.Errorf("no editor found ($VISUAL, $EDITOR, vi)")
+	}
+
+	// 1. Load + serialize to a tempfile.
+	view, err := loadChannelView(o.ID)
+	if err != nil {
+		return err
+	}
+	original, err := json.MarshalIndent(view, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal channel: %w", err)
+	}
+
+	tmp, err := os.CreateTemp("", fmt.Sprintf("srr-chan-%d-*.json", o.ID))
+	if err != nil {
+		return fmt.Errorf("create tempfile: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(original); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("write tempfile: %w", err)
+	}
+	tmp.Close()
+
+	// 2. Spawn editor.
+	cmd := exec.Command(editor, tmpPath)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("editor exited with status %v (tempfile: %s): %w", cmd.ProcessState, tmpPath, err)
+	}
+
+	// 3. Re-read and check for changes.
+	edited, err := os.ReadFile(tmpPath)
+	if err != nil {
+		return fmt.Errorf("read edited file %s: %w", tmpPath, err)
+	}
+	if bytes.Equal(edited, original) {
+		os.Remove(tmpPath)
+		return nil
+	}
+
+	// 4. Parse + validate id.
+	var newView channelView
+	if err := json.Unmarshal(edited, &newView); err != nil {
+		return fmt.Errorf("invalid JSON in %s: %w", tmpPath, err)
+	}
+	if newView.ID == nil || *newView.ID != o.ID {
+		got := -1
+		if newView.ID != nil {
+			got = *newView.ID
+		}
+		return fmt.Errorf("edited document changed id from %d to %d; refusing to apply (tempfile: %s)", o.ID, got, tmpPath)
+	}
+
+	// 5. Apply via ApplyCmd's path.
+	apply := &ApplyCmd{}
+	apply.in = bytes.NewReader(edited)
+	if err := apply.Run(); err != nil {
+		return fmt.Errorf("%w (tempfile: %s)", err, tmpPath)
+	}
+	os.Remove(tmpPath)
+	return nil
+}
+
+// loadChannelView reads the DB unlocked (read-only) and returns the
+// channelView for ID. The DB lock for the apply step is acquired separately
+// inside ApplyCmd.Run.
+func loadChannelView(id int) (*channelView, error) {
+	var view *channelView
+	err := withDB(false, func(_ context.Context, db *DB) error {
+		ch, err := db.ChannelByID(id)
+		if err != nil {
+			return err
+		}
+		view = viewOf(ch)
+		return nil
+	})
+	return view, err
+}
+
+// resolveEditor returns the first non-empty of $VISUAL, $EDITOR, then "vi"
+// if available on PATH.
+func resolveEditor() string {
+	for _, env := range []string{"VISUAL", "EDITOR"} {
+		if v := os.Getenv(env); v != "" {
+			return v
+		}
+	}
+	if _, err := exec.LookPath("vi"); err == nil {
+		return "vi"
+	}
+	return ""
 }
