@@ -644,3 +644,144 @@ func TestChanShowIDNegative(t *testing.T) {
 	setupChannelsTestDB(t)
 	wantErr(t, (&ShowCmd{ID: -1, Format: "json"}).Run(), "[0, 255]")
 }
+
+// applyFromString runs ApplyCmd against an in-memory JSON payload.
+func applyFromString(t *testing.T, json string) error {
+	t.Helper()
+	cmd := &ApplyCmd{}
+	cmd.in = strings.NewReader(json)
+	return cmd.Run()
+}
+
+func TestChanApplySingleCreate(t *testing.T) {
+	setupEmptyDB(t)
+	err := applyFromString(t, `{"title":"NewCh","feeds":[{"url":"https://x.example.com/feed"}],"tag":"t"}`)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	db := reopenDB(t)
+	if len(db.Channels()) != 1 {
+		t.Fatalf("Channels len = %d, want 1", len(db.Channels()))
+	}
+	ch := db.Channels()[0]
+	if ch.Title != "NewCh" || ch.Tag != "t" {
+		t.Errorf("unexpected channel: %+v", ch)
+	}
+}
+
+func TestChanApplySingleUpdate(t *testing.T) {
+	setupChannelsTestDB(t)
+	err := applyFromString(t, `{"id":0,"title":"Renamed","feeds":[{"url":"https://a.example.com/feed"},{"url":"https://b.example.com/feed"}]}`)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	ch := reopenDB(t).Channels()[0]
+	if ch.Title != "Renamed" {
+		t.Errorf("Title = %q, want Renamed", ch.Title)
+	}
+}
+
+func TestChanApplyPreservesFeedState(t *testing.T) {
+	setupChannelsTestDB(t)
+	err := applyFromString(t, `{"id":0,"title":"Test","feeds":[{"url":"https://a.example.com/feed"},{"url":"https://c.example.com/feed"}]}`)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	ch := reopenDB(t).Channels()[0]
+	if ch.Feeds[0].ETag != "etag-a" {
+		t.Errorf("kept feed state lost: ETag = %q", ch.Feeds[0].ETag)
+	}
+	if ch.Feeds[1].URL != "https://c.example.com/feed" || ch.Feeds[1].ETag != "" {
+		t.Errorf("new feed not fresh: %+v", ch.Feeds[1])
+	}
+}
+
+func TestChanApplyArray(t *testing.T) {
+	setupEmptyDB(t)
+	err := applyFromString(t, `[
+		{"title":"A","feeds":[{"url":"https://a.example.com/feed"}]},
+		{"title":"B","feeds":[{"url":"https://b.example.com/feed"}]}
+	]`)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := len(reopenDB(t).Channels()); got != 2 {
+		t.Errorf("Channels len = %d, want 2", got)
+	}
+}
+
+func TestChanApplyAtomicRollback(t *testing.T) {
+	setupEmptyDB(t)
+	// Second item missing title -> whole input must reject without writes.
+	err := applyFromString(t, `[
+		{"title":"A","feeds":[{"url":"https://a.example.com/feed"}]},
+		{"feeds":[{"url":"https://b.example.com/feed"}]}
+	]`)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if got := len(reopenDB(t).Channels()); got != 0 {
+		t.Errorf("Channels len = %d, want 0 (rollback)", got)
+	}
+}
+
+func TestChanApplyAtomicRollbackOnBadURL(t *testing.T) {
+	setupEmptyDB(t)
+	// Second item has an invalid URL — parseFeeds rejects during apply,
+	// after entry A has been added in-memory. Disk should still rollback.
+	err := applyFromString(t, `[
+		{"title":"A","feeds":[{"url":"https://a.example.com/feed"}]},
+		{"title":"B","feeds":[{"url":"not-a-url"}]}
+	]`)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if got := len(reopenDB(t).Channels()); got != 0 {
+		t.Errorf("Channels len = %d, want 0 (disk rollback)", got)
+	}
+}
+
+func TestChanApplyNullArrayEntry(t *testing.T) {
+	setupEmptyDB(t)
+	err := applyFromString(t, `[{"title":"A","feeds":[{"url":"https://a.example.com/feed"}]}, null]`)
+	wantErr(t, err, "null entry")
+	if got := len(reopenDB(t).Channels()); got != 0 {
+		t.Errorf("Channels len = %d, want 0", got)
+	}
+}
+
+func TestChanApplyIdMissingErrors(t *testing.T) {
+	setupChannelsTestDB(t)
+	err := applyFromString(t, `{"id":99,"title":"x","feeds":[{"url":"https://x.example.com/feed"}]}`)
+	wantErr(t, err, "not found")
+}
+
+func TestChanApplyInvalidJSON(t *testing.T) {
+	setupEmptyDB(t)
+	err := applyFromString(t, `{not json`)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestChanApplyCreateMissingFeeds(t *testing.T) {
+	setupEmptyDB(t)
+	err := applyFromString(t, `{"title":"X"}`)
+	wantErr(t, err, "feeds required")
+}
+
+func TestChanApplyIgnoresReadOnlyFields(t *testing.T) {
+	setupChannelsTestDB(t)
+	// Input includes "etag" on a feed; stored ETag must NOT be overwritten.
+	err := applyFromString(t, `{"id":0,"title":"Test","feeds":[
+		{"url":"https://a.example.com/feed","etag":"bogus-from-input"},
+		{"url":"https://b.example.com/feed"}
+	]}`)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	ch := reopenDB(t).Channels()[0]
+	if ch.Feeds[0].ETag != "etag-a" {
+		t.Errorf("apply leaked input etag into stored state: %q", ch.Feeds[0].ETag)
+	}
+}
