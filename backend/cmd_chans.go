@@ -328,74 +328,75 @@ func (o *ApplyCmd) Run() error {
 	}
 
 	return withDB(true, func(ctx context.Context, db *DB) error {
-		// Disk writes are atomic: Commit is only called after all entries
-		// apply successfully. The validation loop catches the cheap shape
-		// errors (missing title/feeds, unknown id) before any mutation
-		// happens; per-URL validation runs inside parseFeeds during apply.
-		// A late URL-validation failure rolls back in-memory state by
-		// abandoning the closure without committing.
-		type pending struct {
-			view *channelView
-			ch   *Channel // existing channel for update; nil for create
-		}
-		ops := make([]pending, 0, len(views))
-		for i, v := range views {
-			if v == nil {
-				return fmt.Errorf("channel #%d: null entry", i)
-			}
-			if v.Title == "" {
-				return fmt.Errorf("channel #%d: title required", i)
-			}
-			if len(v.Feeds) == 0 {
-				return fmt.Errorf("channel #%d: feeds required", i)
-			}
-			if v.ID == nil {
-				ops = append(ops, pending{view: v})
-				continue
-			}
-			ch, err := db.ChannelByID(*v.ID)
-			if err != nil {
-				return err
-			}
-			ops = append(ops, pending{view: v, ch: ch})
-		}
-
-		// Apply.
-		for _, op := range ops {
-			urls := make([]string, len(op.view.Feeds))
-			for i, f := range op.view.Feeds {
-				urls[i] = f.URL
-			}
-			var prevFeeds []*Feed
-			if op.ch != nil {
-				prevFeeds = op.ch.Feeds
-			}
-			feeds, err := parseFeeds(urls, prevFeeds)
-			if err != nil {
-				return err
-			}
-
-			if op.ch == nil {
-				ch := &Channel{
-					Title:    op.view.Title,
-					Feeds:    feeds,
-					Tag:      op.view.Tag,
-					Pipeline: append([]string(nil), op.view.Pipe...),
-					Ingest:   op.view.Ingest,
-				}
-				if err := db.AddChannel(ch); err != nil {
-					return err
-				}
-			} else {
-				op.ch.Title = op.view.Title
-				op.ch.Feeds = feeds
-				op.ch.Tag = op.view.Tag
-				op.ch.Pipeline = append([]string(nil), op.view.Pipe...)
-				op.ch.Ingest = op.view.Ingest
-			}
-		}
-		return db.Commit(ctx)
+		return applyViews(ctx, db, views)
 	})
+}
+
+// applyViews validates the whole batch, then applies it. Commit only runs
+// if every entry validates and applies cleanly — a late failure abandons
+// the closure with the in-memory mutations unpersisted, so the on-disk
+// db.gz stays at the pre-apply state.
+func applyViews(ctx context.Context, db *DB, views []*channelView) error {
+	type pending struct {
+		view *channelView
+		ch   *Channel // existing channel for update; nil for create
+	}
+	ops := make([]pending, 0, len(views))
+	for i, v := range views {
+		if v == nil {
+			return fmt.Errorf("channel #%d: null entry", i)
+		}
+		if v.Title == "" {
+			return fmt.Errorf("channel #%d: title required", i)
+		}
+		if len(v.Feeds) == 0 {
+			return fmt.Errorf("channel #%d: feeds required", i)
+		}
+		if v.ID == nil {
+			ops = append(ops, pending{view: v})
+			continue
+		}
+		ch, err := db.ChannelByID(*v.ID)
+		if err != nil {
+			return err
+		}
+		ops = append(ops, pending{view: v, ch: ch})
+	}
+
+	for _, op := range ops {
+		urls := make([]string, len(op.view.Feeds))
+		for i, f := range op.view.Feeds {
+			urls[i] = f.URL
+		}
+		var prevFeeds []*Feed
+		if op.ch != nil {
+			prevFeeds = op.ch.Feeds
+		}
+		feeds, err := parseFeeds(urls, prevFeeds)
+		if err != nil {
+			return err
+		}
+
+		target := op.ch
+		if target == nil {
+			target = &Channel{}
+		}
+		writeChannelView(target, op.view, feeds)
+		if op.ch == nil {
+			if err := db.AddChannel(target); err != nil {
+				return err
+			}
+		}
+	}
+	return db.Commit(ctx)
+}
+
+func writeChannelView(ch *Channel, v *channelView, feeds []*Feed) {
+	ch.Title = v.Title
+	ch.Feeds = feeds
+	ch.Tag = v.Tag
+	ch.Pipeline = append([]string(nil), v.Pipe...)
+	ch.Ingest = v.Ingest
 }
 
 // parseApplyInput accepts either a single channelView or an array.
@@ -486,10 +487,10 @@ func (o *EditCmd) Run() error {
 		return fmt.Errorf("edited document changed id from %d to %d; refusing to apply (tempfile: %s)", o.ID, got, tmpPath)
 	}
 
-	// 5. Apply via ApplyCmd's path.
-	apply := &ApplyCmd{}
-	apply.in = bytes.NewReader(edited)
-	if err := apply.Run(); err != nil {
+	// 5. Apply.
+	if err := withDB(true, func(ctx context.Context, db *DB) error {
+		return applyViews(ctx, db, []*channelView{&newView})
+	}); err != nil {
 		return fmt.Errorf("%w (tempfile: %s)", err, tmpPath)
 	}
 	os.Remove(tmpPath)
@@ -498,7 +499,7 @@ func (o *EditCmd) Run() error {
 
 // loadChannelView reads the DB unlocked (read-only) and returns the
 // channelView for ID. The DB lock for the apply step is acquired separately
-// inside ApplyCmd.Run.
+// in EditCmd.Run.
 func loadChannelView(id int) (*channelView, error) {
 	var view *channelView
 	err := withDB(false, func(_ context.Context, db *DB) error {
