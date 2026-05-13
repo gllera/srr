@@ -4,12 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"slices"
 	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
+
+// stdout is the destination for printFormatted. Tests substitute this to
+// capture command output without spawning a subprocess.
+var stdout io.Writer = os.Stdout
 
 func printFormatted(format string, v any) error {
 	var output []byte
@@ -23,7 +29,9 @@ func printFormatted(format string, v any) error {
 	if err != nil {
 		return fmt.Errorf("encoding %s: %w", format, err)
 	}
-	fmt.Printf("%s\n", output)
+	if _, err := fmt.Fprintf(stdout, "%s\n", output); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -32,8 +40,8 @@ func printJSON(v any) error {
 	if err != nil {
 		return fmt.Errorf("encoding json: %w", err)
 	}
-	fmt.Print(string(output))
-	return nil
+	_, err = fmt.Fprint(stdout, string(output))
+	return err
 }
 
 type AddCmd struct {
@@ -99,6 +107,40 @@ func (o *AddCmd) Run() error {
 		}
 		return db.Commit(ctx)
 	})
+}
+
+// channelView is the canonical JSON/YAML shape for channel records. Used
+// by `chan ls`, `chan show`, `chan apply`, and `chan edit`. ID is a pointer
+// so `apply` can distinguish "absent => create" from "id 0 => update".
+type channelView struct {
+	ID     *int       `json:"id,omitempty" yaml:"id,omitempty"`
+	Title  string     `json:"title"        yaml:"title"`
+	Feeds  []feedView `json:"feeds"        yaml:"feeds"`
+	Tag    string     `json:"tag,omitempty" yaml:"tag,omitempty"`
+	Pipe   []string   `json:"pipe,omitempty" yaml:"pipe,omitempty"`
+	Ingest string     `json:"ingest,omitempty" yaml:"ingest,omitempty"`
+}
+
+type feedView struct {
+	URL   string `json:"url" yaml:"url"`
+	Error string `json:"error,omitempty" yaml:"error,omitempty"`
+}
+
+// viewOf builds an output channelView for a stored Channel.
+func viewOf(ch *Channel) *channelView {
+	feeds := make([]feedView, len(ch.Feeds))
+	for i, f := range ch.Feeds {
+		feeds[i] = feedView{URL: f.URL, Error: f.FetchError}
+	}
+	id := ch.id
+	return &channelView{
+		ID:     &id,
+		Title:  ch.Title,
+		Feeds:  feeds,
+		Tag:    ch.Tag,
+		Pipe:   append([]string(nil), ch.Pipeline...),
+		Ingest: ch.Ingest,
+	}
 }
 
 type UpdCmd struct {
@@ -239,40 +281,16 @@ type LsCmd struct {
 
 func (o *LsCmd) Run() error {
 	return withDB(false, func(_ context.Context, db *DB) error {
-		type lsFeed struct {
-			URL   string `json:"url" yaml:"url"`
-			Error string `json:"error,omitempty" yaml:"error,omitempty"`
-		}
-		type lsChannel struct {
-			ID     int      `json:"id" yaml:"id"`
-			Title  string   `json:"title" yaml:"title"`
-			Feeds  []lsFeed `json:"feeds" yaml:"feeds"`
-			Tag    string   `json:"tag,omitempty" yaml:"tag,omitempty"`
-			Ingest string   `json:"ingest,omitempty" yaml:"ingest,omitempty"`
-		}
-
-		channelsList := make([]*lsChannel, 0, len(db.Channels()))
+		out := make([]*channelView, 0, len(db.Channels()))
 		for _, ch := range db.Channels() {
 			if o.Tag != nil && ch.Tag != *o.Tag {
 				continue
 			}
-			feeds := make([]lsFeed, len(ch.Feeds))
-			for i, f := range ch.Feeds {
-				feeds[i] = lsFeed{URL: f.URL, Error: f.FetchError}
-			}
-			channelsList = append(channelsList, &lsChannel{
-				ID:     ch.id,
-				Title:  ch.Title,
-				Feeds:  feeds,
-				Tag:    ch.Tag,
-				Ingest: ch.Ingest,
-			})
+			out = append(out, viewOf(ch))
 		}
-
-		sort.Slice(channelsList, func(i, j int) bool {
-			return strings.ToLower(channelsList[i].Title) < strings.ToLower(channelsList[j].Title)
+		sort.Slice(out, func(i, j int) bool {
+			return strings.ToLower(out[i].Title) < strings.ToLower(out[j].Title)
 		})
-
-		return printFormatted(o.Format, &channelsList)
+		return printFormatted(o.Format, out)
 	})
 }
