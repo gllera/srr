@@ -450,3 +450,121 @@ func TestChannelURLsEmpty(t *testing.T) {
 		t.Errorf("URLs() = %q, want empty", got)
 	}
 }
+
+func TestChanUpdRequiresFieldFlag(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &UpdCmd{ID: 0}
+	wantErr(t, cmd.Run(), "nothing to update")
+}
+
+func TestChanUpdChannelNotFound(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &UpdCmd{ID: 99, Title: strPtr("X")}
+	wantErr(t, cmd.Run(), "not found")
+}
+
+func TestChanUpdChangesTitle(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &UpdCmd{ID: 0, Title: strPtr("New Title")}
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	ch := reopenDB(t).Channels()[0]
+	if ch.Title != "New Title" {
+		t.Errorf("Title = %q, want %q", ch.Title, "New Title")
+	}
+	if len(ch.Feeds) != 2 {
+		t.Errorf("Feeds len = %d, want 2 (untouched)", len(ch.Feeds))
+	}
+}
+
+func TestChanUpdEmptyTitleRejected(t *testing.T) {
+	setupChannelsTestDB(t)
+	wantErr(t, (&UpdCmd{ID: 0, Title: strPtr("")}).Run(), "title cannot be empty")
+	if got := reopenDB(t).Channels()[0].Title; got != "Test" {
+		t.Errorf("Title = %q, want %q (should not have committed)", got, "Test")
+	}
+}
+
+func TestChanUpdClearsTag(t *testing.T) {
+	setupChannelsTestDB(t)
+	if err := (&UpdCmd{ID: 0, Tag: strPtr("tech")}).Run(); err != nil {
+		t.Fatalf("set tag: %v", err)
+	}
+	if reopenDB(t).Channels()[0].Tag != "tech" {
+		t.Fatal("setup: tag not set")
+	}
+	if err := (&UpdCmd{ID: 0, Tag: strPtr("")}).Run(); err != nil {
+		t.Fatalf("clear tag: %v", err)
+	}
+	if got := reopenDB(t).Channels()[0].Tag; got != "" {
+		t.Errorf("Tag = %q, want \"\"", got)
+	}
+}
+
+func TestChanUpdSetsPipeline(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &UpdCmd{ID: 0, Parsers: sliceStrPtr([]string{"#sanitize", "#minify"})}
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	ch := reopenDB(t).Channels()[0]
+	if len(ch.Pipeline) != 2 || ch.Pipeline[0] != "#sanitize" || ch.Pipeline[1] != "#minify" {
+		t.Errorf("Pipeline = %v, want [#sanitize #minify]", ch.Pipeline)
+	}
+}
+
+func TestChanUpdClearsPipeline(t *testing.T) {
+	setupChannelsTestDB(t)
+	if err := (&UpdCmd{ID: 0, Parsers: sliceStrPtr([]string{"#sanitize"})}).Run(); err != nil {
+		t.Fatalf("set pipeline: %v", err)
+	}
+	if err := (&UpdCmd{ID: 0, Parsers: sliceStrPtr([]string{""})}).Run(); err != nil {
+		t.Fatalf("clear pipeline: %v", err)
+	}
+	ch := reopenDB(t).Channels()[0]
+	if len(ch.Pipeline) != 0 {
+		t.Errorf("Pipeline = %v, want empty", ch.Pipeline)
+	}
+}
+
+func TestChanUpdSetsIngest(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &UpdCmd{ID: 0, Ingest: strPtr("#telegram")}
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := reopenDB(t).Channels()[0].Ingest; got != "#telegram" {
+		t.Errorf("Ingest = %q, want %q", got, "#telegram")
+	}
+}
+
+func TestChanUpdClearsIngest(t *testing.T) {
+	setupChannelsTestDB(t)
+	if err := (&UpdCmd{ID: 0, Ingest: strPtr("#telegram")}).Run(); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if err := (&UpdCmd{ID: 0, Ingest: strPtr("")}).Run(); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if got := reopenDB(t).Channels()[0].Ingest; got != "" {
+		t.Errorf("Ingest = %q, want \"\"", got)
+	}
+}
+
+func TestChanUpdNoFeedFlagsLeavesFeedsUntouched(t *testing.T) {
+	setupChannelsTestDB(t)
+	if err := (&UpdCmd{ID: 0, Title: strPtr("X")}).Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	ch := reopenDB(t).Channels()[0]
+	if len(ch.Feeds) != 2 {
+		t.Fatalf("Feeds len = %d, want 2 (untouched)", len(ch.Feeds))
+	}
+	if ch.Feeds[0].ETag != "etag-a" || ch.Feeds[1].ETag != "etag-b" {
+		t.Errorf("ETags changed: %q, %q", ch.Feeds[0].ETag, ch.Feeds[1].ETag)
+	}
+	if ch.Feeds[0].Watermark != 0x111 || ch.Feeds[1].Watermark != 0x222 {
+		t.Errorf("Watermarks changed: %#x, %#x", ch.Feeds[0].Watermark, ch.Feeds[1].Watermark)
+	}
+}

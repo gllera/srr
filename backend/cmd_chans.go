@@ -101,6 +101,47 @@ func (o *AddCmd) Run() error {
 	})
 }
 
+type UpdCmd struct {
+	ID      int       `arg:""              help:"Channel id to update."`
+	Title   *string   `short:"t" optional:""              help:"Channel title (empty rejected)."`
+	Tag     *string   `short:"g" optional:""              help:"Channel tag. Empty (\"\") to clear."`
+	Parsers *[]string `short:"p" optional:""              help:"Channel parsers commands. Empty (\"\") to clear."`
+	Ingest  *string   `short:"i" optional:""              help:"Channel ingest strategy. Empty (\"\") to clear."`
+}
+
+func (o *UpdCmd) Run() error {
+	if o.Title == nil && o.Tag == nil && o.Parsers == nil && o.Ingest == nil {
+		return fmt.Errorf("nothing to update")
+	}
+	return withDB(true, func(ctx context.Context, db *DB) error {
+		ch, err := db.ChannelByID(o.ID)
+		if err != nil {
+			return err
+		}
+		if o.Title != nil {
+			if *o.Title == "" {
+				return fmt.Errorf("title cannot be empty")
+			}
+			ch.Title = *o.Title
+		}
+		if o.Tag != nil {
+			ch.Tag = *o.Tag
+		}
+		if o.Parsers != nil {
+			ch.Pipeline = ch.Pipeline[:0]
+			for _, p := range *o.Parsers {
+				if p != "" {
+					ch.Pipeline = append(ch.Pipeline, p)
+				}
+			}
+		}
+		if o.Ingest != nil {
+			ch.Ingest = *o.Ingest
+		}
+		return db.Commit(ctx)
+	})
+}
+
 type AddFeedCmd struct {
 	ID   int      `arg:""            help:"Channel id."`
 	URLs []string `arg:"" name:"url" help:"URL(s) to add."`
