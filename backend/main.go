@@ -18,37 +18,38 @@ var version = "development"
 var globals *Globals
 
 type Globals struct {
-	Workers     int    `short:"w" default:"${nproc}" env:"SRR_WORKERS"       help:"Number of concurrent downloads."`
-	PackSize    int    `short:"s" default:"200"      env:"SRR_PACK_SIZE"     help:"Target pack size in KB."`
-	MaxFeedSize int    `short:"m" default:"5000"     env:"SRR_MAX_FEED_SIZE" help:"Max feed download size in KB."`
-	Store       string `short:"o" default:"packs"    env:"SRR_STORE"         help:"Storage destination path."`
-	Force       bool   `                             env:"SRR_FORCE"         help:"Override DB write lock if needed."`
-	Debug       bool   `short:"d"                    env:"SRR_DEBUG"         help:"Enable debug mode."`
-	CdnURL      string `hidden:""                    env:"SRR_CDN_URL"       help:"CDN URL for frontend builds."`
+	Workers       int    `short:"w" default:"${nproc}" env:"SRR_WORKERS"       help:"Number of concurrent downloads."`
+	PackSize      int    `short:"s" default:"200"      env:"SRR_PACK_SIZE"     help:"Target pack size in KB."`
+	MaxFeedSize   int    `short:"m" default:"5000"     env:"SRR_MAX_FEED_SIZE" help:"Max feed download size in KB."`
+	Store         string `short:"o" default:"packs"    env:"SRR_STORE"         help:"Storage destination path."`
+	DefaultIngest string `                             env:"SRR_INGEST"        help:"Default ingest strategy for sources without an explicit override (e.g. '#rss', '#telegram', or a shell command)."`
+	Force         bool   `                             env:"SRR_FORCE"         help:"Override DB write lock if needed."`
+	Debug         bool   `short:"d"                    env:"SRR_DEBUG"         help:"Enable debug mode."`
+	CdnURL        string `hidden:""                    env:"SRR_CDN_URL"       help:"CDN URL for frontend builds."`
 }
 
-type SubGroup struct {
-	Add    AddCmd    `cmd:"" help:"Subscribe to RSS or update an existing subscription."`
-	Rm     RmCmd     `cmd:"" help:"Unsubscribe from RSS(s)."`
-	AddSrc AddSrcCmd `cmd:"" help:"Add URL(s) to an existing subscription."`
-	RmSrc  RmSrcCmd  `cmd:"" help:"Remove URL(s) from an existing subscription."`
-	Ls     LsCmd     `cmd:"" help:"List subscriptions."`
-	Import ImportCmd `cmd:"" help:"Import opml subscriptions file."`
+type ChannelGroup struct {
+	Add     AddCmd     `cmd:"" help:"Subscribe to RSS or update an existing channel."`
+	Rm      RmCmd      `cmd:"" help:"Unsubscribe from channel(s)."`
+	AddFeed AddFeedCmd `cmd:"" help:"Add URL(s) to an existing channel."`
+	RmFeed  RmFeedCmd  `cmd:"" help:"Remove URL(s) from an existing channel."`
+	Ls      LsCmd      `cmd:"" help:"List channels."`
+	Import  ImportCmd  `cmd:"" help:"Import opml channels file."`
 }
 
 type ArtGroup struct {
-	Fetch FetchCmd `cmd:"" help:"Fetch subscriptions articles."`
+	Fetch FetchCmd `cmd:"" help:"Fetch channel articles."`
 	Ls    ArtCmd   `cmd:"" help:"List stored articles."`
 }
 
 type CLI struct {
 	Globals
-	Sub     SubGroup   `cmd:"" aliases:"s" help:"Subscription management."`
-	Art     ArtGroup   `cmd:"" aliases:"a" help:"Article management."`
-	Preview PreviewCmd `cmd:"" aliases:"p" help:"Preview processed feed articles in a browser."`
-	Config  ConfigCmd  `cmd:"" aliases:"c" help:"Print resolved configuration."`
-	Inspect InspectCmd `cmd:"" aliases:"i" help:"Inspect pack consistency (validate idx<->data, debug chronIdx lookup)."`
-	Version VersionCmd `cmd:"" help:"Print version information."`
+	Chan    ChannelGroup `cmd:"" aliases:"ch" help:"Channel management."`
+	Art     ArtGroup     `cmd:"" aliases:"a" help:"Article management."`
+	Preview PreviewCmd   `cmd:"" aliases:"p" help:"Preview processed feed articles in a browser."`
+	Config  ConfigCmd    `cmd:"" aliases:"c" help:"Print resolved configuration."`
+	Inspect InspectCmd   `cmd:"" aliases:"i" help:"Inspect pack consistency (validate idx<->data, debug chronIdx lookup)."`
+	Version VersionCmd   `cmd:"" help:"Print version information."`
 }
 
 type VersionCmd struct{}

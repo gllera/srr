@@ -45,14 +45,14 @@ type DB struct {
 }
 
 type DBCore struct {
-	DataToggle      bool                  `json:"data_tog"`
-	FetchedAt       int64                 `json:"fetched_at"`
-	TotalArticles   int                   `json:"total_art"`
-	NextPackID      int                   `json:"next_pid"`
-	PackOffset      int                   `json:"pack_off"`
-	FirstFetchedAt  int64                 `json:"first_fetched,omitempty"`
-	FetchedAtCursor int                   `json:"fetched_at_cur,omitempty"`
-	Subscriptions   map[int]*Subscription `json:"subscriptions"`
+	DataToggle      bool             `json:"data_tog"`
+	FetchedAt       int64            `json:"fetched_at"`
+	TotalArticles   int              `json:"total_art"`
+	NextPackID      int              `json:"next_pid"`
+	PackOffset      int              `json:"pack_off"`
+	FirstFetchedAt  int64            `json:"first_fetched,omitempty"`
+	FetchedAtCursor int              `json:"fetched_at_cur,omitempty"`
+	Channels        map[int]*Channel `json:"channels"`
 }
 
 // withDB opens the DB, runs fn, and ensures Close. Use for commands that
@@ -108,8 +108,8 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 		}
 	}
 
-	for id, s := range db.core.Subscriptions {
-		s.id = id
+	for id, ch := range db.core.Channels {
+		ch.id = id
 	}
 	return db, nil
 }
@@ -137,38 +137,38 @@ func (o *DB) Commit(ctx context.Context) error {
 	return o.AtomicPut(ctx, dbFileKey, &buf)
 }
 
-func (o *DB) Subscriptions() map[int]*Subscription {
-	return o.core.Subscriptions
+func (o *DB) Channels() map[int]*Channel {
+	return o.core.Channels
 }
 
-func (o *DB) AddSubscription(s *Subscription) error {
-	if o.core.Subscriptions == nil {
-		o.core.Subscriptions = map[int]*Subscription{}
+func (o *DB) AddChannel(c *Channel) error {
+	if o.core.Channels == nil {
+		o.core.Channels = map[int]*Channel{}
 	}
 	for id := 0; id <= 255; id++ {
-		if _, ok := o.core.Subscriptions[id]; !ok {
-			s.id = id
-			s.AddIdx = o.core.TotalArticles
-			o.core.Subscriptions[id] = s
+		if _, ok := o.core.Channels[id]; !ok {
+			c.id = id
+			c.AddIdx = o.core.TotalArticles
+			o.core.Channels[id] = c
 			return nil
 		}
 	}
-	return fmt.Errorf("maximum number of subscriptions reached (256)")
+	return fmt.Errorf("maximum number of channels reached (256)")
 }
 
-func (o *DB) RemoveSubscription(id int) {
-	delete(o.core.Subscriptions, id)
+func (o *DB) RemoveChannel(id int) {
+	delete(o.core.Channels, id)
 }
 
-func (o *DB) SubByID(id int) (*Subscription, error) {
+func (o *DB) ChannelByID(id int) (*Channel, error) {
 	if id < 0 || id > 255 {
-		return nil, fmt.Errorf("subscription id must be in [0, 255]")
+		return nil, fmt.Errorf("channel id must be in [0, 255]")
 	}
-	sub := o.core.Subscriptions[id]
-	if sub == nil {
-		return nil, fmt.Errorf("subscription id %d not found", id)
+	ch := o.core.Channels[id]
+	if ch == nil {
+		return nil, fmt.Errorf("channel id %d not found", id)
 	}
-	return sub, nil
+	return ch, nil
 }
 
 func (o *DB) readGz(ctx context.Context, key string) ([]byte, error) {

@@ -7,7 +7,7 @@ import (
 )
 
 type ArtCmd struct {
-	ID     []int    `short:"i" optional:"" help:"Filter by subscription ID(s)."`
+	ID     []int    `short:"i" optional:"" help:"Filter by channel ID(s)."`
 	Tag    []string `short:"g" optional:"" help:"Filter by tag(s)."`
 	Limit  int      `short:"l" default:"50" help:"Max articles to return."`
 	Before *int     `short:"b" optional:"" help:"Return articles before this artID (exclusive). Omit for newest."`
@@ -18,7 +18,7 @@ type idxEntry struct {
 	FetchedAt  int64
 	PackID     int
 	PackOffset int
-	SubID      int
+	ChannelID  int
 }
 
 type articleResult struct {
@@ -49,9 +49,9 @@ func (o *ArtCmd) Run() error {
 				filter[id] = true
 			}
 			for _, tag := range o.Tag {
-				for _, s := range db.Subscriptions() {
-					if s.Tag == tag {
-						filter[s.id] = true
+				for _, ch := range db.Channels() {
+					if ch.Tag == tag {
+						filter[ch.id] = true
 					}
 				}
 			}
@@ -64,7 +64,7 @@ func (o *ArtCmd) Run() error {
 
 		filteredTotal := 0
 		for _, e := range entries {
-			if filter == nil || filter[e.SubID] {
+			if filter == nil || filter[e.ChannelID] {
 				filteredTotal++
 			}
 		}
@@ -84,7 +84,7 @@ func (o *ArtCmd) Run() error {
 
 		for i := startIdx; i >= 0 && len(results) < o.Limit; i-- {
 			e := &entries[i]
-			if filter != nil && !filter[e.SubID] {
+			if filter != nil && !filter[e.ChannelID] {
 				continue
 			}
 			results = append(results, articleResult{
@@ -148,11 +148,11 @@ func readAllIdx(ctx context.Context, db *DB) ([]idxEntry, error) {
 			} else {
 				packOffset++
 			}
-			subID := int(data[off])
-			if sub := db.Subscriptions()[subID]; sub != nil && chronIdx >= sub.AddIdx {
+			chanID := int(data[off])
+			if ch := db.Channels()[chanID]; ch != nil && chronIdx >= ch.AddIdx {
 				entries = append(entries, idxEntry{
 					ChronIdx:   chronIdx,
-					SubID:      subID,
+					ChannelID:  chanID,
 					PackID:     packID,
 					PackOffset: packOffset,
 					FetchedAt:  fetchedAt,

@@ -1,195 +1,148 @@
 package main
 
 import (
-	"bytes"
-	"encoding/xml"
-	"errors"
+	"context"
 	"fmt"
-	"hash/fnv"
-	"io"
-	"strings"
-	"time"
+	"log/slog"
+	"net/http"
+	"slices"
 
+	"srrb/ingest"
 	"srrb/mod"
 )
 
-var ErrStopFeed = errors.New("stop feed")
-
-func hash(s string) uint32 {
-	h := fnv.New32a()
-	io.WriteString(h, s)
-	return h.Sum32()
+type Feed struct {
+	URL string `json:"url"`
+	// Ingest selects an extraction strategy: empty falls through to
+	// Channel.Ingest → Globals.DefaultIngest → built-in "#rss". "#name"
+	// resolves to a built-in (registered in the ingest package); anything
+	// else is treated as a shell command per the external-ingest protocol.
+	Ingest       string `json:"ingest,omitempty"`
+	ETag         string `json:"etag,omitempty"`
+	LastModified string `json:"last_modified,omitempty"`
+	// Watermark is the max published unix-second ever seen across fetches.
+	Watermark int64 `json:"wm,omitempty"`
+	// BoundaryGUIDs is the GUIDs from the most recent non-empty fetch whose
+	// pub equals Watermark (the dated boundary) or equals 0 (dateless).
+	// Repopulated each non-empty fetch from the current response so its size
+	// stays bounded by what the publisher currently exposes; a 200 OK with
+	// zero items leaves the field untouched so a transient empty channel
+	// doesn't drop dedup state.
+	BoundaryGUIDs []uint32 `json:"bg,omitempty"`
+	FetchError    string   `json:"ferr,omitempty"`
 }
 
-type rawField struct {
-	Txt  string            `json:"@,omitempty"`
-	Attr map[string]string `json:"$,omitempty"`
-	Chld rawFeedItem       `json:"+,omitempty"`
-}
+// fetch routes the feed through the selected FetchFunc so the
+// dedup / watermark / pipeline path stays uniform across RSS, Telegram,
+// and external ingest strategies.
+func (feed *Feed) fetch(ctx context.Context, client *http.Client, buf []byte, processor *mod.Module, engine *ingest.Fetcher, ch *Channel, fetchedAt int64) ([]*Item, error) {
+	slog.Debug("downloading feed", "url", feed.URL, "channel", ch)
 
-type rawFeedItem map[string][]rawField
-
-func (r rawFeedItem) text(names ...string) string {
-	for _, name := range names {
-		for _, f := range r[name] {
-			if f.Txt != "" {
-				return f.Txt
-			}
-		}
-	}
-	return ""
-}
-
-var dateFields = []string{"pubDate", "published", "issued", "date", "created", "updated", "modified"}
-
-var dateFormats = []string{
-	time.RFC1123Z, time.RFC1123, time.RFC3339,
-	"Mon, 2 Jan 2006 15:04:05 -0700",
-	"Mon, 2 Jan 2006 15:04:05 MST",
-	"2 Jan 2006 15:04:05 -0700",
-	"2006-01-02T15:04:05-07:00",
-	"2006-01-02",
-}
-
-func parseLink(r rawFeedItem) string {
-	var fallback string
-	for _, f := range r["link"] {
-		if href := f.Attr["href"]; href != "" {
-			if rel := f.Attr["rel"]; rel == "" || rel == "alternate" {
-				return href
-			}
-			if fallback == "" {
-				fallback = href
-			}
-		} else if f.Txt != "" && fallback == "" {
-			fallback = f.Txt
-		}
-	}
-	return fallback
-}
-
-func parseDate(r rawFeedItem, hint *[2]string) time.Time {
-	if hint[0] != "" {
-		for _, f := range r[hint[0]] {
-			if t, err := time.Parse(hint[1], f.Txt); err == nil {
-				return t.UTC()
-			}
-		}
-	}
-	for _, key := range dateFields {
-		for _, f := range r[key] {
-			for _, layout := range dateFormats {
-				if t, err := time.Parse(layout, f.Txt); err == nil {
-					hint[0], hint[1] = key, layout
-					return t.UTC()
-				}
-			}
-		}
-	}
-	// Unix(0,0) sentinel for "no date". time.Time{}.Unix() is -62135596800,
-	// which would leak negative timestamps into pack data and the watermark;
-	// time.Now() would non-deterministically reorder undated items.
-	return time.Unix(0, 0).UTC()
-}
-
-func rawToFeedItem(r rawFeedItem, dateHint *[2]string) *mod.RawItem {
-	link := parseLink(r)
-	published := parseDate(r, dateHint)
-
-	guid := r.text("guid", "id")
-	if guid == "" {
-		guid = link
+	name := pickIngest(feed, ch)
+	result, err := engine.Fetch(ctx, name, client, buf, ingest.Request{
+		URL:          feed.URL,
+		ETag:         feed.ETag,
+		LastModified: feed.LastModified,
+		MaxSize:      cap(buf) - 1,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("ingest %q: %w", name, err)
 	}
 
-	return &mod.RawItem{
-		GUID:      hash(guid),
-		Title:     r.text("title"),
-		Content:   r.text("content", "encoded", "description", "summary"),
-		Link:      link,
-		Published: &published,
-		Raw:       &r,
-	}
-}
-
-// parseFeed streams feed items to the callback. If the callback returns
-// ErrStopFeed, parsing stops without error. Any other error is propagated.
-func parseFeed(data []byte, fn func(*mod.RawItem) error) error {
-	dec := xml.NewDecoder(bytes.NewReader(data))
-
-	var itemTag string
-	for {
-		tok, err := dec.Token()
-		if err != nil {
-			return fmt.Errorf("detecting feed format: %w", err)
-		}
-		if se, ok := tok.(xml.StartElement); ok {
-			switch se.Name.Local {
-			case "rss", "RDF":
-				itemTag = "item"
-			case "feed":
-				itemTag = "entry"
-			default:
-				return fmt.Errorf("unsupported feed format: <%s>", se.Name.Local)
-			}
-			break
-		}
+	if result.NotModified {
+		return nil, nil
 	}
 
-	var dateHint [2]string
-	for {
-		tok, err := dec.Token()
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("parsing feed: %w", err)
-		}
-		se, ok := tok.(xml.StartElement)
-		if !ok || se.Name.Local != itemTag {
+	// A 200 OK with zero items (e.g. transient empty channel) advances
+	// the HTTP cache headers but leaves Watermark/BoundaryGUIDs untouched,
+	// so prior items still dedup when the feed recovers.
+	if len(result.Items) == 0 {
+		feed.ETag = result.ETag
+		feed.LastModified = result.LastModified
+		return nil, nil
+	}
+
+	// Back-dated items below Watermark are not recovered (single-cursor
+	// limitation), and watermark-second or dateless items that disappear
+	// from the feed and reappear are re-ingested as duplicates (snapshot
+	// semantics over carry-over).
+	priorWatermark := feed.Watermark
+	priorBoundary := uint32Set(feed.BoundaryGUIDs)
+
+	maxPub := priorWatermark
+	boundary := make(map[uint32]int64)
+
+	var items []*Item
+	for _, i := range result.Items {
+		// Skip subsequent occurrences of the same GUID first so a within-fetch
+		// duplicate cannot pollute boundary or maxPub with a stale pub.
+		if _, dup := boundary[i.GUID]; dup {
 			continue
 		}
-		raw, err := parseElement(dec, se)
-		if err != nil {
-			return err
+
+		var pubUnix int64
+		if i.Published != nil {
+			if u := i.Published.Unix(); u > 0 {
+				// Clamp future-dated items so a publisher CMS bug
+				// (year-2099 default) can't push Watermark past now and
+				// silently swallow every subsequent real item.
+				pubUnix = min(u, fetchedAt)
+			}
 		}
-		if err := fn(rawToFeedItem(raw.Chld, &dateHint)); errors.Is(err, ErrStopFeed) {
-			return nil
-		} else if err != nil {
-			return err
+
+		boundary[i.GUID] = pubUnix
+		if pubUnix > maxPub {
+			maxPub = pubUnix
+		}
+
+		if _, prev := priorBoundary[i.GUID]; prev {
+			continue
+		}
+		if pubUnix != 0 && pubUnix < priorWatermark {
+			continue
+		}
+
+		if err := processItem(ctx, processor, ch.Pipeline, i); err != nil {
+			return nil, err
+		}
+		items = append(items, &Item{
+			Channel:   ch,
+			Title:     i.Title,
+			Content:   i.Content,
+			Link:      i.Link,
+			Published: pubUnix,
+		})
+	}
+
+	feed.Watermark = maxPub
+	bg := make([]uint32, 0, len(boundary))
+	for g, p := range boundary {
+		if p == 0 || p == maxPub {
+			bg = append(bg, g)
 		}
 	}
+	slices.Sort(bg)
+	feed.BoundaryGUIDs = bg
+	feed.ETag = result.ETag
+	feed.LastModified = result.LastModified
+	return items, nil
 }
 
-func parseElement(dec *xml.Decoder, start xml.StartElement) (rawField, error) {
-	var f rawField
-	if len(start.Attr) > 0 {
-		f.Attr = make(map[string]string, len(start.Attr))
-		for _, a := range start.Attr {
-			f.Attr[a.Name.Local] = a.Value
-		}
+func uint32Set(s []uint32) map[uint32]struct{} {
+	m := make(map[uint32]struct{}, len(s))
+	for _, v := range s {
+		m[v] = struct{}{}
 	}
+	return m
+}
 
-	var txt strings.Builder
-	for {
-		tok, err := dec.Token()
-		if err != nil {
-			return f, fmt.Errorf("parsing <%s>: %w", start.Name.Local, err)
-		}
-		switch t := tok.(type) {
-		case xml.CharData:
-			txt.Write(t)
-		case xml.EndElement:
-			f.Txt = strings.TrimSpace(txt.String())
-			return f, nil
-		case xml.StartElement:
-			child, err := parseElement(dec, t)
-			if err != nil {
-				return f, err
-			}
-			if f.Chld == nil {
-				f.Chld = make(rawFeedItem)
-			}
-			f.Chld[t.Name.Local] = append(f.Chld[t.Name.Local], child)
-		}
+// pickIngest resolves the Ingest name for a feed via the
+// feed > channel > global default precedence. globals may be nil during
+// tests run before main() initialises it.
+func pickIngest(feed *Feed, ch *Channel) string {
+	var def string
+	if globals != nil {
+		def = globals.DefaultIngest
 	}
+	return ingest.Select(feed.Ingest, ch.Ingest, def)
 }

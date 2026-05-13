@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func setupSubsTestDB(t *testing.T) {
+func setupChannelsTestDB(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
 	globals = &Globals{PackSize: 1, Store: dir}
@@ -14,14 +14,14 @@ func setupSubsTestDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDB: %v", err)
 	}
-	if err := db.AddSubscription(&Subscription{
+	if err := db.AddChannel(&Channel{
 		Title: "Test",
-		Sources: []*Source{
+		Feeds: []*Feed{
 			{URL: "https://a.example.com/feed", ETag: "etag-a", Watermark: 0x111},
 			{URL: "https://b.example.com/feed", ETag: "etag-b", Watermark: 0x222},
 		},
 	}); err != nil {
-		t.Fatalf("AddSubscription: %v", err)
+		t.Fatalf("AddChannel: %v", err)
 	}
 	if err := db.Commit(ctx); err != nil {
 		t.Fatalf("Commit: %v", err)
@@ -46,16 +46,16 @@ func wantErr(t *testing.T, err error, substr string) {
 	}
 }
 
-func TestAddSrcCmdAppendsAndPreservesState(t *testing.T) {
-	setupSubsTestDB(t)
-	cmd := &AddSrcCmd{ID: 0, URLs: []string{"https://c.example.com/feed", "https://d.example.com/feed"}}
+func TestAddFeedCmdAppendsAndPreservesState(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &AddFeedCmd{ID: 0, URLs: []string{"https://c.example.com/feed", "https://d.example.com/feed"}}
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
-	sub := reopenDB(t).Subscriptions()[0]
-	if len(sub.Sources) != 4 {
-		t.Fatalf("Sources len = %d, want 4", len(sub.Sources))
+	ch := reopenDB(t).Channels()[0]
+	if len(ch.Feeds) != 4 {
+		t.Fatalf("Feeds len = %d, want 4", len(ch.Feeds))
 	}
 	wantURLs := []string{
 		"https://a.example.com/feed",
@@ -64,50 +64,50 @@ func TestAddSrcCmdAppendsAndPreservesState(t *testing.T) {
 		"https://d.example.com/feed",
 	}
 	for i, want := range wantURLs {
-		if sub.Sources[i].URL != want {
-			t.Errorf("Sources[%d].URL = %q, want %q", i, sub.Sources[i].URL, want)
+		if ch.Feeds[i].URL != want {
+			t.Errorf("Feeds[%d].URL = %q, want %q", i, ch.Feeds[i].URL, want)
 		}
 	}
-	if sub.Sources[0].ETag != "etag-a" || sub.Sources[1].ETag != "etag-b" {
-		t.Errorf("existing per-source state lost: ETags = %q, %q", sub.Sources[0].ETag, sub.Sources[1].ETag)
+	if ch.Feeds[0].ETag != "etag-a" || ch.Feeds[1].ETag != "etag-b" {
+		t.Errorf("existing per-feed state lost: ETags = %q, %q", ch.Feeds[0].ETag, ch.Feeds[1].ETag)
 	}
-	if sub.Sources[0].Watermark != 0x111 || sub.Sources[1].Watermark != 0x222 {
-		t.Errorf("existing Watermarks lost: %#x, %#x", sub.Sources[0].Watermark, sub.Sources[1].Watermark)
+	if ch.Feeds[0].Watermark != 0x111 || ch.Feeds[1].Watermark != 0x222 {
+		t.Errorf("existing Watermarks lost: %#x, %#x", ch.Feeds[0].Watermark, ch.Feeds[1].Watermark)
 	}
 }
 
-func TestAddSrcCmdIdempotentDuplicateInArgs(t *testing.T) {
-	setupSubsTestDB(t)
-	cmd := &AddSrcCmd{ID: 0, URLs: []string{"https://c.example.com/feed", "https://c.example.com/feed"}}
+func TestAddFeedCmdIdempotentDuplicateInArgs(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &AddFeedCmd{ID: 0, URLs: []string{"https://c.example.com/feed", "https://c.example.com/feed"}}
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
-	sub := reopenDB(t).Subscriptions()[0]
-	if len(sub.Sources) != 3 {
-		t.Errorf("Sources len = %d, want 3 (deduped)", len(sub.Sources))
+	ch := reopenDB(t).Channels()[0]
+	if len(ch.Feeds) != 3 {
+		t.Errorf("Feeds len = %d, want 3 (deduped)", len(ch.Feeds))
 	}
 }
 
-func TestAddSrcCmdIdempotentAlreadyASource(t *testing.T) {
-	setupSubsTestDB(t)
-	cmd := &AddSrcCmd{ID: 0, URLs: []string{"https://a.example.com/feed"}}
+func TestAddFeedCmdIdempotentAlreadyAFeed(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &AddFeedCmd{ID: 0, URLs: []string{"https://a.example.com/feed"}}
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
-	sub := reopenDB(t).Subscriptions()[0]
-	if len(sub.Sources) != 2 {
-		t.Errorf("Sources len = %d, want 2 (no-op)", len(sub.Sources))
+	ch := reopenDB(t).Channels()[0]
+	if len(ch.Feeds) != 2 {
+		t.Errorf("Feeds len = %d, want 2 (no-op)", len(ch.Feeds))
 	}
-	if sub.Sources[0].ETag != "etag-a" {
-		t.Errorf("existing source state clobbered: ETag = %q, want %q", sub.Sources[0].ETag, "etag-a")
+	if ch.Feeds[0].ETag != "etag-a" {
+		t.Errorf("existing feed state clobbered: ETag = %q, want %q", ch.Feeds[0].ETag, "etag-a")
 	}
 }
 
-func TestAddSrcCmdMixedNewAndExisting(t *testing.T) {
-	setupSubsTestDB(t)
-	cmd := &AddSrcCmd{ID: 0, URLs: []string{
+func TestAddFeedCmdMixedNewAndExisting(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &AddFeedCmd{ID: 0, URLs: []string{
 		"https://a.example.com/feed", // already exists
 		"https://c.example.com/feed", // new
 		"https://c.example.com/feed", // dup of arg
@@ -117,117 +117,117 @@ func TestAddSrcCmdMixedNewAndExisting(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	sub := reopenDB(t).Subscriptions()[0]
-	if len(sub.Sources) != 3 {
-		t.Fatalf("Sources len = %d, want 3", len(sub.Sources))
+	ch := reopenDB(t).Channels()[0]
+	if len(ch.Feeds) != 3 {
+		t.Fatalf("Feeds len = %d, want 3", len(ch.Feeds))
 	}
-	if sub.Sources[2].URL != "https://c.example.com/feed" {
-		t.Errorf("appended URL = %q, want c.example.com/feed", sub.Sources[2].URL)
+	if ch.Feeds[2].URL != "https://c.example.com/feed" {
+		t.Errorf("appended URL = %q, want c.example.com/feed", ch.Feeds[2].URL)
 	}
 }
 
-func TestAddSrcCmdInvalidURL(t *testing.T) {
-	setupSubsTestDB(t)
-	cmd := &AddSrcCmd{ID: 0, URLs: []string{"not-a-url"}}
+func TestAddFeedCmdInvalidURL(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &AddFeedCmd{ID: 0, URLs: []string{"not-a-url"}}
 	wantErr(t, cmd.Run(), "invalid url")
 }
 
-func TestAddSrcCmdSubNotFound(t *testing.T) {
-	setupSubsTestDB(t)
-	cmd := &AddSrcCmd{ID: 99, URLs: []string{"https://c.example.com/feed"}}
+func TestAddFeedCmdChannelNotFound(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &AddFeedCmd{ID: 99, URLs: []string{"https://c.example.com/feed"}}
 	wantErr(t, cmd.Run(), "not found")
 }
 
-func TestAddSrcCmdIDTooLarge(t *testing.T) {
-	setupSubsTestDB(t)
-	cmd := &AddSrcCmd{ID: 256, URLs: []string{"https://c.example.com/feed"}}
+func TestAddFeedCmdIDTooLarge(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &AddFeedCmd{ID: 256, URLs: []string{"https://c.example.com/feed"}}
 	wantErr(t, cmd.Run(), "[0, 255]")
 }
 
-func TestAddSrcCmdIDNegative(t *testing.T) {
-	setupSubsTestDB(t)
-	cmd := &AddSrcCmd{ID: -1, URLs: []string{"https://c.example.com/feed"}}
+func TestAddFeedCmdIDNegative(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &AddFeedCmd{ID: -1, URLs: []string{"https://c.example.com/feed"}}
 	wantErr(t, cmd.Run(), "[0, 255]")
 }
 
-func TestAddSrcCmdAtomicOnError(t *testing.T) {
-	setupSubsTestDB(t)
+func TestAddFeedCmdAtomicOnError(t *testing.T) {
+	setupChannelsTestDB(t)
 	// Second URL is invalid — whole call must fail without appending the first.
-	cmd := &AddSrcCmd{ID: 0, URLs: []string{"https://c.example.com/feed", "not-a-url"}}
+	cmd := &AddFeedCmd{ID: 0, URLs: []string{"https://c.example.com/feed", "not-a-url"}}
 	if err := cmd.Run(); err == nil {
 		t.Fatal("expected error")
 	}
 
-	sub := reopenDB(t).Subscriptions()[0]
-	if len(sub.Sources) != 2 {
-		t.Errorf("Sources len = %d, want 2 (rollback)", len(sub.Sources))
+	ch := reopenDB(t).Channels()[0]
+	if len(ch.Feeds) != 2 {
+		t.Errorf("Feeds len = %d, want 2 (rollback)", len(ch.Feeds))
 	}
 }
 
-func TestRmSrcCmdRemovesAndPreservesState(t *testing.T) {
-	setupSubsTestDB(t)
-	cmd := &RmSrcCmd{ID: 0, URLs: []string{"https://a.example.com/feed"}}
+func TestRmFeedCmdRemovesAndPreservesState(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &RmFeedCmd{ID: 0, URLs: []string{"https://a.example.com/feed"}}
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
-	sub := reopenDB(t).Subscriptions()[0]
-	if len(sub.Sources) != 1 {
-		t.Fatalf("Sources len = %d, want 1", len(sub.Sources))
+	ch := reopenDB(t).Channels()[0]
+	if len(ch.Feeds) != 1 {
+		t.Fatalf("Feeds len = %d, want 1", len(ch.Feeds))
 	}
-	if sub.Sources[0].URL != "https://b.example.com/feed" {
-		t.Errorf("remaining URL = %q, want b.example.com/feed", sub.Sources[0].URL)
+	if ch.Feeds[0].URL != "https://b.example.com/feed" {
+		t.Errorf("remaining URL = %q, want b.example.com/feed", ch.Feeds[0].URL)
 	}
-	if sub.Sources[0].ETag != "etag-b" || sub.Sources[0].Watermark != 0x222 {
-		t.Errorf("per-source state lost on remaining source: ETag=%q Watermark=%#x", sub.Sources[0].ETag, sub.Sources[0].Watermark)
+	if ch.Feeds[0].ETag != "etag-b" || ch.Feeds[0].Watermark != 0x222 {
+		t.Errorf("per-feed state lost on remaining feed: ETag=%q Watermark=%#x", ch.Feeds[0].ETag, ch.Feeds[0].Watermark)
 	}
 }
 
-func TestRmSrcCmdNotASource(t *testing.T) {
-	setupSubsTestDB(t)
-	cmd := &RmSrcCmd{ID: 0, URLs: []string{"https://nope.example.com/feed"}}
-	wantErr(t, cmd.Run(), "not a source")
+func TestRmFeedCmdNotAFeed(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &RmFeedCmd{ID: 0, URLs: []string{"https://nope.example.com/feed"}}
+	wantErr(t, cmd.Run(), "not a feed")
 }
 
-func TestRmSrcCmdLeavesEmpty(t *testing.T) {
-	setupSubsTestDB(t)
-	cmd := &RmSrcCmd{ID: 0, URLs: []string{
+func TestRmFeedCmdLeavesEmpty(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &RmFeedCmd{ID: 0, URLs: []string{
 		"https://a.example.com/feed",
 		"https://b.example.com/feed",
 	}}
-	wantErr(t, cmd.Run(), "no sources")
+	wantErr(t, cmd.Run(), "no feeds")
 
 	// And nothing was committed.
-	sub := reopenDB(t).Subscriptions()[0]
-	if len(sub.Sources) != 2 {
-		t.Errorf("Sources len = %d, want 2 (rollback)", len(sub.Sources))
+	ch := reopenDB(t).Channels()[0]
+	if len(ch.Feeds) != 2 {
+		t.Errorf("Feeds len = %d, want 2 (rollback)", len(ch.Feeds))
 	}
 }
 
-func TestRmSrcCmdDuplicateInArgs(t *testing.T) {
-	setupSubsTestDB(t)
-	cmd := &RmSrcCmd{ID: 0, URLs: []string{
+func TestRmFeedCmdDuplicateInArgs(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &RmFeedCmd{ID: 0, URLs: []string{
 		"https://a.example.com/feed",
 		"https://a.example.com/feed",
 	}}
 	wantErr(t, cmd.Run(), "duplicate")
 }
 
-func TestRmSrcCmdSubNotFound(t *testing.T) {
-	setupSubsTestDB(t)
-	cmd := &RmSrcCmd{ID: 99, URLs: []string{"https://a.example.com/feed"}}
+func TestRmFeedCmdChannelNotFound(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &RmFeedCmd{ID: 99, URLs: []string{"https://a.example.com/feed"}}
 	wantErr(t, cmd.Run(), "not found")
 }
 
-func TestRmSrcCmdIDNegative(t *testing.T) {
-	setupSubsTestDB(t)
-	cmd := &RmSrcCmd{ID: -1, URLs: []string{"https://a.example.com/feed"}}
+func TestRmFeedCmdIDNegative(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &RmFeedCmd{ID: -1, URLs: []string{"https://a.example.com/feed"}}
 	wantErr(t, cmd.Run(), "[0, 255]")
 }
 
-func TestRmSrcCmdIDTooLarge(t *testing.T) {
-	setupSubsTestDB(t)
-	cmd := &RmSrcCmd{ID: 256, URLs: []string{"https://a.example.com/feed"}}
+func TestRmFeedCmdIDTooLarge(t *testing.T) {
+	setupChannelsTestDB(t)
+	cmd := &RmFeedCmd{ID: 256, URLs: []string{"https://a.example.com/feed"}}
 	wantErr(t, cmd.Run(), "[0, 255]")
 }
 
@@ -242,7 +242,7 @@ func setupEmptyDB(t *testing.T) {
 	globals = &Globals{PackSize: 1, Store: dir}
 }
 
-func TestAddCmdCreatesSubscription(t *testing.T) {
+func TestAddCmdCreatesChannel(t *testing.T) {
 	setupEmptyDB(t)
 	cmd := &AddCmd{
 		Title: strPtr("News"),
@@ -254,22 +254,22 @@ func TestAddCmdCreatesSubscription(t *testing.T) {
 	}
 
 	db := reopenDB(t)
-	if len(db.Subscriptions()) != 1 {
-		t.Fatalf("Subscriptions len = %d, want 1", len(db.Subscriptions()))
+	if len(db.Channels()) != 1 {
+		t.Fatalf("Channels len = %d, want 1", len(db.Channels()))
 	}
-	// New subscription is assigned id 0 (first free slot).
-	sub := db.Subscriptions()[0]
-	if sub == nil {
-		t.Fatal("expected subscription at id 0")
+	// New channel is assigned id 0 (first free slot).
+	ch := db.Channels()[0]
+	if ch == nil {
+		t.Fatal("expected channel at id 0")
 	}
-	if sub.Title != "News" {
-		t.Errorf("Title = %q, want %q", sub.Title, "News")
+	if ch.Title != "News" {
+		t.Errorf("Title = %q, want %q", ch.Title, "News")
 	}
-	if len(sub.Sources) != 1 || sub.Sources[0].URL != "https://feed.example.com/rss" {
-		t.Errorf("Sources = %+v, want one URL", sub.Sources)
+	if len(ch.Feeds) != 1 || ch.Feeds[0].URL != "https://feed.example.com/rss" {
+		t.Errorf("Feeds = %+v, want one URL", ch.Feeds)
 	}
-	if sub.Tag != "tech" {
-		t.Errorf("Tag = %q, want %q", sub.Tag, "tech")
+	if ch.Tag != "tech" {
+		t.Errorf("Tag = %q, want %q", ch.Tag, "tech")
 	}
 }
 
@@ -297,66 +297,66 @@ func TestAddCmdCreateMultipleURLs(t *testing.T) {
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	sub := reopenDB(t).Subscriptions()[0]
-	if len(sub.Sources) != 2 {
-		t.Errorf("Sources len = %d, want 2", len(sub.Sources))
+	ch := reopenDB(t).Channels()[0]
+	if len(ch.Feeds) != 2 {
+		t.Errorf("Feeds len = %d, want 2", len(ch.Feeds))
 	}
 }
 
 func TestAddCmdUpdateChangesTitle(t *testing.T) {
-	setupSubsTestDB(t)
+	setupChannelsTestDB(t)
 	cmd := &AddCmd{Upd: intPtr(0), Title: strPtr("New Title")}
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	sub := reopenDB(t).Subscriptions()[0]
-	if sub.Title != "New Title" {
-		t.Errorf("Title = %q, want %q", sub.Title, "New Title")
+	ch := reopenDB(t).Channels()[0]
+	if ch.Title != "New Title" {
+		t.Errorf("Title = %q, want %q", ch.Title, "New Title")
 	}
-	// Existing sources are preserved.
-	if len(sub.Sources) != 2 {
-		t.Errorf("Sources len = %d, want 2", len(sub.Sources))
+	// Existing feeds are preserved.
+	if len(ch.Feeds) != 2 {
+		t.Errorf("Feeds len = %d, want 2", len(ch.Feeds))
 	}
 }
 
 func TestAddCmdUpdateEmptyTitleRejected(t *testing.T) {
-	setupSubsTestDB(t)
+	setupChannelsTestDB(t)
 	cmd := &AddCmd{Upd: intPtr(0), Title: strPtr("")}
 	wantErr(t, cmd.Run(), "title cannot be empty")
 }
 
 func TestAddCmdUpdateClearsTag(t *testing.T) {
-	setupSubsTestDB(t)
+	setupChannelsTestDB(t)
 	// First assign a tag.
 	if err := (&AddCmd{Upd: intPtr(0), Tag: strPtr("tech")}).Run(); err != nil {
 		t.Fatalf("set tag: %v", err)
 	}
-	if reopenDB(t).Subscriptions()[0].Tag != "tech" {
+	if reopenDB(t).Channels()[0].Tag != "tech" {
 		t.Fatal("setup: tag not set")
 	}
 	// Empty Tag must clear it.
 	if err := (&AddCmd{Upd: intPtr(0), Tag: strPtr("")}).Run(); err != nil {
 		t.Fatalf("clear tag: %v", err)
 	}
-	if got := reopenDB(t).Subscriptions()[0].Tag; got != "" {
+	if got := reopenDB(t).Channels()[0].Tag; got != "" {
 		t.Errorf("Tag = %q, want \"\" (cleared)", got)
 	}
 }
 
 func TestAddCmdUpdateSetsPipeline(t *testing.T) {
-	setupSubsTestDB(t)
+	setupChannelsTestDB(t)
 	cmd := &AddCmd{Upd: intPtr(0), Parsers: sliceStrPtr([]string{"#sanitize", "#minify"})}
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	sub := reopenDB(t).Subscriptions()[0]
-	if len(sub.Pipeline) != 2 || sub.Pipeline[0] != "#sanitize" || sub.Pipeline[1] != "#minify" {
-		t.Errorf("Pipeline = %v, want [#sanitize #minify]", sub.Pipeline)
+	ch := reopenDB(t).Channels()[0]
+	if len(ch.Pipeline) != 2 || ch.Pipeline[0] != "#sanitize" || ch.Pipeline[1] != "#minify" {
+		t.Errorf("Pipeline = %v, want [#sanitize #minify]", ch.Pipeline)
 	}
 }
 
 func TestAddCmdUpdateClearsPipeline(t *testing.T) {
-	setupSubsTestDB(t)
+	setupChannelsTestDB(t)
 	if err := (&AddCmd{Upd: intPtr(0), Parsers: sliceStrPtr([]string{"#sanitize"})}).Run(); err != nil {
 		t.Fatalf("set pipeline: %v", err)
 	}
@@ -364,14 +364,14 @@ func TestAddCmdUpdateClearsPipeline(t *testing.T) {
 	if err := (&AddCmd{Upd: intPtr(0), Parsers: sliceStrPtr([]string{""})}).Run(); err != nil {
 		t.Fatalf("clear pipeline: %v", err)
 	}
-	sub := reopenDB(t).Subscriptions()[0]
-	if len(sub.Pipeline) != 0 {
-		t.Errorf("Pipeline = %v, want empty (cleared)", sub.Pipeline)
+	ch := reopenDB(t).Channels()[0]
+	if len(ch.Pipeline) != 0 {
+		t.Errorf("Pipeline = %v, want empty (cleared)", ch.Pipeline)
 	}
 }
 
-func TestAddCmdUpdateReplacesSourcesPreservingState(t *testing.T) {
-	setupSubsTestDB(t)
+func TestAddCmdUpdateReplacesFeedsPreservingState(t *testing.T) {
+	setupChannelsTestDB(t)
 	// Replace one URL, keep the other.
 	cmd := &AddCmd{
 		Upd: intPtr(0),
@@ -383,26 +383,26 @@ func TestAddCmdUpdateReplacesSourcesPreservingState(t *testing.T) {
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	sub := reopenDB(t).Subscriptions()[0]
-	if len(sub.Sources) != 2 {
-		t.Fatalf("Sources len = %d, want 2", len(sub.Sources))
+	ch := reopenDB(t).Channels()[0]
+	if len(ch.Feeds) != 2 {
+		t.Fatalf("Feeds len = %d, want 2", len(ch.Feeds))
 	}
-	if sub.Sources[0].URL != "https://a.example.com/feed" || sub.Sources[0].ETag != "etag-a" {
-		t.Errorf("kept source state lost: %+v", sub.Sources[0])
+	if ch.Feeds[0].URL != "https://a.example.com/feed" || ch.Feeds[0].ETag != "etag-a" {
+		t.Errorf("kept feed state lost: %+v", ch.Feeds[0])
 	}
-	if sub.Sources[1].URL != "https://c.example.com/feed" || sub.Sources[1].ETag != "" {
-		t.Errorf("new source not fresh: %+v", sub.Sources[1])
+	if ch.Feeds[1].URL != "https://c.example.com/feed" || ch.Feeds[1].ETag != "" {
+		t.Errorf("new feed not fresh: %+v", ch.Feeds[1])
 	}
 }
 
 func TestAddCmdUpdateRejectsInvalidURL(t *testing.T) {
-	setupSubsTestDB(t)
+	setupChannelsTestDB(t)
 	cmd := &AddCmd{Upd: intPtr(0), URLs: sliceStrPtr([]string{"not-a-url"})}
 	wantErr(t, cmd.Run(), "invalid url")
 }
 
 func TestAddCmdUpdateRejectsDuplicateURLs(t *testing.T) {
-	setupSubsTestDB(t)
+	setupChannelsTestDB(t)
 	cmd := &AddCmd{Upd: intPtr(0), URLs: sliceStrPtr([]string{
 		"https://x.example.com/feed",
 		"https://x.example.com/feed",
@@ -410,86 +410,86 @@ func TestAddCmdUpdateRejectsDuplicateURLs(t *testing.T) {
 	wantErr(t, cmd.Run(), "duplicate url")
 }
 
-func TestAddCmdUpdateSubNotFound(t *testing.T) {
-	setupSubsTestDB(t)
+func TestAddCmdUpdateChannelNotFound(t *testing.T) {
+	setupChannelsTestDB(t)
 	cmd := &AddCmd{Upd: intPtr(99), Title: strPtr("X")}
 	wantErr(t, cmd.Run(), "not found")
 }
 
-func TestRmCmdRemovesSubscriptions(t *testing.T) {
-	setupSubsTestDB(t)
-	// Add a second subscription so we can verify only the requested one is removed.
+func TestRmCmdRemovesChannels(t *testing.T) {
+	setupChannelsTestDB(t)
+	// Add a second channel so we can verify only the requested one is removed.
 	if err := (&AddCmd{Title: strPtr("Other"), URLs: sliceStrPtr([]string{"https://z.example.com/feed"})}).Run(); err != nil {
 		t.Fatalf("AddCmd: %v", err)
 	}
-	subs := reopenDB(t).Subscriptions()
-	if len(subs) != 2 {
-		t.Fatalf("setup: Subscriptions len = %d, want 2", len(subs))
+	channels := reopenDB(t).Channels()
+	if len(channels) != 2 {
+		t.Fatalf("setup: Channels len = %d, want 2", len(channels))
 	}
 
 	if err := (&RmCmd{ID: []int{0}}).Run(); err != nil {
 		t.Fatalf("RmCmd: %v", err)
 	}
-	subs = reopenDB(t).Subscriptions()
-	if len(subs) != 1 {
-		t.Fatalf("after rm Subscriptions len = %d, want 1", len(subs))
+	channels = reopenDB(t).Channels()
+	if len(channels) != 1 {
+		t.Fatalf("after rm Channels len = %d, want 1", len(channels))
 	}
-	if _, ok := subs[0]; ok {
-		t.Error("subscription 0 should have been removed")
+	if _, ok := channels[0]; ok {
+		t.Error("channel 0 should have been removed")
 	}
 }
 
 func TestRmCmdNoOpForMissingID(t *testing.T) {
 	// RmCmd uses delete() which is a no-op on missing keys; this is the
 	// documented behavior.
-	setupSubsTestDB(t)
+	setupChannelsTestDB(t)
 	if err := (&RmCmd{ID: []int{99}}).Run(); err != nil {
 		t.Fatalf("RmCmd: %v", err)
 	}
-	if len(reopenDB(t).Subscriptions()) != 1 {
-		t.Errorf("Subscriptions changed despite missing id")
+	if len(reopenDB(t).Channels()) != 1 {
+		t.Errorf("Channels changed despite missing id")
 	}
 }
 
-func TestParseSourcesRejectsEmpty(t *testing.T) {
-	if _, err := parseSources(nil, nil); err == nil || !strings.Contains(err.Error(), "at least one --url") {
+func TestParseFeedsRejectsEmpty(t *testing.T) {
+	if _, err := parseFeeds(nil, nil); err == nil || !strings.Contains(err.Error(), "at least one --url") {
 		t.Errorf("err = %v, want 'at least one --url'", err)
 	}
 }
 
-func TestParseSourcesRejectsInvalidURL(t *testing.T) {
-	if _, err := parseSources([]string{"bogus"}, nil); err == nil || !strings.Contains(err.Error(), "invalid url") {
+func TestParseFeedsRejectsInvalidURL(t *testing.T) {
+	if _, err := parseFeeds([]string{"bogus"}, nil); err == nil || !strings.Contains(err.Error(), "invalid url") {
 		t.Errorf("err = %v, want 'invalid url'", err)
 	}
 }
 
-func TestParseSourcesRejectsDuplicates(t *testing.T) {
+func TestParseFeedsRejectsDuplicates(t *testing.T) {
 	urls := []string{"https://a.example.com/feed", "https://a.example.com/feed"}
-	if _, err := parseSources(urls, nil); err == nil || !strings.Contains(err.Error(), "duplicate url") {
+	if _, err := parseFeeds(urls, nil); err == nil || !strings.Contains(err.Error(), "duplicate url") {
 		t.Errorf("err = %v, want 'duplicate url'", err)
 	}
 }
 
-func TestParseSourcesReusesPriorSourceByURL(t *testing.T) {
-	prev := []*Source{
+func TestParseFeedsReusesPriorFeedByURL(t *testing.T) {
+	prev := []*Feed{
 		{URL: "https://a.example.com/feed", ETag: "etag-a", Watermark: 1234},
 		{URL: "https://b.example.com/feed", ETag: "etag-b"},
 	}
-	out, err := parseSources([]string{
+	out, err := parseFeeds([]string{
 		"https://a.example.com/feed", // kept (must reuse pointer)
 		"https://c.example.com/feed", // new
 	}, prev)
 	if err != nil {
-		t.Fatalf("parseSources: %v", err)
+		t.Fatalf("parseFeeds: %v", err)
 	}
 	if len(out) != 2 {
 		t.Fatalf("out len = %d, want 2", len(out))
 	}
 	if out[0] != prev[0] {
-		t.Error("kept source pointer not reused (per-source state would be lost)")
+		t.Error("kept feed pointer not reused (per-feed state would be lost)")
 	}
 	if out[1].URL != "https://c.example.com/feed" || out[1].ETag != "" {
-		t.Errorf("new source not fresh: %+v", out[1])
+		t.Errorf("new feed not fresh: %+v", out[1])
 	}
 }
 
@@ -517,13 +517,13 @@ func TestLsCmdFiltersByTag(t *testing.T) {
 	// Independent check: ensure the data the filter would see is what we expect.
 	db := reopenDB(t)
 	tagged := 0
-	for _, s := range db.Subscriptions() {
-		if s.Tag == "tech" {
+	for _, ch := range db.Channels() {
+		if ch.Tag == "tech" {
 			tagged++
 		}
 	}
 	if tagged != 1 {
-		t.Errorf("expected 1 sub tagged 'tech', got %d", tagged)
+		t.Errorf("expected 1 channel tagged 'tech', got %d", tagged)
 	}
 }
 
@@ -547,21 +547,21 @@ func TestValidFeedURL(t *testing.T) {
 	}
 }
 
-func TestSubscriptionURLsJoined(t *testing.T) {
-	s := &Subscription{Sources: []*Source{
+func TestChannelURLsJoined(t *testing.T) {
+	ch := &Channel{Feeds: []*Feed{
 		{URL: "https://a.example.com/feed"},
 		{URL: "https://b.example.com/feed"},
 	}}
-	got := s.URLs()
+	got := ch.URLs()
 	want := "https://a.example.com/feed, https://b.example.com/feed"
 	if got != want {
 		t.Errorf("URLs() = %q, want %q", got, want)
 	}
 }
 
-func TestSubscriptionURLsEmpty(t *testing.T) {
-	s := &Subscription{}
-	if got := s.URLs(); got != "" {
+func TestChannelURLsEmpty(t *testing.T) {
+	ch := &Channel{}
+	if got := ch.URLs(); got != "" {
 		t.Errorf("URLs() = %q, want empty", got)
 	}
 }
