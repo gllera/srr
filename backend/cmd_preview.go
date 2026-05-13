@@ -2,22 +2,22 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"html/template"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"time"
 
+	"srrb/ingest"
 	"srrb/mod"
 )
 
 type PreviewCmd struct {
-	URL  *url.URL `arg:"" help:"RSS feed URL to preview."`
-	Pipe []string `short:"p" help:"Pipeline processors to apply."`
-	Addr string   `short:"a" default:"localhost:8080" env:"SRR_PREVIEW_ADDR" help:"Address to listen on."`
+	URL    *url.URL `arg:"" help:"URL to preview."`
+	Pipe   []string `short:"p" help:"Pipeline processors to apply."`
+	Ingest string   `short:"i" help:"Ingest strategy: built-in ('#rss', '#telegram') or shell command. Empty falls back to the global default."`
+	Addr   string   `short:"a" default:"localhost:8080" env:"SRR_PREVIEW_ADDR" help:"Address to listen on."`
 }
 
 var previewTmpl = template.Must(template.New("preview").Funcs(template.FuncMap{
@@ -68,52 +68,34 @@ func (o *PreviewCmd) Run() error {
 	ctx := context.Background()
 	client := &http.Client{Timeout: 10 * time.Second}
 	processor := mod.New()
-
-	req, err := http.NewRequestWithContext(ctx, "GET", o.URL.String(), nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("User-Agent", "SRR/"+version)
-
-	res, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-
-	if res.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected HTTP status: %s", res.Status)
-	}
+	engine := ingest.New()
 
 	buf := make([]byte, globals.MaxFeedSize*(1<<10)+1)
-	n, err := io.ReadFull(res.Body, buf)
-	if err == nil {
-		return fmt.Errorf("feed bigger than %d bytes", cap(buf)-1)
-	}
-	if errors.Is(err, io.EOF) {
-		return fmt.Errorf("empty response")
-	}
-	if !errors.Is(err, io.ErrUnexpectedEOF) {
-		return err
+	name := ingest.Select(o.Ingest, "", globals.DefaultIngest)
+
+	result, err := engine.Fetch(ctx, name, client, buf, ingest.Request{
+		URL:     o.URL.String(),
+		MaxSize: cap(buf) - 1,
+	})
+	if err != nil {
+		return fmt.Errorf("ingest %q: %w", name, err)
 	}
 
-	var articles []*Item
-
-	err = parseFeed(buf[:n], func(i *mod.RawItem) error {
+	articles := make([]*Item, 0, len(result.Items))
+	for _, i := range result.Items {
 		if err := processItem(ctx, processor, o.Pipe, i); err != nil {
 			return err
 		}
-
+		var pub int64
+		if i.Published != nil {
+			pub = i.Published.Unix()
+		}
 		articles = append(articles, &Item{
 			Title:     i.Title,
 			Content:   i.Content,
 			Link:      i.Link,
-			Published: i.Published.Unix(),
+			Published: pub,
 		})
-		return nil
-	})
-	if err != nil {
-		return err
 	}
 
 	fmt.Printf("Serving %d articles at http://%s\n", len(articles), o.Addr)
