@@ -100,6 +100,24 @@ func Select(channelFetcher, globalFetcher string) string {
 	return "#rss"
 }
 
+// maxSubprocessOutput caps the bytes buffered from an external fetcher's
+// stdout. Above this, the writer returns an error which propagates as a
+// broken pipe to the subprocess. Defense-in-depth against runaway output
+// OOM'ing the process.
+const maxSubprocessOutput = 64 << 20
+
+type cappedBuffer struct {
+	buf   bytes.Buffer
+	limit int
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	if c.buf.Len()+len(p) > c.limit {
+		return 0, fmt.Errorf("subprocess output exceeds %d bytes", c.limit)
+	}
+	return c.buf.Write(p)
+}
+
 // Fetcher is the dispatcher. New() builds one with every registered
 // built-in instantiated once; Fetch routes per-call by name.
 type Fetcher struct {
@@ -138,10 +156,10 @@ func (f *Fetcher) Fetch(ctx context.Context, args string, client *http.Client, b
 		return Result{}, fmt.Errorf("encode fetcher request: %w", err)
 	}
 
-	var out bytes.Buffer
+	out := &cappedBuffer{limit: maxSubprocessOutput}
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", args)
 	cmd.Stdin = &body
-	cmd.Stdout = &out
+	cmd.Stdout = out
 	cmd.Stderr = os.Stderr
 	cmd.Env = f.env
 	if err := cmd.Run(); err != nil {
@@ -149,7 +167,7 @@ func (f *Fetcher) Fetch(ctx context.Context, args string, client *http.Client, b
 	}
 
 	var resp Result
-	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
+	if err := json.Unmarshal(out.buf.Bytes(), &resp); err != nil {
 		return Result{}, fmt.Errorf("decode fetcher response: %w", err)
 	}
 	return resp, nil
