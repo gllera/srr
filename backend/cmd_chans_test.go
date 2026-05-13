@@ -646,6 +646,30 @@ func TestChanShowIDNegative(t *testing.T) {
 	wantErr(t, (&ShowCmd{ID: -1, Format: "json"}).Run(), "[0, 255]")
 }
 
+func TestChanShowEmitsPipe(t *testing.T) {
+	setupEmptyDB(t)
+	if err := (&AddCmd{
+		Title:   strPtr("P"),
+		URLs:    sliceStrPtr([]string{"https://p.example.com/feed"}),
+		Parsers: sliceStrPtr([]string{"#sanitize"}),
+	}).Run(); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	ch := reopenDB(t).Channels()[0]
+
+	var out bytes.Buffer
+	saved := stdout
+	stdout = &out
+	t.Cleanup(func() { stdout = saved })
+
+	if err := (&ShowCmd{ID: ch.id, Format: "json"}).Run(); err != nil {
+		t.Fatalf("ShowCmd: %v", err)
+	}
+	if !strings.Contains(out.String(), `"pipe":["#sanitize"]`) {
+		t.Errorf("show output missing pipe field: %s", out.String())
+	}
+}
+
 // applyFromString runs ApplyCmd against an in-memory JSON payload.
 func applyFromString(t *testing.T, json string) error {
 	t.Helper()
