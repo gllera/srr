@@ -38,7 +38,7 @@ type Feed struct {
 func (feed *Feed) fetch(ctx context.Context, client *http.Client, buf []byte, processor *mod.Module, engine *ingest.Fetcher, ch *Channel, fetchedAt int64) ([]*Item, error) {
 	slog.Debug("downloading feed", "url", feed.URL, "channel", ch)
 
-	name := pickIngest(feed, ch)
+	name := pickIngest(ch)
 	result, err := engine.Fetch(ctx, name, client, buf, ingest.Request{
 		URL:          feed.URL,
 		ETag:         feed.ETag,
@@ -136,13 +136,13 @@ func uint32Set(s []uint32) map[uint32]struct{} {
 	return m
 }
 
-// pickIngest resolves the Ingest name for a feed via the
-// feed > channel > global default precedence. globals may be nil during
+// pickIngest resolves the Ingest name for a channel via the
+// channel > global default precedence. globals may be nil during
 // tests run before main() initialises it.
-func pickIngest(feed *Feed, ch *Channel) string {
+func pickIngest(ch *Channel) string {
 	var def string
 	if globals != nil {
 		def = globals.DefaultIngest
 	}
-	return ingest.Select(feed.Ingest, ch.Ingest, def)
+	return ingest.Select(ch.Ingest, def)
 }
