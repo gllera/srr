@@ -48,6 +48,7 @@ type CLI struct {
 	Globals
 	Chan    ChannelGroup `cmd:"" aliases:"ch" help:"Channel management."`
 	Art     ArtGroup     `cmd:"" aliases:"a" help:"Article management."`
+	Pipe    PipeCmd      `cmd:"" help:"Set or print root pipe (default pipeline inherited by channels)."`
 	Preview PreviewCmd   `cmd:"" aliases:"p" help:"Preview processed feed articles in a browser."`
 	Config  ConfigCmd    `cmd:"" aliases:"c" help:"Print resolved configuration."`
 	Inspect InspectCmd   `cmd:"" aliases:"i" help:"Inspect pack consistency (validate idx<->data, debug chronIdx lookup)."`
