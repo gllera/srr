@@ -1,31 +1,56 @@
-# Channel & Feed Management CLI — Design
+# Channel Management CLI — Design
 
 **Date:** 2026-05-13
 **Status:** Design approved, pending implementation plan
-**Scope:** `backend/` — CLI surface for adding/removing/updating channels and feeds
+**Scope:** `backend/` — CLI for adding/removing/updating channels and their feeds; removes per-feed ingest from the data model.
 
 ## Goals
 
 - Eliminate the create-vs-update overload in `srr chan add` (today: `--upd <id>` flips it to update mode).
-- Eliminate the asymmetric/confusing pair `chan add -u` (replace feeds) vs `chan add-feed` (append feeds).
-- Provide a state-preserving way to edit per-feed config (`Feed.Ingest`) without losing fetch state (`ETag`, `LastModified`, `Watermark`, `BoundaryGUIDs`).
-- Provide focused inspection: a single-channel `show` and a feeds-only `feed ls`.
-- Provide bulk/scripted editing via JSON (`chan apply`) and an `$EDITOR` flow (`chan edit`).
+- Eliminate the asymmetric pair `chan add -u` (replace feeds) vs `chan add-feed` (append feeds).
+- Remove `Feed.Ingest` from the data model — ingest strategy is channel-level only.
+- Add focused inspection (`chan show`) and scripted/bulk editing (`chan apply`, `chan edit`).
+- Provide a state-preserving way to add or remove a single feed (via `chan upd --add-url` / `--rm-url`) without losing fetch state (`ETag`, `LastModified`, `Watermark`, `BoundaryGUIDs`) on surviving feeds.
 
 ## Non-Goals
 
-- Renaming a feed URL while preserving fetch state. (Wash trade: easy in code, but allowing it conflicts with "URL is the dedup key" mental model. Out of scope.)
-- A "force re-fetch" flag that clears `Watermark`/`BoundaryGUIDs`. Separate feature.
-- Deprecation aliases for removed commands. This branch already churns related names (`subscription` → `channel`, `cmd_subs` → `cmd_chans`); one more rename is acceptable.
+- Force re-fetch flag that clears `Watermark` / `BoundaryGUIDs`. Separate feature.
+- Renaming a feed URL while preserving fetch state. URL is the dedup key.
+- Deprecation aliases for removed commands. This branch already churns related names (`subscription` → `channel`); one more rename is acceptable.
+- A `feed` top-level Kong group. With `Feed.Ingest` gone, every feed-level operation collapses to a flag on `chan upd`.
 - Frontend changes. All work is in `backend/`.
+
+## Data-Model Change: drop `Feed.Ingest`
+
+`Feed.Ingest` is removed from [backend/channel.go](backend/channel.go). Ingest precedence collapses from:
+
+```
+Feed.Ingest > Channel.Ingest > Globals.DefaultIngest > #rss
+```
+
+to:
+
+```
+Channel.Ingest > Globals.DefaultIngest > #rss
+```
+
+Cascading edits:
+
+- [backend/ingest/main.go](backend/ingest/main.go) — `Select(feed, channel, global)` → `Select(channel, global)`.
+- [backend/feed.go](backend/feed.go) — `pickIngest` (currently at line 147) becomes a two-level lookup; nil-globals guard preserved.
+- [backend/cmd_preview.go](backend/cmd_preview.go) — call site at line 74 updates from `ingest.Select(o.Ingest, "", globals.DefaultIngest)` to `ingest.Select(o.Ingest, globals.DefaultIngest)`. (Preview has no real `Channel`; `-i/--ingest` plays the channel-level role.)
+- [backend/channel.go](backend/channel.go) line 20 — comment referring to `Feed.Ingest` deleted alongside the field.
+- [backend/CLAUDE.md](backend/CLAUDE.md) — `Ingest (ingest/)` paragraph rewritten; `Feed` struct field list updated.
+
+DB compatibility: the existing `ingest` JSON tag on `Feed` was `omitempty`. Removing the field means the JSON decoder silently discards `"ingest"` on feed objects in pre-existing DBs. No migration step.
 
 ## CLI Surface
 
-### Channel group (`srr chan …`)
-
 ```
 srr chan add   -t TITLE -u URL... [-g TAG] [-p PARSER...] [-i INGEST]
-srr chan upd   ID [-t TITLE] [-g TAG] [-p PARSER...] [-i INGEST]
+srr chan upd   ID [-t TITLE]
+                  [-u URL... | --add-url URL... | --rm-url URL...]
+                  [-g TAG] [-p PARSER...] [-i INGEST]
 srr chan rm    ID...
 srr chan ls    [-g TAG] [-f json|yaml]
 srr chan show  ID [-f json|yaml]
@@ -34,108 +59,75 @@ srr chan apply [--file PATH | -]
 srr chan import …
 ```
 
-### Feed group (`srr feed …`, new top-level group)
-
-```
-srr feed add   ID URL... [-i INGEST]
-srr feed rm    ID URL...
-srr feed upd   ID URL [-i INGEST]
-srr feed ls    ID [-f json|yaml]
-```
-
 ### Removed
 
-- `srr chan add --upd ID` — replaced by `srr chan upd ID`.
-- `srr chan add-feed ID URL...` — replaced by `srr feed add`.
-- `srr chan rm-feed ID URL...` — replaced by `srr feed rm`.
+- `srr chan add --upd ID` → `srr chan upd ID`.
+- `srr chan add-feed ID URL...` → `srr chan upd ID --add-url URL...`.
+- `srr chan rm-feed ID URL...` → `srr chan upd ID --rm-url URL...`.
+- All `-i/--ingest` flags previously on feed-side commands (the field they targeted is gone).
 
-No aliases are kept. This branch is pre-release for the related rename churn; downstream call sites are migrated in the same change.
+No deprecation aliases.
 
 ## Per-Command Semantics
 
 ### `chan add` (strict create)
 
-- **Required**: `-t/--title`, `-u/--url` (≥1).
-- **Optional**: `-g/--tag`, `-p/--parsers` (repeatable; an empty entry clears the pipeline — preserved CLI convention), `-i/--ingest`.
-- Validates URLs (`validFeedURL`), rejects duplicates within args.
-- Calls `db.AddChannel` to allocate the first free id in `[0, 255]`; errors if all slots are taken.
-- Feeds are fresh (no pre-existing state to preserve on create).
+- Required: `-t/--title`, `-u/--url` (≥1).
+- Optional: `-g/--tag`, `-p/--parsers` (repeatable; a single empty-string entry clears the pipeline — preserved convention), `-i/--ingest`.
+- Validates URLs via `validFeedURL`; rejects duplicates within args.
+- `db.AddChannel` allocates the first free id in `[0, 255]`; errors if full.
 
-### `chan upd ID` (strict update of channel-level fields only)
+### `chan upd ID`
 
-- **Required**: `ID`, plus at least one field flag (else error "nothing to update").
-- **Optional**: `-t/--title` (empty rejected), `-g/--tag` (empty clears), `-p/--parsers` (empty entry clears), `-i/--ingest` (empty clears).
-- **Does not touch feeds.** Use the `feed` subcommands or `chan edit`/`chan apply` for feed changes.
+- Required: `ID`, plus at least one field flag (else `"nothing to update"`).
+- Channel-level flags: `-t` (empty rejected), `-g` (empty clears), `-p` (empty entry clears), `-i` (empty clears).
+- Feed-list flags (mutually-exclusive group; combining errors out):
+  - `-u/--url URL...` — REPLACE the feed list. URLs already on the channel keep their internal state (`ETag`, `LastModified`, `Watermark`, `BoundaryGUIDs`, `FetchError`) via URL match; new URLs start fresh. Same logic as today's `parseFeeds`.
+  - `--add-url URL...` — APPEND. Idempotent: URLs already on the channel or duplicated within args are silently skipped (`mkdir -p` semantics). Invalid URL formats fail.
+  - `--rm-url URL...` — REMOVE. Strict: errors on URLs not currently on the channel, on duplicate args, or if all feeds would be removed (`use chan rm to delete the channel instead`).
 - Errors if channel id is missing.
 
 ### `chan rm ID...`
 
-Unchanged from current implementation. Silent no-op on missing ids (matches the existing `delete(map, id)` semantics; documented behaviour).
+Unchanged. Silent no-op on missing ids (matches `delete(map, id)` semantics; documented behavior).
 
-### `chan ls`
+### `chan ls [-g TAG] [-f json|yaml]`
 
-Unchanged inputs (`-g/--tag`, `-f/--format`). Output schema gains a `pipe` field for round-trip compatibility with `chan apply`. The `error` field on each feed is unchanged.
+Unchanged inputs. Output schema gains a `pipe` field for round-trip compatibility with `chan apply`. The per-feed `error` field is unchanged. Output is an array, sorted alphabetically by lower-cased title (current behavior).
 
-### `chan show ID`
+### `chan show ID [-f json|yaml]`
 
 - Errors if id missing.
-- Emits the same per-channel JSON/YAML shape as `chan ls` (single object, not array).
+- Emits a single channel object in the canonical shape (see Data Shape below).
 
 ### `chan edit ID`
 
 1. Load channel; error if missing.
-2. Marshal to indented JSON in a temp file under `os.TempDir()` (path includes channel id for clarity in editor tab title).
-3. Spawn `$EDITOR` (fallback `vi`); inherit stdio; wait for exit. Non-zero exit code from the editor is a fatal error.
-4. If the user did not change the file (byte-for-byte equal), exit silently with status 0.
-5. Re-parse JSON. Reject if:
-   - JSON is invalid (report parse error).
-   - `id` field is missing or differs from the argument.
-6. Apply via the same code path as `chan apply` (single-object case).
-7. Clean up the temp file on success or error.
+2. Marshal to indented JSON in a tempfile under `os.TempDir()`; filename includes the channel id (e.g. `srr-chan-3-XXXX.json`) so the editor tab is readable.
+3. Resolve the editor: `$VISUAL` → `$EDITOR` → `vi`. Spawn with stdio inherited; wait for exit.
+4. Editor exit with non-zero status: error; tempfile preserved and path printed.
+5. If the file is byte-identical to the original, exit silently with status 0 (no DB write, no lock acquisition beyond the read).
+6. Re-parse the JSON. Failures:
+   - Invalid JSON → error with line number; tempfile preserved.
+   - `id` field missing or differs from the CLI argument → error; tempfile preserved.
+7. Apply through the same code path as `chan apply` (single-object update case). DB write lock is taken only here.
+8. On success, delete the tempfile.
 
 ### `chan apply [--file PATH | -]`
 
-- Reads from `--file PATH`, or stdin if `-` or no flag is given.
-- Input is a single channel object OR a JSON array of channel objects.
+- Reads from `--file PATH`; if `-` or no flag is given, reads stdin.
+- Input is either a single channel object OR a JSON array of channel objects (auto-detected on the first non-whitespace byte).
 - Per-object dispatch:
-  - **`id` absent** → create. Same validation as `chan add` (title + ≥1 feed required).
-  - **`id` present + channel exists** → full-replace of channel fields and feed list. Feed state preserved via URL match (same logic as the current `parseFeeds`).
-  - **`id` present + channel missing** → error. No specific-id creates (avoids slot races and surprise reuse of formerly-deleted ids).
-- All-or-nothing transactional: every input is validated first; on any failure no writes occur. Single `db.Commit` at the end.
-- Read-only `error` field on input feeds is ignored.
-- **Round-trip safety:** because `chan show` emits every non-empty field and `apply` is full-replace, `chan show ID > file && $EDITOR file && chan apply --file file` is faithful. A user editing JSON by hand who wants to keep a field unchanged must include it in the payload; omitting a field clears it (same as HTTP `PUT`). Partial-update is intentionally not supported — use `chan upd` / `feed upd` for surgical field edits.
+  - `id` absent → create. Same validation as `chan add` (title and ≥1 feed required). Allocates the next free id.
+  - `id` present + channel exists → full-replace of channel fields and feed list. Feed state preserved by URL match.
+  - `id` present + channel missing → error.
+- Whole-input atomic: every object is validated up-front, then a single `db.Commit` is issued. Any error during validation produces zero writes.
+- Read-only feed fields on input (`etag`, `last_modified`, `wm`, `bg`, `ferr`) are accepted but ignored — they cannot be poked from the CLI.
+- Read-only channel fields on input (`total_art`, `add_idx`) are similarly ignored.
 
-### `feed add ID URL... [-i INGEST]`
+## Data Shape
 
-Behavior identical to the current `chan add-feed`:
-- Idempotent on URLs already present on the channel (silent skip; `mkdir -p` semantics).
-- Idempotent on duplicates within args.
-- Invalid URL formats fail.
-- `-i/--ingest`, if set, applies only to newly-added URLs; existing URLs retain their prior `Ingest` value.
-
-### `feed rm ID URL...`
-
-Behavior identical to the current `chan rm-feed`:
-- Strict: errors if any URL is not currently on the channel.
-- Errors if all the channel's feeds would be removed (use `chan rm` to delete the channel instead).
-- Errors on duplicate URLs within args.
-
-### `feed upd ID URL [-i INGEST]`
-
-- Errors if channel missing or URL is not a feed on that channel.
-- `-i ""` clears `Feed.Ingest`, falling through to the channel-level default.
-- Internal state (`ETag`, `LastModified`, `Watermark`, `BoundaryGUIDs`, `FetchError`) is untouched.
-- This is the state-preserving fix for the gap that today forces `rm-feed` + `add-feed`.
-
-### `feed ls ID [-f json|yaml]`
-
-- Errors if channel missing.
-- Emits an array of per-feed objects in the channel's stored feed order: `[{url, ingest?, error?}, …]`.
-- Same per-feed shape used inside `chan ls` / `chan show`.
-
-## Data Shapes
-
-### Channel JSON (canonical — emitted by `ls`/`show`, accepted by `apply`/`edit`)
+### Channel JSON — canonical (emitted by `ls` and `show`, accepted by `apply` and `edit`)
 
 ```json
 {
@@ -145,54 +137,67 @@ Behavior identical to the current `chan rm-feed`:
   "ingest": "#telegram",
   "pipe": ["#sanitize"],
   "feeds": [
-    { "url": "https://…/feed", "ingest": "#rss", "error": "" }
+    { "url": "https://example.com/feed", "error": "" }
   ]
 }
 ```
 
 Field rules:
-- `id` — required on output; required on `apply` for update mode; absent for create.
+
+- `id` — required on output; required on `apply` for the update branch; absent for create.
 - `title` — required and non-empty.
-- `tag`, `ingest`, `pipe` — `omitempty` on output. On input, presence means "set"; explicit empty string/array means "clear".
-- `feeds` — required, ≥1 entry. Per-feed: `url` required; `ingest` `omitempty`; `error` read-only.
+- `tag`, `ingest`, `pipe` — `omitempty` on output. On `apply` input, absence clears (full-replace semantics); presence sets.
+- `feeds` — required, ≥1 entry. Per-feed `url` required; `error` read-only.
 
-Per-feed shape used by `feed ls`:
-
-```json
-[
-  { "url": "https://…", "ingest": "#rss", "error": "" }
-]
-```
+`ls`/`show` do NOT emit internal per-feed state (`etag`, `last_modified`, `wm`, `bg`). They emit only `url` (required) and `error` (read-only, populated when the last fetch failed). State preservation across `show > file && apply file` is achieved through URL match inside `apply`, not by piping state through JSON — so the output stays terse and the `bg` arrays don't bloat it. `apply` accepts these internal fields if a hand-written input contains them, but silently ignores them.
 
 ## File Layout
 
-| File | Contents |
+| File | Change |
 |---|---|
-| `backend/cmd_chans.go` (modified) | `AddCmd`, `UpdCmd`, `RmCmd`, `LsCmd`, `ShowCmd`, `EditCmd`, `ApplyCmd`; `parseFeeds`, `printFormatted`, channel-view types. |
-| `backend/cmd_feeds.go` (new) | `FeedAddCmd`, `FeedRmCmd`, `FeedUpdCmd`, `FeedLsCmd`. |
-| `backend/cmd_chans_test.go` (modified) | Existing tests renamed mechanically; new tests for `upd` / `show` / `edit` / `apply`. |
-| `backend/cmd_feeds_test.go` (new) | Tests for the `feed` group. |
-| `backend/main.go` (modified) | Add `FeedGroup`; rename `ChannelGroup` members (drop `AddFeed`/`RmFeed`; add `Show`, `Edit`, `Apply`; rename `Add` → ensure no `--upd` flag; add `Upd`). |
-| `backend/CLAUDE.md` (modified) | Update `cmd_chans.go` blurb; add `cmd_feeds.go` entry; update the `chan`/`art` command-list line. |
-| Root `CLAUDE.md` | No changes required. |
+| [backend/channel.go](backend/channel.go) | Drop `Feed.Ingest` field; delete the line-20 comment that referenced it. |
+| [backend/ingest/main.go](backend/ingest/main.go) | `Select(channel, global)` — drop feed param. |
+| [backend/feed.go](backend/feed.go) | `pickIngest` becomes two-level (currently at line 147). |
+| [backend/feed_test.go](backend/feed_test.go) | Delete the two tests that exercise `Feed.Ingest` (lines 41 and 56 reference it). |
+| [backend/cmd_preview.go](backend/cmd_preview.go) | Update `ingest.Select` call site at line 74. |
+| [backend/cmd_chans.go](backend/cmd_chans.go) | Rewrite: `AddCmd`, `UpdCmd` (replaces old `AddCmd --upd`, `AddFeedCmd`, `RmFeedCmd`), `RmCmd`, `LsCmd`, `ShowCmd`, `EditCmd`, `ApplyCmd`; keep `parseFeeds`, `printFormatted`. |
+| [backend/cmd_chans_test.go](backend/cmd_chans_test.go) | Migrate existing tests; add new ones (see Tests). |
+| [backend/main.go](backend/main.go) | `ChannelGroup` replaced: drop `AddFeed`/`RmFeed`; add `Upd`, `Show`, `Edit`, `Apply`. |
+| [backend/CLAUDE.md](backend/CLAUDE.md) | Update `cmd_chans.go` blurb; update `Channel`/`Feed` field list; update ingest precedence paragraph. |
+| Root [CLAUDE.md](CLAUDE.md) | No changes required. |
+
+No new file. No `cmd_feeds.go`.
 
 ## Error Handling
 
-- All errors wrap with `fmt.Errorf("context: %w", err)` per repo convention.
-- `chan upd` with no field flags: `"nothing to update"`.
-- `chan show ID` missing: error from `db.ChannelByID` (`"channel %d not found"`, existing message).
-- `chan edit` editor non-zero exit: `"editor exited with status N"`.
-- `chan edit` id changed: `"edited document changed id from N to M; refusing to rewrite"`.
-- `chan apply` id given but missing: `"channel %d not found (apply does not create with specific id)"`.
-- `chan apply` shape errors: `"input must be a channel object or array of channel objects"`.
-- `feed upd` URL not on channel: `"url %q is not a feed of channel %d"` (matches `feed rm` wording).
-- Atomicity guarantee for `apply`: failures during validation never commit; one `db.Commit` at the end of the loop.
+All errors wrap with `fmt.Errorf("context: %w", err)` per repo convention. Existing message phrasings reused where applicable.
+
+| Condition | Error message contains |
+|---|---|
+| Channel id not found | `"channel %d not found"` |
+| Channel id out of range | `"id %d not in [0, 255]"` |
+| URL fails `validFeedURL` | `"invalid url %q"` |
+| Duplicate URL in args | `"duplicate url %q"` |
+| `--rm-url` URL not on channel | `"url %q is not a feed of channel %d"` |
+| `--rm-url` would empty feed list | `"channel %d would have no feeds after removal"` |
+| `chan add` missing title or url | `"title is required"` / `"--url is required"` |
+| `chan upd` no field flags | `"nothing to update"` |
+| `chan upd` empty `--title` | `"title cannot be empty"` |
+| `chan upd` `-u` combined with `--add-url`/`--rm-url` | `"--url cannot be combined with --add-url/--rm-url"` |
+| `chan apply` create missing title or feeds | `"channel %q: title required"` / `"channel %q: feeds required"` |
+| `chan apply` update id missing | `"channel %d not found"` |
+| `chan apply` shape error | `"input must be a channel object or array of channel objects"` |
+| `chan edit` editor non-zero exit | `"editor exited with status N (tempfile: %s)"` |
+| `chan edit` id changed | `"edited document changed id from N to M; refusing to apply"` |
+| `chan edit` invalid JSON | `"invalid JSON at line N: %s (tempfile: %s)"` |
+
+Atomicity guarantee: every command runs inside a single `withDB(true, fn)` that issues exactly one `db.Commit` at the end. `chan apply` validates all entries up-front; failures during validation never reach `Commit`.
 
 ## Tests
 
-### Migrated (mechanical renames in `cmd_chans_test.go`)
+### Mechanical migrations in `cmd_chans_test.go`
 
-| Existing | Becomes |
+| Old test name | New name / fate |
 |---|---|
 | `TestAddCmdCreatesChannel` | `TestChanAddCreates` |
 | `TestAddCmdCreateRequiresTitle` | `TestChanAddRequiresTitle` |
@@ -203,58 +208,60 @@ Per-feed shape used by `feed ls`:
 | `TestAddCmdUpdateClearsTag` | `TestChanUpdClearsTag` |
 | `TestAddCmdUpdateSetsPipeline` | `TestChanUpdSetsPipeline` |
 | `TestAddCmdUpdateClearsPipeline` | `TestChanUpdClearsPipeline` |
-| `TestAddCmdUpdateReplacesFeedsPreservingState` | _removed_ (`chan upd` no longer touches feeds; coverage moves to `TestChanApplyUpdatePreservesFeedState`) |
-| `TestAddCmdUpdateRejectsInvalidURL` | _removed_ (same reason) |
-| `TestAddCmdUpdateRejectsDuplicateURLs` | _removed_ (same reason) |
+| `TestAddCmdUpdateReplacesFeedsPreservingState` | `TestChanUpdReplaceFeedsPreservingState` (now via `-u` on `UpdCmd`) |
+| `TestAddCmdUpdateRejectsInvalidURL` | `TestChanUpdReplaceRejectsInvalidURL` |
+| `TestAddCmdUpdateRejectsDuplicateURLs` | `TestChanUpdReplaceRejectsDuplicateURLs` |
 | `TestAddCmdUpdateChannelNotFound` | `TestChanUpdChannelNotFound` |
 | `TestRmCmdRemovesChannels` | unchanged |
 | `TestRmCmdNoOpForMissingID` | unchanged |
-| `TestAddFeedCmd*` | move to `cmd_feeds_test.go` as `TestFeedAdd*` |
-| `TestRmFeedCmd*` | move to `cmd_feeds_test.go` as `TestFeedRm*` |
-| `TestLsCmdFiltersByTag` | unchanged + assert `pipe` field is present in output |
-| `TestParseFeeds*` | unchanged |
+| `TestAddFeedCmd*` (7 cases) | re-cast as `TestChanUpdAddURL*` against `UpdCmd` |
+| `TestRmFeedCmd*` (6 cases) | re-cast as `TestChanUpdRmURL*` against `UpdCmd` |
+| `TestLsCmdFiltersByTag` | unchanged + assert `pipe` field present in output |
+| `TestParseFeeds*` (4 cases) | unchanged |
 | `TestValidFeedURL` | unchanged |
 | `TestChannelURLs*` | unchanged |
+
+### Tests removed
+
+- Any test that exercised `Feed.Ingest` (the field is gone). If `AddFeedCmd`'s `-i` had a dedicated test, drop it.
 
 ### New tests
 
 In `cmd_chans_test.go`:
 
-- `TestChanUpdRequiresFieldFlag` — bare `chan upd 0` errors with "nothing to update".
-- `TestChanUpdDoesNotTouchFeeds` — calling `upd` with no feed-related flags leaves `ch.Feeds` byte-identical (verified via deep-equal of `URL`/`ETag`/`Watermark`/`BG`).
-- `TestChanShowFound` — emits expected JSON for existing channel.
-- `TestChanShowMissing` — errors on bad id.
-- `TestChanApplySingleCreate` — JSON object with no `id` → creates.
-- `TestChanApplySingleUpdate` — JSON object with `id` matching existing → full-replace; per-feed state preserved by URL match.
-- `TestChanApplyUpdatePreservesFeedState` — covers what `TestAddCmdUpdateReplacesFeedsPreservingState` did, but through the JSON path.
-- `TestChanApplyArray` — array of mixed creates and updates committed atomically.
-- `TestChanApplyAtomicRollback` — last item in array is invalid; no writes occur.
-- `TestChanApplyIdMissingErrors` — JSON with `id` of a non-existent channel → error, no writes.
-- `TestChanApplyInvalidJSON` — well-formed parse error reported.
-- `TestChanEditNoChangeNoOp` — `$EDITOR` is a script that re-saves the same bytes; no write to the DB.
-- `TestChanEditIdChangedErrors` — `$EDITOR` script mutates the id; error, no DB write.
-- `TestChanEditInvalidJsonErrors` — `$EDITOR` script writes non-JSON; error, no DB write.
-- `TestChanEditApplies` — `$EDITOR` script changes title; applied; feeds preserved by URL match.
-
-In `cmd_feeds_test.go`:
-
-- `TestFeedUpdChangesIngest`
-- `TestFeedUpdEmptyIngestClears`
-- `TestFeedUpdPreservesFetchState` — ingest changes but `ETag`/`Watermark`/`BG`/`LastModified` are byte-identical.
-- `TestFeedUpdUrlNotOnChannel`
-- `TestFeedUpdChannelNotFound`
-- `TestFeedLsEmpty` — channel with one feed (can't be empty in practice; verifies output shape).
-- `TestFeedLsOutputOrder` — order matches stored `ch.Feeds` order.
-- `TestFeedLsChannelMissing`
-- `TestFeedLsFormatYAML`
+- `TestChanUpdRequiresFieldFlag` — bare `chan upd 0` errors with `"nothing to update"`.
+- `TestChanUpdMutexUrlFlags` — `-u X --add-url Y` errors.
+- `TestChanUpdNoFeedFlagsLeavesFeedsUntouched` — title-only update leaves `ch.Feeds` byte-identical (URL, ETag, Watermark, BG, FetchError preserved).
+- `TestChanShowFound`
+- `TestChanShowMissing`
+- `TestChanShowEmitsPipe`
+- `TestChanApplySingleCreate`
+- `TestChanApplySingleUpdate`
+- `TestChanApplyArray`
+- `TestChanApplyAtomicRollback` — second item in array invalid; no writes occur.
+- `TestChanApplyIdMissingErrors`
+- `TestChanApplyInvalidJSON`
+- `TestChanApplyPreservesFeedState`
+- `TestChanApplyIgnoresReadOnlyFields` — input includes `etag`/`wm`; stored values unchanged after apply.
+- `TestChanEditNoChangeNoOp`
+- `TestChanEditIdChangedErrors`
+- `TestChanEditInvalidJsonErrors`
+- `TestChanEditApplies`
+- `TestChanEditEditorNonZeroExit`
 
 ### `$EDITOR` test harness
 
-`chan edit` spawns `$EDITOR` and waits. Tests set `EDITOR` to a tiny shell script — a per-test temp file with `#!/bin/sh` followed by a `cat > "$1" <<EOF` block writing the desired payload — and make it executable via `os.Chmod`. The current Go test infra in `cmd_chans_test.go` already uses `t.TempDir()`, so the same pattern is reused.
+`chan edit` resolves the editor via `$VISUAL` → `$EDITOR` → `vi` and `exec.Command`s it. Tests write a tiny shell script into `t.TempDir()`, `os.Chmod(0o755)` it, and `t.Setenv("EDITOR", scriptPath)`. The script reads `$1` (the path supplied by `chan edit`), writes the desired payload (or exits non-zero, or writes garbage), and returns. Variants per test cover the four edit branches (no-change, id-changed, invalid-JSON, valid-edit, non-zero-exit).
 
 ## Migration Notes
 
-- All existing call sites in `backend/` for `AddCmd`'s `--upd` form, `AddFeedCmd`, `RmFeedCmd` are confined to `cmd_chans.go` and `main.go` plus tests. None of `cmd_fetch.go`, `cmd_art.go`, `cmd_import.go`, `cmd_preview.go`, `cmd_inspect*.go`, `cmd_config.go` reference these (verified during exploration).
-- `parseFeeds` is reused by `chan add`, the `chan apply` update path, and the `chan edit` apply path.
-- `db.Channels()` API and `Channel` struct are unchanged.
-- No DB format changes.
+- `Feed.Ingest` references in `backend/`, confirmed via `grep -rn "Feed\.Ingest\|feed\.Ingest\|ingest\.Select" backend/`:
+  - [backend/channel.go:20](backend/channel.go) — comment.
+  - [backend/cmd_chans.go:155](backend/cmd_chans.go) — `feed.Ingest = *o.Ingest` in `AddFeedCmd`.
+  - [backend/cmd_preview.go:74](backend/cmd_preview.go) — `ingest.Select` call site.
+  - [backend/feed.go:147](backend/feed.go) — `ingest.Select` call site in `pickIngest`.
+  - [backend/feed_test.go:41,56](backend/feed_test.go) — two tests exercising the field.
+  - [backend/ingest/main.go](backend/ingest/main.go) — `Select` signature.
+- `parseFeeds` is reused by `chan add`, the `chan upd -u` replace path, the `chan apply` update branch, and the `chan edit` apply path.
+- `db.Channels()` API and `Channel` struct (other than the `Feed.Ingest` removal) unchanged.
+- On-disk DB format: unchanged at the byte level. The `ingest` JSON tag on `Feed` objects in pre-existing DBs becomes an unknown field, silently discarded on unmarshal. New writes never emit it.
