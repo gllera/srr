@@ -294,3 +294,18 @@ func (o *LsCmd) Run() error {
 		return printFormatted(o.Format, out)
 	})
 }
+
+type ShowCmd struct {
+	ID     int    `arg:"" help:"Channel id."`
+	Format string `short:"f" default:"json" enum:"yaml,json" help:"Output format."`
+}
+
+func (o *ShowCmd) Run() error {
+	return withDB(false, func(_ context.Context, db *DB) error {
+		ch, err := db.ChannelByID(o.ID)
+		if err != nil {
+			return err
+		}
+		return printFormatted(o.Format, viewOf(ch))
+	})
+}

@@ -591,3 +591,56 @@ func TestChanUpdAddURLAtomicOnError(t *testing.T) {
 		t.Errorf("Feeds len = %d, want 2 (rollback)", len(ch.Feeds))
 	}
 }
+
+func TestChanShowFound(t *testing.T) {
+	setupChannelsTestDB(t)
+	var out bytes.Buffer
+	saved := stdout
+	stdout = &out
+	t.Cleanup(func() { stdout = saved })
+
+	if err := (&ShowCmd{ID: 0, Format: "json"}).Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	body := out.String()
+	if !strings.Contains(body, `"id":0`) {
+		t.Errorf("missing id: %s", body)
+	}
+	if !strings.Contains(body, `"title":"Test"`) {
+		t.Errorf("missing title: %s", body)
+	}
+	if !strings.Contains(body, `"url":"https://a.example.com/feed"`) {
+		t.Errorf("missing feed url: %s", body)
+	}
+}
+
+func TestChanShowMissing(t *testing.T) {
+	setupChannelsTestDB(t)
+	wantErr(t, (&ShowCmd{ID: 99, Format: "json"}).Run(), "not found")
+}
+
+func TestChanShowYAML(t *testing.T) {
+	setupChannelsTestDB(t)
+	var out bytes.Buffer
+	saved := stdout
+	stdout = &out
+	t.Cleanup(func() { stdout = saved })
+
+	if err := (&ShowCmd{ID: 0, Format: "yaml"}).Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	body := out.String()
+	if !strings.Contains(body, "title: Test") {
+		t.Errorf("missing yaml title: %s", body)
+	}
+}
+
+func TestChanShowIDTooLarge(t *testing.T) {
+	setupChannelsTestDB(t)
+	wantErr(t, (&ShowCmd{ID: 256, Format: "json"}).Run(), "[0, 255]")
+}
+
+func TestChanShowIDNegative(t *testing.T) {
+	setupChannelsTestDB(t)
+	wantErr(t, (&ShowCmd{ID: -1, Format: "json"}).Run(), "[0, 255]")
+}

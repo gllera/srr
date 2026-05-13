@@ -33,6 +33,7 @@ type ChannelGroup struct {
 	Upd    UpdCmd    `cmd:"" help:"Update an existing channel."`
 	Rm     RmCmd     `cmd:"" help:"Unsubscribe from channel(s)."`
 	Ls     LsCmd     `cmd:"" help:"List channels."`
+	Show   ShowCmd   `cmd:"" help:"Print one channel's record."`
 	Import ImportCmd `cmd:"" help:"Import opml channels file."`
 }
 
