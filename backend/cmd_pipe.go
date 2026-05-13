@@ -10,7 +10,7 @@ type PipeCmd struct {
 }
 
 func (o *PipeCmd) Run() error {
-	return withDB(true, func(ctx context.Context, db *DB) error {
+	return withDB(len(o.Pipe) > 0, func(ctx context.Context, db *DB) error {
 		if len(o.Pipe) == 0 {
 			return printJSON(db.core.Pipe)
 		}

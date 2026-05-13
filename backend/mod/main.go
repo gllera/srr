@@ -4,11 +4,29 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
 )
+
+// maxSubprocessOutput caps the bytes buffered from an external module's stdout.
+// Above this, the writer returns an error which propagates as a broken pipe to
+// the subprocess. Defense-in-depth against runaway output OOM'ing the process.
+const maxSubprocessOutput = 64 << 20
+
+type cappedBuffer struct {
+	buf   bytes.Buffer
+	limit int
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	if c.buf.Len()+len(p) > c.limit {
+		return 0, fmt.Errorf("subprocess output exceeds %d bytes", c.limit)
+	}
+	return c.buf.Write(p)
+}
 
 type RawItem struct {
 	GUID      uint32     `json:"guid"`
@@ -82,11 +100,11 @@ func (o *Module) Process(ctx context.Context, args string, i *RawItem) error {
 		return err
 	}
 
-	var out bytes.Buffer
+	out := &cappedBuffer{limit: maxSubprocessOutput}
 
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", args)
 	cmd.Stdin = &buf
-	cmd.Stdout = &out
+	cmd.Stdout = out
 	cmd.Stderr = os.Stderr
 	cmd.Env = o.env
 
@@ -94,5 +112,5 @@ func (o *Module) Process(ctx context.Context, args string, i *RawItem) error {
 		return err
 	}
 
-	return json.Unmarshal(out.Bytes(), i)
+	return json.Unmarshal(out.buf.Bytes(), i)
 }
