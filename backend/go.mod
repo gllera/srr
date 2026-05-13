@@ -14,6 +14,8 @@ require (
 	github.com/pkg/sftp v1.13.10
 	github.com/tdewolff/minify v2.3.6+incompatible
 	golang.org/x/crypto v0.49.0
+	golang.org/x/net v0.52.0
+	golang.org/x/sync v0.20.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -41,7 +43,5 @@ require (
 	github.com/rogpeppe/go-internal v1.12.0 // indirect
 	github.com/tdewolff/parse v2.3.4+incompatible // indirect
 	github.com/tdewolff/test v1.0.10 // indirect
-	golang.org/x/net v0.52.0 // indirect
-	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 )

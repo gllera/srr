@@ -52,40 +52,40 @@ func TestIsSelected(t *testing.T) {
 
 func TestImportWalkerBasic(t *testing.T) {
 	nodes := []*OPMLNode{
-		{Name: "Feed A", Sub: &Subscription{Title: "Feed A", Sources: []*Source{{URL: "http://example.com/a"}}}},
-		{Name: "Feed B", Sub: &Subscription{Title: "Feed B", Sources: []*Source{{URL: "http://example.com/b"}}}},
+		{Name: "Feed A", Channel: &Channel{Title: "Feed A", Feeds: []*Feed{{URL: "http://example.com/a"}}}},
+		{Name: "Feed B", Channel: &Channel{Title: "Feed B", Feeds: []*Feed{{URL: "http://example.com/b"}}}},
 	}
 
 	iw := &importWalker{w: io.Discard, selectedIDs: nil}
-	subs, err := iw.walk(nodes, "", "", nil, true)
+	channels, err := iw.walk(nodes, "", "", nil, true)
 	if err != nil {
 		t.Fatalf("walk: %v", err)
 	}
 
-	if len(subs) != 2 {
-		t.Fatalf("got %d subs, want 2", len(subs))
+	if len(channels) != 2 {
+		t.Fatalf("got %d channels, want 2", len(channels))
 	}
 }
 
 func TestImportWalkerSelectiveImport(t *testing.T) {
 	nodes := []*OPMLNode{
-		{Name: "Feed A", Sub: &Subscription{Title: "Feed A", Sources: []*Source{{URL: "http://example.com/a"}}}},
-		{Name: "Feed B", Sub: &Subscription{Title: "Feed B", Sources: []*Source{{URL: "http://example.com/b"}}}},
-		{Name: "Feed C", Sub: &Subscription{Title: "Feed C", Sources: []*Source{{URL: "http://example.com/c"}}}},
+		{Name: "Feed A", Channel: &Channel{Title: "Feed A", Feeds: []*Feed{{URL: "http://example.com/a"}}}},
+		{Name: "Feed B", Channel: &Channel{Title: "Feed B", Feeds: []*Feed{{URL: "http://example.com/b"}}}},
+		{Name: "Feed C", Channel: &Channel{Title: "Feed C", Feeds: []*Feed{{URL: "http://example.com/c"}}}},
 	}
 
 	// Nodes are sorted case-insensitively, so order is A=1, B=2, C=3
 	iw := &importWalker{w: io.Discard, selectedIDs: []string{"2"}}
-	subs, err := iw.walk(nodes, "", "", nil, false)
+	channels, err := iw.walk(nodes, "", "", nil, false)
 	if err != nil {
 		t.Fatalf("walk: %v", err)
 	}
 
-	if len(subs) != 1 {
-		t.Fatalf("got %d subs, want 1", len(subs))
+	if len(channels) != 1 {
+		t.Fatalf("got %d channels, want 1", len(channels))
 	}
-	if subs[0].Title != "Feed B" {
-		t.Errorf("selected sub = %q, want %q", subs[0].Title, "Feed B")
+	if channels[0].Title != "Feed B" {
+		t.Errorf("selected channel = %q, want %q", channels[0].Title, "Feed B")
 	}
 }
 
@@ -94,38 +94,38 @@ func TestImportWalkerNestedGroup(t *testing.T) {
 		{
 			Name: "Tech",
 			Children: []*OPMLNode{
-				{Name: "Blog", Sub: &Subscription{Title: "Blog", Sources: []*Source{{URL: "http://example.com/blog"}}}},
+				{Name: "Blog", Channel: &Channel{Title: "Blog", Feeds: []*Feed{{URL: "http://example.com/blog"}}}},
 			},
 		},
 	}
 
 	iw := &importWalker{w: io.Discard, selectedIDs: nil}
-	subs, err := iw.walk(nodes, "", "", nil, true)
+	channels, err := iw.walk(nodes, "", "", nil, true)
 	if err != nil {
 		t.Fatalf("walk: %v", err)
 	}
 
-	if len(subs) != 1 {
-		t.Fatalf("got %d subs, want 1", len(subs))
+	if len(channels) != 1 {
+		t.Fatalf("got %d channels, want 1", len(channels))
 	}
-	if subs[0].Tag != "tech" {
-		t.Errorf("tag = %q, want %q", subs[0].Tag, "tech")
+	if channels[0].Tag != "tech" {
+		t.Errorf("tag = %q, want %q", channels[0].Tag, "tech")
 	}
 }
 
 func TestImportWalkerNoSelection(t *testing.T) {
 	nodes := []*OPMLNode{
-		{Name: "Feed A", Sub: &Subscription{Title: "Feed A", Sources: []*Source{{URL: "http://example.com/a"}}}},
+		{Name: "Feed A", Channel: &Channel{Title: "Feed A", Feeds: []*Feed{{URL: "http://example.com/a"}}}},
 	}
 
 	iw := &importWalker{w: io.Discard, selectedIDs: nil}
-	subs, err := iw.walk(nodes, "", "", nil, false)
+	channels, err := iw.walk(nodes, "", "", nil, false)
 	if err != nil {
 		t.Fatalf("walk: %v", err)
 	}
 
-	if len(subs) != 0 {
-		t.Errorf("got %d subs, want 0 (nothing selected)", len(subs))
+	if len(channels) != 0 {
+		t.Errorf("got %d channels, want 0 (nothing selected)", len(channels))
 	}
 }
 
@@ -134,48 +134,48 @@ func TestImportWalkerGroupSelectsChildren(t *testing.T) {
 		{
 			Name: "Tech",
 			Children: []*OPMLNode{
-				{Name: "Blog A", Sub: &Subscription{Title: "Blog A", Sources: []*Source{{URL: "http://example.com/a"}}}},
-				{Name: "Blog B", Sub: &Subscription{Title: "Blog B", Sources: []*Source{{URL: "http://example.com/b"}}}},
+				{Name: "Blog A", Channel: &Channel{Title: "Blog A", Feeds: []*Feed{{URL: "http://example.com/a"}}}},
+				{Name: "Blog B", Channel: &Channel{Title: "Blog B", Feeds: []*Feed{{URL: "http://example.com/b"}}}},
 			},
 		},
 	}
 
 	// Selecting the group "1" should import all children
 	iw := &importWalker{w: io.Discard, selectedIDs: []string{"1"}}
-	subs, err := iw.walk(nodes, "", "", nil, false)
+	channels, err := iw.walk(nodes, "", "", nil, false)
 	if err != nil {
 		t.Fatalf("walk: %v", err)
 	}
 
-	if len(subs) != 2 {
-		t.Errorf("got %d subs, want 2 (selecting group imports all children)", len(subs))
+	if len(channels) != 2 {
+		t.Errorf("got %d channels, want 2 (selecting group imports all children)", len(channels))
 	}
 }
 
 func TestImportWalkerSorting(t *testing.T) {
 	nodes := []*OPMLNode{
-		{Name: "Zebra", Sub: &Subscription{Title: "Zebra", Sources: []*Source{{URL: "http://example.com/z"}}}},
-		{Name: "alpha", Sub: &Subscription{Title: "alpha", Sources: []*Source{{URL: "http://example.com/a"}}}},
-		{Name: "Beta", Sub: &Subscription{Title: "Beta", Sources: []*Source{{URL: "http://example.com/b"}}}},
+		{Name: "Zebra", Channel: &Channel{Title: "Zebra", Feeds: []*Feed{{URL: "http://example.com/z"}}}},
+		{Name: "alpha", Channel: &Channel{Title: "alpha", Feeds: []*Feed{{URL: "http://example.com/a"}}}},
+		{Name: "Beta", Channel: &Channel{Title: "Beta", Feeds: []*Feed{{URL: "http://example.com/b"}}}},
 	}
 
 	iw := &importWalker{w: io.Discard, selectedIDs: nil}
-	subs, err := iw.walk(nodes, "", "", nil, true)
+	channels, err := iw.walk(nodes, "", "", nil, true)
 	if err != nil {
 		t.Fatalf("walk: %v", err)
 	}
 
 	// Should be sorted case-insensitively: alpha, Beta, Zebra
-	if len(subs) != 3 {
-		t.Fatalf("got %d subs, want 3", len(subs))
+	if len(channels) != 3 {
+		t.Fatalf("got %d channels, want 3", len(channels))
 	}
-	if subs[0].Title != "alpha" {
-		t.Errorf("subs[0] = %q, want %q", subs[0].Title, "alpha")
+	if channels[0].Title != "alpha" {
+		t.Errorf("channels[0] = %q, want %q", channels[0].Title, "alpha")
 	}
-	if subs[1].Title != "Beta" {
-		t.Errorf("subs[1] = %q, want %q", subs[1].Title, "Beta")
+	if channels[1].Title != "Beta" {
+		t.Errorf("channels[1] = %q, want %q", channels[1].Title, "Beta")
 	}
-	if subs[2].Title != "Zebra" {
-		t.Errorf("subs[2] = %q, want %q", subs[2].Title, "Zebra")
+	if channels[2].Title != "Zebra" {
+		t.Errorf("channels[2] = %q, want %q", channels[2].Title, "Zebra")
 	}
 }
