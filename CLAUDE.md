@@ -35,7 +35,7 @@ Shared format between backend (writer) and frontend (reader).
 ### `db.gz`
 
 ```
-{ data_tog, fetched_at, total_art, next_pid, pack_off, channels{}, first_fetched, fetched_at_cur? }
+{ data_tog, fetched_at, total_art, next_pid, pack_off, channels{}, first_fetched, fetched_at_cur?, pipe? }
 ```
 
 | Field | Type | Description |
@@ -48,12 +48,23 @@ Shared format between backend (writer) and frontend (reader).
 | `channels` | object | JSON object keyed by channel ID (number); may be `null` in JSON (default `{}`) |
 | `first_fetched` | int | Unix timestamp of first fetch that produced articles. `omitempty` |
 | `fetched_at_cur` | int | Running idx-time cursor in 8-hour blocks since `first_fetched`; persists `prevFetchedTS` across `PutArticles` calls so per-entry `delta_fetched_at` reflects real elapsed time. `omitempty` |
+| `pipe` | string[] | Root-level default pipeline inherited by channels whose `pipe` is absent. `omitempty`. If absent at load, `NewDB` substitutes `["#sanitize", "#minify"]`. |
 
 ### Channels (`IChannel`)
 
 `{ id, title, feeds:IFeed[], total_art, add_idx, pipe?:string[], tag? }`
 
 Each `IFeed` is `{ url, ferr?, etag?, last_modified?, wm?, bg? }`. `wm` (Watermark) is the max published unix-second ever seen; `bg` (BoundaryGUIDs) is the FNV-32a hash array used for dedup. Multiple feeds merge under one `chan_id` so a channel is not bound to a single feed URL — useful when the 256-id ceiling matters or when several feeds form one logical channel. Per-feed state (incremental fetch headers, last error, dedup watermark) lives on the feed, not the channel.
+
+### Pipe Hierarchy
+
+Two levels store an optional mod pipeline (`pipe` field): db.gz root and channel. Resolution walks root → channel:
+
+- A `nil`/absent channel `pipe` **inherits** root.
+- A non-`nil` channel `pipe` **overrides** root (an explicit empty slice means "no pipe").
+- The `#parent` token inside a channel override expands inline to the root pipe; non-token entries pass through verbatim.
+- Built-in mods use the `#` prefix (`#sanitize`, `#minify`, `#youtube`); anything else is a shell command (see backend `mod/` docs).
+- When the loaded root `pipe` is nil/absent, `NewDB` substitutes `["#sanitize", "#minify"]` as the default; the value is persisted on the next `Commit`. Clearing root pipe (`srr pipe ""`) writes nil, so the default reappears on the subsequent load — to truly opt out for a given channel, set `Channel.Pipeline` to an explicit empty list (`srr chan upd <id> -p ""`).
 
 `channels` is a JSON object (`Record<number, IChannel>`) keyed by channel ID. Backend struct: `Channel` holds `Feeds []*Feed`. JSON uses short keys for per-feed state (`feeds`, `pipe`, `ferr`, `wm`, `bg`, etc.) — see `DBCore` struct tags.
 

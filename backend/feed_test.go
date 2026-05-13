@@ -31,7 +31,7 @@ func dispatchOnce(t *testing.T, feed *Feed, ch *Channel) []*Item {
 	t.Helper()
 	buf := make([]byte, 1<<20)
 	const fetchedAt int64 = 4_102_444_800
-	items, err := feed.fetch(context.Background(), nil, buf, mod.New(), ingest.New(), ch, fetchedAt)
+	items, err := feed.fetch(context.Background(), nil, buf, mod.New(), ingest.New(), ch, fetchedAt, ch.Pipeline)
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}

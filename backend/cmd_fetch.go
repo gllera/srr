@@ -79,7 +79,7 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 				defer bufPool.Put(buf)
 				processor := procPool.Get().(*mod.Module)
 				defer procPool.Put(processor)
-				ch.Fetch(gctx, client, buf, processor, engine, db.core.FetchedAt)
+				ch.Fetch(gctx, client, buf, processor, engine, db.core.FetchedAt, db.core.Pipe)
 				return nil
 			})
 		}

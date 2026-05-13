@@ -30,7 +30,7 @@ type Feed struct {
 // fetch routes the feed through the selected FetchFunc so the
 // dedup / watermark / pipeline path stays uniform across RSS, Telegram,
 // and external ingest strategies.
-func (feed *Feed) fetch(ctx context.Context, client *http.Client, buf []byte, processor *mod.Module, engine *ingest.Fetcher, ch *Channel, fetchedAt int64) ([]*Item, error) {
+func (feed *Feed) fetch(ctx context.Context, client *http.Client, buf []byte, processor *mod.Module, engine *ingest.Fetcher, ch *Channel, fetchedAt int64, pipeline []string) ([]*Item, error) {
 	slog.Debug("downloading feed", "url", feed.URL, "channel", ch)
 
 	name := pickIngest(ch)
@@ -97,7 +97,7 @@ func (feed *Feed) fetch(ctx context.Context, client *http.Client, buf []byte, pr
 			continue
 		}
 
-		if err := processItem(ctx, processor, ch.Pipeline, i); err != nil {
+		if err := processItem(ctx, processor, pipeline, i); err != nil {
 			return nil, err
 		}
 		items = append(items, &Item{

@@ -18,6 +18,15 @@ const (
 	idxHeaderSize = 259 * 4 // 3 state fields + 256 subCounts, all uint32 LE
 )
 
+// defaultRootPipe returns a fresh copy of the pipeline applied as the
+// db.gz root default when no explicit root pipe is stored. Channels
+// still inherit/override normally; this just supplies the fallback for
+// the topmost level. Returning a fresh slice each call keeps callers
+// from accidentally mutating shared state.
+func defaultRootPipe() []string {
+	return []string{"#sanitize", "#minify"}
+}
+
 func jsonEncode(v any) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -52,6 +61,7 @@ type DBCore struct {
 	PackOffset      int              `json:"pack_off"`
 	FirstFetchedAt  int64            `json:"first_fetched,omitempty"`
 	FetchedAtCursor int              `json:"fetched_at_cur,omitempty"`
+	Pipe            []string         `json:"pipe,omitempty"`
 	Channels        map[int]*Channel `json:"channels"`
 }
 
@@ -106,6 +116,10 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 			db.Close(ctx)
 			return nil, fmt.Errorf("decode %s: %w", dbFileKey, err)
 		}
+	}
+
+	if db.core.Pipe == nil {
+		db.core.Pipe = defaultRootPipe()
 	}
 
 	for id, ch := range db.core.Channels {
