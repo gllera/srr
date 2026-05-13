@@ -53,7 +53,7 @@ const userAgent = "SRR"
 // readBody streams body into the caller's per-worker buf via io.ReadFull
 // and maps the three meaningful outcomes: oversize (entire buf filled),
 // empty body, and the expected short-read. what is the source noun used
-// in the size/empty error message ("subscription file", "telegram page").
+// in the size/empty error message ("feed", "telegram page").
 func readBody(body io.Reader, buf []byte, what string) ([]byte, error) {
 	n, err := io.ReadFull(body, buf)
 	if err == nil {
