@@ -17,25 +17,25 @@ Dependency chain: `app → nav → data → {idx, cache}`, `app → fmt`, `app �
 | Module | Role |
 |---|---|
 | `idx.ts` | Binary idx pack parsing. Exports `IDX_PACK_SIZE` (50000), `IdxPack` interface, `makeIdxPack()`. |
-| `data.ts` | CDN data layer: fetches `db.gz`, loads all idx packs at init via `makeIdxPack()`. Fetches JSONL data packs on demand. Exports `db`, `init`, `loadArticle(chronIdx)`, `getSubId(chronIdx)`, `findChronForTimestamp(ts)`, `findLeft`, `findRight`, `countLeft`, `groupSubsByTag()`. Re-exports `IDX_PACK_SIZE`. |
-| `nav.ts` | Navigation state machine: hash routing (`#pos[!tokens]`), traversal, filtering. Returns `IShowFeed`. Uses `pushState`/`replaceState`. Tokens are sub IDs or tag names. Exports `filter`, `fromHash`, `left`, `right`, `first`, `last`, `switchFilter`, `goTo`, `cycleFilter`, `getFilterEntries`, `getCurrentFilterKey`, `isSingleFilter`, `pruneSeen`. |
+| `data.ts` | CDN data layer: fetches `db.gz`, loads all idx packs at init via `makeIdxPack()`. Fetches JSONL data packs on demand. Exports `db`, `init`, `loadArticle(chronIdx)`, `getChannelId(chronIdx)`, `findChronForTimestamp(ts)`, `findLeft`, `findRight`, `countLeft`, `groupChannelsByTag()`. Re-exports `IDX_PACK_SIZE`. |
+| `nav.ts` | Navigation state machine: hash routing (`#pos[!tokens]`), traversal, filtering. Returns `IShowFeed`. Uses `pushState`/`replaceState`. Tokens are channel IDs or tag names. Exports `filter`, `fromHash`, `left`, `right`, `first`, `last`, `switchFilter`, `goTo`, `cycleFilter`, `getFilterEntries`, `getCurrentFilterKey`, `isSingleFilter`, `pruneSeen`. |
 | `cache.ts` | `makeLRU<T>(maxSize)`: LRU cache via Map insertion order. Used by `data.ts` for data-pack caching. |
 | `fmt.ts` | Pure utilities (no DOM imports): `sanitizeHtml`, `timeAgo`, `formatDate`, `URL_DENY`. `sanitizeHtml` strips dangerous elements/attributes for defense-in-depth; proxies images through wsrv.nl. |
-| `dropdown.ts` | Source-menu dropdown: own DOM lookups + open/close state. Exports `closeAllDropdowns()` and `showSourceMenu(currentTag, guard)`. The currently-shown article's tag and the `guard` mutex are passed in from `app.ts` to keep state ownership clear. |
+| `dropdown.ts` | Channel-menu dropdown: own DOM lookups + open/close state. Exports `closeAllDropdowns()` and `showChannelMenu(currentTag, guard)`. The currently-shown article's tag and the `guard` mutex are passed in from `app.ts` to keep state ownership clear. |
 | `gestures.ts` | Touch and scroll handlers: one-finger swipe = prev/next, two-finger vertical swipe = cycle filter, scroll-down hides toolbar. Exports `setupGestures({ prev, next, toolbar, guard })`. |
-| `app.ts` | UI orchestrator: DOM lookups, render, source-label refresh, error popup, keyboard handler, `guard()` mutex, init. Async handlers always go through `guard()`. Position persisted to localStorage. |
-| `types.d.ts` | Ambient types: `IDB`, `ISub`, `IArticle`, `IShowFeed`. |
+| `app.ts` | UI orchestrator: DOM lookups, render, channel-label refresh, error popup, keyboard handler, `guard()` mutex, init. Async handlers always go through `guard()`. Position persisted to localStorage. |
+| `types.d.ts` | Ambient types: `IDB`, `IChannel`, `IFeed`, `IArticle`, `IShowFeed`. |
 
 CSS: native nesting, `srr-` prefix on all classes, dark mode via `prefers-color-scheme`.
 
 ## Data Structures
 
-See root `CLAUDE.md` Data Contract for db.gz, ISub, IArticle, pack format, CDN layout, and chronIdx.
+See root `CLAUDE.md` Data Contract for db.gz, IChannel, IArticle, pack format, CDN layout, and chronIdx.
 
 Frontend-specific additions:
-- `subscriptions` in `IDB` is `Record<number, ISub>` (JSON object keyed by subscription ID); defaults to `{}` if absent. `sub.id` is populated from object keys at init.
-- **IArticle**: `{ s, a, p, t, l, c }` — sub_id, fetched_at, published, title, link, content. Loaded from JSONL data packs.
-- **IShowFeed**: `{ article, has_left, has_right, filtered, sub, countRight }` — `countRight`: always `number` (never null); count of filtered articles strictly after `pos`.
+- `channels` in `IDB` is `Record<number, IChannel>` (JSON object keyed by channel ID); defaults to `{}` if absent. `channel.id` is populated from object keys at init.
+- **IArticle**: `{ s, a, p, t, l, c }` — chan_id, fetched_at, published, title, link, content. Loaded from JSONL data packs.
+- **IShowFeed**: `{ article, has_left, has_right, filtered, channel, countRight }` — `countRight`: always `number` (never null); count of filtered articles strictly after `pos`.
 - Dev: `../packs/` sibling directory served on port 3000 with CORS.
 
 ## Key Behaviors
@@ -44,7 +44,7 @@ Frontend-specific additions:
 
 **Eager fetch**: `data.ts` starts `fetch("db.gz")` at module load (before `init()` call).
 
-**Init**: `data.init()` loads all idx packs in parallel, calls `makeIdxPack()` (from `idx.ts`) to lazily parse each binary pack into `subIds`/`fetchedAts` typed arrays and `bounds`. Latest packs use `data_tog` filename toggle.
+**Init**: `data.init()` loads all idx packs in parallel, calls `makeIdxPack()` (from `idx.ts`) to lazily parse each binary pack into `chanIds`/`fetchedAts` typed arrays and `bounds`. Latest packs use `data_tog` filename toggle.
 
 **Article loading**: `loadArticle(chronIdx)` resolves pack+offset via binary search on `IdxPack.bounds`, fetches and parses the JSONL data pack (LRU-cached by pack ID, max 20 packs).
 
@@ -52,33 +52,33 @@ Frontend-specific additions:
 
 ## State Machines (nav.ts)
 
-State: `pos` (chronIdx), `filter` (object with `active`, `subs`, `subTotal`, `tokens`, `matches()`, `clear()`, `set(tokens)`).
+State: `pos` (chronIdx), `filter` (object with `active`, `channels`, `chanTotal`, `tokens`, `matches()`, `clear()`, `set(tokens)`).
 
 **`filter`** — active when `tokens` non-empty:
-- `filter.clear()`: empties tokens, repopulates `subs` from all subscriptions with `total_art > 0`
-- `filter.set(tokens)`: resolves tokens (numeric sub IDs or tag names) into `subs` map (`sub_id → add_idx`); falls back to `clear()` if no token resolves
+- `filter.clear()`: empties tokens, repopulates `channels` from all channels with `total_art > 0`
+- `filter.set(tokens)`: resolves tokens (numeric channel IDs or tag names) into `channels` map (`chan_id → add_idx`); falls back to `clear()` if no token resolves
 - `last(token?)`: no arg = use current filter; `""` = clear filter; otherwise `filter.set([token])`; always jumps to last matching article
 - `goTo(idx)`: navigate to chronIdx; if filter active and target doesn't match, snap forward to next match; falls back to `last()` if none
-- `switchFilter(token)`: sets filter to token (or clears if `""`); resumes at last seen position for that sub/tag if valid, otherwise jumps to `first()`
+- `switchFilter(token)`: sets filter to token (or clears if `""`); resumes at last seen position for that channel/tag if valid, otherwise jumps to `first()`
 - `cycleFilter(dir)`: steps through `getFilterEntries()` by `dir` (+1/-1), calls `switchFilter()`
-- `getFilterEntries()`: returns `["", "tagName", ..., "subId", ...]` built via `data.groupSubsByTag()`
+- `getFilterEntries()`: returns `["", "tagName", ..., "channelId", ...]` built via `data.groupChannelsByTag()`
 - `getCurrentFilterKey()`: returns `""`, the single token, or `""` for multi-token filters (URL-only edge case)
-- Navigation uses `findLeft`/`findRight` — synchronous linear scans via `data.getSubId()`
+- Navigation uses `findLeft`/`findRight` — synchronous linear scans via `data.getChannelId()`
 - Hash: `#pos[!tokens]` — `!` segment, `+`-separated tokens, each `encodeURIComponent`-wrapped to survive special chars in tag names.
 
-**Time-range jumps** (dropdown.ts source menu): "8h"/"16h"/"1d"/"7d" chips compute `Date.now() - seconds`, look up `data.findChronForTimestamp(ts)`, and call `nav.goTo(chron)` so the user lands at the article from that point and can navigate right.
+**Time-range jumps** (dropdown.ts channel menu): "8h"/"16h"/"1d"/"7d" chips compute `Date.now() - seconds`, look up `data.findChronForTimestamp(ts)`, and call `nav.goTo(chron)` so the user lands at the article from that point and can navigate right.
 
 ## Test Patterns
 
 `src/js/nav.test.ts` — large nav suite. `src/js/data.test.ts` — pure-function cases only. `src/js/idx.test.ts` — idx binary-parsing unit tests. `src/js/fmt.test.ts` — sanitizeHtml / timeAgo / formatDate tests. `src/js/cache.test.ts` — LRU cache tests.
 
 **nav.test.ts**:
-- **Mock**: `vi.hoisted()` + `vi.mock("./data", ...)` with same shape as data.ts exports. Mocks `getSubId`, `loadArticle`, `groupSubsByTag`, `findLeft`, `findRight`, `countLeft`, `findChronForTimestamp`.
+- **Mock**: `vi.hoisted()` + `vi.mock("./data", ...)` with same shape as data.ts exports. Mocks `getChannelId`, `loadArticle`, `groupChannelsByTag`, `findLeft`, `findRight`, `countLeft`, `findChronForTimestamp`.
 - **Reset**: `beforeEach` resets data state, calls `nav.filter.clear()`, and re-spies `history.pushState`/`replaceState`.
-- **Helpers**: `makeArticle(overrides)`, `makeSub(overrides)` — factory with defaults. `setupIndex(entries)` — populates `db.subscriptions` and wires `getSubId`/`loadArticle` mocks.
+- **Helpers**: `makeArticle(overrides)`, `makeChannel(overrides)` — factory with defaults. `setupIndex(entries)` — populates `db.channels` and wires `getChannelId`/`loadArticle` mocks.
 - **Hash checks**: spy on `history.pushState`/`replaceState` (note the spy accumulates across tests in the same describe).
 
-**data.test.ts**: mocks `./data` with inline reimplementations of `findChronForTimestamp` and `groupSubsByTag` driven by writable `db`/`fetchedAts` state — data.ts's module-load `fetch` would otherwise fire under jsdom.
+**data.test.ts**: mocks `./data` with inline reimplementations of `findChronForTimestamp` and `groupChannelsByTag` driven by writable `db`/`fetchedAts` state — data.ts's module-load `fetch` would otherwise fire under jsdom.
 
 ## Conventions
 

@@ -50,11 +50,11 @@ Entry point: `src/index.html` -> `src/js/app.ts`. Bundled with Parcel 2.
 | `nav.ts` | Navigation state machine: hash routing, traversal, filtering. Returns `IShowFeed`. |
 | `data.ts` | CDN data layer: fetches `db.gz`, loads binary idx packs at init, fetches JSONL data packs on demand (LRU-cached). |
 | `idx.ts` | Binary idx pack parser: lazy `parse()` into `subIds`/`fetchedAts` typed arrays + `bounds`; per-pack `findLeft`/`findRight`/`countLeft`. |
-| `dropdown.ts` | Source-menu dropdown (subscription/tag picker + time-range chips). |
+| `dropdown.ts` | Channel-menu dropdown (channel/tag picker + time-range chips). |
 | `gestures.ts` | Touch swipes (prev/next, cycle filter) + scroll-based toolbar hide. |
 | `cache.ts` | Generic LRU cache factory (`makeLRU`). |
 | `fmt.ts` | Pure utilities: HTML sanitization (proxies images through wsrv.nl), relative time, date formatting. |
-| `types.d.ts` | Ambient types: `IDB`, `ISub`, `ISource`, `IArticle`, `IShowFeed`. |
+| `types.d.ts` | Ambient types: `IDB`, `IChannel`, `IFeed`, `IArticle`, `IShowFeed`. |
 
 ### Data Flow
 
@@ -70,7 +70,7 @@ app  -->  fmt
 
 - **Streaming decompression** -- pack bodies pass through `DecompressionStream`; idx packs decode into an `ArrayBuffer`, data packs go through `TextDecoderStream` with partial-line buffering for JSONL.
 - **Aggressive caching** -- finalized packs use HTTP `force-cache`; latest packs use filename toggle (`true.gz`/`false.gz`) for cache busting; data packs are kept in an in-memory LRU (max 20).
-- **Filtering** -- filter by subscription or tag via URL hash filter segment (sub IDs or tag names, `+`-separated after `!`)
+- **Filtering** -- filter by channel or tag via URL hash filter segment (channel IDs or tag names, `+`-separated after `!`)
 - **Dark mode** -- automatic via `prefers-color-scheme`
 - **No runtime deps** -- the built bundle has zero npm dependencies
 
@@ -83,7 +83,7 @@ app  -->  fmt
 | Segment | Description |
 |---------|-------------|
 | `chronIdx` | Current article position (0-based) |
-| `!tokens` | Optional `+`-separated filter tokens (sub IDs or tag names); each `encodeURIComponent`-wrapped |
+| `!tokens` | Optional `+`-separated filter tokens (channel IDs or tag names); each `encodeURIComponent`-wrapped |
 
 ## Deployment
 

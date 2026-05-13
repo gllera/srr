@@ -16,11 +16,11 @@ import (
 type InspectCmd struct {
 	URL      string `optional:"" help:"HTTP base URL (e.g., http://localhost:3000). Overrides --store."`
 	Chron    int    `default:"-1" help:"Inspect a specific chronIdx; omit for other modes."`
-	Validate bool   `help:"Walk every chronIdx and report any pack inconsistency (bounds, db meta, subCounts/fetchedAts continuity, unknown sub_ids, latest-pack files)."`
-	Filter   string `help:"Tag name or numeric sub_id; reports count and chron range matching the filter (mirrors frontend filter logic)."`
+	Validate bool   `help:"Walk every chronIdx and report any pack inconsistency (bounds, db meta, chanCounts/fetchedAts continuity, unknown chan_ids, latest-pack files)."`
+	Filter   string `help:"Tag name or numeric chan_id; reports count and chron range matching the filter (mirrors frontend filter logic)."`
 	Floor    int    `default:"0" help:"Optional floor chronIdx for --filter."`
 	FromHash string `help:"Replay nav.fromHash on a frontend URL hash like '0,2485!big_info': resolves filter, decides resolve()/last(), prints final article."`
-	ListTags bool   `help:"List tags and their sub/article counts (mirrors frontend groupSubsByTag)."`
+	ListTags bool   `help:"List tags and their channel/article counts (mirrors frontend groupChannelsByTag)."`
 }
 
 type inspBound struct {
@@ -31,17 +31,17 @@ type inspBound struct {
 type inspIdx struct {
 	packIndex     int
 	packSize      int
-	subIDs        []byte
+	chanIDs       []byte
 	fetchedAts    []uint32 // per-entry cumulative fetched_at (8h blocks since first_fetched)
 	bounds        []inspBound
 	fetchedAtBase uint32
 	packIDBase    uint32
 	packOffBase   uint32
-	subCounts     [256]uint32 // from header (cumulative before this pack)
-	ownSubCounts  [256]uint32 // counted during parse (in this pack only)
+	chanCounts    [256]uint32 // from header (cumulative before this pack)
+	ownChanCounts [256]uint32 // counted during parse (in this pack only)
 }
 
-type fetcher func(key string) ([]byte, error)
+type keyGetter func(key string) ([]byte, error)
 
 func (o *InspectCmd) Run() error {
 	ctx := context.Background()
@@ -93,7 +93,7 @@ func (o *InspectCmd) Run() error {
 	return inspectOne(fetch, core, packs, o.Chron)
 }
 
-func (o *InspectCmd) openFetcher(ctx context.Context) (fetcher, func(), error) {
+func (o *InspectCmd) openFetcher(ctx context.Context) (keyGetter, func(), error) {
 	if o.URL != "" {
 		return httpFetcher(o.URL), nil, nil
 	}
@@ -106,7 +106,7 @@ func (o *InspectCmd) openFetcher(ctx context.Context) (fetcher, func(), error) {
 	}, func() { db.Close(ctx) }, nil
 }
 
-func httpFetcher(base string) fetcher {
+func httpFetcher(base string) keyGetter {
 	return func(key string) ([]byte, error) {
 		u, err := url.JoinPath(base, key)
 		if err != nil {
@@ -128,7 +128,7 @@ func httpFetcher(base string) fetcher {
 	}
 }
 
-func loadCore(fetch fetcher) (*DBCore, error) {
+func loadCore(fetch keyGetter) (*DBCore, error) {
 	data, err := fetch(dbFileKey)
 	if err != nil {
 		return nil, fmt.Errorf("fetch %s: %w", dbFileKey, err)
@@ -140,7 +140,7 @@ func loadCore(fetch fetcher) (*DBCore, error) {
 	return &c, nil
 }
 
-func loadIdxPacks(fetch fetcher, core *DBCore) ([]*inspIdx, error) {
+func loadIdxPacks(fetch keyGetter, core *DBCore) ([]*inspIdx, error) {
 	numFinalized := (core.TotalArticles - 1) / idxPackSize
 	out := make([]*inspIdx, numFinalized+1)
 	for p := 0; p <= numFinalized; p++ {
@@ -181,14 +181,14 @@ func parseInspIdx(buf []byte, packIndex, packSize int) (*inspIdx, error) {
 	pack := &inspIdx{
 		packIndex:     packIndex,
 		packSize:      packSize,
-		subIDs:        make([]byte, packSize),
+		chanIDs:       make([]byte, packSize),
 		fetchedAts:    make([]uint32, packSize),
 		fetchedAtBase: binary.LittleEndian.Uint32(buf[0:]),
 		packIDBase:    binary.LittleEndian.Uint32(buf[4:]),
 		packOffBase:   binary.LittleEndian.Uint32(buf[8:]),
 	}
 	for s := range 256 {
-		pack.subCounts[s] = binary.LittleEndian.Uint32(buf[12+s*4:])
+		pack.chanCounts[s] = binary.LittleEndian.Uint32(buf[12+s*4:])
 	}
 
 	packID := int(pack.packIDBase)
@@ -206,9 +206,9 @@ func parseInspIdx(buf []byte, packIndex, packSize int) (*inspIdx, error) {
 		}
 		fetchedAt += uint32(packed & 0x7F)
 		sub := buf[off]
-		pack.subIDs[i] = sub
+		pack.chanIDs[i] = sub
 		pack.fetchedAts[i] = fetchedAt
-		pack.ownSubCounts[sub]++
+		pack.ownChanCounts[sub]++
 		if len(pack.bounds) == 0 || pack.bounds[len(pack.bounds)-1].packID != packID {
 			pack.bounds = append(pack.bounds, inspBound{packID, baseChron + i})
 		}
@@ -233,7 +233,7 @@ func packIdxFor(chron, n int) int {
 	return p
 }
 
-func loadDataPack(fetch fetcher, key string) ([]ArticleData, error) {
+func loadDataPack(fetch keyGetter, key string) ([]ArticleData, error) {
 	data, err := fetch(key)
 	if err != nil {
 		return nil, fmt.Errorf("fetch %s: %w", key, err)

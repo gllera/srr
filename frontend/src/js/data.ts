@@ -14,8 +14,8 @@ let idxPacks: IdxPack[] = []
 export async function init() {
    const res = await dbFetch
    const raw: IDB = await new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).json()
-   raw.subscriptions ??= {}
-   for (const [k, sub] of Object.entries(raw.subscriptions)) sub.id = Number(k)
+   raw.channels ??= {}
+   for (const [k, ch] of Object.entries(raw.channels)) ch.id = Number(k)
    db = raw
 
    if (db.total_art === 0) return
@@ -45,10 +45,10 @@ function packIdx(chronIdx: number): number {
    return Math.min(Math.floor(chronIdx / IDX_PACK_SIZE), idxPacks.length - 1)
 }
 
-export function getSubId(chronIdx: number): number {
+export function getChannelId(chronIdx: number): number {
    const n = packIdx(chronIdx)
-   const subIds = idxPacks[n].parse().subIds
-   return subIds[chronIdx - n * IDX_PACK_SIZE]
+   const chanIds = idxPacks[n].parse().chanIds
+   return chanIds[chronIdx - n * IDX_PACK_SIZE]
 }
 
 // Binary search for leftmost entry where fetchedAt >= ts.
@@ -66,26 +66,26 @@ export function findChronForTimestamp(ts: number): number {
    return lo < db.total_art ? lo : Math.max(0, db.total_art - 1)
 }
 
-export function countLeft(chronIdx: number, subs: Map<number, number>): number {
+export function countLeft(chronIdx: number, channels: Map<number, number>): number {
    if (idxPacks.length === 0) return 0
    const n = packIdx(chronIdx)
-   return idxPacks[n].countLeft(chronIdx, subs)
+   return idxPacks[n].countLeft(chronIdx, channels)
 }
 
-export function findLeft(from: number, subs: Map<number, number>): number {
+export function findLeft(from: number, channels: Map<number, number>): number {
    if (from < 0 || idxPacks.length === 0) return -1
    for (let p = packIdx(from); p >= 0; p--) {
-      const found = idxPacks[p].findLeft(from, subs)
+      const found = idxPacks[p].findLeft(from, channels)
       if (found !== -1) return found
    }
    return -1
 }
 
-export function findRight(from: number, subs: Map<number, number>): number {
+export function findRight(from: number, channels: Map<number, number>): number {
    if (from < 0) from = 0
    if (from >= db.total_art || idxPacks.length === 0) return -1
    for (let p = packIdx(from); p < idxPacks.length; p++) {
-      const found = idxPacks[p].findRight(from, subs)
+      const found = idxPacks[p].findRight(from, channels)
       if (found !== -1) return found
    }
    return -1
@@ -163,32 +163,32 @@ export async function loadArticle(chronIdx: number): Promise<IArticle> {
    return entries[ref.offset]
 }
 
-let activeSubsCache: ISub[] | null = null
-function activeSubs(): ISub[] {
-   if (activeSubsCache) return activeSubsCache
-   activeSubsCache = Object.values(db.subscriptions)
-      .filter((sub) => sub.total_art > 0)
+let activeChannelsCache: IChannel[] | null = null
+function activeChannels(): IChannel[] {
+   if (activeChannelsCache) return activeChannelsCache
+   activeChannelsCache = Object.values(db.channels)
+      .filter((ch) => ch.total_art > 0)
       .sort((a, b) => (a.title < b.title ? -1 : 1))
-   return activeSubsCache
+   return activeChannelsCache
 }
 
-type GroupResult = { tagged: Map<string, ISub[]>; sortedTags: string[]; untagged: ISub[] }
+type GroupResult = { tagged: Map<string, IChannel[]>; sortedTags: string[]; untagged: IChannel[] }
 let groupCache: GroupResult | null = null
 
-export function groupSubsByTag(): GroupResult {
+export function groupChannelsByTag(): GroupResult {
    if (groupCache) return groupCache
-   const tagged = new Map<string, ISub[]>()
-   const untagged: ISub[] = []
-   for (const sub of activeSubs()) {
-      if (sub.tag) {
-         let group = tagged.get(sub.tag)
+   const tagged = new Map<string, IChannel[]>()
+   const untagged: IChannel[] = []
+   for (const ch of activeChannels()) {
+      if (ch.tag) {
+         let group = tagged.get(ch.tag)
          if (!group) {
             group = []
-            tagged.set(sub.tag, group)
+            tagged.set(ch.tag, group)
          }
-         group.push(sub)
+         group.push(ch)
       } else {
-         untagged.push(sub)
+         untagged.push(ch)
       }
    }
    groupCache = { tagged, sortedTags: Array.from(tagged.keys()).sort(), untagged }

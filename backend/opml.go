@@ -24,7 +24,7 @@ type Outline struct {
 
 type OPMLNode struct {
 	Name     string
-	Sub      *Subscription
+	Channel  *Channel
 	Children []*OPMLNode
 }
 
@@ -35,13 +35,13 @@ func outlineDisplayName(o Outline) string {
 	return o.Text
 }
 
-func outlineToSub(o Outline) *Subscription {
+func outlineToChannel(o Outline) *Channel {
 	if !validFeedURL(o.XMLURL) {
 		return nil
 	}
-	return &Subscription{
-		Title:   outlineDisplayName(o),
-		Sources: []*Source{{URL: o.XMLURL}},
+	return &Channel{
+		Title: outlineDisplayName(o),
+		Feeds: []*Feed{{URL: o.XMLURL}},
 	}
 }
 
@@ -87,13 +87,13 @@ func buildTree(outlines []Outline) []*OPMLNode {
 	var nodes []*OPMLNode
 	for _, o := range outlines {
 		node := &OPMLNode{Name: outlineDisplayName(o)}
-		if s := outlineToSub(o); s != nil {
-			node.Sub = s
+		if c := outlineToChannel(o); c != nil {
+			node.Channel = c
 		}
 		if len(o.Outlines) > 0 {
 			node.Children = buildTree(o.Outlines)
 		}
-		if node.Sub != nil || len(node.Children) > 0 {
+		if node.Channel != nil || len(node.Children) > 0 {
 			nodes = append(nodes, node)
 		}
 	}

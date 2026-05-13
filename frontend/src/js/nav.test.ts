@@ -4,34 +4,34 @@ const data = vi.hoisted(() => ({
    IDX_PACK_SIZE: 50000 as const,
    db: {
       total_art: 0,
-      subscriptions: {} as Record<number, ISub>,
+      channels: {} as Record<number, IChannel>,
    } as unknown as IDB,
    loadArticle: vi.fn<(chronIdx: number) => Promise<IArticle>>(),
-   groupSubsByTag: vi.fn(() => ({ tagged: new Map(), sortedTags: [] as string[], untagged: [] as ISub[] })),
+   groupChannelsByTag: vi.fn(() => ({ tagged: new Map(), sortedTags: [] as string[], untagged: [] as IChannel[] })),
    findChronForTimestamp: vi.fn(() => 0),
-   getSubId: vi.fn<(chronIdx: number) => number>(),
-   countLeft: vi.fn((chronIdx: number, subs: Map<number, number>) => {
+   getChannelId: vi.fn<(chronIdx: number) => number>(),
+   countLeft: vi.fn((chronIdx: number, channels: Map<number, number>) => {
       let count = 0
       for (let i = 0; i < chronIdx; i++) {
-         const subId = data.getSubId(i)
-         const addIdx = subs.get(subId)
+         const chanId = data.getChannelId(i)
+         const addIdx = channels.get(chanId)
          if (addIdx !== undefined && i >= addIdx) count++
       }
       return count
    }),
-   findLeft: vi.fn((from: number, subs: Map<number, number>) => {
+   findLeft: vi.fn((from: number, channels: Map<number, number>) => {
       for (let i = from; i >= 0; i--) {
-         const subId = data.getSubId(i)
-         const addIdx = subs.get(subId)
+         const chanId = data.getChannelId(i)
+         const addIdx = channels.get(chanId)
          if (addIdx !== undefined && i >= addIdx) return i
       }
       return -1
    }),
-   findRight: vi.fn((from: number, subs: Map<number, number>) => {
+   findRight: vi.fn((from: number, channels: Map<number, number>) => {
       const end = data.db.total_art
       for (let i = from; i < end; i++) {
-         const subId = data.getSubId(i)
-         const addIdx = subs.get(subId)
+         const chanId = data.getChannelId(i)
+         const addIdx = channels.get(chanId)
          if (addIdx !== undefined && i >= addIdx) return i
       }
       return -1
@@ -46,28 +46,28 @@ function makeArticle(overrides: Partial<IArticle> = {}): IArticle {
    return { s: 1, a: 0, p: 0, t: "", l: "", c: "", ...overrides }
 }
 
-function makeSub(overrides: Partial<ISub> = {}): ISub {
-   return { id: 1, title: "Test", src: [{ url: "http://test.com" }], total_art: 1, ...overrides } as ISub
+function makeChannel(overrides: Partial<IChannel> = {}): IChannel {
+   return { id: 1, title: "Test", feeds: [{ url: "http://test.com" }], total_art: 1, ...overrides } as IChannel
 }
 
-function setupIndex(entries: Array<{ subId: number; fetchedAt?: number }>) {
+function setupIndex(entries: Array<{ chanId: number; fetchedAt?: number }>) {
    data.db.total_art = entries.length
-   const sIds = new Uint32Array(entries.map((e) => e.subId))
+   const cIds = new Uint32Array(entries.map((e) => e.chanId))
    const fAts = new Uint32Array(entries.map((e) => e.fetchedAt ?? 0))
-   data.loadArticle.mockImplementation(async (idx: number) => makeArticle({ s: sIds[idx], a: fAts[idx] }))
-   data.getSubId.mockImplementation((idx: number) => sIds[idx])
+   data.loadArticle.mockImplementation(async (idx: number) => makeArticle({ s: cIds[idx], a: fAts[idx] }))
+   data.getChannelId.mockImplementation((idx: number) => cIds[idx])
    const counts = new Map<number, number>()
-   for (const e of entries) counts.set(e.subId, (counts.get(e.subId) ?? 0) + 1)
+   for (const e of entries) counts.set(e.chanId, (counts.get(e.chanId) ?? 0) + 1)
    for (const [id, count] of counts)
-      if (!data.db.subscriptions[id]) data.db.subscriptions[id] = makeSub({ id, total_art: count })
+      if (!data.db.channels[id]) data.db.channels[id] = makeChannel({ id, total_art: count })
    nav.filter.clear()
 }
 
 beforeEach(() => {
    data.db.total_art = 0
-   data.db.subscriptions = {}
+   data.db.channels = {}
    data.loadArticle.mockReset()
-   data.getSubId.mockReset()
+   data.getChannelId.mockReset()
    data.findLeft.mockClear()
    data.findRight.mockClear()
    nav.filter.clear()
@@ -83,21 +83,21 @@ describe("fromHash", () => {
    })
 
    it.each([999, -5, NaN, Infinity])("clamps %s to last article", async (input) => {
-      setupIndex([{ subId: 1 }, { subId: 2 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
       const result = await nav.fromHash(String(input))
       expect(data.loadArticle).toHaveBeenCalledWith(1)
       expect(result.article.s).toBe(2)
    })
 
    it("parses basic hash (#1)", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
       const result = await nav.fromHash("1")
       expect(result.article.s).toBe(2)
       expect(result.filtered).toBe(false)
    })
 
    it("handles single article feed", async () => {
-      setupIndex([{ subId: 1 }])
+      setupIndex([{ chanId: 1 }])
       const result = await nav.fromHash("0")
       expect(result.article.s).toBe(1)
       expect(result.has_left).toBe(false)
@@ -105,104 +105,104 @@ describe("fromHash", () => {
    })
 
    it("snaps to later match when filter has no earlier match", async () => {
-      setupIndex([{ subId: 2 }, { subId: 2 }, { subId: 1 }])
+      setupIndex([{ chanId: 2 }, { chanId: 2 }, { chanId: 1 }])
       const result = await nav.fromHash("0!1")
       expect(data.loadArticle).toHaveBeenCalledWith(2)
       expect(result.article.s).toBe(1)
    })
 
    it("does not snap when current article matches filter", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
       const result = await nav.fromHash("0!1")
       expect(data.loadArticle).toHaveBeenCalledWith(0)
       expect(result.article.s).toBe(1)
    })
 
    it("parses filter hash (#1!42)", async () => {
-      setupIndex([{ subId: 1 }, { subId: 42 }])
+      setupIndex([{ chanId: 1 }, { chanId: 42 }])
       const result = await nav.fromHash("1!42")
       expect(result.filtered).toBe(true)
    })
 
    it("parses tag filter", async () => {
-      data.db.subscriptions = { "1": makeSub({ id: 1, tag: "news" }), "2": makeSub({ id: 2, tag: "news" }) }
-      for (const [k, s] of Object.entries(data.db.subscriptions)) s.id = Number(k)
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 3 }])
+      data.db.channels = { "1": makeChannel({ id: 1, tag: "news" }), "2": makeChannel({ id: 2, tag: "news" }) }
+      for (const [k, s] of Object.entries(data.db.channels)) s.id = Number(k)
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 3 }])
       const result = await nav.fromHash("1!news")
       expect(result.filtered).toBe(true)
       expect(result.article.s).toBe(2)
    })
 
    it.each(["", "abc"])("handles non-numeric hash %j by clamping", async (hash) => {
-      setupIndex([{ subId: 1 }])
+      setupIndex([{ chanId: 1 }])
       const result = await nav.fromHash(hash)
       expect(result.article.s).toBe(1)
    })
 
    it("bare ! treated as no filter", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
       const result = await nav.fromHash("1!")
       expect(result.article.s).toBe(2)
       expect(result.filtered).toBe(false)
    })
 
    it("parses multi-sub filter from hash", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
       const result = await nav.fromHash("1!1+3")
       expect(result.filtered).toBe(true)
    })
 
    it("ignores unresolved tag tokens from hash", async () => {
-      setupIndex([{ subId: 1 }])
+      setupIndex([{ chanId: 1 }])
       const result = await nav.fromHash("0!1+abc+3")
       expect(result.filtered).toBe(true)
    })
 
    it("hash with empty tokens between plus signs", async () => {
-      setupIndex([{ subId: 1 }])
+      setupIndex([{ chanId: 1 }])
       const result = await nav.fromHash("0!1++3")
       expect(result.filtered).toBe(true)
    })
 
    it("tag with no matching subs clears filter", async () => {
-      data.db.subscriptions = {}
-      setupIndex([{ subId: 1 }])
+      data.db.channels = {}
+      setupIndex([{ chanId: 1 }])
       const result = await nav.fromHash("0!nonexistent")
       expect(result.filtered).toBe(false)
    })
 
    it("hash preserves tag token instead of expanding to sub IDs", async () => {
-      data.db.subscriptions = { "1": makeSub({ id: 1, tag: "tech" }), "2": makeSub({ id: 2, tag: "tech" }) }
-      for (const [k, s] of Object.entries(data.db.subscriptions)) s.id = Number(k)
-      setupIndex([{ subId: 1 }])
+      data.db.channels = { "1": makeChannel({ id: 1, tag: "tech" }), "2": makeChannel({ id: 2, tag: "tech" }) }
+      for (const [k, s] of Object.entries(data.db.channels)) s.id = Number(k)
+      setupIndex([{ chanId: 1 }])
       await nav.fromHash("0!tech")
       expect(history.replaceState).toHaveBeenCalledWith(null, "", "#0!tech")
    })
 
    it("mixed tag and sub ID tokens in hash", async () => {
-      data.db.subscriptions = { "1": makeSub({ id: 1, tag: "tech" }), "2": makeSub({ id: 2 }) }
-      for (const [k, s] of Object.entries(data.db.subscriptions)) s.id = Number(k)
-      setupIndex([{ subId: 1 }, { subId: 2 }])
+      data.db.channels = { "1": makeChannel({ id: 1, tag: "tech" }), "2": makeChannel({ id: 2 }) }
+      for (const [k, s] of Object.entries(data.db.channels)) s.id = Number(k)
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
       await nav.fromHash("1!tech+2")
       expect(history.replaceState).toHaveBeenCalledWith(null, "", "#1!tech+2")
    })
 
    it("fromHash goes to last matching article when current does not match filter", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 1 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 1 }])
       const result = await nav.fromHash("1!1")
       expect(result.article.s).toBe(1)
       expect(data.loadArticle).toHaveBeenLastCalledWith(2)
    })
 
    it("resolves token '0' as sub ID 0", async () => {
-      data.db.subscriptions = { "0": makeSub({ id: 0, title: "Zero" }) }
-      setupIndex([{ subId: 0 }])
+      data.db.channels = { "0": makeChannel({ id: 0, title: "Zero" }) }
+      setupIndex([{ chanId: 0 }])
       const result = await nav.fromHash("0!0")
       expect(result.filtered).toBe(true)
    })
 
    it("multi-sub filter hash serializes sub IDs", async () => {
-      setupIndex([{ subId: 3 }])
+      setupIndex([{ chanId: 3 }])
       await nav.fromHash("0!1+3")
       expect(history.replaceState).toHaveBeenCalledWith(null, "", "#0!1+3")
    })
@@ -210,7 +210,7 @@ describe("fromHash", () => {
 
 describe("left", () => {
    it("decrements pos in normal mode", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 3 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 3 }])
       await nav.fromHash("2")
       const r1 = await nav.left()
       expect(r1.article.s).toBe(2)
@@ -220,13 +220,13 @@ describe("left", () => {
    })
 
    it("throws when already at start", async () => {
-      setupIndex([{ subId: 1 }])
+      setupIndex([{ chanId: 1 }])
       await nav.fromHash("0")
       await expect(nav.left()).rejects.toThrow("no left match")
    })
 
    it("in filter mode, finds previous matching entry", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 3 }, { subId: 1 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 3 }, { chanId: 1 }])
       await nav.fromHash("3!1")
       const result = await nav.left()
       expect(result.article.s).toBe(1)
@@ -234,20 +234,20 @@ describe("left", () => {
    })
 
    it("in filter mode, throws when no match exists", async () => {
-      setupIndex([{ subId: 2 }, { subId: 1 }])
+      setupIndex([{ chanId: 2 }, { chanId: 1 }])
       await nav.fromHash("1!1")
       await expect(nav.left()).rejects.toThrow("no left match")
    })
 
    it("finds last matching entry searching backward", async () => {
-      setupIndex([{ subId: 1 }, { subId: 1 }, { subId: 2 }, { subId: 1 }])
+      setupIndex([{ chanId: 1 }, { chanId: 1 }, { chanId: 2 }, { chanId: 1 }])
       await nav.fromHash("3!1")
       await nav.left()
       expect(data.loadArticle).toHaveBeenLastCalledWith(1)
    })
 
    it("returns first matching entry when it is at index 0", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 2 }, { subId: 1 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 2 }, { chanId: 1 }])
       await nav.fromHash("3!1")
       const r1 = await nav.left()
       expect(data.loadArticle).toHaveBeenLastCalledWith(0)
@@ -255,7 +255,7 @@ describe("left", () => {
    })
 
    it("multi-sub filter matches any sub in filter set going left", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 3 }, { subId: 1 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 3 }, { chanId: 1 }])
       await nav.fromHash("3!1+3")
       const r1 = await nav.left()
       expect(r1.article.s).toBe(3)
@@ -266,7 +266,7 @@ describe("left", () => {
 
 describe("right", () => {
    it("increments pos in normal mode", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 3 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 3 }])
       await nav.fromHash("0")
       const r1 = await nav.right()
       expect(r1.article.s).toBe(2)
@@ -275,13 +275,13 @@ describe("right", () => {
    })
 
    it("throws when already at end", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 3 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 3 }])
       await nav.fromHash("2")
       await expect(nav.right()).rejects.toThrow("no right match")
    })
 
    it("in filter mode, finds next matching entry", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 3 }, { subId: 1 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 3 }, { chanId: 1 }])
       await nav.fromHash("0!1")
       const result = await nav.right()
       expect(result.article.s).toBe(1)
@@ -289,13 +289,13 @@ describe("right", () => {
    })
 
    it("in filter mode, throws when no match exists", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
       await nav.fromHash("0!1")
       await expect(nav.right()).rejects.toThrow("no right match")
    })
 
    it("multi-sub filter matches any sub in filter set going right", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 3 }, { subId: 1 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 3 }, { chanId: 1 }])
       await nav.fromHash("0!1+3")
       const r1 = await nav.right()
       expect(r1.article.s).toBe(3)
@@ -304,7 +304,7 @@ describe("right", () => {
    })
 
    it("updates hash after right navigation", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
       await nav.fromHash("0")
       await nav.right()
       expect(history.pushState).toHaveBeenCalledWith(null, "", "#1")
@@ -313,8 +313,8 @@ describe("right", () => {
 
 describe("last", () => {
    it("finds last matching entry for a sub", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 1 }, { subId: 2 }])
-      data.db.subscriptions[1] = makeSub({ id: 1, total_art: 2 })
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 1 }, { chanId: 2 }])
+      data.db.channels[1] = makeChannel({ id: 1, total_art: 2 })
       await nav.fromHash("0")
       nav.filter.set(["1"])
       const result = await nav.last()
@@ -325,8 +325,8 @@ describe("last", () => {
    })
 
    it("goes to last article when sub has no articles", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }])
-      data.db.subscriptions[5] = makeSub({ id: 5, total_art: 0 })
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
+      data.db.channels[5] = makeChannel({ id: 5, total_art: 0 })
       await nav.fromHash("0")
       nav.filter.set(["5"])
       const result = await nav.last()
@@ -334,7 +334,7 @@ describe("last", () => {
    })
 
    it("goes to last article when sub not found in subscriptions", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
       await nav.fromHash("0")
       nav.filter.set(["999"])
       const result = await nav.last()
@@ -342,8 +342,8 @@ describe("last", () => {
    })
 
    it("uses current filter when called without subId in filter mode", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }])
-      data.db.subscriptions[1] = makeSub({ id: 1, total_art: 1 })
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
+      data.db.channels[1] = makeChannel({ id: 1, total_art: 1 })
       await nav.fromHash("0!1")
       const result = await nav.last()
       expect(result.article.s).toBe(1)
@@ -351,15 +351,15 @@ describe("last", () => {
    })
 
    it("clears filter when called without subId and no filter active", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
       await nav.fromHash("0")
       const result = await nav.last()
       expect(result.filtered).toBe(false)
    })
 
    it("returns no-match article when sub not found in any entry", async () => {
-      setupIndex([{ subId: 3 }, { subId: 4 }])
-      data.db.subscriptions[5] = makeSub({ id: 5, total_art: 1 })
+      setupIndex([{ chanId: 3 }, { chanId: 4 }])
+      data.db.channels[5] = makeChannel({ id: 5, total_art: 1 })
       await nav.fromHash("0")
       nav.filter.set(["5"])
       const result = await nav.last()
@@ -370,7 +370,7 @@ describe("last", () => {
    })
 
    it("filter.set with empty string auto-clears", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
       await nav.fromHash("0")
       nav.filter.set([""])
       const result = await nav.last()
@@ -378,7 +378,7 @@ describe("last", () => {
    })
 
    it("filter.set with NaN auto-clears", async () => {
-      setupIndex([{ subId: 1 }])
+      setupIndex([{ chanId: 1 }])
       await nav.fromHash("0")
       nav.filter.set(["abc"])
       const result = await nav.last()
@@ -386,8 +386,8 @@ describe("last", () => {
    })
 
    it("scans backward to find last matching entry", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 2 }, { subId: 2 }])
-      data.db.subscriptions[1] = makeSub({ id: 1, total_art: 1 })
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 2 }, { chanId: 2 }])
+      data.db.channels[1] = makeChannel({ id: 1, total_art: 1 })
       await nav.fromHash("3")
       nav.filter.set(["1"])
       const result = await nav.last()
@@ -396,9 +396,9 @@ describe("last", () => {
    })
 
    it("preserves multi-sub filter set when called with no arg", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 3 }])
-      data.db.subscriptions[1] = makeSub({ id: 1, total_art: 1 })
-      data.db.subscriptions[3] = makeSub({ id: 3, total_art: 1 })
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 3 }])
+      data.db.channels[1] = makeChannel({ id: 1, total_art: 1 })
+      data.db.channels[3] = makeChannel({ id: 3, total_art: 1 })
       await nav.fromHash("0!1+3")
       const result = await nav.last()
       expect(result.article.s).toBe(3)
@@ -408,62 +408,62 @@ describe("last", () => {
 
 describe("countRight", () => {
    it("is always a number (never null)", async () => {
-      setupIndex([{ subId: 1 }])
+      setupIndex([{ chanId: 1 }])
       const result = await nav.fromHash("0")
       expect(typeof result.countRight).toBe("number")
    })
 
    it("correct count in unfiltered mode (total - 1 - pos)", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 3 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 3 }])
       const result = await nav.fromHash("0")
       expect(result.countRight).toBe(2)
    })
 
    it("returns 0 at last index unfiltered", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
       const result = await nav.fromHash("1")
       expect(result.countRight).toBe(0)
    })
 
    it("decreases as pos approaches end", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 3 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 3 }])
       const mid = await nav.fromHash("1")
       expect(mid.countRight).toBe(1)
    })
 
    it("correct count in filtered mode", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 1 }, { subId: 1 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 1 }, { chanId: 1 }])
       const result = await nav.fromHash("0!1")
       expect(result.countRight).toBe(2)
    })
 
    it("filtered: returns 0 at the last match", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
       const result = await nav.fromHash("0!1")
       expect(result.countRight).toBe(0)
    })
 
    it("filtered: counts matches after pos", async () => {
-      setupIndex([{ subId: 2 }, { subId: 1 }, { subId: 1 }, { subId: 1 }])
+      setupIndex([{ chanId: 2 }, { chanId: 1 }, { chanId: 1 }, { chanId: 1 }])
       const result = await nav.fromHash("1!1")
       expect(result.countRight).toBe(2)
    })
 
    it("filtered: returns 0 when current is the only match", async () => {
-      setupIndex([{ subId: 2 }, { subId: 2 }, { subId: 1 }])
+      setupIndex([{ chanId: 2 }, { chanId: 2 }, { chanId: 1 }])
       const result = await nav.fromHash("2!1")
       expect(result.countRight).toBe(0)
    })
 
    it("multi-sub filter counts articles matching any sub in set", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 3 }, { subId: 1 }, { subId: 3 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 3 }, { chanId: 1 }, { chanId: 3 }])
       const result = await nav.fromHash("0!1+3")
       expect(result.countRight).toBe(3)
    })
 
    it("counter ignores sub.total_art when it exceeds real idx entries", async () => {
-      setupIndex([{ subId: 1 }, { subId: 1 }])
-      data.db.subscriptions[1].total_art = 5
+      setupIndex([{ chanId: 1 }, { chanId: 1 }])
+      data.db.channels[1].total_art = 5
       const result = await nav.fromHash("1!1")
       expect(result.countRight).toBe(0)
       expect(result.has_right).toBe(false)
@@ -471,8 +471,8 @@ describe("countRight", () => {
    })
 
    it("counter excludes unknown sub_id entries in unfiltered mode", async () => {
-      setupIndex([{ subId: 1 }, { subId: 99 }])
-      delete data.db.subscriptions[99]
+      setupIndex([{ chanId: 1 }, { chanId: 99 }])
+      delete data.db.channels[99]
       const result = await nav.fromHash("0")
       expect(result.countRight).toBe(0)
       expect(result.has_right).toBe(false)
@@ -481,7 +481,7 @@ describe("countRight", () => {
 
 describe("showFeed", () => {
    it("has_left/has_right correct in normal mode", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 3 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 3 }])
 
       const first = await nav.fromHash("0")
       expect(first.has_left).toBe(false)
@@ -497,7 +497,7 @@ describe("showFeed", () => {
    })
 
    it("has_left/has_right correct in filtered mode", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 1 }, { subId: 2 }, { subId: 1 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 1 }, { chanId: 2 }, { chanId: 1 }])
 
       const first = await nav.fromHash("0!1")
       expect(first.has_left).toBe(false)
@@ -513,46 +513,46 @@ describe("showFeed", () => {
    })
 
    it("has_right false in filtered mode with no later same-sub entries", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
       const result = await nav.fromHash("0!1")
       expect(result.has_right).toBe(false)
    })
 
    it("has_left false in filtered mode with no earlier same-sub entries", async () => {
-      setupIndex([{ subId: 2 }, { subId: 1 }])
+      setupIndex([{ chanId: 2 }, { chanId: 1 }])
       const result = await nav.fromHash("1!1")
       expect(result.has_left).toBe(false)
    })
 
-   it("sub is looked up from subscriptions", async () => {
-      const sub = makeSub({ id: 1, title: "MySub", src: [{ url: "http://sub.com" }] })
-      data.db.subscriptions[1] = sub
-      setupIndex([{ subId: 1 }])
+   it("channel is looked up from channels", async () => {
+      const ch = makeChannel({ id: 1, title: "MyChannel", feeds: [{ url: "http://ch.com" }] })
+      data.db.channels[1] = ch
+      setupIndex([{ chanId: 1 }])
       const result = await nav.fromHash("0")
-      expect(result.sub).toBe(sub)
+      expect(result.channel).toBe(ch)
    })
 
-   it("sub is undefined when not in subscriptions", async () => {
-      setupIndex([{ subId: 99 }])
-      delete data.db.subscriptions[99]
+   it("channel is undefined when not in channels", async () => {
+      setupIndex([{ chanId: 99 }])
+      delete data.db.channels[99]
       const result = await nav.fromHash("0")
-      expect(result.sub).toBeUndefined()
+      expect(result.channel).toBeUndefined()
    })
 })
 
 describe("getFilterEntries", () => {
    it("returns only empty string when no active subs", () => {
-      data.groupSubsByTag.mockReturnValue({ tagged: new Map(), sortedTags: [], untagged: [] })
+      data.groupChannelsByTag.mockReturnValue({ tagged: new Map(), sortedTags: [], untagged: [] })
       const entries = nav.getFilterEntries()
       expect(entries).toEqual([""])
    })
 
    it("returns tags sorted then untagged sub IDs", () => {
-      const sub3 = makeSub({ id: 3, title: "B-Sub", total_art: 2 })
-      data.groupSubsByTag.mockReturnValue({
+      const sub3 = makeChannel({ id: 3, title: "B-Sub", total_art: 2 })
+      data.groupChannelsByTag.mockReturnValue({
          tagged: new Map([
-            ["alpha", [makeSub({ id: 2, tag: "alpha" })]],
-            ["beta", [makeSub({ id: 1, tag: "beta" })]],
+            ["alpha", [makeChannel({ id: 2, tag: "alpha" })]],
+            ["beta", [makeChannel({ id: 1, tag: "beta" })]],
          ]),
          sortedTags: ["alpha", "beta"],
          untagged: [sub3],
@@ -562,8 +562,8 @@ describe("getFilterEntries", () => {
    })
 
    it("returns single tag entry for multiple subs with same tag", () => {
-      data.groupSubsByTag.mockReturnValue({
-         tagged: new Map([["tech", [makeSub({ id: 1, tag: "tech" }), makeSub({ id: 2, tag: "tech" })]]]),
+      data.groupChannelsByTag.mockReturnValue({
+         tagged: new Map([["tech", [makeChannel({ id: 1, tag: "tech" }), makeChannel({ id: 2, tag: "tech" })]]]),
          sortedTags: ["tech"],
          untagged: [],
       })
@@ -574,7 +574,7 @@ describe("getFilterEntries", () => {
 
 describe("last with token", () => {
    it("with empty string clears filter", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
       nav.filter.set(["1"])
       await nav.fromHash("0")
       const result = await nav.last("")
@@ -583,7 +583,7 @@ describe("last with token", () => {
    })
 
    it("with token sets filter and jumps to last match", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 1 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 1 }])
       await nav.fromHash("1")
       const result = await nav.last("1")
       expect(result.article.s).toBe(1)
@@ -591,7 +591,7 @@ describe("last with token", () => {
    })
 
    it("jumps to last matching article for given token", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
       await nav.fromHash("0")
       const result = await nav.last("1")
       expect(result.article.s).toBe(1)
@@ -599,9 +599,9 @@ describe("last with token", () => {
    })
 
    it("applies tag filter via token", async () => {
-      data.db.subscriptions = { "5": makeSub({ id: 5, tag: "news" }), "6": makeSub({ id: 6, tag: "news" }) }
-      for (const [k, s] of Object.entries(data.db.subscriptions)) s.id = Number(k)
-      setupIndex([{ subId: 5 }, { subId: 6 }])
+      data.db.channels = { "5": makeChannel({ id: 5, tag: "news" }), "6": makeChannel({ id: 6, tag: "news" }) }
+      for (const [k, s] of Object.entries(data.db.channels)) s.id = Number(k)
+      setupIndex([{ chanId: 5 }, { chanId: 6 }])
       await nav.fromHash("0")
       const result = await nav.last("news")
       expect(result.filtered).toBe(true)
@@ -610,7 +610,7 @@ describe("last with token", () => {
 
 describe("switchFilter", () => {
    it("with empty token clears filter and jumps to last", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
       nav.filter.set(["1"])
       await nav.fromHash("0")
       const result = await nav.switchFilter("")
@@ -620,7 +620,7 @@ describe("switchFilter", () => {
    })
 
    it("jumps to first matching article when sub has not been seen", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 1 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 1 }])
       await nav.fromHash("0")
       const result = await nav.switchFilter("1")
       expect(result.filtered).toBe(true)
@@ -629,9 +629,9 @@ describe("switchFilter", () => {
    })
 
    it("jumps to first matching article when tag has not been seen", async () => {
-      data.db.subscriptions[5] = makeSub({ id: 5, tag: "news" })
-      data.db.subscriptions[6] = makeSub({ id: 6, tag: "news" })
-      setupIndex([{ subId: 5 }, { subId: 6 }, { subId: 5 }])
+      data.db.channels[5] = makeChannel({ id: 5, tag: "news" })
+      data.db.channels[6] = makeChannel({ id: 6, tag: "news" })
+      setupIndex([{ chanId: 5 }, { chanId: 6 }, { chanId: 5 }])
       await nav.fromHash("0")
       const result = await nav.switchFilter("news")
       expect(result.filtered).toBe(true)
@@ -639,7 +639,7 @@ describe("switchFilter", () => {
    })
 
    it("resumes at last seen position when sub was previously viewed", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 1 }, { subId: 2 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 1 }, { chanId: 2 }])
       await nav.fromHash("2") // chronIdx 2 (sub 1) → seen sub:1=2
       await nav.switchFilter("2") // sub 2 lands on chronIdx 1 (does not touch sub:1)
       const result = await nav.switchFilter("1")
@@ -648,9 +648,9 @@ describe("switchFilter", () => {
    })
 
    it("resumes at last seen position when tag was previously viewed", async () => {
-      data.db.subscriptions[5] = makeSub({ id: 5, tag: "news" })
-      data.db.subscriptions[6] = makeSub({ id: 6 })
-      setupIndex([{ subId: 5 }, { subId: 6 }, { subId: 5 }])
+      data.db.channels[5] = makeChannel({ id: 5, tag: "news" })
+      data.db.channels[6] = makeChannel({ id: 6 })
+      setupIndex([{ chanId: 5 }, { chanId: 6 }, { chanId: 5 }])
       await nav.fromHash("0") // chronIdx 0 (sub 5, tag news) → seen tag:news=0
       await nav.switchFilter("6") // sub 6 (no tag) lands on chronIdx 1
       const result = await nav.switchFilter("news")
@@ -659,63 +659,63 @@ describe("switchFilter", () => {
    })
 
    it("falls back to first when stored position no longer matches filter", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 1 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 1 }])
       // Stale seen entry: chronIdx 1 is sub 2, doesn't match sub:1 filter.
-      localStorage.setItem("srr-seen", JSON.stringify({ "sub:1": 1 }))
+      localStorage.setItem("srr-seen", JSON.stringify({ "chan:1": 1 }))
       const result = await nav.switchFilter("1")
       expect(data.loadArticle).toHaveBeenLastCalledWith(0)
       expect(result.article.s).toBe(1)
    })
 
    it("falls back to first when stored position is beyond total_art", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 1 }])
-      localStorage.setItem("srr-seen", JSON.stringify({ "sub:1": 99 }))
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 1 }])
+      localStorage.setItem("srr-seen", JSON.stringify({ "chan:1": 99 }))
       const result = await nav.switchFilter("1")
       expect(data.loadArticle).toHaveBeenLastCalledWith(0)
       expect(result.article.s).toBe(1)
    })
 
    it("records both sub and tag seen positions on view", async () => {
-      data.db.subscriptions[5] = makeSub({ id: 5, tag: "news" })
-      setupIndex([{ subId: 5 }, { subId: 5 }])
+      data.db.channels[5] = makeChannel({ id: 5, tag: "news" })
+      setupIndex([{ chanId: 5 }, { chanId: 5 }])
       await nav.fromHash("1") // view chronIdx 1
       const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
-      expect(seen["sub:5"]).toBe(1)
+      expect(seen["chan:5"]).toBe(1)
       expect(seen["tag:news"]).toBe(1)
    })
 
    it("does not record tag seen for untagged sub", async () => {
-      setupIndex([{ subId: 1 }])
+      setupIndex([{ chanId: 1 }])
       await nav.fromHash("0")
       const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
-      expect(seen["sub:1"]).toBe(0)
+      expect(seen["chan:1"]).toBe(0)
       expect(Object.keys(seen).filter((k) => k.startsWith("tag:"))).toHaveLength(0)
    })
 })
 
 describe("pruneSeen", () => {
    it("removes entries for deleted subs and tags", () => {
-      data.db.subscriptions = { 1: makeSub({ id: 1, tag: "news" }) }
-      localStorage.setItem("srr-seen", JSON.stringify({ "sub:1": 5, "sub:99": 10, "tag:news": 3, "tag:gone": 7 }))
+      data.db.channels = { 1: makeChannel({ id: 1, tag: "news" }) }
+      localStorage.setItem("srr-seen", JSON.stringify({ "chan:1": 5, "chan:99": 10, "tag:news": 3, "tag:gone": 7 }))
       nav.pruneSeen()
       const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
-      expect(seen).toEqual({ "sub:1": 5, "tag:news": 3 })
+      expect(seen).toEqual({ "chan:1": 5, "tag:news": 3 })
    })
 
    it("keeps tag entry when at least one sub still has the tag", () => {
-      data.db.subscriptions = {
-         1: makeSub({ id: 1, tag: "news" }),
-         2: makeSub({ id: 2 }),
+      data.db.channels = {
+         1: makeChannel({ id: 1, tag: "news" }),
+         2: makeChannel({ id: 2 }),
       }
-      localStorage.setItem("srr-seen", JSON.stringify({ "sub:1": 0, "tag:news": 0 }))
+      localStorage.setItem("srr-seen", JSON.stringify({ "chan:1": 0, "tag:news": 0 }))
       nav.pruneSeen()
       const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
-      expect(seen).toEqual({ "sub:1": 0, "tag:news": 0 })
+      expect(seen).toEqual({ "chan:1": 0, "tag:news": 0 })
    })
 
    it("does not write when nothing is stale", () => {
-      data.db.subscriptions = { 1: makeSub({ id: 1, tag: "news" }) }
-      localStorage.setItem("srr-seen", JSON.stringify({ "sub:1": 0, "tag:news": 0 }))
+      data.db.channels = { 1: makeChannel({ id: 1, tag: "news" }) }
+      localStorage.setItem("srr-seen", JSON.stringify({ "chan:1": 0, "tag:news": 0 }))
       const setSpy = vi.spyOn(Storage.prototype, "setItem")
       nav.pruneSeen()
       expect(setSpy).not.toHaveBeenCalled()
@@ -725,15 +725,15 @@ describe("pruneSeen", () => {
 
 describe("filter mutations", () => {
    it("set() resolves tag and sets filter", async () => {
-      data.db.subscriptions = { "5": makeSub({ id: 5, tag: "news" }), "6": makeSub({ id: 6, tag: "news" }) }
-      for (const [k, s] of Object.entries(data.db.subscriptions)) s.id = Number(k)
-      setupIndex([{ subId: 5 }, { subId: 6 }])
+      data.db.channels = { "5": makeChannel({ id: 5, tag: "news" }), "6": makeChannel({ id: 6, tag: "news" }) }
+      for (const [k, s] of Object.entries(data.db.channels)) s.id = Number(k)
+      setupIndex([{ chanId: 5 }, { chanId: 6 }])
       const result = await nav.fromHash("1!news")
       expect(result.filtered).toBe(true)
    })
 
    it("clear() clears filter", async () => {
-      setupIndex([{ subId: 1 }])
+      setupIndex([{ chanId: 1 }])
       const r1 = await nav.fromHash("0!1")
       expect(r1.filtered).toBe(true)
       const r2 = await nav.fromHash("0")
@@ -743,7 +743,7 @@ describe("filter mutations", () => {
 
 describe("jumpToEnd via last()", () => {
    it("navigates to last article", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 3 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 3 }])
       await nav.fromHash("0")
       const result = await nav.last()
       expect(data.loadArticle).toHaveBeenLastCalledWith(2)
@@ -751,7 +751,7 @@ describe("jumpToEnd via last()", () => {
    })
 
    it("returns last article when already at end", async () => {
-      setupIndex([{ subId: 1 }])
+      setupIndex([{ chanId: 1 }])
       await nav.fromHash("0")
       const result = await nav.last()
       expect(data.loadArticle).toHaveBeenLastCalledWith(0)
@@ -759,7 +759,7 @@ describe("jumpToEnd via last()", () => {
    })
 
    it("jumps to last article and snaps to filter", async () => {
-      setupIndex([{ subId: 1 }, { subId: 1 }, { subId: 2 }])
+      setupIndex([{ chanId: 1 }, { chanId: 1 }, { chanId: 2 }])
       await nav.fromHash("0!1")
       const result = await nav.last()
       expect(data.loadArticle).toHaveBeenLastCalledWith(1)
@@ -769,13 +769,13 @@ describe("jumpToEnd via last()", () => {
 
 describe("cycleFilter", () => {
    it("cycles forward from no filter to first tag", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }])
-      data.db.subscriptions[1] = makeSub({ id: 1, tag: "news" })
-      data.db.subscriptions[2] = makeSub({ id: 2 })
-      data.groupSubsByTag.mockReturnValue({
-         tagged: new Map([["news", [data.db.subscriptions[1]]]]),
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
+      data.db.channels[1] = makeChannel({ id: 1, tag: "news" })
+      data.db.channels[2] = makeChannel({ id: 2 })
+      data.groupChannelsByTag.mockReturnValue({
+         tagged: new Map([["news", [data.db.channels[1]]]]),
          sortedTags: ["news"],
-         untagged: [data.db.subscriptions[2]],
+         untagged: [data.db.channels[2]],
       })
       await nav.fromHash("0")
       const result = await nav.cycleFilter(1)
@@ -783,13 +783,13 @@ describe("cycleFilter", () => {
    })
 
    it("cycles backward wrapping to last entry", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }])
-      data.db.subscriptions[1] = makeSub({ id: 1 })
-      data.db.subscriptions[2] = makeSub({ id: 2 })
-      data.groupSubsByTag.mockReturnValue({
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
+      data.db.channels[1] = makeChannel({ id: 1 })
+      data.db.channels[2] = makeChannel({ id: 2 })
+      data.groupChannelsByTag.mockReturnValue({
          tagged: new Map(),
          sortedTags: [],
-         untagged: [data.db.subscriptions[1], data.db.subscriptions[2]],
+         untagged: [data.db.channels[1], data.db.channels[2]],
       })
       await nav.fromHash("0")
       // entries = ["", "1", "2"], current = "" (idx 0), dir = -1 → wraps to idx 2 ("2")
@@ -798,13 +798,13 @@ describe("cycleFilter", () => {
    })
 
    it("clears filter when cycling back to all", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }])
-      data.db.subscriptions[1] = makeSub({ id: 1 })
-      data.db.subscriptions[2] = makeSub({ id: 2 })
-      data.groupSubsByTag.mockReturnValue({
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
+      data.db.channels[1] = makeChannel({ id: 1 })
+      data.db.channels[2] = makeChannel({ id: 2 })
+      data.groupChannelsByTag.mockReturnValue({
          tagged: new Map(),
          sortedTags: [],
-         untagged: [data.db.subscriptions[1], data.db.subscriptions[2]],
+         untagged: [data.db.channels[1], data.db.channels[2]],
       })
       await nav.fromHash("1!2")
       // entries = ["", "1", "2"], current = "2" (idx 2), dir = 1 → wraps to idx 0 ("")
@@ -815,7 +815,7 @@ describe("cycleFilter", () => {
 
 describe("first", () => {
    it("navigates to first article", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
       await nav.fromHash("1")
       const result = await nav.first()
       expect(data.loadArticle).toHaveBeenLastCalledWith(0)
@@ -823,15 +823,15 @@ describe("first", () => {
    })
 
    it("navigates to first filtered article", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 1 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 1 }])
       await nav.fromHash("2!1")
       await nav.first()
       expect(data.loadArticle).toHaveBeenLastCalledWith(0)
    })
 
    it("starts findRight from min add_idx (skips packs before any filter sub existed)", async () => {
-      setupIndex([{ subId: 1 }, { subId: 1 }, { subId: 2 }, { subId: 2 }])
-      data.db.subscriptions[2].add_idx = 2
+      setupIndex([{ chanId: 1 }, { chanId: 1 }, { chanId: 2 }, { chanId: 2 }])
+      data.db.channels[2].add_idx = 2
       await nav.fromHash("3!2")
       data.findRight.mockClear()
       await nav.first()
@@ -841,7 +841,7 @@ describe("first", () => {
 
 describe("goTo", () => {
    it("navigates directly to target when no filter active", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 3 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 3 }])
       await nav.fromHash("0")
       const result = await nav.goTo(2)
       expect(data.loadArticle).toHaveBeenLastCalledWith(2)
@@ -849,7 +849,7 @@ describe("goTo", () => {
    })
 
    it("navigates directly when target matches filter", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 3 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 3 }])
       await nav.fromHash("0")
       const result = await nav.goTo(1)
       expect(data.loadArticle).toHaveBeenLastCalledWith(1)
@@ -857,7 +857,7 @@ describe("goTo", () => {
    })
 
    it("snaps forward when target does not match active filter", async () => {
-      setupIndex([{ subId: 2 }, { subId: 1 }, { subId: 1 }])
+      setupIndex([{ chanId: 2 }, { chanId: 1 }, { chanId: 1 }])
       await nav.fromHash("2!1")
       const result = await nav.goTo(0)
       expect(data.loadArticle).toHaveBeenLastCalledWith(1)
@@ -865,28 +865,28 @@ describe("goTo", () => {
    })
 
    it("falls back to last when no match at or after target", async () => {
-      setupIndex([{ subId: 1 }, { subId: 1 }, { subId: 2 }])
+      setupIndex([{ chanId: 1 }, { chanId: 1 }, { chanId: 2 }])
       await nav.fromHash("0!1")
       const result = await nav.goTo(2)
       expect(result.article.s).toBe(1)
    })
 
    it("falls back to last for out-of-range target", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
       await nav.fromHash("0")
       const result = await nav.goTo(99)
       expect(result.article.s).toBe(2)
    })
 
    it("commits resolved chronIdx to URL hash when no filter", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 3 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 3 }])
       await nav.fromHash("0")
       await nav.goTo(2)
       expect(history.pushState).toHaveBeenLastCalledWith(null, "", "#2")
    })
 
    it("commits target chronIdx to URL hash when active filter matches", async () => {
-      setupIndex([{ subId: 1 }, { subId: 2 }, { subId: 1 }])
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 1 }])
       await nav.fromHash("0!1")
       const result = await nav.goTo(2)
       expect(data.loadArticle).toHaveBeenLastCalledWith(2)
@@ -895,7 +895,7 @@ describe("goTo", () => {
    })
 
    it("commits snapped chronIdx (not input) to URL hash when filter forces a snap", async () => {
-      setupIndex([{ subId: 2 }, { subId: 1 }, { subId: 1 }])
+      setupIndex([{ chanId: 2 }, { chanId: 1 }, { chanId: 1 }])
       await nav.fromHash("2!1")
       await nav.goTo(0)
       expect(history.pushState).toHaveBeenLastCalledWith(null, "", "#1!1")
@@ -903,9 +903,9 @@ describe("goTo", () => {
 
    it("lands on findChronForTimestamp result chronIdx", async () => {
       setupIndex([
-         { subId: 1, fetchedAt: 10 },
-         { subId: 2, fetchedAt: 20 },
-         { subId: 3, fetchedAt: 30 },
+         { chanId: 1, fetchedAt: 10 },
+         { chanId: 2, fetchedAt: 20 },
+         { chanId: 3, fetchedAt: 30 },
       ])
       data.findChronForTimestamp.mockReturnValueOnce(1)
       await nav.fromHash("0")
@@ -951,7 +951,7 @@ describe("prefetch abort", () => {
    }
 
    it("creates Image objects with proxied src for the neighbor article", async () => {
-      setupIndex([{ subId: 1 }, { subId: 1 }, { subId: 1 }])
+      setupIndex([{ chanId: 1 }, { chanId: 1 }, { chanId: 1 }])
       data.loadArticle.mockImplementation(async (idx: number) =>
          makeArticle({ c: `<img src="http://example.com/${idx}.jpg">` }),
       )
@@ -963,7 +963,7 @@ describe("prefetch abort", () => {
    })
 
    it("sets src='' on previously prefetched images when the next navigation lands", async () => {
-      setupIndex([{ subId: 1 }, { subId: 1 }, { subId: 1 }])
+      setupIndex([{ chanId: 1 }, { chanId: 1 }, { chanId: 1 }])
       data.loadArticle.mockImplementation(async (idx: number) =>
          makeArticle({ c: `<img src="http://example.com/${idx}.jpg">` }),
       )
@@ -978,7 +978,7 @@ describe("prefetch abort", () => {
    })
 
    it("bails the stale idle callback so no Image is created after an abort", async () => {
-      setupIndex([{ subId: 1 }, { subId: 1 }, { subId: 1 }])
+      setupIndex([{ chanId: 1 }, { chanId: 1 }, { chanId: 1 }])
       data.loadArticle.mockImplementation(async (idx: number) =>
          makeArticle({ c: `<img src="http://example.com/${idx}.jpg">` }),
       )
@@ -990,7 +990,7 @@ describe("prefetch abort", () => {
    })
 
    it("aborts the prior prefetch when goTo navigates away (no left/right re-schedule)", async () => {
-      setupIndex([{ subId: 1 }, { subId: 1 }, { subId: 1 }, { subId: 1 }])
+      setupIndex([{ chanId: 1 }, { chanId: 1 }, { chanId: 1 }, { chanId: 1 }])
       data.loadArticle.mockImplementation(async (idx: number) =>
          makeArticle({ c: `<img src="http://example.com/${idx}.jpg">` }),
       )

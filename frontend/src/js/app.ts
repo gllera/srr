@@ -1,5 +1,5 @@
 import * as data from "./data"
-import { closeAllDropdowns, showSourceMenu } from "./dropdown"
+import { closeAllDropdowns, showChannelMenu } from "./dropdown"
 import { formatDate, sanitizeHtml, timeAgo, URL_DENY } from "./fmt"
 import { setupGestures } from "./gestures"
 import * as nav from "./nav"
@@ -11,7 +11,7 @@ const el = {
    toolbar: document.querySelector(".srr-toolbar") as HTMLElement,
    prev: document.querySelector(".srr-prev") as HTMLButtonElement,
    next: document.querySelector(".srr-next") as HTMLButtonElement,
-   source: document.querySelector(".srr-source") as HTMLButtonElement,
+   channel: document.querySelector(".srr-channel") as HTMLButtonElement,
    date: document.querySelector(".srr-date") as HTMLElement,
    counter: document.querySelector(".srr-counter") as HTMLElement,
    popupText: document.querySelector(".srr-popup-text") as HTMLElement,
@@ -23,8 +23,8 @@ const el = {
 let busy = false
 let retryFn: (() => void) | null = null
 let currentPublished = 0
-let currentSource = { id: 0, title: "", tag: "" }
-let lastSourceLabel = ""
+let currentChannel = { id: 0, title: "", tag: "" }
+let lastChannelLabel = ""
 let previousFocus: HTMLElement | null = null
 
 function showError(e: unknown, retry?: () => void) {
@@ -78,12 +78,12 @@ function render(o: IShowFeed) {
    el.date.textContent = currentPublished ? timeAgo(currentPublished) : ""
    el.date.title = currentPublished ? formatDate(currentPublished) : ""
 
-   currentSource = {
-      id: o.sub?.id ?? 0,
-      title: o.sub?.title || "[DELETED]",
-      tag: o.sub?.tag || "",
+   currentChannel = {
+      id: o.channel?.id ?? 0,
+      title: o.channel?.title || "[DELETED]",
+      tag: o.channel?.tag || "",
    }
-   refreshSourceLabel()
+   refreshChannelLabel()
    el.counter.textContent = String(o.countRight)
 
    document.title = "SRR - " + o.article.t
@@ -99,13 +99,13 @@ function render(o: IShowFeed) {
    } catch {}
 }
 
-function refreshSourceLabel() {
-   const tagFiltered = nav.isSingleFilter(currentSource.tag)
-   const subFiltered = nav.isSingleFilter(String(currentSource.id))
+function refreshChannelLabel() {
+   const tagFiltered = nav.isSingleFilter(currentChannel.tag)
+   const chanFiltered = nav.isSingleFilter(String(currentChannel.id))
 
-   const key = `${currentSource.tag}|${currentSource.title}|${tagFiltered}|${subFiltered}`
-   if (key === lastSourceLabel) return
-   lastSourceLabel = key
+   const key = `${currentChannel.tag}|${currentChannel.title}|${tagFiltered}|${chanFiltered}`
+   if (key === lastChannelLabel) return
+   lastChannelLabel = key
 
    const parts: HTMLSpanElement[] = []
    const aria: string[] = []
@@ -117,20 +117,20 @@ function refreshSourceLabel() {
       aria.push(label)
    }
 
-   if (currentSource.tag) {
-      const tag = currentSource.tag
+   if (currentChannel.tag) {
+      const tag = currentChannel.tag
       push((tag[0] + tag[tag.length - 1]).toUpperCase(), tagFiltered, `tag ${tag}${tagFiltered ? " active" : ""}`)
    }
-   push(currentSource.title, subFiltered, `source ${currentSource.title}${subFiltered ? " active" : ""}`)
+   push(currentChannel.title, chanFiltered, `channel ${currentChannel.title}${chanFiltered ? " active" : ""}`)
 
    const children: (HTMLSpanElement | string)[] = []
    parts.forEach((p, i) => {
       if (i > 0) children.push(" · ")
       children.push(p)
    })
-   el.source.replaceChildren(...children)
-   el.source.title = currentSource.tag ? `Tag: ${currentSource.tag}` : ""
-   el.source.setAttribute("aria-label", `Filter: ${aria.join(", ")}`)
+   el.channel.replaceChildren(...children)
+   el.channel.title = currentChannel.tag ? `Tag: ${currentChannel.tag}` : ""
+   el.channel.setAttribute("aria-label", `Filter: ${aria.join(", ")}`)
 }
 
 const KEY_ACTIONS: Record<string, () => void> = {
@@ -163,7 +163,7 @@ async function init() {
 
    el.prev.addEventListener("click", () => guard(() => nav.left()))
    el.next.addEventListener("click", () => guard(() => nav.right()))
-   el.source.addEventListener("click", () => showSourceMenu(currentSource.tag, guard))
+   el.channel.addEventListener("click", () => showChannelMenu(currentChannel.tag, guard))
    el.popupClose.addEventListener("click", closePopup)
    el.popupRetry.addEventListener("click", () => {
       closePopup()

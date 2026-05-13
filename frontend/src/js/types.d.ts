@@ -8,10 +8,10 @@ interface IDB {
    total_art: number
    next_pid: number
    pack_off: number
-   subscriptions: Record<number, ISub>
+   channels: Record<number, IChannel>
 }
 
-interface ISource {
+interface IFeed {
    url: string
    ferr?: string
    wm?: number
@@ -20,10 +20,10 @@ interface ISource {
    last_modified?: string
 }
 
-interface ISub {
+interface IChannel {
    id: number
    title: string
-   src: ISource[]
+   feeds: IFeed[]
    pipe?: string[]
    total_art: number
    add_idx: number
@@ -44,6 +44,6 @@ interface IShowFeed {
    has_right: boolean
    filtered: boolean
    article: IArticle
-   sub: ISub | undefined
+   channel: IChannel | undefined
    countRight: number
 }

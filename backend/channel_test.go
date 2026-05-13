@@ -8,17 +8,18 @@ import (
 	"strings"
 	"testing"
 
+	"srrb/ingest"
 	"srrb/mod"
 )
 
-func fetchOnce(t *testing.T, src *Source, sub *Subscription, srv *httptest.Server) []*Item {
+func fetchOnce(t *testing.T, feed *Feed, ch *Channel, srv *httptest.Server) []*Item {
 	t.Helper()
 	buf := make([]byte, 1<<20)
-	src.ETag, src.LastModified = "", ""
+	feed.ETag, feed.LastModified = "", ""
 	// Far enough in the future that test-fixture pubDates of 2024 always pass
 	// the future-clamp without affecting the dedup expectations the tests check.
 	const fetchedAt int64 = 4_102_444_800 // 2100-01-01
-	items, err := src.fetch(context.Background(), srv.Client(), buf, mod.New(), sub, fetchedAt)
+	items, err := feed.fetch(context.Background(), srv.Client(), buf, mod.New(), ingest.New(), ch, fetchedAt)
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
@@ -36,10 +37,10 @@ func TestFetchDatelessItemHasZeroPublished(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	src := &Source{URL: srv.URL}
-	sub := &Subscription{Title: "T", Sources: []*Source{src}}
+	f := &Feed{URL: srv.URL}
+	ch := &Channel{Title: "T", Feeds: []*Feed{f}}
 
-	items := fetchOnce(t, src, sub, srv)
+	items := fetchOnce(t, f, ch, srv)
 	if len(items) != 1 {
 		t.Fatalf("got %d items, want 1", len(items))
 	}
@@ -60,10 +61,10 @@ func TestFetchWithinFetchDuplicateDeduped(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	src := &Source{URL: srv.URL}
-	sub := &Subscription{Title: "T", Sources: []*Source{src}}
+	f := &Feed{URL: srv.URL}
+	ch := &Channel{Title: "T", Feeds: []*Feed{f}}
 
-	items := fetchOnce(t, src, sub, srv)
+	items := fetchOnce(t, f, ch, srv)
 	if len(items) != 1 {
 		t.Errorf("got %d items, want 1", len(items))
 	}
@@ -87,15 +88,15 @@ func TestFetchSameSecondDifferentGUIDIsIngested(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	src := &Source{URL: srv.URL}
-	sub := &Subscription{Title: "T", Sources: []*Source{src}}
+	f := &Feed{URL: srv.URL}
+	ch := &Channel{Title: "T", Feeds: []*Feed{f}}
 
-	if got := fetchOnce(t, src, sub, srv); len(got) != 1 {
+	if got := fetchOnce(t, f, ch, srv); len(got) != 1 {
 		t.Fatalf("fetch1: got %d items, want 1", len(got))
 	}
 
 	current = feed2
-	if got := fetchOnce(t, src, sub, srv); len(got) != 1 {
+	if got := fetchOnce(t, f, ch, srv); len(got) != 1 {
 		t.Errorf("fetch2: got %d items, want 1 (same-second item with new GUID dropped)", len(got))
 	}
 }
@@ -117,14 +118,14 @@ func TestFetchDatelessRemainsSkippedWhenLaterDated(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	src := &Source{URL: srv.URL}
-	sub := &Subscription{Title: "T", Sources: []*Source{src}}
+	f := &Feed{URL: srv.URL}
+	ch := &Channel{Title: "T", Feeds: []*Feed{f}}
 
-	if got := fetchOnce(t, src, sub, srv); len(got) != 1 {
+	if got := fetchOnce(t, f, ch, srv); len(got) != 1 {
 		t.Fatalf("fetch1: got %d, want 1", len(got))
 	}
 	current = feedWithDate
-	if got := fetchOnce(t, src, sub, srv); len(got) != 0 {
+	if got := fetchOnce(t, f, ch, srv); len(got) != 0 {
 		t.Errorf("fetch2: got %d, want 0 (re-ingested previously-dateless item once it gained a date)", len(got))
 	}
 }
@@ -141,16 +142,16 @@ func TestFetchPriorBoundaryStillDedupes(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	src := &Source{URL: srv.URL}
-	sub := &Subscription{Title: "T", Sources: []*Source{src}}
+	f := &Feed{URL: srv.URL}
+	ch := &Channel{Title: "T", Feeds: []*Feed{f}}
 
-	if got := fetchOnce(t, src, sub, srv); len(got) != 2 {
+	if got := fetchOnce(t, f, ch, srv); len(got) != 2 {
 		t.Fatalf("fetch1: got %d, want 2", len(got))
 	}
-	if len(src.BoundaryGUIDs) != 2 {
-		t.Errorf("BoundaryGUIDs = %v, want 2", src.BoundaryGUIDs)
+	if len(f.BoundaryGUIDs) != 2 {
+		t.Errorf("BoundaryGUIDs = %v, want 2", f.BoundaryGUIDs)
 	}
-	if got := fetchOnce(t, src, sub, srv); len(got) != 0 {
+	if got := fetchOnce(t, f, ch, srv); len(got) != 0 {
 		t.Errorf("fetch2: got %d, want 0", len(got))
 	}
 }
@@ -172,19 +173,19 @@ func TestFetchSiblingsAtBoundarySecondBothInBoundary(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	src := &Source{URL: srv.URL}
-	sub := &Subscription{Title: "T", Sources: []*Source{src}}
+	f := &Feed{URL: srv.URL}
+	ch := &Channel{Title: "T", Feeds: []*Feed{f}}
 
-	if got := fetchOnce(t, src, sub, srv); len(got) != 1 {
+	if got := fetchOnce(t, f, ch, srv); len(got) != 1 {
 		t.Fatalf("fetch1: got %d, want 1", len(got))
 	}
 
 	current = feed2
-	if got := fetchOnce(t, src, sub, srv); len(got) != 1 {
+	if got := fetchOnce(t, f, ch, srv); len(got) != 1 {
 		t.Errorf("fetch2: got %d, want 1 (B is new at the same second)", len(got))
 	}
-	if len(src.BoundaryGUIDs) != 2 {
-		t.Errorf("BoundaryGUIDs = %v, want 2", src.BoundaryGUIDs)
+	if len(f.BoundaryGUIDs) != 2 {
+		t.Errorf("BoundaryGUIDs = %v, want 2", f.BoundaryGUIDs)
 	}
 }
 
@@ -203,28 +204,28 @@ func TestFetchEmptyResponsePreservesDedupState(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	src := &Source{URL: srv.URL}
-	sub := &Subscription{Title: "T", Sources: []*Source{src}}
+	f := &Feed{URL: srv.URL}
+	ch := &Channel{Title: "T", Feeds: []*Feed{f}}
 
-	if got := fetchOnce(t, src, sub, srv); len(got) != 1 {
+	if got := fetchOnce(t, f, ch, srv); len(got) != 1 {
 		t.Fatalf("fetch1: got %d, want 1", len(got))
 	}
-	priorWatermark := src.Watermark
-	priorBoundary := append([]uint32(nil), src.BoundaryGUIDs...)
+	priorWatermark := f.Watermark
+	priorBoundary := append([]uint32(nil), f.BoundaryGUIDs...)
 
 	current = feedEmpty
-	if got := fetchOnce(t, src, sub, srv); len(got) != 0 {
+	if got := fetchOnce(t, f, ch, srv); len(got) != 0 {
 		t.Fatalf("fetch2: got %d, want 0", len(got))
 	}
-	if src.Watermark != priorWatermark {
-		t.Errorf("Watermark = %d, want %d (preserved across empty fetch)", src.Watermark, priorWatermark)
+	if f.Watermark != priorWatermark {
+		t.Errorf("Watermark = %d, want %d (preserved across empty fetch)", f.Watermark, priorWatermark)
 	}
-	if !slices.Equal(src.BoundaryGUIDs, priorBoundary) {
-		t.Errorf("BoundaryGUIDs = %v, want %v (preserved across empty fetch)", src.BoundaryGUIDs, priorBoundary)
+	if !slices.Equal(f.BoundaryGUIDs, priorBoundary) {
+		t.Errorf("BoundaryGUIDs = %v, want %v (preserved across empty fetch)", f.BoundaryGUIDs, priorBoundary)
 	}
 
 	current = feedWithItem
-	if got := fetchOnce(t, src, sub, srv); len(got) != 0 {
+	if got := fetchOnce(t, f, ch, srv); len(got) != 0 {
 		t.Errorf("fetch3: got %d, want 0 (item re-ingested after empty fetch)", len(got))
 	}
 }
@@ -242,16 +243,16 @@ func TestFetchWithinFetchDuplicateLowerPubKeepsBoundary(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	src := &Source{URL: srv.URL}
-	sub := &Subscription{Title: "T", Sources: []*Source{src}}
+	f := &Feed{URL: srv.URL}
+	ch := &Channel{Title: "T", Feeds: []*Feed{f}}
 
-	if got := fetchOnce(t, src, sub, srv); len(got) != 1 {
+	if got := fetchOnce(t, f, ch, srv); len(got) != 1 {
 		t.Fatalf("fetch1: got %d, want 1", len(got))
 	}
-	if len(src.BoundaryGUIDs) != 1 {
-		t.Errorf("BoundaryGUIDs = %v, want 1 entry (GUID dropped → re-ingestion next fetch)", src.BoundaryGUIDs)
+	if len(f.BoundaryGUIDs) != 1 {
+		t.Errorf("BoundaryGUIDs = %v, want 1 entry (GUID dropped → re-ingestion next fetch)", f.BoundaryGUIDs)
 	}
-	if got := fetchOnce(t, src, sub, srv); len(got) != 0 {
+	if got := fetchOnce(t, f, ch, srv); len(got) != 0 {
 		t.Errorf("fetch2: got %d, want 0 (dup ingested because boundary lost the GUID)", len(got))
 	}
 }
@@ -274,15 +275,15 @@ func TestFetchWithinFetchDuplicateHigherPubKeepsWatermark(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	src := &Source{URL: srv.URL}
-	sub := &Subscription{Title: "T", Sources: []*Source{src}}
+	f := &Feed{URL: srv.URL}
+	ch := &Channel{Title: "T", Feeds: []*Feed{f}}
 
-	if got := fetchOnce(t, src, sub, srv); len(got) != 1 {
+	if got := fetchOnce(t, f, ch, srv); len(got) != 1 {
 		t.Fatalf("fetch1: got %d, want 1", len(got))
 	}
 
 	current = feed2
-	if got := fetchOnce(t, src, sub, srv); len(got) != 1 {
+	if got := fetchOnce(t, f, ch, srv); len(got) != 1 {
 		t.Errorf("fetch2: got %d, want 1 (B at 00:05 skipped because watermark jumped to 00:10 on a dup)", len(got))
 	}
 }
@@ -300,12 +301,12 @@ func TestFetchFutureDatedItemClampedToFetchedAt(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	src := &Source{URL: srv.URL}
-	sub := &Subscription{Title: "T", Sources: []*Source{src}}
+	f := &Feed{URL: srv.URL}
+	ch := &Channel{Title: "T", Feeds: []*Feed{f}}
 
 	const fetchedAt int64 = 1_700_000_000
 	buf := make([]byte, 1<<20)
-	items, err := src.fetch(context.Background(), srv.Client(), buf, mod.New(), sub, fetchedAt)
+	items, err := f.fetch(context.Background(), srv.Client(), buf, mod.New(), ingest.New(), ch, fetchedAt)
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
@@ -315,8 +316,8 @@ func TestFetchFutureDatedItemClampedToFetchedAt(t *testing.T) {
 	if items[0].Published != fetchedAt {
 		t.Errorf("Published = %d, want %d (clamped to fetchedAt)", items[0].Published, fetchedAt)
 	}
-	if src.Watermark != fetchedAt {
-		t.Errorf("Watermark = %d, want %d (clamped)", src.Watermark, fetchedAt)
+	if f.Watermark != fetchedAt {
+		t.Errorf("Watermark = %d, want %d (clamped)", f.Watermark, fetchedAt)
 	}
 }
 

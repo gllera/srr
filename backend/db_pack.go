@@ -12,7 +12,7 @@ import (
 // ArticleData is the on-disk JSONL representation of an article (one
 // per line in data/*.gz). Short keys match what the frontend expects.
 type ArticleData struct {
-	SubID     int    `json:"s"`
+	ChannelID int    `json:"s"`
 	FetchedAt int64  `json:"a"`
 	Published int64  `json:"p,omitempty"`
 	Title     string `json:"t,omitempty"`
@@ -23,7 +23,7 @@ type ArticleData struct {
 // Item is the in-memory representation of an article during fetch.
 // PutArticles converts these into ArticleData before persistence.
 type Item struct {
-	Sub       *Subscription
+	Channel   *Channel
 	Title     string
 	Content   string
 	Link      string
@@ -73,18 +73,18 @@ func newPack() *pack {
 func (p *pack) Len() int                    { return p.buf.Len() }
 func (p *pack) Write(b []byte) (int, error) { return p.gz.Write(b) }
 
-func (p *pack) writeIdx(subID, deltaPack, deltaFetched int) error {
-	_, err := p.Write([]byte{byte(subID), byte(deltaFetched) | byte(deltaPack)<<7})
+func (p *pack) writeIdx(chanID, deltaPack, deltaFetched int) error {
+	_, err := p.Write([]byte{byte(chanID), byte(deltaFetched) | byte(deltaPack)<<7})
 	return err
 }
 
-func writeIdxHeader(p *pack, block, packID, packOff int, subs map[int]*Subscription) error {
+func writeIdxHeader(p *pack, block, packID, packOff int, channels map[int]*Channel) error {
 	var buf [idxHeaderSize]byte
 	binary.LittleEndian.PutUint32(buf[0:], uint32(block))
 	binary.LittleEndian.PutUint32(buf[4:], uint32(packID))
 	binary.LittleEndian.PutUint32(buf[8:], uint32(packOff))
-	for id, sub := range subs {
-		binary.LittleEndian.PutUint32(buf[12+id*4:], uint32(sub.TotalArt))
+	for id, ch := range channels {
+		binary.LittleEndian.PutUint32(buf[12+id*4:], uint32(ch.TotalArt))
 	}
 	_, err := p.Write(buf[:])
 	return err
@@ -173,7 +173,7 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 		}
 
 		if meta.Len() == 0 {
-			if err := writeIdxHeader(meta, c.FetchedAtCursor, c.NextPackID, c.PackOffset, c.Subscriptions); err != nil {
+			if err := writeIdxHeader(meta, c.FetchedAtCursor, c.NextPackID, c.PackOffset, c.Channels); err != nil {
 				return err
 			}
 		}
@@ -199,7 +199,7 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 		} else {
 			fetchedCarry = 0
 		}
-		if err := meta.writeIdx(item.Sub.id, c.NextPackID-prevPackID, int(delta)); err != nil {
+		if err := meta.writeIdx(item.Channel.id, c.NextPackID-prevPackID, int(delta)); err != nil {
 			return err
 		}
 
@@ -208,7 +208,7 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 		prevFetchedTS = c.FetchedAt / 28800
 
 		if err := data.writeArticle(&ArticleData{
-			SubID:     item.Sub.id,
+			ChannelID: item.Channel.id,
 			FetchedAt: c.FetchedAt,
 			Published: item.Published,
 			Title:     item.Title,
@@ -219,7 +219,7 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 		}
 
 		c.TotalArticles++
-		item.Sub.TotalArt++
+		item.Channel.TotalArt++
 		c.PackOffset++
 	}
 

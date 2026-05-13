@@ -4,7 +4,7 @@ import { IDX_PACK_SIZE, makeIdxPack } from "./idx"
 const HEADER_BYTES = 259 * 4
 
 interface Entry {
-   subId: number
+   chanId: number
    deltaPackId: 0 | 1
    deltaFetchedAt: number
 }
@@ -13,7 +13,7 @@ interface PackOpts {
    fetchedAtBase?: number
    packIdBase?: number
    packOffBase?: number
-   subCounts?: Record<number, number>
+   chanCounts?: Record<number, number>
    entries: Entry[]
 }
 
@@ -23,20 +23,20 @@ function buildBuf(o: PackOpts): ArrayBuffer {
    view.setUint32(0, o.fetchedAtBase ?? 0, true)
    view.setUint32(4, o.packIdBase ?? 0, true)
    view.setUint32(8, o.packOffBase ?? 0, true)
-   for (const [k, v] of Object.entries(o.subCounts ?? {})) {
+   for (const [k, v] of Object.entries(o.chanCounts ?? {})) {
       view.setUint32(12 + Number(k) * 4, v, true)
    }
    const bytes = new Uint8Array(buf)
    for (let i = 0; i < o.entries.length; i++) {
       const e = o.entries[i]
-      bytes[HEADER_BYTES + i * 2] = e.subId
+      bytes[HEADER_BYTES + i * 2] = e.chanId
       bytes[HEADER_BYTES + i * 2 + 1] = (e.deltaPackId << 7) | (e.deltaFetchedAt & 0x7f)
    }
    return buf
 }
 
-const e = (subId: number, deltaPackId: 0 | 1 = 0, deltaFetchedAt = 0): Entry => ({
-   subId,
+const e = (chanId: number, deltaPackId: 0 | 1 = 0, deltaFetchedAt = 0): Entry => ({
+   chanId,
    deltaPackId,
    deltaFetchedAt,
 })
@@ -48,10 +48,10 @@ describe("IDX_PACK_SIZE", () => {
 })
 
 describe("makeIdxPack.parse", () => {
-   it("decodes subIds in order", () => {
+   it("decodes chanIds in order", () => {
       const buf = buildBuf({ entries: [e(1), e(2), e(3)] })
       const pack = makeIdxPack(buf, 0, 3).parse()
-      expect(Array.from(pack.subIds)).toEqual([1, 2, 3])
+      expect(Array.from(pack.chanIds)).toEqual([1, 2, 3])
    })
 
    it("accumulates fetchedAt from header base plus deltas", () => {
@@ -72,26 +72,26 @@ describe("makeIdxPack.parse", () => {
       expect(Array.from(pack.fetchedAts)).toEqual([127, 254])
    })
 
-   it("populates ownSubCounts from entries", () => {
+   it("populates ownChanCounts from entries", () => {
       const buf = buildBuf({ entries: [e(1), e(2), e(1), e(1), e(3)] })
       const pack = makeIdxPack(buf, 0, 5).parse()
-      expect(pack.ownSubCounts[1]).toBe(3)
-      expect(pack.ownSubCounts[2]).toBe(1)
-      expect(pack.ownSubCounts[3]).toBe(1)
-      expect(pack.ownSubCounts[0]).toBe(0)
-      expect(pack.ownSubCounts[42]).toBe(0)
+      expect(pack.ownChanCounts[1]).toBe(3)
+      expect(pack.ownChanCounts[2]).toBe(1)
+      expect(pack.ownChanCounts[3]).toBe(1)
+      expect(pack.ownChanCounts[0]).toBe(0)
+      expect(pack.ownChanCounts[42]).toBe(0)
    })
 
-   it("copies subCounts header verbatim", () => {
+   it("copies chanCounts header verbatim", () => {
       const buf = buildBuf({
-         subCounts: { 1: 100, 2: 50, 255: 7 },
+         chanCounts: { 1: 100, 2: 50, 255: 7 },
          entries: [],
       })
       const pack = makeIdxPack(buf, 0, 0).parse()
-      expect(pack.subCounts[0]).toBe(0)
-      expect(pack.subCounts[1]).toBe(100)
-      expect(pack.subCounts[2]).toBe(50)
-      expect(pack.subCounts[255]).toBe(7)
+      expect(pack.chanCounts[0]).toBe(0)
+      expect(pack.chanCounts[1]).toBe(100)
+      expect(pack.chanCounts[2]).toBe(50)
+      expect(pack.chanCounts[255]).toBe(7)
    })
 
    it("is idempotent across repeated calls", () => {
@@ -100,7 +100,7 @@ describe("makeIdxPack.parse", () => {
       const a = pack.parse()
       const b = pack.parse()
       expect(a).toBe(b)
-      expect(Array.from(a.subIds)).toEqual([1, 2])
+      expect(Array.from(a.chanIds)).toEqual([1, 2])
    })
 
    it("uses packIndex to compute baseChron in bounds", () => {
@@ -142,17 +142,17 @@ describe("makeIdxPack.findLeft", () => {
 
    it("returns the rightmost match scanning leftward from chronFrom", () => {
       const pack = buildPack()
-      const subs = new Map([[1, 0]])
-      expect(pack.findLeft(4, subs)).toBe(4)
-      expect(pack.findLeft(3, subs)).toBe(2)
-      expect(pack.findLeft(1, subs)).toBe(0)
+      const channels = new Map([[1, 0]])
+      expect(pack.findLeft(4, channels)).toBe(4)
+      expect(pack.findLeft(3, channels)).toBe(2)
+      expect(pack.findLeft(1, channels)).toBe(0)
    })
 
    it("respects sub addIdx (entries before addIdx don't match)", () => {
       const pack = buildPack()
-      const subs = new Map([[1, 3]])
-      expect(pack.findLeft(4, subs)).toBe(4)
-      expect(pack.findLeft(2, subs)).toBe(-1)
+      const channels = new Map([[1, 3]])
+      expect(pack.findLeft(4, channels)).toBe(4)
+      expect(pack.findLeft(2, channels)).toBe(-1)
    })
 
    it("returns -1 when no sub matches", () => {
@@ -172,10 +172,10 @@ describe("makeIdxPack.findRight", () => {
 
    it("returns the leftmost match scanning rightward from chronFrom", () => {
       const pack = buildPack()
-      const subs = new Map([[1, 0]])
-      expect(pack.findRight(0, subs)).toBe(0)
-      expect(pack.findRight(1, subs)).toBe(2)
-      expect(pack.findRight(3, subs)).toBe(4)
+      const channels = new Map([[1, 0]])
+      expect(pack.findRight(0, channels)).toBe(0)
+      expect(pack.findRight(1, channels)).toBe(2)
+      expect(pack.findRight(3, channels)).toBe(4)
    })
 
    it("respects sub addIdx", () => {
@@ -210,9 +210,9 @@ describe("makeIdxPack.countLeft", () => {
       expect(pack.countLeft(3, new Map([[1, 1]]))).toBe(2)
    })
 
-   it("uses subCounts header for entries in earlier packs", () => {
+   it("uses chanCounts header for entries in earlier packs", () => {
       const buf = buildBuf({
-         subCounts: { 1: 200 },
+         chanCounts: { 1: 200 },
          entries: [e(1)],
       })
       const pack = makeIdxPack(buf, 1, 1)

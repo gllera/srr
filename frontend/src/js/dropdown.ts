@@ -52,13 +52,13 @@ function toggleDropdown(
    dd.appendChild(frag)
 }
 
-export function showSourceMenu(currentTag: string, guard: (fn: () => Promise<IShowFeed>) => void): void {
-   const { tagged, sortedTags, untagged } = data.groupSubsByTag()
+export function showChannelMenu(currentTag: string, guard: (fn: () => Promise<IShowFeed>) => void): void {
+   const { tagged, sortedTags, untagged } = data.groupChannelsByTag()
    const current = nav.getCurrentFilterKey()
    const cls = (base: string, v: string) => (v === current ? `${base} srr-active`.trim() : base)
 
    toggleDropdown(
-      "srr-source-menu",
+      "srr-channel-menu",
       (frag) => {
          const since = divEl("srr-chip-row")
          since.appendChild(createLink("!last", "last"))
@@ -85,16 +85,16 @@ export function showSourceMenu(currentTag: string, guard: (fn: () => Promise<ISh
             })
             header.appendChild(toggle)
             div.appendChild(header)
-            for (const sub of group) {
-               const sid = String(sub.id)
-               div.appendChild(createLink(sid, sub.title, cls("srr-tag-item", sid)))
+            for (const ch of group) {
+               const cid = String(ch.id)
+               div.appendChild(createLink(cid, ch.title, cls("srr-tag-item", cid)))
             }
             frag.appendChild(div)
          }
          if (sortedTags.length > 0 && untagged.length > 0) frag.appendChild(divEl("srr-tag-sep"))
-         for (const sub of untagged) {
-            const sid = String(sub.id)
-            frag.appendChild(createLink(sid, sub.title, cls("", sid)))
+         for (const ch of untagged) {
+            const cid = String(ch.id)
+            frag.appendChild(createLink(cid, ch.title, cls("", cid)))
          }
       },
       (value) =>

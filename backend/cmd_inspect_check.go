@@ -5,15 +5,15 @@ import (
 	"sort"
 )
 
-func validateAll(fetch fetcher, core *DBCore, packs []*inspIdx) error {
+func validateAll(fetch keyGetter, core *DBCore, packs []*inspIdx) error {
 	fmt.Println()
 	issues := 0
 
 	issues += checkBoundsVsData(fetch, core, packs)
 	issues += checkDBMeta(fetch, core, packs)
-	issues += checkSubCountsContinuity(packs)
+	issues += checkChanCountsContinuity(packs)
 	issues += checkFetchedAtsContinuity(packs)
-	issues += checkUnknownSubIDs(core, packs)
+	issues += checkUnknownChanIDs(core, packs)
 	issues += checkLatestFiles(fetch, core)
 
 	fmt.Println()
@@ -26,8 +26,8 @@ func validateAll(fetch fetcher, core *DBCore, packs []*inspIdx) error {
 
 // checkBoundsVsData walks every chronIdx and verifies the resolved
 // (packId, offset) lands inside an existing data-pack entry whose
-// sub_id matches the idx pack's sub_id.
-func checkBoundsVsData(fetch fetcher, core *DBCore, packs []*inspIdx) int {
+// chan_id matches the idx pack's chan_id.
+func checkBoundsVsData(fetch keyGetter, core *DBCore, packs []*inspIdx) int {
 	cache := map[int][]ArticleData{}
 	loadCached := func(pid int) []ArticleData {
 		if e, ok := cache[pid]; ok {
@@ -46,7 +46,7 @@ func checkBoundsVsData(fetch fetcher, core *DBCore, packs []*inspIdx) int {
 	for chron := range core.TotalArticles {
 		n := packIdxFor(chron, len(packs))
 		pack := packs[n]
-		idxSub := int(pack.subIDs[chron-n*idxPackSize])
+		idxSub := int(pack.chanIDs[chron-n*idxPackSize])
 		pid, offset := pack.getPackRef(chron)
 
 		entries := loadCached(pid)
@@ -60,19 +60,19 @@ func checkBoundsVsData(fetch fetcher, core *DBCore, packs []*inspIdx) int {
 			oob++
 			continue
 		}
-		if entries[offset].SubID != idxSub {
-			fmt.Printf("[bounds-vs-data] chron %d: sub_id mismatch idx=%d data=%d (packId=%d offset=%d)\n",
-				chron, idxSub, entries[offset].SubID, pid, offset)
+		if entries[offset].ChannelID != idxSub {
+			fmt.Printf("[bounds-vs-data] chron %d: chan_id mismatch idx=%d data=%d (packId=%d offset=%d)\n",
+				chron, idxSub, entries[offset].ChannelID, pid, offset)
 			mismatch++
 		}
 	}
-	fmt.Printf("[bounds-vs-data] scanned %d chronIdx, %d data packs cached: %d out-of-range, %d sub_id mismatches\n",
+	fmt.Printf("[bounds-vs-data] scanned %d chronIdx, %d data packs cached: %d out-of-range, %d chan_id mismatches\n",
 		core.TotalArticles, len(cache), oob, mismatch)
 	return oob + mismatch
 }
 
 // checkDBMeta cross-checks db.gz fields against actual pack contents.
-func checkDBMeta(fetch fetcher, core *DBCore, packs []*inspIdx) int {
+func checkDBMeta(fetch keyGetter, core *DBCore, packs []*inspIdx) int {
 	issues := 0
 
 	totalEntries := 0
@@ -105,7 +105,7 @@ func checkDBMeta(fetch fetcher, core *DBCore, packs []*inspIdx) int {
 	idxFirst := map[int]int{}
 	for _, p := range packs {
 		base := p.packIndex * idxPackSize
-		for i, s := range p.subIDs {
+		for i, s := range p.chanIDs {
 			sid := int(s)
 			idxCount[sid]++
 			if _, ok := idxFirst[sid]; !ok {
@@ -113,13 +113,13 @@ func checkDBMeta(fetch fetcher, core *DBCore, packs []*inspIdx) int {
 			}
 		}
 	}
-	subIDs := make([]int, 0, len(core.Subscriptions))
-	for id := range core.Subscriptions {
-		subIDs = append(subIDs, id)
+	chanIDs := make([]int, 0, len(core.Channels))
+	for id := range core.Channels {
+		chanIDs = append(chanIDs, id)
 	}
-	sort.Ints(subIDs)
-	for _, id := range subIDs {
-		sub := core.Subscriptions[id]
+	sort.Ints(chanIDs)
+	for _, id := range chanIDs {
+		sub := core.Channels[id]
 		actual := idxCount[id]
 		if actual != sub.TotalArt {
 			fmt.Printf("[db-meta] sub %d (%q): total_art=%d but idx has %d entries\n",
@@ -132,39 +132,39 @@ func checkDBMeta(fetch fetcher, core *DBCore, packs []*inspIdx) int {
 			issues++
 		}
 	}
-	fmt.Printf("[db-meta] checked total_art, next_pid, pack_off, and %d subscriptions\n", len(subIDs))
+	fmt.Printf("[db-meta] checked total_art, next_pid, pack_off, and %d subscriptions\n", len(chanIDs))
 	return issues
 }
 
-// checkSubCountsContinuity verifies header subCounts[s] in pack i+1
-// equals subCounts[s] + ownSubCounts[s] from pack i. Only meaningful
+// checkChanCountsContinuity verifies header chanCounts[s] in pack i+1
+// equals chanCounts[s] + ownChanCounts[s] from pack i. Only meaningful
 // once total_art crosses idxPackSize.
-func checkSubCountsContinuity(packs []*inspIdx) int {
+func checkChanCountsContinuity(packs []*inspIdx) int {
 	if len(packs) < 2 {
-		fmt.Println("[sub-counts] only 1 idx pack; continuity check skipped")
+		fmt.Println("[chan-counts] only 1 idx pack; continuity check skipped")
 		return 0
 	}
 	issues := 0
 	for i := 0; i < len(packs)-1; i++ {
 		cur, next := packs[i], packs[i+1]
 		for s := range 256 {
-			expected := cur.subCounts[s] + cur.ownSubCounts[s]
-			if next.subCounts[s] != expected {
-				fmt.Printf("[sub-counts] pack %d sub %d: header=%d but pack %d ended with cumulative %d\n",
-					next.packIndex, s, next.subCounts[s], cur.packIndex, expected)
+			expected := cur.chanCounts[s] + cur.ownChanCounts[s]
+			if next.chanCounts[s] != expected {
+				fmt.Printf("[chan-counts] pack %d sub %d: header=%d but pack %d ended with cumulative %d\n",
+					next.packIndex, s, next.chanCounts[s], cur.packIndex, expected)
 				issues++
 			}
 		}
 	}
 	for s := range 256 {
-		if packs[0].subCounts[s] != 0 {
-			fmt.Printf("[sub-counts] pack 0 sub %d: header=%d but expected 0 (no articles before first pack)\n",
-				s, packs[0].subCounts[s])
+		if packs[0].chanCounts[s] != 0 {
+			fmt.Printf("[chan-counts] pack 0 sub %d: header=%d but expected 0 (no articles before first pack)\n",
+				s, packs[0].chanCounts[s])
 			issues++
 		}
 	}
 	if issues == 0 {
-		fmt.Printf("[sub-counts] %d pack boundary transitions consistent\n", len(packs)-1)
+		fmt.Printf("[chan-counts] %d pack boundary transitions consistent\n", len(packs)-1)
 	}
 	return issues
 }
@@ -198,16 +198,16 @@ func checkFetchedAtsContinuity(packs []*inspIdx) int {
 	return issues
 }
 
-// checkUnknownSubIDs flags any idx entry whose sub byte isn't
-// registered in db.subscriptions.
-func checkUnknownSubIDs(core *DBCore, packs []*inspIdx) int {
+// checkUnknownChanIDs flags any idx entry whose channel byte isn't
+// registered in db.channels.
+func checkUnknownChanIDs(core *DBCore, packs []*inspIdx) int {
 	count := map[int]int{}
 	first := map[int]int{}
 	for _, p := range packs {
 		base := p.packIndex * idxPackSize
-		for i, s := range p.subIDs {
+		for i, s := range p.chanIDs {
 			sid := int(s)
-			if _, ok := core.Subscriptions[sid]; ok {
+			if _, ok := core.Channels[sid]; ok {
 				continue
 			}
 			count[sid]++
@@ -217,11 +217,11 @@ func checkUnknownSubIDs(core *DBCore, packs []*inspIdx) int {
 		}
 	}
 	if len(count) == 0 {
-		fmt.Println("[unknown-subs] all idx sub_ids are registered")
+		fmt.Println("[unknown-chans] all idx chan_ids are registered")
 		return 0
 	}
 	for sid, c := range count {
-		fmt.Printf("[unknown-subs] sub_id %d: %d entries (first chron %d) — frontend renders \"[DELETED]\"\n",
+		fmt.Printf("[unknown-chans] chan_id %d: %d entries (first chron %d) — frontend renders \"[DELETED]\"\n",
 			sid, c, first[sid])
 	}
 	return len(count)
@@ -229,7 +229,7 @@ func checkUnknownSubIDs(core *DBCore, packs []*inspIdx) int {
 
 // checkLatestFiles confirms the latest idx and data pack files
 // (named after data_tog) actually exist and decompress.
-func checkLatestFiles(fetch fetcher, core *DBCore) int {
+func checkLatestFiles(fetch keyGetter, core *DBCore) int {
 	issues := 0
 	for _, prefix := range []string{"idx", "data"} {
 		key := fmt.Sprintf("%s/%v.gz", prefix, core.DataToggle)
