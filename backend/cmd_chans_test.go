@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 )
@@ -783,5 +784,133 @@ func TestChanApplyIgnoresReadOnlyFields(t *testing.T) {
 	ch := reopenDB(t).Channels()[0]
 	if ch.Feeds[0].ETag != "etag-a" {
 		t.Errorf("apply leaked input etag into stored state: %q", ch.Feeds[0].ETag)
+	}
+}
+
+// writeEditorScript writes a /bin/sh script to a tempfile, chmods it +x, and
+// returns its path. The script body receives the JSON tempfile as $1.
+// Tests then point $EDITOR (or $VISUAL) at this path.
+func writeEditorScript(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := dir + "/editor.sh"
+	content := "#!/bin/sh\n" + body + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("write editor script: %v", err)
+	}
+	return path
+}
+
+func TestChanEditApplies(t *testing.T) {
+	setupChannelsTestDB(t)
+	// Editor: rewrite title to "Renamed", keep feeds and id intact.
+	script := writeEditorScript(t, `cat > "$1" <<'EOF'
+{"id":0,"title":"Renamed","feeds":[{"url":"https://a.example.com/feed"},{"url":"https://b.example.com/feed"}]}
+EOF`)
+	t.Setenv("EDITOR", script)
+	t.Setenv("VISUAL", "")
+
+	if err := (&EditCmd{ID: 0}).Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	ch := reopenDB(t).Channels()[0]
+	if ch.Title != "Renamed" {
+		t.Errorf("Title = %q, want Renamed", ch.Title)
+	}
+	if ch.Feeds[0].ETag != "etag-a" {
+		t.Errorf("feed state lost: %q", ch.Feeds[0].ETag)
+	}
+}
+
+func TestChanEditNoChangeNoOp(t *testing.T) {
+	setupChannelsTestDB(t)
+	// Editor: do nothing — leave the file exactly as written.
+	script := writeEditorScript(t, `: # no-op`)
+	t.Setenv("EDITOR", script)
+	t.Setenv("VISUAL", "")
+
+	before := reopenDB(t).Channels()[0].Title
+
+	if err := (&EditCmd{ID: 0}).Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := reopenDB(t).Channels()[0].Title; got != before {
+		t.Errorf("title changed unexpectedly: %q -> %q", before, got)
+	}
+}
+
+func TestChanEditIdChangedErrors(t *testing.T) {
+	setupChannelsTestDB(t)
+	script := writeEditorScript(t, `cat > "$1" <<'EOF'
+{"id":7,"title":"Hijack","feeds":[{"url":"https://a.example.com/feed"}]}
+EOF`)
+	t.Setenv("EDITOR", script)
+	t.Setenv("VISUAL", "")
+
+	err := (&EditCmd{ID: 0}).Run()
+	wantErr(t, err, "id from 0 to 7")
+	if reopenDB(t).Channels()[0].Title == "Hijack" {
+		t.Errorf("hijacked title was applied")
+	}
+}
+
+func TestChanEditInvalidJsonErrors(t *testing.T) {
+	setupChannelsTestDB(t)
+	script := writeEditorScript(t, `printf 'not json' > "$1"`)
+	t.Setenv("EDITOR", script)
+	t.Setenv("VISUAL", "")
+
+	err := (&EditCmd{ID: 0}).Run()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "JSON") && !strings.Contains(err.Error(), "json") {
+		t.Errorf("error should mention JSON: %v", err)
+	}
+}
+
+func TestChanEditEditorNonZeroExit(t *testing.T) {
+	setupChannelsTestDB(t)
+	script := writeEditorScript(t, `exit 42`)
+	t.Setenv("EDITOR", script)
+	t.Setenv("VISUAL", "")
+
+	err := (&EditCmd{ID: 0}).Run()
+	wantErr(t, err, "editor exited")
+	if reopenDB(t).Channels()[0].Title != "Test" {
+		t.Errorf("Title unexpectedly changed despite editor failure")
+	}
+}
+
+func TestChanEditChannelNotFound(t *testing.T) {
+	setupChannelsTestDB(t)
+	t.Setenv("EDITOR", writeEditorScript(t, `:`))
+	t.Setenv("VISUAL", "")
+	wantErr(t, (&EditCmd{ID: 99}).Run(), "not found")
+}
+
+func TestChanEditApplyFailsPreservesTempfile(t *testing.T) {
+	setupChannelsTestDB(t)
+	// Editor writes valid JSON with an invalid URL — passes JSON parse
+	// and id check, fails inside parseFeeds during apply.
+	script := writeEditorScript(t, `cat > "$1" <<'EOF'
+{"id":0,"title":"Test","feeds":[{"url":"not-a-url"}]}
+EOF`)
+	t.Setenv("EDITOR", script)
+	t.Setenv("VISUAL", "")
+
+	err := (&EditCmd{ID: 0}).Run()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "tempfile:") {
+		t.Errorf("error should embed tempfile path: %v", err)
+	}
+	if !strings.Contains(err.Error(), "invalid url") {
+		t.Errorf("error should mention invalid url: %v", err)
+	}
+	// And no DB write.
+	if reopenDB(t).Channels()[0].Title != "Test" {
+		t.Errorf("Title unexpectedly changed despite apply failure")
 	}
 }
