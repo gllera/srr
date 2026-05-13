@@ -219,6 +219,16 @@ async function init() {
    }, 60000)
 
    let hash = location.hash.substring(1)
+   // Reject foreign hashes (e.g., OAuth implicit-flow tokens injected by an
+   // auth provider in front of the app — Cloudflare Access JWT-in-fragment,
+   // OIDC, etc.) so the page lands on the user's last position instead of
+   // the latest article. SRR hashes are `[integer][!tokens]` or `!tokens`.
+   const bang = hash.indexOf("!")
+   const posPart = bang === -1 ? hash : hash.substring(0, bang)
+   if (posPart && !/^-?\d+$/.test(posPart)) {
+      history.replaceState(null, "", location.pathname + location.search)
+      hash = ""
+   }
    if (!hash)
       try {
          hash = localStorage.getItem("srr-hash")?.substring(1) || ""

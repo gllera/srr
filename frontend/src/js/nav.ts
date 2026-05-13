@@ -75,8 +75,7 @@ let currentPrefetch: HTMLImageElement[] | null = null
 function schedulePrefetch(target: number) {
    if (target === -1 || typeof window.requestIdleCallback !== "function") return
    const my: HTMLImageElement[] = []
-   if (currentPrefetch)
-      for (const img of currentPrefetch) img.src = ""
+   if (currentPrefetch) for (const img of currentPrefetch) img.src = ""
    currentPrefetch = my
    window.requestIdleCallback(
       async () => {
