@@ -29,13 +29,11 @@ type Globals struct {
 }
 
 type ChannelGroup struct {
-	Add     AddCmd     `cmd:"" help:"Subscribe to a new RSS channel."`
-	Upd     UpdCmd     `cmd:"" help:"Update an existing channel."`
-	Rm      RmCmd      `cmd:"" help:"Unsubscribe from channel(s)."`
-	AddFeed AddFeedCmd `cmd:"" help:"Add URL(s) to an existing channel."`
-	RmFeed  RmFeedCmd  `cmd:"" help:"Remove URL(s) from an existing channel."`
-	Ls      LsCmd      `cmd:"" help:"List channels."`
-	Import  ImportCmd  `cmd:"" help:"Import opml channels file."`
+	Add    AddCmd    `cmd:"" help:"Subscribe to a new RSS channel."`
+	Upd    UpdCmd    `cmd:"" help:"Update an existing channel."`
+	Rm     RmCmd     `cmd:"" help:"Unsubscribe from channel(s)."`
+	Ls     LsCmd     `cmd:"" help:"List channels."`
+	Import ImportCmd `cmd:"" help:"Import opml channels file."`
 }
 
 type ArtGroup struct {
