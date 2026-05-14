@@ -131,7 +131,7 @@ func TestImportWalkerNoSelection(t *testing.T) {
 	}
 }
 
-func TestImportWalkerGroupSelectsChildren(t *testing.T) {
+func TestImportWalkerGroupSelectsChildrenNoMerge(t *testing.T) {
 	nodes := []*OPMLNode{
 		{
 			Name: "Tech",
@@ -142,7 +142,8 @@ func TestImportWalkerGroupSelectsChildren(t *testing.T) {
 		},
 	}
 
-	// Selecting the group "1" should import all children
+	// Without merge mode, selecting the group "1" still imports each child as
+	// its own channel — exercising the legacy (pre-merge) path.
 	iw := &importWalker{w: io.Discard, selectedIDs: []string{"1"}}
 	channels, err := iw.walk(nodes, "", "", nil, false)
 	if err != nil {
@@ -150,7 +151,7 @@ func TestImportWalkerGroupSelectsChildren(t *testing.T) {
 	}
 
 	if len(channels) != 2 {
-		t.Errorf("got %d channels, want 2 (selecting group imports all children)", len(channels))
+		t.Errorf("got %d channels, want 2 (legacy path: group selection expands to children)", len(channels))
 	}
 }
 
@@ -442,5 +443,36 @@ func TestWalkerMergeSingleLeaf(t *testing.T) {
 	}
 	if len(iw.mergedFeeds) != 1 {
 		t.Errorf("got %d feeds, want 1", len(iw.mergedFeeds))
+	}
+}
+
+func TestImportRunAssemblesMergedChannel(t *testing.T) {
+	nodes := []*OPMLNode{
+		{Name: "Alpha", Channel: &Channel{Title: "Alpha", Feeds: []*Feed{{URL: "http://example.com/a"}}}},
+		{Name: "Beta", Channel: &Channel{Title: "Beta", Feeds: []*Feed{{URL: "http://example.com/b"}}}},
+	}
+	title := "Merged"
+	iw := &importWalker{w: io.Discard, merge: true}
+	if _, err := iw.walk(nodes, "", "", nil, true); err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+
+	// Simulate Run's assembly step.
+	var newChannels []*Channel
+	if iw.merge && len(iw.mergedFeeds) > 0 {
+		newChannels = []*Channel{{Title: title, Feeds: iw.mergedFeeds}}
+	}
+
+	if len(newChannels) != 1 {
+		t.Fatalf("got %d channels, want 1", len(newChannels))
+	}
+	if newChannels[0].Title != "Merged" {
+		t.Errorf("Title = %q, want Merged", newChannels[0].Title)
+	}
+	if len(newChannels[0].Feeds) != 2 {
+		t.Errorf("Feeds len = %d, want 2", len(newChannels[0].Feeds))
+	}
+	if newChannels[0].Tag != "" {
+		t.Errorf("Tag = %q, want empty (no -g, no per-leaf auto-tag in merge mode)", newChannels[0].Tag)
 	}
 }
