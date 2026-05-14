@@ -18,14 +18,13 @@ var version = "development"
 var globals *Globals
 
 type Globals struct {
-	Workers       int    `short:"w" default:"${nproc}" env:"SRR_WORKERS"       help:"Number of concurrent downloads."`
-	PackSize      int    `short:"s" default:"200"      env:"SRR_PACK_SIZE"     help:"Target pack size in KB."`
-	MaxFeedSize   int    `short:"m" default:"5000"     env:"SRR_MAX_FEED_SIZE" help:"Max feed download size in KB."`
-	Store         string `short:"o" default:"packs"    env:"SRR_STORE"         help:"Storage destination path."`
-	DefaultIngest string `                             env:"SRR_INGEST"        help:"Default ingest strategy for sources without an explicit override (e.g. '#rss', '#telegram', or a shell command)."`
-	Force         bool   `                             env:"SRR_FORCE"         help:"Override DB write lock if needed."`
-	Debug         bool   `short:"d"                    env:"SRR_DEBUG"         help:"Enable debug mode."`
-	CdnURL        string `hidden:""                    env:"SRR_CDN_URL"       help:"CDN URL for frontend builds."`
+	Workers     int    `short:"w" default:"${nproc}" env:"SRR_WORKERS"       help:"Number of concurrent downloads."`
+	PackSize    int    `short:"s" default:"200"      env:"SRR_PACK_SIZE"     help:"Target pack size in KB."`
+	MaxFeedSize int    `short:"m" default:"5000"     env:"SRR_MAX_FEED_SIZE" help:"Max feed download size in KB."`
+	Store       string `short:"o" default:"packs"    env:"SRR_STORE"         help:"Storage destination path."`
+	Force       bool   `                             env:"SRR_FORCE"         help:"Override DB write lock if needed."`
+	Debug       bool   `short:"d"                    env:"SRR_DEBUG"         help:"Enable debug mode."`
+	CdnURL      string `hidden:""                    env:"SRR_CDN_URL"       help:"CDN URL for frontend builds."`
 }
 
 type ChannelGroup struct {
@@ -49,6 +48,7 @@ type CLI struct {
 	Chan    ChannelGroup `cmd:"" aliases:"ch" help:"Channel management."`
 	Art     ArtGroup     `cmd:"" aliases:"a" help:"Article management."`
 	Pipe    PipeCmd      `cmd:"" help:"Set or print root pipe (default pipeline inherited by channels)."`
+	Ingest  IngestCmd    `cmd:"" help:"Set or print root ingest strategy (default inherited by channels)."`
 	Preview PreviewCmd   `cmd:"" aliases:"p" help:"Preview processed feed articles in a browser."`
 	Config  ConfigCmd    `cmd:"" aliases:"c" help:"Print resolved configuration."`
 	Inspect InspectCmd   `cmd:"" aliases:"i" help:"Inspect pack consistency (validate idx<->data, debug chronIdx lookup)."`

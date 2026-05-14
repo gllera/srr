@@ -27,11 +27,12 @@ func init() {
 	})
 }
 
-func dispatchOnce(t *testing.T, feed *Feed, ch *Channel) []*Item {
+func dispatchOnce(t *testing.T, feed *Feed, ch *Channel, rootIngest string) []*Item {
 	t.Helper()
 	buf := make([]byte, 1<<20)
 	const fetchedAt int64 = 4_102_444_800
-	items, err := feed.fetch(context.Background(), nil, buf, mod.New(), ingest.New(), ch, fetchedAt, ch.Pipeline)
+	ingestName := ingest.Select(ch.Ingest, rootIngest)
+	items, err := feed.fetch(context.Background(), nil, buf, mod.New(), ingest.New(), ch, fetchedAt, ch.Pipe, ingestName)
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
@@ -42,30 +43,18 @@ func dispatchOnce(t *testing.T, feed *Feed, ch *Channel) []*Item {
 func TestFeedFetchInheritsFromChannel(t *testing.T) {
 	feed := &Feed{URL: "irrelevant://value"}
 	ch := &Channel{Title: "T", Ingest: "#test-stub", Feeds: []*Feed{feed}}
-	items := dispatchOnce(t, feed, ch)
+	items := dispatchOnce(t, feed, ch, "")
 	if len(items) != 2 {
 		t.Fatalf("got %d items, want 2 (channel-level ingest inherited)", len(items))
 	}
 }
 
-// pickIngest is the bridge that consults the (possibly-nil) globals.
-// It must stay safe for tests that run before main() initialises them.
-func TestPickIngestNilGlobals(t *testing.T) {
-	saved := globals
-	defer func() { globals = saved }()
-	globals = nil
-
-	if got := pickIngest(&Channel{}); got != "#rss" {
-		t.Errorf("got %q, want %q", got, "#rss")
-	}
-}
-
-func TestPickIngestReadsGlobalDefault(t *testing.T) {
-	saved := globals
-	defer func() { globals = saved }()
-	globals = &Globals{DefaultIngest: "#telegram"}
-
-	if got := pickIngest(&Channel{}); got != "#telegram" {
-		t.Errorf("got %q, want %q", got, "#telegram")
+// The db.gz root Ingest applies when the channel has no override.
+func TestFeedFetchUsesRootIngest(t *testing.T) {
+	feed := &Feed{URL: "irrelevant://value"}
+	ch := &Channel{Title: "T", Feeds: []*Feed{feed}}
+	items := dispatchOnce(t, feed, ch, "#test-stub")
+	if len(items) != 2 {
+		t.Fatalf("got %d items, want 2 (root ingest applied)", len(items))
 	}
 }
