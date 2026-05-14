@@ -83,6 +83,8 @@ func (o *ImportCmd) Run() error {
 type importWalker struct {
 	w           io.Writer
 	selectedIDs []string
+	merge       bool    // true when -t is set; selected feeds accumulate into mergedFeeds instead of becoming channels
+	mergedFeeds []*Feed // accumulator (merge mode only)
 }
 
 func (iw *importWalker) walk(nodes []*OPMLNode, prefix, indent string, groupPath []string, importAll bool) ([]*Channel, error) {
@@ -92,7 +94,11 @@ func (iw *importWalker) walk(nodes []*OPMLNode, prefix, indent string, groupPath
 
 	var result []*Channel
 
-	selectChannel := func(ch *Channel) error {
+	emit := func(ch *Channel) error {
+		if iw.merge {
+			iw.mergedFeeds = append(iw.mergedFeeds, ch.Feeds...)
+			return nil
+		}
 		tag, err := resolveTag(groupPath)
 		if err != nil {
 			return err
@@ -108,7 +114,7 @@ func (iw *importWalker) walk(nodes []*OPMLNode, prefix, indent string, groupPath
 		if n.Channel != nil && len(n.Children) == 0 {
 			fmt.Fprintf(iw.w, "%s\t%s%s\t%s\n", id, indent, n.Name, n.Channel.URLs())
 			if iw.isSelected(id, importAll) {
-				if err := selectChannel(n.Channel); err != nil {
+				if err := emit(n.Channel); err != nil {
 					return nil, err
 				}
 			}
@@ -119,7 +125,7 @@ func (iw *importWalker) walk(nodes []*OPMLNode, prefix, indent string, groupPath
 				chID := id + ".0"
 				fmt.Fprintf(iw.w, "%s\t%s  %s\t%s\n", chID, indent, n.Name, n.Channel.URLs())
 				if iw.isSelected(chID, importAll) || iw.isSelected(id, false) {
-					if err := selectChannel(n.Channel); err != nil {
+					if err := emit(n.Channel); err != nil {
 						return nil, err
 					}
 				}
