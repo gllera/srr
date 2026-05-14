@@ -267,3 +267,26 @@ func TestApplyImportDefaultsIngestClearsToEmpty(t *testing.T) {
 		t.Errorf("c.Ingest = %q, want empty", channels[0].Ingest)
 	}
 }
+
+func TestImportRunFlagsThreadIntoChannels(t *testing.T) {
+	// Drive applyImportDefaults via the same call site Run uses, with
+	// fields populated from an ImportCmd. Guards the wiring after the
+	// rename / refactor.
+	parsers := []string{"#sanitize", "#minify"}
+	ingest := "#telegram"
+	tag := "news"
+	o := &ImportCmd{Parsers: &parsers, Ingest: &ingest, Tag: &tag}
+
+	channels := []*Channel{{Title: "A"}}
+	applyImportDefaults(channels, o.Parsers, o.Ingest, o.Tag)
+
+	if !slices.Equal(channels[0].Pipe, []string{"#sanitize", "#minify"}) {
+		t.Errorf("Pipe = %v", channels[0].Pipe)
+	}
+	if channels[0].Ingest != "#telegram" {
+		t.Errorf("Ingest = %q", channels[0].Ingest)
+	}
+	if channels[0].Tag != "news" {
+		t.Errorf("Tag = %q", channels[0].Tag)
+	}
+}
