@@ -162,6 +162,145 @@ func TestTelegramFetcherIgnoresVideoDurationTime(t *testing.T) {
 	}
 }
 
+// Photos in a Telegram preview message come either as a nested <img> or
+// (more commonly) as an inline background-image style on the wrapper.
+// Both forms must render as an <img> in the article content.
+func TestTelegramFetcherExtractsPhotoFromBackgroundImage(t *testing.T) {
+	const page = `<!doctype html><html><body>
+<div class="tgme_widget_message_wrap">
+  <div class="tgme_widget_message default" data-post="ch/3">
+    <a class="tgme_widget_message_photo_wrap"
+       href="https://t.me/ch/3?single"
+       style="background-image:url('https://cdn.telegram.test/photo.jpg');padding-top:56%"></a>
+    <div class="tgme_widget_message_text js-message_text">caption</div>
+    <a class="tgme_widget_message_date" href="https://t.me/ch/3">
+      <time datetime="2024-05-01T00:00:00+00:00" class="time">00:00</time>
+    </a>
+  </div>
+</div>
+</body></html>`
+	items, err := parseTelegramHTML([]byte(page))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1", len(items))
+	}
+	if !strings.Contains(items[0].Content, `src="https://cdn.telegram.test/photo.jpg"`) {
+		t.Errorf("photo URL missing from content: %q", items[0].Content)
+	}
+	// DOM-order: photo precedes the caption text.
+	photoIdx := strings.Index(items[0].Content, "<img")
+	textIdx := strings.Index(items[0].Content, "caption")
+	if photoIdx < 0 || textIdx < 0 || photoIdx >= textIdx {
+		t.Errorf("photo should precede text: %q", items[0].Content)
+	}
+}
+
+func TestTelegramFetcherExtractsPhotoFromNestedImg(t *testing.T) {
+	const page = `<!doctype html><html><body>
+<div class="tgme_widget_message_wrap">
+  <div class="tgme_widget_message default" data-post="ch/3b">
+    <a class="tgme_widget_message_photo_wrap" href="https://t.me/ch/3b?single">
+      <i class="tgme_widget_message_photo"><img src="https://cdn.telegram.test/inner.jpg"></i>
+    </a>
+    <a class="tgme_widget_message_date" href="https://t.me/ch/3b">
+      <time datetime="2024-05-01T00:00:00+00:00" class="time">00:00</time>
+    </a>
+  </div>
+</div>
+</body></html>`
+	items, err := parseTelegramHTML([]byte(page))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1", len(items))
+	}
+	if !strings.Contains(items[0].Content, `src="https://cdn.telegram.test/inner.jpg"`) {
+		t.Errorf("nested img src not picked up: %q", items[0].Content)
+	}
+}
+
+// Videos render as an inline <video> player so users can play in-place;
+// the thumbnail becomes the poster.
+func TestTelegramFetcherExtractsVideo(t *testing.T) {
+	const page = `<!doctype html><html><body>
+<div class="tgme_widget_message_wrap">
+  <div class="tgme_widget_message default" data-post="ch/4">
+    <a class="tgme_widget_message_video_player" href="https://t.me/ch/4" style="padding-top:56.25%;padding-bottom:0">
+      <i class="tgme_widget_message_video_thumb" style="background-image:url('https://cdn.telegram.test/vid-thumb.jpg')"></i>
+      <video class="tgme_widget_message_video" src="https://cdn.telegram.test/vid.mp4" preload="metadata"></video>
+      <i class="tgme_widget_message_video_play"></i>
+      <time class="tgme_widget_message_video_duration">0:42</time>
+    </a>
+    <div class="tgme_widget_message_text js-message_text">watch this</div>
+    <a class="tgme_widget_message_date" href="https://t.me/ch/4">
+      <time datetime="2024-05-02T00:00:00+00:00" class="time">00:00</time>
+    </a>
+  </div>
+</div>
+</body></html>`
+	items, err := parseTelegramHTML([]byte(page))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1", len(items))
+	}
+	for _, want := range []string{
+		"<video ",
+		`src="https://cdn.telegram.test/vid.mp4"`,
+		`poster="https://cdn.telegram.test/vid-thumb.jpg"`,
+		"controls",
+		`preload="metadata"`,
+		"playsinline",
+		// 56.25% → width=1000, height=563 — propagates Telegram's
+		// aspect-ratio hint so the player doesn't snap on first play.
+		`width="1000"`,
+		`height="563"`,
+	} {
+		if !strings.Contains(items[0].Content, want) {
+			t.Errorf("video content missing %q: %q", want, items[0].Content)
+		}
+	}
+	// Existing duration-time guard must still hold: published comes from the
+	// date anchor, not the in-bubble duration <time>.
+	if items[0].Published == nil || items[0].Published.Unix() != 1714608000 {
+		t.Errorf("Published = %v, want 2024-05-02T00:00:00Z", items[0].Published)
+	}
+}
+
+// A video missing its direct <video src> still renders, with the message
+// permalink as the link target and the thumbnail as the image.
+func TestTelegramFetcherVideoFallsBackToPermalink(t *testing.T) {
+	const page = `<!doctype html><html><body>
+<div class="tgme_widget_message_wrap">
+  <div class="tgme_widget_message default" data-post="ch/5">
+    <a class="tgme_widget_message_video_player" href="https://t.me/ch/5">
+      <i class="tgme_widget_message_video_thumb" style="background-image:url('https://cdn.telegram.test/only-thumb.jpg')"></i>
+    </a>
+    <a class="tgme_widget_message_date" href="https://t.me/ch/5">
+      <time datetime="2024-05-03T00:00:00+00:00" class="time">00:00</time>
+    </a>
+  </div>
+</div>
+</body></html>`
+	items, err := parseTelegramHTML([]byte(page))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1", len(items))
+	}
+	if !strings.Contains(items[0].Content, `href="https://t.me/ch/5"`) {
+		t.Errorf("expected permalink fallback in href: %q", items[0].Content)
+	}
+	if !strings.Contains(items[0].Content, `src="https://cdn.telegram.test/only-thumb.jpg"`) {
+		t.Errorf("thumbnail not rendered: %q", items[0].Content)
+	}
+}
+
 func TestValidateTelegramURL(t *testing.T) {
 	ok := []string{
 		"https://t.me/s/durov",

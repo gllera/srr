@@ -2,6 +2,7 @@ package mod
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -28,6 +29,39 @@ func TestModuleBuiltinSanitize(t *testing.T) {
 	// <p>Safe</p> should remain
 	if item.Content != "<p>Safe</p>" {
 		t.Errorf("content = %q, want %q", item.Content, "<p>Safe</p>")
+	}
+}
+
+func TestModuleBuiltinSanitizePreservesVideo(t *testing.T) {
+	m := New()
+	now := time.Now()
+	item := &RawItem{
+		GUID:  1,
+		Title: "T",
+		Content: `<p><video src="https://x/v.mp4" poster="https://x/p.jpg" controls preload="metadata" playsinline></video></p>` +
+			`<video onerror="x()" src="javascript:alert(1)"></video>`,
+		Link:      "http://example.com",
+		Published: &now,
+	}
+	if err := m.Process(context.Background(), "#sanitize", item); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	for _, want := range []string{
+		"<video ",
+		`src="https://x/v.mp4"`,
+		`poster="https://x/p.jpg"`,
+		"controls",
+		`preload="metadata"`,
+		"playsinline",
+	} {
+		if !strings.Contains(item.Content, want) {
+			t.Errorf("sanitized output missing %q: %q", want, item.Content)
+		}
+	}
+	for _, banned := range []string{"onerror", "javascript:"} {
+		if strings.Contains(item.Content, banned) {
+			t.Errorf("sanitizer let through %q: %q", banned, item.Content)
+		}
 	}
 }
 

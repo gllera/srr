@@ -22,6 +22,16 @@ func init() {
 		policy.AllowAttrs("title").Matching(bluemonday.Paragraph).OnElements("img")
 		policy.AllowElements("img")
 
+		// Video player support — Telegram bubbles emit raw mp4 URLs. The
+		// frontend defense-in-depth strips style/class/on* and URL_DENY
+		// schemes, mirroring this allowlist.
+		policy.AllowAttrs("src", "poster").OnElements("video")
+		policy.AllowAttrs("preload").Matching(regexp.MustCompile(`(?i)^(none|metadata|auto)$`)).OnElements("video")
+		policy.AllowAttrs("controls").Matching(regexp.MustCompile(`(?i)^(|controls)$`)).OnElements("video")
+		policy.AllowAttrs("playsinline").Matching(regexp.MustCompile(`(?i)^(|playsinline)$`)).OnElements("video")
+		policy.AllowAttrs("width", "height").Matching(bluemonday.NumberOrPercent).OnElements("video")
+		policy.AllowElements("video")
+
 		policy.RequireParseableURLs(true)
 		policy.AllowRelativeURLs(true)
 		policy.AllowURLSchemes("mailto", "http", "https")

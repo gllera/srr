@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -126,6 +127,13 @@ func extractTelegramMessage(msg *html.Node, channelTitle string) *mod.RawItem {
 	walk = func(n *html.Node) {
 		if n.Type == html.ElementNode {
 			switch {
+			case n.Data == "a" && hasClass(n, "tgme_widget_message_photo_wrap"):
+				writeTelegramPhoto(&content, n)
+				return
+			case n.Data == "a" && (hasClass(n, "tgme_widget_message_video_player") ||
+				hasClass(n, "tgme_widget_message_roundvideo")):
+				writeTelegramVideo(&content, n, link)
+				return
 			case n.Data == "div" && hasClass(n, "tgme_widget_message_text"):
 				renderHTML(&content, n)
 				return
@@ -230,4 +238,168 @@ func renderHTML(out *strings.Builder, n *html.Node) {
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
 		_ = html.Render(out, c)
 	}
+}
+
+// writeTelegramPhoto emits an <img> linked to the full-size source. The
+// URL is either inside a nested <img src="…"> or inline on the wrapper's
+// "background-image:url(…)" style — both forms are seen in production.
+func writeTelegramPhoto(out *strings.Builder, n *html.Node) {
+	url := findImgSrc(n)
+	if url == "" {
+		url = findStyleBgImage(n)
+	}
+	if url == "" {
+		return
+	}
+	esc := html.EscapeString(url)
+	fmt.Fprintf(out, `<p><a href="%s"><img src="%s"></a></p>`, esc, esc)
+}
+
+// writeTelegramVideo emits an inline <video> player when a direct
+// <video src> is available so the user can play in-place. Falls back to
+// a clickable thumbnail card linking to the message permalink when only
+// a thumbnail is present (some bubbles ship preview-only). Thumbnail
+// comes from the inline background-image style on
+// .tgme_widget_message_video_thumb (or any descendant style). When the
+// wrapper carries the aspect-ratio hint Telegram encodes as the CSS
+// padding-top trick, that ratio is propagated as width/height HTML
+// attributes — browsers honour those as the pre-metadata intrinsic
+// aspect so the player doesn't snap on first play.
+func writeTelegramVideo(out *strings.Builder, n *html.Node, messageLink string) {
+	videoSrc := findVideoSrc(n)
+	thumb := findStyleBgImage(n)
+	if videoSrc != "" {
+		out.WriteString("<p><video ")
+		fmt.Fprintf(out, `src="%s"`, html.EscapeString(videoSrc))
+		if thumb != "" {
+			fmt.Fprintf(out, ` poster="%s"`, html.EscapeString(thumb))
+		}
+		if w, h := videoAspect(n); w > 0 && h > 0 {
+			fmt.Fprintf(out, ` width="%d" height="%d"`, w, h)
+		}
+		out.WriteString(` controls preload="metadata" playsinline></video></p>`)
+		return
+	}
+	if thumb != "" {
+		fmt.Fprintf(out, `<p><a href="%s"><img src="%s"></a></p>`,
+			html.EscapeString(messageLink), html.EscapeString(thumb))
+	}
+}
+
+// videoAspect derives a width/height integer pair from the wrapper's
+// inline padding-top% (height/width × 100, the CSS aspect-ratio trick).
+// Returns 0,0 when no padding-top is present or parseable. The pair is
+// scaled to 1000:N so the integer ratio carries ~0.1% precision.
+func videoAspect(n *html.Node) (int, int) {
+	pct := findStylePaddingTop(n)
+	if pct <= 0 {
+		return 0, 0
+	}
+	const baseWidth = 1000
+	height := int(pct*10 + 0.5)
+	if height < 1 {
+		return 0, 0
+	}
+	return baseWidth, height
+}
+
+// findStylePaddingTop walks n and its descendants for the first inline
+// "style" attribute containing a "padding-top:NN%" declaration, returning
+// NN as a float, or 0 if missing/unparseable.
+func findStylePaddingTop(n *html.Node) float64 {
+	if n.Type == html.ElementNode {
+		if pct := parsePaddingTopPercent(attr(n, "style")); pct > 0 {
+			return pct
+		}
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if pct := findStylePaddingTop(c); pct > 0 {
+			return pct
+		}
+	}
+	return 0
+}
+
+// parsePaddingTopPercent extracts NN from "padding-top: NN%" in a style
+// string. Returns 0 if missing or non-percentage.
+func parsePaddingTopPercent(style string) float64 {
+	_, rest, ok := strings.Cut(style, "padding-top")
+	if !ok {
+		return 0
+	}
+	rest = strings.TrimLeft(rest, ": \t")
+	end := strings.IndexAny(rest, "%;")
+	if end < 0 || rest[end] != '%' {
+		return 0
+	}
+	val, err := strconv.ParseFloat(strings.TrimSpace(rest[:end]), 64)
+	if err != nil || val <= 0 {
+		return 0
+	}
+	return val
+}
+
+// findImgSrc returns the src of the first <img> descendant of n, or "".
+func findImgSrc(n *html.Node) string {
+	if n.Type == html.ElementNode && n.Data == "img" {
+		return attr(n, "src")
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if s := findImgSrc(c); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// findVideoSrc returns the src of the first <video> descendant of n, or "".
+func findVideoSrc(n *html.Node) string {
+	if n.Type == html.ElementNode && n.Data == "video" {
+		return attr(n, "src")
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if s := findVideoSrc(c); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// findStyleBgImage walks n and its descendants for the first inline
+// "style" attribute containing a "background-image:url(…)" declaration,
+// returning that URL or "".
+func findStyleBgImage(n *html.Node) string {
+	if n.Type == html.ElementNode {
+		if url := parseBgImageURL(attr(n, "style")); url != "" {
+			return url
+		}
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if url := findStyleBgImage(c); url != "" {
+			return url
+		}
+	}
+	return ""
+}
+
+// parseBgImageURL extracts the URL from the first
+// "background-image: url(…)" declaration in a CSS-style attribute value.
+// Handles single, double, or unquoted URL forms.
+func parseBgImageURL(style string) string {
+	i := strings.Index(style, "background-image")
+	if i < 0 {
+		return ""
+	}
+	j := strings.Index(style[i:], "url(")
+	if j < 0 {
+		return ""
+	}
+	start := i + j + len("url(")
+	end := strings.IndexByte(style[start:], ')')
+	if end < 0 {
+		return ""
+	}
+	raw := strings.TrimSpace(style[start : start+end])
+	raw = strings.Trim(raw, `"'`)
+	return raw
 }
