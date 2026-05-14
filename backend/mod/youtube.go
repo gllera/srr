@@ -21,10 +21,29 @@ func init() {
 			if id == "" {
 				return nil
 			}
-			i.Content = renderYouTubeContent(id, i.Title, youtubeDescription(i))
+			authorName, authorURL := youtubeAuthor(i)
+			i.Content = renderYouTubeContent(id, i.Title, youtubeDescription(i), authorName, authorURL)
 			return nil
 		}
 	})
+}
+
+// youtubeAuthor pulls the channel display name and channel URL from the
+// Atom <author> element of the entry. YouTube's feed nests <name> and <uri>
+// children inside <author>; the <uri> already points at /channel/<id>, so we
+// don't reconstruct from <yt:channelId>. Returns "" for fields that are
+// absent (no <author>, malformed Raw, or one of the two children missing).
+func youtubeAuthor(i *RawItem) (string, string) {
+	raw, ok := i.Raw.(RawFeedItem)
+	if !ok {
+		return "", ""
+	}
+	authors := raw["author"]
+	if len(authors) == 0 {
+		return "", ""
+	}
+	a := authors[0].Chld
+	return a.Text("name"), a.Text("uri")
 }
 
 // extractYouTubeID returns the canonical 11-char video ID for any YouTube
@@ -89,8 +108,18 @@ func youtubeDescription(i *RawItem) string {
 	return i.Content
 }
 
-func renderYouTubeContent(id, title, description string) string {
+func renderYouTubeContent(id, title, description, authorName, authorURL string) string {
 	var b strings.Builder
+	if authorName != "" {
+		if authorURL != "" {
+			fmt.Fprintf(&b, `<p>by <a href="%s">%s</a></p>`,
+				html.EscapeString(authorURL),
+				html.EscapeString(authorName),
+			)
+		} else {
+			fmt.Fprintf(&b, `<p>by %s</p>`, html.EscapeString(authorName))
+		}
+	}
 	watchURL := "https://www.youtube.com/watch?v=" + id
 	thumbURL := "https://i.ytimg.com/vi/" + id + "/hqdefault.jpg"
 	fmt.Fprintf(&b, `<p><a href="%s"><img src="%s" alt="%s"></a></p>`,
