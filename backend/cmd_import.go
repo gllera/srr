@@ -45,12 +45,7 @@ func (o *ImportCmd) Run() error {
 		return nil
 	}
 
-	// Resolve tags
-	if o.Tag != nil {
-		for _, c := range newChannels {
-			c.Tag = *o.Tag
-		}
-	}
+	applyImportDefaults(newChannels, nil, nil, o.Tag)
 
 	if o.DryRun {
 		w = tabwriter.NewWriter(os.Stdout, 1, 1, 2, ' ', 0)
@@ -141,6 +136,29 @@ func (iw *importWalker) isSelected(id string, importAll bool) bool {
 		}
 	}
 	return false
+}
+
+// applyImportDefaults stamps Pipe / Ingest / Tag onto every channel
+// emitted by the importer. Each pointer is `nil` when the corresponding
+// CLI flag is absent. parsers passes through filterPipe so empty entries
+// drop and an all-empty input becomes nil (inherit-root semantics).
+func applyImportDefaults(channels []*Channel, parsers *[]string, ingest, tag *string) {
+	if parsers != nil {
+		pipe := filterPipe(*parsers)
+		for _, c := range channels {
+			c.Pipe = pipe
+		}
+	}
+	if ingest != nil {
+		for _, c := range channels {
+			c.Ingest = *ingest
+		}
+	}
+	if tag != nil {
+		for _, c := range channels {
+			c.Tag = *tag
+		}
+	}
 }
 
 func resolveTag(groupPath []string) (string, error) {
