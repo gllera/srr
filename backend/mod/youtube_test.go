@@ -189,6 +189,82 @@ func TestYouTubeModEscapesDescription(t *testing.T) {
 	}
 }
 
+func TestYouTubeModRendersAuthorAboveThumbnail(t *testing.T) {
+	m := New()
+	now := time.Now()
+	raw := RawFeedItem{
+		"author": []RawField{{
+			Chld: RawFeedItem{
+				"name": []RawField{{Txt: "MKBHD"}},
+				"uri":  []RawField{{Txt: "https://www.youtube.com/channel/UCBJycsmduvYEL83R_U4JriQ"}},
+			},
+		}},
+	}
+	item := &RawItem{
+		GUID:      1,
+		Title:     "Vid",
+		Link:      "https://youtu.be/dQw4w9WgXcQ",
+		Published: &now,
+		Raw:       raw,
+	}
+	if err := m.Process(context.Background(), "#youtube", item); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	authorLine := `<p>by <a href="https://www.youtube.com/channel/UCBJycsmduvYEL83R_U4JriQ">MKBHD</a></p>`
+	if !strings.Contains(item.Content, authorLine) {
+		t.Errorf("missing author line, got %q", item.Content)
+	}
+	// Order matters: author block must precede the thumbnail block so the
+	// reader sees "by NAME" before the video card.
+	if a, b := strings.Index(item.Content, authorLine), strings.Index(item.Content, "ytimg.com"); a == -1 || a > b {
+		t.Errorf("author must precede thumbnail, got %q", item.Content)
+	}
+}
+
+func TestYouTubeModRendersAuthorPlainTextWhenURIMissing(t *testing.T) {
+	m := New()
+	now := time.Now()
+	raw := RawFeedItem{
+		"author": []RawField{{Chld: RawFeedItem{"name": []RawField{{Txt: "Some <Channel> & Co"}}}}},
+	}
+	item := &RawItem{
+		GUID:      1,
+		Title:     "Vid",
+		Link:      "https://youtu.be/dQw4w9WgXcQ",
+		Published: &now,
+		Raw:       raw,
+	}
+	if err := m.Process(context.Background(), "#youtube", item); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	want := `<p>by Some &lt;Channel&gt; &amp; Co</p>`
+	if !strings.Contains(item.Content, want) {
+		t.Errorf("expected plain author line with escaped name, got %q", item.Content)
+	}
+	if strings.Contains(item.Content, "<a href=\"\"") {
+		t.Errorf("plain-text author must not emit an empty <a> tag, got %q", item.Content)
+	}
+}
+
+func TestYouTubeModOmitsAuthorWhenAbsent(t *testing.T) {
+	m := New()
+	now := time.Now()
+	item := &RawItem{
+		GUID:      1,
+		Title:     "Vid",
+		Link:      "https://youtu.be/dQw4w9WgXcQ",
+		Content:   "desc",
+		Published: &now,
+		Raw:       nil,
+	}
+	if err := m.Process(context.Background(), "#youtube", item); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if strings.Contains(item.Content, "<p>by ") {
+		t.Errorf("no author should render when Raw is nil, got %q", item.Content)
+	}
+}
+
 func TestYouTubeModRegistered(t *testing.T) {
 	m := New()
 	if _, ok := m.processors["#youtube"]; !ok {
