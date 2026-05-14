@@ -223,10 +223,16 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 		c.PackOffset++
 	}
 
-	c.DataToggle = !c.DataToggle
-	latest = fmt.Sprintf("%v.gz", o.core.DataToggle)
+	// Flip the toggle only after both saves succeed — otherwise a mid-flight
+	// data-pack failure leaves the in-memory toggle ahead of db.gz, and the
+	// idx pack we just wrote becomes an orphan under the new-toggle filename.
+	latest = fmt.Sprintf("%v.gz", !c.DataToggle)
 	if err := o.savePack(ctx, "idx/"+latest, meta); err != nil {
 		return err
 	}
-	return o.savePack(ctx, "data/"+latest, data)
+	if err := o.savePack(ctx, "data/"+latest, data); err != nil {
+		return err
+	}
+	c.DataToggle = !c.DataToggle
+	return nil
 }

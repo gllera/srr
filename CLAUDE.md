@@ -61,11 +61,11 @@ Each `IFeed` is `{ url, ferr?, etag?, last_modified?, wm?, bg? }`. `wm` (Waterma
 
 Two levels store an optional mod pipeline (`pipe` field): db.gz root and channel. Resolution walks root → channel:
 
-- A `nil`/absent channel `pipe` **inherits** root.
-- A non-`nil` channel `pipe` **overrides** root (an explicit empty slice means "no pipe").
+- An empty channel `pipe` (nil/absent or empty slice) **inherits** root.
+- A non-empty channel `pipe` **overrides** root.
 - The `#parent` token inside a channel override expands inline to the root pipe; non-token entries pass through verbatim.
 - Built-in mods use the `#` prefix (`#sanitize`, `#minify`, `#youtube`); anything else is a shell command (see backend `mod/` docs).
-- When the loaded root `pipe` is nil/absent, `NewDB` substitutes `["#sanitize", "#minify"]` as the default; the value is persisted on the next `Commit`. Clearing root pipe (`srr pipe ""`) writes nil, so the default reappears on the subsequent load — to truly opt out for a given channel, set `Channel.Pipe` to an explicit empty list (`srr chan upd <id> -p ""`).
+- When the loaded root `pipe` is nil/absent, `NewDB` substitutes `["#sanitize", "#minify"]` as the default; the value is persisted on the next `Commit`. Clearing root or channel pipe (`srr pipe ""` / `srr chan upd <id> -p ""`) reverts to inherit-root semantics on the next load.
 
 `channels` is a JSON object (`Record<number, IChannel>`) keyed by channel ID. Backend struct: `Channel` holds `Feeds []*Feed`. JSON uses short keys for per-feed state (`feeds`, `pipe`, `ferr`, `wm`, `bg`, etc.) — see `DBCore` struct tags.
 
