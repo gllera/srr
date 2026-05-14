@@ -46,12 +46,22 @@ func (o *ImportCmd) Run() error {
 	fmt.Fprintf(w, "ID\tTitle\tURL\n")
 	fmt.Fprintf(w, "---\t-----\t---\n")
 
-	iw := &importWalker{w: w, selectedIDs: o.ID}
+	iw := &importWalker{w: w, selectedIDs: o.ID, merge: o.Title != nil}
 	newChannels, err := iw.walk(nodes, "", "", nil, o.All)
 	if err != nil {
 		return err
 	}
 	w.Flush()
+
+	if iw.merge {
+		if len(iw.mergedFeeds) == 0 {
+			return nil
+		}
+		newChannels = []*Channel{{
+			Title: *o.Title,
+			Feeds: iw.mergedFeeds,
+		}}
+	}
 
 	if len(newChannels) == 0 {
 		return nil
