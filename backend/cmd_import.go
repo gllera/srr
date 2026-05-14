@@ -12,11 +12,13 @@ import (
 )
 
 type ImportCmd struct {
-	Path   string   `arg:""    help:"Channels opml file."`
-	ID     []string `short:"i" help:"Ids to import."`
-	All    bool     `short:"a" help:"Import all."`
-	Tag    *string  `short:"g" help:"Tag to assign to imported channels. Overrides OPML group tags."`
-	DryRun bool     `short:"n" help:"Dry run. List resulting channels without importing."`
+	Path    string    `arg:""               help:"Channels opml file."`
+	ID      []string  `short:"i"            help:"Ids to import."`
+	All     bool      `short:"a"            help:"Import all."`
+	Tag     *string   `short:"g"            help:"Tag to assign to imported channels. Overrides OPML group tags."`
+	DryRun  bool      `short:"n"            help:"Dry run. List resulting channels without importing."`
+	Parsers *[]string `short:"p" optional:"" help:"Channel pipe applied to every imported channel. Repeatable. Empty (\"\") clears (inherit root)."`
+	Ingest  *string   `          optional:"" help:"Channel ingest strategy applied to every imported channel. Empty (\"\") clears (inherit root)."`
 }
 
 func (o *ImportCmd) Run() error {
@@ -45,7 +47,7 @@ func (o *ImportCmd) Run() error {
 		return nil
 	}
 
-	applyImportDefaults(newChannels, nil, nil, o.Tag)
+	applyImportDefaults(newChannels, o.Parsers, o.Ingest, o.Tag)
 
 	if o.DryRun {
 		w = tabwriter.NewWriter(os.Stdout, 1, 1, 2, ' ', 0)
