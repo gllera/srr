@@ -63,7 +63,7 @@ Two levels store an optional mod pipeline (`pipe` field): db.gz root and channel
 
 - An empty channel `pipe` (nil/absent or empty slice) **inherits** root.
 - A non-empty channel `pipe` **overrides** root.
-- The `#parent` token inside a channel override expands inline to the root pipe; non-token entries pass through verbatim.
+- The `#base` token inside a channel override expands inline to the root pipe; non-token entries pass through verbatim.
 - Built-in mods use the `#` prefix (`#sanitize`, `#minify`, `#youtube`); anything else is a shell command (see backend `mod/` docs).
 - When the loaded root `pipe` is nil/absent, `NewDB` substitutes `["#sanitize", "#minify"]` as the default; the value is persisted on the next `Commit`. Clearing root or channel pipe (`srr pipe ""` / `srr chan upd <id> -p ""`) reverts to inherit-root semantics on the next load.
 

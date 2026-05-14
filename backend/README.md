@@ -62,8 +62,8 @@ srr chan add-feed 1 https://example.com/alt-feed.xml
 # Remove a feed URL from a channel
 srr chan rm-feed 1 https://example.com/alt-feed.xml
 
-# Update an existing channel's pipeline (use #parent to keep root mods)
-srr chan upd 1 -p "#parent" -p "jq '.content |= ascii_downcase'"
+# Update an existing channel's pipeline (use #base to keep root mods)
+srr chan upd 1 -p "#base" -p "jq '.content |= ascii_downcase'"
 
 # Set root-level pipe (inherited by every channel whose pipe is absent)
 srr pipe "#sanitize" "#minify"
@@ -175,9 +175,9 @@ srr chan add -t "Feed" -u https://example.com/rss \
 
 - An absent channel `pipe` inherits the root pipe.
 - A present channel `pipe` overrides root (an explicit empty list means "no pipe").
-- The `#parent` token in a channel override expands inline to the root pipe.
+- The `#base` token in a channel override expands inline to the root pipe.
 
-For example, with root `[#sanitize]` and channel override `[#parent, #minify]`, the channel runs `#sanitize → #minify`.
+For example, with root `[#sanitize]` and channel override `[#base, #minify]`, the channel runs `#sanitize → #minify`.
 
 **Root default.** When root `pipe` is absent from `db.gz`, the backend substitutes `["#sanitize", "#minify"]` at load time so fresh installs (and DBs predating this feature) get safe-by-default sanitization and minification. Run `srr pipe <args>` to override; `srr pipe ""` clears the stored value, reverting to the default on the next load. To opt out for a specific channel regardless of the root default, use `srr chan upd <id> -p ""` (sets an explicit empty override).
 
