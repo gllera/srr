@@ -79,8 +79,10 @@ type ImportCmd struct {
 
 Run before the walker, before the DB lock:
 
-1. No `-a` and no `-i` (regardless of `-t`) → error `"nothing to import; pass -a or -i"`. (Today's check, unchanged.)
-2. `-t ""` (i.e. `Title != nil && *Title == ""`) → error `"title must be non-empty"`.
+1. `-t ""` (i.e. `Title != nil && *Title == ""`) → error `"title must be non-empty"`.
+2. `-t` set and no `-a` and no `-i` → error `"merge requires -a or -i"`.
+
+No `-a` / `-i` *without* `-t` remains today's silent no-op (prints the tree, imports nothing) — preserves the "tree preview" UX.
 
 Pipe / ingest do not need their own validation: `filterPipe(Parsers)` already drops empty strings and returns `nil` for an all-empty input; `Ingest == ""` falls through to root via `ingest.Select`.
 
