@@ -15,10 +15,10 @@ import (
 const pipeParent = "#parent"
 
 // resolvePipe composes the effective pipeline by expanding "#parent"
-// tokens in chPipe to root. nil chPipe inherits root; non-nil overrides
-// (an empty slice means "no pipe").
+// tokens in chPipe to root. An empty chPipe (nil or []) inherits root;
+// a non-empty chPipe overrides.
 func resolvePipe(root, chPipe []string) []string {
-	if chPipe == nil {
+	if len(chPipe) == 0 {
 		return root
 	}
 	out := make([]string, 0, len(chPipe)+len(root))
