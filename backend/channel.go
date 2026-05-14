@@ -10,11 +10,11 @@ import (
 	"srrb/mod"
 )
 
-// pipeParent is the token expanded inline to the root pipe at the
+// pipeBase is the token expanded inline to the root pipe at the
 // position where it appears in a channel's Pipe slice.
-const pipeParent = "#parent"
+const pipeBase = "#base"
 
-// resolvePipe composes the effective pipeline by expanding "#parent"
+// resolvePipe composes the effective pipeline by expanding "#base"
 // tokens in chPipe to root. An empty chPipe (nil or []) inherits root;
 // a non-empty chPipe overrides.
 func resolvePipe(root, chPipe []string) []string {
@@ -23,7 +23,7 @@ func resolvePipe(root, chPipe []string) []string {
 	}
 	out := make([]string, 0, len(chPipe)+len(root))
 	for _, m := range chPipe {
-		if m == pipeParent {
+		if m == pipeBase {
 			out = append(out, root...)
 		} else {
 			out = append(out, m)

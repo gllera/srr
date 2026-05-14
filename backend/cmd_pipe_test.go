@@ -27,15 +27,15 @@ func TestResolvePipeEmptySliceInheritsRoot(t *testing.T) {
 	}
 }
 
-func TestResolvePipeParentToken(t *testing.T) {
-	got := resolvePipe([]string{"#sanitize"}, []string{"#parent", "#minify"})
+func TestResolvePipeBaseToken(t *testing.T) {
+	got := resolvePipe([]string{"#sanitize"}, []string{"#base", "#minify"})
 	if !slices.Equal(got, []string{"#sanitize", "#minify"}) {
 		t.Errorf("got %v, want [#sanitize #minify]", got)
 	}
 }
 
-func TestResolvePipeParentTokenMultiple(t *testing.T) {
-	got := resolvePipe([]string{"a", "b"}, []string{"#parent", "x", "#parent"})
+func TestResolvePipeBaseTokenMultiple(t *testing.T) {
+	got := resolvePipe([]string{"a", "b"}, []string{"#base", "x", "#base"})
 	if !slices.Equal(got, []string{"a", "b", "x", "a", "b"}) {
 		t.Errorf("got %v, want [a b x a b]", got)
 	}
