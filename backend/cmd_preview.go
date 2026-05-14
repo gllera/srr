@@ -16,7 +16,7 @@ import (
 type PreviewCmd struct {
 	URL    *url.URL `arg:"" help:"URL to preview."`
 	Pipe   []string `short:"p" help:"Pipeline processors to apply."`
-	Ingest string   `short:"i" help:"Ingest strategy: built-in ('#rss', '#telegram') or shell command. Empty falls back to the global default."`
+	Ingest string   `short:"i" help:"Ingest strategy: built-in ('#rss', '#telegram') or shell command. Empty falls back to the db.gz root ingest."`
 	Addr   string   `short:"a" default:"localhost:8080" env:"SRR_PREVIEW_ADDR" help:"Address to listen on."`
 }
 
@@ -65,13 +65,21 @@ var previewTmpl = template.Must(template.New("preview").Funcs(template.FuncMap{
 </html>`))
 
 func (o *PreviewCmd) Run() error {
+	var rootIngest string
+	if err := withDB(false, func(_ context.Context, db *DB) error {
+		rootIngest = db.core.Ingest
+		return nil
+	}); err != nil {
+		return err
+	}
+
 	ctx := context.Background()
 	client := &http.Client{Timeout: 10 * time.Second}
 	processor := mod.New()
 	engine := ingest.New()
 
 	buf := make([]byte, globals.MaxFeedSize*(1<<10)+1)
-	name := ingest.Select(o.Ingest, globals.DefaultIngest)
+	name := ingest.Select(o.Ingest, rootIngest)
 
 	result, err := engine.Fetch(ctx, name, client, buf, ingest.Request{
 		URL:     o.URL.String(),

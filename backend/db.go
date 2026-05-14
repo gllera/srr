@@ -62,6 +62,7 @@ type DBCore struct {
 	FirstFetchedAt  int64            `json:"first_fetched,omitempty"`
 	FetchedAtCursor int              `json:"fetched_at_cur,omitempty"`
 	Pipe            []string         `json:"pipe,omitempty"`
+	Ingest          string           `json:"ingest,omitempty"`
 	Channels        map[int]*Channel `json:"channels"`
 }
 

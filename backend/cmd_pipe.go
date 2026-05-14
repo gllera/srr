@@ -3,7 +3,7 @@ package main
 import "context"
 
 // PipeCmd sets (or prints) the db.gz root pipe — the default pipeline
-// inherited by channels whose Pipeline field is nil.
+// inherited by channels whose Pipe field is nil.
 // No args → print current. "" alone → clear. Otherwise → set.
 type PipeCmd struct {
 	Pipe []string `arg:"" optional:"" help:"Root pipe to set (omit to print current; use \"\" alone to clear)."`

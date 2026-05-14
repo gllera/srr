@@ -88,7 +88,7 @@ func (o *AddCmd) Run() error {
 			ch.Tag = *o.Tag
 		}
 		if o.Parsers != nil {
-			ch.Pipeline = filterPipe(*o.Parsers)
+			ch.Pipe = filterPipe(*o.Parsers)
 		}
 		if o.Ingest != nil {
 			ch.Ingest = *o.Ingest
@@ -129,7 +129,7 @@ func viewOf(ch *Channel) *channelView {
 		Title:  ch.Title,
 		Feeds:  feeds,
 		Tag:    ch.Tag,
-		Pipe:   append([]string(nil), ch.Pipeline...),
+		Pipe:   append([]string(nil), ch.Pipe...),
 		Ingest: ch.Ingest,
 	}
 }
@@ -180,7 +180,7 @@ func (o *UpdCmd) Run() error {
 			ch.Tag = *o.Tag
 		}
 		if o.Parsers != nil {
-			ch.Pipeline = filterPipe(*o.Parsers)
+			ch.Pipe = filterPipe(*o.Parsers)
 		}
 		if o.Ingest != nil {
 			ch.Ingest = *o.Ingest
@@ -395,7 +395,7 @@ func writeChannelView(ch *Channel, v *channelView, feeds []*Feed) {
 	ch.Title = v.Title
 	ch.Feeds = feeds
 	ch.Tag = v.Tag
-	ch.Pipeline = append([]string(nil), v.Pipe...)
+	ch.Pipe = append([]string(nil), v.Pipe...)
 	ch.Ingest = v.Ingest
 }
 

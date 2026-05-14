@@ -29,19 +29,19 @@ type Feed struct {
 
 // fetch routes the feed through the selected FetchFunc so the
 // dedup / watermark / pipeline path stays uniform across RSS, Telegram,
-// and external ingest strategies.
-func (feed *Feed) fetch(ctx context.Context, client *http.Client, buf []byte, processor *mod.Module, engine *ingest.Fetcher, ch *Channel, fetchedAt int64, pipeline []string) ([]*Item, error) {
+// and external ingest strategies. ingestName is resolved once per channel
+// by Channel.Fetch and shared across all feeds in the channel.
+func (feed *Feed) fetch(ctx context.Context, client *http.Client, buf []byte, processor *mod.Module, engine *ingest.Fetcher, ch *Channel, fetchedAt int64, pipeline []string, ingestName string) ([]*Item, error) {
 	slog.Debug("downloading feed", "url", feed.URL, "channel", ch)
 
-	name := pickIngest(ch)
-	result, err := engine.Fetch(ctx, name, client, buf, ingest.Request{
+	result, err := engine.Fetch(ctx, ingestName, client, buf, ingest.Request{
 		URL:          feed.URL,
 		ETag:         feed.ETag,
 		LastModified: feed.LastModified,
 		MaxSize:      cap(buf) - 1,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("ingest %q: %w", name, err)
+		return nil, fmt.Errorf("ingest %q: %w", ingestName, err)
 	}
 
 	if result.NotModified {
@@ -129,15 +129,4 @@ func uint32Set(s []uint32) map[uint32]struct{} {
 		m[v] = struct{}{}
 	}
 	return m
-}
-
-// pickIngest resolves the Ingest name for a channel via the
-// channel > global default precedence. globals may be nil during
-// tests run before main() initialises it.
-func pickIngest(ch *Channel) string {
-	var def string
-	if globals != nil {
-		def = globals.DefaultIngest
-	}
-	return ingest.Select(ch.Ingest, def)
 }

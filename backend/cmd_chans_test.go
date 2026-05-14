@@ -506,8 +506,8 @@ func TestChanUpdSetsPipeline(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	ch := reopenDB(t).Channels()[0]
-	if len(ch.Pipeline) != 2 || ch.Pipeline[0] != "#sanitize" || ch.Pipeline[1] != "#minify" {
-		t.Errorf("Pipeline = %v, want [#sanitize #minify]", ch.Pipeline)
+	if len(ch.Pipe) != 2 || ch.Pipe[0] != "#sanitize" || ch.Pipe[1] != "#minify" {
+		t.Errorf("Pipeline = %v, want [#sanitize #minify]", ch.Pipe)
 	}
 }
 
@@ -520,8 +520,8 @@ func TestChanUpdClearsPipeline(t *testing.T) {
 		t.Fatalf("clear pipeline: %v", err)
 	}
 	ch := reopenDB(t).Channels()[0]
-	if len(ch.Pipeline) != 0 {
-		t.Errorf("Pipeline = %v, want empty", ch.Pipeline)
+	if len(ch.Pipe) != 0 {
+		t.Errorf("Pipeline = %v, want empty", ch.Pipe)
 	}
 }
 

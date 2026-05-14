@@ -11,7 +11,7 @@ import (
 )
 
 // pipeParent is the token expanded inline to the root pipe at the
-// position where it appears in a channel's Pipeline slice.
+// position where it appears in a channel's Pipe slice.
 const pipeParent = "#parent"
 
 // resolvePipe composes the effective pipeline by expanding "#parent"
@@ -33,13 +33,13 @@ func resolvePipe(root, chPipe []string) []string {
 }
 
 type Channel struct {
-	id       int
-	Title    string   `json:"title"`
-	Feeds    []*Feed  `json:"feeds"`
-	Tag      string   `json:"tag,omitempty"`
-	Pipeline []string `json:"pipe,omitempty"`
+	id    int
+	Title string   `json:"title"`
+	Feeds []*Feed  `json:"feeds"`
+	Tag   string   `json:"tag,omitempty"`
+	Pipe  []string `json:"pipe,omitempty"`
 	// Ingest is the channel-level extraction strategy. Empty falls through
-	// to Globals.DefaultIngest → built-in "#rss".
+	// to the db.gz root Ingest → built-in "#rss".
 	Ingest   string `json:"ingest,omitempty"`
 	TotalArt int    `json:"total_art"`
 	AddIdx   int    `json:"add_idx"`
@@ -61,11 +61,12 @@ func (c *Channel) LogValue() slog.Value {
 	)
 }
 
-func (c *Channel) Fetch(ctx context.Context, client *http.Client, buf []byte, processor *mod.Module, engine *ingest.Fetcher, fetchedAt int64, rootPipe []string) {
+func (c *Channel) Fetch(ctx context.Context, client *http.Client, buf []byte, processor *mod.Module, engine *ingest.Fetcher, fetchedAt int64, rootPipe []string, rootIngest string) {
 	c.newItems = c.newItems[:0]
-	pipeline := resolvePipe(rootPipe, c.Pipeline)
+	pipe := resolvePipe(rootPipe, c.Pipe)
+	ingestName := ingest.Select(c.Ingest, rootIngest)
 	for _, feed := range c.Feeds {
-		items, err := feed.fetch(ctx, client, buf, processor, engine, c, fetchedAt, pipeline)
+		items, err := feed.fetch(ctx, client, buf, processor, engine, c, fetchedAt, pipe, ingestName)
 		if err != nil {
 			feed.FetchError = err.Error()
 			slog.Error("feed fetch failed", "channel", c, "url", feed.URL, "err", err)
