@@ -255,8 +255,9 @@ func TestTelegramFetcherExtractsVideo(t *testing.T) {
 		"controls",
 		`preload="metadata"`,
 		"playsinline",
-		// 56.25% → width=1000, height=563 — propagates Telegram's
-		// aspect-ratio hint so the player doesn't snap on first play.
+		// 56.25% → width=1000 height=563 — Telegram's padding-top hint
+		// so the element starts at hint-derived dimensions instead of
+		// the 320×180 poster size.
 		`width="1000"`,
 		`height="563"`,
 	} {

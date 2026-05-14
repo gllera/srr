@@ -282,10 +282,10 @@ func writeTelegramPhoto(out *strings.Builder, n *html.Node) {
 // a thumbnail is present (some bubbles ship preview-only). Thumbnail
 // comes from the inline background-image style on
 // .tgme_widget_message_video_thumb (or any descendant style). When the
-// wrapper carries the aspect-ratio hint Telegram encodes as the CSS
-// padding-top trick, that ratio is propagated as width/height HTML
-// attributes — browsers honour those as the pre-metadata intrinsic
-// aspect so the player doesn't snap on first play.
+// wrapper carries the padding-top% aspect-ratio hint, that ratio is
+// propagated as width/height attributes so the element starts at
+// hint-derived dimensions — without them the browser falls back to the
+// 320×180 poster size until mp4 metadata loads on first play.
 func writeTelegramVideo(out *strings.Builder, n *html.Node, messageLink string) {
 	videoSrc := findVideoSrc(n)
 	thumb := findStyleBgImage(n)
