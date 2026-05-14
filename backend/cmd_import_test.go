@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -288,5 +289,23 @@ func TestImportRunFlagsThreadIntoChannels(t *testing.T) {
 	}
 	if channels[0].Tag != "news" {
 		t.Errorf("Tag = %q", channels[0].Tag)
+	}
+}
+
+func TestImportRunEmptyTitleErrors(t *testing.T) {
+	empty := ""
+	cmd := &ImportCmd{Path: "irrelevant.opml", All: true, Title: &empty}
+	err := cmd.Run()
+	if err == nil || !strings.Contains(err.Error(), "title must be non-empty") {
+		t.Errorf("got err=%v, want error about empty title", err)
+	}
+}
+
+func TestImportRunTitleWithoutSelectionErrors(t *testing.T) {
+	title := "X"
+	cmd := &ImportCmd{Path: "irrelevant.opml", Title: &title}
+	err := cmd.Run()
+	if err == nil || !strings.Contains(err.Error(), "merge requires -a or -i") {
+		t.Errorf("got err=%v, want error about missing selection", err)
 	}
 }
