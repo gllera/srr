@@ -51,9 +51,19 @@ a:hover {
    text-decoration-color: var(--fg);
 }
 
-img {
+img,
+video {
    max-width: 100%;
    height: auto;
+}
+
+/* Cap player height so portrait videos (9:16, etc.) fit the viewport.
+   width: auto lets the browser shrink the width proportionally when
+   max-height clips a tall video — the intrinsic aspect ratio comes
+   from the <video width=H height=W> attrs Telegram propagation sets. */
+video {
+   max-height: 85vh;
+   width: auto;
 }
 
 /* Layout */
