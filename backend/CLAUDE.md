@@ -84,11 +84,10 @@ Pipeline per-channel during fetch. Factory pattern: `New()` returns fresh statef
 
 Two levels store an optional mod pipeline: root (`DBCore.Pipe`) and channel (`Channel.Pipe`, JSON `pipe`). Resolved once per channel at the start of `Channel.Fetch` via `resolvePipe` in `channel.go`:
 
-- `nil`/absent channel `Pipe` inherits the root pipe.
-- A non-`nil` channel `Pipe` overrides root (an empty slice means "no pipe").
+- An empty channel `Pipe` (nil/absent or empty slice) inherits the root pipe; only a non-empty `Pipe` overrides.
 - The `#parent` token in a channel override expands inline to the root pipe; can appear multiple times. Non-token entries pass through verbatim.
-- CLI: `srr pipe` (root), `srr chan add -p` / `srr chan upd -p` (channel).
-- `NewDB` substitutes `defaultRootPipe()` (`["#sanitize", "#minify"]`) when the loaded `DBCore.Pipe` is nil — fresh DBs and existing DBs predating this feature both pick up the default. Persisted on the next `Commit`. To disable mods for a given channel, set `Channel.Pipe = []string{}` (`srr chan upd <id> -p ""`); clearing root pipe (`srr pipe ""`) reverts to the default on next load.
+- CLI: `srr pipe` (root), `srr chan add -p` / `srr chan upd -p` (channel). `-p ""` clears (reverts to inherit-root).
+- `NewDB` substitutes `defaultRootPipe()` (`["#sanitize", "#minify"]`) when the loaded `DBCore.Pipe` is nil — fresh DBs and existing DBs predating this feature both pick up the default. Persisted on the next `Commit`.
 
 ## Conventions
 

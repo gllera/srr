@@ -20,10 +20,10 @@ func TestResolvePipeChannelOverridesRoot(t *testing.T) {
 	}
 }
 
-func TestResolvePipeEmptySliceOverridesToNothing(t *testing.T) {
+func TestResolvePipeEmptySliceInheritsRoot(t *testing.T) {
 	got := resolvePipe([]string{"#sanitize"}, []string{})
-	if len(got) != 0 {
-		t.Errorf("got %v, want empty (channel overrode with no pipe)", got)
+	if !slices.Equal(got, []string{"#sanitize"}) {
+		t.Errorf("got %v, want [#sanitize] (empty channel pipe inherits)", got)
 	}
 }
 
