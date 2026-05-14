@@ -54,10 +54,13 @@ func (c *Channel) URLs() string {
 	return strings.Join(urls, ", ")
 }
 
+// LogValue keeps per-feed log lines compact: callers already emit the
+// specific feed URL alongside the channel, so the channel-level URL list
+// would duplicate it once per feed in the same fetch loop.
 func (c *Channel) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.Int("id", c.id),
-		slog.String("urls", c.URLs()),
+		slog.String("title", c.Title),
 	)
 }
 
