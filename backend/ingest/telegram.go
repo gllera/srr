@@ -17,6 +17,8 @@ import (
 
 // "#telegram" scrapes a public Telegram channel preview page
 // (https://t.me/s/<channel>) into RawItems — one per visible message.
+// The user-facing channel URL form (https://t.me/<channel>) is also
+// accepted and rewritten internally to the /s/ preview page.
 // Telegram returns no useful ETag/Last-Modified for these pages, so the
 // fetcher returns every visible message every time and relies on the
 // caller's source-level GUID dedup to suppress re-presented messages.
@@ -24,11 +26,12 @@ import (
 func init() {
 	Register("telegram", func() FetchFunc {
 		return func(ctx context.Context, client *http.Client, buf []byte, req Request) (Result, error) {
-			if err := validateTelegramURL(req.URL); err != nil {
+			fetchURL, err := telegramPreviewURL(req.URL)
+			if err != nil {
 				return Result{}, err
 			}
 
-			httpReq, err := http.NewRequestWithContext(ctx, "GET", req.URL, nil)
+			httpReq, err := http.NewRequestWithContext(ctx, "GET", fetchURL, nil)
 			if err != nil {
 				return Result{}, err
 			}
@@ -59,18 +62,36 @@ func init() {
 	})
 }
 
-func validateTelegramURL(raw string) error {
+// telegramPreviewURL validates that raw points to a public Telegram
+// channel and returns the /s/<channel> preview URL the fetcher consumes.
+// Accepted inputs:
+//   - https://t.me/s/<channel>  (used as-is)
+//   - https://t.me/<channel>    (rewritten to /s/<channel>)
+//
+// Deep links to a specific message (/<channel>/<id>), invite links
+// (/+<token>, /joinchat/<token>) and private channel references
+// (/c/<id>/...) are rejected — they don't expose a preview page.
+func telegramPreviewURL(raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return fmt.Errorf("invalid telegram url: %w", err)
+		return "", fmt.Errorf("invalid telegram url: %w", err)
 	}
 	if u.Host != "t.me" {
-		return fmt.Errorf("telegram fetcher requires t.me host, got %q", u.Host)
+		return "", fmt.Errorf("telegram fetcher requires t.me host, got %q", u.Host)
 	}
-	if !strings.HasPrefix(u.Path, "/s/") || len(strings.TrimPrefix(u.Path, "/s/")) == 0 {
-		return fmt.Errorf("telegram fetcher requires /s/<channel> path, got %q", u.Path)
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	var channel string
+	switch {
+	case len(parts) == 2 && parts[0] == "s" && parts[1] != "":
+		channel = parts[1]
+	case len(parts) == 1 && parts[0] != "" && parts[0] != "s" &&
+		!strings.HasPrefix(parts[0], "+"):
+		channel = parts[0]
+	default:
+		return "", fmt.Errorf("telegram fetcher requires /<channel> or /s/<channel> path, got %q", u.Path)
 	}
-	return nil
+	u.Path = "/s/" + channel
+	return u.String(), nil
 }
 
 // parseTelegramHTML walks the document looking for tgme_widget_message
