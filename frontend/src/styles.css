@@ -57,13 +57,21 @@ video {
    height: auto;
 }
 
-/* Cap player height so portrait videos (9:16, etc.) fit the viewport.
-   width: auto lets the browser shrink the width proportionally when
-   max-height clips a tall video — the intrinsic aspect ratio comes
-   from the <video width=H height=W> attrs Telegram propagation sets. */
+/* width:100% fills the container regardless of the poster image's
+   intrinsic size (Telegram thumbnails are ~320 wide; width:auto would
+   pin the box to that until video metadata loaded). aspect-ratio pins
+   the box at the Telegram width/height hint via typed attr() so poster
+   and play frame render at the same size — no reflow on first play.
+   Pre-2025 browsers no-op the typed attr() and fall back to the
+   intrinsic ratio (small residual snap). max-height clamps tall
+   portraits; object-fit:contain letterboxes the inner frame when the
+   box ratio doesn't match the video. */
 video {
+   width: 100%;
    max-height: 85vh;
-   width: auto;
+   aspect-ratio: attr(width type(<number>)) / attr(height type(<number>));
+   object-fit: contain;
+   background: #000;
 }
 
 /* Layout */
