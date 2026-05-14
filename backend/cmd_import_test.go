@@ -309,3 +309,138 @@ func TestImportRunTitleWithoutSelectionErrors(t *testing.T) {
 		t.Errorf("got err=%v, want error about missing selection", err)
 	}
 }
+
+func TestWalkerMergeFlatLeaves(t *testing.T) {
+	nodes := []*OPMLNode{
+		{Name: "Alpha", Channel: &Channel{Title: "Alpha", Feeds: []*Feed{{URL: "http://example.com/a"}}}},
+		{Name: "Beta", Channel: &Channel{Title: "Beta", Feeds: []*Feed{{URL: "http://example.com/b"}}}},
+		{Name: "Gamma", Channel: &Channel{Title: "Gamma", Feeds: []*Feed{{URL: "http://example.com/g"}}}},
+	}
+	iw := &importWalker{w: io.Discard, merge: true}
+	channels, err := iw.walk(nodes, "", "", nil, true /* importAll */)
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	if len(channels) != 0 {
+		t.Errorf("merge mode returned %d channels, want 0", len(channels))
+	}
+	if len(iw.mergedFeeds) != 3 {
+		t.Fatalf("mergedFeeds len = %d, want 3", len(iw.mergedFeeds))
+	}
+	wantURLs := []string{"http://example.com/a", "http://example.com/b", "http://example.com/g"}
+	for i, f := range iw.mergedFeeds {
+		if f.URL != wantURLs[i] {
+			t.Errorf("mergedFeeds[%d].URL = %q, want %q", i, f.URL, wantURLs[i])
+		}
+	}
+}
+
+func TestWalkerMergeGroupCollectsSubtree(t *testing.T) {
+	nodes := []*OPMLNode{
+		{
+			Name: "Tech",
+			Children: []*OPMLNode{
+				{Name: "Blog A", Channel: &Channel{Title: "Blog A", Feeds: []*Feed{{URL: "http://example.com/a"}}}},
+				{Name: "Blog B", Channel: &Channel{Title: "Blog B", Feeds: []*Feed{{URL: "http://example.com/b"}}}},
+			},
+		},
+	}
+	iw := &importWalker{w: io.Discard, selectedIDs: []string{"1"}, merge: true}
+	channels, err := iw.walk(nodes, "", "", nil, false /* importAll */)
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	if len(channels) != 0 {
+		t.Errorf("got %d channels, want 0 (merge)", len(channels))
+	}
+	if len(iw.mergedFeeds) != 2 {
+		t.Fatalf("mergedFeeds len = %d, want 2", len(iw.mergedFeeds))
+	}
+}
+
+func TestWalkerMergeDeepNested(t *testing.T) {
+	nodes := []*OPMLNode{
+		{
+			Name: "Tech",
+			Children: []*OPMLNode{
+				{
+					Name: "Rust",
+					Children: []*OPMLNode{
+						{Name: "R1", Channel: &Channel{Title: "R1", Feeds: []*Feed{{URL: "http://example.com/r1"}}}},
+						{Name: "R2", Channel: &Channel{Title: "R2", Feeds: []*Feed{{URL: "http://example.com/r2"}}}},
+					},
+				},
+				{
+					Name: "Go",
+					Children: []*OPMLNode{
+						{Name: "G1", Channel: &Channel{Title: "G1", Feeds: []*Feed{{URL: "http://example.com/g1"}}}},
+					},
+				},
+			},
+		},
+	}
+	iw := &importWalker{w: io.Discard, selectedIDs: []string{"1"}, merge: true}
+	if _, err := iw.walk(nodes, "", "", nil, false); err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	if len(iw.mergedFeeds) != 3 {
+		t.Errorf("got %d feeds, want 3 (R1, R2, G1)", len(iw.mergedFeeds))
+	}
+}
+
+func TestWalkerMergeGroupWithSelfFeed(t *testing.T) {
+	nodes := []*OPMLNode{
+		{
+			Name:    "Self",
+			Channel: &Channel{Title: "Self", Feeds: []*Feed{{URL: "http://example.com/self"}}},
+			Children: []*OPMLNode{
+				{Name: "Child", Channel: &Channel{Title: "Child", Feeds: []*Feed{{URL: "http://example.com/child"}}}},
+			},
+		},
+	}
+	iw := &importWalker{w: io.Discard, selectedIDs: []string{"1"}, merge: true}
+	if _, err := iw.walk(nodes, "", "", nil, false); err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	if len(iw.mergedFeeds) != 2 {
+		t.Fatalf("got %d feeds, want 2 (self + child)", len(iw.mergedFeeds))
+	}
+	// Self feed contributes first (group node visited before children).
+	if iw.mergedFeeds[0].URL != "http://example.com/self" {
+		t.Errorf("mergedFeeds[0].URL = %q, want self feed", iw.mergedFeeds[0].URL)
+	}
+}
+
+func TestWalkerMergeMixedLeafAndGroup(t *testing.T) {
+	nodes := []*OPMLNode{
+		{
+			Name: "Tech",
+			Children: []*OPMLNode{
+				{Name: "Blog A", Channel: &Channel{Title: "Blog A", Feeds: []*Feed{{URL: "http://example.com/a"}}}},
+				{Name: "Blog B", Channel: &Channel{Title: "Blog B", Feeds: []*Feed{{URL: "http://example.com/b"}}}},
+			},
+		},
+		{Name: "Standalone", Channel: &Channel{Title: "Standalone", Feeds: []*Feed{{URL: "http://example.com/s"}}}},
+	}
+	// Select group 1 (Tech) and leaf 2 (Standalone).
+	iw := &importWalker{w: io.Discard, selectedIDs: []string{"1", "2"}, merge: true}
+	if _, err := iw.walk(nodes, "", "", nil, false); err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	if len(iw.mergedFeeds) != 3 {
+		t.Errorf("got %d feeds, want 3", len(iw.mergedFeeds))
+	}
+}
+
+func TestWalkerMergeSingleLeaf(t *testing.T) {
+	nodes := []*OPMLNode{
+		{Name: "Solo", Channel: &Channel{Title: "Solo", Feeds: []*Feed{{URL: "http://example.com/solo"}}}},
+	}
+	iw := &importWalker{w: io.Discard, selectedIDs: []string{"1"}, merge: true}
+	if _, err := iw.walk(nodes, "", "", nil, false); err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	if len(iw.mergedFeeds) != 1 {
+		t.Errorf("got %d feeds, want 1", len(iw.mergedFeeds))
+	}
+}
