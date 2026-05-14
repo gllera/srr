@@ -301,25 +301,39 @@ func TestTelegramFetcherVideoFallsBackToPermalink(t *testing.T) {
 	}
 }
 
-func TestValidateTelegramURL(t *testing.T) {
-	ok := []string{
-		"https://t.me/s/durov",
-		"https://t.me/s/some_channel",
+func TestTelegramPreviewURL(t *testing.T) {
+	ok := map[string]string{
+		"https://t.me/s/durov":          "https://t.me/s/durov",
+		"https://t.me/s/some_channel":   "https://t.me/s/some_channel",
+		"https://t.me/durov":            "https://t.me/s/durov",
+		"https://t.me/AltRightEspana":   "https://t.me/s/AltRightEspana",
+		"https://t.me/AltRightEspana/":  "https://t.me/s/AltRightEspana",
+		"https://t.me/some_channel?x=1": "https://t.me/s/some_channel?x=1",
 	}
 	bad := []string{
 		"https://example.com/s/durov",
-		"https://t.me/durov", // missing /s/
-		"https://t.me/s/",    // empty channel
+		"https://t.me/",                  // no channel
+		"https://t.me/s/",                // empty channel
+		"https://t.me/s",                 // bare /s
+		"https://t.me/durov/123",         // deep link to a message
+		"https://t.me/joinchat/AAAAAAAA", // invite link
+		"https://t.me/+AAAAAAAA",         // invite link
+		"https://t.me/c/123/456",         // private channel reference
 		"://broken",
 	}
-	for _, u := range ok {
-		if err := validateTelegramURL(u); err != nil {
-			t.Errorf("validateTelegramURL(%q) = %v, want nil", u, err)
+	for in, want := range ok {
+		got, err := telegramPreviewURL(in)
+		if err != nil {
+			t.Errorf("telegramPreviewURL(%q) error: %v", in, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("telegramPreviewURL(%q) = %q, want %q", in, got, want)
 		}
 	}
-	for _, u := range bad {
-		if err := validateTelegramURL(u); err == nil {
-			t.Errorf("validateTelegramURL(%q) = nil, want error", u)
+	for _, in := range bad {
+		if _, err := telegramPreviewURL(in); err == nil {
+			t.Errorf("telegramPreviewURL(%q) = nil, want error", in)
 		}
 	}
 }
