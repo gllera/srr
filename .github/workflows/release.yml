@@ -24,7 +24,7 @@ jobs:
         go-version-file: backend/go.mod
         cache-dependency-path: backend/go.sum
     - run: make release
-    - uses: softprops/action-gh-release@v2
+    - uses: softprops/action-gh-release@v3
       with:
         files: dist/srr-*
 
