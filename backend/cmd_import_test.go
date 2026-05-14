@@ -2,6 +2,7 @@ package main
 
 import (
 	"io"
+	"slices"
 	"testing"
 )
 
@@ -177,5 +178,92 @@ func TestImportWalkerSorting(t *testing.T) {
 	}
 	if channels[2].Title != "Zebra" {
 		t.Errorf("channels[2] = %q, want %q", channels[2].Title, "Zebra")
+	}
+}
+
+func TestApplyImportDefaultsNothingSet(t *testing.T) {
+	channels := []*Channel{
+		{Title: "A", Tag: "auto", Pipe: []string{"#sanitize"}, Ingest: "#rss"},
+		{Title: "B"},
+	}
+	applyImportDefaults(channels, nil, nil, nil)
+	// Untouched: existing Tag / Pipe / Ingest preserved.
+	if channels[0].Tag != "auto" {
+		t.Errorf("channels[0].Tag = %q, want %q", channels[0].Tag, "auto")
+	}
+	if !slices.Equal(channels[0].Pipe, []string{"#sanitize"}) {
+		t.Errorf("channels[0].Pipe = %v, want [#sanitize]", channels[0].Pipe)
+	}
+	if channels[0].Ingest != "#rss" {
+		t.Errorf("channels[0].Ingest = %q, want %q", channels[0].Ingest, "#rss")
+	}
+}
+
+func TestApplyImportDefaultsTagOverride(t *testing.T) {
+	channels := []*Channel{{Title: "A", Tag: "auto"}, {Title: "B", Tag: "other"}}
+	tag := "explicit"
+	applyImportDefaults(channels, nil, nil, &tag)
+	for _, c := range channels {
+		if c.Tag != "explicit" {
+			t.Errorf("c.Tag = %q, want %q", c.Tag, "explicit")
+		}
+	}
+}
+
+func TestApplyImportDefaultsTagClearsToEmpty(t *testing.T) {
+	channels := []*Channel{{Title: "A", Tag: "auto"}}
+	empty := ""
+	applyImportDefaults(channels, nil, nil, &empty)
+	if channels[0].Tag != "" {
+		t.Errorf("c.Tag = %q, want empty", channels[0].Tag)
+	}
+}
+
+func TestApplyImportDefaultsPipeApplied(t *testing.T) {
+	channels := []*Channel{{Title: "A"}, {Title: "B"}}
+	parsers := []string{"#sanitize", "#minify"}
+	applyImportDefaults(channels, &parsers, nil, nil)
+	for _, c := range channels {
+		if !slices.Equal(c.Pipe, []string{"#sanitize", "#minify"}) {
+			t.Errorf("c.Pipe = %v, want [#sanitize #minify]", c.Pipe)
+		}
+	}
+}
+
+func TestApplyImportDefaultsPipeEmptyClears(t *testing.T) {
+	channels := []*Channel{{Title: "A", Pipe: []string{"#sanitize"}}}
+	parsers := []string{""}
+	applyImportDefaults(channels, &parsers, nil, nil)
+	if channels[0].Pipe != nil {
+		t.Errorf("c.Pipe = %v, want nil (filterPipe drops empties)", channels[0].Pipe)
+	}
+}
+
+func TestApplyImportDefaultsPipeFiltersEmpty(t *testing.T) {
+	channels := []*Channel{{Title: "A"}}
+	parsers := []string{"#sanitize", "", "#minify"}
+	applyImportDefaults(channels, &parsers, nil, nil)
+	if !slices.Equal(channels[0].Pipe, []string{"#sanitize", "#minify"}) {
+		t.Errorf("c.Pipe = %v, want [#sanitize #minify]", channels[0].Pipe)
+	}
+}
+
+func TestApplyImportDefaultsIngestApplied(t *testing.T) {
+	channels := []*Channel{{Title: "A"}, {Title: "B"}}
+	ingest := "#telegram"
+	applyImportDefaults(channels, nil, &ingest, nil)
+	for _, c := range channels {
+		if c.Ingest != "#telegram" {
+			t.Errorf("c.Ingest = %q, want %q", c.Ingest, "#telegram")
+		}
+	}
+}
+
+func TestApplyImportDefaultsIngestClearsToEmpty(t *testing.T) {
+	channels := []*Channel{{Title: "A", Ingest: "#telegram"}}
+	empty := ""
+	applyImportDefaults(channels, nil, &empty, nil)
+	if channels[0].Ingest != "" {
+		t.Errorf("c.Ingest = %q, want empty", channels[0].Ingest)
 	}
 }
