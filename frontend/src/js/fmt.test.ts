@@ -213,6 +213,20 @@ describe("extractImageUrls", () => {
       expect(extractImageUrls("")).toEqual([])
    })
 
+   it("extracts unquoted src (backend #minify strips quotes for clean URLs)", () => {
+      // The #minify pass on the backend drops attribute quotes when the value
+      // has no special chars — common for YouTube thumb URLs and Telegram CDN
+      // URLs. Both forms must be recognised or those channels never prefetch.
+      const html =
+         "<p><a href=https://yt.example/watch?v=ABC><img src=https://i.ytimg.com/vi/ABC/hqdefault.jpg alt=t></a></p>"
+      expect(extractImageUrls(html)).toEqual(["https://i.ytimg.com/vi/ABC/hqdefault.jpg"])
+   })
+
+   it("mixes quoted and unquoted img tags in one pass", () => {
+      const html = "<img src=\"http://a.com/1.jpg\"><img src=https://b.com/2.png><img src='http://c.com/3.gif'>"
+      expect(extractImageUrls(html)).toEqual(["http://a.com/1.jpg", "https://b.com/2.png", "http://c.com/3.gif"])
+   })
+
    it("matches the exact URL sanitizeHtml writes (so preload hrefs share cache)", () => {
       // Serialized HTML escapes & as &amp;; the browser decodes it on parse, so
       // compare the parsed attribute value (not the serialized string).
