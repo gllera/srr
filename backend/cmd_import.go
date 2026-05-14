@@ -12,16 +12,26 @@ import (
 )
 
 type ImportCmd struct {
-	Path    string    `arg:""               help:"Channels opml file."`
-	ID      []string  `short:"i"            help:"Ids to import."`
-	All     bool      `short:"a"            help:"Import all."`
-	Tag     *string   `short:"g"            help:"Tag to assign to imported channels. Overrides OPML group tags."`
-	DryRun  bool      `short:"n"            help:"Dry run. List resulting channels without importing."`
+	Path    string    `arg:""                help:"Channels opml file."`
+	ID      []string  `short:"i"             help:"Ids to import."`
+	All     bool      `short:"a"             help:"Import all."`
+	Tag     *string   `short:"g"             help:"Tag to assign to imported channels. Overrides OPML group tags."`
+	DryRun  bool      `short:"n"             help:"Dry run. List resulting channels without importing."`
+	Title   *string   `short:"t" optional:"" help:"Title for the merged channel. Triggers merge mode (all selections become one channel)."`
 	Parsers *[]string `short:"p" optional:"" help:"Channel pipe applied to every imported channel. Repeatable. Empty (\"\") clears (inherit root)."`
 	Ingest  *string   `          optional:"" help:"Channel ingest strategy applied to every imported channel. Empty (\"\") clears (inherit root)."`
 }
 
 func (o *ImportCmd) Run() error {
+	if o.Title != nil {
+		if *o.Title == "" {
+			return fmt.Errorf("title must be non-empty")
+		}
+		if !o.All && len(o.ID) == 0 {
+			return fmt.Errorf("merge requires -a or -i")
+		}
+	}
+
 	nodes, err := ParseOPMLTree(o.Path)
 	if err != nil {
 		return err
