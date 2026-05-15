@@ -928,6 +928,59 @@ describe("goTo", () => {
    })
 })
 
+describe("getCurrentFilterKey", () => {
+   it("returns empty string when no filter is active", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
+      await nav.fromHash("0")
+      expect(nav.getCurrentFilterKey()).toBe("")
+   })
+
+   it("returns the single token of a single-token filter", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
+      await nav.fromHash("0!1")
+      expect(nav.getCurrentFilterKey()).toBe("1")
+   })
+
+   it("returns the tag string of a single-tag filter", async () => {
+      data.db.channels = { "1": makeChannel({ id: 1, tag: "tech" }) }
+      setupIndex([{ chanId: 1 }])
+      await nav.fromHash("0!tech")
+      expect(nav.getCurrentFilterKey()).toBe("tech")
+   })
+
+   it("returns empty string for a multi-token filter (URL-only edge case)", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
+      await nav.fromHash("0!1+2")
+      expect(nav.getCurrentFilterKey()).toBe("")
+   })
+})
+
+describe("isSingleFilter", () => {
+   it("rejects empty token even when no filter is active", async () => {
+      setupIndex([{ chanId: 1 }])
+      await nav.fromHash("0")
+      expect(nav.isSingleFilter("")).toBe(false)
+   })
+
+   it("returns true when the active single-token filter matches the queried token", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
+      await nav.fromHash("0!1")
+      expect(nav.isSingleFilter("1")).toBe(true)
+   })
+
+   it("returns false when token differs from the active single-token filter", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
+      await nav.fromHash("0!1")
+      expect(nav.isSingleFilter("2")).toBe(false)
+   })
+
+   it("returns false when the filter has multiple tokens", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
+      await nav.fromHash("0!1+2")
+      expect(nav.isSingleFilter("1")).toBe(false)
+   })
+})
+
 describe("prefetch abort", () => {
    const RealImage = window.Image
    const RealRIC = window.requestIdleCallback
