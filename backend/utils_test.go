@@ -1,9 +1,60 @@
 package main
 
 import (
+	"io"
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 )
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stdout = w
+	done := make(chan string)
+	go func() {
+		var buf strings.Builder
+		_, _ = io.Copy(&buf, r)
+		done <- buf.String()
+	}()
+	fn()
+	w.Close()
+	os.Stdout = old
+	return <-done
+}
+
+func TestPrintFieldsKebabCase(t *testing.T) {
+	type S struct {
+		PackSize    int
+		MaxFeedSize int
+	}
+	out := captureStdout(t, func() {
+		printFields(reflect.ValueOf(S{PackSize: 200, MaxFeedSize: 5000}), "")
+	})
+	if !strings.Contains(out, "pack-size: 200\n") {
+		t.Errorf("missing kebab-cased pack-size line: %q", out)
+	}
+	if !strings.Contains(out, "max-feed-size: 5000\n") {
+		t.Errorf("missing kebab-cased max-feed-size line: %q", out)
+	}
+}
+
+func TestPrintFieldsRespectsYAMLTag(t *testing.T) {
+	type S struct {
+		Region string `yaml:"my-region"`
+	}
+	out := captureStdout(t, func() {
+		printFields(reflect.ValueOf(S{Region: "us-east-1"}), "  ")
+	})
+	if !strings.Contains(out, "  my-region: us-east-1\n") {
+		t.Errorf("expected yaml-tag-named indented line: %q", out)
+	}
+}
 
 func TestToKebab(t *testing.T) {
 	cases := []struct {
