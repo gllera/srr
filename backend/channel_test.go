@@ -321,6 +321,26 @@ func TestFetchFutureDatedItemClampedToFetchedAt(t *testing.T) {
 	}
 }
 
+func TestChannelLogValue(t *testing.T) {
+	ch := &Channel{id: 7, Title: "My Title", Feeds: []*Feed{{URL: "http://x"}}}
+	val := ch.LogValue()
+	attrs := val.Group()
+	got := map[string]any{}
+	for _, a := range attrs {
+		got[a.Key] = a.Value.Any()
+	}
+	if got["id"] != int64(7) {
+		t.Errorf("LogValue id = %v, want 7", got["id"])
+	}
+	if got["title"] != "My Title" {
+		t.Errorf("LogValue title = %v, want %q", got["title"], "My Title")
+	}
+	// Feeds intentionally omitted to keep per-feed log lines compact.
+	if _, ok := got["feeds"]; ok {
+		t.Errorf("LogValue should not include feeds, got %v", got)
+	}
+}
+
 func TestStripControl(t *testing.T) {
 	tests := []struct {
 		input string

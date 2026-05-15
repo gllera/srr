@@ -823,6 +823,45 @@ func TestDBOpenCorruptedGzipValidInner(t *testing.T) {
 	}
 }
 
+func TestReadGzReturnsDecompressedBytes(t *testing.T) {
+	db, _, dir := setupTestDB(t)
+
+	// Write a gzip blob via the backend so we exercise the same path
+	// readGz uses to read it back.
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	gz.Write([]byte("hello readGz"))
+	gz.Close()
+	if err := os.WriteFile(filepath.Join(dir, "blob.gz"), buf.Bytes(), 0o644); err != nil {
+		t.Fatalf("write blob: %v", err)
+	}
+
+	got, err := db.readGz(ctx, "blob.gz")
+	if err != nil {
+		t.Fatalf("readGz: %v", err)
+	}
+	if string(got) != "hello readGz" {
+		t.Errorf("readGz = %q, want %q", got, "hello readGz")
+	}
+}
+
+func TestReadGzMissingErrors(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	if _, err := db.readGz(ctx, "missing.gz"); err == nil {
+		t.Error("expected error for missing key")
+	}
+}
+
+func TestReadGzCorruptedReturnsError(t *testing.T) {
+	db, _, dir := setupTestDB(t)
+	if err := os.WriteFile(filepath.Join(dir, "bad.gz"), []byte("not gzip"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := db.readGz(ctx, "bad.gz"); err == nil {
+		t.Error("expected decompress error")
+	}
+}
+
 func TestPutArticlesFirstFetchedAt(t *testing.T) {
 	db, c, _ := setupTestDB(t)
 	ch := &Channel{id: 1}
