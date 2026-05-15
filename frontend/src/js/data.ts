@@ -4,8 +4,12 @@ import { IDX_PACK_SIZE, makeIdxPack, type IdxPack } from "./idx"
 export { IDX_PACK_SIZE }
 
 const DB_URL = new URL(SRR_CDN_URL, window.location.href)
-// Reuses the browser's preloaded response from <link rel="preload"> in the built HTML
-const dbFetch = fetch(new URL("db.gz", DB_URL))
+// no-cache forces a conditional revalidation on every load so a stale db.gz on
+// the client (mobile browsers cache aggressively) can't make chronIdx URLs like
+// `#14099` silently fall back to the last article via the `>= total_art` clamp
+// in nav.fromHash. 304 keeps the hot path cheap when the CDN sends ETag /
+// Last-Modified; the <link rel="preload"> in built HTML still warms the entry.
+const dbFetch = fetch(new URL("db.gz", DB_URL), { cache: "no-cache" })
 
 export let db: IDB
 
