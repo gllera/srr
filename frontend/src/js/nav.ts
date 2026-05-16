@@ -1,5 +1,5 @@
 import * as data from "./data"
-import { extractImageUrls, wsrvProxy } from "./fmt"
+import { extractImageUrls, getImgProxy, imgProxy } from "./fmt"
 
 let pos = -1
 let nextLeft: number | undefined
@@ -89,11 +89,12 @@ function schedulePrefetch(target: number) {
          try {
             const art = await data.loadArticle(target)
             if (my !== currentPrefetch) return
+            const proxyPrefix = getImgProxy()
             for (const raw of extractImageUrls(art.c)) {
                const img = new Image()
                img.fetchPriority = "low"
                img.decoding = "async"
-               img.src = wsrvProxy(raw)
+               img.src = imgProxy(raw, proxyPrefix)
                my.push(img)
             }
          } catch {
