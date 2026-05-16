@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
-import { extractImageUrls, sanitizeHtml, timeAgo, formatDate, wsrvProxy } from "./fmt"
+import { extractImageUrls, sanitizeHtml, timeAgo, formatDate, imgProxy, getImgProxy, setImgProxy } from "./fmt"
+
+beforeEach(() => {
+   localStorage.clear()
+})
 
 describe("sanitizeHtml", () => {
    it("removes script elements", () => {
@@ -234,7 +238,44 @@ describe("extractImageUrls", () => {
       const t = document.createElement("template")
       t.innerHTML = sanitizeHtml(`<img src="${raw}">`)
       const img = t.content.querySelector("img")!
-      expect(img.getAttribute("src")).toBe(wsrvProxy(raw))
+      expect(img.getAttribute("src")).toBe(imgProxy(raw, getImgProxy()))
+   })
+})
+
+describe("image proxy", () => {
+   it("defaults to passthrough when no localStorage override is set", () => {
+      expect(getImgProxy()).toBe("")
+      const raw = "https://example.com/x.jpg"
+      expect(imgProxy(raw, getImgProxy())).toBe(raw)
+   })
+
+   it("returns the raw URL when prefix is empty (proxy disabled)", () => {
+      const raw = "https://example.com/x.jpg"
+      expect(imgProxy(raw, "")).toBe(raw)
+   })
+
+   it("supports a custom proxy prefix", () => {
+      const raw = "https://example.com/x.jpg"
+      const prefix = "https://imagor.example.com/unsafe/600x600/filters:format(webp)/"
+      expect(imgProxy(raw, prefix)).toBe(prefix + encodeURIComponent(raw))
+   })
+
+   it("URL-encodes the source so query strings and spaces survive", () => {
+      const raw = "https://example.com/a b.jpg?x=1&y=2"
+      const prefix = "https://p.example/?u="
+      expect(imgProxy(raw, prefix)).toBe(prefix + encodeURIComponent(raw))
+   })
+
+   it("uses localStorage override when set", () => {
+      setImgProxy("https://my-proxy.example/?u=")
+      const out = imgProxy("https://example.com/x.jpg", getImgProxy())
+      expect(out.startsWith("https://my-proxy.example/?u=")).toBe(true)
+   })
+
+   it("passes through even when localStorage explicitly stores empty string", () => {
+      setImgProxy("")
+      const raw = "https://example.com/x.jpg"
+      expect(imgProxy(raw, getImgProxy())).toBe(raw)
    })
 })
 

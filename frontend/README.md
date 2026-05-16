@@ -40,6 +40,12 @@ Output goes to `../dist/srrf/` (repo-root `dist/srrf/`). Set the `SRR_CDN_URL` e
 SRR_CDN_URL=https://cdn.example.com/feeds npm run build
 ```
 
+### Image proxy
+
+Article images can be rewritten through an image proxy that fronts them with transcoding and bandwidth limits. No proxy is configured by default — the raw `<img src>` from the feed is used unless the user opts in.
+
+Open the channel menu and click the image-proxy icon to set a prefix. Any URL-encoded-source-appender proxy works (wsrv.nl, imgproxy, imagor with proper config, etc.). Leave the field empty to disable proxying. The choice is saved in localStorage under `srr-img-proxy`.
+
 ## Architecture
 
 Entry point: `src/index.html` -> `src/js/app.ts`. Bundled with Parcel 2.
@@ -53,7 +59,7 @@ Entry point: `src/index.html` -> `src/js/app.ts`. Bundled with Parcel 2.
 | `dropdown.ts` | Channel-menu dropdown (channel/tag picker + time-range chips). |
 | `gestures.ts` | Touch swipes (prev/next, cycle filter) + scroll-based toolbar hide. |
 | `cache.ts` | Generic LRU cache factory (`makeLRU`). |
-| `fmt.ts` | Pure utilities: HTML sanitization (proxies images through wsrv.nl), relative time, date formatting. |
+| `fmt.ts` | Pure utilities: HTML sanitization (rewrites images through configurable proxy — passthrough by default, runtime override via localStorage), relative time, date formatting. |
 | `types.d.ts` | Ambient types: `IDB`, `IChannel`, `IFeed`, `IArticle`, `IShowFeed`. |
 
 ### Data Flow

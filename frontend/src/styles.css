@@ -459,6 +459,34 @@ video {
          border-radius: var(--radius);
          text-align: center;
       }
+      & a.srr-imgproxy-icon {
+         min-width: 0;
+         padding: 0.25rem 0.4rem;
+         display: inline-flex;
+         align-items: center;
+         justify-content: center;
+         & svg {
+            width: 1rem;
+            height: 1rem;
+            display: block;
+         }
+         &.srr-imgproxy-off {
+            color: var(--faint);
+         }
+         &.srr-imgproxy-on {
+            color: var(--accent);
+         }
+      }
+      & a.srr-last-chip {
+         display: inline-flex;
+         align-items: center;
+         justify-content: center;
+         & svg {
+            width: 0.85rem;
+            height: 0.85rem;
+            display: block;
+         }
+      }
    }
    & .srr-tag-sep {
       border-top: 1px solid var(--faint);
