@@ -1,4 +1,5 @@
 import * as data from "./data"
+import { getImgProxy, setImgProxy } from "./fmt"
 import * as nav from "./nav"
 
 const menus = document.querySelectorAll<HTMLElement>(".srr-dropdown-menu")
@@ -52,6 +53,52 @@ function toggleDropdown(
    dd.appendChild(frag)
 }
 
+const IMG_PROXY_SENTINEL = "__imgproxy__"
+
+const IMG_ICON_SVG =
+   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+   '<rect x="3" y="3" width="18" height="18" rx="2"/>' +
+   '<circle cx="9" cy="9" r="2"/>' +
+   '<path d="M21 15l-5-5L5 21"/>' +
+   "</svg>"
+
+const LAST_ICON_SVG =
+   '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">' +
+   '<path d="M4 5l12 7L4 19z"/>' +
+   '<rect x="17" y="5" width="3" height="14"/>' +
+   "</svg>"
+
+function iconChip(value: string, label: string, className: string, svg: string): HTMLAnchorElement {
+   const a = document.createElement("a")
+   a.href = "#"
+   a.dataset.value = value
+   a.setAttribute("role", "menuitem")
+   a.setAttribute("aria-label", label)
+   a.title = label
+   a.className = className
+   a.innerHTML = svg
+   return a
+}
+
+function lastChip(): HTMLAnchorElement {
+   return iconChip("!last", "latest", "srr-last-chip", LAST_ICON_SVG)
+}
+
+function imgProxyIcon(): HTMLAnchorElement {
+   const state = getImgProxy() === "" ? "off" : "on"
+   return iconChip(IMG_PROXY_SENTINEL, `image proxy: ${state}`, `srr-imgproxy-icon srr-imgproxy-${state}`, IMG_ICON_SVG)
+}
+
+function handleImgProxy(guard: (fn: () => Promise<IShowFeed>) => void): void {
+   const old = getImgProxy()
+   const input = prompt("Image proxy URL prefix. Leave empty to disable.", old)
+   if (input === null) return
+   const next = input.trim()
+   if (next === old) return
+   setImgProxy(next)
+   guard(() => nav.fromHash(location.hash.substring(1)))
+}
+
 export function showChannelMenu(currentTag: string, guard: (fn: () => Promise<IShowFeed>) => void): void {
    const { tagged, sortedTags, untagged } = data.groupChannelsByTag()
    const current = nav.getCurrentFilterKey()
@@ -61,7 +108,8 @@ export function showChannelMenu(currentTag: string, guard: (fn: () => Promise<IS
       "srr-channel-menu",
       (frag) => {
          const since = divEl("srr-chip-row")
-         since.appendChild(createLink("!last", "last"))
+         since.appendChild(imgProxyIcon())
+         since.appendChild(lastChip())
          since.appendChild(createLink("t:28800", "8h"))
          since.appendChild(createLink("t:57600", "16h"))
          since.appendChild(createLink("t:86400", "1d"))
@@ -97,7 +145,11 @@ export function showChannelMenu(currentTag: string, guard: (fn: () => Promise<IS
             frag.appendChild(createLink(cid, ch.title, cls("", cid)))
          }
       },
-      (value) =>
+      async (value) => {
+         if (value === IMG_PROXY_SENTINEL) {
+            handleImgProxy(guard)
+            return
+         }
          guard(() => {
             if (value === "!last") return nav.last()
             if (value.startsWith("t:")) {
@@ -105,6 +157,7 @@ export function showChannelMenu(currentTag: string, guard: (fn: () => Promise<IS
                return nav.goTo(data.findChronForTimestamp(ts))
             }
             return nav.switchFilter(value)
-         }),
+         })
+      },
    )
 }

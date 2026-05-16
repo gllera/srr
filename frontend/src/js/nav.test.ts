@@ -41,6 +41,7 @@ const data = vi.hoisted(() => ({
 vi.mock("./data", () => data)
 
 import * as nav from "./nav"
+import { setImgProxy } from "./fmt"
 
 function makeArticle(overrides: Partial<IArticle> = {}): IArticle {
    return { s: 1, a: 0, p: 0, t: "", l: "", c: "", ...overrides }
@@ -71,7 +72,7 @@ beforeEach(() => {
    data.findLeft.mockClear()
    data.findRight.mockClear()
    nav.filter.clear()
-   localStorage.removeItem("srr-seen")
+   localStorage.clear()
    vi.spyOn(history, "pushState").mockImplementation(() => {})
    vi.spyOn(history, "replaceState").mockImplementation(() => {})
 })
@@ -984,10 +985,14 @@ describe("isSingleFilter", () => {
 describe("prefetch abort", () => {
    const RealImage = window.Image
    const RealRIC = window.requestIdleCallback
+   const PROXY_PREFIX = "https://proxy.test/?u="
    let images: HTMLImageElement[]
    let pendingIdle: Array<() => Promise<void>>
 
    beforeEach(() => {
+      // localStorage `srr-img-proxy` is unset (passthrough) by default; install
+      // a prefix so the assertions about encoded srcs exercise the proxy path.
+      setImgProxy(PROXY_PREFIX)
       images = []
       pendingIdle = []
       window.Image = function () {

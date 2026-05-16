@@ -9,9 +9,26 @@ export const URL_DENY = /^\s*(?:javascript|data|vbscript|file)\s*:/i
 const DANGEROUS_SELECTOR = "script,style,iframe,embed,object,form,link,meta,base,svg,math"
 
 const HTTP_RE = /^https?:\/\//i
-const WSRV_PREFIX = "https://wsrv.nl/?&output=webp&w=600&h=600&fit=inside&we&url="
-export function wsrvProxy(url: string): string {
-   return WSRV_PREFIX + encodeURIComponent(url)
+// Prefix is the URL-encoded-source-appender shape (wsrv.nl, imgproxy, imagor).
+// Configured per-user via localStorage `srr-img-proxy`; empty/absent = passthrough.
+const IMG_PROXY_KEY = "srr-img-proxy"
+
+export function getImgProxy(): string {
+   try {
+      return localStorage.getItem(IMG_PROXY_KEY) ?? ""
+   } catch {
+      return ""
+   }
+}
+
+export function setImgProxy(value: string): void {
+   try {
+      localStorage.setItem(IMG_PROXY_KEY, value)
+   } catch {}
+}
+
+export function imgProxy(url: string, prefix: string): string {
+   return prefix ? prefix + encodeURIComponent(url) : url
 }
 
 // <template> parses HTML without executing scripts, unlike a div
@@ -22,6 +39,7 @@ export function sanitizeHtml(html: string): string {
    // their (now-detached) descendants — saves work on e.g. <svg><script>...
    for (const n of tmpl.content.querySelectorAll(DANGEROUS_SELECTOR)) n.remove()
    const walker = document.createTreeWalker(tmpl.content, NodeFilter.SHOW_ELEMENT)
+   const proxyPrefix = getImgProxy()
    let node: Element | null
    while ((node = walker.nextNode() as Element | null)) {
       const attrs = node.attributes
@@ -35,7 +53,7 @@ export function sanitizeHtml(html: string): string {
       else if (tag === "IMG") {
          node.removeAttribute("srcset")
          const src = node.getAttribute("src")
-         if (src && HTTP_RE.test(src)) node.setAttribute("src", wsrvProxy(src))
+         if (src && HTTP_RE.test(src)) node.setAttribute("src", imgProxy(src, proxyPrefix))
          // URL_DENY-matching src already stripped by the attribute loop above
       }
    }

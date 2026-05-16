@@ -52,7 +52,7 @@ Audit each of the following and report any failure:
 - Frontend: confirm the loop strips any attribute starting with `on`.
 
 **E. Per-tag rewrites that depend on backend output**
-- Frontend rewrites `<img src>` through `wsrv.nl` proxy and adds `loading="lazy"`. Verify backend allows `<img>` with at least `src` (today the policy uses `AllowImages()` which permits `alt`, `height`, `ihref`, `src`, `width`, `usemap`).
+- Frontend rewrites `<img src>` through a per-user image-proxy prefix from localStorage `srr-img-proxy` (empty/absent = passthrough; passthrough is the default) and adds `loading="lazy"`. Verify backend allows `<img>` with at least `src` (today the policy uses `AllowImages()` which permits `alt`, `height`, `ihref`, `src`, `width`, `usemap`).
 - Frontend sets `rel="noopener noreferrer"` on `<a>`. Backend must allow `<a href>`.
 - Frontend strips `srcset` from `<img>` — verify backend doesn't add an `AllowAttrs("srcset")` that would suggest the writer expects responsive images.
 
