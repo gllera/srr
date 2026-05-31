@@ -122,6 +122,38 @@ describe("sanitizeHtml", () => {
    })
 })
 
+// SRR_CDN_URL is defined as "http://localhost:3000" in vitest.config.ts, so the
+// pack base resolves there — the same value data.ts uses for DB_URL.
+describe("sanitizeHtml self-hosted assets", () => {
+   const attr = (html: string, sel: string, name: string): string | null => {
+      const t = document.createElement("template")
+      t.innerHTML = sanitizeHtml(html)
+      return t.content.querySelector(sel)!.getAttribute(name)
+   }
+
+   it("resolves an assets/ img src against the pack base (no proxy)", () => {
+      expect(attr('<img src="assets/ab/cd1234.jpg">', "img", "src")).toBe("http://localhost:3000/assets/ab/cd1234.jpg")
+   })
+
+   it("resolves assets/ video src and poster against the pack base", () => {
+      const html = '<video src="assets/bb/2222.mp4" poster="assets/cc/3333.jpg" controls></video>'
+      expect(attr(html, "video", "src")).toBe("http://localhost:3000/assets/bb/2222.mp4")
+      expect(attr(html, "video", "poster")).toBe("http://localhost:3000/assets/cc/3333.jpg")
+   })
+
+   it("leaves external http(s) img URLs on the proxy path (no asset resolution)", () => {
+      // Proxy is passthrough by default, so the external URL is unchanged and
+      // is NOT rewritten to the pack base.
+      const out = attr('<img src="https://cdn.example.com/x.jpg">', "img", "src")
+      expect(out).toBe("https://cdn.example.com/x.jpg")
+   })
+
+   it("leaves external video URLs untouched", () => {
+      const out = attr('<video src="https://cdn.example.com/v.mp4"></video>', "video", "src")
+      expect(out).toBe("https://cdn.example.com/v.mp4")
+   })
+})
+
 describe("timeAgo", () => {
    beforeEach(() => {
       vi.useFakeTimers()
