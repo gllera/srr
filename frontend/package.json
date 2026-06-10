@@ -20,7 +20,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "concurrently": "^9.2.1",
+    "concurrently": "^10.0.3",
     "eslint": "^10.1.0",
     "eslint-config-prettier": "^10.1.8",
     "jsdom": "^29.0.1",
