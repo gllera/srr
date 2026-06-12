@@ -21,6 +21,13 @@ func (o *GenCmd) Run() error {
 		// so the next fetch rebuilds idx/h<N>.gz; readers fall back to eager
 		// idx loading in the gap.
 		db.core.HdrPacks = 0
+		// Same for the search series: finalized shard names and the latest
+		// tail may hold pre-rebuild bytes. Zeroed coverage makes the next
+		// fetch rebuild everything from the data packs (a zero SearchTail
+		// also marks the read-back tail untrusted); readers keep search
+		// disabled in the gap.
+		db.core.SearchPacks = 0
+		db.core.SearchTail = 0
 		return db.Commit(ctx)
 	})
 }

@@ -8,12 +8,13 @@
 //                           a hit can never be stale. Bounded to ASSET_KEEP
 //                           entries, oldest-cached evicted first.
 //   packs  (srr-packs-vN)   the CDN store under `packs/`: every pack name is
-//      write-once — finalized `idx/<n>.gz` / `data/<n>.gz` (numeric) and the
-//      latest generation `idx|data/L<seq>.gz` (a generation is never rewritten
-//      after the db.gz commit that publishes it) → cache-first. Only `db.gz`
-//      is mutable → network-first (offline → last cached). Finalized series
-//      are bounded to PACK_KEEP entries each, lowest-numbered (oldest) evicted
-//      first (enforceCacheBounds).
+//      write-once — finalized `idx|data|search/<n>.gz` (numeric), the latest
+//      generation `idx|data|search/L<seq>.gz` (a generation is never rewritten
+//      after the db.gz commit that publishes it), and the `idx/h<N>` /
+//      `search/s<N>` summaries → cache-first. Only `db.gz` is mutable →
+//      network-first (offline → last cached). Finalized series are bounded
+//      per series (enforceCacheBounds), lowest-numbered (oldest) evicted
+//      first.
 //   shell  (srr-shell-vN)   the app itself: the `/…/` navigation + content-hashed
 //                           JS/CSS. Runtime-cached (no build-time manifest — keeps
 //                           this SW hand-written and zero-dep). Hashed JS/CSS are
@@ -63,8 +64,9 @@ const SCOPE = new URL(sw.registration.scope).pathname
 // Matched anywhere in the path so they hold whatever prefix the cdn-url adds.
 const RE_ASSET = /\/assets\/[0-9a-f]{2}\/[0-9a-f]{16}\.\w+$/i
 // Write-once pack names: finalized numeric stems, L<seq> latest generations,
-// and idx/h<N> header summaries (published before the db.gz that names them).
-const RE_PACK = /\/packs\/(?:idx|data)\/[Lh]?\d+\.gz$/i
+// and the idx/h<N> / search/s<N> summaries (each published before the db.gz
+// that names it).
+const RE_PACK = /\/packs\/(?:idx|data|search)\/[Lhs]?\d+\.gz$/i
 const RE_DB = /\/packs\/db\.gz$/i // the store's only mutable key
 const RE_SHELL_HASHED = /\.[0-9a-f]{8,}\.(?:js|css)$/i // Parcel content-hashed bundles
 
@@ -128,14 +130,16 @@ async function networkFirst(req: Request, name: string): Promise<Response> {
 // after a successful ONLINE db.gz fetch — an offline reader must never lose a
 // cached pack it cannot refetch.
 const PACK_KEEP = 100 // per finalized series: ~20 MB of data packs + ~5 MB of idx packs
+const SEARCH_KEEP = 30 // search shards run ~1 MB each — a tighter bound for the same idea
 const ASSET_KEEP = 500 // self-hosted images/files: order of ~100 MB at typical sizes
 
-const RE_PACK_FINAL = /\/packs\/(idx|data)\/(\d+)\.gz$/i
+const RE_PACK_FINAL = /\/packs\/(idx|data|search)\/(\d+)\.gz$/i
+const SERIES_KEEP: Record<string, number> = { idx: PACK_KEEP, data: PACK_KEEP, search: SEARCH_KEEP }
 
 async function enforceCacheBounds(): Promise<void> {
    try {
       const packs = await caches.open(PACKS)
-      const series: Record<string, { req: Request; n: number }[]> = { idx: [], data: [] }
+      const series: Record<string, { req: Request; n: number }[]> = { idx: [], data: [], search: [] }
       for (const req of await packs.keys()) {
          const m = RE_PACK_FINAL.exec(new URL(req.url).pathname)
          if (m) series[m[1].toLowerCase()].push({ req, n: Number(m[2]) })
@@ -143,10 +147,10 @@ async function enforceCacheBounds(): Promise<void> {
       const assets = await caches.open(ASSETS)
       const assetKeys = await assets.keys()
       await Promise.all([
-         ...Object.values(series).flatMap((list) =>
+         ...Object.entries(series).flatMap(([name, list]) =>
             list
                .sort((a, b) => b.n - a.n)
-               .slice(PACK_KEEP)
+               .slice(SERIES_KEEP[name])
                .map((e) => packs.delete(e.req)),
          ),
          ...assetKeys.slice(0, Math.max(0, assetKeys.length - ASSET_KEEP)).map((req) => assets.delete(req)),
@@ -185,10 +189,11 @@ async function readMetaNumber(key: string): Promise<number> {
 async function checkManifest(dbRes: Response): Promise<void> {
    try {
       const body = dbRes.clone().body!.pipeThrough(new DecompressionStream("gzip"))
-      const db = (await new Response(body).json()) as Pick<IDBWire, "gen" | "seq" | "hdrs">
+      const db = (await new Response(body).json()) as Pick<IDBWire, "gen" | "seq" | "hdrs" | "srch">
       const gen = db.gen ?? 0
       const seq = db.seq ?? 0
       const hdrs = db.hdrs ?? 0
+      const srch = db.srch ?? 0
       const meta = await caches.open(META)
       const packs = await caches.open(PACKS)
       if (gen !== (await readMetaNumber(GEN_KEY))) {
@@ -202,16 +207,19 @@ async function checkManifest(dbRes: Response): Promise<void> {
          await Promise.all(
             keys.map((k) => {
                const path = new URL(k.url).pathname
-               const m = /\/packs\/(?:idx|data)\/L(\d+)\.gz$/i.exec(path)
+               const m = /\/packs\/(?:idx|data|search)\/L(\d+)\.gz$/i.exec(path)
                if (m && Number(m[1]) < seq - LATEST_KEEP) return packs.delete(k)
-               // Superseded idx header summaries ride the seq prune instead
-               // of tracking their own meta key. hdrs CAN advance without a
-               // seq bump (a zero-article migration or summary-retry cycle),
-               // but such a cycle leaves at most one stale ~1KB name, pruned
-               // on the next article-producing fetch — and a store rebuild
-               // purges the whole bucket via gen above.
+               // Superseded summaries (idx headers, search blooms) ride the
+               // seq prune instead of tracking meta keys of their own. Their
+               // counters CAN advance without a seq bump (a zero-article
+               // migration or sync-retry cycle), but such a cycle strands at
+               // most one stale name each, pruned on the next
+               // article-producing fetch — and a store rebuild purges the
+               // whole bucket via gen above.
                const h = /\/packs\/idx\/h(\d+)\.gz$/i.exec(path)
-               return h && Number(h[1]) < hdrs - LATEST_KEEP ? packs.delete(k) : undefined
+               if (h && Number(h[1]) < hdrs - LATEST_KEEP) return packs.delete(k)
+               const s = /\/packs\/search\/s(\d+)\.gz$/i.exec(path)
+               return s && Number(s[1]) < srch - LATEST_KEEP ? packs.delete(k) : undefined
             }),
          )
          await meta.put(SEQ_KEY, new Response(String(seq)))

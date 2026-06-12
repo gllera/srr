@@ -1,6 +1,8 @@
 import * as data from "./data"
 import { getImgProxy, isValidProxy, setImgProxy, timeAgo } from "./fmt"
 import * as nav from "./nav"
+import * as search from "./search"
+import type { ISearchHit } from "./search"
 
 const menus = document.querySelectorAll<HTMLElement>(".srr-dropdown-menu")
 const btns = document.querySelectorAll<HTMLElement>(".srr-dropdown-btn")
@@ -16,6 +18,8 @@ export function closeAllDropdowns(): void {
    dateEditing = false
    unreadFill = null
    peekFill = null
+   searchFill = null
+   clearTimeout(searchTimer)
    if (!isOpen) return
    menus.forEach((m) => {
       // Closing a menu the user was keyboard-navigating must not drop focus
@@ -409,6 +413,107 @@ export function showPeekMenu(guard: (fn: () => Promise<IShowFeed>) => void): voi
          loading.textContent = "…"
          frag.appendChild(loading)
          void fillPeek(document.getElementById("srr-peek-menu")!)
+      },
+      async (value) => guard(() => nav.goTo(Number(value))),
+   )
+}
+
+// The title search: a third toolbar dropdown (anchored on the magnifier
+// button, `/` shortcut). The input row follows the inline-editor pattern
+// (clicks inside it configure, they don't navigate); results stream in per
+// shard from search.search() under the usual freshness-token discipline,
+// rendered as peek-style rows (title over channel · age), click =
+// nav.goTo(chron). An active channel/tag filter intersects results via
+// nav.filter.matches on each hit's chan_id.
+let searchFill: object | null = null
+let searchTimer: ReturnType<typeof setTimeout> | undefined
+
+const SEARCH_MAX = 100
+const SEARCH_DEBOUNCE_MS = 200
+
+function searchRow(hit: ISearchHit): HTMLAnchorElement {
+   const a = createLink(String(hit.chron), "")
+   const title = divEl("srr-peek-title")
+   title.textContent = hit.t || "(untitled)"
+   const meta = divEl("srr-peek-meta")
+   meta.textContent = `${data.db.channels[hit.s]?.title ?? "[DELETED]"} · ${timeAgo(hit.w)}`
+   a.append(title, meta)
+   return a
+}
+
+async function fillSearch(q: string, results: HTMLElement): Promise<void> {
+   const my = {}
+   searchFill = my
+   results.replaceChildren()
+   if (!q.trim()) return
+   // The status row doubles as the insertion anchor: hit rows land before it,
+   // so batches streaming in per shard keep newest-first order.
+   const status = divEl("srr-search-note")
+   const short = search.shortQuery(q)
+   status.textContent = short ? "Searching recent articles (a 3+ letter word reaches the archive)…" : "Searching…"
+   results.appendChild(status)
+   let count = 0
+   try {
+      outer: for await (const batch of search.search(q)) {
+         if (my !== searchFill) return
+         for (const hit of batch) {
+            if (nav.filter.active && !nav.filter.matches(hit.s, hit.chron)) continue
+            results.insertBefore(searchRow(hit), status)
+            if (++count >= SEARCH_MAX) break outer
+         }
+      }
+   } catch {
+      if (my === searchFill) status.textContent = "Search failed — try again"
+      return
+   }
+   if (my !== searchFill) return
+   if (count === 0)
+      status.textContent = short ? "No recent matches (a 3+ letter word searches the archive)" : "No matches"
+   else if (count >= SEARCH_MAX) status.textContent = `First ${SEARCH_MAX} matches — refine to reach older ones`
+   else status.remove()
+}
+
+export function showSearchMenu(guard: (fn: () => Promise<IShowFeed>) => void): void {
+   toggleDropdown(
+      "srr-search-menu",
+      (frag) => {
+         if (!search.available()) {
+            const note = divEl("srr-search-note")
+            note.textContent = "Search index not published for this store yet"
+            frag.appendChild(note)
+            return
+         }
+         const row = divEl("srr-search-edit")
+         row.addEventListener("mousedown", (e) => e.stopPropagation())
+         row.addEventListener("click", (e) => e.stopPropagation())
+         const input = document.createElement("input")
+         input.type = "search"
+         input.className = "srr-search-input"
+         input.placeholder = "Search titles…"
+         input.setAttribute("aria-label", "Search article titles")
+         const results = divEl("srr-search-results")
+         input.addEventListener("input", () => {
+            clearTimeout(searchTimer)
+            searchTimer = setTimeout(() => void fillSearch(input.value, results), SEARCH_DEBOUNCE_MS)
+         })
+         input.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") {
+               e.preventDefault()
+               clearTimeout(searchTimer)
+               void fillSearch(input.value, results)
+            } else if (e.key === "ArrowDown") {
+               // The roving-focus handler skips INPUT targets; hand off to the
+               // first result row explicitly.
+               const first = results.querySelector<HTMLElement>('[role="menuitem"]')
+               if (first) {
+                  e.preventDefault()
+                  first.focus()
+               }
+            }
+         })
+         row.appendChild(input)
+         frag.append(row, results)
+         queueMicrotask(() => input.focus())
       },
       async (value) => guard(() => nav.goTo(Number(value))),
    )

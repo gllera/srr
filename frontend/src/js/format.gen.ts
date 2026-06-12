@@ -29,6 +29,15 @@ export const DELTA_FETCHED_MAX = 127
 // superseded L<seq> generations the backend GC keeps as a grace window for stale-db.gz readers
 export const LATEST_KEEP = 2
 
+// rune length of the sliding windows the search blooms index, per folded word
+export const SEARCH_GRAM = 3
+
+// bytes: fixed-size trigram bloom heading each finalized search shard (and per shard in search/s<N>.gz)
+export const SEARCH_BLOOM_BYTES = 32768
+
+// bloom bits set/tested per gram
+export const SEARCH_BLOOM_K = 4
+
 // Wire shape of one JSONL line in data/*.gz (backend ArticleData).
 export interface IArticleWire {
    s: number // ChannelID
@@ -37,6 +46,13 @@ export interface IArticleWire {
    t?: string // Title
    l?: string // Link
    c: string // Content
+}
+
+// Wire shape of one JSONL line in search/ shards (backend SearchEntry).
+export interface ISearchEntryWire {
+   s: number // ChannelID
+   w: number // When
+   t?: string // Title
 }
 
 // Wire shape of per-feed state inside a channel (backend Feed).
@@ -73,5 +89,7 @@ export interface IDBWire {
    ingest?: string // Ingest
    gen?: number // Gen
    hdrs?: number // HdrPacks
+   srch?: number // SearchPacks
+   srcht?: number // SearchTail
    channels: Record<number, IChannelWire> | null // Channels
 }

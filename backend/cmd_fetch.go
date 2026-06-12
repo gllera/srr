@@ -135,6 +135,13 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 		if err := db.SyncIdxSummary(ctx); err != nil {
 			slog.Warn("sync idx summary", "error", err)
 		}
+		// Same warn-only contract: the search series is a derived index, so a
+		// failed sync must not discard the durable batch. Coverage fields stay
+		// behind, readers keep search disabled (or miss only the newest tail),
+		// and the next run reconciles.
+		if err := db.SyncSearch(ctx); err != nil {
+			slog.Warn("sync search", "error", err)
+		}
 		if err := db.Commit(ctx); err != nil {
 			return err
 		}
@@ -147,6 +154,9 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 		}
 		if err := db.GCSummaries(context.WithoutCancel(ctx), latestKeep); err != nil {
 			slog.Warn("gc idx summaries", "error", err)
+		}
+		if err := db.GCSearchSummaries(context.WithoutCancel(ctx), latestKeep); err != nil {
+			slog.Warn("gc search summaries", "error", err)
 		}
 
 		var failed, totalFeeds int

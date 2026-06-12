@@ -87,6 +87,28 @@ func TestGenBumpResetsHdrPacks(t *testing.T) {
 	}
 }
 
+// --bump resets the search coverage too: rebuilt packs invalidate the shards'
+// copied titles and the latest tail, so the next fetch must rebuild them.
+func TestGenBumpResetsSearchCoverage(t *testing.T) {
+	setupEmptyDB(t)
+
+	db := reopenDB(t)
+	db.core.SearchPacks = 3
+	db.core.SearchTail = 7
+	if err := db.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	db.Close(ctx)
+
+	if err := (&GenCmd{Bump: true}).Run(); err != nil {
+		t.Fatalf("bump: %v", err)
+	}
+	db = reopenDB(t)
+	if db.core.SearchPacks != 0 || db.core.SearchTail != 0 {
+		t.Errorf("search coverage = (%d, %d), want (0, 0) after bump", db.core.SearchPacks, db.core.SearchTail)
+	}
+}
+
 // gen is omitempty: absent from db.gz at 0 (the reader treats absent as 0),
 // present once bumped.
 func TestGenOmitemptyWhenZero(t *testing.T) {

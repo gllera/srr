@@ -17,8 +17,16 @@ const nav = vi.hoisted(() => ({
    switchFilter: vi.fn(),
    unreadCount: vi.fn<(ch: IChannel) => Promise<number>>(async () => -1),
    peek: vi.fn<(span?: number) => Promise<IPeekItem[]>>(async () => []),
+   filter: { active: false, matches: vi.fn(() => true) },
 }))
 vi.mock("./nav", () => nav)
+
+const searchMod = vi.hoisted(() => ({
+   available: vi.fn(() => true),
+   shortQuery: vi.fn(() => false),
+   search: vi.fn(),
+}))
+vi.mock("./search", () => searchMod)
 
 import { getImgProxy, setImgProxy } from "./fmt"
 
@@ -32,6 +40,10 @@ const SKELETON =
    '<div class="srr-dropdown">' +
    '<button class="srr-dropdown-btn srr-counter" aria-expanded="false"></button>' +
    '<div id="srr-peek-menu" class="srr-dropdown-menu" role="menu"></div>' +
+   "</div>" +
+   '<div class="srr-dropdown">' +
+   '<button class="srr-dropdown-btn srr-search" aria-expanded="false"></button>' +
+   '<div id="srr-search-menu" class="srr-dropdown-menu" role="menu"></div>' +
    "</div>"
 
 const $menu = () => document.getElementById("srr-channel-menu")!
@@ -477,5 +489,95 @@ describe("dropdown: headlines peek", () => {
       release([item(1)])
       await new Promise((r) => setTimeout(r))
       expect($rows().length).toBe(0) // still just the loading placeholder
+   })
+})
+
+describe("dropdown: title search", () => {
+   let dropdown: Dropdown
+   let guard: ReturnType<typeof vi.fn>
+
+   const $smenu = () => document.getElementById("srr-search-menu")!
+   const $input = () => $smenu().querySelector<HTMLInputElement>(".srr-search-input")
+   const $rows = () => Array.from($smenu().querySelectorAll<HTMLAnchorElement>("a[data-value]"))
+   const $note = () => $smenu().querySelector(".srr-search-note")
+
+   const hit = (chron: number, t: string, s = 1) => ({ chron, s, w: 1000, t })
+   async function* gen(batches: ReturnType<typeof hit>[][]) {
+      for (const b of batches) yield b
+   }
+
+   function type(q: string): void {
+      const input = $input()!
+      input.value = q
+      key(input, "Enter") // immediate path — the debounce test covers the timer
+   }
+
+   beforeEach(async () => {
+      document.body.innerHTML = SKELETON
+      localStorage.clear()
+      guard = vi.fn((fn: () => Promise<unknown>) => fn())
+      data.db.channels = { 1: chan({ id: 1, title: "Chan" }) } as unknown as IDB["channels"]
+      searchMod.available.mockReturnValue(true)
+      searchMod.search.mockReset()
+      nav.goTo.mockClear()
+      nav.filter.active = false
+      nav.filter.matches.mockImplementation(() => true)
+      vi.resetModules()
+      dropdown = await import("./dropdown")
+   })
+
+   afterEach(() => {
+      dropdown.closeAllDropdowns()
+      vi.useRealTimers()
+   })
+
+   it("shows the unavailable note instead of an input when the index isn't published", () => {
+      searchMod.available.mockReturnValue(false)
+      dropdown.showSearchMenu(guard)
+      expect($input()).toBeNull()
+      expect($note()!.textContent).toContain("not published")
+   })
+
+   it("runs the query on Enter, streams rows newest-first, and navigates on click", async () => {
+      searchMod.search.mockImplementation(() => gen([[hit(100010, "Alpha latest")], [hit(7, "Alpha old")]]))
+      dropdown.showSearchMenu(guard)
+      type("alpha")
+      await vi.waitFor(() => expect($rows().length).toBe(2))
+      expect(searchMod.search).toHaveBeenCalledWith("alpha")
+      expect($rows().map((r) => r.dataset.value)).toEqual(["100010", "7"])
+      expect($rows()[0].querySelector(".srr-peek-title")!.textContent).toBe("Alpha latest")
+      expect($rows()[0].querySelector(".srr-peek-meta")!.textContent).toContain("Chan")
+      expect($note()).toBeNull() // the status row is removed once done
+      $smenu().querySelector<HTMLAnchorElement>('a[data-value="7"]')!.click()
+      expect(nav.goTo).toHaveBeenCalledWith(7)
+   })
+
+   it("debounces the input event", () => {
+      vi.useFakeTimers()
+      searchMod.search.mockImplementation(() => gen([]))
+      dropdown.showSearchMenu(guard)
+      const input = $input()!
+      input.value = "alp"
+      input.dispatchEvent(new Event("input", { bubbles: true }))
+      expect(searchMod.search).not.toHaveBeenCalled()
+      vi.advanceTimersByTime(200)
+      expect(searchMod.search).toHaveBeenCalledWith("alp")
+   })
+
+   it("intersects hits with the active channel filter", async () => {
+      nav.filter.active = true
+      nav.filter.matches.mockImplementation((s: number) => s === 1)
+      searchMod.search.mockImplementation(() => gen([[hit(10, "Keep", 1), hit(9, "Drop", 2)]]))
+      dropdown.showSearchMenu(guard)
+      type("x")
+      await vi.waitFor(() => expect($rows().length).toBe(1))
+      expect($rows()[0].dataset.value).toBe("10")
+   })
+
+   it("reports no matches", async () => {
+      searchMod.search.mockImplementation(() => gen([]))
+      dropdown.showSearchMenu(guard)
+      type("nothing")
+      await vi.waitFor(() => expect($note()!.textContent).toBe("No matches"))
    })
 })

@@ -1,5 +1,5 @@
 import * as data from "./data"
-import { closeAllDropdowns, showChannelMenu, showPeekMenu } from "./dropdown"
+import { closeAllDropdowns, showChannelMenu, showPeekMenu, showSearchMenu } from "./dropdown"
 import { collapseBrokenMedia, formatDate, sanitizeHtml, timeAgo, URL_DENY } from "./fmt"
 import { setupGestures } from "./gestures"
 import * as nav from "./nav"
@@ -14,6 +14,7 @@ const el = {
    channel: document.querySelector(".srr-channel") as HTMLButtonElement,
    date: document.querySelector(".srr-date") as HTMLElement,
    counter: document.querySelector(".srr-counter") as HTMLButtonElement,
+   search: document.querySelector(".srr-search") as HTMLButtonElement,
    popupText: document.querySelector(".srr-popup-text") as HTMLElement,
    popupRetry: document.querySelector(".srr-popup-retry") as HTMLButtonElement,
    popupClose: document.querySelector(".srr-popup-close") as HTMLElement,
@@ -146,6 +147,7 @@ const KEY_ACTIONS: Record<string, () => void> = {
    q: () => guard(() => nav.first()),
    e: () => guard(() => nav.last()),
    l: () => showPeekMenu(guard),
+   "/": () => showSearchMenu(guard),
    f: () => {
       if (!el.titleLink.getAttribute("href")) return
       el.titleLink.dispatchEvent(
@@ -169,6 +171,7 @@ async function init() {
    el.content.addEventListener("error", collapseBrokenMedia, true)
    el.channel.addEventListener("click", () => showChannelMenu(currentChannel.tag, guard))
    el.counter.addEventListener("click", () => showPeekMenu(guard))
+   el.search.addEventListener("click", () => showSearchMenu(guard))
    el.popupClose.addEventListener("click", closePopup)
    el.popupRetry.addEventListener("click", () => {
       closePopup()
