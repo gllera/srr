@@ -351,6 +351,7 @@ video {
 }
 
 /* Nav buttons */
+.srr-toolbar-right .srr-search,
 .srr-toolbar-right .srr-prev,
 .srr-toolbar-right .srr-next {
    min-width: 2.75rem;
@@ -387,6 +388,26 @@ video {
 }
 .srr-prev-icon {
    transform: rotate(-135deg);
+}
+
+/* Search icon — CSS magnifier: circle + 45° handle off the bottom-right */
+.srr-search-icon {
+   display: inline-block;
+   position: relative;
+   width: 0.55rem;
+   height: 0.55rem;
+   border: 1.5px solid currentColor;
+   border-radius: 50%;
+   &::after {
+      content: "";
+      position: absolute;
+      width: 0.38rem;
+      height: 1.5px;
+      background: currentColor;
+      bottom: -0.15rem;
+      right: -0.27rem;
+      transform: rotate(45deg);
+   }
 }
 
 /* Dropdown */
@@ -604,8 +625,9 @@ video {
    }
 }
 
-/* Headlines peek — two-line rows: title over channel · age */
-#srr-peek-menu {
+/* Headlines peek + search results — two-line rows: title over channel · age */
+#srr-peek-menu,
+#srr-search-menu {
    min-width: min(18rem, 80vw);
    & .srr-peek-title,
    & .srr-peek-meta {
@@ -619,6 +641,35 @@ video {
    & .srr-peek-loading {
       padding: 0.45rem 0.75rem;
       color: var(--muted);
+   }
+}
+
+/* Title search — input row (inline-editor pattern) + status/hint rows */
+#srr-search-menu {
+   & .srr-search-edit {
+      display: flex;
+      padding: 0.2rem 0.4rem;
+      & .srr-search-input {
+         flex: 1 1 auto;
+         min-width: 0;
+         font: inherit;
+         font-size: var(--text-sm);
+         color: var(--fg);
+         background: var(--bg);
+         border: 1px solid var(--faint);
+         border-radius: var(--radius);
+         padding: 0.25rem 0.45rem;
+         &:focus {
+            outline: none;
+            border-color: var(--accent);
+         }
+      }
+   }
+   & .srr-search-note {
+      padding: 0.45rem 0.75rem;
+      color: var(--muted);
+      font-size: var(--text-sm);
+      white-space: normal;
    }
 }
 

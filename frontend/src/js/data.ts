@@ -97,9 +97,12 @@ function numFinalizedIdx(): number {
 }
 
 // Fetches + gunzips one pack key. Every pack name is write-once (finalized
-// numeric, the L<seq> generation or h<N> summary a db.gz commit published),
-// so the HTTP cache may serve them all without revalidation (force-cache).
-async function fetchPackBytes(path: string, isLatest: boolean): Promise<ArrayBuffer> {
+// numeric, the L<seq> generation or h<N>/s<N> summary a db.gz commit
+// published), so the HTTP cache may serve them all without revalidation
+// (force-cache). Exported for search.ts (the search/ series rides the same
+// addressing); isLatest=false there — a missing search pack degrades search
+// instead of triggering the guarded reload.
+export async function fetchPackBytes(path: string, isLatest: boolean): Promise<ArrayBuffer> {
    const res = await fetch(new URL(path, DB_URL), { cache: "force-cache" })
    assertPackOk(res, isLatest)
    return new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer()

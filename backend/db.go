@@ -32,6 +32,15 @@ const (
 	// deltaFetchedMax is the 7-bit per-entry delta_fetched_at limit: the
 	// writer's clamp ceiling and the readers' bit mask.
 	deltaFetchedMax = 0x7F
+	// searchGram is the rune length of the sliding windows ("trigrams") the
+	// search blooms index, taken over each word of a folded title.
+	searchGram = 3
+	// searchBloomBytes is the fixed-size trigram Bloom filter prefixed inside
+	// every finalized search shard and concatenated into search/s<N>.gz. The
+	// bit count is a power of two so probe indices mask instead of modulo.
+	searchBloomBytes = 32768
+	// searchBloomK is the number of bloom bits set/tested per gram.
+	searchBloomK = 4
 )
 
 // defaultRootPipe returns a fresh copy of the pipeline applied as the
@@ -102,8 +111,20 @@ type DBCore struct {
 	// old-binary hazard as Gen: a binary without this field drops it on its
 	// next Commit — readers then fall back to eager idx loading until the
 	// next fetch with a new binary rebuilds the summary.
-	HdrPacks int              `json:"hdrs,omitempty"`
-	Channels map[int]*Channel `json:"channels"`
+	HdrPacks int `json:"hdrs,omitempty"`
+	// SearchPacks is the finalized search-shard coverage: search/<n>.gz exists
+	// for n in [0, SearchPacks) and search/s<SearchPacks>.gz concatenates their
+	// bloom headers. SyncSearch sets it only after every save succeeds and
+	// Commit publishes it (write-once names, same crash argument as Seq /
+	// HdrPacks, same old-binary drop hazard). The reader offers search only
+	// when it equals numFinalizedIdx.
+	SearchPacks int `json:"srch,omitempty"`
+	// SearchTail is the entry count of the published latest search shard
+	// (search/L<Seq>.gz). SyncSearch trusts a read-back tail only when its
+	// count matches, so a stale shard left by a crash or a pre-`gen --bump`
+	// store is rebuilt from data packs instead of extended.
+	SearchTail int              `json:"srcht,omitempty"`
+	Channels   map[int]*Channel `json:"channels"`
 }
 
 // withDB opens the DB, runs fn, and ensures Close. Use for commands that

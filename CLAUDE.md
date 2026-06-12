@@ -42,7 +42,7 @@ Shared format between backend (writer) and frontend (reader).
 ### `db.gz`
 
 ```
-{ seq?, fetched_at, total_art, next_pid, pack_off, channels{}, first_fetched, fetched_at_cur?, pipe?, ingest?, gen?, hdrs? }
+{ seq?, fetched_at, total_art, next_pid, pack_off, channels{}, first_fetched, fetched_at_cur?, pipe?, ingest?, gen?, hdrs?, srch?, srcht? }
 ```
 
 | Field | Type | Description |
@@ -59,6 +59,8 @@ Shared format between backend (writer) and frontend (reader).
 | `ingest` | string | Root-level default ingest strategy inherited by channels whose `ingest` is empty. `omitempty`. Empty falls through to built-in `#rss`. Set/print via `srr ingest`. |
 | `gen` | int | Store generation counter. Bumped manually (`srr gen --bump`) after an in-place store rebuild reuses finalized pack ids with new bytes; the frontend service worker purges its cache-first pack cache when the value changes (any change, not just increments). `omitempty`; absent == 0. |
 | `hdrs` | int | Idx header-summary coverage: `idx/h<hdrs>.gz` holds the verbatim 1036-byte headers of finalized idx packs `0..hdrs-1`. Maintained by `SyncIdxSummary` each fetch (write summary first, publish `hdrs` via Commit — same crash argument as `seq`); `srr gen --bump` resets it to 0 so the next fetch rebuilds against the rebuilt packs. The reader uses the summary only when `hdrs == numFinalized`, else falls back to eager idx loading. `omitempty`; absent == 0. |
+| `srch` | int | Finalized search-shard coverage: `search/<n>.gz` exists for n in `[0, srch)` and `search/s<srch>.gz` concatenates their bloom headers. Set only after every save succeeds (same crash argument as `seq`/`hdrs`); `srr gen --bump` resets to 0. The reader offers search only when `srch === numFinalized` (and `srch > 0` or `srcht > 0` for small stores). `omitempty`; absent == 0. |
+| `srcht` | int | Entry count of the published latest search shard (`search/L<seq>.gz`). `SyncSearch` trusts a read-back tail only when its entry count matches, so a stale shard from a crash or post-`gen --bump` store is rebuilt from data packs rather than extended. `omitempty`; absent == 0. |
 
 ### Channels (`IChannel`)
 
@@ -80,12 +82,13 @@ Two levels store an optional mod pipeline (`pipe` field): db.gz root and channel
 
 ### Pack Storage
 
-Two gzip-compressed series under the feed directory:
+Three gzip-compressed series under the feed directory:
 
 | Series | Format | Split rule |
 |---|---|---|
 | `idx/` | Binary (see below) | Every 50,000 articles (`idxPackSize`) |
 | `data/` | JSONL — one `ArticleData` object per line | At `PackSize` (tracked by `next_pid`/`pack_off`) |
+| `search/` | JSONL (+ bloom header for finalized shards) | Aligned 1:1 with idx packs (every 50,000 articles) |
 
 **idx/ format** — binary, little-endian, timestamps in 8-hour blocks (÷28800 on write, ×28800 on read):
 - Header: 259 × uint32 — `fetchedAt_base` (= `fetched_at_cur` at pack start, blocks since `first_fetched`), `packId_base`, `packOff_base`, then 256 chanCount values (one per possible chan_id byte)
@@ -98,14 +101,17 @@ Two gzip-compressed series under the feed directory:
 
 Short keys: `s`=chan_id, `a`=fetched_at, `p`=published (unix seconds, omitted if 0), `t`=title (omitted if empty), `l`=link (omitted if empty), `c`=content. Contains all article info.
 
+**search/ format** — finalized shard `search/<n>.gz` = `gzip(bloom[32768 bytes] ‖ JSONL)`; latest shard `search/L<seq>.gz` = `gzip(JSONL only, no bloom)`. Each JSONL line is a `SearchEntry`: `{"s":chan_id,"w":when,"t":"title"}` where `w` is published falling back to fetched_at (precomputed for display), `t` is omitempty. Line position within the shard equals the chron offset within that shard. Search bloom: per-word rune trigrams of folded titles; FNV-1a-64 → double-hash `h1=low32, h2=high32|1`, 4 probes `(h1+i*h2) & (2^18-1)`, little-endian bit order. Folding (`foldSearchText`/`fold`): NFD → strip `Mn` marks → per-rune lowercase → ς→σ → non-letter/non-number = word separator, single-space joined; mirrored byte-for-byte between Go and TypeScript. `search/s<N>.gz` = gzip concatenation of the N finalized blooms (summary for shard pruning). Format atoms exported to TS: `SEARCH_GRAM`=3, `SEARCH_BLOOM_BYTES`=32768, `SEARCH_BLOOM_K`=4. Design rationale: `docs/search-design.md`.
+
 ### CDN Layout / Pack Addressing
 
-Each channel directory: `db.gz` + `idx/` + `data/` (+ optional `assets/`).
+Each channel directory: `db.gz` + `idx/` + `data/` + `search/` (+ optional `assets/`).
 
 - **`assets/`**: self-hosted files (images, video, linked documents). Keys are `assets/<2-hex>/<16-hex><ext>`, the hash being sha256 of the **file bytes**: an external ingest command downloads files into the run's shared ingest cache and marks them in content with a `#`-prefixed relative path; SRR's automatic end-of-pipeline step uploads them via `assetFetcher.UploadCacheRef` and rewrites the marker to the key. Article content stores the **relative** key; the frontend (`fmt.ts`) resolves `<img src>`/`<video src>`/`<a href>` against the pack base. The content hash is stable for given bytes ⇒ safe to cache. See `backend/CLAUDE.md` → Asset self-hosting and Ingest.
 - **Finalized packs**: immutable. `idx/` packs are 0-indexed (`idx/0.gz`..`idx/N-1.gz`); `data/` packs start at id `1` (`data/1.gz`..) — the writer increments `next_pid` before writing the first entry, so `data/0.gz` is never produced.
 - **Latest pack**: `L<seq>.gz` (generation named by `seq` in db.gz). Write-once like the finalized names, so the reader fetches **every** pack with `cache: "force-cache"`; only db.gz is mutable (`no-cache`). The backend GC keeps the current generation plus `latestKeep` (2) older ones as a grace window for stale-db.gz tabs and deletes the rest after each fetch commit; a reader that 404s on its latest pack self-heals with one guarded reload (`data.ts assertPackOk`).
 - **Idx header summary**: `idx/h<N>.gz` (N = finalized idx pack count, named by `hdrs` in db.gz) — the gzip concatenation of the finalized packs' verbatim 1036-byte headers. Write-once name; the writer publishes a new one in the same cycle that finalizes a pack (and `GCSummaries` sweeps superseded names with the same grace window as `GCLatest`). The reader boots from db.gz + summary + latest idx pack only and fetches finalized idx packs lazily by chronIdx addressing; consecutive header deltas give per-pack channel counts, so filtered navigation skips packs without fetching them. When `hdrs` lags `numFinalized` (old backend, warn-only summary failure, post-`gen --bump` gap) or the summary 404s, the reader falls back to eagerly fetching all idx packs — correct, just heavier.
+- **Search shards**: `search/<n>.gz` (finalized, 0-indexed, aligned 1:1 with idx packs), `search/L<seq>.gz` (latest tail, generation-named like `idx/data` latest packs), `search/s<N>.gz` (bloom summary = gzip concatenation of N finalized blooms, named by `srch` in db.gz). `GCSearchSummaries` sweeps superseded `s<g>` names with the same grace window as `GCSummaries`. All search pack names are write-once; the latest tail uses the same GC grace window as the idx/data latest packs.
 - **Finalized idx count**: `total_art > 0 ? Math.floor((total_art - 1) / 50000) : 0`
 - **Finalized data packs**: `id < next_pid`
 

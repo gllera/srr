@@ -186,7 +186,9 @@ func (o *DB) gcSweep(ctx context.Context, cutoff int, what string, keys func(g i
 // stale db.gz.
 func (o *DB) GCLatest(ctx context.Context, keep int) error {
 	return o.gcSweep(ctx, o.core.Seq-keep-1, "latest generation", func(g int) []string {
-		return []string{genKey("idx", g), genKey("data", g)}
+		// Pre-search generations never wrote a search/L name; Rm is silent on
+		// missing keys, so sweeping it unconditionally costs nothing.
+		return []string{genKey("idx", g), genKey("data", g), genKey("search", g)}
 	})
 }
 
@@ -219,10 +221,10 @@ func expectedLatestIdxSize(totalArticles int) int {
 	return idxHeaderSize + latestEntries*2
 }
 
-// readIdxHeader decompresses only the leading idxHeaderSize bytes of an idx
-// pack (gzip decodes from the stream head, so the entries are never
-// inflated).
-func (o *DB) readIdxHeader(ctx context.Context, key string) ([]byte, error) {
+// readPackHeader decompresses only the leading size bytes of a pack (gzip
+// decodes from the stream head, so the entries are never inflated). Used for
+// the idx 1036-byte headers and the search shards' bloom headers.
+func (o *DB) readPackHeader(ctx context.Context, key string, size int) ([]byte, error) {
 	rc, err := o.Get(ctx, key, false)
 	if err != nil {
 		return nil, err
@@ -233,7 +235,7 @@ func (o *DB) readIdxHeader(ctx context.Context, key string) ([]byte, error) {
 		return nil, fmt.Errorf("decompress %s: %w", key, err)
 	}
 	defer gz.Close()
-	hdr := make([]byte, idxHeaderSize)
+	hdr := make([]byte, size)
 	if _, err := io.ReadFull(gz, hdr); err != nil {
 		return nil, fmt.Errorf("read %s header: %w", key, err)
 	}
@@ -261,7 +263,7 @@ func (o *DB) SyncIdxSummary(ctx context.Context) error {
 	}
 	sum := newPack()
 	for k := range n {
-		hdr, err := o.readIdxHeader(ctx, finalizedIdxKey(k))
+		hdr, err := o.readPackHeader(ctx, finalizedIdxKey(k), idxHeaderSize)
 		if err != nil {
 			return err
 		}

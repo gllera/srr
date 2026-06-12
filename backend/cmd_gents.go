@@ -37,6 +37,9 @@ var tsConsts = []struct {
 	{"FETCHED_AT_BLOCK", fetchedAtBlock, "seconds per idx timestamp block (8h): stored fetched_at is unix seconds ÷ this"},
 	{"DELTA_FETCHED_MAX", deltaFetchedMax, "7-bit per-entry delta_fetched_at limit: writer clamp ceiling, reader bit mask"},
 	{"LATEST_KEEP", latestKeep, "superseded L<seq> generations the backend GC keeps as a grace window for stale-db.gz readers"},
+	{"SEARCH_GRAM", searchGram, "rune length of the sliding windows the search blooms index, per folded word"},
+	{"SEARCH_BLOOM_BYTES", searchBloomBytes, "bytes: fixed-size trigram bloom heading each finalized search shard (and per shard in search/s<N>.gz)"},
+	{"SEARCH_BLOOM_K", searchBloomK, "bloom bits set/tested per gram"},
 }
 
 // tsTypes lists the Go structs whose JSON encodings the frontend reads,
@@ -48,6 +51,7 @@ var tsTypes = []struct {
 	typ  reflect.Type
 }{
 	{"IArticleWire", "one JSONL line in data/*.gz (backend ArticleData)", reflect.TypeOf(ArticleData{})},
+	{"ISearchEntryWire", "one JSONL line in search/ shards (backend SearchEntry)", reflect.TypeOf(SearchEntry{})},
 	{"IFeedWire", "per-feed state inside a channel (backend Feed)", reflect.TypeOf(Feed{})},
 	{"IChannelWire", "a db.gz channels{} value (backend Channel)", reflect.TypeOf(Channel{})},
 	{"IDBWire", "db.gz itself (backend DBCore)", reflect.TypeOf(DBCore{})},
