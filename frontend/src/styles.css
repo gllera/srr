@@ -58,9 +58,9 @@ video {
 }
 
 /* width:100% fills the container regardless of the poster image's
-   intrinsic size (Telegram thumbnails are ~320 wide; width:auto would
+   intrinsic size (thumbnails are often small; width:auto would
    pin the box to that until video metadata loaded). aspect-ratio pins
-   the box at the Telegram width/height hint via typed attr() so poster
+   the box at the width/height hint via typed attr() so poster
    and play frame render at the same size — no reflow on first play.
    Pre-2025 browsers no-op the typed attr() and fall back to the
    intrinsic ratio (small residual snap). max-height clamps tall

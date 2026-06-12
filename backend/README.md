@@ -162,7 +162,7 @@ Articles pass through a chain of mods during fetch. The pipe is defined at two l
 
 - `#sanitize` — HTML sanitization (bluemonday)
 - `#minify` — HTML minification (tdewolff/minify)
-- `#youtube` — turns YouTube channel-feed entries into a thumbnail-link card with the video description (no-op for non-YouTube links)
+- `#readability` — fetches an item's `Link` and replaces `Content` with the extracted article body (for teaser-only feeds; fail-open)
 
 **Custom mods** — any shell command that reads/writes JSON via stdin/stdout:
 

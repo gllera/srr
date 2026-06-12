@@ -16,7 +16,7 @@ import (
 type PreviewCmd struct {
 	URL    *url.URL `arg:"" help:"URL to preview."`
 	Pipe   []string `short:"p" sep:"none" help:"Pipeline step to apply; repeat -p per step (not comma-separated)."`
-	Ingest string   `short:"i" help:"Ingest strategy: built-in ('#rss', '#telegram') or shell command. Empty falls back to the db.gz root ingest."`
+	Ingest string   `short:"i" help:"Ingest strategy: built-in ('#rss') or shell command. Empty falls back to the db.gz root ingest."`
 	Addr   string   `short:"a" default:"localhost:8080" env:"SRR_PREVIEW_ADDR" help:"Address to listen on."`
 }
 
@@ -78,7 +78,8 @@ func (o *PreviewCmd) Run() error {
 	ctx := context.Background()
 	client := &http.Client{Timeout: 10 * time.Second}
 	processor := mod.New(nil)
-	engine := ingest.New()
+	engine := ingest.New(ingest.Deps{})
+	defer engine.Close()
 
 	// Resolve the effective pipeline exactly like a channel: an empty -p
 	// inherits the root pipe (which defaults to #sanitize/#minify), so preview

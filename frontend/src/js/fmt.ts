@@ -100,9 +100,9 @@ export function sanitizeHtml(html: string): string {
 // Regex (not DOM parse) keeps this cheap; sanitization runs on actual render.
 // Handles both quoted (`src="..."`) and unquoted (`src=...`) forms because the
 // backend's `#minify` pass (tdewolff/minify) drops attribute quotes when the
-// value has no special chars — that fires for YouTube thumb URLs and Telegram
-// CDN URLs (clean paths, no `?` or `&`), so a quote-only regex missed them
-// entirely and the prefetch list came back empty for those channels.
+// value has no special chars — that fires for clean CDN URLs (no `?` or
+// `&`), so a quote-only regex missed them entirely and the prefetch list
+// came back empty for those channels.
 const IMG_SRC_RE = /<img\b[^>]*\bsrc\s*=\s*(?:(["'])([^"']+)\1|([^\s>]+))/gi
 export function extractImageUrls(html: string): string[] {
    const out: string[] = []

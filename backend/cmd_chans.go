@@ -71,7 +71,7 @@ type AddCmd struct {
 	URLs    *[]string `short:"u" required:"" name:"url"   help:"Channel RSS url(s); repeat to merge multiple feeds under one id."`
 	Tag     *string   `short:"g" optional:""              help:"Channel tag."`
 	Parsers []string  `short:"p" sep:"none" optional:"" help:"Channel pipe step; repeat -p per step (not comma-separated). Empty (\"\") for default."`
-	Ingest  *string   `short:"i" optional:""              help:"Ingest strategy: built-in ('#rss', '#telegram') or shell command."`
+	Ingest  *string   `short:"i" optional:""              help:"Ingest strategy: built-in ('#rss') or shell command."`
 }
 
 // parseFeeds validates URL flag values and reuses any prior Feed whose URL

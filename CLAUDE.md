@@ -67,7 +67,7 @@ Two levels store an optional mod pipeline (`pipe` field): db.gz root and channel
 - An empty channel `pipe` (nil/absent or empty slice) **inherits** root.
 - A non-empty channel `pipe` **overrides** root.
 - The `#base` token inside a channel override expands inline to the root pipe; non-token entries pass through verbatim.
-- Built-in mods use the `#` prefix (`#sanitize`, `#minify`, `#youtube`, `#readability`); anything else is a shell command (see backend `mod/` docs).
+- Built-in mods use the `#` prefix (`#sanitize`, `#minify`, `#readability`); anything else is a shell command (see backend `mod/` docs).
 - When the loaded root `pipe` is nil/absent, `NewDB` substitutes `["#sanitize", "#minify"]` as the default; the value is persisted on the next `Commit`. Clearing root or channel pipe (`srr pipe ""` / `srr chan upd <id> -p ""`) reverts to inherit-root semantics on the next load.
 
 `channels` is a JSON object (`Record<number, IChannel>`) keyed by channel ID. Backend struct: `Channel` holds `Feeds []*Feed`. JSON uses short keys for per-feed state (`feeds`, `pipe`, `ferr`, `wm`, `bg`, etc.) — see `DBCore` struct tags.
@@ -96,7 +96,7 @@ Short keys: `s`=chan_id, `a`=fetched_at, `p`=published (unix seconds, omitted if
 
 Each channel directory: `db.gz` + `idx/` + `data/` (+ optional `assets/`).
 
-- **`assets/`**: self-hosted media downloaded by the `mod.Assets` capability (e.g. `#youtube` thumbnails). Keys are `assets/<2-hex>/<16-hex><ext>` = sha256 of the source URL. Article content stores the **relative** key; the frontend (`fmt.ts`) resolves it against the pack base. Stable content (URL-hash key) ⇒ safe to cache. See `backend/CLAUDE.md` → Asset download capability.
+- **`assets/`**: self-hosted media downloaded by the `mod.Assets` capability (via `RewriteMedia`). Keys are `assets/<2-hex>/<16-hex><ext>` = sha256 of the source URL. Article content stores the **relative** key; the frontend (`fmt.ts`) resolves it against the pack base. Stable content (URL-hash key) ⇒ safe to cache. See `backend/CLAUDE.md` → Asset download capability.
 - **Finalized packs**: immutable, fetched with `cache: "force-cache"`. `idx/` packs are 0-indexed (`idx/0.gz`..`idx/N-1.gz`); `data/` packs start at id `1` (`data/1.gz`..) — the writer increments `next_pid` before writing the first entry, so `data/0.gz` is never produced.
 - **Latest pack**: `true.gz` or `false.gz` (toggled by `data_tog`)
 - **Finalized idx count**: `total_art > 0 ? Math.floor((total_art - 1) / 50000) : 0`

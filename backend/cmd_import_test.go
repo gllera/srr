@@ -252,17 +252,17 @@ func TestApplyImportDefaultsPipeFiltersEmpty(t *testing.T) {
 
 func TestApplyImportDefaultsIngestApplied(t *testing.T) {
 	channels := []*Channel{{Title: "A"}, {Title: "B"}}
-	ingest := "#telegram"
+	ingest := "my-fetcher"
 	applyImportDefaults(channels, nil, &ingest, nil)
 	for _, c := range channels {
-		if c.Ingest != "#telegram" {
-			t.Errorf("c.Ingest = %q, want %q", c.Ingest, "#telegram")
+		if c.Ingest != "my-fetcher" {
+			t.Errorf("c.Ingest = %q, want %q", c.Ingest, "my-fetcher")
 		}
 	}
 }
 
 func TestApplyImportDefaultsIngestClearsToEmpty(t *testing.T) {
-	channels := []*Channel{{Title: "A", Ingest: "#telegram"}}
+	channels := []*Channel{{Title: "A", Ingest: "my-fetcher"}}
 	empty := ""
 	applyImportDefaults(channels, nil, &empty, nil)
 	if channels[0].Ingest != "" {
@@ -275,7 +275,7 @@ func TestImportRunFlagsThreadIntoChannels(t *testing.T) {
 	// fields populated from an ImportCmd. Guards the wiring after the
 	// rename / refactor.
 	parsers := []string{"#sanitize", "#minify"}
-	ingest := "#telegram"
+	ingest := "my-fetcher"
 	tag := "news"
 	o := &ImportCmd{Parsers: parsers, Ingest: &ingest, Tag: &tag}
 
@@ -285,7 +285,7 @@ func TestImportRunFlagsThreadIntoChannels(t *testing.T) {
 	if !slices.Equal(channels[0].Pipe, []string{"#sanitize", "#minify"}) {
 		t.Errorf("Pipe = %v", channels[0].Pipe)
 	}
-	if channels[0].Ingest != "#telegram" {
+	if channels[0].Ingest != "my-fetcher" {
 		t.Errorf("Ingest = %q", channels[0].Ingest)
 	}
 	if channels[0].Tag != "news" {

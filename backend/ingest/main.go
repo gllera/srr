@@ -1,7 +1,7 @@
 // Package ingest abstracts the I/O+parse step that turns a source URL
-// into a slice of mod.RawItems. Built-in fetchers (#rss, #telegram)
-// register themselves at init(); any other name is treated as a shell
-// command per the external-fetcher wire protocol (see Fetcher.Fetch).
+// into a slice of mod.RawItems. The built-in fetcher (#rss) registers
+// itself at init(); any other name is treated as a shell command per the
+// external-fetcher wire protocol (see Fetcher.Fetch).
 //
 // A FetchFunc owns I/O and parsing only — dedup, watermarking, pipeline
 // modules, and storage all stay in the caller (Source.fetch) and operate
@@ -45,6 +45,12 @@ type Result struct {
 	Items        []*mod.RawItem `json:"items,omitempty"`
 }
 
+// Deps are the host capabilities passed to each built-in factory once per
+// New(). It is currently empty — the in-repo built-in (#rss) needs none — but
+// the factory signature keeps it as an extension point for future built-ins.
+// Source-specific strategies live out-of-repo as external shell commands.
+type Deps struct{}
+
 // userAgent is the User-Agent header value sent by built-in HTTP-based
 // fetchers. Kept generic — feed publishers expect a fixed identifier per
 // reader, not a per-version string.
@@ -53,7 +59,7 @@ const userAgent = "SRR"
 // readBody streams body into the caller's per-worker buf via io.ReadFull
 // and maps the three meaningful outcomes: oversize (entire buf filled),
 // empty body, and the expected short-read. what is the source noun used
-// in the size/empty error message ("feed", "telegram page").
+// in the size/empty error message (e.g. "feed").
 func readBody(body io.Reader, buf []byte, what string) ([]byte, error) {
 	n, err := io.ReadFull(body, buf)
 	if err == nil {
@@ -77,12 +83,18 @@ func readBody(body io.Reader, buf []byte, what string) ([]byte, error) {
 // buffer — built-ins should reuse it, external fetchers leave it alone.
 type FetchFunc func(ctx context.Context, client *http.Client, buf []byte, req Request) (Result, error)
 
-var registry = map[string]func() FetchFunc{}
+// A factory builds a built-in's FetchFunc once per New(), receiving the run's
+// Deps so it can capture per-instance state (compiled regexes, a shared
+// connection pool, …). It may return an io.Closer to release that state when
+// the Fetcher is closed (nil if there's nothing to clean up).
+type factory func(Deps) (FetchFunc, io.Closer)
+
+var registry = map[string]factory{}
 
 // Register registers a built-in fetcher available as "#name". Names
 // without a leading "#" get one prepended so init() calls can pass either
 // form.
-func Register(name string, init func() FetchFunc) {
+func Register(name string, init factory) {
 	if !strings.HasPrefix(name, "#") {
 		name = "#" + name
 	}
@@ -122,18 +134,40 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 // built-in instantiated once; Fetch routes per-call by name.
 type Fetcher struct {
 	fetchers map[string]FetchFunc
+	closers  []io.Closer
 	env      []string
 }
 
-func New() *Fetcher {
+// New builds a Fetcher with every registered built-in instantiated once,
+// passing deps to each factory. deps carries optional host capabilities for
+// built-ins that need them (currently none — Deps is empty). Call Close after
+// the fetch run to release any resources held by stateful built-ins.
+func New(deps Deps) *Fetcher {
 	f := &Fetcher{
 		fetchers: make(map[string]FetchFunc, len(registry)),
 		env:      os.Environ(),
 	}
 	for name, init := range registry {
-		f.fetchers[name] = init()
+		fn, closer := init(deps)
+		f.fetchers[name] = fn
+		if closer != nil {
+			f.closers = append(f.closers, closer)
+		}
 	}
 	return f
+}
+
+// Close releases resources held by built-in fetchers (e.g. a network
+// connection kept open across the run). A Fetcher with no stateful built-ins
+// closes to a no-op.
+func (f *Fetcher) Close() error {
+	var err error
+	for _, c := range f.closers {
+		if cerr := c.Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+	}
+	return err
 }
 
 // Fetch dispatches by name. A built-in registered as "#name" runs its
