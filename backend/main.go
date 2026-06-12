@@ -110,6 +110,24 @@ func assetCacheRoot() string {
 	return filepath.Join(os.TempDir(), "srr")
 }
 
+// envFirstResolver wraps the YAML config resolver so an explicitly-set
+// environment variable wins over the config file, restoring the documented
+// precedence (CLI flag > env var > config file > default). kong applies a
+// flag's env: tag during Reset but does not record the value as "already set",
+// so a later-running config resolver would otherwise silently override an
+// SRR_*-provided value — e.g. a stale `store:` in srr.yaml beating SRR_STORE.
+// CLI flags are unaffected: kong records those before resolvers run.
+func envFirstResolver(inner kong.Resolver) kong.Resolver {
+	return kong.ResolverFunc(func(ctx *kong.Context, parent *kong.Path, flag *kong.Flag) (any, error) {
+		for _, env := range flag.Tag.Envs {
+			if _, ok := os.LookupEnv(env); ok {
+				return nil, nil
+			}
+		}
+		return inner.Resolve(ctx, parent, flag)
+	})
+}
+
 func main() {
 	var cli CLI
 	globals = &cli.Globals
@@ -130,7 +148,7 @@ func main() {
 		},
 		kong.Name("srr"),
 		kong.Description("Static RSS Reader backend."),
-		kong.Resolvers(resolver),
+		kong.Resolvers(envFirstResolver(resolver)),
 		kong.ShortUsageOnError(),
 		kong.ConfigureHelp(kong.HelpOptions{
 			Compact:             true,
