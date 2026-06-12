@@ -14,6 +14,8 @@
     "servep": "npx serve --cors ../packs",
     "build": "parcel build --no-cache --no-source-maps",
     "test": "vitest run",
+    "test-contract": "vitest run --config vitest.contract.config.ts",
+    "test-browser": "vitest run --config vitest.browser.config.ts",
     "lint": "eslint src/js",
     "format": "prettier --write src",
     "format-check": "prettier --check src"
@@ -26,6 +28,7 @@
     "jsdom": "^29.0.1",
     "parcel": "^2.16.4",
     "prettier": "^3.8.1",
+    "puppeteer": "25.0.2",
     "serve": "^14.2.6",
     "typescript-eslint": "^8.58.0",
     "vitest": "^4.1.2"
