@@ -42,6 +42,20 @@ describe("contract: sanitize/minify pipeline", () => {
       expect(art.c).toContain("bold survives")
    })
 
+   it("renders no executable nodes when the stored content is parsed into the DOM", async () => {
+      // String checks above can miss markup that only a DOM parser normalizes.
+      // Parse the stored content the way the SPA does and assert the live DOM
+      // carries no script/style/event-handler/js-url nodes.
+      const art = await reader.data.loadArticle(0)
+      const div = document.createElement("div")
+      div.innerHTML = art.c
+      expect(div.querySelector("script")).toBeNull()
+      expect(div.querySelector("style")).toBeNull()
+      expect(div.querySelector("[onerror]")).toBeNull()
+      expect(div.querySelector('a[href^="javascript:"]')).toBeNull()
+      expect(div.textContent).toContain("safe text")
+   })
+
    it("backend inspect --validate agrees", async () => {
       expect(await inspectValidate(store)).toContain("OK: all checks passed")
    })

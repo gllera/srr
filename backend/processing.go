@@ -47,15 +47,23 @@ func processItem(ctx context.Context, processor *mod.Module, pipeline []string, 
 	return nil
 }
 
+// isC1 reports whether r is a C1 control (U+0080–U+009F). C1 controls have no
+// printable glyph and no legitimate use in feed text, but survive #sanitize /
+// #minify, so they would otherwise reach the reader (e.g. via a numeric ref
+// like &#x9b;) and corrupt rendering or smuggle control bytes downstream.
+func isC1(r rune) bool {
+	return r >= 0x80 && r <= 0x9f
+}
+
 func stripControl(r rune) rune {
-	if r <= ' ' || r == 0x7f {
+	if r <= ' ' || r == 0x7f || isC1(r) {
 		return -1
 	}
 	return r
 }
 
 func stripControlKeepWS(r rune) rune {
-	if r < ' ' && r != '\t' && r != '\n' && r != '\r' {
+	if (r < ' ' && r != '\t' && r != '\n' && r != '\r') || r == 0x7f || isC1(r) {
 		return -1
 	}
 	return r

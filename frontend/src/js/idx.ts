@@ -3,7 +3,7 @@ const IDX_HEADER_SIZE = 259 * 4 // 3 state uint32 + 256 chanCounts uint32
 
 export interface IdxPack {
    chanIds: Uint8Array
-   fetchedAts: Uint16Array
+   fetchedAts: Uint32Array
    chanCounts: Uint32Array
    ownChanCounts: Uint32Array
    bounds: { packId: number; startChron: number }[]
@@ -42,7 +42,7 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
       chanIds: new Uint8Array(0),
       chanCounts: new Uint32Array(0),
       ownChanCounts: new Uint32Array(0),
-      fetchedAts: new Uint16Array(0),
+      fetchedAts: new Uint32Array(0),
       bounds: [],
       parse() {
          if (!rawBuf) return pack
@@ -64,7 +64,10 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
          }
 
          const chanIds = new Uint8Array(packSize)
-         const fetchedAts = new Uint16Array(packSize)
+         // Uint32 (not Uint16): fetchedAt accumulates 8h-blocks since
+         // first_fetched; a Uint16 ceiling wraps after ~60y of continuous
+         // fetching (65535 blocks), silently corrupting time-range jumps.
+         const fetchedAts = new Uint32Array(packSize)
          pack.chanIds = chanIds
          pack.fetchedAts = fetchedAts
          const bytes = new Uint8Array(rawBuf)

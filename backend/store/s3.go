@@ -117,6 +117,10 @@ func (d *S3) Get(ctx context.Context, key string, ignoreMissing bool) (io.ReadCl
 }
 
 func (d *S3) Put(ctx context.Context, key string, r io.Reader, ignoreExisting bool) error {
+	// Resolve the cache class from the logical key before it gets the path
+	// prefix, so the CDN serves finalized packs immutable and db.gz/latest
+	// always-revalidate.
+	cacheControl := cacheControlForKey(key)
 	key = d.s3path("write", key)
 
 	var condition *string
@@ -132,14 +136,19 @@ func (d *S3) Put(ctx context.Context, key string, r io.Reader, ignoreExisting bo
 		contentType = aws.String(ct)
 	}
 
-	_, err := d.client.PutObject(ctx, &s3.PutObjectInput{
+	input := &s3.PutObjectInput{
 		Bucket:            aws.String(d.bucket),
 		Key:               aws.String(key),
 		Body:              r,
 		ContentType:       contentType,
 		IfNoneMatch:       condition,
 		ChecksumAlgorithm: types.ChecksumAlgorithmCrc32,
-	})
+	}
+	if cacheControl != "" {
+		input.CacheControl = aws.String(cacheControl)
+	}
+
+	_, err := d.client.PutObject(ctx, input)
 
 	switch apiErrorCode(err) {
 	case s3ErrPreconditionFailed:

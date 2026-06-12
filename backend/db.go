@@ -54,12 +54,15 @@ type DB struct {
 }
 
 type DBCore struct {
-	DataToggle      bool             `json:"data_tog"`
-	FetchedAt       int64            `json:"fetched_at"`
-	TotalArticles   int              `json:"total_art"`
-	NextPackID      int              `json:"next_pid"`
-	PackOffset      int              `json:"pack_off"`
-	FirstFetchedAt  int64            `json:"first_fetched,omitempty"`
+	DataToggle    bool  `json:"data_tog"`
+	FetchedAt     int64 `json:"fetched_at"`
+	TotalArticles int   `json:"total_art"`
+	NextPackID    int   `json:"next_pid"`
+	PackOffset    int   `json:"pack_off"`
+	// FirstFetchedAt is NOT omitempty: the reader divides by it
+	// (frontend data.ts findChronForTimestamp) so the key must always be
+	// present in db.gz — an absent key would decode to undefined → NaN.
+	FirstFetchedAt  int64            `json:"first_fetched"`
 	FetchedAtCursor int              `json:"fetched_at_cur,omitempty"`
 	Pipe            []string         `json:"pipe,omitempty"`
 	Ingest          string           `json:"ingest,omitempty"`

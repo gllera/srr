@@ -4,7 +4,7 @@ declare const process: { env: { NODE_ENV: string } }
 interface IDB {
    data_tog: boolean
    fetched_at: number
-   first_fetched: number
+   first_fetched?: number
    total_art: number
    next_pid: number
    pack_off: number

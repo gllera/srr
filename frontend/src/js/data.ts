@@ -57,7 +57,10 @@ export function getChannelId(chronIdx: number): number {
 
 // Binary search for leftmost entry where fetchedAt >= ts.
 export function findChronForTimestamp(ts: number): number {
-   const tsBlocks = Math.trunc(ts / 28800) - Math.trunc(db.first_fetched / 28800)
+   // `?? 0` guards a hand-edited/migrated db.gz missing first_fetched: the
+   // writer always emits it (omitempty dropped backend-side), but an absent
+   // key would make the subtraction NaN and collapse the search to index 0.
+   const tsBlocks = Math.trunc(ts / 28800) - Math.trunc((db.first_fetched ?? 0) / 28800)
    let lo = 0
    let hi = db.total_art
    while (lo < hi) {
