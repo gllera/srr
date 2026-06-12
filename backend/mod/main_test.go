@@ -172,7 +172,7 @@ func TestRegisterBuiltins(t *testing.T) {
 	m := New(nil)
 
 	// Verify built-in processors are registered
-	builtins := []string{"#sanitize", "#minify"}
+	builtins := []string{"#sanitize", "#minify", "#youtube", "#readability"}
 	for _, name := range builtins {
 		if _, ok := m.processors[name]; !ok {
 			t.Errorf("built-in %q not registered", name)

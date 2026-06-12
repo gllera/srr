@@ -71,11 +71,12 @@ Backend-specific behavior:
 
 ### Module System (`mod/`)
 
-Pipeline per-channel during fetch. Factory pattern: `New(assets)` returns a fresh stateful processor; each built-in factory receives the run's `mod.Assets` capability (see below).
+Pipeline per-channel during fetch. Factory pattern: `New(assets)` returns a fresh stateful processor; each built-in factory receives the run's `mod.Assets` capability (see below). A built-in processor is `func(context.Context, *RawItem) error` (the ctx is the per-fetch context, threaded through `Module.Process`); most built-ins ignore it, but network-bound ones like `#readability` use it for cancellation/deadline.
 
 - `#sanitize` — bluemonday, content-only.
 - `#minify` — tdewolff/minify, content-only.
 - `#youtube` — replaces `Content` with a thumbnail-link card (`https://i.ytimg.com/vi/<id>/hqdefault.jpg` linked to `watch?v=<id>`) plus the description; description source preference is `media:group/media:description` → entry-level `description`/`summary` → existing `Content`. Recognises `youtube.com` (`watch?v=`, `/embed/`, `/v/`, `/shorts/`, `/live/`), `youtu.be`, `m./music.` and `youtube-nocookie.com`. Non-YouTube `Link`s are skipped (Content untouched), so the module is safe in mixed pipelines. After building the card it runs the content through `RewriteMedia` (below) so the thumbnail self-hosts when a store is wired.
+- `#readability` — for feeds that syndicate only a teaser/summary: HTTP-GETs the item's `Link` (browser-like UA, 20s timeout, 8 MiB body cap) and replaces `Content` with the article's main body extracted via `go-shiori/go-readability`. **Fail-open**: empty/invalid link, non-2xx, fetch/parse error, or empty extraction all leave `Content` untouched and return nil (logged at WARN) — one bad article never fails the fetch. Place it **before** `#sanitize`/`#minify` (e.g. channel pipe `["#readability", "#base"]`) so the fetched HTML gets clamped to the allowed element set. Network-bound, so unlike the other built-ins it honours the fetch `context` (cancellation/deadline).
 - External modules: `/bin/sh -c`, stdin/stdout JSON (`RawItem`), stderr passthrough.
 
 #### Asset download capability (`mod.Assets` + `RewriteMedia`)
