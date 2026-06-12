@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -84,6 +85,30 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 		engine := ingest.New(ingest.Deps{})
 		defer engine.Close()
 
+		// One asset cache dir shared by every external-ingest feed this run,
+		// created once. Each external command runs with this as its working
+		// directory and chooses its own file layout inside it. Creation is
+		// mandatory: handing a command an empty working dir would run it in SRR's
+		// own cwd (littering it, and its self-hosted files would never upload), so
+		// a dir we can't create is a hard error, not a silent disable. Override
+		// the location with --cache-dir/SRR_CACHE_DIR if the default is unwritable.
+		cacheDir := assetCacheRoot()
+		if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+			return fmt.Errorf("create asset cache dir %q: %w", cacheDir, err)
+		}
+
+		// Run-scoped deps shared across all workers (all concurrent-safe). The
+		// per-worker buf/processor are pulled from their pools inside each worker.
+		run := &fetchRun{
+			client:     client,
+			engine:     engine,
+			assets:     assets,
+			cacheDir:   cacheDir,
+			fetchedAt:  db.core.FetchedAt,
+			rootPipe:   db.core.Pipe,
+			rootIngest: db.core.Ingest,
+		}
+
 		g, gctx := errgroup.WithContext(ctx)
 		g.SetLimit(globals.Workers)
 
@@ -96,7 +121,7 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 				defer bufPool.Put(buf)
 				processor := procPool.Get().(*mod.Module)
 				defer procPool.Put(processor)
-				ch.Fetch(gctx, client, buf, processor, engine, db.core.FetchedAt, db.core.Pipe, db.core.Ingest)
+				ch.Fetch(gctx, run, buf, processor)
 				return nil
 			})
 		}

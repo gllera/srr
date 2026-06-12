@@ -216,3 +216,71 @@ func TestCappedBufferLimit(t *testing.T) {
 		t.Fatal("over limit: expected error, got nil")
 	}
 }
+
+// --- external working directory ---------------------------------------------
+//
+// The engine no longer owns asset upload: it only runs the command in the
+// caller-provided Request.AssetDir (its working directory). Upload of the files
+// the command downloads there is the caller's end-of-pipeline step, exercised
+// in the main package (assets_test.go).
+
+const assetTestURL = "https://example.com/feed"
+
+// TestExternalFetcherRunsInProvidedDir confirms the command runs in the
+// caller-provided Request.AssetDir — so it can read/write files with plain
+// relative paths — and that the directory round-trips to the command as
+// Request.asset_dir.
+func TestExternalFetcherRunsInProvidedDir(t *testing.T) {
+	requireSh(t)
+
+	dir := t.TempDir()
+	// The command writes the request to a relative path and touches a marker;
+	// both land in its working directory, which must be AssetDir.
+	cmd := `cat > req.json; : > marker.txt; echo '{"items":[]}'`
+
+	_, err := New(Deps{}).Fetch(context.Background(), cmd, nil, nil, Request{URL: assetTestURL, AssetDir: dir})
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+
+	// Relative writes from the command landed in dir => it was the cwd.
+	if _, err := os.Stat(filepath.Join(dir, "marker.txt")); err != nil {
+		t.Errorf("command did not run in the provided dir: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "req.json"))
+	if err != nil {
+		t.Fatalf("read captured request: %v", err)
+	}
+	var got Request
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("decode request: %v", err)
+	}
+	if got.AssetDir != dir {
+		t.Errorf("Request.asset_dir = %q, want %q", got.AssetDir, dir)
+	}
+}
+
+// TestExternalFetcherNoAssetDir confirms that with no AssetDir set (preview,
+// self-hosting disabled) the command receives an empty asset_dir and the engine
+// leaves the calling process's working directory unchanged.
+func TestExternalFetcherNoAssetDir(t *testing.T) {
+	requireSh(t)
+
+	reqOut := filepath.Join(t.TempDir(), "req.json")
+	cmd := fmt.Sprintf(`cat > %s; echo '{"items":[]}'`, reqOut)
+
+	if _, err := New(Deps{}).Fetch(context.Background(), cmd, nil, nil, Request{URL: assetTestURL}); err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	data, err := os.ReadFile(reqOut)
+	if err != nil {
+		t.Fatalf("read captured request: %v", err)
+	}
+	var got Request
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("decode request: %v", err)
+	}
+	if got.AssetDir != "" {
+		t.Errorf("asset_dir should be empty when unset, got %q", got.AssetDir)
+	}
+}

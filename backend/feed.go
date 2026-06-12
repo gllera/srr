@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/http"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 
 	"srrb/ingest"
 	"srrb/mod"
@@ -31,14 +33,20 @@ type Feed struct {
 // dedup / watermark / pipeline path stays uniform across the built-in
 // (#rss) and external ingest strategies. ingestName is resolved once per channel
 // by Channel.Fetch and shared across all feeds in the channel.
-func (feed *Feed) fetch(ctx context.Context, client *http.Client, buf []byte, processor *mod.Module, engine *ingest.Fetcher, ch *Channel, fetchedAt int64, pipeline []string, ingestName string) ([]*Item, error) {
+func (feed *Feed) fetch(ctx context.Context, run *fetchRun, buf []byte, processor *mod.Module, ch *Channel, pipeline []string, ingestName string) ([]*Item, error) {
 	slog.Debug("downloading feed", "url", feed.URL, "channel", ch)
 
-	result, err := engine.Fetch(ctx, ingestName, client, buf, ingest.Request{
+	// Every fetcher gets the run's shared cache dir as its working directory
+	// (Request.AssetDir, always non-empty here — created in FetchCmd.fetch) and
+	// may self-host files it leaves there: the post-pipeline upload step below
+	// scans each item for "#"-markers naming a real file in the dir and uploads
+	// them. Built-in or external, the fetcher owns the layout inside.
+	result, err := run.engine.Fetch(ctx, ingestName, run.client, buf, ingest.Request{
 		URL:          feed.URL,
 		ETag:         feed.ETag,
 		LastModified: feed.LastModified,
 		MaxSize:      cap(buf) - 1,
+		AssetDir:     run.cacheDir,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("ingest %q: %w", ingestName, err)
@@ -81,7 +89,7 @@ func (feed *Feed) fetch(ctx context.Context, client *http.Client, buf []byte, pr
 				// Clamp future-dated items so a publisher CMS bug
 				// (year-2099 default) can't push Watermark past now and
 				// silently swallow every subsequent real item.
-				pubUnix = min(u, fetchedAt)
+				pubUnix = min(u, run.fetchedAt)
 			}
 		}
 
@@ -110,6 +118,44 @@ func (feed *Feed) fetch(ctx context.Context, client *http.Client, buf []byte, pr
 			// boundary, so it is not retried next fetch.
 			slog.Warn("dropping item: pipeline error", "url", feed.URL, "link", i.Link, "err", err)
 			continue
+		}
+		// Store-side end-of-pipeline step, kept out of processItem (which stays a
+		// pure, store-free transform): scan the item's self-hostable attributes
+		// (img/video src/poster, a href — see mod.RewriteAttrs) for upload markers
+		// and rewrite them to their final store keys. A marker is a value starting
+		// with "#" whose remainder names a regular file the fetcher left in
+		// run.cacheDir (e.g. "#/photo.jpg"); a "#..." naming no such file is an
+		// ordinary in-page fragment (#section), left as-is. RewriteAttrs returns
+		// content untouched when nothing matches, so it runs unconditionally.
+		//
+		// A failed upload (store error, or an UploadCacheRef guard tripping on
+		// oversize/traversal) hard-fails the whole feed fetch rather than publish
+		// an item still pointing at "#/..." for an asset that never reached the
+		// store. Feed state (watermark, dedup, etag) is left untouched on the
+		// error path, so a transient store failure self-heals next fetch; a
+		// permanently-rejected asset (e.g. over SRR_MAX_MEDIA_SIZE) wedges the
+		// feed until it is fixed.
+		i.Content, err = mod.RewriteAttrs(i.Content, func(val string) (string, bool, error) {
+			if !strings.HasPrefix(val, "#") {
+				return "", false, nil
+			}
+			local := strings.TrimPrefix(val, "#")
+			// Only values naming an existing regular file are upload markers, so a
+			// bare fragment (#section) is left untouched; Lstat also mirrors
+			// UploadCacheRef's own check, telling such a fragment apart from a
+			// genuine upload failure.
+			full := filepath.Join(run.cacheDir, filepath.FromSlash(local))
+			if fi, err := os.Lstat(full); err != nil || !fi.Mode().IsRegular() {
+				return "", false, nil
+			}
+			key, err := run.assets.UploadCacheRef(ctx, run.cacheDir, local)
+			if err != nil {
+				return "", false, fmt.Errorf("self-host asset %q: %w", local, err)
+			}
+			return key, true, nil
+		})
+		if err != nil {
+			return nil, err
 		}
 		items = append(items, &Item{
 			Channel:   ch,

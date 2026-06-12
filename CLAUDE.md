@@ -96,7 +96,7 @@ Short keys: `s`=chan_id, `a`=fetched_at, `p`=published (unix seconds, omitted if
 
 Each channel directory: `db.gz` + `idx/` + `data/` (+ optional `assets/`).
 
-- **`assets/`**: self-hosted media downloaded by the `mod.Assets` capability (via `RewriteMedia`). Keys are `assets/<2-hex>/<16-hex><ext>` = sha256 of the source URL. Article content stores the **relative** key; the frontend (`fmt.ts`) resolves it against the pack base. Stable content (URL-hash key) ⇒ safe to cache. See `backend/CLAUDE.md` → Asset download capability.
+- **`assets/`**: self-hosted files (images, video, linked documents). Keys are `assets/<2-hex>/<16-hex><ext>`, the hash being sha256 of the **source URL** (the `mod.Assets`/`RewriteMedia` HTTP path) or sha256 of the **file bytes** (the external-ingest path: an external command downloads files into the run's shared ingest cache and marks them in content with a `#`-prefixed relative path; SRR's automatic end-of-pipeline step uploads them via `assetFetcher.UploadCacheRef` and rewrites the marker to the key). Article content stores the **relative** key; the frontend (`fmt.ts`) resolves `<img src>`/`<video src>`/`<a href>` against the pack base. Either hash is stable for given input ⇒ safe to cache. See `backend/CLAUDE.md` → Asset download capability and Ingest.
 - **Finalized packs**: immutable, fetched with `cache: "force-cache"`. `idx/` packs are 0-indexed (`idx/0.gz`..`idx/N-1.gz`); `data/` packs start at id `1` (`data/1.gz`..) — the writer increments `next_pid` before writing the first entry, so `data/0.gz` is never produced.
 - **Latest pack**: `true.gz` or `false.gz` (toggled by `data_tog`)
 - **Finalized idx count**: `total_art > 0 ? Math.floor((total_art - 1) / 50000) : 0`

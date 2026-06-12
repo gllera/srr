@@ -65,9 +65,28 @@ func (c *Channel) LogValue() slog.Value {
 	)
 }
 
-func (c *Channel) Fetch(ctx context.Context, client *http.Client, buf []byte, processor *mod.Module, engine *ingest.Fetcher, fetchedAt int64, rootPipe []string, rootIngest string) {
+// fetchRun bundles the run-scoped dependencies shared by every channel and feed
+// in a single fetch: built once in FetchCmd.fetch and concurrent-safe, so one
+// *fetchRun is shared across all workers. The genuinely per-worker values (the
+// pooled read buffer and module processor) stay separate call parameters.
+type fetchRun struct {
+	client *http.Client
+	engine *ingest.Fetcher
+	// assets is the content-addressed uploader for files a fetcher self-hosts
+	// into cacheDir; feed.fetch's end-of-pipeline step calls UploadCacheRef on it.
+	assets *assetFetcher
+	// cacheDir is the single download/working dir shared by every feed this run,
+	// built once in FetchCmd.fetch (always non-empty). Any fetcher (built-in or
+	// external) may stash files here and self-host them, owning the layout inside.
+	cacheDir   string
+	fetchedAt  int64
+	rootPipe   []string
+	rootIngest string
+}
+
+func (c *Channel) Fetch(ctx context.Context, run *fetchRun, buf []byte, processor *mod.Module) {
 	c.newItems = c.newItems[:0]
-	pipe := resolvePipe(rootPipe, c.Pipe)
+	pipe := resolvePipe(run.rootPipe, c.Pipe)
 	// Validate the resolved pipeline once, before the item loop. A bad token
 	// (unknown built-in, stray #base, malformed params) is a config error that
 	// would fail identically for every item; surface it loudly here instead of
@@ -80,9 +99,9 @@ func (c *Channel) Fetch(ctx context.Context, client *http.Client, buf []byte, pr
 		}
 		return
 	}
-	ingestName := ingest.Select(c.Ingest, rootIngest)
+	ingestName := ingest.Select(c.Ingest, run.rootIngest)
 	for _, feed := range c.Feeds {
-		items, err := feed.fetch(ctx, client, buf, processor, engine, c, fetchedAt, pipe, ingestName)
+		items, err := feed.fetch(ctx, run, buf, processor, c, pipe, ingestName)
 		if err != nil {
 			feed.FetchError = err.Error()
 			slog.Error("feed fetch failed", "channel", c, "url", feed.URL, "err", err)
