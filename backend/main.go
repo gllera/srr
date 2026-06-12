@@ -142,6 +142,13 @@ func main() {
 		globals.MaxFeedSize = 5000
 	}
 
+	// Floor like the other size globals: a value <= 0 would make the asset
+	// fetcher's maxBytes <= 0, which disables every size-cap guard and lets an
+	// attacker-controlled response stream unbounded into memory/the store.
+	if globals.MaxMediaSize < 1 {
+		globals.MaxMediaSize = 25000
+	}
+
 	if globals.Workers < 1 {
 		globals.Workers = runtime.NumCPU()
 	}
