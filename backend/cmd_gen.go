@@ -16,6 +16,11 @@ func (o *GenCmd) Run() error {
 			return printJSON(db.core.Gen)
 		}
 		db.core.Gen++
+		// An in-place rebuild reuses finalized idx pack names with new bytes,
+		// so the published summary's copied headers may be stale too. Reset
+		// so the next fetch rebuilds idx/h<N>.gz; readers fall back to eager
+		// idx loading in the gap.
+		db.core.HdrPacks = 0
 		return db.Commit(ctx)
 	})
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 )
 
 // ArticleData is the on-disk JSONL representation of an article (one
@@ -40,6 +41,12 @@ func genKey(prefix string, gen int) string {
 // "data") from the store generation in core.Seq.
 func latestKey(core *DBCore, prefix string) string {
 	return genKey(prefix, core.Seq)
+}
+
+// summaryKey resolves the idx header-summary key covering n finalized idx
+// packs.
+func summaryKey(n int) string {
+	return fmt.Sprintf("idx/h%d.gz", n)
 }
 
 // dataKeyFor resolves a data pack key from a packID: finalized packs
@@ -167,13 +174,96 @@ func (o *DB) GCLatest(ctx context.Context, keep int) error {
 	return nil
 }
 
+// GCSummaries deletes superseded idx header summaries (idx/h<g>.gz), keeping
+// the current one plus `keep` older names as a grace window for readers
+// holding a stale db.gz, with the same trailing sweep as GCLatest. Unlike
+// Seq, HdrPacks advances by the number of packs finalized in a batch, so a
+// >1 jump can strand an old summary outside every future window — a harmless
+// ~1KB-per-50k-articles leak; the reader treats a missing summary by falling
+// back to eager idx loading, so nothing user-visible depends on this sweep.
+func (o *DB) GCSummaries(ctx context.Context, keep int) error {
+	cutoff := o.core.HdrPacks - keep - 1
+	for g := cutoff; g > cutoff-4 && g >= 1; g-- {
+		if err := o.Rm(ctx, summaryKey(g)); err != nil {
+			return fmt.Errorf("gc idx summary %d: %w", g, err)
+		}
+	}
+	return nil
+}
+
+// numFinalizedIdx is the number of finalized idx packs for a given article
+// count. Mirrors the frontend's numFinalizedIdx (data.ts).
+func numFinalizedIdx(totalArticles int) int {
+	if totalArticles == 0 {
+		return 0
+	}
+	return (totalArticles - 1) / idxPackSize
+}
+
 func expectedLatestIdxSize(totalArticles int) int {
 	if totalArticles == 0 {
 		return 0
 	}
-	numFinalized := (totalArticles - 1) / idxPackSize
-	latestEntries := totalArticles - numFinalized*idxPackSize
+	latestEntries := totalArticles - numFinalizedIdx(totalArticles)*idxPackSize
 	return idxHeaderSize + latestEntries*2
+}
+
+// readIdxHeader decompresses only the leading idxHeaderSize bytes of an idx
+// pack (gzip decodes from the stream head, so the entries are never
+// inflated).
+func (o *DB) readIdxHeader(ctx context.Context, key string) ([]byte, error) {
+	rc, err := o.Get(ctx, key, false)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	gz, err := gzip.NewReader(rc)
+	if err != nil {
+		return nil, fmt.Errorf("decompress %s: %w", key, err)
+	}
+	defer gz.Close()
+	hdr := make([]byte, idxHeaderSize)
+	if _, err := io.ReadFull(gz, hdr); err != nil {
+		return nil, fmt.Errorf("read %s header: %w", key, err)
+	}
+	return hdr, nil
+}
+
+// SyncIdxSummary publishes idx/h<N>.gz — the gzip concatenation of the
+// 1036-byte headers of the N finalized idx packs — whenever db.gz's HdrPacks
+// lags the store: a pack finalized this run, a pre-summary store's first run
+// after upgrade, or a post-`srr gen --bump` reset. It always rebuilds from
+// scratch by re-reading each finalized pack's header, keeping one code path
+// that self-heals any prior state (the rebuild costs N small reads and runs
+// once per 50k articles). HdrPacks is set only after the save succeeds and
+// the caller's Commit publishes it — so, like L<Seq+1>, no reader can learn
+// the h<N> name before its content is durable, and a crash-retry overwrite
+// is invisible.
+func (o *DB) SyncIdxSummary(ctx context.Context) error {
+	c := &o.core
+	n := numFinalizedIdx(c.TotalArticles)
+	if c.HdrPacks == n {
+		return nil
+	}
+	if n == 0 {
+		c.HdrPacks = 0
+		return nil
+	}
+	sum := newPack()
+	for k := 0; k < n; k++ {
+		hdr, err := o.readIdxHeader(ctx, fmt.Sprintf("idx/%d.gz", k))
+		if err != nil {
+			return err
+		}
+		if _, err := sum.Write(hdr); err != nil {
+			return err
+		}
+	}
+	if err := o.savePack(ctx, summaryKey(n), sum); err != nil {
+		return err
+	}
+	c.HdrPacks = n
+	return nil
 }
 
 func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {

@@ -21,9 +21,10 @@ describe("contract: filtering & navigation", () => {
    const tech = nItems(2, "tech", 0, 10)
    const sport = nItems(2, "sport", 0, 20)
 
-   const walkRight = (channels: Map<number, number>): number[] => {
+   const walkRight = async (channels: Map<number, number>): Promise<number[]> => {
       const out: number[] = []
-      for (let i = reader.data.findRight(0, channels); i !== -1; i = reader.data.findRight(i + 1, channels)) out.push(i)
+      for (let i = await reader.data.findRight(0, channels); i !== -1; i = await reader.data.findRight(i + 1, channels))
+         out.push(i)
       return out
    }
 
@@ -46,17 +47,19 @@ describe("contract: filtering & navigation", () => {
       if (store) rmSync(store, { recursive: true, force: true })
    })
 
-   it("tag filter scans exactly the tagged channels' articles", () => {
+   it("tag filter scans exactly the tagged channels' articles", async () => {
       reader.nav.filter.set(["world"])
-      expect(walkRight(reader.nav.filter.channels)).toEqual([0, 1, 2, 3])
-      expect(reader.data.countLeft(reader.data.db.total_art, reader.nav.filter.channels)).toBe(4)
-      expect(reader.data.findLeft(5, reader.nav.filter.channels)).toBe(3)
+      expect(await walkRight(reader.nav.filter.channels)).toEqual([0, 1, 2, 3])
+      expect(await reader.data.countLeft(reader.data.db.total_art, reader.nav.filter.channels)).toBe(4)
+      expect(reader.data.countAll(reader.nav.filter.channels)).toBe(4)
+      expect(await reader.data.findLeft(5, reader.nav.filter.channels)).toBe(3)
    })
 
-   it("single-channel filter scans only that channel", () => {
+   it("single-channel filter scans only that channel", async () => {
       reader.nav.filter.set(["0"]) // News
-      expect(walkRight(reader.nav.filter.channels)).toEqual([0, 1])
-      expect(reader.data.countLeft(reader.data.db.total_art, reader.nav.filter.channels)).toBe(2)
+      expect(await walkRight(reader.nav.filter.channels)).toEqual([0, 1])
+      expect(await reader.data.countLeft(reader.data.db.total_art, reader.nav.filter.channels)).toBe(2)
+      expect(reader.data.countAll(reader.nav.filter.channels)).toBe(2)
    })
 
    it("nav.switchFilter + right() visits the tag subset in chronIdx order", async () => {

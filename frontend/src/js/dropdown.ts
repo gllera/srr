@@ -222,11 +222,11 @@ export function showChannelMenu(currentTag: string, guard: (fn: () => Promise<IS
          rebuild()
          return
       }
-      guard(() => {
+      guard(async () => {
          if (value === "!last") return nav.last()
          if (value.startsWith("t:")) {
             const ts = Math.floor(Date.now() / 1000) - Number(value.slice(2))
-            return nav.goTo(data.findChronForTimestamp(ts))
+            return nav.goTo(await data.findChronForTimestamp(ts))
          }
          return nav.switchFilter(value)
       })

@@ -8,7 +8,7 @@ const data = vi.hoisted(() => ({
    } as unknown as IDB,
    loadArticle: vi.fn<(chronIdx: number) => Promise<IArticle>>(),
    groupChannelsByTag: vi.fn(() => ({ tagged: new Map(), sortedTags: [] as string[], untagged: [] as IChannel[] })),
-   findChronForTimestamp: vi.fn(() => 0),
+   findChronForTimestamp: vi.fn(async () => 0),
    getChannelId: vi.fn<(chronIdx: number) => number>(),
    countLeft: vi.fn((chronIdx: number, channels: Map<number, number>) => {
       let count = 0
@@ -19,6 +19,7 @@ const data = vi.hoisted(() => ({
       }
       return count
    }),
+   countAll: vi.fn((channels: Map<number, number>) => data.countLeft(data.db.total_art, channels)),
    findLeft: vi.fn((from: number, channels: Map<number, number>) => {
       for (let i = from; i >= 0; i--) {
          const chanId = data.getChannelId(i)
@@ -918,9 +919,9 @@ describe("goTo", () => {
          { chanId: 2, fetchedAt: 20 },
          { chanId: 3, fetchedAt: 30 },
       ])
-      data.findChronForTimestamp.mockReturnValueOnce(1)
+      data.findChronForTimestamp.mockResolvedValueOnce(1)
       await nav.fromHash("0")
-      const target = data.findChronForTimestamp(25)
+      const target = await data.findChronForTimestamp(25)
       const result = await nav.goTo(target)
       expect(target).toBe(1)
       expect(data.loadArticle).toHaveBeenLastCalledWith(1)

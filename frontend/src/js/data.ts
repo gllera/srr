@@ -1,6 +1,6 @@
 import { makeLRU } from "./cache"
 import { FETCHED_AT_BLOCK } from "./format.gen"
-import { IDX_PACK_SIZE, makeIdxPack, type IdxPack } from "./idx"
+import { findPackForBlocks, IDX_PACK_SIZE, makeIdxPack, parseIdxHeaders, type IdxHeader, type IdxPack } from "./idx"
 
 export { IDX_PACK_SIZE }
 
@@ -14,7 +14,15 @@ const dbFetch = fetch(new URL("db.gz", DB_URL), { cache: "no-cache" })
 
 export let db: IDB
 
-let idxPacks: IdxPack[] = []
+// One slot per idx pack (finalized 0..nf-1, latest at nf). Only the latest
+// pack is fetched eagerly; finalized packs load on demand via getPack() and
+// stay resident once fetched. idxHeaders always holds every pack's header
+// (from idx/h<N>.gz on the summary path, or peeled off each pack on the
+// eager fallback), so counting, pack-skipping, and timestamp search never
+// force a pack fetch.
+let idxPacks: (IdxPack | undefined)[] = []
+let idxFetches: (Promise<IdxPack> | undefined)[] = []
+let idxHeaders: IdxHeader[] = []
 
 // A pack name is write-once, so a non-OK response means the name itself no
 // longer matches the store. For a latest pack (L<seq>) that means this tab's
@@ -42,6 +50,7 @@ export async function init() {
    const raw: IDB = await new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).json()
    raw.channels ??= {}
    raw.seq ??= 0 // backend omitempty: absent for an empty store
+   raw.hdrs ??= 0
    for (const [k, ch] of Object.entries(raw.channels)) ch.id = Number(k)
    db = raw
 
@@ -51,24 +60,39 @@ export async function init() {
    }
 
    const nf = numFinalizedIdx()
+   idxPacks = new Array(nf + 1)
+   idxFetches = new Array(nf + 1)
 
-   idxPacks = await Promise.all(
-      Array.from({ length: nf + 1 }, (_, p) => {
-         const isFinalized = p < nf
-         const path = `idx/${isFinalized ? p.toString() : `L${db.seq}`}.gz`
-         const size = isFinalized ? IDX_PACK_SIZE : db.total_art - p * IDX_PACK_SIZE
-         const url = new URL(path, DB_URL)
-         // Every pack name is write-once (finalized numeric, or the L<seq>
-         // generation a db.gz commit published), so the HTTP cache may serve
-         // them all without revalidation.
-         return fetch(url, { cache: "force-cache" })
-            .then((res) => {
-               assertPackOk(res, !isFinalized)
-               return new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer()
-            })
-            .then((buf) => makeIdxPack(buf, p, size))
-      }),
-   )
+   // The latest pack is always needed: it holds the newest articles (the
+   // default landing view) and its header is the cumulative boundary after
+   // the last finalized pack.
+   const latest = fetchIdxPack(nf)
+
+   let headers: IdxHeader[] | null = null
+   if (nf > 0 && db.hdrs === nf) {
+      try {
+         const res = await fetch(new URL(`idx/h${db.hdrs}.gz`, DB_URL), { cache: "force-cache" })
+         if (!res.ok) throw new Error(`summary fetch failed: ${res.status} ${res.url}`)
+         const buf = await new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer()
+         headers = parseIdxHeaders(buf, nf)
+      } catch {
+         // A stale db.gz past the summary GC window, or a half-written
+         // store: fall through to the eager path instead of reloading —
+         // finalized pack names are never GC'd, so eager is always correct,
+         // just heavier.
+         headers = null
+      }
+   }
+   if (headers === null) {
+      // Eager fallback: a store whose hdrs lags its finalized packs (old
+      // backend, warn-only summary failure, post-rebuild gap) or a failed
+      // summary fetch. Fetch everything like the pre-summary reader did and
+      // peel each pack's own header.
+      const packs = await Promise.all(Array.from({ length: nf }, (_, p) => fetchIdxPack(p)))
+      headers = packs.map((p) => p.header)
+   }
+   headers.push((await latest).header)
+   idxHeaders = headers
    sessionStorage.removeItem(RELOAD_GUARD)
 }
 
@@ -76,62 +100,120 @@ function numFinalizedIdx(): number {
    return db.total_art > 0 ? Math.floor((db.total_art - 1) / IDX_PACK_SIZE) : 0
 }
 
-function packIdx(chronIdx: number): number {
-   return Math.min(Math.floor(chronIdx / IDX_PACK_SIZE), idxPacks.length - 1)
+// Starts (or joins) the fetch of one idx pack. Every pack name is write-once
+// (finalized numeric, or the L<seq> generation a db.gz commit published), so
+// the HTTP cache may serve them all without revalidation.
+function fetchIdxPack(p: number): Promise<IdxPack> {
+   const inflight = idxFetches[p]
+   if (inflight) return inflight
+   const isFinalized = p < numFinalizedIdx()
+   const path = `idx/${isFinalized ? p.toString() : `L${db.seq}`}.gz`
+   const size = isFinalized ? IDX_PACK_SIZE : db.total_art - p * IDX_PACK_SIZE
+   const promise = fetch(new URL(path, DB_URL), { cache: "force-cache" })
+      .then((res) => {
+         assertPackOk(res, !isFinalized)
+         return new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer()
+      })
+      .then((buf) => {
+         const pack = makeIdxPack(buf, p, size)
+         idxPacks[p] = pack
+         return pack
+      })
+   idxFetches[p] = promise
+   promise.catch(() => {
+      // Drop the slot so a retry refetches (mirrors dataCache eviction).
+      if (idxFetches[p] === promise) idxFetches[p] = undefined
+   })
+   return promise
 }
 
-export function getChannelId(chronIdx: number): number {
+function getPack(p: number): Promise<IdxPack> | IdxPack {
+   return idxPacks[p] ?? fetchIdxPack(p)
+}
+
+function packIdx(chronIdx: number): number {
+   return Math.min(Math.floor(chronIdx / IDX_PACK_SIZE), numFinalizedIdx())
+}
+
+export async function getChannelId(chronIdx: number): Promise<number> {
    const n = packIdx(chronIdx)
-   const chanIds = idxPacks[n].parse().chanIds
+   const chanIds = (await getPack(n)).parse().chanIds
    return chanIds[chronIdx - n * IDX_PACK_SIZE]
 }
 
-// Binary search for leftmost entry where fetchedAt >= ts.
-export function findChronForTimestamp(ts: number): number {
+// Binary search for leftmost entry where fetchedAt >= ts: pack-level over
+// the always-resident headers, then entry-level inside the one target pack.
+export async function findChronForTimestamp(ts: number): Promise<number> {
    // `?? 0` guards a hand-edited/migrated db.gz missing first_fetched: the
    // writer always emits it (omitempty dropped backend-side), but an absent
    // key would make the subtraction NaN and collapse the search to index 0.
    const tsBlocks = Math.trunc(ts / FETCHED_AT_BLOCK) - Math.trunc((db.first_fetched ?? 0) / FETCHED_AT_BLOCK)
-   let lo = 0
-   let hi = db.total_art
+   const n = findPackForBlocks(idxHeaders, tsBlocks)
+   const p = (await getPack(n)).parse()
+   let lo = n * IDX_PACK_SIZE
+   let hi = lo + p.fetchedAts.length
    while (lo < hi) {
       const mid = (lo + hi) >>> 1
-      const n = packIdx(mid)
-      const p = idxPacks[n].parse()
       if (p.fetchedAts[mid - n * IDX_PACK_SIZE] < tsBlocks) lo = mid + 1
       else hi = mid
    }
    return lo < db.total_art ? lo : Math.max(0, db.total_art - 1)
 }
 
-export function countLeft(chronIdx: number, channels: Map<number, number>): number {
-   if (idxPacks.length === 0) return 0
-   const n = packIdx(chronIdx)
-   return idxPacks[n].countLeft(chronIdx, channels)
+// Total filtered count across the whole store. Synchronous on purpose:
+// chronIdx=total_art always lands in the latest pack (resident since init),
+// whose header carries the cumulative counts of every finalized pack — so
+// nav's filter bookkeeping never waits on a fetch.
+export function countAll(channels: Map<number, number>): number {
+   if (db.total_art === 0) return 0
+   return idxPacks[numFinalizedIdx()]!.countLeft(db.total_art, channels)
 }
 
-export function findLeft(from: number, channels: Map<number, number>): number {
-   if (from < 0 || idxPacks.length === 0) return -1
+export async function countLeft(chronIdx: number, channels: Map<number, number>): Promise<number> {
+   if (db.total_art === 0) return 0
+   const n = packIdx(chronIdx)
+   return (await getPack(n)).countLeft(chronIdx, channels)
+}
+
+// A finalized pack can be skipped without fetching it: its per-channel
+// counts are the deltas between consecutive cumulative headers. The latest
+// pack has no next boundary — it is resident anyway and scans cheaply.
+function packHasCandidate(p: number, channels: Map<number, number>): boolean {
+   if (p >= numFinalizedIdx()) return true
+   const cur = idxHeaders[p].chanCounts
+   const next = idxHeaders[p + 1].chanCounts
+   const packEnd = (p + 1) * IDX_PACK_SIZE
+   for (const [chanId, addIdx] of channels) {
+      if (next[chanId] - cur[chanId] > 0 && addIdx < packEnd) return true
+   }
+   return false
+}
+
+export async function findLeft(from: number, channels: Map<number, number>): Promise<number> {
+   if (from < 0 || db.total_art === 0) return -1
    for (let p = packIdx(from); p >= 0; p--) {
-      const found = idxPacks[p].findLeft(from, channels)
+      if (!packHasCandidate(p, channels)) continue
+      const found = (await getPack(p)).findLeft(from, channels)
       if (found !== -1) return found
    }
    return -1
 }
 
-export function findRight(from: number, channels: Map<number, number>): number {
+export async function findRight(from: number, channels: Map<number, number>): Promise<number> {
    if (from < 0) from = 0
-   if (from >= db.total_art || idxPacks.length === 0) return -1
-   for (let p = packIdx(from); p < idxPacks.length; p++) {
-      const found = idxPacks[p].findRight(from, channels)
+   if (from >= db.total_art || db.total_art === 0) return -1
+   const nf = numFinalizedIdx()
+   for (let p = packIdx(from); p <= nf; p++) {
+      if (!packHasCandidate(p, channels)) continue
+      const found = (await getPack(p)).findRight(from, channels)
       if (found !== -1) return found
    }
    return -1
 }
 
-function getPackRef(chronIdx: number): { packId: number; offset: number } {
+async function getPackRef(chronIdx: number): Promise<{ packId: number; offset: number }> {
    const n = packIdx(chronIdx)
-   const bounds = idxPacks[n].parse().bounds
+   const bounds = (await getPack(n)).parse().bounds
    let lo = 0
    let hi = bounds.length
    while (lo < hi) {
@@ -190,7 +272,7 @@ async function fetchDataPack(packId: number): Promise<IArticle[]> {
 }
 
 export async function loadArticle(chronIdx: number): Promise<IArticle> {
-   const ref = getPackRef(chronIdx)
+   const ref = await getPackRef(chronIdx)
    const entries = await loadDataPack(ref.packId)
    if (ref.offset >= entries.length) {
       // Pack names are write-once, so this is unreachable in normal operation;
