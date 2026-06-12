@@ -32,6 +32,19 @@ type Request struct {
 	ETag         string `json:"etag,omitempty"`
 	LastModified string `json:"last_modified,omitempty"`
 	MaxSize      int    `json:"max_size"`
+	// AssetDir is the fetcher's persistent download cache, one directory shared by
+	// every feed this run: the caller creates it (and never deletes it) and, for
+	// an external strategy, the command runs in it (its working directory, set as
+	// cmd.Dir below) — a built-in fetcher may read this path and download into it
+	// just the same. The fetcher stashes files under a layout it chooses
+	// (namespacing as needed, since feeds share the dir) and checks it to skip
+	// re-downloading. To self-host a file, the fetcher references it in item
+	// content as "#<relative-path>" (e.g. "#/photo.jpg"); the caller's
+	// end-of-pipeline upload step (main.Feed.fetch) uploads each referenced
+	// file to the store and rewrites the reference to the final key. Empty (and
+	// the working directory left unchanged) when self-hosting is disabled (no
+	// store wired, e.g. preview).
+	AssetDir string `json:"asset_dir,omitempty"`
 }
 
 // Result is what a FetchFunc returns. NotModified short-circuits the
@@ -45,10 +58,11 @@ type Result struct {
 	Items        []*mod.RawItem `json:"items,omitempty"`
 }
 
-// Deps are the host capabilities passed to each built-in factory once per
-// New(). It is currently empty — the in-repo built-in (#rss) needs none — but
-// the factory signature keeps it as an extension point for future built-ins.
-// Source-specific strategies live out-of-repo as external shell commands.
+// Deps are the host capabilities passed to New(), reserved as an extension
+// point for built-in fetchers. The shipped built-in (#rss) needs none. Asset
+// self-hosting is no longer wired here: the caller sets the command's working
+// directory via Request.AssetDir and runs the upload step itself at the end of
+// the article pipeline (main.Feed.fetch).
 type Deps struct{}
 
 // userAgent is the User-Agent header value sent by built-in HTTP-based
@@ -139,9 +153,8 @@ type Fetcher struct {
 }
 
 // New builds a Fetcher with every registered built-in instantiated once,
-// passing deps to each factory. deps carries optional host capabilities for
-// built-ins that need them (currently none — Deps is empty). Call Close after
-// the fetch run to release any resources held by stateful built-ins.
+// passing deps to each factory. Call Close after the fetch run to release any
+// resources held by stateful built-ins.
 func New(deps Deps) *Fetcher {
 	f := &Fetcher{
 		fetchers: make(map[string]FetchFunc, len(registry)),
@@ -201,6 +214,10 @@ func (f *Fetcher) Fetch(ctx context.Context, args string, client *http.Client, b
 	cmd.Stdout = out
 	cmd.Stderr = os.Stderr
 	cmd.Env = f.env
+	// The caller's shared download cache (Request.AssetDir) doubles as the
+	// command's working directory, so it can stash and reference files with
+	// relative paths. Empty leaves the calling process's directory.
+	cmd.Dir = req.AssetDir
 	if err := cmd.Run(); err != nil {
 		return Result{}, fmt.Errorf("fetcher command %q: %w", args, err)
 	}

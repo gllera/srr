@@ -15,10 +15,14 @@ import (
 
 var titlePolicy = bluemonday.StrictPolicy()
 
-// processItem runs a RawItem through the module pipeline and then
-// normalises Title/Link/Content. GUID and Published are immutable
-// for every step in the pipeline; a change is reported as an error
-// attributing the offending module.
+// processItem runs a RawItem through the module pipeline and normalises
+// Title/Link/Content, leaving the item store-ready. It is a pure, store-free
+// transform: GUID and Published are immutable for every step in the pipeline,
+// and a change is reported as an error attributing the offending module.
+// The store-side asset-upload step (feed.fetch's inline upload step) is
+// deliberately NOT here — it performs I/O and applies only on the fetch path,
+// so feed.fetch runs it after this returns. Callers without a store (preview,
+// tests) get the finished content directly.
 func processItem(ctx context.Context, processor *mod.Module, pipeline []string, i *mod.RawItem) error {
 	if len(pipeline) > 0 {
 		GUID := i.GUID

@@ -193,6 +193,7 @@ The command receives a JSON **request** on `stdin` and must print a JSON **respo
 | `etag` | string | The `etag` your command returned last run (empty on first call). |
 | `last_modified` | string | The `last_modified` your command returned last run. |
 | `max_size` | int | Advisory cap (bytes) on what the command should buffer/return. |
+| `asset_dir` | string | Persistent download cache for self-hosting files, shared by all feeds (see below). The command also **runs with this as its working directory**. Absent when self-hosting is off (e.g. `srr preview`). |
 
 **Response** (stdout):
 
@@ -222,13 +223,28 @@ The command receives a JSON **request** on `stdin` and must print a JSON **respo
 - stdout is capped at 64 MiB; exceeding it fails the fetch.
 - `not_modified: true` (or a response with zero `items`) **preserves** the channel's dedup state, so a transient empty response won't drop it.
 
+### Self-hosting files
+
+For files SRR can't fetch itself — images, video, or linked documents behind authentication, say — the command downloads the bytes and lets SRR mirror them into the store. SRR owns the store key and the upload, so the command needs no store credentials.
+
+`asset_dir` is a **persistent directory shared by all feeds** that SRR creates and never deletes, and **runs the command in** (its working directory) — so the command reads and writes files with relative paths, choosing its own layout inside (namespace as needed, since every feed shares the dir). The command:
+
+1. Downloads a file into the working directory (checking first — if it already exists, skip the download).
+2. References it in item `content` with a **`#`-prefixed relative path**: a value that starts with `#` and names the downloaded file, e.g. `<img src="#/photo.jpg">`, `<video src="#/clip.mp4">`, or `<a href="#/report.pdf">`. (A plain `#fragment` that doesn't name a real downloaded file — an ordinary in-page anchor — is left alone.)
+
+After the pipe pipeline runs, SRR's automatic final step scans each item's `content` for those markers in `<img src>` / `<video src>` / `<a href>`, hashes the referenced file, uploads it under `assets/<sha256-of-bytes>` **only if not already present**, and rewrites the marker to that key. Identical bytes dedup to one stored object across feeds and runs. A marker pointing at a missing file is left as-is (a broken reference, never a failed fetch).
+
+> **Note:** `<video poster>` is *not* a supported marker target — the `#sanitize` step strips a `#`-prefixed poster before the upload step runs (its allowlist constrains posters to `http(s)://` or `assets/`). Reference posters as `http(s)` URLs, or host the image via `<img>` instead.
+
+Two dedup layers result: the **cache** (yours) avoids re-downloading; the **content hash** (SRR's) avoids re-uploading. The cache root defaults to `$XDG_CACHE_HOME/srr` — override with `--cache-dir` / `SRR_CACHE_DIR`. It is disposable (the store is the source of truth) but **grows unbounded**: prune it yourself if disk is tight.
+
 ### Reference implementation
 
 A minimal Python command. Replace the marked block with your real source; everything else is protocol boilerplate.
 
 ```python
 #!/usr/bin/env python3
-import sys, json
+import os, sys, json, hashlib, urllib.request
 
 def fnv1a32(s: str) -> int:
     h = 0x811C9DC5
@@ -236,10 +252,21 @@ def fnv1a32(s: str) -> int:
         h = ((h ^ b) * 0x01000193) & 0xFFFFFFFF
     return h
 
-req = json.load(sys.stdin)          # {"url", "etag", "last_modified", "max_size"}
+req = json.load(sys.stdin)          # {"url", "etag", "last_modified", "max_size", "asset_dir"}
+cache = req.get("asset_dir")        # None when self-hosting is off; else the cwd
+
+def host(media_url: str) -> str:
+    """Download media_url into the cache dir (the cwd) once; return its marker."""
+    if not cache:
+        return media_url            # no self-hosting: keep the original URL
+    name = hashlib.sha256(media_url.encode()).hexdigest() + ".jpg"
+    if not os.path.exists(name):    # cwd is the cache dir; relative path is fine
+        urllib.request.urlretrieve(media_url, name)
+    return "#/" + name              # SRR uploads the file and rewrites this to assets/<hash>
 
 # --- your source: produce rows of (id, title, html, link, iso_date | None) ---
-rows = [("post-123", "Hello", "<p>Hi</p>", "https://example.com/123", "2024-03-01T12:00:00Z")]
+img = host("https://example.com/photo.jpg")
+rows = [("post-123", "Hello", f'<p>Hi</p><img src="{img}">', "https://example.com/123", "2024-03-01T12:00:00Z")]
 # ------------------------------------------------------------------------------
 
 items = [{

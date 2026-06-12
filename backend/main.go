@@ -22,6 +22,7 @@ type Globals struct {
 	PackSize     int    `short:"s" default:"200"      env:"SRR_PACK_SIZE"     help:"Target pack size in KB."`
 	MaxFeedSize  int    `short:"m" default:"5000"     env:"SRR_MAX_FEED_SIZE" help:"Max feed download size in KB."`
 	MaxMediaSize int    `          default:"25000"    env:"SRR_MAX_MEDIA_SIZE" help:"Max self-hosted media object size in KB."`
+	CacheDir     string `                             env:"SRR_CACHE_DIR"     help:"Local download cache for external ingest media (default $XDG_CACHE_HOME/srr)."`
 	Store        string `short:"o" default:"packs"    env:"SRR_STORE"         help:"Storage destination path."`
 	Force        bool   `                             env:"SRR_FORCE"         help:"Override DB write lock if needed."`
 	Debug        bool   `short:"d"                    env:"SRR_DEBUG"         help:"Enable debug mode."`
@@ -91,6 +92,22 @@ func readConfig() ([]byte, error) {
 		return nil, fmt.Errorf("reading config %s: %w", configPath, err)
 	}
 	return data, nil
+}
+
+// assetCacheRoot resolves the parent dir under which external ingest strategies
+// get a persistent per-feed media download cache. Precedence:
+// --cache-dir/SRR_CACHE_DIR → os.UserCacheDir()/srr (i.e. $XDG_CACHE_HOME or
+// ~/.cache) → $TMPDIR/srr. Always non-empty so the feature stays on by default;
+// the cache is disposable (the store remains the source of truth), so a
+// less-ideal location only costs re-downloads.
+func assetCacheRoot() string {
+	if globals.CacheDir != "" {
+		return globals.CacheDir
+	}
+	if dir, err := os.UserCacheDir(); err == nil {
+		return filepath.Join(dir, "srr")
+	}
+	return filepath.Join(os.TempDir(), "srr")
 }
 
 func main() {

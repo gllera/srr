@@ -102,6 +102,9 @@ func (o *PreviewCmd) Run() error {
 
 	articles := make([]*Item, 0, len(result.Items))
 	for _, i := range result.Items {
+		// No asset host in preview: self-hosting needs a store backend, and
+		// preview only renders. The upload step lives in feed.fetch, not
+		// processItem, so preview simply never runs it.
 		if err := processItem(ctx, processor, pipe, i); err != nil {
 			return err
 		}
