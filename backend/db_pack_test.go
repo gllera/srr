@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"testing"
 )
 
@@ -114,5 +116,38 @@ func TestExpectedLatestIdxSize(t *testing.T) {
 		if got := expectedLatestIdxSize(c.total); got != c.want {
 			t.Errorf("expectedLatestIdxSize(%d) = %d, want %d", c.total, got, c.want)
 		}
+	}
+}
+
+func TestGzipBestSmallerAndRoundTrips(t *testing.T) {
+	raw := bytes.Repeat([]byte(`{"s":1,"a":100,"t":"hello","c":"body"}`+"\n"), 500)
+	var std bytes.Buffer
+	gz := gzip.NewWriter(&std)
+	if _, err := gz.Write(raw); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+
+	best, err := gzipBest("data/0.gz", std.Bytes())
+	if err != nil {
+		t.Fatalf("gzipBest: %v", err)
+	}
+	if len(best) > std.Len() {
+		t.Errorf("gzipBest output %d bytes, larger than stdlib's %d", len(best), std.Len())
+	}
+	back, err := gunzip(bytes.NewReader(best))
+	if err != nil {
+		t.Fatalf("gzipBest output is not stdlib-readable gzip: %v", err)
+	}
+	if !bytes.Equal(back, raw) {
+		t.Errorf("gzipBest output decompressed to different bytes")
+	}
+}
+
+func TestGzipBestErrorsOnBadInput(t *testing.T) {
+	if out, err := gzipBest("data/0.gz", []byte("not a gzip stream")); err == nil {
+		t.Errorf("gzipBest(non-gzip) = %d bytes, want error", len(out))
 	}
 }

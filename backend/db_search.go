@@ -327,7 +327,7 @@ func (o *DB) saveSearchShard(ctx context.Context, n int, rawLines [][]byte) erro
 			return err
 		}
 	}
-	return o.savePack(ctx, finalizedSearchKey(n), p)
+	return o.savePackFinal(ctx, finalizedSearchKey(n), p)
 }
 
 // GCSearchSummaries deletes superseded search bloom summaries

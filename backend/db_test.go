@@ -23,6 +23,13 @@ func setupTestDB(t *testing.T) (*DB, *DBCore, string) {
 		Store:    dir,
 	}
 
+	// Skip zopfli recompression of finalized packs: the 50k-boundary tests
+	// would pay ~10s per finalized search shard for bytes whose validity
+	// gzipBest's own tests already pin. Identity keeps the published bytes
+	// exactly what the assertions read back.
+	finalGzip = func(_ string, gz []byte) ([]byte, error) { return gz, nil }
+	t.Cleanup(func() { finalGzip = gzipBest })
+
 	db, err := NewDB(ctx, false)
 	if err != nil {
 		t.Fatalf("NewDB: %v", err)
