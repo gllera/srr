@@ -112,4 +112,131 @@ describe("browser: real SPA over real packs", () => {
          await close()
       }
    })
+
+   // The service worker (src/sw.ts) makes the reader work fully offline: the shell
+   // (navigation + hashed JS/CSS) and the packs (db.gz + latest idx/data, here a
+   // single pack) are runtime-cached on the first online visit, then served from
+   // cache when the network is cut. Headless Chrome over http://127.0.0.1 is a
+   // secure context, so the SW registers and activates as it does in production.
+   it("serves the reader offline after one online visit", async () => {
+      const ctx = await browser.createBrowserContext()
+      const page = await ctx.newPage()
+      try {
+         // Cold load: the SW registers, activates (skipWaiting), and claims control.
+         await page.goto(baseUrl, { waitUntil: "load" })
+         await waitRendered(page)
+         await page.waitForFunction(() => navigator.serviceWorker?.controller != null, { timeout: 20000 })
+
+         // Reload so every shell + pack request now flows through the controlling SW
+         // and is cached. The initial render of the latest article already pulls in
+         // the (single) data pack covering the whole store.
+         await page.reload({ waitUntil: "load" })
+         await waitRendered(page)
+
+         // The pack and shell buckets are populated (asset bucket only fills when a
+         // store actually self-hosts images, which these plain-text fixtures don't).
+         const cacheNames = await page.evaluate(() => caches.keys())
+         expect(cacheNames).toEqual(expect.arrayContaining(["srr-packs-v3", "srr-shell-v1"]))
+
+         // Cut the network and reload — the reader must still boot and render purely
+         // from cache. A clean render with no error popup proves db.gz + idx + data
+         // all resolved offline (any miss would throw in data.init() → popup).
+         await page.setOfflineMode(true)
+         await page.reload({ waitUntil: "load" })
+         await waitRendered(page)
+         expect(await $title(page)).toBe("sport title 1")
+         expect(await $content(page)).toContain("sport body 1")
+         expect(await $popupOpen(page)).toBe(false)
+
+         // Offline navigation across the cached store still works.
+         await page.keyboard.press("ArrowLeft")
+         await waitTitle(page, "sport title 0")
+         expect(await $popupOpen(page)).toBe(false)
+      } finally {
+         await ctx.close()
+      }
+   })
+
+   // Installability: a linked, valid web app manifest plus the SW's fetch handler
+   // are what make the reader an installable PWA. This checks the manifest contract
+   // (name, deployment-relative start_url, standalone, 192+512+maskable icons) and
+   // that every icon — and the apple-touch-icon for iOS — actually resolves.
+   it("exposes a valid, installable web app manifest", async () => {
+      const [page, close] = await open()
+      try {
+         // Resolve the <link rel="manifest"> href and fetch the manifest itself.
+         const href = await page.$eval("link[rel=manifest]", (l) => (l as HTMLLinkElement).href)
+         const manifest = await page.evaluate(async (u) => (await fetch(u)).json(), href)
+
+         expect(manifest.name).toBeTruthy()
+         expect(manifest.display).toBe("standalone")
+         // start_url/scope are deployment-relative so the bundle works under any path.
+         expect(manifest.start_url).toBe(".")
+         expect(manifest.scope).toBe(".")
+
+         // At least a 512 "any" and a 512 "maskable" icon — Chrome's install bar.
+         const icons = manifest.icons as { src: string; sizes: string; purpose?: string }[]
+         expect(icons.some((i) => i.sizes.includes("512") && (i.purpose ?? "any").includes("any"))).toBe(true)
+         expect(icons.some((i) => (i.purpose ?? "").includes("maskable"))).toBe(true)
+
+         // Every icon src (resolved against the manifest URL) must actually load,
+         // plus the iOS apple-touch-icon.
+         const appleHref = await page.$eval("link[rel=apple-touch-icon]", (l) => (l as HTMLLinkElement).href)
+         const urls = [...new Set(icons.map((i) => new URL(i.src, href).href)), appleHref]
+         const statuses = await page.evaluate(
+            (list) => Promise.all(list.map((u) => fetch(u).then((r) => r.status))),
+            urls,
+         )
+         expect(statuses.every((s) => s === 200)).toBe(true)
+      } finally {
+         await close()
+      }
+   })
+
+   // An in-place store rebuild reuses finalized pack ids (data/N.gz) with new
+   // bytes — the SW's cache-first would serve the stale packs forever. The db.gz
+   // `gen` field is the invalidation signal: when it changes, the SW purges the
+   // packs bucket BEFORE db.gz resolves to the page (which only then requests
+   // idx/data packs). Proves both directions with a real srrb rebuild: without a
+   // gen bump the stale cache wins (that's cache-first working as designed); with
+   // `srr gen --bump` the fresh bytes win. Runs LAST: it replaces the shared store.
+   it("purges stale finalized packs when db.gz gen changes", async () => {
+      // Wipe the served store and write a fresh one with the same shape (one
+      // channel, same item count/order → chron 0 is always data pack 1, offset 0)
+      // but different content. -s 1 + incompressible filler → finalized packs.
+      const rebuild = async (prefix: string) => {
+         for (const f of readdirSync(packsDir)) rmSync(join(packsDir, f), { recursive: true, force: true })
+         feeds.set("/bulk.xml", rssFeed("Bulk", nItems(30, prefix, 8000)))
+         await srr(packsDir, "chan", "add", "-t", "Bulk", "-u", `${feeds.url}/bulk.xml`)
+         await srr(packsDir, "-s", "1", "art", "fetch")
+      }
+
+      await rebuild("alpha")
+      const ctx = await browser.createBrowserContext()
+      const page = await ctx.newPage()
+      try {
+         // Cold load at chron 0 (lives in finalized, cache-first data/1.gz), wait
+         // for the SW to claim, then reload so the pack is cached through it.
+         await page.goto(baseUrl + "#0", { waitUntil: "load" })
+         await waitTitle(page, "alpha title 0")
+         await page.waitForFunction(() => navigator.serviceWorker?.controller != null, { timeout: 20000 })
+         await page.reload({ waitUntil: "load" })
+         await waitTitle(page, "alpha title 0")
+
+         // Rebuild with new content but unchanged gen (absent == 0): the stale
+         // cached pack must still be served — the purge is gen-driven, not a side
+         // effect of the rebuild itself.
+         await rebuild("beta")
+         await page.reload({ waitUntil: "load" })
+         await waitTitle(page, "alpha title 0")
+
+         // Bump gen → next db.gz fetch purges the packs bucket → fresh bytes.
+         await srr(packsDir, "gen", "--bump")
+         await page.reload({ waitUntil: "load" })
+         await waitTitle(page, "beta title 0")
+         expect(await $popupOpen(page)).toBe(false)
+      } finally {
+         await ctx.close()
+      }
+   })
 })

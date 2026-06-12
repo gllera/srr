@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 8 8">
+   <!-- App/PWA icon. Source of truth for icon-{192,512}.png + apple-touch-icon.png,
+        rasterized with: rsvg-convert -w N -h N icon.svg -o icon-N.png
+        Same RSS glyph as the inline favicon in index.html, recolored white on the
+        brand-orange tile and inset into the maskable safe zone (full-bleed bg). -->
+   <rect width="8" height="8" fill="#f26522" />
+   <g fill="#ffffff" transform="translate(1.85,1.7) scale(0.6)">
+      <circle cx="1" cy="7" r="1" />
+      <path d="M0 3v1a4 4 0 014 4h1A5 5 0 000 3z" />
+      <path d="M0 0v1a7 7 0 017 7h1A8 8 0 000 0z" />
+   </g>
+</svg>

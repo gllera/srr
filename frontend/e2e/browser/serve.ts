@@ -24,7 +24,9 @@ const MIME: Record<string, string> = {
    ".mjs": "text/javascript; charset=utf-8",
    ".css": "text/css; charset=utf-8",
    ".svg": "image/svg+xml",
+   ".png": "image/png",
    ".json": "application/json",
+   ".webmanifest": "application/manifest+json",
    ".ico": "image/x-icon",
    ".gz": "application/octet-stream", // raw gzip — data.ts decompresses manually
 }
