@@ -59,14 +59,11 @@ func parseDataPack(data []byte) ([]ArticleData, error) {
 type pack struct {
 	buf bytes.Buffer
 	gz  *gzip.Writer
-	enc *json.Encoder
 }
 
 func newPack() *pack {
 	p := &pack{}
 	p.gz = gzip.NewWriter(&p.buf)
-	p.enc = json.NewEncoder(p.gz)
-	p.enc.SetEscapeHTML(false)
 	return p
 }
 
@@ -91,9 +88,12 @@ func writeIdxHeader(p *pack, block, packID, packOff int, channels map[int]*Chann
 }
 
 func (p *pack) writeArticle(ad *ArticleData) error {
-	// json.Encoder writes a trailing newline (JSONL) directly into the gzip
-	// writer, avoiding a per-article bytes.Buffer + Encoder allocation.
-	return p.enc.Encode(ad)
+	data, err := jsonEncode(ad)
+	if err != nil {
+		return err
+	}
+	_, err = p.Write(data)
+	return err
 }
 
 func (o *DB) loadPack(ctx context.Context, key string) (*pack, int, error) {
