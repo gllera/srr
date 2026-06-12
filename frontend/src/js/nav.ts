@@ -164,25 +164,29 @@ export async function unreadCount(ch: IChannel): Promise<number> {
 // common case costs zero fetches.
 export async function peek(span = 10): Promise<IPeekItem[]> {
    if (pos === -1) return []
-   const idxs = [pos]
-   for (let i = pos, n = 0; n < span; n++) {
-      i = await data.findLeft(i - 1, filter.channels)
-      if (i === -1) break
-      idxs.unshift(i)
+   // The two directional walks are independent — run them concurrently so
+   // cold idx-pack fetches on both sides overlap.
+   const walk = async (dir: -1 | 1) => {
+      const out: number[] = []
+      for (let i = pos, n = 0; n < span; n++) {
+         i = await (dir === -1 ? data.findLeft(i - 1, filter.channels) : data.findRight(i + 1, filter.channels))
+         if (i === -1) break
+         out.push(i)
+      }
+      return out
    }
-   for (let i = pos, n = 0; n < span; n++) {
-      i = await data.findRight(i + 1, filter.channels)
-      if (i === -1) break
-      idxs.push(i)
-   }
+   const [lefts, rights] = await Promise.all([walk(-1), walk(1)])
+   const idxs = [...lefts.reverse(), pos, ...rights]
    return Promise.all(
       idxs.map(async (chron) => {
          const art = await data.loadArticle(chron)
          return {
             chron,
-            title: art.t || "(untitled)",
+            // Raw wire title — the "(untitled)" placeholder is the renderer's
+            // (dropdown headlineRow), not navigation state.
+            title: art.t ?? "",
             when: art.p || art.a,
-            channel: data.db.channels[art.s]?.title ?? "[DELETED]",
+            channel: data.channelTitle(art.s),
             current: chron === pos,
          }
       }),
