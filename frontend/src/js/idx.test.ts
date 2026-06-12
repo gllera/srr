@@ -72,6 +72,15 @@ describe("makeIdxPack.parse", () => {
       expect(Array.from(pack.fetchedAts)).toEqual([127, 254])
    })
 
+   it("stores fetchedAt beyond the Uint16 ceiling without wrapping", () => {
+      // 70000 8h-blocks ≈ 64 years since first_fetched. A Uint16 fetchedAts
+      // would wrap this to 70000 % 65536 = 4464, silently corrupting time jumps;
+      // Uint32 keeps the full value.
+      const buf = buildBuf({ fetchedAtBase: 70000, entries: [e(1, 0, 5)] })
+      const pack = makeIdxPack(buf, 0, 1).parse()
+      expect(pack.fetchedAts[0]).toBe(70005)
+   })
+
    it("populates ownChanCounts from entries", () => {
       const buf = buildBuf({ entries: [e(1), e(2), e(1), e(1), e(3)] })
       const pack = makeIdxPack(buf, 0, 5).parse()

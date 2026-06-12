@@ -114,6 +114,33 @@ func TestOpenUnsupportedScheme(t *testing.T) {
 	}
 }
 
+// The writer↔CDN cache contract: finalized packs are immutable and may be
+// cached forever; db.gz and the toggled latest packs are rewritten every fetch
+// and must always revalidate (a stale db.gz misroutes the reader to the wrong
+// latest pack). Keys with no policy return "".
+func TestCacheControlForKey(t *testing.T) {
+	cases := []struct {
+		key, want string
+	}{
+		{"db.gz", cacheRevalidate},
+		{"idx/true.gz", cacheRevalidate},
+		{"idx/false.gz", cacheRevalidate},
+		{"data/true.gz", cacheRevalidate},
+		{"data/false.gz", cacheRevalidate},
+		{"idx/0.gz", cacheImmutable},
+		{"idx/12.gz", cacheImmutable},
+		{"data/1.gz", cacheImmutable},
+		{"data/250.gz", cacheImmutable},
+		{".locked", ""},
+		{"unknown.txt", ""},
+	}
+	for _, c := range cases {
+		if got := cacheControlForKey(c.key); got != c.want {
+			t.Errorf("cacheControlForKey(%q) = %q, want %q", c.key, got, c.want)
+		}
+	}
+}
+
 func TestLoadEnvBoolParsing(t *testing.T) {
 	type testConfig struct {
 		Enabled bool `yaml:"enabled"`

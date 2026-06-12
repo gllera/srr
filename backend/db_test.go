@@ -878,3 +878,26 @@ func TestPutArticlesFirstFetchedAt(t *testing.T) {
 		t.Errorf("FirstFetchedAt = %d, want 1700000000", c.FirstFetchedAt)
 	}
 }
+
+// first_fetched must ALWAYS be present in db.gz — the reader divides by it
+// (frontend data.ts findChronForTimestamp), so an omitted key would decode to
+// undefined → NaN and break every time-range jump. The struct tag must NOT be
+// omitempty; this guards against re-adding it.
+func TestDBCommitAlwaysEmitsFirstFetched(t *testing.T) {
+	dir := t.TempDir()
+	globals = &Globals{PackSize: 1, Store: dir}
+
+	db, err := NewDB(ctx, false)
+	if err != nil {
+		t.Fatalf("NewDB: %v", err)
+	}
+	if err := db.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	db.Close(ctx)
+
+	raw := decompressGz(t, filepath.Join(dir, "db.gz"))
+	if !bytes.Contains(raw, []byte(`"first_fetched"`)) {
+		t.Errorf("db.gz must always contain the first_fetched key, got: %s", raw)
+	}
+}
