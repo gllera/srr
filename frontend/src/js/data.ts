@@ -1,16 +1,27 @@
-import { makeLRU } from "./cache"
+import { cachedPromise, makeLRU } from "./cache"
+import { PACK_BASE } from "./fmt"
 import { FETCHED_AT_BLOCK } from "./format.gen"
-import { findPackForBlocks, IDX_PACK_SIZE, makeIdxPack, parseIdxHeaders, type IdxHeader, type IdxPack } from "./idx"
+import {
+   findPackForBlocks,
+   IDX_PACK_SIZE,
+   lowerBound,
+   makeIdxPack,
+   parseIdxHeaders,
+   type IdxHeader,
+   type IdxPack,
+} from "./idx"
 
 export { IDX_PACK_SIZE }
 
-const DB_URL = new URL(SRR_CDN_URL, window.location.href)
+// All pack addressing resolves against PACK_BASE, imported from fmt.ts (which
+// bounds-checks resolved content URLs against the same value), so addressing
+// and resolution can never disagree.
 // no-cache forces a conditional revalidation on every load so a stale db.gz on
 // the client (mobile browsers cache aggressively) can't make chronIdx URLs like
 // `#14099` silently fall back to the last article via the `>= total_art` clamp
 // in nav.fromHash. 304 keeps the hot path cheap when the CDN sends ETag /
 // Last-Modified; the <link rel="preload"> in built HTML still warms the entry.
-const dbFetch = fetch(new URL("db.gz", DB_URL), { cache: "no-cache" })
+const dbFetch = fetch(new URL("db.gz", PACK_BASE), { cache: "no-cache" })
 
 export let db: IDB
 
@@ -92,8 +103,17 @@ export async function init() {
    sessionStorage.removeItem(RELOAD_GUARD)
 }
 
-function numFinalizedIdx(): number {
+// Exported for search.ts: the search/ shards align 1:1 with idx packs, so its
+// coverage gate and chron bases derive from the same formula.
+export function numFinalizedIdx(): number {
    return db.total_art > 0 ? Math.floor((db.total_art - 1) / IDX_PACK_SIZE) : 0
+}
+
+// channelTitle resolves a chan_id for display: a deleted channel's articles
+// stay in the packs, so render a tombstone instead of crashing (the rendering
+// contract `srr inspect`'s unknown-chans diagnostic references).
+export function channelTitle(chanId: number): string {
+   return db.channels[chanId]?.title ?? "[DELETED]"
 }
 
 // Fetches + gunzips one pack key. Every pack name is write-once (finalized
@@ -103,7 +123,7 @@ function numFinalizedIdx(): number {
 // addressing); isLatest=false there — a missing search pack degrades search
 // instead of triggering the guarded reload.
 export async function fetchPackBytes(path: string, isLatest: boolean): Promise<ArrayBuffer> {
-   const res = await fetch(new URL(path, DB_URL), { cache: "force-cache" })
+   const res = await fetch(new URL(path, PACK_BASE), { cache: "force-cache" })
    assertPackOk(res, isLatest)
    return new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer()
 }
@@ -203,34 +223,21 @@ export async function findRight(from: number, channels: Map<number, number>): Pr
 async function getPackRef(chronIdx: number): Promise<{ packId: number; offset: number }> {
    const n = packIdx(chronIdx)
    const bounds = (await fetchIdxPack(n)).parse().bounds
-   let lo = 0
-   let hi = bounds.length
-   while (lo < hi) {
-      const mid = (lo + hi) >>> 1
-      if (bounds[mid].startChron <= chronIdx) lo = mid + 1
-      else hi = mid
-   }
-   const bound = bounds[lo - 1]
+   // The last bound whose startChron <= chronIdx.
+   const bound = bounds[lowerBound(bounds.length, (i) => bounds[i].startChron <= chronIdx) - 1]
    return { packId: bound.packId, offset: chronIdx - bound.startChron }
 }
 
 const dataCache = makeLRU<Promise<IArticle[]>>(20)
 
 function loadDataPack(packId: number): Promise<IArticle[]> {
-   const cached = dataCache.get(packId)
-   if (cached) return cached
-   const entries = fetchDataPack(packId)
-   dataCache.put(packId, entries)
-   entries.catch(() => {
-      if (dataCache.peek(packId) === entries) dataCache.drop(packId)
-   })
-   return entries
+   return cachedPromise(dataCache, packId, () => fetchDataPack(packId))
 }
 
 async function fetchDataPack(packId: number): Promise<IArticle[]> {
    const isFinalized = packId < db.next_pid
    const name = isFinalized ? packId.toString() : `L${db.seq}`
-   const res = await fetch(new URL(`data/${name}.gz`, DB_URL), { cache: "force-cache" })
+   const res = await fetch(new URL(`data/${name}.gz`, PACK_BASE), { cache: "force-cache" })
    assertPackOk(res, !isFinalized)
    const reader = res
       .body!.pipeThrough(new DecompressionStream("gzip"))

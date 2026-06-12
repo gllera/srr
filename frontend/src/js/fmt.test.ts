@@ -179,7 +179,7 @@ describe("collapseBrokenMedia", () => {
 })
 
 // SRR_CDN_URL is defined as "http://localhost:3000" in vitest.config.ts, so the
-// pack base resolves there — the same value data.ts uses for DB_URL.
+// pack base resolves there — the same PACK_BASE data.ts addresses packs with.
 describe("sanitizeHtml relative URL resolution", () => {
    const attr = (html: string, sel: string, name: string): string | null => {
       const t = document.createElement("template")

@@ -47,6 +47,21 @@ export function parseIdxHeaders(buf: ArrayBuffer, count: number): IdxHeader[] {
    return Array.from({ length: count }, (_, k) => parseIdxHeader(buf, k * IDX_HEADER_SIZE))
 }
 
+// lowerBound is the one binary-search primitive of the reader (the Go side's
+// sort.Search): the smallest i in [0, n) for which isBelow(i) is false — n
+// when none. Each caller supplies only its predicate, so the easy-to-fumble
+// `(lo + hi) >>> 1` loop exists once.
+export function lowerBound(n: number, isBelow: (i: number) => boolean): number {
+   let lo = 0
+   let hi = n
+   while (lo < hi) {
+      const mid = (lo + hi) >>> 1
+      if (isBelow(mid)) lo = mid + 1
+      else hi = mid
+   }
+   return lo
+}
+
 // Pack-level step of findChronForTimestamp: headers[k] is pack k's header
 // with the latest pack's at the end, so pack k's LAST entry value equals
 // headers[k+1].fetchedAtBase (validated by the backend's fetched-ats
@@ -54,14 +69,7 @@ export function parseIdxHeaders(buf: ArrayBuffer, count: number): IdxHeader[] {
 // the pack holding the global leftmost qualifying entry — clamped to the
 // latest pack (whose end is unbounded).
 export function findPackForBlocks(headers: IdxHeader[], tsBlocks: number): number {
-   let lo = 0
-   let hi = headers.length - 1
-   while (lo < hi) {
-      const mid = (lo + hi) >>> 1
-      if (headers[mid + 1].fetchedAtBase < tsBlocks) lo = mid + 1
-      else hi = mid
-   }
-   return lo
+   return lowerBound(headers.length - 1, (i) => headers[i + 1].fetchedAtBase < tsBlocks)
 }
 
 // Channel IDs are uint8 (0..255), so a CHAN_ID_SLOTS-entry typed array beats
@@ -193,14 +201,7 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
       findChronForBlocks(tsBlocks: number): number {
          pack.parse()
          const fetchedAts = pack.fetchedAts
-         let lo = 0
-         let hi = fetchedAts.length
-         while (lo < hi) {
-            const mid = (lo + hi) >>> 1
-            if (fetchedAts[mid] < tsBlocks) lo = mid + 1
-            else hi = mid
-         }
-         return baseChron + lo
+         return baseChron + lowerBound(fetchedAts.length, (i) => fetchedAts[i] < tsBlocks)
       },
    }
    return pack
