@@ -207,6 +207,20 @@ func (o *DB) Close(ctx context.Context) error {
 	return o.Backend.Close()
 }
 
+// BumpGen increments the store generation and resets every derived-series
+// coverage counter, keeping the bump-implies-reset invariant in one place:
+// an in-place rebuild reuses finalized pack names with new bytes, so the
+// published idx header summary and search shards may hold stale content.
+// Zeroed coverage makes the next fetch rebuild them (a zero SearchTail also
+// marks the read-back tail untrusted); readers fall back to eager idx
+// loading and keep search disabled in the gap.
+func (o *DB) BumpGen() {
+	o.core.Gen++
+	o.core.HdrPacks = 0
+	o.core.SearchPacks = 0
+	o.core.SearchTail = 0
+}
+
 func (o *DB) Commit(ctx context.Context) error {
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
