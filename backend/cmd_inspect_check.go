@@ -31,18 +31,23 @@ func validateAll(fetch keyGetter, core *DBCore, packs []*idxPack) error {
 // (packId, offset) lands inside an existing data-pack entry whose
 // chan_id matches the idx pack's chan_id.
 func checkBoundsVsData(fetch keyGetter, core *DBCore, packs []*idxPack) int {
-	cache := map[int][]ArticleData{}
-	loadCached := func(pid int) []ArticleData {
-		if e, ok := cache[pid]; ok {
-			return e
+	// Chron order keeps (packId, offset) monotonic, so one resident pack
+	// suffices (the walkArticles pattern) — caching every decoded pack would
+	// hold the whole store's article content at peak.
+	var entries []ArticleData
+	loadedPid, loaded := -1, 0
+	load := func(pid int) []ArticleData {
+		if pid == loadedPid {
+			return entries
 		}
 		e, err := loadDataPack(fetch, dataKeyFor(core, pid))
 		if err != nil {
 			fmt.Printf("[bounds-vs-data] fetch %s: %v\n", dataKeyFor(core, pid), err)
-			return nil
+			e = nil
 		}
-		cache[pid] = e
-		return e
+		entries, loadedPid = e, pid
+		loaded++
+		return entries
 	}
 
 	oob, mismatch := 0, 0
@@ -52,7 +57,7 @@ func checkBoundsVsData(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 		idxSub := int(pack.chanIDs[chron-n*idxPackSize])
 		pid, offset := pack.getPackRef(chron)
 
-		entries := loadCached(pid)
+		entries := load(pid)
 		if entries == nil {
 			oob++
 			continue
@@ -69,9 +74,27 @@ func checkBoundsVsData(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 			mismatch++
 		}
 	}
-	fmt.Printf("[bounds-vs-data] scanned %d chronIdx, %d data packs cached: %d out-of-range, %d chan_id mismatches\n",
-		core.TotalArticles, len(cache), oob, mismatch)
+	fmt.Printf("[bounds-vs-data] scanned %d chronIdx, %d data packs visited: %d out-of-range, %d chan_id mismatches\n",
+		core.TotalArticles, loaded, oob, mismatch)
 	return oob + mismatch
+}
+
+// chanIDStats walks every idx entry once, returning per-chan_id entry counts
+// and first-occurrence chrons. Shared by checkDBMeta (registered channels)
+// and checkUnknownChanIDs (unregistered ones).
+func chanIDStats(packs []*idxPack) (count, first map[int]int) {
+	count, first = map[int]int{}, map[int]int{}
+	for _, p := range packs {
+		base := p.packIndex * idxPackSize
+		for i, s := range p.chanIDs {
+			sid := int(s)
+			count[sid]++
+			if _, ok := first[sid]; !ok {
+				first[sid] = base + i
+			}
+		}
+	}
+	return count, first
 }
 
 // checkDBMeta cross-checks db.gz fields against actual pack contents.
@@ -104,18 +127,7 @@ func checkDBMeta(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 		issues++
 	}
 
-	idxCount := map[int]int{}
-	idxFirst := map[int]int{}
-	for _, p := range packs {
-		base := p.packIndex * idxPackSize
-		for i, s := range p.chanIDs {
-			sid := int(s)
-			idxCount[sid]++
-			if _, ok := idxFirst[sid]; !ok {
-				idxFirst[sid] = base + i
-			}
-		}
-	}
+	idxCount, idxFirst := chanIDStats(packs)
 	chanIDs := make([]int, 0, len(core.Channels))
 	for id := range core.Channels {
 		chanIDs = append(chanIDs, id)
@@ -204,30 +216,20 @@ func checkFetchedAtsContinuity(packs []*idxPack) int {
 // checkUnknownChanIDs flags any idx entry whose channel byte isn't
 // registered in db.channels.
 func checkUnknownChanIDs(core *DBCore, packs []*idxPack) int {
-	count := map[int]int{}
-	first := map[int]int{}
-	for _, p := range packs {
-		base := p.packIndex * idxPackSize
-		for i, s := range p.chanIDs {
-			sid := int(s)
-			if _, ok := core.Channels[sid]; ok {
-				continue
-			}
-			count[sid]++
-			if _, ok := first[sid]; !ok {
-				first[sid] = base + i
-			}
-		}
-	}
-	if len(count) == 0 {
-		fmt.Println("[unknown-chans] all idx chan_ids are registered")
-		return 0
-	}
+	count, first := chanIDStats(packs)
+	unknown := 0
 	for sid, c := range count {
+		if _, ok := core.Channels[sid]; ok {
+			continue
+		}
 		fmt.Printf("[unknown-chans] chan_id %d: %d entries (first chron %d) — frontend renders \"[DELETED]\"\n",
 			sid, c, first[sid])
+		unknown++
 	}
-	return len(count)
+	if unknown == 0 {
+		fmt.Println("[unknown-chans] all idx chan_ids are registered")
+	}
+	return unknown
 }
 
 // checkIdxSummary verifies the published idx header summary
