@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -46,7 +47,7 @@ func (o *ImportCmd) Run() error {
 	fmt.Fprintf(w, "ID\tTitle\tURL\n")
 	fmt.Fprintf(w, "---\t-----\t---\n")
 
-	iw := &importWalker{w: w, selectedIDs: o.ID, merge: o.Title != nil}
+	iw := &importWalker{w: w, selectedIDs: o.ID, merge: o.Title != nil, tagOverride: o.Tag != nil}
 	newChannels, err := iw.walk(nodes, "", "", nil, o.All)
 	if err != nil {
 		return err
@@ -82,6 +83,9 @@ func (o *ImportCmd) Run() error {
 
 	return withDB(true, func(ctx context.Context, db *DB) error {
 		for _, c := range newChannels {
+			if err := normalizeChannel(c); err != nil {
+				return err
+			}
 			if err := db.AddChannel(c); err != nil {
 				return err
 			}
@@ -94,6 +98,7 @@ type importWalker struct {
 	w           io.Writer
 	selectedIDs []string
 	merge       bool    // true when -t is set; selected feeds accumulate into mergedFeeds instead of becoming channels
+	tagOverride bool    // true when -g is set: skip OPML group-tag resolution. resolveTag can error on an un-normalizable group name, and applyImportDefaults overwrites Tag from -g regardless, so resolving here would only raise a spurious error.
 	mergedFeeds []*Feed // accumulator (merge mode only)
 }
 
@@ -104,16 +109,27 @@ func (iw *importWalker) walk(nodes []*OPMLNode, prefix, indent string, groupPath
 
 	var result []*Channel
 
-	emit := func(ch *Channel) error {
+	// emit records a selected channel. path is the group path used to derive its
+	// tag (skipped when -g overrides it). In merge mode feeds accumulate into one
+	// channel, deduped by URL since OPML commonly lists the same xmlUrl in
+	// several folders.
+	emit := func(ch *Channel, path []string) error {
 		if iw.merge {
-			iw.mergedFeeds = append(iw.mergedFeeds, ch.Feeds...)
+			for _, f := range ch.Feeds {
+				if slices.ContainsFunc(iw.mergedFeeds, func(e *Feed) bool { return e.URL == f.URL }) {
+					continue
+				}
+				iw.mergedFeeds = append(iw.mergedFeeds, f)
+			}
 			return nil
 		}
-		tag, err := resolveTag(groupPath)
-		if err != nil {
-			return err
+		if !iw.tagOverride {
+			tag, err := resolveTag(path)
+			if err != nil {
+				return err
+			}
+			ch.Tag = tag
 		}
-		ch.Tag = tag
 		result = append(result, ch)
 		return nil
 	}
@@ -124,25 +140,27 @@ func (iw *importWalker) walk(nodes []*OPMLNode, prefix, indent string, groupPath
 		if n.Channel != nil && len(n.Children) == 0 {
 			fmt.Fprintf(iw.w, "%s\t%s%s\t%s\n", id, indent, n.Name, n.Channel.URLs())
 			if iw.isSelected(id, importAll) {
-				if err := emit(n.Channel); err != nil {
+				if err := emit(n.Channel, groupPath); err != nil {
 					return nil, err
 				}
 			}
 		} else if len(n.Children) > 0 {
 			fmt.Fprintf(iw.w, "%s\t%s[%s]\t-\n", id, indent, n.Name)
+			childPath := append(append([]string{}, groupPath...), n.Name)
 
 			if n.Channel != nil {
 				chID := id + ".0"
 				fmt.Fprintf(iw.w, "%s\t%s  %s\t%s\n", chID, indent, n.Name, n.Channel.URLs())
 				if iw.isSelected(chID, importAll) || iw.isSelected(id, false) {
-					if err := emit(n.Channel); err != nil {
+					// A group that is also a feed: its own channel shares the tag
+					// its children get (the group's own name), not the parent path.
+					if err := emit(n.Channel, childPath); err != nil {
 						return nil, err
 					}
 				}
 			}
 
 			childImportAll := importAll || iw.isSelected(id, false)
-			childPath := append(append([]string{}, groupPath...), n.Name)
 			channels, err := iw.walk(n.Children, id+".", indent+"  ", childPath, childImportAll)
 			if err != nil {
 				return nil, err

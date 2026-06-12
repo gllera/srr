@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -67,6 +68,18 @@ func (c *Channel) LogValue() slog.Value {
 func (c *Channel) Fetch(ctx context.Context, client *http.Client, buf []byte, processor *mod.Module, engine *ingest.Fetcher, fetchedAt int64, rootPipe []string, rootIngest string) {
 	c.newItems = c.newItems[:0]
 	pipe := resolvePipe(rootPipe, c.Pipe)
+	// Validate the resolved pipeline once, before the item loop. A bad token
+	// (unknown built-in, stray #base, malformed params) is a config error that
+	// would fail identically for every item; surface it loudly here instead of
+	// letting feed.go skip every item one by one.
+	if err := processor.Validate(ctx, pipe); err != nil {
+		err = fmt.Errorf("invalid pipeline %v: %w", pipe, err)
+		slog.Error("channel pipeline invalid; skipping fetch", "channel", c, "err", err)
+		for _, feed := range c.Feeds {
+			feed.FetchError = err.Error()
+		}
+		return
+	}
 	ingestName := ingest.Select(c.Ingest, rootIngest)
 	for _, feed := range c.Feeds {
 		items, err := feed.fetch(ctx, client, buf, processor, engine, c, fetchedAt, pipe, ingestName)

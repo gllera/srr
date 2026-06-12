@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 )
@@ -142,6 +143,15 @@ func (o *Module) Process(ctx context.Context, args string, i *RawItem) error {
 		return err
 	}
 
+	// Empty/whitespace stdout means the shell step chose to emit nothing (a
+	// `true`, a filter that dropped the line, a conditional no-op). Treat it as
+	// "leave the item unchanged" rather than feeding "" to json.Unmarshal —
+	// which errors with "unexpected end of JSON input" and (per feed.go) would
+	// drop the item.
+	if strings.TrimSpace(out.buf.String()) == "" {
+		return nil
+	}
+
 	// Preserve the typed Raw payload across the JSON round-trip — Unmarshal
 	// would otherwise decode it into map[string]any, breaking type-asserts
 	// in built-ins that run after a shell module (e.g. #youtube).
@@ -150,5 +160,59 @@ func (o *Module) Process(ctx context.Context, args string, i *RawItem) error {
 		return err
 	}
 	i.Raw = saved
+	return nil
+}
+
+// IsBuiltin reports whether token's first whitespace field names a registered
+// built-in module (e.g. "#sanitize" or "#readability timeout=30s"). Used by the
+// CLI to reject misspelled "#"-tokens before they are stored.
+func IsBuiltin(token string) bool {
+	fields := strings.Fields(token)
+	if len(fields) == 0 {
+		return false
+	}
+	_, ok := registry[fields[0]]
+	return ok
+}
+
+// Builtins returns the registered built-in module names (e.g. "#sanitize"),
+// sorted, for help and validation error messages.
+func Builtins() []string {
+	out := make([]string, 0, len(registry))
+	for name := range registry {
+		out = append(out, name)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// Validate checks an already-resolved pipeline before the per-item fetch loop,
+// so a misconfigured pipe fails loudly (a channel-level error) instead of
+// silently dropping every item. For each step: an empty step or an unknown
+// "#"-prefixed token (incl. a stray "#base" or "#base key=val") is rejected; a
+// known built-in is run once against a throwaway item to surface parameter
+// errors (bad value, unknown key); external shell steps are not executed here.
+func (o *Module) Validate(ctx context.Context, pipeline []string) error {
+	sentinel := &RawItem{}
+	for _, step := range pipeline {
+		fields := strings.Fields(step)
+		if len(fields) == 0 {
+			return fmt.Errorf("empty pipeline step")
+		}
+		fn, ok := o.processors[fields[0]]
+		if !ok {
+			if strings.HasPrefix(fields[0], "#") {
+				return fmt.Errorf("unknown built-in module %q", fields[0])
+			}
+			continue // external shell command: not validated here
+		}
+		params, err := parseParams(fields[1:])
+		if err != nil {
+			return fmt.Errorf("%s: %w", fields[0], err)
+		}
+		if err := fn(ctx, params, sentinel); err != nil {
+			return fmt.Errorf("%s: %w", fields[0], err)
+		}
+	}
 	return nil
 }

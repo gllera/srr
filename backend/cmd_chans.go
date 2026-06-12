@@ -39,6 +39,33 @@ func printJSON(v any) error {
 	return printFormatted("json", v)
 }
 
+// normalizeChannel trims/validates a channel's pipe and tag just before it is
+// persisted (the single chokepoint for add / upd / apply / edit / import), so a
+// bad value fails loudly at config time instead of silently breaking the fetch
+// later. Channel pipes may use #base (allowBase=true).
+func normalizeChannel(ch *Channel) error {
+	ch.Pipe = filterPipe(ch.Pipe)
+	if err := validatePipe(ch.Pipe, true); err != nil {
+		return err
+	}
+	return validateTag(ch.Tag)
+}
+
+// validateTag rejects a numeric-only tag. The frontend filter resolves an
+// all-digits token as a channel id, so such a tag would silently show every
+// article instead of the tagged set (and could collide with a real id).
+func validateTag(tag string) error {
+	if tag == "" {
+		return nil
+	}
+	for _, r := range tag {
+		if r < '0' || r > '9' {
+			return nil
+		}
+	}
+	return fmt.Errorf("tag %q cannot be numeric-only (it would be read as a channel id)", tag)
+}
+
 type AddCmd struct {
 	Title   *string   `short:"t" required:""              help:"Channel title."`
 	URLs    *[]string `short:"u" required:"" name:"url"   help:"Channel RSS url(s); repeat to merge multiple feeds under one id."`
@@ -88,10 +115,13 @@ func (o *AddCmd) Run() error {
 			ch.Tag = *o.Tag
 		}
 		if o.Parsers != nil {
-			ch.Pipe = filterPipe(o.Parsers)
+			ch.Pipe = o.Parsers // normalizeChannel trims/validates below
 		}
 		if o.Ingest != nil {
 			ch.Ingest = *o.Ingest
+		}
+		if err := normalizeChannel(ch); err != nil {
+			return err
 		}
 		if err := db.AddChannel(ch); err != nil {
 			return err
@@ -180,7 +210,7 @@ func (o *UpdCmd) Run() error {
 			ch.Tag = *o.Tag
 		}
 		if o.Parsers != nil {
-			ch.Pipe = filterPipe(o.Parsers)
+			ch.Pipe = o.Parsers // normalizeChannel trims/validates below
 		}
 		if o.Ingest != nil {
 			ch.Ingest = *o.Ingest
@@ -203,6 +233,9 @@ func (o *UpdCmd) Run() error {
 			}
 		}
 
+		if err := normalizeChannel(ch); err != nil {
+			return err
+		}
 		return db.Commit(ctx)
 	})
 }
@@ -382,6 +415,9 @@ func applyViews(ctx context.Context, db *DB, views []*channelView) error {
 			target = &Channel{}
 		}
 		writeChannelView(target, op.view, feeds)
+		if err := normalizeChannel(target); err != nil {
+			return fmt.Errorf("channel %q: %w", op.view.Title, err)
+		}
 		if op.ch == nil {
 			if err := db.AddChannel(target); err != nil {
 				return err
