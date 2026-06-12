@@ -81,6 +81,7 @@ See [backend/README.md](backend/README.md) and [frontend/README.md](frontend/REA
 
 | Workflow | Trigger | Action |
 |----------|---------|--------|
+| `ci.yml` | Push to `main`, PRs | Runs `make verify` (lint, format, FE+BE tests, builds, jsdom e2e contract) and `make test-browser` (Puppeteer) in parallel jobs |
 | `release.yml` (`release` job) | `v*.*.*` tag | Cross-compiles backend binaries, creates GitHub release |
 | `release.yml` (`pages` job) | `v*.*.*` tag or manual | Builds and deploys frontend to GitHub Pages |
 | `cron.yml` | Manual dispatch | Downloads latest `srr` binary and runs `srr a fetch` against the configured store |
