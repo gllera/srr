@@ -37,6 +37,14 @@ export function setImgProxy(value: string): void {
    } catch {}
 }
 
+// isValidProxy accepts the empty string (disables proxying) or an absolute
+// http(s) prefix (http allowed for LAN proxies) — imgProxy() just concatenates
+// prefix + encoded URL, so a schemeless prefix could never produce a fetchable
+// image URL. setImgProxy stays a dumb setter; the UI validates before storing.
+export function isValidProxy(v: string): boolean {
+   return v === "" || /^https?:\/\//i.test(v)
+}
+
 export function imgProxy(url: string, prefix: string): string {
    return prefix ? prefix + encodeURIComponent(url) : url
 }
