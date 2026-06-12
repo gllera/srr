@@ -63,12 +63,21 @@ const SCOPE = new URL(sw.registration.scope).pathname
 
 // Matched anywhere in the path so they hold whatever prefix the cdn-url adds.
 const RE_ASSET = /\/assets\/[0-9a-f]{2}\/[0-9a-f]{16}\.\w+$/i
-// Write-once pack names: finalized numeric stems, L<seq> latest generations,
-// and the idx/h<N> / search/s<N> summaries (each published before the db.gz
-// that names it).
-const RE_PACK = /\/packs\/(?:idx|data|search)\/[Lhs]?\d+\.gz$/i
+// The one pack-name grammar (parsed by parsePackName below): write-once names
+// only — finalized numeric stems, L<seq> latest generations, and the idx/h<N>
+// / search/s<N> summaries (each published before the db.gz that names it).
+const RE_PACK = /\/packs\/(idx|data|search)\/([Lhs]?)(\d+)\.gz$/i
 const RE_DB = /\/packs\/db\.gz$/i // the store's only mutable key
 const RE_SHELL_HASHED = /\.[0-9a-f]{8,}\.(?:js|css)$/i // Parcel content-hashed bundles
+
+// parsePackName decodes a pack path: the series, the stem kind ("" finalized,
+// "l" latest generation, "h" idx header summary, "s" search bloom summary —
+// lowercased like the series), and the numeric stem. The route test, the
+// cache bound, and the manifest prunes all consume this one grammar.
+function parsePackName(path: string): { series: string; kind: string; n: number } | null {
+   const m = RE_PACK.exec(path)
+   return m ? { series: m[1].toLowerCase(), kind: m[2].toLowerCase(), n: Number(m[3]) } : null
+}
 
 sw.addEventListener("install", () => {
    // A fresh worker is useful immediately; nothing to pre-cache.
@@ -133,7 +142,6 @@ const PACK_KEEP = 100 // per finalized series: ~20 MB of data packs + ~5 MB of i
 const SEARCH_KEEP = 30 // search shards run ~1 MB each — a tighter bound for the same idea
 const ASSET_KEEP = 500 // self-hosted images/files: order of ~100 MB at typical sizes
 
-const RE_PACK_FINAL = /\/packs\/(idx|data|search)\/(\d+)\.gz$/i
 const SERIES_KEEP: Record<string, number> = { idx: PACK_KEEP, data: PACK_KEEP, search: SEARCH_KEEP }
 
 async function enforceCacheBounds(): Promise<void> {
@@ -141,8 +149,8 @@ async function enforceCacheBounds(): Promise<void> {
       const packs = await caches.open(PACKS)
       const series: Record<string, { req: Request; n: number }[]> = { idx: [], data: [], search: [] }
       for (const req of await packs.keys()) {
-         const m = RE_PACK_FINAL.exec(new URL(req.url).pathname)
-         if (m) series[m[1].toLowerCase()].push({ req, n: Number(m[2]) })
+         const p = parsePackName(new URL(req.url).pathname)
+         if (p && p.kind === "") series[p.series].push({ req, n: p.n })
       }
       const assets = await caches.open(ASSETS)
       const assetKeys = await assets.keys()
@@ -204,22 +212,17 @@ async function checkManifest(dbRes: Response): Promise<void> {
       }
       if (seq !== (await readMetaNumber(SEQ_KEY))) {
          const keys = await packs.keys()
+         // Superseded summaries (idx h<N> headers, search s<N> blooms) ride
+         // the seq prune instead of tracking meta keys of their own. Their
+         // counters CAN advance without a seq bump (a zero-article migration
+         // or sync-retry cycle), but such a cycle strands at most one stale
+         // name each, pruned on the next article-producing fetch — and a
+         // store rebuild purges the whole bucket via gen above.
+         const cutoff: Record<string, number> = { l: seq, h: hdrs, s: srch }
          await Promise.all(
             keys.map((k) => {
-               const path = new URL(k.url).pathname
-               const m = /\/packs\/(?:idx|data|search)\/L(\d+)\.gz$/i.exec(path)
-               if (m && Number(m[1]) < seq - LATEST_KEEP) return packs.delete(k)
-               // Superseded summaries (idx headers, search blooms) ride the
-               // seq prune instead of tracking meta keys of their own. Their
-               // counters CAN advance without a seq bump (a zero-article
-               // migration or sync-retry cycle), but such a cycle strands at
-               // most one stale name each, pruned on the next
-               // article-producing fetch — and a store rebuild purges the
-               // whole bucket via gen above.
-               const h = /\/packs\/idx\/h(\d+)\.gz$/i.exec(path)
-               if (h && Number(h[1]) < hdrs - LATEST_KEEP) return packs.delete(k)
-               const s = /\/packs\/search\/s(\d+)\.gz$/i.exec(path)
-               return s && Number(s[1]) < srch - LATEST_KEEP ? packs.delete(k) : undefined
+               const p = parsePackName(new URL(k.url).pathname)
+               return p && p.kind !== "" && p.n < cutoff[p.kind] - LATEST_KEEP ? packs.delete(k) : undefined
             }),
          )
          await meta.put(SEQ_KEY, new Response(String(seq)))
@@ -234,17 +237,34 @@ async function checkManifest(dbRes: Response): Promise<void> {
 // any idx pack, so a purge that completes first is race-free. Offline (fetch
 // threw) the check is unreachable — correct, there is no new gen/seq to
 // discover and the cached db.gz/pack pair stays mutually consistent.
+//
+// validator: an unchanged ETag/Last-Modified against the cached copy means
+// unchanged bytes — same gen/seq/hdrs/srch — so the common no-change load
+// skips the gunzip+parse (and the redundant cache.put) on the boot critical
+// path; the await stays a cheap header compare. No validator (or a changed
+// one) falls through to the full check. checkManifest is best-effort anyway,
+// so trusting the validator weakens nothing.
+function validator(r: Response): string | null {
+   return r.headers.get("etag") ?? r.headers.get("last-modified")
+}
+
 async function dbNetworkFirst(req: Request, event: FetchEvent): Promise<Response> {
    const cache = await caches.open(PACKS)
    try {
       const res = await fetch(req)
       if (res.ok) {
-         cache.put(req, res.clone())
-         await checkManifest(res)
-         // Size backstop rides the same online-db.gz signal, but off the
-         // critical path — the page is waiting on this response. waitUntil
-         // keeps the worker alive; new puts after the keys() snapshot are
-         // never deleted, so it can't race the page's pack fetches.
+         const v = validator(res)
+         const prev = v ? await cache.match(req) : undefined
+         if (!prev || validator(prev) !== v) {
+            cache.put(req, res.clone())
+            await checkManifest(res)
+         }
+         // Size backstop rides the same online-db.gz signal (the packs bucket
+         // grows from archive navigation even when db.gz is unchanged), but
+         // off the critical path — the page is waiting on this response.
+         // waitUntil keeps the worker alive; new puts after the keys()
+         // snapshot are never deleted, so it can't race the page's pack
+         // fetches.
          event.waitUntil(enforceCacheBounds())
       }
       return res
