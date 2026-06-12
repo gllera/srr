@@ -29,7 +29,12 @@ func init() {
 		// of the 320×180 poster size. The frontend defense-in-depth
 		// strips style/class/on* and URL_DENY schemes, mirroring this
 		// allowlist.
-		policy.AllowAttrs("src", "poster").OnElements("video")
+		// bluemonday URL-scheme-validates a video's "src" but NOT its "poster",
+		// so a poster="javascript:…"/"data:…" would otherwise survive into the
+		// stored packs. Constrain poster to http(s) or the relative assets/ key
+		// (the only forms the writer emits) so dangerous schemes are stripped.
+		policy.AllowAttrs("src").OnElements("video")
+		policy.AllowAttrs("poster").Matching(regexp.MustCompile(`(?i)^(https?://|assets/)`)).OnElements("video")
 		policy.AllowAttrs("preload").Matching(regexp.MustCompile(`(?i)^(none|metadata|auto)$`)).OnElements("video")
 		policy.AllowAttrs("controls").Matching(regexp.MustCompile(`(?i)^(|controls)$`)).OnElements("video")
 		policy.AllowAttrs("playsinline").Matching(regexp.MustCompile(`(?i)^(|playsinline)$`)).OnElements("video")

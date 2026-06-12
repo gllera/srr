@@ -37,6 +37,24 @@ export function imgProxy(url: string, prefix: string): string {
    return prefix ? prefix + encodeURIComponent(url) : url
 }
 
+// resolveAsset resolves a self-hosted asset key against the pack base, but only
+// if the result stays inside that base. Without the bounds check, a crafted key
+// like "assets/../../x" would traverse out of the assets subtree onto an
+// arbitrary path on the CDN origin (a credentialed-GET info-leak vector).
+// Returns null when the key escapes, so the caller drops the attribute.
+function resolveAsset(v: string): string | null {
+   const resolved = new URL(v, PACK_BASE).href
+   return resolved.startsWith(PACK_BASE.href) ? resolved : null
+}
+
+// setAsset resolves a self-hosted asset key and sets it on node[attr], dropping
+// the attribute when the key escapes the pack base (see resolveAsset).
+function setAsset(node: Element, attr: string, v: string): void {
+   const resolved = resolveAsset(v)
+   if (resolved) node.setAttribute(attr, resolved)
+   else node.removeAttribute(attr)
+}
+
 // <template> parses HTML without executing scripts, unlike a div
 const tmpl = document.createElement("template")
 export function sanitizeHtml(html: string): string {
@@ -59,18 +77,21 @@ export function sanitizeHtml(html: string): string {
       else if (tag === "IMG") {
          node.removeAttribute("srcset")
          const src = node.getAttribute("src")
-         // Self-hosted assets resolve against the pack base and bypass the proxy;
-         // external http(s) URLs keep the proxy path. URL_DENY-matching src was
-         // already stripped by the attribute loop above.
-         if (src && src.startsWith(ASSET_PREFIX)) node.setAttribute("src", new URL(src, PACK_BASE).href)
+         // Self-hosted assets resolve against the pack base (bounds-checked) and
+         // bypass the proxy; external http(s) URLs keep the proxy path. URL_DENY-
+         // matching src was already stripped by the attribute loop above.
+         if (src && src.startsWith(ASSET_PREFIX)) setAsset(node, "src", src)
          else if (src && HTTP_RE.test(src)) node.setAttribute("src", imgProxy(src, proxyPrefix))
       } else if (tag === "VIDEO") {
-         // Resolve self-hosted src/poster against the pack base; external video
-         // URLs pass through (image proxies don't handle video).
-         for (const a of ["src", "poster"]) {
-            const v = node.getAttribute(a)
-            if (v && v.startsWith(ASSET_PREFIX)) node.setAttribute(a, new URL(v, PACK_BASE).href)
-         }
+         // src: self-hosted resolves against the pack base; external passes
+         // through (image proxies don't handle video).
+         const src = node.getAttribute("src")
+         if (src && src.startsWith(ASSET_PREFIX)) setAsset(node, "src", src)
+         // poster IS an image, so route external posters through the proxy like
+         // img.src (the asymmetry of leaving them direct leaks the user's IP).
+         const poster = node.getAttribute("poster")
+         if (poster && poster.startsWith(ASSET_PREFIX)) setAsset(node, "poster", poster)
+         else if (poster && HTTP_RE.test(poster)) node.setAttribute("poster", imgProxy(poster, proxyPrefix))
       }
    }
    return tmpl.innerHTML
