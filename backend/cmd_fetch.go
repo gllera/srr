@@ -124,6 +124,12 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 			return articles[i].Published < articles[j].Published
 		})
 
+		// Snapshot the GC-relevant counters: each sweep below runs only when
+		// its counter advanced this run. Most cycles fetch nothing new, and an
+		// unconditional sweep would re-delete the same already-gone window
+		// every interval (≈20 no-op store round trips + warn lines per cycle).
+		prevSeq, prevHdrs, prevSrch := db.core.Seq, db.core.HdrPacks, db.core.SearchPacks
+
 		if err := db.PutArticles(ctx, articles); err != nil {
 			return err
 		}
@@ -138,25 +144,35 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 		// Same warn-only contract: the search series is a derived index, so a
 		// failed sync must not discard the durable batch. Coverage fields stay
 		// behind, readers keep search disabled (or miss only the newest tail),
-		// and the next run reconciles.
-		if err := db.SyncSearch(ctx); err != nil {
+		// and the next run reconciles. The batch lets the common cycle build
+		// its entries from memory instead of re-reading the packs just written.
+		if err := db.SyncSearch(ctx, articles); err != nil {
 			slog.Warn("sync search", "error", err)
 		}
 		if err := db.Commit(ctx); err != nil {
 			return err
 		}
-		// Drop latest-pack generations older than the grace window. Articles
-		// are already durable, so failure here is log-only; WithoutCancel
-		// keeps a shutdown signal from widening the leak window (anything
-		// missed is swept by a later run regardless).
-		if err := db.GCLatest(context.WithoutCancel(ctx), latestKeep); err != nil {
-			slog.Warn("gc latest packs", "error", err)
+		// Drop latest-pack generations older than the grace window, but only
+		// when the counter advanced this run — a crash-leaked name is still
+		// swept by the next advancing run (the sweep window is wider than a
+		// single advance), which is the same "anything missed is swept by a
+		// later run" guarantee. Articles are already durable, so failure here
+		// is log-only; WithoutCancel keeps a shutdown signal from widening
+		// the leak window.
+		if db.core.Seq != prevSeq {
+			if err := db.GCLatest(context.WithoutCancel(ctx), latestKeep); err != nil {
+				slog.Warn("gc latest packs", "error", err)
+			}
 		}
-		if err := db.GCSummaries(context.WithoutCancel(ctx), latestKeep); err != nil {
-			slog.Warn("gc idx summaries", "error", err)
+		if db.core.HdrPacks != prevHdrs {
+			if err := db.GCSummaries(context.WithoutCancel(ctx), latestKeep); err != nil {
+				slog.Warn("gc idx summaries", "error", err)
+			}
 		}
-		if err := db.GCSearchSummaries(context.WithoutCancel(ctx), latestKeep); err != nil {
-			slog.Warn("gc search summaries", "error", err)
+		if db.core.SearchPacks != prevSrch {
+			if err := db.GCSearchSummaries(context.WithoutCancel(ctx), latestKeep); err != nil {
+				slog.Warn("gc search summaries", "error", err)
+			}
 		}
 
 		var failed, totalFeeds int

@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"sort"
 )
@@ -292,21 +291,6 @@ func checkIdxSummary(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 		fmt.Printf("[idx-summary] %s matches %d finalized pack header(s)\n", key, core.HdrPacks)
 	}
 	return issues
-}
-
-func parseSearchEntries(buf []byte) ([]SearchEntry, error) {
-	var out []SearchEntry
-	for i, line := range bytes.Split(buf, []byte("\n")) {
-		if len(line) == 0 {
-			continue
-		}
-		var e SearchEntry
-		if err := json.Unmarshal(line, &e); err != nil {
-			return nil, fmt.Errorf("line %d: %w", i, err)
-		}
-		out = append(out, e)
-	}
-	return out, nil
 }
 
 // checkSearch verifies the search/ series against db.gz: coverage
