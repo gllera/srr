@@ -178,6 +178,11 @@ func (f *Fetcher) Close() error {
 // per-item string (computed by the external fetcher to match the dedup
 // contract used by built-ins); `published` is RFC3339 or null/absent for
 // dateless items.
+//
+// A non-zero exit code, empty stdout, or output exceeding
+// maxSubprocessOutput is a hard error (fails just this feed's fetch). The
+// author-facing spec and a reference implementation live in README.md
+// (Ingest Strategies).
 func (f *Fetcher) Fetch(ctx context.Context, args string, client *http.Client, buf []byte, req Request) (Result, error) {
 	if fn, ok := f.fetchers[args]; ok {
 		return fn(ctx, client, buf, req)
@@ -200,8 +205,17 @@ func (f *Fetcher) Fetch(ctx context.Context, args string, client *http.Client, b
 		return Result{}, fmt.Errorf("fetcher command %q: %w", args, err)
 	}
 
+	// Empty stdout is a protocol violation, not a no-op: a fetcher that has
+	// nothing to report must still say so explicitly ({"items":[]} or
+	// {"not_modified":true}). Reporting it here beats letting json.Unmarshal
+	// fail on "" with an opaque "unexpected end of JSON input".
+	raw := bytes.TrimSpace(out.buf.Bytes())
+	if len(raw) == 0 {
+		return Result{}, fmt.Errorf("fetcher command %q produced no output", args)
+	}
+
 	var resp Result
-	if err := json.Unmarshal(out.buf.Bytes(), &resp); err != nil {
+	if err := json.Unmarshal(raw, &resp); err != nil {
 		return Result{}, fmt.Errorf("decode fetcher response: %w", err)
 	}
 	return resp, nil
