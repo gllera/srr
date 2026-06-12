@@ -16,9 +16,8 @@ interface IChannel extends IChannelWire {
    id: number // populated from the channels object key at init
 }
 
-interface IDB extends Omit<IDBWire, "seq" | "hdrs" | "channels"> {
+interface IDB extends Omit<IDBWire, "seq" | "channels"> {
    seq: number // backend omitempty (absent == 0 == empty store); init() normalizes with ??= 0
-   hdrs: number // backend omitempty (absent == 0 == no idx header summary); init() normalizes with ??= 0
    channels: Record<number, IChannel> // init() normalizes null with ??= {} and stamps each value's .id
 }
 

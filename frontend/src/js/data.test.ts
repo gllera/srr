@@ -4,7 +4,6 @@ import { describe, it, expect, vi } from "vitest"
 // module and re-export the real pure functions with writable state.
 const state = vi.hoisted(() => ({
    db: {} as IDB,
-   fetchedAts: new Uint32Array(0),
 }))
 
 vi.mock("./data", () => ({
@@ -14,19 +13,6 @@ vi.mock("./data", () => ({
    },
    set db(v: IDB) {
       state.db = v
-   },
-   // Mirrors the real signature (async since the lazy-idx change) but keeps
-   // the flat in-pack search: the pack-level step is pure and unit-tested in
-   // idx.test.ts (findPackForBlocks).
-   async findChronForTimestamp(ts: number): Promise<number> {
-      let lo = 0
-      let hi = state.fetchedAts.length
-      while (lo < hi) {
-         const mid = (lo + hi) >>> 1
-         if (state.fetchedAts[mid] < ts) lo = mid + 1
-         else hi = mid
-      }
-      return lo < state.fetchedAts.length ? lo : Math.max(0, state.fetchedAts.length - 1)
    },
    groupChannelsByTag(): { tagged: Map<string, IChannel[]>; sortedTags: string[]; untagged: IChannel[] } {
       const subs = Object.values(state.db.channels ?? {})
@@ -52,47 +38,9 @@ vi.mock("./data", () => ({
 
 const data = await import("./data")
 
-describe("findChronForTimestamp", () => {
-   it("returns 0 for empty array", async () => {
-      state.fetchedAts = new Uint32Array([])
-      expect(await data.findChronForTimestamp(100)).toBe(0)
-   })
-
-   it("returns 0 when all entries are after the timestamp", async () => {
-      state.fetchedAts = new Uint32Array([50, 60, 70])
-      expect(await data.findChronForTimestamp(10)).toBe(0)
-   })
-
-   it("returns last index when all entries are before the timestamp", async () => {
-      state.fetchedAts = new Uint32Array([10, 20, 30])
-      expect(await data.findChronForTimestamp(100)).toBe(2)
-   })
-
-   it("finds leftmost entry >= ts", async () => {
-      state.fetchedAts = new Uint32Array([10, 20, 30, 40, 50])
-      expect(await data.findChronForTimestamp(25)).toBe(2)
-   })
-
-   it("finds exact match", async () => {
-      state.fetchedAts = new Uint32Array([10, 20, 30, 40, 50])
-      expect(await data.findChronForTimestamp(30)).toBe(2)
-   })
-
-   it("returns leftmost of duplicate values", async () => {
-      state.fetchedAts = new Uint32Array([10, 20, 20, 20, 50])
-      expect(await data.findChronForTimestamp(20)).toBe(1)
-   })
-
-   it("works with single element <= ts", async () => {
-      state.fetchedAts = new Uint32Array([10])
-      expect(await data.findChronForTimestamp(10)).toBe(0)
-   })
-
-   it("works with single element > ts", async () => {
-      state.fetchedAts = new Uint32Array([10])
-      expect(await data.findChronForTimestamp(5)).toBe(0)
-   })
-})
+// findChronForTimestamp is covered where the real code lives: its two halves
+// in idx.test.ts (findPackForBlocks, findChronForBlocks) and the composition
+// in the contract layer (summary.e2e.test.ts).
 
 describe("groupChannelsByTag", () => {
    it("returns empty collections when no channels", () => {

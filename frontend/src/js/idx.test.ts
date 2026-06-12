@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest"
+import { IDX_HEADER_SIZE } from "./format.gen"
 import { findPackForBlocks, IDX_PACK_SIZE, makeIdxPack, parseIdxHeaders, type IdxHeader } from "./idx"
-
-const HEADER_BYTES = 259 * 4
 
 interface Entry {
    chanId: number
@@ -18,7 +17,7 @@ interface PackOpts {
 }
 
 function buildBuf(o: PackOpts): ArrayBuffer {
-   const buf = new ArrayBuffer(HEADER_BYTES + o.entries.length * 2)
+   const buf = new ArrayBuffer(IDX_HEADER_SIZE + o.entries.length * 2)
    const view = new DataView(buf)
    view.setUint32(0, o.fetchedAtBase ?? 0, true)
    view.setUint32(4, o.packIdBase ?? 0, true)
@@ -29,8 +28,8 @@ function buildBuf(o: PackOpts): ArrayBuffer {
    const bytes = new Uint8Array(buf)
    for (let i = 0; i < o.entries.length; i++) {
       const e = o.entries[i]
-      bytes[HEADER_BYTES + i * 2] = e.chanId
-      bytes[HEADER_BYTES + i * 2 + 1] = (e.deltaPackId << 7) | (e.deltaFetchedAt & 0x7f)
+      bytes[IDX_HEADER_SIZE + i * 2] = e.chanId
+      bytes[IDX_HEADER_SIZE + i * 2 + 1] = (e.deltaPackId << 7) | (e.deltaFetchedAt & 0x7f)
    }
    return buf
 }
@@ -257,25 +256,26 @@ describe("makeIdxPack.countLeft", () => {
 
 // idx/h<N>.gz is the verbatim concatenation of finalized-pack headers.
 function buildSummary(headers: Omit<PackOpts, "entries">[]): ArrayBuffer {
-   const out = new Uint8Array(headers.length * HEADER_BYTES)
-   headers.forEach((h, k) => out.set(new Uint8Array(buildBuf({ ...h, entries: [] })), k * HEADER_BYTES))
+   const out = new Uint8Array(headers.length * IDX_HEADER_SIZE)
+   headers.forEach((h, k) => out.set(new Uint8Array(buildBuf({ ...h, entries: [] })), k * IDX_HEADER_SIZE))
    return out.buffer
 }
 
-describe("makeIdxPack.findFirstBlock", () => {
-   // fetchedAts: [10, 15, 15, 20]
+describe("makeIdxPack.findChronForBlocks", () => {
+   // fetchedAts: [10, 15, 15, 20] in pack 2 → chron base 2 * IDX_PACK_SIZE
    const buf = buildBuf({ fetchedAtBase: 10, entries: [e(1), e(1, 0, 5), e(1), e(1, 0, 5)] })
+   const base = 2 * IDX_PACK_SIZE
 
-   it("returns the leftmost entry with fetchedAt >= tsBlocks", () => {
-      const pack = makeIdxPack(buf, 0, 4)
-      expect(pack.findFirstBlock(0)).toBe(0)
-      expect(pack.findFirstBlock(11)).toBe(1)
-      expect(pack.findFirstBlock(15)).toBe(1)
-      expect(pack.findFirstBlock(16)).toBe(3)
+   it("returns the global chron of the leftmost entry with fetchedAt >= tsBlocks", () => {
+      const pack = makeIdxPack(buf, 2, 4)
+      expect(pack.findChronForBlocks(0)).toBe(base)
+      expect(pack.findChronForBlocks(11)).toBe(base + 1)
+      expect(pack.findChronForBlocks(15)).toBe(base + 1)
+      expect(pack.findChronForBlocks(16)).toBe(base + 3)
    })
 
-   it("returns the entry count when nothing qualifies", () => {
-      expect(makeIdxPack(buf, 0, 4).findFirstBlock(21)).toBe(4)
+   it("returns one past the pack's end when nothing qualifies", () => {
+      expect(makeIdxPack(buf, 2, 4).findChronForBlocks(21)).toBe(base + 4)
    })
 })
 
