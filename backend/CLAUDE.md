@@ -81,7 +81,7 @@ Pipeline per-channel during fetch. Factory pattern: `New()` returns a fresh stat
 - `#sanitize` — bluemonday, content-only.
 - `#minify` — tdewolff/minify, content-only.
 - `#readability` — for feeds that syndicate only a teaser/summary: HTTP-GETs the item's `Link` (browser-like UA, default 20s timeout, 8 MiB body cap) and replaces `Content` with the article's main body extracted via `go-shiori/go-readability`. Tunable per pipeline position via `timeout=` (Go duration) and `maxbody=` (byte size), e.g. `#readability timeout=30s maxbody=16MiB`; the timeout is enforced via a per-call `context.WithTimeout` so the shared client can carry different budgets. **Fail-open**: empty/invalid link, non-2xx, fetch/parse error, or empty extraction all leave `Content` untouched and return nil (logged at WARN) — one bad article never fails the fetch (but a bad `timeout=`/`maxbody=` value, or an unknown param, is a hard error). Place it **before** `#sanitize`/`#minify` (e.g. channel pipe `["#readability", "#base"]`) so the fetched HTML gets clamped to the allowed element set. Network-bound, so unlike the other built-ins it honours the fetch `context` (cancellation/deadline).
-- External modules: `/bin/sh -c`, stdin/stdout JSON (`RawItem`), stderr passthrough.
+- External modules: `/bin/sh -c`, stdin/stdout JSON (`RawItem`), stderr passthrough. The author-facing protocol spec + a reference implementation live in `backend/README.md` (External mod protocol); the protocol tests are in `mod/main_test.go`.
 
 #### Asset self-hosting (`assetFetcher.UploadCacheRef` + `RewriteAttrs`)
 

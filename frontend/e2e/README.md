@@ -42,9 +42,12 @@ needs the Chromium under `~/.cache/puppeteer/` (installed with `puppeteer`).
 - `harness.ts` — `srr()` (run the binary; async so the in-process feed server can
   answer the child's fetch), `feedServer()` (canned RSS over HTTP), `makeStore()`,
   `inspectValidate()`.
-- `fixtures.ts` — RSS builders; `nItems()` produces deterministic items with
-  disjoint published ranges (so global chronIdx order is total) and optional
-  **incompressible** content (packs roll on compressed size).
+- `fixtures.ts` — RSS builders; `nItems(count, prefix, pad?, startIdx?)` builds
+  deterministic items — pass a distinct `startIdx` per channel so their published
+  ranges are disjoint (keeping global chronIdx order total and assertable; a
+  single call spans `pubUnix(startIdx)..pubUnix(startIdx+count-1)`, so default
+  calls overlap), and `pad>0` to append **incompressible** content (packs roll on
+  compressed size).
 - `contract/mount.ts` — mounts the real reader against a store (fetch shim +
   `resetModules` + dynamic import; the shim must be installed before import
   because `data.ts` fetches `db.gz` at module load).

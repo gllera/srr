@@ -14,8 +14,8 @@ Update CLAUDE.md files to reflect the current state of the codebase. There are t
 ## Process
 
 1. Read all three `CLAUDE.md` files
-2. Read key source files: `frontend/src/js/types.d.ts`, `frontend/src/js/data.ts`, `frontend/src/js/nav.ts`, `frontend/src/js/app.ts`, `frontend/src/js/nav.test.ts`, `backend/db.go`, `backend/subscription.go`
-3. Glob for undocumented files: `backend/cmd_*.go`, `backend/*.go`, `backend/store/*.go`, `backend/mod/*.go`, `frontend/src/js/*.ts`
+2. Read key source files: `frontend/src/js/types.d.ts`, `frontend/src/js/data.ts`, `frontend/src/js/nav.ts`, `frontend/src/js/app.ts`, `frontend/src/js/nav.test.ts`, `backend/db.go`, `backend/channel.go`, `backend/feed.go`
+3. Glob for undocumented files: `backend/cmd_*.go`, `backend/*.go`, `backend/store/*.go`, `backend/mod/*.go`, `backend/ingest/*.go`, `frontend/src/js/*.ts`
 4. Compare each section against actual code and fix stale content
 
 ## Rules

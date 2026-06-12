@@ -28,6 +28,7 @@ Verify the backend file has:
 - **Constructor** matching `InitFunc` signature: `func(context.Context, *url.URL) (Backend, error)`
 - **Path helper** method (e.g., `localPath`, `s3path`) that calls `slog.Debug("db "+op, "url", ...)` — every method should log via this helper
 - **Struct** implementing all 5 `Backend` interface methods
+- **`RegisterConfig` (configurable backends only)**: if the backend reads YAML/env config, its `init()` must call `RegisterConfig(scheme, &cfg)` in addition to `Register`, and every overridable field must carry a `yaml:"name"` tag (S3/SFTP do this). `LoadConfigs` decodes the matching YAML section, then `loadEnv` applies `SRR_<SCHEME>_<FIELD>` env overrides. Gotchas to flag: an untagged field is silently skipped by the env-override loader, and only `string`/`bool` fields are env-overridable. Backends with no config (local) correctly omit `RegisterConfig`.
 
 ### 4. Audit Each Method
 
@@ -41,12 +42,14 @@ Verify the backend file has:
 - When `ignoreExisting=true`: overwrites silently (local/SFTP: `O_TRUNC`; S3: no precondition)
 - When `ignoreExisting=false`: fails if key exists (local/SFTP: `O_EXCL`; S3: `IfNoneMatch: "*"`)
 - Local backend auto-creates subdirectories via `ensureDir`; flag if a filesystem backend is missing this
+- Cloud/HTTP backends must stamp `Cache-Control` (via `cacheControlForKey` on the logical key, before prefixing) and `Content-Type` (via `mime.TypeByExtension`) — see HTTP metadata under Cross-Cutting Concerns
 - Calls the path helper for debug logging
 
 **`AtomicPut(ctx, key, val)`**
 - Filesystem backends (local, SFTP): temp file write → close → rename (crash-safe)
 - Non-filesystem backends (S3): delegating to `Put(ctx, key, val, true)` is acceptable
 - Local backend auto-creates subdirectories; check filesystem backends do the same
+- Cloud/HTTP backends must carry the same `Cache-Control`/`Content-Type` metadata as `Put` (S3 inherits it by delegating) — see HTTP metadata under Cross-Cutting Concerns
 - Calls the path helper for debug logging
 
 **`Rm(ctx, key)`**
@@ -63,14 +66,16 @@ Verify the backend file has:
 - **Error wrapping**: Returned errors should use `fmt.Errorf("...: %w", err)` for context. Flag any method that returns a raw unwrapped error.
 - **Context**: Pass `ctx` through to underlying I/O where the library supports it. Filesystem backends that use `os` calls may ignore ctx (acceptable since `os` doesn't support context).
 - **No panics**: Errors are returned, never panicked (panics only in `Register()` in `main.go`).
-- **Shared helpers**: Local backend exports `writeOpenFlags()` — SFTP reuses it. New filesystem backends should too if applicable.
+- **HTTP metadata (cloud/HTTP backends only)**: a backend that carries HTTP metadata (S3, GCS, Azure, any HTTP store) MUST, in `Put`, (1) call `cacheControlForKey(key)` on the **logical** key **before** applying the path prefix and stamp the result as `Cache-Control` (ordering is load-bearing — prefixing first would shadow the `db.gz`/`true.gz`/`false.gz`/`idx/`/`data/` classification and misroute the reader to a stale latest pack), and (2) set `Content-Type` via `mime.TypeByExtension(path.Ext(key))` so `assets/` files render in-browser instead of as octet-stream (see `s3.go` `Put`). `AtomicPut` must carry the same metadata (S3 satisfies this by delegating to `Put`). Filesystem backends (local, SFTP) correctly ignore both. **FAIL** a cloud/HTTP backend that omits either.
+- **Shared helpers**: The package-private helper `writeOpenFlags()` (a package-level func defined in `local.go`, not a method on `Local`) is shared — SFTP's `Put` reuses it, and new filesystem backends should too rather than re-deriving the `O_CREATE|O_TRUNC` (overwrite) vs `O_CREATE|O_EXCL` (exclusive-create) flag choice.
 
 ### 6. Compare with References
 
 Flag behavioral divergences not justified by the backend's nature. Known acceptable deviations:
 - S3 `AtomicPut` = simple overwrite (no temp-rename possible)
 - S3 `Rm` uses S3's idempotent delete (no not-found check needed, but error should still be wrapped)
-- SFTP doesn't auto-create subdirectories (unlike local)
+- Filesystem backends (local, SFTP) both auto-create parent directories before writing — local via `os.MkdirAll`, SFTP via `client.MkdirAll`, each gated through an `ensureDir` helper called by `Put`/`AtomicPut`; flag any new filesystem backend that writes nested keys without an `ensureDir` step.
+- HTTP-metadata (Cache-Control / Content-Type) is emitted only by cloud/HTTP backends (S3); filesystem backends may omit it, but cloud/HTTP backends may not (see Cross-Cutting Concerns).
 
 ## Output
 

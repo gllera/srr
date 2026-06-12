@@ -55,7 +55,7 @@ Entry point: `src/index.html` -> `src/js/app.ts`. Bundled with Parcel 2.
 | `app.ts` | UI rendering, events, keyboard shortcuts, error popup. All async actions go through a `guard()` mutex. |
 | `nav.ts` | Navigation state machine: hash routing, traversal, filtering. Returns `IShowFeed`. |
 | `data.ts` | CDN data layer: fetches `db.gz`, loads binary idx packs at init, fetches JSONL data packs on demand (LRU-cached). |
-| `idx.ts` | Binary idx pack parser: lazy `parse()` into `subIds`/`fetchedAts` typed arrays + `bounds`; per-pack `findLeft`/`findRight`/`countLeft`. |
+| `idx.ts` | Binary idx pack parser: lazy `parse()` into `chanIds`/`fetchedAts` typed arrays + `bounds`; per-pack `findLeft`/`findRight`/`countLeft`. |
 | `dropdown.ts` | Channel-menu dropdown (channel/tag picker + time-range chips). |
 | `gestures.ts` | Touch swipes (prev/next, cycle filter) + scroll-based toolbar hide. |
 | `cache.ts` | Generic LRU cache factory (`makeLRU`). |

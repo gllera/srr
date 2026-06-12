@@ -33,11 +33,15 @@ Commands are grouped under `chan` (channel management), `art` (articles), `previ
 
 | Command            | Description                                        |
 |--------------------|----------------------------------------------------|
-| `chan add`         | Subscribe to a feed or update an existing channel  |
+| `chan add`         | Subscribe to a new channel (one or more feed URLs); always allocates a fresh id |
+| `chan upd <id>`    | Update a channel (`-t` title, `-g` tag, `-p` pipe, `-i` ingest; feed URLs via `-u` REPLACE / `--add-url` APPEND / `--rm-url` REMOVE) |
+| `chan upd <id> --add-url <url>` | Append feed URL(s) to a channel (idempotent) |
+| `chan upd <id> --rm-url <url>`  | Remove feed URL(s) (strict — errors if absent or if it would empty the channel) |
 | `chan rm`          | Unsubscribe from channel(s) by id                  |
-| `chan add-feed`    | Add URL(s) to an existing channel                  |
-| `chan rm-feed`     | Remove URL(s) from an existing channel             |
 | `chan ls`          | List channels (`-g` tag filter, `-f` format)       |
+| `chan show <id>`   | Print one channel (yaml/json)                      |
+| `chan edit <id>`   | Edit a channel's JSON in `$EDITOR`                 |
+| `chan apply`       | Upsert channel(s) from JSON (`--file` or stdin)    |
 | `chan import`      | Import channels from an OPML file                  |
 | `art fetch`        | Fetch new articles from all channels               |
 | `art ls`           | List stored articles                               |
@@ -58,10 +62,10 @@ srr chan add -t "Tech News" -u https://example.com/feed.xml -g tech/news
 srr chan add -t "Blog" -u https://example.com/rss -p "#sanitize" -p "#minify"
 
 # Add a second feed URL to an existing channel (idempotent)
-srr chan add-feed 1 https://example.com/alt-feed.xml
+srr chan upd 1 --add-url https://example.com/alt-feed.xml
 
 # Remove a feed URL from a channel
-srr chan rm-feed 1 https://example.com/alt-feed.xml
+srr chan upd 1 --rm-url https://example.com/alt-feed.xml
 
 # Update an existing channel's pipeline (use #base to keep root mods)
 srr chan upd 1 -p "#base" -p "jq '.content |= ascii_downcase'"
@@ -104,6 +108,8 @@ srr preview https://example.com/feed.xml -p "#sanitize" -p "#minify"
 | `-w, --workers` | nproc | Concurrent downloads |
 | `-s, --pack-size` | 200 | Target pack size (KB) |
 | `-m, --max-feed-size` | 5000 | Max feed download size (KB) |
+| `--max-media-size` | 25000 | Max self-hosted media object size (KB); breach hard-fails the feed |
+| `--cache-dir` | $XDG_CACHE_HOME/srr | Download cache root for self-hosted external-ingest media |
 | `-o, --store` | packs | Storage destination |
 | `--force` | false | Override DB write lock |
 | `-d, --debug` | false | Enable debug logging |
@@ -126,9 +132,9 @@ The output path (`-o`) determines which backend is used:
 
 | Backend | Example | Notes |
 |---------|---------|-------|
-| Local | `srr -o ./packs fetch` | Default. Auto-creates directories. |
-| S3 | `srr -o s3://bucket/prefix fetch` | Uses standard AWS SDK credentials. |
-| SFTP | `srr -o sftp://user@host/path fetch` | Auth: URL password, config password, config private key, `~/.ssh/` keys, or SSH agent. |
+| Local | `srr -o ./packs art fetch` | Default. Auto-creates directories. |
+| S3 | `srr -o s3://bucket/prefix art fetch` | Uses standard AWS SDK credentials. |
+| SFTP | `srr -o sftp://user@host/path art fetch` | Auth: URL password, config password, config private key, `~/.ssh/` keys, or SSH agent. |
 
 ### Backend Configuration
 
@@ -216,11 +222,37 @@ The command receives a JSON **request** on `stdin` and must print a JSON **respo
 
 **The `guid` contract.** SRR dedups and watermarks on `guid`, a 32-bit FNV-1a hash. Pick any *stable* per-item string (an upstream id, the permalink, …) and hash its UTF-8 bytes with FNV-1a — offset basis `2166136261`, prime `16777619`. The same input must always produce the same `guid` so a re-presented item dedups instead of duplicating.
 
+**Example exchange.** SRR writes exactly one request object to the command's stdin (one line, no trailing input):
+
+```json
+{"url":"https://example.com/x","etag":"","last_modified":"","max_size":5119999,"asset_dir":"/home/you/.cache/srr"}
+```
+
+The command reads it, fetches its source, and prints exactly one response object to stdout (whitespace is ignored; pretty-printed here):
+
+```json
+{
+  "etag": "W/\"a1b2c3\"",
+  "items": [
+    {
+      "guid": 3542072042,
+      "title": "Hello world",
+      "content": "<p>First post.</p>",
+      "link": "https://example.com/123",
+      "published": "2024-03-01T12:00:00Z"
+    }
+  ]
+}
+```
+
+`guid` here is `fnv1a32("post-123")`. On the next run SRR echoes `"etag":"W/\"a1b2c3\""` back in the request; reply `{"not_modified":true}` to report nothing changed, or `{"items":[]}` if the source is genuinely empty (both preserve dedup state).
+
 **Behavior contract.**
 
-- A **non-zero exit code** fails the fetch for that channel; other channels still proceed.
+- A **non-zero exit code** fails the fetch for that feed only (the error is recorded in the feed's `ferr`); the channel's other feeds — and all other channels — still fetch and commit.
 - **Empty stdout is an error** — emit at least `{"items":[]}` (or `{"not_modified":true}`).
 - stdout is capped at 64 MiB; exceeding it fails the fetch.
+- The command is killed if it runs longer than the subprocess time budget — 5m by default, overridable via `SRR_CMD_TIMEOUT` (a Go duration; a value that doesn't parse or is ≤ 0 is ignored and the 5m default applies). A killed command fails the fetch for that feed, so long-running sources must finish within the budget or raise it. The command must not block waiting for more stdin after consuming the single request object.
 - `not_modified: true` (or a response with zero `items`) **preserves** the channel's dedup state, so a transient empty response won't drop it.
 
 ### Self-hosting files
@@ -232,7 +264,7 @@ For files SRR can't fetch itself — images, video, or linked documents behind a
 1. Downloads a file into the working directory (checking first — if it already exists, skip the download).
 2. References it in item `content` with a **`#`-prefixed relative path**: a value that starts with `#` and names the downloaded file, e.g. `<img src="#/photo.jpg">`, `<video src="#/clip.mp4">`, or `<a href="#/report.pdf">`. (A plain `#fragment` that doesn't name a real downloaded file — an ordinary in-page anchor — is left alone.)
 
-After the pipe pipeline runs, SRR's automatic final step scans each item's `content` for those markers in `<img src>` / `<video src>` / `<a href>`, hashes the referenced file, uploads it under `assets/<sha256-of-bytes>` **only if not already present**, and rewrites the marker to that key. Identical bytes dedup to one stored object across feeds and runs. A marker pointing at a missing file is left as-is (a broken reference, never a failed fetch).
+After the pipe pipeline runs, SRR's automatic final step scans each item's `content` for those markers in `<img src>` / `<video src>` / `<a href>`, hashes the referenced file, uploads it under `assets/<2-hex>/<16-hex><ext>` — a 2-char shard directory, the first 16 hex chars (64-bit prefix) of the file's sha256, plus the original extension (e.g. `assets/ab/abcdef0123456789.jpg`) — **only if not already present**, and rewrites the marker to that key. Identical bytes dedup to one stored object across feeds and runs. A marker pointing at a missing file is left as-is (a broken reference, never a failed fetch).
 
 > **Note:** `<video poster>` is *not* a supported marker target — the `#sanitize` step strips a `#`-prefixed poster before the upload step runs (its allowlist constrains posters to `http(s)://` or `assets/`). Reference posters as `http(s)` URLs, or host the image via `<img>` instead.
 
@@ -290,11 +322,69 @@ Articles pass through a chain of mods during fetch. The pipe is defined at two l
 - `#minify` — HTML minification (tdewolff/minify)
 - `#readability` — fetches an item's `Link` and replaces `Content` with the extracted article body (for teaser-only feeds; fail-open)
 
-**Custom mods** — any shell command that reads/writes JSON via stdin/stdout:
+**Custom mods** — any shell command that reads/writes JSON via stdin/stdout (see [External mod protocol](#external-mod-protocol)):
 
 ```bash
 srr chan add -t "Feed" -u https://example.com/rss \
   -p "#sanitize" -p "#minify" -p "jq '.content |= ascii_downcase'"
+```
+
+### External mod protocol
+
+A pipeline step whose first word is not a built-in `#`-token is run as an external mod: `/bin/sh -c <step>` is invoked **once per item**, in SRR's process working directory, with the process environment inherited and `stderr` passed through to the terminal (use it for logging). Unlike an external ingest command, an external mod is **not** handed an `asset_dir`, so it cannot self-host files — it only transforms the item it is given.
+
+**stdin** is the full item as a single JSON object (HTML-escaping disabled, so `<`/`>`/`&` are emitted verbatim):
+
+| Field | Type | Description |
+|---|---|---|
+| `guid` | uint32 | The dedup key. **Immutable** — must be echoed back unchanged. |
+| `title` | string | Article title. |
+| `content` | string | Article HTML — the field most mods rewrite. |
+| `link` | string | Canonical article URL. |
+| `published` | string \| null | RFC 3339 timestamp, or `null` for dateless items. **Immutable.** |
+| `raw` | object | The parsed feed entry, keyed by element name; each value carries the short keys `@` (text), `$` (attributes), `+` (children). Restored by SRR after the round-trip, so a mod need not preserve it. |
+
+**stdout** is either the same JSON object back (with `title`/`content`/`link` optionally changed) **or** empty/whitespace — an empty result is a **no-op** that leaves the item unchanged (the opposite of an external ingest command, where empty stdout is an error). `guid` and `published` must be returned unchanged, and `raw` is restored by SRR regardless of what the mod emits.
+
+**Example.** For one item from a `#rss` source, SRR writes this object to the mod's stdin (pretty-printed). `raw` mirrors the parsed feed entry — element name → list of occurrences, each `{@: text, $: attributes, +: children}`; it is `null` for items from an external ingest command, which don't populate it:
+
+```json
+{
+  "guid": 3542072042,
+  "title": "Hello world",
+  "content": "<p>First post.</p>",
+  "link": "https://example.com/123",
+  "published": "2024-03-01T12:00:00Z",
+  "raw": {
+    "title": [{ "@": "Hello world" }],
+    "link": [{ "@": "https://example.com/123" }],
+    "guid": [{ "@": "post-123", "$": { "isPermaLink": "false" } }],
+    "description": [{ "@": "<p>First post.</p>" }],
+    "pubDate": [{ "@": "Fri, 01 Mar 2024 12:00:00 GMT" }],
+    "category": [{ "@": "tech" }, { "@": "news" }]
+  }
+}
+```
+
+To uppercase the title, the mod prints the same object back with only `title` changed — it may drop `raw` (SRR restores it) but must echo `guid` and `published` unchanged:
+
+```json
+{"guid":3542072042,"title":"HELLO WORLD","content":"<p>First post.</p>","link":"https://example.com/123","published":"2024-03-01T12:00:00Z"}
+```
+
+Printing nothing (or only whitespace) leaves the item exactly as received.
+
+**Behavior contract.**
+
+- stdout is capped at 64 MiB; exceeding it errors.
+- The command is killed if it runs longer than the subprocess time budget — 5m by default, overridable via `SRR_CMD_TIMEOUT` (a Go duration; a value that doesn't parse or is ≤ 0 is ignored and the 5m default applies).
+- A **non-zero exit code**, an **unmarshalable** stdout, or a mod that **changes `guid` or `published`** does *not* fail the feed: SRR logs a WARN and **drops just that one item**, then continues with the rest of the batch.
+
+A minimal reference mod — lowercase every title — using `jq`:
+
+```bash
+srr chan add -t "Feed" -u https://example.com/rss \
+  -p "#base" -p "jq -c '.title |= ascii_downcase'"
 ```
 
 **Hierarchy & resolution.** A `pipe` field lives at two levels: db.gz root (`srr pipe`) and channel (`srr chan add -p ...` / `srr chan upd -p ...`). For each channel the effective pipeline is resolved root → channel:
@@ -314,6 +404,6 @@ Articles are stored in two gzip-compressed series under each channel directory, 
 - **`idx/`** — Binary index (header + 2-byte entries per article); split every 50,000 articles.
 - **`data/`** — JSONL article content (one record per line); split when the gzip-compressed pack exceeds `--pack-size` KB.
 
-Finalized packs are immutable and named `0.gz`..`N-1.gz`; the latest (mutable) pack rotates between `true.gz` and `false.gz` via a `data_tog` flag in `db.gz` so CDNs can serve finalized packs with `force-cache`.
+`idx/` finalized packs are 0-indexed (`idx/0.gz`..`idx/N-1.gz`); `data/` finalized packs start at id 1 (`data/1.gz`..) — the writer bumps `next_pid` before the first data entry, so `data/0.gz` is never produced. For each series the latest (mutable) pack rotates between `true.gz` and `false.gz` via the `data_tog` flag in `db.gz`, so CDNs can serve finalized packs with `force-cache`.
 
 This format is optimized for static file hosting with efficient incremental client sync.
