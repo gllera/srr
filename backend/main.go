@@ -51,6 +51,7 @@ type CLI struct {
 	Art     ArtGroup     `cmd:"" aliases:"a" help:"Article management."`
 	Pipe    PipeCmd      `cmd:"" help:"Set or print root pipe (default pipeline inherited by channels)."`
 	Ingest  IngestCmd    `cmd:"" help:"Set or print root ingest strategy (default inherited by channels)."`
+	Gen     GenCmd       `cmd:"" help:"Print or bump the store generation (db.gz 'gen'; frontend SW cache key)."`
 	Preview PreviewCmd   `cmd:"" aliases:"p" help:"Preview processed feed articles in a browser."`
 	Config  ConfigCmd    `cmd:"" aliases:"c" help:"Print resolved configuration."`
 	Inspect InspectCmd   `cmd:"" aliases:"i" help:"Inspect pack consistency (validate idx<->data, debug chronIdx lookup)."`
