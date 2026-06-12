@@ -173,13 +173,13 @@ func (o *DB) walkArticles(ctx context.Context, from, to int, fn func(ad *Article
 // with the missing chron range, finalizing bloom-headed shards at each
 // idxPackSize boundary, then writes the new latest shard and, when shards
 // were finalized, rebuilds the bloom summary from cheap streaming header
-// reads. The missing range is normally exactly `batch` — the items the
-// caller just gave PutArticles — so the common cycle builds entries from
+// reads. The missing range is normally exactly `written` — the slice
+// PutArticles just returned — so the common cycle builds entries from
 // memory; any other gap (first run, post-bump, failed-sync catch-up) is read
 // back from the idx+data packs. The coverage fields are set only after every
 // save succeeds and the caller's Commit publishes them — so, like
 // Seq/HdrPacks, no reader can learn a name before its content is durable.
-func (o *DB) SyncSearch(ctx context.Context, batch []*Item) error {
+func (o *DB) SyncSearch(ctx context.Context, written []ArticleData) error {
 	c := &o.core
 	if c.TotalArticles == 0 {
 		return nil
@@ -235,15 +235,13 @@ func (o *DB) SyncSearch(ctx context.Context, batch []*Item) error {
 		return nil
 	}
 
-	if from := start + len(rawLines); from+len(batch) == c.TotalArticles {
-		// The missing range is exactly this run's batch (same order — the
-		// caller hands PutArticles and SyncSearch the same sorted slice), so
-		// no pack is re-read seconds after it was written. articleData is the
-		// one Item mapping PutArticles stored, so the entries can't drift
-		// from the packs.
-		for _, item := range batch {
-			ad := item.articleData(c.FetchedAt)
-			if err := add(&ad); err != nil {
+	if from := start + len(rawLines); from+len(written) == c.TotalArticles {
+		// The missing range is exactly this run's batch: written is what
+		// PutArticles reported persisting, so the entries derive from the
+		// very values the packs hold and no pack is re-read seconds after
+		// it was written.
+		for i := range written {
+			if err := add(&written[i]); err != nil {
 				return err
 			}
 		}
@@ -311,14 +309,12 @@ func (o *DB) readSearchLines(ctx context.Context, key string) ([][]byte, error) 
 // every folded title, then the JSONL lines. Titles are decoded here, once
 // per finalized shard, so the sync loop never carries a parallel array.
 func (o *DB) saveSearchShard(ctx context.Context, n int, rawLines [][]byte) error {
-	// rawLines keep their newline terminators, so the join round-trips the
-	// JSONL body exactly as parseSearchEntries expects it.
-	entries, err := parseSearchEntries(bytes.Join(rawLines, nil))
-	if err != nil {
-		return fmt.Errorf("shard %d: %w", n, err)
-	}
 	bloom := make([]byte, searchBloomBytes)
-	for _, e := range entries {
+	for i, line := range rawLines {
+		var e SearchEntry
+		if err := json.Unmarshal(line, &e); err != nil {
+			return fmt.Errorf("shard %d line %d: %w", n, i, err)
+		}
 		eachSearchGram(foldSearchText(e.Title), func(gram string) { bloomAdd(bloom, gram) })
 	}
 	p := newPack()

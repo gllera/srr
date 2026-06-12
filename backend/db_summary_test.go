@@ -25,10 +25,10 @@ func setupBoundaryDB(t *testing.T) (*DB, string) {
 	for i := range articles {
 		articles[i] = &Item{Channel: ch, Title: fmt.Sprintf("A%d", i), Content: "c", Published: int64(i)}
 	}
-	if err := db.PutArticles(ctx, articles); err != nil {
+	if _, err := db.PutArticles(ctx, articles); err != nil {
 		t.Fatalf("PutArticles: %v", err)
 	}
-	if err := db.PutArticles(ctx, []*Item{
+	if _, err := db.PutArticles(ctx, []*Item{
 		{Channel: ch, Title: "Last", Content: "c", Published: int64(idxPackSize)},
 	}); err != nil {
 		t.Fatalf("PutArticles: %v", err)

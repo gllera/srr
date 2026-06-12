@@ -31,9 +31,9 @@ type Item struct {
 	Published int64
 }
 
-// articleData is the one Item→ArticleData mapping, shared by the data-pack
-// writer (PutArticles) and SyncSearch's batch fast path so the derived
-// search entries can never drift from what the packs actually contain.
+// articleData is the one Item→ArticleData mapping. PutArticles applies it
+// and returns the results, so SyncSearch's derived search entries are built
+// from the very values the packs hold.
 func (it *Item) articleData(fetchedAt int64) ArticleData {
 	return ArticleData{
 		ChannelID: it.Channel.id,
@@ -317,23 +317,26 @@ func (o *DB) SyncIdxSummary(ctx context.Context) error {
 	return nil
 }
 
-func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
+// PutArticles persists the batch into the idx and data series and returns
+// the ArticleData it wrote, in pack order — SyncSearch consumes that slice,
+// so the derived search entries can never drift from the packs.
+func (o *DB) PutArticles(ctx context.Context, articles []*Item) ([]ArticleData, error) {
 	if len(articles) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	c := &o.core
 
 	meta, metaSize, err := o.loadPack(ctx, latestKey(c, "idx"))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if expected := expectedLatestIdxSize(c.TotalArticles); metaSize != expected {
-		return fmt.Errorf("%s has %d bytes but db.gz expects %d", latestKey(c, "idx"), metaSize, expected)
+		return nil, fmt.Errorf("%s has %d bytes but db.gz expects %d", latestKey(c, "idx"), metaSize, expected)
 	}
 	data, _, err := o.loadPack(ctx, latestKey(c, "data"))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if c.FirstFetchedAt == 0 {
@@ -354,23 +357,24 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 	// such a gap reads slightly earlier than it was fetched, which self-corrects
 	// on the following fetch).
 	var fetchedCarry int64
+	written := make([]ArticleData, 0, len(articles))
 
 	for _, item := range articles {
 		if c.TotalArticles > 0 && c.TotalArticles%idxPackSize == 0 {
 			if err := o.savePack(ctx, finalizedIdxKey(c.TotalArticles/idxPackSize-1), meta); err != nil {
-				return err
+				return nil, err
 			}
 		}
 
 		if meta.Len() == 0 {
 			if err := writeIdxHeader(meta, c.FetchedAtCursor, c.NextPackID, c.PackOffset, c.Channels); err != nil {
-				return err
+				return nil, err
 			}
 		}
 
 		if data.Len() > 0 && data.Len() >= globals.PackSize<<10 {
 			if err := o.savePack(ctx, finalizedDataKey(c.NextPackID), data); err != nil {
-				return err
+				return nil, err
 			}
 		}
 
@@ -390,7 +394,7 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 			fetchedCarry = 0
 		}
 		if err := meta.writeIdx(item.Channel.id, c.NextPackID-prevPackID, int(delta)); err != nil {
-			return err
+			return nil, err
 		}
 
 		c.FetchedAtCursor += int(delta)
@@ -399,8 +403,9 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 
 		ad := item.articleData(c.FetchedAt)
 		if err := data.writeArticle(&ad); err != nil {
-			return err
+			return nil, err
 		}
+		written = append(written, ad)
 
 		c.TotalArticles++
 		item.Channel.TotalArt++
@@ -417,11 +422,11 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 	// Any future feature that speculatively prefetches L<seq+1> would break
 	// that invariant.
 	if err := o.savePack(ctx, genKey("idx", c.Seq+1), meta); err != nil {
-		return err
+		return nil, err
 	}
 	if err := o.savePack(ctx, genKey("data", c.Seq+1), data); err != nil {
-		return err
+		return nil, err
 	}
 	c.Seq++
-	return nil
+	return written, nil
 }
