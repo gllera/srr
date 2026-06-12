@@ -130,7 +130,8 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 		// every interval (≈20 no-op store round trips + warn lines per cycle).
 		prevSeq, prevHdrs, prevSrch := db.core.Seq, db.core.HdrPacks, db.core.SearchPacks
 
-		if err := db.PutArticles(ctx, articles); err != nil {
+		written, err := db.PutArticles(ctx, articles)
+		if err != nil {
 			return err
 		}
 		// Warn-only: the batch is already durable in L<Seq+1>, so a failed
@@ -144,9 +145,10 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 		// Same warn-only contract: the search series is a derived index, so a
 		// failed sync must not discard the durable batch. Coverage fields stay
 		// behind, readers keep search disabled (or miss only the newest tail),
-		// and the next run reconciles. The batch lets the common cycle build
-		// its entries from memory instead of re-reading the packs just written.
-		if err := db.SyncSearch(ctx, articles); err != nil {
+		// and the next run reconciles. PutArticles' return lets the common
+		// cycle build its entries from memory instead of re-reading the packs
+		// just written.
+		if err := db.SyncSearch(ctx, written); err != nil {
 			slog.Warn("sync search", "error", err)
 		}
 		if err := db.Commit(ctx); err != nil {
@@ -159,19 +161,20 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 		// later run" guarantee. Articles are already durable, so failure here
 		// is log-only; WithoutCancel keeps a shutdown signal from widening
 		// the leak window.
-		if db.core.Seq != prevSeq {
-			if err := db.GCLatest(context.WithoutCancel(ctx), latestKeep); err != nil {
-				slog.Warn("gc latest packs", "error", err)
+		for _, gc := range []struct {
+			advanced bool
+			msg      string
+			fn       func(context.Context, int) error
+		}{
+			{db.core.Seq != prevSeq, "gc latest packs", db.GCLatest},
+			{db.core.HdrPacks != prevHdrs, "gc idx summaries", db.GCSummaries},
+			{db.core.SearchPacks != prevSrch, "gc search summaries", db.GCSearchSummaries},
+		} {
+			if !gc.advanced {
+				continue
 			}
-		}
-		if db.core.HdrPacks != prevHdrs {
-			if err := db.GCSummaries(context.WithoutCancel(ctx), latestKeep); err != nil {
-				slog.Warn("gc idx summaries", "error", err)
-			}
-		}
-		if db.core.SearchPacks != prevSrch {
-			if err := db.GCSearchSummaries(context.WithoutCancel(ctx), latestKeep); err != nil {
-				slog.Warn("gc search summaries", "error", err)
+			if err := gc.fn(context.WithoutCancel(ctx), latestKeep); err != nil {
+				slog.Warn(gc.msg, "error", err)
 			}
 		}
 

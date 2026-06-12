@@ -217,20 +217,20 @@ func TestSyncSearchIncremental(t *testing.T) {
 	}
 }
 
-// The common fetch cycle: the missing range is exactly the batch just given
-// to PutArticles, so SyncSearch builds its entries from memory. Removing the
-// packs the walk would need proves no read-back happens.
+// The common fetch cycle: the missing range is exactly what PutArticles just
+// returned, so SyncSearch builds its entries from memory. Removing the packs
+// the walk would need proves no read-back happens.
 func TestSyncSearchBatchFastPath(t *testing.T) {
 	db, c, dir := setupTestDB(t)
 	ch := &Channel{id: 3}
 	c.Channels = map[int]*Channel{ch.id: ch}
 	c.FetchedAt = 1700000000
 
-	batch := []*Item{
+	written, err := db.PutArticles(ctx, []*Item{
 		{Channel: ch, Title: "A1", Content: "C", Published: 1000},
 		{Channel: ch, Title: "A2", Content: "C"},
-	}
-	if err := db.PutArticles(ctx, batch); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("PutArticles: %v", err)
 	}
 	for _, key := range []string{genKey("idx", 1), genKey("data", 1)} {
@@ -239,7 +239,7 @@ func TestSyncSearchBatchFastPath(t *testing.T) {
 		}
 	}
 
-	if err := db.SyncSearch(ctx, batch); err != nil {
+	if err := db.SyncSearch(ctx, written); err != nil {
 		t.Fatalf("SyncSearch: %v", err)
 	}
 	if c.SearchPacks != 0 || c.SearchTail != 2 {

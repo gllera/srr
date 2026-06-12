@@ -160,7 +160,7 @@ func TestPutArticlesBasic(t *testing.T) {
 		{Channel: ch1, Title: "A2", Content: "C2", Link: "http://example.com/2", Published: 2000},
 	}
 
-	if err := db.PutArticles(ctx, articles); err != nil {
+	if _, err := db.PutArticles(ctx, articles); err != nil {
 		t.Fatalf("PutArticles: %v", err)
 	}
 
@@ -179,10 +179,10 @@ func TestPutArticlesBasic(t *testing.T) {
 func TestPutArticlesEmpty(t *testing.T) {
 	db, c, _ := setupTestDB(t)
 
-	if err := db.PutArticles(ctx, nil); err != nil {
+	if _, err := db.PutArticles(ctx, nil); err != nil {
 		t.Fatalf("PutArticles(nil): %v", err)
 	}
-	if err := db.PutArticles(ctx, []*Item{}); err != nil {
+	if _, err := db.PutArticles(ctx, []*Item{}); err != nil {
 		t.Fatalf("PutArticles([]): %v", err)
 	}
 	// An empty batch must not publish a new latest-pack generation.
@@ -201,7 +201,7 @@ func TestPutArticlesMultipleChannels(t *testing.T) {
 		{Channel: ch2, Title: "Sub2-A", Published: 2000},
 	}
 
-	if err := db.PutArticles(ctx, articles); err != nil {
+	if _, err := db.PutArticles(ctx, articles); err != nil {
 		t.Fatalf("PutArticles: %v", err)
 	}
 
@@ -230,7 +230,7 @@ func TestPutArticlesPackSplitting(t *testing.T) {
 		{Channel: ch1, Title: "A3", Content: "Content 3", Published: 3000},
 	}
 
-	if err := db.PutArticles(ctx, articles); err != nil {
+	if _, err := db.PutArticles(ctx, articles); err != nil {
 		t.Fatalf("PutArticles: %v", err)
 	}
 
@@ -259,7 +259,7 @@ func TestPackMetadata(t *testing.T) {
 		{Channel: ch1, Title: "A3", Content: "Content 3", Published: 3000},
 	}
 
-	if err := db.PutArticles(ctx, articles); err != nil {
+	if _, err := db.PutArticles(ctx, articles); err != nil {
 		t.Fatalf("PutArticles: %v", err)
 	}
 
@@ -556,7 +556,7 @@ func TestPutArticlesRejectsStaleLatestIdx(t *testing.T) {
 	ch1 := &Channel{id: 1}
 	c.Channels = map[int]*Channel{ch1.id: ch1}
 
-	if err := db.PutArticles(ctx, []*Item{
+	if _, err := db.PutArticles(ctx, []*Item{
 		{Channel: ch1, Title: "A1", Published: 1000},
 		{Channel: ch1, Title: "A2", Published: 2000},
 	}); err != nil {
@@ -565,7 +565,7 @@ func TestPutArticlesRejectsStaleLatestIdx(t *testing.T) {
 
 	c.TotalArticles = 5
 
-	err := db.PutArticles(ctx, []*Item{{Channel: ch1, Title: "A3", Published: 3000}})
+	_, err := db.PutArticles(ctx, []*Item{{Channel: ch1, Title: "A3", Published: 3000}})
 	if err == nil {
 		t.Fatal("expected PutArticles to refuse a stale latest idx pack")
 	}
@@ -605,7 +605,7 @@ func TestPutArticlesSeqIncrements(t *testing.T) {
 		articles := []*Item{
 			{Channel: ch, Title: "A", Content: "C", Published: int64(1000 * want)},
 		}
-		if err := db.PutArticles(ctx, articles); err != nil {
+		if _, err := db.PutArticles(ctx, articles); err != nil {
 			t.Fatalf("PutArticles #%d: %v", want, err)
 		}
 		if c.Seq != want {
@@ -621,7 +621,7 @@ func putOneArticle(t *testing.T, db *DB, ch *Channel, n int) {
 	articles := []*Item{
 		{Channel: ch, Title: fmt.Sprintf("A%d", n), Content: "C", Published: int64(n * 1000)},
 	}
-	if err := db.PutArticles(ctx, articles); err != nil {
+	if _, err := db.PutArticles(ctx, articles); err != nil {
 		t.Fatalf("PutArticles #%d: %v", n, err)
 	}
 }
@@ -748,7 +748,7 @@ func TestPutArticlesIdxPackSplitAtBoundary(t *testing.T) {
 	for i := range articles {
 		articles[i] = &Item{Channel: ch, Title: fmt.Sprintf("A%d", i), Content: "c", Published: int64(i)}
 	}
-	if err := db.PutArticles(ctx, articles); err != nil {
+	if _, err := db.PutArticles(ctx, articles); err != nil {
 		t.Fatalf("PutArticles: %v", err)
 	}
 
@@ -760,7 +760,7 @@ func TestPutArticlesIdxPackSplitAtBoundary(t *testing.T) {
 		t.Errorf("idx/0.gz should not exist yet at exactly %d articles", idxPackSize)
 	}
 
-	if err := db.PutArticles(ctx, []*Item{
+	if _, err := db.PutArticles(ctx, []*Item{
 		{Channel: ch, Title: "A1001", Content: "c", Published: 1001},
 	}); err != nil {
 		t.Fatalf("PutArticles: %v", err)
@@ -792,7 +792,7 @@ func TestPutArticlesEmptyTitleAndLink(t *testing.T) {
 	articles := []*Item{
 		{Channel: ch, Title: "", Content: "body", Link: "", Published: 0},
 	}
-	if err := db.PutArticles(ctx, articles); err != nil {
+	if _, err := db.PutArticles(ctx, articles); err != nil {
 		t.Fatalf("PutArticles: %v", err)
 	}
 
@@ -878,7 +878,7 @@ func TestPutArticlesDataPackSplitResetsPackOffset(t *testing.T) {
 		{Channel: ch, Title: "A1", Content: "Content1", Published: 1000},
 		{Channel: ch, Title: "A2", Content: "Content2", Published: 2000},
 	}
-	if err := db.PutArticles(ctx, articles); err != nil {
+	if _, err := db.PutArticles(ctx, articles); err != nil {
 		t.Fatalf("PutArticles: %v", err)
 	}
 
@@ -896,7 +896,7 @@ func TestPutArticlesResumption(t *testing.T) {
 	c.Channels = map[int]*Channel{ch.id: ch}
 	c.FetchedAt = 1700000000
 
-	if err := db.PutArticles(ctx, []*Item{
+	if _, err := db.PutArticles(ctx, []*Item{
 		{Channel: ch, Title: "A1", Content: "C1", Published: 1000},
 	}); err != nil {
 		t.Fatalf("PutArticles(1): %v", err)
@@ -906,7 +906,7 @@ func TestPutArticlesResumption(t *testing.T) {
 	savedNPID := c.NextPackID
 	savedTotal := c.TotalArticles
 
-	if err := db.PutArticles(ctx, []*Item{
+	if _, err := db.PutArticles(ctx, []*Item{
 		{Channel: ch, Title: "A2", Content: "C2", Published: 2000},
 	}); err != nil {
 		t.Fatalf("PutArticles(2): %v", err)
@@ -992,7 +992,7 @@ func TestPutArticlesFirstFetchedAt(t *testing.T) {
 	c.Channels = map[int]*Channel{ch.id: ch}
 	c.FetchedAt = 1700000000
 
-	if err := db.PutArticles(ctx, []*Item{
+	if _, err := db.PutArticles(ctx, []*Item{
 		{Channel: ch, Title: "A1", Content: "C1", Published: 1000},
 	}); err != nil {
 		t.Fatalf("PutArticles: %v", err)

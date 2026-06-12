@@ -148,7 +148,7 @@ func (feed *Feed) fetch(ctx context.Context, run *fetchRun, buf []byte, processo
 			switch {
 			case err == nil:
 				return key, true, nil
-			case errors.Is(err, errNotAsset), errors.Is(err, errEscapesCache):
+			case errors.Is(err, errNotAsset):
 				// Not a real upload marker: a bare fragment (#section → "section")
 				// names no file in the cache dir, and a value escaping the dir
 				// (e.g. "#../secret", attacker-influenced content) must be declined

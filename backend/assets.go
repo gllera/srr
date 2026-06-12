@@ -16,16 +16,13 @@ import (
 	"srrb/store"
 )
 
-// Sentinel classifications for UploadCacheRef failures, so the caller can
-// tell "this reference is not an upload marker at all" (decline it, leave the
-// value untouched) apart from a genuine upload failure (fail the fetch):
-// errNotAsset marks references naming no regular file in the cache dir (an
-// ordinary #fragment), errEscapesCache marks references resolving outside it
-// (attacker-influenced content must be ignored, not wedge the feed).
-var (
-	errNotAsset     = errors.New("not a cache asset")
-	errEscapesCache = errors.New("escapes cache dir")
-)
+// errNotAsset classifies UploadCacheRef failures meaning "this reference is
+// not an upload marker at all" — it names no regular file in the cache dir
+// (an ordinary #fragment) or resolves outside it (attacker-influenced content
+// must be ignored, not wedge the feed). The caller declines such references,
+// leaving the value untouched; any other failure fails the fetch. The
+// wrapping messages keep the specific reason.
+var errNotAsset = errors.New("not a cache asset")
 
 // assetFetcher uploads files into the store backend under a content-hash key,
 // returning the relative key. The same key for given bytes makes uploads
@@ -91,7 +88,7 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 		return "", fmt.Errorf("resolve asset %q: %w", localname, err)
 	}
 	if rel, err := filepath.Rel(root, real); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("asset %q: %w", localname, errEscapesCache)
+		return "", fmt.Errorf("asset %q escapes cache dir: %w", localname, errNotAsset)
 	}
 
 	if a.maxBytes > 0 && fi.Size() > a.maxBytes {
