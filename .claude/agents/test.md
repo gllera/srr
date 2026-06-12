@@ -20,20 +20,18 @@ Write or update unit tests for the frontend project following the established pa
 
 ## Mocking pattern
 
-- **data.ts**: `vi.hoisted()` + `vi.mock("./data", ...)` with a mock object mirroring all data.ts exports (db, articles, idxPack, init, loadIdxPack, getContent, makeLRU, streamSplit, numFinalizedIdx, latestIdxCount, activeSubs). See nav.test.ts for the exact shape.
-- **ts.ts**: Same hoisted pattern with `findCandidateIdxPacks` and `findChronForTimestamp` mocks (default: `mockResolvedValue(null)`).
+- **data.ts**: `vi.hoisted()` + `vi.mock("./data", () => data)` with a mock object mirroring data.ts's exports: `IDX_PACK_SIZE`, `db`, `loadArticle`, `getChannelId`, `groupChannelsByTag`, `findChronForTimestamp`, `countLeft`, `findLeft`, `findRight`. Note `init` is a data.ts export that the mock omits (nav never calls it). `findLeft`/`findRight`/`countLeft` are NOT bare `vi.fn()` — they wrap working inline reimplementations that scan via `data.getChannelId()`/`data.db.total_art`. See nav.test.ts (lines 3-39) for the exact shape.
+- **Mock invariants (do not break these)**: in the `vi.hoisted()` block, `countLeft`/`findLeft`/`findRight` are REAL reimplementations scanning `data.getChannelId(i)` and matching `addIdx !== undefined && i >= addIdx`. Do NOT replace them with bare `mockReturnValue`/`mockResolvedValue` stubs — every traversal/count/filter assertion depends on these loop bodies, and `beforeEach` only `mockClear()`s `findLeft`/`findRight` (leaving `countLeft` untouched), so they persist across the suite. `setupIndex(entries)` is the single seeding entry point that drives navigation off typed arrays read by `getChannelId`: pass `[{ chanId, fetchedAt? }]` and it sets `db.total_art`, builds `Uint32Array` arrays, wires the typed-array-backed `getChannelId`/`loadArticle` via `mockImplementation`, populates `db.channels`, and clears `nav.filter`.
 
 ## Factory functions (defined in nav.test.ts)
 
-- `makeEntry(overrides?)` — returns `IIdxEntry` with defaults `{ fetched_at: 0, pack_id: 1, pack_offset: 0, sub_id: 1, published: 0, title: "Test", link: "" }`
-- `makeSub(overrides?)` — returns `ISub` with defaults `{ id: 1, title: "Sub1", url: "" }`
-- `setArticles(entries)` — replaces `data.articles` contents from an array
-- `mockIdxLoad(entries)` — sets `data.loadIdxPack` mock to always load given entries (also calls `setArticles`)
-- `mockIdxLoadOnce(entries)` — same but only for the next call (chain for cross-pack sequences)
+- `makeArticle(overrides?)` — returns `IArticle` with defaults `{ s: 1, a: 0, p: 0, t: "", l: "", c: "" }`
+- `makeChannel(overrides?)` — returns `IChannel` with defaults `{ id: 1, title: "Test", feeds: [{ url: "http://test.com" }], total_art: 1 }`
+- `setupIndex(entries: Array<{ chanId: number; fetchedAt?: number }>)` — the single seeding entry point: sets `data.db.total_art`, builds `Uint32Array` chanId/fetchedAt arrays, wires the `data.loadArticle`/`data.getChannelId` mock implementations off those arrays, seeds `data.db.channels` (one `makeChannel` per distinct chanId), and calls `nav.filter.clear()`
 
 ## State reset
 
-Every `beforeEach` must reset all data state (idxPack, db.total_art, db.data_tog, subscriptions, subs_mapped, articles), restore default loadIdxPack implementation, reset ts mocks, and call `nav.setFilterSubs(undefined)` + `nav.setFloorChron(0)`. See nav.test.ts `beforeEach` for the exact reset sequence.
+Every `beforeEach` resets `data.db.total_art` (to 0) and `data.db.channels` (to `{}`), calls `mockReset()` on `data.loadArticle`/`data.getChannelId` and `mockClear()` on `data.findLeft`/`data.findRight`, then `nav.filter.clear()`, `localStorage.clear()`, and spies `history.pushState`/`replaceState` via `vi.spyOn`. Filter state is reset through the exported `filter` object (`nav.filter.clear()`), not setter functions — nav.ts exports no `setFilterSubs`/`setFloorChron`. There is no idxPack, db.data_tog, subscriptions, subs_mapped, articles, or loadIdxPack to reset, and no ts.ts module/mock exists. See nav.test.ts `beforeEach` for the exact sequence.
 
 ## Hash verification
 
@@ -43,9 +41,9 @@ Spy on `history.pushState`/`history.replaceState` to verify hash updates without
 
 | File | Module | Approach |
 |---|---|---|
-| `nav.test.ts` | nav.ts | Hoisted mocks for data.ts + ts.ts, factory functions, beforeEach reset |
-| `data.test.ts` | data.ts | Direct imports, mock fetch |
-| `ts.test.ts` | ts.ts | Hoisted mock for data.ts |
+| `nav.test.ts` | nav.ts | Hoisted mock for data.ts, factory functions, beforeEach reset |
+| `data.test.ts` | data.ts | `vi.mock('./data')` with inline pure-fn reimplementations of `findChronForTimestamp`/`groupChannelsByTag` + `await import('./data')` to dodge data.ts's module-load fetch |
+| `idx.test.ts` | idx.ts | Binary idx-pack parsing, direct imports |
 | `fmt.test.ts` | fmt.ts | Direct imports, no mocks (pure functions) |
 | `cache.test.ts` | cache.ts | Direct imports, no mocks (pure factory) |
 
@@ -77,9 +75,11 @@ Write or update unit tests for the backend Go project following patterns in exis
 
 | File | Module | Focus |
 |---|---|---|
-| `db_test.go` | db.go | Pack storage, idx/data/ts series, commit cycle |
-| `feed_test.go` | feed.go | RSS/Atom/RDF parsing, date formats, stop feed |
-| `subscription_test.go` | subscription.go | Text sanitization helpers |
+| `db_test.go` | db.go | Pack storage, idx/data series, commit cycle |
+| `feed_test.go` | feed.go | Feed-level ingest-strategy inheritance (channel override + db.gz root fallthrough) |
+| `channel_test.go` | channel.go | Feed fetch/dedup, watermark/boundary GUIDs, future-date clamping, strip-control sanitization helpers |
+| `processing_test.go` | processing.go | Content-pipeline processing: immutable-field guard, explicit `#sanitize`, ordering hazards |
+| `ingest/rss_test.go` | ingest/rss.go | RSS/Atom/RDF parsing, date formats, `ErrStopFeed` |
 | `cmd_import_test.go` | cmd_import.go | OPML import selection logic |
 | `opml_test.go` | opml.go | OPML parsing, group normalization |
 | `mod/main_test.go` | mod/main.go | Module pipeline, external processor |

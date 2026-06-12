@@ -49,7 +49,7 @@ Shared format between backend (writer) and frontend (reader).
 | `next_pid` | int | Next data pack ID; packs with `id < next_pid` are finalized/immutable |
 | `pack_off` | int | Current offset in latest data pack |
 | `channels` | object | JSON object keyed by channel ID (number); may be `null` in JSON (default `{}`) |
-| `first_fetched` | int | Unix timestamp of first fetch that produced articles. `omitempty` |
+| `first_fetched` | int | Unix timestamp of first fetch that produced articles. **Not** `omitempty` — always emitted (unlike the other optional db.gz fields), because the reader divides by it in `findChronForTimestamp` (frontend `data.ts`) and an absent key would decode to `undefined` → `NaN` |
 | `fetched_at_cur` | int | Running idx-time cursor in 8-hour blocks since `first_fetched`; persists `prevFetchedTS` across `PutArticles` calls so per-entry `delta_fetched_at` reflects real elapsed time. `omitempty` |
 | `pipe` | string[] | Root-level default pipeline inherited by channels whose `pipe` is absent. `omitempty`. If absent at load, `NewDB` substitutes `["#sanitize", "#minify"]`. |
 | `ingest` | string | Root-level default ingest strategy inherited by channels whose `ingest` is empty. `omitempty`. Empty falls through to built-in `#rss`. Set/print via `srr ingest`. |

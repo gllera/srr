@@ -1,6 +1,6 @@
 ---
 name: idx-format-reviewer
-description: "Use this agent when modifying the binary idx pack format on either side of SRR: backend/db.go (PutArticles, savePack, writeIdxHeader, writeIdx, ArticleData) or frontend/src/js/idx.ts (makeIdxPack, IdxPack, IDX_PACK_SIZE) or frontend/src/js/data.ts (init, getSubId, findChronForTimestamp, countLeft, packIdx). It audits writer/reader symmetry of header layout, entry encoding, delta_pack_id and delta_fetched_at semantics, the 50,000-entry pack split, chronIdx math, and the data_tog/finalized pack addressing scheme."
+description: "Use this agent when modifying the binary idx pack format on either side of SRR: backend/db_pack.go (PutArticles, savePack, writeIdxHeader, writeIdx, ArticleData) plus backend/db.go (idxPackSize, idxHeaderSize constants) or frontend/src/js/idx.ts (makeIdxPack, IdxPack, IDX_PACK_SIZE) or frontend/src/js/data.ts (init, getChannelId, findChronForTimestamp, countLeft, findLeft, findRight, packIdx). It audits writer/reader symmetry of header layout, entry encoding, delta_pack_id and delta_fetched_at semantics, the 50,000-entry pack split, chronIdx math, and the data_tog/finalized pack addressing scheme."
 model: sonnet
 color: yellow
 ---
@@ -13,23 +13,24 @@ You are a binary idx-pack format auditor for the SRR project. The idx pack forma
   - `[0]` = `FetchedAtCursor` base (cumulative `delta_fetched_at` count up to the start of this pack — semantically the "fetchedAt block base")
   - `[1]` = `NextPackID` base (data pack ID at the start of this idx pack)
   - `[2]` = `PackOffset` base (offset into that data pack)
-  - `[3..258]` = `subCounts[256]` — one `uint32` per possible sub_id, snapshotting per-sub article totals at the start of this idx pack
+  - `[3..258]` = `chanCounts[256]` — one `uint32` per possible chan_id, snapshotting per-channel article totals at the start of this idx pack
 - **Entries**: 2 bytes each, packed after the header
-  - byte 0: `sub_id` (uint8)
+  - byte 0: `chan_id` (uint8)
   - byte 1: `(delta_pack_id << 7) | delta_fetched_at` where `delta_pack_id` ∈ {0, 1} and `delta_fetched_at` ∈ [0, 127]
 - **Pack size**: exactly `idxPackSize` = 50,000 entries per finalized idx pack; the latest pack has `total_art - numFinalized * 50000` entries
 - **Filename addressing**: finalized packs are `0.gz`..`(N-1).gz`; latest pack is `true.gz` or `false.gz` depending on `db.data_tog`
-- **`data_tog` toggle**: flips on each `Commit` to invalidate the latest pack via cache-busting filename swap
+- **`data_tog` toggle**: flips at the very end of `PutArticles` — after both latest packs have been written — to invalidate the latest pack via a cache-busting filename swap (never in `Commit`, which only gzip-serializes `db.gz`)
 
-## Writer (backend/db.go)
+## Writer (backend/db_pack.go)
 
-Key entry points to audit:
+Key entry points to audit (all in `backend/db_pack.go`; the `idxPackSize`/`idxHeaderSize` constants stay in `backend/db.go`):
 - `PutArticles` — top-level loop that writes both idx and data series
 - `writeIdxHeader` — serializes the 259-uint32 header
 - `pack.writeIdx` — serializes a single 2-byte entry
 - `savePack` — gzips and atomically writes to storage
-- `idxPackSize` constant
-- `idxHeaderSize` constant
+- `ArticleData` — the JSONL data-pack record
+- `idxPackSize` constant (in `backend/db.go`)
+- `idxHeaderSize` constant (in `backend/db.go`)
 
 The split: when `c.TotalArticles > 0 && c.TotalArticles % idxPackSize == 0`, the writer calls `savePack(ctx, fmt.Sprintf("idx/%d.gz", c.TotalArticles/idxPackSize-1), meta)` to finalize the current pack. Note the `-1` — the freshly-completed pack is at index `(TotalArticles/idxPackSize)-1`.
 
@@ -39,15 +40,15 @@ The delta logic: the writer tracks `prevPackID` and `prevFetchedTS = c.FetchedAt
 
 Key entry points to audit:
 - `makeIdxPack(buf, packIndex, packSize)` and its `parse()` closure
-- `IdxPack` interface (`subIds`, `fetchedAts`, `subCounts`, `bounds`)
+- `IdxPack` interface — data members `chanIds`, `fetchedAts`, `chanCounts`, `ownChanCounts`, `bounds`; methods `parse()`, `countLeft()`, `findLeft()`, `findRight()`
 - `IDX_PACK_SIZE` constant (must equal backend `idxPackSize`)
 - `IDX_HEADER_SIZE` constant (must equal backend `idxHeaderSize`)
-- `data.ts`: `init()`, `numFinalizedIdx()`, `packIdx()`, `getSubId()`, `findChronForTimestamp()`, `countLeft()`, `getPackRef()`
+- `data.ts`: `init()`, `numFinalizedIdx()`, `packIdx()`, `getChannelId()`, `findChronForTimestamp()`, `countLeft()`, `findLeft()`, `findRight()`, `getPackRef()`
 
 The reader at `parse()`:
 - Reads `h[0]` as initial `fetchedAt`, `h[1]` as initial `packId`, `h[2]` as `packOff`
 - Walks 2-byte entries: `if (packed >> 7) packId++; fetchedAt += packed & 0x7f`
-- Stores `subIds[localOff]`, `fetchedAts[localOff] = fetchedAt`
+- Stores `chanIds[localOff]`, `fetchedAts[localOff] = fetchedAt`, and increments the per-chan running tally `ownChanCounts[chanId]++` (consulted by `findLeft`/`findRight` via `hasCandidate`)
 - Builds `bounds[]` — `{ packId, startChron }` markers used by `getPackRef` to map a chronIdx to (packId, offset)
 
 ## Your Mission
@@ -58,11 +59,11 @@ Audit writer/reader symmetry whenever either side changes. Find anything that br
 
 ### 1. Identify what changed
 
-Run `git diff HEAD~5 -- backend/db.go frontend/src/js/idx.ts frontend/src/js/data.ts` (or equivalent) to find recent edits. If invoked after a specific edit, focus on that.
+Run `git diff HEAD~5 -- backend/db.go backend/db_pack.go frontend/src/js/idx.ts frontend/src/js/data.ts` (or equivalent) to find recent edits. If invoked after a specific edit, focus on that.
 
 ### 2. Read both sides in full
 
-Don't trust your memory of the format — re-read `backend/db.go` (especially `PutArticles`, `writeIdxHeader`, `pack.writeIdx`, `idxPackSize`, `idxHeaderSize`) and `frontend/src/js/idx.ts` + `frontend/src/js/data.ts` end to end.
+Don't trust your memory of the format — re-read `backend/db_pack.go` (especially `PutArticles`, `writeIdxHeader`, `pack.writeIdx`, `savePack`, the delta/`fetchedCarry`/`28800` logic, and the idx-pack split) plus `backend/db.go` only for the `idxPackSize`/`idxHeaderSize` constants and `DBCore`, and `frontend/src/js/idx.ts` + `frontend/src/js/data.ts` end to end.
 
 ### 3. Run symmetry checks
 
@@ -76,13 +77,13 @@ Audit each of the following and report any failure:
 **B. Header layout**
 - Writer puts `FetchedAtCursor` at `buf[0:]`, `NextPackID` at `buf[4:]`, `PackOffset` at `buf[8:]`
 - Reader reads `h[0]`, `h[1]`, `h[2]` in the same order
-- Writer puts `subs[id].TotalArt` at `buf[12 + id*4:]` for each id in `0..255`
-- Reader reads `subCounts = new Uint32Array(rawBuf, 3 * 4, 256)` — note `3*4 = 12`, matching offset
+- Writer puts `ch.TotalArt` at `buf[12 + id*4:]` for each id in `0..255`
+- Reader reads `chanCounts = new Uint32Array(new Uint32Array(rawBuf, 3 * 4, 256))` — note `3*4 = 12`, matching offset; the outer copy detaches from `rawBuf` so it can be GC'd
 - Verify endianness: writer uses `binary.LittleEndian.PutUint32`; reader uses `Uint32Array` which is platform-endian. **This is a latent issue — Uint32Array is little-endian on every common platform but the spec doesn't guarantee it.** Flag if this is touched.
 
 **C. Entry encoding**
-- Writer: `[]byte{byte(subID), byte(deltaFetched) | byte(deltaPack)<<7}` — 2 bytes per entry, sub_id first, packed delta byte second
-- Reader: `view.getUint8(off)` for sub_id at `off+0`, `view.getUint8(off + 1)` for the packed byte
+- Writer: `[]byte{byte(chanID), byte(deltaFetched) | byte(deltaPack)<<7}` — 2 bytes per entry, chan_id first, packed delta byte second
+- Reader: `view.getUint8(off)` for chan_id at `off+0`, `view.getUint8(off + 1)` for the packed byte
 - Reader: `if (packed >> 7) packId++` — assumes `delta_pack_id` is 0 or 1, never 2+
 - Writer: emits `c.NextPackID - prevPackID` which is 0 or 1 because the loop only advances `c.NextPackID++` when `data.Len() == 0` (i.e., right after a `savePack` of the previous data pack). Verify the writer never advances `NextPackID` by more than 1 between two consecutive `writeIdx` calls. If it ever could (e.g., a refactor introduces a multi-pack jump), the reader will silently desync.
 
@@ -102,23 +103,24 @@ Audit each of the following and report any failure:
 
 **F. chronIdx math**
 - Reader: `packIdx(chronIdx) = min(floor(chronIdx / IDX_PACK_SIZE), idxPacks.length - 1)` — clamps invalid chronIdx to the last pack
-- Reader: `getSubId(chronIdx)` indexes `subIds[chronIdx - n * IDX_PACK_SIZE]`
+- Reader: `getChannelId(chronIdx)` indexes `chanIds[chronIdx - n * IDX_PACK_SIZE]`
+- Reader filter-scan API: `countLeft`/`findLeft`/`findRight` (per-pack, in `idx.ts`; `data.ts` exports the cross-pack wrappers) iterate `chanIds` and gate on `ownChanCounts`/`chanCounts`, so they are part of the chronIdx/filter contract this agent audits (its mission flags "wrong filter counts").
 - Reader `bounds[]`: built only for distinct `packId` transitions. The first bound is the initial `packId` (from `h[1]`) IF `packOff > 0`, otherwise it's added when the first entry is parsed. Audit that this matches the writer's `packOff` field and that `getPackRef` produces a valid `(packId, offset)` for any chronIdx in the pack.
 
 **G. data_tog and finalized pack addressing**
-- Writer toggles `c.DataToggle = !c.DataToggle` AFTER the loop, then saves both idx and data latest packs at the new filename
+- Writer saves both idx and data latest packs at the NEGATED filename (`!c.DataToggle`) first, THEN flips `c.DataToggle = !c.DataToggle` — only after both saves succeed (db_pack.go:240-247). The comment at db_pack.go:237-239 makes this order deliberate: flipping before the saves would orphan the just-written idx pack under the new-toggle filename if the data-pack save fails.
 - Reader: `data.ts init()` reads `db.data_tog` and uses `String(db.data_tog)` for the latest filename
-- Verify: when the writer crashes after `savePack(idx/<new_tog>.gz)` but before `savePack(data/<new_tog>.gz)`, the reader will see `db.data_tog` (whichever the saved `db.gz` reflects) and try to fetch a `data/<tog>.gz` that doesn't exist or is stale. Flag any change that affects ordering of `Commit` vs. `savePack` — the order is currently `PutArticles` (saves both) → `Commit` (writes new `data_tog` to db.gz).
+- Verify: when the writer crashes after `savePack(idx/<new_tog>.gz)` but before `savePack(data/<new_tog>.gz)`, the reader will see `db.data_tog` (whichever the saved `db.gz` reflects) and try to fetch a `data/<tog>.gz` that doesn't exist or is stale. Flag any change that affects ordering of the latest-pack saves vs. the toggle flip — the saves happen at the negated filename first, the flip last.
 
 **H. ArticleData JSONL keys**
 - Writer struct tags: `s, a, p (omitempty), t (omitempty), l (omitempty), c`
-- Reader: any code path parsing `IArticle` (`data.ts loadDataPack` and `types.d.ts IArticle`) must use the same keys
+- Reader: any code path parsing `IArticle` (`data.ts fetchDataPack` — the `JSON.parse(...) as IArticle` at data.ts:151/155, reached via `loadDataPack`'s LRU wrapper — and `types.d.ts IArticle`) must use the same keys
 - A mismatched or renamed JSON tag silently produces empty fields downstream — flag if either side touches these tags
 
-**I. Subscription map serialization**
-- Backend: `Subscriptions map[int]*Subscription` serializes as a JSON object keyed by stringified int
-- Frontend: `db.subscriptions` is `Record<number, ISub>`; `init()` does `for (const [k, sub] of Object.entries(raw.subscriptions)) sub.id = Number(k)`
-- Verify the backend never serializes subscriptions as an array (would break the reader) and that sub IDs stay in `[0, 255]` to fit in the entry's `sub_id:u8` byte
+**I. Channel map serialization**
+- Backend: `Channels map[int]*Channel` serializes as a JSON object keyed by stringified int under `channels`
+- Frontend: `db.channels` is `Record<number, IChannel>`; `init()` does `for (const [k, ch] of Object.entries(raw.channels)) ch.id = Number(k)`
+- Verify the backend never serializes channels as an array (would break the reader) and that chan IDs stay in `[0, 255]` to fit in the entry's `chan_id:u8` byte
 
 ### 4. Look for these specific anti-patterns
 

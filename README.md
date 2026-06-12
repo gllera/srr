@@ -25,7 +25,7 @@ curl -sL "$(curl -s https://api.github.com/repos/gllera/srr/releases/latest \
 chmod +x srr
 
 # Add a feed
-./srr sub add -t "Hacker News" -u https://hnrss.org/frontpage
+./srr chan add -t "Hacker News" -u https://hnrss.org/frontpage
 
 # Fetch articles to local directory
 ./srr art fetch
