@@ -26,12 +26,33 @@ const (
 	cacheRevalidate = "no-cache, must-revalidate"
 )
 
-// packKeyRe is the write-once pack-name grammar: a pack-series directory plus
-// a finalized digit run ("idx/12.gz"), an L<seq> generation ("data/L3.gz"),
-// or the series' summary stem ("idx/h2.gz" header summaries, "search/s4.gz"
-// bloom summaries). Anchored strictly — "L", "Lx7" or "LL3" must not be
-// stamped immutable.
-var packKeyRe = regexp.MustCompile(`^(?:idx/[Lh]?|data/L?|search/[Ls]?)[0-9]+\.gz$`)
+// PackSeries is the write-once pack-name grammar, one row per pack series:
+// the directory plus the kind letters a stem may carry in front of the digit
+// run — none (finalized "idx/12.gz"), "L"<seq> latest generations
+// ("data/L3.gz", all series), "h"<N> idx header summaries ("idx/h2.gz"),
+// "s"<N> search bloom summaries ("search/s4.gz"). Single source of truth for
+// both sides of the contract: packKeyRe below and the service worker's
+// RE_PACK/parsePackName (via `srr gen-ts` → format.gen.ts PACK_SERIES_KINDS)
+// are built from it.
+var PackSeries = []struct {
+	Name  string // series directory
+	Kinds string // kind letters valid besides the finalized bare stem
+}{
+	{"idx", "Lh"},
+	{"data", "L"},
+	{"search", "Ls"},
+}
+
+// packKeyRe matches the write-once pack names, built from PackSeries.
+// Anchored strictly — "L", "Lx7" or "LL3" must not be stamped immutable, and
+// a kind letter another series owns ("data/h3.gz") is not a pack name.
+var packKeyRe = func() *regexp.Regexp {
+	alts := make([]string, len(PackSeries))
+	for i, s := range PackSeries {
+		alts[i] = s.Name + "/[" + s.Kinds + "]?"
+	}
+	return regexp.MustCompile(`^(?:` + strings.Join(alts, "|") + `)[0-9]+\.gz$`)
+}()
 
 // cacheControlForKey returns the HTTP Cache-Control directive a backend should
 // attach when writing key, or "" for keys with no caching policy (e.g. the

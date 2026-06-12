@@ -37,7 +37,7 @@ All commands run from the repo root via `make`:
 
 Shared format between backend (writer) and frontend (reader).
 
-**Single source of truth**: the Go declarations — the format constants in `backend/db.go` (`idxPackSize`, `idxHeaderSize`, `fetchedAtBlock`, …) and the JSON struct tags of `ArticleData`/`Feed`/`Channel`/`DBCore`. The TS side consumes them through the generated `frontend/src/js/format.gen.ts` (constants + wire interfaces; emitted by the hidden `srr gen-ts` command, regenerated via `make generate`, freshness-checked by `make verify`). The backend's only read-side idx parser is `backend/idx_read.go`, a byte-for-byte mirror of `frontend/src/js/idx.ts`. This section documents the format; the code above defines it.
+**Single source of truth**: the Go declarations — the format constants in `backend/db.go` (`idxPackSize`, `idxHeaderSize`, `fetchedAtBlock`, …), the write-once pack-name grammar `store.PackSeries` in `backend/store/main.go` (series → valid kind letters; builds the store's `packKeyRe` and, via the generated `PACK_SERIES_KINDS`, the service worker's route regex), and the JSON struct tags of `ArticleData`/`Feed`/`Channel`/`DBCore`. The TS side consumes them through the generated `frontend/src/js/format.gen.ts` (constants + grammar table + wire interfaces; emitted by the hidden `srr gen-ts` command, regenerated via `make generate`, freshness-checked by `make verify`). The backend's only read-side idx parser is `backend/idx_read.go`, a byte-for-byte mirror of `frontend/src/js/idx.ts`. This section documents the format; the code above defines it.
 
 ### `db.gz`
 

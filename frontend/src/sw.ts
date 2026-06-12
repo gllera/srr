@@ -36,7 +36,7 @@
 // browser without SW support (or an insecure-context LAN deploy) just runs straight
 // off the network, exactly as before. Self-contained: no SRR_CDN_URL, so it works
 // under any cdn-url prefix.
-import { LATEST_KEEP, type IDBWire } from "./js/format.gen"
+import { LATEST_KEEP, PACK_SERIES_KINDS, type IDBWire } from "./js/format.gen"
 
 const sw = self as unknown as ServiceWorkerGlobalScope
 
@@ -63,20 +63,26 @@ const SCOPE = new URL(sw.registration.scope).pathname
 
 // Matched anywhere in the path so they hold whatever prefix the cdn-url adds.
 const RE_ASSET = /\/assets\/[0-9a-f]{2}\/[0-9a-f]{16}\.\w+$/i
-// The one pack-name grammar (parsed by parsePackName below): write-once names
-// only — finalized numeric stems, L<seq> latest generations, and the idx/h<N>
-// / search/s<N> summaries (each published before the db.gz that names it).
-const RE_PACK = /\/packs\/(idx|data|search)\/([Lhs]?)(\d+)\.gz$/i
-const RE_DB = /\/packs\/db\.gz$/i // the store's only mutable key
+// The one pack-name grammar (parsed by parsePackName below), built from the
+// generated PACK_SERIES_KINDS table: write-once names only — finalized numeric
+// stems, L<seq> latest generations, and the idx/h<N> / search/s<N> summaries
+// (each published before the db.gz that names it). The regex captures any kind
+// letter on any series; parsePackName then rejects kinds another series owns.
+const PACK_KINDS = [...new Set(Object.values(PACK_SERIES_KINDS).join(""))].join("") // "Lhs"
+const RE_PACK = new RegExp(`/packs/(${Object.keys(PACK_SERIES_KINDS).join("|")})/([${PACK_KINDS}]?)(\\d+)\\.gz$`)
+const RE_DB = /\/packs\/db\.gz$/ // the store's only mutable key
 const RE_SHELL_HASHED = /\.[0-9a-f]{8,}\.(?:js|css)$/i // Parcel content-hashed bundles
 
 // parsePackName decodes a pack path: the series, the stem kind ("" finalized,
 // "l" latest generation, "h" idx header summary, "s" search bloom summary —
-// lowercased like the series), and the numeric stem. The route test, the
-// cache bound, and the manifest prunes all consume this one grammar.
+// lowercased for keying), and the numeric stem. Strict per-series like the
+// backend store's packKeyRe: a kind letter another series owns (data/h3.gz)
+// is not a pack name. The fetch route, the cache bound, and the manifest
+// prunes all consume this one grammar.
 function parsePackName(path: string): { series: string; kind: string; n: number } | null {
    const m = RE_PACK.exec(path)
-   return m ? { series: m[1].toLowerCase(), kind: m[2].toLowerCase(), n: Number(m[3]) } : null
+   if (!m || !PACK_SERIES_KINDS[m[1]].includes(m[2])) return null
+   return { series: m[1], kind: m[2].toLowerCase(), n: Number(m[3]) }
 }
 
 sw.addEventListener("install", () => {
@@ -147,7 +153,9 @@ const SERIES_KEEP: Record<string, number> = { idx: PACK_KEEP, data: PACK_KEEP, s
 async function enforceCacheBounds(): Promise<void> {
    try {
       const packs = await caches.open(PACKS)
-      const series: Record<string, { req: Request; n: number }[]> = { idx: [], data: [], search: [] }
+      const series: Record<string, { req: Request; n: number }[]> = Object.fromEntries(
+         Object.keys(PACK_SERIES_KINDS).map((name) => [name, []]),
+      )
       for (const req of await packs.keys()) {
          const p = parsePackName(new URL(req.url).pathname)
          if (p && p.kind === "") series[p.series].push({ req, n: p.n })
@@ -158,7 +166,7 @@ async function enforceCacheBounds(): Promise<void> {
          ...Object.entries(series).flatMap(([name, list]) =>
             list
                .sort((a, b) => b.n - a.n)
-               .slice(SERIES_KEEP[name])
+               .slice(SERIES_KEEP[name] ?? PACK_KEEP)
                .map((e) => packs.delete(e.req)),
          ),
          ...assetKeys.slice(0, Math.max(0, assetKeys.length - ASSET_KEEP)).map((req) => assets.delete(req)),
@@ -292,7 +300,7 @@ sw.addEventListener("fetch", (event) => {
    const path = url.pathname
    if (RE_ASSET.test(path)) event.respondWith(cacheFirst(req, ASSETS))
    else if (RE_DB.test(path)) event.respondWith(dbNetworkFirst(req, event))
-   else if (RE_PACK.test(path)) event.respondWith(cacheFirst(req, PACKS, true))
+   else if (parsePackName(path)) event.respondWith(cacheFirst(req, PACKS, true))
    else if (RE_SHELL_HASHED.test(path)) event.respondWith(cacheFirst(req, SHELL))
    // everything else (sw.js, favicon, sourcemaps) → default network passthrough
 })
