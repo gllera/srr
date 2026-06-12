@@ -77,6 +77,13 @@ func (feed *Feed) fetch(ctx context.Context, run *fetchRun, buf []byte, processo
 
 	var items []*Item
 	for _, i := range result.Items {
+		// An external ingest strategy returns items as a JSON array; a null
+		// element decodes to a nil *mod.RawItem. Skip it before any field access
+		// — otherwise i.GUID below panics, and (with no recover in the worker)
+		// crashes the whole fetch process, taking every feed down with it.
+		if i == nil {
+			continue
+		}
 		// Skip subsequent occurrences of the same GUID first so a within-fetch
 		// duplicate cannot pollute boundary or maxPub with a stale pub.
 		if _, dup := boundary[i.GUID]; dup {
@@ -140,11 +147,17 @@ func (feed *Feed) fetch(ctx context.Context, run *fetchRun, buf []byte, processo
 				return "", false, nil
 			}
 			local := strings.TrimPrefix(val, "#")
-			// Only values naming an existing regular file are upload markers, so a
-			// bare fragment (#section) is left untouched; Lstat also mirrors
-			// UploadCacheRef's own check, telling such a fragment apart from a
-			// genuine upload failure.
+			// Only values naming an existing regular file inside the cache dir are
+			// upload markers, so a bare fragment (#section) is left untouched. A
+			// value escaping the dir (e.g. "#../secret", attacker-influenced
+			// content) must also be treated as a non-marker rather than handed to
+			// UploadCacheRef: its containment guard would return an error that
+			// hard-fails the whole feed permanently. Genuine in-cache upload
+			// failures (oversize, store error) still fail the feed below.
 			full := filepath.Join(run.cacheDir, filepath.FromSlash(local))
+			if !withinDir(run.cacheDir, full) {
+				return "", false, nil
+			}
 			if fi, err := os.Lstat(full); err != nil || !fi.Mode().IsRegular() {
 				return "", false, nil
 			}
@@ -182,6 +195,19 @@ func (feed *Feed) fetch(ctx context.Context, run *fetchRun, buf []byte, processo
 	feed.ETag = result.ETag
 	feed.LastModified = result.LastModified
 	return items, nil
+}
+
+// withinDir reports whether full is lexically contained within dir (both
+// cleaned). Used to tell an in-cache upload marker apart from a path that
+// escapes the cache dir via "..", which must be ignored rather than surfaced as
+// a failed upload. Lexical only: a symlinked escape is separately rejected by
+// the Lstat regular-file check and UploadCacheRef's EvalSymlinks containment.
+func withinDir(dir, full string) bool {
+	rel, err := filepath.Rel(dir, full)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func uint32Set(s []uint32) map[uint32]struct{} {
