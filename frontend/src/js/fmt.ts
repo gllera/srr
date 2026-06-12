@@ -15,10 +15,12 @@ const HTTP_RE = /^https?:\/\//i
 const ABS_SCHEME = /^[a-z][a-z0-9+.-]*:/i
 // Content URLs are relative to the pack base (where the article was stored), not
 // the reader page, so relative refs — the self-hosted "assets/" keys and any
-// other relative URL the feed carried — resolve against PACK_BASE (the same
-// value as data.ts's DB_URL) instead of the SPA origin or the image proxy.
-// Computed once at module load.
-const PACK_BASE = new URL(SRR_CDN_URL, window.location.href)
+// other relative URL the feed carried — resolve against PACK_BASE instead of the
+// SPA origin or the image proxy. Computed once at module load; exported so
+// data.ts addresses packs from the same base the bounds check below enforces
+// (fmt.ts owns it rather than data.ts because importing data.ts would trigger
+// its eager db.gz fetch).
+export const PACK_BASE = new URL(SRR_CDN_URL, window.location.href)
 // Prefix is the URL-encoded-source-appender shape (wsrv.nl, imgproxy, imagor).
 // Configured per-user via localStorage `srr-img-proxy`; empty/absent = passthrough.
 const IMG_PROXY_KEY = "srr-img-proxy"
