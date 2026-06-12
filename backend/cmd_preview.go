@@ -66,8 +66,10 @@ var previewTmpl = template.Must(template.New("preview").Funcs(template.FuncMap{
 
 func (o *PreviewCmd) Run() error {
 	var rootIngest string
+	var rootPipe []string
 	if err := withDB(false, func(_ context.Context, db *DB) error {
 		rootIngest = db.core.Ingest
+		rootPipe = db.core.Pipe
 		return nil
 	}); err != nil {
 		return err
@@ -77,6 +79,14 @@ func (o *PreviewCmd) Run() error {
 	client := &http.Client{Timeout: 10 * time.Second}
 	processor := mod.New(nil)
 	engine := ingest.New()
+
+	// Resolve the effective pipeline exactly like a channel: an empty -p
+	// inherits the root pipe (which defaults to #sanitize/#minify), so preview
+	// never serves raw, unsanitized feed HTML via the template's rawHTML helper.
+	pipe := resolvePipe(rootPipe, o.Pipe)
+	if err := processor.Validate(ctx, pipe); err != nil {
+		return fmt.Errorf("invalid pipeline %v: %w", pipe, err)
+	}
 
 	buf := make([]byte, globals.MaxFeedSize*(1<<10)+1)
 	name := ingest.Select(o.Ingest, rootIngest)
@@ -91,7 +101,7 @@ func (o *PreviewCmd) Run() error {
 
 	articles := make([]*Item, 0, len(result.Items))
 	for _, i := range result.Items {
-		if err := processItem(ctx, processor, o.Pipe, i); err != nil {
+		if err := processItem(ctx, processor, pipe, i); err != nil {
 			return err
 		}
 		var pub int64

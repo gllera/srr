@@ -217,3 +217,71 @@ func TestModuleProcessSplitsNameFromParams(t *testing.T) {
 		t.Errorf("shell command should run verbatim, got title %q", item.Title)
 	}
 }
+
+func TestModuleSanitizeStripsDangerousPoster(t *testing.T) {
+	m := New(nil)
+	now := time.Now()
+	item := &RawItem{GUID: 1, Title: "T",
+		Content: `<video poster="javascript:alert(1)" src="https://x/v.mp4"></video>` +
+			`<video poster="https://x/ok.jpg"></video>` +
+			`<video poster="assets/ab/cd.jpg"></video>`,
+		Link: "http://e.com", Published: &now}
+	if err := m.Process(context.Background(), "#sanitize", item); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if strings.Contains(item.Content, "javascript:") {
+		t.Errorf("dangerous poster scheme survived: %q", item.Content)
+	}
+	if !strings.Contains(item.Content, `poster="https://x/ok.jpg"`) {
+		t.Errorf("https poster dropped: %q", item.Content)
+	}
+	if !strings.Contains(item.Content, `poster="assets/ab/cd.jpg"`) {
+		t.Errorf("relative assets/ poster dropped: %q", item.Content)
+	}
+}
+
+func TestModuleEmptyShellOutputIsNoop(t *testing.T) {
+	m := New(nil)
+	now := time.Now()
+	item := &RawItem{GUID: 7, Title: "Keep", Content: "<p>keep me</p>", Link: "http://e.com", Published: &now}
+	// `true` exits 0 with empty stdout: must leave the item unchanged rather than
+	// erroring on json.Unmarshal("") and (per feed.go) dropping the item.
+	if err := m.Process(context.Background(), "true", item); err != nil {
+		t.Fatalf("empty stdout should be a no-op, got: %v", err)
+	}
+	if item.Content != "<p>keep me</p>" || item.Title != "Keep" {
+		t.Errorf("no-op shell mod mutated the item: %+v", item)
+	}
+}
+
+func TestIsBuiltin(t *testing.T) {
+	for _, tok := range []string{"#sanitize", "#readability timeout=5s", "#minify"} {
+		if !IsBuiltin(tok) {
+			t.Errorf("IsBuiltin(%q) = false, want true", tok)
+		}
+	}
+	for _, tok := range []string{"#sanitise", "jq .", "", "#base"} {
+		if IsBuiltin(tok) {
+			t.Errorf("IsBuiltin(%q) = true, want false", tok)
+		}
+	}
+}
+
+func TestModuleValidate(t *testing.T) {
+	m := New(nil)
+	ctx := context.Background()
+	if err := m.Validate(ctx, []string{"#sanitize", "#readability timeout=5s", "jq ."}); err != nil {
+		t.Errorf("valid pipeline rejected: %v", err)
+	}
+	for _, bad := range [][]string{
+		{"#sanitise"},                 // typo'd built-in
+		{"#readability timeout=nope"}, // bad param value
+		{"#sanitize x=1"},             // unknown param
+		{"#base"},                     // resolvePipe expands #base earlier; a leftover is invalid
+		{""},                          // empty step
+	} {
+		if err := m.Validate(ctx, bad); err == nil {
+			t.Errorf("Validate accepted invalid pipeline %v", bad)
+		}
+	}
+}
