@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"hash/fnv"
 	"log/slog"
 	"strings"
 	"unicode"
@@ -91,10 +90,15 @@ func eachSearchGram(folded string, fn func(gram string)) {
 // bloomBits derives the searchBloomK probe indices of a gram: FNV-1a-64 over
 // its UTF-8 bytes, double-hashed as h1=low32, h2=high32|1 (odd, so the probe
 // step cycles the power-of-two bit space). Mirrored by search.ts bloomBits().
+// FNV-1a is inlined: hash/fnv allocates a hasher per call, and this runs per
+// gram across whole shards (finalize, validate, migration sweeps).
 func bloomBits(gram string) [searchBloomK]uint32 {
-	h := fnv.New64a()
-	h.Write([]byte(gram))
-	sum := h.Sum64()
+	const offset64, prime64 = 14695981039346656037, 1099511628211
+	sum := uint64(offset64)
+	for i := 0; i < len(gram); i++ {
+		sum ^= uint64(gram[i])
+		sum *= prime64
+	}
 	h1, h2 := uint32(sum), uint32(sum>>32)|1
 	var out [searchBloomK]uint32
 	for i := range out {
@@ -123,15 +127,11 @@ func bloomHas(bloom []byte, gram string) bool {
 // at most once (chron order keeps data-pack visits monotonic).
 func (o *DB) walkArticles(ctx context.Context, from, to int, fn func(ad *ArticleData) error) error {
 	c := &o.core
-	nf := numFinalizedIdx(c.TotalArticles)
 	var data []ArticleData
 	dataPackID := -1
 	for from < to {
 		p := from / idxPackSize
-		key, size := finalizedIdxKey(p), idxPackSize
-		if p == nf {
-			key, size = latestKey(c, "idx"), c.TotalArticles-nf*idxPackSize
-		}
+		key, size := idxKeyAndSize(c, p)
 		buf, err := o.readGz(ctx, key)
 		if err != nil {
 			return err
@@ -170,13 +170,16 @@ func (o *DB) walkArticles(ctx context.Context, from, to int, fn func(ad *Article
 // or a retry after a failed sync — one self-healing code path for all of
 // them (the SyncIdxSummary philosophy). It extends the previous run's tail
 // (search/L<Seq-1>, trusted only when its entry count matches SearchTail)
-// with the missing chron range read back from the data packs, finalizing
-// bloom-headed shards at each idxPackSize boundary, then writes the new
-// latest shard and, when shards were finalized, rebuilds the bloom summary
-// from cheap streaming header reads. The coverage fields are set only after
-// every save succeeds and the caller's Commit publishes them — so, like
+// with the missing chron range, finalizing bloom-headed shards at each
+// idxPackSize boundary, then writes the new latest shard and, when shards
+// were finalized, rebuilds the bloom summary from cheap streaming header
+// reads. The missing range is normally exactly `batch` — the items the
+// caller just gave PutArticles — so the common cycle builds entries from
+// memory; any other gap (first run, post-bump, failed-sync catch-up) is read
+// back from the idx+data packs. The coverage fields are set only after every
+// save succeeds and the caller's Commit publishes them — so, like
 // Seq/HdrPacks, no reader can learn a name before its content is durable.
-func (o *DB) SyncSearch(ctx context.Context) error {
+func (o *DB) SyncSearch(ctx context.Context, batch []*Item) error {
 	c := &o.core
 	if c.TotalArticles == 0 {
 		return nil
@@ -194,7 +197,6 @@ func (o *DB) SyncSearch(ctx context.Context) error {
 
 	start := c.SearchPacks * idxPackSize // chron of the tail's first entry
 	var rawLines [][]byte                // jsonEncode outputs, newline included
-	var titles []string                  // parallel: feeds the bloom at finalize
 
 	// Read back the previous generation's tail. The last successful sync
 	// wrote search/L<Seq-1> in the common paths (this run's PutArticles
@@ -203,43 +205,47 @@ func (o *DB) SyncSearch(ctx context.Context) error {
 	// rebuilds from data packs instead — heavier, still correct.
 	if c.SearchTail > 0 {
 		prevKey := genKey("search", c.Seq-1)
-		if lines, count, err := o.readSearchLines(ctx, prevKey); err != nil {
+		if lines, err := o.readSearchLines(ctx, prevKey); err != nil {
 			slog.Warn("search tail read-back failed, rebuilding tail", "key", prevKey, "error", err)
-		} else if count != c.SearchTail {
+		} else if len(lines) != c.SearchTail {
 			slog.Warn("search tail read-back mismatch, rebuilding tail",
-				"key", prevKey, "entries", count, "srcht", c.SearchTail)
+				"key", prevKey, "entries", len(lines), "srcht", c.SearchTail)
 		} else {
 			rawLines = lines
-			titles = make([]string, len(lines))
-			for i, line := range lines {
-				var e SearchEntry
-				if err := json.Unmarshal(line, &e); err != nil {
-					return fmt.Errorf("parse %s line %d: %w", prevKey, i, err)
-				}
-				titles[i] = e.Title
-			}
 		}
 	}
 
-	if err := o.walkArticles(ctx, start+len(rawLines), c.TotalArticles, func(ad *ArticleData) error {
+	add := func(chanID int, published, fetchedAt int64, title string) error {
 		if len(rawLines) == idxPackSize {
-			if err := o.saveSearchShard(ctx, start/idxPackSize, rawLines, titles); err != nil {
+			if err := o.saveSearchShard(ctx, start/idxPackSize, rawLines); err != nil {
 				return err
 			}
-			rawLines, titles = rawLines[:0], titles[:0]
+			rawLines = rawLines[:0]
 			start += idxPackSize
 		}
-		when := ad.Published
+		when := published
 		if when == 0 {
-			when = ad.FetchedAt
+			when = fetchedAt
 		}
-		line, err := jsonEncode(&SearchEntry{ChannelID: ad.ChannelID, When: when, Title: ad.Title})
+		line, err := jsonEncode(&SearchEntry{ChannelID: chanID, When: when, Title: title})
 		if err != nil {
 			return err
 		}
 		rawLines = append(rawLines, line)
-		titles = append(titles, ad.Title)
 		return nil
+	}
+
+	if from := start + len(rawLines); from+len(batch) == c.TotalArticles {
+		// The missing range is exactly this run's batch (same order — the
+		// caller hands PutArticles and SyncSearch the same sorted slice), so
+		// no pack is re-read seconds after it was written.
+		for _, item := range batch {
+			if err := add(item.Channel.id, item.Published, c.FetchedAt, item.Title); err != nil {
+				return err
+			}
+		}
+	} else if err := o.walkArticles(ctx, from, c.TotalArticles, func(ad *ArticleData) error {
+		return add(ad.ChannelID, ad.Published, ad.FetchedAt, ad.Title)
 	}); err != nil {
 		return err
 	}
@@ -255,17 +261,7 @@ func (o *DB) SyncSearch(ctx context.Context) error {
 	}
 
 	if c.SearchPacks != nf {
-		sum := newPack()
-		for k := range nf {
-			hdr, err := o.readPackHeader(ctx, finalizedSearchKey(k), searchBloomBytes)
-			if err != nil {
-				return err
-			}
-			if _, err := sum.Write(hdr); err != nil {
-				return err
-			}
-		}
-		if err := o.savePack(ctx, searchSummaryKey(nf), sum); err != nil {
+		if err := o.saveSummary(ctx, nf, searchBloomBytes, finalizedSearchKey, searchSummaryKey(nf)); err != nil {
 			return err
 		}
 	}
@@ -274,29 +270,53 @@ func (o *DB) SyncSearch(ctx context.Context) error {
 	return nil
 }
 
+// parseSearchEntries decodes a shard's JSONL body (bloom already stripped)
+// into SearchEntry values — the read-side mirror of the writer below, kept in
+// this file so the wire format has one owner. Used by `srr inspect`'s
+// checkSearch and the tests.
+func parseSearchEntries(buf []byte) ([]SearchEntry, error) {
+	var out []SearchEntry
+	for i, line := range bytes.Split(buf, []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		var e SearchEntry
+		if err := json.Unmarshal(line, &e); err != nil {
+			return nil, fmt.Errorf("line %d: %w", i, err)
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
+
 // readSearchLines fetches a search shard and splits it into JSONL lines
 // (terminators kept, so they re-emit verbatim). Missing key is an error —
 // callers decide whether that warrants a rebuild or a failure.
-func (o *DB) readSearchLines(ctx context.Context, key string) (lines [][]byte, count int, err error) {
+func (o *DB) readSearchLines(ctx context.Context, key string) ([][]byte, error) {
 	raw, err := o.readGz(ctx, key)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
-	split := bytes.SplitAfter(raw, []byte("\n"))
-	for _, line := range split {
+	var lines [][]byte
+	for _, line := range bytes.SplitAfter(raw, []byte("\n")) {
 		if len(line) > 0 {
 			lines = append(lines, line)
 		}
 	}
-	return lines, len(lines), nil
+	return lines, nil
 }
 
 // saveSearchShard writes finalized shard n: the bloom over every gram of
-// every folded title, then the JSONL lines.
-func (o *DB) saveSearchShard(ctx context.Context, n int, rawLines [][]byte, titles []string) error {
+// every folded title, then the JSONL lines. Titles are decoded here, once
+// per finalized shard, so the sync loop never carries a parallel array.
+func (o *DB) saveSearchShard(ctx context.Context, n int, rawLines [][]byte) error {
 	bloom := make([]byte, searchBloomBytes)
-	for _, t := range titles {
-		eachSearchGram(foldSearchText(t), func(gram string) { bloomAdd(bloom, gram) })
+	for i, line := range rawLines {
+		var e SearchEntry
+		if err := json.Unmarshal(line, &e); err != nil {
+			return fmt.Errorf("shard %d line %d: %w", n, i, err)
+		}
+		eachSearchGram(foldSearchText(e.Title), func(gram string) { bloomAdd(bloom, gram) })
 	}
 	p := newPack()
 	if _, err := p.Write(bloom); err != nil {

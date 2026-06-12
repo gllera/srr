@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -93,16 +92,9 @@ func readSearchEntries(t *testing.T, dir, key string, skipBloom bool) []SearchEn
 		}
 		raw = raw[searchBloomBytes:]
 	}
-	var out []SearchEntry
-	for _, line := range bytes.Split(raw, []byte("\n")) {
-		if len(line) == 0 {
-			continue
-		}
-		var e SearchEntry
-		if err := json.Unmarshal(line, &e); err != nil {
-			t.Fatalf("%s: bad line %q: %v", key, line, err)
-		}
-		out = append(out, e)
+	out, err := parseSearchEntries(raw)
+	if err != nil {
+		t.Fatalf("%s: %v", key, err)
 	}
 	return out
 }
@@ -115,7 +107,7 @@ func TestSyncSearchFresh(t *testing.T) {
 	putOneArticle(t, db, ch, 1)
 	putOneArticle(t, db, ch, 2)
 
-	if err := db.SyncSearch(ctx); err != nil {
+	if err := db.SyncSearch(ctx, nil); err != nil {
 		t.Fatalf("SyncSearch: %v", err)
 	}
 	if c.SearchPacks != 0 || c.SearchTail != 2 {
@@ -145,7 +137,7 @@ func TestSyncSearchAtBoundary(t *testing.T) {
 	db, dir := setupBoundaryDB(t)
 	c := &db.core
 
-	if err := db.SyncSearch(ctx); err != nil {
+	if err := db.SyncSearch(ctx, nil); err != nil {
 		t.Fatalf("SyncSearch: %v", err)
 	}
 	if c.SearchPacks != 1 || c.SearchTail != 1 {
@@ -185,13 +177,13 @@ func TestSyncSearchAtBoundary(t *testing.T) {
 func TestSyncSearchNoopWhenCurrent(t *testing.T) {
 	db, dir := setupBoundaryDB(t)
 
-	if err := db.SyncSearch(ctx); err != nil {
+	if err := db.SyncSearch(ctx, nil); err != nil {
 		t.Fatalf("SyncSearch: %v", err)
 	}
 	for _, key := range []string{"search/0.gz", "search/L2.gz", "search/s1.gz"} {
 		os.Remove(filepath.Join(dir, key))
 	}
-	if err := db.SyncSearch(ctx); err != nil {
+	if err := db.SyncSearch(ctx, nil); err != nil {
 		t.Fatalf("SyncSearch (noop): %v", err)
 	}
 	for _, key := range []string{"search/0.gz", "search/L2.gz", "search/s1.gz"} {
@@ -208,11 +200,11 @@ func TestSyncSearchIncremental(t *testing.T) {
 	c.FetchedAt = 1700000000
 
 	putOneArticle(t, db, ch, 1)
-	if err := db.SyncSearch(ctx); err != nil {
+	if err := db.SyncSearch(ctx, nil); err != nil {
 		t.Fatalf("SyncSearch #1: %v", err)
 	}
 	putOneArticle(t, db, ch, 2)
-	if err := db.SyncSearch(ctx); err != nil {
+	if err := db.SyncSearch(ctx, nil); err != nil {
 		t.Fatalf("SyncSearch #2: %v", err)
 	}
 
@@ -222,6 +214,44 @@ func TestSyncSearchIncremental(t *testing.T) {
 	entries := readSearchEntries(t, dir, "search/L2.gz", false)
 	if len(entries) != 2 || entries[0].Title != "A1" || entries[1].Title != "A2" {
 		t.Fatalf("latest = %+v, want A1+A2", entries)
+	}
+}
+
+// The common fetch cycle: the missing range is exactly the batch just given
+// to PutArticles, so SyncSearch builds its entries from memory. Removing the
+// packs the walk would need proves no read-back happens.
+func TestSyncSearchBatchFastPath(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	ch := &Channel{id: 3}
+	c.Channels = map[int]*Channel{ch.id: ch}
+	c.FetchedAt = 1700000000
+
+	batch := []*Item{
+		{Channel: ch, Title: "A1", Content: "C", Published: 1000},
+		{Channel: ch, Title: "A2", Content: "C"},
+	}
+	if err := db.PutArticles(ctx, batch); err != nil {
+		t.Fatalf("PutArticles: %v", err)
+	}
+	for _, key := range []string{genKey("idx", 1), genKey("data", 1)} {
+		if err := os.Remove(filepath.Join(dir, key)); err != nil {
+			t.Fatalf("Remove %s: %v", key, err)
+		}
+	}
+
+	if err := db.SyncSearch(ctx, batch); err != nil {
+		t.Fatalf("SyncSearch: %v", err)
+	}
+	if c.SearchPacks != 0 || c.SearchTail != 2 {
+		t.Fatalf("coverage = (%d, %d), want (0, 2)", c.SearchPacks, c.SearchTail)
+	}
+	entries := readSearchEntries(t, dir, "search/L1.gz", false)
+	want := []SearchEntry{
+		{ChannelID: 3, When: 1000, Title: "A1"},
+		{ChannelID: 3, When: 1700000000, Title: "A2"}, // dateless → fetched_at
+	}
+	if len(entries) != 2 || entries[0] != want[0] || entries[1] != want[1] {
+		t.Fatalf("latest = %+v, want %+v", entries, want)
 	}
 }
 
@@ -235,13 +265,13 @@ func TestSyncSearchRebuildsMissingTail(t *testing.T) {
 
 	putOneArticle(t, db, ch, 1)
 	putOneArticle(t, db, ch, 2)
-	if err := db.SyncSearch(ctx); err != nil {
+	if err := db.SyncSearch(ctx, nil); err != nil {
 		t.Fatalf("SyncSearch: %v", err)
 	}
 	putOneArticle(t, db, ch, 3)
 	os.Remove(filepath.Join(dir, "search/L2.gz")) // the read-back candidate
 
-	if err := db.SyncSearch(ctx); err != nil {
+	if err := db.SyncSearch(ctx, nil); err != nil {
 		t.Fatalf("SyncSearch (rebuild): %v", err)
 	}
 	if c.SearchTail != 3 {
@@ -265,7 +295,7 @@ func TestSyncSearchInconsistentCoverageRebuilds(t *testing.T) {
 	putOneArticle(t, db, ch, 2)
 	c.SearchTail = 7 // covered (7) > total_art (2)
 
-	if err := db.SyncSearch(ctx); err != nil {
+	if err := db.SyncSearch(ctx, nil); err != nil {
 		t.Fatalf("SyncSearch: %v", err)
 	}
 	if c.SearchPacks != 0 || c.SearchTail != 2 {
@@ -334,7 +364,7 @@ func TestInspectValidateSearch(t *testing.T) {
 	if err := db.SyncIdxSummary(ctx); err != nil {
 		t.Fatalf("SyncIdxSummary: %v", err)
 	}
-	if err := db.SyncSearch(ctx); err != nil {
+	if err := db.SyncSearch(ctx, nil); err != nil {
 		t.Fatalf("SyncSearch: %v", err)
 	}
 	if err := db.Commit(ctx); err != nil {
@@ -354,7 +384,7 @@ func TestInspectValidateSearchOverclaim(t *testing.T) {
 	if err := db.SyncIdxSummary(ctx); err != nil {
 		t.Fatalf("SyncIdxSummary: %v", err)
 	}
-	if err := db.SyncSearch(ctx); err != nil {
+	if err := db.SyncSearch(ctx, nil); err != nil {
 		t.Fatalf("SyncSearch: %v", err)
 	}
 	db.core.SearchPacks = 2
