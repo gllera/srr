@@ -42,6 +42,7 @@ Commands are grouped under `chan` (channel management), `art` (articles), `previ
 | `art fetch`        | Fetch new articles from all channels               |
 | `art ls`           | List stored articles                               |
 | `pipe`             | Set or print root-level pipe (default pipeline)    |
+| `ingest`           | Set or print root-level ingest strategy            |
 | `preview`          | Preview processed feed articles in a browser       |
 | `inspect`          | Validate pack consistency / debug chronIdx lookups |
 | `config`           | Print resolved configuration                       |
@@ -153,6 +154,104 @@ sftp:
 ```
 
 SFTP auth chain (in order): URL password → config password → config `private-key` → `~/.ssh/` keys → SSH agent. Uses `~/.ssh/known_hosts` for host key verification by default. Set `insecure: true` to skip verification.
+
+## Ingest Strategies
+
+An *ingest strategy* is the I/O + parse step that turns a subscription URL into a list of articles, before the [pipe pipeline](#pipe-pipeline) transforms them. The default strategy, `#rss`, fetches the URL over HTTP and parses RSS/Atom/RDF. Sources that aren't feeds — a private API, a site that needs scraping, anything bespoke — are handled by an **external command** that speaks a small JSON protocol. No rebuild is required, and nothing source-specific lives in this repo.
+
+### Selecting a strategy
+
+The effective strategy is resolved per channel, most specific wins:
+
+1. The channel's `ingest` field (`srr chan add -i ...` / `srr chan upd -i ...`)
+2. The db.gz root default (`srr ingest ...`)
+3. The built-in `#rss` (when both are empty)
+
+Built-in strategy names start with `#` (only `#rss` ships built-in). **Any value that does not start with `#` is run as a shell command** via `/bin/sh -c`.
+
+```bash
+# Route one channel through an external command
+srr chan add -t "My source" -u "https://example.com/x" -i "myfetch --token=$TOK"
+
+# Make an external command the default for every channel
+srr ingest "myfetch"
+
+# Print the current root default; clear it with ""
+srr ingest
+srr ingest ""
+```
+
+### External command protocol
+
+The command receives a JSON **request** on `stdin` and must print a JSON **response** on `stdout`. `stderr` is passed through to the terminal — use it for logging. The process environment is inherited, so `SRR_*` and any credentials already in the environment are available to the command.
+
+**Request** (stdin):
+
+| Field | Type | Description |
+|---|---|---|
+| `url` | string | The subscription URL (the channel feed URL). |
+| `etag` | string | The `etag` your command returned last run (empty on first call). |
+| `last_modified` | string | The `last_modified` your command returned last run. |
+| `max_size` | int | Advisory cap (bytes) on what the command should buffer/return. |
+
+**Response** (stdout):
+
+| Field | Type | Description |
+|---|---|---|
+| `not_modified` | bool | `true` if nothing changed since `etag`/`last_modified`; `items` is then ignored. |
+| `etag` | string | Opaque cursor echoed back on the next request (optional). |
+| `last_modified` | string | Opaque cursor echoed back on the next request (optional). |
+| `items` | array | The articles (each item below). |
+
+**Item:**
+
+| Field | Type | Description |
+|---|---|---|
+| `guid` | uint32 | Stable per-item dedup key — an **FNV-1a 32-bit hash** (see below). |
+| `title` | string | Article title. |
+| `content` | string | Article HTML (then runs through the pipe pipeline). |
+| `link` | string | Canonical article URL. |
+| `published` | string \| null | RFC 3339 timestamp, or `null`/absent for dateless items. |
+
+**The `guid` contract.** SRR dedups and watermarks on `guid`, a 32-bit FNV-1a hash. Pick any *stable* per-item string (an upstream id, the permalink, …) and hash its UTF-8 bytes with FNV-1a — offset basis `2166136261`, prime `16777619`. The same input must always produce the same `guid` so a re-presented item dedups instead of duplicating.
+
+**Behavior contract.**
+
+- A **non-zero exit code** fails the fetch for that channel; other channels still proceed.
+- **Empty stdout is an error** — emit at least `{"items":[]}` (or `{"not_modified":true}`).
+- stdout is capped at 64 MiB; exceeding it fails the fetch.
+- `not_modified: true` (or a response with zero `items`) **preserves** the channel's dedup state, so a transient empty response won't drop it.
+
+### Reference implementation
+
+A minimal Python command. Replace the marked block with your real source; everything else is protocol boilerplate.
+
+```python
+#!/usr/bin/env python3
+import sys, json
+
+def fnv1a32(s: str) -> int:
+    h = 0x811C9DC5
+    for b in s.encode("utf-8"):
+        h = ((h ^ b) * 0x01000193) & 0xFFFFFFFF
+    return h
+
+req = json.load(sys.stdin)          # {"url", "etag", "last_modified", "max_size"}
+
+# --- your source: produce rows of (id, title, html, link, iso_date | None) ---
+rows = [("post-123", "Hello", "<p>Hi</p>", "https://example.com/123", "2024-03-01T12:00:00Z")]
+# ------------------------------------------------------------------------------
+
+items = [{
+    "guid": fnv1a32(rid or link),   # any stable string -> uint32
+    "title": title,
+    "content": html,
+    "link": link,
+    "published": date,              # RFC 3339 string, or None
+} for (rid, title, html, link, date) in rows]
+
+json.dump({"items": items}, sys.stdout)
+```
 
 ## Pipe Pipeline
 
