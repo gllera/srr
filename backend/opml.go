@@ -7,8 +7,18 @@ import (
 	"strings"
 )
 
+// OPML round-trips: Unmarshal ignores the extra export-side fields (XMLName
+// matches loosely, version/head are simply read and discarded by import), and
+// Marshal needs them to emit a spec-valid OPML 2.0 document for `chan export`.
 type OPML struct {
-	Body Body `xml:"body"`
+	XMLName xml.Name `xml:"opml"`
+	Version string   `xml:"version,attr"`
+	Head    Head     `xml:"head"`
+	Body    Body     `xml:"body"`
+}
+
+type Head struct {
+	Title string `xml:"title,omitempty"`
 }
 
 type Body struct {
@@ -16,7 +26,7 @@ type Body struct {
 }
 
 type Outline struct {
-	XMLURL   string    `xml:"xmlUrl,attr"`
+	XMLURL   string    `xml:"xmlUrl,attr,omitempty"` // omitempty: group outlines carry no URL
 	Title    string    `xml:"title,attr"`
 	Text     string    `xml:"text,attr"`
 	Outlines []Outline `xml:"outline"`

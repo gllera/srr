@@ -38,6 +38,7 @@ type ChannelGroup struct {
 	Edit   EditCmd   `cmd:"" help:"Open a channel record in $EDITOR and apply on save."`
 	Apply  ApplyCmd  `cmd:"" help:"Upsert channels from JSON (object or array)."`
 	Import ImportCmd `cmd:"" help:"Import opml channels file."`
+	Export ExportCmd `cmd:"" help:"Export channels as OPML (inverse of import)."`
 }
 
 type ArtGroup struct {
