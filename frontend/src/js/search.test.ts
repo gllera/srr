@@ -5,10 +5,18 @@ import { IDX_PACK_SIZE, SEARCH_BLOOM_BYTES, SEARCH_BLOOM_K, SEARCH_GRAM } from "
 // search.ts holds lazy fetch slots (summary/latest/shard LRU) as module
 // state, so every test gets a fresh instance via resetModules + dynamic
 // import (the dropdown.test.ts pattern).
-const mockData = vi.hoisted(() => ({
-   db: {} as Record<string, unknown>,
-   fetchPackBytes: vi.fn<(path: string, isLatest: boolean) => Promise<ArrayBuffer>>(),
-}))
+const mockData = vi.hoisted(() => {
+   const data = {
+      db: {} as Record<string, unknown>,
+      fetchPackBytes: vi.fn<(path: string, isLatest: boolean) => Promise<ArrayBuffer>>(),
+      // Same formula as the real data.ts export, driven by the mock db.
+      numFinalizedIdx: () => {
+         const total = (data.db.total_art as number) ?? 0
+         return total > 0 ? Math.floor((total - 1) / 50000) : 0
+      },
+   }
+   return data
+})
 vi.mock("./data", () => mockData)
 
 type SearchMod = typeof import("./search")

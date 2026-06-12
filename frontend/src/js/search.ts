@@ -7,7 +7,7 @@
 // (false positives cost one shard fetch; false negatives are impossible), so
 // the Go/TS folding parity below is a recall optimization, not a correctness
 // gate, except for the query side which only ever folds in TS.
-import { makeLRU } from "./cache"
+import { cachedPromise, lazySlot, makeLRU } from "./cache"
 import * as data from "./data"
 import { IDX_PACK_SIZE, SEARCH_BLOOM_BYTES, SEARCH_BLOOM_K, SEARCH_GRAM, type ISearchEntryWire } from "./format.gen"
 
@@ -20,10 +20,6 @@ export interface ISearchHit {
    t: string
 }
 
-function numFinalized(): number {
-   return data.db.total_art > 0 ? Math.floor((data.db.total_art - 1) / IDX_PACK_SIZE) : 0
-}
-
 // The hdrs-style coverage gate: the backend publishes srch only after every
 // shard + summary save succeeded, so equality with the finalized count means
 // the whole series is consistent with this db.gz. The srcht>0 leg
@@ -33,33 +29,26 @@ function numFinalized(): number {
 export function available(): boolean {
    if (data.db.total_art === 0) return false
    const srch = data.db.srch ?? 0
-   return srch === numFinalized() && (srch > 0 || (data.db.srcht ?? 0) > 0)
+   return srch === data.numFinalizedIdx() && (srch > 0 || (data.db.srcht ?? 0) > 0)
 }
 
 // fold mirrors the backend's foldSearchText (db_search.go) byte-for-byte —
-// the parity is enforced by the e2e contract test. NFD before lowercasing
-// neutralizes the Go-simple vs JS-full case-mapping divergences (İ, ẞ); ς→σ
-// patches JS's context-sensitive final sigma; everything that isn't a letter
-// or number separates words.
-const KEEP = /^[\p{L}\p{N}]+$/u
+// the parity is enforced by the e2e contract test. Whole-string passes (a
+// shard parse folds 50k titles, so per-rune regex calls add up): NFD before
+// lowercasing neutralizes the Go-simple vs JS-full case-mapping divergences
+// (İ, ẞ); ς→σ patches JS's only other context-sensitive mapping, the final
+// sigma toLowerCase produces; everything that isn't a letter or number
+// separates words, single-space joined.
+const SEP = /[^\p{L}\p{N}]+/u
 export function fold(s: string): string {
-   let out = ""
-   let pending = false
-   for (let r of s.normalize("NFD")) {
-      if (/\p{Mn}/u.test(r)) continue
-      r = r.toLowerCase()
-      if (r === "ς") r = "σ"
-      if (!KEEP.test(r)) {
-         pending = out.length > 0
-         continue
-      }
-      if (pending) {
-         out += " "
-         pending = false
-      }
-      out += r
-   }
-   return out
+   return s
+      .normalize("NFD")
+      .replace(/\p{Mn}+/gu, "")
+      .toLowerCase()
+      .replaceAll("ς", "σ")
+      .split(SEP)
+      .filter((w) => w.length > 0)
+      .join(" ")
 }
 
 // wordGrams mirrors eachSearchGram for a single folded word: SEARCH_GRAM-rune
@@ -91,8 +80,10 @@ export function bloomBits(gram: string): number[] {
    return out
 }
 
-function bloomHas(blooms: Uint8Array, shardOff: number, gram: string): boolean {
-   for (const bit of bloomBits(gram)) {
+// bloomHas takes precomputed probe indices (one bloomBits result) so a query
+// hashes each gram once, not once per scanned shard.
+function bloomHas(blooms: Uint8Array, shardOff: number, bits: number[]): boolean {
+   for (const bit of bits) {
       if ((blooms[shardOff + (bit >> 3)] & (1 << (bit & 7))) === 0) return false
    }
    return true
@@ -120,50 +111,32 @@ function parseShard(buf: ArrayBuffer, skipBloom: boolean): Shard {
 // boot stays O(1). All three loaders follow data.ts's retry discipline —
 // a rejected promise clears its slot so the next query refetches.
 
-let summarySlot: Promise<Uint8Array> | null = null
-function loadSummary(): Promise<Uint8Array> {
-   if (summarySlot) return summarySlot
-   const nf = numFinalized()
-   const promise = data.fetchPackBytes(`search/s${data.db.srch}.gz`, false).then((buf) => {
-      const blooms = new Uint8Array(buf)
-      if (blooms.length !== nf * SEARCH_BLOOM_BYTES)
-         throw new Error(`search summary: ${blooms.length} bytes for ${nf} shards`)
-      return blooms
-   })
-   summarySlot = promise
-   promise.catch(() => {
-      if (summarySlot === promise) summarySlot = null
-   })
-   return promise
-}
+const loadSummary = lazySlot(async () => {
+   const nf = data.numFinalizedIdx()
+   const blooms = new Uint8Array(await data.fetchPackBytes(`search/s${data.db.srch}.gz`, false))
+   if (blooms.length !== nf * SEARCH_BLOOM_BYTES)
+      throw new Error(`search summary: ${blooms.length} bytes for ${nf} shards`)
+   return blooms
+})
 
-let latestSlot: Promise<Shard> | null = null
-function loadLatest(): Promise<Shard> {
-   if (latestSlot) return latestSlot
-   const promise = data.fetchPackBytes(`search/L${data.db.seq}.gz`, false).then((buf) => parseShard(buf, false))
-   latestSlot = promise
-   promise.catch(() => {
-      if (latestSlot === promise) latestSlot = null
-   })
-   return promise
-}
+const loadLatest = lazySlot(() =>
+   data.fetchPackBytes(`search/L${data.db.seq}.gz`, false).then((buf) => parseShard(buf, false)),
+)
 
 const shardCache = makeLRU<Promise<Shard>>(8)
 function loadShard(n: number): Promise<Shard> {
-   const cached = shardCache.get(n)
-   if (cached) return cached
-   const promise = data.fetchPackBytes(`search/${n}.gz`, false).then((buf) => parseShard(buf, true))
-   shardCache.put(n, promise)
-   promise.catch(() => {
-      if (shardCache.peek(n) === promise) shardCache.drop(n)
-   })
-   return promise
+   return cachedPromise(shardCache, n, () =>
+      data.fetchPackBytes(`search/${n}.gz`, false).then((buf) => parseShard(buf, true)),
+   )
 }
 
-function matchShard(shard: Shard, baseChron: number, words: string[]): ISearchHit[] {
+function matchShard(shard: Shard, baseChron: number, words: string[], max: number): ISearchHit[] {
    const hits: ISearchHit[] = []
-   // Newest-first within the shard, like the shard order of the outer scan.
-   for (let i = shard.folded.length - 1; i >= 0; i--) {
+   // Newest-first within the shard, like the shard order of the outer scan —
+   // so the first `max` collected are exactly the `max` the consumer keeps
+   // (a frequent word against a full shard would otherwise build tens of
+   // thousands of hit objects per keystroke just to be discarded).
+   for (let i = shard.folded.length - 1; i >= 0 && hits.length < max; i--) {
       const folded = shard.folded[i]
       if (!words.every((w) => folded.includes(w))) continue
       const e = shard.entries[i]
@@ -182,33 +155,39 @@ export function shortQuery(q: string): boolean {
 }
 
 // search yields batches of hits, newest shard first (latest tail, then
-// finalized nf-1..0), one batch per shard that matched. Matching is AND of
-// folded substring tests per query word; candidate shards must hold every
-// gram of every bloom-sized word. A missing/broken latest tail degrades to
-// finalized-only (warn); a missing summary rejects — the caller decides how
-// to surface that.
-export async function* search(q: string): AsyncGenerator<ISearchHit[], void, void> {
+// finalized nf-1..0), one batch per shard that matched, stopping after
+// `limit` total hits. Matching is AND of folded substring tests per query
+// word; candidate shards must hold every gram of every bloom-sized word. A
+// caller that discards some yielded hits (an active channel filter) must
+// pass Infinity — search can't know which hits survive. A missing/broken
+// latest tail degrades to finalized-only (warn); a missing summary rejects —
+// the caller decides how to surface that.
+export async function* search(q: string, limit = Infinity): AsyncGenerator<ISearchHit[], void, void> {
    const words = fold(q)
       .split(" ")
       .filter((w) => w.length > 0)
    if (words.length === 0) return
 
+   const nf = data.numFinalizedIdx()
+   let remaining = limit
    try {
       const latest = await loadLatest()
-      const hits = matchShard(latest, numFinalized() * IDX_PACK_SIZE, words)
+      const hits = matchShard(latest, nf * IDX_PACK_SIZE, words, remaining)
+      remaining -= hits.length
       if (hits.length > 0) yield hits
    } catch (e) {
       console.warn("search: latest tail unavailable, scanning finalized shards only", e)
    }
 
-   const nf = numFinalized()
-   const grams = words.filter((w) => [...w].length >= SEARCH_GRAM).flatMap(wordGrams)
-   if (nf === 0 || grams.length === 0) return
+   // wordGrams already yields nothing for words shorter than SEARCH_GRAM.
+   const gramBits = words.flatMap(wordGrams).map(bloomBits)
+   if (nf === 0 || gramBits.length === 0 || remaining <= 0) return
 
    const blooms = await loadSummary()
-   for (let p = nf - 1; p >= 0; p--) {
-      if (!grams.every((g) => bloomHas(blooms, p * SEARCH_BLOOM_BYTES, g))) continue
-      const hits = matchShard(await loadShard(p), p * IDX_PACK_SIZE, words)
+   for (let p = nf - 1; p >= 0 && remaining > 0; p--) {
+      if (!gramBits.every((bits) => bloomHas(blooms, p * SEARCH_BLOOM_BYTES, bits))) continue
+      const hits = matchShard(await loadShard(p), p * IDX_PACK_SIZE, words, remaining)
+      remaining -= hits.length
       if (hits.length > 0) yield hits
    }
 }
