@@ -178,7 +178,16 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
               .substring(bangIdx + 1)
               .split("+")
               .filter((t) => t.length > 0)
-              .map(decodeURIComponent)
+              .map((t) => {
+                 // A malformed %-escape (e.g. a lone "%") makes decodeURIComponent
+                 // throw; pass the raw token through instead of crashing navigation
+                 // (an unrecoverable error popup + a hash that persists across reloads).
+                 try {
+                    return decodeURIComponent(t)
+                 } catch {
+                    return t
+                 }
+              })
    if (tokens.length > 0) filter.set(tokens)
    else filter.clear()
 
@@ -274,7 +283,18 @@ export function isSingleFilter(token: string): boolean {
 
 export async function cycleFilter(dir: number): Promise<IShowFeed> {
    const entries = getFilterEntries()
-   const current = getCurrentFilterKey()
+   let current = getCurrentFilterKey()
+   // A single-channel filter on a TAGGED channel has no entry of its own
+   // (getFilterEntries lists tagged channels only by tag), so indexOf would
+   // miss and cycling would snap to [ALL]. Resolve it to the channel's tag so
+   // cycling continues relative to the current selection.
+   if (current !== "" && filter.tokens.length === 1) {
+      const num = Number(current)
+      if (Number.isFinite(num)) {
+         const ch = data.db.channels[num]
+         if (ch?.tag) current = ch.tag
+      }
+   }
    let idx = entries.indexOf(current)
    if (idx === -1) idx = 0
    idx = (idx + dir + entries.length) % entries.length
