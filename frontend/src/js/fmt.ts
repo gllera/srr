@@ -69,6 +69,19 @@ function setPackRelative(node: Element, attr: string, v: string): void {
    else node.removeAttribute(attr)
 }
 
+// resolveMediaAttr routes one URL-bearing attribute on a sanitized node: a
+// relative reference resolves against the pack base (bounds-checked, dropped if
+// it escapes), and — when proxy is set — an external http(s) reference goes
+// through the image proxy. Other values (absolute non-http, or already stripped
+// by the attribute loop) are left untouched. Centralizes the branch shared by
+// <img src>, <video src>, <video poster> and <a href>.
+function resolveMediaAttr(node: Element, attr: string, proxyPrefix: string, proxy: boolean): void {
+   const v = node.getAttribute(attr)
+   if (!v) return
+   if (isRelative(v)) setPackRelative(node, attr, v)
+   else if (proxy && HTTP_RE.test(v)) node.setAttribute(attr, imgProxy(v, proxyPrefix))
+}
+
 // <template> parses HTML without executing scripts, unlike a div
 const tmpl = document.createElement("template")
 export function sanitizeHtml(html: string): string {
@@ -93,28 +106,20 @@ export function sanitizeHtml(html: string): string {
          // the feed carried) resolve against the pack base, bounds-checked so they
          // can't traverse off it. Absolute hrefs (http(s), mailto:, …) stay as-is:
          // user-initiated navigation, not an auto-loaded resource, so no
-         // proxy/IP-leak concern. URL_DENY-matching href was already stripped by
-         // the attribute loop above.
-         const href = node.getAttribute("href")
-         if (href && isRelative(href)) setPackRelative(node, "href", href)
+         // proxy/IP-leak concern (proxy:false). URL_DENY-matching href was already
+         // stripped by the attribute loop above.
+         resolveMediaAttr(node, "href", proxyPrefix, false)
       } else if (tag === "IMG") {
          node.removeAttribute("srcset")
-         const src = node.getAttribute("src")
-         // Relative src resolves against the pack base (bounds-checked) and
-         // bypasses the proxy; external http(s) URLs keep the proxy path. URL_DENY-
-         // matching src was already stripped by the attribute loop above.
-         if (src && isRelative(src)) setPackRelative(node, "src", src)
-         else if (src && HTTP_RE.test(src)) node.setAttribute("src", imgProxy(src, proxyPrefix))
+         // Relative src resolves against the pack base; external http(s) keeps the
+         // proxy path (proxy:true) so the user's IP isn't leaked to feed hosts.
+         resolveMediaAttr(node, "src", proxyPrefix, true)
       } else if (tag === "VIDEO") {
-         // src: relative resolves against the pack base; external passes through
-         // (image proxies don't handle video).
-         const src = node.getAttribute("src")
-         if (src && isRelative(src)) setPackRelative(node, "src", src)
-         // poster IS an image, so route external posters through the proxy like
-         // img.src (the asymmetry of leaving them direct leaks the user's IP).
-         const poster = node.getAttribute("poster")
-         if (poster && isRelative(poster)) setPackRelative(node, "poster", poster)
-         else if (poster && HTTP_RE.test(poster)) node.setAttribute("poster", imgProxy(poster, proxyPrefix))
+         // src passes external URLs through (proxy:false — image proxies don't
+         // handle video); poster IS an image, so external posters take the proxy
+         // path like img.src (leaving them direct would leak the user's IP).
+         resolveMediaAttr(node, "src", proxyPrefix, false)
+         resolveMediaAttr(node, "poster", proxyPrefix, true)
       }
    }
    return tmpl.innerHTML
