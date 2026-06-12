@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -85,10 +86,31 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 		return "", fmt.Errorf("asset %q exceeds %d bytes (size %d)", localname, a.maxBytes, fi.Size())
 	}
 
-	sum, err := hashFile(full)
+	// Read the file once and key on THESE bytes, then upload THEM. Opening twice
+	// (hash, then upload) let a concurrent rewrite in the shared cache dir store
+	// bytes that don't match the content-hash key — a mismatch the upload-if-
+	// absent dedup below then makes permanent. The read is bounded by the size
+	// cap already pre-checked above (defended again here against a concurrent
+	// grow between the Lstat and this read).
+	f, err := os.Open(full)
 	if err != nil {
-		return "", fmt.Errorf("hash asset %q: %w", localname, err)
+		return "", fmt.Errorf("open asset %q: %w", localname, err)
 	}
+	var buf bytes.Buffer
+	var src io.Reader = f
+	if a.maxBytes > 0 {
+		src = io.LimitReader(f, a.maxBytes+1)
+	}
+	n, err := buf.ReadFrom(src)
+	f.Close()
+	if err != nil {
+		return "", fmt.Errorf("read asset %q: %w", localname, err)
+	}
+	if a.maxBytes > 0 && n > a.maxBytes {
+		return "", fmt.Errorf("asset %q exceeds %d bytes", localname, a.maxBytes)
+	}
+
+	sum := sha256.Sum256(buf.Bytes())
 	key := contentHashKey(localname, sum)
 
 	// Upload only if absent: a content-hash key is stable, so a key already in
@@ -101,31 +123,10 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 		return key, nil
 	}
 
-	f, err := os.Open(full)
-	if err != nil {
-		return "", fmt.Errorf("open asset %q: %w", localname, err)
-	}
-	defer f.Close()
-	if err := a.be.Put(ctx, key, f, true); err != nil {
+	if err := a.be.Put(ctx, key, bytes.NewReader(buf.Bytes()), true); err != nil {
 		return "", fmt.Errorf("store asset %q: %w", key, err)
 	}
 	return key, nil
-}
-
-// hashFile streams path through sha256 without buffering the whole file.
-func hashFile(path string) ([32]byte, error) {
-	var sum [32]byte
-	f, err := os.Open(path)
-	if err != nil {
-		return sum, err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return sum, err
-	}
-	copy(sum[:], h.Sum(nil))
-	return sum, nil
 }
 
 // contentHashKey derives the relative store key (assets/<2>/<16><ext>) from the
