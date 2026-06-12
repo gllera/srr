@@ -10,13 +10,13 @@ import (
 )
 
 func init() {
-	mod.Register("test-mutate-guid", func(_ mod.Assets) mod.Processor {
+	mod.Register("test-mutate-guid", func() mod.Processor {
 		return func(_ context.Context, _ mod.Params, i *mod.RawItem) error {
 			i.GUID++
 			return nil
 		}
 	})
-	mod.Register("test-mutate-published", func(_ mod.Assets) mod.Processor {
+	mod.Register("test-mutate-published", func() mod.Processor {
 		return func(_ context.Context, _ mod.Params, i *mod.RawItem) error {
 			t := time.Unix(1, 0)
 			i.Published = &t
@@ -44,7 +44,7 @@ func TestProcessItemRejectsImmutableFieldChange(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			item := &mod.RawItem{GUID: 42, Title: "t", Content: "c", Link: "http://example.com", Published: &now}
-			err := processItem(context.Background(), mod.New(nil), []string{tt.module}, item)
+			err := processItem(context.Background(), mod.New(), []string{tt.module}, item)
 			wantErr(t, err, tt.want)
 		})
 	}
@@ -63,7 +63,7 @@ func TestProcessItemSanitizeIsExplicit(t *testing.T) {
 	// No #sanitize → hostile nodes survive verbatim.
 	for _, pipe := range [][]string{nil, {"#minify"}} {
 		item := &mod.RawItem{Content: hostileHTML, Link: "http://example.com"}
-		if err := processItem(ctx, mod.New(nil), pipe, item); err != nil {
+		if err := processItem(ctx, mod.New(), pipe, item); err != nil {
 			t.Fatalf("processItem(pipe=%v): %v", pipe, err)
 		}
 		if !strings.Contains(item.Content, "<script") || !strings.Contains(item.Content, "onerror") {
@@ -73,7 +73,7 @@ func TestProcessItemSanitizeIsExplicit(t *testing.T) {
 
 	// With #sanitize → script element and event handler are gone, safe text stays.
 	item := &mod.RawItem{Content: hostileHTML, Link: "http://example.com"}
-	if err := processItem(ctx, mod.New(nil), []string{"#sanitize"}, item); err != nil {
+	if err := processItem(ctx, mod.New(), []string{"#sanitize"}, item); err != nil {
 		t.Fatalf("processItem(#sanitize): %v", err)
 	}
 	if strings.Contains(item.Content, "<script") || strings.Contains(item.Content, "onerror") {
@@ -92,7 +92,7 @@ func TestProcessItemSanitizeIsExplicit(t *testing.T) {
 func TestProcessItemSanitizeOrderingHazard(t *testing.T) {
 	item := &mod.RawItem{Content: "<p>safe</p>", Link: "http://example.com"}
 	pipe := []string{"#sanitize", `jq -c '.content="<script>evil</script>"'`}
-	if err := processItem(context.Background(), mod.New(nil), pipe, item); err != nil {
+	if err := processItem(context.Background(), mod.New(), pipe, item); err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
 	if !strings.Contains(item.Content, "<script>evil</script>") {

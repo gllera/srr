@@ -34,7 +34,7 @@ func dispatchOnce(t *testing.T, feed *Feed, ch *Channel, rootIngest string) []*I
 	const fetchedAt int64 = 4_102_444_800
 	ingestName := ingest.Select(ch.Ingest, rootIngest)
 	run := &fetchRun{engine: ingest.New(ingest.Deps{}), fetchedAt: fetchedAt}
-	items, err := feed.fetch(context.Background(), run, buf, mod.New(nil), ch, ch.Pipe, ingestName)
+	items, err := feed.fetch(context.Background(), run, buf, mod.New(), ch, ch.Pipe, ingestName)
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}

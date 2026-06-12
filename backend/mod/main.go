@@ -63,26 +63,16 @@ func (r RawFeedItem) Text(names ...string) string {
 	return ""
 }
 
-// Assets lets a module download an object by URL and stream it into the SRR
-// store, returning the RELATIVE store key to reference it by.
-type Assets interface {
-	// Fetch GETs srcURL and streams the body into the store under a URL-hash
-	// key, returning the relative key (e.g. "assets/ab/cd1234.jpg"). On any
-	// failure returns ("", err); callers keep the original URL.
-	Fetch(ctx context.Context, srcURL string) (key string, err error)
-}
-
 // Processor is a built-in pipeline step. Params carries the key=value options
 // parsed from the step's pipeline token (e.g. "timeout=30s" in
 // "#readability timeout=30s"); steps that take no options ignore it.
 type Processor func(context.Context, Params, *RawItem) error
 
-var registry = map[string]func(Assets) Processor{}
+var registry = map[string]func() Processor{}
 
 // Register registers a built-in processor available as "#name". The init
-// factory receives the run's Assets capability (may be nil when no store is
-// wired, e.g. preview/tests) and runs once per New().
-func Register(name string, init func(Assets) Processor) {
+// factory runs once per New() so a built-in can capture per-instance state.
+func Register(name string, init func() Processor) {
 	if !strings.HasPrefix(name, "#") {
 		name = "#" + name
 	}
@@ -95,15 +85,13 @@ type Module struct {
 }
 
 // New builds a Module with every registered built-in instantiated once.
-// assets is the download capability passed to each built-in factory; pass
-// nil to disable downloads (built-ins degrade to a no-op for that feature).
-func New(assets Assets) *Module {
+func New() *Module {
 	m := &Module{
 		processors: make(map[string]Processor, len(registry)),
 		env:        os.Environ(),
 	}
 	for name, init := range registry {
-		m.processors[name] = init(assets)
+		m.processors[name] = init()
 	}
 	return m
 }

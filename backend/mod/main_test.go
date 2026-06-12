@@ -8,7 +8,7 @@ import (
 )
 
 func TestModuleBuiltinSanitize(t *testing.T) {
-	m := New(nil)
+	m := New()
 
 	now := time.Now()
 	item := &RawItem{
@@ -33,7 +33,7 @@ func TestModuleBuiltinSanitize(t *testing.T) {
 }
 
 func TestModuleBuiltinSanitizePreservesVideo(t *testing.T) {
-	m := New(nil)
+	m := New()
 	now := time.Now()
 	item := &RawItem{
 		GUID:  1,
@@ -66,7 +66,7 @@ func TestModuleBuiltinSanitizePreservesVideo(t *testing.T) {
 }
 
 func TestModuleBuiltinSanitizeStripsClass(t *testing.T) {
-	m := New(nil)
+	m := New()
 
 	now := time.Now()
 	item := &RawItem{
@@ -85,7 +85,7 @@ func TestModuleBuiltinSanitizeStripsClass(t *testing.T) {
 }
 
 func TestModuleBuiltinMinify(t *testing.T) {
-	m := New(nil)
+	m := New()
 
 	now := time.Now()
 	item := &RawItem{
@@ -107,7 +107,7 @@ func TestModuleBuiltinMinify(t *testing.T) {
 }
 
 func TestModuleExternalProcessor(t *testing.T) {
-	m := New(nil)
+	m := New()
 
 	now := time.Now()
 	item := &RawItem{
@@ -133,7 +133,7 @@ func TestModuleExternalProcessor(t *testing.T) {
 }
 
 func TestModuleExternalProcessorFailure(t *testing.T) {
-	m := New(nil)
+	m := New()
 
 	now := time.Now()
 	item := &RawItem{
@@ -151,7 +151,7 @@ func TestModuleExternalProcessorFailure(t *testing.T) {
 }
 
 func TestModuleExternalInvalidJSON(t *testing.T) {
-	m := New(nil)
+	m := New()
 
 	now := time.Now()
 	item := &RawItem{
@@ -169,7 +169,7 @@ func TestModuleExternalInvalidJSON(t *testing.T) {
 }
 
 func TestRegisterBuiltins(t *testing.T) {
-	m := New(nil)
+	m := New()
 
 	// Verify built-in processors are registered
 	builtins := []string{"#sanitize", "#minify", "#readability"}
@@ -183,7 +183,7 @@ func TestRegisterBuiltins(t *testing.T) {
 // Built-ins that take no parameters reject any, so a stray option surfaces as
 // a config error instead of being silently ignored.
 func TestModuleBuiltinRejectsUnexpectedParam(t *testing.T) {
-	m := New(nil)
+	m := New()
 	now := time.Now()
 	for _, token := range []string{"#sanitize x=1", "#minify foo=bar"} {
 		item := &RawItem{GUID: 1, Title: "T", Content: "<p>a</p>", Link: "http://example.com", Published: &now}
@@ -196,7 +196,7 @@ func TestModuleBuiltinRejectsUnexpectedParam(t *testing.T) {
 // A name-with-params token must dispatch to the built-in, while a shell command
 // whose first word is not a built-in still runs verbatim through /bin/sh.
 func TestModuleProcessSplitsNameFromParams(t *testing.T) {
-	m := New(nil)
+	m := New()
 	now := time.Now()
 
 	// "#sanitize" with no params behaves exactly as before.
@@ -219,7 +219,7 @@ func TestModuleProcessSplitsNameFromParams(t *testing.T) {
 }
 
 func TestModuleSanitizeStripsDangerousPoster(t *testing.T) {
-	m := New(nil)
+	m := New()
 	now := time.Now()
 	item := &RawItem{GUID: 1, Title: "T",
 		Content: `<video poster="javascript:alert(1)" src="https://x/v.mp4"></video>` +
@@ -241,7 +241,7 @@ func TestModuleSanitizeStripsDangerousPoster(t *testing.T) {
 }
 
 func TestModuleEmptyShellOutputIsNoop(t *testing.T) {
-	m := New(nil)
+	m := New()
 	now := time.Now()
 	item := &RawItem{GUID: 7, Title: "Keep", Content: "<p>keep me</p>", Link: "http://e.com", Published: &now}
 	// `true` exits 0 with empty stdout: must leave the item unchanged rather than
@@ -268,7 +268,7 @@ func TestIsBuiltin(t *testing.T) {
 }
 
 func TestModuleValidate(t *testing.T) {
-	m := New(nil)
+	m := New()
 	ctx := context.Background()
 	if err := m.Validate(ctx, []string{"#sanitize", "#readability timeout=5s", "jq ."}); err != nil {
 		t.Errorf("valid pipeline rejected: %v", err)

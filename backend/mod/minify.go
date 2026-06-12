@@ -8,7 +8,7 @@ import (
 )
 
 func init() {
-	Register("minify", func(_ Assets) Processor {
+	Register("minify", func() Processor {
 		mi := minify.New()
 		mi.AddFunc("text/html", html.Minify)
 

@@ -8,7 +8,7 @@ import (
 )
 
 func init() {
-	Register("sanitize", func(_ Assets) Processor {
+	Register("sanitize", func() Processor {
 		policy := bluemonday.StrictPolicy()
 
 		policy.AllowLists()

@@ -45,7 +45,7 @@ const (
 )
 
 func init() {
-	Register("readability", func(_ Assets) Processor {
+	Register("readability", func() Processor {
 		// One client per Module (i.e. per fetch worker, via the procPool):
 		// reused across the items a worker processes. The per-call timeout is
 		// enforced via the request context rather than client.Timeout so it can
