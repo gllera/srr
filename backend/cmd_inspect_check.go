@@ -5,7 +5,7 @@ import (
 	"sort"
 )
 
-func validateAll(fetch keyGetter, core *DBCore, packs []*inspIdx) error {
+func validateAll(fetch keyGetter, core *DBCore, packs []*idxPack) error {
 	fmt.Println()
 	issues := 0
 
@@ -27,7 +27,7 @@ func validateAll(fetch keyGetter, core *DBCore, packs []*inspIdx) error {
 // checkBoundsVsData walks every chronIdx and verifies the resolved
 // (packId, offset) lands inside an existing data-pack entry whose
 // chan_id matches the idx pack's chan_id.
-func checkBoundsVsData(fetch keyGetter, core *DBCore, packs []*inspIdx) int {
+func checkBoundsVsData(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 	cache := map[int][]ArticleData{}
 	loadCached := func(pid int) []ArticleData {
 		if e, ok := cache[pid]; ok {
@@ -72,7 +72,7 @@ func checkBoundsVsData(fetch keyGetter, core *DBCore, packs []*inspIdx) int {
 }
 
 // checkDBMeta cross-checks db.gz fields against actual pack contents.
-func checkDBMeta(fetch keyGetter, core *DBCore, packs []*inspIdx) int {
+func checkDBMeta(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 	issues := 0
 
 	totalEntries := 0
@@ -139,7 +139,7 @@ func checkDBMeta(fetch keyGetter, core *DBCore, packs []*inspIdx) int {
 // checkChanCountsContinuity verifies header chanCounts[s] in pack i+1
 // equals chanCounts[s] + ownChanCounts[s] from pack i. Only meaningful
 // once total_art crosses idxPackSize.
-func checkChanCountsContinuity(packs []*inspIdx) int {
+func checkChanCountsContinuity(packs []*idxPack) int {
 	if len(packs) < 2 {
 		fmt.Println("[chan-counts] only 1 idx pack; continuity check skipped")
 		return 0
@@ -147,7 +147,7 @@ func checkChanCountsContinuity(packs []*inspIdx) int {
 	issues := 0
 	for i := 0; i < len(packs)-1; i++ {
 		cur, next := packs[i], packs[i+1]
-		for s := range 256 {
+		for s := range idxChanSlots {
 			expected := cur.chanCounts[s] + cur.ownChanCounts[s]
 			if next.chanCounts[s] != expected {
 				fmt.Printf("[chan-counts] pack %d sub %d: header=%d but pack %d ended with cumulative %d\n",
@@ -156,7 +156,7 @@ func checkChanCountsContinuity(packs []*inspIdx) int {
 			}
 		}
 	}
-	for s := range 256 {
+	for s := range idxChanSlots {
 		if packs[0].chanCounts[s] != 0 {
 			fmt.Printf("[chan-counts] pack 0 sub %d: header=%d but expected 0 (no articles before first pack)\n",
 				s, packs[0].chanCounts[s])
@@ -173,7 +173,7 @@ func checkChanCountsContinuity(packs []*inspIdx) int {
 // equals the cumulative fetched_at at the end of pack i. Pack 0's base
 // must be 0 (no time has passed before the first article). A drift here
 // silently breaks findChronForTimestamp's binary search.
-func checkFetchedAtsContinuity(packs []*inspIdx) int {
+func checkFetchedAtsContinuity(packs []*idxPack) int {
 	issues := 0
 	if packs[0].fetchedAtBase != 0 {
 		fmt.Printf("[fetched-ats] pack 0 fetchedAt_base=%d but expected 0\n", packs[0].fetchedAtBase)
@@ -200,7 +200,7 @@ func checkFetchedAtsContinuity(packs []*inspIdx) int {
 
 // checkUnknownChanIDs flags any idx entry whose channel byte isn't
 // registered in db.channels.
-func checkUnknownChanIDs(core *DBCore, packs []*inspIdx) int {
+func checkUnknownChanIDs(core *DBCore, packs []*idxPack) int {
 	count := map[int]int{}
 	first := map[int]int{}
 	for _, p := range packs {
