@@ -46,9 +46,11 @@ var markerShapeRe = regexp.MustCompile(`=\s*["']?#`)
 func RewriteAttrs(content string, fn func(marker string) (string, bool, error)) (string, error) {
 	// A marker is always a whole attribute value, so content without the
 	// `=["']?#` shape can hold none (this also covers empty content): skip the
-	// parse+walk entirely. The common case — built-in #rss feeds never emit
-	// markers — costs only this linear scan.
-	if !markerShapeRe.MatchString(content) {
+	// parse+walk entirely. The Contains pass keeps the common case — built-in
+	// #rss feeds never emit markers, and most content has no "#" at all — at
+	// memchr speed; the regexp scan runs only when a "#" exists, sparing the
+	// fragment parse for bare URL fragments and entities.
+	if !strings.Contains(content, "#") || !markerShapeRe.MatchString(content) {
 		return content, nil
 	}
 

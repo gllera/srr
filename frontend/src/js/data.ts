@@ -1,5 +1,5 @@
-import { cachedPromise, makeLRU } from "./cache"
-import { PACK_BASE } from "./fmt"
+import { PACK_BASE } from "./base"
+import { cachedPromise, makeLRU, type LRU } from "./cache"
 import { FETCHED_AT_BLOCK } from "./format.gen"
 import {
    findPackForBlocks,
@@ -13,9 +13,6 @@ import {
 
 export { IDX_PACK_SIZE }
 
-// All pack addressing resolves against PACK_BASE, imported from fmt.ts (which
-// bounds-checks resolved content URLs against the same value), so addressing
-// and resolution can never disagree.
 // no-cache forces a conditional revalidation on every load so a stale db.gz on
 // the client (mobile browsers cache aggressively) can't make chronIdx URLs like
 // `#14099` silently fall back to the last article via the `>= total_art` clamp
@@ -26,13 +23,13 @@ const dbFetch = fetch(new URL("db.gz", PACK_BASE), { cache: "no-cache" })
 export let db: IDB
 
 // One in-flight-or-resolved fetch per idx pack (finalized 0..nf-1, latest at
-// nf); resolved promises stay in their slot, so packs are fetched once and
-// stay resident. Only the latest pack is fetched eagerly — latestIdx keeps
-// it reachable synchronously for countAll. idxHeaders always holds every
-// pack's header (from idx/h<N>.gz on the summary path, or peeled off each
-// pack on the eager fallback), so counting, pack-skipping, and timestamp
+// nf; capacity covers every pack, so nothing ever evicts) — packs are fetched
+// once and stay resident. Only the latest pack is fetched eagerly — latestIdx
+// keeps it reachable synchronously for countAll. idxHeaders always holds
+// every pack's header (from idx/h<N>.gz on the summary path, or peeled off
+// each pack on the eager fallback), so counting, pack-skipping, and timestamp
 // search never force a pack fetch.
-let idxFetches: (Promise<IdxPack> | undefined)[] = []
+let idxFetches: LRU<Promise<IdxPack>>
 let idxHeaders: IdxHeader[] = []
 let latestIdx: IdxPack
 
@@ -71,7 +68,7 @@ export async function init() {
    }
 
    const nf = numFinalizedIdx()
-   idxFetches = new Array(nf + 1)
+   idxFetches = makeLRU(nf + 1)
 
    // The latest pack is always needed: it holds the newest articles (the
    // default landing view) and its header is the cumulative boundary after
@@ -130,21 +127,12 @@ export async function fetchPackBytes(path: string, isLatest: boolean): Promise<A
 
 // Starts (or joins) the fetch of one idx pack.
 function fetchIdxPack(p: number): Promise<IdxPack> {
-   const inflight = idxFetches[p]
-   if (inflight) return inflight
-   const isFinalized = p < numFinalizedIdx()
-   const path = `idx/${isFinalized ? p.toString() : `L${db.seq}`}.gz`
-   const size = isFinalized ? IDX_PACK_SIZE : db.total_art - p * IDX_PACK_SIZE
-   const promise = fetchPackBytes(path, !isFinalized).then((buf) => makeIdxPack(buf, p, size))
-   idxFetches[p] = promise
-   promise.catch(() => {
-      // Drop the slot so a retry refetches. No identity guard needed (unlike
-      // dataCache's eviction): nothing else can overwrite a filled slot, and
-      // this catch — the first handler attached — clears it before any
-      // caller's retry can install a new promise.
-      idxFetches[p] = undefined
+   return cachedPromise(idxFetches, p, () => {
+      const isFinalized = p < numFinalizedIdx()
+      const path = `idx/${isFinalized ? p.toString() : `L${db.seq}`}.gz`
+      const size = isFinalized ? IDX_PACK_SIZE : db.total_art - p * IDX_PACK_SIZE
+      return fetchPackBytes(path, !isFinalized).then((buf) => makeIdxPack(buf, p, size))
    })
-   return promise
 }
 
 function packIdx(chronIdx: number): number {

@@ -215,7 +215,7 @@ func (o *DB) SyncSearch(ctx context.Context, batch []*Item) error {
 		}
 	}
 
-	add := func(chanID int, published, fetchedAt int64, title string) error {
+	add := func(ad *ArticleData) error {
 		if len(rawLines) == idxPackSize {
 			if err := o.saveSearchShard(ctx, start/idxPackSize, rawLines); err != nil {
 				return err
@@ -223,11 +223,11 @@ func (o *DB) SyncSearch(ctx context.Context, batch []*Item) error {
 			rawLines = rawLines[:0]
 			start += idxPackSize
 		}
-		when := published
+		when := ad.Published
 		if when == 0 {
-			when = fetchedAt
+			when = ad.FetchedAt
 		}
-		line, err := jsonEncode(&SearchEntry{ChannelID: chanID, When: when, Title: title})
+		line, err := jsonEncode(&SearchEntry{ChannelID: ad.ChannelID, When: when, Title: ad.Title})
 		if err != nil {
 			return err
 		}
@@ -238,15 +238,16 @@ func (o *DB) SyncSearch(ctx context.Context, batch []*Item) error {
 	if from := start + len(rawLines); from+len(batch) == c.TotalArticles {
 		// The missing range is exactly this run's batch (same order — the
 		// caller hands PutArticles and SyncSearch the same sorted slice), so
-		// no pack is re-read seconds after it was written.
+		// no pack is re-read seconds after it was written. articleData is the
+		// one Item mapping PutArticles stored, so the entries can't drift
+		// from the packs.
 		for _, item := range batch {
-			if err := add(item.Channel.id, item.Published, c.FetchedAt, item.Title); err != nil {
+			ad := item.articleData(c.FetchedAt)
+			if err := add(&ad); err != nil {
 				return err
 			}
 		}
-	} else if err := o.walkArticles(ctx, from, c.TotalArticles, func(ad *ArticleData) error {
-		return add(ad.ChannelID, ad.Published, ad.FetchedAt, ad.Title)
-	}); err != nil {
+	} else if err := o.walkArticles(ctx, from, c.TotalArticles, add); err != nil {
 		return err
 	}
 
@@ -310,12 +311,14 @@ func (o *DB) readSearchLines(ctx context.Context, key string) ([][]byte, error) 
 // every folded title, then the JSONL lines. Titles are decoded here, once
 // per finalized shard, so the sync loop never carries a parallel array.
 func (o *DB) saveSearchShard(ctx context.Context, n int, rawLines [][]byte) error {
+	// rawLines keep their newline terminators, so the join round-trips the
+	// JSONL body exactly as parseSearchEntries expects it.
+	entries, err := parseSearchEntries(bytes.Join(rawLines, nil))
+	if err != nil {
+		return fmt.Errorf("shard %d: %w", n, err)
+	}
 	bloom := make([]byte, searchBloomBytes)
-	for i, line := range rawLines {
-		var e SearchEntry
-		if err := json.Unmarshal(line, &e); err != nil {
-			return fmt.Errorf("shard %d line %d: %w", n, i, err)
-		}
+	for _, e := range entries {
 		eachSearchGram(foldSearchText(e.Title), func(gram string) { bloomAdd(bloom, gram) })
 	}
 	p := newPack()

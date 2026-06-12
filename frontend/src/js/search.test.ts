@@ -231,4 +231,15 @@ describe("search", () => {
       const batches = await collect(search.search("boring"))
       expect(batches.flat().map((h) => h.chron)).toEqual([IDX_PACK_SIZE + 1])
    })
+
+   it("stops at limit, counting only hits accept keeps", async () => {
+      // "alpha" matches one title in each shard; limit 2 never reaches shard 0.
+      const capped = await collect(search.search("alpha", 2))
+      expect(capped.flat().map((h) => h.chron)).toEqual([2 * IDX_PACK_SIZE, IDX_PACK_SIZE])
+      // A rejected hit doesn't count against the limit: with the latest-tail
+      // match filtered out, limit 1 still reaches shard 1.
+      const accept = (_s: number, chron: number) => chron < 2 * IDX_PACK_SIZE
+      const filtered = await collect(search.search("alpha", 1, accept))
+      expect(filtered.flat().map((h) => h.chron)).toEqual([IDX_PACK_SIZE])
+   })
 })

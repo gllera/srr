@@ -31,6 +31,20 @@ type Item struct {
 	Published int64
 }
 
+// articleData is the one Item→ArticleData mapping, shared by the data-pack
+// writer (PutArticles) and SyncSearch's batch fast path so the derived
+// search entries can never drift from what the packs actually contain.
+func (it *Item) articleData(fetchedAt int64) ArticleData {
+	return ArticleData{
+		ChannelID: it.Channel.id,
+		FetchedAt: fetchedAt,
+		Published: it.Published,
+		Title:     it.Title,
+		Link:      it.Link,
+		Content:   it.Content,
+	}
+}
+
 // genKey resolves the latest-pack key of a series ("idx" or "data") for a
 // specific generation.
 func genKey(prefix string, gen int) string {
@@ -383,14 +397,8 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 		prevPackID = c.NextPackID
 		prevFetchedTS = c.FetchedAt / fetchedAtBlock
 
-		if err := data.writeArticle(&ArticleData{
-			ChannelID: item.Channel.id,
-			FetchedAt: c.FetchedAt,
-			Published: item.Published,
-			Title:     item.Title,
-			Link:      item.Link,
-			Content:   item.Content,
-		}); err != nil {
+		ad := item.articleData(c.FetchedAt)
+		if err := data.writeArticle(&ad); err != nil {
 			return err
 		}
 

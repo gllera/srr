@@ -7,7 +7,7 @@ const data = vi.hoisted(() => {
       db: { first_fetched: 0 } as IDB,
       groupChannelsByTag: vi.fn(() => ({ tagged: new Map(), sortedTags: [] as string[], untagged: [] as IChannel[] })),
       findChronForTimestamp: vi.fn(async () => 0),
-      channelTitle: (chanId: number) => mock.db.channels[chanId]?.title ?? "[DELETED]",
+      channelTitle: (chanId: number) => mock.db.channels?.[chanId]?.title ?? "[DELETED]",
    }
    return mock
 })
@@ -433,7 +433,7 @@ describe("dropdown: headlines peek", () => {
       chron,
       title: `T${chron}`,
       when: 0,
-      channel: "Chan",
+      s: 1,
       current: false,
       ...over,
    })
@@ -442,6 +442,7 @@ describe("dropdown: headlines peek", () => {
       document.body.innerHTML = SKELETON
       localStorage.clear()
       guard = vi.fn()
+      data.db.channels = { 1: chan({ id: 1, title: "Chan" }) } as unknown as IDB["channels"]
       nav.peek.mockClear()
       nav.goTo.mockClear()
       vi.resetModules()
@@ -547,7 +548,7 @@ describe("dropdown: title search", () => {
       dropdown.showSearchMenu(guard)
       type("alpha")
       await vi.waitFor(() => expect($rows().length).toBe(2))
-      expect(searchMod.search).toHaveBeenCalledWith("alpha", 100)
+      expect(searchMod.search).toHaveBeenCalledWith("alpha", 100, expect.any(Function))
       expect($rows().map((r) => r.dataset.value)).toEqual(["100010", "7"])
       expect($rows()[0].querySelector(".srr-peek-title")!.textContent).toBe("Alpha latest")
       expect($rows()[0].querySelector(".srr-peek-meta")!.textContent).toContain("Chan")
@@ -565,13 +566,17 @@ describe("dropdown: title search", () => {
       input.dispatchEvent(new Event("input", { bubbles: true }))
       expect(searchMod.search).not.toHaveBeenCalled()
       vi.advanceTimersByTime(200)
-      expect(searchMod.search).toHaveBeenCalledWith("alp", 100)
+      expect(searchMod.search).toHaveBeenCalledWith("alp", 100, expect.any(Function))
    })
 
-   it("intersects hits with the active channel filter", async () => {
+   it("hands the active channel filter to search as the accept predicate", async () => {
       nav.filter.active = true
       nav.filter.matches.mockImplementation((s: number) => s === 1)
-      searchMod.search.mockImplementation(() => gen([[hit(10, "Keep", 1), hit(9, "Drop", 2)]]))
+      // The mock applies accept like the real search() does, so this pins
+      // both that the predicate is passed and that it implements the filter.
+      searchMod.search.mockImplementation((_q: string, _limit: number, accept: (s: number, chron: number) => boolean) =>
+         gen([[hit(10, "Keep", 1), hit(9, "Drop", 2)].filter((h) => accept(h.s, h.chron))]),
+      )
       dropdown.showSearchMenu(guard)
       type("x")
       await vi.waitFor(() => expect($rows().length).toBe(1))
