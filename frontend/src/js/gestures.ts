@@ -15,30 +15,29 @@ export function setupGestures(deps: GestureDeps): void {
    let touchStartY = 0
    let twoFingerStartY = 0
    let twoFingerDy = 0
-   let twoFinger = false
-   // singleTouch marks an in-progress, tracked one-finger gesture. A swipe is
-   // only evaluated when it began as one, so a 3+-finger tap/lift can't fire a
-   // spurious prev/next off a stale touchStartX.
-   let singleTouch = false
+   // The tracked gesture, if any. A swipe is only evaluated when it began as
+   // a single-finger gesture ("single"), so a 3+-finger tap/lift ("none")
+   // can't fire a spurious prev/next off a stale touchStartX.
+   let mode: "none" | "single" | "two" = "none"
+
+   const trackSingle = (t: Touch) => {
+      mode = "single"
+      touchStartX = t.clientX
+      touchStartY = t.clientY
+   }
 
    document.addEventListener(
       "touchstart",
       (e) => {
          if (e.touches.length === 2) {
-            twoFinger = true
-            singleTouch = false
+            mode = "two"
             twoFingerStartY = (e.touches[0].clientY + e.touches[1].clientY) / 2
             twoFingerDy = 0
          } else if (e.touches.length === 1) {
-            twoFinger = false
-            singleTouch = true
-            touchStartX = e.touches[0].clientX
-            touchStartY = e.touches[0].clientY
+            trackSingle(e.touches[0])
          } else {
-            // 3+ fingers: not a gesture we handle. Clear state so the eventual
-            // lift doesn't reuse a stale single-finger start point.
-            twoFinger = false
-            singleTouch = false
+            // 3+ fingers: not a gesture we handle.
+            mode = "none"
          }
       },
       { passive: true },
@@ -46,7 +45,7 @@ export function setupGestures(deps: GestureDeps): void {
    document.addEventListener(
       "touchmove",
       (e) => {
-         if (twoFinger && e.touches.length === 2) {
+         if (mode === "two" && e.touches.length === 2) {
             e.preventDefault()
             twoFingerDy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - twoFingerStartY
          }
@@ -56,25 +55,22 @@ export function setupGestures(deps: GestureDeps): void {
    document.addEventListener(
       "touchend",
       (e) => {
-         if (twoFinger) {
+         if (mode === "two") {
             if (e.touches.length === 0) {
-               twoFinger = false
+               mode = "none"
                if (Math.abs(twoFingerDy) >= 50 && nav.getFilterEntries().length > 1)
                   deps.guard(() => nav.cycleFilter(twoFingerDy < 0 ? -1 : 1))
             } else if (e.touches.length === 1) {
                // Fingers lifted one at a time: the two-finger gesture is over.
                // Re-seed the remaining finger as a fresh single-finger swipe
-               // instead of leaving twoFinger stuck true (which would swallow
-               // it) or later firing cycleFilter off a stale twoFingerDy.
-               twoFinger = false
-               singleTouch = true
-               touchStartX = e.touches[0].clientX
-               touchStartY = e.touches[0].clientY
+               // instead of staying in "two" (which would swallow it) or later
+               // firing cycleFilter off a stale twoFingerDy.
+               trackSingle(e.touches[0])
             }
             return
          }
-         if (!singleTouch || e.touches.length !== 0) return
-         singleTouch = false
+         if (mode !== "single" || e.touches.length !== 0) return
+         mode = "none"
          const dx = e.changedTouches[0].clientX - touchStartX
          const dy = e.changedTouches[0].clientY - touchStartY
          if (Math.abs(dx) < 50 || Math.abs(dy) > Math.abs(dx)) return
@@ -86,8 +82,7 @@ export function setupGestures(deps: GestureDeps): void {
    document.addEventListener(
       "touchcancel",
       () => {
-         twoFinger = false
-         singleTouch = false
+         mode = "none"
       },
       { passive: true },
    )
