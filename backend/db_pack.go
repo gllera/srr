@@ -54,12 +54,27 @@ func finalizedIdxKey(n int) string {
 	return fmt.Sprintf("idx/%d.gz", n)
 }
 
+// idxKeyAndSize resolves the store key and entry count of idx pack p:
+// finalized packs use the numeric name and are always full; the latest pack
+// uses the L<seq> generation name and holds the tail.
+func idxKeyAndSize(core *DBCore, p int) (string, int) {
+	if p < numFinalizedIdx(core.TotalArticles) {
+		return finalizedIdxKey(p), idxPackSize
+	}
+	return latestKey(core, "idx"), core.TotalArticles - p*idxPackSize
+}
+
+// finalizedDataKey resolves the key of finalized data pack n.
+func finalizedDataKey(n int) string {
+	return fmt.Sprintf("data/%d.gz", n)
+}
+
 // dataKeyFor resolves a data pack key from a packID: finalized packs
 // (id < NextPackID) use the numeric filename; otherwise the current
 // latest-generation name.
 func dataKeyFor(core *DBCore, packID int) string {
 	if packID < core.NextPackID {
-		return fmt.Sprintf("data/%d.gz", packID)
+		return finalizedDataKey(packID)
 	}
 	return latestKey(core, "data")
 }
@@ -242,6 +257,26 @@ func (o *DB) readPackHeader(ctx context.Context, key string, size int) ([]byte, 
 	return hdr, nil
 }
 
+// saveSummary publishes a count-named summary pack: the gzip concatenation
+// of the leading `size` bytes (the headers) of finalized packs 0..n-1, read
+// via streaming header reads. The crash-safety contract is the caller's: it
+// advances its coverage counter only after this save succeeds, so no reader
+// can learn the summary name before its content is durable. Shared by
+// SyncIdxSummary (idx/h<N>) and SyncSearch (search/s<N>).
+func (o *DB) saveSummary(ctx context.Context, n, size int, packKey func(int) string, sumKey string) error {
+	sum := newPack()
+	for k := range n {
+		hdr, err := o.readPackHeader(ctx, packKey(k), size)
+		if err != nil {
+			return err
+		}
+		if _, err := sum.Write(hdr); err != nil {
+			return err
+		}
+	}
+	return o.savePack(ctx, sumKey, sum)
+}
+
 // SyncIdxSummary publishes idx/h<N>.gz — the gzip concatenation of the
 // 1036-byte headers of the N finalized idx packs — whenever db.gz's HdrPacks
 // lags the store: a pack finalized this run, a pre-summary store's first run
@@ -261,17 +296,7 @@ func (o *DB) SyncIdxSummary(ctx context.Context) error {
 	if c.HdrPacks == n || n == 0 {
 		return nil
 	}
-	sum := newPack()
-	for k := range n {
-		hdr, err := o.readPackHeader(ctx, finalizedIdxKey(k), idxHeaderSize)
-		if err != nil {
-			return err
-		}
-		if _, err := sum.Write(hdr); err != nil {
-			return err
-		}
-	}
-	if err := o.savePack(ctx, summaryKey(n), sum); err != nil {
+	if err := o.saveSummary(ctx, n, idxHeaderSize, finalizedIdxKey, summaryKey(n)); err != nil {
 		return err
 	}
 	c.HdrPacks = n
@@ -330,7 +355,7 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 		}
 
 		if data.Len() > 0 && data.Len() >= globals.PackSize<<10 {
-			if err := o.savePack(ctx, fmt.Sprintf("data/%d.gz", c.NextPackID), data); err != nil {
+			if err := o.savePack(ctx, finalizedDataKey(c.NextPackID), data); err != nil {
 				return err
 			}
 		}
