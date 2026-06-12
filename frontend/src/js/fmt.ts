@@ -9,11 +9,15 @@ export const URL_DENY = /^\s*(?:javascript|data|vbscript|file)\s*:/i
 const DANGEROUS_SELECTOR = "script,style,iframe,embed,object,form,link,meta,base,svg,math"
 
 const HTTP_RE = /^https?:\/\//i
-// Reserved store prefix for self-hosted media (mirrors backend assetPrefix).
-// Such content URLs are relative to the pack base, not the reader page, so we
-// resolve them against PACK_BASE (the same value as data.ts's DB_URL) instead
-// of routing them through the image proxy. Computed once at module load.
-const ASSET_PREFIX = "assets/"
+// A reference carrying a URL scheme (http:, mailto:, the URL_DENY set, …) is
+// absolute; everything else is a relative reference. ABS_SCHEME detects the
+// scheme so isRelative can route relative refs to the pack base below.
+const ABS_SCHEME = /^[a-z][a-z0-9+.-]*:/i
+// Content URLs are relative to the pack base (where the article was stored), not
+// the reader page, so relative refs — the self-hosted "assets/" keys and any
+// other relative URL the feed carried — resolve against PACK_BASE (the same
+// value as data.ts's DB_URL) instead of the SPA origin or the image proxy.
+// Computed once at module load.
 const PACK_BASE = new URL(SRR_CDN_URL, window.location.href)
 // Prefix is the URL-encoded-source-appender shape (wsrv.nl, imgproxy, imagor).
 // Configured per-user via localStorage `srr-img-proxy`; empty/absent = passthrough.
@@ -37,20 +41,30 @@ export function imgProxy(url: string, prefix: string): string {
    return prefix ? prefix + encodeURIComponent(url) : url
 }
 
-// resolveAsset resolves a self-hosted asset key against the pack base, but only
-// if the result stays inside that base. Without the bounds check, a crafted key
-// like "assets/../../x" would traverse out of the assets subtree onto an
-// arbitrary path on the CDN origin (a credentialed-GET info-leak vector).
-// Returns null when the key escapes, so the caller drops the attribute.
-function resolveAsset(v: string): string | null {
+// isRelative reports whether v is a relative reference — one with no URL scheme
+// (e.g. "assets/ab/cd.jpg", "/img/x.jpg", "#frag"). A protocol-relative "//host"
+// ref counts as relative too: it has no scheme, and resolvePackRelative's bounds
+// check then drops it because it resolves to a foreign origin.
+function isRelative(v: string): boolean {
+   return !ABS_SCHEME.test(v)
+}
+
+// resolvePackRelative resolves a relative reference against the pack base, but
+// only if the result stays inside that base. Without the bounds check, a crafted
+// ref like "../../x" (or "assets/../../x") would traverse off the pack subtree
+// onto an arbitrary path on the CDN origin — and "//host/x" onto a foreign one —
+// a credentialed-GET info-leak vector. Returns null when the ref escapes, so the
+// caller drops the attribute.
+function resolvePackRelative(v: string): string | null {
    const resolved = new URL(v, PACK_BASE).href
    return resolved.startsWith(PACK_BASE.href) ? resolved : null
 }
 
-// setAsset resolves a self-hosted asset key and sets it on node[attr], dropping
-// the attribute when the key escapes the pack base (see resolveAsset).
-function setAsset(node: Element, attr: string, v: string): void {
-   const resolved = resolveAsset(v)
+// setPackRelative resolves a relative reference and sets it on node[attr],
+// dropping the attribute when the ref escapes the pack base (see
+// resolvePackRelative).
+function setPackRelative(node: Element, attr: string, v: string): void {
+   const resolved = resolvePackRelative(v)
    if (resolved) node.setAttribute(attr, resolved)
    else node.removeAttribute(attr)
 }
@@ -73,24 +87,33 @@ export function sanitizeHtml(html: string): string {
             node.removeAttribute(attr.name)
       }
       const tag = node.tagName
-      if (tag === "A") node.setAttribute("rel", "noopener noreferrer")
-      else if (tag === "IMG") {
+      if (tag === "A") {
+         node.setAttribute("rel", "noopener noreferrer")
+         // Relative hrefs (self-hosted "assets/…/doc.pdf", or any relative link
+         // the feed carried) resolve against the pack base, bounds-checked so they
+         // can't traverse off it. Absolute hrefs (http(s), mailto:, …) stay as-is:
+         // user-initiated navigation, not an auto-loaded resource, so no
+         // proxy/IP-leak concern. URL_DENY-matching href was already stripped by
+         // the attribute loop above.
+         const href = node.getAttribute("href")
+         if (href && isRelative(href)) setPackRelative(node, "href", href)
+      } else if (tag === "IMG") {
          node.removeAttribute("srcset")
          const src = node.getAttribute("src")
-         // Self-hosted assets resolve against the pack base (bounds-checked) and
-         // bypass the proxy; external http(s) URLs keep the proxy path. URL_DENY-
+         // Relative src resolves against the pack base (bounds-checked) and
+         // bypasses the proxy; external http(s) URLs keep the proxy path. URL_DENY-
          // matching src was already stripped by the attribute loop above.
-         if (src && src.startsWith(ASSET_PREFIX)) setAsset(node, "src", src)
+         if (src && isRelative(src)) setPackRelative(node, "src", src)
          else if (src && HTTP_RE.test(src)) node.setAttribute("src", imgProxy(src, proxyPrefix))
       } else if (tag === "VIDEO") {
-         // src: self-hosted resolves against the pack base; external passes
-         // through (image proxies don't handle video).
+         // src: relative resolves against the pack base; external passes through
+         // (image proxies don't handle video).
          const src = node.getAttribute("src")
-         if (src && src.startsWith(ASSET_PREFIX)) setAsset(node, "src", src)
+         if (src && isRelative(src)) setPackRelative(node, "src", src)
          // poster IS an image, so route external posters through the proxy like
          // img.src (the asymmetry of leaving them direct leaks the user's IP).
          const poster = node.getAttribute("poster")
-         if (poster && poster.startsWith(ASSET_PREFIX)) setAsset(node, "poster", poster)
+         if (poster && isRelative(poster)) setPackRelative(node, "poster", poster)
          else if (poster && HTTP_RE.test(poster)) node.setAttribute("poster", imgProxy(poster, proxyPrefix))
       }
    }
