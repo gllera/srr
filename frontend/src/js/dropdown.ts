@@ -374,14 +374,15 @@ let peekFill: object | null = null
 
 // headlineRow is the peek-style result row shared by the headlines peek and
 // the search results: title over "channel · age" meta, click = goTo(chron).
-// The "(untitled)" placeholder lives here, at the layer that renders it, so
-// every consumer gets the same fallback.
-function headlineRow(chron: number, titleText: string, channelTitle: string, when: number): HTMLAnchorElement {
+// Both display fallbacks — the "(untitled)" placeholder and the "[DELETED]"
+// channel tombstone — live here, at the layer that renders them, so every
+// consumer hands over raw wire fields and gets the same treatment.
+function headlineRow(chron: number, titleText: string, chanId: number, when: number): HTMLAnchorElement {
    const a = createLink(String(chron), "")
    const title = divEl("srr-peek-title")
    title.textContent = titleText || "(untitled)"
    const meta = divEl("srr-peek-meta")
-   meta.textContent = `${channelTitle} · ${timeAgo(when)}`
+   meta.textContent = `${data.channelTitle(chanId)} · ${timeAgo(when)}`
    a.append(title, meta)
    return a
 }
@@ -394,7 +395,7 @@ async function fillPeek(dd: HTMLElement): Promise<void> {
       if (my !== peekFill) return
       const frag = document.createDocumentFragment()
       for (const it of items.reverse()) {
-         const a = headlineRow(it.chron, it.title, it.channel, it.when)
+         const a = headlineRow(it.chron, it.title, it.s, it.when)
          if (it.current) {
             a.className = "srr-active"
             a.setAttribute("aria-current", "true")
@@ -452,17 +453,13 @@ async function fillSearch(q: string, results: HTMLElement): Promise<void> {
    results.appendChild(status)
    let count = 0
    try {
-      // With a filter active some yielded hits are discarded here, so only
-      // the unfiltered case can tell search() to stop collecting at the cap.
-      const limit = nav.filter.active ? Infinity : SEARCH_MAX
-      outer: for await (const batch of search.search(q, limit)) {
+      // The filter predicate rides into search() so the cap counts only
+      // surviving hits — filtered and unfiltered queries get the same bound.
+      const accept = (s: number, chron: number) => !nav.filter.active || nav.filter.matches(s, chron)
+      for await (const batch of search.search(q, SEARCH_MAX, accept)) {
          if (my !== searchFill) return
-         for (const hit of batch) {
-            if (nav.filter.active && !nav.filter.matches(hit.s, hit.chron)) continue
-            const row = headlineRow(hit.chron, hit.t, data.channelTitle(hit.s), hit.w)
-            results.insertBefore(row, status)
-            if (++count >= SEARCH_MAX) break outer
-         }
+         for (const hit of batch) results.insertBefore(headlineRow(hit.chron, hit.t, hit.s, hit.w), status)
+         count += batch.length
       }
    } catch {
       if (my === searchFill) status.textContent = "Search failed — try again"

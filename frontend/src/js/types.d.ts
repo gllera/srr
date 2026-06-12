@@ -31,11 +31,12 @@ interface IShowFeed {
 }
 
 // One row of the headlines peek (nav.peek): a filter-matching article near
-// the current position, ready to render without further lookups.
+// the current position. Raw wire fields — the display fallbacks are the
+// renderer's (dropdown headlineRow).
 interface IPeekItem {
    chron: number
    title: string
    when: number // published, falling back to fetched_at when unparsed
-   channel: string
+   s: number // chan_id
    current: boolean
 }

@@ -40,10 +40,11 @@ export function available(): boolean {
 // sigma toLowerCase produces; everything that isn't a letter or number
 // separates words, single-space joined.
 const SEP = /[^\p{L}\p{N}]+/u
+const MARKS = /\p{Mn}+/gu
 export function fold(s: string): string {
    return s
       .normalize("NFD")
-      .replace(/\p{Mn}+/gu, "")
+      .replace(MARKS, "")
       .toLowerCase()
       .replaceAll("ς", "σ")
       .split(SEP)
@@ -130,17 +131,22 @@ function loadShard(n: number): Promise<Shard> {
    )
 }
 
-function matchShard(shard: Shard, baseChron: number, words: string[], max: number): ISearchHit[] {
+type Accept = (s: number, chron: number) => boolean
+
+function matchShard(shard: Shard, baseChron: number, words: string[], max: number, accept: Accept): ISearchHit[] {
    const hits: ISearchHit[] = []
    // Newest-first within the shard, like the shard order of the outer scan —
-   // so the first `max` collected are exactly the `max` the consumer keeps
-   // (a frequent word against a full shard would otherwise build tens of
-   // thousands of hit objects per keystroke just to be discarded).
+   // and only accepted hits count toward `max`, so the first `max` collected
+   // are exactly the `max` the consumer keeps (a frequent word against a full
+   // shard would otherwise build tens of thousands of hit objects per
+   // keystroke just to be discarded).
    for (let i = shard.folded.length - 1; i >= 0 && hits.length < max; i--) {
       const folded = shard.folded[i]
       if (!words.every((w) => folded.includes(w))) continue
       const e = shard.entries[i]
-      hits.push({ chron: baseChron + i, s: e.s, w: e.w, t: e.t ?? "" })
+      const chron = baseChron + i
+      if (!accept(e.s, chron)) continue
+      hits.push({ chron, s: e.s, w: e.w, t: e.t ?? "" })
    }
    return hits
 }
@@ -155,38 +161,47 @@ export function shortQuery(q: string): boolean {
 }
 
 // search yields batches of hits, newest shard first (latest tail, then
-// finalized nf-1..0), one batch per shard that matched, stopping after
-// `limit` total hits. Matching is AND of folded substring tests per query
-// word; candidate shards must hold every gram of every bloom-sized word. A
-// caller that discards some yielded hits (an active channel filter) must
-// pass Infinity — search can't know which hits survive. A missing/broken
-// latest tail degrades to finalized-only (warn); a missing summary rejects —
-// the caller decides how to surface that.
-export async function* search(q: string, limit = Infinity): AsyncGenerator<ISearchHit[], void, void> {
+// finalized nf-1..0), one batch per shard that matched, stopping once
+// `limit` hits passed `accept` — the caller's filter, applied here so the
+// cap counts only hits the caller keeps. Matching is AND of folded substring
+// tests per query word; candidate shards must hold every gram of every
+// bloom-sized word. A missing/broken latest tail degrades to finalized-only
+// (warn); a missing summary rejects — the caller decides how to surface
+// that.
+export async function* search(
+   q: string,
+   limit = Infinity,
+   accept: Accept = () => true,
+): AsyncGenerator<ISearchHit[], void, void> {
    const words = fold(q)
       .split(" ")
       .filter((w) => w.length > 0)
    if (words.length === 0) return
 
    const nf = data.numFinalizedIdx()
+   // wordGrams already yields nothing for words shorter than SEARCH_GRAM.
+   const gramBits = words.flatMap(wordGrams).map(bloomBits)
+   // Kick the summary fetch off before the latest tail is awaited: the two
+   // are independent, so the first query of a session overlaps their round
+   // trips (lazySlot caches both afterwards; its catch keeps an early return
+   // from leaving the rejection unhandled).
+   const summary = nf > 0 && gramBits.length > 0 ? loadSummary() : null
    let remaining = limit
+
    try {
       const latest = await loadLatest()
-      const hits = matchShard(latest, nf * IDX_PACK_SIZE, words, remaining)
+      const hits = matchShard(latest, nf * IDX_PACK_SIZE, words, remaining, accept)
       remaining -= hits.length
       if (hits.length > 0) yield hits
    } catch (e) {
       console.warn("search: latest tail unavailable, scanning finalized shards only", e)
    }
 
-   // wordGrams already yields nothing for words shorter than SEARCH_GRAM.
-   const gramBits = words.flatMap(wordGrams).map(bloomBits)
-   if (nf === 0 || gramBits.length === 0 || remaining <= 0) return
-
-   const blooms = await loadSummary()
+   if (!summary || remaining <= 0) return
+   const blooms = await summary
    for (let p = nf - 1; p >= 0 && remaining > 0; p--) {
       if (!gramBits.every((bits) => bloomHas(blooms, p * SEARCH_BLOOM_BYTES, bits))) continue
-      const hits = matchShard(await loadShard(p), p * IDX_PACK_SIZE, words, remaining)
+      const hits = matchShard(await loadShard(p), p * IDX_PACK_SIZE, words, remaining, accept)
       remaining -= hits.length
       if (hits.length > 0) yield hits
    }

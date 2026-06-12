@@ -82,7 +82,7 @@ function render(o: IShowFeed) {
 
    currentChannel = {
       id: o.channel?.id ?? 0,
-      title: o.channel?.title || "[DELETED]",
+      title: data.channelTitle(o.article.s),
       tag: o.channel?.tag || "",
    }
    refreshChannelLabel()

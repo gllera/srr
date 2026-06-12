@@ -166,27 +166,32 @@ export async function peek(span = 10): Promise<IPeekItem[]> {
    if (pos === -1) return []
    // The two directional walks are independent — run them concurrently so
    // cold idx-pack fetches on both sides overlap.
-   const walk = async (dir: -1 | 1) => {
+   const walk = async (step: (i: number) => Promise<number>) => {
       const out: number[] = []
-      for (let i = pos, n = 0; n < span; n++) {
-         i = await (dir === -1 ? data.findLeft(i - 1, filter.channels) : data.findRight(i + 1, filter.channels))
+      let i = pos
+      for (let n = 0; n < span; n++) {
+         i = await step(i)
          if (i === -1) break
          out.push(i)
       }
       return out
    }
-   const [lefts, rights] = await Promise.all([walk(-1), walk(1)])
+   const [lefts, rights] = await Promise.all([
+      walk((i) => data.findLeft(i - 1, filter.channels)),
+      walk((i) => data.findRight(i + 1, filter.channels)),
+   ])
    const idxs = [...lefts.reverse(), pos, ...rights]
    return Promise.all(
       idxs.map(async (chron) => {
          const art = await data.loadArticle(chron)
          return {
             chron,
-            // Raw wire title — the "(untitled)" placeholder is the renderer's
-            // (dropdown headlineRow), not navigation state.
+            // Raw wire fields — the display fallbacks ("(untitled)", the
+            // "[DELETED]" tombstone) are the renderer's (dropdown
+            // headlineRow), not navigation state.
             title: art.t ?? "",
             when: art.p || art.a,
-            channel: data.channelTitle(art.s),
+            s: art.s,
             current: chron === pos,
          }
       }),

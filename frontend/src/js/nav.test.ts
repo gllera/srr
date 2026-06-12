@@ -9,7 +9,6 @@ const data = vi.hoisted(() => ({
    loadArticle: vi.fn<(chronIdx: number) => Promise<IArticle>>(),
    groupChannelsByTag: vi.fn(() => ({ tagged: new Map(), sortedTags: [] as string[], untagged: [] as IChannel[] })),
    findChronForTimestamp: vi.fn(async () => 0),
-   channelTitle: (chanId: number) => data.db.channels[chanId]?.title ?? "[DELETED]",
    getChannelId: vi.fn<(chronIdx: number) => number>(),
    countLeft: vi.fn((chronIdx: number, channels: Map<number, number>) => {
       let count = 0
@@ -1035,7 +1034,7 @@ describe("peek", () => {
       expect(items.map((i) => i.current)).toEqual([false, true, false])
       expect(items[1].title).toBe("T2")
       expect(items[1].when).toBe(102)
-      expect(items[1].channel).toBe("Test")
+      expect(items[1].s).toBe(1)
    })
 
    it("walks only filter matches and falls back to fetched_at when published is unset", async () => {
@@ -1058,14 +1057,15 @@ describe("peek", () => {
       expect((await nav.peek(10)).map((i) => i.chron)).toEqual([0, 1])
    })
 
-   it("passes untitled articles through raw and labels deleted channels", async () => {
+   it("passes raw wire fields through — placeholders are the renderer's", async () => {
       setupIndex([{ chanId: 1 }, { chanId: 1 }])
       await nav.fromHash("1")
       delete data.db.channels[1]
       const items = await nav.peek()
-      // The "(untitled)" placeholder is the renderer's (dropdown headlineRow).
+      // "(untitled)" and the "[DELETED]" tombstone are applied by dropdown's
+      // headlineRow; peek carries the raw title and chan_id.
       expect(items.every((i) => i.title === "")).toBe(true)
-      expect(items.every((i) => i.channel === "[DELETED]")).toBe(true)
+      expect(items.every((i) => i.s === 1)).toBe(true)
    })
 })
 
