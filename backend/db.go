@@ -62,11 +62,18 @@ type DBCore struct {
 	// FirstFetchedAt is NOT omitempty: the reader divides by it
 	// (frontend data.ts findChronForTimestamp) so the key must always be
 	// present in db.gz — an absent key would decode to undefined → NaN.
-	FirstFetchedAt  int64            `json:"first_fetched"`
-	FetchedAtCursor int              `json:"fetched_at_cur,omitempty"`
-	Pipe            []string         `json:"pipe,omitempty"`
-	Ingest          string           `json:"ingest,omitempty"`
-	Channels        map[int]*Channel `json:"channels"`
+	FirstFetchedAt  int64    `json:"first_fetched"`
+	FetchedAtCursor int      `json:"fetched_at_cur,omitempty"`
+	Pipe            []string `json:"pipe,omitempty"`
+	Ingest          string   `json:"ingest,omitempty"`
+	// Gen is the store generation: bumped (srr gen --bump) after an in-place
+	// store rebuild reuses finalized pack ids with new bytes, so the frontend
+	// service worker can self-invalidate its cache-first pack cache. omitempty
+	// is safe: the reader treats an absent key as 0. Known hazard: an old
+	// binary (without this field) silently drops it on its next Commit (plain
+	// json.Unmarshal) — accepted for a single-operator deployment.
+	Gen      int              `json:"gen,omitempty"`
+	Channels map[int]*Channel `json:"channels"`
 }
 
 // withDB opens the DB, runs fn, and ensures Close. Use for commands that
