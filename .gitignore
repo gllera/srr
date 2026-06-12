@@ -1,5 +1,6 @@
 /packs/
 /.vscode/
+/.claude/
 
 # Frontend
 /frontend/node_modules/
