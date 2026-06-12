@@ -10,7 +10,7 @@ import (
 // TestCappedBufferLimit pins the stdout cap that defends against a runaway
 // subprocess OOMing the process (shared by the module and ingest exec paths).
 func TestCappedBufferLimit(t *testing.T) {
-	c := &CappedBuffer{Limit: 8}
+	c := &cappedBuffer{limit: 8}
 	if _, err := c.Write([]byte("1234")); err != nil {
 		t.Fatalf("under limit: %v", err)
 	}
