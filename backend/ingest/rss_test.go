@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"srrb/mod"
@@ -270,13 +271,23 @@ func TestParseCallbackError(t *testing.T) {
 	}
 }
 
-func TestParseGUIDFallbackToEmptyHash(t *testing.T) {
+func TestParseGUIDFallbackDistinctForGUIDlessItems(t *testing.T) {
+	// Items with no guid/id/link must NOT all collapse to hash("") — that would
+	// dedup distinct articles away. Two such items with different title/content
+	// get distinct GUIDs derived from their own text.
 	items := collectFeed(t, `<rss version="2.0"><channel>
-    <item><title>No ID</title></item>
+    <item><title>First</title><description>one</description></item>
+    <item><title>Second</title><description>two</description></item>
   </channel></rss>`)
 
-	if items[0].GUID != hash("") {
-		t.Errorf("guid = %d, want hash of empty string (%d)", items[0].GUID, hash(""))
+	if len(items) != 2 {
+		t.Fatalf("got %d items, want 2", len(items))
+	}
+	if items[0].GUID == hash("") || items[1].GUID == hash("") {
+		t.Errorf("guid-less items collapsed to hash(\"\"): %d, %d", items[0].GUID, items[1].GUID)
+	}
+	if items[0].GUID == items[1].GUID {
+		t.Errorf("distinct guid-less items share a GUID (%d); they would dedup each other away", items[0].GUID)
 	}
 }
 
@@ -545,5 +556,104 @@ func TestParseRSSItemGUIDFallbackChain(t *testing.T) {
 
 	if items[0].GUID != hash("http://example.com/linkonly") {
 		t.Errorf("GUID should fall back to link hash when guid is empty")
+	}
+}
+
+func TestParseNamedHTMLEntitiesDoNotAbort(t *testing.T) {
+	// Bare named HTML entities (&nbsp;, &mdash;) are not predefined XML entities;
+	// they must resolve/tolerate instead of aborting the whole feed.
+	items := collectFeed(t, `<rss version="2.0"><channel>
+    <item><title>Price&nbsp;5&mdash;10</title><description>a&nbsp;b</description></item>
+    <item><title>Second item survives</title></item>
+  </channel></rss>`)
+
+	if len(items) != 2 {
+		t.Fatalf("got %d items, want 2 (named entity must not abort the feed)", len(items))
+	}
+	if !strings.Contains(items[0].Title, "5") || !strings.Contains(items[0].Title, "10") {
+		t.Errorf("title lost content: %q", items[0].Title)
+	}
+}
+
+func TestParseNonUTF8Charset(t *testing.T) {
+	// A windows-1252 byte (0xe9 = é) in a feed declaring ISO-8859-1 must transcode
+	// to UTF-8, not error on the first token.
+	raw := "<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><rss version=\"2.0\"><channel>" +
+		"<item><title>caf\xe9</title></item></channel></rss>"
+	items := collectFeed(t, raw)
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1 (non-UTF-8 feed must parse)", len(items))
+	}
+	if items[0].Title != "café" {
+		t.Errorf("title = %q, want %q (transcoded)", items[0].Title, "café")
+	}
+}
+
+func TestParseLinkTextBeatsNonAlternateHref(t *testing.T) {
+	// A non-alternate href (rel=self) appearing BEFORE the plain text <link>
+	// must not shadow the real article URL.
+	items := collectFeed(t, `<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>Entry</title>
+    <link href="http://example.com/self" rel="self"/>
+    <link>http://example.com/article</link>
+  </entry>
+</feed>`)
+
+	if items[0].Link != "http://example.com/article" {
+		t.Errorf("link = %q, want the text link to win over a leading rel=self href", items[0].Link)
+	}
+}
+
+func TestParsePublishedBeatsUpdatedAcrossItems(t *testing.T) {
+	// First item carries only <updated>; the layout hint must not lock onto the
+	// "updated" FIELD and shadow a later item's higher-priority <published>.
+	items := collectFeed(t, `<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry><title>A</title><updated>2020-01-01T00:00:00Z</updated></entry>
+  <entry><title>B</title>
+    <published>2024-06-15T00:00:00Z</published>
+    <updated>2021-01-01T00:00:00Z</updated>
+  </entry>
+</feed>`)
+
+	if len(items) != 2 {
+		t.Fatalf("got %d items, want 2", len(items))
+	}
+	if items[1].Published.Year() != 2024 {
+		t.Errorf("second item date = %v, want 2024 from <published> (not <updated>=2021)", items[1].Published)
+	}
+}
+
+func TestParseNamedTimezoneNotTreatedAsUTC(t *testing.T) {
+	// "15:04:05 EST" is 20:04:05 UTC; without the offset map it would read as
+	// 15:04:05 UTC (5h wrong).
+	items := collectFeed(t, `<rss version="2.0"><channel>
+    <item><title>T</title><pubDate>Mon, 02 Jan 2006 15:04:05 EST</pubDate></item>
+  </channel></rss>`)
+
+	got := items[0].Published.UTC()
+	if got.Hour() != 20 || got.Minute() != 4 {
+		t.Errorf("EST date = %v, want 20:04 UTC", got)
+	}
+}
+
+func TestParseAtomXHTMLContent(t *testing.T) {
+	// Atom type="xhtml" content is child markup, not CharData; it must be
+	// captured rather than dropped to "".
+	items := collectFeed(t, `<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>X</title>
+    <content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>hello <b>world</b></p></div></content>
+  </entry>
+</feed>`)
+
+	if !strings.Contains(items[0].Content, "hello") || !strings.Contains(items[0].Content, "world") {
+		t.Errorf("xhtml content lost: %q", items[0].Content)
+	}
+	if !strings.Contains(items[0].Content, "<b>") {
+		t.Errorf("xhtml markup not preserved: %q", items[0].Content)
 	}
 }
