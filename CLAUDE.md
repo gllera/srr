@@ -66,7 +66,7 @@ Shared format between backend (writer) and frontend (reader).
 
 `{ id, title, feeds:IFeed[], total_art, add_idx, pipe?:string[], tag? }`
 
-Each `IFeed` is `{ url, ferr?, etag?, last_modified?, wm?, bg? }`. `wm` (Watermark) is the max published unix-second ever seen; `bg` (BoundaryGUIDs) is the FNV-32a hash array used for dedup. Multiple feeds merge under one `chan_id` so a channel is not bound to a single feed URL — useful when the 256-id ceiling matters or when several feeds form one logical channel. Per-feed state (incremental fetch headers, last error, dedup watermark) lives on the feed, not the channel.
+Each `IFeed` is `{ url, ferr?, etag?, last_modified?, wm?, bg? }`. `wm` (Watermark) is the max published unix-second ever seen; `bg` (BoundaryGUIDs) is the FNV-32a hash array used for dedup, capped at 1024 entries (`maxBoundaryGUIDs` in `backend/feed.go`). Multiple feeds merge under one `chan_id` so a channel is not bound to a single feed URL — useful when the 256-id ceiling matters or when several feeds form one logical channel. Per-feed state (incremental fetch headers, last error, dedup watermark) lives on the feed, not the channel.
 
 ### Pipe Hierarchy
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -401,6 +402,38 @@ func TestStripControlKeepWS(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("stripControlKeepWS(%q) = %q, want %q", tt.input, got, tt.want)
 		}
+	}
+}
+
+// A response with more boundary-class items than maxBoundaryGUIDs (here: all
+// dateless) must cap the persisted bg array AND skip the over-cap items
+// entirely. Ingesting an item whose GUID isn't remembered would make it look
+// new again on every subsequent fetch — fetch2 returning 0 is the guard
+// against that duplicate-forever failure mode.
+func TestFetchBoundaryGUIDsCapped(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(`<rss version="2.0"><channel>`)
+	for i := range maxBoundaryGUIDs + 100 {
+		fmt.Fprintf(&b, `<item><title>T%d</title><guid>g%d</guid></item>`, i, i)
+	}
+	b.WriteString(`</channel></rss>`)
+	feed := b.String()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(feed))
+	}))
+	defer srv.Close()
+
+	f := &Feed{URL: srv.URL}
+	ch := &Channel{Title: "T", Feeds: []*Feed{f}}
+
+	if got := fetchOnce(t, f, ch, srv); len(got) != maxBoundaryGUIDs {
+		t.Fatalf("fetch1: got %d items, want %d (only kept items ingested)", len(got), maxBoundaryGUIDs)
+	}
+	if len(f.BoundaryGUIDs) != maxBoundaryGUIDs {
+		t.Errorf("BoundaryGUIDs = %d entries, want %d (capped)", len(f.BoundaryGUIDs), maxBoundaryGUIDs)
+	}
+	if got := fetchOnce(t, f, ch, srv); len(got) != 0 {
+		t.Errorf("fetch2: got %d, want 0 (over-cap items re-ingested as duplicates)", len(got))
 	}
 }
 
