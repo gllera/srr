@@ -8,7 +8,7 @@ import (
 )
 
 func TestModuleBuiltinSanitize(t *testing.T) {
-	m := New()
+	m := New(nil)
 
 	now := time.Now()
 	item := &RawItem{
@@ -33,7 +33,7 @@ func TestModuleBuiltinSanitize(t *testing.T) {
 }
 
 func TestModuleBuiltinSanitizePreservesVideo(t *testing.T) {
-	m := New()
+	m := New(nil)
 	now := time.Now()
 	item := &RawItem{
 		GUID:  1,
@@ -66,7 +66,7 @@ func TestModuleBuiltinSanitizePreservesVideo(t *testing.T) {
 }
 
 func TestModuleBuiltinSanitizeStripsClass(t *testing.T) {
-	m := New()
+	m := New(nil)
 
 	now := time.Now()
 	item := &RawItem{
@@ -85,7 +85,7 @@ func TestModuleBuiltinSanitizeStripsClass(t *testing.T) {
 }
 
 func TestModuleBuiltinMinify(t *testing.T) {
-	m := New()
+	m := New(nil)
 
 	now := time.Now()
 	item := &RawItem{
@@ -107,7 +107,7 @@ func TestModuleBuiltinMinify(t *testing.T) {
 }
 
 func TestModuleExternalProcessor(t *testing.T) {
-	m := New()
+	m := New(nil)
 
 	now := time.Now()
 	item := &RawItem{
@@ -133,7 +133,7 @@ func TestModuleExternalProcessor(t *testing.T) {
 }
 
 func TestModuleExternalProcessorFailure(t *testing.T) {
-	m := New()
+	m := New(nil)
 
 	now := time.Now()
 	item := &RawItem{
@@ -151,7 +151,7 @@ func TestModuleExternalProcessorFailure(t *testing.T) {
 }
 
 func TestModuleExternalInvalidJSON(t *testing.T) {
-	m := New()
+	m := New(nil)
 
 	now := time.Now()
 	item := &RawItem{
@@ -169,7 +169,7 @@ func TestModuleExternalInvalidJSON(t *testing.T) {
 }
 
 func TestRegisterBuiltins(t *testing.T) {
-	m := New()
+	m := New(nil)
 
 	// Verify built-in processors are registered
 	builtins := []string{"#sanitize", "#minify"}

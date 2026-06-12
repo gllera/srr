@@ -71,12 +71,21 @@ Backend-specific behavior:
 
 ### Module System (`mod/`)
 
-Pipeline per-channel during fetch. Factory pattern: `New()` returns fresh stateful processor.
+Pipeline per-channel during fetch. Factory pattern: `New(assets)` returns a fresh stateful processor; each built-in factory receives the run's `mod.Assets` capability (see below).
 
 - `#sanitize` — bluemonday, content-only.
 - `#minify` — tdewolff/minify, content-only.
-- `#youtube` — replaces `Content` with a thumbnail-link card (`https://i.ytimg.com/vi/<id>/hqdefault.jpg` linked to `watch?v=<id>`) plus the description; description source preference is `media:group/media:description` → entry-level `description`/`summary` → existing `Content`. Recognises `youtube.com` (`watch?v=`, `/embed/`, `/v/`, `/shorts/`, `/live/`), `youtu.be`, `m./music.` and `youtube-nocookie.com`. Non-YouTube `Link`s are skipped (Content untouched), so the module is safe in mixed pipelines.
+- `#youtube` — replaces `Content` with a thumbnail-link card (`https://i.ytimg.com/vi/<id>/hqdefault.jpg` linked to `watch?v=<id>`) plus the description; description source preference is `media:group/media:description` → entry-level `description`/`summary` → existing `Content`. Recognises `youtube.com` (`watch?v=`, `/embed/`, `/v/`, `/shorts/`, `/live/`), `youtu.be`, `m./music.` and `youtube-nocookie.com`. Non-YouTube `Link`s are skipped (Content untouched), so the module is safe in mixed pipelines. After building the card it runs the content through `RewriteMedia` (below) so the thumbnail self-hosts when a store is wired.
 - External modules: `/bin/sh -c`, stdin/stdout JSON (`RawItem`), stderr passthrough.
+
+#### Asset download capability (`mod.Assets` + `RewriteMedia`)
+
+`mod.Assets` is a generic helper any built-in can use to download an object by URL and stream it into the SRR store, returning a RELATIVE store key (`assets/<2-hex>/<16-hex><ext>`). It is **not** a pipeline module — built-in factories receive an `Assets` (or nil) via `New(assets)`.
+
+- Implementation `assetFetcher` (`assets.go`): `Fetch(ctx, srcURL)` rejects non-http(s), hashes the source URL (sha256) for the key, picks the extension from the URL path or response `Content-Type` (`mime.ExtensionsByType`), enforces `SRR_MAX_MEDIA_SIZE` (KB; `Content-Length` pre-check + `io.LimitReader` stream guard that `Rm`s a partial on overflow), and `Put`s the body streaming-through (overwrite-safe). Built once per `fetch` run in `cmd_fetch.go` from `db.Backend` + a dedicated long-timeout media `*http.Client`, shared across workers (concurrent-safe).
+- `RewriteMedia(ctx, assets, content)` (`mod/media.go`): a reusable exported helper (no `Register`, no `#token`) that parses content HTML with `golang.org/x/net/html` and, for every http(s) URL in `<img src>`, `<video src>`, `<video poster>`, downloads it via `assets` and rewrites the attribute to the returned relative key; per-URL Fetch errors keep the original URL (graceful degrade). **No-op when `assets == nil`** (preview/tests via `mod.New(nil)`). Runs before `#sanitize`, whose allowlist permits relative URLs + img/video, so rewritten keys survive.
+- Idempotency: the pipeline only sees **new** items (`feed.go` dedups before `processItem`), so each asset is fetched at most once per run; no cross-run `Backend.Exists` in v1. External (shell) modules don't get the capability in v1.
+- `assets/` is a reserved store prefix in the writer↔reader contract (analogous to `idx/`/`data/`); the frontend (`fmt.ts`) resolves it against the pack base. `S3.Put` stamps `Content-Type` by extension so assets render in-browser; local/SFTP rely on the static server's mime-by-extension.
 - `GUID` and `Published` are immutable for all modules (built-in or external; change = error). Enforced in `processItem` after each pipeline step — the captured value before the step is compared to the post-step value, attributing changes to the offending module.
 - `RawItem.Raw` is set by `feed.go` to the parsed entry as `mod.RawFeedItem` (`map[string][]mod.RawField`); modules can type-assert it for typed access. External (shell) modules see the same data as JSON via the short keys `@`/`$`/`+` (text/attrs/children).
 

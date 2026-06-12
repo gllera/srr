@@ -1,13 +1,14 @@
 package mod
 
 import (
+	"context"
 	"regexp"
 
 	"github.com/microcosm-cc/bluemonday"
 )
 
 func init() {
-	Register("sanitize", func() func(*RawItem) error {
+	Register("sanitize", func(_ Assets) func(context.Context, *RawItem) error {
 		policy := bluemonday.StrictPolicy()
 
 		policy.AllowLists()
@@ -71,7 +72,7 @@ func init() {
 		policy.AllowAttrs("value", "min", "max", "low", "high", "optimum").Matching(bluemonday.Number).OnElements("meter")
 		policy.AllowAttrs("value", "max").Matching(bluemonday.Number).OnElements("progress")
 
-		return func(i *RawItem) error {
+		return func(_ context.Context, i *RawItem) error {
 			i.Content = policy.Sanitize(i.Content)
 			return nil
 		}
