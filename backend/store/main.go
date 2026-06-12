@@ -6,19 +6,19 @@ import (
 	"io"
 	"net/url"
 	"os"
-	"path"
 	"reflect"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 const (
-	// cacheImmutable stamps pack files (idx/, data/): finalized packs
-	// (idx/<n>.gz, data/<n>.gz) never change once written, and latest packs
-	// (idx/L<seq>.gz, data/L<seq>.gz) are write-once — a generation is never
-	// rewritten after db.gz publishes it — so the CDN/client may cache both
-	// forever.
+	// cacheImmutable stamps write-once keys: finalized packs (idx|data|
+	// search/<n>.gz) never change once written; latest packs (L<seq>) and the
+	// summaries (idx/h<N>, search/s<N>) are write-once names — never rewritten
+	// after the db.gz commit that publishes them; assets/ keys are
+	// content-hashed. The CDN/client may cache them all forever.
 	cacheImmutable = "public, max-age=31536000, immutable"
 	// cacheRevalidate stamps db.gz: the store's only mutable key (the
 	// consistency root naming the current L<seq> generation), rewritten every
@@ -26,43 +26,27 @@ const (
 	cacheRevalidate = "no-cache, must-revalidate"
 )
 
+// packKeyRe is the write-once pack-name grammar: a pack-series directory plus
+// a finalized digit run ("idx/12.gz"), an L<seq> generation ("data/L3.gz"),
+// or the series' summary stem ("idx/h2.gz" header summaries, "search/s4.gz"
+// bloom summaries). Anchored strictly — "L", "Lx7" or "LL3" must not be
+// stamped immutable.
+var packKeyRe = regexp.MustCompile(`^(?:idx/[Lh]?|data/L?|search/[Ls]?)[0-9]+\.gz$`)
+
 // cacheControlForKey returns the HTTP Cache-Control directive a backend should
 // attach when writing key, or "" for keys with no caching policy (e.g. the
 // lock marker). Backends that carry HTTP metadata (S3) emit it; filesystem
 // backends ignore it. Centralised here so writer and the contract stay in one
 // place.
 func cacheControlForKey(key string) string {
-	base := path.Base(key)
 	switch {
 	case key == "db.gz":
 		return cacheRevalidate
-	case (strings.HasPrefix(key, "idx/") || strings.HasPrefix(key, "data/")) && isPackStem(strings.TrimSuffix(base, ".gz")):
+	case strings.HasPrefix(key, "assets/") || packKeyRe.MatchString(key):
 		return cacheImmutable
 	default:
 		return ""
 	}
-}
-
-// isPackStem reports whether s is a pack filename stem: the digit run of a
-// finalized pack ("0", "12") or the L-prefixed generation name of a
-// write-once latest pack ("L3"). Anchored strictly — "L", "Lx7" or "LL3"
-// must not be stamped immutable.
-func isPackStem(s string) bool {
-	return isPackNumber(strings.TrimPrefix(s, "L"))
-}
-
-// isPackNumber reports whether s is a non-empty run of ASCII digits — the
-// filename stem of a finalized pack (e.g. "0", "12", "250").
-func isPackNumber(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		if s[i] < '0' || s[i] > '9' {
-			return false
-		}
-	}
-	return true
 }
 
 // Backend defines the storage operations used by the application.
