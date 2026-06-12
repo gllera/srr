@@ -49,8 +49,10 @@ func init() {
 		// One client per Module (i.e. per fetch worker, via the procPool):
 		// reused across the items a worker processes. The per-call timeout is
 		// enforced via the request context rather than client.Timeout so it can
-		// vary per pipeline position while sharing this client.
-		client := &http.Client{}
+		// vary per pipeline position while sharing this client. The transport is
+		// SSRF-guarded: the Link comes from attacker-controlled feed content, so
+		// dials to private/loopback/link-local addresses are refused.
+		client := &http.Client{Transport: SafeTransport()}
 		return func(ctx context.Context, p Params, i *RawItem) error {
 			timeout, err := p.Duration("timeout", readabilityTimeout)
 			if err != nil {

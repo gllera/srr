@@ -54,13 +54,15 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 		// Dedicated client for asset downloads: a longer timeout than the 10s
 		// feed client, suited to large media (video). The asset fetcher is
 		// shared across workers (its client + the store backend are
-		// concurrent-safe).
+		// concurrent-safe). SSRF-guarded transport: media URLs come from
+		// attacker-controlled feed content, so dials to private/loopback/
+		// link-local addresses are refused (override with SRR_ALLOW_PRIVATE_FETCH).
+		mediaTransport := mod.SafeTransport()
+		mediaTransport.MaxIdleConnsPerHost = globals.Workers
+		mediaTransport.MaxConnsPerHost = globals.Workers
 		mediaClient := &http.Client{
-			Timeout: 5 * time.Minute,
-			Transport: &http.Transport{
-				MaxIdleConnsPerHost: globals.Workers,
-				MaxConnsPerHost:     globals.Workers,
-			},
+			Timeout:   5 * time.Minute,
+			Transport: mediaTransport,
 		}
 		assets := newAssetFetcher(db.Backend, mediaClient, globals.MaxMediaSize)
 		bufPool := sync.Pool{

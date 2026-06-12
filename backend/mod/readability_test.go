@@ -26,6 +26,7 @@ var readabilityArticleHTML = `<!DOCTYPE html>
 </body></html>`
 
 func TestReadabilityReplacesTruncatedContent(t *testing.T) {
+	t.Setenv("SRR_ALLOW_PRIVATE_FETCH", "1") // test server is on loopback; opt out of the SSRF guard
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(readabilityArticleHTML))
@@ -65,6 +66,7 @@ func TestReadabilityEmptyLinkIsNoop(t *testing.T) {
 }
 
 func TestReadabilityFailsOpenOnHTTPError(t *testing.T) {
+	t.Setenv("SRR_ALLOW_PRIVATE_FETCH", "1") // test server is on loopback; opt out of the SSRF guard
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
 	}))
@@ -84,6 +86,7 @@ func TestReadabilityFailsOpenOnHTTPError(t *testing.T) {
 func TestReadabilityTimeoutParamFailsOpen(t *testing.T) {
 	// Handler stalls well past the configured timeout so the request context
 	// deadline trips first; the module must keep the original content.
+	t.Setenv("SRR_ALLOW_PRIVATE_FETCH", "1") // test server is on loopback; opt out of the SSRF guard
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(200 * time.Millisecond)
 		_, _ = w.Write([]byte(readabilityArticleHTML))
@@ -102,6 +105,7 @@ func TestReadabilityTimeoutParamFailsOpen(t *testing.T) {
 }
 
 func TestReadabilityMaxBodyParamTruncates(t *testing.T) {
+	t.Setenv("SRR_ALLOW_PRIVATE_FETCH", "1") // test server is on loopback; opt out of the SSRF guard
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(readabilityArticleHTML))
 	}))
@@ -138,6 +142,7 @@ func TestReadabilityRejectsBadParams(t *testing.T) {
 }
 
 func TestReadabilityPreservesGUIDAndPublished(t *testing.T) {
+	t.Setenv("SRR_ALLOW_PRIVATE_FETCH", "1") // test server is on loopback; opt out of the SSRF guard
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(readabilityArticleHTML))
 	}))
