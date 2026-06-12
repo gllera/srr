@@ -78,8 +78,7 @@ func (o *PreviewCmd) Run() error {
 	ctx := context.Background()
 	client := &http.Client{Timeout: 10 * time.Second}
 	processor := mod.New()
-	engine := ingest.New(ingest.Deps{})
-	defer engine.Close()
+	engine := ingest.New()
 
 	// Resolve the effective pipeline exactly like a channel: an empty -p
 	// inherits the root pipe (which defaults to #sanitize/#minify), so preview

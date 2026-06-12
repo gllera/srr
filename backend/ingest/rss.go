@@ -22,7 +22,7 @@ import (
 // then handed to the streaming RSS/Atom/RDF parser (ParseFeed) defined
 // below.
 func init() {
-	Register("rss", func(Deps) (FetchFunc, io.Closer) {
+	Register("rss", func() FetchFunc {
 		return func(ctx context.Context, client *http.Client, buf []byte, req Request) (Result, error) {
 			httpReq, err := http.NewRequestWithContext(ctx, "GET", req.URL, nil)
 			if err != nil {
@@ -69,7 +69,7 @@ func init() {
 				LastModified: res.Header.Get("Last-Modified"),
 				Items:        items,
 			}, nil
-		}, nil
+		}
 	})
 }
 

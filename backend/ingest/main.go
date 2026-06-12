@@ -17,7 +17,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"strings"
 
 	"srrb/mod"
@@ -58,13 +57,6 @@ type Result struct {
 	Items        []*mod.RawItem `json:"items,omitempty"`
 }
 
-// Deps are the host capabilities passed to New(), reserved as an extension
-// point for built-in fetchers. The shipped built-in (#rss) needs none. Asset
-// self-hosting is no longer wired here: the caller sets the command's working
-// directory via Request.AssetDir and runs the upload step itself at the end of
-// the article pipeline (main.Feed.fetch).
-type Deps struct{}
-
 // userAgent is the User-Agent header value sent by built-in HTTP-based
 // fetchers. Kept generic — feed publishers expect a fixed identifier per
 // reader, not a per-version string.
@@ -97,11 +89,10 @@ func readBody(body io.Reader, buf []byte, what string) ([]byte, error) {
 // buffer — built-ins should reuse it, external fetchers leave it alone.
 type FetchFunc func(ctx context.Context, client *http.Client, buf []byte, req Request) (Result, error)
 
-// A factory builds a built-in's FetchFunc once per New(), receiving the run's
-// Deps so it can capture per-instance state (compiled regexes, a shared
-// connection pool, …). It may return an io.Closer to release that state when
-// the Fetcher is closed (nil if there's nothing to clean up).
-type factory func(Deps) (FetchFunc, io.Closer)
+// A factory builds a built-in's FetchFunc once per New() so it can capture
+// per-instance state (compiled regexes, a shared connection pool, …). Mirrors
+// mod.Register's factory.
+type factory func() FetchFunc
 
 var registry = map[string]factory{}
 
@@ -126,61 +117,23 @@ func Select(channelFetcher, globalFetcher string) string {
 	return "#rss"
 }
 
-// maxSubprocessOutput caps the bytes buffered from an external fetcher's
-// stdout. Above this, the writer returns an error which propagates as a
-// broken pipe to the subprocess. Defense-in-depth against runaway output
-// OOM'ing the process.
-const maxSubprocessOutput = 64 << 20
-
-type cappedBuffer struct {
-	buf   bytes.Buffer
-	limit int
-}
-
-func (c *cappedBuffer) Write(p []byte) (int, error) {
-	if c.buf.Len()+len(p) > c.limit {
-		return 0, fmt.Errorf("subprocess output exceeds %d bytes", c.limit)
-	}
-	return c.buf.Write(p)
-}
-
 // Fetcher is the dispatcher. New() builds one with every registered
 // built-in instantiated once; Fetch routes per-call by name.
 type Fetcher struct {
 	fetchers map[string]FetchFunc
-	closers  []io.Closer
 	env      []string
 }
 
-// New builds a Fetcher with every registered built-in instantiated once,
-// passing deps to each factory. Call Close after the fetch run to release any
-// resources held by stateful built-ins.
-func New(deps Deps) *Fetcher {
+// New builds a Fetcher with every registered built-in instantiated once.
+func New() *Fetcher {
 	f := &Fetcher{
 		fetchers: make(map[string]FetchFunc, len(registry)),
 		env:      os.Environ(),
 	}
 	for name, init := range registry {
-		fn, closer := init(deps)
-		f.fetchers[name] = fn
-		if closer != nil {
-			f.closers = append(f.closers, closer)
-		}
+		f.fetchers[name] = init()
 	}
 	return f
-}
-
-// Close releases resources held by built-in fetchers (e.g. a network
-// connection kept open across the run). A Fetcher with no stateful built-ins
-// closes to a no-op.
-func (f *Fetcher) Close() error {
-	var err error
-	for _, c := range f.closers {
-		if cerr := c.Close(); cerr != nil && err == nil {
-			err = cerr
-		}
-	}
-	return err
 }
 
 // Fetch dispatches by name. A built-in registered as "#name" runs its
@@ -193,7 +146,7 @@ func (f *Fetcher) Close() error {
 // dateless items.
 //
 // A non-zero exit code, empty stdout, or output exceeding
-// maxSubprocessOutput is a hard error (fails just this feed's fetch). The
+// mod.MaxSubprocessOutput is a hard error (fails just this feed's fetch). The
 // author-facing spec and a reference implementation live in README.md
 // (Ingest Strategies).
 func (f *Fetcher) Fetch(ctx context.Context, args string, client *http.Client, buf []byte, req Request) (Result, error) {
@@ -208,21 +161,12 @@ func (f *Fetcher) Fetch(ctx context.Context, args string, client *http.Client, b
 		return Result{}, fmt.Errorf("encode fetcher request: %w", err)
 	}
 
-	out := &cappedBuffer{limit: maxSubprocessOutput}
 	// Bound the command so a hang can't wedge the worker forever — the fetch
-	// context has no deadline of its own (see mod.SubprocessTimeout).
-	cctx, cancel := context.WithTimeout(ctx, mod.SubprocessTimeout())
-	defer cancel()
-	cmd := exec.CommandContext(cctx, "/bin/sh", "-c", args)
-	cmd.Stdin = &body
-	cmd.Stdout = out
-	cmd.Stderr = os.Stderr
-	cmd.Env = f.env
-	// The caller's shared download cache (Request.AssetDir) doubles as the
-	// command's working directory, so it can stash and reference files with
-	// relative paths. Empty leaves the calling process's directory.
-	cmd.Dir = req.AssetDir
-	if err := cmd.Run(); err != nil {
+	// context has no deadline of its own (see mod.SubprocessTimeout). The
+	// caller's shared download cache (Request.AssetDir) doubles as the command's
+	// working directory, so it can stash and reference files with relative paths.
+	raw, err := mod.RunSubprocess(ctx, args, f.env, req.AssetDir, &body)
+	if err != nil {
 		return Result{}, fmt.Errorf("fetcher command %q: %w", args, err)
 	}
 
@@ -230,7 +174,6 @@ func (f *Fetcher) Fetch(ctx context.Context, args string, client *http.Client, b
 	// nothing to report must still say so explicitly ({"items":[]} or
 	// {"not_modified":true}). Reporting it here beats letting json.Unmarshal
 	// fail on "" with an opaque "unexpected end of JSON input".
-	raw := bytes.TrimSpace(out.buf.Bytes())
 	if len(raw) == 0 {
 		return Result{}, fmt.Errorf("fetcher command %q produced no output", args)
 	}

@@ -71,10 +71,8 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 		}
 		// Built-in FetchFuncs are concurrent-safe (HTTP built-ins are stateless;
 		// external shell fetchers spawn per-call subprocesses), so one
-		// *ingest.Fetcher is shared across workers. Close releases any resources
-		// held by stateful built-ins (a no-op for the shipped ones).
-		engine := ingest.New(ingest.Deps{})
-		defer engine.Close()
+		// *ingest.Fetcher is shared across workers.
+		engine := ingest.New()
 
 		// One asset cache dir shared by every external-ingest feed this run,
 		// created once. Each external command runs with this as its working
