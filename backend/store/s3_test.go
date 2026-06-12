@@ -254,7 +254,7 @@ func TestS3PutCacheControlAndContentType(t *testing.T) {
 		{"db.gz", cacheRevalidate, "application/gzip"},
 		{"idx/0.gz", cacheImmutable, "application/gzip"},
 		{"data/L3.gz", cacheImmutable, "application/gzip"},
-		{"assets/ab/0123456789abcdef.jpg", "", "image/jpeg"},
+		{"assets/ab/0123456789abcdef.jpg", cacheImmutable, "image/jpeg"},
 		{".locked", "", ""}, // no policy; CT unchecked (the SDK stamps a default when we pass none)
 	}
 	for _, c := range cases {
