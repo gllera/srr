@@ -161,10 +161,12 @@ async function checkManifest(dbRes: Response): Promise<void> {
                const path = new URL(k.url).pathname
                const m = /\/packs\/(?:idx|data)\/L(\d+)\.gz$/i.exec(path)
                if (m && Number(m[1]) < seq - LATEST_KEEP) return packs.delete(k)
-               // Superseded idx header summaries ride the same prune: a
-               // summary rewrite only happens on an article-producing fetch,
-               // which always bumps seq too (mirrors the backend's
-               // GCSummaries grace window).
+               // Superseded idx header summaries ride the seq prune instead
+               // of tracking their own meta key. hdrs CAN advance without a
+               // seq bump (a zero-article migration or summary-retry cycle),
+               // but such a cycle leaves at most one stale ~1KB name, pruned
+               // on the next article-producing fetch — and a store rebuild
+               // purges the whole bucket via gen above.
                const h = /\/packs\/idx\/h(\d+)\.gz$/i.exec(path)
                return h && Number(h[1]) < hdrs - LATEST_KEEP ? packs.delete(k) : undefined
             }),

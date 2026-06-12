@@ -42,7 +42,7 @@ func loadIdxPacks(fetch keyGetter, core *DBCore) ([]*idxPack, error) {
 	if core.TotalArticles == 0 {
 		return nil, nil
 	}
-	numFinalized := (core.TotalArticles - 1) / idxPackSize
+	numFinalized := numFinalizedIdx(core.TotalArticles)
 	out := make([]*idxPack, numFinalized+1)
 	for p := 0; p <= numFinalized; p++ {
 		var key string

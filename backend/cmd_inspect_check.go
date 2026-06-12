@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/binary"
 	"fmt"
 	"sort"
 )
@@ -233,7 +232,9 @@ func checkUnknownChanIDs(core *DBCore, packs []*idxPack) int {
 // (idx/h<hdrs>.gz) against db.gz and the finalized packs: coverage may lag
 // numFinalized (SyncIdxSummary is warn-only in fetch — readers fall back to
 // eager idx loading) but never exceed it, and each 1036-byte chunk must
-// equal the verbatim header of the finalized pack it covers.
+// equal the verbatim header of the finalized pack it covers. Chunks are
+// decoded through parseIdxPack (packSize 0 = header only) so the summary is
+// read by the same parser as the packs themselves.
 func checkIdxSummary(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 	numFinalized := numFinalizedIdx(core.TotalArticles)
 	if core.HdrPacks > numFinalized {
@@ -261,21 +262,24 @@ func checkIdxSummary(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 	}
 	issues := 0
 	for k := range core.HdrPacks {
-		chunk := buf[k*idxHeaderSize:]
+		hdr, err := parseIdxPack(buf[k*idxHeaderSize:(k+1)*idxHeaderSize], k, 0)
+		if err != nil {
+			fmt.Printf("[idx-summary] pack %d chunk: %v\n", k, err)
+			issues++
+			continue
+		}
 		p := packs[k]
-		if binary.LittleEndian.Uint32(chunk[0:]) != p.fetchedAtBase ||
-			binary.LittleEndian.Uint32(chunk[4:]) != p.packIDBase ||
-			binary.LittleEndian.Uint32(chunk[8:]) != p.packOffBase {
+		if hdr.fetchedAtBase != p.fetchedAtBase || hdr.packIDBase != p.packIDBase || hdr.packOffBase != p.packOffBase {
 			fmt.Printf("[idx-summary] pack %d: summary bases (%d,%d,%d) != header (%d,%d,%d)\n", k,
-				binary.LittleEndian.Uint32(chunk[0:]), binary.LittleEndian.Uint32(chunk[4:]),
-				binary.LittleEndian.Uint32(chunk[8:]), p.fetchedAtBase, p.packIDBase, p.packOffBase)
+				hdr.fetchedAtBase, hdr.packIDBase, hdr.packOffBase,
+				p.fetchedAtBase, p.packIDBase, p.packOffBase)
 			issues++
 			continue
 		}
 		for s := range idxChanSlots {
-			if got := binary.LittleEndian.Uint32(chunk[idxStateSize+s*4:]); got != p.chanCounts[s] {
+			if hdr.chanCounts[s] != p.chanCounts[s] {
 				fmt.Printf("[idx-summary] pack %d sub %d: summary chanCount=%d but header has %d\n",
-					k, s, got, p.chanCounts[s])
+					k, s, hdr.chanCounts[s], p.chanCounts[s])
 				issues++
 				break
 			}

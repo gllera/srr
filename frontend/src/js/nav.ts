@@ -2,8 +2,8 @@ import * as data from "./data"
 import { extractImageUrls, getImgProxy, imgProxy } from "./fmt"
 
 let pos = -1
-let nextLeft: number | undefined
-let nextRight: number | undefined
+let nextLeft: Promise<number> | undefined
+let nextRight: Promise<number> | undefined
 
 export const filter = {
    channels: new Map<number, number>(),
@@ -206,21 +206,40 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
    return resolve(target, true)
 }
 
+// The post-navigation neighbor lookup is speculative, so it is stored as an
+// un-awaited promise: findLeft/findRight may lazily fetch an idx pack, and
+// that must neither delay the article already on screen nor reject a
+// navigation that succeeded (a failed lookup just clears its slot; the next
+// keypress retries on the critical path). The slot-identity checks keep a
+// lookup superseded by a newer navigation from prefetching or clearing on
+// its behalf.
 export async function left(): Promise<IShowFeed> {
-   const target = nextLeft ?? (await data.findLeft(pos - 1, filter.channels))
+   const target = await (nextLeft ?? data.findLeft(pos - 1, filter.channels))
    if (target === -1) throw new Error("no left match")
    const result = await resolve(target)
-   nextLeft = await data.findLeft(pos - 1, filter.channels)
-   schedulePrefetch(nextLeft)
+   const next = (nextLeft = data.findLeft(pos - 1, filter.channels))
+   next
+      .then((t) => {
+         if (nextLeft === next) schedulePrefetch(t)
+      })
+      .catch(() => {
+         if (nextLeft === next) nextLeft = undefined
+      })
    return result
 }
 
 export async function right(): Promise<IShowFeed> {
-   const target = nextRight ?? (await data.findRight(pos + 1, filter.channels))
+   const target = await (nextRight ?? data.findRight(pos + 1, filter.channels))
    if (target === -1) throw new Error("no right match")
    const result = await resolve(target)
-   nextRight = await data.findRight(pos + 1, filter.channels)
-   schedulePrefetch(nextRight)
+   const next = (nextRight = data.findRight(pos + 1, filter.channels))
+   next
+      .then((t) => {
+         if (nextRight === next) schedulePrefetch(t)
+      })
+      .catch(() => {
+         if (nextRight === next) nextRight = undefined
+      })
    return result
 }
 
