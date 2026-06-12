@@ -32,7 +32,7 @@
 // browser without SW support (or an insecure-context LAN deploy) just runs straight
 // off the network, exactly as before. Self-contained: no SRR_CDN_URL, so it works
 // under any cdn-url prefix.
-import { LATEST_KEEP } from "./js/format.gen"
+import { LATEST_KEEP, type IDBWire } from "./js/format.gen"
 
 const sw = self as unknown as ServiceWorkerGlobalScope
 
@@ -142,7 +142,7 @@ async function readMetaNumber(key: string): Promise<number> {
 async function checkManifest(dbRes: Response): Promise<void> {
    try {
       const body = dbRes.clone().body!.pipeThrough(new DecompressionStream("gzip"))
-      const db = (await new Response(body).json()) as { gen?: number; seq?: number; hdrs?: number }
+      const db = (await new Response(body).json()) as Pick<IDBWire, "gen" | "seq" | "hdrs">
       const gen = db.gen ?? 0
       const seq = db.seq ?? 0
       const hdrs = db.hdrs ?? 0

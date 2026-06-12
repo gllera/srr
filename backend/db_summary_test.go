@@ -9,10 +9,18 @@ import (
 	"testing"
 )
 
-// crossIdxBoundary writes idxPackSize+1 articles in two batches so exactly
-// one idx pack finalizes (mirrors TestPutArticlesIdxPackSplitAtBoundary).
-func crossIdxBoundary(t *testing.T, db *DB, ch *Channel) {
+// setupBoundaryDB builds a store whose first idx pack just finalized:
+// idxPackSize+1 articles written in two batches (mirrors
+// TestPutArticlesIdxPackSplitAtBoundary).
+func setupBoundaryDB(t *testing.T) (*DB, string) {
 	t.Helper()
+	db, c, dir := setupTestDB(t)
+	globals.PackSize = 1024 // data packs never split (read lazily at write time)
+
+	ch := &Channel{id: 1}
+	c.Channels = map[int]*Channel{ch.id: ch}
+	c.FetchedAt = 1700000000
+
 	articles := make([]*Item, idxPackSize)
 	for i := range articles {
 		articles[i] = &Item{Channel: ch, Title: fmt.Sprintf("A%d", i), Content: "c", Published: int64(i)}
@@ -25,18 +33,6 @@ func crossIdxBoundary(t *testing.T, db *DB, ch *Channel) {
 	}); err != nil {
 		t.Fatalf("PutArticles: %v", err)
 	}
-}
-
-// setupBoundaryDB builds a store whose first idx pack just finalized.
-func setupBoundaryDB(t *testing.T) (*DB, string) {
-	t.Helper()
-	db, c, dir := setupTestDB(t)
-	globals.PackSize = 1024 // data packs never split (read lazily at write time)
-
-	ch := &Channel{id: 1}
-	c.Channels = map[int]*Channel{ch.id: ch}
-	c.FetchedAt = 1700000000
-	crossIdxBoundary(t, db, ch)
 	return db, dir
 }
 
