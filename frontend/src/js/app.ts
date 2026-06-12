@@ -1,6 +1,6 @@
 import * as data from "./data"
-import { closeAllDropdowns, showChannelMenu } from "./dropdown"
-import { formatDate, sanitizeHtml, timeAgo, URL_DENY } from "./fmt"
+import { closeAllDropdowns, showChannelMenu, showPeekMenu } from "./dropdown"
+import { collapseBrokenMedia, formatDate, sanitizeHtml, timeAgo, URL_DENY } from "./fmt"
 import { setupGestures } from "./gestures"
 import * as nav from "./nav"
 
@@ -13,7 +13,7 @@ const el = {
    next: document.querySelector(".srr-next") as HTMLButtonElement,
    channel: document.querySelector(".srr-channel") as HTMLButtonElement,
    date: document.querySelector(".srr-date") as HTMLElement,
-   counter: document.querySelector(".srr-counter") as HTMLElement,
+   counter: document.querySelector(".srr-counter") as HTMLButtonElement,
    popupText: document.querySelector(".srr-popup-text") as HTMLElement,
    popupRetry: document.querySelector(".srr-popup-retry") as HTMLButtonElement,
    popupClose: document.querySelector(".srr-popup-close") as HTMLElement,
@@ -145,6 +145,7 @@ const KEY_ACTIONS: Record<string, () => void> = {
    s: () => nav.getFilterEntries().length > 1 && guard(() => nav.cycleFilter(1)),
    q: () => guard(() => nav.first()),
    e: () => guard(() => nav.last()),
+   l: () => showPeekMenu(guard),
    f: () => {
       if (!el.titleLink.getAttribute("href")) return
       el.titleLink.dispatchEvent(
@@ -164,7 +165,10 @@ async function init() {
 
    el.prev.addEventListener("click", () => guard(() => nav.left()))
    el.next.addEventListener("click", () => guard(() => nav.right()))
+   // capture: error events don't bubble (see collapseBrokenMedia)
+   el.content.addEventListener("error", collapseBrokenMedia, true)
    el.channel.addEventListener("click", () => showChannelMenu(currentChannel.tag, guard))
+   el.counter.addEventListener("click", () => showPeekMenu(guard))
    el.popupClose.addEventListener("click", closePopup)
    el.popupRetry.addEventListener("click", () => {
       closePopup()

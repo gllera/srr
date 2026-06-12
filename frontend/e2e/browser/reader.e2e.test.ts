@@ -113,6 +113,31 @@ describe("browser: real SPA over real packs", () => {
       }
    })
 
+   it("opens the headlines peek with the keyboard and jumps to a nearby article", async () => {
+      const [page, close] = await open() // lands on the latest article (chron 5)
+      try {
+         await page.keyboard.press("l")
+         await page.waitForFunction(
+            () => document.querySelectorAll("#srr-peek-menu.srr-open a[data-value]").length === 6,
+            { timeout: 20000 },
+         )
+         // Newest-first: the current (latest) article tops the list.
+         const [topCurrent, topTitle] = await page.$eval("#srr-peek-menu a[data-value]", (e) => [
+            e.getAttribute("aria-current"),
+            e.querySelector(".srr-peek-title")?.textContent,
+         ])
+         expect(topCurrent).toBe("true")
+         expect(topTitle).toBe("sport title 1")
+
+         await page.click('#srr-peek-menu a[data-value="3"]')
+         await waitTitle(page, "tech title 1")
+         expect(await page.evaluate(() => location.hash)).toBe("#3")
+         expect(await page.$eval("#srr-peek-menu", (e) => e.classList.contains("srr-open"))).toBe(false)
+      } finally {
+         await close()
+      }
+   })
+
    // The service worker (src/sw.ts) makes the reader work fully offline: the shell
    // (navigation + hashed JS/CSS) and the packs (db.gz + latest idx/data, here a
    // single pack) are runtime-cached on the first online visit, then served from
@@ -190,6 +215,83 @@ describe("browser: real SPA over real packs", () => {
          expect(statuses.every((s) => s === 200)).toBe(true)
       } finally {
          await close()
+      }
+   })
+
+   // The SW bounds client storage: each finalized pack series keeps its
+   // PACK_KEEP highest-numbered entries (the names encode chron age) and the
+   // assets bucket keeps the ASSET_KEEP most recently cached. Everything
+   // offline correctness depends on (db.gz, L<seq>, h<N>) is exempt. Stuffs
+   // the caches with synthetic over-cap entries, reloads (a successful online
+   // db.gz fetch triggers enforceCacheBounds), and checks the eviction order.
+   // Uses the shared 6-article store, where every real pack is L-named — so
+   // the synthetic entries are the only finalized-numeric keys in the bucket
+   // and the assertions can be exact.
+   it("bounds the pack and asset caches, evicting oldest entries first", async () => {
+      const ctx = await browser.createBrowserContext()
+      const page = await ctx.newPage()
+      try {
+         await page.goto(baseUrl, { waitUntil: "load" })
+         await waitRendered(page)
+         await page.waitForFunction(() => navigator.serviceWorker?.controller != null, { timeout: 20000 })
+
+         // 130 finalized data packs (30 over PACK_KEEP=100), 10 finalized idx
+         // packs (under the cap), 510 assets (10 over ASSET_KEEP=500) — puts
+         // awaited sequentially so the assets' insertion order is exact.
+         await page.evaluate(async () => {
+            const packs = await caches.open("srr-packs-v3")
+            for (let n = 1; n <= 130; n++)
+               await packs.put(new URL(`packs/data/${n}.gz`, location.href).href, new Response("x"))
+            for (let n = 0; n < 10; n++)
+               await packs.put(new URL(`packs/idx/${n}.gz`, location.href).href, new Response("x"))
+            const assets = await caches.open("srr-assets-v1")
+            for (let n = 0; n < 510; n++) {
+               const name = n.toString(16).padStart(16, "0")
+               await assets.put(new URL(`packs/assets/aa/${name}.webp`, location.href).href, new Response("x"))
+            }
+         })
+
+         // Reload: db.gz now flows through the SW online → prune runs in
+         // waitUntil after the response resolves. Poll until it lands.
+         await page.reload({ waitUntil: "load" })
+         await waitRendered(page)
+         await page.waitForFunction(
+            async () => {
+               const packs = await caches.open("srr-packs-v3")
+               const keys = await packs.keys()
+               return keys.filter((k) => /\/packs\/data\/\d+\.gz$/.test(new URL(k.url).pathname)).length === 100
+            },
+            { timeout: 20000 },
+         )
+
+         const state = await page.evaluate(async () => {
+            const packs = await caches.open("srr-packs-v3")
+            const packPaths = (await packs.keys()).map((k) => new URL(k.url).pathname)
+            const assets = await caches.open("srr-assets-v1")
+            const assetPaths = (await assets.keys()).map((k) => new URL(k.url).pathname)
+            return { packPaths, assetPaths }
+         })
+         const nums = (series: string) =>
+            state.packPaths
+               .map((p) => new RegExp(`/packs/${series}/(\\d+)\\.gz$`).exec(p)?.[1])
+               .filter((v): v is string => v != null)
+               .map(Number)
+               .sort((a, b) => a - b)
+
+         // Data series: the 30 lowest-numbered (oldest) evicted, newest 100 kept.
+         expect(nums("data")).toEqual(Array.from({ length: 100 }, (_, i) => i + 31))
+         // The under-cap idx series is untouched.
+         expect(nums("idx")).toEqual(Array.from({ length: 10 }, (_, i) => i))
+         // Exempt names survive the prune.
+         expect(state.packPaths.some((p) => p.endsWith("/packs/db.gz"))).toBe(true)
+         expect(state.packPaths.some((p) => /\/packs\/idx\/L\d+\.gz$/.test(p))).toBe(true)
+         // Assets: exactly ASSET_KEEP remain, the 10 oldest-cached gone —
+         // the first surviving key is #10 (0xa), the last is #509 (0x1fd).
+         expect(state.assetPaths).toHaveLength(500)
+         expect(state.assetPaths[0].endsWith("/000000000000000a.webp")).toBe(true)
+         expect(state.assetPaths[499].endsWith("/00000000000001fd.webp")).toBe(true)
+      } finally {
+         await ctx.close()
       }
    })
 

@@ -76,6 +76,10 @@ beforeEach(() => {
    localStorage.clear()
    vi.spyOn(history, "pushState").mockImplementation(() => {})
    vi.spyOn(history, "replaceState").mockImplementation(() => {})
+   // jsdom has no requestIdleCallback; without a stub schedulePrefetch would
+   // take its setTimeout fallback and fire mid-suite. A swallow-everything rIC
+   // keeps prefetch inert except where the prefetch suite installs its own.
+   window.requestIdleCallback = (() => 0) as unknown as typeof window.requestIdleCallback
 })
 
 describe("fromHash", () => {
@@ -983,6 +987,86 @@ describe("isSingleFilter", () => {
    })
 })
 
+describe("unreadCount", () => {
+   it("returns -1 for a channel never seen on this device", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
+      expect(await nav.unreadCount(data.db.channels[2])).toBe(-1)
+   })
+
+   it("counts the channel's articles strictly after its seen position", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 1 }, { chanId: 2 }, { chanId: 1 }])
+      await nav.fromHash("1") // views chron 1 (chan 1) → seen chan:1 = 1
+      expect(await nav.unreadCount(data.db.channels[1])).toBe(1) // only chron 3 left
+      expect(await nav.unreadCount(data.db.channels[2])).toBe(-1) // still untouched
+   })
+
+   it("reading everything via [ALL] clears the counts of passed channels", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 1 }])
+      await nav.fromHash("0")
+      await nav.right()
+      await nav.right() // unfiltered walk to the end bumps each article's own channel
+      expect(await nav.unreadCount(data.db.channels[1])).toBe(0)
+      expect(await nav.unreadCount(data.db.channels[2])).toBe(0)
+   })
+
+   it("respects add_idx so a reused id's predecessor articles never count", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 1 }, { chanId: 1 }])
+      data.db.channels[1].add_idx = 1 // chron 0 belongs to the predecessor epoch
+      await nav.fromHash("1") // seen chan:1 = 1
+      expect(await nav.unreadCount(data.db.channels[1])).toBe(1) // only chron 2
+   })
+
+   it("clamps a stale seen position beyond total_art instead of going negative", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 1 }])
+      await nav.fromHash("1") // seen chan:1 = 1
+      data.db.total_art = 1 // simulate a rebuilt, shorter store
+      expect(await nav.unreadCount(data.db.channels[1])).toBe(0)
+   })
+})
+
+describe("peek", () => {
+   it("returns the current article plus up to span matches each side, in chron order", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 1 }, { chanId: 1 }, { chanId: 1 }, { chanId: 1 }])
+      data.loadArticle.mockImplementation(async (idx: number) => makeArticle({ s: 1, t: `T${idx}`, p: 100 + idx }))
+      await nav.fromHash("2")
+      const items = await nav.peek(1)
+      expect(items.map((i) => i.chron)).toEqual([1, 2, 3])
+      expect(items.map((i) => i.current)).toEqual([false, true, false])
+      expect(items[1].title).toBe("T2")
+      expect(items[1].when).toBe(102)
+      expect(items[1].channel).toBe("Test")
+   })
+
+   it("walks only filter matches and falls back to fetched_at when published is unset", async () => {
+      setupIndex([
+         { chanId: 1, fetchedAt: 5 },
+         { chanId: 2 },
+         { chanId: 1, fetchedAt: 7 },
+         { chanId: 2 },
+         { chanId: 1, fetchedAt: 9 },
+      ])
+      await nav.fromHash("2!1")
+      const items = await nav.peek()
+      expect(items.map((i) => i.chron)).toEqual([0, 2, 4])
+      expect(items.map((i) => i.when)).toEqual([5, 7, 9])
+   })
+
+   it("clips at the archive edges without padding the other side", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 1 }])
+      await nav.fromHash("0")
+      expect((await nav.peek(10)).map((i) => i.chron)).toEqual([0, 1])
+   })
+
+   it("labels untitled articles and deleted channels", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 1 }])
+      await nav.fromHash("1")
+      delete data.db.channels[1]
+      const items = await nav.peek()
+      expect(items.every((i) => i.title === "(untitled)")).toBe(true)
+      expect(items.every((i) => i.channel === "[DELETED]")).toBe(true)
+   })
+})
+
 describe("prefetch abort", () => {
    const RealImage = window.Image
    const RealRIC = window.requestIdleCallback
@@ -1071,5 +1155,24 @@ describe("prefetch abort", () => {
 
       await nav.goTo(3)
       expect(prefetched.getAttribute("src")).toBe("")
+   })
+
+   it("falls back to setTimeout when requestIdleCallback is missing (WebKit)", async () => {
+      window.requestIdleCallback = undefined as unknown as typeof window.requestIdleCallback
+      vi.useFakeTimers()
+      try {
+         setupIndex([{ chanId: 1 }, { chanId: 1 }, { chanId: 1 }])
+         data.loadArticle.mockImplementation(async (idx: number) =>
+            makeArticle({ c: `<img src="http://example.com/${idx}.jpg">` }),
+         )
+         await nav.fromHash("0")
+         await nav.right()
+         expect(images).toHaveLength(0)
+         await vi.advanceTimersByTimeAsync(200)
+         expect(images).toHaveLength(1)
+         expect(images[0].src).toContain(encodeURIComponent("http://example.com/2.jpg"))
+      } finally {
+         vi.useRealTimers()
+      }
    })
 })

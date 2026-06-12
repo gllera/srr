@@ -119,6 +119,15 @@ export function sanitizeHtml(html: string): string {
          resolveMediaAttr(node, "href", proxyPrefix, false)
       } else if (tag === "IMG") {
          node.removeAttribute("srcset")
+         // lazy+async: a long article's images must not compete with first render
+         // (or the neighbor prefetch) for bandwidth the user may never need.
+         // no-referrer: links already carry rel=noreferrer; without it every image
+         // fetch tells the feed host where this reader lives — the same leak the
+         // optional proxy exists to prevent, and proxying is off by default.
+         // (<video>/<source> take no referrerpolicy attribute, so media stays as-is.)
+         node.setAttribute("loading", "lazy")
+         node.setAttribute("decoding", "async")
+         node.setAttribute("referrerpolicy", "no-referrer")
          // Relative src resolves against the pack base; external http(s) keeps the
          // proxy path (proxy:true) so the user's IP isn't leaked to feed hosts.
          resolveMediaAttr(node, "src", proxyPrefix, true)
@@ -131,6 +140,18 @@ export function sanitizeHtml(html: string): string {
       }
    }
    return tmpl.innerHTML
+}
+
+// Articles span years and external images rot — a dead <img> renders as a
+// broken-image icon strewn through old content. Collapsing the failed element
+// keeps the archive readable. One delegated listener replaces per-element
+// handlers, but the error event doesn't bubble: the caller must register this
+// on the content container with capture: true. A <video><source> failure
+// fires on the <source> child, so the collapse targets its <video> host.
+export function collapseBrokenMedia(e: Event): void {
+   const t = e.target as Element
+   const victim = t.tagName === "SOURCE" ? t.closest("video") : t.tagName === "IMG" || t.tagName === "VIDEO" ? t : null
+   victim?.classList.add("srr-broken")
 }
 
 // Regex (not DOM parse) keeps this cheap; sanitization runs on actual render.

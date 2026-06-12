@@ -83,29 +83,30 @@ function abortPrefetch() {
 }
 
 function schedulePrefetch(target: number) {
-   if (target === -1 || typeof window.requestIdleCallback !== "function") return
+   if (target === -1) return
    const my: HTMLImageElement[] = []
    currentPrefetch = my
-   window.requestIdleCallback(
-      async () => {
+   const run = async () => {
+      if (my !== currentPrefetch) return
+      try {
+         const art = await data.loadArticle(target)
          if (my !== currentPrefetch) return
-         try {
-            const art = await data.loadArticle(target)
-            if (my !== currentPrefetch) return
-            const proxyPrefix = getImgProxy()
-            for (const raw of extractImageUrls(art.c)) {
-               const img = new Image()
-               img.fetchPriority = "low"
-               img.decoding = "async"
-               img.src = imgProxy(raw, proxyPrefix)
-               my.push(img)
-            }
-         } catch {
-            // Best-effort; errors surface on user nav.
+         const proxyPrefix = getImgProxy()
+         for (const raw of extractImageUrls(art.c)) {
+            const img = new Image()
+            img.fetchPriority = "low"
+            img.decoding = "async"
+            img.src = imgProxy(raw, proxyPrefix)
+            my.push(img)
          }
-      },
-      { timeout: 500 },
-   )
+      } catch {
+         // Best-effort; errors surface on user nav.
+      }
+   }
+   // WebKit has no requestIdleCallback — without the timeout fallback every
+   // iOS reader would stall at each data-pack boundary instead of prefetching.
+   if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(run, { timeout: 500 })
+   else setTimeout(run, 200)
 }
 
 const SEEN_KEY = "srr-seen"
@@ -137,6 +138,55 @@ function recordSeen(article: IArticle) {
       if (tagKey) seen[tagKey] = pos
       localStorage.setItem(SEEN_KEY, JSON.stringify(seen))
    } catch {}
+}
+
+// Unread count for one channel: its articles strictly after the channel's
+// seen position (recordSeen bumps that on every view, filtered or not, so
+// reading via [ALL] clears badges too). Both sides of the subtraction come
+// from the same idx counting (countAll/countLeft) so db.gz total_art drift
+// can't skew the result, and countLeft's boundary pack is the resident
+// latest pack whenever the seen position is recent — zero fetches in the
+// common case. Returns -1 when the channel was never seen on this device:
+// "unknown", not "zero" — a fresh localStorage would otherwise badge every
+// channel with its full history.
+export async function unreadCount(ch: IChannel): Promise<number> {
+   const seenIdx = getSeen(String(ch.id))
+   if (seenIdx === undefined) return -1
+   const channels = new Map([[ch.id, ch.add_idx ?? 0]])
+   const upTo = Math.min(seenIdx + 1, data.db.total_art)
+   return Math.max(0, data.countAll(channels) - (await data.countLeft(upTo, channels)))
+}
+
+// The headlines around the current position under the current filter: up to
+// `span` matches each side plus the shown article, in chron order. The walk
+// reuses the nav lookups (findLeft/findRight skip non-matching packs via the
+// resident headers) and the data-pack LRU already holds the pos pack, so the
+// common case costs zero fetches.
+export async function peek(span = 10): Promise<IPeekItem[]> {
+   if (pos === -1) return []
+   const idxs = [pos]
+   for (let i = pos, n = 0; n < span; n++) {
+      i = await data.findLeft(i - 1, filter.channels)
+      if (i === -1) break
+      idxs.unshift(i)
+   }
+   for (let i = pos, n = 0; n < span; n++) {
+      i = await data.findRight(i + 1, filter.channels)
+      if (i === -1) break
+      idxs.push(i)
+   }
+   return Promise.all(
+      idxs.map(async (chron) => {
+         const art = await data.loadArticle(chron)
+         return {
+            chron,
+            title: art.t || "(untitled)",
+            when: art.p || art.a,
+            channel: data.db.channels[art.s]?.title ?? "[DELETED]",
+            current: chron === pos,
+         }
+      }),
+   )
 }
 
 export function pruneSeen() {
