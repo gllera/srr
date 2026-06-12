@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"io"
 	"net/http"
 	"testing"
 	"time"
@@ -16,7 +15,7 @@ import (
 // rather than hard-coding the RSS path.
 func init() {
 	// Registered once at init; safe because tests use distinct names.
-	ingest.Register("test-stub", func(ingest.Deps) (ingest.FetchFunc, io.Closer) {
+	ingest.Register("test-stub", func() ingest.FetchFunc {
 		pub := time.Unix(1700000000, 0)
 		items := []*mod.RawItem{
 			{GUID: 1, Title: "stub-1", Link: "https://stub/1", Published: &pub},
@@ -24,7 +23,7 @@ func init() {
 		}
 		return func(_ context.Context, _ *http.Client, _ []byte, _ ingest.Request) (ingest.Result, error) {
 			return ingest.Result{Items: items}, nil
-		}, nil
+		}
 	})
 }
 
@@ -33,7 +32,7 @@ func dispatchOnce(t *testing.T, feed *Feed, ch *Channel, rootIngest string) []*I
 	buf := make([]byte, 1<<20)
 	const fetchedAt int64 = 4_102_444_800
 	ingestName := ingest.Select(ch.Ingest, rootIngest)
-	run := &fetchRun{engine: ingest.New(ingest.Deps{}), fetchedAt: fetchedAt}
+	run := &fetchRun{engine: ingest.New(), fetchedAt: fetchedAt}
 	items, err := feed.fetch(context.Background(), run, buf, mod.New(), ch, ch.Pipe, ingestName)
 	if err != nil {
 		t.Fatalf("fetch: %v", err)

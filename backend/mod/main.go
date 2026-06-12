@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"slices"
@@ -12,22 +13,33 @@ import (
 	"time"
 )
 
-// maxSubprocessOutput caps the bytes buffered from an external module's stdout.
-// Above this, the writer returns an error which propagates as a broken pipe to
-// the subprocess. Defense-in-depth against runaway output OOM'ing the process.
-const maxSubprocessOutput = 64 << 20
+// MaxSubprocessOutput caps the bytes buffered from an external command's stdout
+// (a built-in module's shell step or an ingest fetcher). Above this, the writer
+// returns an error which propagates as a broken pipe to the subprocess.
+// Defense-in-depth against runaway output OOM'ing the process. Shared with the
+// ingest package, whose external-fetcher exec has the same exposure.
+const MaxSubprocessOutput = 64 << 20
 
-type cappedBuffer struct {
+// CappedBuffer buffers subprocess output up to Limit bytes and fails the write
+// that would exceed it, rather than growing unbounded. It backs the capped
+// stdout of every /bin/sh -c subprocess SRR runs (modules and ingest fetchers).
+type CappedBuffer struct {
 	buf   bytes.Buffer
-	limit int
+	Limit int
 }
 
-func (c *cappedBuffer) Write(p []byte) (int, error) {
-	if c.buf.Len()+len(p) > c.limit {
-		return 0, fmt.Errorf("subprocess output exceeds %d bytes", c.limit)
+func (c *CappedBuffer) Write(p []byte) (int, error) {
+	if c.buf.Len()+len(p) > c.Limit {
+		return 0, fmt.Errorf("subprocess output exceeds %d bytes", c.Limit)
 	}
 	return c.buf.Write(p)
 }
+
+// Bytes returns the buffered output.
+func (c *CappedBuffer) Bytes() []byte { return c.buf.Bytes() }
+
+// String returns the buffered output as a string.
+func (c *CappedBuffer) String() string { return c.buf.String() }
 
 // SubprocessTimeout bounds a single external (shell) command invocation so a
 // command that blocks forever — waiting on stdin, sleeping, trapping SIGPIPE
@@ -44,6 +56,29 @@ func SubprocessTimeout() time.Duration {
 		}
 	}
 	return 5 * time.Minute
+}
+
+// RunSubprocess runs `/bin/sh -c args` with the given env and working directory
+// (dir == "" inherits the process cwd), feeding stdin and capturing stdout
+// capped at MaxSubprocessOutput. The command is bounded by SubprocessTimeout so
+// a hang can't wedge the worker forever. Returns the whitespace-trimmed stdout
+// bytes; the caller decides what an empty result means (a no-op vs an error) and
+// how to wrap a run failure. Shared by the built-in shell-module path and the
+// ingest external-fetcher path, which run the same exec with different policies.
+func RunSubprocess(ctx context.Context, args string, env []string, dir string, stdin io.Reader) ([]byte, error) {
+	out := &CappedBuffer{Limit: MaxSubprocessOutput}
+	cctx, cancel := context.WithTimeout(ctx, SubprocessTimeout())
+	defer cancel()
+	cmd := exec.CommandContext(cctx, "/bin/sh", "-c", args)
+	cmd.Stdin = stdin
+	cmd.Stdout = out
+	cmd.Stderr = os.Stderr
+	cmd.Env = env
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSpace(out.Bytes()), nil
 }
 
 type RawItem struct {
@@ -136,17 +171,8 @@ func (o *Module) Process(ctx context.Context, args string, i *RawItem) error {
 		return err
 	}
 
-	out := &cappedBuffer{limit: maxSubprocessOutput}
-
-	cctx, cancel := context.WithTimeout(ctx, SubprocessTimeout())
-	defer cancel()
-	cmd := exec.CommandContext(cctx, "/bin/sh", "-c", args)
-	cmd.Stdin = &buf
-	cmd.Stdout = out
-	cmd.Stderr = os.Stderr
-	cmd.Env = o.env
-
-	if err := cmd.Run(); err != nil {
+	out, err := RunSubprocess(ctx, args, o.env, "", &buf)
+	if err != nil {
 		return err
 	}
 
@@ -155,7 +181,7 @@ func (o *Module) Process(ctx context.Context, args string, i *RawItem) error {
 	// "leave the item unchanged" rather than feeding "" to json.Unmarshal —
 	// which errors with "unexpected end of JSON input" and (per feed.go) would
 	// drop the item.
-	if strings.TrimSpace(out.buf.String()) == "" {
+	if len(out) == 0 {
 		return nil
 	}
 
@@ -163,7 +189,7 @@ func (o *Module) Process(ctx context.Context, args string, i *RawItem) error {
 	// would otherwise decode it into map[string]any, breaking type-asserts
 	// in built-ins that run after a shell module.
 	saved := i.Raw
-	if err := json.Unmarshal(out.buf.Bytes(), i); err != nil {
+	if err := json.Unmarshal(out, i); err != nil {
 		return err
 	}
 	i.Raw = saved

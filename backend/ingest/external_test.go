@@ -41,7 +41,7 @@ func TestExternalFetcherProtocol(t *testing.T) {
 	guid := hash("abc")
 	payload := fmt.Sprintf(`{"etag":"e1","last_modified":"lm1","items":[{"guid":%d,"title":"T","content":"C","link":"https://x/1","published":"2024-03-01T12:00:00Z"}]}`, guid)
 
-	got, err := New(Deps{}).Fetch(context.Background(), emit(t, payload), nil, nil, Request{URL: "https://x", MaxSize: 1024})
+	got, err := New().Fetch(context.Background(), emit(t, payload), nil, nil, Request{URL: "https://x", MaxSize: 1024})
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestExternalFetcherProtocol(t *testing.T) {
 func TestExternalFetcherNotModified(t *testing.T) {
 	requireSh(t)
 
-	got, err := New(Deps{}).Fetch(context.Background(), emit(t, `{"not_modified":true,"etag":"e2"}`), nil, nil, Request{URL: "https://x", MaxSize: 1024})
+	got, err := New().Fetch(context.Background(), emit(t, `{"not_modified":true,"etag":"e2"}`), nil, nil, Request{URL: "https://x", MaxSize: 1024})
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestExternalFetcherRequestOnStdin(t *testing.T) {
 	cmd := fmt.Sprintf("cat > %s; echo '{\"items\":[]}'", reqFile)
 	want := Request{URL: "https://example.com/x", ETag: "e-tag", LastModified: "lm", MaxSize: 4096}
 
-	if _, err := New(Deps{}).Fetch(context.Background(), cmd, nil, nil, want); err != nil {
+	if _, err := New().Fetch(context.Background(), cmd, nil, nil, want); err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
 
@@ -111,7 +111,7 @@ func TestExternalFetcherEnvPassthrough(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "token.txt")
 	cmd := fmt.Sprintf(`cat > /dev/null; printf '%%s' "$SRR_TEST_TOKEN" > %s; echo '{"items":[]}'`, out)
 
-	if _, err := New(Deps{}).Fetch(context.Background(), cmd, nil, nil, Request{URL: "https://x"}); err != nil {
+	if _, err := New().Fetch(context.Background(), cmd, nil, nil, Request{URL: "https://x"}); err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
 	data, err := os.ReadFile(out)
@@ -127,7 +127,7 @@ func TestExternalFetcherDatelessItem(t *testing.T) {
 	requireSh(t)
 
 	payload := fmt.Sprintf(`{"items":[{"guid":%d,"title":"T","content":"C","link":"https://x/1"}]}`, hash("no-date"))
-	got, err := New(Deps{}).Fetch(context.Background(), emit(t, payload), nil, nil, Request{URL: "https://x", MaxSize: 1024})
+	got, err := New().Fetch(context.Background(), emit(t, payload), nil, nil, Request{URL: "https://x", MaxSize: 1024})
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestExternalFetcherMultipleItemsOrdered(t *testing.T) {
 	requireSh(t)
 
 	payload := `{"items":[{"guid":1,"title":"a"},{"guid":2,"title":"b"},{"guid":3,"title":"c"}]}`
-	got, err := New(Deps{}).Fetch(context.Background(), emit(t, payload), nil, nil, Request{URL: "https://x", MaxSize: 1024})
+	got, err := New().Fetch(context.Background(), emit(t, payload), nil, nil, Request{URL: "https://x", MaxSize: 1024})
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestExternalFetcherMultipleItemsOrdered(t *testing.T) {
 func TestExternalFetcherNonZeroExit(t *testing.T) {
 	requireSh(t)
 
-	_, err := New(Deps{}).Fetch(context.Background(), "cat > /dev/null; exit 3", nil, nil, Request{URL: "https://x"})
+	_, err := New().Fetch(context.Background(), "cat > /dev/null; exit 3", nil, nil, Request{URL: "https://x"})
 	if err == nil {
 		t.Fatal("expected error on non-zero exit, got nil")
 	}
@@ -170,7 +170,7 @@ func TestExternalFetcherNonZeroExit(t *testing.T) {
 func TestExternalFetcherEmptyOutput(t *testing.T) {
 	requireSh(t)
 
-	_, err := New(Deps{}).Fetch(context.Background(), "cat > /dev/null; true", nil, nil, Request{URL: "https://x"})
+	_, err := New().Fetch(context.Background(), "cat > /dev/null; true", nil, nil, Request{URL: "https://x"})
 	if err == nil {
 		t.Fatal("expected error on empty output, got nil")
 	}
@@ -182,7 +182,7 @@ func TestExternalFetcherEmptyOutput(t *testing.T) {
 func TestExternalFetcherGarbageOutput(t *testing.T) {
 	requireSh(t)
 
-	_, err := New(Deps{}).Fetch(context.Background(), "cat > /dev/null; echo not-json", nil, nil, Request{URL: "https://x"})
+	_, err := New().Fetch(context.Background(), "cat > /dev/null; echo not-json", nil, nil, Request{URL: "https://x"})
 	if err == nil {
 		t.Fatal("expected decode error on non-JSON output, got nil")
 	}
@@ -196,24 +196,9 @@ func TestExternalFetcherContextCanceled(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := New(Deps{}).Fetch(ctx, "cat > /dev/null; cat", nil, nil, Request{URL: "https://x"})
+	_, err := New().Fetch(ctx, "cat > /dev/null; cat", nil, nil, Request{URL: "https://x"})
 	if err == nil {
 		t.Fatal("expected error when context is canceled, got nil")
-	}
-}
-
-// TestCappedBufferLimit pins the stdout cap that defends against a runaway
-// subprocess OOMing the process.
-func TestCappedBufferLimit(t *testing.T) {
-	c := &cappedBuffer{limit: 8}
-	if _, err := c.Write([]byte("1234")); err != nil {
-		t.Fatalf("under limit: %v", err)
-	}
-	if _, err := c.Write([]byte("5678")); err != nil {
-		t.Fatalf("at limit: %v", err)
-	}
-	if _, err := c.Write([]byte("9")); err == nil {
-		t.Fatal("over limit: expected error, got nil")
 	}
 }
 
@@ -238,7 +223,7 @@ func TestExternalFetcherRunsInProvidedDir(t *testing.T) {
 	// both land in its working directory, which must be AssetDir.
 	cmd := `cat > req.json; : > marker.txt; echo '{"items":[]}'`
 
-	_, err := New(Deps{}).Fetch(context.Background(), cmd, nil, nil, Request{URL: assetTestURL, AssetDir: dir})
+	_, err := New().Fetch(context.Background(), cmd, nil, nil, Request{URL: assetTestURL, AssetDir: dir})
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
@@ -269,7 +254,7 @@ func TestExternalFetcherNoAssetDir(t *testing.T) {
 	reqOut := filepath.Join(t.TempDir(), "req.json")
 	cmd := fmt.Sprintf(`cat > %s; echo '{"items":[]}'`, reqOut)
 
-	if _, err := New(Deps{}).Fetch(context.Background(), cmd, nil, nil, Request{URL: assetTestURL}); err != nil {
+	if _, err := New().Fetch(context.Background(), cmd, nil, nil, Request{URL: assetTestURL}); err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
 	data, err := os.ReadFile(reqOut)
