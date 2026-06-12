@@ -12,7 +12,7 @@ srr art fetch  --->  pack files (idx/ + data/ + db.gz)  --->  static SPA reader
 1. **Backend CLI** fetches RSS/Atom/RDF feeds and writes articles into gzip-compressed pack series optimized for incremental sync and HTTP caching.
 2. **Frontend SPA** loads the packs directly from any static host -- no API server, no database at runtime.
 
-Finalized packs are immutable and cached indefinitely; only the latest pack rotates via a filename toggle for cache busting.
+Every pack name is write-once — finalized packs are numeric, the latest pack is generation-named (`L<seq>.gz`) — so the whole store is cached indefinitely; only the small `db.gz` manifest revalidates.
 
 ## Quick Start
 

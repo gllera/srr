@@ -130,6 +130,13 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 		if err := db.Commit(ctx); err != nil {
 			return err
 		}
+		// Drop latest-pack generations older than the grace window. Articles
+		// are already durable, so failure here is log-only; WithoutCancel
+		// keeps a shutdown signal from widening the leak window (anything
+		// missed is swept by a later run regardless).
+		if err := db.GCLatest(context.WithoutCancel(ctx), latestKeep); err != nil {
+			slog.Warn("gc latest packs", "error", err)
+		}
 
 		var failed, totalFeeds int
 		for _, ch := range db.Channels() {

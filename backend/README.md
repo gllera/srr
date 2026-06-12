@@ -404,6 +404,6 @@ Articles are stored in two gzip-compressed series under each channel directory, 
 - **`idx/`** — Binary index (header + 2-byte entries per article); split every 50,000 articles.
 - **`data/`** — JSONL article content (one record per line); split when the gzip-compressed pack exceeds `--pack-size` KB.
 
-`idx/` finalized packs are 0-indexed (`idx/0.gz`..`idx/N-1.gz`); `data/` finalized packs start at id 1 (`data/1.gz`..) — the writer bumps `next_pid` before the first data entry, so `data/0.gz` is never produced. For each series the latest (mutable) pack rotates between `true.gz` and `false.gz` via the `data_tog` flag in `db.gz`, so CDNs can serve finalized packs with `force-cache`.
+`idx/` finalized packs are 0-indexed (`idx/0.gz`..`idx/N-1.gz`); `data/` finalized packs start at id 1 (`data/1.gz`..) — the writer bumps `next_pid` before the first data entry, so `data/0.gz` is never produced. For each series the latest pack is generation-named `L<seq>.gz` (the `seq` field in `db.gz`): each fetch that stores articles writes a new generation and never rewrites a published one, so every pack name is write-once and CDNs can serve the whole store (everything but `db.gz`) immutably. Expired generations beyond a small grace window (current + 2) are deleted after each fetch commit.
 
 This format is optimized for static file hosting with efficient incremental client sync.

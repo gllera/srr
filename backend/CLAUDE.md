@@ -67,7 +67,7 @@ Backend-specific behavior:
 - Per-entry `delta_fetched_at` is computed against `prevFetchedTS = FirstFetchedAt/28800 + FetchedAtCursor` so the first entry of each batch records the elapsed time since the previous fetch (clamped to 7 bits with carry).
 - `ArticleData` struct: `{ ChannelID, FetchedAt, Published, Title, Link, Content }` — serialized as JSONL with short keys `s/a/p/t/l/c`.
 - `DBCore.Channels` is `map[int]*Channel`; serialized as a JSON object keyed by channel ID. `AddChannel` assigns the first free ID in [0, 255] and returns an error if all 256 slots are taken. `RemoveChannel` uses `delete`.
-- `data_tog` toggles alternating pack filenames for atomic updates (used for both idx/ and data/ latest packs).
+- `seq` names the latest packs (`idx/L<seq>.gz`, `data/L<seq>.gz`): each article-producing batch writes generation `seq+1` (both series), bumps `Seq` only after both saves succeed, and `Commit` publishes it — names are write-once, so a generation can never be seen half-written or rewritten. `GCLatest(ctx, keep)` (called from `cmd_fetch` after `Commit`, `latestKeep` = 2, warn-only) deletes expired generations, sweeping a 4-wide trailing window so crash-leaked packs self-heal.
 - `withDB(locked, fn)` / `withDBCtx(ctx, locked, fn)`: most cmd `Run()` methods are now a single `withDB` call wrapping the work.
 
 ### Module System (`mod/`)

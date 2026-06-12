@@ -14,13 +14,15 @@ import (
 )
 
 const (
-	// cacheImmutable stamps finalized packs (idx/<n>.gz, data/<n>.gz): once
-	// written they never change, so the CDN/client may cache them forever.
+	// cacheImmutable stamps pack files (idx/, data/): finalized packs
+	// (idx/<n>.gz, data/<n>.gz) never change once written, and latest packs
+	// (idx/L<seq>.gz, data/L<seq>.gz) are write-once — a generation is never
+	// rewritten after db.gz publishes it — so the CDN/client may cache both
+	// forever.
 	cacheImmutable = "public, max-age=31536000, immutable"
-	// cacheRevalidate stamps db.gz and the toggled latest packs
-	// (true.gz/false.gz): they are rewritten every fetch, so a stale copy
-	// would misroute the reader to the wrong latest pack (see frontend commit
-	// 1d3826f). Must-revalidate forces a conditional request every load.
+	// cacheRevalidate stamps db.gz: the store's only mutable key (the
+	// consistency root naming the current L<seq> generation), rewritten every
+	// fetch. Must-revalidate forces a conditional request every load.
 	cacheRevalidate = "no-cache, must-revalidate"
 )
 
@@ -28,20 +30,25 @@ const (
 // attach when writing key, or "" for keys with no caching policy (e.g. the
 // lock marker). Backends that carry HTTP metadata (S3) emit it; filesystem
 // backends ignore it. Centralised here so writer and the contract stay in one
-// place. The toggled-latest check must precede the numeric-pack check because
-// both live under idx/ and data/.
+// place.
 func cacheControlForKey(key string) string {
 	base := path.Base(key)
 	switch {
 	case key == "db.gz":
 		return cacheRevalidate
-	case base == "true.gz" || base == "false.gz":
-		return cacheRevalidate
-	case (strings.HasPrefix(key, "idx/") || strings.HasPrefix(key, "data/")) && isPackNumber(strings.TrimSuffix(base, ".gz")):
+	case (strings.HasPrefix(key, "idx/") || strings.HasPrefix(key, "data/")) && isPackStem(strings.TrimSuffix(base, ".gz")):
 		return cacheImmutable
 	default:
 		return ""
 	}
+}
+
+// isPackStem reports whether s is a pack filename stem: the digit run of a
+// finalized pack ("0", "12") or the L-prefixed generation name of a
+// write-once latest pack ("L3"). Anchored strictly — "L", "Lx7" or "LL3"
+// must not be stamped immutable.
+func isPackStem(s string) bool {
+	return isPackNumber(strings.TrimPrefix(s, "L"))
 }
 
 // isPackNumber reports whether s is a non-empty run of ASCII digits — the

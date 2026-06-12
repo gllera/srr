@@ -5,16 +5,16 @@ import (
 )
 
 func TestDataKeyForFinalized(t *testing.T) {
-	core := &DBCore{NextPackID: 5, DataToggle: true}
+	core := &DBCore{NextPackID: 5, Seq: 7}
 	cases := []struct {
 		packID int
 		want   string
 	}{
 		{0, "data/0.gz"},
 		{4, "data/4.gz"},
-		// packID == NextPackID is the latest pack (toggle name).
-		{5, "data/true.gz"},
-		{99, "data/true.gz"},
+		// packID == NextPackID is the latest pack (current generation name).
+		{5, "data/L7.gz"},
+		{99, "data/L7.gz"},
 	}
 	for _, c := range cases {
 		if got := dataKeyFor(core, c.packID); got != c.want {
@@ -23,18 +23,39 @@ func TestDataKeyForFinalized(t *testing.T) {
 	}
 }
 
-func TestDataKeyForLatestRespectsToggle(t *testing.T) {
+func TestGenKey(t *testing.T) {
 	cases := []struct {
-		toggle bool
+		prefix string
+		gen    int
 		want   string
 	}{
-		{true, "data/true.gz"},
-		{false, "data/false.gz"},
+		{"idx", 0, "idx/L0.gz"},
+		{"idx", 1, "idx/L1.gz"},
+		{"data", 17, "data/L17.gz"},
 	}
 	for _, c := range cases {
-		core := &DBCore{NextPackID: 0, DataToggle: c.toggle}
-		if got := dataKeyFor(core, 0); got != c.want {
-			t.Errorf("dataKeyFor(toggle=%v) = %q, want %q", c.toggle, got, c.want)
+		if got := genKey(c.prefix, c.gen); got != c.want {
+			t.Errorf("genKey(%q, %d) = %q, want %q", c.prefix, c.gen, got, c.want)
+		}
+	}
+}
+
+func TestLatestKeyFollowsSeq(t *testing.T) {
+	cases := []struct {
+		seq  int
+		want string
+	}{
+		{1, "data/L1.gz"},
+		{42, "data/L42.gz"},
+	}
+	for _, c := range cases {
+		core := &DBCore{Seq: c.seq}
+		if got := latestKey(core, "data"); got != c.want {
+			t.Errorf("latestKey(seq=%d, data) = %q, want %q", c.seq, got, c.want)
+		}
+		wantIdx := "idx" + c.want[len("data"):]
+		if got := latestKey(core, "idx"); got != wantIdx {
+			t.Errorf("latestKey(seq=%d, idx) = %q, want %q", c.seq, got, wantIdx)
 		}
 	}
 }

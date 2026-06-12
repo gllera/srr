@@ -90,7 +90,7 @@ func readAllArticles(t *testing.T, dir string, c *DBCore) []*Item {
 		if p < numFinalized {
 			name = fmt.Sprintf("idx/%d.gz", p)
 		} else {
-			name = fmt.Sprintf("idx/%v.gz", c.DataToggle)
+			name = latestKey(c, "idx")
 		}
 		metaBytes := decompressGz(t, filepath.Join(dir, name))
 		for off := idxHeaderSize; off+2 <= len(metaBytes); off += 2 {
@@ -111,7 +111,7 @@ func readAllArticles(t *testing.T, dir string, c *DBCore) []*Item {
 			var dataBytes []byte
 			for _, name := range []string{
 				fmt.Sprintf("data/%d.gz", ref.packID),
-				fmt.Sprintf("data/%v.gz", c.DataToggle),
+				latestKey(c, "data"),
 			} {
 				path := filepath.Join(dir, name)
 				if _, err := os.Stat(path); err == nil {
@@ -177,13 +177,17 @@ func TestPutArticlesBasic(t *testing.T) {
 }
 
 func TestPutArticlesEmpty(t *testing.T) {
-	db, _, _ := setupTestDB(t)
+	db, c, _ := setupTestDB(t)
 
 	if err := db.PutArticles(ctx, nil); err != nil {
 		t.Fatalf("PutArticles(nil): %v", err)
 	}
 	if err := db.PutArticles(ctx, []*Item{}); err != nil {
 		t.Fatalf("PutArticles([]): %v", err)
+	}
+	// An empty batch must not publish a new latest-pack generation.
+	if c.Seq != 0 {
+		t.Errorf("Seq after empty batches = %d, want 0", c.Seq)
 	}
 }
 
@@ -587,21 +591,107 @@ func TestAddChannelSetsAddIdx(t *testing.T) {
 	}
 }
 
-func TestPutArticlesToggle(t *testing.T) {
+func TestPutArticlesSeqIncrements(t *testing.T) {
 	db, c, _ := setupTestDB(t)
 	ch := &Channel{id: 1}
 	c.Channels = map[int]*Channel{ch.id: ch}
 
-	initialToggle := c.DataToggle
-	articles := []*Item{
-		{Channel: ch, Title: "A1", Content: "C1", Published: 1000},
-	}
-	if err := db.PutArticles(ctx, articles); err != nil {
-		t.Fatalf("PutArticles: %v", err)
+	if c.Seq != 0 {
+		t.Fatalf("fresh store Seq = %d, want 0", c.Seq)
 	}
 
-	if c.DataToggle != !initialToggle {
-		t.Errorf("DataToggle should have toggled from %v to %v", initialToggle, !initialToggle)
+	// First article batch publishes generation 1, the next one generation 2.
+	for want := 1; want <= 2; want++ {
+		articles := []*Item{
+			{Channel: ch, Title: "A", Content: "C", Published: int64(1000 * want)},
+		}
+		if err := db.PutArticles(ctx, articles); err != nil {
+			t.Fatalf("PutArticles #%d: %v", want, err)
+		}
+		if c.Seq != want {
+			t.Errorf("Seq after batch %d = %d, want %d", want, c.Seq, want)
+		}
+	}
+}
+
+// putOneArticle runs one article-producing PutArticles batch (one latest-pack
+// generation per call).
+func putOneArticle(t *testing.T, db *DB, ch *Channel, n int) {
+	t.Helper()
+	articles := []*Item{
+		{Channel: ch, Title: fmt.Sprintf("A%d", n), Content: "C", Published: int64(n * 1000)},
+	}
+	if err := db.PutArticles(ctx, articles); err != nil {
+		t.Fatalf("PutArticles #%d: %v", n, err)
+	}
+}
+
+// assertGen asserts presence/absence of both series' files for a generation.
+func assertGen(t *testing.T, dir string, g int, present bool) {
+	t.Helper()
+	for _, prefix := range []string{"idx", "data"} {
+		_, err := os.Stat(filepath.Join(dir, genKey(prefix, g)))
+		if present && err != nil {
+			t.Errorf("%s missing: %v", genKey(prefix, g), err)
+		}
+		if !present && err == nil {
+			t.Errorf("%s should have been GC'd", genKey(prefix, g))
+		}
+	}
+}
+
+func TestGCLatestGraceWindow(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	ch := &Channel{id: 1}
+	c.Channels = map[int]*Channel{ch.id: ch}
+
+	// Five fetch cycles, each running GC like cmd_fetch does.
+	for i := 1; i <= 5; i++ {
+		putOneArticle(t, db, ch, i)
+		if err := db.GCLatest(ctx, 2); err != nil {
+			t.Fatalf("GCLatest #%d: %v", i, err)
+		}
+	}
+
+	// Seq is 5, keep=2: generations 3..5 stay, 1..2 are gone.
+	for g := 1; g <= 2; g++ {
+		assertGen(t, dir, g, false)
+	}
+	for g := 3; g <= 5; g++ {
+		assertGen(t, dir, g, true)
+	}
+}
+
+func TestGCLatestSweepsCrashGaps(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	ch := &Channel{id: 1}
+	c.Channels = map[int]*Channel{ch.id: ch}
+
+	// Five batches with no GC in between (as if every prior run died after
+	// Commit): a single sweep must still clear the whole expired backlog.
+	for i := 1; i <= 5; i++ {
+		putOneArticle(t, db, ch, i)
+	}
+	if err := db.GCLatest(ctx, 2); err != nil {
+		t.Fatalf("GCLatest: %v", err)
+	}
+	for g := 1; g <= 2; g++ {
+		assertGen(t, dir, g, false)
+	}
+	for g := 3; g <= 5; g++ {
+		assertGen(t, dir, g, true)
+	}
+
+	// A second sweep on the same state is a no-op (Rm silent-on-missing).
+	if err := db.GCLatest(ctx, 2); err != nil {
+		t.Fatalf("GCLatest (idempotent): %v", err)
+	}
+}
+
+func TestGCLatestEmptyStoreNoop(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	if err := db.GCLatest(ctx, 2); err != nil {
+		t.Fatalf("GCLatest on empty store: %v", err)
 	}
 }
 
@@ -718,11 +808,39 @@ func TestPutArticlesEmptyTitleAndLink(t *testing.T) {
 	}
 }
 
+// TestCommitSeqGolden pins the db.gz emission contract the frontend
+// normalizes against (data.ts `raw.seq ??= 0`): "seq" is present once a
+// generation exists, omitted (omitempty) for an empty store, and the
+// retired "data_tog" key is never emitted.
+func TestCommitSeqGolden(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+
+	if err := db.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	raw := string(decompressGz(t, filepath.Join(dir, "db.gz")))
+	if strings.Contains(raw, `"seq"`) {
+		t.Errorf("empty-store db.gz should omit %q: %s", "seq", raw)
+	}
+
+	c.Seq = 3
+	if err := db.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	raw = string(decompressGz(t, filepath.Join(dir, "db.gz")))
+	if !strings.Contains(raw, `"seq":3`) {
+		t.Errorf("db.gz missing %q: %s", `"seq":3`, raw)
+	}
+	if strings.Contains(raw, "data_tog") {
+		t.Errorf("db.gz still emits retired %q: %s", "data_tog", raw)
+	}
+}
+
 func TestDBNullChannelsInJSON(t *testing.T) {
 	dir := t.TempDir()
 	globals = &Globals{PackSize: 1, Store: dir}
 
-	core := `{"data_tog":false,"fetched_at":0,"total_art":0,"next_pid":0,"pack_off":0,"channels":null}` + "\n"
+	core := `{"fetched_at":0,"total_art":0,"next_pid":0,"pack_off":0,"channels":null}` + "\n"
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	gz.Write([]byte(core))

@@ -123,14 +123,19 @@ func TestCacheControlForKey(t *testing.T) {
 		key, want string
 	}{
 		{"db.gz", cacheRevalidate},
-		{"idx/true.gz", cacheRevalidate},
-		{"idx/false.gz", cacheRevalidate},
-		{"data/true.gz", cacheRevalidate},
-		{"data/false.gz", cacheRevalidate},
 		{"idx/0.gz", cacheImmutable},
 		{"idx/12.gz", cacheImmutable},
 		{"data/1.gz", cacheImmutable},
 		{"data/250.gz", cacheImmutable},
+		{"idx/L1.gz", cacheImmutable},
+		{"idx/L0.gz", cacheImmutable},
+		{"data/L7.gz", cacheImmutable},
+		{"idx/L.gz", ""},
+		{"data/Lx7.gz", ""},
+		{"data/LL3.gz", ""},
+		{"L1.gz", ""},
+		{"idx/true.gz", ""},
+		{"data/false.gz", ""},
 		{".locked", ""},
 		{"unknown.txt", ""},
 	}

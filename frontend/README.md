@@ -75,7 +75,7 @@ app  -->  fmt
 ## Features
 
 - **Streaming decompression** -- pack bodies pass through `DecompressionStream`; idx packs decode into an `ArrayBuffer`, data packs go through `TextDecoderStream` with partial-line buffering for JSONL.
-- **Aggressive caching** -- finalized packs use HTTP `force-cache`; latest packs use filename toggle (`true.gz`/`false.gz`) for cache busting; data packs are kept in an in-memory LRU (max 20).
+- **Aggressive caching** -- every pack name is write-once (finalized `N.gz`, latest generation `L<seq>.gz`), so all packs use HTTP `force-cache`; only `db.gz` revalidates. Data packs are kept in an in-memory LRU (max 20).
 - **Filtering** -- filter by channel or tag via URL hash filter segment (channel IDs or tag names, `+`-separated after `!`)
 - **Dark mode** -- automatic via `prefers-color-scheme`
 - **No runtime deps** -- the built bundle has zero npm dependencies

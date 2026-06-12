@@ -2,7 +2,10 @@ declare const SRR_CDN_URL: string
 declare const process: { env: { NODE_ENV: string } }
 
 interface IDB {
-   data_tog: boolean
+   // Latest-pack generation: current latest packs are idx/L<seq>.gz and
+   // data/L<seq>.gz. Backend omits the key at 0 (empty store); data.ts
+   // init() normalizes the absent case.
+   seq: number
    fetched_at: number
    first_fetched?: number
    total_art: number
