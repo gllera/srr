@@ -11,6 +11,13 @@ import (
 	"srrb/mod"
 )
 
+// maxBoundaryGUIDs caps the persisted per-feed BoundaryGUIDs array. Real
+// publishers expose at most a few hundred items per response; without a cap,
+// one misbehaving feed (thousands of dateless or same-second items) bloats
+// db.gz — the one no-cache object every reader polls — permanently. See the
+// cap logic in fetch for the over-cap semantics.
+const maxBoundaryGUIDs = 1024
+
 type Feed struct {
 	URL          string `json:"url"`
 	ETag         string `json:"etag,omitempty"`
@@ -20,8 +27,9 @@ type Feed struct {
 	// BoundaryGUIDs is the GUIDs from the most recent non-empty fetch whose
 	// pub equals Watermark (the dated boundary) or equals 0 (dateless).
 	// Repopulated each non-empty fetch from the current response so its size
-	// stays bounded by what the publisher currently exposes; a 200 OK with
-	// zero items leaves the field untouched so a transient empty channel
+	// stays bounded by what the publisher currently exposes, and hard-capped
+	// at maxBoundaryGUIDs (over-cap items are skipped, not ingested); a 200 OK
+	// with zero items leaves the field untouched so a transient empty channel
 	// doesn't drop dedup state.
 	BoundaryGUIDs []uint32 `json:"bg,omitempty"`
 	FetchError    string   `json:"ferr,omitempty"`
@@ -73,7 +81,14 @@ func (feed *Feed) fetch(ctx context.Context, run *fetchRun, buf []byte, processo
 	maxPub := priorWatermark
 	boundary := make(map[uint32]int64)
 
-	var items []*Item
+	// First pass: cheap dedup/watermark classification over the whole
+	// response, no pipeline work yet. The boundary cap below must see the
+	// complete fetch before any item is committed to ingestion.
+	type candidate struct {
+		item *mod.RawItem
+		pub  int64
+	}
+	var candidates []candidate
 	for _, i := range result.Items {
 		// An external ingest strategy returns items as a JSON array; a null
 		// element decodes to a nil *mod.RawItem. Skip it before any field access
@@ -112,6 +127,47 @@ func (feed *Feed) fetch(ctx context.Context, run *fetchRun, buf []byte, processo
 			maxPub = pubUnix
 		}
 		if pubUnix != 0 && pubUnix < priorWatermark {
+			continue
+		}
+		candidates = append(candidates, candidate{i, pubUnix})
+	}
+
+	bg := make([]uint32, 0, len(boundary))
+	for g, p := range boundary {
+		// Keep dateless GUIDs and everything at or above the watermark so they
+		// dedup next fetch. ">= maxPub" (not "==") also retains a re-dated
+		// existing item whose bumped pub exceeds the (deliberately unraised)
+		// watermark, so it stays deduped instead of re-ingesting.
+		if p == 0 || p >= maxPub {
+			bg = append(bg, g)
+		}
+	}
+	slices.Sort(bg)
+
+	// Cap bg at maxBoundaryGUIDs. Sorting first makes the kept set the cap
+	// smallest hashes — a pure function of the response, independent of item
+	// order and fetch history, so the same over-cap response keeps and drops
+	// the same GUIDs every fetch. Dropped GUIDs must then not be ingested at
+	// all (the gate in the second pass below): an ingested-but-unremembered
+	// item would look new again on every subsequent fetch and duplicate
+	// forever. Net effect: an over-cap feed surfaces only its kept items, the
+	// rest stay invisible until the response shrinks.
+	var dropped map[uint32]struct{}
+	if len(bg) > maxBoundaryGUIDs {
+		slog.Warn("boundary GUIDs over cap, skipping over-cap items", "url", feed.URL, "total", len(bg), "cap", maxBoundaryGUIDs)
+		dropped = uint32Set(bg[maxBoundaryGUIDs:])
+		bg = bg[:maxBoundaryGUIDs]
+	}
+
+	// Second pass: pipeline + asset upload for the items committed to
+	// ingestion.
+	var items []*Item
+	for _, c := range candidates {
+		i := c.item
+		// Only bg-class items (dateless or at/above the new watermark) can be
+		// in dropped — anything below maxPub is protected by Watermark itself
+		// next fetch and needs no bg slot.
+		if _, skip := dropped[i.GUID]; skip {
 			continue
 		}
 
@@ -167,22 +223,11 @@ func (feed *Feed) fetch(ctx context.Context, run *fetchRun, buf []byte, processo
 			Title:     i.Title,
 			Content:   i.Content,
 			Link:      i.Link,
-			Published: pubUnix,
+			Published: c.pub,
 		})
 	}
 
 	feed.Watermark = maxPub
-	bg := make([]uint32, 0, len(boundary))
-	for g, p := range boundary {
-		// Keep dateless GUIDs and everything at or above the watermark so they
-		// dedup next fetch. ">= maxPub" (not "==") also retains a re-dated
-		// existing item whose bumped pub exceeds the (deliberately unraised)
-		// watermark, so it stays deduped instead of re-ingesting.
-		if p == 0 || p >= maxPub {
-			bg = append(bg, g)
-		}
-	}
-	slices.Sort(bg)
 	feed.BoundaryGUIDs = bg
 	feed.ETag = result.ETag
 	feed.LastModified = result.LastModified
