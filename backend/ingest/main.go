@@ -145,10 +145,9 @@ func New() *Fetcher {
 // contract used by built-ins); `published` is RFC3339 or null/absent for
 // dateless items.
 //
-// A non-zero exit code, empty stdout, or output exceeding
-// mod.MaxSubprocessOutput is a hard error (fails just this feed's fetch). The
-// author-facing spec and a reference implementation live in README.md
-// (Ingest Strategies).
+// A non-zero exit code, empty stdout, or output over the subprocess output cap
+// is a hard error (fails just this feed's fetch). The author-facing spec and a
+// reference implementation live in README.md (Ingest Strategies).
 func (f *Fetcher) Fetch(ctx context.Context, args string, client *http.Client, buf []byte, req Request) (Result, error) {
 	if fn, ok := f.fetchers[args]; ok {
 		return fn(ctx, client, buf, req)

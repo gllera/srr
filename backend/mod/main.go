@@ -13,33 +13,27 @@ import (
 	"time"
 )
 
-// MaxSubprocessOutput caps the bytes buffered from an external command's stdout
+// maxSubprocessOutput caps the bytes buffered from an external command's stdout
 // (a built-in module's shell step or an ingest fetcher). Above this, the writer
 // returns an error which propagates as a broken pipe to the subprocess.
-// Defense-in-depth against runaway output OOM'ing the process. Shared with the
-// ingest package, whose external-fetcher exec has the same exposure.
-const MaxSubprocessOutput = 64 << 20
+// Defense-in-depth against runaway output OOM'ing the process. An internal
+// detail of RunSubprocess, which both the module and ingest paths run through.
+const maxSubprocessOutput = 64 << 20
 
-// CappedBuffer buffers subprocess output up to Limit bytes and fails the write
+// cappedBuffer buffers subprocess output up to limit bytes and fails the write
 // that would exceed it, rather than growing unbounded. It backs the capped
-// stdout of every /bin/sh -c subprocess SRR runs (modules and ingest fetchers).
-type CappedBuffer struct {
+// stdout in RunSubprocess.
+type cappedBuffer struct {
 	buf   bytes.Buffer
-	Limit int
+	limit int
 }
 
-func (c *CappedBuffer) Write(p []byte) (int, error) {
-	if c.buf.Len()+len(p) > c.Limit {
-		return 0, fmt.Errorf("subprocess output exceeds %d bytes", c.Limit)
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	if c.buf.Len()+len(p) > c.limit {
+		return 0, fmt.Errorf("subprocess output exceeds %d bytes", c.limit)
 	}
 	return c.buf.Write(p)
 }
-
-// Bytes returns the buffered output.
-func (c *CappedBuffer) Bytes() []byte { return c.buf.Bytes() }
-
-// String returns the buffered output as a string.
-func (c *CappedBuffer) String() string { return c.buf.String() }
 
 // SubprocessTimeout bounds a single external (shell) command invocation so a
 // command that blocks forever — waiting on stdin, sleeping, trapping SIGPIPE
@@ -66,7 +60,7 @@ func SubprocessTimeout() time.Duration {
 // how to wrap a run failure. Shared by the built-in shell-module path and the
 // ingest external-fetcher path, which run the same exec with different policies.
 func RunSubprocess(ctx context.Context, args string, env []string, dir string, stdin io.Reader) ([]byte, error) {
-	out := &CappedBuffer{Limit: MaxSubprocessOutput}
+	out := &cappedBuffer{limit: maxSubprocessOutput}
 	cctx, cancel := context.WithTimeout(ctx, SubprocessTimeout())
 	defer cancel()
 	cmd := exec.CommandContext(cctx, "/bin/sh", "-c", args)
@@ -78,7 +72,7 @@ func RunSubprocess(ctx context.Context, args string, env []string, dir string, s
 	if err := cmd.Run(); err != nil {
 		return nil, err
 	}
-	return bytes.TrimSpace(out.Bytes()), nil
+	return bytes.TrimSpace(out.buf.Bytes()), nil
 }
 
 type RawItem struct {
