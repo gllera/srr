@@ -9,6 +9,12 @@ export const URL_DENY = /^\s*(?:javascript|data|vbscript|file)\s*:/i
 const DANGEROUS_SELECTOR = "script,style,iframe,embed,object,form,link,meta,base,svg,math"
 
 const HTTP_RE = /^https?:\/\//i
+// Reserved store prefix for self-hosted media (mirrors backend assetPrefix).
+// Such content URLs are relative to the pack base, not the reader page, so we
+// resolve them against PACK_BASE (the same value as data.ts's DB_URL) instead
+// of routing them through the image proxy. Computed once at module load.
+const ASSET_PREFIX = "assets/"
+const PACK_BASE = new URL(SRR_CDN_URL, window.location.href)
 // Prefix is the URL-encoded-source-appender shape (wsrv.nl, imgproxy, imagor).
 // Configured per-user via localStorage `srr-img-proxy`; empty/absent = passthrough.
 const IMG_PROXY_KEY = "srr-img-proxy"
@@ -53,8 +59,18 @@ export function sanitizeHtml(html: string): string {
       else if (tag === "IMG") {
          node.removeAttribute("srcset")
          const src = node.getAttribute("src")
-         if (src && HTTP_RE.test(src)) node.setAttribute("src", imgProxy(src, proxyPrefix))
-         // URL_DENY-matching src already stripped by the attribute loop above
+         // Self-hosted assets resolve against the pack base and bypass the proxy;
+         // external http(s) URLs keep the proxy path. URL_DENY-matching src was
+         // already stripped by the attribute loop above.
+         if (src && src.startsWith(ASSET_PREFIX)) node.setAttribute("src", new URL(src, PACK_BASE).href)
+         else if (src && HTTP_RE.test(src)) node.setAttribute("src", imgProxy(src, proxyPrefix))
+      } else if (tag === "VIDEO") {
+         // Resolve self-hosted src/poster against the pack base; external video
+         // URLs pass through (image proxies don't handle video).
+         for (const a of ["src", "poster"]) {
+            const v = node.getAttribute(a)
+            if (v && v.startsWith(ASSET_PREFIX)) node.setAttribute(a, new URL(v, PACK_BASE).href)
+         }
       }
    }
    return tmpl.innerHTML

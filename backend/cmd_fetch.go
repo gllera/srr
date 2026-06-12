@@ -51,6 +51,18 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 				MaxConnsPerHost:     globals.Workers,
 			},
 		}
+		// Dedicated client for asset downloads: a longer timeout than the 10s
+		// feed client, suited to large media (video). The asset fetcher is
+		// shared across workers (its client + the store backend are
+		// concurrent-safe).
+		mediaClient := &http.Client{
+			Timeout: 5 * time.Minute,
+			Transport: &http.Transport{
+				MaxIdleConnsPerHost: globals.Workers,
+				MaxConnsPerHost:     globals.Workers,
+			},
+		}
+		assets := newAssetFetcher(db.Backend, mediaClient, globals.MaxMediaSize)
 		bufPool := sync.Pool{
 			New: func() any {
 				return make([]byte, globals.MaxFeedSize*(1<<10)+1)
@@ -61,7 +73,7 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 		// shared *mod.Module across workers is unsafe. Workers also amortize their
 		// own bluemonday/minify allocations across the items they process.
 		procPool := sync.Pool{
-			New: func() any { return mod.New() },
+			New: func() any { return mod.New(assets) },
 		}
 		// Built-in FetchFuncs are stateless and external (shell) fetchers spawn
 		// per-call subprocesses, so one *ingest.Fetcher is concurrent-safe.

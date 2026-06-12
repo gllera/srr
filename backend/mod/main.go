@@ -62,10 +62,21 @@ func (r RawFeedItem) Text(names ...string) string {
 	return ""
 }
 
-var registry = map[string]func() func(*RawItem) error{}
+// Assets lets a module download an object by URL and stream it into the SRR
+// store, returning the RELATIVE store key to reference it by.
+type Assets interface {
+	// Fetch GETs srcURL and streams the body into the store under a URL-hash
+	// key, returning the relative key (e.g. "assets/ab/cd1234.jpg"). On any
+	// failure returns ("", err); callers keep the original URL.
+	Fetch(ctx context.Context, srcURL string) (key string, err error)
+}
 
-// Register registers a built-in processor available as "#name".
-func Register(name string, init func() func(*RawItem) error) {
+var registry = map[string]func(Assets) func(context.Context, *RawItem) error{}
+
+// Register registers a built-in processor available as "#name". The init
+// factory receives the run's Assets capability (may be nil when no store is
+// wired, e.g. preview/tests) and runs once per New().
+func Register(name string, init func(Assets) func(context.Context, *RawItem) error) {
 	if !strings.HasPrefix(name, "#") {
 		name = "#" + name
 	}
@@ -73,24 +84,27 @@ func Register(name string, init func() func(*RawItem) error) {
 }
 
 type Module struct {
-	processors map[string]func(*RawItem) error
+	processors map[string]func(context.Context, *RawItem) error
 	env        []string
 }
 
-func New() *Module {
+// New builds a Module with every registered built-in instantiated once.
+// assets is the download capability passed to each built-in factory; pass
+// nil to disable downloads (built-ins degrade to a no-op for that feature).
+func New(assets Assets) *Module {
 	m := &Module{
-		processors: make(map[string]func(*RawItem) error, len(registry)),
+		processors: make(map[string]func(context.Context, *RawItem) error, len(registry)),
 		env:        os.Environ(),
 	}
 	for name, init := range registry {
-		m.processors[name] = init()
+		m.processors[name] = init(assets)
 	}
 	return m
 }
 
 func (o *Module) Process(ctx context.Context, args string, i *RawItem) error {
 	if fn, ok := o.processors[args]; ok {
-		return fn(i)
+		return fn(ctx, i)
 	}
 
 	var buf bytes.Buffer

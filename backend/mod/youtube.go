@@ -1,6 +1,7 @@
 package mod
 
 import (
+	"context"
 	"fmt"
 	"html"
 	"net/url"
@@ -15,14 +16,21 @@ var youtubeIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{11}$`)
 var youtubeURLRe = regexp.MustCompile(`https?://[^\s<>"']+`)
 
 func init() {
-	Register("youtube", func() func(*RawItem) error {
-		return func(i *RawItem) error {
+	Register("youtube", func(assets Assets) func(context.Context, *RawItem) error {
+		return func(ctx context.Context, i *RawItem) error {
 			id := extractYouTubeID(i.Link)
 			if id == "" {
 				return nil
 			}
 			authorName, authorURL := youtubeAuthor(i)
 			i.Content = renderYouTubeContent(id, i.Title, youtubeDescription(i), authorName, authorURL)
+			// Self-host the i.ytimg.com thumbnail (and any media in the
+			// description) when a store is wired; no-op when assets == nil.
+			content, err := RewriteMedia(ctx, assets, i.Content)
+			if err != nil {
+				return err
+			}
+			i.Content = content
 			return nil
 		}
 	})

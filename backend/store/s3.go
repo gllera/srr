@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/url"
 	"path"
 	"strings"
@@ -123,10 +124,19 @@ func (d *S3) Put(ctx context.Context, key string, r io.Reader, ignoreExisting bo
 		condition = aws.String("*")
 	}
 
+	// Set Content-Type by extension so self-hosted assets (assets/<hash>.jpg,
+	// .mp4, …) render in-browser instead of serving as octet-stream. Empty for
+	// unrecognised extensions; harmless for .gz packs.
+	var contentType *string
+	if ct := mime.TypeByExtension(path.Ext(key)); ct != "" {
+		contentType = aws.String(ct)
+	}
+
 	_, err := d.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:            aws.String(d.bucket),
 		Key:               aws.String(key),
 		Body:              r,
+		ContentType:       contentType,
 		IfNoneMatch:       condition,
 		ChecksumAlgorithm: types.ChecksumAlgorithmCrc32,
 	})

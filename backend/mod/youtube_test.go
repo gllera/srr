@@ -43,7 +43,7 @@ func TestExtractYouTubeID(t *testing.T) {
 }
 
 func TestYouTubeModSkipsNonYouTubeLinks(t *testing.T) {
-	m := New()
+	m := New(nil)
 	now := time.Now()
 	item := &RawItem{
 		GUID:      1,
@@ -61,7 +61,7 @@ func TestYouTubeModSkipsNonYouTubeLinks(t *testing.T) {
 }
 
 func TestYouTubeModEmbedsThumbnail(t *testing.T) {
-	m := New()
+	m := New(nil)
 	now := time.Now()
 	item := &RawItem{
 		GUID:      1,
@@ -85,7 +85,7 @@ func TestYouTubeModEmbedsThumbnail(t *testing.T) {
 }
 
 func TestYouTubeModUsesMediaDescription(t *testing.T) {
-	m := New()
+	m := New(nil)
 	now := time.Now()
 
 	raw := RawFeedItem{
@@ -120,7 +120,7 @@ func TestYouTubeModUsesMediaDescription(t *testing.T) {
 }
 
 func TestYouTubeModFallsBackToEntryDescription(t *testing.T) {
-	m := New()
+	m := New(nil)
 	now := time.Now()
 
 	raw := RawFeedItem{
@@ -142,7 +142,7 @@ func TestYouTubeModFallsBackToEntryDescription(t *testing.T) {
 }
 
 func TestYouTubeModFallsBackToExistingContent(t *testing.T) {
-	m := New()
+	m := New(nil)
 	now := time.Now()
 
 	item := &RawItem{
@@ -165,7 +165,7 @@ func TestYouTubeModFallsBackToExistingContent(t *testing.T) {
 }
 
 func TestYouTubeModEscapesDescription(t *testing.T) {
-	m := New()
+	m := New(nil)
 	now := time.Now()
 
 	raw := RawFeedItem{
@@ -190,7 +190,7 @@ func TestYouTubeModEscapesDescription(t *testing.T) {
 }
 
 func TestYouTubeModRendersAuthorAboveThumbnail(t *testing.T) {
-	m := New()
+	m := New(nil)
 	now := time.Now()
 	raw := RawFeedItem{
 		"author": []RawField{{
@@ -222,7 +222,7 @@ func TestYouTubeModRendersAuthorAboveThumbnail(t *testing.T) {
 }
 
 func TestYouTubeModRendersAuthorPlainTextWhenURIMissing(t *testing.T) {
-	m := New()
+	m := New(nil)
 	now := time.Now()
 	raw := RawFeedItem{
 		"author": []RawField{{Chld: RawFeedItem{"name": []RawField{{Txt: "Some <Channel> & Co"}}}}},
@@ -247,7 +247,7 @@ func TestYouTubeModRendersAuthorPlainTextWhenURIMissing(t *testing.T) {
 }
 
 func TestYouTubeModOmitsAuthorWhenAbsent(t *testing.T) {
-	m := New()
+	m := New(nil)
 	now := time.Now()
 	item := &RawItem{
 		GUID:      1,
@@ -266,7 +266,7 @@ func TestYouTubeModOmitsAuthorWhenAbsent(t *testing.T) {
 }
 
 func TestYouTubeModRegistered(t *testing.T) {
-	m := New()
+	m := New(nil)
 	if _, ok := m.processors["#youtube"]; !ok {
 		t.Error(`#youtube not registered`)
 	}

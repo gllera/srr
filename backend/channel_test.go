@@ -19,7 +19,7 @@ func fetchOnce(t *testing.T, feed *Feed, ch *Channel, srv *httptest.Server) []*I
 	// Far enough in the future that test-fixture pubDates of 2024 always pass
 	// the future-clamp without affecting the dedup expectations the tests check.
 	const fetchedAt int64 = 4_102_444_800 // 2100-01-01
-	items, err := feed.fetch(context.Background(), srv.Client(), buf, mod.New(), ingest.New(), ch, fetchedAt, ch.Pipe, ingest.Select(ch.Ingest, ""))
+	items, err := feed.fetch(context.Background(), srv.Client(), buf, mod.New(nil), ingest.New(), ch, fetchedAt, ch.Pipe, ingest.Select(ch.Ingest, ""))
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
@@ -306,7 +306,7 @@ func TestFetchFutureDatedItemClampedToFetchedAt(t *testing.T) {
 
 	const fetchedAt int64 = 1_700_000_000
 	buf := make([]byte, 1<<20)
-	items, err := f.fetch(context.Background(), srv.Client(), buf, mod.New(), ingest.New(), ch, fetchedAt, ch.Pipe, ingest.Select(ch.Ingest, ""))
+	items, err := f.fetch(context.Background(), srv.Client(), buf, mod.New(nil), ingest.New(), ch, fetchedAt, ch.Pipe, ingest.Select(ch.Ingest, ""))
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}

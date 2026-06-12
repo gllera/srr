@@ -9,14 +9,14 @@ import (
 )
 
 func init() {
-	mod.Register("test-mutate-guid", func() func(*mod.RawItem) error {
-		return func(i *mod.RawItem) error {
+	mod.Register("test-mutate-guid", func(_ mod.Assets) func(context.Context, *mod.RawItem) error {
+		return func(_ context.Context, i *mod.RawItem) error {
 			i.GUID++
 			return nil
 		}
 	})
-	mod.Register("test-mutate-published", func() func(*mod.RawItem) error {
-		return func(i *mod.RawItem) error {
+	mod.Register("test-mutate-published", func(_ mod.Assets) func(context.Context, *mod.RawItem) error {
+		return func(_ context.Context, i *mod.RawItem) error {
 			t := time.Unix(1, 0)
 			i.Published = &t
 			return nil
@@ -43,7 +43,7 @@ func TestProcessItemRejectsImmutableFieldChange(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			item := &mod.RawItem{GUID: 42, Title: "t", Content: "c", Link: "http://example.com", Published: &now}
-			err := processItem(context.Background(), mod.New(), []string{tt.module}, item)
+			err := processItem(context.Background(), mod.New(nil), []string{tt.module}, item)
 			wantErr(t, err, tt.want)
 		})
 	}
