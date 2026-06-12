@@ -132,8 +132,7 @@ func (feed *Feed) fetch(ctx context.Context, run *fetchRun, buf []byte, processo
 		// and rewrite them to their final store keys. A marker is a value starting
 		// with "#" whose remainder names a regular file the fetcher left in
 		// run.cacheDir (e.g. "#/photo.jpg"); a "#..." naming no such file is an
-		// ordinary in-page fragment (#section), left as-is. RewriteAttrs returns
-		// content untouched when nothing matches, so it runs unconditionally.
+		// ordinary in-page fragment (#section), left as-is.
 		//
 		// A failed upload (store error, or an UploadCacheRef guard tripping on
 		// oversize/traversal) hard-fails the whole feed fetch rather than publish
@@ -142,33 +141,39 @@ func (feed *Feed) fetch(ctx context.Context, run *fetchRun, buf []byte, processo
 		// error path, so a transient store failure self-heals next fetch; a
 		// permanently-rejected asset (e.g. over SRR_MAX_MEDIA_SIZE) wedges the
 		// feed until it is fixed.
-		i.Content, err = mod.RewriteAttrs(i.Content, func(val string) (string, bool, error) {
-			if !strings.HasPrefix(val, "#") {
-				return "", false, nil
-			}
-			local := strings.TrimPrefix(val, "#")
-			// Only values naming an existing regular file inside the cache dir are
-			// upload markers, so a bare fragment (#section) is left untouched. A
-			// value escaping the dir (e.g. "#../secret", attacker-influenced
-			// content) must also be treated as a non-marker rather than handed to
-			// UploadCacheRef: its containment guard would return an error that
-			// hard-fails the whole feed permanently. Genuine in-cache upload
-			// failures (oversize, store error) still fail the feed below.
-			full := filepath.Join(run.cacheDir, filepath.FromSlash(local))
-			if !withinDir(run.cacheDir, full) {
-				return "", false, nil
-			}
-			if fi, err := os.Lstat(full); err != nil || !fi.Mode().IsRegular() {
-				return "", false, nil
-			}
-			key, err := run.assets.UploadCacheRef(ctx, run.cacheDir, local)
+		//
+		// Every marker starts with "#", so content without one can only round-trip
+		// unchanged: skip the parse+walk entirely for it, which is the common case
+		// (built-in #rss feeds never emit markers).
+		if strings.Contains(i.Content, "#") {
+			i.Content, err = mod.RewriteAttrs(i.Content, func(val string) (string, bool, error) {
+				if !strings.HasPrefix(val, "#") {
+					return "", false, nil
+				}
+				local := strings.TrimPrefix(val, "#")
+				// Only values naming an existing regular file inside the cache dir are
+				// upload markers, so a bare fragment (#section) is left untouched. A
+				// value escaping the dir (e.g. "#../secret", attacker-influenced
+				// content) must also be treated as a non-marker rather than handed to
+				// UploadCacheRef: its containment guard would return an error that
+				// hard-fails the whole feed permanently. Genuine in-cache upload
+				// failures (oversize, store error) still fail the feed below.
+				full := filepath.Join(run.cacheDir, filepath.FromSlash(local))
+				if !withinDir(run.cacheDir, full) {
+					return "", false, nil
+				}
+				if fi, err := os.Lstat(full); err != nil || !fi.Mode().IsRegular() {
+					return "", false, nil
+				}
+				key, err := run.assets.UploadCacheRef(ctx, run.cacheDir, local)
+				if err != nil {
+					return "", false, fmt.Errorf("self-host asset %q: %w", local, err)
+				}
+				return key, true, nil
+			})
 			if err != nil {
-				return "", false, fmt.Errorf("self-host asset %q: %w", local, err)
+				return nil, err
 			}
-			return key, true, nil
-		})
-		if err != nil {
-			return nil, err
 		}
 		items = append(items, &Item{
 			Channel:   ch,
