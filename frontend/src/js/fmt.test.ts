@@ -1,5 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
-import { extractImageUrls, sanitizeHtml, timeAgo, formatDate, imgProxy, getImgProxy, setImgProxy } from "./fmt"
+import {
+   extractImageUrls,
+   sanitizeHtml,
+   timeAgo,
+   formatDate,
+   imgProxy,
+   getImgProxy,
+   setImgProxy,
+   isValidProxy,
+} from "./fmt"
 
 beforeEach(() => {
    localStorage.clear()
@@ -344,6 +353,23 @@ describe("image proxy", () => {
       const raw = "https://example.com/x.jpg"
       expect(imgProxy(raw, getImgProxy())).toBe(raw)
    })
+})
+
+describe("isValidProxy", () => {
+   const cases: Array<[string, boolean]> = [
+      ["", true], // empty disables the proxy
+      ["https://p.example/?url=", true],
+      ["http://192.168.1.4:8000/unsafe/", true], // http allowed for LAN proxies
+      ["HTTPS://P.EXAMPLE/?url=", true], // scheme match is case-insensitive
+      ["ftp://p.example/", false],
+      ["p.example/?url=", false], // schemeless can't produce a fetchable URL
+      ["javascript:alert(1)", false],
+   ]
+   for (const [value, want] of cases) {
+      it(`${JSON.stringify(value)} → ${want}`, () => {
+         expect(isValidProxy(value)).toBe(want)
+      })
+   }
 })
 
 describe("formatDate", () => {

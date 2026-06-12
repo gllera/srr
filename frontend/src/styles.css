@@ -488,6 +488,47 @@ video {
          }
       }
    }
+   & .srr-imgproxy-edit {
+      display: flex;
+      gap: 0.25rem;
+      align-items: center;
+      padding: 0.2rem 0.4rem;
+      & .srr-imgproxy-input {
+         flex: 1 1 auto;
+         min-width: 0;
+         font: inherit;
+         font-size: var(--text-sm);
+         color: var(--fg);
+         background: var(--bg);
+         border: 1px solid var(--faint);
+         border-radius: var(--radius);
+         padding: 0.25rem 0.45rem;
+         &:focus {
+            outline: none;
+            border-color: var(--accent);
+         }
+         &.srr-input-invalid {
+            border-color: var(--accent);
+            background: color-mix(in srgb, var(--accent) 10%, transparent);
+         }
+      }
+      & .srr-imgproxy-save,
+      & .srr-imgproxy-clear {
+         flex: 0 0 auto;
+         min-width: 2rem;
+         font: inherit;
+         font-size: var(--text-sm);
+         color: var(--fg);
+         background: none;
+         border: 1px solid var(--faint);
+         border-radius: var(--radius);
+         padding: 0.25rem 0.45rem;
+         cursor: pointer;
+         &:hover {
+            background: var(--hover);
+         }
+      }
+   }
    & .srr-tag-sep {
       border-top: 1px solid var(--faint);
       margin: 0.2rem 0;
