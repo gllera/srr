@@ -23,13 +23,21 @@ import (
 // non-2xx, parse failure, empty extraction) leaves the original Content
 // untouched and returns nil, so one bad article never fails the fetch.
 // GUID/Published are not touched, satisfying the pipeline immutability rule.
+//
+// Two parameters tune the fetch per pipeline position (defaults below apply
+// when omitted): "timeout" (Go duration, e.g. "30s") and "maxbody" (byte size,
+// e.g. "16MiB"). A malformed or unknown parameter is a hard error — unlike the
+// fail-open network path, a misconfigured pipe should surface immediately.
+//   #readability timeout=30s maxbody=16MiB
 
 const (
-	// readabilityTimeout bounds a single article fetch. Feed downloads use 10s;
-	// article pages (redirects, ads, slow CMSes) need more headroom.
+	// readabilityTimeout is the default per-article fetch budget (override with
+	// timeout=). Feed downloads use 10s; article pages (redirects, ads, slow
+	// CMSes) need more headroom.
 	readabilityTimeout = 20 * time.Second
-	// readabilityMaxBody caps the downloaded HTML. readability only needs the
-	// document; an unbounded read would let one page balloon worker memory.
+	// readabilityMaxBody is the default downloaded-HTML cap (override with
+	// maxbody=). readability only needs the document; an unbounded read would
+	// let one page balloon worker memory.
 	readabilityMaxBody = 8 << 20
 	// readabilityUserAgent identifies the fetcher; some origins 403 the default
 	// Go user agent, which would defeat extraction.
@@ -37,12 +45,28 @@ const (
 )
 
 func init() {
-	Register("readability", func(_ Assets) func(context.Context, *RawItem) error {
+	Register("readability", func(_ Assets) Processor {
 		// One client per Module (i.e. per fetch worker, via the procPool):
-		// reused across the items a worker processes.
-		client := &http.Client{Timeout: readabilityTimeout}
-		return func(ctx context.Context, i *RawItem) error {
-			content, err := fetchReadable(ctx, client, i.Link)
+		// reused across the items a worker processes. The per-call timeout is
+		// enforced via the request context rather than client.Timeout so it can
+		// vary per pipeline position while sharing this client.
+		client := &http.Client{}
+		return func(ctx context.Context, p Params, i *RawItem) error {
+			timeout, err := p.Duration("timeout", readabilityTimeout)
+			if err != nil {
+				return err
+			}
+			maxBody, err := p.Bytes("maxbody", readabilityMaxBody)
+			if err != nil {
+				return err
+			}
+			if err := p.only("timeout", "maxbody"); err != nil {
+				return err
+			}
+
+			ctx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			content, err := fetchReadable(ctx, client, i.Link, maxBody)
 			if err != nil {
 				slog.Warn("readability extraction failed; keeping original content",
 					"link", i.Link, "err", err)
@@ -60,7 +84,7 @@ func init() {
 // HTML. It returns ("", nil) when there is nothing to extract (empty/invalid
 // link or an empty result) and ("", err) on a fetch/parse failure, letting the
 // caller distinguish "leave content as-is" from a genuine error worth logging.
-func fetchReadable(ctx context.Context, client *http.Client, link string) (string, error) {
+func fetchReadable(ctx context.Context, client *http.Client, link string, maxBody int64) (string, error) {
 	if link == "" {
 		return "", nil
 	}
@@ -86,7 +110,7 @@ func fetchReadable(ctx context.Context, client *http.Client, link string) (strin
 		return "", fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
 
-	article, err := readability.FromReader(io.LimitReader(resp.Body, readabilityMaxBody), u)
+	article, err := readability.FromReader(io.LimitReader(resp.Body, maxBody), u)
 	if err != nil {
 		return "", err
 	}

@@ -16,8 +16,11 @@ var youtubeIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{11}$`)
 var youtubeURLRe = regexp.MustCompile(`https?://[^\s<>"']+`)
 
 func init() {
-	Register("youtube", func(assets Assets) func(context.Context, *RawItem) error {
-		return func(ctx context.Context, i *RawItem) error {
+	Register("youtube", func(assets Assets) Processor {
+		return func(ctx context.Context, p Params, i *RawItem) error {
+			if err := p.only(); err != nil {
+				return err
+			}
 			id := extractYouTubeID(i.Link)
 			if id == "" {
 				return nil

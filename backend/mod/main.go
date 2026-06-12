@@ -71,12 +71,17 @@ type Assets interface {
 	Fetch(ctx context.Context, srcURL string) (key string, err error)
 }
 
-var registry = map[string]func(Assets) func(context.Context, *RawItem) error{}
+// Processor is a built-in pipeline step. Params carries the key=value options
+// parsed from the step's pipeline token (e.g. "timeout=30s" in
+// "#readability timeout=30s"); steps that take no options ignore it.
+type Processor func(context.Context, Params, *RawItem) error
+
+var registry = map[string]func(Assets) Processor{}
 
 // Register registers a built-in processor available as "#name". The init
 // factory receives the run's Assets capability (may be nil when no store is
 // wired, e.g. preview/tests) and runs once per New().
-func Register(name string, init func(Assets) func(context.Context, *RawItem) error) {
+func Register(name string, init func(Assets) Processor) {
 	if !strings.HasPrefix(name, "#") {
 		name = "#" + name
 	}
@@ -84,7 +89,7 @@ func Register(name string, init func(Assets) func(context.Context, *RawItem) err
 }
 
 type Module struct {
-	processors map[string]func(context.Context, *RawItem) error
+	processors map[string]Processor
 	env        []string
 }
 
@@ -93,7 +98,7 @@ type Module struct {
 // nil to disable downloads (built-ins degrade to a no-op for that feature).
 func New(assets Assets) *Module {
 	m := &Module{
-		processors: make(map[string]func(context.Context, *RawItem) error, len(registry)),
+		processors: make(map[string]Processor, len(registry)),
 		env:        os.Environ(),
 	}
 	for name, init := range registry {
@@ -103,8 +108,19 @@ func New(assets Assets) *Module {
 }
 
 func (o *Module) Process(ctx context.Context, args string, i *RawItem) error {
-	if fn, ok := o.processors[args]; ok {
-		return fn(ctx, i)
+	// A built-in token is "#name [key=value ...]": the first whitespace field
+	// names the step, the rest are its parameters. Only when that first field
+	// is a registered built-in do we strip params and dispatch internally;
+	// anything else (incl. shell commands whose first word merely contains
+	// spaces or "=") falls through to /bin/sh -c with the original args.
+	if fields := strings.Fields(args); len(fields) > 0 {
+		if fn, ok := o.processors[fields[0]]; ok {
+			params, err := parseParams(fields[1:])
+			if err != nil {
+				return err
+			}
+			return fn(ctx, params, i)
+		}
 	}
 
 	var buf bytes.Buffer

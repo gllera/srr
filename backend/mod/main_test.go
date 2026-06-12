@@ -179,3 +179,41 @@ func TestRegisterBuiltins(t *testing.T) {
 		}
 	}
 }
+
+// Built-ins that take no parameters reject any, so a stray option surfaces as
+// a config error instead of being silently ignored.
+func TestModuleBuiltinRejectsUnexpectedParam(t *testing.T) {
+	m := New(nil)
+	now := time.Now()
+	for _, token := range []string{"#sanitize x=1", "#minify foo=bar"} {
+		item := &RawItem{GUID: 1, Title: "T", Content: "<p>a</p>", Link: "http://example.com", Published: &now}
+		if err := m.Process(context.Background(), token, item); err == nil {
+			t.Errorf("token %q: expected unknown-parameter error", token)
+		}
+	}
+}
+
+// A name-with-params token must dispatch to the built-in, while a shell command
+// whose first word is not a built-in still runs verbatim through /bin/sh.
+func TestModuleProcessSplitsNameFromParams(t *testing.T) {
+	m := New(nil)
+	now := time.Now()
+
+	// "#sanitize" with no params behaves exactly as before.
+	item := &RawItem{GUID: 1, Title: "T", Content: `<p>ok</p><script>x</script>`, Link: "http://e.com", Published: &now}
+	if err := m.Process(context.Background(), "#sanitize", item); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if item.Content != "<p>ok</p>" {
+		t.Errorf("sanitize without params: got %q", item.Content)
+	}
+
+	// A shell command containing '=' is not mistaken for a built-in param token.
+	item = &RawItem{GUID: 2, Title: "Orig", Content: "c", Link: "http://e.com", Published: &now}
+	if err := m.Process(context.Background(), `jq -c '.title = "Shell"'`, item); err != nil {
+		t.Fatalf("shell Process: %v", err)
+	}
+	if item.Title != "Shell" {
+		t.Errorf("shell command should run verbatim, got title %q", item.Title)
+	}
+}

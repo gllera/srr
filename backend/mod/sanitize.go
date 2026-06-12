@@ -8,7 +8,7 @@ import (
 )
 
 func init() {
-	Register("sanitize", func(_ Assets) func(context.Context, *RawItem) error {
+	Register("sanitize", func(_ Assets) Processor {
 		policy := bluemonday.StrictPolicy()
 
 		policy.AllowLists()
@@ -72,7 +72,10 @@ func init() {
 		policy.AllowAttrs("value", "min", "max", "low", "high", "optimum").Matching(bluemonday.Number).OnElements("meter")
 		policy.AllowAttrs("value", "max").Matching(bluemonday.Number).OnElements("progress")
 
-		return func(_ context.Context, i *RawItem) error {
+		return func(_ context.Context, p Params, i *RawItem) error {
+			if err := p.only(); err != nil {
+				return err
+			}
 			i.Content = policy.Sanitize(i.Content)
 			return nil
 		}

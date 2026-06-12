@@ -203,7 +203,7 @@ func TestLsCmdEmitsPipe(t *testing.T) {
 			t.Fatalf("Run: %v", err)
 		}
 	}
-	mustRun(&AddCmd{Title: strPtr("A"), URLs: sliceStrPtr([]string{"https://a.example.com/feed"}), Parsers: sliceStrPtr([]string{"#sanitize"})})
+	mustRun(&AddCmd{Title: strPtr("A"), URLs: sliceStrPtr([]string{"https://a.example.com/feed"}), Parsers: []string{"#sanitize"}})
 
 	var out bytes.Buffer
 	saved := stdout
@@ -501,7 +501,7 @@ func TestChanUpdClearsTag(t *testing.T) {
 
 func TestChanUpdSetsPipeline(t *testing.T) {
 	setupChannelsTestDB(t)
-	cmd := &UpdCmd{ID: 0, Parsers: sliceStrPtr([]string{"#sanitize", "#minify"})}
+	cmd := &UpdCmd{ID: 0, Parsers: []string{"#sanitize", "#minify"}}
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -513,10 +513,10 @@ func TestChanUpdSetsPipeline(t *testing.T) {
 
 func TestChanUpdClearsPipeline(t *testing.T) {
 	setupChannelsTestDB(t)
-	if err := (&UpdCmd{ID: 0, Parsers: sliceStrPtr([]string{"#sanitize"})}).Run(); err != nil {
+	if err := (&UpdCmd{ID: 0, Parsers: []string{"#sanitize"}}).Run(); err != nil {
 		t.Fatalf("set pipeline: %v", err)
 	}
-	if err := (&UpdCmd{ID: 0, Parsers: sliceStrPtr([]string{""})}).Run(); err != nil {
+	if err := (&UpdCmd{ID: 0, Parsers: []string{""}}).Run(); err != nil {
 		t.Fatalf("clear pipeline: %v", err)
 	}
 	ch := reopenDB(t).Channels()[0]
@@ -651,7 +651,7 @@ func TestChanShowEmitsPipe(t *testing.T) {
 	if err := (&AddCmd{
 		Title:   strPtr("P"),
 		URLs:    sliceStrPtr([]string{"https://p.example.com/feed"}),
-		Parsers: sliceStrPtr([]string{"#sanitize"}),
+		Parsers: []string{"#sanitize"},
 	}).Run(); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
