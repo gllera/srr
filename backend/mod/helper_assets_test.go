@@ -7,14 +7,11 @@ import (
 )
 
 // upMarker mirrors the real upload-marker policy (the upload step inlined in
-// main.Feed.fetch): a value is rewritten iff it starts with "#"; the rest names
-// the file.
+// main.Feed.fetch): RewriteAttrs hands fn the marker remainder (the "#" already
+// stripped) only for "#"-prefixed values, and the policy maps it under prefix.
 func upMarker(prefix string) func(string) (string, bool, error) {
-	return func(val string) (string, bool, error) {
-		if !strings.HasPrefix(val, "#") {
-			return "", false, nil
-		}
-		return prefix + strings.TrimPrefix(val, "#"), true, nil
+	return func(marker string) (string, bool, error) {
+		return prefix + marker, true, nil
 	}
 }
 
@@ -49,21 +46,24 @@ func TestRewriteAttrsCoversAnchorHref(t *testing.T) {
 	}
 }
 
-func TestRewriteAttrsLeavesValuesOnResolveFalse(t *testing.T) {
+// Non-marker attribute values (no "#" prefix) are passed through untouched and
+// never reach fn — the marker convention lives in the walk, so fn only ever sees
+// markers.
+func TestRewriteAttrsLeavesNonMarkerValues(t *testing.T) {
 	calls := 0
-	in := `<img src="https://example.com/a.jpg"><img src="assets/aa/1.jpg"><a href="/page">x</a>`
+	in := `<img src="https://example.com/a.jpg"><img src="assets/aa/1.jpg"><img src="#/m.jpg"><a href="/page">x</a>`
 	out, err := RewriteAttrs(in, func(string) (string, bool, error) {
 		calls++
-		return "assets/x", false, nil
+		return "", false, nil
 	})
 	if err != nil {
 		t.Fatalf("RewriteAttrs: %v", err)
 	}
-	if calls == 0 {
-		t.Fatal("resolve was never called")
+	if calls != 1 {
+		t.Fatalf("fn called %d times, want 1 (only the #-marker)", calls)
 	}
 	if !strings.Contains(out, "https://example.com/a.jpg") || !strings.Contains(out, "assets/aa/1.jpg") || !strings.Contains(out, `href="/page"`) {
-		t.Errorf("values altered despite resolve=false:\n%s", out)
+		t.Errorf("non-marker values altered:\n%s", out)
 	}
 }
 
@@ -78,16 +78,18 @@ func TestRewriteAttrsKeepsValueOnResolveFalse(t *testing.T) {
 	}
 }
 
-func TestRewriteAttrsPassesRawValue(t *testing.T) {
+// RewriteAttrs strips the "#" and hands fn the marker remainder, so the caller's
+// policy works with the bare path rather than the marker syntax.
+func TestRewriteAttrsPassesStrippedMarker(t *testing.T) {
 	var got string
-	if _, err := RewriteAttrs(`<a href="#/sub/dir/file.pdf">x</a>`, func(val string) (string, bool, error) {
-		got = val
+	if _, err := RewriteAttrs(`<a href="#/sub/dir/file.pdf">x</a>`, func(marker string) (string, bool, error) {
+		got = marker
 		return "assets/k", true, nil
 	}); err != nil {
 		t.Fatalf("RewriteAttrs: %v", err)
 	}
-	if got != "#/sub/dir/file.pdf" {
-		t.Errorf("value = %q, want %q", got, "#/sub/dir/file.pdf")
+	if got != "/sub/dir/file.pdf" {
+		t.Errorf("marker = %q, want %q", got, "/sub/dir/file.pdf")
 	}
 }
 
