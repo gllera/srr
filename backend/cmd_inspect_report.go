@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-func inspectOne(fetch keyGetter, core *DBCore, packs []*inspIdx, chron int) error {
+func inspectOne(fetch keyGetter, core *DBCore, packs []*idxPack, chron int) error {
 	if chron >= core.TotalArticles {
 		return fmt.Errorf("chron %d out of range (total_art=%d)", chron, core.TotalArticles)
 	}
@@ -20,7 +20,7 @@ func inspectOne(fetch keyGetter, core *DBCore, packs []*inspIdx, chron int) erro
 
 	local := chron - n*idxPackSize
 	blocks := pack.fetchedAts[local]
-	recoveredTs := (core.FirstFetchedAt/28800 + int64(blocks)) * 28800
+	recoveredTs := (core.FirstFetchedAt/fetchedAtBlock + int64(blocks)) * fetchedAtBlock
 
 	fmt.Printf("\nchron %d:\n", chron)
 	fmt.Printf("  idx pack %d  entry chan_id=%d  fetchedAt_blocks=%d\n", n, idxSub, blocks)
@@ -40,8 +40,8 @@ func inspectOne(fetch keyGetter, core *DBCore, packs []*inspIdx, chron int) erro
 	if a.ChannelID != idxSub {
 		fmt.Printf("  *** SUB_ID MISMATCH: idx=%d data=%d ***\n", idxSub, a.ChannelID)
 	}
-	storedBlock := a.FetchedAt / 28800
-	expectedBlock := core.FirstFetchedAt/28800 + int64(blocks)
+	storedBlock := a.FetchedAt / fetchedAtBlock
+	expectedBlock := core.FirstFetchedAt/fetchedAtBlock + int64(blocks)
 	tsMismatch := storedBlock != expectedBlock
 	fmt.Printf("  data chan_id: %d\n", a.ChannelID)
 	fmt.Printf("  fetched_at: data=%d  idx-recovered=%d  (block-aligned match=%v)\n",
@@ -69,7 +69,7 @@ func inspectOne(fetch keyGetter, core *DBCore, packs []*inspIdx, chron int) erro
 // numeric chan_id or a tag name. Reports total count, chron range, and
 // count above the optional floor — same numbers the frontend computes
 // for filteredTotal / filteredLeft.
-func filterReport(core *DBCore, packs []*inspIdx, token string, floor int) error {
+func filterReport(core *DBCore, packs []*idxPack, token string, floor int) error {
 	channels := map[int]int{} // chan_id -> add_idx
 	if n, err := strconv.Atoi(token); err == nil {
 		if ch := core.Channels[n]; ch != nil && ch.TotalArt > 0 {
@@ -180,7 +180,7 @@ func listTagsReport(core *DBCore) error {
 // fromHashReport replays nav.fromHash on a frontend URL hash like
 // "0,2485!big_info": parses floor/pos/tokens, resolves filter, decides
 // whether resolve(true) or last() runs, prints the resulting article.
-func fromHashReport(fetch keyGetter, core *DBCore, packs []*inspIdx, hash string) error {
+func fromHashReport(fetch keyGetter, core *DBCore, packs []*idxPack, hash string) error {
 	hash = strings.TrimPrefix(hash, "#")
 	main, tokensPart, _ := strings.Cut(hash, "!")
 	floorStr, posStr, hasComma := strings.Cut(main, ",")

@@ -94,7 +94,7 @@ func writeIdxHeader(p *pack, block, packID, packOff int, channels map[int]*Chann
 	binary.LittleEndian.PutUint32(buf[4:], uint32(packID))
 	binary.LittleEndian.PutUint32(buf[8:], uint32(packOff))
 	for id, ch := range channels {
-		binary.LittleEndian.PutUint32(buf[12+id*4:], uint32(ch.TotalArt))
+		binary.LittleEndian.PutUint32(buf[idxStateSize+id*4:], uint32(ch.TotalArt))
 	}
 	_, err := p.Write(buf[:])
 	return err
@@ -200,7 +200,7 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 	}
 
 	prevPackID := c.NextPackID
-	prevFetchedTS := c.FirstFetchedAt/28800 + int64(c.FetchedAtCursor)
+	prevFetchedTS := c.FirstFetchedAt/fetchedAtBlock + int64(c.FetchedAtCursor)
 	// fetchedCarry is intentionally batch-local and its residual is dropped at
 	// the end of PutArticles rather than persisted to DBCore. Within a batch it
 	// drains over later entries (after the first entry prevFetchedTS == now, so
@@ -238,10 +238,10 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 			c.PackOffset = 0
 		}
 
-		delta := c.FetchedAt/28800 - prevFetchedTS + fetchedCarry
-		if delta > 0x7F {
-			fetchedCarry = delta - 0x7F
-			delta = 0x7F
+		delta := c.FetchedAt/fetchedAtBlock - prevFetchedTS + fetchedCarry
+		if delta > deltaFetchedMax {
+			fetchedCarry = delta - deltaFetchedMax
+			delta = deltaFetchedMax
 		} else if delta < 0 {
 			fetchedCarry = delta
 			delta = 0
@@ -254,7 +254,7 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 
 		c.FetchedAtCursor += int(delta)
 		prevPackID = c.NextPackID
-		prevFetchedTS = c.FetchedAt / 28800
+		prevFetchedTS = c.FetchedAt / fetchedAtBlock
 
 		if err := data.writeArticle(&ArticleData{
 			ChannelID: item.Channel.id,

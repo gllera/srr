@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"sort"
 )
 
@@ -114,51 +113,31 @@ func (o *ArtCmd) Run() error {
 }
 
 func readAllIdx(ctx context.Context, db *DB) ([]idxEntry, error) {
-	total := db.core.TotalArticles
-	numFinalized := 0
-	if total > 0 {
-		numFinalized = (total - 1) / idxPackSize
+	packs, err := loadIdxPacks(func(key string) ([]byte, error) {
+		return db.readGz(ctx, key)
+	}, &db.core)
+	if err != nil {
+		return nil, err
 	}
 
-	packID := 0
-	packOffset := 0
-	fetchedAt := db.core.FirstFetchedAt / 28800 * 28800
-	chronIdx := 0
-
-	entries := make([]idxEntry, 0, total)
-	for p := 0; p <= numFinalized; p++ {
-		var key string
-		if p < numFinalized {
-			key = fmt.Sprintf("idx/%d.gz", p)
-		} else {
-			key = latestKey(&db.core, "idx")
-		}
-
-		data, err := db.readGz(ctx, key)
-		if err != nil {
-			return nil, err
-		}
-
-		for off := idxHeaderSize; off+2 <= len(data); off += 2 {
-			packed := data[off+1]
-			fetchedAt += int64(packed&0x7F) * 28800
-			if packed>>7 != 0 {
-				packID++
-				packOffset = 0
-			} else {
-				packOffset++
+	entries := make([]idxEntry, 0, db.core.TotalArticles)
+	for _, p := range packs {
+		base := p.packIndex * idxPackSize
+		for i, sub := range p.chanIDs {
+			chron := base + i
+			chanID := int(sub)
+			ch := db.Channels()[chanID]
+			if ch == nil || chron < ch.AddIdx {
+				continue
 			}
-			chanID := int(data[off])
-			if ch := db.Channels()[chanID]; ch != nil && chronIdx >= ch.AddIdx {
-				entries = append(entries, idxEntry{
-					ChronIdx:   chronIdx,
-					ChannelID:  chanID,
-					PackID:     packID,
-					PackOffset: packOffset,
-					FetchedAt:  fetchedAt,
-				})
-			}
-			chronIdx++
+			packID, packOffset := p.getPackRef(chron)
+			entries = append(entries, idxEntry{
+				ChronIdx:   chron,
+				ChannelID:  chanID,
+				PackID:     packID,
+				PackOffset: packOffset,
+				FetchedAt:  (db.core.FirstFetchedAt/fetchedAtBlock + int64(p.fetchedAts[i])) * fetchedAtBlock,
+			})
 		}
 	}
 
