@@ -152,6 +152,16 @@ describe("sanitizeHtml self-hosted assets", () => {
       const out = attr('<video src="https://cdn.example.com/v.mp4"></video>', "video", "src")
       expect(out).toBe("https://cdn.example.com/v.mp4")
    })
+
+   it("routes an external video poster through the image proxy (mirrors img.src)", () => {
+      setImgProxy("https://my-proxy.example/?u=")
+      const html = '<video src="https://cdn.example.com/v.mp4" poster="https://cdn.example.com/p.jpg"></video>'
+      expect(attr(html, "video", "poster")).toBe(
+         "https://my-proxy.example/?u=" + encodeURIComponent("https://cdn.example.com/p.jpg"),
+      )
+      // src stays direct — image proxies don't handle video.
+      expect(attr(html, "video", "src")).toBe("https://cdn.example.com/v.mp4")
+   })
 })
 
 describe("timeAgo", () => {
