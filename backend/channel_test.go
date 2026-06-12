@@ -401,3 +401,43 @@ func TestStripControlKeepWS(t *testing.T) {
 		}
 	}
 }
+
+// A publisher re-dating an existing post (same GUID, higher pub) on a later
+// fetch must NOT advance the persisted Watermark — otherwise a genuinely-new
+// article dated between the old and bumped value is permanently dropped.
+func TestFetchRedatedDuplicateDoesNotPoisonWatermark(t *testing.T) {
+	feed1 := `<rss version="2.0"><channel>
+		<item><title>A</title><guid>a</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
+	</channel></rss>`
+	// A re-dated to 00:10 (publisher bumped/edited it).
+	feed2 := `<rss version="2.0"><channel>
+		<item><title>A</title><guid>a</guid><pubDate>Mon, 01 Jan 2024 00:10:00 GMT</pubDate></item>
+	</channel></rss>`
+	// A still re-dated, plus a genuinely-new B dated BETWEEN the old (00:00) and
+	// bumped (00:10) watermark.
+	feed3 := `<rss version="2.0"><channel>
+		<item><title>A</title><guid>a</guid><pubDate>Mon, 01 Jan 2024 00:10:00 GMT</pubDate></item>
+		<item><title>B</title><guid>b</guid><pubDate>Mon, 01 Jan 2024 00:05:00 GMT</pubDate></item>
+	</channel></rss>`
+
+	current := feed1
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(current))
+	}))
+	defer srv.Close()
+
+	f := &Feed{URL: srv.URL}
+	ch := &Channel{Title: "T", Feeds: []*Feed{f}}
+
+	if got := fetchOnce(t, f, ch, srv); len(got) != 1 {
+		t.Fatalf("fetch1: got %d, want 1", len(got))
+	}
+	current = feed2
+	if got := fetchOnce(t, f, ch, srv); len(got) != 0 {
+		t.Fatalf("fetch2: got %d, want 0 (re-dated A is a dup)", len(got))
+	}
+	current = feed3
+	if got := fetchOnce(t, f, ch, srv); len(got) != 1 {
+		t.Errorf("fetch3: got %d, want 1 — B at 00:05 dropped because a re-dated dup poisoned the watermark", len(got))
+	}
+}

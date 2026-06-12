@@ -86,19 +86,30 @@ func (feed *Feed) fetch(ctx context.Context, client *http.Client, buf []byte, pr
 		}
 
 		boundary[i.GUID] = pubUnix
-		if pubUnix > maxPub {
-			maxPub = pubUnix
-		}
 
 		if _, prev := priorBoundary[i.GUID]; prev {
+			// A GUID we have already seen: keep deduping it, but do NOT let a
+			// publisher re-dating an existing post raise Watermark. Otherwise a
+			// genuinely-new article later dated between the old and the bumped
+			// value is permanently and silently dropped by the watermark check.
 			continue
+		}
+		// Only newly-seen items advance the watermark.
+		if pubUnix > maxPub {
+			maxPub = pubUnix
 		}
 		if pubUnix != 0 && pubUnix < priorWatermark {
 			continue
 		}
 
 		if err := processItem(ctx, processor, pipeline, i); err != nil {
-			return nil, err
+			// One bad item must not discard the whole feed's batch. Config
+			// errors (unknown pipe token / bad params) are caught up front by
+			// Module.Validate in Channel.Fetch, so an error here is a per-item
+			// runtime failure: skip just this item. It stays recorded in
+			// boundary, so it is not retried next fetch.
+			slog.Warn("dropping item: pipeline error", "url", feed.URL, "link", i.Link, "err", err)
+			continue
 		}
 		items = append(items, &Item{
 			Channel:   ch,
@@ -112,7 +123,11 @@ func (feed *Feed) fetch(ctx context.Context, client *http.Client, buf []byte, pr
 	feed.Watermark = maxPub
 	bg := make([]uint32, 0, len(boundary))
 	for g, p := range boundary {
-		if p == 0 || p == maxPub {
+		// Keep dateless GUIDs and everything at or above the watermark so they
+		// dedup next fetch. ">= maxPub" (not "==") also retains a re-dated
+		// existing item whose bumped pub exceeds the (deliberately unraised)
+		// watermark, so it stays deduped instead of re-ingesting.
+		if p == 0 || p >= maxPub {
 			bg = append(bg, g)
 		}
 	}
