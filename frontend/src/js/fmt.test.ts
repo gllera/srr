@@ -82,8 +82,10 @@ describe("sanitizeHtml", () => {
    })
 
    it("preserves safe attributes", () => {
-      const result = sanitizeHtml('<img src="img.png" alt="photo" width="100">')
-      expect(result).toContain('src="img.png"')
+      // A relative src is resolved against the pack base (see the self-hosted
+      // assets suite); this case pins that alt/width ride through untouched.
+      const result = sanitizeHtml('<img src="https://cdn.example.com/img.png" alt="photo" width="100">')
+      expect(result).toContain('src="https://cdn.example.com/img.png"')
       expect(result).toContain('alt="photo"')
       expect(result).toContain('width="100"')
    })
@@ -124,7 +126,7 @@ describe("sanitizeHtml", () => {
 
 // SRR_CDN_URL is defined as "http://localhost:3000" in vitest.config.ts, so the
 // pack base resolves there — the same value data.ts uses for DB_URL.
-describe("sanitizeHtml self-hosted assets", () => {
+describe("sanitizeHtml relative URL resolution", () => {
    const attr = (html: string, sel: string, name: string): string | null => {
       const t = document.createElement("template")
       t.innerHTML = sanitizeHtml(html)
@@ -133,6 +135,22 @@ describe("sanitizeHtml self-hosted assets", () => {
 
    it("resolves an assets/ img src against the pack base (no proxy)", () => {
       expect(attr('<img src="assets/ab/cd1234.jpg">', "img", "src")).toBe("http://localhost:3000/assets/ab/cd1234.jpg")
+   })
+
+   it("resolves a non-assets relative img src against the pack base (not just assets/)", () => {
+      expect(attr('<img src="img/photo.jpg">', "img", "src")).toBe("http://localhost:3000/img/photo.jpg")
+      expect(attr('<img src="/rooted.jpg">', "img", "src")).toBe("http://localhost:3000/rooted.jpg")
+   })
+
+   it("resolves a non-assets relative anchor href against the pack base", () => {
+      expect(attr('<a href="docs/report.pdf">x</a>', "a", "href")).toBe("http://localhost:3000/docs/report.pdf")
+   })
+
+   it("drops a protocol-relative ref pointing at a foreign origin", () => {
+      // "//evil.example" has no scheme so it's relative, but resolves to a foreign
+      // origin — the bounds check drops it instead of letting the browser load it
+      // direct (an IP-leak vector that the prior assets/-only check let through).
+      expect(attr('<img src="//evil.example/x.jpg">', "img", "src")).toBeNull()
    })
 
    it("resolves assets/ video src and poster against the pack base", () => {
@@ -151,6 +169,14 @@ describe("sanitizeHtml self-hosted assets", () => {
    it("leaves external video URLs untouched", () => {
       const out = attr('<video src="https://cdn.example.com/v.mp4"></video>', "video", "src")
       expect(out).toBe("https://cdn.example.com/v.mp4")
+   })
+
+   it("resolves an assets/ anchor href against the pack base (self-hosted file)", () => {
+      expect(attr('<a href="assets/de/9f01.pdf">doc</a>', "a", "href")).toBe("http://localhost:3000/assets/de/9f01.pdf")
+   })
+
+   it("leaves an external anchor href untouched (navigation, not an asset)", () => {
+      expect(attr('<a href="https://example.com/page">x</a>', "a", "href")).toBe("https://example.com/page")
    })
 
    it("routes an external video poster through the image proxy (mirrors img.src)", () => {
