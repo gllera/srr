@@ -127,6 +127,14 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 	}
 
 	for id, ch := range db.core.Channels {
+		// The idx format reserves exactly 256 chanCount slots and writeIdxHeader
+		// indexes by id, so an out-of-range id (hand-edited / migrated db.gz)
+		// would panic with "slice bounds out of range" mid-fetch. Reject it here
+		// with a clear message instead.
+		if id < 0 || id > 255 {
+			db.Close(ctx)
+			return nil, fmt.Errorf("channel id %d in %s out of range [0, 255]", id, dbFileKey)
+		}
 		ch.id = id
 	}
 	return db, nil

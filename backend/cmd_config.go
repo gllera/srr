@@ -17,8 +17,13 @@ func (o *ConfigCmd) Run() error {
 	gv := reflect.ValueOf(*globals)
 	gt := gv.Type()
 
-	u, _ := url.Parse(globals.Store)
-	scheme := u.Scheme
+	// A malformed store (e.g. "packs%") makes url.Parse return (nil, err); read
+	// the scheme only on success so we print config cleanly instead of panicking
+	// on u.Scheme. Other commands surface the parse error via store.Open.
+	var scheme string
+	if u, err := url.Parse(globals.Store); err == nil {
+		scheme = u.Scheme
+	}
 	storeCfg, hasStoreCfg := store.Configs()[scheme]
 
 	if o.Key == "" {

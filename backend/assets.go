@@ -82,8 +82,10 @@ func (a *assetFetcher) Fetch(ctx context.Context, srcURL string) (string, error)
 	}
 	if a.maxBytes > 0 && counted.n > a.maxBytes {
 		// The body overflowed the cap mid-stream; drop the partial object so a
-		// truncated asset never serves.
-		_ = a.be.Rm(ctx, key)
+		// truncated asset never serves. Use WithoutCancel so the cleanup still
+		// runs when the fetch is being torn down (SIGTERM/SIGINT cancelled ctx),
+		// otherwise the partial object leaks into the assets/ prefix.
+		_ = a.be.Rm(context.WithoutCancel(ctx), key)
 		return "", fmt.Errorf("asset %q exceeds %d bytes", srcURL, a.maxBytes)
 	}
 	return key, nil

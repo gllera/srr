@@ -56,10 +56,12 @@ func sftpHostKeyCallback() (ssh.HostKeyCallback, error) {
 }
 
 func newSFTP(_ context.Context, u *url.URL) (_ Backend, retErr error) {
-	auth, err := sftpAuthMethods(u)
+	auth, cleanup, err := sftpAuthMethods(u)
 	if err != nil {
 		return nil, err
 	}
+	// The ssh-agent socket (if any) is only needed for the handshake below.
+	defer cleanup()
 
 	hostKeyCallback, err := sftpHostKeyCallback()
 	if err != nil {
@@ -225,8 +227,13 @@ func sftpUser(u *url.URL) string {
 	return "root"
 }
 
-func sftpAuthMethods(u *url.URL) ([]ssh.AuthMethod, error) {
+// sftpAuthMethods returns the auth methods plus a cleanup func the caller must
+// invoke once the SSH handshake is done. The ssh-agent Unix socket is only
+// needed during auth, but it must stay open across ssh.Dial; returning a closer
+// (instead of closing it here) prevents the fd leak of the never-closed socket.
+func sftpAuthMethods(u *url.URL) ([]ssh.AuthMethod, func(), error) {
 	var methods []ssh.AuthMethod
+	cleanup := func() {}
 
 	if u.User != nil {
 		if pw, ok := u.User.Password(); ok {
@@ -239,11 +246,11 @@ func sftpAuthMethods(u *url.URL) ([]ssh.AuthMethod, error) {
 	if sftpCfg.PrivateKey != "" {
 		pem, err := os.ReadFile(sftpCfg.PrivateKey)
 		if err != nil {
-			return nil, fmt.Errorf("reading private key %s: %w", sftpCfg.PrivateKey, err)
+			return nil, cleanup, fmt.Errorf("reading private key %s: %w", sftpCfg.PrivateKey, err)
 		}
 		key, err := ssh.ParsePrivateKey(pem)
 		if err != nil {
-			return nil, fmt.Errorf("parsing private key %s: %w", sftpCfg.PrivateKey, err)
+			return nil, cleanup, fmt.Errorf("parsing private key %s: %w", sftpCfg.PrivateKey, err)
 		}
 		methods = append(methods, ssh.PublicKeys(key))
 	} else {
@@ -263,12 +270,13 @@ func sftpAuthMethods(u *url.URL) ([]ssh.AuthMethod, error) {
 	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
 		if agentConn, err := net.Dial("unix", sock); err == nil {
 			methods = append(methods, ssh.PublicKeysCallback(agent.NewClient(agentConn).Signers))
+			cleanup = func() { agentConn.Close() }
 		}
 	}
 
 	if len(methods) == 0 {
-		return nil, fmt.Errorf("no password, private key, or ssh-agent key available for sftp auth")
+		return nil, cleanup, fmt.Errorf("no password, private key, or ssh-agent key available for sftp auth")
 	}
 
-	return methods, nil
+	return methods, cleanup, nil
 }

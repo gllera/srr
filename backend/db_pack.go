@@ -163,6 +163,17 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 
 	prevPackID := c.NextPackID
 	prevFetchedTS := c.FirstFetchedAt/28800 + int64(c.FetchedAtCursor)
+	// fetchedCarry is intentionally batch-local and its residual is dropped at
+	// the end of PutArticles rather than persisted to DBCore. Within a batch it
+	// drains over later entries (after the first entry prevFetchedTS == now, so
+	// subsequent deltas consume it). A residual only survives when a batch has
+	// fewer entries than ceil(gap/127) — i.e. very sparse fetches across a
+	// >42-day dormancy gap. Dropping it keeps the reconstructed cursor
+	// monotonically climbing toward true time and never overshooting; persisting
+	// it would add the leftover onto the NEXT batch's fresh gap and overshoot
+	// (the only cost of dropping is that the single oldest entry right after
+	// such a gap reads slightly earlier than it was fetched, which self-corrects
+	// on the following fetch).
 	var fetchedCarry int64
 
 	for _, item := range articles {
