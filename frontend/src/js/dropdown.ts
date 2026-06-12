@@ -1,8 +1,8 @@
 import * as data from "./data"
 import { getImgProxy, isValidProxy, setImgProxy, timeAgo } from "./fmt"
+import { SEARCH_GRAM } from "./format.gen"
 import * as nav from "./nav"
 import * as search from "./search"
-import type { ISearchHit } from "./search"
 
 const menus = document.querySelectorAll<HTMLElement>(".srr-dropdown-menu")
 const btns = document.querySelectorAll<HTMLElement>(".srr-dropdown-btn")
@@ -91,6 +91,55 @@ function divEl(className: string): HTMLDivElement {
    return d
 }
 
+// editorRow is the inline-editor row scaffold (date/proxy editors, search
+// input): clicks inside it configure, they don't navigate — both events stop
+// propagating so app.ts's window-level "any click closes dropdowns" handler
+// (and the menu's delegated onclick) never fire.
+function editorRow(className: string): HTMLDivElement {
+   const row = divEl(className)
+   row.addEventListener("mousedown", (e) => e.stopPropagation())
+   row.addEventListener("click", (e) => e.stopPropagation())
+   return row
+}
+
+// editorInput builds an editor's <input> — typing clears any invalid marker,
+// and the initial focus is scheduled for after the row is attached.
+function editorInput(type: string, className: string, ariaLabel: string): HTMLInputElement {
+   const input = document.createElement("input")
+   input.type = type
+   input.className = className
+   input.setAttribute("aria-label", ariaLabel)
+   input.addEventListener("input", () => input.classList.remove("srr-input-invalid"))
+   queueMicrotask(() => input.focus())
+   return input
+}
+
+// editorKeys wires the shared editor keymap: Enter commits; Escape cancels
+// the edit only — stopPropagation keeps the document-level Escape handler
+// from also closing the whole dropdown.
+function editorKeys(input: HTMLInputElement, commit: () => void, cancel: () => void): void {
+   input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+         e.preventDefault()
+         commit()
+      } else if (e.key === "Escape") {
+         e.preventDefault()
+         e.stopPropagation()
+         cancel()
+      }
+   })
+}
+
+function btn(className: string, label: string, text: string, onClick: () => void): HTMLButtonElement {
+   const b = document.createElement("button")
+   b.type = "button"
+   b.className = className
+   b.textContent = text
+   b.setAttribute("aria-label", label)
+   b.addEventListener("click", onClick)
+   return b
+}
+
 // fillMenu (re)builds an open menu's content in place. The delegated onclick
 // lives on the menu element itself, so it survives replaceChildren — the
 // editor swap re-renders without touching open/close state.
@@ -148,13 +197,9 @@ const CAL_ICON_SVG =
    "</svg>"
 
 function iconChip(value: string, label: string, className: string, svg: string): HTMLAnchorElement {
-   const a = document.createElement("a")
-   a.href = "#"
-   a.dataset.value = value
-   a.setAttribute("role", "menuitem")
+   const a = createLink(value, "", className)
    a.setAttribute("aria-label", label)
    a.title = label
-   a.className = className
    a.innerHTML = svg
    return a
 }
@@ -176,23 +221,16 @@ function dateIcon(): HTMLAnchorElement {
 // input's change event, or Enter) jumps to the first article at-or-after
 // local midnight of that day — the same findChronForTimestamp path as the
 // preset chips, but reaching arbitrarily deep into the archive. The input
-// starts empty so change only fires once the date is complete. Same
-// propagation/Escape discipline as imgProxyEditor; since clicks here never
-// bubble to the window close-handler, commit closes the menu itself.
+// starts empty so change only fires once the date is complete. Since clicks
+// here never bubble to the window close-handler (editorRow), commit closes
+// the menu itself.
 function dateEditor(guard: (fn: () => Promise<IShowFeed>) => void, rebuild: () => void): HTMLDivElement {
-   const row = divEl("srr-date-edit")
-   row.addEventListener("mousedown", (e) => e.stopPropagation())
-   row.addEventListener("click", (e) => e.stopPropagation())
-
-   const input = document.createElement("input")
-   input.type = "date"
-   input.className = "srr-date-input"
-   input.setAttribute("aria-label", "Jump to date")
+   const row = editorRow("srr-date-edit")
+   const input = editorInput("date", "srr-date-input", "Jump to date")
    const dateValue = (d: Date) =>
       `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
    input.max = dateValue(new Date())
    if (data.db.first_fetched) input.min = dateValue(new Date(data.db.first_fetched * 1000))
-   input.addEventListener("input", () => input.classList.remove("srr-input-invalid"))
 
    // Browsers fire change again when Enter commits the typed value — `done`
    // keeps the pair from navigating twice.
@@ -210,33 +248,14 @@ function dateEditor(guard: (fn: () => Promise<IShowFeed>) => void, rebuild: () =
       closeAllDropdowns()
       guard(async () => nav.goTo(await data.findChronForTimestamp(ts)))
    }
-
-   input.addEventListener("change", commit)
-   input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") {
-         e.preventDefault()
-         commit()
-      } else if (e.key === "Escape") {
-         // Cancel the edit only — keep the document-level Escape handler from
-         // also closing the whole dropdown.
-         e.preventDefault()
-         e.stopPropagation()
-         dateEditing = false
-         rebuild()
-      }
-   })
-
-   const cancel = document.createElement("button")
-   cancel.type = "button"
-   cancel.className = "srr-date-cancel"
-   cancel.textContent = "✕"
-   cancel.setAttribute("aria-label", "cancel date jump")
-   cancel.addEventListener("click", () => {
+   const cancel = () => {
       dateEditing = false
       rebuild()
-   })
-   row.append(input, cancel)
-   queueMicrotask(() => input.focus())
+   }
+
+   input.addEventListener("change", commit)
+   editorKeys(input, commit, cancel)
+   row.append(input, btn("srr-date-cancel", "cancel date jump", "✕", cancel))
    return row
 }
 
@@ -307,21 +326,12 @@ async function fillUnread(rows: [HTMLAnchorElement, IChannel][], headers: [HTMLA
 
 // imgProxyEditor is the inline editor row that replaces the chip row while
 // configuring the proxy prefix: type + Enter/✓ commits (after isValidProxy),
-// Escape cancels, ✕ commits "" (disables). Clicks inside it stop propagating
-// so app.ts's window-level "any click closes dropdowns" handler never fires —
-// clicks here configure, they don't navigate.
+// Escape cancels, ✕ commits "" (disables).
 function imgProxyEditor(guard: (fn: () => Promise<IShowFeed>) => void, rebuild: () => void): HTMLDivElement {
-   const row = divEl("srr-imgproxy-edit")
-   row.addEventListener("mousedown", (e) => e.stopPropagation())
-   row.addEventListener("click", (e) => e.stopPropagation())
-
-   const input = document.createElement("input")
-   input.type = "url"
-   input.className = "srr-imgproxy-input"
+   const row = editorRow("srr-imgproxy-edit")
+   const input = editorInput("url", "srr-imgproxy-input", "Image proxy URL prefix (empty disables)")
    input.placeholder = "https://proxy/?url="
    input.value = getImgProxy()
-   input.setAttribute("aria-label", "Image proxy URL prefix (empty disables)")
-   input.addEventListener("input", () => input.classList.remove("srr-input-invalid"))
 
    const commit = (raw: string) => {
       const next = raw.trim()
@@ -338,35 +348,19 @@ function imgProxyEditor(guard: (fn: () => Promise<IShowFeed>) => void, rebuild: 
       rebuild()
    }
 
-   input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") {
-         e.preventDefault()
-         commit(input.value)
-      } else if (e.key === "Escape") {
-         // Cancel the edit only — keep the document-level Escape handler from
-         // also closing the whole dropdown.
-         e.preventDefault()
-         e.stopPropagation()
+   editorKeys(
+      input,
+      () => commit(input.value),
+      () => {
          imgProxyEditing = false
          rebuild()
-      }
-   })
-
-   const btn = (className: string, label: string, text: string, onClick: () => void) => {
-      const b = document.createElement("button")
-      b.type = "button"
-      b.className = className
-      b.textContent = text
-      b.setAttribute("aria-label", label)
-      b.addEventListener("click", onClick)
-      return b
-   }
+      },
+   )
    row.append(
       input,
       btn("srr-imgproxy-save", "save image proxy", "✓", () => commit(input.value)),
       btn("srr-imgproxy-clear", "disable image proxy", "✕", () => commit("")),
    )
-   queueMicrotask(() => input.focus())
    return row
 }
 
@@ -378,6 +372,20 @@ function imgProxyEditor(guard: (fn: () => Promise<IShowFeed>) => void, rebuild: 
 // fillUnread) so a pack-boundary fetch never delays the menu itself.
 let peekFill: object | null = null
 
+// headlineRow is the peek-style result row shared by the headlines peek and
+// the search results: title over "channel · age" meta, click = goTo(chron).
+// The "(untitled)" placeholder lives here, at the layer that renders it, so
+// every consumer gets the same fallback.
+function headlineRow(chron: number, titleText: string, channelTitle: string, when: number): HTMLAnchorElement {
+   const a = createLink(String(chron), "")
+   const title = divEl("srr-peek-title")
+   title.textContent = titleText || "(untitled)"
+   const meta = divEl("srr-peek-meta")
+   meta.textContent = `${channelTitle} · ${timeAgo(when)}`
+   a.append(title, meta)
+   return a
+}
+
 async function fillPeek(dd: HTMLElement): Promise<void> {
    const my = {}
    peekFill = my
@@ -386,13 +394,11 @@ async function fillPeek(dd: HTMLElement): Promise<void> {
       if (my !== peekFill) return
       const frag = document.createDocumentFragment()
       for (const it of items.reverse()) {
-         const a = createLink(String(it.chron), "", it.current ? "srr-active" : "")
-         if (it.current) a.setAttribute("aria-current", "true")
-         const title = divEl("srr-peek-title")
-         title.textContent = it.title
-         const meta = divEl("srr-peek-meta")
-         meta.textContent = `${it.channel} · ${timeAgo(it.when)}`
-         a.append(title, meta)
+         const a = headlineRow(it.chron, it.title, it.channel, it.when)
+         if (it.current) {
+            a.className = "srr-active"
+            a.setAttribute("aria-current", "true")
+         }
          frag.appendChild(a)
       }
       dd.replaceChildren(frag)
@@ -431,16 +437,6 @@ let searchTimer: ReturnType<typeof setTimeout> | undefined
 const SEARCH_MAX = 100
 const SEARCH_DEBOUNCE_MS = 200
 
-function searchRow(hit: ISearchHit): HTMLAnchorElement {
-   const a = createLink(String(hit.chron), "")
-   const title = divEl("srr-peek-title")
-   title.textContent = hit.t || "(untitled)"
-   const meta = divEl("srr-peek-meta")
-   meta.textContent = `${data.db.channels[hit.s]?.title ?? "[DELETED]"} · ${timeAgo(hit.w)}`
-   a.append(title, meta)
-   return a
-}
-
 async function fillSearch(q: string, results: HTMLElement): Promise<void> {
    const my = {}
    searchFill = my
@@ -450,15 +446,21 @@ async function fillSearch(q: string, results: HTMLElement): Promise<void> {
    // so batches streaming in per shard keep newest-first order.
    const status = divEl("srr-search-note")
    const short = search.shortQuery(q)
-   status.textContent = short ? "Searching recent articles (a 3+ letter word reaches the archive)…" : "Searching…"
+   status.textContent = short
+      ? `Searching recent articles (a ${SEARCH_GRAM}+ letter word reaches the archive)…`
+      : "Searching…"
    results.appendChild(status)
    let count = 0
    try {
-      outer: for await (const batch of search.search(q)) {
+      // With a filter active some yielded hits are discarded here, so only
+      // the unfiltered case can tell search() to stop collecting at the cap.
+      const limit = nav.filter.active ? Infinity : SEARCH_MAX
+      outer: for await (const batch of search.search(q, limit)) {
          if (my !== searchFill) return
          for (const hit of batch) {
             if (nav.filter.active && !nav.filter.matches(hit.s, hit.chron)) continue
-            results.insertBefore(searchRow(hit), status)
+            const row = headlineRow(hit.chron, hit.t, data.channelTitle(hit.s), hit.w)
+            results.insertBefore(row, status)
             if (++count >= SEARCH_MAX) break outer
          }
       }
@@ -468,7 +470,9 @@ async function fillSearch(q: string, results: HTMLElement): Promise<void> {
    }
    if (my !== searchFill) return
    if (count === 0)
-      status.textContent = short ? "No recent matches (a 3+ letter word searches the archive)" : "No matches"
+      status.textContent = short
+         ? `No recent matches (a ${SEARCH_GRAM}+ letter word searches the archive)`
+         : "No matches"
    else if (count >= SEARCH_MAX) status.textContent = `First ${SEARCH_MAX} matches — refine to reach older ones`
    else status.remove()
 }
@@ -483,19 +487,16 @@ export function showSearchMenu(guard: (fn: () => Promise<IShowFeed>) => void): v
             frag.appendChild(note)
             return
          }
-         const row = divEl("srr-search-edit")
-         row.addEventListener("mousedown", (e) => e.stopPropagation())
-         row.addEventListener("click", (e) => e.stopPropagation())
-         const input = document.createElement("input")
-         input.type = "search"
-         input.className = "srr-search-input"
+         const row = editorRow("srr-search-edit")
+         const input = editorInput("search", "srr-search-input", "Search article titles")
          input.placeholder = "Search titles…"
-         input.setAttribute("aria-label", "Search article titles")
          const results = divEl("srr-search-results")
          input.addEventListener("input", () => {
             clearTimeout(searchTimer)
             searchTimer = setTimeout(() => void fillSearch(input.value, results), SEARCH_DEBOUNCE_MS)
          })
+         // No Escape handling (editorKeys): this input IS the menu's main UI,
+         // so Escape closing the whole dropdown is the right behavior.
          input.addEventListener("keydown", (e) => {
             if (e.key === "Enter") {
                e.preventDefault()
@@ -513,7 +514,6 @@ export function showSearchMenu(guard: (fn: () => Promise<IShowFeed>) => void): v
          })
          row.appendChild(input)
          frag.append(row, results)
-         queueMicrotask(() => input.focus())
       },
       async (value) => guard(() => nav.goTo(Number(value))),
    )

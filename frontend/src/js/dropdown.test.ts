@@ -2,11 +2,15 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 
 // dropdown.ts owns its DOM lookups at module load, so the skeleton must exist
 // before import — hence vi.resetModules() + dynamic import per test run.
-const data = vi.hoisted(() => ({
-   db: { first_fetched: 0 } as IDB,
-   groupChannelsByTag: vi.fn(() => ({ tagged: new Map(), sortedTags: [] as string[], untagged: [] as IChannel[] })),
-   findChronForTimestamp: vi.fn(async () => 0),
-}))
+const data = vi.hoisted(() => {
+   const mock = {
+      db: { first_fetched: 0 } as IDB,
+      groupChannelsByTag: vi.fn(() => ({ tagged: new Map(), sortedTags: [] as string[], untagged: [] as IChannel[] })),
+      findChronForTimestamp: vi.fn(async () => 0),
+      channelTitle: (chanId: number) => mock.db.channels[chanId]?.title ?? "[DELETED]",
+   }
+   return mock
+})
 vi.mock("./data", () => data)
 
 const nav = vi.hoisted(() => ({
@@ -543,7 +547,7 @@ describe("dropdown: title search", () => {
       dropdown.showSearchMenu(guard)
       type("alpha")
       await vi.waitFor(() => expect($rows().length).toBe(2))
-      expect(searchMod.search).toHaveBeenCalledWith("alpha")
+      expect(searchMod.search).toHaveBeenCalledWith("alpha", 100)
       expect($rows().map((r) => r.dataset.value)).toEqual(["100010", "7"])
       expect($rows()[0].querySelector(".srr-peek-title")!.textContent).toBe("Alpha latest")
       expect($rows()[0].querySelector(".srr-peek-meta")!.textContent).toContain("Chan")
@@ -561,7 +565,7 @@ describe("dropdown: title search", () => {
       input.dispatchEvent(new Event("input", { bubbles: true }))
       expect(searchMod.search).not.toHaveBeenCalled()
       vi.advanceTimersByTime(200)
-      expect(searchMod.search).toHaveBeenCalledWith("alp")
+      expect(searchMod.search).toHaveBeenCalledWith("alp", 100)
    })
 
    it("intersects hits with the active channel filter", async () => {
