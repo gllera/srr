@@ -29,6 +29,23 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 	return c.buf.Write(p)
 }
 
+// SubprocessTimeout bounds a single external (shell) command invocation so a
+// command that blocks forever — waiting on stdin, sleeping, trapping SIGPIPE
+// after the output cap fires — can't wedge a fetch worker for the life of the
+// process. The fetch context carries no deadline (it cancels only on
+// SIGINT/SIGTERM), so without this an external module or ingest command hang is
+// unbounded. Generous default; override with SRR_CMD_TIMEOUT (a Go duration)
+// for unusually long-running commands. Shared with the ingest package, whose
+// external-fetcher exec has the same exposure.
+func SubprocessTimeout() time.Duration {
+	if v := os.Getenv("SRR_CMD_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 5 * time.Minute
+}
+
 type RawItem struct {
 	GUID      uint32     `json:"guid"`
 	Title     string     `json:"title"`
@@ -121,7 +138,9 @@ func (o *Module) Process(ctx context.Context, args string, i *RawItem) error {
 
 	out := &cappedBuffer{limit: maxSubprocessOutput}
 
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", args)
+	cctx, cancel := context.WithTimeout(ctx, SubprocessTimeout())
+	defer cancel()
+	cmd := exec.CommandContext(cctx, "/bin/sh", "-c", args)
 	cmd.Stdin = &buf
 	cmd.Stdout = out
 	cmd.Stderr = os.Stderr

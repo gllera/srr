@@ -209,7 +209,11 @@ func (f *Fetcher) Fetch(ctx context.Context, args string, client *http.Client, b
 	}
 
 	out := &cappedBuffer{limit: maxSubprocessOutput}
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", args)
+	// Bound the command so a hang can't wedge the worker forever — the fetch
+	// context has no deadline of its own (see mod.SubprocessTimeout).
+	cctx, cancel := context.WithTimeout(ctx, mod.SubprocessTimeout())
+	defer cancel()
+	cmd := exec.CommandContext(cctx, "/bin/sh", "-c", args)
 	cmd.Stdin = &body
 	cmd.Stdout = out
 	cmd.Stderr = os.Stderr
