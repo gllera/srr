@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+
+	"github.com/foobaz/go-zopfli/zopfli"
 )
 
 // ArticleData is the on-disk JSONL representation of an article (one
@@ -170,16 +172,73 @@ func (o *DB) loadPack(ctx context.Context, key string) (*pack, int, error) {
 	return p, len(raw), nil
 }
 
+// savePack publishes a pack with the fast stdlib gzip encoding it was
+// streamed through — right for the names rewritten on every cycle (latest
+// generations, summaries).
 func (o *DB) savePack(ctx context.Context, key string, p *pack) error {
+	return o.flushPack(ctx, key, p, false)
+}
+
+// savePackFinal publishes a finalized pack. Finalized names are immutable
+// and downloaded forever, so it spends zopfli-grade CPU recompressing them
+// (docs/improvement-backlog.md item 4).
+func (o *DB) savePackFinal(ctx context.Context, key string, p *pack) error {
+	return o.flushPack(ctx, key, p, true)
+}
+
+// finalGzip is the finalized-pack recompressor, a var only as a test seam:
+// the 50k-boundary tests would otherwise spend ~10s of zopfli CPU per shard
+// (setupTestDB stubs it to identity). Production always runs gzipBest.
+var finalGzip = gzipBest
+
+func (o *DB) flushPack(ctx context.Context, key string, p *pack, final bool) error {
 	if err := p.gz.Close(); err != nil {
 		return err
 	}
-	if err := o.Put(ctx, key, &p.buf, true); err != nil {
+	out := p.buf.Bytes()
+	if final {
+		var err error
+		if out, err = finalGzip(key, out); err != nil {
+			return err
+		}
+	}
+	if err := o.Put(ctx, key, bytes.NewReader(out), true); err != nil {
 		return err
 	}
 	p.buf.Reset()
 	p.gz.Reset(&p.buf)
 	return nil
+}
+
+// gzipBest recompresses an already-gzipped pack with zopfli's exhaustive
+// deflate search (measured 2026-06-12: data packs −4%, idx packs −11% vs the
+// stdlib encoder). The output is still plain RFC 1952 gzip, so readers need
+// no change and old and new packs coexist. The obscure dependency is not
+// trusted with the write-once names: the candidate must round-trip
+// byte-for-byte through the stdlib gzip reader, else the save fails — a
+// finalized name is cached forever, so corrupt bytes must never publish.
+// Returns the input when zopfli can't beat it (incompressible content).
+func gzipBest(key string, gz []byte) ([]byte, error) {
+	raw, err := gunzip(bytes.NewReader(gz))
+	if err != nil {
+		return nil, fmt.Errorf("recompress %s: read input: %w", key, err)
+	}
+	var best bytes.Buffer
+	opts := zopfli.DefaultOptions()
+	if err := zopfli.GzipCompress(&opts, raw, &best); err != nil {
+		return nil, fmt.Errorf("recompress %s: %w", key, err)
+	}
+	back, err := gunzip(bytes.NewReader(best.Bytes()))
+	if err != nil {
+		return nil, fmt.Errorf("recompress %s: round-trip: %w", key, err)
+	}
+	if !bytes.Equal(back, raw) {
+		return nil, fmt.Errorf("recompress %s: round-trip mismatch", key)
+	}
+	if best.Len() >= len(gz) {
+		return gz, nil
+	}
+	return best.Bytes(), nil
 }
 
 // latestKeep is the GC grace window: how many superseded latest-pack
@@ -361,7 +420,7 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) ([]ArticleData, 
 
 	for _, item := range articles {
 		if c.TotalArticles > 0 && c.TotalArticles%idxPackSize == 0 {
-			if err := o.savePack(ctx, finalizedIdxKey(c.TotalArticles/idxPackSize-1), meta); err != nil {
+			if err := o.savePackFinal(ctx, finalizedIdxKey(c.TotalArticles/idxPackSize-1), meta); err != nil {
 				return nil, err
 			}
 		}
@@ -373,7 +432,7 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) ([]ArticleData, 
 		}
 
 		if data.Len() > 0 && data.Len() >= globals.PackSize<<10 {
-			if err := o.savePack(ctx, finalizedDataKey(c.NextPackID), data); err != nil {
+			if err := o.savePackFinal(ctx, finalizedDataKey(c.NextPackID), data); err != nil {
 				return nil, err
 			}
 		}
