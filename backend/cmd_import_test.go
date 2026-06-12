@@ -224,7 +224,7 @@ func TestApplyImportDefaultsTagClearsToEmpty(t *testing.T) {
 func TestApplyImportDefaultsPipeApplied(t *testing.T) {
 	channels := []*Channel{{Title: "A"}, {Title: "B"}}
 	parsers := []string{"#sanitize", "#minify"}
-	applyImportDefaults(channels, &parsers, nil, nil)
+	applyImportDefaults(channels, parsers, nil, nil)
 	for _, c := range channels {
 		if !slices.Equal(c.Pipe, []string{"#sanitize", "#minify"}) {
 			t.Errorf("c.Pipe = %v, want [#sanitize #minify]", c.Pipe)
@@ -235,7 +235,7 @@ func TestApplyImportDefaultsPipeApplied(t *testing.T) {
 func TestApplyImportDefaultsPipeEmptyClears(t *testing.T) {
 	channels := []*Channel{{Title: "A", Pipe: []string{"#sanitize"}}}
 	parsers := []string{""}
-	applyImportDefaults(channels, &parsers, nil, nil)
+	applyImportDefaults(channels, parsers, nil, nil)
 	if channels[0].Pipe != nil {
 		t.Errorf("c.Pipe = %v, want nil (filterPipe drops empties)", channels[0].Pipe)
 	}
@@ -244,7 +244,7 @@ func TestApplyImportDefaultsPipeEmptyClears(t *testing.T) {
 func TestApplyImportDefaultsPipeFiltersEmpty(t *testing.T) {
 	channels := []*Channel{{Title: "A"}}
 	parsers := []string{"#sanitize", "", "#minify"}
-	applyImportDefaults(channels, &parsers, nil, nil)
+	applyImportDefaults(channels, parsers, nil, nil)
 	if !slices.Equal(channels[0].Pipe, []string{"#sanitize", "#minify"}) {
 		t.Errorf("c.Pipe = %v, want [#sanitize #minify]", channels[0].Pipe)
 	}
@@ -277,7 +277,7 @@ func TestImportRunFlagsThreadIntoChannels(t *testing.T) {
 	parsers := []string{"#sanitize", "#minify"}
 	ingest := "#telegram"
 	tag := "news"
-	o := &ImportCmd{Parsers: &parsers, Ingest: &ingest, Tag: &tag}
+	o := &ImportCmd{Parsers: parsers, Ingest: &ingest, Tag: &tag}
 
 	channels := []*Channel{{Title: "A"}}
 	applyImportDefaults(channels, o.Parsers, o.Ingest, o.Tag)

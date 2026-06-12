@@ -12,14 +12,14 @@ import (
 )
 
 type ImportCmd struct {
-	Path    string    `arg:""                help:"Channels opml file."`
-	ID      []string  `short:"i"             help:"Ids to import."`
-	All     bool      `short:"a"             help:"Import all."`
-	Tag     *string   `short:"g"             help:"Tag to assign to imported channels. Overrides OPML group tags."`
-	DryRun  bool      `short:"n"             help:"Dry run. List resulting channels without importing."`
-	Title   *string   `short:"t" optional:"" help:"Title for the merged channel. Triggers merge mode (all selections become one channel)."`
-	Parsers *[]string `short:"p" optional:"" help:"Channel pipe applied to every imported channel. Repeatable. Empty (\"\") clears (inherit root)."`
-	Ingest  *string   `          optional:"" help:"Channel ingest strategy applied to every imported channel. Empty (\"\") clears (inherit root)."`
+	Path    string   `arg:""                help:"Channels opml file."`
+	ID      []string `short:"i"             help:"Ids to import."`
+	All     bool     `short:"a"             help:"Import all."`
+	Tag     *string  `short:"g"             help:"Tag to assign to imported channels. Overrides OPML group tags."`
+	DryRun  bool     `short:"n"             help:"Dry run. List resulting channels without importing."`
+	Title   *string  `short:"t" optional:"" help:"Title for the merged channel. Triggers merge mode (all selections become one channel)."`
+	Parsers []string `short:"p" sep:"none" optional:"" help:"Channel pipe applied to every imported channel; repeat -p per step (not comma-separated). Empty (\"\") clears (inherit root)."`
+	Ingest  *string  `          optional:"" help:"Channel ingest strategy applied to every imported channel. Empty (\"\") clears (inherit root)."`
 }
 
 func (o *ImportCmd) Run() error {
@@ -167,12 +167,13 @@ func (iw *importWalker) isSelected(id string, importAll bool) bool {
 }
 
 // applyImportDefaults stamps Pipe / Ingest / Tag onto every channel
-// emitted by the importer. Each pointer is `nil` when the corresponding
-// CLI flag is absent. parsers passes through filterPipe so empty entries
-// drop and an all-empty input becomes nil (inherit-root semantics).
-func applyImportDefaults(channels []*Channel, parsers *[]string, ingest, tag *string) {
+// emitted by the importer. parsers (a slice) and the ingest/tag pointers are
+// `nil` when the corresponding CLI flag is absent. parsers passes through
+// filterPipe so empty entries drop and an all-empty input becomes nil
+// (inherit-root semantics).
+func applyImportDefaults(channels []*Channel, parsers []string, ingest, tag *string) {
 	if parsers != nil {
-		pipe := filterPipe(*parsers)
+		pipe := filterPipe(parsers)
 		for _, c := range channels {
 			c.Pipe = pipe
 		}

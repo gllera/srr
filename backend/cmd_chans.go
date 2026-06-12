@@ -43,7 +43,7 @@ type AddCmd struct {
 	Title   *string   `short:"t" required:""              help:"Channel title."`
 	URLs    *[]string `short:"u" required:"" name:"url"   help:"Channel RSS url(s); repeat to merge multiple feeds under one id."`
 	Tag     *string   `short:"g" optional:""              help:"Channel tag."`
-	Parsers *[]string `short:"p" optional:""              help:"Channel parsers commands. Empty (\"\") for default."`
+	Parsers []string  `short:"p" sep:"none" optional:"" help:"Channel pipe step; repeat -p per step (not comma-separated). Empty (\"\") for default."`
 	Ingest  *string   `short:"i" optional:""              help:"Ingest strategy: built-in ('#rss', '#telegram') or shell command."`
 }
 
@@ -88,7 +88,7 @@ func (o *AddCmd) Run() error {
 			ch.Tag = *o.Tag
 		}
 		if o.Parsers != nil {
-			ch.Pipe = filterPipe(*o.Parsers)
+			ch.Pipe = filterPipe(o.Parsers)
 		}
 		if o.Ingest != nil {
 			ch.Ingest = *o.Ingest
@@ -141,7 +141,7 @@ type UpdCmd struct {
 	AddURLs *[]string `           optional:"" name:"add-url"   help:"Append URL(s) (idempotent). Mutually exclusive with -u and --rm-url."`
 	RmURLs  *[]string `           optional:"" name:"rm-url"    help:"Remove URL(s) (strict). Mutually exclusive with -u and --add-url."`
 	Tag     *string   `short:"g" optional:""                  help:"Channel tag. Empty (\"\") to clear."`
-	Parsers *[]string `short:"p" optional:""                  help:"Channel parsers commands. Empty (\"\") to clear."`
+	Parsers []string  `short:"p" sep:"none" optional:"" help:"Channel pipe step; repeat -p per step (not comma-separated). Empty (\"\") to clear."`
 	Ingest  *string   `short:"i" optional:""                  help:"Channel ingest strategy. Empty (\"\") to clear."`
 }
 
@@ -180,7 +180,7 @@ func (o *UpdCmd) Run() error {
 			ch.Tag = *o.Tag
 		}
 		if o.Parsers != nil {
-			ch.Pipe = filterPipe(*o.Parsers)
+			ch.Pipe = filterPipe(o.Parsers)
 		}
 		if o.Ingest != nil {
 			ch.Ingest = *o.Ingest

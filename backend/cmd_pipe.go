@@ -5,8 +5,10 @@ import "context"
 // PipeCmd sets (or prints) the db.gz root pipe — the default pipeline
 // inherited by channels whose Pipe field is nil.
 // No args → print current. "" alone → clear. Otherwise → set.
+// One positional arg per pipeline step (sep:none → never comma-split, so a
+// step may contain commas, e.g. inside a module parameter value).
 type PipeCmd struct {
-	Pipe []string `arg:"" optional:"" help:"Root pipe to set (omit to print current; use \"\" alone to clear)."`
+	Pipe []string `arg:"" optional:"" sep:"none" help:"Root pipe; one arg per step (omit to print current; use \"\" alone to clear)."`
 }
 
 func (o *PipeCmd) Run() error {

@@ -81,6 +81,62 @@ func TestReadabilityFailsOpenOnHTTPError(t *testing.T) {
 	}
 }
 
+func TestReadabilityTimeoutParamFailsOpen(t *testing.T) {
+	// Handler stalls well past the configured timeout so the request context
+	// deadline trips first; the module must keep the original content.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		_, _ = w.Write([]byte(readabilityArticleHTML))
+	}))
+	defer srv.Close()
+
+	m := New(nil)
+	now := time.Now()
+	item := &RawItem{GUID: 1, Title: "T", Content: "<p>keep me</p>", Link: srv.URL, Published: &now}
+	if err := m.Process(context.Background(), "#readability timeout=1ms", item); err != nil {
+		t.Fatalf("Process should fail open on timeout, got err: %v", err)
+	}
+	if item.Content != "<p>keep me</p>" {
+		t.Errorf("content should be preserved when the fetch times out, got %q", item.Content)
+	}
+}
+
+func TestReadabilityMaxBodyParamTruncates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(readabilityArticleHTML))
+	}))
+	defer srv.Close()
+
+	m := New(nil)
+	now := time.Now()
+	item := &RawItem{GUID: 1, Title: "T", Content: "<p>teaser</p>", Link: srv.URL, Published: &now}
+	// A 10-byte cap truncates the document before the <article> body, so there
+	// is nothing to extract and the original content survives — proving maxbody
+	// is wired (the default cap replaces it, see TestReadabilityReplaces...).
+	if err := m.Process(context.Background(), "#readability maxbody=10", item); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if strings.Contains(item.Content, "substantial paragraph") {
+		t.Errorf("maxbody=10 should have prevented extraction, got %q", item.Content)
+	}
+}
+
+func TestReadabilityRejectsBadParams(t *testing.T) {
+	m := New(nil)
+	now := time.Now()
+	for _, token := range []string{
+		"#readability foo=bar",      // unknown key
+		"#readability timeout=abc",  // unparseable duration
+		"#readability maxbody=12xb", // unparseable size
+		"#readability timeout",      // bare flag where a duration is required
+	} {
+		item := &RawItem{GUID: 1, Title: "T", Content: "<p>x</p>", Link: "http://example.com", Published: &now}
+		if err := m.Process(context.Background(), token, item); err == nil {
+			t.Errorf("token %q: expected a configuration error", token)
+		}
+	}
+}
+
 func TestReadabilityPreservesGUIDAndPublished(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(readabilityArticleHTML))

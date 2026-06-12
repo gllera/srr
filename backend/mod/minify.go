@@ -8,11 +8,14 @@ import (
 )
 
 func init() {
-	Register("minify", func(_ Assets) func(context.Context, *RawItem) error {
+	Register("minify", func(_ Assets) Processor {
 		mi := minify.New()
 		mi.AddFunc("text/html", html.Minify)
 
-		return func(_ context.Context, i *RawItem) error {
+		return func(_ context.Context, p Params, i *RawItem) error {
+			if err := p.only(); err != nil {
+				return err
+			}
 			var err error
 			i.Content, err = mi.String("text/html", i.Content)
 			return err

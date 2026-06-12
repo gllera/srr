@@ -10,14 +10,14 @@ import (
 )
 
 func init() {
-	mod.Register("test-mutate-guid", func(_ mod.Assets) func(context.Context, *mod.RawItem) error {
-		return func(_ context.Context, i *mod.RawItem) error {
+	mod.Register("test-mutate-guid", func(_ mod.Assets) mod.Processor {
+		return func(_ context.Context, _ mod.Params, i *mod.RawItem) error {
 			i.GUID++
 			return nil
 		}
 	})
-	mod.Register("test-mutate-published", func(_ mod.Assets) func(context.Context, *mod.RawItem) error {
-		return func(_ context.Context, i *mod.RawItem) error {
+	mod.Register("test-mutate-published", func(_ mod.Assets) mod.Processor {
+		return func(_ context.Context, _ mod.Params, i *mod.RawItem) error {
 			t := time.Unix(1, 0)
 			i.Published = &t
 			return nil
