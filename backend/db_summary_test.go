@@ -40,6 +40,9 @@ func setupBoundaryDB(t *testing.T) (*DB, string) {
 	return db, dir
 }
 
+// The HdrPacks=0-with-finalized-packs state synced here is also exactly what
+// a pre-summary store (first run after upgrade) or a post-`srr gen --bump`
+// reset presents, so this covers all three rebuild triggers.
 func TestSyncIdxSummaryAtBoundary(t *testing.T) {
 	db, dir := setupBoundaryDB(t)
 
@@ -91,28 +94,6 @@ func TestSyncIdxSummaryBelowBoundaryNoop(t *testing.T) {
 	matches, _ := filepath.Glob(filepath.Join(dir, "idx/h*.gz"))
 	if len(matches) != 0 {
 		t.Errorf("unexpected summary files: %v", matches)
-	}
-}
-
-// A pre-summary store (or one reset by `srr gen --bump`) has finalized packs
-// but HdrPacks 0 — the next sync must rebuild from the packs.
-func TestSyncIdxSummaryMigration(t *testing.T) {
-	db, dir := setupBoundaryDB(t)
-
-	if err := db.SyncIdxSummary(ctx); err != nil {
-		t.Fatalf("SyncIdxSummary: %v", err)
-	}
-	os.Remove(filepath.Join(dir, "idx/h1.gz"))
-	db.core.HdrPacks = 0
-
-	if err := db.SyncIdxSummary(ctx); err != nil {
-		t.Fatalf("SyncIdxSummary (migration): %v", err)
-	}
-	if db.core.HdrPacks != 1 {
-		t.Errorf("HdrPacks = %d, want 1", db.core.HdrPacks)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "idx/h1.gz")); err != nil {
-		t.Errorf("idx/h1.gz missing after migration rebuild: %v", err)
 	}
 }
 

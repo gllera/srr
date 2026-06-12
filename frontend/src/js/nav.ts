@@ -229,11 +229,11 @@ async function step(dir: "left" | "right"): Promise<IShowFeed> {
    return result
 }
 
-export async function left(): Promise<IShowFeed> {
+export function left(): Promise<IShowFeed> {
    return step("left")
 }
 
-export async function right(): Promise<IShowFeed> {
+export function right(): Promise<IShowFeed> {
    return step("right")
 }
 

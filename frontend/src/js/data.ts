@@ -51,7 +51,6 @@ export async function init() {
    const raw: IDB = await new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).json()
    raw.channels ??= {}
    raw.seq ??= 0 // backend omitempty: absent for an empty store
-   raw.hdrs ??= 0
    for (const [k, ch] of Object.entries(raw.channels)) ch.id = Number(k)
    db = raw
 
@@ -143,7 +142,7 @@ export async function findChronForTimestamp(ts: number): Promise<number> {
    // key would make the subtraction NaN and collapse the search to index 0.
    const tsBlocks = Math.trunc(ts / FETCHED_AT_BLOCK) - Math.trunc((db.first_fetched ?? 0) / FETCHED_AT_BLOCK)
    const n = findPackForBlocks(idxHeaders, tsBlocks)
-   const chron = n * IDX_PACK_SIZE + (await fetchIdxPack(n)).findFirstBlock(tsBlocks)
+   const chron = (await fetchIdxPack(n)).findChronForBlocks(tsBlocks)
    return chron < db.total_art ? chron : Math.max(0, db.total_art - 1)
 }
 
