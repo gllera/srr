@@ -46,7 +46,7 @@ describe("contract: multi data-pack split", () => {
          expect(art.t, `article ${i} title`).toBe(items[i].title)
          expect(art.l, `article ${i} link`).toBe(items[i].link)
          expect(art.c, `article ${i} content`).toBe(items[i].content)
-         expect(reader.data.getChannelId(i)).toBe(0)
+         expect(await reader.data.getChannelId(i)).toBe(0)
       }
    })
 

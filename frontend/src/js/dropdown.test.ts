@@ -4,7 +4,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest"
 // before import — hence vi.resetModules() + dynamic import per test run.
 const data = vi.hoisted(() => ({
    groupChannelsByTag: vi.fn(() => ({ tagged: new Map(), sortedTags: [] as string[], untagged: [] as IChannel[] })),
-   findChronForTimestamp: vi.fn(() => 0),
+   findChronForTimestamp: vi.fn(async () => 0),
 }))
 vi.mock("./data", () => data)
 

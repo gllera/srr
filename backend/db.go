@@ -94,7 +94,15 @@ type DBCore struct {
 	// is safe: the reader treats an absent key as 0. Known hazard: an old
 	// binary (without this field) silently drops it on its next Commit (plain
 	// json.Unmarshal) — accepted for a single-operator deployment.
-	Gen      int              `json:"gen,omitempty"`
+	Gen int `json:"gen,omitempty"`
+	// HdrPacks is the idx header-summary coverage: idx/h<HdrPacks>.gz holds
+	// the verbatim 1036-byte headers of finalized idx packs 0..HdrPacks-1.
+	// SyncIdxSummary sets it only after the summary save succeeds and Commit
+	// publishes it (write-once name, same crash argument as Seq). Same
+	// old-binary hazard as Gen: a binary without this field drops it on its
+	// next Commit — readers then fall back to eager idx loading until the
+	// next fetch with a new binary rebuilds the summary.
+	HdrPacks int              `json:"hdrs,omitempty"`
 	Channels map[int]*Channel `json:"channels"`
 }
 

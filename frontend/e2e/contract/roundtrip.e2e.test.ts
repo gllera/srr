@@ -56,7 +56,7 @@ describe("contract: round-trip", () => {
 
    it("every chronIdx round-trips through the real reader", async () => {
       for (let i = 0; i < expected.length; i++) {
-         expect(reader.data.getChannelId(i), `getChannelId(${i})`).toBe(expected[i].chanId)
+         expect(await reader.data.getChannelId(i), `getChannelId(${i})`).toBe(expected[i].chanId)
          const art = await reader.data.loadArticle(i)
          expect(art.s, `article ${i} chan`).toBe(expected[i].chanId)
          expect(art.t, `article ${i} title`).toBe(expected[i].title)

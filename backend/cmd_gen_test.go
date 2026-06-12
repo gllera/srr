@@ -66,6 +66,27 @@ func TestGenPrintDoesNotMutate(t *testing.T) {
 	}
 }
 
+// --bump resets hdrs: an in-place rebuild invalidates the summary's copied
+// headers, so the next fetch must rebuild idx/h<N>.gz.
+func TestGenBumpResetsHdrPacks(t *testing.T) {
+	setupEmptyDB(t)
+
+	db := reopenDB(t)
+	db.core.HdrPacks = 3
+	if err := db.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	db.Close(ctx)
+
+	if err := (&GenCmd{Bump: true}).Run(); err != nil {
+		t.Fatalf("bump: %v", err)
+	}
+	db = reopenDB(t)
+	if db.core.HdrPacks != 0 {
+		t.Errorf("core.HdrPacks = %d, want 0 after bump", db.core.HdrPacks)
+	}
+}
+
 // gen is omitempty: absent from db.gz at 0 (the reader treats absent as 0),
 // present once bumped.
 func TestGenOmitemptyWhenZero(t *testing.T) {

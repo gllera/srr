@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
 	"sort"
 )
@@ -15,6 +16,7 @@ func validateAll(fetch keyGetter, core *DBCore, packs []*idxPack) error {
 	issues += checkFetchedAtsContinuity(packs)
 	issues += checkUnknownChanIDs(core, packs)
 	issues += checkLatestFiles(fetch, core)
+	issues += checkIdxSummary(fetch, core, packs)
 
 	fmt.Println()
 	if issues == 0 {
@@ -225,6 +227,64 @@ func checkUnknownChanIDs(core *DBCore, packs []*idxPack) int {
 			sid, c, first[sid])
 	}
 	return len(count)
+}
+
+// checkIdxSummary verifies the published idx header summary
+// (idx/h<hdrs>.gz) against db.gz and the finalized packs: coverage may lag
+// numFinalized (SyncIdxSummary is warn-only in fetch — readers fall back to
+// eager idx loading) but never exceed it, and each 1036-byte chunk must
+// equal the verbatim header of the finalized pack it covers.
+func checkIdxSummary(fetch keyGetter, core *DBCore, packs []*idxPack) int {
+	numFinalized := numFinalizedIdx(core.TotalArticles)
+	if core.HdrPacks > numFinalized {
+		fmt.Printf("[idx-summary] hdrs=%d but only %d finalized idx packs exist\n", core.HdrPacks, numFinalized)
+		return 1
+	}
+	if core.HdrPacks < numFinalized {
+		fmt.Printf("[idx-summary] warning: hdrs=%d lags %d finalized packs (readers fall back to eager idx loading; next fetch rebuilds)\n",
+			core.HdrPacks, numFinalized)
+	}
+	if core.HdrPacks == 0 {
+		fmt.Println("[idx-summary] no summary expected (hdrs=0)")
+		return 0
+	}
+	key := summaryKey(core.HdrPacks)
+	buf, err := fetch(key)
+	if err != nil {
+		fmt.Printf("[idx-summary] %s missing or corrupt: %v\n", key, err)
+		return 1
+	}
+	if len(buf) != core.HdrPacks*idxHeaderSize {
+		fmt.Printf("[idx-summary] %s has %d bytes but hdrs=%d expects %d\n",
+			key, len(buf), core.HdrPacks, core.HdrPacks*idxHeaderSize)
+		return 1
+	}
+	issues := 0
+	for k := range core.HdrPacks {
+		chunk := buf[k*idxHeaderSize:]
+		p := packs[k]
+		if binary.LittleEndian.Uint32(chunk[0:]) != p.fetchedAtBase ||
+			binary.LittleEndian.Uint32(chunk[4:]) != p.packIDBase ||
+			binary.LittleEndian.Uint32(chunk[8:]) != p.packOffBase {
+			fmt.Printf("[idx-summary] pack %d: summary bases (%d,%d,%d) != header (%d,%d,%d)\n", k,
+				binary.LittleEndian.Uint32(chunk[0:]), binary.LittleEndian.Uint32(chunk[4:]),
+				binary.LittleEndian.Uint32(chunk[8:]), p.fetchedAtBase, p.packIDBase, p.packOffBase)
+			issues++
+			continue
+		}
+		for s := range idxChanSlots {
+			if got := binary.LittleEndian.Uint32(chunk[idxStateSize+s*4:]); got != p.chanCounts[s] {
+				fmt.Printf("[idx-summary] pack %d sub %d: summary chanCount=%d but header has %d\n",
+					k, s, got, p.chanCounts[s])
+				issues++
+				break
+			}
+		}
+	}
+	if issues == 0 {
+		fmt.Printf("[idx-summary] %s matches %d finalized pack header(s)\n", key, core.HdrPacks)
+	}
+	return issues
 }
 
 // checkLatestFiles confirms the latest idx and data pack files

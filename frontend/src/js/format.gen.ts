@@ -72,5 +72,6 @@ export interface IDBWire {
    pipe?: string[] // Pipe
    ingest?: string // Ingest
    gen?: number // Gen
+   hdrs?: number // HdrPacks
    channels: Record<number, IChannelWire> | null // Channels
 }

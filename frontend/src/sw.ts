@@ -59,8 +59,9 @@ const SCOPE = new URL(sw.registration.scope).pathname
 
 // Matched anywhere in the path so they hold whatever prefix the cdn-url adds.
 const RE_ASSET = /\/assets\/[0-9a-f]{2}\/[0-9a-f]{16}\.\w+$/i
-// Write-once pack names: finalized numeric stems and L<seq> latest generations.
-const RE_PACK = /\/packs\/(?:idx|data)\/L?\d+\.gz$/i
+// Write-once pack names: finalized numeric stems, L<seq> latest generations,
+// and idx/h<N> header summaries (published before the db.gz that names them).
+const RE_PACK = /\/packs\/(?:idx|data)\/[Lh]?\d+\.gz$/i
 const RE_DB = /\/packs\/db\.gz$/i // the store's only mutable key
 const RE_SHELL_HASHED = /\.[0-9a-f]{8,}\.(?:js|css)$/i // Parcel content-hashed bundles
 
@@ -141,9 +142,10 @@ async function readMetaNumber(key: string): Promise<number> {
 async function checkManifest(dbRes: Response): Promise<void> {
    try {
       const body = dbRes.clone().body!.pipeThrough(new DecompressionStream("gzip"))
-      const db = (await new Response(body).json()) as { gen?: number; seq?: number }
+      const db = (await new Response(body).json()) as { gen?: number; seq?: number; hdrs?: number }
       const gen = db.gen ?? 0
       const seq = db.seq ?? 0
+      const hdrs = db.hdrs ?? 0
       const meta = await caches.open(META)
       const packs = await caches.open(PACKS)
       if (gen !== (await readMetaNumber(GEN_KEY))) {
@@ -156,8 +158,15 @@ async function checkManifest(dbRes: Response): Promise<void> {
          const keys = await packs.keys()
          await Promise.all(
             keys.map((k) => {
-               const m = /\/packs\/(?:idx|data)\/L(\d+)\.gz$/i.exec(new URL(k.url).pathname)
-               return m && Number(m[1]) < seq - LATEST_KEEP ? packs.delete(k) : undefined
+               const path = new URL(k.url).pathname
+               const m = /\/packs\/(?:idx|data)\/L(\d+)\.gz$/i.exec(path)
+               if (m && Number(m[1]) < seq - LATEST_KEEP) return packs.delete(k)
+               // Superseded idx header summaries ride the same prune: a
+               // summary rewrite only happens on an article-producing fetch,
+               // which always bumps seq too (mirrors the backend's
+               // GCSummaries grace window).
+               const h = /\/packs\/idx\/h(\d+)\.gz$/i.exec(path)
+               return h && Number(h[1]) < hdrs - LATEST_KEEP ? packs.delete(k) : undefined
             }),
          )
          await meta.put(SEQ_KEY, new Response(String(seq)))

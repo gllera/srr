@@ -15,7 +15,10 @@ vi.mock("./data", () => ({
    set db(v: IDB) {
       state.db = v
    },
-   findChronForTimestamp(ts: number): number {
+   // Mirrors the real signature (async since the lazy-idx change) but keeps
+   // the flat in-pack search: the pack-level step is pure and unit-tested in
+   // idx.test.ts (findPackForBlocks).
+   async findChronForTimestamp(ts: number): Promise<number> {
       let lo = 0
       let hi = state.fetchedAts.length
       while (lo < hi) {
@@ -50,44 +53,44 @@ vi.mock("./data", () => ({
 const data = await import("./data")
 
 describe("findChronForTimestamp", () => {
-   it("returns 0 for empty array", () => {
+   it("returns 0 for empty array", async () => {
       state.fetchedAts = new Uint32Array([])
-      expect(data.findChronForTimestamp(100)).toBe(0)
+      expect(await data.findChronForTimestamp(100)).toBe(0)
    })
 
-   it("returns 0 when all entries are after the timestamp", () => {
+   it("returns 0 when all entries are after the timestamp", async () => {
       state.fetchedAts = new Uint32Array([50, 60, 70])
-      expect(data.findChronForTimestamp(10)).toBe(0)
+      expect(await data.findChronForTimestamp(10)).toBe(0)
    })
 
-   it("returns last index when all entries are before the timestamp", () => {
+   it("returns last index when all entries are before the timestamp", async () => {
       state.fetchedAts = new Uint32Array([10, 20, 30])
-      expect(data.findChronForTimestamp(100)).toBe(2)
+      expect(await data.findChronForTimestamp(100)).toBe(2)
    })
 
-   it("finds leftmost entry >= ts", () => {
+   it("finds leftmost entry >= ts", async () => {
       state.fetchedAts = new Uint32Array([10, 20, 30, 40, 50])
-      expect(data.findChronForTimestamp(25)).toBe(2)
+      expect(await data.findChronForTimestamp(25)).toBe(2)
    })
 
-   it("finds exact match", () => {
+   it("finds exact match", async () => {
       state.fetchedAts = new Uint32Array([10, 20, 30, 40, 50])
-      expect(data.findChronForTimestamp(30)).toBe(2)
+      expect(await data.findChronForTimestamp(30)).toBe(2)
    })
 
-   it("returns leftmost of duplicate values", () => {
+   it("returns leftmost of duplicate values", async () => {
       state.fetchedAts = new Uint32Array([10, 20, 20, 20, 50])
-      expect(data.findChronForTimestamp(20)).toBe(1)
+      expect(await data.findChronForTimestamp(20)).toBe(1)
    })
 
-   it("works with single element <= ts", () => {
+   it("works with single element <= ts", async () => {
       state.fetchedAts = new Uint32Array([10])
-      expect(data.findChronForTimestamp(10)).toBe(0)
+      expect(await data.findChronForTimestamp(10)).toBe(0)
    })
 
-   it("works with single element > ts", () => {
+   it("works with single element > ts", async () => {
       state.fetchedAts = new Uint32Array([10])
-      expect(data.findChronForTimestamp(5)).toBe(0)
+      expect(await data.findChronForTimestamp(5)).toBe(0)
    })
 })
 

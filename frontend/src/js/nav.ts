@@ -18,10 +18,12 @@ export const filter = {
    },
    // chanTotal is derived from the idx scan so it matches findRight/findLeft
    // reachability — sum-of-total_art can overstate when idx and db.gz disagree.
+   // countAll is synchronous (latest pack + its cumulative header), so the
+   // filter object never waits on a pack fetch.
    clear() {
       this.channels = new Map<number, number>()
       for (const ch of Object.values(data.db.channels)) if (ch.total_art) this.channels.set(ch.id, ch.add_idx ?? 0)
-      this.chanTotal = data.countLeft(data.db.total_art, this.channels)
+      this.chanTotal = data.countAll(this.channels)
       this.tokens = []
    },
    set(tokens: string[]) {
@@ -38,12 +40,14 @@ export const filter = {
                   this.channels.set(ch.id, ch.add_idx ?? 0)
       }
       if (this.channels.size === 0) this.clear()
-      else this.chanTotal = data.countLeft(data.db.total_art, this.channels)
+      else this.chanTotal = data.countAll(this.channels)
    },
 }
 
-function showFeed(article: IArticle): IShowFeed {
-   const filteredLeft = data.countLeft(pos, filter.channels)
+async function showFeed(article: IArticle): Promise<IShowFeed> {
+   // resolve() awaited loadArticle(pos) first, so the pos idx pack is
+   // resident and this countLeft never fetches.
+   const filteredLeft = await data.countLeft(pos, filter.channels)
    const matchesPos = filter.matches(article.s, pos) ? 1 : 0
    const countRight = filter.chanTotal - filteredLeft - matchesPos
    return {
@@ -198,24 +202,24 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
    let target = posStr === "" ? NaN : Number(posStr)
    if (!Number.isFinite(target) || target < 0 || target >= data.db.total_art) target = data.db.total_art - 1
 
-   if (!filter.matches(data.getChannelId(target), target)) return last(undefined, true)
+   if (!filter.matches(await data.getChannelId(target), target)) return last(undefined, true)
    return resolve(target, true)
 }
 
 export async function left(): Promise<IShowFeed> {
-   const target = nextLeft ?? data.findLeft(pos - 1, filter.channels)
+   const target = nextLeft ?? (await data.findLeft(pos - 1, filter.channels))
    if (target === -1) throw new Error("no left match")
    const result = await resolve(target)
-   nextLeft = data.findLeft(pos - 1, filter.channels)
+   nextLeft = await data.findLeft(pos - 1, filter.channels)
    schedulePrefetch(nextLeft)
    return result
 }
 
 export async function right(): Promise<IShowFeed> {
-   const target = nextRight ?? data.findRight(pos + 1, filter.channels)
+   const target = nextRight ?? (await data.findRight(pos + 1, filter.channels))
    if (target === -1) throw new Error("no right match")
    const result = await resolve(target)
-   nextRight = data.findRight(pos + 1, filter.channels)
+   nextRight = await data.findRight(pos + 1, filter.channels)
    schedulePrefetch(nextRight)
    return result
 }
@@ -232,13 +236,13 @@ export async function last(token?: string, replace = false): Promise<IShowFeed> 
       if (token === "") filter.clear()
       else filter.set([token])
    }
-   const found = data.findLeft(data.db.total_art - 1, filter.channels)
+   const found = await data.findLeft(data.db.total_art - 1, filter.channels)
    if (found === -1) return resolveNoMatch(replace)
    return resolve(found, replace)
 }
 
-function isValidSeen(idx: number): boolean {
-   return idx >= 0 && idx < data.db.total_art && filter.matches(data.getChannelId(idx), idx)
+async function isValidSeen(idx: number): Promise<boolean> {
+   return idx >= 0 && idx < data.db.total_art && filter.matches(await data.getChannelId(idx), idx)
 }
 
 export async function switchFilter(token: string): Promise<IShowFeed> {
@@ -249,14 +253,14 @@ export async function switchFilter(token: string): Promise<IShowFeed> {
    filter.set([token])
    if (!filter.active) return last()
    const seenIdx = getSeen(token)
-   if (seenIdx !== undefined && isValidSeen(seenIdx)) return resolve(seenIdx)
+   if (seenIdx !== undefined && (await isValidSeen(seenIdx))) return resolve(seenIdx)
    return first()
 }
 
 // Jump to chronIdx, snapping forward to next match if filter is active.
 export async function goTo(idx: number): Promise<IShowFeed> {
    if (idx < 0 || idx >= data.db.total_art) return last()
-   const found = data.findRight(idx, filter.channels)
+   const found = await data.findRight(idx, filter.channels)
    return found === -1 ? last() : resolve(found)
 }
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { IDX_PACK_SIZE, makeIdxPack } from "./idx"
+import { findPackForBlocks, IDX_PACK_SIZE, makeIdxPack, parseIdxHeaders, type IdxHeader } from "./idx"
 
 const HEADER_BYTES = 259 * 4
 
@@ -97,10 +97,28 @@ describe("makeIdxPack.parse", () => {
          entries: [],
       })
       const pack = makeIdxPack(buf, 0, 0).parse()
-      expect(pack.chanCounts[0]).toBe(0)
-      expect(pack.chanCounts[1]).toBe(100)
-      expect(pack.chanCounts[2]).toBe(50)
-      expect(pack.chanCounts[255]).toBe(7)
+      expect(pack.header.chanCounts[0]).toBe(0)
+      expect(pack.header.chanCounts[1]).toBe(100)
+      expect(pack.header.chanCounts[2]).toBe(50)
+      expect(pack.header.chanCounts[255]).toBe(7)
+   })
+
+   it("exposes the full header before parse() is called", () => {
+      const buf = buildBuf({
+         fetchedAtBase: 42,
+         packIdBase: 7,
+         packOffBase: 3,
+         chanCounts: { 5: 11 },
+         entries: [e(1, 1, 2)],
+      })
+      const pack = makeIdxPack(buf, 0, 1)
+      expect(pack.header.fetchedAtBase).toBe(42)
+      expect(pack.header.packIdBase).toBe(7)
+      expect(pack.header.packOffBase).toBe(3)
+      expect(pack.header.chanCounts[5]).toBe(11)
+      // Entry-derived state must still be untouched (parse not forced).
+      expect(pack.chanIds.length).toBe(0)
+      expect(pack.bounds.length).toBe(0)
    })
 
    it("is idempotent across repeated calls", () => {
@@ -234,5 +252,63 @@ describe("makeIdxPack.countLeft", () => {
       const buf = buildBuf({ entries: [e(1), e(1), e(1)] })
       const pack = makeIdxPack(buf, 0, 3)
       expect(pack.countLeft(99999, new Map([[1, 0]]))).toBe(3)
+   })
+})
+
+// idx/h<N>.gz is the verbatim concatenation of finalized-pack headers.
+function buildSummary(headers: Omit<PackOpts, "entries">[]): ArrayBuffer {
+   const out = new Uint8Array(headers.length * HEADER_BYTES)
+   headers.forEach((h, k) => out.set(new Uint8Array(buildBuf({ ...h, entries: [] })), k * HEADER_BYTES))
+   return out.buffer
+}
+
+describe("parseIdxHeaders", () => {
+   it("decodes each 1036-byte chunk", () => {
+      const buf = buildSummary([
+         { fetchedAtBase: 0, packIdBase: 1, packOffBase: 0 },
+         { fetchedAtBase: 9, packIdBase: 4, packOffBase: 2, chanCounts: { 1: 50000 } },
+      ])
+      const hs = parseIdxHeaders(buf, 2)
+      expect(hs.length).toBe(2)
+      expect(hs[0].fetchedAtBase).toBe(0)
+      expect(hs[0].packIdBase).toBe(1)
+      expect(hs[1].fetchedAtBase).toBe(9)
+      expect(hs[1].packIdBase).toBe(4)
+      expect(hs[1].packOffBase).toBe(2)
+      expect(hs[1].chanCounts[1]).toBe(50000)
+      expect(hs[1].chanCounts[0]).toBe(0)
+   })
+
+   it("rejects a size mismatch", () => {
+      const buf = buildSummary([{}])
+      expect(() => parseIdxHeaders(buf, 2)).toThrow(/summary/)
+      expect(() => parseIdxHeaders(buf.slice(0, 100), 1)).toThrow(/summary/)
+   })
+})
+
+describe("findPackForBlocks", () => {
+   const hdr = (fetchedAtBase: number): IdxHeader => ({
+      fetchedAtBase,
+      packIdBase: 0,
+      packOffBase: 0,
+      chanCounts: new Uint32Array(256),
+   })
+   // Pack k's last entry value = headers[k+1].fetchedAtBase; the final
+   // header is the latest pack's (unbounded end). Packs 0..2 + latest.
+   const headers = [hdr(0), hdr(10), hdr(10), hdr(30)]
+
+   it("picks the first pack whose last entry >= tsBlocks", () => {
+      expect(findPackForBlocks(headers, 0)).toBe(0)
+      expect(findPackForBlocks(headers, 5)).toBe(0)
+      // Boundary duplicate (pack 1 spans no time): earliest pack wins, like
+      // the flat leftmost-entry search.
+      expect(findPackForBlocks(headers, 10)).toBe(0)
+      expect(findPackForBlocks(headers, 11)).toBe(2)
+      expect(findPackForBlocks(headers, 30)).toBe(2)
+   })
+
+   it("clamps to the latest pack when no finalized pack qualifies", () => {
+      expect(findPackForBlocks(headers, 31)).toBe(3)
+      expect(findPackForBlocks([hdr(0)], 999)).toBe(0)
    })
 })

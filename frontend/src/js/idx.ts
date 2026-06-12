@@ -2,16 +2,65 @@ import { CHAN_ID_SLOTS, DELTA_FETCHED_MAX, IDX_HEADER_SIZE, IDX_PACK_SIZE, IDX_S
 
 export { IDX_PACK_SIZE }
 
+// The decoded 1036-byte idx pack header: state bases plus the cumulative
+// per-channel counts of everything BEFORE the pack. Available for every pack
+// without entry parsing — from the pack's own bytes at construction, or from
+// the idx/h<N>.gz summary for packs not yet fetched.
+export interface IdxHeader {
+   fetchedAtBase: number
+   packIdBase: number
+   packOffBase: number
+   chanCounts: Uint32Array
+}
+
 export interface IdxPack {
+   header: IdxHeader
    chanIds: Uint8Array
    fetchedAts: Uint16Array
-   chanCounts: Uint32Array
    ownChanCounts: Uint32Array
    bounds: { packId: number; startChron: number }[]
    parse(): IdxPack
    countLeft(chronIdx: number, channels: Map<number, number>): number
    findLeft(chronFrom: number, channels: Map<number, number>): number
    findRight(chronFrom: number, channels: Map<number, number>): number
+}
+
+function parseIdxHeader(buf: ArrayBuffer, byteOff: number): IdxHeader {
+   const h = new Uint32Array(buf, byteOff, 3)
+   return {
+      fetchedAtBase: h[0],
+      packIdBase: h[1],
+      packOffBase: h[2],
+      // Copy out so the source buffer can be GC'd independently.
+      chanCounts: new Uint32Array(new Uint32Array(buf, byteOff + IDX_STATE_SIZE, CHAN_ID_SLOTS)),
+   }
+}
+
+// Decodes idx/h<N>.gz: the verbatim concatenation of the finalized packs'
+// 1036-byte headers. Refuses a size mismatch so a truncated body can't
+// silently zero the tail packs' counts.
+export function parseIdxHeaders(buf: ArrayBuffer, count: number): IdxHeader[] {
+   if (buf.byteLength !== count * IDX_HEADER_SIZE) {
+      throw new Error(`idx summary: got ${buf.byteLength}B, want ${count * IDX_HEADER_SIZE}B`)
+   }
+   return Array.from({ length: count }, (_, k) => parseIdxHeader(buf, k * IDX_HEADER_SIZE))
+}
+
+// Pack-level step of findChronForTimestamp: headers[k] is pack k's header
+// with the latest pack's at the end, so pack k's LAST entry value equals
+// headers[k+1].fetchedAtBase (validated by the backend's fetched-ats
+// continuity check). Returns the first pack whose last entry >= tsBlocks —
+// the pack holding the global leftmost qualifying entry — clamped to the
+// latest pack (whose end is unbounded).
+export function findPackForBlocks(headers: IdxHeader[], tsBlocks: number): number {
+   let lo = 0
+   let hi = headers.length - 1
+   while (lo < hi) {
+      const mid = (lo + hi) >>> 1
+      if (headers[mid + 1].fetchedAtBase < tsBlocks) lo = mid + 1
+      else hi = mid
+   }
+   return lo
 }
 
 // Channel IDs are uint8 (0..255), so a CHAN_ID_SLOTS-entry typed array beats
@@ -40,19 +89,18 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
       return false
    }
    const pack: IdxPack = {
+      // Decoded eagerly: header-only consumers (countLeft cumulative counts,
+      // pack-skip deltas, timestamp bases) must not force the entry parse.
+      header: parseIdxHeader(buf, 0),
       chanIds: new Uint8Array(0),
-      chanCounts: new Uint32Array(0),
       ownChanCounts: new Uint32Array(0),
       fetchedAts: new Uint16Array(0),
       bounds: [],
       parse() {
          if (!rawBuf) return pack
-         const h = new Uint32Array(rawBuf, 0, IDX_HEADER_SIZE / 4)
-         let fetchedAt = h[0]
-         let packId = h[1]
-         const packOff = h[2]
-         // Copy out so the raw buffer can be GC'd after parse() returns
-         pack.chanCounts = new Uint32Array(new Uint32Array(rawBuf, IDX_STATE_SIZE, CHAN_ID_SLOTS))
+         let fetchedAt = pack.header.fetchedAtBase
+         let packId = pack.header.packIdBase
+         const packOff = pack.header.packOffBase
          const ownChanCounts = new Uint32Array(CHAN_ID_SLOTS)
          pack.ownChanCounts = ownChanCounts
 
@@ -98,7 +146,7 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
          pack.parse()
          let count = 0
          for (const [chanId, addIdx] of channels) {
-            if (addIdx < baseChron) count += pack.chanCounts[chanId]
+            if (addIdx < baseChron) count += pack.header.chanCounts[chanId]
          }
          const limit = Math.min(chronIdx - baseChron, packSize)
          if (limit <= 0) return count

@@ -127,6 +127,14 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 		if err := db.PutArticles(ctx, articles); err != nil {
 			return err
 		}
+		// Warn-only: the batch is already durable in L<Seq+1>, so a failed
+		// ~1KB summary write must not discard it. HdrPacks stays behind,
+		// readers fall back to eager idx loading, and the next run retries
+		// the rebuild. Runs unconditionally (zero-article runs included) so a
+		// pre-summary store migrates on its first fetch cycle.
+		if err := db.SyncIdxSummary(ctx); err != nil {
+			slog.Warn("sync idx summary", "error", err)
+		}
 		if err := db.Commit(ctx); err != nil {
 			return err
 		}
@@ -136,6 +144,9 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 		// missed is swept by a later run regardless).
 		if err := db.GCLatest(context.WithoutCancel(ctx), latestKeep); err != nil {
 			slog.Warn("gc latest packs", "error", err)
+		}
+		if err := db.GCSummaries(context.WithoutCancel(ctx), latestKeep); err != nil {
+			slog.Warn("gc idx summaries", "error", err)
 		}
 
 		var failed, totalFeeds int
