@@ -15,30 +15,60 @@ export let db: IDB
 
 let idxPacks: IdxPack[] = []
 
+// A pack name is write-once, so a non-OK response means the name itself no
+// longer matches the store. For a latest pack (L<seq>) that means this tab's
+// db.gz predates the backend's GC grace window — only a fresh db.gz (fetched
+// no-cache) can name the current generation, so reload once. The
+// sessionStorage guard prevents reload loops; it is cleared only after a
+// successful init() so a transient failure can't permanently disable
+// self-healing for the tab.
+const RELOAD_GUARD = "srr-reload-guard"
+
+function assertPackOk(res: Response, isLatest: boolean): void {
+   if (res.ok) return
+   if (isLatest && !sessionStorage.getItem(RELOAD_GUARD)) {
+      sessionStorage.setItem(RELOAD_GUARD, "1")
+      location.reload()
+   }
+   // reload() doesn't halt execution — always throw so callers never touch
+   // res.body, and so the failure stays visible when the guard suppressed
+   // the reload (or under jsdom, where reload is a no-op).
+   throw new Error(`pack fetch failed: ${res.status} ${res.url}`)
+}
+
 export async function init() {
    const res = await dbFetch
    const raw: IDB = await new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).json()
    raw.channels ??= {}
+   raw.seq ??= 0 // backend omitempty: absent for an empty store
    for (const [k, ch] of Object.entries(raw.channels)) ch.id = Number(k)
    db = raw
 
-   if (db.total_art === 0) return
+   if (db.total_art === 0) {
+      sessionStorage.removeItem(RELOAD_GUARD)
+      return
+   }
 
    const nf = numFinalizedIdx()
 
    idxPacks = await Promise.all(
       Array.from({ length: nf + 1 }, (_, p) => {
          const isFinalized = p < nf
-         const path = `idx/${isFinalized ? p.toString() : String(db.data_tog)}.gz`
+         const path = `idx/${isFinalized ? p.toString() : `L${db.seq}`}.gz`
          const size = isFinalized ? IDX_PACK_SIZE : db.total_art - p * IDX_PACK_SIZE
          const url = new URL(path, DB_URL)
-         const opts: RequestInit = {}
-         if (isFinalized) opts.cache = "force-cache"
-         return fetch(url, opts)
-            .then((res) => new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer())
+         // Every pack name is write-once (finalized numeric, or the L<seq>
+         // generation a db.gz commit published), so the HTTP cache may serve
+         // them all without revalidation.
+         return fetch(url, { cache: "force-cache" })
+            .then((res) => {
+               assertPackOk(res, !isFinalized)
+               return new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer()
+            })
             .then((buf) => makeIdxPack(buf, p, size))
       }),
    )
+   sessionStorage.removeItem(RELOAD_GUARD)
 }
 
 function numFinalizedIdx(): number {
@@ -127,10 +157,9 @@ function loadDataPack(packId: number): Promise<IArticle[]> {
 
 async function fetchDataPack(packId: number): Promise<IArticle[]> {
    const isFinalized = packId < db.next_pid
-   const name = isFinalized ? packId.toString() : String(db.data_tog)
-   const opts: RequestInit = {}
-   if (isFinalized) opts.cache = "force-cache"
-   const res = await fetch(new URL(`data/${name}.gz`, DB_URL), opts)
+   const name = isFinalized ? packId.toString() : `L${db.seq}`
+   const res = await fetch(new URL(`data/${name}.gz`, DB_URL), { cache: "force-cache" })
+   assertPackOk(res, !isFinalized)
    const reader = res
       .body!.pipeThrough(new DecompressionStream("gzip"))
       .pipeThrough(new TextDecoderStream())
@@ -163,7 +192,10 @@ export async function loadArticle(chronIdx: number): Promise<IArticle> {
    const ref = getPackRef(chronIdx)
    const entries = await loadDataPack(ref.packId)
    if (ref.offset >= entries.length) {
-      // Backend cron may have rewritten the pack; drop the cache so a retry refetches.
+      // Pack names are write-once, so this is unreachable in normal operation;
+      // it survives as defense-in-depth for a store rebuilt in place (same
+      // names, new bytes) before its `gen` bump propagates. Drop the cache so
+      // a retry refetches.
       dataCache.drop(ref.packId)
       throw new Error(`pack ${ref.packId} out of sync (offset ${ref.offset} of ${entries.length}); retry to refresh`)
    }

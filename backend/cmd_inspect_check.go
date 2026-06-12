@@ -91,13 +91,13 @@ func checkDBMeta(fetch keyGetter, core *DBCore, packs []*inspIdx) int {
 		issues++
 	}
 
-	latestKey := fmt.Sprintf("data/%v.gz", core.DataToggle)
-	latest, err := loadDataPack(fetch, latestKey)
+	latestData := latestKey(core, "data")
+	latest, err := loadDataPack(fetch, latestData)
 	if err != nil {
-		fmt.Printf("[db-meta] fetch %s: %v\n", latestKey, err)
+		fmt.Printf("[db-meta] fetch %s: %v\n", latestData, err)
 		issues++
 	} else if len(latest) != core.PackOffset {
-		fmt.Printf("[db-meta] pack_off=%d but %s has %d entries\n", core.PackOffset, latestKey, len(latest))
+		fmt.Printf("[db-meta] pack_off=%d but %s has %d entries\n", core.PackOffset, latestData, len(latest))
 		issues++
 	}
 
@@ -228,18 +228,18 @@ func checkUnknownChanIDs(core *DBCore, packs []*inspIdx) int {
 }
 
 // checkLatestFiles confirms the latest idx and data pack files
-// (named after data_tog) actually exist and decompress.
+// (the current L<seq> generation) actually exist and decompress.
 func checkLatestFiles(fetch keyGetter, core *DBCore) int {
 	issues := 0
 	for _, prefix := range []string{"idx", "data"} {
-		key := fmt.Sprintf("%s/%v.gz", prefix, core.DataToggle)
+		key := latestKey(core, prefix)
 		if _, err := fetch(key); err != nil {
 			fmt.Printf("[latest-files] %s missing or corrupt: %v\n", key, err)
 			issues++
 		}
 	}
 	if issues == 0 {
-		fmt.Printf("[latest-files] idx/%v.gz and data/%v.gz present\n", core.DataToggle, core.DataToggle)
+		fmt.Printf("[latest-files] %s and %s present\n", latestKey(core, "idx"), latestKey(core, "data"))
 	}
 	return issues
 }

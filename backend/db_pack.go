@@ -30,13 +30,26 @@ type Item struct {
 	Published int64
 }
 
+// genKey resolves the latest-pack key of a series ("idx" or "data") for a
+// specific generation.
+func genKey(prefix string, gen int) string {
+	return fmt.Sprintf("%s/L%d.gz", prefix, gen)
+}
+
+// latestKey resolves the current latest-pack key of a series ("idx" or
+// "data") from the store generation in core.Seq.
+func latestKey(core *DBCore, prefix string) string {
+	return genKey(prefix, core.Seq)
+}
+
 // dataKeyFor resolves a data pack key from a packID: finalized packs
-// (id < NextPackID) use the numeric filename; otherwise the toggle name.
+// (id < NextPackID) use the numeric filename; otherwise the current
+// latest-generation name.
 func dataKeyFor(core *DBCore, packID int) string {
 	if packID < core.NextPackID {
 		return fmt.Sprintf("data/%d.gz", packID)
 	}
-	return fmt.Sprintf("data/%v.gz", core.DataToggle)
+	return latestKey(core, "data")
 }
 
 // parseDataPack decodes a JSONL data pack (one ArticleData per line)
@@ -128,6 +141,32 @@ func (o *DB) savePack(ctx context.Context, key string, p *pack) error {
 	return nil
 }
 
+// latestKeep is the GC grace window: how many superseded latest-pack
+// generations stay in the store alongside the current one. A reader whose
+// db.gz is up to latestKeep fetch cycles old still resolves its own L<seq>
+// snapshot; anything older gets a clean 404 (the frontend self-heals with a
+// guarded reload). Mirrored by the frontend service worker's LATEST_KEEP.
+const latestKeep = 2
+
+// GCLatest deletes superseded latest-pack generations, keeping the current
+// one plus `keep` older generations as a grace window for readers holding a
+// stale db.gz. It sweeps a small trailing window below the cutoff instead of
+// only the newest expired generation, so packs leaked by a crash between
+// Commit and GC self-heal on later runs (the store interface has no List —
+// only computed names can be deleted; Rm is silent on missing keys, so the
+// extra calls are free). Best-effort: callers treat errors as non-fatal.
+func (o *DB) GCLatest(ctx context.Context, keep int) error {
+	cutoff := o.core.Seq - keep - 1 // newest expired generation
+	for g := cutoff; g > cutoff-4 && g >= 1; g-- {
+		for _, prefix := range []string{"idx", "data"} {
+			if err := o.Rm(ctx, genKey(prefix, g)); err != nil {
+				return fmt.Errorf("gc latest generation %d: %w", g, err)
+			}
+		}
+	}
+	return nil
+}
+
 func expectedLatestIdxSize(totalArticles int) int {
 	if totalArticles == 0 {
 		return 0
@@ -143,16 +182,15 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 	}
 
 	c := &o.core
-	latest := fmt.Sprintf("%v.gz", c.DataToggle)
 
-	meta, metaSize, err := o.loadPack(ctx, "idx/"+latest)
+	meta, metaSize, err := o.loadPack(ctx, latestKey(c, "idx"))
 	if err != nil {
 		return err
 	}
 	if expected := expectedLatestIdxSize(c.TotalArticles); metaSize != expected {
-		return fmt.Errorf("idx/%s has %d bytes but db.gz expects %d", latest, metaSize, expected)
+		return fmt.Errorf("%s has %d bytes but db.gz expects %d", latestKey(c, "idx"), metaSize, expected)
 	}
-	data, _, err := o.loadPack(ctx, "data/"+latest)
+	data, _, err := o.loadPack(ctx, latestKey(c, "data"))
 	if err != nil {
 		return err
 	}
@@ -234,16 +272,21 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 		c.PackOffset++
 	}
 
-	// Flip the toggle only after both saves succeed — otherwise a mid-flight
-	// data-pack failure leaves the in-memory toggle ahead of db.gz, and the
-	// idx pack we just wrote becomes an orphan under the new-toggle filename.
-	latest = fmt.Sprintf("%v.gz", !c.DataToggle)
-	if err := o.savePack(ctx, "idx/"+latest, meta); err != nil {
+	// Write the next generation, and bump Seq only after both saves succeed
+	// — otherwise a mid-flight data-pack failure leaves the in-memory Seq
+	// ahead of db.gz, and the idx pack we just wrote becomes an orphan under
+	// the new generation name. A crash here (before Commit publishes Seq)
+	// leaves an orphan L<Seq+1> that the retry overwrites — safe even under
+	// immutable cache headers because no client can learn a generation name
+	// before Commit publishes it, so nothing has ever requested the orphan.
+	// Any future feature that speculatively prefetches L<seq+1> would break
+	// that invariant.
+	if err := o.savePack(ctx, genKey("idx", c.Seq+1), meta); err != nil {
 		return err
 	}
-	if err := o.savePack(ctx, "data/"+latest, data); err != nil {
+	if err := o.savePack(ctx, genKey("data", c.Seq+1), data); err != nil {
 		return err
 	}
-	c.DataToggle = !c.DataToggle
+	c.Seq++
 	return nil
 }

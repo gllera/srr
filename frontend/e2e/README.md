@@ -6,8 +6,8 @@ an API. The unit tests exercise each side in isolation (the frontend ones mock
 `./data` entirely). These e2e tests close the gap: they run the **real `srrb`
 binary** to write packs from canned feeds, then read them back with the **real
 frontend code** — catching writer↔reader drift (idx layout, pack-split math,
-`data_tog` toggle, dedup/watermark, JSONL keys) that neither side's unit tests
-can see.
+`seq` latest-pack generations, dedup/watermark, JSONL keys) that neither
+side's unit tests can see.
 
 ## Layers
 

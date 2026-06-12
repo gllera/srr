@@ -31,7 +31,7 @@ Write or update unit tests for the frontend project following the established pa
 
 ## State reset
 
-Every `beforeEach` resets `data.db.total_art` (to 0) and `data.db.channels` (to `{}`), calls `mockReset()` on `data.loadArticle`/`data.getChannelId` and `mockClear()` on `data.findLeft`/`data.findRight`, then `nav.filter.clear()`, `localStorage.clear()`, and spies `history.pushState`/`replaceState` via `vi.spyOn`. Filter state is reset through the exported `filter` object (`nav.filter.clear()`), not setter functions — nav.ts exports no `setFilterSubs`/`setFloorChron`. There is no idxPack, db.data_tog, subscriptions, subs_mapped, articles, or loadIdxPack to reset, and no ts.ts module/mock exists. See nav.test.ts `beforeEach` for the exact sequence.
+Every `beforeEach` resets `data.db.total_art` (to 0) and `data.db.channels` (to `{}`), calls `mockReset()` on `data.loadArticle`/`data.getChannelId` and `mockClear()` on `data.findLeft`/`data.findRight`, then `nav.filter.clear()`, `localStorage.clear()`, and spies `history.pushState`/`replaceState` via `vi.spyOn`. Filter state is reset through the exported `filter` object (`nav.filter.clear()`), not setter functions — nav.ts exports no `setFilterSubs`/`setFloorChron`. There is no idxPack, db.seq, subscriptions, subs_mapped, articles, or loadIdxPack to reset, and no ts.ts module/mock exists. See nav.test.ts `beforeEach` for the exact sequence.
 
 ## Hash verification
 

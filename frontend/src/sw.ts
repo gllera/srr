@@ -6,28 +6,27 @@
 //   assets (srr-assets-vN)  content-hash `assets/<2hex>/<16hex><ext>` — immutable
 //                           (the hash is the sha256 of the bytes). Cache-first,
 //                           permanent; a hit can never be stale.
-//   packs  (srr-packs-vN)   the CDN store under `packs/`:
-//      finalized `idx/<n>.gz` / `data/<n>.gz` (numeric)  → immutable, cache-first.
-//      `db.gz`, `idx|data/{true,false}.gz`               → mutable, network-first
-//                                                           (offline → last cached).
+//   packs  (srr-packs-vN)   the CDN store under `packs/`: every pack name is
+//      write-once — finalized `idx/<n>.gz` / `data/<n>.gz` (numeric) and the
+//      latest generation `idx|data/L<seq>.gz` (a generation is never rewritten
+//      after the db.gz commit that publishes it) → cache-first. Only `db.gz`
+//      is mutable → network-first (offline → last cached).
 //   shell  (srr-shell-vN)   the app itself: the `/…/` navigation + content-hashed
 //                           JS/CSS. Runtime-cached (no build-time manifest — keeps
 //                           this SW hand-written and zero-dep). Hashed JS/CSS are
 //                           immutable → cache-first; the navigation/index.html is the
 //                           version pointer → network-first so a fresh deploy wins
 //                           online and the cached shell serves offline.
-//   meta   (srr-meta-vN)    one synthetic entry: the last-seen db.gz `gen` (store
-//                           generation). When a fresh db.gz carries a different gen,
-//                           the packs bucket is purged (see checkGen) — that's how an
-//                           in-place store rebuild invalidates cache-first packs
-//                           without a frontend redeploy.
+//   meta   (srr-meta-vN)    two synthetic entries: the last-seen db.gz `gen` (store
+//                           generation) and `seq` (latest-pack generation). A gen
+//                           change purges the packs bucket (in-place store rebuild,
+//                           see checkManifest); a seq change prunes cached L<g>
+//                           generations the backend GC has already dropped.
 //
-// Offline correctness rests on one invariant: db.gz and the latest pack
-// (true/false.gz) must agree on data_tog/next_pid. Network-first fetches the freshest
-// of BOTH when online and the last-cached of BOTH when offline — and they were cached
-// together on the last online visit, so the offline pair is mutually consistent. (A
-// mid-load network blip can still pair a fresh db.gz with a stale pack, but that race
-// already exists without the SW — a fetch-cron rewrite vs an open tab.)
+// Offline correctness is structural: a cached db.gz of generation N can only ever
+// pair with `L<N>` — the name is write-once, so the pair can never disagree on
+// next_pid/offsets, even across a mid-load network blip. Both were cached on the
+// last online visit; offline serves that consistent snapshot.
 //
 // Best-effort throughout: every miss/failure falls through to the network, so a
 // browser without SW support (or an insecure-context LAN deploy) just runs straight
@@ -38,7 +37,7 @@ const sw = self as unknown as ServiceWorkerGlobalScope
 // Bump a suffix to invalidate that bucket on the next activate.
 const ASSETS = "srr-assets-v1"
 // vN now only marks format changes of the cache itself. Store rebuilds are
-// handled by the db.gz `gen` field (checkGen below): an in-place wipe+rebuild
+// handled by the db.gz `gen` field (checkManifest below): an in-place wipe+rebuild
 // reuses finalized pack ids (data/N.gz) with new bytes — cache-first would
 // serve the stale cached packs — so the operator bumps `srr gen --bump` and
 // every client purges PACKS on its next db.gz fetch, no redeploy needed.
@@ -46,8 +45,9 @@ const ASSETS = "srr-assets-v1"
 // gen existed; cron only appends, so prod never rebuilds.)
 const PACKS = "srr-packs-v3"
 const SHELL = "srr-shell-v1"
-// Tiny bucket holding the last-seen store generation (a Cache is the only
-// storage a SW shares across restarts without IndexedDB).
+// Tiny bucket holding the last-seen store generation + latest-pack
+// generation (a Cache is the only storage a SW shares across restarts
+// without IndexedDB).
 const META = "srr-meta-v1"
 const KEEP = new Set([ASSETS, PACKS, SHELL, META])
 
@@ -57,9 +57,9 @@ const SCOPE = new URL(sw.registration.scope).pathname
 
 // Matched anywhere in the path so they hold whatever prefix the cdn-url adds.
 const RE_ASSET = /\/assets\/[0-9a-f]{2}\/[0-9a-f]{16}\.\w+$/i
-const RE_PACK_FINAL = /\/packs\/(?:idx|data)\/\d+\.gz$/i
-const RE_PACK_LATEST = /\/packs\/(?:db\.gz|(?:idx|data)\/(?:true|false)\.gz)$/i
-const RE_DB = /\/packs\/db\.gz$/i // subset of RE_PACK_LATEST — test first
+// Write-once pack names: finalized numeric stems and L<seq> latest generations.
+const RE_PACK = /\/packs\/(?:idx|data)\/L?\d+\.gz$/i
+const RE_DB = /\/packs\/db\.gz$/i // the store's only mutable key
 const RE_SHELL_HASHED = /\.[0-9a-f]{8,}\.(?:js|css)$/i // Parcel content-hashed bundles
 
 sw.addEventListener("install", () => {
@@ -78,12 +78,13 @@ sw.addEventListener("activate", (event) => {
 })
 
 // Serve the cached copy if present, else fetch and cache a genuine success.
-// `revalidate` (finalized packs): a miss must bypass the HTTP cache underneath —
-// the page fetches packs with force-cache and they're served immutable/1y, so a
-// stale post-rebuild copy can outlive checkGen's purge of this bucket; no-cache
-// forces origin revalidation exactly once, then this cache is the hit path
-// again. Content-hashed assets/bundles can't go stale → they keep re-filling
-// from the HTTP cache for free.
+// `revalidate` (write-once packs, numeric and L<seq>): a miss must bypass the
+// HTTP cache underneath — the page fetches packs with force-cache and they're
+// served immutable/1y, so a stale post-rebuild copy (same name, new bytes) can
+// outlive checkManifest's purge of this bucket; no-cache forces origin
+// revalidation exactly once, then this cache is the hit path again.
+// Content-hashed assets/bundles can't go stale → they keep re-filling from
+// the HTTP cache for free.
 async function cacheFirst(req: Request, name: string, revalidate = false): Promise<Response> {
    const cache = await caches.open(name)
    const hit = await cache.match(req)
@@ -109,50 +110,75 @@ async function networkFirst(req: Request, name: string): Promise<Response> {
    }
 }
 
-// The last-seen gen persists as a synthetic entry in META (the URL is never
-// fetched — it's just a cache key).
+// The last-seen gen/seq persist as synthetic entries in META (the URLs are
+// never fetched — they're just cache keys).
 const GEN_KEY = "https://srr.invalid/gen"
+const SEQ_KEY = "https://srr.invalid/seq"
 
-async function readStoredGen(): Promise<number> {
+// Latest generations the backend's GC keeps in the store (current + this
+// many older ones) — mirrors the backend's `latestKeep`, so the SW never
+// prunes a generation the store itself still serves (an offline device may
+// be reading from it).
+const LATEST_KEEP = 2
+
+async function readMetaNumber(key: string): Promise<number> {
    const cache = await caches.open(META)
-   const hit = await cache.match(GEN_KEY)
+   const hit = await cache.match(key)
    return hit ? Number(await hit.text()) || 0 : 0
 }
 
-// Best-effort store-rebuild detection: gunzip the db.gz body (raw gzip bytes,
-// no Content-Encoding — same manual decompression as data.ts), read `gen`
-// (absent == 0), and when it differs from the last-seen value purge PACKS so
-// the next finalized-pack fetch re-pulls fresh bytes. Inequality, not
-// greater-than: a wipe+rebuild may reset gen. ASSETS stays (content-hashed —
-// a hit can never be stale); SHELL is unrelated. Any failure is swallowed:
-// a malformed db.gz must still be served.
-async function checkGen(dbRes: Response): Promise<void> {
+// Best-effort manifest tracking: gunzip the db.gz body (raw gzip bytes, no
+// Content-Encoding — same manual decompression as data.ts) and read `gen`
+// and `seq` (absent == 0).
+//   gen differs → in-place store rebuild: every cached pack may hold stale
+//   bytes under a reused name, purge the whole PACKS bucket. Inequality, not
+//   greater-than: a wipe+rebuild may reset gen.
+//   seq differs (gen same) → normal fetch-cron advance: prune only cached
+//   L<g> generations older than the store's GC grace window; newer cached
+//   generations stay usable offline.
+// ASSETS stays (content-hashed — a hit can never be stale); SHELL is
+// unrelated. Any failure is swallowed: a malformed db.gz must still be served.
+async function checkManifest(dbRes: Response): Promise<void> {
    try {
       const body = dbRes.clone().body!.pipeThrough(new DecompressionStream("gzip"))
-      const db = (await new Response(body).json()) as { gen?: number }
+      const db = (await new Response(body).json()) as { gen?: number; seq?: number }
       const gen = db.gen ?? 0
-      if (gen === (await readStoredGen())) return
-      const packs = await caches.open(PACKS)
-      await Promise.all((await packs.keys()).map((k) => packs.delete(k)))
+      const seq = db.seq ?? 0
       const meta = await caches.open(META)
-      await meta.put(GEN_KEY, new Response(String(gen)))
+      const packs = await caches.open(PACKS)
+      if (gen !== (await readMetaNumber(GEN_KEY))) {
+         await Promise.all((await packs.keys()).map((k) => packs.delete(k)))
+         await meta.put(GEN_KEY, new Response(String(gen)))
+         await meta.put(SEQ_KEY, new Response(String(seq)))
+         return
+      }
+      if (seq !== (await readMetaNumber(SEQ_KEY))) {
+         const keys = await packs.keys()
+         await Promise.all(
+            keys.map((k) => {
+               const m = /\/packs\/(?:idx|data)\/L(\d+)\.gz$/i.exec(new URL(k.url).pathname)
+               return m && Number(m[1]) < seq - LATEST_KEEP ? packs.delete(k) : undefined
+            }),
+         )
+         await meta.put(SEQ_KEY, new Response(String(seq)))
+      }
    } catch {
       // best-effort — leave caches as-is
    }
 }
 
-// db.gz gets its own network-first variant that awaits the gen check BEFORE
-// resolving: the page awaits db.gz (data.ts init) before requesting any idx
-// pack, so a purge that completes first is race-free. Offline (fetch threw)
-// the check is unreachable — correct, there is no new gen to discover and the
-// cached db.gz/pack pair stays mutually consistent.
+// db.gz gets its own network-first variant that awaits the manifest check
+// BEFORE resolving: the page awaits db.gz (data.ts init) before requesting
+// any idx pack, so a purge that completes first is race-free. Offline (fetch
+// threw) the check is unreachable — correct, there is no new gen/seq to
+// discover and the cached db.gz/pack pair stays mutually consistent.
 async function dbNetworkFirst(req: Request): Promise<Response> {
    const cache = await caches.open(PACKS)
    try {
       const res = await fetch(req)
       if (res.ok) {
          cache.put(req, res.clone())
-         await checkGen(res)
+         await checkManifest(res)
       }
       return res
    } catch (err) {
@@ -179,8 +205,7 @@ sw.addEventListener("fetch", (event) => {
    const path = url.pathname
    if (RE_ASSET.test(path)) event.respondWith(cacheFirst(req, ASSETS))
    else if (RE_DB.test(path)) event.respondWith(dbNetworkFirst(req))
-   else if (RE_PACK_FINAL.test(path)) event.respondWith(cacheFirst(req, PACKS, true))
-   else if (RE_PACK_LATEST.test(path)) event.respondWith(networkFirst(req, PACKS))
+   else if (RE_PACK.test(path)) event.respondWith(cacheFirst(req, PACKS, true))
    else if (RE_SHELL_HASHED.test(path)) event.respondWith(cacheFirst(req, SHELL))
    // everything else (sw.js, favicon, sourcemaps) → default network passthrough
 })

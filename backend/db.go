@@ -54,7 +54,13 @@ type DB struct {
 }
 
 type DBCore struct {
-	DataToggle    bool  `json:"data_tog"`
+	// Seq is the latest-pack generation: the current latest packs are
+	// idx/L<Seq>.gz and data/L<Seq>.gz. 0 = empty store (no latest packs
+	// yet); the first article batch publishes generation 1. PutArticles
+	// bumps it in memory only after both L<Seq+1> saves succeed, and Commit
+	// publishes it — so a generation name is never visible to readers
+	// before its content is complete, and never rewritten afterwards.
+	Seq           int   `json:"seq,omitempty"`
 	FetchedAt     int64 `json:"fetched_at"`
 	TotalArticles int   `json:"total_art"`
 	NextPackID    int   `json:"next_pid"`

@@ -38,12 +38,12 @@ Shared format between backend (writer) and frontend (reader).
 ### `db.gz`
 
 ```
-{ data_tog, fetched_at, total_art, next_pid, pack_off, channels{}, first_fetched, fetched_at_cur?, pipe?, ingest?, gen? }
+{ seq?, fetched_at, total_art, next_pid, pack_off, channels{}, first_fetched, fetched_at_cur?, pipe?, ingest?, gen? }
 ```
 
 | Field | Type | Description |
 |---|---|---|
-| `data_tog` | bool | Toggles latest pack filename (`true.gz`/`false.gz`); used for both `idx/` and `data/` latest packs |
+| `seq` | int | Latest-pack generation: the current latest packs are `idx/L<seq>.gz` and `data/L<seq>.gz` (both series share one generation). Write-once names — a generation is never rewritten after the db.gz commit that publishes it; each article-producing `PutArticles` batch writes generation `seq+1` then bumps. `omitempty`; absent == 0 == empty store (first batch publishes generation 1). |
 | `fetched_at` | int | Unix timestamp of last fetch |
 | `total_art` | int | Total article count across all packs |
 | `next_pid` | int | Next data pack ID; packs with `id < next_pid` are finalized/immutable |
@@ -98,8 +98,8 @@ Short keys: `s`=chan_id, `a`=fetched_at, `p`=published (unix seconds, omitted if
 Each channel directory: `db.gz` + `idx/` + `data/` (+ optional `assets/`).
 
 - **`assets/`**: self-hosted files (images, video, linked documents). Keys are `assets/<2-hex>/<16-hex><ext>`, the hash being sha256 of the **file bytes**: an external ingest command downloads files into the run's shared ingest cache and marks them in content with a `#`-prefixed relative path; SRR's automatic end-of-pipeline step uploads them via `assetFetcher.UploadCacheRef` and rewrites the marker to the key. Article content stores the **relative** key; the frontend (`fmt.ts`) resolves `<img src>`/`<video src>`/`<a href>` against the pack base. The content hash is stable for given bytes ⇒ safe to cache. See `backend/CLAUDE.md` → Asset self-hosting and Ingest.
-- **Finalized packs**: immutable, fetched with `cache: "force-cache"`. `idx/` packs are 0-indexed (`idx/0.gz`..`idx/N-1.gz`); `data/` packs start at id `1` (`data/1.gz`..) — the writer increments `next_pid` before writing the first entry, so `data/0.gz` is never produced.
-- **Latest pack**: `true.gz` or `false.gz` (toggled by `data_tog`)
+- **Finalized packs**: immutable. `idx/` packs are 0-indexed (`idx/0.gz`..`idx/N-1.gz`); `data/` packs start at id `1` (`data/1.gz`..) — the writer increments `next_pid` before writing the first entry, so `data/0.gz` is never produced.
+- **Latest pack**: `L<seq>.gz` (generation named by `seq` in db.gz). Write-once like the finalized names, so the reader fetches **every** pack with `cache: "force-cache"`; only db.gz is mutable (`no-cache`). The backend GC keeps the current generation plus `latestKeep` (2) older ones as a grace window for stale-db.gz tabs and deletes the rest after each fetch commit; a reader that 404s on its latest pack self-heals with one guarded reload (`data.ts assertPackOk`).
 - **Finalized idx count**: `total_art > 0 ? Math.floor((total_art - 1) / 50000) : 0`
 - **Finalized data packs**: `id < next_pid`
 

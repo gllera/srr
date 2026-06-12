@@ -8,7 +8,8 @@ import { mountReader } from "./mount"
 // Force the data series to split into multiple packs (tiny --pack-size + bulky
 // content). This is the core getPackRef test: every chronIdx must resolve to the
 // right (packId, offset) across finalized packs (data/1.gz, data/2.gz, …) AND
-// the latest toggled pack — including the never-produced data/0.gz edge.
+// the latest generation pack (data/L<seq>.gz) — including the never-produced
+// data/0.gz edge.
 
 describe("contract: multi data-pack split", () => {
    let feeds: FeedServer

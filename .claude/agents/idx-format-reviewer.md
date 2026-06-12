@@ -1,6 +1,6 @@
 ---
 name: idx-format-reviewer
-description: "Use this agent when modifying the binary idx pack format on either side of SRR: backend/db_pack.go (PutArticles, savePack, writeIdxHeader, writeIdx, ArticleData) plus backend/db.go (idxPackSize, idxHeaderSize constants) or frontend/src/js/idx.ts (makeIdxPack, IdxPack, IDX_PACK_SIZE) or frontend/src/js/data.ts (init, getChannelId, findChronForTimestamp, countLeft, findLeft, findRight, packIdx). It audits writer/reader symmetry of header layout, entry encoding, delta_pack_id and delta_fetched_at semantics, the 50,000-entry pack split, chronIdx math, and the data_tog/finalized pack addressing scheme."
+description: "Use this agent when modifying the binary idx pack format on either side of SRR: backend/db_pack.go (PutArticles, savePack, writeIdxHeader, writeIdx, ArticleData) plus backend/db.go (idxPackSize, idxHeaderSize constants) or frontend/src/js/idx.ts (makeIdxPack, IdxPack, IDX_PACK_SIZE) or frontend/src/js/data.ts (init, getChannelId, findChronForTimestamp, countLeft, findLeft, findRight, packIdx). It audits writer/reader symmetry of header layout, entry encoding, delta_pack_id and delta_fetched_at semantics, the 50,000-entry pack split, chronIdx math, and the seq-generation (L<seq>.gz) / finalized pack addressing scheme."
 model: sonnet
 color: yellow
 ---
@@ -18,8 +18,8 @@ You are a binary idx-pack format auditor for the SRR project. The idx pack forma
   - byte 0: `chan_id` (uint8)
   - byte 1: `(delta_pack_id << 7) | delta_fetched_at` where `delta_pack_id` ∈ {0, 1} and `delta_fetched_at` ∈ [0, 127]
 - **Pack size**: exactly `idxPackSize` = 50,000 entries per finalized idx pack; the latest pack has `total_art - numFinalized * 50000` entries
-- **Filename addressing**: finalized packs are `0.gz`..`(N-1).gz`; latest pack is `true.gz` or `false.gz` depending on `db.data_tog`
-- **`data_tog` toggle**: flips at the very end of `PutArticles` — after both latest packs have been written — to invalidate the latest pack via a cache-busting filename swap (never in `Commit`, which only gzip-serializes `db.gz`)
+- **Filename addressing**: finalized packs are `0.gz`..`(N-1).gz`; latest pack is `L<seq>.gz` where `seq` is the db.gz latest-pack generation (shared by both series)
+- **`seq` generation**: `PutArticles` writes both latest packs at `L<Seq+1>` and bumps `c.Seq++` at the very end — after both saves succeed (never in `Commit`, which only gzip-serializes `db.gz`). Generation names are write-once: never rewritten after the db.gz commit that publishes them; `GCLatest` deletes generations older than the grace window (`latestKeep` = 2)
 
 ## Writer (backend/db_pack.go)
 
@@ -98,8 +98,8 @@ Audit each of the following and report any failure:
 - Writer split: `if c.TotalArticles > 0 && c.TotalArticles%idxPackSize == 0 { savePack("idx/<TotalArticles/idxPackSize - 1>.gz", meta) }` — note the `-1`
 - After the split, the writer immediately writes a fresh header for the next pack via the `if meta.Len() == 0 { writeIdxHeader(...) }` check
 - Reader split: `numFinalizedIdx() = total_art > 0 ? floor((total_art - 1) / IDX_PACK_SIZE) : 0`
-- Reader fetches `nf + 1` packs in `data.ts init()`: 0..(nf-1) are finalized at `idx/<n>.gz`, the last one is `idx/<data_tog>.gz` with size `total_art - p * IDX_PACK_SIZE`
-- Verify: when `total_art == 50000` exactly, `numFinalizedIdx == 0` (because `(50000-1)/50000 == 0`), so the reader treats all 50000 entries as the latest pack — but the writer split just happened. Trace whether the writer keeps the freshly-finalized pack at `idx/0.gz` AND writes the now-empty meta as `idx/<data_tog>.gz` — confirm the reader's view stays consistent.
+- Reader fetches `nf + 1` packs in `data.ts init()`: 0..(nf-1) are finalized at `idx/<n>.gz`, the last one is `idx/L<seq>.gz` with size `total_art - p * IDX_PACK_SIZE`
+- Verify: when `total_art == 50000` exactly, `numFinalizedIdx == 0` (because `(50000-1)/50000 == 0`), so the reader treats all 50000 entries as the latest pack — but the writer split just happened. Trace whether the writer keeps the freshly-finalized pack at `idx/0.gz` AND writes the now-empty meta as `idx/L<seq>.gz` — confirm the reader's view stays consistent.
 
 **F. chronIdx math**
 - Reader: `packIdx(chronIdx) = min(floor(chronIdx / IDX_PACK_SIZE), idxPacks.length - 1)` — clamps invalid chronIdx to the last pack
@@ -107,10 +107,10 @@ Audit each of the following and report any failure:
 - Reader filter-scan API: `countLeft`/`findLeft`/`findRight` (per-pack, in `idx.ts`; `data.ts` exports the cross-pack wrappers) iterate `chanIds` and gate on `ownChanCounts`/`chanCounts`, so they are part of the chronIdx/filter contract this agent audits (its mission flags "wrong filter counts").
 - Reader `bounds[]`: built only for distinct `packId` transitions. The first bound is the initial `packId` (from `h[1]`) IF `packOff > 0`, otherwise it's added when the first entry is parsed. Audit that this matches the writer's `packOff` field and that `getPackRef` produces a valid `(packId, offset)` for any chronIdx in the pack.
 
-**G. data_tog and finalized pack addressing**
-- Writer saves both idx and data latest packs at the NEGATED filename (`!c.DataToggle`) first, THEN flips `c.DataToggle = !c.DataToggle` — only after both saves succeed (db_pack.go:240-247). The comment at db_pack.go:237-239 makes this order deliberate: flipping before the saves would orphan the just-written idx pack under the new-toggle filename if the data-pack save fails.
-- Reader: `data.ts init()` reads `db.data_tog` and uses `String(db.data_tog)` for the latest filename
-- Verify: when the writer crashes after `savePack(idx/<new_tog>.gz)` but before `savePack(data/<new_tog>.gz)`, the reader will see `db.data_tog` (whichever the saved `db.gz` reflects) and try to fetch a `data/<tog>.gz` that doesn't exist or is stale. Flag any change that affects ordering of the latest-pack saves vs. the toggle flip — the saves happen at the negated filename first, the flip last.
+**G. seq generation and finalized pack addressing**
+- Writer saves both idx and data latest packs at the NEXT generation name (`genKey(prefix, c.Seq+1)`) first, THEN bumps `c.Seq++` — only after both saves succeed. The comment above those saves in `PutArticles` makes this order deliberate: bumping before the saves would orphan the just-written idx pack under the new generation name if the data-pack save fails.
+- Reader: `data.ts init()` reads `db.seq` (normalized `??= 0`) and uses `` `L${db.seq}` `` for the latest filename
+- Verify: a crash between the `L<Seq+1>` saves and `Commit` leaves an orphan generation that nothing references (readers learn names only from db.gz); the retry overwrites it. This is the invariant that makes write-once/immutable cache headers safe — flag any change that lets a client learn a generation name before `Commit` publishes it (e.g. speculative prefetch of `L<seq+1>`), and any reordering of the latest-pack saves vs. the `Seq` bump (saves at `Seq+1` first, bump last).
 
 **H. ArticleData JSONL keys**
 - Writer struct tags: `s, a, p (omitempty), t (omitempty), l (omitempty), c`

@@ -57,8 +57,8 @@ func (o *InspectCmd) Run() error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("db: total_art=%d  next_pid=%d  data_tog=%v  pack_off=%d  first_fetched=%d\n",
-		core.TotalArticles, core.NextPackID, core.DataToggle, core.PackOffset, core.FirstFetchedAt)
+	fmt.Printf("db: total_art=%d  next_pid=%d  seq=%d  pack_off=%d  first_fetched=%d\n",
+		core.TotalArticles, core.NextPackID, core.Seq, core.PackOffset, core.FirstFetchedAt)
 
 	if core.TotalArticles == 0 {
 		fmt.Println("no articles")
@@ -148,7 +148,7 @@ func loadIdxPacks(fetch keyGetter, core *DBCore) ([]*inspIdx, error) {
 		if p < numFinalized {
 			key = fmt.Sprintf("idx/%d.gz", p)
 		} else {
-			key = fmt.Sprintf("idx/%v.gz", core.DataToggle)
+			key = latestKey(core, "idx")
 		}
 		size := idxPackSize
 		if p == numFinalized {

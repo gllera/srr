@@ -131,7 +131,7 @@ func readAllIdx(ctx context.Context, db *DB) ([]idxEntry, error) {
 		if p < numFinalized {
 			key = fmt.Sprintf("idx/%d.gz", p)
 		} else {
-			key = fmt.Sprintf("idx/%v.gz", db.core.DataToggle)
+			key = latestKey(&db.core, "idx")
 		}
 
 		data, err := db.readGz(ctx, key)
