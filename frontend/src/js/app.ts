@@ -237,3 +237,13 @@ async function init() {
 }
 
 init().catch(showError)
+
+// Cache immutable self-hosted assets via a service worker (scope = this
+// deployment's directory, e.g. /srr/ or /srr.tmp/). Best-effort: any failure
+// (unsupported, insecure context, registration error) leaves the app working
+// straight off the network.
+if ("serviceWorker" in navigator) {
+   // sw.ts lives at src/ root (not src/js/) so Parcel emits it at the deployment
+   // root — its default scope then covers the whole env (incl. packs/assets/).
+   navigator.serviceWorker.register(new URL("../sw.ts", import.meta.url)).catch(() => {})
+}
