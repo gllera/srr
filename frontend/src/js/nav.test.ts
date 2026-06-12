@@ -20,7 +20,7 @@ const data = vi.hoisted(() => ({
       return count
    }),
    countAll: vi.fn((channels: Map<number, number>) => data.countLeft(data.db.total_art, channels)),
-   findLeft: vi.fn((from: number, channels: Map<number, number>) => {
+   findLeft: vi.fn(async (from: number, channels: Map<number, number>) => {
       for (let i = from; i >= 0; i--) {
          const chanId = data.getChannelId(i)
          const addIdx = channels.get(chanId)
@@ -28,7 +28,7 @@ const data = vi.hoisted(() => ({
       }
       return -1
    }),
-   findRight: vi.fn((from: number, channels: Map<number, number>) => {
+   findRight: vi.fn(async (from: number, channels: Map<number, number>) => {
       const end = data.db.total_art
       for (let i = from; i < end; i++) {
          const chanId = data.getChannelId(i)

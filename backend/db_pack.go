@@ -155,40 +155,46 @@ func (o *DB) savePack(ctx context.Context, key string, p *pack) error {
 // guarded reload). Mirrored by the frontend service worker's LATEST_KEEP.
 const latestKeep = 2
 
-// GCLatest deletes superseded latest-pack generations, keeping the current
-// one plus `keep` older generations as a grace window for readers holding a
-// stale db.gz. It sweeps a small trailing window below the cutoff instead of
-// only the newest expired generation, so packs leaked by a crash between
-// Commit and GC self-heal on later runs (the store interface has no List —
-// only computed names can be deleted; Rm is silent on missing keys, so the
-// extra calls are free). Best-effort: callers treat errors as non-fatal.
-func (o *DB) GCLatest(ctx context.Context, keep int) error {
-	cutoff := o.core.Seq - keep - 1 // newest expired generation
-	for g := cutoff; g > cutoff-4 && g >= 1; g-- {
-		for _, prefix := range []string{"idx", "data"} {
-			if err := o.Rm(ctx, genKey(prefix, g)); err != nil {
-				return fmt.Errorf("gc latest generation %d: %w", g, err)
+// gcSweepWindow is how far below the GC cutoff each sweep reaches. Deleting
+// only the newest expired name would let names leaked by a crash between
+// Commit and GC live forever (the store interface has no List — only
+// computed names can be deleted); a small trailing window self-heals them on
+// later runs. Rm is silent on missing keys, so the extra calls are free.
+const gcSweepWindow = 4
+
+// gcSweep deletes the computed names of every generation in the trailing
+// window below cutoff (the newest expired generation), never touching g < 1.
+// Best-effort: callers treat errors as non-fatal.
+func (o *DB) gcSweep(ctx context.Context, cutoff int, what string, keys func(g int) []string) error {
+	for g := cutoff; g > cutoff-gcSweepWindow && g >= 1; g-- {
+		for _, key := range keys(g) {
+			if err := o.Rm(ctx, key); err != nil {
+				return fmt.Errorf("gc %s %d: %w", what, g, err)
 			}
 		}
 	}
 	return nil
 }
 
-// GCSummaries deletes superseded idx header summaries (idx/h<g>.gz), keeping
-// the current one plus `keep` older names as a grace window for readers
-// holding a stale db.gz, with the same trailing sweep as GCLatest. Unlike
-// Seq, HdrPacks advances by the number of packs finalized in a batch, so a
-// >1 jump can strand an old summary outside every future window — a harmless
-// ~1KB-per-50k-articles leak; the reader treats a missing summary by falling
-// back to eager idx loading, so nothing user-visible depends on this sweep.
+// GCLatest deletes superseded latest-pack generations, keeping the current
+// one plus `keep` older generations as a grace window for readers holding a
+// stale db.gz.
+func (o *DB) GCLatest(ctx context.Context, keep int) error {
+	return o.gcSweep(ctx, o.core.Seq-keep-1, "latest generation", func(g int) []string {
+		return []string{genKey("idx", g), genKey("data", g)}
+	})
+}
+
+// GCSummaries deletes superseded idx header summaries (idx/h<g>.gz) with the
+// same grace window. Unlike Seq, HdrPacks advances by the number of packs
+// finalized in a batch, so a >1 jump can strand an old summary outside every
+// future window — a harmless ~1KB-per-50k-articles leak; the reader treats a
+// missing summary by falling back to eager idx loading, so nothing
+// user-visible depends on this sweep.
 func (o *DB) GCSummaries(ctx context.Context, keep int) error {
-	cutoff := o.core.HdrPacks - keep - 1
-	for g := cutoff; g > cutoff-4 && g >= 1; g-- {
-		if err := o.Rm(ctx, summaryKey(g)); err != nil {
-			return fmt.Errorf("gc idx summary %d: %w", g, err)
-		}
-	}
-	return nil
+	return o.gcSweep(ctx, o.core.HdrPacks-keep-1, "idx summary", func(g int) []string {
+		return []string{summaryKey(g)}
+	})
 }
 
 // numFinalizedIdx is the number of finalized idx packs for a given article
@@ -242,15 +248,14 @@ func (o *DB) readIdxHeader(ctx context.Context, key string) ([]byte, error) {
 func (o *DB) SyncIdxSummary(ctx context.Context) error {
 	c := &o.core
 	n := numFinalizedIdx(c.TotalArticles)
-	if c.HdrPacks == n {
-		return nil
-	}
-	if n == 0 {
-		c.HdrPacks = 0
+	// HdrPacks > 0 with n == 0 is unreachable (HdrPacks only ever records a
+	// past numFinalizedIdx, and TotalArticles never decreases), so n == 0
+	// simply means there is nothing to publish yet.
+	if c.HdrPacks == n || n == 0 {
 		return nil
 	}
 	sum := newPack()
-	for k := 0; k < n; k++ {
+	for k := range n {
 		hdr, err := o.readIdxHeader(ctx, fmt.Sprintf("idx/%d.gz", k))
 		if err != nil {
 			return err

@@ -1,9 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { gzipSync } from "node:zlib"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
+import { FETCHED_AT_BLOCK, IDX_HEADER_SIZE, IDX_PACK_SIZE } from "../../src/js/format.gen"
+import { makeStore } from "../harness"
 import { mountReader, type MountedReader } from "./mount"
 
 // Lazy-idx contract: a synthetic store with two finalized idx packs
@@ -14,9 +15,6 @@ import { mountReader, type MountedReader } from "./mount"
 // Go tests (TestSyncIdxSummary*, TestInspectValidateSummary); hand-built
 // bytes here keep this layer inside the `make verify` time budget.
 
-const IDX_PACK_SIZE = 50000
-const HEADER_BYTES = 259 * 4
-
 interface Hdr {
    fetchedAtBase: number
    packIdBase: number
@@ -25,7 +23,7 @@ interface Hdr {
 }
 
 function headerBytes(h: Hdr): Uint8Array {
-   const buf = new Uint8Array(HEADER_BYTES)
+   const buf = new Uint8Array(IDX_HEADER_SIZE)
    const view = new DataView(buf.buffer)
    view.setUint32(0, h.fetchedAtBase, true)
    view.setUint32(4, h.packIdBase, true)
@@ -36,11 +34,11 @@ function headerBytes(h: Hdr): Uint8Array {
 
 // Entries: [chanId, deltaPackId, deltaFetchedAt][]
 function idxPack(h: Hdr, entries: [number, number, number][]): Uint8Array {
-   const buf = new Uint8Array(HEADER_BYTES + entries.length * 2)
+   const buf = new Uint8Array(IDX_HEADER_SIZE + entries.length * 2)
    buf.set(headerBytes(h))
    entries.forEach(([chanId, deltaPack, deltaFetched], i) => {
-      buf[HEADER_BYTES + i * 2] = chanId
-      buf[HEADER_BYTES + i * 2 + 1] = (deltaPack << 7) | (deltaFetched & 0x7f)
+      buf[IDX_HEADER_SIZE + i * 2] = chanId
+      buf[IDX_HEADER_SIZE + i * 2 + 1] = (deltaPack << 7) | (deltaFetched & 0x7f)
    })
    return buf
 }
@@ -57,7 +55,7 @@ const FIRST_FETCHED = 1700000000
 // chan 1 (fetchedAts 10, data pack 2) · latest = 2 × chan 2 (fetchedAts 20,
 // data pack 3 = data/L1.gz). hdrs=2 covers packs 0 and 1.
 function buildStore(opts: { hdrs: boolean; summaryFile: boolean }): string {
-   const dir = mkdtempSync(join(tmpdir(), "srr-summary-"))
+   const dir = makeStore()
    mkdirSync(join(dir, "idx"))
    mkdirSync(join(dir, "data"))
 
@@ -82,9 +80,9 @@ function buildStore(opts: { hdrs: boolean; summaryFile: boolean }): string {
       ),
    )
    if (opts.summaryFile) {
-      const sum = new Uint8Array(2 * HEADER_BYTES)
+      const sum = new Uint8Array(2 * IDX_HEADER_SIZE)
       sum.set(headerBytes(hdr0))
-      sum.set(headerBytes(hdr1), HEADER_BYTES)
+      sum.set(headerBytes(hdr1), IDX_HEADER_SIZE)
       writeFileSync(join(dir, "idx/h2.gz"), gzipSync(sum))
    }
 
@@ -111,7 +109,7 @@ function buildStore(opts: { hdrs: boolean; summaryFile: boolean }): string {
 
 // ts whose 8h-block distance from first_fetched is exactly `blocks`.
 function tsAtBlocks(blocks: number): number {
-   return (Math.trunc(FIRST_FETCHED / 28800) + blocks) * 28800
+   return (Math.trunc(FIRST_FETCHED / FETCHED_AT_BLOCK) + blocks) * FETCHED_AT_BLOCK
 }
 
 describe("contract: idx header summary fast path", () => {
