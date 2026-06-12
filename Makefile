@@ -1,12 +1,21 @@
-.PHONY: verify verify-fe verify-be lint-fe format-check-fe format-fe test-fe build-fe dev-fe vet-be build-be test-be release clean
+.PHONY: verify verify-fe verify-be lint-fe format-check-fe format-fe test-fe build-fe dev-fe vet-be build-be test-be test-contract test-browser test-e2e release clean
 
 SHELL := /bin/bash -e
 
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
 
-verify: verify-fe verify-be
+# verify includes the fast jsdom e2e contract layer; the heavier headless-browser
+# layer (test-browser) is opt-in via test-e2e.
+verify: verify-fe verify-be test-contract
 verify-fe: lint-fe format-check-fe test-fe build-fe
 verify-be: vet-be build-be test-be
+
+# End-to-end (writer<->reader contract). Both layers run the real srrb binary
+# ($SRR_BIN, built by build-be) and read its packs with the real frontend code.
+test-contract test-browser: build-be frontend/node_modules/.package-lock.json
+	cd frontend && SRR_BIN=../dist/srrb npm run $@
+
+test-e2e: test-contract test-browser
 
 frontend/node_modules/.package-lock.json: frontend/package-lock.json
 	cd frontend && npm ci

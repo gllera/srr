@@ -80,6 +80,11 @@ State: `pos` (chronIdx), `filter` (object with `active`, `channels`, `chanTotal`
 
 **data.test.ts**: mocks `./data` with inline reimplementations of `findChronForTimestamp` and `groupChannelsByTag` driven by writable `db`/`fetchedAts` state — data.ts's module-load `fetch` would otherwise fire under jsdom.
 
+**E2e (`e2e/`)** — writer↔reader contract: the unit tests above mock `./data`; the e2e suite runs the REAL `srrb` binary to write packs from canned feeds (`e2e/harness.ts` `srr()` + in-process `feedServer()`, `e2e/fixtures.ts`), then reads them back with the REAL frontend code. Two layers + their own configs (excluded from `npm test` via `vitest.config.ts` `test.exclude`):
+- **contract** (`e2e/contract/`, `vitest.contract.config.ts`, jsdom, in `make verify`): `mountReader()` installs a `fetch` shim mapping CDN URLs → store files (raw `.gz` bytes, no `Content-Encoding` — data.ts decompresses via `DecompressionStream`), `vi.resetModules()` + dynamic-imports the real `data.ts`/`nav.ts` (its module-load `db.gz` fetch must hit the shim, so stub-before-import), then asserts every chronIdx round-trips, pack splits, dedup/toggle, and nav filtering. Cross-checks `srr inspect --validate`.
+- **browser** (`e2e/browser/`, `vitest.browser.config.ts`, Puppeteer, opt-in via `make test-browser`/`test-e2e`): `serve.ts` global-setup builds the real bundle with relative `SRR_CDN_URL=/packs/` and serves it + a per-run pack dir from one origin; scenarios drive headless Chrome (render, keyboard nav, deep-link, tag filter). Reuses the Chromium under `~/.cache/puppeteer/` (`puppeteer` pinned to 25.0.2). Gotcha: set `Connection: close` + `server.closeAllConnections()` or `server.close()` stalls on Chrome keep-alive sockets.
+- Content that must force data-pack splits has to be incompressible (`fixtures.ts` seeded alphanumeric) — packs roll on COMPRESSED size (`db_pack.go` `data.Len() >= PackSize<<10`).
+
 ## Conventions
 
 - 3-space indent, no semicolons in TypeScript

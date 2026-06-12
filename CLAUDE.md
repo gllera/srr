@@ -13,11 +13,14 @@ All commands run from the repo root via `make`:
 
 | Command | What it does |
 |---|---|
-| `make verify` | Full check: lint + format + test + build (both projects) |
+| `make verify` | Full check: lint + format + test + build (both projects) + e2e contract layer |
 | `make verify-fe` | Frontend pipeline only |
 | `make verify-be` | Backend pipeline only |
 | `make test-fe` | Frontend unit tests |
 | `make test-be` | Backend unit tests |
+| `make test-contract` | E2e contract layer: real `srrb` packs → real `idx.ts`/`data.ts`/`nav.ts` (jsdom, fast; in `verify`) |
+| `make test-browser` | E2e browser layer: real built SPA in headless Chrome over real packs (Puppeteer; opt-in) |
+| `make test-e2e` | Both e2e layers — the writer↔reader contract. Suite lives in `frontend/e2e/` |
 | `make lint-fe` | ESLint |
 | `make format-fe` | Prettier write |
 | `make format-check-fe` | Prettier check only |
