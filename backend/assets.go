@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,17 @@ import (
 	"strings"
 
 	"srrb/store"
+)
+
+// Sentinel classifications for UploadCacheRef failures, so the caller can
+// tell "this reference is not an upload marker at all" (decline it, leave the
+// value untouched) apart from a genuine upload failure (fail the fetch):
+// errNotAsset marks references naming no regular file in the cache dir (an
+// ordinary #fragment), errEscapesCache marks references resolving outside it
+// (attacker-influenced content must be ignored, not wedge the feed).
+var (
+	errNotAsset     = errors.New("not a cache asset")
+	errEscapesCache = errors.New("escapes cache dir")
 )
 
 // assetFetcher uploads files into the store backend under a content-hash key,
@@ -52,7 +64,7 @@ func newAssetFetcher(be store.Backend, maxKB int) *assetFetcher {
 // must be a regular file, and must not exceed the media size cap.
 func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname string) (string, error) {
 	if localname == "" {
-		return "", fmt.Errorf("empty asset reference")
+		return "", fmt.Errorf("empty asset reference: %w", errNotAsset)
 	}
 
 	full := filepath.Join(cacheDir, filepath.FromSlash(localname))
@@ -61,10 +73,10 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 	// final component).
 	fi, err := os.Lstat(full)
 	if err != nil {
-		return "", fmt.Errorf("stat asset %q: %w", localname, err)
+		return "", fmt.Errorf("stat asset %q: %w: %w", localname, errNotAsset, err)
 	}
 	if !fi.Mode().IsRegular() {
-		return "", fmt.Errorf("asset %q is not a regular file", localname)
+		return "", fmt.Errorf("asset %q is not a regular file: %w", localname, errNotAsset)
 	}
 
 	// Containment: resolve symlinks on both sides and confirm the file stays
@@ -79,7 +91,7 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 		return "", fmt.Errorf("resolve asset %q: %w", localname, err)
 	}
 	if rel, err := filepath.Rel(root, real); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("asset %q escapes cache dir", localname)
+		return "", fmt.Errorf("asset %q: %w", localname, errEscapesCache)
 	}
 
 	if a.maxBytes > 0 && fi.Size() > a.maxBytes {

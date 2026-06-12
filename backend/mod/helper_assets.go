@@ -1,6 +1,7 @@
 package mod
 
 import (
+	"regexp"
 	"strings"
 
 	"golang.org/x/net/html"
@@ -21,19 +22,33 @@ var assetAttrs = map[string][]string{
 	"a":     {"href"},
 }
 
-// rewriteFragment parses content as an HTML fragment and rewrites the
-// "#"-prefixed upload markers among the given element/attribute pairs (e.g. <img
-// src>, <a href>). For each marker it calls fn with the remainder (the "#"
-// stripped); fn returns (newValue, true) to replace the whole attribute value or
-// (_, false) to leave the original marker untouched. Non-marker values are left
-// untouched without reaching fn. Unparseable content and a no-op pass both return
+// markerShapeRe matches the raw shape every marker-bearing attribute must
+// have: `=`, optional whitespace, optional quote, then the "#" prefix. A bare
+// `#` elsewhere (URL fragments, entities — very common) can never parse into
+// a marker, so it must not trigger the fragment parse below. Entity-encoded
+// prefixes (&num;) are outside the marker contract: cooperating fetchers emit
+// the literal "#", and the pipeline built-ins never entity-encode it.
+var markerShapeRe = regexp.MustCompile(`=\s*["']?#`)
+
+// RewriteAttrs walks every self-hostable attribute value in content (img/video
+// src/poster, a href — see assetAttrs) and rewrites its "#"-prefixed upload
+// markers: for each marker it calls fn with the remainder (the "#" already
+// stripped), which returns (newValue, true, nil) to replace the whole value,
+// (_, false, nil) to leave the marker untouched, or a non-nil error to abort the
+// walk and surface it to the caller. Non-marker values are passed through without
+// reaching fn. It is the asset-upload walk behind the end-of-pipeline step
+// inlined in main.Feed.fetch: fn owns the upload policy — how the referenced
+// files are stored and which failures are fatal — while the marker convention
+// (the "#" prefix) lives here. Unparseable content and a no-op pass both return
 // the original string verbatim (no re-render), so quoting/whitespace survives
-// when nothing changed. Backs RewriteAttrs (assetAttrs).
-func rewriteFragment(content string, attrs map[string][]string, fn func(marker string) (string, bool, error)) (string, error) {
-	// Markers are "#"-prefixed, so content with no "#" can hold none (this also
-	// covers empty content): skip the parse+walk entirely. The common case —
-	// built-in #rss feeds never emit markers — costs only this substring scan.
-	if !strings.Contains(content, "#") {
+// when nothing changed; a fn or render error is returned alongside an empty
+// string.
+func RewriteAttrs(content string, fn func(marker string) (string, bool, error)) (string, error) {
+	// A marker is always a whole attribute value, so content without the
+	// `=["']?#` shape can hold none (this also covers empty content): skip the
+	// parse+walk entirely. The common case — built-in #rss feeds never emit
+	// markers — costs only this linear scan.
+	if !markerShapeRe.MatchString(content) {
 		return content, nil
 	}
 
@@ -51,7 +66,7 @@ func rewriteFragment(content string, attrs map[string][]string, fn func(marker s
 
 	changed := false
 	for _, n := range nodes {
-		c, err := applyAttrs(n, attrs, fn)
+		c, err := applyAttrs(n, fn)
 		if err != nil {
 			return "", err
 		}
@@ -73,14 +88,15 @@ func rewriteFragment(content string, attrs map[string][]string, fn func(marker s
 }
 
 // applyAttrs walks n and its descendants, rewriting the "#"-prefixed upload
-// markers among the values of attrs in place: for each marker it calls fn with
-// the remainder (the "#" stripped) and replaces the whole value when fn returns
-// ok. Non-marker values are skipped without reaching fn. Returns true if any
-// value was rewritten, or the first error fn returns (which stops the walk).
-func applyAttrs(n *html.Node, attrs map[string][]string, fn func(marker string) (string, bool, error)) (bool, error) {
+// markers among the assetAttrs values in place: for each marker it calls fn
+// with the remainder (the "#" stripped) and replaces the whole value when fn
+// returns ok. Non-marker values are skipped without reaching fn. Returns true
+// if any value was rewritten, or the first error fn returns (which stops the
+// walk).
+func applyAttrs(n *html.Node, fn func(marker string) (string, bool, error)) (bool, error) {
 	changed := false
 	if n.Type == html.ElementNode {
-		if names, ok := attrs[n.Data]; ok {
+		if names, ok := assetAttrs[n.Data]; ok {
 			for _, name := range names {
 				for i := range n.Attr {
 					if n.Attr[i].Key != name {
@@ -104,7 +120,7 @@ func applyAttrs(n *html.Node, attrs map[string][]string, fn func(marker string) 
 		}
 	}
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		cc, err := applyAttrs(c, attrs, fn)
+		cc, err := applyAttrs(c, fn)
 		if err != nil {
 			return false, err
 		}
@@ -113,19 +129,4 @@ func applyAttrs(n *html.Node, attrs map[string][]string, fn func(marker string) 
 		}
 	}
 	return changed, nil
-}
-
-// RewriteAttrs walks every self-hostable attribute value in content (img/video
-// src/poster, a href — see assetAttrs) and rewrites its "#"-prefixed upload
-// markers: for each marker it calls fn with the remainder (the "#" already
-// stripped), which returns (newValue, true, nil) to replace the whole value,
-// (_, false, nil) to leave the marker untouched, or a non-nil error to abort the
-// walk and surface it to the caller. Non-marker values are passed through without
-// reaching fn. It is the asset-upload walk behind the end-of-pipeline step
-// inlined in main.Feed.fetch: fn owns the upload policy — how the referenced
-// files are stored and which failures are fatal — while the marker convention
-// (the "#" prefix) lives here. Unparseable content is returned unchanged with a
-// nil error; a fn or render error is returned alongside an empty string.
-func RewriteAttrs(content string, fn func(marker string) (string, bool, error)) (string, error) {
-	return rewriteFragment(content, assetAttrs, fn)
 }

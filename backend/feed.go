@@ -2,12 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"slices"
-	"strings"
 
 	"srrb/ingest"
 	"srrb/mod"
@@ -142,29 +140,24 @@ func (feed *Feed) fetch(ctx context.Context, run *fetchRun, buf []byte, processo
 		// permanently-rejected asset (e.g. over SRR_MAX_MEDIA_SIZE) wedges the
 		// feed until it is fixed.
 		//
-		// RewriteAttrs handles the marker convention: it skips content with no "#"
-		// (no marker possible — the common case, as built-in #rss feeds never emit
-		// markers) and hands fn the path with the "#" already stripped.
+		// RewriteAttrs handles the marker convention: it skips content with no
+		// marker-shaped attribute (the common case, as built-in #rss feeds never
+		// emit markers) and hands fn the path with the "#" already stripped.
 		i.Content, err = mod.RewriteAttrs(i.Content, func(local string) (string, bool, error) {
-			// Only a value naming an existing regular file inside the cache dir is a
-			// real upload marker, so a bare fragment (#section → "section") names no
-			// file and is left untouched. A value escaping the dir (e.g. "#../secret",
-			// attacker-influenced content) must also be declined rather than handed to
-			// UploadCacheRef: its containment guard would return an error that
-			// hard-fails the whole feed permanently. Genuine in-cache upload failures
-			// (oversize, store error) still fail the feed below.
-			full := filepath.Join(run.cacheDir, filepath.FromSlash(local))
-			if !withinDir(run.cacheDir, full) {
-				return "", false, nil
-			}
-			if fi, err := os.Lstat(full); err != nil || !fi.Mode().IsRegular() {
-				return "", false, nil
-			}
 			key, err := run.assets.UploadCacheRef(ctx, run.cacheDir, local)
-			if err != nil {
+			switch {
+			case err == nil:
+				return key, true, nil
+			case errors.Is(err, errNotAsset), errors.Is(err, errEscapesCache):
+				// Not a real upload marker: a bare fragment (#section → "section")
+				// names no file in the cache dir, and a value escaping the dir
+				// (e.g. "#../secret", attacker-influenced content) must be declined
+				// rather than wedge the feed permanently. Genuine in-cache upload
+				// failures (oversize, store error) still fail the feed below.
+				return "", false, nil
+			default:
 				return "", false, fmt.Errorf("self-host asset %q: %w", local, err)
 			}
-			return key, true, nil
 		})
 		if err != nil {
 			return nil, err
@@ -194,19 +187,6 @@ func (feed *Feed) fetch(ctx context.Context, run *fetchRun, buf []byte, processo
 	feed.ETag = result.ETag
 	feed.LastModified = result.LastModified
 	return items, nil
-}
-
-// withinDir reports whether full is lexically contained within dir (both
-// cleaned). Used to tell an in-cache upload marker apart from a path that
-// escapes the cache dir via "..", which must be ignored rather than surfaced as
-// a failed upload. Lexical only: a symlinked escape is separately rejected by
-// the Lstat regular-file check and UploadCacheRef's EvalSymlinks containment.
-func withinDir(dir, full string) bool {
-	rel, err := filepath.Rel(dir, full)
-	if err != nil {
-		return false
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func uint32Set(s []uint32) map[uint32]struct{} {
