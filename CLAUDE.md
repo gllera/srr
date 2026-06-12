@@ -28,12 +28,16 @@ All commands run from the repo root via `make`:
 | `make build-fe` | Production frontend build (auto `npm ci` if `node_modules` is stale) |
 | `make build-be` | Go build |
 | `make vet-be` | Go vet |
+| `make generate` | Regenerate `frontend/src/js/format.gen.ts` from the backend Go declarations (`srr gen-ts`) |
+| `make generate-check` | Fail if `format.gen.ts` is stale (runs inside `verify-be`) |
 | `make release` | Cross-compile backend for all platforms (requires `VERSION=`) |
 | `make clean` | Remove build artifacts |
 
 ## Data Contract
 
 Shared format between backend (writer) and frontend (reader).
+
+**Single source of truth**: the Go declarations — the format constants in `backend/db.go` (`idxPackSize`, `idxHeaderSize`, `fetchedAtBlock`, …) and the JSON struct tags of `ArticleData`/`Feed`/`Channel`/`DBCore`. The TS side consumes them through the generated `frontend/src/js/format.gen.ts` (constants + wire interfaces; emitted by the hidden `srr gen-ts` command, regenerated via `make generate`, freshness-checked by `make verify`). The backend's only read-side idx parser is `backend/idx_read.go`, a byte-for-byte mirror of `frontend/src/js/idx.ts`. This section documents the format; the code above defines it.
 
 ### `db.gz`
 

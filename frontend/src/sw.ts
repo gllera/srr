@@ -32,6 +32,8 @@
 // browser without SW support (or an insecure-context LAN deploy) just runs straight
 // off the network, exactly as before. Self-contained: no SRR_CDN_URL, so it works
 // under any cdn-url prefix.
+import { LATEST_KEEP } from "./js/format.gen"
+
 const sw = self as unknown as ServiceWorkerGlobalScope
 
 // Bump a suffix to invalidate that bucket on the next activate.
@@ -115,11 +117,9 @@ async function networkFirst(req: Request, name: string): Promise<Response> {
 const GEN_KEY = "https://srr.invalid/gen"
 const SEQ_KEY = "https://srr.invalid/seq"
 
-// Latest generations the backend's GC keeps in the store (current + this
-// many older ones) — mirrors the backend's `latestKeep`, so the SW never
-// prunes a generation the store itself still serves (an offline device may
-// be reading from it).
-const LATEST_KEEP = 2
+// LATEST_KEEP (imported from the generated contract) is the backend GC's
+// grace window: the SW never prunes a generation the store itself still
+// serves (an offline device may be reading from it).
 
 async function readMetaNumber(key: string): Promise<number> {
    const cache = await caches.open(META)

@@ -1,4 +1,5 @@
 import { makeLRU } from "./cache"
+import { FETCHED_AT_BLOCK } from "./format.gen"
 import { IDX_PACK_SIZE, makeIdxPack, type IdxPack } from "./idx"
 
 export { IDX_PACK_SIZE }
@@ -90,7 +91,7 @@ export function findChronForTimestamp(ts: number): number {
    // `?? 0` guards a hand-edited/migrated db.gz missing first_fetched: the
    // writer always emits it (omitempty dropped backend-side), but an absent
    // key would make the subtraction NaN and collapse the search to index 0.
-   const tsBlocks = Math.trunc(ts / 28800) - Math.trunc((db.first_fetched ?? 0) / 28800)
+   const tsBlocks = Math.trunc(ts / FETCHED_AT_BLOCK) - Math.trunc((db.first_fetched ?? 0) / FETCHED_AT_BLOCK)
    let lo = 0
    let hi = db.total_art
    while (lo < hi) {

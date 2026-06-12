@@ -11,7 +11,9 @@ import (
 	"srrb/store"
 )
 
-// Format atoms of the writer↔reader data contract.
+// Format atoms of the writer↔reader data contract. These are the single
+// source of truth: `srr gen-ts` (cmd_gents.go) emits them to
+// frontend/src/js/format.gen.ts for the frontend reader.
 const (
 	dbFileKey = "db.gz"
 	dbLockKey = ".locked"

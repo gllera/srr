@@ -1,4 +1,4 @@
-.PHONY: verify verify-fe verify-be lint-fe format-check-fe format-fe test-fe build-fe dev-fe vet-be build-be test-be test-contract test-browser test-e2e release clean
+.PHONY: verify verify-fe verify-be lint-fe format-check-fe format-fe test-fe build-fe dev-fe vet-be build-be test-be test-contract test-browser test-e2e generate generate-check release clean
 
 SHELL := /bin/bash -e
 
@@ -8,7 +8,16 @@ PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 win
 # layer (test-browser) is opt-in via test-e2e.
 verify: verify-fe verify-be test-contract
 verify-fe: lint-fe format-check-fe test-fe build-fe
-verify-be: vet-be build-be test-be
+verify-be: vet-be build-be test-be generate-check
+
+# frontend/src/js/format.gen.ts is generated from the backend's Go
+# data-contract declarations (srr gen-ts). generate rewrites it;
+# generate-check (in verify-be) fails when it is stale.
+generate:
+	cd backend && go generate .
+
+generate-check:
+	cd backend && go run . gen-ts --check
 
 # End-to-end (writer<->reader contract). Both layers run the real srrb binary
 # ($SRR_BIN, built by build-be) and read its packs with the real frontend code.

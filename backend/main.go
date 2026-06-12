@@ -56,6 +56,7 @@ type CLI struct {
 	Preview PreviewCmd   `cmd:"" aliases:"p" help:"Preview processed feed articles in a browser."`
 	Config  ConfigCmd    `cmd:"" aliases:"c" help:"Print resolved configuration."`
 	Inspect InspectCmd   `cmd:"" aliases:"i" help:"Inspect pack consistency (validate idx<->data, debug chronIdx lookup)."`
+	GenTS   GenTSCmd     `cmd:"" name:"gen-ts" hidden:"" help:"Generate frontend/src/js/format.gen.ts from the Go data-contract declarations."`
 	Version VersionCmd   `cmd:"" help:"Print version information."`
 }
 
