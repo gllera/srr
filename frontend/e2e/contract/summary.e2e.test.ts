@@ -112,11 +112,13 @@ function tsAtBlocks(blocks: number): number {
    return (Math.trunc(FIRST_FETCHED / FETCHED_AT_BLOCK) + blocks) * FETCHED_AT_BLOCK
 }
 
+const fetchedPaths = (r: MountedReader) => r.fetchMock.mock.calls.map((c) => new URL(String(c[0])).pathname)
+
 describe("contract: idx header summary fast path", () => {
    let store: string
    let reader: MountedReader
 
-   const fetched = () => reader.fetchMock.mock.calls.map((c) => new URL(String(c[0])).pathname)
+   const fetched = () => fetchedPaths(reader)
 
    beforeAll(async () => {
       store = buildStore({ hdrs: true, summaryFile: true })
@@ -189,7 +191,7 @@ describe("contract: eager fallback when the summary is unavailable", () => {
       const store = buildStore({ hdrs: false, summaryFile: false })
       stores.push(store)
       const reader = await mountReader(store)
-      const paths = reader.fetchMock.mock.calls.map((c) => new URL(String(c[0])).pathname)
+      const paths = fetchedPaths(reader)
       expect(paths.some((p) => p.endsWith("idx/0.gz"))).toBe(true)
       expect(paths.some((p) => p.endsWith("idx/1.gz"))).toBe(true)
       expect(paths.some((p) => p.endsWith("idx/h2.gz"))).toBe(false)
@@ -202,7 +204,7 @@ describe("contract: eager fallback when the summary is unavailable", () => {
       const store = buildStore({ hdrs: true, summaryFile: false })
       stores.push(store)
       const reader = await mountReader(store)
-      const paths = reader.fetchMock.mock.calls.map((c) => new URL(String(c[0])).pathname)
+      const paths = fetchedPaths(reader)
       expect(paths.some((p) => p.endsWith("idx/h2.gz"))).toBe(true) // attempted
       expect(paths.some((p) => p.endsWith("idx/0.gz"))).toBe(true) // then eager
       expect(await reader.data.findLeft(100001, new Map([[0, 0]]))).toBe(49999)

@@ -30,18 +30,12 @@ func crossIdxBoundary(t *testing.T, db *DB, ch *Channel) {
 // setupBoundaryDB builds a store whose first idx pack just finalized.
 func setupBoundaryDB(t *testing.T) (*DB, string) {
 	t.Helper()
-	dir := t.TempDir()
-	globals = &Globals{PackSize: 1024, Store: dir} // data packs never split
-
-	db, err := NewDB(ctx, false)
-	if err != nil {
-		t.Fatalf("NewDB: %v", err)
-	}
-	t.Cleanup(func() { db.Close(ctx) })
+	db, c, dir := setupTestDB(t)
+	globals.PackSize = 1024 // data packs never split (read lazily at write time)
 
 	ch := &Channel{id: 1}
-	db.core.Channels = map[int]*Channel{ch.id: ch}
-	db.core.FetchedAt = 1700000000
+	c.Channels = map[int]*Channel{ch.id: ch}
+	c.FetchedAt = 1700000000
 	crossIdxBoundary(t, db, ch)
 	return db, dir
 }
@@ -140,14 +134,10 @@ func TestGCSummariesGraceWindow(t *testing.T) {
 		t.Fatalf("GCSummaries: %v", err)
 	}
 	for g := 1; g <= 2; g++ {
-		if _, err := os.Stat(filepath.Join(dir, summaryKey(g))); err == nil {
-			t.Errorf("%s should have been GC'd", summaryKey(g))
-		}
+		assertKey(t, dir, summaryKey(g), false)
 	}
 	for g := 3; g <= 5; g++ {
-		if _, err := os.Stat(filepath.Join(dir, summaryKey(g))); err != nil {
-			t.Errorf("%s missing: %v", summaryKey(g), err)
-		}
+		assertKey(t, dir, summaryKey(g), true)
 	}
 
 	// A second sweep on the same state is a no-op (Rm silent-on-missing).

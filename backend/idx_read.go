@@ -47,7 +47,7 @@ func loadIdxPacks(fetch keyGetter, core *DBCore) ([]*idxPack, error) {
 	for p := 0; p <= numFinalized; p++ {
 		var key string
 		if p < numFinalized {
-			key = fmt.Sprintf("idx/%d.gz", p)
+			key = finalizedIdxKey(p)
 		} else {
 			key = latestKey(core, "idx")
 		}

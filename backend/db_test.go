@@ -626,17 +626,23 @@ func putOneArticle(t *testing.T, db *DB, ch *Channel, n int) {
 	}
 }
 
+// assertKey asserts presence/absence of one store file.
+func assertKey(t *testing.T, dir, key string, present bool) {
+	t.Helper()
+	_, err := os.Stat(filepath.Join(dir, key))
+	if present && err != nil {
+		t.Errorf("%s missing: %v", key, err)
+	}
+	if !present && err == nil {
+		t.Errorf("%s should have been GC'd", key)
+	}
+}
+
 // assertGen asserts presence/absence of both series' files for a generation.
 func assertGen(t *testing.T, dir string, g int, present bool) {
 	t.Helper()
 	for _, prefix := range []string{"idx", "data"} {
-		_, err := os.Stat(filepath.Join(dir, genKey(prefix, g)))
-		if present && err != nil {
-			t.Errorf("%s missing: %v", genKey(prefix, g), err)
-		}
-		if !present && err == nil {
-			t.Errorf("%s should have been GC'd", genKey(prefix, g))
-		}
+		assertKey(t, dir, genKey(prefix, g), present)
 	}
 }
 

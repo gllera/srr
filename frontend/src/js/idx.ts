@@ -23,6 +23,7 @@ export interface IdxPack {
    countLeft(chronIdx: number, channels: Map<number, number>): number
    findLeft(chronFrom: number, channels: Map<number, number>): number
    findRight(chronFrom: number, channels: Map<number, number>): number
+   findFirstBlock(tsBlocks: number): number
 }
 
 function parseIdxHeader(buf: ArrayBuffer, byteOff: number): IdxHeader {
@@ -183,6 +184,21 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
             if (addIdx !== -1 && baseChron + i >= addIdx) return baseChron + i
          }
          return -1
+      },
+      // Entry-level step of findChronForTimestamp (the pack-level step is
+      // findPackForBlocks): pack-local index of the leftmost entry with
+      // fetchedAt >= tsBlocks, or the entry count when none qualifies.
+      findFirstBlock(tsBlocks: number): number {
+         pack.parse()
+         const fetchedAts = pack.fetchedAts
+         let lo = 0
+         let hi = fetchedAts.length
+         while (lo < hi) {
+            const mid = (lo + hi) >>> 1
+            if (fetchedAts[mid] < tsBlocks) lo = mid + 1
+            else hi = mid
+         }
+         return lo
       },
    }
    return pack
