@@ -1,20 +1,11 @@
 package mod
 
 import (
-	"context"
 	"strings"
 
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
 )
-
-// mediaAttrs lists the element/attribute pairs RewriteMedia self-hosts by
-// downloading an embedded http(s) URL. Links (<a href>) are deliberately
-// excluded — a link target is navigation, not an embedded asset to fetch.
-var mediaAttrs = map[string][]string{
-	"img":   {"src"},
-	"video": {"src", "poster"},
-}
 
 // assetAttrs lists every element/attribute pair whose value may reference a
 // self-hostable file: the embedded-media set plus <a href>, so a linked file
@@ -35,7 +26,7 @@ var assetAttrs = map[string][]string{
 // returns (newValue, true) to replace the value or (_, false) to leave it
 // untouched. Unparseable content and a no-op pass both return the original
 // string verbatim (no re-render), so quoting/whitespace survives when nothing
-// changed. Shared by RewriteMedia (mediaAttrs) and RewriteAttrs (assetAttrs).
+// changed. Backs RewriteAttrs (assetAttrs).
 func rewriteFragment(content string, attrs map[string][]string, fn func(val string) (string, bool, error)) (string, error) {
 	if content == "" {
 		return content, nil
@@ -112,29 +103,6 @@ func applyAttrs(n *html.Node, attrs map[string][]string, fn func(val string) (st
 	return changed, nil
 }
 
-// RewriteMedia parses content HTML and, for every http(s) URL in <img src>,
-// <video src>, <video poster>, downloads it via assets and rewrites the
-// attribute to the returned relative store key. On a per-URL Fetch error the
-// original URL is kept (graceful degrade). Returns content unchanged when
-// assets == nil (preview/tests). Reusable by any built-in module that emits
-// media URLs.
-func RewriteMedia(ctx context.Context, assets Assets, content string) (string, error) {
-	if assets == nil {
-		return content, nil
-	}
-	return rewriteFragment(content, mediaAttrs, func(val string) (string, bool, error) {
-		if !isHTTPURL(val) {
-			return "", false, nil
-		}
-		key, err := assets.Fetch(ctx, val)
-		if err != nil {
-			// Graceful degrade: keep the original URL on a per-URL Fetch error.
-			return "", false, nil
-		}
-		return key, true, nil
-	})
-}
-
 // RewriteAttrs walks every self-hostable attribute value in content (img/video
 // src/poster, a href — see assetAttrs) and applies fn, which returns
 // (newValue, true, nil) to replace the value, (_, false, nil) to leave it
@@ -147,8 +115,4 @@ func RewriteMedia(ctx context.Context, assets Assets, content string) (string, e
 // returned alongside an empty string.
 func RewriteAttrs(content string, fn func(val string) (string, bool, error)) (string, error) {
 	return rewriteFragment(content, assetAttrs, fn)
-}
-
-func isHTTPURL(s string) bool {
-	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
 }

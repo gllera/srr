@@ -33,7 +33,7 @@ func TestReadabilityReplacesTruncatedContent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	m := New(nil)
+	m := New()
 	now := time.Now()
 	item := &RawItem{
 		GUID:      1,
@@ -54,7 +54,7 @@ func TestReadabilityReplacesTruncatedContent(t *testing.T) {
 }
 
 func TestReadabilityEmptyLinkIsNoop(t *testing.T) {
-	m := New(nil)
+	m := New()
 	now := time.Now()
 	item := &RawItem{GUID: 2, Title: "T", Content: "<p>original</p>", Link: "", Published: &now}
 	if err := m.Process(context.Background(), "#readability", item); err != nil {
@@ -72,7 +72,7 @@ func TestReadabilityFailsOpenOnHTTPError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	m := New(nil)
+	m := New()
 	now := time.Now()
 	item := &RawItem{GUID: 3, Title: "T", Content: "<p>keep me</p>", Link: srv.URL, Published: &now}
 	if err := m.Process(context.Background(), "#readability", item); err != nil {
@@ -93,7 +93,7 @@ func TestReadabilityTimeoutParamFailsOpen(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	m := New(nil)
+	m := New()
 	now := time.Now()
 	item := &RawItem{GUID: 1, Title: "T", Content: "<p>keep me</p>", Link: srv.URL, Published: &now}
 	if err := m.Process(context.Background(), "#readability timeout=1ms", item); err != nil {
@@ -111,7 +111,7 @@ func TestReadabilityMaxBodyParamTruncates(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	m := New(nil)
+	m := New()
 	now := time.Now()
 	item := &RawItem{GUID: 1, Title: "T", Content: "<p>teaser</p>", Link: srv.URL, Published: &now}
 	// A 10-byte cap truncates the document before the <article> body, so there
@@ -126,7 +126,7 @@ func TestReadabilityMaxBodyParamTruncates(t *testing.T) {
 }
 
 func TestReadabilityRejectsBadParams(t *testing.T) {
-	m := New(nil)
+	m := New()
 	now := time.Now()
 	for _, token := range []string{
 		"#readability foo=bar",      // unknown key
@@ -148,7 +148,7 @@ func TestReadabilityPreservesGUIDAndPublished(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	m := New(nil)
+	m := New()
 	now := time.Now()
 	item := &RawItem{GUID: 42, Title: "T", Content: "<p>teaser</p>", Link: srv.URL, Published: &now}
 	if err := m.Process(context.Background(), "#readability", item); err != nil {

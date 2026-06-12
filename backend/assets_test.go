@@ -4,8 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,102 +37,6 @@ func readKey(t *testing.T, be store.Backend, key string) []byte {
 	return b
 }
 
-func TestAssetFetchStoresBodyUnderHashKey(t *testing.T) {
-	const body = "JPEGDATA"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "image/jpeg")
-		io.WriteString(w, body)
-	}))
-	defer srv.Close()
-
-	be := tempStore(t)
-	af := newAssetFetcher(be, srv.Client(), 1024)
-
-	src := srv.URL + "/photo.jpg"
-	key, err := af.Fetch(context.Background(), src)
-	if err != nil {
-		t.Fatalf("Fetch: %v", err)
-	}
-	if !strings.HasPrefix(key, "assets/") || !strings.HasSuffix(key, ".jpg") {
-		t.Errorf("unexpected key shape: %q", key)
-	}
-	if got := string(readKey(t, be, key)); got != body {
-		t.Errorf("stored body = %q, want %q", got, body)
-	}
-}
-
-func TestAssetFetchExtFromContentType(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "image/png")
-		io.WriteString(w, "PNG")
-	}))
-	defer srv.Close()
-
-	af := newAssetFetcher(tempStore(t), srv.Client(), 1024)
-	// No extension on the URL path → ext derives from Content-Type.
-	key, err := af.Fetch(context.Background(), srv.URL+"/image")
-	if err != nil {
-		t.Fatalf("Fetch: %v", err)
-	}
-	if !strings.HasSuffix(key, ".png") {
-		t.Errorf("ext not derived from content-type: %q", key)
-	}
-}
-
-func TestAssetFetchSizeCapAbortsAndRemovesPartial(t *testing.T) {
-	big := strings.Repeat("x", 4096)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		// No Content-Length (chunked) so the cap is enforced via the stream
-		// guard, not the pre-check.
-		w.Header().Set("Content-Type", "image/jpeg")
-		io.WriteString(w, big)
-	}))
-	defer srv.Close()
-
-	be := tempStore(t)
-	af := newAssetFetcher(be, srv.Client(), 1) // 1 KB cap < 4 KB body
-
-	src := srv.URL + "/big.jpg"
-	if _, err := af.Fetch(context.Background(), src); err == nil {
-		t.Fatal("expected size-cap error, got nil")
-	}
-	// The partial object must not survive.
-	key := assetKey(src, "/big.jpg", "image/jpeg")
-	if rc, err := be.Get(context.Background(), key, true); err != nil {
-		t.Fatalf("get: %v", err)
-	} else if rc != nil {
-		rc.Close()
-		t.Errorf("partial asset %q was not removed", key)
-	}
-}
-
-func TestAssetFetchRejectsNonHTTP(t *testing.T) {
-	af := newAssetFetcher(tempStore(t), http.DefaultClient, 1024)
-	if _, err := af.Fetch(context.Background(), "ftp://example.com/x.jpg"); err == nil {
-		t.Error("expected error for non-http scheme")
-	}
-}
-
-func TestAssetFetchNon200(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "nope", http.StatusNotFound)
-	}))
-	defer srv.Close()
-
-	af := newAssetFetcher(tempStore(t), srv.Client(), 1024)
-	if _, err := af.Fetch(context.Background(), srv.URL+"/missing.jpg"); err == nil {
-		t.Error("expected error for non-200 response")
-	}
-}
-
-func TestAssetKeyStableForSameURL(t *testing.T) {
-	a := assetKey("https://x/y.jpg", "/y.jpg", "")
-	b := assetKey("https://x/y.jpg", "/y.jpg", "")
-	if a != b {
-		t.Errorf("key not stable: %q vs %q", a, b)
-	}
-}
-
 // writeCacheFile writes content to cacheDir/name (creating parents) for the
 // UploadCacheRef tests, returning the cache dir's absolute path.
 func writeCacheFile(t *testing.T, cacheDir, name, content string) {
@@ -151,7 +53,7 @@ func writeCacheFile(t *testing.T, cacheDir, name, content string) {
 func TestUploadCacheRefStoresUnderContentHashKey(t *testing.T) {
 	const body = "IMAGEBYTES"
 	be := tempStore(t)
-	af := newAssetFetcher(be, nil, 1024)
+	af := newAssetFetcher(be, 1024)
 
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "sub/photo.jpg", body)
@@ -175,7 +77,7 @@ func TestUploadCacheRefStoresUnderContentHashKey(t *testing.T) {
 
 func TestUploadCacheRefSkipsWhenAlreadyPresent(t *testing.T) {
 	be := tempStore(t)
-	af := newAssetFetcher(be, nil, 1024)
+	af := newAssetFetcher(be, 1024)
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "p.jpg", "ORIGINAL")
 
@@ -211,7 +113,7 @@ func TestUploadCacheRefRejectsTraversal(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(parent, "outside.jpg"), []byte("x"), 0o644); err != nil {
 		t.Fatalf("write outside: %v", err)
 	}
-	af := newAssetFetcher(tempStore(t), nil, 1024)
+	af := newAssetFetcher(tempStore(t), 1024)
 	if _, err := af.UploadCacheRef(context.Background(), cacheDir, "../outside.jpg"); err == nil {
 		t.Fatal("expected traversal rejection, got nil")
 	}
@@ -230,7 +132,7 @@ func TestUploadCacheRefRejectsSymlink(t *testing.T) {
 	if err := os.Symlink(target, filepath.Join(cacheDir, "link.jpg")); err != nil {
 		t.Skipf("symlink unsupported: %v", err)
 	}
-	af := newAssetFetcher(tempStore(t), nil, 1024)
+	af := newAssetFetcher(tempStore(t), 1024)
 	if _, err := af.UploadCacheRef(context.Background(), cacheDir, "link.jpg"); err == nil {
 		t.Fatal("expected symlink rejection, got nil")
 	}
@@ -238,7 +140,7 @@ func TestUploadCacheRefRejectsSymlink(t *testing.T) {
 
 func TestUploadCacheRefRejectsOversize(t *testing.T) {
 	be := tempStore(t)
-	af := newAssetFetcher(be, nil, 1) // 1 KB cap
+	af := newAssetFetcher(be, 1) // 1 KB cap
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "big.jpg", strings.Repeat("x", 4096))
 	if _, err := af.UploadCacheRef(context.Background(), cacheDir, "big.jpg"); err == nil {
@@ -247,7 +149,7 @@ func TestUploadCacheRefRejectsOversize(t *testing.T) {
 }
 
 func TestUploadCacheRefMissingFile(t *testing.T) {
-	af := newAssetFetcher(tempStore(t), nil, 1024)
+	af := newAssetFetcher(tempStore(t), 1024)
 	if _, err := af.UploadCacheRef(context.Background(), t.TempDir(), "nope.jpg"); err == nil {
 		t.Fatal("expected error for missing file, got nil")
 	}

@@ -77,7 +77,7 @@ func (o *PreviewCmd) Run() error {
 
 	ctx := context.Background()
 	client := &http.Client{Timeout: 10 * time.Second}
-	processor := mod.New(nil)
+	processor := mod.New()
 	engine := ingest.New(ingest.Deps{})
 	defer engine.Close()
 
