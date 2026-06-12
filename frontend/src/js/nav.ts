@@ -2,8 +2,7 @@ import * as data from "./data"
 import { extractImageUrls, getImgProxy, imgProxy } from "./fmt"
 
 let pos = -1
-let nextLeft: Promise<number> | undefined
-let nextRight: Promise<number> | undefined
+const next: { left?: Promise<number>; right?: Promise<number> } = {}
 
 export const filter = {
    channels: new Map<number, number>(),
@@ -64,7 +63,7 @@ async function resolve(target: number, replace = false): Promise<IShowFeed> {
    // Load first; commit pos only on success so a Retry replays the same chron.
    const article = await data.loadArticle(target)
    pos = target
-   nextLeft = nextRight = undefined
+   next.left = next.right = undefined
    abortPrefetch()
    updateHash(replace)
    recordSeen(article)
@@ -206,41 +205,36 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
    return resolve(target, true)
 }
 
-// The post-navigation neighbor lookup is speculative, so it is stored as an
-// un-awaited promise: findLeft/findRight may lazily fetch an idx pack, and
-// that must neither delay the article already on screen nor reject a
-// navigation that succeeded (a failed lookup just clears its slot; the next
-// keypress retries on the critical path). The slot-identity checks keep a
-// lookup superseded by a newer navigation from prefetching or clearing on
-// its behalf.
-export async function left(): Promise<IShowFeed> {
-   const target = await (nextLeft ?? data.findLeft(pos - 1, filter.channels))
-   if (target === -1) throw new Error("no left match")
+// One directional navigation step. The post-navigation neighbor lookup is
+// speculative, so it is stored as an un-awaited promise: findLeft/findRight
+// may lazily fetch an idx pack, and that must neither delay the article
+// already on screen nor reject a navigation that succeeded (a failed lookup
+// just clears its slot; the next keypress retries on the critical path).
+// The slot-identity checks keep a lookup superseded by a newer navigation
+// from prefetching or clearing on its behalf.
+async function step(dir: "left" | "right"): Promise<IShowFeed> {
+   const lookup = () =>
+      dir === "left" ? data.findLeft(pos - 1, filter.channels) : data.findRight(pos + 1, filter.channels)
+   const target = await (next[dir] ?? lookup())
+   if (target === -1) throw new Error(`no ${dir} match`)
    const result = await resolve(target)
-   const next = (nextLeft = data.findLeft(pos - 1, filter.channels))
-   next
+   const mine = (next[dir] = lookup())
+   mine
       .then((t) => {
-         if (nextLeft === next) schedulePrefetch(t)
+         if (next[dir] === mine) schedulePrefetch(t)
       })
       .catch(() => {
-         if (nextLeft === next) nextLeft = undefined
+         if (next[dir] === mine) next[dir] = undefined
       })
    return result
 }
 
+export async function left(): Promise<IShowFeed> {
+   return step("left")
+}
+
 export async function right(): Promise<IShowFeed> {
-   const target = await (nextRight ?? data.findRight(pos + 1, filter.channels))
-   if (target === -1) throw new Error("no right match")
-   const result = await resolve(target)
-   const next = (nextRight = data.findRight(pos + 1, filter.channels))
-   next
-      .then((t) => {
-         if (nextRight === next) schedulePrefetch(t)
-      })
-      .catch(() => {
-         if (nextRight === next) nextRight = undefined
-      })
-   return result
+   return step("right")
 }
 
 export async function first(): Promise<IShowFeed> {

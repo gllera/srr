@@ -49,6 +49,11 @@ func summaryKey(n int) string {
 	return fmt.Sprintf("idx/h%d.gz", n)
 }
 
+// finalizedIdxKey resolves the key of finalized idx pack n.
+func finalizedIdxKey(n int) string {
+	return fmt.Sprintf("idx/%d.gz", n)
+}
+
 // dataKeyFor resolves a data pack key from a packID: finalized packs
 // (id < NextPackID) use the numeric filename; otherwise the current
 // latest-generation name.
@@ -256,7 +261,7 @@ func (o *DB) SyncIdxSummary(ctx context.Context) error {
 	}
 	sum := newPack()
 	for k := range n {
-		hdr, err := o.readIdxHeader(ctx, fmt.Sprintf("idx/%d.gz", k))
+		hdr, err := o.readIdxHeader(ctx, finalizedIdxKey(k))
 		if err != nil {
 			return err
 		}
@@ -311,7 +316,7 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) error {
 
 	for _, item := range articles {
 		if c.TotalArticles > 0 && c.TotalArticles%idxPackSize == 0 {
-			if err := o.savePack(ctx, fmt.Sprintf("idx/%d.gz", c.TotalArticles/idxPackSize-1), meta); err != nil {
+			if err := o.savePack(ctx, finalizedIdxKey(c.TotalArticles/idxPackSize-1), meta); err != nil {
 				return err
 			}
 		}

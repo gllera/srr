@@ -116,7 +116,10 @@ function fetchIdxPack(p: number): Promise<IdxPack> {
    const promise = fetchPackBytes(path, !isFinalized).then((buf) => makeIdxPack(buf, p, size))
    idxFetches[p] = promise
    promise.catch(() => {
-      // Drop the slot so a retry refetches (mirrors dataCache eviction).
+      // Drop the slot so a retry refetches. No identity guard needed (unlike
+      // dataCache's eviction): nothing else can overwrite a filled slot, and
+      // this catch — the first handler attached — clears it before any
+      // caller's retry can install a new promise.
       idxFetches[p] = undefined
    })
    return promise
@@ -140,15 +143,8 @@ export async function findChronForTimestamp(ts: number): Promise<number> {
    // key would make the subtraction NaN and collapse the search to index 0.
    const tsBlocks = Math.trunc(ts / FETCHED_AT_BLOCK) - Math.trunc((db.first_fetched ?? 0) / FETCHED_AT_BLOCK)
    const n = findPackForBlocks(idxHeaders, tsBlocks)
-   const p = (await fetchIdxPack(n)).parse()
-   let lo = n * IDX_PACK_SIZE
-   let hi = lo + p.fetchedAts.length
-   while (lo < hi) {
-      const mid = (lo + hi) >>> 1
-      if (p.fetchedAts[mid - n * IDX_PACK_SIZE] < tsBlocks) lo = mid + 1
-      else hi = mid
-   }
-   return lo < db.total_art ? lo : Math.max(0, db.total_art - 1)
+   const chron = n * IDX_PACK_SIZE + (await fetchIdxPack(n)).findFirstBlock(tsBlocks)
+   return chron < db.total_art ? chron : Math.max(0, db.total_art - 1)
 }
 
 // Total filtered count across the whole store. Synchronous on purpose:

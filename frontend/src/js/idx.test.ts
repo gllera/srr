@@ -262,6 +262,23 @@ function buildSummary(headers: Omit<PackOpts, "entries">[]): ArrayBuffer {
    return out.buffer
 }
 
+describe("makeIdxPack.findFirstBlock", () => {
+   // fetchedAts: [10, 15, 15, 20]
+   const buf = buildBuf({ fetchedAtBase: 10, entries: [e(1), e(1, 0, 5), e(1), e(1, 0, 5)] })
+
+   it("returns the leftmost entry with fetchedAt >= tsBlocks", () => {
+      const pack = makeIdxPack(buf, 0, 4)
+      expect(pack.findFirstBlock(0)).toBe(0)
+      expect(pack.findFirstBlock(11)).toBe(1)
+      expect(pack.findFirstBlock(15)).toBe(1)
+      expect(pack.findFirstBlock(16)).toBe(3)
+   })
+
+   it("returns the entry count when nothing qualifies", () => {
+      expect(makeIdxPack(buf, 0, 4).findFirstBlock(21)).toBe(4)
+   })
+})
+
 describe("parseIdxHeaders", () => {
    it("decodes each 1036-byte chunk", () => {
       const buf = buildSummary([
