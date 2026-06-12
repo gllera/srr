@@ -1,5 +1,6 @@
-export const IDX_PACK_SIZE = 50000
-const IDX_HEADER_SIZE = 259 * 4 // 3 state uint32 + 256 chanCounts uint32
+import { CHAN_ID_SLOTS, DELTA_FETCHED_MAX, IDX_HEADER_SIZE, IDX_PACK_SIZE, IDX_STATE_SIZE } from "./format.gen"
+
+export { IDX_PACK_SIZE }
 
 export interface IdxPack {
    chanIds: Uint8Array
@@ -13,11 +14,11 @@ export interface IdxPack {
    findRight(chronFrom: number, channels: Map<number, number>): number
 }
 
-// Channel IDs are uint8 (0..255), so a 256-entry typed array beats Map.get in the
-// hot scan loops: no hashing, predictable cache locality, and the JIT can
-// keep the loaded value in a register. -1 sentinel = "not in filter".
+// Channel IDs are uint8 (0..255), so a CHAN_ID_SLOTS-entry typed array beats
+// Map.get in the hot scan loops: no hashing, predictable cache locality, and
+// the JIT can keep the loaded value in a register. -1 sentinel = "not in filter".
 function channelsToLookup(channels: Map<number, number>): Int32Array {
-   const arr = new Int32Array(256).fill(-1)
+   const arr = new Int32Array(CHAN_ID_SLOTS).fill(-1)
    for (const [chanId, addIdx] of channels) arr[chanId] = addIdx
    return arr
 }
@@ -51,8 +52,8 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
          let packId = h[1]
          const packOff = h[2]
          // Copy out so the raw buffer can be GC'd after parse() returns
-         pack.chanCounts = new Uint32Array(new Uint32Array(rawBuf, 3 * 4, 256))
-         const ownChanCounts = new Uint32Array(256)
+         pack.chanCounts = new Uint32Array(new Uint32Array(rawBuf, IDX_STATE_SIZE, CHAN_ID_SLOTS))
+         const ownChanCounts = new Uint32Array(CHAN_ID_SLOTS)
          pack.ownChanCounts = ownChanCounts
 
          let lastPackId: number
@@ -79,7 +80,7 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
             const chanId = bytes[off]
             const packed = bytes[off + 1]
             if (packed >> 7) packId++
-            fetchedAt += packed & 0x7f
+            fetchedAt += packed & DELTA_FETCHED_MAX
 
             const i = (off - IDX_HEADER_SIZE) >> 1
             chanIds[i] = chanId

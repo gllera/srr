@@ -62,7 +62,8 @@ function clearContentTransition() {
 }
 
 function render(o: IShowFeed) {
-   el.title.textContent = o.article.t
+   // t/l are omitempty on the wire — an untitled article must not render "undefined"
+   el.title.textContent = o.article.t ?? ""
    el.content.style.transition = "none"
    el.content.style.opacity = "0"
    el.content.style.transform = "translateY(6px)"
@@ -86,7 +87,7 @@ function render(o: IShowFeed) {
    refreshChannelLabel()
    el.counter.textContent = String(o.countRight)
 
-   document.title = "SRR - " + o.article.t
+   document.title = "SRR - " + (o.article.t ?? "")
    window.scrollTo(0, 0)
    el.title.focus()
 
@@ -245,5 +246,8 @@ init().catch(showError)
 if ("serviceWorker" in navigator) {
    // sw.ts lives at src/ root (not src/js/) so Parcel emits it at the deployment
    // root — its default scope then covers the whole env (incl. packs/assets/).
-   navigator.serviceWorker.register(new URL("../sw.ts", import.meta.url)).catch(() => {})
+   // type:module lets sw.ts import the generated contract (format.gen.ts); the
+   // SW already requires DecompressionStream, which is the newer feature, so
+   // module-worker support is never the limiting factor.
+   navigator.serviceWorker.register(new URL("../sw.ts", import.meta.url), { type: "module" }).catch(() => {})
 }

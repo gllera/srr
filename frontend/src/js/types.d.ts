@@ -1,46 +1,24 @@
 declare const SRR_CDN_URL: string
 declare const process: { env: { NODE_ENV: string } }
 
-interface IDB {
-   // Latest-pack generation: current latest packs are idx/L<seq>.gz and
-   // data/L<seq>.gz. Backend omits the key at 0 (empty store); data.ts
-   // init() normalizes the absent case.
-   seq: number
-   fetched_at: number
-   first_fetched?: number
-   total_art: number
-   next_pid: number
-   pack_off: number
-   gen?: number
-   channels: Record<number, IChannel>
+// Wire shapes come from the generated contract (format.gen.ts, emitted from
+// the backend's Go declarations by `srr gen-ts`). The types below layer the
+// client-side normalizations data.ts init() applies on top of the wire.
+// import() type references keep this file ambient (a top-level import would
+// turn it into a module and un-global every name).
+
+type IArticle = import("./format.gen").IArticleWire
+type IFeed = import("./format.gen").IFeedWire
+type IChannelWire = import("./format.gen").IChannelWire
+type IDBWire = import("./format.gen").IDBWire
+
+interface IChannel extends IChannelWire {
+   id: number // populated from the channels object key at init
 }
 
-interface IFeed {
-   url: string
-   ferr?: string
-   wm?: number
-   bg?: number[]
-   etag?: string
-   last_modified?: string
-}
-
-interface IChannel {
-   id: number
-   title: string
-   feeds: IFeed[]
-   pipe?: string[]
-   total_art: number
-   add_idx: number
-   tag?: string
-}
-
-interface IArticle {
-   s: number
-   a: number
-   p?: number
-   t: string
-   l: string
-   c: string
+interface IDB extends Omit<IDBWire, "seq" | "channels"> {
+   seq: number // backend omitempty (absent == 0 == empty store); init() normalizes with ??= 0
+   channels: Record<number, IChannel> // init() normalizes null with ??= {} and stamps each value's .id
 }
 
 interface IShowFeed {
