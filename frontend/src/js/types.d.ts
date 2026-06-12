@@ -29,3 +29,13 @@ interface IShowFeed {
    channel: IChannel | undefined
    countRight: number
 }
+
+// One row of the headlines peek (nav.peek): a filter-matching article near
+// the current position, ready to render without further lookups.
+interface IPeekItem {
+   chron: number
+   title: string
+   when: number // published, falling back to fetched_at when unparsed
+   channel: string
+   current: boolean
+}

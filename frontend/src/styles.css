@@ -124,7 +124,9 @@ video {
    margin: 0 0.4rem;
 }
 
-.srr-counter {
+/* The counter doubles as the headlines-peek button; the descendant selector
+   outranks the shared toolbar-button rule so it keeps its muted look. */
+.srr-toolbar-right .srr-counter {
    font-size: var(--text-sm);
    color: var(--muted);
    white-space: nowrap;
@@ -197,6 +199,11 @@ video {
    }
    & img {
       border-radius: var(--radius);
+   }
+   /* media whose resource failed to load (collapseBrokenMedia) — old
+      articles outlive their external images; hide the corpses */
+   & .srr-broken {
+      display: none;
    }
    & figure {
       margin: 1.5em 0;
@@ -322,6 +329,10 @@ video {
 
 .srr-toolbar-right {
    margin-left: auto;
+   & .srr-dropdown-menu {
+      bottom: 100%;
+      right: 0;
+   }
 }
 
 .srr-toolbar-left {
@@ -459,7 +470,8 @@ video {
          border-radius: var(--radius);
          text-align: center;
       }
-      & a.srr-imgproxy-icon {
+      & a.srr-imgproxy-icon,
+      & a.srr-date-icon {
          min-width: 0;
          padding: 0.25rem 0.4rem;
          display: inline-flex;
@@ -488,12 +500,14 @@ video {
          }
       }
    }
-   & .srr-imgproxy-edit {
+   & .srr-imgproxy-edit,
+   & .srr-date-edit {
       display: flex;
       gap: 0.25rem;
       align-items: center;
       padding: 0.2rem 0.4rem;
-      & .srr-imgproxy-input {
+      & .srr-imgproxy-input,
+      & .srr-date-input {
          flex: 1 1 auto;
          min-width: 0;
          font: inherit;
@@ -513,7 +527,8 @@ video {
          }
       }
       & .srr-imgproxy-save,
-      & .srr-imgproxy-clear {
+      & .srr-imgproxy-clear,
+      & .srr-date-cancel {
          flex: 0 0 auto;
          min-width: 2rem;
          font: inherit;
@@ -528,6 +543,36 @@ video {
             background: var(--hover);
          }
       }
+   }
+   & .srr-err-dot {
+      display: inline-block;
+      flex-shrink: 0;
+      width: 0.4rem;
+      height: 0.4rem;
+      border-radius: 50%;
+      background: var(--accent);
+      margin-right: 0.35rem;
+      vertical-align: middle;
+   }
+   /* Unread badge. Channel rows are block + nowrap/ellipsis: the badge is
+      prepended and floated right so it pins to the right edge and a long
+      title ellipsizes before reaching it instead of clipping it away. */
+   & .srr-unread {
+      float: right;
+      flex-shrink: 0;
+      margin-left: 0.5rem;
+      font-size: 0.75rem;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+   }
+   /* Tag headers are flex (floats don't apply): the badge sits before the
+      toggle and takes the free space, parking next to the chevron. */
+   & .srr-tag-header .srr-unread {
+      float: none;
+      margin-left: auto;
+   }
+   & .srr-tag-header .srr-unread + .srr-tag-toggle {
+      margin-left: 0;
    }
    & .srr-tag-sep {
       border-top: 1px solid var(--faint);
@@ -556,6 +601,24 @@ video {
    }
    & .srr-tag-collapsed .srr-tag-toggle::after {
       transform: rotate(-45deg);
+   }
+}
+
+/* Headlines peek — two-line rows: title over channel · age */
+#srr-peek-menu {
+   min-width: min(18rem, 80vw);
+   & .srr-peek-title,
+   & .srr-peek-meta {
+      overflow: hidden;
+      text-overflow: ellipsis;
+   }
+   & .srr-peek-meta {
+      font-size: 0.75rem;
+      color: var(--muted);
+   }
+   & .srr-peek-loading {
+      padding: 0.45rem 0.75rem;
+      color: var(--muted);
    }
 }
 

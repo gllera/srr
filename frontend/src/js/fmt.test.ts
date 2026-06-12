@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import {
+   collapseBrokenMedia,
    extractImageUrls,
    sanitizeHtml,
    timeAgo,
@@ -130,6 +131,50 @@ describe("sanitizeHtml", () => {
       expect(sanitizeHtml('<img src="data:image/svg+xml,<svg onload=alert(1)></svg>">')).not.toContain("data:")
       expect(sanitizeHtml('<a href="vbscript:msgbox(1)">x</a>')).not.toContain("vbscript")
       expect(sanitizeHtml('<a href="file:///etc/passwd">x</a>')).not.toContain("file:")
+   })
+
+   it("adds loading=lazy, decoding=async and referrerpolicy=no-referrer to images", () => {
+      const result = sanitizeHtml('<img src="https://feed.example/img.png" loading="eager">')
+      expect(result).toContain('loading="lazy"') // overrides feed-supplied eager
+      expect(result).toContain('decoding="async"')
+      expect(result).toContain('referrerpolicy="no-referrer"')
+      // <video> takes no referrerpolicy attribute — must not grow one
+      expect(sanitizeHtml('<video src="https://feed.example/v.mp4"></video>')).not.toContain("referrerpolicy")
+   })
+})
+
+describe("collapseBrokenMedia", () => {
+   // The error event doesn't bubble; production registers the handler on the
+   // content container with capture: true, which still sees descendant errors.
+   const container = (html: string): HTMLElement => {
+      const div = document.createElement("div")
+      div.innerHTML = html
+      div.addEventListener("error", collapseBrokenMedia, true)
+      document.body.appendChild(div)
+      return div
+   }
+
+   afterEach(() => {
+      document.body.innerHTML = ""
+   })
+
+   it("collapses an img whose load failed", () => {
+      const div = container('<p>text</p><img src="https://dead.example/x.png">')
+      div.querySelector("img")!.dispatchEvent(new Event("error"))
+      expect(div.querySelector("img")!.classList.contains("srr-broken")).toBe(true)
+      expect(div.querySelector("p")!.classList.contains("srr-broken")).toBe(false)
+   })
+
+   it("collapses the video hosting a failed source child", () => {
+      const div = container('<video><source src="https://dead.example/x.mp4"></video>')
+      div.querySelector("source")!.dispatchEvent(new Event("error"))
+      expect(div.querySelector("video")!.classList.contains("srr-broken")).toBe(true)
+   })
+
+   it("ignores errors from non-media elements", () => {
+      const div = container("<p>text</p>")
+      div.querySelector("p")!.dispatchEvent(new Event("error"))
+      expect(div.querySelector(".srr-broken")).toBeNull()
    })
 })
 

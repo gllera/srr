@@ -4,13 +4,16 @@
 // Three buckets, split by how mutable each resource is:
 //
 //   assets (srr-assets-vN)  content-hash `assets/<2hex>/<16hex><ext>` — immutable
-//                           (the hash is the sha256 of the bytes). Cache-first,
-//                           permanent; a hit can never be stale.
+//                           (the hash is the sha256 of the bytes). Cache-first;
+//                           a hit can never be stale. Bounded to ASSET_KEEP
+//                           entries, oldest-cached evicted first.
 //   packs  (srr-packs-vN)   the CDN store under `packs/`: every pack name is
 //      write-once — finalized `idx/<n>.gz` / `data/<n>.gz` (numeric) and the
 //      latest generation `idx|data/L<seq>.gz` (a generation is never rewritten
 //      after the db.gz commit that publishes it) → cache-first. Only `db.gz`
-//      is mutable → network-first (offline → last cached).
+//      is mutable → network-first (offline → last cached). Finalized series
+//      are bounded to PACK_KEEP entries each, lowest-numbered (oldest) evicted
+//      first (enforceCacheBounds).
 //   shell  (srr-shell-vN)   the app itself: the `/…/` navigation + content-hashed
 //                           JS/CSS. Runtime-cached (no build-time manifest — keeps
 //                           this SW hand-written and zero-dep). Hashed JS/CSS are
@@ -113,6 +116,46 @@ async function networkFirst(req: Request, name: string): Promise<Response> {
    }
 }
 
+// Cache-size backstop: the store grows forever, a device shouldn't. Finalized
+// pack names are numbered in chron order and reading skews to the tail, so each
+// series (idx/, data/) keeps its PACK_KEEP highest-numbered entries and evicts
+// the rest — the names themselves encode age, no access-time bookkeeping.
+// Evicting a pack someone is still reading just costs one CDN refetch on the
+// next miss. db.gz and the L<seq>/h<N> names are exempt (checkManifest owns
+// those, and offline consistency depends on them). Assets are content-hashed
+// (no age in the name), so that bucket prunes oldest-cached-first: Cache.keys()
+// returns insertion order and cacheFirst never re-puts on a hit. Runs only
+// after a successful ONLINE db.gz fetch — an offline reader must never lose a
+// cached pack it cannot refetch.
+const PACK_KEEP = 100 // per finalized series: ~20 MB of data packs + ~5 MB of idx packs
+const ASSET_KEEP = 500 // self-hosted images/files: order of ~100 MB at typical sizes
+
+const RE_PACK_FINAL = /\/packs\/(idx|data)\/(\d+)\.gz$/i
+
+async function enforceCacheBounds(): Promise<void> {
+   try {
+      const packs = await caches.open(PACKS)
+      const series: Record<string, { req: Request; n: number }[]> = { idx: [], data: [] }
+      for (const req of await packs.keys()) {
+         const m = RE_PACK_FINAL.exec(new URL(req.url).pathname)
+         if (m) series[m[1].toLowerCase()].push({ req, n: Number(m[2]) })
+      }
+      const assets = await caches.open(ASSETS)
+      const assetKeys = await assets.keys()
+      await Promise.all([
+         ...Object.values(series).flatMap((list) =>
+            list
+               .sort((a, b) => b.n - a.n)
+               .slice(PACK_KEEP)
+               .map((e) => packs.delete(e.req)),
+         ),
+         ...assetKeys.slice(0, Math.max(0, assetKeys.length - ASSET_KEEP)).map((req) => assets.delete(req)),
+      ])
+   } catch {
+      // best-effort — a failed prune never affects serving
+   }
+}
+
 // The last-seen gen/seq persist as synthetic entries in META (the URLs are
 // never fetched — they're just cache keys).
 const GEN_KEY = "https://srr.invalid/gen"
@@ -183,13 +226,18 @@ async function checkManifest(dbRes: Response): Promise<void> {
 // any idx pack, so a purge that completes first is race-free. Offline (fetch
 // threw) the check is unreachable — correct, there is no new gen/seq to
 // discover and the cached db.gz/pack pair stays mutually consistent.
-async function dbNetworkFirst(req: Request): Promise<Response> {
+async function dbNetworkFirst(req: Request, event: FetchEvent): Promise<Response> {
    const cache = await caches.open(PACKS)
    try {
       const res = await fetch(req)
       if (res.ok) {
          cache.put(req, res.clone())
          await checkManifest(res)
+         // Size backstop rides the same online-db.gz signal, but off the
+         // critical path — the page is waiting on this response. waitUntil
+         // keeps the worker alive; new puts after the keys() snapshot are
+         // never deleted, so it can't race the page's pack fetches.
+         event.waitUntil(enforceCacheBounds())
       }
       return res
    } catch (err) {
@@ -215,7 +263,7 @@ sw.addEventListener("fetch", (event) => {
 
    const path = url.pathname
    if (RE_ASSET.test(path)) event.respondWith(cacheFirst(req, ASSETS))
-   else if (RE_DB.test(path)) event.respondWith(dbNetworkFirst(req))
+   else if (RE_DB.test(path)) event.respondWith(dbNetworkFirst(req, event))
    else if (RE_PACK.test(path)) event.respondWith(cacheFirst(req, PACKS, true))
    else if (RE_SHELL_HASHED.test(path)) event.respondWith(cacheFirst(req, SHELL))
    // everything else (sw.js, favicon, sourcemaps) → default network passthrough
