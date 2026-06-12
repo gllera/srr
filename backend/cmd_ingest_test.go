@@ -9,15 +9,15 @@ func TestIngestCmdSetAndClear(t *testing.T) {
 	dir := t.TempDir()
 	globals = &Globals{PackSize: 1, Store: dir}
 
-	if err := (&IngestCmd{Ingest: strPtr("#telegram")}).Run(); err != nil {
+	if err := (&IngestCmd{Ingest: strPtr("my-fetcher")}).Run(); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 	db, err := NewDB(context.Background(), false)
 	if err != nil {
 		t.Fatalf("NewDB: %v", err)
 	}
-	if db.core.Ingest != "#telegram" {
-		t.Errorf("core.Ingest = %q, want %q", db.core.Ingest, "#telegram")
+	if db.core.Ingest != "my-fetcher" {
+		t.Errorf("core.Ingest = %q, want %q", db.core.Ingest, "my-fetcher")
 	}
 	db.Close(context.Background())
 
@@ -40,7 +40,7 @@ func TestIngestCmdPrintDoesNotMutate(t *testing.T) {
 	dir := t.TempDir()
 	globals = &Globals{PackSize: 1, Store: dir}
 
-	if err := (&IngestCmd{Ingest: strPtr("#telegram")}).Run(); err != nil {
+	if err := (&IngestCmd{Ingest: strPtr("my-fetcher")}).Run(); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	if err := (&IngestCmd{Ingest: nil}).Run(); err != nil {
@@ -51,7 +51,7 @@ func TestIngestCmdPrintDoesNotMutate(t *testing.T) {
 		t.Fatalf("NewDB: %v", err)
 	}
 	defer db.Close(context.Background())
-	if db.core.Ingest != "#telegram" {
-		t.Errorf("core.Ingest = %q, want preserved %q", db.core.Ingest, "#telegram")
+	if db.core.Ingest != "my-fetcher" {
+		t.Errorf("core.Ingest = %q, want preserved %q", db.core.Ingest, "my-fetcher")
 	}
 }

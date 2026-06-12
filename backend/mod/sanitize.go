@@ -23,10 +23,10 @@ func init() {
 		policy.AllowAttrs("title").Matching(bluemonday.Paragraph).OnElements("img")
 		policy.AllowElements("img")
 
-		// Video player support — Telegram bubbles emit raw mp4 URLs.
-		// width/height carry the Telegram padding-top aspect-ratio hint
-		// so the player element starts at hint-derived dimensions instead
-		// of the 320×180 poster size. The frontend defense-in-depth
+		// Video player support — feeds may embed raw mp4 URLs.
+		// width/height carry an optional aspect-ratio hint so the player
+		// element starts at hint-derived dimensions instead of the
+		// poster's intrinsic size. The frontend defense-in-depth
 		// strips style/class/on* and URL_DENY schemes, mirroring this
 		// allowlist.
 		// bluemonday URL-scheme-validates a video's "src" but NOT its "poster",

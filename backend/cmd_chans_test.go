@@ -527,18 +527,18 @@ func TestChanUpdClearsPipeline(t *testing.T) {
 
 func TestChanUpdSetsIngest(t *testing.T) {
 	setupChannelsTestDB(t)
-	cmd := &UpdCmd{ID: 0, Ingest: strPtr("#telegram")}
+	cmd := &UpdCmd{ID: 0, Ingest: strPtr("my-fetcher")}
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if got := reopenDB(t).Channels()[0].Ingest; got != "#telegram" {
-		t.Errorf("Ingest = %q, want %q", got, "#telegram")
+	if got := reopenDB(t).Channels()[0].Ingest; got != "my-fetcher" {
+		t.Errorf("Ingest = %q, want %q", got, "my-fetcher")
 	}
 }
 
 func TestChanUpdClearsIngest(t *testing.T) {
 	setupChannelsTestDB(t)
-	if err := (&UpdCmd{ID: 0, Ingest: strPtr("#telegram")}).Run(); err != nil {
+	if err := (&UpdCmd{ID: 0, Ingest: strPtr("my-fetcher")}).Run(); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 	if err := (&UpdCmd{ID: 0, Ingest: strPtr("")}).Run(); err != nil {

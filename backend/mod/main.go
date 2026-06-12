@@ -154,7 +154,7 @@ func (o *Module) Process(ctx context.Context, args string, i *RawItem) error {
 
 	// Preserve the typed Raw payload across the JSON round-trip — Unmarshal
 	// would otherwise decode it into map[string]any, breaking type-asserts
-	// in built-ins that run after a shell module (e.g. #youtube).
+	// in built-ins that run after a shell module.
 	saved := i.Raw
 	if err := json.Unmarshal(out.buf.Bytes(), i); err != nil {
 		return err

@@ -28,8 +28,8 @@ type Feed struct {
 }
 
 // fetch routes the feed through the selected FetchFunc so the
-// dedup / watermark / pipeline path stays uniform across RSS, Telegram,
-// and external ingest strategies. ingestName is resolved once per channel
+// dedup / watermark / pipeline path stays uniform across the built-in
+// (#rss) and external ingest strategies. ingestName is resolved once per channel
 // by Channel.Fetch and shared across all feeds in the channel.
 func (feed *Feed) fetch(ctx context.Context, client *http.Client, buf []byte, processor *mod.Module, engine *ingest.Fetcher, ch *Channel, fetchedAt int64, pipeline []string, ingestName string) ([]*Item, error) {
 	slog.Debug("downloading feed", "url", feed.URL, "channel", ch)

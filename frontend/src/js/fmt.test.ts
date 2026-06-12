@@ -261,11 +261,10 @@ describe("extractImageUrls", () => {
 
    it("extracts unquoted src (backend #minify strips quotes for clean URLs)", () => {
       // The #minify pass on the backend drops attribute quotes when the value
-      // has no special chars — common for YouTube thumb URLs and Telegram CDN
-      // URLs. Both forms must be recognised or those channels never prefetch.
-      const html =
-         "<p><a href=https://yt.example/watch?v=ABC><img src=https://i.ytimg.com/vi/ABC/hqdefault.jpg alt=t></a></p>"
-      expect(extractImageUrls(html)).toEqual(["https://i.ytimg.com/vi/ABC/hqdefault.jpg"])
+      // has no special chars — common for clean CDN URLs. Both forms must be
+      // recognised or those channels never prefetch.
+      const html = "<p><a href=https://example.com/post/ABC><img src=https://cdn.example/img/ABC.jpg alt=t></a></p>"
+      expect(extractImageUrls(html)).toEqual(["https://cdn.example/img/ABC.jpg"])
    })
 
    it("mixes quoted and unquoted img tags in one pass", () => {
