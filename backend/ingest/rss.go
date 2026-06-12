@@ -270,7 +270,14 @@ func ParseFeed(data []byte, fn func(*mod.RawItem) error) error {
 		}
 		raw, err := parseElement(dec, se)
 		if err != nil {
-			return err
+			// A malformed element wedges the decoder (Go's xml decoder rejects a
+			// bare "]]>" even in non-strict mode, and keeps erroring after).
+			// Stop here but keep the items parsed so far rather than dropping the
+			// whole feed: the caller then advances its cache headers and commits
+			// the good items, so one bad element can't blank a feed and leave it
+			// re-failing every fetch forever.
+			slog.Warn("feed parse stopped at malformed element", "err", err)
+			return nil
 		}
 		if err := fn(rawToFeedItem(raw.Chld, &dateHint)); errors.Is(err, ErrStopFeed) {
 			return nil
