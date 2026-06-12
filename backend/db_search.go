@@ -270,9 +270,10 @@ func (o *DB) SyncSearch(ctx context.Context, written []ArticleData) error {
 }
 
 // parseSearchEntries decodes a shard's JSONL body (bloom already stripped)
-// into SearchEntry values — the read-side mirror of the writer below, kept in
-// this file so the wire format has one owner. Used by `srr inspect`'s
-// checkSearch and the tests.
+// into SearchEntry values. The wire format's one owner is this file's
+// SearchEntry struct: writers jsonEncode it and every decode (here and
+// saveSearchShard's bloom pass) unmarshals through it. Used by `srr
+// inspect`'s checkSearch and the tests.
 func parseSearchEntries(buf []byte) ([]SearchEntry, error) {
 	var out []SearchEntry
 	for i, line := range bytes.Split(buf, []byte("\n")) {
