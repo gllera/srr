@@ -120,41 +120,74 @@ function readSeen(): Record<string, number> {
    }
 }
 
+// A channel stores its own seen position (chronIdx of the last article viewed
+// from it). A tag has no position of its own: it continues from the furthest
+// read (max seen chronIdx) of its member channels, so reading any channel in
+// the tag advances the tag, and the tag badge agrees with the toolbar
+// "articles to your right" you land on when you open it (switchFilter resumes
+// at this same position). undefined === never seen on this device (channel) /
+// no member channel seen yet (tag).
 function getSeen(token: string): number | undefined {
    const seen = readSeen()
    const n = Number(token)
-   return Number.isFinite(n) ? seen["chan:" + n] : seen["tag:" + token]
+   if (Number.isFinite(n)) return seen["chan:" + n]
+   let max: number | undefined
+   for (const ch of Object.values(data.db.channels))
+      if (ch.tag === token) {
+         const s = seen["chan:" + ch.id]
+         if (s !== undefined && (max === undefined || s > max)) max = s
+      }
+   return max
 }
 
 function recordSeen(article: IArticle) {
    const ch = data.db.channels[article.s]
    if (!ch) return
    try {
+      // Only the channel position is stored; a tag's position is derived from
+      // its channels in getSeen, so bumping the channel advances the tag too.
       const seen = readSeen()
       const chanKey = "chan:" + article.s
-      const tagKey = ch.tag ? "tag:" + ch.tag : null
-      if (seen[chanKey] === pos && (!tagKey || seen[tagKey] === pos)) return
+      if (seen[chanKey] === pos) return
       seen[chanKey] = pos
-      if (tagKey) seen[tagKey] = pos
       localStorage.setItem(SEEN_KEY, JSON.stringify(seen))
    } catch {}
 }
 
-// Unread count for one channel: its articles strictly after the channel's
-// seen position (recordSeen bumps that on every view, filtered or not, so
-// reading via [ALL] clears badges too). Both sides of the subtraction come
-// from the same idx counting (countAll/countLeft) so db.gz total_art drift
-// can't skew the result, and countLeft's boundary pack is the resident
-// latest pack whenever the seen position is recent — zero fetches in the
-// common case. Returns -1 when the channel was never seen on this device:
-// "unknown", not "zero" — a fresh localStorage would otherwise badge every
-// channel with its full history.
-export async function unreadCount(ch: IChannel): Promise<number> {
-   const seenIdx = getSeen(String(ch.id))
+// Articles belonging to `channels` strictly after `seenIdx` (the resume
+// position). Both sides of the subtraction come from the same idx counting
+// (countAll/countLeft) so db.gz total_art drift can't skew the result, and
+// countLeft's boundary pack is the resident latest pack whenever the seen
+// position is recent — zero fetches in the common case. Returns -1 when
+// seenIdx is undefined: "unknown", not "zero" — a fresh localStorage would
+// otherwise badge a channel/tag with its full history.
+async function unreadAfter(channels: Map<number, number>, seenIdx: number | undefined): Promise<number> {
    if (seenIdx === undefined) return -1
-   const channels = new Map([[ch.id, ch.add_idx ?? 0]])
    const upTo = Math.min(seenIdx + 1, data.db.total_art)
    return Math.max(0, data.countAll(channels) - (await data.countLeft(upTo, channels)))
+}
+
+// chan_id → add_idx map (the shape countAll/countLeft count over), for one
+// channel or a whole group.
+const chanMap = (chs: IChannel[]) => new Map(chs.map((c): [number, number] => [c.id, c.add_idx ?? 0]))
+
+// Unread count for one channel: its articles strictly after the channel's seen
+// position (recordSeen bumps that on every view, filtered or not, so reading
+// via [ALL] clears badges too).
+export function unreadCount(ch: IChannel): Promise<number> {
+   return unreadAfter(chanMap([ch]), getSeen(String(ch.id)))
+}
+
+// Unread for a whole tag: its member channels' articles strictly after the
+// tag's resume position — the furthest read (max seen chronIdx) of those
+// channels (getSeen(tag)). So the tag-header badge equals the toolbar
+// "articles to your right" the user lands on when they open the tag
+// (switchFilter resumes at the same position). Because the anchor is the
+// furthest-read channel, the tag badge is not the arithmetic sum of the
+// channel rows beneath it — a channel left further behind contributes only the
+// part of its backlog newer than that anchor.
+export function tagUnreadCount(tag: string, group: IChannel[]): Promise<number> {
+   return unreadAfter(chanMap(group), getSeen(tag))
 }
 
 // The headlines around the current position under the current filter: up to
@@ -201,13 +234,12 @@ export async function peek(span = 10): Promise<IPeekItem[]> {
 export function pruneSeen() {
    try {
       const seen = readSeen()
-      const tags = new Set<string>()
-      for (const ch of Object.values(data.db.channels)) if (ch.tag) tags.add(ch.tag)
       let changed = false
       for (const key of Object.keys(seen)) {
-         const stale =
-            (key.startsWith("chan:") && !data.db.channels[Number(key.slice(5))]) ||
-            (key.startsWith("tag:") && !tags.has(key.slice(4)))
+         // tag: entries are legacy — a tag's position now derives from its
+         // member channels, so any stored tag: key is dead weight. A chan: key
+         // for a deleted channel goes too.
+         const stale = key.startsWith("tag:") || (key.startsWith("chan:") && !data.db.channels[Number(key.slice(5))])
          if (stale) {
             delete seen[key]
             changed = true

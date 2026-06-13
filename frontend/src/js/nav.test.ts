@@ -691,16 +691,18 @@ describe("switchFilter", () => {
       expect(result.article.s).toBe(1)
    })
 
-   it("records both sub and tag seen positions on view", async () => {
+   it("records only the channel seen position; the tag derives from it", async () => {
       data.db.channels[5] = makeChannel({ id: 5, tag: "news" })
       setupIndex([{ chanId: 5 }, { chanId: 5 }])
       await nav.fromHash("1") // view chronIdx 1
       const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
       expect(seen["chan:5"]).toBe(1)
-      expect(seen["tag:news"]).toBe(1)
+      // No tag key is ever written — the tag's position is read back from its
+      // member channels (here a single channel at chron 1).
+      expect(Object.keys(seen).filter((k) => k.startsWith("tag:"))).toHaveLength(0)
    })
 
-   it("does not record tag seen for untagged sub", async () => {
+   it("never records a tag key", async () => {
       setupIndex([{ chanId: 1 }])
       await nav.fromHash("0")
       const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
@@ -710,15 +712,17 @@ describe("switchFilter", () => {
 })
 
 describe("pruneSeen", () => {
-   it("removes entries for deleted subs and tags", () => {
+   it("removes entries for deleted subs and all legacy tag keys", () => {
       data.db.channels = { 1: makeChannel({ id: 1, tag: "news" }) }
       localStorage.setItem("srr-seen", JSON.stringify({ "chan:1": 5, "chan:99": 10, "tag:news": 3, "tag:gone": 7 }))
       nav.pruneSeen()
       const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
-      expect(seen).toEqual({ "chan:1": 5, "tag:news": 3 })
+      // tag: keys are legacy now (a tag derives its position from its channels),
+      // so they are dropped even when the tag still exists.
+      expect(seen).toEqual({ "chan:1": 5 })
    })
 
-   it("keeps tag entry when at least one sub still has the tag", () => {
+   it("strips a legacy tag key even when the tag still exists", () => {
       data.db.channels = {
          1: makeChannel({ id: 1, tag: "news" }),
          2: makeChannel({ id: 2 }),
@@ -726,12 +730,12 @@ describe("pruneSeen", () => {
       localStorage.setItem("srr-seen", JSON.stringify({ "chan:1": 0, "tag:news": 0 }))
       nav.pruneSeen()
       const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
-      expect(seen).toEqual({ "chan:1": 0, "tag:news": 0 })
+      expect(seen).toEqual({ "chan:1": 0 })
    })
 
    it("does not write when nothing is stale", () => {
       data.db.channels = { 1: makeChannel({ id: 1, tag: "news" }) }
-      localStorage.setItem("srr-seen", JSON.stringify({ "chan:1": 0, "tag:news": 0 }))
+      localStorage.setItem("srr-seen", JSON.stringify({ "chan:1": 0 }))
       const setSpy = vi.spyOn(Storage.prototype, "setItem")
       nav.pruneSeen()
       expect(setSpy).not.toHaveBeenCalled()
@@ -1021,6 +1025,38 @@ describe("unreadCount", () => {
       await nav.fromHash("1") // seen chan:1 = 1
       data.db.total_art = 1 // simulate a rebuilt, shorter store
       expect(await nav.unreadCount(data.db.channels[1])).toBe(0)
+   })
+})
+
+describe("tagUnreadCount", () => {
+   // Two channels share a tag; group is the dropdown's member list.
+   function tagSetup(entries: Array<{ chanId: number }>) {
+      setupIndex(entries)
+      for (const id of new Set(entries.map((e) => e.chanId))) data.db.channels[id].tag = "news"
+      return Object.values(data.db.channels).filter((c) => c.tag === "news")
+   }
+
+   it("returns -1 when no member channel has been seen", async () => {
+      const group = tagSetup([{ chanId: 1 }, { chanId: 2 }])
+      expect(await nav.tagUnreadCount("news", group)).toBe(-1)
+   })
+
+   it("counts the tag's articles after its furthest-read channel", async () => {
+      // chron: 0=ch1 1=ch2 2=ch1 3=ch2 4=ch1. Read ch1 up to chron 2, ch2 only
+      // to chron 1 → tag anchor = max(2,1) = 2; articles right of 2 are 3,4.
+      const group = tagSetup([{ chanId: 1 }, { chanId: 2 }, { chanId: 1 }, { chanId: 2 }, { chanId: 1 }])
+      await nav.fromHash("1") // view chron 1 (ch2) → chan:2 = 1
+      await nav.fromHash("2") // view chron 2 (ch1) → chan:1 = 2
+      expect(await nav.tagUnreadCount("news", group)).toBe(2)
+   })
+
+   it("equals the toolbar countRight you land on when opening the tag", async () => {
+      const group = tagSetup([{ chanId: 1 }, { chanId: 2 }, { chanId: 1 }, { chanId: 2 }, { chanId: 1 }])
+      await nav.fromHash("1") // chan:2 = 1
+      await nav.fromHash("2") // chan:1 = 2 → tag anchor 2
+      const badge = await nav.tagUnreadCount("news", group)
+      const shown = await nav.switchFilter("news") // resumes at the same anchor
+      expect(shown.countRight).toBe(badge)
    })
 })
 
