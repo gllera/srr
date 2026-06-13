@@ -10,8 +10,8 @@
   },
   "scripts": {
     "dev": "concurrently -k npm:serve npm:servep",
-    "serve": "parcel serve --no-cache",
-    "servep": "npx serve --cors ../packs",
+    "serve": "SRR_CDN_URL=${SRR_CDN_URL:-http://localhost:3000} parcel serve --no-cache",
+    "servep": "npx serve --cors -l 3000 \"$(node parcel/resolve-store.js)\"",
     "build": "parcel build --no-cache --no-source-maps",
     "test": "vitest run",
     "test-contract": "vitest run --config vitest.contract.config.ts",

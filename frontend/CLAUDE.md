@@ -10,7 +10,7 @@ SRR Frontend — single-page RSS reader. Zero runtime deps. Parcel + TypeScript 
 
 ## Architecture
 
-Entry: `src/index.html` → `src/styles.css` + `src/js/app.ts`. Bundler: Parcel 2. `SRR_CDN_URL` is replaced at build time via `parcel/resolve-cdn-url.js`. Resolution: env var → `cdn-url:` from `$SRR_CONFIG_INLINE` (raw YAML) → `cdn-url:` from `$SRR_CONFIG` (file path, default `$XDG_CONFIG_HOME/srr/srr.yaml`) → fallback `http://localhost:3000`.
+Entry: `src/index.html` → `src/styles.css` + `src/js/app.ts`. Bundler: Parcel 2. `SRR_CDN_URL` is replaced at build time via `parcel/resolve-cdn-url.js`. Resolution: env var → `cdn-url:` from `$SRR_CONFIG_INLINE` (raw YAML) → `cdn-url:` from `$SRR_CONFIG` (file path, default `$XDG_CONFIG_HOME/srr/srr.yaml`) → fallback `http://localhost:3000`. The config read (the INLINE → file → default chain) is shared with the dev pack server via `parcel/srr-config.js` (`readConfigYaml`/`parseKey`).
 
 Dependency chain: `app → nav → data → {idx, cache, base}`, `app → fmt → base`, `app → dropdown → {data, nav, search, format.gen}`, `app → gestures → {nav, dropdown}`, `{idx, data, sw, types.d} → format.gen` (generated, see below), `search → {data, cache, format.gen}`. All in `src/js/`, strict mode.
 
@@ -39,7 +39,7 @@ Frontend-specific additions:
 - `channels` in `IDB` is `Record<number, IChannel>` (JSON object keyed by channel ID); defaults to `{}` if absent. `channel.id` is populated from object keys at init.
 - **IArticle**: `{ s, a, p, t, l, c }` — chan_id, fetched_at, published, title, link, content. Loaded from JSONL data packs.
 - **IShowFeed**: `{ article, has_left, has_right, filtered, channel, countRight }` — `countRight`: always `number` (never null); count of filtered articles strictly after `pos`.
-- Dev: `../packs/` sibling directory served on port 3000 with CORS.
+- Dev (`npm run dev` / `make dev-fe`): `concurrently` runs Parcel HMR (port 1234) + a CORS pack server (`serve`, port 3000). The pack server serves the **configured local store**, not a fixed path: `parcel/resolve-store.js` resolves the directory from `$SRR_STORE` → `store:` in the active config → `../packs` fallback (same precedence as the backend; an `s3://`/`sftp://` store, missing config, or absent dir falls back with a stderr note). Select a store with `SRR_CONFIG=~/.config/srr/srr.tmp.yaml make dev-fe`. The `serve` script forces `SRR_CDN_URL=http://localhost:3000` (the config's `cdn-url:` is a production same-origin path the local app can't use) unless `SRR_CDN_URL` is already set. `serve`'s directory listing lets you browse the pack files at `http://localhost:3000`.
 
 ## Key Behaviors
 
