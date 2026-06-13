@@ -20,6 +20,7 @@ const el = {
    date: document.querySelector(".srr-date") as HTMLElement,
    counter: document.querySelector(".srr-counter") as HTMLButtonElement,
    search: document.querySelector(".srr-search") as HTMLButtonElement,
+   save: document.querySelector(".srr-save") as HTMLButtonElement,
    popupText: document.querySelector(".srr-popup-text") as HTMLElement,
    popupRetry: document.querySelector(".srr-popup-retry") as HTMLButtonElement,
    popupClose: document.querySelector(".srr-popup-close") as HTMLElement,
@@ -122,6 +123,7 @@ function render(o: IShowFeed) {
    }
    el.source.textContent = currentChannel.title
    refreshChannelLabel()
+   refreshSaveButton(o.channel !== undefined)
    el.counter.textContent = String(o.countRight)
 
    document.title = "SRR - " + (o.article.t ?? "")
@@ -150,16 +152,49 @@ function refreshChannelLabel() {
    if (key === lastChannelLabel) return
    lastChannelLabel = key
 
-   const label = key === "" ? "All" : /^\d+$/.test(key) ? data.channelTitle(Number(key)) : key
+   const label =
+      key === ""
+         ? "All"
+         : key === nav.SAVED_TOKEN
+           ? "★ Saved"
+           : /^\d+$/.test(key)
+             ? data.channelTitle(Number(key))
+             : key
    el.channel.textContent = label
    el.channel.classList.toggle("srr-filter-on", key !== "")
    el.channel.title = key === "" ? "All channels" : `Filtered: ${label}`
    el.channel.setAttribute("aria-label", `Filter: ${label}`)
 }
 
+// The reader's save (★) toggle reflects whether the current article is in the
+// saved set. Disabled on the "(no matching articles)" placeholder (no channel),
+// where there's nothing to save.
+function refreshSaveButton(hasArticle: boolean) {
+   const chron = nav.currentChron()
+   const canSave = hasArticle && chron >= 0
+   const saved = canSave && nav.isSaved(chron)
+   el.save.disabled = !canSave
+   el.save.classList.toggle("srr-saved", saved)
+   el.save.setAttribute("aria-pressed", String(saved))
+   el.save.setAttribute("aria-label", saved ? "Unsave article" : "Save article")
+}
+
+// Toggle the current article's saved state from the reader. A local state flip
+// (localStorage + the button), not a navigation — it stays off the guard mutex,
+// and the list re-derives stars from the live set when you return to it.
+function toggleSave() {
+   const chron = nav.currentChron()
+   if (chron < 0) return
+   const saved = nav.toggleSaved(chron)
+   el.save.classList.toggle("srr-saved", saved)
+   el.save.setAttribute("aria-pressed", String(saved))
+   el.save.setAttribute("aria-label", saved ? "Unsave article" : "Save article")
+}
+
 function listTitle(): string {
    const key = nav.getCurrentFilterKey()
    if (key === "") return "SRR"
+   if (key === nav.SAVED_TOKEN) return "SRR · ★ Saved"
    return "SRR · " + (/^\d+$/.test(key) ? data.channelTitle(Number(key)) : key)
 }
 
@@ -278,6 +313,7 @@ const KEY_ACTIONS: Record<string, () => void> = {
    e: () => guard(() => nav.last()),
    l: () => showPeekMenu(guard),
    "/": () => showSearchMenu(guard),
+   b: () => !el.save.disabled && toggleSave(),
    f: () => {
       if (!el.titleLink.getAttribute("href")) return
       el.titleLink.dispatchEvent(
@@ -307,6 +343,7 @@ async function init() {
    el.channel.addEventListener("click", () => showChannelMenu(channelMenuTag(), guard, dropdownHost))
    el.counter.addEventListener("click", () => showPeekMenu(guard))
    el.search.addEventListener("click", () => showSearchMenu(guard))
+   el.save.addEventListener("click", () => !el.save.disabled && toggleSave())
    el.popupClose.addEventListener("click", closePopup)
    el.popupRetry.addEventListener("click", () => {
       closePopup()

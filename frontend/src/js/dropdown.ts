@@ -630,6 +630,18 @@ export function showChannelMenu(
       frag.appendChild(divEl("srr-tag-sep"))
 
       frag.appendChild(createLink("", "[ALL]", cls("", "")))
+      // "★ Saved" — the per-article collection, surfaced once there's something
+      // in it. Same selection path as a channel/tag (host.selectFilter on the
+      // list, guard(switchFilter) in the reader); the count rides as a badge.
+      const savedN = nav.savedCount()
+      if (savedN > 0) {
+         const savedRow = createLink(nav.SAVED_TOKEN, "★ Saved", cls("", nav.SAVED_TOKEN))
+         const num = document.createElement("span")
+         num.className = "srr-saved-num"
+         num.textContent = String(savedN)
+         savedRow.appendChild(num)
+         frag.appendChild(savedRow)
+      }
       for (const tag of sortedTags) {
          const group = tagged.get(tag)!
          const expanded = tag === currentTag && tag !== current

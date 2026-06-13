@@ -30,7 +30,9 @@ const nav = vi.hoisted(() => ({
    isUnreadOnly: vi.fn(() => false),
    setUnreadOnly: vi.fn<(on: boolean) => void>(),
    peek: vi.fn<(span?: number) => Promise<IPeekItem[]>>(async () => []),
-   filter: { active: false, matches: vi.fn(() => true) },
+   savedCount: vi.fn(() => 0),
+   SAVED_TOKEN: "~saved",
+   filter: { active: false, saved: false, matches: vi.fn(() => true) },
 }))
 vi.mock("./nav", () => nav)
 
@@ -333,6 +335,44 @@ describe("dropdown: feed-error badges", () => {
       })
       dropdown.showChannelMenu("", guard)
       expect($menu().querySelector(".srr-err-dot")).toBeNull()
+   })
+})
+
+describe("dropdown: saved row", () => {
+   let dropdown: Dropdown
+
+   beforeEach(async () => {
+      document.body.innerHTML = SKELETON
+      localStorage.clear()
+      nav.savedCount.mockReturnValue(0)
+      vi.resetModules()
+      dropdown = await import("./dropdown")
+   })
+   afterEach(() => nav.savedCount.mockReturnValue(0))
+
+   it("hides the ★ Saved row when nothing is saved", () => {
+      data.groupChannelsByTag.mockReturnValueOnce({ tagged: new Map(), sortedTags: [], untagged: [chan({ id: 1 })] })
+      dropdown.showChannelMenu("", vi.fn())
+      expect($menu().querySelector('a[data-value="~saved"]')).toBeNull()
+   })
+
+   it("shows ★ Saved with a count once there are saved articles", () => {
+      nav.savedCount.mockReturnValue(7)
+      data.groupChannelsByTag.mockReturnValueOnce({ tagged: new Map(), sortedTags: [], untagged: [chan({ id: 1 })] })
+      dropdown.showChannelMenu("", vi.fn())
+      const row = $menu().querySelector('a[data-value="~saved"]')!
+      expect(row).not.toBeNull()
+      expect(row.textContent).toContain("Saved")
+      expect(row.querySelector(".srr-saved-num")!.textContent).toBe("7")
+   })
+
+   it("on the list, selecting ★ Saved routes to host.selectFilter", () => {
+      nav.savedCount.mockReturnValue(2)
+      data.groupChannelsByTag.mockReturnValueOnce({ tagged: new Map(), sortedTags: [], untagged: [] })
+      const selectFilter = vi.fn()
+      dropdown.showChannelMenu("", vi.fn(), { viewIsList: () => true, selectFilter, reapplyFilter: vi.fn() })
+      $menu().querySelector<HTMLElement>('a[data-value="~saved"]')!.click()
+      expect(selectFilter).toHaveBeenCalledWith("~saved")
    })
 })
 
