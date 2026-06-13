@@ -293,8 +293,10 @@ function channelLink(ch: IChannel, className: string): HTMLAnchorElement {
 // seen → resident latest pack) resolves in a microtask. `unreadFill` is the
 // freshness token: a rebuild or close orphans a stale pass before it touches
 // the DOM. Channels never seen on this device (unreadCount -1) show nothing,
-// and tag headers sum their known children so a collapsed group still shows
-// the activity inside it.
+// and each tag header shows the tag's own unread (nav.tagUnreadCount: articles
+// right of its furthest-read channel) so a collapsed group still surfaces the
+// activity inside it and the badge equals the counter you land on when you
+// open the tag.
 let unreadFill: object | null = null
 
 function unreadBadge(n: number): HTMLSpanElement {
@@ -304,19 +306,23 @@ function unreadBadge(n: number): HTMLSpanElement {
    return s
 }
 
-async function fillUnread(rows: [HTMLAnchorElement, IChannel][], headers: [HTMLAnchorElement, IChannel[]][]) {
+async function fillUnread(rows: [HTMLAnchorElement, IChannel][], headers: [HTMLAnchorElement, IChannel[], string][]) {
    const my = {}
    unreadFill = my
    try {
       const counts = new Map<number, number>()
-      await Promise.all(rows.map(async ([, ch]) => counts.set(ch.id, await nav.unreadCount(ch))))
+      const tagCounts = new Map<string, number>()
+      await Promise.all([
+         ...rows.map(async ([, ch]) => counts.set(ch.id, await nav.unreadCount(ch))),
+         ...headers.map(async ([, group, tag]) => tagCounts.set(tag, await nav.tagUnreadCount(tag, group))),
+      ])
       if (my !== unreadFill) return
       for (const [a, ch] of rows) {
          const n = counts.get(ch.id)!
          if (n > 0) a.prepend(unreadBadge(n))
       }
-      for (const [h, group] of headers) {
-         const n = group.reduce((sum, ch) => sum + Math.max(0, counts.get(ch.id) ?? 0), 0)
+      for (const [h, , tag] of headers) {
+         const n = tagCounts.get(tag)!
          if (n > 0) h.insertBefore(unreadBadge(n), h.querySelector(".srr-tag-toggle"))
       }
    } catch {
@@ -523,7 +529,7 @@ export function showChannelMenu(currentTag: string, guard: (fn: () => Promise<IS
 
    const buildContent = (frag: DocumentFragment) => {
       const unreadRows: [HTMLAnchorElement, IChannel][] = []
-      const headerRows: [HTMLAnchorElement, IChannel[]][] = []
+      const headerRows: [HTMLAnchorElement, IChannel[], string][] = []
       if (imgProxyEditing) {
          frag.appendChild(imgProxyEditor(guard, rebuild))
       } else if (dateEditing) {
@@ -549,7 +555,7 @@ export function showChannelMenu(currentTag: string, guard: (fn: () => Promise<IS
          const div = divEl(expanded ? "srr-tag-group" : "srr-tag-group srr-tag-collapsed")
          const header = createLink(tag, tag, cls("srr-tag-header", tag))
          if (group.some((ch) => channelErr(ch))) header.prepend(errDot())
-         headerRows.push([header, group])
+         headerRows.push([header, group, tag])
          const toggle = document.createElement("span")
          toggle.className = "srr-tag-toggle"
          toggle.addEventListener("click", (e) => {

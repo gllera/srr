@@ -20,6 +20,7 @@ const nav = vi.hoisted(() => ({
    goTo: vi.fn(),
    switchFilter: vi.fn(),
    unreadCount: vi.fn<(ch: IChannel) => Promise<number>>(async () => -1),
+   tagUnreadCount: vi.fn<(tag: string, group: IChannel[]) => Promise<number>>(async () => -1),
    peek: vi.fn<(span?: number) => Promise<IPeekItem[]>>(async () => []),
    filter: { active: false, matches: vi.fn(() => true) },
 }))
@@ -273,15 +274,17 @@ describe("dropdown: unread badges", () => {
       localStorage.clear()
       guard = vi.fn()
       nav.unreadCount.mockClear()
+      nav.tagUnreadCount.mockClear()
       vi.resetModules()
       dropdown = await import("./dropdown")
    })
 
    afterEach(() => {
       nav.unreadCount.mockImplementation(async () => -1)
+      nav.tagUnreadCount.mockImplementation(async () => -1)
    })
 
-   it("badges channels async and sums onto the tag header, hiding unknown and zero", async () => {
+   it("badges channels async and shows the tag's own unread on the header, hiding unknown and zero", async () => {
       const a = chan({ id: 3, title: "A" })
       const b = chan({ id: 4, title: "B" })
       const c = chan({ id: 5, title: "C" })
@@ -291,15 +294,33 @@ describe("dropdown: unread badges", () => {
          untagged: [c],
       })
       nav.unreadCount.mockImplementation(async (ch) => (ch.id === 3 ? 5 : ch.id === 4 ? -1 : 0))
+      // The header badge is nav.tagUnreadCount (right of the tag's furthest-read
+      // channel), not the arithmetic sum of the child rows.
+      nav.tagUnreadCount.mockImplementation(async (tag) => (tag === "news" ? 7 : -1))
       dropdown.showChannelMenu("", guard)
       await vi.waitFor(() => expect($badge("3")).not.toBeNull())
       expect($badge("3")!.textContent).toBe("5")
       expect($badge("4")).toBeNull() // never seen → unknown, no badge
       expect($badge("5")).toBeNull() // fully read → no badge
       const headerBadge = $badge("news")!
-      expect(headerBadge.textContent).toBe("5") // sum of known children
+      expect(headerBadge.textContent).toBe("7") // the tag's own count, not 5 + (−1)
+      expect(nav.tagUnreadCount).toHaveBeenCalledWith("news", [a, b])
       // sits before the collapse toggle, not after the chevron
       expect(headerBadge.nextElementSibling?.className).toBe("srr-tag-toggle")
+   })
+
+   it("hides the tag header badge when the tag is unknown (-1)", async () => {
+      const a = chan({ id: 3, title: "A" })
+      data.groupChannelsByTag.mockReturnValueOnce({
+         tagged: new Map([["news", [a]]]),
+         sortedTags: ["news"],
+         untagged: [],
+      })
+      nav.unreadCount.mockImplementation(async () => -1)
+      nav.tagUnreadCount.mockImplementation(async () => -1)
+      dropdown.showChannelMenu("", guard)
+      await new Promise((r) => setTimeout(r))
+      expect($badge("news")).toBeNull()
    })
 
    it("caps the displayed count at 999+", async () => {
