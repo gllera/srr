@@ -33,10 +33,13 @@ export function closeAllDropdowns(): void {
 }
 
 // Keyboard-reachable rows of an open menu: menuitem anchors not hidden inside
-// a collapsed tag group (the header itself stays reachable).
+// a collapsed tag group (the header itself stays reachable) and not hidden by
+// the unseen-only filter (`.srr-hidden`, on the row or its tag group).
 function menuItems(menu: HTMLElement): HTMLElement[] {
    return Array.from(menu.querySelectorAll<HTMLElement>('[role="menuitem"]')).filter(
-      (el) => !(el.classList.contains("srr-tag-item") && el.parentElement?.classList.contains("srr-tag-collapsed")),
+      (el) =>
+         !el.closest(".srr-hidden") &&
+         !(el.classList.contains("srr-tag-item") && el.parentElement?.classList.contains("srr-tag-collapsed")),
    )
 }
 
@@ -153,7 +156,7 @@ function fillMenu(dd: HTMLElement, buildContent: (frag: DocumentFragment) => voi
 function toggleDropdown(
    id: string,
    buildContent: (frag: DocumentFragment) => void,
-   onClick: (value: string) => Promise<void>,
+   onClick: (value: string, e: MouseEvent) => Promise<void>,
 ): void {
    const dd = document.getElementById(id)!
    const wasOpen = dd.classList.contains("srr-open")
@@ -165,17 +168,22 @@ function toggleDropdown(
    dd.classList.add("srr-open")
    isOpen = true
    btn?.setAttribute("aria-expanded", "true")
+   // The delegated click bubbles on to app.ts's window-level close handler,
+   // which is what auto-closes the menu after a navigation selection. Handlers
+   // that instead keep the menu open (the inline-editor swaps) get the event so
+   // they can stopPropagation() and survive that close.
    dd.onclick = (e) => {
       const a = (e.target as HTMLElement).closest("a[data-value]") as HTMLAnchorElement | null
       if (!a) return
       e.preventDefault()
-      onClick(a.dataset.value!)
+      onClick(a.dataset.value!, e)
    }
    fillMenu(dd, buildContent)
 }
 
 const IMG_PROXY_SENTINEL = "__imgproxy__"
 const DATE_SENTINEL = "__date__"
+const UNREAD_SENTINEL = "__unread__"
 
 const IMG_ICON_SVG =
    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
@@ -194,6 +202,13 @@ const CAL_ICON_SVG =
    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
    '<rect x="3" y="4" width="18" height="17" rx="2"/>' +
    '<path d="M8 2v4M16 2v4M3 10h18"/>' +
+   "</svg>"
+
+// An eye: "show only what I haven't seen". On = unseen-only navigation active.
+const UNREAD_ICON_SVG =
+   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+   '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/>' +
+   '<circle cx="12" cy="12" r="3"/>' +
    "</svg>"
 
 function iconChip(value: string, label: string, className: string, svg: string): HTMLAnchorElement {
@@ -215,6 +230,16 @@ function imgProxyIcon(): HTMLAnchorElement {
 
 function dateIcon(): HTMLAnchorElement {
    return iconChip(DATE_SENTINEL, "jump to date", "srr-date-icon", CAL_ICON_SVG)
+}
+
+function unreadIcon(): HTMLAnchorElement {
+   const state = nav.isUnreadOnly() ? "on" : "off"
+   return iconChip(
+      UNREAD_SENTINEL,
+      `unseen-only (tags): ${state}`,
+      `srr-unread-icon srr-unread-${state}`,
+      UNREAD_ICON_SVG,
+   )
 }
 
 // dateEditor swaps the chip row for a native date input: picking a day (the
@@ -293,10 +318,13 @@ function channelLink(ch: IChannel, className: string): HTMLAnchorElement {
 // seen → resident latest pack) resolves in a microtask. `unreadFill` is the
 // freshness token: a rebuild or close orphans a stale pass before it touches
 // the DOM. Channels never seen on this device (unreadCount -1) show nothing,
-// and each tag header shows the tag's own unread (nav.tagUnreadCount: articles
-// right of its furthest-read channel) so a collapsed group still surfaces the
-// activity inside it and the badge equals the counter you land on when you
-// open the tag.
+// and each tag header shows nav.tagUnreadFromCounts (derived from the same
+// counts map: the tag's never-seen members counted as fully unread, so a
+// collapsed group still surfaces the activity inside it and the badge equals
+// the unseen-only toolbar counter you land on when you open the tag). When
+// unseen-only is on, the same pass hides
+// fully-read rows and tags (`.srr-hidden`): a per-channel count of 0 = nothing
+// unseen; -1 (never seen here) has unseen content, so it stays.
 let unreadFill: object | null = null
 
 function unreadBadge(n: number): HTMLSpanElement {
@@ -306,25 +334,39 @@ function unreadBadge(n: number): HTMLSpanElement {
    return s
 }
 
-async function fillUnread(rows: [HTMLAnchorElement, IChannel][], headers: [HTMLAnchorElement, IChannel[], string][]) {
+async function fillUnread(rows: [HTMLAnchorElement, IChannel][], headers: [HTMLAnchorElement, IChannel[]][]) {
    const my = {}
    unreadFill = my
    try {
-      const counts = new Map<number, number>()
-      const tagCounts = new Map<string, number>()
-      await Promise.all([
-         ...rows.map(async ([, ch]) => counts.set(ch.id, await nav.unreadCount(ch))),
-         ...headers.map(async ([, group, tag]) => tagCounts.set(tag, await nav.tagUnreadCount(tag, group))),
-      ])
+      // One batched call reads the localStorage seen blob once for every row,
+      // instead of nav.unreadCount per row re-parsing it. The single freshness
+      // check guards every DOM write below — the tag header badge is derived
+      // synchronously from this same counts map (nav.tagUnreadFromCounts:
+      // never-seen members counted as fully unread, == the unseen-only toolbar
+      // counter), so there's no second await pass re-scanning the idx packs.
+      const counts = await nav.unreadCounts(rows.map(([, ch]) => ch))
       if (my !== unreadFill) return
+      const hideRead = nav.isUnreadOnly()
+      // The row/group you're currently viewing must never self-hide mid-session:
+      // reading the active tag/channel down to 0 unseen THIS session would else
+      // drop its `.srr-active` styling and make it keyboard-unreachable
+      // (menuItems skips `.srr-hidden`) while you're still on it. The toolbar
+      // counter uses a frozen snapshot, so it stays visible regardless. The
+      // active key is `""` (no exemption), a single tag name, or a channel id.
+      const activeKey = nav.getCurrentFilterKey()
       for (const [a, ch] of rows) {
          const n = counts.get(ch.id)!
          if (n > 0) a.prepend(unreadBadge(n))
+         if (hideRead && n === 0 && String(ch.id) !== activeKey) a.classList.add("srr-hidden")
       }
-      for (const [h, , tag] of headers) {
-         const n = tagCounts.get(tag)!
+      headers.forEach(([h, group]) => {
+         const n = nav.tagUnreadFromCounts(group, counts)
          if (n > 0) h.insertBefore(unreadBadge(n), h.querySelector(".srr-tag-toggle"))
-      }
+         // Hide the whole group when no member has unseen content (>0 or -1) —
+         // unless it's the active tag, which stays put while you read it down.
+         if (hideRead && h.dataset.value !== activeKey && group.every((ch) => counts.get(ch.id) === 0))
+            h.closest(".srr-tag-group")?.classList.add("srr-hidden")
+      })
    } catch {
       // Best-effort decoration; the menu works without badges.
    }
@@ -339,7 +381,7 @@ function imgProxyEditor(guard: (fn: () => Promise<IShowFeed>) => void, rebuild: 
    input.placeholder = "https://proxy/?url="
    input.value = getImgProxy()
 
-   const commit = (raw: string) => {
+   const commit = (raw: string, fromKeyboard = false) => {
       const next = raw.trim()
       if (!isValidProxy(next)) {
          input.classList.add("srr-input-invalid")
@@ -352,11 +394,18 @@ function imgProxyEditor(guard: (fn: () => Promise<IShowFeed>) => void, rebuild: 
          guard(() => nav.fromHash(location.hash.substring(1)))
       }
       rebuild()
+      // rebuild() detaches the focused ✓/input, and the gated render() (from the
+      // guard re-apply) won't steal focus to the title while the menu stays open
+      // — so an Enter commit would strand focus on <body>. Mirror the eye-toggle:
+      // hand focus back to the freshly-rebuilt chip on the keyboard (Enter) path.
+      // A mouse user clicking ✓/✕ doesn't need it, so the button path is left be.
+      if (fromKeyboard)
+         document.querySelector<HTMLElement>(`#srr-channel-menu a[data-value="${IMG_PROXY_SENTINEL}"]`)?.focus()
    }
 
    editorKeys(
       input,
-      () => commit(input.value),
+      () => commit(input.value, true),
       () => {
          imgProxyEditing = false
          rebuild()
@@ -529,7 +578,7 @@ export function showChannelMenu(currentTag: string, guard: (fn: () => Promise<IS
 
    const buildContent = (frag: DocumentFragment) => {
       const unreadRows: [HTMLAnchorElement, IChannel][] = []
-      const headerRows: [HTMLAnchorElement, IChannel[], string][] = []
+      const headerRows: [HTMLAnchorElement, IChannel[]][] = []
       if (imgProxyEditing) {
          frag.appendChild(imgProxyEditor(guard, rebuild))
       } else if (dateEditing) {
@@ -537,6 +586,7 @@ export function showChannelMenu(currentTag: string, guard: (fn: () => Promise<IS
       } else {
          const since = divEl("srr-chip-row")
          since.appendChild(imgProxyIcon())
+         since.appendChild(unreadIcon())
          since.appendChild(lastChip())
          since.appendChild(createLink("t:28800", "8h"))
          since.appendChild(createLink("t:57600", "16h"))
@@ -555,7 +605,7 @@ export function showChannelMenu(currentTag: string, guard: (fn: () => Promise<IS
          const div = divEl(expanded ? "srr-tag-group" : "srr-tag-group srr-tag-collapsed")
          const header = createLink(tag, tag, cls("srr-tag-header", tag))
          if (group.some((ch) => channelErr(ch))) header.prepend(errDot())
-         headerRows.push([header, group, tag])
+         headerRows.push([header, group])
          const toggle = document.createElement("span")
          toggle.className = "srr-tag-toggle"
          toggle.addEventListener("click", (e) => {
@@ -582,15 +632,51 @@ export function showChannelMenu(currentTag: string, guard: (fn: () => Promise<IS
    }
    const rebuild = () => fillMenu(document.getElementById("srr-channel-menu")!, buildContent)
 
-   toggleDropdown("srr-channel-menu", buildContent, async (value) => {
+   toggleDropdown("srr-channel-menu", buildContent, async (value, e) => {
+      // Swap to an inline editor without letting the click reach the window
+      // close handler, which would otherwise shut the menu the instant it opens.
       if (value === IMG_PROXY_SENTINEL) {
+         e.stopPropagation()
          imgProxyEditing = true
          rebuild()
          return
       }
       if (value === DATE_SENTINEL) {
+         e.stopPropagation()
          dateEditing = true
          rebuild()
+         return
+      }
+      if (value === UNREAD_SENTINEL) {
+         // A mode toggle, not a selection: keep the menu open. Do the flip + chip
+         // rebuild + nav re-apply ATOMICALLY inside the guard so a busy click (a
+         // nav already in flight, or a rapid double-click) is a true no-op — the
+         // chip can never get ahead of the applied nav state. Restore focus to
+         // the freshly-rebuilt chip when this came from the keyboard (Space),
+         // since rebuild() detaches the focused element.
+         e.stopPropagation()
+         // Capture the target mode ONCE, outside the guarded fn: guard's error
+         // path re-invokes the SAME fn on Retry, so reading live !isUnreadOnly()
+         // inside it would flip back the already-applied toggle on a retry.
+         const want = !nav.isUnreadOnly()
+         // Keyboard activation (Space → synthetic .click()) carries detail === 0;
+         // a real mouse click has detail >= 1. activeElement can't tell them
+         // apart once the chip stays focused through the click.
+         const fromKeyboard = e.detail === 0
+         guard(() => {
+            nav.setUnreadOnly(want)
+            rebuild()
+            if (fromKeyboard)
+               document.querySelector<HTMLElement>('#srr-channel-menu a[data-value="__unread__"]')?.focus()
+            // Re-resolve the current single-tag filter via switchFilter (oldest
+            // unseen, matching tag-select) so toggling ON lands on the OLDEST
+            // unseen, not fromHash's last()-fallback newest. Other filters
+            // (channel / [ALL] / multi-token) ignore unseen-only, so replay the
+            // raw hash unchanged.
+            const key = nav.getCurrentFilterKey()
+            const isTag = key !== "" && !Number.isFinite(Number(key))
+            return isTag ? nav.switchFilter(key) : nav.fromHash(location.hash.substring(1))
+         })
          return
       }
       guard(async () => {
