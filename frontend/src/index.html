@@ -28,7 +28,7 @@
          <button class="srr-popup-close" aria-label="Close">&times;</button>
       </div>
       <main class="srr-container">
-         <article>
+         <article class="srr-reader" hidden>
             <div class="srr-title-row">
                <div class="srr-kicker">
                   <span class="srr-source"></span>
@@ -40,8 +40,12 @@
             </div>
             <div class="srr-content"></div>
          </article>
+         <div class="srr-list" aria-label="Article list" hidden></div>
          <nav class="srr-toolbar" aria-label="Article navigation">
             <div class="srr-toolbar-left">
+               <button class="srr-back" aria-label="Back to list" title="Back to list">
+                  <span class="srr-back-icon" aria-hidden="true"></span>
+               </button>
                <div class="srr-dropdown">
                   <button class="srr-dropdown-btn srr-channel" aria-expanded="false" aria-haspopup="menu"></button>
                   <div id="srr-channel-menu" class="srr-dropdown-menu" role="menu"></div>

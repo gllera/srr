@@ -7,8 +7,8 @@ import { feedServer, srr, type FeedServer } from "../harness"
 import { nItems, rssFeed } from "../fixtures"
 
 // Drives the REAL built SPA in headless Chrome against real srrb packs: proves
-// the Parcel build, app.ts render, hash routing, and real-browser
-// fetch/DecompressionStream all work end-to-end — not just the data modules.
+// the Parcel build, app.ts render, hash routing (list home + reader drill-down),
+// and real-browser fetch/DecompressionStream all work end-to-end.
 
 const baseUrl = inject("baseUrl")
 const packsDir = inject("packsDir")
@@ -24,10 +24,36 @@ const $content = (p: Page) => p.$eval(".srr-content", (e) => e.textContent ?? ""
 const $link = (p: Page) => p.$eval(".srr-title-link", (e) => e.getAttribute("href"))
 const $nextDisabled = (p: Page) => p.$eval(".srr-next", (e) => (e as HTMLButtonElement).disabled)
 const $popupOpen = (p: Page) => p.$eval(".srr-popup", (e) => e.classList.contains("srr-open"))
+const $rowTitles = (p: Page) => p.$$eval(".srr-list a.srr-row .srr-row-title", (els) => els.map((e) => e.textContent))
+
 const waitTitle = (p: Page, t: string) =>
    p.waitForFunction((want) => document.querySelector(".srr-title")?.textContent === want, { timeout: 20000 }, t)
-const waitRendered = (p: Page) =>
-   p.waitForFunction(() => (document.querySelector(".srr-title")?.textContent?.length ?? 0) > 0, { timeout: 20000 })
+// The reader surface is shown with a non-empty title.
+const waitReader = (p: Page) =>
+   p.waitForFunction(
+      () => {
+         const a = document.querySelector(".srr-reader") as HTMLElement | null
+         return !!a && !a.hidden && (document.querySelector(".srr-title")?.textContent?.length ?? 0) > 0
+      },
+      { timeout: 20000 },
+   )
+// The list surface is shown with at least one rendered row.
+const waitList = (p: Page) =>
+   p.waitForFunction(
+      () => {
+         const l = document.querySelector(".srr-list") as HTMLElement | null
+         return !!l && !l.hidden && l.querySelector("a.srr-row") != null
+      },
+      { timeout: 20000 },
+   )
+// The app has booted into EITHER surface (used where the surface is irrelevant).
+const waitBoot = (p: Page) =>
+   p.waitForFunction(
+      () =>
+         (document.querySelector(".srr-title")?.textContent?.length ?? 0) > 0 ||
+         document.querySelector(".srr-list a.srr-row") != null,
+      { timeout: 20000 },
+   )
 
 describe("browser: real SPA over real packs", () => {
    let feeds: FeedServer
@@ -59,13 +85,40 @@ describe("browser: real SPA over real packs", () => {
       const ctx = await browser.createBrowserContext()
       const page = await ctx.newPage()
       await page.goto(baseUrl + hash, { waitUntil: "load" })
-      await waitRendered(page)
+      await waitBoot(page)
       return [page, async () => ctx.close()]
    }
 
-   it("renders the latest article and navigates with the keyboard", async () => {
+   it("boots into the list, newest-first", async () => {
       const [page, close] = await open()
       try {
+         await waitList(page)
+         // The list IS home: no article is shown until a row is tapped.
+         expect(await page.$eval(".srr-reader", (e) => (e as HTMLElement).hidden)).toBe(true)
+         expect(await $rowTitles(page)).toEqual([
+            "sport title 1",
+            "sport title 0",
+            "tech title 1",
+            "tech title 0",
+            "news title 1",
+            "news title 0",
+         ])
+         // A never-seen store → every row unread.
+         expect(
+            await page.$$eval(".srr-list a.srr-row", (els) => els.every((e) => e.classList.contains("srr-row-unread"))),
+         ).toBe(true)
+      } finally {
+         await close()
+      }
+   })
+
+   it("opens an article from the list, navigates with the keyboard, and returns", async () => {
+      const [page, close] = await open()
+      try {
+         await waitList(page)
+         // Tap the top row (latest) → reader.
+         await page.click(".srr-list a.srr-row")
+         await waitReader(page)
          expect(await $title(page)).toBe("sport title 1")
          expect(await $content(page)).toContain("sport body 1")
          expect(await $link(page)).toBe("http://example.com/sport/1")
@@ -75,15 +128,20 @@ describe("browser: real SPA over real packs", () => {
          await waitTitle(page, "sport title 0")
          await page.keyboard.press("ArrowLeft")
          await waitTitle(page, "tech title 1")
-         expect(await $popupOpen(page)).toBe(false)
+
+         // Back to the list via the toolbar back button.
+         await page.click(".srr-back")
+         await waitList(page)
+         expect(await page.$eval(".srr-reader", (e) => (e as HTMLElement).hidden)).toBe(true)
       } finally {
          await close()
       }
    })
 
-   it("deep-links to a specific chronIdx", async () => {
+   it("deep-links to a specific chronIdx (reader)", async () => {
       const [page, close] = await open("#2")
       try {
+         await waitReader(page)
          await waitTitle(page, "tech title 0")
          expect(await $content(page)).toContain("tech body 0")
          expect(await $link(page)).toBe("http://example.com/tech/0")
@@ -92,9 +150,21 @@ describe("browser: real SPA over real packs", () => {
       }
    })
 
-   it("filters to a tag and traverses only that subset", async () => {
+   it("deep-links to a filtered list (#!tag)", async () => {
+      const [page, close] = await open("#!world")
+      try {
+         await waitList(page)
+         // world = News + Tech, newest-first; Sport excluded.
+         expect(await $rowTitles(page)).toEqual(["tech title 1", "tech title 0", "news title 1", "news title 0"])
+      } finally {
+         await close()
+      }
+   })
+
+   it("filters to a tag and traverses only that subset in the reader", async () => {
       const [page, close] = await open("#0!world")
       try {
+         await waitReader(page)
          await waitTitle(page, "news title 0")
          const titles = [await $title(page)]
          while (!(await $nextDisabled(page))) {
@@ -114,8 +184,9 @@ describe("browser: real SPA over real packs", () => {
    })
 
    it("opens the headlines peek with the keyboard and jumps to a nearby article", async () => {
-      const [page, close] = await open() // lands on the latest article (chron 5)
+      const [page, close] = await open("#5") // reader on the latest article (chron 5)
       try {
+         await waitReader(page)
          await page.keyboard.press("l")
          await page.waitForFunction(
             () => document.querySelectorAll("#srr-peek-menu.srr-open a[data-value]").length === 6,
@@ -138,19 +209,15 @@ describe("browser: real SPA over real packs", () => {
       }
    })
 
-   // Regression guard: the search button must open the search menu on click/tap.
-   // The magnifier renders as an inner .srr-search-icon <span> that fills the
-   // button, so a tap's event target is the span, not the button. app.ts's
-   // window-level "click outside closes dropdowns" handler once tested
-   // e.target.matches(".srr-dropdown-btn") — false for the span — so it closed
-   // the menu the button's own handler had just opened. The menu opened then
-   // vanished, leaving the button dead to taps (only the `/` key worked, and
-   // mobile has no `/`). Fixed by switching that handler to .closest().
+   // Regression guard: the search button must open the search menu on click/tap
+   // (it's reachable from both surfaces). The magnifier renders as an inner
+   // .srr-search-icon <span> that fills the button, so a tap's event target is
+   // the span, not the button — app.ts's outside-click close handler uses
+   // .closest() so it doesn't close the menu the button just opened.
    it("opens the search menu when the magnifier button is clicked", async () => {
       const [page, close] = await open()
       try {
-         // The hit target at the button's center is the icon span — the exact
-         // path that regressed.
+         await waitList(page)
          expect(await page.$eval(".srr-search .srr-search-icon", (e) => e.tagName)).toBe("SPAN")
          await page.click(".srr-search")
          await page.waitForSelector("#srr-search-menu.srr-open", { timeout: 20000 })
@@ -167,20 +234,21 @@ describe("browser: real SPA over real packs", () => {
    // single pack) are runtime-cached on the first online visit, then served from
    // cache when the network is cut. Headless Chrome over http://127.0.0.1 is a
    // secure context, so the SW registers and activates as it does in production.
+   // Deep-links to the reader (#5) so the offline assertions are about pack/SW
+   // behavior, not the surface.
    it("serves the reader offline after one online visit", async () => {
       const ctx = await browser.createBrowserContext()
       const page = await ctx.newPage()
       try {
          // Cold load: the SW registers, activates (skipWaiting), and claims control.
-         await page.goto(baseUrl, { waitUntil: "load" })
-         await waitRendered(page)
+         await page.goto(baseUrl + "#5", { waitUntil: "load" })
+         await waitReader(page)
          await page.waitForFunction(() => navigator.serviceWorker?.controller != null, { timeout: 20000 })
 
          // Reload so every shell + pack request now flows through the controlling SW
-         // and is cached. The initial render of the latest article already pulls in
-         // the (single) data pack covering the whole store.
+         // and is cached. The reader at chron 5 pulls in the (single) data pack.
          await page.reload({ waitUntil: "load" })
-         await waitRendered(page)
+         await waitReader(page)
 
          // The pack and shell buckets are populated (asset bucket only fills when a
          // store actually self-hosts images, which these plain-text fixtures don't).
@@ -192,7 +260,7 @@ describe("browser: real SPA over real packs", () => {
          // all resolved offline (any miss would throw in data.init() → popup).
          await page.setOfflineMode(true)
          await page.reload({ waitUntil: "load" })
-         await waitRendered(page)
+         await waitReader(page)
          expect(await $title(page)).toBe("sport title 1")
          expect(await $content(page)).toContain("sport body 1")
          expect(await $popupOpen(page)).toBe(false)
@@ -256,7 +324,7 @@ describe("browser: real SPA over real packs", () => {
       const page = await ctx.newPage()
       try {
          await page.goto(baseUrl, { waitUntil: "load" })
-         await waitRendered(page)
+         await waitBoot(page)
          await page.waitForFunction(() => navigator.serviceWorker?.controller != null, { timeout: 20000 })
 
          // 130 finalized data packs (30 over PACK_KEEP=100), 10 finalized idx
@@ -278,7 +346,7 @@ describe("browser: real SPA over real packs", () => {
          // Reload: db.gz now flows through the SW online → prune runs in
          // waitUntil after the response resolves. Poll until it lands.
          await page.reload({ waitUntil: "load" })
-         await waitRendered(page)
+         await waitBoot(page)
          await page.waitForFunction(
             async () => {
                const packs = await caches.open("srr-packs-v3")
