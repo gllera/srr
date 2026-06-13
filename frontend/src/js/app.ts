@@ -184,7 +184,12 @@ async function init() {
       if (retryFn) retryFn()
    })
    window.addEventListener("click", (e) => {
-      if (!(e.target as HTMLElement).matches(".srr-dropdown-btn")) closeAllDropdowns()
+      // closest(), not matches(): a dropdown button may be clicked on an inner
+      // icon span (e.g. .srr-search-icon), so the event target is the child, not
+      // the button. matches() missed that and closed the menu the button's own
+      // handler had just opened — leaving the search button dead to taps/clicks
+      // (only the `/` shortcut worked; on mobile there is no `/` key).
+      if (!(e.target as HTMLElement).closest(".srr-dropdown-btn")) closeAllDropdowns()
    })
    window.addEventListener("mousedown", (e) => {
       if (el.popup.classList.contains("srr-open") && !el.popup.contains(e.target as Node)) closePopup()
