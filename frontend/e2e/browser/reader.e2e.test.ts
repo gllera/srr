@@ -138,6 +138,30 @@ describe("browser: real SPA over real packs", () => {
       }
    })
 
+   // Regression guard: the search button must open the search menu on click/tap.
+   // The magnifier renders as an inner .srr-search-icon <span> that fills the
+   // button, so a tap's event target is the span, not the button. app.ts's
+   // window-level "click outside closes dropdowns" handler once tested
+   // e.target.matches(".srr-dropdown-btn") — false for the span — so it closed
+   // the menu the button's own handler had just opened. The menu opened then
+   // vanished, leaving the button dead to taps (only the `/` key worked, and
+   // mobile has no `/`). Fixed by switching that handler to .closest().
+   it("opens the search menu when the magnifier button is clicked", async () => {
+      const [page, close] = await open()
+      try {
+         // The hit target at the button's center is the icon span — the exact
+         // path that regressed.
+         expect(await page.$eval(".srr-search .srr-search-icon", (e) => e.tagName)).toBe("SPAN")
+         await page.click(".srr-search")
+         await page.waitForSelector("#srr-search-menu.srr-open", { timeout: 20000 })
+         // It must STAY open: the bug closed it a tick after opening.
+         await new Promise((r) => setTimeout(r, 200))
+         expect(await page.$eval("#srr-search-menu", (e) => e.classList.contains("srr-open"))).toBe(true)
+      } finally {
+         await close()
+      }
+   })
+
    // The service worker (src/sw.ts) makes the reader work fully offline: the shell
    // (navigation + hashed JS/CSS) and the packs (db.gz + latest idx/data, here a
    // single pack) are runtime-cached on the first online visit, then served from
