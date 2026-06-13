@@ -24,7 +24,7 @@ html {
    --text-lg: 1.125rem;
    --text-xl: 1.25rem;
 
-   padding: 1rem 1.5rem;
+   padding: max(1.5rem, env(safe-area-inset-top)) 1.5rem 1rem;
    scrollbar-width: thin;
    overflow-y: scroll;
    overflow-x: hidden;
@@ -83,10 +83,27 @@ video {
 
 /* Header */
 .srr-title-row {
-   padding-bottom: 0.6rem;
-   border-bottom: 1px solid var(--faint);
-   margin-bottom: 1rem;
+   margin-bottom: 1.4rem;
    overflow-wrap: anywhere;
+}
+
+/* Kicker — "source · age" as a quiet uppercase line above the title */
+.srr-kicker {
+   display: flex;
+   align-items: baseline;
+   font-size: 0.72rem;
+   letter-spacing: 0.06em;
+   text-transform: uppercase;
+   color: var(--muted);
+   margin-bottom: 0.55rem;
+}
+.srr-source {
+   min-width: 0;
+   font-weight: 650;
+   color: var(--accent);
+   overflow: hidden;
+   text-overflow: ellipsis;
+   white-space: nowrap;
 }
 
 .srr-title-link {
@@ -98,11 +115,11 @@ video {
 }
 
 .srr-title {
-   display: inline;
-   font-weight: 650;
-   font-size: var(--text-xl);
+   display: block;
+   font-weight: 680;
+   font-size: 1.45rem;
    letter-spacing: -0.022em;
-   line-height: 1.3;
+   line-height: 1.22;
 }
 
 .srr-channel {
@@ -112,15 +129,19 @@ video {
    text-overflow: ellipsis;
    white-space: nowrap;
 }
+.srr-channel.srr-filter-on {
+   color: var(--accent);
+}
 
 .srr-date {
-   font-size: var(--text-sm);
+   font-size: inherit;
    color: var(--muted);
    white-space: nowrap;
+   flex-shrink: 0;
 }
 .srr-date::before {
    content: "·";
-   color: var(--muted);
+   color: var(--faint);
    margin: 0 0.4rem;
 }
 
@@ -131,6 +152,7 @@ video {
    color: var(--muted);
    white-space: nowrap;
    font-variant-numeric: tabular-nums;
+   opacity: 0.55;
 }
 
 /* Content */
@@ -198,7 +220,7 @@ video {
       text-decoration-color: var(--accent);
    }
    & img {
-      border-radius: var(--radius);
+      border-radius: 8px;
    }
    /* media whose resource failed to load (collapseBrokenMedia) — old
       articles outlive their external images; hide the corpses */
@@ -378,9 +400,20 @@ video {
    }
 }
 
-/* Next is the primary nav action — wider target */
+/* Next is the primary nav action — wider target, emphasized as a filled pill */
 .srr-toolbar-right .srr-next {
    min-width: 4.75rem;
+}
+.srr-toolbar-right .srr-next:not(:disabled) {
+   background: var(--accent);
+   border-radius: 999px;
+   & .srr-next-icon {
+      border-color: var(--bg);
+   }
+   &:hover {
+      background: var(--accent);
+      opacity: 0.85;
+   }
 }
 
 /* Nav arrows — chevron right */
@@ -421,13 +454,6 @@ video {
 /* Dropdown */
 .srr-dropdown {
    position: relative;
-}
-
-.srr-channel > span {
-   pointer-events: none;
-}
-.srr-channel .srr-filter-on {
-   color: var(--accent);
 }
 
 .srr-dropdown-menu {
@@ -774,7 +800,7 @@ video {
 /* Mobile */
 @media (max-width: 500px) {
    html {
-      padding: 0.5rem 0.75rem;
+      padding: max(1.25rem, env(safe-area-inset-top)) 0.75rem 0.5rem;
    }
    .srr-toolbar-right .srr-prev {
       display: none;

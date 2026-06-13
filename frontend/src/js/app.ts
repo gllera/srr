@@ -12,6 +12,7 @@ const el = {
    prev: document.querySelector(".srr-prev") as HTMLButtonElement,
    next: document.querySelector(".srr-next") as HTMLButtonElement,
    channel: document.querySelector(".srr-channel") as HTMLButtonElement,
+   source: document.querySelector(".srr-source") as HTMLElement,
    date: document.querySelector(".srr-date") as HTMLElement,
    counter: document.querySelector(".srr-counter") as HTMLButtonElement,
    search: document.querySelector(".srr-search") as HTMLButtonElement,
@@ -25,7 +26,7 @@ let busy = false
 let retryFn: (() => void) | null = null
 let currentPublished = 0
 let currentChannel = { id: 0, title: "", tag: "" }
-let lastChannelLabel = ""
+let lastChannelLabel: string | null = null
 let previousFocus: HTMLElement | null = null
 
 function showError(e: unknown, retry?: () => void) {
@@ -79,12 +80,16 @@ function render(o: IShowFeed) {
    currentPublished = o.article.p ?? 0
    el.date.textContent = currentPublished ? timeAgo(currentPublished) : ""
    el.date.title = currentPublished ? formatDate(currentPublished) : ""
+   // Hide the date (and its leading "·" separator) in the kicker when undated,
+   // so the source name doesn't trail a dangling middot.
+   el.date.hidden = !currentPublished
 
    currentChannel = {
       id: o.channel?.id ?? 0,
       title: data.channelTitle(o.article.s),
       tag: o.channel?.tag || "",
    }
+   el.source.textContent = currentChannel.title
    refreshChannelLabel()
    el.counter.textContent = String(o.countRight)
 
@@ -108,37 +113,17 @@ function render(o: IShowFeed) {
 }
 
 function refreshChannelLabel() {
-   const tagFiltered = nav.isSingleFilter(currentChannel.tag)
-   const chanFiltered = nav.isSingleFilter(String(currentChannel.id))
-
-   const key = `${currentChannel.tag}|${currentChannel.title}|${tagFiltered}|${chanFiltered}`
+   // The article's source now lives in the header kicker, so the toolbar button
+   // is a pure active-filter indicator: "All", a tag name, or a single channel.
+   const key = nav.getCurrentFilterKey() // "" (all/multi) | tag name | numeric channel id
    if (key === lastChannelLabel) return
    lastChannelLabel = key
 
-   const parts: HTMLSpanElement[] = []
-   const aria: string[] = []
-   const push = (text: string, on: boolean, label: string) => {
-      const s = document.createElement("span")
-      s.textContent = text
-      if (on) s.className = "srr-filter-on"
-      parts.push(s)
-      aria.push(label)
-   }
-
-   if (currentChannel.tag) {
-      const tag = currentChannel.tag
-      push((tag[0] + tag[tag.length - 1]).toUpperCase(), tagFiltered, `tag ${tag}${tagFiltered ? " active" : ""}`)
-   }
-   push(currentChannel.title, chanFiltered, `channel ${currentChannel.title}${chanFiltered ? " active" : ""}`)
-
-   const children: (HTMLSpanElement | string)[] = []
-   parts.forEach((p, i) => {
-      if (i > 0) children.push(" · ")
-      children.push(p)
-   })
-   el.channel.replaceChildren(...children)
-   el.channel.title = currentChannel.tag ? `Tag: ${currentChannel.tag}` : ""
-   el.channel.setAttribute("aria-label", `Filter: ${aria.join(", ")}`)
+   const label = key === "" ? "All" : /^\d+$/.test(key) ? data.channelTitle(Number(key)) : key
+   el.channel.textContent = label
+   el.channel.classList.toggle("srr-filter-on", key !== "")
+   el.channel.title = key === "" ? "All channels" : `Filtered: ${label}`
+   el.channel.setAttribute("aria-label", `Filter: ${label}`)
 }
 
 const KEY_ACTIONS: Record<string, () => void> = {
