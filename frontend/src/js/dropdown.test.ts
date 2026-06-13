@@ -19,8 +19,16 @@ const nav = vi.hoisted(() => ({
    last: vi.fn(),
    goTo: vi.fn(),
    switchFilter: vi.fn(),
-   unreadCount: vi.fn<(ch: IChannel) => Promise<number>>(async () => -1),
-   tagUnreadCount: vi.fn<(tag: string, group: IChannel[]) => Promise<number>>(async () => -1),
+   unreadCounts: vi.fn<(chs: IChannel[]) => Promise<Map<number, number>>>(async () => new Map()),
+   // Synchronous, derived from the already-computed counts map: a member count
+   // ≥0 contributes it; a never-seen member (-1) contributes 0 in the mock
+   // (the real impl substitutes full history). Tests that pin the badge value
+   // override this implementation.
+   tagUnreadFromCounts: vi.fn<(group: IChannel[], counts: Map<number, number>) => number>((group, counts) =>
+      group.reduce((sum, ch) => sum + Math.max(0, counts.get(ch.id) ?? 0), 0),
+   ),
+   isUnreadOnly: vi.fn(() => false),
+   setUnreadOnly: vi.fn<(on: boolean) => void>(),
    peek: vi.fn<(span?: number) => Promise<IPeekItem[]>>(async () => []),
    filter: { active: false, matches: vi.fn(() => true) },
 }))
@@ -145,6 +153,20 @@ describe("dropdown: image-proxy inline editor", () => {
       expect($input()).toBeNull()
       expect($icon()).not.toBeNull()
    })
+
+   // R3-3: an Enter commit keeps the menu open, so rebuild() detaches the
+   // focused control and the gated render() won't refocus the title — focus
+   // would fall to <body>. The keyboard path must hand focus to the rebuilt
+   // chip (mirrors the eye-toggle), not strand it.
+   it("refocuses the img-proxy chip after an Enter commit (not <body>)", () => {
+      openEditor()
+      const input = $input()!
+      input.value = "https://new.example/?url="
+      key(input, "Enter")
+      expect($icon()).not.toBeNull() // chip row rebuilt, menu still open
+      expect(document.activeElement).toBe($icon())
+      expect(document.activeElement).not.toBe(document.body)
+   })
 })
 
 const $dateIcon = () => $menu().querySelector<HTMLAnchorElement>('a[data-value="__date__"]')
@@ -221,6 +243,57 @@ describe("dropdown: date jump", () => {
    })
 })
 
+// The inline-editor icons live in the channel menu, so a real bubbling click on
+// them reaches app.ts's window-level "any click closes dropdowns" handler. These
+// guard the regression where that handler shut the menu the instant the editor
+// opened (the per-icon .click() tests above never see the window handler).
+describe("dropdown: inline editors survive the window close handler", () => {
+   let dropdown: Dropdown
+   let closeHandler: (e: Event) => void
+
+   beforeEach(async () => {
+      document.body.innerHTML = SKELETON
+      localStorage.clear()
+      data.db.first_fetched = 0
+      vi.resetModules()
+      dropdown = await import("./dropdown")
+      // Mirror app.ts:180-182 exactly.
+      closeHandler = (e) => {
+         if (!(e.target as HTMLElement).matches(".srr-dropdown-btn")) dropdown.closeAllDropdowns()
+      }
+      window.addEventListener("click", closeHandler)
+   })
+   afterEach(() => window.removeEventListener("click", closeHandler))
+
+   // The svg inside the chip is the real click target a mouse would hit.
+   const clickIcon = (value: string): void => {
+      const icon = $menu().querySelector<HTMLAnchorElement>(`a[data-value="${value}"]`)!
+      const target = (icon.querySelector("svg") ?? icon) as HTMLElement
+      target.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }))
+   }
+
+   it("calendar icon opens the date editor and keeps the menu open", () => {
+      dropdown.showChannelMenu("", vi.fn())
+      clickIcon("__date__")
+      expect($menu().classList.contains("srr-open")).toBe(true)
+      expect($menu().querySelector(".srr-date-input")).not.toBeNull()
+   })
+
+   it("image-proxy icon opens its editor and keeps the menu open", () => {
+      dropdown.showChannelMenu("", vi.fn())
+      clickIcon("__imgproxy__")
+      expect($menu().classList.contains("srr-open")).toBe(true)
+      expect($menu().querySelector(".srr-imgproxy-input")).not.toBeNull()
+   })
+
+   it("a navigation chip still closes the menu via the window handler", () => {
+      dropdown.showChannelMenu("", vi.fn())
+      const chip = $menu().querySelector<HTMLAnchorElement>('a[data-value="t:28800"]')!
+      chip.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }))
+      expect($menu().classList.contains("srr-open")).toBe(false)
+   })
+})
+
 describe("dropdown: feed-error badges", () => {
    let dropdown: Dropdown
    let guard: ReturnType<typeof vi.fn>
@@ -268,23 +341,29 @@ describe("dropdown: unread badges", () => {
    let guard: ReturnType<typeof vi.fn>
 
    const $badge = (value: string) => $menu().querySelector(`a[data-value="${value}"] .srr-unread`)
+   // Drive the batched nav.unreadCounts from a per-channel count function.
+   const counts = (by: (id: number) => number) =>
+      nav.unreadCounts.mockImplementation(async (chs) => new Map(chs.map((ch) => [ch.id, by(ch.id)])))
 
    beforeEach(async () => {
       document.body.innerHTML = SKELETON
       localStorage.clear()
       guard = vi.fn()
-      nav.unreadCount.mockClear()
-      nav.tagUnreadCount.mockClear()
+      nav.unreadCounts.mockClear()
+      nav.tagUnreadFromCounts.mockClear()
       vi.resetModules()
       dropdown = await import("./dropdown")
    })
 
    afterEach(() => {
-      nav.unreadCount.mockImplementation(async () => -1)
-      nav.tagUnreadCount.mockImplementation(async () => -1)
+      nav.unreadCounts.mockImplementation(async () => new Map())
+      nav.tagUnreadFromCounts.mockImplementation((group, counts) =>
+         group.reduce((sum, ch) => sum + Math.max(0, counts.get(ch.id) ?? 0), 0),
+      )
+      nav.isUnreadOnly.mockReturnValue(false)
    })
 
-   it("badges channels async and shows the tag's own unread on the header, hiding unknown and zero", async () => {
+   it("badges rows from unreadCounts and the tag header from tagUnreadFromCounts, hiding unknown and zero", async () => {
       const a = chan({ id: 3, title: "A" })
       const b = chan({ id: 4, title: "B" })
       const c = chan({ id: 5, title: "C" })
@@ -293,10 +372,11 @@ describe("dropdown: unread badges", () => {
          sortedTags: ["news"],
          untagged: [c],
       })
-      nav.unreadCount.mockImplementation(async (ch) => (ch.id === 3 ? 5 : ch.id === 4 ? -1 : 0))
-      // The header badge is nav.tagUnreadCount (right of the tag's furthest-read
-      // channel), not the arithmetic sum of the child rows.
-      nav.tagUnreadCount.mockImplementation(async (tag) => (tag === "news" ? 7 : -1))
+      counts((id) => (id === 3 ? 5 : id === 4 ? -1 : 0))
+      // The header badge is nav.tagUnreadFromCounts (never-seen members counted
+      // as fully unread), derived synchronously from the same counts map — not
+      // a second await pass, and not the arithmetic sum of the child rows.
+      nav.tagUnreadFromCounts.mockReturnValue(7)
       dropdown.showChannelMenu("", guard)
       await vi.waitFor(() => expect($badge("3")).not.toBeNull())
       expect($badge("3")!.textContent).toBe("5")
@@ -304,23 +384,120 @@ describe("dropdown: unread badges", () => {
       expect($badge("5")).toBeNull() // fully read → no badge
       const headerBadge = $badge("news")!
       expect(headerBadge.textContent).toBe("7") // the tag's own count, not 5 + (−1)
-      expect(nav.tagUnreadCount).toHaveBeenCalledWith("news", [a, b])
+      // Derived from the group + the same counts map already in hand — no
+      // re-scan of the idx packs.
+      const counts34 = nav.unreadCounts.mock.results[0].value
+      expect(nav.tagUnreadFromCounts).toHaveBeenCalledWith([a, b], await counts34)
       // sits before the collapse toggle, not after the chevron
       expect(headerBadge.nextElementSibling?.className).toBe("srr-tag-toggle")
    })
 
-   it("hides the tag header badge when the tag is unknown (-1)", async () => {
+   it("hides the tag header badge when tagUnreadFromCounts is zero", async () => {
       const a = chan({ id: 3, title: "A" })
+      const b = chan({ id: 4, title: "B" })
       data.groupChannelsByTag.mockReturnValueOnce({
-         tagged: new Map([["news", [a]]]),
+         tagged: new Map([["news", [a, b]]]),
          sortedTags: ["news"],
          untagged: [],
       })
-      nav.unreadCount.mockImplementation(async () => -1)
-      nav.tagUnreadCount.mockImplementation(async () => -1)
+      counts((id) => (id === 3 ? -1 : 0))
+      nav.tagUnreadFromCounts.mockReturnValue(0) // nothing unseen
       dropdown.showChannelMenu("", guard)
       await new Promise((r) => setTimeout(r))
       expect($badge("news")).toBeNull()
+   })
+
+   it("hides fully-read rows and tags when unseen-only is on, keeping unread and never-seen", async () => {
+      nav.isUnreadOnly.mockReturnValue(true)
+      const a = chan({ id: 3, title: "A" }) // unread > 0 → shown
+      const b = chan({ id: 4, title: "B" }) // never seen (-1) → shown
+      const old = chan({ id: 7, title: "Old" }) // fully read → tag hidden
+      const c = chan({ id: 5, title: "C" }) // untagged, read → hidden
+      const d = chan({ id: 6, title: "D" }) // untagged, unread → shown
+      data.groupChannelsByTag.mockReturnValueOnce({
+         tagged: new Map([
+            ["archive", [old]],
+            ["news", [a, b]],
+         ]),
+         sortedTags: ["archive", "news"],
+         untagged: [c, d],
+      })
+      counts((id) => (id === 3 ? 4 : id === 4 ? -1 : id === 6 ? 2 : 0))
+      dropdown.showChannelMenu("", guard)
+      await vi.waitFor(() => expect($badge("3")).not.toBeNull())
+      const row = (v: string) => $menu().querySelector(`a[data-value="${v}"]`)!
+      const groupHidden = (v: string) => row(v).closest(".srr-tag-group")!.classList.contains("srr-hidden")
+      const hidden = (v: string) => row(v).classList.contains("srr-hidden")
+      expect(hidden("3")).toBe(false) // unread
+      expect(hidden("4")).toBe(false) // never seen → has unseen content
+      expect(hidden("5")).toBe(true) // fully read untagged
+      expect(hidden("6")).toBe(false) // unread untagged
+      expect(groupHidden("3")).toBe(false) // news has unread + never-seen
+      expect(groupHidden("7")).toBe(true) // archive: only member fully read
+   })
+
+   // R3-4: with unseen-only on, the CURRENTLY-APPLIED tag/channel must never
+   // self-hide even when read down to 0 unseen this session — else it loses its
+   // .srr-active styling and becomes keyboard-unreachable while you're on it.
+   // The toolbar counter uses a frozen snapshot, so it stays visible regardless.
+   it("does not hide the active tag's group when fully read, but hides a different fully-read tag", async () => {
+      nav.isUnreadOnly.mockReturnValue(true)
+      nav.getCurrentFilterKey.mockReturnValue("news") // the active filter is the news tag
+      try {
+         const a = chan({ id: 3, title: "A" }) // active tag member, fully read
+         const b = chan({ id: 4, title: "B" }) // active tag member, fully read
+         const old = chan({ id: 7, title: "Old" }) // inactive tag, fully read → hidden
+         data.groupChannelsByTag.mockReturnValueOnce({
+            tagged: new Map([
+               ["archive", [old]],
+               ["news", [a, b]],
+            ]),
+            sortedTags: ["archive", "news"],
+            untagged: [],
+         })
+         counts(() => 0) // every channel fully read
+         dropdown.showChannelMenu("news", guard)
+         await new Promise((r) => setTimeout(r))
+         const row = (v: string) => $menu().querySelector(`a[data-value="${v}"]`)!
+         const groupHidden = (v: string) => row(v).closest(".srr-tag-group")!.classList.contains("srr-hidden")
+         expect(groupHidden("3")).toBe(false) // active tag stays put despite all-read
+         expect(groupHidden("7")).toBe(true) // a different fully-read tag is hidden
+      } finally {
+         nav.getCurrentFilterKey.mockReturnValue("")
+      }
+   })
+
+   // R3-4: the active CHANNEL row is exempt from hiding the same way.
+   it("does not hide the active channel row when fully read", async () => {
+      nav.isUnreadOnly.mockReturnValue(true)
+      nav.getCurrentFilterKey.mockReturnValue("5") // the active filter is channel id 5
+      try {
+         data.groupChannelsByTag.mockReturnValueOnce({
+            tagged: new Map(),
+            sortedTags: [],
+            untagged: [chan({ id: 5, title: "Active" }), chan({ id: 6, title: "Other" })],
+         })
+         counts(() => 0) // both fully read
+         dropdown.showChannelMenu("", guard)
+         await new Promise((r) => setTimeout(r))
+         const hidden = (v: string) => $menu().querySelector(`a[data-value="${v}"]`)!.classList.contains("srr-hidden")
+         expect(hidden("5")).toBe(false) // active channel stays put
+         expect(hidden("6")).toBe(true) // an inactive fully-read channel is hidden
+      } finally {
+         nav.getCurrentFilterKey.mockReturnValue("")
+      }
+   })
+
+   it("hides nothing when unseen-only is off", async () => {
+      data.groupChannelsByTag.mockReturnValueOnce({
+         tagged: new Map(),
+         sortedTags: [],
+         untagged: [chan({ id: 5, title: "Read" })],
+      })
+      counts(() => 0) // fully read
+      dropdown.showChannelMenu("", guard)
+      await new Promise((r) => setTimeout(r))
+      expect($menu().querySelector('a[data-value="5"]')!.classList.contains("srr-hidden")).toBe(false)
    })
 
    it("caps the displayed count at 999+", async () => {
@@ -329,15 +506,15 @@ describe("dropdown: unread badges", () => {
          sortedTags: [],
          untagged: [chan({ id: 6, title: "Busy" })],
       })
-      nav.unreadCount.mockImplementation(async () => 1500)
+      counts(() => 1500)
       dropdown.showChannelMenu("", guard)
       await vi.waitFor(() => expect($badge("6")).not.toBeNull())
       expect($badge("6")!.textContent).toBe("999+")
    })
 
    it("a fill that resolves after the menu closed never touches the DOM", async () => {
-      let release!: (n: number) => void
-      nav.unreadCount.mockImplementation(() => new Promise<number>((r) => (release = r)))
+      let release!: (m: Map<number, number>) => void
+      nav.unreadCounts.mockImplementation(() => new Promise<Map<number, number>>((r) => (release = r)))
       data.groupChannelsByTag.mockReturnValueOnce({
          tagged: new Map(),
          sortedTags: [],
@@ -345,9 +522,158 @@ describe("dropdown: unread badges", () => {
       })
       dropdown.showChannelMenu("", guard)
       dropdown.closeAllDropdowns()
-      release(9)
+      release(new Map([[7, 9]]))
       await new Promise((r) => setTimeout(r))
       expect($menu().querySelector(".srr-unread")).toBeNull()
+   })
+})
+
+describe("dropdown: unseen-only chip", () => {
+   let dropdown: Dropdown
+   let guard: ReturnType<typeof vi.fn>
+   const $chip = () => $menu().querySelector<HTMLAnchorElement>('a[data-value="__unread__"]')
+
+   beforeEach(async () => {
+      document.body.innerHTML = SKELETON
+      localStorage.clear()
+      guard = vi.fn((fn) => fn())
+      nav.isUnreadOnly.mockReset().mockReturnValue(false)
+      nav.setUnreadOnly.mockReset()
+      nav.fromHash.mockClear()
+      nav.switchFilter.mockReset()
+      nav.getCurrentFilterKey.mockReturnValue("")
+      vi.resetModules()
+      dropdown = await import("./dropdown")
+   })
+
+   afterEach(() => {
+      nav.isUnreadOnly.mockReturnValue(false)
+      nav.getCurrentFilterKey.mockReturnValue("")
+      dropdown.closeAllDropdowns()
+   })
+
+   it("renders the chip off by default and on when enabled", () => {
+      dropdown.showChannelMenu("", guard)
+      expect($chip()!.className).toContain("srr-unread-off")
+      dropdown.closeAllDropdowns()
+      nav.isUnreadOnly.mockReturnValue(true)
+      dropdown.showChannelMenu("", guard)
+      expect($chip()!.className).toContain("srr-unread-on")
+   })
+
+   it("toggles the mode and replays the raw hash for a non-tag filter, keeping the menu open", () => {
+      dropdown.showChannelMenu("", guard) // [ALL] → getCurrentFilterKey "" → fromHash
+      $chip()!.click()
+      expect(nav.setUnreadOnly).toHaveBeenCalledWith(true)
+      expect(nav.fromHash).toHaveBeenCalled()
+      expect(nav.switchFilter).not.toHaveBeenCalled()
+      expect($menu().classList.contains("srr-open")).toBe(true)
+   })
+
+   it("re-resolves via switchFilter (oldest unseen) when the current filter is a single tag", () => {
+      nav.getCurrentFilterKey.mockReturnValue("news") // a tag: non-numeric, non-empty
+      dropdown.showChannelMenu("", guard)
+      $chip()!.click()
+      expect(nav.setUnreadOnly).toHaveBeenCalledWith(true)
+      expect(nav.switchFilter).toHaveBeenCalledWith("news")
+      expect(nav.fromHash).not.toHaveBeenCalled()
+   })
+
+   it("uses fromHash, not switchFilter, for a single-channel (numeric) filter", () => {
+      nav.getCurrentFilterKey.mockReturnValue("42") // a channel id, not a tag
+      dropdown.showChannelMenu("", guard)
+      $chip()!.click()
+      expect(nav.fromHash).toHaveBeenCalled()
+      expect(nav.switchFilter).not.toHaveBeenCalled()
+   })
+
+   // BUG-3: the flip + re-apply must be atomic inside the guard, so a busy guard
+   // (a nav already in flight, or a rapid double-click) drops the WHOLE toggle —
+   // the chip never gets ahead of the applied nav state.
+   it("a busy/dropped guard leaves the chip and mode untouched (no divergence)", () => {
+      const busyGuard = vi.fn() // mimics app.ts guard returning early while busy
+      dropdown.showChannelMenu("", busyGuard)
+      expect($chip()!.className).toContain("srr-unread-off")
+      $chip()!.click()
+      expect(nav.setUnreadOnly).not.toHaveBeenCalled() // flip never ran
+      expect($chip()!.className).toContain("srr-unread-off") // chip stayed off
+      expect($menu().classList.contains("srr-open")).toBe(true)
+   })
+
+   // FIX D: the target mode is captured ONCE outside the guarded fn. guard's
+   // error path re-invokes the SAME fn on Retry; if the fn read the live
+   // !isUnreadOnly() it would flip BACK the already-applied toggle. Here the
+   // nav re-apply rejects, then Retry runs the same fn again — setUnreadOnly
+   // must get the SAME captured `want` both times, never toggled back.
+   it("a rejected nav re-apply then Retry re-applies the SAME mode (idempotent)", async () => {
+      // Faithfully simulate the real flip: setUnreadOnly drives isUnreadOnly, so
+      // a buggy live `!isUnreadOnly()` read inside the fn would compute the
+      // opposite on the retry and expose itself.
+      let mode = false
+      nav.isUnreadOnly.mockImplementation(() => mode)
+      nav.setUnreadOnly.mockImplementation((on: boolean) => {
+         mode = on
+      })
+      // The nav re-apply rejects once (cold-pack fetch fails), succeeds on Retry.
+      nav.switchFilter.mockRejectedValueOnce(new Error("cold pack")).mockResolvedValueOnce({} as IShowFeed)
+      nav.getCurrentFilterKey.mockReturnValue("news") // a tag → switchFilter route
+
+      // A guard that mirrors app.ts: runs fn; on rejection it captures a Retry
+      // that re-invokes the SAME fn (the closure app.ts hands showError).
+      let retry: (() => void) | undefined
+      const retryGuard = vi.fn((fn: () => Promise<IShowFeed>) => {
+         const run = () => fn().catch(() => (retry = run))
+         void run()
+      })
+
+      dropdown.showChannelMenu("", retryGuard)
+      $chip()!.click() // first attempt → switchFilter rejects → retry armed
+      await new Promise((r) => setTimeout(r))
+      expect(nav.setUnreadOnly).toHaveBeenNthCalledWith(1, true)
+
+      retry!() // user clicks Retry → same fn re-runs
+      await new Promise((r) => setTimeout(r))
+      // The captured `want` (true) is re-applied — NOT flipped back to false.
+      expect(nav.setUnreadOnly).toHaveBeenNthCalledWith(2, true)
+      expect(nav.switchFilter).toHaveBeenCalledTimes(2)
+      expect(nav.switchFilter).toHaveBeenNthCalledWith(2, "news")
+   })
+
+   // BUG-5: Space-activating the chip detaches it on rebuild; focus must return
+   // to the freshly-built chip (else the next Arrow restarts from the first row).
+   // The roving handler activates via a synthetic .click() (detail === 0).
+   it("restores focus to the eye chip after a keyboard (Space) toggle", () => {
+      dropdown.showChannelMenu("", guard)
+      $chip()!.focus()
+      key($chip()!, " ")
+      expect(nav.setUnreadOnly).toHaveBeenCalledWith(true)
+      // A new chip was built by rebuild(); focus landed back on it.
+      expect(document.activeElement).toBe($chip())
+   })
+
+   // FIX E: a keyboard activation carries detail === 0 (Space → synthetic
+   // .click()); even with the chip focused (as it is after BUG-5's refocus or
+   // FIX A keeping it focused), it refocuses the rebuilt chip.
+   it("refocuses the rebuilt chip on a detail:0 (keyboard) activation", () => {
+      dropdown.showChannelMenu("", guard)
+      $chip()!.focus()
+      $chip()!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, detail: 0 }))
+      expect(nav.setUnreadOnly).toHaveBeenCalledWith(true)
+      expect(document.activeElement).toBe($chip())
+   })
+
+   // FIX E: a real mouse click carries detail >= 1. Even though the browser
+   // focuses the <a> chip on mousedown (so activeElement IS the chip at click
+   // time), the handler must NOT treat it as keyboard, so it never refocuses
+   // the rebuilt chip: the old chip detaches on rebuild and focus is not moved
+   // back to the new one.
+   it("does not refocus the chip on a detail:1 (real mouse) click", () => {
+      dropdown.showChannelMenu("", guard)
+      $chip()!.focus() // mimic the browser focusing the chip on mousedown
+      $chip()!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, detail: 1 }))
+      expect(nav.setUnreadOnly).toHaveBeenCalledWith(true)
+      // No keyboard refocus: the freshly-rebuilt chip did NOT receive focus.
+      expect(document.activeElement).not.toBe($chip())
    })
 })
 

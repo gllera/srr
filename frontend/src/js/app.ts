@@ -90,7 +90,13 @@ function render(o: IShowFeed) {
 
    document.title = "SRR - " + (o.article.t ?? "")
    window.scrollTo(0, 0)
-   el.title.focus()
+   // Don't steal focus to the title while a dropdown menu is open — the only
+   // render() with a menu still open is the unseen-only eye-chip toggle, which
+   // keeps the menu open and restores focus to the chip. Stealing it here would
+   // strand the keyboard user behind the open menu (next Arrow finds
+   // activeElement outside the menu items). Every navigation selection closes
+   // the menu before its render(), so this is a no-op on all other paths.
+   if (!document.querySelector(".srr-dropdown-menu.srr-open")) el.title.focus()
 
    // Double rAF: first ensures the browser has painted with opacity:0,
    // second re-enables transitions so the fade-in animates

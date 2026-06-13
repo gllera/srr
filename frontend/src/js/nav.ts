@@ -4,10 +4,50 @@ import { extractImageUrls, getImgProxy, imgProxy } from "./fmt"
 let pos = -1
 const next: { left?: Promise<number>; right?: Promise<number> } = {}
 
+// Unseen-only navigation, tags only: when on, a single-tag filter skips
+// articles already seen (per the snapshotted seen positions of its members), so
+// you glide past channels you're caught up on. A device-local preference, not
+// part of the shareable #pos!tokens hash. See filter.set / showFeed /
+// unreadTally and dropdown.ts's chip.
+const UNREAD_ONLY_KEY = "srr-unread-only"
+let unreadOnly = ((): boolean => {
+   try {
+      return localStorage.getItem(UNREAD_ONLY_KEY) === "1"
+   } catch {
+      return false
+   }
+})()
+export function isUnreadOnly(): boolean {
+   return unreadOnly
+}
+export function setUnreadOnly(on: boolean) {
+   unreadOnly = on
+   try {
+      if (on) localStorage.setItem(UNREAD_ONLY_KEY, "1")
+      else localStorage.removeItem(UNREAD_ONLY_KEY)
+   } catch {}
+}
+
+// A snapshotted tag member: its true add_idx, its seen position at snapshot
+// time (-1 = never seen on this device), the position-invariant total of its
+// articles (`all`, the member's full countAll — cached because it's
+// pos-invariant and recomputing it in unreadTally doubled the latest-pack
+// scans per nav step), and its position-invariant unread contribution
+// (computed once in filter.set: a never-seen member counts as fully unread,
+// since unseen-only navigates its whole history). `all`/`unread` are -1 until
+// memberUnread populates them (memberUnread always runs before either is read).
+type UnreadMember = { id: number; addIdx: number; seen: number; all: number; unread: number }
+
 export const filter = {
    channels: new Map<number, number>(),
    chanTotal: 0,
    tokens: [] as string[],
+   // Non-null only in unseen-only tag mode: the tag's members with their true
+   // add_idx, a snapshot of each one's seen position, and the position-invariant
+   // unread contribution (max(0, all − read)) precomputed once at set() time, for
+   // the unread counter (showFeed/unreadTally). `channels` then holds raised
+   // bounds for nav.
+   unreadMembers: null as UnreadMember[] | null,
    get active() {
       return this.tokens.length > 0
    },
@@ -21,6 +61,7 @@ export const filter = {
    // filter object never waits on a pack fetch.
    clear() {
       this.channels = new Map<number, number>()
+      this.unreadMembers = null
       for (const ch of Object.values(data.db.channels)) if (ch.total_art) this.channels.set(ch.id, ch.add_idx ?? 0)
       this.chanTotal = data.countAll(this.channels)
       this.tokens = []
@@ -28,6 +69,14 @@ export const filter = {
    set(tokens: string[]) {
       this.tokens = tokens
       this.channels = new Map<number, number>()
+      this.unreadMembers = null
+      // Unseen-only applies to a single-tag filter only. Resolve the tag's
+      // members so we can both raise their nav bounds and tally unread.
+      const tagToken = tokens.length === 1 && !Number.isFinite(Number(tokens[0])) ? tokens[0] : null
+      // One localStorage read for the whole member loop (OPT-2): getSeen per
+      // member would re-parse the seen map M times.
+      const seenMap = readSeen()
+      const members: UnreadMember[] = []
       for (const token of tokens) {
          const num = Number(token)
          if (Number.isFinite(num)) {
@@ -35,20 +84,124 @@ export const filter = {
             if (ch?.total_art && !this.channels.has(num)) this.channels.set(num, ch.add_idx ?? 0)
          } else
             for (const ch of Object.values(data.db.channels))
-               if (ch.tag === token && ch.total_art && !this.channels.has(ch.id))
-                  this.channels.set(ch.id, ch.add_idx ?? 0)
+               if (ch.tag === token && ch.total_art && !this.channels.has(ch.id)) {
+                  const addIdx = ch.add_idx ?? 0
+                  this.channels.set(ch.id, addIdx)
+                  members.push({ id: ch.id, addIdx, seen: seenMap["chan:" + ch.id] ?? -1, all: -1, unread: -1 })
+               }
       }
-      if (this.channels.size === 0) this.clear()
-      else this.chanTotal = data.countAll(this.channels)
+      if (this.channels.size === 0) {
+         this.clear()
+         return
+      }
+      if (unreadOnly && tagToken !== null) {
+         // Raise each member's lower bound past its (snapshotted) seen position
+         // so already-read articles fall below it — findLeft/findRight, matches,
+         // peek and search all skip them. Snapshot rather than live getSeen so
+         // the nav set and the counter stay consistent as you read this session.
+         for (const m of members) this.channels.set(m.id, Math.max(m.addIdx, m.seen + 1))
+         this.unreadMembers = members
+         // chanTotal is unused in unread mode (showFeed tallies via unreadMembers);
+         // leave it 0 so a stale value from a prior filter can't leak through.
+         this.chanTotal = 0
+      } else {
+         this.chanTotal = data.countAll(this.channels)
+      }
    },
 }
 
+// One member's genuine unread given an already-parsed seen map: its articles
+// strictly after the channel's seen position. Returns -1 when never seen on
+// this device ("unknown", not "zero" — a fresh localStorage must not badge a
+// channel with its full history). Both sides come from the same idx counting
+// (countAll − countLeft) so db.gz total_art drift can't skew it, and the
+// boundary pack is the resident latest pack whenever seen is recent (zero
+// fetches in the common case). Shared by unreadCount/unreadCounts.
+async function chanUnread(ch: IChannel, seenMap: Record<string, number>): Promise<number> {
+   const seenIdx = seenMap["chan:" + ch.id]
+   if (seenIdx === undefined) return -1
+   const map = new Map([[ch.id, ch.add_idx ?? 0]])
+   const upTo = Math.min(seenIdx + 1, data.db.total_art)
+   return Math.max(0, data.countAll(map) - (await data.countLeft(upTo, map)))
+}
+
+// The position-invariant unread of one member (max(0, all − read)). Depends only
+// on the snapshot, never on pos, so unreadTally computes it once per member and
+// caches it on the entry (m.unread === -1 means uncomputed). The member's total
+// `all` (countAll, also pos-invariant) is cached alongside so unreadTally's
+// `right` term doesn't rescan the latest pack for the same single-channel map.
+// A never-seen member (seen < 0) counts as fully unread: unseen-only navigates
+// its whole history.
+async function memberUnread(m: UnreadMember): Promise<number> {
+   if (m.unread >= 0) return m.unread
+   const map = new Map([[m.id, m.addIdx]])
+   m.all = data.countAll(map)
+   // seen < 0 (unseen on this device): nothing read, skip the fetch → all unread.
+   const read = m.seen < 0 ? 0 : await data.countLeft(Math.min(m.seen + 1, data.db.total_art), map)
+   return (m.unread = Math.max(0, m.all - read))
+}
+
+// Unread tallies for a tag's snapshotted members: the tag's total unread (the
+// position-invariant part, summed once and cached per member — OPT-1) and the
+// part strictly right of `at` (the only pos-dependent term, one countLeft per
+// member, run concurrently so cold packs don't serialize). countLeft's
+// cumulative-header shortcut is only exact for true add_idx bounds, which is why
+// this counts per member instead of over filter.channels' raised bounds.
+async function unreadTally(at: number, members: UnreadMember[]): Promise<{ total: number; right: number }> {
+   const perMember = await Promise.all(
+      members.map(async (m) => {
+         // memberUnread populates m.all (pos-invariant countAll) before we read
+         // it, so the `right` term reuses it instead of a second countAll scan.
+         const unread = await memberUnread(m)
+         const map = new Map([[m.id, m.addIdx]])
+         const rightEnd = Math.min(Math.max(at, m.seen) + 1, data.db.total_art)
+         const right = Math.max(0, m.all - (await data.countLeft(rightEnd, map)))
+         return { unread, right }
+      }),
+   )
+   let total = 0
+   let right = 0
+   for (const p of perMember) {
+      total += p.unread
+      right += p.right
+   }
+   return { total, right }
+}
+
 async function showFeed(article: IArticle): Promise<IShowFeed> {
-   // resolve() awaited loadArticle(pos) first, so the pos idx pack is
-   // resident and this countLeft never fetches.
-   const filteredLeft = await data.countLeft(pos, filter.channels)
    const matchesPos = filter.matches(article.s, pos) ? 1 : 0
-   const countRight = filter.chanTotal - filteredLeft - matchesPos
+   let filteredLeft: number
+   let countRight: number
+   if (filter.unreadMembers) {
+      // Unseen-only tag mode: count only unread. `right` is the unread strictly
+      // to the right; left is the remainder of the tag's total unread (mirrors
+      // the all-mode identity countRight = chanTotal − left − pos).
+      try {
+         const { total, right } = await unreadTally(pos, filter.unreadMembers)
+         countRight = right
+         filteredLeft = total - right - matchesPos
+      } catch {
+         // A per-member countLeft keys on a snapshotted SEEN position that can
+         // live in a cold finalized idx pack; if that fetch rejects (offline /
+         // evicted / blip) the rejection would propagate up and replace the
+         // ALREADY-LOADED article with the error popup while pos is advanced.
+         // The article already loaded, so degrade to an approximate raised-bounds
+         // count that provably never fetches: countAll is sync (resident latest
+         // pack), and countLeft(pos) hits the resident pos pack (resolve awaited
+         // loadArticle(pos) before showFeed) and reads finalized packs only via
+         // cumulative headers — the same no-fetch guarantee the non-unread
+         // branch below relies on. It counts over raised bounds with countLeft's
+         // cumulative-header shortcut so it may differ slightly from exact
+         // unread, which is acceptable for a non-blocking has_left/has_right.
+         filteredLeft = await data.countLeft(pos, filter.channels)
+         countRight = data.countAll(filter.channels) - filteredLeft - matchesPos
+      }
+   } else {
+      // resolve() awaited loadArticle(pos) first, so the pos idx pack is
+      // resident and this countLeft never fetches.
+      filteredLeft = await data.countLeft(pos, filter.channels)
+      countRight = filter.chanTotal - filteredLeft - matchesPos
+   }
    return {
       article,
       has_left: filteredLeft > 0,
@@ -121,23 +274,24 @@ function readSeen(): Record<string, number> {
 }
 
 // A channel stores its own seen position (chronIdx of the last article viewed
-// from it). A tag has no position of its own: it continues from the furthest
-// read (max seen chronIdx) of its member channels, so reading any channel in
-// the tag advances the tag, and the tag badge agrees with the toolbar
-// "articles to your right" you land on when you open it (switchFilter resumes
-// at this same position). undefined === never seen on this device (channel) /
-// no member channel seen yet (tag).
+// from it). A tag has no position of its own: it resumes from the oldest seen
+// position (min seen chronIdx) among its member channels, so opening the tag
+// drops you at the least-recently-read member and no member's unread (each of
+// which sits at or after that member's own seen position) is skipped to the
+// left. Reading on still advances the tag, since the min only rises once that
+// furthest-behind member is read on. undefined === never seen on this device
+// (channel) / no member channel seen yet (tag).
 function getSeen(token: string): number | undefined {
    const seen = readSeen()
    const n = Number(token)
    if (Number.isFinite(n)) return seen["chan:" + n]
-   let max: number | undefined
+   let min: number | undefined
    for (const ch of Object.values(data.db.channels))
       if (ch.tag === token) {
          const s = seen["chan:" + ch.id]
-         if (s !== undefined && (max === undefined || s > max)) max = s
+         if (s !== undefined && (min === undefined || s < min)) min = s
       }
-   return max
+   return min
 }
 
 function recordSeen(article: IArticle) {
@@ -154,40 +308,63 @@ function recordSeen(article: IArticle) {
    } catch {}
 }
 
-// Articles belonging to `channels` strictly after `seenIdx` (the resume
-// position). Both sides of the subtraction come from the same idx counting
-// (countAll/countLeft) so db.gz total_art drift can't skew the result, and
-// countLeft's boundary pack is the resident latest pack whenever the seen
-// position is recent — zero fetches in the common case. Returns -1 when
-// seenIdx is undefined: "unknown", not "zero" — a fresh localStorage would
-// otherwise badge a channel/tag with its full history.
-async function unreadAfter(channels: Map<number, number>, seenIdx: number | undefined): Promise<number> {
-   if (seenIdx === undefined) return -1
-   const upTo = Math.min(seenIdx + 1, data.db.total_art)
-   return Math.max(0, data.countAll(channels) - (await data.countLeft(upTo, channels)))
-}
-
-// chan_id → add_idx map (the shape countAll/countLeft count over), for one
-// channel or a whole group.
-const chanMap = (chs: IChannel[]) => new Map(chs.map((c): [number, number] => [c.id, c.add_idx ?? 0]))
-
 // Unread count for one channel: its articles strictly after the channel's seen
 // position (recordSeen bumps that on every view, filtered or not, so reading
-// via [ALL] clears badges too).
+// via [ALL] clears badges too); -1 when never seen on this device. See
+// chanUnread for the counting rationale.
 export function unreadCount(ch: IChannel): Promise<number> {
-   return unreadAfter(chanMap([ch]), getSeen(String(ch.id)))
+   return chanUnread(ch, readSeen())
 }
 
-// Unread for a whole tag: its member channels' articles strictly after the
-// tag's resume position — the furthest read (max seen chronIdx) of those
-// channels (getSeen(tag)). So the tag-header badge equals the toolbar
-// "articles to your right" the user lands on when they open the tag
-// (switchFilter resumes at the same position). Because the anchor is the
-// furthest-read channel, the tag badge is not the arithmetic sum of the
-// channel rows beneath it — a channel left further behind contributes only the
-// part of its backlog newer than that anchor.
-export function tagUnreadCount(tag: string, group: IChannel[]): Promise<number> {
-   return unreadAfter(chanMap(group), getSeen(tag))
+// Batched per-channel unread (OPT-2): same semantics as unreadCount applied to
+// each channel, but the seen map is parsed once for the whole batch instead of
+// once per channel (a menu fill badges every visible row). Maps channel id →
+// unread (or -1 for a channel never seen on this device).
+export async function unreadCounts(chs: IChannel[]): Promise<Map<number, number>> {
+   const seenMap = readSeen()
+   const out = new Map<number, number>()
+   await Promise.all(chs.map(async (ch) => out.set(ch.id, await chanUnread(ch, seenMap))))
+   return out
+}
+
+// The tag-header aggregate the dropdown displays as the tag badge, derived from
+// the per-channel `unreadCounts` map already computed for the row badges (no
+// recount — the previous async tagUnreadCount re-ran chanUnread for every tag
+// member, so tagged channels were scanned twice per menu open). A member with a
+// known count (>= 0) contributes it; a member NEVER seen on this device (-1)
+// contributes its FULL history (countAll) — because unseen-only mode navigates
+// such a member's full backlog (its raised bound is max(add_idx, seen+1) =
+// add_idx). This deliberately matches unreadTally's `total` in unseen-only mode
+// (same per-member rule), so the menu badge equals the toolbar counter the user
+// lands on when opening the tag. A tag has no count of its own; this derives it
+// from its members. Synchronous: the counts are already resolved and countAll is
+// sync. Returns ≥ 0 (0 = nothing unseen).
+//
+// In DEFAULT (unseen-only OFF) navigation the toolbar counter is a position
+// indicator, not genuine unread: opening a tag resumes at its oldest member's
+// seen position and counts EVERY article to the right (including already-read
+// ones re-shown there), so badge ≤ counter by design. Only in unseen-only mode,
+// where read articles are skipped, does "articles to your right" equal this badge.
+export function tagUnreadFromCounts(group: IChannel[], counts: Map<number, number>): number {
+   let total = 0
+   // A member NEVER seen on this device (-1, or absent) contributes its FULL
+   // history (countAll). Collapse every such member into ONE combined map and do
+   // a SINGLE countAll instead of one full latest-pack scan per never-seen
+   // member (on a cold/first-run device every tagged channel is never-seen, so
+   // the per-member loop did up to ~255 separate scans). This is exact: countAll
+   // applies each channel's own add_idx bound via its lookup table, so the
+   // union-map count equals the sum of the per-member counts. Members with a
+   // known count (>= 0) contribute it directly. This deliberately matches
+   // unreadTally's `total` in unseen-only mode, so the menu badge equals the
+   // toolbar counter the user lands on when opening the tag.
+   const nevers: IChannel[] = []
+   for (const ch of group) {
+      const n = counts.get(ch.id)
+      if (n !== undefined && n >= 0) total += n
+      else nevers.push(ch)
+   }
+   if (nevers.length) total += data.countAll(new Map(nevers.map((c) => [c.id, c.add_idx ?? 0])))
+   return total
 }
 
 // The headlines around the current position under the current filter: up to

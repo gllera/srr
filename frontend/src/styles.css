@@ -329,6 +329,14 @@ video {
 
 .srr-toolbar-right {
    margin-left: auto;
+   /* Anchor the menus to the toolbar's right edge (≈ screen edge), not to each
+      button: search/peek sit left of the nav buttons, so a button-anchored
+      right:0 menu would extend leftward off the screen on narrow phones —
+      worse when large text pushes min/max-width to their 80vw/90vw clamps. */
+   position: relative;
+   & .srr-dropdown {
+      position: static;
+   }
    & .srr-dropdown-menu {
       bottom: 100%;
       right: 0;
@@ -492,6 +500,7 @@ video {
          text-align: center;
       }
       & a.srr-imgproxy-icon,
+      & a.srr-unread-icon,
       & a.srr-date-icon {
          min-width: 0;
          padding: 0.25rem 0.4rem;
@@ -503,10 +512,12 @@ video {
             height: 1rem;
             display: block;
          }
-         &.srr-imgproxy-off {
+         &.srr-imgproxy-off,
+         &.srr-unread-off {
             color: var(--faint);
          }
-         &.srr-imgproxy-on {
+         &.srr-imgproxy-on,
+         &.srr-unread-on {
             color: var(--accent);
          }
       }
