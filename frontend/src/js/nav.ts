@@ -595,6 +595,47 @@ export function getFilterEntries(): string[] {
    return entries
 }
 
+// Set the active filter from tokens WITHOUT moving pos or resolving an article
+// — the list surface owns its own position (scroll), so it sets the filter then
+// walks findLeft/findRight itself. Same token semantics as fromHash's filter
+// segment (numeric channel ids and tag names; unseen-only's raised bounds apply
+// in single-tag mode). Empty → clear (all channels).
+export function applyFilter(tokens: string[]): void {
+   if (tokens.length > 0) filter.set(tokens)
+   else filter.clear()
+}
+
+// The current filter's tokens (copy) and a stable key for them. filterKey()
+// identifies a token SET (unlike getCurrentFilterKey, which collapses
+// multi-token filters to ""), so the list can key its build/scroll memory on
+// the exact filter — "" means [ALL].
+export function currentTokens(): string[] {
+   return [...filter.tokens]
+}
+export function filterKey(): string {
+   return filter.tokens.join(" ")
+}
+
+// The `!tokens` hash suffix for the active filter ("" when inactive) — shared by
+// updateHash (reader `#pos!tokens`) and the list surface (`#!tokens`, no pos).
+export function tokensSuffix(): string {
+   return filter.active ? "!" + filter.tokens.map(encodeURIComponent).join("+") : ""
+}
+
+// The parsed seen map (channel key → last-viewed chronIdx). Exposed for the
+// list surface's per-row read/unread dot; nav owns the localStorage shape.
+export function getSeenMap(): Record<string, number> {
+   return readSeen()
+}
+
+// A row is unread when its channel was never seen on this device, or the row's
+// chronIdx is strictly after the channel's seen high-water — the same rule
+// unreadCount/chanUnread count by (never-seen = all unread).
+export function isRowUnread(chronIdx: number, chanId: number, seenMap: Record<string, number>): boolean {
+   const s = seenMap["chan:" + chanId]
+   return s === undefined || chronIdx > s
+}
+
 // Map current filter state to a key matching getFilterEntries() format (""|"tagName"|"id")
 export function getCurrentFilterKey(): string {
    if (!filter.active) return ""
@@ -629,7 +670,6 @@ export async function cycleFilter(dir: number): Promise<IShowFeed> {
 }
 
 function updateHash(replace = false) {
-   const tokens = filter.active ? "!" + filter.tokens.map(encodeURIComponent).join("+") : ""
-   const hash = `#${pos}${tokens}`
+   const hash = `#${pos}${tokensSuffix()}`
    history[replace ? "replaceState" : "pushState"](null, "", hash)
 }

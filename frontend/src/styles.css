@@ -714,6 +714,117 @@ video {
    display: block;
 }
 
+/* Back-to-list button — a three-line "list" glyph, square like the nav buttons */
+.srr-toolbar-left .srr-back {
+   min-width: 2.75rem;
+   min-height: 2.75rem;
+   display: inline-flex;
+   align-items: center;
+   justify-content: center;
+   border-radius: var(--radius);
+   transition:
+      opacity 0.15s,
+      background 0.15s;
+   &:hover:not(:disabled) {
+      opacity: 1;
+      background: var(--hover);
+   }
+}
+.srr-back-icon {
+   display: inline-block;
+   position: relative;
+   width: 1.05rem;
+   height: 1.5px;
+   background: currentColor;
+   &::before,
+   &::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      width: 1.05rem;
+      height: 1.5px;
+      background: currentColor;
+   }
+   &::before {
+      top: -0.35rem;
+   }
+   &::after {
+      top: 0.35rem;
+   }
+}
+
+/* View mode: on the list, hide the reader-only controls (prev/next/peek);
+   the back button is meaningless on the list it returns to. */
+.srr-view-list .srr-prev,
+.srr-view-list .srr-next,
+.srr-view-list .srr-counter,
+.srr-view-list .srr-back {
+   display: none;
+}
+
+/* List surface — a scannable feed of headline rows */
+.srr-list {
+   padding-bottom: 1rem;
+}
+.srr-row {
+   display: flex;
+   gap: 0.6rem;
+   align-items: baseline;
+   padding: 0.7rem 0.25rem;
+   border-bottom: 1px solid var(--faint);
+   text-decoration: none;
+   color: var(--fg);
+   /* Offscreen rows skip layout/paint — virtualization without manual windowing.
+      The intrinsic-size hint keeps the scrollbar honest before they render. */
+   content-visibility: auto;
+   contain-intrinsic-size: auto 3.5rem;
+   &:hover {
+      background: var(--hover);
+   }
+}
+.srr-row-dot {
+   flex-shrink: 0;
+   width: 0.5rem;
+   height: 0.5rem;
+   margin-top: 0.4rem;
+   border-radius: 50%;
+   border: 1.5px solid var(--faint);
+   background: transparent;
+}
+.srr-row-unread .srr-row-dot {
+   background: var(--accent);
+   border-color: var(--accent);
+}
+.srr-row-body {
+   min-width: 0;
+   flex: 1 1 auto;
+}
+.srr-row-title {
+   line-height: 1.35;
+   overflow-wrap: anywhere;
+   color: var(--muted);
+}
+.srr-row-unread .srr-row-title {
+   color: var(--fg);
+   font-weight: 650;
+}
+.srr-row-meta {
+   margin-top: 0.15rem;
+   font-size: 0.75rem;
+   color: var(--muted);
+   overflow: hidden;
+   text-overflow: ellipsis;
+   white-space: nowrap;
+}
+.srr-list-empty {
+   color: var(--muted);
+   text-align: center;
+   padding: 3rem 1rem;
+}
+.srr-list-sentinel {
+   height: 1px;
+}
+
 /* Loading */
 .srr-loading .srr-content {
    opacity: 0.25;

@@ -6,6 +6,10 @@ export interface GestureDeps {
    next: HTMLButtonElement
    toolbar: HTMLElement
    guard: (fn: () => Promise<IShowFeed>) => void
+   // Two-finger vertical swipe = step the filter. The handler is surface-aware
+   // (reader → cycle to next filter's article; list → re-filter the list), so
+   // app.ts owns it rather than calling nav.cycleFilter directly.
+   onCycle: (dir: number) => void
 }
 
 // setupGestures wires touch swipes (one-finger left/right = prev/next,
@@ -58,8 +62,7 @@ export function setupGestures(deps: GestureDeps): void {
          if (mode === "two") {
             if (e.touches.length === 0) {
                mode = "none"
-               if (Math.abs(twoFingerDy) >= 50 && nav.getFilterEntries().length > 1)
-                  deps.guard(() => nav.cycleFilter(twoFingerDy < 0 ? -1 : 1))
+               if (Math.abs(twoFingerDy) >= 50) deps.onCycle(twoFingerDy < 0 ? -1 : 1)
             } else if (e.touches.length === 1) {
                // Fingers lifted one at a time: the two-finger gesture is over.
                // Re-seed the remaining finger as a fresh single-finger swipe

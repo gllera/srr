@@ -7,6 +7,23 @@ import * as search from "./search"
 const menus = document.querySelectorAll<HTMLElement>(".srr-dropdown-menu")
 const btns = document.querySelectorAll<HTMLElement>(".srr-dropdown-btn")
 
+// The list surface hooks the channel menu's filter actions: when the app is on
+// the list, picking a channel/tag/[ALL] (or flipping unseen-only) re-filters the
+// list in place instead of opening the reader at a resume position. Optional so
+// the reader-only callers (and the whole existing test suite) keep the original
+// behavior unchanged — the default host reports "not the list" and the menu
+// falls through to its guard(switchFilter)/guard(fromHash) reader paths.
+export interface ChannelMenuHost {
+   viewIsList: () => boolean
+   selectFilter: (token: string) => void // "" = [ALL]; token = tag name or channel id
+   reapplyFilter: () => void // re-render the list after an unseen-only flip, menu stays open
+}
+const READER_HOST: ChannelMenuHost = {
+   viewIsList: () => false,
+   selectFilter: () => {},
+   reapplyFilter: () => {},
+}
+
 let isOpen = false
 // Whether the chip row currently shows the image-proxy editor or the date
 // editor instead of the chips. Reset on close so reopening starts collapsed.
@@ -377,7 +394,11 @@ async function fillUnread(rows: [HTMLAnchorElement, IChannel][], headers: [HTMLA
 // imgProxyEditor is the inline editor row that replaces the chip row while
 // configuring the proxy prefix: type + Enter/✓ commits (after isValidProxy),
 // Escape cancels, ✕ commits "" (disables).
-function imgProxyEditor(guard: (fn: () => Promise<IShowFeed>) => void, rebuild: () => void): HTMLDivElement {
+function imgProxyEditor(
+   guard: (fn: () => Promise<IShowFeed>) => void,
+   rebuild: () => void,
+   reapply: () => void,
+): HTMLDivElement {
    const row = editorRow("srr-imgproxy-edit")
    const input = editorInput("url", "srr-imgproxy-input", "Image proxy URL prefix (empty disables)")
    input.placeholder = "https://proxy/?url="
@@ -393,7 +414,11 @@ function imgProxyEditor(guard: (fn: () => Promise<IShowFeed>) => void, rebuild: 
       imgProxyEditing = false
       if (next !== getImgProxy()) {
          setImgProxy(next)
-         guard(() => nav.fromHash(location.hash.substring(1)))
+         // Re-render the active surface so the new prefix takes effect: the
+         // reader re-renders the current article's images (fromHash), the list
+         // re-renders its rows. On the list, fromHash would jump to the last
+         // article (its hash has no position) — hence the surface-aware reapply.
+         reapply()
       }
       rebuild()
       // rebuild() detaches the focused ✓/input, and the gated render() (from the
@@ -573,7 +598,11 @@ export function showSearchMenu(guard: (fn: () => Promise<IShowFeed>) => void): v
    )
 }
 
-export function showChannelMenu(currentTag: string, guard: (fn: () => Promise<IShowFeed>) => void): void {
+export function showChannelMenu(
+   currentTag: string,
+   guard: (fn: () => Promise<IShowFeed>) => void,
+   host: ChannelMenuHost = READER_HOST,
+): void {
    const { tagged, sortedTags, untagged } = data.groupChannelsByTag()
    const current = nav.getCurrentFilterKey()
    const cls = (base: string, v: string) => (v === current ? `${base} srr-active`.trim() : base)
@@ -582,7 +611,7 @@ export function showChannelMenu(currentTag: string, guard: (fn: () => Promise<IS
       const unreadRows: [HTMLAnchorElement, IChannel][] = []
       const headerRows: [HTMLAnchorElement, IChannel[]][] = []
       if (imgProxyEditing) {
-         frag.appendChild(imgProxyEditor(guard, rebuild))
+         frag.appendChild(imgProxyEditor(guard, rebuild, reapply))
       } else if (dateEditing) {
          frag.appendChild(dateEditor(guard, rebuild))
       } else {
@@ -633,6 +662,12 @@ export function showChannelMenu(currentTag: string, guard: (fn: () => Promise<IS
       void fillUnread(unreadRows, headerRows)
    }
    const rebuild = () => fillMenu(document.getElementById("srr-channel-menu")!, buildContent)
+   // Re-render the active surface after an image-proxy change: the list in place,
+   // the reader by replaying its hash (the list's hash carries no position).
+   const reapply = () => {
+      if (host.viewIsList()) host.reapplyFilter()
+      else guard(() => nav.fromHash(location.hash.substring(1)))
+   }
 
    toggleDropdown("srr-channel-menu", buildContent, async (value, e) => {
       // Swap to an inline editor without letting the click reach the window
@@ -665,6 +700,17 @@ export function showChannelMenu(currentTag: string, guard: (fn: () => Promise<IS
          // a real mouse click has detail >= 1. activeElement can't tell them
          // apart once the chip stays focused through the click.
          const fromKeyboard = e.detail === 0
+         // On the list surface the flip re-renders the list in place (host owns
+         // the busy-guarded re-render); the menu stays open and focus returns to
+         // the chip, mirroring the reader path below.
+         if (host.viewIsList()) {
+            nav.setUnreadOnly(want)
+            rebuild()
+            if (fromKeyboard)
+               document.querySelector<HTMLElement>('#srr-channel-menu a[data-value="__unread__"]')?.focus()
+            host.reapplyFilter()
+            return
+         }
          guard(() => {
             nav.setUnreadOnly(want)
             rebuild()
@@ -681,13 +727,24 @@ export function showChannelMenu(currentTag: string, guard: (fn: () => Promise<IS
          })
          return
       }
-      guard(async () => {
-         if (value === "!last") return nav.last()
-         if (value.startsWith("t:")) {
-            const ts = Math.floor(Date.now() / 1000) - Number(value.slice(2))
-            return nav.goTo(await data.findChronForTimestamp(ts))
-         }
-         return nav.switchFilter(value)
-      })
+      // "Jump to a specific article" actions (latest / time-range) open the
+      // reader from either surface — they target one article, not a feed.
+      if (value === "!last") {
+         guard(() => nav.last())
+         return
+      }
+      if (value.startsWith("t:")) {
+         const ts = Math.floor(Date.now() / 1000) - Number(value.slice(2))
+         guard(async () => nav.goTo(await data.findChronForTimestamp(ts)))
+         return
+      }
+      // A channel/tag/[ALL] selection: on the list surface, re-filter the list
+      // (the host shows that filter's feed); in the reader, resume that filter
+      // at its current position as before.
+      if (host.viewIsList()) {
+         host.selectFilter(value)
+         return
+      }
+      guard(() => nav.switchFilter(value))
    })
 }
