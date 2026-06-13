@@ -381,6 +381,7 @@ video {
 }
 
 /* Nav buttons */
+.srr-toolbar-right .srr-save,
 .srr-toolbar-right .srr-search,
 .srr-toolbar-right .srr-prev,
 .srr-toolbar-right .srr-next {
@@ -397,6 +398,23 @@ video {
    &:hover:not(:disabled) {
       opacity: 1;
       background: var(--hover);
+   }
+}
+
+/* Save (★) toggle — outline star, filled + accent when the article is saved */
+.srr-save-icon {
+   display: block;
+   width: 1.2rem;
+   height: 1.2rem;
+   fill: none;
+   stroke: currentColor;
+   stroke-width: 1.6;
+   stroke-linejoin: round;
+}
+.srr-toolbar-right .srr-save.srr-saved {
+   color: var(--accent);
+   & .srr-save-icon {
+      fill: currentColor;
    }
 }
 
@@ -758,6 +776,7 @@ video {
 .srr-view-list .srr-prev,
 .srr-view-list .srr-next,
 .srr-view-list .srr-counter,
+.srr-view-list .srr-save,
 .srr-view-list .srr-back {
    display: none;
 }
@@ -815,6 +834,42 @@ video {
    overflow: hidden;
    text-overflow: ellipsis;
    white-space: nowrap;
+}
+/* Per-row save star — outline by default, filled + accent on a saved row.
+   A generous padding keeps the tap target ≈ the row height without widening it. */
+.srr-row-star {
+   flex-shrink: 0;
+   align-self: center;
+   padding: 0.45rem 0.25rem;
+   margin: -0.45rem -0.1rem -0.45rem 0;
+   color: var(--faint);
+   cursor: pointer;
+   & svg {
+      display: block;
+      width: 1.05rem;
+      height: 1.05rem;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.6;
+      stroke-linejoin: round;
+   }
+   &:hover {
+      color: var(--muted);
+   }
+}
+.srr-row-saved .srr-row-star {
+   color: var(--accent);
+   & svg {
+      fill: currentColor;
+   }
+}
+/* "★ Saved" menu row count — quiet, right-aligned like the unread badge */
+.srr-dropdown-menu .srr-saved-num {
+   float: right;
+   margin-left: 0.5rem;
+   font-size: 0.75rem;
+   color: var(--muted);
+   font-variant-numeric: tabular-nums;
 }
 .srr-list-empty {
    color: var(--muted);

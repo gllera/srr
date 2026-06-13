@@ -18,6 +18,11 @@ const BATCH = 30
 // rows are ready before they're scrolled into view).
 const ROOT_MARGIN = "800px"
 
+// Per-row save star. Tapping it toggles nav.toggleSaved without opening the
+// reader; the row carries .srr-row-saved for the filled look.
+const STAR_SVG =
+   '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.4l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z"/></svg>'
+
 let container: HTMLElement
 let rowsEl: HTMLElement
 let sentinel: HTMLElement
@@ -42,14 +47,29 @@ export function setup(el: HTMLElement, open: (chron: number) => void): void {
    container = el
    onOpen = open
    container.addEventListener("click", (e) => {
-      const a = (e.target as HTMLElement).closest("a.srr-row") as HTMLElement | null
+      const target = e.target as HTMLElement
+      const a = target.closest("a.srr-row") as HTMLElement | null
       if (!a) return
       // The row is a real <a href="#chron"> for keyboard/semantics, but
       // <base target="_blank"> would open it in a new tab — intercept and
-      // route in-SPA instead.
+      // route in-SPA instead (covers a star tap too: the star lives inside <a>).
       e.preventDefault()
+      const chron = Number(a.dataset.chron)
+      // The save star toggles in place; it does NOT open the reader. In the
+      // Saved view, un-saving drops the row from the feed straight away.
+      const star = target.closest(".srr-row-star")
+      if (star) {
+         const nowSaved = nav.toggleSaved(chron)
+         a.classList.toggle("srr-row-saved", nowSaved)
+         star.setAttribute("aria-pressed", String(nowSaved))
+         if (nav.filter.saved && !nowSaved) {
+            a.remove()
+            if (rowsEl && rowsEl.childElementCount === 0) showEmptyState()
+         }
+         return
+      }
       saveScroll()
-      onOpen(Number(a.dataset.chron))
+      onOpen(chron)
    })
 }
 
@@ -75,20 +95,39 @@ function rowEl(chron: number, art: IArticle, seen: Record<string, number>): HTML
    a.dataset.chron = String(chron)
    a.dataset.chan = String(art.s)
    if (nav.isRowUnread(chron, art.s, seen)) a.classList.add("srr-row-unread")
+   const saved = nav.isSaved(chron)
+   if (saved) a.classList.add("srr-row-saved")
    const body = el("div", "srr-row-body")
    const title = el("div", "srr-row-title")
    title.textContent = art.t || "(untitled)"
    const meta = el("div", "srr-row-meta")
    meta.textContent = `${data.channelTitle(art.s)} · ${timeAgo(art.p || art.a)}`
    body.append(title, meta)
-   a.append(el("span", "srr-row-dot"), body)
+   const star = el("span", "srr-row-star")
+   star.setAttribute("role", "button")
+   star.setAttribute("aria-label", "Save article")
+   star.setAttribute("aria-pressed", String(saved))
+   star.innerHTML = STAR_SVG
+   a.append(el("span", "srr-row-dot"), body, star)
    return a
 }
 
 function emptyState(): void {
    const empty = el("div", "srr-list-empty")
-   empty.textContent = nav.filter.active ? "Nothing here yet." : "No articles yet."
+   empty.textContent = nav.filter.saved
+      ? "No saved articles yet."
+      : nav.filter.active
+        ? "Nothing here yet."
+        : "No articles yet."
    container.appendChild(empty)
+}
+
+// Collapse a now-empty list (the Saved view after un-saving the last row) to its
+// empty state, dropping the observer so a stale sentinel can't keep firing.
+function showEmptyState(): void {
+   teardownObserver()
+   container.replaceChildren()
+   emptyState()
 }
 
 // Full (re)build: clears the list and loads the newest batch under the current
@@ -126,11 +165,19 @@ export async function render(): Promise<void> {
 // Re-show an already-built list (same filter): refresh read/unread dots from
 // the live seen map (you may have read some in the reader) and restore scroll.
 export function refresh(): void {
+   const seen = nav.getSeenMap()
+   const savedView = nav.filter.saved
    container.querySelectorAll<HTMLElement>("a.srr-row").forEach((a) => {
-      const seen = nav.getSeenMap()
-      const unread = nav.isRowUnread(Number(a.dataset.chron), Number(a.dataset.chan), seen)
-      a.classList.toggle("srr-row-unread", unread)
+      const chron = Number(a.dataset.chron)
+      a.classList.toggle("srr-row-unread", nav.isRowUnread(chron, Number(a.dataset.chan), seen))
+      const saved = nav.isSaved(chron)
+      a.classList.toggle("srr-row-saved", saved)
+      a.querySelector(".srr-row-star")?.setAttribute("aria-pressed", String(saved))
+      // In the Saved view, an article un-saved from the reader is gone from the
+      // feed — drop its row on the way back.
+      if (savedView && !saved) a.remove()
    })
+   if (savedView && rowsEl && rowsEl.childElementCount === 0) showEmptyState()
    if (savedScroll && savedScroll.key === nav.filterKey()) window.scrollTo(0, savedScroll.top)
 }
 
@@ -158,7 +205,7 @@ async function loadOlder(my: object): Promise<void> {
       const chrons: number[] = []
       let i = from
       while (chrons.length < BATCH && i >= 0) {
-         const found = await data.findLeft(i, nav.filter.channels)
+         const found = await nav.feedLeft(i)
          if (my !== tok) return
          if (found === -1) {
             exhausted = true

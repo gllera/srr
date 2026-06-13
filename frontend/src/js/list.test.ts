@@ -28,18 +28,41 @@ const data = vi.hoisted(() => {
 vi.mock("./data", () => data)
 
 const nav = vi.hoisted(() => {
-   const filter = { channels: new Map<number, number>(), active: false }
+   const filter = { channels: new Map<number, number>(), active: false, saved: false }
    let seen: Record<string, number> = {}
+   let saved = new Set<number>()
    return {
       filter,
       _setSeen: (s: Record<string, number>) => (seen = s),
-      filterKey: vi.fn(() => (filter.active ? "F" : "")),
+      _setSaved: (s: number[]) => (saved = new Set(s)),
+      filterKey: vi.fn(() => (filter.saved ? "S" : filter.active ? "F" : "")),
       getCurrentFilterKey: vi.fn(() => ""),
-      tokensSuffix: vi.fn(() => (filter.active ? "!F" : "")),
+      tokensSuffix: vi.fn(() => (filter.saved ? "!~saved" : filter.active ? "!F" : "")),
       getSeenMap: vi.fn(() => seen),
       isRowUnread: vi.fn((chron: number, chan: number, s: Record<string, number>) => {
          const v = s["chan:" + chan]
          return v === undefined || chron > v
+      }),
+      isSaved: vi.fn((chron: number) => saved.has(chron)),
+      toggleSaved: vi.fn((chron: number) => {
+         if (saved.has(chron)) {
+            saved.delete(chron)
+            return false
+         }
+         saved.add(chron)
+         return true
+      }),
+      savedCount: vi.fn(() => saved.size),
+      // The list's neighbor walk: channel mode delegates to data.findLeft (which
+      // reads filter.channels), saved mode walks the explicit set.
+      feedLeft: vi.fn(async (from: number) => {
+         if (!filter.saved) return data.findLeft(from)
+         let res = -1
+         for (const c of [...saved].sort((a, b) => a - b)) {
+            if (c > from) break
+            res = c
+         }
+         return res
       }),
    }
 })
@@ -75,7 +98,9 @@ describe("list", () => {
       window.scrollTo = vi.fn()
       nav.filter.channels = new Map()
       nav.filter.active = false
+      nav.filter.saved = false
       nav._setSeen({})
+      nav._setSaved([])
       vi.resetModules()
       list = await import("./list")
       list.setup(container, (chron) => opened.push(chron))
@@ -184,5 +209,78 @@ describe("list", () => {
       data.findLeft.mockClear()
       await list.show() // same filterKey → refresh path, no findLeft walk
       expect(data.findLeft).not.toHaveBeenCalled()
+   })
+
+   const $star = (chron: number) =>
+      $rows()
+         .find((a) => Number(a.dataset.chron) === chron)!
+         .querySelector<HTMLElement>(".srr-row-star")!
+   const tapStar = (chron: number) =>
+      $star(chron).dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }))
+
+   it("renders a save star per row; saved rows carry srr-row-saved", async () => {
+      setIndex(3)
+      nav._setSaved([1])
+      await list.render()
+      expect($rows().every((a) => a.querySelector(".srr-row-star") !== null)).toBe(true)
+      const saved = (chron: number) =>
+         $rows()
+            .find((a) => Number(a.dataset.chron) === chron)!
+            .classList.contains("srr-row-saved")
+      expect(saved(1)).toBe(true)
+      expect(saved(0)).toBe(false)
+      expect(saved(2)).toBe(false)
+      expect($star(1).getAttribute("aria-pressed")).toBe("true")
+   })
+
+   it("tapping a row's star toggles saved without opening the reader", async () => {
+      setIndex(3)
+      await list.render()
+      tapStar(2)
+      expect(nav.toggleSaved).toHaveBeenCalledWith(2)
+      expect(opened).toEqual([]) // the reader did NOT open
+      const row = $rows().find((a) => Number(a.dataset.chron) === 2)!
+      expect(row.classList.contains("srr-row-saved")).toBe(true)
+      expect($star(2).getAttribute("aria-pressed")).toBe("true")
+   })
+
+   it("the saved view renders only saved chrons, newest-first", async () => {
+      setIndex(6)
+      nav._setSaved([0, 2, 4])
+      nav.filter.saved = true
+      await list.render()
+      expect($chrons()).toEqual([4, 2, 0])
+   })
+
+   it("the saved view drops a row when its star is un-saved", async () => {
+      setIndex(6)
+      nav._setSaved([0, 2, 4])
+      nav.filter.saved = true
+      await list.render()
+      tapStar(2)
+      expect(nav.toggleSaved).toHaveBeenCalledWith(2)
+      expect($chrons()).toEqual([4, 0]) // 2 left the feed
+   })
+
+   it("the saved view shows an empty state once the last row is un-saved", async () => {
+      setIndex(3)
+      nav._setSaved([1])
+      nav.filter.saved = true
+      await list.render()
+      expect($chrons()).toEqual([1])
+      tapStar(1)
+      expect($rows().length).toBe(0)
+      expect(container.querySelector(".srr-list-empty")).not.toBeNull()
+   })
+
+   it("refresh drops rows un-saved elsewhere (e.g. from the reader) in the saved view", async () => {
+      setIndex(6)
+      nav._setSaved([0, 2, 4])
+      nav.filter.saved = true
+      await list.render()
+      expect($chrons()).toEqual([4, 2, 0])
+      nav._setSaved([0, 4]) // article 2 un-saved in the reader
+      list.refresh()
+      expect($chrons()).toEqual([4, 0])
    })
 })

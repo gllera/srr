@@ -1497,3 +1497,88 @@ describe("prefetch abort", () => {
       }
    })
 })
+
+describe("saved articles", () => {
+   it("toggleSaved / isSaved / savedCount round-trip via localStorage", () => {
+      expect(nav.isSaved(3)).toBe(false)
+      expect(nav.toggleSaved(3)).toBe(true)
+      expect(nav.isSaved(3)).toBe(true)
+      expect(nav.savedCount()).toBe(1)
+      expect(JSON.parse(localStorage.getItem("srr-saved")!)).toEqual([3])
+      expect(nav.toggleSaved(3)).toBe(false)
+      expect(nav.isSaved(3)).toBe(false)
+      expect(nav.savedCount()).toBe(0)
+      expect(localStorage.getItem("srr-saved")).toBe("[]")
+   })
+
+   it("filter.set([SAVED_TOKEN]) enters a channel-agnostic saved mode", () => {
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
+      nav.filter.set([nav.SAVED_TOKEN])
+      expect(nav.filter.saved).toBe(true)
+      expect(nav.filter.active).toBe(true)
+      expect(nav.filter.channels.size).toBe(0)
+   })
+
+   it("matches() is saved-set membership, ignoring the channel", () => {
+      nav.toggleSaved(5)
+      nav.filter.set([nav.SAVED_TOKEN])
+      expect(nav.filter.matches(99, 5)).toBe(true) // any channel
+      expect(nav.filter.matches(1, 4)).toBe(false) // not saved
+   })
+
+   it("clear() leaves saved mode", () => {
+      nav.filter.set([nav.SAVED_TOKEN])
+      nav.filter.clear()
+      expect(nav.filter.saved).toBe(false)
+   })
+
+   it("traverses only saved articles, newest-first, with right-counts", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 1 }, { chanId: 1 }, { chanId: 1 }, { chanId: 1 }]) // chrons 0..4
+      nav.toggleSaved(1)
+      nav.toggleSaved(3)
+      nav.toggleSaved(4)
+      // switchFilter resumes at the newest saved (4).
+      const r4 = await nav.switchFilter(nav.SAVED_TOKEN)
+      expect(data.loadArticle).toHaveBeenCalledWith(4)
+      expect(r4.filtered).toBe(true)
+      expect(r4.countRight).toBe(0)
+      expect(r4.has_right).toBe(false)
+      expect(r4.has_left).toBe(true)
+
+      const r3 = await nav.left()
+      expect(data.loadArticle).toHaveBeenCalledWith(3)
+      expect(r3.countRight).toBe(1) // only 4 is to the right
+      expect(r3.has_left).toBe(true)
+
+      const r1 = await nav.left()
+      expect(data.loadArticle).toHaveBeenCalledWith(1) // skips unsaved 2
+      expect(r1.countRight).toBe(2) // 3 and 4
+      expect(r1.has_left).toBe(false) // oldest saved
+      await expect(nav.left()).rejects.toThrow("no left match")
+   })
+
+   it("getFilterEntries surfaces the saved token only when something is saved", () => {
+      setupIndex([{ chanId: 1 }])
+      expect(nav.getFilterEntries()).not.toContain(nav.SAVED_TOKEN)
+      nav.toggleSaved(0)
+      expect(nav.getFilterEntries()).toContain(nav.SAVED_TOKEN)
+   })
+
+   it("switchFilter(SAVED) pushes a #pos!~saved hash", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 1 }])
+      nav.toggleSaved(1)
+      await nav.switchFilter(nav.SAVED_TOKEN)
+      expect(history.pushState).toHaveBeenCalledWith(null, "", "#1!~saved")
+   })
+
+   it("fromHash validates the position against the saved set", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 1 }, { chanId: 1 }]) // 0,1,2
+      nav.toggleSaved(2)
+      await nav.fromHash("2!~saved")
+      expect(data.loadArticle).toHaveBeenCalledWith(2)
+      // A position not in the saved set bounces to the newest saved (2).
+      data.loadArticle.mockClear()
+      await nav.fromHash("1!~saved")
+      expect(data.loadArticle).toHaveBeenCalledWith(2)
+   })
+})

@@ -32,6 +32,89 @@ export function setUnreadOnly(on: boolean) {
    } catch {}
 }
 
+// Saved articles ("★ Saved") — a per-article collection orthogonal to the
+// channel/tag axes and the positional seen frontier. Stored device-local as a
+// chronIdx set in localStorage (srr-saved), like srr-seen. chronIdx is a
+// permanent article address — finalized packs are immutable and never GC'd — so
+// a saved id stays loadable indefinitely (it survives even its channel being
+// deleted; data.channelTitle then shows the "[DELETED]" tombstone). "★ Saved" is
+// a distinct nav MODE (filter.saved): navigation walks the explicit set, not the
+// idx packs, so it needs no fetch and is channel-agnostic. The reserved token
+// "~saved" addresses the mode in the #hash and the filter rotation; a
+// (vanishingly unlikely) real tag literally named "~saved" is shadowed by it.
+export const SAVED_TOKEN = "~saved"
+const SAVED_KEY = "srr-saved"
+
+// Re-read on each access (no module-level cache): the set is small and
+// user-curated, so the localStorage parse is cheap, and reading fresh stays
+// correct across tabs and keeps tests/`vi.resetModules` free of stale state.
+function readSavedSet(): Set<number> {
+   try {
+      const raw = localStorage.getItem(SAVED_KEY)
+      const arr = raw ? JSON.parse(raw) : []
+      return new Set(Array.isArray(arr) ? arr.filter((n) => Number.isInteger(n)) : [])
+   } catch {
+      return new Set()
+   }
+}
+// Ascending chronIdx, for the neighbor walks and the showFeed left/right tally.
+function savedSorted(): number[] {
+   return [...readSavedSet()].sort((a, b) => a - b)
+}
+
+export function isSaved(chron: number): boolean {
+   return readSavedSet().has(chron)
+}
+export function savedCount(): number {
+   return readSavedSet().size
+}
+// Toggle one article's saved state; returns the new state. Clears the
+// neighbor-prefetch slots since the saved feed's neighbors may have shifted.
+export function toggleSaved(chron: number): boolean {
+   const set = readSavedSet()
+   const nowSaved = !set.has(chron)
+   if (nowSaved) set.add(chron)
+   else set.delete(chron)
+   try {
+      localStorage.setItem(SAVED_KEY, JSON.stringify([...set].sort((a, b) => a - b)))
+   } catch {}
+   next.left = next.right = undefined
+   return nowSaved
+}
+// The chronIdx of the article currently in the reader (-1 = none), so app.ts can
+// reflect its saved state on the star toggle without threading pos into IShowFeed.
+export function currentChron(): number {
+   return pos
+}
+
+// Largest saved chron <= from / smallest saved chron >= from (-1 = none). Pure
+// scans of the small sorted set — saved navigation never fetches an idx pack.
+function savedLeft(from: number): number {
+   let res = -1
+   for (const c of savedSorted()) {
+      if (c > from) break
+      res = c
+   }
+   return res
+}
+function savedRight(from: number): number {
+   for (const c of savedSorted()) if (c >= from) return c
+   return -1
+}
+
+// The current feed's neighbor walk — the ONE seam saved mode branches at. Every
+// navigation primitive (step, peek, first/last, goTo) and the list surface route
+// their findLeft/findRight through these instead of data.* directly, so saved
+// mode (the explicit set) vs channel mode (the idx packs) is decided in one
+// place. Async to match data.findLeft/findRight; the saved branch is synchronous,
+// wrapped in a resolved promise.
+export function feedLeft(from: number): Promise<number> {
+   return filter.saved ? Promise.resolve(savedLeft(from)) : data.findLeft(from, filter.channels)
+}
+export function feedRight(from: number): Promise<number> {
+   return filter.saved ? Promise.resolve(savedRight(from)) : data.findRight(from, filter.channels)
+}
+
 // A snapshotted tag member: its true add_idx, its seen position at snapshot
 // time (-1 = never seen on this device), the position-invariant total of its
 // articles (`all`, the member's full countAll — cached because it's
@@ -52,10 +135,16 @@ export const filter = {
    // the unread counter (showFeed/unreadTally). `channels` then holds raised
    // bounds for nav.
    unreadMembers: null as UnreadMember[] | null,
+   // "★ Saved" mode: navigation walks the explicit srr-saved set, channel-agnostic
+   // (channels stays empty). Set by set() when the only token is SAVED_TOKEN.
+   saved: false,
    get active() {
       return this.tokens.length > 0
    },
    matches(chanId: number, chronIdx: number) {
+      // Saved mode ignores the channel: membership IS the saved set. (chanId is
+      // still passed by callers that don't know the mode — the search predicate.)
+      if (this.saved) return isSaved(chronIdx)
       const addIdx = this.channels.get(chanId)
       return addIdx !== undefined && chronIdx >= addIdx
    },
@@ -66,6 +155,7 @@ export const filter = {
    clear() {
       this.channels = new Map<number, number>()
       this.unreadMembers = null
+      this.saved = false
       for (const ch of Object.values(data.db.channels)) if (ch.total_art) this.channels.set(ch.id, ch.add_idx ?? 0)
       this.chanTotal = data.countAll(this.channels)
       this.tokens = []
@@ -74,6 +164,15 @@ export const filter = {
       this.tokens = tokens
       this.channels = new Map<number, number>()
       this.unreadMembers = null
+      // "★ Saved" is a standalone mode, not a channel resolution: short-circuit
+      // before the channel loop (which would find no channels and clear() back
+      // to [ALL]). channels stays empty; feedLeft/feedRight/matches/showFeed all
+      // branch on filter.saved.
+      this.saved = tokens.length === 1 && tokens[0] === SAVED_TOKEN
+      if (this.saved) {
+         this.chanTotal = 0
+         return
+      }
       // Unseen-only applies to a single-tag filter only. Resolve the tag's
       // members so we can both raise their nav bounds and tally unread.
       const tagToken = tokens.length === 1 && !Number.isFinite(Number(tokens[0])) ? tokens[0] : null
@@ -194,7 +293,18 @@ async function showFeed(article: IArticle): Promise<IShowFeed> {
    // `right` is the count strictly to the right of pos — it drives has_right
    // (the next button) and, outside unseen-only mode, the toolbar counter too.
    let right: number
-   if (filter.unreadMembers) {
+   if (filter.saved) {
+      // Saved mode counts the explicit set directly (no idx fetch): the toolbar
+      // counter is the saved articles strictly to the right, like a channel.
+      let l = 0
+      let r = 0
+      for (const c of savedSorted()) {
+         if (c < pos) l++
+         else if (c > pos) r++
+      }
+      filteredLeft = l
+      right = r
+   } else if (filter.unreadMembers) {
       // Unseen-only tag mode: count only unread. `right` is the unread strictly
       // to the right; left is the remainder of the tag's total unread (mirrors
       // the all-mode identity right = chanTotal − left − pos).
@@ -401,10 +511,7 @@ export async function peek(span = 10): Promise<IPeekItem[]> {
       }
       return out
    }
-   const [lefts, rights] = await Promise.all([
-      walk((i) => data.findLeft(i - 1, filter.channels)),
-      walk((i) => data.findRight(i + 1, filter.channels)),
-   ])
+   const [lefts, rights] = await Promise.all([walk((i) => feedLeft(i - 1)), walk((i) => feedRight(i + 1))])
    const idxs = [...lefts.reverse(), pos, ...rights]
    return Promise.all(
       idxs.map(async (chron) => {
@@ -504,8 +611,7 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
 // The slot-identity checks keep a lookup superseded by a newer navigation
 // from prefetching or clearing on its behalf.
 async function step(dir: "left" | "right"): Promise<IShowFeed> {
-   const lookup = () =>
-      dir === "left" ? data.findLeft(pos - 1, filter.channels) : data.findRight(pos + 1, filter.channels)
+   const lookup = () => (dir === "left" ? feedLeft(pos - 1) : feedRight(pos + 1))
    const target = await (next[dir] ?? lookup())
    if (target === -1) throw new Error(`no ${dir} match`)
    const result = await resolve(target)
@@ -540,7 +646,7 @@ export async function last(token?: string, replace = false): Promise<IShowFeed> 
       if (token === "") filter.clear()
       else filter.set([token])
    }
-   const found = await data.findLeft(data.db.total_art - 1, filter.channels)
+   const found = await feedLeft(data.db.total_art - 1)
    if (found === -1) return resolveNoMatch(replace)
    return resolve(found, replace)
 }
@@ -575,6 +681,9 @@ export async function switchFilter(token: string): Promise<IShowFeed> {
    }
    filter.set([token])
    if (!filter.active) return last()
+   // Saved has no per-channel resume position; open at the newest saved article
+   // (top of the list), the same place selecting "★ Saved" on the list shows.
+   if (filter.saved) return last()
    const seenIdx = getSeen(token)
    if (seenIdx !== undefined && (await isValidSeen(seenIdx))) return resolve(seenIdx)
    return first()
@@ -583,13 +692,16 @@ export async function switchFilter(token: string): Promise<IShowFeed> {
 // Jump to chronIdx, snapping forward to next match if filter is active.
 export async function goTo(idx: number): Promise<IShowFeed> {
    if (idx < 0 || idx >= data.db.total_art) return last()
-   const found = await data.findRight(idx, filter.channels)
+   const found = await feedRight(idx)
    return found === -1 ? last() : resolve(found)
 }
 
 export function getFilterEntries(): string[] {
    const { sortedTags, untagged } = data.groupChannelsByTag()
    const entries = [""]
+   // "★ Saved" joins the rotation (keyboard cycle / two-finger swipe) right
+   // after [ALL], but only once there's something saved — no empty smart folder.
+   if (savedCount() > 0) entries.push(SAVED_TOKEN)
    for (const tag of sortedTags) entries.push(tag)
    for (const ch of untagged) entries.push(String(ch.id))
    return entries

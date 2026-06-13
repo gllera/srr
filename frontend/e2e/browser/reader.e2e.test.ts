@@ -229,6 +229,50 @@ describe("browser: real SPA over real packs", () => {
       }
    })
 
+   // Saved articles: the reader's ★ toggle adds the current article to the
+   // device-local srr-saved set; "★ Saved" in the channel menu is a distinct
+   // filter view that shows exactly that set, and it survives a reload (the set
+   // lives in localStorage, the #!~saved hash re-enters the view).
+   it("saves an article, lists it under ★ Saved, and persists across reload", async () => {
+      const [page, close] = await open()
+      try {
+         await waitList(page)
+         // Open the latest article and save it from the keyboard.
+         await page.click(".srr-list a.srr-row")
+         await waitReader(page)
+         expect(await $title(page)).toBe("sport title 1")
+         await page.keyboard.press("b")
+         await page.waitForFunction(() => document.querySelector(".srr-save")?.classList.contains("srr-saved"), {
+            timeout: 20000,
+         })
+         expect(await page.$eval(".srr-save", (e) => e.getAttribute("aria-pressed"))).toBe("true")
+
+         // Back to the list → channel menu → pick "★ Saved".
+         await page.click(".srr-back")
+         await waitList(page)
+         await page.click(".srr-channel")
+         await page.waitForSelector('#srr-channel-menu.srr-open a[data-value="~saved"]', { timeout: 20000 })
+         await page.click('#srr-channel-menu a[data-value="~saved"]')
+         await waitList(page)
+         await page.waitForFunction(() => document.querySelectorAll(".srr-list a.srr-row").length === 1, {
+            timeout: 20000,
+         })
+         expect(await $rowTitles(page)).toEqual(["sport title 1"])
+         expect(await page.$eval(".srr-list a.srr-row", (e) => e.classList.contains("srr-row-saved"))).toBe(true)
+         expect(await page.evaluate(() => location.hash)).toBe("#!~saved")
+
+         // Reload: the saved set persists and #!~saved re-enters the saved view.
+         await page.reload({ waitUntil: "load" })
+         await waitList(page)
+         await page.waitForFunction(() => document.querySelectorAll(".srr-list a.srr-row").length === 1, {
+            timeout: 20000,
+         })
+         expect(await $rowTitles(page)).toEqual(["sport title 1"])
+      } finally {
+         await close()
+      }
+   })
+
    // The service worker (src/sw.ts) makes the reader work fully offline: the shell
    // (navigation + hashed JS/CSS) and the packs (db.gz + latest idx/data, here a
    // single pack) are runtime-cached on the first online visit, then served from
