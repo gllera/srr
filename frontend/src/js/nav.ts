@@ -485,7 +485,14 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
    let target = posStr === "" ? NaN : Number(posStr)
    if (!Number.isFinite(target) || target < 0 || target >= data.db.total_art) target = data.db.total_art - 1
 
-   if (!filter.matches(await data.getChannelId(target), target)) return last(undefined, true)
+   // Validate the explicit #pos against the channel's TRUE add_idx, not unseen-only's
+   // raised (seen+1) bounds. A restored/shared hash position is an entry anchor, like
+   // switchFilter's resume position — isValidSeen is exactly that predicate (true add_idx
+   // in unseen-only mode, filter.matches otherwise). Using filter.matches() here let
+   // unseen-only reject an already-seen #pos and bounce it to last(); recordSeen then
+   // marked that seen, so each refresh drifted to a lower unseen article. From the
+   // honored position, Right still walks the unseen.
+   if (!(await isValidSeen(target))) return last(undefined, true)
    return resolve(target, true)
 }
 

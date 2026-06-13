@@ -1134,6 +1134,22 @@ describe("unread-only mode (tags)", () => {
       expect(nav.tagUnreadFromCounts(group, counts)).toBe(onUnseen.countRight) // 2 == 2, not 1
    })
 
+   it("fromHash honors an explicit seen #pos instead of bouncing/drifting to the last unseen", async () => {
+      await readSome() // ch1 seen→2, ch2 seen→1; unseen chron 3 (ch2), 4 (ch1)
+      nav.setUnreadOnly(true)
+      // Refreshing #2!news: chron 2 (ch1) is an already-SEEN article, below ch1's
+      // raised bound (seen+1 = 3). filter.matches() would reject it and bounce to
+      // last() (chron 4, the highest unseen); recordSeen would mark that seen, so a
+      // second refresh would drift lower again. The hash position must be honored.
+      const shown = await nav.fromHash("2!news")
+      expect(data.loadArticle).toHaveBeenLastCalledWith(2)
+      expect(shown.article.s).toBe(1)
+      // Stable across a reload of the same hash — no downward drift.
+      const again = await nav.fromHash("2!news")
+      expect(data.loadArticle).toHaveBeenLastCalledWith(2)
+      expect(again.article.s).toBe(1)
+   })
+
    it("does not affect a single-channel filter (navigates all, including seen)", async () => {
       setupIndex([{ chanId: 1 }, { chanId: 1 }, { chanId: 1 }])
       await nav.fromHash("1") // chan:1 = 1
