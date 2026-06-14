@@ -765,6 +765,30 @@ describe("pruneSeen", () => {
    })
 })
 
+describe("isRowUnread", () => {
+   // Strictly-after the channel's seen high-water — the same rule chanUnread
+   // counts by (countAll − countLeft(seen+1)). recordSeen stores the just-read
+   // article's OWN chronIdx, so the row AT seen must read as READ, not unread, or
+   // the list dot disagrees with the channel badge by one row.
+   const seen = { "chan:5": 50 }
+
+   it("treats the article at the seen high-water (chron === seen) as READ", () => {
+      expect(nav.isRowUnread(50, 5, seen)).toBe(false)
+   })
+
+   it("treats older articles (chron < seen) as READ", () => {
+      expect(nav.isRowUnread(49, 5, seen)).toBe(false)
+   })
+
+   it("treats newer articles (chron > seen) as UNREAD", () => {
+      expect(nav.isRowUnread(51, 5, seen)).toBe(true)
+   })
+
+   it("treats a never-seen channel as fully unread", () => {
+      expect(nav.isRowUnread(0, 7, seen)).toBe(true)
+   })
+})
+
 describe("filter mutations", () => {
    it("set() resolves tag and sets filter", async () => {
       data.db.channels = { "5": makeChannel({ id: 5, tag: "news" }), "6": makeChannel({ id: 6, tag: "news" }) }

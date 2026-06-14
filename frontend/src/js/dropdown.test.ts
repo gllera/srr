@@ -136,7 +136,6 @@ describe("dropdown: image-proxy menu", () => {
 
 describe("jump: native date picker", () => {
    let dropdown: Dropdown
-   let guard: ReturnType<typeof vi.fn>
    let input: HTMLInputElement
 
    // Assign showPicker as an own property so it shadows whatever jsdom's
@@ -150,9 +149,6 @@ describe("jump: native date picker", () => {
    beforeEach(async () => {
       document.body.innerHTML = SKELETON
       localStorage.clear()
-      guard = vi.fn()
-      nav.goTo.mockClear()
-      data.findChronForTimestamp.mockClear()
       data.db.first_fetched = 0
       vi.resetModules()
       dropdown = await import("./dropdown")
@@ -187,20 +183,18 @@ describe("jump: native date picker", () => {
       expect(focus).toHaveBeenCalledTimes(1)
    })
 
-   it("jumps to local midnight of the picked date and opens the reader via guard", async () => {
-      data.findChronForTimestamp.mockResolvedValueOnce(42)
+   it("hands local midnight of the picked date to onPick (does not open the reader)", () => {
+      const onPick = vi.fn()
       input.value = "2024-06-12"
-      dropdown.dateJump(input, guard)
-      expect(guard).toHaveBeenCalledTimes(1)
-      await (guard.mock.calls[0][0] as () => Promise<unknown>)()
-      expect(data.findChronForTimestamp).toHaveBeenCalledWith(new Date(2024, 5, 12).getTime() / 1000)
-      expect(nav.goTo).toHaveBeenCalledWith(42)
+      dropdown.dateJump(input, onPick)
+      expect(onPick).toHaveBeenCalledWith(new Date(2024, 5, 12).getTime() / 1000)
    })
 
    it("does nothing when no date is set (cancelled picker)", () => {
+      const onPick = vi.fn()
       input.value = ""
-      dropdown.dateJump(input, guard)
-      expect(guard).not.toHaveBeenCalled()
+      dropdown.dateJump(input, onPick)
+      expect(onPick).not.toHaveBeenCalled()
    })
 })
 

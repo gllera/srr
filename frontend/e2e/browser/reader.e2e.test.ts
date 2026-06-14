@@ -25,6 +25,17 @@ const $link = (p: Page) => p.$eval(".srr-title-link", (e) => e.getAttribute("hre
 const $nextDisabled = (p: Page) => p.$eval(".srr-next", (e) => (e as HTMLButtonElement).disabled)
 const $popupOpen = (p: Page) => p.$eval(".srr-popup", (e) => e.classList.contains("srr-open"))
 const $rowTitles = (p: Page) => p.$$eval(".srr-list a.srr-row .srr-row-title", (els) => els.map((e) => e.textContent))
+// Viewport-relative top of the row whose title matches (null if absent) — used to
+// assert the list anchored a given article at the top of the viewport.
+const $rowTop = (p: Page, title: string) =>
+   p.$$eval(
+      ".srr-list a.srr-row",
+      (els, t) => {
+         const row = els.find((e) => e.querySelector(".srr-row-title")?.textContent === t)
+         return row ? row.getBoundingClientRect().top : null
+      },
+      title,
+   )
 
 const waitTitle = (p: Page, t: string) =>
    p.waitForFunction((want) => document.querySelector(".srr-title")?.textContent === want, { timeout: 20000 }, t)
@@ -133,6 +144,188 @@ describe("browser: real SPA over real packs", () => {
          await page.click(".srr-back")
          await waitList(page)
          expect(await page.$eval(".srr-reader", (e) => (e as HTMLElement).hidden)).toBe(true)
+      } finally {
+         await close()
+      }
+   })
+
+   // The list is a bidirectional infinite window anchored at the reader's
+   // position: returning from the reader drops you back at the article you were
+   // reading (it sits at the top of the viewport), with newer ("next") articles
+   // loaded ABOVE it and older ones below — literally the reader's prev/next
+   // sequence laid out vertically.
+   it("anchors the list at the article you were reading, newer above / older below", async () => {
+      const [page, close] = await open()
+      try {
+         // A short viewport so this 6-row store is taller than the fold — only
+         // then is there enough content below the anchor to scroll it to the top.
+         await page.setViewport({ width: 500, height: 140 })
+         await waitList(page)
+         await page.click(".srr-list a.srr-row") // top row = sport title 1 (newest)
+         await waitReader(page)
+         expect(await $title(page)).toBe("sport title 1")
+         // Step older (prev) into the middle of the feed.
+         await page.keyboard.press("ArrowLeft")
+         await waitTitle(page, "sport title 0")
+         await page.keyboard.press("ArrowLeft")
+         await waitTitle(page, "tech title 1")
+         await page.keyboard.press("ArrowLeft")
+         await waitTitle(page, "tech title 0")
+
+         // Return to the list — it re-anchors at the article we were reading.
+         await page.click(".srr-back")
+         await waitList(page)
+         // The anchored row sits at the top of the viewport (within a px or two).
+         await page.waitForFunction(
+            () => {
+               const row = [...document.querySelectorAll(".srr-list a.srr-row")].find(
+                  (e) => e.querySelector(".srr-row-title")?.textContent === "tech title 0",
+               )
+               return row != null && Math.abs(row.getBoundingClientRect().top) <= 2
+            },
+            { timeout: 20000 },
+         )
+         // Newer ("next") articles are loaded ABOVE the anchor (scrolled off the top)...
+         expect(await $rowTop(page, "sport title 1")).toBeLessThan(0)
+         expect(await $rowTop(page, "tech title 1")).toBeLessThan(0)
+         // ...and older ones are BELOW it.
+         expect(await $rowTop(page, "news title 0")).toBeGreaterThan(0)
+      } finally {
+         await close()
+      }
+   })
+
+   // A tag/channel with no navigation information (never opened on this device)
+   // opens the list at its OLDEST article, not the newest — the start of the
+   // backlog, with the unread/newer rows above it. The oldest row has nothing
+   // below it, so anchoring there scrolls the list DOWN (scrollY > 0) and pushes
+   // the newest rows above the fold, unlike [ALL] which sits pinned at the newest.
+   it("a never-opened tag opens the list scrolled to its oldest article (newer above)", async () => {
+      const [page, close] = await open()
+      try {
+         // Short viewport so the filtered list is taller than the fold and scrollable.
+         await page.setViewport({ width: 500, height: 140 })
+         await waitList(page)
+         expect(await page.evaluate(() => window.scrollY)).toBe(0) // boot [ALL] sits at the newest
+
+         // Pick the never-read "world" tag (News + Tech) from a fresh boot.
+         await page.click(".srr-channel")
+         await page.waitForSelector('#srr-channel-menu.srr-open a[data-value="world"]', { timeout: 20000 })
+         await page.click('#srr-channel-menu a[data-value="world"]')
+         await waitList(page)
+         expect(await page.evaluate(() => location.hash)).toBe("#!world")
+
+         // No nav info for "world" → anchored at its oldest article: the list
+         // scrolled away from the newest. The newest world rows are scrolled off
+         // ABOVE the fold — only possible when the list anchored below them, at
+         // the oldest, rather than staying pinned at the newest ([ALL]).
+         await page.waitForFunction(() => window.scrollY > 0, { timeout: 20000 })
+         expect(await $rowTop(page, "tech title 1")).toBeLessThan(0) // newest world, scrolled off above
+         expect(await $rowTop(page, "tech title 0")).toBeLessThan(0)
+         // The oldest world row (news title 0) is the anchor, on screen near the top.
+         const oldestTop = await $rowTop(page, "news title 0")
+         expect(oldestTop).not.toBeNull()
+         expect(oldestTop!).toBeLessThan(140) // within the 140px viewport (not off the bottom)
+         // Sport (tag "play") is excluded entirely.
+         expect(await $rowTop(page, "sport title 1")).toBeNull()
+      } finally {
+         await close()
+      }
+   })
+
+   // The calendar jump (🗓, list-only) scrubs the LIST to the first article
+   // at-or-after the picked day — it repositions the list (newer above, older
+   // below) rather than opening the reader. The shared store is a single fetch,
+   // so every entry shares one fetched-at block: a date before the fetch snaps to
+   // the oldest article. Drives the hidden date input directly (the native picker
+   // can't be scripted in headless Chrome).
+   it("date jump repositions the list instead of opening the reader", async () => {
+      const [page, close] = await open()
+      try {
+         // Short viewport so the 6-row store is taller than the fold and scrollable.
+         await page.setViewport({ width: 500, height: 140 })
+         await waitList(page)
+         expect(await page.evaluate(() => window.scrollY)).toBe(0) // boot anchors at newest (top)
+
+         await page.$eval(".srr-jump-date", (el) => {
+            const input = el as HTMLInputElement
+            input.value = "2000-01-01" // well before the fetch → snaps to the oldest article
+            input.dispatchEvent(new Event("change", { bubbles: true }))
+         })
+
+         // It stays on the LIST (the reader never opens) and scrolls down to anchor
+         // the oldest article at the top of the viewport (newer rows scrolled off above).
+         await page.waitForFunction(
+            () => {
+               const reader = document.querySelector(".srr-reader") as HTMLElement | null
+               const row = [...document.querySelectorAll(".srr-list a.srr-row")].find(
+                  (e) => e.querySelector(".srr-row-title")?.textContent === "news title 0",
+               )
+               return (
+                  !!reader &&
+                  reader.hidden &&
+                  !!row &&
+                  window.scrollY > 0 &&
+                  Math.abs(row.getBoundingClientRect().top) <= 2
+               )
+            },
+            { timeout: 20000 },
+         )
+         // The newer ("next") articles sit ABOVE the anchored oldest row.
+         expect(await $rowTop(page, "news title 1")).toBeLessThan(0)
+         expect(await $rowTop(page, "sport title 1")).toBeLessThan(0)
+      } finally {
+         await close()
+      }
+   })
+
+   // The list is a non-committal staging surface: filter + position changes
+   // there reach the reader only when you tap an article (the commit). A Cancel
+   // button (list-only, shown once you've been into the reader) discards the
+   // staging and resumes the article you were reading, under its original filter.
+   it("Cancel discards staged list changes and resumes the article you were reading", async () => {
+      const [page, close] = await open()
+      try {
+         await waitList(page)
+         // Fresh boot into the list (nothing read yet) → no return target, Cancel hidden.
+         expect(await page.$eval(".srr-cancel", (e) => getComputedStyle(e).display)).toBe("none")
+
+         // Read into the middle of the feed.
+         await page.click(".srr-list a.srr-row") // sport title 1 (newest)
+         await waitReader(page)
+         await page.keyboard.press("ArrowLeft")
+         await waitTitle(page, "sport title 0")
+         await page.keyboard.press("ArrowLeft")
+         await waitTitle(page, "tech title 1")
+
+         // Back to the list: now there's an article to return to → Cancel appears.
+         await page.click(".srr-back")
+         await waitList(page)
+         await page.waitForFunction(
+            () => getComputedStyle(document.querySelector(".srr-cancel") as Element).display !== "none",
+            { timeout: 20000 },
+         )
+
+         // Stage a filter change (pick the "play" tag = Sport only) — it must NOT
+         // touch the reader yet.
+         await page.click(".srr-channel")
+         await page.waitForSelector('#srr-channel-menu.srr-open a[data-value="play"]', { timeout: 20000 })
+         await page.click('#srr-channel-menu a[data-value="play"]')
+         await waitList(page)
+         await page.waitForFunction(
+            () => {
+               const t = [...document.querySelectorAll(".srr-list a.srr-row .srr-row-title")].map((e) => e.textContent)
+               return t.length === 2 && t.every((x) => (x ?? "").includes("sport"))
+            },
+            { timeout: 20000 },
+         )
+         expect(await page.evaluate(() => location.hash)).toBe("#!play")
+
+         // Cancel: discard the staged "play" filter and resume tech title 1 ([ALL]).
+         await page.click(".srr-cancel")
+         await waitReader(page)
+         expect(await $title(page)).toBe("tech title 1")
+         expect(await page.evaluate(() => location.hash)).toBe("#3")
       } finally {
          await close()
       }

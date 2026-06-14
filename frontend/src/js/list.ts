@@ -5,17 +5,33 @@ import * as nav from "./nav"
 // The list surface — the app's home: a scannable feed of headlines under the
 // current filter, newest-first, with a read/unread dot per row. Tapping a row
 // opens the reader (app wires that via setup's `open`). The list owns no nav
-// state of its own — it walks nav.feedLeft over nav.filter.channels (the same
-// neighbor seam the reader steps through, just unbounded) and reads the seen
-// map for dots, so the filter/unseen-only semantics are identical to the reader's.
+// state of its own — it walks nav.feedLeft/feedRight over the active filter (the
+// same neighbor seam the reader steps through, just unbounded in both
+// directions) and reads the seen map for dots, so the filter/unseen-only/saved/
+// search semantics are identical to the reader's.
+//
+// Bidirectional infinite window, anchored at the filter's reading position. On
+// open the list anchors at nav.listAnchor() — the article the reader last sat on
+// when it still matches the filter, else a tag/channel's remembered resume
+// position, else (a tag/channel with no navigation information) its OLDEST
+// article, else the newest match ([ALL]/saved/search). That anchor row is
+// scrolled to the top of the viewport; NEWER ("next") articles load ABOVE it
+// (scroll up) and older ones below (scroll down), both paged lazily off
+// IntersectionObserver sentinels.
+//
+// The rendered rows ARE a persisted, expandable navigation list: returning from
+// the reader to an article that's already a rendered row (the common case — you
+// stepped a few within the loaded window) re-anchors by scrolling to it with NO
+// feed walk, NO fetch and NO rebuild (see show()). Only a filter change or an
+// article outside the window triggers a bounded rebuild (≤ 2 batches).
 
-// Rows fetched per older batch. One batch spans ~1 data pack (titles already
-// ride in the data packs the LRU holds), so this is a paint-budget knob, not a
-// fetch-count one.
+// Rows fetched per batch in either direction. One batch spans ~1 data pack
+// (titles already ride in the data packs the LRU holds), so this is a
+// paint-budget knob, not a fetch-count one.
 const BATCH = 30
 
-// Start fetching the next batch this far below the fold (a scroll runway so
-// rows are ready before they're scrolled into view).
+// Start fetching the next batch this far beyond the fold (a scroll runway so
+// rows are ready before they're scrolled into view), in either direction.
 const ROOT_MARGIN = "800px"
 
 // Per-row save star. Tapping it toggles nav.toggleSaved without opening the
@@ -24,28 +40,33 @@ const STAR_SVG =
    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.4l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z"/></svg>'
 
 let container: HTMLElement
-let rowsEl: HTMLElement
-let sentinel: HTMLElement
+let rowsEl: HTMLElement | null = null
+let topSentinel: HTMLElement
+let bottomSentinel: HTMLElement
 let onOpen: (chron: number) => void = () => {}
+// Called after every programmatic scroll the list performs (anchor positioning,
+// prepend compensation) so the gesture layer can resync its toolbar-hide
+// baseline — otherwise the jump reads as a downward scroll and hides the toolbar.
+let notifyScroll: () => void = () => {}
 
-// Freshness token: a new render() reassigns it so any in-flight older-load (or
-// pending observer callback) from the prior filter bails before touching the
-// DOM — the same discipline as dropdown's fill tokens and nav's prefetch.
+// Freshness token: a new render() reassigns it so any in-flight load (or pending
+// observer callback) from the prior filter bails before touching the DOM — the
+// same discipline as dropdown's fill tokens and nav's prefetch.
 let tok: object = {}
-let oldest = -1 // chronIdx of the oldest row currently rendered (-1 = none yet)
-let exhausted = false // walked off the start of the (filtered) feed
-let loading = false // a batch load is in flight (re-entry guard for loadOlder)
-let pumping = false // a viewport-fill loop is running (re-entry guard for pump)
+let newest = -1 // chronIdx of the newest (topmost) row rendered (-1 = none yet)
+let oldest = -1 // chronIdx of the oldest (bottommost) row rendered (-1 = none yet)
+let exhaustedTop = false // walked off the newest end (no newer matches above)
+let exhaustedBottom = false // walked off the oldest end of the (filtered) feed
+let loadingTop = false // a newer-load is in flight (re-entry guard for fetchNewer)
+let loadingBottom = false // an older-load is in flight (re-entry guard for fetchOlder)
+let pumping = false // a downward viewport-fill loop is running (re-entry guard for pump)
 let builtKey: string | null = null // filterKey() the current DOM was built for
 let observer: IntersectionObserver | null = null
 
-// Scroll memory keyed by filter, so returning from the reader (back button or
-// browser-back) lands where you left the list. Session-only (cleared on reload).
-let savedScroll: { key: string; top: number } | null = null
-
-export function setup(el: HTMLElement, open: (chron: number) => void): void {
+export function setup(el: HTMLElement, open: (chron: number) => void, onScroll?: () => void): void {
    container = el
    onOpen = open
+   notifyScroll = onScroll ?? (() => {})
    container.addEventListener("click", (e) => {
       const target = e.target as HTMLElement
       const a = target.closest("a.srr-row") as HTMLElement | null
@@ -68,15 +89,8 @@ export function setup(el: HTMLElement, open: (chron: number) => void): void {
          }
          return
       }
-      saveScroll()
       onOpen(chron)
    })
-}
-
-// Remember the current scroll position against the active filter — called
-// before leaving the list for the reader.
-export function saveScroll(): void {
-   savedScroll = { key: nav.filterKey(), top: window.scrollY }
 }
 
 function el(tag: string, className: string): HTMLElement {
@@ -129,20 +143,49 @@ function emptyState(): void {
 // empty state, dropping the observer so a stale sentinel can't keep firing.
 function showEmptyState(): void {
    teardownObserver()
+   rowsEl = null
    container.replaceChildren()
    emptyState()
 }
 
-// Full (re)build: clears the list and loads the newest batch under the current
-// filter, scrolled to top. Sets builtKey so show() can later refresh-vs-rebuild.
+// Walk the filtered feed from `from` (inclusive) collecting up to `max` matching
+// chronIdxs. "older" walks feedLeft downward (returns DESCENDING chrons, so the
+// caller can append them newest-first); "newer" walks feedRight upward (returns
+// ASCENDING chrons). `exhausted` is true when the walk ran off the end of the
+// feed (a -1 lookup or out-of-range index), as opposed to merely filling `max`.
+async function walk(
+   my: object,
+   from: number,
+   max: number,
+   dir: "older" | "newer",
+): Promise<{ chrons: number[]; exhausted: boolean }> {
+   const chrons: number[] = []
+   const n = data.db.total_art
+   let i = from
+   while (chrons.length < max) {
+      if (dir === "older" ? i < 0 : i >= n) return { chrons, exhausted: true }
+      const found = await (dir === "older" ? nav.feedLeft(i) : nav.feedRight(i))
+      if (my !== tok) return { chrons, exhausted: false }
+      if (found === -1) return { chrons, exhausted: true }
+      chrons.push(found)
+      i = dir === "older" ? found - 1 : found + 1
+   }
+   return { chrons, exhausted: false }
+}
+
+// Full (re)build: clears the list, resolves the anchor (the reader's article when
+// it matches, else newest), loads a batch older (incl. the anchor) and — when
+// anchored mid-feed — a batch newer above it, then scrolls the anchor to the top.
+// Sets builtKey so show() can later refresh-vs-rebuild.
 export async function render(): Promise<void> {
    const my = (tok = {})
    teardownObserver()
-   oldest = -1
-   exhausted = false
-   loading = false
+   newest = oldest = -1
+   exhaustedTop = exhaustedBottom = false
+   loadingTop = loadingBottom = false
    pumping = false
    builtKey = nav.filterKey()
+   rowsEl = null
    container.replaceChildren()
 
    if (data.db.total_art === 0) {
@@ -150,27 +193,79 @@ export async function render(): Promise<void> {
       return
    }
 
-   rowsEl = el("div", "srr-list-rows")
-   sentinel = el("div", "srr-list-sentinel")
-   container.append(rowsEl, sentinel)
-
-   await loadOlder(my)
+   const anchor = await nav.listAnchor()
+   // The seed is the topmost row of the older batch: the anchor itself when it's
+   // a real match, the newest match when anchored at -1, and (defensively) the
+   // nearest match below a non-matching anchor.
+   let seed = await nav.feedLeft(anchor === -1 ? data.db.total_art - 1 : anchor)
    if (my !== tok) return
-   if (rowsEl.childElementCount === 0) {
-      container.replaceChildren()
+   if (seed === -1 && anchor !== -1) seed = await nav.feedLeft(data.db.total_art - 1)
+   if (my !== tok) return
+   if (seed === -1) {
       emptyState()
       return
    }
-   window.scrollTo(0, 0)
+   const anchoredMid = anchor !== -1 && seed === anchor
+
+   const older = await walk(my, seed, BATCH, "older") // [seed, ...older], descending
+   if (my !== tok) return
+   const newer = anchoredMid
+      ? await walk(my, seed + 1, BATCH, "newer") // matches above the seed, ascending
+      : { chrons: [], exhausted: true }
+   if (my !== tok) return
+   if (older.chrons.length === 0) {
+      emptyState()
+      return
+   }
+
+   oldest = older.chrons[older.chrons.length - 1]
+   newest = newer.chrons.length ? newer.chrons[newer.chrons.length - 1] : older.chrons[0]
+   exhaustedBottom = older.exhausted || oldest === 0
+   exhaustedTop = newer.exhausted || newest === data.db.total_art - 1
+
+   const chronsDesc = newer.chrons.slice().reverse().concat(older.chrons) // newest-first
+   const seen = nav.getSeenMap()
+   const arts = await Promise.all(chronsDesc.map((c) => data.loadArticle(c)))
+   if (my !== tok) return
+
+   rowsEl = el("div", "srr-list-rows")
+   topSentinel = el("div", "srr-list-sentinel")
+   bottomSentinel = el("div", "srr-list-sentinel")
+   const frag = document.createDocumentFragment()
+   chronsDesc.forEach((c, k) => frag.appendChild(rowEl(c, arts[k], seen)))
+   rowsEl.appendChild(frag)
+   container.append(topSentinel, rowsEl, bottomSentinel)
+
+   if (anchoredMid) scrollChronToTop(seed)
+   else window.scrollTo(0, 0)
+   notifyScroll()
    observe(my)
 }
 
-// Re-show an already-built list (same filter): refresh read/unread dots from
-// the live seen map (you may have read some in the reader) and restore scroll.
+// Re-show an already-built list (same filter). When the reader's article is
+// already a rendered row — the common return path: you stepped a few articles
+// within the loaded window — re-anchor by scrolling to it, with NO feed walk,
+// fetch or rebuild. Filter change, or an article outside the window (you jumped,
+// or navigated past the loaded batch), falls through to a bounded rebuild.
+export async function show(): Promise<void> {
+   const pos = nav.currentChron()
+   if (builtKey === nav.filterKey() && rowsEl && pos >= 0 && findRow(pos)) {
+      refresh()
+      scrollChronToTop(pos)
+      notifyScroll()
+      return
+   }
+   await render()
+}
+
+// Re-derive read/unread dots + saved stars from the live state (you may have read
+// or saved some in the reader), and in the Saved view drop rows un-saved
+// elsewhere. Does NOT move scroll — show() owns re-anchoring.
 export function refresh(): void {
+   if (!rowsEl) return
    const seen = nav.getSeenMap()
    const savedView = nav.filter.saved
-   container.querySelectorAll<HTMLElement>("a.srr-row").forEach((a) => {
+   rowsEl.querySelectorAll<HTMLElement>("a.srr-row").forEach((a) => {
       const chron = Number(a.dataset.chron)
       a.classList.toggle("srr-row-unread", nav.isRowUnread(chron, Number(a.dataset.chan), seen))
       const saved = nav.isSaved(chron)
@@ -180,49 +275,50 @@ export function refresh(): void {
       // feed — drop its row on the way back.
       if (savedView && !saved) a.remove()
    })
-   if (savedView && rowsEl && rowsEl.childElementCount === 0) showEmptyState()
-   if (savedScroll && savedScroll.key === nav.filterKey()) window.scrollTo(0, savedScroll.top)
+   if (savedView && rowsEl.childElementCount === 0) showEmptyState()
 }
 
-// Entry point on (re)entering the list surface: rebuild when the filter changed
-// since the last build, else just refresh dots + restore scroll.
-export async function show(): Promise<void> {
-   if (builtKey !== nav.filterKey()) await render()
-   else refresh()
-}
-
-// Force a rebuild regardless of builtKey — used after an unseen-only toggle,
-// where the filter token is unchanged but its membership (raised bounds) is not.
+// Force a rebuild regardless of builtKey — used after an unseen-only toggle or a
+// search-query change, where the filter token may be unchanged but its
+// membership (raised bounds / new hit set) is not.
 export function rerender(): Promise<void> {
    builtKey = null
    return render()
 }
 
-// Pull the next older batch by walking findLeft from below the oldest row.
-// Guarded against re-entry; bails on a stale token without touching the DOM.
-async function loadOlder(my: object): Promise<void> {
-   if (my !== tok || exhausted || loading) return
-   loading = true
+function findRow(chron: number): HTMLElement | null {
+   return rowsEl ? rowsEl.querySelector<HTMLElement>(`a.srr-row[data-chron="${chron}"]`) : null
+}
+
+// Scroll the row for `chron` to the top of the viewport (below the sticky search
+// bar when it's showing). A no-op if the row isn't rendered (e.g. saved view
+// dropped it on return) — the caller then keeps the current scroll.
+function scrollChronToTop(chron: number): void {
+   const row = findRow(chron)
+   if (!row) return
+   const top = row.getBoundingClientRect().top + window.scrollY
+   window.scrollTo(0, Math.max(0, top - stickyOffset()))
+}
+
+function stickyOffset(): number {
+   const bar = document.querySelector<HTMLElement>(".srr-searchbar")
+   return bar && bar.offsetParent !== null ? bar.offsetHeight : 0
+}
+
+// Pull the next older batch and append it below. Guarded against re-entry; bails
+// on a stale token without touching the DOM.
+async function fetchOlder(my: object): Promise<void> {
+   if (my !== tok || exhaustedBottom || loadingBottom || !rowsEl) return
+   loadingBottom = true
    try {
-      const from = oldest === -1 ? data.db.total_art - 1 : oldest - 1
-      const chrons: number[] = []
-      let i = from
-      while (chrons.length < BATCH && i >= 0) {
-         const found = await nav.feedLeft(i)
-         if (my !== tok) return
-         if (found === -1) {
-            exhausted = true
-            break
-         }
-         chrons.push(found)
-         i = found - 1
-      }
+      const { chrons, exhausted } = await walk(my, oldest - 1, BATCH, "older")
+      if (my !== tok) return
       if (chrons.length === 0) {
-         exhausted = true
+         exhaustedBottom = true
          return
       }
       oldest = chrons[chrons.length - 1]
-      if (oldest === 0) exhausted = true
+      if (exhausted || oldest === 0) exhaustedBottom = true
       const seen = nav.getSeenMap()
       const arts = await Promise.all(chrons.map((c) => data.loadArticle(c)))
       if (my !== tok) return
@@ -230,27 +326,75 @@ async function loadOlder(my: object): Promise<void> {
       chrons.forEach((c, k) => frag.appendChild(rowEl(c, arts[k], seen)))
       rowsEl.appendChild(frag)
    } finally {
-      if (my === tok) loading = false
+      if (my === tok) loadingBottom = false
    }
 }
 
-// Public for the IntersectionObserver and tests: pull one older batch under the
-// current freshness token.
+// Pull the next newer batch and PREPEND it above, compensating window scroll so
+// the viewport stays put (the content above the fold shifts down by the new
+// rows' height). overflow-anchor:none on the list (see styles.css) keeps the
+// browser from also adjusting — manual compensation is the sole adjuster, so it
+// behaves the same on engines with and without scroll anchoring (Safari has none).
+async function fetchNewer(my: object): Promise<void> {
+   if (my !== tok || exhaustedTop || loadingTop || newest === -1 || !rowsEl) return
+   loadingTop = true
+   try {
+      const { chrons, exhausted } = await walk(my, newest + 1, BATCH, "newer") // ascending
+      if (my !== tok) return
+      if (chrons.length === 0) {
+         exhaustedTop = true
+         return
+      }
+      newest = chrons[chrons.length - 1]
+      if (exhausted || newest === data.db.total_art - 1) exhaustedTop = true
+      const seen = nav.getSeenMap()
+      const arts = await Promise.all(chrons.map((c) => data.loadArticle(c)))
+      if (my !== tok) return
+      const frag = document.createDocumentFragment()
+      // chrons is ascending; prepend newest-first so the block reads top-down.
+      for (let k = chrons.length - 1; k >= 0; k--) frag.appendChild(rowEl(chrons[k], arts[k], seen))
+      const scroller = document.scrollingElement ?? document.documentElement
+      const before = scroller.scrollHeight
+      rowsEl.insertBefore(frag, rowsEl.firstChild)
+      const delta = scroller.scrollHeight - before
+      if (delta) {
+         window.scrollTo(0, window.scrollY + delta)
+         notifyScroll()
+      }
+   } finally {
+      if (my === tok) loadingTop = false
+   }
+}
+
+// Public for the IntersectionObserver and tests: page one batch in either
+// direction under the current freshness token. loadMore keeps its name (older
+// paging) for back-compat; loadNewer pages upward.
 export function loadMore(): Promise<void> {
-   return loadOlder(tok)
+   return fetchOlder(tok)
+}
+export function loadNewer(): Promise<void> {
+   return fetchNewer(tok)
 }
 
 function observe(my: object): void {
    if (typeof IntersectionObserver === "undefined") return // jsdom: no layout/IO
    observer = new IntersectionObserver(
       (entries) => {
-         if (my === tok && entries.some((e) => e.isIntersecting)) void pump(my)
+         if (my !== tok) return
+         for (const e of entries) {
+            if (!e.isIntersecting) continue
+            if (e.target === topSentinel) void fetchNewer(my)
+            else void pump(my)
+         }
       },
       { rootMargin: ROOT_MARGIN },
    )
-   observer.observe(sentinel)
-   // The first batch may not fill the viewport (tall screen / sparse filter);
-   // pump until the sentinel sits below the fold or the feed is exhausted.
+   observer.observe(topSentinel)
+   observer.observe(bottomSentinel)
+   // The older batch below the anchor may not fill the viewport (tall screen /
+   // sparse filter); pump until the bottom sentinel sits below the fold or the
+   // feed is exhausted. The newer side above needs no initial pump — it's
+   // off-screen until the user scrolls up, where the observer pages it in.
    void pump(my)
 }
 
@@ -258,14 +402,14 @@ async function pump(my: object): Promise<void> {
    if (pumping) return
    pumping = true
    try {
-      while (my === tok && !exhausted) {
-         const rect = sentinel.getBoundingClientRect()
+      while (my === tok && !exhaustedBottom && rowsEl) {
+         const rect = bottomSentinel.getBoundingClientRect()
          if (rect.top > window.innerHeight + 800) break
          const before = rowsEl.childElementCount
-         await loadOlder(my)
-         // No progress and not exhausted (a transient loadOlder no-op) — stop to
+         await fetchOlder(my)
+         // No progress and not exhausted (a transient fetchOlder no-op) — stop to
          // avoid a busy spin; the next scroll/observer tick will retry.
-         if (rowsEl.childElementCount === before && !exhausted) break
+         if (rowsEl && rowsEl.childElementCount === before && !exhaustedBottom) break
       }
    } finally {
       pumping = false

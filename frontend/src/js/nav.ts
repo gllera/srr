@@ -88,6 +88,51 @@ export function currentChron(): number {
    return pos
 }
 
+// Where the list surface should anchor when (re)built: the article currently in
+// the reader (pos) when it still matches the active filter — so opening the list
+// drops you back at the article you were reading, with newer ("next") articles
+// above and older below — else -1, meaning "newest" (a fresh boot, or a filter
+// change that left the prior article behind). filter.matches consults the same
+// state navigation does — raised bounds (unseen-only), the explicit set
+// (saved/search) — so the list anchors exactly where the reader sits.
+export function anchorChron(): number {
+   if (pos >= 0 && currentChan >= 0 && filter.matches(currentChan, pos)) return pos
+   return -1
+}
+
+// Where the LIST surface anchors when (re)built — a superset of anchorChron that
+// adds per-filter resume, mirroring how switchFilter opens a tag/channel in the
+// reader. The reader's live article still wins when it matches the active filter
+// (you tapped back from reading it — anchorChron). Otherwise, for a tag/channel
+// filter:
+//   • one you've opened before resumes at its remembered position (getSeen — a
+//     channel's own seen high-water, a tag's oldest member), when that position
+//     is still a row of the active filter. In unseen-only mode it isn't (seen
+//     articles fall below the raised bound), so it drops through to the oldest
+//     unread — the natural "start of the backlog" there too.
+//   • one with NO navigation information (never opened on this device, or a
+//     stale/foreign stored position) anchors at its OLDEST matching article, so
+//     the list opens at the start of the backlog with the unread rows above it,
+//     instead of at the newest.
+// [ALL], ★ Saved and search keep the newest-first default (-1) — the same place
+// switchFilter opens saved/search and where the home firehose belongs. Async
+// because resolving the oldest match / a resume position's channel may touch an
+// idx pack; anchorChron stays synchronous for the live-position callers.
+export async function listAnchor(): Promise<number> {
+   const live = anchorChron()
+   if (live >= 0) return live
+   if (!filter.active || filter.saved || filter.search) return -1
+   if (filter.tokens.length === 1) {
+      const resume = getSeen(filter.tokens[0])
+      if (resume !== undefined && resume >= 0 && resume < data.db.total_art) {
+         if (filter.matches(await data.getChannelId(resume), resume)) return resume
+      }
+   }
+   // Oldest match: feedRight from the smallest filter bound (mirrors first()).
+   const start = filter.channels.size > 0 ? Math.min(...filter.channels.values()) : 0
+   return feedRight(start)
+}
+
 // Largest saved chron <= from / smallest saved chron >= from (-1 = none). Pure
 // scans of the small sorted set — saved navigation never fetches an idx pack.
 function savedLeft(from: number): number {
@@ -576,6 +621,12 @@ function getSeen(token: string): number | undefined {
 }
 
 function recordSeen(article: IArticle) {
+   // Search (q:) mode jumps to title-search hits, not a contiguous read-through:
+   // advancing the channel's seen high-water here would mark every article in
+   // that channel up to the hit as seen, including ones never shown. So search
+   // navigations never touch the seen frontier — a hit you peek at via search
+   // stays unread until you actually read it in the feed.
+   if (filter.search) return
    const ch = data.db.channels[article.s]
    if (!ch) return
    try {
@@ -660,6 +711,7 @@ function resolveNoMatch(replace = false): IShowFeed {
       filtered: filter.active,
       channel: undefined,
       countRight: 0,
+      placeholder: true,
    }
 }
 
@@ -802,6 +854,30 @@ export async function goTo(idx: number): Promise<IShowFeed> {
    return found === -1 ? last() : resolve(found)
 }
 
+// Position the navigation cursor at chronIdx WITHOUT loading the article or
+// producing an IShowFeed — used by the date jump, which repositions the LIST
+// (the list anchors at this cursor: newer above, older below) instead of
+// opening the reader. Snaps forward to the next matching article like goTo,
+// then falls back to the newest match, so the cursor always lands on a real
+// filter member. Returns the resolved chronIdx (-1 only when the filter has no
+// articles). getChannelId touches just the idx pack (resident or lazily
+// fetched) — no data-pack load, since the list paints titles from the rows it
+// walks; abortPrefetch/clearing next.* drop any reader prefetch we're leaving.
+export async function seek(idx: number): Promise<number> {
+   if (data.db.total_art === 0) {
+      pos = currentChan = -1
+      return -1
+   }
+   if (idx < 0 || idx >= data.db.total_art) idx = data.db.total_art - 1
+   let found = await feedRight(idx)
+   if (found === -1) found = await feedLeft(data.db.total_art - 1)
+   pos = found
+   currentChan = found === -1 ? -1 : await data.getChannelId(found)
+   next.left = next.right = undefined
+   abortPrefetch()
+   return found
+}
+
 export function getFilterEntries(): string[] {
    const { sortedTags, untagged } = data.groupChannelsByTag()
    const entries = [""]
@@ -870,13 +946,13 @@ export function isSingleFilter(token: string): boolean {
    return token !== "" && filter.tokens.length === 1 && filter.tokens[0] === token
 }
 
-export async function cycleFilter(dir: number): Promise<IShowFeed> {
-   const entries = getFilterEntries()
+// The cycle "origin": like getCurrentFilterKey, but a single-channel filter on a
+// TAGGED channel resolves to its tag. getFilterEntries lists tagged channels only
+// by tag (never by id), so a raw id would miss indexOf and snap cycling to [ALL].
+// Shared by the reader (cycleFilter) and the list (app.onCycle) so both surfaces
+// cycle relative to the same current selection.
+export function cycleOriginKey(): string {
    let current = getCurrentFilterKey()
-   // A single-channel filter on a TAGGED channel has no entry of its own
-   // (getFilterEntries lists tagged channels only by tag), so indexOf would
-   // miss and cycling would snap to [ALL]. Resolve it to the channel's tag so
-   // cycling continues relative to the current selection.
    if (current !== "" && filter.tokens.length === 1) {
       const num = Number(current)
       if (Number.isFinite(num)) {
@@ -884,7 +960,12 @@ export async function cycleFilter(dir: number): Promise<IShowFeed> {
          if (ch?.tag) current = ch.tag
       }
    }
-   let idx = entries.indexOf(current)
+   return current
+}
+
+export async function cycleFilter(dir: number): Promise<IShowFeed> {
+   const entries = getFilterEntries()
+   let idx = entries.indexOf(cycleOriginKey())
    if (idx === -1) idx = 0
    idx = (idx + dir + entries.length) % entries.length
    return switchFilter(entries[idx])

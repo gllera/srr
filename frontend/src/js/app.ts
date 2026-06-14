@@ -8,7 +8,7 @@ import {
    type ChannelMenuHost,
 } from "./dropdown"
 import { collapseBrokenMedia, formatDate, sanitizeHtml, timeAgo, URL_DENY } from "./fmt"
-import { setupGestures } from "./gestures"
+import { setupGestures, type Gestures } from "./gestures"
 import * as list from "./list"
 import * as nav from "./nav"
 
@@ -16,6 +16,7 @@ const el = {
    article: document.querySelector(".srr-reader") as HTMLElement,
    listView: document.querySelector(".srr-list") as HTMLElement,
    back: document.querySelector(".srr-back") as HTMLButtonElement,
+   cancel: document.querySelector(".srr-cancel") as HTMLButtonElement,
    title: document.querySelector(".srr-title") as HTMLElement,
    content: document.querySelector(".srr-content") as HTMLElement,
    titleLink: document.querySelector(".srr-title-link") as HTMLAnchorElement,
@@ -43,7 +44,18 @@ const el = {
 
 // Which surface is showing. The list is home; the reader is the drill-down.
 let view: "list" | "reader" = "list"
+// Set once gestures are wired; the list calls it after a programmatic scroll so
+// the toolbar-hide baseline stays in sync (declared up here so list.setup, wired
+// before setupGestures runs, can close over it).
+let gestures: Gestures | null = null
 let busy = false
+// The list is a non-committal staging surface: while it's open you can change
+// the filter and reposition (date-jump) without disturbing the reader. Tapping
+// an article is the only commit; until then, Cancel resumes the article you were
+// reading. readerSnapshot is that return target — the reader's committed
+// {pos, tokens}, captured when you leave the reader for the list (backToList),
+// dropped when any reader view commits (render) or the URL changes (route).
+let readerSnapshot: { pos: number; tokens: string[] } | null = null
 let retryFn: (() => void) | null = null
 let currentPublished = 0
 let currentChannel = { id: 0, title: "", tag: "" }
@@ -114,6 +126,14 @@ function clearContentTransition() {
 
 function render(o: IShowFeed) {
    showReader()
+   // Showing the reader is a commit — the list's staging (and its Cancel return
+   // target) is now fulfilled or replaced, so drop the snapshot (hides Cancel).
+   setSnapshot(null)
+   // ...and supersede any pending debounced search query. A row-tap commit can
+   // land within the 200ms search debounce; without this the stale timer fires
+   // applySearchQuery under the now-hidden list and rewrites the reader's hash to
+   // the positionless #!q:<query>, losing the article's resume position.
+   clearTimeout(searchDebounce)
    // t/l are omitempty on the wire — an untitled article must not render "undefined"
    el.title.textContent = o.article.t ?? ""
    el.content.style.transition = "none"
@@ -141,7 +161,7 @@ function render(o: IShowFeed) {
    }
    el.source.textContent = currentChannel.title
    refreshChannelLabel()
-   refreshSaveButton(o.channel !== undefined)
+   refreshSaveButton(!o.placeholder)
 
    document.title = "SRR - " + (o.article.t ?? "")
    window.scrollTo(0, 0)
@@ -187,8 +207,10 @@ function refreshChannelLabel() {
 }
 
 // The reader's save (★) toggle reflects whether the current article is in the
-// saved set. Disabled on the "(no matching articles)" placeholder (no channel),
-// where there's nothing to save.
+// saved set. Disabled only on the "(no matching articles)" placeholder, where
+// there's nothing to save — keyed off o.placeholder, NOT channel presence, so a
+// saved article whose channel was deleted ([DELETED] tombstone, channel ===
+// undefined) stays toggleable.
 function refreshSaveButton(hasArticle: boolean) {
    const chron = nav.currentChron()
    const canSave = hasArticle && chron >= 0
@@ -243,6 +265,30 @@ async function renderListSurface() {
    }
 }
 
+// Picking a date (calendar 🗓, list-only) repositions the LIST to the first
+// article at-or-after local midnight of that day, snapped forward through the
+// active filter — it does NOT open the reader. nav.seek moves the cursor
+// without loading an article; list.show() then anchors the list there (newer
+// "next" rows above, older below), reusing the rendered window when the target
+// is already on screen. Mirrors renderListSurface's guard/loading/searchbar
+// bookkeeping (we're already on the list, so the filter/hash are unchanged); a
+// cold idx-pack fetch that rejects surfaces in the popup with Retry.
+async function jumpToDate(ts: number) {
+   if (busy) return
+   busy = true
+   document.body.classList.add("srr-loading")
+   try {
+      await nav.seek(await data.findChronForTimestamp(ts))
+      await list.show()
+   } catch (e) {
+      showError(e, () => void jumpToDate(ts))
+   } finally {
+      document.body.classList.remove("srr-loading")
+      syncSearchBar()
+      busy = false
+   }
+}
+
 // Hash → surface. A numeric position routes to the reader (deep-link or restored
 // reading position); anything else (empty, or just `!tokens`) is the list at
 // that filter.
@@ -250,6 +296,9 @@ async function route(hash: string) {
    // A URL-driven filter change (hashchange / back-forward) also supersedes any
    // pending debounced query — see selectFilter.
    clearTimeout(searchDebounce)
+   // URL/history navigation supersedes the list's in-app staging, so the Cancel
+   // return target no longer applies.
+   setSnapshot(null)
    const bang = hash.indexOf("!")
    const posStr = bang === -1 ? hash : hash.substring(0, bang)
    if (posStr !== "" && /^-?\d+$/.test(posStr)) {
@@ -283,13 +332,56 @@ async function route(hash: string) {
 // pick). pushState so browser-back from the reader still works; the list
 // restores its saved scroll for the active filter.
 async function goToList(push: boolean) {
+   // Bail BEFORE mutating history/localStorage: renderListSurface also checks
+   // busy, but the pushState/persistHash below would already have rewritten the
+   // URL to a filter the dropped render never painted, desyncing URL from view.
+   if (busy) return
    const h = "#" + nav.tokensSuffix()
    history[push ? "pushState" : "replaceState"](null, "", h)
    persistHash(h)
    await renderListSurface()
 }
 
+// The return target for the list's Cancel button (null = nothing to return to,
+// so the button stays hidden via the body class). Setting it is the ONLY place
+// .srr-can-cancel is toggled.
+function setSnapshot(snap: { pos: number; tokens: string[] } | null) {
+   readerSnapshot = snap
+   document.body.classList.toggle("srr-can-cancel", snap !== null)
+}
+
+// Reader → list via the back button: snapshot the reader's committed position +
+// filter first, so the list can stage filter/position changes non-committally.
+// Tapping an article applies them (render drops the snapshot); Cancel restores
+// this snapshot. currentTokens() returns a copy, so later filter.set on the list
+// can't mutate it.
+function backToList() {
+   setSnapshot({ pos: nav.currentChron(), tokens: nav.currentTokens() })
+   void goToList(true)
+}
+
+// Cancel: discard everything staged on the list and resume the article you were
+// reading, under its original filter. Re-applying the filter before goTo means a
+// staged filter that no longer contains the article can't strand the snapshot —
+// goTo resolves the position within the restored filter. render() clears the
+// snapshot on the way back into the reader.
+async function cancelToArticle() {
+   // Bail BEFORE applyFilter: guard() drops the goTo when busy, but applyFilter
+   // would already have mutated nav.filter, stranding the snapshot/Cancel button
+   // and leaving the filter out of sync with the still-rendered list.
+   if (busy) return
+   const snap = readerSnapshot
+   if (!snap) return
+   nav.applyFilter(snap.tokens)
+   await guard(() => nav.goTo(snap.pos))
+}
+
 async function selectFilter(token: string) {
+   // Bail BEFORE applyFilter/goToList: goToList drops on busy, but applyFilter
+   // would already have mutated nav.filter (and goToList's pushState the URL) for
+   // a render that never ran. Dropping the whole handler keeps filter+URL+view
+   // consistent — same mutex discipline as guard() for reader actions.
+   if (busy) return
    // Any explicit filter change cancels a still-pending debounced search query;
    // otherwise typing then leaving search (✕ / Escape / the magnifier, but also a
    // channel-menu pick or a two-finger/arrow cycle, which all land here) within
@@ -332,6 +424,9 @@ function exitSearch() {
 
 async function applySearchQuery(q: string) {
    clearTimeout(searchDebounce)
+   // Defense in depth against a debounce that fired after the user already left
+   // search (e.g. opened an article): only the list-search surface owns the query.
+   if (view !== "list" || !nav.isSearchFilter()) return
    nav.applyFilter([nav.SEARCH_PREFIX + q])
    const h = "#" + nav.tokensSuffix()
    history.replaceState(null, "", h)
@@ -397,7 +492,10 @@ function onCycle(dir: number) {
    const entries = nav.getFilterEntries()
    if (entries.length <= 1) return
    if (view === "list") {
-      let idx = entries.indexOf(nav.getCurrentFilterKey())
+      // cycleOriginKey (not getCurrentFilterKey) so a single tagged-channel
+      // filter cycles relative to its tag, matching the reader's cycleFilter —
+      // getFilterEntries lists tagged channels only by tag, so a raw id misses.
+      let idx = entries.indexOf(nav.cycleOriginKey())
       if (idx === -1) idx = 0
       void selectFilter(entries[(idx + dir + entries.length) % entries.length])
    } else {
@@ -446,21 +544,28 @@ async function init() {
    nav.pruneSeen()
 
    // The list opens an article in the reader through the same guard mutex as
-   // every other navigation.
-   list.setup(el.listView, (chron) => guard(() => nav.goTo(chron)))
+   // every other navigation. The scroll callback resyncs the gesture toolbar
+   // baseline after the list's anchor jump / prepend compensation.
+   list.setup(
+      el.listView,
+      (chron) => guard(() => nav.goTo(chron)),
+      () => gestures?.resetScroll(),
+   )
 
    el.prev.addEventListener("click", () => guard(() => nav.left()))
    el.next.addEventListener("click", () => guard(() => nav.right()))
-   el.back.addEventListener("click", () => void goToList(true))
+   el.back.addEventListener("click", () => backToList())
+   el.cancel.addEventListener("click", () => void cancelToArticle())
    // capture: error events don't bubble (see collapseBrokenMedia)
    el.content.addEventListener("error", collapseBrokenMedia, true)
    el.channel.addEventListener("click", () => showChannelMenu(channelMenuTag(), guard, dropdownHost))
    el.unreadToggle.addEventListener("click", toggleUnreadOnly)
    el.imgproxy.addEventListener("click", () => showImgProxyMenu())
    // Jump: the button pops the native date picker; picking a day (the input's
-   // change) jumps the reader to that date. No dropdown menu of its own.
+   // change) repositions the LIST to that date (jumpToDate), not the reader. No
+   // dropdown menu of its own.
    el.jump.addEventListener("click", () => openDatePicker(el.jumpDate))
-   el.jumpDate.addEventListener("change", () => dateJump(el.jumpDate, guard))
+   el.jumpDate.addEventListener("change", () => dateJump(el.jumpDate, jumpToDate))
    // Resume reading: open the reader at the latest article in the current filter.
    el.resume.addEventListener("click", () => guard(() => nav.last()))
    // Search: the magnifier toggles the list's "q:<query>" filter; the pinned
@@ -545,7 +650,7 @@ async function init() {
       }
    })
 
-   setupGestures({ prev: el.prev, next: el.next, toolbar: el.toolbar, guard, onCycle })
+   gestures = setupGestures({ prev: el.prev, next: el.next, toolbar: el.toolbar, guard, onCycle })
 
    setInterval(() => {
       if (currentPublished) {
