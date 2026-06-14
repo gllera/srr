@@ -1005,16 +1005,16 @@ describe("isSingleFilter", () => {
 })
 
 describe("unreadCount", () => {
-   it("returns -1 for a channel never seen on this device", async () => {
+   it("returns the full backlog for a channel never seen on this device", async () => {
       setupIndex([{ chanId: 1 }, { chanId: 2 }])
-      expect(await nav.unreadCount(data.db.channels[2])).toBe(-1)
+      expect(await nav.unreadCount(data.db.channels[2])).toBe(1) // its 1 article, all unseen
    })
 
    it("counts the channel's articles strictly after its seen position", async () => {
       setupIndex([{ chanId: 1 }, { chanId: 1 }, { chanId: 2 }, { chanId: 1 }])
       await nav.fromHash("1") // views chron 1 (chan 1) → seen chan:1 = 1
       expect(await nav.unreadCount(data.db.channels[1])).toBe(1) // only chron 3 left
-      expect(await nav.unreadCount(data.db.channels[2])).toBe(-1) // still untouched
+      expect(await nav.unreadCount(data.db.channels[2])).toBe(1) // never seen → its 1 article (chron 2)
    })
 
    it("reading everything via [ALL] clears the counts of passed channels", async () => {
@@ -1065,32 +1065,73 @@ describe("unread-only mode (tags)", () => {
       await nav.fromHash("2") // chan:1 = 2
    }
 
-   it("opening a tag skips seen articles, landing on the oldest unseen", async () => {
-      await readSome()
+   it("opening a tag resumes at its current position, not the next unseen", async () => {
+      await readSome() // ch1 seen→2, ch2 seen→1; unseen chron 3 (ch2), 4 (ch1)
       nav.setUnreadOnly(true)
       const shown = await nav.switchFilter("news")
-      expect(data.loadArticle).toHaveBeenLastCalledWith(3) // ch2, first unseen
+      // Resumes at the tag's saved position (min seen = chron 1, ch2) — the same
+      // current position a channel or a non-unseen tag opens at — NOT the oldest
+      // unseen. The raised bounds no longer bounce the open forward.
+      expect(data.loadArticle).toHaveBeenLastCalledWith(1)
       expect(shown.article.s).toBe(2)
+      expect(shown.has_left).toBe(false) // nothing unseen to the left of the resume
+      const next = await nav.right() // Right steps to the first unseen
+      expect(data.loadArticle).toHaveBeenLastCalledWith(3) // ch2, first unseen
+      expect(next.article.s).toBe(2)
    })
 
-   it("counts only unread remaining to the right and stops at the last unseen", async () => {
+   it("counts unseen remaining including the current one and stops at the last unseen", async () => {
       await readSome()
       nav.setUnreadOnly(true)
-      const shown = await nav.switchFilter("news") // chron 3
-      expect(shown.countRight).toBe(1) // only chron 4 unseen to the right
-      expect(shown.has_right).toBe(true)
-      const next = await nav.right() // chron 4 (last unseen)
+      await nav.switchFilter("news") // resumes at chron 1 (seen); both unseen to the right
+      const onFirst = await nav.right() // chron 3 (oldest unseen)
+      expect(data.loadArticle).toHaveBeenLastCalledWith(3)
+      expect(onFirst.countRight).toBe(2) // both unseen remain (chron 3 you're on + chron 4)
+      expect(onFirst.has_right).toBe(true)
+      const onLast = await nav.right() // chron 4 (last unseen)
       expect(data.loadArticle).toHaveBeenLastCalledWith(4)
-      expect(next.countRight).toBe(0)
-      expect(next.has_right).toBe(false)
+      expect(onLast.countRight).toBe(1) // only the one you're on remains
+      expect(onLast.has_right).toBe(false) // nothing further to the right
    })
 
-   it("navigating right from the oldest unseen skips the interleaved seen article", async () => {
+   it("navigating right skips interleaved seen articles, hitting only unseen", async () => {
       await readSome()
       nav.setUnreadOnly(true)
-      await nav.switchFilter("news") // chron 3
+      await nav.switchFilter("news") // resumes at chron 1 (seen)
+      await nav.right() // chron 3 (oldest unseen), skipping seen chron 2
+      expect(data.loadArticle).toHaveBeenLastCalledWith(3)
       await nav.right()
       expect(data.loadArticle).toHaveBeenLastCalledWith(4) // jumps 3→4, not onto a seen one
+   })
+
+   it("the dropdown tag badge stays equal to the toolbar counter through select then read", async () => {
+      await readSome() // ch1 seen→2, ch2 seen→1; unseen chron 3 (ch2), 4 (ch1) → 2
+      nav.setUnreadOnly(true)
+      const group = [data.db.channels[1], data.db.channels[2]]
+
+      // On select you resume at the seen position (chron 1): the current article
+      // is seen (matchesPos 0), so neither the counter nor the badge counts it —
+      // both read the full 2.
+      const opened = await nav.switchFilter("news")
+      expect(data.loadArticle).toHaveBeenLastCalledWith(1)
+      expect(opened.countRight).toBe(2)
+      let counts = await nav.unreadCounts(group)
+      expect(counts.get(2)).toBe(1) // ch2 unseen {3}
+      expect(counts.get(1)).toBe(1) // ch1 unseen {4}
+      expect(nav.tagUnreadFromCounts(group, counts)).toBe(opened.countRight) // 2 == 2
+
+      // Regression: step onto the first unseen (chron 3, ch2). recordSeen bumps
+      // ch2's LIVE seen to 3 the instant you arrive, which would drop ch2's badge
+      // to 0 and leave it one below the (snapshot-based) counter. chanUnread
+      // counts the unread you're sitting on back, so the badge still equals the
+      // counter.
+      const onUnseen = await nav.right()
+      expect(data.loadArticle).toHaveBeenLastCalledWith(3)
+      expect(onUnseen.countRight).toBe(2)
+      counts = await nav.unreadCounts(group)
+      expect(counts.get(2)).toBe(1) // ch2: live seen now 3 → {} unread, +1 for the one you're on
+      expect(counts.get(1)).toBe(1) // ch1: its remaining unseen {4}, not inflated
+      expect(nav.tagUnreadFromCounts(group, counts)).toBe(onUnseen.countRight) // 2 == 2, not 1
    })
 
    it("does not affect a single-channel filter (navigates all, including seen)", async () => {
@@ -1112,20 +1153,22 @@ describe("unread-only mode (tags)", () => {
       expect(shown.has_left).toBe(true) // the seen chron 0 is still to the left
    })
 
-   it("tally total stays constant as pos walks right (OPT-1 invariant)", async () => {
-      await readSome() // ch1→2, ch2→1; unseen are chron 3 (ch2), 4 (ch1)
+   it("the counter shows total unseen at open and decrements by one per step (OPT-1 invariant)", async () => {
+      await readSome() // ch1→2, ch2→1; unseen are chron 3 (ch2), 4 (ch1) → 2 total
       nav.setUnreadOnly(true)
-      // At the oldest unseen, total unread = countRight + the article you're on
-      // (it's itself unread) + nothing to the left.
-      const a = await nav.switchFilter("news") // chron 3
-      const totalA = a.countRight + 1
-      expect(a.has_left).toBe(false) // landed on the oldest unseen
-      expect(totalA).toBe(2)
-      // Step right to the last unseen: countRight drops but the invariant total
-      // (countRight + matchesPos + filteredLeft) is unchanged.
-      const b = await nav.right() // chron 4
-      const totalB = b.countRight + 1 + (b.has_left ? 1 : 0)
-      expect(totalB).toBe(totalA)
+      // Open at the resume position (chron 1, seen): both unseen are to the right,
+      // none to the left, so the counter equals the tag's total unseen.
+      const a = await nav.switchFilter("news") // chron 1 (resume, seen)
+      expect(a.has_left).toBe(false)
+      expect(a.countRight).toBe(2)
+      // Walk onto the oldest unseen, then the last: the counter ticks 2 → 1, and
+      // the invariant (counter + unseen already passed on the left) stays 2.
+      const b = await nav.right() // chron 3 (oldest unseen)
+      expect(b.countRight).toBe(2) // on the first of two unseen
+      expect(b.has_left).toBe(false)
+      const c = await nav.right() // chron 4 (last unseen)
+      expect(c.countRight).toBe(1)
+      expect(c.has_left).toBe(true)
    })
 
    it("R3-2: a cold-pack countLeft rejection in the unread tally does not fail the loaded nav", async () => {
@@ -1147,14 +1190,15 @@ describe("unread-only mode (tags)", () => {
       try {
          // switchFilter resolves the article (loadArticle(pos) succeeds), then
          // showFeed tallies unread — the rejection must be swallowed, not surfaced.
-         const shown = await nav.switchFilter("news") // lands on chron 3 (ch2, oldest unseen)
-         expect(data.loadArticle).toHaveBeenLastCalledWith(3)
+         const shown = await nav.switchFilter("news") // resumes at chron 1 (ch2, seen)
+         expect(data.loadArticle).toHaveBeenLastCalledWith(1)
          expect(shown.article.s).toBe(2) // the loaded article is intact
          expect(shown.article.t).not.toBe("(no matching articles)")
          expect(Number.isFinite(shown.countRight)).toBe(true)
          expect(shown.countRight).toBeGreaterThanOrEqual(0)
-         // The approximate raised-bounds fallback: 0 left, total 2, matchesPos 1.
-         expect(shown.countRight).toBe(1)
+         // The approximate raised-bounds fallback: at the resume position 0 left,
+         // total 2, matchesPos 0 (a seen article) → right 2, counter 2.
+         expect(shown.countRight).toBe(2)
       } finally {
          data.countLeft.mockImplementation(realCountLeft) // restore for later tests
       }
@@ -1164,7 +1208,7 @@ describe("unread-only mode (tags)", () => {
 describe("tagUnreadFromCounts", () => {
    afterEach(() => nav.setUnreadOnly(false))
 
-   it("counts a never-seen member as fully unread and equals the unseen-only counter", async () => {
+   it("counts a never-seen member as fully unread; unseen-only resumes at the saved position", async () => {
       data.db.channels[1] = makeChannel({ id: 1, tag: "news" })
       data.db.channels[2] = makeChannel({ id: 2, tag: "news" })
       // chron 0=ch1 1=ch2 2=ch1 3=ch2 4=ch1. Read ch1→2; ch2 NEVER seen here.
@@ -1178,13 +1222,15 @@ describe("tagUnreadFromCounts", () => {
       const counts = await nav.unreadCounts(group)
       const badge = nav.tagUnreadFromCounts(group, counts)
       expect(badge).toBe(3)
-      // The toolbar counter the user lands on must equal the badge: at the
-      // oldest unseen there's nothing to the left and the article is itself
-      // unread, so total = countRight + 1.
+      // Unseen-only opens at the tag's saved position (chron 2, ch1), NOT the
+      // oldest unseen. ch2 was never seen and has an older article at chron 1, so
+      // it sits to the LEFT of the resume (reachable with Left) and the toolbar
+      // counter (unseen to the right) is the badge minus that one left-side unseen.
       nav.setUnreadOnly(true)
-      const shown = await nav.switchFilter("news") // lands on chron 1 (ch2, oldest unseen)
-      expect(shown.has_left).toBe(false)
-      expect(shown.countRight + 1).toBe(badge)
+      const shown = await nav.switchFilter("news")
+      expect(data.loadArticle).toHaveBeenLastCalledWith(2)
+      expect(shown.has_left).toBe(true)
+      expect(shown.countRight).toBe(2) // badge (3) − 1 unseen to the left
    })
 
    it("equals the unseen-only counter for a mixed tag (seen, never-seen, fully-read members)", async () => {
@@ -1206,13 +1252,14 @@ describe("tagUnreadFromCounts", () => {
       const badge = nav.tagUnreadFromCounts(group, counts)
       // 1 (ch1) + 1 (ch2 full) + 0 (ch3) = 2.
       expect(badge).toBe(2)
-      // The badge equals the toolbar counter at filter-apply time: at the oldest
-      // unseen there's nothing to the left and the article is itself unread, so
-      // total = countRight + 1.
+      // Unseen-only resumes at the saved position (chron 2, ch1), not the oldest
+      // unseen. ch2 (never seen) has an older article at chron 1, to the left of
+      // the resume, so has_left and the counter is the badge minus that one.
       nav.setUnreadOnly(true)
-      const shown = await nav.switchFilter("news") // lands on chron 1 (ch2, oldest unseen)
-      expect(shown.has_left).toBe(false)
-      expect(shown.countRight + 1).toBe(badge)
+      const shown = await nav.switchFilter("news")
+      expect(data.loadArticle).toHaveBeenLastCalledWith(2)
+      expect(shown.has_left).toBe(true)
+      expect(shown.countRight).toBe(1) // badge (2) − 1 unseen to the left
    })
 
    it("returns 0 when every member is fully read (never-seen members excepted)", async () => {
@@ -1224,12 +1271,10 @@ describe("tagUnreadFromCounts", () => {
       expect(nav.tagUnreadFromCounts(group, await nav.unreadCounts(group))).toBe(0)
    })
 
-   it("R3-1: the single combined countAll equals the sum of per-member countAlls (value-identical)", async () => {
-      // A tag mixing seen / never-seen / fully-read members. The R3-1 collapse
-      // does ONE countAll over the union of the never-seen members' add_idx
-      // bounds instead of one scan per never-seen member; countAll applies each
-      // channel's own add_idx via its lookup table, so the union count equals the
-      // sum of the per-member counts — the result must be byte-identical.
+   it("sums member counts (never-seen members as their full backlog) and equals the unseen-only counter", async () => {
+      // A tag mixing seen / never-seen / fully-read members. chanUnread reports a
+      // never-seen member as its full backlog, so the tag badge is a plain sum of
+      // the per-channel counts and the row badges beneath the header add up to it.
       data.db.channels[1] = makeChannel({ id: 1, tag: "news" })
       data.db.channels[2] = makeChannel({ id: 2, tag: "news" })
       data.db.channels[3] = makeChannel({ id: 3, tag: "news" })
@@ -1250,26 +1295,20 @@ describe("tagUnreadFromCounts", () => {
       await nav.fromHash("2") // chan:1 = 2; ch2/ch3 untouched (never-seen)
       const group = [data.db.channels[1], data.db.channels[2], data.db.channels[3]]
       const counts = await nav.unreadCounts(group)
-      // counts: ch1 = 1 (known >= 0), ch2 = -1, ch3 = -1 (never-seen).
+      // counts: ch1 = 1 (read down to chron 2); ch2/ch3 = their full backlog (2 each).
       expect(counts.get(1)).toBe(1)
-      expect(counts.get(2)).toBe(-1)
-      expect(counts.get(3)).toBe(-1)
-      // Reference value via the OLD per-member rule: known counts direct, every
-      // never-seen member its own separate countAll.
-      let oldStyle = 0
-      for (const ch of group) {
-         const n = counts.get(ch.id)
-         oldStyle += n !== undefined && n >= 0 ? n : data.countAll(new Map([[ch.id, ch.add_idx ?? 0]]))
-      }
+      expect(counts.get(2)).toBe(2)
+      expect(counts.get(3)).toBe(2)
       const badge = nav.tagUnreadFromCounts(group, counts)
-      expect(badge).toBe(oldStyle) // value-identical to the pre-R3-1 implementation
       expect(badge).toBe(5) // 1 (ch1) + 2 (ch2 full) + 2 (ch3 full)
-      // And it still equals the unseen-only counter at apply time: at the oldest
-      // unseen there's nothing to the left and the article is itself unread.
+      // Unseen-only resumes at the saved position (chron 2, ch1), not the oldest
+      // unseen; ch2 (never seen) has an older article at chron 1 to the left, so
+      // the counter is the badge minus that one left-side unseen.
       nav.setUnreadOnly(true)
-      const shown = await nav.switchFilter("news") // lands on chron 1 (ch2, oldest unseen)
-      expect(shown.has_left).toBe(false)
-      expect(shown.countRight + 1).toBe(badge)
+      const shown = await nav.switchFilter("news")
+      expect(data.loadArticle).toHaveBeenLastCalledWith(2)
+      expect(shown.has_left).toBe(true)
+      expect(shown.countRight).toBe(4) // badge (5) − 1 unseen to the left
    })
 })
 
@@ -1280,10 +1319,11 @@ describe("unreadCounts", () => {
       const chs = [data.db.channels[1], data.db.channels[2], data.db.channels[3]]
       const batch = await nav.unreadCounts(chs)
       for (const ch of chs) expect(batch.get(ch.id)).toBe(await nav.unreadCount(ch))
-      // Spot-check the semantics: ch1 has chron 2 unread, ch2/ch3 unknown (-1).
+      // Spot-check the semantics: ch1 has chron 2 unread; ch2/ch3 never seen →
+      // their full backlog (one article each, chron 1 and 3).
       expect(batch.get(1)).toBe(1)
-      expect(batch.get(2)).toBe(-1)
-      expect(batch.get(3)).toBe(-1)
+      expect(batch.get(2)).toBe(1)
+      expect(batch.get(3)).toBe(1)
    })
 })
 

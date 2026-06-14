@@ -317,14 +317,16 @@ function channelLink(ch: IChannel, className: string): HTMLAnchorElement {
 // lazy idx-pack fetch) never delays the menu itself; the common case (recent
 // seen → resident latest pack) resolves in a microtask. `unreadFill` is the
 // freshness token: a rebuild or close orphans a stale pass before it touches
-// the DOM. Channels never seen on this device (unreadCount -1) show nothing,
-// and each tag header shows nav.tagUnreadFromCounts (derived from the same
-// counts map: the tag's never-seen members counted as fully unread, so a
-// collapsed group still surfaces the activity inside it and the badge equals
-// the unseen-only toolbar counter you land on when you open the tag). When
-// unseen-only is on, the same pass hides
-// fully-read rows and tags (`.srr-hidden`): a per-channel count of 0 = nothing
-// unseen; -1 (never seen here) has unseen content, so it stays.
+// the DOM. Every channel with unseen articles badges its count — including one
+// never seen on this device, which badges its full backlog (chanUnread) so a
+// fresh device shows counts on the channels too and the row badges sum to their
+// tag header (nav.tagUnreadFromCounts, the same counts map: a collapsed group
+// still surfaces the activity inside it and the badge equals the unseen-only
+// toolbar counter you land on when you open the tag). A channel read down to 0
+// unseen badges nothing. When unseen-only is on, the same pass hides fully-read
+// rows and tags (`.srr-hidden`): a per-channel count of 0 = nothing unseen and
+// hides; any positive count (including a never-seen channel's backlog) has
+// unseen content, so it stays.
 let unreadFill: object | null = null
 
 function unreadBadge(n: number): HTMLSpanElement {
@@ -668,11 +670,11 @@ export function showChannelMenu(currentTag: string, guard: (fn: () => Promise<IS
             rebuild()
             if (fromKeyboard)
                document.querySelector<HTMLElement>('#srr-channel-menu a[data-value="__unread__"]')?.focus()
-            // Re-resolve the current single-tag filter via switchFilter (oldest
-            // unseen, matching tag-select) so toggling ON lands on the OLDEST
-            // unseen, not fromHash's last()-fallback newest. Other filters
-            // (channel / [ALL] / multi-token) ignore unseen-only, so replay the
-            // raw hash unchanged.
+            // Re-resolve the current single-tag filter via switchFilter (which
+            // resumes at the tag's current position, matching tag-select) so
+            // toggling ON lands on where you left off, not fromHash's
+            // last()-fallback newest. Other filters (channel / [ALL] /
+            // multi-token) ignore unseen-only, so replay the raw hash unchanged.
             const key = nav.getCurrentFilterKey()
             const isTag = key !== "" && !Number.isFinite(Number(key))
             return isTag ? nav.switchFilter(key) : nav.fromHash(location.hash.substring(1))

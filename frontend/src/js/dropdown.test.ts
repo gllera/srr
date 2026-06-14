@@ -20,10 +20,10 @@ const nav = vi.hoisted(() => ({
    goTo: vi.fn(),
    switchFilter: vi.fn(),
    unreadCounts: vi.fn<(chs: IChannel[]) => Promise<Map<number, number>>>(async () => new Map()),
-   // Synchronous, derived from the already-computed counts map: a member count
-   // ≥0 contributes it; a never-seen member (-1) contributes 0 in the mock
-   // (the real impl substitutes full history). Tests that pin the badge value
-   // override this implementation.
+   // Synchronous plain sum of the already-computed counts map (mirrors the real
+   // impl): a never-seen channel arrives as its full backlog, a positive number;
+   // Math.max guards any stray negative / missing member down to 0. Tests that
+   // pin the badge value override this implementation.
    tagUnreadFromCounts: vi.fn<(group: IChannel[], counts: Map<number, number>) => number>((group, counts) =>
       group.reduce((sum, ch) => sum + Math.max(0, counts.get(ch.id) ?? 0), 0),
    ),
@@ -363,7 +363,7 @@ describe("dropdown: unread badges", () => {
       nav.isUnreadOnly.mockReturnValue(false)
    })
 
-   it("badges rows from unreadCounts and the tag header from tagUnreadFromCounts, hiding unknown and zero", async () => {
+   it("badges rows from unreadCounts and the tag header from tagUnreadFromCounts, hiding only zero", async () => {
       const a = chan({ id: 3, title: "A" })
       const b = chan({ id: 4, title: "B" })
       const c = chan({ id: 5, title: "C" })
@@ -372,18 +372,18 @@ describe("dropdown: unread badges", () => {
          sortedTags: ["news"],
          untagged: [c],
       })
-      counts((id) => (id === 3 ? 5 : id === 4 ? -1 : 0))
-      // The header badge is nav.tagUnreadFromCounts (never-seen members counted
-      // as fully unread), derived synchronously from the same counts map — not
-      // a second await pass, and not the arithmetic sum of the child rows.
+      counts((id) => (id === 3 ? 5 : id === 4 ? 8 : 0)) // 4 never-seen → its full backlog
+      // The header badge is nav.tagUnreadFromCounts, derived synchronously from
+      // the same counts map — not a second await pass. Pinned here to prove the
+      // header uses that function's value, not an arithmetic sum of the rows.
       nav.tagUnreadFromCounts.mockReturnValue(7)
       dropdown.showChannelMenu("", guard)
       await vi.waitFor(() => expect($badge("3")).not.toBeNull())
       expect($badge("3")!.textContent).toBe("5")
-      expect($badge("4")).toBeNull() // never seen → unknown, no badge
+      expect($badge("4")!.textContent).toBe("8") // never seen → full backlog badged
       expect($badge("5")).toBeNull() // fully read → no badge
       const headerBadge = $badge("news")!
-      expect(headerBadge.textContent).toBe("7") // the tag's own count, not 5 + (−1)
+      expect(headerBadge.textContent).toBe("7") // the tag's own count, not 5 + 8
       // Derived from the group + the same counts map already in hand — no
       // re-scan of the idx packs.
       const counts34 = nav.unreadCounts.mock.results[0].value
@@ -400,7 +400,7 @@ describe("dropdown: unread badges", () => {
          sortedTags: ["news"],
          untagged: [],
       })
-      counts((id) => (id === 3 ? -1 : 0))
+      counts(() => 0)
       nav.tagUnreadFromCounts.mockReturnValue(0) // nothing unseen
       dropdown.showChannelMenu("", guard)
       await new Promise((r) => setTimeout(r))
@@ -410,7 +410,7 @@ describe("dropdown: unread badges", () => {
    it("hides fully-read rows and tags when unseen-only is on, keeping unread and never-seen", async () => {
       nav.isUnreadOnly.mockReturnValue(true)
       const a = chan({ id: 3, title: "A" }) // unread > 0 → shown
-      const b = chan({ id: 4, title: "B" }) // never seen (-1) → shown
+      const b = chan({ id: 4, title: "B" }) // never seen → full backlog → shown
       const old = chan({ id: 7, title: "Old" }) // fully read → tag hidden
       const c = chan({ id: 5, title: "C" }) // untagged, read → hidden
       const d = chan({ id: 6, title: "D" }) // untagged, unread → shown
@@ -422,14 +422,14 @@ describe("dropdown: unread badges", () => {
          sortedTags: ["archive", "news"],
          untagged: [c, d],
       })
-      counts((id) => (id === 3 ? 4 : id === 4 ? -1 : id === 6 ? 2 : 0))
+      counts((id) => (id === 3 ? 4 : id === 4 ? 9 : id === 6 ? 2 : 0)) // 4 never-seen → full backlog
       dropdown.showChannelMenu("", guard)
       await vi.waitFor(() => expect($badge("3")).not.toBeNull())
       const row = (v: string) => $menu().querySelector(`a[data-value="${v}"]`)!
       const groupHidden = (v: string) => row(v).closest(".srr-tag-group")!.classList.contains("srr-hidden")
       const hidden = (v: string) => row(v).classList.contains("srr-hidden")
       expect(hidden("3")).toBe(false) // unread
-      expect(hidden("4")).toBe(false) // never seen → has unseen content
+      expect(hidden("4")).toBe(false) // never seen → full backlog, has unseen content
       expect(hidden("5")).toBe(true) // fully read untagged
       expect(hidden("6")).toBe(false) // unread untagged
       expect(groupHidden("3")).toBe(false) // news has unread + never-seen
@@ -570,7 +570,7 @@ describe("dropdown: unseen-only chip", () => {
       expect($menu().classList.contains("srr-open")).toBe(true)
    })
 
-   it("re-resolves via switchFilter (oldest unseen) when the current filter is a single tag", () => {
+   it("re-resolves via switchFilter (resume at current position) when the current filter is a single tag", () => {
       nav.getCurrentFilterKey.mockReturnValue("news") // a tag: non-numeric, non-empty
       dropdown.showChannelMenu("", guard)
       $chip()!.click()
