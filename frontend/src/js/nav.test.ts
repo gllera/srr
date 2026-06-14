@@ -41,6 +41,15 @@ const data = vi.hoisted(() => ({
 
 vi.mock("./data", () => data)
 
+// nav.ts imports ./search for its "q:<query>" filter mode; mock it so tests
+// drive the hit set directly instead of fetching real shards.
+const searchMod = vi.hoisted(() => ({
+   available: vi.fn(() => true),
+   shortQuery: vi.fn(() => false),
+   search: vi.fn(),
+}))
+vi.mock("./search", () => searchMod)
+
 import * as nav from "./nav"
 import { setImgProxy } from "./fmt"
 
@@ -1343,51 +1352,6 @@ describe("unreadCounts", () => {
    })
 })
 
-describe("peek", () => {
-   it("returns the current article plus up to span matches each side, in chron order", async () => {
-      setupIndex([{ chanId: 1 }, { chanId: 1 }, { chanId: 1 }, { chanId: 1 }, { chanId: 1 }])
-      data.loadArticle.mockImplementation(async (idx: number) => makeArticle({ s: 1, t: `T${idx}`, p: 100 + idx }))
-      await nav.fromHash("2")
-      const items = await nav.peek(1)
-      expect(items.map((i) => i.chron)).toEqual([1, 2, 3])
-      expect(items.map((i) => i.current)).toEqual([false, true, false])
-      expect(items[1].title).toBe("T2")
-      expect(items[1].when).toBe(102)
-      expect(items[1].s).toBe(1)
-   })
-
-   it("walks only filter matches and falls back to fetched_at when published is unset", async () => {
-      setupIndex([
-         { chanId: 1, fetchedAt: 5 },
-         { chanId: 2 },
-         { chanId: 1, fetchedAt: 7 },
-         { chanId: 2 },
-         { chanId: 1, fetchedAt: 9 },
-      ])
-      await nav.fromHash("2!1")
-      const items = await nav.peek()
-      expect(items.map((i) => i.chron)).toEqual([0, 2, 4])
-      expect(items.map((i) => i.when)).toEqual([5, 7, 9])
-   })
-
-   it("clips at the archive edges without padding the other side", async () => {
-      setupIndex([{ chanId: 1 }, { chanId: 1 }])
-      await nav.fromHash("0")
-      expect((await nav.peek(10)).map((i) => i.chron)).toEqual([0, 1])
-   })
-
-   it("passes raw wire fields through — placeholders are the renderer's", async () => {
-      setupIndex([{ chanId: 1 }, { chanId: 1 }])
-      await nav.fromHash("1")
-      delete data.db.channels[1]
-      const items = await nav.peek()
-      // "(untitled)" and the "[DELETED]" tombstone are applied by dropdown's
-      // headlineRow; peek carries the raw title and chan_id.
-      expect(items.every((i) => i.title === "")).toBe(true)
-      expect(items.every((i) => i.s === 1)).toBe(true)
-   })
-})
-
 describe("prefetch abort", () => {
    const RealImage = window.Image
    const RealRIC = window.requestIdleCallback
@@ -1580,5 +1544,140 @@ describe("saved articles", () => {
       data.loadArticle.mockClear()
       await nav.fromHash("1!~saved")
       expect(data.loadArticle).toHaveBeenCalledWith(2)
+   })
+})
+
+describe("search filter mode (q:<query>)", () => {
+   // The hit set is computed lazily (ensureSearchSet) on the first feedLeft/Right;
+   // nav module state persists across tests (no resetModules), and filter.set only
+   // refetches when the term changes, so each test uses a UNIQUE query term.
+   const hit = (chron: number) => ({ chron, s: 1, w: 1000, t: "t" })
+   async function* gen(hits: ReturnType<typeof hit>[]) {
+      yield hits
+   }
+   const enter = (term: string) => nav.applyFilter([nav.SEARCH_PREFIX + term])
+
+   beforeEach(() => {
+      searchMod.search.mockReset()
+      searchMod.available.mockReturnValue(true)
+      searchMod.shortQuery.mockReturnValue(false)
+   })
+
+   it("walks the hit set newest-first via feedLeft / feedRight", async () => {
+      setupIndex(Array.from({ length: 20 }, () => ({ chanId: 1 })))
+      searchMod.search.mockImplementation(() => gen([hit(3), hit(9), hit(15)]))
+      enter("alpha")
+      expect(nav.isSearchFilter()).toBe(true)
+      expect(await nav.feedLeft(19)).toBe(15)
+      expect(await nav.feedLeft(14)).toBe(9)
+      expect(await nav.feedLeft(8)).toBe(3)
+      expect(await nav.feedLeft(2)).toBe(-1)
+      expect(await nav.feedRight(0)).toBe(3)
+      expect(await nav.feedRight(10)).toBe(15)
+      expect(await nav.feedRight(16)).toBe(-1)
+      // The hit-set generator is consulted once and cached for the walk.
+      expect(searchMod.search).toHaveBeenCalledTimes(1)
+   })
+
+   it("matches() reflects the hit set", async () => {
+      setupIndex(Array.from({ length: 20 }, () => ({ chanId: 1 })))
+      searchMod.search.mockImplementation(() => gen([hit(3), hit(9)]))
+      enter("bravo")
+      await nav.feedLeft(19) // trigger the lazy load
+      expect(nav.filter.matches(1, 3)).toBe(true)
+      expect(nav.filter.matches(1, 4)).toBe(false)
+   })
+
+   it("last() opens the newest hit, first() the oldest, goTo snaps forward", async () => {
+      setupIndex(Array.from({ length: 20 }, () => ({ chanId: 1 })))
+      searchMod.search.mockImplementation(() => gen([hit(3), hit(9), hit(15)]))
+      enter("charlie")
+      await nav.last()
+      expect(nav.currentChron()).toBe(15)
+      await nav.first()
+      expect(nav.currentChron()).toBe(3)
+      await nav.goTo(5) // next hit at-or-after 5 is 9
+      expect(nav.currentChron()).toBe(9)
+   })
+
+   it("showFeed reports left/right over the hit set", async () => {
+      setupIndex(Array.from({ length: 20 }, () => ({ chanId: 1 })))
+      searchMod.search.mockImplementation(() => gen([hit(3), hit(9), hit(15)]))
+      enter("delta")
+      const r = await nav.goTo(9)
+      expect(r.has_left).toBe(true) // hit 3 is left of 9
+      expect(r.has_right).toBe(true) // hit 15 is right of 9
+      expect(r.countRight).toBe(1)
+   })
+
+   it("fromHash honors a #pos!q: deep link that is a hit, else snaps to newest", async () => {
+      setupIndex(Array.from({ length: 20 }, () => ({ chanId: 1 })))
+      searchMod.search.mockImplementation(() => gen([hit(3), hit(9), hit(15)]))
+      await nav.fromHash("9!" + nav.SEARCH_PREFIX + "echo")
+      expect(nav.currentChron()).toBe(9)
+      await nav.fromHash("7!" + nav.SEARCH_PREFIX + "echo2")
+      expect(nav.currentChron()).toBe(15) // 7 isn't a hit → newest
+   })
+
+   it("an empty query yields no hits and never fetches", async () => {
+      setupIndex(Array.from({ length: 5 }, () => ({ chanId: 1 })))
+      enter("")
+      expect(nav.isSearchFilter()).toBe(true)
+      expect(await nav.feedLeft(4)).toBe(-1)
+      expect(searchMod.search).not.toHaveBeenCalled()
+   })
+
+   it("caps the set at SEARCH_CAP and flags truncation", async () => {
+      setupIndex(Array.from({ length: 600 }, () => ({ chanId: 1 })))
+      // Honor `limit` like the real search() does — it never yields more than the
+      // caller asks for. So truncation is only observable if nav requests one past
+      // the cap (SEARCH_CAP + 1); asking for exactly SEARCH_CAP makes it invisible.
+      searchMod.search.mockImplementation((_q: string, limit: number) =>
+         gen(Array.from({ length: Math.min(limit, 600) }, (_, i) => hit(i))),
+      )
+      enter("foxtrot")
+      // The cap keeps the first SEARCH_CAP collected (chrons 0..499); the witness
+      // hit (500) only flips the flag.
+      expect(await nav.feedLeft(599)).toBe(499)
+      expect(nav.searchTruncated()).toBe(true)
+   })
+
+   it("leaving search (another filter) clears the mode and escapes '+' in the hash", async () => {
+      setupIndex(Array.from({ length: 5 }, () => ({ chanId: 1 })))
+      searchMod.search.mockImplementation(() => gen([hit(2)]))
+      enter("c++")
+      expect(nav.isSearchFilter()).toBe(true)
+      expect(nav.tokensSuffix()).toBe("!q%3Ac%2B%2B") // ":" and "+" escaped so the split survives
+      nav.applyFilter([])
+      expect(nav.isSearchFilter()).toBe(false)
+   })
+
+   it("a returning query reloads after its set was dropped by an in-flight newer query", async () => {
+      // Regression: A → B → A while B's load is still in flight. filter.set drops
+      // A's cached set when B arrives; without also forgetting searchLoadedFor, the
+      // return to A short-circuits ensureSearchSet on the EMPTIED set and strands
+      // the list on "no matches" for a query that has hits.
+      setupIndex(Array.from({ length: 20 }, () => ({ chanId: 1 })))
+      // 1. "golf" loads and commits.
+      searchMod.search.mockImplementation(() => gen([hit(5), hit(11)]))
+      enter("golf")
+      expect(await nav.feedLeft(19)).toBe(11)
+      // 2. "golfx": its load blocks (still in flight) — and dropping the set here is
+      //    what would strand the return to "golf".
+      let release!: () => void
+      const blocked = new Promise<void>((r) => (release = r))
+      searchMod.search.mockImplementation(async function* () {
+         await blocked
+         yield [hit(7)]
+      })
+      enter("golfx")
+      const inflight = nav.feedLeft(19) // kicks off the blocked load, leaves it pending
+      // 3. Back to "golf" before "golfx" resolves.
+      searchMod.search.mockImplementation(() => gen([hit(5), hit(11)]))
+      enter("golf")
+      // 4. The walk must RECOMPUTE "golf" (not read the emptied set) → 11, not -1.
+      expect(await nav.feedLeft(19)).toBe(11)
+      release()
+      await inflight.catch(() => {})
    })
 })

@@ -1,42 +1,28 @@
 import * as data from "./data"
-import { getImgProxy, isValidProxy, setImgProxy, timeAgo } from "./fmt"
-import { SEARCH_GRAM } from "./format.gen"
+import { getImgProxy, isValidProxy, setImgProxy } from "./fmt"
 import * as nav from "./nav"
-import * as search from "./search"
 
 const menus = document.querySelectorAll<HTMLElement>(".srr-dropdown-menu")
 const btns = document.querySelectorAll<HTMLElement>(".srr-dropdown-btn")
 
 // The list surface hooks the channel menu's filter actions: when the app is on
-// the list, picking a channel/tag/[ALL] (or flipping unseen-only) re-filters the
-// list in place instead of opening the reader at a resume position. Optional so
-// the reader-only callers (and the whole existing test suite) keep the original
-// behavior unchanged — the default host reports "not the list" and the menu
-// falls through to its guard(switchFilter)/guard(fromHash) reader paths.
+// the list, picking a channel/tag/[ALL]/★ Saved re-filters the list in place
+// instead of opening the reader at a resume position. Optional so the reader-only
+// callers (and the existing test suite) keep the original behavior — the default
+// host reports "not the list" and the menu falls through to guard(switchFilter).
 export interface ChannelMenuHost {
    viewIsList: () => boolean
-   selectFilter: (token: string) => void // "" = [ALL]; token = tag name or channel id
-   reapplyFilter: () => void // re-render the list after an unseen-only flip, menu stays open
+   selectFilter: (token: string) => void // "" = [ALL]; token = tag name, channel id, or ~saved
 }
 const READER_HOST: ChannelMenuHost = {
    viewIsList: () => false,
    selectFilter: () => {},
-   reapplyFilter: () => {},
 }
 
 let isOpen = false
-// Whether the chip row currently shows the image-proxy editor or the date
-// editor instead of the chips. Reset on close so reopening starts collapsed.
-let imgProxyEditing = false
-let dateEditing = false
 
 export function closeAllDropdowns(): void {
-   imgProxyEditing = false
-   dateEditing = false
    unreadFill = null
-   peekFill = null
-   searchFill = null
-   clearTimeout(searchTimer)
    if (!isOpen) return
    menus.forEach((m) => {
       // Closing a menu the user was keyboard-navigating must not drop focus
@@ -63,8 +49,8 @@ function menuItems(menu: HTMLElement): HTMLElement[] {
 // Roving menu focus — the keyboard contract role="menu" promises. Capture
 // phase + stopPropagation, because app.ts binds the same arrow keys to filter
 // cycling on the document bubble path; with a menu open the arrows must move
-// through it instead. Inline-editor inputs keep their own keys (date/proxy
-// editors handle Enter/Escape themselves). Enter already activates a focused
+// through it instead. Inline-editor inputs keep their own keys (the proxy
+// editor handles Enter/Escape itself). Enter already activates a focused
 // anchor natively; Space is the menu-pattern addition.
 document.addEventListener(
    "keydown",
@@ -111,7 +97,7 @@ function divEl(className: string): HTMLDivElement {
    return d
 }
 
-// editorRow is the inline-editor row scaffold (date/proxy editors, search
+// editorRow is the inline-editor row scaffold (the proxy editor, search
 // input): clicks inside it configure, they don't navigate — both events stop
 // propagating so app.ts's window-level "any click closes dropdowns" handler
 // (and the menu's delegated onclick) never fire.
@@ -196,109 +182,6 @@ function toggleDropdown(
       onClick(a.dataset.value!, e)
    }
    fillMenu(dd, buildContent)
-}
-
-const IMG_PROXY_SENTINEL = "__imgproxy__"
-const DATE_SENTINEL = "__date__"
-const UNREAD_SENTINEL = "__unread__"
-
-const IMG_ICON_SVG =
-   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
-   '<rect x="3" y="3" width="18" height="18" rx="2"/>' +
-   '<circle cx="9" cy="9" r="2"/>' +
-   '<path d="M21 15l-5-5L5 21"/>' +
-   "</svg>"
-
-const LAST_ICON_SVG =
-   '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">' +
-   '<path d="M4 5l12 7L4 19z"/>' +
-   '<rect x="17" y="5" width="3" height="14"/>' +
-   "</svg>"
-
-const CAL_ICON_SVG =
-   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
-   '<rect x="3" y="4" width="18" height="17" rx="2"/>' +
-   '<path d="M8 2v4M16 2v4M3 10h18"/>' +
-   "</svg>"
-
-// An eye: "show only what I haven't seen". On = unseen-only navigation active.
-const UNREAD_ICON_SVG =
-   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
-   '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/>' +
-   '<circle cx="12" cy="12" r="3"/>' +
-   "</svg>"
-
-function iconChip(value: string, label: string, className: string, svg: string): HTMLAnchorElement {
-   const a = createLink(value, "", className)
-   a.setAttribute("aria-label", label)
-   a.title = label
-   a.innerHTML = svg
-   return a
-}
-
-function lastChip(): HTMLAnchorElement {
-   return iconChip("!last", "latest", "srr-last-chip", LAST_ICON_SVG)
-}
-
-function imgProxyIcon(): HTMLAnchorElement {
-   const state = getImgProxy() === "" ? "off" : "on"
-   return iconChip(IMG_PROXY_SENTINEL, `image proxy: ${state}`, `srr-imgproxy-icon srr-imgproxy-${state}`, IMG_ICON_SVG)
-}
-
-function dateIcon(): HTMLAnchorElement {
-   return iconChip(DATE_SENTINEL, "jump to date", "srr-date-icon", CAL_ICON_SVG)
-}
-
-function unreadIcon(): HTMLAnchorElement {
-   const state = nav.isUnreadOnly() ? "on" : "off"
-   return iconChip(
-      UNREAD_SENTINEL,
-      `unseen-only (tags): ${state}`,
-      `srr-unread-icon srr-unread-${state}`,
-      UNREAD_ICON_SVG,
-   )
-}
-
-// dateEditor swaps the chip row for a native date input: picking a day (the
-// input's change event, or Enter) jumps to the first article at-or-after
-// local midnight of that day — the same findChronForTimestamp path as the
-// preset chips, but reaching arbitrarily deep into the archive. The input
-// starts empty so change only fires once the date is complete. Since clicks
-// here never bubble to the window close-handler (editorRow), commit closes
-// the menu itself.
-function dateEditor(guard: (fn: () => Promise<IShowFeed>) => void, rebuild: () => void): HTMLDivElement {
-   const row = editorRow("srr-date-edit")
-   const input = editorInput("date", "srr-date-input", "Jump to date")
-   const dateValue = (d: Date) =>
-      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
-   input.max = dateValue(new Date())
-   if (data.db.first_fetched) input.min = dateValue(new Date(data.db.first_fetched * 1000))
-
-   // Browsers fire change again when Enter commits the typed value — `done`
-   // keeps the pair from navigating twice.
-   let done = false
-   const commit = () => {
-      if (done) return
-      if (!input.value) {
-         input.classList.add("srr-input-invalid")
-         input.focus()
-         return
-      }
-      const [y, m, d] = input.value.split("-").map(Number)
-      const ts = new Date(y, m - 1, d).getTime() / 1000
-      done = true
-      closeAllDropdowns()
-      guard(async () => nav.goTo(await data.findChronForTimestamp(ts)))
-   }
-   const cancel = () => {
-      dateEditing = false
-      rebuild()
-   }
-
-   input.addEventListener("change", commit)
-   editorKeys(input, commit, cancel)
-   row.append(input, btn("srr-date-cancel", "cancel date jump", "✕", cancel))
-   return row
 }
 
 // A non-empty ferr on any of a channel's feeds marks the channel row (and the
@@ -391,53 +274,30 @@ async function fillUnread(rows: [HTMLAnchorElement, IChannel][], headers: [HTMLA
    }
 }
 
-// imgProxyEditor is the inline editor row that replaces the chip row while
-// configuring the proxy prefix: type + Enter/✓ commits (after isValidProxy),
-// Escape cancels, ✕ commits "" (disables).
-function imgProxyEditor(
-   guard: (fn: () => Promise<IShowFeed>) => void,
-   rebuild: () => void,
-   reapply: () => void,
-): HTMLDivElement {
+// imgProxyEditor is the whole content of the image-proxy toolbar menu: type a
+// URL prefix + Enter/✓ to set it (after isValidProxy), ✕ to disable (commit ""),
+// Escape to cancel — each of them closes the menu via `close`. The proxy only
+// affects reader images, so there's nothing on the list to re-render; committing
+// just persists the prefix for the next reader open. closeAllDropdowns hands
+// focus back to the toolbar button, so no keyboard-refocus dance is needed.
+function imgProxyEditor(close: () => void): HTMLDivElement {
    const row = editorRow("srr-imgproxy-edit")
    const input = editorInput("url", "srr-imgproxy-input", "Image proxy URL prefix (empty disables)")
    input.placeholder = "https://proxy/?url="
    input.value = getImgProxy()
 
-   const commit = (raw: string, fromKeyboard = false) => {
+   const commit = (raw: string) => {
       const next = raw.trim()
       if (!isValidProxy(next)) {
          input.classList.add("srr-input-invalid")
          input.focus()
          return
       }
-      imgProxyEditing = false
-      if (next !== getImgProxy()) {
-         setImgProxy(next)
-         // Re-render the active surface so the new prefix takes effect: the
-         // reader re-renders the current article's images (fromHash), the list
-         // re-renders its rows. On the list, fromHash would jump to the last
-         // article (its hash has no position) — hence the surface-aware reapply.
-         reapply()
-      }
-      rebuild()
-      // rebuild() detaches the focused ✓/input, and the gated render() (from the
-      // guard re-apply) won't steal focus to the title while the menu stays open
-      // — so an Enter commit would strand focus on <body>. Mirror the eye-toggle:
-      // hand focus back to the freshly-rebuilt chip on the keyboard (Enter) path.
-      // A mouse user clicking ✓/✕ doesn't need it, so the button path is left be.
-      if (fromKeyboard)
-         document.querySelector<HTMLElement>(`#srr-channel-menu a[data-value="${IMG_PROXY_SENTINEL}"]`)?.focus()
+      if (next !== getImgProxy()) setImgProxy(next)
+      close()
    }
 
-   editorKeys(
-      input,
-      () => commit(input.value, true),
-      () => {
-         imgProxyEditing = false
-         rebuild()
-      },
-   )
+   editorKeys(input, () => commit(input.value), close)
    row.append(
       input,
       btn("srr-imgproxy-save", "save image proxy", "✓", () => commit(input.value)),
@@ -446,156 +306,48 @@ function imgProxyEditor(
    return row
 }
 
-// The headlines peek: a second toolbar dropdown (anchored on the counter
-// button) listing the titles around the current position under the current
-// filter — navigation stops being blind without any new data: titles already
-// ride in the data packs the LRU holds. Rendered newest-first like a feed;
-// rows fill in async after the menu opens (same freshness-token discipline as
-// fillUnread) so a pack-boundary fetch never delays the menu itself.
-let peekFill: object | null = null
-
-// headlineRow is the peek-style result row shared by the headlines peek and
-// the search results: title over "channel · age" meta, click = goTo(chron).
-// Both display fallbacks — the "(untitled)" placeholder and the "[DELETED]"
-// channel tombstone — live here, at the layer that renders them, so every
-// consumer hands over raw wire fields and gets the same treatment.
-function headlineRow(chron: number, titleText: string, chanId: number, when: number): HTMLAnchorElement {
-   const a = createLink(String(chron), "")
-   const title = divEl("srr-peek-title")
-   title.textContent = titleText || "(untitled)"
-   const meta = divEl("srr-peek-meta")
-   meta.textContent = `${data.channelTitle(chanId)} · ${timeAgo(when)}`
-   a.append(title, meta)
-   return a
-}
-
-async function fillPeek(dd: HTMLElement): Promise<void> {
-   const my = {}
-   peekFill = my
-   try {
-      const items = await nav.peek()
-      if (my !== peekFill) return
-      const frag = document.createDocumentFragment()
-      for (const it of items.reverse()) {
-         const a = headlineRow(it.chron, it.title, it.s, it.when)
-         if (it.current) {
-            a.className = "srr-active"
-            a.setAttribute("aria-current", "true")
-         }
-         frag.appendChild(a)
-      }
-      dd.replaceChildren(frag)
-      // Center the current row in the scrollable menu (no-op under jsdom,
-      // where offsetTop/clientHeight are 0).
-      const cur = dd.querySelector<HTMLElement>("[aria-current]")
-      if (cur) dd.scrollTop = Math.max(0, cur.offsetTop - (dd.clientHeight - cur.offsetHeight) / 2)
-   } catch {
-      // Best-effort: the menu just keeps its placeholder.
-   }
-}
-
-export function showPeekMenu(guard: (fn: () => Promise<IShowFeed>) => void): void {
+// The image-proxy menu (toolbar 🖼 button): its sole content is the editor row.
+// No navigable anchors, so the delegated onClick is a no-op — the editor's own
+// inputs/buttons handle everything and editorRow stops their clicks bubbling.
+export function showImgProxyMenu(): void {
    toggleDropdown(
-      "srr-peek-menu",
-      (frag) => {
-         const loading = divEl("srr-peek-loading")
-         loading.textContent = "…"
-         frag.appendChild(loading)
-         void fillPeek(document.getElementById("srr-peek-menu")!)
-      },
-      async (value) => guard(() => nav.goTo(Number(value))),
+      "srr-imgproxy-menu",
+      (frag) => frag.appendChild(imgProxyEditor(() => closeAllDropdowns())),
+      async () => {},
    )
 }
 
-// The title search: a third toolbar dropdown (anchored on the magnifier
-// button, `/` shortcut). The input row follows the inline-editor pattern
-// (clicks inside it configure, they don't navigate); results stream in per
-// shard from search.search() under the usual freshness-token discipline,
-// rendered as peek-style rows (title over channel · age), click =
-// nav.goTo(chron). An active channel/tag filter intersects results via
-// nav.filter.matches on each hit's chan_id.
-let searchFill: object | null = null
-let searchTimer: ReturnType<typeof setTimeout> | undefined
-
-const SEARCH_MAX = 100
-const SEARCH_DEBOUNCE_MS = 200
-
-async function fillSearch(q: string, results: HTMLElement): Promise<void> {
-   const my = {}
-   searchFill = my
-   results.replaceChildren()
-   if (!q.trim()) return
-   // The status row doubles as the insertion anchor: hit rows land before it,
-   // so batches streaming in per shard keep newest-first order.
-   const status = divEl("srr-search-note")
-   const short = search.shortQuery(q)
-   status.textContent = short
-      ? `Searching recent articles (a ${SEARCH_GRAM}+ letter word reaches the archive)…`
-      : "Searching…"
-   results.appendChild(status)
-   let count = 0
-   try {
-      // The filter predicate rides into search() so the cap counts only
-      // surviving hits — filtered and unfiltered queries get the same bound.
-      const accept = (s: number, chron: number) => !nav.filter.active || nav.filter.matches(s, chron)
-      for await (const batch of search.search(q, SEARCH_MAX, accept)) {
-         if (my !== searchFill) return
-         for (const hit of batch) results.insertBefore(headlineRow(hit.chron, hit.t, hit.s, hit.w), status)
-         count += batch.length
-      }
-   } catch {
-      if (my === searchFill) status.textContent = "Search failed — try again"
-      return
-   }
-   if (my !== searchFill) return
-   if (count === 0)
-      status.textContent = short
-         ? `No recent matches (a ${SEARCH_GRAM}+ letter word searches the archive)`
-         : "No matches"
-   else if (count >= SEARCH_MAX) status.textContent = `First ${SEARCH_MAX} matches — refine to reach older ones`
-   else status.remove()
+// The jump control (toolbar 🗓 button): no dropdown, no time presets, no
+// text-entry step — clicking it opens the browser's *native* date picker
+// straight away on its paired hidden <input type="date">. openDatePicker clamps
+// the calendar to the archive span [first_fetched, today] and pops it (showPicker
+// rides the button click's transient activation; focus is the fallback where
+// showPicker is unavailable — older engines, jsdom). dateJump, wired to the
+// input's change, lands on the first article at-or-after local midnight of the
+// chosen day — the same findChronForTimestamp path the old time rows used, but
+// reaching arbitrarily deep into the archive — opening the reader via guard.
+// ("Latest" lives on the dedicated resume toolbar button.)
+function dateValue(d: Date): string {
+   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
 }
 
-export function showSearchMenu(guard: (fn: () => Promise<IShowFeed>) => void): void {
-   toggleDropdown(
-      "srr-search-menu",
-      (frag) => {
-         if (!search.available()) {
-            const note = divEl("srr-search-note")
-            note.textContent = "Search index not published for this store yet"
-            frag.appendChild(note)
-            return
-         }
-         const row = editorRow("srr-search-edit")
-         const input = editorInput("search", "srr-search-input", "Search article titles")
-         input.placeholder = "Search titles…"
-         const results = divEl("srr-search-results")
-         input.addEventListener("input", () => {
-            clearTimeout(searchTimer)
-            searchTimer = setTimeout(() => void fillSearch(input.value, results), SEARCH_DEBOUNCE_MS)
-         })
-         // No Escape handling (editorKeys): this input IS the menu's main UI,
-         // so Escape closing the whole dropdown is the right behavior.
-         input.addEventListener("keydown", (e) => {
-            if (e.key === "Enter") {
-               e.preventDefault()
-               clearTimeout(searchTimer)
-               void fillSearch(input.value, results)
-            } else if (e.key === "ArrowDown") {
-               // The roving-focus handler skips INPUT targets; hand off to the
-               // first result row explicitly.
-               const first = results.querySelector<HTMLElement>('[role="menuitem"]')
-               if (first) {
-                  e.preventDefault()
-                  first.focus()
-               }
-            }
-         })
-         row.appendChild(input)
-         frag.append(row, results)
-      },
-      async (value) => guard(() => nav.goTo(Number(value))),
-   )
+export function openDatePicker(input: HTMLInputElement): void {
+   input.max = dateValue(new Date())
+   input.min = data.db.first_fetched ? dateValue(new Date(data.db.first_fetched * 1000)) : ""
+   // Start empty so picking the same day twice still fires change (= re-jumps).
+   input.value = ""
+   try {
+      input.showPicker()
+   } catch {
+      input.focus()
+   }
+}
+
+export function dateJump(input: HTMLInputElement, guard: (fn: () => Promise<IShowFeed>) => void): void {
+   if (!input.value) return
+   const [y, m, d] = input.value.split("-").map(Number)
+   const ts = new Date(y, m - 1, d).getTime() / 1000
+   guard(async () => nav.goTo(await data.findChronForTimestamp(ts)))
 }
 
 export function showChannelMenu(
@@ -610,25 +362,8 @@ export function showChannelMenu(
    const buildContent = (frag: DocumentFragment) => {
       const unreadRows: [HTMLAnchorElement, IChannel][] = []
       const headerRows: [HTMLAnchorElement, IChannel[]][] = []
-      if (imgProxyEditing) {
-         frag.appendChild(imgProxyEditor(guard, rebuild, reapply))
-      } else if (dateEditing) {
-         frag.appendChild(dateEditor(guard, rebuild))
-      } else {
-         const since = divEl("srr-chip-row")
-         since.appendChild(imgProxyIcon())
-         since.appendChild(unreadIcon())
-         since.appendChild(lastChip())
-         since.appendChild(createLink("t:28800", "8h"))
-         since.appendChild(createLink("t:57600", "16h"))
-         since.appendChild(createLink("t:86400", "1d"))
-         since.appendChild(createLink("t:604800", "7d"))
-         since.appendChild(dateIcon())
-         frag.appendChild(since)
-      }
-
-      frag.appendChild(divEl("srr-tag-sep"))
-
+      // Pure filter selector — tags/channels/★ Saved/[ALL]. The image-proxy,
+      // unseen-only, time-jump and date controls moved out to the toolbar.
       frag.appendChild(createLink("", "[ALL]", cls("", "")))
       // "★ Saved" — the per-article collection, surfaced once there's something
       // in it. Same selection path as a channel/tag (host.selectFilter on the
@@ -673,86 +408,11 @@ export function showChannelMenu(
       }
       void fillUnread(unreadRows, headerRows)
    }
-   const rebuild = () => fillMenu(document.getElementById("srr-channel-menu")!, buildContent)
-   // Re-render the active surface after an image-proxy change: the list in place,
-   // the reader by replaying its hash (the list's hash carries no position).
-   const reapply = () => {
-      if (host.viewIsList()) host.reapplyFilter()
-      else guard(() => nav.fromHash(location.hash.substring(1)))
-   }
 
-   toggleDropdown("srr-channel-menu", buildContent, async (value, e) => {
-      // Swap to an inline editor without letting the click reach the window
-      // close handler, which would otherwise shut the menu the instant it opens.
-      if (value === IMG_PROXY_SENTINEL) {
-         e.stopPropagation()
-         imgProxyEditing = true
-         rebuild()
-         return
-      }
-      if (value === DATE_SENTINEL) {
-         e.stopPropagation()
-         dateEditing = true
-         rebuild()
-         return
-      }
-      if (value === UNREAD_SENTINEL) {
-         // A mode toggle, not a selection: keep the menu open. Do the flip + chip
-         // rebuild + nav re-apply ATOMICALLY inside the guard so a busy click (a
-         // nav already in flight, or a rapid double-click) is a true no-op — the
-         // chip can never get ahead of the applied nav state. Restore focus to
-         // the freshly-rebuilt chip when this came from the keyboard (Space),
-         // since rebuild() detaches the focused element.
-         e.stopPropagation()
-         // Capture the target mode ONCE, outside the guarded fn: guard's error
-         // path re-invokes the SAME fn on Retry, so reading live !isUnreadOnly()
-         // inside it would flip back the already-applied toggle on a retry.
-         const want = !nav.isUnreadOnly()
-         // Keyboard activation (Space → synthetic .click()) carries detail === 0;
-         // a real mouse click has detail >= 1. activeElement can't tell them
-         // apart once the chip stays focused through the click.
-         const fromKeyboard = e.detail === 0
-         // On the list surface the flip re-renders the list in place (host owns
-         // the busy-guarded re-render); the menu stays open and focus returns to
-         // the chip, mirroring the reader path below.
-         if (host.viewIsList()) {
-            nav.setUnreadOnly(want)
-            rebuild()
-            if (fromKeyboard)
-               document.querySelector<HTMLElement>('#srr-channel-menu a[data-value="__unread__"]')?.focus()
-            host.reapplyFilter()
-            return
-         }
-         guard(() => {
-            nav.setUnreadOnly(want)
-            rebuild()
-            if (fromKeyboard)
-               document.querySelector<HTMLElement>('#srr-channel-menu a[data-value="__unread__"]')?.focus()
-            // Re-resolve the current single-tag filter via switchFilter (which
-            // resumes at the tag's current position, matching tag-select) so
-            // toggling ON lands on where you left off, not fromHash's
-            // last()-fallback newest. Other filters (channel / [ALL] /
-            // multi-token) ignore unseen-only, so replay the raw hash unchanged.
-            const key = nav.getCurrentFilterKey()
-            const isTag = key !== "" && !Number.isFinite(Number(key))
-            return isTag ? nav.switchFilter(key) : nav.fromHash(location.hash.substring(1))
-         })
-         return
-      }
-      // "Jump to a specific article" actions (latest / time-range) open the
-      // reader from either surface — they target one article, not a feed.
-      if (value === "!last") {
-         guard(() => nav.last())
-         return
-      }
-      if (value.startsWith("t:")) {
-         const ts = Math.floor(Date.now() / 1000) - Number(value.slice(2))
-         guard(async () => nav.goTo(await data.findChronForTimestamp(ts)))
-         return
-      }
-      // A channel/tag/[ALL] selection: on the list surface, re-filter the list
-      // (the host shows that filter's feed); in the reader, resume that filter
-      // at its current position as before.
+   toggleDropdown("srr-channel-menu", buildContent, async (value) => {
+      // A channel/tag/[ALL]/★ Saved selection: on the list surface, re-filter the
+      // list (the host shows that filter's feed); in the reader, resume that
+      // filter at its current position. (switchFilter maps ""→[ALL] and ~saved.)
       if (host.viewIsList()) {
          host.selectFilter(value)
          return

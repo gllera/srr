@@ -5,9 +5,9 @@ import * as nav from "./nav"
 // The list surface — the app's home: a scannable feed of headlines under the
 // current filter, newest-first, with a read/unread dot per row. Tapping a row
 // opens the reader (app wires that via setup's `open`). The list owns no nav
-// state of its own — it walks data.findLeft over nav.filter.channels (exactly
-// what nav.peek does, just unbounded) and reads the seen map for dots, so the
-// filter/unseen-only semantics are identical to the reader's.
+// state of its own — it walks nav.feedLeft over nav.filter.channels (the same
+// neighbor seam the reader steps through, just unbounded) and reads the seen
+// map for dots, so the filter/unseen-only semantics are identical to the reader's.
 
 // Rows fetched per older batch. One batch spans ~1 data pack (titles already
 // ride in the data packs the LRU holds), so this is a paint-budget knob, not a
@@ -86,8 +86,7 @@ function el(tag: string, className: string): HTMLElement {
 }
 
 // One headline row: dot + (title over "channel · age"). Display fallbacks
-// ("(untitled)", the "[DELETED]" channel tombstone) live here, mirroring
-// dropdown's headlineRow.
+// ("(untitled)", the "[DELETED]" channel tombstone) live here.
 function rowEl(chron: number, art: IArticle, seen: Record<string, number>): HTMLElement {
    const a = document.createElement("a")
    a.className = "srr-row"
@@ -114,11 +113,15 @@ function rowEl(chron: number, art: IArticle, seen: Record<string, number>): HTML
 
 function emptyState(): void {
    const empty = el("div", "srr-list-empty")
-   empty.textContent = nav.filter.saved
-      ? "No saved articles yet."
-      : nav.filter.active
-        ? "Nothing here yet."
-        : "No articles yet."
+   empty.textContent = nav.isSearchFilter()
+      ? nav.searchQuery()
+         ? "No matching articles."
+         : "Type to search article titles."
+      : nav.filter.saved
+        ? "No saved articles yet."
+        : nav.filter.active
+          ? "Nothing here yet."
+          : "No articles yet."
    container.appendChild(empty)
 }
 
