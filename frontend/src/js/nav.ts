@@ -1,5 +1,6 @@
 import * as data from "./data"
 import { extractImageUrls, getImgProxy, imgProxy } from "./fmt"
+import * as search from "./search"
 
 let pos = -1
 // Channel id of the article currently on screen (-1 = none). chanUnread counts
@@ -102,6 +103,109 @@ function savedRight(from: number): number {
    return -1
 }
 
+// ── Search filter mode ───────────────────────────────────────────────────────
+// A third filter mode beside channel-membership and ★ Saved: when the single
+// token is "q:<query>", navigation walks an explicit set of matching chronIdxs —
+// the title-search hits — exactly as ★ Saved walks the saved set. The set is
+// computed once per query from the search/ shards (search.ts) and cached; the
+// list and the reader then step through it via feedLeft/feedRight with no idx
+// walk. The query rides in the shareable #!q:<query> hash like any token, so
+// reload / back / forward restore the search and it behaves like a tag filter
+// (picking another filter, two-finger cycle, or arrow-cycling leaves it — search
+// is not part of getFilterEntries). Capped at SEARCH_CAP newest hits so a broad
+// query can't fetch the whole archive; searchTruncated() flags the cap for the UI.
+export const SEARCH_PREFIX = "q:"
+const SEARCH_CAP = 500
+let searchTerm = "" // the active query (text after "q:")
+let searchSorted: number[] = [] // ascending matching chronIdxs — the neighbor walk
+let searchSet = new Set<number>() // the same hits, for matches()
+let searchTruncatedFlag = false
+let searchLoadedFor: string | null = null // term searchSorted/searchSet were built for
+let searchLoad: Promise<void> | null = null // in-flight computation (dedupes concurrent walks)
+let searchLoadingTerm = ""
+
+export function isSearchFilter(): boolean {
+   return filter.search
+}
+export function searchQuery(): string {
+   return searchTerm
+}
+export function searchTruncated(): boolean {
+   return searchTruncatedFlag
+}
+export function searchAvailable(): boolean {
+   return search.available()
+}
+export function searchShort(q: string): boolean {
+   return search.shortQuery(q)
+}
+
+// Largest entry <= from / smallest entry >= from in an ascending array (-1 =
+// none) — the pure neighbor scan the search set walks (saved has its own).
+function setLeft(sorted: number[], from: number): number {
+   let res = -1
+   for (const c of sorted) {
+      if (c > from) break
+      res = c
+   }
+   return res
+}
+function setRight(sorted: number[], from: number): number {
+   for (const c of sorted) if (c >= from) return c
+   return -1
+}
+
+// Compute the search set for `term` from the shard generator (newest-first,
+// capped). Commits only if `term` is still the active query when it resolves, so
+// a superseded keystroke's late result can't overwrite fresher hits.
+async function loadSearchSet(term: string): Promise<void> {
+   const set = new Set<number>()
+   const chrons: number[] = []
+   let truncated = false
+   if (term) {
+      try {
+         // Ask for one past the cap: search() stops at its limit, so without the
+         // +1 a query with exactly SEARCH_CAP matches and one with thousands both
+         // yield SEARCH_CAP hits and the break below never fires — truncation
+         // would be invisible. The extra hit is the witness; we keep only SEARCH_CAP.
+         outer: for await (const batch of search.search(term, SEARCH_CAP + 1)) {
+            for (const h of batch) {
+               if (chrons.length >= SEARCH_CAP) {
+                  truncated = true
+                  break outer
+               }
+               if (!set.has(h.chron)) {
+                  set.add(h.chron)
+                  chrons.push(h.chron)
+               }
+            }
+         }
+      } catch (e) {
+         // A missing summary / shard rejects the generator; degrade to whatever
+         // was collected rather than breaking list/reader navigation.
+         console.warn("search filter: shard scan failed", e)
+      }
+   }
+   if (term !== searchTerm) return // superseded by a newer query
+   chrons.sort((a, b) => a - b)
+   searchSorted = chrons
+   searchSet = set
+   searchTruncatedFlag = truncated
+   searchLoadedFor = term
+}
+
+// Ensure the set matches the active term before a neighbor walk reads it.
+// Concurrent walks within one render share the single in-flight load.
+function ensureSearchSet(): Promise<void> {
+   if (searchLoadedFor === searchTerm) return Promise.resolve()
+   if (searchLoad && searchLoadingTerm === searchTerm) return searchLoad
+   const term = (searchLoadingTerm = searchTerm)
+   searchLoad = loadSearchSet(term).finally(() => {
+      if (searchLoadingTerm === term) searchLoad = null
+   })
+   return searchLoad
+}
+
 // The current feed's neighbor walk — the ONE seam saved mode branches at. Every
 // navigation primitive (step, peek, first/last, goTo) and the list surface route
 // their findLeft/findRight through these instead of data.* directly, so saved
@@ -109,10 +213,14 @@ function savedRight(from: number): number {
 // place. Async to match data.findLeft/findRight; the saved branch is synchronous,
 // wrapped in a resolved promise.
 export function feedLeft(from: number): Promise<number> {
-   return filter.saved ? Promise.resolve(savedLeft(from)) : data.findLeft(from, filter.channels)
+   if (filter.saved) return Promise.resolve(savedLeft(from))
+   if (filter.search) return ensureSearchSet().then(() => setLeft(searchSorted, from))
+   return data.findLeft(from, filter.channels)
 }
 export function feedRight(from: number): Promise<number> {
-   return filter.saved ? Promise.resolve(savedRight(from)) : data.findRight(from, filter.channels)
+   if (filter.saved) return Promise.resolve(savedRight(from))
+   if (filter.search) return ensureSearchSet().then(() => setRight(searchSorted, from))
+   return data.findRight(from, filter.channels)
 }
 
 // A snapshotted tag member: its true add_idx, its seen position at snapshot
@@ -138,13 +246,18 @@ export const filter = {
    // "★ Saved" mode: navigation walks the explicit srr-saved set, channel-agnostic
    // (channels stays empty). Set by set() when the only token is SAVED_TOKEN.
    saved: false,
+   // Search mode: navigation walks the explicit title-search set (searchSorted),
+   // channel-agnostic like saved. Set by set() when the only token is "q:<query>"
+   // — see the Search filter mode section above.
+   search: false,
    get active() {
       return this.tokens.length > 0
    },
    matches(chanId: number, chronIdx: number) {
-      // Saved mode ignores the channel: membership IS the saved set. (chanId is
-      // still passed by callers that don't know the mode — the search predicate.)
+      // Saved/search modes ignore the channel: membership IS the explicit set.
+      // (chanId is still passed by callers that don't know the mode.)
       if (this.saved) return isSaved(chronIdx)
+      if (this.search) return searchSet.has(chronIdx)
       const addIdx = this.channels.get(chanId)
       return addIdx !== undefined && chronIdx >= addIdx
    },
@@ -156,6 +269,7 @@ export const filter = {
       this.channels = new Map<number, number>()
       this.unreadMembers = null
       this.saved = false
+      this.search = false
       for (const ch of Object.values(data.db.channels)) if (ch.total_art) this.channels.set(ch.id, ch.add_idx ?? 0)
       this.chanTotal = data.countAll(this.channels)
       this.tokens = []
@@ -169,7 +283,32 @@ export const filter = {
       // to [ALL]). channels stays empty; feedLeft/feedRight/matches/showFeed all
       // branch on filter.saved.
       this.saved = tokens.length === 1 && tokens[0] === SAVED_TOKEN
+      // "q:<query>" — title-search mode (see Search filter mode above). Like
+      // ★ Saved it short-circuits the channel resolution; the matching set is
+      // computed lazily by ensureSearchSet, which feedLeft/feedRight await.
+      this.search = !this.saved && tokens.length === 1 && tokens[0].startsWith(SEARCH_PREFIX)
       if (this.saved) {
+         this.chanTotal = 0
+         return
+      }
+      if (this.search) {
+         const term = tokens[0].slice(SEARCH_PREFIX.length)
+         // New query: drop the stale set so matches()/showFeed can't read the
+         // previous query's hits before ensureSearchSet recomputes. A returning
+         // query (back/forward) keeps its cached set.
+         if (term !== searchLoadedFor) {
+            searchSorted = []
+            searchSet = new Set<number>()
+            searchTruncatedFlag = false
+            // Also forget what the (now-emptied) set was loaded for. Without this,
+            // a fast type→backspace (A → B → A, where B's reload is still in flight)
+            // would leave searchLoadedFor === "A" while the set is empty; on the
+            // return to A, ensureSearchSet would see searchLoadedFor === searchTerm
+            // and short-circuit, stranding the list on an empty result for a query
+            // that has matches. Nulling forces ensureSearchSet to recompute.
+            searchLoadedFor = null
+         }
+         searchTerm = term
          this.chanTotal = 0
          return
       }
@@ -293,12 +432,13 @@ async function showFeed(article: IArticle): Promise<IShowFeed> {
    // `right` is the count strictly to the right of pos — it drives has_right
    // (the next button) and, outside unseen-only mode, the toolbar counter too.
    let right: number
-   if (filter.saved) {
-      // Saved mode counts the explicit set directly (no idx fetch): the toolbar
-      // counter is the saved articles strictly to the right, like a channel.
+   if (filter.saved || filter.search) {
+      // Saved/search count their explicit set directly (no idx fetch): the
+      // toolbar counter is the set's members strictly to the right, like a channel.
+      const sorted = filter.saved ? savedSorted() : searchSorted
       let l = 0
       let r = 0
-      for (const c of savedSorted()) {
+      for (const c of sorted) {
          if (c < pos) l++
          else if (c > pos) r++
       }
@@ -492,44 +632,6 @@ export function tagUnreadFromCounts(group: IChannel[], counts: Map<number, numbe
    return group.reduce((sum, ch) => sum + Math.max(0, counts.get(ch.id) ?? 0), 0)
 }
 
-// The headlines around the current position under the current filter: up to
-// `span` matches each side plus the shown article, in chron order. The walk
-// reuses the nav lookups (findLeft/findRight skip non-matching packs via the
-// resident headers) and the data-pack LRU already holds the pos pack, so the
-// common case costs zero fetches.
-export async function peek(span = 10): Promise<IPeekItem[]> {
-   if (pos === -1) return []
-   // The two directional walks are independent — run them concurrently so
-   // cold idx-pack fetches on both sides overlap.
-   const walk = async (step: (i: number) => Promise<number>) => {
-      const out: number[] = []
-      let i = pos
-      for (let n = 0; n < span; n++) {
-         i = await step(i)
-         if (i === -1) break
-         out.push(i)
-      }
-      return out
-   }
-   const [lefts, rights] = await Promise.all([walk((i) => feedLeft(i - 1)), walk((i) => feedRight(i + 1))])
-   const idxs = [...lefts.reverse(), pos, ...rights]
-   return Promise.all(
-      idxs.map(async (chron) => {
-         const art = await data.loadArticle(chron)
-         return {
-            chron,
-            // Raw wire fields — the display fallbacks ("(untitled)", the
-            // "[DELETED]" tombstone) are the renderer's (dropdown
-            // headlineRow), not navigation state.
-            title: art.t ?? "",
-            when: art.p || art.a,
-            s: art.s,
-            current: chron === pos,
-         }
-      }),
-   )
-}
-
 export function pruneSeen() {
    try {
       const seen = readSeen()
@@ -586,6 +688,10 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
    else filter.clear()
 
    if (data.db.total_art === 0) throw new Error("no articles")
+
+   // Search mode's matching set must be loaded before isValidSeen/resolve read it
+   // (matches() is synchronous), so a #pos!q:… deep-link honors its position.
+   if (filter.search) await ensureSearchSet()
 
    // Empty posStr → Number("")=0 would land on the oldest article; treat it
    // as "no target" so a first-time visitor with no stored hash sees latest.
@@ -681,9 +787,9 @@ export async function switchFilter(token: string): Promise<IShowFeed> {
    }
    filter.set([token])
    if (!filter.active) return last()
-   // Saved has no per-channel resume position; open at the newest saved article
-   // (top of the list), the same place selecting "★ Saved" on the list shows.
-   if (filter.saved) return last()
+   // Saved/search have no per-channel resume position; open at the newest member
+   // (top of the list), the same place selecting them on the list shows.
+   if (filter.saved || filter.search) return last()
    const seenIdx = getSeen(token)
    if (seenIdx !== undefined && (await isValidSeen(seenIdx))) return resolve(seenIdx)
    return first()
@@ -730,8 +836,11 @@ export function filterKey(): string {
 
 // The `!tokens` hash suffix for the active filter ("" when inactive) — shared by
 // updateHash (reader `#pos!tokens`) and the list surface (`#!tokens`, no pos).
+// `+` joins tokens, so a literal `+` inside one (e.g. a search query "c++") is
+// escaped to %2B — encodeURIComponent leaves `+` alone — and decoded back after
+// the split on the read side (route/fromHash).
 export function tokensSuffix(): string {
-   return filter.active ? "!" + filter.tokens.map(encodeURIComponent).join("+") : ""
+   return filter.active ? "!" + filter.tokens.map((t) => encodeURIComponent(t).replaceAll("+", "%2B")).join("+") : ""
 }
 
 // The parsed seen map (channel key → last-viewed chronIdx). Exposed for the

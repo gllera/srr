@@ -28,6 +28,14 @@
          <button class="srr-popup-close" aria-label="Close">&times;</button>
       </div>
       <main class="srr-container">
+         <div class="srr-searchbar" role="search">
+            <div class="srr-searchbar-row">
+               <span class="srr-search-icon" aria-hidden="true"></span>
+               <input type="search" class="srr-search-input" aria-label="Search article titles" placeholder="Search titles…" autocomplete="off" enterkeyhint="search" />
+               <button class="srr-search-clear" aria-label="Clear search" title="Clear search">&times;</button>
+            </div>
+            <div class="srr-search-note" hidden></div>
+         </div>
          <article class="srr-reader" hidden>
             <div class="srr-title-row">
                <div class="srr-kicker">
@@ -50,6 +58,12 @@
                   <button class="srr-dropdown-btn srr-channel" aria-expanded="false" aria-haspopup="menu"></button>
                   <div id="srr-channel-menu" class="srr-dropdown-menu" role="menu"></div>
                </div>
+               <button class="srr-unread-toggle srr-unread-off" aria-pressed="false" aria-label="Unseen-only navigation: off" title="Unseen-only (tags): off">
+                  <svg class="srr-unread-toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                     <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" />
+                     <circle cx="12" cy="12" r="3" />
+                  </svg>
+               </button>
             </div>
             <div class="srr-toolbar-right">
                <button class="srr-save" aria-label="Save article" aria-keyshortcuts="b" aria-pressed="false" title="Save article (B)" disabled>
@@ -58,20 +72,38 @@
                   </svg>
                </button>
                <div class="srr-dropdown">
-                  <button class="srr-search srr-dropdown-btn" aria-expanded="false" aria-haspopup="menu" aria-label="Search articles" aria-keyshortcuts="/" title="Search (/)">
-                     <span class="srr-search-icon" aria-hidden="true"></span>
+                  <button class="srr-imgproxy srr-dropdown-btn" aria-expanded="false" aria-haspopup="menu" aria-label="Image proxy" title="Image proxy">
+                     <svg class="srr-imgproxy-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <rect x="3" y="3" width="18" height="18" rx="2" />
+                        <circle cx="9" cy="9" r="2" />
+                        <path d="M21 15l-5-5L5 21" />
+                     </svg>
                   </button>
-                  <div id="srr-search-menu" class="srr-dropdown-menu" role="menu" aria-label="Search articles"></div>
+                  <div id="srr-imgproxy-menu" class="srr-dropdown-menu" role="menu" aria-label="Image proxy"></div>
                </div>
-               <div class="srr-dropdown">
-                  <button class="srr-counter srr-dropdown-btn" aria-expanded="false" aria-haspopup="menu" aria-label="Nearby articles" aria-keyshortcuts="l" title="Nearby articles (L)"></button>
-                  <div id="srr-peek-menu" class="srr-dropdown-menu" role="menu" aria-label="Nearby articles"></div>
-               </div>
+               <span class="srr-jump-wrap">
+                  <button class="srr-jump" aria-label="Jump to a date" title="Jump to a date">
+                     <svg class="srr-jump-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <rect x="3" y="4" width="18" height="17" rx="2" />
+                        <path d="M3 9h18M8 2v4M16 2v4" />
+                     </svg>
+                  </button>
+                  <input type="date" class="srr-jump-date" tabindex="-1" aria-hidden="true" />
+               </span>
+               <button class="srr-search" aria-pressed="false" aria-label="Search articles" aria-keyshortcuts="/" title="Search (/)">
+                  <span class="srr-search-icon" aria-hidden="true"></span>
+               </button>
                <button class="srr-prev" disabled aria-label="Previous article" aria-keyshortcuts="ArrowLeft a" title="Previous article (←/A)">
                   <span class="srr-prev-icon" aria-hidden="true"></span>
                </button>
                <button class="srr-next" disabled aria-label="Next article" aria-keyshortcuts="ArrowRight d" title="Next article (→/D)">
                   <span class="srr-next-icon" aria-hidden="true"></span>
+               </button>
+               <button class="srr-resume" aria-label="Resume reading (latest)" title="Resume reading (latest)">
+                  <svg class="srr-resume-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                     <path d="M4 5l12 7L4 19z" />
+                     <rect x="17" y="5" width="3" height="14" />
+                  </svg>
                </button>
             </div>
          </nav>

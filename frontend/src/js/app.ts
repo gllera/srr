@@ -1,5 +1,12 @@
 import * as data from "./data"
-import { closeAllDropdowns, showChannelMenu, showPeekMenu, showSearchMenu, type ChannelMenuHost } from "./dropdown"
+import {
+   closeAllDropdowns,
+   dateJump,
+   openDatePicker,
+   showChannelMenu,
+   showImgProxyMenu,
+   type ChannelMenuHost,
+} from "./dropdown"
 import { collapseBrokenMedia, formatDate, sanitizeHtml, timeAgo, URL_DENY } from "./fmt"
 import { setupGestures } from "./gestures"
 import * as list from "./list"
@@ -16,10 +23,17 @@ const el = {
    prev: document.querySelector(".srr-prev") as HTMLButtonElement,
    next: document.querySelector(".srr-next") as HTMLButtonElement,
    channel: document.querySelector(".srr-channel") as HTMLButtonElement,
+   unreadToggle: document.querySelector(".srr-unread-toggle") as HTMLButtonElement,
    source: document.querySelector(".srr-source") as HTMLElement,
    date: document.querySelector(".srr-date") as HTMLElement,
-   counter: document.querySelector(".srr-counter") as HTMLButtonElement,
    search: document.querySelector(".srr-search") as HTMLButtonElement,
+   searchInput: document.querySelector(".srr-search-input") as HTMLInputElement,
+   searchClear: document.querySelector(".srr-search-clear") as HTMLButtonElement,
+   searchNote: document.querySelector(".srr-search-note") as HTMLElement,
+   imgproxy: document.querySelector(".srr-imgproxy") as HTMLButtonElement,
+   jump: document.querySelector(".srr-jump") as HTMLButtonElement,
+   jumpDate: document.querySelector(".srr-jump-date") as HTMLInputElement,
+   resume: document.querySelector(".srr-resume") as HTMLButtonElement,
    save: document.querySelector(".srr-save") as HTMLButtonElement,
    popupText: document.querySelector(".srr-popup-text") as HTMLElement,
    popupRetry: document.querySelector(".srr-popup-retry") as HTMLButtonElement,
@@ -35,6 +49,10 @@ let currentPublished = 0
 let currentChannel = { id: 0, title: "", tag: "" }
 let lastChannelLabel: string | null = null
 let previousFocus: HTMLElement | null = null
+// Pending debounced search query (see the Title search section). Declared up
+// here so selectFilter / route can cancel it when the filter changes by any
+// means other than continued typing.
+let searchDebounce: ReturnType<typeof setTimeout> | undefined
 
 function showReader() {
    view = "reader"
@@ -124,7 +142,6 @@ function render(o: IShowFeed) {
    el.source.textContent = currentChannel.title
    refreshChannelLabel()
    refreshSaveButton(o.channel !== undefined)
-   el.counter.textContent = String(o.countRight)
 
    document.title = "SRR - " + (o.article.t ?? "")
    window.scrollTo(0, 0)
@@ -148,7 +165,10 @@ function render(o: IShowFeed) {
 function refreshChannelLabel() {
    // The article's source now lives in the header kicker, so the toolbar button
    // is a pure active-filter indicator: "All", a tag name, or a single channel.
-   const key = nav.getCurrentFilterKey() // "" (all/multi) | tag name | numeric channel id
+   // Search mode is orthogonal to the channel axis (the pinned search bar owns the
+   // query), so show the button neutral ("All", unhighlighted) instead of the raw
+   // "q:<query>" token getCurrentFilterKey returns.
+   const key = nav.isSearchFilter() ? "" : nav.getCurrentFilterKey() // "" (all/multi) | tag name | numeric channel id
    if (key === lastChannelLabel) return
    lastChannelLabel = key
 
@@ -192,6 +212,10 @@ function toggleSave() {
 }
 
 function listTitle(): string {
+   if (nav.isSearchFilter()) {
+      const q = nav.searchQuery()
+      return q ? `SRR · Search: ${q}` : "SRR · Search"
+   }
    const key = nav.getCurrentFilterKey()
    if (key === "") return "SRR"
    if (key === nav.SAVED_TOKEN) return "SRR · ★ Saved"
@@ -214,6 +238,7 @@ async function renderListSurface() {
       showError(e, () => void renderListSurface())
    } finally {
       document.body.classList.remove("srr-loading")
+      syncSearchBar()
       busy = false
    }
 }
@@ -222,6 +247,9 @@ async function renderListSurface() {
 // reading position); anything else (empty, or just `!tokens`) is the list at
 // that filter.
 async function route(hash: string) {
+   // A URL-driven filter change (hashchange / back-forward) also supersedes any
+   // pending debounced query — see selectFilter.
+   clearTimeout(searchDebounce)
    const bang = hash.indexOf("!")
    const posStr = bang === -1 ? hash : hash.substring(0, bang)
    if (posStr !== "" && /^-?\d+$/.test(posStr)) {
@@ -262,6 +290,12 @@ async function goToList(push: boolean) {
 }
 
 async function selectFilter(token: string) {
+   // Any explicit filter change cancels a still-pending debounced search query;
+   // otherwise typing then leaving search (✕ / Escape / the magnifier, but also a
+   // channel-menu pick or a two-finger/arrow cycle, which all land here) within
+   // the debounce window lets the stale applySearchQuery fire ~200ms later and
+   // bounce the list back into search. Typing itself never routes through here.
+   clearTimeout(searchDebounce)
    nav.applyFilter(token === "" ? [] : [token])
    closeAllDropdowns()
    await goToList(true)
@@ -270,10 +304,91 @@ async function selectFilter(token: string) {
 const dropdownHost: ChannelMenuHost = {
    viewIsList: () => view === "list",
    selectFilter: (token) => void selectFilter(token),
-   reapplyFilter: () => {
-      nav.applyFilter(nav.currentTokens())
-      void list.rerender()
-   },
+}
+
+// ── Title search (list filter mode) ──────────────────────────────────────────
+// The toolbar magnifier / `/` toggle a "q:<query>" filter (nav search mode): the
+// list renders the matching articles and the reader walks them, all via the
+// shared #!q:<query> hash. A search bar pinned atop the list owns the input;
+// typing updates the query in place (debounced, replaceState) so each keystroke
+// re-renders results without spamming history, while entering/leaving search is
+// a single history step. The bar lives outside .srr-list, so list.rerender
+// (which clears .srr-list) never disturbs the focused input.
+
+function toggleSearch() {
+   if (view === "list" && nav.isSearchFilter()) void exitSearch()
+   else void enterSearch()
+}
+
+async function enterSearch() {
+   if (!nav.searchAvailable()) return
+   await selectFilter(nav.SEARCH_PREFIX) // one history step into search; the bar drives the query
+   el.searchInput.focus()
+}
+
+function exitSearch() {
+   return selectFilter("")
+}
+
+async function applySearchQuery(q: string) {
+   clearTimeout(searchDebounce)
+   nav.applyFilter([nav.SEARCH_PREFIX + q])
+   const h = "#" + nav.tokensSuffix()
+   history.replaceState(null, "", h)
+   persistHash(h)
+   document.title = listTitle()
+   try {
+      await list.rerender()
+   } catch (e) {
+      showError(e, () => void applySearchQuery(q))
+      return
+   }
+   syncSearchBar()
+}
+
+// Reflect the active search state into the bar: show/hide it (CSS gates display
+// on body.srr-searching + .srr-view-list), seed the input from the query (unless
+// the user is mid-type), drive the toolbar button's pressed state, and surface
+// the short-query / truncation hint.
+function syncSearchBar() {
+   const on = nav.isSearchFilter()
+   document.body.classList.toggle("srr-searching", on && view === "list")
+   el.search.setAttribute("aria-pressed", String(on))
+   if (!on) {
+      el.searchNote.hidden = true
+      return
+   }
+   const q = nav.searchQuery()
+   if (document.activeElement !== el.searchInput) el.searchInput.value = q
+   let note = ""
+   if (q && nav.searchShort(q))
+      note = "Short words search only recent articles — type a longer word to reach the archive."
+   else if (nav.searchTruncated()) note = "Showing the most recent matches — refine to reach older ones."
+   el.searchNote.textContent = note
+   el.searchNote.hidden = !note
+}
+
+// The unseen-only (tags) toggle — a list-only toolbar button. Its icon reflects
+// the persisted mode; toggling it flips the mode and rebuilds the list under the
+// new (raised/restored) bounds. The mode also governs reader navigation, but the
+// only place it's switched is here on the list.
+function refreshUnreadToggle() {
+   const on = nav.isUnreadOnly()
+   el.unreadToggle.classList.toggle("srr-unread-on", on)
+   el.unreadToggle.classList.toggle("srr-unread-off", !on)
+   el.unreadToggle.setAttribute("aria-pressed", String(on))
+   el.unreadToggle.setAttribute("aria-label", `Unseen-only navigation: ${on ? "on" : "off"}`)
+   el.unreadToggle.title = `Unseen-only (tags): ${on ? "on" : "off"}`
+}
+
+function toggleUnreadOnly() {
+   nav.setUnreadOnly(!nav.isUnreadOnly())
+   refreshUnreadToggle()
+   // Re-apply the same tokens so filter.set re-reads the new mode (raised bounds
+   // in single-tag mode), then force a rebuild — the token set is unchanged, so
+   // list.show() alone would only refresh dots. Mirrors the old dropdown reapply.
+   nav.applyFilter(nav.currentTokens())
+   void list.rerender()
 }
 
 // Two-finger vertical swipe = step the filter. In the reader, cycle to the next
@@ -294,6 +409,7 @@ function channelMenuTag(): string {
    // Which tag group to auto-expand in the menu. In the reader, the shown
    // article's tag; on the list, the active tag filter (if any).
    if (view === "list") {
+      if (nav.isSearchFilter()) return ""
       const key = nav.getCurrentFilterKey()
       return key !== "" && !/^\d+$/.test(key) ? key : ""
    }
@@ -311,8 +427,6 @@ const KEY_ACTIONS: Record<string, () => void> = {
    s: () => nav.getFilterEntries().length > 1 && guard(() => nav.cycleFilter(1)),
    q: () => guard(() => nav.first()),
    e: () => guard(() => nav.last()),
-   l: () => showPeekMenu(guard),
-   "/": () => showSearchMenu(guard),
    b: () => !el.save.disabled && toggleSave(),
    f: () => {
       if (!el.titleLink.getAttribute("href")) return
@@ -341,20 +455,48 @@ async function init() {
    // capture: error events don't bubble (see collapseBrokenMedia)
    el.content.addEventListener("error", collapseBrokenMedia, true)
    el.channel.addEventListener("click", () => showChannelMenu(channelMenuTag(), guard, dropdownHost))
-   el.counter.addEventListener("click", () => showPeekMenu(guard))
-   el.search.addEventListener("click", () => showSearchMenu(guard))
+   el.unreadToggle.addEventListener("click", toggleUnreadOnly)
+   el.imgproxy.addEventListener("click", () => showImgProxyMenu())
+   // Jump: the button pops the native date picker; picking a day (the input's
+   // change) jumps the reader to that date. No dropdown menu of its own.
+   el.jump.addEventListener("click", () => openDatePicker(el.jumpDate))
+   el.jumpDate.addEventListener("change", () => dateJump(el.jumpDate, guard))
+   // Resume reading: open the reader at the latest article in the current filter.
+   el.resume.addEventListener("click", () => guard(() => nav.last()))
+   // Search: the magnifier toggles the list's "q:<query>" filter; the pinned
+   // search bar owns the input (debounced live query, Enter applies immediately,
+   // Escape / ✕ leave search).
+   el.search.disabled = !nav.searchAvailable()
+   el.search.addEventListener("click", () => !el.search.disabled && toggleSearch())
+   el.searchInput.addEventListener("input", () => {
+      clearTimeout(searchDebounce)
+      searchDebounce = setTimeout(() => void applySearchQuery(el.searchInput.value), 200)
+   })
+   el.searchInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+         e.preventDefault()
+         void applySearchQuery(el.searchInput.value)
+      } else if (e.key === "Escape") {
+         // Stop the document-level Escape handler from also acting; leave search.
+         e.preventDefault()
+         e.stopPropagation()
+         void exitSearch()
+      }
+   })
+   el.searchClear.addEventListener("click", () => void exitSearch())
    el.save.addEventListener("click", () => !el.save.disabled && toggleSave())
+   refreshUnreadToggle()
    el.popupClose.addEventListener("click", closePopup)
    el.popupRetry.addEventListener("click", () => {
       closePopup()
       if (retryFn) retryFn()
    })
    window.addEventListener("click", (e) => {
-      // closest(), not matches(): a dropdown button may be clicked on an inner
-      // icon span (e.g. .srr-search-icon), so the event target is the child, not
-      // the button. matches() missed that and closed the menu the button's own
-      // handler had just opened — leaving the search button dead to taps/clicks
-      // (only the `/` shortcut worked; on mobile there is no `/` key).
+      // closest(), not matches(): a dropdown button (channel, image-proxy) is
+      // clicked on its inner icon (e.g. the .srr-imgproxy-btn-icon svg), so the
+      // event target is the child, not the button. matches() missed that and
+      // closed the menu the button's own handler had just opened — leaving the
+      // button dead to taps/clicks.
       if (!(e.target as HTMLElement).closest(".srr-dropdown-btn")) closeAllDropdowns()
    })
    window.addEventListener("mousedown", (e) => {
@@ -392,7 +534,7 @@ async function init() {
       if (view === "list") {
          if (e.key === "/") {
             e.preventDefault()
-            showSearchMenu(guard)
+            toggleSearch()
          }
          return
       }

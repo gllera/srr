@@ -145,16 +145,6 @@ video {
    margin: 0 0.4rem;
 }
 
-/* The counter doubles as the headlines-peek button; the descendant selector
-   outranks the shared toolbar-button rule so it keeps its muted look. */
-.srr-toolbar-right .srr-counter {
-   font-size: var(--text-sm);
-   color: var(--muted);
-   white-space: nowrap;
-   font-variant-numeric: tabular-nums;
-   opacity: 0.55;
-}
-
 /* Content */
 .srr-content {
    font-size: var(--text-base);
@@ -313,10 +303,13 @@ video {
    transform: translateY(100%);
 }
 
-/* Buttons — no chrome. 44px (2.75rem) tap targets per Apple/Material guidelines. */
+/* Buttons — no chrome. 44px (2.75rem) tap targets per Apple/Material guidelines.
+   .srr-jump-wrap is listed alongside .srr-dropdown: both wrap a toolbar button,
+   so its child button needs the same chrome-stripping reset. */
 .srr-toolbar-left,
 .srr-toolbar-right,
-.srr-dropdown {
+.srr-dropdown,
+.srr-jump-wrap {
    & > button {
       background: none;
       border: none;
@@ -352,7 +345,7 @@ video {
 .srr-toolbar-right {
    margin-left: auto;
    /* Anchor the menus to the toolbar's right edge (≈ screen edge), not to each
-      button: search/peek sit left of the nav buttons, so a button-anchored
+      button: search sits left of the nav buttons, so a button-anchored
       right:0 menu would extend leftward off the screen on narrow phones —
       worse when large text pushes min/max-width to their 80vw/90vw clamps. */
    position: relative;
@@ -382,9 +375,12 @@ video {
 
 /* Nav buttons */
 .srr-toolbar-right .srr-save,
+.srr-toolbar-right .srr-imgproxy,
+.srr-toolbar-right .srr-jump,
 .srr-toolbar-right .srr-search,
 .srr-toolbar-right .srr-prev,
-.srr-toolbar-right .srr-next {
+.srr-toolbar-right .srr-next,
+.srr-toolbar-right .srr-resume {
    min-width: 2.75rem;
    min-height: 2.75rem;
    padding: 0.55rem 0.5rem;
@@ -410,6 +406,36 @@ video {
    stroke: currentColor;
    stroke-width: 1.6;
    stroke-linejoin: round;
+}
+
+/* Image-proxy / jump / resume toolbar-button glyphs (stroke + fill set inline) */
+.srr-imgproxy-btn-icon,
+.srr-jump-icon,
+.srr-resume-icon,
+.srr-unread-toggle-icon {
+   display: block;
+   width: 1.2rem;
+   height: 1.2rem;
+}
+
+/* Jump: a plain toolbar button that pops the browser's native date picker. The
+   <input type="date"> is hidden but rendered (so showPicker has something to
+   anchor) and overlaid on the button via the wrap; pointer-events: none lets the
+   button take the click while JS calls showPicker() on the input. */
+.srr-jump-wrap {
+   position: relative;
+   display: inline-flex;
+}
+.srr-jump-date {
+   position: absolute;
+   inset: 0;
+   width: 100%;
+   height: 100%;
+   margin: 0;
+   padding: 0;
+   border: 0;
+   opacity: 0;
+   pointer-events: none;
 }
 .srr-toolbar-right .srr-save.srr-saved {
    color: var(--accent);
@@ -526,64 +552,12 @@ video {
          background: color-mix(in srgb, var(--accent) 22%, transparent);
       }
    }
-   & .srr-chip-row {
-      display: flex;
-      gap: 0.1rem;
-      padding: 0.2rem 0.4rem;
-      overflow-x: auto;
-      scrollbar-width: none;
-      &::-webkit-scrollbar {
-         display: none;
-      }
-      & a {
-         display: inline-block;
-         flex-shrink: 0;
-         min-width: 2.5rem;
-         padding: 0.25rem 0.5rem;
-         border-radius: var(--radius);
-         text-align: center;
-      }
-      & a.srr-imgproxy-icon,
-      & a.srr-unread-icon,
-      & a.srr-date-icon {
-         min-width: 0;
-         padding: 0.25rem 0.4rem;
-         display: inline-flex;
-         align-items: center;
-         justify-content: center;
-         & svg {
-            width: 1rem;
-            height: 1rem;
-            display: block;
-         }
-         &.srr-imgproxy-off,
-         &.srr-unread-off {
-            color: var(--faint);
-         }
-         &.srr-imgproxy-on,
-         &.srr-unread-on {
-            color: var(--accent);
-         }
-      }
-      & a.srr-last-chip {
-         display: inline-flex;
-         align-items: center;
-         justify-content: center;
-         & svg {
-            width: 0.85rem;
-            height: 0.85rem;
-            display: block;
-         }
-      }
-   }
-   & .srr-imgproxy-edit,
-   & .srr-date-edit {
+   & .srr-imgproxy-edit {
       display: flex;
       gap: 0.25rem;
       align-items: center;
       padding: 0.2rem 0.4rem;
-      & .srr-imgproxy-input,
-      & .srr-date-input {
+      & .srr-imgproxy-input {
          flex: 1 1 auto;
          min-width: 0;
          font: inherit;
@@ -603,8 +577,7 @@ video {
          }
       }
       & .srr-imgproxy-save,
-      & .srr-imgproxy-clear,
-      & .srr-date-cancel {
+      & .srr-imgproxy-clear {
          flex: 0 0 auto;
          min-width: 2rem;
          font: inherit;
@@ -680,60 +653,79 @@ video {
    }
 }
 
-/* Headlines peek + search results — two-line rows: title over channel · age */
-#srr-peek-menu,
-#srr-search-menu {
-   min-width: min(18rem, 80vw);
-   & .srr-peek-title,
-   & .srr-peek-meta {
-      overflow: hidden;
-      text-overflow: ellipsis;
-   }
-   & .srr-peek-meta {
-      font-size: 0.75rem;
-      color: var(--muted);
-   }
-   & .srr-peek-loading {
-      padding: 0.45rem 0.75rem;
-      color: var(--muted);
-   }
+/* Toolbar magnifier reflects the active search (aria-pressed) like the eye toggle. */
+.srr-toolbar-right .srr-search[aria-pressed="true"] {
+   color: var(--accent);
 }
 
-/* Title search — input row (inline-editor pattern) + status/hint rows */
-#srr-search-menu {
-   & .srr-search-edit {
-      display: flex;
-      padding: 0.2rem 0.4rem;
-      & .srr-search-input {
-         flex: 1 1 auto;
-         min-width: 0;
-         font: inherit;
-         font-size: var(--text-sm);
-         color: var(--fg);
-         background: var(--bg);
-         border: 1px solid var(--faint);
-         border-radius: var(--radius);
-         padding: 0.25rem 0.45rem;
-         &:focus {
-            outline: none;
-            border-color: var(--accent);
-         }
-      }
+/* Title search bar — pinned atop the list while a "q:<query>" filter is active
+   (body.srr-view-list.srr-searching); sticky so it stays in view as the matching
+   articles scroll under it. Magnifier + input + ✕ on one row; a hint line below. */
+.srr-searchbar {
+   display: none;
+}
+body.srr-view-list.srr-searching .srr-searchbar {
+   display: block;
+   position: sticky;
+   top: 0;
+   z-index: 5;
+   background: var(--bg);
+   border-bottom: 1px solid var(--faint);
+   padding: 0.4rem 0.25rem;
+}
+.srr-searchbar-row {
+   display: flex;
+   align-items: center;
+   gap: 0.5rem;
+   padding: 0 0.35rem;
+}
+.srr-searchbar .srr-search-icon {
+   flex: 0 0 auto;
+   color: var(--muted);
+}
+.srr-searchbar .srr-search-input {
+   flex: 1 1 auto;
+   min-width: 0;
+   font: inherit;
+   font-size: var(--text-base);
+   color: var(--fg);
+   background: transparent;
+   border: none;
+   padding: 0.35rem 0;
+   &:focus {
+      outline: none;
    }
-   & .srr-search-note {
-      padding: 0.45rem 0.75rem;
-      color: var(--muted);
-      font-size: var(--text-sm);
-      white-space: normal;
+   &::-webkit-search-cancel-button {
+      display: none;
    }
+}
+.srr-searchbar .srr-search-clear {
+   flex: 0 0 auto;
+   background: none;
+   border: none;
+   color: var(--muted);
+   font-size: 1.4rem;
+   line-height: 1;
+   padding: 0.1rem 0.45rem;
+   cursor: pointer;
+   &:hover {
+      color: var(--fg);
+   }
+}
+.srr-searchbar .srr-search-note {
+   padding: 0.3rem 0.6rem 0.1rem;
+   color: var(--muted);
+   font-size: var(--text-sm);
 }
 
 .srr-open {
    display: block;
 }
 
-/* Back-to-list button — a three-line "list" glyph, square like the nav buttons */
-.srr-toolbar-left .srr-back {
+/* Back-to-list button — a three-line "list" glyph, square like the nav buttons.
+   The list-only unseen-only toggle shares the same square icon-button shape. */
+.srr-toolbar-left .srr-back,
+.srr-toolbar-left .srr-unread-toggle {
    min-width: 2.75rem;
    min-height: 2.75rem;
    display: inline-flex;
@@ -747,6 +739,15 @@ video {
       opacity: 1;
       background: var(--hover);
    }
+}
+
+/* Unseen-only toggle (eye): muted when off, accent when on — the only toolbar
+   button that reflects a persisted on/off state. */
+.srr-unread-toggle.srr-unread-off {
+   color: var(--muted);
+}
+.srr-unread-toggle.srr-unread-on {
+   color: var(--accent);
 }
 .srr-back-icon {
    display: inline-block;
@@ -771,13 +772,24 @@ video {
    }
 }
 
-/* View mode: on the list, hide the reader-only controls (prev/next/peek);
+/* View mode: on the list, hide the reader-only controls (prev/next/save);
    the back button is meaningless on the list it returns to. */
 .srr-view-list .srr-prev,
 .srr-view-list .srr-next,
-.srr-view-list .srr-counter,
 .srr-view-list .srr-save,
 .srr-view-list .srr-back {
+   display: none;
+}
+
+/* The list-only controls — the filter/image-proxy dropdowns plus the jump,
+   search, unseen-only and resume buttons (and the search bar) — belong to the
+   list (home); the reader is a focused reading surface: back / save / prev /
+   next only. (The search bar is already display:none without .srr-searching.) */
+body:not(.srr-view-list) .srr-dropdown,
+body:not(.srr-view-list) .srr-jump-wrap,
+body:not(.srr-view-list) .srr-search,
+body:not(.srr-view-list) .srr-unread-toggle,
+body:not(.srr-view-list) .srr-resume {
    display: none;
 }
 

@@ -183,47 +183,53 @@ describe("browser: real SPA over real packs", () => {
       }
    })
 
-   it("opens the headlines peek with the keyboard and jumps to a nearby article", async () => {
-      const [page, close] = await open("#5") // reader on the latest article (chron 5)
-      try {
-         await waitReader(page)
-         await page.keyboard.press("l")
-         await page.waitForFunction(
-            () => document.querySelectorAll("#srr-peek-menu.srr-open a[data-value]").length === 6,
-            { timeout: 20000 },
-         )
-         // Newest-first: the current (latest) article tops the list.
-         const [topCurrent, topTitle] = await page.$eval("#srr-peek-menu a[data-value]", (e) => [
-            e.getAttribute("aria-current"),
-            e.querySelector(".srr-peek-title")?.textContent,
-         ])
-         expect(topCurrent).toBe("true")
-         expect(topTitle).toBe("sport title 1")
-
-         await page.click('#srr-peek-menu a[data-value="3"]')
-         await waitTitle(page, "tech title 1")
-         expect(await page.evaluate(() => location.hash)).toBe("#3")
-         expect(await page.$eval("#srr-peek-menu", (e) => e.classList.contains("srr-open"))).toBe(false)
-      } finally {
-         await close()
-      }
-   })
-
-   // Regression guard: the search button must open the search menu on click/tap
-   // (it's reachable from both surfaces). The magnifier renders as an inner
-   // .srr-search-icon <span> that fills the button, so a tap's event target is
-   // the span, not the button — app.ts's outside-click close handler uses
-   // .closest() so it doesn't close the menu the button just opened.
-   it("opens the search menu when the magnifier button is clicked", async () => {
+   // Search drives the MAIN list now (no dropdown): the magnifier toggles the
+   // "q:<query>" list filter, a pinned search bar takes the query, matches render
+   // as ordinary list rows, the query rides in the #!q:… hash, and tapping a
+   // result opens the reader walking the search set. The magnifier still renders
+   // as an inner .srr-search-icon <span> filling the button.
+   it("search renders matches into the main list and the reader walks the hits", async () => {
       const [page, close] = await open()
       try {
          await waitList(page)
          expect(await page.$eval(".srr-search .srr-search-icon", (e) => e.tagName)).toBe("SPAN")
          await page.click(".srr-search")
-         await page.waitForSelector("#srr-search-menu.srr-open", { timeout: 20000 })
-         // It must STAY open: the bug closed it a tick after opening.
-         await new Promise((r) => setTimeout(r, 200))
-         expect(await page.$eval("#srr-search-menu", (e) => e.classList.contains("srr-open"))).toBe(true)
+         // The search bar appears (body gains srr-searching) ready for input.
+         await page.waitForFunction(() => document.body.classList.contains("srr-searching"), { timeout: 20000 })
+         await page.type(".srr-search-input", "tech")
+         // The list narrows (debounced) to the two "tech" titles, newest-first.
+         await page.waitForFunction(
+            () => {
+               const t = [...document.querySelectorAll(".srr-list a.srr-row .srr-row-title")].map((e) => e.textContent)
+               return t.length === 2 && t.every((x) => (x ?? "").includes("tech"))
+            },
+            { timeout: 20000 },
+         )
+         expect(await $rowTitles(page)).toEqual(["tech title 1", "tech title 0"])
+         expect(await page.evaluate(() => location.hash)).toContain("q")
+         // Tapping the top result opens the reader; prev steps to the older hit.
+         await page.click(".srr-list a.srr-row")
+         await waitReader(page)
+         expect(await $title(page)).toBe("tech title 1")
+         await page.keyboard.press("ArrowLeft")
+         await waitTitle(page, "tech title 0")
+      } finally {
+         await close()
+      }
+   })
+
+   // Resume reading: the list-only resume button opens the reader at the latest
+   // article in the current filter (nav.last()), carrying the filter into the
+   // reader hash — independent of which row you'd scrolled to.
+   it("resumes into the reader at the latest article of the current filter", async () => {
+      const [page, close] = await open("#!world")
+      try {
+         await waitList(page)
+         // world = News + Tech; the latest is tech title 1 (chron 3).
+         await page.click(".srr-resume")
+         await waitReader(page)
+         expect(await $title(page)).toBe("tech title 1")
+         expect(await page.evaluate(() => location.hash)).toContain("!world")
       } finally {
          await close()
       }

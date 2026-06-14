@@ -29,159 +29,122 @@ const nav = vi.hoisted(() => ({
    ),
    isUnreadOnly: vi.fn(() => false),
    setUnreadOnly: vi.fn<(on: boolean) => void>(),
-   peek: vi.fn<(span?: number) => Promise<IPeekItem[]>>(async () => []),
    savedCount: vi.fn(() => 0),
    SAVED_TOKEN: "~saved",
    filter: { active: false, saved: false, matches: vi.fn(() => true) },
 }))
 vi.mock("./nav", () => nav)
 
-const searchMod = vi.hoisted(() => ({
-   available: vi.fn(() => true),
-   shortQuery: vi.fn(() => false),
-   search: vi.fn(),
-}))
-vi.mock("./search", () => searchMod)
-
 import { getImgProxy, setImgProxy } from "./fmt"
 
 type Dropdown = typeof import("./dropdown")
 
-const SKELETON =
-   '<div class="srr-dropdown">' +
-   '<button class="srr-dropdown-btn srr-channel" aria-expanded="false"></button>' +
-   '<div id="srr-channel-menu" class="srr-dropdown-menu" role="menu"></div>' +
-   "</div>" +
-   '<div class="srr-dropdown">' +
-   '<button class="srr-dropdown-btn srr-counter" aria-expanded="false"></button>' +
-   '<div id="srr-peek-menu" class="srr-dropdown-menu" role="menu"></div>' +
-   "</div>" +
-   '<div class="srr-dropdown">' +
-   '<button class="srr-dropdown-btn srr-search" aria-expanded="false"></button>' +
-   '<div id="srr-search-menu" class="srr-dropdown-menu" role="menu"></div>' +
-   "</div>"
+const dd = (btn: string, menuId: string) =>
+   `<div class="srr-dropdown"><button class="srr-dropdown-btn ${btn}" aria-expanded="false"></button>` +
+   `<div id="${menuId}" class="srr-dropdown-menu" role="menu"></div></div>`
+// The whole toolbar's dropdowns: dropdown.ts binds its DOM lookups at module
+// load, so every menu/button it touches must exist before import.
+const SKELETON = dd("srr-channel", "srr-channel-menu") + dd("srr-imgproxy", "srr-imgproxy-menu")
 
 const $menu = () => document.getElementById("srr-channel-menu")!
 const chan = (over: Partial<IChannel>): IChannel =>
    ({ id: 1, title: "Test", feeds: [{ url: "http://test.com" }], total_art: 1, ...over }) as IChannel
-const $input = () => $menu().querySelector<HTMLInputElement>(".srr-imgproxy-input")
-const $icon = () => $menu().querySelector<HTMLAnchorElement>('a[data-value="__imgproxy__"]')
 
 function key(el: HTMLElement, k: string): void {
    el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }))
 }
 
-describe("dropdown: image-proxy inline editor", () => {
+describe("dropdown: image-proxy menu", () => {
    let dropdown: Dropdown
-   let guard: ReturnType<typeof vi.fn>
-
-   // Opens the channel menu and expands the proxy editor.
-   function openEditor(): void {
-      dropdown.showChannelMenu("", guard)
-      $icon()!.click()
-   }
+   const $imenu = () => document.getElementById("srr-imgproxy-menu")!
+   const $input = () => $imenu().querySelector<HTMLInputElement>(".srr-imgproxy-input")
 
    beforeEach(async () => {
       document.body.innerHTML = SKELETON
       localStorage.clear()
-      guard = vi.fn()
       vi.resetModules()
       dropdown = await import("./dropdown")
    })
 
-   it("expands the editor seeded from the stored prefix on icon click", () => {
+   it("opens with the editor seeded from the stored prefix", () => {
       setImgProxy("https://p.example/?url=")
-      openEditor()
+      dropdown.showImgProxyMenu()
       const input = $input()
       expect(input).not.toBeNull()
       expect(input!.value).toBe("https://p.example/?url=")
-      expect($icon()).toBeNull() // chip row swapped out while editing
    })
 
-   it("commits a valid prefix on Enter, re-renders via guard, and collapses", () => {
-      openEditor()
+   it("commits a valid prefix on Enter and closes the menu", () => {
+      dropdown.showImgProxyMenu()
       const input = $input()!
       input.value = " https://new.example/?url= " // trimmed on commit
       key(input, "Enter")
       expect(getImgProxy()).toBe("https://new.example/?url=")
-      expect(guard).toHaveBeenCalledTimes(1)
-      expect($input()).toBeNull()
-      expect($icon()).not.toBeNull()
+      expect($imenu().classList.contains("srr-open")).toBe(false)
    })
 
    it("cancels on Escape without persisting", () => {
       setImgProxy("https://old.example/?url=")
-      openEditor()
+      dropdown.showImgProxyMenu()
       const input = $input()!
       input.value = "https://changed.example/?url="
       key(input, "Escape")
       expect(getImgProxy()).toBe("https://old.example/?url=")
-      expect(guard).not.toHaveBeenCalled()
-      expect($input()).toBeNull()
+      expect($imenu().classList.contains("srr-open")).toBe(false)
    })
 
-   it("clear button stores the empty string (disables the proxy)", () => {
+   it("clear button stores the empty string (disables the proxy) and closes", () => {
       setImgProxy("https://old.example/?url=")
-      openEditor()
-      $menu().querySelector<HTMLButtonElement>(".srr-imgproxy-clear")!.click()
+      dropdown.showImgProxyMenu()
+      $imenu().querySelector<HTMLButtonElement>(".srr-imgproxy-clear")!.click()
       expect(getImgProxy()).toBe("")
-      expect(guard).toHaveBeenCalledTimes(1)
-      expect($input()).toBeNull()
+      expect($imenu().classList.contains("srr-open")).toBe(false)
    })
 
-   it("rejects a schemeless prefix: flags the input, keeps editing, stores nothing", () => {
-      openEditor()
+   it("rejects a schemeless prefix: flags the input, keeps the menu open, stores nothing", () => {
+      dropdown.showImgProxyMenu()
       const input = $input()!
       input.value = "foo"
       key(input, "Enter")
       expect(input.classList.contains("srr-input-invalid")).toBe(true)
       expect($input()).not.toBeNull() // still editing
+      expect($imenu().classList.contains("srr-open")).toBe(true)
       expect(getImgProxy()).toBe("")
-      expect(guard).not.toHaveBeenCalled()
    })
 
-   it("committing the unchanged value collapses without a re-render", () => {
+   it("committing the unchanged value just closes the menu", () => {
       setImgProxy("https://old.example/?url=")
-      openEditor()
+      dropdown.showImgProxyMenu()
       key($input()!, "Enter")
-      expect(guard).not.toHaveBeenCalled()
-      expect($input()).toBeNull()
+      expect(getImgProxy()).toBe("https://old.example/?url=")
+      expect($imenu().classList.contains("srr-open")).toBe(false)
    })
 
-   it("reopening the menu starts collapsed", () => {
-      openEditor()
-      dropdown.closeAllDropdowns()
-      dropdown.showChannelMenu("", guard)
-      expect($input()).toBeNull()
-      expect($icon()).not.toBeNull()
-   })
-
-   // R3-3: an Enter commit keeps the menu open, so rebuild() detaches the
-   // focused control and the gated render() won't refocus the title — focus
-   // would fall to <body>. The keyboard path must hand focus to the rebuilt
-   // chip (mirrors the eye-toggle), not strand it.
-   it("refocuses the img-proxy chip after an Enter commit (not <body>)", () => {
-      openEditor()
+   // closeAllDropdowns hands focus from a menu-internal element back to the
+   // menu's toolbar button, so an Enter commit lands on the 🖼 button, not <body>.
+   it("hands focus back to the toolbar button on commit (not <body>)", () => {
+      dropdown.showImgProxyMenu()
       const input = $input()!
       input.value = "https://new.example/?url="
+      input.focus()
       key(input, "Enter")
-      expect($icon()).not.toBeNull() // chip row rebuilt, menu still open
-      expect(document.activeElement).toBe($icon())
+      expect($imenu().classList.contains("srr-open")).toBe(false)
+      expect(document.activeElement).toBe(document.querySelector(".srr-imgproxy"))
       expect(document.activeElement).not.toBe(document.body)
    })
 })
 
-const $dateIcon = () => $menu().querySelector<HTMLAnchorElement>('a[data-value="__date__"]')
-const $dateInput = () => $menu().querySelector<HTMLInputElement>(".srr-date-input")
-
-describe("dropdown: date jump", () => {
+describe("jump: native date picker", () => {
    let dropdown: Dropdown
    let guard: ReturnType<typeof vi.fn>
+   let input: HTMLInputElement
 
-   // Opens the channel menu and expands the date editor.
-   function openEditor(): void {
-      dropdown.showChannelMenu("", guard)
-      $dateIcon()!.click()
+   // Assign showPicker as an own property so it shadows whatever jsdom's
+   // prototype provides (which throws "not implemented"); returns the spy.
+   const stubPicker = (impl: () => void = () => {}): ReturnType<typeof vi.fn> => {
+      const spy = vi.fn(impl)
+      ;(input as unknown as { showPicker: () => void }).showPicker = spy
+      return spy
    }
 
    beforeEach(async () => {
@@ -193,62 +156,58 @@ describe("dropdown: date jump", () => {
       data.db.first_fetched = 0
       vi.resetModules()
       dropdown = await import("./dropdown")
+      input = document.createElement("input")
+      input.type = "date"
+      document.body.appendChild(input)
    })
 
-   it("swaps the chip row for a date editor on icon click", () => {
+   it("clamps the calendar to [first_fetched, today] and pops the native picker", () => {
       data.db.first_fetched = new Date(2020, 0, 15).getTime() / 1000
-      openEditor()
-      const input = $dateInput()!
-      expect(input).not.toBeNull()
-      expect($dateIcon()).toBeNull() // chip row swapped out while editing
+      const picker = stubPicker()
+      dropdown.openDatePicker(input)
       expect(input.min).toBe("2020-01-15") // archive start bounds the picker
       expect(input.max).not.toBe("") // today bounds the other end
+      expect(input.value).toBe("") // empty so re-picking the same day re-jumps
+      expect(picker).toHaveBeenCalledTimes(1)
    })
 
-   it("jumps to local midnight of the picked date and closes the menu", async () => {
+   it("leaves min unset when the store has no first_fetched", () => {
+      data.db.first_fetched = 0
+      stubPicker()
+      dropdown.openDatePicker(input)
+      expect(input.min).toBe("")
+   })
+
+   it("falls back to focus() when showPicker is unavailable", () => {
+      stubPicker(() => {
+         throw new Error("not supported")
+      })
+      const focus = vi.spyOn(input, "focus")
+      dropdown.openDatePicker(input)
+      expect(focus).toHaveBeenCalledTimes(1)
+   })
+
+   it("jumps to local midnight of the picked date and opens the reader via guard", async () => {
       data.findChronForTimestamp.mockResolvedValueOnce(42)
-      openEditor()
-      const input = $dateInput()!
       input.value = "2024-06-12"
-      input.dispatchEvent(new Event("change"))
+      dropdown.dateJump(input, guard)
       expect(guard).toHaveBeenCalledTimes(1)
-      expect($menu().classList.contains("srr-open")).toBe(false)
       await (guard.mock.calls[0][0] as () => Promise<unknown>)()
       expect(data.findChronForTimestamp).toHaveBeenCalledWith(new Date(2024, 5, 12).getTime() / 1000)
       expect(nav.goTo).toHaveBeenCalledWith(42)
    })
 
-   it("navigates once when Enter re-fires change on a committed value", () => {
-      openEditor()
-      const input = $dateInput()!
-      input.value = "2024-06-12"
-      input.dispatchEvent(new Event("change"))
-      key(input, "Enter")
-      expect(guard).toHaveBeenCalledTimes(1)
-   })
-
-   it("Enter with an empty value flags the input and stays editing", () => {
-      openEditor()
-      const input = $dateInput()!
-      key(input, "Enter")
-      expect(input.classList.contains("srr-input-invalid")).toBe(true)
-      expect($dateInput()).not.toBeNull() // still editing
-      expect(guard).not.toHaveBeenCalled()
-   })
-
-   it("Escape cancels back to the chip row without navigating", () => {
-      openEditor()
-      key($dateInput()!, "Escape")
-      expect($dateInput()).toBeNull()
-      expect($dateIcon()).not.toBeNull()
+   it("does nothing when no date is set (cancelled picker)", () => {
+      input.value = ""
+      dropdown.dateJump(input, guard)
       expect(guard).not.toHaveBeenCalled()
    })
 })
 
-// The inline-editor icons live in the channel menu, so a real bubbling click on
-// them reaches app.ts's window-level "any click closes dropdowns" handler. These
-// guard the regression where that handler shut the menu the instant the editor
-// opened (the per-icon .click() tests above never see the window handler).
+// The image-proxy editor lives inside a dropdown menu, so a real bubbling click
+// reaches app.ts's window-level "any click closes dropdowns" handler. This guards
+// the regression where that handler shut the menu the instant the editor opened
+// (the .click() tests above never see it).
 describe("dropdown: inline editors survive the window close handler", () => {
    let dropdown: Dropdown
    let closeHandler: (e: Event) => void
@@ -259,40 +218,21 @@ describe("dropdown: inline editors survive the window close handler", () => {
       data.db.first_fetched = 0
       vi.resetModules()
       dropdown = await import("./dropdown")
-      // Mirror app.ts:180-182 exactly.
+      // Mirror app.ts's window close handler exactly (closest, not matches: a
+      // tap can land on a button's inner icon span).
       closeHandler = (e) => {
-         if (!(e.target as HTMLElement).matches(".srr-dropdown-btn")) dropdown.closeAllDropdowns()
+         if (!(e.target as HTMLElement).closest(".srr-dropdown-btn")) dropdown.closeAllDropdowns()
       }
       window.addEventListener("click", closeHandler)
    })
    afterEach(() => window.removeEventListener("click", closeHandler))
 
-   // The svg inside the chip is the real click target a mouse would hit.
-   const clickIcon = (value: string): void => {
-      const icon = $menu().querySelector<HTMLAnchorElement>(`a[data-value="${value}"]`)!
-      const target = (icon.querySelector("svg") ?? icon) as HTMLElement
-      target.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }))
-   }
-
-   it("calendar icon opens the date editor and keeps the menu open", () => {
-      dropdown.showChannelMenu("", vi.fn())
-      clickIcon("__date__")
-      expect($menu().classList.contains("srr-open")).toBe(true)
-      expect($menu().querySelector(".srr-date-input")).not.toBeNull()
-   })
-
-   it("image-proxy icon opens its editor and keeps the menu open", () => {
-      dropdown.showChannelMenu("", vi.fn())
-      clickIcon("__imgproxy__")
-      expect($menu().classList.contains("srr-open")).toBe(true)
-      expect($menu().querySelector(".srr-imgproxy-input")).not.toBeNull()
-   })
-
-   it("a navigation chip still closes the menu via the window handler", () => {
-      dropdown.showChannelMenu("", vi.fn())
-      const chip = $menu().querySelector<HTMLAnchorElement>('a[data-value="t:28800"]')!
-      chip.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }))
-      expect($menu().classList.contains("srr-open")).toBe(false)
+   it("clicking inside the image-proxy editor keeps its menu open", () => {
+      dropdown.showImgProxyMenu()
+      const input = document.querySelector<HTMLInputElement>("#srr-imgproxy-menu .srr-imgproxy-input")!
+      input.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }))
+      expect(document.getElementById("srr-imgproxy-menu")!.classList.contains("srr-open")).toBe(true)
+      expect(input.isConnected).toBe(true)
    })
 })
 
@@ -370,7 +310,7 @@ describe("dropdown: saved row", () => {
       nav.savedCount.mockReturnValue(2)
       data.groupChannelsByTag.mockReturnValueOnce({ tagged: new Map(), sortedTags: [], untagged: [] })
       const selectFilter = vi.fn()
-      dropdown.showChannelMenu("", vi.fn(), { viewIsList: () => true, selectFilter, reapplyFilter: vi.fn() })
+      dropdown.showChannelMenu("", vi.fn(), { viewIsList: () => true, selectFilter })
       $menu().querySelector<HTMLElement>('a[data-value="~saved"]')!.click()
       expect(selectFilter).toHaveBeenCalledWith("~saved")
    })
@@ -568,155 +508,6 @@ describe("dropdown: unread badges", () => {
    })
 })
 
-describe("dropdown: unseen-only chip", () => {
-   let dropdown: Dropdown
-   let guard: ReturnType<typeof vi.fn>
-   const $chip = () => $menu().querySelector<HTMLAnchorElement>('a[data-value="__unread__"]')
-
-   beforeEach(async () => {
-      document.body.innerHTML = SKELETON
-      localStorage.clear()
-      guard = vi.fn((fn) => fn())
-      nav.isUnreadOnly.mockReset().mockReturnValue(false)
-      nav.setUnreadOnly.mockReset()
-      nav.fromHash.mockClear()
-      nav.switchFilter.mockReset()
-      nav.getCurrentFilterKey.mockReturnValue("")
-      vi.resetModules()
-      dropdown = await import("./dropdown")
-   })
-
-   afterEach(() => {
-      nav.isUnreadOnly.mockReturnValue(false)
-      nav.getCurrentFilterKey.mockReturnValue("")
-      dropdown.closeAllDropdowns()
-   })
-
-   it("renders the chip off by default and on when enabled", () => {
-      dropdown.showChannelMenu("", guard)
-      expect($chip()!.className).toContain("srr-unread-off")
-      dropdown.closeAllDropdowns()
-      nav.isUnreadOnly.mockReturnValue(true)
-      dropdown.showChannelMenu("", guard)
-      expect($chip()!.className).toContain("srr-unread-on")
-   })
-
-   it("toggles the mode and replays the raw hash for a non-tag filter, keeping the menu open", () => {
-      dropdown.showChannelMenu("", guard) // [ALL] → getCurrentFilterKey "" → fromHash
-      $chip()!.click()
-      expect(nav.setUnreadOnly).toHaveBeenCalledWith(true)
-      expect(nav.fromHash).toHaveBeenCalled()
-      expect(nav.switchFilter).not.toHaveBeenCalled()
-      expect($menu().classList.contains("srr-open")).toBe(true)
-   })
-
-   it("re-resolves via switchFilter (resume at current position) when the current filter is a single tag", () => {
-      nav.getCurrentFilterKey.mockReturnValue("news") // a tag: non-numeric, non-empty
-      dropdown.showChannelMenu("", guard)
-      $chip()!.click()
-      expect(nav.setUnreadOnly).toHaveBeenCalledWith(true)
-      expect(nav.switchFilter).toHaveBeenCalledWith("news")
-      expect(nav.fromHash).not.toHaveBeenCalled()
-   })
-
-   it("uses fromHash, not switchFilter, for a single-channel (numeric) filter", () => {
-      nav.getCurrentFilterKey.mockReturnValue("42") // a channel id, not a tag
-      dropdown.showChannelMenu("", guard)
-      $chip()!.click()
-      expect(nav.fromHash).toHaveBeenCalled()
-      expect(nav.switchFilter).not.toHaveBeenCalled()
-   })
-
-   // BUG-3: the flip + re-apply must be atomic inside the guard, so a busy guard
-   // (a nav already in flight, or a rapid double-click) drops the WHOLE toggle —
-   // the chip never gets ahead of the applied nav state.
-   it("a busy/dropped guard leaves the chip and mode untouched (no divergence)", () => {
-      const busyGuard = vi.fn() // mimics app.ts guard returning early while busy
-      dropdown.showChannelMenu("", busyGuard)
-      expect($chip()!.className).toContain("srr-unread-off")
-      $chip()!.click()
-      expect(nav.setUnreadOnly).not.toHaveBeenCalled() // flip never ran
-      expect($chip()!.className).toContain("srr-unread-off") // chip stayed off
-      expect($menu().classList.contains("srr-open")).toBe(true)
-   })
-
-   // FIX D: the target mode is captured ONCE outside the guarded fn. guard's
-   // error path re-invokes the SAME fn on Retry; if the fn read the live
-   // !isUnreadOnly() it would flip BACK the already-applied toggle. Here the
-   // nav re-apply rejects, then Retry runs the same fn again — setUnreadOnly
-   // must get the SAME captured `want` both times, never toggled back.
-   it("a rejected nav re-apply then Retry re-applies the SAME mode (idempotent)", async () => {
-      // Faithfully simulate the real flip: setUnreadOnly drives isUnreadOnly, so
-      // a buggy live `!isUnreadOnly()` read inside the fn would compute the
-      // opposite on the retry and expose itself.
-      let mode = false
-      nav.isUnreadOnly.mockImplementation(() => mode)
-      nav.setUnreadOnly.mockImplementation((on: boolean) => {
-         mode = on
-      })
-      // The nav re-apply rejects once (cold-pack fetch fails), succeeds on Retry.
-      nav.switchFilter.mockRejectedValueOnce(new Error("cold pack")).mockResolvedValueOnce({} as IShowFeed)
-      nav.getCurrentFilterKey.mockReturnValue("news") // a tag → switchFilter route
-
-      // A guard that mirrors app.ts: runs fn; on rejection it captures a Retry
-      // that re-invokes the SAME fn (the closure app.ts hands showError).
-      let retry: (() => void) | undefined
-      const retryGuard = vi.fn((fn: () => Promise<IShowFeed>) => {
-         const run = () => fn().catch(() => (retry = run))
-         void run()
-      })
-
-      dropdown.showChannelMenu("", retryGuard)
-      $chip()!.click() // first attempt → switchFilter rejects → retry armed
-      await new Promise((r) => setTimeout(r))
-      expect(nav.setUnreadOnly).toHaveBeenNthCalledWith(1, true)
-
-      retry!() // user clicks Retry → same fn re-runs
-      await new Promise((r) => setTimeout(r))
-      // The captured `want` (true) is re-applied — NOT flipped back to false.
-      expect(nav.setUnreadOnly).toHaveBeenNthCalledWith(2, true)
-      expect(nav.switchFilter).toHaveBeenCalledTimes(2)
-      expect(nav.switchFilter).toHaveBeenNthCalledWith(2, "news")
-   })
-
-   // BUG-5: Space-activating the chip detaches it on rebuild; focus must return
-   // to the freshly-built chip (else the next Arrow restarts from the first row).
-   // The roving handler activates via a synthetic .click() (detail === 0).
-   it("restores focus to the eye chip after a keyboard (Space) toggle", () => {
-      dropdown.showChannelMenu("", guard)
-      $chip()!.focus()
-      key($chip()!, " ")
-      expect(nav.setUnreadOnly).toHaveBeenCalledWith(true)
-      // A new chip was built by rebuild(); focus landed back on it.
-      expect(document.activeElement).toBe($chip())
-   })
-
-   // FIX E: a keyboard activation carries detail === 0 (Space → synthetic
-   // .click()); even with the chip focused (as it is after BUG-5's refocus or
-   // FIX A keeping it focused), it refocuses the rebuilt chip.
-   it("refocuses the rebuilt chip on a detail:0 (keyboard) activation", () => {
-      dropdown.showChannelMenu("", guard)
-      $chip()!.focus()
-      $chip()!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, detail: 0 }))
-      expect(nav.setUnreadOnly).toHaveBeenCalledWith(true)
-      expect(document.activeElement).toBe($chip())
-   })
-
-   // FIX E: a real mouse click carries detail >= 1. Even though the browser
-   // focuses the <a> chip on mousedown (so activeElement IS the chip at click
-   // time), the handler must NOT treat it as keyboard, so it never refocuses
-   // the rebuilt chip: the old chip detaches on rebuild and focus is not moved
-   // back to the new one.
-   it("does not refocus the chip on a detail:1 (real mouse) click", () => {
-      dropdown.showChannelMenu("", guard)
-      $chip()!.focus() // mimic the browser focusing the chip on mousedown
-      $chip()!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, detail: 1 }))
-      expect(nav.setUnreadOnly).toHaveBeenCalledWith(true)
-      // No keyboard refocus: the freshly-rebuilt chip did NOT receive focus.
-      expect(document.activeElement).not.toBe($chip())
-   })
-})
-
 describe("dropdown: menu keyboard navigation", () => {
    let dropdown: Dropdown
    let guard: ReturnType<typeof vi.fn>
@@ -810,170 +601,7 @@ describe("dropdown: menu keyboard navigation", () => {
    })
 })
 
-describe("dropdown: headlines peek", () => {
-   let dropdown: Dropdown
-   let guard: ReturnType<typeof vi.fn>
-
-   const $peek = () => document.getElementById("srr-peek-menu")!
-   const $rows = () => Array.from($peek().querySelectorAll<HTMLAnchorElement>("a[data-value]"))
-   const item = (chron: number, over: Partial<IPeekItem> = {}): IPeekItem => ({
-      chron,
-      title: `T${chron}`,
-      when: 0,
-      s: 1,
-      current: false,
-      ...over,
-   })
-
-   beforeEach(async () => {
-      document.body.innerHTML = SKELETON
-      localStorage.clear()
-      guard = vi.fn()
-      data.db.channels = { 1: chan({ id: 1, title: "Chan" }) } as unknown as IDB["channels"]
-      nav.peek.mockClear()
-      nav.goTo.mockClear()
-      vi.resetModules()
-      dropdown = await import("./dropdown")
-   })
-
-   afterEach(() => {
-      dropdown.closeAllDropdowns()
-      nav.peek.mockImplementation(async () => [])
-   })
-
-   it("renders rows newest-first with the current row marked", async () => {
-      nav.peek.mockResolvedValueOnce([item(1), item(2, { current: true }), item(3)])
-      dropdown.showPeekMenu(guard)
-      expect($peek().classList.contains("srr-open")).toBe(true)
-      await vi.waitFor(() => expect($rows().length).toBe(3))
-      expect($rows().map((r) => r.dataset.value)).toEqual(["3", "2", "1"])
-      expect($rows()[1].classList.contains("srr-active")).toBe(true)
-      expect($rows()[1].getAttribute("aria-current")).toBe("true")
-      expect($rows()[0].querySelector(".srr-peek-title")!.textContent).toBe("T3")
-      expect($rows()[0].querySelector(".srr-peek-meta")!.textContent).toContain("Chan")
-   })
-
-   it("clicking a row jumps to its chronIdx via the guard", async () => {
-      nav.peek.mockResolvedValueOnce([item(7), item(8, { current: true })])
-      dropdown.showPeekMenu(guard)
-      await vi.waitFor(() => expect($rows().length).toBe(2))
-      $peek().querySelector<HTMLAnchorElement>('a[data-value="7"]')!.click()
-      expect(guard).toHaveBeenCalledTimes(1)
-      await (guard.mock.calls[0][0] as () => Promise<unknown>)()
-      expect(nav.goTo).toHaveBeenCalledWith(7)
-   })
-
-   it("only one dropdown opens at a time, and reinvoking toggles closed", () => {
-      dropdown.showChannelMenu("", guard)
-      expect($menu().classList.contains("srr-open")).toBe(true)
-      dropdown.showPeekMenu(guard)
-      expect($menu().classList.contains("srr-open")).toBe(false)
-      expect($peek().classList.contains("srr-open")).toBe(true)
-      dropdown.showPeekMenu(guard)
-      expect($peek().classList.contains("srr-open")).toBe(false)
-   })
-
-   it("a fill that resolves after the menu closed never touches the DOM", async () => {
-      let release!: (items: IPeekItem[]) => void
-      nav.peek.mockImplementationOnce(() => new Promise<IPeekItem[]>((r) => (release = r)))
-      dropdown.showPeekMenu(guard)
-      dropdown.closeAllDropdowns()
-      release([item(1)])
-      await new Promise((r) => setTimeout(r))
-      expect($rows().length).toBe(0) // still just the loading placeholder
-   })
-})
-
-describe("dropdown: title search", () => {
-   let dropdown: Dropdown
-   let guard: ReturnType<typeof vi.fn>
-
-   const $smenu = () => document.getElementById("srr-search-menu")!
-   const $input = () => $smenu().querySelector<HTMLInputElement>(".srr-search-input")
-   const $rows = () => Array.from($smenu().querySelectorAll<HTMLAnchorElement>("a[data-value]"))
-   const $note = () => $smenu().querySelector(".srr-search-note")
-
-   const hit = (chron: number, t: string, s = 1) => ({ chron, s, w: 1000, t })
-   async function* gen(batches: ReturnType<typeof hit>[][]) {
-      for (const b of batches) yield b
-   }
-
-   function type(q: string): void {
-      const input = $input()!
-      input.value = q
-      key(input, "Enter") // immediate path — the debounce test covers the timer
-   }
-
-   beforeEach(async () => {
-      document.body.innerHTML = SKELETON
-      localStorage.clear()
-      guard = vi.fn((fn: () => Promise<unknown>) => fn())
-      data.db.channels = { 1: chan({ id: 1, title: "Chan" }) } as unknown as IDB["channels"]
-      searchMod.available.mockReturnValue(true)
-      searchMod.search.mockReset()
-      nav.goTo.mockClear()
-      nav.filter.active = false
-      nav.filter.matches.mockImplementation(() => true)
-      vi.resetModules()
-      dropdown = await import("./dropdown")
-   })
-
-   afterEach(() => {
-      dropdown.closeAllDropdowns()
-      vi.useRealTimers()
-   })
-
-   it("shows the unavailable note instead of an input when the index isn't published", () => {
-      searchMod.available.mockReturnValue(false)
-      dropdown.showSearchMenu(guard)
-      expect($input()).toBeNull()
-      expect($note()!.textContent).toContain("not published")
-   })
-
-   it("runs the query on Enter, streams rows newest-first, and navigates on click", async () => {
-      searchMod.search.mockImplementation(() => gen([[hit(100010, "Alpha latest")], [hit(7, "Alpha old")]]))
-      dropdown.showSearchMenu(guard)
-      type("alpha")
-      await vi.waitFor(() => expect($rows().length).toBe(2))
-      expect(searchMod.search).toHaveBeenCalledWith("alpha", 100, expect.any(Function))
-      expect($rows().map((r) => r.dataset.value)).toEqual(["100010", "7"])
-      expect($rows()[0].querySelector(".srr-peek-title")!.textContent).toBe("Alpha latest")
-      expect($rows()[0].querySelector(".srr-peek-meta")!.textContent).toContain("Chan")
-      expect($note()).toBeNull() // the status row is removed once done
-      $smenu().querySelector<HTMLAnchorElement>('a[data-value="7"]')!.click()
-      expect(nav.goTo).toHaveBeenCalledWith(7)
-   })
-
-   it("debounces the input event", () => {
-      vi.useFakeTimers()
-      searchMod.search.mockImplementation(() => gen([]))
-      dropdown.showSearchMenu(guard)
-      const input = $input()!
-      input.value = "alp"
-      input.dispatchEvent(new Event("input", { bubbles: true }))
-      expect(searchMod.search).not.toHaveBeenCalled()
-      vi.advanceTimersByTime(200)
-      expect(searchMod.search).toHaveBeenCalledWith("alp", 100, expect.any(Function))
-   })
-
-   it("hands the active channel filter to search as the accept predicate", async () => {
-      nav.filter.active = true
-      nav.filter.matches.mockImplementation((s: number) => s === 1)
-      // The mock applies accept like the real search() does, so this pins
-      // both that the predicate is passed and that it implements the filter.
-      searchMod.search.mockImplementation((_q: string, _limit: number, accept: (s: number, chron: number) => boolean) =>
-         gen([[hit(10, "Keep", 1), hit(9, "Drop", 2)].filter((h) => accept(h.s, h.chron))]),
-      )
-      dropdown.showSearchMenu(guard)
-      type("x")
-      await vi.waitFor(() => expect($rows().length).toBe(1))
-      expect($rows()[0].dataset.value).toBe("10")
-   })
-
-   it("reports no matches", async () => {
-      searchMod.search.mockImplementation(() => gen([]))
-      dropdown.showSearchMenu(guard)
-      type("nothing")
-      await vi.waitFor(() => expect($note()!.textContent).toBe("No matches"))
-   })
-})
+// Title search no longer lives in a dropdown — it's a list filter mode
+// (nav "q:<query>") driven by the pinned search bar in app.ts. The search SET
+// behavior is covered in nav.test.ts (search filter mode) and the search index
+// itself in search.test.ts / the contract suite.

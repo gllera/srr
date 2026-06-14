@@ -28,14 +28,22 @@ const data = vi.hoisted(() => {
 vi.mock("./data", () => data)
 
 const nav = vi.hoisted(() => {
-   const filter = { channels: new Map<number, number>(), active: false, saved: false }
+   const filter = { channels: new Map<number, number>(), active: false, saved: false, search: false }
    let seen: Record<string, number> = {}
    let saved = new Set<number>()
+   let searchTerm = ""
    return {
       filter,
       _setSeen: (s: Record<string, number>) => (seen = s),
       _setSaved: (s: number[]) => (saved = new Set(s)),
-      filterKey: vi.fn(() => (filter.saved ? "S" : filter.active ? "F" : "")),
+      _setSearch: (term: string) => {
+         filter.search = true
+         filter.active = true
+         searchTerm = term
+      },
+      isSearchFilter: vi.fn(() => filter.search),
+      searchQuery: vi.fn(() => searchTerm),
+      filterKey: vi.fn(() => (filter.saved ? "S" : filter.search ? "q:" + searchTerm : filter.active ? "F" : "")),
       getCurrentFilterKey: vi.fn(() => ""),
       tokensSuffix: vi.fn(() => (filter.saved ? "!~saved" : filter.active ? "!F" : "")),
       getSeenMap: vi.fn(() => seen),
@@ -99,6 +107,7 @@ describe("list", () => {
       nav.filter.channels = new Map()
       nav.filter.active = false
       nav.filter.saved = false
+      nav.filter.search = false
       nav._setSeen({})
       nav._setSaved([])
       vi.resetModules()
@@ -183,6 +192,18 @@ describe("list", () => {
       nav.filter.channels = new Map([[99, 0]]) // no articles in channel 99
       await list.render()
       expect(container.querySelector(".srr-list-empty")).not.toBeNull()
+   })
+
+   it("search mode shows a 'no matching articles' state when the query has no hits", async () => {
+      setIndex(4, () => 1)
+      nav._setSearch("zzz")
+      // The first (and only) walk finds nothing → empty list. Once, so the
+      // default findLeft impl is restored for the following tests.
+      data.findLeft.mockResolvedValueOnce(-1)
+      await list.render()
+      const empty = container.querySelector(".srr-list-empty")
+      expect(empty).not.toBeNull()
+      expect(empty!.textContent).toBe("No matching articles.")
    })
 
    it("refresh re-derives read/unread dots from the live seen map", async () => {
