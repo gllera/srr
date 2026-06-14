@@ -317,16 +317,16 @@ export function showImgProxyMenu(): void {
    )
 }
 
-// The jump control (toolbar 🗓 button): no dropdown, no time presets, no
-// text-entry step — clicking it opens the browser's *native* date picker
+// The jump control (toolbar 🗓 button, list-only): no dropdown, no time presets,
+// no text-entry step — clicking it opens the browser's *native* date picker
 // straight away on its paired hidden <input type="date">. openDatePicker clamps
 // the calendar to the archive span [first_fetched, today] and pops it (showPicker
 // rides the button click's transient activation; focus is the fallback where
 // showPicker is unavailable — older engines, jsdom). dateJump, wired to the
-// input's change, lands on the first article at-or-after local midnight of the
-// chosen day — the same findChronForTimestamp path the old time rows used, but
-// reaching arbitrarily deep into the archive — opening the reader via guard.
-// ("Latest" lives on the dedicated resume toolbar button.)
+// input's change, hands local midnight of the chosen day to onPick; app.ts then
+// repositions the LIST to the first article at-or-after that day (nav.seek + the
+// list's anchor) — it does NOT open the reader, so picking a date scrubs the
+// timeline of the list you're browsing. ("Latest" lives on the resume button.)
 function dateValue(d: Date): string {
    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
 }
@@ -343,11 +343,10 @@ export function openDatePicker(input: HTMLInputElement): void {
    }
 }
 
-export function dateJump(input: HTMLInputElement, guard: (fn: () => Promise<IShowFeed>) => void): void {
+export function dateJump(input: HTMLInputElement, onPick: (ts: number) => void): void {
    if (!input.value) return
    const [y, m, d] = input.value.split("-").map(Number)
-   const ts = new Date(y, m - 1, d).getTime() / 1000
-   guard(async () => nav.goTo(await data.findChronForTimestamp(ts)))
+   onPick(new Date(y, m - 1, d).getTime() / 1000)
 }
 
 export function showChannelMenu(

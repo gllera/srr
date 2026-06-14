@@ -772,6 +772,36 @@ body.srr-view-list.srr-searching .srr-searchbar {
    }
 }
 
+/* Cancel (return-arrow): the list is a non-committal staging surface — filter
+   and position (date-jump) changes there don't reach the reader until you tap an
+   article (that's the only commit). Cancel discards the staging and resumes the
+   article you were reading. Square like the back button; hidden by default and
+   shown only on the list once there's a snapshotted article to return to
+   (app.ts toggles .srr-can-cancel) — so it never appears on a fresh boot-into-
+   list with nothing yet read. */
+.srr-toolbar-left .srr-cancel {
+   display: none;
+   min-width: 2.75rem;
+   min-height: 2.75rem;
+   align-items: center;
+   justify-content: center;
+   border-radius: var(--radius);
+   transition:
+      opacity 0.15s,
+      background 0.15s;
+   &:hover:not(:disabled) {
+      opacity: 1;
+      background: var(--hover);
+   }
+}
+body.srr-view-list.srr-can-cancel .srr-toolbar-left .srr-cancel {
+   display: inline-flex;
+}
+.srr-cancel-icon {
+   width: 1.25rem;
+   height: 1.25rem;
+}
+
 /* View mode: on the list, hide the reader-only controls (prev/next/save);
    the back button is meaningless on the list it returns to. */
 .srr-view-list .srr-prev,
@@ -793,9 +823,15 @@ body:not(.srr-view-list) .srr-resume {
    display: none;
 }
 
-/* List surface — a scannable feed of headline rows */
+/* List surface — a scannable feed of headline rows. The list is a bidirectional
+   infinite window anchored at the reader's position: newer ("next") rows page in
+   above, older below. overflow-anchor:none disables the browser's own scroll
+   anchoring so list.ts's manual prepend compensation is the sole scroll adjuster
+   — uniform across engines (WebKit has no scroll anchoring; without this Chrome/
+   Firefox would double-adjust on prepend). */
 .srr-list {
    padding-bottom: 1rem;
+   overflow-anchor: none;
 }
 .srr-row {
    display: flex;

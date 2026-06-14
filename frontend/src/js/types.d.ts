@@ -28,4 +28,9 @@ interface IShowFeed {
    article: IArticle
    channel: IChannel | undefined
    countRight: number
+   // True only for the synthetic "(no matching articles)" placeholder. Distinct
+   // from channel === undefined, which a REAL article whose channel was deleted
+   // (the [DELETED] tombstone) also has — the reader's save toggle keys off this
+   // so it stays enabled for a saved deleted-channel article.
+   placeholder?: boolean
 }

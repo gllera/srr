@@ -20,6 +20,17 @@ const data = vi.hoisted(() => {
          }
          return -1
       }),
+      // Smallest chron >= from whose article exists and matches the active filter
+      // (mirrors data.findRight over filter.channels); -1 when none.
+      findRight: vi.fn(async (from: number) => {
+         for (let i = from; i < mock.db.total_art; i++) {
+            const a = mock._arts.get(i)
+            if (!a) continue
+            if (nav.filter.channels.size > 0 && !nav.filter.channels.has(a.s)) continue
+            return i
+         }
+         return -1
+      }),
       loadArticle: vi.fn(async (chron: number) => mock._arts.get(chron)!),
       channelTitle: vi.fn((id: number) => "Chan" + id),
    }
@@ -32,6 +43,10 @@ const nav = vi.hoisted(() => {
    let seen: Record<string, number> = {}
    let saved = new Set<number>()
    let searchTerm = ""
+   // Reader position + list anchor (settable per test). Default -1 == "newest"
+   // (no valid reader article), so render() lays a newest-first feed like before.
+   let pos = -1
+   let anchor = -1
    return {
       filter,
       _setSeen: (s: Record<string, number>) => (seen = s),
@@ -41,11 +56,27 @@ const nav = vi.hoisted(() => {
          filter.active = true
          searchTerm = term
       },
+      _setPos: (p: number) => (pos = p),
+      // Set both the reader position and the list anchor (the common case: the
+      // list anchors at the article the reader sits on).
+      _setAnchor: (a: number) => {
+         anchor = a
+         pos = a
+      },
+      // Set ONLY the list anchor (leave pos), simulating listAnchor resolving a
+      // resume / oldest position with no live reader article.
+      _setListAnchor: (a: number) => (anchor = a),
       isSearchFilter: vi.fn(() => filter.search),
       searchQuery: vi.fn(() => searchTerm),
       filterKey: vi.fn(() => (filter.saved ? "S" : filter.search ? "q:" + searchTerm : filter.active ? "F" : "")),
       getCurrentFilterKey: vi.fn(() => ""),
       tokensSuffix: vi.fn(() => (filter.saved ? "!~saved" : filter.active ? "!F" : "")),
+      currentChron: vi.fn(() => pos),
+      anchorChron: vi.fn(() => anchor),
+      // The real listAnchor resolves resume/oldest per filter; the list only
+      // consumes the resolved chronIdx, so the mock hands back the test's anchor
+      // (that resolution is exercised in nav.test.ts against the real nav).
+      listAnchor: vi.fn(async () => anchor),
       getSeenMap: vi.fn(() => seen),
       isRowUnread: vi.fn((chron: number, chan: number, s: Record<string, number>) => {
          const v = s["chan:" + chan]
@@ -61,8 +92,8 @@ const nav = vi.hoisted(() => {
          return true
       }),
       savedCount: vi.fn(() => saved.size),
-      // The list's neighbor walk: channel mode delegates to data.findLeft (which
-      // reads filter.channels), saved mode walks the explicit set.
+      // The list's neighbor walk: channel mode delegates to data.findLeft/Right
+      // (which read filter.channels), saved mode walks the explicit set.
       feedLeft: vi.fn(async (from: number) => {
          if (!filter.saved) return data.findLeft(from)
          let res = -1
@@ -71,6 +102,11 @@ const nav = vi.hoisted(() => {
             res = c
          }
          return res
+      }),
+      feedRight: vi.fn(async (from: number) => {
+         if (!filter.saved) return data.findRight(from)
+         for (const c of [...saved].sort((a, b) => a - b)) if (c >= from) return c
+         return -1
       }),
    }
 })
@@ -110,6 +146,8 @@ describe("list", () => {
       nav.filter.search = false
       nav._setSeen({})
       nav._setSaved([])
+      nav._setPos(-1)
+      nav._setAnchor(-1)
       vi.resetModules()
       list = await import("./list")
       list.setup(container, (chron) => opened.push(chron))
@@ -224,12 +262,62 @@ describe("list", () => {
       expect($chrons()).toEqual([4, 3, 2, 1, 0])
    })
 
-   it("show() refreshes (no rebuild) when re-entered with the same filter", async () => {
+   it("show() re-anchors (no rebuild/walk) when the reader's article is a rendered row", async () => {
       setIndex(3)
       await list.render()
       data.findLeft.mockClear()
-      await list.show() // same filterKey → refresh path, no findLeft walk
+      data.findRight.mockClear()
+      nav._setPos(1) // the reader sat on a row that's already in the window
+      await list.show() // same filterKey + row present → reuse path, no walk
       expect(data.findLeft).not.toHaveBeenCalled()
+      expect(data.findRight).not.toHaveBeenCalled()
+   })
+
+   it("anchors at the current position: newer ('next') rows above, older below", async () => {
+      setIndex(10)
+      nav._setAnchor(5) // the reader's article
+      await list.render()
+      // Newest-first: newer (will-be-seen-next) above the anchor, older below.
+      expect($chrons()).toEqual([9, 8, 7, 6, 5, 4, 3, 2, 1, 0])
+   })
+
+   it("anchors at the oldest article (no nav info) with the newer rows above it", async () => {
+      setIndex(10)
+      nav._setListAnchor(0) // listAnchor resolved the filter's oldest article
+      await list.render()
+      // Oldest at the bottom; every newer article sits above it (scroll up to advance).
+      expect($chrons()).toEqual([9, 8, 7, 6, 5, 4, 3, 2, 1, 0])
+      expect($chrons()[$rows().length - 1]).toBe(0)
+      // The oldest row is the anchor scrolled to the top (jsdom scroll is a spy).
+      expect(window.scrollTo).toHaveBeenCalled()
+   })
+
+   it("pages newer batches above on loadNewer (prepend), then exhausts at the top", async () => {
+      setIndex(100)
+      nav._setAnchor(50)
+      await list.render()
+      // One batch each side of the anchor: newer [80..51] above, [50..21] below.
+      expect($chrons()[0]).toBe(80)
+      expect($chrons()[$rows().length - 1]).toBe(21)
+      await list.loadNewer()
+      expect($chrons()[0]).toBe(99) // paged up to the newest, prepended above
+      await list.loadNewer() // exhausted upward: no-op
+      expect($chrons()[0]).toBe(99)
+      // Older paging downward still works from the same window.
+      await list.loadMore()
+      expect($chrons()[$rows().length - 1]).toBe(0)
+   })
+
+   it("show() rebuilds when the reader's article is outside the loaded window", async () => {
+      setIndex(100)
+      nav._setAnchor(50)
+      await list.render() // window [80..21]
+      expect($chrons()).not.toContain(5)
+      data.findLeft.mockClear()
+      nav._setAnchor(5) // the reader jumped far below the window
+      await list.show()
+      expect(data.findLeft).toHaveBeenCalled() // rebuilt
+      expect($chrons()).toContain(5)
    })
 
    const $star = (chron: number) =>

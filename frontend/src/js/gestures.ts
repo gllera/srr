@@ -12,9 +12,16 @@ export interface GestureDeps {
    onCycle: (dir: number) => void
 }
 
+export interface Gestures {
+   // Resync the scroll baseline after a programmatic scroll (the list's anchor
+   // jump / prepend compensation), and reveal the toolbar. Without this, the jump
+   // reads as a fast downward scroll and the scroll handler hides the toolbar.
+   resetScroll(): void
+}
+
 // setupGestures wires touch swipes (one-finger left/right = prev/next,
 // two-finger vertical = cycle filter) and scroll-based toolbar hide.
-export function setupGestures(deps: GestureDeps): void {
+export function setupGestures(deps: GestureDeps): Gestures {
    let touchStartX = 0
    let touchStartY = 0
    let twoFingerStartY = 0
@@ -106,4 +113,17 @@ export function setupGestures(deps: GestureDeps): void {
       },
       { passive: true },
    )
+
+   return {
+      resetScroll() {
+         // Sync the baseline to the post-jump position so the queued scroll event
+         // from a programmatic scrollTo reads zero delta (no spurious hide), and
+         // reveal the toolbar if a prior scroll had slid it away.
+         lastScrollY = window.scrollY
+         if (toolbarHidden) {
+            deps.toolbar.classList.remove("srr-toolbar-slide")
+            toolbarHidden = false
+         }
+      },
+   }
 }
