@@ -875,6 +875,39 @@ body:not(.srr-view-list) .srr-search {
       background: color-mix(in srgb, var(--accent) 18%, transparent);
    }
 }
+/* Edge "rubber-band": a keyboard step past the start/end of the list nudges the
+   selected row toward the wall and springs it back, so the boundary is felt
+   rather than read as a dropped key (list.ts bumpEdge). */
+@keyframes srr-row-bump-down {
+   0%,
+   100% {
+      transform: translateY(0);
+   }
+   45% {
+      transform: translateY(5px);
+   }
+}
+@keyframes srr-row-bump-up {
+   0%,
+   100% {
+      transform: translateY(0);
+   }
+   45% {
+      transform: translateY(-5px);
+   }
+}
+.srr-row-bump-down {
+   animation: srr-row-bump-down 0.2s ease;
+}
+.srr-row-bump-up {
+   animation: srr-row-bump-up 0.2s ease;
+}
+@media (prefers-reduced-motion: reduce) {
+   .srr-row-bump-down,
+   .srr-row-bump-up {
+      animation: none;
+   }
+}
 .srr-row-meta {
    margin-top: 0.15rem;
    font-size: 0.75rem;

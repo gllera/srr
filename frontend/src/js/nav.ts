@@ -878,6 +878,20 @@ export async function seek(idx: number): Promise<number> {
    return found
 }
 
+// Move the navigation cursor to an exact, already-known-matching chronIdx — the
+// list surface's keyboard selection (A/D/←/→ step the highlighted row). The row
+// is a rendered filter member and its channel is known from the row's data-chan,
+// so unlike seek there's no feed walk or idx fetch. Same cursor bookkeeping as
+// resolve/seek minus the article load: it does NOT update the hash or recordSeen,
+// because moving the list cursor isn't reading the article — pos just tracks the
+// highlight so opening it (tap) or re-anchoring the list later stays consistent.
+export function select(chron: number, chanId: number): void {
+   pos = chron
+   currentChan = chanId
+   next.left = next.right = undefined
+   abortPrefetch()
+}
+
 export function getFilterEntries(): string[] {
    const { sortedTags, untagged } = data.groupChannelsByTag()
    const entries = [""]

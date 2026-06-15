@@ -72,6 +72,9 @@ const nav = vi.hoisted(() => {
       getCurrentFilterKey: vi.fn(() => ""),
       tokensSuffix: vi.fn(() => (filter.saved ? "!~saved" : filter.active ? "!F" : "")),
       currentChron: vi.fn(() => pos),
+      // The list's keyboard cursor sets nav.pos to the selected row (the chan arg
+      // is still recorded for assertions; the real setter also clears prefetch).
+      select: vi.fn((chron: number) => (pos = chron)),
       anchorChron: vi.fn(() => anchor),
       // The real listAnchor resolves resume/oldest per filter; the list only
       // consumes the resolved chronIdx, so the mock hands back the test's anchor
@@ -406,5 +409,76 @@ describe("list", () => {
       nav._setSaved([0, 4]) // article 2 un-saved in the reader
       list.refresh()
       expect($chrons()).toEqual([4, 0])
+   })
+
+   // ── Keyboard selection cursor (moveSelection) ──────────────────────────────
+   // A/← step to the older neighbor (row below), D/→ to the newer (row above) —
+   // mirroring the reader's left()/right(). The highlight is .srr-row-current.
+   const $current = () =>
+      $rows()
+         .filter((a) => a.classList.contains("srr-row-current"))
+         .map((a) => Number(a.dataset.chron))
+
+   it("moveSelection steps the highlight to the older (down) / newer (up) neighbor", async () => {
+      setIndex(10)
+      nav._setAnchor(5) // reader's article → row 5 starts highlighted
+      await list.render()
+      expect($current()).toEqual([5])
+
+      expect(await list.moveSelection("older")).toBe(4) // A/← → older = the row below
+      expect($current()).toEqual([4]) // exactly one row highlighted
+      expect(nav.select).toHaveBeenLastCalledWith(4, 1) // pos + channel synced
+
+      expect(await list.moveSelection("newer")).toBe(5) // D/→ → newer = the row above
+      expect(await list.moveSelection("newer")).toBe(6)
+      expect($current()).toEqual([6])
+   })
+
+   it("moveSelection pages the next batch when stepping past the loaded edge", async () => {
+      setIndex(35)
+      nav._setAnchor(34) // newest; one older batch below → window [34..5]
+      await list.render()
+      expect($rows().length).toBe(30)
+      // Walk the cursor down to the oldest loaded row (5).
+      for (let i = 0; i < 29; i++) await list.moveSelection("older")
+      expect($current()).toEqual([5])
+      // One more older step pages the next batch in and lands on 4.
+      expect(await list.moveSelection("older")).toBe(4)
+      expect($rows().length).toBe(35)
+      expect($current()).toEqual([4])
+   })
+
+   const $rowFor = (chron: number) => $rows().find((a) => Number(a.dataset.chron) === chron)!
+
+   it("at the oldest article it bumps the row (down) instead of moving", async () => {
+      setIndex(5)
+      nav._setAnchor(0) // oldest = current, at the bottom of the window
+      await list.render()
+      expect($current()).toEqual([0])
+      expect(await list.moveSelection("older")).toBe(-1)
+      expect($current()).toEqual([0]) // unchanged
+      expect($rowFor(0).classList.contains("srr-row-bump-down")).toBe(true) // boundary cue
+   })
+
+   it("at the newest article it bumps the row (up) instead of moving", async () => {
+      setIndex(5)
+      nav._setAnchor(4) // newest = current, at the top of the window
+      await list.render()
+      expect($current()).toEqual([4])
+      expect(await list.moveSelection("newer")).toBe(-1)
+      expect($current()).toEqual([4])
+      expect($rowFor(4).classList.contains("srr-row-bump-up")).toBe(true)
+   })
+
+   it("with no cursor yet, the first step establishes the selection on a visible row", async () => {
+      setIndex(4) // pos = -1 → no row highlighted
+      await list.render()
+      expect($current()).toEqual([])
+      const landed = await list.moveSelection("newer")
+      // The first key drops the cursor (no step); jsdom's zero-rect geometry
+      // falls back to the oldest visible row. Exactly one row is now current.
+      expect(landed).toBeGreaterThanOrEqual(0)
+      expect($current()).toEqual([landed])
+      expect(nav.select).toHaveBeenCalledWith(landed, expect.anything())
    })
 })
