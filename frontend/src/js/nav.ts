@@ -622,21 +622,47 @@ function getSeen(token: string): number | undefined {
 
 function recordSeen(article: IArticle) {
    // Search (q:) mode jumps to title-search hits, not a contiguous read-through:
-   // advancing the channel's seen high-water here would mark every article in
-   // that channel up to the hit as seen, including ones never shown. So search
-   // navigations never touch the seen frontier — a hit you peek at via search
-   // stays unread until you actually read it in the feed.
+   // advancing the seen frontier here would mark every article up to the hit as
+   // seen, including ones never shown. So search navigations never touch the
+   // seen frontier — a hit you peek at via search stays unread until you
+   // actually read it in the feed. (This is the "unless in query mode" carve-out
+   // for the mark-previous-as-seen rule below.)
    if (filter.search) return
    const ch = data.db.channels[article.s]
    if (!ch) return
    try {
-      // Only the channel position is stored; a tag's position is derived from
-      // its channels in getSeen, so bumping the channel advances the tag too.
       const seen = readSeen()
+      let changed = false
+      // The article's OWN channel stores its resume position — the exact pos, so
+      // stepping back to an older article moves the resume point with you. A
+      // tag's position is derived from its channels in getSeen, so bumping the
+      // channel advances the tag too.
       const chanKey = "chan:" + article.s
-      if (seen[chanKey] === pos) return
-      seen[chanKey] = pos
-      localStorage.setItem(SEEN_KEY, JSON.stringify(seen))
+      if (seen[chanKey] !== pos) {
+         seen[chanKey] = pos
+         changed = true
+      }
+      // Opening an article marks every OLDER article in the navigation list as
+      // seen, not just ones from its own channel: for each OTHER channel in the
+      // active filter (the list you're reading), raise its seen frontier to pos
+      // so all of its articles at-or-below pos read as seen — the chronological
+      // "everything before here is caught up" the reader expects. A one-way
+      // raise (never lowers), so scrubbing back to an older article can't
+      // un-mark a channel you'd already caught up on; only the current channel
+      // (above) tracks an exact resume position. Saved mode keeps filter.channels
+      // empty (channel-agnostic) and search returned above, so this loop only
+      // fires for channel/tag/[ALL] navigation — the contiguous read-throughs
+      // where a "previous = seen" frontier across channels is meaningful.
+      for (const chanId of filter.channels.keys()) {
+         if (chanId === article.s) continue
+         const key = "chan:" + chanId
+         const prev = seen[key]
+         if (prev === undefined || prev < pos) {
+            seen[key] = pos
+            changed = true
+         }
+      }
+      if (changed) localStorage.setItem(SEEN_KEY, JSON.stringify(seen))
    } catch {}
 }
 
