@@ -789,6 +789,71 @@ describe("isRowUnread", () => {
    })
 })
 
+describe("recordSeen marks previous articles seen across the list", () => {
+   it("marks OLDER articles in every other filter channel seen, leaving newer unread", async () => {
+      // Three interleaved channels in [ALL]: chron 0=ch1 1=ch2 2=ch3 3=ch1 4=ch2 5=ch3.
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 3 }, { chanId: 1 }, { chanId: 2 }, { chanId: 3 }])
+      await nav.fromHash("3") // open chron 3 (ch1)
+      const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
+      // Every channel is caught up to chron 3 — ch1 exactly (its own resume), ch2
+      // and ch3 by the one-way high-water — so all articles at-or-below 3 are seen.
+      expect(seen).toEqual({ "chan:1": 3, "chan:2": 3, "chan:3": 3 })
+      expect(nav.isRowUnread(2, 3, seen)).toBe(false) // ch3 @ chron 2 (older) → seen
+      expect(nav.isRowUnread(1, 2, seen)).toBe(false) // ch2 @ chron 1 (older) → seen
+      expect(nav.isRowUnread(4, 2, seen)).toBe(true) // ch2 @ chron 4 (newer) → still unread
+      expect(nav.isRowUnread(5, 3, seen)).toBe(true) // ch3 @ chron 5 (newer) → still unread
+   })
+
+   it("only marks channels in the active filter, not the whole store", async () => {
+      data.db.channels[1] = makeChannel({ id: 1, tag: "news" })
+      data.db.channels[2] = makeChannel({ id: 2, tag: "news" })
+      data.db.channels[3] = makeChannel({ id: 3 }) // untagged — outside the filter
+      // chron 0=ch1 1=ch3 2=ch2 3=ch1.
+      setupIndex([{ chanId: 1 }, { chanId: 3 }, { chanId: 2 }, { chanId: 1 }])
+      await nav.switchFilter("news") // tag {ch1, ch2}, opens at first() = chron 0
+      await nav.right() // → chron 2 (ch2), skipping ch3's chron 1 (not in the filter)
+      const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
+      expect(seen["chan:1"]).toBe(2) // tag member, caught up to chron 2
+      expect(seen["chan:2"]).toBe(2) // current channel
+      expect(seen["chan:3"]).toBeUndefined() // outside the filter — untouched
+   })
+
+   it("never lowers another channel's frontier when scrubbing back to an older article", async () => {
+      // chron 0=ch1 1=ch2 2=ch1 3=ch2.
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 1 }, { chanId: 2 }])
+      await nav.fromHash("3") // chron 3 (ch2): all caught up to 3
+      await nav.fromHash("0") // step back to chron 0 (ch1)
+      const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
+      expect(seen["chan:1"]).toBe(0) // current channel tracks the exact resume position
+      expect(seen["chan:2"]).toBe(3) // kept its higher frontier — a one-way raise
+   })
+
+   it("query (search) mode never advances the seen frontier", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 1 }])
+      searchMod.available.mockReturnValue(true)
+      searchMod.shortQuery.mockReturnValue(false)
+      searchMod.search.mockImplementation(async function* () {
+         yield [{ chron: 2, s: 1, w: 1000, t: "t" }]
+      })
+      await nav.switchFilter("q:zeta") // search mode, opens at the newest hit (chron 2)
+      const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
+      expect(seen).toEqual({}) // a hit peeked via search stays unread
+      searchMod.search.mockReset()
+   })
+
+   it("saved mode marks only the opened article's own channel (channel-agnostic set)", async () => {
+      // chron 0=ch1 1=ch2 2=ch1; saved set spans both channels.
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 1 }])
+      localStorage.setItem("srr-saved", JSON.stringify([0, 1, 2]))
+      await nav.switchFilter(nav.SAVED_TOKEN) // opens at the newest saved (chron 2, ch1)
+      const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
+      // filter.channels is empty in saved mode, so "mark previous across the list"
+      // can't apply (it would over-mark non-saved articles) — only the current
+      // article's own channel is recorded.
+      expect(seen).toEqual({ "chan:1": 2 })
+   })
+})
+
 describe("filter mutations", () => {
    it("set() resolves tag and sets filter", async () => {
       data.db.channels = { "5": makeChannel({ id: 5, tag: "news" }), "6": makeChannel({ id: 6, tag: "news" }) }
@@ -1094,8 +1159,13 @@ describe("unread-only mode (tags)", () => {
    // chron 0=ch1 1=ch2 2=ch1 3=ch2 4=ch1; read ch1→2, ch2→1; unseen are 3,4.
    async function readSome() {
       tagSetup([{ chanId: 1 }, { chanId: 2 }, { chanId: 1 }, { chanId: 2 }, { chanId: 1 }])
-      await nav.fromHash("1") // chan:2 = 1
-      await nav.fromHash("2") // chan:1 = 2
+      // Seed the seen map directly so the two members sit at DIFFERENT positions
+      // (ch1→2, ch2→1), the case these tests exercise — the tag resumes at the
+      // min (ch2's chron 1). Reaching this via [ALL] browsing no longer works:
+      // opening an article now marks every passed channel seen up to it (the
+      // mark-previous-as-seen rule), which would collapse both members onto the
+      // same frontier. See recordSeen and its dedicated test below.
+      localStorage.setItem("srr-seen", JSON.stringify({ "chan:2": 1, "chan:1": 2 }))
    }
 
    it("opening a tag resumes at its current position, not the next unseen", async () => {
@@ -1264,7 +1334,10 @@ describe("tagUnreadFromCounts", () => {
       setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 1 }, { chanId: 2 }, { chanId: 1 }])
       data.db.channels[1].tag = "news"
       data.db.channels[2].tag = "news"
-      await nav.fromHash("2") // chan:1 = 2 (ch2 untouched)
+      // Seed directly: ch1 read to chron 2, ch2 NEVER seen. (Browsing to chron 2
+      // via [ALL] would now also mark ch2 seen up to chron 2 — the mark-previous-
+      // as-seen rule — so seed the never-seen member explicitly.)
+      localStorage.setItem("srr-seen", JSON.stringify({ "chan:1": 2 }))
       const group = [data.db.channels[1], data.db.channels[2]]
       // ch1 unread after chron 2 = {4} = 1; ch2 fully unread = {1,3} = 2 → 3.
       // The badge is derived from the already-computed per-channel counts map.
@@ -1294,8 +1367,11 @@ describe("tagUnreadFromCounts", () => {
       data.db.channels[1].tag = "news"
       data.db.channels[2].tag = "news"
       data.db.channels[3].tag = "news"
-      await nav.fromHash("5") // chan:3 = 5 (ch3 fully read)
-      await nav.fromHash("2") // chan:1 = 2 (ch1 partially read); ch2 untouched
+      // Seed directly: ch3 fully read (→5), ch1 partially read (→2), ch2 NEVER
+      // seen. (Browsing via [ALL] would now mark every passed channel seen up to
+      // the opened article — the mark-previous-as-seen rule — so seed the
+      // distinct per-member positions explicitly.)
+      localStorage.setItem("srr-seen", JSON.stringify({ "chan:3": 5, "chan:1": 2 }))
       const group = [data.db.channels[1], data.db.channels[2], data.db.channels[3]]
       const counts = await nav.unreadCounts(group)
       const badge = nav.tagUnreadFromCounts(group, counts)
@@ -1341,7 +1417,9 @@ describe("tagUnreadFromCounts", () => {
          { chanId: 2 },
       ])
       for (const id of [1, 2, 3]) data.db.channels[id].tag = "news"
-      await nav.fromHash("2") // chan:1 = 2; ch2/ch3 untouched (never-seen)
+      // Seed directly: ch1 read to chron 2, ch2/ch3 NEVER seen. (Browsing via
+      // [ALL] would now mark ch2/ch3 seen up to chron 2 — mark-previous-as-seen.)
+      localStorage.setItem("srr-seen", JSON.stringify({ "chan:1": 2 }))
       const group = [data.db.channels[1], data.db.channels[2], data.db.channels[3]]
       const counts = await nav.unreadCounts(group)
       // counts: ch1 = 1 (read down to chron 2); ch2/ch3 = their full backlog (2 each).
