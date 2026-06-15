@@ -373,14 +373,17 @@ video {
    }
 }
 
-/* Nav buttons */
+/* Icon toolbar buttons — square 44px tap targets with a subtle hover fill.
+   Shared across both groups: back/search on the left, save/jump/prev/next and
+   the ⋯ overflow on the right. flex-shrink:0 keeps the search/back icons their
+   size next to the flexible channel-filter button in the left group. */
+.srr-toolbar-left .srr-back,
+.srr-toolbar-left .srr-search,
 .srr-toolbar-right .srr-save,
-.srr-toolbar-right .srr-imgproxy,
 .srr-toolbar-right .srr-jump,
-.srr-toolbar-right .srr-search,
 .srr-toolbar-right .srr-prev,
 .srr-toolbar-right .srr-next,
-.srr-toolbar-right .srr-resume {
+.srr-toolbar-right .srr-overflow {
    min-width: 2.75rem;
    min-height: 2.75rem;
    padding: 0.55rem 0.5rem;
@@ -388,6 +391,7 @@ video {
    align-items: center;
    justify-content: center;
    border-radius: var(--radius);
+   flex-shrink: 0;
    transition:
       opacity 0.15s,
       background 0.15s;
@@ -408,11 +412,9 @@ video {
    stroke-linejoin: round;
 }
 
-/* Image-proxy / jump / resume toolbar-button glyphs (stroke + fill set inline) */
-.srr-imgproxy-btn-icon,
+/* Jump / overflow toolbar-button glyphs (stroke + fill set inline) */
 .srr-jump-icon,
-.srr-resume-icon,
-.srr-unread-toggle-icon {
+.srr-overflow-icon {
    display: block;
    width: 1.2rem;
    height: 1.2rem;
@@ -504,7 +506,10 @@ video {
    display: none;
    position: absolute;
    background: var(--bg);
-   min-width: 10rem;
+   /* Fixed width (clamped to the viewport on narrow phones) so the menu doesn't
+      resize to its longest row — the filter and ⋯ overflow menus match, and long
+      channel titles ellipsize rather than widening it. */
+   width: min(18rem, 90vw);
    border: 1px solid var(--faint);
    border-radius: var(--radius);
    box-shadow: var(--shadow);
@@ -515,7 +520,6 @@ video {
    overflow-y: auto;
    overscroll-behavior: contain;
    scrollbar-width: thin;
-   max-width: min(20rem, 90vw);
    & a {
       color: var(--fg);
       padding: 0.45rem 0.75rem;
@@ -551,6 +555,35 @@ video {
       &.srr-active:hover {
          background: color-mix(in srgb, var(--accent) 22%, transparent);
       }
+      /* "Unseen only" view-modifier toggle pinned atop the menu — a checkbox +
+         label; the box fills accent when the mode is on. */
+      &.srr-unseen-row {
+         display: flex;
+         align-items: center;
+         gap: 0.5rem;
+         & .srr-check {
+            flex: 0 0 auto;
+            width: 0.85rem;
+            height: 0.85rem;
+            border: 1.5px solid var(--muted);
+            border-radius: 3px;
+         }
+      }
+      &.srr-unseen-row.srr-unseen-on {
+         color: var(--accent);
+         & .srr-check {
+            border-color: var(--accent);
+            background: var(--accent);
+         }
+      }
+   }
+   /* Section label inside the ⋯ overflow/settings menu. */
+   & .srr-menu-label {
+      padding: 0.3rem 0.75rem 0.15rem;
+      font-size: var(--text-sm);
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
    }
    & .srr-imgproxy-edit {
       display: flex;
@@ -609,16 +642,20 @@ video {
    & .srr-unread {
       float: right;
       flex-shrink: 0;
-      margin-left: 0.5rem;
+      /* Gap from the (ellipsized) channel title so the count never touches it. */
+      margin-left: 0.75rem;
       font-size: 0.75rem;
       color: var(--muted);
       font-variant-numeric: tabular-nums;
    }
    /* Tag headers are flex (floats don't apply): the badge sits before the
-      toggle and takes the free space, parking next to the chevron. */
+      toggle and takes the free space, parking next to the chevron. padding-left
+      guarantees a gap from the tag name even when the name is long enough to
+      collapse the auto margin to zero. */
    & .srr-tag-header .srr-unread {
       float: none;
       margin-left: auto;
+      padding-left: 0.75rem;
    }
    & .srr-tag-header .srr-unread + .srr-tag-toggle {
       margin-left: 0;
@@ -627,20 +664,29 @@ video {
       border-top: 1px solid var(--faint);
       margin: 0.2rem 0;
    }
+   /* The collapse/expand control — a ~44px square button flush to the row's
+      right and top/bottom edges (negative margins absorb the <a>'s padding so
+      the whole right gutter is tappable, not a tiny chevron with dead strips
+      around it). The chevron is centered in it, so the hover highlight reads as
+      a balanced button; the header text to its left still selects the tag. */
    & .srr-tag-toggle {
-      margin-left: auto;
-      align-self: stretch;
+      margin: -0.4rem -0.75rem -0.45rem auto;
       min-width: 2.75rem;
+      min-height: 2.75rem;
       display: flex;
       align-items: center;
-      justify-content: flex-end;
+      justify-content: center;
       cursor: pointer;
+      border-radius: var(--radius);
+      &:hover {
+         background: var(--hover);
+      }
       &::after {
          content: "";
-         width: 0.35rem;
-         height: 0.35rem;
-         border-right: 1.5px solid currentColor;
-         border-bottom: 1.5px solid currentColor;
+         width: 0.45rem;
+         height: 0.45rem;
+         border-right: 2px solid currentColor;
+         border-bottom: 2px solid currentColor;
          transform: rotate(45deg);
          transition: transform 0.15s;
       }
@@ -653,8 +699,8 @@ video {
    }
 }
 
-/* Toolbar magnifier reflects the active search (aria-pressed) like the eye toggle. */
-.srr-toolbar-right .srr-search[aria-pressed="true"] {
+/* Toolbar magnifier reflects the active search via aria-pressed. */
+.srr-search[aria-pressed="true"] {
    color: var(--accent);
 }
 
@@ -722,33 +768,8 @@ body.srr-view-list.srr-searching .srr-searchbar {
    display: block;
 }
 
-/* Back-to-list button — a three-line "list" glyph, square like the nav buttons.
-   The list-only unseen-only toggle shares the same square icon-button shape. */
-.srr-toolbar-left .srr-back,
-.srr-toolbar-left .srr-unread-toggle {
-   min-width: 2.75rem;
-   min-height: 2.75rem;
-   display: inline-flex;
-   align-items: center;
-   justify-content: center;
-   border-radius: var(--radius);
-   transition:
-      opacity 0.15s,
-      background 0.15s;
-   &:hover:not(:disabled) {
-      opacity: 1;
-      background: var(--hover);
-   }
-}
-
-/* Unseen-only toggle (eye): muted when off, accent when on — the only toolbar
-   button that reflects a persisted on/off state. */
-.srr-unread-toggle.srr-unread-off {
-   color: var(--muted);
-}
-.srr-unread-toggle.srr-unread-on {
-   color: var(--accent);
-}
+/* Back-to-list button — a three-line "list" glyph (the square button shape is
+   the shared icon-button rule above). */
 .srr-back-icon {
    display: inline-block;
    position: relative;
@@ -772,36 +793,6 @@ body.srr-view-list.srr-searching .srr-searchbar {
    }
 }
 
-/* Cancel (return-arrow): the list is a non-committal staging surface — filter
-   and position (date-jump) changes there don't reach the reader until you tap an
-   article (that's the only commit). Cancel discards the staging and resumes the
-   article you were reading. Square like the back button; hidden by default and
-   shown only on the list once there's a snapshotted article to return to
-   (app.ts toggles .srr-can-cancel) — so it never appears on a fresh boot-into-
-   list with nothing yet read. */
-.srr-toolbar-left .srr-cancel {
-   display: none;
-   min-width: 2.75rem;
-   min-height: 2.75rem;
-   align-items: center;
-   justify-content: center;
-   border-radius: var(--radius);
-   transition:
-      opacity 0.15s,
-      background 0.15s;
-   &:hover:not(:disabled) {
-      opacity: 1;
-      background: var(--hover);
-   }
-}
-body.srr-view-list.srr-can-cancel .srr-toolbar-left .srr-cancel {
-   display: inline-flex;
-}
-.srr-cancel-icon {
-   width: 1.25rem;
-   height: 1.25rem;
-}
-
 /* View mode: on the list, hide the reader-only controls (prev/next/save);
    the back button is meaningless on the list it returns to. */
 .srr-view-list .srr-prev,
@@ -811,15 +802,13 @@ body.srr-view-list.srr-can-cancel .srr-toolbar-left .srr-cancel {
    display: none;
 }
 
-/* The list-only controls — the filter/image-proxy dropdowns plus the jump,
-   search, unseen-only and resume buttons (and the search bar) — belong to the
-   list (home); the reader is a focused reading surface: back / save / prev /
-   next only. (The search bar is already display:none without .srr-searching.) */
+/* The list-only controls — the filter + ⋯ overflow dropdowns plus the jump and
+   search buttons (and the search bar) — belong to the list (home); the reader is
+   a focused reading surface: back / save / prev / next only. (The search bar is
+   already display:none without .srr-searching.) */
 body:not(.srr-view-list) .srr-dropdown,
 body:not(.srr-view-list) .srr-jump-wrap,
-body:not(.srr-view-list) .srr-search,
-body:not(.srr-view-list) .srr-unread-toggle,
-body:not(.srr-view-list) .srr-resume {
+body:not(.srr-view-list) .srr-search {
    display: none;
 }
 
@@ -874,6 +863,17 @@ body:not(.srr-view-list) .srr-resume {
 .srr-row-unread .srr-row-title {
    color: var(--fg);
    font-weight: 650;
+}
+/* The article currently open in the reader — tinted + accent bar so returning to
+   the list (which centers it in the viewport) lands you visibly back on it. The
+   2px bar is absorbed from the left padding so the row's text doesn't shift. */
+.srr-row-current {
+   background: color-mix(in srgb, var(--accent) 12%, transparent);
+   border-left: 2px solid var(--accent);
+   padding-left: calc(0.25rem - 2px);
+   &:hover {
+      background: color-mix(in srgb, var(--accent) 18%, transparent);
+   }
 }
 .srr-row-meta {
    margin-top: 0.15rem;

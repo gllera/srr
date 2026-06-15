@@ -54,21 +54,12 @@
                <button class="srr-back" aria-label="Back to list" title="Back to list">
                   <span class="srr-back-icon" aria-hidden="true"></span>
                </button>
-               <button class="srr-cancel" aria-label="Cancel — return to the article you were reading" title="Cancel (return to the article you were reading)">
-                  <svg class="srr-cancel-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                     <path d="M9 14 4 9l5-5" />
-                     <path d="M4 9h11a5 5 0 0 1 5 5v3" />
-                  </svg>
-               </button>
                <div class="srr-dropdown">
                   <button class="srr-dropdown-btn srr-channel" aria-expanded="false" aria-haspopup="menu"></button>
                   <div id="srr-channel-menu" class="srr-dropdown-menu" role="menu"></div>
                </div>
-               <button class="srr-unread-toggle srr-unread-off" aria-pressed="false" aria-label="Unseen-only navigation: off" title="Unseen-only (tags): off">
-                  <svg class="srr-unread-toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                     <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" />
-                     <circle cx="12" cy="12" r="3" />
-                  </svg>
+               <button class="srr-search" aria-pressed="false" aria-label="Search articles" aria-keyshortcuts="/" title="Search (/)">
+                  <span class="srr-search-icon" aria-hidden="true"></span>
                </button>
             </div>
             <div class="srr-toolbar-right">
@@ -77,16 +68,6 @@
                      <path d="M12 3.4l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z" />
                   </svg>
                </button>
-               <div class="srr-dropdown">
-                  <button class="srr-imgproxy srr-dropdown-btn" aria-expanded="false" aria-haspopup="menu" aria-label="Image proxy" title="Image proxy">
-                     <svg class="srr-imgproxy-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <rect x="3" y="3" width="18" height="18" rx="2" />
-                        <circle cx="9" cy="9" r="2" />
-                        <path d="M21 15l-5-5L5 21" />
-                     </svg>
-                  </button>
-                  <div id="srr-imgproxy-menu" class="srr-dropdown-menu" role="menu" aria-label="Image proxy"></div>
-               </div>
                <span class="srr-jump-wrap">
                   <button class="srr-jump" aria-label="Jump to a date" title="Jump to a date">
                      <svg class="srr-jump-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -96,21 +77,22 @@
                   </button>
                   <input type="date" class="srr-jump-date" tabindex="-1" aria-hidden="true" />
                </span>
-               <button class="srr-search" aria-pressed="false" aria-label="Search articles" aria-keyshortcuts="/" title="Search (/)">
-                  <span class="srr-search-icon" aria-hidden="true"></span>
-               </button>
                <button class="srr-prev" disabled aria-label="Previous article" aria-keyshortcuts="ArrowLeft a" title="Previous article (←/A)">
                   <span class="srr-prev-icon" aria-hidden="true"></span>
                </button>
                <button class="srr-next" disabled aria-label="Next article" aria-keyshortcuts="ArrowRight d" title="Next article (→/D)">
                   <span class="srr-next-icon" aria-hidden="true"></span>
                </button>
-               <button class="srr-resume" aria-label="Resume reading (latest)" title="Resume reading (latest)">
-                  <svg class="srr-resume-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                     <path d="M4 5l12 7L4 19z" />
-                     <rect x="17" y="5" width="3" height="14" />
-                  </svg>
-               </button>
+               <div class="srr-dropdown">
+                  <button class="srr-overflow srr-dropdown-btn" aria-expanded="false" aria-haspopup="menu" aria-label="More options" title="More options">
+                     <svg class="srr-overflow-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                        <circle cx="5" cy="12" r="2" />
+                        <circle cx="12" cy="12" r="2" />
+                        <circle cx="19" cy="12" r="2" />
+                     </svg>
+                  </button>
+                  <div id="srr-overflow-menu" class="srr-dropdown-menu" role="menu" aria-label="More options"></div>
+               </div>
             </div>
          </nav>
       </main>

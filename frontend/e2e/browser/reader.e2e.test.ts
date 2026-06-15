@@ -26,7 +26,8 @@ const $nextDisabled = (p: Page) => p.$eval(".srr-next", (e) => (e as HTMLButtonE
 const $popupOpen = (p: Page) => p.$eval(".srr-popup", (e) => e.classList.contains("srr-open"))
 const $rowTitles = (p: Page) => p.$$eval(".srr-list a.srr-row .srr-row-title", (els) => els.map((e) => e.textContent))
 // Viewport-relative top of the row whose title matches (null if absent) — used to
-// assert the list anchored a given article at the top of the viewport.
+// assert where the list anchored a given article (top-aligned, centered, or
+// relative to another row).
 const $rowTop = (p: Page, title: string) =>
    p.$$eval(
       ".srr-list a.srr-row",
@@ -151,14 +152,14 @@ describe("browser: real SPA over real packs", () => {
 
    // The list is a bidirectional infinite window anchored at the reader's
    // position: returning from the reader drops you back at the article you were
-   // reading (it sits at the top of the viewport), with newer ("next") articles
-   // loaded ABOVE it and older ones below — literally the reader's prev/next
-   // sequence laid out vertically.
-   it("anchors the list at the article you were reading, newer above / older below", async () => {
+   // reading — CENTERED in the viewport and highlighted (.srr-row-current) — with
+   // newer ("next") articles loaded ABOVE it and older ones below — literally the
+   // reader's prev/next sequence laid out vertically.
+   it("centers + highlights the article you were reading, newer above / older below", async () => {
       const [page, close] = await open()
       try {
          // A short viewport so this 6-row store is taller than the fold — only
-         // then is there enough content below the anchor to scroll it to the top.
+         // then is there room above AND below the anchor to actually center it.
          await page.setViewport({ width: 500, height: 140 })
          await waitList(page)
          await page.click(".srr-list a.srr-row") // top row = sport title 1 (newest)
@@ -172,24 +173,33 @@ describe("browser: real SPA over real packs", () => {
          await page.keyboard.press("ArrowLeft")
          await waitTitle(page, "tech title 0")
 
-         // Return to the list — it re-anchors at the article we were reading.
+         // Return to the list — it re-anchors at the article we were reading,
+         // centered in the viewport (the row's midpoint near the viewport center).
          await page.click(".srr-back")
          await waitList(page)
-         // The anchored row sits at the top of the viewport (within a px or two).
          await page.waitForFunction(
             () => {
                const row = [...document.querySelectorAll(".srr-list a.srr-row")].find(
                   (e) => e.querySelector(".srr-row-title")?.textContent === "tech title 0",
                )
-               return row != null && Math.abs(row.getBoundingClientRect().top) <= 2
+               if (!row) return false
+               const r = row.getBoundingClientRect()
+               return Math.abs(r.top + r.height / 2 - window.innerHeight / 2) <= 3
             },
             { timeout: 20000 },
          )
-         // Newer ("next") articles are loaded ABOVE the anchor (scrolled off the top)...
-         expect(await $rowTop(page, "sport title 1")).toBeLessThan(0)
-         expect(await $rowTop(page, "tech title 1")).toBeLessThan(0)
+         // The anchored row carries the current-article highlight.
+         const anchorIsCurrent = await page.$$eval(".srr-list a.srr-row", (els) => {
+            const row = els.find((e) => e.querySelector(".srr-row-title")?.textContent === "tech title 0")
+            return row?.classList.contains("srr-row-current") ?? false
+         })
+         expect(anchorIsCurrent).toBe(true)
+         // Newer ("next") articles are loaded ABOVE the anchor...
+         const anchorTop = (await $rowTop(page, "tech title 0"))!
+         expect(await $rowTop(page, "sport title 1")).toBeLessThan(anchorTop)
+         expect(await $rowTop(page, "tech title 1")).toBeLessThan(anchorTop)
          // ...and older ones are BELOW it.
-         expect(await $rowTop(page, "news title 0")).toBeGreaterThan(0)
+         expect(await $rowTop(page, "news title 0")).toBeGreaterThan(anchorTop)
       } finally {
          await close()
       }
@@ -279,58 +289,6 @@ describe("browser: real SPA over real packs", () => {
       }
    })
 
-   // The list is a non-committal staging surface: filter + position changes
-   // there reach the reader only when you tap an article (the commit). A Cancel
-   // button (list-only, shown once you've been into the reader) discards the
-   // staging and resumes the article you were reading, under its original filter.
-   it("Cancel discards staged list changes and resumes the article you were reading", async () => {
-      const [page, close] = await open()
-      try {
-         await waitList(page)
-         // Fresh boot into the list (nothing read yet) → no return target, Cancel hidden.
-         expect(await page.$eval(".srr-cancel", (e) => getComputedStyle(e).display)).toBe("none")
-
-         // Read into the middle of the feed.
-         await page.click(".srr-list a.srr-row") // sport title 1 (newest)
-         await waitReader(page)
-         await page.keyboard.press("ArrowLeft")
-         await waitTitle(page, "sport title 0")
-         await page.keyboard.press("ArrowLeft")
-         await waitTitle(page, "tech title 1")
-
-         // Back to the list: now there's an article to return to → Cancel appears.
-         await page.click(".srr-back")
-         await waitList(page)
-         await page.waitForFunction(
-            () => getComputedStyle(document.querySelector(".srr-cancel") as Element).display !== "none",
-            { timeout: 20000 },
-         )
-
-         // Stage a filter change (pick the "play" tag = Sport only) — it must NOT
-         // touch the reader yet.
-         await page.click(".srr-channel")
-         await page.waitForSelector('#srr-channel-menu.srr-open a[data-value="play"]', { timeout: 20000 })
-         await page.click('#srr-channel-menu a[data-value="play"]')
-         await waitList(page)
-         await page.waitForFunction(
-            () => {
-               const t = [...document.querySelectorAll(".srr-list a.srr-row .srr-row-title")].map((e) => e.textContent)
-               return t.length === 2 && t.every((x) => (x ?? "").includes("sport"))
-            },
-            { timeout: 20000 },
-         )
-         expect(await page.evaluate(() => location.hash)).toBe("#!play")
-
-         // Cancel: discard the staged "play" filter and resume tech title 1 ([ALL]).
-         await page.click(".srr-cancel")
-         await waitReader(page)
-         expect(await $title(page)).toBe("tech title 1")
-         expect(await page.evaluate(() => location.hash)).toBe("#3")
-      } finally {
-         await close()
-      }
-   })
-
    it("deep-links to a specific chronIdx (reader)", async () => {
       const [page, close] = await open("#2")
       try {
@@ -406,23 +364,6 @@ describe("browser: real SPA over real packs", () => {
          expect(await $title(page)).toBe("tech title 1")
          await page.keyboard.press("ArrowLeft")
          await waitTitle(page, "tech title 0")
-      } finally {
-         await close()
-      }
-   })
-
-   // Resume reading: the list-only resume button opens the reader at the latest
-   // article in the current filter (nav.last()), carrying the filter into the
-   // reader hash — independent of which row you'd scrolled to.
-   it("resumes into the reader at the latest article of the current filter", async () => {
-      const [page, close] = await open("#!world")
-      try {
-         await waitList(page)
-         // world = News + Tech; the latest is tech title 1 (chron 3).
-         await page.click(".srr-resume")
-         await waitReader(page)
-         expect(await $title(page)).toBe("tech title 1")
-         expect(await page.evaluate(() => location.hash)).toContain("!world")
       } finally {
          await close()
       }
