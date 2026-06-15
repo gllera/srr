@@ -14,9 +14,12 @@ import * as nav from "./nav"
 // open the list anchors at nav.listAnchor() — the article the reader last sat on
 // when it still matches the filter, else a tag/channel's remembered resume
 // position, else (a tag/channel with no navigation information) its OLDEST
-// article, else the newest match ([ALL]/saved/search). That anchor row is
-// scrolled to the top of the viewport; NEWER ("next") articles load ABOVE it
-// (scroll up) and older ones below (scroll down), both paged lazily off
+// article, else the newest match ([ALL]/saved/search). Returning FROM THE READER
+// centers that article in the viewport and highlights its row (.srr-row-current)
+// so you land back on what you were reading; a resume/oldest anchor (filter
+// switch, date scrub, never-opened tag) is top-aligned instead — the
+// start-of-backlog framing. NEWER ("next") articles load ABOVE the anchor (scroll
+// up) and older ones below (scroll down), both paged lazily off
 // IntersectionObserver sentinels.
 //
 // The rendered rows ARE a persisted, expandable navigation list: returning from
@@ -108,6 +111,9 @@ function rowEl(chron: number, art: IArticle, seen: Record<string, number>): HTML
    a.dataset.chron = String(chron)
    a.dataset.chan = String(art.s)
    if (nav.isRowUnread(chron, art.s, seen)) a.classList.add("srr-row-unread")
+   // The article currently in the reader (the one you were just reading) is
+   // highlighted wherever it appears, so returning to the list lands you on it.
+   if (chron === nav.currentChron()) a.classList.add("srr-row-current")
    const saved = nav.isSaved(chron)
    if (saved) a.classList.add("srr-row-saved")
    const body = el("div", "srr-row-body")
@@ -175,9 +181,11 @@ async function walk(
 
 // Full (re)build: clears the list, resolves the anchor (the reader's article when
 // it matches, else newest), loads a batch older (incl. the anchor) and — when
-// anchored mid-feed — a batch newer above it, then scrolls the anchor to the top.
-// Sets builtKey so show() can later refresh-vs-rebuild.
-export async function render(): Promise<void> {
+// anchored mid-feed — a batch newer above it, then positions the anchor. `center`
+// (set when returning from the reader) centers the anchor in the viewport instead
+// of top-aligning it — but only the live reader article (seed === anchorChron),
+// never a resume/oldest anchor. Sets builtKey so show() can later refresh-vs-rebuild.
+export async function render(center = false): Promise<void> {
    const my = (tok = {})
    teardownObserver()
    newest = oldest = -1
@@ -236,7 +244,7 @@ export async function render(): Promise<void> {
    rowsEl.appendChild(frag)
    container.append(topSentinel, rowsEl, bottomSentinel)
 
-   if (anchoredMid) scrollChronToTop(seed)
+   if (anchoredMid) scrollChronToView(seed, center && seed === nav.anchorChron())
    else window.scrollTo(0, 0)
    notifyScroll()
    observe(my)
@@ -247,27 +255,32 @@ export async function render(): Promise<void> {
 // within the loaded window — re-anchor by scrolling to it, with NO feed walk,
 // fetch or rebuild. Filter change, or an article outside the window (you jumped,
 // or navigated past the loaded batch), falls through to a bounded rebuild.
-export async function show(): Promise<void> {
+// `center` (returning from the reader) centers the article instead of
+// top-aligning it; the rebuild path forwards it to render().
+export async function show(center = false): Promise<void> {
    const pos = nav.currentChron()
    if (builtKey === nav.filterKey() && rowsEl && pos >= 0 && findRow(pos)) {
       refresh()
-      scrollChronToTop(pos)
+      scrollChronToView(pos, center)
       notifyScroll()
       return
    }
-   await render()
+   await render(center)
 }
 
-// Re-derive read/unread dots + saved stars from the live state (you may have read
-// or saved some in the reader), and in the Saved view drop rows un-saved
-// elsewhere. Does NOT move scroll — show() owns re-anchoring.
+// Re-derive read/unread dots + saved stars + the current-article highlight from
+// the live state (you may have read or saved some in the reader), and in the
+// Saved view drop rows un-saved elsewhere. Does NOT move scroll — show() owns
+// re-anchoring.
 export function refresh(): void {
    if (!rowsEl) return
    const seen = nav.getSeenMap()
    const savedView = nav.filter.saved
+   const current = nav.currentChron()
    rowsEl.querySelectorAll<HTMLElement>("a.srr-row").forEach((a) => {
       const chron = Number(a.dataset.chron)
       a.classList.toggle("srr-row-unread", nav.isRowUnread(chron, Number(a.dataset.chan), seen))
+      a.classList.toggle("srr-row-current", chron === current)
       const saved = nav.isSaved(chron)
       a.classList.toggle("srr-row-saved", saved)
       a.querySelector(".srr-row-star")?.setAttribute("aria-pressed", String(saved))
@@ -290,14 +303,22 @@ function findRow(chron: number): HTMLElement | null {
    return rowsEl ? rowsEl.querySelector<HTMLElement>(`a.srr-row[data-chron="${chron}"]`) : null
 }
 
-// Scroll the row for `chron` to the top of the viewport (below the sticky search
-// bar when it's showing). A no-op if the row isn't rendered (e.g. saved view
-// dropped it on return) — the caller then keeps the current scroll.
-function scrollChronToTop(chron: number): void {
+// Scroll the row for `chron` into view: `center` puts its vertical midpoint at
+// the center of the area below the sticky search bar (returning from the reader —
+// keep what you were reading in the middle, with context above and below); else
+// it's aligned to the top of that area (the start-of-backlog / date-scrub
+// framing). window.scrollTo clamps to [0, maxScroll], so an anchor near the top
+// or bottom of the feed lands as close to centered as the content allows. A no-op
+// if the row isn't rendered (e.g. saved view dropped it on return) — the caller
+// then keeps the current scroll.
+function scrollChronToView(chron: number, center: boolean): void {
    const row = findRow(chron)
    if (!row) return
-   const top = row.getBoundingClientRect().top + window.scrollY
-   window.scrollTo(0, Math.max(0, top - stickyOffset()))
+   const rect = row.getBoundingClientRect()
+   const top = rect.top + window.scrollY
+   const sticky = stickyOffset()
+   const target = center ? top + rect.height / 2 - (window.innerHeight + sticky) / 2 : top - sticky
+   window.scrollTo(0, Math.max(0, target))
 }
 
 function stickyOffset(): number {

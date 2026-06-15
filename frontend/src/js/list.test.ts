@@ -281,6 +281,21 @@ describe("list", () => {
       expect($chrons()).toEqual([9, 8, 7, 6, 5, 4, 3, 2, 1, 0])
    })
 
+   it("highlights the reader's current article row, moving it as you read", async () => {
+      const current = () =>
+         $rows()
+            .filter((a) => a.classList.contains("srr-row-current"))
+            .map((a) => Number(a.dataset.chron))
+      setIndex(10)
+      nav._setAnchor(5) // the reader's article
+      await list.render()
+      expect(current()).toEqual([5]) // exactly the reader's row is highlighted
+      // Reading another article moves the highlight on the next refresh (return path).
+      nav._setPos(7)
+      list.refresh()
+      expect(current()).toEqual([7])
+   })
+
    it("anchors at the oldest article (no nav info) with the newer rows above it", async () => {
       setIndex(10)
       nav._setListAnchor(0) // listAnchor resolved the filter's oldest article

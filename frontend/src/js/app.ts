@@ -4,7 +4,7 @@ import {
    dateJump,
    openDatePicker,
    showChannelMenu,
-   showImgProxyMenu,
+   showOverflowMenu,
    type ChannelMenuHost,
 } from "./dropdown"
 import { collapseBrokenMedia, formatDate, sanitizeHtml, timeAgo, URL_DENY } from "./fmt"
@@ -16,7 +16,6 @@ const el = {
    article: document.querySelector(".srr-reader") as HTMLElement,
    listView: document.querySelector(".srr-list") as HTMLElement,
    back: document.querySelector(".srr-back") as HTMLButtonElement,
-   cancel: document.querySelector(".srr-cancel") as HTMLButtonElement,
    title: document.querySelector(".srr-title") as HTMLElement,
    content: document.querySelector(".srr-content") as HTMLElement,
    titleLink: document.querySelector(".srr-title-link") as HTMLAnchorElement,
@@ -24,17 +23,15 @@ const el = {
    prev: document.querySelector(".srr-prev") as HTMLButtonElement,
    next: document.querySelector(".srr-next") as HTMLButtonElement,
    channel: document.querySelector(".srr-channel") as HTMLButtonElement,
-   unreadToggle: document.querySelector(".srr-unread-toggle") as HTMLButtonElement,
    source: document.querySelector(".srr-source") as HTMLElement,
    date: document.querySelector(".srr-date") as HTMLElement,
    search: document.querySelector(".srr-search") as HTMLButtonElement,
    searchInput: document.querySelector(".srr-search-input") as HTMLInputElement,
    searchClear: document.querySelector(".srr-search-clear") as HTMLButtonElement,
    searchNote: document.querySelector(".srr-search-note") as HTMLElement,
-   imgproxy: document.querySelector(".srr-imgproxy") as HTMLButtonElement,
+   overflow: document.querySelector(".srr-overflow") as HTMLButtonElement,
    jump: document.querySelector(".srr-jump") as HTMLButtonElement,
    jumpDate: document.querySelector(".srr-jump-date") as HTMLInputElement,
-   resume: document.querySelector(".srr-resume") as HTMLButtonElement,
    save: document.querySelector(".srr-save") as HTMLButtonElement,
    popupText: document.querySelector(".srr-popup-text") as HTMLElement,
    popupRetry: document.querySelector(".srr-popup-retry") as HTMLButtonElement,
@@ -49,13 +46,6 @@ let view: "list" | "reader" = "list"
 // before setupGestures runs, can close over it).
 let gestures: Gestures | null = null
 let busy = false
-// The list is a non-committal staging surface: while it's open you can change
-// the filter and reposition (date-jump) without disturbing the reader. Tapping
-// an article is the only commit; until then, Cancel resumes the article you were
-// reading. readerSnapshot is that return target — the reader's committed
-// {pos, tokens}, captured when you leave the reader for the list (backToList),
-// dropped when any reader view commits (render) or the URL changes (route).
-let readerSnapshot: { pos: number; tokens: string[] } | null = null
 let retryFn: (() => void) | null = null
 let currentPublished = 0
 let currentChannel = { id: 0, title: "", tag: "" }
@@ -126,13 +116,10 @@ function clearContentTransition() {
 
 function render(o: IShowFeed) {
    showReader()
-   // Showing the reader is a commit — the list's staging (and its Cancel return
-   // target) is now fulfilled or replaced, so drop the snapshot (hides Cancel).
-   setSnapshot(null)
-   // ...and supersede any pending debounced search query. A row-tap commit can
-   // land within the 200ms search debounce; without this the stale timer fires
-   // applySearchQuery under the now-hidden list and rewrites the reader's hash to
-   // the positionless #!q:<query>, losing the article's resume position.
+   // Showing the reader supersedes any pending debounced search query. A row-tap
+   // commit can land within the 200ms search debounce; without this the stale
+   // timer fires applySearchQuery under the now-hidden list and rewrites the
+   // reader's hash to the positionless #!q:<query>, losing the resume position.
    clearTimeout(searchDebounce)
    // t/l are omitempty on the wire — an untitled article must not render "undefined"
    el.title.textContent = o.article.t ?? ""
@@ -250,12 +237,17 @@ function listTitle(): string {
 async function renderListSurface() {
    if (busy) return
    busy = true
+   // Returning FROM THE READER (back button, browser-back) centers + highlights
+   // the article you were reading; arriving via a filter change / boot (view was
+   // already "list") keeps the top-aligned anchor. Captured before showList()
+   // flips view to "list".
+   const center = view === "reader"
    showList()
    refreshChannelLabel()
    document.title = listTitle()
    document.body.classList.add("srr-loading")
    try {
-      await list.show()
+      await list.show(center)
    } catch (e) {
       showError(e, () => void renderListSurface())
    } finally {
@@ -296,9 +288,6 @@ async function route(hash: string) {
    // A URL-driven filter change (hashchange / back-forward) also supersedes any
    // pending debounced query — see selectFilter.
    clearTimeout(searchDebounce)
-   // URL/history navigation supersedes the list's in-app staging, so the Cancel
-   // return target no longer applies.
-   setSnapshot(null)
    const bang = hash.indexOf("!")
    const posStr = bang === -1 ? hash : hash.substring(0, bang)
    if (posStr !== "" && /^-?\d+$/.test(posStr)) {
@@ -342,40 +331,6 @@ async function goToList(push: boolean) {
    await renderListSurface()
 }
 
-// The return target for the list's Cancel button (null = nothing to return to,
-// so the button stays hidden via the body class). Setting it is the ONLY place
-// .srr-can-cancel is toggled.
-function setSnapshot(snap: { pos: number; tokens: string[] } | null) {
-   readerSnapshot = snap
-   document.body.classList.toggle("srr-can-cancel", snap !== null)
-}
-
-// Reader → list via the back button: snapshot the reader's committed position +
-// filter first, so the list can stage filter/position changes non-committally.
-// Tapping an article applies them (render drops the snapshot); Cancel restores
-// this snapshot. currentTokens() returns a copy, so later filter.set on the list
-// can't mutate it.
-function backToList() {
-   setSnapshot({ pos: nav.currentChron(), tokens: nav.currentTokens() })
-   void goToList(true)
-}
-
-// Cancel: discard everything staged on the list and resume the article you were
-// reading, under its original filter. Re-applying the filter before goTo means a
-// staged filter that no longer contains the article can't strand the snapshot —
-// goTo resolves the position within the restored filter. render() clears the
-// snapshot on the way back into the reader.
-async function cancelToArticle() {
-   // Bail BEFORE applyFilter: guard() drops the goTo when busy, but applyFilter
-   // would already have mutated nav.filter, stranding the snapshot/Cancel button
-   // and leaving the filter out of sync with the still-rendered list.
-   if (busy) return
-   const snap = readerSnapshot
-   if (!snap) return
-   nav.applyFilter(snap.tokens)
-   await guard(() => nav.goTo(snap.pos))
-}
-
 async function selectFilter(token: string) {
    // Bail BEFORE applyFilter/goToList: goToList drops on busy, but applyFilter
    // would already have mutated nav.filter (and goToList's pushState the URL) for
@@ -396,6 +351,7 @@ async function selectFilter(token: string) {
 const dropdownHost: ChannelMenuHost = {
    viewIsList: () => view === "list",
    selectFilter: (token) => void selectFilter(token),
+   toggleUnseenOnly,
 }
 
 // ── Title search (list filter mode) ──────────────────────────────────────────
@@ -463,25 +419,16 @@ function syncSearchBar() {
    el.searchNote.hidden = !note
 }
 
-// The unseen-only (tags) toggle — a list-only toolbar button. Its icon reflects
-// the persisted mode; toggling it flips the mode and rebuilds the list under the
-// new (raised/restored) bounds. The mode also governs reader navigation, but the
-// only place it's switched is here on the list.
-function refreshUnreadToggle() {
-   const on = nav.isUnreadOnly()
-   el.unreadToggle.classList.toggle("srr-unread-on", on)
-   el.unreadToggle.classList.toggle("srr-unread-off", !on)
-   el.unreadToggle.setAttribute("aria-pressed", String(on))
-   el.unreadToggle.setAttribute("aria-label", `Unseen-only navigation: ${on ? "on" : "off"}`)
-   el.unreadToggle.title = `Unseen-only (tags): ${on ? "on" : "off"}`
-}
-
-function toggleUnreadOnly() {
+// The unseen-only (tags) toggle — now a row in the channel menu (dropdownHost
+// hands this to showChannelMenu). Flipping it persists the mode and rebuilds the
+// list under the new (raised/restored) bounds; the mode also governs reader
+// navigation, but the list is the only place it's switched. The menu re-renders
+// its own row state + unseen-only row hiding after calling this.
+function toggleUnseenOnly() {
    nav.setUnreadOnly(!nav.isUnreadOnly())
-   refreshUnreadToggle()
    // Re-apply the same tokens so filter.set re-reads the new mode (raised bounds
    // in single-tag mode), then force a rebuild — the token set is unchanged, so
-   // list.show() alone would only refresh dots. Mirrors the old dropdown reapply.
+   // list.show() alone would only refresh dots.
    nav.applyFilter(nav.currentTokens())
    void list.rerender()
 }
@@ -554,20 +501,16 @@ async function init() {
 
    el.prev.addEventListener("click", () => guard(() => nav.left()))
    el.next.addEventListener("click", () => guard(() => nav.right()))
-   el.back.addEventListener("click", () => backToList())
-   el.cancel.addEventListener("click", () => void cancelToArticle())
+   el.back.addEventListener("click", () => void goToList(true))
    // capture: error events don't bubble (see collapseBrokenMedia)
    el.content.addEventListener("error", collapseBrokenMedia, true)
    el.channel.addEventListener("click", () => showChannelMenu(channelMenuTag(), guard, dropdownHost))
-   el.unreadToggle.addEventListener("click", toggleUnreadOnly)
-   el.imgproxy.addEventListener("click", () => showImgProxyMenu())
+   el.overflow.addEventListener("click", () => showOverflowMenu())
    // Jump: the button pops the native date picker; picking a day (the input's
    // change) repositions the LIST to that date (jumpToDate), not the reader. No
    // dropdown menu of its own.
    el.jump.addEventListener("click", () => openDatePicker(el.jumpDate))
    el.jumpDate.addEventListener("change", () => dateJump(el.jumpDate, jumpToDate))
-   // Resume reading: open the reader at the latest article in the current filter.
-   el.resume.addEventListener("click", () => guard(() => nav.last()))
    // Search: the magnifier toggles the list's "q:<query>" filter; the pinned
    // search bar owns the input (debounced live query, Enter applies immediately,
    // Escape / ✕ leave search).
@@ -590,15 +533,14 @@ async function init() {
    })
    el.searchClear.addEventListener("click", () => void exitSearch())
    el.save.addEventListener("click", () => !el.save.disabled && toggleSave())
-   refreshUnreadToggle()
    el.popupClose.addEventListener("click", closePopup)
    el.popupRetry.addEventListener("click", () => {
       closePopup()
       if (retryFn) retryFn()
    })
    window.addEventListener("click", (e) => {
-      // closest(), not matches(): a dropdown button (channel, image-proxy) is
-      // clicked on its inner icon (e.g. the .srr-imgproxy-btn-icon svg), so the
+      // closest(), not matches(): a dropdown button (channel, overflow) is
+      // clicked on its inner icon (e.g. the .srr-overflow-icon svg), so the
       // event target is the child, not the button. matches() missed that and
       // closed the menu the button's own handler had just opened — leaving the
       // button dead to taps/clicks.

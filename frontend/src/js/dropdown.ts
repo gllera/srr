@@ -13,11 +13,21 @@ const btns = document.querySelectorAll<HTMLElement>(".srr-dropdown-btn")
 export interface ChannelMenuHost {
    viewIsList: () => boolean
    selectFilter: (token: string) => void // "" = [ALL]; token = tag name, channel id, or ~saved
+   // Flip the unseen-only (tags) mode + rebuild the list. Optional: only the list
+   // host provides it, so the in-menu toggle row renders on the list only (the
+   // reader-only callers and the test suite's default host omit it).
+   toggleUnseenOnly?: () => void
 }
 const READER_HOST: ChannelMenuHost = {
    viewIsList: () => false,
    selectFilter: () => {},
 }
+
+// Sentinel data-value for the in-menu "Unseen only" toggle row — a UI action, not
+// a filter token, so the channel-menu onClick intercepts it instead of routing to
+// selectFilter/switchFilter. `~`-prefixed like nav's SAVED_TOKEN to stay clear of
+// numeric channel ids, tag names, and the [ALL] empty string.
+const UNSEEN_TOGGLE = "~unseen"
 
 let isOpen = false
 
@@ -35,11 +45,12 @@ export function closeAllDropdowns(): void {
    isOpen = false
 }
 
-// Keyboard-reachable rows of an open menu: menuitem anchors not hidden inside
-// a collapsed tag group (the header itself stays reachable) and not hidden by
-// the unseen-only filter (`.srr-hidden`, on the row or its tag group).
+// Keyboard-reachable rows of an open menu: menuitem (and the "Unseen only"
+// menuitemcheckbox) anchors not hidden inside a collapsed tag group (the header
+// itself stays reachable) and not hidden by the unseen-only filter (`.srr-hidden`,
+// on the row or its tag group).
 function menuItems(menu: HTMLElement): HTMLElement[] {
-   return Array.from(menu.querySelectorAll<HTMLElement>('[role="menuitem"]')).filter(
+   return Array.from(menu.querySelectorAll<HTMLElement>('[role="menuitem"],[role="menuitemcheckbox"]')).filter(
       (el) =>
          !el.closest(".srr-hidden") &&
          !(el.classList.contains("srr-tag-item") && el.parentElement?.classList.contains("srr-tag-collapsed")),
@@ -306,13 +317,22 @@ function imgProxyEditor(close: () => void): HTMLDivElement {
    return row
 }
 
-// The image-proxy menu (toolbar 🖼 button): its sole content is the editor row.
-// No navigable anchors, so the delegated onClick is a no-op — the editor's own
-// inputs/buttons handle everything and editorRow stops their clicks bubbling.
-export function showImgProxyMenu(): void {
+// The overflow / settings menu (toolbar ⋯ button, list-only): a small settings
+// panel — currently just the image-proxy editor under a label, with room for
+// future settings. No navigable anchors, so the delegated onClick is a no-op —
+// the editor's own inputs/buttons handle everything and editorRow stops their
+// clicks bubbling.
+export function showOverflowMenu(): void {
    toggleDropdown(
-      "srr-imgproxy-menu",
-      (frag) => frag.appendChild(imgProxyEditor(() => closeAllDropdowns())),
+      "srr-overflow-menu",
+      (frag) => {
+         const label = divEl("srr-menu-label")
+         label.textContent = "Image proxy"
+         frag.append(
+            label,
+            imgProxyEditor(() => closeAllDropdowns()),
+         )
+      },
       async () => {},
    )
 }
@@ -349,6 +369,26 @@ export function dateJump(input: HTMLInputElement, onPick: (ts: number) => void):
    onPick(new Date(y, m - 1, d).getTime() / 1000)
 }
 
+// The "Unseen only" toggle row pinned atop the channel menu (list host only):
+// a checkable menu item carrying the UNSEEN_TOGGLE sentinel + a checkbox
+// indicator reflecting nav.isUnreadOnly(). Lives here, in the filter selector,
+// because unseen-only is a view modifier on the tag filter — it moved off the
+// toolbar. role="menuitemcheckbox" + aria-checked (NOT aria-pressed, which is a
+// button state ARIA doesn't define for menu items) so the on/off state the old
+// toolbar button exposed stays announced by assistive tech — the visual accent
+// + the aria-hidden checkbox alone wouldn't reach a screen reader.
+function unseenToggleRow(): HTMLAnchorElement {
+   const on = nav.isUnreadOnly()
+   const row = createLink(UNSEEN_TOGGLE, "Unseen only", on ? "srr-unseen-row srr-unseen-on" : "srr-unseen-row")
+   const mark = document.createElement("span")
+   mark.className = "srr-check"
+   mark.setAttribute("aria-hidden", "true")
+   row.prepend(mark)
+   row.setAttribute("role", "menuitemcheckbox")
+   row.setAttribute("aria-checked", String(on))
+   return row
+}
+
 export function showChannelMenu(
    currentTag: string,
    guard: (fn: () => Promise<IShowFeed>) => void,
@@ -361,8 +401,13 @@ export function showChannelMenu(
    const buildContent = (frag: DocumentFragment) => {
       const unreadRows: [HTMLAnchorElement, IChannel][] = []
       const headerRows: [HTMLAnchorElement, IChannel[]][] = []
-      // Pure filter selector — tags/channels/★ Saved/[ALL]. The image-proxy,
-      // unseen-only, time-jump and date controls moved out to the toolbar.
+      // Filter selector — tags/channels/★ Saved/[ALL] — topped (on the list) by
+      // the "Unseen only" view-modifier toggle. The image-proxy, time-jump and
+      // date controls live elsewhere on the toolbar (overflow menu / jump button).
+      if (host.viewIsList() && host.toggleUnseenOnly) {
+         frag.appendChild(unseenToggleRow())
+         frag.appendChild(divEl("srr-tag-sep"))
+      }
       frag.appendChild(createLink("", "[ALL]", cls("", "")))
       // "★ Saved" — the per-article collection, surfaced once there's something
       // in it. Same selection path as a channel/tag (host.selectFilter on the
@@ -408,7 +453,19 @@ export function showChannelMenu(
       void fillUnread(unreadRows, headerRows)
    }
 
-   toggleDropdown("srr-channel-menu", buildContent, async (value) => {
+   toggleDropdown("srr-channel-menu", buildContent, async (value, e) => {
+      // The "Unseen only" toggle: stay open and re-render in place. stopPropagation
+      // keeps app.ts's window "any click closes dropdowns" handler from firing;
+      // the host flips the mode + rebuilds the list, and fillMenu refreshes this
+      // menu (the toggle's own state + the unseen-only row/tag hiding in fillUnread).
+      if (value === UNSEEN_TOGGLE) {
+         e.stopPropagation()
+         host.toggleUnseenOnly?.()
+         const menu = document.getElementById("srr-channel-menu")!
+         fillMenu(menu, buildContent)
+         menu.querySelector<HTMLElement>(`a[data-value="${UNSEEN_TOGGLE}"]`)?.focus()
+         return
+      }
       // A channel/tag/[ALL]/★ Saved selection: on the list surface, re-filter the
       // list (the host shows that filter's feed); in the reader, resume that
       // filter at its current position. (switchFilter maps ""→[ALL] and ~saved.)
