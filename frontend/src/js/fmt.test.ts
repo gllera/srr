@@ -9,6 +9,10 @@ import {
    getImgProxy,
    setImgProxy,
    isValidProxy,
+   srcColorIndex,
+   SRC_COLORS,
+   dayLabel,
+   readMinutes,
 } from "./fmt"
 
 beforeEach(() => {
@@ -438,5 +442,71 @@ describe("formatDate", () => {
       const pad = (n: number) => n.toString().padStart(2, "0")
       const expected = `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`
       expect(formatDate(0)).toBe(expected)
+   })
+})
+
+describe("srcColorIndex", () => {
+   it("is deterministic for a given channel id", () => {
+      expect(srcColorIndex(3)).toBe(srcColorIndex(3))
+   })
+
+   it("always lands in [0, SRC_COLORS)", () => {
+      for (const id of [0, 1, 7, 8, 42, 255, 1000]) {
+         const i = srcColorIndex(id)
+         expect(i).toBeGreaterThanOrEqual(0)
+         expect(i).toBeLessThan(SRC_COLORS)
+      }
+   })
+
+   it("gives sequential channel ids distinct colors until the ramp wraps", () => {
+      const slots = Array.from({ length: SRC_COLORS }, (_, id) => srcColorIndex(id))
+      expect(new Set(slots).size).toBe(SRC_COLORS)
+   })
+
+   it("wraps modulo SRC_COLORS", () => {
+      expect(srcColorIndex(SRC_COLORS)).toBe(srcColorIndex(0))
+      expect(srcColorIndex(SRC_COLORS + 2)).toBe(srcColorIndex(2))
+   })
+
+   it("never returns a negative slot for a negative id", () => {
+      expect(srcColorIndex(-1)).toBeGreaterThanOrEqual(0)
+      expect(srcColorIndex(-1)).toBeLessThan(SRC_COLORS)
+   })
+})
+
+describe("dayLabel", () => {
+   const at = (y: number, m: number, d: number) => Math.floor(new Date(y, m, d, 12, 0, 0).getTime() / 1000)
+
+   it("labels today and yesterday relatively", () => {
+      const now = new Date()
+      const today = at(now.getFullYear(), now.getMonth(), now.getDate())
+      const yesterday = at(now.getFullYear(), now.getMonth(), now.getDate() - 1)
+      expect(dayLabel(today)).toBe("TODAY")
+      expect(dayLabel(yesterday)).toBe("YESTERDAY")
+   })
+
+   it("labels an older date with weekday, day, month and the year", () => {
+      // 9 Jun 2020 was a Tuesday; year shown because it isn't the current year.
+      expect(dayLabel(at(2020, 5, 9))).toBe("TUE 9 JUN 2020")
+   })
+})
+
+describe("readMinutes", () => {
+   it("returns 0 for empty or whitespace content so the label can be omitted", () => {
+      expect(readMinutes("")).toBe(0)
+      expect(readMinutes("   \n  ")).toBe(0)
+   })
+
+   it("rounds up any non-empty short content to at least 1 minute", () => {
+      expect(readMinutes("one two three")).toBe(1)
+   })
+
+   it("estimates whole minutes at 200 wpm", () => {
+      expect(readMinutes(Array(400).fill("word").join(" "))).toBe(2)
+      expect(readMinutes(Array(500).fill("word").join(" "))).toBe(3) // round(2.5)
+   })
+
+   it("counts words by whitespace, ignoring runs of spaces and newlines", () => {
+      expect(readMinutes("a  b\n\tc   d")).toBe(1)
    })
 })

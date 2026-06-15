@@ -7,7 +7,7 @@ import {
    showOverflowMenu,
    type ChannelMenuHost,
 } from "./dropdown"
-import { collapseBrokenMedia, formatDate, sanitizeHtml, timeAgo, URL_DENY } from "./fmt"
+import { collapseBrokenMedia, formatDate, readMinutes, sanitizeHtml, srcColorIndex, timeAgo, URL_DENY } from "./fmt"
 import { setupGestures, type Gestures } from "./gestures"
 import * as list from "./list"
 import * as nav from "./nav"
@@ -25,6 +25,7 @@ const el = {
    channel: document.querySelector(".srr-channel") as HTMLButtonElement,
    source: document.querySelector(".srr-source") as HTMLElement,
    date: document.querySelector(".srr-date") as HTMLElement,
+   readlen: document.querySelector(".srr-readlen") as HTMLElement,
    search: document.querySelector(".srr-search") as HTMLButtonElement,
    searchInput: document.querySelector(".srr-search-input") as HTMLInputElement,
    searchClear: document.querySelector(".srr-search-clear") as HTMLButtonElement,
@@ -135,17 +136,29 @@ function render(o: IShowFeed) {
 
    // p is omitted (=> undefined) when the writer couldn't parse a date
    currentPublished = o.article.p ?? 0
-   el.date.textContent = currentPublished ? timeAgo(currentPublished) : ""
-   el.date.title = currentPublished ? formatDate(currentPublished) : ""
+   // The reader carries an absolute dateline (you're reading an archived
+   // dispatch, so the real date matters more than "5h ago"); the relative age
+   // moves to the hover title.
+   el.date.textContent = currentPublished ? formatDate(currentPublished) : ""
+   el.date.title = currentPublished ? timeAgo(currentPublished) : ""
    // Hide the date (and its leading "·" separator) in the kicker when undated,
    // so the source name doesn't trail a dangling middot.
    el.date.hidden = !currentPublished
+
+   // Dispatch length — the commitment the read-through spine then fulfills.
+   // Counted off the just-rendered text; hidden (with its separator) when empty.
+   const mins = readMinutes(el.content.textContent ?? "")
+   el.readlen.textContent = mins ? `${mins} MIN READ` : ""
+   el.readlen.hidden = !mins
 
    currentChannel = {
       id: o.channel?.id ?? 0,
       title: data.channelTitle(o.article.s),
       tag: o.channel?.tag || "",
    }
+   // Key the reader's spine + masthead to the article's source color (same ramp
+   // as the list rails — see styles.css [data-src]).
+   el.article.dataset.src = String(srcColorIndex(o.article.s))
    el.source.textContent = currentChannel.title
    refreshChannelLabel()
    refreshSaveButton(!o.placeholder)
@@ -161,8 +174,16 @@ function render(o: IShowFeed) {
    if (!document.querySelector(".srr-dropdown-menu.srr-open")) el.title.focus()
 
    // Double rAF: first ensures the browser has painted with opacity:0,
-   // second re-enables transitions so the fade-in animates
-   requestAnimationFrame(() => requestAnimationFrame(clearContentTransition))
+   // second re-enables transitions so the fade-in animates. The article is now
+   // laid out at scrollTop 0, so sync the read-through spine (scrollTo(0,0) above
+   // fired no scroll event when already at the top — a short article would
+   // otherwise keep the prior article's fill until first scroll).
+   requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+         clearContentTransition()
+         gestures?.syncReadProgress()
+      }),
+   )
 
    try {
       localStorage.setItem("srr-hash", location.hash)
@@ -188,6 +209,11 @@ function refreshChannelLabel() {
              ? data.channelTitle(Number(key))
              : key
    el.channel.textContent = label
+   // A single-channel filter tints the toolbar label with that channel's source
+   // color (the wire-desk identity in the toolbar); [ALL]/tag/saved/search stay
+   // neutral. The chip-less label still says which source you're viewing.
+   if (/^\d+$/.test(key)) el.channel.dataset.src = String(srcColorIndex(Number(key)))
+   else delete el.channel.dataset.src
    el.channel.classList.toggle("srr-filter-on", key !== "")
    el.channel.title = key === "" ? "All channels" : `Filtered: ${label}`
    el.channel.setAttribute("aria-label", `Filter: ${label}`)
@@ -601,14 +627,7 @@ async function init() {
       }
    })
 
-   gestures = setupGestures({ prev: el.prev, next: el.next, toolbar: el.toolbar, guard, onCycle })
-
-   setInterval(() => {
-      if (currentPublished) {
-         const next = timeAgo(currentPublished)
-         if (el.date.textContent !== next) el.date.textContent = next
-      }
-   }, 60000)
+   gestures = setupGestures({ prev: el.prev, next: el.next, toolbar: el.toolbar, reader: el.article, guard, onCycle })
 
    let hash = location.hash.substring(1)
    // Reject foreign hashes (e.g., OAuth implicit-flow tokens injected by an

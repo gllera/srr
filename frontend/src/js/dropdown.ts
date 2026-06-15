@@ -1,5 +1,5 @@
 import * as data from "./data"
-import { getImgProxy, isValidProxy, setImgProxy } from "./fmt"
+import { getImgProxy, isValidProxy, setImgProxy, srcColorIndex } from "./fmt"
 import * as nav from "./nav"
 
 const menus = document.querySelectorAll<HTMLElement>(".srr-dropdown-menu")
@@ -213,6 +213,17 @@ function errDot(): HTMLSpanElement {
    return s
 }
 
+// The channel's source-color chip — the same per-channel color (data-src → --src)
+// as its list rail and reader spine, so you pick a source here by the color you
+// then see everywhere it appears.
+function srcChip(chanId: number): HTMLSpanElement {
+   const s = document.createElement("span")
+   s.className = "srr-src-chip"
+   s.dataset.src = String(srcColorIndex(chanId))
+   s.setAttribute("aria-hidden", "true")
+   return s
+}
+
 function channelLink(ch: IChannel, className: string): HTMLAnchorElement {
    const a = createLink(String(ch.id), ch.title, className)
    const err = channelErr(ch)
@@ -221,6 +232,8 @@ function channelLink(ch: IChannel, className: string): HTMLAnchorElement {
       a.setAttribute("aria-label", `${ch.title} — feed error: ${err}`)
       a.prepend(errDot())
    }
+   // Chip leftmost — color identity first, then any error dot, then the title.
+   a.prepend(srcChip(ch.id))
    return a
 }
 

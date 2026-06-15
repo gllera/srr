@@ -17,6 +17,10 @@ html {
 
    --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
    --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+   /* The reader's prose voice — a system serif (zero bytes). Pairs with the
+      sans/mono "wire" chrome (masthead, headings, code): machine metadata wraps
+      human prose. */
+   --font-serif: ui-serif, Georgia, Charter, "Times New Roman", serif;
 
    /* Type scale (1.125 ratio). em multipliers in .srr-content mirror these ratios. */
    --text-sm: 0.875rem;
@@ -81,26 +85,50 @@ video {
    padding-bottom: 4rem;
 }
 
+/* The reader is a dispatch: the list row's source rail graduates into a
+   full-height spine down the article, keyed to the channel's color (data-src set
+   on .srr-reader by app.ts). The spine doubles as a read gauge — the border is a
+   pale wash of the source color (the unread track, same faded-rail recipe as a
+   read list row), and .srr-read-spine inks the full color down it as you scroll
+   (--read 0→1, driven by gestures.ts). The dispatch develops as you read it. */
+.srr-reader {
+   position: relative;
+   border-left: 3px solid color-mix(in srgb, var(--src, var(--accent)) 30%, var(--faint));
+   padding-left: 1.1rem;
+}
+.srr-read-spine {
+   position: absolute;
+   left: -3px;
+   top: 0;
+   width: 3px;
+   height: calc(var(--read, 0) * 100%);
+   background: var(--src, var(--accent));
+   transition: height 0.12s linear;
+   pointer-events: none;
+}
+
 /* Header */
 .srr-title-row {
    margin-bottom: 1.4rem;
    overflow-wrap: anywhere;
 }
 
-/* Kicker — "source · age" as a quiet uppercase line above the title */
+/* Masthead — "SOURCE · dateline" in tracked mono (the wire voice), the source
+   name in its own color. */
 .srr-kicker {
    display: flex;
    align-items: baseline;
+   font-family: var(--font-mono);
    font-size: 0.72rem;
-   letter-spacing: 0.06em;
+   letter-spacing: 0.05em;
    text-transform: uppercase;
    color: var(--muted);
    margin-bottom: 0.55rem;
 }
 .srr-source {
    min-width: 0;
-   font-weight: 650;
-   color: var(--accent);
+   font-weight: 600;
+   color: var(--src, var(--accent));
    overflow: hidden;
    text-overflow: ellipsis;
    white-space: nowrap;
@@ -122,15 +150,24 @@ video {
    line-height: 1.22;
 }
 
-.srr-channel {
+/* Toolbar filter label — the "now viewing" readout in the wire voice (mono,
+   uppercase, tracked). Single-channel filters tint it with the source color
+   (data-src, set in app.ts); [ALL]/tag/saved/search stay neutral. */
+.srr-toolbar .srr-channel {
+   font-family: var(--font-mono);
    font-size: var(--text-sm);
+   letter-spacing: 0.04em;
+   text-transform: uppercase;
    color: var(--muted);
    overflow: hidden;
    text-overflow: ellipsis;
    white-space: nowrap;
 }
 .srr-channel.srr-filter-on {
-   color: var(--accent);
+   color: var(--fg);
+}
+.srr-channel[data-src] {
+   color: var(--src);
 }
 
 .srr-date {
@@ -145,10 +182,26 @@ video {
    margin: 0 0.4rem;
 }
 
-/* Content */
+/* Dispatch length — "N MIN READ" in the kicker, the commitment the spine then
+   fulfills. Its own middot keeps separators correct whether or not the date
+   shows; flex-shrink:0 so the source name ellipsizes before this clips. */
+.srr-readlen {
+   color: var(--muted);
+   white-space: nowrap;
+   flex-shrink: 0;
+}
+.srr-readlen::before {
+   content: "·";
+   color: var(--faint);
+   margin: 0 0.4rem;
+}
+
+/* Content — the prose voice is serif; headings, code and captions stay in the
+   wire chrome's sans/mono (set below). */
 .srr-content {
-   font-size: var(--text-base);
-   line-height: 1.6;
+   font-family: var(--font-serif);
+   font-size: 1.05rem;
+   line-height: 1.65;
    transition:
       opacity 0.25s ease-out,
       transform 0.25s ease-out;
@@ -171,6 +224,9 @@ video {
    & h4,
    & h5,
    & h6 {
+      /* Sans subheads punctuate the serif prose — editorial signposts, not part
+         of the running text. */
+      font-family: var(--font-sans);
       font-weight: 650;
       line-height: 1.3;
       letter-spacing: -0.015em;
@@ -198,16 +254,18 @@ video {
    & li {
       margin: 0.25em 0;
    }
+   /* Links stay neutral ink — the underline carries the affordance, so a
+      low-contrast source color never has to double as link text. */
    & a {
-      color: var(--accent);
+      color: var(--fg);
       text-decoration: underline;
       text-decoration-thickness: 1px;
-      text-decoration-color: color-mix(in srgb, var(--accent) 30%, transparent);
+      text-decoration-color: color-mix(in srgb, var(--fg) 35%, transparent);
       text-underline-offset: 0.18em;
       transition: text-decoration-color 0.15s;
    }
    & a:hover {
-      text-decoration-color: var(--accent);
+      text-decoration-color: var(--fg);
    }
    & img {
       border-radius: 8px;
@@ -230,7 +288,7 @@ video {
    & blockquote {
       margin: 1.25em 0;
       padding: 0.15em 0 0.15em 1.25em;
-      border-left: 2px solid var(--accent);
+      border-left: 2px solid var(--muted);
       color: var(--muted);
       font-style: italic;
    }
@@ -242,6 +300,7 @@ video {
       padding: 0.95rem 1.1rem;
       background: var(--hover);
       border-radius: var(--radius);
+      font-family: var(--font-mono);
       font-size: 0.875em;
       line-height: 1.55;
       margin: 1.25em 0;
@@ -636,6 +695,19 @@ video {
       margin-right: 0.35rem;
       vertical-align: middle;
    }
+   /* Source-color chip on channel rows — the same per-channel color (data-src →
+      --src) as the row's list rail and the reader spine, so a source is picked
+      here by the color it wears everywhere else. */
+   & .srr-src-chip {
+      display: inline-block;
+      flex-shrink: 0;
+      width: 0.5rem;
+      height: 0.5rem;
+      border-radius: 50%;
+      background: var(--src, var(--muted));
+      margin-right: 0.5rem;
+      vertical-align: middle;
+   }
    /* Unread badge. Channel rows are block + nowrap/ellipsis: the badge is
       prepended and floated right so it pins to the right edge and a long
       title ellipsizes before reaching it instead of clipping it away. */
@@ -822,57 +894,137 @@ body:not(.srr-view-list) .srr-search {
    padding-bottom: 1rem;
    overflow-anchor: none;
 }
+/* Day-strata divider — the list's TIME axis. A quiet sticky label (the wire
+   voice: tracked mono, muted) + a hairline that rides the top of the viewport as
+   you scroll a day's run, so depth in the archive stays readable. The boldness
+   stays on the source rail; this is deliberately just a line and a label. */
+.srr-day-divider {
+   position: sticky;
+   top: 0;
+   z-index: 1;
+   display: flex;
+   align-items: center;
+   gap: 0.6rem;
+   padding: 0.6rem 0.4rem 0.35rem 0.85rem;
+   background: var(--bg);
+   font-family: var(--font-mono);
+   font-size: 0.66rem;
+   font-weight: 600;
+   letter-spacing: 0.09em;
+   color: var(--muted);
+}
+.srr-day-divider::after {
+   content: "";
+   flex: 1;
+   height: 1px;
+   background: var(--faint);
+}
+/* Source color system — each channel maps to a stable slot (fmt.ts
+   srcColorIndex → data-src) so the feed can be triaged by origin at a glance. A
+   curated, fixed-tone riso-ink ramp; derived offline from the channel id, never
+   a fetched favicon. Dark-mode variants live in the dark @media block. */
+/* Defined on [data-src] (not just .srr-row) so both the list rows AND the reader
+   article pick up their channel's color — the rail graduates into the reader's
+   spine + masthead. */
+[data-src="0"] {
+   --src: #c2410c;
+}
+[data-src="1"] {
+   --src: #2563a8;
+}
+[data-src="2"] {
+   --src: #3f7d52;
+}
+[data-src="3"] {
+   --src: #8a4fa0;
+}
+[data-src="4"] {
+   --src: #b7791f;
+}
+[data-src="5"] {
+   --src: #0f766e;
+}
+[data-src="6"] {
+   --src: #9d2449;
+}
+[data-src="7"] {
+   --src: #4f5b93;
+}
 .srr-row {
    display: flex;
-   gap: 0.6rem;
-   align-items: baseline;
-   padding: 0.7rem 0.25rem;
+   gap: 0.7rem;
+   align-items: flex-start;
+   padding: 0.55rem 0.4rem 0.6rem 0.7rem;
+   /* The source rail — a 3px left edge in the channel's color segments the feed
+      by origin. Read rows fade it toward the hairline (below). */
+   border-left: 3px solid var(--src, var(--faint));
    border-bottom: 1px solid var(--faint);
    text-decoration: none;
    color: var(--fg);
    /* Offscreen rows skip layout/paint — virtualization without manual windowing.
       The intrinsic-size hint keeps the scrollbar honest before they render. */
    content-visibility: auto;
-   contain-intrinsic-size: auto 3.5rem;
+   contain-intrinsic-size: auto 4rem;
    &:hover {
       background: var(--hover);
    }
 }
-.srr-row-dot {
-   flex-shrink: 0;
-   width: 0.5rem;
-   height: 0.5rem;
-   margin-top: 0.4rem;
-   border-radius: 50%;
-   border: 1.5px solid var(--faint);
-   background: transparent;
-}
-.srr-row-unread .srr-row-dot {
-   background: var(--accent);
-   border-color: var(--accent);
+/* Read rows recede: the rail fades toward the hairline. */
+.srr-row:not(.srr-row-unread) {
+   border-left-color: color-mix(in srgb, var(--src, var(--faint)) 28%, var(--faint));
 }
 .srr-row-body {
    min-width: 0;
    flex: 1 1 auto;
 }
+/* "source · age" eyebrow: the source name (colored mono — the primary triage
+   key) leads, age right-aligned beside it. */
+.srr-row-head {
+   display: flex;
+   align-items: baseline;
+   gap: 0.5rem;
+   margin-bottom: 0.2rem;
+}
+.srr-row-source {
+   flex: 1 1 auto;
+   min-width: 0;
+   font-family: var(--font-mono);
+   font-size: 0.66rem;
+   font-weight: 600;
+   letter-spacing: 0.07em;
+   text-transform: uppercase;
+   color: var(--src, var(--accent));
+   overflow: hidden;
+   text-overflow: ellipsis;
+   white-space: nowrap;
+}
+.srr-row:not(.srr-row-unread) .srr-row-source {
+   color: color-mix(in srgb, var(--src, var(--muted)) 60%, var(--muted));
+}
+.srr-row-age {
+   flex-shrink: 0;
+   font-family: var(--font-mono);
+   font-size: 0.66rem;
+   letter-spacing: 0.02em;
+   color: var(--muted);
+}
 .srr-row-title {
-   line-height: 1.35;
+   font-size: 0.95rem;
+   line-height: 1.32;
    overflow-wrap: anywhere;
    color: var(--muted);
 }
 .srr-row-unread .srr-row-title {
    color: var(--fg);
-   font-weight: 650;
+   font-weight: 600;
 }
-/* The article currently open in the reader — tinted + accent bar so returning to
-   the list (which centers it in the viewport) lands you visibly back on it. The
-   2px bar is absorbed from the left padding so the row's text doesn't shift. */
+/* The article currently open in the reader — a source-tinted wash so returning
+   to the list (which centers it in the viewport) lands you visibly back on it.
+   The colored rail already marks the left edge, so no extra bar is needed. */
 .srr-row-current {
-   background: color-mix(in srgb, var(--accent) 12%, transparent);
-   border-left: 2px solid var(--accent);
-   padding-left: calc(0.25rem - 2px);
+   background: color-mix(in srgb, var(--src, var(--accent)) 13%, transparent);
    &:hover {
-      background: color-mix(in srgb, var(--accent) 18%, transparent);
+      background: color-mix(in srgb, var(--src, var(--accent)) 20%, transparent);
    }
 }
 /* Edge "rubber-band": a keyboard step past the start/end of the list nudges the
@@ -907,14 +1059,6 @@ body:not(.srr-view-list) .srr-search {
    .srr-row-bump-up {
       animation: none;
    }
-}
-.srr-row-meta {
-   margin-top: 0.15rem;
-   font-size: 0.75rem;
-   color: var(--muted);
-   overflow: hidden;
-   text-overflow: ellipsis;
-   white-space: nowrap;
 }
 /* Per-row save star — outline by default, filled + accent on a saved row.
    A generous padding keeps the tap target ≈ the row height without widening it. */
@@ -952,10 +1096,38 @@ body:not(.srr-view-list) .srr-search {
    color: var(--muted);
    font-variant-numeric: tabular-nums;
 }
+/* In-between states (empty / caught-up / no-match / cold) — a quiet centered
+   station, not a top-floating void: mono eyebrow (the wire voice) over one plain
+   directive line. */
 .srr-list-empty {
-   color: var(--muted);
+   display: flex;
+   flex-direction: column;
+   align-items: center;
+   justify-content: center;
+   gap: 0.55rem;
+   min-height: 58vh;
    text-align: center;
-   padding: 3rem 1rem;
+   padding: 2rem 1.5rem;
+}
+.srr-empty-eyebrow {
+   font-family: var(--font-mono);
+   font-size: 0.7rem;
+   font-weight: 600;
+   letter-spacing: 0.12em;
+   text-transform: uppercase;
+   color: var(--muted);
+}
+.srr-empty-msg {
+   margin: 0;
+   max-width: 30ch;
+   line-height: 1.5;
+   color: var(--fg);
+}
+.srr-empty-em {
+   font-weight: 650;
+}
+.srr-empty-star {
+   color: var(--accent);
 }
 .srr-list-sentinel {
    height: 1px;
@@ -1125,5 +1297,30 @@ body:not(.srr-view-list) .srr-search {
    }
    .srr-title-link {
       color: inherit;
+   }
+   /* Source ramp, dark — same hues lifted in luminance to read on the dark bg. */
+   [data-src="0"] {
+      --src: #e8855a;
+   }
+   [data-src="1"] {
+      --src: #6aa3e0;
+   }
+   [data-src="2"] {
+      --src: #79b88c;
+   }
+   [data-src="3"] {
+      --src: #c08fd6;
+   }
+   [data-src="4"] {
+      --src: #d6a94e;
+   }
+   [data-src="5"] {
+      --src: #4fb3a8;
+   }
+   [data-src="6"] {
+      --src: #d96f8c;
+   }
+   [data-src="7"] {
+      --src: #8e9bd8;
    }
 }
