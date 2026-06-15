@@ -43,6 +43,7 @@ const nav = vi.hoisted(() => {
    let seen: Record<string, number> = {}
    let saved = new Set<number>()
    let searchTerm = ""
+   let unreadOnly = false
    // Reader position + list anchor (settable per test). Default -1 == "newest"
    // (no valid reader article), so render() lays a newest-first feed like before.
    let pos = -1
@@ -68,6 +69,8 @@ const nav = vi.hoisted(() => {
       _setListAnchor: (a: number) => (anchor = a),
       isSearchFilter: vi.fn(() => filter.search),
       searchQuery: vi.fn(() => searchTerm),
+      isUnreadOnly: vi.fn(() => unreadOnly),
+      _setUnreadOnly: (v: boolean) => (unreadOnly = v),
       filterKey: vi.fn(() => (filter.saved ? "S" : filter.search ? "q:" + searchTerm : filter.active ? "F" : "")),
       getCurrentFilterKey: vi.fn(() => ""),
       tokensSuffix: vi.fn(() => (filter.saved ? "!~saved" : filter.active ? "!F" : "")),
@@ -115,7 +118,12 @@ const nav = vi.hoisted(() => {
 })
 vi.mock("./nav", () => nav)
 
-vi.mock("./fmt", () => ({ timeAgo: (n: number) => `${n}s` }))
+vi.mock("./fmt", () => ({
+   timeAgo: (n: number) => `${n}s`,
+   srcColorIndex: (id: number) => id % 8,
+   // Two chrons per "day" so a small fixture spans multiple strata.
+   dayLabel: (n: number) => "D" + Math.floor(n / 2),
+}))
 
 type List = typeof import("./list")
 
@@ -147,6 +155,7 @@ describe("list", () => {
       nav.filter.active = false
       nav.filter.saved = false
       nav.filter.search = false
+      nav._setUnreadOnly(false)
       nav._setSeen({})
       nav._setSaved([])
       nav._setPos(-1)
@@ -162,9 +171,36 @@ describe("list", () => {
       expect($chrons()).toEqual([3, 2, 1, 0])
       const top = $rows()[0]
       expect(top.querySelector(".srr-row-title")!.textContent).toBe("title 3")
+      // Source-first head: channel name leads, age right-aligned beside it.
+      expect(top.querySelector(".srr-row-source")!.textContent).toBe("Chan1")
       // timeAgo is stubbed to `${when}s`; when = published || fetched_at (=chron here)
-      expect(top.querySelector(".srr-row-meta")!.textContent).toBe("Chan1 · 3s")
+      expect(top.querySelector(".srr-row-age")!.textContent).toBe("3s")
       expect(top.getAttribute("href")).toBe("#3")
+   })
+
+   it("inserts a sticky day divider before the first row of each day stratum", async () => {
+      // dayLabel stub buckets 2 chrons/day; rows 5..0 → D2,D2,D1,D1,D0,D0.
+      setIndex(6)
+      await list.render()
+      const divs = Array.from(document.querySelectorAll(".srr-day-divider"))
+      expect(divs.map((d) => d.textContent)).toEqual(["D2", "D1", "D0"])
+      // Each divider sits immediately before the newest row of its day.
+      expect((divs[0].nextElementSibling as HTMLElement).dataset.chron).toBe("5")
+      expect((divs[1].nextElementSibling as HTMLElement).dataset.chron).toBe("3")
+   })
+
+   it("omits day dividers in search mode (title hits are cross-time)", async () => {
+      setIndex(6)
+      nav._setSearch("x")
+      await list.render()
+      expect(document.querySelectorAll(".srr-day-divider").length).toBe(0)
+   })
+
+   it("steps the keyboard cursor across a day boundary, skipping the divider", async () => {
+      setIndex(6)
+      nav._setAnchor(3) // start on chron 3 (a D1 row); chron 4 is D2, across a divider
+      await list.render()
+      expect(await list.moveSelection("newer")).toBe(4)
    })
 
    it("marks rows unread strictly after the channel's seen high-water", async () => {
@@ -244,7 +280,20 @@ describe("list", () => {
       await list.render()
       const empty = container.querySelector(".srr-list-empty")
       expect(empty).not.toBeNull()
-      expect(empty!.textContent).toBe("No matching articles.")
+      // Names the query and offers recovery, instead of a vague "no matches".
+      expect(empty!.textContent).toContain("No titles match")
+      expect(empty!.querySelector(".srr-empty-em")!.textContent).toBe("“zzz”")
+   })
+
+   it("shows an 'all caught up' state when unseen-only leaves nothing unread", async () => {
+      setIndex(4, () => 1)
+      nav.filter.active = true
+      nav.filter.channels = new Map([[99, 0]]) // nothing matches → empty feed
+      nav._setUnreadOnly(true)
+      await list.render()
+      const empty = container.querySelector(".srr-list-empty")
+      expect(empty).not.toBeNull()
+      expect(empty!.querySelector(".srr-empty-eyebrow")!.textContent).toBe("All caught up")
    })
 
    it("refresh re-derives read/unread dots from the live seen map", async () => {

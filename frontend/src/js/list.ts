@@ -1,9 +1,9 @@
 import * as data from "./data"
-import { timeAgo } from "./fmt"
+import { timeAgo, srcColorIndex, dayLabel } from "./fmt"
 import * as nav from "./nav"
 
 // The list surface — the app's home: a scannable feed of headlines under the
-// current filter, newest-first, with a read/unread dot per row. Tapping a row
+// current filter, newest-first, source-keyed with read/unread weighting. Tapping a row
 // opens the reader (app wires that via setup's `open`). The list owns no nav
 // state of its own — it walks nav.feedLeft/feedRight over the active filter (the
 // same neighbor seam the reader steps through, just unbounded in both
@@ -88,7 +88,8 @@ export function setup(el: HTMLElement, open: (chron: number) => void, onScroll?:
          star.setAttribute("aria-pressed", String(nowSaved))
          if (nav.filter.saved && !nowSaved) {
             a.remove()
-            if (rowsEl && rowsEl.childElementCount === 0) showEmptyState()
+            relabelDividers() // drop a day divider the removed row may have orphaned
+            if (rowsEl && !rowsEl.querySelector("a.srr-row")) showEmptyState()
          }
          return
       }
@@ -102,14 +103,21 @@ function el(tag: string, className: string): HTMLElement {
    return e
 }
 
-// One headline row: dot + (title over "channel · age"). Display fallbacks
-// ("(untitled)", the "[DELETED]" channel tombstone) live here.
+// One headline row: a source-colored rail + ("source · age" eyebrow over the
+// title). Unread reads as full-ink weight + saturated rail, read as dimmed.
+// Display fallbacks ("(untitled)", the "[DELETED]" channel tombstone) live here.
 function rowEl(chron: number, art: IArticle, seen: Record<string, number>): HTMLElement {
    const a = document.createElement("a")
    a.className = "srr-row"
    a.href = "#" + chron + nav.tokensSuffix()
    a.dataset.chron = String(chron)
    a.dataset.chan = String(art.s)
+   // Stable per-source color slot (see styles.css [data-src]): the source-colored
+   // left rail + eyebrow let the feed be triaged by origin.
+   a.dataset.src = String(srcColorIndex(art.s))
+   // The article's own timestamp — relabelDividers buckets rows into day strata
+   // by comparing the dayLabel of consecutive rows.
+   a.dataset.ts = String(art.p || art.a)
    if (nav.isRowUnread(chron, art.s, seen)) a.classList.add("srr-row-unread")
    // The article currently in the reader (the one you were just reading) is
    // highlighted wherever it appears, so returning to the list lands you on it.
@@ -117,32 +125,70 @@ function rowEl(chron: number, art: IArticle, seen: Record<string, number>): HTML
    const saved = nav.isSaved(chron)
    if (saved) a.classList.add("srr-row-saved")
    const body = el("div", "srr-row-body")
+   // Source-first head: the source name (the primary triage key) leads as a
+   // colored mono eyebrow, with the age right-aligned beside it; the title
+   // follows beneath.
+   const head = el("div", "srr-row-head")
+   const source = el("span", "srr-row-source")
+   source.textContent = data.channelTitle(art.s)
+   const age = el("time", "srr-row-age")
+   age.textContent = timeAgo(art.p || art.a)
+   head.append(source, age)
    const title = el("div", "srr-row-title")
    title.textContent = art.t || "(untitled)"
-   const meta = el("div", "srr-row-meta")
-   meta.textContent = `${data.channelTitle(art.s)} · ${timeAgo(art.p || art.a)}`
-   body.append(title, meta)
+   body.append(head, title)
    const star = el("span", "srr-row-star")
    star.setAttribute("role", "button")
    star.setAttribute("aria-label", "Save article")
    star.setAttribute("aria-pressed", String(saved))
    star.innerHTML = STAR_SVG
-   a.append(el("span", "srr-row-dot"), body, star)
+   a.append(body, star)
    return a
 }
 
+// The "wire when it's quiet": each empty/in-between state is a directed station —
+// a mono eyebrow (the wire voice) over one plain, specific line that says what's
+// true and what to do next, instead of a vague "Nothing here". The caught-up
+// state (unseen-only on, everything read) is the reward for the app's purpose.
 function emptyState(): void {
-   const empty = el("div", "srr-list-empty")
-   empty.textContent = nav.isSearchFilter()
-      ? nav.searchQuery()
-         ? "No matching articles."
-         : "Type to search article titles."
-      : nav.filter.saved
-        ? "No saved articles yet."
-        : nav.filter.active
-          ? "Nothing here yet."
-          : "No articles yet."
-   container.appendChild(empty)
+   const wrap = el("div", "srr-list-empty")
+   const eyebrow = (text: string): void => {
+      const e = el("span", "srr-empty-eyebrow")
+      e.textContent = text
+      wrap.appendChild(e)
+   }
+   const msg = el("p", "srr-empty-msg")
+   const em = (text: string): HTMLElement => {
+      const s = el("strong", "srr-empty-em")
+      s.textContent = text
+      return s
+   }
+
+   if (nav.isSearchFilter()) {
+      const q = nav.searchQuery()
+      if (q) msg.append("No titles match ", em(`“${q}”`), ". Try fewer or different words.")
+      else {
+         eyebrow("Search")
+         msg.textContent = "Find any article by its title."
+      }
+   } else if (nav.isUnreadOnly() && nav.filter.active) {
+      eyebrow("All caught up")
+      const name = nav.getCurrentFilterKey()
+      if (name) msg.append("You've read everything in ", em(name), ".")
+      else msg.textContent = "You've read everything here."
+   } else if (nav.filter.saved) {
+      eyebrow("Nothing saved")
+      const star = el("span", "srr-empty-star")
+      star.textContent = "★"
+      msg.append("Tap ", star, " on any article to keep it here for later.")
+   } else if (nav.filter.active) {
+      msg.textContent = "No articles under this filter yet."
+   } else {
+      eyebrow("No dispatches")
+      msg.textContent = "New articles show up here once your feeds are fetched."
+   }
+   wrap.appendChild(msg)
+   container.appendChild(wrap)
 }
 
 // Collapse a now-empty list (the Saved view after un-saving the last row) to its
@@ -152,6 +198,30 @@ function showEmptyState(): void {
    rowsEl = null
    container.replaceChildren()
    emptyState()
+}
+
+// The list's TIME axis: rebuild the sticky day-strata dividers from scratch over
+// the currently rendered rows (idempotent — drop the old ones, walk the rows
+// newest-first, and insert a divider before the first row of each new day).
+// Cheap: the window is bounded, and dayLabel is unique per calendar day so a
+// label change IS a day boundary. Suppressed in search mode (title hits are
+// cross-time, and the pinned search bar owns the sticky top slot). Callers run
+// it inside any scroll-compensation bracket so the divider heights ride the same
+// scrollHeight delta as the rows.
+function relabelDividers(): void {
+   if (!rowsEl) return
+   rowsEl.querySelectorAll(".srr-day-divider").forEach((d) => d.remove())
+   if (nav.isSearchFilter()) return
+   let prev: string | null = null
+   for (const row of rowsEl.querySelectorAll<HTMLElement>("a.srr-row")) {
+      const label = dayLabel(Number(row.dataset.ts))
+      if (label !== prev) {
+         const d = el("div", "srr-day-divider")
+         d.textContent = label
+         rowsEl.insertBefore(d, row)
+         prev = label
+      }
+   }
 }
 
 // Walk the filtered feed from `from` (inclusive) collecting up to `max` matching
@@ -243,6 +313,7 @@ export async function render(center = false): Promise<void> {
    chronsDesc.forEach((c, k) => frag.appendChild(rowEl(c, arts[k], seen)))
    rowsEl.appendChild(frag)
    container.append(topSentinel, rowsEl, bottomSentinel)
+   relabelDividers()
 
    if (anchoredMid) scrollChronToView(seed, center && seed === nav.anchorChron())
    else window.scrollTo(0, 0)
@@ -346,6 +417,7 @@ async function fetchOlder(my: object): Promise<void> {
       const frag = document.createDocumentFragment()
       chrons.forEach((c, k) => frag.appendChild(rowEl(c, arts[k], seen)))
       rowsEl.appendChild(frag)
+      relabelDividers()
    } finally {
       if (my === tok) loadingBottom = false
    }
@@ -377,6 +449,9 @@ async function fetchNewer(my: object): Promise<void> {
       const scroller = document.scrollingElement ?? document.documentElement
       const before = scroller.scrollHeight
       rowsEl.insertBefore(frag, rowsEl.firstChild)
+      // Relabel inside the measure bracket so the day strata that shift across the
+      // new seam ride the same scrollHeight delta as the prepended rows.
+      relabelDividers()
       const delta = scroller.scrollHeight - before
       if (delta) {
          window.scrollTo(0, window.scrollY + delta)
@@ -499,11 +574,14 @@ function bumpEdge(row: HTMLElement, dir: "older" | "newer"): void {
 }
 
 // The adjacent row in `dir` (older = below / next sibling, newer = above /
-// previous sibling), or null at the loaded edge. Guards against a non-row
-// sibling, though rows only ever neighbor rows inside rowsEl.
+// previous sibling), or null at the loaded edge. Skips day-strata dividers, which
+// sit between rows inside rowsEl.
 function rowSibling(row: HTMLElement, dir: "older" | "newer"): HTMLElement | null {
-   const sib = (dir === "older" ? row.nextElementSibling : row.previousElementSibling) as HTMLElement | null
-   return sib && sib.classList.contains("srr-row") ? sib : null
+   let sib = (dir === "older" ? row.nextElementSibling : row.previousElementSibling) as HTMLElement | null
+   while (sib && !sib.classList.contains("srr-row")) {
+      sib = (dir === "older" ? sib.nextElementSibling : sib.previousElementSibling) as HTMLElement | null
+   }
+   return sib
 }
 
 // Make `row` the cursor: move the highlight, sync nav.pos (so the selection IS

@@ -187,3 +187,46 @@ export function formatDate(unix: number): string {
    const d = new Date(unix * 1000)
    return `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}/${d.getFullYear()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`
 }
+
+// Number of source-color slots. MUST match the `.srr-row[data-src="N"]` rules in
+// styles.css (light + dark). The list gives every channel a stable color from
+// this ramp so the feed can be triaged by origin at a glance.
+export const SRC_COLORS = 8
+
+// Map a channel id to one of SRC_COLORS palette slots — deterministic and fully
+// offline (no favicon is ever fetched, keeping the reader zero-network like the
+// rest of the app). Channel ids are handed out sequentially, so a plain modulo
+// gives every channel a distinct color until a store exceeds SRC_COLORS feeds;
+// the double-modulo keeps a stray negative id in range.
+export function srcColorIndex(chanId: number): number {
+   return ((chanId % SRC_COLORS) + SRC_COLORS) % SRC_COLORS
+}
+
+const DOW = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"]
+const MON = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+
+// A coarse day label for the list's time strata: TODAY / YESTERDAY for the near
+// edge (how you think when catching up), otherwise weekday + day + month, with
+// the year appended only when it isn't the current one. Local time (matches the
+// per-row age and the date jump). Math.round on the local-midnight difference
+// stays correct across a DST hour.
+export function dayLabel(unix: number): string {
+   const d = new Date(unix * 1000)
+   const now = new Date()
+   const midnight = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime()
+   const diff = Math.round((midnight(now) - midnight(d)) / 86400000)
+   if (diff === 0) return "TODAY"
+   if (diff === 1) return "YESTERDAY"
+   const base = `${DOW[d.getDay()]} ${d.getDate()} ${MON[d.getMonth()]}`
+   return d.getFullYear() === now.getFullYear() ? base : `${base} ${d.getFullYear()}`
+}
+
+// Estimated read time in whole minutes for the reader's masthead — the dispatch's
+// length, so triage knows the commitment before the tap. 200 wpm (a common prose
+// reading pace); whitespace-split word count off the rendered text. Returns 0 for
+// empty content so the caller can omit the label (and its leading separator).
+export function readMinutes(text: string): number {
+   const words = text.trim().split(/\s+/).filter(Boolean).length
+   if (!words) return 0
+   return Math.max(1, Math.round(words / 200))
+}
