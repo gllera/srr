@@ -38,6 +38,25 @@ const $rowTop = (p: Page, title: string) =>
       title,
    )
 
+// Title of the list's currently selected (highlighted) row, or null if none.
+const $currentTitle = (p: Page) =>
+   p.$$eval(".srr-list a.srr-row", (els) => {
+      const row = els.find((e) => e.classList.contains("srr-row-current"))
+      return row?.querySelector(".srr-row-title")?.textContent ?? null
+   })
+// Wait until the selected (.srr-row-current) row's title matches.
+const waitCurrent = (p: Page, t: string) =>
+   p.waitForFunction(
+      (want) => {
+         const row = [...document.querySelectorAll(".srr-list a.srr-row")].find((e) =>
+            e.classList.contains("srr-row-current"),
+         )
+         return (row?.querySelector(".srr-row-title")?.textContent ?? null) === want
+      },
+      { timeout: 20000 },
+      t,
+   )
+
 const waitTitle = (p: Page, t: string) =>
    p.waitForFunction((want) => document.querySelector(".srr-title")?.textContent === want, { timeout: 20000 }, t)
 // The reader surface is shown with a non-empty title.
@@ -145,6 +164,98 @@ describe("browser: real SPA over real packs", () => {
          await page.click(".srr-back")
          await waitList(page)
          expect(await page.$eval(".srr-reader", (e) => (e as HTMLElement).hidden)).toBe(true)
+      } finally {
+         await close()
+      }
+   })
+
+   // On the LIST, the same A/D and ←/→ keys that step prev/next in the reader move
+   // the highlighted SELECTION (.srr-row-current) through the feed WITHOUT opening
+   // it: A/← to the older neighbor (the row below, newest-first), D/→ to the newer
+   // (the row above) — so the same key reaches the same article on both surfaces.
+   it("steps the list selection with the reader's prev/next keys", async () => {
+      const [page, close] = await open()
+      try {
+         await page.setViewport({ width: 500, height: 600 }) // tall enough for all 6 rows
+         await waitList(page)
+         expect(await $currentTitle(page)).toBeNull() // fresh boot: nothing selected
+
+         // First key drops the cursor on the topmost visible row (the newest), no step.
+         await page.keyboard.press("d")
+         await waitCurrent(page, "sport title 1")
+
+         // A / ← step to the OLDER neighbor (down the newest-first list).
+         await page.keyboard.press("a")
+         await waitCurrent(page, "sport title 0")
+         await page.keyboard.press("ArrowLeft")
+         await waitCurrent(page, "tech title 1")
+
+         // D / → step back to the NEWER neighbor (up).
+         await page.keyboard.press("ArrowRight")
+         await waitCurrent(page, "sport title 0")
+         await page.keyboard.press("d")
+         await waitCurrent(page, "sport title 1")
+
+         // Exactly one row is ever highlighted, and the reader never opened.
+         expect(await page.$$eval(".srr-list a.srr-row-current", (e) => e.length)).toBe(1)
+         expect(await page.$eval(".srr-reader", (e) => (e as HTMLElement).hidden)).toBe(true)
+      } finally {
+         await close()
+      }
+   })
+
+   // Stepping the selection DOWN (older) must keep the highlighted row clear of
+   // the toolbar fixed to the bottom of the viewport — otherwise the row you just
+   // selected is parked behind it and you can't see it.
+   it("keeps the downward-stepped selection above the bottom toolbar", async () => {
+      const [page, close] = await open()
+      try {
+         // Short viewport so stepping to the oldest row must scroll the list and
+         // could collide with the bottom toolbar.
+         await page.setViewport({ width: 500, height: 320 })
+         await waitList(page)
+         await page.keyboard.press("d") // establish the cursor on the newest visible row
+         await waitCurrent(page, "sport title 1")
+         for (let i = 0; i < 5; i++) await page.keyboard.press("a") // older ×5 → the oldest row
+         await waitCurrent(page, "news title 0")
+         // The selected row sits ENTIRELY above the (visible) toolbar.
+         const clear = await page.evaluate(() => {
+            const row = [...document.querySelectorAll(".srr-list a.srr-row")].find((e) =>
+               e.classList.contains("srr-row-current"),
+            )!
+            const bar = document.querySelector(".srr-toolbar")!
+            const r = row.getBoundingClientRect()
+            const b = bar.getBoundingClientRect()
+            return r.bottom <= b.top + 0.5 && r.top >= 0 // above the toolbar and on screen
+         })
+         expect(clear).toBe(true)
+      } finally {
+         await close()
+      }
+   })
+
+   // Stepping past the start/end of the list can't move — instead the current row
+   // gets a directional "bump" so the boundary is clear, not a dropped key.
+   it("bumps the current row when stepping past the oldest end", async () => {
+      const [page, close] = await open()
+      try {
+         await waitList(page)
+         await page.keyboard.press("d") // cursor on the newest row
+         await waitCurrent(page, "sport title 1")
+         for (let i = 0; i < 5; i++) await page.keyboard.press("a") // older → the oldest row
+         await waitCurrent(page, "news title 0")
+         // One more older step can't advance — the row takes the down-bump cue.
+         await page.keyboard.press("a")
+         await page.waitForFunction(
+            () => {
+               const row = [...document.querySelectorAll(".srr-list a.srr-row")].find((e) =>
+                  e.classList.contains("srr-row-current"),
+               )
+               return !!row && row.classList.contains("srr-row-bump-down")
+            },
+            { timeout: 5000 },
+         )
+         expect(await $currentTitle(page)).toBe("news title 0") // selection held at the edge
       } finally {
          await close()
       }

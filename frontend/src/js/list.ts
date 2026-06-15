@@ -441,3 +441,117 @@ function teardownObserver(): void {
    observer?.disconnect()
    observer = null
 }
+
+// ── Keyboard selection cursor ────────────────────────────────────────────────
+// The list is a window over the SAME feed sequence the reader steps through, so
+// its rows top→bottom are strictly newest→oldest (the filter's order). A/← select
+// the OLDER neighbor (the row below) and D/→ the NEWER (the row above), mirroring
+// the reader's left()/right() so the same key reaches the same article on either
+// surface. The selected row carries .srr-row-current (the reader's highlight) and
+// nav.select() tracks it in nav.pos, so opening it (tap) or re-anchoring the list
+// later stays consistent. The neighbor is just the adjacent row — no feed walk —
+// and the infinite window pages one batch when the neighbor isn't loaded yet.
+// Returns the now-selected chronIdx, or -1 when there's nowhere to move.
+export async function moveSelection(dir: "older" | "newer"): Promise<number> {
+   if (!rowsEl) return -1
+   const my = tok
+   const cur = rowsEl.querySelector<HTMLElement>("a.srr-row.srr-row-current")
+   if (!cur) {
+      // No cursor yet (fresh list, or the reader's article isn't a rendered row):
+      // the first key just drops the cursor on the topmost row in view, no step.
+      const start = firstVisibleRow()
+      if (!start) return -1
+      selectRow(start)
+      return Number(start.dataset.chron)
+   }
+   let target = rowSibling(cur, dir)
+   if (!target) {
+      // At the loaded edge — page one batch that way (append older / prepend
+      // newer), then retry the sibling once. A stale token or an in-flight load
+      // leaves target null and the keypress no-ops; the next press retries.
+      await (dir === "older" ? fetchOlder(my) : fetchNewer(my))
+      if (my !== tok || !rowsEl) return -1
+      target = rowSibling(cur, dir)
+   }
+   if (!target) {
+      // Still no neighbor. When the feed is genuinely exhausted that way we're at
+      // the end/beginning of the list — bump the current row to make the boundary
+      // clear. (A null target while NOT exhausted is a transient in-flight page;
+      // no cue, since the next press will advance once it lands.)
+      if (dir === "older" ? exhaustedBottom : exhaustedTop) bumpEdge(cur, dir)
+      return -1
+   }
+   selectRow(target)
+   return Number(target.dataset.chron)
+}
+
+// Nudge the current row toward the edge it can't pass and let it spring back — a
+// localized "rubber-band" so a key press at the start/end of the list reads as a
+// boundary, not a dropped input. Direction-aware (down at the oldest end, up at
+// the newest); the animation self-clears, and a remove+reflow restarts it on a
+// rapid repeat. Honors prefers-reduced-motion via the CSS (animation: none).
+function bumpEdge(row: HTMLElement, dir: "older" | "newer"): void {
+   const cls = dir === "older" ? "srr-row-bump-down" : "srr-row-bump-up"
+   row.classList.remove("srr-row-bump-down", "srr-row-bump-up")
+   void row.offsetWidth // force reflow so re-adding restarts the keyframes
+   row.classList.add(cls)
+   setTimeout(() => row.classList.remove(cls), 220) // > the 0.2s animation
+}
+
+// The adjacent row in `dir` (older = below / next sibling, newer = above /
+// previous sibling), or null at the loaded edge. Guards against a non-row
+// sibling, though rows only ever neighbor rows inside rowsEl.
+function rowSibling(row: HTMLElement, dir: "older" | "newer"): HTMLElement | null {
+   const sib = (dir === "older" ? row.nextElementSibling : row.previousElementSibling) as HTMLElement | null
+   return sib && sib.classList.contains("srr-row") ? sib : null
+}
+
+// Make `row` the cursor: move the highlight, sync nav.pos (so the selection IS
+// the reader's "current article"), and scroll it into view. notifyScroll resyncs
+// the gesture toolbar baseline so the programmatic scroll doesn't read as a
+// downward swipe and hide the toolbar (same contract as render/fetchNewer).
+function selectRow(row: HTMLElement): void {
+   if (!rowsEl) return
+   rowsEl.querySelector(".srr-row-current")?.classList.remove("srr-row-current")
+   row.classList.add("srr-row-current")
+   nav.select(Number(row.dataset.chron), Number(row.dataset.chan))
+   scrollRowIntoView(row)
+   notifyScroll()
+}
+
+// The topmost row at least partly below the sticky search bar — where the cursor
+// lands when none is set yet, so it appears where you're looking rather than at a
+// fixed end. Falls back to the last (oldest) row when geometry is unavailable
+// (jsdom reports zero rects).
+function firstVisibleRow(): HTMLElement | null {
+   if (!rowsEl) return null
+   const sticky = stickyOffset()
+   const rows = rowsEl.querySelectorAll<HTMLElement>("a.srr-row")
+   for (const r of rows) if (r.getBoundingClientRect().bottom > sticky + 1) return r
+   return (rows[rows.length - 1] as HTMLElement | undefined) ?? null
+}
+
+// Bring the selected row fully into the live band — below the sticky search bar
+// (top) and ABOVE the toolbar fixed to the bottom of the viewport — but only when
+// it isn't already there (a keyboard step shouldn't recenter on every press,
+// unlike the return-from-reader centering). Without the bottom inset a row
+// stepped downward parks flush against the viewport bottom, hidden behind the
+// toolbar (which selectRow's notifyScroll always reveals). window.scrollTo clamps
+// to [0, maxScroll].
+function scrollRowIntoView(row: HTMLElement): void {
+   const rect = row.getBoundingClientRect()
+   const top = stickyOffset()
+   const bottom = window.innerHeight - toolbarInset()
+   const margin = 8 // breathing room so the row clears the sticky bar / toolbar
+   if (rect.top < top + margin) window.scrollTo(0, Math.max(0, window.scrollY + rect.top - top - margin))
+   else if (rect.bottom > bottom - margin) window.scrollTo(0, window.scrollY + rect.bottom - bottom + margin)
+}
+
+// Height the bottom-fixed toolbar occupies. selectRow reveals it after every move
+// (notifyScroll), so its full rendered height is reserved unconditionally of the
+// current slide state — offsetHeight ignores the slide transform and reads 0 only
+// when the toolbar is display:none (no list surface).
+function toolbarInset(): number {
+   const bar = document.querySelector<HTMLElement>(".srr-toolbar")
+   return bar ? bar.offsetHeight : 0
+}

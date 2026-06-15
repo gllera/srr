@@ -576,12 +576,21 @@ async function init() {
       if (el.popup.classList.contains("srr-open")) return
       const tag = (e.target as HTMLElement).tagName
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return
-      // On the list, arrows/letters scroll and rove rows natively; only `/`
-      // (search) is a global shortcut. The reader keymap stays reader-only.
+      // On the list, vertical arrows/letters scroll and rove rows natively. The
+      // horizontal step keys move the selected (highlighted) row through the feed
+      // — A/← to the older neighbor, D/→ to the newer — mirroring the reader's
+      // prev/next so the same key reaches the same article on both surfaces; `/`
+      // toggles search. The rest of the reader keymap stays reader-only.
       if (view === "list") {
          if (e.key === "/") {
             e.preventDefault()
             toggleSearch()
+         } else if (e.key === "a" || e.key === "ArrowLeft") {
+            e.preventDefault()
+            void list.moveSelection("older")
+         } else if (e.key === "d" || e.key === "ArrowRight") {
+            e.preventDefault()
+            void list.moveSelection("newer")
          }
          return
       }
