@@ -50,10 +50,126 @@ func writeCacheFile(t *testing.T, cacheDir, name, content string) {
 	}
 }
 
+// fakeFilter writes an executable shell script to a temp dir and returns its
+// path (the command for newAssetFetcher). body is the script after the shebang;
+// the cache file path arrives as "$1".
+func fakeFilter(t *testing.T, body string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "filter.sh")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatalf("write filter: %v", err)
+	}
+	return p
+}
+
+const filteredBytes = "FILTERED-OUTPUT-BYTES"
+const jpegBytes = "\xff\xd8\xff\xe0\x00\x10JFIF\x00original-jpeg"
+const pdfBytes = "%PDF-1.4\n original pdf"
+
+func TestUploadCacheRefRunsFilterBeforeUpload(t *testing.T) {
+	be := tempStore(t)
+	// Filter ignores its input and emits fixed bytes — stands in for a transcoder.
+	out := filepath.Join(t.TempDir(), "out.bin")
+	if err := os.WriteFile(out, []byte(filteredBytes), 0o644); err != nil {
+		t.Fatalf("write out: %v", err)
+	}
+	af := newAssetFetcher(be, 1024, fakeFilter(t, "cat '"+out+"'"))
+
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+
+	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	if err != nil {
+		t.Fatalf("UploadCacheRef: %v", err)
+	}
+
+	// Stored bytes are the FILTER's output; the key is keyed on the SOURCE hash
+	// and keeps the source extension.
+	sum := sha256.Sum256([]byte(jpegBytes))
+	if want := contentHashKey(".jpg", sum); key != want {
+		t.Errorf("key = %q, want source-hash key %q", key, want)
+	}
+	if got := string(readKey(t, be, key)); got != filteredBytes {
+		t.Errorf("stored body = %q, want filtered bytes %q", got, filteredBytes)
+	}
+}
+
+func TestUploadCacheRefSkipsFilterWhenSourceAlreadyUploaded(t *testing.T) {
+	be := tempStore(t)
+	// Pre-seed the store at the source-hash key with a sentinel.
+	sum := sha256.Sum256([]byte(jpegBytes))
+	key := contentHashKey(".jpg", sum)
+	if err := be.Put(context.Background(), key, strings.NewReader("ALREADY"), true); err != nil {
+		t.Fatalf("seed store: %v", err)
+	}
+
+	// A filter with a side effect: if it runs, it creates ran.
+	ran := filepath.Join(t.TempDir(), "ran")
+	af := newAssetFetcher(be, 1024, fakeFilter(t, "touch '"+ran+"'\ncat \"$1\""))
+
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+
+	got, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	if err != nil {
+		t.Fatalf("UploadCacheRef: %v", err)
+	}
+	if got != key {
+		t.Errorf("key = %q, want %q", got, key)
+	}
+	if _, err := os.Stat(ran); !os.IsNotExist(err) {
+		t.Error("filter ran even though the source was already uploaded")
+	}
+	if body := string(readKey(t, be, key)); body != "ALREADY" {
+		t.Errorf("present key was re-uploaded: stored %q, want ALREADY", body)
+	}
+}
+
+func TestUploadCacheRefFilterRunsForEveryFileType(t *testing.T) {
+	be := tempStore(t)
+	// A pass-through filter with a side effect, on a non-media (PDF) file: the
+	// filter must still run (no media gate) and its output is stored verbatim.
+	ran := filepath.Join(t.TempDir(), "ran")
+	af := newAssetFetcher(be, 1024, fakeFilter(t, "touch '"+ran+"'\ncat \"$1\""))
+
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "doc.pdf", pdfBytes)
+
+	key, err := af.UploadCacheRef(context.Background(), cacheDir, "doc.pdf")
+	if err != nil {
+		t.Fatalf("UploadCacheRef: %v", err)
+	}
+	if _, err := os.Stat(ran); err != nil {
+		t.Errorf("filter was not run for a non-media file: %v", err)
+	}
+	if !strings.HasSuffix(key, ".pdf") {
+		t.Errorf("key = %q, want source .pdf extension", key)
+	}
+	if got := string(readKey(t, be, key)); got != pdfBytes {
+		t.Errorf("stored body = %q, want %q", got, pdfBytes)
+	}
+}
+
+func TestUploadCacheRefFilterFailsSoftToOriginal(t *testing.T) {
+	be := tempStore(t)
+	af := newAssetFetcher(be, 1024, fakeFilter(t, "echo boom >&2\nexit 1"))
+
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+
+	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	if err != nil {
+		t.Fatalf("UploadCacheRef should fail soft, got error: %v", err)
+	}
+	if got := string(readKey(t, be, key)); got != jpegBytes {
+		t.Errorf("stored body = %q, want original %q (fail-soft)", got, jpegBytes)
+	}
+}
+
 func TestUploadCacheRefStoresUnderContentHashKey(t *testing.T) {
 	const body = "IMAGEBYTES"
 	be := tempStore(t)
-	af := newAssetFetcher(be, 1024)
+	af := newAssetFetcher(be, 1024, "")
 
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "sub/photo.jpg", body)
@@ -64,7 +180,7 @@ func TestUploadCacheRefStoresUnderContentHashKey(t *testing.T) {
 	}
 
 	sum := sha256.Sum256([]byte(body))
-	if want := contentHashKey("sub/photo.jpg", sum); key != want {
+	if want := contentHashKey(".jpg", sum); key != want {
 		t.Errorf("key = %q, want content-hash key %q", key, want)
 	}
 	if !strings.HasPrefix(key, "assets/") || !strings.HasSuffix(key, ".jpg") {
@@ -77,7 +193,7 @@ func TestUploadCacheRefStoresUnderContentHashKey(t *testing.T) {
 
 func TestUploadCacheRefSkipsWhenAlreadyPresent(t *testing.T) {
 	be := tempStore(t)
-	af := newAssetFetcher(be, 1024)
+	af := newAssetFetcher(be, 1024, "")
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "p.jpg", "ORIGINAL")
 
@@ -113,7 +229,7 @@ func TestUploadCacheRefRejectsTraversal(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(parent, "outside.jpg"), []byte("x"), 0o644); err != nil {
 		t.Fatalf("write outside: %v", err)
 	}
-	af := newAssetFetcher(tempStore(t), 1024)
+	af := newAssetFetcher(tempStore(t), 1024, "")
 	if _, err := af.UploadCacheRef(context.Background(), cacheDir, "../outside.jpg"); err == nil {
 		t.Fatal("expected traversal rejection, got nil")
 	}
@@ -132,7 +248,7 @@ func TestUploadCacheRefRejectsSymlink(t *testing.T) {
 	if err := os.Symlink(target, filepath.Join(cacheDir, "link.jpg")); err != nil {
 		t.Skipf("symlink unsupported: %v", err)
 	}
-	af := newAssetFetcher(tempStore(t), 1024)
+	af := newAssetFetcher(tempStore(t), 1024, "")
 	if _, err := af.UploadCacheRef(context.Background(), cacheDir, "link.jpg"); err == nil {
 		t.Fatal("expected symlink rejection, got nil")
 	}
@@ -140,7 +256,7 @@ func TestUploadCacheRefRejectsSymlink(t *testing.T) {
 
 func TestUploadCacheRefRejectsOversize(t *testing.T) {
 	be := tempStore(t)
-	af := newAssetFetcher(be, 1) // 1 KB cap
+	af := newAssetFetcher(be, 1, "") // 1 KB cap
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "big.jpg", strings.Repeat("x", 4096))
 	if _, err := af.UploadCacheRef(context.Background(), cacheDir, "big.jpg"); err == nil {
@@ -149,7 +265,7 @@ func TestUploadCacheRefRejectsOversize(t *testing.T) {
 }
 
 func TestUploadCacheRefMissingFile(t *testing.T) {
-	af := newAssetFetcher(tempStore(t), 1024)
+	af := newAssetFetcher(tempStore(t), 1024, "")
 	if _, err := af.UploadCacheRef(context.Background(), t.TempDir(), "nope.jpg"); err == nil {
 		t.Fatal("expected error for missing file, got nil")
 	}

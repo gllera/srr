@@ -22,6 +22,7 @@ type Globals struct {
 	PackSize     int    `short:"s" default:"200"      env:"SRR_PACK_SIZE"     help:"Target pack size in KB."`
 	MaxFeedSize  int    `short:"m" default:"5000"     env:"SRR_MAX_FEED_SIZE" help:"Max feed download size in KB."`
 	MaxMediaSize int    `          default:"25000"    env:"SRR_MAX_MEDIA_SIZE" help:"Max self-hosted media object size in KB."`
+	AssetFilter  string `                             env:"SRR_ASSET_FILTER" help:"Command run on every self-hosted asset just before upload to process its bytes, e.g. transcode media (the cache file path is appended as the final arg; processed bytes are read from stdout; non-zero exit or empty output keeps the original). Skipped when the source is already uploaded. Empty disables. E.g. \"webify -m 720\"."`
 	CacheDir     string `                             env:"SRR_CACHE_DIR"     help:"Local download cache for external ingest media (default $XDG_CACHE_HOME/srr)."`
 	Store        string `short:"o" default:"packs"    env:"SRR_STORE"         help:"Storage destination path."`
 	Force        bool   `                             env:"SRR_FORCE"         help:"Override DB write lock if needed."`

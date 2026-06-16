@@ -7,8 +7,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
+	"log/slog"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
@@ -31,6 +32,7 @@ var errNotAsset = errors.New("not a cache asset")
 type assetFetcher struct {
 	be       store.Backend
 	maxBytes int64
+	filter   []string
 }
 
 // assetPrefix is the reserved store prefix for self-hosted media, analogous to
@@ -38,27 +40,37 @@ type assetFetcher struct {
 // pack base.
 const assetPrefix = "assets/"
 
-// newAssetFetcher builds the run's asset uploader. maxKB caps a single file's
-// size.
-func newAssetFetcher(be store.Backend, maxKB int) *assetFetcher {
+// newAssetFetcher builds the run's asset uploader. maxKB caps a single stored
+// object's size. filterCmd, when non-empty, is a command run on every asset
+// just before upload to process its bytes (e.g. transcode media): it is split
+// on whitespace, the cache file path is appended as its final argument, and the
+// processed bytes are read from its stdout. Empty disables filtering.
+func newAssetFetcher(be store.Backend, maxKB int, filterCmd string) *assetFetcher {
 	return &assetFetcher{
 		be:       be,
 		maxBytes: int64(maxKB) * (1 << 10),
+		filter:   strings.Fields(filterCmd),
 	}
 }
 
-// UploadCacheRef resolves localname inside cacheDir, uploads the file to the
-// store under a content-hash key if it is not already present, and returns that
-// key. It backs the end-of-pipeline upload step (inlined in feed.fetch): an
-// out-of-repo ingest fetcher downloads files into the run's shared cache
-// dir and refers to them by relative path in item content; SRR owns the assets/
-// key (sha256 of the bytes, so identical content from any source dedups) and
-// the upload, so the fetcher needs no store credentials. Idempotent: a key
-// already in the store is not re-uploaded.
+// UploadCacheRef resolves localname inside cacheDir and uploads the file to the
+// store under a key derived from the ORIGINAL file's content hash, returning
+// that key. It backs the end-of-pipeline upload step (inlined in feed.fetch):
+// an out-of-repo ingest fetcher downloads files into the run's shared cache dir
+// and refers to them by relative path in item content; SRR owns the assets/ key
+// (sha256 of the source bytes, so identical content from any source dedups) and
+// the upload, so the fetcher needs no store credentials.
+//
+// The existence check keys on the source so it can run BEFORE the optional
+// per-asset filter: an asset already in the store is returned without
+// re-running the filter or the upload. On a miss the filter (if configured)
+// processes the file just before upload; the stored object keeps the source
+// extension.
 //
 // Guards (localname comes from item content, which may be attacker-influenced):
 // the resolved path must stay within cacheDir (no "..", no symlinked escape),
-// must be a regular file, and must not exceed the media size cap.
+// must be a regular file, and the stored object must not exceed the media size
+// cap.
 func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname string) (string, error) {
 	if localname == "" {
 		return "", fmt.Errorf("empty asset reference: %w", errNotAsset)
@@ -91,40 +103,21 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 		return "", fmt.Errorf("asset %q escapes cache dir: %w", localname, errNotAsset)
 	}
 
-	if a.maxBytes > 0 && fi.Size() > a.maxBytes {
-		return "", fmt.Errorf("asset %q exceeds %d bytes (size %d)", localname, a.maxBytes, fi.Size())
-	}
-
-	// Read the file once and key on THESE bytes, then upload THEM. Opening twice
-	// (hash, then upload) let a concurrent rewrite in the shared cache dir store
-	// bytes that don't match the content-hash key — a mismatch the upload-if-
-	// absent dedup below then makes permanent. The read is bounded by the size
-	// cap already pre-checked above (defended again here against a concurrent
-	// grow between the Lstat and this read).
-	f, err := os.Open(full)
-	if err != nil {
-		return "", fmt.Errorf("open asset %q: %w", localname, err)
-	}
-	var buf bytes.Buffer
-	var src io.Reader = f
-	if a.maxBytes > 0 {
-		src = io.LimitReader(f, a.maxBytes+1)
-	}
-	n, err := buf.ReadFrom(src)
-	f.Close()
+	// Key on the ORIGINAL file's content hash so an asset already in the store is
+	// recognized before the (possibly expensive) pre-upload filter runs. The key
+	// keeps the source extension; identical source bytes dedup to one key. The
+	// cache dir is ops-managed and the source was size-capped by the fetcher that
+	// downloaded it, so reading it whole to hash it is bounded.
+	orig, err := os.ReadFile(full)
 	if err != nil {
 		return "", fmt.Errorf("read asset %q: %w", localname, err)
 	}
-	if a.maxBytes > 0 && n > a.maxBytes {
-		return "", fmt.Errorf("asset %q exceeds %d bytes", localname, a.maxBytes)
-	}
+	sum := sha256.Sum256(orig)
+	key := contentHashKey(path.Ext(localname), sum)
 
-	sum := sha256.Sum256(buf.Bytes())
-	key := contentHashKey(localname, sum)
-
-	// Upload only if absent: a content-hash key is stable, so a key already in
-	// the store holds identical bytes (skip the redundant Put, and the upstream
-	// download was already skipped by the fetcher's cache hit).
+	// Already uploaded? Skip BOTH the filter and the upload — the common case for
+	// an image reused across articles or feeds, and the reason the existence
+	// check keys on the source rather than on the filter's output.
 	if rc, err := a.be.Get(ctx, key, true); err != nil {
 		return "", fmt.Errorf("check asset %q: %w", key, err)
 	} else if rc != nil {
@@ -132,18 +125,55 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 		return key, nil
 	}
 
-	if err := a.be.Put(ctx, key, bytes.NewReader(buf.Bytes()), true); err != nil {
+	// First time we've seen these bytes: run the configured per-asset filter (any
+	// processing — e.g. media transcoding) on the file just before upload, then
+	// store the result under the source-hash key. Fail-soft: a filter that errors
+	// or emits nothing uploads the original unchanged.
+	payload := orig
+	if len(a.filter) > 0 {
+		if b, ok := a.runFilter(ctx, full, localname); ok {
+			payload = b
+		}
+	}
+	if a.maxBytes > 0 && int64(len(payload)) > a.maxBytes {
+		return "", fmt.Errorf("asset %q exceeds %d bytes (size %d)", localname, a.maxBytes, len(payload))
+	}
+
+	if err := a.be.Put(ctx, key, bytes.NewReader(payload), true); err != nil {
 		return "", fmt.Errorf("store asset %q: %w", key, err)
 	}
 	return key, nil
 }
 
+// runFilter runs the configured per-asset filter on the cache file just before
+// upload, returning its stdout and ok=true on success. The cache file path is
+// appended as the command's final argument; stderr passes through for
+// diagnostics. Fail-soft: it returns ok=false — the caller uploads the original
+// unchanged — when the command errors or produces no output, so a filter hiccup,
+// or a file type the filter does not handle, never wedges a feed. Output is
+// buffered in memory, bounded in practice by the upstream download cap.
+func (a *assetFetcher) runFilter(ctx context.Context, full, localname string) ([]byte, bool) {
+	cmd := exec.CommandContext(ctx, a.filter[0], append(append([]string(nil), a.filter[1:]...), full)...)
+	cmd.Stderr = os.Stderr
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		slog.Warn("asset filter failed; uploading original", "asset", localname, "cmd", a.filter[0], "err", err)
+		return nil, false
+	}
+	if out.Len() == 0 {
+		slog.Warn("asset filter produced no output; uploading original", "asset", localname, "cmd", a.filter[0])
+		return nil, false
+	}
+	return out.Bytes(), true
+}
+
 // contentHashKey derives the relative store key (assets/<2>/<16><ext>) from the
-// file's content hash plus an extension recovered from the reference path.
-// Content-addressed, so identical bytes from any source dedup to one key; the
-// layout is part of the writer↔reader contract (the frontend resolves keys
-// under assetPrefix against the pack base).
-func contentHashKey(localname string, sum [32]byte) string {
+// content hash plus the given extension (leading dot). Content-addressed, so
+// identical bytes from any source dedup to one key; the layout is part of the
+// writer↔reader contract (the frontend resolves keys under assetPrefix against
+// the pack base).
+func contentHashKey(ext string, sum [32]byte) string {
 	h := hex.EncodeToString(sum[:])
-	return assetPrefix + h[:2] + "/" + h[:16] + path.Ext(localname)
+	return assetPrefix + h[:2] + "/" + h[:16] + ext
 }
