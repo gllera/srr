@@ -56,7 +56,7 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 		// workers (the store backend is concurrent-safe). It reads files an ingest
 		// strategy left in the run's cache dir and uploads them under a
 		// content-hash key — no outbound HTTP of its own.
-		assets := newAssetFetcher(db.Backend, globals.MaxMediaSize)
+		assets := newAssetFetcher(db.Backend, globals.MaxMediaSize, globals.AssetFilter)
 		bufPool := sync.Pool{
 			New: func() any {
 				return make([]byte, globals.MaxFeedSize*(1<<10)+1)
