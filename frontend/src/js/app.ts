@@ -15,9 +15,11 @@ import * as nav from "./nav"
 const el = {
    article: document.querySelector(".srr-reader") as HTMLElement,
    listView: document.querySelector(".srr-list") as HTMLElement,
+   mastheadStatus: document.querySelector(".srr-masthead-status") as HTMLElement,
    back: document.querySelector(".srr-back") as HTMLButtonElement,
    title: document.querySelector(".srr-title") as HTMLElement,
    content: document.querySelector(".srr-content") as HTMLElement,
+   readon: document.querySelector(".srr-readon") as HTMLElement,
    titleLink: document.querySelector(".srr-title-link") as HTMLAnchorElement,
    toolbar: document.querySelector(".srr-toolbar") as HTMLElement,
    prev: document.querySelector(".srr-prev") as HTMLButtonElement,
@@ -115,6 +117,57 @@ function clearContentTransition() {
    el.content.style.transform = ""
 }
 
+// "Read on" — the next dispatch previewed at the article's end, so the wire
+// reads as a continuous feed and the next tap lands under your thumb (not at the
+// bottom toolbar). A "NEXT" divider (perforated rule, echoing the masthead — the
+// paper keeps feeding) over a list-row-style preview keyed to the next source's
+// color; tapping it is exactly the toolbar's next. At the newest match it's a
+// quiet terminal line. Token-guarded so a fast next/prev never paints a stale
+// preview; nav.peek's loadArticle is the cache the neighbor prefetch warms.
+let readonTok = 0
+function readonDivider(label: string): HTMLElement {
+   const d = document.createElement("div")
+   d.className = "srr-readon-divider"
+   d.textContent = label
+   return d
+}
+function renderReadon(next: { chron: number; article: IArticle } | null) {
+   el.readon.replaceChildren()
+   if (!next) {
+      el.readon.append(readonDivider("LATEST"))
+      const end = document.createElement("p")
+      end.className = "srr-readon-endmsg"
+      end.textContent = "You're at the newest dispatch in this view."
+      el.readon.append(end)
+      return
+   }
+   el.readon.append(readonDivider("NEXT"))
+   const a = document.createElement("a")
+   a.className = "srr-readon-next"
+   a.href = "#" + next.chron + nav.tokensSuffix()
+   a.dataset.src = String(srcColorIndex(next.article.s))
+   // Same as the toolbar next (right = newer): intercept like a list row so the
+   // hash link doesn't new-tab under <base target=_blank>.
+   a.addEventListener("click", (e) => {
+      e.preventDefault()
+      guard(() => nav.right())
+   })
+   const head = document.createElement("div")
+   head.className = "srr-readon-head"
+   const src = document.createElement("span")
+   src.className = "srr-readon-source"
+   src.textContent = data.channelTitle(next.article.s)
+   const age = document.createElement("time")
+   age.className = "srr-readon-age"
+   age.textContent = timeAgo(next.article.p || next.article.a)
+   head.append(src, age)
+   const title = document.createElement("div")
+   title.className = "srr-readon-title"
+   title.textContent = next.article.t || "(untitled)"
+   a.append(head, title)
+   el.readon.append(a)
+}
+
 function render(o: IShowFeed) {
    showReader()
    // Showing the reader supersedes any pending debounced search query. A row-tap
@@ -162,6 +215,20 @@ function render(o: IShowFeed) {
    el.source.textContent = currentChannel.title
    refreshChannelLabel()
    refreshSaveButton(!o.placeholder)
+
+   // Read on: clear the prior article's preview now (it's below the fold, so no
+   // flash), then fill — the next dispatch when there is one, else a terminal
+   // line. peek is token-guarded against a faster subsequent navigation.
+   el.readon.replaceChildren()
+   const myReadon = ++readonTok
+   if (!o.has_right) renderReadon(null)
+   else
+      void nav
+         .peek("right")
+         .then((nx) => {
+            if (myReadon === readonTok) renderReadon(nx)
+         })
+         .catch(() => {})
 
    document.title = "SRR - " + (o.article.t ?? "")
    window.scrollTo(0, 0)
@@ -257,6 +324,49 @@ function listTitle(): string {
    return "SRR · " + (/^\d+$/.test(key) ? data.channelTitle(Number(key)) : key)
 }
 
+// Front-page masthead — the wire's live state on the home list. Freshness is
+// instant off the resident db; the unread total across the WHOLE wire (not the
+// active filter — the nameplate says "your wire") is async (idx scans, the same
+// machinery as the filter-menu badges) and token-guarded so a rapid re-entry
+// never writes a stale total. lastWireUnread caches the prior total so a return
+// to the list shows it immediately, then refreshes (e.g. ticks down after you
+// read a few). The freshness part always shows, so the async fill grows the line
+// without a vertical shift.
+let lastWireUnread = -1
+let mastheadTok = 0
+function renderMastheadStatus(unread: number) {
+   const fresh = data.db.fetched_at ? `updated ${timeAgo(data.db.fetched_at)} ago` : ""
+   const unreadText = unread < 0 ? "" : unread > 0 ? `${unread.toLocaleString()} unread` : "All caught up"
+   el.mastheadStatus.replaceChildren()
+   if (unreadText) {
+      const u = document.createElement("span")
+      u.className = "srr-masthead-unread"
+      u.textContent = unreadText
+      el.mastheadStatus.append(u)
+   }
+   if (fresh) {
+      const f = document.createElement("span")
+      f.className = "srr-masthead-fresh"
+      f.textContent = (unreadText ? " · " : "") + fresh
+      el.mastheadStatus.append(f)
+   }
+}
+function refreshMasthead() {
+   renderMastheadStatus(lastWireUnread)
+   const my = ++mastheadTok
+   const chans = Object.values(data.db.channels ?? {}).filter((c) => c.total_art > 0)
+   void nav
+      .unreadCounts(chans)
+      .then((counts) => {
+         if (my !== mastheadTok) return
+         let total = 0
+         for (const n of counts.values()) total += n
+         lastWireUnread = total
+         renderMastheadStatus(total)
+      })
+      .catch(() => {})
+}
+
 // Show the list surface and (re)render it under the current filter. Shares the
 // guard() busy flag so it can't overlap an in-flight article load; on error,
 // the popup's Retry re-runs it.
@@ -270,6 +380,7 @@ async function renderListSurface() {
    const center = view === "reader"
    showList()
    refreshChannelLabel()
+   refreshMasthead()
    document.title = listTitle()
    document.body.classList.add("srr-loading")
    try {
