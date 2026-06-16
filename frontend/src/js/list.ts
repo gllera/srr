@@ -171,7 +171,9 @@ function emptyState(): void {
          eyebrow("Search")
          msg.textContent = "Find any article by its title."
       }
-   } else if (nav.isUnreadOnly() && nav.filter.active) {
+   } else if (nav.isUnreadOnly() && data.db.total_art > 0) {
+      // Unseen-only now spans [ALL] too (no active filter needed): an empty list
+      // with articles present means everything in view has been read.
       eyebrow("All caught up")
       const name = nav.getCurrentFilterKey()
       if (name) msg.append("You've read everything in ", em(name), ".")

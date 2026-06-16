@@ -42,9 +42,19 @@ type Dropdown = typeof import("./dropdown")
 const dd = (btn: string, menuId: string) =>
    `<div class="srr-dropdown"><button class="srr-dropdown-btn ${btn}" aria-expanded="false"></button>` +
    `<div id="${menuId}" class="srr-dropdown-menu" role="menu"></div></div>`
-// The whole toolbar's dropdowns: dropdown.ts binds its DOM lookups at module
-// load, so every menu/button it touches must exist before import.
-const SKELETON = dd("srr-channel", "srr-channel-menu") + dd("srr-overflow", "srr-overflow-menu")
+// The image-proxy dialog scaffold — dropdown.ts queries .srr-imgproxy-dialog at
+// module load and injects .srr-imgproxy-body into the card on open.
+const DIALOG =
+   `<div class="srr-imgproxy-dialog" role="dialog">` +
+   `<div class="srr-imgproxy-card">` +
+   `<h2 class="srr-imgproxy-title" id="srr-imgproxy-title">Image proxy</h2>` +
+   `<p class="srr-imgproxy-desc"></p>` +
+   `<div class="srr-imgproxy-body"></div>` +
+   `</div></div>`
+// The whole toolbar's dropdowns + the proxy dialog: dropdown.ts binds its DOM
+// lookups at module load, so every menu/button/dialog it touches must exist
+// before import.
+const SKELETON = dd("srr-channel", "srr-channel-menu") + dd("srr-overflow", "srr-overflow-menu") + DIALOG
 
 const $menu = () => document.getElementById("srr-channel-menu")!
 const chan = (over: Partial<IChannel>): IChannel =>
@@ -54,10 +64,12 @@ function key(el: HTMLElement, k: string): void {
    el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }))
 }
 
-describe("dropdown: overflow (settings) menu — image proxy", () => {
+describe("image-proxy dialog", () => {
    let dropdown: Dropdown
-   const $imenu = () => document.getElementById("srr-overflow-menu")!
-   const $input = () => $imenu().querySelector<HTMLInputElement>(".srr-imgproxy-input")
+   const $dialog = () => document.querySelector<HTMLElement>(".srr-imgproxy-dialog")!
+   const $input = () => $dialog().querySelector<HTMLInputElement>(".srr-imgproxy-input")
+   const $btn = (cls: string) => $dialog().querySelector<HTMLButtonElement>(cls)
+   const isOpen = () => $dialog().classList.contains("srr-open")
 
    beforeEach(async () => {
       document.body.innerHTML = SKELETON
@@ -65,72 +77,149 @@ describe("dropdown: overflow (settings) menu — image proxy", () => {
       vi.resetModules()
       dropdown = await import("./dropdown")
    })
-
-   it("opens with the editor seeded from the stored prefix", () => {
-      setImgProxy("https://p.example/?url=")
-      dropdown.showOverflowMenu()
-      const input = $input()
-      expect(input).not.toBeNull()
-      expect(input!.value).toBe("https://p.example/?url=")
+   // Each open registers a capture-phase keydown listener on document; closing
+   // removes it. Tear down any still-open dialog so a stale listener (on the
+   // shared jsdom document) can't bleed into the next test.
+   afterEach(() => {
+      if ($dialog()?.classList.contains("srr-open")) key(document.body, "Escape")
    })
 
-   it("commits a valid prefix on Enter and closes the menu", () => {
+   it("the ⋯ overflow menu has an 'Image proxy…' row that opens the dialog and closes the menu", () => {
       dropdown.showOverflowMenu()
+      const row = document.querySelector<HTMLElement>('#srr-overflow-menu a[data-value="~img-proxy"]')
+      expect(row).not.toBeNull()
+      row!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }))
+      expect(isOpen()).toBe(true)
+      expect($input()).not.toBeNull()
+      expect(document.getElementById("srr-overflow-menu")!.classList.contains("srr-open")).toBe(false)
+   })
+
+   it("opens seeded from the stored prefix", () => {
+      setImgProxy("https://p.example/?url=")
+      dropdown.showImgProxyDialog()
+      expect($input()).not.toBeNull()
+      expect($input()!.value).toBe("https://p.example/?url=")
+   })
+
+   // Regression: re-opening must repopulate the single stable .srr-imgproxy-body
+   // host, never stack a second editor (an earlier build appended a fresh body and
+   // close() removed the wrong one, leaving a stale duplicate to accumulate).
+   it("re-opening keeps exactly one editor body (no stacking)", () => {
+      dropdown.showImgProxyDialog()
+      key($input()!, "Escape")
+      dropdown.showImgProxyDialog()
+      expect($dialog().querySelectorAll(".srr-imgproxy-body").length).toBe(1)
+      expect($dialog().querySelectorAll(".srr-imgproxy-input").length).toBe(1)
+   })
+
+   it("commits a valid prefix on Enter and closes", () => {
+      dropdown.showImgProxyDialog()
       const input = $input()!
       input.value = " https://new.example/?url= " // trimmed on commit
       key(input, "Enter")
       expect(getImgProxy()).toBe("https://new.example/?url=")
-      expect($imenu().classList.contains("srr-open")).toBe(false)
+      expect(isOpen()).toBe(false)
+   })
+
+   it("the Save button commits the typed prefix and closes", () => {
+      dropdown.showImgProxyDialog()
+      $input()!.value = "https://save.example/?url="
+      $btn(".srr-imgproxy-save")!.click()
+      expect(getImgProxy()).toBe("https://save.example/?url=")
+      expect(isOpen()).toBe(false)
    })
 
    it("cancels on Escape without persisting", () => {
       setImgProxy("https://old.example/?url=")
-      dropdown.showOverflowMenu()
-      const input = $input()!
-      input.value = "https://changed.example/?url="
-      key(input, "Escape")
+      dropdown.showImgProxyDialog()
+      $input()!.value = "https://changed.example/?url="
+      key($input()!, "Escape")
       expect(getImgProxy()).toBe("https://old.example/?url=")
-      expect($imenu().classList.contains("srr-open")).toBe(false)
+      expect(isOpen()).toBe(false)
    })
 
-   it("clear button stores the empty string (disables the proxy) and closes", () => {
+   it("the Cancel button discards without persisting", () => {
       setImgProxy("https://old.example/?url=")
-      dropdown.showOverflowMenu()
-      $imenu().querySelector<HTMLButtonElement>(".srr-imgproxy-clear")!.click()
-      expect(getImgProxy()).toBe("")
-      expect($imenu().classList.contains("srr-open")).toBe(false)
+      dropdown.showImgProxyDialog()
+      $input()!.value = "https://changed.example/?url="
+      $btn(".srr-imgproxy-cancel")!.click()
+      expect(getImgProxy()).toBe("https://old.example/?url=")
+      expect(isOpen()).toBe(false)
    })
 
-   it("rejects a schemeless prefix: flags the input, keeps the menu open, stores nothing", () => {
-      dropdown.showOverflowMenu()
+   it("the Disable button (shown only when a proxy is set) stores the empty string and closes", () => {
+      setImgProxy("https://old.example/?url=")
+      dropdown.showImgProxyDialog()
+      const clear = $btn(".srr-imgproxy-clear")
+      expect(clear).not.toBeNull()
+      clear!.click()
+      expect(getImgProxy()).toBe("")
+      expect(isOpen()).toBe(false)
+   })
+
+   it("omits Disable when no proxy is set (Save-of-empty already covers it)", () => {
+      dropdown.showImgProxyDialog()
+      expect($btn(".srr-imgproxy-clear")).toBeNull()
+   })
+
+   it("rejects a schemeless prefix: flags the input, keeps the dialog open, stores nothing", () => {
+      dropdown.showImgProxyDialog()
       const input = $input()!
       input.value = "foo"
       key(input, "Enter")
       expect(input.classList.contains("srr-input-invalid")).toBe(true)
       expect($input()).not.toBeNull() // still editing
-      expect($imenu().classList.contains("srr-open")).toBe(true)
+      expect(isOpen()).toBe(true)
       expect(getImgProxy()).toBe("")
    })
 
-   it("committing the unchanged value just closes the menu", () => {
+   it("committing the unchanged value just closes", () => {
       setImgProxy("https://old.example/?url=")
-      dropdown.showOverflowMenu()
+      dropdown.showImgProxyDialog()
       key($input()!, "Enter")
       expect(getImgProxy()).toBe("https://old.example/?url=")
-      expect($imenu().classList.contains("srr-open")).toBe(false)
+      expect(isOpen()).toBe(false)
    })
 
-   // closeAllDropdowns hands focus from a menu-internal element back to the
-   // menu's toolbar button, so an Enter commit lands on the ⋯ button, not <body>.
-   it("hands focus back to the toolbar button on commit (not <body>)", () => {
-      dropdown.showOverflowMenu()
+   // On close, focus returns to whatever opened the dialog — the ⋯ button in the
+   // real flow (closeAllDropdowns hands focus there before the modal opens).
+   it("restores focus to the opener on close (not <body>)", () => {
+      const overflowBtn = document.querySelector<HTMLButtonElement>(".srr-overflow")!
+      overflowBtn.focus()
+      dropdown.showImgProxyDialog()
       const input = $input()!
       input.value = "https://new.example/?url="
-      input.focus()
       key(input, "Enter")
-      expect($imenu().classList.contains("srr-open")).toBe(false)
-      expect(document.activeElement).toBe(document.querySelector(".srr-overflow"))
+      expect(isOpen()).toBe(false)
+      expect(document.activeElement).toBe(overflowBtn)
       expect(document.activeElement).not.toBe(document.body)
+   })
+
+   it("a backdrop click cancels; a click on the card does not", () => {
+      setImgProxy("https://old.example/?url=")
+      dropdown.showImgProxyDialog()
+      const md = () => new MouseEvent("mousedown", { bubbles: true, cancelable: true })
+      // A press inside the card keeps the dialog open.
+      $dialog().querySelector<HTMLElement>(".srr-imgproxy-card")!.dispatchEvent(md())
+      expect(isOpen()).toBe(true)
+      // A press on the backdrop (the overlay itself) closes without saving.
+      $dialog().dispatchEvent(md())
+      expect(isOpen()).toBe(false)
+      expect(getImgProxy()).toBe("https://old.example/?url=")
+   })
+
+   it("traps Tab inside the dialog — wraps last→first and first→last (no escape to the dimmed page)", () => {
+      setImgProxy("https://p.example/?url=") // Disable shown → [input, Disable, Cancel, Save]
+      dropdown.showImgProxyDialog()
+      const f = Array.from($dialog().querySelectorAll<HTMLElement>("input, button"))
+      const first = f[0]
+      const last = f[f.length - 1]
+      last.focus()
+      key(last, "Tab")
+      expect(document.activeElement).toBe(first) // forward wrap
+      first.focus()
+      $dialog().dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true }))
+      expect(document.activeElement).toBe(last) // backward wrap
    })
 })
 
@@ -167,6 +256,14 @@ describe("jump: native date picker", () => {
       expect(picker).toHaveBeenCalledTimes(1)
    })
 
+   it("clears a previously-set value before popping so re-picking the same day re-fires change", () => {
+      data.db.first_fetched = 0
+      input.value = "2024-06-12" // a stale value from a prior jump
+      stubPicker()
+      dropdown.openDatePicker(input)
+      expect(input.value).toBe("")
+   })
+
    it("leaves min unset when the store has no first_fetched", () => {
       data.db.first_fetched = 0
       stubPicker()
@@ -198,13 +295,14 @@ describe("jump: native date picker", () => {
    })
 })
 
-// The image-proxy editor lives inside a dropdown menu, so a real bubbling click
-// reaches app.ts's window-level "any click closes dropdowns" handler. This guards
-// the regression where that handler shut the menu the instant the editor opened
-// (the .click() tests above never see it).
-describe("dropdown: inline editors survive the window close handler", () => {
+// Clicking the overflow "Image proxy…" row opens the dialog AND bubbles on to
+// app.ts's window-level "any click closes dropdowns" handler. The menu closing is
+// expected; the just-opened dialog must survive (it isn't a dropdown). Guards the
+// regression where that handler would shut a freshly-opened overlay.
+describe("image-proxy dialog: survives the window close handler", () => {
    let dropdown: Dropdown
    let closeHandler: (e: Event) => void
+   const $dialog = () => document.querySelector<HTMLElement>(".srr-imgproxy-dialog")!
 
    beforeEach(async () => {
       document.body.innerHTML = SKELETON
@@ -219,14 +317,19 @@ describe("dropdown: inline editors survive the window close handler", () => {
       }
       window.addEventListener("click", closeHandler)
    })
-   afterEach(() => window.removeEventListener("click", closeHandler))
+   afterEach(() => {
+      window.removeEventListener("click", closeHandler)
+      if ($dialog()?.classList.contains("srr-open")) key(document.body, "Escape")
+   })
 
-   it("clicking inside the image-proxy editor keeps its menu open", () => {
+   it("stays open after the row click reaches the window close handler", () => {
       dropdown.showOverflowMenu()
-      const input = document.querySelector<HTMLInputElement>("#srr-overflow-menu .srr-imgproxy-input")!
-      input.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }))
-      expect(document.getElementById("srr-overflow-menu")!.classList.contains("srr-open")).toBe(true)
-      expect(input.isConnected).toBe(true)
+      const row = document.querySelector<HTMLElement>('#srr-overflow-menu a[data-value="~img-proxy"]')!
+      row.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }))
+      expect($dialog().classList.contains("srr-open")).toBe(true)
+      expect($dialog().querySelector(".srr-imgproxy-input")).not.toBeNull()
+      // the menu it launched from is closed
+      expect(document.getElementById("srr-overflow-menu")!.classList.contains("srr-open")).toBe(false)
    })
 })
 
@@ -310,89 +413,28 @@ describe("dropdown: saved row", () => {
    })
 })
 
-// The unseen-only (tags) mode moved off the toolbar into a toggle row pinned
-// atop the channel menu. It renders only for a list host that provides
-// toggleUnseenOnly; clicking it flips the mode via the host, stays open, and
-// re-renders its own state — without leaking the click to the window close handler.
-describe("dropdown: unseen-only toggle (list host)", () => {
+// The overflow (⋯) menu's "Jump to a date" row opens the native date picker via
+// the onJumpDate callback, then closes the menu — it must not leak the click to
+// the window close handler before the picker opens.
+describe("dropdown: overflow menu — jump to date", () => {
    let dropdown: Dropdown
-   let closeHandler: (e: Event) => void
-   const $toggle = () => $menu().querySelector<HTMLElement>('a[data-value="~unseen"]')
-   const listHost = (over: Partial<import("./dropdown").ChannelMenuHost> = {}) => ({
-      viewIsList: () => true,
-      selectFilter: vi.fn(),
-      toggleUnseenOnly: vi.fn(),
-      ...over,
-   })
 
    beforeEach(async () => {
       document.body.innerHTML = SKELETON
       localStorage.clear()
-      nav.isUnreadOnly.mockReturnValue(false)
       vi.resetModules()
       dropdown = await import("./dropdown")
-      // Mirror app.ts's window close handler so we prove the toggle survives it.
-      closeHandler = (e) => {
-         if (!(e.target as HTMLElement).closest(".srr-dropdown-btn")) dropdown.closeAllDropdowns()
-      }
-      window.addEventListener("click", closeHandler)
    })
-   afterEach(() => {
-      window.removeEventListener("click", closeHandler)
-      nav.isUnreadOnly.mockReturnValue(false)
-      dropdown.closeAllDropdowns()
-   })
+   afterEach(() => dropdown.closeAllDropdowns())
 
-   it("renders only for a list host that provides toggleUnseenOnly", () => {
-      // Reader host (default): no toggle row.
-      data.groupChannelsByTag.mockReturnValueOnce({ tagged: new Map(), sortedTags: [], untagged: [chan({ id: 1 })] })
-      dropdown.showChannelMenu("", vi.fn())
-      expect($toggle()).toBeNull()
-      dropdown.closeAllDropdowns()
-      // List host with the callback: the toggle row appears as a checkable menu item.
-      data.groupChannelsByTag.mockReturnValueOnce({ tagged: new Map(), sortedTags: [], untagged: [chan({ id: 1 })] })
-      dropdown.showChannelMenu("", vi.fn(), listHost())
-      expect($toggle()).not.toBeNull()
-      // Checkable-menu-item ARIA (not aria-pressed, which is inert on a menu item):
-      // the on/off state must be programmatically announced to assistive tech.
-      expect($toggle()!.getAttribute("role")).toBe("menuitemcheckbox")
-      expect($toggle()!.getAttribute("aria-checked")).toBe("false")
-      expect($toggle()!.hasAttribute("aria-pressed")).toBe(false)
-   })
+   const $jump = () => document.querySelector<HTMLElement>('#srr-overflow-menu a[data-value="~jump-date"]')
 
-   it("clicking it calls host.toggleUnseenOnly, stays open, and re-renders the new state", () => {
-      let on = false
-      nav.isUnreadOnly.mockImplementation(() => on)
-      const toggleUnseenOnly = vi.fn(() => {
-         on = !on
-      })
-      data.groupChannelsByTag.mockReturnValueOnce({ tagged: new Map(), sortedTags: [], untagged: [chan({ id: 1 })] })
-      dropdown.showChannelMenu("", vi.fn(), listHost({ toggleUnseenOnly }))
-      expect($toggle()!.classList.contains("srr-unseen-on")).toBe(false)
-      expect($toggle()!.getAttribute("aria-checked")).toBe("false")
-      $toggle()!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }))
-      expect(toggleUnseenOnly).toHaveBeenCalledTimes(1)
-      expect($menu().classList.contains("srr-open")).toBe(true) // survived the window close handler
-      expect($toggle()!.classList.contains("srr-unseen-on")).toBe(true) // re-rendered as on
-      expect($toggle()!.getAttribute("aria-checked")).toBe("true") // ...and the announced state flips too
-      nav.isUnreadOnly.mockReturnValue(false)
-   })
-
-   it("a toggle click never routes through selectFilter", () => {
-      const selectFilter = vi.fn()
-      data.groupChannelsByTag.mockReturnValueOnce({ tagged: new Map(), sortedTags: [], untagged: [chan({ id: 1 })] })
-      dropdown.showChannelMenu("", vi.fn(), listHost({ selectFilter }))
-      $toggle()!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }))
-      expect(selectFilter).not.toHaveBeenCalled()
-   })
-
-   // The row is a menuitemcheckbox, so menuItems() must include that role or the
-   // keyboard rover would skip it and the toggle would be keyboard-dead.
-   it("the toggle row is keyboard-reachable (roving includes menuitemcheckbox)", () => {
-      data.groupChannelsByTag.mockReturnValueOnce({ tagged: new Map(), sortedTags: [], untagged: [chan({ id: 1 })] })
-      dropdown.showChannelMenu("", vi.fn(), listHost())
-      key(document.body, "ArrowDown") // first rove lands on the first item = the toggle row
-      expect(document.activeElement).toBe($toggle())
+   it("renders a 'Jump to a date' row that fires onJumpDate", () => {
+      const onJumpDate = vi.fn()
+      dropdown.showOverflowMenu(onJumpDate)
+      expect($jump()).not.toBeNull()
+      $jump()!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }))
+      expect(onJumpDate).toHaveBeenCalledTimes(1)
    })
 })
 
@@ -558,6 +600,22 @@ describe("dropdown: unread badges", () => {
       dropdown.showChannelMenu("", guard)
       await new Promise((r) => setTimeout(r))
       expect($menu().querySelector('a[data-value="5"]')!.classList.contains("srr-hidden")).toBe(false)
+   })
+
+   // R3-4 boundary: the active-key exemption is "" for [ALL]/multi-token, which
+   // must exempt NOTHING — a fully-read row in the global catch-up view still hides.
+   it("hides a fully-read row in the global ([ALL], key '') unseen-only view — '' exempts nothing", async () => {
+      nav.isUnreadOnly.mockReturnValue(true)
+      nav.getCurrentFilterKey.mockReturnValue("") // [ALL] / multi-token
+      data.groupChannelsByTag.mockReturnValueOnce({
+         tagged: new Map(),
+         sortedTags: [],
+         untagged: [chan({ id: 5, title: "Read" })],
+      })
+      counts(() => 0) // fully read
+      dropdown.showChannelMenu("", guard)
+      await new Promise((r) => setTimeout(r))
+      expect($menu().querySelector('a[data-value="5"]')!.classList.contains("srr-hidden")).toBe(true)
    })
 
    it("caps the displayed count at 999+", async () => {

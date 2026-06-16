@@ -4,6 +4,7 @@ import * as nav from "./nav"
 
 const menus = document.querySelectorAll<HTMLElement>(".srr-dropdown-menu")
 const btns = document.querySelectorAll<HTMLElement>(".srr-dropdown-btn")
+const imgProxyDialog = document.querySelector<HTMLElement>(".srr-imgproxy-dialog")
 
 // The list surface hooks the channel menu's filter actions: when the app is on
 // the list, picking a channel/tag/[ALL]/★ Saved re-filters the list in place
@@ -13,21 +14,16 @@ const btns = document.querySelectorAll<HTMLElement>(".srr-dropdown-btn")
 export interface ChannelMenuHost {
    viewIsList: () => boolean
    selectFilter: (token: string) => void // "" = [ALL]; token = tag name, channel id, or ~saved
-   // Flip the unseen-only (tags) mode + rebuild the list. Optional: only the list
-   // host provides it, so the in-menu toggle row renders on the list only (the
-   // reader-only callers and the test suite's default host omit it).
-   toggleUnseenOnly?: () => void
 }
 const READER_HOST: ChannelMenuHost = {
    viewIsList: () => false,
    selectFilter: () => {},
 }
 
-// Sentinel data-value for the in-menu "Unseen only" toggle row — a UI action, not
-// a filter token, so the channel-menu onClick intercepts it instead of routing to
-// selectFilter/switchFilter. `~`-prefixed like nav's SAVED_TOKEN to stay clear of
-// numeric channel ids, tag names, and the [ALL] empty string.
-const UNSEEN_TOGGLE = "~unseen"
+// Sentinel data-values for the overflow menu's action rows — UI actions, not
+// filter tokens, so the onClick intercepts them instead of routing anywhere.
+const JUMP_DATE = "~jump-date"
+const IMG_PROXY = "~img-proxy"
 
 let isOpen = false
 
@@ -106,17 +102,6 @@ function divEl(className: string): HTMLDivElement {
    const d = document.createElement("div")
    d.className = className
    return d
-}
-
-// editorRow is the inline-editor row scaffold (the proxy editor, search
-// input): clicks inside it configure, they don't navigate — both events stop
-// propagating so app.ts's window-level "any click closes dropdowns" handler
-// (and the menu's delegated onclick) never fire.
-function editorRow(className: string): HTMLDivElement {
-   const row = divEl(className)
-   row.addEventListener("mousedown", (e) => e.stopPropagation())
-   row.addEventListener("click", (e) => e.stopPropagation())
-   return row
 }
 
 // editorInput builds an editor's <input> — typing clears any invalid marker,
@@ -298,14 +283,16 @@ async function fillUnread(rows: [HTMLAnchorElement, IChannel][], headers: [HTMLA
    }
 }
 
-// imgProxyEditor is the whole content of the image-proxy toolbar menu: type a
-// URL prefix + Enter/✓ to set it (after isValidProxy), ✕ to disable (commit ""),
-// Escape to cancel — each of them closes the menu via `close`. The proxy only
-// affects reader images, so there's nothing on the list to re-render; committing
-// just persists the prefix for the next reader open. closeAllDropdowns hands
-// focus back to the toolbar button, so no keyboard-refocus dance is needed.
-function imgProxyEditor(close: () => void): HTMLDivElement {
-   const row = editorRow("srr-imgproxy-edit")
+// imgProxyBody is the editable content of the image-proxy dialog: a URL-prefix
+// input plus the action row — Save commits after isValidProxy, Disable commits
+// "" to turn the proxy off (shown only when one is currently set), Cancel
+// discards. Enter commits from the input, Escape cancels — both via `close`,
+// which the caller wires to tear the dialog down. Returns a fragment dropped into
+// the dialog's stable .srr-imgproxy-body host (replaceChildren, so re-opens don't
+// stack). The proxy only affects reader images, so a commit just persists the
+// prefix for the next reader open; there's nothing on screen to re-render.
+function imgProxyBody(close: () => void): DocumentFragment {
+   const frag = document.createDocumentFragment()
    const input = editorInput("url", "srr-imgproxy-input", "Image proxy URL prefix (empty disables)")
    input.placeholder = "https://proxy/?url="
    input.value = getImgProxy()
@@ -320,33 +307,99 @@ function imgProxyEditor(close: () => void): HTMLDivElement {
       if (next !== getImgProxy()) setImgProxy(next)
       close()
    }
-
    editorKeys(input, () => commit(input.value), close)
-   row.append(
-      input,
-      btn("srr-imgproxy-save", "save image proxy", "✓", () => commit(input.value)),
-      btn("srr-imgproxy-clear", "disable image proxy", "✕", () => commit("")),
+
+   const actions = divEl("srr-imgproxy-actions")
+   // Disable sits apart (far left, CSS margin) — a destructive-ish "turn it off"
+   // only worth offering when a proxy is actually set; otherwise Save-of-empty
+   // already covers it.
+   if (getImgProxy())
+      actions.append(btn("srr-dialog-btn srr-imgproxy-clear", "disable image proxy", "Disable", () => commit("")))
+   actions.append(
+      btn("srr-dialog-btn srr-imgproxy-cancel", "cancel", "Cancel", close),
+      btn("srr-dialog-btn srr-dialog-primary srr-imgproxy-save", "save image proxy", "Save", () => commit(input.value)),
    )
-   return row
+   frag.append(input, actions)
+   return frag
 }
 
-// The overflow / settings menu (toolbar ⋯ button, list-only): a small settings
-// panel — currently just the image-proxy editor under a label, with room for
-// future settings. No navigable anchors, so the delegated onClick is a no-op —
-// the editor's own inputs/buttons handle everything and editorRow stops their
-// clicks bubbling.
-export function showOverflowMenu(): void {
+// showImgProxyDialog opens the centered image-proxy modal (built fresh each time
+// so the input re-seeds from storage). It's a real modal — dimmed backdrop, focus
+// trapped inside, Escape and a backdrop click both cancel — distinct from the
+// toast-style .srr-popup. The keydown handler is capture-phase + stopPropagation
+// so Escape closes only the dialog (not app.ts's document-level Escape) and Tab
+// wraps within it; on close, focus returns to whatever opened it (the ⋯ button
+// when launched from the overflow menu, since closeAllDropdowns hands focus there).
+let closeImgProxy: (() => void) | null = null
+
+export function showImgProxyDialog(): void {
+   const dialog = imgProxyDialog
+   if (!dialog) return
+   closeAllDropdowns() // hands focus to the ⋯ button when launched from the menu
+   if (closeImgProxy) closeImgProxy() // never stack two opens
+   const body = dialog.querySelector<HTMLElement>(".srr-imgproxy-body")!
+   const restore = document.activeElement as HTMLElement | null
+
+   const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+         e.preventDefault()
+         e.stopPropagation()
+         close()
+      } else if (e.key === "Tab") {
+         const f = dialog.querySelectorAll<HTMLElement>("input, button")
+         if (f.length === 0) return
+         const first = f[0]
+         const last = f[f.length - 1]
+         if (e.shiftKey && document.activeElement === first) {
+            e.preventDefault()
+            last.focus()
+         } else if (!e.shiftKey && document.activeElement === last) {
+            e.preventDefault()
+            first.focus()
+         }
+      }
+   }
+   // mousedown (like the popup's outside-close) only on the backdrop itself —
+   // the card is a child, so a click on the input/buttons leaves target ≠ dialog.
+   const onDown = (e: MouseEvent) => {
+      if (e.target === dialog) close()
+   }
+   const close = () => {
+      dialog.classList.remove("srr-open")
+      body.replaceChildren()
+      document.removeEventListener("keydown", onKey, true)
+      dialog.removeEventListener("mousedown", onDown)
+      closeImgProxy = null
+      restore?.focus()
+   }
+   closeImgProxy = close
+
+   body.replaceChildren(imgProxyBody(close)) // editorInput focuses the field on attach
+   dialog.classList.add("srr-open")
+   document.addEventListener("keydown", onKey, true)
+   dialog.addEventListener("mousedown", onDown)
+}
+
+// The overflow / settings menu (toolbar ⋯ button, list-only): "Jump to a date"
+// (relocated off the toolbar — a lower-frequency navigation aid) and "Image
+// proxy…" (opens the centered settings dialog). Both rows are navigable anchors;
+// the proxy editing moved out of the menu into showImgProxyDialog's modal.
+export function showOverflowMenu(onJumpDate: () => void = () => {}): void {
    toggleDropdown(
       "srr-overflow-menu",
       (frag) => {
-         const label = divEl("srr-menu-label")
-         label.textContent = "Image proxy"
-         frag.append(
-            label,
-            imgProxyEditor(() => closeAllDropdowns()),
-         )
+         frag.append(createLink(JUMP_DATE, "Jump to a date…"), createLink(IMG_PROXY, "Image proxy…"))
       },
-      async () => {},
+      async (value) => {
+         if (value === JUMP_DATE) {
+            // Open the native picker while the click's transient activation is
+            // still live (showPicker needs it), then close the menu.
+            onJumpDate()
+            closeAllDropdowns()
+         } else if (value === IMG_PROXY) {
+            showImgProxyDialog() // closes the menu itself, then opens the modal
+         }
+      },
    )
 }
 
@@ -382,26 +435,6 @@ export function dateJump(input: HTMLInputElement, onPick: (ts: number) => void):
    onPick(new Date(y, m - 1, d).getTime() / 1000)
 }
 
-// The "Unseen only" toggle row pinned atop the channel menu (list host only):
-// a checkable menu item carrying the UNSEEN_TOGGLE sentinel + a checkbox
-// indicator reflecting nav.isUnreadOnly(). Lives here, in the filter selector,
-// because unseen-only is a view modifier on the tag filter — it moved off the
-// toolbar. role="menuitemcheckbox" + aria-checked (NOT aria-pressed, which is a
-// button state ARIA doesn't define for menu items) so the on/off state the old
-// toolbar button exposed stays announced by assistive tech — the visual accent
-// + the aria-hidden checkbox alone wouldn't reach a screen reader.
-function unseenToggleRow(): HTMLAnchorElement {
-   const on = nav.isUnreadOnly()
-   const row = createLink(UNSEEN_TOGGLE, "Unseen only", on ? "srr-unseen-row srr-unseen-on" : "srr-unseen-row")
-   const mark = document.createElement("span")
-   mark.className = "srr-check"
-   mark.setAttribute("aria-hidden", "true")
-   row.prepend(mark)
-   row.setAttribute("role", "menuitemcheckbox")
-   row.setAttribute("aria-checked", String(on))
-   return row
-}
-
 export function showChannelMenu(
    currentTag: string,
    guard: (fn: () => Promise<IShowFeed>) => void,
@@ -414,13 +447,8 @@ export function showChannelMenu(
    const buildContent = (frag: DocumentFragment) => {
       const unreadRows: [HTMLAnchorElement, IChannel][] = []
       const headerRows: [HTMLAnchorElement, IChannel[]][] = []
-      // Filter selector — tags/channels/★ Saved/[ALL] — topped (on the list) by
-      // the "Unseen only" view-modifier toggle. The image-proxy, time-jump and
-      // date controls live elsewhere on the toolbar (overflow menu / jump button).
-      if (host.viewIsList() && host.toggleUnseenOnly) {
-         frag.appendChild(unseenToggleRow())
-         frag.appendChild(divEl("srr-tag-sep"))
-      }
+      // Filter selector — [ALL] / ★ Saved / tags / channels. (Unseen-only moved to
+      // a toolbar toggle; the image-proxy + date-jump live in the ⋯ overflow menu.)
       frag.appendChild(createLink("", "[ALL]", cls("", "")))
       // "★ Saved" — the per-article collection, surfaced once there's something
       // in it. Same selection path as a channel/tag (host.selectFilter on the
@@ -466,19 +494,7 @@ export function showChannelMenu(
       void fillUnread(unreadRows, headerRows)
    }
 
-   toggleDropdown("srr-channel-menu", buildContent, async (value, e) => {
-      // The "Unseen only" toggle: stay open and re-render in place. stopPropagation
-      // keeps app.ts's window "any click closes dropdowns" handler from firing;
-      // the host flips the mode + rebuilds the list, and fillMenu refreshes this
-      // menu (the toggle's own state + the unseen-only row/tag hiding in fillUnread).
-      if (value === UNSEEN_TOGGLE) {
-         e.stopPropagation()
-         host.toggleUnseenOnly?.()
-         const menu = document.getElementById("srr-channel-menu")!
-         fillMenu(menu, buildContent)
-         menu.querySelector<HTMLElement>(`a[data-value="${UNSEEN_TOGGLE}"]`)?.focus()
-         return
-      }
+   toggleDropdown("srr-channel-menu", buildContent, async (value) => {
       // A channel/tag/[ALL]/★ Saved selection: on the list surface, re-filter the
       // list (the host shows that filter's feed); in the reader, resume that
       // filter at its current position. (switchFilter maps ""→[ALL] and ~saved.)
