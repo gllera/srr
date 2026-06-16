@@ -161,6 +161,14 @@ describe("makeIdxPack.parse", () => {
       const buf = buildBuf({ entries: [e(1), e(2)] })
       expect(() => makeIdxPack(buf, 0, 7)).toThrow(/short body/)
    })
+
+   it("ignores trailing entries past packSize (a stale SW cache may hold a longer body)", () => {
+      // The body carries 5 entries but db.gz says this pack holds 3 — parsing
+      // must stop at packSize so the ghost rows don't skew chanIds/bounds/counts.
+      const buf = buildBuf({ entries: [e(1), e(2), e(3), e(4), e(5)] })
+      const pack = makeIdxPack(buf, 0, 3).parse()
+      expect(Array.from(pack.chanIds)).toEqual([1, 2, 3])
+   })
 })
 
 describe("makeIdxPack.findLeft", () => {
@@ -276,6 +284,14 @@ describe("makeIdxPack.findChronForBlocks", () => {
 
    it("returns one past the pack's end when nothing qualifies", () => {
       expect(makeIdxPack(buf, 2, 4).findChronForBlocks(21)).toBe(base + 4)
+   })
+
+   it("clamps a tsBlocks before the pack's first entry to the base chron", () => {
+      // ts earlier than the archive start (the date picker is clamped to
+      // first_fetched's *day*, but a ts earlier in that same day is negative):
+      // every entry qualifies, so the leftmost is the pack base.
+      expect(makeIdxPack(buf, 2, 4).findChronForBlocks(-5)).toBe(base)
+      expect(makeIdxPack(buf, 2, 4).findChronForBlocks(10)).toBe(base) // exactly the first entry
    })
 })
 

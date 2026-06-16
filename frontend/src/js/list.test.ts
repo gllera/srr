@@ -530,4 +530,50 @@ describe("list", () => {
       expect($current()).toEqual([landed])
       expect(nav.select).toHaveBeenCalledWith(landed, expect.anything())
    })
+
+   it("moveSelection returns -1 on an empty list (no rows rendered)", async () => {
+      setIndex(0) // total_art 0 → emptyState, rowsEl never created
+      await list.render()
+      expect(await list.moveSelection("older")).toBe(-1)
+      expect(await list.moveSelection("newer")).toBe(-1)
+   })
+
+   it("on a single-row list, the first press establishes the cursor and the next bumps the edge", async () => {
+      setIndex(1)
+      await list.render()
+      expect($chrons()).toEqual([0])
+      expect(await list.moveSelection("older")).toBe(0) // no cursor → establish on the only row
+      expect($current()).toEqual([0])
+      // Genuinely exhausted both ways → no neighbor → bump + no move.
+      expect(await list.moveSelection("older")).toBe(-1)
+      expect($rows()[0].classList.contains("srr-row-bump-down")).toBe(true)
+   })
+
+   // ── Anchor re-seed + divider integrity ─────────────────────────────────────
+   it("re-seeds to the newest match when the anchor lies below the filter's oldest article", async () => {
+      // 0,1 = ch2 (excluded); 2,3 = ch1. Anchor at 0 (a ch2 row): feedLeft(0)
+      // under the ch1 filter is -1, so render re-seeds to the newest ch1 (3) and
+      // opens newest-first there instead of anchoring on the non-matching row.
+      setIndex(4, (c) => (c < 2 ? 2 : 1))
+      nav.filter.channels = new Map([[1, 0]])
+      nav.filter.active = true
+      nav._setPos(-1)
+      nav._setListAnchor(0)
+      await list.render()
+      expect($chrons()).toEqual([3, 2]) // ch1 only, newest-first; never anchored on ch2's 0/1
+   })
+
+   it("re-labels day dividers when un-saving removes the last row of a day stratum", async () => {
+      // dayLabel buckets 2 chrons/day: saved [0,2,4] → rows 4(D2), 2(D1), 0(D0),
+      // one per day → three dividers. Un-saving 2 must drop its orphaned D1.
+      setIndex(6)
+      nav._setSaved([0, 2, 4])
+      nav.filter.saved = true
+      await list.render()
+      const labels = () => Array.from(document.querySelectorAll(".srr-day-divider")).map((d) => d.textContent)
+      expect(labels()).toEqual(["D2", "D1", "D0"])
+      tapStar(2)
+      expect($chrons()).toEqual([4, 0])
+      expect(labels()).toEqual(["D2", "D0"]) // D1 dropped with its only row
+   })
 })
