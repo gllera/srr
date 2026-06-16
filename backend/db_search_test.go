@@ -26,6 +26,10 @@ func TestFoldSearchText(t *testing.T) {
 		{"γλώσσας", "γλωσσασ"},   // …and literal final sigma maps ς→σ
 		{"日本語のニュース", "日本語のニュース"},
 		{"...a...", "a"},
+		{"ﬁle", "ﬁle"},         // NFD (not NFKD) leaves the ﬁ ligature intact
+		{"foo😀bar", "foo bar"}, // emoji is neither letter nor number → separator
+		{"́abc", "abc"},        // an orphan combining mark (Mn) is stripped
+		{"٤٢", "٤٢"},           // Arabic-Indic digits are numbers, kept as a word
 	} {
 		if got := foldSearchText(tc.in); got != tc.want {
 			t.Errorf("foldSearchText(%q) = %q, want %q", tc.in, got, tc.want)

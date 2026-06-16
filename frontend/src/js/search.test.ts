@@ -94,6 +94,10 @@ describe("fold", () => {
       ["γλώσσας", "γλωσσασ"],
       ["日本語のニュース", "日本語のニュース"],
       ["...a...", "a"],
+      ["ﬁle", "ﬁle"], // NFD (not NFKD) leaves the ﬁ ligature intact
+      ["foo😀bar", "foo bar"], // emoji is neither letter nor number → a separator
+      ["́abc", "abc"], // an orphan combining mark (Mn) is stripped
+      ["٤٢", "٤٢"], // Arabic-Indic digits are \p{N}, kept as a word
    ])("fold(%j) = %j", (input, want) => {
       expect(search.fold(input)).toBe(want)
    })
