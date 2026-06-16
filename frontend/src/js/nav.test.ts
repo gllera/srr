@@ -1788,3 +1788,215 @@ describe("search filter mode (q:<query>)", () => {
       await inflight.catch(() => {})
    })
 })
+
+// ── Edge cases: seek / listAnchor / peek / fromHash foreign+malformed /
+// cycle / saved-set parse / pruneSeen / tombstone / all-caught-up ────────────
+const SEEN = "srr-seen"
+const seedSeen = (m: Record<string, number>) => localStorage.setItem(SEEN, JSON.stringify(m))
+
+describe("seek (date-jump cursor)", () => {
+   it("returns -1 and clears the cursor on an empty store", async () => {
+      data.db.total_art = 0
+      expect(await nav.seek(5)).toBe(-1)
+      expect(nav.currentChron()).toBe(-1)
+   })
+
+   it("clamps an out-of-range idx forward to the last article", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 1 }, { chanId: 1 }])
+      expect(await nav.seek(999)).toBe(2)
+      expect(nav.currentChron()).toBe(2)
+   })
+
+   it("falls back to the newest match when nothing at-or-after the target matches the filter", async () => {
+      // ch1 only at chron 0; seeking past it finds nothing forward, so it snaps
+      // back to the last (only) ch1 instead of leaving the cursor at -1.
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 2 }])
+      nav.filter.set(["1"])
+      expect(await nav.seek(1)).toBe(0)
+      expect(nav.currentChron()).toBe(0)
+   })
+})
+
+describe("listAnchor", () => {
+   it("returns the live reader position when it still matches the active filter", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
+      await nav.goTo(1) // pos=1, ch2
+      expect(await nav.listAnchor()).toBe(1)
+   })
+
+   it("returns -1 (newest-first) for [ALL] with no live position", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
+      nav.select(-1, -1) // no reader article
+      nav.filter.clear()
+      expect(await nav.listAnchor()).toBe(-1)
+   })
+
+   it("returns -1 for ★ Saved (newest-first), never a resume", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 1 }, { chanId: 1 }])
+      localStorage.setItem("srr-saved", JSON.stringify([1]))
+      nav.select(-1, -1)
+      nav.filter.set([nav.SAVED_TOKEN])
+      expect(await nav.listAnchor()).toBe(-1)
+   })
+
+   it("resumes a single-channel filter at its remembered seen position", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 1 }, { chanId: 1 }])
+      seedSeen({ "chan:1": 1 })
+      nav.select(-1, -1)
+      nav.filter.set(["1"])
+      expect(await nav.listAnchor()).toBe(1)
+   })
+
+   it("anchors a never-opened channel at its OLDEST matching article (start of backlog)", async () => {
+      // ch9 first appears at chron 1; with no seen record the list opens there,
+      // not at the newest, so the unread backlog reads downward from the top.
+      setupIndex([{ chanId: 1 }, { chanId: 9 }, { chanId: 9 }])
+      nav.select(-1, -1)
+      nav.filter.set(["9"])
+      expect(await nav.listAnchor()).toBe(1)
+   })
+
+   it("drops a now-unread-filtered resume to the oldest unread (unseen-only raised the bound past it)", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 1 }, { chanId: 1 }])
+      seedSeen({ "chan:1": 1 }) // seen through chron 1 → unread is chron 2
+      nav.setUnreadOnly(true)
+      try {
+         nav.select(-1, -1)
+         nav.filter.set(["1"]) // bound raised to max(0, seen+1)=2
+         expect(await nav.listAnchor()).toBe(2) // oldest unread, not the seen resume (1)
+      } finally {
+         nav.setUnreadOnly(false)
+      }
+   })
+})
+
+describe("peek", () => {
+   it("returns null at the right edge (newest article)", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 1 }])
+      await nav.goTo(1)
+      expect(await nav.peek("right")).toBeNull()
+   })
+
+   it("returns null at the left edge (oldest article)", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 1 }])
+      await nav.goTo(0)
+      expect(await nav.peek("left")).toBeNull()
+   })
+
+   it("peeks the adjacent SAVED neighbor (respects saved mode, no idx walk)", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 1 }, { chanId: 1 }])
+      localStorage.setItem("srr-saved", JSON.stringify([0, 2]))
+      nav.filter.set([nav.SAVED_TOKEN])
+      await nav.last() // pos = 2 (newest saved)
+      const p = await nav.peek("left")
+      expect(p?.chron).toBe(0) // skips the unsaved chron 1
+   })
+})
+
+describe("fromHash — foreign + malformed hashes", () => {
+   it("clamps a foreign non-numeric hash (no !, e.g. an OAuth fragment) to the last article", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
+      const r = await nav.fromHash("access_token=abc.def&state=xyz")
+      expect(r.article.s).toBe(2) // Number(...) = NaN → clamp to last
+   })
+
+   it("passes a malformed %-escape token through verbatim instead of crashing", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 2 }])
+      // lone "%" makes decodeURIComponent throw; the raw token resolves to no
+      // channel → [ALL], and navigation still succeeds at the given position.
+      const r = await nav.fromHash("0!%")
+      expect(r.article.s).toBe(1)
+      expect(nav.currentTokens()).toEqual([]) // "%" matched nothing → cleared to [ALL]
+   })
+})
+
+describe("cycleOriginKey / cycleFilter edges", () => {
+   it("resolves a tagged single-channel filter to its tag (so the cycle finds it)", () => {
+      setupIndex([{ chanId: 5 }])
+      data.db.channels[5].tag = "news"
+      nav.filter.set(["5"])
+      expect(nav.cycleOriginKey()).toBe("news")
+   })
+
+   it("returns the id for an untagged single-channel filter", () => {
+      setupIndex([{ chanId: 5 }])
+      nav.filter.set(["5"])
+      expect(nav.cycleOriginKey()).toBe("5")
+   })
+
+   it("cycles [ALL] → ★ Saved when something is saved (saved joins the rotation)", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 1 }])
+      localStorage.setItem("srr-saved", JSON.stringify([0]))
+      nav.filter.clear() // [ALL]
+      data.groupChannelsByTag.mockReturnValueOnce({ tagged: new Map(), sortedTags: [], untagged: [] })
+      await nav.cycleFilter(1) // entries = ["", "~saved"] → forward from "" lands on saved
+      expect(nav.filter.saved).toBe(true)
+   })
+
+   it("a degenerate single-entry rotation ([ALL] only) stays on [ALL]", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 1 }])
+      nav.filter.clear()
+      data.groupChannelsByTag.mockReturnValue({ tagged: new Map(), sortedTags: [], untagged: [] })
+      await nav.cycleFilter(1) // entries = [""] → wraps to itself
+      expect(nav.getCurrentFilterKey()).toBe("")
+      data.groupChannelsByTag.mockReturnValue({ tagged: new Map(), sortedTags: [], untagged: [] })
+   })
+})
+
+describe("readSavedSet — corrupt localStorage", () => {
+   it("filters non-integers and tolerates a non-array / invalid JSON without throwing", () => {
+      localStorage.setItem("srr-saved", JSON.stringify([1, "x", 2.5, null, 3]))
+      expect(nav.isSaved(1)).toBe(true)
+      expect(nav.isSaved(3)).toBe(true)
+      expect(nav.isSaved(2)).toBe(false) // 2.5 is not an integer
+      expect(nav.savedCount()).toBe(2)
+      localStorage.setItem("srr-saved", "{}") // non-array
+      expect(nav.savedCount()).toBe(0)
+      localStorage.setItem("srr-saved", "not json")
+      expect(nav.savedCount()).toBe(0)
+   })
+})
+
+describe("pruneSeen — keep live channels (incl. id 0), drop deleted", () => {
+   it("keeps a chan:0 key when channel 0 exists and drops a deleted channel's key", () => {
+      setupIndex([{ chanId: 0 }, { chanId: 0 }]) // channel id 0 is valid
+      seedSeen({ "chan:0": 1, "chan:9": 0, "tag:old": 3 })
+      nav.pruneSeen()
+      const seen = JSON.parse(localStorage.getItem(SEEN)!)
+      expect(seen).toEqual({ "chan:0": 1 }) // chan:9 (deleted) and the legacy tag: key gone
+   })
+
+   it("does not throw on a corrupt seen blob", () => {
+      localStorage.setItem(SEEN, "not json")
+      expect(() => nav.pruneSeen()).not.toThrow()
+   })
+})
+
+describe("saved navigation survives a deleted channel (tombstone)", () => {
+   it("walks and counts a saved chron whose channel was removed from db.gz", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 2 }, { chanId: 3 }])
+      localStorage.setItem("srr-saved", JSON.stringify([0, 1, 2]))
+      delete data.db.channels[2] // channel 2 deleted; its saved article (chron 1) stays in packs
+      nav.filter.set([nav.SAVED_TOKEN])
+      const shown = await nav.fromHash("1!~saved") // open the tombstoned saved article
+      expect(nav.currentChron()).toBe(1)
+      expect(shown.has_left).toBe(true) // chron 0 still to the left
+      expect(shown.has_right).toBe(true) // chron 2 still to the right
+   })
+})
+
+describe("unseen-only — fully-caught-up filter yields no match", () => {
+   it("last() returns the placeholder when every article is already seen", async () => {
+      setupIndex([{ chanId: 1 }, { chanId: 1 }, { chanId: 1 }])
+      seedSeen({ "chan:1": 2 }) // seen through the newest → nothing unread
+      nav.setUnreadOnly(true)
+      try {
+         const shown = await nav.last("1") // bound raised to 3 (== total_art) → no match
+         expect(shown.placeholder).toBe(true)
+         expect(shown.has_left).toBe(false)
+         expect(shown.has_right).toBe(false)
+      } finally {
+         nav.setUnreadOnly(false)
+      }
+   })
+})

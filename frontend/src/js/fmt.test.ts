@@ -147,6 +147,63 @@ describe("sanitizeHtml", () => {
    })
 })
 
+// Defense-in-depth edge/XSS cases the basic suite above doesn't pin. These run
+// against the root pack base (localhost:3000/); the off-base bounds drop needs a
+// SUBPATH base and lives in fmt.bounds.test.ts.
+describe("sanitizeHtml security edge cases", () => {
+   const attr = (html: string, sel: string, name: string): string | null => {
+      const t = document.createElement("template")
+      t.innerHTML = sanitizeHtml(html)
+      return t.content.querySelector(sel)!.getAttribute(name)
+   }
+
+   it("removes <svg> (and its <script> child) — foreign-content surface", () => {
+      // bluemonday strips svg server-side; mirror it. The <script> inside must go
+      // with the subtree, not survive as a detached executable.
+      expect(sanitizeHtml("<svg><script>alert(1)</script></svg><p>ok</p>")).toBe("<p>ok</p>")
+   })
+
+   it("removes <math> (MathML foreign-content surface)", () => {
+      expect(sanitizeHtml("<math><mtext>x</mtext></math><p>ok</p>")).toBe("<p>ok</p>")
+   })
+
+   it("strips srcset from <img> (an unbounded off-origin URL channel the single-src bounds check can't see)", () => {
+      const out = sanitizeHtml(
+         '<img src="https://cdn.example/x.jpg" srcset="//evil.example/a 1x, //evil.example/b 2x">',
+      )
+      expect(out).not.toContain("srcset")
+      expect(out).not.toContain("evil.example")
+   })
+
+   it("neutralizes a tab-obfuscated javascript: href (URL parse strips the tab → off-base → dropped)", () => {
+      // URL_DENY doesn't match a keyword with an interior tab; the safety comes
+      // from the relative-resolution fallback: new URL() strips the tab, reveals
+      // the javascript: scheme, which fails the pack-base bounds check → dropped.
+      expect(attr('<a href="jaVa\tscript:alert(1)">x</a>', "a", "href")).toBeNull()
+   })
+
+   it("strips a mixed-case JaVaScRiPt: href (URL_DENY is case-insensitive)", () => {
+      expect(sanitizeHtml('<a href="JaVaScRiPt:alert(1)">x</a>')).not.toContain("alert")
+   })
+
+   it("leaves a javascript: anchor inert: no href, no onclick, but still decorated with rel", () => {
+      // strip-then-decorate order must not produce a half-sanitized executable anchor.
+      const out = sanitizeHtml('<a href="javascript:alert(1)" onclick="x()">link</a>')
+      expect(out).not.toContain("javascript")
+      expect(out).not.toContain("onclick")
+      expect(out).toContain('rel="noopener noreferrer"')
+      expect(out).toContain("link")
+   })
+
+   it("does NOT route a relative src through the image proxy even when a proxy is set", () => {
+      // A relative ref is a self-hosted asset key — it resolves against the pack
+      // base and bypasses the proxy (proxying it would both break it and is
+      // pointless); only EXTERNAL http(s) refs take the proxy path.
+      setImgProxy("https://p.example/?u=")
+      expect(attr('<img src="assets/ab/cd.jpg">', "img", "src")).toBe("http://localhost:3000/assets/ab/cd.jpg")
+   })
+})
+
 describe("collapseBrokenMedia", () => {
    // The error event doesn't bubble; production registers the handler on the
    // content container with capture: true, which still sees descendant errors.
@@ -364,6 +421,21 @@ describe("extractImageUrls", () => {
       t.innerHTML = sanitizeHtml(`<img src="${raw}">`)
       const img = t.content.querySelector("img")!
       expect(img.getAttribute("src")).toBe(imgProxy(raw, getImgProxy()))
+   })
+
+   it("ignores an <img> with only srcset (no src) — nothing to prefetch", () => {
+      expect(extractImageUrls('<img srcset="https://cdn.example/a 1x, https://cdn.example/b 2x">')).toEqual([])
+   })
+
+   it("prefers the real src when a data-src placeholder precedes it (greedy match lands on the last src=)", () => {
+      const html = '<img data-src="https://lazy.example/placeholder.gif" src="https://cdn.example/real.jpg">'
+      expect(extractImageUrls(html)).toEqual(["https://cdn.example/real.jpg"])
+   })
+
+   it("scrapes a lone data-src as a fallback (documented: \\bsrc matches data-src; harmless for prefetch)", () => {
+      // Pins current behavior — the prefetch list is best-effort warming, so
+      // warming a data-src lazy URL when there's no real src is acceptable.
+      expect(extractImageUrls('<img data-src="https://lazy.example/x.jpg">')).toEqual(["https://lazy.example/x.jpg"])
    })
 })
 
