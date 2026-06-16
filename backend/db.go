@@ -19,13 +19,18 @@ const (
 	dbLockKey = ".locked"
 	// idxPackSize is the idx split threshold: entries per finalized pack.
 	idxPackSize = 50000
-	// idxChanSlots is the channel-id ceiling baked into the format: chan_id
-	// is one byte and the idx header reserves exactly this many chanCount slots.
-	idxChanSlots = 256
-	// idxStateSize is the 3 leading uint32 LE state fields of the idx header
+	// chanIDCeiling is the channel-id ceiling: chan_id is a uint16 in each idx
+	// entry, so ids run [0, chanIDCeiling).
+	chanIDCeiling = 65536
+	// idxStateSize is the 3 leading uint32 LE idx-header state fields
 	// (fetchedAt/packId/packOff bases).
-	idxStateSize  = 3 * 4
-	idxHeaderSize = idxStateSize + idxChanSlots*4
+	idxStateSize = 3 * 4
+	// idxHeaderPrefix is the fixed idx-header prefix: the 3 state uint32s plus
+	// the numSlots uint32. The variable cumulative-count array (numSlots × u32)
+	// follows it.
+	idxHeaderPrefix = idxStateSize + 4
+	// idxEntrySize is the per-entry idx byte width: chan_id:u16 LE + packed:u8.
+	idxEntrySize = 3
 	// fetchedAtBlock is the idx timestamp granularity in seconds (8h blocks):
 	// fetched_at is stored as unix ÷ this (× this on read).
 	fetchedAtBlock = 28800
@@ -185,13 +190,12 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 	}
 
 	for id, ch := range db.core.Channels {
-		// The idx format reserves exactly idxChanSlots chanCount slots and
-		// writeIdxHeader indexes by id, so an out-of-range id (hand-edited /
-		// migrated db.gz) would panic with "slice bounds out of range"
-		// mid-fetch. Reject it here with a clear message instead.
-		if id < 0 || id >= idxChanSlots {
+		// chan_id is a uint16 in each idx entry, so ids run [0, chanIDCeiling).
+		// An out-of-range id (hand-edited / migrated db.gz) would overflow the
+		// entry encoding mid-fetch. Reject it here with a clear message instead.
+		if id < 0 || id >= chanIDCeiling {
 			db.Close(ctx)
-			return nil, fmt.Errorf("channel id %d in %s out of range [0, %d]", id, dbFileKey, idxChanSlots-1)
+			return nil, fmt.Errorf("channel id %d in %s out of range [0, %d]", id, dbFileKey, chanIDCeiling-1)
 		}
 		ch.id = id
 	}
@@ -243,7 +247,7 @@ func (o *DB) AddChannel(c *Channel) error {
 	if o.core.Channels == nil {
 		o.core.Channels = map[int]*Channel{}
 	}
-	for id := 0; id < idxChanSlots; id++ {
+	for id := 0; id < chanIDCeiling; id++ {
 		if _, ok := o.core.Channels[id]; !ok {
 			c.id = id
 			c.AddIdx = o.core.TotalArticles
@@ -251,7 +255,7 @@ func (o *DB) AddChannel(c *Channel) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("maximum number of channels reached (%d)", idxChanSlots)
+	return fmt.Errorf("maximum number of channels reached (%d)", chanIDCeiling)
 }
 
 func (o *DB) RemoveChannel(id int) {
@@ -259,8 +263,8 @@ func (o *DB) RemoveChannel(id int) {
 }
 
 func (o *DB) ChannelByID(id int) (*Channel, error) {
-	if id < 0 || id >= idxChanSlots {
-		return nil, fmt.Errorf("channel id must be in [0, %d]", idxChanSlots-1)
+	if id < 0 || id >= chanIDCeiling {
+		return nil, fmt.Errorf("channel id must be in [0, %d]", chanIDCeiling-1)
 	}
 	ch := o.core.Channels[id]
 	if ch == nil {

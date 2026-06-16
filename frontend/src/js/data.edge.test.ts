@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
-import { IDX_HEADER_SIZE, FETCHED_AT_BLOCK } from "./format.gen"
+import { IDX_ENTRY_SIZE, IDX_HEADER_PREFIX, IDX_STATE_SIZE, FETCHED_AT_BLOCK } from "./format.gen"
 
 // data.ts has a top-level db.gz fetch and private state set only by init(), so
 // its composition edges (clamp, empty store, the first_fetched NaN guard, the
@@ -16,24 +16,30 @@ interface Entry {
    deltaFetchedAt?: number
 }
 
-// Build one idx pack buffer (header + 2-byte entries), mirroring the backend
-// writer and idx.test.ts's buildBuf.
+// Build one idx pack buffer (variable header + 3-byte entries: chan_id u16 LE +
+// packed u8), mirroring the backend writer and idx.test.ts's buildBuf. These
+// edge cases carry no header chanCounts, so numSlots = 0 (16-byte prefix only).
 function packBuf(entries: Entry[], opts: { fetchedAtBase?: number } = {}): ArrayBuffer {
-   const buf = new ArrayBuffer(IDX_HEADER_SIZE + entries.length * 2)
+   const buf = new ArrayBuffer(IDX_HEADER_PREFIX + entries.length * IDX_ENTRY_SIZE)
    const view = new DataView(buf)
    view.setUint32(0, opts.fetchedAtBase ?? 0, true)
+   view.setUint32(IDX_STATE_SIZE, 0, true) // numSlots = 0
    const bytes = new Uint8Array(buf)
    for (let i = 0; i < entries.length; i++) {
       const e = entries[i]
-      bytes[IDX_HEADER_SIZE + i * 2] = e.chanId
-      bytes[IDX_HEADER_SIZE + i * 2 + 1] = ((e.deltaPackId ?? 0) << 7) | ((e.deltaFetchedAt ?? 0) & 0x7f)
+      const off = IDX_HEADER_PREFIX + i * IDX_ENTRY_SIZE
+      bytes[off] = e.chanId & 0xff
+      bytes[off + 1] = (e.chanId >> 8) & 0xff
+      bytes[off + 2] = ((e.deltaPackId ?? 0) << 7) | ((e.deltaFetchedAt ?? 0) & 0x7f)
    }
    return buf
 }
 
-// N zero-filled 1036-byte headers concatenated — a minimal idx/h<N>.gz summary.
+// N zero-filled numSlots=0 headers (16-byte prefix each) concatenated — a
+// minimal idx/h<N>.gz summary. parseIdxHeaders reads numSlots=0 from each
+// prefix and advances by IDX_HEADER_PREFIX.
 function summaryBuf(n: number): ArrayBuffer {
-   return new ArrayBuffer(IDX_HEADER_SIZE * n)
+   return new ArrayBuffer(IDX_HEADER_PREFIX * n)
 }
 
 async function gzip(input: ArrayBuffer | string): Promise<Uint8Array> {

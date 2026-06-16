@@ -1,21 +1,31 @@
-import { CHAN_ID_SLOTS, DELTA_FETCHED_MAX, IDX_HEADER_SIZE, IDX_PACK_SIZE, IDX_STATE_SIZE } from "./format.gen"
+import { DELTA_FETCHED_MAX, IDX_ENTRY_SIZE, IDX_HEADER_PREFIX, IDX_PACK_SIZE } from "./format.gen"
 
 export { IDX_PACK_SIZE }
 
-// The decoded 1036-byte idx pack header: state bases plus the cumulative
-// per-channel counts of everything BEFORE the pack. Available for every pack
-// without entry parsing — from the pack's own bytes at construction, or from
-// the idx/h<N>.gz summary for packs not yet fetched.
+// The decoded idx pack header: state bases, the numSlots count, plus the
+// cumulative per-channel counts of everything BEFORE the pack. The count array
+// is variable-length — dense up to the high-water channel id when the pack was
+// written (numSlots entries). Available for every pack without entry parsing —
+// from the pack's own bytes at construction, or from the idx/h<N>.gz summary
+// for packs not yet fetched.
 export interface IdxHeader {
    fetchedAtBase: number
    packIdBase: number
    packOffBase: number
+   numSlots: number
    chanCounts: Uint32Array
+}
+
+// chanCounts/ownChanCounts are sized to the pack's numSlots (dense up to the
+// high-water id when the pack was written). A channel added later is absent
+// → its count is 0.
+export function countAt(arr: Uint32Array, id: number): number {
+   return id < arr.length ? arr[id] : 0
 }
 
 export interface IdxPack {
    header: IdxHeader
-   chanIds: Uint8Array
+   chanIds: Uint16Array
    fetchedAts: Uint16Array
    ownChanCounts: Uint32Array
    bounds: { packId: number; startChron: number }[]
@@ -27,24 +37,38 @@ export interface IdxPack {
 }
 
 function parseIdxHeader(buf: ArrayBuffer, byteOff: number): IdxHeader {
-   const h = new Uint32Array(buf, byteOff, 3)
+   const h = new Uint32Array(buf, byteOff, 4)
+   const numSlots = h[3]
    return {
       fetchedAtBase: h[0],
       packIdBase: h[1],
       packOffBase: h[2],
-      // Copy out so the source buffer can be GC'd independently.
-      chanCounts: new Uint32Array(new Uint32Array(buf, byteOff + IDX_STATE_SIZE, CHAN_ID_SLOTS)),
+      numSlots,
+      // Copy out so the source buffer can be GC'd independently. The count
+      // array is variable-length (numSlots entries).
+      chanCounts: new Uint32Array(new Uint32Array(buf, byteOff + IDX_HEADER_PREFIX, numSlots)),
    }
 }
 
 // Decodes idx/h<N>.gz: the verbatim concatenation of the finalized packs'
-// 1036-byte headers. Refuses a size mismatch so a truncated body can't
-// silently zero the tail packs' counts.
+// variable-length headers. Each header's stride depends on its own numSlots,
+// so the walk reads numSlots from each prefix to advance; it must consume the
+// buffer exactly so a truncated body can't silently zero the tail packs' counts.
 export function parseIdxHeaders(buf: ArrayBuffer, count: number): IdxHeader[] {
-   if (buf.byteLength !== count * IDX_HEADER_SIZE) {
-      throw new Error(`idx summary: got ${buf.byteLength}B, want ${count * IDX_HEADER_SIZE}B`)
+   const out: IdxHeader[] = []
+   let off = 0
+   for (let k = 0; k < count; k++) {
+      if (off + IDX_HEADER_PREFIX > buf.byteLength) {
+         throw new Error(`idx summary: truncated header ${k}/${count}`)
+      }
+      const h = parseIdxHeader(buf, off)
+      out.push(h)
+      off += IDX_HEADER_PREFIX + h.numSlots * 4
    }
-   return Array.from({ length: count }, (_, k) => parseIdxHeader(buf, k * IDX_HEADER_SIZE))
+   if (off !== buf.byteLength) {
+      throw new Error(`idx summary: ${buf.byteLength}B, consumed ${off}B for ${count} headers`)
+   }
+   return out
 }
 
 // lowerBound is the one binary-search primitive of the reader (the Go side's
@@ -72,20 +96,26 @@ export function findPackForBlocks(headers: IdxHeader[], tsBlocks: number): numbe
    return lowerBound(headers.length - 1, (i) => headers[i + 1].fetchedAtBase < tsBlocks)
 }
 
-// Channel IDs are uint8 (0..255), so a CHAN_ID_SLOTS-entry typed array beats
-// Map.get in the hot scan loops: no hashing, predictable cache locality, and
-// the JIT can keep the loaded value in a register. -1 sentinel = "not in filter".
-function channelsToLookup(channels: Map<number, number>): Int32Array {
-   const arr = new Int32Array(CHAN_ID_SLOTS).fill(-1)
+// A `slots`-entry typed array beats Map.get in the hot scan loops: no hashing,
+// predictable cache locality, and the JIT can keep the loaded value in a
+// register. -1 sentinel = "not in filter". `slots` is the store high-water+1
+// (threaded from data.ts), so it is sized to the actual channel count rather
+// than the format ceiling. data.ts hoists the build out of the per-pack loop.
+function channelsToLookup(channels: Map<number, number>, slots: number): Int32Array {
+   const arr = new Int32Array(slots).fill(-1)
    for (const [chanId, addIdx] of channels) arr[chanId] = addIdx
    return arr
 }
 
-export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: number): IdxPack {
+export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: number, slots: number): IdxPack {
+   // header is decoded eagerly below so its numSlots is available before the
+   // short-body guard (the header itself is variable-length).
+   const header = parseIdxHeader(buf, 0)
+   const headerEnd = IDX_HEADER_PREFIX + header.numSlots * 4
    // Refuse a short body so the caller can evict + retry. Silently parsing
    // fewer bytes than packSize claims leaves the chanIds tail at default 0,
    // which findRight skips while showFeed still counts those slots.
-   const expected = IDX_HEADER_SIZE + packSize * 2
+   const expected = headerEnd + packSize * IDX_ENTRY_SIZE
    if (buf.byteLength < expected) {
       throw new Error(`idx pack ${packIndex}: short body, got ${buf.byteLength}B, want ${expected}B`)
    }
@@ -93,15 +123,15 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
    const baseChron = packIndex * IDX_PACK_SIZE
    function hasCandidate(channels: Map<number, number>, packEnd: number): boolean {
       for (const [chanId, addIdx] of channels) {
-         if (pack.ownChanCounts[chanId] > 0 && addIdx < packEnd) return true
+         if (countAt(pack.ownChanCounts, chanId) > 0 && addIdx < packEnd) return true
       }
       return false
    }
    const pack: IdxPack = {
       // Decoded eagerly: header-only consumers (countLeft cumulative counts,
       // pack-skip deltas, timestamp bases) must not force the entry parse.
-      header: parseIdxHeader(buf, 0),
-      chanIds: new Uint8Array(0),
+      header,
+      chanIds: new Uint16Array(0),
       ownChanCounts: new Uint32Array(0),
       fetchedAts: new Uint16Array(0),
       bounds: [],
@@ -110,7 +140,9 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
          let fetchedAt = pack.header.fetchedAtBase
          let packId = pack.header.packIdBase
          const packOff = pack.header.packOffBase
-         const ownChanCounts = new Uint32Array(CHAN_ID_SLOTS)
+         // Sized to the store high-water (slots), so ownChanCount(id) reads 0
+         // for an id beyond it. countAt guards the rare out-of-range read.
+         const ownChanCounts = new Uint32Array(slots)
          pack.ownChanCounts = ownChanCounts
 
          let lastPackId: number
@@ -121,7 +153,7 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
             lastPackId = -1
          }
 
-         const chanIds = new Uint8Array(packSize)
+         const chanIds = new Uint16Array(packSize)
          // fetchedAt is 8h-blocks since first_fetched. Uint16 caps at 65535
          // blocks ≈ 60y of calendar time from the first fetch — far past any
          // real horizon, so the wrap it would eventually cause is acceptable.
@@ -132,17 +164,17 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
          // Cap at packSize so an oversized body (e.g. stale SW cache with
          // entries from a newer total_art than db.gz claims) can't push ghost
          // rows into ownChanCounts/bounds and skew countLeft/findLeft/Right.
-         const limit = IDX_HEADER_SIZE + packSize * 2
-         for (let off = IDX_HEADER_SIZE; off < limit; off += 2) {
-            const chanId = bytes[off]
-            const packed = bytes[off + 1]
+         const limit = headerEnd + packSize * IDX_ENTRY_SIZE
+         for (let off = headerEnd; off < limit; off += IDX_ENTRY_SIZE) {
+            const chanId = bytes[off] | (bytes[off + 1] << 8)
+            const packed = bytes[off + 2]
             if (packed >> 7) packId++
             fetchedAt += packed & DELTA_FETCHED_MAX
 
-            const i = (off - IDX_HEADER_SIZE) >> 1
+            const i = (off - headerEnd) / IDX_ENTRY_SIZE
             chanIds[i] = chanId
             fetchedAts[i] = fetchedAt
-            ownChanCounts[chanId]++
+            if (chanId < slots) ownChanCounts[chanId]++
             if (packId !== lastPackId) {
                pack.bounds.push({ packId, startChron: baseChron + i })
                lastPackId = packId
@@ -155,11 +187,11 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
          pack.parse()
          let count = 0
          for (const [chanId, addIdx] of channels) {
-            if (addIdx < baseChron) count += pack.header.chanCounts[chanId]
+            if (addIdx < baseChron) count += countAt(pack.header.chanCounts, chanId)
          }
          const limit = Math.min(chronIdx - baseChron, packSize)
          if (limit <= 0) return count
-         const lookup = channelsToLookup(channels)
+         const lookup = channelsToLookup(channels, slots)
          const chanIds = pack.chanIds
          for (let i = 0; i < limit; i++) {
             const addIdx = lookup[chanIds[i]]
@@ -171,7 +203,7 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
          pack.parse()
          const packEnd = baseChron + packSize
          if (!hasCandidate(channels, packEnd)) return -1
-         const lookup = channelsToLookup(channels)
+         const lookup = channelsToLookup(channels, slots)
          const chanIds = pack.chanIds
          const hi = Math.min(chronFrom, packEnd - 1) - baseChron
          for (let i = hi; i >= 0; i--) {
@@ -184,7 +216,7 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
          pack.parse()
          const packEnd = baseChron + packSize
          if (!hasCandidate(channels, packEnd)) return -1
-         const lookup = channelsToLookup(channels)
+         const lookup = channelsToLookup(channels, slots)
          const chanIds = pack.chanIds
          const lo = Math.max(chronFrom, baseChron) - baseChron
          for (let i = lo; i < packSize; i++) {

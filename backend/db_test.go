@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -100,14 +101,18 @@ func readAllArticles(t *testing.T, dir string, c *DBCore) []*Item {
 			name = latestKey(c, "idx")
 		}
 		metaBytes := decompressGz(t, filepath.Join(dir, name))
-		for off := idxHeaderSize; off+2 <= len(metaBytes); off += 2 {
-			if metaBytes[off+1]>>7 != 0 {
+		// The idx header is variable-length: prefix + numSlots×4 counts.
+		numSlots := int(binary.LittleEndian.Uint32(metaBytes[idxStateSize:]))
+		headerSize := idxHeaderPrefix + numSlots*4
+		for off := headerSize; off+idxEntrySize <= len(metaBytes); off += idxEntrySize {
+			chanID := int(metaBytes[off]) | int(metaBytes[off+1])<<8
+			if metaBytes[off+2]>>7 != 0 {
 				packID++
 				packOffset = 0
 			} else {
 				packOffset++
 			}
-			refs = append(refs, idxRef{int(metaBytes[off]), packID, packOffset})
+			refs = append(refs, idxRef{chanID, packID, packOffset})
 		}
 	}
 

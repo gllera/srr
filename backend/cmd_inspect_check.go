@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"sort"
 )
@@ -162,16 +163,23 @@ func checkChanCountsContinuity(packs []*idxPack) int {
 	issues := 0
 	for i := 0; i < len(packs)-1; i++ {
 		cur, next := packs[i], packs[i+1]
-		for s := range idxChanSlots {
-			expected := cur.chanCounts[s] + cur.ownChanCounts[s]
-			if next.chanCounts[s] != expected {
+		// Check every slot either pack carries: a later-added channel widens
+		// next's header beyond cur's, and the bounded accessors read 0 for ids
+		// a pack doesn't reach.
+		slots := cur.numSlots
+		if next.numSlots > slots {
+			slots = next.numSlots
+		}
+		for s := range slots {
+			expected := cur.chanCount(s) + cur.ownChanCount(s)
+			if next.chanCount(s) != expected {
 				fmt.Printf("[chan-counts] pack %d sub %d: header=%d but pack %d ended with cumulative %d\n",
-					next.packIndex, s, next.chanCounts[s], cur.packIndex, expected)
+					next.packIndex, s, next.chanCount(s), cur.packIndex, expected)
 				issues++
 			}
 		}
 	}
-	for s := range idxChanSlots {
+	for s := range packs[0].numSlots {
 		if packs[0].chanCounts[s] != 0 {
 			fmt.Printf("[chan-counts] pack 0 sub %d: header=%d but expected 0 (no articles before first pack)\n",
 				s, packs[0].chanCounts[s])
@@ -235,10 +243,12 @@ func checkUnknownChanIDs(core *DBCore, packs []*idxPack) int {
 // checkIdxSummary verifies the published idx header summary
 // (idx/h<hdrs>.gz) against db.gz and the finalized packs: coverage may lag
 // numFinalized (SyncIdxSummary is warn-only in fetch — readers fall back to
-// eager idx loading) but never exceed it, and each 1036-byte chunk must
-// equal the verbatim header of the finalized pack it covers. Chunks are
-// decoded through parseIdxPack (packSize 0 = header only) so the summary is
-// read by the same parser as the packs themselves.
+// eager idx loading) but never exceed it, and each variable-length chunk must
+// equal the verbatim header of the finalized pack it covers. The summary is a
+// concatenation of headers whose stride varies with each pack's numSlots, so
+// the walk reads numSlots from each prefix to advance; it must consume the
+// buffer exactly. Chunks are decoded through parseIdxPack (packSize 0 = header
+// only) so the summary is read by the same parser as the packs themselves.
 func checkIdxSummary(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 	numFinalized := numFinalizedIdx(core.TotalArticles)
 	if core.HdrPacks > numFinalized {
@@ -259,19 +269,29 @@ func checkIdxSummary(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 		fmt.Printf("[idx-summary] %s missing or corrupt: %v\n", key, err)
 		return 1
 	}
-	if len(buf) != core.HdrPacks*idxHeaderSize {
-		fmt.Printf("[idx-summary] %s has %d bytes but hdrs=%d expects %d\n",
-			key, len(buf), core.HdrPacks, core.HdrPacks*idxHeaderSize)
-		return 1
-	}
 	issues := 0
+	off := 0
 	for k := range core.HdrPacks {
-		hdr, err := parseIdxPack(buf[k*idxHeaderSize:(k+1)*idxHeaderSize], k, 0)
+		if off+idxHeaderPrefix > len(buf) {
+			fmt.Printf("[idx-summary] %s: truncated at chunk %d/%d (offset %d of %d)\n",
+				key, k, core.HdrPacks, off, len(buf))
+			return issues + 1
+		}
+		numSlots := int(binary.LittleEndian.Uint32(buf[off+idxStateSize:]))
+		end := off + idxHeaderPrefix + numSlots*4
+		if end > len(buf) {
+			fmt.Printf("[idx-summary] %s: chunk %d claims %d slots running past the buffer (%d > %d)\n",
+				key, k, numSlots, end, len(buf))
+			return issues + 1
+		}
+		hdr, err := parseIdxPack(buf[off:end], k, 0)
 		if err != nil {
 			fmt.Printf("[idx-summary] pack %d chunk: %v\n", k, err)
 			issues++
+			off = end
 			continue
 		}
+		off = end
 		p := packs[k]
 		if hdr.fetchedAtBase != p.fetchedAtBase || hdr.packIDBase != p.packIDBase || hdr.packOffBase != p.packOffBase {
 			fmt.Printf("[idx-summary] pack %d: summary bases (%d,%d,%d) != header (%d,%d,%d)\n", k,
@@ -280,14 +300,23 @@ func checkIdxSummary(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 			issues++
 			continue
 		}
-		for s := range idxChanSlots {
-			if hdr.chanCounts[s] != p.chanCounts[s] {
+		slots := hdr.numSlots
+		if p.numSlots > slots {
+			slots = p.numSlots
+		}
+		for s := range slots {
+			if hdr.chanCount(s) != p.chanCount(s) {
 				fmt.Printf("[idx-summary] pack %d sub %d: summary chanCount=%d but header has %d\n",
-					k, s, hdr.chanCounts[s], p.chanCounts[s])
+					k, s, hdr.chanCount(s), p.chanCount(s))
 				issues++
 				break
 			}
 		}
+	}
+	if off != len(buf) {
+		fmt.Printf("[idx-summary] %s: %d byte(s) consumed but buffer is %d (extra trailing data)\n",
+			key, off, len(buf))
+		issues++
 	}
 	if issues == 0 {
 		fmt.Printf("[idx-summary] %s matches %d finalized pack header(s)\n", key, core.HdrPacks)

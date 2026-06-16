@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -50,11 +51,15 @@ func TestSyncIdxSummaryAtBoundary(t *testing.T) {
 	}
 
 	sum := decompressGz(t, filepath.Join(dir, "idx/h1.gz"))
-	if len(sum) != idxHeaderSize {
-		t.Fatalf("summary size = %d, want %d", len(sum), idxHeaderSize)
-	}
 	pack0 := decompressGz(t, filepath.Join(dir, "idx/0.gz"))
-	if !bytes.Equal(sum, pack0[:idxHeaderSize]) {
+	// The idx header is variable-length: the fixed prefix plus numSlots×4
+	// cumulative counts, dense up to the high-water channel id.
+	numSlots := int(binary.LittleEndian.Uint32(pack0[idxStateSize:]))
+	headerSize := idxHeaderPrefix + numSlots*4
+	if len(sum) != headerSize {
+		t.Fatalf("summary size = %d, want %d", len(sum), headerSize)
+	}
+	if !bytes.Equal(sum, pack0[:headerSize]) {
 		t.Error("summary bytes != idx/0.gz header bytes")
 	}
 }

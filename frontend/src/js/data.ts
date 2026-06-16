@@ -2,6 +2,7 @@ import { PACK_BASE } from "./base"
 import { cachedPromise, makeLRU, type LRU } from "./cache"
 import { FETCHED_AT_BLOCK } from "./format.gen"
 import {
+   countAt,
    findPackForBlocks,
    IDX_PACK_SIZE,
    lowerBound,
@@ -32,6 +33,10 @@ export let db: IDB
 let idxFetches: LRU<Promise<IdxPack>>
 let idxHeaders: IdxHeader[] = []
 let latestIdx: IdxPack
+// Store high-water + 1: the size of the per-pack channel lookup arrays
+// (chanIds/ownChanCounts and the filter lookup). Sized to the actual channel
+// count, not the format ceiling. Computed once at init from db.channels.
+let slots = 1
 
 // A pack name is write-once, so a non-OK response means the name itself no
 // longer matches the store. For a latest pack (L<seq>) that means this tab's
@@ -61,6 +66,12 @@ export async function init() {
    raw.seq ??= 0 // backend omitempty: absent for an empty store
    for (const [k, ch] of Object.entries(raw.channels)) ch.id = Number(k)
    db = raw
+
+   // Size the per-pack channel lookup arrays to the store's high-water id + 1
+   // (min 1). All chanIds in packs and filters are store channel ids, so this
+   // bounds the typed-array allocations by the actual channel count.
+   const ids = Object.keys(db.channels).map(Number)
+   slots = ids.length > 0 ? Math.max(...ids) + 1 : 1
 
    if (db.total_art === 0) {
       sessionStorage.removeItem(RELOAD_GUARD)
@@ -131,7 +142,7 @@ function fetchIdxPack(p: number): Promise<IdxPack> {
       const isFinalized = p < numFinalizedIdx()
       const path = `idx/${isFinalized ? p.toString() : `L${db.seq}`}.gz`
       const size = isFinalized ? IDX_PACK_SIZE : db.total_art - p * IDX_PACK_SIZE
-      return fetchPackBytes(path, !isFinalized).then((buf) => makeIdxPack(buf, p, size))
+      return fetchPackBytes(path, !isFinalized).then((buf) => makeIdxPack(buf, p, size, slots))
    })
 }
 
@@ -181,7 +192,8 @@ function packHasCandidate(p: number, channels: Map<number, number>): boolean {
    const next = idxHeaders[p + 1].chanCounts
    const packEnd = (p + 1) * IDX_PACK_SIZE
    for (const [chanId, addIdx] of channels) {
-      if (next[chanId] - cur[chanId] > 0 && addIdx < packEnd) return true
+      const delta = countAt(next, chanId) - countAt(cur, chanId)
+      if (delta > 0 && addIdx < packEnd) return true
    }
    return false
 }

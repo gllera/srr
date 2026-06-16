@@ -568,14 +568,14 @@ func TestChanUpdNoFeedFlagsLeavesFeedsUntouched(t *testing.T) {
 
 func TestChanUpdIDTooLarge(t *testing.T) {
 	setupChannelsTestDB(t)
-	cmd := &UpdCmd{ID: 256, AddURLs: sliceStrPtr([]string{"https://x.example.com/feed"})}
-	wantErr(t, cmd.Run(), "[0, 255]")
+	cmd := &UpdCmd{ID: 65536, AddURLs: sliceStrPtr([]string{"https://x.example.com/feed"})}
+	wantErr(t, cmd.Run(), "[0, 65535]")
 }
 
 func TestChanUpdIDNegative(t *testing.T) {
 	setupChannelsTestDB(t)
 	cmd := &UpdCmd{ID: -1, AddURLs: sliceStrPtr([]string{"https://x.example.com/feed"})}
-	wantErr(t, cmd.Run(), "[0, 255]")
+	wantErr(t, cmd.Run(), "[0, 65535]")
 }
 
 func TestChanUpdAddURLAtomicOnError(t *testing.T) {
@@ -638,12 +638,12 @@ func TestChanShowYAML(t *testing.T) {
 
 func TestChanShowIDTooLarge(t *testing.T) {
 	setupChannelsTestDB(t)
-	wantErr(t, (&ShowCmd{ID: 256, Format: "json"}).Run(), "[0, 255]")
+	wantErr(t, (&ShowCmd{ID: 65536, Format: "json"}).Run(), "[0, 65535]")
 }
 
 func TestChanShowIDNegative(t *testing.T) {
 	setupChannelsTestDB(t)
-	wantErr(t, (&ShowCmd{ID: -1, Format: "json"}).Run(), "[0, 255]")
+	wantErr(t, (&ShowCmd{ID: -1, Format: "json"}).Run(), "[0, 65535]")
 }
 
 func TestChanShowEmitsPipe(t *testing.T) {
