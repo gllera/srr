@@ -429,101 +429,112 @@ video {
    bottom: 0;
    max-width: 680px;
    margin: 0 auto;
-   display: flex;
-   padding: 0.3rem 0.25rem calc(0.3rem + env(safe-area-inset-bottom));
+   /* Above the list's sticky day dividers (z-index 1) and the sticky search bar
+      (z-index 5) so the upward-opening filter/⋯ menus are never punched through by
+      a date divider; still below the error popup (1000). The fixed position +
+      will-change already make this a stacking context, so this lifts the whole
+      toolbar — menus included. */
+   z-index: 6;
+   /* The wire console: a 4-column grid. The DOM interleaves the reader + list
+      controls (back · filter · prev · search · next · unread · save · ⋯) so each
+      view's visible four — the other view's are display:none and take no cell —
+      auto-place into columns 1–4 left→right: reader = back · prev · next · save,
+      list = filter · search · unread · ⋯. The READER keeps four equal slots
+      (minmax(0,1fr)) so prev/next sit centered in the thumb zone; the LIST template
+      (below) instead lets the filter readout take the bar's free space (1fr) with
+      the three icons shrunk to their tap targets on the right — a long channel/tag
+      name ("The Go Programming Language Blog") stays legible. Either way the filter
+      track is a free-space fraction, never its content, so it ellipsizes within its
+      column and NEVER shifts the icons as its label changes. */
+   display: grid;
+   grid-template-columns: repeat(4, minmax(0, 1fr));
+   align-items: center;
+   justify-items: center;
+   gap: 0.3rem;
+   padding: 0.3rem 0.6rem calc(0.3rem + env(safe-area-inset-bottom));
    background: var(--bg);
    border-top: 1px solid var(--faint);
    transition: transform 0.25s ease;
    will-change: transform;
+}
+/* List toolbar: the filter readout earns the free space; the search / unread / ⋯
+   icons shrink to content (their 44px tap targets) and cluster at the right. */
+body.srr-view-list .srr-toolbar {
+   grid-template-columns: 1fr auto auto auto;
 }
 
 .srr-toolbar-slide {
    transform: translateY(100%);
 }
 
-/* Buttons — no chrome. 44px (2.75rem) tap targets per Apple/Material guidelines.
-   .srr-jump-wrap is listed alongside .srr-dropdown: both wrap a toolbar button,
-   so its child button needs the same chrome-stripping reset. */
-.srr-toolbar-left,
-.srr-toolbar-right,
-.srr-dropdown,
-.srr-jump-wrap {
-   & > button {
-      background: none;
-      border: none;
-      padding: 0.5rem 0.45rem;
-      min-height: 2.75rem;
-      color: var(--fg);
-      font-family: inherit;
-      font-size: var(--text-sm);
-      cursor: pointer;
-      transition:
-         opacity 0.15s,
-         color 0.15s;
-      &:hover:not(:disabled) {
-         opacity: 0.55;
-      }
-      &:active:not(:disabled) {
-         opacity: 0.3;
-      }
-      &:disabled {
-         opacity: 0.15;
-         cursor: default;
-      }
+/* Chrome-stripping reset + 44px (2.75rem) tap target for every toolbar control
+   (the filter + ⋯ buttons sit inside .srr-dropdown wrappers). NOTE: the unread
+   toggle uses the CHILD combinator `.srr-toolbar > .srr-unread`, not descendant —
+   the channel filter menu lives *inside* .srr-toolbar and its unread COUNT badges
+   reuse the .srr-unread class, so a descendant selector would size those badges as
+   44px tap targets and bloat the menu rows. */
+.srr-toolbar .srr-back,
+.srr-toolbar .srr-channel,
+.srr-toolbar .srr-prev,
+.srr-toolbar .srr-search,
+.srr-toolbar .srr-next,
+.srr-toolbar > .srr-unread,
+.srr-toolbar .srr-save,
+.srr-toolbar .srr-overflow {
+   background: none;
+   border: none;
+   padding: 0.5rem 0.45rem;
+   min-height: 2.75rem;
+   color: var(--fg);
+   font-family: inherit;
+   font-size: var(--text-sm);
+   cursor: pointer;
+   transition:
+      opacity 0.15s,
+      color 0.15s,
+      background 0.15s;
+   &:hover:not(:disabled) {
+      opacity: 0.55;
+   }
+   &:active:not(:disabled) {
+      opacity: 0.3;
+   }
+   &:disabled {
+      opacity: 0.15;
+      cursor: default;
    }
 }
 
-.srr-toolbar-left,
-.srr-toolbar-right {
-   display: flex;
-   align-items: center;
-   gap: 0.4rem;
-}
-
-.srr-toolbar-right {
-   margin-left: auto;
-   /* Anchor the menus to the toolbar's right edge (≈ screen edge), not to each
-      button: search sits left of the nav buttons, so a button-anchored
-      right:0 menu would extend leftward off the screen on narrow phones —
-      worse when large text pushes min/max-width to their 80vw/90vw clamps. */
-   position: relative;
-   & .srr-dropdown {
-      position: static;
-   }
-   & .srr-dropdown-menu {
-      bottom: 100%;
-      right: 0;
-   }
-}
-
-.srr-toolbar-left {
+/* Edge slots hug the screen edges (the rest of each control centers in its slot):
+   the filter readout (list slot 1) fills its slot and reads left-aligned, the ⋯
+   overflow (list slot 4) and the reader's save (slot 4) sit flush right, back
+   (reader slot 1) flush left. */
+.srr-toolbar > .srr-dropdown:has(> .srr-channel) {
+   justify-self: stretch;
    min-width: 0;
-   flex: 1 1 auto;
-   & > .srr-dropdown:has(> .srr-channel) {
-      min-width: 0;
-      flex: 0 1 auto;
-      & > .srr-channel {
-         max-width: 100%;
-      }
+   & > .srr-channel {
+      width: 100%;
+      text-align: left;
    }
-   & .srr-dropdown-menu {
-      bottom: 100%;
-   }
+}
+.srr-toolbar > .srr-back {
+   justify-self: start;
+}
+.srr-toolbar > .srr-save,
+.srr-toolbar > .srr-dropdown:has(> .srr-overflow) {
+   justify-self: end;
 }
 
 /* Icon toolbar buttons — square 44px tap targets with a subtle hover fill.
-   Shared across both groups: back/search on the left, save/jump/prev/next and
-   the ⋯ overflow on the right. flex-shrink:0 keeps the search/back icons their
-   size next to the flexible channel-filter button in the left group. */
-.srr-toolbar-left .srr-back,
-.srr-toolbar-left .srr-search,
-.srr-toolbar-right .srr-save,
-.srr-toolbar-right .srr-jump,
-.srr-toolbar-right .srr-prev,
-.srr-toolbar-right .srr-next,
-.srr-toolbar-right .srr-overflow {
+   flex-shrink:0 keeps every glyph its size next to the flexible filter button. */
+.srr-toolbar .srr-back,
+.srr-toolbar .srr-prev,
+.srr-toolbar .srr-search,
+.srr-toolbar .srr-next,
+.srr-toolbar > .srr-unread,
+.srr-toolbar .srr-overflow,
+.srr-toolbar .srr-save {
    min-width: 2.75rem;
-   min-height: 2.75rem;
    padding: 0.55rem 0.5rem;
    display: inline-flex;
    align-items: center;
@@ -550,22 +561,34 @@ video {
    stroke-linejoin: round;
 }
 
-/* Jump / overflow toolbar-button glyphs (stroke + fill set inline) */
-.srr-jump-icon,
+/* Overflow toolbar-button glyph (stroke + fill set inline) */
 .srr-overflow-icon {
    display: block;
    width: 1.2rem;
    height: 1.2rem;
 }
 
-/* Jump: a plain toolbar button that pops the browser's native date picker. The
-   <input type="date"> is hidden but rendered (so showPicker has something to
-   anchor) and overlaid on the button via the wrap; pointer-events: none lets the
-   button take the click while JS calls showPicker() on the input. */
-.srr-jump-wrap {
-   position: relative;
-   display: inline-flex;
+/* Unread (catch-up) toggle — an "unread" dot: a ring by default, filled + accent
+   when the mode is on (aria-pressed), so the toolbar shows at a glance whether the
+   list is filtered to unread. */
+.srr-unread-icon {
+   display: inline-block;
+   width: 0.85rem;
+   height: 0.85rem;
+   border: 1.6px solid currentColor;
+   border-radius: 50%;
 }
+.srr-toolbar > .srr-unread[aria-pressed="true"] {
+   color: var(--accent);
+   & .srr-unread-icon {
+      background: currentColor;
+   }
+}
+
+/* Date-jump's hidden native picker input — relocated into the ⋯ overflow dropdown
+   (its trigger is a row in that menu now). Kept rendered (not display:none) so
+   showPicker has something to anchor; absolute + opacity:0 + pointer-events:none
+   overlay the ⋯ button area without blocking it, so the calendar pops near ⋯. */
 .srr-jump-date {
    position: absolute;
    inset: 0;
@@ -577,7 +600,7 @@ video {
    opacity: 0;
    pointer-events: none;
 }
-.srr-toolbar-right .srr-save.srr-saved {
+.srr-toolbar .srr-save.srr-saved {
    color: var(--accent);
    & .srr-save-icon {
       fill: currentColor;
@@ -585,10 +608,10 @@ video {
 }
 
 /* Next is the primary nav action — wider target, emphasized as a filled pill */
-.srr-toolbar-right .srr-next {
+.srr-toolbar .srr-next {
    min-width: 4.75rem;
 }
-.srr-toolbar-right .srr-next:not(:disabled) {
+.srr-toolbar .srr-next:not(:disabled) {
    background: var(--accent);
    border-radius: 999px;
    & .srr-next-icon {
@@ -643,10 +666,16 @@ video {
 .srr-dropdown-menu {
    display: none;
    position: absolute;
+   /* Opens UPWARD off its button (the toolbar is fixed to the bottom). Each menu
+      anchors to the screen-edge its trigger sits at, so the fixed-width panel
+      always opens inward and never spills off a narrow phone: the filter is the
+      left-most control (left:0), the ⋯ overflow the right-most (right:0). */
+   bottom: 100%;
    background: var(--bg);
-   /* Fixed width (clamped to the viewport on narrow phones) so the menu doesn't
-      resize to its longest row — the filter and ⋯ overflow menus match, and long
-      channel titles ellipsize rather than widening it. */
+   /* Fixed width (clamped to the viewport on narrow phones) so the channel filter
+      menu doesn't resize to its longest row — long channel titles ellipsize within
+      it instead of widening it. The ⋯ overflow menu overrides this to size to its
+      (short) content — see #srr-overflow-menu. */
    width: min(18rem, 90vw);
    border: 1px solid var(--faint);
    border-radius: var(--radius);
@@ -692,76 +721,6 @@ video {
       }
       &.srr-active:hover {
          background: color-mix(in srgb, var(--accent) 22%, transparent);
-      }
-      /* "Unseen only" view-modifier toggle pinned atop the menu — a checkbox +
-         label; the box fills accent when the mode is on. */
-      &.srr-unseen-row {
-         display: flex;
-         align-items: center;
-         gap: 0.5rem;
-         & .srr-check {
-            flex: 0 0 auto;
-            width: 0.85rem;
-            height: 0.85rem;
-            border: 1.5px solid var(--muted);
-            border-radius: 3px;
-         }
-      }
-      &.srr-unseen-row.srr-unseen-on {
-         color: var(--accent);
-         & .srr-check {
-            border-color: var(--accent);
-            background: var(--accent);
-         }
-      }
-   }
-   /* Section label inside the ⋯ overflow/settings menu. */
-   & .srr-menu-label {
-      padding: 0.3rem 0.75rem 0.15rem;
-      font-size: var(--text-sm);
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-   }
-   & .srr-imgproxy-edit {
-      display: flex;
-      gap: 0.25rem;
-      align-items: center;
-      padding: 0.2rem 0.4rem;
-      & .srr-imgproxy-input {
-         flex: 1 1 auto;
-         min-width: 0;
-         font: inherit;
-         font-size: var(--text-sm);
-         color: var(--fg);
-         background: var(--bg);
-         border: 1px solid var(--faint);
-         border-radius: var(--radius);
-         padding: 0.25rem 0.45rem;
-         &:focus {
-            outline: none;
-            border-color: var(--accent);
-         }
-         &.srr-input-invalid {
-            border-color: var(--accent);
-            background: color-mix(in srgb, var(--accent) 10%, transparent);
-         }
-      }
-      & .srr-imgproxy-save,
-      & .srr-imgproxy-clear {
-         flex: 0 0 auto;
-         min-width: 2rem;
-         font: inherit;
-         font-size: var(--text-sm);
-         color: var(--fg);
-         background: none;
-         border: 1px solid var(--faint);
-         border-radius: var(--radius);
-         padding: 0.25rem 0.45rem;
-         cursor: pointer;
-         &:hover {
-            background: var(--hover);
-         }
       }
    }
    & .srr-err-dot {
@@ -848,6 +807,19 @@ video {
    & .srr-tag-collapsed .srr-tag-toggle::after {
       transform: rotate(-45deg);
    }
+}
+/* Each menu opens inward from the screen edge its trigger sits at: the filter is
+   the left-most control, the ⋯ overflow the right-most. */
+#srr-channel-menu {
+   left: 0;
+}
+#srr-overflow-menu {
+   right: 0;
+   /* Only two short rows now (the proxy editor moved to a dialog), so size to
+      content instead of the channel menu's fixed 18rem — still clamped, still
+      opening inward from the right edge on a narrow phone. */
+   width: max-content;
+   max-width: min(18rem, 90vw);
 }
 
 /* Toolbar magnifier reflects the active search via aria-pressed. */
@@ -953,13 +925,14 @@ body.srr-view-list.srr-searching .srr-searchbar {
    display: none;
 }
 
-/* The list-only controls — the filter + ⋯ overflow dropdowns plus the jump and
-   search buttons (and the search bar) — belong to the list (home); the reader is
-   a focused reading surface: back / save / prev / next only. (The search bar is
-   already display:none without .srr-searching.) */
+/* The list-only controls — the filter + ⋯ overflow dropdowns (the ⋯ menu carries
+   the date-jump + image-proxy), the search button, and the unread toggle (and the
+   search bar) — belong to the list (home); the reader is a focused reading
+   surface: back / save / prev / next only. (The search bar is already
+   display:none without .srr-searching.) */
 body:not(.srr-view-list) .srr-dropdown,
-body:not(.srr-view-list) .srr-jump-wrap,
-body:not(.srr-view-list) .srr-search {
+body:not(.srr-view-list) .srr-search,
+body:not(.srr-view-list) .srr-toolbar > .srr-unread {
    display: none;
 }
 
@@ -1336,6 +1309,107 @@ body.srr-view-list.srr-searching .srr-masthead {
    }
 }
 
+/* Image-proxy dialog — a true centered modal opened from the ⋯ overflow menu.
+   Unlike the toast-style .srr-popup it takes input, so it dims the page behind a
+   full-viewport backdrop and traps focus (dropdown.ts). */
+.srr-imgproxy-dialog {
+   display: none;
+   position: fixed;
+   inset: 0;
+   z-index: 1000;
+   align-items: center;
+   justify-content: center;
+   padding: 1.25rem;
+   background: color-mix(in srgb, var(--fg) 28%, transparent);
+   &.srr-open {
+      display: flex;
+   }
+}
+.srr-imgproxy-card {
+   width: min(26rem, 100%);
+   max-height: calc(100dvh - 2.5rem);
+   overflow-y: auto;
+   background: var(--bg);
+   color: var(--fg);
+   border: 1px solid var(--faint);
+   border-radius: var(--radius);
+   box-shadow: var(--shadow);
+   padding: 1.25rem 1.4rem 1.4rem;
+}
+/* The dialog's title speaks in the masthead's wire voice (tracked mono caps). */
+.srr-imgproxy-title {
+   margin: 0 0 0.6rem;
+   font-family: var(--font-mono);
+   font-size: 0.82rem;
+   font-weight: 700;
+   letter-spacing: 0.14em;
+   text-transform: uppercase;
+   color: var(--fg);
+}
+.srr-imgproxy-desc {
+   margin: 0 0 1rem;
+   font-size: var(--text-sm);
+   line-height: 1.5;
+   color: var(--muted);
+}
+.srr-imgproxy-body {
+   display: flex;
+   flex-direction: column;
+   gap: 0.9rem;
+}
+.srr-imgproxy-input {
+   width: 100%;
+   font: inherit;
+   font-size: var(--text-sm);
+   color: var(--fg);
+   background: var(--bg);
+   border: 1px solid var(--faint);
+   border-radius: var(--radius);
+   padding: 0.5rem 0.6rem;
+   &:focus {
+      outline: none;
+      border-color: var(--accent);
+   }
+   &.srr-input-invalid {
+      border-color: var(--accent);
+      background: color-mix(in srgb, var(--accent) 10%, transparent);
+   }
+}
+.srr-imgproxy-actions {
+   display: flex;
+   gap: 0.5rem;
+   align-items: center;
+}
+/* Disable sits apart from Cancel/Save — pushed to the far left of the row. */
+.srr-imgproxy-clear {
+   margin-right: auto;
+}
+.srr-dialog-btn {
+   font: inherit;
+   font-size: var(--text-sm);
+   padding: 0.4rem 0.85rem;
+   border: 1px solid var(--faint);
+   border-radius: var(--radius);
+   background: none;
+   color: var(--fg);
+   cursor: pointer;
+   transition:
+      border-color 0.15s,
+      background 0.15s;
+   &:hover {
+      background: var(--hover);
+      border-color: var(--fg);
+   }
+}
+.srr-dialog-primary {
+   border-color: var(--accent);
+   color: var(--accent);
+   &:hover {
+      background: color-mix(in srgb, var(--accent) 12%, transparent);
+      border-color: var(--accent);
+   }
+}
+
 .srr-hidden {
    display: none !important;
 }
@@ -1344,9 +1418,6 @@ body.srr-view-list.srr-searching .srr-masthead {
 @media (max-width: 500px) {
    html {
       padding: max(1.25rem, env(safe-area-inset-top)) 0.75rem 0.5rem;
-   }
-   .srr-toolbar-right .srr-prev {
-      display: none;
    }
 }
 
@@ -1393,7 +1464,8 @@ body.srr-view-list.srr-searching .srr-masthead {
 /* Print */
 @media print {
    .srr-toolbar,
-   .srr-popup {
+   .srr-popup,
+   .srr-imgproxy-dialog {
       display: none !important;
    }
    .srr-container {

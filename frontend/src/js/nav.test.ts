@@ -1139,7 +1139,7 @@ describe("unreadCount", () => {
    })
 })
 
-describe("unread-only mode (tags)", () => {
+describe("unread-only mode", () => {
    afterEach(() => nav.setUnreadOnly(false))
 
    function tagSetup(entries: Array<{ chanId: number }>) {
@@ -1253,23 +1253,28 @@ describe("unread-only mode (tags)", () => {
       expect(again.article.s).toBe(1)
    })
 
-   it("does not affect a single-channel filter (navigates all, including seen)", async () => {
+   it("filters a single-channel view to unread too (seen excluded)", async () => {
       setupIndex([{ chanId: 1 }, { chanId: 1 }, { chanId: 1 }])
-      await nav.fromHash("1") // chan:1 = 1
+      await nav.fromHash("1") // chan:1 seen → 1 (chron 0,1 seen; chron 2 unseen)
       nav.setUnreadOnly(true)
-      await nav.switchFilter("1") // resumes at seen position 1
+      await nav.switchFilter("1") // resumes at the channel's seen position (chron 1)
       expect(data.loadArticle).toHaveBeenLastCalledWith(1)
-      const left = await nav.left() // can still reach the seen article at 0
-      expect(data.loadArticle).toHaveBeenLastCalledWith(0)
-      expect(left.article.s).toBe(1)
+      // The seen chron 0 is below the raised bound now — left can't reach it.
+      await expect(nav.left()).rejects.toThrow("no left match")
+      // Right still steps to the unseen chron 2.
+      const r = await nav.right()
+      expect(data.loadArticle).toHaveBeenLastCalledWith(2)
+      expect(r.article.s).toBe(1)
    })
 
-   it("does not affect [ALL] (seen articles still counted)", async () => {
+   it("filters [ALL] to unread too (seen articles excluded)", async () => {
       setupIndex([{ chanId: 1 }, { chanId: 2 }])
-      await nav.fromHash("0") // chan:1 = 0 (chron 0 seen)
+      await nav.fromHash("0") // chan:1 seen → 0 (chron 0 seen); chron 1 (ch2) unseen
       nav.setUnreadOnly(true)
-      const shown = await nav.last("") // [ALL], lands on chron 1
-      expect(shown.has_left).toBe(true) // the seen chron 0 is still to the left
+      const shown = await nav.last("") // [ALL] unread → newest unseen (chron 1)
+      expect(data.loadArticle).toHaveBeenLastCalledWith(1)
+      expect(shown.article.s).toBe(2)
+      expect(shown.has_left).toBe(false) // the seen chron 0 is excluded, nothing unseen left
    })
 
    it("the counter shows total unseen at open and decrements by one per step (OPT-1 invariant)", async () => {

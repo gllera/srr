@@ -33,7 +33,7 @@ const el = {
    searchClear: document.querySelector(".srr-search-clear") as HTMLButtonElement,
    searchNote: document.querySelector(".srr-search-note") as HTMLElement,
    overflow: document.querySelector(".srr-overflow") as HTMLButtonElement,
-   jump: document.querySelector(".srr-jump") as HTMLButtonElement,
+   unread: document.querySelector(".srr-unread") as HTMLButtonElement,
    jumpDate: document.querySelector(".srr-jump-date") as HTMLInputElement,
    save: document.querySelector(".srr-save") as HTMLButtonElement,
    popupText: document.querySelector(".srr-popup-text") as HTMLElement,
@@ -488,7 +488,6 @@ async function selectFilter(token: string) {
 const dropdownHost: ChannelMenuHost = {
    viewIsList: () => view === "list",
    selectFilter: (token) => void selectFilter(token),
-   toggleUnseenOnly,
 }
 
 // ── Title search (list filter mode) ──────────────────────────────────────────
@@ -556,16 +555,23 @@ function syncSearchBar() {
    el.searchNote.hidden = !note
 }
 
-// The unseen-only (tags) toggle — now a row in the channel menu (dropdownHost
-// hands this to showChannelMenu). Flipping it persists the mode and rebuilds the
-// list under the new (raised/restored) bounds; the mode also governs reader
-// navigation, but the list is the only place it's switched. The menu re-renders
-// its own row state + unseen-only row hiding after calling this.
+// The unread (catch-up) toggle — a toolbar button (list-only). Flipping it
+// persists the mode and rebuilds the list under the new (raised/restored) bounds;
+// the mode also governs reader navigation, but the list is where it's switched.
+// Unseen-only now spans every filter ([ALL]/channel/tag), so this is the one-tap
+// "show only unread" button for the whole wire.
+function refreshUnreadButton() {
+   const on = nav.isUnreadOnly()
+   el.unread.setAttribute("aria-pressed", String(on))
+   el.unread.setAttribute("aria-label", on ? "Showing only unread — show all" : "Show only unread")
+   el.unread.title = on ? "Showing only unread" : "Show only unread"
+}
 function toggleUnseenOnly() {
    nav.setUnreadOnly(!nav.isUnreadOnly())
-   // Re-apply the same tokens so filter.set re-reads the new mode (raised bounds
-   // in single-tag mode), then force a rebuild — the token set is unchanged, so
-   // list.show() alone would only refresh dots.
+   refreshUnreadButton()
+   // Re-apply the same tokens so filter.set re-reads the new mode (raised/restored
+   // bounds), then force a rebuild — the token set is unchanged, so list.show()
+   // alone would only refresh dots.
    nav.applyFilter(nav.currentTokens())
    void list.rerender()
 }
@@ -642,12 +648,13 @@ async function init() {
    // capture: error events don't bubble (see collapseBrokenMedia)
    el.content.addEventListener("error", collapseBrokenMedia, true)
    el.channel.addEventListener("click", () => showChannelMenu(channelMenuTag(), guard, dropdownHost))
-   el.overflow.addEventListener("click", () => showOverflowMenu())
-   // Jump: the button pops the native date picker; picking a day (the input's
-   // change) repositions the LIST to that date (jumpToDate), not the reader. No
-   // dropdown menu of its own.
-   el.jump.addEventListener("click", () => openDatePicker(el.jumpDate))
+   // ⋯ overflow holds settings + the relocated "Jump to a date" row, which pops
+   // the native date picker; picking a day (the input's change) repositions the
+   // LIST to that date (jumpToDate), not the reader.
+   el.overflow.addEventListener("click", () => showOverflowMenu(() => openDatePicker(el.jumpDate)))
    el.jumpDate.addEventListener("change", () => dateJump(el.jumpDate, jumpToDate))
+   // Unread (catch-up) toggle — one-tap "show only unread" in whatever's filtered.
+   el.unread.addEventListener("click", toggleUnseenOnly)
    // Search: the magnifier toggles the list's "q:<query>" filter; the pinned
    // search bar owns the input (debounced live query, Enter applies immediately,
    // Escape / ✕ leave search).
@@ -739,6 +746,7 @@ async function init() {
    })
 
    gestures = setupGestures({ prev: el.prev, next: el.next, toolbar: el.toolbar, reader: el.article, guard, onCycle })
+   refreshUnreadButton() // reflect the persisted unread-only mode on the toolbar at boot
 
    let hash = location.hash.substring(1)
    // Reject foreign hashes (e.g., OAuth implicit-flow tokens injected by an

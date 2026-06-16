@@ -316,8 +316,9 @@ export const filter = {
       this.saved = false
       this.search = false
       for (const ch of Object.values(data.db.channels)) if (ch.total_art) this.channels.set(ch.id, ch.add_idx ?? 0)
-      this.chanTotal = data.countAll(this.channels)
       this.tokens = []
+      // [ALL] honours unseen-only too now (a global "only unread" catch-up view).
+      this.applyUnseen(readSeen())
    },
    set(tokens: string[]) {
       this.tokens = tokens
@@ -357,13 +358,8 @@ export const filter = {
          this.chanTotal = 0
          return
       }
-      // Unseen-only applies to a single-tag filter only. Resolve the tag's
-      // members so we can both raise their nav bounds and tally unread.
-      const tagToken = tokens.length === 1 && !Number.isFinite(Number(tokens[0])) ? tokens[0] : null
-      // One localStorage read for the whole member loop (OPT-2): getSeen per
-      // member would re-parse the seen map M times.
-      const seenMap = readSeen()
-      const members: UnreadMember[] = []
+      // Resolve membership at natural add_idx bounds (numeric token = a channel,
+      // else a tag's members), then fold in unseen-only via applyUnseen.
       for (const token of tokens) {
          const num = Number(token)
          if (Number.isFinite(num)) {
@@ -371,29 +367,36 @@ export const filter = {
             if (ch?.total_art && !this.channels.has(num)) this.channels.set(num, ch.add_idx ?? 0)
          } else
             for (const ch of Object.values(data.db.channels))
-               if (ch.tag === token && ch.total_art && !this.channels.has(ch.id)) {
-                  const addIdx = ch.add_idx ?? 0
-                  this.channels.set(ch.id, addIdx)
-                  members.push({ id: ch.id, addIdx, seen: seenMap["chan:" + ch.id] ?? -1, all: -1, unread: -1 })
-               }
+               if (ch.tag === token && ch.total_art && !this.channels.has(ch.id))
+                  this.channels.set(ch.id, ch.add_idx ?? 0)
       }
       if (this.channels.size === 0) {
          this.clear()
          return
       }
-      if (unreadOnly && tagToken !== null) {
-         // Raise each member's lower bound past its (snapshotted) seen position
-         // so already-read articles fall below it — findLeft/findRight, matches,
-         // peek and search all skip them. Snapshot rather than live getSeen so
-         // the nav set and the counter stay consistent as you read this session.
-         for (const m of members) this.channels.set(m.id, Math.max(m.addIdx, m.seen + 1))
-         this.unreadMembers = members
-         // chanTotal is unused in unread mode (showFeed tallies via unreadMembers);
-         // leave it 0 so a stale value from a prior filter can't leak through.
-         this.chanTotal = 0
-      } else {
+      this.applyUnseen(readSeen())
+   },
+   // Fold unseen-only into the just-built channel membership (shared by set() and
+   // clear()). When on, raise EVERY member's lower bound past its snapshotted seen
+   // high-water — so read articles fall below it for findLeft/findRight/matches/
+   // peek — and snapshot the members for the unread counters (showFeed/unreadTally/
+   // isValidSeen). Generalised from the old single-tag case: it now applies to any
+   // filter, so [ALL]/a channel/a tag all become a "show only unread" view. When
+   // off, just total the set (chanTotal). Saved/search short-circuit before this.
+   applyUnseen(seenMap: Record<string, number>) {
+      if (!unreadOnly) {
+         this.unreadMembers = null
          this.chanTotal = data.countAll(this.channels)
+         return
       }
+      const members: UnreadMember[] = []
+      for (const [id, addIdx] of this.channels)
+         members.push({ id, addIdx, seen: seenMap["chan:" + id] ?? -1, all: -1, unread: -1 })
+      for (const m of members) this.channels.set(m.id, Math.max(m.addIdx, m.seen + 1))
+      this.unreadMembers = members
+      // chanTotal is unused in unread mode (showFeed tallies via unreadMembers);
+      // 0 so a stale value from a prior filter can't leak through.
+      this.chanTotal = 0
    },
 }
 
