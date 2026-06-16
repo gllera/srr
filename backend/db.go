@@ -247,7 +247,7 @@ func (o *DB) AddChannel(c *Channel) error {
 	if o.core.Channels == nil {
 		o.core.Channels = map[int]*Channel{}
 	}
-	for id := 0; id < chanIDCeiling; id++ {
+	for id := range chanIDCeiling {
 		if _, ok := o.core.Channels[id]; !ok {
 			c.id = id
 			c.AddIdx = o.core.TotalArticles

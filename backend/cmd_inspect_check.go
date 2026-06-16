@@ -166,10 +166,7 @@ func checkChanCountsContinuity(packs []*idxPack) int {
 		// Check every slot either pack carries: a later-added channel widens
 		// next's header beyond cur's, and the bounded accessors read 0 for ids
 		// a pack doesn't reach.
-		slots := cur.numSlots
-		if next.numSlots > slots {
-			slots = next.numSlots
-		}
+		slots := max(cur.numSlots, next.numSlots)
 		for s := range slots {
 			expected := cur.chanCount(s) + cur.ownChanCount(s)
 			if next.chanCount(s) != expected {
@@ -300,17 +297,17 @@ func checkIdxSummary(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 			issues++
 			continue
 		}
-		slots := hdr.numSlots
-		if p.numSlots > slots {
-			slots = p.numSlots
-		}
+		slots := max(hdr.numSlots, p.numSlots)
+		mismatched := false
 		for s := range slots {
 			if hdr.chanCount(s) != p.chanCount(s) {
 				fmt.Printf("[idx-summary] pack %d sub %d: summary chanCount=%d but header has %d\n",
 					k, s, hdr.chanCount(s), p.chanCount(s))
-				issues++
-				break
+				mismatched = true
 			}
+		}
+		if mismatched {
+			issues++
 		}
 	}
 	if off != len(buf) {
