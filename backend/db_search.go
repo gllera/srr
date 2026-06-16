@@ -260,7 +260,9 @@ func (o *DB) SyncSearch(ctx context.Context, written []ArticleData) error {
 	}
 
 	if c.SearchPacks != nf {
-		if err := o.saveSummary(ctx, nf, searchBloomBytes, finalizedSearchKey, searchSummaryKey(nf)); err != nil {
+		if err := o.saveSummary(ctx, nf, func(k int) ([]byte, error) {
+			return o.readPackHeader(ctx, finalizedSearchKey(k), searchBloomBytes)
+		}, searchSummaryKey(nf)); err != nil {
 			return err
 		}
 	}

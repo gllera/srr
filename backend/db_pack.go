@@ -127,19 +127,29 @@ func (p *pack) Len() int                    { return p.buf.Len() }
 func (p *pack) Write(b []byte) (int, error) { return p.gz.Write(b) }
 
 func (p *pack) writeIdx(chanID, deltaPack, deltaFetched int) error {
-	_, err := p.Write([]byte{byte(chanID), byte(deltaFetched) | byte(deltaPack)<<7})
+	_, err := p.Write([]byte{
+		byte(chanID), byte(chanID >> 8),
+		byte(deltaFetched) | byte(deltaPack)<<7,
+	})
 	return err
 }
 
 func writeIdxHeader(p *pack, block, packID, packOff int, channels map[int]*Channel) error {
-	var buf [idxHeaderSize]byte
+	numSlots := 0
+	for id := range channels {
+		if id+1 > numSlots {
+			numSlots = id + 1
+		}
+	}
+	buf := make([]byte, idxHeaderPrefix+numSlots*4)
 	binary.LittleEndian.PutUint32(buf[0:], uint32(block))
 	binary.LittleEndian.PutUint32(buf[4:], uint32(packID))
 	binary.LittleEndian.PutUint32(buf[8:], uint32(packOff))
+	binary.LittleEndian.PutUint32(buf[idxStateSize:], uint32(numSlots))
 	for id, ch := range channels {
-		binary.LittleEndian.PutUint32(buf[idxStateSize+id*4:], uint32(ch.TotalArt))
+		binary.LittleEndian.PutUint32(buf[idxHeaderPrefix+id*4:], uint32(ch.TotalArt))
 	}
-	_, err := p.Write(buf[:])
+	_, err := p.Write(buf)
 	return err
 }
 
@@ -152,24 +162,24 @@ func (p *pack) writeArticle(ad *ArticleData) error {
 	return err
 }
 
-func (o *DB) loadPack(ctx context.Context, key string) (*pack, int, error) {
+func (o *DB) loadPack(ctx context.Context, key string) (*pack, []byte, error) {
 	p := newPack()
 	rc, err := o.Get(ctx, key, true)
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, err
 	}
 	if rc == nil {
-		return p, 0, nil
+		return p, nil, nil
 	}
 	defer rc.Close()
 	raw, err := gunzip(rc)
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, err
 	}
 	if _, err := p.Write(raw); err != nil {
-		return nil, 0, err
+		return nil, nil, err
 	}
-	return p, len(raw), nil
+	return p, raw, nil
 }
 
 // savePack publishes a pack with the fast stdlib gzip encoding it was
@@ -301,17 +311,41 @@ func numFinalizedIdx(totalArticles int) int {
 	return (totalArticles - 1) / idxPackSize
 }
 
-func expectedLatestIdxSize(totalArticles int) int {
+// latestIdxEntryCount is the entry count the latest idx pack must hold for a
+// given article total (the tail past the finalized packs).
+func latestIdxEntryCount(totalArticles int) int {
 	if totalArticles == 0 {
 		return 0
 	}
-	latestEntries := totalArticles - numFinalizedIdx(totalArticles)*idxPackSize
-	return idxHeaderSize + latestEntries*2
+	return totalArticles - numFinalizedIdx(totalArticles)*idxPackSize
+}
+
+// checkLatestIdx verifies a freshly-loaded latest idx pack matches db.gz: its
+// entry count (derived from the variable header's numSlots) must equal the
+// tail count. Guards against a stale latest pack / format mismatch.
+func checkLatestIdx(key string, raw []byte, totalArticles int) error {
+	want := latestIdxEntryCount(totalArticles)
+	if want == 0 {
+		if len(raw) != 0 {
+			return fmt.Errorf("%s has %d bytes but db.gz expects an empty store", key, len(raw))
+		}
+		return nil
+	}
+	if len(raw) < idxHeaderPrefix {
+		return fmt.Errorf("%s: short idx header (%d bytes)", key, len(raw))
+	}
+	numSlots := int(binary.LittleEndian.Uint32(raw[idxStateSize:]))
+	expected := idxHeaderPrefix + numSlots*4 + want*idxEntrySize
+	if len(raw) != expected {
+		return fmt.Errorf("%s has %d bytes but db.gz expects %d", key, len(raw), expected)
+	}
+	return nil
 }
 
 // readPackHeader decompresses only the leading size bytes of a pack (gzip
 // decodes from the stream head, so the entries are never inflated). Used for
-// the idx 1036-byte headers and the search shards' bloom headers.
+// the search shards' fixed-size bloom headers; idx packs use readIdxHeader,
+// whose header is variable-length.
 func (o *DB) readPackHeader(ctx context.Context, key string, size int) ([]byte, error) {
 	rc, err := o.Get(ctx, key, false)
 	if err != nil {
@@ -330,16 +364,42 @@ func (o *DB) readPackHeader(ctx context.Context, key string, size int) ([]byte, 
 	return hdr, nil
 }
 
+// readIdxHeader decompresses just the variable-length header of an idx pack:
+// the fixed prefix, then numSlots×4 cumulative-count bytes.
+func (o *DB) readIdxHeader(ctx context.Context, key string) ([]byte, error) {
+	rc, err := o.Get(ctx, key, false)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	gz, err := gzip.NewReader(rc)
+	if err != nil {
+		return nil, fmt.Errorf("decompress %s: %w", key, err)
+	}
+	defer gz.Close()
+	prefix := make([]byte, idxHeaderPrefix)
+	if _, err := io.ReadFull(gz, prefix); err != nil {
+		return nil, fmt.Errorf("read %s header prefix: %w", key, err)
+	}
+	numSlots := int(binary.LittleEndian.Uint32(prefix[idxStateSize:]))
+	rest := make([]byte, numSlots*4)
+	if _, err := io.ReadFull(gz, rest); err != nil {
+		return nil, fmt.Errorf("read %s header counts: %w", key, err)
+	}
+	return append(prefix, rest...), nil
+}
+
 // saveSummary publishes a count-named summary pack: the gzip concatenation
-// of the leading `size` bytes (the headers) of finalized packs 0..n-1, read
-// via streaming header reads. The crash-safety contract is the caller's: it
-// advances its coverage counter only after this save succeeds, so no reader
-// can learn the summary name before its content is durable. Shared by
-// SyncIdxSummary (idx/h<N>) and SyncSearch (search/s<N>).
-func (o *DB) saveSummary(ctx context.Context, n, size int, packKey func(int) string, sumKey string) error {
+// of the headers of finalized packs 0..n-1, each produced by the `header`
+// callback. The crash-safety contract is the caller's: it advances its
+// coverage counter only after this save succeeds, so no reader can learn the
+// summary name before its content is durable. Shared by SyncIdxSummary
+// (idx/h<N>, variable-length header) and SyncSearch (search/s<N>, fixed bloom
+// header).
+func (o *DB) saveSummary(ctx context.Context, n int, header func(k int) ([]byte, error), sumKey string) error {
 	sum := newPack()
 	for k := range n {
-		hdr, err := o.readPackHeader(ctx, packKey(k), size)
+		hdr, err := header(k)
 		if err != nil {
 			return err
 		}
@@ -351,9 +411,9 @@ func (o *DB) saveSummary(ctx context.Context, n, size int, packKey func(int) str
 }
 
 // SyncIdxSummary publishes idx/h<N>.gz — the gzip concatenation of the
-// 1036-byte headers of the N finalized idx packs — whenever db.gz's HdrPacks
-// lags the store: a pack finalized this run, a pre-summary store's first run
-// after upgrade, or a post-`srr gen --bump` reset. It always rebuilds from
+// variable-length headers of the N finalized idx packs — whenever db.gz's
+// HdrPacks lags the store: a pack finalized this run, a pre-summary store's
+// first run after upgrade, or a post-`srr gen --bump` reset. It always rebuilds from
 // scratch by re-reading each finalized pack's header, keeping one code path
 // that self-heals any prior state (the rebuild costs N small reads and runs
 // once per 50k articles). HdrPacks is set only after the save succeeds and
@@ -369,7 +429,9 @@ func (o *DB) SyncIdxSummary(ctx context.Context) error {
 	if c.HdrPacks == n || n == 0 {
 		return nil
 	}
-	if err := o.saveSummary(ctx, n, idxHeaderSize, finalizedIdxKey, summaryKey(n)); err != nil {
+	if err := o.saveSummary(ctx, n, func(k int) ([]byte, error) {
+		return o.readIdxHeader(ctx, finalizedIdxKey(k))
+	}, summaryKey(n)); err != nil {
 		return err
 	}
 	c.HdrPacks = n
@@ -386,12 +448,12 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) ([]ArticleData, 
 
 	c := &o.core
 
-	meta, metaSize, err := o.loadPack(ctx, latestKey(c, "idx"))
+	meta, metaRaw, err := o.loadPack(ctx, latestKey(c, "idx"))
 	if err != nil {
 		return nil, err
 	}
-	if expected := expectedLatestIdxSize(c.TotalArticles); metaSize != expected {
-		return nil, fmt.Errorf("%s has %d bytes but db.gz expects %d", latestKey(c, "idx"), metaSize, expected)
+	if err := checkLatestIdx(latestKey(c, "idx"), metaRaw, c.TotalArticles); err != nil {
+		return nil, err
 	}
 	data, _, err := o.loadPack(ctx, latestKey(c, "data"))
 	if err != nil {

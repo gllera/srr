@@ -34,8 +34,9 @@ var tsConsts = []struct {
 }{
 	{"IDX_PACK_SIZE", idxPackSize, "entries per finalized idx pack (split threshold)"},
 	{"IDX_STATE_SIZE", idxStateSize, "bytes: the 3 leading uint32 LE idx-header state fields (fetchedAt/packId/packOff bases)"},
-	{"CHAN_ID_SLOTS", idxChanSlots, "channel-id ceiling: chan_id is one byte, the idx header reserves this many chanCount slots"},
-	{"IDX_HEADER_SIZE", idxHeaderSize, "bytes: IDX_STATE_SIZE + CHAN_ID_SLOTS uint32 chanCounts"},
+	{"IDX_HEADER_PREFIX", idxHeaderPrefix, "bytes: idx-header fixed prefix (3 state uint32s + numSlots uint32); the variable count array follows"},
+	{"IDX_ENTRY_SIZE", idxEntrySize, "bytes per idx entry: chan_id uint16 LE + packed uint8"},
+	{"CHAN_ID_CEILING", chanIDCeiling, "channel-id ceiling: chan_id is a uint16, ids run [0, this)"},
 	{"FETCHED_AT_BLOCK", fetchedAtBlock, "seconds per idx timestamp block (8h): stored fetched_at is unix seconds ÷ this"},
 	{"DELTA_FETCHED_MAX", deltaFetchedMax, "7-bit per-entry delta_fetched_at limit: writer clamp ceiling, reader bit mask"},
 	{"LATEST_KEEP", latestKeep, "superseded L<seq> generations the backend GC keeps as a grace window for stale-db.gz readers"},

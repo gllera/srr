@@ -98,23 +98,23 @@ func TestParseDataPackInvalidJSON(t *testing.T) {
 	}
 }
 
-func TestExpectedLatestIdxSize(t *testing.T) {
+func TestLatestIdxEntryCount(t *testing.T) {
 	cases := []struct {
 		total int
 		want  int
 	}{
 		{0, 0},
-		{1, idxHeaderSize + 2},
-		{idxPackSize - 1, idxHeaderSize + (idxPackSize-1)*2},
+		{1, 1},
+		{idxPackSize - 1, idxPackSize - 1},
 		// At exactly idxPackSize the latest pack still holds all entries
 		// (the split fires only when the next entry arrives).
-		{idxPackSize, idxHeaderSize + idxPackSize*2},
-		{idxPackSize + 1, idxHeaderSize + 1*2},
-		{2*idxPackSize + 7, idxHeaderSize + 7*2},
+		{idxPackSize, idxPackSize},
+		{idxPackSize + 1, 1},
+		{2*idxPackSize + 7, 7},
 	}
 	for _, c := range cases {
-		if got := expectedLatestIdxSize(c.total); got != c.want {
-			t.Errorf("expectedLatestIdxSize(%d) = %d, want %d", c.total, got, c.want)
+		if got := latestIdxEntryCount(c.total); got != c.want {
+			t.Errorf("latestIdxEntryCount(%d) = %d, want %d", c.total, got, c.want)
 		}
 	}
 }

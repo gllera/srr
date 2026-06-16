@@ -3,7 +3,13 @@ import { join } from "node:path"
 import { gzipSync } from "node:zlib"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
-import { FETCHED_AT_BLOCK, IDX_HEADER_SIZE, IDX_PACK_SIZE } from "../../src/js/format.gen"
+import {
+   FETCHED_AT_BLOCK,
+   IDX_ENTRY_SIZE,
+   IDX_HEADER_PREFIX,
+   IDX_PACK_SIZE,
+   IDX_STATE_SIZE,
+} from "../../src/js/format.gen"
 import { makeStore } from "../harness"
 import { mountReader, type MountedReader } from "./mount"
 
@@ -22,23 +28,37 @@ interface Hdr {
    chanCounts: Record<number, number>
 }
 
+// numSlots a header carries: dense up to the highest chanCount key (+1), else 0.
+function headerSlots(h: Hdr): number {
+   const keys = Object.keys(h.chanCounts).map(Number)
+   return keys.length > 0 ? Math.max(...keys) + 1 : 0
+}
+
+// Variable-length header: 3 state uint32s + numSlots uint32, then numSlots×4
+// cumulative counts.
 function headerBytes(h: Hdr): Uint8Array {
-   const buf = new Uint8Array(IDX_HEADER_SIZE)
+   const numSlots = headerSlots(h)
+   const buf = new Uint8Array(IDX_HEADER_PREFIX + numSlots * 4)
    const view = new DataView(buf.buffer)
    view.setUint32(0, h.fetchedAtBase, true)
    view.setUint32(4, h.packIdBase, true)
    view.setUint32(8, h.packOffBase, true)
-   for (const [k, v] of Object.entries(h.chanCounts)) view.setUint32(12 + Number(k) * 4, v, true)
+   view.setUint32(IDX_STATE_SIZE, numSlots, true)
+   for (const [k, v] of Object.entries(h.chanCounts)) view.setUint32(IDX_HEADER_PREFIX + Number(k) * 4, v, true)
    return buf
 }
 
-// Entries: [chanId, deltaPackId, deltaFetchedAt][]
+// Entries: [chanId, deltaPackId, deltaFetchedAt][]; each entry is chan_id u16
+// LE + packed u8.
 function idxPack(h: Hdr, entries: [number, number, number][]): Uint8Array {
-   const buf = new Uint8Array(IDX_HEADER_SIZE + entries.length * 2)
-   buf.set(headerBytes(h))
+   const header = headerBytes(h)
+   const buf = new Uint8Array(header.byteLength + entries.length * IDX_ENTRY_SIZE)
+   buf.set(header)
    entries.forEach(([chanId, deltaPack, deltaFetched], i) => {
-      buf[IDX_HEADER_SIZE + i * 2] = chanId
-      buf[IDX_HEADER_SIZE + i * 2 + 1] = (deltaPack << 7) | (deltaFetched & 0x7f)
+      const off = header.byteLength + i * IDX_ENTRY_SIZE
+      buf[off] = chanId & 0xff
+      buf[off + 1] = (chanId >> 8) & 0xff
+      buf[off + 2] = (deltaPack << 7) | (deltaFetched & 0x7f)
    })
    return buf
 }
@@ -80,9 +100,13 @@ function buildStore(opts: { hdrs: boolean; summaryFile: boolean }): string {
       ),
    )
    if (opts.summaryFile) {
-      const sum = new Uint8Array(2 * IDX_HEADER_SIZE)
-      sum.set(headerBytes(hdr0))
-      sum.set(headerBytes(hdr1), IDX_HEADER_SIZE)
+      // The summary is the verbatim concatenation of each pack's
+      // variable-length header (hdr0 numSlots 0, hdr1 numSlots 1).
+      const h0 = headerBytes(hdr0)
+      const h1 = headerBytes(hdr1)
+      const sum = new Uint8Array(h0.byteLength + h1.byteLength)
+      sum.set(h0)
+      sum.set(h1, h0.byteLength)
       writeFileSync(join(dir, "idx/h2.gz"), gzipSync(sum))
    }
 

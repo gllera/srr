@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { IDX_HEADER_SIZE } from "./format.gen"
+import { IDX_ENTRY_SIZE, IDX_HEADER_PREFIX, IDX_STATE_SIZE } from "./format.gen"
 import { findPackForBlocks, IDX_PACK_SIZE, makeIdxPack, parseIdxHeaders, type IdxHeader } from "./idx"
 
 interface Entry {
@@ -13,23 +13,42 @@ interface PackOpts {
    packIdBase?: number
    packOffBase?: number
    chanCounts?: Record<number, number>
+   // numSlots override; defaults to (high-water chanCount id) + 1.
+   numSlots?: number
    entries: Entry[]
 }
 
+// SLOTS is the per-pack channel lookup size passed to makeIdxPack: the store
+// high-water + 1 in production. Tests use a fixed generous value.
+const SLOTS = 256
+
+// numSlots a built header carries: explicit override, else dense up to the
+// highest chanCount key (+1), else 0.
+function headerSlots(o: Pick<PackOpts, "chanCounts" | "numSlots">): number {
+   if (o.numSlots !== undefined) return o.numSlots
+   const keys = Object.keys(o.chanCounts ?? {}).map(Number)
+   return keys.length > 0 ? Math.max(...keys) + 1 : 0
+}
+
 function buildBuf(o: PackOpts): ArrayBuffer {
-   const buf = new ArrayBuffer(IDX_HEADER_SIZE + o.entries.length * 2)
+   const numSlots = headerSlots(o)
+   const headerSize = IDX_HEADER_PREFIX + numSlots * 4
+   const buf = new ArrayBuffer(headerSize + o.entries.length * IDX_ENTRY_SIZE)
    const view = new DataView(buf)
    view.setUint32(0, o.fetchedAtBase ?? 0, true)
    view.setUint32(4, o.packIdBase ?? 0, true)
    view.setUint32(8, o.packOffBase ?? 0, true)
+   view.setUint32(IDX_STATE_SIZE, numSlots, true)
    for (const [k, v] of Object.entries(o.chanCounts ?? {})) {
-      view.setUint32(12 + Number(k) * 4, v, true)
+      view.setUint32(IDX_HEADER_PREFIX + Number(k) * 4, v, true)
    }
    const bytes = new Uint8Array(buf)
    for (let i = 0; i < o.entries.length; i++) {
       const e = o.entries[i]
-      bytes[IDX_HEADER_SIZE + i * 2] = e.chanId
-      bytes[IDX_HEADER_SIZE + i * 2 + 1] = (e.deltaPackId << 7) | (e.deltaFetchedAt & 0x7f)
+      const off = headerSize + i * IDX_ENTRY_SIZE
+      bytes[off] = e.chanId & 0xff
+      bytes[off + 1] = (e.chanId >> 8) & 0xff
+      bytes[off + 2] = (e.deltaPackId << 7) | (e.deltaFetchedAt & 0x7f)
    }
    return buf
 }
@@ -49,8 +68,20 @@ describe("IDX_PACK_SIZE", () => {
 describe("makeIdxPack.parse", () => {
    it("decodes chanIds in order", () => {
       const buf = buildBuf({ entries: [e(1), e(2), e(3)] })
-      const pack = makeIdxPack(buf, 0, 3).parse()
+      const pack = makeIdxPack(buf, 0, 3, SLOTS).parse()
       expect(Array.from(pack.chanIds)).toEqual([1, 2, 3])
+   })
+
+   it("decodes u16 chan_ids beyond the old 255 ceiling", () => {
+      // The widen: a chan_id is a little-endian uint16, so ids 256..65535 must
+      // round-trip and count into ownChanCounts at their full value (the
+      // lookup arrays are sized to the store high-water, here 65536).
+      const wide = 65536
+      const buf = buildBuf({ numSlots: 1000, entries: [e(300), e(65535), e(300)] })
+      const pack = makeIdxPack(buf, 0, 3, wide).parse()
+      expect(Array.from(pack.chanIds)).toEqual([300, 65535, 300])
+      expect(pack.ownChanCounts[300]).toBe(2)
+      expect(pack.ownChanCounts[65535]).toBe(1)
    })
 
    it("accumulates fetchedAt from header base plus deltas", () => {
@@ -58,7 +89,7 @@ describe("makeIdxPack.parse", () => {
          fetchedAtBase: 100,
          entries: [e(1, 0, 5), e(2, 0, 3), e(3, 0, 7)],
       })
-      const pack = makeIdxPack(buf, 0, 3).parse()
+      const pack = makeIdxPack(buf, 0, 3, SLOTS).parse()
       expect(Array.from(pack.fetchedAts)).toEqual([105, 108, 115])
    })
 
@@ -67,7 +98,7 @@ describe("makeIdxPack.parse", () => {
          fetchedAtBase: 0,
          entries: [e(1, 0, 127), e(2, 0, 127)],
       })
-      const pack = makeIdxPack(buf, 0, 2).parse()
+      const pack = makeIdxPack(buf, 0, 2, SLOTS).parse()
       expect(Array.from(pack.fetchedAts)).toEqual([127, 254])
    })
 
@@ -76,13 +107,13 @@ describe("makeIdxPack.parse", () => {
       // ceiling (65535 blocks ≈ 60y of calendar time from the first fetch)
       // is far beyond any real horizon, so a large base still round-trips.
       const buf = buildBuf({ fetchedAtBase: 60000, entries: [e(1, 0, 5)] })
-      const pack = makeIdxPack(buf, 0, 1).parse()
+      const pack = makeIdxPack(buf, 0, 1, SLOTS).parse()
       expect(pack.fetchedAts[0]).toBe(60005)
    })
 
    it("populates ownChanCounts from entries", () => {
       const buf = buildBuf({ entries: [e(1), e(2), e(1), e(1), e(3)] })
-      const pack = makeIdxPack(buf, 0, 5).parse()
+      const pack = makeIdxPack(buf, 0, 5, SLOTS).parse()
       expect(pack.ownChanCounts[1]).toBe(3)
       expect(pack.ownChanCounts[2]).toBe(1)
       expect(pack.ownChanCounts[3]).toBe(1)
@@ -95,7 +126,7 @@ describe("makeIdxPack.parse", () => {
          chanCounts: { 1: 100, 2: 50, 255: 7 },
          entries: [],
       })
-      const pack = makeIdxPack(buf, 0, 0).parse()
+      const pack = makeIdxPack(buf, 0, 0, SLOTS).parse()
       expect(pack.header.chanCounts[0]).toBe(0)
       expect(pack.header.chanCounts[1]).toBe(100)
       expect(pack.header.chanCounts[2]).toBe(50)
@@ -110,7 +141,7 @@ describe("makeIdxPack.parse", () => {
          chanCounts: { 5: 11 },
          entries: [e(1, 1, 2)],
       })
-      const pack = makeIdxPack(buf, 0, 1)
+      const pack = makeIdxPack(buf, 0, 1, SLOTS)
       expect(pack.header.fetchedAtBase).toBe(42)
       expect(pack.header.packIdBase).toBe(7)
       expect(pack.header.packOffBase).toBe(3)
@@ -122,7 +153,7 @@ describe("makeIdxPack.parse", () => {
 
    it("is idempotent across repeated calls", () => {
       const buf = buildBuf({ entries: [e(1), e(2)] })
-      const pack = makeIdxPack(buf, 0, 2)
+      const pack = makeIdxPack(buf, 0, 2, SLOTS)
       const a = pack.parse()
       const b = pack.parse()
       expect(a).toBe(b)
@@ -131,7 +162,7 @@ describe("makeIdxPack.parse", () => {
 
    it("uses packIndex to compute baseChron in bounds", () => {
       const buf = buildBuf({ entries: [e(1)] })
-      const pack = makeIdxPack(buf, 2, 1).parse()
+      const pack = makeIdxPack(buf, 2, 1, SLOTS).parse()
       expect(pack.bounds[0]).toEqual({ packId: 0, startChron: 2 * IDX_PACK_SIZE })
    })
 
@@ -141,7 +172,7 @@ describe("makeIdxPack.parse", () => {
          packOffBase: 10,
          entries: [e(1)],
       })
-      const pack = makeIdxPack(buf, 0, 1).parse()
+      const pack = makeIdxPack(buf, 0, 1, SLOTS).parse()
       expect(pack.bounds[0]).toEqual({ packId: 5, startChron: -10 })
    })
 
@@ -151,28 +182,28 @@ describe("makeIdxPack.parse", () => {
          packOffBase: 0,
          entries: [e(1, 0, 0), e(2, 1, 0), e(3, 0, 0)],
       })
-      const pack = makeIdxPack(buf, 0, 3).parse()
+      const pack = makeIdxPack(buf, 0, 3, SLOTS).parse()
       expect(pack.bounds.length).toBe(2)
       expect(pack.bounds[0]).toEqual({ packId: 5, startChron: 0 })
       expect(pack.bounds[1]).toEqual({ packId: 6, startChron: 1 })
    })
 
-   it("rejects a buffer shorter than header + packSize*2", () => {
+   it("rejects a buffer shorter than header + packSize*IDX_ENTRY_SIZE", () => {
       const buf = buildBuf({ entries: [e(1), e(2)] })
-      expect(() => makeIdxPack(buf, 0, 7)).toThrow(/short body/)
+      expect(() => makeIdxPack(buf, 0, 7, SLOTS)).toThrow(/short body/)
    })
 
    it("ignores trailing entries past packSize (a stale SW cache may hold a longer body)", () => {
       // The body carries 5 entries but db.gz says this pack holds 3 — parsing
       // must stop at packSize so the ghost rows don't skew chanIds/bounds/counts.
       const buf = buildBuf({ entries: [e(1), e(2), e(3), e(4), e(5)] })
-      const pack = makeIdxPack(buf, 0, 3).parse()
+      const pack = makeIdxPack(buf, 0, 3, SLOTS).parse()
       expect(Array.from(pack.chanIds)).toEqual([1, 2, 3])
    })
 })
 
 describe("makeIdxPack.findLeft", () => {
-   const buildPack = () => makeIdxPack(buildBuf({ entries: [e(1), e(2), e(1), e(3), e(1)] }), 0, 5)
+   const buildPack = () => makeIdxPack(buildBuf({ entries: [e(1), e(2), e(1), e(3), e(1)] }), 0, 5, SLOTS)
 
    it("returns the rightmost match scanning leftward from chronFrom", () => {
       const pack = buildPack()
@@ -196,13 +227,13 @@ describe("makeIdxPack.findLeft", () => {
 
    it("returns -1 when chronFrom < baseChron", () => {
       const buf = buildBuf({ entries: [e(1)] })
-      const pack = makeIdxPack(buf, 1, 1)
+      const pack = makeIdxPack(buf, 1, 1, SLOTS)
       expect(pack.findLeft(IDX_PACK_SIZE - 1, new Map([[1, 0]]))).toBe(-1)
    })
 })
 
 describe("makeIdxPack.findRight", () => {
-   const buildPack = () => makeIdxPack(buildBuf({ entries: [e(1), e(2), e(1), e(3), e(1)] }), 0, 5)
+   const buildPack = () => makeIdxPack(buildBuf({ entries: [e(1), e(2), e(1), e(3), e(1)] }), 0, 5, SLOTS)
 
    it("returns the leftmost match scanning rightward from chronFrom", () => {
       const pack = buildPack()
@@ -219,7 +250,7 @@ describe("makeIdxPack.findRight", () => {
 
    it("returns -1 when no sub matches addIdx within pack", () => {
       const buf = buildBuf({ entries: [e(1), e(1), e(1)] })
-      const pack = makeIdxPack(buf, 0, 3)
+      const pack = makeIdxPack(buf, 0, 3, SLOTS)
       expect(pack.findRight(0, new Map([[1, 5]]))).toBe(-1)
    })
 
@@ -232,7 +263,7 @@ describe("makeIdxPack.findRight", () => {
 describe("makeIdxPack.countLeft", () => {
    it("counts matching entries strictly left of chronIdx", () => {
       const buf = buildBuf({ entries: [e(1), e(2), e(1), e(3), e(1)] })
-      const pack = makeIdxPack(buf, 0, 5)
+      const pack = makeIdxPack(buf, 0, 5, SLOTS)
       expect(pack.countLeft(0, new Map([[1, 0]]))).toBe(0)
       expect(pack.countLeft(4, new Map([[1, 0]]))).toBe(2)
       expect(pack.countLeft(5, new Map([[1, 0]]))).toBe(3)
@@ -240,7 +271,7 @@ describe("makeIdxPack.countLeft", () => {
 
    it("respects sub addIdx", () => {
       const buf = buildBuf({ entries: [e(1), e(1), e(1)] })
-      const pack = makeIdxPack(buf, 0, 3)
+      const pack = makeIdxPack(buf, 0, 3, SLOTS)
       expect(pack.countLeft(3, new Map([[1, 1]]))).toBe(2)
    })
 
@@ -249,7 +280,7 @@ describe("makeIdxPack.countLeft", () => {
          chanCounts: { 1: 200 },
          entries: [e(1)],
       })
-      const pack = makeIdxPack(buf, 1, 1)
+      const pack = makeIdxPack(buf, 1, 1, SLOTS)
       // baseChron = 1 * IDX_PACK_SIZE; addIdx (0) < baseChron, so prior count = 200
       expect(pack.countLeft(IDX_PACK_SIZE, new Map([[1, 0]]))).toBe(200)
       expect(pack.countLeft(IDX_PACK_SIZE + 1, new Map([[1, 0]]))).toBe(201)
@@ -257,15 +288,23 @@ describe("makeIdxPack.countLeft", () => {
 
    it("clamps limit at packSize so chronIdx past the pack still works", () => {
       const buf = buildBuf({ entries: [e(1), e(1), e(1)] })
-      const pack = makeIdxPack(buf, 0, 3)
+      const pack = makeIdxPack(buf, 0, 3, SLOTS)
       expect(pack.countLeft(99999, new Map([[1, 0]]))).toBe(3)
    })
 })
 
-// idx/h<N>.gz is the verbatim concatenation of finalized-pack headers.
+// idx/h<N>.gz is the verbatim concatenation of finalized-pack headers, each
+// variable-length (its own numSlots). Concatenate the entry-less buildBuf
+// outputs so the strides match what parseIdxHeaders walks.
 function buildSummary(headers: Omit<PackOpts, "entries">[]): ArrayBuffer {
-   const out = new Uint8Array(headers.length * IDX_HEADER_SIZE)
-   headers.forEach((h, k) => out.set(new Uint8Array(buildBuf({ ...h, entries: [] })), k * IDX_HEADER_SIZE))
+   const parts = headers.map((h) => new Uint8Array(buildBuf({ ...h, entries: [] })))
+   const total = parts.reduce((n, p) => n + p.byteLength, 0)
+   const out = new Uint8Array(total)
+   let off = 0
+   for (const p of parts) {
+      out.set(p, off)
+      off += p.byteLength
+   }
    return out.buffer
 }
 
@@ -275,7 +314,7 @@ describe("makeIdxPack.findChronForBlocks", () => {
    const base = 2 * IDX_PACK_SIZE
 
    it("returns the global chron of the leftmost entry with fetchedAt >= tsBlocks", () => {
-      const pack = makeIdxPack(buf, 2, 4)
+      const pack = makeIdxPack(buf, 2, 4, SLOTS)
       expect(pack.findChronForBlocks(0)).toBe(base)
       expect(pack.findChronForBlocks(11)).toBe(base + 1)
       expect(pack.findChronForBlocks(15)).toBe(base + 1)
@@ -283,20 +322,20 @@ describe("makeIdxPack.findChronForBlocks", () => {
    })
 
    it("returns one past the pack's end when nothing qualifies", () => {
-      expect(makeIdxPack(buf, 2, 4).findChronForBlocks(21)).toBe(base + 4)
+      expect(makeIdxPack(buf, 2, 4, SLOTS).findChronForBlocks(21)).toBe(base + 4)
    })
 
    it("clamps a tsBlocks before the pack's first entry to the base chron", () => {
       // ts earlier than the archive start (the date picker is clamped to
       // first_fetched's *day*, but a ts earlier in that same day is negative):
       // every entry qualifies, so the leftmost is the pack base.
-      expect(makeIdxPack(buf, 2, 4).findChronForBlocks(-5)).toBe(base)
-      expect(makeIdxPack(buf, 2, 4).findChronForBlocks(10)).toBe(base) // exactly the first entry
+      expect(makeIdxPack(buf, 2, 4, SLOTS).findChronForBlocks(-5)).toBe(base)
+      expect(makeIdxPack(buf, 2, 4, SLOTS).findChronForBlocks(10)).toBe(base) // exactly the first entry
    })
 })
 
 describe("parseIdxHeaders", () => {
-   it("decodes each 1036-byte chunk", () => {
+   it("decodes each variable-length chunk by its own numSlots", () => {
       const buf = buildSummary([
          { fetchedAtBase: 0, packIdBase: 1, packOffBase: 0 },
          { fetchedAtBase: 9, packIdBase: 4, packOffBase: 2, chanCounts: { 1: 50000 } },
@@ -305,17 +344,25 @@ describe("parseIdxHeaders", () => {
       expect(hs.length).toBe(2)
       expect(hs[0].fetchedAtBase).toBe(0)
       expect(hs[0].packIdBase).toBe(1)
+      expect(hs[0].numSlots).toBe(0)
       expect(hs[1].fetchedAtBase).toBe(9)
       expect(hs[1].packIdBase).toBe(4)
       expect(hs[1].packOffBase).toBe(2)
+      expect(hs[1].numSlots).toBe(2)
       expect(hs[1].chanCounts[1]).toBe(50000)
       expect(hs[1].chanCounts[0]).toBe(0)
    })
 
    it("rejects a size mismatch", () => {
+      // One header in the buffer but count=2 → the walk runs off the end.
       const buf = buildSummary([{}])
       expect(() => parseIdxHeaders(buf, 2)).toThrow(/summary/)
-      expect(() => parseIdxHeaders(buf.slice(0, 100), 1)).toThrow(/summary/)
+      // A buffer shorter than even one header's prefix.
+      expect(() => parseIdxHeaders(buf.slice(0, 10), 1)).toThrow(/summary/)
+      // Trailing bytes past the last header (count too low for the buffer).
+      const padded = new Uint8Array(buf.byteLength + 8)
+      padded.set(new Uint8Array(buf))
+      expect(() => parseIdxHeaders(padded.buffer, 1)).toThrow(/summary/)
    })
 })
 
@@ -324,7 +371,8 @@ describe("findPackForBlocks", () => {
       fetchedAtBase,
       packIdBase: 0,
       packOffBase: 0,
-      chanCounts: new Uint32Array(256),
+      numSlots: 0,
+      chanCounts: new Uint32Array(0),
    })
    // Pack k's last entry value = headers[k+1].fetchedAtBase; the final
    // header is the latest pack's (unbounded end). Packs 0..2 + latest.

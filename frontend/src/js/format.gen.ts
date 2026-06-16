@@ -15,11 +15,14 @@ export const IDX_PACK_SIZE = 50000
 // bytes: the 3 leading uint32 LE idx-header state fields (fetchedAt/packId/packOff bases)
 export const IDX_STATE_SIZE = 12
 
-// channel-id ceiling: chan_id is one byte, the idx header reserves this many chanCount slots
-export const CHAN_ID_SLOTS = 256
+// bytes: idx-header fixed prefix (3 state uint32s + numSlots uint32); the variable count array follows
+export const IDX_HEADER_PREFIX = 16
 
-// bytes: IDX_STATE_SIZE + CHAN_ID_SLOTS uint32 chanCounts
-export const IDX_HEADER_SIZE = 1036
+// bytes per idx entry: chan_id uint16 LE + packed uint8
+export const IDX_ENTRY_SIZE = 3
+
+// channel-id ceiling: chan_id is a uint16, ids run [0, this)
+export const CHAN_ID_CEILING = 65536
 
 // seconds per idx timestamp block (8h): stored fetched_at is unix seconds ÷ this
 export const FETCHED_AT_BLOCK = 28800
