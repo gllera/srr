@@ -61,11 +61,11 @@ func TestBloomBitsVectors(t *testing.T) {
 		gram string
 		want [searchBloomK]uint32
 	}{
-		{"abc", [searchBloomK]uint32{87883, 63844, 39805, 15766}},
-		{"ukr", [searchBloomK]uint32{66889, 37986, 9083, 242324}},
-		{"日本語", [searchBloomK]uint32{61319, 250428, 177393, 104358}},
-		{"niñ", [searchBloomK]uint32{108032, 123835, 139638, 155441}},
-		{"42a", [searchBloomK]uint32{230950, 126783, 22616, 180593}},
+		{"abc", [searchBloomK]uint32{22347, 31076, 7037, 15766}},
+		{"ukr", [searchBloomK]uint32{1353, 5218, 9083, 12948}},
+		{"日本語", [searchBloomK]uint32{28551, 21052, 13553, 6054}},
+		{"niñ", [searchBloomK]uint32{9728, 25531, 8566, 24369}},
+		{"42a", [searchBloomK]uint32{1574, 28479, 22616, 16753}},
 	} {
 		if got := bloomBits(tc.gram); got != tc.want {
 			t.Errorf("bloomBits(%q) = %v, want %v", tc.gram, got, tc.want)
