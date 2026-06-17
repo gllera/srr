@@ -2,8 +2,8 @@ import { describe, it, expect, vi, beforeEach } from "vitest"
 
 // The touch state machine (one-finger swipe / two-finger cycle) needs real
 // Touch dispatch and is left to the e2e-browser layer (Puppeteer CDP). Here we
-// cover the jsdom-feasible half: the scroll-driven toolbar hide/show, the
-// resetScroll re-baseline, and the read-progress (--read) clamp.
+// cover the jsdom-feasible half: the scroll-driven toolbar hide/show and the
+// resetScroll re-baseline.
 
 const dropdown = vi.hoisted(() => ({ closeAllDropdowns: vi.fn() }))
 vi.mock("./dropdown", () => dropdown)
@@ -15,37 +15,18 @@ const setScrollY = (y: number) => Object.defineProperty(window, "scrollY", { val
 const scroll = () => window.dispatchEvent(new Event("scroll"))
 
 let toolbar: HTMLElement
-let reader: HTMLElement
 let g: Gestures
 
 function mount(): void {
-   document.body.innerHTML = `<nav class="srr-toolbar"></nav><article class="srr-reader"></article>
+   document.body.innerHTML = `<nav class="srr-toolbar"></nav>
       <button class="srr-prev"></button><button class="srr-next"></button>`
    toolbar = document.querySelector(".srr-toolbar")!
-   reader = document.querySelector(".srr-reader")!
    g = setupGestures({
       prev: document.querySelector(".srr-prev")!,
       next: document.querySelector(".srr-next")!,
       toolbar,
-      reader,
       guard: vi.fn(),
       onCycle: vi.fn(),
-   })
-}
-
-// Stub the reader's layout so updateReadProgress is deterministic.
-const layout = (height: number, top: number, innerHeight = 800) => {
-   Object.defineProperty(window, "innerHeight", { value: innerHeight, configurable: true })
-   reader.getBoundingClientRect = () => ({
-      height,
-      top,
-      bottom: top + height,
-      left: 0,
-      right: 0,
-      width: 0,
-      x: 0,
-      y: top,
-      toJSON: () => ({}),
    })
 }
 
@@ -92,33 +73,5 @@ describe("resetScroll", () => {
       // The queued scroll event from the jump now reads zero delta → no re-hide.
       scroll()
       expect(toolbar.classList.contains("srr-toolbar-slide")).toBe(false)
-   })
-})
-
-describe("read-progress (--read)", () => {
-   const read = () => reader.style.getPropertyValue("--read")
-
-   it("inks a short (unscrollable) article fully (--read = 1)", () => {
-      layout(500, 0) // height < viewport → scrollable <= 10
-      g.syncReadProgress()
-      expect(read()).toBe("1")
-   })
-
-   it("sets the scrolled fraction for a long article", () => {
-      layout(2000, -600) // scrollable = 1200; scrolled 600 past the top → 0.5
-      g.syncReadProgress()
-      expect(read()).toBe("0.5")
-   })
-
-   it("clamps the fraction to [0,1]", () => {
-      layout(2000, -5000) // scrolled way past → clamps to 1
-      g.syncReadProgress()
-      expect(read()).toBe("1")
-   })
-
-   it("is a no-op on the list (hidden reader)", () => {
-      reader.hidden = true
-      g.syncReadProgress()
-      expect(read()).toBe("") // --read never set
    })
 })

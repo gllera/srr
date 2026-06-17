@@ -194,8 +194,8 @@ function render(o: IShowFeed) {
       title: data.feedTitle(o.article.f),
       tag: o.feed?.tag || "",
    }
-   // Key the reader's spine + masthead to the article's source color (same ramp
-   // as the list rails — see styles.css [data-src]).
+   // Key the reader's masthead to the article's source color (same ramp as the
+   // list rails — see styles.css [data-src]).
    el.article.dataset.src = String(srcColorIndex(o.article.f))
    el.source.textContent = currentFeed.title
    refreshFeedLabel()
@@ -225,17 +225,9 @@ function render(o: IShowFeed) {
    // the menu before its render(), so this is a no-op on all other paths.
    if (!document.querySelector(".srr-dropdown-menu.srr-open")) el.title.focus()
 
-   // Double rAF: first ensures the browser has painted with opacity:0,
-   // second re-enables transitions so the fade-in animates. The article is now
-   // laid out at scrollTop 0, so sync the read-through spine (scrollTo(0,0) above
-   // fired no scroll event when already at the top — a short article would
-   // otherwise keep the prior article's fill until first scroll).
-   requestAnimationFrame(() =>
-      requestAnimationFrame(() => {
-         clearContentTransition()
-         gestures?.syncReadProgress()
-      }),
-   )
+   // Double rAF: first ensures the browser has painted with opacity:0, second
+   // re-enables transitions so the fade-in animates.
+   requestAnimationFrame(() => requestAnimationFrame(clearContentTransition))
 
    try {
       localStorage.setItem("srr-hash", location.hash)
@@ -697,7 +689,7 @@ async function init() {
       }
    })
 
-   gestures = setupGestures({ prev: el.prev, next: el.next, toolbar: el.toolbar, reader: el.article, guard, onCycle })
+   gestures = setupGestures({ prev: el.prev, next: el.next, toolbar: el.toolbar, guard, onCycle })
    refreshUnreadButton() // reflect the persisted unread-only mode on the toolbar at boot
 
    let hash = location.hash.substring(1)
