@@ -1,4 +1,4 @@
-.PHONY: verify verify-fe verify-be lint-fe format-check-fe format-fe test-fe build-fe dev-fe vet-be build-be test-be test-contract test-browser test-e2e generate generate-check release clean
+.PHONY: verify verify-fe verify-be lint-fe format-check-fe format-fe test-fe build-fe dev-fe vet-be build-be test-be test-contract test-browser test-stress test-e2e generate generate-check release clean
 
 SHELL := /bin/bash -e
 
@@ -25,6 +25,14 @@ test-contract test-browser: build-be frontend/node_modules/.package-lock.json
 	cd frontend && SRR_BIN=../dist/srrb npm run $@
 
 test-e2e: test-contract test-browser
+
+# Stress/performance layer (opt-in, NOT in verify). Generates or reuses a large
+# (>50k-article) synthetic store via the gated Go generator (genbig_test.go) and
+# measures navigation/filtering/query cost at scale. Tunable:
+#   SRR_STRESS_N=<articles>      store size to generate (default 60000)
+#   SRR_STRESS_STORE=<dir>       use an existing store instead of generating
+test-stress: build-be frontend/node_modules/.package-lock.json
+	cd frontend && SRR_BIN=../dist/srrb npm run test-stress
 
 frontend/node_modules/.package-lock.json: frontend/package-lock.json
 	cd frontend && npm ci
