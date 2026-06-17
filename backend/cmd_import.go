@@ -158,20 +158,20 @@ func (iw *importWalker) isSelected(id string, importAll bool) bool {
 }
 
 // applyImportDefaults stamps Pipe / Ingest / Tag onto every channel
-// emitted by the importer. parsers (a slice) and the ingest/tag pointers are
+// emitted by the importer. parsers (a slice) and the ingestStrategy/tag pointers are
 // `nil` when the corresponding CLI flag is absent. parsers passes through
 // filterPipe so empty entries drop and an all-empty input becomes nil
 // (inherit-root semantics).
-func applyImportDefaults(channels []*Channel, parsers []string, ingest, tag *string) {
+func applyImportDefaults(channels []*Channel, parsers []string, ingestStrategy, tag *string) {
 	if parsers != nil {
 		pipe := filterPipe(parsers)
 		for _, c := range channels {
-			c.Pipe = pipe
+			c.Pipe = append([]string(nil), pipe...)
 		}
 	}
-	if ingest != nil {
+	if ingestStrategy != nil {
 		for _, c := range channels {
-			c.Ingest = *ingest
+			c.Ingest = *ingestStrategy
 		}
 	}
 	if tag != nil {

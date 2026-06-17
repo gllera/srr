@@ -191,18 +191,17 @@ func TestImportWalkerSorting(t *testing.T) {
 // folder visited wins the tag (folders are walked in case-insensitive name
 // order, so "AAA" precedes "BBB").
 func TestImportDedupCrossFolder(t *testing.T) {
-	shared := &Channel{Title: "Shared", URL: "http://example.com/shared"}
 	nodes := []*OPMLNode{
 		{
 			Name: "AAA",
 			Children: []*OPMLNode{
-				{Name: "Shared", Channel: shared},
+				{Name: "Shared", Channel: &Channel{Title: "Shared", URL: "http://example.com/shared"}},
 			},
 		},
 		{
 			Name: "BBB",
 			Children: []*OPMLNode{
-				{Name: "Shared", Channel: shared},
+				{Name: "Shared", Channel: &Channel{Title: "Shared", URL: "http://example.com/shared"}},
 			},
 		},
 	}
