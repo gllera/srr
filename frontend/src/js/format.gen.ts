@@ -90,7 +90,6 @@ export interface IDBWire {
    next_pid: number // NextPackID
    pack_off: number // PackOffset
    first_fetched: number // FirstFetchedAt
-   fetched_at_cur?: number // FetchedAtCursor
    pipe?: string[] // Pipe
    ingest?: string // Ingest
    gen?: number // Gen

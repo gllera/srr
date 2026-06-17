@@ -1,4 +1,4 @@
-import { IDX_ENTRY_SIZE, IDX_HEADER_PREFIX, IDX_PACK_SIZE } from "./format.gen"
+import { IDX_BOUNDARY_SIZE, IDX_ENTRY_SIZE, IDX_HEADER_PREFIX, IDX_PACK_SIZE } from "./format.gen"
 
 export { IDX_PACK_SIZE }
 
@@ -7,8 +7,7 @@ export { IDX_PACK_SIZE }
 // is variable-length — dense up to the high-water feed id when the pack was
 // written (numSlots entries). Available for every pack without entry parsing —
 // from the pack's own bytes at construction, or from the idx/h<N>.gz summary
-// for packs not yet fetched. (The wire prefix also leads with a fetchedAt_base
-// u32, but the reader doesn't decode entry timestamps — see parseIdxHeader.)
+// for packs not yet fetched.
 export interface IdxHeader {
    packIdBase: number
    packOffBase: number
@@ -35,15 +34,12 @@ export interface IdxPack {
 }
 
 function parseIdxHeader(buf: ArrayBuffer, byteOff: number): IdxHeader {
-   // The on-wire prefix is 4 LE u32s: [fetchedAt_base, packId_base, packOff_base,
-   // numSlots]. The reader ignores fetchedAt_base — entry timestamps aren't
-   // decoded any more (only the backend's `srr inspect` tooling reads them), so
-   // h[0] is skipped and only the pack/offset bases + numSlots are kept.
-   const h = new Uint32Array(buf, byteOff, 4)
-   const numSlots = h[3]
+   // The on-wire prefix is 3 LE u32s: [packId_base, packOff_base, numSlots].
+   const h = new Uint32Array(buf, byteOff, 3)
+   const numSlots = h[2]
    return {
-      packIdBase: h[1],
-      packOffBase: h[2],
+      packIdBase: h[0],
+      packOffBase: h[1],
       numSlots,
       // Copy out so the source buffer can be GC'd independently. The count
       // array is variable-length (numSlots entries).
@@ -112,6 +108,13 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
    if (buf.byteLength < expected) {
       throw new Error(`idx pack ${packIndex}: short body, got ${buf.byteLength}B, want ${expected}B`)
    }
+   // The trailing footer is a whole number of u16 boundaries (mirrors the Go
+   // reader's parseIdxPack guard); a ragged tail means a corrupt pack.
+   if ((buf.byteLength - expected) % IDX_BOUNDARY_SIZE !== 0) {
+      throw new Error(
+         `idx pack ${packIndex}: footer not whole u16 boundaries (${buf.byteLength - expected} trailing B)`,
+      )
+   }
    let rawBuf: ArrayBuffer | null = buf
    const baseChron = packIndex * IDX_PACK_SIZE
    function hasCandidate(feeds: Map<number, number>, packEnd: number): boolean {
@@ -122,7 +125,7 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
    }
    const pack: IdxPack = {
       // Decoded eagerly: header-only consumers (countLeft cumulative counts,
-      // pack-skip deltas, timestamp bases) must not force the entry parse.
+      // pack-skip deltas, pack/offset bases) must not force the entry parse.
       header,
       feedIds: new Uint16Array(0),
       ownFeedCounts: new Uint32Array(0),
@@ -147,20 +150,23 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
          const feedIds = new Uint16Array(packSize)
          pack.feedIds = feedIds
          const bytes = new Uint8Array(rawBuf)
-         // Cap at packSize so an oversized body (e.g. stale SW cache with
-         // entries from a newer total_art than db.gz claims) can't push ghost
-         // rows into ownFeedCounts/bounds and skew countLeft/findLeft/Right.
-         const limit = headerEnd + packSize * IDX_ENTRY_SIZE
-         for (let off = headerEnd; off < limit; off += IDX_ENTRY_SIZE) {
+         // Each entry is feed_id:u16 LE. The data-pack boundaries (the u16 LE
+         // local indices where packId advances by 1) live in the footer after
+         // the packSize entries; the bounds are rebuilt from them with the same
+         // push condition the old per-entry delta_pack_id decode used. Reading
+         // entries is capped at packSize so an oversized body (e.g. stale SW
+         // cache) can't push ghost rows into ownFeedCounts/bounds.
+         const entriesEnd = headerEnd + packSize * IDX_ENTRY_SIZE
+         let bi = entriesEnd
+         for (let i = 0; i < packSize; i++) {
+            const off = headerEnd + i * IDX_ENTRY_SIZE
             const feedId = bytes[off] | (bytes[off + 1] << 8)
-            const packed = bytes[off + 2]
-            if (packed >> 7) packId++
-            fetchedAt += packed & DELTA_FETCHED_MAX
-
-            const i = (off - headerEnd) / IDX_ENTRY_SIZE
             feedIds[i] = feedId
-            fetchedAts[i] = fetchedAt
             if (feedId < slots) ownFeedCounts[feedId]++
+            if (bi + IDX_BOUNDARY_SIZE <= bytes.length && (bytes[bi] | (bytes[bi + 1] << 8)) === i) {
+               packId++
+               bi += IDX_BOUNDARY_SIZE
+            }
             if (packId !== lastPackId) {
                pack.bounds.push({ packId, startChron: baseChron + i })
                lastPackId = packId

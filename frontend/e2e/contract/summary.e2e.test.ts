@@ -3,7 +3,13 @@ import { join } from "node:path"
 import { gzipSync } from "node:zlib"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
-import { IDX_ENTRY_SIZE, IDX_HEADER_PREFIX, IDX_PACK_SIZE, IDX_STATE_SIZE } from "../../src/js/format.gen"
+import {
+   IDX_BOUNDARY_SIZE,
+   IDX_ENTRY_SIZE,
+   IDX_HEADER_PREFIX,
+   IDX_PACK_SIZE,
+   IDX_STATE_SIZE,
+} from "../../src/js/format.gen"
 import { makeStore } from "../harness"
 import { mountReader, type MountedReader } from "./mount"
 
@@ -16,7 +22,6 @@ import { mountReader, type MountedReader } from "./mount"
 // bytes here keep this layer inside the `make verify` time budget.
 
 interface Hdr {
-   fetchedAtBase: number
    packIdBase: number
    packOffBase: number
    feedCounts: Record<number, number>
@@ -28,32 +33,43 @@ function headerSlots(h: Hdr): number {
    return keys.length > 0 ? Math.max(...keys) + 1 : 0
 }
 
-// Variable-length header: 3 state uint32s + numSlots uint32, then numSlots×4
-// cumulative counts.
+// Variable-length header: 2 state uint32s (packId/packOff bases) + numSlots
+// uint32, then numSlots×4 cumulative counts.
 function headerBytes(h: Hdr): Uint8Array {
    const numSlots = headerSlots(h)
    const buf = new Uint8Array(IDX_HEADER_PREFIX + numSlots * 4)
    const view = new DataView(buf.buffer)
-   view.setUint32(0, h.fetchedAtBase, true)
-   view.setUint32(4, h.packIdBase, true)
-   view.setUint32(8, h.packOffBase, true)
+   view.setUint32(0, h.packIdBase, true)
+   view.setUint32(4, h.packOffBase, true)
    view.setUint32(IDX_STATE_SIZE, numSlots, true)
    for (const [k, v] of Object.entries(h.feedCounts)) view.setUint32(IDX_HEADER_PREFIX + Number(k) * 4, v, true)
    return buf
 }
 
-// Entries: [feedId, deltaPackId, deltaFetchedAt][]; each entry is feed_id u16
-// LE + packed u8.
+// Entries: [feedId, deltaPackId, _][] (the third tuple slot is ignored — kept
+// for call-site readability). Each entry is feed_id u16 LE; entries flagged
+// deltaPackId=1 contribute their local index to the u16 LE boundary footer.
 function idxPack(h: Hdr, entries: [number, number, number][]): Uint8Array {
    const header = headerBytes(h)
-   const buf = new Uint8Array(header.byteLength + entries.length * IDX_ENTRY_SIZE)
+   const boundaries: number[] = []
+   entries.forEach(([, deltaPack], i) => {
+      if (deltaPack) boundaries.push(i)
+   })
+   const buf = new Uint8Array(
+      header.byteLength + entries.length * IDX_ENTRY_SIZE + boundaries.length * IDX_BOUNDARY_SIZE,
+   )
    buf.set(header)
-   entries.forEach(([feedId, deltaPack, deltaFetched], i) => {
+   const view = new DataView(buf.buffer)
+   entries.forEach(([feedId], i) => {
       const off = header.byteLength + i * IDX_ENTRY_SIZE
       buf[off] = feedId & 0xff
       buf[off + 1] = (feedId >> 8) & 0xff
-      buf[off + 2] = (deltaPack << 7) | (deltaFetched & 0x7f)
    })
+   let foff = header.byteLength + entries.length * IDX_ENTRY_SIZE
+   for (const b of boundaries) {
+      view.setUint16(foff, b, true)
+      foff += IDX_BOUNDARY_SIZE
+   }
    return buf
 }
 
@@ -65,18 +81,17 @@ function fill(feedId: number, first: [number, number, number]): [number, number,
 
 const FIRST_FETCHED = 1700000000
 
-// Layout: pack 0 = 50k × feed 0 (fetchedAts 0, data pack 1) · pack 1 = 50k ×
-// feed 1 (fetchedAts 10, data pack 2) · latest = 2 × feed 2 (fetchedAts 20,
-// data pack 3 = data/L1.gz). hdrs=2 covers packs 0 and 1.
+// Layout: pack 0 = 50k × feed 0 (data pack 1) · pack 1 = 50k × feed 1 (data
+// pack 2) · latest = 2 × feed 2 (data pack 3 = data/L1.gz). hdrs=2 covers packs
+// 0 and 1. Each pack's first entry is flagged a boundary (deltaPack=1).
 function buildStore(opts: { hdrs: boolean; summaryFile: boolean }): string {
    const dir = makeStore()
    mkdirSync(join(dir, "idx"))
    mkdirSync(join(dir, "data"))
 
-   const hdr0: Hdr = { fetchedAtBase: 0, packIdBase: 0, packOffBase: 0, feedCounts: {} }
-   const hdr1: Hdr = { fetchedAtBase: 0, packIdBase: 1, packOffBase: IDX_PACK_SIZE, feedCounts: { 0: 50000 } }
+   const hdr0: Hdr = { packIdBase: 0, packOffBase: 0, feedCounts: {} }
+   const hdr1: Hdr = { packIdBase: 1, packOffBase: IDX_PACK_SIZE, feedCounts: { 0: 50000 } }
    const hdrLatest: Hdr = {
-      fetchedAtBase: 10,
       packIdBase: 2,
       packOffBase: IDX_PACK_SIZE,
       feedCounts: { 0: 50000, 1: 50000 },

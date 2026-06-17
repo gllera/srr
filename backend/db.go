@@ -98,13 +98,13 @@ type DBCore struct {
 	TotalArticles int   `json:"total_art"`
 	NextPackID    int   `json:"next_pid"`
 	PackOffset    int   `json:"pack_off"`
-	// FirstFetchedAt is NOT omitempty: the reader divides by it
-	// (frontend data.ts findChronForTimestamp) so the key must always be
-	// present in db.gz — an absent key would decode to undefined → NaN.
-	FirstFetchedAt  int64    `json:"first_fetched"`
-	FetchedAtCursor int      `json:"fetched_at_cur,omitempty"`
-	Pipe            []string `json:"pipe,omitempty"`
-	Ingest          string   `json:"ingest,omitempty"`
+	// FirstFetchedAt is the unix time of the first fetch that produced
+	// articles — informational metadata (it is no longer the idx-timestamp
+	// epoch; per-entry timestamps were dropped with the 2-byte idx entry).
+	// Kept NOT omitempty so the key is always present for golden/e2e fixtures.
+	FirstFetchedAt int64    `json:"first_fetched"`
+	Pipe           []string `json:"pipe,omitempty"`
+	Ingest         string   `json:"ingest,omitempty"`
 	// Gen is the store generation: bumped (srr gen --bump) after an in-place
 	// store rebuild reuses finalized pack ids with new bytes, so the frontend
 	// service worker can self-invalidate its cache-first pack cache. omitempty
