@@ -58,7 +58,7 @@ const SKELETON = dd("srr-channel", "srr-channel-menu") + dd("srr-overflow", "srr
 
 const $menu = () => document.getElementById("srr-channel-menu")!
 const chan = (over: Partial<IChannel>): IChannel =>
-   ({ id: 1, title: "Test", feeds: [{ url: "http://test.com" }], total_art: 1, ...over }) as IChannel
+   ({ id: 1, title: "Test", url: "http://test.com", total_art: 1, ...over }) as IChannel
 
 function key(el: HTMLElement, k: string): void {
    el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }))
@@ -346,7 +346,7 @@ describe("dropdown: feed-error badges", () => {
    })
 
    it("marks broken channels and their tag header with a dot carrying the error", () => {
-      const broken = chan({ id: 3, title: "Dead", feeds: [{ url: "u", ferr: "404 not found" }] })
+      const broken = chan({ id: 3, title: "Dead", ferr: "404 not found" })
       const healthy = chan({ id: 4, title: "Live" })
       data.groupChannelsByTag.mockReturnValueOnce({
          tagged: new Map([["news", [broken]]]),
@@ -364,11 +364,11 @@ describe("dropdown: feed-error badges", () => {
       expect($menu().querySelector('a[data-value="news"] .srr-err-dot')).not.toBeNull()
    })
 
-   it("renders clean rows for healthy and null-feeds channels", () => {
+   it("renders clean rows for healthy and error-free channels", () => {
       data.groupChannelsByTag.mockReturnValueOnce({
          tagged: new Map(),
          sortedTags: [],
-         untagged: [chan({ id: 5, title: "NullFeeds", feeds: null })],
+         untagged: [chan({ id: 5, title: "NoErr", ferr: undefined })],
       })
       dropdown.showChannelMenu("", guard)
       expect($menu().querySelector(".srr-err-dot")).toBeNull()

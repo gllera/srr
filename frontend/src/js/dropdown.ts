@@ -180,15 +180,11 @@ function toggleDropdown(
    fillMenu(dd, buildContent)
 }
 
-// A non-empty ferr on any of a channel's feeds marks the channel row (and the
-// tag header hiding it when collapsed) with a dot; the row's title/aria-label
-// carry the error text. The evidence already rides in db.gz — this only makes
-// silent feed rot visible.
+// A non-empty ferr on a channel marks its row (and the tag header hiding it
+// when collapsed) with a dot; the row's title/aria-label carry the error text.
+// The evidence already rides in db.gz — this only makes silent feed rot visible.
 function channelErr(ch: IChannel): string {
-   return (ch.feeds ?? [])
-      .map((f) => f.ferr)
-      .filter((e): e is string => !!e)
-      .join("\n")
+   return ch.ferr ?? ""
 }
 
 function errDot(): HTMLSpanElement {
