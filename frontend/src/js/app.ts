@@ -265,6 +265,12 @@ function refreshSaveButton(hasArticle: boolean) {
    const canSave = hasArticle && chron >= 0
    const saved = canSave && nav.isSaved(chron)
    el.save.disabled = !canSave
+   paintSaveButton(saved)
+}
+
+// The save-button visual contract (active class + aria), single-sourced so the
+// reader's refresh and toggle paths can't drift out of lockstep.
+function paintSaveButton(saved: boolean) {
    el.save.classList.toggle("srr-saved", saved)
    el.save.setAttribute("aria-pressed", String(saved))
    el.save.setAttribute("aria-label", saved ? "Unsave article" : "Save article")
@@ -277,9 +283,7 @@ function toggleSave() {
    const chron = nav.currentChron()
    if (chron < 0) return
    const saved = nav.toggleSaved(chron)
-   el.save.classList.toggle("srr-saved", saved)
-   el.save.setAttribute("aria-pressed", String(saved))
-   el.save.setAttribute("aria-label", saved ? "Unsave article" : "Save article")
+   paintSaveButton(saved)
 }
 
 function listTitle(): string {
