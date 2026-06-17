@@ -15,6 +15,7 @@ side's unit tests can see.
 |---|---|---|---|---|
 | **contract** | `contract/` | vitest + jsdom | fast (~1s) | `make verify`, `make test-contract` |
 | **browser** | `browser/` | vitest + Puppeteer (headless Chrome) | slower (~30s, builds the bundle) | `make test-browser`, `make test-e2e` |
+| **stress** | `stress/` | vitest + jsdom | heavy (~15s first run, generates a >50k store) | `make test-stress` (opt-in, NOT verify) |
 
 - **contract** drives the real `idx.ts`/`data.ts`/`nav.ts` directly for
   exhaustive byte-level assertions (every chronIdx, pack splits, dedup, filter
@@ -22,6 +23,12 @@ side's unit tests can see.
 - **browser** builds the real production bundle and drives it in headless Chrome
   against real packs — proves the Parcel build, `app.ts` render, hash routing,
   and real-browser `fetch`/`DecompressionStream` work, not just the modules.
+- **stress** drives the real data modules (`idx`/`data`/`nav`/`search`) against a
+  **large** (>50,000-article, multi-idx-pack, multi-meta-shard, ≥150-feed)
+  synthetic store and measures navigation / filtering / query cost **at scale** —
+  request budget (asserted, deterministic) + wall time (logged as a PERF table).
+  It reuses the contract `mount.ts` shim; the store comes from `stressStore()`
+  (below).
 
 ## Run
 
@@ -29,9 +36,48 @@ side's unit tests can see.
 make test-contract   # fast layer (also part of `make verify`)
 make test-browser    # headless-browser layer
 make test-e2e        # both
+make test-stress     # large-store stress/perf layer (opt-in)
 # or directly (after `make build-be`):
 cd frontend && SRR_BIN=../dist/srrb npm run test-contract
 ```
+
+### Stress layer
+
+`make test-stress` measures the reader at scale. The store comes from
+`harness.ts` `stressStore()`, in precedence order:
+
+1. `SRR_STRESS_STORE=<dir>` — use an existing store as-is (e.g. one you already
+   generated to serve). Never wiped or regenerated.
+2. a per-N cache dir under the OS temp dir (`srr-stress-store-<N>`), reused when
+   it already holds ≥ N articles.
+3. otherwise generated via the gated Go generator (`backend/genbig_test.go`'s
+   `TestGenBigStore` — the **same production write path** a real fetch loop uses),
+   sized by `SRR_STRESS_N` (default 60,000, enough for one finalized idx pack +
+   11 meta shards).
+
+```bash
+make test-stress                          # generate/reuse a 60k store, then measure
+SRR_STRESS_N=120000 make test-stress      # bigger: two finalized idx packs
+SRR_STRESS_STORE=../bigstore make test-stress   # measure a store you already have
+```
+
+What it asserts (deterministic, machine-independent) vs. logs (timings):
+
+- **boot** is O(1): db.gz + idx summary + latest packs only, **no** finalized idx
+  pack fetched, and search/meta untouched until the first query.
+- **navigation**: random-access `loadArticle` across the whole store is correct
+  (idx↔data feed_id agreement) and published-monotonic; stepping **across the
+  50,000-entry idx-pack boundary** stays contiguous.
+- **filtering**: a feed present from the start touches the finalized idx pack,
+  but a **late-added feed's walk skips it entirely** via header deltas (0
+  finalized-idx fetches) — and every count matches the Go writer's own
+  `srr inspect --filter`.
+- **query**: an **absent term prunes every finalized shard** (0 shard fetches), a
+  short (<3-rune) query scans the tail only, and a common term scans every shard
+  with each hit addressing the real article it claims.
+
+The generated store is a durable cache (not deleted on teardown). The PERF table
+prints to the terminal (console interception is disabled for this layer).
 
 `$SRR_BIN` points at the `srrb` binary (the Makefile sets `../dist/srrb`); if
 unset/missing the harness builds it on demand from `backend/`. The browser layer
@@ -58,5 +104,7 @@ needs the Chromium under `~/.cache/puppeteer/` (installed with `puppeteer`).
   decompresses manually; a gzip header would double-decode.
 - The browser server sends `Connection: close` and calls `closeAllConnections()`
   on teardown — otherwise `server.close()` stalls on Chrome's keep-alive sockets.
-- A >50k-article multi-*idx*-pack case is too slow for the default run; add it as
-  a `describe.skip` stub if you need to exercise idx-pack continuity.
+- A >50k-article multi-*idx*-pack case is too slow for `make verify`; that's what
+  the **stress** layer (`make test-stress`, above) is for — it generates a real
+  >50k store once and reuses it, so idx-pack continuity at scale is covered there,
+  not inline in the contract layer.

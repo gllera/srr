@@ -16,6 +16,7 @@
     "test": "vitest run",
     "test-contract": "vitest run --config vitest.contract.config.ts",
     "test-browser": "vitest run --config vitest.browser.config.ts",
+    "test-stress": "vitest run --config vitest.stress.config.ts",
     "lint": "eslint src/js",
     "format": "prettier --write src",
     "format-check": "prettier --check src"

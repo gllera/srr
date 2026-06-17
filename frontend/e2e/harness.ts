@@ -6,11 +6,12 @@
 import { execFile, execFileSync } from "node:child_process"
 import { createServer, type Server } from "node:http"
 import type { AddressInfo } from "node:net"
-import { existsSync, mkdtempSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
+import { gunzipSync } from "node:zlib"
 
 const execFileAsync = promisify(execFile)
 
@@ -58,6 +59,66 @@ export function inspectValidate(storeDir: string): Promise<string> {
 // Fresh temp store directory. Caller is responsible for cleanup (see afterAll).
 export function makeStore(): string {
    return mkdtempSync(join(tmpdir(), "srr-e2e-"))
+}
+
+// total_art read straight from a store's db.gz, or -1 if it isn't a readable
+// store. Used to decide whether a cached stress store can be reused.
+function storeTotalArt(dir: string): number {
+   const f = join(dir, "db.gz")
+   if (!existsSync(f)) return -1
+   try {
+      const db = JSON.parse(gunzipSync(readFileSync(f)).toString("utf8")) as { total_art?: number }
+      return db.total_art ?? 0
+   } catch {
+      return -1
+   }
+}
+
+export interface StressStore {
+   dir: string
+   total: number
+   generated: boolean
+}
+
+const DEFAULT_STRESS_N = 60000
+
+// Resolve the large synthetic store the stress layer measures against. Three
+// modes, in precedence order:
+//   1. $SRR_STRESS_STORE — use an existing store as-is (e.g. one you generated
+//      to serve to the reader). Never regenerated or wiped.
+//   2. a per-N cache dir under the OS temp dir (srr-stress-store-<N>): reused
+//      across runs when it already holds >= N articles.
+//   3. otherwise generate one via the gated Go generator (genbig_test.go's
+//      TestGenBigStore — the SAME production write path a real fetch loop uses),
+//      sized by $SRR_STRESS_N (default 60,000, enough to cross the 50,000-entry
+//      idx-pack boundary into a finalized pack + multiple meta shards).
+// Unlike makeStore(), the result is a durable cache — callers must NOT delete it.
+export function stressStore(): StressStore {
+   const n = Number(process.env.SRR_STRESS_N) || DEFAULT_STRESS_N
+
+   const override = process.env.SRR_STRESS_STORE
+   if (override) {
+      const dir = resolve(process.cwd(), override)
+      const total = storeTotalArt(dir)
+      if (total < 0) throw new Error(`SRR_STRESS_STORE=${dir} is not a readable srr store (no db.gz)`)
+      return { dir, total, generated: false }
+   }
+
+   const dir = join(tmpdir(), `srr-stress-store-${n}`)
+   const cached = storeTotalArt(dir)
+   if (cached >= n) return { dir, total: cached, generated: false }
+
+   // (Re)generate. stdio inherit so the generator's progress + the validate
+   // sweep stream to the test output; FORCE wipes any short/partial cache.
+   execFileSync("go", ["test", "-run", "TestGenBigStore", "-count=1", "-timeout", "1800s", "."], {
+      cwd: resolve(REPO, "backend"),
+      stdio: "inherit",
+      env: { ...process.env, SRR_GENBIG_OUT: dir, SRR_GENBIG_N: String(n), SRR_GENBIG_FORCE: "1" },
+   })
+
+   const total = storeTotalArt(dir)
+   if (total < n) throw new Error(`stress store generation reached only ${total}/${n} articles at ${dir}`)
+   return { dir, total, generated: true }
 }
 
 export interface FeedServer {
