@@ -113,7 +113,8 @@ type DBCore struct {
 	// json.Unmarshal) — accepted for a single-operator deployment.
 	Gen int `json:"gen,omitempty"`
 	// HdrPacks is the idx header-summary coverage: idx/h<HdrPacks>.gz holds
-	// the verbatim 1036-byte headers of finalized idx packs 0..HdrPacks-1.
+	// the verbatim variable-length headers of finalized idx packs 0..HdrPacks-1
+	// (each idxHeaderPrefix + numSlots*4 bytes).
 	// SyncIdxSummary sets it only after the summary save succeeds and Commit
 	// publishes it (write-once name, same crash argument as Seq). Same
 	// old-binary hazard as Gen: a binary without this field drops it on its

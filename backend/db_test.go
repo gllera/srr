@@ -1055,10 +1055,11 @@ func TestPutArticlesFirstFetchedAt(t *testing.T) {
 	}
 }
 
-// first_fetched must ALWAYS be present in db.gz — the reader divides by it
-// (frontend data.ts findChronForTimestamp), so an omitted key would decode to
-// undefined → NaN and break every time-range jump. The struct tag must NOT be
-// omitempty; this guards against re-adding it.
+// first_fetched must ALWAYS be present in db.gz: it is kept NOT omitempty so
+// the key is present for golden/e2e fixtures (DBCore.FirstFetchedAt is now
+// informational metadata — no longer the idx-timestamp epoch the reader divided
+// by, since per-entry timestamps were dropped with the 2-byte idx entry). This
+// guards against re-adding omitempty.
 func TestDBCommitAlwaysEmitsFirstFetched(t *testing.T) {
 	dir := t.TempDir()
 	globals = &Globals{PackSize: 1, Store: dir}

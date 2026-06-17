@@ -57,7 +57,7 @@ function wordGrams(word: string): string[] {
    return out
 }
 
-// bloomBits mirrors db_search.go bloomBits: FNV-1a-64 over the gram's UTF-8
+// bloomBits mirrors db_meta.go bloomBits: FNV-1a-64 over the gram's UTF-8
 // bytes, double-hashed as h1=low32 / h2=high32|1. The Go side reduces probe
 // indices with uint32 wraparound then a power-of-two mask; 2^32 is a multiple
 // of the bit count, so plain exact-integer % here lands on the same bits.
