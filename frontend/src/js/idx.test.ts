@@ -173,6 +173,16 @@ describe("makeIdxPack.parse", () => {
       expect(() => makeIdxPack(buf, 0, 7, SLOTS)).toThrow(/short body/)
    })
 
+   it("rejects a footer whose trailing bytes are not whole u16 boundaries", () => {
+      // Mirror of the Go side's parseIdxPack guard (idx_read_test.go
+      // TestParseIdxPackRejectsRaggedFooter): one stray byte past header+entries
+      // can't be a complete u16 boundary, so the pack is corrupt.
+      const base = buildBuf({ entries: [e(1), e(2)] })
+      const ragged = new Uint8Array(base.byteLength + 1)
+      ragged.set(new Uint8Array(base))
+      expect(() => makeIdxPack(ragged.buffer, 0, 2, SLOTS)).toThrow(/footer not whole u16 boundaries/)
+   })
+
    it("ignores trailing entries past packSize (a stale SW cache may hold a longer body)", () => {
       // The body carries 5 entries but db.gz says this pack holds 3 — parsing
       // must stop at packSize so the ghost rows don't skew feedIds/bounds/counts.

@@ -29,7 +29,7 @@ func inspectOne(fetch keyGetter, core *DBCore, packs []*idxPack, chron int) erro
 	fmt.Printf("  data pack entries: %d\n", len(entries))
 
 	if offset >= len(entries) {
-		fmt.Printf("  *** OUT OF RANGE: frontend will throw 'Cannot read properties of undefined (reading 's')' ***\n")
+		fmt.Printf("  *** OUT OF RANGE: frontend will throw 'Cannot read properties of undefined (reading 'f')' ***\n")
 		return fmt.Errorf("offset %d >= entries %d", offset, len(entries))
 	}
 	a := entries[offset]
