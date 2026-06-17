@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
-import { IDX_ENTRY_SIZE, IDX_HEADER_PREFIX, IDX_STATE_SIZE } from "./format.gen"
+import { IDX_BOUNDARY_SIZE, IDX_ENTRY_SIZE, IDX_HEADER_PREFIX, IDX_STATE_SIZE } from "./format.gen"
 
 // data.ts has a top-level db.gz fetch and private state set only by init(), so
 // its composition edges (clamp, empty store, the 50000 pack seam,
@@ -12,30 +12,38 @@ const PACK_SIZE = 50000
 
 interface Entry {
    feedId: number
+   // deltaPackId marks a data-pack boundary; its local index goes in the footer.
    deltaPackId?: 0 | 1
-   deltaFetchedAt?: number
 }
 
-// Build one idx pack buffer (variable header + 3-byte entries: feed_id u16 LE +
-// packed u8), mirroring the backend writer and idx.test.ts's buildBuf. These
-// edge cases carry no header feedCounts, so numSlots = 0 (16-byte prefix only).
-function packBuf(entries: Entry[], opts: { fetchedAtBase?: number } = {}): ArrayBuffer {
-   const buf = new ArrayBuffer(IDX_HEADER_PREFIX + entries.length * IDX_ENTRY_SIZE)
+// Build one v2 idx pack buffer (header ‖ 2-byte feed_id entries ‖ u16 LE
+// boundary footer), mirroring the backend writer and idx.test.ts's buildBuf.
+// These edge cases carry no header feedCounts, so numSlots = 0 (12-byte prefix).
+function packBuf(entries: Entry[]): ArrayBuffer {
+   const boundaries: number[] = []
+   entries.forEach((e, i) => {
+      if (e.deltaPackId) boundaries.push(i)
+   })
+   const buf = new ArrayBuffer(
+      IDX_HEADER_PREFIX + entries.length * IDX_ENTRY_SIZE + boundaries.length * IDX_BOUNDARY_SIZE,
+   )
    const view = new DataView(buf)
-   view.setUint32(0, opts.fetchedAtBase ?? 0, true)
    view.setUint32(IDX_STATE_SIZE, 0, true) // numSlots = 0
    const bytes = new Uint8Array(buf)
    for (let i = 0; i < entries.length; i++) {
-      const e = entries[i]
       const off = IDX_HEADER_PREFIX + i * IDX_ENTRY_SIZE
-      bytes[off] = e.feedId & 0xff
-      bytes[off + 1] = (e.feedId >> 8) & 0xff
-      bytes[off + 2] = ((e.deltaPackId ?? 0) << 7) | ((e.deltaFetchedAt ?? 0) & 0x7f)
+      bytes[off] = entries[i].feedId & 0xff
+      bytes[off + 1] = (entries[i].feedId >> 8) & 0xff
+   }
+   let foff = IDX_HEADER_PREFIX + entries.length * IDX_ENTRY_SIZE
+   for (const b of boundaries) {
+      view.setUint16(foff, b, true)
+      foff += IDX_BOUNDARY_SIZE
    }
    return buf
 }
 
-// N zero-filled numSlots=0 headers (16-byte prefix each) concatenated — a
+// N zero-filled numSlots=0 headers (12-byte prefix each) concatenated — a
 // minimal idx/h<N>.gz summary. parseIdxHeaders reads numSlots=0 from each
 // prefix and advances by IDX_HEADER_PREFIX.
 function summaryBuf(n: number): ArrayBuffer {

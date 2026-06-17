@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { IDX_ENTRY_SIZE, IDX_HEADER_PREFIX, IDX_STATE_SIZE } from "./format.gen"
+import { IDX_BOUNDARY_SIZE, IDX_ENTRY_SIZE, IDX_HEADER_PREFIX, IDX_STATE_SIZE } from "./format.gen"
 import { IDX_PACK_SIZE, makeFeedsLookup, makeIdxPack, parseIdxHeaders } from "./idx"
 
 // The scan methods take the prebuilt reverse lookup data.ts hoists once per nav
@@ -8,12 +8,12 @@ const lk = (feeds: Map<number, number>): Int32Array => makeFeedsLookup(feeds, SL
 
 interface Entry {
    feedId: number
+   // deltaPackId marks this entry as a data-pack boundary: buildBuf collects the
+   // local indices of such entries into the u16 LE footer (the wire form).
    deltaPackId: 0 | 1
-   deltaFetchedAt: number
 }
 
 interface PackOpts {
-   fetchedAtBase?: number
    packIdBase?: number
    packOffBase?: number
    feedCounts?: Record<number, number>
@@ -34,34 +34,39 @@ function headerSlots(o: Pick<PackOpts, "feedCounts" | "numSlots">): number {
    return keys.length > 0 ? Math.max(...keys) + 1 : 0
 }
 
+// buildBuf assembles a v2 idx pack: header (prefix [packIdBase, packOffBase,
+// numSlots] + feedCounts) ‖ 2-byte feed_id entries ‖ u16 LE boundary footer
+// (the local indices of entries flagged deltaPackId=1).
 function buildBuf(o: PackOpts): ArrayBuffer {
    const numSlots = headerSlots(o)
    const headerSize = IDX_HEADER_PREFIX + numSlots * 4
-   const buf = new ArrayBuffer(headerSize + o.entries.length * IDX_ENTRY_SIZE)
+   const boundaries: number[] = []
+   o.entries.forEach((e, i) => {
+      if (e.deltaPackId) boundaries.push(i)
+   })
+   const buf = new ArrayBuffer(headerSize + o.entries.length * IDX_ENTRY_SIZE + boundaries.length * IDX_BOUNDARY_SIZE)
    const view = new DataView(buf)
-   view.setUint32(0, o.fetchedAtBase ?? 0, true)
-   view.setUint32(4, o.packIdBase ?? 0, true)
-   view.setUint32(8, o.packOffBase ?? 0, true)
+   view.setUint32(0, o.packIdBase ?? 0, true)
+   view.setUint32(4, o.packOffBase ?? 0, true)
    view.setUint32(IDX_STATE_SIZE, numSlots, true)
    for (const [k, v] of Object.entries(o.feedCounts ?? {})) {
       view.setUint32(IDX_HEADER_PREFIX + Number(k) * 4, v, true)
    }
    const bytes = new Uint8Array(buf)
    for (let i = 0; i < o.entries.length; i++) {
-      const e = o.entries[i]
       const off = headerSize + i * IDX_ENTRY_SIZE
-      bytes[off] = e.feedId & 0xff
-      bytes[off + 1] = (e.feedId >> 8) & 0xff
-      bytes[off + 2] = (e.deltaPackId << 7) | (e.deltaFetchedAt & 0x7f)
+      bytes[off] = o.entries[i].feedId & 0xff
+      bytes[off + 1] = (o.entries[i].feedId >> 8) & 0xff
+   }
+   let foff = headerSize + o.entries.length * IDX_ENTRY_SIZE
+   for (const b of boundaries) {
+      view.setUint16(foff, b, true)
+      foff += IDX_BOUNDARY_SIZE
    }
    return buf
 }
 
-const e = (feedId: number, deltaPackId: 0 | 1 = 0, deltaFetchedAt = 0): Entry => ({
-   feedId,
-   deltaPackId,
-   deltaFetchedAt,
-})
+const e = (feedId: number, deltaPackId: 0 | 1 = 0): Entry => ({ feedId, deltaPackId })
 
 describe("IDX_PACK_SIZE", () => {
    it("is 50000", () => {
@@ -112,14 +117,10 @@ describe("makeIdxPack.parse", () => {
 
    it("exposes the full header before parse() is called", () => {
       const buf = buildBuf({
-         // The wire prefix still leads with a fetchedAt_base u32 (42 here); the
-         // reader skips it (entry timestamps aren't decoded) and keeps only the
-         // pack/offset bases + numSlots, so it isn't exposed on the header.
-         fetchedAtBase: 42,
          packIdBase: 7,
          packOffBase: 3,
          feedCounts: { 5: 11 },
-         entries: [e(1, 1, 2)],
+         entries: [e(1, 1)],
       })
       const pack = makeIdxPack(buf, 0, 1, SLOTS)
       expect(pack.header.packIdBase).toBe(7)
@@ -155,11 +156,11 @@ describe("makeIdxPack.parse", () => {
       expect(pack.bounds[0]).toEqual({ packId: 5, startChron: -10 })
    })
 
-   it("advances packId on the delta_pack_id bit and adds a new bound", () => {
+   it("advances packId on a footer boundary and adds a new bound", () => {
       const buf = buildBuf({
          packIdBase: 5,
          packOffBase: 0,
-         entries: [e(1, 0, 0), e(2, 1, 0), e(3, 0, 0)],
+         entries: [e(1), e(2, 1), e(3)],
       })
       const pack = makeIdxPack(buf, 0, 3, SLOTS).parse()
       expect(pack.bounds.length).toBe(2)

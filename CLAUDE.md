@@ -37,12 +37,12 @@ All commands run from the repo root via `make`:
 
 Shared format between backend (writer) and frontend (reader).
 
-**Single source of truth**: the Go declarations — the format constants in `backend/db.go` (`idxPackSize`, `idxHeaderPrefix`, `idxEntrySize`, `feedIDCeiling`, `fetchedAtBlock`, …), the write-once pack-name grammar `store.PackSeries` in `backend/store/main.go` (series → valid kind letters; builds the store's `packKeyRe` and, via the generated `PACK_SERIES_KINDS`, the service worker's route regex), and the JSON struct tags of `ArticleData`/`Feed`/`DBCore`. The TS side consumes them through the generated `frontend/src/js/format.gen.ts` (constants + grammar table + wire interfaces; emitted by the hidden `srr gen-ts` command, regenerated via `make generate`, freshness-checked by `make verify`). The backend's only read-side idx parser is `backend/idx_read.go`, a byte-for-byte mirror of `frontend/src/js/idx.ts`. This section documents the format; the code above defines it.
+**Single source of truth**: the Go declarations — the format constants in `backend/db.go` (`idxPackSize`, `idxHeaderPrefix`, `idxEntrySize`, `idxBoundarySize`, `feedIDCeiling`, …), the write-once pack-name grammar `store.PackSeries` in `backend/store/main.go` (series → valid kind letters; builds the store's `packKeyRe` and, via the generated `PACK_SERIES_KINDS`, the service worker's route regex), and the JSON struct tags of `ArticleData`/`Feed`/`DBCore`. The TS side consumes them through the generated `frontend/src/js/format.gen.ts` (constants + grammar table + wire interfaces; emitted by the hidden `srr gen-ts` command, regenerated via `make generate`, freshness-checked by `make verify`). The backend's only read-side idx parser is `backend/idx_read.go`, a byte-for-byte mirror of `frontend/src/js/idx.ts`. This section documents the format; the code above defines it.
 
 ### `db.gz`
 
 ```
-{ seq?, fetched_at, total_art, next_pid, pack_off, feeds{}, first_fetched, fetched_at_cur?, pipe?, ingest?, gen?, hdrs?, mp?, mt? }
+{ seq?, fetched_at, total_art, next_pid, pack_off, feeds{}, first_fetched, pipe?, ingest?, gen?, hdrs?, mp?, mt? }
 ```
 
 | Field | Type | Description |
@@ -53,8 +53,7 @@ Shared format between backend (writer) and frontend (reader).
 | `next_pid` | int | Next data pack ID; packs with `id < next_pid` are finalized/immutable |
 | `pack_off` | int | Current offset in latest data pack |
 | `feeds` | object | JSON object keyed by feed ID (number); may be `null` in JSON (default `{}`) |
-| `first_fetched` | int | Unix timestamp of first fetch that produced articles. **Not** `omitempty` — always emitted (unlike the other optional db.gz fields), because the reader divides by it in `findChronForTimestamp` (frontend `data.ts`) and an absent key would decode to `undefined` → `NaN` |
-| `fetched_at_cur` | int | Running idx-time cursor in 8-hour blocks since `first_fetched`; persists `prevFetchedTS` across `PutArticles` calls so per-entry `delta_fetched_at` reflects real elapsed time. `omitempty` |
+| `first_fetched` | int | Unix timestamp of first fetch that produced articles. Informational metadata (it is no longer the idx-timestamp epoch — per-entry timestamps were dropped with the 2-byte idx entry). Kept **not** `omitempty` so the key is always present for golden/e2e fixtures |
 | `pipe` | string[] | Root-level default pipeline inherited by feeds whose `pipe` is absent. `omitempty`. If absent at load, `NewDB` substitutes `["#sanitize", "#minify"]`. |
 | `ingest` | string | Root-level default ingest strategy inherited by feeds whose `ingest` is empty. `omitempty`. Empty falls through to built-in `#rss`. Set/print via `srr ingest`. |
 | `gen` | int | Store generation counter. Bumped manually (`srr gen --bump`) after an in-place store rebuild reuses finalized pack ids with new bytes; the frontend service worker purges its cache-first pack cache when the value changes (any change, not just increments). `omitempty`; absent == 0. |
@@ -92,13 +91,10 @@ Three gzip-compressed series under the feed directory (plus a fourth derived ser
 | `data/` | JSONL — one `ArticleData` object per line (`{f,a,p,t,l,c}`) | At `PackSize` (tracked by `next_pid`/`pack_off`) |
 | `meta/` | JSONL `{f,w,t}` cards (+ bloom header for finalized shards) — derived projection of `data/` | Every 5,000 articles (`metaPackSize`, a divisor of `idxPackSize`) |
 
-**idx/ format** — binary, little-endian, timestamps in 8-hour blocks (÷28800 on write, ×28800 on read):
-- Header: **variable-length** — a fixed `idxHeaderPrefix` (16 bytes = 4 × uint32: `fetchedAt_base` (= `fetched_at_cur` at pack start, blocks since `first_fetched`), `packId_base`, `packOff_base`, `numSlots`), then `numSlots` cumulative-count uint32s (one per feed_id `0..numSlots-1`). `numSlots` = (max feed_id present in packs `[0, P)`) + 1 at the time pack P was written — dense up to the high-water id, ceiling-agnostic. A feed added after a finalized pack was written is simply absent from it, and every reader treats `feedCount[id]` for `id ≥ numSlots` as **0** (bounds-guarded — not native OOB).
-- Entries (**3 bytes each**, after header): `feed_id:u16 LE` (low byte then high byte), `packed:u8 = delta_pack_id:1 << 7 | delta_fetched_at:7`
-  - `delta_pack_id == 0` → same pack, offset++; `delta_pack_id == 1` → pack advances by 1, offset resets to 0
-  - `delta_fetched_at` clamped to [0, 127]; excess carry rolls into subsequent entries
-  - First entry of a batch carries the gap since the prior fetch (writer derives `prevFetchedTS = first_fetched/28800 + fetched_at_cur`)
-  - `feed_id` is a uint16, so ids run [0, 65536) (`feedIDCeiling`)
+**idx/ format** — binary, little-endian. Each idx pack is `header ‖ entries ‖ footer`:
+- Header: **variable-length** — a fixed `idxHeaderPrefix` (12 bytes = 3 × uint32: `packId_base`, `packOff_base`, `numSlots`), then `numSlots` cumulative-count uint32s (one per feed_id `0..numSlots-1`). `numSlots` = (max feed_id present in packs `[0, P)`) + 1 at the time pack P was written — dense up to the high-water id, ceiling-agnostic. A feed added after a finalized pack was written is simply absent from it, and every reader treats `feedCount[id]` for `id ≥ numSlots` as **0** (bounds-guarded — not native OOB).
+- Entries (**2 bytes each**, after header): `feed_id:u16 LE` (low byte then high byte). `feed_id` is a uint16, so ids run [0, 65536) (`feedIDCeiling`).
+- Footer (after the entries): the **data-pack boundary list** — a u16 LE (`idxBoundarySize`) for each local entry index at which the data packId advances by 1 (offset resets to 0). Ascending; its length is implicit (`bytes − header − packSize*2`). The reader rebuilds the chronIdx→data-pack `bounds` from `packId_base`/`packOff_base` + this list. (Pre-2026-06-17 the boundary rode a per-entry `delta_pack_id` bit alongside a now-removed `delta_fetched_at`; the footer is its replacement.)
 
 **data/ format** — JSONL, each line: `{"f":feed_id,"a":fetched_at,"p":published,"t":"title","l":"link","c":"content"}`
 
