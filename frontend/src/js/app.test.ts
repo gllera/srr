@@ -61,7 +61,6 @@ const data = vi.hoisted(() => ({
    init: vi.fn(async () => {}),
    db: { total_art: 0, fetched_at: 0, feeds: {} } as unknown as IDB,
    feedTitle: vi.fn(() => "Feed"),
-   findChronForTimestamp: vi.fn(async () => 0),
 }))
 vi.mock("./data", () => data)
 
@@ -77,8 +76,6 @@ const dropdown = vi.hoisted(() => ({
    closeAllDropdowns: vi.fn(),
    showFeedMenu: vi.fn(),
    showOverflowMenu: vi.fn(),
-   openDatePicker: vi.fn(),
-   dateJump: vi.fn(),
 }))
 vi.mock("./dropdown", () => dropdown)
 
@@ -118,8 +115,7 @@ const SKELETON = `
          <button class="srr-next" disabled></button>
          <button class="srr-unread"></button>
          <button class="srr-save" disabled></button>
-         <div class="srr-dropdown"><button class="srr-overflow srr-dropdown-btn"></button><div id="srr-overflow-menu" class="srr-dropdown-menu"></div>
-            <input type="date" class="srr-jump-date" /></div>
+         <div class="srr-dropdown"><button class="srr-overflow srr-dropdown-btn"></button><div id="srr-overflow-menu" class="srr-dropdown-menu"></div></div>
       </nav>
    </main>`
 

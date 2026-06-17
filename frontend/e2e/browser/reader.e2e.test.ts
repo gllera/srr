@@ -354,52 +354,6 @@ describe("browser: real SPA over real packs", () => {
       }
    })
 
-   // The calendar jump (🗓, list-only) scrubs the LIST to the first article
-   // at-or-after the picked day — it repositions the list (newer above, older
-   // below) rather than opening the reader. The shared store is a single fetch,
-   // so every entry shares one fetched-at block: a date before the fetch snaps to
-   // the oldest article. Drives the hidden date input directly (the native picker
-   // can't be scripted in headless Chrome).
-   it("date jump repositions the list instead of opening the reader", async () => {
-      const [page, close] = await open()
-      try {
-         // Short viewport so the 6-row store is taller than the fold and scrollable.
-         await page.setViewport({ width: 500, height: 140 })
-         await waitList(page)
-         expect(await page.evaluate(() => window.scrollY)).toBe(0) // boot anchors at newest (top)
-
-         await page.$eval(".srr-jump-date", (el) => {
-            const input = el as HTMLInputElement
-            input.value = "2000-01-01" // well before the fetch → snaps to the oldest article
-            input.dispatchEvent(new Event("change", { bubbles: true }))
-         })
-
-         // It stays on the LIST (the reader never opens) and scrolls down to anchor
-         // the oldest article at the top of the viewport (newer rows scrolled off above).
-         await page.waitForFunction(
-            () => {
-               const reader = document.querySelector(".srr-reader") as HTMLElement | null
-               const row = [...document.querySelectorAll(".srr-list a.srr-row")].find(
-                  (e) => e.querySelector(".srr-row-title")?.textContent === "news title 0",
-               )
-               return (
-                  !!reader &&
-                  reader.hidden &&
-                  !!row &&
-                  window.scrollY > 0 &&
-                  Math.abs(row.getBoundingClientRect().top) <= 2
-               )
-            },
-            { timeout: 20000 },
-         )
-         // The newer ("next") articles sit ABOVE the anchored oldest row.
-         expect(await $rowTop(page, "news title 1")).toBeLessThan(0)
-         expect(await $rowTop(page, "sport title 1")).toBeLessThan(0)
-      } finally {
-         await close()
-      }
-   })
-
    it("deep-links to a specific chronIdx (reader)", async () => {
       const [page, close] = await open("#2")
       try {

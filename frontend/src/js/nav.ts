@@ -893,37 +893,13 @@ export async function goTo(idx: number): Promise<IShowFeed> {
    return found === -1 ? last() : resolve(found)
 }
 
-// Position the navigation cursor at chronIdx WITHOUT loading the article or
-// producing an IShowFeed — used by the date jump, which repositions the LIST
-// (the list anchors at this cursor: newer above, older below) instead of
-// opening the reader. Snaps forward to the next matching article like goTo,
-// then falls back to the newest match, so the cursor always lands on a real
-// filter member. Returns the resolved chronIdx (-1 only when the filter has no
-// articles). getFeedId touches just the idx pack (resident or lazily
-// fetched) — no data-pack load, since the list paints titles from the rows it
-// walks; abortPrefetch/clearing next.* drop any reader prefetch we're leaving.
-export async function seek(idx: number): Promise<number> {
-   if (data.db.total_art === 0) {
-      pos = currentFeed = -1
-      return -1
-   }
-   if (idx < 0 || idx >= data.db.total_art) idx = data.db.total_art - 1
-   let found = await feedRight(idx)
-   if (found === -1) found = await feedLeft(data.db.total_art - 1)
-   pos = found
-   currentFeed = found === -1 ? -1 : await data.getFeedId(found)
-   next.left = next.right = undefined
-   abortPrefetch()
-   return found
-}
-
 // Move the navigation cursor to an exact, already-known-matching chronIdx — the
 // list surface's keyboard selection (A/D/←/→ step the highlighted row). The row
 // is a rendered filter member and its feed is known from the row's data-feed,
-// so unlike seek there's no feed walk or idx fetch. Same cursor bookkeeping as
-// resolve/seek minus the article load: it does NOT update the hash or recordSeen,
-// because moving the list cursor isn't reading the article — pos just tracks the
-// highlight so opening it (tap) or re-anchoring the list later stays consistent.
+// so there's no feed walk or idx fetch. Same cursor bookkeeping as resolve minus
+// the article load: it does NOT update the hash or recordSeen, because moving
+// the list cursor isn't reading the article — pos just tracks the highlight so
+// opening it (tap) or re-anchoring the list later stays consistent.
 export function select(chron: number, feedId: number): void {
    pos = chron
    currentFeed = feedId

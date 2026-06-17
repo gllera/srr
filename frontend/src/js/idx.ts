@@ -1,15 +1,15 @@
-import { DELTA_FETCHED_MAX, IDX_ENTRY_SIZE, IDX_HEADER_PREFIX, IDX_PACK_SIZE } from "./format.gen"
+import { IDX_ENTRY_SIZE, IDX_HEADER_PREFIX, IDX_PACK_SIZE } from "./format.gen"
 
 export { IDX_PACK_SIZE }
 
-// The decoded idx pack header: state bases, the numSlots count, plus the
-// cumulative per-feed counts of everything BEFORE the pack. The count array
+// The decoded idx pack header: the pack/offset bases, the numSlots count, plus
+// the cumulative per-feed counts of everything BEFORE the pack. The count array
 // is variable-length — dense up to the high-water feed id when the pack was
 // written (numSlots entries). Available for every pack without entry parsing —
 // from the pack's own bytes at construction, or from the idx/h<N>.gz summary
-// for packs not yet fetched.
+// for packs not yet fetched. (The wire prefix also leads with a fetchedAt_base
+// u32, but the reader doesn't decode entry timestamps — see parseIdxHeader.)
 export interface IdxHeader {
-   fetchedAtBase: number
    packIdBase: number
    packOffBase: number
    numSlots: number
@@ -26,21 +26,22 @@ export function countAt(arr: Uint32Array, id: number): number {
 export interface IdxPack {
    header: IdxHeader
    feedIds: Uint16Array
-   fetchedAts: Uint16Array
    ownFeedCounts: Uint32Array
    bounds: { packId: number; startChron: number }[]
    parse(): IdxPack
    countLeft(chronIdx: number, feeds: Map<number, number>, lookup: Int32Array): number
    findLeft(chronFrom: number, feeds: Map<number, number>, lookup: Int32Array): number
    findRight(chronFrom: number, feeds: Map<number, number>, lookup: Int32Array): number
-   findChronForBlocks(tsBlocks: number): number
 }
 
 function parseIdxHeader(buf: ArrayBuffer, byteOff: number): IdxHeader {
+   // The on-wire prefix is 4 LE u32s: [fetchedAt_base, packId_base, packOff_base,
+   // numSlots]. The reader ignores fetchedAt_base — entry timestamps aren't
+   // decoded any more (only the backend's `srr inspect` tooling reads them), so
+   // h[0] is skipped and only the pack/offset bases + numSlots are kept.
    const h = new Uint32Array(buf, byteOff, 4)
    const numSlots = h[3]
    return {
-      fetchedAtBase: h[0],
       packIdBase: h[1],
       packOffBase: h[2],
       numSlots,
@@ -86,16 +87,6 @@ export function lowerBound(n: number, isBelow: (i: number) => boolean): number {
    return lo
 }
 
-// Pack-level step of findChronForTimestamp: headers[k] is pack k's header
-// with the latest pack's at the end, so pack k's LAST entry value equals
-// headers[k+1].fetchedAtBase (validated by the backend's fetched-ats
-// continuity check). Returns the first pack whose last entry >= tsBlocks —
-// the pack holding the global leftmost qualifying entry — clamped to the
-// latest pack (whose end is unbounded).
-export function findPackForBlocks(headers: IdxHeader[], tsBlocks: number): number {
-   return lowerBound(headers.length - 1, (i) => headers[i + 1].fetchedAtBase < tsBlocks)
-}
-
 // A `slots`-entry typed array beats Map.get in the hot scan loops: no hashing,
 // predictable cache locality, and the JIT can keep the loaded value in a
 // register. -1 sentinel = "not in filter". `slots` is the store high-water+1
@@ -135,11 +126,9 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
       header,
       feedIds: new Uint16Array(0),
       ownFeedCounts: new Uint32Array(0),
-      fetchedAts: new Uint16Array(0),
       bounds: [],
       parse() {
          if (!rawBuf) return pack
-         let fetchedAt = pack.header.fetchedAtBase
          let packId = pack.header.packIdBase
          const packOff = pack.header.packOffBase
          // Sized to the store high-water (slots), so ownFeedCount(id) reads 0
@@ -156,12 +145,7 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
          }
 
          const feedIds = new Uint16Array(packSize)
-         // fetchedAt is 8h-blocks since first_fetched. Uint16 caps at 65535
-         // blocks ≈ 60y of calendar time from the first fetch — far past any
-         // real horizon, so the wrap it would eventually cause is acceptable.
-         const fetchedAts = new Uint16Array(packSize)
          pack.feedIds = feedIds
-         pack.fetchedAts = fetchedAts
          const bytes = new Uint8Array(rawBuf)
          // Cap at packSize so an oversized body (e.g. stale SW cache with
          // entries from a newer total_art than db.gz claims) can't push ghost
@@ -223,16 +207,6 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
             if (addIdx !== -1 && baseChron + i >= addIdx) return baseChron + i
          }
          return -1
-      },
-      // Entry-level step of findChronForTimestamp (the pack-level step is
-      // findPackForBlocks): global chronIdx of the leftmost entry with
-      // fetchedAt >= tsBlocks, or one past the pack's end when none
-      // qualifies (global like every other IdxPack member; the caller's
-      // total_art clamp handles the overflow).
-      findChronForBlocks(tsBlocks: number): number {
-         pack.parse()
-         const fetchedAts = pack.fetchedAts
-         return baseChron + lowerBound(fetchedAts.length, (i) => fetchedAts[i] < tsBlocks)
       },
    }
    return pack

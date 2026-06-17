@@ -208,8 +208,8 @@ const MON = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT
 // A coarse day label for the list's time strata: TODAY / YESTERDAY for the near
 // edge (how you think when catching up), otherwise weekday + day + month, with
 // the year appended only when it isn't the current one. Local time (matches the
-// per-row age and the date jump). Math.round on the local-midnight difference
-// stays correct across a DST hour.
+// per-row age). Math.round on the local-midnight difference stays correct
+// across a DST hour.
 export function dayLabel(unix: number): string {
    const d = new Date(unix * 1000)
    const now = new Date()

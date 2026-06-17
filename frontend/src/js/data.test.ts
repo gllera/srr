@@ -38,10 +38,6 @@ vi.mock("./data", () => ({
 
 const data = await import("./data")
 
-// findChronForTimestamp is covered where the real code lives: its two halves
-// in idx.test.ts (findPackForBlocks, findChronForBlocks) and the composition
-// in the contract layer (summary.e2e.test.ts).
-
 describe("groupFeedsByTag", () => {
    it("returns empty collections when no feeds", () => {
       state.db = { feeds: {} } as IDB

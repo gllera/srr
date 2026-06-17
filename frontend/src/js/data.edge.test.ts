@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
-import { IDX_ENTRY_SIZE, IDX_HEADER_PREFIX, IDX_STATE_SIZE, FETCHED_AT_BLOCK } from "./format.gen"
+import { IDX_ENTRY_SIZE, IDX_HEADER_PREFIX, IDX_STATE_SIZE } from "./format.gen"
 
 // data.ts has a top-level db.gz fetch and private state set only by init(), so
-// its composition edges (clamp, empty store, the first_fetched NaN guard, the
-// 50000 pack seam, numFinalizedIdx's off-by-one) need a real fetch+init harness
-// the always-non-empty contract stores can't reach. We stub global.fetch to
+// its composition edges (clamp, empty store, the 50000 pack seam,
+// numFinalizedIdx's off-by-one) need a real fetch+init harness the
+// always-non-empty contract stores can't reach. We stub global.fetch to
 // serve gzipped synthetic packs and dynamic-import data.ts after, so its
 // load-time fetch binds the stub. Real idx.ts/cache.ts compose underneath.
 
@@ -139,31 +139,5 @@ describe("data.feedTitle — deleted-feed tombstone", () => {
       })
       expect(data.feedTitle(5)).toBe("Live")
       expect(data.feedTitle(404)).toBe("[DELETED]") // its articles survive in packs; render a tombstone
-   })
-})
-
-describe("data.findChronForTimestamp — clamp + first_fetched NaN guard", () => {
-   // A 4-article single-pack store; fetchedAts (blocks) = [0, 5, 5, 20].
-   const latest = () =>
-      packBuf([{ feedId: 1 }, { feedId: 1, deltaFetchedAt: 5 }, { feedId: 1 }, { feedId: 1, deltaFetchedAt: 15 }])
-   const at = (blocks: number) => blocks * FETCHED_AT_BLOCK // ts (seconds) for a block
-
-   it("clamps a timestamp past the newest article to total_art-1 (not total_art)", async () => {
-      const data = await mount({ total_art: 4, seq: 1, first_fetched: 0 }, { "idx/L1.gz": latest() })
-      expect(await data.findChronForTimestamp(at(100))).toBe(3) // far future → last article
-   })
-
-   it("resolves a timestamp at/before the first article to chron 0", async () => {
-      const data = await mount({ total_art: 4, seq: 1, first_fetched: 0 }, { "idx/L1.gz": latest() })
-      expect(await data.findChronForTimestamp(0)).toBe(0)
-      expect(await data.findChronForTimestamp(at(5))).toBe(1) // leftmost with block >= 5
-   })
-
-   it("stays finite when db.gz omits first_fetched (the NaN guard) instead of collapsing to NaN", async () => {
-      // Without `?? 0`, trunc(undefined/B) is NaN → the whole search collapses.
-      const data = await mount({ total_art: 4, seq: 1 }, { "idx/L1.gz": latest() })
-      const chron = await data.findChronForTimestamp(at(5))
-      expect(Number.isFinite(chron)).toBe(true)
-      expect(chron).toBe(1)
    })
 })

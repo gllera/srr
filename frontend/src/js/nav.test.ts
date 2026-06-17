@@ -8,7 +8,6 @@ const data = vi.hoisted(() => ({
    } as unknown as IDB,
    loadArticle: vi.fn<(chronIdx: number) => Promise<IArticle>>(),
    groupFeedsByTag: vi.fn(() => ({ tagged: new Map(), sortedTags: [] as string[], untagged: [] as IFeed[] })),
-   findChronForTimestamp: vi.fn(async () => 0),
    getFeedId: vi.fn<(chronIdx: number) => number>(),
    countLeft: vi.fn((chronIdx: number, feeds: Map<number, number>) => {
       let count = 0
@@ -1030,22 +1029,6 @@ describe("goTo", () => {
       await nav.goTo(0)
       expect(history.pushState).toHaveBeenLastCalledWith(null, "", "#1!1")
    })
-
-   it("lands on findChronForTimestamp result chronIdx", async () => {
-      setupIndex([
-         { feedId: 1, fetchedAt: 10 },
-         { feedId: 2, fetchedAt: 20 },
-         { feedId: 3, fetchedAt: 30 },
-      ])
-      data.findChronForTimestamp.mockResolvedValueOnce(1)
-      await nav.fromHash("0")
-      const target = await data.findChronForTimestamp(25)
-      const result = await nav.goTo(target)
-      expect(target).toBe(1)
-      expect(data.loadArticle).toHaveBeenLastCalledWith(1)
-      expect(result.article.f).toBe(2)
-      expect(history.pushState).toHaveBeenLastCalledWith(null, "", "#1")
-   })
 })
 
 describe("getCurrentFilterKey", () => {
@@ -1788,33 +1771,10 @@ describe("search filter mode (q:<query>)", () => {
    })
 })
 
-// ── Edge cases: seek / listAnchor / peek / fromHash foreign+malformed /
+// ── Edge cases: listAnchor / peek / fromHash foreign+malformed /
 // cycle / saved-set parse / pruneSeen / tombstone / all-caught-up ────────────
 const SEEN = "srr-seen"
 const seedSeen = (m: Record<string, number>) => localStorage.setItem(SEEN, JSON.stringify(m))
-
-describe("seek (date-jump cursor)", () => {
-   it("returns -1 and clears the cursor on an empty store", async () => {
-      data.db.total_art = 0
-      expect(await nav.seek(5)).toBe(-1)
-      expect(nav.currentChron()).toBe(-1)
-   })
-
-   it("clamps an out-of-range idx forward to the last article", async () => {
-      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
-      expect(await nav.seek(999)).toBe(2)
-      expect(nav.currentChron()).toBe(2)
-   })
-
-   it("falls back to the newest match when nothing at-or-after the target matches the filter", async () => {
-      // ch1 only at chron 0; seeking past it finds nothing forward, so it snaps
-      // back to the last (only) ch1 instead of leaving the cursor at -1.
-      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 2 }])
-      nav.filter.set(["1"])
-      expect(await nav.seek(1)).toBe(0)
-      expect(nav.currentChron()).toBe(0)
-   })
-})
 
 describe("listAnchor", () => {
    it("returns the live reader position when it still matches the active filter", async () => {
