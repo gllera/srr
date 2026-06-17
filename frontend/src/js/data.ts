@@ -135,9 +135,11 @@ export function feedTitle(feedId: number): string {
 // Fetches + gunzips one pack key. Every pack name is write-once (finalized
 // numeric, the L<seq> generation or h<N>/s<N> summary a db.gz commit
 // published), so the HTTP cache may serve them all without revalidation
-// (force-cache). Also used by the meta/ loaders (list + search), which pass
-// isLatest=false — a missing meta pack degrades to the data/ fallback instead
-// of triggering the guarded reload.
+// (force-cache). Also used by the meta/ loaders (list + search): like the idx
+// and data loaders, the latest meta pack passes isLatest=true so a 404 on a
+// stale-db.gz tab self-heals with one guarded reload; finalized meta shards
+// pass false (write-once, never GC'd). The "meta lagged" case is handled
+// upstream by metaReady() (loadMeta skips meta entirely), not here.
 export async function fetchPackBytes(path: string, isLatest: boolean): Promise<ArrayBuffer> {
    const res = await fetch(new URL(path, PACK_BASE), { cache: "force-cache" })
    assertPackOk(res, isLatest)
@@ -328,16 +330,18 @@ function loadMetaPack(n: number): Promise<IMetaWire[]> {
    })
 }
 
-// loadMeta returns one card. Uses meta/ when the projection is consistent;
-// otherwise falls back to the data/ source of truth (projected) so the home
-// list never breaks during a transient meta lag.
+// loadMeta returns one card. Uses meta/ when the projection is consistent
+// (metaReady), otherwise reads the data/ source of truth (projected) so the
+// home list never breaks while meta lags after a failed SyncMeta. A stale-tab
+// 404 on the latest meta pack is NOT handled here — it self-heals via the
+// guarded reload in fetchPackBytes (same as the reader's data/ path).
 export async function loadMeta(chronIdx: number): Promise<IMetaWire> {
    if (metaReady()) {
       const n = metaPackId(chronIdx)
       const entries = await loadMetaPack(n)
       const e = entries[chronIdx - n * META_PACK_SIZE]
       if (e) return e
-      // Defensive: a coverage race — fall through to data/.
+      // Defensive: an undefined slot (coverage race) — fall through to data/.
    }
    const a = await loadArticle(chronIdx)
    return { f: a.f, w: a.p || a.a, t: a.t }

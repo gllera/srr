@@ -247,7 +247,7 @@ async function checkManifest(dbRes: Response): Promise<void> {
 // discover and the cached db.gz/pack pair stays mutually consistent.
 //
 // validator: an unchanged ETag/Last-Modified against the cached copy means
-// unchanged bytes — same gen/seq/hdrs/srch — so the common no-change load
+// unchanged bytes — same gen/seq/hdrs/mp — so the common no-change load
 // skips the gunzip+parse (and the redundant cache.put) on the boot critical
 // path; the await stays a cheap header compare. No validator (or a changed
 // one) falls through to the full check. checkManifest is best-effort anyway,
