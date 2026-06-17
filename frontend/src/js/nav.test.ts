@@ -58,7 +58,7 @@ function makeArticle(overrides: Partial<IArticle> = {}): IArticle {
 }
 
 function makeChannel(overrides: Partial<IChannel> = {}): IChannel {
-   return { id: 1, title: "Test", feeds: [{ url: "http://test.com" }], total_art: 1, ...overrides } as IChannel
+   return { id: 1, title: "Test", url: "http://test.com", total_art: 1, ...overrides } as IChannel
 }
 
 function setupIndex(entries: Array<{ chanId: number; fetchedAt?: number }>) {
@@ -550,7 +550,7 @@ describe("showFeed", () => {
    })
 
    it("channel is looked up from channels", async () => {
-      const ch = makeChannel({ id: 1, title: "MyChannel", feeds: [{ url: "http://ch.com" }] })
+      const ch = makeChannel({ id: 1, title: "MyChannel", url: "http://ch.com" })
       data.db.channels[1] = ch
       setupIndex([{ chanId: 1 }])
       const result = await nav.fromHash("0")

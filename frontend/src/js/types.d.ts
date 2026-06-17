@@ -8,7 +8,6 @@ declare const process: { env: { NODE_ENV: string } }
 // turn it into a module and un-global every name).
 
 type IArticle = import("./format.gen").IArticleWire
-type IFeed = import("./format.gen").IFeedWire
 type IChannelWire = import("./format.gen").IChannelWire
 type IDBWire = import("./format.gen").IDBWire
 

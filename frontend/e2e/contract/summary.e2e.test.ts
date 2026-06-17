@@ -122,9 +122,9 @@ function buildStore(opts: { hdrs: boolean; summaryFile: boolean }): string {
       first_fetched: FIRST_FETCHED,
       ...(opts.hdrs ? { hdrs: 2 } : {}),
       channels: {
-         0: { title: "A", feeds: [], total_art: 50000, add_idx: 0 },
-         1: { title: "B", feeds: [], total_art: 50000, add_idx: 0 },
-         2: { title: "C", feeds: [], total_art: 2, add_idx: 100000 },
+         0: { title: "A", url: "http://a", total_art: 50000, add_idx: 0 },
+         1: { title: "B", url: "http://b", total_art: 50000, add_idx: 0 },
+         2: { title: "C", url: "http://c", total_art: 2, add_idx: 100000 },
       },
    }
    writeFileSync(join(dir, "db.gz"), gzipSync(JSON.stringify(db)))
