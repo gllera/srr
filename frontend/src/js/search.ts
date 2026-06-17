@@ -1,6 +1,6 @@
 // Title search over the meta/ pack series (design: docs/search-design.md).
-// Shards align 1:1 with idx packs (5,000 entries per meta shard):
-// finalized meta/<n>.gz = bloom[SEARCH_BLOOM_BYTES] ‖ JSONL, the latest
+// Each finalized shard holds META_PACK_SIZE (5,000) entries — a tenth of an
+// idx pack: finalized meta/<n>.gz = bloom[SEARCH_BLOOM_BYTES] ‖ JSONL, the latest
 // meta/L<seq>.gz tail is JSONL only (always scanned), and meta/s<mp>.gz
 // concatenates the finalized blooms so a query fetches only shards that can
 // match. Matching is AND of folded substring tests per query word — the blooms
@@ -28,9 +28,9 @@ export function available(): boolean {
    return data.metaReady()
 }
 
-// fold mirrors the backend's foldSearchText (db_search.go) byte-for-byte —
+// fold mirrors the backend's foldSearchText (db_meta.go) byte-for-byte —
 // the parity is enforced by the e2e contract test. Whole-string passes (a
-// shard parse folds 50k titles, so per-rune regex calls add up): NFD before
+// shard parse folds 5k titles, so per-rune regex calls add up): NFD before
 // lowercasing neutralizes the Go-simple vs JS-full case-mapping divergences
 // (İ, ẞ); ς→σ patches JS's only other context-sensitive mapping, the final
 // sigma toLowerCase produces; everything that isn't a letter or number
