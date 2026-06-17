@@ -228,9 +228,7 @@ function render(o: IShowFeed) {
    // re-enables transitions so the fade-in animates.
    requestAnimationFrame(() => requestAnimationFrame(clearContentTransition))
 
-   try {
-      localStorage.setItem("srr-hash", location.hash)
-   } catch {}
+   persistHash(location.hash)
 }
 
 function refreshFeedLabel() {
