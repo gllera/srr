@@ -199,6 +199,81 @@ func TestPutArticlesBasic(t *testing.T) {
 	}
 }
 
+// A second batch must STRIP the latest idx pack's non-empty boundary footer
+// (keeping header+entries), recover its boundary list, then re-emit it with the
+// new batch's boundaries. PackSize=0 rolls a fresh data pack per article, so
+// batch 1 leaves a non-empty footer; a bug in the strip math (db_pack.go
+// entriesEnd) would corrupt the boundary list and mis-resolve chronIdx -> the
+// wrong article, while `make verify` stays green. This is the core mechanism
+// the 2-byte-entry + footer format introduced, and was previously covered only
+// in isolation (idx_read_test.go) or by single-batch / no-split tests.
+func TestPutArticlesCrossBatchFooter(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	globals.PackSize = 0 // each article in its own data pack -> a boundary per entry
+
+	ch1, ch2 := &Feed{id: 1, URL: "http://a"}, &Feed{id: 2, URL: "http://b"}
+	c.Feeds = map[int]*Feed{ch1.id: ch1, ch2.id: ch2}
+
+	batch1 := []*Item{
+		{Feed: ch1, Title: "A", Content: "cA", Link: "http://a/1", Published: 1000},
+		{Feed: ch2, Title: "B", Content: "cB", Link: "http://b/1", Published: 2000},
+		{Feed: ch1, Title: "C", Content: "cC", Link: "http://a/2", Published: 3000},
+	}
+	if _, err := db.PutArticles(ctx, batch1); err != nil {
+		t.Fatalf("PutArticles batch1: %v", err)
+	}
+
+	// Precondition: batch 1 must leave a NON-EMPTY footer, else the cross-batch
+	// strip/re-emit path under test is never exercised.
+	_, raw1, err := db.loadPack(ctx, latestKey(c, "idx"))
+	if err != nil {
+		t.Fatalf("loadPack idx after batch1: %v", err)
+	}
+	numSlots := int(binary.LittleEndian.Uint32(raw1[idxStateSize:]))
+	entriesEnd := idxHeaderPrefix + numSlots*4 + latestIdxEntryCount(c.TotalArticles)*idxEntrySize
+	if n := len(parseIdxFooter(raw1[entriesEnd:])); n == 0 {
+		t.Fatalf("batch1 left an empty footer; test would not exercise the strip path")
+	}
+
+	batch2 := []*Item{
+		{Feed: ch2, Title: "D", Content: "cD", Link: "http://b/2", Published: 4000},
+		{Feed: ch1, Title: "E", Content: "cE", Link: "http://a/3", Published: 5000},
+	}
+	if _, err := db.PutArticles(ctx, batch2); err != nil {
+		t.Fatalf("PutArticles batch2: %v", err)
+	}
+
+	// The footer-derived bounds must resolve every chronIdx to the right article
+	// in order — proving the old footer was stripped and re-emitted, not
+	// double-counted or dropped.
+	got := readAllArticles(t, dir, c)
+	want := []struct {
+		feedID  int
+		content string
+	}{{1, "cA"}, {2, "cB"}, {1, "cC"}, {2, "cD"}, {1, "cE"}}
+	if len(got) != len(want) {
+		t.Fatalf("readAllArticles len = %d, want %d", len(got), len(want))
+	}
+	for i, w := range want {
+		if got[i].Feed.id != w.feedID || got[i].Content != w.content {
+			t.Errorf("article %d = (feed %d, %q), want (feed %d, %q)",
+				i, got[i].Feed.id, got[i].Content, w.feedID, w.content)
+		}
+	}
+
+	// Strongest cross-check: validate footer-derived bounds against the data
+	// packs over the committed store (reopens via NewDB).
+	if err := db.SyncIdxSummary(ctx); err != nil {
+		t.Fatalf("SyncIdxSummary: %v", err)
+	}
+	if err := db.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := (&InspectCmd{Chron: -1, Validate: true}).Run(); err != nil {
+		t.Fatalf("inspect --validate: %v", err)
+	}
+}
+
 func TestPutArticlesEmpty(t *testing.T) {
 	db, c, _ := setupTestDB(t)
 
