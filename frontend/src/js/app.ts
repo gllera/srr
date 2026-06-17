@@ -527,15 +527,24 @@ function bumpReaderEdge(side: "prev" | "next") {
    }, 240) // > the 0.22s animations
 }
 
+// Each step/cycle key has an arrow + letter alias; define the action once and
+// point both keys at it. step toward a dead edge rings the reader margin bell;
+// cycle is a no-op when the filter rotation has a single entry.
+const stepLeft = () => (el.prev.disabled ? bumpReaderEdge("prev") : guard(() => nav.left()))
+const stepRight = () => (el.next.disabled ? bumpReaderEdge("next") : guard(() => nav.right()))
+const cycle = (dir: -1 | 1) => () => nav.getFilterEntries().length > 1 && guard(() => nav.cycleFilter(dir))
+const cyclePrev = cycle(-1)
+const cycleNext = cycle(1)
+
 const KEY_ACTIONS: Record<string, () => void> = {
-   ArrowLeft: () => (el.prev.disabled ? bumpReaderEdge("prev") : guard(() => nav.left())),
-   a: () => (el.prev.disabled ? bumpReaderEdge("prev") : guard(() => nav.left())),
-   ArrowRight: () => (el.next.disabled ? bumpReaderEdge("next") : guard(() => nav.right())),
-   d: () => (el.next.disabled ? bumpReaderEdge("next") : guard(() => nav.right())),
-   ArrowUp: () => nav.getFilterEntries().length > 1 && guard(() => nav.cycleFilter(-1)),
-   w: () => nav.getFilterEntries().length > 1 && guard(() => nav.cycleFilter(-1)),
-   ArrowDown: () => nav.getFilterEntries().length > 1 && guard(() => nav.cycleFilter(1)),
-   s: () => nav.getFilterEntries().length > 1 && guard(() => nav.cycleFilter(1)),
+   ArrowLeft: stepLeft,
+   a: stepLeft,
+   ArrowRight: stepRight,
+   d: stepRight,
+   ArrowUp: cyclePrev,
+   w: cyclePrev,
+   ArrowDown: cycleNext,
+   s: cycleNext,
    q: () => guard(() => nav.first()),
    e: () => guard(() => nav.last()),
    b: () => !el.save.disabled && toggleSave(),
