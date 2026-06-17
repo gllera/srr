@@ -18,7 +18,7 @@ html {
    --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
    --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
    /* The reader's prose voice — a system serif (zero bytes). Pairs with the
-      sans/mono "wire" chrome (masthead, headings, code): machine metadata wraps
+      sans/mono "wire" chrome (headings, code): machine metadata wraps
       human prose. */
    --font-serif: ui-serif, Georgia, Charter, "Times New Roman", serif;
 
@@ -308,11 +308,10 @@ video {
 
 /* Read on — the next dispatch previewed at the article's end, so the wire reads
    as a continuous feed and the next tap lands under your thumb, not at the
-   toolbar. A "NEXT" divider (the perforated teleprinter rule echoing the
-   masthead — the paper keeps feeding) over a list-row-style preview: a colored
-   source eyebrow (the next source's color, data-src → --src) + headline in the
-   sans wire chrome (it sits outside .srr-content's serif). No left rail — the
-   reader's own spine already owns the left edge; the colored eyebrow carries the
+   toolbar. A "NEXT" divider (a perforated teleprinter rule — the paper keeps
+   feeding) over a list-row-style preview: a colored source eyebrow (the next
+   source's color, data-src → --src) + headline in the sans wire chrome (it sits
+   outside .srr-content's serif). No left rail — the colored eyebrow carries the
    source. Terminal at the newest match: a "LATEST" divider + a quiet line. */
 .srr-readon {
    display: block;
@@ -885,51 +884,6 @@ body:not(.srr-view-list) .srr-toolbar > .srr-unread {
    display: none;
 }
 
-/* Front page — the wire's masthead at the top of the home feed: the app's only
-   identity mark over a live status line (unread across your whole wire + last
-   sync). Plain-flow, not sticky: render() lands at scrollTop 0 only when anchored
-   at the newest edge, so the masthead greets you at the front of the wire and
-   scrolls away into the archive. Hidden on the reader and during search (the
-   pinned search bar owns the top). */
-.srr-masthead {
-   display: none;
-   padding: 0.3rem 0.4rem 0.65rem 0.7rem;
-   /* Teleprinter rule — a perforated tractor-feed edge, not the solid hairline of
-      the broadsheet default. */
-   border-bottom: 1px dashed var(--faint);
-}
-body.srr-view-list .srr-masthead {
-   display: block;
-}
-body.srr-view-list.srr-searching .srr-masthead {
-   display: none;
-}
-.srr-masthead-name {
-   font-family: var(--font-mono);
-   font-size: 0.92rem;
-   font-weight: 700;
-   letter-spacing: 0.18em;
-   text-transform: uppercase;
-   color: var(--fg);
-}
-.srr-masthead-sub {
-   color: var(--muted);
-   font-weight: 500;
-}
-.srr-masthead-status {
-   margin-top: 0.4rem;
-   font-family: var(--font-mono);
-   font-size: 0.72rem;
-   letter-spacing: 0.03em;
-}
-.srr-masthead-unread {
-   color: var(--fg);
-   font-weight: 600;
-}
-.srr-masthead-fresh {
-   color: var(--muted);
-}
-
 /* List surface — a scannable feed of headline rows. The list is a bidirectional
    infinite window anchored at the reader's position: newer ("next") rows page in
    above, older below. overflow-anchor:none disables the browser's own scroll
@@ -971,7 +925,7 @@ body.srr-view-list.srr-searching .srr-masthead {
    a fetched favicon. Dark-mode variants live in the dark @media block. */
 /* Defined on [data-src] (not just .srr-row) so both the list rows AND the reader
    article pick up their feed's color — the rail graduates into the reader's
-   spine + masthead. */
+   masthead. */
 [data-src="0"] {
    --src: #c2410c;
 }
@@ -1285,7 +1239,7 @@ body.srr-view-list.srr-searching .srr-masthead {
    box-shadow: var(--shadow);
    padding: 1.25rem 1.4rem 1.4rem;
 }
-/* The dialog's title speaks in the masthead's wire voice (tracked mono caps). */
+/* The dialog's title speaks in the wire voice (tracked mono caps). */
 .srr-imgproxy-title {
    margin: 0 0 0.6rem;
    font-family: var(--font-mono);
