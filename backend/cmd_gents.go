@@ -55,7 +55,6 @@ var tsTypes = []struct {
 }{
 	{"IArticleWire", "one JSONL line in data/*.gz (backend ArticleData)", reflect.TypeOf(ArticleData{})},
 	{"ISearchEntryWire", "one JSONL line in search/ shards (backend SearchEntry)", reflect.TypeOf(SearchEntry{})},
-	{"IFeedWire", "per-feed state inside a channel (backend Feed)", reflect.TypeOf(Feed{})},
 	{"IChannelWire", "a db.gz channels{} value (backend Channel)", reflect.TypeOf(Channel{})},
 	{"IDBWire", "db.gz itself (backend DBCore)", reflect.TypeOf(DBCore{})},
 }
@@ -85,7 +84,7 @@ func generateTS() ([]byte, error) {
 // The Go declarations in backend/ are the single source of truth for the
 // writer↔reader data contract: the format constants in db.go, the pack-name
 // grammar in store/main.go (PackSeries), and the JSON struct tags of
-// ArticleData/Feed/Channel/DBCore. Regenerate with
+// ArticleData/Channel/DBCore. Regenerate with
 // ` + "`make generate`; `make verify` fails when this file is stale." + `
 //
 // Wire-type conventions: ` + "`?`" + ` = json omitempty (key absent at the Go zero

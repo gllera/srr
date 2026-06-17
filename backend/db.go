@@ -197,6 +197,13 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 			db.Close(ctx)
 			return nil, fmt.Errorf("channel id %d in %s out of range [0, %d]", id, dbFileKey, chanIDCeiling-1)
 		}
+		// An old feeds[]-only db.gz unmarshals to a channel with no top-level
+		// url (the legacy feeds key is ignored). Reject it clearly rather than
+		// silently fetch nothing.
+		if ch.URL == "" {
+			db.Close(ctx)
+			return nil, fmt.Errorf("channel %d has no url; store predates the feed→channel merge — delete and re-fetch", id)
+		}
 		ch.id = id
 	}
 	return db, nil

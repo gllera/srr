@@ -51,12 +51,8 @@ func seedChannels(t *testing.T, chans ...*Channel) {
 	db.Close(ctx)
 }
 
-func chanOf(title, tag string, urls ...string) *Channel {
-	feeds := make([]*Feed, 0, len(urls))
-	for _, u := range urls {
-		feeds = append(feeds, &Feed{URL: u})
-	}
-	return &Channel{Title: title, Tag: tag, Feeds: feeds}
+func chanOf(title, tag, url string) *Channel {
+	return &Channel{Title: title, Tag: tag, URL: url}
 }
 
 func TestExportEmptyDB(t *testing.T) {
@@ -79,8 +75,8 @@ func TestExportUntaggedTopLevel(t *testing.T) {
 	if nodes[0].Channel == nil || len(nodes[0].Children) != 0 {
 		t.Fatalf("node = %+v, want bare leaf channel", nodes[0])
 	}
-	if nodes[0].Channel.Title != "News" || nodes[0].Channel.Feeds[0].URL != "https://news.example.com/rss" {
-		t.Errorf("leaf = %q %q", nodes[0].Channel.Title, nodes[0].Channel.Feeds[0].URL)
+	if nodes[0].Channel.Title != "News" || nodes[0].Channel.URL != "https://news.example.com/rss" {
+		t.Errorf("leaf = %q %q", nodes[0].Channel.Title, nodes[0].Channel.URL)
 	}
 }
 
@@ -114,18 +110,22 @@ func TestExportMergesSharedPrefix(t *testing.T) {
 	}
 }
 
-func TestExportMultiFeedEmitsSiblingLeaves(t *testing.T) {
-	seedChannels(t, chanOf("Multi", "", "https://a.example.com/rss", "https://b.example.com/rss"))
+// One channel = one leaf carrying its single URL.
+func TestExportOneLeafPerChannel(t *testing.T) {
+	seedChannels(t,
+		chanOf("A", "", "https://a.example.com/rss"),
+		chanOf("B", "", "https://b.example.com/rss"),
+	)
 	nodes := parseExport(t, runExport(t, &ExportCmd{}))
 	if len(nodes) != 2 {
-		t.Fatalf("top-level nodes = %d, want 2 sibling leaves", len(nodes))
+		t.Fatalf("top-level nodes = %d, want 2 leaves", len(nodes))
 	}
 	urls := []string{}
 	for _, n := range nodes {
-		if n.Channel == nil || n.Channel.Title != "Multi" {
-			t.Fatalf("node = %+v, want Multi leaf", n)
+		if n.Channel == nil {
+			t.Fatalf("node = %+v, want a leaf channel", n)
 		}
-		urls = append(urls, n.Channel.Feeds[0].URL)
+		urls = append(urls, n.Channel.URL)
 	}
 	sort.Strings(urls)
 	want := []string{"https://a.example.com/rss", "https://b.example.com/rss"}
@@ -182,8 +182,8 @@ func TestExportImportRoundTrip(t *testing.T) {
 		if ch.Tag != want.Tag {
 			t.Errorf("%q tag = %q, want %q", want.Title, ch.Tag, want.Tag)
 		}
-		if len(ch.Feeds) != len(want.Feeds) || ch.Feeds[0].URL != want.Feeds[0].URL {
-			t.Errorf("%q feeds = %+v, want %+v", want.Title, ch.Feeds, want.Feeds)
+		if ch.URL != want.URL {
+			t.Errorf("%q url = %q, want %q", want.Title, ch.URL, want.URL)
 		}
 	}
 }

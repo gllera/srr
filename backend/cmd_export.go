@@ -10,10 +10,10 @@ import (
 
 // ExportCmd writes the channel list as an OPML 2.0 document — the inverse of
 // `chan import`: hierarchical tags become nested outline groups, untagged
-// channels sit at the body top level, and a multi-feed channel emits one
-// sibling leaf per feed (re-import with `-t <title>` to recombine them).
-// Stored tags are already normalized (normalizeGroupName is idempotent on its
-// own output), so `export | import -a` reproduces identical tags.
+// channels sit at the body top level, and each channel emits one leaf carrying
+// its single URL. Stored tags are already normalized (normalizeGroupName is
+// idempotent on its own output), so `export | import -a` reproduces identical
+// tags.
 type ExportCmd struct {
 	Tag *string `short:"g" optional:"" help:"Only export channels with this exact tag."`
 }
@@ -75,8 +75,8 @@ func buildOPML(chans []*Channel) OPML {
 }
 
 // outlinesOf emits a node's group children (sorted by name) followed by its
-// channel leaves (already title-sorted by buildOPML) — one leaf per feed,
-// since an OPML outline carries a single xmlUrl.
+// channel leaves (already title-sorted by buildOPML) — one leaf per channel,
+// carrying its single xmlUrl.
 func outlinesOf(n *exportNode) []Outline {
 	names := make([]string, 0, len(n.children))
 	for name := range n.children {
@@ -88,9 +88,7 @@ func outlinesOf(n *exportNode) []Outline {
 		outs = append(outs, Outline{Title: name, Text: name, Outlines: outlinesOf(n.children[name])})
 	}
 	for _, ch := range n.channels {
-		for _, f := range ch.Feeds {
-			outs = append(outs, Outline{Title: ch.Title, Text: ch.Title, XMLURL: f.URL})
-		}
+		outs = append(outs, Outline{Title: ch.Title, Text: ch.Title, XMLURL: ch.URL})
 	}
 	return outs
 }

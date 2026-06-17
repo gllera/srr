@@ -3,7 +3,7 @@
 // The Go declarations in backend/ are the single source of truth for the
 // writer↔reader data contract: the format constants in db.go, the pack-name
 // grammar in store/main.go (PackSeries), and the JSON struct tags of
-// ArticleData/Feed/Channel/DBCore. Regenerate with
+// ArticleData/Channel/DBCore. Regenerate with
 // `make generate`; `make verify` fails when this file is stale.
 //
 // Wire-type conventions: `?` = json omitempty (key absent at the Go zero
@@ -66,20 +66,15 @@ export interface ISearchEntryWire {
    t?: string // Title
 }
 
-// Wire shape of per-feed state inside a channel (backend Feed).
-export interface IFeedWire {
+// Wire shape of a db.gz channels{} value (backend Channel).
+export interface IChannelWire {
+   title: string // Title
    url: string // URL
    etag?: string // ETag
    last_modified?: string // LastModified
    wm?: number // Watermark
    bg?: number[] // BoundaryGUIDs
    ferr?: string // FetchError
-}
-
-// Wire shape of a db.gz channels{} value (backend Channel).
-export interface IChannelWire {
-   title: string // Title
-   feeds: IFeedWire[] | null // Feeds
    tag?: string // Tag
    pipe?: string[] // Pipe
    ingest?: string // Ingest

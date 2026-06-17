@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"slices"
 	"sort"
 	"strings"
 
@@ -67,35 +66,11 @@ func validateTag(tag string) error {
 }
 
 type AddCmd struct {
-	Title   *string   `short:"t" required:""              help:"Channel title."`
-	URLs    *[]string `short:"u" required:"" name:"url"   help:"Channel RSS url(s); repeat to merge multiple feeds under one id."`
-	Tag     *string   `short:"g" optional:""              help:"Channel tag."`
-	Parsers []string  `short:"p" sep:"none" optional:"" help:"Channel pipe step; repeat -p per step (not comma-separated). Empty (\"\") for default."`
-	Ingest  *string   `short:"i" optional:""              help:"Ingest strategy: built-in ('#rss') or shell command."`
-}
-
-// parseFeeds validates URL flag values and reuses any prior Feed whose URL
-// survives the update so per-feed state (ETag, Watermark, etc.) is preserved.
-func parseFeeds(urls []string, prev []*Feed) ([]*Feed, error) {
-	if len(urls) == 0 {
-		return nil, fmt.Errorf("at least one --url is required")
-	}
-	out := make([]*Feed, 0, len(urls))
-	for _, raw := range urls {
-		if !validFeedURL(raw) {
-			return nil, fmt.Errorf("invalid url %q", raw)
-		}
-		if slices.ContainsFunc(out, func(f *Feed) bool { return f.URL == raw }) {
-			return nil, fmt.Errorf("duplicate url %q", raw)
-		}
-		i := slices.IndexFunc(prev, func(f *Feed) bool { return f.URL == raw })
-		if i >= 0 {
-			out = append(out, prev[i])
-		} else {
-			out = append(out, &Feed{URL: raw})
-		}
-	}
-	return out, nil
+	Title   *string  `short:"t" required:""              help:"Channel title."`
+	URL     *string  `short:"u" required:""              help:"Channel RSS url."`
+	Tag     *string  `short:"g" optional:""              help:"Channel tag."`
+	Parsers []string `short:"p" sep:"none" optional:"" help:"Channel pipe step; repeat -p per step (not comma-separated). Empty (\"\") for default."`
+	Ingest  *string  `short:"i" optional:""              help:"Ingest strategy: built-in ('#rss') or shell command."`
 }
 
 func (o *AddCmd) Run() error {
@@ -103,14 +78,13 @@ func (o *AddCmd) Run() error {
 		if o.Title == nil || *o.Title == "" {
 			return fmt.Errorf("title is required")
 		}
-		if o.URLs == nil {
+		if o.URL == nil {
 			return fmt.Errorf("--url is required")
 		}
-		feeds, err := parseFeeds(*o.URLs, nil)
-		if err != nil {
-			return err
+		if !validFeedURL(*o.URL) {
+			return fmt.Errorf("invalid url %q", *o.URL)
 		}
-		ch := &Channel{Title: *o.Title, Feeds: feeds}
+		ch := &Channel{Title: *o.Title, URL: *o.URL}
 		if o.Tag != nil {
 			ch.Tag = *o.Tag
 		}
@@ -132,32 +106,27 @@ func (o *AddCmd) Run() error {
 
 // channelView is the canonical JSON/YAML shape for channel records. Used
 // by `chan ls`, `chan show`, `chan apply`, and `chan edit`. ID is a pointer
-// so `apply` can distinguish "absent => create" from "id 0 => update".
+// so `apply` can distinguish "absent => create" from "id 0 => update". One
+// channel = one URL: the URL is a flat field; the last fetch error (if any)
+// rides alongside it as a read-only `error` for visibility.
 type channelView struct {
-	ID     *int       `json:"id,omitempty" yaml:"id,omitempty"`
-	Title  string     `json:"title"        yaml:"title"`
-	Feeds  []feedView `json:"feeds"        yaml:"feeds"`
-	Tag    string     `json:"tag,omitempty" yaml:"tag,omitempty"`
-	Pipe   []string   `json:"pipe,omitempty" yaml:"pipe,omitempty"`
-	Ingest string     `json:"ingest,omitempty" yaml:"ingest,omitempty"`
-}
-
-type feedView struct {
-	URL   string `json:"url" yaml:"url"`
-	Error string `json:"error,omitempty" yaml:"error,omitempty"`
+	ID     *int     `json:"id,omitempty" yaml:"id,omitempty"`
+	Title  string   `json:"title"        yaml:"title"`
+	URL    string   `json:"url"          yaml:"url"`
+	Error  string   `json:"error,omitempty" yaml:"error,omitempty"`
+	Tag    string   `json:"tag,omitempty" yaml:"tag,omitempty"`
+	Pipe   []string `json:"pipe,omitempty" yaml:"pipe,omitempty"`
+	Ingest string   `json:"ingest,omitempty" yaml:"ingest,omitempty"`
 }
 
 // viewOf builds an output channelView for a stored Channel.
 func viewOf(ch *Channel) *channelView {
-	feeds := make([]feedView, len(ch.Feeds))
-	for i, f := range ch.Feeds {
-		feeds[i] = feedView{URL: f.URL, Error: f.FetchError}
-	}
 	id := ch.id
 	return &channelView{
 		ID:     &id,
 		Title:  ch.Title,
-		Feeds:  feeds,
+		URL:    ch.URL,
+		Error:  ch.FetchError,
 		Tag:    ch.Tag,
 		Pipe:   append([]string(nil), ch.Pipe...),
 		Ingest: ch.Ingest,
@@ -165,33 +134,16 @@ func viewOf(ch *Channel) *channelView {
 }
 
 type UpdCmd struct {
-	ID      int       `arg:""                                 help:"Channel id to update."`
-	Title   *string   `short:"t" optional:""                  help:"Channel title (empty rejected)."`
-	URLs    *[]string `short:"u" optional:"" name:"url"       help:"Replace the feed list. Per-URL state preserved for surviving URLs. Mutually exclusive with --add-url and --rm-url."`
-	AddURLs *[]string `           optional:"" name:"add-url"   help:"Append URL(s) (idempotent). Mutually exclusive with -u and --rm-url."`
-	RmURLs  *[]string `           optional:"" name:"rm-url"    help:"Remove URL(s) (strict). Mutually exclusive with -u and --add-url."`
-	Tag     *string   `short:"g" optional:""                  help:"Channel tag. Empty (\"\") to clear."`
-	Parsers []string  `short:"p" sep:"none" optional:"" help:"Channel pipe step; repeat -p per step (not comma-separated). Empty (\"\") to clear."`
-	Ingest  *string   `short:"i" optional:""                  help:"Channel ingest strategy. Empty (\"\") to clear."`
+	ID      int      `arg:""                                 help:"Channel id to update."`
+	Title   *string  `short:"t" optional:""                  help:"Channel title (empty rejected)."`
+	URL     *string  `short:"u" optional:""                  help:"Channel RSS url. Changing it resets the channel's fetch state (etag/watermark/dedup)."`
+	Tag     *string  `short:"g" optional:""                  help:"Channel tag. Empty (\"\") to clear."`
+	Parsers []string `short:"p" sep:"none" optional:"" help:"Channel pipe step; repeat -p per step (not comma-separated). Empty (\"\") to clear."`
+	Ingest  *string  `short:"i" optional:""                  help:"Channel ingest strategy. Empty (\"\") to clear."`
 }
 
 func (o *UpdCmd) Run() error {
-	// Mutex on the three feed-list flags.
-	urlFlagCount := 0
-	if o.URLs != nil {
-		urlFlagCount++
-	}
-	if o.AddURLs != nil {
-		urlFlagCount++
-	}
-	if o.RmURLs != nil {
-		urlFlagCount++
-	}
-	if urlFlagCount > 1 {
-		return fmt.Errorf("--url cannot be combined with --add-url/--rm-url")
-	}
-
-	if o.Title == nil && o.Tag == nil && o.Parsers == nil && o.Ingest == nil && urlFlagCount == 0 {
+	if o.Title == nil && o.Tag == nil && o.Parsers == nil && o.Ingest == nil && o.URL == nil {
 		return fmt.Errorf("nothing to update")
 	}
 
@@ -215,22 +167,11 @@ func (o *UpdCmd) Run() error {
 		if o.Ingest != nil {
 			ch.Ingest = *o.Ingest
 		}
-
-		switch {
-		case o.URLs != nil:
-			feeds, err := parseFeeds(*o.URLs, ch.Feeds)
-			if err != nil {
-				return err
+		if o.URL != nil {
+			if !validFeedURL(*o.URL) {
+				return fmt.Errorf("invalid url %q", *o.URL)
 			}
-			ch.Feeds = feeds
-		case o.AddURLs != nil:
-			if err := appendURLs(ch, *o.AddURLs); err != nil {
-				return err
-			}
-		case o.RmURLs != nil:
-			if err := removeURLs(ch, *o.RmURLs); err != nil {
-				return err
-			}
+			setChannelURL(ch, *o.URL)
 		}
 
 		if err := normalizeChannel(ch); err != nil {
@@ -240,44 +181,20 @@ func (o *UpdCmd) Run() error {
 	})
 }
 
-// appendURLs adds urls to ch.Feeds idempotently (silent skip on duplicates
-// or URLs already on the channel). Invalid URL formats fail.
-func appendURLs(ch *Channel, urls []string) error {
-	seen := make(map[string]bool, len(ch.Feeds)+len(urls))
-	for _, f := range ch.Feeds {
-		seen[f.URL] = true
+// setChannelURL points the channel at url, preserving the per-channel fetch
+// state (ETag/Watermark/BoundaryGUIDs/LastModified/FetchError) when the URL is
+// unchanged and resetting it when the URL changes — a new source shares no
+// dedup/cache history with the old one.
+func setChannelURL(ch *Channel, url string) {
+	if ch.URL == url {
+		return
 	}
-	for _, u := range urls {
-		if !validFeedURL(u) {
-			return fmt.Errorf("invalid url %q", u)
-		}
-		if seen[u] {
-			continue
-		}
-		seen[u] = true
-		ch.Feeds = append(ch.Feeds, &Feed{URL: u})
-	}
-	return nil
-}
-
-// removeURLs strict-removes urls from ch.Feeds. Errors if any url is not a
-// current feed, on duplicate args, or if all feeds would be removed.
-func removeURLs(ch *Channel, urls []string) error {
-	rmSet := make(map[string]bool, len(urls))
-	for _, u := range urls {
-		if rmSet[u] {
-			return fmt.Errorf("duplicate url %q", u)
-		}
-		rmSet[u] = true
-		if !slices.ContainsFunc(ch.Feeds, func(f *Feed) bool { return f.URL == u }) {
-			return fmt.Errorf("url %q is not a feed of channel %d", u, ch.id)
-		}
-	}
-	if len(rmSet) == len(ch.Feeds) {
-		return fmt.Errorf("channel %d would have no feeds after removal", ch.id)
-	}
-	ch.Feeds = slices.DeleteFunc(ch.Feeds, func(f *Feed) bool { return rmSet[f.URL] })
-	return nil
+	ch.URL = url
+	ch.ETag = ""
+	ch.LastModified = ""
+	ch.Watermark = 0
+	ch.BoundaryGUIDs = nil
+	ch.FetchError = ""
 }
 
 type RmCmd struct {
@@ -382,8 +299,11 @@ func applyViews(ctx context.Context, db *DB, views []*channelView) error {
 		if v.Title == "" {
 			return fmt.Errorf("channel #%d: title required", i)
 		}
-		if len(v.Feeds) == 0 {
-			return fmt.Errorf("channel #%d: feeds required", i)
+		if v.URL == "" {
+			return fmt.Errorf("channel #%d: url required", i)
+		}
+		if !validFeedURL(v.URL) {
+			return fmt.Errorf("channel #%d: invalid url %q", i, v.URL)
 		}
 		if v.ID == nil {
 			ops = append(ops, pending{view: v})
@@ -397,24 +317,11 @@ func applyViews(ctx context.Context, db *DB, views []*channelView) error {
 	}
 
 	for _, op := range ops {
-		urls := make([]string, len(op.view.Feeds))
-		for i, f := range op.view.Feeds {
-			urls[i] = f.URL
-		}
-		var prevFeeds []*Feed
-		if op.ch != nil {
-			prevFeeds = op.ch.Feeds
-		}
-		feeds, err := parseFeeds(urls, prevFeeds)
-		if err != nil {
-			return err
-		}
-
 		target := op.ch
 		if target == nil {
 			target = &Channel{}
 		}
-		writeChannelView(target, op.view, feeds)
+		writeChannelView(target, op.view)
 		if err := normalizeChannel(target); err != nil {
 			return fmt.Errorf("channel %q: %w", op.view.Title, err)
 		}
@@ -427,9 +334,12 @@ func applyViews(ctx context.Context, db *DB, views []*channelView) error {
 	return db.Commit(ctx)
 }
 
-func writeChannelView(ch *Channel, v *channelView, feeds []*Feed) {
+// writeChannelView applies a channelView onto ch. The URL goes through
+// setChannelURL so per-channel fetch state is preserved when the URL is
+// unchanged (an update keeping the same source) and reset when it changes.
+func writeChannelView(ch *Channel, v *channelView) {
 	ch.Title = v.Title
-	ch.Feeds = feeds
+	setChannelURL(ch, v.URL)
 	ch.Tag = v.Tag
 	ch.Pipe = append([]string(nil), v.Pipe...)
 	ch.Ingest = v.Ingest

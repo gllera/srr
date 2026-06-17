@@ -105,7 +105,7 @@ func readSearchEntries(t *testing.T, dir, key string, skipBloom bool) []SearchEn
 
 func TestSyncSearchFresh(t *testing.T) {
 	db, c, dir := setupTestDB(t)
-	ch := &Channel{id: 3}
+	ch := &Channel{id: 3, URL: "https://example.com/3"}
 	c.Channels = map[int]*Channel{ch.id: ch}
 	c.FetchedAt = 1700000000
 	putOneArticle(t, db, ch, 1)
@@ -199,7 +199,7 @@ func TestSyncSearchNoopWhenCurrent(t *testing.T) {
 // instead of rebuilding it.
 func TestSyncSearchIncremental(t *testing.T) {
 	db, c, dir := setupTestDB(t)
-	ch := &Channel{id: 1}
+	ch := &Channel{id: 1, URL: "https://example.com/1"}
 	c.Channels = map[int]*Channel{ch.id: ch}
 	c.FetchedAt = 1700000000
 
@@ -226,7 +226,7 @@ func TestSyncSearchIncremental(t *testing.T) {
 // the walk would need proves no read-back happens.
 func TestSyncSearchBatchFastPath(t *testing.T) {
 	db, c, dir := setupTestDB(t)
-	ch := &Channel{id: 3}
+	ch := &Channel{id: 3, URL: "https://example.com/3"}
 	c.Channels = map[int]*Channel{ch.id: ch}
 	c.FetchedAt = 1700000000
 
@@ -263,7 +263,7 @@ func TestSyncSearchBatchFastPath(t *testing.T) {
 // back to rebuilding the tail from the data packs.
 func TestSyncSearchRebuildsMissingTail(t *testing.T) {
 	db, c, dir := setupTestDB(t)
-	ch := &Channel{id: 1}
+	ch := &Channel{id: 1, URL: "https://example.com/1"}
 	c.Channels = map[int]*Channel{ch.id: ch}
 	c.FetchedAt = 1700000000
 
@@ -291,7 +291,7 @@ func TestSyncSearchRebuildsMissingTail(t *testing.T) {
 // instead of trusting them.
 func TestSyncSearchInconsistentCoverageRebuilds(t *testing.T) {
 	db, c, dir := setupTestDB(t)
-	ch := &Channel{id: 1}
+	ch := &Channel{id: 1, URL: "https://example.com/1"}
 	c.Channels = map[int]*Channel{ch.id: ch}
 	c.FetchedAt = 1700000000
 

@@ -178,18 +178,16 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 			}
 		}
 
-		var failed, totalFeeds int
+		var failed, totalChannels int
 		for _, ch := range db.Channels() {
-			for _, feed := range ch.Feeds {
-				totalFeeds++
-				if feed.FetchError != "" {
-					failed++
-				}
+			totalChannels++
+			if ch.FetchError != "" {
+				failed++
 			}
 		}
 		slog.Info("fetch complete",
 			"new_articles", len(articles),
-			"fetched", totalFeeds-failed,
+			"fetched", totalChannels-failed,
 			"failed", failed,
 		)
 		return nil
