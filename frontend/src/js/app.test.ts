@@ -82,7 +82,6 @@ vi.mock("./dropdown", () => dropdown)
 vi.mock("./fmt", () => ({
    sanitizeHtml: (s: string) => s,
    formatDate: () => "01/01/2020 00:00",
-   readMinutes: () => 0,
    srcColorIndex: () => 0,
    timeAgo: () => "1h",
    collapseBrokenMedia: () => {},
@@ -102,7 +101,7 @@ const SKELETON = `
       <div class="srr-searchbar"><input class="srr-search-input" /><button class="srr-search-clear"></button>
          <div class="srr-search-note"></div></div>
       <article class="srr-reader" hidden><div class="srr-read-spine"></div>
-         <div class="srr-kicker"><span class="srr-source"></span><time class="srr-date"></time><span class="srr-readlen"></span></div>
+         <div class="srr-kicker"><span class="srr-source"></span><time class="srr-date"></time></div>
          <a class="srr-title-link"><h1 class="srr-title" tabindex="-1"></h1></a>
          <div class="srr-content"></div><nav class="srr-readon"></nav></article>
       <header class="srr-masthead"><div class="srr-masthead-status"></div></header>
