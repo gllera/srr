@@ -4,32 +4,20 @@
 //
 // The bundle is built with a RELATIVE SRR_CDN_URL=/packs/ so the app fetches
 // packs from the same origin (no CORS, no port baked into the build). One HTTP
-// server serves the built app at / and the per-run pack dir at /packs/. Tests
-// write packs into packsDir (shared via the filesystem) and reload the page.
+// server (e2e/static-serve.ts) serves the built app at / and the per-run pack dir
+// at /packs/. Tests write packs into packsDir (shared via the filesystem) and
+// reload the page.
 
 import { execFile } from "node:child_process"
-import { createReadStream, existsSync, mkdtempSync, rmSync, statSync } from "node:fs"
-import { createServer, type Server } from "node:http"
-import type { AddressInfo } from "node:net"
+import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { extname, join, normalize, resolve } from "node:path"
+import { join, resolve } from "node:path"
 import { promisify } from "node:util"
 import type { GlobalSetupContext } from "vitest/node"
 
-const execFileAsync = promisify(execFile)
+import { startStaticServer, stopStaticServer } from "../static-serve"
 
-const MIME: Record<string, string> = {
-   ".html": "text/html; charset=utf-8",
-   ".js": "text/javascript; charset=utf-8",
-   ".mjs": "text/javascript; charset=utf-8",
-   ".css": "text/css; charset=utf-8",
-   ".svg": "image/svg+xml",
-   ".png": "image/png",
-   ".json": "application/json",
-   ".webmanifest": "application/manifest+json",
-   ".ico": "image/x-icon",
-   ".gz": "application/octet-stream", // raw gzip — data.ts decompresses manually
-}
+const execFileAsync = promisify(execFile)
 
 declare module "vitest" {
    interface ProvidedContext {
@@ -49,33 +37,12 @@ export default async function setup({ provide }: GlobalSetupContext) {
       env: { ...process.env, SRR_CDN_URL: "/packs/" },
    })
 
-   const serveFile = (res: import("node:http").ServerResponse, baseDir: string, rel: string) => {
-      const file = join(baseDir, normalize(rel).replace(/^(\.\.([/\\]|$))+/, ""))
-      if (!file.startsWith(baseDir) || !existsSync(file) || !statSync(file).isFile()) {
-         res.statusCode = 404
-         res.end("not found")
-         return
-      }
-      res.setHeader("Content-Type", MIME[extname(file)] ?? "application/octet-stream")
-      createReadStream(file).pipe(res)
-   }
-
-   const server: Server = createServer((req, res) => {
-      res.setHeader("Connection", "close") // avoid keep-alive sockets that stall server.close()
-      let p = decodeURIComponent((req.url || "/").split("?")[0])
-      if (p === "/") p = "/index.html"
-      if (p.startsWith("/packs/")) serveFile(res, packsDir, p.slice("/packs/".length))
-      else serveFile(res, appDir, p.slice(1))
-   })
-   await new Promise<void>((rs) => server.listen(0, "127.0.0.1", () => rs()))
-   const port = (server.address() as AddressInfo).port
-
-   provide("baseUrl", `http://127.0.0.1:${port}/`)
+   const { server, baseUrl } = await startStaticServer({ appDir, packsDir })
+   provide("baseUrl", `${baseUrl}/`)
    provide("packsDir", packsDir)
 
    return async () => {
-      server.closeAllConnections?.()
-      await new Promise<void>((rs) => server.close(() => rs()))
+      await stopStaticServer(server)
       rmSync(packsDir, { recursive: true, force: true })
    }
 }
