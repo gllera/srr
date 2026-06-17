@@ -15,8 +15,8 @@ import (
 
 const (
 	// cacheImmutable stamps write-once keys: finalized packs (idx|data|
-	// search/<n>.gz) never change once written; latest packs (L<seq>) and the
-	// summaries (idx/h<N>, search/s<N>) are write-once names — never rewritten
+	// meta/<n>.gz) never change once written; latest packs (L<seq>) and the
+	// summaries (idx/h<N>, meta/s<N>) are write-once names — never rewritten
 	// after the db.gz commit that publishes them; assets/ keys are
 	// content-hashed. The CDN/client may cache them all forever.
 	cacheImmutable = "public, max-age=31536000, immutable"
@@ -30,7 +30,7 @@ const (
 // the directory plus the kind letters a stem may carry in front of the digit
 // run — none (finalized "idx/12.gz"), "L"<seq> latest generations
 // ("data/L3.gz", all series), "h"<N> idx header summaries ("idx/h2.gz"),
-// "s"<N> search bloom summaries ("search/s4.gz"). Single source of truth for
+// "s"<N> meta bloom summaries ("meta/s4.gz"). Single source of truth for
 // both sides of the contract: packKeyRe below and the service worker's
 // RE_PACK/parsePackName (via `srr gen-ts` → format.gen.ts PACK_SERIES_KINDS)
 // are built from it.
@@ -40,7 +40,7 @@ var PackSeries = []struct {
 }{
 	{"idx", "Lh"},
 	{"data", "L"},
-	{"search", "Ls"},
+	{"meta", "Ls"},
 }
 
 // packKeyRe matches the write-once pack names, built from PackSeries.

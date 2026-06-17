@@ -19,6 +19,11 @@ const (
 	dbLockKey = ".locked"
 	// idxPackSize is the idx split threshold: entries per finalized pack.
 	idxPackSize = 50000
+	// metaPackSize is the meta/ split threshold: entries per finalized meta
+	// shard. A divisor of idxPackSize (50000/5000 = 10) so a meta shard never
+	// straddles an idx-pack boundary, keeping the meta↔idx mapping clean for
+	// the writer and `srr inspect`.
+	metaPackSize = 5000
 	// feedIDCeiling is the feed-id ceiling: feed_id is a uint16 in each idx
 	// entry, so ids run [0, feedIDCeiling).
 	feedIDCeiling = 65536
@@ -41,9 +46,10 @@ const (
 	// search blooms index, taken over each word of a folded title.
 	searchGram = 3
 	// searchBloomBytes is the fixed-size trigram Bloom filter prefixed inside
-	// every finalized search shard and concatenated into search/s<N>.gz. The
-	// bit count is a power of two so probe indices mask instead of modulo.
-	searchBloomBytes = 32768
+	// every finalized meta shard and concatenated into meta/s<N>.gz. 4096 bytes
+	// = 2^15 bits — a power of two so probe indices mask instead of modulo,
+	// sized for a 5,000-title shard.
+	searchBloomBytes = 4096
 	// searchBloomK is the number of bloom bits set/tested per gram.
 	searchBloomK = 4
 )
