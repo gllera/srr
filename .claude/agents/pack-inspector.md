@@ -9,14 +9,15 @@ You audit SRR pack consistency by running the `srrb inspect` subcommand. The ins
 
 1. Build `srrb` if missing: `make build-be` (produces `dist/srrb`).
 2. If the user pasted a frontend URL hash (e.g., `#2485!big_info`), the fastest path is `--from-hash '<hash>'` — it replays `nav.fromHash` end-to-end (filter resolution, pos clamp, `resolve()` vs `last()` decision, final article). Skips the "now run --filter, now run --chron, now mentally combine" step. Caveat: the inspector also accepts a `#floor,pos[!tokens]` comma syntax with a floor-bounded backward scan, but that is INSPECTOR-ONLY — the real `nav.fromHash` does NOT implement it. A comma in a real browser hash makes `Number("0,2485")` → `NaN`, which clamps `target` to `total_art-1` (the LAST article), and `nav.last()` has no floor. To reproduce real reader behavior, pass a comma-free `#pos[!tokens]` hash.
-3. If the user named a specific chronIdx, run `--chron N` — shows resolved (packId, offset), data-pack entry count, and a recovered-vs-stored fetched_at comparison; explicitly flags out-of-range offsets and timestamp drift.
-4. Run `--validate` for a full sweep. Note `[bounds-vs-data]` (checkBoundsVsData) walks every chronIdx and fetches+gunzips every distinct data pack it references (cached per pid, but a full chron walk touches the whole `data/` series); over `--url` this downloads and decompresses the entire data archive, so its cost scales with total_art and pack count (packs split at ~200 KB compressed). The other five checks are cheap (idx-only or at most the single latest data pack).
+3. If the user named a specific chronIdx, run `--chron N` — shows resolved (packId, offset), the idx entry's feed_id, data-pack entry count, and the stored `fetched_at`; explicitly flags out-of-range offsets and idx-vs-data feed_id mismatches (`*** SUB_ID MISMATCH ***`).
+4. Run `--validate` for a full sweep. Note `[bounds-vs-data]` (checkBoundsVsData) walks every chronIdx and fetches+gunzips every distinct data pack it references (cached per pid, but a full chron walk touches the whole `data/` series); over `--url` this downloads and decompresses the entire data archive, so its cost scales with total_art and pack count (packs split at ~200 KB compressed). The other six checks are cheap (idx-only or at most the single latest data pack).
    - `[bounds-vs-data]` — frontend lookup correctness
-   - `[db-meta]` — total_art / next_pid / pack_off / per-sub total_art / per-sub add_idx
+   - `[db-meta]` — total_art / next_pid / pack_off / per-feed total_art / per-feed add_idx
    - `[feed-counts]` — header feedCount continuity across pack boundaries (checkFeedCountsContinuity)
-   - `[fetched-ats]` — header fetchedAt_base continuity (silently breaks `findChronForTimestamp` if drifted)
    - `[unknown-feeds]` — orphan feed_ids (idx feed bytes not registered in db.feeds); the frontend renders these as `[DELETED]`
-   - `[latest-files]` — `idx/{tog}.gz` and `data/{tog}.gz` present
+   - `[latest-files]` — `idx/L<seq>.gz` and `data/L<seq>.gz` present
+   - `[idx-summary]` — idx/h<N>.gz header-summary coverage + per-pack header agreement (checkIdxSummary)
+   - `[meta]` — meta/ shard coverage: mp/mt counts, finalized shard blooms, latest tail entry count (checkMeta)
 5. Other modes when the symptom hints at filter math: `--filter <tag|feed_id> [--floor N]`, `--list-tags`.
 6. Match the source of truth the user is hitting:
    - Local dir (default `packs/`): `./dist/srrb -o packs inspect ...`
