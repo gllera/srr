@@ -18,7 +18,7 @@ func validateAll(fetch keyGetter, core *DBCore, packs []*idxPack) error {
 	issues += checkUnknownFeedIDs(core, packs)
 	issues += checkLatestFiles(fetch, core)
 	issues += checkIdxSummary(fetch, core, packs)
-	issues += checkSearch(fetch, core)
+	issues += checkMeta(fetch, core)
 
 	fmt.Println()
 	if issues == 0 {
@@ -321,7 +321,7 @@ func checkIdxSummary(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 	return issues
 }
 
-// checkSearch verifies the meta/ series against db.gz: coverage
+// checkMeta verifies the meta/ series against db.gz: coverage
 // (mp/mt) may lag numFinalizedMeta (SyncMeta is warn-only in fetch —
 // readers keep search disabled until the next run heals) but never
 // overclaim; the latest tail must hold exactly mt entries; every covered
@@ -329,7 +329,7 @@ func checkIdxSummary(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 // every title's grams must probe positive in that bloom (the no-false-
 // negatives contract the reader's pruning relies on), and the summary must
 // equal the concatenated shard blooms byte-for-byte.
-func checkSearch(fetch keyGetter, core *DBCore) int {
+func checkMeta(fetch keyGetter, core *DBCore) int {
 	nf := numFinalizedMeta(core.TotalArticles)
 	if core.MetaPacks > nf {
 		fmt.Printf("[meta] mp=%d but only %d finalized meta shards exist\n", core.MetaPacks, nf)
