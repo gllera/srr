@@ -48,7 +48,7 @@ func TestFeedWidthBeyond255(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadPack: %v", err)
 	}
-	pack, err := parseIdxPack(raw, 0, n)
+	pack, err := parseIdxPack(raw, 0, n, n)
 	if err != nil {
 		t.Fatalf("parseIdxPack: %v", err)
 	}

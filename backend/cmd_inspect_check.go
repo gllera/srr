@@ -251,7 +251,9 @@ func checkIdxSummary(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 				key, k, numSlots, end, len(buf))
 			return issues + 1
 		}
-		hdr, err := parseIdxPack(buf[off:end], k, 0)
+		// Header-only decode (packSize 0 ⇒ no entries parsed), so the
+		// ownFeedCounts slot width is irrelevant here.
+		hdr, err := parseIdxPack(buf[off:end], k, 0, 0)
 		if err != nil {
 			fmt.Printf("[idx-summary] pack %d chunk: %v\n", k, err)
 			issues++
