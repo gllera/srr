@@ -34,7 +34,7 @@ type Item struct {
 }
 
 // articleData is the one Item→ArticleData mapping. PutArticles applies it
-// and returns the results, so SyncSearch's derived search entries are built
+// and returns the results, so SyncMeta's derived meta entries are built
 // from the very values the packs hold.
 func (it *Item) articleData(fetchedAt int64) ArticleData {
 	return ArticleData{
@@ -284,9 +284,9 @@ func (o *DB) gcSweep(ctx context.Context, cutoff int, what string, keys func(g i
 // stale db.gz.
 func (o *DB) GCLatest(ctx context.Context, keep int) error {
 	return o.gcSweep(ctx, o.core.Seq-keep-1, "latest generation", func(g int) []string {
-		// Pre-search generations never wrote a search/L name; Rm is silent on
+		// Pre-meta generations never wrote a meta/L name; Rm is silent on
 		// missing keys, so sweeping it unconditionally costs nothing.
-		return []string{genKey("idx", g), genKey("data", g), genKey("search", g)}
+		return []string{genKey("idx", g), genKey("data", g), genKey("meta", g)}
 	})
 }
 
@@ -394,7 +394,7 @@ func (o *DB) readIdxHeader(ctx context.Context, key string) ([]byte, error) {
 // callback. The crash-safety contract is the caller's: it advances its
 // coverage counter only after this save succeeds, so no reader can learn the
 // summary name before its content is durable. Shared by SyncIdxSummary
-// (idx/h<N>, variable-length header) and SyncSearch (search/s<N>, fixed bloom
+// (idx/h<N>, variable-length header) and SyncMeta (meta/s<N>, fixed bloom
 // header).
 func (o *DB) saveSummary(ctx context.Context, n int, header func(k int) ([]byte, error), sumKey string) error {
 	sum := newPack()
@@ -439,8 +439,8 @@ func (o *DB) SyncIdxSummary(ctx context.Context) error {
 }
 
 // PutArticles persists the batch into the idx and data series and returns
-// the ArticleData it wrote, in pack order — SyncSearch consumes that slice,
-// so the derived search entries can never drift from the packs.
+// the ArticleData it wrote, in pack order — SyncMeta consumes that slice,
+// so the derived meta entries can never drift from the packs.
 func (o *DB) PutArticles(ctx context.Context, articles []*Item) ([]ArticleData, error) {
 	if len(articles) == 0 {
 		return nil, nil

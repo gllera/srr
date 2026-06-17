@@ -19,7 +19,7 @@ func TestFoldSearchText(t *testing.T) {
 		{"  --foo__bar  42  ", "foo bar 42"},
 		{"don't", "don t"},
 		{"Café Éclair", "cafe eclair"},
-		{"éclair", "eclair"},    // pre-decomposed combining mark
+		{"éclair", "eclair"},     // pre-decomposed combining mark
 		{"İstanbul", "istanbul"}, // NFD defuses the JS full-case divergence
 		{"STRAẞE", "straße"},     // U+1E9E lowers to ß on both sides
 		{"ΓΛΩΣΣΑΣ", "γλωσσασ"},   // Σ lowers context-free…
@@ -87,7 +87,7 @@ func TestBloomAddHas(t *testing.T) {
 	}
 }
 
-func readSearchEntries(t *testing.T, dir, key string, skipBloom bool) []SearchEntry {
+func readMetaEntries(t *testing.T, dir, key string, skipBloom bool) []MetaEntry {
 	t.Helper()
 	raw := decompressGz(t, filepath.Join(dir, key))
 	if skipBloom {
@@ -96,14 +96,40 @@ func readSearchEntries(t *testing.T, dir, key string, skipBloom bool) []SearchEn
 		}
 		raw = raw[searchBloomBytes:]
 	}
-	out, err := parseSearchEntries(raw)
+	out, err := parseMetaEntries(raw)
 	if err != nil {
 		t.Fatalf("%s: %v", key, err)
 	}
 	return out
 }
 
-func TestSyncSearchFresh(t *testing.T) {
+// setupMetaBoundaryDB builds a store whose first meta shard just finalized:
+// metaPackSize+1 articles written in two batches.
+func setupMetaBoundaryDB(t *testing.T) (*DB, string) {
+	t.Helper()
+	db, c, dir := setupTestDB(t)
+	globals.PackSize = 1024 // data packs never split
+
+	ch := &Feed{id: 1, URL: "https://example.com/1"}
+	c.Feeds = map[int]*Feed{ch.id: ch}
+	c.FetchedAt = 1700000000
+
+	articles := make([]*Item, metaPackSize)
+	for i := range articles {
+		articles[i] = &Item{Feed: ch, Title: fmt.Sprintf("A%d", i), Content: "c", Published: int64(i)}
+	}
+	if _, err := db.PutArticles(ctx, articles); err != nil {
+		t.Fatalf("PutArticles: %v", err)
+	}
+	if _, err := db.PutArticles(ctx, []*Item{
+		{Feed: ch, Title: "Last", Content: "c", Published: int64(metaPackSize)},
+	}); err != nil {
+		t.Fatalf("PutArticles: %v", err)
+	}
+	return db, dir
+}
+
+func TestSyncMetaFresh(t *testing.T) {
 	db, c, dir := setupTestDB(t)
 	ch := &Feed{id: 3, URL: "https://example.com/3"}
 	c.Feeds = map[int]*Feed{ch.id: ch}
@@ -111,18 +137,18 @@ func TestSyncSearchFresh(t *testing.T) {
 	putOneArticle(t, db, ch, 1)
 	putOneArticle(t, db, ch, 2)
 
-	if err := db.SyncSearch(ctx, nil); err != nil {
-		t.Fatalf("SyncSearch: %v", err)
+	if err := db.SyncMeta(ctx, nil); err != nil {
+		t.Fatalf("SyncMeta: %v", err)
 	}
-	if c.SearchPacks != 0 || c.SearchTail != 2 {
-		t.Fatalf("coverage = (%d, %d), want (0, 2)", c.SearchPacks, c.SearchTail)
+	if c.MetaPacks != 0 || c.MetaTail != 2 {
+		t.Fatalf("coverage = (%d, %d), want (0, 2)", c.MetaPacks, c.MetaTail)
 	}
 
-	entries := readSearchEntries(t, dir, "search/L2.gz", false)
+	entries := readMetaEntries(t, dir, "meta/L2.gz", false)
 	if len(entries) != 2 {
 		t.Fatalf("latest entries = %d, want 2", len(entries))
 	}
-	want := []SearchEntry{
+	want := []MetaEntry{
 		{FeedID: 3, When: 1000, Title: "A1"},
 		{FeedID: 3, When: 2000, Title: "A2"},
 	}
@@ -131,100 +157,100 @@ func TestSyncSearchFresh(t *testing.T) {
 			t.Errorf("entry %d = %+v, want %+v", i, e, want[i])
 		}
 	}
-	matches, _ := filepath.Glob(filepath.Join(dir, "search/s*.gz"))
+	matches, _ := filepath.Glob(filepath.Join(dir, "meta/s*.gz"))
 	if len(matches) != 0 {
 		t.Errorf("no shards finalized, yet summary exists: %v", matches)
 	}
 }
 
-func TestSyncSearchAtBoundary(t *testing.T) {
-	db, dir := setupBoundaryDB(t)
+func TestSyncMetaAtBoundary(t *testing.T) {
+	db, dir := setupMetaBoundaryDB(t)
 	c := &db.core
 
-	if err := db.SyncSearch(ctx, nil); err != nil {
-		t.Fatalf("SyncSearch: %v", err)
+	if err := db.SyncMeta(ctx, nil); err != nil {
+		t.Fatalf("SyncMeta: %v", err)
 	}
-	if c.SearchPacks != 1 || c.SearchTail != 1 {
-		t.Fatalf("coverage = (%d, %d), want (1, 1)", c.SearchPacks, c.SearchTail)
+	if c.MetaPacks != 1 || c.MetaTail != 1 {
+		t.Fatalf("coverage = (%d, %d), want (1, 1)", c.MetaPacks, c.MetaTail)
 	}
 
-	shard := decompressGz(t, filepath.Join(dir, "search/0.gz"))
+	shard := decompressGz(t, filepath.Join(dir, "meta/0.gz"))
 	bloom := shard[:searchBloomBytes]
-	for _, gram := range []string{"a49", "999"} { // grams of folded "A49999"
+	for _, gram := range []string{"a49", "999"} { // grams of folded "A4999"
 		if !bloomHas(bloom, gram) {
 			t.Errorf("shard bloom missing gram %q", gram)
 		}
 	}
-	entries := readSearchEntries(t, dir, "search/0.gz", true)
-	if len(entries) != idxPackSize {
-		t.Fatalf("shard entries = %d, want %d", len(entries), idxPackSize)
+	entries := readMetaEntries(t, dir, "meta/0.gz", true)
+	if len(entries) != metaPackSize {
+		t.Fatalf("shard entries = %d, want %d", len(entries), metaPackSize)
 	}
-	if entries[0].Title != "A0" || entries[idxPackSize-1].Title != fmt.Sprintf("A%d", idxPackSize-1) {
-		t.Errorf("shard boundary titles = %q / %q", entries[0].Title, entries[idxPackSize-1].Title)
+	if entries[0].Title != "A0" || entries[metaPackSize-1].Title != fmt.Sprintf("A%d", metaPackSize-1) {
+		t.Errorf("shard boundary titles = %q / %q", entries[0].Title, entries[metaPackSize-1].Title)
 	}
 	// Article 0 has Published 0 → When falls back to FetchedAt.
 	if entries[0].When != 1700000000 {
 		t.Errorf("entry 0 When = %d, want fetched_at fallback 1700000000", entries[0].When)
 	}
 
-	latest := readSearchEntries(t, dir, "search/L2.gz", false)
+	latest := readMetaEntries(t, dir, "meta/L2.gz", false)
 	if len(latest) != 1 || latest[0].Title != "Last" {
 		t.Fatalf("latest = %+v, want the single post-boundary article", latest)
 	}
 
-	sum := decompressGz(t, filepath.Join(dir, "search/s1.gz"))
+	sum := decompressGz(t, filepath.Join(dir, "meta/s1.gz"))
 	if !bytes.Equal(sum, bloom) {
-		t.Error("summary bytes != search/0.gz bloom header")
+		t.Error("summary bytes != meta/0.gz bloom header")
 	}
 }
 
-func TestSyncSearchNoopWhenCurrent(t *testing.T) {
-	db, dir := setupBoundaryDB(t)
+func TestSyncMetaNoopWhenCurrent(t *testing.T) {
+	db, dir := setupMetaBoundaryDB(t)
 
-	if err := db.SyncSearch(ctx, nil); err != nil {
-		t.Fatalf("SyncSearch: %v", err)
+	if err := db.SyncMeta(ctx, nil); err != nil {
+		t.Fatalf("SyncMeta: %v", err)
 	}
-	for _, key := range []string{"search/0.gz", "search/L2.gz", "search/s1.gz"} {
+	for _, key := range []string{"meta/0.gz", "meta/L2.gz", "meta/s1.gz"} {
 		os.Remove(filepath.Join(dir, key))
 	}
-	if err := db.SyncSearch(ctx, nil); err != nil {
-		t.Fatalf("SyncSearch (noop): %v", err)
+	if err := db.SyncMeta(ctx, nil); err != nil {
+		t.Fatalf("SyncMeta (noop): %v", err)
 	}
-	for _, key := range []string{"search/0.gz", "search/L2.gz", "search/s1.gz"} {
+	for _, key := range []string{"meta/0.gz", "meta/L2.gz", "meta/s1.gz"} {
 		assertKey(t, dir, key, false)
 	}
 }
 
 // Steady state: each sync extends the previous generation's tail read-back
 // instead of rebuilding it.
-func TestSyncSearchIncremental(t *testing.T) {
+func TestSyncMetaIncremental(t *testing.T) {
 	db, c, dir := setupTestDB(t)
 	ch := &Feed{id: 1, URL: "https://example.com/1"}
 	c.Feeds = map[int]*Feed{ch.id: ch}
 	c.FetchedAt = 1700000000
 
 	putOneArticle(t, db, ch, 1)
-	if err := db.SyncSearch(ctx, nil); err != nil {
-		t.Fatalf("SyncSearch #1: %v", err)
+	if err := db.SyncMeta(ctx, nil); err != nil {
+		t.Fatalf("SyncMeta #1: %v", err)
 	}
 	putOneArticle(t, db, ch, 2)
-	if err := db.SyncSearch(ctx, nil); err != nil {
-		t.Fatalf("SyncSearch #2: %v", err)
+	if err := db.SyncMeta(ctx, nil); err != nil {
+		t.Fatalf("SyncMeta #2: %v", err)
 	}
 
-	if c.SearchTail != 2 {
-		t.Fatalf("SearchTail = %d, want 2", c.SearchTail)
+	if c.MetaTail != 2 {
+		t.Fatalf("MetaTail = %d, want 2", c.MetaTail)
 	}
-	entries := readSearchEntries(t, dir, "search/L2.gz", false)
+	entries := readMetaEntries(t, dir, "meta/L2.gz", false)
 	if len(entries) != 2 || entries[0].Title != "A1" || entries[1].Title != "A2" {
 		t.Fatalf("latest = %+v, want A1+A2", entries)
 	}
 }
 
 // The common fetch cycle: the missing range is exactly what PutArticles just
-// returned, so SyncSearch builds its entries from memory. Removing the packs
+// returned, so SyncMeta builds its entries from memory. Removing the packs
 // the walk would need proves no read-back happens.
-func TestSyncSearchBatchFastPath(t *testing.T) {
+func TestSyncMetaBatchFastPath(t *testing.T) {
 	db, c, dir := setupTestDB(t)
 	ch := &Feed{id: 3, URL: "https://example.com/3"}
 	c.Feeds = map[int]*Feed{ch.id: ch}
@@ -243,14 +269,14 @@ func TestSyncSearchBatchFastPath(t *testing.T) {
 		}
 	}
 
-	if err := db.SyncSearch(ctx, written); err != nil {
-		t.Fatalf("SyncSearch: %v", err)
+	if err := db.SyncMeta(ctx, written); err != nil {
+		t.Fatalf("SyncMeta: %v", err)
 	}
-	if c.SearchPacks != 0 || c.SearchTail != 2 {
-		t.Fatalf("coverage = (%d, %d), want (0, 2)", c.SearchPacks, c.SearchTail)
+	if c.MetaPacks != 0 || c.MetaTail != 2 {
+		t.Fatalf("coverage = (%d, %d), want (0, 2)", c.MetaPacks, c.MetaTail)
 	}
-	entries := readSearchEntries(t, dir, "search/L1.gz", false)
-	want := []SearchEntry{
+	entries := readMetaEntries(t, dir, "meta/L1.gz", false)
+	want := []MetaEntry{
 		{FeedID: 3, When: 1000, Title: "A1"},
 		{FeedID: 3, When: 1700000000, Title: "A2"}, // dateless → fetched_at
 	}
@@ -261,7 +287,7 @@ func TestSyncSearchBatchFastPath(t *testing.T) {
 
 // A missing previous tail (consecutive failed syncs, manual deletion) falls
 // back to rebuilding the tail from the data packs.
-func TestSyncSearchRebuildsMissingTail(t *testing.T) {
+func TestSyncMetaRebuildsMissingTail(t *testing.T) {
 	db, c, dir := setupTestDB(t)
 	ch := &Feed{id: 1, URL: "https://example.com/1"}
 	c.Feeds = map[int]*Feed{ch.id: ch}
@@ -269,19 +295,19 @@ func TestSyncSearchRebuildsMissingTail(t *testing.T) {
 
 	putOneArticle(t, db, ch, 1)
 	putOneArticle(t, db, ch, 2)
-	if err := db.SyncSearch(ctx, nil); err != nil {
-		t.Fatalf("SyncSearch: %v", err)
+	if err := db.SyncMeta(ctx, nil); err != nil {
+		t.Fatalf("SyncMeta: %v", err)
 	}
 	putOneArticle(t, db, ch, 3)
-	os.Remove(filepath.Join(dir, "search/L2.gz")) // the read-back candidate
+	os.Remove(filepath.Join(dir, "meta/L2.gz")) // the read-back candidate
 
-	if err := db.SyncSearch(ctx, nil); err != nil {
-		t.Fatalf("SyncSearch (rebuild): %v", err)
+	if err := db.SyncMeta(ctx, nil); err != nil {
+		t.Fatalf("SyncMeta (rebuild): %v", err)
 	}
-	if c.SearchTail != 3 {
-		t.Fatalf("SearchTail = %d, want 3", c.SearchTail)
+	if c.MetaTail != 3 {
+		t.Fatalf("MetaTail = %d, want 3", c.MetaTail)
 	}
-	entries := readSearchEntries(t, dir, "search/L3.gz", false)
+	entries := readMetaEntries(t, dir, "meta/L3.gz", false)
 	if len(entries) != 3 || entries[2].Title != "A3" {
 		t.Fatalf("latest = %+v, want A1..A3", entries)
 	}
@@ -289,7 +315,7 @@ func TestSyncSearchRebuildsMissingTail(t *testing.T) {
 
 // Inconsistent coverage fields (hand-edited db.gz) reset to a full rebuild
 // instead of trusting them.
-func TestSyncSearchInconsistentCoverageRebuilds(t *testing.T) {
+func TestSyncMetaInconsistentCoverageRebuilds(t *testing.T) {
 	db, c, dir := setupTestDB(t)
 	ch := &Feed{id: 1, URL: "https://example.com/1"}
 	c.Feeds = map[int]*Feed{ch.id: ch}
@@ -297,53 +323,53 @@ func TestSyncSearchInconsistentCoverageRebuilds(t *testing.T) {
 
 	putOneArticle(t, db, ch, 1)
 	putOneArticle(t, db, ch, 2)
-	c.SearchTail = 7 // covered (7) > total_art (2)
+	c.MetaTail = 7 // covered (7) > total_art (2)
 
-	if err := db.SyncSearch(ctx, nil); err != nil {
-		t.Fatalf("SyncSearch: %v", err)
+	if err := db.SyncMeta(ctx, nil); err != nil {
+		t.Fatalf("SyncMeta: %v", err)
 	}
-	if c.SearchPacks != 0 || c.SearchTail != 2 {
-		t.Fatalf("coverage = (%d, %d), want rebuilt (0, 2)", c.SearchPacks, c.SearchTail)
+	if c.MetaPacks != 0 || c.MetaTail != 2 {
+		t.Fatalf("coverage = (%d, %d), want rebuilt (0, 2)", c.MetaPacks, c.MetaTail)
 	}
-	entries := readSearchEntries(t, dir, "search/L2.gz", false)
+	entries := readMetaEntries(t, dir, "meta/L2.gz", false)
 	if len(entries) != 2 {
 		t.Fatalf("latest entries = %d, want 2", len(entries))
 	}
 }
 
-func TestGCSearchSummariesGraceWindow(t *testing.T) {
+func TestGCMetaSummariesGraceWindow(t *testing.T) {
 	db, c, dir := setupTestDB(t)
 
-	if err := os.MkdirAll(filepath.Join(dir, "search"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "meta"), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
 	for g := 1; g <= 5; g++ {
-		if err := os.WriteFile(filepath.Join(dir, searchSummaryKey(g)), []byte("x"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, metaSummaryKey(g)), []byte("x"), 0o644); err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}
 	}
-	c.SearchPacks = 5
+	c.MetaPacks = 5
 
-	if err := db.GCSearchSummaries(ctx, 2); err != nil {
-		t.Fatalf("GCSearchSummaries: %v", err)
+	if err := db.GCMetaSummaries(ctx, 2); err != nil {
+		t.Fatalf("GCMetaSummaries: %v", err)
 	}
 	for g := 1; g <= 2; g++ {
-		assertKey(t, dir, searchSummaryKey(g), false)
+		assertKey(t, dir, metaSummaryKey(g), false)
 	}
 	for g := 3; g <= 5; g++ {
-		assertKey(t, dir, searchSummaryKey(g), true)
+		assertKey(t, dir, metaSummaryKey(g), true)
 	}
 }
 
-// GCLatest sweeps the search series' L<g> names alongside idx/data.
-func TestGCLatestSweepsSearch(t *testing.T) {
+// GCLatest sweeps the meta series' L<g> names alongside idx/data.
+func TestGCLatestSweepsMeta(t *testing.T) {
 	db, c, dir := setupTestDB(t)
 
-	if err := os.MkdirAll(filepath.Join(dir, "search"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "meta"), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
 	for g := 1; g <= 5; g++ {
-		if err := os.WriteFile(filepath.Join(dir, genKey("search", g)), []byte("x"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, genKey("meta", g)), []byte("x"), 0o644); err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}
 	}
@@ -353,23 +379,23 @@ func TestGCLatestSweepsSearch(t *testing.T) {
 		t.Fatalf("GCLatest: %v", err)
 	}
 	for g := 1; g <= 2; g++ {
-		assertKey(t, dir, genKey("search", g), false)
+		assertKey(t, dir, genKey("meta", g), false)
 	}
 	for g := 3; g <= 5; g++ {
-		assertKey(t, dir, genKey("search", g), true)
+		assertKey(t, dir, genKey("meta", g), true)
 	}
 }
 
-// Full inspect --validate sweep over a boundary-crossing store with the
-// search series published — the writer-side contract check for search/.
-func TestInspectValidateSearch(t *testing.T) {
-	db, _ := setupBoundaryDB(t)
+// Full inspect --validate sweep over a meta-boundary-crossing store with the
+// meta series published — the writer-side contract check for meta/.
+func TestInspectValidateMeta(t *testing.T) {
+	db, _ := setupMetaBoundaryDB(t)
 
 	if err := db.SyncIdxSummary(ctx); err != nil {
 		t.Fatalf("SyncIdxSummary: %v", err)
 	}
-	if err := db.SyncSearch(ctx, nil); err != nil {
-		t.Fatalf("SyncSearch: %v", err)
+	if err := db.SyncMeta(ctx, nil); err != nil {
+		t.Fatalf("SyncMeta: %v", err)
 	}
 	if err := db.Commit(ctx); err != nil {
 		t.Fatalf("Commit: %v", err)
@@ -380,47 +406,47 @@ func TestInspectValidateSearch(t *testing.T) {
 	}
 }
 
-// srch claiming more coverage than the store has finalized packs is an
+// mp claiming more coverage than the store has finalized meta shards is an
 // integrity issue, not a warning.
-func TestInspectValidateSearchOverclaim(t *testing.T) {
-	db, _ := setupBoundaryDB(t)
+func TestInspectValidateMetaOverclaim(t *testing.T) {
+	db, _ := setupMetaBoundaryDB(t)
 
 	if err := db.SyncIdxSummary(ctx); err != nil {
 		t.Fatalf("SyncIdxSummary: %v", err)
 	}
-	if err := db.SyncSearch(ctx, nil); err != nil {
-		t.Fatalf("SyncSearch: %v", err)
+	if err := db.SyncMeta(ctx, nil); err != nil {
+		t.Fatalf("SyncMeta: %v", err)
 	}
-	db.core.SearchPacks = 2
+	db.core.MetaPacks = 2
 	if err := db.Commit(ctx); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 
 	if err := (&InspectCmd{Chron: -1, Validate: true}).Run(); err == nil {
-		t.Fatal("inspect --validate passed with srch > finalized pack count")
+		t.Fatal("inspect --validate passed with mp > finalized meta shard count")
 	}
 }
 
-// srch/srcht are omitempty: absent from db.gz at 0 (readers treat absent as 0).
-func TestCommitSearchFieldsOmitemptyWhenZero(t *testing.T) {
+// mp/mt are omitempty: absent from db.gz at 0 (readers treat absent as 0).
+func TestCommitMetaFieldsOmitemptyWhenZero(t *testing.T) {
 	db, c, dir := setupTestDB(t)
 
 	if err := db.Commit(ctx); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	raw := string(decompressGz(t, filepath.Join(dir, "db.gz")))
-	for _, key := range []string{`"srch"`, `"srcht"`} {
+	for _, key := range []string{`"mp"`, `"mt"`} {
 		if strings.Contains(raw, key) {
 			t.Errorf("fresh db.gz should omit %s: %s", key, raw)
 		}
 	}
 
-	c.SearchPacks, c.SearchTail = 2, 7
+	c.MetaPacks, c.MetaTail = 2, 7
 	if err := db.Commit(ctx); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	raw = string(decompressGz(t, filepath.Join(dir, "db.gz")))
-	for _, want := range []string{`"srch":2`, `"srcht":7`} {
+	for _, want := range []string{`"mp":2`, `"mt":7`} {
 		if !strings.Contains(raw, want) {
 			t.Errorf("db.gz missing %s: %s", want, raw)
 		}
