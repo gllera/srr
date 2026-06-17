@@ -19,10 +19,10 @@ function hrefOf(input: unknown): string {
    return obj.href ?? obj.url ?? String(input)
 }
 
-// Map a CDN-relative request (db.gz, idx/*.gz, data/*.gz) to the matching file
-// under storeDir and return its RAW gzip bytes with NO Content-Encoding header —
-// data.ts decompresses manually via DecompressionStream, so a gzip header would
-// double-decode.
+// Map a CDN-relative request (db.gz, idx/*.gz, data/*.gz, meta/*.gz) to the
+// matching file under storeDir and return its RAW gzip bytes with NO
+// Content-Encoding header — data.ts decompresses manually via
+// DecompressionStream, so a gzip header would double-decode.
 function makeFetchShim(storeDir: string) {
    return vi.fn(async (input: unknown) => {
       const pathname = new URL(hrefOf(input)).pathname.replace(/^\/+/, "")
