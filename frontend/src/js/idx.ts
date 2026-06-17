@@ -30,9 +30,9 @@ export interface IdxPack {
    ownChanCounts: Uint32Array
    bounds: { packId: number; startChron: number }[]
    parse(): IdxPack
-   countLeft(chronIdx: number, channels: Map<number, number>): number
-   findLeft(chronFrom: number, channels: Map<number, number>): number
-   findRight(chronFrom: number, channels: Map<number, number>): number
+   countLeft(chronIdx: number, channels: Map<number, number>, lookup: Int32Array): number
+   findLeft(chronFrom: number, channels: Map<number, number>, lookup: Int32Array): number
+   findRight(chronFrom: number, channels: Map<number, number>, lookup: Int32Array): number
    findChronForBlocks(tsBlocks: number): number
 }
 
@@ -100,8 +100,10 @@ export function findPackForBlocks(headers: IdxHeader[], tsBlocks: number): numbe
 // predictable cache locality, and the JIT can keep the loaded value in a
 // register. -1 sentinel = "not in filter". `slots` is the store high-water+1
 // (threaded from data.ts), so it is sized to the actual channel count rather
-// than the format ceiling. data.ts hoists the build out of the per-pack loop.
-function channelsToLookup(channels: Map<number, number>, slots: number): Int32Array {
+// than the format ceiling. data.ts builds it once per nav call and threads it
+// into the per-pack scans (countLeft/findLeft/findRight), so a multi-pack walk
+// reuses one allocation instead of rebuilding it per pack touched.
+export function makeChannelsLookup(channels: Map<number, number>, slots: number): Int32Array {
    const arr = new Int32Array(slots).fill(-1)
    for (const [chanId, addIdx] of channels) arr[chanId] = addIdx
    return arr
@@ -183,7 +185,7 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
          rawBuf = null
          return pack
       },
-      countLeft(chronIdx: number, channels: Map<number, number>): number {
+      countLeft(chronIdx: number, channels: Map<number, number>, lookup: Int32Array): number {
          pack.parse()
          let count = 0
          for (const [chanId, addIdx] of channels) {
@@ -191,7 +193,6 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
          }
          const limit = Math.min(chronIdx - baseChron, packSize)
          if (limit <= 0) return count
-         const lookup = channelsToLookup(channels, slots)
          const chanIds = pack.chanIds
          for (let i = 0; i < limit; i++) {
             const addIdx = lookup[chanIds[i]]
@@ -199,11 +200,10 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
          }
          return count
       },
-      findLeft(chronFrom: number, channels: Map<number, number>): number {
+      findLeft(chronFrom: number, channels: Map<number, number>, lookup: Int32Array): number {
          pack.parse()
          const packEnd = baseChron + packSize
          if (!hasCandidate(channels, packEnd)) return -1
-         const lookup = channelsToLookup(channels, slots)
          const chanIds = pack.chanIds
          const hi = Math.min(chronFrom, packEnd - 1) - baseChron
          for (let i = hi; i >= 0; i--) {
@@ -212,11 +212,10 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
          }
          return -1
       },
-      findRight(chronFrom: number, channels: Map<number, number>): number {
+      findRight(chronFrom: number, channels: Map<number, number>, lookup: Int32Array): number {
          pack.parse()
          const packEnd = baseChron + packSize
          if (!hasCandidate(channels, packEnd)) return -1
-         const lookup = channelsToLookup(channels, slots)
          const chanIds = pack.chanIds
          const lo = Math.max(chronFrom, baseChron) - baseChron
          for (let i = lo; i < packSize; i++) {

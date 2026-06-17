@@ -1,6 +1,17 @@
 import { describe, it, expect } from "vitest"
 import { IDX_ENTRY_SIZE, IDX_HEADER_PREFIX, IDX_STATE_SIZE } from "./format.gen"
-import { findPackForBlocks, IDX_PACK_SIZE, makeIdxPack, parseIdxHeaders, type IdxHeader } from "./idx"
+import {
+   findPackForBlocks,
+   IDX_PACK_SIZE,
+   makeChannelsLookup,
+   makeIdxPack,
+   parseIdxHeaders,
+   type IdxHeader,
+} from "./idx"
+
+// The scan methods take the prebuilt reverse lookup data.ts hoists once per nav
+// call; tests build it from the same channels Map at SLOTS width.
+const lk = (channels: Map<number, number>): Int32Array => makeChannelsLookup(channels, SLOTS)
 
 interface Entry {
    chanId: number
@@ -208,27 +219,29 @@ describe("makeIdxPack.findLeft", () => {
    it("returns the rightmost match scanning leftward from chronFrom", () => {
       const pack = buildPack()
       const channels = new Map([[1, 0]])
-      expect(pack.findLeft(4, channels)).toBe(4)
-      expect(pack.findLeft(3, channels)).toBe(2)
-      expect(pack.findLeft(1, channels)).toBe(0)
+      expect(pack.findLeft(4, channels, lk(channels))).toBe(4)
+      expect(pack.findLeft(3, channels, lk(channels))).toBe(2)
+      expect(pack.findLeft(1, channels, lk(channels))).toBe(0)
    })
 
    it("respects sub addIdx (entries before addIdx don't match)", () => {
       const pack = buildPack()
       const channels = new Map([[1, 3]])
-      expect(pack.findLeft(4, channels)).toBe(4)
-      expect(pack.findLeft(2, channels)).toBe(-1)
+      expect(pack.findLeft(4, channels, lk(channels))).toBe(4)
+      expect(pack.findLeft(2, channels, lk(channels))).toBe(-1)
    })
 
    it("returns -1 when no sub matches", () => {
       const pack = buildPack()
-      expect(pack.findLeft(4, new Map([[99, 0]]))).toBe(-1)
+      const channels = new Map([[99, 0]])
+      expect(pack.findLeft(4, channels, lk(channels))).toBe(-1)
    })
 
    it("returns -1 when chronFrom < baseChron", () => {
       const buf = buildBuf({ entries: [e(1)] })
       const pack = makeIdxPack(buf, 1, 1, SLOTS)
-      expect(pack.findLeft(IDX_PACK_SIZE - 1, new Map([[1, 0]]))).toBe(-1)
+      const channels = new Map([[1, 0]])
+      expect(pack.findLeft(IDX_PACK_SIZE - 1, channels, lk(channels))).toBe(-1)
    })
 })
 
@@ -238,25 +251,28 @@ describe("makeIdxPack.findRight", () => {
    it("returns the leftmost match scanning rightward from chronFrom", () => {
       const pack = buildPack()
       const channels = new Map([[1, 0]])
-      expect(pack.findRight(0, channels)).toBe(0)
-      expect(pack.findRight(1, channels)).toBe(2)
-      expect(pack.findRight(3, channels)).toBe(4)
+      expect(pack.findRight(0, channels, lk(channels))).toBe(0)
+      expect(pack.findRight(1, channels, lk(channels))).toBe(2)
+      expect(pack.findRight(3, channels, lk(channels))).toBe(4)
    })
 
    it("respects sub addIdx", () => {
       const pack = buildPack()
-      expect(pack.findRight(0, new Map([[1, 3]]))).toBe(4)
+      const channels = new Map([[1, 3]])
+      expect(pack.findRight(0, channels, lk(channels))).toBe(4)
    })
 
    it("returns -1 when no sub matches addIdx within pack", () => {
       const buf = buildBuf({ entries: [e(1), e(1), e(1)] })
       const pack = makeIdxPack(buf, 0, 3, SLOTS)
-      expect(pack.findRight(0, new Map([[1, 5]]))).toBe(-1)
+      const channels = new Map([[1, 5]])
+      expect(pack.findRight(0, channels, lk(channels))).toBe(-1)
    })
 
    it("returns -1 when no sub matches", () => {
       const pack = buildPack()
-      expect(pack.findRight(0, new Map([[99, 0]]))).toBe(-1)
+      const channels = new Map([[99, 0]])
+      expect(pack.findRight(0, channels, lk(channels))).toBe(-1)
    })
 })
 
@@ -264,15 +280,17 @@ describe("makeIdxPack.countLeft", () => {
    it("counts matching entries strictly left of chronIdx", () => {
       const buf = buildBuf({ entries: [e(1), e(2), e(1), e(3), e(1)] })
       const pack = makeIdxPack(buf, 0, 5, SLOTS)
-      expect(pack.countLeft(0, new Map([[1, 0]]))).toBe(0)
-      expect(pack.countLeft(4, new Map([[1, 0]]))).toBe(2)
-      expect(pack.countLeft(5, new Map([[1, 0]]))).toBe(3)
+      const channels = new Map([[1, 0]])
+      expect(pack.countLeft(0, channels, lk(channels))).toBe(0)
+      expect(pack.countLeft(4, channels, lk(channels))).toBe(2)
+      expect(pack.countLeft(5, channels, lk(channels))).toBe(3)
    })
 
    it("respects sub addIdx", () => {
       const buf = buildBuf({ entries: [e(1), e(1), e(1)] })
       const pack = makeIdxPack(buf, 0, 3, SLOTS)
-      expect(pack.countLeft(3, new Map([[1, 1]]))).toBe(2)
+      const channels = new Map([[1, 1]])
+      expect(pack.countLeft(3, channels, lk(channels))).toBe(2)
    })
 
    it("uses chanCounts header for entries in earlier packs", () => {
@@ -281,15 +299,17 @@ describe("makeIdxPack.countLeft", () => {
          entries: [e(1)],
       })
       const pack = makeIdxPack(buf, 1, 1, SLOTS)
+      const channels = new Map([[1, 0]])
       // baseChron = 1 * IDX_PACK_SIZE; addIdx (0) < baseChron, so prior count = 200
-      expect(pack.countLeft(IDX_PACK_SIZE, new Map([[1, 0]]))).toBe(200)
-      expect(pack.countLeft(IDX_PACK_SIZE + 1, new Map([[1, 0]]))).toBe(201)
+      expect(pack.countLeft(IDX_PACK_SIZE, channels, lk(channels))).toBe(200)
+      expect(pack.countLeft(IDX_PACK_SIZE + 1, channels, lk(channels))).toBe(201)
    })
 
    it("clamps limit at packSize so chronIdx past the pack still works", () => {
       const buf = buildBuf({ entries: [e(1), e(1), e(1)] })
       const pack = makeIdxPack(buf, 0, 3, SLOTS)
-      expect(pack.countLeft(99999, new Map([[1, 0]]))).toBe(3)
+      const channels = new Map([[1, 0]])
+      expect(pack.countLeft(99999, channels, lk(channels))).toBe(3)
    })
 })
 
