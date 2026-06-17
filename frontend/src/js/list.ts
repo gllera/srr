@@ -150,6 +150,38 @@ function rowEl(chron: number, art: import("./format.gen").IMetaWire, seen: Recor
    return a
 }
 
+// Pin each row's REAL height as its content-visibility intrinsic size. Rows are
+// virtualized with `content-visibility: auto; contain-intrinsic-size: auto 4rem`
+// (styles.css) — but a real row is 1- or 2-line (≈60 vs 80px), so the 4rem (64px)
+// placeholder is wrong for every row. With the list's browser scroll anchoring
+// off (overflow-anchor:none, for Safari parity), nothing absorbs a placeholder→
+// real correction happening ABOVE the viewport: the moment a skipped row renders
+// (scrolled into view, or swept past by a prepend's compensation scroll) its size
+// jumps and shoves the viewport — the upward-scroll jump. Measuring each row once
+// and pinning its true height makes the reserved space exact, so a row's size
+// never changes when it later renders or skips, on any engine. Called at every
+// insertion path so the invariant "every loaded row's intrinsic size is its real
+// height" holds, keeping the fetchNewer prepend compensation exact. One forced
+// layout per batch (the offsetHeight read); the rows stay virtualized afterward.
+//
+// `contain-intrinsic-size` sizes the CONTENT box, but offsetHeight is the
+// border-box (box-sizing:border-box). Pinning offsetHeight directly makes a
+// skipped row reserve offsetHeight + padding + border — ~19px too tall per row,
+// which over-scrolls the prepend compensation. Subtract the row chrome (identical
+// for every .srr-row) so the reserved border-box equals the real rendered height.
+function pinHeights(rows: HTMLElement[]): void {
+   if (!rows.length) return
+   for (const r of rows) r.style.setProperty("content-visibility", "visible")
+   const heights = rows.map((r) => r.offsetHeight) // single forced layout, then cached reads
+   const cs = getComputedStyle(rows[0])
+   const px = (v: string): number => parseFloat(v) || 0 // "" (jsdom) / "auto" → 0
+   const chrome = px(cs.paddingTop) + px(cs.paddingBottom) + px(cs.borderTopWidth) + px(cs.borderBottomWidth)
+   rows.forEach((r, i) => {
+      r.style.setProperty("contain-intrinsic-size", `auto ${Math.max(0, heights[i] - chrome)}px`)
+      r.style.removeProperty("content-visibility")
+   })
+}
+
 // The "wire when it's quiet": each empty/in-between state is a directed station —
 // a mono eyebrow (the wire voice) over one plain, specific line that says what's
 // true and what to do next, instead of a vague "Nothing here". The caught-up
@@ -379,6 +411,10 @@ export async function render(center = false): Promise<void> {
    rowsEl.appendChild(frag)
    container.append(topSentinel, rowsEl, bottomSentinel)
    relabelDividers()
+   // Pin every row's real height before positioning so the newer batch above the
+   // anchor reserves accurate space (scrollChronToView's offsetTop is exact) and
+   // never corrects when scrolled up into (see pinHeights).
+   pinHeights([...rowsEl.querySelectorAll<HTMLElement>("a.srr-row")])
    syncBottomTerminus() // cap the rows when the whole view fits one batch
    syncTopTerminus() // and cap the top when we're already anchored at the newest
 
@@ -482,9 +518,15 @@ async function fetchOlder(my: object): Promise<void> {
       const arts = await Promise.all(chrons.map((c) => data.loadMeta(c)))
       if (my !== tok) return
       const frag = document.createDocumentFragment()
-      chrons.forEach((c, k) => frag.appendChild(rowEl(c, arts[k], seen)))
+      const older: HTMLElement[] = []
+      chrons.forEach((c, k) => {
+         const row = rowEl(c, arts[k], seen)
+         older.push(row)
+         frag.appendChild(row)
+      })
       rowsEl.appendChild(frag)
       relabelDividers()
+      pinHeights(older) // keep the every-row-pinned invariant (see pinHeights)
    } finally {
       if (my === tok) {
          loadingBottom = false
@@ -515,40 +557,37 @@ async function fetchNewer(my: object): Promise<void> {
       if (my !== tok) return
       const frag = document.createDocumentFragment()
       // chrons is ascending; prepend newest-first so the block reads top-down.
-      // Render the prepended rows for real (override the content-visibility:auto
-      // virtualization) so the compensation below measures their TRUE height, not
-      // the contain-intrinsic-size placeholder. A never-rendered placeholder is
-      // corrected to the real height the moment the row scrolls into view, and
-      // since the list disables browser scroll anchoring (overflow-anchor:none,
-      // for Safari parity) nothing absorbs that resize happening ABOVE the
-      // viewport — that is the upward-scroll jump.
       const fresh: HTMLElement[] = []
       for (let k = chrons.length - 1; k >= 0; k--) {
          const row = rowEl(chrons[k], arts[k], seen)
-         row.style.setProperty("content-visibility", "visible")
          fresh.push(row)
          frag.appendChild(row)
       }
-      const scroller = document.scrollingElement ?? document.documentElement
-      const before = scroller.scrollHeight
+      // Pick the compensation anchor — the first row reaching into the viewport
+      // (bottom past the top edge) — BEFORE the insert. Compensating by how far a
+      // VIEWPORT row actually moves (then scrolling to put it back) keeps the
+      // visible content fixed across the insert regardless of ANY height change
+      // above it (the prepended block, or day-divider churn from relabelDividers).
+      // Anchoring to the topmost row or to a scrollHeight delta is wrong: either
+      // folds in changes that aren't directly above the viewport and lurches it.
+      // Rows are never removed, so the anchor survives the mutation.
+      const anchor =
+         [...rowsEl.querySelectorAll<HTMLElement>("a.srr-row")].find((r) => r.getBoundingClientRect().bottom > 0) ??
+         rowsEl.querySelector<HTMLElement>("a.srr-row")
+      const anchorBefore = anchor ? anchor.getBoundingClientRect().top : 0
       rowsEl.insertBefore(frag, rowsEl.firstChild)
-      // Relabel inside the measure bracket so the day strata that shift across the
-      // new seam ride the same scrollHeight delta as the prepended rows.
       relabelDividers()
-      const delta = scroller.scrollHeight - before
-      if (delta) {
-         window.scrollTo(0, window.scrollY + delta)
+      // Pin the prepended rows to their real height so their reserved space is
+      // exact: the anchor measurement below then reflects the true inserted height,
+      // AND the rows never correct when scrolled up into later. pinHeights leaves
+      // them content-visibility:auto with a contain-intrinsic-size matching their
+      // measured height (getBoundingClientRect forces the layout it relies on).
+      pinHeights(fresh)
+      const shift = anchor ? anchor.getBoundingClientRect().top - anchorBefore : 0
+      if (shift) {
+         window.scrollTo(0, window.scrollY + shift)
          notifyScroll()
       }
-      // Pin each row's now-measured height as its intrinsic size, then hand it
-      // back to content-visibility:auto. The placeholder now equals the real
-      // height, so the row's size no longer changes when it later renders/skips
-      // on scroll, and the viewport stays put.
-      const heights = fresh.map((row) => row.offsetHeight)
-      fresh.forEach((row, i) => {
-         row.style.setProperty("contain-intrinsic-size", `auto ${heights[i]}px`)
-         row.style.removeProperty("content-visibility")
-      })
    } finally {
       if (my === tok) {
          loadingTop = false
