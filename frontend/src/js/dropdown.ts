@@ -20,9 +20,8 @@ const READER_HOST: FeedMenuHost = {
    selectFilter: () => {},
 }
 
-// Sentinel data-values for the overflow menu's action rows — UI actions, not
-// filter tokens, so the onClick intercepts them instead of routing anywhere.
-const JUMP_DATE = "~jump-date"
+// Sentinel data-value for the overflow menu's action row — a UI action, not a
+// filter token, so the onClick intercepts it instead of routing anywhere.
 const IMG_PROXY = "~img-proxy"
 
 let isOpen = false
@@ -376,59 +375,21 @@ export function showImgProxyDialog(): void {
    dialog.addEventListener("mousedown", onDown)
 }
 
-// The overflow / settings menu (toolbar ⋯ button, list-only): "Jump to a date"
-// (relocated off the toolbar — a lower-frequency navigation aid) and "Image
-// proxy…" (opens the centered settings dialog). Both rows are navigable anchors;
-// the proxy editing moved out of the menu into showImgProxyDialog's modal.
-export function showOverflowMenu(onJumpDate: () => void = () => {}): void {
+// The overflow / settings menu (toolbar ⋯ button, list-only): a single "Image
+// proxy…" row that opens the centered settings dialog. The row is a navigable
+// anchor; the proxy editing lives in showImgProxyDialog's modal.
+export function showOverflowMenu(): void {
    toggleDropdown(
       "srr-overflow-menu",
       (frag) => {
-         frag.append(createLink(JUMP_DATE, "Jump to a date…"), createLink(IMG_PROXY, "Image proxy…"))
+         frag.append(createLink(IMG_PROXY, "Image proxy…"))
       },
       async (value) => {
-         if (value === JUMP_DATE) {
-            // Open the native picker while the click's transient activation is
-            // still live (showPicker needs it), then close the menu.
-            onJumpDate()
-            closeAllDropdowns()
-         } else if (value === IMG_PROXY) {
+         if (value === IMG_PROXY) {
             showImgProxyDialog() // closes the menu itself, then opens the modal
          }
       },
    )
-}
-
-// The jump control (toolbar 🗓 button, list-only): no dropdown, no time presets,
-// no text-entry step — clicking it opens the browser's *native* date picker
-// straight away on its paired hidden <input type="date">. openDatePicker clamps
-// the calendar to the archive span [first_fetched, today] and pops it (showPicker
-// rides the button click's transient activation; focus is the fallback where
-// showPicker is unavailable — older engines, jsdom). dateJump, wired to the
-// input's change, hands local midnight of the chosen day to onPick; app.ts then
-// repositions the LIST to the first article at-or-after that day (nav.seek + the
-// list's anchor) — it does NOT open the reader, so picking a date scrubs the
-// timeline of the list you're browsing. ("Latest" lives on the resume button.)
-function dateValue(d: Date): string {
-   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
-}
-
-export function openDatePicker(input: HTMLInputElement): void {
-   input.max = dateValue(new Date())
-   input.min = data.db.first_fetched ? dateValue(new Date(data.db.first_fetched * 1000)) : ""
-   // Start empty so picking the same day twice still fires change (= re-jumps).
-   input.value = ""
-   try {
-      input.showPicker()
-   } catch {
-      input.focus()
-   }
-}
-
-export function dateJump(input: HTMLInputElement, onPick: (ts: number) => void): void {
-   if (!input.value) return
-   const [y, m, d] = input.value.split("-").map(Number)
-   onPick(new Date(y, m - 1, d).getTime() / 1000)
 }
 
 export function showFeedMenu(

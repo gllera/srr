@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest"
 import { IDX_ENTRY_SIZE, IDX_HEADER_PREFIX, IDX_STATE_SIZE } from "./format.gen"
-import { findPackForBlocks, IDX_PACK_SIZE, makeFeedsLookup, makeIdxPack, parseIdxHeaders, type IdxHeader } from "./idx"
+import { IDX_PACK_SIZE, makeFeedsLookup, makeIdxPack, parseIdxHeaders } from "./idx"
 
 // The scan methods take the prebuilt reverse lookup data.ts hoists once per nav
 // call; tests build it from the same feeds Map at SLOTS width.
@@ -88,33 +88,6 @@ describe("makeIdxPack.parse", () => {
       expect(pack.ownFeedCounts[65535]).toBe(1)
    })
 
-   it("accumulates fetchedAt from header base plus deltas", () => {
-      const buf = buildBuf({
-         fetchedAtBase: 100,
-         entries: [e(1, 0, 5), e(2, 0, 3), e(3, 0, 7)],
-      })
-      const pack = makeIdxPack(buf, 0, 3, SLOTS).parse()
-      expect(Array.from(pack.fetchedAts)).toEqual([105, 108, 115])
-   })
-
-   it("preserves max 7-bit delta (127)", () => {
-      const buf = buildBuf({
-         fetchedAtBase: 0,
-         entries: [e(1, 0, 127), e(2, 0, 127)],
-      })
-      const pack = makeIdxPack(buf, 0, 2, SLOTS).parse()
-      expect(Array.from(pack.fetchedAts)).toEqual([127, 254])
-   })
-
-   it("accumulates fetchedAt across a large in-range base", () => {
-      // fetchedAt is 8h-blocks since first_fetched, stored as Uint16. The
-      // ceiling (65535 blocks ≈ 60y of calendar time from the first fetch)
-      // is far beyond any real horizon, so a large base still round-trips.
-      const buf = buildBuf({ fetchedAtBase: 60000, entries: [e(1, 0, 5)] })
-      const pack = makeIdxPack(buf, 0, 1, SLOTS).parse()
-      expect(pack.fetchedAts[0]).toBe(60005)
-   })
-
    it("populates ownFeedCounts from entries", () => {
       const buf = buildBuf({ entries: [e(1), e(2), e(1), e(1), e(3)] })
       const pack = makeIdxPack(buf, 0, 5, SLOTS).parse()
@@ -139,6 +112,9 @@ describe("makeIdxPack.parse", () => {
 
    it("exposes the full header before parse() is called", () => {
       const buf = buildBuf({
+         // The wire prefix still leads with a fetchedAt_base u32 (42 here); the
+         // reader skips it (entry timestamps aren't decoded) and keeps only the
+         // pack/offset bases + numSlots, so it isn't exposed on the header.
          fetchedAtBase: 42,
          packIdBase: 7,
          packOffBase: 3,
@@ -146,7 +122,6 @@ describe("makeIdxPack.parse", () => {
          entries: [e(1, 1, 2)],
       })
       const pack = makeIdxPack(buf, 0, 1, SLOTS)
-      expect(pack.header.fetchedAtBase).toBe(42)
       expect(pack.header.packIdBase).toBe(7)
       expect(pack.header.packOffBase).toBe(3)
       expect(pack.header.feedCounts[5]).toBe(11)
@@ -321,44 +296,16 @@ function buildSummary(headers: Omit<PackOpts, "entries">[]): ArrayBuffer {
    return out.buffer
 }
 
-describe("makeIdxPack.findChronForBlocks", () => {
-   // fetchedAts: [10, 15, 15, 20] in pack 2 → chron base 2 * IDX_PACK_SIZE
-   const buf = buildBuf({ fetchedAtBase: 10, entries: [e(1), e(1, 0, 5), e(1), e(1, 0, 5)] })
-   const base = 2 * IDX_PACK_SIZE
-
-   it("returns the global chron of the leftmost entry with fetchedAt >= tsBlocks", () => {
-      const pack = makeIdxPack(buf, 2, 4, SLOTS)
-      expect(pack.findChronForBlocks(0)).toBe(base)
-      expect(pack.findChronForBlocks(11)).toBe(base + 1)
-      expect(pack.findChronForBlocks(15)).toBe(base + 1)
-      expect(pack.findChronForBlocks(16)).toBe(base + 3)
-   })
-
-   it("returns one past the pack's end when nothing qualifies", () => {
-      expect(makeIdxPack(buf, 2, 4, SLOTS).findChronForBlocks(21)).toBe(base + 4)
-   })
-
-   it("clamps a tsBlocks before the pack's first entry to the base chron", () => {
-      // ts earlier than the archive start (the date picker is clamped to
-      // first_fetched's *day*, but a ts earlier in that same day is negative):
-      // every entry qualifies, so the leftmost is the pack base.
-      expect(makeIdxPack(buf, 2, 4, SLOTS).findChronForBlocks(-5)).toBe(base)
-      expect(makeIdxPack(buf, 2, 4, SLOTS).findChronForBlocks(10)).toBe(base) // exactly the first entry
-   })
-})
-
 describe("parseIdxHeaders", () => {
    it("decodes each variable-length chunk by its own numSlots", () => {
       const buf = buildSummary([
-         { fetchedAtBase: 0, packIdBase: 1, packOffBase: 0 },
-         { fetchedAtBase: 9, packIdBase: 4, packOffBase: 2, feedCounts: { 1: 50000 } },
+         { packIdBase: 1, packOffBase: 0 },
+         { packIdBase: 4, packOffBase: 2, feedCounts: { 1: 50000 } },
       ])
       const hs = parseIdxHeaders(buf, 2)
       expect(hs.length).toBe(2)
-      expect(hs[0].fetchedAtBase).toBe(0)
       expect(hs[0].packIdBase).toBe(1)
       expect(hs[0].numSlots).toBe(0)
-      expect(hs[1].fetchedAtBase).toBe(9)
       expect(hs[1].packIdBase).toBe(4)
       expect(hs[1].packOffBase).toBe(2)
       expect(hs[1].numSlots).toBe(2)
@@ -376,33 +323,5 @@ describe("parseIdxHeaders", () => {
       const padded = new Uint8Array(buf.byteLength + 8)
       padded.set(new Uint8Array(buf))
       expect(() => parseIdxHeaders(padded.buffer, 1)).toThrow(/summary/)
-   })
-})
-
-describe("findPackForBlocks", () => {
-   const hdr = (fetchedAtBase: number): IdxHeader => ({
-      fetchedAtBase,
-      packIdBase: 0,
-      packOffBase: 0,
-      numSlots: 0,
-      feedCounts: new Uint32Array(0),
-   })
-   // Pack k's last entry value = headers[k+1].fetchedAtBase; the final
-   // header is the latest pack's (unbounded end). Packs 0..2 + latest.
-   const headers = [hdr(0), hdr(10), hdr(10), hdr(30)]
-
-   it("picks the first pack whose last entry >= tsBlocks", () => {
-      expect(findPackForBlocks(headers, 0)).toBe(0)
-      expect(findPackForBlocks(headers, 5)).toBe(0)
-      // Boundary duplicate (pack 1 spans no time): earliest pack wins, like
-      // the flat leftmost-entry search.
-      expect(findPackForBlocks(headers, 10)).toBe(0)
-      expect(findPackForBlocks(headers, 11)).toBe(2)
-      expect(findPackForBlocks(headers, 30)).toBe(2)
-   })
-
-   it("clamps to the latest pack when no finalized pack qualifies", () => {
-      expect(findPackForBlocks(headers, 31)).toBe(3)
-      expect(findPackForBlocks([hdr(0)], 999)).toBe(0)
    })
 })

@@ -1,12 +1,5 @@
 import * as data from "./data"
-import {
-   closeAllDropdowns,
-   dateJump,
-   openDatePicker,
-   showFeedMenu,
-   showOverflowMenu,
-   type FeedMenuHost,
-} from "./dropdown"
+import { closeAllDropdowns, showFeedMenu, showOverflowMenu, type FeedMenuHost } from "./dropdown"
 import { collapseBrokenMedia, formatDate, readMinutes, sanitizeHtml, srcColorIndex, timeAgo, URL_DENY } from "./fmt"
 import { setupGestures, type Gestures } from "./gestures"
 import * as list from "./list"
@@ -34,7 +27,6 @@ const el = {
    searchNote: document.querySelector(".srr-search-note") as HTMLElement,
    overflow: document.querySelector(".srr-overflow") as HTMLButtonElement,
    unread: document.querySelector(".srr-unread") as HTMLButtonElement,
-   jumpDate: document.querySelector(".srr-jump-date") as HTMLInputElement,
    save: document.querySelector(".srr-save") as HTMLButtonElement,
    popupText: document.querySelector(".srr-popup-text") as HTMLElement,
    popupRetry: document.querySelector(".srr-popup-retry") as HTMLButtonElement,
@@ -388,30 +380,6 @@ async function renderListSurface() {
    }
 }
 
-// Picking a date (calendar 🗓, list-only) repositions the LIST to the first
-// article at-or-after local midnight of that day, snapped forward through the
-// active filter — it does NOT open the reader. nav.seek moves the cursor
-// without loading an article; list.show() then anchors the list there (newer
-// "next" rows above, older below), reusing the rendered window when the target
-// is already on screen. Mirrors renderListSurface's guard/loading/searchbar
-// bookkeeping (we're already on the list, so the filter/hash are unchanged); a
-// cold idx-pack fetch that rejects surfaces in the popup with Retry.
-async function jumpToDate(ts: number) {
-   if (busy) return
-   busy = true
-   document.body.classList.add("srr-loading")
-   try {
-      await nav.seek(await data.findChronForTimestamp(ts))
-      await list.show()
-   } catch (e) {
-      showError(e, () => void jumpToDate(ts))
-   } finally {
-      document.body.classList.remove("srr-loading")
-      syncSearchBar()
-      busy = false
-   }
-}
-
 // Hash → surface. A numeric position routes to the reader (deep-link or restored
 // reading position); anything else (empty, or just `!tokens`) is the list at
 // that filter.
@@ -642,11 +610,8 @@ async function init() {
    // capture: error events don't bubble (see collapseBrokenMedia)
    el.content.addEventListener("error", collapseBrokenMedia, true)
    el.feed.addEventListener("click", () => showFeedMenu(feedMenuTag(), guard, dropdownHost))
-   // ⋯ overflow holds settings + the relocated "Jump to a date" row, which pops
-   // the native date picker; picking a day (the input's change) repositions the
-   // LIST to that date (jumpToDate), not the reader.
-   el.overflow.addEventListener("click", () => showOverflowMenu(() => openDatePicker(el.jumpDate)))
-   el.jumpDate.addEventListener("change", () => dateJump(el.jumpDate, jumpToDate))
+   // ⋯ overflow holds settings — currently just the "Image proxy…" row.
+   el.overflow.addEventListener("click", () => showOverflowMenu())
    // Unread (catch-up) toggle — one-tap "show only unread" in whatever's filtered.
    el.unread.addEventListener("click", toggleUnseenOnly)
    // Search: the magnifier toggles the list's "q:<query>" filter; the pinned

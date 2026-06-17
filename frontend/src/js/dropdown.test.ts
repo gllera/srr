@@ -4,9 +4,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 // before import — hence vi.resetModules() + dynamic import per test run.
 const data = vi.hoisted(() => {
    const mock = {
-      db: { first_fetched: 0 } as IDB,
+      db: {} as IDB,
       groupFeedsByTag: vi.fn(() => ({ tagged: new Map(), sortedTags: [] as string[], untagged: [] as IFeed[] })),
-      findChronForTimestamp: vi.fn(async () => 0),
       feedTitle: (feedId: number) => mock.db.feeds?.[feedId]?.title ?? "[DELETED]",
    }
    return mock
@@ -223,78 +222,6 @@ describe("image-proxy dialog", () => {
    })
 })
 
-describe("jump: native date picker", () => {
-   let dropdown: Dropdown
-   let input: HTMLInputElement
-
-   // Assign showPicker as an own property so it shadows whatever jsdom's
-   // prototype provides (which throws "not implemented"); returns the spy.
-   const stubPicker = (impl: () => void = () => {}): ReturnType<typeof vi.fn> => {
-      const spy = vi.fn(impl)
-      ;(input as unknown as { showPicker: () => void }).showPicker = spy
-      return spy
-   }
-
-   beforeEach(async () => {
-      document.body.innerHTML = SKELETON
-      localStorage.clear()
-      data.db.first_fetched = 0
-      vi.resetModules()
-      dropdown = await import("./dropdown")
-      input = document.createElement("input")
-      input.type = "date"
-      document.body.appendChild(input)
-   })
-
-   it("clamps the calendar to [first_fetched, today] and pops the native picker", () => {
-      data.db.first_fetched = new Date(2020, 0, 15).getTime() / 1000
-      const picker = stubPicker()
-      dropdown.openDatePicker(input)
-      expect(input.min).toBe("2020-01-15") // archive start bounds the picker
-      expect(input.max).not.toBe("") // today bounds the other end
-      expect(input.value).toBe("") // empty so re-picking the same day re-jumps
-      expect(picker).toHaveBeenCalledTimes(1)
-   })
-
-   it("clears a previously-set value before popping so re-picking the same day re-fires change", () => {
-      data.db.first_fetched = 0
-      input.value = "2024-06-12" // a stale value from a prior jump
-      stubPicker()
-      dropdown.openDatePicker(input)
-      expect(input.value).toBe("")
-   })
-
-   it("leaves min unset when the store has no first_fetched", () => {
-      data.db.first_fetched = 0
-      stubPicker()
-      dropdown.openDatePicker(input)
-      expect(input.min).toBe("")
-   })
-
-   it("falls back to focus() when showPicker is unavailable", () => {
-      stubPicker(() => {
-         throw new Error("not supported")
-      })
-      const focus = vi.spyOn(input, "focus")
-      dropdown.openDatePicker(input)
-      expect(focus).toHaveBeenCalledTimes(1)
-   })
-
-   it("hands local midnight of the picked date to onPick (does not open the reader)", () => {
-      const onPick = vi.fn()
-      input.value = "2024-06-12"
-      dropdown.dateJump(input, onPick)
-      expect(onPick).toHaveBeenCalledWith(new Date(2024, 5, 12).getTime() / 1000)
-   })
-
-   it("does nothing when no date is set (cancelled picker)", () => {
-      const onPick = vi.fn()
-      input.value = ""
-      dropdown.dateJump(input, onPick)
-      expect(onPick).not.toHaveBeenCalled()
-   })
-})
-
 // Clicking the overflow "Image proxy…" row opens the dialog AND bubbles on to
 // app.ts's window-level "any click closes dropdowns" handler. The menu closing is
 // expected; the just-opened dialog must survive (it isn't a dropdown). Guards the
@@ -307,7 +234,6 @@ describe("image-proxy dialog: survives the window close handler", () => {
    beforeEach(async () => {
       document.body.innerHTML = SKELETON
       localStorage.clear()
-      data.db.first_fetched = 0
       vi.resetModules()
       dropdown = await import("./dropdown")
       // Mirror app.ts's window close handler exactly (closest, not matches: a
@@ -410,31 +336,6 @@ describe("dropdown: saved row", () => {
       dropdown.showFeedMenu("", vi.fn(), { viewIsList: () => true, selectFilter })
       $menu().querySelector<HTMLElement>('a[data-value="~saved"]')!.click()
       expect(selectFilter).toHaveBeenCalledWith("~saved")
-   })
-})
-
-// The overflow (⋯) menu's "Jump to a date" row opens the native date picker via
-// the onJumpDate callback, then closes the menu — it must not leak the click to
-// the window close handler before the picker opens.
-describe("dropdown: overflow menu — jump to date", () => {
-   let dropdown: Dropdown
-
-   beforeEach(async () => {
-      document.body.innerHTML = SKELETON
-      localStorage.clear()
-      vi.resetModules()
-      dropdown = await import("./dropdown")
-   })
-   afterEach(() => dropdown.closeAllDropdowns())
-
-   const $jump = () => document.querySelector<HTMLElement>('#srr-overflow-menu a[data-value="~jump-date"]')
-
-   it("renders a 'Jump to a date' row that fires onJumpDate", () => {
-      const onJumpDate = vi.fn()
-      dropdown.showOverflowMenu(onJumpDate)
-      expect($jump()).not.toBeNull()
-      $jump()!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }))
-      expect(onJumpDate).toHaveBeenCalledTimes(1)
    })
 })
 

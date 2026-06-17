@@ -1,9 +1,8 @@
 import { PACK_BASE } from "./base"
 import { cachedPromise, makeLRU, type LRU } from "./cache"
-import { FETCHED_AT_BLOCK, META_PACK_SIZE, SEARCH_BLOOM_BYTES, type IMetaWire } from "./format.gen"
+import { META_PACK_SIZE, SEARCH_BLOOM_BYTES, type IMetaWire } from "./format.gen"
 import {
    countAt,
-   findPackForBlocks,
    IDX_PACK_SIZE,
    lowerBound,
    makeFeedsLookup,
@@ -164,18 +163,6 @@ export async function getFeedId(chronIdx: number): Promise<number> {
    const n = packIdx(chronIdx)
    const feedIds = (await fetchIdxPack(n)).parse().feedIds
    return feedIds[chronIdx - n * IDX_PACK_SIZE]
-}
-
-// Binary search for leftmost entry where fetchedAt >= ts: pack-level over
-// the always-resident headers, then entry-level inside the one target pack.
-export async function findChronForTimestamp(ts: number): Promise<number> {
-   // `?? 0` guards a hand-edited/migrated db.gz missing first_fetched: the
-   // writer always emits it (omitempty dropped backend-side), but an absent
-   // key would make the subtraction NaN and collapse the search to index 0.
-   const tsBlocks = Math.trunc(ts / FETCHED_AT_BLOCK) - Math.trunc((db.first_fetched ?? 0) / FETCHED_AT_BLOCK)
-   const n = findPackForBlocks(idxHeaders, tsBlocks)
-   const chron = (await fetchIdxPack(n)).findChronForBlocks(tsBlocks)
-   return chron < db.total_art ? chron : Math.max(0, db.total_art - 1)
 }
 
 // Total filtered count across the whole store. Synchronous on purpose:

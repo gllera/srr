@@ -3,13 +3,7 @@ import { join } from "node:path"
 import { gzipSync } from "node:zlib"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
-import {
-   FETCHED_AT_BLOCK,
-   IDX_ENTRY_SIZE,
-   IDX_HEADER_PREFIX,
-   IDX_PACK_SIZE,
-   IDX_STATE_SIZE,
-} from "../../src/js/format.gen"
+import { IDX_ENTRY_SIZE, IDX_HEADER_PREFIX, IDX_PACK_SIZE, IDX_STATE_SIZE } from "../../src/js/format.gen"
 import { makeStore } from "../harness"
 import { mountReader, type MountedReader } from "./mount"
 
@@ -131,11 +125,6 @@ function buildStore(opts: { hdrs: boolean; summaryFile: boolean }): string {
    return dir
 }
 
-// ts whose 8h-block distance from first_fetched is exactly `blocks`.
-function tsAtBlocks(blocks: number): number {
-   return (Math.trunc(FIRST_FETCHED / FETCHED_AT_BLOCK) + blocks) * FETCHED_AT_BLOCK
-}
-
 const fetchedPaths = (r: MountedReader) => r.fetchMock.mock.calls.map((c) => new URL(String(c[0])).pathname)
 
 describe("contract: idx header summary fast path", () => {
@@ -179,12 +168,6 @@ describe("contract: idx header summary fast path", () => {
       expect(fetched().some((p) => p.endsWith("idx/1.gz"))).toBe(true)
    })
 
-   it("findChronForTimestamp lands in the right pack via summary bases", async () => {
-      expect(await reader.data.findChronForTimestamp(tsAtBlocks(5))).toBe(50000)
-      expect(await reader.data.findChronForTimestamp(tsAtBlocks(15))).toBe(100000)
-      expect(await reader.data.findChronForTimestamp(tsAtBlocks(999))).toBe(100001)
-   })
-
    it("countLeft counts across pack boundaries", async () => {
       expect(
          await reader.data.countLeft(
@@ -221,7 +204,6 @@ describe("contract: eager fallback when the summary is unavailable", () => {
       expect(paths.some((p) => p.endsWith("idx/h2.gz"))).toBe(false)
       expect(reader.data.countAll(new Map([[0, 0]]))).toBe(50000)
       expect(await reader.data.getFeedId(75000)).toBe(1)
-      expect(await reader.data.findChronForTimestamp(tsAtBlocks(5))).toBe(50000)
    })
 
    it("summary 404 (stale db.gz past the GC window): falls back instead of failing", async () => {
