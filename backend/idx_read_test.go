@@ -72,7 +72,7 @@ func TestIdxFooterRoundTrip(t *testing.T) {
 // tests them (idx.test.ts) but the Go side did not, so the two readers could
 // drift on what counts as a corrupt pack.
 func TestParseIdxPackRejectsShortHeader(t *testing.T) {
-	_, err := parseIdxPack(make([]byte, idxHeaderPrefix-1), 0, 1)
+	_, err := parseIdxPack(make([]byte, idxHeaderPrefix-1), 0, 1, 1)
 	if err == nil || !strings.Contains(err.Error(), "short header") {
 		t.Fatalf("want short-header error, got %v", err)
 	}
@@ -81,7 +81,7 @@ func TestParseIdxPackRejectsShortHeader(t *testing.T) {
 func TestParseIdxPackRejectsShortBody(t *testing.T) {
 	// Header claims numSlots=1; only 3 of the promised 10 entries are present.
 	raw := buildIdxRaw(0, 0, []uint32{0}, []uint16{1, 2, 3}, nil)
-	_, err := parseIdxPack(raw, 0, 10)
+	_, err := parseIdxPack(raw, 0, 10, 4)
 	if err == nil || !strings.Contains(err.Error(), "short body") {
 		t.Fatalf("want short-body error, got %v", err)
 	}
@@ -90,7 +90,7 @@ func TestParseIdxPackRejectsShortBody(t *testing.T) {
 func TestParseIdxPackRejectsRaggedFooter(t *testing.T) {
 	raw := buildIdxRaw(0, 0, []uint32{0}, []uint16{1, 2}, nil)
 	raw = append(raw, 0x00) // one stray byte → footer is not a whole u16
-	_, err := parseIdxPack(raw, 0, 2)
+	_, err := parseIdxPack(raw, 0, 2, 3)
 	if err == nil || !strings.Contains(err.Error(), "footer not whole u16 boundaries") {
 		t.Fatalf("want ragged-footer error, got %v", err)
 	}
@@ -102,7 +102,7 @@ func TestParseIdxPackRejectsRaggedFooter(t *testing.T) {
 // end-to-end before; this pins the distinct path in isolation.
 func TestParseIdxPackBoundaryAtIndexZero(t *testing.T) {
 	raw := buildIdxRaw(2, 0, []uint32{0, 0, 0}, []uint16{2, 2, 2}, []int{0, 2})
-	pack, err := parseIdxPack(raw, 0, 3)
+	pack, err := parseIdxPack(raw, 0, 3, 3)
 	if err != nil {
 		t.Fatalf("parseIdxPack: %v", err)
 	}
@@ -120,5 +120,63 @@ func TestParseIdxPackBoundaryAtIndexZero(t *testing.T) {
 	}
 	if pid, off := pack.getPackRef(2); pid != 4 || off != 0 {
 		t.Errorf("getPackRef(2) = (%d,%d), want (4,0)", pid, off)
+	}
+}
+
+// Regression: a feed added AFTER an idx pack's header was frozen (the header is
+// written once, at the pack's first entry) has feed_id >= that pack's numSlots,
+// yet its articles can land in the same pack. ownFeedCounts must be sized to
+// the store high-water (feedSlots), not the pack's own numSlots — the frontend
+// (idx.ts makeIdxPack) sizes by the threaded `slots`, so the Go mirror must
+// too, or ownFeedCount under-reports that feed and both filtered navigation
+// (idx.ts hasCandidate) and the inspector's feedCounts-continuity check
+// silently undercount it. Found via the >50k synthetic-store generator
+// (genbig_test.go); reproduced here inside a single latest pack so the path is
+// pinned without crossing the 50,000-entry boundary.
+func TestOwnFeedCountForFeedAddedMidPack(t *testing.T) {
+	db, c, _ := setupTestDB(t)
+
+	f0 := &Feed{Title: "f0", URL: "https://example.com/0"}
+	if err := db.AddFeed(f0); err != nil {
+		t.Fatalf("AddFeed f0: %v", err)
+	}
+	// Batch 1: only feed 0 exists, so the latest idx pack's header freezes at
+	// numSlots=1.
+	if _, err := db.PutArticles(ctx, []*Item{
+		{Feed: f0, Title: "a0", Content: "c0", Link: "l0", Published: 1000},
+	}); err != nil {
+		t.Fatalf("PutArticles batch 1: %v", err)
+	}
+
+	// Feed 1 is added only now; its article appends to the SAME latest pack,
+	// whose frozen header still says numSlots=1 (id 1 >= numSlots).
+	f1 := &Feed{Title: "f1", URL: "https://example.com/1"}
+	if err := db.AddFeed(f1); err != nil {
+		t.Fatalf("AddFeed f1: %v", err)
+	}
+	if _, err := db.PutArticles(ctx, []*Item{
+		{Feed: f1, Title: "a1", Content: "c1", Link: "l1", Published: 1001},
+	}); err != nil {
+		t.Fatalf("PutArticles batch 2: %v", err)
+	}
+
+	_, raw, err := db.loadPack(ctx, latestKey(c, "idx"))
+	if err != nil {
+		t.Fatalf("loadPack: %v", err)
+	}
+	pack, err := parseIdxPack(raw, 0, c.TotalArticles, feedSlots(c))
+	if err != nil {
+		t.Fatalf("parseIdxPack: %v", err)
+	}
+	if pack.numSlots != 1 {
+		t.Fatalf("header numSlots = %d, want 1 (frozen at pack start)", pack.numSlots)
+	}
+	// The bug returned 0 here: feed 1's entry was skipped because id 1 fell
+	// beyond the pack's numSlots=1.
+	if got := pack.ownFeedCount(1); got != 1 {
+		t.Errorf("ownFeedCount(1) = %d, want 1 (feed added after header froze)", got)
+	}
+	if got := pack.ownFeedCount(0); got != 1 {
+		t.Errorf("ownFeedCount(0) = %d, want 1", got)
 	}
 }

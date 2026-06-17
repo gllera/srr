@@ -31,7 +31,7 @@ type idxPack struct {
 	packOffBase   uint32
 	numSlots      int
 	feedCounts    []uint32 // cumulative before this pack (len numSlots)
-	ownFeedCounts []uint32 // counted during parse (len numSlots)
+	ownFeedCounts []uint32 // counted during parse (len = store high-water slots)
 }
 
 // feedCount returns the cumulative count for id, 0 when id is beyond this
@@ -43,11 +43,29 @@ func (p *idxPack) feedCount(id int) uint32 {
 	return p.feedCounts[id]
 }
 
+// ownFeedCount returns how many of this pack's entries belong to feed id.
+// ownFeedCounts is sized to the store high-water (feedSlots), NOT this pack's
+// numSlots: a feed added after the pack's header was frozen has id >= numSlots
+// yet entries inside the pack, and both readers must still count them — see
+// feedSlots and idx.ts makeIdxPack().parse() (sized to the threaded `slots`).
 func (p *idxPack) ownFeedCount(id int) uint32 {
-	if id < 0 || id >= p.numSlots {
+	if id < 0 || id >= len(p.ownFeedCounts) {
 		return 0
 	}
 	return p.ownFeedCounts[id]
+}
+
+// feedSlots mirrors data.ts (slots = max(feed id)+1, or 1 when there are no
+// feeds): the width parseIdxPack sizes ownFeedCounts to. It is the store
+// high-water, deliberately not a pack's own numSlots — see ownFeedCount.
+func feedSlots(core *DBCore) int {
+	slots := 1
+	for id := range core.Feeds {
+		if id+1 > slots {
+			slots = id + 1
+		}
+	}
+	return slots
 }
 
 // loadIdxPacks fetches and parses every idx pack named by core: the
@@ -58,6 +76,7 @@ func loadIdxPacks(fetch keyGetter, core *DBCore) ([]*idxPack, error) {
 		return nil, nil
 	}
 	numFinalized := numFinalizedIdx(core.TotalArticles)
+	slots := feedSlots(core)
 	out := make([]*idxPack, numFinalized+1)
 	for p := 0; p <= numFinalized; p++ {
 		key, size := idxKeyAndSize(core, p)
@@ -65,7 +84,7 @@ func loadIdxPacks(fetch keyGetter, core *DBCore) ([]*idxPack, error) {
 		if err != nil {
 			return nil, fmt.Errorf("fetch %s: %w", key, err)
 		}
-		pack, err := parseIdxPack(buf, p, size)
+		pack, err := parseIdxPack(buf, p, size, slots)
 		if err != nil {
 			return nil, fmt.Errorf("parse %s: %w", key, err)
 		}
@@ -76,7 +95,7 @@ func loadIdxPacks(fetch keyGetter, core *DBCore) ([]*idxPack, error) {
 
 // parseIdxPack is the byte-for-byte mirror of
 // frontend/src/js/idx.ts makeIdxPack().parse().
-func parseIdxPack(buf []byte, packIndex, packSize int) (*idxPack, error) {
+func parseIdxPack(buf []byte, packIndex, packSize, slots int) (*idxPack, error) {
 	if len(buf) < idxHeaderPrefix {
 		return nil, fmt.Errorf("short header: %d < %d", len(buf), idxHeaderPrefix)
 	}
@@ -98,7 +117,7 @@ func parseIdxPack(buf []byte, packIndex, packSize int) (*idxPack, error) {
 		packOffBase:   binary.LittleEndian.Uint32(buf[4:]),
 		numSlots:      numSlots,
 		feedCounts:    make([]uint32, numSlots),
-		ownFeedCounts: make([]uint32, numSlots),
+		ownFeedCounts: make([]uint32, slots),
 	}
 	for s := range numSlots {
 		pack.feedCounts[s] = binary.LittleEndian.Uint32(buf[idxHeaderPrefix+s*4:])
@@ -119,7 +138,7 @@ func parseIdxPack(buf []byte, packIndex, packSize int) (*idxPack, error) {
 		off := headerSize + i*idxEntrySize
 		sub := uint16(buf[off]) | uint16(buf[off+1])<<8
 		pack.feedIDs[i] = sub
-		if int(sub) < numSlots {
+		if int(sub) < slots {
 			pack.ownFeedCounts[sub]++
 		}
 		if bi < len(boundaries) && boundaries[bi] == i {

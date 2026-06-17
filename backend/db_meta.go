@@ -128,6 +128,7 @@ func bloomHas(bloom []byte, gram string) bool {
 // at most once (chron order keeps data-pack visits monotonic).
 func (o *DB) walkArticles(ctx context.Context, from, to int, fn func(ad *ArticleData) error) error {
 	c := &o.core
+	slots := feedSlots(c)
 	var data []ArticleData
 	dataPackID := -1
 	for from < to {
@@ -137,7 +138,7 @@ func (o *DB) walkArticles(ctx context.Context, from, to int, fn func(ad *Article
 		if err != nil {
 			return err
 		}
-		pack, err := parseIdxPack(buf, p, size)
+		pack, err := parseIdxPack(buf, p, size, slots)
 		if err != nil {
 			return fmt.Errorf("parse %s: %w", key, err)
 		}
