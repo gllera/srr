@@ -11,7 +11,7 @@ import { stateHash, forceTransient, clearTransients, TRANSIENTS, buildPanel } fr
 function seedSkeleton() {
    document.body.innerHTML = `
       <div class="srr-popup"><span class="srr-popup-text"></span></div>
-      <article class="srr-reader"><div class="srr-content"></div><nav class="srr-readon"></nav></article>
+      <article class="srr-reader"><div class="srr-content"></div></article>
       <div class="srr-list"></div>
       <nav class="srr-toolbar">
          <button class="srr-prev"></button><button class="srr-next"></button>
