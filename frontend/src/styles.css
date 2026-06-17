@@ -85,28 +85,6 @@ video {
    padding-bottom: 4rem;
 }
 
-/* The reader is a dispatch: the list row's source rail graduates into a
-   full-height spine down the article, keyed to the feed's color (data-src set
-   on .srr-reader by app.ts). The spine doubles as a read gauge — the border is a
-   pale wash of the source color (the unread track, same faded-rail recipe as a
-   read list row), and .srr-read-spine inks the full color down it as you scroll
-   (--read 0→1, driven by gestures.ts). The dispatch develops as you read it. */
-.srr-reader {
-   position: relative;
-   border-left: 3px solid color-mix(in srgb, var(--src, var(--accent)) 30%, var(--faint));
-   padding-left: 1.1rem;
-}
-.srr-read-spine {
-   position: absolute;
-   left: -3px;
-   top: 0;
-   width: 3px;
-   height: calc(var(--read, 0) * 100%);
-   background: var(--src, var(--accent));
-   transition: height 0.12s linear;
-   pointer-events: none;
-}
-
 /* Header */
 .srr-title-row {
    margin-bottom: 1.4rem;

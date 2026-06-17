@@ -89,7 +89,7 @@ vi.mock("./fmt", () => ({
 }))
 
 const gestures = vi.hoisted(() => ({
-   setupGestures: vi.fn(() => ({ resetScroll: vi.fn(), syncReadProgress: vi.fn() })),
+   setupGestures: vi.fn(() => ({ resetScroll: vi.fn() })),
 }))
 vi.mock("./gestures", () => gestures)
 
@@ -100,7 +100,7 @@ const SKELETON = `
    <main class="srr-container">
       <div class="srr-searchbar"><input class="srr-search-input" /><button class="srr-search-clear"></button>
          <div class="srr-search-note"></div></div>
-      <article class="srr-reader" hidden><div class="srr-read-spine"></div>
+      <article class="srr-reader" hidden>
          <div class="srr-kicker"><span class="srr-source"></span><time class="srr-date"></time></div>
          <a class="srr-title-link"><h1 class="srr-title" tabindex="-1"></h1></a>
          <div class="srr-content"></div><nav class="srr-readon"></nav></article>
