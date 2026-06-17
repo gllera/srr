@@ -133,21 +133,6 @@ export async function listAnchor(): Promise<number> {
    return feedRight(start)
 }
 
-// Largest saved chron <= from / smallest saved chron >= from (-1 = none). Pure
-// scans of the small sorted set — saved navigation never fetches an idx pack.
-function savedLeft(from: number): number {
-   let res = -1
-   for (const c of savedSorted()) {
-      if (c > from) break
-      res = c
-   }
-   return res
-}
-function savedRight(from: number): number {
-   for (const c of savedSorted()) if (c >= from) return c
-   return -1
-}
-
 // ── Search filter mode ───────────────────────────────────────────────────────
 // A third filter mode beside feed-membership and ★ Saved: when the single
 // token is "q:<query>", navigation walks an explicit set of matching chronIdxs —
@@ -186,7 +171,8 @@ export function searchShort(q: string): boolean {
 }
 
 // Largest entry <= from / smallest entry >= from in an ascending array (-1 =
-// none) — the pure neighbor scan the search set walks (saved has its own).
+// none) — the pure neighbor scan the saved and search sets walk. Both modes
+// pass their sorted set; the walk never fetches an idx pack.
 function setLeft(sorted: number[], from: number): number {
    let res = -1
    for (const c of sorted) {
@@ -258,12 +244,12 @@ function ensureSearchSet(): Promise<void> {
 // place. Async to match data.findLeft/findRight; the saved branch is synchronous,
 // wrapped in a resolved promise.
 export function feedLeft(from: number): Promise<number> {
-   if (filter.saved) return Promise.resolve(savedLeft(from))
+   if (filter.saved) return Promise.resolve(setLeft(savedSorted(), from))
    if (filter.search) return ensureSearchSet().then(() => setLeft(searchSorted, from))
    return data.findLeft(from, filter.feeds)
 }
 export function feedRight(from: number): Promise<number> {
-   if (filter.saved) return Promise.resolve(savedRight(from))
+   if (filter.saved) return Promise.resolve(setRight(savedSorted(), from))
    if (filter.search) return ensureSearchSet().then(() => setRight(searchSorted, from))
    return data.findRight(from, filter.feeds)
 }
