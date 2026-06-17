@@ -101,12 +101,23 @@ func readAllArticles(t *testing.T, dir string, c *DBCore) []*Item {
 			name = latestKey(c, "idx")
 		}
 		metaBytes := decompressGz(t, filepath.Join(dir, name))
-		// The idx header is variable-length: prefix + numSlots×4 counts.
+		// idx pack = header (prefix + numSlots×4 counts) ‖ 2-byte entries ‖
+		// u16-LE boundary footer (local indices where the data packId advances).
 		numSlots := int(binary.LittleEndian.Uint32(metaBytes[idxStateSize:]))
 		headerSize := idxHeaderPrefix + numSlots*4
-		for off := headerSize; off+idxEntrySize <= len(metaBytes); off += idxEntrySize {
+		entryCount := idxPackSize
+		if p == numFinalized {
+			entryCount = c.TotalArticles - numFinalized*idxPackSize
+		}
+		entriesEnd := headerSize + entryCount*idxEntrySize
+		boundaries := map[int]bool{}
+		for off := entriesEnd; off+idxBoundarySize <= len(metaBytes); off += idxBoundarySize {
+			boundaries[int(binary.LittleEndian.Uint16(metaBytes[off:]))] = true
+		}
+		for i := range entryCount {
+			off := headerSize + i*idxEntrySize
 			feedID := int(metaBytes[off]) | int(metaBytes[off+1])<<8
-			if metaBytes[off+2]>>7 != 0 {
+			if boundaries[i] {
 				packID++
 				packOffset = 0
 			} else {

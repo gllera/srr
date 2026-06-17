@@ -126,15 +126,35 @@ func newPack() *pack {
 func (p *pack) Len() int                    { return p.buf.Len() }
 func (p *pack) Write(b []byte) (int, error) { return p.gz.Write(b) }
 
-func (p *pack) writeIdx(feedID, deltaPack, deltaFetched int) error {
-	_, err := p.Write([]byte{
-		byte(feedID), byte(feedID >> 8),
-		byte(deltaFetched) | byte(deltaPack)<<7,
-	})
+func (p *pack) writeIdx(feedID int) error {
+	_, err := p.Write([]byte{byte(feedID), byte(feedID >> 8)})
 	return err
 }
 
-func writeIdxHeader(p *pack, block, packID, packOff int, feeds map[int]*Feed) error {
+// writeIdxFooter appends the data-pack boundary list — u16 LE local entry
+// indices at which the data packId advances by 1 — to a finished idx pack.
+// It carries what the old per-entry delta_pack_id bit did, out of the entries.
+func writeIdxFooter(p *pack, boundaries []int) error {
+	buf := make([]byte, len(boundaries)*idxBoundarySize)
+	for i, b := range boundaries {
+		binary.LittleEndian.PutUint16(buf[i*idxBoundarySize:], uint16(b))
+	}
+	_, err := p.Write(buf)
+	return err
+}
+
+// parseIdxFooter reads a u16 LE boundary list (the bytes after header+entries
+// of an already-saved latest idx pack) back into local-index form, so an
+// append can re-emit the full footer.
+func parseIdxFooter(footer []byte) []int {
+	out := make([]int, len(footer)/idxBoundarySize)
+	for i := range out {
+		out[i] = int(binary.LittleEndian.Uint16(footer[i*idxBoundarySize:]))
+	}
+	return out
+}
+
+func writeIdxHeader(p *pack, packID, packOff int, feeds map[int]*Feed) error {
 	numSlots := 0
 	for id := range feeds {
 		if id+1 > numSlots {
@@ -142,9 +162,8 @@ func writeIdxHeader(p *pack, block, packID, packOff int, feeds map[int]*Feed) er
 		}
 	}
 	buf := make([]byte, idxHeaderPrefix+numSlots*4)
-	binary.LittleEndian.PutUint32(buf[0:], uint32(block))
-	binary.LittleEndian.PutUint32(buf[4:], uint32(packID))
-	binary.LittleEndian.PutUint32(buf[8:], uint32(packOff))
+	binary.LittleEndian.PutUint32(buf[0:], uint32(packID))
+	binary.LittleEndian.PutUint32(buf[4:], uint32(packOff))
 	binary.LittleEndian.PutUint32(buf[idxStateSize:], uint32(numSlots))
 	for id, ch := range feeds {
 		binary.LittleEndian.PutUint32(buf[idxHeaderPrefix+id*4:], uint32(ch.TotalArt))
@@ -322,7 +341,9 @@ func latestIdxEntryCount(totalArticles int) int {
 
 // checkLatestIdx verifies a freshly-loaded latest idx pack matches db.gz: its
 // entry count (derived from the variable header's numSlots) must equal the
-// tail count. Guards against a stale latest pack / format mismatch.
+// tail count. The pack ends with a variable-length u16 boundary footer, so the
+// header+entries length is a lower bound and the trailing bytes must be a whole
+// number of u16 boundaries. Guards against a stale latest pack / format mismatch.
 func checkLatestIdx(key string, raw []byte, totalArticles int) error {
 	want := latestIdxEntryCount(totalArticles)
 	if want == 0 {
@@ -335,9 +356,13 @@ func checkLatestIdx(key string, raw []byte, totalArticles int) error {
 		return fmt.Errorf("%s: short idx header (%d bytes)", key, len(raw))
 	}
 	numSlots := int(binary.LittleEndian.Uint32(raw[idxStateSize:]))
-	expected := idxHeaderPrefix + numSlots*4 + want*idxEntrySize
-	if len(raw) != expected {
-		return fmt.Errorf("%s has %d bytes but db.gz expects %d", key, len(raw), expected)
+	headerAndEntries := idxHeaderPrefix + numSlots*4 + want*idxEntrySize
+	if len(raw) < headerAndEntries {
+		return fmt.Errorf("%s has %d bytes but db.gz expects at least %d", key, len(raw), headerAndEntries)
+	}
+	if (len(raw)-headerAndEntries)%idxBoundarySize != 0 {
+		return fmt.Errorf("%s footer is not a whole number of u16 boundaries (%d trailing bytes)",
+			key, len(raw)-headerAndEntries)
 	}
 	return nil
 }
@@ -464,31 +489,42 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) ([]ArticleData, 
 		c.FirstFetchedAt = c.FetchedAt
 	}
 
+	// The latest idx pack = header ‖ entries ‖ u16-boundary footer. Appending
+	// means dropping the old footer, keeping header+entries, recovering the
+	// boundary list, then re-emitting it at save. localIdx is the next entry's
+	// position within the current latest idx pack; boundaries holds the local
+	// indices at which the data packId has advanced (what the old per-entry
+	// delta_pack_id bit encoded).
+	var boundaries []int
+	localIdx := latestIdxEntryCount(c.TotalArticles)
+	if len(metaRaw) > 0 {
+		numSlots := int(binary.LittleEndian.Uint32(metaRaw[idxStateSize:]))
+		entriesEnd := idxHeaderPrefix + numSlots*4 + localIdx*idxEntrySize
+		boundaries = parseIdxFooter(metaRaw[entriesEnd:])
+		meta = newPack()
+		if _, err := meta.Write(metaRaw[:entriesEnd]); err != nil {
+			return nil, err
+		}
+	}
+
 	prevPackID := c.NextPackID
-	prevFetchedTS := c.FirstFetchedAt/fetchedAtBlock + int64(c.FetchedAtCursor)
-	// fetchedCarry is intentionally batch-local and its residual is dropped at
-	// the end of PutArticles rather than persisted to DBCore. Within a batch it
-	// drains over later entries (after the first entry prevFetchedTS == now, so
-	// subsequent deltas consume it). A residual only survives when a batch has
-	// fewer entries than ceil(gap/127) — i.e. very sparse fetches across a
-	// >42-day dormancy gap. Dropping it keeps the reconstructed cursor
-	// monotonically climbing toward true time and never overshooting; persisting
-	// it would add the leftover onto the NEXT batch's fresh gap and overshoot
-	// (the only cost of dropping is that the single oldest entry right after
-	// such a gap reads slightly earlier than it was fetched, which self-corrects
-	// on the following fetch).
-	var fetchedCarry int64
 	written := make([]ArticleData, 0, len(articles))
 
 	for _, item := range articles {
 		if c.TotalArticles > 0 && c.TotalArticles%idxPackSize == 0 {
+			if err := writeIdxFooter(meta, boundaries); err != nil {
+				return nil, err
+			}
 			if err := o.savePackFinal(ctx, finalizedIdxKey(c.TotalArticles/idxPackSize-1), meta); err != nil {
 				return nil, err
 			}
+			// savePackFinal resets meta; the next entry starts a fresh idx pack.
+			boundaries = nil
+			localIdx = 0
 		}
 
 		if meta.Len() == 0 {
-			if err := writeIdxHeader(meta, c.FetchedAtCursor, c.NextPackID, c.PackOffset, c.Feeds); err != nil {
+			if err := writeIdxHeader(meta, c.NextPackID, c.PackOffset, c.Feeds); err != nil {
 				return nil, err
 			}
 		}
@@ -504,23 +540,16 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) ([]ArticleData, 
 			c.PackOffset = 0
 		}
 
-		delta := c.FetchedAt/fetchedAtBlock - prevFetchedTS + fetchedCarry
-		if delta > deltaFetchedMax {
-			fetchedCarry = delta - deltaFetchedMax
-			delta = deltaFetchedMax
-		} else if delta < 0 {
-			fetchedCarry = delta
-			delta = 0
-		} else {
-			fetchedCarry = 0
+		// A data-pack roll since the previous entry (NextPackID advanced) is a
+		// boundary at this local index — recorded in the footer, not the entry.
+		if c.NextPackID != prevPackID {
+			boundaries = append(boundaries, localIdx)
 		}
-		if err := meta.writeIdx(item.Feed.id, c.NextPackID-prevPackID, int(delta)); err != nil {
+		if err := meta.writeIdx(item.Feed.id); err != nil {
 			return nil, err
 		}
-
-		c.FetchedAtCursor += int(delta)
+		localIdx++
 		prevPackID = c.NextPackID
-		prevFetchedTS = c.FetchedAt / fetchedAtBlock
 
 		ad := item.articleData(c.FetchedAt)
 		if err := data.writeArticle(&ad); err != nil {
@@ -531,6 +560,12 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) ([]ArticleData, 
 		c.TotalArticles++
 		item.Feed.TotalArt++
 		c.PackOffset++
+	}
+
+	// Seal the latest (non-finalized) idx pack with its boundary footer before
+	// saving — same shape as a finalized pack, so the reader's parse is uniform.
+	if err := writeIdxFooter(meta, boundaries); err != nil {
+		return nil, err
 	}
 
 	// Write the next generation, and bump Seq only after both saves succeed

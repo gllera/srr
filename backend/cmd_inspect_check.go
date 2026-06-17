@@ -14,7 +14,6 @@ func validateAll(fetch keyGetter, core *DBCore, packs []*idxPack) error {
 	issues += checkBoundsVsData(fetch, core, packs)
 	issues += checkDBMeta(fetch, core, packs)
 	issues += checkFeedCountsContinuity(packs)
-	issues += checkFetchedAtsContinuity(packs)
 	issues += checkUnknownFeedIDs(core, packs)
 	issues += checkLatestFiles(fetch, core)
 	issues += checkIdxSummary(fetch, core, packs)
@@ -189,35 +188,6 @@ func checkFeedCountsContinuity(packs []*idxPack) int {
 	return issues
 }
 
-// checkFetchedAtsContinuity verifies header fetchedAt_base in pack i+1
-// equals the cumulative fetched_at at the end of pack i. Pack 0's base
-// must be 0 (no time has passed before the first article). A drift here
-// silently breaks findChronForTimestamp's binary search.
-func checkFetchedAtsContinuity(packs []*idxPack) int {
-	issues := 0
-	if packs[0].fetchedAtBase != 0 {
-		fmt.Printf("[fetched-ats] pack 0 fetchedAt_base=%d but expected 0\n", packs[0].fetchedAtBase)
-		issues++
-	}
-	for i := 0; i < len(packs)-1; i++ {
-		cur, next := packs[i], packs[i+1]
-		last := cur.fetchedAts[len(cur.fetchedAts)-1]
-		if next.fetchedAtBase != last {
-			fmt.Printf("[fetched-ats] pack %d fetchedAt_base=%d but pack %d ended at %d\n",
-				next.packIndex, next.fetchedAtBase, cur.packIndex, last)
-			issues++
-		}
-	}
-	if issues == 0 {
-		if len(packs) == 1 {
-			fmt.Println("[fetched-ats] pack 0 base=0 OK (single pack)")
-		} else {
-			fmt.Printf("[fetched-ats] %d pack boundary transitions consistent\n", len(packs)-1)
-		}
-	}
-	return issues
-}
-
 // checkUnknownFeedIDs flags any idx entry whose feed byte isn't
 // registered in db.feeds.
 func checkUnknownFeedIDs(core *DBCore, packs []*idxPack) int {
@@ -290,10 +260,9 @@ func checkIdxSummary(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 		}
 		off = end
 		p := packs[k]
-		if hdr.fetchedAtBase != p.fetchedAtBase || hdr.packIDBase != p.packIDBase || hdr.packOffBase != p.packOffBase {
-			fmt.Printf("[idx-summary] pack %d: summary bases (%d,%d,%d) != header (%d,%d,%d)\n", k,
-				hdr.fetchedAtBase, hdr.packIDBase, hdr.packOffBase,
-				p.fetchedAtBase, p.packIDBase, p.packOffBase)
+		if hdr.packIDBase != p.packIDBase || hdr.packOffBase != p.packOffBase {
+			fmt.Printf("[idx-summary] pack %d: summary bases (%d,%d) != header (%d,%d)\n", k,
+				hdr.packIDBase, hdr.packOffBase, p.packIDBase, p.packOffBase)
 			issues++
 			continue
 		}

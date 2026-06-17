@@ -18,12 +18,8 @@ func inspectOne(fetch keyGetter, core *DBCore, packs []*idxPack, chron int) erro
 	pid, offset := pack.getPackRef(chron)
 	key := dataKeyFor(core, pid)
 
-	local := chron - n*idxPackSize
-	blocks := pack.fetchedAts[local]
-	recoveredTs := (core.FirstFetchedAt/fetchedAtBlock + int64(blocks)) * fetchedAtBlock
-
 	fmt.Printf("\nchron %d:\n", chron)
-	fmt.Printf("  idx pack %d  entry feed_id=%d  fetchedAt_blocks=%d\n", n, idxSub, blocks)
+	fmt.Printf("  idx pack %d  entry feed_id=%d\n", n, idxSub)
 	fmt.Printf("  resolved -> %s  packId=%d  offset=%d\n", key, pid, offset)
 
 	entries, err := loadDataPack(fetch, key)
@@ -40,15 +36,8 @@ func inspectOne(fetch keyGetter, core *DBCore, packs []*idxPack, chron int) erro
 	if a.FeedID != idxSub {
 		fmt.Printf("  *** SUB_ID MISMATCH: idx=%d data=%d ***\n", idxSub, a.FeedID)
 	}
-	storedBlock := a.FetchedAt / fetchedAtBlock
-	expectedBlock := core.FirstFetchedAt/fetchedAtBlock + int64(blocks)
-	tsMismatch := storedBlock != expectedBlock
 	fmt.Printf("  data feed_id: %d\n", a.FeedID)
-	fmt.Printf("  fetched_at: data=%d  idx-recovered=%d  (block-aligned match=%v)\n",
-		a.FetchedAt, recoveredTs, !tsMismatch)
-	if tsMismatch {
-		fmt.Printf("  *** TIMESTAMP MISMATCH: idx block=%d data block=%d ***\n", expectedBlock, storedBlock)
-	}
+	fmt.Printf("  fetched_at: %d\n", a.FetchedAt)
 	fmt.Printf("  title: %s\n", truncStr(a.Title, 100))
 	fmt.Printf("  link: %s\n", a.Link)
 	if ch := core.Feeds[idxSub]; ch != nil {
@@ -58,9 +47,6 @@ func inspectOne(fetch keyGetter, core *DBCore, packs []*idxPack, chron int) erro
 	}
 	if a.FeedID != idxSub {
 		return fmt.Errorf("feed_id mismatch")
-	}
-	if tsMismatch {
-		return fmt.Errorf("timestamp mismatch")
 	}
 	return nil
 }
