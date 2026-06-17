@@ -287,7 +287,7 @@ func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 // into MetaEntry values. The wire format's one owner is this file's
 // MetaEntry struct: writers jsonEncode it and every decode (here and
 // saveMetaShard's bloom pass) unmarshals through it. Used by `srr
-// inspect`'s checkSearch and the tests.
+// inspect`'s checkMeta and the tests.
 func parseMetaEntries(buf []byte) ([]MetaEntry, error) {
 	var out []MetaEntry
 	for i, line := range bytes.Split(buf, []byte("\n")) {
