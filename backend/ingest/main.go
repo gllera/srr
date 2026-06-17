@@ -106,10 +106,10 @@ func Register(name string, init factory) {
 	registry[name] = init
 }
 
-// Select applies the caller's precedence rule: channel > global default
+// Select applies the caller's precedence rule: feed > global default
 // > built-in "#rss". Empty strings fall through.
-func Select(channelFetcher, globalFetcher string) string {
-	for _, name := range []string{channelFetcher, globalFetcher} {
+func Select(feedFetcher, globalFetcher string) string {
+	for _, name := range []string{feedFetcher, globalFetcher} {
 		if name != "" {
 			return name
 		}

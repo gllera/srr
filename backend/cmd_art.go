@@ -6,7 +6,7 @@ import (
 )
 
 type ArtCmd struct {
-	ID     []int    `short:"i" optional:"" help:"Filter by channel ID(s)."`
+	ID     []int    `short:"i" optional:"" help:"Filter by feed ID(s)."`
 	Tag    []string `short:"g" optional:"" help:"Filter by tag(s)."`
 	Limit  int      `short:"l" default:"50" help:"Max articles to return."`
 	Before *int     `short:"b" optional:"" help:"Return articles before this artID (exclusive). Omit for newest."`
@@ -17,7 +17,7 @@ type idxEntry struct {
 	FetchedAt  int64
 	PackID     int
 	PackOffset int
-	ChannelID  int
+	FeedID     int
 }
 
 type articleResult struct {
@@ -48,7 +48,7 @@ func (o *ArtCmd) Run() error {
 				filter[id] = true
 			}
 			for _, tag := range o.Tag {
-				for _, ch := range db.Channels() {
+				for _, ch := range db.Feeds() {
 					if ch.Tag == tag {
 						filter[ch.id] = true
 					}
@@ -63,7 +63,7 @@ func (o *ArtCmd) Run() error {
 
 		filteredTotal := 0
 		for _, e := range entries {
-			if filter == nil || filter[e.ChannelID] {
+			if filter == nil || filter[e.FeedID] {
 				filteredTotal++
 			}
 		}
@@ -83,7 +83,7 @@ func (o *ArtCmd) Run() error {
 
 		for i := startIdx; i >= 0 && len(results) < o.Limit; i-- {
 			e := &entries[i]
-			if filter != nil && !filter[e.ChannelID] {
+			if filter != nil && !filter[e.FeedID] {
 				continue
 			}
 			results = append(results, articleResult{
@@ -123,17 +123,17 @@ func readAllIdx(ctx context.Context, db *DB) ([]idxEntry, error) {
 	entries := make([]idxEntry, 0, db.core.TotalArticles)
 	for _, p := range packs {
 		base := p.packIndex * idxPackSize
-		for i, sub := range p.chanIDs {
+		for i, sub := range p.feedIDs {
 			chron := base + i
-			chanID := int(sub)
-			ch := db.Channels()[chanID]
+			feedID := int(sub)
+			ch := db.Feeds()[feedID]
 			if ch == nil || chron < ch.AddIdx {
 				continue
 			}
 			packID, packOffset := p.getPackRef(chron)
 			entries = append(entries, idxEntry{
 				ChronIdx:   chron,
-				ChannelID:  chanID,
+				FeedID:     feedID,
 				PackID:     packID,
 				PackOffset: packOffset,
 				FetchedAt:  (db.core.FirstFetchedAt/fetchedAtBlock + int64(p.fetchedAts[i])) * fetchedAtBlock,

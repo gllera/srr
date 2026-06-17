@@ -25,12 +25,12 @@ interface Hdr {
    fetchedAtBase: number
    packIdBase: number
    packOffBase: number
-   chanCounts: Record<number, number>
+   feedCounts: Record<number, number>
 }
 
-// numSlots a header carries: dense up to the highest chanCount key (+1), else 0.
+// numSlots a header carries: dense up to the highest feedCount key (+1), else 0.
 function headerSlots(h: Hdr): number {
-   const keys = Object.keys(h.chanCounts).map(Number)
+   const keys = Object.keys(h.feedCounts).map(Number)
    return keys.length > 0 ? Math.max(...keys) + 1 : 0
 }
 
@@ -44,48 +44,48 @@ function headerBytes(h: Hdr): Uint8Array {
    view.setUint32(4, h.packIdBase, true)
    view.setUint32(8, h.packOffBase, true)
    view.setUint32(IDX_STATE_SIZE, numSlots, true)
-   for (const [k, v] of Object.entries(h.chanCounts)) view.setUint32(IDX_HEADER_PREFIX + Number(k) * 4, v, true)
+   for (const [k, v] of Object.entries(h.feedCounts)) view.setUint32(IDX_HEADER_PREFIX + Number(k) * 4, v, true)
    return buf
 }
 
-// Entries: [chanId, deltaPackId, deltaFetchedAt][]; each entry is chan_id u16
+// Entries: [feedId, deltaPackId, deltaFetchedAt][]; each entry is feed_id u16
 // LE + packed u8.
 function idxPack(h: Hdr, entries: [number, number, number][]): Uint8Array {
    const header = headerBytes(h)
    const buf = new Uint8Array(header.byteLength + entries.length * IDX_ENTRY_SIZE)
    buf.set(header)
-   entries.forEach(([chanId, deltaPack, deltaFetched], i) => {
+   entries.forEach(([feedId, deltaPack, deltaFetched], i) => {
       const off = header.byteLength + i * IDX_ENTRY_SIZE
-      buf[off] = chanId & 0xff
-      buf[off + 1] = (chanId >> 8) & 0xff
+      buf[off] = feedId & 0xff
+      buf[off + 1] = (feedId >> 8) & 0xff
       buf[off + 2] = (deltaPack << 7) | (deltaFetched & 0x7f)
    })
    return buf
 }
 
-function fill(chanId: number, first: [number, number, number]): [number, number, number][] {
+function fill(feedId: number, first: [number, number, number]): [number, number, number][] {
    const out: [number, number, number][] = [first]
-   for (let i = 1; i < IDX_PACK_SIZE; i++) out.push([chanId, 0, 0])
+   for (let i = 1; i < IDX_PACK_SIZE; i++) out.push([feedId, 0, 0])
    return out
 }
 
 const FIRST_FETCHED = 1700000000
 
-// Layout: pack 0 = 50k × chan 0 (fetchedAts 0, data pack 1) · pack 1 = 50k ×
-// chan 1 (fetchedAts 10, data pack 2) · latest = 2 × chan 2 (fetchedAts 20,
+// Layout: pack 0 = 50k × feed 0 (fetchedAts 0, data pack 1) · pack 1 = 50k ×
+// feed 1 (fetchedAts 10, data pack 2) · latest = 2 × feed 2 (fetchedAts 20,
 // data pack 3 = data/L1.gz). hdrs=2 covers packs 0 and 1.
 function buildStore(opts: { hdrs: boolean; summaryFile: boolean }): string {
    const dir = makeStore()
    mkdirSync(join(dir, "idx"))
    mkdirSync(join(dir, "data"))
 
-   const hdr0: Hdr = { fetchedAtBase: 0, packIdBase: 0, packOffBase: 0, chanCounts: {} }
-   const hdr1: Hdr = { fetchedAtBase: 0, packIdBase: 1, packOffBase: IDX_PACK_SIZE, chanCounts: { 0: 50000 } }
+   const hdr0: Hdr = { fetchedAtBase: 0, packIdBase: 0, packOffBase: 0, feedCounts: {} }
+   const hdr1: Hdr = { fetchedAtBase: 0, packIdBase: 1, packOffBase: IDX_PACK_SIZE, feedCounts: { 0: 50000 } }
    const hdrLatest: Hdr = {
       fetchedAtBase: 10,
       packIdBase: 2,
       packOffBase: IDX_PACK_SIZE,
-      chanCounts: { 0: 50000, 1: 50000 },
+      feedCounts: { 0: 50000, 1: 50000 },
    }
 
    writeFileSync(join(dir, "idx/0.gz"), gzipSync(idxPack(hdr0, fill(0, [0, 1, 0]))))
@@ -110,7 +110,7 @@ function buildStore(opts: { hdrs: boolean; summaryFile: boolean }): string {
       writeFileSync(join(dir, "idx/h2.gz"), gzipSync(sum))
    }
 
-   const latestArticles = [0, 1].map((i) => JSON.stringify({ s: 2, a: FIRST_FETCHED, t: `latest-${i}`, l: "", c: "x" }))
+   const latestArticles = [0, 1].map((i) => JSON.stringify({ f: 2, a: FIRST_FETCHED, t: `latest-${i}`, l: "", c: "x" }))
    writeFileSync(join(dir, "data/L1.gz"), gzipSync(latestArticles.join("\n") + "\n"))
 
    const db = {
@@ -121,7 +121,7 @@ function buildStore(opts: { hdrs: boolean; summaryFile: boolean }): string {
       pack_off: 2,
       first_fetched: FIRST_FETCHED,
       ...(opts.hdrs ? { hdrs: 2 } : {}),
-      channels: {
+      feeds: {
          0: { title: "A", url: "http://a", total_art: 50000, add_idx: 0 },
          1: { title: "B", url: "http://b", total_art: 50000, add_idx: 0 },
          2: { title: "C", url: "http://c", total_art: 2, add_idx: 100000 },
@@ -167,7 +167,7 @@ describe("contract: idx header summary fast path", () => {
    })
 
    it("findLeft skips a no-match pack via header deltas without fetching it", async () => {
-      // chan 0 lives only in pack 0: the walk must skip pack 1 entirely.
+      // feed 0 lives only in pack 0: the walk must skip pack 1 entirely.
       expect(await reader.data.findLeft(100001, new Map([[0, 0]]))).toBe(49999)
       const paths = fetched()
       expect(paths.some((p) => p.endsWith("idx/0.gz"))).toBe(true)
@@ -175,7 +175,7 @@ describe("contract: idx header summary fast path", () => {
    })
 
    it("fetches a finalized pack lazily on first touch", async () => {
-      expect(await reader.data.getChannelId(75000)).toBe(1)
+      expect(await reader.data.getFeedId(75000)).toBe(1)
       expect(fetched().some((p) => p.endsWith("idx/1.gz"))).toBe(true)
    })
 
@@ -220,7 +220,7 @@ describe("contract: eager fallback when the summary is unavailable", () => {
       expect(paths.some((p) => p.endsWith("idx/1.gz"))).toBe(true)
       expect(paths.some((p) => p.endsWith("idx/h2.gz"))).toBe(false)
       expect(reader.data.countAll(new Map([[0, 0]]))).toBe(50000)
-      expect(await reader.data.getChannelId(75000)).toBe(1)
+      expect(await reader.data.getFeedId(75000)).toBe(1)
       expect(await reader.data.findChronForTimestamp(tsAtBlocks(5))).toBe(50000)
    })
 

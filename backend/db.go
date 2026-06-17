@@ -19,9 +19,9 @@ const (
 	dbLockKey = ".locked"
 	// idxPackSize is the idx split threshold: entries per finalized pack.
 	idxPackSize = 50000
-	// chanIDCeiling is the channel-id ceiling: chan_id is a uint16 in each idx
-	// entry, so ids run [0, chanIDCeiling).
-	chanIDCeiling = 65536
+	// feedIDCeiling is the feed-id ceiling: feed_id is a uint16 in each idx
+	// entry, so ids run [0, feedIDCeiling).
+	feedIDCeiling = 65536
 	// idxStateSize is the 3 leading uint32 LE idx-header state fields
 	// (fetchedAt/packId/packOff bases).
 	idxStateSize = 3 * 4
@@ -29,7 +29,7 @@ const (
 	// the numSlots uint32. The variable cumulative-count array (numSlots × u32)
 	// follows it.
 	idxHeaderPrefix = idxStateSize + 4
-	// idxEntrySize is the per-entry idx byte width: chan_id:u16 LE + packed:u8.
+	// idxEntrySize is the per-entry idx byte width: feed_id:u16 LE + packed:u8.
 	idxEntrySize = 3
 	// fetchedAtBlock is the idx timestamp granularity in seconds (8h blocks):
 	// fetched_at is stored as unix ÷ this (× this on read).
@@ -49,7 +49,7 @@ const (
 )
 
 // defaultRootPipe returns a fresh copy of the pipeline applied as the
-// db.gz root default when no explicit root pipe is stored. Channels
+// db.gz root default when no explicit root pipe is stored. Feeds
 // still inherit/override normally; this just supplies the fallback for
 // the topmost level. Returning a fresh slice each call keeps callers
 // from accidentally mutating shared state.
@@ -128,8 +128,8 @@ type DBCore struct {
 	// (search/L<Seq>.gz). SyncSearch trusts a read-back tail only when its
 	// count matches, so a stale shard left by a crash or a pre-`gen --bump`
 	// store is rebuilt from data packs instead of extended.
-	SearchTail int              `json:"srcht,omitempty"`
-	Channels   map[int]*Channel `json:"channels"`
+	SearchTail int           `json:"srcht,omitempty"`
+	Feeds      map[int]*Feed `json:"feeds"`
 }
 
 // withDB opens the DB, runs fn, and ensures Close. Use for commands that
@@ -189,20 +189,20 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 		db.core.Pipe = defaultRootPipe()
 	}
 
-	for id, ch := range db.core.Channels {
-		// chan_id is a uint16 in each idx entry, so ids run [0, chanIDCeiling).
+	for id, ch := range db.core.Feeds {
+		// feed_id is a uint16 in each idx entry, so ids run [0, feedIDCeiling).
 		// An out-of-range id (hand-edited / migrated db.gz) would overflow the
 		// entry encoding mid-fetch. Reject it here with a clear message instead.
-		if id < 0 || id >= chanIDCeiling {
+		if id < 0 || id >= feedIDCeiling {
 			db.Close(ctx)
-			return nil, fmt.Errorf("channel id %d in %s out of range [0, %d]", id, dbFileKey, chanIDCeiling-1)
+			return nil, fmt.Errorf("feed id %d in %s out of range [0, %d]", id, dbFileKey, feedIDCeiling-1)
 		}
-		// An old feeds[]-only db.gz unmarshals to a channel with no top-level
+		// An old feeds[]-only db.gz unmarshals to a feed with no top-level
 		// url (the legacy feeds key is ignored). Reject it clearly rather than
 		// silently fetch nothing.
 		if ch.URL == "" {
 			db.Close(ctx)
-			return nil, fmt.Errorf("channel %d has no url; store predates the feed→channel merge — delete and re-fetch", id)
+			return nil, fmt.Errorf("feed %d has no url; store predates the feed→feed merge — delete and re-fetch", id)
 		}
 		ch.id = id
 	}
@@ -246,36 +246,36 @@ func (o *DB) Commit(ctx context.Context) error {
 	return o.AtomicPut(ctx, dbFileKey, &buf)
 }
 
-func (o *DB) Channels() map[int]*Channel {
-	return o.core.Channels
+func (o *DB) Feeds() map[int]*Feed {
+	return o.core.Feeds
 }
 
-func (o *DB) AddChannel(c *Channel) error {
-	if o.core.Channels == nil {
-		o.core.Channels = map[int]*Channel{}
+func (o *DB) AddFeed(c *Feed) error {
+	if o.core.Feeds == nil {
+		o.core.Feeds = map[int]*Feed{}
 	}
-	for id := range chanIDCeiling {
-		if _, ok := o.core.Channels[id]; !ok {
+	for id := range feedIDCeiling {
+		if _, ok := o.core.Feeds[id]; !ok {
 			c.id = id
 			c.AddIdx = o.core.TotalArticles
-			o.core.Channels[id] = c
+			o.core.Feeds[id] = c
 			return nil
 		}
 	}
-	return fmt.Errorf("maximum number of channels reached (%d)", chanIDCeiling)
+	return fmt.Errorf("maximum number of feeds reached (%d)", feedIDCeiling)
 }
 
-func (o *DB) RemoveChannel(id int) {
-	delete(o.core.Channels, id)
+func (o *DB) RemoveFeed(id int) {
+	delete(o.core.Feeds, id)
 }
 
-func (o *DB) ChannelByID(id int) (*Channel, error) {
-	if id < 0 || id >= chanIDCeiling {
-		return nil, fmt.Errorf("channel id must be in [0, %d]", chanIDCeiling-1)
+func (o *DB) FeedByID(id int) (*Feed, error) {
+	if id < 0 || id >= feedIDCeiling {
+		return nil, fmt.Errorf("feed id must be in [0, %d]", feedIDCeiling-1)
 	}
-	ch := o.core.Channels[id]
+	ch := o.core.Feeds[id]
 	if ch == nil {
-		return nil, fmt.Errorf("channel id %d not found", id)
+		return nil, fmt.Errorf("feed id %d not found", id)
 	}
 	return ch, nil
 }

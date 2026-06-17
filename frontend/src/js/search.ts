@@ -15,7 +15,7 @@ import { IDX_PACK_SIZE, SEARCH_BLOOM_BYTES, SEARCH_BLOOM_K, SEARCH_GRAM, type IS
 // shard base + line index; the existing nav addressing takes over from here).
 export interface ISearchHit {
    chron: number
-   s: number
+   f: number
    w: number
    t: string
 }
@@ -145,8 +145,8 @@ function matchShard(shard: Shard, baseChron: number, words: string[], max: numbe
       if (!words.every((w) => folded.includes(w))) continue
       const e = shard.entries[i]
       const chron = baseChron + i
-      if (!accept(e.s, chron)) continue
-      hits.push({ chron, s: e.s, w: e.w, t: e.t ?? "" })
+      if (!accept(e.f, chron)) continue
+      hits.push({ chron, f: e.f, w: e.w, t: e.t ?? "" })
    }
    return hits
 }

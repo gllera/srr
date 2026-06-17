@@ -79,7 +79,7 @@ func readAllArticles(t *testing.T, dir string, c *DBCore) []*Item {
 	t.Helper()
 
 	type idxRef struct {
-		chanID     int
+		feedID     int
 		packID     int
 		packOffset int
 	}
@@ -105,14 +105,14 @@ func readAllArticles(t *testing.T, dir string, c *DBCore) []*Item {
 		numSlots := int(binary.LittleEndian.Uint32(metaBytes[idxStateSize:]))
 		headerSize := idxHeaderPrefix + numSlots*4
 		for off := headerSize; off+idxEntrySize <= len(metaBytes); off += idxEntrySize {
-			chanID := int(metaBytes[off]) | int(metaBytes[off+1])<<8
+			feedID := int(metaBytes[off]) | int(metaBytes[off+1])<<8
 			if metaBytes[off+2]>>7 != 0 {
 				packID++
 				packOffset = 0
 			} else {
 				packOffset++
 			}
-			refs = append(refs, idxRef{chanID, packID, packOffset})
+			refs = append(refs, idxRef{feedID, packID, packOffset})
 		}
 	}
 
@@ -152,7 +152,7 @@ func readAllArticles(t *testing.T, dir string, c *DBCore) []*Item {
 		}
 
 		articles = append(articles, &Item{
-			Channel:   &Channel{id: ref.chanID},
+			Feed:      &Feed{id: ref.feedID},
 			Title:     ad.Title,
 			Content:   ad.Content,
 			Link:      ad.Link,
@@ -164,12 +164,12 @@ func readAllArticles(t *testing.T, dir string, c *DBCore) []*Item {
 
 func TestPutArticlesBasic(t *testing.T) {
 	db, c, dir := setupTestDB(t)
-	ch1 := &Channel{id: 1}
-	c.Channels = map[int]*Channel{ch1.id: ch1}
+	ch1 := &Feed{id: 1}
+	c.Feeds = map[int]*Feed{ch1.id: ch1}
 
 	articles := []*Item{
-		{Channel: ch1, Title: "A1", Content: "C1", Link: "http://example.com/1", Published: 1000},
-		{Channel: ch1, Title: "A2", Content: "C2", Link: "http://example.com/2", Published: 2000},
+		{Feed: ch1, Title: "A1", Content: "C1", Link: "http://example.com/1", Published: 1000},
+		{Feed: ch1, Title: "A2", Content: "C2", Link: "http://example.com/2", Published: 2000},
 	}
 
 	if _, err := db.PutArticles(ctx, articles); err != nil {
@@ -203,14 +203,14 @@ func TestPutArticlesEmpty(t *testing.T) {
 	}
 }
 
-func TestPutArticlesMultipleChannels(t *testing.T) {
+func TestPutArticlesMultipleFeeds(t *testing.T) {
 	db, c, dir := setupTestDB(t)
-	ch1, ch2 := &Channel{id: 1}, &Channel{id: 2}
-	c.Channels = map[int]*Channel{ch1.id: ch1, ch2.id: ch2}
+	ch1, ch2 := &Feed{id: 1}, &Feed{id: 2}
+	c.Feeds = map[int]*Feed{ch1.id: ch1, ch2.id: ch2}
 
 	articles := []*Item{
-		{Channel: ch1, Title: "Sub1-A", Published: 1000},
-		{Channel: ch2, Title: "Sub2-A", Published: 2000},
+		{Feed: ch1, Title: "Sub1-A", Published: 1000},
+		{Feed: ch2, Title: "Sub2-A", Published: 2000},
 	}
 
 	if _, err := db.PutArticles(ctx, articles); err != nil {
@@ -219,12 +219,12 @@ func TestPutArticlesMultipleChannels(t *testing.T) {
 
 	result := readAllArticles(t, dir, c)
 
-	chanIds := map[int]bool{}
+	feedIds := map[int]bool{}
 	for _, a := range result {
-		chanIds[a.Channel.id] = true
+		feedIds[a.Feed.id] = true
 	}
-	if !chanIds[1] || !chanIds[2] {
-		t.Errorf("expected articles from both channels, got chanIds: %v", chanIds)
+	if !feedIds[1] || !feedIds[2] {
+		t.Errorf("expected articles from both feeds, got feedIds: %v", feedIds)
 	}
 }
 
@@ -233,13 +233,13 @@ func TestPutArticlesPackSplitting(t *testing.T) {
 	// Very small pack size to force content splitting
 	globals.PackSize = 0 // 0 KB -> split after every flush
 
-	ch1 := &Channel{id: 1}
-	c.Channels = map[int]*Channel{ch1.id: ch1}
+	ch1 := &Feed{id: 1}
+	c.Feeds = map[int]*Feed{ch1.id: ch1}
 
 	articles := []*Item{
-		{Channel: ch1, Title: "A1", Content: "Content 1", Published: 1000},
-		{Channel: ch1, Title: "A2", Content: "Content 2", Published: 2000},
-		{Channel: ch1, Title: "A3", Content: "Content 3", Published: 3000},
+		{Feed: ch1, Title: "A1", Content: "Content 1", Published: 1000},
+		{Feed: ch1, Title: "A2", Content: "Content 2", Published: 2000},
+		{Feed: ch1, Title: "A3", Content: "Content 3", Published: 3000},
 	}
 
 	if _, err := db.PutArticles(ctx, articles); err != nil {
@@ -262,13 +262,13 @@ func TestPackMetadata(t *testing.T) {
 	db, c, _ := setupTestDB(t)
 	globals.PackSize = 0 // force content split after every article
 
-	ch1, ch2 := &Channel{id: 1}, &Channel{id: 2}
-	c.Channels = map[int]*Channel{ch1.id: ch1, ch2.id: ch2}
+	ch1, ch2 := &Feed{id: 1}, &Feed{id: 2}
+	c.Feeds = map[int]*Feed{ch1.id: ch1, ch2.id: ch2}
 
 	articles := []*Item{
-		{Channel: ch1, Title: "A1", Content: "Content 1", Published: 1000},
-		{Channel: ch2, Title: "A2", Content: "Content 2", Published: 2000},
-		{Channel: ch1, Title: "A3", Content: "Content 3", Published: 3000},
+		{Feed: ch1, Title: "A1", Content: "Content 1", Published: 1000},
+		{Feed: ch2, Title: "A2", Content: "Content 2", Published: 2000},
+		{Feed: ch1, Title: "A3", Content: "Content 3", Published: 3000},
 	}
 
 	if _, err := db.PutArticles(ctx, articles); err != nil {
@@ -282,7 +282,7 @@ func TestPackMetadata(t *testing.T) {
 
 func TestCommitAndReadDB(t *testing.T) {
 	db, c, dir := setupTestDB(t)
-	c.Channels = map[int]*Channel{
+	c.Feeds = map[int]*Feed{
 		1: {id: 1, Title: "Test Feed", URL: "http://example.com/feed"},
 	}
 
@@ -298,11 +298,11 @@ func TestCommitAndReadDB(t *testing.T) {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 
-	if len(core.Channels) != 1 {
-		t.Fatalf("Subscriptions len = %d, want 1", len(core.Channels))
+	if len(core.Feeds) != 1 {
+		t.Fatalf("Subscriptions len = %d, want 1", len(core.Feeds))
 	}
-	if core.Channels[1].Title != "Test Feed" {
-		t.Errorf("Sub title = %q, want %q", core.Channels[1].Title, "Test Feed")
+	if core.Feeds[1].Title != "Test Feed" {
+		t.Errorf("Sub title = %q, want %q", core.Feeds[1].Title, "Test Feed")
 	}
 }
 
@@ -459,36 +459,36 @@ func TestDBLockingForce(t *testing.T) {
 	db2.Close(ctx)
 }
 
-func TestAddRemoveChannel(t *testing.T) {
+func TestAddRemoveFeed(t *testing.T) {
 	db, _, _ := setupTestDB(t)
 
-	s1 := &Channel{Title: "Feed 1", URL: "http://example.com/1"}
-	s2 := &Channel{Title: "Feed 2", URL: "http://example.com/2"}
-	if err := db.AddChannel(s1); err != nil {
+	s1 := &Feed{Title: "Feed 1", URL: "http://example.com/1"}
+	s2 := &Feed{Title: "Feed 2", URL: "http://example.com/2"}
+	if err := db.AddFeed(s1); err != nil {
 		t.Fatalf("AddSubscription(s1): %v", err)
 	}
-	if err := db.AddChannel(s2); err != nil {
+	if err := db.AddFeed(s2); err != nil {
 		t.Fatalf("AddSubscription(s2): %v", err)
 	}
 
 	if s1.id != 0 || s2.id != 1 {
 		t.Errorf("IDs = (%d, %d), want (0, 1)", s1.id, s2.id)
 	}
-	if len(db.Channels()) != 2 {
-		t.Fatalf("len(Subscriptions) = %d, want 2", len(db.Channels()))
+	if len(db.Feeds()) != 2 {
+		t.Fatalf("len(Subscriptions) = %d, want 2", len(db.Feeds()))
 	}
 
-	db.RemoveChannel(0)
-	if len(db.Channels()) != 1 {
-		t.Fatalf("len(Subscriptions) after remove = %d, want 1", len(db.Channels()))
+	db.RemoveFeed(0)
+	if len(db.Feeds()) != 1 {
+		t.Fatalf("len(Subscriptions) after remove = %d, want 1", len(db.Feeds()))
 	}
-	if db.Channels()[1].id != 1 {
-		t.Errorf("remaining sub ID = %d, want 1", db.Channels()[1].id)
+	if db.Feeds()[1].id != 1 {
+		t.Errorf("remaining sub ID = %d, want 1", db.Feeds()[1].id)
 	}
 
 	// Adding after removal should reuse freed ID
-	s3 := &Channel{Title: "Feed 3", URL: "http://example.com/3"}
-	if err := db.AddChannel(s3); err != nil {
+	s3 := &Feed{Title: "Feed 3", URL: "http://example.com/3"}
+	if err := db.AddFeed(s3); err != nil {
 		t.Fatalf("AddSubscription(s3): %v", err)
 	}
 	if s3.id != 0 {
@@ -496,16 +496,16 @@ func TestAddRemoveChannel(t *testing.T) {
 	}
 }
 
-func TestRemoveNonExistentChannel(t *testing.T) {
+func TestRemoveNonExistentFeed(t *testing.T) {
 	db, _, _ := setupTestDB(t)
-	if err := db.AddChannel(&Channel{Title: "Feed", URL: "http://example.com"}); err != nil {
+	if err := db.AddFeed(&Feed{Title: "Feed", URL: "http://example.com"}); err != nil {
 		t.Fatalf("AddSubscription: %v", err)
 	}
 
 	// Should not panic or error
-	db.RemoveChannel(999)
-	if len(db.Channels()) != 1 {
-		t.Errorf("len(Subscriptions) = %d, want 1", len(db.Channels()))
+	db.RemoveFeed(999)
+	if len(db.Feeds()) != 1 {
+		t.Errorf("len(Subscriptions) = %d, want 1", len(db.Feeds()))
 	}
 }
 
@@ -518,7 +518,7 @@ func TestCommitAndReopen(t *testing.T) {
 		t.Fatalf("NewDB: %v", err)
 	}
 
-	if err := db.AddChannel(&Channel{Title: "Persist Feed", URL: "http://example.com/feed"}); err != nil {
+	if err := db.AddFeed(&Feed{Title: "Persist Feed", URL: "http://example.com/feed"}); err != nil {
 		t.Fatalf("AddSubscription: %v", err)
 	}
 	db.core.FetchedAt = 1234567890
@@ -536,11 +536,11 @@ func TestCommitAndReopen(t *testing.T) {
 	}
 	defer db2.Close(ctx)
 
-	if len(db2.Channels()) != 1 {
-		t.Fatalf("Subscriptions after reopen: %d, want 1", len(db2.Channels()))
+	if len(db2.Feeds()) != 1 {
+		t.Fatalf("Subscriptions after reopen: %d, want 1", len(db2.Feeds()))
 	}
-	if db2.Channels()[0].Title != "Persist Feed" {
-		t.Errorf("Title = %q, want %q", db2.Channels()[0].Title, "Persist Feed")
+	if db2.Feeds()[0].Title != "Persist Feed" {
+		t.Errorf("Title = %q, want %q", db2.Feeds()[0].Title, "Persist Feed")
 	}
 	if db2.core.FetchedAt != 1234567890 {
 		t.Errorf("FetchedAt = %d, want 1234567890", db2.core.FetchedAt)
@@ -565,19 +565,19 @@ func TestLoadPackCorruptedGzip(t *testing.T) {
 
 func TestPutArticlesRejectsStaleLatestIdx(t *testing.T) {
 	db, c, _ := setupTestDB(t)
-	ch1 := &Channel{id: 1}
-	c.Channels = map[int]*Channel{ch1.id: ch1}
+	ch1 := &Feed{id: 1}
+	c.Feeds = map[int]*Feed{ch1.id: ch1}
 
 	if _, err := db.PutArticles(ctx, []*Item{
-		{Channel: ch1, Title: "A1", Published: 1000},
-		{Channel: ch1, Title: "A2", Published: 2000},
+		{Feed: ch1, Title: "A1", Published: 1000},
+		{Feed: ch1, Title: "A2", Published: 2000},
 	}); err != nil {
 		t.Fatalf("PutArticles seed: %v", err)
 	}
 
 	c.TotalArticles = 5
 
-	_, err := db.PutArticles(ctx, []*Item{{Channel: ch1, Title: "A3", Published: 3000}})
+	_, err := db.PutArticles(ctx, []*Item{{Feed: ch1, Title: "A3", Published: 3000}})
 	if err == nil {
 		t.Fatal("expected PutArticles to refuse a stale latest idx pack")
 	}
@@ -586,12 +586,12 @@ func TestPutArticlesRejectsStaleLatestIdx(t *testing.T) {
 	}
 }
 
-func TestAddChannelSetsAddIdx(t *testing.T) {
+func TestAddFeedSetsAddIdx(t *testing.T) {
 	db, c, _ := setupTestDB(t)
 	c.TotalArticles = 100
 
-	s := &Channel{Title: "Feed", URL: "http://example.com"}
-	if err := db.AddChannel(s); err != nil {
+	s := &Feed{Title: "Feed", URL: "http://example.com"}
+	if err := db.AddFeed(s); err != nil {
 		t.Fatalf("AddSubscription: %v", err)
 	}
 
@@ -605,8 +605,8 @@ func TestAddChannelSetsAddIdx(t *testing.T) {
 
 func TestPutArticlesSeqIncrements(t *testing.T) {
 	db, c, _ := setupTestDB(t)
-	ch := &Channel{id: 1}
-	c.Channels = map[int]*Channel{ch.id: ch}
+	ch := &Feed{id: 1}
+	c.Feeds = map[int]*Feed{ch.id: ch}
 
 	if c.Seq != 0 {
 		t.Fatalf("fresh store Seq = %d, want 0", c.Seq)
@@ -615,7 +615,7 @@ func TestPutArticlesSeqIncrements(t *testing.T) {
 	// First article batch publishes generation 1, the next one generation 2.
 	for want := 1; want <= 2; want++ {
 		articles := []*Item{
-			{Channel: ch, Title: "A", Content: "C", Published: int64(1000 * want)},
+			{Feed: ch, Title: "A", Content: "C", Published: int64(1000 * want)},
 		}
 		if _, err := db.PutArticles(ctx, articles); err != nil {
 			t.Fatalf("PutArticles #%d: %v", want, err)
@@ -628,10 +628,10 @@ func TestPutArticlesSeqIncrements(t *testing.T) {
 
 // putOneArticle runs one article-producing PutArticles batch (one latest-pack
 // generation per call).
-func putOneArticle(t *testing.T, db *DB, ch *Channel, n int) {
+func putOneArticle(t *testing.T, db *DB, ch *Feed, n int) {
 	t.Helper()
 	articles := []*Item{
-		{Channel: ch, Title: fmt.Sprintf("A%d", n), Content: "C", Published: int64(n * 1000)},
+		{Feed: ch, Title: fmt.Sprintf("A%d", n), Content: "C", Published: int64(n * 1000)},
 	}
 	if _, err := db.PutArticles(ctx, articles); err != nil {
 		t.Fatalf("PutArticles #%d: %v", n, err)
@@ -660,8 +660,8 @@ func assertGen(t *testing.T, dir string, g int, present bool) {
 
 func TestGCLatestGraceWindow(t *testing.T) {
 	db, c, dir := setupTestDB(t)
-	ch := &Channel{id: 1}
-	c.Channels = map[int]*Channel{ch.id: ch}
+	ch := &Feed{id: 1}
+	c.Feeds = map[int]*Feed{ch.id: ch}
 
 	// Five fetch cycles, each running GC like cmd_fetch does.
 	for i := 1; i <= 5; i++ {
@@ -682,8 +682,8 @@ func TestGCLatestGraceWindow(t *testing.T) {
 
 func TestGCLatestSweepsCrashGaps(t *testing.T) {
 	db, c, dir := setupTestDB(t)
-	ch := &Channel{id: 1}
-	c.Channels = map[int]*Channel{ch.id: ch}
+	ch := &Feed{id: 1}
+	c.Feeds = map[int]*Feed{ch.id: ch}
 
 	// Five batches with no GC in between (as if every prior run died after
 	// Commit): a single sweep must still clear the whole expired backlog.
@@ -737,21 +737,21 @@ func TestDBOpenEmptyDir(t *testing.T) {
 	}
 	defer db.Close(ctx)
 
-	if len(db.Channels()) != 0 {
-		t.Errorf("Subscriptions = %d, want 0", len(db.Channels()))
+	if len(db.Feeds()) != 0 {
+		t.Errorf("Subscriptions = %d, want 0", len(db.Feeds()))
 	}
 }
 
-// A db.gz from before the feed→channel merge stored the source URL under a
-// feeds[] array, which the current schema ignores — leaving the channel's
+// A db.gz from before the feed→feed merge stored the source URL under a
+// feeds[] array, which the current schema ignores — leaving the feed's
 // top-level url empty. NewDB must reject that loudly rather than silently
 // fetch nothing.
-func TestNewDBRejectsUrllessChannel(t *testing.T) {
+func TestNewDBRejectsUrllessFeed(t *testing.T) {
 	dir := t.TempDir()
 	globals = &Globals{PackSize: 1, Store: dir}
 
-	// Legacy shape: channel carries feeds[] but no top-level url.
-	legacy := `{"channels":{"1":{"title":"Old","feeds":[{"url":"http://example.com/feed"}],"total_art":0,"add_idx":0}}}`
+	// Legacy shape: feed carries feeds[] but no top-level url.
+	legacy := `{"feeds":{"1":{"title":"Old","feeds":[{"url":"http://example.com/feed"}],"total_art":0,"add_idx":0}}}`
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	if _, err := gz.Write([]byte(legacy)); err != nil {
@@ -764,10 +764,10 @@ func TestNewDBRejectsUrllessChannel(t *testing.T) {
 
 	_, err := NewDB(ctx, false)
 	if err == nil {
-		t.Fatal("expected error for url-less (pre-merge) channel")
+		t.Fatal("expected error for url-less (pre-merge) feed")
 	}
-	if !strings.Contains(err.Error(), "no url") || !strings.Contains(err.Error(), "feed→channel merge") {
-		t.Errorf("error = %v, want the feed→channel migration guard message", err)
+	if !strings.Contains(err.Error(), "no url") || !strings.Contains(err.Error(), "feed→feed merge") {
+		t.Errorf("error = %v, want the feed→feed migration guard message", err)
 	}
 }
 
@@ -781,13 +781,13 @@ func TestPutArticlesIdxPackSplitAtBoundary(t *testing.T) {
 	}
 	defer db.Close(ctx)
 
-	ch := &Channel{id: 1}
-	db.core.Channels = map[int]*Channel{ch.id: ch}
+	ch := &Feed{id: 1}
+	db.core.Feeds = map[int]*Feed{ch.id: ch}
 	db.core.FetchedAt = 1700000000
 
 	articles := make([]*Item, idxPackSize)
 	for i := range articles {
-		articles[i] = &Item{Channel: ch, Title: fmt.Sprintf("A%d", i), Content: "c", Published: int64(i)}
+		articles[i] = &Item{Feed: ch, Title: fmt.Sprintf("A%d", i), Content: "c", Published: int64(i)}
 	}
 	if _, err := db.PutArticles(ctx, articles); err != nil {
 		t.Fatalf("PutArticles: %v", err)
@@ -802,7 +802,7 @@ func TestPutArticlesIdxPackSplitAtBoundary(t *testing.T) {
 	}
 
 	if _, err := db.PutArticles(ctx, []*Item{
-		{Channel: ch, Title: "A1001", Content: "c", Published: 1001},
+		{Feed: ch, Title: "A1001", Content: "c", Published: 1001},
 	}); err != nil {
 		t.Fatalf("PutArticles: %v", err)
 	}
@@ -827,11 +827,11 @@ func TestPutArticlesIdxPackSplitAtBoundary(t *testing.T) {
 
 func TestPutArticlesEmptyTitleAndLink(t *testing.T) {
 	db, c, dir := setupTestDB(t)
-	ch := &Channel{id: 1}
-	c.Channels = map[int]*Channel{ch.id: ch}
+	ch := &Feed{id: 1}
+	c.Feeds = map[int]*Feed{ch.id: ch}
 
 	articles := []*Item{
-		{Channel: ch, Title: "", Content: "body", Link: "", Published: 0},
+		{Feed: ch, Title: "", Content: "body", Link: "", Published: 0},
 	}
 	if _, err := db.PutArticles(ctx, articles); err != nil {
 		t.Fatalf("PutArticles: %v", err)
@@ -883,11 +883,11 @@ func TestCommitSeqGolden(t *testing.T) {
 	}
 }
 
-func TestDBNullChannelsInJSON(t *testing.T) {
+func TestDBNullFeedsInJSON(t *testing.T) {
 	dir := t.TempDir()
 	globals = &Globals{PackSize: 1, Store: dir}
 
-	core := `{"fetched_at":0,"total_art":0,"next_pid":0,"pack_off":0,"channels":null}` + "\n"
+	core := `{"fetched_at":0,"total_art":0,"next_pid":0,"pack_off":0,"feeds":null}` + "\n"
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	gz.Write([]byte(core))
@@ -900,10 +900,10 @@ func TestDBNullChannelsInJSON(t *testing.T) {
 	}
 	defer db.Close(ctx)
 
-	for range db.Channels() {
+	for range db.Feeds() {
 	}
-	if len(db.Channels()) != 0 {
-		t.Errorf("Subscriptions len = %d, want 0", len(db.Channels()))
+	if len(db.Feeds()) != 0 {
+		t.Errorf("Subscriptions len = %d, want 0", len(db.Feeds()))
 	}
 }
 
@@ -911,13 +911,13 @@ func TestPutArticlesDataPackSplitResetsPackOffset(t *testing.T) {
 	db, c, _ := setupTestDB(t)
 	globals.PackSize = 0 // split after every article
 
-	ch := &Channel{id: 1}
-	c.Channels = map[int]*Channel{ch.id: ch}
+	ch := &Feed{id: 1}
+	c.Feeds = map[int]*Feed{ch.id: ch}
 	c.FetchedAt = 1700000000
 
 	articles := []*Item{
-		{Channel: ch, Title: "A1", Content: "Content1", Published: 1000},
-		{Channel: ch, Title: "A2", Content: "Content2", Published: 2000},
+		{Feed: ch, Title: "A1", Content: "Content1", Published: 1000},
+		{Feed: ch, Title: "A2", Content: "Content2", Published: 2000},
 	}
 	if _, err := db.PutArticles(ctx, articles); err != nil {
 		t.Fatalf("PutArticles: %v", err)
@@ -933,12 +933,12 @@ func TestPutArticlesDataPackSplitResetsPackOffset(t *testing.T) {
 
 func TestPutArticlesResumption(t *testing.T) {
 	db, c, dir := setupTestDB(t)
-	ch := &Channel{id: 1}
-	c.Channels = map[int]*Channel{ch.id: ch}
+	ch := &Feed{id: 1}
+	c.Feeds = map[int]*Feed{ch.id: ch}
 	c.FetchedAt = 1700000000
 
 	if _, err := db.PutArticles(ctx, []*Item{
-		{Channel: ch, Title: "A1", Content: "C1", Published: 1000},
+		{Feed: ch, Title: "A1", Content: "C1", Published: 1000},
 	}); err != nil {
 		t.Fatalf("PutArticles(1): %v", err)
 	}
@@ -948,7 +948,7 @@ func TestPutArticlesResumption(t *testing.T) {
 	savedTotal := c.TotalArticles
 
 	if _, err := db.PutArticles(ctx, []*Item{
-		{Channel: ch, Title: "A2", Content: "C2", Published: 2000},
+		{Feed: ch, Title: "A2", Content: "C2", Published: 2000},
 	}); err != nil {
 		t.Fatalf("PutArticles(2): %v", err)
 	}
@@ -1029,12 +1029,12 @@ func TestReadGzCorruptedReturnsError(t *testing.T) {
 
 func TestPutArticlesFirstFetchedAt(t *testing.T) {
 	db, c, _ := setupTestDB(t)
-	ch := &Channel{id: 1}
-	c.Channels = map[int]*Channel{ch.id: ch}
+	ch := &Feed{id: 1}
+	c.Feeds = map[int]*Feed{ch.id: ch}
 	c.FetchedAt = 1700000000
 
 	if _, err := db.PutArticles(ctx, []*Item{
-		{Channel: ch, Title: "A1", Content: "C1", Published: 1000},
+		{Feed: ch, Title: "A1", Content: "C1", Published: 1000},
 	}); err != nil {
 		t.Fatalf("PutArticles: %v", err)
 	}

@@ -15,7 +15,7 @@ import (
 )
 
 // The "test-stub" ingest strategy returns a fixed result for every URL —
-// used to confirm Channel.fetchURL dispatches through the ingest registry
+// used to confirm Feed.fetchURL dispatches through the ingest registry
 // rather than hard-coding the RSS path.
 func init() {
 	// Registered once at init; safe because tests use distinct names.
@@ -34,7 +34,7 @@ func init() {
 // fetchOnce points ch at the test server and runs one fetchURL cycle. ETag /
 // LastModified are cleared each call so a re-fetch from the same server is not
 // answered with a 304 — the dedup tests rely on every fetch seeing the body.
-func fetchOnce(t *testing.T, ch *Channel, srv *httptest.Server) []*Item {
+func fetchOnce(t *testing.T, ch *Feed, srv *httptest.Server) []*Item {
 	t.Helper()
 	buf := make([]byte, 1<<20)
 	ch.URL = srv.URL
@@ -52,7 +52,7 @@ func fetchOnce(t *testing.T, ch *Channel, srv *httptest.Server) []*Item {
 
 // dispatchStub runs one fetchURL cycle against the engine's registry (no HTTP
 // server) — the URL is irrelevant since test-stub ignores it.
-func dispatchStub(t *testing.T, ch *Channel, rootIngest string) []*Item {
+func dispatchStub(t *testing.T, ch *Feed, rootIngest string) []*Item {
 	t.Helper()
 	buf := make([]byte, 1<<20)
 	const fetchedAt int64 = 4_102_444_800
@@ -65,18 +65,18 @@ func dispatchStub(t *testing.T, ch *Channel, rootIngest string) []*Item {
 	return items
 }
 
-// A channel-level ingest strategy is used by fetchURL.
-func TestFetchInheritsIngestFromChannel(t *testing.T) {
-	ch := &Channel{Title: "T", URL: "irrelevant://value", Ingest: "#test-stub"}
+// A feed-level ingest strategy is used by fetchURL.
+func TestFetchInheritsIngestFromFeed(t *testing.T) {
+	ch := &Feed{Title: "T", URL: "irrelevant://value", Ingest: "#test-stub"}
 	items := dispatchStub(t, ch, "")
 	if len(items) != 2 {
-		t.Fatalf("got %d items, want 2 (channel-level ingest used)", len(items))
+		t.Fatalf("got %d items, want 2 (feed-level ingest used)", len(items))
 	}
 }
 
-// The db.gz root Ingest applies when the channel has no override.
+// The db.gz root Ingest applies when the feed has no override.
 func TestFetchUsesRootIngest(t *testing.T) {
-	ch := &Channel{Title: "T", URL: "irrelevant://value"}
+	ch := &Feed{Title: "T", URL: "irrelevant://value"}
 	items := dispatchStub(t, ch, "#test-stub")
 	if len(items) != 2 {
 		t.Fatalf("got %d items, want 2 (root ingest applied)", len(items))
@@ -86,15 +86,15 @@ func TestFetchUsesRootIngest(t *testing.T) {
 // Items the publisher gave no parseable date for must be stored with
 // Published=0 so the frontend renders an empty date (its `p ?? 0` fallback).
 func TestFetchDatelessItemHasZeroPublished(t *testing.T) {
-	feed := `<rss version="2.0"><channel>
+	feed := `<rss version="2.0"><feed>
 		<item><title>Dateless</title><guid>a</guid></item>
-	</channel></rss>`
+	</feed></rss>`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(feed))
 	}))
 	defer srv.Close()
 
-	ch := &Channel{Title: "T"}
+	ch := &Feed{Title: "T"}
 
 	items := fetchOnce(t, ch, srv)
 	if len(items) != 1 {
@@ -108,16 +108,16 @@ func TestFetchDatelessItemHasZeroPublished(t *testing.T) {
 // Same (pub, guid) appearing twice in one response must be collapsed to one
 // stored article.
 func TestFetchWithinFetchDuplicateDeduped(t *testing.T) {
-	feed := `<rss version="2.0"><channel>
+	feed := `<rss version="2.0"><feed>
 		<item><title>Dup</title><guid>same</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
 		<item><title>Dup</title><guid>same</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
-	</channel></rss>`
+	</feed></rss>`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(feed))
 	}))
 	defer srv.Close()
 
-	ch := &Channel{Title: "T"}
+	ch := &Feed{Title: "T"}
 
 	items := fetchOnce(t, ch, srv)
 	if len(items) != 1 {
@@ -130,12 +130,12 @@ func TestFetchWithinFetchDuplicateDeduped(t *testing.T) {
 // whose GUID hash sorted below the boundary; the boundary-set model has no
 // hash dependency.
 func TestFetchSameSecondDifferentGUIDIsIngested(t *testing.T) {
-	feed1 := `<rss version="2.0"><channel>
+	feed1 := `<rss version="2.0"><feed>
 		<item><title>First</title><guid>a</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
-	</channel></rss>`
-	feed2 := `<rss version="2.0"><channel>
+	</feed></rss>`
+	feed2 := `<rss version="2.0"><feed>
 		<item><title>Second</title><guid>b</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
-	</channel></rss>`
+	</feed></rss>`
 
 	current := feed1
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -143,7 +143,7 @@ func TestFetchSameSecondDifferentGUIDIsIngested(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ch := &Channel{Title: "T"}
+	ch := &Feed{Title: "T"}
 
 	if got := fetchOnce(t, ch, srv); len(got) != 1 {
 		t.Fatalf("fetch1: got %d items, want 1", len(got))
@@ -159,12 +159,12 @@ func TestFetchSameSecondDifferentGUIDIsIngested(t *testing.T) {
 // deduped even if the publisher later adds a date — there's no other dedup
 // path for items the publisher initially ships dateless.
 func TestFetchDatelessRemainsSkippedWhenLaterDated(t *testing.T) {
-	feedWithoutDate := `<rss version="2.0"><channel>
+	feedWithoutDate := `<rss version="2.0"><feed>
 		<item><title>D</title><guid>permanent</guid></item>
-	</channel></rss>`
-	feedWithDate := `<rss version="2.0"><channel>
+	</feed></rss>`
+	feedWithDate := `<rss version="2.0"><feed>
 		<item><title>D</title><guid>permanent</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
-	</channel></rss>`
+	</feed></rss>`
 
 	current := feedWithoutDate
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -172,7 +172,7 @@ func TestFetchDatelessRemainsSkippedWhenLaterDated(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ch := &Channel{Title: "T"}
+	ch := &Feed{Title: "T"}
 
 	if got := fetchOnce(t, ch, srv); len(got) != 1 {
 		t.Fatalf("fetch1: got %d, want 1", len(got))
@@ -186,16 +186,16 @@ func TestFetchDatelessRemainsSkippedWhenLaterDated(t *testing.T) {
 // Items at the prior watermark second that were already in BoundaryGUIDs must
 // be skipped on subsequent fetches.
 func TestFetchPriorBoundaryStillDedupes(t *testing.T) {
-	feed := `<rss version="2.0"><channel>
+	feed := `<rss version="2.0"><feed>
 		<item><title>A</title><guid>a</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
 		<item><title>B</title><guid>b</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
-	</channel></rss>`
+	</feed></rss>`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(feed))
 	}))
 	defer srv.Close()
 
-	ch := &Channel{Title: "T"}
+	ch := &Feed{Title: "T"}
 
 	if got := fetchOnce(t, ch, srv); len(got) != 2 {
 		t.Fatalf("fetch1: got %d, want 2", len(got))
@@ -211,13 +211,13 @@ func TestFetchPriorBoundaryStillDedupes(t *testing.T) {
 // When the new fetch contains both the prior boundary item and a new sibling
 // at the same watermark second, both must end up in the snapshot boundary.
 func TestFetchSiblingsAtBoundarySecondBothInBoundary(t *testing.T) {
-	feed1 := `<rss version="2.0"><channel>
+	feed1 := `<rss version="2.0"><feed>
 		<item><title>A</title><guid>a</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
-	</channel></rss>`
-	feed2 := `<rss version="2.0"><channel>
+	</feed></rss>`
+	feed2 := `<rss version="2.0"><feed>
 		<item><title>A</title><guid>a</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
 		<item><title>B</title><guid>b</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
-	</channel></rss>`
+	</feed></rss>`
 
 	current := feed1
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -225,7 +225,7 @@ func TestFetchSiblingsAtBoundarySecondBothInBoundary(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ch := &Channel{Title: "T"}
+	ch := &Feed{Title: "T"}
 
 	if got := fetchOnce(t, ch, srv); len(got) != 1 {
 		t.Fatalf("fetch1: got %d, want 1", len(got))
@@ -244,10 +244,10 @@ func TestFetchSiblingsAtBoundarySecondBothInBoundary(t *testing.T) {
 // BoundaryGUIDs — otherwise items at the watermark second get re-ingested
 // when the feed recovers.
 func TestFetchEmptyResponsePreservesDedupState(t *testing.T) {
-	feedWithItem := `<rss version="2.0"><channel>
+	feedWithItem := `<rss version="2.0"><feed>
 		<item><title>A</title><guid>a</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
-	</channel></rss>`
-	feedEmpty := `<rss version="2.0"><channel></channel></rss>`
+	</feed></rss>`
+	feedEmpty := `<rss version="2.0"><feed></feed></rss>`
 
 	current := feedWithItem
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -255,7 +255,7 @@ func TestFetchEmptyResponsePreservesDedupState(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ch := &Channel{Title: "T"}
+	ch := &Feed{Title: "T"}
 
 	if got := fetchOnce(t, ch, srv); len(got) != 1 {
 		t.Fatalf("fetch1: got %d, want 1", len(got))
@@ -284,16 +284,16 @@ func TestFetchEmptyResponsePreservesDedupState(t *testing.T) {
 // not corrupt BoundaryGUIDs. The first occurrence wins for boundary state, so
 // the GUID stays in the snapshot and subsequent fetches still dedup it.
 func TestFetchWithinFetchDuplicateLowerPubKeepsBoundary(t *testing.T) {
-	feed := `<rss version="2.0"><channel>
+	feed := `<rss version="2.0"><feed>
 		<item><title>A1</title><guid>x</guid><pubDate>Mon, 01 Jan 2024 00:05:00 GMT</pubDate></item>
 		<item><title>A2</title><guid>x</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
-	</channel></rss>`
+	</feed></rss>`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(feed))
 	}))
 	defer srv.Close()
 
-	ch := &Channel{Title: "T"}
+	ch := &Feed{Title: "T"}
 
 	if got := fetchOnce(t, ch, srv); len(got) != 1 {
 		t.Fatalf("fetch1: got %d, want 1", len(got))
@@ -310,13 +310,13 @@ func TestFetchWithinFetchDuplicateLowerPubKeepsBoundary(t *testing.T) {
 // not advance Watermark past the first occurrence's pub. Otherwise a legit
 // item between the two pubs gets permanently skipped on later fetches.
 func TestFetchWithinFetchDuplicateHigherPubKeepsWatermark(t *testing.T) {
-	feed1 := `<rss version="2.0"><channel>
+	feed1 := `<rss version="2.0"><feed>
 		<item><title>A1</title><guid>x</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
 		<item><title>A2</title><guid>x</guid><pubDate>Mon, 01 Jan 2024 00:10:00 GMT</pubDate></item>
-	</channel></rss>`
-	feed2 := `<rss version="2.0"><channel>
+	</feed></rss>`
+	feed2 := `<rss version="2.0"><feed>
 		<item><title>B</title><guid>y</guid><pubDate>Mon, 01 Jan 2024 00:05:00 GMT</pubDate></item>
-	</channel></rss>`
+	</feed></rss>`
 
 	current := feed1
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -324,7 +324,7 @@ func TestFetchWithinFetchDuplicateHigherPubKeepsWatermark(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ch := &Channel{Title: "T"}
+	ch := &Feed{Title: "T"}
 
 	if got := fetchOnce(t, ch, srv); len(got) != 1 {
 		t.Fatalf("fetch1: got %d, want 1", len(got))
@@ -341,15 +341,15 @@ func TestFetchWithinFetchDuplicateHigherPubKeepsWatermark(t *testing.T) {
 // for years. The clamp also guarantees the stored Published value never
 // exceeds the moment we fetched.
 func TestFetchFutureDatedItemClampedToFetchedAt(t *testing.T) {
-	feed := `<rss version="2.0"><channel>
+	feed := `<rss version="2.0"><feed>
 		<item><title>FromTheFuture</title><guid>fut</guid><pubDate>Fri, 01 Jan 2999 00:00:00 GMT</pubDate></item>
-	</channel></rss>`
+	</feed></rss>`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(feed))
 	}))
 	defer srv.Close()
 
-	ch := &Channel{Title: "T", URL: srv.URL}
+	ch := &Feed{Title: "T", URL: srv.URL}
 
 	const fetchedAt int64 = 1_700_000_000
 	buf := make([]byte, 1<<20)
@@ -369,8 +369,8 @@ func TestFetchFutureDatedItemClampedToFetchedAt(t *testing.T) {
 	}
 }
 
-func TestChannelLogValue(t *testing.T) {
-	ch := &Channel{id: 7, Title: "My Title", URL: "http://x"}
+func TestFeedLogValue(t *testing.T) {
+	ch := &Feed{id: 7, Title: "My Title", URL: "http://x"}
 	val := ch.LogValue()
 	attrs := val.Group()
 	got := map[string]any{}
@@ -383,7 +383,7 @@ func TestChannelLogValue(t *testing.T) {
 	if got["title"] != "My Title" {
 		t.Errorf("LogValue title = %v, want %q", got["title"], "My Title")
 	}
-	// URL intentionally omitted to keep per-channel log lines compact.
+	// URL intentionally omitted to keep per-feed log lines compact.
 	if _, ok := got["url"]; ok {
 		t.Errorf("LogValue should not include url, got %v", got)
 	}
@@ -457,18 +457,18 @@ func TestStripControlKeepWS(t *testing.T) {
 // against that duplicate-forever failure mode.
 func TestFetchBoundaryGUIDsCapped(t *testing.T) {
 	var b strings.Builder
-	b.WriteString(`<rss version="2.0"><channel>`)
+	b.WriteString(`<rss version="2.0"><feed>`)
 	for i := range maxBoundaryGUIDs + 100 {
 		fmt.Fprintf(&b, `<item><title>T%d</title><guid>g%d</guid></item>`, i, i)
 	}
-	b.WriteString(`</channel></rss>`)
+	b.WriteString(`</feed></rss>`)
 	feed := b.String()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte(feed))
 	}))
 	defer srv.Close()
 
-	ch := &Channel{Title: "T"}
+	ch := &Feed{Title: "T"}
 
 	if got := fetchOnce(t, ch, srv); len(got) != maxBoundaryGUIDs {
 		t.Fatalf("fetch1: got %d items, want %d (only kept items ingested)", len(got), maxBoundaryGUIDs)
@@ -485,19 +485,19 @@ func TestFetchBoundaryGUIDsCapped(t *testing.T) {
 // fetch must NOT advance the persisted Watermark — otherwise a genuinely-new
 // article dated between the old and bumped value is permanently dropped.
 func TestFetchRedatedDuplicateDoesNotPoisonWatermark(t *testing.T) {
-	feed1 := `<rss version="2.0"><channel>
+	feed1 := `<rss version="2.0"><feed>
 		<item><title>A</title><guid>a</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
-	</channel></rss>`
+	</feed></rss>`
 	// A re-dated to 00:10 (publisher bumped/edited it).
-	feed2 := `<rss version="2.0"><channel>
+	feed2 := `<rss version="2.0"><feed>
 		<item><title>A</title><guid>a</guid><pubDate>Mon, 01 Jan 2024 00:10:00 GMT</pubDate></item>
-	</channel></rss>`
+	</feed></rss>`
 	// A still re-dated, plus a genuinely-new B dated BETWEEN the old (00:00) and
 	// bumped (00:10) watermark.
-	feed3 := `<rss version="2.0"><channel>
+	feed3 := `<rss version="2.0"><feed>
 		<item><title>A</title><guid>a</guid><pubDate>Mon, 01 Jan 2024 00:10:00 GMT</pubDate></item>
 		<item><title>B</title><guid>b</guid><pubDate>Mon, 01 Jan 2024 00:05:00 GMT</pubDate></item>
-	</channel></rss>`
+	</feed></rss>`
 
 	current := feed1
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -505,7 +505,7 @@ func TestFetchRedatedDuplicateDoesNotPoisonWatermark(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ch := &Channel{Title: "T"}
+	ch := &Feed{Title: "T"}
 
 	if got := fetchOnce(t, ch, srv); len(got) != 1 {
 		t.Fatalf("fetch1: got %d, want 1", len(got))

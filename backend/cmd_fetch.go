@@ -101,7 +101,7 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 		g, gctx := errgroup.WithContext(ctx)
 		g.SetLimit(globals.Workers)
 
-		for _, ch := range db.Channels() {
+		for _, ch := range db.Feeds() {
 			if ctx.Err() != nil {
 				break
 			}
@@ -117,7 +117,7 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 		g.Wait()
 
 		var articles []*Item
-		for _, ch := range db.Channels() {
+		for _, ch := range db.Feeds() {
 			articles = append(articles, ch.newItems...)
 		}
 		sort.SliceStable(articles, func(i, j int) bool {
@@ -178,16 +178,16 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 			}
 		}
 
-		var failed, totalChannels int
-		for _, ch := range db.Channels() {
-			totalChannels++
+		var failed, totalFeeds int
+		for _, ch := range db.Feeds() {
+			totalFeeds++
 			if ch.FetchError != "" {
 				failed++
 			}
 		}
 		slog.Info("fetch complete",
 			"new_articles", len(articles),
-			"fetched", totalChannels-failed,
+			"fetched", totalFeeds-failed,
 			"failed", failed,
 		)
 		return nil

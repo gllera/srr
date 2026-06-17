@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func setupChannelsTestDB(t *testing.T) {
+func setupFeedsTestDB(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
 	globals = &Globals{PackSize: 1, Store: dir}
@@ -16,13 +16,13 @@ func setupChannelsTestDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDB: %v", err)
 	}
-	if err := db.AddChannel(&Channel{
+	if err := db.AddFeed(&Feed{
 		Title:     "Test",
 		URL:       "https://a.example.com/feed",
 		ETag:      "etag-a",
 		Watermark: 0x111,
 	}); err != nil {
-		t.Fatalf("AddChannel: %v", err)
+		t.Fatalf("AddFeed: %v", err)
 	}
 	if err := db.Commit(ctx); err != nil {
 		t.Fatalf("Commit: %v", err)
@@ -56,7 +56,7 @@ func setupEmptyDB(t *testing.T) {
 	globals = &Globals{PackSize: 1, Store: dir}
 }
 
-func TestChanAddCreates(t *testing.T) {
+func TestFeedAddCreates(t *testing.T) {
 	setupEmptyDB(t)
 	cmd := &AddCmd{
 		Title: strPtr("News"),
@@ -68,12 +68,12 @@ func TestChanAddCreates(t *testing.T) {
 	}
 
 	db := reopenDB(t)
-	if len(db.Channels()) != 1 {
-		t.Fatalf("Channels len = %d, want 1", len(db.Channels()))
+	if len(db.Feeds()) != 1 {
+		t.Fatalf("Feeds len = %d, want 1", len(db.Feeds()))
 	}
-	ch := db.Channels()[0]
+	ch := db.Feeds()[0]
 	if ch == nil {
-		t.Fatal("expected channel at id 0")
+		t.Fatal("expected feed at id 0")
 	}
 	if ch.Title != "News" {
 		t.Errorf("Title = %q, want %q", ch.Title, "News")
@@ -86,56 +86,56 @@ func TestChanAddCreates(t *testing.T) {
 	}
 }
 
-func TestChanAddRequiresTitle(t *testing.T) {
+func TestFeedAddRequiresTitle(t *testing.T) {
 	setupEmptyDB(t)
 	cmd := &AddCmd{URL: strPtr("https://feed.example.com/rss")}
 	wantErr(t, cmd.Run(), "title is required")
 }
 
-func TestChanAddRequiresURL(t *testing.T) {
+func TestFeedAddRequiresURL(t *testing.T) {
 	setupEmptyDB(t)
 	cmd := &AddCmd{Title: strPtr("News")}
 	wantErr(t, cmd.Run(), "--url is required")
 }
 
-func TestChanAddRejectsInvalidURL(t *testing.T) {
+func TestFeedAddRejectsInvalidURL(t *testing.T) {
 	setupEmptyDB(t)
 	cmd := &AddCmd{Title: strPtr("News"), URL: strPtr("not-a-url")}
 	wantErr(t, cmd.Run(), "invalid url")
 }
 
-func TestRmCmdRemovesChannels(t *testing.T) {
-	setupChannelsTestDB(t)
-	// Add a second channel so we can verify only the requested one is removed.
+func TestRmCmdRemovesFeeds(t *testing.T) {
+	setupFeedsTestDB(t)
+	// Add a second feed so we can verify only the requested one is removed.
 	if err := (&AddCmd{Title: strPtr("Other"), URL: strPtr("https://z.example.com/feed")}).Run(); err != nil {
 		t.Fatalf("AddCmd: %v", err)
 	}
-	channels := reopenDB(t).Channels()
-	if len(channels) != 2 {
-		t.Fatalf("setup: Channels len = %d, want 2", len(channels))
+	feeds := reopenDB(t).Feeds()
+	if len(feeds) != 2 {
+		t.Fatalf("setup: Feeds len = %d, want 2", len(feeds))
 	}
 
 	if err := (&RmCmd{ID: []int{0}}).Run(); err != nil {
 		t.Fatalf("RmCmd: %v", err)
 	}
-	channels = reopenDB(t).Channels()
-	if len(channels) != 1 {
-		t.Fatalf("after rm Channels len = %d, want 1", len(channels))
+	feeds = reopenDB(t).Feeds()
+	if len(feeds) != 1 {
+		t.Fatalf("after rm Feeds len = %d, want 1", len(feeds))
 	}
-	if _, ok := channels[0]; ok {
-		t.Error("channel 0 should have been removed")
+	if _, ok := feeds[0]; ok {
+		t.Error("feed 0 should have been removed")
 	}
 }
 
 func TestRmCmdNoOpForMissingID(t *testing.T) {
 	// RmCmd uses delete() which is a no-op on missing keys; this is the
 	// documented behavior.
-	setupChannelsTestDB(t)
+	setupFeedsTestDB(t)
 	if err := (&RmCmd{ID: []int{99}}).Run(); err != nil {
 		t.Fatalf("RmCmd: %v", err)
 	}
-	if len(reopenDB(t).Channels()) != 1 {
-		t.Errorf("Channels changed despite missing id")
+	if len(reopenDB(t).Feeds()) != 1 {
+		t.Errorf("Feeds changed despite missing id")
 	}
 }
 
@@ -183,10 +183,10 @@ func TestLsCmdFiltersByTag(t *testing.T) {
 	}
 	body := out.String()
 	if !strings.Contains(body, `"title":"A"`) {
-		t.Errorf("expected channel A in filtered output: %s", body)
+		t.Errorf("expected feed A in filtered output: %s", body)
 	}
 	if strings.Contains(body, `"title":"B"`) {
-		t.Errorf("did not expect channel B in tech-filtered output: %s", body)
+		t.Errorf("did not expect feed B in tech-filtered output: %s", body)
 	}
 }
 
@@ -210,13 +210,13 @@ func TestValidFeedURL(t *testing.T) {
 	}
 }
 
-func TestChanUpdReplacesURLResetsState(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedUpdReplacesURLResetsState(t *testing.T) {
+	setupFeedsTestDB(t)
 	cmd := &UpdCmd{ID: 0, URL: strPtr("https://c.example.com/feed")}
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	ch := reopenDB(t).Channels()[0]
+	ch := reopenDB(t).Feeds()[0]
 	if ch.URL != "https://c.example.com/feed" {
 		t.Errorf("URL = %q, want the new url", ch.URL)
 	}
@@ -225,44 +225,44 @@ func TestChanUpdReplacesURLResetsState(t *testing.T) {
 	}
 }
 
-func TestChanUpdSameURLPreservesState(t *testing.T) {
-	setupChannelsTestDB(t)
-	// Re-setting the same URL must not clear the per-channel fetch state.
+func TestFeedUpdSameURLPreservesState(t *testing.T) {
+	setupFeedsTestDB(t)
+	// Re-setting the same URL must not clear the per-feed fetch state.
 	cmd := &UpdCmd{ID: 0, URL: strPtr("https://a.example.com/feed")}
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	ch := reopenDB(t).Channels()[0]
+	ch := reopenDB(t).Feeds()[0]
 	if ch.ETag != "etag-a" || ch.Watermark != 0x111 {
 		t.Errorf("state lost on unchanged URL: etag=%q wm=%#x", ch.ETag, ch.Watermark)
 	}
 }
 
-func TestChanUpdRejectsInvalidURL(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedUpdRejectsInvalidURL(t *testing.T) {
+	setupFeedsTestDB(t)
 	cmd := &UpdCmd{ID: 0, URL: strPtr("not-a-url")}
 	wantErr(t, cmd.Run(), "invalid url")
 }
 
-func TestChanUpdRequiresFieldFlag(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedUpdRequiresFieldFlag(t *testing.T) {
+	setupFeedsTestDB(t)
 	cmd := &UpdCmd{ID: 0}
 	wantErr(t, cmd.Run(), "nothing to update")
 }
 
-func TestChanUpdChannelNotFound(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedUpdFeedNotFound(t *testing.T) {
+	setupFeedsTestDB(t)
 	cmd := &UpdCmd{ID: 99, Title: strPtr("X")}
 	wantErr(t, cmd.Run(), "not found")
 }
 
-func TestChanUpdChangesTitle(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedUpdChangesTitle(t *testing.T) {
+	setupFeedsTestDB(t)
 	cmd := &UpdCmd{ID: 0, Title: strPtr("New Title")}
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	ch := reopenDB(t).Channels()[0]
+	ch := reopenDB(t).Feeds()[0]
 	if ch.Title != "New Title" {
 		t.Errorf("Title = %q, want %q", ch.Title, "New Title")
 	}
@@ -271,86 +271,86 @@ func TestChanUpdChangesTitle(t *testing.T) {
 	}
 }
 
-func TestChanUpdEmptyTitleRejected(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedUpdEmptyTitleRejected(t *testing.T) {
+	setupFeedsTestDB(t)
 	wantErr(t, (&UpdCmd{ID: 0, Title: strPtr("")}).Run(), "title cannot be empty")
-	if got := reopenDB(t).Channels()[0].Title; got != "Test" {
+	if got := reopenDB(t).Feeds()[0].Title; got != "Test" {
 		t.Errorf("Title = %q, want %q (should not have committed)", got, "Test")
 	}
 }
 
-func TestChanUpdClearsTag(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedUpdClearsTag(t *testing.T) {
+	setupFeedsTestDB(t)
 	if err := (&UpdCmd{ID: 0, Tag: strPtr("tech")}).Run(); err != nil {
 		t.Fatalf("set tag: %v", err)
 	}
-	if reopenDB(t).Channels()[0].Tag != "tech" {
+	if reopenDB(t).Feeds()[0].Tag != "tech" {
 		t.Fatal("setup: tag not set")
 	}
 	if err := (&UpdCmd{ID: 0, Tag: strPtr("")}).Run(); err != nil {
 		t.Fatalf("clear tag: %v", err)
 	}
-	if got := reopenDB(t).Channels()[0].Tag; got != "" {
+	if got := reopenDB(t).Feeds()[0].Tag; got != "" {
 		t.Errorf("Tag = %q, want \"\"", got)
 	}
 }
 
-func TestChanUpdSetsPipeline(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedUpdSetsPipeline(t *testing.T) {
+	setupFeedsTestDB(t)
 	cmd := &UpdCmd{ID: 0, Parsers: []string{"#sanitize", "#minify"}}
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	ch := reopenDB(t).Channels()[0]
+	ch := reopenDB(t).Feeds()[0]
 	if len(ch.Pipe) != 2 || ch.Pipe[0] != "#sanitize" || ch.Pipe[1] != "#minify" {
 		t.Errorf("Pipeline = %v, want [#sanitize #minify]", ch.Pipe)
 	}
 }
 
-func TestChanUpdClearsPipeline(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedUpdClearsPipeline(t *testing.T) {
+	setupFeedsTestDB(t)
 	if err := (&UpdCmd{ID: 0, Parsers: []string{"#sanitize"}}).Run(); err != nil {
 		t.Fatalf("set pipeline: %v", err)
 	}
 	if err := (&UpdCmd{ID: 0, Parsers: []string{""}}).Run(); err != nil {
 		t.Fatalf("clear pipeline: %v", err)
 	}
-	ch := reopenDB(t).Channels()[0]
+	ch := reopenDB(t).Feeds()[0]
 	if len(ch.Pipe) != 0 {
 		t.Errorf("Pipeline = %v, want empty", ch.Pipe)
 	}
 }
 
-func TestChanUpdSetsIngest(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedUpdSetsIngest(t *testing.T) {
+	setupFeedsTestDB(t)
 	cmd := &UpdCmd{ID: 0, Ingest: strPtr("my-fetcher")}
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if got := reopenDB(t).Channels()[0].Ingest; got != "my-fetcher" {
+	if got := reopenDB(t).Feeds()[0].Ingest; got != "my-fetcher" {
 		t.Errorf("Ingest = %q, want %q", got, "my-fetcher")
 	}
 }
 
-func TestChanUpdClearsIngest(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedUpdClearsIngest(t *testing.T) {
+	setupFeedsTestDB(t)
 	if err := (&UpdCmd{ID: 0, Ingest: strPtr("my-fetcher")}).Run(); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 	if err := (&UpdCmd{ID: 0, Ingest: strPtr("")}).Run(); err != nil {
 		t.Fatalf("clear: %v", err)
 	}
-	if got := reopenDB(t).Channels()[0].Ingest; got != "" {
+	if got := reopenDB(t).Feeds()[0].Ingest; got != "" {
 		t.Errorf("Ingest = %q, want \"\"", got)
 	}
 }
 
-func TestChanUpdNoURLFlagLeavesURLUntouched(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedUpdNoURLFlagLeavesURLUntouched(t *testing.T) {
+	setupFeedsTestDB(t)
 	if err := (&UpdCmd{ID: 0, Title: strPtr("X")}).Run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	ch := reopenDB(t).Channels()[0]
+	ch := reopenDB(t).Feeds()[0]
 	if ch.URL != "https://a.example.com/feed" {
 		t.Errorf("URL changed: %q", ch.URL)
 	}
@@ -359,20 +359,20 @@ func TestChanUpdNoURLFlagLeavesURLUntouched(t *testing.T) {
 	}
 }
 
-func TestChanUpdIDTooLarge(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedUpdIDTooLarge(t *testing.T) {
+	setupFeedsTestDB(t)
 	cmd := &UpdCmd{ID: 65536, Title: strPtr("X")}
 	wantErr(t, cmd.Run(), "[0, 65535]")
 }
 
-func TestChanUpdIDNegative(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedUpdIDNegative(t *testing.T) {
+	setupFeedsTestDB(t)
 	cmd := &UpdCmd{ID: -1, Title: strPtr("X")}
 	wantErr(t, cmd.Run(), "[0, 65535]")
 }
 
-func TestChanShowFound(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedShowFound(t *testing.T) {
+	setupFeedsTestDB(t)
 	var out bytes.Buffer
 	saved := stdout
 	stdout = &out
@@ -393,13 +393,13 @@ func TestChanShowFound(t *testing.T) {
 	}
 }
 
-func TestChanShowMissing(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedShowMissing(t *testing.T) {
+	setupFeedsTestDB(t)
 	wantErr(t, (&ShowCmd{ID: 99, Format: "json"}).Run(), "not found")
 }
 
-func TestChanShowYAML(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedShowYAML(t *testing.T) {
+	setupFeedsTestDB(t)
 	var out bytes.Buffer
 	saved := stdout
 	stdout = &out
@@ -414,17 +414,17 @@ func TestChanShowYAML(t *testing.T) {
 	}
 }
 
-func TestChanShowIDTooLarge(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedShowIDTooLarge(t *testing.T) {
+	setupFeedsTestDB(t)
 	wantErr(t, (&ShowCmd{ID: 65536, Format: "json"}).Run(), "[0, 65535]")
 }
 
-func TestChanShowIDNegative(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedShowIDNegative(t *testing.T) {
+	setupFeedsTestDB(t)
 	wantErr(t, (&ShowCmd{ID: -1, Format: "json"}).Run(), "[0, 65535]")
 }
 
-func TestChanShowEmitsPipe(t *testing.T) {
+func TestFeedShowEmitsPipe(t *testing.T) {
 	setupEmptyDB(t)
 	if err := (&AddCmd{
 		Title:   strPtr("P"),
@@ -433,7 +433,7 @@ func TestChanShowEmitsPipe(t *testing.T) {
 	}).Run(); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
-	ch := reopenDB(t).Channels()[0]
+	ch := reopenDB(t).Feeds()[0]
 
 	var out bytes.Buffer
 	saved := stdout
@@ -456,56 +456,56 @@ func applyFromString(t *testing.T, json string) error {
 	return cmd.Run()
 }
 
-func TestChanApplySingleCreate(t *testing.T) {
+func TestFeedApplySingleCreate(t *testing.T) {
 	setupEmptyDB(t)
 	err := applyFromString(t, `{"title":"NewCh","url":"https://x.example.com/feed","tag":"t"}`)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	db := reopenDB(t)
-	if len(db.Channels()) != 1 {
-		t.Fatalf("Channels len = %d, want 1", len(db.Channels()))
+	if len(db.Feeds()) != 1 {
+		t.Fatalf("Feeds len = %d, want 1", len(db.Feeds()))
 	}
-	ch := db.Channels()[0]
+	ch := db.Feeds()[0]
 	if ch.Title != "NewCh" || ch.Tag != "t" {
-		t.Errorf("unexpected channel: %+v", ch)
+		t.Errorf("unexpected feed: %+v", ch)
 	}
 	if ch.URL != "https://x.example.com/feed" {
 		t.Errorf("URL = %q, want the applied url", ch.URL)
 	}
 }
 
-func TestChanApplySingleUpdate(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedApplySingleUpdate(t *testing.T) {
+	setupFeedsTestDB(t)
 	err := applyFromString(t, `{"id":0,"title":"Renamed","url":"https://a.example.com/feed"}`)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	ch := reopenDB(t).Channels()[0]
+	ch := reopenDB(t).Feeds()[0]
 	if ch.Title != "Renamed" {
 		t.Errorf("Title = %q, want Renamed", ch.Title)
 	}
 }
 
-func TestChanApplyPreservesStateOnUnchangedURL(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedApplyPreservesStateOnUnchangedURL(t *testing.T) {
+	setupFeedsTestDB(t)
 	err := applyFromString(t, `{"id":0,"title":"Test","url":"https://a.example.com/feed"}`)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	ch := reopenDB(t).Channels()[0]
+	ch := reopenDB(t).Feeds()[0]
 	if ch.ETag != "etag-a" || ch.Watermark != 0x111 {
-		t.Errorf("kept channel state lost on unchanged URL: etag=%q wm=%#x", ch.ETag, ch.Watermark)
+		t.Errorf("kept feed state lost on unchanged URL: etag=%q wm=%#x", ch.ETag, ch.Watermark)
 	}
 }
 
-func TestChanApplyResetsStateOnChangedURL(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedApplyResetsStateOnChangedURL(t *testing.T) {
+	setupFeedsTestDB(t)
 	err := applyFromString(t, `{"id":0,"title":"Test","url":"https://c.example.com/feed"}`)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	ch := reopenDB(t).Channels()[0]
+	ch := reopenDB(t).Feeds()[0]
 	if ch.URL != "https://c.example.com/feed" {
 		t.Errorf("URL = %q, want the new url", ch.URL)
 	}
@@ -514,7 +514,7 @@ func TestChanApplyResetsStateOnChangedURL(t *testing.T) {
 	}
 }
 
-func TestChanApplyArray(t *testing.T) {
+func TestFeedApplyArray(t *testing.T) {
 	setupEmptyDB(t)
 	err := applyFromString(t, `[
 		{"title":"A","url":"https://a.example.com/feed"},
@@ -523,12 +523,12 @@ func TestChanApplyArray(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if got := len(reopenDB(t).Channels()); got != 2 {
-		t.Errorf("Channels len = %d, want 2", got)
+	if got := len(reopenDB(t).Feeds()); got != 2 {
+		t.Errorf("Feeds len = %d, want 2", got)
 	}
 }
 
-func TestChanApplyAtomicRollback(t *testing.T) {
+func TestFeedApplyAtomicRollback(t *testing.T) {
 	setupEmptyDB(t)
 	// Second item missing title -> whole input must reject without writes.
 	err := applyFromString(t, `[
@@ -538,12 +538,12 @@ func TestChanApplyAtomicRollback(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if got := len(reopenDB(t).Channels()); got != 0 {
-		t.Errorf("Channels len = %d, want 0 (rollback)", got)
+	if got := len(reopenDB(t).Feeds()); got != 0 {
+		t.Errorf("Feeds len = %d, want 0 (rollback)", got)
 	}
 }
 
-func TestChanApplyAtomicRollbackOnBadURL(t *testing.T) {
+func TestFeedApplyAtomicRollbackOnBadURL(t *testing.T) {
 	setupEmptyDB(t)
 	// Second item has an invalid URL — rejected during apply, after entry A
 	// has been added in-memory. Disk should still rollback.
@@ -554,27 +554,27 @@ func TestChanApplyAtomicRollbackOnBadURL(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if got := len(reopenDB(t).Channels()); got != 0 {
-		t.Errorf("Channels len = %d, want 0 (disk rollback)", got)
+	if got := len(reopenDB(t).Feeds()); got != 0 {
+		t.Errorf("Feeds len = %d, want 0 (disk rollback)", got)
 	}
 }
 
-func TestChanApplyNullArrayEntry(t *testing.T) {
+func TestFeedApplyNullArrayEntry(t *testing.T) {
 	setupEmptyDB(t)
 	err := applyFromString(t, `[{"title":"A","url":"https://a.example.com/feed"}, null]`)
 	wantErr(t, err, "null entry")
-	if got := len(reopenDB(t).Channels()); got != 0 {
-		t.Errorf("Channels len = %d, want 0", got)
+	if got := len(reopenDB(t).Feeds()); got != 0 {
+		t.Errorf("Feeds len = %d, want 0", got)
 	}
 }
 
-func TestChanApplyIdMissingErrors(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedApplyIdMissingErrors(t *testing.T) {
+	setupFeedsTestDB(t)
 	err := applyFromString(t, `{"id":99,"title":"x","url":"https://x.example.com/feed"}`)
 	wantErr(t, err, "not found")
 }
 
-func TestChanApplyInvalidJSON(t *testing.T) {
+func TestFeedApplyInvalidJSON(t *testing.T) {
 	setupEmptyDB(t)
 	err := applyFromString(t, `{not json`)
 	if err == nil {
@@ -582,22 +582,22 @@ func TestChanApplyInvalidJSON(t *testing.T) {
 	}
 }
 
-func TestChanApplyCreateMissingURL(t *testing.T) {
+func TestFeedApplyCreateMissingURL(t *testing.T) {
 	setupEmptyDB(t)
 	err := applyFromString(t, `{"title":"X"}`)
 	wantErr(t, err, "url required")
 }
 
-func TestChanApplyIgnoresReadOnlyFields(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedApplyIgnoresReadOnlyFields(t *testing.T) {
+	setupFeedsTestDB(t)
 	// Input includes "etag"; stored ETag must NOT be overwritten (it's a
-	// read-only-from-input field — only the channelView's url/title/tag/pipe/
+	// read-only-from-input field — only the feedView's url/title/tag/pipe/
 	// ingest are applied).
 	err := applyFromString(t, `{"id":0,"title":"Test","url":"https://a.example.com/feed","etag":"bogus-from-input"}`)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	ch := reopenDB(t).Channels()[0]
+	ch := reopenDB(t).Feeds()[0]
 	if ch.ETag != "etag-a" {
 		t.Errorf("apply leaked input etag into stored state: %q", ch.ETag)
 	}
@@ -617,8 +617,8 @@ func writeEditorScript(t *testing.T, body string) string {
 	return path
 }
 
-func TestChanEditApplies(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedEditApplies(t *testing.T) {
+	setupFeedsTestDB(t)
 	// Editor: rewrite title to "Renamed", keep url and id intact.
 	script := writeEditorScript(t, `cat > "$1" <<'EOF'
 {"id":0,"title":"Renamed","url":"https://a.example.com/feed"}
@@ -629,34 +629,34 @@ EOF`)
 	if err := (&EditCmd{ID: 0}).Run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	ch := reopenDB(t).Channels()[0]
+	ch := reopenDB(t).Feeds()[0]
 	if ch.Title != "Renamed" {
 		t.Errorf("Title = %q, want Renamed", ch.Title)
 	}
 	if ch.ETag != "etag-a" {
-		t.Errorf("channel state lost: %q", ch.ETag)
+		t.Errorf("feed state lost: %q", ch.ETag)
 	}
 }
 
-func TestChanEditNoChangeNoOp(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedEditNoChangeNoOp(t *testing.T) {
+	setupFeedsTestDB(t)
 	// Editor: do nothing — leave the file exactly as written.
 	script := writeEditorScript(t, `: # no-op`)
 	t.Setenv("EDITOR", script)
 	t.Setenv("VISUAL", "")
 
-	before := reopenDB(t).Channels()[0].Title
+	before := reopenDB(t).Feeds()[0].Title
 
 	if err := (&EditCmd{ID: 0}).Run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if got := reopenDB(t).Channels()[0].Title; got != before {
+	if got := reopenDB(t).Feeds()[0].Title; got != before {
 		t.Errorf("title changed unexpectedly: %q -> %q", before, got)
 	}
 }
 
-func TestChanEditIdChangedErrors(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedEditIdChangedErrors(t *testing.T) {
+	setupFeedsTestDB(t)
 	script := writeEditorScript(t, `cat > "$1" <<'EOF'
 {"id":7,"title":"Hijack","url":"https://a.example.com/feed"}
 EOF`)
@@ -665,13 +665,13 @@ EOF`)
 
 	err := (&EditCmd{ID: 0}).Run()
 	wantErr(t, err, "id from 0 to 7")
-	if reopenDB(t).Channels()[0].Title == "Hijack" {
+	if reopenDB(t).Feeds()[0].Title == "Hijack" {
 		t.Errorf("hijacked title was applied")
 	}
 }
 
-func TestChanEditInvalidJsonErrors(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedEditInvalidJsonErrors(t *testing.T) {
+	setupFeedsTestDB(t)
 	script := writeEditorScript(t, `printf 'not json' > "$1"`)
 	t.Setenv("EDITOR", script)
 	t.Setenv("VISUAL", "")
@@ -685,28 +685,28 @@ func TestChanEditInvalidJsonErrors(t *testing.T) {
 	}
 }
 
-func TestChanEditEditorNonZeroExit(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedEditEditorNonZeroExit(t *testing.T) {
+	setupFeedsTestDB(t)
 	script := writeEditorScript(t, `exit 42`)
 	t.Setenv("EDITOR", script)
 	t.Setenv("VISUAL", "")
 
 	err := (&EditCmd{ID: 0}).Run()
 	wantErr(t, err, "editor exited")
-	if reopenDB(t).Channels()[0].Title != "Test" {
+	if reopenDB(t).Feeds()[0].Title != "Test" {
 		t.Errorf("Title unexpectedly changed despite editor failure")
 	}
 }
 
-func TestChanEditChannelNotFound(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedEditFeedNotFound(t *testing.T) {
+	setupFeedsTestDB(t)
 	t.Setenv("EDITOR", writeEditorScript(t, `:`))
 	t.Setenv("VISUAL", "")
 	wantErr(t, (&EditCmd{ID: 99}).Run(), "not found")
 }
 
-func TestChanEditApplyFailsPreservesTempfile(t *testing.T) {
-	setupChannelsTestDB(t)
+func TestFeedEditApplyFailsPreservesTempfile(t *testing.T) {
+	setupFeedsTestDB(t)
 	// Editor writes valid JSON with an invalid URL — passes JSON parse
 	// and id check, fails inside applyViews validation during apply.
 	script := writeEditorScript(t, `cat > "$1" <<'EOF'
@@ -726,7 +726,7 @@ EOF`)
 		t.Errorf("error should mention invalid url: %v", err)
 	}
 	// And no DB write.
-	if reopenDB(t).Channels()[0].Title != "Test" {
+	if reopenDB(t).Feeds()[0].Title != "Test" {
 		t.Errorf("Title unexpectedly changed despite apply failure")
 	}
 }

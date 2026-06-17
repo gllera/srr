@@ -6,7 +6,7 @@ import { nItems, rssFeed } from "../fixtures"
 
 // `srr inspect` is the Go-side mirror of the frontend parser (idx.ts parse +
 // data.ts getPackRef + nav filter math). Running its modes against a real
-// multi-channel, multi-pack store keeps that mirror honest and exercises the
+// multi-feed, multi-pack store keeps that mirror honest and exercises the
 // --chron / --filter code paths the other scenarios don't.
 
 describe("contract: inspect cross-check", () => {
@@ -23,8 +23,8 @@ describe("contract: inspect cross-check", () => {
          "/tech.xml": rssFeed("Tech", tech),
       })
       store = makeStore()
-      await srr(store, "chan", "add", "-t", "News", "-g", "world", "-u", `${feeds.url}/news.xml`)
-      await srr(store, "chan", "add", "-t", "Tech", "-g", "world", "-u", `${feeds.url}/tech.xml`)
+      await srr(store, "feed", "add", "-t", "News", "-g", "world", "-u", `${feeds.url}/news.xml`)
+      await srr(store, "feed", "add", "-t", "Tech", "-g", "world", "-u", `${feeds.url}/tech.xml`)
       await srr(store, "-s", "1", "art", "fetch") // small packs → multiple data packs
    })
 
@@ -33,7 +33,7 @@ describe("contract: inspect cross-check", () => {
       if (store) rmSync(store, { recursive: true, force: true })
    })
 
-   it("--validate passes on a multi-channel, multi-pack store", async () => {
+   it("--validate passes on a multi-feed, multi-pack store", async () => {
       expect(await inspectValidate(store)).toContain("OK: all checks passed")
    })
 

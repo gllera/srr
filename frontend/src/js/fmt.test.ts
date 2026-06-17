@@ -167,7 +167,7 @@ describe("sanitizeHtml security edge cases", () => {
       expect(sanitizeHtml("<math><mtext>x</mtext></math><p>ok</p>")).toBe("<p>ok</p>")
    })
 
-   it("strips srcset from <img> (an unbounded off-origin URL channel the single-src bounds check can't see)", () => {
+   it("strips srcset from <img> (an unbounded off-origin URL feed the single-src bounds check can't see)", () => {
       const out = sanitizeHtml(
          '<img src="https://cdn.example/x.jpg" srcset="//evil.example/a 1x, //evil.example/b 2x">',
       )
@@ -403,7 +403,7 @@ describe("extractImageUrls", () => {
    it("extracts unquoted src (backend #minify strips quotes for clean URLs)", () => {
       // The #minify pass on the backend drops attribute quotes when the value
       // has no special chars — common for clean CDN URLs. Both forms must be
-      // recognised or those channels never prefetch.
+      // recognised or those feeds never prefetch.
       const html = "<p><a href=https://example.com/post/ABC><img src=https://cdn.example/img/ABC.jpg alt=t></a></p>"
       expect(extractImageUrls(html)).toEqual(["https://cdn.example/img/ABC.jpg"])
    })
@@ -518,7 +518,7 @@ describe("formatDate", () => {
 })
 
 describe("srcColorIndex", () => {
-   it("is deterministic for a given channel id", () => {
+   it("is deterministic for a given feed id", () => {
       expect(srcColorIndex(3)).toBe(srcColorIndex(3))
    })
 
@@ -530,7 +530,7 @@ describe("srcColorIndex", () => {
       }
    })
 
-   it("gives sequential channel ids distinct colors until the ramp wraps", () => {
+   it("gives sequential feed ids distinct colors until the ramp wraps", () => {
       const slots = Array.from({ length: SRC_COLORS }, (_, id) => srcColorIndex(id))
       expect(new Set(slots).size).toBe(SRC_COLORS)
    })

@@ -105,8 +105,8 @@ func readSearchEntries(t *testing.T, dir, key string, skipBloom bool) []SearchEn
 
 func TestSyncSearchFresh(t *testing.T) {
 	db, c, dir := setupTestDB(t)
-	ch := &Channel{id: 3, URL: "https://example.com/3"}
-	c.Channels = map[int]*Channel{ch.id: ch}
+	ch := &Feed{id: 3, URL: "https://example.com/3"}
+	c.Feeds = map[int]*Feed{ch.id: ch}
 	c.FetchedAt = 1700000000
 	putOneArticle(t, db, ch, 1)
 	putOneArticle(t, db, ch, 2)
@@ -123,8 +123,8 @@ func TestSyncSearchFresh(t *testing.T) {
 		t.Fatalf("latest entries = %d, want 2", len(entries))
 	}
 	want := []SearchEntry{
-		{ChannelID: 3, When: 1000, Title: "A1"},
-		{ChannelID: 3, When: 2000, Title: "A2"},
+		{FeedID: 3, When: 1000, Title: "A1"},
+		{FeedID: 3, When: 2000, Title: "A2"},
 	}
 	for i, e := range entries {
 		if e != want[i] {
@@ -199,8 +199,8 @@ func TestSyncSearchNoopWhenCurrent(t *testing.T) {
 // instead of rebuilding it.
 func TestSyncSearchIncremental(t *testing.T) {
 	db, c, dir := setupTestDB(t)
-	ch := &Channel{id: 1, URL: "https://example.com/1"}
-	c.Channels = map[int]*Channel{ch.id: ch}
+	ch := &Feed{id: 1, URL: "https://example.com/1"}
+	c.Feeds = map[int]*Feed{ch.id: ch}
 	c.FetchedAt = 1700000000
 
 	putOneArticle(t, db, ch, 1)
@@ -226,13 +226,13 @@ func TestSyncSearchIncremental(t *testing.T) {
 // the walk would need proves no read-back happens.
 func TestSyncSearchBatchFastPath(t *testing.T) {
 	db, c, dir := setupTestDB(t)
-	ch := &Channel{id: 3, URL: "https://example.com/3"}
-	c.Channels = map[int]*Channel{ch.id: ch}
+	ch := &Feed{id: 3, URL: "https://example.com/3"}
+	c.Feeds = map[int]*Feed{ch.id: ch}
 	c.FetchedAt = 1700000000
 
 	written, err := db.PutArticles(ctx, []*Item{
-		{Channel: ch, Title: "A1", Content: "C", Published: 1000},
-		{Channel: ch, Title: "A2", Content: "C"},
+		{Feed: ch, Title: "A1", Content: "C", Published: 1000},
+		{Feed: ch, Title: "A2", Content: "C"},
 	})
 	if err != nil {
 		t.Fatalf("PutArticles: %v", err)
@@ -251,8 +251,8 @@ func TestSyncSearchBatchFastPath(t *testing.T) {
 	}
 	entries := readSearchEntries(t, dir, "search/L1.gz", false)
 	want := []SearchEntry{
-		{ChannelID: 3, When: 1000, Title: "A1"},
-		{ChannelID: 3, When: 1700000000, Title: "A2"}, // dateless → fetched_at
+		{FeedID: 3, When: 1000, Title: "A1"},
+		{FeedID: 3, When: 1700000000, Title: "A2"}, // dateless → fetched_at
 	}
 	if len(entries) != 2 || entries[0] != want[0] || entries[1] != want[1] {
 		t.Fatalf("latest = %+v, want %+v", entries, want)
@@ -263,8 +263,8 @@ func TestSyncSearchBatchFastPath(t *testing.T) {
 // back to rebuilding the tail from the data packs.
 func TestSyncSearchRebuildsMissingTail(t *testing.T) {
 	db, c, dir := setupTestDB(t)
-	ch := &Channel{id: 1, URL: "https://example.com/1"}
-	c.Channels = map[int]*Channel{ch.id: ch}
+	ch := &Feed{id: 1, URL: "https://example.com/1"}
+	c.Feeds = map[int]*Feed{ch.id: ch}
 	c.FetchedAt = 1700000000
 
 	putOneArticle(t, db, ch, 1)
@@ -291,8 +291,8 @@ func TestSyncSearchRebuildsMissingTail(t *testing.T) {
 // instead of trusting them.
 func TestSyncSearchInconsistentCoverageRebuilds(t *testing.T) {
 	db, c, dir := setupTestDB(t)
-	ch := &Channel{id: 1, URL: "https://example.com/1"}
-	c.Channels = map[int]*Channel{ch.id: ch}
+	ch := &Feed{id: 1, URL: "https://example.com/1"}
+	c.Feeds = map[int]*Feed{ch.id: ch}
 	c.FetchedAt = 1700000000
 
 	putOneArticle(t, db, ch, 1)

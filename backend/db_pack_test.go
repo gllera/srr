@@ -73,8 +73,8 @@ func TestParseDataPackEmpty(t *testing.T) {
 }
 
 func TestParseDataPackJSONL(t *testing.T) {
-	body := []byte(`{"s":1,"a":100,"p":50,"t":"hello","l":"http://x","c":"body1"}` + "\n" +
-		`{"s":2,"a":200,"c":"body2"}` + "\n")
+	body := []byte(`{"f":1,"a":100,"p":50,"t":"hello","l":"http://x","c":"body1"}` + "\n" +
+		`{"f":2,"a":200,"c":"body2"}` + "\n")
 	entries, err := parseDataPack(body)
 	if err != nil {
 		t.Fatalf("parseDataPack: %v", err)
@@ -82,11 +82,11 @@ func TestParseDataPackJSONL(t *testing.T) {
 	if len(entries) != 2 {
 		t.Fatalf("got %d entries, want 2", len(entries))
 	}
-	if entries[0].ChannelID != 1 || entries[0].FetchedAt != 100 || entries[0].Published != 50 ||
+	if entries[0].FeedID != 1 || entries[0].FetchedAt != 100 || entries[0].Published != 50 ||
 		entries[0].Title != "hello" || entries[0].Link != "http://x" || entries[0].Content != "body1" {
 		t.Errorf("entries[0] = %+v", entries[0])
 	}
-	if entries[1].ChannelID != 2 || entries[1].FetchedAt != 200 || entries[1].Content != "body2" ||
+	if entries[1].FeedID != 2 || entries[1].FetchedAt != 200 || entries[1].Content != "body2" ||
 		entries[1].Published != 0 || entries[1].Title != "" || entries[1].Link != "" {
 		t.Errorf("entries[1] = %+v", entries[1])
 	}
@@ -120,7 +120,7 @@ func TestLatestIdxEntryCount(t *testing.T) {
 }
 
 func TestGzipBestSmallerAndRoundTrips(t *testing.T) {
-	raw := bytes.Repeat([]byte(`{"s":1,"a":100,"t":"hello","c":"body"}`+"\n"), 500)
+	raw := bytes.Repeat([]byte(`{"f":1,"a":100,"t":"hello","c":"body"}`+"\n"), 500)
 	var std bytes.Buffer
 	gz := gzip.NewWriter(&std)
 	if _, err := gz.Write(raw); err != nil {

@@ -43,7 +43,7 @@ needs the Chromium under `~/.cache/puppeteer/` (installed with `puppeteer`).
   answer the child's fetch), `feedServer()` (canned RSS over HTTP), `makeStore()`,
   `inspectValidate()`.
 - `fixtures.ts` — RSS builders; `nItems(count, prefix, pad?, startIdx?)` builds
-  deterministic items — pass a distinct `startIdx` per channel so their published
+  deterministic items — pass a distinct `startIdx` per feed so their published
   ranges are disjoint (keeping global chronIdx order total and assertable; a
   single call spans `pubUnix(startIdx)..pubUnix(startIdx+count-1)`, so default
   calls overlap), and `pad>0` to append **incompressible** content (packs roll on

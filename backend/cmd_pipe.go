@@ -9,7 +9,7 @@ import (
 )
 
 // PipeCmd sets (or prints) the db.gz root pipe — the default pipeline
-// inherited by channels whose Pipe field is nil.
+// inherited by feeds whose Pipe field is nil.
 // No args → print current. "" alone → clear. Otherwise → set.
 // One positional arg per pipeline step (sep:none → never comma-split, so a
 // step may contain commas, e.g. inside a module parameter value).
@@ -23,7 +23,7 @@ func (o *PipeCmd) Run() error {
 			return printJSON(db.core.Pipe)
 		}
 		pipe := filterPipe(o.Pipe)
-		// allowBase=false: #base only means something inside a channel override.
+		// allowBase=false: #base only means something inside a feed override.
 		if err := validatePipe(pipe, false); err != nil {
 			return err
 		}
@@ -36,7 +36,7 @@ func (o *PipeCmd) Run() error {
 // nil when the result is empty so callers can use that as the CLI sentinel for
 // "clear / revert to inherit". Trimming matters: a whitespace-only step (e.g.
 // `-p " "`) would otherwise be stored and later run as an empty `/bin/sh -c`,
-// silently breaking the channel's fetch.
+// silently breaking the feed's fetch.
 func filterPipe(in []string) []string {
 	out := make([]string, 0, len(in))
 	for _, m := range in {
@@ -52,7 +52,7 @@ func filterPipe(in []string) []string {
 
 // validatePipe rejects pipeline steps that would silently break a fetch: an
 // unknown "#"-prefixed token (a typo'd built-in like "#sanitise"). "#base" is
-// valid only inside a channel override (allowBase), never the root pipe.
+// valid only inside a feed override (allowBase), never the root pipe.
 // Known built-ins and shell commands pass. Run after filterPipe.
 func validatePipe(steps []string, allowBase bool) error {
 	for _, s := range steps {
@@ -63,7 +63,7 @@ func validatePipe(steps []string, allowBase bool) error {
 		name := fields[0]
 		if name == pipeBase {
 			if !allowBase {
-				return fmt.Errorf("%q is only valid inside a channel pipe override, not the root pipe", pipeBase)
+				return fmt.Errorf("%q is only valid inside a feed pipe override, not the root pipe", pipeBase)
 			}
 			continue
 		}

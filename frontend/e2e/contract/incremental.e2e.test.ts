@@ -22,7 +22,7 @@ describe("contract: incremental fetch + dedup + seq", () => {
    beforeAll(async () => {
       feeds = await feedServer({ "/a.xml": rssFeed("Alpha", all.slice(0, 3)) }) // items 0,1,2
       store = makeStore()
-      await srr(store, "chan", "add", "-t", "Alpha", "-u", `${feeds.url}/a.xml`)
+      await srr(store, "feed", "add", "-t", "Alpha", "-u", `${feeds.url}/a.xml`)
       await srr(store, "art", "fetch")
 
       const r1 = await mountReader(store)

@@ -8,16 +8,16 @@ declare const process: { env: { NODE_ENV: string } }
 // turn it into a module and un-global every name).
 
 type IArticle = import("./format.gen").IArticleWire
-type IChannelWire = import("./format.gen").IChannelWire
+type IFeedWire = import("./format.gen").IFeedWire
 type IDBWire = import("./format.gen").IDBWire
 
-interface IChannel extends IChannelWire {
-   id: number // populated from the channels object key at init
+interface IFeed extends IFeedWire {
+   id: number // populated from the feeds object key at init
 }
 
-interface IDB extends Omit<IDBWire, "seq" | "channels"> {
+interface IDB extends Omit<IDBWire, "seq" | "feeds"> {
    seq: number // backend omitempty (absent == 0 == empty store); init() normalizes with ??= 0
-   channels: Record<number, IChannel> // init() normalizes null with ??= {} and stamps each value's .id
+   feeds: Record<number, IFeed> // init() normalizes null with ??= {} and stamps each value's .id
 }
 
 interface IShowFeed {
@@ -25,11 +25,11 @@ interface IShowFeed {
    has_right: boolean
    filtered: boolean
    article: IArticle
-   channel: IChannel | undefined
+   feed: IFeed | undefined
    countRight: number
    // True only for the synthetic "(no matching articles)" placeholder. Distinct
-   // from channel === undefined, which a REAL article whose channel was deleted
+   // from feed === undefined, which a REAL article whose feed was deleted
    // (the [DELETED] tombstone) also has — the reader's save toggle keys off this
-   // so it stays enabled for a saved deleted-channel article.
+   // so it stays enabled for a saved deleted-feed article.
    placeholder?: boolean
 }

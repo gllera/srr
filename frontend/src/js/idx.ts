@@ -3,8 +3,8 @@ import { DELTA_FETCHED_MAX, IDX_ENTRY_SIZE, IDX_HEADER_PREFIX, IDX_PACK_SIZE } f
 export { IDX_PACK_SIZE }
 
 // The decoded idx pack header: state bases, the numSlots count, plus the
-// cumulative per-channel counts of everything BEFORE the pack. The count array
-// is variable-length — dense up to the high-water channel id when the pack was
+// cumulative per-feed counts of everything BEFORE the pack. The count array
+// is variable-length — dense up to the high-water feed id when the pack was
 // written (numSlots entries). Available for every pack without entry parsing —
 // from the pack's own bytes at construction, or from the idx/h<N>.gz summary
 // for packs not yet fetched.
@@ -13,11 +13,11 @@ export interface IdxHeader {
    packIdBase: number
    packOffBase: number
    numSlots: number
-   chanCounts: Uint32Array
+   feedCounts: Uint32Array
 }
 
-// chanCounts/ownChanCounts are sized to the pack's numSlots (dense up to the
-// high-water id when the pack was written). A channel added later is absent
+// feedCounts/ownFeedCounts are sized to the pack's numSlots (dense up to the
+// high-water id when the pack was written). A feed added later is absent
 // → its count is 0.
 export function countAt(arr: Uint32Array, id: number): number {
    return id < arr.length ? arr[id] : 0
@@ -25,14 +25,14 @@ export function countAt(arr: Uint32Array, id: number): number {
 
 export interface IdxPack {
    header: IdxHeader
-   chanIds: Uint16Array
+   feedIds: Uint16Array
    fetchedAts: Uint16Array
-   ownChanCounts: Uint32Array
+   ownFeedCounts: Uint32Array
    bounds: { packId: number; startChron: number }[]
    parse(): IdxPack
-   countLeft(chronIdx: number, channels: Map<number, number>, lookup: Int32Array): number
-   findLeft(chronFrom: number, channels: Map<number, number>, lookup: Int32Array): number
-   findRight(chronFrom: number, channels: Map<number, number>, lookup: Int32Array): number
+   countLeft(chronIdx: number, feeds: Map<number, number>, lookup: Int32Array): number
+   findLeft(chronFrom: number, feeds: Map<number, number>, lookup: Int32Array): number
+   findRight(chronFrom: number, feeds: Map<number, number>, lookup: Int32Array): number
    findChronForBlocks(tsBlocks: number): number
 }
 
@@ -46,7 +46,7 @@ function parseIdxHeader(buf: ArrayBuffer, byteOff: number): IdxHeader {
       numSlots,
       // Copy out so the source buffer can be GC'd independently. The count
       // array is variable-length (numSlots entries).
-      chanCounts: new Uint32Array(new Uint32Array(buf, byteOff + IDX_HEADER_PREFIX, numSlots)),
+      feedCounts: new Uint32Array(new Uint32Array(buf, byteOff + IDX_HEADER_PREFIX, numSlots)),
    }
 }
 
@@ -99,13 +99,13 @@ export function findPackForBlocks(headers: IdxHeader[], tsBlocks: number): numbe
 // A `slots`-entry typed array beats Map.get in the hot scan loops: no hashing,
 // predictable cache locality, and the JIT can keep the loaded value in a
 // register. -1 sentinel = "not in filter". `slots` is the store high-water+1
-// (threaded from data.ts), so it is sized to the actual channel count rather
+// (threaded from data.ts), so it is sized to the actual feed count rather
 // than the format ceiling. data.ts builds it once per nav call and threads it
 // into the per-pack scans (countLeft/findLeft/findRight), so a multi-pack walk
 // reuses one allocation instead of rebuilding it per pack touched.
-export function makeChannelsLookup(channels: Map<number, number>, slots: number): Int32Array {
+export function makeFeedsLookup(feeds: Map<number, number>, slots: number): Int32Array {
    const arr = new Int32Array(slots).fill(-1)
-   for (const [chanId, addIdx] of channels) arr[chanId] = addIdx
+   for (const [feedId, addIdx] of feeds) arr[feedId] = addIdx
    return arr
 }
 
@@ -115,7 +115,7 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
    const header = parseIdxHeader(buf, 0)
    const headerEnd = IDX_HEADER_PREFIX + header.numSlots * 4
    // Refuse a short body so the caller can evict + retry. Silently parsing
-   // fewer bytes than packSize claims leaves the chanIds tail at default 0,
+   // fewer bytes than packSize claims leaves the feedIds tail at default 0,
    // which findRight skips while showFeed still counts those slots.
    const expected = headerEnd + packSize * IDX_ENTRY_SIZE
    if (buf.byteLength < expected) {
@@ -123,9 +123,9 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
    }
    let rawBuf: ArrayBuffer | null = buf
    const baseChron = packIndex * IDX_PACK_SIZE
-   function hasCandidate(channels: Map<number, number>, packEnd: number): boolean {
-      for (const [chanId, addIdx] of channels) {
-         if (countAt(pack.ownChanCounts, chanId) > 0 && addIdx < packEnd) return true
+   function hasCandidate(feeds: Map<number, number>, packEnd: number): boolean {
+      for (const [feedId, addIdx] of feeds) {
+         if (countAt(pack.ownFeedCounts, feedId) > 0 && addIdx < packEnd) return true
       }
       return false
    }
@@ -133,8 +133,8 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
       // Decoded eagerly: header-only consumers (countLeft cumulative counts,
       // pack-skip deltas, timestamp bases) must not force the entry parse.
       header,
-      chanIds: new Uint16Array(0),
-      ownChanCounts: new Uint32Array(0),
+      feedIds: new Uint16Array(0),
+      ownFeedCounts: new Uint32Array(0),
       fetchedAts: new Uint16Array(0),
       bounds: [],
       parse() {
@@ -142,10 +142,10 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
          let fetchedAt = pack.header.fetchedAtBase
          let packId = pack.header.packIdBase
          const packOff = pack.header.packOffBase
-         // Sized to the store high-water (slots), so ownChanCount(id) reads 0
+         // Sized to the store high-water (slots), so ownFeedCount(id) reads 0
          // for an id beyond it. countAt guards the rare out-of-range read.
-         const ownChanCounts = new Uint32Array(slots)
-         pack.ownChanCounts = ownChanCounts
+         const ownFeedCounts = new Uint32Array(slots)
+         pack.ownFeedCounts = ownFeedCounts
 
          let lastPackId: number
          if (packOff > 0) {
@@ -155,28 +155,28 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
             lastPackId = -1
          }
 
-         const chanIds = new Uint16Array(packSize)
+         const feedIds = new Uint16Array(packSize)
          // fetchedAt is 8h-blocks since first_fetched. Uint16 caps at 65535
          // blocks ≈ 60y of calendar time from the first fetch — far past any
          // real horizon, so the wrap it would eventually cause is acceptable.
          const fetchedAts = new Uint16Array(packSize)
-         pack.chanIds = chanIds
+         pack.feedIds = feedIds
          pack.fetchedAts = fetchedAts
          const bytes = new Uint8Array(rawBuf)
          // Cap at packSize so an oversized body (e.g. stale SW cache with
          // entries from a newer total_art than db.gz claims) can't push ghost
-         // rows into ownChanCounts/bounds and skew countLeft/findLeft/Right.
+         // rows into ownFeedCounts/bounds and skew countLeft/findLeft/Right.
          const limit = headerEnd + packSize * IDX_ENTRY_SIZE
          for (let off = headerEnd; off < limit; off += IDX_ENTRY_SIZE) {
-            const chanId = bytes[off] | (bytes[off + 1] << 8)
+            const feedId = bytes[off] | (bytes[off + 1] << 8)
             const packed = bytes[off + 2]
             if (packed >> 7) packId++
             fetchedAt += packed & DELTA_FETCHED_MAX
 
             const i = (off - headerEnd) / IDX_ENTRY_SIZE
-            chanIds[i] = chanId
+            feedIds[i] = feedId
             fetchedAts[i] = fetchedAt
-            if (chanId < slots) ownChanCounts[chanId]++
+            if (feedId < slots) ownFeedCounts[feedId]++
             if (packId !== lastPackId) {
                pack.bounds.push({ packId, startChron: baseChron + i })
                lastPackId = packId
@@ -185,41 +185,41 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
          rawBuf = null
          return pack
       },
-      countLeft(chronIdx: number, channels: Map<number, number>, lookup: Int32Array): number {
+      countLeft(chronIdx: number, feeds: Map<number, number>, lookup: Int32Array): number {
          pack.parse()
          let count = 0
-         for (const [chanId, addIdx] of channels) {
-            if (addIdx < baseChron) count += countAt(pack.header.chanCounts, chanId)
+         for (const [feedId, addIdx] of feeds) {
+            if (addIdx < baseChron) count += countAt(pack.header.feedCounts, feedId)
          }
          const limit = Math.min(chronIdx - baseChron, packSize)
          if (limit <= 0) return count
-         const chanIds = pack.chanIds
+         const feedIds = pack.feedIds
          for (let i = 0; i < limit; i++) {
-            const addIdx = lookup[chanIds[i]]
+            const addIdx = lookup[feedIds[i]]
             if (addIdx !== -1 && baseChron + i >= addIdx) count++
          }
          return count
       },
-      findLeft(chronFrom: number, channels: Map<number, number>, lookup: Int32Array): number {
+      findLeft(chronFrom: number, feeds: Map<number, number>, lookup: Int32Array): number {
          pack.parse()
          const packEnd = baseChron + packSize
-         if (!hasCandidate(channels, packEnd)) return -1
-         const chanIds = pack.chanIds
+         if (!hasCandidate(feeds, packEnd)) return -1
+         const feedIds = pack.feedIds
          const hi = Math.min(chronFrom, packEnd - 1) - baseChron
          for (let i = hi; i >= 0; i--) {
-            const addIdx = lookup[chanIds[i]]
+            const addIdx = lookup[feedIds[i]]
             if (addIdx !== -1 && baseChron + i >= addIdx) return baseChron + i
          }
          return -1
       },
-      findRight(chronFrom: number, channels: Map<number, number>, lookup: Int32Array): number {
+      findRight(chronFrom: number, feeds: Map<number, number>, lookup: Int32Array): number {
          pack.parse()
          const packEnd = baseChron + packSize
-         if (!hasCandidate(channels, packEnd)) return -1
-         const chanIds = pack.chanIds
+         if (!hasCandidate(feeds, packEnd)) return -1
+         const feedIds = pack.feedIds
          const lo = Math.max(chronFrom, baseChron) - baseChron
          for (let i = lo; i < packSize; i++) {
-            const addIdx = lookup[chanIds[i]]
+            const addIdx = lookup[feedIds[i]]
             if (addIdx !== -1 && baseChron + i >= addIdx) return baseChron + i
          }
          return -1

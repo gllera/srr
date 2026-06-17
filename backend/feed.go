@@ -12,7 +12,7 @@ import (
 	"srrb/mod"
 )
 
-// maxBoundaryGUIDs caps the persisted per-channel BoundaryGUIDs array. Real
+// maxBoundaryGUIDs caps the persisted per-feed BoundaryGUIDs array. Real
 // publishers expose at most a few hundred items per response; without a cap,
 // one misbehaving feed (thousands of dateless or same-second items) bloats
 // db.gz — the one no-cache object every reader polls — permanently. See the
@@ -20,7 +20,7 @@ import (
 const maxBoundaryGUIDs = 1024
 
 // pipeBase is the token expanded inline to the root pipe at the
-// position where it appears in a channel's Pipe slice.
+// position where it appears in a feed's Pipe slice.
 const pipeBase = "#base"
 
 // resolvePipe composes the effective pipeline by expanding "#base"
@@ -41,7 +41,7 @@ func resolvePipe(root, chPipe []string) []string {
 	return out
 }
 
-type Channel struct {
+type Feed struct {
 	id           int
 	Title        string `json:"title"`
 	URL          string `json:"url"`
@@ -54,13 +54,13 @@ type Channel struct {
 	// Repopulated each non-empty fetch from the current response so its size
 	// stays bounded by what the publisher currently exposes, and hard-capped
 	// at maxBoundaryGUIDs (over-cap items are skipped, not ingested); a 200 OK
-	// with zero items leaves the field untouched so a transient empty channel
+	// with zero items leaves the field untouched so a transient empty feed
 	// doesn't drop dedup state.
 	BoundaryGUIDs []uint32 `json:"bg,omitempty"`
 	FetchError    string   `json:"ferr,omitempty"`
 	Tag           string   `json:"tag,omitempty"`
 	Pipe          []string `json:"pipe,omitempty"`
-	// Ingest is the channel-level extraction strategy. Empty falls through
+	// Ingest is the feed-level extraction strategy. Empty falls through
 	// to the db.gz root Ingest → built-in "#rss".
 	Ingest   string `json:"ingest,omitempty"`
 	TotalArt int    `json:"total_art"`
@@ -68,14 +68,14 @@ type Channel struct {
 	newItems []*Item
 }
 
-func (c *Channel) LogValue() slog.Value {
+func (c *Feed) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.Int("id", c.id),
 		slog.String("title", c.Title),
 	)
 }
 
-// fetchRun bundles the run-scoped dependencies shared by every channel in a
+// fetchRun bundles the run-scoped dependencies shared by every feed in a
 // single fetch: built once in FetchCmd.fetch and concurrent-safe, so one
 // *fetchRun is shared across all workers. The genuinely per-worker values (the
 // pooled read buffer and module processor) stay separate call parameters.
@@ -85,7 +85,7 @@ type fetchRun struct {
 	// assets is the content-addressed uploader for files a fetcher self-hosts
 	// into cacheDir; fetchURL's end-of-pipeline step calls UploadCacheRef on it.
 	assets *assetFetcher
-	// cacheDir is the single download/working dir shared by every channel this
+	// cacheDir is the single download/working dir shared by every feed this
 	// run, built once in FetchCmd.fetch (always non-empty). Any fetcher (built-in
 	// or external) may stash files here and self-host them, owning the layout
 	// inside.
@@ -95,7 +95,7 @@ type fetchRun struct {
 	rootIngest string
 }
 
-func (c *Channel) Fetch(ctx context.Context, run *fetchRun, buf []byte, processor *mod.Module) {
+func (c *Feed) Fetch(ctx context.Context, run *fetchRun, buf []byte, processor *mod.Module) {
 	c.newItems = c.newItems[:0]
 	pipe := resolvePipe(run.rootPipe, c.Pipe)
 	// Validate the resolved pipeline once, before the item loop. A bad token
@@ -104,7 +104,7 @@ func (c *Channel) Fetch(ctx context.Context, run *fetchRun, buf []byte, processo
 	// letting fetchURL skip every item one by one.
 	if err := processor.Validate(ctx, pipe); err != nil {
 		err = fmt.Errorf("invalid pipeline %v: %w", pipe, err)
-		slog.Error("channel pipeline invalid; skipping fetch", "channel", c, "err", err)
+		slog.Error("feed pipeline invalid; skipping fetch", "feed", c, "err", err)
 		c.FetchError = err.Error()
 		return
 	}
@@ -112,19 +112,19 @@ func (c *Channel) Fetch(ctx context.Context, run *fetchRun, buf []byte, processo
 	items, err := c.fetchURL(ctx, run, buf, processor, pipe, ingestName)
 	if err != nil {
 		c.FetchError = err.Error()
-		slog.Error("channel fetch failed", "channel", c, "url", c.URL, "err", err)
+		slog.Error("feed fetch failed", "feed", c, "url", c.URL, "err", err)
 		return
 	}
 	c.FetchError = ""
 	c.newItems = append(c.newItems, items...)
 }
 
-// fetchURL routes the channel's single URL through the selected FetchFunc so
+// fetchURL routes the feed's single URL through the selected FetchFunc so
 // the dedup / watermark / pipeline path stays uniform across the built-in
 // (#rss) and external ingest strategies. ingestName is resolved once by
-// Channel.Fetch before this is called.
-func (c *Channel) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processor *mod.Module, pipeline []string, ingestName string) ([]*Item, error) {
-	slog.Debug("downloading feed", "url", c.URL, "channel", c)
+// Feed.Fetch before this is called.
+func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processor *mod.Module, pipeline []string, ingestName string) ([]*Item, error) {
+	slog.Debug("downloading feed", "url", c.URL, "feed", c)
 
 	// Every fetcher gets the run's shared cache dir as its working directory
 	// (Request.AssetDir, always non-empty here — created in FetchCmd.fetch) and
@@ -146,7 +146,7 @@ func (c *Channel) fetchURL(ctx context.Context, run *fetchRun, buf []byte, proce
 		return nil, nil
 	}
 
-	// A 200 OK with zero items (e.g. transient empty channel) advances
+	// A 200 OK with zero items (e.g. transient empty feed) advances
 	// the HTTP cache headers but leaves Watermark/BoundaryGUIDs untouched,
 	// so prior items still dedup when the feed recovers.
 	if len(result.Items) == 0 {
@@ -177,7 +177,7 @@ func (c *Channel) fetchURL(ctx context.Context, run *fetchRun, buf []byte, proce
 		// An external ingest strategy returns items as a JSON array; a null
 		// element decodes to a nil *mod.RawItem. Skip it before any field access
 		// — otherwise i.GUID below panics, and (with no recover in the worker)
-		// crashes the whole fetch process, taking every channel down with it.
+		// crashes the whole fetch process, taking every feed down with it.
 		if i == nil {
 			continue
 		}
@@ -256,9 +256,9 @@ func (c *Channel) fetchURL(ctx context.Context, run *fetchRun, buf []byte, proce
 		}
 
 		if err := processItem(ctx, processor, pipeline, i); err != nil {
-			// One bad item must not discard the whole channel's batch. Config
+			// One bad item must not discard the whole feed's batch. Config
 			// errors (unknown pipe token / bad params) are caught up front by
-			// Module.Validate in Channel.Fetch, so an error here is a per-item
+			// Module.Validate in Feed.Fetch, so an error here is a per-item
 			// runtime failure: skip just this item. It stays recorded in
 			// boundary, so it is not retried next fetch.
 			slog.Warn("dropping item: pipeline error", "url", c.URL, "link", i.Link, "err", err)
@@ -273,12 +273,12 @@ func (c *Channel) fetchURL(ctx context.Context, run *fetchRun, buf []byte, proce
 		// ordinary in-page fragment (#section), left as-is.
 		//
 		// A failed upload (store error, or an UploadCacheRef guard tripping on
-		// oversize/traversal) hard-fails the whole channel fetch rather than
+		// oversize/traversal) hard-fails the whole feed fetch rather than
 		// publish an item still pointing at "#/..." for an asset that never
-		// reached the store. Channel state (watermark, dedup, etag) is left
+		// reached the store. Feed state (watermark, dedup, etag) is left
 		// untouched on the error path, so a transient store failure self-heals
 		// next fetch; a permanently-rejected asset (e.g. over SRR_MAX_MEDIA_SIZE)
-		// wedges the channel until it is fixed.
+		// wedges the feed until it is fixed.
 		//
 		// RewriteAttrs handles the marker convention: it skips content with no
 		// marker-shaped attribute (the common case, as built-in #rss feeds never
@@ -292,8 +292,8 @@ func (c *Channel) fetchURL(ctx context.Context, run *fetchRun, buf []byte, proce
 				// Not a real upload marker: a bare fragment (#section → "section")
 				// names no file in the cache dir, and a value escaping the dir
 				// (e.g. "#../secret", attacker-influenced content) must be declined
-				// rather than wedge the channel permanently. Genuine in-cache upload
-				// failures (oversize, store error) still fail the channel below.
+				// rather than wedge the feed permanently. Genuine in-cache upload
+				// failures (oversize, store error) still fail the feed below.
 				return "", false, nil
 			default:
 				return "", false, fmt.Errorf("self-host asset %q: %w", local, err)
@@ -303,7 +303,7 @@ func (c *Channel) fetchURL(ctx context.Context, run *fetchRun, buf []byte, proce
 			return nil, err
 		}
 		items = append(items, &Item{
-			Channel:   c,
+			Feed:      c,
 			Title:     i.Title,
 			Content:   i.Content,
 			Link:      i.Link,

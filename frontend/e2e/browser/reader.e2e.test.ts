@@ -98,9 +98,9 @@ describe("browser: real SPA over real packs", () => {
       })
       // Write packs straight into the served pack dir (cleared first).
       for (const f of readdirSync(packsDir)) rmSync(join(packsDir, f), { recursive: true, force: true })
-      await srr(packsDir, "chan", "add", "-t", "News", "-g", "world", "-u", `${feeds.url}/news.xml`)
-      await srr(packsDir, "chan", "add", "-t", "Tech", "-g", "world", "-u", `${feeds.url}/tech.xml`)
-      await srr(packsDir, "chan", "add", "-t", "Sport", "-g", "play", "-u", `${feeds.url}/sport.xml`)
+      await srr(packsDir, "feed", "add", "-t", "News", "-g", "world", "-u", `${feeds.url}/news.xml`)
+      await srr(packsDir, "feed", "add", "-t", "Tech", "-g", "world", "-u", `${feeds.url}/tech.xml`)
+      await srr(packsDir, "feed", "add", "-t", "Sport", "-g", "play", "-u", `${feeds.url}/sport.xml`)
       await srr(packsDir, "art", "fetch")
 
       browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox", "--disable-dev-shm-usage"] })
@@ -316,7 +316,7 @@ describe("browser: real SPA over real packs", () => {
       }
    })
 
-   // A tag/channel with no navigation information (never opened on this device)
+   // A tag/feed with no navigation information (never opened on this device)
    // opens the list at its OLDEST article, not the newest — the start of the
    // backlog, with the unread/newer rows above it. The oldest row has nothing
    // below it, so anchoring there scrolls the list DOWN (scrollY > 0) and pushes
@@ -330,9 +330,9 @@ describe("browser: real SPA over real packs", () => {
          expect(await page.evaluate(() => window.scrollY)).toBe(0) // boot [ALL] sits at the newest
 
          // Pick the never-read "world" tag (News + Tech) from a fresh boot.
-         await page.click(".srr-channel")
-         await page.waitForSelector('#srr-channel-menu.srr-open a[data-value="world"]', { timeout: 20000 })
-         await page.click('#srr-channel-menu a[data-value="world"]')
+         await page.click(".srr-feed")
+         await page.waitForSelector('#srr-feed-menu.srr-open a[data-value="world"]', { timeout: 20000 })
+         await page.click('#srr-feed-menu a[data-value="world"]')
          await waitList(page)
          expect(await page.evaluate(() => location.hash)).toBe("#!world")
 
@@ -481,7 +481,7 @@ describe("browser: real SPA over real packs", () => {
    })
 
    // Saved articles: the reader's ★ toggle adds the current article to the
-   // device-local srr-saved set; "★ Saved" in the channel menu is a distinct
+   // device-local srr-saved set; "★ Saved" in the feed menu is a distinct
    // filter view that shows exactly that set, and it survives a reload (the set
    // lives in localStorage, the #!~saved hash re-enters the view).
    it("saves an article, lists it under ★ Saved, and persists across reload", async () => {
@@ -498,12 +498,12 @@ describe("browser: real SPA over real packs", () => {
          })
          expect(await page.$eval(".srr-save", (e) => e.getAttribute("aria-pressed"))).toBe("true")
 
-         // Back to the list → channel menu → pick "★ Saved".
+         // Back to the list → feed menu → pick "★ Saved".
          await page.click(".srr-back")
          await waitList(page)
-         await page.click(".srr-channel")
-         await page.waitForSelector('#srr-channel-menu.srr-open a[data-value="~saved"]', { timeout: 20000 })
-         await page.click('#srr-channel-menu a[data-value="~saved"]')
+         await page.click(".srr-feed")
+         await page.waitForSelector('#srr-feed-menu.srr-open a[data-value="~saved"]', { timeout: 20000 })
+         await page.click('#srr-feed-menu a[data-value="~saved"]')
          await waitList(page)
          await page.waitForFunction(() => document.querySelectorAll(".srr-list a.srr-row").length === 1, {
             timeout: 20000,
@@ -691,12 +691,12 @@ describe("browser: real SPA over real packs", () => {
    // `srr gen --bump` the fresh bytes win. Runs LAST: it replaces the shared store.
    it("purges stale finalized packs when db.gz gen changes", async () => {
       // Wipe the served store and write a fresh one with the same shape (one
-      // channel, same item count/order → chron 0 is always data pack 1, offset 0)
+      // feed, same item count/order → chron 0 is always data pack 1, offset 0)
       // but different content. -s 1 + incompressible filler → finalized packs.
       const rebuild = async (prefix: string) => {
          for (const f of readdirSync(packsDir)) rmSync(join(packsDir, f), { recursive: true, force: true })
          feeds.set("/bulk.xml", rssFeed("Bulk", nItems(30, prefix, 8000)))
-         await srr(packsDir, "chan", "add", "-t", "Bulk", "-u", `${feeds.url}/bulk.xml`)
+         await srr(packsDir, "feed", "add", "-t", "Bulk", "-u", `${feeds.url}/bulk.xml`)
          await srr(packsDir, "-s", "1", "art", "fetch")
       }
 

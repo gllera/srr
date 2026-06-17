@@ -214,7 +214,7 @@ func Builtins() []string {
 }
 
 // Validate checks an already-resolved pipeline before the per-item fetch loop,
-// so a misconfigured pipe fails loudly (a channel-level error) instead of
+// so a misconfigured pipe fails loudly (a feed-level error) instead of
 // silently dropping every item. For each step: an empty step or an unknown
 // "#"-prefixed token (incl. a stray "#base" or "#base key=val") is rejected; a
 // known built-in is run once against a throwaway item to surface parameter

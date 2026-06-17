@@ -1,20 +1,13 @@
 import { describe, it, expect } from "vitest"
 import { IDX_ENTRY_SIZE, IDX_HEADER_PREFIX, IDX_STATE_SIZE } from "./format.gen"
-import {
-   findPackForBlocks,
-   IDX_PACK_SIZE,
-   makeChannelsLookup,
-   makeIdxPack,
-   parseIdxHeaders,
-   type IdxHeader,
-} from "./idx"
+import { findPackForBlocks, IDX_PACK_SIZE, makeFeedsLookup, makeIdxPack, parseIdxHeaders, type IdxHeader } from "./idx"
 
 // The scan methods take the prebuilt reverse lookup data.ts hoists once per nav
-// call; tests build it from the same channels Map at SLOTS width.
-const lk = (channels: Map<number, number>): Int32Array => makeChannelsLookup(channels, SLOTS)
+// call; tests build it from the same feeds Map at SLOTS width.
+const lk = (feeds: Map<number, number>): Int32Array => makeFeedsLookup(feeds, SLOTS)
 
 interface Entry {
-   chanId: number
+   feedId: number
    deltaPackId: 0 | 1
    deltaFetchedAt: number
 }
@@ -23,21 +16,21 @@ interface PackOpts {
    fetchedAtBase?: number
    packIdBase?: number
    packOffBase?: number
-   chanCounts?: Record<number, number>
-   // numSlots override; defaults to (high-water chanCount id) + 1.
+   feedCounts?: Record<number, number>
+   // numSlots override; defaults to (high-water feedCount id) + 1.
    numSlots?: number
    entries: Entry[]
 }
 
-// SLOTS is the per-pack channel lookup size passed to makeIdxPack: the store
+// SLOTS is the per-pack feed lookup size passed to makeIdxPack: the store
 // high-water + 1 in production. Tests use a fixed generous value.
 const SLOTS = 256
 
 // numSlots a built header carries: explicit override, else dense up to the
-// highest chanCount key (+1), else 0.
-function headerSlots(o: Pick<PackOpts, "chanCounts" | "numSlots">): number {
+// highest feedCount key (+1), else 0.
+function headerSlots(o: Pick<PackOpts, "feedCounts" | "numSlots">): number {
    if (o.numSlots !== undefined) return o.numSlots
-   const keys = Object.keys(o.chanCounts ?? {}).map(Number)
+   const keys = Object.keys(o.feedCounts ?? {}).map(Number)
    return keys.length > 0 ? Math.max(...keys) + 1 : 0
 }
 
@@ -50,22 +43,22 @@ function buildBuf(o: PackOpts): ArrayBuffer {
    view.setUint32(4, o.packIdBase ?? 0, true)
    view.setUint32(8, o.packOffBase ?? 0, true)
    view.setUint32(IDX_STATE_SIZE, numSlots, true)
-   for (const [k, v] of Object.entries(o.chanCounts ?? {})) {
+   for (const [k, v] of Object.entries(o.feedCounts ?? {})) {
       view.setUint32(IDX_HEADER_PREFIX + Number(k) * 4, v, true)
    }
    const bytes = new Uint8Array(buf)
    for (let i = 0; i < o.entries.length; i++) {
       const e = o.entries[i]
       const off = headerSize + i * IDX_ENTRY_SIZE
-      bytes[off] = e.chanId & 0xff
-      bytes[off + 1] = (e.chanId >> 8) & 0xff
+      bytes[off] = e.feedId & 0xff
+      bytes[off + 1] = (e.feedId >> 8) & 0xff
       bytes[off + 2] = (e.deltaPackId << 7) | (e.deltaFetchedAt & 0x7f)
    }
    return buf
 }
 
-const e = (chanId: number, deltaPackId: 0 | 1 = 0, deltaFetchedAt = 0): Entry => ({
-   chanId,
+const e = (feedId: number, deltaPackId: 0 | 1 = 0, deltaFetchedAt = 0): Entry => ({
+   feedId,
    deltaPackId,
    deltaFetchedAt,
 })
@@ -77,22 +70,22 @@ describe("IDX_PACK_SIZE", () => {
 })
 
 describe("makeIdxPack.parse", () => {
-   it("decodes chanIds in order", () => {
+   it("decodes feedIds in order", () => {
       const buf = buildBuf({ entries: [e(1), e(2), e(3)] })
       const pack = makeIdxPack(buf, 0, 3, SLOTS).parse()
-      expect(Array.from(pack.chanIds)).toEqual([1, 2, 3])
+      expect(Array.from(pack.feedIds)).toEqual([1, 2, 3])
    })
 
-   it("decodes u16 chan_ids beyond the old 255 ceiling", () => {
-      // The widen: a chan_id is a little-endian uint16, so ids 256..65535 must
-      // round-trip and count into ownChanCounts at their full value (the
+   it("decodes u16 feed_ids beyond the old 255 ceiling", () => {
+      // The widen: a feed_id is a little-endian uint16, so ids 256..65535 must
+      // round-trip and count into ownFeedCounts at their full value (the
       // lookup arrays are sized to the store high-water, here 65536).
       const wide = 65536
       const buf = buildBuf({ numSlots: 1000, entries: [e(300), e(65535), e(300)] })
       const pack = makeIdxPack(buf, 0, 3, wide).parse()
-      expect(Array.from(pack.chanIds)).toEqual([300, 65535, 300])
-      expect(pack.ownChanCounts[300]).toBe(2)
-      expect(pack.ownChanCounts[65535]).toBe(1)
+      expect(Array.from(pack.feedIds)).toEqual([300, 65535, 300])
+      expect(pack.ownFeedCounts[300]).toBe(2)
+      expect(pack.ownFeedCounts[65535]).toBe(1)
    })
 
    it("accumulates fetchedAt from header base plus deltas", () => {
@@ -122,26 +115,26 @@ describe("makeIdxPack.parse", () => {
       expect(pack.fetchedAts[0]).toBe(60005)
    })
 
-   it("populates ownChanCounts from entries", () => {
+   it("populates ownFeedCounts from entries", () => {
       const buf = buildBuf({ entries: [e(1), e(2), e(1), e(1), e(3)] })
       const pack = makeIdxPack(buf, 0, 5, SLOTS).parse()
-      expect(pack.ownChanCounts[1]).toBe(3)
-      expect(pack.ownChanCounts[2]).toBe(1)
-      expect(pack.ownChanCounts[3]).toBe(1)
-      expect(pack.ownChanCounts[0]).toBe(0)
-      expect(pack.ownChanCounts[42]).toBe(0)
+      expect(pack.ownFeedCounts[1]).toBe(3)
+      expect(pack.ownFeedCounts[2]).toBe(1)
+      expect(pack.ownFeedCounts[3]).toBe(1)
+      expect(pack.ownFeedCounts[0]).toBe(0)
+      expect(pack.ownFeedCounts[42]).toBe(0)
    })
 
-   it("copies chanCounts header verbatim", () => {
+   it("copies feedCounts header verbatim", () => {
       const buf = buildBuf({
-         chanCounts: { 1: 100, 2: 50, 255: 7 },
+         feedCounts: { 1: 100, 2: 50, 255: 7 },
          entries: [],
       })
       const pack = makeIdxPack(buf, 0, 0, SLOTS).parse()
-      expect(pack.header.chanCounts[0]).toBe(0)
-      expect(pack.header.chanCounts[1]).toBe(100)
-      expect(pack.header.chanCounts[2]).toBe(50)
-      expect(pack.header.chanCounts[255]).toBe(7)
+      expect(pack.header.feedCounts[0]).toBe(0)
+      expect(pack.header.feedCounts[1]).toBe(100)
+      expect(pack.header.feedCounts[2]).toBe(50)
+      expect(pack.header.feedCounts[255]).toBe(7)
    })
 
    it("exposes the full header before parse() is called", () => {
@@ -149,16 +142,16 @@ describe("makeIdxPack.parse", () => {
          fetchedAtBase: 42,
          packIdBase: 7,
          packOffBase: 3,
-         chanCounts: { 5: 11 },
+         feedCounts: { 5: 11 },
          entries: [e(1, 1, 2)],
       })
       const pack = makeIdxPack(buf, 0, 1, SLOTS)
       expect(pack.header.fetchedAtBase).toBe(42)
       expect(pack.header.packIdBase).toBe(7)
       expect(pack.header.packOffBase).toBe(3)
-      expect(pack.header.chanCounts[5]).toBe(11)
+      expect(pack.header.feedCounts[5]).toBe(11)
       // Entry-derived state must still be untouched (parse not forced).
-      expect(pack.chanIds.length).toBe(0)
+      expect(pack.feedIds.length).toBe(0)
       expect(pack.bounds.length).toBe(0)
    })
 
@@ -168,7 +161,7 @@ describe("makeIdxPack.parse", () => {
       const a = pack.parse()
       const b = pack.parse()
       expect(a).toBe(b)
-      expect(Array.from(a.chanIds)).toEqual([1, 2])
+      expect(Array.from(a.feedIds)).toEqual([1, 2])
    })
 
    it("uses packIndex to compute baseChron in bounds", () => {
@@ -206,10 +199,10 @@ describe("makeIdxPack.parse", () => {
 
    it("ignores trailing entries past packSize (a stale SW cache may hold a longer body)", () => {
       // The body carries 5 entries but db.gz says this pack holds 3 — parsing
-      // must stop at packSize so the ghost rows don't skew chanIds/bounds/counts.
+      // must stop at packSize so the ghost rows don't skew feedIds/bounds/counts.
       const buf = buildBuf({ entries: [e(1), e(2), e(3), e(4), e(5)] })
       const pack = makeIdxPack(buf, 0, 3, SLOTS).parse()
-      expect(Array.from(pack.chanIds)).toEqual([1, 2, 3])
+      expect(Array.from(pack.feedIds)).toEqual([1, 2, 3])
    })
 })
 
@@ -218,30 +211,30 @@ describe("makeIdxPack.findLeft", () => {
 
    it("returns the rightmost match scanning leftward from chronFrom", () => {
       const pack = buildPack()
-      const channels = new Map([[1, 0]])
-      expect(pack.findLeft(4, channels, lk(channels))).toBe(4)
-      expect(pack.findLeft(3, channels, lk(channels))).toBe(2)
-      expect(pack.findLeft(1, channels, lk(channels))).toBe(0)
+      const feeds = new Map([[1, 0]])
+      expect(pack.findLeft(4, feeds, lk(feeds))).toBe(4)
+      expect(pack.findLeft(3, feeds, lk(feeds))).toBe(2)
+      expect(pack.findLeft(1, feeds, lk(feeds))).toBe(0)
    })
 
    it("respects sub addIdx (entries before addIdx don't match)", () => {
       const pack = buildPack()
-      const channels = new Map([[1, 3]])
-      expect(pack.findLeft(4, channels, lk(channels))).toBe(4)
-      expect(pack.findLeft(2, channels, lk(channels))).toBe(-1)
+      const feeds = new Map([[1, 3]])
+      expect(pack.findLeft(4, feeds, lk(feeds))).toBe(4)
+      expect(pack.findLeft(2, feeds, lk(feeds))).toBe(-1)
    })
 
    it("returns -1 when no sub matches", () => {
       const pack = buildPack()
-      const channels = new Map([[99, 0]])
-      expect(pack.findLeft(4, channels, lk(channels))).toBe(-1)
+      const feeds = new Map([[99, 0]])
+      expect(pack.findLeft(4, feeds, lk(feeds))).toBe(-1)
    })
 
    it("returns -1 when chronFrom < baseChron", () => {
       const buf = buildBuf({ entries: [e(1)] })
       const pack = makeIdxPack(buf, 1, 1, SLOTS)
-      const channels = new Map([[1, 0]])
-      expect(pack.findLeft(IDX_PACK_SIZE - 1, channels, lk(channels))).toBe(-1)
+      const feeds = new Map([[1, 0]])
+      expect(pack.findLeft(IDX_PACK_SIZE - 1, feeds, lk(feeds))).toBe(-1)
    })
 })
 
@@ -250,29 +243,29 @@ describe("makeIdxPack.findRight", () => {
 
    it("returns the leftmost match scanning rightward from chronFrom", () => {
       const pack = buildPack()
-      const channels = new Map([[1, 0]])
-      expect(pack.findRight(0, channels, lk(channels))).toBe(0)
-      expect(pack.findRight(1, channels, lk(channels))).toBe(2)
-      expect(pack.findRight(3, channels, lk(channels))).toBe(4)
+      const feeds = new Map([[1, 0]])
+      expect(pack.findRight(0, feeds, lk(feeds))).toBe(0)
+      expect(pack.findRight(1, feeds, lk(feeds))).toBe(2)
+      expect(pack.findRight(3, feeds, lk(feeds))).toBe(4)
    })
 
    it("respects sub addIdx", () => {
       const pack = buildPack()
-      const channels = new Map([[1, 3]])
-      expect(pack.findRight(0, channels, lk(channels))).toBe(4)
+      const feeds = new Map([[1, 3]])
+      expect(pack.findRight(0, feeds, lk(feeds))).toBe(4)
    })
 
    it("returns -1 when no sub matches addIdx within pack", () => {
       const buf = buildBuf({ entries: [e(1), e(1), e(1)] })
       const pack = makeIdxPack(buf, 0, 3, SLOTS)
-      const channels = new Map([[1, 5]])
-      expect(pack.findRight(0, channels, lk(channels))).toBe(-1)
+      const feeds = new Map([[1, 5]])
+      expect(pack.findRight(0, feeds, lk(feeds))).toBe(-1)
    })
 
    it("returns -1 when no sub matches", () => {
       const pack = buildPack()
-      const channels = new Map([[99, 0]])
-      expect(pack.findRight(0, channels, lk(channels))).toBe(-1)
+      const feeds = new Map([[99, 0]])
+      expect(pack.findRight(0, feeds, lk(feeds))).toBe(-1)
    })
 })
 
@@ -280,36 +273,36 @@ describe("makeIdxPack.countLeft", () => {
    it("counts matching entries strictly left of chronIdx", () => {
       const buf = buildBuf({ entries: [e(1), e(2), e(1), e(3), e(1)] })
       const pack = makeIdxPack(buf, 0, 5, SLOTS)
-      const channels = new Map([[1, 0]])
-      expect(pack.countLeft(0, channels, lk(channels))).toBe(0)
-      expect(pack.countLeft(4, channels, lk(channels))).toBe(2)
-      expect(pack.countLeft(5, channels, lk(channels))).toBe(3)
+      const feeds = new Map([[1, 0]])
+      expect(pack.countLeft(0, feeds, lk(feeds))).toBe(0)
+      expect(pack.countLeft(4, feeds, lk(feeds))).toBe(2)
+      expect(pack.countLeft(5, feeds, lk(feeds))).toBe(3)
    })
 
    it("respects sub addIdx", () => {
       const buf = buildBuf({ entries: [e(1), e(1), e(1)] })
       const pack = makeIdxPack(buf, 0, 3, SLOTS)
-      const channels = new Map([[1, 1]])
-      expect(pack.countLeft(3, channels, lk(channels))).toBe(2)
+      const feeds = new Map([[1, 1]])
+      expect(pack.countLeft(3, feeds, lk(feeds))).toBe(2)
    })
 
-   it("uses chanCounts header for entries in earlier packs", () => {
+   it("uses feedCounts header for entries in earlier packs", () => {
       const buf = buildBuf({
-         chanCounts: { 1: 200 },
+         feedCounts: { 1: 200 },
          entries: [e(1)],
       })
       const pack = makeIdxPack(buf, 1, 1, SLOTS)
-      const channels = new Map([[1, 0]])
+      const feeds = new Map([[1, 0]])
       // baseChron = 1 * IDX_PACK_SIZE; addIdx (0) < baseChron, so prior count = 200
-      expect(pack.countLeft(IDX_PACK_SIZE, channels, lk(channels))).toBe(200)
-      expect(pack.countLeft(IDX_PACK_SIZE + 1, channels, lk(channels))).toBe(201)
+      expect(pack.countLeft(IDX_PACK_SIZE, feeds, lk(feeds))).toBe(200)
+      expect(pack.countLeft(IDX_PACK_SIZE + 1, feeds, lk(feeds))).toBe(201)
    })
 
    it("clamps limit at packSize so chronIdx past the pack still works", () => {
       const buf = buildBuf({ entries: [e(1), e(1), e(1)] })
       const pack = makeIdxPack(buf, 0, 3, SLOTS)
-      const channels = new Map([[1, 0]])
-      expect(pack.countLeft(99999, channels, lk(channels))).toBe(3)
+      const feeds = new Map([[1, 0]])
+      expect(pack.countLeft(99999, feeds, lk(feeds))).toBe(3)
    })
 })
 
@@ -358,7 +351,7 @@ describe("parseIdxHeaders", () => {
    it("decodes each variable-length chunk by its own numSlots", () => {
       const buf = buildSummary([
          { fetchedAtBase: 0, packIdBase: 1, packOffBase: 0 },
-         { fetchedAtBase: 9, packIdBase: 4, packOffBase: 2, chanCounts: { 1: 50000 } },
+         { fetchedAtBase: 9, packIdBase: 4, packOffBase: 2, feedCounts: { 1: 50000 } },
       ])
       const hs = parseIdxHeaders(buf, 2)
       expect(hs.length).toBe(2)
@@ -369,8 +362,8 @@ describe("parseIdxHeaders", () => {
       expect(hs[1].packIdBase).toBe(4)
       expect(hs[1].packOffBase).toBe(2)
       expect(hs[1].numSlots).toBe(2)
-      expect(hs[1].chanCounts[1]).toBe(50000)
-      expect(hs[1].chanCounts[0]).toBe(0)
+      expect(hs[1].feedCounts[1]).toBe(50000)
+      expect(hs[1].feedCounts[0]).toBe(0)
    })
 
    it("rejects a size mismatch", () => {
@@ -392,7 +385,7 @@ describe("findPackForBlocks", () => {
       packIdBase: 0,
       packOffBase: 0,
       numSlots: 0,
-      chanCounts: new Uint32Array(0),
+      feedCounts: new Uint32Array(0),
    })
    // Pack k's last entry value = headers[k+1].fetchedAtBase; the final
    // header is the latest pack's (unbounded end). Packs 0..2 + latest.

@@ -7,7 +7,7 @@ import { mountReader } from "./mount"
 
 // Filtering/navigation over real idx packs: drive the real nav state machine
 // (switchFilter/right) and the data filter primitives (findRight/findLeft/
-// countLeft) and assert the traversed chronIdx set matches the channel/tag
+// countLeft) and assert the traversed chronIdx set matches the feed/tag
 // subset — the contract `srr inspect --filter` mirrors in Go.
 
 describe("contract: filtering & navigation", () => {
@@ -21,9 +21,9 @@ describe("contract: filtering & navigation", () => {
    const tech = nItems(2, "tech", 0, 10)
    const sport = nItems(2, "sport", 0, 20)
 
-   const walkRight = async (channels: Map<number, number>): Promise<number[]> => {
+   const walkRight = async (feeds: Map<number, number>): Promise<number[]> => {
       const out: number[] = []
-      for (let i = await reader.data.findRight(0, channels); i !== -1; i = await reader.data.findRight(i + 1, channels))
+      for (let i = await reader.data.findRight(0, feeds); i !== -1; i = await reader.data.findRight(i + 1, feeds))
          out.push(i)
       return out
    }
@@ -35,9 +35,9 @@ describe("contract: filtering & navigation", () => {
          "/sport.xml": rssFeed("Sport", sport),
       })
       store = makeStore()
-      await srr(store, "chan", "add", "-t", "News", "-g", "world", "-u", `${feeds.url}/news.xml`)
-      await srr(store, "chan", "add", "-t", "Tech", "-g", "world", "-u", `${feeds.url}/tech.xml`)
-      await srr(store, "chan", "add", "-t", "Sport", "-g", "play", "-u", `${feeds.url}/sport.xml`)
+      await srr(store, "feed", "add", "-t", "News", "-g", "world", "-u", `${feeds.url}/news.xml`)
+      await srr(store, "feed", "add", "-t", "Tech", "-g", "world", "-u", `${feeds.url}/tech.xml`)
+      await srr(store, "feed", "add", "-t", "Sport", "-g", "play", "-u", `${feeds.url}/sport.xml`)
       await srr(store, "art", "fetch")
       reader = await mountReader(store)
    })
@@ -47,19 +47,19 @@ describe("contract: filtering & navigation", () => {
       if (store) rmSync(store, { recursive: true, force: true })
    })
 
-   it("tag filter scans exactly the tagged channels' articles", async () => {
+   it("tag filter scans exactly the tagged feeds' articles", async () => {
       reader.nav.filter.set(["world"])
-      expect(await walkRight(reader.nav.filter.channels)).toEqual([0, 1, 2, 3])
-      expect(await reader.data.countLeft(reader.data.db.total_art, reader.nav.filter.channels)).toBe(4)
-      expect(reader.data.countAll(reader.nav.filter.channels)).toBe(4)
-      expect(await reader.data.findLeft(5, reader.nav.filter.channels)).toBe(3)
+      expect(await walkRight(reader.nav.filter.feeds)).toEqual([0, 1, 2, 3])
+      expect(await reader.data.countLeft(reader.data.db.total_art, reader.nav.filter.feeds)).toBe(4)
+      expect(reader.data.countAll(reader.nav.filter.feeds)).toBe(4)
+      expect(await reader.data.findLeft(5, reader.nav.filter.feeds)).toBe(3)
    })
 
-   it("single-channel filter scans only that channel", async () => {
+   it("single-feed filter scans only that feed", async () => {
       reader.nav.filter.set(["0"]) // News
-      expect(await walkRight(reader.nav.filter.channels)).toEqual([0, 1])
-      expect(await reader.data.countLeft(reader.data.db.total_art, reader.nav.filter.channels)).toBe(2)
-      expect(reader.data.countAll(reader.nav.filter.channels)).toBe(2)
+      expect(await walkRight(reader.nav.filter.feeds)).toEqual([0, 1])
+      expect(await reader.data.countLeft(reader.data.db.total_art, reader.nav.filter.feeds)).toBe(2)
+      expect(reader.data.countAll(reader.nav.filter.feeds)).toBe(2)
    })
 
    it("nav.switchFilter + right() visits the tag subset in chronIdx order", async () => {

@@ -30,35 +30,35 @@ type Globals struct {
 	CdnURL       string `hidden:""                    env:"SRR_CDN_URL"       help:"CDN URL for frontend builds."`
 }
 
-type ChannelGroup struct {
-	Add    AddCmd    `cmd:"" help:"Subscribe to a new RSS channel."`
-	Upd    UpdCmd    `cmd:"" help:"Update an existing channel."`
-	Rm     RmCmd     `cmd:"" help:"Unsubscribe from channel(s)."`
-	Ls     LsCmd     `cmd:"" help:"List channels."`
-	Show   ShowCmd   `cmd:"" help:"Print one channel's record."`
-	Edit   EditCmd   `cmd:"" help:"Open a channel record in $EDITOR and apply on save."`
-	Apply  ApplyCmd  `cmd:"" help:"Upsert channels from JSON (object or array)."`
-	Import ImportCmd `cmd:"" help:"Import opml channels file."`
-	Export ExportCmd `cmd:"" help:"Export channels as OPML (inverse of import)."`
+type FeedGroup struct {
+	Add    AddCmd    `cmd:"" help:"Subscribe to a new RSS feed."`
+	Upd    UpdCmd    `cmd:"" help:"Update an existing feed."`
+	Rm     RmCmd     `cmd:"" help:"Unsubscribe from feed(s)."`
+	Ls     LsCmd     `cmd:"" help:"List feeds."`
+	Show   ShowCmd   `cmd:"" help:"Print one feed's record."`
+	Edit   EditCmd   `cmd:"" help:"Open a feed record in $EDITOR and apply on save."`
+	Apply  ApplyCmd  `cmd:"" help:"Upsert feeds from JSON (object or array)."`
+	Import ImportCmd `cmd:"" help:"Import opml feeds file."`
+	Export ExportCmd `cmd:"" help:"Export feeds as OPML (inverse of import)."`
 }
 
 type ArtGroup struct {
-	Fetch FetchCmd `cmd:"" help:"Fetch channel articles."`
+	Fetch FetchCmd `cmd:"" help:"Fetch feed articles."`
 	Ls    ArtCmd   `cmd:"" help:"List stored articles."`
 }
 
 type CLI struct {
 	Globals
-	Chan    ChannelGroup `cmd:"" aliases:"ch" help:"Channel management."`
-	Art     ArtGroup     `cmd:"" aliases:"a" help:"Article management."`
-	Pipe    PipeCmd      `cmd:"" help:"Set or print root pipe (default pipeline inherited by channels)."`
-	Ingest  IngestCmd    `cmd:"" help:"Set or print root ingest strategy (default inherited by channels)."`
-	Gen     GenCmd       `cmd:"" help:"Print or bump the store generation (db.gz 'gen'; frontend SW cache key)."`
-	Preview PreviewCmd   `cmd:"" aliases:"p" help:"Preview processed feed articles in a browser."`
-	Config  ConfigCmd    `cmd:"" aliases:"c" help:"Print resolved configuration."`
-	Inspect InspectCmd   `cmd:"" aliases:"i" help:"Inspect pack consistency (validate idx<->data, debug chronIdx lookup)."`
-	GenTS   GenTSCmd     `cmd:"" name:"gen-ts" hidden:"" help:"Generate frontend/src/js/format.gen.ts from the Go data-contract declarations."`
-	Version VersionCmd   `cmd:"" help:"Print version information."`
+	Feed    FeedGroup  `cmd:"" aliases:"ch" help:"Feed management."`
+	Art     ArtGroup   `cmd:"" aliases:"a" help:"Article management."`
+	Pipe    PipeCmd    `cmd:"" help:"Set or print root pipe (default pipeline inherited by feeds)."`
+	Ingest  IngestCmd  `cmd:"" help:"Set or print root ingest strategy (default inherited by feeds)."`
+	Gen     GenCmd     `cmd:"" help:"Print or bump the store generation (db.gz 'gen'; frontend SW cache key)."`
+	Preview PreviewCmd `cmd:"" aliases:"p" help:"Preview processed feed articles in a browser."`
+	Config  ConfigCmd  `cmd:"" aliases:"c" help:"Print resolved configuration."`
+	Inspect InspectCmd `cmd:"" aliases:"i" help:"Inspect pack consistency (validate idx<->data, debug chronIdx lookup)."`
+	GenTS   GenTSCmd   `cmd:"" name:"gen-ts" hidden:"" help:"Generate frontend/src/js/format.gen.ts from the Go data-contract declarations."`
+	Version VersionCmd `cmd:"" help:"Print version information."`
 }
 
 type VersionCmd struct{}

@@ -6,7 +6,7 @@ import {
    findPackForBlocks,
    IDX_PACK_SIZE,
    lowerBound,
-   makeChannelsLookup,
+   makeFeedsLookup,
    makeIdxPack,
    parseIdxHeaders,
    type IdxHeader,
@@ -34,9 +34,9 @@ export let db: IDB
 let idxFetches: LRU<Promise<IdxPack>>
 let idxHeaders: IdxHeader[] = []
 let latestIdx: IdxPack
-// Store high-water + 1: the size of the per-pack channel lookup arrays
-// (chanIds/ownChanCounts and the filter lookup). Sized to the actual channel
-// count, not the format ceiling. Computed once at init from db.channels.
+// Store high-water + 1: the size of the per-pack feed lookup arrays
+// (feedIds/ownFeedCounts and the filter lookup). Sized to the actual feed
+// count, not the format ceiling. Computed once at init from db.feeds.
 let slots = 1
 
 // A pack name is write-once, so a non-OK response means the name itself no
@@ -63,15 +63,15 @@ function assertPackOk(res: Response, isLatest: boolean): void {
 export async function init() {
    const res = await dbFetch
    const raw: IDB = await new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).json()
-   raw.channels ??= {}
+   raw.feeds ??= {}
    raw.seq ??= 0 // backend omitempty: absent for an empty store
-   for (const [k, ch] of Object.entries(raw.channels)) ch.id = Number(k)
+   for (const [k, ch] of Object.entries(raw.feeds)) ch.id = Number(k)
    db = raw
 
-   // Size the per-pack channel lookup arrays to the store's high-water id + 1
-   // (min 1). All chanIds in packs and filters are store channel ids, so this
-   // bounds the typed-array allocations by the actual channel count.
-   const ids = Object.keys(db.channels).map(Number)
+   // Size the per-pack feed lookup arrays to the store's high-water id + 1
+   // (min 1). All feedIds in packs and filters are store feed ids, so this
+   // bounds the typed-array allocations by the actual feed count.
+   const ids = Object.keys(db.feeds).map(Number)
    slots = ids.length > 0 ? Math.max(...ids) + 1 : 1
 
    if (db.total_art === 0) {
@@ -118,11 +118,11 @@ export function numFinalizedIdx(): number {
    return db.total_art > 0 ? Math.floor((db.total_art - 1) / IDX_PACK_SIZE) : 0
 }
 
-// channelTitle resolves a chan_id for display: a deleted channel's articles
+// feedTitle resolves a feed_id for display: a deleted feed's articles
 // stay in the packs, so render a tombstone instead of crashing (the rendering
-// contract `srr inspect`'s unknown-chans diagnostic references).
-export function channelTitle(chanId: number): string {
-   return db.channels[chanId]?.title ?? "[DELETED]"
+// contract `srr inspect`'s unknown-feeds diagnostic references).
+export function feedTitle(feedId: number): string {
+   return db.feeds[feedId]?.title ?? "[DELETED]"
 }
 
 // Fetches + gunzips one pack key. Every pack name is write-once (finalized
@@ -151,10 +151,10 @@ function packIdx(chronIdx: number): number {
    return Math.min(Math.floor(chronIdx / IDX_PACK_SIZE), numFinalizedIdx())
 }
 
-export async function getChannelId(chronIdx: number): Promise<number> {
+export async function getFeedId(chronIdx: number): Promise<number> {
    const n = packIdx(chronIdx)
-   const chanIds = (await fetchIdxPack(n)).parse().chanIds
-   return chanIds[chronIdx - n * IDX_PACK_SIZE]
+   const feedIds = (await fetchIdxPack(n)).parse().feedIds
+   return feedIds[chronIdx - n * IDX_PACK_SIZE]
 }
 
 // Binary search for leftmost entry where fetchedAt >= ts: pack-level over
@@ -173,51 +173,51 @@ export async function findChronForTimestamp(ts: number): Promise<number> {
 // chronIdx=total_art always lands in the latest pack (resident since init),
 // whose header carries the cumulative counts of every finalized pack — so
 // nav's filter bookkeeping never waits on a fetch.
-export function countAll(channels: Map<number, number>): number {
+export function countAll(feeds: Map<number, number>): number {
    if (db.total_art === 0) return 0
-   return latestIdx.countLeft(db.total_art, channels, makeChannelsLookup(channels, slots))
+   return latestIdx.countLeft(db.total_art, feeds, makeFeedsLookup(feeds, slots))
 }
 
-export async function countLeft(chronIdx: number, channels: Map<number, number>): Promise<number> {
+export async function countLeft(chronIdx: number, feeds: Map<number, number>): Promise<number> {
    if (db.total_art === 0) return 0
    const n = packIdx(chronIdx)
-   return (await fetchIdxPack(n)).countLeft(chronIdx, channels, makeChannelsLookup(channels, slots))
+   return (await fetchIdxPack(n)).countLeft(chronIdx, feeds, makeFeedsLookup(feeds, slots))
 }
 
-// A finalized pack can be skipped without fetching it: its per-channel
+// A finalized pack can be skipped without fetching it: its per-feed
 // counts are the deltas between consecutive cumulative headers. The latest
 // pack has no next boundary — it is resident anyway and scans cheaply.
-function packHasCandidate(p: number, channels: Map<number, number>): boolean {
+function packHasCandidate(p: number, feeds: Map<number, number>): boolean {
    if (p >= numFinalizedIdx()) return true
-   const cur = idxHeaders[p].chanCounts
-   const next = idxHeaders[p + 1].chanCounts
+   const cur = idxHeaders[p].feedCounts
+   const next = idxHeaders[p + 1].feedCounts
    const packEnd = (p + 1) * IDX_PACK_SIZE
-   for (const [chanId, addIdx] of channels) {
-      const delta = countAt(next, chanId) - countAt(cur, chanId)
+   for (const [feedId, addIdx] of feeds) {
+      const delta = countAt(next, feedId) - countAt(cur, feedId)
       if (delta > 0 && addIdx < packEnd) return true
    }
    return false
 }
 
-export async function findLeft(from: number, channels: Map<number, number>): Promise<number> {
+export async function findLeft(from: number, feeds: Map<number, number>): Promise<number> {
    if (from < 0 || db.total_art === 0) return -1
-   const lookup = makeChannelsLookup(channels, slots)
+   const lookup = makeFeedsLookup(feeds, slots)
    for (let p = packIdx(from); p >= 0; p--) {
-      if (!packHasCandidate(p, channels)) continue
-      const found = (await fetchIdxPack(p)).findLeft(from, channels, lookup)
+      if (!packHasCandidate(p, feeds)) continue
+      const found = (await fetchIdxPack(p)).findLeft(from, feeds, lookup)
       if (found !== -1) return found
    }
    return -1
 }
 
-export async function findRight(from: number, channels: Map<number, number>): Promise<number> {
+export async function findRight(from: number, feeds: Map<number, number>): Promise<number> {
    if (from < 0) from = 0
    if (from >= db.total_art) return -1
-   const lookup = makeChannelsLookup(channels, slots)
+   const lookup = makeFeedsLookup(feeds, slots)
    const nf = numFinalizedIdx()
    for (let p = packIdx(from); p <= nf; p++) {
-      if (!packHasCandidate(p, channels)) continue
-      const found = (await fetchIdxPack(p)).findRight(from, channels, lookup)
+      if (!packHasCandidate(p, feeds)) continue
+      const found = (await fetchIdxPack(p)).findRight(from, feeds, lookup)
       if (found !== -1) return found
    }
    return -1
@@ -284,23 +284,23 @@ export async function loadArticle(chronIdx: number): Promise<IArticle> {
    return entries[ref.offset]
 }
 
-let activeChannelsCache: IChannel[] | null = null
-function activeChannels(): IChannel[] {
-   if (activeChannelsCache) return activeChannelsCache
-   activeChannelsCache = Object.values(db.channels)
+let activeFeedsCache: IFeed[] | null = null
+function activeFeeds(): IFeed[] {
+   if (activeFeedsCache) return activeFeedsCache
+   activeFeedsCache = Object.values(db.feeds)
       .filter((ch) => ch.total_art > 0)
       .sort((a, b) => (a.title < b.title ? -1 : 1))
-   return activeChannelsCache
+   return activeFeedsCache
 }
 
-type GroupResult = { tagged: Map<string, IChannel[]>; sortedTags: string[]; untagged: IChannel[] }
+type GroupResult = { tagged: Map<string, IFeed[]>; sortedTags: string[]; untagged: IFeed[] }
 let groupCache: GroupResult | null = null
 
-export function groupChannelsByTag(): GroupResult {
+export function groupFeedsByTag(): GroupResult {
    if (groupCache) return groupCache
-   const tagged = new Map<string, IChannel[]>()
-   const untagged: IChannel[] = []
-   for (const ch of activeChannels()) {
+   const tagged = new Map<string, IFeed[]>()
+   const untagged: IFeed[] = []
+   for (const ch of activeFeeds()) {
       if (ch.tag) {
          let group = tagged.get(ch.tag)
          if (!group) {

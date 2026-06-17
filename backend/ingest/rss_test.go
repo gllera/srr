@@ -24,7 +24,7 @@ func collectFeed(t *testing.T, data string) []*mod.RawItem {
 func TestParseRSS2(t *testing.T) {
 	items := collectFeed(t, `<?xml version="1.0"?>
 <rss version="2.0">
-  <channel>
+  <feed>
     <item>
       <title>First</title>
       <link>http://example.com/1</link>
@@ -38,7 +38,7 @@ func TestParseRSS2(t *testing.T) {
       <content:encoded><![CDATA[<p>Full content</p>]]></content:encoded>
       <description>Desc 2</description>
     </item>
-  </channel>
+  </feed>
 </rss>`)
 
 	if len(items) != 2 {
@@ -105,7 +105,7 @@ func TestParseRDF(t *testing.T) {
 <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
          xmlns="http://purl.org/rss/1.0/"
          xmlns:dc="http://purl.org/dc/elements/1.1/">
-  <channel/>
+  <feed/>
   <item>
     <title>RDF Item</title>
     <link>http://example.com/rdf/1</link>
@@ -125,12 +125,12 @@ func TestParseRDF(t *testing.T) {
 }
 
 func TestParseDescriptionFallback(t *testing.T) {
-	items := collectFeed(t, `<rss version="2.0"><channel>
+	items := collectFeed(t, `<rss version="2.0"><feed>
     <item>
       <title>No Content</title>
       <description>Only description</description>
     </item>
-  </channel></rss>`)
+  </feed></rss>`)
 
 	if items[0].Content != "Only description" {
 		t.Errorf("content = %q, want description fallback", items[0].Content)
@@ -138,12 +138,12 @@ func TestParseDescriptionFallback(t *testing.T) {
 }
 
 func TestParseGUIDFallbackToLink(t *testing.T) {
-	items := collectFeed(t, `<rss version="2.0"><channel>
+	items := collectFeed(t, `<rss version="2.0"><feed>
     <item>
       <title>No GUID</title>
       <link>http://example.com/fallback</link>
     </item>
-  </channel></rss>`)
+  </feed></rss>`)
 
 	if items[0].GUID != hash("http://example.com/fallback") {
 		t.Errorf("guid should fall back to link hash")
@@ -151,9 +151,9 @@ func TestParseGUIDFallbackToLink(t *testing.T) {
 }
 
 func TestParseDateUnparseableIsUnixZero(t *testing.T) {
-	items := collectFeed(t, `<rss version="2.0"><channel>
+	items := collectFeed(t, `<rss version="2.0"><feed>
     <item><title>No Date</title></item>
-  </channel></rss>`)
+  </feed></rss>`)
 
 	if got := items[0].Published.Unix(); got != 0 {
 		t.Errorf("published.Unix() = %d, want 0 for unparseable date", got)
@@ -161,12 +161,12 @@ func TestParseDateUnparseableIsUnixZero(t *testing.T) {
 }
 
 func TestParseCDATA(t *testing.T) {
-	items := collectFeed(t, `<rss version="2.0"><channel>
+	items := collectFeed(t, `<rss version="2.0"><feed>
     <item>
       <title><![CDATA[Title with <special> chars]]></title>
       <description><![CDATA[<p>HTML content</p>]]></description>
     </item>
-  </channel></rss>`)
+  </feed></rss>`)
 
 	if items[0].Title != "Title with <special> chars" {
 		t.Errorf("title = %q", items[0].Title)
@@ -178,11 +178,11 @@ func TestParseCDATA(t *testing.T) {
 
 func TestParseStopFeed(t *testing.T) {
 	count := 0
-	err := ParseFeed([]byte(`<rss version="2.0"><channel>
+	err := ParseFeed([]byte(`<rss version="2.0"><feed>
     <item><title>A</title></item>
     <item><title>B</title></item>
     <item><title>C</title></item>
-  </channel></rss>`), func(item *mod.RawItem) error {
+  </feed></rss>`), func(item *mod.RawItem) error {
 		count++
 		if count == 2 {
 			return ErrStopFeed
@@ -246,8 +246,8 @@ func TestHashEmptyString(t *testing.T) {
 func TestParseEmptyFeed(t *testing.T) {
 	items := collectFeed(t, `<?xml version="1.0"?>
 <rss version="2.0">
-  <channel>
-  </channel>
+  <feed>
+  </feed>
 </rss>`)
 
 	if len(items) != 0 {
@@ -257,9 +257,9 @@ func TestParseEmptyFeed(t *testing.T) {
 
 func TestParseCallbackError(t *testing.T) {
 	testErr := fmt.Errorf("custom callback error")
-	err := ParseFeed([]byte(`<rss version="2.0"><channel>
+	err := ParseFeed([]byte(`<rss version="2.0"><feed>
     <item><title>A</title></item>
-  </channel></rss>`), func(*mod.RawItem) error {
+  </feed></rss>`), func(*mod.RawItem) error {
 		return testErr
 	})
 
@@ -275,10 +275,10 @@ func TestParseGUIDFallbackDistinctForGUIDlessItems(t *testing.T) {
 	// Items with no guid/id/link must NOT all collapse to hash("") — that would
 	// dedup distinct articles away. Two such items with different title/content
 	// get distinct GUIDs derived from their own text.
-	items := collectFeed(t, `<rss version="2.0"><channel>
+	items := collectFeed(t, `<rss version="2.0"><feed>
     <item><title>First</title><description>one</description></item>
     <item><title>Second</title><description>two</description></item>
-  </channel></rss>`)
+  </feed></rss>`)
 
 	if len(items) != 2 {
 		t.Fatalf("got %d items, want 2", len(items))
@@ -321,12 +321,12 @@ func TestParseLinkAtomNoRel(t *testing.T) {
 }
 
 func TestParseLinkRSSText(t *testing.T) {
-	items := collectFeed(t, `<rss version="2.0"><channel>
+	items := collectFeed(t, `<rss version="2.0"><feed>
     <item>
       <title>Text Link</title>
       <link>http://example.com/text</link>
     </item>
-  </channel></rss>`)
+  </feed></rss>`)
 
 	if items[0].Link != "http://example.com/text" {
 		t.Errorf("link = %q", items[0].Link)
@@ -348,12 +348,12 @@ func TestParseDateFormats(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			items := collectFeed(t, fmt.Sprintf(`<rss version="2.0"><channel>
+			items := collectFeed(t, fmt.Sprintf(`<rss version="2.0"><feed>
     <item>
       <title>Date Test</title>
       <pubDate>%s</pubDate>
     </item>
-  </channel></rss>`, tt.date))
+  </feed></rss>`, tt.date))
 
 			if items[0].Published.Year() != tt.year {
 				t.Errorf("year = %d, want %d", items[0].Published.Year(), tt.year)
@@ -363,13 +363,13 @@ func TestParseDateFormats(t *testing.T) {
 }
 
 func TestParseContentPriority(t *testing.T) {
-	items := collectFeed(t, `<rss version="2.0"><channel>
+	items := collectFeed(t, `<rss version="2.0"><feed>
     <item>
       <title>Priority</title>
       <description>Desc</description>
       <summary>Summary</summary>
     </item>
-  </channel></rss>`)
+  </feed></rss>`)
 
 	if items[0].Content != "Desc" {
 		t.Errorf("content = %q, want %q (description fallback)", items[0].Content, "Desc")
@@ -391,13 +391,13 @@ func TestParseAtomSummaryFallback(t *testing.T) {
 }
 
 func TestParseMultipleItems(t *testing.T) {
-	items := collectFeed(t, `<rss version="2.0"><channel>
+	items := collectFeed(t, `<rss version="2.0"><feed>
     <item><title>A</title></item>
     <item><title>B</title></item>
     <item><title>C</title></item>
     <item><title>D</title></item>
     <item><title>E</title></item>
-  </channel></rss>`)
+  </feed></rss>`)
 
 	if len(items) != 5 {
 		t.Fatalf("got %d items, want 5", len(items))
@@ -410,12 +410,12 @@ func TestParseMultipleItems(t *testing.T) {
 }
 
 func TestParseRSSWithAttributes(t *testing.T) {
-	items := collectFeed(t, `<rss version="2.0"><channel>
+	items := collectFeed(t, `<rss version="2.0"><feed>
     <item>
       <title>Attr Test</title>
       <guid isPermaLink="false">custom-guid-123</guid>
     </item>
-  </channel></rss>`)
+  </feed></rss>`)
 
 	if items[0].GUID != hash("custom-guid-123") {
 		t.Errorf("guid should use text content, not attributes")
@@ -432,12 +432,12 @@ func TestParseEmptyXML(t *testing.T) {
 }
 
 func TestParseRawFieldPreserved(t *testing.T) {
-	items := collectFeed(t, `<rss version="2.0"><channel>
+	items := collectFeed(t, `<rss version="2.0"><feed>
     <item>
       <title>Raw Test</title>
       <customField>custom value</customField>
     </item>
-  </channel></rss>`)
+  </feed></rss>`)
 
 	if items[0].Raw == nil {
 		t.Error("Raw field should be preserved")
@@ -477,7 +477,7 @@ func TestParseLinkAtomAlternateWinsOverEnclosure(t *testing.T) {
 }
 
 func TestParseDateHintReusedAcrossItems(t *testing.T) {
-	items := collectFeed(t, `<rss version="2.0"><channel>
+	items := collectFeed(t, `<rss version="2.0"><feed>
     <item>
       <title>First</title>
       <pubDate>Mon, 02 Jan 2006 15:04:05 +0000</pubDate>
@@ -486,7 +486,7 @@ func TestParseDateHintReusedAcrossItems(t *testing.T) {
       <title>Second</title>
       <pubDate>Tue, 03 Jan 2006 10:00:00 +0000</pubDate>
     </item>
-  </channel></rss>`)
+  </feed></rss>`)
 
 	if len(items) != 2 {
 		t.Fatalf("got %d items, want 2", len(items))
@@ -500,13 +500,13 @@ func TestParseDateHintReusedAcrossItems(t *testing.T) {
 }
 
 func TestParseGUIDPriorityOverID(t *testing.T) {
-	items := collectFeed(t, `<rss version="2.0"><channel>
+	items := collectFeed(t, `<rss version="2.0"><feed>
     <item>
       <title>Both IDs</title>
       <guid>guid-value</guid>
       <id>id-value</id>
     </item>
-  </channel></rss>`)
+  </feed></rss>`)
 
 	if items[0].GUID != hash("guid-value") {
 		t.Errorf("GUID = %d, want hash of %q (guid wins over id)", items[0].GUID, "guid-value")
@@ -514,13 +514,13 @@ func TestParseGUIDPriorityOverID(t *testing.T) {
 }
 
 func TestParseContentEncodedPriorityOverDescription(t *testing.T) {
-	items := collectFeed(t, `<rss version="2.0"><channel>
+	items := collectFeed(t, `<rss version="2.0"><feed>
     <item>
       <title>Priority</title>
       <content:encoded><![CDATA[<p>Full</p>]]></content:encoded>
       <description>Short</description>
     </item>
-  </channel></rss>`)
+  </feed></rss>`)
 
 	if items[0].Content != "<p>Full</p>" {
 		t.Errorf("content = %q, want content:encoded to win over description", items[0].Content)
@@ -532,7 +532,7 @@ func TestParseNamespacePrefixStripping(t *testing.T) {
 <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
          xmlns="http://purl.org/rss/1.0/"
          xmlns:dc="http://purl.org/dc/elements/1.1/">
-  <channel/>
+  <feed/>
   <item>
     <title>NS Test</title>
     <link>http://example.com</link>
@@ -546,13 +546,13 @@ func TestParseNamespacePrefixStripping(t *testing.T) {
 }
 
 func TestParseRSSItemGUIDFallbackChain(t *testing.T) {
-	items := collectFeed(t, `<rss version="2.0"><channel>
+	items := collectFeed(t, `<rss version="2.0"><feed>
     <item>
       <title>Only Link</title>
       <guid></guid>
       <link>http://example.com/linkonly</link>
     </item>
-  </channel></rss>`)
+  </feed></rss>`)
 
 	if items[0].GUID != hash("http://example.com/linkonly") {
 		t.Errorf("GUID should fall back to link hash when guid is empty")
@@ -562,10 +562,10 @@ func TestParseRSSItemGUIDFallbackChain(t *testing.T) {
 func TestParseNamedHTMLEntitiesDoNotAbort(t *testing.T) {
 	// Bare named HTML entities (&nbsp;, &mdash;) are not predefined XML entities;
 	// they must resolve/tolerate instead of aborting the whole feed.
-	items := collectFeed(t, `<rss version="2.0"><channel>
+	items := collectFeed(t, `<rss version="2.0"><feed>
     <item><title>Price&nbsp;5&mdash;10</title><description>a&nbsp;b</description></item>
     <item><title>Second item survives</title></item>
-  </channel></rss>`)
+  </feed></rss>`)
 
 	if len(items) != 2 {
 		t.Fatalf("got %d items, want 2 (named entity must not abort the feed)", len(items))
@@ -578,8 +578,8 @@ func TestParseNamedHTMLEntitiesDoNotAbort(t *testing.T) {
 func TestParseNonUTF8Charset(t *testing.T) {
 	// A windows-1252 byte (0xe9 = é) in a feed declaring ISO-8859-1 must transcode
 	// to UTF-8, not error on the first token.
-	raw := "<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><rss version=\"2.0\"><channel>" +
-		"<item><title>caf\xe9</title></item></channel></rss>"
+	raw := "<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><rss version=\"2.0\"><feed>" +
+		"<item><title>caf\xe9</title></item></feed></rss>"
 	items := collectFeed(t, raw)
 	if len(items) != 1 {
 		t.Fatalf("got %d items, want 1 (non-UTF-8 feed must parse)", len(items))
@@ -629,9 +629,9 @@ func TestParsePublishedBeatsUpdatedAcrossItems(t *testing.T) {
 func TestParseNamedTimezoneNotTreatedAsUTC(t *testing.T) {
 	// "15:04:05 EST" is 20:04:05 UTC; without the offset map it would read as
 	// 15:04:05 UTC (5h wrong).
-	items := collectFeed(t, `<rss version="2.0"><channel>
+	items := collectFeed(t, `<rss version="2.0"><feed>
     <item><title>T</title><pubDate>Mon, 02 Jan 2006 15:04:05 EST</pubDate></item>
-  </channel></rss>`)
+  </feed></rss>`)
 
 	got := items[0].Published.UTC()
 	if got.Hour() != 20 || got.Minute() != 4 {

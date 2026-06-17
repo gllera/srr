@@ -48,9 +48,9 @@ describe("contract: search", () => {
    let search: SearchModule
 
    beforeAll(async () => {
-      feeds = await feedServer({ "/feed.xml": rssFeed("Chan", items()) })
+      feeds = await feedServer({ "/feed.xml": rssFeed("Feed", items()) })
       store = makeStore()
-      await srr(store, "chan", "add", "-t", "Chan", "-u", `${feeds.url}/feed.xml`)
+      await srr(store, "feed", "add", "-t", "Feed", "-u", `${feeds.url}/feed.xml`)
       await srr(store, "art", "fetch")
       reader = await mountReader(store)
       // Same fresh module registry as the mounted data/nav, so search.ts sees
@@ -92,7 +92,7 @@ describe("contract: search", () => {
       for (const hit of hits) {
          const art = await reader.data.loadArticle(hit.chron)
          expect(art.t, `chron ${hit.chron}`).toBe(hit.t)
-         expect(art.s, `chron ${hit.chron}`).toBe(hit.s)
+         expect(art.f, `chron ${hit.chron}`).toBe(hit.f)
          expect(hit.w, `chron ${hit.chron}`).toBe(art.p ?? art.a)
       }
    })
@@ -100,7 +100,7 @@ describe("contract: search", () => {
    it("a second fetch extends the tail under the new generation name", async () => {
       feeds.set(
          "/feed.xml",
-         rssFeed("Chan", [
+         rssFeed("Feed", [
             ...items(),
             {
                title: "Brand new article",
