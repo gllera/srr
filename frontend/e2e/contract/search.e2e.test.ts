@@ -5,15 +5,17 @@ import { feedServer, inspectValidate, makeStore, srr, type FeedServer } from "..
 import { pubDate, rssFeed, type FeedItem } from "../fixtures"
 import { mountReader } from "./mount"
 
-// The search/ series end-to-end: real srrb writes the latest search tail
-// (SyncSearch) from real pipeline-processed titles; the real search.ts reads
+// The meta/ series end-to-end: real srrb writes the latest meta tail
+// (SyncMeta) from real pipeline-processed titles; the real search.ts reads
 // it back. Pins the write-side JSONL contract, the available() gate, TS
 // folding at query time over Go-written titles, generation naming across
 // fetches, and chron addressing (every hit must load the article it claims).
-// Bloom pruning and Go-side folding only engage with finalized 50k shards —
-// per the summary.e2e.test.ts precedent that real ≥50k writer coverage is
-// Go's job, those live in the backend tests plus the shared fold-vector
-// tables and bloomBits literal pins in both unit suites.
+// meta/ is the derived projection shared between search and the home list,
+// at a 5,000-entry stride (META_PACK_SIZE). Bloom pruning and Go-side folding
+// only engage with finalized 5k shards — per the summary.e2e.test.ts
+// precedent that real ≥5k writer coverage is Go's job, those live in the
+// backend tests plus the shared fold-vector tables and bloomBits literal pins
+// in both unit suites.
 
 type SearchModule = typeof import("../../src/js/search")
 
@@ -64,8 +66,8 @@ describe("contract: search", () => {
    })
 
    it("publishes coverage fields and the reader offers search", () => {
-      expect(reader.data.db.srch ?? 0).toBe(0) // no finalized packs at this size
-      expect(reader.data.db.srcht).toBe(TITLES.length)
+      expect(reader.data.db.mp ?? 0).toBe(0) // no finalized packs at this size
+      expect(reader.data.db.mt).toBe(TITLES.length)
       expect(search.available()).toBe(true)
    })
 
@@ -115,14 +117,14 @@ describe("contract: search", () => {
       reader = await mountReader(store)
       search = await import("../../src/js/search")
 
-      expect(reader.data.db.srcht).toBe(TITLES.length + 1)
+      expect(reader.data.db.mt).toBe(TITLES.length + 1)
       const hits = await collect(search.search("brand new"))
       expect(hits.map((h) => h.t)).toEqual(["Brand new article"])
       // The read-back-and-extend path must keep the original entries too.
       expect((await collect(search.search("istanbul"))).length).toBe(1)
    })
 
-   it("backend inspect --validate covers the search series", async () => {
+   it("backend inspect --validate covers the meta series", async () => {
       expect(await inspectValidate(store)).toContain("OK: all checks passed")
    })
 })

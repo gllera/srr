@@ -480,6 +480,40 @@ describe("browser: real SPA over real packs", () => {
       }
    })
 
+   // The home list reads thin meta/ cards (the derived projection) to populate
+   // its rows — NOT full data/ records — so the list launch is O(1) data pack
+   // fetches. Opening a row then fetches the data/ pack for that article.
+   // This test captures the core read-amplification win of the meta/ design.
+   it("list boot fetches meta/ packs and NOT data/ until a row is opened", async () => {
+      const ctx = await browser.createBrowserContext()
+      const page = await ctx.newPage()
+      try {
+         const requested: string[] = []
+         page.on("request", (req) => {
+            const url = new URL(req.url())
+            requested.push(url.pathname)
+         })
+
+         await page.goto(baseUrl, { waitUntil: "load" })
+         await waitList(page)
+
+         // After list boot: meta/ pack fetched (the list reads it for card data).
+         expect(requested.some((p) => /\/packs\/meta\//.test(p))).toBe(true)
+         // No data/ pack fetched yet — the list uses meta/ projections only.
+         expect(requested.some((p) => /\/packs\/data\//.test(p))).toBe(false)
+
+         // Tap the top row → reader opens and fetches the data/ pack.
+         await page.click(".srr-list a.srr-row")
+         await waitReader(page)
+         expect(await $title(page)).toBe("sport title 1")
+
+         // Now a data/ pack must have been fetched.
+         expect(requested.some((p) => /\/packs\/data\//.test(p))).toBe(true)
+      } finally {
+         await ctx.close()
+      }
+   })
+
    // Saved articles: the reader's ★ toggle adds the current article to the
    // device-local srr-saved set; "★ Saved" in the feed menu is a distinct
    // filter view that shows exactly that set, and it survives a reload (the set
