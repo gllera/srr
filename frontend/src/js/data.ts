@@ -112,12 +112,15 @@ export async function init() {
    sessionStorage.removeItem(RELOAD_GUARD)
 }
 
-// Exported for search.ts: the search/ shards align 1:1 with idx packs, so its
-// coverage gate and chron bases derive from the same formula.
+// Finalized idx-pack count for the current store (the latest pack holds the
+// rest). Used throughout for idx addressing and the header summary.
 export function numFinalizedIdx(): number {
    return db.total_art > 0 ? Math.floor((db.total_art - 1) / IDX_PACK_SIZE) : 0
 }
 
+// Finalized meta-shard count. The meta/ series strides at META_PACK_SIZE (a
+// divisor of IDX_PACK_SIZE), so this differs from numFinalizedIdx. Used by the
+// list and search to address meta shards and gate coverage (see metaReady).
 export function numFinalizedMeta(): number {
    return db.total_art > 0 ? Math.floor((db.total_art - 1) / META_PACK_SIZE) : 0
 }
@@ -132,9 +135,9 @@ export function feedTitle(feedId: number): string {
 // Fetches + gunzips one pack key. Every pack name is write-once (finalized
 // numeric, the L<seq> generation or h<N>/s<N> summary a db.gz commit
 // published), so the HTTP cache may serve them all without revalidation
-// (force-cache). Exported for search.ts (the search/ series rides the same
-// addressing); isLatest=false there — a missing search pack degrades search
-// instead of triggering the guarded reload.
+// (force-cache). Also used by the meta/ loaders (list + search), which pass
+// isLatest=false — a missing meta pack degrades to the data/ fallback instead
+// of triggering the guarded reload.
 export async function fetchPackBytes(path: string, isLatest: boolean): Promise<ArrayBuffer> {
    const res = await fetch(new URL(path, PACK_BASE), { cache: "force-cache" })
    assertPackOk(res, isLatest)
