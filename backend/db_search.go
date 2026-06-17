@@ -24,7 +24,7 @@ import (
 // SearchEntry is the JSONL line of search/ shards. Line position within the
 // shard is the chron offset — no chron is stored.
 type SearchEntry struct {
-	ChannelID int `json:"s"`
+	FeedID int `json:"f"`
 	// When is the display timestamp: published, falling back to fetched_at
 	// when unparsed — the same fallback the reader's row rendering wants, so
 	// it is precomputed here.
@@ -227,7 +227,7 @@ func (o *DB) SyncSearch(ctx context.Context, written []ArticleData) error {
 		if when == 0 {
 			when = ad.FetchedAt
 		}
-		line, err := jsonEncode(&SearchEntry{ChannelID: ad.ChannelID, When: when, Title: ad.Title})
+		line, err := jsonEncode(&SearchEntry{FeedID: ad.FeedID, When: when, Title: ad.Title})
 		if err != nil {
 			return err
 		}

@@ -21,7 +21,7 @@ describe("contract: sanitize/minify pipeline", () => {
          ]),
       })
       store = makeStore()
-      await srr(store, "chan", "add", "-t", "Hostile", "-u", `${feeds.url}/hostile.xml`)
+      await srr(store, "feed", "add", "-t", "Hostile", "-u", `${feeds.url}/hostile.xml`)
       await srr(store, "art", "fetch")
       reader = await mountReader(store)
    })

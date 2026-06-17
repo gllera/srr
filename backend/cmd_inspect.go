@@ -15,11 +15,11 @@ import (
 type InspectCmd struct {
 	URL      string `optional:"" help:"HTTP base URL (e.g., http://localhost:3000). Overrides --store."`
 	Chron    int    `default:"-1" help:"Inspect a specific chronIdx; omit for other modes."`
-	Validate bool   `help:"Walk every chronIdx and report any pack inconsistency (bounds, db meta, chanCounts/fetchedAts continuity, unknown chan_ids, latest-pack files)."`
-	Filter   string `help:"Tag name or numeric chan_id; reports count and chron range matching the filter (mirrors frontend filter logic)."`
+	Validate bool   `help:"Walk every chronIdx and report any pack inconsistency (bounds, db meta, feedCounts/fetchedAts continuity, unknown feed_ids, latest-pack files)."`
+	Filter   string `help:"Tag name or numeric feed_id; reports count and chron range matching the filter (mirrors frontend filter logic)."`
 	Floor    int    `default:"0" help:"Optional floor chronIdx for --filter."`
 	FromHash string `help:"Replay nav.fromHash on a frontend URL hash like '0,2485!big_info': resolves filter, decides resolve()/last(), prints final article."`
-	ListTags bool   `help:"List tags and their channel/article counts (mirrors frontend groupChannelsByTag)."`
+	ListTags bool   `help:"List tags and their feed/article counts (mirrors frontend groupFeedsByTag)."`
 }
 
 func (o *InspectCmd) Run() error {

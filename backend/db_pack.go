@@ -15,7 +15,7 @@ import (
 // ArticleData is the on-disk JSONL representation of an article (one
 // per line in data/*.gz). Short keys match what the frontend expects.
 type ArticleData struct {
-	ChannelID int    `json:"s"`
+	FeedID    int    `json:"f"`
 	FetchedAt int64  `json:"a"`
 	Published int64  `json:"p,omitempty"`
 	Title     string `json:"t,omitempty"`
@@ -26,7 +26,7 @@ type ArticleData struct {
 // Item is the in-memory representation of an article during fetch.
 // PutArticles converts these into ArticleData before persistence.
 type Item struct {
-	Channel   *Channel
+	Feed      *Feed
 	Title     string
 	Content   string
 	Link      string
@@ -38,7 +38,7 @@ type Item struct {
 // from the very values the packs hold.
 func (it *Item) articleData(fetchedAt int64) ArticleData {
 	return ArticleData{
-		ChannelID: it.Channel.id,
+		FeedID:    it.Feed.id,
 		FetchedAt: fetchedAt,
 		Published: it.Published,
 		Title:     it.Title,
@@ -126,17 +126,17 @@ func newPack() *pack {
 func (p *pack) Len() int                    { return p.buf.Len() }
 func (p *pack) Write(b []byte) (int, error) { return p.gz.Write(b) }
 
-func (p *pack) writeIdx(chanID, deltaPack, deltaFetched int) error {
+func (p *pack) writeIdx(feedID, deltaPack, deltaFetched int) error {
 	_, err := p.Write([]byte{
-		byte(chanID), byte(chanID >> 8),
+		byte(feedID), byte(feedID >> 8),
 		byte(deltaFetched) | byte(deltaPack)<<7,
 	})
 	return err
 }
 
-func writeIdxHeader(p *pack, block, packID, packOff int, channels map[int]*Channel) error {
+func writeIdxHeader(p *pack, block, packID, packOff int, feeds map[int]*Feed) error {
 	numSlots := 0
-	for id := range channels {
+	for id := range feeds {
 		if id+1 > numSlots {
 			numSlots = id + 1
 		}
@@ -146,7 +146,7 @@ func writeIdxHeader(p *pack, block, packID, packOff int, channels map[int]*Chann
 	binary.LittleEndian.PutUint32(buf[4:], uint32(packID))
 	binary.LittleEndian.PutUint32(buf[8:], uint32(packOff))
 	binary.LittleEndian.PutUint32(buf[idxStateSize:], uint32(numSlots))
-	for id, ch := range channels {
+	for id, ch := range feeds {
 		binary.LittleEndian.PutUint32(buf[idxHeaderPrefix+id*4:], uint32(ch.TotalArt))
 	}
 	_, err := p.Write(buf)
@@ -488,7 +488,7 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) ([]ArticleData, 
 		}
 
 		if meta.Len() == 0 {
-			if err := writeIdxHeader(meta, c.FetchedAtCursor, c.NextPackID, c.PackOffset, c.Channels); err != nil {
+			if err := writeIdxHeader(meta, c.FetchedAtCursor, c.NextPackID, c.PackOffset, c.Feeds); err != nil {
 				return nil, err
 			}
 		}
@@ -514,7 +514,7 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) ([]ArticleData, 
 		} else {
 			fetchedCarry = 0
 		}
-		if err := meta.writeIdx(item.Channel.id, c.NextPackID-prevPackID, int(delta)); err != nil {
+		if err := meta.writeIdx(item.Feed.id, c.NextPackID-prevPackID, int(delta)); err != nil {
 			return nil, err
 		}
 
@@ -529,7 +529,7 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) ([]ArticleData, 
 		written = append(written, ad)
 
 		c.TotalArticles++
-		item.Channel.TotalArt++
+		item.Feed.TotalArt++
 		c.PackOffset++
 	}
 

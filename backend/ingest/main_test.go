@@ -5,19 +5,19 @@ import "testing"
 func TestSelectPrecedence(t *testing.T) {
 	tests := []struct {
 		name          string
-		chanFetcher   string
+		feedFetcher   string
 		globalFetcher string
 		want          string
 	}{
-		{"channel-wins", "chan", "glob", "chan"},
-		{"global-when-channel-empty", "", "glob", "glob"},
+		{"feed-wins", "feed", "glob", "feed"},
+		{"global-when-feed-empty", "", "glob", "glob"},
 		{"default-when-all-empty", "", "", "#rss"},
-		{"channel-overrides-default", "#custom", "", "#custom"},
+		{"feed-overrides-default", "#custom", "", "#custom"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := Select(tt.chanFetcher, tt.globalFetcher); got != tt.want {
+			if got := Select(tt.feedFetcher, tt.globalFetcher); got != tt.want {
 				t.Errorf("got %q, want %q", got, tt.want)
 			}
 		})

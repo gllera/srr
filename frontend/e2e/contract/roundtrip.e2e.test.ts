@@ -5,13 +5,13 @@ import { feedServer, inspectValidate, makeStore, srr, type FeedServer } from "..
 import { nItems, pubUnix, rssFeed } from "../fixtures"
 import { mountReader } from "./mount"
 
-// Two channels fetched into one store, then read back through the real
+// Two feeds fetched into one store, then read back through the real
 // idx.ts/data.ts. Asserts the central contract: every chronIdx maps to the
-// right article (title/link/content/published/channel) and the global order is
+// right article (title/link/content/published/feed) and the global order is
 // published-ascending (cmd_fetch.go sorts articles asc before PutArticles).
 
 interface Expected {
-   chanId: number
+   feedId: number
    title: string
    link: string
    content: string
@@ -32,12 +32,12 @@ describe("contract: round-trip", () => {
          "/beta.xml": rssFeed("Beta", beta),
       })
       store = makeStore()
-      await srr(store, "chan", "add", "-t", "Alpha", "-u", `${feeds.url}/alpha.xml`)
-      await srr(store, "chan", "add", "-t", "Beta", "-u", `${feeds.url}/beta.xml`)
+      await srr(store, "feed", "add", "-t", "Alpha", "-u", `${feeds.url}/alpha.xml`)
+      await srr(store, "feed", "add", "-t", "Beta", "-u", `${feeds.url}/beta.xml`)
       await srr(store, "art", "fetch")
 
-      alpha.forEach((it, i) => expected.push({ chanId: 0, title: it.title, link: it.link, content: it.content, p: pubUnix(i) }))
-      beta.forEach((it, i) => expected.push({ chanId: 1, title: it.title, link: it.link, content: it.content, p: pubUnix(10 + i) }))
+      alpha.forEach((it, i) => expected.push({ feedId: 0, title: it.title, link: it.link, content: it.content, p: pubUnix(i) }))
+      beta.forEach((it, i) => expected.push({ feedId: 1, title: it.title, link: it.link, content: it.content, p: pubUnix(10 + i) }))
       expected.sort((a, b) => a.p - b.p)
 
       reader = await mountReader(store)
@@ -50,15 +50,15 @@ describe("contract: round-trip", () => {
 
    it("db reflects fetched totals", () => {
       expect(reader.data.db.total_art).toBe(expected.length)
-      expect(reader.data.db.channels[0].total_art).toBe(3)
-      expect(reader.data.db.channels[1].total_art).toBe(2)
+      expect(reader.data.db.feeds[0].total_art).toBe(3)
+      expect(reader.data.db.feeds[1].total_art).toBe(2)
    })
 
    it("every chronIdx round-trips through the real reader", async () => {
       for (let i = 0; i < expected.length; i++) {
-         expect(await reader.data.getChannelId(i), `getChannelId(${i})`).toBe(expected[i].chanId)
+         expect(await reader.data.getFeedId(i), `getFeedId(${i})`).toBe(expected[i].feedId)
          const art = await reader.data.loadArticle(i)
-         expect(art.s, `article ${i} chan`).toBe(expected[i].chanId)
+         expect(art.f, `article ${i} feed`).toBe(expected[i].feedId)
          expect(art.t, `article ${i} title`).toBe(expected[i].title)
          expect(art.l, `article ${i} link`).toBe(expected[i].link)
          expect(art.c, `article ${i} content`).toBe(expected[i].content)

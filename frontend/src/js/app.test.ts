@@ -7,22 +7,22 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 // — the pure-logic P1s the heavy e2e-browser layer can't economically pin.
 
 interface ShowFeed {
-   article: { s: number; a: number; p: number; t: string; l: string; c: string }
+   article: { f: number; a: number; p: number; t: string; l: string; c: string }
    has_left: boolean
    has_right: boolean
-   channel?: { id: number; tag: string }
+   feed?: { id: number; tag: string }
    placeholder?: boolean
    filtered?: boolean
 }
 const showFeed = (o: Partial<ShowFeed> = {}): ShowFeed => ({
-   article: { s: 1, a: 0, p: 0, t: "Title", l: "", c: "<p>body</p>" },
+   article: { f: 1, a: 0, p: 0, t: "Title", l: "", c: "<p>body</p>" },
    has_left: false,
    has_right: false,
    ...o,
 })
 
 const nav = vi.hoisted(() => {
-   const sf = () => ({ article: { s: 1, a: 0, p: 0, t: "T", l: "", c: "<p>x</p>" }, has_left: false, has_right: false })
+   const sf = () => ({ article: { f: 1, a: 0, p: 0, t: "T", l: "", c: "<p>x</p>" }, has_left: false, has_right: false })
    return {
       SAVED_TOKEN: "~saved",
       SEARCH_PREFIX: "q:",
@@ -59,8 +59,8 @@ vi.mock("./nav", () => nav)
 
 const data = vi.hoisted(() => ({
    init: vi.fn(async () => {}),
-   db: { total_art: 0, fetched_at: 0, channels: {} } as unknown as IDB,
-   channelTitle: vi.fn(() => "Chan"),
+   db: { total_art: 0, fetched_at: 0, feeds: {} } as unknown as IDB,
+   feedTitle: vi.fn(() => "Feed"),
    findChronForTimestamp: vi.fn(async () => 0),
 }))
 vi.mock("./data", () => data)
@@ -75,7 +75,7 @@ vi.mock("./list", () => list)
 
 const dropdown = vi.hoisted(() => ({
    closeAllDropdowns: vi.fn(),
-   showChannelMenu: vi.fn(),
+   showFeedMenu: vi.fn(),
    showOverflowMenu: vi.fn(),
    openDatePicker: vi.fn(),
    dateJump: vi.fn(),
@@ -112,7 +112,7 @@ const SKELETON = `
       <div class="srr-list" hidden></div>
       <nav class="srr-toolbar">
          <button class="srr-back"></button>
-         <div class="srr-dropdown"><button class="srr-dropdown-btn srr-channel"></button><div id="srr-channel-menu" class="srr-dropdown-menu"></div></div>
+         <div class="srr-dropdown"><button class="srr-dropdown-btn srr-feed"></button><div id="srr-feed-menu" class="srr-dropdown-menu"></div></div>
          <button class="srr-prev" disabled></button>
          <button class="srr-search"></button>
          <button class="srr-next" disabled></button>

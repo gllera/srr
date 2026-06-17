@@ -12,8 +12,8 @@ import * as nav from "./nav"
 //
 // Bidirectional infinite window, anchored at the filter's reading position. On
 // open the list anchors at nav.listAnchor() — the article the reader last sat on
-// when it still matches the filter, else a tag/channel's remembered resume
-// position, else (a tag/channel with no navigation information) its OLDEST
+// when it still matches the filter, else a tag/feed's remembered resume
+// position, else (a tag/feed with no navigation information) its OLDEST
 // article, else the newest match ([ALL]/saved/search). Returning FROM THE READER
 // centers that article in the viewport and highlights its row (.srr-row-current)
 // so you land back on what you were reading; a resume/oldest anchor (filter
@@ -105,20 +105,20 @@ function el(tag: string, className: string): HTMLElement {
 
 // One headline row: a source-colored rail + ("source · age" eyebrow over the
 // title). Unread reads as full-ink weight + saturated rail, read as dimmed.
-// Display fallbacks ("(untitled)", the "[DELETED]" channel tombstone) live here.
+// Display fallbacks ("(untitled)", the "[DELETED]" feed tombstone) live here.
 function rowEl(chron: number, art: IArticle, seen: Record<string, number>): HTMLElement {
    const a = document.createElement("a")
    a.className = "srr-row"
    a.href = "#" + chron + nav.tokensSuffix()
    a.dataset.chron = String(chron)
-   a.dataset.chan = String(art.s)
+   a.dataset.feed = String(art.f)
    // Stable per-source color slot (see styles.css [data-src]): the source-colored
    // left rail + eyebrow let the feed be triaged by origin.
-   a.dataset.src = String(srcColorIndex(art.s))
+   a.dataset.src = String(srcColorIndex(art.f))
    // The article's own timestamp — relabelDividers buckets rows into day strata
    // by comparing the dayLabel of consecutive rows.
    a.dataset.ts = String(art.p || art.a)
-   if (nav.isRowUnread(chron, art.s, seen)) a.classList.add("srr-row-unread")
+   if (nav.isRowUnread(chron, art.f, seen)) a.classList.add("srr-row-unread")
    // The article currently in the reader (the one you were just reading) is
    // highlighted wherever it appears, so returning to the list lands you on it.
    if (chron === nav.currentChron()) a.classList.add("srr-row-current")
@@ -130,7 +130,7 @@ function rowEl(chron: number, art: IArticle, seen: Record<string, number>): HTML
    // follows beneath.
    const head = el("div", "srr-row-head")
    const source = el("span", "srr-row-source")
-   source.textContent = data.channelTitle(art.s)
+   source.textContent = data.feedTitle(art.f)
    const age = el("time", "srr-row-age")
    age.textContent = timeAgo(art.p || art.a)
    head.append(source, age)
@@ -352,7 +352,7 @@ export function refresh(): void {
    const current = nav.currentChron()
    rowsEl.querySelectorAll<HTMLElement>("a.srr-row").forEach((a) => {
       const chron = Number(a.dataset.chron)
-      a.classList.toggle("srr-row-unread", nav.isRowUnread(chron, Number(a.dataset.chan), seen))
+      a.classList.toggle("srr-row-unread", nav.isRowUnread(chron, Number(a.dataset.feed), seen))
       a.classList.toggle("srr-row-current", chron === current)
       const saved = nav.isSaved(chron)
       a.classList.toggle("srr-row-saved", saved)
@@ -594,7 +594,7 @@ function selectRow(row: HTMLElement): void {
    if (!rowsEl) return
    rowsEl.querySelector(".srr-row-current")?.classList.remove("srr-row-current")
    row.classList.add("srr-row-current")
-   nav.select(Number(row.dataset.chron), Number(row.dataset.chan))
+   nav.select(Number(row.dataset.chron), Number(row.dataset.feed))
    scrollRowIntoView(row)
    notifyScroll()
 }

@@ -5,9 +5,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 const data = vi.hoisted(() => {
    const mock = {
       db: { first_fetched: 0 } as IDB,
-      groupChannelsByTag: vi.fn(() => ({ tagged: new Map(), sortedTags: [] as string[], untagged: [] as IChannel[] })),
+      groupFeedsByTag: vi.fn(() => ({ tagged: new Map(), sortedTags: [] as string[], untagged: [] as IFeed[] })),
       findChronForTimestamp: vi.fn(async () => 0),
-      channelTitle: (chanId: number) => mock.db.channels?.[chanId]?.title ?? "[DELETED]",
+      feedTitle: (feedId: number) => mock.db.feeds?.[feedId]?.title ?? "[DELETED]",
    }
    return mock
 })
@@ -19,12 +19,12 @@ const nav = vi.hoisted(() => ({
    last: vi.fn(),
    goTo: vi.fn(),
    switchFilter: vi.fn(),
-   unreadCounts: vi.fn<(chs: IChannel[]) => Promise<Map<number, number>>>(async () => new Map()),
+   unreadCounts: vi.fn<(chs: IFeed[]) => Promise<Map<number, number>>>(async () => new Map()),
    // Synchronous plain sum of the already-computed counts map (mirrors the real
-   // impl): a never-seen channel arrives as its full backlog, a positive number;
+   // impl): a never-seen feed arrives as its full backlog, a positive number;
    // Math.max guards any stray negative / missing member down to 0. Tests that
    // pin the badge value override this implementation.
-   tagUnreadFromCounts: vi.fn<(group: IChannel[], counts: Map<number, number>) => number>((group, counts) =>
+   tagUnreadFromCounts: vi.fn<(group: IFeed[], counts: Map<number, number>) => number>((group, counts) =>
       group.reduce((sum, ch) => sum + Math.max(0, counts.get(ch.id) ?? 0), 0),
    ),
    isUnreadOnly: vi.fn(() => false),
@@ -54,11 +54,11 @@ const DIALOG =
 // The whole toolbar's dropdowns + the proxy dialog: dropdown.ts binds its DOM
 // lookups at module load, so every menu/button/dialog it touches must exist
 // before import.
-const SKELETON = dd("srr-channel", "srr-channel-menu") + dd("srr-overflow", "srr-overflow-menu") + DIALOG
+const SKELETON = dd("srr-feed", "srr-feed-menu") + dd("srr-overflow", "srr-overflow-menu") + DIALOG
 
-const $menu = () => document.getElementById("srr-channel-menu")!
-const chan = (over: Partial<IChannel>): IChannel =>
-   ({ id: 1, title: "Test", url: "http://test.com", total_art: 1, ...over }) as IChannel
+const $menu = () => document.getElementById("srr-feed-menu")!
+const feed = (over: Partial<IFeed>): IFeed =>
+   ({ id: 1, title: "Test", url: "http://test.com", total_art: 1, ...over }) as IFeed
 
 function key(el: HTMLElement, k: string): void {
    el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }))
@@ -345,15 +345,15 @@ describe("dropdown: feed-error badges", () => {
       dropdown = await import("./dropdown")
    })
 
-   it("marks broken channels and their tag header with a dot carrying the error", () => {
-      const broken = chan({ id: 3, title: "Dead", ferr: "404 not found" })
-      const healthy = chan({ id: 4, title: "Live" })
-      data.groupChannelsByTag.mockReturnValueOnce({
+   it("marks broken feeds and their tag header with a dot carrying the error", () => {
+      const broken = feed({ id: 3, title: "Dead", ferr: "404 not found" })
+      const healthy = feed({ id: 4, title: "Live" })
+      data.groupFeedsByTag.mockReturnValueOnce({
          tagged: new Map([["news", [broken]]]),
          sortedTags: ["news"],
          untagged: [healthy],
       })
-      dropdown.showChannelMenu("", guard)
+      dropdown.showFeedMenu("", guard)
 
       const deadRow = $menu().querySelector('a[data-value="3"]')!
       expect(deadRow.querySelector(".srr-err-dot")).not.toBeNull()
@@ -364,13 +364,13 @@ describe("dropdown: feed-error badges", () => {
       expect($menu().querySelector('a[data-value="news"] .srr-err-dot')).not.toBeNull()
    })
 
-   it("renders clean rows for healthy and error-free channels", () => {
-      data.groupChannelsByTag.mockReturnValueOnce({
+   it("renders clean rows for healthy and error-free feeds", () => {
+      data.groupFeedsByTag.mockReturnValueOnce({
          tagged: new Map(),
          sortedTags: [],
-         untagged: [chan({ id: 5, title: "NoErr", ferr: undefined })],
+         untagged: [feed({ id: 5, title: "NoErr", ferr: undefined })],
       })
-      dropdown.showChannelMenu("", guard)
+      dropdown.showFeedMenu("", guard)
       expect($menu().querySelector(".srr-err-dot")).toBeNull()
    })
 })
@@ -388,15 +388,15 @@ describe("dropdown: saved row", () => {
    afterEach(() => nav.savedCount.mockReturnValue(0))
 
    it("hides the ★ Saved row when nothing is saved", () => {
-      data.groupChannelsByTag.mockReturnValueOnce({ tagged: new Map(), sortedTags: [], untagged: [chan({ id: 1 })] })
-      dropdown.showChannelMenu("", vi.fn())
+      data.groupFeedsByTag.mockReturnValueOnce({ tagged: new Map(), sortedTags: [], untagged: [feed({ id: 1 })] })
+      dropdown.showFeedMenu("", vi.fn())
       expect($menu().querySelector('a[data-value="~saved"]')).toBeNull()
    })
 
    it("shows ★ Saved with a count once there are saved articles", () => {
       nav.savedCount.mockReturnValue(7)
-      data.groupChannelsByTag.mockReturnValueOnce({ tagged: new Map(), sortedTags: [], untagged: [chan({ id: 1 })] })
-      dropdown.showChannelMenu("", vi.fn())
+      data.groupFeedsByTag.mockReturnValueOnce({ tagged: new Map(), sortedTags: [], untagged: [feed({ id: 1 })] })
+      dropdown.showFeedMenu("", vi.fn())
       const row = $menu().querySelector('a[data-value="~saved"]')!
       expect(row).not.toBeNull()
       expect(row.textContent).toContain("Saved")
@@ -405,9 +405,9 @@ describe("dropdown: saved row", () => {
 
    it("on the list, selecting ★ Saved routes to host.selectFilter", () => {
       nav.savedCount.mockReturnValue(2)
-      data.groupChannelsByTag.mockReturnValueOnce({ tagged: new Map(), sortedTags: [], untagged: [] })
+      data.groupFeedsByTag.mockReturnValueOnce({ tagged: new Map(), sortedTags: [], untagged: [] })
       const selectFilter = vi.fn()
-      dropdown.showChannelMenu("", vi.fn(), { viewIsList: () => true, selectFilter })
+      dropdown.showFeedMenu("", vi.fn(), { viewIsList: () => true, selectFilter })
       $menu().querySelector<HTMLElement>('a[data-value="~saved"]')!.click()
       expect(selectFilter).toHaveBeenCalledWith("~saved")
    })
@@ -443,7 +443,7 @@ describe("dropdown: unread badges", () => {
    let guard: ReturnType<typeof vi.fn>
 
    const $badge = (value: string) => $menu().querySelector(`a[data-value="${value}"] .srr-unread`)
-   // Drive the batched nav.unreadCounts from a per-channel count function.
+   // Drive the batched nav.unreadCounts from a per-feed count function.
    const counts = (by: (id: number) => number) =>
       nav.unreadCounts.mockImplementation(async (chs) => new Map(chs.map((ch) => [ch.id, by(ch.id)])))
 
@@ -466,10 +466,10 @@ describe("dropdown: unread badges", () => {
    })
 
    it("badges rows from unreadCounts and the tag header from tagUnreadFromCounts, hiding only zero", async () => {
-      const a = chan({ id: 3, title: "A" })
-      const b = chan({ id: 4, title: "B" })
-      const c = chan({ id: 5, title: "C" })
-      data.groupChannelsByTag.mockReturnValueOnce({
+      const a = feed({ id: 3, title: "A" })
+      const b = feed({ id: 4, title: "B" })
+      const c = feed({ id: 5, title: "C" })
+      data.groupFeedsByTag.mockReturnValueOnce({
          tagged: new Map([["news", [a, b]]]),
          sortedTags: ["news"],
          untagged: [c],
@@ -479,7 +479,7 @@ describe("dropdown: unread badges", () => {
       // the same counts map — not a second await pass. Pinned here to prove the
       // header uses that function's value, not an arithmetic sum of the rows.
       nav.tagUnreadFromCounts.mockReturnValue(7)
-      dropdown.showChannelMenu("", guard)
+      dropdown.showFeedMenu("", guard)
       await vi.waitFor(() => expect($badge("3")).not.toBeNull())
       expect($badge("3")!.textContent).toBe("5")
       expect($badge("4")!.textContent).toBe("8") // never seen → full backlog badged
@@ -495,28 +495,28 @@ describe("dropdown: unread badges", () => {
    })
 
    it("hides the tag header badge when tagUnreadFromCounts is zero", async () => {
-      const a = chan({ id: 3, title: "A" })
-      const b = chan({ id: 4, title: "B" })
-      data.groupChannelsByTag.mockReturnValueOnce({
+      const a = feed({ id: 3, title: "A" })
+      const b = feed({ id: 4, title: "B" })
+      data.groupFeedsByTag.mockReturnValueOnce({
          tagged: new Map([["news", [a, b]]]),
          sortedTags: ["news"],
          untagged: [],
       })
       counts(() => 0)
       nav.tagUnreadFromCounts.mockReturnValue(0) // nothing unseen
-      dropdown.showChannelMenu("", guard)
+      dropdown.showFeedMenu("", guard)
       await new Promise((r) => setTimeout(r))
       expect($badge("news")).toBeNull()
    })
 
    it("hides fully-read rows and tags when unseen-only is on, keeping unread and never-seen", async () => {
       nav.isUnreadOnly.mockReturnValue(true)
-      const a = chan({ id: 3, title: "A" }) // unread > 0 → shown
-      const b = chan({ id: 4, title: "B" }) // never seen → full backlog → shown
-      const old = chan({ id: 7, title: "Old" }) // fully read → tag hidden
-      const c = chan({ id: 5, title: "C" }) // untagged, read → hidden
-      const d = chan({ id: 6, title: "D" }) // untagged, unread → shown
-      data.groupChannelsByTag.mockReturnValueOnce({
+      const a = feed({ id: 3, title: "A" }) // unread > 0 → shown
+      const b = feed({ id: 4, title: "B" }) // never seen → full backlog → shown
+      const old = feed({ id: 7, title: "Old" }) // fully read → tag hidden
+      const c = feed({ id: 5, title: "C" }) // untagged, read → hidden
+      const d = feed({ id: 6, title: "D" }) // untagged, unread → shown
+      data.groupFeedsByTag.mockReturnValueOnce({
          tagged: new Map([
             ["archive", [old]],
             ["news", [a, b]],
@@ -525,7 +525,7 @@ describe("dropdown: unread badges", () => {
          untagged: [c, d],
       })
       counts((id) => (id === 3 ? 4 : id === 4 ? 9 : id === 6 ? 2 : 0)) // 4 never-seen → full backlog
-      dropdown.showChannelMenu("", guard)
+      dropdown.showFeedMenu("", guard)
       await vi.waitFor(() => expect($badge("3")).not.toBeNull())
       const row = (v: string) => $menu().querySelector(`a[data-value="${v}"]`)!
       const groupHidden = (v: string) => row(v).closest(".srr-tag-group")!.classList.contains("srr-hidden")
@@ -538,7 +538,7 @@ describe("dropdown: unread badges", () => {
       expect(groupHidden("7")).toBe(true) // archive: only member fully read
    })
 
-   // R3-4: with unseen-only on, the CURRENTLY-APPLIED tag/channel must never
+   // R3-4: with unseen-only on, the CURRENTLY-APPLIED tag/feed must never
    // self-hide even when read down to 0 unseen this session — else it loses its
    // .srr-active styling and becomes keyboard-unreachable while you're on it.
    // The toolbar counter uses a frozen snapshot, so it stays visible regardless.
@@ -546,10 +546,10 @@ describe("dropdown: unread badges", () => {
       nav.isUnreadOnly.mockReturnValue(true)
       nav.getCurrentFilterKey.mockReturnValue("news") // the active filter is the news tag
       try {
-         const a = chan({ id: 3, title: "A" }) // active tag member, fully read
-         const b = chan({ id: 4, title: "B" }) // active tag member, fully read
-         const old = chan({ id: 7, title: "Old" }) // inactive tag, fully read → hidden
-         data.groupChannelsByTag.mockReturnValueOnce({
+         const a = feed({ id: 3, title: "A" }) // active tag member, fully read
+         const b = feed({ id: 4, title: "B" }) // active tag member, fully read
+         const old = feed({ id: 7, title: "Old" }) // inactive tag, fully read → hidden
+         data.groupFeedsByTag.mockReturnValueOnce({
             tagged: new Map([
                ["archive", [old]],
                ["news", [a, b]],
@@ -557,8 +557,8 @@ describe("dropdown: unread badges", () => {
             sortedTags: ["archive", "news"],
             untagged: [],
          })
-         counts(() => 0) // every channel fully read
-         dropdown.showChannelMenu("news", guard)
+         counts(() => 0) // every feed fully read
+         dropdown.showFeedMenu("news", guard)
          await new Promise((r) => setTimeout(r))
          const row = (v: string) => $menu().querySelector(`a[data-value="${v}"]`)!
          const groupHidden = (v: string) => row(v).closest(".srr-tag-group")!.classList.contains("srr-hidden")
@@ -569,35 +569,35 @@ describe("dropdown: unread badges", () => {
       }
    })
 
-   // R3-4: the active CHANNEL row is exempt from hiding the same way.
-   it("does not hide the active channel row when fully read", async () => {
+   // R3-4: the active FEED row is exempt from hiding the same way.
+   it("does not hide the active feed row when fully read", async () => {
       nav.isUnreadOnly.mockReturnValue(true)
-      nav.getCurrentFilterKey.mockReturnValue("5") // the active filter is channel id 5
+      nav.getCurrentFilterKey.mockReturnValue("5") // the active filter is feed id 5
       try {
-         data.groupChannelsByTag.mockReturnValueOnce({
+         data.groupFeedsByTag.mockReturnValueOnce({
             tagged: new Map(),
             sortedTags: [],
-            untagged: [chan({ id: 5, title: "Active" }), chan({ id: 6, title: "Other" })],
+            untagged: [feed({ id: 5, title: "Active" }), feed({ id: 6, title: "Other" })],
          })
          counts(() => 0) // both fully read
-         dropdown.showChannelMenu("", guard)
+         dropdown.showFeedMenu("", guard)
          await new Promise((r) => setTimeout(r))
          const hidden = (v: string) => $menu().querySelector(`a[data-value="${v}"]`)!.classList.contains("srr-hidden")
-         expect(hidden("5")).toBe(false) // active channel stays put
-         expect(hidden("6")).toBe(true) // an inactive fully-read channel is hidden
+         expect(hidden("5")).toBe(false) // active feed stays put
+         expect(hidden("6")).toBe(true) // an inactive fully-read feed is hidden
       } finally {
          nav.getCurrentFilterKey.mockReturnValue("")
       }
    })
 
    it("hides nothing when unseen-only is off", async () => {
-      data.groupChannelsByTag.mockReturnValueOnce({
+      data.groupFeedsByTag.mockReturnValueOnce({
          tagged: new Map(),
          sortedTags: [],
-         untagged: [chan({ id: 5, title: "Read" })],
+         untagged: [feed({ id: 5, title: "Read" })],
       })
       counts(() => 0) // fully read
-      dropdown.showChannelMenu("", guard)
+      dropdown.showFeedMenu("", guard)
       await new Promise((r) => setTimeout(r))
       expect($menu().querySelector('a[data-value="5"]')!.classList.contains("srr-hidden")).toBe(false)
    })
@@ -607,25 +607,25 @@ describe("dropdown: unread badges", () => {
    it("hides a fully-read row in the global ([ALL], key '') unseen-only view — '' exempts nothing", async () => {
       nav.isUnreadOnly.mockReturnValue(true)
       nav.getCurrentFilterKey.mockReturnValue("") // [ALL] / multi-token
-      data.groupChannelsByTag.mockReturnValueOnce({
+      data.groupFeedsByTag.mockReturnValueOnce({
          tagged: new Map(),
          sortedTags: [],
-         untagged: [chan({ id: 5, title: "Read" })],
+         untagged: [feed({ id: 5, title: "Read" })],
       })
       counts(() => 0) // fully read
-      dropdown.showChannelMenu("", guard)
+      dropdown.showFeedMenu("", guard)
       await new Promise((r) => setTimeout(r))
       expect($menu().querySelector('a[data-value="5"]')!.classList.contains("srr-hidden")).toBe(true)
    })
 
    it("caps the displayed count at 999+", async () => {
-      data.groupChannelsByTag.mockReturnValueOnce({
+      data.groupFeedsByTag.mockReturnValueOnce({
          tagged: new Map(),
          sortedTags: [],
-         untagged: [chan({ id: 6, title: "Busy" })],
+         untagged: [feed({ id: 6, title: "Busy" })],
       })
       counts(() => 1500)
-      dropdown.showChannelMenu("", guard)
+      dropdown.showFeedMenu("", guard)
       await vi.waitFor(() => expect($badge("6")).not.toBeNull())
       expect($badge("6")!.textContent).toBe("999+")
    })
@@ -633,12 +633,12 @@ describe("dropdown: unread badges", () => {
    it("a fill that resolves after the menu closed never touches the DOM", async () => {
       let release!: (m: Map<number, number>) => void
       nav.unreadCounts.mockImplementation(() => new Promise<Map<number, number>>((r) => (release = r)))
-      data.groupChannelsByTag.mockReturnValueOnce({
+      data.groupFeedsByTag.mockReturnValueOnce({
          tagged: new Map(),
          sortedTags: [],
-         untagged: [chan({ id: 7, title: "Slow" })],
+         untagged: [feed({ id: 7, title: "Slow" })],
       })
-      dropdown.showChannelMenu("", guard)
+      dropdown.showFeedMenu("", guard)
       dropdown.closeAllDropdowns()
       release(new Map([[7, 9]]))
       await new Promise((r) => setTimeout(r))
@@ -666,12 +666,12 @@ describe("dropdown: menu keyboard navigation", () => {
    })
 
    it("ArrowDown/ArrowUp rove focus through the open menu, wrapping at the ends", () => {
-      data.groupChannelsByTag.mockReturnValueOnce({
+      data.groupFeedsByTag.mockReturnValueOnce({
          tagged: new Map(),
          sortedTags: [],
-         untagged: [chan({ id: 3, title: "A" }), chan({ id: 4, title: "B" })],
+         untagged: [feed({ id: 3, title: "A" }), feed({ id: 4, title: "B" })],
       })
-      dropdown.showChannelMenu("", guard)
+      dropdown.showFeedMenu("", guard)
       const list = items()
       key(document.body, "ArrowDown")
       expect(document.activeElement).toBe(list[0])
@@ -686,12 +686,12 @@ describe("dropdown: menu keyboard navigation", () => {
    })
 
    it("Home/End jump to the first/last item; ArrowUp with no focus starts at the end", () => {
-      data.groupChannelsByTag.mockReturnValueOnce({
+      data.groupFeedsByTag.mockReturnValueOnce({
          tagged: new Map(),
          sortedTags: [],
-         untagged: [chan({ id: 3, title: "A" })],
+         untagged: [feed({ id: 3, title: "A" })],
       })
-      dropdown.showChannelMenu("", guard)
+      dropdown.showFeedMenu("", guard)
       const list = items()
       key(document.body, "ArrowUp")
       expect(document.activeElement).toBe(list[list.length - 1])
@@ -701,13 +701,13 @@ describe("dropdown: menu keyboard navigation", () => {
       expect(document.activeElement).toBe(list[list.length - 1])
    })
 
-   it("skips channel rows hidden inside a collapsed tag group", () => {
-      data.groupChannelsByTag.mockReturnValueOnce({
-         tagged: new Map([["news", [chan({ id: 3, title: "Hidden" })]]]),
+   it("skips feed rows hidden inside a collapsed tag group", () => {
+      data.groupFeedsByTag.mockReturnValueOnce({
+         tagged: new Map([["news", [feed({ id: 3, title: "Hidden" })]]]),
          sortedTags: ["news"],
-         untagged: [chan({ id: 4, title: "Visible" })],
+         untagged: [feed({ id: 4, title: "Visible" })],
       })
-      dropdown.showChannelMenu("", guard) // currentTag "" → news starts collapsed
+      dropdown.showFeedMenu("", guard) // currentTag "" → news starts collapsed
       key(document.body, "End")
       expect((document.activeElement as HTMLElement).dataset.value).toBe("4")
       key(document.activeElement as HTMLElement, "ArrowUp")
@@ -715,7 +715,7 @@ describe("dropdown: menu keyboard navigation", () => {
    })
 
    it("Space activates the focused item and the keys never leak to other handlers", () => {
-      dropdown.showChannelMenu("", guard)
+      dropdown.showFeedMenu("", guard)
       const leak = vi.fn()
       document.addEventListener("keydown", leak) // bubble phase, like app.ts shortcuts
       try {
@@ -731,11 +731,11 @@ describe("dropdown: menu keyboard navigation", () => {
    })
 
    it("closing hands focus back to the menu's button", () => {
-      dropdown.showChannelMenu("", guard)
+      dropdown.showFeedMenu("", guard)
       key(document.body, "ArrowDown")
       expect($menu().contains(document.activeElement)).toBe(true)
       dropdown.closeAllDropdowns()
-      expect(document.activeElement).toBe(document.querySelector(".srr-channel"))
+      expect(document.activeElement).toBe(document.querySelector(".srr-feed"))
    })
 })
 

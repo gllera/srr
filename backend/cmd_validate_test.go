@@ -26,8 +26,8 @@ func TestValidatePipe(t *testing.T) {
 	if err := validatePipe([]string{"#sanitise"}, false); err == nil {
 		t.Error("accepted typo'd built-in #sanitise, want error")
 	}
-	// Channel pipe: #base allowed.
+	// Feed pipe: #base allowed.
 	if err := validatePipe([]string{"#readability", "#base"}, true); err != nil {
-		t.Errorf("channel pipe with #base rejected: %v", err)
+		t.Errorf("feed pipe with #base rejected: %v", err)
 	}
 }

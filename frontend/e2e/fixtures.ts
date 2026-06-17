@@ -47,12 +47,12 @@ function renderItem(it: FeedItem): string {
 export function rssFeed(title: string, items: FeedItem[]): string {
    return (
       `<?xml version="1.0" encoding="UTF-8"?>\n` +
-      `<rss version="2.0"><channel>` +
+      `<rss version="2.0"><feed>` +
       `<title>${xmlEscape(title)}</title>` +
       `<link>http://example.com</link>` +
       `<description>${xmlEscape(title)} feed</description>` +
       items.map(renderItem).join("") +
-      `</channel></rss>`
+      `</feed></rss>`
    )
 }
 
@@ -77,8 +77,8 @@ function seedFor(prefix: string, i: number): number {
 }
 
 // `count` simple items with predictable, distinct titles/links/content. `prefix`
-// keeps items unique across channels. `startIdx` offsets the published-date
-// index so two channels can occupy disjoint, non-overlapping time ranges — that
+// keeps items unique across feeds. `startIdx` offsets the published-date
+// index so two feeds can occupy disjoint, non-overlapping time ranges — that
 // makes the global published-ascending order (chronIdx) total and assertable.
 // `pad` appends `pad` incompressible chars to force data-pack splits under a
 // small --pack-size. Each returned item's published unix is `pubUnix(startIdx + i)`.

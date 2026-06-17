@@ -160,7 +160,7 @@ export function collapseBrokenMedia(e: Event): void {
 // backend's `#minify` pass (tdewolff/minify) drops attribute quotes when the
 // value has no special chars — that fires for clean CDN URLs (no `?` or
 // `&`), so a quote-only regex missed them entirely and the prefetch list
-// came back empty for those channels.
+// came back empty for those feeds.
 const IMG_SRC_RE = /<img\b[^>]*\bsrc\s*=\s*(?:(["'])([^"']+)\1|([^\s>]+))/gi
 export function extractImageUrls(html: string): string[] {
    const out: string[] = []
@@ -189,17 +189,17 @@ export function formatDate(unix: number): string {
 }
 
 // Number of source-color slots. MUST match the `.srr-row[data-src="N"]` rules in
-// styles.css (light + dark). The list gives every channel a stable color from
+// styles.css (light + dark). The list gives every feed a stable color from
 // this ramp so the feed can be triaged by origin at a glance.
 export const SRC_COLORS = 8
 
-// Map a channel id to one of SRC_COLORS palette slots — deterministic and fully
+// Map a feed id to one of SRC_COLORS palette slots — deterministic and fully
 // offline (no favicon is ever fetched, keeping the reader zero-network like the
-// rest of the app). Channel ids are handed out sequentially, so a plain modulo
-// gives every channel a distinct color until a store exceeds SRC_COLORS feeds;
+// rest of the app). Feed ids are handed out sequentially, so a plain modulo
+// gives every feed a distinct color until a store exceeds SRC_COLORS feeds;
 // the double-modulo keeps a stray negative id in range.
-export function srcColorIndex(chanId: number): number {
-   return ((chanId % SRC_COLORS) + SRC_COLORS) % SRC_COLORS
+export function srcColorIndex(feedId: number): number {
+   return ((feedId % SRC_COLORS) + SRC_COLORS) % SRC_COLORS
 }
 
 const DOW = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"]

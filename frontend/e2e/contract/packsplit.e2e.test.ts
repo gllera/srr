@@ -15,7 +15,7 @@ describe("contract: multi data-pack split", () => {
    let feeds: FeedServer
    let store: string
    let reader: Awaited<ReturnType<typeof mountReader>>
-   // One channel, published-ascending = chronIdx order. Content is incompressible
+   // One feed, published-ascending = chronIdx order. Content is incompressible
    // (high-entropy) so the gzip data buffer actually flushes and rolls packs —
    // ~240KB total reliably produces several finalized packs under -s 1.
    const items = nItems(30, "big", 8000)
@@ -23,7 +23,7 @@ describe("contract: multi data-pack split", () => {
    beforeAll(async () => {
       feeds = await feedServer({ "/big.xml": rssFeed("Big", items) })
       store = makeStore()
-      await srr(store, "chan", "add", "-t", "Big", "-u", `${feeds.url}/big.xml`)
+      await srr(store, "feed", "add", "-t", "Big", "-u", `${feeds.url}/big.xml`)
       // -s 1 = 1KB target; finalized packs roll as the gzip buffer flushes.
       await srr(store, "-s", "1", "art", "fetch")
       reader = await mountReader(store)
@@ -46,7 +46,7 @@ describe("contract: multi data-pack split", () => {
          expect(art.t, `article ${i} title`).toBe(items[i].title)
          expect(art.l, `article ${i} link`).toBe(items[i].link)
          expect(art.c, `article ${i} content`).toBe(items[i].content)
-         expect(await reader.data.getChannelId(i)).toBe(0)
+         expect(await reader.data.getFeedId(i)).toBe(0)
       }
    })
 

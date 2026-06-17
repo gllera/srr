@@ -36,7 +36,7 @@ func TestParseOPMLTreeGrouped(t *testing.T) {
 	if len(tech.Children) != 2 {
 		t.Fatalf("Tech children: got %d, want 2", len(tech.Children))
 	}
-	if got := tech.Children[0].Channel.URL; got != "http://example.com/a.xml" {
+	if got := tech.Children[0].Feed.URL; got != "http://example.com/a.xml" {
 		t.Errorf("first tech URL = %q", got)
 	}
 
@@ -63,11 +63,11 @@ func TestParseOPMLTreeFlat(t *testing.T) {
 	if len(nodes) != 1 {
 		t.Fatalf("got %d root nodes, want 1", len(nodes))
 	}
-	if nodes[0].Channel == nil {
-		t.Fatal("expected channel on root node")
+	if nodes[0].Feed == nil {
+		t.Fatal("expected feed on root node")
 	}
-	if nodes[0].Channel.Title != "Direct Feed" {
-		t.Errorf("title = %q, want %q", nodes[0].Channel.Title, "Direct Feed")
+	if nodes[0].Feed.Title != "Direct Feed" {
+		t.Errorf("title = %q, want %q", nodes[0].Feed.Title, "Direct Feed")
 	}
 }
 
@@ -116,8 +116,8 @@ func TestParseOPMLTreeTextFallback(t *testing.T) {
 	if len(nodes[0].Children) != 1 {
 		t.Fatalf("group children: got %d, want 1", len(nodes[0].Children))
 	}
-	if nodes[0].Children[0].Channel.Title != "Text Feed" {
-		t.Errorf("title = %q, want %q", nodes[0].Children[0].Channel.Title, "Text Feed")
+	if nodes[0].Children[0].Feed.Title != "Text Feed" {
+		t.Errorf("title = %q, want %q", nodes[0].Children[0].Feed.Title, "Text Feed")
 	}
 }
 
@@ -162,14 +162,14 @@ func TestParseOPMLTreeNested(t *testing.T) {
 	if blogs == nil || len(blogs.Children) != 1 {
 		t.Fatal("expected Blogs group with 1 child")
 	}
-	if blogs.Children[0].Channel.Title != "Deep Blog" {
-		t.Errorf("nested feed title = %q, want %q", blogs.Children[0].Channel.Title, "Deep Blog")
+	if blogs.Children[0].Feed.Title != "Deep Blog" {
+		t.Errorf("nested feed title = %q, want %q", blogs.Children[0].Feed.Title, "Deep Blog")
 	}
 
-	if topFeed == nil || topFeed.Channel == nil {
+	if topFeed == nil || topFeed.Feed == nil {
 		t.Fatal("expected Top Feed as leaf subscription")
 	}
-	if got := topFeed.Channel.URL; got != "http://example.com/top.xml" {
+	if got := topFeed.Feed.URL; got != "http://example.com/top.xml" {
 		t.Errorf("top feed URL = %q", got)
 	}
 }
@@ -244,7 +244,7 @@ func TestParseOPMLEmptyBody(t *testing.T) {
 	}
 }
 
-func TestOutlineToChannelBadURLs(t *testing.T) {
+func TestOutlineToFeedBadURLs(t *testing.T) {
 	tests := []struct {
 		name    string
 		url     string
@@ -260,9 +260,9 @@ func TestOutlineToChannelBadURLs(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			o := Outline{XMLURL: tt.url, Title: "Test"}
-			c := outlineToChannel(o)
+			c := outlineToFeed(o)
 			if (c == nil) != tt.wantNil {
-				t.Errorf("outlineToChannel(%q) nil=%v, want nil=%v", tt.url, c == nil, tt.wantNil)
+				t.Errorf("outlineToFeed(%q) nil=%v, want nil=%v", tt.url, c == nil, tt.wantNil)
 			}
 		})
 	}
@@ -316,8 +316,8 @@ func TestResolveTag(t *testing.T) {
 	}
 }
 
-func TestParseOPMLGroupWithChannel(t *testing.T) {
-	// A group node that itself has a channel URL plus children
+func TestParseOPMLGroupWithFeed(t *testing.T) {
+	// A group node that itself has a feed URL plus children
 	f := writeTempFile(t, `<?xml version="1.0"?>
 <opml version="2.0">
 <body>
@@ -335,9 +335,9 @@ func TestParseOPMLGroupWithChannel(t *testing.T) {
 	if len(nodes) != 1 {
 		t.Fatalf("got %d root nodes, want 1", len(nodes))
 	}
-	// The node should have both a Channel and Children
-	if nodes[0].Channel == nil {
-		t.Error("expected group node to have a channel")
+	// The node should have both a Feed and Children
+	if nodes[0].Feed == nil {
+		t.Error("expected group node to have a feed")
 	}
 	if len(nodes[0].Children) != 1 {
 		t.Errorf("expected 1 child, got %d", len(nodes[0].Children))

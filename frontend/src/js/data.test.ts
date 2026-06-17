@@ -14,12 +14,12 @@ vi.mock("./data", () => ({
    set db(v: IDB) {
       state.db = v
    },
-   groupChannelsByTag(): { tagged: Map<string, IChannel[]>; sortedTags: string[]; untagged: IChannel[] } {
-      const subs = Object.values(state.db.channels ?? {})
-         .filter((sub: IChannel) => sub.total_art > 0)
-         .sort((a: IChannel, b: IChannel) => (a.title < b.title ? -1 : 1))
-      const tagged = new Map<string, IChannel[]>()
-      const untagged: IChannel[] = []
+   groupFeedsByTag(): { tagged: Map<string, IFeed[]>; sortedTags: string[]; untagged: IFeed[] } {
+      const subs = Object.values(state.db.feeds ?? {})
+         .filter((sub: IFeed) => sub.total_art > 0)
+         .sort((a: IFeed, b: IFeed) => (a.title < b.title ? -1 : 1))
+      const tagged = new Map<string, IFeed[]>()
+      const untagged: IFeed[] = []
       for (const sub of subs) {
          if (sub.tag) {
             let group = tagged.get(sub.tag)
@@ -42,10 +42,10 @@ const data = await import("./data")
 // in idx.test.ts (findPackForBlocks, findChronForBlocks) and the composition
 // in the contract layer (summary.e2e.test.ts).
 
-describe("groupChannelsByTag", () => {
-   it("returns empty collections when no channels", () => {
-      state.db = { channels: {} } as IDB
-      const result = data.groupChannelsByTag()
+describe("groupFeedsByTag", () => {
+   it("returns empty collections when no feeds", () => {
+      state.db = { feeds: {} } as IDB
+      const result = data.groupFeedsByTag()
       expect(result.tagged.size).toBe(0)
       expect(result.sortedTags).toEqual([])
       expect(result.untagged).toEqual([])
@@ -53,12 +53,12 @@ describe("groupChannelsByTag", () => {
 
    it("separates tagged and untagged subs", () => {
       state.db = {
-         channels: {
+         feeds: {
             1: { id: 1, title: "A", total_art: 1, tag: "news" },
             2: { id: 2, title: "B", total_art: 1 },
          },
       } as unknown as IDB
-      const result = data.groupChannelsByTag()
+      const result = data.groupFeedsByTag()
       expect(result.sortedTags).toEqual(["news"])
       expect(result.tagged.get("news")!.length).toBe(1)
       expect(result.untagged.length).toBe(1)
@@ -67,35 +67,35 @@ describe("groupChannelsByTag", () => {
 
    it("sorts tags alphabetically", () => {
       state.db = {
-         channels: {
+         feeds: {
             1: { id: 1, title: "A", total_art: 1, tag: "zebra" },
             2: { id: 2, title: "B", total_art: 1, tag: "alpha" },
          },
       } as unknown as IDB
-      const result = data.groupChannelsByTag()
+      const result = data.groupFeedsByTag()
       expect(result.sortedTags).toEqual(["alpha", "zebra"])
    })
 
    it("groups multiple subs under same tag", () => {
       state.db = {
-         channels: {
+         feeds: {
             1: { id: 1, title: "A", total_art: 1, tag: "tech" },
             2: { id: 2, title: "B", total_art: 1, tag: "tech" },
          },
       } as unknown as IDB
-      const result = data.groupChannelsByTag()
+      const result = data.groupFeedsByTag()
       expect(result.tagged.get("tech")!.length).toBe(2)
       expect(result.sortedTags).toEqual(["tech"])
    })
 
    it("excludes subs with zero articles", () => {
       state.db = {
-         channels: {
+         feeds: {
             1: { id: 1, title: "A", total_art: 0, tag: "news" },
             2: { id: 2, title: "B", total_art: 1 },
          },
       } as unknown as IDB
-      const result = data.groupChannelsByTag()
+      const result = data.groupFeedsByTag()
       expect(result.tagged.size).toBe(0)
       expect(result.untagged.length).toBe(1)
    })

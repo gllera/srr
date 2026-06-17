@@ -3,7 +3,7 @@
 // The Go declarations in backend/ are the single source of truth for the
 // writer↔reader data contract: the format constants in db.go, the pack-name
 // grammar in store/main.go (PackSeries), and the JSON struct tags of
-// ArticleData/Channel/DBCore. Regenerate with
+// ArticleData/Feed/DBCore. Regenerate with
 // `make generate`; `make verify` fails when this file is stale.
 //
 // Wire-type conventions: `?` = json omitempty (key absent at the Go zero
@@ -18,11 +18,11 @@ export const IDX_STATE_SIZE = 12
 // bytes: idx-header fixed prefix (3 state uint32s + numSlots uint32); the variable count array follows
 export const IDX_HEADER_PREFIX = 16
 
-// bytes per idx entry: chan_id uint16 LE + packed uint8
+// bytes per idx entry: feed_id uint16 LE + packed uint8
 export const IDX_ENTRY_SIZE = 3
 
-// channel-id ceiling: chan_id is a uint16, ids run [0, this)
-export const CHAN_ID_CEILING = 65536
+// feed-id ceiling: feed_id is a uint16, ids run [0, this)
+export const FEED_ID_CEILING = 65536
 
 // seconds per idx timestamp block (8h): stored fetched_at is unix seconds ÷ this
 export const FETCHED_AT_BLOCK = 28800
@@ -51,7 +51,7 @@ export const PACK_SERIES_KINDS: Record<string, string> = { idx: "Lh", data: "L",
 
 // Wire shape of one JSONL line in data/*.gz (backend ArticleData).
 export interface IArticleWire {
-   s: number // ChannelID
+   f: number // FeedID
    a: number // FetchedAt
    p?: number // Published
    t?: string // Title
@@ -61,13 +61,13 @@ export interface IArticleWire {
 
 // Wire shape of one JSONL line in search/ shards (backend SearchEntry).
 export interface ISearchEntryWire {
-   s: number // ChannelID
+   f: number // FeedID
    w: number // When
    t?: string // Title
 }
 
-// Wire shape of a db.gz channels{} value (backend Channel).
-export interface IChannelWire {
+// Wire shape of a db.gz feeds{} value (backend Feed).
+export interface IFeedWire {
    title: string // Title
    url: string // URL
    etag?: string // ETag
@@ -97,5 +97,5 @@ export interface IDBWire {
    hdrs?: number // HdrPacks
    srch?: number // SearchPacks
    srcht?: number // SearchTail
-   channels: Record<number, IChannelWire> | null // Channels
+   feeds: Record<number, IFeedWire> | null // Feeds
 }

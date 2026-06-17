@@ -7,39 +7,39 @@ import { describe, it, expect, vi, beforeEach } from "vitest"
 
 const data = vi.hoisted(() => {
    const mock = {
-      db: { total_art: 0, channels: {} } as IDB,
+      db: { total_art: 0, feeds: {} } as IDB,
       _arts: new Map<number, IArticle>(),
       // Largest chron <= from whose article exists and matches the active filter
-      // (mirrors data.findLeft over filter.channels); -1 when none.
+      // (mirrors data.findLeft over filter.feeds); -1 when none.
       findLeft: vi.fn(async (from: number) => {
          for (let i = from; i >= 0; i--) {
             const a = mock._arts.get(i)
             if (!a) continue
-            if (nav.filter.channels.size > 0 && !nav.filter.channels.has(a.s)) continue
+            if (nav.filter.feeds.size > 0 && !nav.filter.feeds.has(a.f)) continue
             return i
          }
          return -1
       }),
       // Smallest chron >= from whose article exists and matches the active filter
-      // (mirrors data.findRight over filter.channels); -1 when none.
+      // (mirrors data.findRight over filter.feeds); -1 when none.
       findRight: vi.fn(async (from: number) => {
          for (let i = from; i < mock.db.total_art; i++) {
             const a = mock._arts.get(i)
             if (!a) continue
-            if (nav.filter.channels.size > 0 && !nav.filter.channels.has(a.s)) continue
+            if (nav.filter.feeds.size > 0 && !nav.filter.feeds.has(a.f)) continue
             return i
          }
          return -1
       }),
       loadArticle: vi.fn(async (chron: number) => mock._arts.get(chron)!),
-      channelTitle: vi.fn((id: number) => "Chan" + id),
+      feedTitle: vi.fn((id: number) => "Feed" + id),
    }
    return mock
 })
 vi.mock("./data", () => data)
 
 const nav = vi.hoisted(() => {
-   const filter = { channels: new Map<number, number>(), active: false, saved: false, search: false }
+   const filter = { feeds: new Map<number, number>(), active: false, saved: false, search: false }
    let seen: Record<string, number> = {}
    let saved = new Set<number>()
    let searchTerm = ""
@@ -75,7 +75,7 @@ const nav = vi.hoisted(() => {
       getCurrentFilterKey: vi.fn(() => ""),
       tokensSuffix: vi.fn(() => (filter.saved ? "!~saved" : filter.active ? "!F" : "")),
       currentChron: vi.fn(() => pos),
-      // The list's keyboard cursor sets nav.pos to the selected row (the chan arg
+      // The list's keyboard cursor sets nav.pos to the selected row (the feed arg
       // is still recorded for assertions; the real setter also clears prefetch).
       select: vi.fn((chron: number) => (pos = chron)),
       anchorChron: vi.fn(() => anchor),
@@ -84,8 +84,8 @@ const nav = vi.hoisted(() => {
       // (that resolution is exercised in nav.test.ts against the real nav).
       listAnchor: vi.fn(async () => anchor),
       getSeenMap: vi.fn(() => seen),
-      isRowUnread: vi.fn((chron: number, chan: number, s: Record<string, number>) => {
-         const v = s["chan:" + chan]
+      isRowUnread: vi.fn((chron: number, feed: number, s: Record<string, number>) => {
+         const v = s["feed:" + feed]
          return v === undefined || chron > v
       }),
       isSaved: vi.fn((chron: number) => saved.has(chron)),
@@ -98,8 +98,8 @@ const nav = vi.hoisted(() => {
          return true
       }),
       savedCount: vi.fn(() => saved.size),
-      // The list's neighbor walk: channel mode delegates to data.findLeft/Right
-      // (which read filter.channels), saved mode walks the explicit set.
+      // The list's neighbor walk: feed mode delegates to data.findLeft/Right
+      // (which read filter.feeds), saved mode walks the explicit set.
       feedLeft: vi.fn(async (from: number) => {
          if (!filter.saved) return data.findLeft(from)
          let res = -1
@@ -127,13 +127,13 @@ vi.mock("./fmt", () => ({
 
 type List = typeof import("./list")
 
-const art = (over: Partial<IArticle>): IArticle => ({ s: 1, a: 100, p: 0, t: "T", l: "", c: "", ...over }) as IArticle
+const art = (over: Partial<IArticle>): IArticle => ({ f: 1, a: 100, p: 0, t: "T", l: "", c: "", ...over }) as IArticle
 
-// Seed the fake index with one article per chron (0..n-1). `chan(chron)` lets a
-// test interleave channels; default everything to channel 1.
-function setIndex(n: number, chan: (chron: number) => number = () => 1) {
+// Seed the fake index with one article per chron (0..n-1). `feed(chron)` lets a
+// test interleave feeds; default everything to feed 1.
+function setIndex(n: number, feed: (chron: number) => number = () => 1) {
    data._arts.clear()
-   for (let i = 0; i < n; i++) data._arts.set(i, art({ s: chan(i), t: "title " + i, a: i }))
+   for (let i = 0; i < n; i++) data._arts.set(i, art({ f: feed(i), t: "title " + i, a: i }))
    data.db.total_art = n
 }
 
@@ -151,7 +151,7 @@ describe("list", () => {
       opened = []
       // jsdom has no real scroll; keep scrollTo a no-op spy.
       window.scrollTo = vi.fn()
-      nav.filter.channels = new Map()
+      nav.filter.feeds = new Map()
       nav.filter.active = false
       nav.filter.saved = false
       nav.filter.search = false
@@ -165,14 +165,14 @@ describe("list", () => {
       list.setup(container, (chron) => opened.push(chron))
    })
 
-   it("renders rows newest-first with title + channel·age meta", async () => {
+   it("renders rows newest-first with title + feed·age meta", async () => {
       setIndex(4)
       await list.render()
       expect($chrons()).toEqual([3, 2, 1, 0])
       const top = $rows()[0]
       expect(top.querySelector(".srr-row-title")!.textContent).toBe("title 3")
-      // Source-first head: channel name leads, age right-aligned beside it.
-      expect(top.querySelector(".srr-row-source")!.textContent).toBe("Chan1")
+      // Source-first head: feed name leads, age right-aligned beside it.
+      expect(top.querySelector(".srr-row-source")!.textContent).toBe("Feed1")
       // timeAgo is stubbed to `${when}s`; when = published || fetched_at (=chron here)
       expect(top.querySelector(".srr-row-age")!.textContent).toBe("3s")
       expect(top.getAttribute("href")).toBe("#3")
@@ -203,9 +203,9 @@ describe("list", () => {
       expect(await list.moveSelection("newer")).toBe(4)
    })
 
-   it("marks rows unread strictly after the channel's seen high-water", async () => {
+   it("marks rows unread strictly after the feed's seen high-water", async () => {
       setIndex(5)
-      nav._setSeen({ "chan:1": 2 }) // 0,1,2 read · 3,4 unread
+      nav._setSeen({ "feed:1": 2 }) // 0,1,2 read · 3,4 unread
       await list.render()
       const unread = (chron: number) =>
          $rows()
@@ -217,7 +217,7 @@ describe("list", () => {
       expect(unread(0)).toBe(false)
    })
 
-   it("a never-seen channel renders every row unread", async () => {
+   it("a never-seen feed renders every row unread", async () => {
       setIndex(3)
       await list.render()
       expect($rows().every((a) => a.classList.contains("srr-row-unread"))).toBe(true)
@@ -248,10 +248,10 @@ describe("list", () => {
       expect($rows().length).toBe(65)
    })
 
-   it("only includes channels in the active filter", async () => {
-      setIndex(6, (c) => (c % 2 === 0 ? 1 : 2)) // even=chan1, odd=chan2
+   it("only includes feeds in the active filter", async () => {
+      setIndex(6, (c) => (c % 2 === 0 ? 1 : 2)) // even=feed1, odd=feed2
       nav.filter.active = true
-      nav.filter.channels = new Map([[1, 0]])
+      nav.filter.feeds = new Map([[1, 0]])
       await list.render()
       expect($chrons()).toEqual([4, 2, 0])
    })
@@ -266,7 +266,7 @@ describe("list", () => {
    it("shows an empty state when the filter matches nothing", async () => {
       setIndex(4, () => 1)
       nav.filter.active = true
-      nav.filter.channels = new Map([[99, 0]]) // no articles in channel 99
+      nav.filter.feeds = new Map([[99, 0]]) // no articles in feed 99
       await list.render()
       expect(container.querySelector(".srr-list-empty")).not.toBeNull()
    })
@@ -288,7 +288,7 @@ describe("list", () => {
    it("shows an 'all caught up' state when unseen-only leaves nothing unread", async () => {
       setIndex(4, () => 1)
       nav.filter.active = true
-      nav.filter.channels = new Map([[99, 0]]) // nothing matches → empty feed
+      nav.filter.feeds = new Map([[99, 0]]) // nothing matches → empty feed
       nav._setUnreadOnly(true)
       await list.render()
       const empty = container.querySelector(".srr-list-empty")
@@ -300,7 +300,7 @@ describe("list", () => {
       setIndex(4)
       await list.render()
       expect($rows().every((a) => a.classList.contains("srr-row-unread"))).toBe(true)
-      nav._setSeen({ "chan:1": 3 }) // now all read
+      nav._setSeen({ "feed:1": 3 }) // now all read
       list.refresh()
       expect($rows().some((a) => a.classList.contains("srr-row-unread"))).toBe(false)
    })
@@ -476,7 +476,7 @@ describe("list", () => {
 
       expect(await list.moveSelection("older")).toBe(4) // A/← → older = the row below
       expect($current()).toEqual([4]) // exactly one row highlighted
-      expect(nav.select).toHaveBeenLastCalledWith(4, 1) // pos + channel synced
+      expect(nav.select).toHaveBeenLastCalledWith(4, 1) // pos + feed synced
 
       expect(await list.moveSelection("newer")).toBe(5) // D/→ → newer = the row above
       expect(await list.moveSelection("newer")).toBe(6)
@@ -555,7 +555,7 @@ describe("list", () => {
       // under the ch1 filter is -1, so render re-seeds to the newest ch1 (3) and
       // opens newest-first there instead of anchoring on the non-matching row.
       setIndex(4, (c) => (c < 2 ? 2 : 1))
-      nav.filter.channels = new Map([[1, 0]])
+      nav.filter.feeds = new Map([[1, 0]])
       nav.filter.active = true
       nav._setPos(-1)
       nav._setListAnchor(0)

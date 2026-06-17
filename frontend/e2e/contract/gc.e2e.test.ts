@@ -20,7 +20,7 @@ describe("contract: latest-pack GC grace window", () => {
    beforeAll(async () => {
       feeds = await feedServer({ "/a.xml": rssFeed("GC", all.slice(0, 2)) })
       store = makeStore()
-      await srr(store, "chan", "add", "-t", "GC", "-u", `${feeds.url}/a.xml`)
+      await srr(store, "feed", "add", "-t", "GC", "-u", `${feeds.url}/a.xml`)
       await srr(store, "art", "fetch")
 
       // Three more fetches, each re-presenting everything + 2 new items

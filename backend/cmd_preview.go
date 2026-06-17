@@ -80,7 +80,7 @@ func (o *PreviewCmd) Run() error {
 	processor := mod.New()
 	engine := ingest.New()
 
-	// Resolve the effective pipeline exactly like a channel: an empty -p
+	// Resolve the effective pipeline exactly like a feed: an empty -p
 	// inherits the root pipe (which defaults to #sanitize/#minify), so preview
 	// never serves raw, unsanitized feed HTML via the template's rawHTML helper.
 	pipe := resolvePipe(rootPipe, o.Pipe)

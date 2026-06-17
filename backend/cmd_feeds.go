@@ -38,11 +38,11 @@ func printJSON(v any) error {
 	return printFormatted("json", v)
 }
 
-// normalizeChannel trims/validates a channel's pipe and tag just before it is
+// normalizeFeed trims/validates a feed's pipe and tag just before it is
 // persisted (the single chokepoint for add / upd / apply / edit / import), so a
 // bad value fails loudly at config time instead of silently breaking the fetch
-// later. Channel pipes may use #base (allowBase=true).
-func normalizeChannel(ch *Channel) error {
+// later. Feed pipes may use #base (allowBase=true).
+func normalizeFeed(ch *Feed) error {
 	ch.Pipe = filterPipe(ch.Pipe)
 	if err := validatePipe(ch.Pipe, true); err != nil {
 		return err
@@ -51,7 +51,7 @@ func normalizeChannel(ch *Channel) error {
 }
 
 // validateTag rejects a numeric-only tag. The frontend filter resolves an
-// all-digits token as a channel id, so such a tag would silently show every
+// all-digits token as a feed id, so such a tag would silently show every
 // article instead of the tagged set (and could collide with a real id).
 func validateTag(tag string) error {
 	if tag == "" {
@@ -62,14 +62,14 @@ func validateTag(tag string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("tag %q cannot be numeric-only (it would be read as a channel id)", tag)
+	return fmt.Errorf("tag %q cannot be numeric-only (it would be read as a feed id)", tag)
 }
 
 type AddCmd struct {
-	Title   *string  `short:"t" required:""              help:"Channel title."`
-	URL     *string  `short:"u" required:""              help:"Channel RSS url."`
-	Tag     *string  `short:"g" optional:""              help:"Channel tag."`
-	Parsers []string `short:"p" sep:"none" optional:"" help:"Channel pipe step; repeat -p per step (not comma-separated). Empty (\"\") for default."`
+	Title   *string  `short:"t" required:""              help:"Feed title."`
+	URL     *string  `short:"u" required:""              help:"Feed RSS url."`
+	Tag     *string  `short:"g" optional:""              help:"Feed tag."`
+	Parsers []string `short:"p" sep:"none" optional:"" help:"Feed pipe step; repeat -p per step (not comma-separated). Empty (\"\") for default."`
 	Ingest  *string  `short:"i" optional:""              help:"Ingest strategy: built-in ('#rss') or shell command."`
 }
 
@@ -84,32 +84,32 @@ func (o *AddCmd) Run() error {
 		if !validFeedURL(*o.URL) {
 			return fmt.Errorf("invalid url %q", *o.URL)
 		}
-		ch := &Channel{Title: *o.Title, URL: *o.URL}
+		ch := &Feed{Title: *o.Title, URL: *o.URL}
 		if o.Tag != nil {
 			ch.Tag = *o.Tag
 		}
 		if o.Parsers != nil {
-			ch.Pipe = o.Parsers // normalizeChannel trims/validates below
+			ch.Pipe = o.Parsers // normalizeFeed trims/validates below
 		}
 		if o.Ingest != nil {
 			ch.Ingest = *o.Ingest
 		}
-		if err := normalizeChannel(ch); err != nil {
+		if err := normalizeFeed(ch); err != nil {
 			return err
 		}
-		if err := db.AddChannel(ch); err != nil {
+		if err := db.AddFeed(ch); err != nil {
 			return err
 		}
 		return db.Commit(ctx)
 	})
 }
 
-// channelView is the canonical JSON/YAML shape for channel records. Used
-// by `chan ls`, `chan show`, `chan apply`, and `chan edit`. ID is a pointer
+// feedView is the canonical JSON/YAML shape for feed records. Used
+// by `feed ls`, `feed show`, `feed apply`, and `feed edit`. ID is a pointer
 // so `apply` can distinguish "absent => create" from "id 0 => update". One
-// channel = one URL: the URL is a flat field; the last fetch error (if any)
+// feed = one URL: the URL is a flat field; the last fetch error (if any)
 // rides alongside it as a read-only `error` for visibility.
-type channelView struct {
+type feedView struct {
 	ID     *int     `json:"id,omitempty" yaml:"id,omitempty"`
 	Title  string   `json:"title"        yaml:"title"`
 	URL    string   `json:"url"          yaml:"url"`
@@ -119,10 +119,10 @@ type channelView struct {
 	Ingest string   `json:"ingest,omitempty" yaml:"ingest,omitempty"`
 }
 
-// viewOf builds an output channelView for a stored Channel.
-func viewOf(ch *Channel) *channelView {
+// viewOf builds an output feedView for a stored Feed.
+func viewOf(ch *Feed) *feedView {
 	id := ch.id
-	return &channelView{
+	return &feedView{
 		ID:     &id,
 		Title:  ch.Title,
 		URL:    ch.URL,
@@ -134,12 +134,12 @@ func viewOf(ch *Channel) *channelView {
 }
 
 type UpdCmd struct {
-	ID      int      `arg:""                                 help:"Channel id to update."`
-	Title   *string  `short:"t" optional:""                  help:"Channel title (empty rejected)."`
-	URL     *string  `short:"u" optional:""                  help:"Channel RSS url. Changing it resets the channel's fetch state (etag/watermark/dedup)."`
-	Tag     *string  `short:"g" optional:""                  help:"Channel tag. Empty (\"\") to clear."`
-	Parsers []string `short:"p" sep:"none" optional:"" help:"Channel pipe step; repeat -p per step (not comma-separated). Empty (\"\") to clear."`
-	Ingest  *string  `short:"i" optional:""                  help:"Channel ingest strategy. Empty (\"\") to clear."`
+	ID      int      `arg:""                                 help:"Feed id to update."`
+	Title   *string  `short:"t" optional:""                  help:"Feed title (empty rejected)."`
+	URL     *string  `short:"u" optional:""                  help:"Feed RSS url. Changing it resets the feed's fetch state (etag/watermark/dedup)."`
+	Tag     *string  `short:"g" optional:""                  help:"Feed tag. Empty (\"\") to clear."`
+	Parsers []string `short:"p" sep:"none" optional:"" help:"Feed pipe step; repeat -p per step (not comma-separated). Empty (\"\") to clear."`
+	Ingest  *string  `short:"i" optional:""                  help:"Feed ingest strategy. Empty (\"\") to clear."`
 }
 
 func (o *UpdCmd) Run() error {
@@ -148,7 +148,7 @@ func (o *UpdCmd) Run() error {
 	}
 
 	return withDB(true, func(ctx context.Context, db *DB) error {
-		ch, err := db.ChannelByID(o.ID)
+		ch, err := db.FeedByID(o.ID)
 		if err != nil {
 			return err
 		}
@@ -162,7 +162,7 @@ func (o *UpdCmd) Run() error {
 			ch.Tag = *o.Tag
 		}
 		if o.Parsers != nil {
-			ch.Pipe = o.Parsers // normalizeChannel trims/validates below
+			ch.Pipe = o.Parsers // normalizeFeed trims/validates below
 		}
 		if o.Ingest != nil {
 			ch.Ingest = *o.Ingest
@@ -171,21 +171,21 @@ func (o *UpdCmd) Run() error {
 			if !validFeedURL(*o.URL) {
 				return fmt.Errorf("invalid url %q", *o.URL)
 			}
-			setChannelURL(ch, *o.URL)
+			setFeedURL(ch, *o.URL)
 		}
 
-		if err := normalizeChannel(ch); err != nil {
+		if err := normalizeFeed(ch); err != nil {
 			return err
 		}
 		return db.Commit(ctx)
 	})
 }
 
-// setChannelURL points the channel at url, preserving the per-channel fetch
+// setFeedURL points the feed at url, preserving the per-feed fetch
 // state (ETag/Watermark/BoundaryGUIDs/LastModified/FetchError) when the URL is
 // unchanged and resetting it when the URL changes — a new source shares no
 // dedup/cache history with the old one.
-func setChannelURL(ch *Channel, url string) {
+func setFeedURL(ch *Feed, url string) {
 	if ch.URL == url {
 		return
 	}
@@ -198,13 +198,13 @@ func setChannelURL(ch *Channel, url string) {
 }
 
 type RmCmd struct {
-	ID []int `arg:"" help:"Channel ids to remove."`
+	ID []int `arg:"" help:"Feed ids to remove."`
 }
 
 func (o *RmCmd) Run() error {
 	return withDB(true, func(ctx context.Context, db *DB) error {
 		for _, id := range o.ID {
-			db.RemoveChannel(id)
+			db.RemoveFeed(id)
 		}
 		return db.Commit(ctx)
 	})
@@ -217,8 +217,8 @@ type LsCmd struct {
 
 func (o *LsCmd) Run() error {
 	return withDB(false, func(_ context.Context, db *DB) error {
-		out := make([]*channelView, 0, len(db.Channels()))
-		for _, ch := range db.Channels() {
+		out := make([]*feedView, 0, len(db.Feeds()))
+		for _, ch := range db.Feeds() {
 			if o.Tag != nil && ch.Tag != *o.Tag {
 				continue
 			}
@@ -232,13 +232,13 @@ func (o *LsCmd) Run() error {
 }
 
 type ShowCmd struct {
-	ID     int    `arg:"" help:"Channel id."`
+	ID     int    `arg:"" help:"Feed id."`
 	Format string `short:"f" default:"json" enum:"yaml,json" help:"Output format."`
 }
 
 func (o *ShowCmd) Run() error {
 	return withDB(false, func(_ context.Context, db *DB) error {
-		ch, err := db.ChannelByID(o.ID)
+		ch, err := db.FeedByID(o.ID)
 		if err != nil {
 			return err
 		}
@@ -286,30 +286,30 @@ func (o *ApplyCmd) Run() error {
 // if every entry validates and applies cleanly — a late failure abandons
 // the closure with the in-memory mutations unpersisted, so the on-disk
 // db.gz stays at the pre-apply state.
-func applyViews(ctx context.Context, db *DB, views []*channelView) error {
+func applyViews(ctx context.Context, db *DB, views []*feedView) error {
 	type pending struct {
-		view *channelView
-		ch   *Channel // existing channel for update; nil for create
+		view *feedView
+		ch   *Feed // existing feed for update; nil for create
 	}
 	ops := make([]pending, 0, len(views))
 	for i, v := range views {
 		if v == nil {
-			return fmt.Errorf("channel #%d: null entry", i)
+			return fmt.Errorf("feed #%d: null entry", i)
 		}
 		if v.Title == "" {
-			return fmt.Errorf("channel #%d: title required", i)
+			return fmt.Errorf("feed #%d: title required", i)
 		}
 		if v.URL == "" {
-			return fmt.Errorf("channel #%d: url required", i)
+			return fmt.Errorf("feed #%d: url required", i)
 		}
 		if !validFeedURL(v.URL) {
-			return fmt.Errorf("channel #%d: invalid url %q", i, v.URL)
+			return fmt.Errorf("feed #%d: invalid url %q", i, v.URL)
 		}
 		if v.ID == nil {
 			ops = append(ops, pending{view: v})
 			continue
 		}
-		ch, err := db.ChannelByID(*v.ID)
+		ch, err := db.FeedByID(*v.ID)
 		if err != nil {
 			return err
 		}
@@ -319,14 +319,14 @@ func applyViews(ctx context.Context, db *DB, views []*channelView) error {
 	for _, op := range ops {
 		target := op.ch
 		if target == nil {
-			target = &Channel{}
+			target = &Feed{}
 		}
-		writeChannelView(target, op.view)
-		if err := normalizeChannel(target); err != nil {
-			return fmt.Errorf("channel %q: %w", op.view.Title, err)
+		writeFeedView(target, op.view)
+		if err := normalizeFeed(target); err != nil {
+			return fmt.Errorf("feed %q: %w", op.view.Title, err)
 		}
 		if op.ch == nil {
-			if err := db.AddChannel(target); err != nil {
+			if err := db.AddFeed(target); err != nil {
 				return err
 			}
 		}
@@ -334,43 +334,43 @@ func applyViews(ctx context.Context, db *DB, views []*channelView) error {
 	return db.Commit(ctx)
 }
 
-// writeChannelView applies a channelView onto ch. The URL goes through
-// setChannelURL so per-channel fetch state is preserved when the URL is
+// writeFeedView applies a feedView onto ch. The URL goes through
+// setFeedURL so per-feed fetch state is preserved when the URL is
 // unchanged (an update keeping the same source) and reset when it changes.
-func writeChannelView(ch *Channel, v *channelView) {
+func writeFeedView(ch *Feed, v *feedView) {
 	ch.Title = v.Title
-	setChannelURL(ch, v.URL)
+	setFeedURL(ch, v.URL)
 	ch.Tag = v.Tag
 	ch.Pipe = append([]string(nil), v.Pipe...)
 	ch.Ingest = v.Ingest
 }
 
-// parseApplyInput accepts either a single channelView or an array.
+// parseApplyInput accepts either a single feedView or an array.
 // Auto-detect on the first non-whitespace byte.
-func parseApplyInput(data []byte) ([]*channelView, error) {
+func parseApplyInput(data []byte) ([]*feedView, error) {
 	trim := bytes.TrimLeft(data, " \t\r\n")
 	if len(trim) == 0 {
-		return nil, fmt.Errorf("input must be a channel object or array of channel objects")
+		return nil, fmt.Errorf("input must be a feed object or array of feed objects")
 	}
 	if trim[0] == '[' {
-		var views []*channelView
+		var views []*feedView
 		if err := json.Unmarshal(data, &views); err != nil {
 			return nil, fmt.Errorf("decode array: %w", err)
 		}
 		return views, nil
 	}
 	if trim[0] == '{' {
-		var view channelView
+		var view feedView
 		if err := json.Unmarshal(data, &view); err != nil {
 			return nil, fmt.Errorf("decode object: %w", err)
 		}
-		return []*channelView{&view}, nil
+		return []*feedView{&view}, nil
 	}
-	return nil, fmt.Errorf("input must be a channel object or array of channel objects")
+	return nil, fmt.Errorf("input must be a feed object or array of feed objects")
 }
 
 type EditCmd struct {
-	ID int `arg:"" help:"Channel id to edit."`
+	ID int `arg:"" help:"Feed id to edit."`
 }
 
 func (o *EditCmd) Run() error {
@@ -380,16 +380,16 @@ func (o *EditCmd) Run() error {
 	}
 
 	// 1. Load + serialize to a tempfile.
-	view, err := loadChannelView(o.ID)
+	view, err := loadFeedView(o.ID)
 	if err != nil {
 		return err
 	}
 	original, err := json.MarshalIndent(view, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal channel: %w", err)
+		return fmt.Errorf("marshal feed: %w", err)
 	}
 
-	tmp, err := os.CreateTemp("", fmt.Sprintf("srr-chan-%d-*.json", o.ID))
+	tmp, err := os.CreateTemp("", fmt.Sprintf("srr-feed-%d-*.json", o.ID))
 	if err != nil {
 		return fmt.Errorf("create tempfile: %w", err)
 	}
@@ -421,7 +421,7 @@ func (o *EditCmd) Run() error {
 	}
 
 	// 4. Parse + validate id.
-	var newView channelView
+	var newView feedView
 	if err := json.Unmarshal(edited, &newView); err != nil {
 		return fmt.Errorf("invalid JSON in %s: %w", tmpPath, err)
 	}
@@ -435,7 +435,7 @@ func (o *EditCmd) Run() error {
 
 	// 5. Apply.
 	if err := withDB(true, func(ctx context.Context, db *DB) error {
-		return applyViews(ctx, db, []*channelView{&newView})
+		return applyViews(ctx, db, []*feedView{&newView})
 	}); err != nil {
 		return fmt.Errorf("%w (tempfile: %s)", err, tmpPath)
 	}
@@ -443,13 +443,13 @@ func (o *EditCmd) Run() error {
 	return nil
 }
 
-// loadChannelView reads the DB unlocked (read-only) and returns the
-// channelView for ID. The DB lock for the apply step is acquired separately
+// loadFeedView reads the DB unlocked (read-only) and returns the
+// feedView for ID. The DB lock for the apply step is acquired separately
 // in EditCmd.Run.
-func loadChannelView(id int) (*channelView, error) {
-	var view *channelView
+func loadFeedView(id int) (*feedView, error) {
+	var view *feedView
 	err := withDB(false, func(_ context.Context, db *DB) error {
-		ch, err := db.ChannelByID(id)
+		ch, err := db.FeedByID(id)
 		if err != nil {
 			return err
 		}

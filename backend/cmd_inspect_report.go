@@ -14,7 +14,7 @@ func inspectOne(fetch keyGetter, core *DBCore, packs []*idxPack, chron int) erro
 	}
 	n := packIdxFor(chron, len(packs))
 	pack := packs[n]
-	idxSub := int(pack.chanIDs[chron-n*idxPackSize])
+	idxSub := int(pack.feedIDs[chron-n*idxPackSize])
 	pid, offset := pack.getPackRef(chron)
 	key := dataKeyFor(core, pid)
 
@@ -23,7 +23,7 @@ func inspectOne(fetch keyGetter, core *DBCore, packs []*idxPack, chron int) erro
 	recoveredTs := (core.FirstFetchedAt/fetchedAtBlock + int64(blocks)) * fetchedAtBlock
 
 	fmt.Printf("\nchron %d:\n", chron)
-	fmt.Printf("  idx pack %d  entry chan_id=%d  fetchedAt_blocks=%d\n", n, idxSub, blocks)
+	fmt.Printf("  idx pack %d  entry feed_id=%d  fetchedAt_blocks=%d\n", n, idxSub, blocks)
 	fmt.Printf("  resolved -> %s  packId=%d  offset=%d\n", key, pid, offset)
 
 	entries, err := loadDataPack(fetch, key)
@@ -37,13 +37,13 @@ func inspectOne(fetch keyGetter, core *DBCore, packs []*idxPack, chron int) erro
 		return fmt.Errorf("offset %d >= entries %d", offset, len(entries))
 	}
 	a := entries[offset]
-	if a.ChannelID != idxSub {
-		fmt.Printf("  *** SUB_ID MISMATCH: idx=%d data=%d ***\n", idxSub, a.ChannelID)
+	if a.FeedID != idxSub {
+		fmt.Printf("  *** SUB_ID MISMATCH: idx=%d data=%d ***\n", idxSub, a.FeedID)
 	}
 	storedBlock := a.FetchedAt / fetchedAtBlock
 	expectedBlock := core.FirstFetchedAt/fetchedAtBlock + int64(blocks)
 	tsMismatch := storedBlock != expectedBlock
-	fmt.Printf("  data chan_id: %d\n", a.ChannelID)
+	fmt.Printf("  data feed_id: %d\n", a.FeedID)
 	fmt.Printf("  fetched_at: data=%d  idx-recovered=%d  (block-aligned match=%v)\n",
 		a.FetchedAt, recoveredTs, !tsMismatch)
 	if tsMismatch {
@@ -51,13 +51,13 @@ func inspectOne(fetch keyGetter, core *DBCore, packs []*idxPack, chron int) erro
 	}
 	fmt.Printf("  title: %s\n", truncStr(a.Title, 100))
 	fmt.Printf("  link: %s\n", a.Link)
-	if ch := core.Channels[idxSub]; ch != nil {
-		fmt.Printf("  channel: %s (tag=%q)\n", ch.Title, ch.Tag)
+	if ch := core.Feeds[idxSub]; ch != nil {
+		fmt.Printf("  feed: %s (tag=%q)\n", ch.Title, ch.Tag)
 	} else {
-		fmt.Printf("  *** channel %d not in channels ***\n", idxSub)
+		fmt.Printf("  *** feed %d not in feeds ***\n", idxSub)
 	}
-	if a.ChannelID != idxSub {
-		return fmt.Errorf("chan_id mismatch")
+	if a.FeedID != idxSub {
+		return fmt.Errorf("feed_id mismatch")
 	}
 	if tsMismatch {
 		return fmt.Errorf("timestamp mismatch")
@@ -66,40 +66,40 @@ func inspectOne(fetch keyGetter, core *DBCore, packs []*idxPack, chron int) erro
 }
 
 // filterReport mirrors frontend filter logic: a filter token is a
-// numeric chan_id or a tag name. Reports total count, chron range, and
+// numeric feed_id or a tag name. Reports total count, chron range, and
 // count above the optional floor — same numbers the frontend computes
 // for filteredTotal / filteredLeft.
 func filterReport(core *DBCore, packs []*idxPack, token string, floor int) error {
-	channels := map[int]int{} // chan_id -> add_idx
+	feeds := map[int]int{} // feed_id -> add_idx
 	if n, err := strconv.Atoi(token); err == nil {
-		if ch := core.Channels[n]; ch != nil && ch.TotalArt > 0 {
-			channels[n] = ch.AddIdx
+		if ch := core.Feeds[n]; ch != nil && ch.TotalArt > 0 {
+			feeds[n] = ch.AddIdx
 		}
 	} else {
-		for id, ch := range core.Channels {
+		for id, ch := range core.Feeds {
 			if ch.Tag == token && ch.TotalArt > 0 {
-				channels[id] = ch.AddIdx
+				feeds[id] = ch.AddIdx
 			}
 		}
 	}
-	if len(channels) == 0 {
-		return fmt.Errorf("filter %q resolved to 0 channels with articles", token)
+	if len(feeds) == 0 {
+		return fmt.Errorf("filter %q resolved to 0 feeds with articles", token)
 	}
 
-	chanTotal := 0
-	chanIDs := make([]int, 0, len(channels))
-	for id := range channels {
-		chanIDs = append(chanIDs, id)
-		chanTotal += core.Channels[id].TotalArt
+	feedTotal := 0
+	feedIDs := make([]int, 0, len(feeds))
+	for id := range feeds {
+		feedIDs = append(feedIDs, id)
+		feedTotal += core.Feeds[id].TotalArt
 	}
-	sort.Ints(chanIDs)
+	sort.Ints(feedIDs)
 
 	count, aboveFloor, firstChron, lastChron := 0, 0, -1, -1
 	for chron := range core.TotalArticles {
 		n := packIdxFor(chron, len(packs))
 		pack := packs[n]
-		sid := int(pack.chanIDs[chron-n*idxPackSize])
-		addIdx, ok := channels[sid]
+		sid := int(pack.feedIDs[chron-n*idxPackSize])
+		addIdx, ok := feeds[sid]
 		if !ok || chron < addIdx {
 			continue
 		}
@@ -113,15 +113,15 @@ func filterReport(core *DBCore, packs []*idxPack, token string, floor int) error
 		lastChron = chron
 	}
 
-	fmt.Printf("\nfilter %q -> %d channel(s): %v\n", token, len(channels), chanIDs)
-	for _, id := range chanIDs {
-		ch := core.Channels[id]
-		fmt.Printf("  channel %d: %q tag=%q total_art=%d add_idx=%d\n",
+	fmt.Printf("\nfilter %q -> %d feed(s): %v\n", token, len(feeds), feedIDs)
+	for _, id := range feedIDs {
+		ch := core.Feeds[id]
+		fmt.Printf("  feed %d: %q tag=%q total_art=%d add_idx=%d\n",
 			id, ch.Title, ch.Tag, ch.TotalArt, ch.AddIdx)
 	}
-	fmt.Printf("\nfilter.chanTotal (sum of channel.total_art) = %d\n", chanTotal)
+	fmt.Printf("\nfilter.feedTotal (sum of feed.total_art) = %d\n", feedTotal)
 	fmt.Printf("matches in idx                              = %d\n", count)
-	if count != chanTotal {
+	if count != feedTotal {
 		fmt.Printf("  *** mismatch: filter would show wrong counter in UI ***\n")
 	}
 	if count > 0 {
@@ -129,27 +129,27 @@ func filterReport(core *DBCore, packs []*idxPack, token string, floor int) error
 		fmt.Printf("last matching chron                         = %d\n", lastChron)
 		fmt.Printf("matches with chron >= floor(%d)              = %d\n", floor, aboveFloor)
 	}
-	if count != chanTotal {
-		return fmt.Errorf("filter count %d != chan_total %d", count, chanTotal)
+	if count != feedTotal {
+		return fmt.Errorf("filter count %d != feed_total %d", count, feedTotal)
 	}
 	return nil
 }
 
-// listTagsReport mirrors frontend groupChannelsByTag: one line per tag
-// with channel count and total article count.
+// listTagsReport mirrors frontend groupFeedsByTag: one line per tag
+// with feed count and total article count.
 func listTagsReport(core *DBCore) error {
 	type tagInfo struct {
-		channels int
+		feeds    int
 		articles int
 	}
 	tags := map[string]*tagInfo{}
 	untagged := &tagInfo{}
-	for _, ch := range core.Channels {
+	for _, ch := range core.Feeds {
 		if ch.TotalArt == 0 {
 			continue
 		}
 		if ch.Tag == "" {
-			untagged.channels++
+			untagged.feeds++
 			untagged.articles += ch.TotalArt
 			continue
 		}
@@ -158,7 +158,7 @@ func listTagsReport(core *DBCore) error {
 			t = &tagInfo{}
 			tags[ch.Tag] = t
 		}
-		t.channels++
+		t.feeds++
 		t.articles += ch.TotalArt
 	}
 	names := make([]string, 0, len(tags))
@@ -169,10 +169,10 @@ func listTagsReport(core *DBCore) error {
 	fmt.Printf("\ntags (%d):\n", len(names))
 	for _, n := range names {
 		t := tags[n]
-		fmt.Printf("  %-20s  %3d channels  %5d articles\n", n, t.channels, t.articles)
+		fmt.Printf("  %-20s  %3d feeds  %5d articles\n", n, t.feeds, t.articles)
 	}
-	if untagged.channels > 0 {
-		fmt.Printf("  %-20s  %3d channels  %5d articles\n", "(untagged)", untagged.channels, untagged.articles)
+	if untagged.feeds > 0 {
+		fmt.Printf("  %-20s  %3d feeds  %5d articles\n", "(untagged)", untagged.feeds, untagged.articles)
 	}
 	return nil
 }
@@ -210,31 +210,31 @@ func fromHashReport(fetch keyGetter, core *DBCore, packs []*idxPack, hash string
 
 	fmt.Printf("\nhash %q -> floor=%d pos_str=%q tokens=%v\n", hash, floor, posStr, tokens)
 
-	channels := map[int]int{}
+	feeds := map[int]int{}
 	for _, token := range tokens {
 		if id, err := strconv.Atoi(token); err == nil {
-			if ch := core.Channels[id]; ch != nil && ch.TotalArt > 0 {
-				channels[id] = ch.AddIdx
+			if ch := core.Feeds[id]; ch != nil && ch.TotalArt > 0 {
+				feeds[id] = ch.AddIdx
 			}
 		} else {
-			for id, ch := range core.Channels {
+			for id, ch := range core.Feeds {
 				if ch.Tag == token && ch.TotalArt > 0 {
-					channels[id] = ch.AddIdx
+					feeds[id] = ch.AddIdx
 				}
 			}
 		}
 	}
-	activeFilter := len(tokens) > 0 && len(channels) > 0
+	activeFilter := len(tokens) > 0 && len(feeds) > 0
 	if len(tokens) > 0 && !activeFilter {
-		fmt.Printf("  filter tokens %v resolved to 0 channels -> falls back to no filter\n", tokens)
+		fmt.Printf("  filter tokens %v resolved to 0 feeds -> falls back to no filter\n", tokens)
 	}
 	if activeFilter {
-		ids := make([]int, 0, len(channels))
-		for id := range channels {
+		ids := make([]int, 0, len(feeds))
+		for id := range feeds {
 			ids = append(ids, id)
 		}
 		sort.Ints(ids)
-		fmt.Printf("  filter active: %d channel(s) %v\n", len(channels), ids)
+		fmt.Printf("  filter active: %d feed(s) %v\n", len(feeds), ids)
 	} else {
 		fmt.Println("  filter inactive")
 	}
@@ -248,25 +248,25 @@ func fromHashReport(fetch keyGetter, core *DBCore, packs []*idxPack, hash string
 	}
 
 	n := packIdxFor(pos, len(packs))
-	posChanID := int(packs[n].chanIDs[pos-n*idxPackSize])
+	posFeedID := int(packs[n].feedIDs[pos-n*idxPackSize])
 	matches := true
 	if activeFilter {
-		addIdx, ok := channels[posChanID]
+		addIdx, ok := feeds[posFeedID]
 		matches = ok && pos >= addIdx
 	}
-	fmt.Printf("  pos chan_id=%d matches filter=%v\n", posChanID, matches)
+	fmt.Printf("  pos feed_id=%d matches filter=%v\n", posFeedID, matches)
 
 	finalPos := pos
 	if !matches {
 		finalPos = -1
 		for c := core.TotalArticles - 1; c >= floor; c-- {
 			pn := packIdxFor(c, len(packs))
-			sid := int(packs[pn].chanIDs[c-pn*idxPackSize])
+			sid := int(packs[pn].feedIDs[c-pn*idxPackSize])
 			if !activeFilter {
 				finalPos = c
 				break
 			}
-			addIdx, ok := channels[sid]
+			addIdx, ok := feeds[sid]
 			if ok && c >= addIdx {
 				finalPos = c
 				break

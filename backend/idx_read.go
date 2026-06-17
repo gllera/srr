@@ -25,31 +25,31 @@ type idxBound struct {
 type idxPack struct {
 	packIndex     int
 	packSize      int
-	chanIDs       []uint16
+	feedIDs       []uint16
 	fetchedAts    []uint32 // per-entry cumulative fetched_at (8h blocks since first_fetched)
 	bounds        []idxBound
 	fetchedAtBase uint32
 	packIDBase    uint32
 	packOffBase   uint32
 	numSlots      int
-	chanCounts    []uint32 // cumulative before this pack (len numSlots)
-	ownChanCounts []uint32 // counted during parse (len numSlots)
+	feedCounts    []uint32 // cumulative before this pack (len numSlots)
+	ownFeedCounts []uint32 // counted during parse (len numSlots)
 }
 
-// chanCount returns the cumulative count for id, 0 when id is beyond this
-// pack's slots (a channel added after the pack was written).
-func (p *idxPack) chanCount(id int) uint32 {
+// feedCount returns the cumulative count for id, 0 when id is beyond this
+// pack's slots (a feed added after the pack was written).
+func (p *idxPack) feedCount(id int) uint32 {
 	if id < 0 || id >= p.numSlots {
 		return 0
 	}
-	return p.chanCounts[id]
+	return p.feedCounts[id]
 }
 
-func (p *idxPack) ownChanCount(id int) uint32 {
+func (p *idxPack) ownFeedCount(id int) uint32 {
 	if id < 0 || id >= p.numSlots {
 		return 0
 	}
-	return p.ownChanCounts[id]
+	return p.ownFeedCounts[id]
 }
 
 // loadIdxPacks fetches and parses every idx pack named by core: the
@@ -92,17 +92,17 @@ func parseIdxPack(buf []byte, packIndex, packSize int) (*idxPack, error) {
 	pack := &idxPack{
 		packIndex:     packIndex,
 		packSize:      packSize,
-		chanIDs:       make([]uint16, packSize),
+		feedIDs:       make([]uint16, packSize),
 		fetchedAts:    make([]uint32, packSize),
 		fetchedAtBase: binary.LittleEndian.Uint32(buf[0:]),
 		packIDBase:    binary.LittleEndian.Uint32(buf[4:]),
 		packOffBase:   binary.LittleEndian.Uint32(buf[8:]),
 		numSlots:      numSlots,
-		chanCounts:    make([]uint32, numSlots),
-		ownChanCounts: make([]uint32, numSlots),
+		feedCounts:    make([]uint32, numSlots),
+		ownFeedCounts: make([]uint32, numSlots),
 	}
 	for s := range numSlots {
-		pack.chanCounts[s] = binary.LittleEndian.Uint32(buf[idxHeaderPrefix+s*4:])
+		pack.feedCounts[s] = binary.LittleEndian.Uint32(buf[idxHeaderPrefix+s*4:])
 	}
 
 	packID := int(pack.packIDBase)
@@ -120,10 +120,10 @@ func parseIdxPack(buf []byte, packIndex, packSize int) (*idxPack, error) {
 			packID++
 		}
 		fetchedAt += uint32(packed & deltaFetchedMax)
-		pack.chanIDs[i] = sub
+		pack.feedIDs[i] = sub
 		pack.fetchedAts[i] = fetchedAt
 		if int(sub) < numSlots {
-			pack.ownChanCounts[sub]++
+			pack.ownFeedCounts[sub]++
 		}
 		if len(pack.bounds) == 0 || pack.bounds[len(pack.bounds)-1].packID != packID {
 			pack.bounds = append(pack.bounds, idxBound{packID, baseChron + i})

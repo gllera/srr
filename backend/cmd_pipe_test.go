@@ -13,7 +13,7 @@ func TestResolvePipeNilInheritsRoot(t *testing.T) {
 	}
 }
 
-func TestResolvePipeChannelOverridesRoot(t *testing.T) {
+func TestResolvePipeFeedOverridesRoot(t *testing.T) {
 	got := resolvePipe([]string{"#sanitize"}, []string{"custom"})
 	if !slices.Equal(got, []string{"custom"}) {
 		t.Errorf("got %v, want [custom]", got)
@@ -23,7 +23,7 @@ func TestResolvePipeChannelOverridesRoot(t *testing.T) {
 func TestResolvePipeEmptySliceInheritsRoot(t *testing.T) {
 	got := resolvePipe([]string{"#sanitize"}, []string{})
 	if !slices.Equal(got, []string{"#sanitize"}) {
-		t.Errorf("got %v, want [#sanitize] (empty channel pipe inherits)", got)
+		t.Errorf("got %v, want [#sanitize] (empty feed pipe inherits)", got)
 	}
 }
 

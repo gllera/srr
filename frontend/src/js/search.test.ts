@@ -26,8 +26,8 @@ let search: SearchMod
 // bytes (the real fetchPackBytes gunzips before returning).
 let store: Record<string, Uint8Array>
 
-function entryBytes(titles: (string | undefined)[], chanId = 1): Uint8Array {
-   const lines = titles.map((t) => JSON.stringify(t === undefined ? { s: chanId, w: 1000 } : { s: chanId, w: 1000, t }))
+function entryBytes(titles: (string | undefined)[], feedId = 1): Uint8Array {
+   const lines = titles.map((t) => JSON.stringify(t === undefined ? { f: feedId, w: 1000 } : { f: feedId, w: 1000, t }))
    return new TextEncoder().encode(lines.join("\n") + "\n")
 }
 
@@ -180,7 +180,7 @@ describe("search", () => {
          [IDX_PACK_SIZE], // shard 1
          [0], // shard 0
       ])
-      expect(batches[0][0]).toMatchObject({ t: "Alpha latest", s: 1, w: 1000 })
+      expect(batches[0][0]).toMatchObject({ t: "Alpha latest", f: 1, w: 1000 })
    })
 
    it("ANDs every query word", async () => {

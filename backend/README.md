@@ -29,19 +29,19 @@ srr <command> [flags]
 
 ### Commands
 
-Commands are grouped under `chan` (channel management), `art` (articles), `preview`, `inspect`, `config`, and `version`. Group names have short aliases (`ch`, `a`, `p`, `i`, `c`).
+Commands are grouped under `feed` (feed management), `art` (articles), `preview`, `inspect`, `config`, and `version`. Group names have short aliases (`ch`, `a`, `p`, `i`, `c`).
 
 | Command            | Description                                        |
 |--------------------|----------------------------------------------------|
-| `chan add`         | Subscribe to a new channel (one feed URL); always allocates a fresh id |
-| `chan upd <id>`    | Update a channel (`-t` title, `-g` tag, `-p` pipe, `-i` ingest; `-u` repoints the single feed URL) |
-| `chan rm`          | Unsubscribe from channel(s) by id                  |
-| `chan ls`          | List channels (`-g` tag filter, `-f` format)       |
-| `chan show <id>`   | Print one channel (yaml/json)                      |
-| `chan edit <id>`   | Edit a channel's JSON in `$EDITOR`                 |
-| `chan apply`       | Upsert channel(s) from JSON (`--file` or stdin)    |
-| `chan import`      | Import channels from an OPML file                  |
-| `art fetch`        | Fetch new articles from all channels               |
+| `feed add`         | Subscribe to a new feed (one feed URL); always allocates a fresh id |
+| `feed upd <id>`    | Update a feed (`-t` title, `-g` tag, `-p` pipe, `-i` ingest; `-u` repoints the single feed URL) |
+| `feed rm`          | Unsubscribe from feed(s) by id                  |
+| `feed ls`          | List feeds (`-g` tag filter, `-f` format)       |
+| `feed show <id>`   | Print one feed (yaml/json)                      |
+| `feed edit <id>`   | Edit a feed's JSON in `$EDITOR`                 |
+| `feed apply`       | Upsert feed(s) from JSON (`--file` or stdin)    |
+| `feed import`      | Import feeds from an OPML file                  |
+| `art fetch`        | Fetch new articles from all feeds               |
 | `art ls`           | List stored articles                               |
 | `pipe`             | Set or print root-level pipe (default pipeline)    |
 | `ingest`           | Set or print root-level ingest strategy            |
@@ -53,19 +53,19 @@ Commands are grouped under `chan` (channel management), `art` (articles), `previ
 ### Examples
 
 ```bash
-# Add a channel
-srr chan add -t "Tech News" -u https://example.com/feed.xml -g tech/news
+# Add a feed
+srr feed add -t "Tech News" -u https://example.com/feed.xml -g tech/news
 
 # Add with processing pipeline
-srr chan add -t "Blog" -u https://example.com/rss -p "#sanitize" -p "#minify"
+srr feed add -t "Blog" -u https://example.com/rss -p "#sanitize" -p "#minify"
 
-# Repoint a channel at a new feed URL (resets its fetch/dedup state)
-srr chan upd 1 -u https://example.com/new-feed.xml
+# Repoint a feed at a new feed URL (resets its fetch/dedup state)
+srr feed upd 1 -u https://example.com/new-feed.xml
 
-# Update an existing channel's pipeline (use #base to keep root mods)
-srr chan upd 1 -p "#base" -p "jq '.content |= ascii_downcase'"
+# Update an existing feed's pipeline (use #base to keep root mods)
+srr feed upd 1 -p "#base" -p "jq '.content |= ascii_downcase'"
 
-# Set root-level pipe (inherited by every channel whose pipe is absent)
+# Set root-level pipe (inherited by every feed whose pipe is absent)
 srr pipe "#sanitize" "#minify"
 
 # Print current root-level pipe (defaults to "#sanitize", "#minify" when unset)
@@ -74,11 +74,11 @@ srr pipe
 # Clear root-level pipe — reverts to the built-in default on next load
 srr pipe ""
 
-# List channels (filter by tag)
-srr chan ls -g tech
+# List feeds (filter by tag)
+srr feed ls -g tech
 
-# List channels as JSON
-srr chan ls -f json
+# List feeds as JSON
+srr feed ls -f json
 
 # Fetch all feeds
 srr art fetch
@@ -87,10 +87,10 @@ srr art fetch
 srr -w 8 art fetch
 
 # Import from OPML (all feeds)
-srr chan import feeds.opml -a
+srr feed import feeds.opml -a
 
 # Import selectively with dry-run
-srr chan import feeds.opml -i "1" -i "2.3" -n
+srr feed import feeds.opml -i "1" -i "2.3" -n
 
 # Preview a feed with processors
 srr preview https://example.com/feed.xml -p "#sanitize" -p "#minify"
@@ -162,19 +162,19 @@ An *ingest strategy* is the I/O + parse step that turns a subscription URL into 
 
 ### Selecting a strategy
 
-The effective strategy is resolved per channel, most specific wins:
+The effective strategy is resolved per feed, most specific wins:
 
-1. The channel's `ingest` field (`srr chan add -i ...` / `srr chan upd -i ...`)
+1. The feed's `ingest` field (`srr feed add -i ...` / `srr feed upd -i ...`)
 2. The db.gz root default (`srr ingest ...`)
 3. The built-in `#rss` (when both are empty)
 
 Built-in strategy names start with `#` (only `#rss` ships built-in). **Any value that does not start with `#` is run as a shell command** via `/bin/sh -c`.
 
 ```bash
-# Route one channel through an external command
-srr chan add -t "My source" -u "https://example.com/x" -i "myfetch --token=$TOK"
+# Route one feed through an external command
+srr feed add -t "My source" -u "https://example.com/x" -i "myfetch --token=$TOK"
 
-# Make an external command the default for every channel
+# Make an external command the default for every feed
 srr ingest "myfetch"
 
 # Print the current root default; clear it with ""
@@ -190,7 +190,7 @@ The command receives a JSON **request** on `stdin` and must print a JSON **respo
 
 | Field | Type | Description |
 |---|---|---|
-| `url` | string | The subscription URL (the channel feed URL). |
+| `url` | string | The subscription URL (the feed feed URL). |
 | `etag` | string | The `etag` your command returned last run (empty on first call). |
 | `last_modified` | string | The `last_modified` your command returned last run. |
 | `max_size` | int | Advisory cap (bytes) on what the command should buffer/return. |
@@ -244,11 +244,11 @@ The command reads it, fetches its source, and prints exactly one response object
 
 **Behavior contract.**
 
-- A **non-zero exit code** fails the fetch for that channel only (the error is recorded in the channel's `ferr`); all other channels still fetch and commit.
+- A **non-zero exit code** fails the fetch for that feed only (the error is recorded in the feed's `ferr`); all other feeds still fetch and commit.
 - **Empty stdout is an error** — emit at least `{"items":[]}` (or `{"not_modified":true}`).
 - stdout is capped at 64 MiB; exceeding it fails the fetch.
 - The command is killed if it runs longer than the subprocess time budget — 5m by default, overridable via `SRR_CMD_TIMEOUT` (a Go duration; a value that doesn't parse or is ≤ 0 is ignored and the 5m default applies). A killed command fails the fetch for that feed, so long-running sources must finish within the budget or raise it. The command must not block waiting for more stdin after consuming the single request object.
-- `not_modified: true` (or a response with zero `items`) **preserves** the channel's dedup state, so a transient empty response won't drop it.
+- `not_modified: true` (or a response with zero `items`) **preserves** the feed's dedup state, so a transient empty response won't drop it.
 
 ### Self-hosting files
 
@@ -309,7 +309,7 @@ json.dump({"items": items}, sys.stdout)
 
 ## Pipe Pipeline
 
-Articles pass through a chain of mods during fetch. The pipe is defined at two levels — root (db.gz default) and per channel — and channels inherit the root unless they explicitly override.
+Articles pass through a chain of mods during fetch. The pipe is defined at two levels — root (db.gz default) and per feed — and feeds inherit the root unless they explicitly override.
 
 **Built-in mods:**
 
@@ -320,7 +320,7 @@ Articles pass through a chain of mods during fetch. The pipe is defined at two l
 **Custom mods** — any shell command that reads/writes JSON via stdin/stdout (see [External mod protocol](#external-mod-protocol)):
 
 ```bash
-srr chan add -t "Feed" -u https://example.com/rss \
+srr feed add -t "Feed" -u https://example.com/rss \
   -p "#sanitize" -p "#minify" -p "jq '.content |= ascii_downcase'"
 ```
 
@@ -378,23 +378,23 @@ Printing nothing (or only whitespace) leaves the item exactly as received.
 A minimal reference mod — lowercase every title — using `jq`:
 
 ```bash
-srr chan add -t "Feed" -u https://example.com/rss \
+srr feed add -t "Feed" -u https://example.com/rss \
   -p "#base" -p "jq -c '.title |= ascii_downcase'"
 ```
 
-**Hierarchy & resolution.** A `pipe` field lives at two levels: db.gz root (`srr pipe`) and channel (`srr chan add -p ...` / `srr chan upd -p ...`). For each channel the effective pipeline is resolved root → channel:
+**Hierarchy & resolution.** A `pipe` field lives at two levels: db.gz root (`srr pipe`) and feed (`srr feed add -p ...` / `srr feed upd -p ...`). For each feed the effective pipeline is resolved root → feed:
 
-- An absent channel `pipe` inherits the root pipe.
-- A present channel `pipe` overrides root (an explicit empty list means "no pipe").
-- The `#base` token in a channel override expands inline to the root pipe.
+- An absent feed `pipe` inherits the root pipe.
+- A present feed `pipe` overrides root (an explicit empty list means "no pipe").
+- The `#base` token in a feed override expands inline to the root pipe.
 
-For example, with root `[#sanitize]` and channel override `[#base, #minify]`, the channel runs `#sanitize → #minify`.
+For example, with root `[#sanitize]` and feed override `[#base, #minify]`, the feed runs `#sanitize → #minify`.
 
-**Root default.** When root `pipe` is absent from `db.gz`, the backend substitutes `["#sanitize", "#minify"]` at load time so fresh installs (and DBs predating this feature) get safe-by-default sanitization and minification. Run `srr pipe <args>` to override; `srr pipe ""` clears the stored value, reverting to the default on the next load. To opt out for a specific channel regardless of the root default, use `srr chan upd <id> -p ""` (sets an explicit empty override).
+**Root default.** When root `pipe` is absent from `db.gz`, the backend substitutes `["#sanitize", "#minify"]` at load time so fresh installs (and DBs predating this feature) get safe-by-default sanitization and minification. Run `srr pipe <args>` to override; `srr pipe ""` clears the stored value, reverting to the default on the next load. To opt out for a specific feed regardless of the root default, use `srr feed upd <id> -p ""` (sets an explicit empty override).
 
 ## Pack Format
 
-Articles are stored in two gzip-compressed series under each channel directory, alongside a `db.gz` metadata file:
+Articles are stored in two gzip-compressed series under each feed directory, alongside a `db.gz` metadata file:
 
 - **`idx/`** — Binary index (header + 2-byte entries per article); split every 50,000 articles.
 - **`data/`** — JSONL article content (one record per line); split when the gzip-compressed pack exceeds `--pack-size` KB.

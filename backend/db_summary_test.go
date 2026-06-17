@@ -18,19 +18,19 @@ func setupBoundaryDB(t *testing.T) (*DB, string) {
 	db, c, dir := setupTestDB(t)
 	globals.PackSize = 1024 // data packs never split (read lazily at write time)
 
-	ch := &Channel{id: 1, URL: "https://example.com/1"}
-	c.Channels = map[int]*Channel{ch.id: ch}
+	ch := &Feed{id: 1, URL: "https://example.com/1"}
+	c.Feeds = map[int]*Feed{ch.id: ch}
 	c.FetchedAt = 1700000000
 
 	articles := make([]*Item, idxPackSize)
 	for i := range articles {
-		articles[i] = &Item{Channel: ch, Title: fmt.Sprintf("A%d", i), Content: "c", Published: int64(i)}
+		articles[i] = &Item{Feed: ch, Title: fmt.Sprintf("A%d", i), Content: "c", Published: int64(i)}
 	}
 	if _, err := db.PutArticles(ctx, articles); err != nil {
 		t.Fatalf("PutArticles: %v", err)
 	}
 	if _, err := db.PutArticles(ctx, []*Item{
-		{Channel: ch, Title: "Last", Content: "c", Published: int64(idxPackSize)},
+		{Feed: ch, Title: "Last", Content: "c", Published: int64(idxPackSize)},
 	}); err != nil {
 		t.Fatalf("PutArticles: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestSyncIdxSummaryAtBoundary(t *testing.T) {
 	sum := decompressGz(t, filepath.Join(dir, "idx/h1.gz"))
 	pack0 := decompressGz(t, filepath.Join(dir, "idx/0.gz"))
 	// The idx header is variable-length: the fixed prefix plus numSlots×4
-	// cumulative counts, dense up to the high-water channel id.
+	// cumulative counts, dense up to the high-water feed id.
 	numSlots := int(binary.LittleEndian.Uint32(pack0[idxStateSize:]))
 	headerSize := idxHeaderPrefix + numSlots*4
 	if len(sum) != headerSize {
@@ -82,8 +82,8 @@ func TestSyncIdxSummaryNoopWhenCurrent(t *testing.T) {
 
 func TestSyncIdxSummaryBelowBoundaryNoop(t *testing.T) {
 	db, c, dir := setupTestDB(t)
-	ch := &Channel{id: 1, URL: "https://example.com/1"}
-	c.Channels = map[int]*Channel{ch.id: ch}
+	ch := &Feed{id: 1, URL: "https://example.com/1"}
+	c.Feeds = map[int]*Feed{ch.id: ch}
 	putOneArticle(t, db, ch, 1)
 
 	if err := db.SyncIdxSummary(ctx); err != nil {

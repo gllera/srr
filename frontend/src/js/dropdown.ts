@@ -6,16 +6,16 @@ const menus = document.querySelectorAll<HTMLElement>(".srr-dropdown-menu")
 const btns = document.querySelectorAll<HTMLElement>(".srr-dropdown-btn")
 const imgProxyDialog = document.querySelector<HTMLElement>(".srr-imgproxy-dialog")
 
-// The list surface hooks the channel menu's filter actions: when the app is on
-// the list, picking a channel/tag/[ALL]/★ Saved re-filters the list in place
+// The list surface hooks the feed menu's filter actions: when the app is on
+// the list, picking a feed/tag/[ALL]/★ Saved re-filters the list in place
 // instead of opening the reader at a resume position. Optional so the reader-only
 // callers (and the existing test suite) keep the original behavior — the default
 // host reports "not the list" and the menu falls through to guard(switchFilter).
-export interface ChannelMenuHost {
+export interface FeedMenuHost {
    viewIsList: () => boolean
-   selectFilter: (token: string) => void // "" = [ALL]; token = tag name, channel id, or ~saved
+   selectFilter: (token: string) => void // "" = [ALL]; token = tag name, feed id, or ~saved
 }
-const READER_HOST: ChannelMenuHost = {
+const READER_HOST: FeedMenuHost = {
    viewIsList: () => false,
    selectFilter: () => {},
 }
@@ -180,10 +180,10 @@ function toggleDropdown(
    fillMenu(dd, buildContent)
 }
 
-// A non-empty ferr on a channel marks its row (and the tag header hiding it
+// A non-empty ferr on a feed marks its row (and the tag header hiding it
 // when collapsed) with a dot; the row's title/aria-label carry the error text.
 // The evidence already rides in db.gz — this only makes silent feed rot visible.
-function channelErr(ch: IChannel): string {
+function feedErr(ch: IFeed): string {
    return ch.ferr ?? ""
 }
 
@@ -194,20 +194,20 @@ function errDot(): HTMLSpanElement {
    return s
 }
 
-// The channel's source-color chip — the same per-channel color (data-src → --src)
+// The feed's source-color chip — the same per-feed color (data-src → --src)
 // as its list rail and reader spine, so you pick a source here by the color you
 // then see everywhere it appears.
-function srcChip(chanId: number): HTMLSpanElement {
+function srcChip(feedId: number): HTMLSpanElement {
    const s = document.createElement("span")
    s.className = "srr-src-chip"
-   s.dataset.src = String(srcColorIndex(chanId))
+   s.dataset.src = String(srcColorIndex(feedId))
    s.setAttribute("aria-hidden", "true")
    return s
 }
 
-function channelLink(ch: IChannel, className: string): HTMLAnchorElement {
+function feedLink(ch: IFeed, className: string): HTMLAnchorElement {
    const a = createLink(String(ch.id), ch.title, className)
-   const err = channelErr(ch)
+   const err = feedErr(ch)
    if (err) {
       a.title = err
       a.setAttribute("aria-label", `${ch.title} — feed error: ${err}`)
@@ -222,15 +222,15 @@ function channelLink(ch: IChannel, className: string): HTMLAnchorElement {
 // lazy idx-pack fetch) never delays the menu itself; the common case (recent
 // seen → resident latest pack) resolves in a microtask. `unreadFill` is the
 // freshness token: a rebuild or close orphans a stale pass before it touches
-// the DOM. Every channel with unseen articles badges its count — including one
-// never seen on this device, which badges its full backlog (chanUnread) so a
-// fresh device shows counts on the channels too and the row badges sum to their
+// the DOM. Every feed with unseen articles badges its count — including one
+// never seen on this device, which badges its full backlog (feedUnread) so a
+// fresh device shows counts on the feeds too and the row badges sum to their
 // tag header (nav.tagUnreadFromCounts, the same counts map: a collapsed group
 // still surfaces the activity inside it and the badge equals the unseen-only
-// toolbar counter you land on when you open the tag). A channel read down to 0
+// toolbar counter you land on when you open the tag). A feed read down to 0
 // unseen badges nothing. When unseen-only is on, the same pass hides fully-read
-// rows and tags (`.srr-hidden`): a per-channel count of 0 = nothing unseen and
-// hides; any positive count (including a never-seen channel's backlog) has
+// rows and tags (`.srr-hidden`): a per-feed count of 0 = nothing unseen and
+// hides; any positive count (including a never-seen feed's backlog) has
 // unseen content, so it stays.
 let unreadFill: object | null = null
 
@@ -241,7 +241,7 @@ function unreadBadge(n: number): HTMLSpanElement {
    return s
 }
 
-async function fillUnread(rows: [HTMLAnchorElement, IChannel][], headers: [HTMLAnchorElement, IChannel[]][]) {
+async function fillUnread(rows: [HTMLAnchorElement, IFeed][], headers: [HTMLAnchorElement, IFeed[]][]) {
    const my = {}
    unreadFill = my
    try {
@@ -255,11 +255,11 @@ async function fillUnread(rows: [HTMLAnchorElement, IChannel][], headers: [HTMLA
       if (my !== unreadFill) return
       const hideRead = nav.isUnreadOnly()
       // The row/group you're currently viewing must never self-hide mid-session:
-      // reading the active tag/channel down to 0 unseen THIS session would else
+      // reading the active tag/feed down to 0 unseen THIS session would else
       // drop its `.srr-active` styling and make it keyboard-unreachable
       // (menuItems skips `.srr-hidden`) while you're still on it. The toolbar
       // counter uses a frozen snapshot, so it stays visible regardless. The
-      // active key is `""` (no exemption), a single tag name, or a channel id.
+      // active key is `""` (no exemption), a single tag name, or a feed id.
       const activeKey = nav.getCurrentFilterKey()
       for (const [a, ch] of rows) {
          const n = counts.get(ch.id)!
@@ -431,23 +431,23 @@ export function dateJump(input: HTMLInputElement, onPick: (ts: number) => void):
    onPick(new Date(y, m - 1, d).getTime() / 1000)
 }
 
-export function showChannelMenu(
+export function showFeedMenu(
    currentTag: string,
    guard: (fn: () => Promise<IShowFeed>) => void,
-   host: ChannelMenuHost = READER_HOST,
+   host: FeedMenuHost = READER_HOST,
 ): void {
-   const { tagged, sortedTags, untagged } = data.groupChannelsByTag()
+   const { tagged, sortedTags, untagged } = data.groupFeedsByTag()
    const current = nav.getCurrentFilterKey()
    const cls = (base: string, v: string) => (v === current ? `${base} srr-active`.trim() : base)
 
    const buildContent = (frag: DocumentFragment) => {
-      const unreadRows: [HTMLAnchorElement, IChannel][] = []
-      const headerRows: [HTMLAnchorElement, IChannel[]][] = []
-      // Filter selector — [ALL] / ★ Saved / tags / channels. (Unseen-only moved to
+      const unreadRows: [HTMLAnchorElement, IFeed][] = []
+      const headerRows: [HTMLAnchorElement, IFeed[]][] = []
+      // Filter selector — [ALL] / ★ Saved / tags / feeds. (Unseen-only moved to
       // a toolbar toggle; the image-proxy + date-jump live in the ⋯ overflow menu.)
       frag.appendChild(createLink("", "[ALL]", cls("", "")))
       // "★ Saved" — the per-article collection, surfaced once there's something
-      // in it. Same selection path as a channel/tag (host.selectFilter on the
+      // in it. Same selection path as a feed/tag (host.selectFilter on the
       // list, guard(switchFilter) in the reader); the count rides as a badge.
       const savedN = nav.savedCount()
       if (savedN > 0) {
@@ -463,7 +463,7 @@ export function showChannelMenu(
          const expanded = tag === currentTag && tag !== current
          const div = divEl(expanded ? "srr-tag-group" : "srr-tag-group srr-tag-collapsed")
          const header = createLink(tag, tag, cls("srr-tag-header", tag))
-         if (group.some((ch) => channelErr(ch))) header.prepend(errDot())
+         if (group.some((ch) => feedErr(ch))) header.prepend(errDot())
          headerRows.push([header, group])
          const toggle = document.createElement("span")
          toggle.className = "srr-tag-toggle"
@@ -475,7 +475,7 @@ export function showChannelMenu(
          header.appendChild(toggle)
          div.appendChild(header)
          for (const ch of group) {
-            const item = channelLink(ch, cls("srr-tag-item", String(ch.id)))
+            const item = feedLink(ch, cls("srr-tag-item", String(ch.id)))
             unreadRows.push([item, ch])
             div.appendChild(item)
          }
@@ -483,15 +483,15 @@ export function showChannelMenu(
       }
       if (sortedTags.length > 0 && untagged.length > 0) frag.appendChild(divEl("srr-tag-sep"))
       for (const ch of untagged) {
-         const item = channelLink(ch, cls("", String(ch.id)))
+         const item = feedLink(ch, cls("", String(ch.id)))
          unreadRows.push([item, ch])
          frag.appendChild(item)
       }
       void fillUnread(unreadRows, headerRows)
    }
 
-   toggleDropdown("srr-channel-menu", buildContent, async (value) => {
-      // A channel/tag/[ALL]/★ Saved selection: on the list surface, re-filter the
+   toggleDropdown("srr-feed-menu", buildContent, async (value) => {
+      // A feed/tag/[ALL]/★ Saved selection: on the list surface, re-filter the
       // list (the host shows that filter's feed); in the reader, resume that
       // filter at its current position. (switchFilter maps ""→[ALL] and ~saved.)
       if (host.viewIsList()) {

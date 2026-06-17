@@ -35,8 +35,8 @@ var tsConsts = []struct {
 	{"IDX_PACK_SIZE", idxPackSize, "entries per finalized idx pack (split threshold)"},
 	{"IDX_STATE_SIZE", idxStateSize, "bytes: the 3 leading uint32 LE idx-header state fields (fetchedAt/packId/packOff bases)"},
 	{"IDX_HEADER_PREFIX", idxHeaderPrefix, "bytes: idx-header fixed prefix (3 state uint32s + numSlots uint32); the variable count array follows"},
-	{"IDX_ENTRY_SIZE", idxEntrySize, "bytes per idx entry: chan_id uint16 LE + packed uint8"},
-	{"CHAN_ID_CEILING", chanIDCeiling, "channel-id ceiling: chan_id is a uint16, ids run [0, this)"},
+	{"IDX_ENTRY_SIZE", idxEntrySize, "bytes per idx entry: feed_id uint16 LE + packed uint8"},
+	{"FEED_ID_CEILING", feedIDCeiling, "feed-id ceiling: feed_id is a uint16, ids run [0, this)"},
 	{"FETCHED_AT_BLOCK", fetchedAtBlock, "seconds per idx timestamp block (8h): stored fetched_at is unix seconds ÷ this"},
 	{"DELTA_FETCHED_MAX", deltaFetchedMax, "7-bit per-entry delta_fetched_at limit: writer clamp ceiling, reader bit mask"},
 	{"LATEST_KEEP", latestKeep, "superseded L<seq> generations the backend GC keeps as a grace window for stale-db.gz readers"},
@@ -55,7 +55,7 @@ var tsTypes = []struct {
 }{
 	{"IArticleWire", "one JSONL line in data/*.gz (backend ArticleData)", reflect.TypeOf(ArticleData{})},
 	{"ISearchEntryWire", "one JSONL line in search/ shards (backend SearchEntry)", reflect.TypeOf(SearchEntry{})},
-	{"IChannelWire", "a db.gz channels{} value (backend Channel)", reflect.TypeOf(Channel{})},
+	{"IFeedWire", "a db.gz feeds{} value (backend Feed)", reflect.TypeOf(Feed{})},
 	{"IDBWire", "db.gz itself (backend DBCore)", reflect.TypeOf(DBCore{})},
 }
 
@@ -84,7 +84,7 @@ func generateTS() ([]byte, error) {
 // The Go declarations in backend/ are the single source of truth for the
 // writer↔reader data contract: the format constants in db.go, the pack-name
 // grammar in store/main.go (PackSeries), and the JSON struct tags of
-// ArticleData/Channel/DBCore. Regenerate with
+// ArticleData/Feed/DBCore. Regenerate with
 // ` + "`make generate`; `make verify` fails when this file is stale." + `
 //
 // Wire-type conventions: ` + "`?`" + ` = json omitempty (key absent at the Go zero

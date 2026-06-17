@@ -3,9 +3,9 @@ import {
    closeAllDropdowns,
    dateJump,
    openDatePicker,
-   showChannelMenu,
+   showFeedMenu,
    showOverflowMenu,
-   type ChannelMenuHost,
+   type FeedMenuHost,
 } from "./dropdown"
 import { collapseBrokenMedia, formatDate, readMinutes, sanitizeHtml, srcColorIndex, timeAgo, URL_DENY } from "./fmt"
 import { setupGestures, type Gestures } from "./gestures"
@@ -24,7 +24,7 @@ const el = {
    toolbar: document.querySelector(".srr-toolbar") as HTMLElement,
    prev: document.querySelector(".srr-prev") as HTMLButtonElement,
    next: document.querySelector(".srr-next") as HTMLButtonElement,
-   channel: document.querySelector(".srr-channel") as HTMLButtonElement,
+   feed: document.querySelector(".srr-feed") as HTMLButtonElement,
    source: document.querySelector(".srr-source") as HTMLElement,
    date: document.querySelector(".srr-date") as HTMLElement,
    readlen: document.querySelector(".srr-readlen") as HTMLElement,
@@ -51,8 +51,8 @@ let gestures: Gestures | null = null
 let busy = false
 let retryFn: (() => void) | null = null
 let currentPublished = 0
-let currentChannel = { id: 0, title: "", tag: "" }
-let lastChannelLabel: string | null = null
+let currentFeed = { id: 0, title: "", tag: "" }
+let lastFeedLabel: string | null = null
 let previousFocus: HTMLElement | null = null
 // Pending debounced search query (see the Title search section). Declared up
 // here so selectFilter / route can cancel it when the filter changes by any
@@ -145,7 +145,7 @@ function renderReadon(next: { chron: number; article: IArticle } | null) {
    const a = document.createElement("a")
    a.className = "srr-readon-next"
    a.href = "#" + next.chron + nav.tokensSuffix()
-   a.dataset.src = String(srcColorIndex(next.article.s))
+   a.dataset.src = String(srcColorIndex(next.article.f))
    // Same as the toolbar next (right = newer): intercept like a list row so the
    // hash link doesn't new-tab under <base target=_blank>.
    a.addEventListener("click", (e) => {
@@ -156,7 +156,7 @@ function renderReadon(next: { chron: number; article: IArticle } | null) {
    head.className = "srr-readon-head"
    const src = document.createElement("span")
    src.className = "srr-readon-source"
-   src.textContent = data.channelTitle(next.article.s)
+   src.textContent = data.feedTitle(next.article.f)
    const age = document.createElement("time")
    age.className = "srr-readon-age"
    age.textContent = timeAgo(next.article.p || next.article.a)
@@ -204,16 +204,16 @@ function render(o: IShowFeed) {
    el.readlen.textContent = mins ? `${mins} MIN READ` : ""
    el.readlen.hidden = !mins
 
-   currentChannel = {
-      id: o.channel?.id ?? 0,
-      title: data.channelTitle(o.article.s),
-      tag: o.channel?.tag || "",
+   currentFeed = {
+      id: o.feed?.id ?? 0,
+      title: data.feedTitle(o.article.f),
+      tag: o.feed?.tag || "",
    }
    // Key the reader's spine + masthead to the article's source color (same ramp
    // as the list rails — see styles.css [data-src]).
-   el.article.dataset.src = String(srcColorIndex(o.article.s))
-   el.source.textContent = currentChannel.title
-   refreshChannelLabel()
+   el.article.dataset.src = String(srcColorIndex(o.article.f))
+   el.source.textContent = currentFeed.title
+   refreshFeedLabel()
    refreshSaveButton(!o.placeholder)
 
    // Read on: clear the prior article's preview now (it's below the fold, so no
@@ -257,39 +257,33 @@ function render(o: IShowFeed) {
    } catch {}
 }
 
-function refreshChannelLabel() {
+function refreshFeedLabel() {
    // The article's source now lives in the header kicker, so the toolbar button
-   // is a pure active-filter indicator: "All", a tag name, or a single channel.
-   // Search mode is orthogonal to the channel axis (the pinned search bar owns the
+   // is a pure active-filter indicator: "All", a tag name, or a single feed.
+   // Search mode is orthogonal to the feed axis (the pinned search bar owns the
    // query), so show the button neutral ("All", unhighlighted) instead of the raw
    // "q:<query>" token getCurrentFilterKey returns.
-   const key = nav.isSearchFilter() ? "" : nav.getCurrentFilterKey() // "" (all/multi) | tag name | numeric channel id
-   if (key === lastChannelLabel) return
-   lastChannelLabel = key
+   const key = nav.isSearchFilter() ? "" : nav.getCurrentFilterKey() // "" (all/multi) | tag name | numeric feed id
+   if (key === lastFeedLabel) return
+   lastFeedLabel = key
 
    const label =
-      key === ""
-         ? "All"
-         : key === nav.SAVED_TOKEN
-           ? "★ Saved"
-           : /^\d+$/.test(key)
-             ? data.channelTitle(Number(key))
-             : key
-   el.channel.textContent = label
-   // A single-channel filter tints the toolbar label with that channel's source
+      key === "" ? "All" : key === nav.SAVED_TOKEN ? "★ Saved" : /^\d+$/.test(key) ? data.feedTitle(Number(key)) : key
+   el.feed.textContent = label
+   // A single-feed filter tints the toolbar label with that feed's source
    // color (the wire-desk identity in the toolbar); [ALL]/tag/saved/search stay
    // neutral. The chip-less label still says which source you're viewing.
-   if (/^\d+$/.test(key)) el.channel.dataset.src = String(srcColorIndex(Number(key)))
-   else delete el.channel.dataset.src
-   el.channel.classList.toggle("srr-filter-on", key !== "")
-   el.channel.title = key === "" ? "All channels" : `Filtered: ${label}`
-   el.channel.setAttribute("aria-label", `Filter: ${label}`)
+   if (/^\d+$/.test(key)) el.feed.dataset.src = String(srcColorIndex(Number(key)))
+   else delete el.feed.dataset.src
+   el.feed.classList.toggle("srr-filter-on", key !== "")
+   el.feed.title = key === "" ? "All feeds" : `Filtered: ${label}`
+   el.feed.setAttribute("aria-label", `Filter: ${label}`)
 }
 
 // The reader's save (★) toggle reflects whether the current article is in the
 // saved set. Disabled only on the "(no matching articles)" placeholder, where
-// there's nothing to save — keyed off o.placeholder, NOT channel presence, so a
-// saved article whose channel was deleted ([DELETED] tombstone, channel ===
+// there's nothing to save — keyed off o.placeholder, NOT feed presence, so a
+// saved article whose feed was deleted ([DELETED] tombstone, feed ===
 // undefined) stays toggleable.
 function refreshSaveButton(hasArticle: boolean) {
    const chron = nav.currentChron()
@@ -321,7 +315,7 @@ function listTitle(): string {
    const key = nav.getCurrentFilterKey()
    if (key === "") return "SRR"
    if (key === nav.SAVED_TOKEN) return "SRR · ★ Saved"
-   return "SRR · " + (/^\d+$/.test(key) ? data.channelTitle(Number(key)) : key)
+   return "SRR · " + (/^\d+$/.test(key) ? data.feedTitle(Number(key)) : key)
 }
 
 // Front-page masthead — the wire's live state on the home list. Freshness is
@@ -354,9 +348,9 @@ function renderMastheadStatus(unread: number) {
 function refreshMasthead() {
    renderMastheadStatus(lastWireUnread)
    const my = ++mastheadTok
-   const chans = Object.values(data.db.channels ?? {}).filter((c) => c.total_art > 0)
+   const feeds = Object.values(data.db.feeds ?? {}).filter((c) => c.total_art > 0)
    void nav
-      .unreadCounts(chans)
+      .unreadCounts(feeds)
       .then((counts) => {
          if (my !== mastheadTok) return
          let total = 0
@@ -379,7 +373,7 @@ async function renderListSurface() {
    // flips view to "list".
    const center = view === "reader"
    showList()
-   refreshChannelLabel()
+   refreshFeedLabel()
    refreshMasthead()
    document.title = listTitle()
    document.body.classList.add("srr-loading")
@@ -476,7 +470,7 @@ async function selectFilter(token: string) {
    if (busy) return
    // Any explicit filter change cancels a still-pending debounced search query;
    // otherwise typing then leaving search (✕ / Escape / the magnifier, but also a
-   // channel-menu pick or a two-finger/arrow cycle, which all land here) within
+   // feed-menu pick or a two-finger/arrow cycle, which all land here) within
    // the debounce window lets the stale applySearchQuery fire ~200ms later and
    // bounce the list back into search. Typing itself never routes through here.
    clearTimeout(searchDebounce)
@@ -485,7 +479,7 @@ async function selectFilter(token: string) {
    await goToList(true)
 }
 
-const dropdownHost: ChannelMenuHost = {
+const dropdownHost: FeedMenuHost = {
    viewIsList: () => view === "list",
    selectFilter: (token) => void selectFilter(token),
 }
@@ -558,7 +552,7 @@ function syncSearchBar() {
 // The unread (catch-up) toggle — a toolbar button (list-only). Flipping it
 // persists the mode and rebuilds the list under the new (raised/restored) bounds;
 // the mode also governs reader navigation, but the list is where it's switched.
-// Unseen-only now spans every filter ([ALL]/channel/tag), so this is the one-tap
+// Unseen-only now spans every filter ([ALL]/feed/tag), so this is the one-tap
 // "show only unread" button for the whole wire.
 function refreshUnreadButton() {
    const on = nav.isUnreadOnly()
@@ -582,9 +576,9 @@ function onCycle(dir: number) {
    const entries = nav.getFilterEntries()
    if (entries.length <= 1) return
    if (view === "list") {
-      // cycleOriginKey (not getCurrentFilterKey) so a single tagged-channel
+      // cycleOriginKey (not getCurrentFilterKey) so a single tagged-feed
       // filter cycles relative to its tag, matching the reader's cycleFilter —
-      // getFilterEntries lists tagged channels only by tag, so a raw id misses.
+      // getFilterEntries lists tagged feeds only by tag, so a raw id misses.
       let idx = entries.indexOf(nav.cycleOriginKey())
       if (idx === -1) idx = 0
       void selectFilter(entries[(idx + dir + entries.length) % entries.length])
@@ -593,7 +587,7 @@ function onCycle(dir: number) {
    }
 }
 
-function channelMenuTag(): string {
+function feedMenuTag(): string {
    // Which tag group to auto-expand in the menu. In the reader, the shown
    // article's tag; on the list, the active tag filter (if any).
    if (view === "list") {
@@ -601,7 +595,7 @@ function channelMenuTag(): string {
       const key = nav.getCurrentFilterKey()
       return key !== "" && !/^\d+$/.test(key) ? key : ""
    }
-   return currentChannel.tag
+   return currentFeed.tag
 }
 
 const KEY_ACTIONS: Record<string, () => void> = {
@@ -647,7 +641,7 @@ async function init() {
    el.back.addEventListener("click", () => void goToList(true))
    // capture: error events don't bubble (see collapseBrokenMedia)
    el.content.addEventListener("error", collapseBrokenMedia, true)
-   el.channel.addEventListener("click", () => showChannelMenu(channelMenuTag(), guard, dropdownHost))
+   el.feed.addEventListener("click", () => showFeedMenu(feedMenuTag(), guard, dropdownHost))
    // ⋯ overflow holds settings + the relocated "Jump to a date" row, which pops
    // the native date picker; picking a day (the input's change) repositions the
    // LIST to that date (jumpToDate), not the reader.
@@ -683,7 +677,7 @@ async function init() {
       if (retryFn) retryFn()
    })
    window.addEventListener("click", (e) => {
-      // closest(), not matches(): a dropdown button (channel, overflow) is
+      // closest(), not matches(): a dropdown button (feed, overflow) is
       // clicked on its inner icon (e.g. the .srr-overflow-icon svg), so the
       // event target is the child, not the button. matches() missed that and
       // closed the menu the button's own handler had just opened — leaving the

@@ -9,7 +9,7 @@ import (
 
 // OPML round-trips: Unmarshal ignores the extra export-side fields (XMLName
 // matches loosely, version/head are simply read and discarded by import), and
-// Marshal needs them to emit a spec-valid OPML 2.0 document for `chan export`.
+// Marshal needs them to emit a spec-valid OPML 2.0 document for `feed export`.
 type OPML struct {
 	XMLName xml.Name `xml:"opml"`
 	Version string   `xml:"version,attr"`
@@ -34,7 +34,7 @@ type Outline struct {
 
 type OPMLNode struct {
 	Name     string
-	Channel  *Channel
+	Feed     *Feed
 	Children []*OPMLNode
 }
 
@@ -45,11 +45,11 @@ func outlineDisplayName(o Outline) string {
 	return o.Text
 }
 
-func outlineToChannel(o Outline) *Channel {
+func outlineToFeed(o Outline) *Feed {
 	if !validFeedURL(o.XMLURL) {
 		return nil
 	}
-	return &Channel{
+	return &Feed{
 		Title: outlineDisplayName(o),
 		URL:   o.XMLURL,
 	}
@@ -97,13 +97,13 @@ func buildTree(outlines []Outline) []*OPMLNode {
 	var nodes []*OPMLNode
 	for _, o := range outlines {
 		node := &OPMLNode{Name: outlineDisplayName(o)}
-		if c := outlineToChannel(o); c != nil {
-			node.Channel = c
+		if c := outlineToFeed(o); c != nil {
+			node.Feed = c
 		}
 		if len(o.Outlines) > 0 {
 			node.Children = buildTree(o.Outlines)
 		}
-		if node.Channel != nil || len(node.Children) > 0 {
+		if node.Feed != nil || len(node.Children) > 0 {
 			nodes = append(nodes, node)
 		}
 	}

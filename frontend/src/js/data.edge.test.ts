@@ -11,14 +11,14 @@ import { IDX_ENTRY_SIZE, IDX_HEADER_PREFIX, IDX_STATE_SIZE, FETCHED_AT_BLOCK } f
 const PACK_SIZE = 50000
 
 interface Entry {
-   chanId: number
+   feedId: number
    deltaPackId?: 0 | 1
    deltaFetchedAt?: number
 }
 
-// Build one idx pack buffer (variable header + 3-byte entries: chan_id u16 LE +
+// Build one idx pack buffer (variable header + 3-byte entries: feed_id u16 LE +
 // packed u8), mirroring the backend writer and idx.test.ts's buildBuf. These
-// edge cases carry no header chanCounts, so numSlots = 0 (16-byte prefix only).
+// edge cases carry no header feedCounts, so numSlots = 0 (16-byte prefix only).
 function packBuf(entries: Entry[], opts: { fetchedAtBase?: number } = {}): ArrayBuffer {
    const buf = new ArrayBuffer(IDX_HEADER_PREFIX + entries.length * IDX_ENTRY_SIZE)
    const view = new DataView(buf)
@@ -28,8 +28,8 @@ function packBuf(entries: Entry[], opts: { fetchedAtBase?: number } = {}): Array
    for (let i = 0; i < entries.length; i++) {
       const e = entries[i]
       const off = IDX_HEADER_PREFIX + i * IDX_ENTRY_SIZE
-      bytes[off] = e.chanId & 0xff
-      bytes[off + 1] = (e.chanId >> 8) & 0xff
+      bytes[off] = e.feedId & 0xff
+      bytes[off + 1] = (e.feedId >> 8) & 0xff
       bytes[off + 2] = ((e.deltaPackId ?? 0) << 7) | ((e.deltaFetchedAt ?? 0) & 0x7f)
    }
    return buf
@@ -76,7 +76,7 @@ afterEach(() => {
 
 describe("data.init / numFinalizedIdx — the (total_art-1)/50000 inflection", () => {
    it("empty store (total_art 0): init returns before any idx fetch; counts degrade to 0/-1", async () => {
-      const data = await mount({ total_art: 0, channels: {} })
+      const data = await mount({ total_art: 0, feeds: {} })
       expect(data.numFinalizedIdx()).toBe(0)
       expect(data.countAll(new Map())).toBe(0)
       expect(await data.findLeft(0, new Map())).toBe(-1)
@@ -87,13 +87,13 @@ describe("data.init / numFinalizedIdx — the (total_art-1)/50000 inflection", (
    })
 
    it("total_art 1 → 0 finalized packs (everything in the latest pack)", async () => {
-      const data = await mount({ total_art: 1, seq: 1 }, { "idx/L1.gz": packBuf([{ chanId: 3 }]) })
+      const data = await mount({ total_art: 1, seq: 1 }, { "idx/L1.gz": packBuf([{ feedId: 3 }]) })
       expect(data.numFinalizedIdx()).toBe(0)
-      expect(await data.getChannelId(0)).toBe(3)
+      expect(await data.getFeedId(0)).toBe(3)
    })
 
    it("total_art exactly 50000 → still 0 finalized (the article that finalizes pack 0 hasn't arrived)", async () => {
-      const latest = packBuf(Array.from({ length: PACK_SIZE }, () => ({ chanId: 0 })))
+      const latest = packBuf(Array.from({ length: PACK_SIZE }, () => ({ feedId: 0 })))
       const data = await mount({ total_art: PACK_SIZE, seq: 1 }, { "idx/L1.gz": latest })
       expect(data.numFinalizedIdx()).toBe(0)
    })
@@ -101,7 +101,7 @@ describe("data.init / numFinalizedIdx — the (total_art-1)/50000 inflection", (
    it("total_art 50001 → 1 finalized pack (the inflection)", async () => {
       const data = await mount(
          { total_art: PACK_SIZE + 1, seq: 1, hdrs: 1 },
-         { "idx/h1.gz": summaryBuf(1), "idx/L1.gz": packBuf([{ chanId: 0 }]) },
+         { "idx/h1.gz": summaryBuf(1), "idx/L1.gz": packBuf([{ feedId: 0 }]) },
       )
       expect(data.numFinalizedIdx()).toBe(1)
    })
@@ -109,43 +109,43 @@ describe("data.init / numFinalizedIdx — the (total_art-1)/50000 inflection", (
    it("total_art 100001 → 2 finalized packs", async () => {
       const data = await mount(
          { total_art: 2 * PACK_SIZE + 1, seq: 1, hdrs: 2 },
-         { "idx/h2.gz": summaryBuf(2), "idx/L1.gz": packBuf([{ chanId: 0 }]) },
+         { "idx/h2.gz": summaryBuf(2), "idx/L1.gz": packBuf([{ feedId: 0 }]) },
       )
       expect(data.numFinalizedIdx()).toBe(2)
    })
 })
 
-describe("data.getChannelId — the 50000 pack boundary (last finalized vs first latest)", () => {
+describe("data.getFeedId — the 50000 pack boundary (last finalized vs first latest)", () => {
    it("addresses chron 49999 in finalized pack 0 and chron 50000 in the latest pack", async () => {
       // Eager path (no hdrs) so init fetches the finalized pack; entry 49999 of
-      // pack 0 carries a sentinel chan, entry 0 of the latest carries another.
-      const finalized = Array.from({ length: PACK_SIZE }, () => ({ chanId: 0 }))
-      finalized[PACK_SIZE - 1] = { chanId: 7 }
+      // pack 0 carries a sentinel feed, entry 0 of the latest carries another.
+      const finalized = Array.from({ length: PACK_SIZE }, () => ({ feedId: 0 }))
+      finalized[PACK_SIZE - 1] = { feedId: 7 }
       const data = await mount(
          { total_art: PACK_SIZE + 1, seq: 1 },
-         { "idx/0.gz": packBuf(finalized), "idx/L1.gz": packBuf([{ chanId: 9 }]) },
+         { "idx/0.gz": packBuf(finalized), "idx/L1.gz": packBuf([{ feedId: 9 }]) },
       )
       expect(data.numFinalizedIdx()).toBe(1)
-      expect(await data.getChannelId(PACK_SIZE - 1)).toBe(7) // last of finalized pack 0
-      expect(await data.getChannelId(PACK_SIZE)).toBe(9) // first of the latest pack
+      expect(await data.getFeedId(PACK_SIZE - 1)).toBe(7) // last of finalized pack 0
+      expect(await data.getFeedId(PACK_SIZE)).toBe(9) // first of the latest pack
    })
 })
 
-describe("data.channelTitle — deleted-channel tombstone", () => {
-   it("returns the title for a known channel and [DELETED] for an absent chan_id", async () => {
+describe("data.feedTitle — deleted-feed tombstone", () => {
+   it("returns the title for a known feed and [DELETED] for an absent feed_id", async () => {
       const data = await mount({
          total_art: 0,
-         channels: { 5: { id: 5, title: "Live", total_art: 1 } } as unknown as IDB["channels"],
+         feeds: { 5: { id: 5, title: "Live", total_art: 1 } } as unknown as IDB["feeds"],
       })
-      expect(data.channelTitle(5)).toBe("Live")
-      expect(data.channelTitle(404)).toBe("[DELETED]") // its articles survive in packs; render a tombstone
+      expect(data.feedTitle(5)).toBe("Live")
+      expect(data.feedTitle(404)).toBe("[DELETED]") // its articles survive in packs; render a tombstone
    })
 })
 
 describe("data.findChronForTimestamp — clamp + first_fetched NaN guard", () => {
    // A 4-article single-pack store; fetchedAts (blocks) = [0, 5, 5, 20].
    const latest = () =>
-      packBuf([{ chanId: 1 }, { chanId: 1, deltaFetchedAt: 5 }, { chanId: 1 }, { chanId: 1, deltaFetchedAt: 15 }])
+      packBuf([{ feedId: 1 }, { feedId: 1, deltaFetchedAt: 5 }, { feedId: 1 }, { feedId: 1, deltaFetchedAt: 15 }])
    const at = (blocks: number) => blocks * FETCHED_AT_BLOCK // ts (seconds) for a block
 
    it("clamps a timestamp past the newest article to total_art-1 (not total_art)", async () => {

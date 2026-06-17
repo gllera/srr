@@ -59,40 +59,40 @@ func TestIsSelected(t *testing.T) {
 
 func TestImportWalkerBasic(t *testing.T) {
 	nodes := []*OPMLNode{
-		{Name: "Feed A", Channel: &Channel{Title: "Feed A", URL: "http://example.com/a"}},
-		{Name: "Feed B", Channel: &Channel{Title: "Feed B", URL: "http://example.com/b"}},
+		{Name: "Feed A", Feed: &Feed{Title: "Feed A", URL: "http://example.com/a"}},
+		{Name: "Feed B", Feed: &Feed{Title: "Feed B", URL: "http://example.com/b"}},
 	}
 
 	iw := newImportWalker(nil)
-	channels, err := iw.walk(nodes, "", "", nil, true)
+	feeds, err := iw.walk(nodes, "", "", nil, true)
 	if err != nil {
 		t.Fatalf("walk: %v", err)
 	}
 
-	if len(channels) != 2 {
-		t.Fatalf("got %d channels, want 2", len(channels))
+	if len(feeds) != 2 {
+		t.Fatalf("got %d feeds, want 2", len(feeds))
 	}
 }
 
 func TestImportWalkerSelectiveImport(t *testing.T) {
 	nodes := []*OPMLNode{
-		{Name: "Feed A", Channel: &Channel{Title: "Feed A", URL: "http://example.com/a"}},
-		{Name: "Feed B", Channel: &Channel{Title: "Feed B", URL: "http://example.com/b"}},
-		{Name: "Feed C", Channel: &Channel{Title: "Feed C", URL: "http://example.com/c"}},
+		{Name: "Feed A", Feed: &Feed{Title: "Feed A", URL: "http://example.com/a"}},
+		{Name: "Feed B", Feed: &Feed{Title: "Feed B", URL: "http://example.com/b"}},
+		{Name: "Feed C", Feed: &Feed{Title: "Feed C", URL: "http://example.com/c"}},
 	}
 
 	// Nodes are sorted case-insensitively, so order is A=1, B=2, C=3
 	iw := newImportWalker([]string{"2"})
-	channels, err := iw.walk(nodes, "", "", nil, false)
+	feeds, err := iw.walk(nodes, "", "", nil, false)
 	if err != nil {
 		t.Fatalf("walk: %v", err)
 	}
 
-	if len(channels) != 1 {
-		t.Fatalf("got %d channels, want 1", len(channels))
+	if len(feeds) != 1 {
+		t.Fatalf("got %d feeds, want 1", len(feeds))
 	}
-	if channels[0].Title != "Feed B" {
-		t.Errorf("selected channel = %q, want %q", channels[0].Title, "Feed B")
+	if feeds[0].Title != "Feed B" {
+		t.Errorf("selected feed = %q, want %q", feeds[0].Title, "Feed B")
 	}
 }
 
@@ -101,38 +101,38 @@ func TestImportWalkerNestedGroup(t *testing.T) {
 		{
 			Name: "Tech",
 			Children: []*OPMLNode{
-				{Name: "Blog", Channel: &Channel{Title: "Blog", URL: "http://example.com/blog"}},
+				{Name: "Blog", Feed: &Feed{Title: "Blog", URL: "http://example.com/blog"}},
 			},
 		},
 	}
 
 	iw := newImportWalker(nil)
-	channels, err := iw.walk(nodes, "", "", nil, true)
+	feeds, err := iw.walk(nodes, "", "", nil, true)
 	if err != nil {
 		t.Fatalf("walk: %v", err)
 	}
 
-	if len(channels) != 1 {
-		t.Fatalf("got %d channels, want 1", len(channels))
+	if len(feeds) != 1 {
+		t.Fatalf("got %d feeds, want 1", len(feeds))
 	}
-	if channels[0].Tag != "tech" {
-		t.Errorf("tag = %q, want %q", channels[0].Tag, "tech")
+	if feeds[0].Tag != "tech" {
+		t.Errorf("tag = %q, want %q", feeds[0].Tag, "tech")
 	}
 }
 
 func TestImportWalkerNoSelection(t *testing.T) {
 	nodes := []*OPMLNode{
-		{Name: "Feed A", Channel: &Channel{Title: "Feed A", URL: "http://example.com/a"}},
+		{Name: "Feed A", Feed: &Feed{Title: "Feed A", URL: "http://example.com/a"}},
 	}
 
 	iw := newImportWalker(nil)
-	channels, err := iw.walk(nodes, "", "", nil, false)
+	feeds, err := iw.walk(nodes, "", "", nil, false)
 	if err != nil {
 		t.Fatalf("walk: %v", err)
 	}
 
-	if len(channels) != 0 {
-		t.Errorf("got %d channels, want 0 (nothing selected)", len(channels))
+	if len(feeds) != 0 {
+		t.Errorf("got %d feeds, want 0 (nothing selected)", len(feeds))
 	}
 }
 
@@ -141,53 +141,53 @@ func TestImportWalkerGroupSelectsChildren(t *testing.T) {
 		{
 			Name: "Tech",
 			Children: []*OPMLNode{
-				{Name: "Blog A", Channel: &Channel{Title: "Blog A", URL: "http://example.com/a"}},
-				{Name: "Blog B", Channel: &Channel{Title: "Blog B", URL: "http://example.com/b"}},
+				{Name: "Blog A", Feed: &Feed{Title: "Blog A", URL: "http://example.com/a"}},
+				{Name: "Blog B", Feed: &Feed{Title: "Blog B", URL: "http://example.com/b"}},
 			},
 		},
 	}
 
-	// Selecting the group "1" imports each child as its own channel.
+	// Selecting the group "1" imports each child as its own feed.
 	iw := newImportWalker([]string{"1"})
-	channels, err := iw.walk(nodes, "", "", nil, false)
+	feeds, err := iw.walk(nodes, "", "", nil, false)
 	if err != nil {
 		t.Fatalf("walk: %v", err)
 	}
 
-	if len(channels) != 2 {
-		t.Errorf("got %d channels, want 2 (group selection expands to children)", len(channels))
+	if len(feeds) != 2 {
+		t.Errorf("got %d feeds, want 2 (group selection expands to children)", len(feeds))
 	}
 }
 
 func TestImportWalkerSorting(t *testing.T) {
 	nodes := []*OPMLNode{
-		{Name: "Zebra", Channel: &Channel{Title: "Zebra", URL: "http://example.com/z"}},
-		{Name: "alpha", Channel: &Channel{Title: "alpha", URL: "http://example.com/a"}},
-		{Name: "Beta", Channel: &Channel{Title: "Beta", URL: "http://example.com/b"}},
+		{Name: "Zebra", Feed: &Feed{Title: "Zebra", URL: "http://example.com/z"}},
+		{Name: "alpha", Feed: &Feed{Title: "alpha", URL: "http://example.com/a"}},
+		{Name: "Beta", Feed: &Feed{Title: "Beta", URL: "http://example.com/b"}},
 	}
 
 	iw := newImportWalker(nil)
-	channels, err := iw.walk(nodes, "", "", nil, true)
+	feeds, err := iw.walk(nodes, "", "", nil, true)
 	if err != nil {
 		t.Fatalf("walk: %v", err)
 	}
 
 	// Should be sorted case-insensitively: alpha, Beta, Zebra
-	if len(channels) != 3 {
-		t.Fatalf("got %d channels, want 3", len(channels))
+	if len(feeds) != 3 {
+		t.Fatalf("got %d feeds, want 3", len(feeds))
 	}
-	if channels[0].Title != "alpha" {
-		t.Errorf("channels[0] = %q, want %q", channels[0].Title, "alpha")
+	if feeds[0].Title != "alpha" {
+		t.Errorf("feeds[0] = %q, want %q", feeds[0].Title, "alpha")
 	}
-	if channels[1].Title != "Beta" {
-		t.Errorf("channels[1] = %q, want %q", channels[1].Title, "Beta")
+	if feeds[1].Title != "Beta" {
+		t.Errorf("feeds[1] = %q, want %q", feeds[1].Title, "Beta")
 	}
-	if channels[2].Title != "Zebra" {
-		t.Errorf("channels[2] = %q, want %q", channels[2].Title, "Zebra")
+	if feeds[2].Title != "Zebra" {
+		t.Errorf("feeds[2] = %q, want %q", feeds[2].Title, "Zebra")
 	}
 }
 
-// A URL cross-listed in several folders yields exactly one channel. First
+// A URL cross-listed in several folders yields exactly one feed. First
 // folder visited wins the tag (folders are walked in case-insensitive name
 // order, so "AAA" precedes "BBB").
 func TestImportDedupCrossFolder(t *testing.T) {
@@ -195,54 +195,54 @@ func TestImportDedupCrossFolder(t *testing.T) {
 		{
 			Name: "AAA",
 			Children: []*OPMLNode{
-				{Name: "Shared", Channel: &Channel{Title: "Shared", URL: "http://example.com/shared"}},
+				{Name: "Shared", Feed: &Feed{Title: "Shared", URL: "http://example.com/shared"}},
 			},
 		},
 		{
 			Name: "BBB",
 			Children: []*OPMLNode{
-				{Name: "Shared", Channel: &Channel{Title: "Shared", URL: "http://example.com/shared"}},
+				{Name: "Shared", Feed: &Feed{Title: "Shared", URL: "http://example.com/shared"}},
 			},
 		},
 	}
 
 	iw := newImportWalker(nil)
-	channels, err := iw.walk(nodes, "", "", nil, true)
+	feeds, err := iw.walk(nodes, "", "", nil, true)
 	if err != nil {
 		t.Fatalf("walk: %v", err)
 	}
 
-	if len(channels) != 1 {
-		t.Fatalf("got %d channels, want 1 (cross-folder URL deduped)", len(channels))
+	if len(feeds) != 1 {
+		t.Fatalf("got %d feeds, want 1 (cross-folder URL deduped)", len(feeds))
 	}
-	if channels[0].Tag != "aaa" {
-		t.Errorf("tag = %q, want %q (first folder wins)", channels[0].Tag, "aaa")
+	if feeds[0].Tag != "aaa" {
+		t.Errorf("tag = %q, want %q (first folder wins)", feeds[0].Tag, "aaa")
 	}
 }
 
 func TestApplyImportDefaultsNothingSet(t *testing.T) {
-	channels := []*Channel{
+	feeds := []*Feed{
 		{Title: "A", Tag: "auto", Pipe: []string{"#sanitize"}, Ingest: "#rss"},
 		{Title: "B"},
 	}
-	applyImportDefaults(channels, nil, nil, nil)
+	applyImportDefaults(feeds, nil, nil, nil)
 	// Untouched: existing Tag / Pipe / Ingest preserved.
-	if channels[0].Tag != "auto" {
-		t.Errorf("channels[0].Tag = %q, want %q", channels[0].Tag, "auto")
+	if feeds[0].Tag != "auto" {
+		t.Errorf("feeds[0].Tag = %q, want %q", feeds[0].Tag, "auto")
 	}
-	if !slices.Equal(channels[0].Pipe, []string{"#sanitize"}) {
-		t.Errorf("channels[0].Pipe = %v, want [#sanitize]", channels[0].Pipe)
+	if !slices.Equal(feeds[0].Pipe, []string{"#sanitize"}) {
+		t.Errorf("feeds[0].Pipe = %v, want [#sanitize]", feeds[0].Pipe)
 	}
-	if channels[0].Ingest != "#rss" {
-		t.Errorf("channels[0].Ingest = %q, want %q", channels[0].Ingest, "#rss")
+	if feeds[0].Ingest != "#rss" {
+		t.Errorf("feeds[0].Ingest = %q, want %q", feeds[0].Ingest, "#rss")
 	}
 }
 
 func TestApplyImportDefaultsTagOverride(t *testing.T) {
-	channels := []*Channel{{Title: "A", Tag: "auto"}, {Title: "B", Tag: "other"}}
+	feeds := []*Feed{{Title: "A", Tag: "auto"}, {Title: "B", Tag: "other"}}
 	tag := "explicit"
-	applyImportDefaults(channels, nil, nil, &tag)
-	for _, c := range channels {
+	applyImportDefaults(feeds, nil, nil, &tag)
+	for _, c := range feeds {
 		if c.Tag != "explicit" {
 			t.Errorf("c.Tag = %q, want %q", c.Tag, "explicit")
 		}
@@ -250,19 +250,19 @@ func TestApplyImportDefaultsTagOverride(t *testing.T) {
 }
 
 func TestApplyImportDefaultsTagClearsToEmpty(t *testing.T) {
-	channels := []*Channel{{Title: "A", Tag: "auto"}}
+	feeds := []*Feed{{Title: "A", Tag: "auto"}}
 	empty := ""
-	applyImportDefaults(channels, nil, nil, &empty)
-	if channels[0].Tag != "" {
-		t.Errorf("c.Tag = %q, want empty", channels[0].Tag)
+	applyImportDefaults(feeds, nil, nil, &empty)
+	if feeds[0].Tag != "" {
+		t.Errorf("c.Tag = %q, want empty", feeds[0].Tag)
 	}
 }
 
 func TestApplyImportDefaultsPipeApplied(t *testing.T) {
-	channels := []*Channel{{Title: "A"}, {Title: "B"}}
+	feeds := []*Feed{{Title: "A"}, {Title: "B"}}
 	parsers := []string{"#sanitize", "#minify"}
-	applyImportDefaults(channels, parsers, nil, nil)
-	for _, c := range channels {
+	applyImportDefaults(feeds, parsers, nil, nil)
+	for _, c := range feeds {
 		if !slices.Equal(c.Pipe, []string{"#sanitize", "#minify"}) {
 			t.Errorf("c.Pipe = %v, want [#sanitize #minify]", c.Pipe)
 		}
@@ -270,28 +270,28 @@ func TestApplyImportDefaultsPipeApplied(t *testing.T) {
 }
 
 func TestApplyImportDefaultsPipeEmptyClears(t *testing.T) {
-	channels := []*Channel{{Title: "A", Pipe: []string{"#sanitize"}}}
+	feeds := []*Feed{{Title: "A", Pipe: []string{"#sanitize"}}}
 	parsers := []string{""}
-	applyImportDefaults(channels, parsers, nil, nil)
-	if channels[0].Pipe != nil {
-		t.Errorf("c.Pipe = %v, want nil (filterPipe drops empties)", channels[0].Pipe)
+	applyImportDefaults(feeds, parsers, nil, nil)
+	if feeds[0].Pipe != nil {
+		t.Errorf("c.Pipe = %v, want nil (filterPipe drops empties)", feeds[0].Pipe)
 	}
 }
 
 func TestApplyImportDefaultsPipeFiltersEmpty(t *testing.T) {
-	channels := []*Channel{{Title: "A"}}
+	feeds := []*Feed{{Title: "A"}}
 	parsers := []string{"#sanitize", "", "#minify"}
-	applyImportDefaults(channels, parsers, nil, nil)
-	if !slices.Equal(channels[0].Pipe, []string{"#sanitize", "#minify"}) {
-		t.Errorf("c.Pipe = %v, want [#sanitize #minify]", channels[0].Pipe)
+	applyImportDefaults(feeds, parsers, nil, nil)
+	if !slices.Equal(feeds[0].Pipe, []string{"#sanitize", "#minify"}) {
+		t.Errorf("c.Pipe = %v, want [#sanitize #minify]", feeds[0].Pipe)
 	}
 }
 
 func TestApplyImportDefaultsIngestApplied(t *testing.T) {
-	channels := []*Channel{{Title: "A"}, {Title: "B"}}
+	feeds := []*Feed{{Title: "A"}, {Title: "B"}}
 	ingest := "my-fetcher"
-	applyImportDefaults(channels, nil, &ingest, nil)
-	for _, c := range channels {
+	applyImportDefaults(feeds, nil, &ingest, nil)
+	for _, c := range feeds {
 		if c.Ingest != "my-fetcher" {
 			t.Errorf("c.Ingest = %q, want %q", c.Ingest, "my-fetcher")
 		}
@@ -299,15 +299,15 @@ func TestApplyImportDefaultsIngestApplied(t *testing.T) {
 }
 
 func TestApplyImportDefaultsIngestClearsToEmpty(t *testing.T) {
-	channels := []*Channel{{Title: "A", Ingest: "my-fetcher"}}
+	feeds := []*Feed{{Title: "A", Ingest: "my-fetcher"}}
 	empty := ""
-	applyImportDefaults(channels, nil, &empty, nil)
-	if channels[0].Ingest != "" {
-		t.Errorf("c.Ingest = %q, want empty", channels[0].Ingest)
+	applyImportDefaults(feeds, nil, &empty, nil)
+	if feeds[0].Ingest != "" {
+		t.Errorf("c.Ingest = %q, want empty", feeds[0].Ingest)
 	}
 }
 
-func TestImportRunFlagsThreadIntoChannels(t *testing.T) {
+func TestImportRunFlagsThreadIntoFeeds(t *testing.T) {
 	// Drive applyImportDefaults via the same call site Run uses, with
 	// fields populated from an ImportCmd. Guards the wiring after the
 	// rename / refactor.
@@ -316,16 +316,16 @@ func TestImportRunFlagsThreadIntoChannels(t *testing.T) {
 	tag := "news"
 	o := &ImportCmd{Parsers: parsers, Ingest: &ingest, Tag: &tag}
 
-	channels := []*Channel{{Title: "A"}}
-	applyImportDefaults(channels, o.Parsers, o.Ingest, o.Tag)
+	feeds := []*Feed{{Title: "A"}}
+	applyImportDefaults(feeds, o.Parsers, o.Ingest, o.Tag)
 
-	if !slices.Equal(channels[0].Pipe, []string{"#sanitize", "#minify"}) {
-		t.Errorf("Pipe = %v", channels[0].Pipe)
+	if !slices.Equal(feeds[0].Pipe, []string{"#sanitize", "#minify"}) {
+		t.Errorf("Pipe = %v", feeds[0].Pipe)
 	}
-	if channels[0].Ingest != "my-fetcher" {
-		t.Errorf("Ingest = %q", channels[0].Ingest)
+	if feeds[0].Ingest != "my-fetcher" {
+		t.Errorf("Ingest = %q", feeds[0].Ingest)
 	}
-	if channels[0].Tag != "news" {
-		t.Errorf("Tag = %q", channels[0].Tag)
+	if feeds[0].Tag != "news" {
+		t.Errorf("Tag = %q", feeds[0].Tag)
 	}
 }

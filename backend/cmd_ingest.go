@@ -3,7 +3,7 @@ package main
 import "context"
 
 // IngestCmd sets (or prints) the db.gz root Ingest — the default ingest
-// strategy inherited by channels whose Ingest field is empty.
+// strategy inherited by feeds whose Ingest field is empty.
 // No args → print current. "" alone → clear. Otherwise → set.
 type IngestCmd struct {
 	Ingest *string `arg:"" optional:"" help:"Root ingest strategy to set (omit to print current; use \"\" alone to clear)."`

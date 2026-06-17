@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// runExport captures `chan export` output for the current globals.Store.
+// runExport captures `feed export` output for the current globals.Store.
 func runExport(t *testing.T, cmd *ExportCmd) string {
 	t.Helper()
 	var out bytes.Buffer
@@ -33,16 +33,16 @@ func parseExport(t *testing.T, opml string) []*OPMLNode {
 	return nodes
 }
 
-func seedChannels(t *testing.T, chans ...*Channel) {
+func seedFeeds(t *testing.T, feeds ...*Feed) {
 	t.Helper()
 	setupEmptyDB(t)
 	db, err := NewDB(ctx, false)
 	if err != nil {
 		t.Fatalf("NewDB: %v", err)
 	}
-	for _, ch := range chans {
-		if err := db.AddChannel(ch); err != nil {
-			t.Fatalf("AddChannel %q: %v", ch.Title, err)
+	for _, ch := range feeds {
+		if err := db.AddFeed(ch); err != nil {
+			t.Fatalf("AddFeed %q: %v", ch.Title, err)
 		}
 	}
 	if err := db.Commit(ctx); err != nil {
@@ -51,8 +51,8 @@ func seedChannels(t *testing.T, chans ...*Channel) {
 	db.Close(ctx)
 }
 
-func chanOf(title, tag, url string) *Channel {
-	return &Channel{Title: title, Tag: tag, URL: url}
+func feedOf(title, tag, url string) *Feed {
+	return &Feed{Title: title, Tag: tag, URL: url}
 }
 
 func TestExportEmptyDB(t *testing.T) {
@@ -67,23 +67,23 @@ func TestExportEmptyDB(t *testing.T) {
 }
 
 func TestExportUntaggedTopLevel(t *testing.T) {
-	seedChannels(t, chanOf("News", "", "https://news.example.com/rss"))
+	seedFeeds(t, feedOf("News", "", "https://news.example.com/rss"))
 	nodes := parseExport(t, runExport(t, &ExportCmd{}))
 	if len(nodes) != 1 {
 		t.Fatalf("top-level nodes = %d, want 1", len(nodes))
 	}
-	if nodes[0].Channel == nil || len(nodes[0].Children) != 0 {
-		t.Fatalf("node = %+v, want bare leaf channel", nodes[0])
+	if nodes[0].Feed == nil || len(nodes[0].Children) != 0 {
+		t.Fatalf("node = %+v, want bare leaf feed", nodes[0])
 	}
-	if nodes[0].Channel.Title != "News" || nodes[0].Channel.URL != "https://news.example.com/rss" {
-		t.Errorf("leaf = %q %q", nodes[0].Channel.Title, nodes[0].Channel.URL)
+	if nodes[0].Feed.Title != "News" || nodes[0].Feed.URL != "https://news.example.com/rss" {
+		t.Errorf("leaf = %q %q", nodes[0].Feed.Title, nodes[0].Feed.URL)
 	}
 }
 
 func TestExportNestedTagGroups(t *testing.T) {
-	seedChannels(t, chanOf("Go Blog", "tech/go_blogs", "https://go.example.com/rss"))
+	seedFeeds(t, feedOf("Go Blog", "tech/go_blogs", "https://go.example.com/rss"))
 	nodes := parseExport(t, runExport(t, &ExportCmd{}))
-	if len(nodes) != 1 || nodes[0].Name != "tech" || nodes[0].Channel != nil {
+	if len(nodes) != 1 || nodes[0].Name != "tech" || nodes[0].Feed != nil {
 		t.Fatalf("top level = %+v, want single tech group", nodes)
 	}
 	mid := nodes[0].Children
@@ -91,15 +91,15 @@ func TestExportNestedTagGroups(t *testing.T) {
 		t.Fatalf("second level = %+v, want go_blogs group", mid)
 	}
 	leaves := mid[0].Children
-	if len(leaves) != 1 || leaves[0].Channel == nil || leaves[0].Channel.Title != "Go Blog" {
-		t.Fatalf("leaves = %+v, want Go Blog channel", leaves)
+	if len(leaves) != 1 || leaves[0].Feed == nil || leaves[0].Feed.Title != "Go Blog" {
+		t.Fatalf("leaves = %+v, want Go Blog feed", leaves)
 	}
 }
 
 func TestExportMergesSharedPrefix(t *testing.T) {
-	seedChannels(t,
-		chanOf("Go Blog", "tech/go_blogs", "https://go.example.com/rss"),
-		chanOf("Rust Blog", "tech/rust", "https://rust.example.com/rss"),
+	seedFeeds(t,
+		feedOf("Go Blog", "tech/go_blogs", "https://go.example.com/rss"),
+		feedOf("Rust Blog", "tech/rust", "https://rust.example.com/rss"),
 	)
 	nodes := parseExport(t, runExport(t, &ExportCmd{}))
 	if len(nodes) != 1 || nodes[0].Name != "tech" {
@@ -110,11 +110,11 @@ func TestExportMergesSharedPrefix(t *testing.T) {
 	}
 }
 
-// One channel = one leaf carrying its single URL.
-func TestExportOneLeafPerChannel(t *testing.T) {
-	seedChannels(t,
-		chanOf("A", "", "https://a.example.com/rss"),
-		chanOf("B", "", "https://b.example.com/rss"),
+// One feed = one leaf carrying its single URL.
+func TestExportOneLeafPerFeed(t *testing.T) {
+	seedFeeds(t,
+		feedOf("A", "", "https://a.example.com/rss"),
+		feedOf("B", "", "https://b.example.com/rss"),
 	)
 	nodes := parseExport(t, runExport(t, &ExportCmd{}))
 	if len(nodes) != 2 {
@@ -122,10 +122,10 @@ func TestExportOneLeafPerChannel(t *testing.T) {
 	}
 	urls := []string{}
 	for _, n := range nodes {
-		if n.Channel == nil {
-			t.Fatalf("node = %+v, want a leaf channel", n)
+		if n.Feed == nil {
+			t.Fatalf("node = %+v, want a leaf feed", n)
 		}
-		urls = append(urls, n.Channel.URL)
+		urls = append(urls, n.Feed.URL)
 	}
 	sort.Strings(urls)
 	want := []string{"https://a.example.com/rss", "https://b.example.com/rss"}
@@ -135,9 +135,9 @@ func TestExportOneLeafPerChannel(t *testing.T) {
 }
 
 func TestExportTagFilter(t *testing.T) {
-	seedChannels(t,
-		chanOf("Go Blog", "tech", "https://go.example.com/rss"),
-		chanOf("News", "news", "https://news.example.com/rss"),
+	seedFeeds(t,
+		feedOf("Go Blog", "tech", "https://go.example.com/rss"),
+		feedOf("News", "news", "https://news.example.com/rss"),
 	)
 	nodes := parseExport(t, runExport(t, &ExportCmd{Tag: strPtr("tech")}))
 	if len(nodes) != 1 || nodes[0].Name != "tech" {
@@ -148,12 +148,12 @@ func TestExportTagFilter(t *testing.T) {
 // The load-bearing invariant: export → import -a reproduces the same
 // titles/tags/feeds (stored tags re-normalize to themselves).
 func TestExportImportRoundTrip(t *testing.T) {
-	orig := []*Channel{
-		chanOf("Go Blog", "tech/go_blogs", "https://go.example.com/rss"),
-		chanOf("News", "", "https://news.example.com/rss"),
-		chanOf("Rust Blog", "tech/rust", "https://rust.example.com/rss"),
+	orig := []*Feed{
+		feedOf("Go Blog", "tech/go_blogs", "https://go.example.com/rss"),
+		feedOf("News", "", "https://news.example.com/rss"),
+		feedOf("Rust Blog", "tech/rust", "https://rust.example.com/rss"),
 	}
-	seedChannels(t, orig...)
+	seedFeeds(t, orig...)
 	out := runExport(t, &ExportCmd{})
 
 	// Import the export into a fresh store.
@@ -167,17 +167,17 @@ func TestExportImportRoundTrip(t *testing.T) {
 	}
 	defer db.Close(context.Background())
 
-	got := map[string]*Channel{}
-	for _, ch := range db.Channels() {
+	got := map[string]*Feed{}
+	for _, ch := range db.Feeds() {
 		got[ch.Title] = ch
 	}
 	if len(got) != len(orig) {
-		t.Fatalf("imported %d channels, want %d", len(got), len(orig))
+		t.Fatalf("imported %d feeds, want %d", len(got), len(orig))
 	}
 	for _, want := range orig {
 		ch := got[want.Title]
 		if ch == nil {
-			t.Fatalf("channel %q missing after round-trip", want.Title)
+			t.Fatalf("feed %q missing after round-trip", want.Title)
 		}
 		if ch.Tag != want.Tag {
 			t.Errorf("%q tag = %q, want %q", want.Title, ch.Tag, want.Tag)
@@ -193,7 +193,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 func TestOPMLMarshalRoundTrip(t *testing.T) {
 	in := OPML{
 		Version: "2.0",
-		Head:    Head{Title: "SRR channels"},
+		Head:    Head{Title: "SRR feeds"},
 		Body: Body{Outlines: []Outline{
 			{Title: "tech", Text: "tech", Outlines: []Outline{
 				{Title: "Go Blog", Text: "Go Blog", XMLURL: "https://go.example.com/rss"},
@@ -205,7 +205,7 @@ func TestOPMLMarshalRoundTrip(t *testing.T) {
 		t.Fatalf("MarshalIndent: %v", err)
 	}
 	raw := string(b)
-	if !strings.Contains(raw, `<opml version="2.0">`) || !strings.Contains(raw, "<title>SRR channels</title>") {
+	if !strings.Contains(raw, `<opml version="2.0">`) || !strings.Contains(raw, "<title>SRR feeds</title>") {
 		t.Fatalf("marshalled OPML missing envelope:\n%s", raw)
 	}
 	// Group outlines must not carry an empty xmlUrl attribute.

@@ -13,9 +13,9 @@ func validateAll(fetch keyGetter, core *DBCore, packs []*idxPack) error {
 
 	issues += checkBoundsVsData(fetch, core, packs)
 	issues += checkDBMeta(fetch, core, packs)
-	issues += checkChanCountsContinuity(packs)
+	issues += checkFeedCountsContinuity(packs)
 	issues += checkFetchedAtsContinuity(packs)
-	issues += checkUnknownChanIDs(core, packs)
+	issues += checkUnknownFeedIDs(core, packs)
 	issues += checkLatestFiles(fetch, core)
 	issues += checkIdxSummary(fetch, core, packs)
 	issues += checkSearch(fetch, core)
@@ -30,7 +30,7 @@ func validateAll(fetch keyGetter, core *DBCore, packs []*idxPack) error {
 
 // checkBoundsVsData walks every chronIdx and verifies the resolved
 // (packId, offset) lands inside an existing data-pack entry whose
-// chan_id matches the idx pack's chan_id.
+// feed_id matches the idx pack's feed_id.
 func checkBoundsVsData(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 	// Chron order keeps (packId, offset) monotonic, so one resident pack
 	// suffices (the walkArticles pattern) — caching every decoded pack would
@@ -55,7 +55,7 @@ func checkBoundsVsData(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 	for chron := range core.TotalArticles {
 		n := packIdxFor(chron, len(packs))
 		pack := packs[n]
-		idxSub := int(pack.chanIDs[chron-n*idxPackSize])
+		idxSub := int(pack.feedIDs[chron-n*idxPackSize])
 		pid, offset := pack.getPackRef(chron)
 
 		entries := load(pid)
@@ -69,25 +69,25 @@ func checkBoundsVsData(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 			oob++
 			continue
 		}
-		if entries[offset].ChannelID != idxSub {
-			fmt.Printf("[bounds-vs-data] chron %d: chan_id mismatch idx=%d data=%d (packId=%d offset=%d)\n",
-				chron, idxSub, entries[offset].ChannelID, pid, offset)
+		if entries[offset].FeedID != idxSub {
+			fmt.Printf("[bounds-vs-data] chron %d: feed_id mismatch idx=%d data=%d (packId=%d offset=%d)\n",
+				chron, idxSub, entries[offset].FeedID, pid, offset)
 			mismatch++
 		}
 	}
-	fmt.Printf("[bounds-vs-data] scanned %d chronIdx, %d data packs visited: %d out-of-range, %d chan_id mismatches\n",
+	fmt.Printf("[bounds-vs-data] scanned %d chronIdx, %d data packs visited: %d out-of-range, %d feed_id mismatches\n",
 		core.TotalArticles, loaded, oob, mismatch)
 	return oob + mismatch
 }
 
-// chanIDStats walks every idx entry once, returning per-chan_id entry counts
-// and first-occurrence chrons. Shared by checkDBMeta (registered channels)
-// and checkUnknownChanIDs (unregistered ones).
-func chanIDStats(packs []*idxPack) (count, first map[int]int) {
+// feedIDStats walks every idx entry once, returning per-feed_id entry counts
+// and first-occurrence chrons. Shared by checkDBMeta (registered feeds)
+// and checkUnknownFeedIDs (unregistered ones).
+func feedIDStats(packs []*idxPack) (count, first map[int]int) {
 	count, first = map[int]int{}, map[int]int{}
 	for _, p := range packs {
 		base := p.packIndex * idxPackSize
-		for i, s := range p.chanIDs {
+		for i, s := range p.feedIDs {
 			sid := int(s)
 			count[sid]++
 			if _, ok := first[sid]; !ok {
@@ -128,14 +128,14 @@ func checkDBMeta(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 		issues++
 	}
 
-	idxCount, idxFirst := chanIDStats(packs)
-	chanIDs := make([]int, 0, len(core.Channels))
-	for id := range core.Channels {
-		chanIDs = append(chanIDs, id)
+	idxCount, idxFirst := feedIDStats(packs)
+	feedIDs := make([]int, 0, len(core.Feeds))
+	for id := range core.Feeds {
+		feedIDs = append(feedIDs, id)
 	}
-	sort.Ints(chanIDs)
-	for _, id := range chanIDs {
-		sub := core.Channels[id]
+	sort.Ints(feedIDs)
+	for _, id := range feedIDs {
+		sub := core.Feeds[id]
 		actual := idxCount[id]
 		if actual != sub.TotalArt {
 			fmt.Printf("[db-meta] sub %d (%q): total_art=%d but idx has %d entries\n",
@@ -148,43 +148,43 @@ func checkDBMeta(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 			issues++
 		}
 	}
-	fmt.Printf("[db-meta] checked total_art, next_pid, pack_off, and %d subscriptions\n", len(chanIDs))
+	fmt.Printf("[db-meta] checked total_art, next_pid, pack_off, and %d subscriptions\n", len(feedIDs))
 	return issues
 }
 
-// checkChanCountsContinuity verifies header chanCounts[s] in pack i+1
-// equals chanCounts[s] + ownChanCounts[s] from pack i. Only meaningful
+// checkFeedCountsContinuity verifies header feedCounts[s] in pack i+1
+// equals feedCounts[s] + ownFeedCounts[s] from pack i. Only meaningful
 // once total_art crosses idxPackSize.
-func checkChanCountsContinuity(packs []*idxPack) int {
+func checkFeedCountsContinuity(packs []*idxPack) int {
 	if len(packs) < 2 {
-		fmt.Println("[chan-counts] only 1 idx pack; continuity check skipped")
+		fmt.Println("[feed-counts] only 1 idx pack; continuity check skipped")
 		return 0
 	}
 	issues := 0
 	for i := 0; i < len(packs)-1; i++ {
 		cur, next := packs[i], packs[i+1]
-		// Check every slot either pack carries: a later-added channel widens
+		// Check every slot either pack carries: a later-added feed widens
 		// next's header beyond cur's, and the bounded accessors read 0 for ids
 		// a pack doesn't reach.
 		slots := max(cur.numSlots, next.numSlots)
 		for s := range slots {
-			expected := cur.chanCount(s) + cur.ownChanCount(s)
-			if next.chanCount(s) != expected {
-				fmt.Printf("[chan-counts] pack %d sub %d: header=%d but pack %d ended with cumulative %d\n",
-					next.packIndex, s, next.chanCount(s), cur.packIndex, expected)
+			expected := cur.feedCount(s) + cur.ownFeedCount(s)
+			if next.feedCount(s) != expected {
+				fmt.Printf("[feed-counts] pack %d sub %d: header=%d but pack %d ended with cumulative %d\n",
+					next.packIndex, s, next.feedCount(s), cur.packIndex, expected)
 				issues++
 			}
 		}
 	}
 	for s := range packs[0].numSlots {
-		if packs[0].chanCounts[s] != 0 {
-			fmt.Printf("[chan-counts] pack 0 sub %d: header=%d but expected 0 (no articles before first pack)\n",
-				s, packs[0].chanCounts[s])
+		if packs[0].feedCounts[s] != 0 {
+			fmt.Printf("[feed-counts] pack 0 sub %d: header=%d but expected 0 (no articles before first pack)\n",
+				s, packs[0].feedCounts[s])
 			issues++
 		}
 	}
 	if issues == 0 {
-		fmt.Printf("[chan-counts] %d pack boundary transitions consistent\n", len(packs)-1)
+		fmt.Printf("[feed-counts] %d pack boundary transitions consistent\n", len(packs)-1)
 	}
 	return issues
 }
@@ -218,21 +218,21 @@ func checkFetchedAtsContinuity(packs []*idxPack) int {
 	return issues
 }
 
-// checkUnknownChanIDs flags any idx entry whose channel byte isn't
-// registered in db.channels.
-func checkUnknownChanIDs(core *DBCore, packs []*idxPack) int {
-	count, first := chanIDStats(packs)
+// checkUnknownFeedIDs flags any idx entry whose feed byte isn't
+// registered in db.feeds.
+func checkUnknownFeedIDs(core *DBCore, packs []*idxPack) int {
+	count, first := feedIDStats(packs)
 	unknown := 0
 	for sid, c := range count {
-		if _, ok := core.Channels[sid]; ok {
+		if _, ok := core.Feeds[sid]; ok {
 			continue
 		}
-		fmt.Printf("[unknown-chans] chan_id %d: %d entries (first chron %d) — frontend renders \"[DELETED]\"\n",
+		fmt.Printf("[unknown-feeds] feed_id %d: %d entries (first chron %d) — frontend renders \"[DELETED]\"\n",
 			sid, c, first[sid])
 		unknown++
 	}
 	if unknown == 0 {
-		fmt.Println("[unknown-chans] all idx chan_ids are registered")
+		fmt.Println("[unknown-feeds] all idx feed_ids are registered")
 	}
 	return unknown
 }
@@ -300,9 +300,9 @@ func checkIdxSummary(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 		slots := max(hdr.numSlots, p.numSlots)
 		mismatched := false
 		for s := range slots {
-			if hdr.chanCount(s) != p.chanCount(s) {
-				fmt.Printf("[idx-summary] pack %d sub %d: summary chanCount=%d but header has %d\n",
-					k, s, hdr.chanCount(s), p.chanCount(s))
+			if hdr.feedCount(s) != p.feedCount(s) {
+				fmt.Printf("[idx-summary] pack %d sub %d: summary feedCount=%d but header has %d\n",
+					k, s, hdr.feedCount(s), p.feedCount(s))
 				mismatched = true
 			}
 		}

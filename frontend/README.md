@@ -44,7 +44,7 @@ SRR_CDN_URL=https://cdn.example.com/feeds npm run build
 
 Article images can be rewritten through an image proxy that fronts them with transcoding and bandwidth limits. No proxy is configured by default — the raw `<img src>` from the feed is used unless the user opts in.
 
-Open the channel menu and click the image-proxy icon to set a prefix. Any URL-encoded-source-appender proxy works (wsrv.nl, imgproxy, imagor with proper config, etc.). Leave the field empty to disable proxying. The choice is saved in localStorage under `srr-img-proxy`.
+Open the feed menu and click the image-proxy icon to set a prefix. Any URL-encoded-source-appender proxy works (wsrv.nl, imgproxy, imagor with proper config, etc.). Leave the field empty to disable proxying. The choice is saved in localStorage under `srr-img-proxy`.
 
 ## Architecture
 
@@ -55,12 +55,12 @@ Entry point: `src/index.html` -> `src/js/app.ts`. Bundled with Parcel 2.
 | `app.ts` | UI rendering, events, keyboard shortcuts, error popup. All async actions go through a `guard()` mutex. |
 | `nav.ts` | Navigation state machine: hash routing, traversal, filtering. Returns `IShowFeed`. |
 | `data.ts` | CDN data layer: fetches `db.gz`, loads binary idx packs at init, fetches JSONL data packs on demand (LRU-cached). |
-| `idx.ts` | Binary idx pack parser: lazy `parse()` into `chanIds`/`fetchedAts` typed arrays + `bounds`; per-pack `findLeft`/`findRight`/`countLeft`. |
-| `dropdown.ts` | Channel-menu dropdown (channel/tag picker + time-range chips). |
+| `idx.ts` | Binary idx pack parser: lazy `parse()` into `feedIds`/`fetchedAts` typed arrays + `bounds`; per-pack `findLeft`/`findRight`/`countLeft`. |
+| `dropdown.ts` | Feed-menu dropdown (feed/tag picker + time-range chips). |
 | `gestures.ts` | Touch swipes (prev/next, cycle filter) + scroll-based toolbar hide. |
 | `cache.ts` | Generic LRU cache factory (`makeLRU`). |
 | `fmt.ts` | Pure utilities: HTML sanitization (rewrites images through configurable proxy — passthrough by default, runtime override via localStorage), relative time, date formatting. |
-| `types.d.ts` | Ambient types: `IDB`, `IChannel`, `IFeed`, `IArticle`, `IShowFeed`. |
+| `types.d.ts` | Ambient types: `IDB`, `IFeed`, `IFeed`, `IArticle`, `IShowFeed`. |
 
 ### Data Flow
 
@@ -76,7 +76,7 @@ app  -->  fmt
 
 - **Streaming decompression** -- pack bodies pass through `DecompressionStream`; idx packs decode into an `ArrayBuffer`, data packs go through `TextDecoderStream` with partial-line buffering for JSONL.
 - **Aggressive caching** -- every pack name is write-once (finalized `N.gz`, latest generation `L<seq>.gz`), so all packs use HTTP `force-cache`; only `db.gz` revalidates. Data packs are kept in an in-memory LRU (max 20).
-- **Filtering** -- filter by channel or tag via URL hash filter segment (channel IDs or tag names, `+`-separated after `!`)
+- **Filtering** -- filter by feed or tag via URL hash filter segment (feed IDs or tag names, `+`-separated after `!`)
 - **Dark mode** -- automatic via `prefers-color-scheme`
 - **No runtime deps** -- the built bundle has zero npm dependencies
 
@@ -89,7 +89,7 @@ app  -->  fmt
 | Segment | Description |
 |---------|-------------|
 | `chronIdx` | Current article position (0-based) |
-| `!tokens` | Optional `+`-separated filter tokens (channel IDs or tag names); each `encodeURIComponent`-wrapped |
+| `!tokens` | Optional `+`-separated filter tokens (feed IDs or tag names); each `encodeURIComponent`-wrapped |
 
 ## Deployment
 

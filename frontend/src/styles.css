@@ -86,7 +86,7 @@ video {
 }
 
 /* The reader is a dispatch: the list row's source rail graduates into a
-   full-height spine down the article, keyed to the channel's color (data-src set
+   full-height spine down the article, keyed to the feed's color (data-src set
    on .srr-reader by app.ts). The spine doubles as a read gauge — the border is a
    pale wash of the source color (the unread track, same faded-rail recipe as a
    read list row), and .srr-read-spine inks the full color down it as you scroll
@@ -151,9 +151,9 @@ video {
 }
 
 /* Toolbar filter label — the "now viewing" readout in the wire voice (mono,
-   uppercase, tracked). Single-channel filters tint it with the source color
+   uppercase, tracked). Single-feed filters tint it with the source color
    (data-src, set in app.ts); [ALL]/tag/saved/search stay neutral. */
-.srr-toolbar .srr-channel {
+.srr-toolbar .srr-feed {
    font-family: var(--font-mono);
    font-size: var(--text-sm);
    letter-spacing: 0.04em;
@@ -163,10 +163,10 @@ video {
    text-overflow: ellipsis;
    white-space: nowrap;
 }
-.srr-channel.srr-filter-on {
+.srr-feed.srr-filter-on {
    color: var(--fg);
 }
-.srr-channel[data-src] {
+.srr-feed[data-src] {
    color: var(--src);
 }
 
@@ -442,7 +442,7 @@ video {
       list = filter · search · unread · ⋯. The READER keeps four equal slots
       (minmax(0,1fr)) so prev/next sit centered in the thumb zone; the LIST template
       (below) instead lets the filter readout take the bar's free space (1fr) with
-      the three icons shrunk to their tap targets on the right — a long channel/tag
+      the three icons shrunk to their tap targets on the right — a long feed/tag
       name ("The Go Programming Language Blog") stays legible. Either way the filter
       track is a free-space fraction, never its content, so it ellipsizes within its
       column and NEVER shifts the icons as its label changes. */
@@ -470,11 +470,11 @@ body.srr-view-list .srr-toolbar {
 /* Chrome-stripping reset + 44px (2.75rem) tap target for every toolbar control
    (the filter + ⋯ buttons sit inside .srr-dropdown wrappers). NOTE: the unread
    toggle uses the CHILD combinator `.srr-toolbar > .srr-unread`, not descendant —
-   the channel filter menu lives *inside* .srr-toolbar and its unread COUNT badges
+   the feed filter menu lives *inside* .srr-toolbar and its unread COUNT badges
    reuse the .srr-unread class, so a descendant selector would size those badges as
    44px tap targets and bloat the menu rows. */
 .srr-toolbar .srr-back,
-.srr-toolbar .srr-channel,
+.srr-toolbar .srr-feed,
 .srr-toolbar .srr-prev,
 .srr-toolbar .srr-search,
 .srr-toolbar .srr-next,
@@ -509,10 +509,10 @@ body.srr-view-list .srr-toolbar {
    the filter readout (list slot 1) fills its slot and reads left-aligned, the ⋯
    overflow (list slot 4) and the reader's save (slot 4) sit flush right, back
    (reader slot 1) flush left. */
-.srr-toolbar > .srr-dropdown:has(> .srr-channel) {
+.srr-toolbar > .srr-dropdown:has(> .srr-feed) {
    justify-self: stretch;
    min-width: 0;
-   & > .srr-channel {
+   & > .srr-feed {
       width: 100%;
       text-align: left;
    }
@@ -672,8 +672,8 @@ body.srr-view-list .srr-toolbar {
       left-most control (left:0), the ⋯ overflow the right-most (right:0). */
    bottom: 100%;
    background: var(--bg);
-   /* Fixed width (clamped to the viewport on narrow phones) so the channel filter
-      menu doesn't resize to its longest row — long channel titles ellipsize within
+   /* Fixed width (clamped to the viewport on narrow phones) so the feed filter
+      menu doesn't resize to its longest row — long feed titles ellipsize within
       it instead of widening it. The ⋯ overflow menu overrides this to size to its
       (short) content — see #srr-overflow-menu. */
    width: min(18rem, 90vw);
@@ -733,7 +733,7 @@ body.srr-view-list .srr-toolbar {
       margin-right: 0.35rem;
       vertical-align: middle;
    }
-   /* Source-color chip on channel rows — the same per-channel color (data-src →
+   /* Source-color chip on feed rows — the same per-feed color (data-src →
       --src) as the row's list rail and the reader spine, so a source is picked
       here by the color it wears everywhere else. */
    & .srr-src-chip {
@@ -746,13 +746,13 @@ body.srr-view-list .srr-toolbar {
       margin-right: 0.5rem;
       vertical-align: middle;
    }
-   /* Unread badge. Channel rows are block + nowrap/ellipsis: the badge is
+   /* Unread badge. Feed rows are block + nowrap/ellipsis: the badge is
       prepended and floated right so it pins to the right edge and a long
       title ellipsizes before reaching it instead of clipping it away. */
    & .srr-unread {
       float: right;
       flex-shrink: 0;
-      /* Gap from the (ellipsized) channel title so the count never touches it. */
+      /* Gap from the (ellipsized) feed title so the count never touches it. */
       margin-left: 0.75rem;
       font-size: 0.75rem;
       color: var(--muted);
@@ -810,13 +810,13 @@ body.srr-view-list .srr-toolbar {
 }
 /* Each menu opens inward from the screen edge its trigger sits at: the filter is
    the left-most control, the ⋯ overflow the right-most. */
-#srr-channel-menu {
+#srr-feed-menu {
    left: 0;
 }
 #srr-overflow-menu {
    right: 0;
    /* Only two short rows now (the proxy editor moved to a dialog), so size to
-      content instead of the channel menu's fixed 18rem — still clamped, still
+      content instead of the feed menu's fixed 18rem — still clamped, still
       opening inward from the right edge on a narrow phone. */
    width: max-content;
    max-width: min(18rem, 90vw);
@@ -1016,12 +1016,12 @@ body.srr-view-list.srr-searching .srr-masthead {
    height: 1px;
    background: var(--faint);
 }
-/* Source color system — each channel maps to a stable slot (fmt.ts
+/* Source color system — each feed maps to a stable slot (fmt.ts
    srcColorIndex → data-src) so the feed can be triaged by origin at a glance. A
-   curated, fixed-tone riso-ink ramp; derived offline from the channel id, never
+   curated, fixed-tone riso-ink ramp; derived offline from the feed id, never
    a fetched favicon. Dark-mode variants live in the dark @media block. */
 /* Defined on [data-src] (not just .srr-row) so both the list rows AND the reader
-   article pick up their channel's color — the rail graduates into the reader's
+   article pick up their feed's color — the rail graduates into the reader's
    spine + masthead. */
 [data-src="0"] {
    --src: #c2410c;
@@ -1052,7 +1052,7 @@ body.srr-view-list.srr-searching .srr-masthead {
    gap: 0.7rem;
    align-items: flex-start;
    padding: 0.55rem 0.4rem 0.6rem 0.7rem;
-   /* The source rail — a 3px left edge in the channel's color segments the feed
+   /* The source rail — a 3px left edge in the feed's color segments the feed
       by origin. Read rows fade it toward the hairline (below). */
    border-left: 3px solid var(--src, var(--faint));
    border-bottom: 1px solid var(--faint);
