@@ -36,15 +36,11 @@
    --z-popup: 1000; /* error popup / imgproxy backdrop + card */
    --z-popup-top: 1001; /* topmost popup layer (popup accent bar) */
 
-   /* Spacing scale — defined for re-theming. Existing rules use rem literals and
-      are intentionally NOT retrofitted (a sweeping diff with no visual payoff);
-      new rules should prefer these. */
+   /* Spacing scale (used by the design panel; existing rules keep their rem
+      literals — intentionally not retrofitted, a sweeping diff with no payoff). */
    --space-1: 0.25rem;
    --space-2: 0.5rem;
    --space-3: 0.75rem;
-   --space-4: 1rem;
-   --space-6: 1.5rem;
-   --space-8: 2rem;
 }
 
 /* Source color system — each feed maps to a stable slot (fmt.ts srcColorIndex →

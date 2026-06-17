@@ -44,9 +44,11 @@ design: frontend/node_modules/.package-lock.json
 	cd frontend && SRR_STORE=e2e/fixtures/design-store npm run dev
 
 # Capture every design-harness state to PNGs (light + dark) for headless / CI
-# grounding. Needs the puppeteer Chromium (same as test-browser). Rebuilds the
-# fixture first so the curated states are present.
-design-shots: design-fixture
+# grounding. Needs the puppeteer Chromium (same as test-browser). Reuses the
+# fixture store if it's already present; builds it only when missing (run
+# `make design-fixture` to force a rebuild).
+design-shots: frontend/node_modules/.package-lock.json
+	@test -f frontend/e2e/fixtures/design-store/db.gz || $(MAKE) design-fixture
 	cd frontend && SRR_BIN=../dist/srrb npm run shoot-design
 
 frontend/node_modules/.package-lock.json: frontend/package-lock.json

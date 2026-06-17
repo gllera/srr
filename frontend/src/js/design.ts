@@ -34,55 +34,64 @@ export function stateHash(s: DesignState): string {
 
 // ---- Transient / interaction-only states -----------------------------------
 
+// Each transient is the real class(es) the app would add for that state, plus an
+// optional text fill. The table drives both forcing and clearing — adding a
+// state is one entry, never a switch arm + a separate class list to keep in sync.
 export interface Transient {
    id: string
    label: string
+   apply: { sel: string; cls: string }[]
+   text?: { sel: string; value: string }
 }
 
-// Each forcer adds the real class(es) the app would add for that state.
 export const TRANSIENTS: Transient[] = [
-   { id: "error", label: "Error popup" },
-   { id: "bell-left", label: "Reader edge bell ◀" },
-   { id: "bell-right", label: "Reader edge bell ▶" },
-   { id: "broken-media", label: "Collapsed broken media" },
+   {
+      id: "error",
+      label: "Error popup",
+      apply: [{ sel: ".srr-popup", cls: "srr-open" }],
+      text: { sel: ".srr-popup-text", value: "Sample error: failed to load db.gz (HTTP 503)." },
+   },
+   {
+      id: "bell-left",
+      label: "Reader edge bell ◀",
+      apply: [
+         { sel: ".srr-reader", cls: "srr-bell-left" },
+         { sel: ".srr-prev", cls: "srr-edge-pulse" },
+      ],
+   },
+   {
+      id: "bell-right",
+      label: "Reader edge bell ▶",
+      apply: [
+         { sel: ".srr-reader", cls: "srr-bell-right" },
+         { sel: ".srr-next", cls: "srr-edge-pulse" },
+      ],
+   },
+   {
+      id: "broken-media",
+      label: "Collapsed broken media",
+      apply: [{ sel: ".srr-content img, .srr-content video", cls: "srr-broken" }],
+   },
 ]
 
 export function forceTransient(id: string, root: Document): void {
-   const q = <T extends Element>(sel: string) => root.querySelector<T>(sel)
-   switch (id) {
-      case "error": {
-         const popup = q(".srr-popup")
-         const text = q<HTMLElement>(".srr-popup-text")
-         if (text) text.textContent = "Sample error: failed to load db.gz (HTTP 503)."
-         popup?.classList.add("srr-open")
-         break
-      }
-      case "bell-left": {
-         q(".srr-reader")?.classList.add("srr-bell-left")
-         q(".srr-prev")?.classList.add("srr-edge-pulse")
-         break
-      }
-      case "bell-right": {
-         q(".srr-reader")?.classList.add("srr-bell-right")
-         q(".srr-next")?.classList.add("srr-edge-pulse")
-         break
-      }
-      case "broken-media": {
-         // Mark the first content image/video collapsed, like collapseBrokenMedia.
-         q(".srr-content img, .srr-content video")?.classList.add("srr-broken")
-         break
-      }
+   const t = TRANSIENTS.find((x) => x.id === id)
+   if (!t) return
+   if (t.text) {
+      const el = root.querySelector(t.text.sel)
+      if (el) el.textContent = t.text.value
    }
+   for (const a of t.apply) root.querySelector(a.sel)?.classList.add(a.cls)
 }
 
 export function clearTransients(root: Document): void {
-   const cls = ["srr-open", "srr-bell-left", "srr-bell-right", "srr-edge-pulse", "srr-broken"]
-   for (const c of cls) root.querySelectorAll("." + c).forEach((el) => el.classList.remove(c))
+   const classes = new Set(TRANSIENTS.flatMap((t) => t.apply.map((a) => a.cls)))
+   for (const c of classes) root.querySelectorAll("." + c).forEach((el) => el.classList.remove(c))
 }
 
 // ---- Optional curated targets (emitted by the fixture generator) -----------
 
-interface DesignTargets {
+export interface DesignTargets {
    savedDeletedChron?: number // a saved article whose feed was removed (tombstone)
    ferrToken?: string // a feed id (as string) whose ferr is set
    longTitlePos?: number // chronIdx of the deliberately long-titled article
@@ -126,11 +135,9 @@ function group(title: string, ...kids: HTMLElement[]): HTMLElement {
 }
 
 function setTheme(mode: "auto" | "light" | "dark"): void {
-   // Explicit override: set color-scheme on the root and record the choice in a
-   // data attr. "auto" clears the override and defers to prefers-color-scheme.
-   const root = document.documentElement
-   root.style.colorScheme = mode === "auto" ? "" : mode
-   root.dataset.designTheme = mode
+   // Explicit override via color-scheme on the root; "auto" clears it and defers
+   // back to prefers-color-scheme.
+   document.documentElement.style.colorScheme = mode === "auto" ? "" : mode
 }
 
 export function buildPanel(targets: DesignTargets): HTMLElement {
@@ -204,12 +211,13 @@ async function mount(): Promise<void> {
    host.replaceChildren(buildPanel(targets))
 }
 
-// app.ts dispatches srr:ready after init(). Mount on that event; also mount on
-// DOMContentLoaded / immediately as a fallback so the theme + transient controls
-// still work if the app errored before srr:ready. mount() is idempotent
-// (replaceChildren), so a double-fire is harmless.
+// app.ts dispatches srr:ready after init(). Mount on that event, and once now as
+// a fallback so the theme + transient controls still work if the app errored
+// before srr:ready (this module is a deferred entry, so the DOM is already
+// parsed). mount() is idempotent (replaceChildren), so the double-fire is fine.
+// The `typeof document` guard lets node-env importers (the screenshotter) load
+// this module for its exports without tripping over the boot block.
 if (typeof document !== "undefined" && document.getElementById("srr-design-panel")) {
    document.addEventListener("srr:ready", () => void mount())
-   if (document.readyState !== "loading") void mount()
-   else document.addEventListener("DOMContentLoaded", () => void mount())
+   void mount()
 }
