@@ -1,6 +1,6 @@
 import * as data from "./data"
 import { closeAllDropdowns, showFeedMenu, showOverflowMenu, type FeedMenuHost } from "./dropdown"
-import { collapseBrokenMedia, formatDate, readMinutes, sanitizeHtml, srcColorIndex, timeAgo, URL_DENY } from "./fmt"
+import { collapseBrokenMedia, formatDate, sanitizeHtml, srcColorIndex, timeAgo, URL_DENY } from "./fmt"
 import { setupGestures, type Gestures } from "./gestures"
 import * as list from "./list"
 import * as nav from "./nav"
@@ -20,7 +20,6 @@ const el = {
    feed: document.querySelector(".srr-feed") as HTMLButtonElement,
    source: document.querySelector(".srr-source") as HTMLElement,
    date: document.querySelector(".srr-date") as HTMLElement,
-   readlen: document.querySelector(".srr-readlen") as HTMLElement,
    search: document.querySelector(".srr-search") as HTMLButtonElement,
    searchInput: document.querySelector(".srr-search-input") as HTMLInputElement,
    searchClear: document.querySelector(".srr-search-clear") as HTMLButtonElement,
@@ -189,12 +188,6 @@ function render(o: IShowFeed) {
    // Hide the date (and its leading "·" separator) in the kicker when undated,
    // so the source name doesn't trail a dangling middot.
    el.date.hidden = !currentPublished
-
-   // Dispatch length — the commitment the read-through spine then fulfills.
-   // Counted off the just-rendered text; hidden (with its separator) when empty.
-   const mins = readMinutes(el.content.textContent ?? "")
-   el.readlen.textContent = mins ? `${mins} MIN READ` : ""
-   el.readlen.hidden = !mins
 
    currentFeed = {
       id: o.feed?.id ?? 0,

@@ -220,13 +220,3 @@ export function dayLabel(unix: number): string {
    const base = `${DOW[d.getDay()]} ${d.getDate()} ${MON[d.getMonth()]}`
    return d.getFullYear() === now.getFullYear() ? base : `${base} ${d.getFullYear()}`
 }
-
-// Estimated read time in whole minutes for the reader's masthead — the dispatch's
-// length, so triage knows the commitment before the tap. 200 wpm (a common prose
-// reading pace); whitespace-split word count off the rendered text. Returns 0 for
-// empty content so the caller can omit the label (and its leading separator).
-export function readMinutes(text: string): number {
-   const words = text.trim().split(/\s+/).filter(Boolean).length
-   if (!words) return 0
-   return Math.max(1, Math.round(words / 200))
-}

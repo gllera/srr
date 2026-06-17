@@ -12,7 +12,6 @@ import {
    srcColorIndex,
    SRC_COLORS,
    dayLabel,
-   readMinutes,
 } from "./fmt"
 
 beforeEach(() => {
@@ -560,25 +559,5 @@ describe("dayLabel", () => {
    it("labels an older date with weekday, day, month and the year", () => {
       // 9 Jun 2020 was a Tuesday; year shown because it isn't the current year.
       expect(dayLabel(at(2020, 5, 9))).toBe("TUE 9 JUN 2020")
-   })
-})
-
-describe("readMinutes", () => {
-   it("returns 0 for empty or whitespace content so the label can be omitted", () => {
-      expect(readMinutes("")).toBe(0)
-      expect(readMinutes("   \n  ")).toBe(0)
-   })
-
-   it("rounds up any non-empty short content to at least 1 minute", () => {
-      expect(readMinutes("one two three")).toBe(1)
-   })
-
-   it("estimates whole minutes at 200 wpm", () => {
-      expect(readMinutes(Array(400).fill("word").join(" "))).toBe(2)
-      expect(readMinutes(Array(500).fill("word").join(" "))).toBe(3) // round(2.5)
-   })
-
-   it("counts words by whitespace, ignoring runs of spaces and newlines", () => {
-      expect(readMinutes("a  b\n\tc   d")).toBe(1)
    })
 })
