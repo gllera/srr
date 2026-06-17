@@ -6,6 +6,7 @@ import {
    findPackForBlocks,
    IDX_PACK_SIZE,
    lowerBound,
+   makeChannelsLookup,
    makeIdxPack,
    parseIdxHeaders,
    type IdxHeader,
@@ -174,13 +175,13 @@ export async function findChronForTimestamp(ts: number): Promise<number> {
 // nav's filter bookkeeping never waits on a fetch.
 export function countAll(channels: Map<number, number>): number {
    if (db.total_art === 0) return 0
-   return latestIdx.countLeft(db.total_art, channels)
+   return latestIdx.countLeft(db.total_art, channels, makeChannelsLookup(channels, slots))
 }
 
 export async function countLeft(chronIdx: number, channels: Map<number, number>): Promise<number> {
    if (db.total_art === 0) return 0
    const n = packIdx(chronIdx)
-   return (await fetchIdxPack(n)).countLeft(chronIdx, channels)
+   return (await fetchIdxPack(n)).countLeft(chronIdx, channels, makeChannelsLookup(channels, slots))
 }
 
 // A finalized pack can be skipped without fetching it: its per-channel
@@ -200,9 +201,10 @@ function packHasCandidate(p: number, channels: Map<number, number>): boolean {
 
 export async function findLeft(from: number, channels: Map<number, number>): Promise<number> {
    if (from < 0 || db.total_art === 0) return -1
+   const lookup = makeChannelsLookup(channels, slots)
    for (let p = packIdx(from); p >= 0; p--) {
       if (!packHasCandidate(p, channels)) continue
-      const found = (await fetchIdxPack(p)).findLeft(from, channels)
+      const found = (await fetchIdxPack(p)).findLeft(from, channels, lookup)
       if (found !== -1) return found
    }
    return -1
@@ -211,10 +213,11 @@ export async function findLeft(from: number, channels: Map<number, number>): Pro
 export async function findRight(from: number, channels: Map<number, number>): Promise<number> {
    if (from < 0) from = 0
    if (from >= db.total_art) return -1
+   const lookup = makeChannelsLookup(channels, slots)
    const nf = numFinalizedIdx()
    for (let p = packIdx(from); p <= nf; p++) {
       if (!packHasCandidate(p, channels)) continue
-      const found = (await fetchIdxPack(p)).findRight(from, channels)
+      const found = (await fetchIdxPack(p)).findRight(from, channels, lookup)
       if (found !== -1) return found
    }
    return -1

@@ -33,10 +33,8 @@ Commands are grouped under `chan` (channel management), `art` (articles), `previ
 
 | Command            | Description                                        |
 |--------------------|----------------------------------------------------|
-| `chan add`         | Subscribe to a new channel (one or more feed URLs); always allocates a fresh id |
-| `chan upd <id>`    | Update a channel (`-t` title, `-g` tag, `-p` pipe, `-i` ingest; feed URLs via `-u` REPLACE / `--add-url` APPEND / `--rm-url` REMOVE) |
-| `chan upd <id> --add-url <url>` | Append feed URL(s) to a channel (idempotent) |
-| `chan upd <id> --rm-url <url>`  | Remove feed URL(s) (strict — errors if absent or if it would empty the channel) |
+| `chan add`         | Subscribe to a new channel (one feed URL); always allocates a fresh id |
+| `chan upd <id>`    | Update a channel (`-t` title, `-g` tag, `-p` pipe, `-i` ingest; `-u` repoints the single feed URL) |
 | `chan rm`          | Unsubscribe from channel(s) by id                  |
 | `chan ls`          | List channels (`-g` tag filter, `-f` format)       |
 | `chan show <id>`   | Print one channel (yaml/json)                      |
@@ -61,11 +59,8 @@ srr chan add -t "Tech News" -u https://example.com/feed.xml -g tech/news
 # Add with processing pipeline
 srr chan add -t "Blog" -u https://example.com/rss -p "#sanitize" -p "#minify"
 
-# Add a second feed URL to an existing channel (idempotent)
-srr chan upd 1 --add-url https://example.com/alt-feed.xml
-
-# Remove a feed URL from a channel
-srr chan upd 1 --rm-url https://example.com/alt-feed.xml
+# Repoint a channel at a new feed URL (resets its fetch/dedup state)
+srr chan upd 1 -u https://example.com/new-feed.xml
 
 # Update an existing channel's pipeline (use #base to keep root mods)
 srr chan upd 1 -p "#base" -p "jq '.content |= ascii_downcase'"
@@ -249,7 +244,7 @@ The command reads it, fetches its source, and prints exactly one response object
 
 **Behavior contract.**
 
-- A **non-zero exit code** fails the fetch for that feed only (the error is recorded in the feed's `ferr`); the channel's other feeds — and all other channels — still fetch and commit.
+- A **non-zero exit code** fails the fetch for that channel only (the error is recorded in the channel's `ferr`); all other channels still fetch and commit.
 - **Empty stdout is an error** — emit at least `{"items":[]}` (or `{"not_modified":true}`).
 - stdout is capped at 64 MiB; exceeding it fails the fetch.
 - The command is killed if it runs longer than the subprocess time budget — 5m by default, overridable via `SRR_CMD_TIMEOUT` (a Go duration; a value that doesn't parse or is ≤ 0 is ignored and the 5m default applies). A killed command fails the fetch for that feed, so long-running sources must finish within the budget or raise it. The command must not block waiting for more stdin after consuming the single request object.
