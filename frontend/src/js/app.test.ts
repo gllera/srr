@@ -104,7 +104,6 @@ const SKELETON = `
          <div class="srr-kicker"><span class="srr-source"></span><time class="srr-date"></time></div>
          <a class="srr-title-link"><h1 class="srr-title" tabindex="-1"></h1></a>
          <div class="srr-content"></div><nav class="srr-readon"></nav></article>
-      <header class="srr-masthead"><div class="srr-masthead-status"></div></header>
       <div class="srr-list" hidden></div>
       <nav class="srr-toolbar">
          <button class="srr-back"></button>

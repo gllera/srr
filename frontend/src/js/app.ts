@@ -8,7 +8,6 @@ import * as nav from "./nav"
 const el = {
    article: document.querySelector(".srr-reader") as HTMLElement,
    listView: document.querySelector(".srr-list") as HTMLElement,
-   mastheadStatus: document.querySelector(".srr-masthead-status") as HTMLElement,
    back: document.querySelector(".srr-back") as HTMLButtonElement,
    title: document.querySelector(".srr-title") as HTMLElement,
    content: document.querySelector(".srr-content") as HTMLElement,
@@ -295,49 +294,6 @@ function listTitle(): string {
    return "SRR · " + (/^\d+$/.test(key) ? data.feedTitle(Number(key)) : key)
 }
 
-// Front-page masthead — the wire's live state on the home list. Freshness is
-// instant off the resident db; the unread total across the WHOLE wire (not the
-// active filter — the nameplate says "your wire") is async (idx scans, the same
-// machinery as the filter-menu badges) and token-guarded so a rapid re-entry
-// never writes a stale total. lastWireUnread caches the prior total so a return
-// to the list shows it immediately, then refreshes (e.g. ticks down after you
-// read a few). The freshness part always shows, so the async fill grows the line
-// without a vertical shift.
-let lastWireUnread = -1
-let mastheadTok = 0
-function renderMastheadStatus(unread: number) {
-   const fresh = data.db.fetched_at ? `updated ${timeAgo(data.db.fetched_at)} ago` : ""
-   const unreadText = unread < 0 ? "" : unread > 0 ? `${unread.toLocaleString()} unread` : "All caught up"
-   el.mastheadStatus.replaceChildren()
-   if (unreadText) {
-      const u = document.createElement("span")
-      u.className = "srr-masthead-unread"
-      u.textContent = unreadText
-      el.mastheadStatus.append(u)
-   }
-   if (fresh) {
-      const f = document.createElement("span")
-      f.className = "srr-masthead-fresh"
-      f.textContent = (unreadText ? " · " : "") + fresh
-      el.mastheadStatus.append(f)
-   }
-}
-function refreshMasthead() {
-   renderMastheadStatus(lastWireUnread)
-   const my = ++mastheadTok
-   const feeds = Object.values(data.db.feeds ?? {}).filter((c) => c.total_art > 0)
-   void nav
-      .unreadCounts(feeds)
-      .then((counts) => {
-         if (my !== mastheadTok) return
-         let total = 0
-         for (const n of counts.values()) total += n
-         lastWireUnread = total
-         renderMastheadStatus(total)
-      })
-      .catch(() => {})
-}
-
 // Show the list surface and (re)render it under the current filter. Shares the
 // guard() busy flag so it can't overlap an in-flight article load; on error,
 // the popup's Retry re-runs it.
@@ -351,7 +307,6 @@ async function renderListSurface() {
    const center = view === "reader"
    showList()
    refreshFeedLabel()
-   refreshMasthead()
    document.title = listTitle()
    document.body.classList.add("srr-loading")
    try {
