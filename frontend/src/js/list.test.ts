@@ -32,6 +32,10 @@ const data = vi.hoisted(() => {
          return -1
       }),
       loadArticle: vi.fn(async (chron: number) => mock._arts.get(chron)!),
+      loadMeta: vi.fn(async (chron: number) => {
+         const a = mock._arts.get(chron)!
+         return { f: a.f, w: a.p || a.a, t: a.t }
+      }),
       feedTitle: vi.fn((id: number) => "Feed" + id),
    }
    return mock

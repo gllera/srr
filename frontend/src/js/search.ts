@@ -1,15 +1,15 @@
-// Title search over the search/ pack series (design: docs/search-design.md).
-// Shards align 1:1 with idx packs: finalized search/<n>.gz =
-// bloom[SEARCH_BLOOM_BYTES] ‖ JSONL, the latest search/L<seq>.gz tail is
-// JSONL only (always scanned), and search/s<srch>.gz concatenates the
-// finalized blooms so a query fetches only shards that can match. Matching is
-// AND of folded substring tests per query word — the blooms only prune
-// (false positives cost one shard fetch; false negatives are impossible), so
-// the Go/TS folding parity below is a recall optimization, not a correctness
-// gate, except for the query side which only ever folds in TS.
+// Title search over the meta/ pack series (design: docs/search-design.md).
+// Shards align 1:1 with idx packs (5,000 entries per meta shard):
+// finalized meta/<n>.gz = bloom[SEARCH_BLOOM_BYTES] ‖ JSONL, the latest
+// meta/L<seq>.gz tail is JSONL only (always scanned), and meta/s<mp>.gz
+// concatenates the finalized blooms so a query fetches only shards that can
+// match. Matching is AND of folded substring tests per query word — the blooms
+// only prune (false positives cost one shard fetch; false negatives are
+// impossible), so the Go/TS folding parity below is a recall optimization,
+// not a correctness gate, except for the query side which only ever folds in TS.
 import { cachedPromise, lazySlot, makeLRU } from "./cache"
 import * as data from "./data"
-import { IDX_PACK_SIZE, SEARCH_BLOOM_BYTES, SEARCH_BLOOM_K, SEARCH_GRAM, type ISearchEntryWire } from "./format.gen"
+import { META_PACK_SIZE, SEARCH_BLOOM_BYTES, SEARCH_BLOOM_K, SEARCH_GRAM, type IMetaWire } from "./format.gen"
 
 // One search result: the shard entry plus its global position (chron =
 // shard base + line index; the existing nav addressing takes over from here).
@@ -20,16 +20,12 @@ export interface ISearchHit {
    t: string
 }
 
-// The hdrs-style coverage gate: the backend publishes srch only after every
-// shard + summary save succeeded, so equality with the finalized count means
-// the whole series is consistent with this db.gz. The srcht>0 leg
-// distinguishes a small store written by a search-aware backend (tail
-// published, no finalized shards yet) from a pre-search store where both
-// fields are absent.
+// The hdrs-style coverage gate: the backend publishes mp only after every
+// meta shard + summary save succeeded, so metaReady() checks that mp and mt
+// fully cover the store — meaning every meta shard (finalized + tail) is
+// present and consistent with this db.gz.
 export function available(): boolean {
-   if (data.db.total_art === 0) return false
-   const srch = data.db.srch ?? 0
-   return srch === data.numFinalizedIdx() && (srch > 0 || (data.db.srcht ?? 0) > 0)
+   return data.metaReady()
 }
 
 // fold mirrors the backend's foldSearchText (db_search.go) byte-for-byte —
@@ -91,20 +87,14 @@ function bloomHas(blooms: Uint8Array, shardOff: number, bits: number[]): boolean
 }
 
 interface Shard {
-   entries: ISearchEntryWire[]
+   entries: IMetaWire[]
    folded: string[] // fold(entry.t), computed once at parse
 }
 
 function parseShard(buf: ArrayBuffer, skipBloom: boolean): Shard {
-   const bytes = skipBloom ? new Uint8Array(buf, SEARCH_BLOOM_BYTES) : new Uint8Array(buf)
-   const entries: ISearchEntryWire[] = []
-   const folded: string[] = []
-   for (const line of new TextDecoder().decode(bytes).split("\n")) {
-      if (!line) continue
-      const e = JSON.parse(line) as ISearchEntryWire
-      entries.push(e)
-      folded.push(fold(e.t ?? ""))
-   }
+   const sliced = skipBloom ? buf.slice(SEARCH_BLOOM_BYTES) : buf
+   const entries = data.parseJsonl<IMetaWire>(sliced)
+   const folded = entries.map((e) => fold(e.t ?? ""))
    return { entries, folded }
 }
 
@@ -113,21 +103,21 @@ function parseShard(buf: ArrayBuffer, skipBloom: boolean): Shard {
 // a rejected promise clears its slot so the next query refetches.
 
 const loadSummary = lazySlot(async () => {
-   const nf = data.numFinalizedIdx()
-   const blooms = new Uint8Array(await data.fetchPackBytes(`search/s${data.db.srch}.gz`, false))
+   const nf = data.numFinalizedMeta()
+   const blooms = new Uint8Array(await data.fetchPackBytes(`meta/s${data.db.mp}.gz`, false))
    if (blooms.length !== nf * SEARCH_BLOOM_BYTES)
-      throw new Error(`search summary: ${blooms.length} bytes for ${nf} shards`)
+      throw new Error(`meta summary: ${blooms.length} bytes for ${nf} shards`)
    return blooms
 })
 
 const loadLatest = lazySlot(() =>
-   data.fetchPackBytes(`search/L${data.db.seq}.gz`, false).then((buf) => parseShard(buf, false)),
+   data.fetchPackBytes(`meta/L${data.db.seq}.gz`, false).then((buf) => parseShard(buf, false)),
 )
 
 const shardCache = makeLRU<Promise<Shard>>(8)
 function loadShard(n: number): Promise<Shard> {
    return cachedPromise(shardCache, n, () =>
-      data.fetchPackBytes(`search/${n}.gz`, false).then((buf) => parseShard(buf, true)),
+      data.fetchPackBytes(`meta/${n}.gz`, false).then((buf) => parseShard(buf, true)),
    )
 }
 
@@ -178,7 +168,7 @@ export async function* search(
       .filter((w) => w.length > 0)
    if (words.length === 0) return
 
-   const nf = data.numFinalizedIdx()
+   const nf = data.numFinalizedMeta()
    // wordGrams already yields nothing for words shorter than SEARCH_GRAM.
    const gramBits = words.flatMap(wordGrams).map(bloomBits)
    // Kick the summary fetch off before the latest tail is awaited: the two
@@ -190,7 +180,7 @@ export async function* search(
 
    try {
       const latest = await loadLatest()
-      const hits = matchShard(latest, nf * IDX_PACK_SIZE, words, remaining, accept)
+      const hits = matchShard(latest, nf * META_PACK_SIZE, words, remaining, accept)
       remaining -= hits.length
       if (hits.length > 0) yield hits
    } catch (e) {
@@ -201,7 +191,7 @@ export async function* search(
    const blooms = await summary
    for (let p = nf - 1; p >= 0 && remaining > 0; p--) {
       if (!gramBits.every((bits) => bloomHas(blooms, p * SEARCH_BLOOM_BYTES, bits))) continue
-      const hits = matchShard(await loadShard(p), p * IDX_PACK_SIZE, words, remaining, accept)
+      const hits = matchShard(await loadShard(p), p * META_PACK_SIZE, words, remaining, accept)
       remaining -= hits.length
       if (hits.length > 0) yield hits
    }

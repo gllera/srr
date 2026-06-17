@@ -1,6 +1,6 @@
 import { PACK_BASE } from "./base"
 import { cachedPromise, makeLRU, type LRU } from "./cache"
-import { FETCHED_AT_BLOCK } from "./format.gen"
+import { FETCHED_AT_BLOCK, META_PACK_SIZE, SEARCH_BLOOM_BYTES, type IMetaWire } from "./format.gen"
 import {
    countAt,
    findPackForBlocks,
@@ -13,7 +13,7 @@ import {
    type IdxPack,
 } from "./idx"
 
-export { IDX_PACK_SIZE }
+export { IDX_PACK_SIZE, META_PACK_SIZE }
 
 // no-cache forces a conditional revalidation on every load so a stale db.gz on
 // the client (mobile browsers cache aggressively) can't make chronIdx URLs like
@@ -116,6 +116,10 @@ export async function init() {
 // coverage gate and chron bases derive from the same formula.
 export function numFinalizedIdx(): number {
    return db.total_art > 0 ? Math.floor((db.total_art - 1) / IDX_PACK_SIZE) : 0
+}
+
+export function numFinalizedMeta(): number {
+   return db.total_art > 0 ? Math.floor((db.total_art - 1) / META_PACK_SIZE) : 0
 }
 
 // feedTitle resolves a feed_id for display: a deleted feed's articles
@@ -282,6 +286,58 @@ export async function loadArticle(chronIdx: number): Promise<IArticle> {
       throw new Error(`pack ${ref.packId} out of sync (offset ${ref.offset} of ${entries.length}); retry to refresh`)
    }
    return entries[ref.offset]
+}
+
+// parseJsonl decodes an ArrayBuffer of newline-delimited JSON into typed
+// objects. Exported for search.ts (meta shard parsing).
+export function parseJsonl<T>(buf: ArrayBuffer): T[] {
+   const text = new TextDecoder().decode(buf)
+   const out: T[] = []
+   for (const line of text.split("\n")) {
+      if (line) out.push(JSON.parse(line) as T)
+   }
+   return out
+}
+
+// meta/ is a warn-only derived projection, so after a failed SyncMeta it can
+// lag db.gz for one fetch cycle. metaReady() reports whether mp+mt fully cover
+// the store — only then is every meta shard (finalized + tail) present and
+// consistent. The list and search both gate on it; the list falls back to data/.
+export function metaReady(): boolean {
+   if (db.total_art === 0) return false
+   const mp = db.mp ?? 0
+   return mp === numFinalizedMeta() && mp * META_PACK_SIZE + (db.mt ?? 0) === db.total_art
+}
+
+const metaCache = makeLRU<Promise<IMetaWire[]>>(20)
+
+function metaPackId(chronIdx: number): number {
+   return Math.min(Math.floor(chronIdx / META_PACK_SIZE), numFinalizedMeta())
+}
+
+function loadMetaPack(n: number): Promise<IMetaWire[]> {
+   return cachedPromise(metaCache, n, async () => {
+      const isFinalized = n < numFinalizedMeta()
+      const path = `meta/${isFinalized ? n.toString() : `L${db.seq}`}.gz`
+      const buf = await fetchPackBytes(path, !isFinalized)
+      // Finalized shards carry a SEARCH_BLOOM_BYTES bloom prefix; the latest tail does not.
+      return parseJsonl<IMetaWire>(isFinalized ? buf.slice(SEARCH_BLOOM_BYTES) : buf)
+   })
+}
+
+// loadMeta returns one card. Uses meta/ when the projection is consistent;
+// otherwise falls back to the data/ source of truth (projected) so the home
+// list never breaks during a transient meta lag.
+export async function loadMeta(chronIdx: number): Promise<IMetaWire> {
+   if (metaReady()) {
+      const n = metaPackId(chronIdx)
+      const entries = await loadMetaPack(n)
+      const e = entries[chronIdx - n * META_PACK_SIZE]
+      if (e) return e
+      // Defensive: a coverage race — fall through to data/.
+   }
+   const a = await loadArticle(chronIdx)
+   return { f: a.f, w: a.p || a.a, t: a.t }
 }
 
 let activeFeedsCache: IFeed[] | null = null

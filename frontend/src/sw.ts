@@ -8,10 +8,10 @@
 //                           a hit can never be stale. Bounded to ASSET_KEEP
 //                           entries, oldest-cached evicted first.
 //   packs  (srr-packs-vN)   the CDN store under `packs/`: every pack name is
-//      write-once — finalized `idx|data|search/<n>.gz` (numeric), the latest
-//      generation `idx|data|search/L<seq>.gz` (a generation is never rewritten
+//      write-once — finalized `idx|data|meta/<n>.gz` (numeric), the latest
+//      generation `idx|data|meta/L<seq>.gz` (a generation is never rewritten
 //      after the db.gz commit that publishes it), and the `idx/h<N>` /
-//      `search/s<N>` summaries → cache-first. Only `db.gz` is mutable →
+//      `meta/s<N>` summaries → cache-first. Only `db.gz` is mutable →
 //      network-first (offline → last cached). Finalized series are bounded
 //      per series (enforceCacheBounds), lowest-numbered (oldest) evicted
 //      first.
@@ -145,10 +145,10 @@ async function networkFirst(req: Request, name: string): Promise<Response> {
 // after a successful ONLINE db.gz fetch — an offline reader must never lose a
 // cached pack it cannot refetch.
 const PACK_KEEP = 100 // per finalized series: ~20 MB of data packs + ~5 MB of idx packs
-const SEARCH_KEEP = 30 // search shards run ~1 MB each — a tighter bound for the same idea
+const META_KEEP = 80 // meta shards run ~200 KB each — a tighter bound for the same idea
 const ASSET_KEEP = 500 // self-hosted images/files: order of ~100 MB at typical sizes
 
-const SERIES_KEEP: Record<string, number> = { idx: PACK_KEEP, data: PACK_KEEP, search: SEARCH_KEEP }
+const SERIES_KEEP: Record<string, number> = { idx: PACK_KEEP, data: PACK_KEEP, meta: META_KEEP }
 
 async function enforceCacheBounds(): Promise<void> {
    try {
@@ -205,11 +205,11 @@ async function readMetaNumber(key: string): Promise<number> {
 async function checkManifest(dbRes: Response): Promise<void> {
    try {
       const body = dbRes.clone().body!.pipeThrough(new DecompressionStream("gzip"))
-      const db = (await new Response(body).json()) as Pick<IDBWire, "gen" | "seq" | "hdrs" | "srch">
+      const db = (await new Response(body).json()) as Pick<IDBWire, "gen" | "seq" | "hdrs" | "mp">
       const gen = db.gen ?? 0
       const seq = db.seq ?? 0
       const hdrs = db.hdrs ?? 0
-      const srch = db.srch ?? 0
+      const mp = db.mp ?? 0
       const meta = await caches.open(META)
       const packs = await caches.open(PACKS)
       if (gen !== (await readMetaNumber(GEN_KEY))) {
@@ -220,13 +220,13 @@ async function checkManifest(dbRes: Response): Promise<void> {
       }
       if (seq !== (await readMetaNumber(SEQ_KEY))) {
          const keys = await packs.keys()
-         // Superseded summaries (idx h<N> headers, search s<N> blooms) ride
+         // Superseded summaries (idx h<N> headers, meta s<N> blooms) ride
          // the seq prune instead of tracking meta keys of their own. Their
          // counters CAN advance without a seq bump (a zero-article migration
          // or sync-retry cycle), but such a cycle strands at most one stale
          // name each, pruned on the next article-producing fetch — and a
          // store rebuild purges the whole bucket via gen above.
-         const cutoff: Record<string, number> = { l: seq, h: hdrs, s: srch }
+         const cutoff: Record<string, number> = { l: seq, h: hdrs, s: mp }
          await Promise.all(
             keys.map((k) => {
                const p = parsePackName(new URL(k.url).pathname)
