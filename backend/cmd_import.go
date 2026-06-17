@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,21 +17,11 @@ type ImportCmd struct {
 	All     bool     `short:"a"             help:"Import all."`
 	Tag     *string  `short:"g"             help:"Tag to assign to imported channels. Overrides OPML group tags."`
 	DryRun  bool     `short:"n"             help:"Dry run. List resulting channels without importing."`
-	Title   *string  `short:"t" optional:"" help:"Title for the merged channel. Triggers merge mode (all selections become one channel)."`
 	Parsers []string `short:"p" sep:"none" optional:"" help:"Channel pipe applied to every imported channel; repeat -p per step (not comma-separated). Empty (\"\") clears (inherit root)."`
 	Ingest  *string  `          optional:"" help:"Channel ingest strategy applied to every imported channel. Empty (\"\") clears (inherit root)."`
 }
 
 func (o *ImportCmd) Run() error {
-	if o.Title != nil {
-		if *o.Title == "" {
-			return fmt.Errorf("title must be non-empty")
-		}
-		if !o.All && len(o.ID) == 0 {
-			return fmt.Errorf("merge requires -a or -i")
-		}
-	}
-
 	nodes, err := ParseOPMLTree(o.Path)
 	if err != nil {
 		return err
@@ -47,22 +36,12 @@ func (o *ImportCmd) Run() error {
 	fmt.Fprintf(w, "ID\tTitle\tURL\n")
 	fmt.Fprintf(w, "---\t-----\t---\n")
 
-	iw := &importWalker{w: w, selectedIDs: o.ID, merge: o.Title != nil, tagOverride: o.Tag != nil}
+	iw := &importWalker{w: w, selectedIDs: o.ID, tagOverride: o.Tag != nil, seen: map[string]bool{}}
 	newChannels, err := iw.walk(nodes, "", "", nil, o.All)
 	if err != nil {
 		return err
 	}
 	w.Flush()
-
-	if iw.merge {
-		if len(iw.mergedFeeds) == 0 {
-			return nil
-		}
-		newChannels = []*Channel{{
-			Title: *o.Title,
-			Feeds: iw.mergedFeeds,
-		}}
-	}
 
 	if len(newChannels) == 0 {
 		return nil
@@ -75,7 +54,7 @@ func (o *ImportCmd) Run() error {
 		fmt.Fprintf(w, "\nTitle\tURL\tTag\n")
 		fmt.Fprintf(w, "-----\t---\t---\n")
 		for _, c := range newChannels {
-			fmt.Fprintf(w, "%s\t%s\t%s\n", c.Title, c.URLs(), c.Tag)
+			fmt.Fprintf(w, "%s\t%s\t%s\n", c.Title, c.URL, c.Tag)
 		}
 		w.Flush()
 		return nil
@@ -97,9 +76,8 @@ func (o *ImportCmd) Run() error {
 type importWalker struct {
 	w           io.Writer
 	selectedIDs []string
-	merge       bool    // true when -t is set; selected feeds accumulate into mergedFeeds instead of becoming channels
-	tagOverride bool    // true when -g is set: skip OPML group-tag resolution. resolveTag can error on an un-normalizable group name, and applyImportDefaults overwrites Tag from -g regardless, so resolving here would only raise a spurious error.
-	mergedFeeds []*Feed // accumulator (merge mode only)
+	tagOverride bool            // true when -g is set: skip OPML group-tag resolution. resolveTag can error on an un-normalizable group name, and applyImportDefaults overwrites Tag from -g regardless, so resolving here would only raise a spurious error.
+	seen        map[string]bool // URLs already emitted: OPML commonly cross-lists the same xmlUrl in several folders, so dedup to one channel (first folder wins its tag).
 }
 
 func (iw *importWalker) walk(nodes []*OPMLNode, prefix, indent string, groupPath []string, importAll bool) ([]*Channel, error) {
@@ -110,19 +88,14 @@ func (iw *importWalker) walk(nodes []*OPMLNode, prefix, indent string, groupPath
 	var result []*Channel
 
 	// emit records a selected channel. path is the group path used to derive its
-	// tag (skipped when -g overrides it). In merge mode feeds accumulate into one
-	// channel, deduped by URL since OPML commonly lists the same xmlUrl in
-	// several folders.
+	// tag (skipped when -g overrides it). The same xmlUrl is commonly cross-listed
+	// in several folders, so a URL already emitted is skipped (first folder wins
+	// its tag) — exactly one channel per distinct URL.
 	emit := func(ch *Channel, path []string) error {
-		if iw.merge {
-			for _, f := range ch.Feeds {
-				if slices.ContainsFunc(iw.mergedFeeds, func(e *Feed) bool { return e.URL == f.URL }) {
-					continue
-				}
-				iw.mergedFeeds = append(iw.mergedFeeds, f)
-			}
+		if iw.seen[ch.URL] {
 			return nil
 		}
+		iw.seen[ch.URL] = true
 		if !iw.tagOverride {
 			tag, err := resolveTag(path)
 			if err != nil {
@@ -138,7 +111,7 @@ func (iw *importWalker) walk(nodes []*OPMLNode, prefix, indent string, groupPath
 		id := prefix + strconv.Itoa(i+1)
 
 		if n.Channel != nil && len(n.Children) == 0 {
-			fmt.Fprintf(iw.w, "%s\t%s%s\t%s\n", id, indent, n.Name, n.Channel.URLs())
+			fmt.Fprintf(iw.w, "%s\t%s%s\t%s\n", id, indent, n.Name, n.Channel.URL)
 			if iw.isSelected(id, importAll) {
 				if err := emit(n.Channel, groupPath); err != nil {
 					return nil, err
@@ -150,7 +123,7 @@ func (iw *importWalker) walk(nodes []*OPMLNode, prefix, indent string, groupPath
 
 			if n.Channel != nil {
 				chID := id + ".0"
-				fmt.Fprintf(iw.w, "%s\t%s  %s\t%s\n", chID, indent, n.Name, n.Channel.URLs())
+				fmt.Fprintf(iw.w, "%s\t%s  %s\t%s\n", chID, indent, n.Name, n.Channel.URL)
 				if iw.isSelected(chID, importAll) || iw.isSelected(id, false) {
 					// A group that is also a feed: its own channel shares the tag
 					// its children get (the group's own name), not the parent path.

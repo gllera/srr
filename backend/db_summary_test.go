@@ -18,7 +18,7 @@ func setupBoundaryDB(t *testing.T) (*DB, string) {
 	db, c, dir := setupTestDB(t)
 	globals.PackSize = 1024 // data packs never split (read lazily at write time)
 
-	ch := &Channel{id: 1}
+	ch := &Channel{id: 1, URL: "https://example.com/1"}
 	c.Channels = map[int]*Channel{ch.id: ch}
 	c.FetchedAt = 1700000000
 
@@ -82,7 +82,7 @@ func TestSyncIdxSummaryNoopWhenCurrent(t *testing.T) {
 
 func TestSyncIdxSummaryBelowBoundaryNoop(t *testing.T) {
 	db, c, dir := setupTestDB(t)
-	ch := &Channel{id: 1}
+	ch := &Channel{id: 1, URL: "https://example.com/1"}
 	c.Channels = map[int]*Channel{ch.id: ch}
 	putOneArticle(t, db, ch, 1)
 

@@ -283,7 +283,7 @@ func TestPackMetadata(t *testing.T) {
 func TestCommitAndReadDB(t *testing.T) {
 	db, c, dir := setupTestDB(t)
 	c.Channels = map[int]*Channel{
-		1: {id: 1, Title: "Test Feed", Feeds: []*Feed{{URL: "http://example.com/feed"}}},
+		1: {id: 1, Title: "Test Feed", URL: "http://example.com/feed"},
 	}
 
 	if err := db.Commit(ctx); err != nil {
@@ -462,8 +462,8 @@ func TestDBLockingForce(t *testing.T) {
 func TestAddRemoveChannel(t *testing.T) {
 	db, _, _ := setupTestDB(t)
 
-	s1 := &Channel{Title: "Feed 1", Feeds: []*Feed{{URL: "http://example.com/1"}}}
-	s2 := &Channel{Title: "Feed 2", Feeds: []*Feed{{URL: "http://example.com/2"}}}
+	s1 := &Channel{Title: "Feed 1", URL: "http://example.com/1"}
+	s2 := &Channel{Title: "Feed 2", URL: "http://example.com/2"}
 	if err := db.AddChannel(s1); err != nil {
 		t.Fatalf("AddSubscription(s1): %v", err)
 	}
@@ -487,7 +487,7 @@ func TestAddRemoveChannel(t *testing.T) {
 	}
 
 	// Adding after removal should reuse freed ID
-	s3 := &Channel{Title: "Feed 3", Feeds: []*Feed{{URL: "http://example.com/3"}}}
+	s3 := &Channel{Title: "Feed 3", URL: "http://example.com/3"}
 	if err := db.AddChannel(s3); err != nil {
 		t.Fatalf("AddSubscription(s3): %v", err)
 	}
@@ -498,7 +498,7 @@ func TestAddRemoveChannel(t *testing.T) {
 
 func TestRemoveNonExistentChannel(t *testing.T) {
 	db, _, _ := setupTestDB(t)
-	if err := db.AddChannel(&Channel{Title: "Feed", Feeds: []*Feed{{URL: "http://example.com"}}}); err != nil {
+	if err := db.AddChannel(&Channel{Title: "Feed", URL: "http://example.com"}); err != nil {
 		t.Fatalf("AddSubscription: %v", err)
 	}
 
@@ -518,7 +518,7 @@ func TestCommitAndReopen(t *testing.T) {
 		t.Fatalf("NewDB: %v", err)
 	}
 
-	if err := db.AddChannel(&Channel{Title: "Persist Feed", Feeds: []*Feed{{URL: "http://example.com/feed"}}}); err != nil {
+	if err := db.AddChannel(&Channel{Title: "Persist Feed", URL: "http://example.com/feed"}); err != nil {
 		t.Fatalf("AddSubscription: %v", err)
 	}
 	db.core.FetchedAt = 1234567890
@@ -590,7 +590,7 @@ func TestAddChannelSetsAddIdx(t *testing.T) {
 	db, c, _ := setupTestDB(t)
 	c.TotalArticles = 100
 
-	s := &Channel{Title: "Feed", Feeds: []*Feed{{URL: "http://example.com"}}}
+	s := &Channel{Title: "Feed", URL: "http://example.com"}
 	if err := db.AddChannel(s); err != nil {
 		t.Fatalf("AddSubscription: %v", err)
 	}
@@ -739,6 +739,35 @@ func TestDBOpenEmptyDir(t *testing.T) {
 
 	if len(db.Channels()) != 0 {
 		t.Errorf("Subscriptions = %d, want 0", len(db.Channels()))
+	}
+}
+
+// A db.gz from before the feed→channel merge stored the source URL under a
+// feeds[] array, which the current schema ignores — leaving the channel's
+// top-level url empty. NewDB must reject that loudly rather than silently
+// fetch nothing.
+func TestNewDBRejectsUrllessChannel(t *testing.T) {
+	dir := t.TempDir()
+	globals = &Globals{PackSize: 1, Store: dir}
+
+	// Legacy shape: channel carries feeds[] but no top-level url.
+	legacy := `{"channels":{"1":{"title":"Old","feeds":[{"url":"http://example.com/feed"}],"total_art":0,"add_idx":0}}}`
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write([]byte(legacy)); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	gz.Close()
+	if err := os.WriteFile(filepath.Join(dir, "db.gz"), buf.Bytes(), 0o644); err != nil {
+		t.Fatalf("write db.gz: %v", err)
+	}
+
+	_, err := NewDB(ctx, false)
+	if err == nil {
+		t.Fatal("expected error for url-less (pre-merge) channel")
+	}
+	if !strings.Contains(err.Error(), "no url") || !strings.Contains(err.Error(), "feed→channel merge") {
+		t.Errorf("error = %v, want the feed→channel migration guard message", err)
 	}
 }
 

@@ -51,7 +51,7 @@ func outlineToChannel(o Outline) *Channel {
 	}
 	return &Channel{
 		Title: outlineDisplayName(o),
-		Feeds: []*Feed{{URL: o.XMLURL}},
+		URL:   o.XMLURL,
 	}
 }
 

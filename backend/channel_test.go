@@ -8,24 +8,79 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"srrb/ingest"
 	"srrb/mod"
 )
 
-func fetchOnce(t *testing.T, feed *Feed, ch *Channel, srv *httptest.Server) []*Item {
+// The "test-stub" ingest strategy returns a fixed result for every URL —
+// used to confirm Channel.fetchURL dispatches through the ingest registry
+// rather than hard-coding the RSS path.
+func init() {
+	// Registered once at init; safe because tests use distinct names.
+	ingest.Register("test-stub", func() ingest.FetchFunc {
+		pub := time.Unix(1700000000, 0)
+		items := []*mod.RawItem{
+			{GUID: 1, Title: "stub-1", Link: "https://stub/1", Published: &pub},
+			{GUID: 2, Title: "stub-2", Link: "https://stub/2", Published: &pub},
+		}
+		return func(_ context.Context, _ *http.Client, _ []byte, _ ingest.Request) (ingest.Result, error) {
+			return ingest.Result{Items: items}, nil
+		}
+	})
+}
+
+// fetchOnce points ch at the test server and runs one fetchURL cycle. ETag /
+// LastModified are cleared each call so a re-fetch from the same server is not
+// answered with a 304 — the dedup tests rely on every fetch seeing the body.
+func fetchOnce(t *testing.T, ch *Channel, srv *httptest.Server) []*Item {
 	t.Helper()
 	buf := make([]byte, 1<<20)
-	feed.ETag, feed.LastModified = "", ""
+	ch.URL = srv.URL
+	ch.ETag, ch.LastModified = "", ""
 	// Far enough in the future that test-fixture pubDates of 2024 always pass
 	// the future-clamp without affecting the dedup expectations the tests check.
 	const fetchedAt int64 = 4_102_444_800 // 2100-01-01
 	run := &fetchRun{client: srv.Client(), engine: ingest.New(), fetchedAt: fetchedAt}
-	items, err := feed.fetch(context.Background(), run, buf, mod.New(), ch, ch.Pipe, ingest.Select(ch.Ingest, ""))
+	items, err := ch.fetchURL(context.Background(), run, buf, mod.New(), ch.Pipe, ingest.Select(ch.Ingest, ""))
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
 	return items
+}
+
+// dispatchStub runs one fetchURL cycle against the engine's registry (no HTTP
+// server) — the URL is irrelevant since test-stub ignores it.
+func dispatchStub(t *testing.T, ch *Channel, rootIngest string) []*Item {
+	t.Helper()
+	buf := make([]byte, 1<<20)
+	const fetchedAt int64 = 4_102_444_800
+	ingestName := ingest.Select(ch.Ingest, rootIngest)
+	run := &fetchRun{engine: ingest.New(), fetchedAt: fetchedAt}
+	items, err := ch.fetchURL(context.Background(), run, buf, mod.New(), ch.Pipe, ingestName)
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	return items
+}
+
+// A channel-level ingest strategy is used by fetchURL.
+func TestFetchInheritsIngestFromChannel(t *testing.T) {
+	ch := &Channel{Title: "T", URL: "irrelevant://value", Ingest: "#test-stub"}
+	items := dispatchStub(t, ch, "")
+	if len(items) != 2 {
+		t.Fatalf("got %d items, want 2 (channel-level ingest used)", len(items))
+	}
+}
+
+// The db.gz root Ingest applies when the channel has no override.
+func TestFetchUsesRootIngest(t *testing.T) {
+	ch := &Channel{Title: "T", URL: "irrelevant://value"}
+	items := dispatchStub(t, ch, "#test-stub")
+	if len(items) != 2 {
+		t.Fatalf("got %d items, want 2 (root ingest applied)", len(items))
+	}
 }
 
 // Items the publisher gave no parseable date for must be stored with
@@ -39,10 +94,9 @@ func TestFetchDatelessItemHasZeroPublished(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	f := &Feed{URL: srv.URL}
-	ch := &Channel{Title: "T", Feeds: []*Feed{f}}
+	ch := &Channel{Title: "T"}
 
-	items := fetchOnce(t, f, ch, srv)
+	items := fetchOnce(t, ch, srv)
 	if len(items) != 1 {
 		t.Fatalf("got %d items, want 1", len(items))
 	}
@@ -63,10 +117,9 @@ func TestFetchWithinFetchDuplicateDeduped(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	f := &Feed{URL: srv.URL}
-	ch := &Channel{Title: "T", Feeds: []*Feed{f}}
+	ch := &Channel{Title: "T"}
 
-	items := fetchOnce(t, f, ch, srv)
+	items := fetchOnce(t, ch, srv)
 	if len(items) != 1 {
 		t.Errorf("got %d items, want 1", len(items))
 	}
@@ -90,15 +143,14 @@ func TestFetchSameSecondDifferentGUIDIsIngested(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	f := &Feed{URL: srv.URL}
-	ch := &Channel{Title: "T", Feeds: []*Feed{f}}
+	ch := &Channel{Title: "T"}
 
-	if got := fetchOnce(t, f, ch, srv); len(got) != 1 {
+	if got := fetchOnce(t, ch, srv); len(got) != 1 {
 		t.Fatalf("fetch1: got %d items, want 1", len(got))
 	}
 
 	current = feed2
-	if got := fetchOnce(t, f, ch, srv); len(got) != 1 {
+	if got := fetchOnce(t, ch, srv); len(got) != 1 {
 		t.Errorf("fetch2: got %d items, want 1 (same-second item with new GUID dropped)", len(got))
 	}
 }
@@ -120,14 +172,13 @@ func TestFetchDatelessRemainsSkippedWhenLaterDated(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	f := &Feed{URL: srv.URL}
-	ch := &Channel{Title: "T", Feeds: []*Feed{f}}
+	ch := &Channel{Title: "T"}
 
-	if got := fetchOnce(t, f, ch, srv); len(got) != 1 {
+	if got := fetchOnce(t, ch, srv); len(got) != 1 {
 		t.Fatalf("fetch1: got %d, want 1", len(got))
 	}
 	current = feedWithDate
-	if got := fetchOnce(t, f, ch, srv); len(got) != 0 {
+	if got := fetchOnce(t, ch, srv); len(got) != 0 {
 		t.Errorf("fetch2: got %d, want 0 (re-ingested previously-dateless item once it gained a date)", len(got))
 	}
 }
@@ -144,16 +195,15 @@ func TestFetchPriorBoundaryStillDedupes(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	f := &Feed{URL: srv.URL}
-	ch := &Channel{Title: "T", Feeds: []*Feed{f}}
+	ch := &Channel{Title: "T"}
 
-	if got := fetchOnce(t, f, ch, srv); len(got) != 2 {
+	if got := fetchOnce(t, ch, srv); len(got) != 2 {
 		t.Fatalf("fetch1: got %d, want 2", len(got))
 	}
-	if len(f.BoundaryGUIDs) != 2 {
-		t.Errorf("BoundaryGUIDs = %v, want 2", f.BoundaryGUIDs)
+	if len(ch.BoundaryGUIDs) != 2 {
+		t.Errorf("BoundaryGUIDs = %v, want 2", ch.BoundaryGUIDs)
 	}
-	if got := fetchOnce(t, f, ch, srv); len(got) != 0 {
+	if got := fetchOnce(t, ch, srv); len(got) != 0 {
 		t.Errorf("fetch2: got %d, want 0", len(got))
 	}
 }
@@ -175,19 +225,18 @@ func TestFetchSiblingsAtBoundarySecondBothInBoundary(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	f := &Feed{URL: srv.URL}
-	ch := &Channel{Title: "T", Feeds: []*Feed{f}}
+	ch := &Channel{Title: "T"}
 
-	if got := fetchOnce(t, f, ch, srv); len(got) != 1 {
+	if got := fetchOnce(t, ch, srv); len(got) != 1 {
 		t.Fatalf("fetch1: got %d, want 1", len(got))
 	}
 
 	current = feed2
-	if got := fetchOnce(t, f, ch, srv); len(got) != 1 {
+	if got := fetchOnce(t, ch, srv); len(got) != 1 {
 		t.Errorf("fetch2: got %d, want 1 (B is new at the same second)", len(got))
 	}
-	if len(f.BoundaryGUIDs) != 2 {
-		t.Errorf("BoundaryGUIDs = %v, want 2", f.BoundaryGUIDs)
+	if len(ch.BoundaryGUIDs) != 2 {
+		t.Errorf("BoundaryGUIDs = %v, want 2", ch.BoundaryGUIDs)
 	}
 }
 
@@ -206,28 +255,27 @@ func TestFetchEmptyResponsePreservesDedupState(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	f := &Feed{URL: srv.URL}
-	ch := &Channel{Title: "T", Feeds: []*Feed{f}}
+	ch := &Channel{Title: "T"}
 
-	if got := fetchOnce(t, f, ch, srv); len(got) != 1 {
+	if got := fetchOnce(t, ch, srv); len(got) != 1 {
 		t.Fatalf("fetch1: got %d, want 1", len(got))
 	}
-	priorWatermark := f.Watermark
-	priorBoundary := append([]uint32(nil), f.BoundaryGUIDs...)
+	priorWatermark := ch.Watermark
+	priorBoundary := append([]uint32(nil), ch.BoundaryGUIDs...)
 
 	current = feedEmpty
-	if got := fetchOnce(t, f, ch, srv); len(got) != 0 {
+	if got := fetchOnce(t, ch, srv); len(got) != 0 {
 		t.Fatalf("fetch2: got %d, want 0", len(got))
 	}
-	if f.Watermark != priorWatermark {
-		t.Errorf("Watermark = %d, want %d (preserved across empty fetch)", f.Watermark, priorWatermark)
+	if ch.Watermark != priorWatermark {
+		t.Errorf("Watermark = %d, want %d (preserved across empty fetch)", ch.Watermark, priorWatermark)
 	}
-	if !slices.Equal(f.BoundaryGUIDs, priorBoundary) {
-		t.Errorf("BoundaryGUIDs = %v, want %v (preserved across empty fetch)", f.BoundaryGUIDs, priorBoundary)
+	if !slices.Equal(ch.BoundaryGUIDs, priorBoundary) {
+		t.Errorf("BoundaryGUIDs = %v, want %v (preserved across empty fetch)", ch.BoundaryGUIDs, priorBoundary)
 	}
 
 	current = feedWithItem
-	if got := fetchOnce(t, f, ch, srv); len(got) != 0 {
+	if got := fetchOnce(t, ch, srv); len(got) != 0 {
 		t.Errorf("fetch3: got %d, want 0 (item re-ingested after empty fetch)", len(got))
 	}
 }
@@ -245,16 +293,15 @@ func TestFetchWithinFetchDuplicateLowerPubKeepsBoundary(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	f := &Feed{URL: srv.URL}
-	ch := &Channel{Title: "T", Feeds: []*Feed{f}}
+	ch := &Channel{Title: "T"}
 
-	if got := fetchOnce(t, f, ch, srv); len(got) != 1 {
+	if got := fetchOnce(t, ch, srv); len(got) != 1 {
 		t.Fatalf("fetch1: got %d, want 1", len(got))
 	}
-	if len(f.BoundaryGUIDs) != 1 {
-		t.Errorf("BoundaryGUIDs = %v, want 1 entry (GUID dropped → re-ingestion next fetch)", f.BoundaryGUIDs)
+	if len(ch.BoundaryGUIDs) != 1 {
+		t.Errorf("BoundaryGUIDs = %v, want 1 entry (GUID dropped → re-ingestion next fetch)", ch.BoundaryGUIDs)
 	}
-	if got := fetchOnce(t, f, ch, srv); len(got) != 0 {
+	if got := fetchOnce(t, ch, srv); len(got) != 0 {
 		t.Errorf("fetch2: got %d, want 0 (dup ingested because boundary lost the GUID)", len(got))
 	}
 }
@@ -277,15 +324,14 @@ func TestFetchWithinFetchDuplicateHigherPubKeepsWatermark(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	f := &Feed{URL: srv.URL}
-	ch := &Channel{Title: "T", Feeds: []*Feed{f}}
+	ch := &Channel{Title: "T"}
 
-	if got := fetchOnce(t, f, ch, srv); len(got) != 1 {
+	if got := fetchOnce(t, ch, srv); len(got) != 1 {
 		t.Fatalf("fetch1: got %d, want 1", len(got))
 	}
 
 	current = feed2
-	if got := fetchOnce(t, f, ch, srv); len(got) != 1 {
+	if got := fetchOnce(t, ch, srv); len(got) != 1 {
 		t.Errorf("fetch2: got %d, want 1 (B at 00:05 skipped because watermark jumped to 00:10 on a dup)", len(got))
 	}
 }
@@ -303,13 +349,12 @@ func TestFetchFutureDatedItemClampedToFetchedAt(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	f := &Feed{URL: srv.URL}
-	ch := &Channel{Title: "T", Feeds: []*Feed{f}}
+	ch := &Channel{Title: "T", URL: srv.URL}
 
 	const fetchedAt int64 = 1_700_000_000
 	buf := make([]byte, 1<<20)
 	run := &fetchRun{client: srv.Client(), engine: ingest.New(), fetchedAt: fetchedAt}
-	items, err := f.fetch(context.Background(), run, buf, mod.New(), ch, ch.Pipe, ingest.Select(ch.Ingest, ""))
+	items, err := ch.fetchURL(context.Background(), run, buf, mod.New(), ch.Pipe, ingest.Select(ch.Ingest, ""))
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
@@ -319,13 +364,13 @@ func TestFetchFutureDatedItemClampedToFetchedAt(t *testing.T) {
 	if items[0].Published != fetchedAt {
 		t.Errorf("Published = %d, want %d (clamped to fetchedAt)", items[0].Published, fetchedAt)
 	}
-	if f.Watermark != fetchedAt {
-		t.Errorf("Watermark = %d, want %d (clamped)", f.Watermark, fetchedAt)
+	if ch.Watermark != fetchedAt {
+		t.Errorf("Watermark = %d, want %d (clamped)", ch.Watermark, fetchedAt)
 	}
 }
 
 func TestChannelLogValue(t *testing.T) {
-	ch := &Channel{id: 7, Title: "My Title", Feeds: []*Feed{{URL: "http://x"}}}
+	ch := &Channel{id: 7, Title: "My Title", URL: "http://x"}
 	val := ch.LogValue()
 	attrs := val.Group()
 	got := map[string]any{}
@@ -338,9 +383,9 @@ func TestChannelLogValue(t *testing.T) {
 	if got["title"] != "My Title" {
 		t.Errorf("LogValue title = %v, want %q", got["title"], "My Title")
 	}
-	// Feeds intentionally omitted to keep per-feed log lines compact.
-	if _, ok := got["feeds"]; ok {
-		t.Errorf("LogValue should not include feeds, got %v", got)
+	// URL intentionally omitted to keep per-channel log lines compact.
+	if _, ok := got["url"]; ok {
+		t.Errorf("LogValue should not include url, got %v", got)
 	}
 }
 
@@ -423,16 +468,15 @@ func TestFetchBoundaryGUIDsCapped(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	f := &Feed{URL: srv.URL}
-	ch := &Channel{Title: "T", Feeds: []*Feed{f}}
+	ch := &Channel{Title: "T"}
 
-	if got := fetchOnce(t, f, ch, srv); len(got) != maxBoundaryGUIDs {
+	if got := fetchOnce(t, ch, srv); len(got) != maxBoundaryGUIDs {
 		t.Fatalf("fetch1: got %d items, want %d (only kept items ingested)", len(got), maxBoundaryGUIDs)
 	}
-	if len(f.BoundaryGUIDs) != maxBoundaryGUIDs {
-		t.Errorf("BoundaryGUIDs = %d entries, want %d (capped)", len(f.BoundaryGUIDs), maxBoundaryGUIDs)
+	if len(ch.BoundaryGUIDs) != maxBoundaryGUIDs {
+		t.Errorf("BoundaryGUIDs = %d entries, want %d (capped)", len(ch.BoundaryGUIDs), maxBoundaryGUIDs)
 	}
-	if got := fetchOnce(t, f, ch, srv); len(got) != 0 {
+	if got := fetchOnce(t, ch, srv); len(got) != 0 {
 		t.Errorf("fetch2: got %d, want 0 (over-cap items re-ingested as duplicates)", len(got))
 	}
 }
@@ -461,18 +505,17 @@ func TestFetchRedatedDuplicateDoesNotPoisonWatermark(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	f := &Feed{URL: srv.URL}
-	ch := &Channel{Title: "T", Feeds: []*Feed{f}}
+	ch := &Channel{Title: "T"}
 
-	if got := fetchOnce(t, f, ch, srv); len(got) != 1 {
+	if got := fetchOnce(t, ch, srv); len(got) != 1 {
 		t.Fatalf("fetch1: got %d, want 1", len(got))
 	}
 	current = feed2
-	if got := fetchOnce(t, f, ch, srv); len(got) != 0 {
+	if got := fetchOnce(t, ch, srv); len(got) != 0 {
 		t.Fatalf("fetch2: got %d, want 0 (re-dated A is a dup)", len(got))
 	}
 	current = feed3
-	if got := fetchOnce(t, f, ch, srv); len(got) != 1 {
+	if got := fetchOnce(t, ch, srv); len(got) != 1 {
 		t.Errorf("fetch3: got %d, want 1 — B at 00:05 dropped because a re-dated dup poisoned the watermark", len(got))
 	}
 }
