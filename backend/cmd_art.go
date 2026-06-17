@@ -14,7 +14,6 @@ type ArtCmd struct {
 
 type idxEntry struct {
 	ChronIdx   int
-	FetchedAt  int64
 	PackID     int
 	PackOffset int
 	FeedID     int
@@ -136,7 +135,6 @@ func readAllIdx(ctx context.Context, db *DB) ([]idxEntry, error) {
 				FeedID:     feedID,
 				PackID:     packID,
 				PackOffset: packOffset,
-				FetchedAt:  (db.core.FirstFetchedAt/fetchedAtBlock + int64(p.fetchedAts[i])) * fetchedAtBlock,
 			})
 		}
 	}

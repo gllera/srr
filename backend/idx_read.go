@@ -26,9 +26,7 @@ type idxPack struct {
 	packIndex     int
 	packSize      int
 	feedIDs       []uint16
-	fetchedAts    []uint32 // per-entry cumulative fetched_at (8h blocks since first_fetched)
 	bounds        []idxBound
-	fetchedAtBase uint32
 	packIDBase    uint32
 	packOffBase   uint32
 	numSlots      int
@@ -84,19 +82,20 @@ func parseIdxPack(buf []byte, packIndex, packSize int) (*idxPack, error) {
 	}
 	numSlots := int(binary.LittleEndian.Uint32(buf[idxStateSize:]))
 	headerSize := idxHeaderPrefix + numSlots*4
-	expected := headerSize + packSize*idxEntrySize
-	if len(buf) < expected {
-		return nil, fmt.Errorf("short body: have %d, want %d (header+%d entries)", len(buf), expected, packSize)
+	entriesEnd := headerSize + packSize*idxEntrySize
+	if len(buf) < entriesEnd {
+		return nil, fmt.Errorf("short body: have %d, want >= %d (header+%d entries)", len(buf), entriesEnd, packSize)
+	}
+	if (len(buf)-entriesEnd)%idxBoundarySize != 0 {
+		return nil, fmt.Errorf("idx footer not whole u16 boundaries: %d trailing bytes", len(buf)-entriesEnd)
 	}
 
 	pack := &idxPack{
 		packIndex:     packIndex,
 		packSize:      packSize,
 		feedIDs:       make([]uint16, packSize),
-		fetchedAts:    make([]uint32, packSize),
-		fetchedAtBase: binary.LittleEndian.Uint32(buf[0:]),
-		packIDBase:    binary.LittleEndian.Uint32(buf[4:]),
-		packOffBase:   binary.LittleEndian.Uint32(buf[8:]),
+		packIDBase:    binary.LittleEndian.Uint32(buf[0:]),
+		packOffBase:   binary.LittleEndian.Uint32(buf[4:]),
 		numSlots:      numSlots,
 		feedCounts:    make([]uint32, numSlots),
 		ownFeedCounts: make([]uint32, numSlots),
@@ -105,25 +104,27 @@ func parseIdxPack(buf []byte, packIndex, packSize int) (*idxPack, error) {
 		pack.feedCounts[s] = binary.LittleEndian.Uint32(buf[idxHeaderPrefix+s*4:])
 	}
 
+	// Bounds come from the header bases + the boundary footer (the u16 LE local
+	// indices at which the data packId advances), reconstructed with the same
+	// push condition the old per-entry delta_pack_id decode used.
+	boundaries := parseIdxFooter(buf[entriesEnd:])
 	packID := int(pack.packIDBase)
 	packOff := int(pack.packOffBase)
-	fetchedAt := pack.fetchedAtBase
 	baseChron := packIndex * idxPackSize
 	if packOff > 0 {
 		pack.bounds = append(pack.bounds, idxBound{packID, baseChron - packOff})
 	}
+	bi := 0
 	for i := range packSize {
 		off := headerSize + i*idxEntrySize
 		sub := uint16(buf[off]) | uint16(buf[off+1])<<8
-		packed := buf[off+2]
-		if packed>>7 != 0 {
-			packID++
-		}
-		fetchedAt += uint32(packed & deltaFetchedMax)
 		pack.feedIDs[i] = sub
-		pack.fetchedAts[i] = fetchedAt
 		if int(sub) < numSlots {
 			pack.ownFeedCounts[sub]++
+		}
+		if bi < len(boundaries) && boundaries[bi] == i {
+			packID++
+			bi++
 		}
 		if len(pack.bounds) == 0 || pack.bounds[len(pack.bounds)-1].packID != packID {
 			pack.bounds = append(pack.bounds, idxBound{packID, baseChron + i})

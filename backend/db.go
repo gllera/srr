@@ -27,21 +27,18 @@ const (
 	// feedIDCeiling is the feed-id ceiling: feed_id is a uint16 in each idx
 	// entry, so ids run [0, feedIDCeiling).
 	feedIDCeiling = 65536
-	// idxStateSize is the 3 leading uint32 LE idx-header state fields
-	// (fetchedAt/packId/packOff bases).
-	idxStateSize = 3 * 4
-	// idxHeaderPrefix is the fixed idx-header prefix: the 3 state uint32s plus
+	// idxStateSize is the 2 leading uint32 LE idx-header state fields
+	// (packId/packOff bases).
+	idxStateSize = 2 * 4
+	// idxHeaderPrefix is the fixed idx-header prefix: the 2 state uint32s plus
 	// the numSlots uint32. The variable cumulative-count array (numSlots × u32)
 	// follows it.
 	idxHeaderPrefix = idxStateSize + 4
-	// idxEntrySize is the per-entry idx byte width: feed_id:u16 LE + packed:u8.
-	idxEntrySize = 3
-	// fetchedAtBlock is the idx timestamp granularity in seconds (8h blocks):
-	// fetched_at is stored as unix ÷ this (× this on read).
-	fetchedAtBlock = 28800
-	// deltaFetchedMax is the 7-bit per-entry delta_fetched_at limit: the
-	// writer's clamp ceiling and the readers' bit mask.
-	deltaFetchedMax = 0x7F
+	// idxEntrySize is the per-entry idx byte width: feed_id:u16 LE.
+	idxEntrySize = 2
+	// idxBoundarySize is the idx footer element width: each data-pack boundary
+	// is a u16 LE local entry index at which the data packId advances by 1.
+	idxBoundarySize = 2
 	// searchGram is the rune length of the sliding windows ("trigrams") the
 	// search blooms index, taken over each word of a folded title.
 	searchGram = 3

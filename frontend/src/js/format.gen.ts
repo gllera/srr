@@ -15,23 +15,20 @@ export const IDX_PACK_SIZE = 50000
 // entries per finalized meta shard (the meta/ split stride; a divisor of IDX_PACK_SIZE)
 export const META_PACK_SIZE = 5000
 
-// bytes: the 3 leading uint32 LE idx-header state fields (fetchedAt/packId/packOff bases)
-export const IDX_STATE_SIZE = 12
+// bytes: the 2 leading uint32 LE idx-header state fields (packId/packOff bases)
+export const IDX_STATE_SIZE = 8
 
-// bytes: idx-header fixed prefix (3 state uint32s + numSlots uint32); the variable count array follows
-export const IDX_HEADER_PREFIX = 16
+// bytes: idx-header fixed prefix (2 state uint32s + numSlots uint32); the variable count array follows
+export const IDX_HEADER_PREFIX = 12
 
-// bytes per idx entry: feed_id uint16 LE + packed uint8
-export const IDX_ENTRY_SIZE = 3
+// bytes per idx entry: feed_id uint16 LE (pack boundaries live in the footer)
+export const IDX_ENTRY_SIZE = 2
+
+// bytes per idx footer boundary: a uint16 LE local entry index where the data packId advances
+export const IDX_BOUNDARY_SIZE = 2
 
 // feed-id ceiling: feed_id is a uint16, ids run [0, this)
 export const FEED_ID_CEILING = 65536
-
-// seconds per idx timestamp block (8h): stored fetched_at is unix seconds ÷ this
-export const FETCHED_AT_BLOCK = 28800
-
-// 7-bit per-entry delta_fetched_at limit: writer clamp ceiling, reader bit mask
-export const DELTA_FETCHED_MAX = 127
 
 // superseded L<seq> generations the backend GC keeps as a grace window for stale-db.gz readers
 export const LATEST_KEEP = 2
