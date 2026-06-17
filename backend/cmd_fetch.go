@@ -128,7 +128,7 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 		// its counter advanced this run. Most cycles fetch nothing new, and an
 		// unconditional sweep would re-delete the same already-gone window
 		// every interval (≈20 no-op store round trips + warn lines per cycle).
-		prevSeq, prevHdrs, prevSrch := db.core.Seq, db.core.HdrPacks, db.core.SearchPacks
+		prevSeq, prevHdrs, prevMeta := db.core.Seq, db.core.HdrPacks, db.core.MetaPacks
 
 		written, err := db.PutArticles(ctx, articles)
 		if err != nil {
@@ -142,14 +142,14 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 		if err := db.SyncIdxSummary(ctx); err != nil {
 			slog.Warn("sync idx summary", "error", err)
 		}
-		// Same warn-only contract: the search series is a derived index, so a
+		// Same warn-only contract: the meta series is a derived index, so a
 		// failed sync must not discard the durable batch. Coverage fields stay
 		// behind, readers keep search disabled (or miss only the newest tail),
 		// and the next run reconciles. PutArticles' return lets the common
 		// cycle build its entries from memory instead of re-reading the packs
 		// just written.
-		if err := db.SyncSearch(ctx, written); err != nil {
-			slog.Warn("sync search", "error", err)
+		if err := db.SyncMeta(ctx, written); err != nil {
+			slog.Warn("sync meta", "error", err)
 		}
 		if err := db.Commit(ctx); err != nil {
 			return err
@@ -168,7 +168,7 @@ func (o *FetchCmd) fetch(ctx context.Context) error {
 		}{
 			{db.core.Seq != prevSeq, "gc latest packs", db.GCLatest},
 			{db.core.HdrPacks != prevHdrs, "gc idx summaries", db.GCSummaries},
-			{db.core.SearchPacks != prevSrch, "gc search summaries", db.GCSearchSummaries},
+			{db.core.MetaPacks != prevMeta, "gc meta summaries", db.GCMetaSummaries},
 		} {
 			if !gc.advanced {
 				continue

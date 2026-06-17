@@ -33,6 +33,7 @@ var tsConsts = []struct {
 	doc   string
 }{
 	{"IDX_PACK_SIZE", idxPackSize, "entries per finalized idx pack (split threshold)"},
+	{"META_PACK_SIZE", metaPackSize, "entries per finalized meta shard (the meta/ split stride; a divisor of IDX_PACK_SIZE)"},
 	{"IDX_STATE_SIZE", idxStateSize, "bytes: the 3 leading uint32 LE idx-header state fields (fetchedAt/packId/packOff bases)"},
 	{"IDX_HEADER_PREFIX", idxHeaderPrefix, "bytes: idx-header fixed prefix (3 state uint32s + numSlots uint32); the variable count array follows"},
 	{"IDX_ENTRY_SIZE", idxEntrySize, "bytes per idx entry: feed_id uint16 LE + packed uint8"},
@@ -41,7 +42,7 @@ var tsConsts = []struct {
 	{"DELTA_FETCHED_MAX", deltaFetchedMax, "7-bit per-entry delta_fetched_at limit: writer clamp ceiling, reader bit mask"},
 	{"LATEST_KEEP", latestKeep, "superseded L<seq> generations the backend GC keeps as a grace window for stale-db.gz readers"},
 	{"SEARCH_GRAM", searchGram, "rune length of the sliding windows the search blooms index, per folded word"},
-	{"SEARCH_BLOOM_BYTES", searchBloomBytes, "bytes: fixed-size trigram bloom heading each finalized search shard (and per shard in search/s<N>.gz)"},
+	{"SEARCH_BLOOM_BYTES", searchBloomBytes, "bytes: fixed-size trigram bloom heading each finalized meta shard (and per shard in meta/s<N>.gz)"},
 	{"SEARCH_BLOOM_K", searchBloomK, "bloom bits set/tested per gram"},
 }
 
@@ -54,7 +55,7 @@ var tsTypes = []struct {
 	typ  reflect.Type
 }{
 	{"IArticleWire", "one JSONL line in data/*.gz (backend ArticleData)", reflect.TypeOf(ArticleData{})},
-	{"ISearchEntryWire", "one JSONL line in search/ shards (backend SearchEntry)", reflect.TypeOf(SearchEntry{})},
+	{"IMetaWire", "one JSONL line in meta/*.gz (backend MetaEntry)", reflect.TypeOf(MetaEntry{})},
 	{"IFeedWire", "a db.gz feeds{} value (backend Feed)", reflect.TypeOf(Feed{})},
 	{"IDBWire", "db.gz itself (backend DBCore)", reflect.TypeOf(DBCore{})},
 }

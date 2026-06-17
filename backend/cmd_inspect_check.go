@@ -321,94 +321,94 @@ func checkIdxSummary(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 	return issues
 }
 
-// checkSearch verifies the search/ series against db.gz: coverage
-// (srch/srcht) may lag numFinalized (SyncSearch is warn-only in fetch —
+// checkSearch verifies the meta/ series against db.gz: coverage
+// (mp/mt) may lag numFinalizedMeta (SyncMeta is warn-only in fetch —
 // readers keep search disabled until the next run heals) but never
-// overclaim; the latest tail must hold exactly srcht entries; every covered
-// finalized shard must hold idxPackSize entries behind its bloom header,
+// overclaim; the latest tail must hold exactly mt entries; every covered
+// finalized shard must hold metaPackSize entries behind its bloom header,
 // every title's grams must probe positive in that bloom (the no-false-
 // negatives contract the reader's pruning relies on), and the summary must
 // equal the concatenated shard blooms byte-for-byte.
 func checkSearch(fetch keyGetter, core *DBCore) int {
-	nf := numFinalizedIdx(core.TotalArticles)
-	if core.SearchPacks > nf {
-		fmt.Printf("[search] srch=%d but only %d finalized idx packs exist\n", core.SearchPacks, nf)
+	nf := numFinalizedMeta(core.TotalArticles)
+	if core.MetaPacks > nf {
+		fmt.Printf("[meta] mp=%d but only %d finalized meta shards exist\n", core.MetaPacks, nf)
 		return 1
 	}
-	if core.SearchTail < 0 || core.SearchTail > idxPackSize ||
-		core.SearchPacks*idxPackSize+core.SearchTail > core.TotalArticles {
-		fmt.Printf("[search] inconsistent coverage: srch=%d srcht=%d total_art=%d\n",
-			core.SearchPacks, core.SearchTail, core.TotalArticles)
+	if core.MetaTail < 0 || core.MetaTail > metaPackSize ||
+		core.MetaPacks*metaPackSize+core.MetaTail > core.TotalArticles {
+		fmt.Printf("[meta] inconsistent coverage: mp=%d mt=%d total_art=%d\n",
+			core.MetaPacks, core.MetaTail, core.TotalArticles)
 		return 1
 	}
-	if core.SearchPacks == 0 && core.SearchTail == 0 {
-		fmt.Println("[search] no search coverage published (srch=0, srcht=0)")
+	if core.MetaPacks == 0 && core.MetaTail == 0 {
+		fmt.Println("[meta] no meta coverage published (mp=0, mt=0)")
 		return 0
 	}
-	if core.SearchPacks < nf {
-		fmt.Printf("[search] warning: srch=%d lags %d finalized packs (readers keep search disabled; next fetch rebuilds)\n",
-			core.SearchPacks, nf)
+	if core.MetaPacks < nf {
+		fmt.Printf("[meta] warning: mp=%d lags %d finalized shards (readers keep search disabled; next fetch rebuilds)\n",
+			core.MetaPacks, nf)
 	}
 	issues := 0
 
-	latestSearch := latestKey(core, "search")
-	if buf, err := fetch(latestSearch); err != nil {
-		fmt.Printf("[search] %s missing or corrupt: %v\n", latestSearch, err)
+	latestMeta := latestKey(core, "meta")
+	if buf, err := fetch(latestMeta); err != nil {
+		fmt.Printf("[meta] %s missing or corrupt: %v\n", latestMeta, err)
 		issues++
-	} else if entries, err := parseSearchEntries(buf); err != nil {
-		fmt.Printf("[search] %s: %v\n", latestSearch, err)
+	} else if entries, err := parseMetaEntries(buf); err != nil {
+		fmt.Printf("[meta] %s: %v\n", latestMeta, err)
 		issues++
-	} else if len(entries) != core.SearchTail {
-		fmt.Printf("[search] srcht=%d but %s has %d entries\n", core.SearchTail, latestSearch, len(entries))
+	} else if len(entries) != core.MetaTail {
+		fmt.Printf("[meta] mt=%d but %s has %d entries\n", core.MetaTail, latestMeta, len(entries))
 		issues++
 	}
 
-	if core.SearchPacks == 0 {
+	if core.MetaPacks == 0 {
 		if issues == 0 {
-			fmt.Printf("[search] %s holds the %d-entry tail (no finalized shards)\n", latestSearch, core.SearchTail)
+			fmt.Printf("[meta] %s holds the %d-entry tail (no finalized shards)\n", latestMeta, core.MetaTail)
 		}
 		return issues
 	}
 
-	sumKey := searchSummaryKey(core.SearchPacks)
+	sumKey := metaSummaryKey(core.MetaPacks)
 	sum, err := fetch(sumKey)
 	if err != nil {
-		fmt.Printf("[search] %s missing or corrupt: %v\n", sumKey, err)
+		fmt.Printf("[meta] %s missing or corrupt: %v\n", sumKey, err)
 		sum = nil
 		issues++
-	} else if len(sum) != core.SearchPacks*searchBloomBytes {
-		fmt.Printf("[search] %s has %d bytes but srch=%d expects %d\n",
-			sumKey, len(sum), core.SearchPacks, core.SearchPacks*searchBloomBytes)
+	} else if len(sum) != core.MetaPacks*searchBloomBytes {
+		fmt.Printf("[meta] %s has %d bytes but mp=%d expects %d\n",
+			sumKey, len(sum), core.MetaPacks, core.MetaPacks*searchBloomBytes)
 		sum = nil
 		issues++
 	}
 
-	for k := range core.SearchPacks {
-		key := finalizedSearchKey(k)
+	for k := range core.MetaPacks {
+		key := finalizedMetaKey(k)
 		buf, err := fetch(key)
 		if err != nil {
-			fmt.Printf("[search] %s missing or corrupt: %v\n", key, err)
+			fmt.Printf("[meta] %s missing or corrupt: %v\n", key, err)
 			issues++
 			continue
 		}
 		if len(buf) < searchBloomBytes {
-			fmt.Printf("[search] %s has %d bytes, shorter than the bloom header\n", key, len(buf))
+			fmt.Printf("[meta] %s has %d bytes, shorter than the bloom header\n", key, len(buf))
 			issues++
 			continue
 		}
 		bloom := buf[:searchBloomBytes]
 		if sum != nil && !bytes.Equal(sum[k*searchBloomBytes:(k+1)*searchBloomBytes], bloom) {
-			fmt.Printf("[search] shard %d: summary bloom != shard bloom header\n", k)
+			fmt.Printf("[meta] shard %d: summary bloom != shard bloom header\n", k)
 			issues++
 		}
-		entries, err := parseSearchEntries(buf[searchBloomBytes:])
+		entries, err := parseMetaEntries(buf[searchBloomBytes:])
 		if err != nil {
-			fmt.Printf("[search] %s: %v\n", key, err)
+			fmt.Printf("[meta] %s: %v\n", key, err)
 			issues++
 			continue
 		}
-		if len(entries) != idxPackSize {
-			fmt.Printf("[search] %s has %d entries, want %d\n", key, len(entries), idxPackSize)
+		if len(entries) != metaPackSize {
+			fmt.Printf("[meta] %s has %d entries, want %d\n", key, len(entries), metaPackSize)
 			issues++
 			continue
 		}
@@ -421,14 +421,14 @@ func checkSearch(fetch keyGetter, core *DBCore) int {
 			})
 		}
 		if missing > 0 {
-			fmt.Printf("[search] shard %d: %d gram(s) absent from its bloom (reader pruning would miss results)\n", k, missing)
+			fmt.Printf("[meta] shard %d: %d gram(s) absent from its bloom (reader pruning would miss results)\n", k, missing)
 			issues++
 		}
 	}
 
 	if issues == 0 {
-		fmt.Printf("[search] %d shard(s), %s, and the %d-entry tail consistent\n",
-			core.SearchPacks, sumKey, core.SearchTail)
+		fmt.Printf("[meta] %d shard(s), %s, and the %d-entry tail consistent\n",
+			core.MetaPacks, sumKey, core.MetaTail)
 	}
 	return issues
 }

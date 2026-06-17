@@ -12,6 +12,9 @@
 // entries per finalized idx pack (split threshold)
 export const IDX_PACK_SIZE = 50000
 
+// entries per finalized meta shard (the meta/ split stride; a divisor of IDX_PACK_SIZE)
+export const META_PACK_SIZE = 5000
+
 // bytes: the 3 leading uint32 LE idx-header state fields (fetchedAt/packId/packOff bases)
 export const IDX_STATE_SIZE = 12
 
@@ -36,8 +39,8 @@ export const LATEST_KEEP = 2
 // rune length of the sliding windows the search blooms index, per folded word
 export const SEARCH_GRAM = 3
 
-// bytes: fixed-size trigram bloom heading each finalized search shard (and per shard in search/s<N>.gz)
-export const SEARCH_BLOOM_BYTES = 32768
+// bytes: fixed-size trigram bloom heading each finalized meta shard (and per shard in meta/s<N>.gz)
+export const SEARCH_BLOOM_BYTES = 4096
 
 // bloom bits set/tested per gram
 export const SEARCH_BLOOM_K = 4
@@ -47,7 +50,7 @@ export const SEARCH_BLOOM_K = 4
 // — "L" latest generations, "h" idx header summaries, "s" search bloom
 // summaries. sw.ts builds its route regex from this table and enforces
 // kind-per-series in parsePackName, mirroring the store's strict packKeyRe.
-export const PACK_SERIES_KINDS: Record<string, string> = { idx: "Lh", data: "L", search: "Ls" }
+export const PACK_SERIES_KINDS: Record<string, string> = { idx: "Lh", data: "L", meta: "Ls" }
 
 // Wire shape of one JSONL line in data/*.gz (backend ArticleData).
 export interface IArticleWire {
@@ -59,8 +62,8 @@ export interface IArticleWire {
    c: string // Content
 }
 
-// Wire shape of one JSONL line in search/ shards (backend SearchEntry).
-export interface ISearchEntryWire {
+// Wire shape of one JSONL line in meta/*.gz (backend MetaEntry).
+export interface IMetaWire {
    f: number // FeedID
    w: number // When
    t?: string // Title
@@ -95,7 +98,7 @@ export interface IDBWire {
    ingest?: string // Ingest
    gen?: number // Gen
    hdrs?: number // HdrPacks
-   srch?: number // SearchPacks
-   srcht?: number // SearchTail
+   mp?: number // MetaPacks
+   mt?: number // MetaTail
    feeds: Record<number, IFeedWire> | null // Feeds
 }

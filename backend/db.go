@@ -123,19 +123,20 @@ type DBCore struct {
 	// next Commit — readers then fall back to eager idx loading until the
 	// next fetch with a new binary rebuilds the summary.
 	HdrPacks int `json:"hdrs,omitempty"`
-	// SearchPacks is the finalized search-shard coverage: search/<n>.gz exists
-	// for n in [0, SearchPacks) and search/s<SearchPacks>.gz concatenates their
-	// bloom headers. SyncSearch sets it only after every save succeeds and
-	// Commit publishes it (write-once names, same crash argument as Seq /
-	// HdrPacks, same old-binary drop hazard). The reader offers search only
-	// when it equals numFinalizedIdx.
-	SearchPacks int `json:"srch,omitempty"`
-	// SearchTail is the entry count of the published latest search shard
-	// (search/L<Seq>.gz). SyncSearch trusts a read-back tail only when its
-	// count matches, so a stale shard left by a crash or a pre-`gen --bump`
-	// store is rebuilt from data packs instead of extended.
-	SearchTail int           `json:"srcht,omitempty"`
-	Feeds      map[int]*Feed `json:"feeds"`
+	// MetaPacks is the derived meta-shard coverage: meta/<n>.gz exists for n in
+	// [0, MetaPacks) and meta/s<MetaPacks>.gz concatenates their bloom prefixes.
+	// SyncMeta sets it only after every save succeeds and Commit publishes it
+	// (write-once names, same crash argument as Seq / HdrPacks). The reader
+	// offers search only when it equals numFinalizedMeta, and the list reads
+	// meta packs only when MetaPacks+MetaTail fully cover the store (else it
+	// falls back to the data/ source of truth).
+	MetaPacks int `json:"mp,omitempty"`
+	// MetaTail is the entry count of the published latest meta shard
+	// (meta/L<Seq>.gz). SyncMeta trusts a read-back tail only when its count
+	// matches, so a stale shard from a crash or a pre-`gen --bump` store is
+	// rebuilt from data packs instead of extended.
+	MetaTail int           `json:"mt,omitempty"`
+	Feeds    map[int]*Feed `json:"feeds"`
 }
 
 // withDB opens the DB, runs fn, and ensures Close. Use for commands that
@@ -227,15 +228,15 @@ func (o *DB) Close(ctx context.Context) error {
 // BumpGen increments the store generation and resets every derived-series
 // coverage counter, keeping the bump-implies-reset invariant in one place:
 // an in-place rebuild reuses finalized pack names with new bytes, so the
-// published idx header summary and search shards may hold stale content.
-// Zeroed coverage makes the next fetch rebuild them (a zero SearchTail also
-// marks the read-back tail untrusted); readers fall back to eager idx
-// loading and keep search disabled in the gap.
+// published idx header summary and meta shards / bloom summary may hold
+// stale content. Zeroed coverage makes the next fetch rebuild them (a zero
+// MetaTail also marks the read-back tail untrusted); readers fall back to
+// eager idx loading and keep search disabled in the gap.
 func (o *DB) BumpGen() {
 	o.core.Gen++
 	o.core.HdrPacks = 0
-	o.core.SearchPacks = 0
-	o.core.SearchTail = 0
+	o.core.MetaPacks = 0
+	o.core.MetaTail = 0
 }
 
 func (o *DB) Commit(ctx context.Context) error {

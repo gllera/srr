@@ -12,18 +12,19 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-// The search/ pack series: title search shards aligned 1:1 with idx packs.
-// Finalized shard n (search/<n>.gz) covers chron [n*idxPackSize,
-// (n+1)*idxPackSize) as gzip(bloom[searchBloomBytes] ‖ JSONL of SearchEntry);
-// the latest shard (search/L<Seq>.gz) holds the tail with no bloom (readers
-// always scan it); search/s<N>.gz concatenates the N finalized blooms so the
-// reader fetches only shards that can match a query. Design:
-// docs/search-design.md. All writing happens here, post-hoc to PutArticles
-// (SyncSearch); the frontend reader is frontend/src/js/search.ts.
+// The meta/ pack series: derived {f,w,t} projection at 5k stride, consumed by
+// the list (data.ts loadMeta) and search (search.ts). Finalized shard n
+// (meta/<n>.gz) covers chron [n*metaPackSize, (n+1)*metaPackSize) as
+// gzip(bloom[searchBloomBytes] ‖ JSONL of MetaEntry); the latest shard
+// (meta/L<Seq>.gz) holds the tail with no bloom (readers always scan it);
+// meta/s<N>.gz concatenates the N finalized blooms so the reader fetches only
+// shards that can match a query. Design: docs/search-design.md. All writing
+// happens here, post-hoc to PutArticles (SyncMeta); the frontend readers are
+// frontend/src/js/data.ts (list) and frontend/src/js/search.ts (search).
 
-// SearchEntry is the JSONL line of search/ shards. Line position within the
+// MetaEntry is the JSONL line of meta/*.gz shards. Line position within the
 // shard is the chron offset — no chron is stored.
-type SearchEntry struct {
+type MetaEntry struct {
 	FeedID int `json:"f"`
 	// When is the display timestamp: published, falling back to fetched_at
 	// when unparsed — the same fallback the reader's row rendering wants, so
@@ -32,15 +33,15 @@ type SearchEntry struct {
 	Title string `json:"t,omitempty"`
 }
 
-// finalizedSearchKey resolves the key of finalized search shard n.
-func finalizedSearchKey(n int) string {
-	return fmt.Sprintf("search/%d.gz", n)
+// finalizedMetaKey resolves the key of finalized meta shard n.
+func finalizedMetaKey(n int) string {
+	return fmt.Sprintf("meta/%d.gz", n)
 }
 
-// searchSummaryKey resolves the search bloom-summary key covering n
+// metaSummaryKey resolves the meta bloom-summary key covering n
 // finalized shards.
-func searchSummaryKey(n int) string {
-	return fmt.Sprintf("search/s%d.gz", n)
+func metaSummaryKey(n int) string {
+	return fmt.Sprintf("meta/s%d.gz", n)
 }
 
 // foldSearchText is the search folding contract, mirrored byte-for-byte by
@@ -164,14 +165,24 @@ func (o *DB) walkArticles(ctx context.Context, from, to int, fn func(ad *Article
 	return nil
 }
 
-// SyncSearch reconciles the search/ series with the store whenever db.gz's
-// SearchPacks/SearchTail coverage lags TotalArticles: a normal append, a
-// pre-search store's first run after upgrade, a post-`srr gen --bump` reset,
+// numFinalizedMeta is the number of finalized meta shards for an article count;
+// mirrors numFinalizedIdx at the metaPackSize stride and the frontend's
+// numFinalizedMeta (data.ts).
+func numFinalizedMeta(totalArticles int) int {
+	if totalArticles == 0 {
+		return 0
+	}
+	return (totalArticles - 1) / metaPackSize
+}
+
+// SyncMeta reconciles the meta/ series with the store whenever db.gz's
+// MetaPacks/MetaTail coverage lags TotalArticles: a normal append, a
+// pre-meta store's first run after upgrade, a post-`srr gen --bump` reset,
 // or a retry after a failed sync — one self-healing code path for all of
 // them (the SyncIdxSummary philosophy). It extends the previous run's tail
-// (search/L<Seq-1>, trusted only when its entry count matches SearchTail)
+// (meta/L<Seq-1>, trusted only when its entry count matches MetaTail)
 // with the missing chron range, finalizing bloom-headed shards at each
-// idxPackSize boundary, then writes the new latest shard and, when shards
+// metaPackSize boundary, then writes the new latest shard and, when shards
 // were finalized, rebuilds the bloom summary from cheap streaming header
 // reads. The missing range is normally exactly `written` — the slice
 // PutArticles just returned — so the common cycle builds entries from
@@ -179,55 +190,56 @@ func (o *DB) walkArticles(ctx context.Context, from, to int, fn func(ad *Article
 // back from the idx+data packs. The coverage fields are set only after every
 // save succeeds and the caller's Commit publishes them — so, like
 // Seq/HdrPacks, no reader can learn a name before its content is durable.
-func (o *DB) SyncSearch(ctx context.Context, written []ArticleData) error {
+// SyncMeta feeds BOTH the list (data.ts loadMeta) and search (search.ts).
+func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 	c := &o.core
 	if c.TotalArticles == 0 {
 		return nil
 	}
-	nf := numFinalizedIdx(c.TotalArticles)
-	if c.SearchPacks == nf && c.SearchPacks*idxPackSize+c.SearchTail == c.TotalArticles {
+	nf := numFinalizedMeta(c.TotalArticles)
+	if c.MetaPacks == nf && c.MetaPacks*metaPackSize+c.MetaTail == c.TotalArticles {
 		return nil
 	}
-	if c.SearchPacks < 0 || c.SearchPacks > nf || c.SearchTail < 0 || c.SearchTail > idxPackSize ||
-		c.SearchPacks*idxPackSize+c.SearchTail > c.TotalArticles {
-		slog.Warn("inconsistent search coverage, rebuilding from scratch",
-			"srch", c.SearchPacks, "srcht", c.SearchTail, "total_art", c.TotalArticles)
-		c.SearchPacks, c.SearchTail = 0, 0
+	if c.MetaPacks < 0 || c.MetaPacks > nf || c.MetaTail < 0 || c.MetaTail > metaPackSize ||
+		c.MetaPacks*metaPackSize+c.MetaTail > c.TotalArticles {
+		slog.Warn("inconsistent meta coverage, rebuilding from scratch",
+			"mp", c.MetaPacks, "mt", c.MetaTail, "total_art", c.TotalArticles)
+		c.MetaPacks, c.MetaTail = 0, 0
 	}
 
-	start := c.SearchPacks * idxPackSize // chron of the tail's first entry
-	var rawLines [][]byte                // jsonEncode outputs, newline included
+	start := c.MetaPacks * metaPackSize // chron of the tail's first entry
+	var rawLines [][]byte               // jsonEncode outputs, newline included
 
 	// Read back the previous generation's tail. The last successful sync
-	// wrote search/L<Seq-1> in the common paths (this run's PutArticles
+	// wrote meta/L<Seq-1> in the common paths (this run's PutArticles
 	// bumped Seq past it, or a previous run's sync failed without articles
 	// since); after consecutive failed syncs the name is gone and the tail
 	// rebuilds from data packs instead — heavier, still correct.
-	if c.SearchTail > 0 {
-		prevKey := genKey("search", c.Seq-1)
-		if lines, err := o.readSearchLines(ctx, prevKey); err != nil {
-			slog.Warn("search tail read-back failed, rebuilding tail", "key", prevKey, "error", err)
-		} else if len(lines) != c.SearchTail {
-			slog.Warn("search tail read-back mismatch, rebuilding tail",
-				"key", prevKey, "entries", len(lines), "srcht", c.SearchTail)
+	if c.MetaTail > 0 {
+		prevKey := genKey("meta", c.Seq-1)
+		if lines, err := o.readMetaLines(ctx, prevKey); err != nil {
+			slog.Warn("meta tail read-back failed, rebuilding tail", "key", prevKey, "error", err)
+		} else if len(lines) != c.MetaTail {
+			slog.Warn("meta tail read-back mismatch, rebuilding tail",
+				"key", prevKey, "entries", len(lines), "mt", c.MetaTail)
 		} else {
 			rawLines = lines
 		}
 	}
 
 	add := func(ad *ArticleData) error {
-		if len(rawLines) == idxPackSize {
-			if err := o.saveSearchShard(ctx, start/idxPackSize, rawLines); err != nil {
+		if len(rawLines) == metaPackSize {
+			if err := o.saveMetaShard(ctx, start/metaPackSize, rawLines); err != nil {
 				return err
 			}
 			rawLines = rawLines[:0]
-			start += idxPackSize
+			start += metaPackSize
 		}
 		when := ad.Published
 		if when == 0 {
 			when = ad.FetchedAt
 		}
-		line, err := jsonEncode(&SearchEntry{FeedID: ad.FeedID, When: when, Title: ad.Title})
+		line, err := jsonEncode(&MetaEntry{FeedID: ad.FeedID, When: when, Title: ad.Title})
 		if err != nil {
 			return err
 		}
@@ -255,34 +267,34 @@ func (o *DB) SyncSearch(ctx context.Context, written []ArticleData) error {
 			return err
 		}
 	}
-	if err := o.savePack(ctx, genKey("search", c.Seq), latest); err != nil {
+	if err := o.savePack(ctx, genKey("meta", c.Seq), latest); err != nil {
 		return err
 	}
 
-	if c.SearchPacks != nf {
+	if c.MetaPacks != nf {
 		if err := o.saveSummary(ctx, nf, func(k int) ([]byte, error) {
-			return o.readPackHeader(ctx, finalizedSearchKey(k), searchBloomBytes)
-		}, searchSummaryKey(nf)); err != nil {
+			return o.readPackHeader(ctx, finalizedMetaKey(k), searchBloomBytes)
+		}, metaSummaryKey(nf)); err != nil {
 			return err
 		}
 	}
 
-	c.SearchPacks, c.SearchTail = nf, len(rawLines)
+	c.MetaPacks, c.MetaTail = nf, len(rawLines)
 	return nil
 }
 
-// parseSearchEntries decodes a shard's JSONL body (bloom already stripped)
-// into SearchEntry values. The wire format's one owner is this file's
-// SearchEntry struct: writers jsonEncode it and every decode (here and
-// saveSearchShard's bloom pass) unmarshals through it. Used by `srr
+// parseMetaEntries decodes a shard's JSONL body (bloom already stripped)
+// into MetaEntry values. The wire format's one owner is this file's
+// MetaEntry struct: writers jsonEncode it and every decode (here and
+// saveMetaShard's bloom pass) unmarshals through it. Used by `srr
 // inspect`'s checkSearch and the tests.
-func parseSearchEntries(buf []byte) ([]SearchEntry, error) {
-	var out []SearchEntry
+func parseMetaEntries(buf []byte) ([]MetaEntry, error) {
+	var out []MetaEntry
 	for i, line := range bytes.Split(buf, []byte("\n")) {
 		if len(line) == 0 {
 			continue
 		}
-		var e SearchEntry
+		var e MetaEntry
 		if err := json.Unmarshal(line, &e); err != nil {
 			return nil, fmt.Errorf("line %d: %w", i, err)
 		}
@@ -291,10 +303,10 @@ func parseSearchEntries(buf []byte) ([]SearchEntry, error) {
 	return out, nil
 }
 
-// readSearchLines fetches a search shard and splits it into JSONL lines
+// readMetaLines fetches a meta shard and splits it into JSONL lines
 // (terminators kept, so they re-emit verbatim). Missing key is an error —
 // callers decide whether that warrants a rebuild or a failure.
-func (o *DB) readSearchLines(ctx context.Context, key string) ([][]byte, error) {
+func (o *DB) readMetaLines(ctx context.Context, key string) ([][]byte, error) {
 	raw, err := o.readGz(ctx, key)
 	if err != nil {
 		return nil, err
@@ -308,13 +320,13 @@ func (o *DB) readSearchLines(ctx context.Context, key string) ([][]byte, error) 
 	return lines, nil
 }
 
-// saveSearchShard writes finalized shard n: the bloom over every gram of
+// saveMetaShard writes finalized shard n: the bloom over every gram of
 // every folded title, then the JSONL lines. Titles are decoded here, once
 // per finalized shard, so the sync loop never carries a parallel array.
-func (o *DB) saveSearchShard(ctx context.Context, n int, rawLines [][]byte) error {
+func (o *DB) saveMetaShard(ctx context.Context, n int, rawLines [][]byte) error {
 	bloom := make([]byte, searchBloomBytes)
 	for i, line := range rawLines {
-		var e SearchEntry
+		var e MetaEntry
 		if err := json.Unmarshal(line, &e); err != nil {
 			return fmt.Errorf("shard %d line %d: %w", n, i, err)
 		}
@@ -329,14 +341,14 @@ func (o *DB) saveSearchShard(ctx context.Context, n int, rawLines [][]byte) erro
 			return err
 		}
 	}
-	return o.savePackFinal(ctx, finalizedSearchKey(n), p)
+	return o.savePackFinal(ctx, finalizedMetaKey(n), p)
 }
 
-// GCSearchSummaries deletes superseded search bloom summaries
-// (search/s<g>.gz) with the same grace window and stranded-name caveat as
+// GCMetaSummaries deletes superseded meta bloom summaries
+// (meta/s<g>.gz) with the same grace window and stranded-name caveat as
 // GCSummaries.
-func (o *DB) GCSearchSummaries(ctx context.Context, keep int) error {
-	return o.gcSweep(ctx, o.core.SearchPacks-keep-1, "search summary", func(g int) []string {
-		return []string{searchSummaryKey(g)}
+func (o *DB) GCMetaSummaries(ctx context.Context, keep int) error {
+	return o.gcSweep(ctx, o.core.MetaPacks-keep-1, "meta summary", func(g int) []string {
+		return []string{metaSummaryKey(g)}
 	})
 }

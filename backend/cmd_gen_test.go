@@ -87,14 +87,14 @@ func TestGenBumpResetsHdrPacks(t *testing.T) {
 	}
 }
 
-// --bump resets the search coverage too: rebuilt packs invalidate the shards'
+// --bump resets the meta coverage too: rebuilt packs invalidate the shards'
 // copied titles and the latest tail, so the next fetch must rebuild them.
-func TestGenBumpResetsSearchCoverage(t *testing.T) {
+func TestGenBumpResetsMetaCoverage(t *testing.T) {
 	setupEmptyDB(t)
 
 	db := reopenDB(t)
-	db.core.SearchPacks = 3
-	db.core.SearchTail = 7
+	db.core.MetaPacks = 3
+	db.core.MetaTail = 7
 	if err := db.Commit(ctx); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
@@ -104,8 +104,8 @@ func TestGenBumpResetsSearchCoverage(t *testing.T) {
 		t.Fatalf("bump: %v", err)
 	}
 	db = reopenDB(t)
-	if db.core.SearchPacks != 0 || db.core.SearchTail != 0 {
-		t.Errorf("search coverage = (%d, %d), want (0, 0) after bump", db.core.SearchPacks, db.core.SearchTail)
+	if db.core.MetaPacks != 0 || db.core.MetaTail != 0 {
+		t.Errorf("meta coverage = (%d, %d), want (0, 0) after bump", db.core.MetaPacks, db.core.MetaTail)
 	}
 }
 
