@@ -65,7 +65,7 @@ const SCOPE = new URL(sw.registration.scope).pathname
 const RE_ASSET = /\/assets\/[0-9a-f]{2}\/[0-9a-f]{16}\.\w+$/i
 // The one pack-name grammar (parsed by parsePackName below), built from the
 // generated PACK_SERIES_KINDS table: write-once names only — finalized numeric
-// stems, L<seq> latest generations, and the idx/h<N> / search/s<N> summaries
+// stems, L<seq> latest generations, and the idx/h<N> / meta/s<N> summaries
 // (each published before the db.gz that names it). The regex captures any kind
 // letter on any series; parsePackName then rejects kinds another series owns.
 const PACK_KINDS = [...new Set(Object.values(PACK_SERIES_KINDS).join(""))].join("") // "Lhs"
