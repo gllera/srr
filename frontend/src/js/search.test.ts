@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
-import { IDX_PACK_SIZE, SEARCH_BLOOM_BYTES, SEARCH_BLOOM_K, SEARCH_GRAM } from "./format.gen"
+import { META_PACK_SIZE, SEARCH_BLOOM_BYTES, SEARCH_BLOOM_K, SEARCH_GRAM } from "./format.gen"
 
 // search.ts holds lazy fetch slots (summary/latest/shard LRU) as module
 // state, so every test gets a fresh instance via resetModules + dynamic
@@ -10,9 +10,23 @@ const mockData = vi.hoisted(() => {
       db: {} as Record<string, unknown>,
       fetchPackBytes: vi.fn<(path: string, isLatest: boolean) => Promise<ArrayBuffer>>(),
       // Same formula as the real data.ts export, driven by the mock db.
-      numFinalizedIdx: () => {
+      numFinalizedMeta: () => {
          const total = (data.db.total_art as number) ?? 0
-         return total > 0 ? Math.floor((total - 1) / 50000) : 0
+         return total > 0 ? Math.floor((total - 1) / META_PACK_SIZE) : 0
+      },
+      metaReady: () => {
+         const total = (data.db.total_art as number) ?? 0
+         if (total === 0) return false
+         const mp = (data.db.mp as number) ?? 0
+         return mp === data.numFinalizedMeta() && mp * META_PACK_SIZE + ((data.db.mt as number) ?? 0) === total
+      },
+      parseJsonl: <T>(buf: ArrayBuffer): T[] => {
+         const text = new TextDecoder().decode(buf)
+         const out: T[] = []
+         for (const line of text.split("\n")) {
+            if (line) out.push(JSON.parse(line) as T)
+         }
+         return out
       },
    }
    return data
@@ -106,12 +120,12 @@ describe("fold", () => {
 describe("bloomBits", () => {
    it("matches the backend's probe vectors (cross-language parity pin)", () => {
       // The same literals are asserted against the Go bloomBits in
-      // backend/db_search_test.go TestBloomBitsVectors.
-      expect(search.bloomBits("abc")).toEqual([87883, 63844, 39805, 15766])
-      expect(search.bloomBits("ukr")).toEqual([66889, 37986, 9083, 242324])
-      expect(search.bloomBits("日本語")).toEqual([61319, 250428, 177393, 104358])
-      expect(search.bloomBits("niñ")).toEqual([108032, 123835, 139638, 155441])
-      expect(search.bloomBits("42a")).toEqual([230950, 126783, 22616, 180593])
+      // backend/db_meta_test.go TestBloomBitsVectors.
+      expect(search.bloomBits("abc")).toEqual([22347, 31076, 7037, 15766])
+      expect(search.bloomBits("ukr")).toEqual([1353, 5218, 9083, 12948])
+      expect(search.bloomBits("日本語")).toEqual([28551, 21052, 13553, 6054])
+      expect(search.bloomBits("niñ")).toEqual([9728, 25531, 8566, 24369])
+      expect(search.bloomBits("42a")).toEqual([1574, 28479, 22616, 16753])
    })
 
    it("derives SEARCH_BLOOM_K deterministic in-range indices", () => {
@@ -128,19 +142,19 @@ describe("bloomBits", () => {
 })
 
 describe("available", () => {
-   it("gates on srch == numFinalized with the srcht small-store leg", () => {
+   it("gates on metaReady() (mp + mt fully cover the store)", () => {
       mockData.db = { total_art: 0 }
       expect(search.available()).toBe(false)
-      // Small store (no finalized packs), search-aware backend.
-      mockData.db = { total_art: 10, srcht: 10 }
+      // Small store (no finalized shards), meta-aware backend: mp=0, mt=total_art.
+      mockData.db = { total_art: 10, mp: 0, mt: 10 }
       expect(search.available()).toBe(true)
-      // Small store, pre-search backend: both fields absent.
+      // Small store, pre-meta backend: both fields absent.
       mockData.db = { total_art: 10 }
       expect(search.available()).toBe(false)
       // Finalized coverage complete / lagging.
-      mockData.db = { total_art: IDX_PACK_SIZE + 1, srch: 1, srcht: 1 }
+      mockData.db = { total_art: META_PACK_SIZE + 1, mp: 1, mt: 1 }
       expect(search.available()).toBe(true)
-      mockData.db = { total_art: 2 * IDX_PACK_SIZE + 1, srch: 1, srcht: 1 }
+      mockData.db = { total_art: 2 * META_PACK_SIZE + 1, mp: 1, mt: 1 }
       expect(search.available()).toBe(false)
    })
 })
@@ -160,24 +174,24 @@ describe("shortQuery", () => {
 describe("search", () => {
    // Two finalized shards + latest tail. Shards hold 3 entries each — the
    // reader never validates shard length, chron math comes from
-   // IDX_PACK_SIZE bases alone.
+   // META_PACK_SIZE bases alone.
    const shard0 = ["Alpha ancient", "Café Niño", "unrelated thing"]
    const shard1 = ["Alpha middle", "Boring row", undefined]
    const latest = ["Alpha latest", "Final entry"]
 
    beforeEach(() => {
-      mockData.db = { total_art: 2 * IDX_PACK_SIZE + latest.length, seq: 7, srch: 2, srcht: latest.length }
-      store["search/0.gz"] = concat(bloomOf(shard0), entryBytes(shard0))
-      store["search/1.gz"] = concat(bloomOf(shard1), entryBytes(shard1))
-      store["search/L7.gz"] = entryBytes(latest)
-      store["search/s2.gz"] = concat(bloomOf(shard0), bloomOf(shard1))
+      mockData.db = { total_art: 2 * META_PACK_SIZE + latest.length, seq: 7, mp: 2, mt: latest.length }
+      store["meta/0.gz"] = concat(bloomOf(shard0), entryBytes(shard0))
+      store["meta/1.gz"] = concat(bloomOf(shard1), entryBytes(shard1))
+      store["meta/L7.gz"] = entryBytes(latest)
+      store["meta/s2.gz"] = concat(bloomOf(shard0), bloomOf(shard1))
    })
 
    it("yields newest-first batches with shard-based chron addressing", async () => {
       const batches = await collect(search.search("alpha"))
       expect(batches.map((b) => b.map((h) => h.chron))).toEqual([
-         [2 * IDX_PACK_SIZE], // latest tail
-         [IDX_PACK_SIZE], // shard 1
+         [2 * META_PACK_SIZE], // latest tail
+         [META_PACK_SIZE], // shard 1
          [0], // shard 0
       ])
       expect(batches[0][0]).toMatchObject({ t: "Alpha latest", f: 1, w: 1000 })
@@ -197,8 +211,8 @@ describe("search", () => {
       const batches = await collect(search.search("zzzqqq"))
       expect(batches).toEqual([])
       const fetched = mockData.fetchPackBytes.mock.calls.map((c) => c[0])
-      expect(fetched).not.toContain("search/0.gz")
-      expect(fetched).not.toContain("search/1.gz")
+      expect(fetched).not.toContain("meta/0.gz")
+      expect(fetched).not.toContain("meta/1.gz")
    })
 
    it("scans only the latest tail for short queries", async () => {
@@ -206,20 +220,20 @@ describe("search", () => {
       const batches = await collect(search.search("al"))
       expect(batches.flat().map((h) => h.t)).toEqual(["Final entry", "Alpha latest"])
       const fetched = mockData.fetchPackBytes.mock.calls.map((c) => c[0])
-      expect(fetched).toEqual(["search/L7.gz"])
+      expect(fetched).toEqual(["meta/L7.gz"])
    })
 
    it("degrades to finalized shards when the latest tail is missing", async () => {
-      delete store["search/L7.gz"]
+      delete store["meta/L7.gz"]
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
       const batches = await collect(search.search("alpha"))
-      expect(batches.map((b) => b.map((h) => h.chron))).toEqual([[IDX_PACK_SIZE], [0]])
+      expect(batches.map((b) => b.map((h) => h.chron))).toEqual([[META_PACK_SIZE], [0]])
       expect(warn).toHaveBeenCalled()
       warn.mockRestore()
    })
 
    it("rejects when the summary is missing (caller surfaces it)", async () => {
-      delete store["search/s2.gz"]
+      delete store["meta/s2.gz"]
       await expect(collect(search.search("alpha"))).rejects.toThrow()
    })
 
@@ -227,23 +241,23 @@ describe("search", () => {
       await collect(search.search("alpha"))
       await collect(search.search("alpha"))
       const fetched = mockData.fetchPackBytes.mock.calls.map((c) => c[0])
-      expect(fetched.filter((p) => p === "search/s2.gz")).toHaveLength(1)
-      expect(fetched.filter((p) => p === "search/0.gz")).toHaveLength(1)
+      expect(fetched.filter((p) => p === "meta/s2.gz")).toHaveLength(1)
+      expect(fetched.filter((p) => p === "meta/0.gz")).toHaveLength(1)
    })
 
    it("treats untitled entries as unmatchable", async () => {
       const batches = await collect(search.search("boring"))
-      expect(batches.flat().map((h) => h.chron)).toEqual([IDX_PACK_SIZE + 1])
+      expect(batches.flat().map((h) => h.chron)).toEqual([META_PACK_SIZE + 1])
    })
 
    it("stops at limit, counting only hits accept keeps", async () => {
       // "alpha" matches one title in each shard; limit 2 never reaches shard 0.
       const capped = await collect(search.search("alpha", 2))
-      expect(capped.flat().map((h) => h.chron)).toEqual([2 * IDX_PACK_SIZE, IDX_PACK_SIZE])
+      expect(capped.flat().map((h) => h.chron)).toEqual([2 * META_PACK_SIZE, META_PACK_SIZE])
       // A rejected hit doesn't count against the limit: with the latest-tail
       // match filtered out, limit 1 still reaches shard 1.
-      const accept = (_s: number, chron: number) => chron < 2 * IDX_PACK_SIZE
+      const accept = (_s: number, chron: number) => chron < 2 * META_PACK_SIZE
       const filtered = await collect(search.search("alpha", 1, accept))
-      expect(filtered.flat().map((h) => h.chron)).toEqual([IDX_PACK_SIZE])
+      expect(filtered.flat().map((h) => h.chron)).toEqual([META_PACK_SIZE])
    })
 })

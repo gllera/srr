@@ -28,9 +28,9 @@ import * as nav from "./nav"
 // feed walk, NO fetch and NO rebuild (see show()). Only a filter change or an
 // article outside the window triggers a bounded rebuild (≤ 2 batches).
 
-// Rows fetched per batch in either direction. One batch spans ~1 data pack
-// (titles already ride in the data packs the LRU holds), so this is a
-// paint-budget knob, not a fetch-count one.
+// Rows fetched per batch in either direction. One batch spans roughly one
+// meta shard (5,000-card shards held in the LRU, falling back to data/ when
+// meta lags), so this is a paint-budget knob, not a fetch-count one.
 const BATCH = 30
 
 // Start fetching the next batch this far beyond the fold (a scroll runway so
@@ -106,7 +106,7 @@ function el(tag: string, className: string): HTMLElement {
 // One headline row: a source-colored rail + ("source · age" eyebrow over the
 // title). Unread reads as full-ink weight + saturated rail, read as dimmed.
 // Display fallbacks ("(untitled)", the "[DELETED]" feed tombstone) live here.
-function rowEl(chron: number, art: IArticle, seen: Record<string, number>): HTMLElement {
+function rowEl(chron: number, art: import("./format.gen").IMetaWire, seen: Record<string, number>): HTMLElement {
    const a = document.createElement("a")
    a.className = "srr-row"
    a.href = "#" + chron + nav.tokensSuffix()
@@ -117,7 +117,7 @@ function rowEl(chron: number, art: IArticle, seen: Record<string, number>): HTML
    a.dataset.src = String(srcColorIndex(art.f))
    // The article's own timestamp — relabelDividers buckets rows into day strata
    // by comparing the dayLabel of consecutive rows.
-   a.dataset.ts = String(art.p || art.a)
+   a.dataset.ts = String(art.w)
    if (nav.isRowUnread(chron, art.f, seen)) a.classList.add("srr-row-unread")
    // The article currently in the reader (the one you were just reading) is
    // highlighted wherever it appears, so returning to the list lands you on it.
@@ -132,7 +132,7 @@ function rowEl(chron: number, art: IArticle, seen: Record<string, number>): HTML
    const source = el("span", "srr-row-source")
    source.textContent = data.feedTitle(art.f)
    const age = el("time", "srr-row-age")
-   age.textContent = timeAgo(art.p || art.a)
+   age.textContent = timeAgo(art.w)
    head.append(source, age)
    const title = el("div", "srr-row-title")
    title.textContent = art.t || "(untitled)"
@@ -305,7 +305,7 @@ export async function render(center = false): Promise<void> {
 
    const chronsDesc = newer.chrons.slice().reverse().concat(older.chrons) // newest-first
    const seen = nav.getSeenMap()
-   const arts = await Promise.all(chronsDesc.map((c) => data.loadArticle(c)))
+   const arts = await Promise.all(chronsDesc.map((c) => data.loadMeta(c)))
    if (my !== tok) return
 
    rowsEl = el("div", "srr-list-rows")
@@ -414,7 +414,7 @@ async function fetchOlder(my: object): Promise<void> {
       oldest = chrons[chrons.length - 1]
       if (exhausted || oldest === 0) exhaustedBottom = true
       const seen = nav.getSeenMap()
-      const arts = await Promise.all(chrons.map((c) => data.loadArticle(c)))
+      const arts = await Promise.all(chrons.map((c) => data.loadMeta(c)))
       if (my !== tok) return
       const frag = document.createDocumentFragment()
       chrons.forEach((c, k) => frag.appendChild(rowEl(c, arts[k], seen)))
@@ -443,7 +443,7 @@ async function fetchNewer(my: object): Promise<void> {
       newest = chrons[chrons.length - 1]
       if (exhausted || newest === data.db.total_art - 1) exhaustedTop = true
       const seen = nav.getSeenMap()
-      const arts = await Promise.all(chrons.map((c) => data.loadArticle(c)))
+      const arts = await Promise.all(chrons.map((c) => data.loadMeta(c)))
       if (my !== tok) return
       const frag = document.createDocumentFragment()
       // chrons is ascending; prepend newest-first so the block reads top-down.
