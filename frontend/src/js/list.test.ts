@@ -72,6 +72,7 @@ const nav = vi.hoisted(() => {
       // resume / oldest position with no live reader article.
       _setListAnchor: (a: number) => (anchor = a),
       isSearchFilter: vi.fn(() => filter.search),
+      searchMore: vi.fn(async () => ({ hits: [] as { chron: number; f: number; w: number; t: string }[], done: true })),
       searchQuery: vi.fn(() => searchTerm),
       isUnreadOnly: vi.fn(() => unreadOnly),
       _setUnreadOnly: (v: boolean) => (unreadOnly = v),
@@ -165,6 +166,9 @@ describe("list", () => {
       nav._setSaved([])
       nav._setPos(-1)
       nav._setAnchor(-1)
+      // Restore the default (empty) search stream so a per-test mockImplementation
+      // can't leak into the next test.
+      nav.searchMore.mockImplementation(async () => ({ hits: [], done: true }))
       vi.resetModules()
       list = await import("./list")
       list.setup(container, (chron) => opened.push(chron))
@@ -231,6 +235,35 @@ describe("list", () => {
          const a = data._arts.get(chron)!
          return { f: a.f, w: a.p || a.a, t: a.t }
       })
+   })
+
+   it("streams search matches into the list as they are found", async () => {
+      // 3 matches, newest-first 9,5,1; one per searchMore batch.
+      const batches = [
+         [{ chron: 9, f: 1, w: 1700000009, t: "alpha nine" }],
+         [{ chron: 5, f: 1, w: 1700000005, t: "alpha five" }],
+         [{ chron: 1, f: 1, w: 1700000001, t: "alpha one" }],
+      ]
+      let i = 0
+      nav.filter.search = true // isSearchFilter() reads filter.search
+      nav.searchMore.mockImplementation(async () => {
+         if (i >= batches.length) return { hits: [], done: true }
+         const hits = batches[i++]
+         return { hits, done: i >= batches.length }
+      })
+      data.db.total_art = 10
+
+      await list.render()
+      const rows = $rows()
+      expect(rows.map((r) => r.querySelector(".srr-row-title")!.textContent)).toEqual([
+         "alpha nine",
+         "alpha five",
+         "alpha one",
+      ])
+      // Search rows are born complete — no skeletons.
+      expect(rows.some((r) => r.classList.contains("srr-row-skeleton"))).toBe(false)
+      // OLDEST terminus once the stream is done.
+      expect(container.querySelector(".srr-wire-end")).not.toBeNull()
    })
 
    it("relabelDividers skips skeleton rows (no data-ts)", () => {
