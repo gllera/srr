@@ -33,8 +33,8 @@
    --z-sticky: 1; /* list day dividers, reader spine */
    --z-searchbar: 5; /* pinned search bar */
    --z-toolbar: 6; /* bottom toolbar + its upward-opening menus */
-   --z-popup: 1000; /* error popup / imgproxy backdrop */
-   --z-popup-top: 1001; /* imgproxy card above its own backdrop */
+   --z-popup: 1000; /* error popup / imgproxy backdrop + card */
+   --z-popup-top: 1001; /* topmost popup layer (popup accent bar) */
 
    /* Spacing scale — defined for re-theming. Existing rules use rem literals and
       are intentionally NOT retrofitted (a sweeping diff with no visual payoff);
