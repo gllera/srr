@@ -121,11 +121,11 @@ describe("bloomBits", () => {
    it("matches the backend's probe vectors (cross-language parity pin)", () => {
       // The same literals are asserted against the Go bloomBits in
       // backend/db_meta_test.go TestBloomBitsVectors.
-      expect(search.bloomBits("abc")).toEqual([22347, 31076, 7037, 15766])
-      expect(search.bloomBits("ukr")).toEqual([1353, 5218, 9083, 12948])
-      expect(search.bloomBits("日本語")).toEqual([28551, 21052, 13553, 6054])
-      expect(search.bloomBits("niñ")).toEqual([9728, 25531, 8566, 24369])
-      expect(search.bloomBits("42a")).toEqual([1574, 28479, 22616, 16753])
+      expect(search.bloomBits("abc")).toEqual([22347, 31076, 7037, 15766, 24495, 456, 9185])
+      expect(search.bloomBits("ukr")).toEqual([1353, 5218, 9083, 12948, 16813, 20678, 24543])
+      expect(search.bloomBits("日本語")).toEqual([28551, 21052, 13553, 6054, 31323, 23824, 16325])
+      expect(search.bloomBits("niñ")).toEqual([9728, 25531, 8566, 24369, 7404, 23207, 6242])
+      expect(search.bloomBits("42a")).toEqual([1574, 28479, 22616, 16753, 10890, 5027, 31932])
    })
 
    it("derives SEARCH_BLOOM_K deterministic in-range indices", () => {
