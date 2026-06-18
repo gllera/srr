@@ -201,6 +201,23 @@ describe("list", () => {
       expect(document.querySelectorAll(".srr-day-divider").length).toBe(0)
    })
 
+   it("builds a skeleton row when no card is given, then fills it", () => {
+      const row = list.rowEl(3, null, {})
+      expect(row.classList.contains("srr-row-skeleton")).toBe(true)
+      expect(row.dataset.chron).toBe("3")
+      expect(row.getAttribute("href")).toContain("#3")
+      // No content yet, and no data-ts (dividers must skip it).
+      expect(row.querySelector(".srr-row-title")!.textContent).toBe("")
+      expect(row.dataset.ts).toBeUndefined()
+
+      list.fillRow(row, { f: 1, w: 1700000003, t: "title 3" }, {})
+      expect(row.classList.contains("srr-row-skeleton")).toBe(false)
+      expect(row.dataset.ts).toBe("1700000003")
+      expect(row.dataset.feed).toBe("1")
+      expect(row.querySelector(".srr-row-title")!.textContent).toBe("title 3")
+      expect(row.querySelector(".srr-row-source")!.textContent).toBe("Feed1")
+   })
+
    it("steps the keyboard cursor across a day boundary, skipping the divider", async () => {
       setIndex(6)
       nav._setAnchor(3) // start on chron 3 (a D1 row); chron 4 is D2, across a divider

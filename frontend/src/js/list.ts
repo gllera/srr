@@ -110,19 +110,20 @@ function el(tag: string, className: string): HTMLElement {
 // One headline row: a source-colored rail + ("source · age" eyebrow over the
 // title). Unread reads as full-ink weight + saturated rail, read as dimmed.
 // Display fallbacks ("(untitled)", the "[DELETED]" feed tombstone) live here.
-function rowEl(chron: number, art: import("./format.gen").IMetaWire, seen: Record<string, number>): HTMLElement {
+// One headline row. With a card it is born complete (search hits, paging); with
+// `art === null` it is a height-reserved SKELETON that fillRow() later populates
+// in place (the feed/[ALL]/saved progressive path). Chron-derived bits (href,
+// saved star, current highlight) are set up front; feed-derived bits (source
+// color/name, age, title, unread weight, data-ts) arrive with the card.
+export function rowEl(
+   chron: number,
+   art: import("./format.gen").IMetaWire | null,
+   seen: Record<string, number>,
+): HTMLElement {
    const a = document.createElement("a")
    a.className = "srr-row"
    a.href = "#" + chron + nav.tokensSuffix()
    a.dataset.chron = String(chron)
-   a.dataset.feed = String(art.f)
-   // Stable per-source color slot (see styles.css [data-src]): the source-colored
-   // left rail + eyebrow let the feed be triaged by origin.
-   a.dataset.src = String(srcColorIndex(art.f))
-   // The article's own timestamp — relabelDividers buckets rows into day strata
-   // by comparing the dayLabel of consecutive rows.
-   a.dataset.ts = String(art.w)
-   if (nav.isRowUnread(chron, art.f, seen)) a.classList.add("srr-row-unread")
    // The article currently in the reader (the one you were just reading) is
    // highlighted wherever it appears, so returning to the list lands you on it.
    if (chron === nav.currentChron()) a.classList.add("srr-row-current")
@@ -134,12 +135,9 @@ function rowEl(chron: number, art: import("./format.gen").IMetaWire, seen: Recor
    // follows beneath.
    const head = el("div", "srr-row-head")
    const source = el("span", "srr-row-source")
-   source.textContent = data.feedTitle(art.f)
    const age = el("time", "srr-row-age")
-   age.textContent = timeAgo(art.w)
    head.append(source, age)
    const title = el("div", "srr-row-title")
-   title.textContent = art.t || "(untitled)"
    body.append(head, title)
    const star = el("span", "srr-row-star")
    star.setAttribute("role", "button")
@@ -147,7 +145,27 @@ function rowEl(chron: number, art: import("./format.gen").IMetaWire, seen: Recor
    star.setAttribute("aria-pressed", String(saved))
    star.innerHTML = STAR_SVG
    a.append(body, star)
+   if (art) fillRow(a, art, seen)
+   else a.classList.add("srr-row-skeleton")
    return a
+}
+
+// Populate a skeleton row's feed-derived content in place once its meta card
+// lands. Idempotent: also used as rowEl's content path when a card is present.
+export function fillRow(a: HTMLElement, art: import("./format.gen").IMetaWire, seen: Record<string, number>): void {
+   const chron = Number(a.dataset.chron)
+   // Stable per-source color slot (see styles.css [data-src]): the source-colored
+   // left rail + eyebrow let the feed be triaged by origin.
+   a.dataset.feed = String(art.f)
+   a.dataset.src = String(srcColorIndex(art.f))
+   // The article's own timestamp — relabelDividers buckets rows into day strata
+   // by comparing the dayLabel of consecutive rows.
+   a.dataset.ts = String(art.w)
+   a.classList.toggle("srr-row-unread", nav.isRowUnread(chron, art.f, seen))
+   a.querySelector(".srr-row-source")!.textContent = data.feedTitle(art.f)
+   a.querySelector(".srr-row-age")!.textContent = timeAgo(art.w)
+   a.querySelector(".srr-row-title")!.textContent = art.t || "(untitled)"
+   a.classList.remove("srr-row-skeleton")
 }
 
 // Pin each row's REAL height as its content-visibility intrinsic size. Rows are
