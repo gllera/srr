@@ -5,6 +5,13 @@
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover" />
       <meta name="robots" content="noindex" />
+      <!-- Dev-serve fallback: guarantees SRR_CDN_URL is defined before the module
+           bundle evaluates, regardless of how parcel serve orders shared bundles.
+           A production/single-entry build's injection overwrites this with the
+           resolved value (e.g. /packs/) since it runs at the bundle entry. -->
+      <script>
+         globalThis.SRR_CDN_URL ||= "http://localhost:3000"
+      </script>
       <link rel="stylesheet" href="styles.css" />
       <base target="_blank" />
    </head>
@@ -134,7 +141,8 @@
       </main>
       <!-- srr:skeleton:end -->
       <div id="srr-design-panel" aria-label="Design harness controls"></div>
-      <script src="js/app.ts" type="module"></script>
-      <script src="js/design.ts" type="module"></script>
+      <!-- Single module entry (design-boot imports ./app + ./design) so the page
+           has one bundle and the SRR_CDN_URL build-injection's load order holds. -->
+      <script src="js/design-boot.ts" type="module"></script>
    </body>
 </html>
