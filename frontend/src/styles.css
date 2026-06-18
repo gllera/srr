@@ -521,13 +521,13 @@ body.srr-view-list .srr-toolbar {
       always opens inward and never spills off a narrow phone: the filter is the
       left-most control (left:0), the ⋯ overflow the right-most (right:0). */
    bottom: 100%;
-   background: var(--bg);
+   background: var(--surface-raised);
    /* Fixed width (clamped to the viewport on narrow phones) so the feed filter
       menu doesn't resize to its longest row — long feed titles ellipsize within
       it instead of widening it. The ⋯ overflow menu overrides this to size to its
       (short) content — see #srr-overflow-menu. */
    width: min(18rem, 90vw);
-   border: 1px solid var(--faint);
+   border: 1px solid var(--border);
    border-radius: var(--radius);
    box-shadow: var(--shadow);
    z-index: var(--z-sticky);
@@ -884,7 +884,10 @@ body:not(.srr-view-list) .srr-toolbar > .srr-unread {
    font-size: 0.95rem;
    line-height: 1.32;
    overflow-wrap: anywhere;
-   color: var(--muted);
+   /* Read titles recede via a dimmed-ink tier — still legible (>=4.5:1), not the
+      metadata grey (--muted) they used to share with timestamps. Unread titles
+      go full --fg + 600 below, so read/unread still separate by weight + ink. */
+   color: var(--fg-2);
 }
 .srr-row-unread .srr-row-title {
    color: var(--fg);
@@ -1144,10 +1147,10 @@ body:not(.srr-view-list) .srr-toolbar > .srr-unread {
    top: 50%;
    left: 50%;
    transform: translate(-50%, -50%);
-   background: var(--bg);
+   background: var(--surface-raised);
    color: var(--fg);
    padding: 1.5rem 2rem;
-   border: 1px solid var(--faint);
+   border: 1px solid var(--border);
    border-radius: var(--radius);
    box-shadow: var(--shadow);
    display: none;
@@ -1212,9 +1215,9 @@ body:not(.srr-view-list) .srr-toolbar > .srr-unread {
    width: min(26rem, 100%);
    max-height: calc(100dvh - 2.5rem);
    overflow-y: auto;
-   background: var(--bg);
+   background: var(--surface-raised);
    color: var(--fg);
-   border: 1px solid var(--faint);
+   border: 1px solid var(--border);
    border-radius: var(--radius);
    box-shadow: var(--shadow);
    padding: 1.25rem 1.4rem 1.4rem;

@@ -21,15 +21,35 @@ rm -rf ds-bundle && mkdir -p ds-bundle/tokens
 cp frontend/src/tokens.css ds-bundle/tokens/tokens.css
 grep -v '@import "./tokens.css";' frontend/src/styles.css > ds-bundle/components.css
 printf '%s\n' '/* SRR styling entry — designs receive this file'"'"'s @import closure. */' \
-  '@import "./tokens/tokens.css";' '@import "./components.css";' > ds-bundle/styles.css
+  '@import "./fonts/fonts.css";' '@import "./tokens/tokens.css";' '@import "./components.css";' > ds-bundle/styles.css
 cp .design-sync/conventions.md ds-bundle/README.md
 ```
 
-- `styles.css` is the **entry** (designs receive its `@import` closure): tokens first, then the `.srr-*` component styles.
+- `styles.css` is the **entry** (designs receive its `@import` closure): fonts, then tokens, then the `.srr-*` component styles.
 - `components.css` = `frontend/src/styles.css` minus its own `@import "./tokens.css"` (the entry imports tokens instead).
 - `tokens/tokens.css` = `frontend/src/tokens.css` verbatim — the reusable part.
 - `README.md` = `.design-sync/conventions.md` (the design-agent conventions header; edit the source copy, not the build output).
-- **System fonts only** — no `fonts/` directory.
+
+### Fonts — a PROJECT-ONLY addition (not in the repo)
+
+The SRR **app** uses zero-byte system font stacks (deliberate). But the Claude Design
+**project** has real webfonts added in-app: `fonts/` (JetBrains Mono variable + Charter)
++ `fonts/fonts.css` (@font-face), which `styles.css` `@import`s so designs get the real
+families named in the token stacks. **These font files live only in the design project,
+not this repo** — the build re-adds the `@import "./fonts/fonts.css";` line so a re-sync
+doesn't unwire them (it 404s harmlessly if `fonts/` is ever absent, e.g. a fresh project).
+The token font-family declarations are still **system-first** (`ui-monospace`/`ui-serif`
+ahead of `"JetBrains Mono"`/`"Charter"`); flip the order in `tokens.css` if the webfonts
+should be primary.
+
+### ⚠ In-app edits to managed files get OVERWRITTEN
+
+A re-sync overwrites the four managed files (`styles.css`, `tokens/tokens.css`,
+`components.css`, `README.md`) with the repo's build. The user's *added* files
+(`fonts/`, `screenshots/`, `*.html`, `*.jsx`, …) are outside the plan's write/delete
+scope and are preserved — but any edit made to the four managed files **inside the app**
+is clobbered on the next sync. Make styling changes in the repo (`frontend/src/`), not
+in the Claude Design project.
 
 ## Re-sync procedure
 

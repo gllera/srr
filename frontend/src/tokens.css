@@ -8,9 +8,12 @@
 :root {
    /* Palette (light) */
    --bg: #fafaf7;
+   --surface-raised: #ffffff; /* menus / popups / dialogs — lifts off the page bg */
    --fg: #1c1c1a;
-   --muted: #8a8780;
-   --faint: #d5d2cb;
+   --fg-2: #5e5c56; /* dimmed ink for read / secondary text — stays legible (>=4.5:1), unlike --muted */
+   --muted: #8a8780; /* metadata / chrome only — intentionally below AA for body text */
+   --faint: #d5d2cb; /* in-flow hairlines / dividers */
+   --border: #cbc7be; /* component edges (cards / menus) — a touch stronger than --faint */
    --hover: rgba(0, 0, 0, 0.04);
    --accent: #b35650;
    --radius: 4px;
@@ -36,11 +39,16 @@
    --z-popup: 1000; /* error popup / imgproxy backdrop + card */
    --z-popup-top: 1001; /* topmost popup layer (popup accent bar) */
 
-   /* Spacing scale (used by the design panel; existing rules keep their rem
-      literals — intentionally not retrofitted, a sweeping diff with no payoff). */
+   /* Spacing scale (used by the design panel + the design-system export; existing
+      app rules keep their rem literals — intentionally not retrofitted, a sweeping
+      diff with no payoff). Extended past --space-3 so full-screen layouts have
+      token-sized gaps to reach for. */
    --space-1: 0.25rem;
    --space-2: 0.5rem;
    --space-3: 0.75rem;
+   --space-4: 1rem;
+   --space-5: 1.5rem;
+   --space-6: 2rem;
 }
 
 /* Source color system — each feed maps to a stable slot (fmt.ts srcColorIndex →
@@ -77,14 +85,18 @@
 /* High contrast */
 @media (prefers-contrast: more) {
    :root {
+      --fg-2: #333;
       --muted: #555;
       --faint: #999;
+      --border: #777;
    }
 }
 @media (prefers-contrast: more) and (prefers-color-scheme: dark) {
    :root {
+      --fg-2: #ccc;
       --muted: #aaa;
       --faint: #777;
+      --border: #999;
    }
 }
 
@@ -93,9 +105,12 @@
 @media (prefers-color-scheme: dark) {
    :root {
       --bg: #111110;
+      --surface-raised: #1c1c1a;
       --fg: #ccc9c2;
+      --fg-2: #8a877f;
       --muted: #6e6c66;
       --faint: #2a2928;
+      --border: #383734;
       --hover: rgba(255, 255, 255, 0.05);
       --accent: #d4847e;
       --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 28px rgba(0, 0, 0, 0.55);

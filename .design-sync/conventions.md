@@ -16,10 +16,14 @@ for free. Hard-coded values opt out of all of that.
 
 ## Token vocabulary (all defined in `tokens/tokens.css`)
 
-**Color** — `--bg` (page surface), `--fg` (primary ink), `--muted` (secondary text),
-`--faint` (hairlines/dividers/disabled), `--hover` (hover wash), `--accent` (the one
-brand accent — a muted terracotta; use sparingly for the primary action / active
-state).
+**Color** — `--bg` (page surface), `--surface-raised` (menus / popups / dialogs — a
+hair lighter than `--bg` so cards lift off the page), `--fg` (primary ink), `--fg-2`
+(dimmed ink for read / secondary text — still legible, unlike `--muted`), `--muted`
+(metadata / chrome only — intentionally below AA for body text, so don't use it for
+content), `--faint` (in-flow hairlines / dividers), `--border` (component edges —
+cards/menus, a touch stronger than `--faint`), `--hover` (hover wash), `--accent`
+(the one brand accent — a muted terracotta; use sparingly for the primary action /
+active state).
 
 **Per-source accent** — set `data-src="0"`…`data-src="7"` on an element and read
 `var(--src)`: a fixed 8-slot riso-ink ramp (light + dark variants) for color-coding
@@ -34,7 +38,8 @@ categorical color (rails, eyebrows, badges).
 stacks — no web fonts. Scale (1.125 ratio): `--text-sm`, `--text-base`, `--text-lg`,
 `--text-xl`.
 
-**Spacing** — `--space-1` (0.25rem), `--space-2` (0.5rem), `--space-3` (0.75rem).
+**Spacing** — `--space-1` (0.25rem), `--space-2` (0.5rem), `--space-3` (0.75rem),
+`--space-4` (1rem), `--space-5` (1.5rem), `--space-6` (2rem).
 
 **Stacking** — use these instead of literal z-indexes: `--z-sticky` (1, pinned
 dividers), `--z-searchbar` (5), `--z-toolbar` (6), `--z-popup` (1000), `--z-popup-top`
