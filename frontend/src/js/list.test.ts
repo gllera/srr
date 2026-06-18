@@ -441,6 +441,30 @@ describe("list", () => {
       expect($chrons()[$rows().length - 1]).toBe(0)
    })
 
+   it("pins each prepended row's intrinsic size so scrolling up doesn't jump", async () => {
+      // Prepended rows above the viewport are content-visibility:auto, so they'd
+      // render with the 4rem placeholder and correct to their real height only as
+      // you scroll into them — and with overflow-anchor:none that resize jumps the
+      // viewport. fetchNewer renders them once to measure, pins the measured
+      // height as contain-intrinsic-size, then hands them back to the virtualizer.
+      setIndex(100)
+      nav._setAnchor(50)
+      await list.render() // window top is chron 80
+      await list.loadNewer() // prepends 99..81 above
+      const prepended = $rows().filter((a) => Number(a.dataset.chron) > 80)
+      expect(prepended.length).toBeGreaterThan(0)
+      for (const row of prepended) {
+         // The temporary render-for-measurement override is handed back to the
+         // .srr-row class's content-visibility:auto (no inline override left)...
+         expect(row.style.getPropertyValue("content-visibility")).toBe("")
+         // ...with the measured height pinned as the intrinsic-size placeholder.
+         expect(row.style.getPropertyValue("contain-intrinsic-size")).toMatch(/^auto \d+px$/)
+      }
+      // Rows from the initial render() (not the prepend path) are untouched.
+      const original = $rows().find((a) => Number(a.dataset.chron) === 80)!
+      expect(original.style.getPropertyValue("contain-intrinsic-size")).toBe("")
+   })
+
    it("show() rebuilds when the reader's article is outside the loaded window", async () => {
       setIndex(100)
       nav._setAnchor(50)
