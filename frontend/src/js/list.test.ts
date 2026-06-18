@@ -201,6 +201,38 @@ describe("list", () => {
       expect(document.querySelectorAll(".srr-day-divider").length).toBe(0)
    })
 
+   it("paints skeleton rows immediately, then fills them in place", async () => {
+      setIndex(3) // chrons 0,1,2 → titles "title 0..2", newest-first 2,1,0
+      // Gate loadMeta so we can inspect the skeleton phase before content lands.
+      let release: (() => void) | null = null
+      const gate = new Promise<void>((r) => (release = () => r()))
+      data.loadMeta.mockImplementation(async (chron: number) => {
+         await gate
+         const a = data._arts.get(chron)!
+         return { f: a.f, w: a.p || a.a, t: a.t }
+      })
+
+      const p = list.render()
+      // Flush microtasks (the async feed walk) without resolving the gated fills.
+      await new Promise((r) => setTimeout(r, 0))
+      const skeletons = $rows()
+      expect(skeletons.length).toBe(3)
+      expect(skeletons.every((r) => r.classList.contains("srr-row-skeleton"))).toBe(true)
+      expect(skeletons[0].querySelector(".srr-row-title")!.textContent).toBe("")
+
+      release!()
+      await p
+      const filled = $rows()
+      expect(filled.every((r) => !r.classList.contains("srr-row-skeleton"))).toBe(true)
+      expect(filled[0].querySelector(".srr-row-title")!.textContent).toBe("title 2")
+
+      // Restore the default (non-gated) loadMeta so later tests aren't affected.
+      data.loadMeta.mockImplementation(async (chron: number) => {
+         const a = data._arts.get(chron)!
+         return { f: a.f, w: a.p || a.a, t: a.t }
+      })
+   })
+
    it("relabelDividers skips skeleton rows (no data-ts)", () => {
       // Build a rows container by hand: one filled row, one skeleton.
       const rows = document.createElement("div")
