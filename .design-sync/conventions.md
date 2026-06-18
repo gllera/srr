@@ -26,17 +26,20 @@ cards/menus, a touch stronger than `--faint`), `--hover` (hover wash), `--accent
 active state).
 
 **Per-source accent** — set `data-src="0"`…`data-src="7"` on an element and read
-`var(--src)`: a fixed 8-slot riso-ink ramp (light + dark variants) for color-coding
-by origin/category. SRR keys each feed to a slot; reuse it anywhere you want stable
+`var(--src)`: a uniform 8-slot OKLCH ramp (one lightness + chroma, 8 hues spread
+evenly so neighbours don't clash; light + dark variants) for color-coding by
+origin/category. SRR keys each feed to a slot; reuse it anywhere you want stable
 categorical color (rails, eyebrows, badges).
 
 **Shape** — `--radius` (4px corners), `--shadow` (the elevation shadow for popups/cards).
 
 **Type** — three roles, deliberately paired ("wire chrome wraps human prose"):
-`--font-sans` for UI chrome, `--font-mono` for metadata/wire labels (e.g. a
-`source · age` eyebrow), `--font-serif` for reading prose. All are zero-byte system
-stacks — no web fonts. Scale (1.125 ratio): `--text-sm`, `--text-base`, `--text-lg`,
-`--text-xl`.
+`--font-sans` for UI chrome (system stack), `--font-mono` for metadata/wire labels
+(e.g. a `source · age` eyebrow) — leads with **JetBrains Mono**, and `--font-serif`
+for reading prose — leads with **Charter**. The mono + serif families load from a
+CDN (`fonts/fonts.css`, inside the styles.css closure) so designs render the real
+faces, with system stacks behind them as fallback. Scale (1.125 ratio): `--text-sm`,
+`--text-base`, `--text-lg`, `--text-xl`.
 
 **Spacing** — `--space-1` (0.25rem), `--space-2` (0.5rem), `--space-3` (0.75rem),
 `--space-4` (1rem), `--space-5` (1.5rem), `--space-6` (2rem).

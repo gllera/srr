@@ -1,0 +1,9 @@
+/* Brand webfonts via CDN — JetBrains Mono (the mono "wire" voice) + Charter (the
+   serif reading voice), the two families the tokens name. Loaded from popular,
+   already-hosted CDNs (no self-hosted binaries): JetBrains Mono from Google Fonts
+   (exact family "JetBrains Mono", italics + weights 100–800), Charter from
+   jsDelivr's charter-webfont (family "Charter", 400/700 + italics, MIT).
+   styles.css @imports this so every design that receives styles.css gets the real
+   families behind the tokens. The build copies it to ds-bundle/fonts/fonts.css. */
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,100..800;1,100..800&display=swap");
+@import url("https://cdn.jsdelivr.net/npm/charter-webfont@4/charter.min.css");

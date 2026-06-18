@@ -19,12 +19,15 @@
    --radius: 4px;
    --shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 12px 28px rgba(0, 0, 0, 0.08);
 
-   /* Fonts */
+   /* Fonts. --font-mono / --font-serif lead with the brand webfonts (JetBrains
+      Mono / Charter); the Claude Design export loads those families from a CDN
+      (see .design-sync/fonts.css), while the SRR app ships no webfonts and falls
+      through to the system stacks behind them — same look where the OS has them. */
    --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
-   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
-   /* The reader's prose voice — a system serif (zero bytes). Pairs with the
-      sans/mono "wire" chrome (headings, code): machine metadata wraps human prose. */
-   --font-serif: ui-serif, Georgia, Charter, "Times New Roman", serif;
+   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+   /* The reader's prose voice. Pairs with the sans/mono "wire" chrome (headings,
+      code): machine metadata wraps human prose. */
+   --font-serif: "Charter", ui-serif, Georgia, "Times New Roman", serif;
 
    /* Type scale (1.125 ratio). em multipliers in .srr-content mirror these ratios. */
    --text-sm: 0.875rem;
@@ -52,34 +55,37 @@
 }
 
 /* Source color system — each feed maps to a stable slot (fmt.ts srcColorIndex →
-   data-src) so the feed can be triaged by origin at a glance. A curated, fixed-
-   tone riso-ink ramp; derived offline from the feed id, never a fetched favicon.
+   data-src) so the feed can be triaged by origin at a glance. A uniform OKLCH
+   ramp: every slot shares one lightness + chroma and the 8 hues spread evenly
+   (45° apart), reordered so adjacent slots never collide — color = origin,
+   derived offline from the feed id, never a fetched favicon. (Replaces the older
+   hand-tuned hex ramp, which varied chroma/lightness and read as a paintbox.)
    Defined on [data-src] (not just .srr-row) so both the list rows AND the reader
    article pick up their feed's color — the rail graduates into the reader's
-   masthead. Dark-mode variants live in the dark @media block below. */
+   masthead. Dark-mode variants (same hues, lifted) live in the dark @media block. */
 [data-src="0"] {
-   --src: #c2410c;
+   --src: oklch(0.55 0.13 25);
 }
 [data-src="1"] {
-   --src: #2563a8;
+   --src: oklch(0.55 0.13 250);
 }
 [data-src="2"] {
-   --src: #3f7d52;
+   --src: oklch(0.55 0.13 160);
 }
 [data-src="3"] {
-   --src: #8a4fa0;
+   --src: oklch(0.55 0.13 295);
 }
 [data-src="4"] {
-   --src: #b7791f;
+   --src: oklch(0.55 0.13 70);
 }
 [data-src="5"] {
-   --src: #0f766e;
+   --src: oklch(0.55 0.13 205);
 }
 [data-src="6"] {
-   --src: #9d2449;
+   --src: oklch(0.55 0.13 340);
 }
 [data-src="7"] {
-   --src: #4f5b93;
+   --src: oklch(0.55 0.13 115);
 }
 
 /* High contrast */
@@ -115,29 +121,29 @@
       --accent: #d4847e;
       --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 28px rgba(0, 0, 0, 0.55);
    }
-   /* Source ramp, dark — same hues lifted in luminance to read on the dark bg. */
+   /* Source ramp, dark — same hues, lifted in lightness to read on the dark bg. */
    [data-src="0"] {
-      --src: #e8855a;
+      --src: oklch(0.74 0.125 25);
    }
    [data-src="1"] {
-      --src: #6aa3e0;
+      --src: oklch(0.74 0.125 250);
    }
    [data-src="2"] {
-      --src: #79b88c;
+      --src: oklch(0.74 0.125 160);
    }
    [data-src="3"] {
-      --src: #c08fd6;
+      --src: oklch(0.74 0.125 295);
    }
    [data-src="4"] {
-      --src: #d6a94e;
+      --src: oklch(0.74 0.125 70);
    }
    [data-src="5"] {
-      --src: #4fb3a8;
+      --src: oklch(0.74 0.125 205);
    }
    [data-src="6"] {
-      --src: #d96f8c;
+      --src: oklch(0.74 0.125 340);
    }
    [data-src="7"] {
-      --src: #8e9bd8;
+      --src: oklch(0.74 0.125 115);
    }
 }

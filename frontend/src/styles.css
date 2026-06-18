@@ -70,6 +70,14 @@ video {
    margin-bottom: 1.4rem;
    overflow-wrap: anywhere;
 }
+/* A tinted source spine beside the reader's kicker + title — a masthead accent
+   carrying the feed's color into the reader (NOT a full-height bar down the prose).
+   data-src is stamped on .srr-reader (app.ts), so key off that, not .srr-container. */
+.srr-reader[data-src] .srr-title-row {
+   border-left: 3px solid var(--src);
+   padding-left: 0.85rem;
+   margin-left: -0.85rem;
+}
 
 /* Masthead — "SOURCE · dateline" in tracked mono (the wire voice), the source
    name in its own color. */
@@ -433,9 +441,9 @@ body.srr-view-list .srr-toolbar {
    height: 1.2rem;
 }
 
-/* Unread (catch-up) toggle — an "unread" dot: a ring by default, filled + accent
-   when the mode is on (aria-pressed), so the toolbar shows at a glance whether the
-   list is filtered to unread. */
+/* Unread (catch-up) toggle — an "unread" dot: a ring by default, filled with
+   neutral ink when the mode is on (aria-pressed), so the toolbar shows at a glance
+   whether the list is filtered to unread. */
 .srr-unread-icon {
    display: inline-block;
    width: 0.85rem;
@@ -444,7 +452,9 @@ body.srr-view-list .srr-toolbar {
    border-radius: 50%;
 }
 .srr-toolbar > .srr-unread[aria-pressed="true"] {
-   color: var(--accent);
+   /* Unread is structure, not a brand moment — fill with neutral ink. Accent is
+      reserved for the primary action (next pill) and the saved star. */
+   color: var(--fg);
    & .srr-unread-icon {
       background: currentColor;
    }
@@ -892,6 +902,14 @@ body:not(.srr-view-list) .srr-toolbar > .srr-unread {
 .srr-row-unread .srr-row-title {
    color: var(--fg);
    font-weight: 600;
+}
+/* Unread rows carry more presence so scanning by source is effortless: a thicker
+   source rail and a hair more tracking on the source name (the triage key). */
+.srr-row-unread {
+   border-left-width: 5px;
+}
+.srr-row-unread .srr-row-source {
+   letter-spacing: 0.09em;
 }
 /* The article currently open in the reader — a source-tinted wash so returning
    to the list (which centers it in the viewport) lands you visibly back on it.
