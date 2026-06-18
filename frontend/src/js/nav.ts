@@ -157,10 +157,13 @@ export async function listAnchor(): Promise<number> {
 export const SEARCH_PREFIX = "q:"
 const SEARCH_CAP = 500
 let searchTerm = "" // the active query (text after "q:")
-let searchSorted: number[] = [] // ascending matching chronIdxs — the neighbor walk
+let searchSorted: number[] = [] // ascending matching chronIdxs pulled so far
 let searchSet = new Set<number>() // the same hits, for matches()
 let searchTruncatedFlag = false
-let searchLoadedFor: string | null = null // term searchSorted/searchSet were built for
+let searchIter: AsyncGenerator<import("./search").ISearchHit[], void, void> | null = null
+let searchDone = false // generator exhausted (or cap hit) for searchIterFor
+let searchIterFor: string | null = null // the term searchIter/state were built for
+let searchPulled = 0 // hits accepted so far (cap guard)
 
 export function isSearchFilter(): boolean {
    return filter.search
@@ -194,22 +197,66 @@ function setRight(sorted: number[], from: number): number {
    return -1
 }
 
-// Ensure the snapshot matches the active term before a neighbor walk reads it.
-// search.loadHits owns the per-query caching and shares the in-flight promise
-// (so concurrent walks within one render dedupe). nav keeps only the snapshot
-// (searchSorted/searchSet for the walk + matches) and the supersession guard:
-// commit only if `term` is still the active query when its hits resolve, so a
-// superseded keystroke's late result can't overwrite fresher hits.
-function ensureSearchSet(): Promise<void> {
-   if (searchLoadedFor === searchTerm) return Promise.resolve()
+// Pull the next generator batch (newest-first) and extend the snapshot. Lazily
+// (re)starts the iterator for the active term. Query-token guarded so a
+// superseded keystroke's late batch is dropped (the guard precedes any state
+// mutation, so a stale resolve can't corrupt the active term's searchDone). The
+// list streams rows from the returned hits; the reader reaches this via
+// ensureSearchCovers. Hits carry {chron,f,w,t}, so callers render with no fetch.
+export async function searchMore(): Promise<{ hits: import("./search").ISearchHit[]; done: boolean }> {
    const term = searchTerm
-   return search.loadHits(term, SEARCH_CAP).then((hits) => {
-      if (term !== searchTerm) return // superseded by a newer query
-      searchSorted = hits.chrons
-      searchSet = new Set(hits.chrons)
-      searchTruncatedFlag = hits.truncated
-      searchLoadedFor = term
-   })
+   if (searchIterFor !== term || !searchIter) {
+      searchIterFor = term
+      searchDone = false
+      searchPulled = 0
+      searchSorted = []
+      searchSet = new Set<number>()
+      searchTruncatedFlag = false
+      // An empty query has no hits and must NOT touch search.search (parity with
+      // the old loadHits `if (query)` guard — a test asserts it never fetches).
+      searchIter = term ? search.search(term, SEARCH_CAP + 1) : null
+      if (!searchIter) searchDone = true
+   }
+   if (searchDone) return { hits: [], done: true }
+   const it = searchIter
+   let step: IteratorResult<import("./search").ISearchHit[], void>
+   try {
+      step = await it.next()
+   } catch {
+      searchDone = true
+      return { hits: [], done: true }
+   }
+   if (term !== searchTerm) return { hits: [], done: true } // superseded — no state mutation
+   if (step.done || !step.value) {
+      searchDone = true
+      return { hits: [], done: true }
+   }
+   const fresh: import("./search").ISearchHit[] = []
+   for (const h of step.value) {
+      if (searchSet.has(h.chron)) continue
+      if (searchPulled >= SEARCH_CAP) {
+         searchTruncatedFlag = true
+         searchDone = true
+         break
+      }
+      searchSet.add(h.chron)
+      searchPulled++
+      searchSorted.push(h.chron)
+      fresh.push(h)
+   }
+   searchSorted.sort((a, b) => a - b) // bounded (<= SEARCH_CAP); keeps setLeft/Right's invariant
+   return { hits: fresh, done: searchDone }
+}
+
+// Ensure the snapshot covers down to `from` (so the largest hit <= from / smallest
+// hit >= from is knowable), pulling only as far as needed. The unloaded region is
+// always strictly below searchSorted[0] (the generator yields newest-first), so
+// covering `from` means pulling until searchSorted[0] <= from or exhaustion.
+async function ensureSearchCovers(from: number): Promise<void> {
+   while (!searchDone && (searchSorted.length === 0 || searchSorted[0] > from)) {
+      await searchMore()
+      if (searchIterFor !== searchTerm) return // superseded mid-pull
+   }
 }
 
 // The current feed's neighbor walk — the ONE seam saved mode branches at. Every
@@ -220,12 +267,12 @@ function ensureSearchSet(): Promise<void> {
 // wrapped in a resolved promise.
 export function feedLeft(from: number): Promise<number> {
    if (filter.saved) return Promise.resolve(setLeft(savedSorted(), from))
-   if (filter.search) return ensureSearchSet().then(() => setLeft(searchSorted, from))
+   if (filter.search) return ensureSearchCovers(from).then(() => setLeft(searchSorted, from))
    return data.findLeft(from, filter.feeds)
 }
 export function feedRight(from: number): Promise<number> {
    if (filter.saved) return Promise.resolve(setRight(savedSorted(), from))
-   if (filter.search) return ensureSearchSet().then(() => setRight(searchSorted, from))
+   if (filter.search) return ensureSearchCovers(from).then(() => setRight(searchSorted, from))
    return data.findRight(from, filter.feeds)
 }
 
@@ -280,26 +327,25 @@ export const filter = {
       // branch on filter.saved.
       this.saved = tokens.length === 1 && tokens[0] === SAVED_TOKEN
       // "q:<query>" — title-search mode (see Search filter mode above). Like
-      // ★ Saved it short-circuits the feed resolution; the matching set is
-      // computed lazily by ensureSearchSet, which feedLeft/feedRight await.
+      // ★ Saved it short-circuits the feed resolution; the matching set is pulled
+      // lazily by searchMore (via ensureSearchCovers, which feedLeft/feedRight await).
       this.search = !this.saved && tokens.length === 1 && tokens[0].startsWith(SEARCH_PREFIX)
       if (this.saved) return
       if (this.search) {
          const term = tokens[0].slice(SEARCH_PREFIX.length)
-         // New query: drop the stale set so matches()/showFeed can't read the
-         // previous query's hits before ensureSearchSet recomputes. A returning
-         // query (back/forward) keeps its cached set.
-         if (term !== searchLoadedFor) {
+         // New query: drop the stale stream so matches()/searchMore rebuild it. A
+         // returning query (back/forward, term unchanged) keeps its partial stream.
+         // Nulling searchIterFor forces searchMore to (re)start the iterator; without
+         // it a fast type→backspace (A → B → A, B's pull still in flight) would leave
+         // searchIterFor === "A" with an emptied set and strand the list on no matches.
+         if (term !== searchIterFor) {
+            searchIter = null
+            searchIterFor = null
+            searchDone = false
+            searchPulled = 0
             searchSorted = []
             searchSet = new Set<number>()
             searchTruncatedFlag = false
-            // Also forget what the (now-emptied) set was loaded for. Without this,
-            // a fast type→backspace (A → B → A, where B's reload is still in flight)
-            // would leave searchLoadedFor === "A" while the set is empty; on the
-            // return to A, ensureSearchSet would see searchLoadedFor === searchTerm
-            // and short-circuit, stranding the list on an empty result for a query
-            // that has matches. Nulling forces ensureSearchSet to recompute.
-            searchLoadedFor = null
          }
          searchTerm = term
          return
@@ -608,14 +654,15 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
 
    if (data.db.total_art === 0) throw new Error("no articles")
 
-   // Search mode's matching set must be loaded before isValidSeen/resolve read it
-   // (matches() is synchronous), so a #pos!q:… deep-link honors its position.
-   if (filter.search) await ensureSearchSet()
-
    // Empty posStr → Number("")=0 would land on the oldest article; treat it
    // as "no target" so a first-time visitor with no stored hash sees latest.
    let target = posStr === "" ? NaN : Number(posStr)
    if (!Number.isFinite(target) || target < 0 || target >= data.db.total_art) target = data.db.total_art - 1
+
+   // Search mode's matching set must cover the deep-link position before
+   // isValidSeen/resolve read it (matches() is synchronous). Pull the lazy stream
+   // down to `target` (or exhaustion) so a #pos!q:… deep-link honors its position.
+   if (filter.search) await ensureSearchCovers(target)
 
    // Validate the explicit #pos against the feed's TRUE add_idx, not unseen-only's
    // raised (seen+1) bounds. A restored/shared hash position is an entry anchor, like
