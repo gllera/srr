@@ -237,6 +237,37 @@ describe("list", () => {
       })
    })
 
+   it("fills packs nearest the navigation anchor first, with bounded concurrency", async () => {
+      setIndex(10) // chrons 0..9, all feed 1
+      nav._setAnchor(5) // returning to chron 5 → list anchors (centers) there
+      const calls: number[] = []
+      let release: (() => void) | null = null
+      const gate = new Promise<void>((r) => (release = () => r()))
+      data.loadMeta.mockImplementation(async (chron: number) => {
+         calls.push(chron)
+         await gate
+         const a = data._arts.get(chron)!
+         return { f: a.f, w: a.p || a.a, t: a.t }
+      })
+
+      const p = list.render()
+      await new Promise((r) => setTimeout(r, 0)) // skeletons placed + first wave dispatched
+      // Bounded concurrency: only the pool's width is in flight before any resolve.
+      expect(calls.length).toBe(6)
+      // …and that first wave is the six rows nearest the anchor (chron 5), never
+      // the far ends (0, 9, 1) — content you're looking at loads first.
+      expect(calls.slice().sort((a, b) => a - b)).toEqual([3, 4, 5, 6, 7, 8])
+
+      release!()
+      await p
+      expect($rows().every((r) => !r.classList.contains("srr-row-skeleton"))).toBe(true)
+
+      data.loadMeta.mockImplementation(async (chron: number) => {
+         const a = data._arts.get(chron)!
+         return { f: a.f, w: a.p || a.a, t: a.t }
+      })
+   })
+
    it("streams search matches into the list as they are found", async () => {
       // 3 matches, newest-first 9,5,1; one per searchMore batch.
       const batches = [

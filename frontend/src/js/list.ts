@@ -33,6 +33,12 @@ import * as nav from "./nav"
 // meta lags), so this is a paint-budget knob, not a fetch-count one.
 const BATCH = 30
 
+// Max meta-card fetches in flight while filling a freshly-rendered batch. Bounds
+// concurrency so the packs NEAREST the navigation anchor (filled first, see
+// render) actually win the network before off-screen rows, instead of all BATCH
+// fetches racing. ~the classic per-origin connection budget.
+const FILL_CONCURRENCY = 6
+
 // Start fetching the next batch this far beyond the fold (a scroll runway so
 // rows are ready before they're scrolled into view), in either direction.
 const ROOT_MARGIN = "800px"
@@ -387,6 +393,18 @@ async function walk(
    return { chrons, exhausted: false }
 }
 
+// Run `items` through `worker` with at most `limit` in flight, pulling them in
+// the given order — so the earliest items (here: nearest the anchor) dispatch and
+// resolve before later ones, regardless of transport (HTTP/2 would otherwise race
+// them all at once). Each worker is token-guarded by its caller.
+async function runPool<T>(items: T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
+   let next = 0
+   const run = async (): Promise<void> => {
+      while (next < items.length) await worker(items[next++])
+   }
+   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => run()))
+}
+
 // Full (re)build: clears the list, resolves the anchor (the reader's article when
 // it matches, else newest), loads a batch older (incl. the anchor) and — when
 // anchored mid-feed — a batch newer above it, then positions the anchor. `center`
@@ -470,21 +488,23 @@ export async function render(center = false, onInteractive?: () => void): Promis
    onInteractive?.()
    observe(my)
 
-   // Fill each row as its meta card resolves (out-of-order arrival is fine: each
-   // card fills its own row). Pin the row's real height, relabel dividers (which
-   // skip still-skeleton rows), and re-assert the anchor (guarded) so a height
-   // change above the seed doesn't drift it.
-   await Promise.all(
-      chronsDesc.map((c, k) =>
-         data.loadMeta(c).then((card) => {
-            if (my !== tok) return
-            fillRow(rows[k], card, seen)
-            pinHeights([rows[k]])
-            relabelDividers()
-            if (anchoredMid) reassertAnchor(seed, center && seed === nav.anchorChron())
-         }),
-      ),
-   )
+   // Fill rows NEAREST the anchor first (bounded concurrency), so the packs for
+   // what you're looking at resolve before off-screen rows — progressive fill
+   // prioritized by navigation position. Out-of-order arrival within a wave is
+   // fine: each card fills its own row. Pin the row's real height, relabel
+   // dividers (which skip still-skeleton rows), and re-assert the anchor (guarded)
+   // so a height change above the seed doesn't drift it.
+   const anchorIdx = chronsDesc.indexOf(seed)
+   const fillOrder = chronsDesc.map((_, k) => k).sort((a, b) => Math.abs(a - anchorIdx) - Math.abs(b - anchorIdx))
+   await runPool(fillOrder, FILL_CONCURRENCY, async (k) => {
+      if (my !== tok) return
+      const card = await data.loadMeta(chronsDesc[k])
+      if (my !== tok) return
+      fillRow(rows[k], card, seen)
+      pinHeights([rows[k]])
+      relabelDividers()
+      if (anchoredMid) reassertAnchor(seed, center && seed === nav.anchorChron())
+   })
    if (my !== tok) return
    relabelDividers()
    if (anchoredMid) reassertAnchor(seed, center && seed === nav.anchorChron())
