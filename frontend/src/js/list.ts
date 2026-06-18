@@ -69,6 +69,10 @@ let loadingBottom = false // an older-load is in flight (re-entry guard for fetc
 let pumping = false // a downward viewport-fill loop is running (re-entry guard for pump)
 let builtKey: string | null = null // filterKey() the current DOM was built for
 let observer: IntersectionObserver | null = null
+// Set by a genuine user scroll gesture (wheel/touch/key) during a render, so the
+// post-fill anchor re-assert never yanks the page out from under the reader.
+// Programmatic scrolls (window.scrollTo) don't fire these, so they don't trip it.
+let userScrolled = false
 
 export function setup(el: HTMLElement, open: (chron: number) => void, onScroll?: () => void): void {
    container = el
@@ -99,6 +103,15 @@ export function setup(el: HTMLElement, open: (chron: number) => void, onScroll?:
       }
       onOpen(chron)
    })
+   // A genuine scroll gesture during a progressive render disables the post-fill
+   // anchor re-assert (the user's position wins). Programmatic window.scrollTo
+   // fires "scroll" but NOT these, so it never trips the flag.
+   const markScrolled = () => {
+      userScrolled = true
+   }
+   container.ownerDocument.addEventListener("wheel", markScrolled, { passive: true })
+   container.ownerDocument.addEventListener("touchstart", markScrolled, { passive: true })
+   container.ownerDocument.addEventListener("keydown", markScrolled)
 }
 
 function el(tag: string, className: string): HTMLElement {
@@ -273,6 +286,15 @@ function showEmptyState(): void {
 // cross-time, and the pinned search bar owns the sticky top slot). Callers run
 // it inside any scroll-compensation bracket so the divider heights ride the same
 // scrollHeight delta as the rows.
+// Re-assert the anchor after a progressive fill changed row heights, unless the
+// user has scrolled (then their position wins). Only meaningful for an
+// anchoredMid seed (rows above it can grow/shrink); a newest-top anchor is at
+// scroll 0 and grows downward, so it never needs this.
+function reassertAnchor(seed: number, center: boolean): void {
+   if (userScrolled) return
+   scrollChronToView(seed, center)
+}
+
 function relabelDividers(): void {
    if (!rowsEl) return
    rowsEl.querySelectorAll(".srr-day-divider").forEach((d) => d.remove())
@@ -384,6 +406,7 @@ export async function render(center = false, onInteractive?: () => void): Promis
 
    if (data.db.total_art === 0) {
       emptyState()
+      onInteractive?.()
       return
    }
 
@@ -397,6 +420,7 @@ export async function render(center = false, onInteractive?: () => void): Promis
    if (my !== tok) return
    if (seed === -1) {
       emptyState()
+      onInteractive?.()
       return
    }
    const anchoredMid = anchor !== -1 && seed === anchor
@@ -409,6 +433,7 @@ export async function render(center = false, onInteractive?: () => void): Promis
    if (my !== tok) return
    if (older.chrons.length === 0) {
       emptyState()
+      onInteractive?.()
       return
    }
 
@@ -419,29 +444,45 @@ export async function render(center = false, onInteractive?: () => void): Promis
 
    const chronsDesc = newer.chrons.slice().reverse().concat(older.chrons) // newest-first
    const seen = nav.getSeenMap()
-   const arts = await Promise.all(chronsDesc.map((c) => data.loadMeta(c)))
-   if (my !== tok) return
 
    rowsEl = el("div", "srr-list-rows")
    topSentinel = el("div", "srr-list-sentinel")
    bottomSentinel = el("div", "srr-list-sentinel")
    const frag = document.createDocumentFragment()
-   chronsDesc.forEach((c, k) => frag.appendChild(rowEl(c, arts[k], seen)))
+   const rows = chronsDesc.map((c) => rowEl(c, null, seen)) // skeletons, in order
+   rows.forEach((r) => frag.appendChild(r))
    rowsEl.appendChild(frag)
    container.append(topSentinel, rowsEl, bottomSentinel)
-   relabelDividers()
-   // Pin every row's real height before positioning so the newer batch above the
-   // anchor reserves accurate space (scrollChronToView's offsetTop is exact) and
-   // never corrects when scrolled up into (see pinHeights).
-   pinHeights([...rowsEl.querySelectorAll<HTMLElement>("a.srr-row")])
    syncBottomTerminus() // cap the rows when the whole view fits one batch
    syncTopTerminus() // and cap the top when we're already anchored at the newest
 
+   // Position on the skeletons, then hand the surface over (interactive) before
+   // the network fills land.
    if (anchoredMid) scrollChronToView(seed, center && seed === nav.anchorChron())
    else window.scrollTo(0, 0)
    notifyScroll()
+   userScrolled = false
+   onInteractive?.()
    observe(my)
-   onInteractive?.() // temporary placement; Task 5 moves it to first paint
+
+   // Fill each row as its meta card resolves (out-of-order arrival is fine: each
+   // card fills its own row). Pin the row's real height, relabel dividers (which
+   // skip still-skeleton rows), and re-assert the anchor (guarded) so a height
+   // change above the seed doesn't drift it.
+   await Promise.all(
+      chronsDesc.map((c, k) =>
+         data.loadMeta(c).then((card) => {
+            if (my !== tok) return
+            fillRow(rows[k], card, seen)
+            pinHeights([rows[k]])
+            relabelDividers()
+            if (anchoredMid) reassertAnchor(seed, center && seed === nav.anchorChron())
+         }),
+      ),
+   )
+   if (my !== tok) return
+   relabelDividers()
+   if (anchoredMid) reassertAnchor(seed, center && seed === nav.anchorChron())
 }
 
 // Re-show an already-built list (same filter). When the reader's article is
