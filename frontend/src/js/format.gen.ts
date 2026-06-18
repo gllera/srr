@@ -40,7 +40,7 @@ export const SEARCH_GRAM = 3
 export const SEARCH_BLOOM_BYTES = 4096
 
 // bloom bits set/tested per gram
-export const SEARCH_BLOOM_K = 4
+export const SEARCH_BLOOM_K = 7
 
 // The write-once pack-name grammar (backend store.PackSeries): per pack-series
 // directory, the kind letters a stem may carry besides the finalized digit run

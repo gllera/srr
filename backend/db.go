@@ -47,8 +47,10 @@ const (
 	// = 2^15 bits — a power of two so probe indices mask instead of modulo,
 	// sized for a 5,000-title shard.
 	searchBloomBytes = 4096
-	// searchBloomK is the number of bloom bits set/tested per gram.
-	searchBloomK = 4
+	// searchBloomK is the number of bloom bits set/tested per gram. 7 is the
+	// near-optimal probe count for ~3,500 trigrams in 2^15 bits ((m/n)·ln2 ≈
+	// 6.5); it minimizes the per-(shard,gram) false-positive rate (~1.1%).
+	searchBloomK = 7
 )
 
 // defaultRootPipe returns a fresh copy of the pipeline applied as the
