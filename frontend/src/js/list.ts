@@ -241,9 +241,8 @@ function relabelDividers(): void {
 
 // The list's oldest-end terminus: once the feed is exhausted downward, cap the
 // rows with an "OLDEST" sign-off so scrolling to the bottom reads as a definite
-// end — the list counterpart to the reader's read-on "LATEST" line. Idempotent
-// (one terminus at most) and cleared on every rebuild via replaceChildren;
-// rowSibling skips it, so it never intercepts cursor stepping.
+// end. Idempotent (one terminus at most) and cleared on every rebuild via
+// replaceChildren; rowSibling skips it, so it never intercepts cursor stepping.
 function syncBottomTerminus(): void {
    if (!rowsEl) return
    const existing = rowsEl.querySelector(".srr-wire-end")
@@ -261,8 +260,8 @@ function syncBottomTerminus(): void {
 
 // The list's newest-end terminus — the symmetric cap at the top: once the upward
 // walk is exhausted, prepend a "LATEST" sign-off so scrolling up to the newest
-// reads as a definite end, matching the reader's read-on "LATEST" line. Same
-// idempotent/cleared-on-rebuild/rowSibling-skipped contract as the bottom. When
+// reads as a definite end. Same idempotent/cleared-on-rebuild/rowSibling-skipped
+// contract as the bottom. When
 // `compensate`, it keeps the viewport put across the prepend (the incremental
 // fetchNewer path, which compensates its own prepended rows the same way);
 // render passes false because it sets scroll explicitly right after.

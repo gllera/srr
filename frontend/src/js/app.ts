@@ -11,7 +11,6 @@ const el = {
    back: document.querySelector(".srr-back") as HTMLButtonElement,
    title: document.querySelector(".srr-title") as HTMLElement,
    content: document.querySelector(".srr-content") as HTMLElement,
-   readon: document.querySelector(".srr-readon") as HTMLElement,
    titleLink: document.querySelector(".srr-title-link") as HTMLAnchorElement,
    toolbar: document.querySelector(".srr-toolbar") as HTMLElement,
    prev: document.querySelector(".srr-prev") as HTMLButtonElement,
@@ -107,57 +106,6 @@ function clearContentTransition() {
    el.content.style.transform = ""
 }
 
-// "Read on" — the next dispatch previewed at the article's end, so the wire
-// reads as a continuous feed and the next tap lands under your thumb (not at the
-// bottom toolbar). A "NEXT" divider (perforated rule, echoing the masthead — the
-// paper keeps feeding) over a list-row-style preview keyed to the next source's
-// color; tapping it is exactly the toolbar's next. At the newest match it's a
-// quiet terminal line. Token-guarded so a fast next/prev never paints a stale
-// preview; nav.peek's loadArticle is the cache the neighbor prefetch warms.
-let readonTok = 0
-function readonDivider(label: string): HTMLElement {
-   const d = document.createElement("div")
-   d.className = "srr-readon-divider"
-   d.textContent = label
-   return d
-}
-function renderReadon(next: { chron: number; article: IArticle } | null) {
-   el.readon.replaceChildren()
-   if (!next) {
-      el.readon.append(readonDivider("LATEST"))
-      const end = document.createElement("p")
-      end.className = "srr-readon-endmsg"
-      end.textContent = "You're at the newest article in this view."
-      el.readon.append(end)
-      return
-   }
-   el.readon.append(readonDivider("NEXT"))
-   const a = document.createElement("a")
-   a.className = "srr-readon-next"
-   a.href = "#" + next.chron + nav.tokensSuffix()
-   a.dataset.src = String(srcColorIndex(next.article.f))
-   // Same as the toolbar next (right = newer): intercept like a list row so the
-   // hash link doesn't new-tab under <base target=_blank>.
-   a.addEventListener("click", (e) => {
-      e.preventDefault()
-      guard(() => nav.right())
-   })
-   const head = document.createElement("div")
-   head.className = "srr-readon-head"
-   const src = document.createElement("span")
-   src.className = "srr-readon-source"
-   src.textContent = data.feedTitle(next.article.f)
-   const age = document.createElement("time")
-   age.className = "srr-readon-age"
-   age.textContent = timeAgo(next.article.p || next.article.a)
-   head.append(src, age)
-   const title = document.createElement("div")
-   title.className = "srr-readon-title"
-   title.textContent = next.article.t || "(untitled)"
-   a.append(head, title)
-   el.readon.append(a)
-}
-
 function render(o: IShowFeed) {
    showReader()
    // Showing the reader supersedes any pending debounced search query. A row-tap
@@ -199,20 +147,6 @@ function render(o: IShowFeed) {
    el.source.textContent = currentFeed.title
    refreshFeedLabel()
    refreshSaveButton(!o.placeholder)
-
-   // Read on: clear the prior article's preview now (it's below the fold, so no
-   // flash), then fill — the next dispatch when there is one, else a terminal
-   // line. peek is token-guarded against a faster subsequent navigation.
-   el.readon.replaceChildren()
-   const myReadon = ++readonTok
-   if (!o.has_right) renderReadon(null)
-   else
-      void nav
-         .peek("right")
-         .then((nx) => {
-            if (myReadon === readonTok) renderReadon(nx)
-         })
-         .catch(() => {})
 
    document.title = "SRR - " + (o.article.t ?? "")
    window.scrollTo(0, 0)

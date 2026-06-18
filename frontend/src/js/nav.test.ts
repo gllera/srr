@@ -1788,7 +1788,7 @@ describe("search filter mode (q:<query>)", () => {
    })
 })
 
-// ── Edge cases: listAnchor / peek / fromHash foreign+malformed /
+// ── Edge cases: listAnchor / fromHash foreign+malformed /
 // cycle / saved-set parse / pruneSeen / tombstone / all-caught-up ────────────
 const SEEN = "srr-seen"
 const seedSeen = (m: Record<string, number>) => localStorage.setItem(SEEN, JSON.stringify(m))
@@ -1843,29 +1843,6 @@ describe("listAnchor", () => {
       } finally {
          nav.setUnreadOnly(false)
       }
-   })
-})
-
-describe("peek", () => {
-   it("returns null at the right edge (newest article)", async () => {
-      setupIndex([{ feedId: 1 }, { feedId: 1 }])
-      await nav.goTo(1)
-      expect(await nav.peek("right")).toBeNull()
-   })
-
-   it("returns null at the left edge (oldest article)", async () => {
-      setupIndex([{ feedId: 1 }, { feedId: 1 }])
-      await nav.goTo(0)
-      expect(await nav.peek("left")).toBeNull()
-   })
-
-   it("peeks the adjacent SAVED neighbor (respects saved mode, no idx walk)", async () => {
-      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
-      localStorage.setItem("srr-saved", JSON.stringify([0, 2]))
-      nav.filter.set([nav.SAVED_TOKEN])
-      await nav.last() // pos = 2 (newest saved)
-      const p = await nav.peek("left")
-      expect(p?.chron).toBe(0) // skips the unsaved chron 1
    })
 })
 

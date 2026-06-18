@@ -286,84 +286,6 @@ video {
    }
 }
 
-/* Read on — the next dispatch previewed at the article's end, so the wire reads
-   as a continuous feed and the next tap lands under your thumb, not at the
-   toolbar. A "NEXT" divider (a perforated teleprinter rule — the paper keeps
-   feeding) over a list-row-style preview: a colored source eyebrow (the next
-   source's color, data-src → --src) + headline in the sans wire chrome (it sits
-   outside .srr-content's serif). No left rail — the colored eyebrow carries the
-   source. Terminal at the newest match: a "LATEST" divider + a quiet line. */
-.srr-readon {
-   display: block;
-   margin-top: 2.5rem;
-}
-.srr-readon-divider {
-   display: flex;
-   align-items: center;
-   gap: 0.6rem;
-   font-family: var(--font-mono);
-   font-size: 0.66rem;
-   font-weight: 600;
-   letter-spacing: 0.12em;
-   color: var(--muted);
-   margin-bottom: 0.55rem;
-}
-.srr-readon-divider::after {
-   content: "";
-   flex: 1;
-   border-top: 1px dashed var(--faint);
-}
-.srr-readon-next {
-   display: block;
-   padding: 0.35rem 0.45rem 0.5rem;
-   margin: 0 -0.45rem;
-   border-radius: var(--radius);
-   text-decoration: none;
-   color: var(--fg);
-   transition: background 0.15s;
-}
-.srr-readon-next:hover {
-   background: var(--hover);
-}
-.srr-readon-head {
-   display: flex;
-   align-items: baseline;
-   gap: 0.5rem;
-   margin-bottom: 0.2rem;
-}
-.srr-readon-source {
-   flex: 1 1 auto;
-   min-width: 0;
-   font-family: var(--font-mono);
-   font-size: 0.66rem;
-   font-weight: 600;
-   letter-spacing: 0.07em;
-   text-transform: uppercase;
-   color: var(--src, var(--accent));
-   overflow: hidden;
-   text-overflow: ellipsis;
-   white-space: nowrap;
-}
-.srr-readon-age {
-   flex-shrink: 0;
-   font-family: var(--font-mono);
-   font-size: 0.66rem;
-   color: var(--muted);
-}
-.srr-readon-title {
-   font-family: var(--font-sans);
-   font-size: 1.05rem;
-   font-weight: 600;
-   line-height: 1.3;
-   letter-spacing: -0.01em;
-   overflow-wrap: anywhere;
-}
-.srr-readon-endmsg {
-   margin: 0;
-   color: var(--muted);
-   font-size: var(--text-sm);
-}
-
 /* Toolbar */
 .srr-toolbar {
    position: fixed;
@@ -1162,8 +1084,7 @@ body:not(.srr-view-list) .srr-toolbar > .srr-unread {
 
 /* The list's end termini (list.ts syncBottomTerminus / syncTopTerminus): an
    "OLDEST" label at the bottom and a "LATEST" label at the top, each a dashed
-   rule flanking the label, so scrolling to either end reads as a definite stop.
-   "LATEST" matches the reader's read-on "LATEST" terminus. */
+   rule flanking the label, so scrolling to either end reads as a definite stop. */
 .srr-wire-end {
    /* Top padding matches LATEST's distance to the first headline — its 1.5rem
       gap plus the day divider that sits under it — so both termini sit equally

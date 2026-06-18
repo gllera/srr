@@ -238,7 +238,7 @@ function ensureSearchSet(): Promise<void> {
 }
 
 // The current feed's neighbor walk — the ONE seam saved mode branches at. Every
-// navigation primitive (step, peek, first/last, goTo) and the list surface route
+// navigation primitive (step, first/last, goTo) and the list surface route
 // their findLeft/findRight through these instead of data.* directly, so saved
 // mode (the explicit set) vs feed mode (the idx packs) is decided in one
 // place. Async to match data.findLeft/findRight; the saved branch is synchronous,
@@ -363,8 +363,8 @@ export const filter = {
    },
    // Fold unseen-only into the just-built feed membership (shared by set() and
    // clear()). When on, raise EVERY member's lower bound past its snapshotted seen
-   // high-water — so read articles fall below it for findLeft/findRight/matches/
-   // peek — and snapshot the members for the unread counters (showFeed/unreadTally/
+   // high-water — so read articles fall below it for findLeft/findRight/matches
+   // — and snapshot the members for the unread counters (showFeed/unreadTally/
    // isValidSeen). Generalised from the old single-tag case: it now applies to any
    // filter, so [ALL]/a feed/a tag all become a "show only unread" view. When
    // off, just total the set (feedTotal). Saved/search short-circuit before this.
@@ -804,17 +804,6 @@ export function left(): Promise<IShowFeed> {
 
 export function right(): Promise<IShowFeed> {
    return step("right")
-}
-
-// Peek the neighbor in `dir` without navigating: its chronIdx + (cached/
-// prefetched) article, or null at the edge. Uses the SAME feedLeft/feedRight
-// neighbor walk as step(), so it respects every filter mode (feed / tag /
-// unseen-only / saved / search). For the reader's end-of-article "read on"
-// preview — loadArticle is the deduped cache the neighbor prefetch already warms.
-export async function peek(dir: "left" | "right"): Promise<{ chron: number; article: IArticle } | null> {
-   const target = await (dir === "left" ? feedLeft(pos - 1) : feedRight(pos + 1))
-   if (target === -1) return null
-   return { chron: target, article: await data.loadArticle(target) }
 }
 
 export async function first(): Promise<IShowFeed> {
