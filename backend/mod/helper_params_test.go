@@ -19,40 +19,14 @@ func TestParseParams(t *testing.T) {
 		t.Errorf("parseParams(nil) = %v, %v; want nil, nil", got, err)
 	}
 
-	// A bare flag (no '=') is shorthand for key=true.
-	if p, err := parseParams([]string{"verbose", "level=2"}); err != nil {
-		t.Errorf("bare flag: %v", err)
-	} else if p["verbose"] != "true" || p["level"] != "2" {
-		t.Errorf("bare flag parsed wrong: %v", p)
-	}
-
 	for _, bad := range [][]string{
 		{"=value"},     // empty key
+		{"verbose"},    // bare token (no '='); key=value is required
 		{"k=v", "k=w"}, // duplicate key
 	} {
 		if _, err := parseParams(bad); err == nil {
 			t.Errorf("parseParams(%v) expected error", bad)
 		}
-	}
-}
-
-func TestParamsBool(t *testing.T) {
-	// Absent → default (either way).
-	if b, err := Params(nil).Bool("verbose", true); err != nil || !b {
-		t.Errorf("absent: got %v, %v; want true, nil", b, err)
-	}
-	if b, err := Params(nil).Bool("verbose", false); err != nil || b {
-		t.Errorf("absent: got %v, %v; want false, nil", b, err)
-	}
-	// Bare flag (stored as "true" by parseParams) and explicit forms.
-	for v, want := range map[string]bool{"true": true, "false": false, "1": true, "0": false} {
-		if b, err := (Params{"verbose": v}).Bool("verbose", false); err != nil || b != want {
-			t.Errorf("Bool(%q) = %v, %v; want %v", v, b, err, want)
-		}
-	}
-	// Non-boolean value errors.
-	if _, err := (Params{"verbose": "maybe"}).Bool("verbose", false); err == nil {
-		t.Errorf("Bool(\"maybe\") expected error")
 	}
 }
 

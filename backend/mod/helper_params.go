@@ -16,8 +16,7 @@ import (
 type Params map[string]string
 
 // parseParams turns the post-name fields of a built-in token into a Params map.
-// A field is key=value, or a bare key (no '=') which sets a boolean flag to
-// "true" — so "verbose" is shorthand for "verbose=true". An empty key or a
+// Each field must be key=value; a bare token (no '='), an empty key, or a
 // repeated key is a configuration error reported to the caller (no silent drops).
 func parseParams(fields []string) (Params, error) {
 	if len(fields) == 0 {
@@ -26,11 +25,8 @@ func parseParams(fields []string) (Params, error) {
 	p := make(Params, len(fields))
 	for _, f := range fields {
 		k, v, ok := strings.Cut(f, "=")
-		if k == "" {
-			return nil, fmt.Errorf("malformed parameter %q, want key or key=value", f)
-		}
-		if !ok {
-			v = "true" // a bare flag (no '=') is a boolean set to true
+		if k == "" || !ok {
+			return nil, fmt.Errorf("malformed parameter %q, want key=value", f)
 		}
 		if _, dup := p[k]; dup {
 			return nil, fmt.Errorf("duplicate parameter %q", k)
@@ -50,22 +46,6 @@ func (p Params) only(allowed ...string) error {
 		}
 	}
 	return nil
-}
-
-// Bool returns the boolean for key, or def when key is absent. A bare flag
-// (e.g. "verbose" with no '=') is stored as "true" by parseParams, so it reads
-// as true here; an explicit value accepts the strconv.ParseBool set
-// (1/0, t/f, true/false).
-func (p Params) Bool(key string, def bool) (bool, error) {
-	v, ok := p[key]
-	if !ok {
-		return def, nil
-	}
-	b, err := strconv.ParseBool(v)
-	if err != nil {
-		return false, fmt.Errorf("parameter %s=%q: %w", key, v, err)
-	}
-	return b, nil
 }
 
 // Duration returns the parsed duration for key, or def when key is absent.

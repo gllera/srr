@@ -89,7 +89,6 @@ export interface IDBWire {
    total_art: number // TotalArticles
    next_pid: number // NextPackID
    pack_off: number // PackOffset
-   first_fetched: number // FirstFetchedAt
    pipe?: string[] // Pipe
    ingest?: string // Ingest
    gen?: number // Gen

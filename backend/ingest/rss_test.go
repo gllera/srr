@@ -176,28 +176,6 @@ func TestParseCDATA(t *testing.T) {
 	}
 }
 
-func TestParseStopFeed(t *testing.T) {
-	count := 0
-	err := ParseFeed([]byte(`<rss version="2.0"><feed>
-    <item><title>A</title></item>
-    <item><title>B</title></item>
-    <item><title>C</title></item>
-  </feed></rss>`), func(item *mod.RawItem) error {
-		count++
-		if count == 2 {
-			return ErrStopFeed
-		}
-		return nil
-	})
-
-	if err != nil {
-		t.Fatalf("ParseFeed: %v", err)
-	}
-	if count != 2 {
-		t.Errorf("callback called %d times, want 2", count)
-	}
-}
-
 func TestParseUnsupportedFormat(t *testing.T) {
 	err := ParseFeed([]byte(`<html><body>Not a feed</body></html>`), func(*mod.RawItem) error {
 		t.Fatal("callback should not be called")

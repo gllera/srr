@@ -181,24 +181,33 @@ func (p *pack) writeArticle(ad *ArticleData) error {
 	return err
 }
 
-func (o *DB) loadPack(ctx context.Context, key string) (*pack, []byte, error) {
-	p := newPack()
+// loadPack fetches and decompresses the pack at key into its raw bytes, or nil
+// when the key is absent (Get with ignoreMissing). Callers that need to append
+// wrap the bytes with packFromBytes.
+func (o *DB) loadPack(ctx context.Context, key string) ([]byte, error) {
 	rc, err := o.Get(ctx, key, true)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if rc == nil {
-		return p, nil, nil
+		return nil, nil
 	}
 	defer rc.Close()
-	raw, err := gunzip(rc)
-	if err != nil {
-		return nil, nil, err
+	return gunzip(rc)
+}
+
+// packFromBytes wraps decompressed pack bytes into an appendable *pack. The
+// length guard is load-bearing: gzip.NewWriter flushes its header on the first
+// Write — including Write(nil) — so an empty pack must skip the Write to keep
+// Len()==0, the fresh-store sentinel the idx/data writers branch on.
+func packFromBytes(raw []byte) (*pack, error) {
+	p := newPack()
+	if len(raw) > 0 {
+		if _, err := p.Write(raw); err != nil {
+			return nil, err
+		}
 	}
-	if _, err := p.Write(raw); err != nil {
-		return nil, nil, err
-	}
-	return p, raw, nil
+	return p, nil
 }
 
 // savePack publishes a pack with the fast stdlib gzip encoding it was
@@ -340,31 +349,34 @@ func latestIdxEntryCount(totalArticles int) int {
 }
 
 // checkLatestIdx verifies a freshly-loaded latest idx pack matches db.gz: its
-// entry count (derived from the variable header's numSlots) must equal the
-// tail count. The pack ends with a variable-length u16 boundary footer, so the
+// entry count (derived from the variable header's numSlots) must equal the tail
+// count. The pack ends with a variable-length u16 boundary footer, so the
 // header+entries length is a lower bound and the trailing bytes must be a whole
-// number of u16 boundaries. Guards against a stale latest pack / format mismatch.
-func checkLatestIdx(key string, raw []byte, totalArticles int) error {
+// number of u16 boundaries. It returns entriesEnd — the offset where the entries
+// end and the footer begins — so the append path can split the footer off without
+// re-deriving the variable-header geometry (0 for an empty store). Guards against
+// a stale latest pack / format mismatch.
+func checkLatestIdx(key string, raw []byte, totalArticles int) (entriesEnd int, err error) {
 	want := latestIdxEntryCount(totalArticles)
 	if want == 0 {
 		if len(raw) != 0 {
-			return fmt.Errorf("%s has %d bytes but db.gz expects an empty store", key, len(raw))
+			return 0, fmt.Errorf("%s has %d bytes but db.gz expects an empty store", key, len(raw))
 		}
-		return nil
+		return 0, nil
 	}
 	if len(raw) < idxHeaderPrefix {
-		return fmt.Errorf("%s: short idx header (%d bytes)", key, len(raw))
+		return 0, fmt.Errorf("%s: short idx header (%d bytes)", key, len(raw))
 	}
 	numSlots := int(binary.LittleEndian.Uint32(raw[idxStateSize:]))
-	headerAndEntries := idxHeaderPrefix + numSlots*4 + want*idxEntrySize
-	if len(raw) < headerAndEntries {
-		return fmt.Errorf("%s has %d bytes but db.gz expects at least %d", key, len(raw), headerAndEntries)
+	entriesEnd = idxHeaderPrefix + numSlots*4 + want*idxEntrySize
+	if len(raw) < entriesEnd {
+		return 0, fmt.Errorf("%s has %d bytes but db.gz expects at least %d", key, len(raw), entriesEnd)
 	}
-	if (len(raw)-headerAndEntries)%idxBoundarySize != 0 {
-		return fmt.Errorf("%s footer is not a whole number of u16 boundaries (%d trailing bytes)",
-			key, len(raw)-headerAndEntries)
+	if (len(raw)-entriesEnd)%idxBoundarySize != 0 {
+		return 0, fmt.Errorf("%s footer is not a whole number of u16 boundaries (%d trailing bytes)",
+			key, len(raw)-entriesEnd)
 	}
-	return nil
+	return entriesEnd, nil
 }
 
 // readPackHeader decompresses only the leading size bytes of a pack (gzip
@@ -473,20 +485,21 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) ([]ArticleData, 
 
 	c := &o.core
 
-	meta, metaRaw, err := o.loadPack(ctx, latestKey(c, "idx"))
+	metaRaw, err := o.loadPack(ctx, latestKey(c, "idx"))
 	if err != nil {
 		return nil, err
 	}
-	if err := checkLatestIdx(latestKey(c, "idx"), metaRaw, c.TotalArticles); err != nil {
-		return nil, err
-	}
-	data, _, err := o.loadPack(ctx, latestKey(c, "data"))
+	entriesEnd, err := checkLatestIdx(latestKey(c, "idx"), metaRaw, c.TotalArticles)
 	if err != nil {
 		return nil, err
 	}
-
-	if c.FirstFetchedAt == 0 {
-		c.FirstFetchedAt = c.FetchedAt
+	dataRaw, err := o.loadPack(ctx, latestKey(c, "data"))
+	if err != nil {
+		return nil, err
+	}
+	data, err := packFromBytes(dataRaw)
+	if err != nil {
+		return nil, err
 	}
 
 	// The latest idx pack = header ‖ entries ‖ u16-boundary footer. Appending
@@ -494,14 +507,13 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) ([]ArticleData, 
 	// boundary list, then re-emitting it at save. localIdx is the next entry's
 	// position within the current latest idx pack; boundaries holds the local
 	// indices at which the data packId has advanced (what the old per-entry
-	// delta_pack_id bit encoded).
+	// delta_pack_id bit encoded). entriesEnd (from checkLatestIdx, 0 on an empty
+	// store) is where the entries end and the old footer begins.
 	var boundaries []int
 	localIdx := latestIdxEntryCount(c.TotalArticles)
-	if len(metaRaw) > 0 {
-		numSlots := int(binary.LittleEndian.Uint32(metaRaw[idxStateSize:]))
-		entriesEnd := idxHeaderPrefix + numSlots*4 + localIdx*idxEntrySize
+	meta := newPack()
+	if entriesEnd > 0 {
 		boundaries = parseIdxFooter(metaRaw[entriesEnd:])
-		meta = newPack()
 		if _, err := meta.Write(metaRaw[:entriesEnd]); err != nil {
 			return nil, err
 		}

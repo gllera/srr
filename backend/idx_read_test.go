@@ -160,7 +160,7 @@ func TestOwnFeedCountForFeedAddedMidPack(t *testing.T) {
 		t.Fatalf("PutArticles batch 2: %v", err)
 	}
 
-	_, raw, err := db.loadPack(ctx, latestKey(c, "idx"))
+	raw, err := db.loadPack(ctx, latestKey(c, "idx"))
 	if err != nil {
 		t.Fatalf("loadPack: %v", err)
 	}

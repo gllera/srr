@@ -225,7 +225,7 @@ func TestPutArticlesCrossBatchFooter(t *testing.T) {
 
 	// Precondition: batch 1 must leave a NON-EMPTY footer, else the cross-batch
 	// strip/re-emit path under test is never exercised.
-	_, raw1, err := db.loadPack(ctx, latestKey(c, "idx"))
+	raw1, err := db.loadPack(ctx, latestKey(c, "idx"))
 	if err != nil {
 		t.Fatalf("loadPack idx after batch1: %v", err)
 	}
@@ -643,7 +643,7 @@ func TestLoadPackCorruptedGzip(t *testing.T) {
 	os.MkdirAll(filepath.Join(dir, "data"), 0755)
 	os.WriteFile(filepath.Join(dir, "data/corrupt.gz"), []byte("not gzip data"), 0644)
 
-	_, _, err := db.loadPack(ctx, "data/corrupt.gz")
+	_, err := db.loadPack(ctx, "data/corrupt.gz")
 	if err == nil {
 		t.Error("expected error for corrupted gzip data")
 	}
@@ -1110,46 +1110,5 @@ func TestReadGzCorruptedReturnsError(t *testing.T) {
 	}
 	if _, err := db.readGz(ctx, "bad.gz"); err == nil {
 		t.Error("expected decompress error")
-	}
-}
-
-func TestPutArticlesFirstFetchedAt(t *testing.T) {
-	db, c, _ := setupTestDB(t)
-	ch := &Feed{id: 1}
-	c.Feeds = map[int]*Feed{ch.id: ch}
-	c.FetchedAt = 1700000000
-
-	if _, err := db.PutArticles(ctx, []*Item{
-		{Feed: ch, Title: "A1", Content: "C1", Published: 1000},
-	}); err != nil {
-		t.Fatalf("PutArticles: %v", err)
-	}
-
-	if c.FirstFetchedAt != 1700000000 {
-		t.Errorf("FirstFetchedAt = %d, want 1700000000", c.FirstFetchedAt)
-	}
-}
-
-// first_fetched must ALWAYS be present in db.gz: it is kept NOT omitempty so
-// the key is present for golden/e2e fixtures (DBCore.FirstFetchedAt is now
-// informational metadata — no longer the idx-timestamp epoch the reader divided
-// by, since per-entry timestamps were dropped with the 2-byte idx entry). This
-// guards against re-adding omitempty.
-func TestDBCommitAlwaysEmitsFirstFetched(t *testing.T) {
-	dir := t.TempDir()
-	globals = &Globals{PackSize: 1, Store: dir}
-
-	db, err := NewDB(ctx, false)
-	if err != nil {
-		t.Fatalf("NewDB: %v", err)
-	}
-	if err := db.Commit(ctx); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
-	db.Close(ctx)
-
-	raw := decompressGz(t, filepath.Join(dir, "db.gz"))
-	if !bytes.Contains(raw, []byte(`"first_fetched"`)) {
-		t.Errorf("db.gz must always contain the first_fetched key, got: %s", raw)
 	}
 }
