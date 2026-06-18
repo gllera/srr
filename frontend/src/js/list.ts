@@ -279,6 +279,7 @@ function relabelDividers(): void {
    if (nav.isSearchFilter()) return
    let prev: string | null = null
    for (const row of rowsEl.querySelectorAll<HTMLElement>("a.srr-row")) {
+      if (row.dataset.ts === undefined) continue // skeleton: no timestamp yet
       const label = dayLabel(Number(row.dataset.ts))
       if (label !== prev) {
          const d = el("div", "srr-day-divider")
@@ -784,4 +785,12 @@ function scrollRowIntoView(row: HTMLElement): void {
 function toolbarInset(): number {
    const bar = document.querySelector<HTMLElement>(".srr-toolbar")
    return bar ? bar.offsetHeight : 0
+}
+
+// ── test seams (jsdom drives module-private DOM state) ───────────────────────
+export function __setRowsForTest(rows: HTMLElement | null): void {
+   rowsEl = rows
+}
+export function __relabelDividersForTest(): void {
+   relabelDividers()
 }
