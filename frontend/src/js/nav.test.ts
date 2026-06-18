@@ -1670,6 +1670,58 @@ describe("search filter mode (q:<query>)", () => {
    })
 })
 
+describe("search lazy stream (incremental pull)", () => {
+   const hit = (c: number) => ({ chron: c, f: 1, w: 1000 + c, t: "t" })
+   // newest-first, ONE hit per batch, so a partial walk proves laziness.
+   const genPerBatch = (chronsDesc: number[]) =>
+      async function* () {
+         for (const c of chronsDesc) yield [hit(c)]
+      }
+
+   beforeEach(() => {
+      searchMod.search.mockReset()
+      searchMod.available.mockReturnValue(true)
+      searchMod.shortQuery.mockReturnValue(false)
+   })
+
+   it("searchMore pulls one batch at a time, newest-first", async () => {
+      setupIndex(Array.from({ length: 60 }, () => ({ feedId: 1 })))
+      searchMod.search.mockImplementation(genPerBatch([55, 50, 45]))
+      nav.applyFilter([nav.SEARCH_PREFIX + "spin1"])
+      const a = await nav.searchMore()
+      expect(a.hits.map((h) => h.chron)).toEqual([55])
+      expect(a.done).toBe(false)
+      const b = await nav.searchMore()
+      expect(b.hits.map((h) => h.chron)).toEqual([50])
+      expect(nav.filter.matches(1, 55)).toBe(true)
+      expect(nav.filter.matches(1, 45)).toBe(false) // not pulled yet
+   })
+
+   it("feedLeft auto-pulls only down to the requested edge", async () => {
+      setupIndex(Array.from({ length: 60 }, () => ({ feedId: 1 })))
+      searchMod.search.mockImplementation(genPerBatch([55, 50, 45, 40, 35]))
+      nav.applyFilter([nav.SEARCH_PREFIX + "spin2"])
+      expect(await nav.feedLeft(47)).toBe(45) // pulls 55,50,45 then stops
+      expect(searchMod.search).toHaveBeenCalledTimes(1)
+      expect(nav.filter.matches(1, 40)).toBe(false) // 40 untouched
+   })
+
+   it("feedRight returns the smallest hit >= from", async () => {
+      setupIndex(Array.from({ length: 60 }, () => ({ feedId: 1 })))
+      searchMod.search.mockImplementation(genPerBatch([55, 50, 45]))
+      nav.applyFilter([nav.SEARCH_PREFIX + "spin3"])
+      expect(await nav.feedRight(46)).toBe(50)
+   })
+
+   it("an empty query never calls search.search", async () => {
+      setupIndex(Array.from({ length: 5 }, () => ({ feedId: 1 })))
+      nav.applyFilter([nav.SEARCH_PREFIX])
+      const r = await nav.searchMore()
+      expect(r.done).toBe(true)
+      expect(searchMod.search).not.toHaveBeenCalled()
+   })
+})
+
 // ── Edge cases: listAnchor / fromHash foreign+malformed /
 // cycle / saved-set parse / pruneSeen / tombstone / all-caught-up ────────────
 const SEEN = "srr-seen"
