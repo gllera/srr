@@ -53,7 +53,6 @@ const nav = vi.hoisted(() => {
       right: vi.fn(async () => sf()),
       first: vi.fn(async () => sf()),
       last: vi.fn(async () => sf()),
-      peek: vi.fn(async () => null),
       seek: vi.fn(async () => 0),
       unreadCounts: vi.fn(async () => new Map<number, number>()),
    }
@@ -106,7 +105,7 @@ const SKELETON = `
       <article class="srr-reader" hidden>
          <div class="srr-kicker"><span class="srr-source"></span><time class="srr-date"></time></div>
          <a class="srr-title-link"><h1 class="srr-title" tabindex="-1"></h1></a>
-         <div class="srr-content"></div><nav class="srr-readon"></nav></article>
+         <div class="srr-content"></div></article>
       <div class="srr-list" hidden></div>
       <nav class="srr-toolbar">
          <button class="srr-back"></button>
