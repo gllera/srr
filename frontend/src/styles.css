@@ -1060,6 +1060,55 @@ body:not(.srr-view-list) .srr-toolbar > .srr-unread {
       animation: none;
    }
 }
+/* Margin bell — the reader's edge feedback (app.ts bumpReaderEdge). A swipe or
+   arrow toward a dead edge kicks the whole reader a few px toward that wall and
+   springs back (the teleprinter carriage hitting the margin), while srr-edge-pulse
+   flashes the greyed ◀/▶ so the disabled control explains the stop. The reader
+   counterpart to the list's row bump above. */
+@keyframes srr-bell-left {
+   0%,
+   100% {
+      transform: translateX(0);
+   }
+   40% {
+      transform: translateX(-5px);
+   }
+}
+@keyframes srr-bell-right {
+   0%,
+   100% {
+      transform: translateX(0);
+   }
+   40% {
+      transform: translateX(5px);
+   }
+}
+.srr-reader.srr-bell-left {
+   animation: srr-bell-left 0.22s ease;
+}
+.srr-reader.srr-bell-right {
+   animation: srr-bell-right 0.22s ease;
+}
+@keyframes srr-edge-pulse {
+   0%,
+   100% {
+      opacity: 0.15;
+   }
+   35% {
+      opacity: 0.7;
+      color: var(--accent);
+   }
+}
+.srr-toolbar .srr-edge-pulse:disabled {
+   animation: srr-edge-pulse 0.22s ease;
+}
+@media (prefers-reduced-motion: reduce) {
+   .srr-reader.srr-bell-left,
+   .srr-reader.srr-bell-right,
+   .srr-toolbar .srr-edge-pulse:disabled {
+      animation: none;
+   }
+}
 /* Per-row save star — outline by default, filled + accent on a saved row.
    A generous padding keeps the tap target ≈ the row height without widening it. */
 .srr-row-star {
@@ -1129,8 +1178,68 @@ body:not(.srr-view-list) .srr-toolbar > .srr-unread {
 .srr-empty-star {
    color: var(--accent);
 }
+/* All caught up — the one in-between state that's a reward, not an absence:
+   there's nothing left to read. Alone among the empty states it gets a plain
+   checkmark in the app's warm accent (the cold/absent ones stay --muted gray);
+   the eyebrow + line below match the other states. */
+.srr-caughtup-check {
+   color: var(--accent);
+}
+.srr-caughtup-check svg {
+   display: block;
+   width: 2.1rem;
+   height: 2.1rem;
+}
+/* The reward settles in once. */
+@media (prefers-reduced-motion: no-preference) {
+   .srr-caughtup-check {
+      animation: srr-caughtup-in 0.4s ease both;
+   }
+}
+@keyframes srr-caughtup-in {
+   from {
+      opacity: 0;
+      transform: translateY(3px) scale(0.92);
+   }
+   to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+   }
+}
 .srr-list-sentinel {
    height: 1px;
+}
+
+/* The list's end termini (list.ts syncBottomTerminus / syncTopTerminus): an
+   "OLDEST" label at the bottom and a "LATEST" label at the top, each a dashed
+   rule flanking the label, so scrolling to either end reads as a definite stop.
+   "LATEST" matches the reader's read-on "LATEST" terminus. */
+.srr-wire-end {
+   /* Top padding matches LATEST's distance to the first headline — its 1.5rem
+      gap plus the day divider that sits under it — so both termini sit equally
+      far from the rows (the bottom has no divider to fill the space). */
+   padding: 3.5rem 0.85rem 2.25rem;
+   text-align: center;
+}
+.srr-wire-top {
+   padding: 2.25rem 0.85rem 1.5rem;
+   text-align: center;
+}
+.srr-wire-end-rule {
+   display: flex;
+   align-items: center;
+   gap: 0.7rem;
+   font-family: var(--font-mono);
+   font-size: 0.72rem;
+   font-weight: 600;
+   letter-spacing: 0.22em;
+   color: var(--muted);
+}
+.srr-wire-end-rule::before,
+.srr-wire-end-rule::after {
+   content: "";
+   flex: 1;
+   border-top: 1px dashed var(--faint);
 }
 
 /* Loading */

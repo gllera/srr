@@ -26,6 +26,7 @@ function mount(): void {
       next: document.querySelector(".srr-next")!,
       toolbar,
       guard: vi.fn(),
+      edgeBump: vi.fn(),
       onCycle: vi.fn(),
    })
 }

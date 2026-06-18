@@ -32,6 +32,9 @@ const nav = vi.hoisted(() => {
       tokensSuffix: vi.fn(() => ""),
       currentTokens: vi.fn(() => [] as string[]),
       getCurrentFilterKey: vi.fn(() => ""),
+      filterLabel: vi.fn((key: string) =>
+         key === "" ? "All" : key === "~saved" ? "★ Saved" : /^\d+$/.test(key) ? data.feedTitle(Number(key)) : key,
+      ),
       getFilterEntries: vi.fn(() => [""]),
       cycleFilter: vi.fn(async () => sf()),
       cycleOriginKey: vi.fn(() => ""),
@@ -229,6 +232,34 @@ describe("guard() — busy mutex", () => {
       expect(nav.fromHash).toHaveBeenLastCalledWith("2")
       release()
       await flush()
+   })
+})
+
+describe("reader edge — margin bell", () => {
+   // The default showFeed() has no left/right neighbor, so routing #2 lands on an
+   // article with BOTH prev and next disabled — i.e. at both edges at once.
+   it("ArrowLeft at the first article rings the bell instead of navigating", async () => {
+      await boot()
+      hashTo("#2")
+      await flush()
+      const reader = document.querySelector(".srr-reader") as HTMLElement
+      expect((document.querySelector(".srr-prev") as HTMLButtonElement).disabled).toBe(true)
+      nav.left.mockClear()
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }))
+      expect(reader.classList.contains("srr-bell-left")).toBe(true)
+      expect(nav.left).not.toHaveBeenCalled()
+   })
+
+   it("ArrowRight at the last article rings the bell to the right", async () => {
+      await boot()
+      hashTo("#2")
+      await flush()
+      const reader = document.querySelector(".srr-reader") as HTMLElement
+      expect((document.querySelector(".srr-next") as HTMLButtonElement).disabled).toBe(true)
+      nav.right.mockClear()
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }))
+      expect(reader.classList.contains("srr-bell-right")).toBe(true)
+      expect(nav.right).not.toHaveBeenCalled()
    })
 })
 

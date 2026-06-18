@@ -127,7 +127,7 @@ function renderReadon(next: { chron: number; article: IArticle } | null) {
       el.readon.append(readonDivider("LATEST"))
       const end = document.createElement("p")
       end.className = "srr-readon-endmsg"
-      end.textContent = "You're at the newest dispatch in this view."
+      end.textContent = "You're at the newest article in this view."
       el.readon.append(end)
       return
    }
@@ -243,8 +243,7 @@ function refreshFeedLabel() {
    if (key === lastFeedLabel) return
    lastFeedLabel = key
 
-   const label =
-      key === "" ? "All" : key === nav.SAVED_TOKEN ? "★ Saved" : /^\d+$/.test(key) ? data.feedTitle(Number(key)) : key
+   const label = nav.filterLabel(key)
    el.feed.textContent = label
    // A single-feed filter tints the toolbar label with that feed's source
    // color (the wire-desk identity in the toolbar); [ALL]/tag/saved/search stay
@@ -290,8 +289,7 @@ function listTitle(): string {
    }
    const key = nav.getCurrentFilterKey()
    if (key === "") return "SRR"
-   if (key === nav.SAVED_TOKEN) return "SRR · ★ Saved"
-   return "SRR · " + (/^\d+$/.test(key) ? data.feedTitle(Number(key)) : key)
+   return "SRR · " + nav.filterLabel(key)
 }
 
 // Show the list surface and (re)render it under the current filter. Shares the
@@ -506,11 +504,32 @@ function feedMenuTag(): string {
    return currentFeed.tag
 }
 
+// Margin bell — a step toward an edge with no neighbor (prev/next disabled) kicks
+// the reader toward that wall and springs it back, and pulses the dead control,
+// so a swipe or arrow at the first/last article reads as a boundary instead of a
+// dropped input — the reader's counterpart to the list's row bump (list.ts
+// bumpEdge). Reduced motion drops the kick (styles.css); the greyed button stays
+// as the static cue.
+function bumpReaderEdge(side: "prev" | "next") {
+   const bell = side === "prev" ? "srr-bell-left" : "srr-bell-right"
+   el.article.classList.remove("srr-bell-left", "srr-bell-right")
+   void el.article.offsetWidth // force reflow so a rapid repeat restarts the keyframes
+   el.article.classList.add(bell)
+   const btn = side === "prev" ? el.prev : el.next
+   btn.classList.remove("srr-edge-pulse")
+   void btn.offsetWidth
+   btn.classList.add("srr-edge-pulse")
+   setTimeout(() => {
+      el.article.classList.remove(bell)
+      btn.classList.remove("srr-edge-pulse")
+   }, 240) // > the 0.22s animations
+}
+
 const KEY_ACTIONS: Record<string, () => void> = {
-   ArrowLeft: () => !el.prev.disabled && guard(() => nav.left()),
-   a: () => !el.prev.disabled && guard(() => nav.left()),
-   ArrowRight: () => !el.next.disabled && guard(() => nav.right()),
-   d: () => !el.next.disabled && guard(() => nav.right()),
+   ArrowLeft: () => (el.prev.disabled ? bumpReaderEdge("prev") : guard(() => nav.left())),
+   a: () => (el.prev.disabled ? bumpReaderEdge("prev") : guard(() => nav.left())),
+   ArrowRight: () => (el.next.disabled ? bumpReaderEdge("next") : guard(() => nav.right())),
+   d: () => (el.next.disabled ? bumpReaderEdge("next") : guard(() => nav.right())),
    ArrowUp: () => nav.getFilterEntries().length > 1 && guard(() => nav.cycleFilter(-1)),
    w: () => nav.getFilterEntries().length > 1 && guard(() => nav.cycleFilter(-1)),
    ArrowDown: () => nav.getFilterEntries().length > 1 && guard(() => nav.cycleFilter(1)),
@@ -644,7 +663,14 @@ async function init() {
       }
    })
 
-   gestures = setupGestures({ prev: el.prev, next: el.next, toolbar: el.toolbar, guard, onCycle })
+   gestures = setupGestures({
+      prev: el.prev,
+      next: el.next,
+      toolbar: el.toolbar,
+      guard,
+      edgeBump: bumpReaderEdge,
+      onCycle,
+   })
    refreshUnreadButton() // reflect the persisted unread-only mode on the toolbar at boot
 
    let hash = location.hash.substring(1)

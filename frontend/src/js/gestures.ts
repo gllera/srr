@@ -6,6 +6,10 @@ export interface GestureDeps {
    next: HTMLButtonElement
    toolbar: HTMLElement
    guard: (fn: () => Promise<IShowFeed>) => void
+   // A committed swipe toward an edge with no neighbor (the prev/next button
+   // disabled) rings the reader's margin bell instead of navigating — app.ts owns
+   // the reader animation, like onCycle.
+   edgeBump: (side: "prev" | "next") => void
    // Two-finger vertical swipe = step the filter. The handler is surface-aware
    // (reader → cycle to next filter's article; list → re-filter the list), so
    // app.ts owns it rather than calling nav.cycleFilter directly.
@@ -84,8 +88,16 @@ export function setupGestures(deps: GestureDeps): Gestures {
          const dx = e.changedTouches[0].clientX - touchStartX
          const dy = e.changedTouches[0].clientY - touchStartY
          if (Math.abs(dx) < 50 || Math.abs(dy) > Math.abs(dx)) return
-         if (dx > 0 && !deps.prev.disabled) deps.guard(() => nav.left())
-         if (dx < 0 && !deps.next.disabled) deps.guard(() => nav.right())
+         // Past the threshold dx is a committed left/right swipe. Toward a live
+         // neighbor it navigates; toward a dead edge (button disabled) it rings
+         // the margin bell so the boundary is felt rather than swallowed.
+         if (dx > 0) {
+            if (deps.prev.disabled) deps.edgeBump("prev")
+            else deps.guard(() => nav.left())
+         } else {
+            if (deps.next.disabled) deps.edgeBump("next")
+            else deps.guard(() => nav.right())
+         }
       },
       { passive: true },
    )

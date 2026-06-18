@@ -969,6 +969,17 @@ export function getCurrentFilterKey(): string {
    return ""
 }
 
+// Resolve a filter key (getCurrentFilterKey / getFilterEntries format) to its
+// human label: [ALL] "" → "All", the saved smart-folder → "★ Saved", a numeric
+// feed id → that feed's title, a tag name → itself. Tags are already names; only
+// untagged single-feed filters carry a raw id, so this is what keeps the toolbar
+// label, the document title, and the caught-up line from ever showing an id.
+export function filterLabel(key: string): string {
+   if (key === "") return "All"
+   if (key === SAVED_TOKEN) return "★ Saved"
+   return /^\d+$/.test(key) ? data.feedTitle(Number(key)) : key
+}
+
 // "" guard: callers pass currentFeed.tag/id which can be empty when no feed is set;
 // without it, an active filter on "" (impossible) or callers' "" would falsely match.
 export function isSingleFilter(token: string): boolean {
