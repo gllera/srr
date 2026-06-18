@@ -268,6 +268,164 @@ describe("list", () => {
       })
    })
 
+   // Default (non-gated) loadMeta, restored by tests that install a gated one.
+   const defaultLoadMeta = () =>
+      data.loadMeta.mockImplementation(async (chron: number) => {
+         const a = data._arts.get(chron)!
+         return { f: a.f, w: a.p || a.a, t: a.t }
+      })
+
+   it("fires onInteractive at first paint (before fills) and on an empty store", async () => {
+      setIndex(3)
+      let release: (() => void) | null = null
+      const gate = new Promise<void>((r) => (release = () => r()))
+      data.loadMeta.mockImplementation(async (chron: number) => {
+         await gate
+         const a = data._arts.get(chron)!
+         return { f: a.f, w: a.p || a.a, t: a.t }
+      })
+      const cb = vi.fn()
+      const p = list.render(false, cb)
+      await new Promise((r) => setTimeout(r, 0))
+      expect(cb).toHaveBeenCalledTimes(1) // fired at first paint, fills still gated
+      release!()
+      await p
+      expect(cb).toHaveBeenCalledTimes(1) // not re-fired after fills
+      defaultLoadMeta()
+
+      // An empty store must STILL fire it — otherwise the surface stays 'busy'.
+      data.db.total_art = 0
+      const cb2 = vi.fn()
+      await list.render(false, cb2)
+      expect(cb2).toHaveBeenCalledTimes(1)
+   })
+
+   it("fires onInteractive on the show() reuse path (no rebuild)", async () => {
+      setIndex(4)
+      nav._setAnchor(2) // a rendered row, so show() takes the reuse path
+      await list.render()
+      const cb = vi.fn()
+      await list.show(false, cb) // builtKey matches + row present → reuse
+      expect(cb).toHaveBeenCalledTimes(1)
+   })
+
+   it("a superseding render aborts the gated one cleanly (no dup rows, bounded waste)", async () => {
+      setIndex(20)
+      let release: (() => void) | null = null
+      const gate = new Promise<void>((r) => (release = () => r()))
+      const calls: number[] = []
+      data.loadMeta.mockImplementation(async (chron: number) => {
+         calls.push(chron)
+         await gate
+         const a = data._arts.get(chron)!
+         return { f: a.f, w: a.p || a.a, t: a.t }
+      })
+      const p1 = list.render()
+      await new Promise((r) => setTimeout(r, 0))
+      expect(calls.length).toBe(6) // p1's first pool wave only
+      const p2 = list.render() // supersede before releasing
+      await new Promise((r) => setTimeout(r, 0))
+      expect(calls.length).toBe(12) // + p2's first wave
+      release!()
+      await Promise.all([p1, p2])
+      // p1 dispatched only its first wave (6) then aborted on the token guard; p2
+      // ran all 20. 6 + 20 = 26 (not 40), proving the superseded run stops fetching.
+      expect(calls.length).toBe(26)
+      // One clean set of 20 filled rows — no duplicates from the superseded run.
+      expect($rows().length).toBe(20)
+      expect($rows().every((r) => !r.classList.contains("srr-row-skeleton"))).toBe(true)
+      defaultLoadMeta()
+   })
+
+   it("search appends every hit in a single multi-hit batch", async () => {
+      nav.filter.search = true
+      let done = false
+      nav.searchMore.mockImplementation(async () => {
+         if (done) return { hits: [], done: true }
+         done = true
+         return {
+            hits: [
+               { chron: 9, f: 1, w: 9, t: "a nine" },
+               { chron: 5, f: 1, w: 5, t: "a five" },
+               { chron: 1, f: 1, w: 1, t: "a one" },
+            ],
+            done: true,
+         }
+      })
+      data.db.total_art = 10
+      await list.render()
+      expect($rows().map((r) => r.querySelector(".srr-row-title")!.textContent)).toEqual(["a nine", "a five", "a one"])
+   })
+
+   it("search stops the initial render at one batch (BATCH) and pages older via loadMore", async () => {
+      nav.filter.search = true
+      const waves = [
+         Array.from({ length: 30 }, (_, k) => ({ chron: 100 - k, f: 1, w: 100 - k, t: "t" + k })),
+         [{ chron: 50, f: 1, w: 50, t: "older one" }],
+      ]
+      let i = 0
+      nav.searchMore.mockImplementation(async () => {
+         if (i >= waves.length) return { hits: [], done: true }
+         const hits = waves[i++]
+         return { hits, done: i >= waves.length }
+      })
+      data.db.total_art = 200
+      await list.render()
+      expect($rows().length).toBe(30) // filled one batch, didn't drain the stream
+      await list.loadMore()
+      expect($rows().length).toBe(31) // paged the next batch
+      expect($rows()[30].querySelector(".srr-row-title")!.textContent).toBe("older one")
+   })
+
+   it("fillRow falls back to '(untitled)' for an empty title", () => {
+      const row = list.rowEl(1, null, {})
+      list.fillRow(row, { f: 1, w: 100, t: "" }, {})
+      expect(row.querySelector(".srr-row-title")!.textContent).toBe("(untitled)")
+   })
+
+   it("relabelDividers builds nothing while every row is still a skeleton", () => {
+      const rows = document.createElement("div")
+      rows.className = "srr-list-rows"
+      rows.append(list.rowEl(2, null, {}), list.rowEl(1, null, {}), list.rowEl(0, null, {}))
+      document.querySelector(".srr-list")!.replaceChildren(rows)
+      list.__setRowsForTest(rows)
+      list.__relabelDividersForTest()
+      expect(rows.querySelectorAll(".srr-day-divider").length).toBe(0)
+   })
+
+   it("skips the post-fill anchor re-assert after a user scroll gesture", async () => {
+      setIndex(10)
+      nav._setAnchor(5) // anchoredMid → render positions and would re-assert on fill
+      let release: (() => void) | null = null
+      const gate = new Promise<void>((r) => (release = () => r()))
+      data.loadMeta.mockImplementation(async (chron: number) => {
+         await gate
+         const a = data._arts.get(chron)!
+         return { f: a.f, w: a.p || a.a, t: a.t }
+      })
+      const scrollSpy = window.scrollTo as unknown as ReturnType<typeof vi.fn>
+      const p = list.render()
+      await new Promise((r) => setTimeout(r, 0))
+      const afterPaint = scrollSpy.mock.calls.length // initial positioning done
+      document.dispatchEvent(new Event("wheel")) // user takes over scrolling
+      release!()
+      await p
+      // No additional scrollTo from the per-fill / final re-assert — user wins.
+      expect(scrollSpy.mock.calls.length).toBe(afterPaint)
+      defaultLoadMeta()
+   })
+
+   it("propagates a fill failure so the app can surface it (no silent permanent skeleton)", async () => {
+      setIndex(3)
+      data.loadMeta.mockImplementation(async (chron: number) => {
+         if (chron === 2) throw new Error("meta fetch failed")
+         const a = data._arts.get(chron)!
+         return { f: a.f, w: a.p || a.a, t: a.t }
+      })
+      await expect(list.render()).rejects.toThrow("meta fetch failed")
+      defaultLoadMeta()
+   })
+
    it("streams search matches into the list as they are found", async () => {
       // 3 matches, newest-first 9,5,1; one per searchMore batch.
       const batches = [
