@@ -650,11 +650,32 @@ init().catch(showError)
 // straight off the network. The design harness (design.html sets
 // data-srr-harness) skips the SW so its cache-first pack bucket can't serve a
 // stale fixture store across reloads.
+//
+// PRODUCTION ONLY. Under `parcel serve` (dev, NODE_ENV !== "production") the
+// bundle keeps a stable filename across rebuilds, so the cache-first shell bucket
+// would serve STALE JS after every code change — a phantom-bug generator that
+// masks real fixes. So in dev we don't register, and actively unregister any SW a
+// prior build left controlling this origin + drop its caches (self-healing, so a
+// developer who already has a dev SW recovers on the next load without manually
+// clearing site data). `parcel build` (e2e + real prod) sets NODE_ENV=production,
+// so the offline/PWA behavior and its e2e coverage are unaffected.
 if ("serviceWorker" in navigator && !document.documentElement.hasAttribute("data-srr-harness")) {
-   // sw.ts lives at src/ root (not src/js/) so Parcel emits it at the deployment
-   // root — its default scope then covers the whole env (incl. packs/assets/).
-   // type:module lets sw.ts import the generated contract (format.gen.ts); the
-   // SW already requires DecompressionStream, which is the newer feature, so
-   // module-worker support is never the limiting factor.
-   navigator.serviceWorker.register(new URL("../sw.ts", import.meta.url), { type: "module" }).catch(() => {})
+   if (process.env.NODE_ENV === "production") {
+      // sw.ts lives at src/ root (not src/js/) so Parcel emits it at the deployment
+      // root — its default scope then covers the whole env (incl. packs/assets/).
+      // type:module lets sw.ts import the generated contract (format.gen.ts); the
+      // SW already requires DecompressionStream, which is the newer feature, so
+      // module-worker support is never the limiting factor.
+      navigator.serviceWorker.register(new URL("../sw.ts", import.meta.url), { type: "module" }).catch(() => {})
+   } else {
+      navigator.serviceWorker
+         .getRegistrations()
+         .then((regs) => regs.forEach((r) => r.unregister()))
+         .catch(() => {})
+      if (typeof caches !== "undefined")
+         caches
+            .keys()
+            .then((keys) => keys.forEach((k) => caches.delete(k)))
+            .catch(() => {})
+   }
 }
