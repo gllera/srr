@@ -128,7 +128,6 @@ function buildStore(opts: { hdrs: boolean; summaryFile: boolean }): string {
       total_art: 100002,
       next_pid: 3,
       pack_off: 2,
-      first_fetched: FIRST_FETCHED,
       ...(opts.hdrs ? { hdrs: 2 } : {}),
       feeds: {
          0: { title: "A", url: "http://a", total_art: 50000, add_idx: 0 },

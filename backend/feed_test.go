@@ -19,15 +19,13 @@ import (
 // rather than hard-coding the RSS path.
 func init() {
 	// Registered once at init; safe because tests use distinct names.
-	ingest.Register("test-stub", func() ingest.FetchFunc {
-		pub := time.Unix(1700000000, 0)
-		items := []*mod.RawItem{
-			{GUID: 1, Title: "stub-1", Link: "https://stub/1", Published: &pub},
-			{GUID: 2, Title: "stub-2", Link: "https://stub/2", Published: &pub},
-		}
-		return func(_ context.Context, _ *http.Client, _ []byte, _ ingest.Request) (ingest.Result, error) {
-			return ingest.Result{Items: items}, nil
-		}
+	pub := time.Unix(1700000000, 0)
+	items := []*mod.RawItem{
+		{GUID: 1, Title: "stub-1", Link: "https://stub/1", Published: &pub},
+		{GUID: 2, Title: "stub-2", Link: "https://stub/2", Published: &pub},
+	}
+	ingest.Register("test-stub", func(_ context.Context, _ *http.Client, _ []byte, _ ingest.Request) (ingest.Result, error) {
+		return ingest.Result{Items: items}, nil
 	})
 }
 

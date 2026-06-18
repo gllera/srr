@@ -36,8 +36,8 @@ func (o *InspectCmd) Run() error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("db: total_art=%d  next_pid=%d  seq=%d  pack_off=%d  first_fetched=%d\n",
-		core.TotalArticles, core.NextPackID, core.Seq, core.PackOffset, core.FirstFetchedAt)
+	fmt.Printf("db: total_art=%d  next_pid=%d  seq=%d  pack_off=%d\n",
+		core.TotalArticles, core.NextPackID, core.Seq, core.PackOffset)
 
 	if core.TotalArticles == 0 {
 		fmt.Println("no articles")

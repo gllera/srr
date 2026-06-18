@@ -80,30 +80,25 @@ func readBody(body io.Reader, buf []byte, what string) ([]byte, error) {
 	return buf[:n], nil
 }
 
-// FetchFunc fetches a single URL into a Result. Built-in fetchers
-// register a factory that returns one of these; the factory is called
-// once per Fetcher (per New()) so it may capture per-instance state.
+// FetchFunc fetches a single URL into a Result. Built-in fetchers register
+// one of these directly (Register) at init; the built-ins are stateless, so
+// there is no per-instance state to build.
 //
 // The shared *http.Client is provided for HTTP-based built-ins; external
 // fetchers ignore it. The shared buf is the caller's per-worker read
 // buffer — built-ins should reuse it, external fetchers leave it alone.
 type FetchFunc func(ctx context.Context, client *http.Client, buf []byte, req Request) (Result, error)
 
-// A factory builds a built-in's FetchFunc once per New() so it can capture
-// per-instance state (compiled regexes, a shared connection pool, …). Mirrors
-// mod.Register's factory.
-type factory func() FetchFunc
-
-var registry = map[string]factory{}
+var registry = map[string]FetchFunc{}
 
 // Register registers a built-in fetcher available as "#name". Names
 // without a leading "#" get one prepended so init() calls can pass either
 // form.
-func Register(name string, init factory) {
+func Register(name string, fn FetchFunc) {
 	if !strings.HasPrefix(name, "#") {
 		name = "#" + name
 	}
-	registry[name] = init
+	registry[name] = fn
 }
 
 // Select applies the caller's precedence rule: feed > global default
@@ -117,23 +112,20 @@ func Select(feedFetcher, globalFetcher string) string {
 	return "#rss"
 }
 
-// Fetcher is the dispatcher. New() builds one with every registered
-// built-in instantiated once; Fetch routes per-call by name.
+// Fetcher is the dispatcher. New() builds one over the registered built-ins;
+// Fetch routes per-call by name.
 type Fetcher struct {
 	fetchers map[string]FetchFunc
 	env      []string
 }
 
-// New builds a Fetcher with every registered built-in instantiated once.
+// New builds a Fetcher backed by the registered built-ins. The built-in
+// FetchFuncs are stateless, so the registry map is shared rather than copied.
 func New() *Fetcher {
-	f := &Fetcher{
-		fetchers: make(map[string]FetchFunc, len(registry)),
+	return &Fetcher{
+		fetchers: registry,
 		env:      os.Environ(),
 	}
-	for name, init := range registry {
-		f.fetchers[name] = init()
-	}
-	return f
 }
 
 // Fetch dispatches by name. A built-in registered as "#name" runs its

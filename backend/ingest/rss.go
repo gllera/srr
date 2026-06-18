@@ -22,62 +22,56 @@ import (
 // then handed to the streaming RSS/Atom/RDF parser (ParseFeed) defined
 // below.
 func init() {
-	Register("rss", func() FetchFunc {
-		return func(ctx context.Context, client *http.Client, buf []byte, req Request) (Result, error) {
-			httpReq, err := http.NewRequestWithContext(ctx, "GET", req.URL, nil)
-			if err != nil {
-				return Result{}, err
-			}
-			httpReq.Header.Set("User-Agent", userAgent)
-			if req.ETag != "" {
-				httpReq.Header.Set("If-None-Match", req.ETag)
-			}
-			if req.LastModified != "" {
-				httpReq.Header.Set("If-Modified-Since", req.LastModified)
-			}
-
-			res, err := client.Do(httpReq)
-			if err != nil {
-				return Result{}, err
-			}
-			defer res.Body.Close()
-
-			if res.StatusCode == http.StatusNotModified {
-				slog.Debug("source not modified", "url", req.URL)
-				return Result{NotModified: true}, nil
-			}
-			if res.StatusCode != http.StatusOK {
-				return Result{}, fmt.Errorf("unexpected HTTP status: %s", res.Status)
-			}
-
-			data, err := readBody(res.Body, buf, "feed")
-			if err != nil {
-				return Result{}, err
-			}
-
-			var items []*mod.RawItem
-			err = ParseFeed(data, func(i *mod.RawItem) error {
-				items = append(items, i)
-				return nil
-			})
-			if err != nil {
-				return Result{}, err
-			}
-
-			return Result{
-				ETag:         res.Header.Get("ETag"),
-				LastModified: res.Header.Get("Last-Modified"),
-				Items:        items,
-			}, nil
+	Register("rss", func(ctx context.Context, client *http.Client, buf []byte, req Request) (Result, error) {
+		httpReq, err := http.NewRequestWithContext(ctx, "GET", req.URL, nil)
+		if err != nil {
+			return Result{}, err
 		}
+		httpReq.Header.Set("User-Agent", userAgent)
+		if req.ETag != "" {
+			httpReq.Header.Set("If-None-Match", req.ETag)
+		}
+		if req.LastModified != "" {
+			httpReq.Header.Set("If-Modified-Since", req.LastModified)
+		}
+
+		res, err := client.Do(httpReq)
+		if err != nil {
+			return Result{}, err
+		}
+		defer res.Body.Close()
+
+		if res.StatusCode == http.StatusNotModified {
+			slog.Debug("source not modified", "url", req.URL)
+			return Result{NotModified: true}, nil
+		}
+		if res.StatusCode != http.StatusOK {
+			return Result{}, fmt.Errorf("unexpected HTTP status: %s", res.Status)
+		}
+
+		data, err := readBody(res.Body, buf, "feed")
+		if err != nil {
+			return Result{}, err
+		}
+
+		var items []*mod.RawItem
+		err = ParseFeed(data, func(i *mod.RawItem) error {
+			items = append(items, i)
+			return nil
+		})
+		if err != nil {
+			return Result{}, err
+		}
+
+		return Result{
+			ETag:         res.Header.Get("ETag"),
+			LastModified: res.Header.Get("Last-Modified"),
+			Items:        items,
+		}, nil
 	})
 }
 
 // --- RSS/Atom/RDF feed parser -----------------------------------------
-
-// ErrStopFeed is the sentinel a ParseFeed callback returns to stop early
-// without error. Currently unused in production code; kept for the API.
-var ErrStopFeed = errors.New("stop feed")
 
 // hash is FNV-32a, inlined to avoid the per-call hash.Hash32 allocation
 // (this runs once per parsed item across every fetch).
@@ -222,8 +216,8 @@ func rawToFeedItem(r mod.RawFeedItem, dateHint *string) *mod.RawItem {
 	}
 }
 
-// ParseFeed streams feed items to the callback. If the callback returns
-// ErrStopFeed, parsing stops without error. Any other error is propagated.
+// ParseFeed streams feed items to the callback. An error from the callback is
+// propagated.
 func ParseFeed(data []byte, fn func(*mod.RawItem) error) error {
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	// Transcode declared non-UTF-8 encodings (ISO-8859-1, windows-1252, …) to
@@ -279,9 +273,7 @@ func ParseFeed(data []byte, fn func(*mod.RawItem) error) error {
 			slog.Warn("feed parse stopped at malformed element", "err", err)
 			return nil
 		}
-		if err := fn(rawToFeedItem(raw.Chld, &dateHint)); errors.Is(err, ErrStopFeed) {
-			return nil
-		} else if err != nil {
+		if err := fn(rawToFeedItem(raw.Chld, &dateHint)); err != nil {
 			return err
 		}
 	}

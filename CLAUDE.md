@@ -43,7 +43,7 @@ Shared format between backend (writer) and frontend (reader).
 ### `db.gz`
 
 ```
-{ seq?, fetched_at, total_art, next_pid, pack_off, feeds{}, first_fetched, pipe?, ingest?, gen?, hdrs?, mp?, mt? }
+{ seq?, fetched_at, total_art, next_pid, pack_off, feeds{}, pipe?, ingest?, gen?, hdrs?, mp?, mt? }
 ```
 
 | Field | Type | Description |
@@ -54,7 +54,6 @@ Shared format between backend (writer) and frontend (reader).
 | `next_pid` | int | Next data pack ID; packs with `id < next_pid` are finalized/immutable |
 | `pack_off` | int | Current offset in latest data pack |
 | `feeds` | object | JSON object keyed by feed ID (number); may be `null` in JSON (default `{}`) |
-| `first_fetched` | int | Unix timestamp of first fetch that produced articles. Informational metadata (it is no longer the idx-timestamp epoch — per-entry timestamps were dropped with the 2-byte idx entry). Kept **not** `omitempty` so the key is always present for golden/e2e fixtures |
 | `pipe` | string[] | Root-level default pipeline inherited by feeds whose `pipe` is absent. `omitempty`. If absent at load, `NewDB` substitutes `["#sanitize", "#minify"]`. |
 | `ingest` | string | Root-level default ingest strategy inherited by feeds whose `ingest` is empty. `omitempty`. Empty falls through to built-in `#rss`. Set/print via `srr ingest`. |
 | `gen` | int | Store generation counter. Bumped manually (`srr gen --bump`) after an in-place store rebuild reuses finalized pack ids with new bytes; the frontend service worker purges its cache-first pack cache when the value changes (any change, not just increments). `omitempty`; absent == 0. |

@@ -95,18 +95,13 @@ type DBCore struct {
 	// bumps it in memory only after both L<Seq+1> saves succeed, and Commit
 	// publishes it — so a generation name is never visible to readers
 	// before its content is complete, and never rewritten afterwards.
-	Seq           int   `json:"seq,omitempty"`
-	FetchedAt     int64 `json:"fetched_at"`
-	TotalArticles int   `json:"total_art"`
-	NextPackID    int   `json:"next_pid"`
-	PackOffset    int   `json:"pack_off"`
-	// FirstFetchedAt is the unix time of the first fetch that produced
-	// articles — informational metadata (it is no longer the idx-timestamp
-	// epoch; per-entry timestamps were dropped with the 2-byte idx entry).
-	// Kept NOT omitempty so the key is always present for golden/e2e fixtures.
-	FirstFetchedAt int64    `json:"first_fetched"`
-	Pipe           []string `json:"pipe,omitempty"`
-	Ingest         string   `json:"ingest,omitempty"`
+	Seq           int      `json:"seq,omitempty"`
+	FetchedAt     int64    `json:"fetched_at"`
+	TotalArticles int      `json:"total_art"`
+	NextPackID    int      `json:"next_pid"`
+	PackOffset    int      `json:"pack_off"`
+	Pipe          []string `json:"pipe,omitempty"`
+	Ingest        string   `json:"ingest,omitempty"`
 	// Gen is the store generation: bumped (srr gen --bump) after an in-place
 	// store rebuild reuses finalized pack ids with new bytes, so the frontend
 	// service worker can self-invalidate its cache-first pack cache. omitempty
