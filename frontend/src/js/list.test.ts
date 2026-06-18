@@ -914,6 +914,10 @@ describe("list", () => {
 
    const $rowFor = (chron: number) => $rows().find((a) => Number(a.dataset.chron) === chron)!
 
+   // A stub DOMRect for the scroll-positioning tests (jsdom reports zero rects).
+   const rect = (top: number, bottom: number) =>
+      ({ top, bottom, height: bottom - top, left: 0, right: 0, width: 0, x: 0, y: top, toJSON: () => ({}) }) as DOMRect
+
    it("at the oldest article it bumps the row (down) instead of moving", async () => {
       setIndex(5)
       nav._setAnchor(0) // oldest = current, at the bottom of the window
@@ -962,6 +966,78 @@ describe("list", () => {
       // Genuinely exhausted both ways → no neighbor → bump + no move.
       expect(await list.moveSelection("older")).toBe(-1)
       expect($rows()[0].classList.contains("srr-row-bump-down")).toBe(true)
+   })
+
+   it("stepping up to an off-screen row scrolls it clear of the sticky day divider", async () => {
+      setIndex(10)
+      nav._setAnchor(5) // reader's article → row 5 current; row 6 is its newer neighbor
+      await list.render()
+      expect($current()).toEqual([5])
+
+      // Row 6 sits off-screen ABOVE the viewport. The day dividers are sticky at
+      // top:0, so top-aligning to the viewport edge alone parks the row beneath the
+      // divider — its top hidden. The scroll must reserve the divider's height too.
+      const target = $rowFor(6)
+      target.getBoundingClientRect = () => rect(-100, -50)
+      document
+         .querySelectorAll<HTMLElement>(".srr-day-divider")
+         .forEach((d) => Object.defineProperty(d, "offsetHeight", { value: 30, configurable: true }))
+      Object.defineProperty(window, "scrollY", { value: 200, configurable: true })
+
+      const spy = window.scrollTo as unknown as ReturnType<typeof vi.fn>
+      spy.mockClear()
+      expect(await list.moveSelection("newer")).toBe(6)
+      // scrollY 200 + rect.top -100 − (sticky 0 + divider 30) = 70: flush below the
+      // divider, no top margin (a margin would expose the same-day row above as a
+      // gap). Without reserving the divider it lands at 92, leaving the top hidden.
+      expect(spy).toHaveBeenCalledWith(0, 70)
+
+      Object.defineProperty(window, "scrollY", { value: 0, configurable: true })
+   })
+
+   it("snaps flush when the same-day row above is clipped by the pinned divider (no gap)", async () => {
+      setIndex(10) // dayLabel = 2 chrons/day, so row 6 is the 2nd row of its day (row 7 above)
+      nav._setAnchor(5)
+      await list.render()
+
+      // The target row 6 sits comfortably in-band (top 80, not behind the inset),
+      // but its same-day neighbour row 7 above is clipped by the pinned divider
+      // (top 20 < divider-bottom 30 < bottom 80) — its empty lower edge would show
+      // as a gap. The fix snaps row 6 flush to the divider bottom instead.
+      $rowFor(6).getBoundingClientRect = () => rect(80, 140)
+      $rowFor(7).getBoundingClientRect = () => rect(20, 80) // straddles the divider bottom
+      document
+         .querySelectorAll<HTMLElement>(".srr-day-divider")
+         .forEach((d) => Object.defineProperty(d, "offsetHeight", { value: 30, configurable: true }))
+      Object.defineProperty(window, "scrollY", { value: 200, configurable: true })
+
+      const spy = window.scrollTo as unknown as ReturnType<typeof vi.fn>
+      spy.mockClear()
+      expect(await list.moveSelection("newer")).toBe(6)
+      // scrollY 200 + rect.top 80 − (sticky 0 + divider 30) = 250 → row top lands at
+      // 30 (flush), hiding the clipped row above. Old behavior left it at 80 (gap).
+      expect(spy).toHaveBeenCalledWith(0, 250)
+
+      Object.defineProperty(window, "scrollY", { value: 0, configurable: true })
+   })
+
+   it("stepping down parks the row flush above the toolbar (no bottom gap)", async () => {
+      setIndex(10)
+      nav._setAnchor(5) // row 5 current; older neighbour (row 4) is the step-down target
+      await list.render()
+
+      // Row 4 is below the live band (bottom 900 > innerHeight 768). It must land
+      // flush against the toolbar inset (no toolbar in jsdom → bottom = 768), not
+      // 8px above it — symmetric with the flush top, so going down leaves no gap.
+      $rowFor(4).getBoundingClientRect = () => rect(840, 900)
+      Object.defineProperty(window, "scrollY", { value: 0, configurable: true })
+
+      const spy = window.scrollTo as unknown as ReturnType<typeof vi.fn>
+      spy.mockClear()
+      expect(await list.moveSelection("older")).toBe(4)
+      // scrollY 0 + rect.bottom 900 − bottom 768 = 132 → row bottom lands at 768
+      // (flush). With the old +8 margin it parked at 140, leaving an 8px gap.
+      expect(spy).toHaveBeenCalledWith(0, 132)
    })
 
    // ── Anchor re-seed + divider integrity ─────────────────────────────────────

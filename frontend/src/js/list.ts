@@ -661,14 +661,34 @@ function scrollChronToView(chron: number, center: boolean): void {
    if (!row) return
    const rect = row.getBoundingClientRect()
    const top = rect.top + window.scrollY
-   const sticky = stickyOffset()
-   const target = center ? top + rect.height / 2 - (window.innerHeight + sticky) / 2 : top - sticky
+   // Top-align clears the whole top chrome (topInset = sticky bar + day divider),
+   // the same inset scrollRowIntoView/firstVisibleRow use; centering parks the row
+   // mid-band, away from the divider, so it reserves only the search bar.
+   const target = center ? top + rect.height / 2 - (window.innerHeight + stickyOffset()) / 2 : top - topInset()
    window.scrollTo(0, Math.max(0, target))
 }
 
 function stickyOffset(): number {
    const bar = document.querySelector<HTMLElement>(".srr-searchbar")
    return bar && bar.offsetParent !== null ? bar.offsetHeight : 0
+}
+
+// The day-strata dividers are sticky at the top of the list viewport
+// (position:sticky; top:0), so a row aligned to just the sticky search bar would
+// land hidden beneath the divider parked there. Any top-alignment must reserve a
+// divider's height on top of stickyOffset. 0 in search mode (dividers suppressed,
+// none in the DOM) and before the first render — uniform height, so the first one
+// stands in for whichever is currently stuck.
+function dividerInset(): number {
+   const d = rowsEl?.querySelector<HTMLElement>(".srr-day-divider")
+   return d ? d.offsetHeight : 0
+}
+
+// Top of the live band: below the sticky search bar AND the day divider parked at
+// top:0. The single inset every top-alignment measures against (scrollRowIntoView,
+// the cursor seed in firstVisibleRow), so they all clear the same chrome.
+function topInset(): number {
+   return stickyOffset() + dividerInset()
 }
 
 // Pull the next older batch and append it below. Guarded against re-entry; bails
@@ -924,32 +944,52 @@ function selectRow(row: HTMLElement): void {
    notifyScroll()
 }
 
-// The topmost row at least partly below the sticky search bar — where the cursor
-// lands when none is set yet, so it appears where you're looking rather than at a
-// fixed end. Falls back to the last (oldest) row when geometry is unavailable
-// (jsdom reports zero rects).
+// The topmost row at least partly below the top chrome (sticky search bar + day
+// divider) — where the cursor lands when none is set yet, so it appears where
+// you're looking rather than at a fixed end, and clear of the divider like every
+// scrolled-to row. Falls back to the last (oldest) row when geometry is
+// unavailable (jsdom reports zero rects).
 function firstVisibleRow(): HTMLElement | null {
    if (!rowsEl) return null
-   const sticky = stickyOffset()
+   const top = topInset()
    const rows = rowsEl.querySelectorAll<HTMLElement>("a.srr-row")
-   for (const r of rows) if (r.getBoundingClientRect().bottom > sticky + 1) return r
+   for (const r of rows) if (r.getBoundingClientRect().bottom > top + 1) return r
    return (rows[rows.length - 1] as HTMLElement | undefined) ?? null
 }
 
-// Bring the selected row fully into the live band — below the sticky search bar
-// (top) and ABOVE the toolbar fixed to the bottom of the viewport — but only when
-// it isn't already there (a keyboard step shouldn't recenter on every press,
-// unlike the return-from-reader centering). Without the bottom inset a row
-// stepped downward parks flush against the viewport bottom, hidden behind the
-// toolbar (which selectRow's notifyScroll always reveals). window.scrollTo clamps
-// to [0, maxScroll].
+// True when a same-day row sits directly above `row` (its previous sibling is a
+// row, not the day divider) and is clipped by the pinned divider — straddling the
+// divider's bottom edge at `inset`. Its empty lower edge would otherwise show as a
+// gap above the selection, so scrollRowIntoView snaps flush past it. First-of-day
+// rows (previous sibling IS the divider) have no same-day neighbour → false.
+function clippedAbove(row: HTMLElement, inset: number): boolean {
+   const prev = row.previousElementSibling as HTMLElement | null
+   if (!prev || !prev.classList.contains("srr-row")) return false
+   const r = prev.getBoundingClientRect()
+   return r.top < inset && r.bottom > inset
+}
+
+// Bring the selected row fully into the live band — below the sticky search bar +
+// day divider (top) and ABOVE the toolbar fixed to the bottom of the viewport —
+// but only when it isn't already there (a keyboard step shouldn't recenter on
+// every press, unlike the return-from-reader centering). Without the bottom inset
+// a row stepped downward parks flush against the viewport bottom, hidden behind
+// the toolbar (which selectRow's notifyScroll always reveals). window.scrollTo
+// clamps to [0, maxScroll].
+//
+// Both ends land the row FLUSH against the chrome (no inner margin): the row's own
+// padding already separates its text from the divider/toolbar, and a top margin
+// would reveal a clipped same-day row above (clippedAbove) as a gap. The
+// clippedAbove probe is short-circuited — only measured when the row isn't already
+// behind the top inset.
 function scrollRowIntoView(row: HTMLElement): void {
    const rect = row.getBoundingClientRect()
-   const top = stickyOffset()
+   const top = topInset()
    const bottom = window.innerHeight - toolbarInset()
-   const margin = 8 // breathing room so the row clears the sticky bar / toolbar
-   if (rect.top < top + margin) window.scrollTo(0, Math.max(0, window.scrollY + rect.top - top - margin))
-   else if (rect.bottom > bottom - margin) window.scrollTo(0, window.scrollY + rect.bottom - bottom + margin)
+   const margin = 8 // snap tolerance: how close to the chrome before re-aligning flush
+   if (rect.top < top + margin || clippedAbove(row, top))
+      window.scrollTo(0, Math.max(0, window.scrollY + rect.top - top))
+   else if (rect.bottom > bottom - margin) window.scrollTo(0, window.scrollY + rect.bottom - bottom)
 }
 
 // Height the bottom-fixed toolbar occupies. selectRow reveals it after every move
