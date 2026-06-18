@@ -10,7 +10,7 @@
   },
   "scripts": {
     "dev": "concurrently -k npm:serve npm:servep",
-    "serve": "SRR_CDN_URL=${SRR_CDN_URL:-http://localhost:3000} parcel serve --no-cache",
+    "serve": "SRR_CDN_URL=${SRR_CDN_URL:-http://localhost:3000} parcel serve src/index.html src/design.html --no-cache",
     "servep": "npx serve --cors -l 3000 \"$(node parcel/resolve-store.js)\"",
     "build": "parcel build --no-cache --no-source-maps",
     "test": "vitest run",
