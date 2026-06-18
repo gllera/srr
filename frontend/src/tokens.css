@@ -1,0 +1,132 @@
+/* Design tokens — the single source of truth for SRR's visual primitives.
+   Imported first by styles.css, so every component rule resolves var()s from
+   here. Re-theming happens in THIS file: palette, fonts, the per-source color
+   ramp, radii, shadows, stacking layers, and a spacing scale. Component-level
+   rules (including dark-mode color tweaks on specific elements) stay in
+   styles.css — only primitives live here. */
+
+:root {
+   /* Palette (light) */
+   --bg: #fafaf7;
+   --fg: #1c1c1a;
+   --muted: #8a8780;
+   --faint: #d5d2cb;
+   --hover: rgba(0, 0, 0, 0.04);
+   --accent: #b35650;
+   --radius: 4px;
+   --shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 12px 28px rgba(0, 0, 0, 0.08);
+
+   /* Fonts */
+   --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+   /* The reader's prose voice — a system serif (zero bytes). Pairs with the
+      sans/mono "wire" chrome (headings, code): machine metadata wraps human prose. */
+   --font-serif: ui-serif, Georgia, Charter, "Times New Roman", serif;
+
+   /* Type scale (1.125 ratio). em multipliers in .srr-content mirror these ratios. */
+   --text-sm: 0.875rem;
+   --text-base: 1rem;
+   --text-lg: 1.125rem;
+   --text-xl: 1.25rem;
+
+   /* Stacking layers — every z-index literal references one of these. */
+   --z-sticky: 1; /* list day dividers, reader spine */
+   --z-searchbar: 5; /* pinned search bar */
+   --z-toolbar: 6; /* bottom toolbar + its upward-opening menus */
+   --z-popup: 1000; /* error popup / imgproxy backdrop */
+   --z-popup-top: 1001; /* imgproxy card above its own backdrop */
+
+   /* Spacing scale — defined for re-theming. Existing rules use rem literals and
+      are intentionally NOT retrofitted (a sweeping diff with no visual payoff);
+      new rules should prefer these. */
+   --space-1: 0.25rem;
+   --space-2: 0.5rem;
+   --space-3: 0.75rem;
+   --space-4: 1rem;
+   --space-6: 1.5rem;
+   --space-8: 2rem;
+}
+
+/* Source color system — each feed maps to a stable slot (fmt.ts srcColorIndex →
+   data-src) so the feed can be triaged by origin at a glance. A curated, fixed-
+   tone riso-ink ramp; derived offline from the feed id, never a fetched favicon.
+   Defined on [data-src] (not just .srr-row) so both the list rows AND the reader
+   article pick up their feed's color — the rail graduates into the reader's
+   masthead. Dark-mode variants live in the dark @media block below. */
+[data-src="0"] {
+   --src: #c2410c;
+}
+[data-src="1"] {
+   --src: #2563a8;
+}
+[data-src="2"] {
+   --src: #3f7d52;
+}
+[data-src="3"] {
+   --src: #8a4fa0;
+}
+[data-src="4"] {
+   --src: #b7791f;
+}
+[data-src="5"] {
+   --src: #0f766e;
+}
+[data-src="6"] {
+   --src: #9d2449;
+}
+[data-src="7"] {
+   --src: #4f5b93;
+}
+
+/* High contrast */
+@media (prefers-contrast: more) {
+   :root {
+      --muted: #555;
+      --faint: #999;
+   }
+}
+@media (prefers-contrast: more) and (prefers-color-scheme: dark) {
+   :root {
+      --muted: #aaa;
+      --faint: #777;
+   }
+}
+
+/* Dark mode — token reassignments only. The per-element dark rules
+   (a {color}, .srr-title-link {color}) stay in styles.css. */
+@media (prefers-color-scheme: dark) {
+   :root {
+      --bg: #111110;
+      --fg: #ccc9c2;
+      --muted: #6e6c66;
+      --faint: #2a2928;
+      --hover: rgba(255, 255, 255, 0.05);
+      --accent: #d4847e;
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 28px rgba(0, 0, 0, 0.55);
+   }
+   /* Source ramp, dark — same hues lifted in luminance to read on the dark bg. */
+   [data-src="0"] {
+      --src: #e8855a;
+   }
+   [data-src="1"] {
+      --src: #6aa3e0;
+   }
+   [data-src="2"] {
+      --src: #79b88c;
+   }
+   [data-src="3"] {
+      --src: #c08fd6;
+   }
+   [data-src="4"] {
+      --src: #d6a94e;
+   }
+   [data-src="5"] {
+      --src: #4fb3a8;
+   }
+   [data-src="6"] {
+      --src: #d96f8c;
+   }
+   [data-src="7"] {
+      --src: #8e9bd8;
+   }
+}

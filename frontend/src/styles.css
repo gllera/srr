@@ -1,3 +1,5 @@
+@import "./tokens.css";
+
 /* Reset */
 *,
 *::before,
@@ -6,28 +8,6 @@
 }
 
 html {
-   --bg: #fafaf7;
-   --fg: #1c1c1a;
-   --muted: #8a8780;
-   --faint: #d5d2cb;
-   --hover: rgba(0, 0, 0, 0.04);
-   --accent: #b35650;
-   --radius: 4px;
-   --shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 12px 28px rgba(0, 0, 0, 0.08);
-
-   --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
-   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
-   /* The reader's prose voice — a system serif (zero bytes). Pairs with the
-      sans/mono "wire" chrome (headings, code): machine metadata wraps
-      human prose. */
-   --font-serif: ui-serif, Georgia, Charter, "Times New Roman", serif;
-
-   /* Type scale (1.125 ratio). em multipliers in .srr-content mirror these ratios. */
-   --text-sm: 0.875rem;
-   --text-base: 1rem;
-   --text-lg: 1.125rem;
-   --text-xl: 1.25rem;
-
    padding: max(1.5rem, env(safe-area-inset-top)) 1.5rem 1rem;
    scrollbar-width: thin;
    overflow-y: scroll;
@@ -919,37 +899,7 @@ body:not(.srr-view-list) .srr-toolbar > .srr-unread {
    height: 1px;
    background: var(--faint);
 }
-/* Source color system — each feed maps to a stable slot (fmt.ts
-   srcColorIndex → data-src) so the feed can be triaged by origin at a glance. A
-   curated, fixed-tone riso-ink ramp; derived offline from the feed id, never
-   a fetched favicon. Dark-mode variants live in the dark @media block. */
-/* Defined on [data-src] (not just .srr-row) so both the list rows AND the reader
-   article pick up their feed's color — the rail graduates into the reader's
-   masthead. */
-[data-src="0"] {
-   --src: #c2410c;
-}
-[data-src="1"] {
-   --src: #2563a8;
-}
-[data-src="2"] {
-   --src: #3f7d52;
-}
-[data-src="3"] {
-   --src: #8a4fa0;
-}
-[data-src="4"] {
-   --src: #b7791f;
-}
-[data-src="5"] {
-   --src: #0f766e;
-}
-[data-src="6"] {
-   --src: #9d2449;
-}
-[data-src="7"] {
-   --src: #4f5b93;
-}
+/* Source color ramp ([data-src] → --src, light + dark) lives in tokens.css. */
 .srr-row {
    display: flex;
    gap: 0.7rem;
@@ -1454,19 +1404,7 @@ body:not(.srr-view-list) .srr-toolbar > .srr-unread {
    }
 }
 
-/* High contrast */
-@media (prefers-contrast: more) {
-   html {
-      --muted: #555;
-      --faint: #999;
-   }
-}
-@media (prefers-contrast: more) and (prefers-color-scheme: dark) {
-   html {
-      --muted: #aaa;
-      --faint: #777;
-   }
-}
+/* High-contrast token overrides live in tokens.css. */
 
 /* Selection */
 ::selection {
@@ -1489,46 +1427,13 @@ body:not(.srr-view-list) .srr-toolbar > .srr-unread {
    }
 }
 
-/* Dark mode */
+/* Dark mode — component-level overrides only; token reassignments and the dark
+   source ramp live in tokens.css. */
 @media (prefers-color-scheme: dark) {
-   html {
-      --bg: #111110;
-      --fg: #ccc9c2;
-      --muted: #6e6c66;
-      --faint: #2a2928;
-      --hover: rgba(255, 255, 255, 0.05);
-      --accent: #d4847e;
-      --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 28px rgba(0, 0, 0, 0.55);
-   }
    a {
       color: #c4a882;
    }
    .srr-title-link {
       color: inherit;
-   }
-   /* Source ramp, dark — same hues lifted in luminance to read on the dark bg. */
-   [data-src="0"] {
-      --src: #e8855a;
-   }
-   [data-src="1"] {
-      --src: #6aa3e0;
-   }
-   [data-src="2"] {
-      --src: #79b88c;
-   }
-   [data-src="3"] {
-      --src: #c08fd6;
-   }
-   [data-src="4"] {
-      --src: #d6a94e;
-   }
-   [data-src="5"] {
-      --src: #4fb3a8;
-   }
-   [data-src="6"] {
-      --src: #d96f8c;
-   }
-   [data-src="7"] {
-      --src: #8e9bd8;
    }
 }
