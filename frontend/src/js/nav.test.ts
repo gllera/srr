@@ -1720,6 +1720,62 @@ describe("search lazy stream (incremental pull)", () => {
       expect(r.done).toBe(true)
       expect(searchMod.search).not.toHaveBeenCalled()
    })
+
+   it("caps the accumulated set at SEARCH_CAP across MULTIPLE batches and flags truncation", async () => {
+      // The cap is per-stream, not per-batch: two 300-hit batches (600 > 500) must
+      // keep only the newest 500 (chrons 599..100) and flip truncated. The witness
+      // (chron 99) is seen but dropped, so it's NOT navigable.
+      setupIndex(Array.from({ length: 600 }, () => ({ feedId: 1 })))
+      searchMod.search.mockImplementation(async function* () {
+         yield Array.from({ length: 300 }, (_, i) => hit(599 - i)) // 599..300
+         yield Array.from({ length: 300 }, (_, i) => hit(299 - i)) // 299..0
+      })
+      nav.applyFilter([nav.SEARCH_PREFIX + "capn"])
+      expect(await nav.feedLeft(0)).toBe(-1) // walked the whole capped stream; 0 is below the window
+      expect(nav.searchTruncated()).toBe(true)
+      expect(await nav.feedLeft(599)).toBe(599) // newest kept
+      expect(await nav.feedLeft(100)).toBe(100) // oldest kept
+      expect(await nav.feedLeft(99)).toBe(-1) // the witness 99 was dropped by the cap
+   })
+
+   it("dedups a chron that recurs across batches (no phantom, no double-count)", async () => {
+      setupIndex(Array.from({ length: 20 }, () => ({ feedId: 1 })))
+      searchMod.search.mockImplementation(async function* () {
+         yield [hit(15), hit(9)]
+         yield [hit(9), hit(3)] // 9 recurs (e.g. overlapping bloom candidates)
+      })
+      nav.applyFilter([nav.SEARCH_PREFIX + "dedup"])
+      // Walk newest→oldest: 15 → 9 → 3 → none. 9 appears exactly once.
+      expect(await nav.feedLeft(19)).toBe(15)
+      expect(await nav.feedLeft(14)).toBe(9)
+      expect(await nav.feedLeft(8)).toBe(3)
+      expect(await nav.feedLeft(2)).toBe(-1)
+      // And the right walk doesn't stutter on the duplicate either.
+      expect(await nav.feedRight(10)).toBe(15)
+      expect(await nav.feedRight(4)).toBe(9)
+   })
+
+   it("a generator error mid-stream degrades to what was pulled, no throw", async () => {
+      setupIndex(Array.from({ length: 20 }, () => ({ feedId: 1 })))
+      searchMod.search.mockImplementation(async function* () {
+         yield [hit(15)]
+         throw new Error("shard fetch failed")
+      })
+      nav.applyFilter([nav.SEARCH_PREFIX + "boom"])
+      // feedLeft pulls the first batch (15), then the next pull throws → done.
+      // It must resolve (not reject) with what was collected.
+      expect(await nav.feedLeft(19)).toBe(15)
+      expect(await nav.feedLeft(8)).toBe(-1) // nothing older was pulled; stream is done
+   })
+
+   it("fromHash deep-link pulls the lazy stream down to a deep hit, else snaps newest", async () => {
+      setupIndex(Array.from({ length: 60 }, () => ({ feedId: 1 })))
+      searchMod.search.mockImplementation(genPerBatch([55, 40, 25, 10])) // one per batch
+      await nav.fromHash("25!" + nav.SEARCH_PREFIX + "deep1")
+      expect(nav.currentChron()).toBe(25) // honored — pulled across 3 batches (55,40,25)
+      await nav.fromHash("30!" + nav.SEARCH_PREFIX + "deep2")
+      expect(nav.currentChron()).toBe(55) // 30 isn't a hit → snaps to the newest
+   })
 })
 
 // ── Edge cases: listAnchor / fromHash foreign+malformed /
