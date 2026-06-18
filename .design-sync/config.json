@@ -1,0 +1,6 @@
+{
+  "projectId": "13b99a0b-d0bf-415e-9940-7efd6a9940b5",
+  "projectName": "SRR",
+  "offScript": "tokens-and-styles-only",
+  "note": "SRR frontend is a Parcel single-page app, NOT a component library: zero runtime deps, no React/Vue/web-components, no exported components with a Props API, no Storybook. The standard design-sync converter (which ships a compiled component library) does not apply. This is a hand-built, off-script import of the styling assets only so Claude Design can use SRR's design tokens. Source of truth: frontend/src/tokens.css (tokens) + frontend/src/styles.css (.srr-* component styles). System fonts only (no font files). No _ds_bundle.js / components/ exist by design."
+}

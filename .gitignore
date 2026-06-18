@@ -7,3 +7,6 @@
 /frontend/.parcel-cache/
 /frontend/dist/
 /dist/
+
+# design-sync build output (regenerable; see .design-sync/NOTES.md)
+/ds-bundle/
