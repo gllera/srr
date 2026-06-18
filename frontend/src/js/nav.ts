@@ -9,11 +9,11 @@ let pos = -1
 let currentFeed = -1
 const next: { left?: Promise<number>; right?: Promise<number> } = {}
 
-// Unseen-only navigation, tags only: when on, a single-tag filter skips
-// articles already seen (per the snapshotted seen positions of its members), so
-// you glide past feeds you're caught up on. A device-local preference, not
-// part of the shareable #pos!tokens hash. See filter.set / showFeed /
-// unreadTally and dropdown.ts's chip.
+// Unseen-only navigation: when on, the active filter skips articles already
+// seen (per the snapshotted seen positions of its members), so you glide past
+// feeds you're caught up on. A device-local preference, not part of the
+// shareable #pos!tokens hash. See filter.set / filter.applyUnseen and
+// dropdown.ts's chip.
 const UNREAD_ONLY_KEY = "srr-unread-only"
 let unreadOnly = ((): boolean => {
    try {
@@ -31,6 +31,9 @@ export function setUnreadOnly(on: boolean) {
       if (on) localStorage.setItem(UNREAD_ONLY_KEY, "1")
       else localStorage.removeItem(UNREAD_ONLY_KEY)
    } catch {}
+   // Re-apply the current filter so its members immediately pick up (or shed) the
+   // raised unseen-only bounds — the caller just flips the mode and rebuilds.
+   applyFilter([...filter.tokens])
 }
 
 // Saved articles ("★ Saved") — a per-article collection orthogonal to the
@@ -86,6 +89,13 @@ export function toggleSaved(chron: number): boolean {
 // reflect its saved state on the star toggle without threading pos into IShowFeed.
 export function currentChron(): number {
    return pos
+}
+
+// The feed id of the article currently in the reader (-1 = none). app.ts derives
+// the reader source title and the feed-menu auto-expand tag from this, so it
+// keeps no parallel copy of the current article's feed.
+export function currentFeedId(): number {
+   return currentFeed
 }
 
 // Where the list surface should anchor when (re)built: the article currently in
@@ -151,8 +161,6 @@ let searchSorted: number[] = [] // ascending matching chronIdxs — the neighbor
 let searchSet = new Set<number>() // the same hits, for matches()
 let searchTruncatedFlag = false
 let searchLoadedFor: string | null = null // term searchSorted/searchSet were built for
-let searchLoad: Promise<void> | null = null // in-flight computation (dedupes concurrent walks)
-let searchLoadingTerm = ""
 
 export function isSearchFilter(): boolean {
    return filter.search
@@ -186,55 +194,22 @@ function setRight(sorted: number[], from: number): number {
    return -1
 }
 
-// Compute the search set for `term` from the shard generator (newest-first,
-// capped). Commits only if `term` is still the active query when it resolves, so
-// a superseded keystroke's late result can't overwrite fresher hits.
-async function loadSearchSet(term: string): Promise<void> {
-   const set = new Set<number>()
-   const chrons: number[] = []
-   let truncated = false
-   if (term) {
-      try {
-         // Ask for one past the cap: search() stops at its limit, so without the
-         // +1 a query with exactly SEARCH_CAP matches and one with thousands both
-         // yield SEARCH_CAP hits and the break below never fires — truncation
-         // would be invisible. The extra hit is the witness; we keep only SEARCH_CAP.
-         outer: for await (const batch of search.search(term, SEARCH_CAP + 1)) {
-            for (const h of batch) {
-               if (chrons.length >= SEARCH_CAP) {
-                  truncated = true
-                  break outer
-               }
-               if (!set.has(h.chron)) {
-                  set.add(h.chron)
-                  chrons.push(h.chron)
-               }
-            }
-         }
-      } catch (e) {
-         // A missing summary / shard rejects the generator; degrade to whatever
-         // was collected rather than breaking list/reader navigation.
-         console.warn("search filter: shard scan failed", e)
-      }
-   }
-   if (term !== searchTerm) return // superseded by a newer query
-   chrons.sort((a, b) => a - b)
-   searchSorted = chrons
-   searchSet = set
-   searchTruncatedFlag = truncated
-   searchLoadedFor = term
-}
-
-// Ensure the set matches the active term before a neighbor walk reads it.
-// Concurrent walks within one render share the single in-flight load.
+// Ensure the snapshot matches the active term before a neighbor walk reads it.
+// search.loadHits owns the per-query caching and shares the in-flight promise
+// (so concurrent walks within one render dedupe). nav keeps only the snapshot
+// (searchSorted/searchSet for the walk + matches) and the supersession guard:
+// commit only if `term` is still the active query when its hits resolve, so a
+// superseded keystroke's late result can't overwrite fresher hits.
 function ensureSearchSet(): Promise<void> {
    if (searchLoadedFor === searchTerm) return Promise.resolve()
-   if (searchLoad && searchLoadingTerm === searchTerm) return searchLoad
-   const term = (searchLoadingTerm = searchTerm)
-   searchLoad = loadSearchSet(term).finally(() => {
-      if (searchLoadingTerm === term) searchLoad = null
+   const term = searchTerm
+   return search.loadHits(term, SEARCH_CAP).then((hits) => {
+      if (term !== searchTerm) return // superseded by a newer query
+      searchSorted = hits.chrons
+      searchSet = new Set(hits.chrons)
+      searchTruncatedFlag = hits.truncated
+      searchLoadedFor = term
    })
-   return searchLoad
 }
 
 // The current feed's neighbor walk — the ONE seam saved mode branches at. Every
@@ -254,25 +229,18 @@ export function feedRight(from: number): Promise<number> {
    return data.findRight(from, filter.feeds)
 }
 
-// A snapshotted tag member: its true add_idx, its seen position at snapshot
-// time (-1 = never seen on this device), the position-invariant total of its
-// articles (`all`, the member's full countAll — cached because it's
-// pos-invariant and recomputing it in unreadTally doubled the latest-pack
-// scans per nav step), and its position-invariant unread contribution
-// (computed once in filter.set: a never-seen member counts as fully unread,
-// since unseen-only navigates its whole history). `all`/`unread` are -1 until
-// memberUnread populates them (memberUnread always runs before either is read).
-type UnreadMember = { id: number; addIdx: number; seen: number; all: number; unread: number }
+// A snapshotted unseen-only member: its true add_idx and its seen position at
+// snapshot time (-1 = never seen on this device). isValidSeen validates a resume
+// position against addIdx (not the raised bound), and feedUnread checks
+// membership; navigation itself uses the raised bounds stored in filter.feeds.
+type UnreadMember = { id: number; addIdx: number; seen: number }
 
 export const filter = {
    feeds: new Map<number, number>(),
-   feedTotal: 0,
    tokens: [] as string[],
-   // Non-null only in unseen-only tag mode: the tag's members with their true
-   // add_idx, a snapshot of each one's seen position, and the position-invariant
-   // unread contribution (max(0, all − read)) precomputed once at set() time, for
-   // the unread counter (showFeed/unreadTally). `feeds` then holds raised
-   // bounds for nav.
+   // Non-null only in unseen-only mode: each filtered feed with its true add_idx
+   // and a snapshot of its seen position (for isValidSeen / feedUnread). `feeds`
+   // then holds the raised bounds nav walks.
    unreadMembers: null as UnreadMember[] | null,
    // "★ Saved" mode: navigation walks the explicit srr-saved set, feed-agnostic
    // (feeds stays empty). Set by set() when the only token is SAVED_TOKEN.
@@ -292,10 +260,6 @@ export const filter = {
       const addIdx = this.feeds.get(feedId)
       return addIdx !== undefined && chronIdx >= addIdx
    },
-   // feedTotal is derived from the idx scan so it matches findRight/findLeft
-   // reachability — sum-of-total_art can overstate when idx and db.gz disagree.
-   // countAll is synchronous (latest pack + its cumulative header), so the
-   // filter object never waits on a pack fetch.
    clear() {
       this.feeds = new Map<number, number>()
       this.unreadMembers = null
@@ -319,10 +283,7 @@ export const filter = {
       // ★ Saved it short-circuits the feed resolution; the matching set is
       // computed lazily by ensureSearchSet, which feedLeft/feedRight await.
       this.search = !this.saved && tokens.length === 1 && tokens[0].startsWith(SEARCH_PREFIX)
-      if (this.saved) {
-         this.feedTotal = 0
-         return
-      }
+      if (this.saved) return
       if (this.search) {
          const term = tokens[0].slice(SEARCH_PREFIX.length)
          // New query: drop the stale set so matches()/showFeed can't read the
@@ -341,7 +302,6 @@ export const filter = {
             searchLoadedFor = null
          }
          searchTerm = term
-         this.feedTotal = 0
          return
       }
       // Resolve membership at natural add_idx bounds (numeric token = a feed,
@@ -364,24 +324,19 @@ export const filter = {
    // Fold unseen-only into the just-built feed membership (shared by set() and
    // clear()). When on, raise EVERY member's lower bound past its snapshotted seen
    // high-water — so read articles fall below it for findLeft/findRight/matches
-   // — and snapshot the members for the unread counters (showFeed/unreadTally/
-   // isValidSeen). Generalised from the old single-tag case: it now applies to any
+   // — and snapshot the members (their true add_idx + seen) for isValidSeen and
+   // feedUnread. Generalised from the old single-tag case: it now applies to any
    // filter, so [ALL]/a feed/a tag all become a "show only unread" view. When
-   // off, just total the set (feedTotal). Saved/search short-circuit before this.
+   // off, leave the natural bounds. Saved/search short-circuit before this.
    applyUnseen(seenMap: Record<string, number>) {
       if (!unreadOnly) {
          this.unreadMembers = null
-         this.feedTotal = data.countAll(this.feeds)
          return
       }
       const members: UnreadMember[] = []
-      for (const [id, addIdx] of this.feeds)
-         members.push({ id, addIdx, seen: seenMap["feed:" + id] ?? -1, all: -1, unread: -1 })
+      for (const [id, addIdx] of this.feeds) members.push({ id, addIdx, seen: seenMap["feed:" + id] ?? -1 })
       for (const m of members) this.feeds.set(m.id, Math.max(m.addIdx, m.seen + 1))
       this.unreadMembers = members
-      // feedTotal is unused in unread mode (showFeed tallies via unreadMembers);
-      // 0 so a stale value from a prior filter can't leak through.
-      this.feedTotal = 0
    },
 }
 
@@ -396,17 +351,14 @@ export const filter = {
 // fetches; the never-seen branch is sync countAll — no fetch at all). Shared by
 // unreadCount/unreadCounts.
 //
-// `onCurrent`: in unseen-only tag mode, while you sit ON an unread article the
-// toolbar counts it (showFeed's +matchesPos, Option A). recordSeen marks that
-// article seen the instant you arrive, so the live seen map would drop this
-// feed's badge by one immediately — leaving the dropdown tag badge one below
-// the toolbar counter. Add the article back for the feed you're sitting on so
-// the row badge (and its tag-header sum) equals the toolbar counter and ticks
-// down with it. Scoped exactly to when/where showFeed adds matchesPos: only in
-// unseen-only tag mode, only the current article's feed, and only while that
-// article actually matches the (raised) filter — i.e. it is one of the unread
-// you're navigating, NOT the seen resume position you open a tag on (there
-// matchesPos is 0 and the toolbar doesn't count it either, so the badge mustn't).
+// `onCurrent`: in unseen-only mode, recordSeen marks the article you're on seen
+// the instant you arrive, so a live-seen-derived badge would tick this feed down
+// by one before you actually move off it. Count that article back for the feed
+// you're sitting on so its row badge (and its tag-header sum) stays put while you
+// read it, then drops as you step away. Scoped to unseen-only mode, the current
+// article's feed, and only while that article still matches the (raised) filter
+// — i.e. it is one of the unread you're navigating, not the seen resume position
+// you open on.
 async function feedUnread(ch: IFeed, seenMap: Record<string, number>): Promise<number> {
    const map = new Map([[ch.id, ch.add_idx ?? 0]])
    const onCurrent = filter.unreadMembers !== null && ch.id === currentFeed && filter.matches(ch.id, pos) ? 1 : 0
@@ -416,112 +368,24 @@ async function feedUnread(ch: IFeed, seenMap: Record<string, number>): Promise<n
    return Math.max(0, data.countAll(map) - (await data.countLeft(upTo, map))) + onCurrent
 }
 
-// The position-invariant unread of one member (max(0, all − read)). Depends only
-// on the snapshot, never on pos, so unreadTally computes it once per member and
-// caches it on the entry (m.unread === -1 means uncomputed). The member's total
-// `all` (countAll, also pos-invariant) is cached alongside so unreadTally's
-// `right` term doesn't rescan the latest pack for the same single-feed map.
-// A never-seen member (seen < 0) counts as fully unread: unseen-only navigates
-// its whole history.
-async function memberUnread(m: UnreadMember): Promise<number> {
-   if (m.unread >= 0) return m.unread
-   const map = new Map([[m.id, m.addIdx]])
-   m.all = data.countAll(map)
-   // seen < 0 (unseen on this device): nothing read, skip the fetch → all unread.
-   const read = m.seen < 0 ? 0 : await data.countLeft(Math.min(m.seen + 1, data.db.total_art), map)
-   return (m.unread = Math.max(0, m.all - read))
-}
-
-// Unread tallies for a tag's snapshotted members: the tag's total unread (the
-// position-invariant part, summed once and cached per member — OPT-1) and the
-// part strictly right of `at` (the only pos-dependent term, one countLeft per
-// member, run concurrently so cold packs don't serialize). countLeft's
-// cumulative-header shortcut is only exact for true add_idx bounds, which is why
-// this counts per member instead of over filter.feeds' raised bounds.
-async function unreadTally(at: number, members: UnreadMember[]): Promise<{ total: number; right: number }> {
-   const perMember = await Promise.all(
-      members.map(async (m) => {
-         // memberUnread populates m.all (pos-invariant countAll) before we read
-         // it, so the `right` term reuses it instead of a second countAll scan.
-         const unread = await memberUnread(m)
-         const map = new Map([[m.id, m.addIdx]])
-         const rightEnd = Math.min(Math.max(at, m.seen) + 1, data.db.total_art)
-         const right = Math.max(0, m.all - (await data.countLeft(rightEnd, map)))
-         return { unread, right }
-      }),
-   )
-   let total = 0
-   let right = 0
-   for (const p of perMember) {
-      total += p.unread
-      right += p.right
-   }
-   return { total, right }
-}
-
 async function showFeed(article: IArticle): Promise<IShowFeed> {
-   const matchesPos = filter.matches(article.f, pos) ? 1 : 0
-   let filteredLeft: number
-   // `right` is the count strictly to the right of pos — it drives has_right
-   // (the next button) and, outside unseen-only mode, the toolbar counter too.
-   let right: number
-   if (filter.saved || filter.search) {
-      // Saved/search count their explicit set directly (no idx fetch): the
-      // toolbar counter is the set's members strictly to the right, like a feed.
-      const sorted = filter.saved ? savedSorted() : searchSorted
-      let l = 0
-      let r = 0
-      for (const c of sorted) {
-         if (c < pos) l++
-         else if (c > pos) r++
-      }
-      filteredLeft = l
-      right = r
-   } else if (filter.unreadMembers) {
-      // Unseen-only tag mode: count only unread. `right` is the unread strictly
-      // to the right; left is the remainder of the tag's total unread (mirrors
-      // the all-mode identity right = feedTotal − left − pos).
-      try {
-         const tally = await unreadTally(pos, filter.unreadMembers)
-         right = tally.right
-         filteredLeft = tally.total - tally.right - matchesPos
-      } catch {
-         // A per-member countLeft keys on a snapshotted SEEN position that can
-         // live in a cold finalized idx pack; if that fetch rejects (offline /
-         // evicted / blip) the rejection would propagate up and replace the
-         // ALREADY-LOADED article with the error popup while pos is advanced.
-         // The article already loaded, so degrade to an approximate raised-bounds
-         // count that provably never fetches: countAll is sync (resident latest
-         // pack), and countLeft(pos) hits the resident pos pack (resolve awaited
-         // loadArticle(pos) before showFeed) and reads finalized packs only via
-         // cumulative headers — the same no-fetch guarantee the non-unread
-         // branch below relies on. It counts over raised bounds with countLeft's
-         // cumulative-header shortcut so it may differ slightly from exact
-         // unread, which is acceptable for a non-blocking has_left/has_right.
-         filteredLeft = await data.countLeft(pos, filter.feeds)
-         right = data.countAll(filter.feeds) - filteredLeft - matchesPos
-      }
-   } else {
-      // resolve() awaited loadArticle(pos) first, so the pos idx pack is
-      // resident and this countLeft never fetches.
-      filteredLeft = await data.countLeft(pos, filter.feeds)
-      right = filter.feedTotal - filteredLeft - matchesPos
-   }
-   // Unseen-only tag mode lands you ON an unread article, so the toolbar counter
-   // counts the one you're reading too (right + matchesPos): at open it equals
-   // the tag's dropdown badge (total unseen) and counts down to 1 on the last
-   // unseen — matching how a feed, which resumes on an already-read article,
-   // shows its full unread count to the right. Every other filter ([ALL],
-   // feed, unseen-only off) lands on a seen/resume position where the current
-   // article isn't part of the unread set, so the counter is just `right`.
-   const countRight = filter.unreadMembers ? right + matchesPos : right
+   // has_left/has_right only need to know whether a neighbor exists under the
+   // active filter, which is exactly what feedLeft/feedRight answer — the same
+   // seam navigation steps through (raised bounds in unseen-only, the explicit
+   // set in saved/search). So the prev/next buttons enable precisely when a step
+   // would move. resolve() awaited loadArticle(pos), so the pos idx pack is
+   // resident; a same-pack neighbor costs no fetch, and a cross-pack one is the
+   // very lookup the neighbor prefetch makes next anyway. A cold-pack fetch for a
+   // boundary neighbor can blip (offline/evicted); .catch degrades to "no
+   // neighbor" (button disabled, retried on the next render) rather than failing
+   // the already-loaded article into the error popup.
+   const has_left = (await feedLeft(pos - 1).catch(() => -1)) !== -1
+   const has_right = (await feedRight(pos + 1).catch(() => -1)) !== -1
    return {
       article,
-      has_left: filteredLeft > 0,
-      has_right: right > 0,
-      filtered: filter.active,
+      has_left,
+      has_right,
       feed: data.db.feeds[article.f],
-      countRight,
    }
 }
 
@@ -678,21 +542,12 @@ export async function unreadCounts(chs: IFeed[]): Promise<Map<number, number>> {
 // already computed for the row badges (no recount — the previous async
 // tagUnreadCount re-ran feedUnread for every tag member, so tagged feeds were
 // scanned twice per menu open). feedUnread already counts a never-seen member as
-// its full backlog and (in unseen-only tag mode) the unread article you're
-// sitting on as still-unread, so the badge is a plain sum: the row badges beneath
-// the header add up to it, and it equals the unseen-only toolbar counter
-// (showFeed's countRight) — the tag's full unseen total when you first open it
-// (you open ON the seen resume position, which neither counts), ticking down in
-// step with the counter as you read. A tag has no count of its own; this
-// derives it from its members. Synchronous: the counts are already resolved.
-// Returns ≥ 0 (0 = nothing unseen). The Math.max guards any stray negative / a
-// member missing from the map down to 0.
-//
-// In DEFAULT (unseen-only OFF) navigation the toolbar counter is a position
-// indicator, not genuine unread: opening a tag resumes at its oldest member's
-// seen position and counts EVERY article to the right (including already-read
-// ones re-shown there), so badge ≤ counter by design. Only in unseen-only mode,
-// where read articles are skipped, does "articles to your right" equal this badge.
+// its full backlog and (in unseen-only mode) the unread article you're sitting
+// on as still-unread, so the badge is a plain sum and the row badges beneath the
+// header add up to it. A tag has no count of its own; this derives it from its
+// members. Synchronous: the counts are already resolved. Returns ≥ 0 (0 =
+// nothing unseen). The Math.max guards any stray negative / a member missing
+// from the map down to 0.
 export function tagUnreadFromCounts(group: IFeed[], counts: Map<number, number>): number {
    return group.reduce((sum, ch) => sum + Math.max(0, counts.get(ch.id) ?? 0), 0)
 }
@@ -722,9 +577,7 @@ function resolveNoMatch(replace = false): IShowFeed {
       article: { f: 0, a: 0, p: 0, t: "(no matching articles)", l: "", c: "" },
       has_left: false,
       has_right: false,
-      filtered: filter.active,
       feed: undefined,
-      countRight: 0,
       placeholder: true,
    }
 }
@@ -771,7 +624,7 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
    // unseen-only reject an already-seen #pos and bounce it to last(); recordSeen then
    // marked that seen, so each refresh drifted to a lower unseen article. From the
    // honored position, Right still walks the unseen.
-   if (!(await isValidSeen(target))) return last(undefined, true)
+   if (!(await isValidSeen(target))) return last(true)
    return resolve(target, true)
 }
 
@@ -813,11 +666,7 @@ export async function first(): Promise<IShowFeed> {
    return goTo(start)
 }
 
-export async function last(token?: string, replace = false): Promise<IShowFeed> {
-   if (token !== undefined) {
-      if (token === "") filter.clear()
-      else filter.set([token])
-   }
+export async function last(replace = false): Promise<IShowFeed> {
    const found = await feedLeft(data.db.total_art - 1)
    if (found === -1) return resolveNoMatch(replace)
    return resolve(found, replace)
@@ -955,12 +804,6 @@ export function filterLabel(key: string): string {
    return /^\d+$/.test(key) ? data.feedTitle(Number(key)) : key
 }
 
-// "" guard: callers pass currentFeed.tag/id which can be empty when no feed is set;
-// without it, an active filter on "" (impossible) or callers' "" would falsely match.
-export function isSingleFilter(token: string): boolean {
-   return token !== "" && filter.tokens.length === 1 && filter.tokens[0] === token
-}
-
 // The cycle "origin": like getCurrentFilterKey, but a single-feed filter on a
 // TAGGED feed resolves to its tag. getFilterEntries lists tagged feeds only
 // by tag (never by id), so a raw id would miss indexOf and snap cycling to [ALL].
@@ -978,12 +821,19 @@ export function cycleOriginKey(): string {
    return current
 }
 
-export async function cycleFilter(dir: number): Promise<IShowFeed> {
+// The token getFilterEntries() cycling lands on when stepping `dir` from the
+// current selection (cycleOriginKey). Shared by the reader (cycleFilter) and the
+// list (app.onCycle), so both surfaces step relative to the same origin and the
+// indexOf+modulo lives in exactly one place.
+export function cycleToken(dir: number): string {
    const entries = getFilterEntries()
    let idx = entries.indexOf(cycleOriginKey())
    if (idx === -1) idx = 0
-   idx = (idx + dir + entries.length) % entries.length
-   return switchFilter(entries[idx])
+   return entries[(idx + dir + entries.length) % entries.length]
+}
+
+export async function cycleFilter(dir: number): Promise<IShowFeed> {
+   return switchFilter(cycleToken(dir))
 }
 
 function updateHash(replace = false) {

@@ -23,10 +23,8 @@ interface IDB extends Omit<IDBWire, "seq" | "feeds"> {
 interface IShowFeed {
    has_left: boolean
    has_right: boolean
-   filtered: boolean
    article: IArticle
    feed: IFeed | undefined
-   countRight: number
    // True only for the synthetic "(no matching articles)" placeholder. Distinct
    // from feed === undefined, which a REAL article whose feed was deleted
    // (the [DELETED] tombstone) also has — the reader's save toggle keys off this

@@ -39,8 +39,6 @@ let view: "list" | "reader" = "list"
 let gestures: Gestures | null = null
 let busy = false
 let retryFn: (() => void) | null = null
-let currentPublished = 0
-let currentFeed = { id: 0, title: "", tag: "" }
 let lastFeedLabel: string | null = null
 let previousFocus: HTMLElement | null = null
 // Pending debounced search query (see the Title search section). Declared up
@@ -126,7 +124,7 @@ function render(o: IShowFeed) {
    el.next.disabled = !o.has_right
 
    // p is omitted (=> undefined) when the writer couldn't parse a date
-   currentPublished = o.article.p ?? 0
+   const currentPublished = o.article.p ?? 0
    // The reader carries an absolute dateline (you're reading an archived
    // dispatch, so the real date matters more than "5h ago"); the relative age
    // moves to the hover title.
@@ -136,15 +134,10 @@ function render(o: IShowFeed) {
    // so the source name doesn't trail a dangling middot.
    el.date.hidden = !currentPublished
 
-   currentFeed = {
-      id: o.feed?.id ?? 0,
-      title: data.feedTitle(o.article.f),
-      tag: o.feed?.tag || "",
-   }
    // Key the reader's masthead to the article's source color (same ramp as the
    // list rails — see styles.css [data-src]).
    el.article.dataset.src = String(srcColorIndex(o.article.f))
-   el.source.textContent = currentFeed.title
+   el.source.textContent = data.feedTitle(o.article.f)
    refreshFeedLabel()
    refreshSaveButton(!o.placeholder)
 
@@ -403,30 +396,22 @@ function refreshUnreadButton() {
    el.unread.title = on ? "Showing only unread" : "Show only unread"
 }
 function toggleUnseenOnly() {
+   // setUnreadOnly re-applies the filter (raised/restored bounds) internally;
+   // force a rebuild since the token set is unchanged (list.show() alone would
+   // only refresh dots).
    nav.setUnreadOnly(!nav.isUnreadOnly())
    refreshUnreadButton()
-   // Re-apply the same tokens so filter.set re-reads the new mode (raised/restored
-   // bounds), then force a rebuild — the token set is unchanged, so list.show()
-   // alone would only refresh dots.
-   nav.applyFilter(nav.currentTokens())
    void list.rerender()
 }
 
 // Two-finger vertical swipe = step the filter. In the reader, cycle to the next
 // filter's article; on the list, re-filter the list to the next entry.
 function onCycle(dir: number) {
-   const entries = nav.getFilterEntries()
-   if (entries.length <= 1) return
-   if (view === "list") {
-      // cycleOriginKey (not getCurrentFilterKey) so a single tagged-feed
-      // filter cycles relative to its tag, matching the reader's cycleFilter —
-      // getFilterEntries lists tagged feeds only by tag, so a raw id misses.
-      let idx = entries.indexOf(nav.cycleOriginKey())
-      if (idx === -1) idx = 0
-      void selectFilter(entries[(idx + dir + entries.length) % entries.length])
-   } else {
-      guard(() => nav.cycleFilter(dir))
-   }
+   if (nav.getFilterEntries().length <= 1) return
+   // cycleToken steps relative to cycleOriginKey (a single tagged-feed filter
+   // cycles by its tag), so the list and the reader share one rotation.
+   if (view === "list") void selectFilter(nav.cycleToken(dir))
+   else guard(() => nav.cycleFilter(dir))
 }
 
 function feedMenuTag(): string {
@@ -437,7 +422,8 @@ function feedMenuTag(): string {
       const key = nav.getCurrentFilterKey()
       return key !== "" && !/^\d+$/.test(key) ? key : ""
    }
-   return currentFeed.tag
+   const id = nav.currentFeedId()
+   return id >= 0 ? (data.db.feeds[id]?.tag ?? "") : ""
 }
 
 // Margin bell — a step toward an edge with no neighbor (prev/next disabled) kicks
@@ -609,11 +595,9 @@ async function init() {
    })
 
    gestures = setupGestures({
-      prev: el.prev,
-      next: el.next,
       toolbar: el.toolbar,
-      guard,
-      edgeBump: bumpReaderEdge,
+      goPrev: stepLeft,
+      goNext: stepRight,
       onCycle,
    })
    refreshUnreadButton() // reflect the persisted unread-only mode on the toolbar at boot

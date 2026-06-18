@@ -1,15 +1,16 @@
-export interface LRU<T> {
-   get(id: number): T | undefined
-   peek(id: number): T | undefined
-   put(id: number, val: T): void
-   drop(id: number): void
+export interface LRU<T, K = number> {
+   get(id: K): T | undefined
+   peek(id: K): T | undefined
+   put(id: K, val: T): void
+   drop(id: K): void
 }
 
-// LRU via Map insertion order: re-insert on access, evict oldest (first key)
-export function makeLRU<T>(maxSize: number): LRU<T> {
-   const map = new Map<number, T>()
+// LRU via Map insertion order: re-insert on access, evict oldest (first key).
+// Keyed by number by default (pack ids); K widens it to e.g. string query keys.
+export function makeLRU<T, K = number>(maxSize: number): LRU<T, K> {
+   const map = new Map<K, T>()
    return {
-      get(id: number): T | undefined {
+      get(id: K): T | undefined {
          const entry = map.get(id)
          if (entry !== undefined) {
             map.delete(id)
@@ -17,15 +18,15 @@ export function makeLRU<T>(maxSize: number): LRU<T> {
          }
          return entry
       },
-      peek(id: number): T | undefined {
+      peek(id: K): T | undefined {
          return map.get(id)
       },
-      put(id: number, val: T) {
+      put(id: K, val: T) {
          map.delete(id)
          map.set(id, val)
          if (map.size > maxSize) map.delete(map.keys().next().value!)
       },
-      drop(id: number) {
+      drop(id: K) {
          map.delete(id)
       },
    }
@@ -35,7 +36,7 @@ export function makeLRU<T>(maxSize: number): LRU<T> {
 // stored promise, a miss starts make() and stores it, and a rejection drops
 // the slot — identity-guarded, since eviction may have replaced it — so the
 // next call retries instead of caching the failure forever.
-export function cachedPromise<T>(lru: LRU<Promise<T>>, key: number, make: () => Promise<T>): Promise<T> {
+export function cachedPromise<T, K = number>(lru: LRU<Promise<T>, K>, key: K, make: () => Promise<T>): Promise<T> {
    const cached = lru.get(key)
    if (cached) return cached
    const promise = make()

@@ -229,10 +229,6 @@ async function getPackRef(chronIdx: number): Promise<{ packId: number; offset: n
 
 const dataCache = makeLRU<Promise<IArticle[]>>(20)
 
-function loadDataPack(packId: number): Promise<IArticle[]> {
-   return cachedPromise(dataCache, packId, () => fetchDataPack(packId))
-}
-
 async function fetchDataPack(packId: number): Promise<IArticle[]> {
    const isFinalized = packId < db.next_pid
    const name = isFinalized ? packId.toString() : `L${db.seq}`
@@ -268,7 +264,7 @@ async function fetchDataPack(packId: number): Promise<IArticle[]> {
 
 export async function loadArticle(chronIdx: number): Promise<IArticle> {
    const ref = await getPackRef(chronIdx)
-   const entries = await loadDataPack(ref.packId)
+   const entries = await cachedPromise(dataCache, ref.packId, () => fetchDataPack(ref.packId))
    if (ref.offset >= entries.length) {
       // Pack names are write-once, so this is unreachable in normal operation;
       // it survives as defense-in-depth for a store rebuilt in place (same
@@ -334,15 +330,6 @@ export async function loadMeta(chronIdx: number): Promise<IMetaWire> {
    return { f: a.f, w: a.p || a.a, t: a.t }
 }
 
-let activeFeedsCache: IFeed[] | null = null
-function activeFeeds(): IFeed[] {
-   if (activeFeedsCache) return activeFeedsCache
-   activeFeedsCache = Object.values(db.feeds)
-      .filter((ch) => ch.total_art > 0)
-      .sort((a, b) => (a.title < b.title ? -1 : 1))
-   return activeFeedsCache
-}
-
 type GroupResult = { tagged: Map<string, IFeed[]>; sortedTags: string[]; untagged: IFeed[] }
 let groupCache: GroupResult | null = null
 
@@ -350,7 +337,10 @@ export function groupFeedsByTag(): GroupResult {
    if (groupCache) return groupCache
    const tagged = new Map<string, IFeed[]>()
    const untagged: IFeed[] = []
-   for (const ch of activeFeeds()) {
+   const feeds = Object.values(db.feeds)
+      .filter((ch) => ch.total_art > 0)
+      .sort((a, b) => (a.title < b.title ? -1 : 1))
+   for (const ch of feeds) {
       if (ch.tag) {
          let group = tagged.get(ch.tag)
          if (!group) {

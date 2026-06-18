@@ -121,22 +121,17 @@ function loadShard(n: number): Promise<Shard> {
    )
 }
 
-type Accept = (s: number, chron: number) => boolean
-
-function matchShard(shard: Shard, baseChron: number, words: string[], max: number, accept: Accept): ISearchHit[] {
+function matchShard(shard: Shard, baseChron: number, words: string[], max: number): ISearchHit[] {
    const hits: ISearchHit[] = []
    // Newest-first within the shard, like the shard order of the outer scan —
-   // and only accepted hits count toward `max`, so the first `max` collected
-   // are exactly the `max` the consumer keeps (a frequent word against a full
-   // shard would otherwise build tens of thousands of hit objects per
-   // keystroke just to be discarded).
+   // the first `max` collected are exactly the `max` the consumer keeps (a
+   // frequent word against a full shard would otherwise build tens of thousands
+   // of hit objects per keystroke just to be discarded).
    for (let i = shard.folded.length - 1; i >= 0 && hits.length < max; i--) {
       const folded = shard.folded[i]
       if (!words.every((w) => folded.includes(w))) continue
       const e = shard.entries[i]
-      const chron = baseChron + i
-      if (!accept(e.f, chron)) continue
-      hits.push({ chron, f: e.f, w: e.w, t: e.t ?? "" })
+      hits.push({ chron: baseChron + i, f: e.f, w: e.w, t: e.t ?? "" })
    }
    return hits
 }
@@ -151,18 +146,60 @@ export function shortQuery(q: string): boolean {
 }
 
 // search yields batches of hits, newest shard first (latest tail, then
-// finalized nf-1..0), one batch per shard that matched, stopping once
-// `limit` hits passed `accept` — the caller's filter, applied here so the
-// cap counts only hits the caller keeps. Matching is AND of folded substring
-// tests per query word; candidate shards must hold every gram of every
-// bloom-sized word. A missing/broken latest tail degrades to finalized-only
-// (warn); a missing summary rejects — the caller decides how to surface
-// that.
-export async function* search(
-   q: string,
-   limit = Infinity,
-   accept: Accept = () => true,
-): AsyncGenerator<ISearchHit[], void, void> {
+// finalized nf-1..0), one batch per shard that matched, stopping once `limit`
+// hits are collected. Matching is AND of folded substring tests per query
+// word; candidate shards must hold every gram of every bloom-sized word. A
+// missing/broken latest tail degrades to finalized-only (warn); a missing
+// summary rejects — the caller decides how to surface that.
+// The capped, de-duplicated, ascending hit set for a query — the explicit set
+// nav's search filter mode walks. Cached per query string (cachedPromise shares
+// the in-flight promise, so concurrent neighbor walks within one render dedupe,
+// and a rejection drops the slot to retry); nav keeps the active-term
+// supersession guard. `truncated` flags that the SEARCH cap bit (the UI hint).
+export interface HitSet {
+   chrons: number[]
+   truncated: boolean
+}
+
+const hitCache = makeLRU<Promise<HitSet>, string>(8)
+
+export function loadHits(query: string, cap: number): Promise<HitSet> {
+   return cachedPromise(hitCache, query, () => buildHits(query, cap))
+}
+
+async function buildHits(query: string, cap: number): Promise<HitSet> {
+   const seen = new Set<number>()
+   const chrons: number[] = []
+   let truncated = false
+   if (query) {
+      try {
+         // Ask for one past the cap: search() stops at its limit, so without the
+         // +1 a query with exactly `cap` matches and one with thousands both yield
+         // `cap` hits and the break never fires — truncation would be invisible.
+         // The extra hit is the witness; we keep only `cap`.
+         outer: for await (const batch of search(query, cap + 1)) {
+            for (const h of batch) {
+               if (chrons.length >= cap) {
+                  truncated = true
+                  break outer
+               }
+               if (!seen.has(h.chron)) {
+                  seen.add(h.chron)
+                  chrons.push(h.chron)
+               }
+            }
+         }
+      } catch (e) {
+         // A missing summary / shard rejects the generator; degrade to whatever
+         // was collected rather than breaking list/reader navigation.
+         console.warn("search filter: shard scan failed", e)
+      }
+   }
+   chrons.sort((a, b) => a - b)
+   return { chrons, truncated }
+}
+
+export async function* search(q: string, limit = Infinity): AsyncGenerator<ISearchHit[], void, void> {
    const words = fold(q)
       .split(" ")
       .filter((w) => w.length > 0)
@@ -180,7 +217,7 @@ export async function* search(
 
    try {
       const latest = await loadLatest()
-      const hits = matchShard(latest, nf * META_PACK_SIZE, words, remaining, accept)
+      const hits = matchShard(latest, nf * META_PACK_SIZE, words, remaining)
       remaining -= hits.length
       if (hits.length > 0) yield hits
    } catch (e) {
@@ -191,7 +228,7 @@ export async function* search(
    const blooms = await summary
    for (let p = nf - 1; p >= 0 && remaining > 0; p--) {
       if (!gramBits.every((bits) => bloomHas(blooms, p * SEARCH_BLOOM_BYTES, bits))) continue
-      const hits = matchShard(await loadShard(p), p * META_PACK_SIZE, words, remaining, accept)
+      const hits = matchShard(await loadShard(p), p * META_PACK_SIZE, words, remaining)
       remaining -= hits.length
       if (hits.length > 0) yield hits
    }
