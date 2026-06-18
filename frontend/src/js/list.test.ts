@@ -73,6 +73,7 @@ const nav = vi.hoisted(() => {
       _setListAnchor: (a: number) => (anchor = a),
       isSearchFilter: vi.fn(() => filter.search),
       searchMore: vi.fn(async () => ({ hits: [] as { chron: number; f: number; w: number; t: string }[], done: true })),
+      resetSearchStream: vi.fn(),
       searchQuery: vi.fn(() => searchTerm),
       isUnreadOnly: vi.fn(() => unreadOnly),
       _setUnreadOnly: (v: boolean) => (unreadOnly = v),
@@ -169,6 +170,7 @@ describe("list", () => {
       // Restore the default (empty) search stream so a per-test mockImplementation
       // can't leak into the next test.
       nav.searchMore.mockImplementation(async () => ({ hits: [], done: true }))
+      nav.resetSearchStream.mockReset() // default no-op; some tests model its rewind
       vi.resetModules()
       list = await import("./list")
       list.setup(container, (chron) => opened.push(chron))
@@ -453,6 +455,42 @@ describe("list", () => {
       expect(rows.some((r) => r.classList.contains("srr-row-skeleton"))).toBe(false)
       // OLDEST terminus once the stream is done.
       expect(container.querySelector(".srr-wire-end")).not.toBeNull()
+   })
+
+   it("re-renders newest-first after the shared hit stream was advanced (regression)", async () => {
+      // The hit stream is shared with reader stepping. Model it faithfully:
+      // searchMore walks newest→oldest batches and resetSearchStream rewinds it to
+      // the newest (exactly what the real nav does). Reader stepping toward older
+      // hits drains the iterator WITHOUT touching the list DOM — so a later fresh
+      // render that just streamed forward would show the drained tail / empty
+      // state. renderSearch must rewind first and re-show the newest matches.
+      nav.filter.search = true
+      const batches = [
+         [{ chron: 9, f: 1, w: 9, t: "newest" }],
+         [{ chron: 5, f: 1, w: 5, t: "middle" }],
+         [{ chron: 1, f: 1, w: 1, t: "oldest" }],
+      ]
+      let i = 0
+      nav.searchMore.mockImplementation(async () => {
+         if (i >= batches.length) return { hits: [], done: true }
+         const hits = batches[i++]
+         return { hits, done: i >= batches.length }
+      })
+      nav.resetSearchStream.mockImplementation(() => {
+         i = 0
+      })
+      data.db.total_art = 10
+
+      // Simulate the reader stepping to the oldest hit: it drains the iterator.
+      await nav.searchMore()
+      await nav.searchMore()
+      await nav.searchMore()
+      expect(i).toBe(3) // stream drained
+
+      await list.render()
+      expect(nav.resetSearchStream).toHaveBeenCalled()
+      // The list shows the NEWEST matches at the top, not the drained tail/empty.
+      expect($rows().map((r) => r.querySelector(".srr-row-title")!.textContent)).toEqual(["newest", "middle", "oldest"])
    })
 
    it("relabelDividers skips skeleton rows (no data-ts)", () => {

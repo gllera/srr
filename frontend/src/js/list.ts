@@ -61,6 +61,12 @@ let onOpen: (chron: number) => void = () => {}
 // prepend compensation) so the gesture layer can resync its toolbar-hide
 // baseline — otherwise the jump reads as a downward scroll and hides the toolbar.
 let notifyScroll: () => void = () => {}
+// Surfaces a scroll-paging failure (a meta pack 404/network drop during fetchOlder/
+// fetchNewer). The initial render reports errors through its awaited show() chain;
+// the incremental paging fired off the IntersectionObserver has no such caller, so
+// without this its rejection would be an unhandled promise — the list would just
+// stop growing with no feedback. app wires this to its retry-able error popup.
+let onError: (e: unknown) => void = () => {}
 
 // Freshness token: a new render() reassigns it so any in-flight load (or pending
 // observer callback) from the prior filter bails before touching the DOM — the
@@ -80,10 +86,16 @@ let observer: IntersectionObserver | null = null
 // Programmatic scrolls (window.scrollTo) don't fire these, so they don't trip it.
 let userScrolled = false
 
-export function setup(el: HTMLElement, open: (chron: number) => void, onScroll?: () => void): void {
+export function setup(
+   el: HTMLElement,
+   open: (chron: number) => void,
+   onScroll?: () => void,
+   onPageError?: (e: unknown) => void,
+): void {
    container = el
    onOpen = open
    notifyScroll = onScroll ?? (() => {})
+   onError = onPageError ?? (() => {})
    container.addEventListener("click", (e) => {
       const target = e.target as HTMLElement
       const a = target.closest("a.srr-row") as HTMLElement | null
@@ -399,8 +411,21 @@ async function walk(
 // them all at once). Each worker is token-guarded by its caller.
 async function runPool<T>(items: T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
    let next = 0
+   let failed = false
    const run = async (): Promise<void> => {
-      while (next < items.length) await worker(items[next++])
+      while (next < items.length && !failed) {
+         const i = next++
+         try {
+            await worker(items[i])
+         } catch (e) {
+            // First failure rejects the whole pool (render surfaces it). Flip the
+            // flag so the other lanes stop claiming work instead of running on as
+            // orphans — writing to detached rows and raising further unhandled
+            // rejections after Promise.all has already settled.
+            failed = true
+            throw e
+         }
+      }
    }
    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => run()))
 }
@@ -517,6 +542,14 @@ export async function render(center = false, onInteractive?: () => void): Promis
 // Search suppresses day dividers (relabelDividers returns early in search mode),
 // so none are built here.
 async function renderSearch(my: object, onInteractive?: () => void): Promise<void> {
+   // The hit stream is shared with reader stepping (ensureSearchCovers advances it
+   // toward older hits). A full search render must show the NEWEST matches at the
+   // top regardless of how far that stepping consumed the iterator, so restart it
+   // here — otherwise streaming searchMore() forward would render only the unpulled
+   // older tail, or the empty state once the stream is drained/capped. The shards,
+   // summary and latest tail stay cached in search.ts, so the restart re-fetches
+   // nothing; it just re-walks cached bytes from newest-first.
+   nav.resetSearchStream()
    rowsEl = el("div", "srr-list-rows")
    topSentinel = el("div", "srr-list-sentinel")
    bottomSentinel = el("div", "srr-list-sentinel")
@@ -759,6 +792,13 @@ export function loadNewer(): Promise<void> {
    return fetchNewer(tok)
 }
 
+// Token-guarded paging-error sink: a fetchOlder/fetchNewer rejection from the
+// fire-and-forget IO paths below surfaces through app's error popup — but only
+// while still current, so a superseded render's late failure stays silent.
+function reportPageError(my: object, e: unknown): void {
+   if (my === tok) onError(e)
+}
+
 function observe(my: object): void {
    if (typeof IntersectionObserver === "undefined") return // jsdom: no layout/IO
    observer = new IntersectionObserver(
@@ -766,8 +806,8 @@ function observe(my: object): void {
          if (my !== tok) return
          for (const e of entries) {
             if (!e.isIntersecting) continue
-            if (e.target === topSentinel) void fetchNewer(my)
-            else void pump(my)
+            if (e.target === topSentinel) fetchNewer(my).catch((err) => reportPageError(my, err))
+            else pump(my).catch((err) => reportPageError(my, err))
          }
       },
       { rootMargin: ROOT_MARGIN },
@@ -778,7 +818,7 @@ function observe(my: object): void {
    // sparse filter); pump until the bottom sentinel sits below the fold or the
    // feed is exhausted. The newer side above needs no initial pump — it's
    // off-screen until the user scrolls up, where the observer pages it in.
-   void pump(my)
+   pump(my).catch((err) => reportPageError(my, err))
 }
 
 async function pump(my: object): Promise<void> {

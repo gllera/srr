@@ -165,6 +165,24 @@ let searchDone = false // generator exhausted (or cap hit) for searchIterFor
 let searchIterFor: string | null = null // the term searchIter/state were built for
 let searchPulled = 0 // hits accepted so far (cap guard)
 
+// Drop the lazy hit stream so the next searchMore (re)starts the iterator from
+// the newest hit. Called on a new query (filter.set) AND at the top of a full
+// search render (list.renderSearch): the iterator is SHARED with reader stepping
+// (feedLeft/feedRight → ensureSearchCovers advance it as you step to older hits),
+// so a fresh list render that consumed it forward would otherwise show only the
+// unpulled older tail — or nothing once it's drained — instead of the newest
+// matches. Resetting makes every full search render stream newest-first; the
+// summary/tail/shards stay cached in search.ts, so the restart re-fetches nothing.
+export function resetSearchStream(): void {
+   searchIter = null
+   searchIterFor = null
+   searchDone = false
+   searchPulled = 0
+   searchSorted = []
+   searchSet = new Set<number>()
+   searchTruncatedFlag = false
+}
+
 export function isSearchFilter(): boolean {
    return filter.search
 }
@@ -335,18 +353,11 @@ export const filter = {
          const term = tokens[0].slice(SEARCH_PREFIX.length)
          // New query: drop the stale stream so matches()/searchMore rebuild it. A
          // returning query (back/forward, term unchanged) keeps its partial stream.
-         // Nulling searchIterFor forces searchMore to (re)start the iterator; without
-         // it a fast type→backspace (A → B → A, B's pull still in flight) would leave
-         // searchIterFor === "A" with an emptied set and strand the list on no matches.
-         if (term !== searchIterFor) {
-            searchIter = null
-            searchIterFor = null
-            searchDone = false
-            searchPulled = 0
-            searchSorted = []
-            searchSet = new Set<number>()
-            searchTruncatedFlag = false
-         }
+         // resetSearchStream nulls searchIterFor, forcing searchMore to (re)start the
+         // iterator; without it a fast type→backspace (A → B → A, B's pull still in
+         // flight) would leave searchIterFor === "A" with an emptied set and strand
+         // the list on no matches.
+         if (term !== searchIterFor) resetSearchStream()
          searchTerm = term
          return
       }
