@@ -1,9 +1,10 @@
 // design.ts — a dev-only control panel that drives the REAL app (booted by
-// app.ts in design.html) so Claude can see every visual state. It never imports
-// app modules: it navigates by setting location.hash (the app's hashchange
-// router reacts) and forces transient/interaction-only states by toggling the
-// SAME CSS classes app.ts/list.ts use. So what the harness shows is the real
-// rendering — no mock components, nothing to drift.
+// design-boot.ts) so Claude can see every visual state. It imports no app module
+// (so the unit tests can import it without self-booting app.ts): it navigates by
+// setting location.hash (the app's hashchange router reacts) and forces
+// transient/interaction-only states by toggling the SAME CSS classes
+// app.ts/list.ts use. So what the harness shows is the real rendering — no mock
+// components, nothing to drift.
 
 // ---- State jumps -----------------------------------------------------------
 

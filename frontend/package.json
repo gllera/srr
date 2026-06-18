@@ -18,6 +18,7 @@
     "test-browser": "vitest run --config vitest.browser.config.ts",
     "test-stress": "vitest run --config vitest.stress.config.ts",
     "gen-design": "vitest run --config vitest.design.config.ts",
+    "shoot-design": "vitest run --config vitest.design-shots.config.ts",
     "lint": "eslint src/js",
     "format": "prettier --write src",
     "format-check": "prettier --check src"
