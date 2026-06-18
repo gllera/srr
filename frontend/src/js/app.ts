@@ -506,6 +506,10 @@ async function init() {
       el.listView,
       (chron) => guard(() => nav.goTo(chron)),
       () => gestures?.resetScroll(),
+      // A scroll-paging failure (meta pack 404 / network drop) surfaces here; the
+      // retry rebuilds the list at the current anchor, same recovery as a failed
+      // initial render.
+      (e) => showError(e, () => void renderListSurface()),
    )
 
    el.prev.addEventListener("click", () => guard(() => nav.left()))

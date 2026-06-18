@@ -1713,6 +1713,24 @@ describe("search lazy stream (incremental pull)", () => {
       expect(await nav.feedRight(46)).toBe(50)
    })
 
+   it("resetSearchStream rewinds the shared iterator to the newest hit", async () => {
+      // The iterator is shared between list rendering and reader stepping. After
+      // stepping advances it toward older hits, a fresh list render rewinds it so it
+      // streams newest-first again (otherwise it would yield only the older tail, or
+      // nothing once drained). The rewind re-creates the generator from the start.
+      setupIndex(Array.from({ length: 60 }, () => ({ feedId: 1 })))
+      searchMod.search.mockImplementation(genPerBatch([55, 50, 45]))
+      nav.applyFilter([nav.SEARCH_PREFIX + "rewind"])
+      expect((await nav.searchMore()).hits.map((h) => h.chron)).toEqual([55])
+      expect((await nav.searchMore()).hits.map((h) => h.chron)).toEqual([50]) // advanced past 55
+      expect(searchMod.search).toHaveBeenCalledTimes(1)
+
+      nav.resetSearchStream()
+      expect(nav.filter.matches(1, 55)).toBe(false) // snapshot cleared
+      expect((await nav.searchMore()).hits.map((h) => h.chron)).toEqual([55]) // newest again
+      expect(searchMod.search).toHaveBeenCalledTimes(2) // generator re-created
+   })
+
    it("an empty query never calls search.search", async () => {
       setupIndex(Array.from({ length: 5 }, () => ({ feedId: 1 })))
       nav.applyFilter([nav.SEARCH_PREFIX])
