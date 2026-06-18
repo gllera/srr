@@ -201,6 +201,20 @@ describe("list", () => {
       expect(document.querySelectorAll(".srr-day-divider").length).toBe(0)
    })
 
+   it("relabelDividers skips skeleton rows (no data-ts)", () => {
+      // Build a rows container by hand: one filled row, one skeleton.
+      const rows = document.createElement("div")
+      rows.className = "srr-list-rows"
+      const filled = list.rowEl(5, { f: 1, w: 1700000000, t: "a" }, {})
+      const skel = list.rowEl(4, null, {})
+      rows.append(filled, skel)
+      document.querySelector(".srr-list")!.replaceChildren(rows)
+      list.__setRowsForTest(rows)
+      list.__relabelDividersForTest()
+      // Exactly one divider — for the filled row; the skeleton contributes none.
+      expect(rows.querySelectorAll(".srr-day-divider").length).toBe(1)
+   })
+
    it("builds a skeleton row when no card is given, then fills it", () => {
       const row = list.rowEl(3, null, {})
       expect(row.classList.contains("srr-row-skeleton")).toBe(true)
