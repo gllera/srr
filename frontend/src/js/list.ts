@@ -42,6 +42,10 @@ const ROOT_MARGIN = "800px"
 const STAR_SVG =
    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.4l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z"/></svg>'
 
+// The caught-up reward mark — a plain checkmark, the universal "done".
+const CHECK_SVG =
+   '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+
 let container: HTMLElement
 let rowsEl: HTMLElement | null = null
 let topSentinel: HTMLElement
@@ -172,12 +176,21 @@ function emptyState(): void {
          msg.textContent = "Find any article by its title."
       }
    } else if (nav.isUnreadOnly() && data.db.total_art > 0) {
-      // Unseen-only now spans [ALL] too (no active filter needed): an empty list
-      // with articles present means everything in view has been read.
+      // The one empty state that's a reward, not an absence (unseen-only spans
+      // [ALL] too): an empty list with articles present means there's nothing
+      // left to read. Mark it with a plain checkmark in the warm accent the
+      // cold/absent states never get; the eyebrow + line match the other states.
+      wrap.classList.add("srr-caughtup")
+      const check = el("div", "srr-caughtup-check")
+      check.setAttribute("aria-hidden", "true") // decorative; the eyebrow + line are the accessible text
+      check.innerHTML = CHECK_SVG
+      wrap.appendChild(check)
       eyebrow("All caught up")
-      const name = nav.getCurrentFilterKey()
-      if (name) msg.append("You've read everything in ", em(name), ".")
-      else msg.textContent = "You've read everything here."
+      const key = nav.getCurrentFilterKey()
+      // Name the tag/feed (filterLabel turns a single-feed filter's raw id into
+      // its title), not the key — "" (all/multi) stays the unscoped line.
+      if (key) msg.append("Nothing unread in ", em(nav.filterLabel(key)), ".")
+      else msg.textContent = "You've read everything."
    } else if (nav.filter.saved) {
       eyebrow("Nothing saved")
       const star = el("span", "srr-empty-star")
@@ -222,6 +235,57 @@ function relabelDividers(): void {
          d.textContent = label
          rowsEl.insertBefore(d, row)
          prev = label
+      }
+   }
+}
+
+// The list's oldest-end terminus: once the feed is exhausted downward, cap the
+// rows with an "OLDEST" sign-off so scrolling to the bottom reads as a definite
+// end — the list counterpart to the reader's read-on "LATEST" line. Idempotent
+// (one terminus at most) and cleared on every rebuild via replaceChildren;
+// rowSibling skips it, so it never intercepts cursor stepping.
+function syncBottomTerminus(): void {
+   if (!rowsEl) return
+   const existing = rowsEl.querySelector(".srr-wire-end")
+   if (!exhaustedBottom) {
+      existing?.remove()
+      return
+   }
+   if (existing) return
+   const end = el("div", "srr-wire-end")
+   const rule = el("div", "srr-wire-end-rule")
+   rule.textContent = "OLDEST" // the bottom of a newest-first list is its oldest end
+   end.append(rule)
+   rowsEl.appendChild(end)
+}
+
+// The list's newest-end terminus — the symmetric cap at the top: once the upward
+// walk is exhausted, prepend a "LATEST" sign-off so scrolling up to the newest
+// reads as a definite end, matching the reader's read-on "LATEST" line. Same
+// idempotent/cleared-on-rebuild/rowSibling-skipped contract as the bottom. When
+// `compensate`, it keeps the viewport put across the prepend (the incremental
+// fetchNewer path, which compensates its own prepended rows the same way);
+// render passes false because it sets scroll explicitly right after.
+function syncTopTerminus(compensate = false): void {
+   if (!rowsEl) return
+   const existing = rowsEl.querySelector(".srr-wire-top")
+   if (exhaustedTop === !!existing) return // already in the desired state
+   const scroller = document.scrollingElement ?? document.documentElement
+   const before = compensate ? scroller.scrollHeight : 0
+   if (!exhaustedTop) {
+      existing!.remove()
+   } else {
+      const top = el("div", "srr-wire-top")
+      const rule = el("div", "srr-wire-end-rule")
+      rule.textContent = "LATEST" // the top of a newest-first list is its newest end
+      top.append(rule)
+      rowsEl.insertBefore(top, rowsEl.firstChild)
+   }
+   if (compensate) {
+      const delta = scroller.scrollHeight - before
+      if (delta) {
+         window.scrollTo(0, window.scrollY + delta)
+         notifyScroll()
       }
    }
 }
@@ -316,6 +380,8 @@ export async function render(center = false): Promise<void> {
    rowsEl.appendChild(frag)
    container.append(topSentinel, rowsEl, bottomSentinel)
    relabelDividers()
+   syncBottomTerminus() // cap the rows when the whole view fits one batch
+   syncTopTerminus() // and cap the top when we're already anchored at the newest
 
    if (anchoredMid) scrollChronToView(seed, center && seed === nav.anchorChron())
    else window.scrollTo(0, 0)
@@ -421,7 +487,10 @@ async function fetchOlder(my: object): Promise<void> {
       rowsEl.appendChild(frag)
       relabelDividers()
    } finally {
-      if (my === tok) loadingBottom = false
+      if (my === tok) {
+         loadingBottom = false
+         syncBottomTerminus() // append the terminus the moment we page off the oldest end
+      }
    }
 }
 
@@ -460,7 +529,10 @@ async function fetchNewer(my: object): Promise<void> {
          notifyScroll()
       }
    } finally {
-      if (my === tok) loadingTop = false
+      if (my === tok) {
+         loadingTop = false
+         syncTopTerminus(true) // prepend the terminus the moment we page off the newest end
+      }
    }
 }
 

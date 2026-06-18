@@ -77,6 +77,7 @@ const nav = vi.hoisted(() => {
       _setUnreadOnly: (v: boolean) => (unreadOnly = v),
       filterKey: vi.fn(() => (filter.saved ? "S" : filter.search ? "q:" + searchTerm : filter.active ? "F" : "")),
       getCurrentFilterKey: vi.fn(() => ""),
+      filterLabel: vi.fn((key: string) => (/^\d+$/.test(key) ? data.feedTitle(Number(key)) : key)),
       tokensSuffix: vi.fn(() => (filter.saved ? "!~saved" : filter.active ? "!F" : "")),
       currentChron: vi.fn(() => pos),
       // The list's keyboard cursor sets nav.pos to the selected row (the feed arg
@@ -252,6 +253,51 @@ describe("list", () => {
       expect($rows().length).toBe(65)
    })
 
+   const $end = () => container.querySelector(".srr-wire-end")
+
+   it("caps the oldest end with the end-of-wire terminus once exhausted, not before", async () => {
+      setIndex(65)
+      await list.render()
+      expect($end()).toBeNull() // first batch loaded, more below
+      await list.loadMore()
+      expect($end()).toBeNull()
+      await list.loadMore() // reaches chron 0 → exhausted downward
+      expect($end()).not.toBeNull()
+      expect($end()!.querySelector(".srr-wire-end-rule")!.textContent).toBe("OLDEST")
+      // Idempotent — a further no-op load doesn't add a second.
+      await list.loadMore()
+      expect(container.querySelectorAll(".srr-wire-end").length).toBe(1)
+   })
+
+   it("shows the terminus at render when the whole view fits one batch", async () => {
+      setIndex(4)
+      await list.render()
+      expect($end()).not.toBeNull()
+   })
+
+   const $top = () => container.querySelector(".srr-wire-top")
+
+   it("caps the newest end with the LATEST terminus once exhausted upward, not before", async () => {
+      setIndex(65)
+      nav._setAnchor(2) // open mid-feed: newer articles exist above
+      await list.render()
+      expect($top()).toBeNull() // the newer batch above isn't exhausted yet
+      await list.loadNewer()
+      expect($top()).toBeNull()
+      await list.loadNewer() // pages up to chron 64 → exhausted upward
+      expect($top()).not.toBeNull()
+      expect($top()!.querySelector(".srr-wire-end-rule")!.textContent).toBe("LATEST")
+      // Idempotent — a further no-op load doesn't add a second.
+      await list.loadNewer()
+      expect(container.querySelectorAll(".srr-wire-top").length).toBe(1)
+   })
+
+   it("shows the LATEST terminus at render when opened at the newest", async () => {
+      setIndex(4) // default anchor -1 → opens at the newest end
+      await list.render()
+      expect($top()).not.toBeNull()
+   })
+
    it("only includes feeds in the active filter", async () => {
       setIndex(6, (c) => (c % 2 === 0 ? 1 : 2)) // even=feed1, odd=feed2
       nav.filter.active = true
@@ -297,7 +343,23 @@ describe("list", () => {
       await list.render()
       const empty = container.querySelector(".srr-list-empty")
       expect(empty).not.toBeNull()
+      // The reward state gets the accent checkmark the cold/absent states don't,
+      // plus the shared "All caught up" eyebrow.
+      expect(empty!.querySelector(".srr-caughtup-check")).not.toBeNull()
       expect(empty!.querySelector(".srr-empty-eyebrow")!.textContent).toBe("All caught up")
+   })
+
+   it("names the filtered feed (not its raw id) in the caught-up message", async () => {
+      setIndex(4, () => 1)
+      nav.filter.active = true
+      nav.filter.feeds = new Map([[99, 0]]) // nothing matches → caught-up empty
+      nav._setUnreadOnly(true)
+      nav.getCurrentFilterKey.mockReturnValueOnce("99") // a single untagged-feed filter: key is the id
+      await list.render()
+      const empty = container.querySelector(".srr-list-empty")
+      // The emphasized name is the feed's title (filterLabel resolves the id), not "99".
+      expect(empty!.querySelector(".srr-empty-em")!.textContent).toBe("Feed99")
+      expect(empty!.querySelector(".srr-empty-msg")!.textContent).toBe("Nothing unread in Feed99.")
    })
 
    it("refresh re-derives read/unread dots from the live seen map", async () => {

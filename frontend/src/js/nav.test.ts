@@ -8,6 +8,7 @@ const data = vi.hoisted(() => ({
    } as unknown as IDB,
    loadArticle: vi.fn<(chronIdx: number) => Promise<IArticle>>(),
    groupFeedsByTag: vi.fn(() => ({ tagged: new Map(), sortedTags: [] as string[], untagged: [] as IFeed[] })),
+   feedTitle: vi.fn((id: number) => data.db.feeds[id]?.title ?? "[DELETED]"),
    getFeedId: vi.fn<(chronIdx: number) => number>(),
    countLeft: vi.fn((chronIdx: number, feeds: Map<number, number>) => {
       let count = 0
@@ -592,6 +593,22 @@ describe("getFilterEntries", () => {
       })
       const entries = nav.getFilterEntries()
       expect(entries).toEqual(["", "tech"])
+   })
+})
+
+describe("filterLabel", () => {
+   it("maps [ALL] and the saved smart-folder to their words", () => {
+      expect(nav.filterLabel("")).toBe("All")
+      expect(nav.filterLabel(nav.SAVED_TOKEN)).toBe("★ Saved")
+   })
+
+   it("resolves a numeric feed-id key to that feed's title, never the raw id", () => {
+      data.db.feeds = { "7": makeFeed({ id: 7, title: "The Wire" }) }
+      expect(nav.filterLabel("7")).toBe("The Wire")
+   })
+
+   it("passes a tag-name key through unchanged (tags are already names)", () => {
+      expect(nav.filterLabel("news")).toBe("news")
    })
 })
 
