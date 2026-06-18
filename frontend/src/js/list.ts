@@ -371,7 +371,7 @@ async function walk(
 // (set when returning from the reader) centers the anchor in the viewport instead
 // of top-aligning it — but only the live reader article (seed === anchorChron),
 // never a resume/oldest anchor. Sets builtKey so show() can later refresh-vs-rebuild.
-export async function render(center = false): Promise<void> {
+export async function render(center = false, onInteractive?: () => void): Promise<void> {
    const my = (tok = {})
    teardownObserver()
    newest = oldest = -1
@@ -441,6 +441,7 @@ export async function render(center = false): Promise<void> {
    else window.scrollTo(0, 0)
    notifyScroll()
    observe(my)
+   onInteractive?.() // temporary placement; Task 5 moves it to first paint
 }
 
 // Re-show an already-built list (same filter). When the reader's article is
@@ -450,15 +451,16 @@ export async function render(center = false): Promise<void> {
 // or navigated past the loaded batch), falls through to a bounded rebuild.
 // `center` (returning from the reader) centers the article instead of
 // top-aligning it; the rebuild path forwards it to render().
-export async function show(center = false): Promise<void> {
+export async function show(center = false, onInteractive?: () => void): Promise<void> {
    const pos = nav.currentChron()
    if (builtKey === nav.filterKey() && rowsEl && pos >= 0 && findRow(pos)) {
       refresh()
       scrollChronToView(pos, center)
       notifyScroll()
+      onInteractive?.() // reuse path is already interactive
       return
    }
-   await render(center)
+   await render(center, onInteractive)
 }
 
 // Re-derive read/unread dots + saved stars + the current-article highlight from

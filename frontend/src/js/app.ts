@@ -236,14 +236,28 @@ async function renderListSurface() {
    refreshFeedLabel()
    document.title = listTitle()
    document.body.classList.add("srr-loading")
+   // Release busy + the loading veil at FIRST PAINT (skeletons / first matches),
+   // not when the whole list finishes streaming — so rows are tappable while the
+   // rest fills in. The finally only resets busy if first paint never happened
+   // (an error before onInteractive), so a reader-open that grabs busy during the
+   // fill window is not stomped when show() finally resolves.
+   let interactive = false
+   const onInteractive = () => {
+      if (interactive) return
+      interactive = true
+      document.body.classList.remove("srr-loading")
+      busy = false
+   }
    try {
-      await list.show(center)
+      await list.show(center, onInteractive)
    } catch (e) {
       showError(e, () => void renderListSurface())
    } finally {
-      document.body.classList.remove("srr-loading")
+      if (!interactive) {
+         document.body.classList.remove("srr-loading")
+         busy = false
+      }
       syncSearchBar()
-      busy = false
    }
 }
 
