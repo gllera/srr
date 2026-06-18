@@ -111,22 +111,44 @@ export function setupGestures(deps: GestureDeps): Gestures {
 
    let lastScrollY = 0
    let toolbarHidden = false
+   const setHidden = (hide: boolean) => {
+      if (hide !== toolbarHidden) {
+         deps.toolbar.classList.toggle("srr-toolbar-slide", hide)
+         toolbarHidden = hide
+      }
+   }
+   // Drop the scroll-linked bottom-reveal override, handing position back to the
+   // class-driven slide (+ its transition).
+   const clearBottomReveal = () => {
+      if (deps.toolbar.style.transform) {
+         deps.toolbar.style.transform = ""
+         deps.toolbar.style.transition = ""
+      }
+   }
    window.addEventListener(
       "scroll",
       () => {
          const y = window.scrollY
-         // At (or a hair from) the bottom there's nothing more to scroll down
-         // for, so keep the toolbar up — otherwise it'd stay hidden at the end
-         // with no way to reveal it short of scrolling back up off the bottom.
-         const scroller = document.scrollingElement ?? document.documentElement
-         const atBottom = y + window.innerHeight >= scroller.scrollHeight - 4
-         const hide = !atBottom && y > 50 && y > lastScrollY
-         if (hide !== toolbarHidden) {
-            deps.toolbar.classList.toggle("srr-toolbar-slide", hide)
-            toolbarHidden = hide
-         }
-         if (hide) closeAllDropdowns()
+         const goingDown = y > lastScrollY
          lastScrollY = y
+         const scroller = document.scrollingElement ?? document.documentElement
+         const barH = deps.toolbar.offsetHeight || 1
+         const distFromBottom = scroller.scrollHeight - (y + window.innerHeight)
+         // Bottom reveal: scrolling down through the last bar-height, the toolbar
+         // rises 1:1 with the scroll — like a footer that's part of the page,
+         // not a fixed bar popping in. transition:none so it tracks the scroll
+         // instead of easing behind it. Scrolling up falls through to the normal
+         // show path, so it never slides back down on you near the end.
+         if (goingDown && distFromBottom < barH) {
+            setHidden(false)
+            deps.toolbar.style.transition = "none"
+            deps.toolbar.style.transform = `translateY(${Math.max(0, distFromBottom)}px)`
+            return
+         }
+         clearBottomReveal()
+         const hide = y > 50 && goingDown
+         setHidden(hide)
+         if (hide) closeAllDropdowns()
       },
       { passive: true },
    )
@@ -134,13 +156,11 @@ export function setupGestures(deps: GestureDeps): Gestures {
    return {
       resetScroll() {
          // Sync the baseline to the post-jump position so the queued scroll event
-         // from a programmatic scrollTo reads zero delta (no spurious hide), and
-         // reveal the toolbar if a prior scroll had slid it away.
+         // from a programmatic scrollTo reads zero delta (no spurious hide), drop
+         // any bottom-reveal transform, and reveal a slid-away toolbar.
          lastScrollY = window.scrollY
-         if (toolbarHidden) {
-            deps.toolbar.classList.remove("srr-toolbar-slide")
-            toolbarHidden = false
-         }
+         clearBottomReveal()
+         setHidden(false)
       },
    }
 }

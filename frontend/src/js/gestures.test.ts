@@ -70,15 +70,25 @@ describe("scroll-driven toolbar hide/show", () => {
       expect(slid()).toBe(false)
    })
 
-   it("reveals the toolbar at the bottom even though we got there scrolling down", () => {
-      setScrollY(200)
+   it("rises 1:1 with the scroll in the bottom zone, then drops the override on the way up", () => {
+      setScrollHeight(2000)
+      Object.defineProperty(toolbar, "offsetHeight", { value: 60, configurable: true })
+      setScrollY(1100) // above the 60px bottom zone, scrolling down → hidden
       scroll()
-      expect(slid()).toBe(true) // hidden on the way down
-      // Keep scrolling down, this time landing at the very bottom (scrollY +
-      // innerHeight === scrollHeight). Still a downward scroll, but it reveals.
-      setScrollHeight(800 + 1000) // innerHeight + 1000
-      setScrollY(1000)
+      expect(slid()).toBe(true)
+      // 30px from the bottom, still scrolling down → lifted 30px into view (no slide class).
+      setScrollY(1170) // distFromBottom = 2000 - 1170 - 800 = 30
       scroll()
+      expect(slid()).toBe(false)
+      expect(toolbar.style.transform).toBe("translateY(30px)")
+      // At the very bottom it's fully in place.
+      setScrollY(1200) // distFromBottom = 0
+      scroll()
+      expect(toolbar.style.transform).toBe("translateY(0px)")
+      // Scrolling back up drops the scroll-linked override and just shows it fixed.
+      setScrollY(1180)
+      scroll()
+      expect(toolbar.style.transform).toBe("")
       expect(slid()).toBe(false)
    })
 })
