@@ -68,12 +68,19 @@ const waitReader = (p: Page) =>
       },
       { timeout: 20000 },
    )
-// The list surface is shown with at least one rendered row.
+// The list surface is shown with at least one rendered row AND every row filled
+// (no skeletons left) — rows now paint as skeletons first, so gating on row
+// presence alone would let a bulk title read race the progressive fill.
 const waitList = (p: Page) =>
    p.waitForFunction(
       () => {
          const l = document.querySelector(".srr-list") as HTMLElement | null
-         return !!l && !l.hidden && l.querySelector("a.srr-row") != null
+         return (
+            !!l &&
+            !l.hidden &&
+            l.querySelector("a.srr-row") != null &&
+            l.querySelector("a.srr-row.srr-row-skeleton") == null
+         )
       },
       { timeout: 20000 },
    )
@@ -82,7 +89,8 @@ const waitBoot = (p: Page) =>
    p.waitForFunction(
       () =>
          (document.querySelector(".srr-title")?.textContent?.length ?? 0) > 0 ||
-         document.querySelector(".srr-list a.srr-row") != null,
+         (document.querySelector(".srr-list a.srr-row") != null &&
+            document.querySelector(".srr-list a.srr-row.srr-row-skeleton") == null),
       { timeout: 20000 },
    )
 
