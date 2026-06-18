@@ -851,6 +851,50 @@ body:not(.srr-view-list) .srr-toolbar > .srr-unread {
       background: var(--hover);
    }
 }
+/* Progressive render: a row whose meta card hasn't arrived yet. Shimmer bars
+   stand in for source/age/title; the row reserves ~a 2-line height so the fill
+   barely shifts layout. Static under reduced motion. */
+.srr-row-skeleton {
+   contain-intrinsic-size: auto 4.75rem;
+}
+.srr-row-skeleton .srr-row-source,
+.srr-row-skeleton .srr-row-age,
+.srr-row-skeleton .srr-row-title {
+   color: transparent;
+   border-radius: 3px;
+   background: var(--bg-elev, rgba(128, 128, 128, 0.18));
+   background-image: linear-gradient(90deg, transparent 0%, rgba(128, 128, 128, 0.28) 50%, transparent 100%);
+   background-size: 200% 100%;
+   animation: srr-skeleton-shimmer 1.2s ease-in-out infinite;
+}
+.srr-row-skeleton .srr-row-source {
+   width: 7rem;
+}
+.srr-row-skeleton .srr-row-age {
+   width: 2.5rem;
+}
+.srr-row-skeleton .srr-row-title {
+   width: 80%;
+   min-height: 1.1em;
+}
+.srr-row-skeleton .srr-row-star {
+   opacity: 0.25;
+}
+@keyframes srr-skeleton-shimmer {
+   from {
+      background-position: 200% 0;
+   }
+   to {
+      background-position: -200% 0;
+   }
+}
+@media (prefers-reduced-motion: reduce) {
+   .srr-row-skeleton .srr-row-source,
+   .srr-row-skeleton .srr-row-age,
+   .srr-row-skeleton .srr-row-title {
+      animation: none;
+   }
+}
 /* Read rows recede: the rail fades toward the hairline. */
 .srr-row:not(.srr-row-unread) {
    border-left-color: color-mix(in srgb, var(--src, var(--faint)) 28%, var(--faint));
