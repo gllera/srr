@@ -43,11 +43,37 @@ vi.mock("./data", () => data)
 
 // nav.ts imports ./search for its "q:<query>" filter mode; mock it so tests
 // drive the hit set directly instead of fetching real shards.
-const searchMod = vi.hoisted(() => ({
-   available: vi.fn(() => true),
-   shortQuery: vi.fn(() => false),
-   search: vi.fn(),
-}))
+const searchMod = vi.hoisted(() => {
+   const mod = {
+      available: vi.fn(() => true),
+      shortQuery: vi.fn(() => false),
+      search: vi.fn(),
+      // Faithful stand-in for search.ts loadHits: drive the generator, cap, dedup
+      // and sort exactly as buildHits does (like the data mock mirrors findLeft).
+      loadHits: vi.fn(async (query: string, cap: number) => {
+         const seen = new Set<number>()
+         const chrons: number[] = []
+         let truncated = false
+         if (query) {
+            outer: for await (const batch of mod.search(query, cap + 1)) {
+               for (const h of batch as { chron: number }[]) {
+                  if (chrons.length >= cap) {
+                     truncated = true
+                     break outer
+                  }
+                  if (!seen.has(h.chron)) {
+                     seen.add(h.chron)
+                     chrons.push(h.chron)
+                  }
+               }
+            }
+         }
+         chrons.sort((a, b) => a - b)
+         return { chrons, truncated }
+      }),
+   }
+   return mod
+})
 vi.mock("./search", () => searchMod)
 
 import * as nav from "./nav"
@@ -107,7 +133,7 @@ describe("fromHash", () => {
       setupIndex([{ feedId: 1 }, { feedId: 2 }])
       const result = await nav.fromHash("1")
       expect(result.article.f).toBe(2)
-      expect(result.filtered).toBe(false)
+      expect(nav.filter.active).toBe(false)
    })
 
    it("handles single article feed", async () => {
@@ -134,8 +160,8 @@ describe("fromHash", () => {
 
    it("parses filter hash (#1!42)", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 42 }])
-      const result = await nav.fromHash("1!42")
-      expect(result.filtered).toBe(true)
+      await nav.fromHash("1!42")
+      expect(nav.filter.active).toBe(true)
    })
 
    it("parses tag filter", async () => {
@@ -143,7 +169,7 @@ describe("fromHash", () => {
       for (const [k, s] of Object.entries(data.db.feeds)) s.id = Number(k)
       setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 3 }])
       const result = await nav.fromHash("1!news")
-      expect(result.filtered).toBe(true)
+      expect(nav.filter.active).toBe(true)
       expect(result.article.f).toBe(2)
    })
 
@@ -157,32 +183,32 @@ describe("fromHash", () => {
       setupIndex([{ feedId: 1 }, { feedId: 2 }])
       const result = await nav.fromHash("1!")
       expect(result.article.f).toBe(2)
-      expect(result.filtered).toBe(false)
+      expect(nav.filter.active).toBe(false)
    })
 
    it("parses multi-sub filter from hash", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 2 }])
-      const result = await nav.fromHash("1!1+3")
-      expect(result.filtered).toBe(true)
+      await nav.fromHash("1!1+3")
+      expect(nav.filter.active).toBe(true)
    })
 
    it("ignores unresolved tag tokens from hash", async () => {
       setupIndex([{ feedId: 1 }])
-      const result = await nav.fromHash("0!1+abc+3")
-      expect(result.filtered).toBe(true)
+      await nav.fromHash("0!1+abc+3")
+      expect(nav.filter.active).toBe(true)
    })
 
    it("hash with empty tokens between plus signs", async () => {
       setupIndex([{ feedId: 1 }])
-      const result = await nav.fromHash("0!1++3")
-      expect(result.filtered).toBe(true)
+      await nav.fromHash("0!1++3")
+      expect(nav.filter.active).toBe(true)
    })
 
    it("tag with no matching subs clears filter", async () => {
       data.db.feeds = {}
       setupIndex([{ feedId: 1 }])
-      const result = await nav.fromHash("0!nonexistent")
-      expect(result.filtered).toBe(false)
+      await nav.fromHash("0!nonexistent")
+      expect(nav.filter.active).toBe(false)
    })
 
    it("hash preserves tag token instead of expanding to sub IDs", async () => {
@@ -221,8 +247,8 @@ describe("fromHash", () => {
    it("resolves token '0' as sub ID 0", async () => {
       data.db.feeds = { "0": makeFeed({ id: 0, title: "Zero" }) }
       setupIndex([{ feedId: 0 }])
-      const result = await nav.fromHash("0!0")
-      expect(result.filtered).toBe(true)
+      await nav.fromHash("0!0")
+      expect(nav.filter.active).toBe(true)
    })
 
    it("multi-sub filter hash serializes sub IDs", async () => {
@@ -343,7 +369,7 @@ describe("last", () => {
       nav.filter.set(["1"])
       const result = await nav.last()
       expect(result.article.f).toBe(1)
-      expect(result.filtered).toBe(true)
+      expect(nav.filter.active).toBe(true)
       expect(data.loadArticle).toHaveBeenLastCalledWith(2)
       expect(history.pushState).toHaveBeenCalledWith(null, "", "#2!1")
    })
@@ -353,16 +379,16 @@ describe("last", () => {
       data.db.feeds[5] = makeFeed({ id: 5, total_art: 0 })
       await nav.fromHash("0")
       nav.filter.set(["5"])
-      const result = await nav.last()
-      expect(result.filtered).toBe(false)
+      await nav.last()
+      expect(nav.filter.active).toBe(false)
    })
 
    it("goes to last article when sub not found in subscriptions", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 2 }])
       await nav.fromHash("0")
       nav.filter.set(["999"])
-      const result = await nav.last()
-      expect(result.filtered).toBe(false)
+      await nav.last()
+      expect(nav.filter.active).toBe(false)
    })
 
    it("uses current filter when called without subId in filter mode", async () => {
@@ -371,14 +397,14 @@ describe("last", () => {
       await nav.fromHash("0!1")
       const result = await nav.last()
       expect(result.article.f).toBe(1)
-      expect(result.filtered).toBe(true)
+      expect(nav.filter.active).toBe(true)
    })
 
    it("clears filter when called without subId and no filter active", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 2 }])
       await nav.fromHash("0")
-      const result = await nav.last()
-      expect(result.filtered).toBe(false)
+      await nav.last()
+      expect(nav.filter.active).toBe(false)
    })
 
    it("returns no-match article when sub not found in any entry", async () => {
@@ -387,7 +413,7 @@ describe("last", () => {
       await nav.fromHash("0")
       nav.filter.set(["5"])
       const result = await nav.last()
-      expect(result.filtered).toBe(true)
+      expect(nav.filter.active).toBe(true)
       expect(result.article.t).toBe("(no matching articles)")
       expect(result.has_left).toBe(false)
       expect(result.has_right).toBe(false)
@@ -397,16 +423,16 @@ describe("last", () => {
       setupIndex([{ feedId: 1 }, { feedId: 2 }])
       await nav.fromHash("0")
       nav.filter.set([""])
-      const result = await nav.last()
-      expect(result.filtered).toBe(false)
+      await nav.last()
+      expect(nav.filter.active).toBe(false)
    })
 
    it("filter.set with NaN auto-clears", async () => {
       setupIndex([{ feedId: 1 }])
       await nav.fromHash("0")
       nav.filter.set(["abc"])
-      const result = await nav.last()
-      expect(result.filtered).toBe(false)
+      await nav.last()
+      expect(nav.filter.active).toBe(false)
    })
 
    it("scans backward to find last matching entry", async () => {
@@ -426,79 +452,23 @@ describe("last", () => {
       await nav.fromHash("0!1+3")
       const result = await nav.last()
       expect(result.article.f).toBe(3)
-      expect(result.filtered).toBe(true)
+      expect(nav.filter.active).toBe(true)
    })
 })
 
-describe("countRight", () => {
-   it("is always a number (never null)", async () => {
-      setupIndex([{ feedId: 1 }])
-      const result = await nav.fromHash("0")
-      expect(typeof result.countRight).toBe("number")
-   })
-
-   it("correct count in unfiltered mode (total - 1 - pos)", async () => {
-      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 3 }])
-      const result = await nav.fromHash("0")
-      expect(result.countRight).toBe(2)
-   })
-
-   it("returns 0 at last index unfiltered", async () => {
-      setupIndex([{ feedId: 1 }, { feedId: 2 }])
-      const result = await nav.fromHash("1")
-      expect(result.countRight).toBe(0)
-   })
-
-   it("decreases as pos approaches end", async () => {
-      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 3 }])
-      const mid = await nav.fromHash("1")
-      expect(mid.countRight).toBe(1)
-   })
-
-   it("correct count in filtered mode", async () => {
-      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }, { feedId: 1 }])
-      const result = await nav.fromHash("0!1")
-      expect(result.countRight).toBe(2)
-   })
-
-   it("filtered: returns 0 at the last match", async () => {
-      setupIndex([{ feedId: 1 }, { feedId: 2 }])
-      const result = await nav.fromHash("0!1")
-      expect(result.countRight).toBe(0)
-   })
-
-   it("filtered: counts matches after pos", async () => {
-      setupIndex([{ feedId: 2 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
-      const result = await nav.fromHash("1!1")
-      expect(result.countRight).toBe(2)
-   })
-
-   it("filtered: returns 0 when current is the only match", async () => {
-      setupIndex([{ feedId: 2 }, { feedId: 2 }, { feedId: 1 }])
-      const result = await nav.fromHash("2!1")
-      expect(result.countRight).toBe(0)
-   })
-
-   it("multi-sub filter counts articles matching any sub in set", async () => {
-      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 3 }, { feedId: 1 }, { feedId: 3 }])
-      const result = await nav.fromHash("0!1+3")
-      expect(result.countRight).toBe(3)
-   })
-
-   it("counter ignores sub.total_art when it exceeds real idx entries", async () => {
+describe("has_right edges", () => {
+   it("ignores sub.total_art when it exceeds real idx entries", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 1 }])
       data.db.feeds[1].total_art = 5
       const result = await nav.fromHash("1!1")
-      expect(result.countRight).toBe(0)
       expect(result.has_right).toBe(false)
       await expect(nav.right()).rejects.toThrow("no right match")
    })
 
-   it("counter excludes unknown sub_id entries in unfiltered mode", async () => {
+   it("excludes unknown sub_id entries in unfiltered mode", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 99 }])
       delete data.db.feeds[99]
       const result = await nav.fromHash("0")
-      expect(result.countRight).toBe(0)
       expect(result.has_right).toBe(false)
    })
 })
@@ -612,49 +582,13 @@ describe("filterLabel", () => {
    })
 })
 
-describe("last with token", () => {
-   it("with empty string clears filter", async () => {
-      setupIndex([{ feedId: 1 }, { feedId: 2 }])
-      nav.filter.set(["1"])
-      await nav.fromHash("0")
-      const result = await nav.last("")
-      expect(result.filtered).toBe(false)
-      expect(result.article.f).toBe(2)
-   })
-
-   it("with token sets filter and jumps to last match", async () => {
-      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }])
-      await nav.fromHash("1")
-      const result = await nav.last("1")
-      expect(result.article.f).toBe(1)
-      expect(result.filtered).toBe(true)
-   })
-
-   it("jumps to last matching article for given token", async () => {
-      setupIndex([{ feedId: 1 }, { feedId: 2 }])
-      await nav.fromHash("0")
-      const result = await nav.last("1")
-      expect(result.article.f).toBe(1)
-      expect(data.loadArticle).toHaveBeenLastCalledWith(0)
-   })
-
-   it("applies tag filter via token", async () => {
-      data.db.feeds = { "5": makeFeed({ id: 5, tag: "news" }), "6": makeFeed({ id: 6, tag: "news" }) }
-      for (const [k, s] of Object.entries(data.db.feeds)) s.id = Number(k)
-      setupIndex([{ feedId: 5 }, { feedId: 6 }])
-      await nav.fromHash("0")
-      const result = await nav.last("news")
-      expect(result.filtered).toBe(true)
-   })
-})
-
 describe("switchFilter", () => {
    it("with empty token clears filter and jumps to last", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 2 }])
       nav.filter.set(["1"])
       await nav.fromHash("0")
       const result = await nav.switchFilter("")
-      expect(result.filtered).toBe(false)
+      expect(nav.filter.active).toBe(false)
       expect(data.loadArticle).toHaveBeenLastCalledWith(1)
       expect(result.article.f).toBe(2)
    })
@@ -663,7 +597,7 @@ describe("switchFilter", () => {
       setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }])
       await nav.fromHash("0")
       const result = await nav.switchFilter("1")
-      expect(result.filtered).toBe(true)
+      expect(nav.filter.active).toBe(true)
       expect(data.loadArticle).toHaveBeenLastCalledWith(0)
       expect(result.article.f).toBe(1)
    })
@@ -673,8 +607,8 @@ describe("switchFilter", () => {
       data.db.feeds[6] = makeFeed({ id: 6, tag: "news" })
       setupIndex([{ feedId: 5 }, { feedId: 6 }, { feedId: 5 }])
       await nav.fromHash("0")
-      const result = await nav.switchFilter("news")
-      expect(result.filtered).toBe(true)
+      await nav.switchFilter("news")
+      expect(nav.filter.active).toBe(true)
       expect(data.loadArticle).toHaveBeenLastCalledWith(0)
    })
 
@@ -682,8 +616,8 @@ describe("switchFilter", () => {
       setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }, { feedId: 2 }])
       await nav.fromHash("2") // chronIdx 2 (sub 1) → seen sub:1=2
       await nav.switchFilter("2") // sub 2 lands on chronIdx 1 (does not touch sub:1)
-      const result = await nav.switchFilter("1")
-      expect(result.filtered).toBe(true)
+      await nav.switchFilter("1")
+      expect(nav.filter.active).toBe(true)
       expect(data.loadArticle).toHaveBeenLastCalledWith(2)
    })
 
@@ -693,8 +627,8 @@ describe("switchFilter", () => {
       setupIndex([{ feedId: 5 }, { feedId: 6 }, { feedId: 5 }])
       await nav.fromHash("0") // chronIdx 0 (sub 5, tag news) → seen feed:5=0
       await nav.switchFilter("6") // sub 6 (no tag) lands on chronIdx 1
-      const result = await nav.switchFilter("news")
-      expect(result.filtered).toBe(true)
+      await nav.switchFilter("news")
+      expect(nav.filter.active).toBe(true)
       expect(data.loadArticle).toHaveBeenLastCalledWith(0)
    })
 
@@ -704,8 +638,8 @@ describe("switchFilter", () => {
       setupIndex([{ feedId: 5 }, { feedId: 6 }, { feedId: 5 }, { feedId: 6 }, { feedId: 5 }])
       await nav.fromHash("4") // view chron 4 (ch5) → feed:5 = 4
       await nav.fromHash("1") // view chron 1 (ch6) → feed:6 = 1
-      const result = await nav.switchFilter("news")
-      expect(result.filtered).toBe(true)
+      await nav.switchFilter("news")
+      expect(nav.filter.active).toBe(true)
       // min(4, 1) = 1: open at the least-recently-read member so every unread
       // article in the tag sits to the right, none skipped on the left.
       expect(data.loadArticle).toHaveBeenLastCalledWith(1)
@@ -874,16 +808,16 @@ describe("filter mutations", () => {
       data.db.feeds = { "5": makeFeed({ id: 5, tag: "news" }), "6": makeFeed({ id: 6, tag: "news" }) }
       for (const [k, s] of Object.entries(data.db.feeds)) s.id = Number(k)
       setupIndex([{ feedId: 5 }, { feedId: 6 }])
-      const result = await nav.fromHash("1!news")
-      expect(result.filtered).toBe(true)
+      await nav.fromHash("1!news")
+      expect(nav.filter.active).toBe(true)
    })
 
    it("clear() clears filter", async () => {
       setupIndex([{ feedId: 1 }])
-      const r1 = await nav.fromHash("0!1")
-      expect(r1.filtered).toBe(true)
-      const r2 = await nav.fromHash("0")
-      expect(r2.filtered).toBe(false)
+      await nav.fromHash("0!1")
+      expect(nav.filter.active).toBe(true)
+      await nav.fromHash("0")
+      expect(nav.filter.active).toBe(false)
    })
 })
 
@@ -924,8 +858,8 @@ describe("cycleFilter", () => {
          untagged: [data.db.feeds[2]],
       })
       await nav.fromHash("0")
-      const result = await nav.cycleFilter(1)
-      expect(result.filtered).toBe(true)
+      await nav.cycleFilter(1)
+      expect(nav.filter.active).toBe(true)
    })
 
    it("cycles backward wrapping to last entry", async () => {
@@ -939,8 +873,8 @@ describe("cycleFilter", () => {
       })
       await nav.fromHash("0")
       // entries = ["", "1", "2"], current = "" (idx 0), dir = -1 → wraps to idx 2 ("2")
-      const result = await nav.cycleFilter(-1)
-      expect(result.filtered).toBe(true)
+      await nav.cycleFilter(-1)
+      expect(nav.filter.active).toBe(true)
    })
 
    it("clears filter when cycling back to all", async () => {
@@ -954,8 +888,8 @@ describe("cycleFilter", () => {
       })
       await nav.fromHash("1!2")
       // entries = ["", "1", "2"], current = "2" (idx 2), dir = 1 → wraps to idx 0 ("")
-      const result = await nav.cycleFilter(1)
-      expect(result.filtered).toBe(false)
+      await nav.cycleFilter(1)
+      expect(nav.filter.active).toBe(false)
    })
 })
 
@@ -1075,32 +1009,6 @@ describe("getCurrentFilterKey", () => {
    })
 })
 
-describe("isSingleFilter", () => {
-   it("rejects empty token even when no filter is active", async () => {
-      setupIndex([{ feedId: 1 }])
-      await nav.fromHash("0")
-      expect(nav.isSingleFilter("")).toBe(false)
-   })
-
-   it("returns true when the active single-token filter matches the queried token", async () => {
-      setupIndex([{ feedId: 1 }, { feedId: 2 }])
-      await nav.fromHash("0!1")
-      expect(nav.isSingleFilter("1")).toBe(true)
-   })
-
-   it("returns false when token differs from the active single-token filter", async () => {
-      setupIndex([{ feedId: 1 }, { feedId: 2 }])
-      await nav.fromHash("0!1")
-      expect(nav.isSingleFilter("2")).toBe(false)
-   })
-
-   it("returns false when the filter has multiple tokens", async () => {
-      setupIndex([{ feedId: 1 }, { feedId: 2 }])
-      await nav.fromHash("0!1+2")
-      expect(nav.isSingleFilter("1")).toBe(false)
-   })
-})
-
 describe("unreadCount", () => {
    it("returns the full backlog for a feed never seen on this device", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 2 }])
@@ -1182,17 +1090,15 @@ describe("unread-only mode", () => {
       expect(next.article.f).toBe(2)
    })
 
-   it("counts unseen remaining including the current one and stops at the last unseen", async () => {
+   it("steps right through the unseen and stops at the last one", async () => {
       await readSome()
       nav.setUnreadOnly(true)
       await nav.switchFilter("news") // resumes at chron 1 (seen); both unseen to the right
       const onFirst = await nav.right() // chron 3 (oldest unseen)
       expect(data.loadArticle).toHaveBeenLastCalledWith(3)
-      expect(onFirst.countRight).toBe(2) // both unseen remain (chron 3 you're on + chron 4)
       expect(onFirst.has_right).toBe(true)
       const onLast = await nav.right() // chron 4 (last unseen)
       expect(data.loadArticle).toHaveBeenLastCalledWith(4)
-      expect(onLast.countRight).toBe(1) // only the one you're on remains
       expect(onLast.has_right).toBe(false) // nothing further to the right
    })
 
@@ -1206,34 +1112,30 @@ describe("unread-only mode", () => {
       expect(data.loadArticle).toHaveBeenLastCalledWith(4) // jumps 3→4, not onto a seen one
    })
 
-   it("the dropdown tag badge stays equal to the toolbar counter through select then read", async () => {
+   it("the dropdown tag badge counts the unread you're sitting on (stable through select then step)", async () => {
       await readSome() // ch1 seen→2, ch2 seen→1; unseen chron 3 (ch2), 4 (ch1) → 2
       nav.setUnreadOnly(true)
       const group = [data.db.feeds[1], data.db.feeds[2]]
 
       // On select you resume at the seen position (chron 1): the current article
-      // is seen (matchesPos 0), so neither the counter nor the badge counts it —
-      // both read the full 2.
-      const opened = await nav.switchFilter("news")
+      // is seen, so the badge reads the full 2 unseen.
+      await nav.switchFilter("news")
       expect(data.loadArticle).toHaveBeenLastCalledWith(1)
-      expect(opened.countRight).toBe(2)
       let counts = await nav.unreadCounts(group)
       expect(counts.get(2)).toBe(1) // ch2 unseen {3}
       expect(counts.get(1)).toBe(1) // ch1 unseen {4}
-      expect(nav.tagUnreadFromCounts(group, counts)).toBe(opened.countRight) // 2 == 2
+      expect(nav.tagUnreadFromCounts(group, counts)).toBe(2)
 
       // Regression: step onto the first unseen (chron 3, ch2). recordSeen bumps
       // ch2's LIVE seen to 3 the instant you arrive, which would drop ch2's badge
-      // to 0 and leave it one below the (snapshot-based) counter. feedUnread
-      // counts the unread you're sitting on back, so the badge still equals the
-      // counter.
-      const onUnseen = await nav.right()
+      // to 0. feedUnread counts the unread you're sitting on back, so the badge
+      // stays at 2.
+      await nav.right()
       expect(data.loadArticle).toHaveBeenLastCalledWith(3)
-      expect(onUnseen.countRight).toBe(2)
       counts = await nav.unreadCounts(group)
       expect(counts.get(2)).toBe(1) // ch2: live seen now 3 → {} unread, +1 for the one you're on
       expect(counts.get(1)).toBe(1) // ch1: its remaining unseen {4}, not inflated
-      expect(nav.tagUnreadFromCounts(group, counts)).toBe(onUnseen.countRight) // 2 == 2, not 1
+      expect(nav.tagUnreadFromCounts(group, counts)).toBe(2) // not 1
    })
 
    it("fromHash honors an explicit seen #pos instead of bouncing/drifting to the last unseen", async () => {
@@ -1270,60 +1172,47 @@ describe("unread-only mode", () => {
       setupIndex([{ feedId: 1 }, { feedId: 2 }])
       await nav.fromHash("0") // feed:1 seen → 0 (chron 0 seen); chron 1 (ch2) unseen
       nav.setUnreadOnly(true)
-      const shown = await nav.last("") // [ALL] unread → newest unseen (chron 1)
+      nav.filter.clear() // [ALL]
+      const shown = await nav.last() // unread → newest unseen (chron 1)
       expect(data.loadArticle).toHaveBeenLastCalledWith(1)
       expect(shown.article.f).toBe(2)
       expect(shown.has_left).toBe(false) // the seen chron 0 is excluded, nothing unseen left
    })
 
-   it("the counter shows total unseen at open and decrements by one per step (OPT-1 invariant)", async () => {
+   it("walking right past the resume position leaves unseen on the left", async () => {
       await readSome() // ch1→2, ch2→1; unseen are chron 3 (ch2), 4 (ch1) → 2 total
       nav.setUnreadOnly(true)
       // Open at the resume position (chron 1, seen): both unseen are to the right,
-      // none to the left, so the counter equals the tag's total unseen.
+      // none to the left.
       const a = await nav.switchFilter("news") // chron 1 (resume, seen)
       expect(a.has_left).toBe(false)
-      expect(a.countRight).toBe(2)
-      // Walk onto the oldest unseen, then the last: the counter ticks 2 → 1, and
-      // the invariant (counter + unseen already passed on the left) stays 2.
+      // Walk onto the oldest unseen, then the last; only past the first does an
+      // unseen sit on the left.
       const b = await nav.right() // chron 3 (oldest unseen)
-      expect(b.countRight).toBe(2) // on the first of two unseen
       expect(b.has_left).toBe(false)
       const c = await nav.right() // chron 4 (last unseen)
-      expect(c.countRight).toBe(1)
       expect(c.has_left).toBe(true)
    })
 
-   it("R3-2: a cold-pack countLeft rejection in the unread tally does not fail the loaded nav", async () => {
+   it("R3-2: a cold-pack neighbor-lookup rejection does not fail the loaded nav", async () => {
       await readSome() // ch1 seen→2, ch2 seen→1; unseen chron 3 (ch2), 4 (ch1)
       nav.setUnreadOnly(true)
-      const realCountLeft = data.countLeft.getMockImplementation()!
-      // Throw on the per-member seen-pack lookup for ch1 (single-feed map at
-      // its seen+1 = chron 3), as if that finalized idx pack were cold and the
-      // fetch blipped (countLeft awaits the pack fetch, so a throw here is a
-      // rejection). The multi-feed raised-bounds fallback (filter.feeds,
-      // size 2) and the resident-pack countAll still resolve, so unreadTally
-      // rejects but the approximate fallback in showFeed never throws. The
-      // wrapper stays SYNC like the base mock so countAll (which calls countLeft
-      // internally) keeps returning a number, not a promise.
-      data.countLeft.mockImplementation((chronIdx: number, feeds: Map<number, number>) => {
-         if (feeds.size === 1 && feeds.has(1) && chronIdx === 3) throw new Error("cold idx pack fetch failed")
-         return realCountLeft(chronIdx, feeds)
+      const realFindRight = data.findRight.getMockImplementation()!
+      // showFeed probes feedRight(pos+1) for has_right; if that neighbor sits in a
+      // cold finalized idx pack whose fetch blips, the lookup rejects. The loaded
+      // article must survive (button just disabled), not be replaced by the error
+      // popup. Reject the right-neighbor probe; the left probe still resolves.
+      data.findRight.mockImplementation(async () => {
+         throw new Error("cold idx pack fetch failed")
       })
       try {
-         // switchFilter resolves the article (loadArticle(pos) succeeds), then
-         // showFeed tallies unread — the rejection must be swallowed, not surfaced.
          const shown = await nav.switchFilter("news") // resumes at chron 1 (ch2, seen)
          expect(data.loadArticle).toHaveBeenLastCalledWith(1)
          expect(shown.article.f).toBe(2) // the loaded article is intact
          expect(shown.article.t).not.toBe("(no matching articles)")
-         expect(Number.isFinite(shown.countRight)).toBe(true)
-         expect(shown.countRight).toBeGreaterThanOrEqual(0)
-         // The approximate raised-bounds fallback: at the resume position 0 left,
-         // total 2, matchesPos 0 (a seen article) → right 2, counter 2.
-         expect(shown.countRight).toBe(2)
+         expect(shown.has_right).toBe(false) // degraded to "no neighbor", not thrown
       } finally {
-         data.countLeft.mockImplementation(realCountLeft) // restore for later tests
+         data.findRight.mockImplementation(realFindRight) // restore for later tests
       }
    })
 })
@@ -1356,10 +1245,9 @@ describe("tagUnreadFromCounts", () => {
       const shown = await nav.switchFilter("news")
       expect(data.loadArticle).toHaveBeenLastCalledWith(2)
       expect(shown.has_left).toBe(true)
-      expect(shown.countRight).toBe(2) // badge (3) − 1 unseen to the left
    })
 
-   it("equals the unseen-only counter for a mixed tag (seen, never-seen, fully-read members)", async () => {
+   it("sums to the badge for a mixed tag (seen, never-seen, fully-read members)", async () => {
       data.db.feeds[1] = makeFeed({ id: 1, tag: "news" })
       data.db.feeds[2] = makeFeed({ id: 2, tag: "news" })
       data.db.feeds[3] = makeFeed({ id: 3, tag: "news" })
@@ -1388,7 +1276,6 @@ describe("tagUnreadFromCounts", () => {
       const shown = await nav.switchFilter("news")
       expect(data.loadArticle).toHaveBeenLastCalledWith(2)
       expect(shown.has_left).toBe(true)
-      expect(shown.countRight).toBe(1) // badge (2) − 1 unseen to the left
    })
 
    it("returns 0 when every member is fully read (never-seen members excepted)", async () => {
@@ -1400,7 +1287,7 @@ describe("tagUnreadFromCounts", () => {
       expect(nav.tagUnreadFromCounts(group, await nav.unreadCounts(group))).toBe(0)
    })
 
-   it("sums member counts (never-seen members as their full backlog) and equals the unseen-only counter", async () => {
+   it("sums member counts (never-seen members as their full backlog)", async () => {
       // A tag mixing seen / never-seen / fully-read members. feedUnread reports a
       // never-seen member as its full backlog, so the tag badge is a plain sum of
       // the per-feed counts and the row badges beneath the header add up to it.
@@ -1439,7 +1326,6 @@ describe("tagUnreadFromCounts", () => {
       const shown = await nav.switchFilter("news")
       expect(data.loadArticle).toHaveBeenLastCalledWith(2)
       expect(shown.has_left).toBe(true)
-      expect(shown.countRight).toBe(4) // badge (5) − 1 unseen to the left
    })
 })
 
@@ -1602,7 +1488,7 @@ describe("saved articles", () => {
       expect(nav.filter.saved).toBe(false)
    })
 
-   it("traverses only saved articles, newest-first, with right-counts", async () => {
+   it("traverses only saved articles, newest-first", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }]) // chrons 0..4
       nav.toggleSaved(1)
       nav.toggleSaved(3)
@@ -1610,19 +1496,16 @@ describe("saved articles", () => {
       // switchFilter resumes at the newest saved (4).
       const r4 = await nav.switchFilter(nav.SAVED_TOKEN)
       expect(data.loadArticle).toHaveBeenCalledWith(4)
-      expect(r4.filtered).toBe(true)
-      expect(r4.countRight).toBe(0)
+      expect(nav.filter.active).toBe(true)
       expect(r4.has_right).toBe(false)
       expect(r4.has_left).toBe(true)
 
       const r3 = await nav.left()
       expect(data.loadArticle).toHaveBeenCalledWith(3)
-      expect(r3.countRight).toBe(1) // only 4 is to the right
       expect(r3.has_left).toBe(true)
 
       const r1 = await nav.left()
       expect(data.loadArticle).toHaveBeenCalledWith(1) // skips unsaved 2
-      expect(r1.countRight).toBe(2) // 3 and 4
       expect(r1.has_left).toBe(false) // oldest saved
       await expect(nav.left()).rejects.toThrow("no left match")
    })
@@ -1713,7 +1596,6 @@ describe("search filter mode (q:<query>)", () => {
       const r = await nav.goTo(9)
       expect(r.has_left).toBe(true) // hit 3 is left of 9
       expect(r.has_right).toBe(true) // hit 15 is right of 9
-      expect(r.countRight).toBe(1)
    })
 
    it("fromHash honors a #pos!q: deep link that is a hit, else snaps to newest", async () => {
@@ -1944,7 +1826,8 @@ describe("unseen-only — fully-caught-up filter yields no match", () => {
       seedSeen({ "feed:1": 2 }) // seen through the newest → nothing unread
       nav.setUnreadOnly(true)
       try {
-         const shown = await nav.last("1") // bound raised to 3 (== total_art) → no match
+         nav.filter.set(["1"]) // bound raised to 3 (== total_art) → no match
+         const shown = await nav.last()
          expect(shown.placeholder).toBe(true)
          expect(shown.has_left).toBe(false)
          expect(shown.has_right).toBe(false)

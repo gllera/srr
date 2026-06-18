@@ -7,7 +7,6 @@ import { describe, it, expect, vi, beforeEach } from "vitest"
 
 const dropdown = vi.hoisted(() => ({ closeAllDropdowns: vi.fn() }))
 vi.mock("./dropdown", () => dropdown)
-vi.mock("./nav", () => ({ left: vi.fn(), right: vi.fn() }))
 
 import { setupGestures, type Gestures } from "./gestures"
 
@@ -24,15 +23,12 @@ let toolbar: HTMLElement
 let g: Gestures
 
 function mount(): void {
-   document.body.innerHTML = `<nav class="srr-toolbar"></nav>
-      <button class="srr-prev"></button><button class="srr-next"></button>`
+   document.body.innerHTML = `<nav class="srr-toolbar"></nav>`
    toolbar = document.querySelector(".srr-toolbar")!
    g = setupGestures({
-      prev: document.querySelector(".srr-prev")!,
-      next: document.querySelector(".srr-next")!,
       toolbar,
-      guard: vi.fn(),
-      edgeBump: vi.fn(),
+      goPrev: vi.fn(),
+      goNext: vi.fn(),
       onCycle: vi.fn(),
    })
 }
