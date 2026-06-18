@@ -256,33 +256,3 @@ describe("search", () => {
       expect(capped.flat().map((h) => h.chron)).toEqual([2 * META_PACK_SIZE, META_PACK_SIZE])
    })
 })
-
-describe("loadHits", () => {
-   // Latest tail only (mp=0): three "alpha" titles + one miss. search() yields
-   // newest-first (chron 2,1,0); loadHits dedups, caps, and sorts ascending.
-   beforeEach(() => {
-      mockData.db = { total_art: 4, seq: 1, mp: 0, mt: 4 }
-      store["meta/L1.gz"] = entryBytes(["alpha one", "alpha two", "alpha three", "boring row"])
-   })
-
-   it("returns ascending chrons under the cap", async () => {
-      const hits = await search.loadHits("alpha", 10)
-      expect(hits.chrons).toEqual([0, 1, 2])
-      expect(hits.truncated).toBe(false)
-   })
-
-   it("caps at the limit (keeping the newest) and flags truncation", async () => {
-      // The cap keeps the first 2 collected (newest: chron 2, 1); the witness
-      // (chron 0) only flips the flag. Result is still ascending.
-      const hits = await search.loadHits("alpha", 2)
-      expect(hits.chrons).toEqual([1, 2])
-      expect(hits.truncated).toBe(true)
-   })
-
-   it("an empty query yields nothing and never fetches", async () => {
-      const hits = await search.loadHits("", 10)
-      expect(hits.chrons).toEqual([])
-      expect(hits.truncated).toBe(false)
-      expect(mockData.fetchPackBytes).not.toHaveBeenCalled()
-   })
-})

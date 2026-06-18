@@ -150,55 +150,9 @@ export function shortQuery(q: string): boolean {
 // hits are collected. Matching is AND of folded substring tests per query
 // word; candidate shards must hold every gram of every bloom-sized word. A
 // missing/broken latest tail degrades to finalized-only (warn); a missing
-// summary rejects — the caller decides how to surface that.
-// The capped, de-duplicated, ascending hit set for a query — the explicit set
-// nav's search filter mode walks. Cached per query string (cachedPromise shares
-// the in-flight promise, so concurrent neighbor walks within one render dedupe,
-// and a rejection drops the slot to retry); nav keeps the active-term
-// supersession guard. `truncated` flags that the SEARCH cap bit (the UI hint).
-export interface HitSet {
-   chrons: number[]
-   truncated: boolean
-}
-
-const hitCache = makeLRU<Promise<HitSet>, string>(8)
-
-export function loadHits(query: string, cap: number): Promise<HitSet> {
-   return cachedPromise(hitCache, query, () => buildHits(query, cap))
-}
-
-async function buildHits(query: string, cap: number): Promise<HitSet> {
-   const seen = new Set<number>()
-   const chrons: number[] = []
-   let truncated = false
-   if (query) {
-      try {
-         // Ask for one past the cap: search() stops at its limit, so without the
-         // +1 a query with exactly `cap` matches and one with thousands both yield
-         // `cap` hits and the break never fires — truncation would be invisible.
-         // The extra hit is the witness; we keep only `cap`.
-         outer: for await (const batch of search(query, cap + 1)) {
-            for (const h of batch) {
-               if (chrons.length >= cap) {
-                  truncated = true
-                  break outer
-               }
-               if (!seen.has(h.chron)) {
-                  seen.add(h.chron)
-                  chrons.push(h.chron)
-               }
-            }
-         }
-      } catch (e) {
-         // A missing summary / shard rejects the generator; degrade to whatever
-         // was collected rather than breaking list/reader navigation.
-         console.warn("search filter: shard scan failed", e)
-      }
-   }
-   chrons.sort((a, b) => a - b)
-   return { chrons, truncated }
-}
-
+// summary rejects — the caller decides how to surface that. nav consumes this
+// generator directly via its lazy `searchMore` pump (see nav.ts), keeping the
+// per-query supersession guard and the SEARCH cap there.
 export async function* search(q: string, limit = Infinity): AsyncGenerator<ISearchHit[], void, void> {
    const words = fold(q)
       .split(" ")
