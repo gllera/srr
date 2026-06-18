@@ -689,6 +689,10 @@ async function init() {
          hash = localStorage.getItem("srr-hash")?.substring(1) || ""
       } catch {}
    await route(hash)
+   // Signal to the dev design harness (design.ts) that the real app has booted
+   // and the first surface is rendered. Inert in production — nothing else
+   // listens. Only fires on the success path (init returns early on db.gz error).
+   document.dispatchEvent(new CustomEvent("srr:ready"))
 }
 
 init().catch(showError)
@@ -696,8 +700,10 @@ init().catch(showError)
 // Cache immutable self-hosted assets via a service worker (scope = this
 // deployment's directory, e.g. /srr/ or /srr.tmp/). Best-effort: any failure
 // (unsupported, insecure context, registration error) leaves the app working
-// straight off the network.
-if ("serviceWorker" in navigator) {
+// straight off the network. The design harness (design.html sets
+// data-srr-harness) skips the SW so its cache-first pack bucket can't serve a
+// stale fixture store across reloads.
+if ("serviceWorker" in navigator && !document.documentElement.hasAttribute("data-srr-harness")) {
    // sw.ts lives at src/ root (not src/js/) so Parcel emits it at the deployment
    // root — its default scope then covers the whole env (incl. packs/assets/).
    // type:module lets sw.ts import the generated contract (format.gen.ts); the
