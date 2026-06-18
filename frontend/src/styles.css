@@ -1437,3 +1437,52 @@ body:not(.srr-view-list) .srr-toolbar > .srr-unread {
       color: inherit;
    }
 }
+
+/* Dev design harness panel (design.html only — #srr-design-panel never exists on
+   the production index.html, so these rules are inert there). */
+#srr-design-panel {
+   position: fixed;
+   top: 0;
+   right: 0;
+   z-index: var(--z-popup-top);
+   max-height: 100vh;
+   overflow: auto;
+   font-family: var(--font-mono);
+   font-size: var(--text-sm);
+}
+.srr-design-inner {
+   display: flex;
+   flex-direction: column;
+   gap: var(--space-3);
+   padding: var(--space-3);
+   background: var(--bg);
+   border-left: 1px solid var(--faint);
+   border-bottom: 1px solid var(--faint);
+   box-shadow: var(--shadow);
+}
+.srr-design-group {
+   display: flex;
+   flex-wrap: wrap;
+   gap: var(--space-1);
+}
+.srr-design-group-title {
+   width: 100%;
+   color: var(--muted);
+   text-transform: uppercase;
+   letter-spacing: 0.05em;
+}
+.srr-design-btn {
+   font: inherit;
+   padding: var(--space-1) var(--space-2);
+   border: 1px solid var(--faint);
+   border-radius: var(--radius);
+   background: var(--hover);
+   color: var(--fg);
+   cursor: pointer;
+}
+.srr-design-btn:hover {
+   border-color: var(--accent);
+}
+.srr-design-note {
+   color: var(--muted);
+}
