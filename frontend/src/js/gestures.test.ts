@@ -12,6 +12,12 @@ vi.mock("./nav", () => ({ left: vi.fn(), right: vi.fn() }))
 import { setupGestures, type Gestures } from "./gestures"
 
 const setScrollY = (y: number) => Object.defineProperty(window, "scrollY", { value: y, configurable: true })
+// jsdom has no layout, so the scroll handler's at-bottom check needs explicit
+// page dimensions: a viewport and a content height. Default to a tall page so
+// the hide/show tests are nowhere near the bottom.
+const setInnerHeight = (h: number) => Object.defineProperty(window, "innerHeight", { value: h, configurable: true })
+const setScrollHeight = (h: number) =>
+   Object.defineProperty(document.documentElement, "scrollHeight", { value: h, configurable: true })
 const scroll = () => window.dispatchEvent(new Event("scroll"))
 
 let toolbar: HTMLElement
@@ -34,6 +40,8 @@ function mount(): void {
 beforeEach(() => {
    dropdown.closeAllDropdowns.mockClear()
    setScrollY(0)
+   setInnerHeight(800)
+   setScrollHeight(4000) // a tall page: the hide/show tests are far from the bottom
    mount()
 })
 
@@ -58,6 +66,18 @@ describe("scroll-driven toolbar hide/show", () => {
       scroll()
       expect(slid()).toBe(true)
       setScrollY(120) // upward
+      scroll()
+      expect(slid()).toBe(false)
+   })
+
+   it("reveals the toolbar at the bottom even though we got there scrolling down", () => {
+      setScrollY(200)
+      scroll()
+      expect(slid()).toBe(true) // hidden on the way down
+      // Keep scrolling down, this time landing at the very bottom (scrollY +
+      // innerHeight === scrollHeight). Still a downward scroll, but it reveals.
+      setScrollHeight(800 + 1000) // innerHeight + 1000
+      setScrollY(1000)
       scroll()
       expect(slid()).toBe(false)
    })
