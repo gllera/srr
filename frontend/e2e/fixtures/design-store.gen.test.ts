@@ -1,0 +1,120 @@
+// design-store.gen.test.ts — GATED generator (not a real test). Builds a small,
+// curated srrb store that exercises the harness's visual edge cases, then writes
+// a design.json sidecar of curated targets design.ts reads. Run via
+// `make design-fixture`; excluded from `npm test` (vitest.config.ts only scans
+// src/**) and gated on SRR_DESIGN_GEN so an accidental run is a no-op.
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs"
+import { dirname, join, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
+import { gunzipSync } from "node:zlib"
+
+import { describe, expect, it } from "vitest"
+
+import { srr, feedServer, inspectValidate } from "../harness"
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+const OUT = resolve(HERE, "design-store")
+
+const LONG_TITLE =
+   "A deliberately very long headline that has to wrap and exercise the toolbar filter-label ellipsis and the reader title layout across multiple lines"
+
+function rss(title: string, items: { title: string; body: string; guid: string }[]): string {
+   const entries = items
+      .map(
+         (i) =>
+            `<item><title>${i.title}</title><guid>${i.guid}</guid>` +
+            `<description><![CDATA[${i.body}]]></description></item>`,
+      )
+      .join("")
+   return `<?xml version="1.0"?><rss version="2.0"><channel><title>${title}</title>${entries}</channel></rss>`
+}
+
+interface DbCore {
+   seq?: number
+   total_art: number
+   feeds: Record<string, { title?: string; ferr?: string }>
+}
+
+function readDb(dir: string): DbCore {
+   return JSON.parse(gunzipSync(readFileSync(join(dir, "db.gz"))).toString("utf8")) as DbCore
+}
+
+// Decode the latest data pack (the only one for a tiny store) into ordered
+// {f,t} rows. Line position == chron offset within the latest pack, and with a
+// single pack the latest starts at chron 0 — so the row index IS the chronIdx.
+function readLatestData(dir: string, seq: number): { f: number; t?: string }[] {
+   const buf = gunzipSync(readFileSync(join(dir, "data", `L${seq}.gz`)))
+   return buf
+      .toString("utf8")
+      .split("\n")
+      .filter((l) => l.length > 0)
+      .map((l) => JSON.parse(l) as { f: number; t?: string })
+}
+
+const gen = process.env.SRR_DESIGN_GEN ? it : it.skip
+
+describe("design fixture store", () => {
+   gen("generates a curated store + design.json", async () => {
+      mkdirSync(OUT, { recursive: true })
+
+      const feeds = await feedServer({
+         "/tech.xml": rss("Tech Daily", [
+            { title: "Compilers are back", body: "<p>Body one.</p>", guid: "t1" },
+            { title: LONG_TITLE, body: "<p>Long.</p>", guid: "t2" },
+         ]),
+         "/news.xml": rss("World News", [{ title: "Election results", body: "<p>News.</p>", guid: "n1" }]),
+         "/food.xml": rss("Cooking Weekly", [{ title: "Best bread", body: "<p>Bread.</p>", guid: "f1" }]),
+         "/gone.xml": rss("Soon Deleted", [{ title: "Vanishing source", body: "<p>Gone.</p>", guid: "g1" }]),
+         // /broken.xml deliberately NOT served → that feed records a ferr on fetch.
+      })
+
+      try {
+         // tech + food share a tag (a multi-feed tag group); news untagged; gone
+         // gets removed below; broken 404s → ferr.
+         await srr(OUT, "feed", "add", "-t", "Tech Daily", "-g", "topics", "-u", `${feeds.url}/tech.xml`)
+         await srr(OUT, "feed", "add", "-t", "World News", "-u", `${feeds.url}/news.xml`)
+         await srr(OUT, "feed", "add", "-t", "Cooking Weekly", "-g", "topics", "-u", `${feeds.url}/food.xml`)
+         await srr(OUT, "feed", "add", "-t", "Soon Deleted", "-u", `${feeds.url}/gone.xml`)
+         await srr(OUT, "feed", "add", "-t", "Broken Feed", "-u", `${feeds.url}/broken.xml`)
+         await srr(OUT, "art", "fetch")
+
+         // Validate the fully-consistent store BEFORE the deletion (feed rm only
+         // edits db.gz; the immutable packs are unchanged after it).
+         expect(await inspectValidate(OUT)).toContain("OK: all checks passed")
+
+         const db = readDb(OUT)
+         const seq = db.seq ?? 1
+         const idByTitle = (t: string) => Object.entries(db.feeds).find(([, f]) => f.title === t)?.[0]
+         const ferrToken = Object.entries(db.feeds).find(([, f]) => f.ferr)?.[0]
+         const goneId = idByTitle("Soon Deleted")
+
+         const rows = readLatestData(OUT, seq)
+         const longTitlePos = rows.findIndex((r) => r.t === LONG_TITLE)
+         const savedDeletedChron = goneId != null ? rows.findIndex((r) => r.f === Number(goneId)) : -1
+
+         // Diagnostics (streamed during the gated run) so the derivation is auditable.
+         console.log("[design-fixture] feeds:", JSON.stringify(db.feeds))
+         console.log(
+            "[design-fixture] rows:",
+            rows.map((r, i) => `${i}:f${r.f}:${(r.t ?? "").slice(0, 18)}`).join(" | "),
+         )
+         console.log("[design-fixture] derived:", { seq, ferrToken, goneId, longTitlePos, savedDeletedChron })
+
+         expect(db.total_art).toBeGreaterThanOrEqual(5)
+         expect(ferrToken).toBeTruthy()
+         expect(goneId).toBeTruthy()
+         expect(longTitlePos).toBeGreaterThanOrEqual(0)
+         expect(savedDeletedChron).toBeGreaterThanOrEqual(0)
+
+         // Remove the "gone" feed: its articles stay in the immutable pack (chronIdx
+         // is permanent) but feedTitle now tombstones to [DELETED].
+         await srr(OUT, "feed", "rm", goneId!)
+
+         const targets = { sampleTag: "topics", ferrToken, longTitlePos, savedDeletedChron }
+         writeFileSync(join(OUT, "design.json"), JSON.stringify(targets, null, 2))
+         expect(existsSync(join(OUT, "design.json"))).toBe(true)
+      } finally {
+         await feeds.close()
+      }
+   })
+})

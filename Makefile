@@ -1,4 +1,4 @@
-.PHONY: verify verify-fe verify-be lint-fe format-check-fe format-fe test-fe build-fe dev-fe vet-be build-be test-be test-contract test-browser test-stress test-e2e generate generate-check release clean
+.PHONY: verify verify-fe verify-be lint-fe format-check-fe format-fe test-fe build-fe dev-fe vet-be build-be test-be test-contract test-browser test-stress test-e2e generate generate-check release clean design-fixture design
 
 SHELL := /bin/bash -e
 
@@ -33,6 +33,15 @@ test-e2e: test-contract test-browser
 #   SRR_STRESS_STORE=<dir>       use an existing store instead of generating
 test-stress: build-be frontend/node_modules/.package-lock.json
 	cd frontend && SRR_BIN=../dist/srrb npm run test-stress
+
+# Build the curated design-harness fixture store (real srrb), then run the dev
+# servers against it so /design.html shows every curated state. design-fixture
+# needs the srrb binary (build-be) and gates the generator on SRR_DESIGN_GEN.
+design-fixture: build-be frontend/node_modules/.package-lock.json
+	cd frontend && SRR_BIN=../dist/srrb SRR_DESIGN_GEN=1 npm run gen-design
+
+design: frontend/node_modules/.package-lock.json
+	cd frontend && SRR_STORE=e2e/fixtures/design-store npm run dev
 
 frontend/node_modules/.package-lock.json: frontend/package-lock.json
 	cd frontend && npm ci
