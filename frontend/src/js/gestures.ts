@@ -115,7 +115,12 @@ export function setupGestures(deps: GestureDeps): Gestures {
       "scroll",
       () => {
          const y = window.scrollY
-         const hide = y > 50 && y > lastScrollY
+         // At (or a hair from) the bottom there's nothing more to scroll down
+         // for, so keep the toolbar up — otherwise it'd stay hidden at the end
+         // with no way to reveal it short of scrolling back up off the bottom.
+         const scroller = document.scrollingElement ?? document.documentElement
+         const atBottom = y + window.innerHeight >= scroller.scrollHeight - 4
+         const hide = !atBottom && y > 50 && y > lastScrollY
          if (hide !== toolbarHidden) {
             deps.toolbar.classList.toggle("srr-toolbar-slide", hide)
             toolbarHidden = hide
