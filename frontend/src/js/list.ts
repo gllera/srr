@@ -410,6 +410,11 @@ export async function render(center = false, onInteractive?: () => void): Promis
       return
    }
 
+   // Search is always newest-top (listAnchor returns -1 for search) and discovers
+   // its rows by streaming nav's lazy hit set — a different path from the feed
+   // walk + skeleton-fill below.
+   if (nav.isSearchFilter()) return renderSearch(my, onInteractive)
+
    const anchor = await nav.listAnchor()
    // The seed is the topmost row of the older batch: the anchor itself when it's
    // a real match, the newest match when anchored at -1, and (defensively) the
@@ -483,6 +488,57 @@ export async function render(center = false, onInteractive?: () => void): Promis
    if (my !== tok) return
    relabelDividers()
    if (anchoredMid) reassertAnchor(seed, center && seed === nav.anchorChron())
+}
+
+// Search render: matches are discovered newest-first by nav's lazy stream and
+// arrive WITH their content, so rows are appended content-complete (no skeleton)
+// as each searchMore() batch lands. Pulls only until the viewport is filled; the
+// rest streams in via fetchOlder when the bottom sentinel nears (pump/observe).
+// Search suppresses day dividers (relabelDividers returns early in search mode),
+// so none are built here.
+async function renderSearch(my: object, onInteractive?: () => void): Promise<void> {
+   rowsEl = el("div", "srr-list-rows")
+   topSentinel = el("div", "srr-list-sentinel")
+   bottomSentinel = el("div", "srr-list-sentinel")
+   container.append(topSentinel, rowsEl, bottomSentinel)
+   exhaustedTop = true // the newest hit is the top of a search list; nothing newer
+   const seen = nav.getSeenMap()
+   let appended = 0
+   let painted = false
+   while (appended < BATCH) {
+      const { hits, done } = await nav.searchMore()
+      if (my !== tok) return
+      if (hits.length && rowsEl) {
+         const fresh = hits.map((h) => rowEl(h.chron, { f: h.f, w: h.w, t: h.t }, seen))
+         fresh.forEach((r) => rowsEl!.appendChild(r))
+         pinHeights(fresh)
+         appended += fresh.length
+         if (newest === -1) newest = hits[0].chron
+         oldest = hits[hits.length - 1].chron
+         if (!painted) {
+            painted = true
+            window.scrollTo(0, 0)
+            notifyScroll()
+            userScrolled = false
+            onInteractive?.()
+         }
+      }
+      if (done) {
+         exhaustedBottom = true
+         break
+      }
+   }
+   if (appended === 0) {
+      // No matches: tear down the empty rows container and show the empty state.
+      container.replaceChildren()
+      rowsEl = null
+      emptyState()
+      onInteractive?.()
+      return
+   }
+   syncBottomTerminus()
+   syncTopTerminus()
+   observe(my)
 }
 
 // Re-show an already-built list (same filter). When the reader's article is
@@ -568,6 +624,21 @@ async function fetchOlder(my: object): Promise<void> {
    if (my !== tok || exhaustedBottom || loadingBottom || !rowsEl) return
    loadingBottom = true
    try {
+      // Search pages by pulling the lazy hit stream — content-complete rows, no
+      // skeletons, no dividers (suppressed in search mode).
+      if (nav.isSearchFilter()) {
+         const { hits, done } = await nav.searchMore()
+         if (my !== tok) return
+         if (hits.length && rowsEl) {
+            const seen = nav.getSeenMap()
+            const fresh = hits.map((h) => rowEl(h.chron, { f: h.f, w: h.w, t: h.t }, seen))
+            fresh.forEach((r) => rowsEl!.appendChild(r))
+            pinHeights(fresh)
+            oldest = hits[hits.length - 1].chron
+         }
+         if (done) exhaustedBottom = true
+         return
+      }
       const { chrons, exhausted } = await walk(my, oldest - 1, BATCH, "older")
       if (my !== tok) return
       if (chrons.length === 0) {
