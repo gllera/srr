@@ -515,7 +515,20 @@ async function fetchNewer(my: object): Promise<void> {
       if (my !== tok) return
       const frag = document.createDocumentFragment()
       // chrons is ascending; prepend newest-first so the block reads top-down.
-      for (let k = chrons.length - 1; k >= 0; k--) frag.appendChild(rowEl(chrons[k], arts[k], seen))
+      // Render the prepended rows for real (override the content-visibility:auto
+      // virtualization) so the compensation below measures their TRUE height, not
+      // the contain-intrinsic-size placeholder. A never-rendered placeholder is
+      // corrected to the real height the moment the row scrolls into view, and
+      // since the list disables browser scroll anchoring (overflow-anchor:none,
+      // for Safari parity) nothing absorbs that resize happening ABOVE the
+      // viewport — that is the upward-scroll jump.
+      const fresh: HTMLElement[] = []
+      for (let k = chrons.length - 1; k >= 0; k--) {
+         const row = rowEl(chrons[k], arts[k], seen)
+         row.style.setProperty("content-visibility", "visible")
+         fresh.push(row)
+         frag.appendChild(row)
+      }
       const scroller = document.scrollingElement ?? document.documentElement
       const before = scroller.scrollHeight
       rowsEl.insertBefore(frag, rowsEl.firstChild)
@@ -527,6 +540,15 @@ async function fetchNewer(my: object): Promise<void> {
          window.scrollTo(0, window.scrollY + delta)
          notifyScroll()
       }
+      // Pin each row's now-measured height as its intrinsic size, then hand it
+      // back to content-visibility:auto. The placeholder now equals the real
+      // height, so the row's size no longer changes when it later renders/skips
+      // on scroll, and the viewport stays put.
+      const heights = fresh.map((row) => row.offsetHeight)
+      fresh.forEach((row, i) => {
+         row.style.setProperty("contain-intrinsic-size", `auto ${heights[i]}px`)
+         row.style.removeProperty("content-visibility")
+      })
    } finally {
       if (my === tok) {
          loadingTop = false
