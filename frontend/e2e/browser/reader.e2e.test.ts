@@ -324,18 +324,17 @@ describe("browser: real SPA over real packs", () => {
       }
    })
 
-   // A tag/feed with no navigation information (never opened on this device)
-   // opens the list at its OLDEST article, not the newest — the start of the
-   // backlog, with the unread/newer rows above it. The oldest row has nothing
-   // below it, so anchoring there scrolls the list DOWN (scrollY > 0) and pushes
-   // the newest rows above the fold, unlike [ALL] which sits pinned at the newest.
-   it("a never-opened tag opens the list scrolled to its oldest article (newer above)", async () => {
+   // A tag/feed with no navigation information (never opened on this device) opens
+   // the list at its OLDEST unread article — the start of the unread backlog, to
+   // read forward from there — and selects it (the shared cursor the reader would
+   // open). Every "world" article is unread on a fresh boot, so the list anchors
+   // at the oldest, scrolling the newer rows off ABOVE the fold (scrollY > 0).
+   it("a never-opened tag opens at its oldest unread article (start of the backlog), selected", async () => {
       const [page, close] = await open()
       try {
          // Short viewport so the filtered list is taller than the fold and scrollable.
          await page.setViewport({ width: 500, height: 140 })
          await waitList(page)
-         expect(await page.evaluate(() => window.scrollY)).toBe(0) // boot [ALL] sits at the newest
 
          // Pick the never-read "world" tag (News + Tech) from a fresh boot.
          await page.click(".srr-feed")
@@ -344,17 +343,17 @@ describe("browser: real SPA over real packs", () => {
          await waitList(page)
          expect(await page.evaluate(() => location.hash)).toBe("#!world")
 
-         // No nav info for "world" → anchored at its oldest article: the list
-         // scrolled away from the newest. The newest world rows are scrolled off
-         // ABOVE the fold — only possible when the list anchored below them, at
-         // the oldest, rather than staying pinned at the newest ([ALL]).
+         // Oldest world (news title 0) is the anchor + selection; the list scrolled
+         // down to it so the newer world rows sit ABOVE the fold — only possible
+         // when it anchored at the oldest, not pinned at the newest ([ALL]).
+         await waitCurrent(page, "news title 0")
          await page.waitForFunction(() => window.scrollY > 0, { timeout: 20000 })
          expect(await $rowTop(page, "tech title 1")).toBeLessThan(0) // newest world, scrolled off above
          expect(await $rowTop(page, "tech title 0")).toBeLessThan(0)
-         // The oldest world row (news title 0) is the anchor, on screen near the top.
-         const oldestTop = await $rowTop(page, "news title 0")
+         const oldestTop = await $rowTop(page, "news title 0") // oldest world = the anchor, near the top
          expect(oldestTop).not.toBeNull()
-         expect(oldestTop!).toBeLessThan(140) // within the 140px viewport (not off the bottom)
+         expect(oldestTop!).toBeGreaterThanOrEqual(0)
+         expect(oldestTop!).toBeLessThan(140)
          // Sport (tag "play") is excluded entirely.
          expect(await $rowTop(page, "sport title 1")).toBeNull()
       } finally {

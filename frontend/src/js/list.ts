@@ -435,7 +435,12 @@ async function runPool<T>(items: T[], limit: number, worker: (item: T) => Promis
 // anchored mid-feed — a batch newer above it, then positions the anchor. `center`
 // (set when returning from the reader) centers the anchor in the viewport instead
 // of top-aligning it — but only the live reader article (seed === anchorChron),
-// never a resume/oldest anchor. Sets builtKey so show() can later refresh-vs-rebuild.
+// never an oldest-unread anchor. When the filter resolves to a SPECIFIC article
+// (anchoredMid — a fresh feed/tag's oldest-unread position), that article also
+// becomes the current selection (nav.select), so the highlighted row tracks what
+// the reader would open; the newest-default anchor (-1: [ALL]/saved/search) is
+// left unselected. `renderSearch` selects the newest hit for a query. Sets
+// builtKey so show() can later refresh-vs-rebuild.
 export async function render(center = false, onInteractive?: () => void): Promise<void> {
    const my = (tok = {})
    teardownObserver()
@@ -472,6 +477,19 @@ export async function render(center = false, onInteractive?: () => void): Promis
       return
    }
    const anchoredMid = anchor !== -1 && seed === anchor
+
+   // When the filter resolves to a SPECIFIC article — the anchoredMid seed, i.e.
+   // a fresh feed/tag's oldest-unread position — make it the current selection so
+   // the list highlight tracks the article the reader would open under that
+   // filter. Returning from the reader already holds it as pos (guard no-ops). The
+   // newest-default anchor (-1: [ALL]/saved/search, or a caught-up feed/tag) is
+   // deliberately left unselected, so the first arrow still establishes the cursor
+   // on the row in view (moveSelection) and a fresh [ALL] boot shows no selection.
+   // getFeedId is resident — feedLeft just walked the seed's idx pack — no fetch.
+   if (anchoredMid && seed !== nav.currentChron()) {
+      nav.select(seed, await data.getFeedId(seed))
+      if (my !== tok) return
+   }
 
    const older = await walk(my, seed, BATCH, "older") // [seed, ...older], descending
    if (my !== tok) return
@@ -562,6 +580,11 @@ async function renderSearch(my: object, onInteractive?: () => void): Promise<voi
       const { hits, done } = await nav.searchMore()
       if (my !== tok) return
       if (hits.length && rowsEl) {
+         // The newest hit tops the search list — the article the reader opens for
+         // this query (switchFilter → last()). Select it on the first batch so the
+         // list highlight tracks the view (the shared cursor), before the rows are
+         // built so rowEl paints .srr-row-current on it.
+         if (newest === -1 && hits[0].chron !== nav.currentChron()) nav.select(hits[0].chron, hits[0].f)
          const fresh = hits.map((h) => rowEl(h.chron, { f: h.f, w: h.w, t: h.t }, seen))
          fresh.forEach((r) => rowsEl!.appendChild(r))
          pinHeights(fresh)

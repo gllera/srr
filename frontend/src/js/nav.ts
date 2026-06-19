@@ -110,37 +110,39 @@ export function anchorChron(): number {
    return -1
 }
 
-// Where the LIST surface anchors when (re)built — a superset of anchorChron that
-// adds per-filter resume, mirroring how switchFilter opens a tag/feed in the
-// reader. The reader's live article still wins when it matches the active filter
-// (you tapped back from reading it — anchorChron). Otherwise, for a tag/feed
-// filter:
-//   • one you've opened before resumes at its remembered position (getSeen — a
-//     feed's own seen high-water, a tag's oldest member), when that position
-//     is still a row of the active filter. In unseen-only mode it isn't (seen
-//     articles fall below the raised bound), so it drops through to the oldest
-//     unread — the natural "start of the backlog" there too.
-//   • one with NO navigation information (never opened on this device, or a
-//     stale/foreign stored position) anchors at its OLDEST matching article, so
-//     the list opens at the start of the backlog with the unread rows above it,
-//     instead of at the newest.
-// [ALL], ★ Saved and search keep the newest-first default (-1) — the same place
-// switchFilter opens saved/search and where the home firehose belongs. Async
-// because resolving the oldest match / a resume position's feed may touch an
-// idx pack; anchorChron stays synchronous for the live-position callers.
+// Where the LIST surface anchors when (re)built — and, since the list highlight
+// tracks it (render's nav.select), the article the list SELECTS on a fresh
+// filter. The reader's live article still wins when it matches the active filter
+// (you tapped back from reading it — anchorChron). Otherwise:
+//   • a feed/tag opens at its OLDEST UNREAD article — the start of the unread
+//     backlog, to read forward (newer) from there — falling back to its newest
+//     article (the -1 newest-default below) when nothing is unread. Computed by
+//     raising each member's bound past its seen high-water (idempotent with
+//     unseen-only's already-raised bounds; a never-seen feed keeps its bound, so
+//     its full backlog counts as unread) and taking the OLDEST match under those
+//     bounds — the same unread set unseen-only navigation walks, evaluated
+//     transiently here without touching filter.feeds, so the list still SHOWS
+//     every article (read rows below the anchor, unread above).
+//   • [ALL], ★ Saved and search keep the newest-first default (-1): the latest
+//     available article. A query in particular always shows its newest hit,
+//     regardless of seen state.
+// Async because findRight may touch an idx pack; anchorChron stays synchronous
+// for the live-position callers.
 export async function listAnchor(): Promise<number> {
    const live = anchorChron()
    if (live >= 0) return live
    if (!filter.active || filter.saved || filter.search) return -1
-   if (filter.tokens.length === 1) {
-      const resume = getSeen(filter.tokens[0])
-      if (resume !== undefined && resume >= 0 && resume < data.db.total_art) {
-         if (filter.matches(await data.getFeedId(resume), resume)) return resume
-      }
+   const seen = readSeen()
+   const unread = new Map<number, number>()
+   for (const [id, bound] of filter.feeds) {
+      const s = seen["feed:" + id]
+      unread.set(id, s === undefined ? bound : Math.max(bound, s + 1))
    }
-   // Oldest match: feedRight from the smallest filter bound (mirrors first()).
-   const start = filter.feeds.size > 0 ? Math.min(...filter.feeds.values()) : 0
-   return feedRight(start)
+   // Oldest unread: the smallest matching chron under the raised bounds (scan up
+   // from the smallest bound — nothing matches below it). -1 (newest-default,
+   // latest available) when nothing is unread.
+   const start = Math.min(...unread.values())
+   return data.findRight(start, unread)
 }
 
 // ── Search filter mode ───────────────────────────────────────────────────────

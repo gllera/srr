@@ -37,6 +37,9 @@ const data = vi.hoisted(() => {
          return { f: a.f, w: a.p || a.a, t: a.t }
       }),
       feedTitle: vi.fn((id: number) => "Feed" + id),
+      // Resident after the anchor walk; the list reads it to sync nav.select's
+      // feed arg when it makes the resolved anchor the current selection.
+      getFeedId: vi.fn(async (chron: number) => mock._arts.get(chron)!.f),
    }
    return mock
 })
@@ -453,6 +456,10 @@ describe("list", () => {
       ])
       // Search rows are born complete — no skeletons.
       expect(rows.some((r) => r.classList.contains("srr-row-skeleton"))).toBe(false)
+      // A query selects the NEWEST hit (latest available) — the would-be reader
+      // article — regardless of seen state.
+      expect(rows.find((r) => r.classList.contains("srr-row-current"))?.dataset.chron).toBe("9")
+      expect(nav.select).toHaveBeenCalledWith(9, 1)
       // OLDEST terminus once the stream is done.
       expect(container.querySelector(".srr-wire-end")).not.toBeNull()
    })
@@ -737,6 +744,47 @@ describe("list", () => {
       expect(current()).toEqual([7])
    })
 
+   it("selects the filter's resolved article (the anchor) as the current row on a fresh filter", async () => {
+      // No live reader article (pos -1); listAnchor resolved the filter to a
+      // specific article — a feed/tag's oldest-unread position. Updating the filter
+      // makes that article the selection, so the list highlights the same article
+      // the reader would open under it.
+      const current = () =>
+         $rows()
+            .filter((a) => a.classList.contains("srr-row-current"))
+            .map((a) => Number(a.dataset.chron))
+      setIndex(10, (c) => c) // feed id == chron, so getFeedId(3) === 3
+      nav._setListAnchor(3)
+      nav.select.mockClear()
+      await list.render()
+      expect(current()).toEqual([3]) // the resolved article is the highlighted row
+      expect(nav.select).toHaveBeenCalledWith(3, 3) // pos + feed synced from the anchor
+      expect(nav.currentChron()).toBe(3)
+   })
+
+   it("does not move the cursor when the anchor is already the current article (reader return)", async () => {
+      setIndex(10)
+      nav._setAnchor(5) // live reader article: anchor === pos === 5, so seed === pos
+      nav.select.mockClear()
+      await list.render()
+      expect(nav.select).not.toHaveBeenCalled() // no redundant cursor move
+   })
+
+   it("leaves the newest-default view ([ALL]/saved/search) unselected so the first arrow establishes the cursor", async () => {
+      // listAnchor returns -1 (newest) for [ALL]/saved/search; there's no specific
+      // resolved article, so the list stays cursor-less — a fresh [ALL] boot shows
+      // nothing selected, and the first arrow drops the cursor on the visible row.
+      const current = () =>
+         $rows()
+            .filter((a) => a.classList.contains("srr-row-current"))
+            .map((a) => Number(a.dataset.chron))
+      setIndex(10) // default anchor -1, pos -1
+      nav.select.mockClear()
+      await list.render()
+      expect(current()).toEqual([]) // nothing pre-selected
+      expect(nav.select).not.toHaveBeenCalled()
+   })
+
    it("anchors at the oldest article (no nav info) with the newer rows above it", async () => {
       setIndex(10)
       nav._setListAnchor(0) // listAnchor resolved the filter's oldest article
@@ -939,7 +987,7 @@ describe("list", () => {
    })
 
    it("with no cursor yet, the first step establishes the selection on a visible row", async () => {
-      setIndex(4) // pos = -1 → no row highlighted
+      setIndex(4) // newest-default ([ALL]) → nothing pre-selected (pos -1)
       await list.render()
       expect($current()).toEqual([])
       const landed = await list.moveSelection("newer")
