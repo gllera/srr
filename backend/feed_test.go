@@ -553,6 +553,175 @@ func TestFetchBoundaryGUIDsCapPreservesStoredGUIDs(t *testing.T) {
 	}
 }
 
+// Vitals (LastOK, FailStreak, LastNew) bump rules:
+//   - A fetch that ingests ≥1 new articles sets LastOK, resets FailStreak, and
+//     sets LastNew.
+//   - A 304 / success-with-zero-new-items sets LastOK + resets FailStreak but
+//     leaves LastNew unchanged.
+//   - An error increments FailStreak and leaves LastOK / LastNew unchanged.
+func TestFetchVitals(t *testing.T) {
+	const fetchedAt int64 = 4_102_444_800 // 2100-01-01
+
+	feedWithItem := `<rss version="2.0"><feed>
+		<item><title>A</title><guid>a</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
+	</feed></rss>`
+	feedEmpty := `<rss version="2.0"><feed></feed></rss>`
+
+	t.Run("real_items_sets_all_three", func(t *testing.T) {
+		current := feedWithItem
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Write([]byte(current))
+		}))
+		defer srv.Close()
+
+		ch := &Feed{Title: "T", URL: srv.URL}
+		buf := make([]byte, 1<<20)
+		run := &fetchRun{client: srv.Client(), engine: ingest.New(), fetchedAt: fetchedAt}
+		processor := mod.New()
+
+		ch.Fetch(context.Background(), run, buf, processor)
+		if ch.FetchError != "" {
+			t.Fatalf("unexpected error: %s", ch.FetchError)
+		}
+		if ch.LastOK != fetchedAt {
+			t.Errorf("LastOK = %d, want %d (set on success with items)", ch.LastOK, fetchedAt)
+		}
+		if ch.FailStreak != 0 {
+			t.Errorf("FailStreak = %d, want 0 (reset on success)", ch.FailStreak)
+		}
+		if ch.LastNew != fetchedAt {
+			t.Errorf("LastNew = %d, want %d (set when ≥1 new item ingested)", ch.LastNew, fetchedAt)
+		}
+	})
+
+	t.Run("success_with_zero_new_items_sets_lastok_not_lastnew", func(t *testing.T) {
+		// First fetch stores the item; second fetch sees same item → 0 new items.
+		current := feedWithItem
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Write([]byte(current))
+		}))
+		defer srv.Close()
+
+		ch := &Feed{Title: "T", URL: srv.URL}
+		buf := make([]byte, 1<<20)
+		const firstAt int64 = 1_000_000
+		run1 := &fetchRun{client: srv.Client(), engine: ingest.New(), fetchedAt: firstAt}
+		ch.Fetch(context.Background(), run1, buf, mod.New())
+		if ch.FetchError != "" {
+			t.Fatalf("fetch1 error: %s", ch.FetchError)
+		}
+
+		// Second fetch: same body, no new items.
+		const secondAt int64 = 2_000_000
+		run2 := &fetchRun{client: srv.Client(), engine: ingest.New(), fetchedAt: secondAt}
+		ch.Fetch(context.Background(), run2, buf, mod.New())
+		if ch.FetchError != "" {
+			t.Fatalf("fetch2 error: %s", ch.FetchError)
+		}
+
+		if ch.LastOK != secondAt {
+			t.Errorf("LastOK = %d, want %d (updated on success with 0 new items)", ch.LastOK, secondAt)
+		}
+		if ch.FailStreak != 0 {
+			t.Errorf("FailStreak = %d, want 0 (still reset on success)", ch.FailStreak)
+		}
+		if ch.LastNew != firstAt {
+			t.Errorf("LastNew = %d, want %d (unchanged when 0 new items ingested)", ch.LastNew, firstAt)
+		}
+	})
+
+	t.Run("success_with_empty_feed_sets_lastok_not_lastnew", func(t *testing.T) {
+		// Empty feed response (0 items) is a success but sets no LastNew.
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Write([]byte(feedEmpty))
+		}))
+		defer srv.Close()
+
+		ch := &Feed{Title: "T", URL: srv.URL}
+		buf := make([]byte, 1<<20)
+		run := &fetchRun{client: srv.Client(), engine: ingest.New(), fetchedAt: fetchedAt}
+		ch.Fetch(context.Background(), run, buf, mod.New())
+
+		if ch.LastOK != fetchedAt {
+			t.Errorf("LastOK = %d, want %d (set on empty-feed success)", ch.LastOK, fetchedAt)
+		}
+		if ch.FailStreak != 0 {
+			t.Errorf("FailStreak = %d, want 0", ch.FailStreak)
+		}
+		if ch.LastNew != 0 {
+			t.Errorf("LastNew = %d, want 0 (never set on empty feed)", ch.LastNew)
+		}
+	})
+
+	t.Run("error_increments_failstreak_leaves_lastok_lastnew", func(t *testing.T) {
+		// Set up a feed with known prior vitals.
+		// Point at a server that returns an HTTP 500 → hard error.
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer srv.Close()
+
+		ch := &Feed{Title: "T", URL: srv.URL, LastOK: 999, LastNew: 888, FailStreak: 2}
+		buf := make([]byte, 1<<20)
+		run := &fetchRun{client: srv.Client(), engine: ingest.New(), fetchedAt: fetchedAt}
+		ch.Fetch(context.Background(), run, buf, mod.New())
+
+		if ch.FetchError == "" {
+			t.Fatal("expected a FetchError after server error")
+		}
+		if ch.LastOK != 999 {
+			t.Errorf("LastOK = %d, want 999 (unchanged on error)", ch.LastOK)
+		}
+		if ch.LastNew != 888 {
+			t.Errorf("LastNew = %d, want 888 (unchanged on error)", ch.LastNew)
+		}
+		if ch.FailStreak != 3 {
+			t.Errorf("FailStreak = %d, want 3 (incremented on error)", ch.FailStreak)
+		}
+	})
+
+	t.Run("not_modified_304_sets_lastok_resets_failstreak_leaves_lastnew", func(t *testing.T) {
+		// Server responds 304 when the conditional header (If-None-Match) is
+		// present, unconditionally otherwise — ensures the real #rss path fires
+		// the Not-Modified branch.
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("If-None-Match") != "" {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+			// Fallback: should not be reached in this test.
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer srv.Close()
+
+		const sentinelLastNew int64 = 777
+		ch := &Feed{
+			Title:      "T",
+			URL:        srv.URL,
+			ETag:       `"etag-token"`, // triggers If-None-Match on the request
+			LastOK:     555,
+			LastNew:    sentinelLastNew,
+			FailStreak: 3,
+		}
+		buf := make([]byte, 1<<20)
+		run := &fetchRun{client: srv.Client(), engine: ingest.New(), fetchedAt: fetchedAt}
+		ch.Fetch(context.Background(), run, buf, mod.New())
+
+		if ch.FetchError != "" {
+			t.Fatalf("unexpected FetchError on 304: %s", ch.FetchError)
+		}
+		if ch.LastOK != fetchedAt {
+			t.Errorf("LastOK = %d, want %d (set to fetchedAt on 304)", ch.LastOK, fetchedAt)
+		}
+		if ch.FailStreak != 0 {
+			t.Errorf("FailStreak = %d, want 0 (reset on 304)", ch.FailStreak)
+		}
+		if ch.LastNew != sentinelLastNew {
+			t.Errorf("LastNew = %d, want %d (unchanged on 304 — no new articles)", ch.LastNew, sentinelLastNew)
+		}
+	})
+}
+
 // A publisher re-dating an existing post (same GUID, higher pub) on a later
 // fetch must NOT advance the persisted Watermark — otherwise a genuinely-new
 // article dated between the old and bumped value is permanently dropped.

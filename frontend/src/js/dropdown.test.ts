@@ -674,3 +674,111 @@ describe("dropdown: menu keyboard navigation", () => {
 // (nav "q:<query>") driven by the pinned search bar in app.ts. The search SET
 // behavior is covered in nav.test.ts (search filter mode) and the search index
 // itself in search.test.ts / the contract suite.
+
+describe("dropdown: graded health dot (feedGrade)", () => {
+   let dropdown: Dropdown
+   let guard: ReturnType<typeof vi.fn>
+
+   // Thresholds that match the module constants (tested via visible behaviour).
+   const SEC = 1
+   const DAY = 86400
+   const WARN_SEC = 3 * DAY
+   const CRIT_SEC = 14 * DAY
+   // "now" in seconds — use a fixed value far enough past epoch that last_ok
+   // offsets below are always positive.
+   const NOW = 1_800_000_000 // year 2027
+
+   beforeEach(async () => {
+      document.body.innerHTML = SKELETON
+      localStorage.clear()
+      guard = vi.fn()
+      vi.resetModules()
+      // Override Date.now to return a fixed "now" so grade thresholds are stable.
+      vi.spyOn(Date, "now").mockReturnValue(NOW * 1000)
+      dropdown = await import("./dropdown")
+   })
+
+   afterEach(() => {
+      vi.restoreAllMocks()
+   })
+
+   const showFeed = (ch: IFeed) => {
+      data.groupFeedsByTag.mockReturnValueOnce({
+         tagged: new Map(),
+         sortedTags: [],
+         untagged: [ch],
+      })
+      dropdown.showFeedMenu("", guard)
+   }
+
+   const rowFor = (id: number) => $menu().querySelector(`a[data-value="${id}"]`)!
+
+   it("healthy feed (no ferr, last_ok recent) has no dot", () => {
+      showFeed(feed({ id: 10, last_ok: NOW - DAY }))
+      expect(rowFor(10).querySelector(".srr-err-dot")).toBeNull()
+   })
+
+   it("warn: last_ok older than WARN_SEC gets srr-stale-warn dot", () => {
+      showFeed(feed({ id: 11, last_ok: NOW - WARN_SEC - SEC }))
+      const dot = rowFor(11).querySelector(".srr-err-dot")
+      expect(dot).not.toBeNull()
+      expect(dot!.classList.contains("srr-stale-warn")).toBe(true)
+      expect(dot!.classList.contains("srr-stale-crit")).toBe(false)
+   })
+
+   it("crit: last_ok older than CRIT_SEC gets srr-stale-crit dot", () => {
+      showFeed(feed({ id: 12, last_ok: NOW - CRIT_SEC - SEC }))
+      const dot = rowFor(12).querySelector(".srr-err-dot")
+      expect(dot).not.toBeNull()
+      expect(dot!.classList.contains("srr-stale-crit")).toBe(true)
+   })
+
+   it("crit: fail_streak >= 3 gets srr-stale-crit dot regardless of last_ok", () => {
+      showFeed(feed({ id: 13, last_ok: NOW - DAY, fail_streak: 3 }))
+      const dot = rowFor(13).querySelector(".srr-err-dot")
+      expect(dot).not.toBeNull()
+      expect(dot!.classList.contains("srr-stale-crit")).toBe(true)
+   })
+
+   it("crit: ferr present gets srr-stale-crit dot (backward compat + most-severe grade)", () => {
+      showFeed(feed({ id: 14, ferr: "timeout" }))
+      const dot = rowFor(14).querySelector(".srr-err-dot")
+      expect(dot).not.toBeNull()
+      expect(dot!.classList.contains("srr-stale-crit")).toBe(true)
+   })
+
+   it("no dot when last_ok is absent (old store / never fetched)", () => {
+      showFeed(feed({ id: 15 }))
+      expect(rowFor(15).querySelector(".srr-err-dot")).toBeNull()
+   })
+
+   it("warn dot carries neutral descriptive title (includes feed title and staleness hint)", () => {
+      showFeed(feed({ id: 16, title: "MyFeed", last_ok: NOW - WARN_SEC - SEC }))
+      const a = rowFor(16)
+      const t = a.getAttribute("title") ?? ""
+      const aria = a.getAttribute("aria-label") ?? ""
+      // Must mention the feed title and carry the days-ago staleness suffix.
+      expect(t).toMatch(/\dd/)
+      expect(aria).toContain("MyFeed")
+      expect(aria).toMatch(/\dd/)
+   })
+
+   it("lastOK === 0 (never fetched) shows a neutral phrase, not a days-since-epoch number", () => {
+      // fail_streak >= 3 → grade "crit", ferr="" → stale-hint else branch with last_ok=0.
+      // Without the lastOK===0 guard this would compute ~20254d (days since epoch).
+      showFeed(feed({ id: 18, title: "NeverOK", last_ok: 0, fail_streak: 3 }))
+      const a = rowFor(18)
+      const t = a.getAttribute("title") ?? ""
+      const aria = a.getAttribute("aria-label") ?? ""
+      expect(t).toBe("never fetched successfully")
+      expect(aria).toContain("never fetched successfully")
+      expect(t).not.toMatch(/\d{4,}d/)
+   })
+
+   it("ferr crit dot carries the error text in title/aria-label", () => {
+      showFeed(feed({ id: 17, title: "BrokenFeed", ferr: "connection refused" }))
+      const a = rowFor(17)
+      expect(a.getAttribute("title")).toContain("connection refused")
+      expect(a.getAttribute("aria-label")).toContain("feed error")
+   })
+})

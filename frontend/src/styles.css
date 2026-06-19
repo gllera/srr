@@ -592,6 +592,13 @@ body.srr-view-list .srr-toolbar {
       background: var(--accent);
       margin-right: 0.35rem;
       vertical-align: middle;
+      /* Graded health: warn = amber, crit = accent red (default). */
+      &.srr-stale-warn {
+         background: #c98000;
+      }
+      &.srr-stale-crit {
+         background: var(--accent);
+      }
    }
    /* Source-color chip on feed rows — the same per-feed color (data-src →
       --src) as the row's list rail and the reader spine, so a source is picked

@@ -165,16 +165,38 @@ function toggleDropdown(
    fillMenu(dd, buildContent)
 }
 
-// A non-empty ferr on a feed marks its row (and the tag header hiding it
-// when collapsed) with a dot; the row's title/aria-label carry the error text.
-// The evidence already rides in db.gz — this only makes silent feed rot visible.
-function feedErr(ch: IFeed): string {
-   return ch.ferr ?? ""
+// Thresholds for the graded feed-health dot. A feed is "warn" when its last
+// successful fetch was older than STALE_WARN_SEC but not yet STALE_CRIT_SEC;
+// "crit" covers STALE_CRIT_SEC+, a persistent ferr, or a FailStreak ≥ 3.
+const STALE_WARN_SEC = 3 * 86400
+const STALE_CRIT_SEC = 14 * 86400
+const FAIL_STREAK_CRIT = 3
+
+// feedGrade returns "" (healthy), "warn", or "crit". Falls back gracefully when
+// the new vitals are absent (old store): a present ferr is still "crit", and a
+// missing last_ok with no ferr is "" (unknown, don't alarm).
+function feedGrade(ch: IFeed): "" | "warn" | "crit" {
+   const ferr = ch.ferr ?? ""
+   const streak = ch.fail_streak ?? 0
+   const lastOK = ch.last_ok ?? 0
+   if (ferr || streak >= FAIL_STREAK_CRIT) return "crit"
+   if (lastOK > 0) {
+      const ageSec = Date.now() / 1000 - lastOK
+      if (ageSec >= STALE_CRIT_SEC) return "crit"
+      if (ageSec >= STALE_WARN_SEC) return "warn"
+   }
+   return ""
 }
 
-function errDot(): HTMLSpanElement {
+// feedHasIssue returns true when the feed has any health grade (used for tag
+// header dot: a collapsed tag group still surfaces any trouble inside it).
+function feedHasIssue(ch: IFeed): boolean {
+   return feedGrade(ch) !== ""
+}
+
+function errDot(grade: "warn" | "crit"): HTMLSpanElement {
    const s = document.createElement("span")
-   s.className = "srr-err-dot"
+   s.className = `srr-err-dot srr-stale-${grade}`
    s.setAttribute("aria-hidden", "true")
    return s
 }
@@ -192,11 +214,22 @@ function srcChip(feedId: number): HTMLSpanElement {
 
 function feedLink(ch: IFeed, className: string): HTMLAnchorElement {
    const a = createLink(String(ch.id), ch.title, className)
-   const err = feedErr(ch)
-   if (err) {
-      a.title = err
-      a.setAttribute("aria-label", `${ch.title} — feed error: ${err}`)
-      a.prepend(errDot())
+   const grade = feedGrade(ch)
+   if (grade !== "") {
+      const ferr = ch.ferr ?? ""
+      if (ferr) {
+         a.title = ferr
+         a.setAttribute("aria-label", `${ch.title} — feed error: ${ferr}`)
+      } else {
+         const lastOK = ch.last_ok ?? 0
+         const hint =
+            lastOK === 0
+               ? "never fetched successfully"
+               : `no successful fetch in ${Math.floor(Math.round(Date.now() / 1000 - lastOK) / 86400)}d`
+         a.title = hint
+         a.setAttribute("aria-label", `${ch.title} — ${hint}`)
+      }
+      a.prepend(errDot(grade))
    }
    // Chip leftmost — color identity first, then any error dot, then the title.
    a.prepend(srcChip(ch.id))
@@ -411,7 +444,7 @@ export function showFeedMenu(currentTag: string, onSelect: (token: string) => vo
          const expanded = tag === currentTag && tag !== current
          const div = divEl(expanded ? "srr-tag-group" : "srr-tag-group srr-tag-collapsed")
          const header = createLink(tag, tag, cls("srr-tag-header", tag))
-         if (group.some((ch) => feedErr(ch))) header.prepend(errDot())
+         if (group.some(feedHasIssue)) header.prepend(errDot("crit"))
          headerRows.push([header, group])
          const toggle = document.createElement("span")
          toggle.className = "srr-tag-toggle"

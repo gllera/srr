@@ -58,8 +58,17 @@ type Feed struct {
 	// doesn't drop dedup state.
 	BoundaryGUIDs []uint32 `json:"bg,omitempty"`
 	FetchError    string   `json:"ferr,omitempty"`
-	Tag           string   `json:"tag,omitempty"`
-	Pipe          []string `json:"pipe,omitempty"`
+	// LastOK is the unix-second of the last successful fetch (including 304
+	// Not-Modified). Zero when the feed has never been fetched successfully.
+	LastOK int64 `json:"last_ok,omitempty"`
+	// FailStreak is the number of consecutive fetch failures. Reset to 0 on any
+	// success (including 304 Not-Modified). Incremented on each failure.
+	FailStreak int `json:"fail_streak,omitempty"`
+	// LastNew is the unix-second of the last fetch that ingested ≥1 new article.
+	// Not updated on 304 or on a 200 with zero new items.
+	LastNew int64    `json:"last_new,omitempty"`
+	Tag     string   `json:"tag,omitempty"`
+	Pipe    []string `json:"pipe,omitempty"`
 	// Ingest is the feed-level extraction strategy. Empty falls through
 	// to the db.gz root Ingest → built-in "#rss".
 	Ingest   string `json:"ingest,omitempty"`
@@ -106,16 +115,20 @@ func (c *Feed) Fetch(ctx context.Context, run *fetchRun, buf []byte, processor *
 		err = fmt.Errorf("invalid pipeline %v: %w", pipe, err)
 		slog.Error("feed pipeline invalid; skipping fetch", "feed", c, "err", err)
 		c.FetchError = err.Error()
+		c.FailStreak++
 		return
 	}
 	ingestName := ingest.Select(c.Ingest, run.rootIngest)
 	items, err := c.fetchURL(ctx, run, buf, processor, pipe, ingestName)
 	if err != nil {
 		c.FetchError = err.Error()
+		c.FailStreak++
 		slog.Error("feed fetch failed", "feed", c, "url", c.URL, "err", err)
 		return
 	}
 	c.FetchError = ""
+	c.LastOK = run.fetchedAt
+	c.FailStreak = 0
 	c.newItems = append(c.newItems, items...)
 }
 
@@ -344,6 +357,9 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 		})
 	}
 
+	if len(items) > 0 {
+		c.LastNew = run.fetchedAt
+	}
 	c.Watermark = maxPub
 	c.BoundaryGUIDs = bg
 	c.ETag = result.ETag

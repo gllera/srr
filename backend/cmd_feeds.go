@@ -193,6 +193,9 @@ func setFeedURL(ch *Feed, url string) {
 	ch.Watermark = 0
 	ch.BoundaryGUIDs = nil
 	ch.FetchError = ""
+	ch.LastOK = 0
+	ch.FailStreak = 0
+	ch.LastNew = 0
 }
 
 type RmCmd struct {
