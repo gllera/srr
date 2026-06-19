@@ -255,4 +255,20 @@ describe("search", () => {
       const capped = await collect(search.search("alpha", 2))
       expect(capped.flat().map((h) => h.chron)).toEqual([2 * META_PACK_SIZE, META_PACK_SIZE])
    })
+
+   it("fetches latest meta tail with isLatest=true; summary and finalized shards with false", async () => {
+      // CONTRACT BUG 1 / bug #7: the latest tail is generation-named (L<seq>.gz) and
+      // can be GC'd when the tab holds a stale db.gz.  A 404 on it must trigger the
+      // guarded location.reload() self-heal, which only fires when isLatest=true.
+      // The summary and finalized shards are never GC'd, so they must stay false.
+      await collect(search.search("alpha"))
+      const calls = mockData.fetchPackBytes.mock.calls
+      // Build a path→isLatest map from all recorded calls.
+      const isLatestByPath: Record<string, boolean> = {}
+      for (const [path, isLatest] of calls) isLatestByPath[path] = isLatest
+      expect(isLatestByPath["meta/L7.gz"]).toBe(true) // latest tail — must self-heal on 404
+      expect(isLatestByPath["meta/s2.gz"]).toBe(false) // bloom summary — write-once, never GC'd
+      expect(isLatestByPath["meta/0.gz"]).toBe(false) // finalized shard — immutable
+      expect(isLatestByPath["meta/1.gz"]).toBe(false) // finalized shard — immutable
+   })
 })

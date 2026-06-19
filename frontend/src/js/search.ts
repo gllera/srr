@@ -111,7 +111,7 @@ const loadSummary = lazySlot(async () => {
 })
 
 const loadLatest = lazySlot(() =>
-   data.fetchPackBytes(`meta/L${data.db.seq}.gz`, false).then((buf) => parseShard(buf, false)),
+   data.fetchPackBytes(`meta/L${data.db.seq}.gz`, true).then((buf) => parseShard(buf, false)),
 )
 
 const shardCache = makeLRU<Promise<Shard>>(8)
