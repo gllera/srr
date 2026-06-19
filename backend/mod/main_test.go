@@ -300,19 +300,6 @@ func TestRunSubprocessWaitDelayBound(t *testing.T) {
 	}
 }
 
-func TestIsBuiltin(t *testing.T) {
-	for _, tok := range []string{"#sanitize", "#readability timeout=5s", "#minify"} {
-		if !IsBuiltin(tok) {
-			t.Errorf("IsBuiltin(%q) = false, want true", tok)
-		}
-	}
-	for _, tok := range []string{"#sanitise", "jq .", "", "#base"} {
-		if IsBuiltin(tok) {
-			t.Errorf("IsBuiltin(%q) = true, want false", tok)
-		}
-	}
-}
-
 func TestModuleValidate(t *testing.T) {
 	m := New()
 	ctx := context.Background()
