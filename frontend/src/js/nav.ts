@@ -158,7 +158,6 @@ export async function listAnchor(): Promise<number> {
 // query can't fetch the whole archive; searchTruncated() flags the cap for the UI.
 export const SEARCH_PREFIX = "q:"
 const SEARCH_CAP = 500
-let searchTerm = "" // the active query (text after "q:")
 let searchSorted: number[] = [] // ascending matching chronIdxs pulled so far
 let searchSet = new Set<number>() // the same hits, for matches()
 let searchTruncatedFlag = false
@@ -185,11 +184,15 @@ export function resetSearchStream(): void {
    searchTruncatedFlag = false
 }
 
+function activeQuery(): string {
+   return filter.search ? filter.tokens[0].slice(SEARCH_PREFIX.length) : ""
+}
+
 export function isSearchFilter(): boolean {
    return filter.search
 }
 export function searchQuery(): string {
-   return searchTerm
+   return activeQuery()
 }
 export function searchTruncated(): boolean {
    return searchTruncatedFlag
@@ -224,7 +227,7 @@ function setRight(sorted: number[], from: number): number {
 // list streams rows from the returned hits; the reader reaches this via
 // ensureSearchCovers. Hits carry {chron,f,w,t}, so callers render with no fetch.
 export async function searchMore(): Promise<{ hits: import("./search").ISearchHit[]; done: boolean }> {
-   const term = searchTerm
+   const term = activeQuery()
    if (searchIterFor !== term || !searchIter) {
       searchIterFor = term
       searchDone = false
@@ -243,10 +246,10 @@ export async function searchMore(): Promise<{ hits: import("./search").ISearchHi
    try {
       step = await it.next()
    } catch {
-      if (term === searchTerm) searchDone = true
+      if (term === activeQuery()) searchDone = true
       return { hits: [], done: true }
    }
-   if (term !== searchTerm) return { hits: [], done: true } // superseded — no state mutation
+   if (term !== activeQuery()) return { hits: [], done: true } // superseded — no state mutation
    if (step.done || !step.value) {
       searchDone = true
       return { hits: [], done: true }
@@ -275,7 +278,7 @@ export async function searchMore(): Promise<{ hits: import("./search").ISearchHi
 async function ensureSearchCovers(from: number): Promise<void> {
    while (!searchDone && (searchSorted.length === 0 || searchSorted[0] > from)) {
       await searchMore()
-      if (searchIterFor !== searchTerm) return // superseded mid-pull
+      if (searchIterFor !== activeQuery()) return // superseded mid-pull
    }
 }
 
@@ -360,7 +363,6 @@ export const filter = {
          // flight) would leave searchIterFor === "A" with an emptied set and strand
          // the list on no matches.
          if (term !== searchIterFor) resetSearchStream()
-         searchTerm = term
          return
       }
       // Resolve membership at natural add_idx bounds (numeric token = a feed,
