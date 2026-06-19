@@ -198,10 +198,14 @@ export function fillRow(a: HTMLElement, art: import("./format.gen").IMetaWire, s
    a.querySelector(".srr-row-title")!.textContent = art.t || "(untitled)"
    a.classList.remove("srr-row-skeleton")
    // If selectRow placed the cursor on this row while it was still a skeleton
-   // (feed unknown → nav.select was deferred via data-select-pending), sync now.
+   // (feed unknown → nav.select was deferred via data-select-pending), sync now —
+   // but only when the row is still the current cursor.  refresh() can move
+   // .srr-row-current to a different row (e.g. the reader navigated away during
+   // the skeleton window) without clearing selectPending, so we clear the marker
+   // unconditionally and re-select only if this row is still highlighted.
    if (a.dataset.selectPending) {
       delete a.dataset.selectPending
-      nav.select(chron, art.f)
+      if (a.classList.contains("srr-row-current")) nav.select(chron, art.f)
    }
 }
 
@@ -668,7 +672,7 @@ export function refresh(): void {
    })
    if (savedView && removedAny) {
       relabelDividers() // drop any day divider orphaned by the removed rows (#11)
-      if (!rowsEl.querySelector("a.srr-row")) showEmptyState() // (#1)
+      if (rowsEl && !rowsEl.querySelector("a.srr-row")) showEmptyState() // (#1)
    }
 }
 
@@ -973,7 +977,8 @@ function rowSibling(row: HTMLElement, dir: "older" | "newer"): HTMLElement | nul
 // downward swipe and hide the toolbar (same contract as render/fetchNewer).
 function selectRow(row: HTMLElement): void {
    if (!rowsEl) return
-   // Clear the deferred-select marker from any previously-current skeleton.
+   // Clear any pending deferred-select marker left by a prior selectRow call
+   // (regardless of whether that skeleton is still .srr-row-current).
    rowsEl.querySelector("[data-select-pending]")?.removeAttribute("data-select-pending")
    rowsEl.querySelector(".srr-row-current")?.classList.remove("srr-row-current")
    row.classList.add("srr-row-current")
