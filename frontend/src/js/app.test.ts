@@ -81,6 +81,10 @@ const data = vi.hoisted(() => ({
    init: vi.fn(async () => {}),
    db: { total_art: 0, fetched_at: 0, feeds: {} } as unknown as IDB,
    feedTitle: vi.fn(() => "Feed"),
+   lastFetchedAt: vi.fn(() => 0),
+   hasArticles: vi.fn(() => false),
+   metaReady: vi.fn(() => true),
+   idxSummaryDegraded: vi.fn(() => false),
 }))
 vi.mock("./data", () => data)
 
@@ -105,6 +109,8 @@ vi.mock("./fmt", () => ({
    formatDate: () => "01/01/2020 00:00",
    srcColorIndex: () => 0,
    timeAgo: () => "1h",
+   timeAgoProse: (unix: number) => (unix === 0 ? "just now" : "4 minutes ago"),
+   isStale: (unix: number) => unix > 0 && unix < 1000,
    collapseBrokenMedia: () => {},
    URL_DENY: /^\s*(?:javascript|data|vbscript|file)\s*:/i,
 }))
@@ -136,6 +142,7 @@ const SKELETON = `
          <button class="srr-save" disabled></button>
          <div class="srr-dropdown"><button class="srr-overflow srr-dropdown-btn"></button><div id="srr-overflow-menu" class="srr-dropdown-menu"></div></div>
       </nav>
+      <div class="srr-status"></div>
    </main>`
 
 const flush = () => new Promise((r) => setTimeout(r))
@@ -377,5 +384,91 @@ describe("feed-menu onSelect routing — list vs reader (FE-S7)", () => {
       expect(nav.switchFilter).toHaveBeenCalledWith("7")
       // applyFilter is the list path — must NOT be called here
       expect(nav.applyFilter).not.toHaveBeenCalled()
+   })
+})
+
+describe("refreshStatus() — freshness & degradation status banner", () => {
+   const status = () => document.querySelector(".srr-status") as HTMLElement
+
+   it("shows freshness text when fetched_at > 0 and everything is healthy", async () => {
+      data.lastFetchedAt.mockReturnValue(1700000000) // nonzero, treated as recent by mock isStale
+      data.metaReady.mockReturnValue(true)
+      data.idxSummaryDegraded.mockReturnValue(false)
+      await boot()
+      const text = status().textContent ?? ""
+      expect(text).toContain("Updated")
+      expect(text).toContain("minutes ago")
+      expect(status().classList.contains("srr-status-warn")).toBe(false)
+   })
+
+   it("shows stale warning when isStale returns true", async () => {
+      // isStale mock: unix > 0 && unix < 1000 => stale; use value 1 (> 0 and < 1000)
+      data.lastFetchedAt.mockReturnValue(1)
+      data.metaReady.mockReturnValue(true)
+      data.idxSummaryDegraded.mockReturnValue(false)
+      await boot()
+      const text = status().textContent ?? ""
+      expect(text).toContain("backend may be down")
+      expect(status().classList.contains("srr-status-warn")).toBe(true)
+   })
+
+   it("shows search unavailable when metaReady is false and store is non-empty", async () => {
+      data.lastFetchedAt.mockReturnValue(1700000000)
+      data.hasArticles.mockReturnValue(true)
+      data.metaReady.mockReturnValue(false)
+      data.idxSummaryDegraded.mockReturnValue(false)
+      await boot()
+      const text = status().textContent ?? ""
+      expect(text).toContain("Search unavailable")
+      expect(status().classList.contains("srr-status-warn")).toBe(true)
+   })
+
+   it("shows degraded note when idxSummaryDegraded is true", async () => {
+      data.lastFetchedAt.mockReturnValue(1700000000)
+      data.metaReady.mockReturnValue(true)
+      data.idxSummaryDegraded.mockReturnValue(true)
+      await boot()
+      const text = status().textContent ?? ""
+      expect(text).toContain("optimizing")
+      expect(status().classList.contains("srr-status-warn")).toBe(true)
+   })
+
+   it("shows no freshness line when fetched_at is 0", async () => {
+      data.lastFetchedAt.mockReturnValue(0)
+      data.metaReady.mockReturnValue(true)
+      data.idxSummaryDegraded.mockReturnValue(false)
+      await boot()
+      const text = status().textContent ?? ""
+      expect(text).not.toContain("Updated")
+      expect(text).not.toContain("backend may be down")
+      expect(status().classList.contains("srr-status-warn")).toBe(false)
+   })
+
+   it("empty store with recent fetch shows only freshness line, no search warning, no warn class", async () => {
+      // total_art === 0: metaReady() returns false (its real empty-store behaviour),
+      // but hasArticles() is false, so metaMissing must stay false.
+      data.lastFetchedAt.mockReturnValue(1700000000) // nonzero, recent (isStale mock: unix < 1000 => stale)
+      data.hasArticles.mockReturnValue(false)
+      data.metaReady.mockReturnValue(false) // mirrors real empty-store return value
+      data.idxSummaryDegraded.mockReturnValue(false)
+      await boot()
+      const text = status().textContent ?? ""
+      expect(text).toContain("Updated")
+      expect(text).not.toContain("Search unavailable")
+      expect(status().classList.contains("srr-status-warn")).toBe(false)
+   })
+
+   it("stale + metaReady false on non-empty store shows both warnings and warn class", async () => {
+      // isStale mock: unix > 0 && unix < 1000 => stale; use value 1
+      data.lastFetchedAt.mockReturnValue(1)
+      data.hasArticles.mockReturnValue(true)
+      data.metaReady.mockReturnValue(false)
+      data.idxSummaryDegraded.mockReturnValue(false)
+      await boot()
+      const text = status().textContent ?? ""
+      expect(text).toContain("backend may be down")
+      expect(text).toContain("Search unavailable — index rebuilding")
+      expect(text).toContain(" · ") // separator between the two parts
+      expect(status().classList.contains("srr-status-warn")).toBe(true)
    })
 })

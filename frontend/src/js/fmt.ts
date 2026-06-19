@@ -188,6 +188,31 @@ export function timeAgo(unix: number): string {
    return `${Math.floor(sec / 31536000)}y`
 }
 
+// Prose form of timeAgo: "just now", "1 minute ago", "2 hours ago", etc.
+// Uses the same clock basis as timeAgo so tests can control "now" uniformly.
+export function timeAgoProse(unix: number): string {
+   const sec = Math.max(0, Math.floor(Date.now() / 1000) - unix)
+   if (sec < 60) return "just now"
+   const n = (count: number, unit: string) => `${count} ${unit}${count === 1 ? "" : "s"} ago`
+   if (sec < 3600) return n(Math.floor(sec / 60), "minute")
+   if (sec < 86400) return n(Math.floor(sec / 3600), "hour")
+   if (sec < 2592000) return n(Math.floor(sec / 86400), "day")
+   if (sec < 31536000) return n(Math.floor(sec / 2592000), "month")
+   return n(Math.floor(sec / 31536000), "year")
+}
+
+// Crude global freshness threshold: 3 days without a successful backend fetch
+// is long enough to suggest the backend may be down.
+const STALE_AFTER_SEC = 3 * 86400
+
+// Returns true when the last fetch is old enough to suggest something is wrong.
+// A fetched_at of 0 (never fetched / absent) is treated as not-stale: there is
+// nothing honest to report yet.
+export function isStale(unix: number): boolean {
+   if (unix <= 0) return false
+   return Math.floor(Date.now() / 1000) - unix >= STALE_AFTER_SEC
+}
+
 const pad2 = (n: number) => n.toString().padStart(2, "0")
 export function formatDate(unix: number): string {
    const d = new Date(unix * 1000)
