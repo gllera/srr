@@ -26,9 +26,15 @@ func (o *FetchCmd) Run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	// Build once per Run so the transport's idle-conn pool is shared across
+	// all --interval cycles.  A fresh transport per cycle would orphan
+	// readLoop goroutines that keep their sockets/FDs alive until the remote
+	// server closes the connection.
+	client := newFetchClient(globals.Workers)
+
 	if o.Interval > 0 {
 		for {
-			if err := o.fetch(ctx); err != nil {
+			if err := o.fetch(ctx, client); err != nil {
 				slog.Error("fetch iteration failed", "err", err)
 			}
 			select {
@@ -38,20 +44,29 @@ func (o *FetchCmd) Run() error {
 			}
 		}
 	}
-	return o.fetch(ctx)
+	return o.fetch(ctx, client)
 }
 
-func (o *FetchCmd) fetch(ctx context.Context) error {
+// newFetchClient builds the shared HTTP client for a fetch run.  It is called
+// once per Run() invocation so the same client (and its transport's idle-conn
+// pool) is reused across --interval cycles, preventing the per-cycle Transport
+// leak where readLoop goroutines keep idle sockets/FDs alive until the remote
+// server closes them.  IdleConnTimeout matches the SSRF-guarded transport in
+// mod/helper_ssrf.go (90 s).
+func newFetchClient(workers int) *http.Client {
+	return &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConnsPerHost: workers,
+			MaxConnsPerHost:     workers,
+			IdleConnTimeout:     90 * time.Second,
+		},
+	}
+}
+
+func (o *FetchCmd) fetch(ctx context.Context, client *http.Client) error {
 	return withDBCtx(ctx, true, func(ctx context.Context, db *DB) error {
 		db.core.FetchedAt = time.Now().UTC().Unix()
-
-		client := &http.Client{
-			Timeout: 10 * time.Second,
-			Transport: &http.Transport{
-				MaxIdleConnsPerHost: globals.Workers,
-				MaxConnsPerHost:     globals.Workers,
-			},
-		}
 		// Asset uploader for the end-of-pipeline self-hosting step, shared across
 		// workers (the store backend is concurrent-safe). It reads files an ingest
 		// strategy left in the run's cache dir and uploads them under a
