@@ -904,6 +904,6 @@ export async function cycleFilter(dir: number): Promise<IShowFeed> {
 }
 
 function updateHash(replace = false) {
-   const hash = `#${pos}${tokensSuffix()}`
+   const hash = pos >= 0 ? `#${pos}${tokensSuffix()}` : `#${tokensSuffix()}`
    history[replace ? "replaceState" : "pushState"](null, "", hash)
 }
