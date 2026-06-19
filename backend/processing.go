@@ -42,6 +42,12 @@ func processItem(ctx context.Context, processor *mod.Module, pipeline []string, 
 			if hasPub != hadPub || (hasPub && !pub.Equal(*i.Published)) {
 				return fmt.Errorf("module %q changed Published", m)
 			}
+			// A drop signal short-circuits the remaining steps and skips
+			// post-loop normalization — a dropped item is never stored, so
+			// normalizing its fields is wasteful and misleading.
+			if i.Drop {
+				return nil
+			}
 		}
 	}
 	i.Title = html.UnescapeString(titlePolicy.Sanitize(i.Title))

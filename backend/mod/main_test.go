@@ -187,7 +187,7 @@ func TestRegisterBuiltins(t *testing.T) {
 	m := New()
 
 	// Verify built-in processors are registered
-	builtins := []string{"#sanitize", "#minify", "#readability"}
+	builtins := []string{"#filter", "#sanitize", "#minify", "#readability"}
 	for _, name := range builtins {
 		if _, ok := m.processors[name]; !ok {
 			t.Errorf("built-in %q not registered", name)
@@ -266,6 +266,51 @@ func TestModuleEmptyShellOutputIsNoop(t *testing.T) {
 	}
 	if item.Content != "<p>keep me</p>" || item.Title != "Keep" {
 		t.Errorf("no-op shell mod mutated the item: %+v", item)
+	}
+}
+
+// TestModuleExternalDropSignal verifies the drop protocol: an external mod
+// emitting {"drop":true} sets i.Drop=true and leaves Title/Content untouched;
+// a normal transform (no "drop" field) keeps Drop=false; empty stdout (no-op)
+// also keeps Drop=false.
+func TestModuleExternalDropSignal(t *testing.T) {
+	m := New()
+	now := time.Now()
+
+	// {"drop":true} sets Drop and leaves other fields intact.
+	item := &RawItem{GUID: 1, Title: "Original", Content: "original content", Link: "http://e.com", Published: &now}
+	if err := m.Process(context.Background(), `echo '{"drop":true}'`, item); err != nil {
+		t.Fatalf("drop signal: Process error: %v", err)
+	}
+	if !item.Drop {
+		t.Error("drop signal: expected i.Drop=true after {\"drop\":true}")
+	}
+	if item.Title != "Original" {
+		t.Errorf("drop signal: Title mutated to %q, want %q", item.Title, "Original")
+	}
+	if item.Content != "original content" {
+		t.Errorf("drop signal: Content mutated to %q, want %q", item.Content, "original content")
+	}
+
+	// A normal transform sets title but NOT Drop.
+	item2 := &RawItem{GUID: 2, Title: "Orig2", Content: "c2", Link: "http://e.com", Published: &now}
+	if err := m.Process(context.Background(), `jq -c '.title = "Modified"'`, item2); err != nil {
+		t.Fatalf("normal transform: Process error: %v", err)
+	}
+	if item2.Drop {
+		t.Error("normal transform: Drop should be false when stdout has no 'drop' field")
+	}
+	if item2.Title != "Modified" {
+		t.Errorf("normal transform: Title = %q, want %q", item2.Title, "Modified")
+	}
+
+	// Empty stdout (no-op) must not set Drop.
+	item3 := &RawItem{GUID: 3, Title: "Untouched", Content: "c3", Link: "http://e.com", Published: &now}
+	if err := m.Process(context.Background(), "true", item3); err != nil {
+		t.Fatalf("no-op: Process error: %v", err)
+	}
+	if item3.Drop {
+		t.Error("no-op: Drop should be false on empty stdout")
 	}
 }
 
