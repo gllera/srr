@@ -1983,3 +1983,129 @@ describe("unseen-only — fully-caught-up filter yields no match", () => {
       }
    })
 })
+
+// ── Bug #3: search supersession guard in catch ───────────────────────────────
+describe("searchMore supersession guard in catch (#3)", () => {
+   beforeEach(() => {
+      searchMod.search.mockReset()
+      searchMod.available.mockReturnValue(true)
+      searchMod.shortQuery.mockReturnValue(false)
+   })
+
+   it("a superseded query's catch does NOT set searchDone for the active query", async () => {
+      // Scenario: query A's generator has yielded one batch (so searchIterFor = A),
+      // then query B takes over and also calls searchMore() (searchIterFor = B, a
+      // new iterator). A's SECOND pull (still pending in the background) rejects.
+      // A's catch must NOT write searchDone for B (B's stream should still advance).
+      setupIndex(Array.from({ length: 10 }, () => ({ feedId: 1 })))
+
+      // A yields immediately on the first pull; its SECOND pull blocks then rejects.
+      let rejectA!: (err: Error) => void
+      const aSecondPull = new Promise<never>((_, rej) => (rejectA = rej))
+
+      let aCallCount = 0
+      searchMod.search.mockImplementation(async function* () {
+         aCallCount++
+         if (aCallCount === 1) {
+            // Query A's generator: first batch immediate, second rejects.
+            yield [{ chron: 7, f: 1, w: 1000, t: "t" }]
+            await aSecondPull // blocks on second .next()
+         } else {
+            // Query B's generator: multi-batch so we can detect premature done.
+            yield [{ chron: 5, f: 1, w: 1000, t: "t" }]
+            yield [{ chron: 3, f: 1, w: 1000, t: "t" }]
+         }
+      })
+
+      // Query A: first pull succeeds, searchIterFor = "bug3a", iterator advanced.
+      nav.applyFilter([nav.SEARCH_PREFIX + "bug3a"])
+      const aFirstResult = await nav.searchMore()
+      expect(aFirstResult.hits.map((h) => h.chron)).toEqual([7])
+
+      // Query A's second pull is kicked off but not yet awaited.
+      const aSecondPromise = nav.searchMore() // blocks inside aSecondPull
+
+      // Query B supersedes A: searchIterFor flips to "bug3b", new iterator created.
+      nav.applyFilter([nav.SEARCH_PREFIX + "bug3b"])
+
+      // Query B's first pull: sets up B's iterator and pulls one batch.
+      const bFirst = await nav.searchMore()
+      expect(bFirst.hits.map((h) => h.chron)).toEqual([5])
+
+      // Now reject A's second pull AFTER B is fully initialized.
+      // A's catch (term="bug3a") fires with searchTerm="bug3b" → must NOT set searchDone.
+      rejectA(new Error("A shard failed"))
+      await aSecondPromise.catch(() => {}) // let A's catch run
+
+      // B must still be streamable: its second batch should be available.
+      const bSecond = await nav.searchMore()
+      expect(bSecond.done).toBe(false)
+      expect(bSecond.hits.map((h) => h.chron)).toEqual([3])
+   })
+})
+
+// ── Bug #6: unread badge off-by-one on list cursor move ─────────────────────
+describe("feedUnread onCurrent guard: select vs recordSeen (#6)", () => {
+   afterEach(() => nav.setUnreadOnly(false))
+
+   it("select() alone does NOT inflate the badge (+1 only after recordSeen)", async () => {
+      // Setup: feed 1 has 3 articles (chron 0,1,2); feed 1 seen through chron 0.
+      // Unread are chron 1 and 2 → raw unread count = 2.
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      nav.setUnreadOnly(true)
+      // Seed seen: ch1 seen at chron 0. Unread = 2 (chron 1, 2).
+      seedSeen({ "feed:1": 0 })
+      // Apply filter with unseen-only raised bounds.
+      nav.filter.set(["1"])
+
+      // Move the list cursor to chron 1 (unread article) via select() — no recordSeen.
+      nav.select(1, 1)
+
+      // The badge must read 2 (the true unread), NOT 3 (which would be the double-count).
+      const count = await nav.unreadCount(data.db.feeds[1])
+      expect(count).toBe(2)
+   })
+
+   it("recordSeen (reader open) still produces the +1 correction", async () => {
+      // Same setup, but use fromHash (resolve path) which calls recordSeen.
+      // After recordSeen: seen["feed:1"] = 1 (== pos), so the base count dropped
+      // chron 1 from unread, and +1 puts it back → still 2 total.
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      nav.setUnreadOnly(true)
+      seedSeen({ "feed:1": 0 })
+      nav.filter.set(["1"])
+
+      // Open chron 1 via the reader (goes through resolve → recordSeen sets seen=1).
+      await nav.fromHash("1!1")
+
+      // Badge must still be 2: base count excludes chron 1 (now seen), +1 adds it back.
+      const count = await nav.unreadCount(data.db.feeds[1])
+      expect(count).toBe(2)
+   })
+})
+
+// ── Bug #9: stale pos in hash on resolveNoMatch ───────────────────────────────
+describe("resolveNoMatch writes positionless hash (#9)", () => {
+   it("resolveNoMatch clears pos before updateHash so no stale numeric pos is written", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }])
+      // Navigate to chron 1 so pos = 1.
+      await nav.fromHash("1")
+
+      // Now trigger resolveNoMatch by setting up a filter with no matching articles,
+      // then calling last(). last() calls feedLeft → -1 → resolveNoMatch.
+      data.db.feeds[99] = makeFeed({ id: 99, total_art: 1 })
+      nav.filter.set(["99"])
+      // feedLeft will return -1 since no chron has feedId 99.
+      await nav.last()
+
+      // resolveNoMatch calls pushState (replace=false from last()'s default).
+      // The hash written must NOT contain a stale pos ("1").
+      // With pos reset to -1, the hash should be "#-1!99".
+      // Without the fix it would be "#1!99" (pos not reset before updateHash).
+      const pushCalls = (history.pushState as ReturnType<typeof vi.spyOn>).mock.calls
+      const lastPush = pushCalls[pushCalls.length - 1][2] as string
+      // Must not start with the stale "#1" pos.
+      expect(lastPush).not.toMatch(/^#1/)
+      expect(lastPush).toBe("#-1!99")
+   })
+})

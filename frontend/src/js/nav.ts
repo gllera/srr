@@ -243,7 +243,7 @@ export async function searchMore(): Promise<{ hits: import("./search").ISearchHi
    try {
       step = await it.next()
    } catch {
-      searchDone = true
+      if (term === searchTerm) searchDone = true
       return { hits: [], done: true }
    }
    if (term !== searchTerm) return { hits: [], done: true } // superseded — no state mutation
@@ -420,7 +420,13 @@ export const filter = {
 // you open on.
 async function feedUnread(ch: IFeed, seenMap: Record<string, number>): Promise<number> {
    const map = new Map([[ch.id, ch.add_idx ?? 0]])
-   const onCurrent = filter.unreadMembers !== null && ch.id === currentFeed && filter.matches(ch.id, pos) ? 1 : 0
+   const onCurrent =
+      filter.unreadMembers !== null &&
+      ch.id === currentFeed &&
+      filter.matches(ch.id, pos) &&
+      (seenMap["feed:" + ch.id] ?? -1) >= pos
+         ? 1
+         : 0
    const seenIdx = seenMap["feed:" + ch.id]
    if (seenIdx === undefined) return data.countAll(map) + onCurrent
    const upTo = Math.min(seenIdx + 1, data.db.total_art)
@@ -630,6 +636,7 @@ export function pruneSeen() {
 }
 
 function resolveNoMatch(replace = false): IShowFeed {
+   pos = -1
    currentFeed = -1
    updateHash(replace)
    return {
