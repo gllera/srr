@@ -5,7 +5,7 @@ import * as search from "./search"
 let pos = -1
 // Feed id of the article currently on screen (-1 = none). feedUnread counts
 // this feed's current article as still-unread while you sit on it, but only
-// in unseen-only tag mode — see feedUnread.
+// in unseen-only mode (any filter — see feedUnread / unseenActive).
 let currentFeed = -1
 const next: { left?: Promise<number>; right?: Promise<number> } = {}
 
