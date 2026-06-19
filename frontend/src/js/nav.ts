@@ -10,7 +10,7 @@ let currentFeed = -1
 const next: { left?: Promise<number>; right?: Promise<number> } = {}
 
 // Unseen-only navigation: when on, the active filter skips articles already
-// seen (per the snapshotted seen positions of its members), so you glide past
+// seen (per the seen positions read at filter-apply time), so you glide past
 // feeds you're caught up on. A device-local preference, not part of the
 // shareable #pos!tokens hash. See filter.set / filter.applyUnseen and
 // dropdown.ts's chip.
@@ -184,6 +184,9 @@ export function resetSearchStream(): void {
    searchTruncatedFlag = false
 }
 
+// Derives the active search query from filter.tokens — the derive-at-use
+// replacement for the deleted searchTerm let; always consistent with
+// filter.search since set() flips both synchronously (no hand-sync invariant).
 function activeQuery(): string {
    return filter.search ? filter.tokens[0].slice(SEARCH_PREFIX.length) : ""
 }
@@ -371,8 +374,8 @@ export const filter = {
       this.applyUnseen(readSeen())
    },
    // Fold unseen-only into the just-built feed membership (shared by set() and
-   // clear()). When on, raise EVERY member's lower bound past its snapshotted seen
-   // high-water — so read articles fall below it for findLeft/findRight/matches.
+   // clear()). When on, raise EVERY member's lower bound past its seen high-water
+   // (read from localStorage at apply time) — so read articles fall below it for findLeft/findRight/matches.
    // Generalised from the old single-tag case: it now applies to any filter, so
    // [ALL]/a feed/a tag all become a "show only unread" view. When off, no-op.
    // Saved/search short-circuit before this.
@@ -730,8 +733,8 @@ export async function last(replace = false): Promise<IShowFeed> {
 async function isValidSeen(idx: number): Promise<boolean> {
    if (idx < 0 || idx >= data.db.total_art) return false
    const feedId = await data.getFeedId(idx)
-   // Unseen-only tag mode raises each member's bound past its snapshotted seen
-   // position, so filter.matches() would reject the tag's own resume (seen)
+   // Unseen-only tag mode raises each member's bound past its seen position
+   // (read at filter-apply time), so filter.matches() would reject the tag's own resume (seen)
    // position and bounce switchFilter forward to the oldest unseen. Accept that
    // resume position anyway — the same current position a feed or a non-unseen
    // tag resumes to — by validating against the member's TRUE add_idx instead of
