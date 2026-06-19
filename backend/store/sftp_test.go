@@ -1,12 +1,14 @@
 package store
 
 import (
+	"errors"
 	"io"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/pkg/sftp"
 )
@@ -231,6 +233,22 @@ func TestSFTPAtomicPutNoTempFileRemains(t *testing.T) {
 	rc, _ := d.Get(ctx, "atomic.txt", false)
 	if got := readAllClose(t, rc); got != "content" {
 		t.Errorf("content = %q, want %q", got, "content")
+	}
+}
+
+// A failure after the temp file is created must not leave the .tmp orphan
+// behind: unlike the local FS, an SFTP server has nothing to sweep it.
+func TestSFTPAtomicPutFailureRemovesTempFile(t *testing.T) {
+	d, base := setupSFTPPipe(t)
+	wantErr := errors.New("injected read failure")
+	if err := d.AtomicPut(ctx, "atomic.txt", iotest.ErrReader(wantErr)); err == nil {
+		t.Fatal("AtomicPut with a failing reader should return an error")
+	}
+	if _, err := os.Stat(filepath.Join(base, "atomic.txt.tmp")); !os.IsNotExist(err) {
+		t.Error("temp file should not remain after a failed AtomicPut")
+	}
+	if _, err := os.Stat(filepath.Join(base, "atomic.txt")); !os.IsNotExist(err) {
+		t.Error("destination file should not exist after a failed AtomicPut")
 	}
 }
 
