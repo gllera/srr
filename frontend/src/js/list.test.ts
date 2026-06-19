@@ -1115,4 +1115,119 @@ describe("list", () => {
       expect($chrons()).toEqual([4, 0])
       expect(labels()).toEqual(["D2", "D0"]) // D1 dropped with its only row
    })
+
+   // ── Bug #1+#11 — refresh() saved-view empty state + orphaned dividers ────────
+   // dayLabel buckets 2 chrons/day.  saved=[0,2,4] → three rows, one per day →
+   // three dividers D0/D1/D2.  refresh() after removing all three must:
+   //   (#1)  show the "Nothing saved" empty state even though rowsEl still holds
+   //         non-row children (day dividers, terminus blocks)
+   //   (#11) call relabelDividers so every orphaned .srr-day-divider is gone
+   it("refresh() shows empty state and drops orphaned dividers when all saved rows are removed", async () => {
+      setIndex(6)
+      nav._setSaved([0, 2, 4])
+      nav.filter.saved = true
+      await list.render()
+      const labels = () => Array.from(document.querySelectorAll(".srr-day-divider")).map((d) => d.textContent)
+      expect(labels()).toEqual(["D2", "D1", "D0"])
+
+      // Un-save all three articles (simulating reader action) then call refresh()
+      nav._setSaved([])
+      list.refresh()
+
+      // #1: empty state must appear (previously skipped because childElementCount > 0)
+      expect(container.querySelector(".srr-list-empty")).not.toBeNull()
+      // #11: no orphaned day dividers left
+      expect(document.querySelectorAll(".srr-day-divider").length).toBe(0)
+   })
+
+   // ── Bug #4 — fetchOlder TypeError when rowsEl nulled mid-fetch ───────────────
+   // Saved view with >=BATCH+1 articles so a second page is needed.  While
+   // loadMeta is in flight, un-save the last visible row → showEmptyState() sets
+   // rowsEl=null.  The re-check after loadMeta must also guard rowsEl or
+   // rowsEl.appendChild throws.
+   it("fetchOlder does not throw when rowsEl is nulled mid-loadMeta (saved view)", async () => {
+      // 35 saved articles triggers a second page load (BATCH=30)
+      const n = 35
+      setIndex(n)
+      const chronList = Array.from({ length: n }, (_, i) => i)
+      nav._setSaved(chronList)
+      nav.filter.saved = true
+      await list.render() // lays the first 30 rows
+
+      // Gate the next loadMeta batch so we can null rowsEl in flight
+      let releaseLoadMeta: (() => void) | null = null
+      const gate = new Promise<void>((r) => (releaseLoadMeta = () => r()))
+      data.loadMeta.mockImplementation(async (chron: number) => {
+         await gate
+         const a = data._arts.get(chron)!
+         return { f: a.f, w: a.p || a.a, t: a.t }
+      })
+
+      // Start paging; don't await yet
+      const paging = list.loadMore()
+
+      // While loadMeta is gated: un-save every visible row → showEmptyState → rowsEl=null
+      nav._setSaved([])
+      list.refresh()
+      expect(container.querySelector(".srr-list-empty")).not.toBeNull()
+
+      // Release the gated batch and let fetchOlder finish — must NOT throw
+      releaseLoadMeta!()
+      await expect(paging).resolves.not.toThrow()
+
+      // Restore default loadMeta
+      data.loadMeta.mockImplementation(async (chron: number) => {
+         const a = data._arts.get(chron)!
+         return { f: a.f, w: a.p || a.a, t: a.t }
+      })
+   })
+
+   // ── Bug #10 — NaN feedId from a skeleton row in selectRow ────────────────────
+   // selectRow on a skeleton (no dataset.feed) must NOT call nav.select with NaN.
+   // Once fillRow stamps dataset.feed, if the row holds .srr-row-current nav.select
+   // must be called with the correct (chron, feed) to sync nav state.
+   it("selectRow on a skeleton does not call nav.select with NaN; re-selects once fillRow runs", async () => {
+      setIndex(3)
+      // Gate loadMeta so skeletons remain when we call moveSelection
+      let releaseLoadMeta: (() => void) | null = null
+      const gate = new Promise<void>((r) => (releaseLoadMeta = () => r()))
+      data.loadMeta.mockImplementation(async (chron: number) => {
+         await gate
+         const a = data._arts.get(chron)!
+         return { f: a.f, w: a.p || a.a, t: a.t }
+      })
+
+      const p = list.render()
+      // Flush microtasks so skeletons are in DOM but fills are gated
+      await new Promise((r) => setTimeout(r, 0))
+      expect($rows().every((r) => r.classList.contains("srr-row-skeleton"))).toBe(true)
+
+      // Move selection while rows are still skeletons
+      nav.select.mockClear()
+      await list.moveSelection("older") // establishes cursor on first visible row (skeleton)
+
+      // nav.select must NOT have been called with NaN as the feed arg
+      const nanCall = nav.select.mock.calls.find((args) => isNaN(args[1]))
+      expect(nanCall).toBeUndefined()
+
+      // Once the fills land, the current row's nav.select should be called
+      nav.select.mockClear()
+      releaseLoadMeta!()
+      await p
+
+      // nav.select should be called for the currently-highlighted row with a real feed id
+      const selectCalls = nav.select.mock.calls
+      const currentRow = $rows().find((r) => r.classList.contains("srr-row-current"))
+      expect(currentRow).not.toBeUndefined()
+      const chron = Number(currentRow!.dataset.chron)
+      const feed = Number(currentRow!.dataset.feed)
+      expect(isNaN(feed)).toBe(false)
+      const reSelect = selectCalls.find((args) => args[0] === chron && args[1] === feed)
+      expect(reSelect).not.toBeUndefined()
+
+      data.loadMeta.mockImplementation(async (c: number) => {
+         const a = data._arts.get(c)!
+         return { f: a.f, w: a.p || a.a, t: a.t }
+      })
+   })
 })

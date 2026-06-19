@@ -197,6 +197,12 @@ export function fillRow(a: HTMLElement, art: import("./format.gen").IMetaWire, s
    a.querySelector(".srr-row-age")!.textContent = timeAgo(art.w)
    a.querySelector(".srr-row-title")!.textContent = art.t || "(untitled)"
    a.classList.remove("srr-row-skeleton")
+   // If selectRow placed the cursor on this row while it was still a skeleton
+   // (feed unknown → nav.select was deferred via data-select-pending), sync now.
+   if (a.dataset.selectPending) {
+      delete a.dataset.selectPending
+      nav.select(chron, art.f)
+   }
 }
 
 // Pin each row's REAL height as its content-visibility intrinsic size. Rows are
@@ -645,6 +651,7 @@ export function refresh(): void {
    const seen = nav.getSeenMap()
    const savedView = nav.filter.saved
    const current = nav.currentChron()
+   let removedAny = false
    rowsEl.querySelectorAll<HTMLElement>("a.srr-row").forEach((a) => {
       const chron = Number(a.dataset.chron)
       a.classList.toggle("srr-row-unread", nav.isRowUnread(chron, Number(a.dataset.feed), seen))
@@ -654,9 +661,15 @@ export function refresh(): void {
       a.querySelector(".srr-row-star")?.setAttribute("aria-pressed", String(saved))
       // In the Saved view, an article un-saved from the reader is gone from the
       // feed — drop its row on the way back.
-      if (savedView && !saved) a.remove()
+      if (savedView && !saved) {
+         a.remove()
+         removedAny = true
+      }
    })
-   if (savedView && rowsEl.childElementCount === 0) showEmptyState()
+   if (savedView && removedAny) {
+      relabelDividers() // drop any day divider orphaned by the removed rows (#11)
+      if (!rowsEl.querySelector("a.srr-row")) showEmptyState() // (#1)
+   }
 }
 
 // Force a rebuild regardless of builtKey — used after an unseen-only toggle or a
@@ -745,7 +758,7 @@ async function fetchOlder(my: object): Promise<void> {
       if (exhausted || oldest === 0) exhaustedBottom = true
       const seen = nav.getSeenMap()
       const arts = await Promise.all(chrons.map((c) => data.loadMeta(c)))
-      if (my !== tok) return
+      if (my !== tok || !rowsEl) return
       const frag = document.createDocumentFragment()
       const older: HTMLElement[] = []
       chrons.forEach((c, k) => {
@@ -960,9 +973,18 @@ function rowSibling(row: HTMLElement, dir: "older" | "newer"): HTMLElement | nul
 // downward swipe and hide the toolbar (same contract as render/fetchNewer).
 function selectRow(row: HTMLElement): void {
    if (!rowsEl) return
+   // Clear the deferred-select marker from any previously-current skeleton.
+   rowsEl.querySelector("[data-select-pending]")?.removeAttribute("data-select-pending")
    rowsEl.querySelector(".srr-row-current")?.classList.remove("srr-row-current")
    row.classList.add("srr-row-current")
-   nav.select(Number(row.dataset.chron), Number(row.dataset.feed))
+   // Skeleton rows have no dataset.feed yet — Number(undefined) = NaN which
+   // poisons nav.currentFeed and breaks anchorChron().  Defer nav.select until
+   // fillRow stamps the feed; mark the row so fillRow knows to pick it up.
+   if (row.dataset.feed !== undefined) {
+      nav.select(Number(row.dataset.chron), Number(row.dataset.feed))
+   } else {
+      row.dataset.selectPending = "1"
+   }
    scrollRowIntoView(row)
    notifyScroll()
 }
