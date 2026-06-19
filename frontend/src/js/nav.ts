@@ -299,19 +299,9 @@ export function feedRight(from: number): Promise<number> {
    return data.findRight(from, filter.feeds)
 }
 
-// A snapshotted unseen-only member: its true add_idx and its seen position at
-// snapshot time (-1 = never seen on this device). isValidSeen validates a resume
-// position against addIdx (not the raised bound), and feedUnread checks
-// membership; navigation itself uses the raised bounds stored in filter.feeds.
-type UnreadMember = { id: number; addIdx: number; seen: number }
-
 export const filter = {
    feeds: new Map<number, number>(),
    tokens: [] as string[],
-   // Non-null only in unseen-only mode: each filtered feed with its true add_idx
-   // and a snapshot of its seen position (for isValidSeen / feedUnread). `feeds`
-   // then holds the raised bounds nav walks.
-   unreadMembers: null as UnreadMember[] | null,
    // "★ Saved" mode: navigation walks the explicit srr-saved set, feed-agnostic
    // (feeds stays empty). Set by set() when the only token is SAVED_TOKEN.
    saved: false,
@@ -332,7 +322,6 @@ export const filter = {
    },
    clear() {
       this.feeds = new Map<number, number>()
-      this.unreadMembers = null
       this.saved = false
       this.search = false
       for (const ch of Object.values(data.db.feeds)) if (ch.total_art) this.feeds.set(ch.id, ch.add_idx ?? 0)
@@ -343,7 +332,6 @@ export const filter = {
    set(tokens: string[]) {
       this.tokens = tokens
       this.feeds = new Map<number, number>()
-      this.unreadMembers = null
       // "★ Saved" is a standalone mode, not a feed resolution: short-circuit
       // before the feed loop (which would find no feeds and clear() back
       // to [ALL]). feeds stays empty; feedLeft/feedRight/matches/showFeed all
@@ -384,21 +372,24 @@ export const filter = {
    },
    // Fold unseen-only into the just-built feed membership (shared by set() and
    // clear()). When on, raise EVERY member's lower bound past its snapshotted seen
-   // high-water — so read articles fall below it for findLeft/findRight/matches
-   // — and snapshot the members (their true add_idx + seen) for isValidSeen and
-   // feedUnread. Generalised from the old single-tag case: it now applies to any
-   // filter, so [ALL]/a feed/a tag all become a "show only unread" view. When
-   // off, leave the natural bounds. Saved/search short-circuit before this.
+   // high-water — so read articles fall below it for findLeft/findRight/matches.
+   // Generalised from the old single-tag case: it now applies to any filter, so
+   // [ALL]/a feed/a tag all become a "show only unread" view. When off, no-op.
+   // Saved/search short-circuit before this.
    applyUnseen(seenMap: Record<string, number>) {
-      if (!unreadOnly) {
-         this.unreadMembers = null
-         return
+      if (!unreadOnly) return
+      for (const [id, addIdx] of this.feeds) {
+         const seen = seenMap["feed:" + id] ?? -1
+         this.feeds.set(id, Math.max(addIdx, seen + 1))
       }
-      const members: UnreadMember[] = []
-      for (const [id, addIdx] of this.feeds) members.push({ id, addIdx, seen: seenMap["feed:" + id] ?? -1 })
-      for (const m of members) this.feeds.set(m.id, Math.max(m.addIdx, m.seen + 1))
-      this.unreadMembers = members
    },
+}
+
+// True only in unseen-only mode with a feed/tag filter active (not saved, not
+// search). Matches the exact conditions under which applyUnseen raises bounds,
+// so feedUnread and isValidSeen can branch on the same predicate.
+function unseenActive(): boolean {
+   return unreadOnly && !filter.saved && !filter.search
 }
 
 // One member's unread given an already-parsed seen map: its articles strictly
@@ -423,10 +414,7 @@ export const filter = {
 async function feedUnread(ch: IFeed, seenMap: Record<string, number>): Promise<number> {
    const map = new Map([[ch.id, ch.add_idx ?? 0]])
    const onCurrent =
-      filter.unreadMembers !== null &&
-      ch.id === currentFeed &&
-      filter.matches(ch.id, pos) &&
-      (seenMap["feed:" + ch.id] ?? -1) >= pos
+      unseenActive() && ch.id === currentFeed && filter.matches(ch.id, pos) && (seenMap["feed:" + ch.id] ?? -1) === pos
          ? 1
          : 0
    const seenIdx = seenMap["feed:" + ch.id]
@@ -750,10 +738,7 @@ async function isValidSeen(idx: number): Promise<boolean> {
    // resume position anyway — the same current position a feed or a non-unseen
    // tag resumes to — by validating against the member's TRUE add_idx instead of
    // the raised bound. Right then steps to the first unseen.
-   if (filter.unreadMembers) {
-      const m = filter.unreadMembers.find((mm) => mm.id === feedId)
-      return m !== undefined && idx >= m.addIdx
-   }
+   if (unseenActive()) return filter.feeds.has(feedId) && idx >= (data.db.feeds[feedId]?.add_idx ?? 0)
    return filter.matches(feedId, idx)
 }
 
