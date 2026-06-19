@@ -329,13 +329,13 @@ describe("dropdown: saved row", () => {
       expect(row.querySelector(".srr-saved-num")!.textContent).toBe("7")
    })
 
-   it("on the list, selecting ★ Saved routes to host.selectFilter", () => {
+   it("selecting ★ Saved calls onSelect with the saved token", () => {
       nav.savedCount.mockReturnValue(2)
       data.groupFeedsByTag.mockReturnValueOnce({ tagged: new Map(), sortedTags: [], untagged: [] })
-      const selectFilter = vi.fn()
-      dropdown.showFeedMenu("", vi.fn(), { viewIsList: () => true, selectFilter })
+      const onSelect = vi.fn()
+      dropdown.showFeedMenu("", onSelect)
       $menu().querySelector<HTMLElement>('a[data-value="~saved"]')!.click()
-      expect(selectFilter).toHaveBeenCalledWith("~saved")
+      expect(onSelect).toHaveBeenCalledWith("~saved")
    })
 })
 

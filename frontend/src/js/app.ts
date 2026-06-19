@@ -1,5 +1,5 @@
 import * as data from "./data"
-import { closeAllDropdowns, showFeedMenu, showOverflowMenu, type FeedMenuHost } from "./dropdown"
+import { closeAllDropdowns, showFeedMenu, showOverflowMenu } from "./dropdown"
 import { collapseBrokenMedia, formatDate, sanitizeHtml, srcColorIndex, timeAgo, URL_DENY } from "./fmt"
 import { setupGestures, type Gestures } from "./gestures"
 import * as list from "./list"
@@ -315,11 +315,6 @@ async function selectFilter(token: string) {
    await goToList(true)
 }
 
-const dropdownHost: FeedMenuHost = {
-   viewIsList: () => view === "list",
-   selectFilter: (token) => void selectFilter(token),
-}
-
 // ── Title search (list filter mode) ──────────────────────────────────────────
 // The toolbar magnifier / `/` toggle a "q:<query>" filter (nav search mode): the
 // list renders the matching articles and the reader walks them, all via the
@@ -504,7 +499,11 @@ async function init() {
    el.back.addEventListener("click", () => void goToList(true))
    // capture: error events don't bubble (see collapseBrokenMedia)
    el.content.addEventListener("error", collapseBrokenMedia, true)
-   el.feed.addEventListener("click", () => showFeedMenu(feedMenuTag(), guard, dropdownHost))
+   el.feed.addEventListener("click", () =>
+      showFeedMenu(feedMenuTag(), (token) =>
+         view === "list" ? void selectFilter(token) : guard(() => nav.switchFilter(token)),
+      ),
+   )
    // ⋯ overflow holds settings — currently just the "Image proxy…" row.
    el.overflow.addEventListener("click", () => showOverflowMenu())
    // Unread (catch-up) toggle — one-tap "show only unread" in whatever's filtered.
