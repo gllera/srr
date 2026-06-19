@@ -1,6 +1,15 @@
 import * as data from "./data"
 import { closeAllDropdowns, setProfileImportHook, showFeedMenu, showOverflowMenu } from "./dropdown"
-import { collapseBrokenMedia, formatDate, sanitizeHtml, srcColorIndex, timeAgo, URL_DENY } from "./fmt"
+import {
+   collapseBrokenMedia,
+   formatDate,
+   isStale,
+   sanitizeHtml,
+   srcColorIndex,
+   timeAgo,
+   timeAgoProse,
+   URL_DENY,
+} from "./fmt"
 import { setupGestures, type Gestures } from "./gestures"
 import * as list from "./list"
 import * as nav from "./nav"
@@ -29,6 +38,7 @@ const el = {
    popupRetry: document.querySelector(".srr-popup-retry") as HTMLButtonElement,
    popupClose: document.querySelector(".srr-popup-close") as HTMLElement,
    popup: document.querySelector(".srr-popup") as HTMLElement,
+   status: document.querySelector(".srr-status") as HTMLElement,
 }
 
 // Which surface is showing. The list is home; the reader is the drill-down.
@@ -40,6 +50,7 @@ let gestures: Gestures | null = null
 let busy = false
 let retryFn: (() => void) | null = null
 let lastFeedLabel: string | null = null
+let lastStatusText: string | null = null
 let previousFocus: HTMLElement | null = null
 // Pending debounced search query (see the Title search section). Declared up
 // here so selectFilter / route can cancel it when the filter changes by any
@@ -139,6 +150,7 @@ function render(o: IShowFeed) {
    el.article.dataset.src = String(srcColorIndex(o.article.f))
    el.source.textContent = data.feedTitle(o.article.f)
    refreshFeedLabel()
+   refreshStatus()
    refreshSaveButton(!o.placeholder)
 
    document.title = "SRR - " + (o.article.t ?? "")
@@ -178,6 +190,33 @@ function refreshFeedLabel() {
    el.feed.classList.toggle("srr-filter-on", key !== "")
    el.feed.title = key === "" ? "All feeds" : `Filtered: ${label}`
    el.feed.setAttribute("aria-label", `Filter: ${label}`)
+}
+
+// Compose and render the freshness / degradation status banner. Uses only
+// in-memory state — no network calls. Early-returns on no-change to keep
+// render paths cheap (mirrors refreshFeedLabel's cache pattern).
+function refreshStatus() {
+   const fetchedAt = data.lastFetchedAt()
+   const stale = isStale(fetchedAt)
+   const metaMissing = data.hasArticles() && !data.metaReady()
+   const idxDegraded = data.idxSummaryDegraded()
+   const warn = stale || metaMissing || idxDegraded
+
+   const parts: string[] = []
+   if (fetchedAt > 0) {
+      let line = `Updated ${timeAgoProse(fetchedAt)}`
+      if (stale) line += " — backend may be down"
+      parts.push(line)
+   }
+   if (metaMissing) parts.push("Search unavailable — index rebuilding")
+   if (idxDegraded) parts.push("(optimizing index…)")
+
+   const text = parts.join(" · ")
+   if (text === lastStatusText) return
+   lastStatusText = text
+
+   el.status.textContent = text
+   el.status.classList.toggle("srr-status-warn", warn)
 }
 
 // The reader's save (★) toggle reflects whether the current article is in the
@@ -234,6 +273,7 @@ async function renderListSurface() {
    const center = view === "reader"
    showList()
    refreshFeedLabel()
+   refreshStatus()
    document.title = listTitle()
    document.body.classList.add("srr-loading")
    // Release busy + the loading veil at FIRST PAINT (skeletons / first matches),

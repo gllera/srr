@@ -294,6 +294,18 @@ video {
    }
 }
 
+/* Status banner — unobtrusive freshness / degradation line below the toolbar */
+.srr-status {
+   font-size: 0.75rem;
+   color: var(--muted);
+   text-align: center;
+   padding: 0.35rem 0.5rem 0.15rem;
+   min-height: 1.5em;
+}
+.srr-status-warn {
+   color: var(--fg-2);
+}
+
 /* Toolbar */
 .srr-toolbar {
    position: fixed;

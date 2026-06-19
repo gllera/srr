@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest"
+import { describe, it, expect, vi, beforeEach } from "vitest"
 
 // data.ts has top-level side effects (fetch at module load), so we mock the
 // module and re-export the real pure functions with writable state.
@@ -13,6 +13,19 @@ vi.mock("./data", () => ({
    },
    set db(v: IDB) {
       state.db = v
+   },
+   lastFetchedAt(): number {
+      return state.db.fetched_at ?? 0
+   },
+   numFinalizedIdx(): number {
+      return state.db.total_art > 0 ? Math.floor((state.db.total_art - 1) / 50000) : 0
+   },
+   idxSummaryDegraded(): boolean {
+      const nf =
+         (state.db as IDB & { total_art: number }).total_art > 0
+            ? Math.floor(((state.db as IDB & { total_art: number }).total_art - 1) / 50000)
+            : 0
+      return nf > 0 && (state.db as IDB & { hdrs?: number }).hdrs !== nf
    },
    groupFeedsByTag(): { tagged: Map<string, IFeed[]>; sortedTags: string[]; untagged: IFeed[] } {
       const subs = Object.values(state.db.feeds ?? {})
@@ -94,5 +107,51 @@ describe("groupFeedsByTag", () => {
       const result = data.groupFeedsByTag()
       expect(result.tagged.size).toBe(0)
       expect(result.untagged.length).toBe(1)
+   })
+})
+
+describe("lastFetchedAt", () => {
+   beforeEach(() => {
+      state.db = { feeds: {}, total_art: 0, fetched_at: 0 } as unknown as IDB
+   })
+
+   it("returns fetched_at from db", () => {
+      state.db = { feeds: {}, total_art: 0, fetched_at: 1700000000 } as unknown as IDB
+      expect(data.lastFetchedAt()).toBe(1700000000)
+   })
+
+   it("returns 0 when fetched_at is 0", () => {
+      state.db = { feeds: {}, total_art: 0, fetched_at: 0 } as unknown as IDB
+      expect(data.lastFetchedAt()).toBe(0)
+   })
+})
+
+describe("idxSummaryDegraded", () => {
+   it("returns false when no finalized idx packs (empty store)", () => {
+      state.db = { feeds: {}, total_art: 0, fetched_at: 0 } as unknown as IDB
+      expect(data.idxSummaryDegraded()).toBe(false)
+   })
+
+   it("returns false when total_art < IDX_PACK_SIZE (only latest pack, no finalized)", () => {
+      state.db = { feeds: {}, total_art: 1000, fetched_at: 0 } as unknown as IDB
+      expect(data.idxSummaryDegraded()).toBe(false)
+   })
+
+   it("returns false when hdrs matches numFinalizedIdx", () => {
+      // total_art = 50001 => numFinalizedIdx = 1; hdrs = 1 => not degraded
+      state.db = { feeds: {}, total_art: 50001, fetched_at: 0, hdrs: 1 } as unknown as IDB
+      expect(data.idxSummaryDegraded()).toBe(false)
+   })
+
+   it("returns true when finalized idx > 0 and hdrs is absent", () => {
+      // total_art = 50001 => numFinalizedIdx = 1; hdrs absent => degraded
+      state.db = { feeds: {}, total_art: 50001, fetched_at: 0 } as unknown as IDB
+      expect(data.idxSummaryDegraded()).toBe(true)
+   })
+
+   it("returns true when finalized idx > 0 and hdrs does not match", () => {
+      // total_art = 100001 => numFinalizedIdx = 2; hdrs = 1 => degraded
+      state.db = { feeds: {}, total_art: 100001, fetched_at: 0, hdrs: 1 } as unknown as IDB
+      expect(data.idxSummaryDegraded()).toBe(true)
    })
 })

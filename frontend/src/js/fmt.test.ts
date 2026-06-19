@@ -4,6 +4,8 @@ import {
    extractImageUrls,
    sanitizeHtml,
    timeAgo,
+   timeAgoProse,
+   isStale,
    formatDate,
    imgProxy,
    getImgProxy,
@@ -585,5 +587,104 @@ describe("dayLabel", () => {
    it("labels an older date with weekday, day, month and the year", () => {
       // 9 Jun 2020 was a Tuesday; year shown because it isn't the current year.
       expect(dayLabel(at(2020, 5, 9))).toBe("TUE 9 JUN 2020")
+   })
+})
+
+describe("timeAgoProse", () => {
+   beforeEach(() => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date("2025-01-15T12:00:00Z"))
+   })
+
+   afterEach(() => {
+      vi.useRealTimers()
+   })
+
+   const now = Math.floor(new Date("2025-01-15T12:00:00Z").getTime() / 1000)
+
+   it("returns 'just now' for 0 seconds ago", () => {
+      expect(timeAgoProse(now)).toBe("just now")
+   })
+
+   it("returns 'just now' for a few seconds ago", () => {
+      expect(timeAgoProse(now - 45)).toBe("just now")
+   })
+
+   it("returns '1 minute ago' for exactly 60 seconds", () => {
+      expect(timeAgoProse(now - 60)).toBe("1 minute ago")
+   })
+
+   it("returns '2 minutes ago' for 2 minutes (plural)", () => {
+      expect(timeAgoProse(now - 120)).toBe("2 minutes ago")
+   })
+
+   it("returns '1 hour ago' for exactly 1 hour (singular)", () => {
+      expect(timeAgoProse(now - 3600)).toBe("1 hour ago")
+   })
+
+   it("returns '2 hours ago' for 2 hours (plural)", () => {
+      expect(timeAgoProse(now - 7200)).toBe("2 hours ago")
+   })
+
+   it("returns '1 day ago' for exactly 1 day (singular)", () => {
+      expect(timeAgoProse(now - 86400)).toBe("1 day ago")
+   })
+
+   it("returns '2 days ago' for 2 days (plural)", () => {
+      expect(timeAgoProse(now - 172800)).toBe("2 days ago")
+   })
+
+   it("returns '1 month ago' for 30 days (singular)", () => {
+      expect(timeAgoProse(now - 2592000)).toBe("1 month ago")
+   })
+
+   it("returns '2 months ago' for 60 days (plural)", () => {
+      expect(timeAgoProse(now - 5184000)).toBe("2 months ago")
+   })
+
+   it("returns '1 year ago' for 365 days (singular)", () => {
+      expect(timeAgoProse(now - 31536000)).toBe("1 year ago")
+   })
+
+   it("returns '2 years ago' for 2 years (plural)", () => {
+      expect(timeAgoProse(now - 63072000)).toBe("2 years ago")
+   })
+
+   it("handles future timestamp (treats as just now)", () => {
+      expect(timeAgoProse(now + 60)).toBe("just now")
+   })
+})
+
+describe("isStale", () => {
+   beforeEach(() => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date("2025-01-15T12:00:00Z"))
+   })
+
+   afterEach(() => {
+      vi.useRealTimers()
+   })
+
+   const now = Math.floor(new Date("2025-01-15T12:00:00Z").getTime() / 1000)
+   // STALE_AFTER_SEC = 3 * 86400 = 259200
+
+   it("returns false for 0 (absent fetched_at)", () => {
+      expect(isStale(0)).toBe(false)
+   })
+
+   it("returns false for a recent timestamp (just now)", () => {
+      expect(isStale(now - 60)).toBe(false)
+   })
+
+   it("returns false for 2 days ago (below threshold)", () => {
+      expect(isStale(now - 2 * 86400)).toBe(false)
+   })
+
+   it("returns true at exactly the 3-day threshold", () => {
+      expect(isStale(now - 3 * 86400)).toBe(true)
+   })
+
+   it("returns true for 4 days ago (above threshold)", () => {
+      expect(isStale(now - 4 * 86400)).toBe(true)
    })
 })

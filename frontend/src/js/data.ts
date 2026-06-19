@@ -131,6 +131,19 @@ export function feedTitle(feedId: number): string {
    return db.feeds[feedId]?.title ?? "[DELETED]"
 }
 
+// Unix timestamp of the last successful backend fetch (0 when never fetched).
+export function lastFetchedAt(): number {
+   return db.fetched_at
+}
+
+// True when the idx header summary lags the store (old backend, warn-only summary
+// failure, or a post-rebuild gap). The reader is still correct but fetches all
+// idx packs on boot instead of using the fast summary path.
+export function idxSummaryDegraded(): boolean {
+   const nf = numFinalizedIdx()
+   return nf > 0 && db.hdrs !== nf
+}
+
 // Fetches + gunzips one pack key. Every pack name is write-once (finalized
 // numeric, the L<seq> generation or h<N>/s<N> summary a db.gz commit
 // published), so the HTTP cache may serve them all without revalidation
@@ -285,6 +298,11 @@ export function parseJsonl<T>(buf: ArrayBuffer): T[] {
       if (line) out.push(JSON.parse(line) as T)
    }
    return out
+}
+
+// True when the store has at least one article.
+export function hasArticles(): boolean {
+   return db.total_art > 0
 }
 
 // meta/ is a warn-only derived projection, so after a failed SyncMeta it can
