@@ -1,7 +1,10 @@
 package ingest
 
 import (
+	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -673,5 +676,128 @@ func TestParseAtomXHTMLContent(t *testing.T) {
 	}
 	if !strings.Contains(items[0].Content, "<b>") {
 		t.Errorf("xhtml markup not preserved: %q", items[0].Content)
+	}
+}
+
+// --- Auto-discovery tests ---
+
+const rssFixture = `<?xml version="1.0"?>
+<rss version="2.0">
+  <feed>
+    <item>
+      <title>Discovered Item</title>
+      <link>https://example.com/article/1</link>
+      <guid>discovered-guid-1</guid>
+      <description>Found via discovery</description>
+    </item>
+  </feed>
+</rss>`
+
+// rssFunc is the registered #rss FetchFunc, exposed for test access via the
+// package-internal registry.
+func rssFunc(t *testing.T) FetchFunc {
+	t.Helper()
+	fn, ok := registry["#rss"]
+	if !ok {
+		t.Fatal("no #rss registered")
+	}
+	return fn
+}
+
+// TestRSSDiscoveryHTMLPage verifies that when URL #1 returns an HTML page with
+// a <link rel=alternate> pointing to URL #2 which returns valid RSS, the
+// FetchFunc returns URL #2's items and sets Result.ResolvedURL.
+func TestRSSDiscoveryHTMLPage(t *testing.T) {
+	// RSS feed server (URL #2).
+	feedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		fmt.Fprint(w, rssFixture)
+	}))
+	defer feedSrv.Close()
+
+	// HTML page server (URL #1): returns text/html with a <link> pointing to feedSrv.
+	htmlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, `<!doctype html><html><head>
+<link rel="alternate" type="application/rss+xml" href="%s">
+</head><body><p>A website</p></body></html>`, feedSrv.URL)
+	}))
+	defer htmlSrv.Close()
+
+	fn := rssFunc(t)
+	buf := make([]byte, 1<<20)
+	result, err := fn(context.Background(), feedSrv.Client(), buf, Request{
+		URL:     htmlSrv.URL,
+		MaxSize: cap(buf) - 1,
+	})
+	if err != nil {
+		t.Fatalf("FetchFunc error: %v", err)
+	}
+	if len(result.Items) == 0 {
+		t.Fatal("expected items from discovered feed, got none")
+	}
+	if result.Items[0].Title != "Discovered Item" {
+		t.Errorf("item title = %q, want %q", result.Items[0].Title, "Discovered Item")
+	}
+	if result.ResolvedURL != feedSrv.URL {
+		t.Errorf("ResolvedURL = %q, want %q", result.ResolvedURL, feedSrv.URL)
+	}
+}
+
+// TestRSSDiscoveryOneHopGuard verifies that an HTML page whose <link
+// rel=alternate> also points to an HTML page (not a feed) does NOT recurse
+// again — it returns the original parse error rather than looping.
+func TestRSSDiscoveryOneHopGuard(t *testing.T) {
+	// A second HTML page (no feed link in it).
+	secondSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<!doctype html><html><head><title>Still HTML</title></head><body></body></html>`)
+	}))
+	defer secondSrv.Close()
+
+	// First page: HTML with <link> pointing to secondSrv (another HTML page).
+	firstSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, `<!doctype html><html><head>
+<link rel="alternate" type="application/rss+xml" href="%s">
+</head><body></body></html>`, secondSrv.URL)
+	}))
+	defer firstSrv.Close()
+
+	fn := rssFunc(t)
+	buf := make([]byte, 1<<20)
+	_, err := fn(context.Background(), firstSrv.Client(), buf, Request{
+		URL:     firstSrv.URL,
+		MaxSize: cap(buf) - 1,
+	})
+	// Must return an error (parse failed on second HTML page) rather than loop.
+	if err == nil {
+		t.Error("expected an error when discovered URL is also HTML, got nil (loop guard failed)")
+	}
+}
+
+// TestRSSDiscoveryNormalFeedUnchanged verifies that a normal RSS feed path
+// (non-HTML response) is completely unaffected by the discovery logic.
+func TestRSSDiscoveryNormalFeedUnchanged(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		fmt.Fprint(w, rssFixture)
+	}))
+	defer srv.Close()
+
+	fn := rssFunc(t)
+	buf := make([]byte, 1<<20)
+	result, err := fn(context.Background(), srv.Client(), buf, Request{
+		URL:     srv.URL,
+		MaxSize: cap(buf) - 1,
+	})
+	if err != nil {
+		t.Fatalf("normal feed fetch failed: %v", err)
+	}
+	if len(result.Items) == 0 {
+		t.Fatal("expected items from normal feed, got none")
+	}
+	if result.ResolvedURL != "" {
+		t.Errorf("ResolvedURL should be empty for a normal feed, got %q", result.ResolvedURL)
 	}
 }

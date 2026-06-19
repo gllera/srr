@@ -158,7 +158,7 @@ SFTP auth chain (in order): URL password → config password → config `private
 
 ## Ingest Strategies
 
-An *ingest strategy* is the I/O + parse step that turns a subscription URL into a list of articles, before the [pipe pipeline](#pipe-pipeline) transforms them. The default strategy, `#rss`, fetches the URL over HTTP and parses RSS/Atom/RDF. Sources that aren't feeds — a private API, a site that needs scraping, anything bespoke — are handled by an **external command** that speaks a small JSON protocol. No rebuild is required, and nothing source-specific lives in this repo.
+An *ingest strategy* is the I/O + parse step that turns a subscription URL into a list of articles, before the [pipe pipeline](#pipe-pipeline) transforms them. The default strategy, `#rss`, fetches the URL over HTTP and parses RSS/Atom/RDF. If the URL returns an HTML page instead of a feed, `#rss` auto-discovers the feed via `<link rel="alternate">` in the HTML `<head>` and retries from that URL (one-hop guard — no loops); on success the feed's stored URL is updated to the discovered one. Sources that aren't feeds — a private API, a site that needs scraping, anything bespoke — are handled by an **external command** that speaks a small JSON protocol. No rebuild is required, and nothing source-specific lives in this repo.
 
 ### Selecting a strategy
 

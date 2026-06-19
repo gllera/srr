@@ -55,6 +55,11 @@ type Result struct {
 	ETag         string         `json:"etag,omitempty"`
 	LastModified string         `json:"last_modified,omitempty"`
 	Items        []*mod.RawItem `json:"items,omitempty"`
+	// ResolvedURL is set when the #rss fetcher auto-discovered a feed URL
+	// from an HTML page and refetched from that URL. The caller should persist
+	// ch.URL = ResolvedURL to avoid re-discovering on every subsequent fetch.
+	// omitempty keeps the external-fetcher wire protocol unaffected.
+	ResolvedURL string `json:"resolved_url,omitempty"`
 }
 
 // userAgent is the User-Agent header value sent by built-in HTTP-based
