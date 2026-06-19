@@ -21,54 +21,106 @@ import (
 // / If-Modified-Since hints, streamed into the shared per-worker buffer,
 // then handed to the streaming RSS/Atom/RDF parser (ParseFeed) defined
 // below.
+//
+// When ParseFeed fails and the response looks like HTML (Content-Type text/html
+// or body starts with <!doctype html / <html), discoverFeedLink is called to
+// find a <link rel="alternate"> feed URL. If one is found and this is the
+// first attempt, the discovered URL is fetched and parsed. On success,
+// Result.ResolvedURL is set to the discovered URL so the caller can persist
+// the repoint. The one-hop guard prevents infinite loops.
 func init() {
 	Register("rss", func(ctx context.Context, client *http.Client, buf []byte, req Request) (Result, error) {
-		httpReq, err := http.NewRequestWithContext(ctx, "GET", req.URL, nil)
-		if err != nil {
-			return Result{}, err
-		}
-		httpReq.Header.Set("User-Agent", userAgent)
-		if req.ETag != "" {
-			httpReq.Header.Set("If-None-Match", req.ETag)
-		}
-		if req.LastModified != "" {
-			httpReq.Header.Set("If-Modified-Since", req.LastModified)
-		}
-
-		res, err := client.Do(httpReq)
-		if err != nil {
-			return Result{}, err
-		}
-		defer res.Body.Close()
-
-		if res.StatusCode == http.StatusNotModified {
-			slog.Debug("source not modified", "url", req.URL)
-			return Result{NotModified: true}, nil
-		}
-		if res.StatusCode != http.StatusOK {
-			return Result{}, fmt.Errorf("unexpected HTTP status: %s", res.Status)
-		}
-
-		data, err := readBody(res.Body, buf, "feed")
-		if err != nil {
-			return Result{}, err
-		}
-
-		var items []*mod.RawItem
-		err = ParseFeed(data, func(i *mod.RawItem) error {
-			items = append(items, i)
-			return nil
-		})
-		if err != nil {
-			return Result{}, err
-		}
-
-		return Result{
-			ETag:         res.Header.Get("ETag"),
-			LastModified: res.Header.Get("Last-Modified"),
-			Items:        items,
-		}, nil
+		return rssFetch(ctx, client, buf, req, false)
 	})
+}
+
+// rssFetch is the implementation of the #rss FetchFunc. discovered signals
+// that this call is itself a discovery retry — it must not discover again
+// (one-hop guard).
+func rssFetch(ctx context.Context, client *http.Client, buf []byte, req Request, discovered bool) (Result, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", req.URL, nil)
+	if err != nil {
+		return Result{}, err
+	}
+	httpReq.Header.Set("User-Agent", userAgent)
+	if req.ETag != "" {
+		httpReq.Header.Set("If-None-Match", req.ETag)
+	}
+	if req.LastModified != "" {
+		httpReq.Header.Set("If-Modified-Since", req.LastModified)
+	}
+
+	res, err := client.Do(httpReq)
+	if err != nil {
+		return Result{}, err
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode == http.StatusNotModified {
+		slog.Debug("source not modified", "url", req.URL)
+		return Result{NotModified: true}, nil
+	}
+	if res.StatusCode != http.StatusOK {
+		return Result{}, fmt.Errorf("unexpected HTTP status: %s", res.Status)
+	}
+
+	data, err := readBody(res.Body, buf, "feed")
+	if err != nil {
+		return Result{}, err
+	}
+
+	var items []*mod.RawItem
+	parseErr := ParseFeed(data, func(i *mod.RawItem) error {
+		items = append(items, i)
+		return nil
+	})
+	if parseErr != nil {
+		// On parse failure, attempt feed auto-discovery if:
+		//   1. This is not already a discovery retry (one-hop guard).
+		//   2. The response body looks like HTML.
+		if !discovered && looksLikeHTML(res.Header.Get("Content-Type"), data) {
+			if feedURL, ok := discoverFeedLink(data, req.URL); ok {
+				slog.Debug("auto-discovering feed from HTML page", "html_url", req.URL, "feed_url", feedURL)
+				retryReq := Request{
+					URL:      feedURL,
+					MaxSize:  req.MaxSize,
+					AssetDir: req.AssetDir,
+					// Do not forward ETag/LastModified: they belonged to the HTML
+					// page, not the newly discovered feed URL.
+				}
+				result, err := rssFetch(ctx, client, buf, retryReq, true)
+				if err != nil {
+					return Result{}, err
+				}
+				// Record the resolved URL so the caller can persist the repoint.
+				result.ResolvedURL = feedURL
+				return result, nil
+			}
+		}
+		return Result{}, parseErr
+	}
+
+	return Result{
+		ETag:         res.Header.Get("ETag"),
+		LastModified: res.Header.Get("Last-Modified"),
+		Items:        items,
+	}, nil
+}
+
+// looksLikeHTML returns true when the Content-Type header is text/html or
+// the body (after trimming leading whitespace/BOM) starts with <!doctype html
+// or <html (case-insensitive). This is intentionally loose: a false positive
+// only triggers an attempted discoverFeedLink scan, which is cheap.
+func looksLikeHTML(contentType string, data []byte) bool {
+	if strings.Contains(strings.ToLower(contentType), "text/html") {
+		return true
+	}
+	// Trim leading whitespace and the UTF-8 BOM (EF BB BF).
+	b := bytes.TrimSpace(data)
+	b = bytes.TrimPrefix(b, []byte("\xef\xbb\xbf"))
+	b = bytes.TrimSpace(b)
+	prefix := strings.ToLower(string(b[:min(len(b), 14)]))
+	return strings.HasPrefix(prefix, "<!doctype html") || strings.HasPrefix(prefix, "<html")
 }
 
 // --- RSS/Atom/RDF feed parser -----------------------------------------

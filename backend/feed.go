@@ -155,6 +155,16 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 		return nil, fmt.Errorf("ingest %q: %w", ingestName, err)
 	}
 
+	// Auto-discovery repoint: the #rss fetcher found a feed URL embedded in an
+	// HTML page and fetched from that URL instead. Persist the repoint so the
+	// next fetch goes directly to the feed without rediscovering. We do NOT call
+	// setFeedURL here — that would reset dedup/etag/vitals. This is the same
+	// logical feed, just with the canonical URL now known.
+	if result.ResolvedURL != "" && result.ResolvedURL != c.URL {
+		slog.Info("feed URL repointed via auto-discovery", "feed", c, "old_url", c.URL, "new_url", result.ResolvedURL)
+		c.URL = result.ResolvedURL
+	}
+
 	if result.NotModified {
 		return nil, nil
 	}
