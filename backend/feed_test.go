@@ -479,6 +479,80 @@ func TestFetchBoundaryGUIDsCapped(t *testing.T) {
 	}
 }
 
+// When a second fetch adds new items whose hashes are smaller than some of the
+// already-stored items, the cap must prefer retaining stored GUIDs over the
+// pure smallest-hash rule. Without this, already-stored high-hash items are
+// evicted from bg and look new again on the next fetch, causing duplicates.
+//
+// Scenario (all items are dateless so all are boundary-class):
+//
+//   - fetch1: 924 items (g0..g923) → all ingested, bg has 924 entries
+//
+//   - fetch2: 1124 items (g0..g1123) — 924 original + 200 new.
+//     Under the old pure-smallest-hash cap: 1024 kept = 825 originals + 199
+//     new; 99 high-hash originals are evicted and 199 new items are ingested.
+//     Under the fix: all 924 originals are kept (they fit within cap), then
+//     the 100 smallest-hash new items fill the remaining 100 slots; the other
+//     100 new items are over-cap and skipped → 100 new items ingested.
+//
+//   - fetch3: 924 items (g0..g923) → must ingest 0.
+//     Without the fix the 99 evicted originals look new and are re-ingested.
+//     The fix keeps all originals in bg so fetch3 sees 0 new items.
+func TestFetchBoundaryGUIDsCapPreservesStoredGUIDs(t *testing.T) {
+	const nOrig = maxBoundaryGUIDs - 100        // 924 — fits under cap even after fix
+	const nNew = 200                            // g924..g1123; 100 fit under cap, 100 dropped
+	const wantFetch2 = maxBoundaryGUIDs - nOrig // 100 new items ingested under fix
+
+	buildFeed := func(lo, hi int) string {
+		var b strings.Builder
+		b.WriteString(`<rss version="2.0"><feed>`)
+		for i := lo; i < hi; i++ {
+			fmt.Fprintf(&b, `<item><title>T%d</title><guid>g%d</guid></item>`, i, i)
+		}
+		b.WriteString(`</feed></rss>`)
+		return b.String()
+	}
+
+	feed1 := buildFeed(0, nOrig)      // g0..g923
+	feed2 := buildFeed(0, nOrig+nNew) // g0..g1123
+	feed3 := buildFeed(0, nOrig)      // g0..g923 again
+	current := feed1
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(current))
+	}))
+	defer srv.Close()
+
+	ch := &Feed{Title: "T"}
+
+	// fetch1: all 924 items ingested, bg below cap
+	if got := fetchOnce(t, ch, srv); len(got) != nOrig {
+		t.Fatalf("fetch1: got %d items, want %d", len(got), nOrig)
+	}
+	if len(ch.BoundaryGUIDs) != nOrig {
+		t.Fatalf("fetch1 BoundaryGUIDs = %d, want %d", len(ch.BoundaryGUIDs), nOrig)
+	}
+
+	// fetch2: 200 new items, total 1124 > cap. Under the fix all 924 stored
+	// originals keep their bg slots; the remaining 100 cap slots go to the 100
+	// smallest-hash new items. The other 100 new items are over-cap and dropped.
+	current = feed2
+	if got := fetchOnce(t, ch, srv); len(got) != wantFetch2 {
+		t.Fatalf("fetch2: got %d items, want %d (100 new items ingested)", len(got), wantFetch2)
+	}
+	if len(ch.BoundaryGUIDs) != maxBoundaryGUIDs {
+		t.Fatalf("fetch2 BoundaryGUIDs = %d, want %d (at cap)", len(ch.BoundaryGUIDs), maxBoundaryGUIDs)
+	}
+
+	// fetch3: original 924 items return — none should be re-ingested.
+	// Without the fix the 99 high-hash originals that were evicted from bg by
+	// the old smallest-hash rule would look new and be re-ingested as dupes.
+	current = feed3
+	if got := fetchOnce(t, ch, srv); len(got) != 0 {
+		t.Errorf("fetch3: got %d items, want 0 (stored GUIDs re-ingested after cap eviction)", len(got))
+	}
+}
+
 // A publisher re-dating an existing post (same GUID, higher pub) on a later
 // fetch must NOT advance the persisted Watermark — otherwise a genuinely-new
 // article dated between the old and bumped value is permanently dropped.
