@@ -138,6 +138,13 @@ export function sanitizeHtml(html: string): string {
          // path like img.src (leaving them direct would leak the user's IP).
          resolveMediaAttr(node, "src", proxyPrefix, false)
          resolveMediaAttr(node, "poster", proxyPrefix, true)
+      } else if (tag === "SOURCE") {
+         // srcset is stripped unconditionally: a multi-value descriptor bypasses
+         // URL_DENY and the single-src bounds check (same reason <img srcset> is
+         // stripped). src gets the same relative/protocol-relative bounds-check
+         // as <video src> (proxy:false — image proxies don't handle video).
+         node.removeAttribute("srcset")
+         resolveMediaAttr(node, "src", proxyPrefix, false)
       }
    }
    return tmpl.innerHTML

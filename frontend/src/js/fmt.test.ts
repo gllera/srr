@@ -201,6 +201,32 @@ describe("sanitizeHtml security edge cases", () => {
       setImgProxy("https://p.example/?u=")
       expect(attr('<img src="assets/ab/cd.jpg">', "img", "src")).toBe("http://localhost:3000/assets/ab/cd.jpg")
    })
+
+   // #2 — <source srcset> is never stripped today; this must fail before the fix.
+   it("strips srcset from <source> inside <picture> (protocol-relative srcset bypasses URL_DENY)", () => {
+      // A multi-value srcset bypasses the ^-anchored URL_DENY and the single-src
+      // bounds check; strip it unconditionally just like <img srcset>.
+      const out = sanitizeHtml('<picture><source srcset="//evil.example/a 1x, //evil.example/b 2x"></picture>')
+      expect(out).not.toContain("srcset")
+      expect(out).not.toContain("evil.example")
+   })
+
+   // #8 — <source src> is never bounds-checked today; this must fail before the fix.
+   it("drops a protocol-relative <source src> that escapes the pack base (bounds-check parity with <video src>)", () => {
+      // "//evil/v.mp4" has no URL scheme → isRelative() is true → resolvePackRelative
+      // resolves it to http://evil/v.mp4, which doesn't startWith(PACK_BASE) →
+      // the attribute is removed, same as <img src="//evil/..."> and <video src="//evil/...">.
+      expect(attr('<video><source src="//evil.example/v.mp4"></video>', "source", "src")).toBeNull()
+   })
+
+   it("strips srcset from <source> even when the embedded URL has no // prefix", () => {
+      // Any srcset on <source> is stripped — image proxies can't process multi-URL
+      // descriptors, and the single-src bounds check doesn't cover them.
+      const out = sanitizeHtml(
+         '<picture><source srcset="https://cdn.example/a.jpg 1x, https://cdn.example/b.jpg 2x"></picture>',
+      )
+      expect(out).not.toContain("srcset")
+   })
 })
 
 describe("collapseBrokenMedia", () => {
