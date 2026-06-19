@@ -274,11 +274,15 @@ func TestModuleEmptyShellOutputIsNoop(t *testing.T) {
 // RunSubprocess for the grandchild's full lifetime. Before the WaitDelay fix,
 // "sleep 8 & exit 0" kept the pipe open after /bin/sh exited, so cmd.Run()
 // waited ~8 s and returned err=nil — a mislabelled SUCCESS that wedged the
-// fetch worker. After the fix: cmd.WaitDelay (5 s grace period) force-closes
-// the pipe, so RunSubprocess returns well under the sleep duration AND with a
-// non-nil error. The sub-8 s bound is intentionally loose so the test doesn't
-// race against WaitDelay's own timer.
+// fetch worker. After the fix: cmd.WaitDelay force-closes the pipe after
+// cancellation, so RunSubprocess returns well under the sleep duration AND with
+// a non-nil error. The test overrides subprocessWaitDelay to 200 ms so it
+// completes in well under 2 s (context timeout 1 s + 200 ms drain grace).
 func TestRunSubprocessWaitDelayBound(t *testing.T) {
+	orig := subprocessWaitDelay
+	subprocessWaitDelay = 200 * time.Millisecond
+	defer func() { subprocessWaitDelay = orig }()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
@@ -288,8 +292,8 @@ func TestRunSubprocessWaitDelayBound(t *testing.T) {
 	_, err := RunSubprocess(ctx, "sleep 8 & exit 0", nil, "", nil)
 	elapsed := time.Since(start)
 
-	if elapsed >= 8*time.Second {
-		t.Errorf("RunSubprocess took %v; want < 8s (background grandchild wedged the wait)", elapsed)
+	if elapsed >= 2*time.Second {
+		t.Errorf("RunSubprocess took %v; want < 2s (background grandchild wedged the wait)", elapsed)
 	}
 	if err == nil {
 		t.Error("RunSubprocess returned nil error; want non-nil (WaitDelay/timeout)")
