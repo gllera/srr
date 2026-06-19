@@ -322,6 +322,10 @@ func parseElement(dec *xml.Decoder, start xml.StartElement) (mod.RawField, error
 				f.Chld = make(mod.RawFeedItem)
 			}
 			f.Chld[t.Name.Local] = append(f.Chld[t.Name.Local], child)
+			// Fold inner-element text back into the running text so mixed-content
+			// fields like <description>Hello <b>world</b> foo</description> preserve
+			// all text nodes, not just the direct CharData of this element.
+			txt.WriteString(child.Txt)
 		}
 	}
 }

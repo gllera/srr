@@ -617,6 +617,46 @@ func TestParseNamedTimezoneNotTreatedAsUTC(t *testing.T) {
 	}
 }
 
+func TestParseRawHTMLMixedContent(t *testing.T) {
+	// B1: inner-element text in raw-HTML feed fields must be preserved.
+	// <description>Hello <b>world</b> foo</description> is a mixed-content
+	// element: "Hello " is CharData, <b> is a child StartElement whose CharData
+	// "world" was previously stashed in f.Chld and never folded back into f.Txt.
+	tests := []struct {
+		name        string
+		description string
+		wantWords   []string
+	}{
+		{
+			name:        "inline bold",
+			description: "Hello <b>world</b> foo",
+			wantWords:   []string{"Hello", "world", "foo"},
+		},
+		{
+			name:        "inline link",
+			description: `Read <a href="http://x">more</a> here`,
+			wantWords:   []string{"Read", "more", "here"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			feed := `<rss version="2.0"><feed><item>` +
+				`<title>T</title><description>` + tt.description + `</description>` +
+				`</item></feed></rss>`
+			items := collectFeed(t, feed)
+			if len(items) != 1 {
+				t.Fatalf("got %d items, want 1", len(items))
+			}
+			for _, word := range tt.wantWords {
+				if !strings.Contains(items[0].Content, word) {
+					t.Errorf("Content = %q: missing word %q", items[0].Content, word)
+				}
+			}
+		})
+	}
+}
+
 func TestParseAtomXHTMLContent(t *testing.T) {
 	// Atom type="xhtml" content is child markup, not CharData; it must be
 	// captured rather than dropped to "".
