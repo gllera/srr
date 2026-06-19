@@ -45,7 +45,7 @@ func processItem(ctx context.Context, processor *mod.Module, pipeline []string, 
 		}
 	}
 	i.Title = html.UnescapeString(titlePolicy.Sanitize(i.Title))
-	i.Title = strings.Join(strings.Fields(i.Title), " ")
+	i.Title = strings.Join(strings.Fields(strings.Map(stripControlKeepWS, i.Title)), " ")
 	i.Link = strings.Map(stripControl, i.Link)
 	i.Content = strings.Map(stripControlKeepWS, i.Content)
 	return nil

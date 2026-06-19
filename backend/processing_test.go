@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"srrb/ingest"
 	"srrb/mod"
 )
 
@@ -97,5 +98,85 @@ func TestProcessItemSanitizeOrderingHazard(t *testing.T) {
 	}
 	if !strings.Contains(item.Content, "<script>evil</script>") {
 		t.Fatalf("post-#sanitize shell mod output should survive unsanitized (ordering hazard), got %q", item.Content)
+	}
+}
+
+// parseFeedTitle is a test helper that drives a raw RSS title string through
+// the real ParseFeed->processItem path and returns the stored title.
+// The rssTitle argument is embedded verbatim between <title>...</title> tags,
+// so numeric character references like &#x9b; are decoded by the XML parser
+// before processItem ever sees the value — exactly the path a real feed takes.
+func parseFeedTitle(t *testing.T, rssTitle string) string {
+	t.Helper()
+	feed := []byte(`<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel>` +
+		`<item><title>` + rssTitle + `</title><link>http://example.com</link></item>` +
+		`</channel></rss>`)
+	var got string
+	err := ingest.ParseFeed(feed, func(i *mod.RawItem) error {
+		if err := processItem(context.Background(), mod.New(), nil, i); err != nil {
+			return err
+		}
+		got = i.Title
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ParseFeed: %v", err)
+	}
+	return got
+}
+
+// C1 controls (U+0080-U+009F) injected via numeric character references
+// (e.g. &#x9b;) survive XML entity decoding and html.UnescapeString but must
+// be stripped from Title just as they are from Link and Content. Verified
+// codepoints: U+0080 (first), U+009B (CSI, mid-range), U+009F (last).
+// Normal titles with spaces and unicode letters must be preserved verbatim.
+func TestProcessItemTitleStripsC1Controls(t *testing.T) {
+	// C1 controls injected via numeric refs in RSS XML. After XML parsing and
+	// html.UnescapeString they are real C1 runes — processItem must strip them.
+	c1cases := []struct {
+		name     string
+		rssTitle string // embedded verbatim in RSS XML; numeric refs are XML-decoded
+		want     string
+	}{
+		{"U+0080 (first C1)", "Hello&#x80;World", "HelloWorld"},
+		{"U+009B (CSI)", "Hello&#x9b;World", "HelloWorld"},
+		{"U+009F (last C1)", "Hello&#x9f;World", "HelloWorld"},
+		{"C1 at start", "&#x9b;Title", "Title"},
+		{"C1 at end", "Title&#x9b;", "Title"},
+		{"only C1", "&#x80;&#x9b;&#x9f;", ""},
+		{"C1 between spaces", "A &#x9b; B C", "A B C"},
+	}
+	for _, tc := range c1cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseFeedTitle(t, tc.rssTitle)
+			for _, r := range got {
+				if r >= 0x80 && r <= 0x9f {
+					t.Errorf("C1 control U+%04X survived in title %q", r, got)
+				}
+			}
+			if got != tc.want {
+				t.Errorf("title = %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	// Normal titles: spaces, unicode letters, and punctuation must survive intact.
+	normalCases := []struct {
+		name     string
+		rssTitle string
+		want     string
+	}{
+		{"plain ASCII", "Hello World", "Hello World"},
+		{"unicode letters", "Héllo Wörld", "Héllo Wörld"},
+		{"leading/trailing spaces collapsed", "  Hello  World  ", "Hello World"},
+		{"high BMP codepoints", "日本語タイトル", "日本語タイトル"},
+	}
+	for _, tc := range normalCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseFeedTitle(t, tc.rssTitle)
+			if got != tc.want {
+				t.Errorf("title = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
