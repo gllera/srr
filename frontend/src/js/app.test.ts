@@ -30,6 +30,23 @@ const nav = vi.hoisted(() => {
       fromHash: vi.fn(async () => sf()),
       applyFilter: vi.fn(),
       tokensSuffix: vi.fn(() => ""),
+      // The real implementation: a pure decode with no nav state, so a faithful
+      // inline copy (not a stub) keeps the routing tests accurate.
+      parseHashTokens: (hash: string) => {
+         const bang = hash.indexOf("!")
+         if (bang === -1) return []
+         return hash
+            .substring(bang + 1)
+            .split("+")
+            .filter((t: string) => t.length > 0)
+            .map((t: string) => {
+               try {
+                  return decodeURIComponent(t)
+               } catch {
+                  return t
+               }
+            })
+      },
       currentTokens: vi.fn(() => [] as string[]),
       getCurrentFilterKey: vi.fn(() => ""),
       filterLabel: vi.fn((key: string) =>
