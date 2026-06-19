@@ -653,7 +653,8 @@ describe("dropdown: menu keyboard navigation", () => {
          const all = $menu().querySelector<HTMLAnchorElement>('a[data-value=""]')!
          all.focus()
          key(all, " ")
-         expect(guard).toHaveBeenCalledTimes(1) // [ALL] row activated → switchFilter route
+         expect(guard).toHaveBeenCalledTimes(1) // [ALL] row activated → onSelect called with token
+         expect(guard).toHaveBeenCalledWith("") // the [ALL] token is the empty string
          expect(leak).not.toHaveBeenCalled()
       } finally {
          document.removeEventListener("keydown", leak)
