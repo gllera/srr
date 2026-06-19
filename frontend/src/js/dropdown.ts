@@ -6,20 +6,6 @@ const menus = document.querySelectorAll<HTMLElement>(".srr-dropdown-menu")
 const btns = document.querySelectorAll<HTMLElement>(".srr-dropdown-btn")
 const imgProxyDialog = document.querySelector<HTMLElement>(".srr-imgproxy-dialog")
 
-// The list surface hooks the feed menu's filter actions: when the app is on
-// the list, picking a feed/tag/[ALL]/★ Saved re-filters the list in place
-// instead of opening the reader at a resume position. Optional so the reader-only
-// callers (and the existing test suite) keep the original behavior — the default
-// host reports "not the list" and the menu falls through to guard(switchFilter).
-export interface FeedMenuHost {
-   viewIsList: () => boolean
-   selectFilter: (token: string) => void // "" = [ALL]; token = tag name, feed id, or ~saved
-}
-const READER_HOST: FeedMenuHost = {
-   viewIsList: () => false,
-   selectFilter: () => {},
-}
-
 // Sentinel data-value for the overflow menu's action row — a UI action, not a
 // filter token, so the onClick intercepts it instead of routing anywhere.
 const IMG_PROXY = "~img-proxy"
@@ -397,11 +383,7 @@ export function showOverflowMenu(): void {
    )
 }
 
-export function showFeedMenu(
-   currentTag: string,
-   guard: (fn: () => Promise<IShowFeed>) => void,
-   host: FeedMenuHost = READER_HOST,
-): void {
+export function showFeedMenu(currentTag: string, onSelect: (token: string) => void): void {
    const { tagged, sortedTags, untagged } = data.groupFeedsByTag()
    const current = nav.getCurrentFilterKey()
    const cls = (base: string, v: string) => (v === current ? `${base} srr-active`.trim() : base)
@@ -413,8 +395,8 @@ export function showFeedMenu(
       // a toolbar toggle; the image-proxy + date-jump live in the ⋯ overflow menu.)
       frag.appendChild(createLink("", "[ALL]", cls("", "")))
       // "★ Saved" — the per-article collection, surfaced once there's something
-      // in it. Same selection path as a feed/tag (host.selectFilter on the
-      // list, guard(switchFilter) in the reader); the count rides as a badge.
+      // in it. Same selection path as a feed/tag (onSelect routes it); the
+      // count rides as a badge.
       const savedN = nav.savedCount()
       if (savedN > 0) {
          const savedRow = createLink(nav.SAVED_TOKEN, "★ Saved", cls("", nav.SAVED_TOKEN))
@@ -457,13 +439,8 @@ export function showFeedMenu(
    }
 
    toggleDropdown("srr-feed-menu", buildContent, async (value) => {
-      // A feed/tag/[ALL]/★ Saved selection: on the list surface, re-filter the
-      // list (the host shows that filter's feed); in the reader, resume that
-      // filter at its current position. (switchFilter maps ""→[ALL] and ~saved.)
-      if (host.viewIsList()) {
-         host.selectFilter(value)
-         return
-      }
-      guard(() => nav.switchFilter(value))
+      // A feed/tag/[ALL]/★ Saved selection: routing is owned by the caller's
+      // onSelect closure (list → re-filter in place; reader → guard(switchFilter)).
+      onSelect(value)
    })
 }
