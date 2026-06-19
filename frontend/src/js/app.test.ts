@@ -71,6 +71,7 @@ const nav = vi.hoisted(() => {
       right: vi.fn(async () => sf()),
       first: vi.fn(async () => sf()),
       last: vi.fn(async () => sf()),
+      switchFilter: vi.fn(async () => sf()),
       seek: vi.fn(async () => 0),
       unreadCounts: vi.fn(async () => new Map<number, number>()),
    }
@@ -313,5 +314,68 @@ describe("error popup — focus trap + close", () => {
       expect(popup().classList.contains("srr-open")).toBe(true)
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))
       expect(popup().classList.contains("srr-open")).toBe(false)
+   })
+})
+
+// FE-S7 follow-up: the list-vs-reader routing in the feed-menu onSelect callback
+// moved from dropdown.ts into app.ts. These tests pin that decision: selecting a
+// filter from the feed menu must call selectFilter (list surface) or
+// guard(switchFilter) (reader surface), never the wrong one.
+describe("feed-menu onSelect routing — list vs reader (FE-S7)", () => {
+   const clickFeed = () =>
+      document.querySelector<HTMLButtonElement>(".srr-feed")!.dispatchEvent(new MouseEvent("click", { bubbles: true }))
+
+   // Capture the onSelect callback that app.ts passed to showFeedMenu.
+   // showFeedMenu is a vi.fn() so its args are always available.
+   const captureOnSelect = (): ((token: string) => void) => {
+      const calls = (dropdown.showFeedMenu as ReturnType<typeof vi.fn>).mock.calls
+      return calls[calls.length - 1][1]
+   }
+
+   it("LIST surface: onSelect calls selectFilter (applyFilter path), not switchFilter", async () => {
+      await boot() // boots into list (hash "" → list surface)
+      expect(document.body.classList.contains("srr-view-list")).toBe(true)
+
+      dropdown.showFeedMenu.mockClear()
+      nav.applyFilter.mockClear()
+      nav.switchFilter.mockClear()
+
+      clickFeed()
+      expect(dropdown.showFeedMenu).toHaveBeenCalledTimes(1)
+
+      const onSelect = captureOnSelect()
+      await onSelect("42")
+      await flush()
+
+      // selectFilter calls nav.applyFilter then routes to the list
+      expect(nav.applyFilter).toHaveBeenCalledWith(["42"])
+      // switchFilter is the reader path — must NOT be called here
+      expect(nav.switchFilter).not.toHaveBeenCalled()
+   })
+
+   it("READER surface: onSelect calls guard(switchFilter), not selectFilter/applyFilter", async () => {
+      await boot()
+      // Route into the reader by navigating to a numeric hash
+      nav.fromHash.mockClear()
+      hashTo("#3")
+      await flush()
+      expect(document.querySelector(".srr-reader")!.hasAttribute("hidden")).toBe(false)
+      expect(document.body.classList.contains("srr-view-list")).toBe(false)
+
+      dropdown.showFeedMenu.mockClear()
+      nav.applyFilter.mockClear()
+      nav.switchFilter.mockClear()
+
+      clickFeed()
+      expect(dropdown.showFeedMenu).toHaveBeenCalledTimes(1)
+
+      const onSelect = captureOnSelect()
+      await onSelect("7")
+      await flush()
+
+      // guard(switchFilter) runs switchFilter and shows the reader result
+      expect(nav.switchFilter).toHaveBeenCalledWith("7")
+      // applyFilter is the list path — must NOT be called here
+      expect(nav.applyFilter).not.toHaveBeenCalled()
    })
 })
