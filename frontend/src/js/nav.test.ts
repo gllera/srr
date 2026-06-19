@@ -2086,7 +2086,7 @@ describe("feedUnread onCurrent guard: select vs recordSeen (#6)", () => {
 
 // ── Bug #9: stale pos in hash on resolveNoMatch ───────────────────────────────
 describe("resolveNoMatch writes positionless hash (#9)", () => {
-   it("resolveNoMatch clears pos before updateHash so no stale numeric pos is written", async () => {
+   it("resolveNoMatch emits a positionless hash so reload shows the list, not the reader", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 1 }])
       // Navigate to chron 1 so pos = 1.
       await nav.fromHash("1")
@@ -2099,13 +2099,15 @@ describe("resolveNoMatch writes positionless hash (#9)", () => {
       await nav.last()
 
       // resolveNoMatch calls pushState (replace=false from last()'s default).
-      // The hash written must NOT contain a stale pos ("1").
-      // With pos reset to -1, the hash should be "#-1!99".
-      // Without the fix it would be "#1!99" (pos not reset before updateHash).
+      // The hash must be POSITIONLESS: "#!99" — no numeric pos part.
+      // A "#-1!99" hash would route to the reader (posStr "-1" matches /^-?\d+$/)
+      // and open the last article. "#!99" routes to the list at the filter.
       const pushCalls = (history.pushState as ReturnType<typeof vi.spyOn>).mock.calls
       const lastPush = pushCalls[pushCalls.length - 1][2] as string
-      // Must not start with the stale "#1" pos.
-      expect(lastPush).not.toMatch(/^#1/)
-      expect(lastPush).toBe("#-1!99")
+      // Must be exactly the positionless form.
+      expect(lastPush).toBe("#!99")
+      // Double-check: the posStr (before "!") must NOT match the reader-routing regex.
+      const posStr = lastPush.split("!")[0].slice(1) // "" for "#!99"
+      expect(/^-?\d+$/.test(posStr)).toBe(false)
    })
 })
