@@ -66,19 +66,27 @@ func (d *Local) ensureDir(file string) error {
 	return nil
 }
 
+// localOpenFile is a var to allow test seams (mirrors the finalGzip pattern).
+var localOpenFile = func(name string, flag int, perm os.FileMode) (io.WriteCloser, error) {
+	return os.OpenFile(name, flag, perm)
+}
+
 func (d *Local) Put(_ context.Context, key string, r io.Reader, ignoreExisting bool) error {
 	file := d.localPath("write", key)
 	if err := d.ensureDir(file); err != nil {
 		return err
 	}
-	fs, err := os.OpenFile(file, writeOpenFlags(ignoreExisting), 0o644)
+	fs, err := localOpenFile(file, writeOpenFlags(ignoreExisting), 0o644)
 	if err != nil {
 		return fmt.Errorf("opening file %s: %w", file, err)
 	}
-	defer fs.Close()
 
 	if _, err := io.Copy(fs, r); err != nil {
+		fs.Close()
 		return fmt.Errorf("writing file %s: %w", file, err)
+	}
+	if err := fs.Close(); err != nil {
+		return fmt.Errorf("closing file %s: %w", file, err)
 	}
 	return nil
 }

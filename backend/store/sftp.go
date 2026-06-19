@@ -163,10 +163,13 @@ func (d *SFTP) Put(_ context.Context, key string, r io.Reader, ignoreExisting bo
 	if err != nil {
 		return fmt.Errorf("opening file %s: %w", file, err)
 	}
-	defer fs.Close()
 
 	if _, err := io.Copy(fs, r); err != nil {
+		fs.Close()
 		return fmt.Errorf("writing file %s: %w", file, err)
+	}
+	if err := fs.Close(); err != nil {
+		return fmt.Errorf("closing file %s: %w", file, err)
 	}
 	return nil
 }
