@@ -80,33 +80,25 @@ type AddCmd struct {
 }
 
 func (o *AddCmd) Run() error {
+	if o.Title == nil || *o.Title == "" {
+		return fmt.Errorf("title is required")
+	}
+	if o.URL == nil {
+		return fmt.Errorf("--url is required")
+	}
+	v := &feedView{
+		Title: *o.Title,
+		URL:   *o.URL,
+		Pipe:  o.Parsers,
+	}
+	if o.Tag != nil {
+		v.Tag = *o.Tag
+	}
+	if o.Ingest != nil {
+		v.Ingest = *o.Ingest
+	}
 	return withDB(true, func(ctx context.Context, db *DB) error {
-		if o.Title == nil || *o.Title == "" {
-			return fmt.Errorf("title is required")
-		}
-		if o.URL == nil {
-			return fmt.Errorf("--url is required")
-		}
-		if !validFeedURL(*o.URL) {
-			return fmt.Errorf("invalid url %q", *o.URL)
-		}
-		ch := &Feed{Title: *o.Title, URL: *o.URL}
-		if o.Tag != nil {
-			ch.Tag = *o.Tag
-		}
-		if o.Parsers != nil {
-			ch.Pipe = o.Parsers // normalizeFeed trims/validates below
-		}
-		if o.Ingest != nil {
-			ch.Ingest = *o.Ingest
-		}
-		if err := normalizeFeed(ch); err != nil {
-			return err
-		}
-		if err := db.AddFeed(ch); err != nil {
-			return err
-		}
-		return db.Commit(ctx)
+		return applyViews(ctx, db, []*feedView{v})
 	})
 }
 
