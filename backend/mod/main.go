@@ -52,6 +52,14 @@ func SubprocessTimeout() time.Duration {
 	return 5 * time.Minute
 }
 
+// subprocessWaitDelay is the grace period os/exec gives a subprocess to drain
+// its pipe after the context is cancelled (or the command exits while a
+// backgrounded grandchild still holds the inherited stdout open). Without it,
+// cmd.Run() would block until the grandchild exits, ignoring the timeout and
+// returning err=nil. This is a package-level var (not a const) so tests can
+// lower it without affecting the production default.
+var subprocessWaitDelay = 5 * time.Second
+
 // RunSubprocess runs `/bin/sh -c args` with the given env and working directory
 // (dir == "" inherits the process cwd), feeding stdin and capturing stdout
 // capped at MaxSubprocessOutput. The command is bounded by SubprocessTimeout so
@@ -60,11 +68,11 @@ func SubprocessTimeout() time.Duration {
 // how to wrap a run failure. Shared by the built-in shell-module path and the
 // ingest external-fetcher path, which run the same exec with different policies.
 //
-// WaitDelay ensures the bound holds even when a shell mod backgrounds a child
-// process that inherits stdout: without it, cmd.Run() would block until the
-// grandchild exits (keeping the pipe open), ignoring the timeout and returning
-// err=nil. With WaitDelay, os/exec force-closes the pipe after cancellation and
-// cmd.Run() returns promptly with a non-nil error.
+// subprocessWaitDelay ensures the bound holds even when a shell mod backgrounds
+// a child process that inherits stdout: without it, cmd.Run() would block until
+// the grandchild exits (keeping the pipe open), ignoring the timeout and
+// returning err=nil. With WaitDelay, os/exec force-closes the pipe after
+// cancellation and cmd.Run() returns promptly with a non-nil error.
 func RunSubprocess(ctx context.Context, args string, env []string, dir string, stdin io.Reader) ([]byte, error) {
 	out := &cappedBuffer{limit: maxSubprocessOutput}
 	cctx, cancel := context.WithTimeout(ctx, SubprocessTimeout())
@@ -75,7 +83,7 @@ func RunSubprocess(ctx context.Context, args string, env []string, dir string, s
 	cmd.Stderr = os.Stderr
 	cmd.Env = env
 	cmd.Dir = dir
-	cmd.WaitDelay = 5 * time.Second
+	cmd.WaitDelay = subprocessWaitDelay
 	if err := cmd.Run(); err != nil {
 		return nil, err
 	}
