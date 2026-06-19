@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"srrb/mod"
@@ -55,6 +56,7 @@ func filterPipe(in []string) []string {
 // valid only inside a feed override (allowBase), never the root pipe.
 // Known built-ins and shell commands pass. Run after filterPipe.
 func validatePipe(steps []string, allowBase bool) error {
+	names := mod.Builtins()
 	for _, s := range steps {
 		fields := strings.Fields(s)
 		if len(fields) == 0 {
@@ -67,8 +69,8 @@ func validatePipe(steps []string, allowBase bool) error {
 			}
 			continue
 		}
-		if strings.HasPrefix(name, "#") && !mod.IsBuiltin(name) {
-			return fmt.Errorf("unknown built-in module %q (known: %s)", name, strings.Join(mod.Builtins(), ", "))
+		if strings.HasPrefix(name, "#") && !slices.Contains(names, name) {
+			return fmt.Errorf("unknown built-in module %q (known: %s)", name, strings.Join(names, ", "))
 		}
 	}
 	return nil

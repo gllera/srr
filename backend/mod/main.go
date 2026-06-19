@@ -205,18 +205,6 @@ func (o *Module) Process(ctx context.Context, args string, i *RawItem) error {
 	return nil
 }
 
-// IsBuiltin reports whether token's first whitespace field names a registered
-// built-in module (e.g. "#sanitize" or "#readability timeout=30s"). Used by the
-// CLI to reject misspelled "#"-tokens before they are stored.
-func IsBuiltin(token string) bool {
-	fields := strings.Fields(token)
-	if len(fields) == 0 {
-		return false
-	}
-	_, ok := registry[fields[0]]
-	return ok
-}
-
 // Builtins returns the registered built-in module names (e.g. "#sanitize"),
 // sorted, for help and validation error messages.
 func Builtins() []string {
