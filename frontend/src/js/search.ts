@@ -198,6 +198,9 @@ export interface HitSet {
 
 const hitCache = makeLRU<Promise<HitSet>, string>(8)
 
+// `cap` must be constant per query key: the cache is keyed on `query` alone and
+// ignores `cap` on a hit, so a varying cap for the same query would silently
+// return the first cap's result. nav always passes the fixed SEARCH_CAP.
 export function loadHits(query: string, cap: number): Promise<HitSet> {
    return cachedPromise(hitCache, query, async () => {
       const seen = new Set<number>()
