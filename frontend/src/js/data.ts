@@ -373,3 +373,93 @@ export function groupFeedsByTag(): GroupResult {
    groupCache = { tagged, sortedTags: Array.from(tagged.keys()).sort(), untagged }
    return groupCache
 }
+
+// packNamesForFilter enumerates the write-once pack names needed to read a
+// given filter scope end-to-end offline. The names are relative pack paths
+// (e.g. "meta/0.gz", "data/1.gz", "idx/L1.gz") — the same strings the fetch
+// handler sees after the "/packs/" prefix, and the same form data.ts resolves
+// against PACK_BASE when fetching. The SW message handler prefixes them with
+// "packs/" to build the full request URL.
+//
+// feeds: the filter's feeds Map (feed_id → addIdx), exactly as in filter.feeds.
+//   - Empty Map  →  [ALL] scope: all finalized + latest packs.
+//   - Non-empty  →  feed/tag/unread scope: only the idx, data, and meta packs
+//     that contain at least one matching article.
+//
+// Latest packs (L<seq>) are always included (they hold the newest articles of
+// every filter). For saved/search scopes the caller should not pass a feeds map
+// derived from filter.feeds (those modes don't use the map); pinning those
+// scopes is deferred to v2 — the UI guards them.
+//
+// idx packs: for a feed/tag scope every idx pack touching the filter is needed
+// (the reader's idx addressing jumps to arbitrary packs). For [ALL] all idx
+// packs are included.
+export async function packNamesForFilter(feeds: Map<number, number>): Promise<string[]> {
+   if (db.total_art === 0) return []
+
+   const nfIdx = numFinalizedIdx()
+   const nfMeta = numFinalizedMeta()
+   const seq = db.seq
+   const names = new Set<string>()
+
+   // Always include the latest generation packs — they hold the newest articles
+   // of every filter and are the only packs in an empty/fresh store.
+   names.add(`idx/L${seq}.gz`)
+   names.add(`data/L${seq}.gz`)
+   names.add(`meta/L${seq}.gz`)
+
+   const isAll = feeds.size === 0
+
+   if (isAll) {
+      // [ALL]: include every finalized pack of every series.
+      for (let p = 0; p < nfIdx; p++) names.add(`idx/${p}.gz`)
+      // data packs start at id 1; ids < next_pid are finalized.
+      for (let id = 1; id < db.next_pid; id++) names.add(`data/${id}.gz`)
+      for (let s = 0; s < nfMeta; s++) names.add(`meta/${s}.gz`)
+   } else {
+      // Feed/tag/unread scope: walk only the idx packs that have candidates.
+      // For each matching chronIdx, derive the data pack id (from idx bounds)
+      // and the meta shard id (floor(chron / META_PACK_SIZE)).
+      const lookup = makeFeedsLookup(feeds, slots)
+
+      for (let p = 0; p <= nfIdx; p++) {
+         if (!packHasCandidate(p, feeds)) continue
+
+         // This idx pack is needed (it has at least one matching article).
+         const idxName = p < nfIdx ? `idx/${p}.gz` : `idx/L${seq}.gz`
+         names.add(idxName)
+
+         const pack = (await fetchIdxPack(p)).parse()
+         const baseChron = p * IDX_PACK_SIZE
+         const packSize = p < nfIdx ? IDX_PACK_SIZE : db.total_art - p * IDX_PACK_SIZE
+
+         // Walk this idx pack's entries to find matching chronIdxs.
+         // Use the bounds list to efficiently map chron → data pack id.
+         let boundsIdx = 0
+         const bounds = pack.bounds
+
+         for (let i = 0; i < packSize; i++) {
+            const feedId = pack.feedIds[i]
+            const addIdx = feedId < lookup.length ? lookup[feedId] : -1
+            const chron = baseChron + i
+            if (addIdx !== -1 && chron >= addIdx) {
+               // This chronIdx matches the filter.
+               // Advance bounds pointer to find the data pack for this chron.
+               while (boundsIdx + 1 < bounds.length && bounds[boundsIdx + 1].startChron <= chron) {
+                  boundsIdx++
+               }
+               const dataPackId = bounds[boundsIdx].packId
+               const dataName = dataPackId < db.next_pid ? `data/${dataPackId}.gz` : `data/L${seq}.gz`
+               names.add(dataName)
+
+               // Meta shard for this chron.
+               const shardId = Math.floor(chron / META_PACK_SIZE)
+               const metaName = shardId < nfMeta ? `meta/${shardId}.gz` : `meta/L${seq}.gz`
+               names.add(metaName)
+            }
+         }
+      }
+   }
+
+   return Array.from(names)
+}

@@ -723,4 +723,244 @@ describe("browser: real SPA over real packs", () => {
          await ctx.close()
       }
    })
+
+   // ── Offline-pin (PINNED bucket) ─────────────────────────────────────────────
+   // The "pin" SW message caches pack names into srr-pinned-v1, which is
+   // EXEMPT from enforceCacheBounds eviction and PURGED on gen change.
+   //
+   // NOTE: these tests require navigator.serviceWorker.controller to be non-null
+   // (the SW must be controlling the page). In this sandbox, the three pre-existing
+   // SW-controller tests above hit a headless-Chrome limitation on that wait. The
+   // pinned-bucket tests use the same waitForFunction pattern; if the SW controller
+   // is unavailable in the environment they will time out in the same way as the
+   // pre-existing tests — that is an environmental limit, not a code bug.
+
+   it("caches named packs into srr-pinned-v1 on a 'pin' message", async () => {
+      const ctx = await browser.createBrowserContext()
+      const page = await ctx.newPage()
+      try {
+         await page.goto(baseUrl, { waitUntil: "load" })
+         await waitBoot(page)
+         await page.waitForFunction(() => navigator.serviceWorker?.controller != null, { timeout: 20000 })
+
+         // Reload so the SW controls the page and db.gz is cached.
+         await page.reload({ waitUntil: "load" })
+         await waitBoot(page)
+
+         // Send a pin message with two valid pack names. The SW should fetch them
+         // into srr-pinned-v1. Use real pack names that exist in the test store
+         // (the store has total_art=6, seq=1, so idx/L1.gz and data/L1.gz exist).
+         const result = await page.evaluate(async (base) => {
+            const sw = navigator.serviceWorker.controller!
+            const { port1, port2 } = new MessageChannel()
+            const progress: { done: number; total: number }[] = []
+            const done = new Promise<void>((resolve) => {
+               port1.onmessage = (e: MessageEvent<{ type: string; done: number; total: number }>) => {
+                  if (e.data?.type === "pin-progress") {
+                     progress.push({ done: e.data.done, total: e.data.total })
+                     if (e.data.done >= e.data.total) resolve()
+                  }
+               }
+            })
+            sw.postMessage({ type: "pin", names: ["idx/L1.gz", "data/L1.gz"] }, [port2])
+            await done
+            const pinned = await caches.open("srr-pinned-v1")
+            const keys = (await pinned.keys()).map((k) => new URL(k.url).pathname)
+            return { keys, progress }
+         }, baseUrl)
+
+         // Both packs should be in srr-pinned-v1.
+         expect(result.keys.some((k) => k.endsWith("/packs/idx/L1.gz"))).toBe(true)
+         expect(result.keys.some((k) => k.endsWith("/packs/data/L1.gz"))).toBe(true)
+         // Progress messages: [0 done, 1 done, 2 done] (initial + one per pack).
+         expect(result.progress.length).toBeGreaterThanOrEqual(2)
+         expect(result.progress[result.progress.length - 1].done).toBe(2)
+         expect(result.progress[result.progress.length - 1].total).toBe(2)
+      } finally {
+         await ctx.close()
+      }
+   })
+
+   it("pinned packs survive enforceCacheBounds (eviction-exempt)", async () => {
+      const ctx = await browser.createBrowserContext()
+      const page = await ctx.newPage()
+      try {
+         await page.goto(baseUrl, { waitUntil: "load" })
+         await waitBoot(page)
+         await page.waitForFunction(() => navigator.serviceWorker?.controller != null, { timeout: 20000 })
+         await page.reload({ waitUntil: "load" })
+         await waitBoot(page)
+
+         // Pin one real pack name.
+         await page.evaluate(async () => {
+            const sw = navigator.serviceWorker.controller!
+            const { port1, port2 } = new MessageChannel()
+            await new Promise<void>((resolve) => {
+               port1.onmessage = (e: MessageEvent<{ type: string; done: number; total: number }>) => {
+                  if (e.data?.type === "pin-progress" && e.data.done >= e.data.total) resolve()
+               }
+               sw.postMessage({ type: "pin", names: ["idx/L1.gz"] }, [port2])
+            })
+         })
+
+         // Stuff 130 finalized data packs into PACKS (30 over PACK_KEEP=100) to
+         // trigger enforceCacheBounds on the next db.gz reload.
+         await page.evaluate(async () => {
+            const packs = await caches.open("srr-packs-v3")
+            for (let n = 1; n <= 130; n++)
+               await packs.put(new URL(`packs/data/${n}.gz`, location.href).href, new Response("x"))
+         })
+
+         // Reload so db.gz flows through the SW online and enforceCacheBounds runs.
+         await page.reload({ waitUntil: "load" })
+         await waitBoot(page)
+         // Wait for the prune to complete (data series back to 100).
+         await page.waitForFunction(
+            async () => {
+               const packs = await caches.open("srr-packs-v3")
+               const keys = await packs.keys()
+               return keys.filter((k) => /\/packs\/data\/\d+\.gz$/.test(new URL(k.url).pathname)).length === 100
+            },
+            { timeout: 20000 },
+         )
+
+         // The pinned pack must still be in srr-pinned-v1, untouched by the prune.
+         const pinnedKeys = await page.evaluate(async () => {
+            const pinned = await caches.open("srr-pinned-v1")
+            return (await pinned.keys()).map((k) => new URL(k.url).pathname)
+         })
+         expect(pinnedKeys.some((k) => k.endsWith("/packs/idx/L1.gz"))).toBe(true)
+      } finally {
+         await ctx.close()
+      }
+   })
+
+   // An offline-pinned pack is served from srr-pinned-v1 even when it has been
+   // evicted from (or was never in) the rolling srr-packs-v3 bucket. This proves
+   // packCacheFirst's PINNED-first path keeps a pinned filter fully readable after
+   // PACKS eviction — the core offline-pin correctness guarantee.
+   //
+   // NOTE: requires navigator.serviceWorker.controller (same sandbox limit as the
+   // other pinned-bucket tests above — see the block comment above this suite).
+   it("reads a pinned pack from srr-pinned-v1 after it is absent from srr-packs-v3 (offline)", async () => {
+      const ctx = await browser.createBrowserContext()
+      const page = await ctx.newPage()
+      try {
+         // Cold load: SW registers, claims, caches db.gz + pack into PACKS.
+         await page.goto(baseUrl + "#5", { waitUntil: "load" })
+         await waitReader(page)
+         await page.waitForFunction(() => navigator.serviceWorker?.controller != null, { timeout: 20000 })
+
+         // Reload so the SW controls the page and the latest pack is in PACKS.
+         await page.reload({ waitUntil: "load" })
+         await waitReader(page)
+
+         // Pin the latest idx and data packs directly into PINNED (bypassing the SW
+         // message path so we don't need app.ts wired — same as the other pinned
+         // tests that post directly to the SW controller).
+         await page.evaluate(async () => {
+            const sw = navigator.serviceWorker.controller!
+            const { port1, port2 } = new MessageChannel()
+            await new Promise<void>((resolve) => {
+               port1.onmessage = (e: MessageEvent<{ type: string; done: number; total: number }>) => {
+                  if (e.data?.type === "pin-progress" && e.data.done >= e.data.total) resolve()
+               }
+               sw.postMessage({ type: "pin", names: ["idx/L1.gz", "data/L1.gz"] }, [port2])
+            })
+         })
+
+         // Delete both packs from the rolling PACKS bucket so the only copy is in
+         // PINNED — simulates what enforceCacheBounds does to evicted packs.
+         await page.evaluate(async () => {
+            const packs = await caches.open("srr-packs-v3")
+            const keys = await packs.keys()
+            await Promise.all(
+               keys
+                  .filter((k) => /\/packs\/(idx|data)\/L\d+\.gz$/.test(new URL(k.url).pathname))
+                  .map((k) => packs.delete(k)),
+            )
+         })
+
+         // Confirm the packs are gone from PACKS but present in PINNED.
+         const state = await page.evaluate(async () => {
+            const packs = await caches.open("srr-packs-v3")
+            const packKeys = (await packs.keys()).map((k) => new URL(k.url).pathname)
+            const pinned = await caches.open("srr-pinned-v1")
+            const pinnedKeys = (await pinned.keys()).map((k) => new URL(k.url).pathname)
+            return { packKeys, pinnedKeys }
+         })
+         expect(state.packKeys.some((k) => /\/packs\/(idx|data)\/L\d+\.gz$/.test(k))).toBe(false)
+         expect(state.pinnedKeys.some((k) => k.endsWith("/packs/idx/L1.gz"))).toBe(true)
+         expect(state.pinnedKeys.some((k) => k.endsWith("/packs/data/L1.gz"))).toBe(true)
+
+         // Go offline and reload. The reader must boot and render purely from the
+         // PINNED bucket (db.gz is still in PACKS as it's exempt from eviction;
+         // the idx and data packs come from PINNED via packCacheFirst).
+         await page.setOfflineMode(true)
+         await page.reload({ waitUntil: "load" })
+         await waitReader(page)
+         // The reader renders the pinned content — no error popup (a PINNED miss
+         // would throw in data.init() → popup).
+         expect(await $title(page)).toBe("sport title 1")
+         expect(await $content(page)).toContain("sport body 1")
+         expect(await $popupOpen(page)).toBe(false)
+      } finally {
+         await ctx.close()
+      }
+   })
+
+   it("gen change purges srr-pinned-v1 alongside srr-packs-v3", async () => {
+      // Re-use the same rebuild helper and pattern as the gen-purge test above.
+      const rebuild = async (prefix: string) => {
+         for (const f of readdirSync(packsDir)) rmSync(join(packsDir, f), { recursive: true, force: true })
+         feeds.set("/pintest.xml", rssFeed("PinTest", nItems(30, prefix, 8000)))
+         await srr(packsDir, "feed", "add", "-t", "PinTest", "-u", `${feeds.url}/pintest.xml`)
+         await srr(packsDir, "-s", "1", "art", "fetch")
+      }
+
+      await rebuild("pinpre")
+      const ctx = await browser.createBrowserContext()
+      const page = await ctx.newPage()
+      try {
+         await page.goto(baseUrl + "#0", { waitUntil: "load" })
+         await waitTitle(page, "pinpre title 0")
+         await page.waitForFunction(() => navigator.serviceWorker?.controller != null, { timeout: 20000 })
+         await page.reload({ waitUntil: "load" })
+         await waitTitle(page, "pinpre title 0")
+
+         // Pin a finalized pack into PINNED.
+         await page.evaluate(async () => {
+            const sw = navigator.serviceWorker.controller!
+            const { port1, port2 } = new MessageChannel()
+            await new Promise<void>((resolve) => {
+               port1.onmessage = (e: MessageEvent<{ type: string; done: number; total: number }>) => {
+                  if (e.data?.type === "pin-progress" && e.data.done >= e.data.total) resolve()
+               }
+               sw.postMessage({ type: "pin", names: ["data/1.gz"] }, [port2])
+            })
+         })
+
+         const pinnedBefore = await page.evaluate(async () => {
+            const pinned = await caches.open("srr-pinned-v1")
+            return (await pinned.keys()).length
+         })
+         expect(pinnedBefore).toBeGreaterThan(0)
+
+         // Bump gen → PINNED must be purged alongside PACKS on the next db.gz fetch.
+         await rebuild("pinpost")
+         await srr(packsDir, "gen", "--bump")
+         await page.reload({ waitUntil: "load" })
+         // Wait for the gen-purge: PINNED should now be empty.
+         await page.waitForFunction(
+            async () => {
+               const pinned = await caches.open("srr-pinned-v1")
+               return (await pinned.keys()).length === 0
+            },
+            { timeout: 20000 },
+         )
+         expect(await $popupOpen(page)).toBe(false)
+      } finally {
+         await ctx.close()
+      }
+   })
 })

@@ -55,7 +55,13 @@ const SHELL = "srr-shell-v1"
 // generation (a Cache is the only storage a SW shares across restarts
 // without IndexedDB).
 const META = "srr-meta-v1"
-const KEEP = new Set([ASSETS, PACKS, SHELL, META])
+// Eviction-exempt offline-pin bucket. Populated via the "pin" message from the
+// page (per packNamesForFilter), consulted before PACKS in the pack fetch
+// branch, and purged only on store gen change (same invalidation as PACKS).
+// Unlike PACKS it is never touched by enforceCacheBounds — pinned packs survive
+// the rolling-window eviction so an offline-pinned filter stays fully readable.
+const PINNED = "srr-pinned-v1"
+const KEEP = new Set([ASSETS, PACKS, SHELL, META, PINNED])
 
 // Deployment root, e.g. "/srr/" or "/srr.tmp/" (or "/" in e2e) — so we never touch
 // a sibling deployment sharing the origin.
@@ -100,6 +106,105 @@ sw.addEventListener("activate", (event) => {
    )
 })
 
+// Message handler — protocol between the page and the SW:
+//
+//   { type: "pin", names: string[], port?: MessagePort }
+//     Caches each name into the eviction-exempt PINNED bucket. Names MUST pass
+//     parsePackName validation (series/kind/n) — anything else is silently
+//     dropped (no arbitrary cache-key injection). Each name is fetched with
+//     cache:"no-cache" so fresh bytes are always written (the SW's own
+//     cache-first could serve a stale copy under a reused name before a gen
+//     bump — using no-cache here means the pinned entry is always fresh at pin
+//     time). Per-name errors (404 on GC'd latest packs, quota) are caught and
+//     skipped; progress is reported via the provided MessagePort or e.source.
+//     Progress message: { type: "pin-progress", done: number, total: number,
+//                         error?: string }
+//
+//   { type: "unpin-all" }
+//     Clears the entire PINNED bucket (called when the user removes all pins).
+//
+//   { type: "unpin", names: string[] }
+//     Removes specific entries from the PINNED bucket.
+sw.addEventListener("message", (event) => {
+   const msg = event.data as { type: string; names?: string[] }
+   if (!msg || typeof msg.type !== "string") return
+
+   const port: MessagePort | null = event.ports?.[0] ?? null
+   const reply = (data: unknown) => {
+      if (port) port.postMessage(data)
+      else event.source?.postMessage(data)
+   }
+
+   if (msg.type === "pin") {
+      const rawNames = Array.isArray(msg.names) ? msg.names : []
+      // Validate every name via parsePackName — reject non-pack paths.
+      const validNames = rawNames.filter((n) => {
+         if (typeof n !== "string") return false
+         // Build a fake path with the /packs/ prefix that parsePackName expects.
+         return parsePackName(`/packs/${n}`) !== null
+      })
+      const total = validNames.length
+      let done = 0
+      event.waitUntil(
+         (async () => {
+            const pinned = await caches.open(PINNED)
+            for (const name of validNames) {
+               try {
+                  // Build the full URL the SW's fetch handler would see.
+                  const url = new URL(`packs/${name}`, sw.registration.scope).href
+                  const req = new Request(url, { cache: "no-cache" })
+                  const res = await fetch(req)
+                  if (res.ok) await pinned.put(new Request(url), res)
+               } catch (err) {
+                  // 404 from GC'd latest packs, quota error, network error — skip.
+                  reply({
+                     type: "pin-progress",
+                     done,
+                     total,
+                     error: String(err),
+                  })
+               }
+               done++
+               reply({ type: "pin-progress", done, total })
+            }
+         })(),
+      )
+      return
+   }
+
+   if (msg.type === "unpin-all") {
+      event.waitUntil(
+         (async () => {
+            const pinned = await caches.open(PINNED)
+            await Promise.all((await pinned.keys()).map((k) => pinned.delete(k)))
+         })(),
+      )
+      return
+   }
+
+   if (msg.type === "unpin") {
+      const rawNames = Array.isArray(msg.names) ? msg.names : []
+      // Validate every name via parsePackName — reject non-pack paths.
+      const validNames = rawNames.filter((n) => {
+         if (typeof n !== "string") return false
+         // Build a fake path with the /packs/ prefix that parsePackName expects.
+         return parsePackName(`/packs/${n}`) !== null
+      })
+      event.waitUntil(
+         (async () => {
+            const pinned = await caches.open(PINNED)
+            await Promise.all(
+               validNames.map(async (name) => {
+                  const url = new URL(`packs/${name}`, sw.registration.scope).href
+                  await pinned.delete(new Request(url))
+               }),
+            )
+         })(),
+      )
+      return
+   }
+})
+
 // Serve the cached copy if present, else fetch and cache a genuine success.
 // `revalidate` (write-once packs, numeric and L<seq>): a miss must bypass the
 // HTTP cache underneath — the page fetches packs with force-cache and they're
@@ -115,6 +220,16 @@ async function cacheFirst(req: Request, name: string, revalidate = false): Promi
    const res = await fetch(revalidate ? new Request(req, { cache: "no-cache" }) : req)
    if (res.ok) cache.put(req, res.clone())
    return res
+}
+
+// Pack-specific cache-first: check the eviction-exempt PINNED bucket first,
+// then fall through to the rolling PACKS bucket. A hit in PINNED means the
+// pack is part of a pinned filter scope and must survive PACKS eviction.
+async function packCacheFirst(req: Request): Promise<Response> {
+   const pinned = await caches.open(PINNED)
+   const pinnedHit = await pinned.match(req)
+   if (pinnedHit) return pinnedHit
+   return cacheFirst(req, PACKS, true)
 }
 
 // Prefer the network (refreshing the cache); fall back to cache only when the
@@ -213,7 +328,17 @@ async function checkManifest(dbRes: Response): Promise<void> {
       const meta = await caches.open(META)
       const packs = await caches.open(PACKS)
       if (gen !== (await readMetaNumber(GEN_KEY))) {
-         await Promise.all((await packs.keys()).map((k) => packs.delete(k)))
+         // An in-place store rebuild reuses pack names with new bytes. Purge
+         // both the rolling PACKS bucket and the eviction-exempt PINNED bucket —
+         // pinned packs are keyed by name, so stale bytes under a reused name
+         // must be evicted just like PACKS. On seq-only changes PINNED is left
+         // untouched: latest packs are write-once (generation-named), so a
+         // cached L<g> pack in PINNED is still valid for its seq.
+         const pinned = await caches.open(PINNED)
+         await Promise.all([
+            ...(await packs.keys()).map((k) => packs.delete(k)),
+            ...(await pinned.keys()).map((k) => pinned.delete(k)),
+         ])
          await meta.put(GEN_KEY, new Response(String(gen)))
          await meta.put(SEQ_KEY, new Response(String(seq)))
          return
@@ -300,7 +425,7 @@ sw.addEventListener("fetch", (event) => {
    const path = url.pathname
    if (RE_ASSET.test(path)) event.respondWith(cacheFirst(req, ASSETS))
    else if (RE_DB.test(path)) event.respondWith(dbNetworkFirst(req, event))
-   else if (parsePackName(path)) event.respondWith(cacheFirst(req, PACKS, true))
+   else if (parsePackName(path)) event.respondWith(packCacheFirst(req))
    else if (RE_SHELL_HASHED.test(path)) event.respondWith(cacheFirst(req, SHELL))
    // everything else (sw.js, favicon, sourcemaps) → default network passthrough
 })
