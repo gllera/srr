@@ -228,19 +228,52 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 	}
 	slices.Sort(bg)
 
-	// Cap bg at maxBoundaryGUIDs. Sorting first makes the kept set the cap
-	// smallest hashes — a pure function of the response, independent of item
-	// order and fetch history, so the same over-cap response keeps and drops
-	// the same GUIDs every fetch. Dropped GUIDs must then not be ingested at
-	// all (the gate in the second pass below): an ingested-but-unremembered
-	// item would look new again on every subsequent fetch and duplicate
-	// forever. Net effect: an over-cap feed surfaces only its kept items, the
-	// rest stay invisible until the response shrinks.
+	// Cap bg at maxBoundaryGUIDs. When over cap, prefer retaining GUIDs that
+	// are already in priorBoundary (already stored) before filling remaining
+	// slots with the smallest hashes of the rest. This prevents re-ingestion
+	// of already-stored items: under the pure smallest-hash rule a batch of
+	// new items with smaller hashes would evict high-hash stored items from bg
+	// even though those items were already ingested — they would then look new
+	// on the very next fetch and duplicate forever.
+	//
+	// Partition order: bg is sorted ascending; walk it once to separate prior
+	// GUIDs (already stored) from rest (new or unknown), preserving sort order
+	// within each group. Keep all prior GUIDs first (up to cap), then fill
+	// remaining slots with the smallest-hash rest items. Dropped GUIDs must
+	// not be ingested at all (the gate in the second pass below):
+	// ingested-but-unremembered items duplicate on every subsequent fetch.
 	var dropped map[uint32]struct{}
 	if len(bg) > maxBoundaryGUIDs {
 		slog.Warn("boundary GUIDs over cap, skipping over-cap items", "url", c.URL, "total", len(bg), "cap", maxBoundaryGUIDs)
-		dropped = uint32Set(bg[maxBoundaryGUIDs:])
-		bg = bg[:maxBoundaryGUIDs]
+		prior := bg[:0:0] // already-stored GUIDs from bg (sorted)
+		rest := bg[:0:0]  // new GUIDs from bg (sorted)
+		for _, g := range bg {
+			if _, ok := priorBoundary[g]; ok {
+				prior = append(prior, g)
+			} else {
+				rest = append(rest, g)
+			}
+		}
+		// Keep all prior up to cap, then fill with smallest-hash rest.
+		kept := make([]uint32, 0, maxBoundaryGUIDs)
+		kept = append(kept, prior...)
+		if len(kept) > maxBoundaryGUIDs {
+			kept = kept[:maxBoundaryGUIDs]
+		}
+		remaining := maxBoundaryGUIDs - len(kept)
+		if remaining > len(rest) {
+			remaining = len(rest)
+		}
+		kept = append(kept, rest[:remaining]...)
+		slices.Sort(kept) // restore sorted order for deterministic bg
+		dropped = make(map[uint32]struct{}, len(bg)-len(kept))
+		for _, g := range bg {
+			dropped[g] = struct{}{}
+		}
+		for _, g := range kept {
+			delete(dropped, g)
+		}
+		bg = kept
 	}
 
 	// Second pass: pipeline + asset upload for the items committed to
