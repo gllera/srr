@@ -59,6 +59,12 @@ func SubprocessTimeout() time.Duration {
 // bytes; the caller decides what an empty result means (a no-op vs an error) and
 // how to wrap a run failure. Shared by the built-in shell-module path and the
 // ingest external-fetcher path, which run the same exec with different policies.
+//
+// WaitDelay ensures the bound holds even when a shell mod backgrounds a child
+// process that inherits stdout: without it, cmd.Run() would block until the
+// grandchild exits (keeping the pipe open), ignoring the timeout and returning
+// err=nil. With WaitDelay, os/exec force-closes the pipe after cancellation and
+// cmd.Run() returns promptly with a non-nil error.
 func RunSubprocess(ctx context.Context, args string, env []string, dir string, stdin io.Reader) ([]byte, error) {
 	out := &cappedBuffer{limit: maxSubprocessOutput}
 	cctx, cancel := context.WithTimeout(ctx, SubprocessTimeout())
@@ -69,6 +75,7 @@ func RunSubprocess(ctx context.Context, args string, env []string, dir string, s
 	cmd.Stderr = os.Stderr
 	cmd.Env = env
 	cmd.Dir = dir
+	cmd.WaitDelay = 5 * time.Second
 	if err := cmd.Run(); err != nil {
 		return nil, err
 	}
