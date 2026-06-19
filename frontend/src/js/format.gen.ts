@@ -85,6 +85,16 @@ export interface IFeedWire {
    add_idx: number // AddIdx
 }
 
+// Wire shape of a db.gz out[] entry (backend OutFeed).
+export interface IOutFeedWire {
+   name: string // Name
+   title?: string // Title
+   format: string // Format
+   tags?: string[] // Tags
+   feeds?: number[] // Feeds
+   limit?: number // Limit
+}
+
 // Wire shape of db.gz itself (backend DBCore).
 export interface IDBWire {
    seq?: number // Seq
@@ -99,4 +109,5 @@ export interface IDBWire {
    mp?: number // MetaPacks
    mt?: number // MetaTail
    feeds: Record<number, IFeedWire> | null // Feeds
+   out?: IOutFeedWire[] // Out
 }

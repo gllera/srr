@@ -132,6 +132,33 @@ type DBCore struct {
 	// rebuilt from data packs instead of extended.
 	MetaTail int           `json:"mt,omitempty"`
 	Feeds    map[int]*Feed `json:"feeds"`
+	// Out is the list of named syndication output feeds written by SyncOutFeeds
+	// during each fetch cycle. Each OutFeed maps chosen tags/feed ids to one
+	// RSS 2.0 or JSON Feed 1.1 file at out/<name>.<ext> on the CDN. Off by
+	// default (nil → SyncOutFeeds no-op). Managed by `srr syndicate`.
+	// NOTE: out/* objects are the ONE documented mutable class besides db.gz;
+	// the frontend/service-worker ignores the `out` field entirely (backend-only
+	// config and output key space).
+	Out []OutFeed `json:"out,omitempty"`
+}
+
+// OutFeed declares one named syndication output: a rolling newest-N window of
+// articles from the union of matching tags and explicit feed ids, serialised as
+// RSS 2.0 or JSON Feed 1.1 and written to out/<Name>.<ext> each fetch cycle.
+type OutFeed struct {
+	// Name is the file stem: out/<Name>.rss or out/<Name>.json.
+	Name string `json:"name"`
+	// Title is the channel/feed title. Defaults to Name when empty.
+	Title string `json:"title,omitempty"`
+	// Format is "rss" (RSS 2.0) or "json" (JSON Feed 1.1).
+	Format string `json:"format"`
+	// Tags selects every feed whose Tag field is in this list.
+	Tags []string `json:"tags,omitempty"`
+	// Feeds selects individual feeds by id.
+	Feeds []int `json:"feeds,omitempty"`
+	// Limit is the maximum number of items to include (newest first).
+	// Defaults to outDefaultLimit when 0.
+	Limit int `json:"limit,omitempty"`
 }
 
 // withDB opens the DB, runs fn, and ensures Close. Use for commands that
