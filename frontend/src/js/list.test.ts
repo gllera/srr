@@ -1230,4 +1230,59 @@ describe("list", () => {
          return { f: a.f, w: a.p || a.a, t: a.t }
       })
    })
+
+   // ── Bug #10 follow-up — stale skeleton re-select after cursor move ────────
+   // refresh() can run between selectRow (skeleton window) and fillRow, moving
+   // .srr-row-current to a different row.  fillRow must clear selectPending but
+   // must NOT call nav.select with the stale (skeleton chron, skeleton feed).
+   it("fillRow does not re-select a skeleton that is no longer .srr-row-current", async () => {
+      setIndex(3)
+      // Gate loadMeta so skeletons remain after render()
+      let releaseLoadMeta: (() => void) | null = null
+      const gate = new Promise<void>((r) => (releaseLoadMeta = () => r()))
+      data.loadMeta.mockImplementation(async (chron: number) => {
+         await gate
+         const a = data._arts.get(chron)!
+         return { f: a.f, w: a.p || a.a, t: a.t }
+      })
+
+      const p = list.render()
+      // Flush microtasks so skeletons are in DOM but fills are gated
+      await new Promise((r) => setTimeout(r, 0))
+      expect($rows().every((r) => r.classList.contains("srr-row-skeleton"))).toBe(true)
+
+      // Establish cursor on chron=2 (newest) skeleton
+      nav.select.mockClear()
+      await list.moveSelection("older")
+      const skeletonRow = $rows().find((r) => r.classList.contains("srr-row-current"))
+      expect(skeletonRow).not.toBeUndefined()
+      const skeletonChron = Number(skeletonRow!.dataset.chron)
+      expect(skeletonRow!.dataset.selectPending).toBe("1")
+
+      // Simulate refresh() moving the cursor to a DIFFERENT chron (e.g. the reader
+      // navigated away while the skeleton was pending) — pick a row that is NOT
+      // the skeleton we just selected.
+      const otherChron = $chrons().find((c) => c !== skeletonChron)!
+      nav._setPos(otherChron)
+      list.refresh()
+
+      // The skeleton row must no longer carry .srr-row-current after refresh()
+      expect(skeletonRow!.classList.contains("srr-row-current")).toBe(false)
+      // But it still has selectPending (refresh() does not clear it)
+      expect(skeletonRow!.dataset.selectPending).toBe("1")
+
+      // Now release fills and wait for render to settle
+      nav.select.mockClear()
+      releaseLoadMeta!()
+      await p
+
+      // nav.select must NOT have been called with the stale skeleton's chron
+      const staleCall = nav.select.mock.calls.find((args) => args[0] === skeletonChron)
+      expect(staleCall).toBeUndefined()
+
+      data.loadMeta.mockImplementation(async (c: number) => {
+         const a = data._arts.get(c)!
+         return { f: a.f, w: a.p || a.a, t: a.t }
+      })
+   })
 })
