@@ -188,6 +188,37 @@ func TestExportImportRoundTrip(t *testing.T) {
 	}
 }
 
+// TestExportImportRoundTripTagIdentity verifies that export → import -a
+// preserves tags byte-for-byte, covering the B2 fix: only already-normalized
+// tags are storable, so the import side cannot mutate them.
+func TestExportImportRoundTripTagIdentity(t *testing.T) {
+	orig := []*Feed{
+		feedOf("Go Blog", "tech/news", "https://go.example.com/rss"),
+	}
+	seedFeeds(t, orig...)
+	out := runExport(t, &ExportCmd{})
+
+	// Import into a fresh store.
+	setupEmptyDB(t)
+	if err := (&ImportCmd{Path: writeTempFile(t, out), All: true}).Run(); err != nil {
+		t.Fatalf("import of export: %v", err)
+	}
+	db, err := NewDB(context.Background(), false)
+	if err != nil {
+		t.Fatalf("NewDB: %v", err)
+	}
+	defer db.Close(context.Background())
+
+	feeds := db.Feeds()
+	if len(feeds) != 1 {
+		t.Fatalf("imported %d feeds, want 1", len(feeds))
+	}
+	ch := feeds[0]
+	if ch.Tag != "tech/news" {
+		t.Errorf("tag after round-trip = %q, want %q (identity broken)", ch.Tag, "tech/news")
+	}
+}
+
 // Guards the marshal-side struct additions (XMLName/version/head) against
 // regressions in both directions.
 func TestOPMLMarshalRoundTrip(t *testing.T) {

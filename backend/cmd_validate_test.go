@@ -3,14 +3,15 @@ package main
 import "testing"
 
 func TestValidateTagRejectsNumeric(t *testing.T) {
-	for _, ok := range []string{"", "news", "tech-2024", "2024a"} {
+	for _, ok := range []string{"", "news", "2024a"} {
 		if err := validateTag(ok); err != nil {
 			t.Errorf("validateTag(%q) = %v, want nil", ok, err)
 		}
 	}
-	for _, bad := range []string{"2024", "5", "007"} {
+	// "tech-2024" now rejected: dash → underscore on OPML import (B2).
+	for _, bad := range []string{"2024", "5", "007", "tech-2024"} {
 		if err := validateTag(bad); err == nil {
-			t.Errorf("validateTag(%q) = nil, want error (numeric-only)", bad)
+			t.Errorf("validateTag(%q) = nil, want error (numeric-only or would be mutated by import)", bad)
 		}
 	}
 }
