@@ -166,8 +166,23 @@ func checkFeedCountsContinuity(packs []*idxPack) int {
 		// next's header beyond cur's, and the bounded accessors read 0 for ids
 		// a pack doesn't reach.
 		slots := max(cur.numSlots, next.numSlots)
+
+		// Tally cur's own per-slot counts directly from the immutable feedIDs
+		// slice rather than cur.ownFeedCount(). ownFeedCounts is sized to
+		// feedSlots(core) = max(current feed id)+1; deleting the highest-id
+		// feed shrinks that below a finalized pack's immutable numSlots, so
+		// ownFeedCount(deletedId) silently returns 0 and produces a spurious
+		// mismatch against next's on-disk header.  Reading feedIDs avoids that
+		// dependency on the current feed registry entirely.
+		curOwn := make([]uint32, slots)
+		for _, id := range cur.feedIDs {
+			if int(id) < slots {
+				curOwn[id]++
+			}
+		}
+
 		for s := range slots {
-			expected := cur.feedCount(s) + cur.ownFeedCount(s)
+			expected := cur.feedCount(s) + curOwn[s]
 			if next.feedCount(s) != expected {
 				fmt.Printf("[feed-counts] pack %d sub %d: header=%d but pack %d ended with cumulative %d\n",
 					next.packIndex, s, next.feedCount(s), cur.packIndex, expected)
