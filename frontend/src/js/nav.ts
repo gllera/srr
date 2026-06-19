@@ -532,18 +532,9 @@ function recordSeen(article: IArticle) {
    } catch {}
 }
 
-// Unread count for one feed: its articles strictly after the feed's seen
-// position (recordSeen bumps that on every view, filtered or not, so reading
-// via [ALL] clears badges too); its full backlog when never seen on this
-// device. See feedUnread for the counting rationale.
-export function unreadCount(ch: IFeed): Promise<number> {
-   return feedUnread(ch, readSeen())
-}
-
-// Batched per-feed unread (OPT-2): same semantics as unreadCount applied to
-// each feed, but the seen map is parsed once for the whole batch instead of
-// once per feed (a menu fill badges every visible row). Maps feed id →
-// unread (a never-seen feed maps to its full backlog, not a sentinel).
+// Batched per-feed unread (OPT-2): reads the seen map once for the whole
+// batch instead of once per feed (a menu fill badges every visible row).
+// Maps feed id → unread (a never-seen feed maps to its full backlog).
 export async function unreadCounts(chs: IFeed[]): Promise<Map<number, number>> {
    const seenMap = readSeen()
    const out = new Map<number, number>()
@@ -748,13 +739,10 @@ export function applyFilter(tokens: string[]): void {
    else filter.clear()
 }
 
-// The current filter's tokens (copy) and a stable key for them. filterKey()
-// identifies a token SET (unlike getCurrentFilterKey, which collapses
-// multi-token filters to ""), so the list can key its build/scroll memory on
-// the exact filter — "" means [ALL].
-export function currentTokens(): string[] {
-   return [...filter.tokens]
-}
+// A stable key for the active filter tokens — identifies the token SET
+// (unlike getCurrentFilterKey, which collapses multi-token filters to ""),
+// so the list can key its build/scroll memory on the exact filter.
+// "" means [ALL].
 export function filterKey(): string {
    return filter.tokens.join(" ")
 }
