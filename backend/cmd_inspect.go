@@ -116,6 +116,29 @@ func loadCore(fetch keyGetter) (*DBCore, error) {
 	if err := json.Unmarshal(data, &c); err != nil {
 		return nil, fmt.Errorf("decode %s: %w", dbFileKey, err)
 	}
+	// Validate integer fields that must be non-negative. A negative total_art
+	// would reach idxKeyAndSize/parseIdxPack with a negative packSize and
+	// panic with "makeslice: len out of range" (B8).
+	if c.TotalArticles < 0 {
+		return nil, fmt.Errorf("decode %s: total_art %d is negative", dbFileKey, c.TotalArticles)
+	}
+	if c.NextPackID < 0 {
+		return nil, fmt.Errorf("decode %s: next_pid %d is negative", dbFileKey, c.NextPackID)
+	}
+	if c.PackOffset < 0 {
+		return nil, fmt.Errorf("decode %s: pack_off %d is negative", dbFileKey, c.PackOffset)
+	}
+	if c.Seq < 0 {
+		return nil, fmt.Errorf("decode %s: seq %d is negative", dbFileKey, c.Seq)
+	}
+	// Validate feed ids: feed_id is a u16 in each idx entry, so ids must be
+	// in [0, feedIDCeiling). A hostile id >= feedIDCeiling reaches feedSlots
+	// and parseIdxPack with slots = id+1, allocating ~4 GB per pack (B11).
+	for id := range c.Feeds {
+		if id < 0 || id >= feedIDCeiling {
+			return nil, fmt.Errorf("decode %s: feed id %d out of range [0, %d]", dbFileKey, id, feedIDCeiling-1)
+		}
+	}
 	return &c, nil
 }
 
