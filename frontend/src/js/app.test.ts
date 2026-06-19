@@ -73,6 +73,8 @@ const nav = vi.hoisted(() => {
       switchFilter: vi.fn(async () => sf()),
       seek: vi.fn(async () => 0),
       unreadCounts: vi.fn(async () => new Map<number, number>()),
+      filterKey: vi.fn(() => ""),
+      filter: { feeds: new Map<number, number>(), saved: false, search: false, active: false },
    }
 })
 vi.mock("./nav", () => nav)
@@ -85,6 +87,7 @@ const data = vi.hoisted(() => ({
    hasArticles: vi.fn(() => false),
    metaReady: vi.fn(() => true),
    idxSummaryDegraded: vi.fn(() => false),
+   packNamesForFilter: vi.fn(async () => ["idx/L1.gz", "data/L1.gz"]),
 }))
 vi.mock("./data", () => data)
 
@@ -101,6 +104,7 @@ const dropdown = vi.hoisted(() => ({
    showFeedMenu: vi.fn(),
    showOverflowMenu: vi.fn(),
    setProfileImportHook: vi.fn(),
+   setPinMenuHook: vi.fn(),
 }))
 vi.mock("./dropdown", () => dropdown)
 
@@ -470,5 +474,76 @@ describe("refreshStatus() — freshness & degradation status banner", () => {
       expect(text).toContain("Search unavailable — index rebuilding")
       expect(text).toContain(" · ") // separator between the two parts
       expect(status().classList.contains("srr-status-warn")).toBe(true)
+   })
+})
+
+// Helper: invoke the pin action from the registered pinMenuHook (simulates the
+// overflow "Download for offline" tap) and wait for the async pin to settle.
+// Sets up a fake SW controller so pinCurrentFilter doesn't bail early.
+async function invokePinAction(isUnreadOnly: boolean): Promise<void> {
+   // Capture the pinMenuHook registered by app.ts during boot.
+   let capturedHook: (() => { label: string; action: () => void } | null) | null = null
+   dropdown.setPinMenuHook.mockImplementation((fn: () => { label: string; action: () => void } | null) => {
+      capturedHook = fn
+   })
+
+   // In unread-only mode the filter must be active (a feed/tag scope, not [ALL])
+   // so the snapshot note fires.
+   nav.isUnreadOnly.mockReturnValue(isUnreadOnly)
+   nav.filter = { feeds: new Map([[0, 0]]), saved: false, search: false, active: isUnreadOnly }
+
+   // Stub a SW controller so pinCurrentFilter doesn't no-op.
+   const fakePort = { onmessage: null }
+   const fakeSW = { postMessage: vi.fn() }
+   Object.defineProperty(navigator, "serviceWorker", {
+      value: { controller: fakeSW, getRegistrations: () => Promise.resolve([]), register: () => Promise.resolve() },
+      configurable: true,
+   })
+   // MessageChannel: the SW progress messages are sent over a port; simulate the
+   // pin completing immediately (done===total) via the port's onmessage.
+   const realMC = globalThis.MessageChannel
+   const fakePort1 = { onmessage: null as ((e: MessageEvent) => void) | null }
+   const fakePort2 = {}
+   vi.stubGlobal("MessageChannel", function () {
+      return { port1: fakePort1, port2: fakePort2 }
+   })
+
+   await boot()
+   // Flush init then grab the hook.
+   expect(capturedHook).not.toBeNull()
+   const entry = capturedHook!()
+   expect(entry).not.toBeNull()
+
+   // Trigger the pin action (async).
+   entry!.action()
+   await flush()
+
+   // Simulate the SW sending pin-progress: done=2, total=2 (all packs cached).
+   if (fakePort1.onmessage) {
+      fakePort1.onmessage(new MessageEvent("message", { data: { type: "pin-progress", done: 2, total: 2 } }))
+   }
+   await flush()
+
+   // Restore globals.
+   vi.stubGlobal("MessageChannel", realMC)
+   Object.defineProperty(navigator, "serviceWorker", { value: undefined, configurable: true })
+   void fakePort
+}
+
+describe("pinCurrentFilter — unread-snapshot note in the status bar", () => {
+   const status = () => document.querySelector(".srr-status") as HTMLElement
+
+   it("shows the snapshot caveat when pinning in unread-only mode with an active filter", async () => {
+      await invokePinAction(true)
+      const text = status().textContent ?? ""
+      expect(text).toContain("Offline copy saved")
+      expect(text).toContain("new unread won't update automatically")
+   })
+
+   it("does NOT show the snapshot caveat when pinning outside unread-only mode", async () => {
+      await invokePinAction(false)
+      const text = status().textContent ?? ""
+      expect(text).toContain("Offline copy saved")
+      expect(text).not.toContain("new unread")
    })
 })

@@ -11,6 +11,7 @@ const backupDialog = document.querySelector<HTMLElement>(".srr-backup-dialog")
 // Sentinels for overflow menu action rows — UI actions, not filter tokens.
 const IMG_PROXY = "~img-proxy"
 const BACKUP = "~backup"
+const PIN = "~pin"
 
 let isOpen = false
 
@@ -410,6 +411,17 @@ export function setProfileImportHook(fn: () => void): void {
    profileImportHook = fn
 }
 
+// Hook set by app.ts: called each time the overflow menu opens to get the
+// label and action for the offline-pin row. Returns null when pinning is not
+// available for the current filter scope (saved / search) or when there is no
+// SW controller. When null the pin row is omitted from the menu.
+export type PinMenuHook = () => { label: string; action: () => void } | null
+let pinMenuHook: PinMenuHook | undefined
+
+export function setPinMenuHook(fn: PinMenuHook): void {
+   pinMenuHook = fn
+}
+
 // showBackupDialog opens the backup/restore modal. An optional `onImported`
 // callback overrides the module-level hook (used by tests).
 let closeBackup: (() => void) | null = null
@@ -554,14 +566,22 @@ export function showBackupDialog(onImported?: () => void): void {
 // The overflow / settings menu (toolbar ⋯ button, list-only): settings rows
 // that open centered modals. The rows are navigable anchors.
 export function showOverflowMenu(): void {
+   // Resolve the pin row at menu-open time so the label reflects the current
+   // filter's pin state. pinMenuHook returns null when pinning is unavailable
+   // (no SW controller, or a saved/search scope that v1 defers).
+   const pinEntry = pinMenuHook ? pinMenuHook() : null
    toggleDropdown(
       "srr-overflow-menu",
       (frag) => {
+         if (pinEntry) frag.append(createLink(PIN, pinEntry.label))
          frag.append(createLink(BACKUP, "Backup / Restore…"))
          frag.append(createLink(IMG_PROXY, "Image proxy…"))
       },
       async (value) => {
-         if (value === BACKUP) {
+         if (value === PIN) {
+            closeAllDropdowns()
+            pinEntry?.action()
+         } else if (value === BACKUP) {
             showBackupDialog() // closes the menu itself, then opens the modal
          } else if (value === IMG_PROXY) {
             showImgProxyDialog()

@@ -1,5 +1,5 @@
 import * as data from "./data"
-import { closeAllDropdowns, setProfileImportHook, showFeedMenu, showOverflowMenu } from "./dropdown"
+import { closeAllDropdowns, setPinMenuHook, setProfileImportHook, showFeedMenu, showOverflowMenu } from "./dropdown"
 import {
    collapseBrokenMedia,
    formatDate,
@@ -13,6 +13,7 @@ import {
 import { setupGestures, type Gestures } from "./gestures"
 import * as list from "./list"
 import * as nav from "./nav"
+import { isPinned, listPins, pinFilter, unpinFilter } from "./pin"
 
 const el = {
    article: document.querySelector(".srr-reader") as HTMLElement,
@@ -56,6 +57,86 @@ let previousFocus: HTMLElement | null = null
 // here so selectFilter / route can cancel it when the filter changes by any
 // means other than continued typing.
 let searchDebounce: ReturnType<typeof setTimeout> | undefined
+
+// Offline-pin progress: show a transient "Downloading N / M…" note in the
+// status bar while the SW caches the filter's packs, then restore.
+let pinProgressTimer: ReturnType<typeof setTimeout> | undefined
+// Whether the current pin was started in unread-only mode (snapshot note).
+let pinIsUnreadSnapshot = false
+
+function showPinProgress(done: number, total: number): void {
+   clearTimeout(pinProgressTimer)
+   let text: string
+   if (done >= total) {
+      text = `Offline copy saved (${total} file${total === 1 ? "" : "s"})`
+      // The pin captures the unread articles as they are right now — new unread
+      // that arrives later won't be included in this offline copy.
+      if (pinIsUnreadSnapshot) text += " — new unread won't update automatically"
+   } else {
+      text = `Downloading ${done} / ${total}…`
+   }
+   lastStatusText = null // force a status repaint on the next refreshStatus()
+   el.status.textContent = text
+   el.status.classList.remove("srr-status-warn")
+   if (done >= total) {
+      // Restore the real status after a short display window.
+      pinProgressTimer = setTimeout(() => {
+         lastStatusText = null
+         refreshStatus()
+      }, 3000)
+   }
+}
+
+// Enumerate the packs for the current filter and cache them in the SW's
+// eviction-exempt PINNED bucket. Records the pin in the localStorage registry
+// so the overflow menu can show "Remove offline copy" on the next open.
+// Scoped to [ALL] / feed / tag / unread — saved and search scopes are deferred
+// (the pinMenuHook returns null for them).
+async function pinCurrentFilter(): Promise<void> {
+   const controller = navigator.serviceWorker?.controller
+   if (!controller) return // dev / harness / insecure context — silent no-op
+   const key = nav.filterKey()
+   const feeds = nav.filter.feeds
+   const names = await data.packNamesForFilter(feeds)
+   if (names.length === 0) return
+   // Track whether this pin was taken in unread-only mode so the completion
+   // message can surface the snapshot caveat (new unread won't auto-update).
+   pinIsUnreadSnapshot = nav.isUnreadOnly() && nav.filter.active
+   pinFilter(key, names)
+   const { port1, port2 } = new MessageChannel()
+   port1.onmessage = (e: MessageEvent<{ type: string; done: number; total: number }>) => {
+      if (e.data?.type === "pin-progress") showPinProgress(e.data.done, e.data.total)
+   }
+   controller.postMessage({ type: "pin", names }, [port2])
+   showPinProgress(0, names.length)
+}
+
+function unpinCurrentFilter(): void {
+   const controller = navigator.serviceWorker?.controller
+   const key = nav.filterKey()
+   // Read the stored names before removing the registry entry, so we can tell
+   // the SW exactly which cache entries to delete.
+   const names = listPins().get(key)?.names ?? []
+   unpinFilter(key)
+   if (controller) controller.postMessage({ type: "unpin", names })
+   lastStatusText = null
+   refreshStatus()
+}
+
+// Returns the pin menu row entry for the current filter, or null when pinning
+// is not available (no SW controller, or a saved/search scope).
+function pinMenuEntry(): { label: string; action: () => void } | null {
+   if (!navigator.serviceWorker?.controller) return null
+   if (nav.filter.saved || nav.filter.search) return null
+   const key = nav.filterKey()
+   if (isPinned(key)) {
+      return { label: "Remove offline copy", action: unpinCurrentFilter }
+   }
+   return {
+      label: "Download for offline",
+      action: () => void pinCurrentFilter(),
+   }
+}
 
 function showReader() {
    view = "reader"
@@ -530,6 +611,12 @@ async function init() {
       refreshSaveButton(!el.save.disabled)
       void list.rerender()
    })
+
+   // Offline-pin row in the ⋯ overflow menu: evaluated lazily at menu-open
+   // time so the label ("Download for offline" vs "Remove offline copy") always
+   // reflects the current filter's pin state. Returns null when pinning is not
+   // applicable (no SW controller, or saved/search scope — v1 defers those).
+   setPinMenuHook(pinMenuEntry)
 
    // The list opens an article in the reader through the same guard mutex as
    // every other navigation. The scroll callback resyncs the gesture toolbar
