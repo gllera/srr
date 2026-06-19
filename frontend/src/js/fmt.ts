@@ -1,4 +1,5 @@
 import { PACK_BASE } from "./base"
+import { IMG_PROXY_KEY } from "./keys"
 
 // Mirror the backend bluemonday allowlist (mailto, http, https) for defense-in-depth.
 // data:/vbscript:/javascript:/file: in href or src are XSS or info-leak vectors
@@ -22,8 +23,6 @@ const ABS_SCHEME = /^[a-z][a-z0-9+.-]*:/i
 // image proxy.
 // Prefix is the URL-encoded-source-appender shape (wsrv.nl, imgproxy, imagor).
 // Configured per-user via localStorage `srr-img-proxy`; empty/absent = passthrough.
-const IMG_PROXY_KEY = "srr-img-proxy"
-
 export function getImgProxy(): string {
    try {
       return localStorage.getItem(IMG_PROXY_KEY) ?? ""

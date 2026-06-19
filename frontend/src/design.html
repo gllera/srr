@@ -36,6 +36,19 @@
             <div class="srr-imgproxy-body"></div>
          </div>
       </div>
+      <!-- Backup / Restore dialog — export the portable profile (seen progress,
+           saved articles, preferences) as JSON, or import a blob from another
+           device. dropdown.ts populates .srr-backup-body on open. -->
+      <div class="srr-backup-dialog" role="dialog" aria-modal="true" aria-labelledby="srr-backup-title">
+         <div class="srr-backup-card">
+            <h2 class="srr-backup-title" id="srr-backup-title">Backup / Restore</h2>
+            <p class="srr-backup-desc">
+               Copy or download your reading progress, saved articles, and preferences — then paste the file on another
+               device to restore them.
+            </p>
+            <div class="srr-backup-body"></div>
+         </div>
+      </div>
       <main class="srr-container">
          <div class="srr-searchbar" role="search">
             <div class="srr-searchbar-row">
