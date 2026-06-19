@@ -517,21 +517,6 @@ describe("showFeed", () => {
       const result = await nav.fromHash("1!1")
       expect(result.has_left).toBe(false)
    })
-
-   it("feed is looked up from feeds", async () => {
-      const ch = makeFeed({ id: 1, title: "MyFeed", url: "http://ch.com" })
-      data.db.feeds[1] = ch
-      setupIndex([{ feedId: 1 }])
-      const result = await nav.fromHash("0")
-      expect(result.feed).toBe(ch)
-   })
-
-   it("feed is undefined when not in feeds", async () => {
-      setupIndex([{ feedId: 99 }])
-      delete data.db.feeds[99]
-      const result = await nav.fromHash("0")
-      expect(result.feed).toBeUndefined()
-   })
 })
 
 describe("getFilterEntries", () => {

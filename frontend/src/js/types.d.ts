@@ -24,10 +24,6 @@ interface IShowFeed {
    has_left: boolean
    has_right: boolean
    article: IArticle
-   feed: IFeed | undefined
-   // True only for the synthetic "(no matching articles)" placeholder. Distinct
-   // from feed === undefined, which a REAL article whose feed was deleted
-   // (the [DELETED] tombstone) also has — the reader's save toggle keys off this
-   // so it stays enabled for a saved deleted-feed article.
+   // True only for the synthetic "(no matching articles)" placeholder.
    placeholder?: boolean
 }

@@ -440,7 +440,6 @@ async function showFeed(article: IArticle): Promise<IShowFeed> {
       article,
       has_left,
       has_right,
-      feed: data.db.feeds[article.f],
    }
 }
 
@@ -633,7 +632,6 @@ function resolveNoMatch(replace = false): IShowFeed {
       article: { f: 0, a: 0, p: 0, t: "(no matching articles)", l: "", c: "" },
       has_left: false,
       has_right: false,
-      feed: undefined,
       placeholder: true,
    }
 }
