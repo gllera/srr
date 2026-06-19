@@ -269,6 +269,33 @@ func TestModuleEmptyShellOutputIsNoop(t *testing.T) {
 	}
 }
 
+// TestRunSubprocessWaitDelayBound verifies that a shell mod which backgrounds a
+// child process that holds the inherited stdout pipe open does NOT block
+// RunSubprocess for the grandchild's full lifetime. Before the WaitDelay fix,
+// "sleep 8 & exit 0" kept the pipe open after /bin/sh exited, so cmd.Run()
+// waited ~8 s and returned err=nil — a mislabelled SUCCESS that wedged the
+// fetch worker. After the fix: cmd.WaitDelay (5 s grace period) force-closes
+// the pipe, so RunSubprocess returns well under the sleep duration AND with a
+// non-nil error. The sub-8 s bound is intentionally loose so the test doesn't
+// race against WaitDelay's own timer.
+func TestRunSubprocessWaitDelayBound(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	// /bin/sh exits immediately; the background sleep inherits stdout and keeps
+	// the pipe open — without WaitDelay cmd.Run() blocks for 8 s with err=nil.
+	_, err := RunSubprocess(ctx, "sleep 8 & exit 0", nil, "", nil)
+	elapsed := time.Since(start)
+
+	if elapsed >= 8*time.Second {
+		t.Errorf("RunSubprocess took %v; want < 8s (background grandchild wedged the wait)", elapsed)
+	}
+	if err == nil {
+		t.Error("RunSubprocess returned nil error; want non-nil (WaitDelay/timeout)")
+	}
+}
+
 func TestIsBuiltin(t *testing.T) {
 	for _, tok := range []string{"#sanitize", "#readability timeout=5s", "#minify"} {
 		if !IsBuiltin(tok) {
