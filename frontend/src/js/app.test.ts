@@ -96,6 +96,7 @@ const dropdown = vi.hoisted(() => ({
    closeAllDropdowns: vi.fn(),
    showFeedMenu: vi.fn(),
    showOverflowMenu: vi.fn(),
+   setProfileImportHook: vi.fn(),
 }))
 vi.mock("./dropdown", () => dropdown)
 

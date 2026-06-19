@@ -1,14 +1,16 @@
 import * as data from "./data"
 import { getImgProxy, isValidProxy, setImgProxy, srcColorIndex } from "./fmt"
 import * as nav from "./nav"
+import { exportProfile, importProfile } from "./profile"
 
 const menus = document.querySelectorAll<HTMLElement>(".srr-dropdown-menu")
 const btns = document.querySelectorAll<HTMLElement>(".srr-dropdown-btn")
 const imgProxyDialog = document.querySelector<HTMLElement>(".srr-imgproxy-dialog")
+const backupDialog = document.querySelector<HTMLElement>(".srr-backup-dialog")
 
-// Sentinel data-value for the overflow menu's action row — a UI action, not a
-// filter token, so the onClick intercepts it instead of routing anywhere.
+// Sentinels for overflow menu action rows — UI actions, not filter tokens.
 const IMG_PROXY = "~img-proxy"
+const BACKUP = "~backup"
 
 let isOpen = false
 
@@ -399,18 +401,170 @@ export function showImgProxyDialog(): void {
    dialog.addEventListener("mousedown", onDown)
 }
 
-// The overflow / settings menu (toolbar ⋯ button, list-only): a single "Image
-// proxy…" row that opens the centered settings dialog. The row is a navigable
-// anchor; the proxy editing lives in showImgProxyDialog's modal.
+// Hook set by app.ts so the backup dialog can trigger a list rerender +
+// toolbar refresh after a successful import — without dropdown.ts importing app.ts.
+// Tests can pass their own callback directly to showBackupDialog(cb).
+let profileImportHook: (() => void) | undefined
+
+export function setProfileImportHook(fn: () => void): void {
+   profileImportHook = fn
+}
+
+// showBackupDialog opens the backup/restore modal. An optional `onImported`
+// callback overrides the module-level hook (used by tests).
+let closeBackup: (() => void) | null = null
+
+export function showBackupDialog(onImported?: () => void): void {
+   const dialog = backupDialog
+   if (!dialog) return
+   closeAllDropdowns()
+   if (closeBackup) closeBackup()
+   const body = dialog.querySelector<HTMLElement>(".srr-backup-body")!
+   const restore = document.activeElement as HTMLElement | null
+
+   const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+         e.preventDefault()
+         e.stopPropagation()
+         close()
+      } else if (e.key === "Tab") {
+         const f = dialog.querySelectorAll<HTMLElement>("input, button, textarea")
+         if (f.length === 0) return
+         const first = f[0]
+         const last = f[f.length - 1]
+         if (e.shiftKey && document.activeElement === first) {
+            e.preventDefault()
+            last.focus()
+         } else if (!e.shiftKey && document.activeElement === last) {
+            e.preventDefault()
+            first.focus()
+         }
+      }
+   }
+   const onDown = (e: MouseEvent) => {
+      if (e.target === dialog) close()
+   }
+   const close = () => {
+      dialog.classList.remove("srr-open")
+      body.replaceChildren()
+      document.removeEventListener("keydown", onKey, true)
+      dialog.removeEventListener("mousedown", onDown)
+      closeBackup = null
+      restore?.focus()
+   }
+   closeBackup = close
+
+   // ── build body ──────────────────────────────────────────────────────────
+   const frag = document.createDocumentFragment()
+
+   // Export section: read-only textarea pre-filled with the current profile.
+   const exportLabel = document.createElement("label")
+   exportLabel.className = "srr-backup-label"
+   exportLabel.textContent = "Your current data (copy or download to back up)"
+   const exportArea = document.createElement("textarea")
+   exportArea.className = "srr-backup-export srr-backup-textarea"
+   exportArea.readOnly = true
+   exportArea.setAttribute("aria-label", "Export data")
+   exportArea.rows = 4
+   exportArea.value = exportProfile()
+
+   const exportActions = divEl("srr-backup-export-actions")
+
+   // Copy button: tries Clipboard API, falls back to select+execCommand.
+   const copyBtn = btn("srr-dialog-btn srr-backup-copy", "copy to clipboard", "Copy", () => {
+      const text = exportArea.value
+      if (navigator.clipboard?.writeText) {
+         void navigator.clipboard.writeText(text)
+      } else {
+         exportArea.select()
+         document.execCommand("copy")
+      }
+   })
+
+   // Download button: creates a temporary Blob + anchor.
+   const dlBtn = btn("srr-dialog-btn srr-backup-download", "download as JSON file", "Download .json", () => {
+      const blob = new Blob([exportArea.value], { type: "application/json" })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement("a")
+      a.href = url
+      a.download = "srr-profile.json"
+      a.click()
+      setTimeout(() => URL.revokeObjectURL(url), 10000)
+   })
+
+   exportActions.append(copyBtn, dlBtn)
+   exportLabel.appendChild(exportArea)
+   frag.append(exportLabel, exportActions)
+
+   // Divider
+   const hr = document.createElement("hr")
+   hr.className = "srr-backup-sep"
+   frag.append(hr)
+
+   // Import section: paste textarea + prefs checkbox + Import button.
+   const importLabel = document.createElement("label")
+   importLabel.className = "srr-backup-label"
+   importLabel.textContent = "Paste a backup here to restore"
+   const importArea = document.createElement("textarea")
+   importArea.className = "srr-backup-import srr-backup-textarea"
+   importArea.setAttribute("aria-label", "Paste backup data")
+   importArea.placeholder = '{"v":1,...}'
+   importArea.rows = 4
+   importArea.addEventListener("input", () => {
+      errEl.textContent = ""
+      errEl.hidden = true
+   })
+   importLabel.appendChild(importArea)
+
+   // "Also import preferences" checkbox — default OFF.
+   const prefsRow = divEl("srr-backup-prefs-row")
+   const prefsCheck = document.createElement("input")
+   prefsCheck.type = "checkbox"
+   prefsCheck.className = "srr-backup-prefs"
+   prefsCheck.id = "srr-backup-prefs-check"
+   const prefsCheckLabel = document.createElement("label")
+   prefsCheckLabel.htmlFor = "srr-backup-prefs-check"
+   prefsCheckLabel.textContent = "Also import preferences (image proxy, unread-only filter)"
+   prefsRow.append(prefsCheck, prefsCheckLabel)
+
+   // Inline error message (hidden until an import fails).
+   const errEl = document.createElement("span")
+   errEl.className = "srr-backup-import-error"
+   errEl.hidden = true
+
+   const importBtn = btn("srr-dialog-btn srr-dialog-primary srr-backup-import-btn", "import backup", "Import", () => {
+      const result = importProfile(importArea.value, { prefs: prefsCheck.checked })
+      if (!result.ok) {
+         errEl.textContent = result.error ?? "Import failed"
+         errEl.hidden = false
+         return
+      }
+      close()
+      ;(onImported ?? profileImportHook)?.()
+   })
+
+   frag.append(importLabel, prefsRow, errEl, importBtn)
+
+   body.replaceChildren(frag)
+   dialog.classList.add("srr-open")
+   document.addEventListener("keydown", onKey, true)
+   dialog.addEventListener("mousedown", onDown)
+}
+
+// The overflow / settings menu (toolbar ⋯ button, list-only): settings rows
+// that open centered modals. The rows are navigable anchors.
 export function showOverflowMenu(): void {
    toggleDropdown(
       "srr-overflow-menu",
       (frag) => {
+         frag.append(createLink(BACKUP, "Backup / Restore…"))
          frag.append(createLink(IMG_PROXY, "Image proxy…"))
       },
       async (value) => {
-         if (value === IMG_PROXY) {
-            showImgProxyDialog() // closes the menu itself, then opens the modal
+         if (value === BACKUP) {
+            showBackupDialog() // closes the menu itself, then opens the modal
+         } else if (value === IMG_PROXY) {
+            showImgProxyDialog()
          }
       },
    )

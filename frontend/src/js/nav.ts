@@ -1,5 +1,6 @@
 import * as data from "./data"
 import { extractImageUrls, getImgProxy, imgProxy } from "./fmt"
+import { SAVED_KEY, SEEN_KEY, UNREAD_ONLY_KEY } from "./keys"
 import * as search from "./search"
 
 let pos = -1
@@ -14,7 +15,6 @@ const next: { left?: Promise<number>; right?: Promise<number> } = {}
 // feeds you're caught up on. A device-local preference, not part of the
 // shareable #pos!tokens hash. See filter.set / filter.applyUnseen and
 // dropdown.ts's chip.
-const UNREAD_ONLY_KEY = "srr-unread-only"
 let unreadOnly = ((): boolean => {
    try {
       return localStorage.getItem(UNREAD_ONLY_KEY) === "1"
@@ -47,7 +47,6 @@ export function setUnreadOnly(on: boolean) {
 // "~saved" addresses the mode in the #hash and the filter rotation; a
 // (vanishingly unlikely) real tag literally named "~saved" is shadowed by it.
 export const SAVED_TOKEN = "~saved"
-const SAVED_KEY = "srr-saved"
 
 // Re-read on each access (no module-level cache): the set is small and
 // user-curated, so the localStorage parse is cheap, and reading fresh stays
@@ -453,8 +452,6 @@ function schedulePrefetch(target: number) {
    if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(run, { timeout: 500 })
    else setTimeout(run, 200)
 }
-
-const SEEN_KEY = "srr-seen"
 
 function readSeen(): Record<string, number> {
    try {

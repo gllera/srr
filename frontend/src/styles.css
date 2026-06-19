@@ -1365,6 +1365,95 @@ body:not(.srr-view-list) .srr-toolbar > .srr-unread {
    }
 }
 
+/* Backup / Restore dialog — same modal pattern as .srr-imgproxy-dialog. */
+.srr-backup-dialog {
+   display: none;
+   position: fixed;
+   inset: 0;
+   z-index: var(--z-popup);
+   align-items: center;
+   justify-content: center;
+   padding: 1.25rem;
+   background: var(--scrim);
+   &.srr-open {
+      display: flex;
+   }
+}
+.srr-backup-card {
+   width: min(32rem, 100%);
+   max-height: calc(100dvh - 2.5rem);
+   overflow-y: auto;
+   background: var(--surface-raised);
+   color: var(--fg);
+   border: 1px solid var(--border);
+   border-radius: var(--radius);
+   box-shadow: var(--shadow);
+   padding: 1.25rem 1.4rem 1.4rem;
+}
+.srr-backup-title {
+   margin: 0 0 0.6rem;
+   font-family: var(--font-mono);
+   font-size: 0.82rem;
+   font-weight: 700;
+   letter-spacing: 0.14em;
+   text-transform: uppercase;
+   color: var(--fg);
+}
+.srr-backup-desc {
+   margin: 0 0 1rem;
+   font-size: var(--text-sm);
+   line-height: 1.5;
+   color: var(--muted);
+}
+.srr-backup-body {
+   display: flex;
+   flex-direction: column;
+   gap: 0.75rem;
+}
+.srr-backup-label {
+   display: flex;
+   flex-direction: column;
+   gap: 0.35rem;
+   font-size: var(--text-sm);
+   color: var(--muted);
+}
+.srr-backup-textarea {
+   width: 100%;
+   font: inherit;
+   font-size: var(--text-sm);
+   font-family: var(--font-mono);
+   color: var(--fg);
+   background: var(--bg);
+   border: 1px solid var(--faint);
+   border-radius: var(--radius);
+   padding: 0.5rem 0.6rem;
+   resize: vertical;
+   &:focus {
+      outline: none;
+      border-color: var(--accent);
+   }
+}
+.srr-backup-export-actions {
+   display: flex;
+   gap: 0.5rem;
+}
+.srr-backup-sep {
+   border: none;
+   border-top: 1px solid var(--faint);
+   margin: 0.25rem 0;
+}
+.srr-backup-prefs-row {
+   display: flex;
+   align-items: center;
+   gap: 0.5rem;
+   font-size: var(--text-sm);
+   color: var(--muted);
+}
+.srr-backup-import-error {
+   font-size: var(--text-sm);
+   color: var(--accent);
+}
+
 .srr-hidden {
    display: none !important;
 }
@@ -1408,7 +1497,8 @@ body:not(.srr-view-list) .srr-toolbar > .srr-unread {
 @media print {
    .srr-toolbar,
    .srr-popup,
-   .srr-imgproxy-dialog {
+   .srr-imgproxy-dialog,
+   .srr-backup-dialog {
       display: none !important;
    }
    .srr-container {

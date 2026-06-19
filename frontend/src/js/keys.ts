@@ -1,0 +1,4 @@
+export const SEEN_KEY = "srr-seen"
+export const SAVED_KEY = "srr-saved"
+export const UNREAD_ONLY_KEY = "srr-unread-only"
+export const IMG_PROXY_KEY = "srr-img-proxy"

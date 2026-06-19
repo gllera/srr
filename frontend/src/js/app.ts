@@ -1,5 +1,5 @@
 import * as data from "./data"
-import { closeAllDropdowns, showFeedMenu, showOverflowMenu } from "./dropdown"
+import { closeAllDropdowns, setProfileImportHook, showFeedMenu, showOverflowMenu } from "./dropdown"
 import { collapseBrokenMedia, formatDate, sanitizeHtml, srcColorIndex, timeAgo, URL_DENY } from "./fmt"
 import { setupGestures, type Gestures } from "./gestures"
 import * as list from "./list"
@@ -480,6 +480,16 @@ async function init() {
       return
    }
    nav.pruneSeen()
+
+   // After a successful profile import: prune stale seen keys, rerender the
+   // list under the current filter, and refresh the unread + save toolbar buttons
+   // to reflect the newly-merged state. Reuses the same paths as toggleUnseenOnly.
+   setProfileImportHook(() => {
+      nav.pruneSeen()
+      refreshUnreadButton()
+      refreshSaveButton(!el.save.disabled)
+      void list.rerender()
+   })
 
    // The list opens an article in the reader through the same guard mutex as
    // every other navigation. The scroll callback resyncs the gesture toolbar

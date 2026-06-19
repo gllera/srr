@@ -670,6 +670,140 @@ describe("dropdown: menu keyboard navigation", () => {
    })
 })
 
+// Backup dialog scaffold — mirrors the imgproxy dialog shape.
+const BACKUP_DIALOG =
+   `<div class="srr-backup-dialog" role="dialog">` +
+   `<div class="srr-backup-card">` +
+   `<h2 class="srr-backup-title" id="srr-backup-title">Backup / Restore</h2>` +
+   `<div class="srr-backup-body"></div>` +
+   `</div></div>`
+const SKELETON_WITH_BACKUP = SKELETON + BACKUP_DIALOG
+
+describe("backup/restore dialog", () => {
+   let dropdown: Dropdown
+   const $dialog = () => document.querySelector<HTMLElement>(".srr-backup-dialog")!
+   const $exportArea = () => $dialog().querySelector<HTMLTextAreaElement>(".srr-backup-export")
+   const $importArea = () => $dialog().querySelector<HTMLTextAreaElement>(".srr-backup-import")
+   const $prefsCheck = () => $dialog().querySelector<HTMLInputElement>(".srr-backup-prefs")
+   const $btn = (cls: string) => $dialog().querySelector<HTMLButtonElement>(cls)
+   const isOpen = () => $dialog().classList.contains("srr-open")
+
+   beforeEach(async () => {
+      document.body.innerHTML = SKELETON_WITH_BACKUP
+      localStorage.clear()
+      vi.resetModules()
+      dropdown = await import("./dropdown")
+   })
+   afterEach(() => {
+      if ($dialog()?.classList.contains("srr-open")) {
+         $dialog().dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }))
+      }
+   })
+
+   it("the ⋯ overflow menu has a 'Backup / Restore…' row", () => {
+      dropdown.showOverflowMenu()
+      const row = document.querySelector<HTMLElement>('#srr-overflow-menu a[data-value="~backup"]')
+      expect(row).not.toBeNull()
+      expect(row!.textContent).toContain("Backup / Restore")
+   })
+
+   it("clicking the 'Backup / Restore…' row opens the backup dialog and closes the menu", () => {
+      dropdown.showOverflowMenu()
+      const row = document.querySelector<HTMLElement>('#srr-overflow-menu a[data-value="~backup"]')!
+      row.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }))
+      expect(isOpen()).toBe(true)
+      expect(document.getElementById("srr-overflow-menu")!.classList.contains("srr-open")).toBe(false)
+   })
+
+   it("opens with export textarea pre-seeded with the current profile JSON", () => {
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 5 }))
+      localStorage.setItem("srr-saved", JSON.stringify([3, 7]))
+      dropdown.showBackupDialog()
+      const exportText = $exportArea()!.value
+      const obj = JSON.parse(exportText)
+      expect(obj.v).toBe(1)
+      expect(obj.seen).toEqual({ "feed:1": 5 })
+      expect(obj.saved).toEqual([3, 7])
+   })
+
+   it("a valid paste into the import area and clicking Import merges and closes", () => {
+      const blob = JSON.stringify({ v: 1, seen: { "feed:2": 10 }, saved: [1, 2], unreadOnly: false, imgProxy: "" })
+      const onImport = vi.fn()
+      dropdown.showBackupDialog(onImport)
+      $importArea()!.value = blob
+      $btn(".srr-backup-import-btn")!.click()
+      expect(isOpen()).toBe(false)
+      expect(onImport).toHaveBeenCalledTimes(1)
+      // data was merged
+      const seen = JSON.parse(localStorage.getItem("srr-seen")!)
+      expect(seen["feed:2"]).toBe(10)
+   })
+
+   it("invalid JSON in the import area shows an error message and keeps the dialog open", () => {
+      dropdown.showBackupDialog()
+      $importArea()!.value = "not valid json"
+      $btn(".srr-backup-import-btn")!.click()
+      expect(isOpen()).toBe(true)
+      const errEl = $dialog().querySelector(".srr-backup-import-error")
+      expect(errEl).not.toBeNull()
+      expect(errEl!.textContent).toBeTruthy()
+   })
+
+   it("prefs checkbox defaults to unchecked and gates pref import", () => {
+      const blob = JSON.stringify({ v: 1, seen: {}, saved: [], unreadOnly: true, imgProxy: "https://p.example/?url=" })
+      dropdown.showBackupDialog()
+      // checkbox must default to unchecked (off)
+      expect($prefsCheck()!.checked).toBe(false)
+      $importArea()!.value = blob
+      $btn(".srr-backup-import-btn")!.click()
+      // prefs NOT applied because checkbox was off
+      expect(localStorage.getItem("srr-unread-only")).toBeNull()
+      expect(localStorage.getItem("srr-img-proxy") ?? "").toBe("")
+   })
+
+   it("checking prefs checkbox applies preferences on import", () => {
+      const blob = JSON.stringify({ v: 1, seen: {}, saved: [], unreadOnly: true, imgProxy: "https://p.example/?url=" })
+      dropdown.showBackupDialog()
+      $prefsCheck()!.checked = true
+      $importArea()!.value = blob
+      $btn(".srr-backup-import-btn")!.click()
+      expect(localStorage.getItem("srr-unread-only")).toBe("1")
+      expect(localStorage.getItem("srr-img-proxy")).toBe("https://p.example/?url=")
+   })
+
+   it("Escape closes the dialog without importing", () => {
+      dropdown.showBackupDialog()
+      $dialog().dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }))
+      expect(isOpen()).toBe(false)
+   })
+
+   it("a backdrop click closes the dialog; a click on the card does not", () => {
+      dropdown.showBackupDialog()
+      $dialog()
+         .querySelector(".srr-backup-card")!
+         .dispatchEvent(new MouseEvent("mousedown", { bubbles: true }))
+      expect(isOpen()).toBe(true)
+      $dialog().dispatchEvent(new MouseEvent("mousedown", { bubbles: true }))
+      expect(isOpen()).toBe(false)
+   })
+
+   it("re-opening keeps exactly one editor body (no stacking)", () => {
+      dropdown.showBackupDialog()
+      $dialog().dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }))
+      dropdown.showBackupDialog()
+      expect($dialog().querySelectorAll(".srr-backup-body").length).toBe(1)
+      expect($dialog().querySelectorAll(".srr-backup-export").length).toBe(1)
+   })
+
+   it("restores focus to the opener on close", () => {
+      const overflowBtn = document.querySelector<HTMLButtonElement>(".srr-overflow")!
+      overflowBtn.focus()
+      dropdown.showBackupDialog()
+      $dialog().dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }))
+      expect(document.activeElement).toBe(overflowBtn)
+   })
+})
+
 // Title search no longer lives in a dropdown — it's a list filter mode
 // (nav "q:<query>") driven by the pinned search bar in app.ts. The search SET
 // behavior is covered in nav.test.ts (search filter mode) and the search index
