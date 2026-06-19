@@ -2018,7 +2018,7 @@ describe("searchMore supersession guard in catch (#3)", () => {
       expect(bFirst.hits.map((h) => h.chron)).toEqual([5])
 
       // Now reject A's second pull AFTER B is fully initialized.
-      // A's catch (term="bug3a") fires with searchTerm="bug3b" → must NOT set searchDone.
+      // A's catch (term="bug3a") fires with term="bug3b" → must NOT set searchDone.
       rejectA(new Error("A shard failed"))
       await aSecondPromise.catch(() => {}) // let A's catch run
 
