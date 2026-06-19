@@ -469,8 +469,8 @@ export async function render(center = false, onInteractive?: () => void): Promis
    }
 
    // Search is always newest-top (listAnchor returns -1 for search) and discovers
-   // its rows by streaming nav's lazy hit set — a different path from the feed
-   // walk + skeleton-fill below.
+   // its rows by walking nav's pre-loaded hit-set snapshot — a different path from
+   // the feed walk + skeleton-fill below.
    if (nav.isSearchFilter()) return renderSearch(my, onInteractive)
 
    const anchor = await nav.listAnchor()
