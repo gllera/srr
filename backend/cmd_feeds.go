@@ -50,19 +50,25 @@ func normalizeFeed(ch *Feed) error {
 	return validateTag(ch.Tag)
 }
 
-// validateTag rejects a numeric-only tag. The frontend filter resolves an
-// all-digits token as a feed id, so such a tag would silently show every
-// article instead of the tagged set (and could collide with a real id).
+// validateTag rejects tags that OPML import would mutate or refuse, so that
+// export → import -a is always identity. It splits on "/" and validates each
+// segment through normalizeGroupName (same rules import applies): the segment
+// must survive normalization unchanged — no uppercasing, spaces, dashes,
+// non-ASCII letters, or empty/numeric-only segments allowed.
 func validateTag(tag string) error {
 	if tag == "" {
 		return nil
 	}
-	for _, r := range tag {
-		if r < '0' || r > '9' {
-			return nil
+	for _, seg := range strings.Split(tag, "/") {
+		norm, err := normalizeGroupName(seg)
+		if err != nil {
+			return fmt.Errorf("tag %q: segment %q: %w", tag, seg, err)
+		}
+		if norm != seg {
+			return fmt.Errorf("tag %q: segment %q is not normalized (OPML import would change it to %q)", tag, seg, norm)
 		}
 	}
-	return fmt.Errorf("tag %q cannot be numeric-only (it would be read as a feed id)", tag)
+	return nil
 }
 
 type AddCmd struct {

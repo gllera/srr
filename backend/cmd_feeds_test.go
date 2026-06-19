@@ -705,6 +705,42 @@ func TestFeedEditFeedNotFound(t *testing.T) {
 	wantErr(t, (&EditCmd{ID: 99}).Run(), "not found")
 }
 
+// TestValidateTag verifies that validateTag only accepts tags that survive
+// normalizeGroupName unchanged on every /-segment — ensuring export→import -a
+// is identity (B2).
+func TestValidateTag(t *testing.T) {
+	// Tags that should be REJECTED (import would mutate or error on them).
+	bad := []string{
+		"Tech-News", // dash → underscore by normalizeGroupName
+		"My Blog",   // space → underscore
+		"UPPER",     // uppercase lowercased
+		"tech/2024", // second segment is numeric-only
+		"tech/",     // trailing slash → empty segment
+		"/tech",     // leading slash → empty segment
+		"café/news", // non-ASCII letter dropped → segment mutated
+	}
+	for _, tag := range bad {
+		if err := validateTag(tag); err == nil {
+			t.Errorf("validateTag(%q) = nil, want error", tag)
+		}
+	}
+
+	// Tags that should be ACCEPTED (already normalized; no mutation by import).
+	good := []string{
+		"",              // empty = no tag, always ok
+		"tech",          // single lower-only segment
+		"news",          // single lower-only segment
+		"tech_news",     // underscores fine
+		"tech/news",     // two valid segments
+		"tech/go_blogs", // nested valid segments
+	}
+	for _, tag := range good {
+		if err := validateTag(tag); err != nil {
+			t.Errorf("validateTag(%q) = %v, want nil", tag, err)
+		}
+	}
+}
+
 func TestFeedEditApplyFailsPreservesTempfile(t *testing.T) {
 	setupFeedsTestDB(t)
 	// Editor writes valid JSON with an invalid URL — passes JSON parse
