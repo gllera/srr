@@ -2,10 +2,85 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/binary"
+	"encoding/json"
 	"strings"
 	"testing"
 )
+
+// buildCoreGz encodes a DBCore as a gzip-compressed JSON blob, suitable for
+// use as a fake db.gz keyGetter in loadCore tests.
+func buildCoreGz(t *testing.T, core DBCore) []byte {
+	t.Helper()
+	raw, err := json.Marshal(core)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write(raw); err != nil {
+		t.Fatalf("gz.Write: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gz.Close: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// fakeFetcher returns a keyGetter that serves a fixed db.gz blob and reports
+// "not found" for any other key, so loadCore tests never reach loadIdxPacks.
+func fakeFetcher(dbGz []byte) keyGetter {
+	return func(key string) ([]byte, error) {
+		if key != dbFileKey {
+			return nil, nil
+		}
+		data, err := gunzip(bytes.NewReader(dbGz))
+		if err != nil {
+			return nil, err
+		}
+		return data, nil
+	}
+}
+
+// B8: a db.gz with total_art < 0 must be rejected by loadCore with a clear
+// error — without panicking. Before the fix, loadCore returns nil error and
+// the corrupt core reaches loadIdxPacks → parseIdxPack with a negative
+// packSize → makeslice panic. After the fix, loadCore itself returns an error.
+func TestLoadCoreRejectsNegativeTotalArticles(t *testing.T) {
+	core := DBCore{TotalArticles: -5, NextPackID: 1, Seq: 1}
+	gz := buildCoreGz(t, core)
+	_, err := loadCore(fakeFetcher(gz))
+	if err == nil {
+		t.Fatal("expected error for negative total_art, got nil")
+	}
+	if !strings.Contains(err.Error(), "total_art") {
+		t.Errorf("error %q does not mention total_art", err.Error())
+	}
+}
+
+// B11: a db.gz with a feed id >= feedIDCeiling must be rejected by loadCore
+// with a clear error — without allocating a ~4 GB ownFeedCounts slice.
+// Before the fix, loadCore returns nil error; the hostile id passes through
+// feedSlots → parseIdxPack, which allocates make([]uint32, id+1). After the
+// fix, loadCore rejects the id before any pack loading.
+func TestLoadCoreRejectsOversizedFeedID(t *testing.T) {
+	oversized := feedIDCeiling + 1 // e.g. 65537 — beyond the u16 ceiling
+	core := DBCore{
+		TotalArticles: 1,
+		NextPackID:    1,
+		Seq:           1,
+		Feeds:         map[int]*Feed{oversized: {URL: "https://example.com/x"}},
+	}
+	gz := buildCoreGz(t, core)
+	_, err := loadCore(fakeFetcher(gz))
+	if err == nil {
+		t.Fatal("expected error for feed id >= feedIDCeiling, got nil")
+	}
+	if !strings.Contains(err.Error(), "feed id") {
+		t.Errorf("error %q does not mention feed id", err.Error())
+	}
+}
 
 // buildIdxRaw assembles the raw (uncompressed) bytes of one idx pack:
 // variable-length header ‖ 2-byte feed_id:u16 LE entries ‖ u16 LE boundary
