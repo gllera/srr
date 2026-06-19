@@ -75,6 +75,9 @@ export interface IFeedWire {
    wm?: number // Watermark
    bg?: number[] // BoundaryGUIDs
    ferr?: string // FetchError
+   last_ok?: number // LastOK
+   fail_streak?: number // FailStreak
+   last_new?: number // LastNew
    tag?: string // Tag
    pipe?: string[] // Pipe
    ingest?: string // Ingest
