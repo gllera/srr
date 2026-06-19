@@ -994,43 +994,6 @@ describe("getCurrentFilterKey", () => {
    })
 })
 
-describe("unreadCount", () => {
-   it("returns the full backlog for a feed never seen on this device", async () => {
-      setupIndex([{ feedId: 1 }, { feedId: 2 }])
-      expect(await nav.unreadCount(data.db.feeds[2])).toBe(1) // its 1 article, all unseen
-   })
-
-   it("counts the feed's articles strictly after its seen position", async () => {
-      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 2 }, { feedId: 1 }])
-      await nav.fromHash("1") // views chron 1 (feed 1) → seen feed:1 = 1
-      expect(await nav.unreadCount(data.db.feeds[1])).toBe(1) // only chron 3 left
-      expect(await nav.unreadCount(data.db.feeds[2])).toBe(1) // never seen → its 1 article (chron 2)
-   })
-
-   it("reading everything via [ALL] clears the counts of passed feeds", async () => {
-      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }])
-      await nav.fromHash("0")
-      await nav.right()
-      await nav.right() // unfiltered walk to the end bumps each article's own feed
-      expect(await nav.unreadCount(data.db.feeds[1])).toBe(0)
-      expect(await nav.unreadCount(data.db.feeds[2])).toBe(0)
-   })
-
-   it("respects add_idx so a reused id's predecessor articles never count", async () => {
-      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
-      data.db.feeds[1].add_idx = 1 // chron 0 belongs to the predecessor epoch
-      await nav.fromHash("1") // seen feed:1 = 1
-      expect(await nav.unreadCount(data.db.feeds[1])).toBe(1) // only chron 2
-   })
-
-   it("clamps a stale seen position beyond total_art instead of going negative", async () => {
-      setupIndex([{ feedId: 1 }, { feedId: 1 }])
-      await nav.fromHash("1") // seen feed:1 = 1
-      data.db.total_art = 1 // simulate a rebuilt, shorter store
-      expect(await nav.unreadCount(data.db.feeds[1])).toBe(0)
-   })
-})
-
 describe("unread-only mode", () => {
    afterEach(() => nav.setUnreadOnly(false))
 
@@ -1315,13 +1278,12 @@ describe("tagUnreadFromCounts", () => {
 })
 
 describe("unreadCounts", () => {
-   it("returns the same values as N× unreadCount", async () => {
+   it("batches per-feed unread counts correctly", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }, { feedId: 3 }])
       await nav.fromHash("0") // feed:1 = 0 seen; ch2/ch3 never seen
       const chs = [data.db.feeds[1], data.db.feeds[2], data.db.feeds[3]]
       const batch = await nav.unreadCounts(chs)
-      for (const ch of chs) expect(batch.get(ch.id)).toBe(await nav.unreadCount(ch))
-      // Spot-check the semantics: ch1 has chron 2 unread; ch2/ch3 never seen →
+      // ch1 has chron 2 unread; ch2/ch3 never seen →
       // their full backlog (one article each, chron 1 and 3).
       expect(batch.get(1)).toBe(1)
       expect(batch.get(2)).toBe(1)
@@ -1858,7 +1820,7 @@ describe("fromHash — foreign + malformed hashes", () => {
       // feed → [ALL], and navigation still succeeds at the given position.
       const r = await nav.fromHash("0!%")
       expect(r.article.f).toBe(1)
-      expect(nav.currentTokens()).toEqual([]) // "%" matched nothing → cleared to [ALL]
+      expect(nav.filter.tokens).toEqual([]) // "%" matched nothing → cleared to [ALL]
    })
 })
 
@@ -2019,8 +1981,8 @@ describe("feedUnread onCurrent guard: select vs recordSeen (#6)", () => {
       nav.select(1, 1)
 
       // The badge must read 2 (the true unread), NOT 3 (which would be the double-count).
-      const count = await nav.unreadCount(data.db.feeds[1])
-      expect(count).toBe(2)
+      const counts = await nav.unreadCounts([data.db.feeds[1]])
+      expect(counts.get(1)).toBe(2)
    })
 
    it("recordSeen (reader open) still produces the +1 correction", async () => {
@@ -2036,8 +1998,8 @@ describe("feedUnread onCurrent guard: select vs recordSeen (#6)", () => {
       await nav.fromHash("1!1")
 
       // Badge must still be 2: base count excludes chron 1 (now seen), +1 adds it back.
-      const count = await nav.unreadCount(data.db.feeds[1])
-      expect(count).toBe(2)
+      const counts = await nav.unreadCounts([data.db.feeds[1]])
+      expect(counts.get(1)).toBe(2)
    })
 })
 

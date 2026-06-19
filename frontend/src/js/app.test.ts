@@ -47,7 +47,6 @@ const nav = vi.hoisted(() => {
                }
             })
       },
-      currentTokens: vi.fn(() => [] as string[]),
       getCurrentFilterKey: vi.fn(() => ""),
       filterLabel: vi.fn((key: string) =>
          key === "" ? "All" : key === "~saved" ? "★ Saved" : /^\d+$/.test(key) ? data.feedTitle(Number(key)) : key,
