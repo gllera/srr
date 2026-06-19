@@ -139,7 +139,7 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 		return "", fmt.Errorf("asset %q exceeds %d bytes (size %d)", localname, a.maxBytes, len(payload))
 	}
 
-	if err := a.be.Put(ctx, key, bytes.NewReader(payload), true); err != nil {
+	if err := a.be.AtomicPut(ctx, key, bytes.NewReader(payload)); err != nil {
 		return "", fmt.Errorf("store asset %q: %w", key, err)
 	}
 	return key, nil

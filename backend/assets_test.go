@@ -270,3 +270,66 @@ func TestUploadCacheRefMissingFile(t *testing.T) {
 		t.Fatal("expected error for missing file, got nil")
 	}
 }
+
+// failMidWriteBackend wraps a real Backend and fails AtomicPut after writing
+// writeOK bytes, simulating a mid-stream crash or I/O error.  Get/Put/Rm/Close
+// delegate to the inner backend unchanged so the existence check works normally.
+type failMidWriteBackend struct {
+	inner    store.Backend
+	writeOK  int64 // bytes to copy before injecting an error
+	atomicOK bool  // once set, AtomicPut succeeds (used to let the seeded Put through)
+}
+
+var errMidWrite = io.ErrUnexpectedEOF
+
+func (f *failMidWriteBackend) Get(ctx context.Context, key string, ignoreMissing bool) (io.ReadCloser, error) {
+	return f.inner.Get(ctx, key, ignoreMissing)
+}
+func (f *failMidWriteBackend) Put(ctx context.Context, key string, r io.Reader, ignoreExisting bool) error {
+	return f.inner.Put(ctx, key, r, ignoreExisting)
+}
+func (f *failMidWriteBackend) AtomicPut(ctx context.Context, key string, r io.Reader) error {
+	if f.atomicOK {
+		return f.inner.AtomicPut(ctx, key, r)
+	}
+	// Drain exactly writeOK bytes then return an error, simulating a mid-write failure.
+	buf := make([]byte, f.writeOK)
+	io.ReadFull(r, buf) //nolint:errcheck — we intentionally discard the partial read
+	return errMidWrite
+}
+func (f *failMidWriteBackend) Rm(ctx context.Context, key string) error {
+	return f.inner.Rm(ctx, key)
+}
+func (f *failMidWriteBackend) Close() error { return f.inner.Close() }
+
+// TestUploadCacheRefNoPartialFileOnAtomicPutFailure is the B6 regression test:
+// a mid-upload failure must leave no partial object at the immutable
+// content-hash key.  With AtomicPut the write goes to a .tmp file; on failure
+// the tmp is abandoned and the final key is never created, so the next
+// existence check returns "not found" rather than truncated bytes.
+func TestUploadCacheRefNoPartialFileOnAtomicPutFailure(t *testing.T) {
+	inner := tempStore(t)
+	be := &failMidWriteBackend{inner: inner, writeOK: 4} // fail after 4 bytes
+
+	af := newAssetFetcher(be, 1024, "")
+	cacheDir := t.TempDir()
+	// Content longer than writeOK so the mid-stream failure fires.
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+
+	_, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	if err == nil {
+		t.Fatal("expected upload error, got nil")
+	}
+
+	// The immutable key must NOT exist — not even partially.
+	sum := sha256.Sum256([]byte(jpegBytes))
+	key := contentHashKey(".jpg", sum)
+	rc, getErr := inner.Get(context.Background(), key, true)
+	if getErr != nil {
+		t.Fatalf("Get after failed upload: %v", getErr)
+	}
+	if rc != nil {
+		rc.Close()
+		t.Errorf("partial object found at immutable key %q after failed upload; AtomicPut should prevent this", key)
+	}
+}
