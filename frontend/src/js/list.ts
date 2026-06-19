@@ -563,68 +563,63 @@ export async function render(center = false, onInteractive?: () => void): Promis
    if (anchoredMid) reassertAnchor(seed, center && seed === nav.anchorChron())
 }
 
-// Search render: matches are discovered newest-first by nav's lazy stream and
-// arrive WITH their content, so rows are appended content-complete (no skeleton)
-// as each searchMore() batch lands. Pulls only until the viewport is filled; the
-// rest streams in via fetchOlder when the bottom sentinel nears (pump/observe).
-// Search suppresses day dividers (relabelDividers returns early in search mode),
-// so none are built here.
+// Search render: the full hit-set is pre-loaded into nav's snapshot via
+// feedLeft/feedRight → ensureSearchSet (search.ts caches results per query).
+// Rows use the skeleton → loadMeta fill pattern like the regular feed render;
+// meta packs are already in memory from the search scan, so fills land quickly.
+// Search suppresses day dividers (relabelDividers returns early in search mode).
 async function renderSearch(my: object, onInteractive?: () => void): Promise<void> {
-   // The hit stream is shared with reader stepping (ensureSearchCovers advances it
-   // toward older hits). A full search render must show the NEWEST matches at the
-   // top regardless of how far that stepping consumed the iterator, so restart it
-   // here — otherwise streaming searchMore() forward would render only the unpulled
-   // older tail, or the empty state once the stream is drained/capped. The shards,
-   // summary and latest tail stay cached in search.ts, so the restart re-fetches
-   // nothing; it just re-walks cached bytes from newest-first.
-   nav.resetSearchStream()
-   rowsEl = el("div", "srr-list-rows")
-   topSentinel = el("div", "srr-list-sentinel")
-   bottomSentinel = el("div", "srr-list-sentinel")
-   container.append(topSentinel, rowsEl, bottomSentinel)
-   exhaustedTop = true // the newest hit is the top of a search list; nothing newer
-   const seen = nav.getSeenMap()
-   let appended = 0
-   let painted = false
-   while (appended < BATCH) {
-      const { hits, done } = await nav.searchMore()
-      if (my !== tok) return
-      if (hits.length && rowsEl) {
-         // The newest hit tops the search list — the article the reader opens for
-         // this query (switchFilter → last()). Select it on the first batch so the
-         // list highlight tracks the view (the shared cursor), before the rows are
-         // built so rowEl paints .srr-row-current on it.
-         if (newest === -1 && hits[0].chron !== nav.currentChron()) nav.select(hits[0].chron, hits[0].f)
-         const fresh = hits.map((h) => rowEl(h.chron, { f: h.f, w: h.w, t: h.t }, seen))
-         fresh.forEach((r) => rowsEl!.appendChild(r))
-         pinHeights(fresh)
-         appended += fresh.length
-         if (newest === -1) newest = hits[0].chron
-         oldest = hits[hits.length - 1].chron
-         if (!painted) {
-            painted = true
-            window.scrollTo(0, 0)
-            notifyScroll()
-            userScrolled = false
-            onInteractive?.()
-         }
-      }
-      if (done) {
-         exhaustedBottom = true
-         break
-      }
-   }
-   if (appended === 0) {
-      // No matches: tear down the empty rows container and show the empty state.
-      container.replaceChildren()
-      rowsEl = null
+   // Walk newest-first from the total_art ceiling to get the first batch.
+   const seed = await nav.feedLeft(data.db.total_art - 1)
+   if (my !== tok) return
+   if (seed === -1) {
       emptyState()
       onInteractive?.()
       return
    }
+   // The newest hit is the cursor position for a search render (the article
+   // switchFilter → last() opens); select it before building rows so
+   // rowEl paints .srr-row-current on it.
+   if (seed !== nav.currentChron()) nav.select(seed, await data.getFeedId(seed))
+   if (my !== tok) return
+
+   const older = await walk(my, seed, BATCH, "older")
+   if (my !== tok) return
+   if (older.chrons.length === 0) {
+      emptyState()
+      onInteractive?.()
+      return
+   }
+   oldest = older.chrons[older.chrons.length - 1]
+   newest = older.chrons[0]
+   exhaustedBottom = older.exhausted || oldest === 0
+   exhaustedTop = true // nothing newer than the newest hit
+
+   const seen = nav.getSeenMap()
+   rowsEl = el("div", "srr-list-rows")
+   topSentinel = el("div", "srr-list-sentinel")
+   bottomSentinel = el("div", "srr-list-sentinel")
+   const frag = document.createDocumentFragment()
+   const rows = older.chrons.map((c) => rowEl(c, null, seen))
+   rows.forEach((r) => frag.appendChild(r))
+   rowsEl.appendChild(frag)
+   container.append(topSentinel, rowsEl, bottomSentinel)
    syncBottomTerminus()
    syncTopTerminus()
+   window.scrollTo(0, 0)
+   notifyScroll()
+   userScrolled = false
+   onInteractive?.()
    observe(my)
+
+   const fillOrder = older.chrons.map((_, k) => k) // newest-first fill order (anchor = 0)
+   await runPool(fillOrder, FILL_CONCURRENCY, async (k) => {
+      if (my !== tok) return
+      const card = await data.loadMeta(older.chrons[k])
+      if (my !== tok) return
+      fillRow(rows[k], card, seen)
+      pinHeights([rows[k]])
+   })
 }
 
 // Re-show an already-built list (same filter). When the reader's article is
@@ -737,21 +732,6 @@ async function fetchOlder(my: object): Promise<void> {
    if (my !== tok || exhaustedBottom || loadingBottom || !rowsEl) return
    loadingBottom = true
    try {
-      // Search pages by pulling the lazy hit stream — content-complete rows, no
-      // skeletons, no dividers (suppressed in search mode).
-      if (nav.isSearchFilter()) {
-         const { hits, done } = await nav.searchMore()
-         if (my !== tok) return
-         if (hits.length && rowsEl) {
-            const seen = nav.getSeenMap()
-            const fresh = hits.map((h) => rowEl(h.chron, { f: h.f, w: h.w, t: h.t }, seen))
-            fresh.forEach((r) => rowsEl!.appendChild(r))
-            pinHeights(fresh)
-            oldest = hits[hits.length - 1].chron
-         }
-         if (done) exhaustedBottom = true
-         return
-      }
       const { chrons, exhausted } = await walk(my, oldest - 1, BATCH, "older")
       if (my !== tok) return
       if (chrons.length === 0) {

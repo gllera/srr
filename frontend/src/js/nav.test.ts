@@ -1533,6 +1533,31 @@ describe("search filter mode (q:<query>)", () => {
 
    beforeEach(() => {
       searchMod.search.mockReset()
+      // loadHits is the primary seam nav calls; reset it so each test gets a clean
+      // call count. The default impl (lines 53–73 of the hoisted mock) calls
+      // search() internally, so tests can drive via search.mockImplementation.
+      searchMod.loadHits.mockReset()
+      searchMod.loadHits.mockImplementation(async (query: string, cap: number) => {
+         const seen = new Set<number>()
+         const chrons: number[] = []
+         let truncated = false
+         if (query) {
+            outer: for await (const batch of searchMod.search(query, cap + 1) as AsyncGenerator<{ chron: number }[]>) {
+               for (const h of batch) {
+                  if (chrons.length >= cap) {
+                     truncated = true
+                     break outer
+                  }
+                  if (!seen.has(h.chron)) {
+                     seen.add(h.chron)
+                     chrons.push(h.chron)
+                  }
+               }
+            }
+         }
+         chrons.sort((a, b) => a - b)
+         return { chrons, truncated }
+      })
       searchMod.available.mockReturnValue(true)
       searchMod.shortQuery.mockReturnValue(false)
    })
@@ -1655,127 +1680,87 @@ describe("search filter mode (q:<query>)", () => {
    })
 })
 
-describe("search lazy stream (incremental pull)", () => {
-   const hit = (c: number) => ({ chron: c, f: 1, w: 1000 + c, t: "t" })
-   // newest-first, ONE hit per batch, so a partial walk proves laziness.
-   const genPerBatch = (chronsDesc: number[]) =>
-      async function* () {
-         for (const c of chronsDesc) yield [hit(c)]
-      }
+describe("search hit-set snapshot (ensureSearchSet / loadHits)", () => {
+   // The pull/dedup/cap loop now lives in search.loadHits (mocked by searchMod.loadHits).
+   // Nav's role: await loadHits once per query, store the snapshot in searchSorted/searchSet,
+   // and discard a stale result when the active query changed while awaiting.
 
    beforeEach(() => {
       searchMod.search.mockReset()
+      searchMod.loadHits.mockReset()
       searchMod.available.mockReturnValue(true)
       searchMod.shortQuery.mockReturnValue(false)
    })
 
-   it("searchMore pulls one batch at a time, newest-first", async () => {
+   it("feedLeft/feedRight load the full set once via loadHits then use the snapshot", async () => {
       setupIndex(Array.from({ length: 60 }, () => ({ feedId: 1 })))
-      searchMod.search.mockImplementation(genPerBatch([55, 50, 45]))
-      nav.applyFilter([nav.SEARCH_PREFIX + "spin1"])
-      const a = await nav.searchMore()
-      expect(a.hits.map((h) => h.chron)).toEqual([55])
-      expect(a.done).toBe(false)
-      const b = await nav.searchMore()
-      expect(b.hits.map((h) => h.chron)).toEqual([50])
-      expect(nav.filter.matches(1, 55)).toBe(true)
-      expect(nav.filter.matches(1, 45)).toBe(false) // not pulled yet
-   })
-
-   it("feedLeft auto-pulls only down to the requested edge", async () => {
-      setupIndex(Array.from({ length: 60 }, () => ({ feedId: 1 })))
-      searchMod.search.mockImplementation(genPerBatch([55, 50, 45, 40, 35]))
-      nav.applyFilter([nav.SEARCH_PREFIX + "spin2"])
-      expect(await nav.feedLeft(47)).toBe(45) // pulls 55,50,45 then stops
-      expect(searchMod.search).toHaveBeenCalledTimes(1)
-      expect(nav.filter.matches(1, 40)).toBe(false) // 40 untouched
+      searchMod.loadHits.mockResolvedValue({ chrons: [45, 50, 55], truncated: false })
+      nav.applyFilter([nav.SEARCH_PREFIX + "snap1"])
+      expect(await nav.feedLeft(57)).toBe(55)
+      expect(await nav.feedLeft(54)).toBe(50)
+      expect(await nav.feedLeft(49)).toBe(45)
+      expect(await nav.feedLeft(44)).toBe(-1)
+      expect(searchMod.loadHits).toHaveBeenCalledTimes(1) // single load, snapshot reused
    })
 
    it("feedRight returns the smallest hit >= from", async () => {
       setupIndex(Array.from({ length: 60 }, () => ({ feedId: 1 })))
-      searchMod.search.mockImplementation(genPerBatch([55, 50, 45]))
-      nav.applyFilter([nav.SEARCH_PREFIX + "spin3"])
+      searchMod.loadHits.mockResolvedValue({ chrons: [45, 50, 55], truncated: false })
+      nav.applyFilter([nav.SEARCH_PREFIX + "snap2"])
       expect(await nav.feedRight(46)).toBe(50)
+      expect(searchMod.loadHits).toHaveBeenCalledTimes(1)
    })
 
-   it("resetSearchStream rewinds the shared iterator to the newest hit", async () => {
-      // The iterator is shared between list rendering and reader stepping. After
-      // stepping advances it toward older hits, a fresh list render rewinds it so it
-      // streams newest-first again (otherwise it would yield only the older tail, or
-      // nothing once drained). The rewind re-creates the generator from the start.
+   it("resetSearchStream clears the snapshot; next feedLeft reloads via loadHits", async () => {
       setupIndex(Array.from({ length: 60 }, () => ({ feedId: 1 })))
-      searchMod.search.mockImplementation(genPerBatch([55, 50, 45]))
-      nav.applyFilter([nav.SEARCH_PREFIX + "rewind"])
-      expect((await nav.searchMore()).hits.map((h) => h.chron)).toEqual([55])
-      expect((await nav.searchMore()).hits.map((h) => h.chron)).toEqual([50]) // advanced past 55
-      expect(searchMod.search).toHaveBeenCalledTimes(1)
+      searchMod.loadHits.mockResolvedValue({ chrons: [45, 55], truncated: false })
+      nav.applyFilter([nav.SEARCH_PREFIX + "snap3"])
+      expect(await nav.feedLeft(57)).toBe(55) // snapshot loaded
+      expect(nav.filter.matches(1, 55)).toBe(true)
 
       nav.resetSearchStream()
       expect(nav.filter.matches(1, 55)).toBe(false) // snapshot cleared
-      expect((await nav.searchMore()).hits.map((h) => h.chron)).toEqual([55]) // newest again
-      expect(searchMod.search).toHaveBeenCalledTimes(2) // generator re-created
+      expect(await nav.feedLeft(57)).toBe(55) // reloads from loadHits
+      expect(searchMod.loadHits).toHaveBeenCalledTimes(2)
    })
 
-   it("an empty query never calls search.search", async () => {
+   it("an empty query never calls loadHits and has no hits", async () => {
       setupIndex(Array.from({ length: 5 }, () => ({ feedId: 1 })))
-      nav.applyFilter([nav.SEARCH_PREFIX])
-      const r = await nav.searchMore()
-      expect(r.done).toBe(true)
-      expect(searchMod.search).not.toHaveBeenCalled()
+      nav.applyFilter([nav.SEARCH_PREFIX]) // empty query
+      expect(await nav.feedLeft(4)).toBe(-1)
+      expect(searchMod.loadHits).not.toHaveBeenCalled()
    })
 
-   it("caps the accumulated set at SEARCH_CAP across MULTIPLE batches and flags truncation", async () => {
-      // The cap is per-stream, not per-batch: two 300-hit batches (600 > 500) must
-      // keep only the newest 500 (chrons 599..100) and flip truncated. The witness
-      // (chron 99) is seen but dropped, so it's NOT navigable.
+   it("cap and truncation are delegated to loadHits (mock returns them faithfully)", async () => {
       setupIndex(Array.from({ length: 600 }, () => ({ feedId: 1 })))
-      searchMod.search.mockImplementation(async function* () {
-         yield Array.from({ length: 300 }, (_, i) => hit(599 - i)) // 599..300
-         yield Array.from({ length: 300 }, (_, i) => hit(299 - i)) // 299..0
-      })
+      // loadHits mock already applies the cap+dedup; return a truncated set
+      const chrons = Array.from({ length: 500 }, (_, i) => i + 100) // 100..599
+      searchMod.loadHits.mockResolvedValue({ chrons, truncated: true })
       nav.applyFilter([nav.SEARCH_PREFIX + "capn"])
-      expect(await nav.feedLeft(0)).toBe(-1) // walked the whole capped stream; 0 is below the window
+      expect(await nav.feedLeft(0)).toBe(-1) // below the window
       expect(nav.searchTruncated()).toBe(true)
       expect(await nav.feedLeft(599)).toBe(599) // newest kept
       expect(await nav.feedLeft(100)).toBe(100) // oldest kept
-      expect(await nav.feedLeft(99)).toBe(-1) // the witness 99 was dropped by the cap
+      expect(await nav.feedLeft(99)).toBe(-1) // dropped by cap
    })
 
-   it("dedups a chron that recurs across batches (no phantom, no double-count)", async () => {
+   it("dedup is handled by loadHits; nav walks a clean sorted set", async () => {
       setupIndex(Array.from({ length: 20 }, () => ({ feedId: 1 })))
-      searchMod.search.mockImplementation(async function* () {
-         yield [hit(15), hit(9)]
-         yield [hit(9), hit(3)] // 9 recurs (e.g. overlapping bloom candidates)
-      })
+      searchMod.loadHits.mockResolvedValue({ chrons: [3, 9, 15], truncated: false })
       nav.applyFilter([nav.SEARCH_PREFIX + "dedup"])
-      // Walk newest→oldest: 15 → 9 → 3 → none. 9 appears exactly once.
       expect(await nav.feedLeft(19)).toBe(15)
       expect(await nav.feedLeft(14)).toBe(9)
       expect(await nav.feedLeft(8)).toBe(3)
       expect(await nav.feedLeft(2)).toBe(-1)
-      // And the right walk doesn't stutter on the duplicate either.
       expect(await nav.feedRight(10)).toBe(15)
       expect(await nav.feedRight(4)).toBe(9)
    })
 
-   it("a generator error mid-stream degrades to what was pulled, no throw", async () => {
-      setupIndex(Array.from({ length: 20 }, () => ({ feedId: 1 })))
-      searchMod.search.mockImplementation(async function* () {
-         yield [hit(15)]
-         throw new Error("shard fetch failed")
-      })
-      nav.applyFilter([nav.SEARCH_PREFIX + "boom"])
-      // feedLeft pulls the first batch (15), then the next pull throws → done.
-      // It must resolve (not reject) with what was collected.
-      expect(await nav.feedLeft(19)).toBe(15)
-      expect(await nav.feedLeft(8)).toBe(-1) // nothing older was pulled; stream is done
-   })
-
-   it("fromHash deep-link pulls the lazy stream down to a deep hit, else snaps newest", async () => {
+   it("fromHash deep-link loads all hits then honors a matching position", async () => {
       setupIndex(Array.from({ length: 60 }, () => ({ feedId: 1 })))
-      searchMod.search.mockImplementation(genPerBatch([55, 40, 25, 10])) // one per batch
+      searchMod.loadHits.mockResolvedValue({ chrons: [10, 25, 40, 55], truncated: false })
       await nav.fromHash("25!" + nav.SEARCH_PREFIX + "deep1")
-      expect(nav.currentChron()).toBe(25) // honored — pulled across 3 batches (55,40,25)
+      expect(nav.currentChron()).toBe(25) // honored
       await nav.fromHash("30!" + nav.SEARCH_PREFIX + "deep2")
       expect(nav.currentChron()).toBe(55) // 30 isn't a hit → snaps to the newest
    })
@@ -1969,63 +1954,50 @@ describe("unseen-only — fully-caught-up filter yields no match", () => {
    })
 })
 
-// ── Bug #3: search supersession guard in catch ───────────────────────────────
-describe("searchMore supersession guard in catch (#3)", () => {
+// ── Bug #3 (recast): ensureSearchSet supersession guard ─────────────────────
+// With loadHits, the guard is: capture term at call entry; after awaiting,
+// discard if activeQuery() changed. A late B→A where B's load unblocks after A
+// re-entered must not overwrite A's freshly-committed snapshot with B's stale one.
+describe("ensureSearchSet supersession guard (#3)", () => {
    beforeEach(() => {
-      searchMod.search.mockReset()
+      searchMod.loadHits.mockReset()
       searchMod.available.mockReturnValue(true)
       searchMod.shortQuery.mockReturnValue(false)
    })
 
-   it("a superseded query's catch does NOT set searchDone for the active query", async () => {
-      // Scenario: query A's generator has yielded one batch (so searchIterFor = A),
-      // then query B takes over and also calls searchMore() (searchIterFor = B, a
-      // new iterator). A's SECOND pull (still pending in the background) rejects.
-      // A's catch must NOT write searchDone for B (B's stream should still advance).
+   it("a superseded load's result does NOT overwrite the active query's snapshot", async () => {
+      // Scenario: A loads fine; B's load is in flight when A returns.
+      // B's promise resolves late — after A has re-entered. The guard must discard B's result.
       setupIndex(Array.from({ length: 10 }, () => ({ feedId: 1 })))
 
-      // A yields immediately on the first pull; its SECOND pull blocks then rejects.
-      let rejectA!: (err: Error) => void
-      const aSecondPull = new Promise<never>((_, rej) => (rejectA = rej))
+      let releaseB!: () => void
+      const bBlocked = new Promise<void>((r) => (releaseB = r))
 
-      let aCallCount = 0
-      searchMod.search.mockImplementation(async function* () {
-         aCallCount++
-         if (aCallCount === 1) {
-            // Query A's generator: first batch immediate, second rejects.
-            yield [{ chron: 7, f: 1, w: 1000, t: "t" }]
-            await aSecondPull // blocks on second .next()
-         } else {
-            // Query B's generator: multi-batch so we can detect premature done.
-            yield [{ chron: 5, f: 1, w: 1000, t: "t" }]
-            yield [{ chron: 3, f: 1, w: 1000, t: "t" }]
-         }
+      searchMod.loadHits.mockImplementation(async (query: string) => {
+         if (query === "sup3a") return { chrons: [7], truncated: false }
+         await bBlocked // "sup3b" blocks
+         return { chrons: [5], truncated: false }
       })
 
-      // Query A: first pull succeeds, searchIterFor = "bug3a", iterator advanced.
-      nav.applyFilter([nav.SEARCH_PREFIX + "bug3a"])
-      const aFirstResult = await nav.searchMore()
-      expect(aFirstResult.hits.map((h) => h.chron)).toEqual([7])
+      // 1. A loads and commits.
+      nav.applyFilter([nav.SEARCH_PREFIX + "sup3a"])
+      expect(await nav.feedLeft(9)).toBe(7)
 
-      // Query A's second pull is kicked off but not yet awaited.
-      const aSecondPromise = nav.searchMore() // blocks inside aSecondPull
+      // 2. B supersedes A: resets snapshot, kicks off blocked load.
+      nav.applyFilter([nav.SEARCH_PREFIX + "sup3b"])
+      const bInflight = nav.feedLeft(9) // triggers ensureSearchSet for "sup3b"
 
-      // Query B supersedes A: searchIterFor flips to "bug3b", new iterator created.
-      nav.applyFilter([nav.SEARCH_PREFIX + "bug3b"])
+      // 3. A returns before B resolves: clears snapshot, loads fresh.
+      nav.applyFilter([nav.SEARCH_PREFIX + "sup3a"])
+      expect(await nav.feedLeft(9)).toBe(7) // A's fresh result
 
-      // Query B's first pull: sets up B's iterator and pulls one batch.
-      const bFirst = await nav.searchMore()
-      expect(bFirst.hits.map((h) => h.chron)).toEqual([5])
+      // 4. B's blocked load finally resolves — its guard sees activeQuery()="sup3a" ≠ "sup3b" → discards.
+      releaseB()
+      await bInflight.catch(() => {})
 
-      // Now reject A's second pull AFTER B is fully initialized.
-      // A's catch (term="bug3a") fires with term="bug3b" → must NOT set searchDone.
-      rejectA(new Error("A shard failed"))
-      await aSecondPromise.catch(() => {}) // let A's catch run
-
-      // B must still be streamable: its second batch should be available.
-      const bSecond = await nav.searchMore()
-      expect(bSecond.done).toBe(false)
-      expect(bSecond.hits.map((h) => h.chron)).toEqual([3])
+      // A's snapshot must still be intact.
+      expect(nav.filter.matches(1, 7)).toBe(true)
+      expect(nav.filter.matches(1, 5)).toBe(false) // B's chron was discarded
    })
 })
 
