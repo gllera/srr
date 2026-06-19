@@ -1823,31 +1823,52 @@ describe("listAnchor", () => {
       expect(await nav.listAnchor()).toBe(-1)
    })
 
-   it("resumes a single-feed filter at its remembered seen position", async () => {
-      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
-      seedSeen({ "feed:1": 1 })
+   it("anchors a single feed at its OLDEST unread article (start of the backlog), not the seen resume", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      seedSeen({ "feed:1": 1 }) // read through chron 1 → unread is 2,3,4
       nav.select(-1, -1)
       nav.filter.set(["1"])
-      expect(await nav.listAnchor()).toBe(1)
+      expect(await nav.listAnchor()).toBe(2) // OLDEST unread (2), not the newest unread (4) nor resume (1)
    })
 
-   it("anchors a never-opened feed at its OLDEST matching article (start of backlog)", async () => {
-      // ch9 first appears at chron 1; with no seen record the list opens there,
-      // not at the newest, so the unread backlog reads downward from the top.
+   it("anchors a never-opened feed at its OLDEST article (nothing seen → all unread)", async () => {
+      // feed 9 spans chron 1..2; with no seen record every article is unread, so
+      // the list opens at the OLDEST of them — the start of the unread backlog.
       setupIndex([{ feedId: 1 }, { feedId: 9 }, { feedId: 9 }])
       nav.select(-1, -1)
       nav.filter.set(["9"])
-      expect(await nav.listAnchor()).toBe(1)
+      expect(await nav.listAnchor()).toBe(1) // oldest feed-9 article
    })
 
-   it("drops a now-unread-filtered resume to the oldest unread (unseen-only raised the bound past it)", async () => {
+   it("falls back to newest-first (-1) for a feed with nothing unread (caught up = latest available)", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
-      seedSeen({ "feed:1": 1 }) // seen through chron 1 → unread is chron 2
+      seedSeen({ "feed:1": 2 }) // read through the newest → no unread left
+      nav.select(-1, -1)
+      nav.filter.set(["1"])
+      expect(await nav.listAnchor()).toBe(-1) // latest available, nothing to catch up on
+   })
+
+   it("anchors a tag at its OLDEST UNREAD article, skipping older READ articles", async () => {
+      // Tag T spans feeds 1 and 2. feed 1 (chron 0,1) is fully read; feed 2 (chron
+      // 2,3) is unseen. The oldest UNREAD is chron 2 — not the oldest overall
+      // (chron 0, read) nor the newest unread (chron 3).
+      data.db.feeds = { "1": makeFeed({ id: 1, tag: "T" }), "2": makeFeed({ id: 2, tag: "T" }) }
+      for (const [k, s] of Object.entries(data.db.feeds)) s.id = Number(k)
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 2 }, { feedId: 2 }])
+      seedSeen({ "feed:1": 1 }) // feed 1 read through its newest (chron 1); feed 2 unseen
+      nav.select(-1, -1)
+      nav.filter.set(["T"])
+      expect(await nav.listAnchor()).toBe(2) // oldest unread (feed 2 @ chron 2), not chron 0 or 3
+   })
+
+   it("anchors at the oldest unread even when unseen-only already raised the bound", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      seedSeen({ "feed:1": 1 }) // seen through chron 1 → unread is 2,3
       nav.setUnreadOnly(true)
       try {
          nav.select(-1, -1)
          nav.filter.set(["1"]) // bound raised to max(0, seen+1)=2
-         expect(await nav.listAnchor()).toBe(2) // oldest unread, not the seen resume (1)
+         expect(await nav.listAnchor()).toBe(2) // oldest unread (2), not 3
       } finally {
          nav.setUnreadOnly(false)
       }
