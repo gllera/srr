@@ -150,9 +150,7 @@ export function shortQuery(q: string): boolean {
 // hits are collected. Matching is AND of folded substring tests per query
 // word; candidate shards must hold every gram of every bloom-sized word. A
 // missing/broken latest tail degrades to finalized-only (warn); a missing
-// summary rejects — the caller decides how to surface that. nav consumes this
-// generator directly via its lazy `searchMore` pump (see nav.ts), keeping the
-// per-query supersession guard and the SEARCH cap there.
+// summary rejects — the caller decides how to surface that.
 export async function* search(q: string, limit = Infinity): AsyncGenerator<ISearchHit[], void, void> {
    const words = fold(q)
       .split(" ")
@@ -186,4 +184,40 @@ export async function* search(q: string, limit = Infinity): AsyncGenerator<ISear
       remaining -= hits.length
       if (hits.length > 0) yield hits
    }
+}
+
+// The hit-set for one query, fully resolved and cached. Drives the pull/dedup/cap
+// loop once per (query, cap) pair; subsequent calls for the same query string
+// return the resolved promise from the LRU (string-keyed; 8 slots) without
+// re-scanning. A rejected promise is dropped from its slot so the next call
+// retries. Returns ascending-sorted chrons so nav's setLeft/setRight work directly.
+export interface HitSet {
+   chrons: number[]
+   truncated: boolean
+}
+
+const hitCache = makeLRU<Promise<HitSet>, string>(8)
+
+export function loadHits(query: string, cap: number): Promise<HitSet> {
+   return cachedPromise(hitCache, query, async () => {
+      const seen = new Set<number>()
+      const chrons: number[] = []
+      let truncated = false
+      if (query) {
+         outer: for await (const batch of search(query, cap + 1)) {
+            for (const h of batch) {
+               if (chrons.length >= cap) {
+                  truncated = true
+                  break outer
+               }
+               if (!seen.has(h.chron)) {
+                  seen.add(h.chron)
+                  chrons.push(h.chron)
+               }
+            }
+         }
+      }
+      chrons.sort((a, b) => a - b)
+      return { chrons, truncated }
+   })
 }

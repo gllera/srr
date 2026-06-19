@@ -75,8 +75,6 @@ const nav = vi.hoisted(() => {
       // resume / oldest position with no live reader article.
       _setListAnchor: (a: number) => (anchor = a),
       isSearchFilter: vi.fn(() => filter.search),
-      searchMore: vi.fn(async () => ({ hits: [] as { chron: number; f: number; w: number; t: string }[], done: true })),
-      resetSearchStream: vi.fn(),
       searchQuery: vi.fn(() => searchTerm),
       isUnreadOnly: vi.fn(() => unreadOnly),
       _setUnreadOnly: (v: boolean) => (unreadOnly = v),
@@ -170,10 +168,6 @@ describe("list", () => {
       nav._setSaved([])
       nav._setPos(-1)
       nav._setAnchor(-1)
-      // Restore the default (empty) search stream so a per-test mockImplementation
-      // can't leak into the next test.
-      nav.searchMore.mockImplementation(async () => ({ hits: [], done: true }))
-      nav.resetSearchStream.mockReset() // default no-op; some tests model its rewind
       vi.resetModules()
       list = await import("./list")
       list.setup(container, (chron) => opened.push(chron))
@@ -342,44 +336,30 @@ describe("list", () => {
       defaultLoadMeta()
    })
 
-   it("search appends every hit in a single multi-hit batch", async () => {
+   it("search renders all hits via feedLeft walk (no streaming)", async () => {
+      // In the new design renderSearch calls nav.feedLeft repeatedly (through walk),
+      // not searchMore. Set up three articles at sparse chrons; feedLeft skips gaps.
       nav.filter.search = true
-      let done = false
-      nav.searchMore.mockImplementation(async () => {
-         if (done) return { hits: [], done: true }
-         done = true
-         return {
-            hits: [
-               { chron: 9, f: 1, w: 9, t: "a nine" },
-               { chron: 5, f: 1, w: 5, t: "a five" },
-               { chron: 1, f: 1, w: 1, t: "a one" },
-            ],
-            done: true,
-         }
-      })
+      data._arts.clear()
+      data._arts.set(9, art({ f: 1, a: 9, t: "a nine" }))
+      data._arts.set(5, art({ f: 1, a: 5, t: "a five" }))
+      data._arts.set(1, art({ f: 1, a: 1, t: "a one" }))
       data.db.total_art = 10
       await list.render()
       expect($rows().map((r) => r.querySelector(".srr-row-title")!.textContent)).toEqual(["a nine", "a five", "a one"])
    })
 
-   it("search stops the initial render at one batch (BATCH) and pages older via loadMore", async () => {
+   it("search stops the initial render at one batch (BATCH=30) and pages older via loadMore", async () => {
+      // 31 consecutive hits: walk collects first 30 (BATCH), leaving chron 0 for loadMore.
       nav.filter.search = true
-      const waves = [
-         Array.from({ length: 30 }, (_, k) => ({ chron: 100 - k, f: 1, w: 100 - k, t: "t" + k })),
-         [{ chron: 50, f: 1, w: 50, t: "older one" }],
-      ]
-      let i = 0
-      nav.searchMore.mockImplementation(async () => {
-         if (i >= waves.length) return { hits: [], done: true }
-         const hits = waves[i++]
-         return { hits, done: i >= waves.length }
-      })
-      data.db.total_art = 200
+      data._arts.clear()
+      for (let k = 0; k <= 30; k++) data._arts.set(k, art({ f: 1, a: k, t: "t" + k }))
+      data.db.total_art = 31
       await list.render()
-      expect($rows().length).toBe(30) // filled one batch, didn't drain the stream
+      expect($rows().length).toBe(30) // first BATCH of 30 hits
       await list.loadMore()
-      expect($rows().length).toBe(31) // paged the next batch
-      expect($rows()[30].querySelector(".srr-row-title")!.textContent).toBe("older one")
+      expect($rows().length).toBe(31) // the 31st hit paged in
+      expect($rows()[30].querySelector(".srr-row-title")!.textContent).toBe("t0")
    })
 
    it("fillRow falls back to '(untitled)' for an empty title", () => {
@@ -431,20 +411,14 @@ describe("list", () => {
       defaultLoadMeta()
    })
 
-   it("streams search matches into the list as they are found", async () => {
-      // 3 matches, newest-first 9,5,1; one per searchMore batch.
-      const batches = [
-         [{ chron: 9, f: 1, w: 1700000009, t: "alpha nine" }],
-         [{ chron: 5, f: 1, w: 1700000005, t: "alpha five" }],
-         [{ chron: 1, f: 1, w: 1700000001, t: "alpha one" }],
-      ]
-      let i = 0
-      nav.filter.search = true // isSearchFilter() reads filter.search
-      nav.searchMore.mockImplementation(async () => {
-         if (i >= batches.length) return { hits: [], done: true }
-         const hits = batches[i++]
-         return { hits, done: i >= batches.length }
-      })
+   it("search render: fills rows via loadMeta, selects newest, shows terminus", async () => {
+      // renderSearch uses the skeleton→loadMeta fill pattern. After awaiting render()
+      // all rows are filled (no skeletons). The newest hit becomes the current article.
+      nav.filter.search = true
+      data._arts.clear()
+      data._arts.set(9, art({ f: 1, a: 1700000009, t: "alpha nine" }))
+      data._arts.set(5, art({ f: 1, a: 1700000005, t: "alpha five" }))
+      data._arts.set(1, art({ f: 1, a: 1700000001, t: "alpha one" }))
       data.db.total_art = 10
 
       await list.render()
@@ -454,49 +428,32 @@ describe("list", () => {
          "alpha five",
          "alpha one",
       ])
-      // Search rows are born complete — no skeletons.
+      // Rows are filled by loadMeta — no skeletons remain after await.
       expect(rows.some((r) => r.classList.contains("srr-row-skeleton"))).toBe(false)
-      // A query selects the NEWEST hit (latest available) — the would-be reader
-      // article — regardless of seen state.
+      // Newest hit selected as the reader position.
       expect(rows.find((r) => r.classList.contains("srr-row-current"))?.dataset.chron).toBe("9")
       expect(nav.select).toHaveBeenCalledWith(9, 1)
-      // OLDEST terminus once the stream is done.
+      // Hit set exhausted → terminus shown.
       expect(container.querySelector(".srr-wire-end")).not.toBeNull()
    })
 
-   it("re-renders newest-first after the shared hit stream was advanced (regression)", async () => {
-      // The hit stream is shared with reader stepping. Model it faithfully:
-      // searchMore walks newest→oldest batches and resetSearchStream rewinds it to
-      // the newest (exactly what the real nav does). Reader stepping toward older
-      // hits drains the iterator WITHOUT touching the list DOM — so a later fresh
-      // render that just streamed forward would show the drained tail / empty
-      // state. renderSearch must rewind first and re-show the newest matches.
+   it("re-renders newest-first regardless of prior feedLeft calls (no drained-iterator regression)", async () => {
+      // In the new snapshot design there is no mutable iterator to drain — each
+      // render() starts a fresh walk from feedLeft(total_art-1). Verify that calling
+      // render() again after reader navigation still shows the full hit set top-down.
       nav.filter.search = true
-      const batches = [
-         [{ chron: 9, f: 1, w: 9, t: "newest" }],
-         [{ chron: 5, f: 1, w: 5, t: "middle" }],
-         [{ chron: 1, f: 1, w: 1, t: "oldest" }],
-      ]
-      let i = 0
-      nav.searchMore.mockImplementation(async () => {
-         if (i >= batches.length) return { hits: [], done: true }
-         const hits = batches[i++]
-         return { hits, done: i >= batches.length }
-      })
-      nav.resetSearchStream.mockImplementation(() => {
-         i = 0
-      })
+      data._arts.clear()
+      data._arts.set(9, art({ f: 1, a: 9, t: "newest" }))
+      data._arts.set(5, art({ f: 1, a: 5, t: "middle" }))
+      data._arts.set(1, art({ f: 1, a: 1, t: "oldest" }))
       data.db.total_art = 10
 
-      // Simulate the reader stepping to the oldest hit: it drains the iterator.
-      await nav.searchMore()
-      await nav.searchMore()
-      await nav.searchMore()
-      expect(i).toBe(3) // stream drained
+      // Simulate reader navigation: call feedLeft a few times (as if stepping).
+      await nav.feedLeft(8) // → 5
+      await nav.feedLeft(4) // → 1
 
+      // Re-render: must show the full hit set from newest to oldest.
       await list.render()
-      expect(nav.resetSearchStream).toHaveBeenCalled()
-      // The list shows the NEWEST matches at the top, not the drained tail/empty.
       expect($rows().map((r) => r.querySelector(".srr-row-title")!.textContent)).toEqual(["newest", "middle", "oldest"])
    })
 
