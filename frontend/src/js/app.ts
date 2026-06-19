@@ -274,20 +274,7 @@ async function route(hash: string) {
       await guard(() => nav.fromHash(hash))
       return
    }
-   const tokens =
-      bang === -1
-         ? []
-         : hash
-              .substring(bang + 1)
-              .split("+")
-              .filter((t) => t.length > 0)
-              .map((t) => {
-                 try {
-                    return decodeURIComponent(t)
-                 } catch {
-                    return t
-                 }
-              })
+   const tokens = nav.parseHashTokens(hash)
    nav.applyFilter(tokens)
    // Canonicalize the URL (boot may restore an empty location.hash from
    // localStorage) without growing history.

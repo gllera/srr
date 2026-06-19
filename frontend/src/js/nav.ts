@@ -643,23 +643,7 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
    const bangIdx = hash.indexOf("!")
    const posStr = bangIdx === -1 ? hash : hash.substring(0, bangIdx)
 
-   const tokens =
-      bangIdx === -1
-         ? []
-         : hash
-              .substring(bangIdx + 1)
-              .split("+")
-              .filter((t) => t.length > 0)
-              .map((t) => {
-                 // A malformed %-escape (e.g. a lone "%") makes decodeURIComponent
-                 // throw; pass the raw token through instead of crashing navigation
-                 // (an unrecoverable error popup + a hash that persists across reloads).
-                 try {
-                    return decodeURIComponent(t)
-                 } catch {
-                    return t
-                 }
-              })
+   const tokens = parseHashTokens(hash)
    if (tokens.length > 0) filter.set(tokens)
    else filter.clear()
 
@@ -825,6 +809,25 @@ export function filterKey(): string {
 // the split on the read side (route/fromHash).
 export function tokensSuffix(): string {
    return filter.active ? "!" + filter.tokens.map((t) => encodeURIComponent(t).replaceAll("+", "%2B")).join("+") : ""
+}
+
+// Parse the `!tokens` segment of a hash into an array of decoded token strings.
+// Called by both app.ts route() (the list path) and fromHash() (the reader path).
+// A malformed %-escape passes through verbatim rather than crashing navigation.
+export function parseHashTokens(hash: string): string[] {
+   const bang = hash.indexOf("!")
+   if (bang === -1) return []
+   return hash
+      .substring(bang + 1)
+      .split("+")
+      .filter((t) => t.length > 0)
+      .map((t) => {
+         try {
+            return decodeURIComponent(t)
+         } catch {
+            return t
+         }
+      })
 }
 
 // The parsed seen map (feed key → last-viewed chronIdx). Exposed for the
