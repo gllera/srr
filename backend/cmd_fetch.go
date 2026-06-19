@@ -166,6 +166,12 @@ func (o *FetchCmd) fetch(ctx context.Context, client *http.Client) error {
 		if err := db.SyncMeta(ctx, written); err != nil {
 			slog.Warn("sync meta", "error", err)
 		}
+		// Warn-only: a syndication write failure must not discard the durable
+		// article batch. SyncOutFeeds is a no-op when core.Out is empty (the
+		// default) or SRR_CDN_URL is unset (degrades with a warning).
+		if err := db.SyncOutFeeds(ctx); err != nil {
+			slog.Warn("sync out feeds", "error", err)
+		}
 		if err := db.Commit(ctx); err != nil {
 			return err
 		}

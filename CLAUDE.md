@@ -43,7 +43,7 @@ Shared format between backend (writer) and frontend (reader).
 ### `db.gz`
 
 ```
-{ seq?, fetched_at, total_art, next_pid, pack_off, feeds{}, pipe?, ingest?, gen?, hdrs?, mp?, mt? }
+{ seq?, fetched_at, total_art, next_pid, pack_off, feeds{}, pipe?, ingest?, gen?, hdrs?, mp?, mt?, out? }
 ```
 
 | Field | Type | Description |
@@ -60,6 +60,7 @@ Shared format between backend (writer) and frontend (reader).
 | `hdrs` | int | Idx header-summary coverage: `idx/h<hdrs>.gz` holds the verbatim variable-length headers of finalized idx packs `0..hdrs-1` (each is `idxHeaderPrefix + numSlots*4` bytes; concatenated, so the summary is parsed by a sequential variable-stride walk). Maintained by `SyncIdxSummary` each fetch (write summary first, publish `hdrs` via Commit — same crash argument as `seq`); `srr gen --bump` resets it to 0 so the next fetch rebuilds against the rebuilt packs. The reader uses the summary only when `hdrs == numFinalized`, else falls back to eager idx loading. `omitempty`; absent == 0. |
 | `mp` | int | Finalized meta-shard coverage (`MetaPacks`): `meta/<n>.gz` exists for n in `[0, mp)` and `meta/s<mp>.gz` concatenates their bloom headers. Set only after every save succeeds (same crash argument as `seq`/`hdrs`); `srr gen --bump` resets to 0. The reader offers search and list-from-meta only when `metaReady()` is true (`mp === numFinalizedMeta` and `mp * metaPackSize + mt === total_art`). `omitempty`; absent == 0. |
 | `mt` | int | Entry count of the published latest meta shard (`meta/L<seq>.gz`, `MetaTail`). `SyncMeta` trusts a read-back tail only when its entry count matches, so a stale shard from a crash or post-`gen --bump` store is rebuilt from data packs rather than extended. `omitempty`; absent == 0. |
+| `out` | OutFeed[] | Named syndication output feeds written by `SyncOutFeeds` during each fetch cycle. Each entry maps chosen tags/feed ids to one `out/<name>.rss` (RSS 2.0) or `out/<name>.json` (JSON Feed 1.1) file. Off by default (absent/null → no-op). Requires `SRR_CDN_URL` to be set; skipped with a warning when unset. Managed via `srr syndicate`. `omitempty`; absent == no syndication. The `IOutFeedWire` TS type is generated but **the frontend/service-worker ignores the `out` field entirely** — it is backend-only config. |
 
 ### Feeds (`IFeed`)
 
@@ -106,6 +107,7 @@ Short keys: `f`=feed_id, `a`=fetched_at, `p`=published (unix seconds, omitted if
 
 Each feed directory: `db.gz` + `idx/` + `data/` + `meta/` (+ optional `assets/`).
 
+- **`out/`**: syndication output feeds — **the ONE documented mutable object class besides `db.gz`**. Each `out/<name>.rss` (RSS 2.0) or `out/<name>.json` (JSON Feed 1.1) is a rolling newest-N window overwritten on every fetch cycle. Cache-Control: `no-cache, must-revalidate` (same as `db.gz`). Written by `SyncOutFeeds` (after `SyncMeta`, before `Commit`; warn-only). Requires `SRR_CDN_URL`; off by default. Asset/media refs in item content are rewritten to absolute CDN URLs. Not in `PackSeries`/`packKeyRe` — never treated as immutable. Managed via `srr syndicate`.
 - **`assets/`**: self-hosted files (images, video, linked documents). Keys are `assets/<2-hex>/<16-hex><ext>`, the hash being sha256 of the **file bytes**: an external ingest command downloads files into the run's shared ingest cache and marks them in content with a `#`-prefixed relative path; SRR's automatic end-of-pipeline step uploads them via `assetFetcher.UploadCacheRef` and rewrites the marker to the key. Article content stores the **relative** key; the frontend (`fmt.ts`) resolves `<img src>`/`<video src>`/`<a href>` against the pack base. The content hash is stable for given bytes ⇒ safe to cache. See `backend/CLAUDE.md` → Asset self-hosting and Ingest.
 - **Finalized packs**: immutable. `idx/` packs are 0-indexed (`idx/0.gz`..`idx/N-1.gz`); `data/` packs start at id `1` (`data/1.gz`..) — the writer increments `next_pid` before writing the first entry, so `data/0.gz` is never produced. Finalized names (idx, data, meta shards) are published with zopfli-grade deflate (`savePackFinal`/`gzipBest` in `db_pack.go`) — still plain RFC 1952 gzip to readers, just smaller; latest packs, summaries, and db.gz use fast stdlib gzip.
 - **Latest pack**: `L<seq>.gz` (generation named by `seq` in db.gz). Write-once like the finalized names, so the reader fetches **every** pack with `cache: "force-cache"`; only db.gz is mutable (`no-cache`). The backend GC keeps the current generation plus `latestKeep` (2) older ones as a grace window for stale-db.gz tabs and deletes the rest after each fetch commit; a reader that 404s on its latest pack self-heals with one guarded reload (`data.ts assertPackOk`).

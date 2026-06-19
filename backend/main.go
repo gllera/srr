@@ -49,16 +49,17 @@ type ArtGroup struct {
 
 type CLI struct {
 	Globals
-	Feed    FeedGroup  `cmd:"" aliases:"ch" help:"Feed management."`
-	Art     ArtGroup   `cmd:"" aliases:"a" help:"Article management."`
-	Pipe    PipeCmd    `cmd:"" help:"Set or print root pipe (default pipeline inherited by feeds)."`
-	Ingest  IngestCmd  `cmd:"" help:"Set or print root ingest strategy (default inherited by feeds)."`
-	Gen     GenCmd     `cmd:"" help:"Print or bump the store generation (db.gz 'gen'; frontend SW cache key)."`
-	Preview PreviewCmd `cmd:"" aliases:"p" help:"Preview processed feed articles in a browser."`
-	Config  ConfigCmd  `cmd:"" aliases:"c" help:"Print resolved configuration."`
-	Inspect InspectCmd `cmd:"" aliases:"i" help:"Inspect pack consistency (validate idx<->data, debug chronIdx lookup)."`
-	GenTS   GenTSCmd   `cmd:"" name:"gen-ts" hidden:"" help:"Generate frontend/src/js/format.gen.ts from the Go data-contract declarations."`
-	Version VersionCmd `cmd:"" help:"Print version information."`
+	Feed      FeedGroup      `cmd:"" aliases:"ch" help:"Feed management."`
+	Art       ArtGroup       `cmd:"" aliases:"a" help:"Article management."`
+	Pipe      PipeCmd        `cmd:"" help:"Set or print root pipe (default pipeline inherited by feeds)."`
+	Ingest    IngestCmd      `cmd:"" help:"Set or print root ingest strategy (default inherited by feeds)."`
+	Syndicate SyndicateGroup `cmd:"" help:"Manage syndication output feeds (out/*)."`
+	Gen       GenCmd         `cmd:"" help:"Print or bump the store generation (db.gz 'gen'; frontend SW cache key)."`
+	Preview   PreviewCmd     `cmd:"" aliases:"p" help:"Preview processed feed articles in a browser."`
+	Config    ConfigCmd      `cmd:"" aliases:"c" help:"Print resolved configuration."`
+	Inspect   InspectCmd     `cmd:"" aliases:"i" help:"Inspect pack consistency (validate idx<->data, debug chronIdx lookup)."`
+	GenTS     GenTSCmd       `cmd:"" name:"gen-ts" hidden:"" help:"Generate frontend/src/js/format.gen.ts from the Go data-contract declarations."`
+	Version   VersionCmd     `cmd:"" help:"Print version information."`
 }
 
 type VersionCmd struct{}

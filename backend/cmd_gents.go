@@ -56,6 +56,8 @@ var tsTypes = []struct {
 	{"IArticleWire", "one JSONL line in data/*.gz (backend ArticleData)", reflect.TypeOf(ArticleData{})},
 	{"IMetaWire", "one JSONL line in meta/*.gz (backend MetaEntry)", reflect.TypeOf(MetaEntry{})},
 	{"IFeedWire", "a db.gz feeds{} value (backend Feed)", reflect.TypeOf(Feed{})},
+	// IOutFeedWire is backend-only config; the frontend/service-worker ignores it.
+	{"IOutFeedWire", "a db.gz out[] entry (backend OutFeed)", reflect.TypeOf(OutFeed{})},
 	{"IDBWire", "db.gz itself (backend DBCore)", reflect.TypeOf(DBCore{})},
 }
 

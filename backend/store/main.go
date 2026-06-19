@@ -63,6 +63,12 @@ func cacheControlForKey(key string) string {
 	switch {
 	case key == "db.gz":
 		return cacheRevalidate
+	case strings.HasPrefix(key, "out/"):
+		// out/* is the one mutable object class besides db.gz: an output
+		// syndication feed (out/<name>.rss or out/<name>.json) is overwritten
+		// on every fetch cycle. Must-revalidate so clients always see the
+		// latest window. Not in PackSeries/packKeyRe — NOT immutable.
+		return cacheRevalidate
 	case strings.HasPrefix(key, "assets/") || packKeyRe.MatchString(key):
 		return cacheImmutable
 	default:

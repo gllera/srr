@@ -150,6 +150,12 @@ func TestCacheControlForKey(t *testing.T) {
 		{"idx/sub/3.gz", ""},
 		{".locked", ""},
 		{"unknown.txt", ""},
+		// out/* is the one documented mutable class besides db.gz: revalidate.
+		{"out/myfeed.rss", cacheRevalidate},
+		{"out/myfeed.json", cacheRevalidate},
+		{"out/nested/feed.rss", cacheRevalidate},
+		// out/ must NOT match packKeyRe (not immutable).
+		{"out/0.gz", cacheRevalidate},
 	}
 	for _, c := range cases {
 		if got := cacheControlForKey(c.key); got != c.want {
