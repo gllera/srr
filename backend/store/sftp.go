@@ -188,13 +188,16 @@ func (d *SFTP) AtomicPut(_ context.Context, key string, r io.Reader) error {
 
 	if _, err := io.Copy(fs, r); err != nil {
 		fs.Close()
+		_ = d.client.Remove(tmpFile)
 		return fmt.Errorf("writing file %s: %w", tmpFile, err)
 	}
 	if err := fs.Close(); err != nil {
+		_ = d.client.Remove(tmpFile)
 		return fmt.Errorf("closing file %s: %w", tmpFile, err)
 	}
 
 	if err := d.client.PosixRename(tmpFile, file); err != nil {
+		_ = d.client.Remove(tmpFile)
 		return fmt.Errorf("renaming %s to %s: %w", tmpFile, file, err)
 	}
 	return nil
@@ -213,8 +216,12 @@ func (d *SFTP) Rm(_ context.Context, key string) error {
 }
 
 func (d *SFTP) Close() error {
-	d.client.Close()
-	return d.sshClient.Close()
+	cerr := d.client.Close()
+	serr := d.sshClient.Close()
+	if cerr != nil {
+		return cerr
+	}
+	return serr
 }
 
 func sftpUser(u *url.URL) string {
