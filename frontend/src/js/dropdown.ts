@@ -270,7 +270,12 @@ async function fillUnread(rows: [HTMLAnchorElement, IFeed][], headers: [HTMLAnch
          if (n > 0) h.insertBefore(unreadBadge(n), h.querySelector(".srr-tag-toggle"))
          // Hide the whole group when no member has unseen content (>0 or -1) —
          // unless it's the active tag, which stays put while you read it down.
-         if (hideRead && h.dataset.value !== activeKey && group.every((ch) => counts.get(ch.id) === 0))
+         if (
+            hideRead &&
+            h.dataset.value !== activeKey &&
+            !group.some((ch) => String(ch.id) === activeKey) &&
+            group.every((ch) => counts.get(ch.id) === 0)
+         )
             h.closest(".srr-tag-group")?.classList.add("srr-hidden")
       })
    } catch {

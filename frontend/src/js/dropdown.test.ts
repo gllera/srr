@@ -491,6 +491,35 @@ describe("dropdown: unread badges", () => {
       }
    })
 
+   // G15 (bug #5): when the active filter is a single FEED that belongs to a tag
+   // whose every member has 0 unread, the tag GROUP must not be hidden — the
+   // exempted active-feed row is inside it and would become keyboard-unreachable.
+   it("does not hide the tag group when the active feed is a member and all members are fully read", async () => {
+      nav.isUnreadOnly.mockReturnValue(true)
+      nav.getCurrentFilterKey.mockReturnValue("5") // active filter is feed id 5
+      try {
+         const a = feed({ id: 5, title: "Active" }) // active feed, in tag "news"
+         const b = feed({ id: 6, title: "Sibling" }) // sibling in same tag, also fully read
+         data.groupFeedsByTag.mockReturnValueOnce({
+            tagged: new Map([["news", [a, b]]]),
+            sortedTags: ["news"],
+            untagged: [],
+         })
+         counts(() => 0) // both fully read
+         dropdown.showFeedMenu("", guard)
+         await new Promise((r) => setTimeout(r))
+         const row = (v: string) => $menu().querySelector(`a[data-value="${v}"]`)!
+         const groupHidden = (v: string) => row(v).closest(".srr-tag-group")!.classList.contains("srr-hidden")
+         // The active feed's row should not be hidden
+         expect(row("5").classList.contains("srr-hidden")).toBe(false) // active feed row exempt
+         // And its containing group must also NOT be hidden
+         expect(groupHidden("5")).toBe(false) // group stays visible (active member inside)
+         expect(groupHidden("6")).toBe(false) // same group, still not hidden
+      } finally {
+         nav.getCurrentFilterKey.mockReturnValue("")
+      }
+   })
+
    it("hides nothing when unseen-only is off", async () => {
       data.groupFeedsByTag.mockReturnValueOnce({
          tagged: new Map(),
