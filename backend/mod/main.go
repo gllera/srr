@@ -97,6 +97,12 @@ type RawItem struct {
 	Link      string     `json:"link"`
 	Published *time.Time `json:"published"`
 	Raw       any        `json:"raw"`
+	// Drop, when true, signals that this item should be silently discarded by
+	// the pipeline. Set by #filter or by an external mod that emits
+	// {"drop":true}. Dropped items are never written to the packs but their
+	// GUID is retained in the feed's dedup boundary so they are not
+	// re-evaluated on subsequent fetches. Drop is NOT a pipeline error.
+	Drop bool `json:"drop,omitempty"`
 }
 
 // RawField is one element of a parsed feed entry: text content, attributes,

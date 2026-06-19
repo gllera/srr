@@ -107,6 +107,11 @@ func (o *PreviewCmd) Run() error {
 		if err := processItem(ctx, processor, pipe, i); err != nil {
 			return err
 		}
+		// A pipeline step may drop this item (i.Drop=true). Preview simply
+		// omits dropped items — no store, so no boundary to update.
+		if i.Drop {
+			continue
+		}
 		var pub int64
 		if i.Published != nil {
 			pub = i.Published.Unix()

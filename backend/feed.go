@@ -320,6 +320,15 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 			slog.Warn("dropping item: pipeline error", "url", c.URL, "link", i.Link, "err", err)
 			continue
 		}
+		// A pipeline step may deliberately drop an item by setting i.Drop=true
+		// (e.g. #filter or an external mod emitting {"drop":true}). The item
+		// is NOT appended to items and NOT asset-uploaded, but its GUID was
+		// already recorded in boundary above, so it stays in BoundaryGUIDs and
+		// is not re-evaluated on subsequent fetches — identical to the existing
+		// per-item skip behaviour above.
+		if i.Drop {
+			continue
+		}
 		// Store-side end-of-pipeline step, kept out of processItem (which stays a
 		// pure, store-free transform): scan the item's self-hostable attributes
 		// (img/video src/poster, a href — see mod.RewriteAttrs) for upload markers

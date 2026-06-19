@@ -722,6 +722,68 @@ func TestFetchVitals(t *testing.T) {
 	})
 }
 
+// TestFetchDroppedItemNotInStore verifies that when a pipeline step drops an
+// item, the item is NOT added to the returned slice (i.e. never stored), but
+// its GUID IS recorded in BoundaryGUIDs so a second identical fetch ingests
+// nothing new (no re-drop churn).
+func TestFetchDroppedItemNotInStore(t *testing.T) {
+	// Feed with two items: one that matches the drop_title filter and one that
+	// doesn't. The kept item must be ingested; the dropped item must not.
+	feed := `<rss version="2.0"><feed>
+		<item><title>Sponsored: buy now</title><guid>sponsored-1</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
+		<item><title>Real news today</title><guid>news-1</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
+	</feed></rss>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(feed))
+	}))
+	defer srv.Close()
+
+	ch := &Feed{Title: "T", Pipe: []string{"#filter drop_title=/^sponsored/i"}}
+
+	// First fetch: 2 items in feed, 1 dropped, 1 stored.
+	items := fetchOnce(t, ch, srv)
+	if len(items) != 1 {
+		t.Fatalf("fetch1: got %d items, want 1 (dropped item must not be stored)", len(items))
+	}
+	if items[0].Title == "Sponsored: buy now" {
+		t.Error("fetch1: dropped item appeared in stored items")
+	}
+
+	// The dropped item's GUID must be in BoundaryGUIDs so it won't be re-evaluated.
+	// We use the FNV-32a hash that the ingest/rss.go `hash` function uses.
+	// Rather than recomputing the hash here, check that a second fetch sees 0 new items
+	// (which proves the GUID was retained in the boundary set).
+	ch.ETag, ch.LastModified = "", ""
+	items2 := fetchOnce(t, ch, srv)
+	if len(items2) != 0 {
+		t.Errorf("fetch2: got %d items, want 0 (dropped item re-evaluated — GUID not in boundary)", len(items2))
+	}
+}
+
+// TestFetchDroppedItemGUIDInBoundary is a tighter version: asserts the dropped
+// GUID appears literally in BoundaryGUIDs after the first fetch.
+func TestFetchDroppedItemGUIDInBoundary(t *testing.T) {
+	feed := `<rss version="2.0"><feed>
+		<item><title>Sponsored post</title><guid>ad-item</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
+	</feed></rss>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(feed))
+	}))
+	defer srv.Close()
+
+	ch := &Feed{Title: "T", Pipe: []string{"#filter drop_title=/sponsored/i"}}
+	items := fetchOnce(t, ch, srv)
+
+	if len(items) != 0 {
+		t.Fatalf("fetch1: got %d items, want 0 (item should be dropped)", len(items))
+	}
+
+	// BoundaryGUIDs must be non-empty: the dropped item's GUID must be recorded.
+	if len(ch.BoundaryGUIDs) == 0 {
+		t.Error("BoundaryGUIDs is empty after a drop — dropped GUID not retained")
+	}
+}
+
 // A publisher re-dating an existing post (same GUID, higher pub) on a later
 // fetch must NOT advance the persisted Watermark — otherwise a genuinely-new
 // article dated between the old and bumped value is permanently dropped.

@@ -24,6 +24,13 @@ func init() {
 			return nil
 		}
 	})
+	// sentinel-later: sets a recognisable string so we can assert it was/wasn't run.
+	mod.Register("test-sentinel-later", func() mod.Processor {
+		return func(_ context.Context, _ mod.Params, i *mod.RawItem) error {
+			i.Title = "RAN_SENTINEL"
+			return nil
+		}
+	})
 }
 
 // processItem must reject any module that mutates GUID or Published —
@@ -82,6 +89,66 @@ func TestProcessItemSanitizeIsExplicit(t *testing.T) {
 	}
 	if !strings.Contains(item.Content, "safe text") {
 		t.Errorf("#sanitize dropped safe content: %q", item.Content)
+	}
+}
+
+// TestProcessItemDropShortCircuit verifies that when a pipeline step sets
+// i.Drop=true, processItem returns nil immediately, skips all subsequent steps,
+// and does NOT run the post-loop Title/Link/Content normalization.
+func TestProcessItemDropShortCircuit(t *testing.T) {
+	now := time.Now()
+	// HTML title with an entity; if normalization ran, it would be decoded.
+	item := &mod.RawItem{
+		GUID:      42,
+		Title:     "&amp;",
+		Content:   "  some content  ",
+		Link:      "http://example.com",
+		Published: &now,
+	}
+	// Pipeline: #filter drops on title match → sentinel step must NOT run.
+	pipe := []string{"#filter drop_title=/amp/", "#test-sentinel-later"}
+	err := processItem(context.Background(), mod.New(), pipe, item)
+	if err != nil {
+		t.Fatalf("processItem returned error on drop: %v", err)
+	}
+	if !item.Drop {
+		t.Error("expected i.Drop=true after #filter drop step")
+	}
+	// The sentinel step must NOT have run.
+	if item.Title == "RAN_SENTINEL" {
+		t.Error("sentinel step ran after drop — short-circuit failed")
+	}
+	// Post-loop normalization must NOT have run: Title should be untouched raw value.
+	if item.Title != "&amp;" {
+		t.Errorf("Title was normalized (%q) on a dropped item — normalization ran when it shouldn't", item.Title)
+	}
+	// Content whitespace not collapsed.
+	if item.Content != "  some content  " {
+		t.Errorf("Content was normalized on a dropped item: %q", item.Content)
+	}
+}
+
+// TestProcessItemDropByExternalMod checks that an external mod emitting
+// {"drop":true} also triggers the short-circuit.
+func TestProcessItemDropByExternalMod(t *testing.T) {
+	now := time.Now()
+	item := &mod.RawItem{
+		GUID:      7,
+		Title:     "title",
+		Content:   "content",
+		Link:      "http://example.com",
+		Published: &now,
+	}
+	pipe := []string{`echo '{"drop":true}'`, "#test-sentinel-later"}
+	err := processItem(context.Background(), mod.New(), pipe, item)
+	if err != nil {
+		t.Fatalf("processItem returned error on drop: %v", err)
+	}
+	if !item.Drop {
+		t.Error("expected i.Drop=true after external drop signal")
+	}
+	if item.Title == "RAN_SENTINEL" {
+		t.Error("sentinel step ran after external drop — short-circuit failed")
 	}
 }
 

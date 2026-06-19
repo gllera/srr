@@ -316,6 +316,7 @@ Articles pass through a chain of mods during fetch. The pipe is defined at two l
 - `#sanitize` — HTML sanitization (bluemonday)
 - `#minify` — HTML minification (tdewolff/minify)
 - `#readability` — fetches an item's `Link` and replaces `Content` with the extracted article body (for teaser-only feeds; fail-open)
+- `#filter` — content-based item dropping (see [below](#filter))
 
 **Custom mods** — any shell command that reads/writes JSON via stdin/stdout (see [External mod protocol](#external-mod-protocol)):
 
@@ -340,6 +341,8 @@ A pipeline step whose first word is not a built-in `#`-token is run as an extern
 | `raw` | object | The parsed feed entry, keyed by element name; each value carries the short keys `@` (text), `$` (attributes), `+` (children). Restored by SRR after the round-trip, so a mod need not preserve it. |
 
 **stdout** is either the same JSON object back (with `title`/`content`/`link` optionally changed) **or** empty/whitespace — an empty result is a **no-op** that leaves the item unchanged (the opposite of an external ingest command, where empty stdout is an error). `guid` and `published` must be returned unchanged, and `raw` is restored by SRR regardless of what the mod emits.
+
+To **drop** an item (prevent it from being stored), emit `{"drop":true}` — or include it alongside other fields, e.g. `{"drop":true,"guid":…}`. A dropped item is silently discarded and its GUID is retained in the feed's dedup boundary so it is not re-evaluated on the next fetch. Dropping is not an error; subsequent pipeline steps are skipped for a dropped item.
 
 **Example.** For one item from a `#rss` source, SRR writes this object to the mod's stdin (pretty-printed). `raw` mirrors the parsed feed entry — element name → list of occurrences, each `{@: text, $: attributes, +: children}`; it is `null` for items from an external ingest command, which don't populate it:
 
@@ -380,6 +383,30 @@ A minimal reference mod — lowercase every title — using `jq`:
 ```bash
 srr feed add -t "Feed" -u https://example.com/rss \
   -p "#base" -p "jq -c '.title |= ascii_downcase'"
+```
+
+### #filter
+
+`#filter` drops items that match (or fail to match) configurable predicates. A dropped item is never written to the packs, but its GUID is retained in the feed's dedup boundary so it is not re-evaluated on subsequent fetches.
+
+**Parameters** (all optional; an item is dropped if it satisfies **any** active condition):
+
+| Parameter | Form | Effect |
+|---|---|---|
+| `drop_title` | `/regex/[i]` | Drop when title matches the regex |
+| `keep_title` | `/regex/[i]` | Drop when title does **not** match the regex |
+| `drop_content` | `/regex/[i]` | Drop when content matches the regex |
+| `keep_content` | `/regex/[i]` | Drop when content does **not** match the regex |
+| `min_words` | integer | Drop when plain-text word count of content is below N |
+
+Regex syntax: `/pattern/` or `/pattern/i` (flag `i` = case-insensitive). A malformed regex or unknown parameter is a hard configuration error. The word-count check (`min_words`) runs against the raw content string including any HTML tags.
+
+```bash
+# Drop sponsored posts and items with fewer than 100 words
+srr feed upd 3 -p "#filter drop_title=/^(sponsored|ad):?/i min_words=100" -p "#base"
+
+# Only keep items whose title mentions "golang"
+srr feed upd 5 -p "#filter keep_title=/golang/i" -p "#base"
 ```
 
 **Hierarchy & resolution.** A `pipe` field lives at two levels: db.gz root (`srr pipe`) and feed (`srr feed add -p ...` / `srr feed upd -p ...`). For each feed the effective pipeline is resolved root → feed:
