@@ -62,7 +62,7 @@ const KEEP = new Set([ASSETS, PACKS, SHELL, META])
 const SCOPE = new URL(sw.registration.scope).pathname
 
 // Matched anywhere in the path so they hold whatever prefix the cdn-url adds.
-const RE_ASSET = /\/assets\/[0-9a-f]{2}\/[0-9a-f]{16}\.\w+$/i
+const RE_ASSET = /\/assets\/[0-9a-f]{2}\/[0-9a-f]{16}(?:\.\w+)?$/i
 // The one pack-name grammar (parsed by parsePackName below), built from the
 // generated PACK_SERIES_KINDS table: write-once names only — finalized numeric
 // stems, L<seq> latest generations, and the idx/h<N> / meta/s<N> summaries
