@@ -1268,7 +1268,7 @@ body:not(.srr-view-list) .srr-toolbar > .srr-unread {
    align-items: center;
    justify-content: center;
    padding: 1.25rem;
-   background: color-mix(in srgb, var(--fg) 28%, transparent);
+   background: var(--scrim);
    &.srr-open {
       display: flex;
    }
