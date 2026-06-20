@@ -194,6 +194,7 @@ export async function* search(q: string, limit = Infinity): AsyncGenerator<ISear
 export interface HitSet {
    chrons: number[]
    truncated: boolean
+   cards: Map<number, import("./format.gen").IMetaWire>
 }
 
 const hitCache = makeLRU<Promise<HitSet>, string>(8)
@@ -205,6 +206,7 @@ export function loadHits(query: string, cap: number): Promise<HitSet> {
    return cachedPromise(hitCache, query, async () => {
       const seen = new Set<number>()
       const chrons: number[] = []
+      const cards = new Map<number, import("./format.gen").IMetaWire>()
       let truncated = false
       if (query) {
          outer: for await (const batch of search(query, cap + 1)) {
@@ -216,11 +218,14 @@ export function loadHits(query: string, cap: number): Promise<HitSet> {
                if (!seen.has(h.chron)) {
                   seen.add(h.chron)
                   chrons.push(h.chron)
+                  // The scan already parsed this shard entry's {f,w,t}; keep it so
+                  // renderSearch builds rows without re-reading the meta packs.
+                  cards.set(h.chron, { f: h.f, w: h.w, t: h.t })
                }
             }
          }
       }
       chrons.sort((a, b) => a - b)
-      return { chrons, truncated }
+      return { chrons, truncated, cards }
    })
 }

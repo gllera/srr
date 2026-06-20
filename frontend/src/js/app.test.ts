@@ -147,6 +147,7 @@ const SKELETON = `
          <div class="srr-dropdown"><button class="srr-overflow srr-dropdown-btn"></button><div id="srr-overflow-menu" class="srr-dropdown-menu"></div></div>
       </nav>
       <div class="srr-status"></div>
+      <div class="srr-pin-progress" hidden></div>
    </main>`
 
 const flush = () => new Promise((r) => setTimeout(r))
@@ -531,7 +532,9 @@ async function invokePinAction(isUnreadOnly: boolean): Promise<void> {
 }
 
 describe("pinCurrentFilter — unread-snapshot note in the status bar", () => {
-   const status = () => document.querySelector(".srr-status") as HTMLElement
+   // Pin progress/caveat now renders in the dedicated non-live .srr-pin-progress
+   // node (not the aria-live .srr-status banner) — see fe-feat#F2/F3/F4 fixes.
+   const status = () => document.querySelector(".srr-pin-progress") as HTMLElement
 
    it("shows the snapshot caveat when pinning in unread-only mode with an active filter", async () => {
       await invokePinAction(true)

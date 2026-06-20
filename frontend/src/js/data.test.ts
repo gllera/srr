@@ -25,7 +25,8 @@ vi.mock("./data", () => ({
          (state.db as IDB & { total_art: number }).total_art > 0
             ? Math.floor(((state.db as IDB & { total_art: number }).total_art - 1) / 50000)
             : 0
-      return nf > 0 && (state.db as IDB & { hdrs?: number }).hdrs !== nf
+      const hdrs = (state.db as IDB & { hdrs?: number }).hdrs ?? 0
+      return nf > 0 && hdrs > 0 && hdrs < nf
    },
    groupFeedsByTag(): { tagged: Map<string, IFeed[]>; sortedTags: string[]; untagged: IFeed[] } {
       const subs = Object.values(state.db.feeds ?? {})
@@ -143,14 +144,15 @@ describe("idxSummaryDegraded", () => {
       expect(data.idxSummaryDegraded()).toBe(false)
    })
 
-   it("returns true when finalized idx > 0 and hdrs is absent", () => {
-      // total_art = 50001 => numFinalizedIdx = 1; hdrs absent => degraded
+   it("returns false when finalized idx > 0 and hdrs is absent (pre-summary store, not advancing)", () => {
+      // total_art = 50001 => numFinalizedIdx = 1; hdrs absent (legacy/old backend)
+      // is steady-state, NOT an active rebuild — no permanent "optimizing" banner.
       state.db = { feeds: {}, total_art: 50001, fetched_at: 0 } as unknown as IDB
-      expect(data.idxSummaryDegraded()).toBe(true)
+      expect(data.idxSummaryDegraded()).toBe(false)
    })
 
-   it("returns true when finalized idx > 0 and hdrs does not match", () => {
-      // total_art = 100001 => numFinalizedIdx = 2; hdrs = 1 => degraded
+   it("returns true when hdrs is partway built (actively-advancing rebuild)", () => {
+      // total_art = 100001 => numFinalizedIdx = 2; hdrs = 1 (0 < hdrs < nf) => degraded
       state.db = { feeds: {}, total_art: 100001, fetched_at: 0, hdrs: 1 } as unknown as IDB
       expect(data.idxSummaryDegraded()).toBe(true)
    })

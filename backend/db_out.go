@@ -7,6 +7,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -41,6 +42,29 @@ func (o *DB) SyncOutFeeds(ctx context.Context) error {
 	return nil
 }
 
+// outFeedsSig is a cheap, deterministic signature of the inputs that determine
+// syndication output: the out-feed config plus every feed's tag (a feed's tag
+// change can alter which feeds a tag-scoped out feed includes). cmd_fetch uses it
+// to skip the SyncOutFeeds walk on a truly-idle cycle — no new articles AND an
+// unchanged signature — without skipping config/tag edits made during the
+// lock-free --interval sleep. Empty when no out feeds are configured.
+func (o *DB) outFeedsSig() string {
+	if len(o.core.Out) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	_ = json.NewEncoder(&b).Encode(o.core.Out)
+	ids := make([]int, 0, len(o.core.Feeds))
+	for id := range o.core.Feeds {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	for _, id := range ids {
+		fmt.Fprintf(&b, "%d=%s;", id, o.core.Feeds[id].Tag)
+	}
+	return b.String()
+}
+
 // syncOneOutFeed collects and writes one syndication output file.
 func (o *DB) syncOneOutFeed(ctx context.Context, of OutFeed, cdn string) error {
 	// Defense-in-depth: reject unsafe names that bypassed the command gate
@@ -60,6 +84,9 @@ func (o *DB) syncOneOutFeed(ctx context.Context, of OutFeed, cdn string) error {
 	}
 	for id, ch := range o.core.Feeds {
 		for _, tag := range of.Tags {
+			if tag == "" {
+				continue // an empty tag would match every untagged feed
+			}
 			if ch.Tag == tag {
 				include[id] = true
 			}
@@ -150,7 +177,9 @@ func (o *DB) syncOneOutFeed(ctx context.Context, of OutFeed, cdn string) error {
 	}
 
 	key := outFileKey(of)
-	if err := o.Backend.Put(ctx, key, &buf, true); err != nil {
+	// AtomicPut (temp-then-rename) so a CDN reader never sees a truncated/half-
+	// written feed — out/* is a mutable served object, like db.gz.
+	if err := o.Backend.AtomicPut(ctx, key, &buf); err != nil {
 		return fmt.Errorf("put %s: %w", key, err)
 	}
 	return nil
@@ -173,11 +202,19 @@ type rssAtomLink struct {
 	Type string `xml:"type,attr"`
 }
 
+// rssGUID is an RSS 2.0 <guid> with its isPermaLink attribute. A synthetic id
+// (urn:srr:… for a linkless article) must set isPermaLink="false" so aggregators
+// don't treat it as a clickable URL.
+type rssGUID struct {
+	Value       string `xml:",chardata"`
+	IsPermaLink string `xml:"isPermaLink,attr"`
+}
+
 // rssItemXML holds one RSS 2.0 <item>.
 type rssItemXML struct {
 	Title   string      `xml:"title"`
 	Link    string      `xml:"link,omitempty"`
-	GUID    string      `xml:"guid"`
+	GUID    rssGUID     `xml:"guid"`
 	PubDate string      `xml:"pubDate"`
 	Desc    cdataString `xml:"description"`
 }
@@ -189,13 +226,12 @@ type cdataString struct {
 }
 
 func (c cdataString) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
-	// Split any CDATA terminator in the value so the output stays well-formed.
-	// "]]>" inside a CDATA section closes it prematurely; the standard escape
-	// is to split it into "]]]]><![CDATA[>".
-	safe := strings.ReplaceAll(c.Value, "]]>", "]]]]><![CDATA[>")
+	// encoding/xml's ,cdata directive already splits any "]]>" terminator in the
+	// value so the CDATA section stays well-formed. Pre-escaping it here too would
+	// double-escape and corrupt content containing "]]>".
 	return e.EncodeElement(struct {
 		Value string `xml:",cdata"`
-	}{safe}, start)
+	}{c.Value}, start)
 }
 
 func marshalRSS(buf *bytes.Buffer, of OutFeed, items []ArticleData, cdn string) error {
@@ -213,10 +249,10 @@ func marshalRSS(buf *bytes.Buffer, of OutFeed, items []ArticleData, cdn string) 
 		}
 		ts := time.Unix(pub, 0).UTC().Format(time.RFC1123Z)
 
-		guid := ad.Link
-		if guid == "" {
-			// Derive a stable id from FeedID + Published using FNV-32a.
-			guid = stableGUID(ad)
+		guid := rssGUID{Value: ad.Link, IsPermaLink: "true"}
+		if ad.Link == "" {
+			// Synthetic stable id (FeedID+Published, FNV-32a) — not a URL.
+			guid = rssGUID{Value: stableGUID(ad), IsPermaLink: "false"}
 		}
 
 		ch.Items = append(ch.Items, rssItemXML{
@@ -269,6 +305,7 @@ func marshalJSONFeed(buf *bytes.Buffer, of OutFeed, items []ArticleData, cdn str
 		Title:       outTitle(of),
 		HomePageURL: cdn,
 		FeedURL:     joinURL(cdn, outFileKey(of)),
+		Items:       []jsonFeedItem{},
 	}
 	for _, ad := range items {
 		pub := ad.Published
@@ -354,7 +391,10 @@ func rewriteAssetURLs(content, cdn string) (string, error) {
 							continue
 						}
 						val := n.Attr[i].Val
-						if isRelativeURL(val) {
+						// Only CDN-prefix self-hosted asset keys (flat
+						// assets/<hex>/<hex>.ext) — never arbitrary relative URLs, or a
+						// real relative <a href> would be repointed to the CDN host.
+						if strings.HasPrefix(val, "assets/") {
 							n.Attr[i].Val = joinURL(cdn, val)
 							changed = true
 						}
@@ -379,25 +419,4 @@ func rewriteAssetURLs(content, cdn string) (string, error) {
 		}
 	}
 	return b.String(), nil
-}
-
-// isRelativeURL returns true when a URL value is relative (no scheme, no
-// protocol-relative "//", no "data:" — i.e. it's safe to prepend the CDN
-// base).
-func isRelativeURL(v string) bool {
-	if v == "" {
-		return false
-	}
-	if strings.HasPrefix(v, "//") {
-		return false
-	}
-	if strings.HasPrefix(v, "#") {
-		return false
-	}
-	// Scheme detection: look for "://" within the first 16 chars.
-	colon := strings.Index(v, ":")
-	if colon >= 0 && colon < 16 {
-		return false
-	}
-	return true
 }

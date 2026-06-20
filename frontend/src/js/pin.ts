@@ -57,6 +57,14 @@ export function unpinFilter(key: string): void {
    saveRegistry(map)
 }
 
+// Clear the entire pin registry — used when the SW purges the PINNED cache on a
+// store gen change (the cached bytes are gone, so the registry must reset too).
+export function clearAllPins(): void {
+   try {
+      localStorage.removeItem(PINS_KEY)
+   } catch {}
+}
+
 export function isPinned(key: string): boolean {
    return loadRegistry().has(key)
 }

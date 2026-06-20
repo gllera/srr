@@ -148,24 +148,29 @@ sw.addEventListener("message", (event) => {
       event.waitUntil(
          (async () => {
             const pinned = await caches.open(PINNED)
+            let cached = 0
             for (const name of validNames) {
                try {
                   // Build the full URL the SW's fetch handler would see.
                   const url = new URL(`packs/${name}`, sw.registration.scope).href
                   const req = new Request(url, { cache: "no-cache" })
                   const res = await fetch(req)
-                  if (res.ok) await pinned.put(new Request(url), res)
+                  if (res.ok) {
+                     await pinned.put(new Request(url), res)
+                     cached++
+                  }
                } catch (err) {
                   // 404 from GC'd latest packs, quota error, network error — skip.
                   reply({
                      type: "pin-progress",
                      done,
                      total,
+                     cached,
                      error: String(err),
                   })
                }
                done++
-               reply({ type: "pin-progress", done, total })
+               reply({ type: "pin-progress", done, total, cached })
             }
          })(),
       )
@@ -341,6 +346,11 @@ async function checkManifest(dbRes: Response): Promise<void> {
          ])
          await meta.put(GEN_KEY, new Response(String(gen)))
          await meta.put(SEQ_KEY, new Response(String(seq)))
+         // The PINNED bucket was just purged — tell open pages to clear their
+         // srr-pins registry so the menu doesn't claim "Remove offline copy" over
+         // evicted bytes.
+         const purgedClients = await sw.clients.matchAll()
+         for (const c of purgedClients) c.postMessage({ type: "pins-purged" })
          return
       }
       if (seq !== (await readMetaNumber(SEQ_KEY))) {

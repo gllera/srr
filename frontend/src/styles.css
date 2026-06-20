@@ -294,16 +294,50 @@ video {
    }
 }
 
-/* Status banner — unobtrusive freshness / degradation line below the toolbar */
+/* Status banner — unobtrusive freshness / degradation line. Fixed just above the
+   bottom toolbar (which is position:fixed; bottom:0) so the populated message is
+   visible on both surfaces instead of sitting at the end of the scroll flow,
+   hidden behind the toolbar. A subtle page-bg fill keeps the text legible where it
+   overlays content; only shows when there's a message (&:empty hides it). */
 .srr-status {
+   position: fixed;
+   left: 0;
+   right: 0;
+   bottom: 4rem;
+   max-width: 680px;
+   margin: 0 auto;
+   z-index: 5;
    font-size: 0.75rem;
    color: var(--muted);
    text-align: center;
-   padding: 0.35rem 0.5rem 0.15rem;
-   min-height: 1.5em;
+   padding: 0.35rem 0.5rem;
+   background: var(--bg);
+   &:empty {
+      display: none;
+   }
 }
 .srr-status-warn {
    color: var(--fg-2);
+}
+
+/* Offline-pin progress — a dedicated NON-live node (NOT aria-live), so per-pack
+   ticks don't flood screen readers and a concurrent refreshStatus (which only
+   writes .srr-status) can't clobber it. Same fixed-above-toolbar placement as the
+   status banner, stacked just above it so the two never overlap. Hidden by default
+   via the [hidden] attribute. */
+.srr-pin-progress {
+   position: fixed;
+   left: 0;
+   right: 0;
+   bottom: 5.5rem;
+   max-width: 680px;
+   margin: 0 auto;
+   z-index: 5;
+   font-size: 0.75rem;
+   color: var(--muted);
+   text-align: center;
+   padding: 0.35rem 0.5rem;
+   background: var(--bg);
 }
 
 /* Toolbar */

@@ -50,7 +50,7 @@ type SyndicateSetCmd struct {
 }
 
 func (o *SyndicateSetCmd) Run() error {
-	return withDB(true, func(_ context.Context, db *DB) error {
+	return withDB(true, func(ctx context.Context, db *DB) error {
 		// Validate name: must be a safe file stem with no path components.
 		if !validOutName(o.Name) {
 			return fmt.Errorf("syndication name %q must match [A-Za-z0-9._-] and not be . or ..", o.Name)
@@ -84,10 +84,14 @@ func (o *SyndicateSetCmd) Run() error {
 			Limit:  limit,
 		}
 
-		// Upsert by name.
+		// Upsert by name. Capture the prior format so a format change can reap the
+		// now-orphaned old-extension out/* file (SyncOutFeeds only ever writes the
+		// current extension, so the old file would be served stale forever).
 		found := false
+		oldFormat := ""
 		for i, e := range db.core.Out {
 			if e.Name == o.Name {
+				oldFormat = e.Format
 				db.core.Out[i] = entry
 				found = true
 				break
@@ -96,7 +100,14 @@ func (o *SyndicateSetCmd) Run() error {
 		if !found {
 			db.core.Out = append(db.core.Out, entry)
 		}
-		return db.Commit(context.Background())
+		if err := db.Commit(ctx); err != nil {
+			return err
+		}
+		if found && oldFormat != "" && oldFormat != o.Format {
+			// Best-effort delete the orphaned old-extension file (Rm is silent-on-missing).
+			_ = db.Rm(ctx, outFileKey(OutFeed{Name: o.Name, Format: oldFormat}))
+		}
+		return nil
 	})
 }
 
@@ -128,10 +139,11 @@ func (o *SyndicateRmCmd) Run() error {
 		// If format was empty (name not found), still attempt both extensions so
 		// a leftover file from a previous run is also cleaned.
 		exts := map[string]string{"rss": ".rss", "json": ".json"}
-		if format != "" {
-			key := "out/" + o.Name + exts[format]
-			_ = db.Rm(ctx, key)
+		if ext := exts[format]; format != "" && ext != "" {
+			_ = db.Rm(ctx, "out/"+o.Name+ext)
 		} else {
+			// Unknown/empty format (e.g. a hand-edited db.gz value): delete both
+			// possible extensions so the real out/* file isn't left orphaned.
 			for _, ext := range exts {
 				_ = db.Rm(ctx, "out/"+o.Name+ext)
 			}

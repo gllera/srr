@@ -27,10 +27,33 @@ import (
 // Regex syntax: /pattern/ or /pattern/i (the only supported flag is i).
 // A malformed regex or unrecognised param is a hard configuration error.
 //
+// NOTE: a pipeline token is split on whitespace before its parameters are parsed
+// (see mod.Module.Process), so a regex param value cannot contain a LITERAL space.
+// Use a whitespace metacharacter instead — drop_title=/breaking\s+news/ or
+// drop_title=/breaking[ ]news/ — NOT drop_title=/breaking news/, which is rejected
+// as a malformed parameter.
+//
 // #filter does not touch GUID, Published, Title, Content, or Link.
 
 func init() {
 	Register("filter", func() Processor {
+		// Compile each distinct regex param value once per Module instance (the
+		// factory runs once per New()), not once per article. *mod.Module is pooled
+		// per-worker (procPool, never shared concurrently), so this map needs no
+		// locking. Keyed by the param VALUE (a value compiles to the same regex
+		// regardless of which param named it).
+		cache := map[string]*regexp.Regexp{}
+		compiled := func(key, val string) (*regexp.Regexp, error) {
+			if re, ok := cache[val]; ok {
+				return re, nil
+			}
+			re, err := parseRegexParam(key, val)
+			if err != nil {
+				return nil, err
+			}
+			cache[val] = re
+			return re, nil
+		}
 		return func(ctx context.Context, p Params, i *RawItem) error {
 			if err := p.only("drop_title", "keep_title", "drop_content", "keep_content", "min_words"); err != nil {
 				return err
@@ -38,7 +61,7 @@ func init() {
 
 			// --- drop_title ---
 			if v, ok := p["drop_title"]; ok {
-				re, err := parseRegexParam("drop_title", v)
+				re, err := compiled("drop_title", v)
 				if err != nil {
 					return err
 				}
@@ -50,7 +73,7 @@ func init() {
 
 			// --- keep_title ---
 			if v, ok := p["keep_title"]; ok {
-				re, err := parseRegexParam("keep_title", v)
+				re, err := compiled("keep_title", v)
 				if err != nil {
 					return err
 				}
@@ -62,7 +85,7 @@ func init() {
 
 			// --- drop_content ---
 			if v, ok := p["drop_content"]; ok {
-				re, err := parseRegexParam("drop_content", v)
+				re, err := compiled("drop_content", v)
 				if err != nil {
 					return err
 				}
@@ -74,7 +97,7 @@ func init() {
 
 			// --- keep_content ---
 			if v, ok := p["keep_content"]; ok {
-				re, err := parseRegexParam("keep_content", v)
+				re, err := compiled("keep_content", v)
 				if err != nil {
 					return err
 				}
@@ -116,6 +139,9 @@ func parseRegexParam(key, val string) (*regexp.Regexp, error) {
 	}
 	// last is relative to val[1:], so absolute index is last+1.
 	pattern := val[1 : last+1]
+	if pattern == "" {
+		return nil, fmt.Errorf("parameter %s=%q: empty pattern matches everything; use a non-empty regex", key, val)
+	}
 	flags := val[last+2:]
 	for _, f := range flags {
 		if f != 'i' {

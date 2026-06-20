@@ -191,12 +191,6 @@ function feedGrade(ch: IFeed): "" | "warn" | "crit" {
    return ""
 }
 
-// feedHasIssue returns true when the feed has any health grade (used for tag
-// header dot: a collapsed tag group still surfaces any trouble inside it).
-function feedHasIssue(ch: IFeed): boolean {
-   return feedGrade(ch) !== ""
-}
-
 function errDot(grade: "warn" | "crit"): HTMLSpanElement {
    const s = document.createElement("span")
    s.className = `srr-err-dot srr-stale-${grade}`
@@ -618,7 +612,11 @@ export function showFeedMenu(currentTag: string, onSelect: (token: string) => vo
          const expanded = tag === currentTag && tag !== current
          const div = divEl(expanded ? "srr-tag-group" : "srr-tag-group srr-tag-collapsed")
          const header = createLink(tag, tag, cls("srr-tag-header", tag))
-         if (group.some(feedHasIssue)) header.prepend(errDot("crit"))
+         const worst = group.reduce<"" | "warn" | "crit">(
+            (g, ch) => (g === "crit" || feedGrade(ch) === "crit" ? "crit" : feedGrade(ch) || g),
+            "",
+         )
+         if (worst) header.prepend(errDot(worst))
          headerRows.push([header, group])
          const toggle = document.createElement("span")
          toggle.className = "srr-tag-toggle"

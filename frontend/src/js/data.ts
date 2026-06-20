@@ -141,7 +141,10 @@ export function lastFetchedAt(): number {
 // idx packs on boot instead of using the fast summary path.
 export function idxSummaryDegraded(): boolean {
    const nf = numFinalizedIdx()
-   return nf > 0 && db.hdrs !== nf
+   // Only an actively-advancing summary rebuild (hdrs partway) — NOT a steady
+   // pre-summary store (hdrs===0/absent, e.g. an old backend), which would pin a
+   // permanent, misleading "(optimizing index…)" banner the user can't act on.
+   return nf > 0 && (db.hdrs ?? 0) > 0 && (db.hdrs ?? 0) < nf
 }
 
 // Fetches + gunzips one pack key. Every pack name is write-once (finalized
