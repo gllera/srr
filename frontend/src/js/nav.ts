@@ -28,8 +28,10 @@ export function isUnreadOnly(): boolean {
 export function setUnreadOnly(on: boolean) {
    unreadOnly = on
    try {
-      if (on) localStorage.setItem(UNREAD_ONLY_KEY, "1")
-      else localStorage.removeItem(UNREAD_ONLY_KEY)
+      // Persist BOTH states explicitly ("1"/"0"): an absent key means "never
+      // chosen", which app.ts treats as the unread-only default on first run — so
+      // a user who turns it off must store "0", not clear the key, or it'd revert.
+      localStorage.setItem(UNREAD_ONLY_KEY, on ? "1" : "0")
    } catch {}
    // Re-apply the current filter so its members immediately pick up (or shed) the
    // raised unseen-only bounds — the caller just flips the mode and rebuilds.

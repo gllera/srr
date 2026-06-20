@@ -1002,13 +1002,15 @@ describe("unread-only mode", () => {
       for (const id of new Set(entries.map((e) => e.feedId))) data.db.feeds[id].tag = "news"
    }
 
-   it("persists the toggle in localStorage", () => {
+   it("persists the toggle in localStorage (both states explicitly)", () => {
       expect(nav.isUnreadOnly()).toBe(false)
       nav.setUnreadOnly(true)
       expect(nav.isUnreadOnly()).toBe(true)
       expect(localStorage.getItem("srr-unread-only")).toBe("1")
       nav.setUnreadOnly(false)
-      expect(localStorage.getItem("srr-unread-only")).toBeNull()
+      // Off persists as "0" (not a cleared key): an absent key is the first-run
+      // unread-only default, so an explicit off must survive a reload.
+      expect(localStorage.getItem("srr-unread-only")).toBe("0")
    })
 
    // chron 0=ch1 1=ch2 2=ch1 3=ch2 4=ch1; read ch1→2, ch2→1; unseen are 3,4.

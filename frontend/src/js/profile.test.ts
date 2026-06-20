@@ -143,13 +143,27 @@ describe("importProfile", () => {
       expect(localStorage.getItem(IMG_PROXY_KEY)).toBe("https://p.example/?url=")
    })
 
-   it("ignores an invalid imgProxy even when opts.prefs is true", () => {
+   it("imports an explicit unreadOnly:false as '0' (so it overrides the first-run default)", () => {
+      const blob = JSON.stringify({ v: 1, seen: {}, saved: [], unreadOnly: false, imgProxy: "" })
+      const r = importProfile(blob, { prefs: true })
+      expect(r.ok).toBe(true)
+      expect(localStorage.getItem(UNREAD_ONLY_KEY)).toBe("0")
+   })
+
+   it("ignores an invalid imgProxy (explicit non-http(s) scheme) even when opts.prefs is true", () => {
       localStorage.setItem(IMG_PROXY_KEY, "https://existing/?url=")
-      const blob = JSON.stringify({ v: 1, seen: {}, saved: [], unreadOnly: false, imgProxy: "not-a-valid-proxy" })
+      const blob = JSON.stringify({ v: 1, seen: {}, saved: [], unreadOnly: false, imgProxy: "ftp://evil/" })
       const r = importProfile(blob, { prefs: true })
       expect(r.ok).toBe(true)
       // invalid proxy is ignored; existing value unchanged
       expect(localStorage.getItem(IMG_PROXY_KEY)).toBe("https://existing/?url=")
+   })
+
+   it("normalizes a schemeless imgProxy on import (https default + trailing slash)", () => {
+      const blob = JSON.stringify({ v: 1, seen: {}, saved: [], unreadOnly: false, imgProxy: "images.weserv.nl" })
+      const r = importProfile(blob, { prefs: true })
+      expect(r.ok).toBe(true)
+      expect(localStorage.getItem(IMG_PROXY_KEY)).toBe("https://images.weserv.nl/")
    })
 
    it("filters non-integer values from incoming saved array", () => {

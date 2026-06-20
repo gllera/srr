@@ -874,6 +874,18 @@ async function pump(my: object): Promise<void> {
    pumping = true
    try {
       while (my === tok && !exhaustedBottom && rowsEl) {
+         // Offscreen guard. pump exists to FILL A VIEWPORT — with no viewport it
+         // must not run. A hidden list (the config surface stacks over it with
+         // el.listView.hidden = true) has no layout box, so getClientRects() is
+         // empty and getBoundingClientRect() below returns all-zeros — making the
+         // below-the-fold break (rect.top > …) never fire. pump would then page to
+         // EXHAUSTION, walking the whole archive. This is the unread-only freeze:
+         // the toggle lives in config, so its list.rerender() runs while the list
+         // is hidden; with a live anchor that has a long older-unread tail (e.g. a
+         // list-cursor selection near the newest end) pump fetched every pack and
+         // hung the tab. Bailing loses nothing — the IntersectionObserver re-pumps
+         // when the list is shown and the sentinel intersects.
+         if (!bottomSentinel.getClientRects().length) break
          const rect = bottomSentinel.getBoundingClientRect()
          if (rect.top > window.innerHeight + 800) break
          const before = rowsEl.childElementCount

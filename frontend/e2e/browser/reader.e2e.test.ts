@@ -963,4 +963,48 @@ describe("browser: real SPA over real packs", () => {
          await ctx.close()
       }
    })
+
+   // Regression: enabling "unread only" froze the tab. The toggle lives in the
+   // config surface, which stacks over the list with el.listView.hidden = true, so
+   // its list.rerender() runs while the list is display:none. When the list anchors
+   // at a LIVE position with a long older-unread tail below it — set here via the
+   // list keyboard cursor (nav.select, which moves pos WITHOUT recording it seen,
+   // unlike opening the reader) — list.ts's pump (infinite scroll) walks that tail.
+   // pump stops once the bottom sentinel sits below the fold, but a hidden element's
+   // getBoundingClientRect() is all-zeros, so pre-fix the break never fired and pump
+   // paged the WHOLE archive into the hidden list (the freeze). Assert the hidden
+   // rerender stays near its initial batch (BATCH=30), not all 100 rows.
+   // Runs LAST: replaces the shared store with a single 100-article feed.
+   it("does not page the hidden list to exhaustion when unread-only is toggled in settings", async () => {
+      for (const f of readdirSync(packsDir)) rmSync(join(packsDir, f), { recursive: true, force: true })
+      feeds.set("/bulk.xml", rssFeed("Bulk", nItems(100, "bulk")))
+      await srr(packsDir, "feed", "add", "-t", "Bulk", "-u", `${feeds.url}/bulk.xml`)
+      await srr(packsDir, "art", "fetch")
+
+      const ctx = await browser.createBrowserContext()
+      const page = await ctx.newPage()
+      try {
+         await page.goto(baseUrl, { waitUntil: "load" })
+         await waitList(page)
+         // Drop the list cursor on the NEWEST row (chron 99) — a live anchor with
+         // ~99 older unread rows below it. nav.select sets pos without recordSeen,
+         // so it stays the anchor through the unread toggle (a reader open would
+         // mark it seen and disqualify it).
+         await page.keyboard.press("d")
+         await waitCurrent(page, "bulk title 99")
+         // Open settings → the list goes display:none behind the config surface.
+         await page.click(".srr-settings")
+         await page.waitForSelector(".srr-config-unread", { visible: true })
+         expect(await page.$eval(".srr-list", (e) => (e as HTMLElement).hidden)).toBe(true)
+         // Flip "Unread" — this rerenders the hidden list.
+         await page.click(".srr-config-unread")
+         // Give a runaway pump ample time to page the whole archive if it regressed.
+         await new Promise((r) => setTimeout(r, 1500))
+         const rows = await page.$$eval(".srr-list a.srr-row", (els) => els.length)
+         expect(rows).toBeGreaterThan(0) // it DID rerender (initial batch loaded)
+         expect(rows).toBeLessThanOrEqual(45) // ~BATCH, NOT all 100 (pre-fix: ~99)
+      } finally {
+         await ctx.close()
+      }
+   })
 })
