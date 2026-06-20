@@ -70,6 +70,7 @@ const nav = vi.hoisted(() => {
       right: vi.fn(async () => sf()),
       first: vi.fn(async () => sf()),
       last: vi.fn(async () => sf()),
+      listAnchor: vi.fn(async () => -1),
       switchFilter: vi.fn(async () => sf()),
       seek: vi.fn(async () => 0),
       unreadCounts: vi.fn(async () => new Map<number, number>()),
@@ -100,13 +101,26 @@ const list = vi.hoisted(() => ({
 vi.mock("./list", () => list)
 
 const dropdown = vi.hoisted(() => ({
-   closeAllDropdowns: vi.fn(),
-   showFeedMenu: vi.fn(),
-   showOverflowMenu: vi.fn(),
    setProfileImportHook: vi.fn(),
-   setPinMenuHook: vi.fn(),
+   showImgProxyDialog: vi.fn(),
+   showBackupDialog: vi.fn(),
 }))
 vi.mock("./dropdown", () => dropdown)
+
+// The config surface is its own module; app.ts drives it via showConfig/config.open
+// and the hooks it passes to config.setup. We mock it and capture those hooks.
+const config = vi.hoisted(() => ({
+   setup: vi.fn(),
+   open: vi.fn(),
+   close: vi.fn(),
+   render: vi.fn(),
+   refreshStatus: vi.fn(),
+   isOpen: vi.fn(() => false),
+}))
+vi.mock("./config", () => config)
+// The hooks object app.ts passes to config.setup (onSelect / onUnreadToggle /
+// onClose / pinEntry / openImgProxy / openBackup) — captured for assertions.
+const configHooks = () => (config.setup as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[1]
 
 vi.mock("./fmt", () => ({
    sanitizeHtml: (s: string) => s,
@@ -138,15 +152,14 @@ const SKELETON = `
       <div class="srr-list" hidden></div>
       <nav class="srr-toolbar">
          <button class="srr-back"></button>
-         <div class="srr-dropdown"><button class="srr-dropdown-btn srr-feed"></button><div id="srr-feed-menu" class="srr-dropdown-menu"></div></div>
+         <button class="srr-open-reader"></button>
+         <span class="srr-feed"></span>
          <button class="srr-prev" disabled></button>
-         <button class="srr-search"></button>
          <button class="srr-next" disabled></button>
-         <button class="srr-unread"></button>
          <button class="srr-save" disabled></button>
-         <div class="srr-dropdown"><button class="srr-overflow srr-dropdown-btn"></button><div id="srr-overflow-menu" class="srr-dropdown-menu"></div></div>
+         <button class="srr-settings"></button>
       </nav>
-      <div class="srr-status"></div>
+      <section class="srr-config" hidden></section>
       <div class="srr-pin-progress" hidden></div>
    </main>`
 
@@ -333,161 +346,210 @@ describe("error popup — focus trap + close", () => {
 // moved from dropdown.ts into app.ts. These tests pin that decision: selecting a
 // filter from the feed menu must call selectFilter (list surface) or
 // guard(switchFilter) (reader surface), never the wrong one.
-describe("feed-menu onSelect routing — list vs reader (FE-S7)", () => {
-   const clickFeed = () =>
-      document.querySelector<HTMLButtonElement>(".srr-feed")!.dispatchEvent(new MouseEvent("click", { bubbles: true }))
-
-   // Capture the onSelect callback that app.ts passed to showFeedMenu.
-   // showFeedMenu is a vi.fn() so its args are always available.
-   const captureOnSelect = (): ((token: string) => void) => {
-      const calls = (dropdown.showFeedMenu as ReturnType<typeof vi.fn>).mock.calls
-      return calls[calls.length - 1][1]
-   }
-
-   it("LIST surface: onSelect calls selectFilter (applyFilter path), not switchFilter", async () => {
-      await boot() // boots into list (hash "" → list surface)
-      expect(document.body.classList.contains("srr-view-list")).toBe(true)
-
-      dropdown.showFeedMenu.mockClear()
-      nav.applyFilter.mockClear()
-      nav.switchFilter.mockClear()
-
-      clickFeed()
-      expect(dropdown.showFeedMenu).toHaveBeenCalledTimes(1)
-
-      const onSelect = captureOnSelect()
-      await onSelect("42")
+describe("list → reader — open-article button", () => {
+   it("enters the reader at the current article (the tap counterpart of Escape)", async () => {
+      await boot() // list surface
+      nav.currentChron.mockReturnValue(5)
+      nav.goTo.mockClear()
+      document
+         .querySelector<HTMLButtonElement>(".srr-open-reader")!
+         .dispatchEvent(new MouseEvent("click", { bubbles: true }))
       await flush()
+      expect(nav.goTo).toHaveBeenCalledWith(5)
+      expect(document.body.classList.contains("srr-view-list")).toBe(false)
+      expect(document.querySelector(".srr-reader")!.hasAttribute("hidden")).toBe(false)
+   })
 
-      // selectFilter calls nav.applyFilter then routes to the list
+   it("falls back to the newest article when nothing is current (currentChron < 0)", async () => {
+      await boot()
+      nav.currentChron.mockReturnValue(-1)
+      nav.listAnchor.mockResolvedValue(-1)
+      nav.last.mockClear()
+      document
+         .querySelector<HTMLButtonElement>(".srr-open-reader")!
+         .dispatchEvent(new MouseEvent("click", { bubbles: true }))
+      await flush()
+      expect(nav.last).toHaveBeenCalled()
+      expect(document.body.classList.contains("srr-view-list")).toBe(false)
+   })
+})
+
+describe("config surface — open + filter / settings routing", () => {
+   // The config entry point is the settings gear now; the now-viewing readout is a
+   // plain label.
+   const clickConfig = () =>
+      document
+         .querySelector<HTMLButtonElement>(".srr-settings")!
+         .dispatchEvent(new MouseEvent("click", { bubbles: true }))
+
+   it("the now-viewing readout is a plain label, not a config trigger", async () => {
+      await boot() // boots into the list (hash "" → list surface)
+      config.open.mockClear()
+      document.querySelector(".srr-feed")!.dispatchEvent(new MouseEvent("click", { bubbles: true }))
+      expect(config.open).not.toHaveBeenCalled()
+      expect(document.body.classList.contains("srr-view-config")).toBe(false)
+   })
+
+   it("the list's settings gear opens config too (the explicit settings entry)", async () => {
+      await boot() // list surface
+      config.open.mockClear()
+      document
+         .querySelector<HTMLButtonElement>(".srr-settings")!
+         .dispatchEvent(new MouseEvent("click", { bubbles: true }))
+      expect(config.open).toHaveBeenCalledTimes(1)
+      expect(document.body.classList.contains("srr-view-config")).toBe(true)
+   })
+
+   it("the reader's settings gear opens config too (the gear lives on both surfaces)", async () => {
+      await boot()
+      hashTo("#2") // numeric hash → reader surface
+      await flush()
+      config.open.mockClear()
+      document
+         .querySelector<HTMLButtonElement>(".srr-settings")!
+         .dispatchEvent(new MouseEvent("click", { bubbles: true }))
+      expect(config.open).toHaveBeenCalledTimes(1)
+      expect(document.body.classList.contains("srr-view-config")).toBe(true)
+   })
+
+   it("config onSearch leaves config for the list with search applied", async () => {
+      await boot()
+      // Open config (settings gear), then trigger the Search row's hook.
+      clickConfig()
+      expect(document.body.classList.contains("srr-view-config")).toBe(true)
+      nav.applyFilter.mockClear()
+      configHooks()!.onSearch()
+      await flush()
+      expect(nav.applyFilter).toHaveBeenCalledWith(["q:"])
+      expect(document.body.classList.contains("srr-view-config")).toBe(false)
+   })
+
+   it("config.onSelect closes config and re-filters the list (applyFilter)", async () => {
+      await boot()
+      nav.applyFilter.mockClear()
+      config.close.mockClear()
+      await configHooks()!.onSelect("42")
+      await flush()
+      expect(config.close).toHaveBeenCalled()
       expect(nav.applyFilter).toHaveBeenCalledWith(["42"])
-      // switchFilter is the reader path — must NOT be called here
+      // selectFilter is the only filter path now — the reader switchFilter menu is gone.
       expect(nav.switchFilter).not.toHaveBeenCalled()
    })
 
-   it("READER surface: onSelect calls guard(switchFilter), not selectFilter/applyFilter", async () => {
+   it("config.onUnreadToggle flips unread-only and rebuilds the list", async () => {
       await boot()
-      // Route into the reader by navigating to a numeric hash
-      nav.fromHash.mockClear()
-      hashTo("#3")
+      nav.setUnreadOnly.mockClear()
+      list.rerender.mockClear()
+      configHooks()!.onUnreadToggle()
       await flush()
-      expect(document.querySelector(".srr-reader")!.hasAttribute("hidden")).toBe(false)
+      expect(nav.setUnreadOnly).toHaveBeenCalledWith(true) // isUnreadOnly() mock = false → toggle on
+      expect(list.rerender).toHaveBeenCalled()
+   })
+
+   it("config settings hooks open the image-proxy and backup dialogs", async () => {
+      await boot()
+      const hooks = configHooks()!
+      hooks.openImgProxy()
+      hooks.openBackup()
+      expect(dropdown.showImgProxyDialog).toHaveBeenCalledTimes(1)
+      expect(dropdown.showBackupDialog).toHaveBeenCalledTimes(1)
+   })
+})
+
+describe("first-run unread-only default", () => {
+   it("enables unread-only on first run when no preference is stored", async () => {
+      // beforeEach cleared localStorage → the key is absent (never chosen).
+      await boot()
+      expect(nav.setUnreadOnly).toHaveBeenCalledWith(true)
+   })
+
+   it("respects a stored preference and does not force unread-only on at boot", async () => {
+      localStorage.setItem("srr-unread-only", "0")
+      await boot()
+      expect(nav.setUnreadOnly).not.toHaveBeenCalled()
+   })
+})
+
+describe("Escape — surface toggle ladder", () => {
+   const esc = () =>
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }))
+   const openConfig = () =>
+      document
+         .querySelector<HTMLButtonElement>(".srr-settings")!
+         .dispatchEvent(new MouseEvent("click", { bubbles: true }))
+
+   it("reader → list", async () => {
+      await boot()
+      hashTo("#3") // into the reader
+      await flush()
       expect(document.body.classList.contains("srr-view-list")).toBe(false)
-
-      dropdown.showFeedMenu.mockClear()
-      nav.applyFilter.mockClear()
-      nav.switchFilter.mockClear()
-
-      clickFeed()
-      expect(dropdown.showFeedMenu).toHaveBeenCalledTimes(1)
-
-      const onSelect = captureOnSelect()
-      await onSelect("7")
+      esc()
       await flush()
+      expect(document.body.classList.contains("srr-view-list")).toBe(true)
+   })
 
-      // guard(switchFilter) runs switchFilter and shows the reader result
-      expect(nav.switchFilter).toHaveBeenCalledWith("7")
-      // applyFilter is the list path — must NOT be called here
-      expect(nav.applyFilter).not.toHaveBeenCalled()
+   it("list → reader: opens the selected row (currentChron)", async () => {
+      await boot()
+      nav.currentChron.mockReturnValue(5)
+      nav.goTo.mockClear()
+      esc()
+      await flush()
+      expect(nav.goTo).toHaveBeenCalledWith(5)
+   })
+
+   it("list → reader: no selection → opens the filter's oldest unseen (listAnchor)", async () => {
+      await boot()
+      nav.currentChron.mockReturnValue(-1)
+      nav.listAnchor.mockResolvedValue(8)
+      nav.goTo.mockClear()
+      esc()
+      await flush()
+      expect(nav.goTo).toHaveBeenCalledWith(8)
+   })
+
+   it("list → reader: nothing unseen → opens the newest (last)", async () => {
+      await boot()
+      nav.currentChron.mockReturnValue(-1)
+      nav.listAnchor.mockResolvedValue(-1)
+      nav.goTo.mockClear()
+      nav.last.mockClear()
+      esc()
+      await flush()
+      expect(nav.goTo).not.toHaveBeenCalled()
+      expect(nav.last).toHaveBeenCalledTimes(1)
+   })
+
+   it("config open → closes config → reader", async () => {
+      await boot()
+      openConfig()
+      expect(document.body.classList.contains("srr-view-config")).toBe(true)
+      config.close.mockClear()
+      esc()
+      await flush()
+      expect(config.close).toHaveBeenCalled()
+      expect(document.body.classList.contains("srr-view-config")).toBe(false)
+   })
+
+   it("an open error popup closes first and does not toggle surfaces", async () => {
+      await boot()
+      nav.goTo.mockClear()
+      document.querySelector(".srr-popup")!.classList.add("srr-open")
+      esc()
+      await flush()
+      expect(document.querySelector(".srr-popup")!.classList.contains("srr-open")).toBe(false)
+      expect(nav.goTo).not.toHaveBeenCalled()
    })
 })
 
-describe("refreshStatus() — freshness & degradation status banner", () => {
-   const status = () => document.querySelector(".srr-status") as HTMLElement
+// The freshness / degradation status line moved into the config surface
+// (config.refreshStatus, covered in config.test.ts), so app.ts no longer owns a
+// status banner — that describe was removed with the move.
 
-   it("shows freshness text when fetched_at > 0 and everything is healthy", async () => {
-      data.lastFetchedAt.mockReturnValue(1700000000) // nonzero, treated as recent by mock isStale
-      data.metaReady.mockReturnValue(true)
-      data.idxSummaryDegraded.mockReturnValue(false)
-      await boot()
-      const text = status().textContent ?? ""
-      expect(text).toContain("Updated")
-      expect(text).toContain("minutes ago")
-      expect(status().classList.contains("srr-status-warn")).toBe(false)
-   })
-
-   it("shows stale warning when isStale returns true", async () => {
-      // isStale mock: unix > 0 && unix < 1000 => stale; use value 1 (> 0 and < 1000)
-      data.lastFetchedAt.mockReturnValue(1)
-      data.metaReady.mockReturnValue(true)
-      data.idxSummaryDegraded.mockReturnValue(false)
-      await boot()
-      const text = status().textContent ?? ""
-      expect(text).toContain("backend may be down")
-      expect(status().classList.contains("srr-status-warn")).toBe(true)
-   })
-
-   it("shows search unavailable when metaReady is false and store is non-empty", async () => {
-      data.lastFetchedAt.mockReturnValue(1700000000)
-      data.hasArticles.mockReturnValue(true)
-      data.metaReady.mockReturnValue(false)
-      data.idxSummaryDegraded.mockReturnValue(false)
-      await boot()
-      const text = status().textContent ?? ""
-      expect(text).toContain("Search unavailable")
-      expect(status().classList.contains("srr-status-warn")).toBe(true)
-   })
-
-   it("shows degraded note when idxSummaryDegraded is true", async () => {
-      data.lastFetchedAt.mockReturnValue(1700000000)
-      data.metaReady.mockReturnValue(true)
-      data.idxSummaryDegraded.mockReturnValue(true)
-      await boot()
-      const text = status().textContent ?? ""
-      expect(text).toContain("optimizing")
-      expect(status().classList.contains("srr-status-warn")).toBe(true)
-   })
-
-   it("shows no freshness line when fetched_at is 0", async () => {
-      data.lastFetchedAt.mockReturnValue(0)
-      data.metaReady.mockReturnValue(true)
-      data.idxSummaryDegraded.mockReturnValue(false)
-      await boot()
-      const text = status().textContent ?? ""
-      expect(text).not.toContain("Updated")
-      expect(text).not.toContain("backend may be down")
-      expect(status().classList.contains("srr-status-warn")).toBe(false)
-   })
-
-   it("empty store with recent fetch shows only freshness line, no search warning, no warn class", async () => {
-      // total_art === 0: metaReady() returns false (its real empty-store behaviour),
-      // but hasArticles() is false, so metaMissing must stay false.
-      data.lastFetchedAt.mockReturnValue(1700000000) // nonzero, recent (isStale mock: unix < 1000 => stale)
-      data.hasArticles.mockReturnValue(false)
-      data.metaReady.mockReturnValue(false) // mirrors real empty-store return value
-      data.idxSummaryDegraded.mockReturnValue(false)
-      await boot()
-      const text = status().textContent ?? ""
-      expect(text).toContain("Updated")
-      expect(text).not.toContain("Search unavailable")
-      expect(status().classList.contains("srr-status-warn")).toBe(false)
-   })
-
-   it("stale + metaReady false on non-empty store shows both warnings and warn class", async () => {
-      // isStale mock: unix > 0 && unix < 1000 => stale; use value 1
-      data.lastFetchedAt.mockReturnValue(1)
-      data.hasArticles.mockReturnValue(true)
-      data.metaReady.mockReturnValue(false)
-      data.idxSummaryDegraded.mockReturnValue(false)
-      await boot()
-      const text = status().textContent ?? ""
-      expect(text).toContain("backend may be down")
-      expect(text).toContain("Search unavailable — index rebuilding")
-      expect(text).toContain(" · ") // separator between the two parts
-      expect(status().classList.contains("srr-status-warn")).toBe(true)
-   })
-})
-
-// Helper: invoke the pin action from the registered pinMenuHook (simulates the
-// overflow "Download for offline" tap) and wait for the async pin to settle.
-// Sets up a fake SW controller so pinCurrentFilter doesn't bail early.
+// Helper: invoke the pin action from the pinEntry hook app.ts hands to
+// config.setup (simulates the config "Download for offline" tap) and wait for the
+// async pin to settle. Sets up a fake SW controller so pinCurrentFilter doesn't
+// bail early.
 async function invokePinAction(isUnreadOnly: boolean): Promise<void> {
-   // Capture the pinMenuHook registered by app.ts during boot.
-   let capturedHook: (() => { label: string; action: () => void } | null) | null = null
-   dropdown.setPinMenuHook.mockImplementation((fn: () => { label: string; action: () => void } | null) => {
-      capturedHook = fn
-   })
-
    // In unread-only mode the filter must be active (a feed/tag scope, not [ALL])
    // so the snapshot note fires.
    nav.isUnreadOnly.mockReturnValue(isUnreadOnly)
@@ -510,9 +572,9 @@ async function invokePinAction(isUnreadOnly: boolean): Promise<void> {
    })
 
    await boot()
-   // Flush init then grab the hook.
-   expect(capturedHook).not.toBeNull()
-   const entry = capturedHook!()
+   // Grab the pinEntry hook app.ts passed to config.setup and resolve it.
+   const pinEntry = configHooks()!.pinEntry as () => { label: string; action: () => void } | null
+   const entry = pinEntry()
    expect(entry).not.toBeNull()
 
    // Trigger the pin action (async).

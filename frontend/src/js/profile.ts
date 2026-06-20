@@ -29,12 +29,6 @@ function lsSet(key: string, value: string): void {
    } catch {}
 }
 
-function lsDel(key: string): void {
-   try {
-      localStorage.removeItem(key)
-   } catch {}
-}
-
 function readSeen(): Record<string, number> {
    try {
       const raw = lsGet(SEEN_KEY)
@@ -54,9 +48,25 @@ function readSavedSorted(): number[] {
    }
 }
 
-// isValidProxy mirrors fmt.ts's isValidProxy exactly.
+// isValidProxy / normalizeProxy mirror fmt.ts's behaviour exactly. profile.ts
+// deliberately does not import fmt.ts (which pulls base.ts's module-load
+// `new URL(SRR_CDN_URL, …)` side effect and would break this module's
+// unit-testability), so the small proxy helpers are duplicated here — keep them in
+// sync. Scheme is optional (https default); a host/path gets a trailing "/".
 function isValidProxy(v: string): boolean {
-   return v === "" || /^https?:\/\//i.test(v)
+   const s = v.trim()
+   if (s === "") return true
+   if (/^https?:\/\//i.test(s)) return true
+   if (/^\s*(?:javascript|data|vbscript|file)\s*:/i.test(s)) return false
+   return !/^[a-z][a-z0-9+.-]*:\/\//i.test(s)
+}
+
+function normalizeProxy(v: string): string {
+   let s = v.trim()
+   if (s === "") return ""
+   if (!/^https?:\/\//i.test(s)) s = "https://" + s.replace(/^\/+/, "")
+   if (/[a-z0-9]$/i.test(s)) s += "/"
+   return s
 }
 
 export interface ImportResult {
@@ -132,14 +142,16 @@ export function importProfile(json: string, opts: { prefs: boolean }): ImportRes
    if (opts.prefs) {
       try {
          if (typeof obj["unreadOnly"] === "boolean") {
-            if (obj["unreadOnly"]) lsSet(UNREAD_ONLY_KEY, "1")
-            else lsDel(UNREAD_ONLY_KEY)
+            // Store the off state explicitly ("0"), not by clearing the key — an
+            // absent key is the first-run unread-only default (app.ts), so a
+            // restored "off" must persist as "0" to override it.
+            lsSet(UNREAD_ONLY_KEY, obj["unreadOnly"] ? "1" : "0")
          }
       } catch {}
       try {
          const proxy = obj["imgProxy"]
          if (typeof proxy === "string" && isValidProxy(proxy)) {
-            lsSet(IMG_PROXY_KEY, proxy)
+            lsSet(IMG_PROXY_KEY, normalizeProxy(proxy))
          }
       } catch {}
    }

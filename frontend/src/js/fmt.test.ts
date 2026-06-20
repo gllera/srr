@@ -11,6 +11,7 @@ import {
    getImgProxy,
    setImgProxy,
    isValidProxy,
+   normalizeProxy,
    srcColorIndex,
    SRC_COLORS,
    dayLabel,
@@ -509,15 +510,42 @@ describe("isValidProxy", () => {
       ["https://p.example/?url=", true],
       ["http://192.168.1.4:8000/unsafe/", true], // http allowed for LAN proxies
       ["HTTPS://P.EXAMPLE/?url=", true], // scheme match is case-insensitive
-      ["ftp://p.example/", false],
-      ["p.example/?url=", false], // schemeless can't produce a fetchable URL
+      ["p.example/?url=", true], // schemeless is allowed now (https is the default)
+      ["images.weserv.nl", true], // a bare host is fine (normalized on save)
+      ["ftp://p.example/", false], // an explicit non-http(s) scheme is rejected
       ["javascript:alert(1)", false],
+      ["data:text/html,x", false],
    ]
    for (const [value, want] of cases) {
       it(`${JSON.stringify(value)} → ${want}`, () => {
          expect(isValidProxy(value)).toBe(want)
       })
    }
+})
+
+describe("normalizeProxy", () => {
+   const cases: Array<[string, string]> = [
+      ["", ""],
+      ["   ", ""], // trims to empty → disabled
+      ["https://p.example/?url=", "https://p.example/?url="], // full + ends "=" → unchanged
+      ["http://lan:8000/unsafe/", "http://lan:8000/unsafe/"], // explicit http kept, ends "/"
+      ["p.example/?url=", "https://p.example/?url="], // scheme defaulted to https
+      ["images.weserv.nl", "https://images.weserv.nl/"], // scheme + trailing slash
+      ["//images.weserv.nl/?url=", "https://images.weserv.nl/?url="], // protocol-relative folded
+      ["  p.example  ", "https://p.example/"], // trim + scheme + slash
+   ]
+   for (const [value, want] of cases) {
+      it(`${JSON.stringify(value)} → ${JSON.stringify(want)}`, () => {
+         expect(normalizeProxy(value)).toBe(want)
+      })
+   }
+
+   it("is idempotent", () => {
+      for (const [value] of cases) {
+         const once = normalizeProxy(value)
+         expect(normalizeProxy(once)).toBe(once)
+      }
+   })
 })
 
 describe("formatDate", () => {

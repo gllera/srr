@@ -95,6 +95,55 @@ describe("design-state screenshots", () => {
                await page.screenshot({ path: join(SHOTS, `${s.name}.${scheme}.png`) })
             }
 
+            // Config surface isn't hash-routed — open it the way a user does (the
+            // settings gear over the list), then capture. Pin unread-only OFF for
+            // the grounding shots (the app now defaults it on for first run, which
+            // hides fully-read feed rows in this fixture) so the full filter list —
+            // and every row's ⓘ — is shown and clickable. Hide the harness panel
+            // first: it floats at the top-left, over the config body's icon bar.
+            await page.goto(`${srv.baseUrl}/design.html#`, { waitUntil: "networkidle0" })
+            await page.evaluate(() => localStorage.setItem("srr-unread-only", "0"))
+            await page.reload({ waitUntil: "networkidle0" })
+            await waitReady(page)
+            await page.click(".srr-settings")
+            await page.evaluate(() => {
+               const panel = document.getElementById("srr-design-panel")
+               if (panel) panel.style.display = "none"
+            })
+            await page.screenshot({ path: join(SHOTS, `config.${scheme}.png`) })
+
+            // Feed info dialog — open it from a (visible, untagged) feed row's ⓘ
+            // button, let the async unread count fill, capture, then close.
+            await page.click(".srr-feed-row:not(.srr-tag-item) .srr-info-btn")
+            await page.waitForSelector(".srr-info-dialog.srr-open")
+            await new Promise((r) => setTimeout(r, 250))
+            await page.screenshot({ path: join(SHOTS, `config-info-feed.${scheme}.png`) })
+            await page.evaluate(() => (document.querySelector(".srr-info-close") as HTMLElement | null)?.click())
+
+            // Regression: opening config while a search filter is active must NOT
+            // leave the pinned search bar showing above the settings header. Config
+            // stacks over the list (srr-view-list stays on underneath), so the bar's
+            // show rule would win the specificity battle without its :not(.srr-view-
+            // config) guard. Go to a search list, confirm the bar shows, open config,
+            // confirm it's gone, then capture the (correct) config-over-search state.
+            const barShown = (p: Page) =>
+               p.evaluate(() => {
+                  const b = document.querySelector(".srr-searchbar")
+                  return b ? getComputedStyle(b).display !== "none" : false
+               })
+            await page.goto(`${srv.baseUrl}/design.html${stateHash({ kind: "search", query: "a" })}`, {
+               waitUntil: "networkidle0",
+            })
+            await waitReady(page)
+            expect(await barShown(page)).toBe(true)
+            await page.click(".srr-settings")
+            expect(await barShown(page)).toBe(false)
+            await page.evaluate(() => {
+               const panel = document.getElementById("srr-design-panel")
+               if (panel) panel.style.display = "none"
+            })
+            await page.screenshot({ path: join(SHOTS, `config-from-search.${scheme}.png`) })
+
             // Transients need a populated surface — capture them all over a reader
             // article, applying/clearing each via its TRANSIENTS recipe (the same
             // table design.ts forces from, so no class lists are duplicated here).
@@ -121,6 +170,8 @@ describe("design-state screenshots", () => {
          await browser.close()
       }
       expect(existsSync(join(SHOTS, "list.light.png"))).toBe(true)
+      expect(existsSync(join(SHOTS, "config.light.png"))).toBe(true)
+      expect(existsSync(join(SHOTS, "config-info-feed.light.png"))).toBe(true)
       expect(existsSync(join(SHOTS, "transient-error.dark.png"))).toBe(true)
    }, 240_000)
 })

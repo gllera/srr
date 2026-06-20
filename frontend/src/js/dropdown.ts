@@ -1,90 +1,14 @@
-import * as data from "./data"
-import { getImgProxy, isValidProxy, setImgProxy, srcColorIndex } from "./fmt"
-import * as nav from "./nav"
+import { getImgProxy, isValidProxy, normalizeProxy, setImgProxy } from "./fmt"
 import { exportProfile, importProfile } from "./profile"
 
-const menus = document.querySelectorAll<HTMLElement>(".srr-dropdown-menu")
-const btns = document.querySelectorAll<HTMLElement>(".srr-dropdown-btn")
 const imgProxyDialog = document.querySelector<HTMLElement>(".srr-imgproxy-dialog")
 const backupDialog = document.querySelector<HTMLElement>(".srr-backup-dialog")
 
-// Sentinels for overflow menu action rows — UI actions, not filter tokens.
-const IMG_PROXY = "~img-proxy"
-const BACKUP = "~backup"
-const PIN = "~pin"
-
-let isOpen = false
-
-export function closeAllDropdowns(): void {
-   unreadFill = null
-   if (!isOpen) return
-   menus.forEach((m) => {
-      // Closing a menu the user was keyboard-navigating must not drop focus
-      // on <body>; hand it back to the menu's button (the standard menu
-      // pattern, and the only way Escape keeps a keyboard user oriented).
-      if (m.contains(document.activeElement)) (m.previousElementSibling as HTMLElement | null)?.focus()
-      m.classList.remove("srr-open")
-   })
-   btns.forEach((b) => b.setAttribute("aria-expanded", "false"))
-   isOpen = false
-}
-
-// Keyboard-reachable rows of an open menu: menuitem (and the "Unseen only"
-// menuitemcheckbox) anchors not hidden inside a collapsed tag group (the header
-// itself stays reachable) and not hidden by the unseen-only filter (`.srr-hidden`,
-// on the row or its tag group).
-function menuItems(menu: HTMLElement): HTMLElement[] {
-   return Array.from(menu.querySelectorAll<HTMLElement>('[role="menuitem"],[role="menuitemcheckbox"]')).filter(
-      (el) =>
-         !el.closest(".srr-hidden") &&
-         !(el.classList.contains("srr-tag-item") && el.parentElement?.classList.contains("srr-tag-collapsed")),
-   )
-}
-
-// Roving menu focus — the keyboard contract role="menu" promises. Capture
-// phase + stopPropagation, because app.ts binds the same arrow keys to filter
-// cycling on the document bubble path; with a menu open the arrows must move
-// through it instead. Inline-editor inputs keep their own keys (the proxy
-// editor handles Enter/Escape itself). Enter already activates a focused
-// anchor natively; Space is the menu-pattern addition.
-document.addEventListener(
-   "keydown",
-   (e) => {
-      if (!isOpen || (e.target as HTMLElement).tagName === "INPUT") return
-      // Own captured menus only, and only while still attached — a re-imported
-      // module instance (tests) or a swapped skeleton must never double-handle.
-      const menu = Array.from(menus).find((m) => m.classList.contains("srr-open") && document.contains(m))
-      if (!menu) return
-      const items = menuItems(menu)
-      if (items.length === 0) return
-      const idx = items.indexOf(document.activeElement as HTMLElement)
-      const move = (to: number) => {
-         e.preventDefault()
-         e.stopPropagation()
-         items[((to % items.length) + items.length) % items.length].focus()
-      }
-      if (e.key === "ArrowDown") move(idx + 1)
-      else if (e.key === "ArrowUp") move(idx === -1 ? items.length - 1 : idx - 1)
-      else if (e.key === "Home") move(0)
-      else if (e.key === "End") move(items.length - 1)
-      else if (e.key === " " && idx !== -1) {
-         e.preventDefault()
-         e.stopPropagation()
-         items[idx].click()
-      }
-   },
-   true,
-)
-
-function createLink(value: string, text: string, className?: string): HTMLAnchorElement {
-   const a = document.createElement("a")
-   a.href = "#"
-   a.dataset.value = value
-   a.textContent = text
-   a.setAttribute("role", "menuitem")
-   if (className) a.className = className
-   return a
-}
+// The toolbar dropdown menus (filter picker + ⋯ settings) were retired when those
+// moved into the config surface (config.ts). closeAllDropdowns stays as a no-op so
+// its remaining callers — gestures.ts (toolbar-hide) and the image-proxy / backup
+// modals — keep working without a dropdown to close.
+export function closeAllDropdowns(): void {}
 
 function divEl(className: string): HTMLDivElement {
    const d = document.createElement("div")
@@ -130,175 +54,6 @@ function btn(className: string, label: string, text: string, onClick: () => void
    return b
 }
 
-// fillMenu (re)builds an open menu's content in place. The delegated onclick
-// lives on the menu element itself, so it survives replaceChildren — the
-// editor swap re-renders without touching open/close state.
-function fillMenu(dd: HTMLElement, buildContent: (frag: DocumentFragment) => void): void {
-   dd.replaceChildren()
-   const frag = document.createDocumentFragment()
-   buildContent(frag)
-   dd.appendChild(frag)
-}
-
-function toggleDropdown(
-   id: string,
-   buildContent: (frag: DocumentFragment) => void,
-   onClick: (value: string, e: MouseEvent) => Promise<void>,
-): void {
-   const dd = document.getElementById(id)!
-   const wasOpen = dd.classList.contains("srr-open")
-   // One menu at a time: opening one closes the other (and resets the editor
-   // flags + fill tokens), so the two toolbar dropdowns can't stack.
-   closeAllDropdowns()
-   if (wasOpen) return
-   const btn = dd.previousElementSibling as HTMLElement
-   dd.classList.add("srr-open")
-   isOpen = true
-   btn?.setAttribute("aria-expanded", "true")
-   // The delegated click bubbles on to app.ts's window-level close handler,
-   // which is what auto-closes the menu after a navigation selection. Handlers
-   // that instead keep the menu open (the inline-editor swaps) get the event so
-   // they can stopPropagation() and survive that close.
-   dd.onclick = (e) => {
-      const a = (e.target as HTMLElement).closest("a[data-value]") as HTMLAnchorElement | null
-      if (!a) return
-      e.preventDefault()
-      onClick(a.dataset.value!, e)
-   }
-   fillMenu(dd, buildContent)
-}
-
-// Thresholds for the graded feed-health dot. A feed is "warn" when its last
-// successful fetch was older than STALE_WARN_SEC but not yet STALE_CRIT_SEC;
-// "crit" covers STALE_CRIT_SEC+, a persistent ferr, or a FailStreak ≥ 3.
-const STALE_WARN_SEC = 3 * 86400
-const STALE_CRIT_SEC = 14 * 86400
-const FAIL_STREAK_CRIT = 3
-
-// feedGrade returns "" (healthy), "warn", or "crit". Falls back gracefully when
-// the new vitals are absent (old store): a present ferr is still "crit", and a
-// missing last_ok with no ferr is "" (unknown, don't alarm).
-function feedGrade(ch: IFeed): "" | "warn" | "crit" {
-   const ferr = ch.ferr ?? ""
-   const streak = ch.fail_streak ?? 0
-   const lastOK = ch.last_ok ?? 0
-   if (ferr || streak >= FAIL_STREAK_CRIT) return "crit"
-   if (lastOK > 0) {
-      const ageSec = Date.now() / 1000 - lastOK
-      if (ageSec >= STALE_CRIT_SEC) return "crit"
-      if (ageSec >= STALE_WARN_SEC) return "warn"
-   }
-   return ""
-}
-
-function errDot(grade: "warn" | "crit"): HTMLSpanElement {
-   const s = document.createElement("span")
-   s.className = `srr-err-dot srr-stale-${grade}`
-   s.setAttribute("aria-hidden", "true")
-   return s
-}
-
-// The feed's source-color chip — the same per-feed color (data-src → --src)
-// as its list rail and reader spine, so you pick a source here by the color you
-// then see everywhere it appears.
-function srcChip(feedId: number): HTMLSpanElement {
-   const s = document.createElement("span")
-   s.className = "srr-src-chip"
-   s.dataset.src = String(srcColorIndex(feedId))
-   s.setAttribute("aria-hidden", "true")
-   return s
-}
-
-function feedLink(ch: IFeed, className: string): HTMLAnchorElement {
-   const a = createLink(String(ch.id), ch.title, className)
-   const grade = feedGrade(ch)
-   if (grade !== "") {
-      const ferr = ch.ferr ?? ""
-      if (ferr) {
-         a.title = ferr
-         a.setAttribute("aria-label", `${ch.title} — feed error: ${ferr}`)
-      } else {
-         const lastOK = ch.last_ok ?? 0
-         const hint =
-            lastOK === 0
-               ? "never fetched successfully"
-               : `no successful fetch in ${Math.floor(Math.round(Date.now() / 1000 - lastOK) / 86400)}d`
-         a.title = hint
-         a.setAttribute("aria-label", `${ch.title} — ${hint}`)
-      }
-      a.prepend(errDot(grade))
-   }
-   // Chip leftmost — color identity first, then any error dot, then the title.
-   a.prepend(srcChip(ch.id))
-   return a
-}
-
-// Unread badges fill in after the menu renders so a cold seen position (one
-// lazy idx-pack fetch) never delays the menu itself; the common case (recent
-// seen → resident latest pack) resolves in a microtask. `unreadFill` is the
-// freshness token: a rebuild or close orphans a stale pass before it touches
-// the DOM. Every feed with unseen articles badges its count — including one
-// never seen on this device, which badges its full backlog (feedUnread) so a
-// fresh device shows counts on the feeds too and the row badges sum to their
-// tag header (nav.tagUnreadFromCounts, the same counts map: a collapsed group
-// still surfaces the activity inside it and the badge equals the unseen-only
-// toolbar counter you land on when you open the tag). A feed read down to 0
-// unseen badges nothing. When unseen-only is on, the same pass hides fully-read
-// rows and tags (`.srr-hidden`): a per-feed count of 0 = nothing unseen and
-// hides; any positive count (including a never-seen feed's backlog) has
-// unseen content, so it stays.
-let unreadFill: object | null = null
-
-function unreadBadge(n: number): HTMLSpanElement {
-   const s = document.createElement("span")
-   s.className = "srr-unread"
-   s.textContent = n > 999 ? "999+" : String(n)
-   return s
-}
-
-async function fillUnread(rows: [HTMLAnchorElement, IFeed][], headers: [HTMLAnchorElement, IFeed[]][]) {
-   const my = {}
-   unreadFill = my
-   try {
-      // One batched call reads the localStorage seen blob once for every row,
-      // instead of nav.unreadCount per row re-parsing it. The single freshness
-      // check guards every DOM write below — the tag header badge is derived
-      // synchronously from this same counts map (nav.tagUnreadFromCounts:
-      // never-seen members counted as fully unread, == the unseen-only toolbar
-      // counter), so there's no second await pass re-scanning the idx packs.
-      const counts = await nav.unreadCounts(rows.map(([, ch]) => ch))
-      if (my !== unreadFill) return
-      const hideRead = nav.isUnreadOnly()
-      // The row/group you're currently viewing must never self-hide mid-session:
-      // reading the active tag/feed down to 0 unseen THIS session would else
-      // drop its `.srr-active` styling and make it keyboard-unreachable
-      // (menuItems skips `.srr-hidden`) while you're still on it. The toolbar
-      // counter uses a frozen snapshot, so it stays visible regardless. The
-      // active key is `""` (no exemption), a single tag name, or a feed id.
-      const activeKey = nav.getCurrentFilterKey()
-      for (const [a, ch] of rows) {
-         const n = counts.get(ch.id)!
-         if (n > 0) a.prepend(unreadBadge(n))
-         if (hideRead && n === 0 && String(ch.id) !== activeKey) a.classList.add("srr-hidden")
-      }
-      headers.forEach(([h, group]) => {
-         const n = nav.tagUnreadFromCounts(group, counts)
-         if (n > 0) h.insertBefore(unreadBadge(n), h.querySelector(".srr-tag-toggle"))
-         // Hide the whole group when no member has unseen content (>0 or -1) —
-         // unless it's the active tag, which stays put while you read it down.
-         if (
-            hideRead &&
-            h.dataset.value !== activeKey &&
-            !group.some((ch) => String(ch.id) === activeKey) &&
-            group.every((ch) => counts.get(ch.id) === 0)
-         )
-            h.closest(".srr-tag-group")?.classList.add("srr-hidden")
-      })
-   } catch {
-      // Best-effort decoration; the menu works without badges.
-   }
-}
-
 // imgProxyBody is the editable content of the image-proxy dialog: a URL-prefix
 // input plus the action row — Save commits after isValidProxy, Disable commits
 // "" to turn the proxy off (shown only when one is currently set), Cancel
@@ -310,7 +65,7 @@ async function fillUnread(rows: [HTMLAnchorElement, IFeed][], headers: [HTMLAnch
 function imgProxyBody(close: () => void): DocumentFragment {
    const frag = document.createDocumentFragment()
    const input = editorInput("url", "srr-imgproxy-input", "Image proxy URL prefix (empty disables)")
-   input.placeholder = "https://proxy/?url="
+   input.placeholder = "proxy.example/?url="
    input.value = getImgProxy()
 
    const commit = (raw: string) => {
@@ -320,7 +75,9 @@ function imgProxyBody(close: () => void): DocumentFragment {
          input.focus()
          return
       }
-      if (next !== getImgProxy()) setImgProxy(next)
+      // Scheme is optional (https default) and a host/path gets a trailing "/".
+      const value = normalizeProxy(next)
+      if (value !== getImgProxy()) setImgProxy(value)
       close()
    }
    editorKeys(input, () => commit(input.value), close)
@@ -351,7 +108,6 @@ let closeImgProxy: (() => void) | null = null
 export function showImgProxyDialog(): void {
    const dialog = imgProxyDialog
    if (!dialog) return
-   closeAllDropdowns() // hands focus to the ⋯ button when launched from the menu
    if (closeImgProxy) closeImgProxy() // never stack two opens
    const body = dialog.querySelector<HTMLElement>(".srr-imgproxy-body")!
    const restore = document.activeElement as HTMLElement | null
@@ -405,17 +161,6 @@ export function setProfileImportHook(fn: () => void): void {
    profileImportHook = fn
 }
 
-// Hook set by app.ts: called each time the overflow menu opens to get the
-// label and action for the offline-pin row. Returns null when pinning is not
-// available for the current filter scope (saved / search) or when there is no
-// SW controller. When null the pin row is omitted from the menu.
-export type PinMenuHook = () => { label: string; action: () => void } | null
-let pinMenuHook: PinMenuHook | undefined
-
-export function setPinMenuHook(fn: PinMenuHook): void {
-   pinMenuHook = fn
-}
-
 // showBackupDialog opens the backup/restore modal. An optional `onImported`
 // callback overrides the module-level hook (used by tests).
 let closeBackup: (() => void) | null = null
@@ -423,7 +168,6 @@ let closeBackup: (() => void) | null = null
 export function showBackupDialog(onImported?: () => void): void {
    const dialog = backupDialog
    if (!dialog) return
-   closeAllDropdowns()
    if (closeBackup) closeBackup()
    const body = dialog.querySelector<HTMLElement>(".srr-backup-body")!
    const restore = document.activeElement as HTMLElement | null
@@ -555,97 +299,4 @@ export function showBackupDialog(onImported?: () => void): void {
    dialog.classList.add("srr-open")
    document.addEventListener("keydown", onKey, true)
    dialog.addEventListener("mousedown", onDown)
-}
-
-// The overflow / settings menu (toolbar ⋯ button, list-only): settings rows
-// that open centered modals. The rows are navigable anchors.
-export function showOverflowMenu(): void {
-   // Resolve the pin row at menu-open time so the label reflects the current
-   // filter's pin state. pinMenuHook returns null when pinning is unavailable
-   // (no SW controller, or a saved/search scope that v1 defers).
-   const pinEntry = pinMenuHook ? pinMenuHook() : null
-   toggleDropdown(
-      "srr-overflow-menu",
-      (frag) => {
-         if (pinEntry) frag.append(createLink(PIN, pinEntry.label))
-         frag.append(createLink(BACKUP, "Backup / Restore…"))
-         frag.append(createLink(IMG_PROXY, "Image proxy…"))
-      },
-      async (value) => {
-         if (value === PIN) {
-            closeAllDropdowns()
-            pinEntry?.action()
-         } else if (value === BACKUP) {
-            showBackupDialog() // closes the menu itself, then opens the modal
-         } else if (value === IMG_PROXY) {
-            showImgProxyDialog()
-         }
-      },
-   )
-}
-
-export function showFeedMenu(currentTag: string, onSelect: (token: string) => void): void {
-   const { tagged, sortedTags, untagged } = data.groupFeedsByTag()
-   const current = nav.getCurrentFilterKey()
-   const cls = (base: string, v: string) => (v === current ? `${base} srr-active`.trim() : base)
-
-   const buildContent = (frag: DocumentFragment) => {
-      const unreadRows: [HTMLAnchorElement, IFeed][] = []
-      const headerRows: [HTMLAnchorElement, IFeed[]][] = []
-      // Filter selector — [ALL] / ★ Saved / tags / feeds. (Unseen-only moved to
-      // a toolbar toggle; the image-proxy + date-jump live in the ⋯ overflow menu.)
-      frag.appendChild(createLink("", "[ALL]", cls("", "")))
-      // "★ Saved" — the per-article collection, surfaced once there's something
-      // in it. Same selection path as a feed/tag (onSelect routes it); the
-      // count rides as a badge.
-      const savedN = nav.savedCount()
-      if (savedN > 0) {
-         const savedRow = createLink(nav.SAVED_TOKEN, "★ Saved", cls("", nav.SAVED_TOKEN))
-         const num = document.createElement("span")
-         num.className = "srr-saved-num"
-         num.textContent = String(savedN)
-         savedRow.appendChild(num)
-         frag.appendChild(savedRow)
-      }
-      for (const tag of sortedTags) {
-         const group = tagged.get(tag)!
-         const expanded = tag === currentTag && tag !== current
-         const div = divEl(expanded ? "srr-tag-group" : "srr-tag-group srr-tag-collapsed")
-         const header = createLink(tag, tag, cls("srr-tag-header", tag))
-         const worst = group.reduce<"" | "warn" | "crit">(
-            (g, ch) => (g === "crit" || feedGrade(ch) === "crit" ? "crit" : feedGrade(ch) || g),
-            "",
-         )
-         if (worst) header.prepend(errDot(worst))
-         headerRows.push([header, group])
-         const toggle = document.createElement("span")
-         toggle.className = "srr-tag-toggle"
-         toggle.addEventListener("click", (e) => {
-            e.preventDefault()
-            e.stopPropagation()
-            div.classList.toggle("srr-tag-collapsed")
-         })
-         header.appendChild(toggle)
-         div.appendChild(header)
-         for (const ch of group) {
-            const item = feedLink(ch, cls("srr-tag-item", String(ch.id)))
-            unreadRows.push([item, ch])
-            div.appendChild(item)
-         }
-         frag.appendChild(div)
-      }
-      if (sortedTags.length > 0 && untagged.length > 0) frag.appendChild(divEl("srr-tag-sep"))
-      for (const ch of untagged) {
-         const item = feedLink(ch, cls("", String(ch.id)))
-         unreadRows.push([item, ch])
-         frag.appendChild(item)
-      }
-      void fillUnread(unreadRows, headerRows)
-   }
-
-   toggleDropdown("srr-feed-menu", buildContent, async (value) => {
-      // A feed/tag/[ALL]/★ Saved selection: routing is owned by the caller's
-      // onSelect closure (list → re-filter in place; reader → guard(switchFilter)).
-      onSelect(value)
-   })
 }

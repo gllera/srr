@@ -35,7 +35,7 @@
       <div class="srr-imgproxy-dialog" role="dialog" aria-modal="true" aria-labelledby="srr-imgproxy-title">
          <div class="srr-imgproxy-card">
             <h2 class="srr-imgproxy-title" id="srr-imgproxy-title">Image proxy</h2>
-            <p class="srr-imgproxy-desc">Route article images through a proxy URL — useful for upgrading insecure images to HTTPS. Leave it empty to load images straight from the source.</p>
+            <p class="srr-imgproxy-desc">Route article images through a proxy URL (the https:// prefix is optional) — useful for upgrading insecure images to HTTPS. Leave it empty to load images straight from the source.</p>
             <div class="srr-imgproxy-body"></div>
          </div>
       </div>
@@ -47,6 +47,20 @@
             <h2 class="srr-backup-title" id="srr-backup-title">Backup / Restore</h2>
             <p class="srr-backup-desc">Copy or download your reading progress, saved articles, and preferences — then paste the file on another device to restore them.</p>
             <div class="srr-backup-body"></div>
+         </div>
+      </div>
+      <!-- Feed / tag info dialog — opened from the ⓘ button on a settings filter
+           row. A read-only detail card; config.ts builds the per-feed / per-tag
+           body into .srr-info-body on open. Same centered-modal pattern as the
+           image-proxy / backup dialogs (dimmed backdrop, focus trap, Escape /
+           backdrop close). -->
+      <div class="srr-info-dialog" role="dialog" aria-modal="true" aria-labelledby="srr-info-title">
+         <div class="srr-info-card">
+            <header class="srr-info-head">
+               <h2 class="srr-info-title" id="srr-info-title"></h2>
+               <button class="srr-info-close" aria-label="Close" title="Close">&times;</button>
+            </header>
+            <div class="srr-info-body"></div>
          </div>
       </div>
       <main class="srr-container">
@@ -71,48 +85,90 @@
             <div class="srr-content"></div>
          </article>
          <div class="srr-list" aria-label="Article list" hidden></div>
-         <!-- One row of four equal slots (styles.css: grid). DOM order interleaves
-              the reader + list controls so each surface's visible four read
-              left→right correctly — reader: back · prev · next · save; list:
-              filter · search · unread · ⋯ (the other surface's controls are
-              display:none per the view rules in styles.css). -->
+         <!-- Config / settings surface (ephemeral; not hash-routed). Opened from the
+              list's now-viewing readout or settings gear; top-to-bottom it owns the
+              quick-action icon bar (search · unread · image proxy · backup), the
+              contextual offline-pin row, the feed / tag filter picker, and last the
+              freshness status (a footer below the long picker, not above it). -->
+         <section class="srr-config" aria-label="Settings" hidden>
+            <header class="srr-config-head">
+               <h2 class="srr-config-title">Settings</h2>
+               <button class="srr-config-close" aria-label="Close settings" title="Close">&times;</button>
+            </header>
+            <div class="srr-config-body">
+               <!-- Quick actions as a row of labeled icon buttons. Search leaves
+                    config for the list with the search bar open; unread is a toggle
+                    (aria-pressed, fills accent when on); backup / image-proxy open
+                    centered dialogs. The contextual offline-pin action renders below
+                    in .srr-config-settings. -->
+               <div class="srr-config-actions">
+                  <button type="button" class="srr-config-search" aria-label="Search articles">
+                     <span class="srr-search-icon" aria-hidden="true"></span>
+                     <span class="srr-config-action-label">Search</span>
+                  </button>
+                  <button type="button" class="srr-config-unread" aria-pressed="false" aria-label="Show read articles">
+                     <span class="srr-config-unread-icon" aria-hidden="true"></span>
+                     <span class="srr-config-action-label">Read</span>
+                  </button>
+                  <button type="button" class="srr-config-imgproxy" aria-label="Image proxy">
+                     <svg class="srr-config-action-icon" viewBox="0 0 24 24" aria-hidden="true">
+                        <rect x="3" y="3" width="18" height="18" rx="2" />
+                        <circle cx="8.5" cy="8.5" r="1.5" />
+                        <path d="M21 15l-5-5L5 21" />
+                     </svg>
+                     <span class="srr-config-action-label">Image proxy</span>
+                  </button>
+                  <button type="button" class="srr-config-backup" aria-label="Backup or restore">
+                     <svg class="srr-config-action-icon" viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M8 4v11M5 12l3 3 3-3M16 20V9M13 12l3-3 3 3" />
+                     </svg>
+                     <span class="srr-config-action-label">Backup</span>
+                  </button>
+               </div>
+               <div class="srr-config-settings"></div>
+               <!-- Feed / tag picker: the long navigation list sits below the quick
+                    actions (separated by a hairline in styles.css). -->
+               <div class="srr-config-filter" aria-label="Filter"></div>
+               <!-- Freshness status last: a quiet footer under the picker (the
+                    former pre-picker banner; styles.css sets it off with a top rule). -->
+               <div class="srr-config-status" role="status"></div>
+            </div>
+         </section>
+         <!-- One row of slots (styles.css: grid). DOM order interleaves the
+              list + reader controls so each surface's visible controls read
+              left→right correctly — list: open-article · now-viewing readout ·
+              settings gear; reader: back · prev · next · save · settings. The
+              gear sits at the far-right edge of BOTH surfaces — one fixed home for
+              "open config", always one tap away; the list's open-article button
+              (left edge) jumps to the article you were reading (the tap counterpart
+              of the reader's back-to-list button). The other surface's controls are
+              display:none per the view rules in styles.css. -->
          <nav class="srr-toolbar" aria-label="Article navigation">
             <button class="srr-back" aria-label="Back to list" title="Back to list">
                <span class="srr-back-icon" aria-hidden="true"></span>
             </button>
-            <div class="srr-dropdown">
-               <button class="srr-dropdown-btn srr-feed" aria-expanded="false" aria-haspopup="menu"></button>
-               <div id="srr-feed-menu" class="srr-dropdown-menu" role="menu"></div>
-            </div>
+            <button class="srr-open-reader" aria-label="Open the current article" title="Article">
+               <span class="srr-open-reader-icon" aria-hidden="true"></span>
+            </button>
+            <span class="srr-feed"></span>
             <button class="srr-prev" disabled aria-label="Previous article" aria-keyshortcuts="ArrowLeft a" title="Previous article (←/A)">
                <span class="srr-prev-icon" aria-hidden="true"></span>
             </button>
-            <button class="srr-search" aria-pressed="false" aria-label="Search articles" aria-keyshortcuts="/" title="Search (/)">
-               <span class="srr-search-icon" aria-hidden="true"></span>
-            </button>
             <button class="srr-next" disabled aria-label="Next article" aria-keyshortcuts="ArrowRight d" title="Next article (→/D)">
                <span class="srr-next-icon" aria-hidden="true"></span>
-            </button>
-            <button class="srr-unread" aria-pressed="false" aria-label="Show only unread" title="Show only unread">
-               <span class="srr-unread-icon" aria-hidden="true"></span>
             </button>
             <button class="srr-save" aria-label="Save article" aria-keyshortcuts="b" aria-pressed="false" title="Save article (B)" disabled>
                <svg class="srr-save-icon" viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M12 3.4l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z" />
                </svg>
             </button>
-            <div class="srr-dropdown">
-               <button class="srr-overflow srr-dropdown-btn" aria-expanded="false" aria-haspopup="menu" aria-label="More options" title="More options">
-                  <svg class="srr-overflow-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                     <circle cx="5" cy="12" r="2" />
-                     <circle cx="12" cy="12" r="2" />
-                     <circle cx="19" cy="12" r="2" />
-                  </svg>
-               </button>
-               <div id="srr-overflow-menu" class="srr-dropdown-menu" role="menu" aria-label="More options"></div>
-            </div>
+            <button class="srr-settings" aria-haspopup="dialog" aria-label="Open settings" title="Settings">
+               <svg class="srr-settings-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="12" cy="12" r="3" />
+                  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+               </svg>
+            </button>
          </nav>
-         <div class="srr-status" role="status" aria-live="polite"></div>
          <div class="srr-pin-progress" hidden></div>
       </main>
       <!-- srr:skeleton:end -->

@@ -1,15 +1,7 @@
+import * as config from "./config"
 import * as data from "./data"
-import { closeAllDropdowns, setPinMenuHook, setProfileImportHook, showFeedMenu, showOverflowMenu } from "./dropdown"
-import {
-   collapseBrokenMedia,
-   formatDate,
-   isStale,
-   sanitizeHtml,
-   srcColorIndex,
-   timeAgo,
-   timeAgoProse,
-   URL_DENY,
-} from "./fmt"
+import { setProfileImportHook, showBackupDialog, showImgProxyDialog } from "./dropdown"
+import { collapseBrokenMedia, formatDate, sanitizeHtml, srcColorIndex, timeAgo, URL_DENY } from "./fmt"
 import { setupGestures, type Gestures } from "./gestures"
 import { UNREAD_ONLY_KEY } from "./keys"
 import * as list from "./list"
@@ -19,33 +11,33 @@ import { clearAllPins, isPinned, listPins, pinFilter, unpinFilter } from "./pin"
 const el = {
    article: document.querySelector(".srr-reader") as HTMLElement,
    listView: document.querySelector(".srr-list") as HTMLElement,
+   config: document.querySelector(".srr-config") as HTMLElement,
    back: document.querySelector(".srr-back") as HTMLButtonElement,
+   openReader: document.querySelector(".srr-open-reader") as HTMLButtonElement,
    title: document.querySelector(".srr-title") as HTMLElement,
    content: document.querySelector(".srr-content") as HTMLElement,
    titleLink: document.querySelector(".srr-title-link") as HTMLAnchorElement,
    toolbar: document.querySelector(".srr-toolbar") as HTMLElement,
    prev: document.querySelector(".srr-prev") as HTMLButtonElement,
    next: document.querySelector(".srr-next") as HTMLButtonElement,
-   feed: document.querySelector(".srr-feed") as HTMLButtonElement,
+   feed: document.querySelector(".srr-feed") as HTMLElement,
+   settings: document.querySelector(".srr-settings") as HTMLButtonElement,
    source: document.querySelector(".srr-source") as HTMLElement,
    date: document.querySelector(".srr-date") as HTMLElement,
-   search: document.querySelector(".srr-search") as HTMLButtonElement,
    searchInput: document.querySelector(".srr-search-input") as HTMLInputElement,
    searchClear: document.querySelector(".srr-search-clear") as HTMLButtonElement,
    searchNote: document.querySelector(".srr-search-note") as HTMLElement,
-   overflow: document.querySelector(".srr-overflow") as HTMLButtonElement,
-   unread: document.querySelector(".srr-unread") as HTMLButtonElement,
    save: document.querySelector(".srr-save") as HTMLButtonElement,
    popupText: document.querySelector(".srr-popup-text") as HTMLElement,
    popupRetry: document.querySelector(".srr-popup-retry") as HTMLButtonElement,
    popupClose: document.querySelector(".srr-popup-close") as HTMLElement,
    popup: document.querySelector(".srr-popup") as HTMLElement,
-   status: document.querySelector(".srr-status") as HTMLElement,
    pinProgress: document.querySelector(".srr-pin-progress") as HTMLElement,
 }
 
-// Which surface is showing. The list is home; the reader is the drill-down.
-let view: "list" | "reader" = "list"
+// Which surface is showing. The list is home; the reader is the drill-down; the
+// config surface (ephemeral, opened from the list) is the settings + nav hub.
+let view: "list" | "reader" | "config" = "list"
 // Set once gestures are wired; the list calls it after a programmatic scroll so
 // the toolbar-hide baseline stays in sync (declared up here so list.setup, wired
 // before setupGestures runs, can close over it).
@@ -53,7 +45,6 @@ let gestures: Gestures | null = null
 let busy = false
 let retryFn: (() => void) | null = null
 let lastFeedLabel: string | null = null
-let lastStatusText: string | null = null
 let previousFocus: HTMLElement | null = null
 // Pending debounced search query (see the Title search section). Declared up
 // here so selectFilter / route can cancel it when the filter changes by any
@@ -139,8 +130,9 @@ function unpinCurrentFilter(): void {
    const names = listPins().get(key)?.names ?? []
    unpinFilter(key)
    if (controller) controller.postMessage({ type: "unpin", names })
-   lastStatusText = null
-   refreshStatus()
+   // Re-render the open config surface so the pin row flips to "Download for
+   // offline" now that the cached copy is gone.
+   if (config.isOpen()) config.render()
 }
 
 // Returns the pin menu row entry for the current filter, or null when pinning
@@ -160,7 +152,8 @@ function pinMenuEntry(): { label: string; action: () => void } | null {
 
 function showReader() {
    view = "reader"
-   document.body.classList.remove("srr-view-list")
+   document.body.classList.remove("srr-view-list", "srr-view-config")
+   config.close()
    el.listView.hidden = true
    el.article.hidden = false
 }
@@ -168,12 +161,45 @@ function showReader() {
 function showList() {
    view = "list"
    document.body.classList.add("srr-view-list")
+   document.body.classList.remove("srr-view-config")
+   config.close()
    el.article.hidden = true
    el.listView.hidden = false
    // Disable the reader-only nav so a one-finger swipe / arrow key is a no-op
    // while the list scrolls natively (the buttons are also hidden via CSS).
    el.prev.disabled = true
    el.next.disabled = true
+}
+
+// The config surface stacks over the list (srr-view-list stays on underneath so
+// the list keeps its state); srr-view-config hides the toolbar + pin-progress and
+// config.open() reveals the panel and (re)renders it.
+function showConfig() {
+   view = "config"
+   document.body.classList.add("srr-view-config")
+   el.article.hidden = true
+   el.listView.hidden = true
+   config.open()
+}
+
+// Leave the config surface back to the article (reader) surface — the Escape /
+// close-button path. enterReader resolves the right article (current, else the
+// list's selected row, else the filter's oldest unseen, else newest).
+function closeConfig() {
+   document.body.classList.remove("srr-view-config")
+   config.close()
+   void enterReader()
+}
+
+// The shared "go to the article surface" resolver, reused by every → reader
+// transition (Escape from the list, Escape/close from config). Opens the reader
+// at the current reader/selected article when there is one, else the filter's
+// oldest-unseen article (start of the backlog), else its newest.
+async function enterReader() {
+   const chron = nav.currentChron()
+   if (chron >= 0) return guard(() => nav.goTo(chron))
+   const anchor = await nav.listAnchor() // oldest unseen, else -1 (newest)
+   return anchor >= 0 ? guard(() => nav.goTo(anchor)) : guard(() => nav.last())
 }
 
 function persistHash(hash: string) {
@@ -251,18 +277,11 @@ function render(o: IShowFeed) {
    el.article.dataset.src = String(srcColorIndex(o.article.f))
    el.source.textContent = data.feedTitle(o.article.f)
    refreshFeedLabel()
-   refreshStatus()
    refreshSaveButton(!o.placeholder)
 
    document.title = "SRR - " + (o.article.t ?? "")
    window.scrollTo(0, 0)
-   // Don't steal focus to the title while a dropdown menu is open — the only
-   // render() with a menu still open is the unseen-only eye-chip toggle, which
-   // keeps the menu open and restores focus to the chip. Stealing it here would
-   // strand the keyboard user behind the open menu (next Arrow finds
-   // activeElement outside the menu items). Every navigation selection closes
-   // the menu before its render(), so this is a no-op on all other paths.
-   if (!document.querySelector(".srr-dropdown-menu.srr-open")) el.title.focus()
+   el.title.focus()
 
    // Double rAF: first ensures the browser has painted with opacity:0, second
    // re-enables transitions so the fade-in animates.
@@ -272,7 +291,7 @@ function render(o: IShowFeed) {
 }
 
 function refreshFeedLabel() {
-   // The article's source now lives in the header kicker, so the toolbar button
+   // The article's source now lives in the header kicker, so the toolbar label
    // is a pure active-filter indicator: "All", a tag name, or a single feed.
    // Search mode is orthogonal to the feed axis (the pinned search bar owns the
    // query), so show the button neutral ("All", unhighlighted) instead of the raw
@@ -289,35 +308,9 @@ function refreshFeedLabel() {
    if (/^\d+$/.test(key)) el.feed.dataset.src = String(srcColorIndex(Number(key)))
    else delete el.feed.dataset.src
    el.feed.classList.toggle("srr-filter-on", key !== "")
+   // Tooltip shows the full filter name when a long one ellipsizes; the label is
+   // non-interactive, so its visible text is its accessible name (no aria-label).
    el.feed.title = key === "" ? "All feeds" : `Filtered: ${label}`
-   el.feed.setAttribute("aria-label", `Filter: ${label}`)
-}
-
-// Compose and render the freshness / degradation status banner. Uses only
-// in-memory state — no network calls. Early-returns on no-change to keep
-// render paths cheap (mirrors refreshFeedLabel's cache pattern).
-function refreshStatus() {
-   const fetchedAt = data.lastFetchedAt()
-   const stale = isStale(fetchedAt)
-   const metaMissing = data.hasArticles() && !data.metaReady()
-   const idxDegraded = data.idxSummaryDegraded()
-   const warn = stale || metaMissing || idxDegraded
-
-   const parts: string[] = []
-   if (fetchedAt > 0) {
-      let line = `Updated ${timeAgoProse(fetchedAt)}`
-      if (stale) line += " — backend may be down"
-      parts.push(line)
-   }
-   if (metaMissing) parts.push("Search unavailable — index rebuilding")
-   if (idxDegraded) parts.push("(optimizing index…)")
-
-   const text = parts.join(" · ")
-   if (text === lastStatusText) return
-   lastStatusText = text
-
-   el.status.textContent = text
-   el.status.classList.toggle("srr-status-warn", warn)
 }
 
 // The reader's save (★) toggle reflects whether the current article is in the
@@ -374,7 +367,6 @@ async function renderListSurface() {
    const center = view === "reader"
    showList()
    refreshFeedLabel()
-   refreshStatus()
    document.title = listTitle()
    document.body.classList.add("srr-loading")
    // Release busy + the loading veil at FIRST PAINT (skeletons / first matches),
@@ -452,7 +444,6 @@ async function selectFilter(token: string) {
    // bounce the list back into search. Typing itself never routes through here.
    clearTimeout(searchDebounce)
    nav.applyFilter(token === "" ? [] : [token])
-   closeAllDropdowns()
    await goToList(true)
 }
 
@@ -501,12 +492,11 @@ async function applySearchQuery(q: string) {
 
 // Reflect the active search state into the bar: show/hide it (CSS gates display
 // on body.srr-searching + .srr-view-list), seed the input from the query (unless
-// the user is mid-type), drive the toolbar button's pressed state, and surface
-// the short-query / truncation hint.
+// the user is mid-type), and surface the short-query / truncation hint. (Search is
+// entered from the config "Search articles…" row, not a toolbar button now.)
 function syncSearchBar() {
    const on = nav.isSearchFilter()
    document.body.classList.toggle("srr-searching", on && view === "list")
-   el.search.setAttribute("aria-pressed", String(on))
    if (!on) {
       el.searchNote.hidden = true
       return
@@ -521,23 +511,15 @@ function syncSearchBar() {
    el.searchNote.hidden = !note
 }
 
-// The unread (catch-up) toggle — a toolbar button (list-only). Flipping it
-// persists the mode and rebuilds the list under the new (raised/restored) bounds;
-// the mode also governs reader navigation, but the list is where it's switched.
-// Unseen-only now spans every filter ([ALL]/feed/tag), so this is the one-tap
-// "show only unread" button for the whole wire.
-function refreshUnreadButton() {
-   const on = nav.isUnreadOnly()
-   el.unread.setAttribute("aria-pressed", String(on))
-   el.unread.setAttribute("aria-label", on ? "Showing only unread — show all" : "Show only unread")
-   el.unread.title = on ? "Showing only unread" : "Show only unread"
-}
+// The unread (catch-up) toggle now lives in the config surface as the inverted
+// "Read" button: unread-only is the default view, and pressing "Read" turns it
+// off to ALSO show already-read articles. config's onUnreadToggle hook flips the
+// mode and rebuilds the list. Unseen-only spans every filter ([ALL]/feed/tag).
 function toggleUnseenOnly() {
    // setUnreadOnly re-applies the filter (raised/restored bounds) internally;
    // force a rebuild since the token set is unchanged (list.show() alone would
    // only refresh dots).
    nav.setUnreadOnly(!nav.isUnreadOnly())
-   refreshUnreadButton()
    void list.rerender()
 }
 
@@ -549,18 +531,6 @@ function onCycle(dir: number) {
    // cycles by its tag), so the list and the reader share one rotation.
    if (view === "list") void selectFilter(nav.cycleToken(dir))
    else guard(() => nav.cycleFilter(dir))
-}
-
-function feedMenuTag(): string {
-   // Which tag group to auto-expand in the menu. In the reader, the shown
-   // article's tag; on the list, the active tag filter (if any).
-   if (view === "list") {
-      if (nav.isSearchFilter()) return ""
-      const key = nav.getCurrentFilterKey()
-      return key !== "" && !/^\d+$/.test(key) ? key : ""
-   }
-   const id = nav.currentFeedId()
-   return id >= 0 ? (data.db.feeds[id]?.tag ?? "") : ""
 }
 
 // Margin bell — a step toward an edge with no neighbor (prev/next disabled) kicks
@@ -622,25 +592,52 @@ async function init() {
    }
    nav.pruneSeen()
 
-   // After a successful profile import: prune stale seen keys, rerender the
-   // list under the current filter, and refresh the unread + save toolbar buttons
-   // to reflect the newly-merged state. Reuses the same paths as toggleUnseenOnly.
+   // First run (no stored preference) defaults to unread-only — a new reader opens
+   // on just what's unread. An explicit choice persists as "1"/"0" via
+   // setUnreadOnly, so a user who turns it off stays off; only a never-set key
+   // (null) trips this default. Set before route() so the first render is filtered.
+   try {
+      if (localStorage.getItem(UNREAD_ONLY_KEY) === null) nav.setUnreadOnly(true)
+   } catch {}
+
+   // After a successful profile import: prune stale seen keys, rerender the list
+   // under the current filter, and refresh the save button to reflect the
+   // newly-merged state. The config surface re-derives its unread checkbox on open.
    setProfileImportHook(() => {
       // importProfile wrote srr-unread-only straight to localStorage, but nav holds
       // unreadOnly in a module var only mutated via setUnreadOnly — reconcile it
       // (this also re-applies the filter so the raised unseen bounds take hold).
       nav.setUnreadOnly(localStorage.getItem(UNREAD_ONLY_KEY) === "1")
       nav.pruneSeen()
-      refreshUnreadButton()
       refreshSaveButton(!el.save.disabled)
       void list.rerender()
    })
 
-   // Offline-pin row in the ⋯ overflow menu: evaluated lazily at menu-open
-   // time so the label ("Download for offline" vs "Remove offline copy") always
-   // reflects the current filter's pin state. Returns null when pinning is not
-   // applicable (no SW controller, or saved/search scope — v1 defers those).
-   setPinMenuHook(pinMenuEntry)
+   // The config surface: the filter picker, the unread toggle, the settings rows
+   // (offline pin / backup / image proxy), and the freshness status. pinEntry is
+   // evaluated lazily at render so its label reflects the current filter's pin
+   // state (null when pinning is unavailable — no SW controller, saved/search).
+   config.setup(el.config, {
+      onSearch: () => {
+         // Search is a list activity: enterSearch → selectFilter → goToList
+         // switches to the list surface (closing config) with the search bar open.
+         void enterSearch()
+      },
+      onSelect: (token) => {
+         config.close()
+         void selectFilter(token)
+      },
+      onUnreadToggle: () => {
+         toggleUnseenOnly()
+         // Re-render the open config filter list so its unread badges / hidden
+         // fully-read rows reflect the flipped mode immediately.
+         config.render()
+      },
+      onClose: closeConfig,
+      pinEntry: pinMenuEntry,
+      openImgProxy: showImgProxyDialog,
+      openBackup: () => showBackupDialog(),
+   })
 
    // The list opens an article in the reader through the same guard mutex as
    // every other navigation. The scroll callback resyncs the gesture toolbar
@@ -658,22 +655,20 @@ async function init() {
    el.prev.addEventListener("click", () => guard(() => nav.left()))
    el.next.addEventListener("click", () => guard(() => nav.right()))
    el.back.addEventListener("click", () => void goToList(true))
+   // The list's open-article button (left edge) is the tap counterpart of Escape on
+   // the list: enter the reader at the article you were reading (enterReader resolves
+   // current → oldest-unseen → newest), mirroring the reader's back-to-list button.
+   el.openReader.addEventListener("click", () => void enterReader())
    // capture: error events don't bubble (see collapseBrokenMedia)
    el.content.addEventListener("error", collapseBrokenMedia, true)
-   el.feed.addEventListener("click", () =>
-      showFeedMenu(feedMenuTag(), (token) =>
-         view === "list" ? void selectFilter(token) : guard(() => nav.switchFilter(token)),
-      ),
-   )
-   // ⋯ overflow holds settings — currently just the "Image proxy…" row.
-   el.overflow.addEventListener("click", () => showOverflowMenu())
-   // Unread (catch-up) toggle — one-tap "show only unread" in whatever's filtered.
-   el.unread.addEventListener("click", toggleUnseenOnly)
-   // Search: the magnifier toggles the list's "q:<query>" filter; the pinned
-   // search bar owns the input (debounced live query, Enter applies immediately,
-   // Escape / ✕ leave search).
-   el.search.disabled = !nav.searchAvailable()
-   el.search.addEventListener("click", () => !el.search.disabled && toggleSearch())
+   // The settings gear is the config entry point (search · filter picker · unread
+   // toggle · settings · status). It lives on BOTH surfaces — its one fixed home is
+   // the bar's right edge — so config is always one tap away. The now-viewing
+   // readout (.srr-feed) is just a label now, not a second config trigger.
+   el.settings.addEventListener("click", () => showConfig())
+   // Search now lives in config (the "Search articles…" row → enterSearch); the `/`
+   // key still toggles it on the list. The pinned search bar owns the input
+   // (debounced live query, Enter applies immediately, Escape / ✕ leave search).
    el.searchInput.addEventListener("input", () => {
       clearTimeout(searchDebounce)
       searchDebounce = setTimeout(() => void applySearchQuery(el.searchInput.value), 200)
@@ -695,14 +690,6 @@ async function init() {
    el.popupRetry.addEventListener("click", () => {
       closePopup()
       if (retryFn) retryFn()
-   })
-   window.addEventListener("click", (e) => {
-      // closest(), not matches(): a dropdown button (feed, overflow) is
-      // clicked on its inner icon (e.g. the .srr-overflow-icon svg), so the
-      // event target is the child, not the button. matches() missed that and
-      // closed the menu the button's own handler had just opened — leaving the
-      // button dead to taps/clicks.
-      if (!(e.target as HTMLElement).closest(".srr-dropdown-btn")) closeAllDropdowns()
    })
    window.addEventListener("mousedown", (e) => {
       if (el.popup.classList.contains("srr-open") && !el.popup.contains(e.target as Node)) closePopup()
@@ -730,11 +717,18 @@ async function init() {
          return
       }
       if (e.key === "Escape") {
+         // Overlays close first (the popup here; the image-proxy / backup modals
+         // self-handle Escape via capture + stopPropagation, so this never fires
+         // while one is open). Then Escape toggles the surfaces: config → reader,
+         // reader → list, list → reader (enterReader resolves the article).
          if (el.popup.classList.contains("srr-open")) {
             closePopup()
             return
          }
-         closeAllDropdowns()
+         e.preventDefault()
+         if (view === "config") closeConfig()
+         else if (view === "reader") void goToList(true)
+         else void enterReader()
          return
       }
       if (el.popup.classList.contains("srr-open")) return
@@ -771,7 +765,6 @@ async function init() {
       goNext: stepRight,
       onCycle,
    })
-   refreshUnreadButton() // reflect the persisted unread-only mode on the toolbar at boot
 
    let hash = location.hash.substring(1)
    // Reject foreign hashes (e.g., OAuth implicit-flow tokens injected by an

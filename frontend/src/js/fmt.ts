@@ -37,12 +37,33 @@ export function setImgProxy(value: string): void {
    } catch {}
 }
 
-// isValidProxy accepts the empty string (disables proxying) or an absolute
-// http(s) prefix (http allowed for LAN proxies) — imgProxy() just concatenates
-// prefix + encoded URL, so a schemeless prefix could never produce a fetchable
-// image URL. setImgProxy stays a dumb setter; the UI validates before storing.
+// A proxy prefix is concatenated straight before the URL-encoded image URL, so
+// the stored value must be an absolute http(s) URL. The scheme is OPTIONAL in the
+// UI: normalizeProxy supplies https:// when none is typed. isValidProxy therefore
+// accepts the empty string (disables proxying), an explicit http(s):// prefix, or
+// a schemeless host/path — and rejects only an explicit non-http(s) scheme
+// (ftp://, javascript:, data:, …) that we must not silently rewrite to https.
+// setImgProxy stays a dumb setter; the UI validates + normalizes before storing.
 export function isValidProxy(v: string): boolean {
-   return v === "" || /^https?:\/\//i.test(v)
+   const s = v.trim()
+   if (s === "") return true
+   if (HTTP_RE.test(s)) return true
+   if (URL_DENY.test(s)) return false
+   return !/^[a-z][a-z0-9+.-]*:\/\//i.test(s)
+}
+
+// normalizeProxy canonicalises a user-entered prefix for storage: trim it, supply
+// the default https:// scheme when absent (folding a leading "//host" in too), and
+// append "/" when it ends in an alphanumeric char — a bare host or path segment
+// needs that boundary before imgProxy() appends the encoded URL, while a value
+// already ending in "=", "?", "/", … is a ready join point. Empty → empty
+// (disabled). Idempotent: normalizeProxy(normalizeProxy(x)) === normalizeProxy(x).
+export function normalizeProxy(v: string): string {
+   let s = v.trim()
+   if (s === "") return ""
+   if (!HTTP_RE.test(s)) s = "https://" + s.replace(/^\/+/, "")
+   if (/[a-z0-9]$/i.test(s)) s += "/"
+   return s
 }
 
 export function imgProxy(url: string, prefix: string): string {
