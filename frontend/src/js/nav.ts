@@ -160,6 +160,7 @@ export const SEARCH_PREFIX = "q:"
 const SEARCH_CAP = 500
 let searchSorted: number[] = [] // ascending matching chronIdxs in the snapshot
 let searchSet = new Set<number>() // the same hits, for matches()
+let searchCards = new Map<number, import("./format.gen").IMetaWire>() // {f,w,t} per hit chron
 let searchTruncatedFlag = false
 // The term the current snapshot was loaded for — distinct from the active query
 // when a query changes before its load resolves (A→B→A): dropping this key on
@@ -174,6 +175,7 @@ let searchLoadedFor: string | null = null
 export function resetSearchStream(): void {
    searchSorted = []
    searchSet = new Set<number>()
+   searchCards = new Map()
    searchTruncatedFlag = false
    searchLoadedFor = null
 }
@@ -192,6 +194,12 @@ export function searchQuery(): string {
 }
 export function searchTruncated(): boolean {
    return searchTruncatedFlag
+}
+// The {f,w,t} card for a search hit chron, captured during the scan so the list
+// can render search rows without re-fetching/re-parsing the meta packs. Undefined
+// for a chron not in the current snapshot.
+export function searchCard(chron: number): import("./format.gen").IMetaWire | undefined {
+   return searchCards.get(chron)
 }
 export function searchAvailable(): boolean {
    return search.available()
@@ -230,14 +238,16 @@ async function ensureSearchSet(): Promise<void> {
    if (!term) {
       searchSorted = []
       searchSet = new Set()
+      searchCards = new Map()
       searchTruncatedFlag = false
       searchLoadedFor = term
       return
    }
-   const { chrons, truncated } = await search.loadHits(term, SEARCH_CAP)
+   const { chrons, truncated, cards } = await search.loadHits(term, SEARCH_CAP)
    if (term !== activeQuery()) return // superseded — discard stale result
    searchSorted = chrons
    searchSet = new Set(chrons)
+   searchCards = cards
    searchTruncatedFlag = truncated
    searchLoadedFor = term
 }

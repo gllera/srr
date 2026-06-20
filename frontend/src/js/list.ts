@@ -565,9 +565,10 @@ export async function render(center = false, onInteractive?: () => void): Promis
 
 // Search render: the full hit-set is pre-loaded into nav's snapshot via
 // feedLeft/feedRight → ensureSearchSet (search.ts caches results per query).
-// Rows use the skeleton → loadMeta fill pattern like the regular feed render;
-// meta packs are already in memory from the search scan, so fills land quickly.
-// Search suppresses day dividers (relabelDividers returns early in search mode).
+// Rows are built directly from the search snapshot's per-hit {f,w,t} cards
+// (nav.searchCard) — no per-row meta fetch, since search.loadHits already parsed
+// them during the scan. Search suppresses day dividers (relabelDividers returns
+// early in search mode).
 async function renderSearch(my: object, onInteractive?: () => void): Promise<void> {
    // Walk newest-first from the total_art ceiling to get the first batch.
    const seed = await nav.feedLeft(data.db.total_art - 1)
@@ -600,7 +601,7 @@ async function renderSearch(my: object, onInteractive?: () => void): Promise<voi
    topSentinel = el("div", "srr-list-sentinel")
    bottomSentinel = el("div", "srr-list-sentinel")
    const frag = document.createDocumentFragment()
-   const rows = older.chrons.map((c) => rowEl(c, null, seen))
+   const rows = older.chrons.map((c) => rowEl(c, nav.searchCard(c) ?? null, seen))
    rows.forEach((r) => frag.appendChild(r))
    rowsEl.appendChild(frag)
    container.append(topSentinel, rowsEl, bottomSentinel)
@@ -612,14 +613,21 @@ async function renderSearch(my: object, onInteractive?: () => void): Promise<voi
    onInteractive?.()
    observe(my)
 
-   const fillOrder = older.chrons.map((_, k) => k) // newest-first fill order (anchor = 0)
-   await runPool(fillOrder, FILL_CONCURRENCY, async (k) => {
-      if (my !== tok) return
-      const card = await data.loadMeta(older.chrons[k])
-      if (my !== tok) return
-      fillRow(rows[k], card, seen)
-      pinHeights([rows[k]])
-   })
+   // Rows already carry their {f,w,t} from the search snapshot (no extra fetch).
+   // Pin the heights of those filled rows; only a chron missing from the snapshot
+   // (defensive — shouldn't happen) falls back to a lazy meta fill.
+   const prefilled = rows.filter((_, k) => nav.searchCard(older.chrons[k]))
+   if (prefilled.length) pinHeights(prefilled)
+   const missing = older.chrons.map((c, k) => (nav.searchCard(c) ? -1 : k)).filter((k) => k >= 0)
+   if (missing.length) {
+      await runPool(missing, FILL_CONCURRENCY, async (k) => {
+         if (my !== tok) return
+         const card = await data.loadMeta(older.chrons[k])
+         if (my !== tok) return
+         fillRow(rows[k], card, seen)
+         pinHeights([rows[k]])
+      })
+   }
 }
 
 // Re-show an already-built list (same filter). When the reader's article is

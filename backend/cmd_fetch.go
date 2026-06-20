@@ -20,6 +20,11 @@ import (
 
 type FetchCmd struct {
 	Interval time.Duration `help:"Run fetch in a loop with this interval." default:"0" env:"SRR_FETCH_INTERVAL"`
+
+	// lastOutSig is the syndication-input signature (db.outFeedsSig) at the last
+	// SyncOutFeeds call, carried across --interval cycles so an idle cycle whose
+	// out config + feed tags are unchanged can skip the redundant store walk.
+	lastOutSig string
 }
 
 func (o *FetchCmd) Run() error {
@@ -168,9 +173,18 @@ func (o *FetchCmd) fetch(ctx context.Context, client *http.Client) error {
 		}
 		// Warn-only: a syndication write failure must not discard the durable
 		// article batch. SyncOutFeeds is a no-op when core.Out is empty (the
-		// default) or SRR_CDN_URL is unset (degrades with a warning).
-		if err := db.SyncOutFeeds(ctx); err != nil {
-			slog.Warn("sync out feeds", "error", err)
+		// default) or SRR_CDN_URL is unset (degrades with a warning). Skip the
+		// store walk on a truly-idle cycle — no new articles AND unchanged
+		// syndication inputs (out config + feed tags) since the last sync — so the
+		// --interval loop doesn't rewrite byte-identical out/* every cycle, while
+		// still materializing config/tag edits made during the lock-free idle
+		// sleep (gating on len(written) alone would skip those — a stale-output bug).
+		sig := db.outFeedsSig()
+		if len(written) > 0 || sig != o.lastOutSig {
+			if err := db.SyncOutFeeds(ctx); err != nil {
+				slog.Warn("sync out feeds", "error", err)
+			}
+			o.lastOutSig = sig
 		}
 		if err := db.Commit(ctx); err != nil {
 			return err

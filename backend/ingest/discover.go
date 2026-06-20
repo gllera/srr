@@ -21,6 +21,9 @@ func discoverFeedLink(htmlData []byte, baseURL string) (string, bool) {
 		// If the base URL can't be parsed we can still return an absolute href.
 		base = nil
 	}
+	// A <base href> in the document overrides baseURL for relative resolution
+	// (HTML spec). First one wins; resolved against the page URL if itself relative.
+	var baseOverride *url.URL
 
 	z := html.NewTokenizer(bytes.NewReader(htmlData))
 	for {
@@ -32,33 +35,59 @@ func discoverFeedLink(htmlData []byte, baseURL string) (string, bool) {
 
 		case html.StartTagToken, html.SelfClosingTagToken:
 			name, hasAttr := z.TagName()
-			if !hasAttr || string(name) != "link" {
+			if !hasAttr {
 				continue
 			}
-			// Collect all attributes of this <link> tag.
-			var rel, typ, href string
-			for {
-				k, v, more := z.TagAttr()
-				switch strings.ToLower(string(k)) {
-				case "rel":
-					rel = string(v)
-				case "type":
-					typ = string(v)
-				case "href":
-					href = string(v)
+			switch string(name) {
+			case "base":
+				for {
+					k, v, more := z.TagAttr()
+					if baseOverride == nil && strings.EqualFold(string(k), "href") {
+						if h := strings.TrimSpace(string(v)); h != "" {
+							if u, perr := url.Parse(h); perr == nil {
+								if base != nil {
+									baseOverride = base.ResolveReference(u)
+								} else {
+									baseOverride = u
+								}
+							}
+						}
+					}
+					if !more {
+						break
+					}
 				}
-				if !more {
-					break
+			case "link":
+				// Collect all attributes of this <link> tag.
+				var rel, typ, href string
+				for {
+					k, v, more := z.TagAttr()
+					switch strings.ToLower(string(k)) {
+					case "rel":
+						rel = string(v)
+					case "type":
+						typ = string(v)
+					case "href":
+						href = string(v)
+					}
+					if !more {
+						break
+					}
 				}
+				href = strings.TrimSpace(href)
+				if href == "" || !isAlternateRel(rel) || !isFeedType(typ) {
+					continue
+				}
+				effectiveBase := base
+				if baseOverride != nil {
+					effectiveBase = baseOverride
+				}
+				resolved := resolveHref(href, effectiveBase)
+				if resolved == "" {
+					continue
+				}
+				return resolved, true
 			}
-			if href == "" || !isAlternateRel(rel) || !isFeedType(typ) {
-				continue
-			}
-			resolved := resolveHref(href, base)
-			if resolved == "" {
-				continue
-			}
-			return resolved, true
 		}
 	}
 }
@@ -76,6 +105,10 @@ func isAlternateRel(rel string) bool {
 
 // isFeedType reports whether the MIME type is a recognised feed type.
 func isFeedType(typ string) bool {
+	// Strip any MIME parameter (e.g. "; charset=utf-8") before matching.
+	if i := strings.IndexByte(typ, ';'); i >= 0 {
+		typ = typ[:i]
+	}
 	switch strings.ToLower(strings.TrimSpace(typ)) {
 	case "application/rss+xml", "application/atom+xml", "application/feed+json":
 		return true

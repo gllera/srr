@@ -11,9 +11,10 @@ import {
    URL_DENY,
 } from "./fmt"
 import { setupGestures, type Gestures } from "./gestures"
+import { UNREAD_ONLY_KEY } from "./keys"
 import * as list from "./list"
 import * as nav from "./nav"
-import { isPinned, listPins, pinFilter, unpinFilter } from "./pin"
+import { clearAllPins, isPinned, listPins, pinFilter, unpinFilter } from "./pin"
 
 const el = {
    article: document.querySelector(".srr-reader") as HTMLElement,
@@ -40,6 +41,7 @@ const el = {
    popupClose: document.querySelector(".srr-popup-close") as HTMLElement,
    popup: document.querySelector(".srr-popup") as HTMLElement,
    status: document.querySelector(".srr-status") as HTMLElement,
+   pinProgress: document.querySelector(".srr-pin-progress") as HTMLElement,
 }
 
 // Which surface is showing. The list is home; the reader is the drill-down.
@@ -64,27 +66,43 @@ let pinProgressTimer: ReturnType<typeof setTimeout> | undefined
 // Whether the current pin was started in unread-only mode (snapshot note).
 let pinIsUnreadSnapshot = false
 
-function showPinProgress(done: number, total: number): void {
+function showPinProgress(done: number, total: number, cached?: number): void {
    clearTimeout(pinProgressTimer)
    let text: string
-   if (done >= total) {
-      text = `Offline copy saved (${total} file${total === 1 ? "" : "s"})`
-      // The pin captures the unread articles as they are right now — new unread
-      // that arrives later won't be included in this offline copy.
-      if (pinIsUnreadSnapshot) text += " — new unread won't update automatically"
+   const finished = done >= total
+   if (finished) {
+      // `cached` is the real success count from the SW; absent (older message)
+      // falls back to `total`. Zero cached = nothing saved (offline/degraded).
+      const ok = cached ?? total
+      if (ok === 0) {
+         text = "Couldn't save offline copy — you may be offline"
+      } else {
+         text = `Offline copy saved (${ok} file${ok === 1 ? "" : "s"})`
+         // The pin is a snapshot — unread that arrives later isn't auto-pinned.
+         if (pinIsUnreadSnapshot) text += " — new unread won't update automatically"
+      }
    } else {
       text = `Downloading ${done} / ${total}…`
    }
-   lastStatusText = null // force a status repaint on the next refreshStatus()
-   el.status.textContent = text
-   el.status.classList.remove("srr-status-warn")
-   if (done >= total) {
-      // Restore the real status after a short display window.
+   // A dedicated non-live node: NOT the aria-live freshness banner, so per-pack
+   // ticks don't flood screen readers and a concurrent refreshStatus (which only
+   // writes el.status) can't clobber the progress/completion message.
+   el.pinProgress.textContent = text
+   el.pinProgress.hidden = false
+   if (finished) {
       pinProgressTimer = setTimeout(() => {
-         lastStatusText = null
-         refreshStatus()
+         el.pinProgress.hidden = true
+         el.pinProgress.textContent = ""
       }, 3000)
    }
+}
+
+// The offline-pin registry key. Distinct from nav.filterKey() (which the list
+// reuses for scroll memory): the pinned pack SET differs by unread-only mode
+// (raised bounds enumerate only the unread tail), so the key must encode it too.
+function pinKey(): string {
+   const base = nav.filterKey()
+   return nav.isUnreadOnly() && nav.filter.active ? base + " #unread" : base
 }
 
 // Enumerate the packs for the current filter and cache them in the SW's
@@ -95,8 +113,10 @@ function showPinProgress(done: number, total: number): void {
 async function pinCurrentFilter(): Promise<void> {
    const controller = navigator.serviceWorker?.controller
    if (!controller) return // dev / harness / insecure context — silent no-op
-   const key = nav.filterKey()
-   const feeds = nav.filter.feeds
+   const key = pinKey()
+   // [ALL] => empty Map, the documented fast path; a populated map is a feed/tag
+   // scope (filter.feeds is fully populated even for [ALL], so pass empty here).
+   const feeds = nav.filter.active ? nav.filter.feeds : new Map<number, number>()
    const names = await data.packNamesForFilter(feeds)
    if (names.length === 0) return
    // Track whether this pin was taken in unread-only mode so the completion
@@ -104,8 +124,8 @@ async function pinCurrentFilter(): Promise<void> {
    pinIsUnreadSnapshot = nav.isUnreadOnly() && nav.filter.active
    pinFilter(key, names)
    const { port1, port2 } = new MessageChannel()
-   port1.onmessage = (e: MessageEvent<{ type: string; done: number; total: number }>) => {
-      if (e.data?.type === "pin-progress") showPinProgress(e.data.done, e.data.total)
+   port1.onmessage = (e: MessageEvent<{ type: string; done: number; total: number; cached?: number }>) => {
+      if (e.data?.type === "pin-progress") showPinProgress(e.data.done, e.data.total, e.data.cached)
    }
    controller.postMessage({ type: "pin", names }, [port2])
    showPinProgress(0, names.length)
@@ -113,7 +133,7 @@ async function pinCurrentFilter(): Promise<void> {
 
 function unpinCurrentFilter(): void {
    const controller = navigator.serviceWorker?.controller
-   const key = nav.filterKey()
+   const key = pinKey()
    // Read the stored names before removing the registry entry, so we can tell
    // the SW exactly which cache entries to delete.
    const names = listPins().get(key)?.names ?? []
@@ -128,13 +148,13 @@ function unpinCurrentFilter(): void {
 function pinMenuEntry(): { label: string; action: () => void } | null {
    if (!navigator.serviceWorker?.controller) return null
    if (nav.filter.saved || nav.filter.search) return null
-   const key = nav.filterKey()
+   const key = pinKey()
    if (isPinned(key)) {
       return { label: "Remove offline copy", action: unpinCurrentFilter }
    }
    return {
       label: "Download for offline",
-      action: () => void pinCurrentFilter(),
+      action: () => void pinCurrentFilter().catch((e) => showError(e)),
    }
 }
 
@@ -606,6 +626,10 @@ async function init() {
    // list under the current filter, and refresh the unread + save toolbar buttons
    // to reflect the newly-merged state. Reuses the same paths as toggleUnseenOnly.
    setProfileImportHook(() => {
+      // importProfile wrote srr-unread-only straight to localStorage, but nav holds
+      // unreadOnly in a module var only mutated via setUnreadOnly — reconcile it
+      // (this also re-applies the filter so the raised unseen bounds take hold).
+      nav.setUnreadOnly(localStorage.getItem(UNREAD_ONLY_KEY) === "1")
       nav.pruneSeen()
       refreshUnreadButton()
       refreshSaveButton(!el.save.disabled)
@@ -682,6 +706,12 @@ async function init() {
    })
    window.addEventListener("mousedown", (e) => {
       if (el.popup.classList.contains("srr-open") && !el.popup.contains(e.target as Node)) closePopup()
+   })
+
+   // The SW posts "pins-purged" after a gen-change purge of the PINNED cache —
+   // reset the local pin registry so menu labels match the (now empty) cache.
+   navigator.serviceWorker?.addEventListener("message", (e: MessageEvent) => {
+      if (e.data?.type === "pins-purged") clearAllPins()
    })
 
    window.addEventListener("hashchange", () => void route(location.hash.substring(1)))

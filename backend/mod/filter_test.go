@@ -49,6 +49,30 @@ func TestFilterDropTitle(t *testing.T) {
 	}
 }
 
+// TestFilterDropTitleWhitespaceMetachar verifies that a multi-word title is
+// matched via a whitespace metacharacter (\s), since a pipeline token is split
+// on whitespace before its params are parsed and a literal space cannot appear
+// in a regex param value.
+func TestFilterDropTitleWhitespaceMetachar(t *testing.T) {
+	// Multi-word title with runs of whitespace → dropped via \s+.
+	item := makeFilterItem("breaking   news", "content")
+	if err := runFilter(t, `#filter drop_title=/breaking\s+news/`, item); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if !item.Drop {
+		t.Error(`expected Drop=true for "breaking   news" with drop_title=/breaking\s+news/`)
+	}
+
+	// No whitespace between the words → not dropped (\s+ requires ≥1 space).
+	item2 := makeFilterItem("breakingnews", "content")
+	if err := runFilter(t, `#filter drop_title=/breaking\s+news/`, item2); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if item2.Drop {
+		t.Error(`expected Drop=false for "breakingnews" with drop_title=/breaking\s+news/`)
+	}
+}
+
 // TestFilterDropContent verifies drop_content matching.
 func TestFilterDropContent(t *testing.T) {
 	item := makeFilterItem("Hello", "buy now sponsored content yes")

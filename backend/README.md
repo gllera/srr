@@ -399,7 +399,7 @@ srr feed add -t "Feed" -u https://example.com/rss \
 | `keep_content` | `/regex/[i]` | Drop when content does **not** match the regex |
 | `min_words` | integer | Drop when plain-text word count of content is below N |
 
-Regex syntax: `/pattern/` or `/pattern/i` (flag `i` = case-insensitive). A malformed regex or unknown parameter is a hard configuration error. The word-count check (`min_words`) runs against the raw content string including any HTML tags.
+Regex syntax: `/pattern/` or `/pattern/i` (flag `i` = case-insensitive). A malformed regex or unknown parameter is a hard configuration error. The word-count check (`min_words`) runs against the raw content string including any HTML tags. A regex param value **cannot contain a literal space** — the pipeline token is split on whitespace before its parameters are parsed — so use a whitespace metacharacter instead: `drop_title=/breaking\s+news/` or `drop_title=/breaking[ ]news/`, not `drop_title=/breaking news/`.
 
 ```bash
 # Drop sponsored posts and items with fewer than 100 words

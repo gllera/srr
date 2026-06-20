@@ -76,6 +76,9 @@ const nav = vi.hoisted(() => {
       _setListAnchor: (a: number) => (anchor = a),
       isSearchFilter: vi.fn(() => filter.search),
       searchQuery: vi.fn(() => searchTerm),
+      // Search snapshot cards (fe-opt#F1): default undefined so renderSearch takes
+      // its defensive loadMeta fallback, matching the existing search-render tests.
+      searchCard: vi.fn(() => undefined),
       isUnreadOnly: vi.fn(() => unreadOnly),
       _setUnreadOnly: (v: boolean) => (unreadOnly = v),
       filterKey: vi.fn(() => (filter.saved ? "S" : filter.search ? "q:" + searchTerm : filter.active ? "F" : "")),
