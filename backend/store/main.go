@@ -139,8 +139,8 @@ func LoadConfigs(data []byte) error {
 // backend config field — the scheme and the field's yaml key upper-cased with
 // dashes turned to underscores — or "" for a field with no yaml tag. It is the
 // single source of truth for the backend env-override grammar: loadEnv reads
-// this key, and `srr config` prints it (via cmd_config.go), so the printed name
-// can never drift from the name actually read.
+// this key, and `srr config` derives it the same way (via cmd_config.go) to
+// detect — and omit — the conventional name, so the two can never drift.
 func EnvName(scheme string, f reflect.StructField) string {
 	tag, _, _ := strings.Cut(f.Tag.Get("yaml"), ",")
 	if tag == "" {

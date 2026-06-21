@@ -2,8 +2,9 @@ package main
 
 import (
 	"fmt"
-	"net/url"
+	"maps"
 	"reflect"
+	"slices"
 	"strings"
 
 	"srrb/store"
@@ -13,17 +14,41 @@ type ConfigCmd struct {
 	Key string `arg:"" optional:"" help:"Config key to print (omit for all)."`
 }
 
-// globalEnvName returns the env var that sets a global flag (its kong env: tag).
+// expectedEnv is the conventional env-var name for a field shown as `name`
+// under `scheme` (empty for globals): SRR_[<SCHEME>_]<SCREAMING_SNAKE(name)>.
+// It mirrors store.EnvName's grammar so cmd_config can tell whether an env name
+// is mechanically derivable from the displayed field name.
+func expectedEnv(scheme, name string) string {
+	env := "SRR_"
+	if scheme != "" {
+		env += strings.ToUpper(scheme) + "_"
+	}
+	return env + strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
+}
+
+// globalEnvName returns the env var that sets a global flag (its kong env: tag),
+// or "" when that name is the conventional derivation of the field name — there
+// is no need to print what the reader can derive. A hand-rolled tag that breaks
+// the convention is still returned so it stays visible.
 func globalEnvName(f reflect.StructField) string {
-	return f.Tag.Get("env")
+	env := f.Tag.Get("env")
+	if env == expectedEnv("", fieldName(f)) {
+		return ""
+	}
+	return env
 }
 
 // backendEnvNameFor returns a per-field env-name deriver for a backend config
-// section, bound to scheme: it prints the very name store.loadEnv reads, since
-// both go through store.EnvName.
+// section, bound to scheme. store.EnvName (the name store.loadEnv reads) is the
+// conventional SRR_<SCHEME>_<FIELD> derivation by construction, so it always
+// matches expectedEnv and is suppressed — backend env names are never printed.
 func backendEnvNameFor(scheme string) func(reflect.StructField) string {
 	return func(f reflect.StructField) string {
-		return store.EnvName(scheme, f)
+		env := store.EnvName(scheme, f)
+		if env == expectedEnv(scheme, fieldName(f)) {
+			return ""
+		}
+		return env
 	}
 }
 
@@ -31,20 +56,17 @@ func (o *ConfigCmd) Run() error {
 	gv := reflect.ValueOf(*globals)
 	gt := gv.Type()
 
-	// A malformed store (e.g. "packs%") makes url.Parse return (nil, err); read
-	// the scheme only on success so we print config cleanly instead of panicking
-	// on u.Scheme. Other commands surface the parse error via store.Open.
-	var scheme string
-	if u, err := url.Parse(globals.Store); err == nil {
-		scheme = u.Scheme
-	}
-	storeCfg, hasStoreCfg := store.Configs()[scheme]
+	// Every registered backend section is printed regardless of the active store
+	// scheme, so unset (inactive-backend) configs are discoverable too. Sorted
+	// for deterministic output (store.Configs returns a map).
+	cfgs := store.Configs()
+	schemes := slices.Sorted(maps.Keys(cfgs))
 
 	if o.Key == "" {
 		printFields(gv, "", globalEnvName)
-		if hasStoreCfg {
+		for _, scheme := range schemes {
 			fmt.Printf("%s:\n", scheme)
-			printFields(reflect.ValueOf(storeCfg).Elem(), "  ", backendEnvNameFor(scheme))
+			printFields(reflect.ValueOf(cfgs[scheme]).Elem(), "  ", backendEnvNameFor(scheme))
 		}
 		return nil
 	}
@@ -56,18 +78,19 @@ func (o *ConfigCmd) Run() error {
 		}
 	}
 
-	if hasStoreCfg {
-		cv := reflect.ValueOf(storeCfg).Elem()
-		ct := cv.Type()
+	// A whole backend section by scheme ("s3"), then a single field ("s3.region"),
+	// both resolved against the registry rather than the active store's scheme.
+	if cfg, ok := cfgs[o.Key]; ok {
+		printFields(reflect.ValueOf(cfg).Elem(), "", backendEnvNameFor(o.Key))
+		return nil
+	}
 
-		if o.Key == scheme {
-			printFields(cv, "", backendEnvNameFor(scheme))
-			return nil
-		}
-
-		if after, ok := strings.CutPrefix(o.Key, scheme+"."); ok {
+	if scheme, field, ok := strings.Cut(o.Key, "."); ok {
+		if cfg, ok := cfgs[scheme]; ok {
+			cv := reflect.ValueOf(cfg).Elem()
+			ct := cv.Type()
 			for i := range ct.NumField() {
-				if fieldName(ct.Field(i)) == after {
+				if fieldName(ct.Field(i)) == field {
 					fmt.Println(cv.Field(i).Interface())
 					return nil
 				}
