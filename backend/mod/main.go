@@ -35,21 +35,27 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 	return c.buf.Write(p)
 }
 
+// CmdTimeout overrides the external-command timeout when > 0. main sets it from
+// the resolved --cmd-timeout / SRR_CMD_TIMEOUT global after parsing; a zero
+// value (e.g. when mod is used directly in tests) falls back to
+// defaultCmdTimeout.
+var CmdTimeout time.Duration
+
+const defaultCmdTimeout = 5 * time.Minute
+
 // SubprocessTimeout bounds a single external (shell) command invocation so a
 // command that blocks forever — waiting on stdin, sleeping, trapping SIGPIPE
 // after the output cap fires — can't wedge a fetch worker for the life of the
 // process. The fetch context carries no deadline (it cancels only on
 // SIGINT/SIGTERM), so without this an external module or ingest command hang is
-// unbounded. Generous default; override with SRR_CMD_TIMEOUT (a Go duration)
-// for unusually long-running commands. Shared with the ingest package, whose
-// external-fetcher exec has the same exposure.
+// unbounded. Generous default; override with the --cmd-timeout flag /
+// SRR_CMD_TIMEOUT env. Shared with the ingest package, whose external-fetcher
+// exec has the same exposure.
 func SubprocessTimeout() time.Duration {
-	if v := os.Getenv("SRR_CMD_TIMEOUT"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			return d
-		}
+	if CmdTimeout > 0 {
+		return CmdTimeout
 	}
-	return 5 * time.Minute
+	return defaultCmdTimeout
 }
 
 // subprocessWaitDelay is the grace period os/exec gives a subprocess to drain

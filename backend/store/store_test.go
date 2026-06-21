@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -227,5 +228,76 @@ func TestLoadEnvHyphenatedTag(t *testing.T) {
 	loadEnv("test", cfg)
 	if cfg.AccessKey != "mykey" {
 		t.Errorf("AccessKey = %q, want %q", cfg.AccessKey, "mykey")
+	}
+}
+
+func TestLoadEnvIntOverride(t *testing.T) {
+	type testConfig struct {
+		Port int `yaml:"port"`
+	}
+
+	cfg := &testConfig{Port: 22}
+	t.Setenv("SRR_TEST_PORT", "2222")
+	if err := loadEnv("test", cfg); err != nil {
+		t.Fatalf("loadEnv: %v", err)
+	}
+	if cfg.Port != 2222 {
+		t.Errorf("Port = %d, want 2222", cfg.Port)
+	}
+}
+
+func TestLoadEnvBadIntErrors(t *testing.T) {
+	type testConfig struct {
+		Port int `yaml:"port"`
+	}
+
+	cfg := &testConfig{Port: 22}
+	t.Setenv("SRR_TEST_PORT", "not-a-number")
+	if err := loadEnv("test", cfg); err == nil {
+		t.Fatal("loadEnv: want error for unparseable int, got nil")
+	}
+	if cfg.Port != 22 {
+		t.Errorf("Port = %d, want 22 (unchanged on error)", cfg.Port)
+	}
+}
+
+func TestEnvName(t *testing.T) {
+	// EnvName is the single source of truth for the backend env-override grammar:
+	// loadEnv reads this name and `srr config` prints it, so this pins both.
+	type cfg struct {
+		Region    string `yaml:"region"`
+		AccessKey string `yaml:"access-key-id"`
+		Inline    string `yaml:"endpoint,omitempty"` // option after the tag is dropped
+		NoTag     string ``
+	}
+	tt := reflect.TypeOf(cfg{})
+	cases := []struct {
+		field int
+		want  string
+	}{
+		{0, "SRR_S3_REGION"},
+		{1, "SRR_S3_ACCESS_KEY_ID"},
+		{2, "SRR_S3_ENDPOINT"},
+		{3, ""}, // no yaml tag → no derived env name
+	}
+	for _, c := range cases {
+		if got := EnvName("s3", tt.Field(c.field)); got != c.want {
+			t.Errorf("EnvName(s3, %s) = %q, want %q", tt.Field(c.field).Name, got, c.want)
+		}
+	}
+}
+
+func TestLoadEnvUnsupportedKindErrors(t *testing.T) {
+	// A field kind loadEnv can't apply must error when an override is present,
+	// rather than silently leaving it un-overridable (the "env beats YAML"
+	// invariant). float64 is not a supported kind.
+	type testConfig struct {
+		Ratio float64 `yaml:"ratio"`
+	}
+
+	cfg := &testConfig{}
+	t.Setenv("SRR_TEST_RATIO", "1.5")
+	if err := loadEnv("test", cfg); err == nil {
+		t.Fatal("loadEnv: want error for unsupported field kind, got nil")
 	}
 }

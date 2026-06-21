@@ -108,8 +108,10 @@ srr preview https://example.com/feed.xml -p "#sanitize" -p "#minify"
 | `-o, --store` | packs | Storage destination |
 | `--force` | false | Override DB write lock |
 | `-d, --debug` | false | Enable debug logging |
+| `--cmd-timeout` | 5m | Timeout for a single external ingest/mod command (Go duration) |
+| `--allow-private-fetch` | false | Disable the SSRF guard (allow fetching feeds/media from private/loopback addresses) — security override |
 
-Global flags can also be set via environment variables (prefixed `SRR_`, e.g. `SRR_WORKERS`) or in a YAML config file using their long flag names as keys:
+Global flags can also be set via environment variables (prefixed `SRR_`, e.g. `SRR_WORKERS`, `SRR_CMD_TIMEOUT`, `SRR_ALLOW_PRIVATE_FETCH`) or in a YAML config file using their long flag names as keys:
 
 ```yaml
 # $XDG_CONFIG_HOME/srr/srr.yaml (or override path with $SRR_CONFIG,
@@ -119,7 +121,9 @@ pack-size: 500
 store: /path/to/packs
 ```
 
-Precedence: CLI flags > env vars > config file > defaults. `$SRR_CONFIG_INLINE`, when set, supersedes `$SRR_CONFIG`.
+Precedence: CLI flags > env vars > config file > defaults. `$SRR_CONFIG_INLINE`, when set, supersedes `$SRR_CONFIG`. Run `srr config` to print the resolved values (each annotated with the env var that sets it).
+
+Only **global** flags are YAML-settable. Per-command flags — `art fetch --interval` (`SRR_FETCH_INTERVAL`) and `preview --addr` (`SRR_PREVIEW_ADDR`) — take a CLI flag or env var but have no YAML key, since they are subcommand-scoped rather than top-level config.
 
 ## Storage Backends
 
@@ -155,6 +159,19 @@ sftp:
 ```
 
 SFTP auth chain (in order): URL password → config password → config `private-key` → `~/.ssh/` keys → SSH agent. Uses `~/.ssh/known_hosts` for host key verification by default. Set `insecure: true` to skip verification.
+
+Every backend field is also overridable by an environment variable named `SRR_<SCHEME>_<FIELD>` — the scheme and the YAML key upper-cased with dashes turned into underscores — which beats the YAML value (same env-over-YAML precedence as the global flags). For example:
+
+| YAML | Environment variable |
+|------|----------------------|
+| `s3.region` | `SRR_S3_REGION` |
+| `s3.access-key-id` | `SRR_S3_ACCESS_KEY_ID` |
+| `s3.secret-access-key` | `SRR_S3_SECRET_ACCESS_KEY` |
+| `sftp.user` | `SRR_SFTP_USER` |
+| `sftp.private-key` | `SRR_SFTP_PRIVATE_KEY` |
+| `sftp.insecure` | `SRR_SFTP_INSECURE` |
+
+`srr config` prints each backend field with its derived env name in brackets.
 
 ## Ingest Strategies
 
@@ -247,7 +264,7 @@ The command reads it, fetches its source, and prints exactly one response object
 - A **non-zero exit code** fails the fetch for that feed only (the error is recorded in the feed's `ferr`); all other feeds still fetch and commit.
 - **Empty stdout is an error** — emit at least `{"items":[]}` (or `{"not_modified":true}`).
 - stdout is capped at 64 MiB; exceeding it fails the fetch.
-- The command is killed if it runs longer than the subprocess time budget — 5m by default, overridable via `SRR_CMD_TIMEOUT` (a Go duration; a value that doesn't parse or is ≤ 0 is ignored and the 5m default applies). A killed command fails the fetch for that feed, so long-running sources must finish within the budget or raise it. The command must not block waiting for more stdin after consuming the single request object.
+- The command is killed if it runs longer than the subprocess time budget — 5m by default, overridable via the `--cmd-timeout` flag / `SRR_CMD_TIMEOUT` env (a Go duration; ≤ 0 falls back to the 5m default). A killed command fails the fetch for that feed, so long-running sources must finish within the budget or raise it. The command must not block waiting for more stdin after consuming the single request object.
 - `not_modified: true` (or a response with zero `items`) **preserves** the feed's dedup state, so a transient empty response won't drop it.
 
 ### Self-hosting files
@@ -375,7 +392,7 @@ Printing nothing (or only whitespace) leaves the item exactly as received.
 **Behavior contract.**
 
 - stdout is capped at 64 MiB; exceeding it errors.
-- The command is killed if it runs longer than the subprocess time budget — 5m by default, overridable via `SRR_CMD_TIMEOUT` (a Go duration; a value that doesn't parse or is ≤ 0 is ignored and the 5m default applies).
+- The command is killed if it runs longer than the subprocess time budget — 5m by default, overridable via the `--cmd-timeout` flag / `SRR_CMD_TIMEOUT` env (a Go duration; ≤ 0 falls back to the 5m default).
 - A **non-zero exit code**, an **unmarshalable** stdout, or a mod that **changes `guid` or `published`** does *not* fail the feed: SRR logs a WARN and **drops just that one item**, then continues with the rest of the batch.
 
 A minimal reference mod — lowercase every title — using `jq`:

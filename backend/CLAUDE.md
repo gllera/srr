@@ -6,7 +6,18 @@
 
 ## Commands
 
-`go build -o srr .`, `go test ./...`, `go test -run TestName .`, `go test -v ./store/`. Release: `CGO_ENABLED=0 go build -ldflags "-s -w"`. No Makefile/linter/Dockerfile.
+The root `Makefile` is the unified entry point for both halves of the monorepo; prefer it over raw `go` commands:
+
+- `make build-be` — build the binary to `dist/srrb`
+- `make test-be` — `go test ./...`
+- `make vet-be` — `go vet ./...`
+- `make format-be` / `make format-check-be` — `gofmt -w .` / gofmt gate (the latter runs inside `make verify-be`)
+- `make lint-be` — `golangci-lint run ./...` (opt-in; not yet gate-clean, so not in `verify-be`)
+- `make generate` / `make generate-check` — regenerate / freshness-check `frontend/src/js/format.gen.ts` (`srr gen-ts`)
+- `make verify-be` — vet + gofmt check + build + test + generate-check
+- `make release VERSION=…` — cross-compile all platforms (`CGO_ENABLED=0 -ldflags "-s -w"`)
+
+Direct equivalents when working inside `backend/`: `go build -o srr .`, `go test ./...`, `go test -run TestName .`, `go test -v ./store/`.
 
 ## Architecture
 

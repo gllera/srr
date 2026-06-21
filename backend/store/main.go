@@ -8,6 +8,7 @@ import (
 	"os"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -127,22 +128,41 @@ func LoadConfigs(data []byte) error {
 	}
 
 	for scheme, cfg := range configs {
-		loadEnv(scheme, cfg)
+		if err := loadEnv(scheme, cfg); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-// loadEnv overrides config fields with SRR_<SCHEME>_<FIELD> env vars.
-func loadEnv(scheme string, cfg any) {
+// EnvName returns the SRR_<SCHEME>_<FIELD> environment variable that overrides a
+// backend config field — the scheme and the field's yaml key upper-cased with
+// dashes turned to underscores — or "" for a field with no yaml tag. It is the
+// single source of truth for the backend env-override grammar: loadEnv reads
+// this key, and `srr config` prints it (via cmd_config.go), so the printed name
+// can never drift from the name actually read.
+func EnvName(scheme string, f reflect.StructField) string {
+	tag, _, _ := strings.Cut(f.Tag.Get("yaml"), ",")
+	if tag == "" {
+		return ""
+	}
+	return "SRR_" + strings.ToUpper(scheme) + "_" + strings.ToUpper(strings.ReplaceAll(tag, "-", "_"))
+}
+
+// loadEnv overrides config fields with SRR_<SCHEME>_<FIELD> env vars (the names
+// `srr config` prints — see EnvName). Returns an error when an override is
+// present for a field it can't apply — a malformed int, or a field kind with no
+// override support — so the "env beats YAML" invariant can never silently fail
+// to apply (e.g. a new int field that would otherwise be YAML-settable but
+// un-overridable by env).
+func loadEnv(scheme string, cfg any) error {
 	v := reflect.ValueOf(cfg).Elem()
 	t := v.Type()
-	prefix := "SRR_" + strings.ToUpper(scheme) + "_"
 	for i := range t.NumField() {
-		tag, _, _ := strings.Cut(t.Field(i).Tag.Get("yaml"), ",")
-		if tag == "" {
+		envKey := EnvName(scheme, t.Field(i))
+		if envKey == "" {
 			continue
 		}
-		envKey := prefix + strings.ToUpper(strings.ReplaceAll(tag, "-", "_"))
 		val, ok := os.LookupEnv(envKey)
 		if !ok {
 			continue
@@ -153,8 +173,17 @@ func loadEnv(scheme string, cfg any) {
 			f.SetString(val)
 		case reflect.Bool:
 			f.SetBool(val == "true" || val == "1")
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			n, err := strconv.ParseInt(val, 10, 64)
+			if err != nil {
+				return fmt.Errorf("%s: %w", envKey, err)
+			}
+			f.SetInt(n)
+		default:
+			return fmt.Errorf("%s: unsupported config field kind %s", envKey, f.Kind())
 		}
 	}
+	return nil
 }
 
 // Configs returns the registered backend config structs keyed by scheme.

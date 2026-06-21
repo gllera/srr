@@ -4,19 +4,15 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"os"
-	"strings"
 	"syscall"
 	"time"
 )
 
-// allowPrivateFetch reports whether the SSRF guard is disabled. Self-hosters
-// who legitimately fetch feeds/media from LAN or loopback addresses opt out
-// with SRR_ALLOW_PRIVATE_FETCH=1 (or "true").
-func allowPrivateFetch() bool {
-	v := os.Getenv("SRR_ALLOW_PRIVATE_FETCH")
-	return v == "1" || strings.EqualFold(v, "true")
-}
+// AllowPrivateFetch disables the SSRF guard when true. Self-hosters who
+// legitimately fetch feeds/media from LAN or loopback addresses opt out via the
+// --allow-private-fetch flag / SRR_ALLOW_PRIVATE_FETCH env; main sets this from
+// the resolved global after parsing. Defaults false (guard on).
+var AllowPrivateFetch bool
 
 // blockedIP reports whether ip is a private, loopback, link-local, unique-local
 // (covered by IsPrivate for fc00::/7), unspecified, or multicast address — the
@@ -33,7 +29,7 @@ func blockedIP(ip net.IP) bool {
 // rebinding TOCTOU and re-checks every hop of a redirect (each hop dials
 // afresh). Disabled when SRR_ALLOW_PRIVATE_FETCH is set.
 func guardDialControl(_, address string, _ syscall.RawConn) error {
-	if allowPrivateFetch() {
+	if AllowPrivateFetch {
 		return nil
 	}
 	host, _, err := net.SplitHostPort(address)
