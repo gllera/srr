@@ -103,11 +103,22 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 		return "", fmt.Errorf("asset %q escapes cache dir: %w", localname, errNotAsset)
 	}
 
+	// Bound the source read by the asset size cap BEFORE pulling the whole file
+	// into memory. localname comes from item content, so the cache dir is
+	// attacker-influenceable (an external ingest command or a content-marker mod
+	// can drop an arbitrarily large file); without this an oversized file would
+	// OOM the worker at the ReadFile below, before the post-payload cap fires.
+	// Skip the pre-read cap when a filter is configured: the filter may shrink an
+	// over-cap source (e.g. transcoding a large image), so only its output —
+	// capped below — must fit, and the operator who enabled arbitrary asset
+	// processing accepts the unbounded source read it implies.
+	if a.maxBytes > 0 && len(a.filter) == 0 && fi.Size() > a.maxBytes {
+		return "", fmt.Errorf("asset %q source exceeds %d bytes (size %d)", localname, a.maxBytes, fi.Size())
+	}
+
 	// Key on the ORIGINAL file's content hash so an asset already in the store is
 	// recognized before the (possibly expensive) pre-upload filter runs. The key
-	// keeps the source extension; identical source bytes dedup to one key. The
-	// cache dir is ops-managed and the source was size-capped by the fetcher that
-	// downloaded it, so reading it whole to hash it is bounded.
+	// keeps the source extension; identical source bytes dedup to one key.
 	orig, err := os.ReadFile(full)
 	if err != nil {
 		return "", fmt.Errorf("read asset %q: %w", localname, err)
