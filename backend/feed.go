@@ -342,7 +342,7 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 		// publish an item still pointing at "#/..." for an asset that never
 		// reached the store. Feed state (watermark, dedup, etag) is left
 		// untouched on the error path, so a transient store failure self-heals
-		// next fetch; a permanently-rejected asset (e.g. over SRR_MAX_MEDIA_SIZE)
+		// next fetch; a permanently-rejected asset (e.g. over SRR_MAX_ASSET_SIZE)
 		// wedges the feed until it is fixed.
 		//
 		// RewriteAttrs handles the marker convention: it skips content with no
