@@ -174,7 +174,13 @@ func (d *S3) Rm(ctx context.Context, key string) error {
 		Bucket: aws.String(d.bucket),
 		Key:    aws.String(key),
 	})
-	return err
+	if err != nil {
+		// Wrap like Local.Rm/SFTP.Rm so a delete failure names the op + key (GC
+		// sweep warnings are warn-only and otherwise opaque). S3 treats a
+		// missing-key delete as success, so no not-found branch is needed.
+		return fmt.Errorf("s3 delete %q: %w", key, err)
+	}
+	return nil
 }
 
 func (d *S3) Close() error {

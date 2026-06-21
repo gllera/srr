@@ -108,12 +108,24 @@ func (d *Local) AtomicPut(_ context.Context, key string, r io.Reader) error {
 		return fmt.Errorf("writing file %s: %w", tmpFile, err)
 	}
 
+	// fsync the bytes before the rename so a crash/power-loss can't publish a
+	// truncated or zero-length file under the real key — db.gz is the one mutable
+	// index the whole store depends on, and finalized packs are cached forever.
+	if err := fs.Sync(); err != nil {
+		fs.Close()
+		return fmt.Errorf("syncing file %s: %w", tmpFile, err)
+	}
 	if err := fs.Close(); err != nil {
 		return fmt.Errorf("closing file %s: %w", tmpFile, err)
 	}
 
 	if err := os.Rename(tmpFile, file); err != nil {
 		return fmt.Errorf("renaming %s to %s: %w", tmpFile, file, err)
+	}
+	// fsync the parent directory so the rename itself is durable across a crash.
+	if dir, err := os.Open(filepath.Dir(file)); err == nil {
+		_ = dir.Sync()
+		dir.Close()
 	}
 	return nil
 }

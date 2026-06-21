@@ -245,10 +245,16 @@ func sftpAuthMethods(u *url.URL) ([]ssh.AuthMethod, func(), error) {
 	var methods []ssh.AuthMethod
 	cleanup := func() {}
 
+	// Password precedence: URL password → config password. Decoupled from whether
+	// the URL carries a username — the common sftp://user@host form (username, no
+	// URL password) must still fall back to the configured password instead of
+	// silently offering no password method at all.
+	urlPw, hasURLPw := "", false
 	if u.User != nil {
-		if pw, ok := u.User.Password(); ok {
-			methods = append(methods, ssh.Password(pw))
-		}
+		urlPw, hasURLPw = u.User.Password()
+	}
+	if hasURLPw {
+		methods = append(methods, ssh.Password(urlPw))
 	} else if sftpCfg.Password != "" {
 		methods = append(methods, ssh.Password(sftpCfg.Password))
 	}

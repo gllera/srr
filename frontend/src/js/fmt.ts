@@ -129,7 +129,7 @@ export function sanitizeHtml(html: string): string {
             node.removeAttribute(attr.name)
       }
       const tag = node.tagName
-      if (tag === "A") {
+      if (tag === "A" || tag === "AREA") {
          node.setAttribute("rel", "noopener noreferrer")
          // Relative hrefs (self-hosted "assets/…/doc.pdf", or any relative link
          // the feed carried) resolve against the pack base, bounds-checked so they

@@ -53,7 +53,7 @@ func (o *SyndicateSetCmd) Run() error {
 	return withDB(true, func(ctx context.Context, db *DB) error {
 		// Validate name: must be a safe file stem with no path components.
 		if !validOutName(o.Name) {
-			return fmt.Errorf("syndication name %q must match [A-Za-z0-9._-] and not be . or ..", o.Name)
+			return fmt.Errorf("syndication name %q must match [A-Za-z0-9._-] and not be '.' or '..'", o.Name)
 		}
 		// Validate format.
 		if o.Format != "rss" && o.Format != "json" {

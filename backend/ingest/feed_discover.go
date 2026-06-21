@@ -110,7 +110,11 @@ func isFeedType(typ string) bool {
 		typ = typ[:i]
 	}
 	switch strings.ToLower(strings.TrimSpace(typ)) {
-	case "application/rss+xml", "application/atom+xml", "application/feed+json":
+	// JSON Feed (application/feed+json) is deliberately NOT discoverable: the
+	// built-in #feed parser (ParseFeed) reads only XML roots (RSS/Atom/RDF), so
+	// auto-discovering a JSON-only feed would repoint to a URL #feed can't parse —
+	// hard-failing the add/import or wedging the feed. Report "no feed" instead.
+	case "application/rss+xml", "application/atom+xml":
 		return true
 	}
 	return false
