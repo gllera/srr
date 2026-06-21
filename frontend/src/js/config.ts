@@ -480,7 +480,7 @@ function buildFeedInfo(ch: IFeed): DocumentFragment {
    frag.appendChild(health.sec)
 
    const proc = infoSection("Processing")
-   addRow(proc.dl, "Ingest", ch.ingest || "Default (#rss)")
+   addRow(proc.dl, "Ingest", ch.ingest || "Default (#feed)")
    addRow(proc.dl, "Pipeline", ch.pipe && ch.pipe.length ? ch.pipe.join("  →  ") : "Inherited from default")
    frag.appendChild(proc.sec)
 

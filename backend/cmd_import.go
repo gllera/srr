@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"text/tabwriter"
 )
 
@@ -49,19 +50,33 @@ func (o *ImportCmd) Run() error {
 
 	applyImportDefaults(newFeeds, o.Parsers, o.Ingest, o.Tag)
 
+	// Subscribe-time discovery: probe every #feed feed, repointing homepage URLs
+	// to their discovered feed and skipping (reporting) the unresolvable ones.
+	// Partial success — a few dead URLs don't abort the batch.
+	rootIngest, err := importRootIngest()
+	if err != nil {
+		return err
+	}
+	kept, failed := resolveImportFeeds(context.Background(), newFeeds, rootIngest)
+	reportImportFailures(failed)
+
 	if o.DryRun {
 		w = tabwriter.NewWriter(os.Stdout, 1, 1, 2, ' ', 0)
 		fmt.Fprintf(w, "\nTitle\tURL\tTag\n")
 		fmt.Fprintf(w, "-----\t---\t---\n")
-		for _, c := range newFeeds {
+		for _, c := range kept {
 			fmt.Fprintf(w, "%s\t%s\t%s\n", c.Title, c.URL, c.Tag)
 		}
 		w.Flush()
 		return nil
 	}
 
+	if len(kept) == 0 {
+		return nil
+	}
+
 	return withDB(true, func(ctx context.Context, db *DB) error {
-		for _, c := range newFeeds {
+		for _, c := range kept {
 			if err := normalizeFeed(c); err != nil {
 				return err
 			}
@@ -178,6 +193,75 @@ func applyImportDefaults(feeds []*Feed, parsers []string, ingestStrategy, tag *s
 		for _, c := range feeds {
 			c.Tag = *tag
 		}
+	}
+}
+
+// importFailure records a feed whose URL could not be resolved to a feed at
+// subscribe time, so it is skipped (and reported) rather than aborting the batch.
+type importFailure struct {
+	Title string
+	URL   string
+	Err   error
+}
+
+// resolveImportFeeds runs subscribe-time discovery over the import set: feeds
+// whose effective ingest is the built-in #feed are probed concurrently (a
+// homepage URL is repointed to its discovered <link rel=alternate> feed),
+// external-ingest feeds pass through untouched. It returns the feeds to import
+// (with resolved URLs) and the ones that could not be resolved — import is
+// partial-success, not all-or-nothing.
+func resolveImportFeeds(ctx context.Context, feeds []*Feed, rootIngest string) (kept []*Feed, failed []importFailure) {
+	resolved := make([]string, len(feeds))
+	errs := make([]error, len(feeds))
+
+	sem := make(chan struct{}, max(1, globals.Workers))
+	var wg sync.WaitGroup
+	for i, c := range feeds {
+		if !resolvesFeed(c.Ingest, rootIngest) {
+			resolved[i] = c.URL // external ingest: stored as-is, never probed
+			continue
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, url string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			resolved[i], errs[i] = resolveFeedURL(ctx, url)
+		}(i, c.URL)
+	}
+	wg.Wait()
+
+	for i, c := range feeds {
+		if errs[i] != nil {
+			failed = append(failed, importFailure{Title: c.Title, URL: c.URL, Err: errs[i]})
+			continue
+		}
+		c.URL = resolved[i]
+		kept = append(kept, c)
+	}
+	return kept, failed
+}
+
+// importRootIngest reads the db.gz root ingest strategy (read-only, unlocked) so
+// resolveImportFeeds can gate which feeds are #feed.
+func importRootIngest() (string, error) {
+	var root string
+	err := withDB(false, func(_ context.Context, db *DB) error {
+		root = db.core.Ingest
+		return nil
+	})
+	return root, err
+}
+
+// reportImportFailures prints the feeds skipped because no feed could be
+// resolved at their URL, to the (test-overridable) stdout.
+func reportImportFailures(failed []importFailure) {
+	if len(failed) == 0 {
+		return
+	}
+	fmt.Fprintf(stdout, "\nSkipped %d feed(s) — no feed found at the URL:\n", len(failed))
+	for _, f := range failed {
+		fmt.Fprintf(stdout, "  %s\t%s\t%v\n", f.Title, f.URL, f.Err)
 	}
 }
 

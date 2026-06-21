@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -11,6 +13,7 @@ func setupFeedsTestDB(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
 	globals = &Globals{PackSize: 1, Store: dir}
+	stubPassthroughResolve()
 
 	db, err := NewDB(ctx, false)
 	if err != nil {
@@ -50,10 +53,108 @@ func wantErr(t *testing.T, err error, substr string) {
 // strPtr returns a pointer to its argument; useful for CLI flag-pointer fields.
 func strPtr(s string) *string { return &s }
 
+// stubPassthroughResolve makes subscribe-time discovery an offline no-op (URL
+// stored verbatim), so cmd tests that aren't about resolution never hit the
+// network. Installed by the setup helpers; resolution tests override it.
+func stubPassthroughResolve() {
+	resolveFeedURL = func(_ context.Context, rawURL string) (string, error) { return rawURL, nil }
+}
+
+// feed add stores the discovered feed URL when subscribe-time discovery
+// repoints a homepage URL to its <link rel=alternate> feed.
+func TestFeedAddStoresDiscoveredURL(t *testing.T) {
+	setupEmptyDB(t)
+	resolveFeedURL = func(_ context.Context, _ string) (string, error) {
+		return "https://blog.example.com/feed.xml", nil
+	}
+	cmd := &AddCmd{Title: strPtr("News"), URL: strPtr("https://blog.example.com/")}
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	ch := reopenDB(t).Feeds()[0]
+	if ch.URL != "https://blog.example.com/feed.xml" {
+		t.Errorf("URL = %q, want resolved feed URL", ch.URL)
+	}
+}
+
+// feed add hard-fails and stores nothing when no feed can be resolved.
+func TestFeedAddHardFailsWhenUnresolvable(t *testing.T) {
+	setupEmptyDB(t)
+	resolveFeedURL = func(_ context.Context, _ string) (string, error) {
+		return "", fmt.Errorf("no feed found")
+	}
+	wantErr(t, (&AddCmd{Title: strPtr("News"), URL: strPtr("https://blog.example.com/")}).Run(), "no feed found")
+	if n := len(reopenDB(t).Feeds()); n != 0 {
+		t.Errorf("Feeds len = %d, want 0 (add rejected)", n)
+	}
+}
+
+// feed add skips resolution for an external ingest strategy — that source is
+// not an HTTP-fetchable feed, so probing it would wrongly reject the add.
+func TestFeedAddSkipsResolveForExternalIngest(t *testing.T) {
+	setupEmptyDB(t)
+	called := false
+	resolveFeedURL = func(_ context.Context, rawURL string) (string, error) {
+		called = true
+		return rawURL, nil
+	}
+	cmd := &AddCmd{Title: strPtr("X"), URL: strPtr("https://x.example/"), Ingest: strPtr("my-fetcher")}
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if called {
+		t.Error("resolveFeedURL must not run for an external ingest strategy")
+	}
+}
+
+// feed upd -u resolves the new URL and stores the discovered feed URL.
+func TestFeedUpdResolvesNewURL(t *testing.T) {
+	setupFeedsTestDB(t)
+	resolveFeedURL = func(_ context.Context, _ string) (string, error) {
+		return "https://a.example.com/discovered.xml", nil
+	}
+	if err := (&UpdCmd{ID: 0, URL: strPtr("https://a.example.com/homepage")}).Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := reopenDB(t).Feeds()[0].URL; got != "https://a.example.com/discovered.xml" {
+		t.Errorf("URL = %q, want resolved feed URL", got)
+	}
+}
+
+// feed upd -u hard-fails and leaves the feed untouched when the new URL is
+// unresolvable.
+func TestFeedUpdHardFailsWhenUnresolvable(t *testing.T) {
+	setupFeedsTestDB(t)
+	resolveFeedURL = func(_ context.Context, _ string) (string, error) {
+		return "", fmt.Errorf("no feed found")
+	}
+	wantErr(t, (&UpdCmd{ID: 0, URL: strPtr("https://a.example.com/homepage")}).Run(), "no feed found")
+	if got := reopenDB(t).Feeds()[0].URL; got != "https://a.example.com/feed" {
+		t.Errorf("URL = %q, want unchanged after failed resolve", got)
+	}
+}
+
+// feed upd -u does not resolve when the URL is unchanged (no repoint, no probe).
+func TestFeedUpdSkipsResolveWhenURLUnchanged(t *testing.T) {
+	setupFeedsTestDB(t)
+	called := false
+	resolveFeedURL = func(_ context.Context, u string) (string, error) {
+		called = true
+		return u, nil
+	}
+	if err := (&UpdCmd{ID: 0, URL: strPtr("https://a.example.com/feed")}).Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if called {
+		t.Error("resolveFeedURL must not run when the URL is unchanged")
+	}
+}
+
 func setupEmptyDB(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
 	globals = &Globals{PackSize: 1, Store: dir}
+	stubPassthroughResolve()
 }
 
 func TestFeedAddCreates(t *testing.T) {
