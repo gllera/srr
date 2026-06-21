@@ -122,7 +122,7 @@ pack-size: 500
 store: /path/to/packs
 ```
 
-Precedence: CLI flags > env vars > config file > defaults. `$SRR_CONFIG_INLINE`, when set, supersedes `$SRR_CONFIG`. Run `srr config` to print the resolved values (each annotated with the env var that sets it).
+Precedence: CLI flags > env vars > config file > defaults. `$SRR_CONFIG_INLINE`, when set, supersedes `$SRR_CONFIG`. Run `srr config` to print the resolved values; a value's env var is shown in brackets only when its name deviates from the conventional `SRR_<FIELD>` derivation (a derivable name is omitted to cut noise).
 
 Only **global** flags are YAML-settable. Per-command flags — `art fetch --interval` (`SRR_FETCH_INTERVAL`) and `preview --addr` (`SRR_PREVIEW_ADDR`) — take a CLI flag or env var but have no YAML key, since they are subcommand-scoped rather than top-level config.
 
@@ -172,7 +172,7 @@ Every backend field is also overridable by an environment variable named `SRR_<S
 | `sftp.private-key` | `SRR_SFTP_PRIVATE_KEY` |
 | `sftp.insecure` | `SRR_SFTP_INSECURE` |
 
-`srr config` prints each backend field with its derived env name in brackets.
+Backend env names are conventional by construction (`SRR_<SCHEME>_<FIELD>`, shown in the table above), so `srr config` does not repeat them inline.
 
 ## Ingest Strategies
 

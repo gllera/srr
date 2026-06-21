@@ -15,6 +15,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
     - uses: actions/checkout@v6
     - uses: ./.github/actions/setup-toolchain
@@ -22,6 +23,7 @@ jobs:
 
   browser:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
     - uses: actions/checkout@v6
     - uses: ./.github/actions/setup-toolchain
@@ -32,4 +34,6 @@ jobs:
       with:
         path: ~/.cache/puppeteer
         key: puppeteer-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
+        restore-keys: |
+          puppeteer-${{ runner.os }}-
     - run: make test-browser

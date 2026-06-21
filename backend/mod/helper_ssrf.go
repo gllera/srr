@@ -48,7 +48,7 @@ func guardDialControl(_, address string, _ syscall.RawConn) error {
 
 // SafeTransport returns an *http.Transport whose dials are screened by the
 // SSRF guard. Built-ins that fetch attacker-controlled URLs from feed content
-// (#readability, the asset fetcher) use it so a malicious feed can't pivot the
+// (#readability) use it so a malicious feed can't pivot the
 // server onto the internal network. Callers may set pooling fields on the
 // returned transport.
 func SafeTransport() *http.Transport {
