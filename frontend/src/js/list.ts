@@ -986,6 +986,11 @@ function selectRow(row: HTMLElement): void {
    rowsEl.querySelector("[data-select-pending]")?.removeAttribute("data-select-pending")
    rowsEl.querySelector(".srr-row-current")?.classList.remove("srr-row-current")
    row.classList.add("srr-row-current")
+   // Move DOM focus to the row anchor so the keyboard selection is announced to
+   // screen readers and the focus ring tracks the cursor; preventScroll leaves
+   // positioning to scrollRowIntoView below (the visual highlight alone never
+   // moves focus, so the cursor was invisible to assistive tech).
+   row.focus({ preventScroll: true })
    // Skeleton rows have no dataset.feed yet — Number(undefined) = NaN which
    // poisons nav.currentFeed and breaks anchorChron().  Defer nav.select until
    // fillRow stamps the feed; mark the row so fillRow knows to pick it up.

@@ -75,15 +75,20 @@ function showPinProgress(done: number, total: number, cached?: number): void {
    } else {
       text = `Downloading ${done} / ${total}…`
    }
-   // A dedicated non-live node (.srr-pin-progress), separate from config.ts's
-   // role=status freshness line (.srr-config-status), so per-pack ticks don't
-   // flood screen readers or clobber that status message.
+   // A dedicated node (.srr-pin-progress), separate from config.ts's role=status
+   // freshness line (.srr-config-status). Per-pack ticks stay SILENT (no live
+   // role) so they don't flood screen readers or clobber that status message;
+   // only the final outcome becomes a role=status live region, so the single
+   // success/failure message is announced once.
+   if (finished) el.pinProgress.setAttribute("role", "status")
+   else el.pinProgress.removeAttribute("role")
    el.pinProgress.textContent = text
    el.pinProgress.hidden = false
    if (finished) {
       pinProgressTimer = setTimeout(() => {
          el.pinProgress.hidden = true
          el.pinProgress.textContent = ""
+         el.pinProgress.removeAttribute("role")
       }, 3000)
    }
 }
@@ -189,8 +194,10 @@ function showList() {
 }
 
 // The config surface stacks over the list (srr-view-list stays on underneath so
-// the list keeps its state); srr-view-config hides the toolbar + pin-progress and
-// config.open() reveals the panel and (re)renders it.
+// the list keeps its state); srr-view-config hides the toolbar, but the
+// pin-progress toast stays visible — the pin is triggered from here, so its
+// progress/outcome feedback must show — and config.open() reveals + (re)renders
+// the panel.
 function showConfig() {
    view = "config"
    document.body.classList.add("srr-view-config")
@@ -579,15 +586,18 @@ function bumpReaderEdge(side: "prev" | "next") {
 // point both keys at it. step toward a dead edge rings the reader margin bell;
 // cycle is a no-op when the filter rotation has a single entry.
 // stepLeft/stepRight back BOTH the reader keymap and the one-finger swipe
-// (gestures' goPrev/goNext). The config guard here covers the touch path so a
-// swipe over the open settings surface can't navigate the hidden reader; the
-// keyboard path is additionally gated in the document keydown handler.
+// (gestures' goPrev/goNext). They act only on the reader surface: gating on
+// view !== "reader" makes a swipe over the LIST (where prev/next are disabled, so
+// it would otherwise ring the hidden reader's margin bell on a forced reflow) or
+// over the open settings surface a clean no-op, instead of driving the reader
+// stacked behind them. The keyboard never reaches these off the reader — the list
+// branch and the config guard in the keydown handler both return first.
 const stepLeft = () => {
-   if (view === "config") return
+   if (view !== "reader") return
    return el.prev.disabled ? bumpReaderEdge("prev") : guard(() => nav.left())
 }
 const stepRight = () => {
-   if (view === "config") return
+   if (view !== "reader") return
    return el.next.disabled ? bumpReaderEdge("next") : guard(() => nav.right())
 }
 const cycle = (dir: -1 | 1) => () => nav.getFilterEntries().length > 1 && guard(() => nav.cycleFilter(dir))
@@ -729,7 +739,12 @@ async function init() {
    // The SW posts "pins-purged" after a gen-change purge of the PINNED cache —
    // reset the local pin registry so menu labels match the (now empty) cache.
    navigator.serviceWorker?.addEventListener("message", (e: MessageEvent) => {
-      if (e.data?.type === "pins-purged") clearAllPins()
+      if (e.data?.type === "pins-purged") {
+         clearAllPins()
+         // Re-render an open config so the pin row reverts to "Download for
+         // offline" immediately, matching the now-empty PINNED bucket.
+         if (config.isOpen()) config.render()
+      }
    })
 
    window.addEventListener("hashchange", () => void route(location.hash.substring(1)))

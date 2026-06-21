@@ -277,9 +277,12 @@ export function showBackupDialog(onImported?: () => void): void {
    prefsCheckLabel.textContent = "Also import preferences (image proxy, unread-only filter)"
    prefsRow.append(prefsCheck, prefsCheckLabel)
 
-   // Inline error message (hidden until an import fails).
+   // Inline error message (hidden until an import fails). role=alert makes it an
+   // assertive live region: the node is hidden+empty until a failure, so setting
+   // its text and unhiding announces the message to screen readers.
    const errEl = document.createElement("span")
    errEl.className = "srr-backup-import-error"
+   errEl.setAttribute("role", "alert")
    errEl.hidden = true
 
    const importBtn = btn("srr-dialog-btn srr-dialog-primary srr-backup-import-btn", "import backup", "Import", () => {

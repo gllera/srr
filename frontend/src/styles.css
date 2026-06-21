@@ -870,13 +870,14 @@ body:not(.srr-view-list) .srr-open-reader {
    display: none;
 }
 
-/* Config surface owns the screen while open: hide the bottom toolbar and the
-   pin-progress line (srr-view-list stays on underneath, so they'd otherwise show
-   through). The pinned search bar is handled at its own show rule above — its
+/* Config surface owns the screen while open: hide the bottom toolbar (srr-view-list
+   stays on underneath, so it'd otherwise show through). The pin-progress toast is
+   NOT hidden — the offline-pin row lives in config, so its progress/outcome
+   feedback (fixed, z-index above the panel) must stay visible while config is open.
+   The pinned search bar is handled at its own show rule above — its
    :not(.srr-view-config) guard wins the specificity battle the simple hide rule
    here would lose. The list/reader containers are hidden via [hidden] in app.ts. */
-body.srr-view-config .srr-toolbar,
-body.srr-view-config .srr-pin-progress {
+body.srr-view-config .srr-toolbar {
    display: none;
 }
 

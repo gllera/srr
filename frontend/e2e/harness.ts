@@ -40,7 +40,13 @@ export function srrBin(): string {
 // non-zero exit, surfacing stderr so a CLI failure is legible.
 export async function srr(storeDir: string, ...args: string[]): Promise<string> {
    try {
-      const { stdout } = await execFileAsync(srrBin(), ["-o", storeDir, ...args])
+      // feedServer() binds loopback (127.0.0.1), which the production SSRF guard
+      // refuses by default; opt out via the documented flag, exactly as a real
+      // localhost/LAN-feed deployment would (feed add's discovery probe and the
+      // fetch loop both dial the test server).
+      const { stdout } = await execFileAsync(srrBin(), ["-o", storeDir, ...args], {
+         env: { ...process.env, SRR_ALLOW_PRIVATE_FETCH: "1" },
+      })
       return stdout
    } catch (e) {
       const err = e as { stderr?: Buffer | string; stdout?: Buffer | string; message: string }
