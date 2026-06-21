@@ -402,6 +402,11 @@ export function groupFeedsByTag(): GroupResult {
 // idx packs: for a feed/tag scope every idx pack touching the filter is needed
 // (the reader's idx addressing jumps to arbitrary packs). For [ALL] all idx
 // packs are included.
+// Self-hosted asset keys as they appear (relative) in article content:
+// assets/<2hex>/<16hex><ext>. Mirrors the SW's RE_ASSET shape; global so
+// matchAll finds every reference in a data pack's articles.
+const ASSET_REF_RE = /assets\/[0-9a-f]{2}\/[0-9a-f]{16}(?:\.\w+)?/gi
+
 export async function packNamesForFilter(feeds: Map<number, number>): Promise<string[]> {
    if (db.total_art === 0) return []
 
@@ -415,6 +420,17 @@ export async function packNamesForFilter(feeds: Map<number, number>): Promise<st
    names.add(`idx/L${seq}.gz`)
    names.add(`data/L${seq}.gz`)
    names.add(`meta/L${seq}.gz`)
+
+   // The boot/search fast-path summaries, when the reader will actually use them
+   // — distinct write-once files the online reader fetches but the pin used to
+   // omit. Without idx/h<N> a feed/tag offline boot can't take the summary fast
+   // path and falls back to eager-fetch-all (idx packs a feed/tag pin never
+   // cached); without meta/s<N> search can't prune shards, so it's unavailable
+   // offline even for a fully-pinned scope.
+   const hdrs = db.hdrs ?? 0
+   const mp = db.mp ?? 0
+   if (nfIdx > 0 && hdrs === nfIdx) names.add(`idx/h${hdrs}.gz`) // offline reader boot
+   if (mp > 0) names.add(`meta/s${mp}.gz`) // offline search
 
    const isAll = feeds.size === 0
 
@@ -466,6 +482,23 @@ export async function packNamesForFilter(feeds: Map<number, number>): Promise<st
                names.add(metaName)
             }
          }
+      }
+   }
+
+   // Enumerate the self-hosted assets/ images the pinned data packs reference, so
+   // a pinned scope renders images offline (the SW's assetCacheFirst serves them
+   // from the eviction-exempt PINNED bucket). Parse each needed data pack once
+   // and scrape its articles' content for asset keys. For a narrow feed/tag
+   // filter this may include a few co-located non-matching articles' assets —
+   // harmless, since that data pack is pinned anyway and asset keys are
+   // content-addressed. Pinning is an explicit "download for offline" action, so
+   // the extra reads are acceptable.
+   const dataNames = [...names].filter((n) => n.startsWith("data/"))
+   for (const dn of dataNames) {
+      const arts = parseJsonl<IArticle>(await fetchPackBytes(dn, dn === `data/L${seq}.gz`))
+      for (const a of arts) {
+         if (!a.c) continue
+         for (const m of a.c.matchAll(ASSET_REF_RE)) names.add(m[0])
       }
    }
 

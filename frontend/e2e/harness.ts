@@ -46,7 +46,7 @@ export async function srr(storeDir: string, ...args: string[]): Promise<string> 
       const err = e as { stderr?: Buffer | string; stdout?: Buffer | string; message: string }
       const stderr = err.stderr ? String(err.stderr) : ""
       const stdout = err.stdout ? String(err.stdout) : ""
-      throw new Error(`srr ${args.join(" ")} failed:\n${stderr}${stdout}\n${err.message}`)
+      throw new Error(`srr ${args.join(" ")} failed:\n${stderr}${stdout}\n${err.message}`, { cause: e })
    }
 }
 

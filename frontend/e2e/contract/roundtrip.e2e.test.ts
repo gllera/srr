@@ -36,8 +36,12 @@ describe("contract: round-trip", () => {
       await srr(store, "feed", "add", "-t", "Beta", "-u", `${feeds.url}/beta.xml`)
       await srr(store, "art", "fetch")
 
-      alpha.forEach((it, i) => expected.push({ feedId: 0, title: it.title, link: it.link, content: it.content, p: pubUnix(i) }))
-      beta.forEach((it, i) => expected.push({ feedId: 1, title: it.title, link: it.link, content: it.content, p: pubUnix(10 + i) }))
+      alpha.forEach((it, i) =>
+         expected.push({ feedId: 0, title: it.title, link: it.link, content: it.content, p: pubUnix(i) }),
+      )
+      beta.forEach((it, i) =>
+         expected.push({ feedId: 1, title: it.title, link: it.link, content: it.content, p: pubUnix(10 + i) }),
+      )
       expected.sort((a, b) => a.p - b.p)
 
       reader = await mountReader(store)

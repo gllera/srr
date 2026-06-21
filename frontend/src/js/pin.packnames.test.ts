@@ -43,7 +43,13 @@ async function gzip(input: ArrayBuffer | string): Promise<Uint8Array> {
    return new Uint8Array(await new Response(stream).arrayBuffer())
 }
 
-async function mount(db: Partial<IDB>, packs: Record<string, ArrayBuffer> = {}) {
+// A minimal data-pack body (one JSONL article) with NO assets/ refs, so
+// packNamesForFilter's asset-enumeration pass can fetch+parse the data packs it
+// returns without 404ing — and adds no asset names (these tests assert pack-name
+// grammar only). Tests that exercise asset enumeration pass their own content.
+const DATA_NOASSET = '{"f":0,"a":1,"c":"plain text, no assets here"}\n'
+
+async function mount(db: Partial<IDB>, packs: Record<string, ArrayBuffer | string> = {}) {
    const files = new Map<string, Uint8Array>()
    files.set("/db.gz", await gzip(JSON.stringify(db)))
    for (const [path, buf] of Object.entries(packs)) files.set("/" + path, await gzip(buf))
@@ -100,7 +106,7 @@ describe("packNamesForFilter", () => {
          } as unknown as IDB["feeds"],
       }
       const latestIdx = packBuf([{ feedId: 0 }, { feedId: 0 }, { feedId: 0 }], 1, 0)
-      const data = await mount(db, { "idx/L1.gz": latestIdx })
+      const data = await mount(db, { "idx/L1.gz": latestIdx, "data/L1.gz": DATA_NOASSET })
 
       // all feeds = empty Map means [ALL]
       const names = await data.packNamesForFilter(new Map())
@@ -140,6 +146,8 @@ describe("packNamesForFilter", () => {
       const data = await mount(db, {
          "idx/h1.gz": summary,
          "idx/L1.gz": latestIdx,
+         "data/1.gz": DATA_NOASSET,
+         "data/L1.gz": DATA_NOASSET,
       })
 
       const names = await data.packNamesForFilter(new Map())
@@ -181,7 +189,7 @@ describe("packNamesForFilter", () => {
          } as unknown as IDB["feeds"],
       }
       const latestIdx = packBuf([{ feedId: 0 }, { feedId: 1 }, { feedId: 0 }], 1, 0)
-      const data = await mount(db, { "idx/L1.gz": latestIdx })
+      const data = await mount(db, { "idx/L1.gz": latestIdx, "data/L1.gz": DATA_NOASSET })
 
       // Filter for feed 0 only
       const feedsMap = new Map([[0, 0]])
@@ -212,7 +220,7 @@ describe("packNamesForFilter", () => {
          } as unknown as IDB["feeds"],
       }
       const latestIdx = packBuf([{ feedId: 0 }, { feedId: 0 }], 1, 0)
-      const data = await mount(db, { "idx/L2.gz": latestIdx })
+      const data = await mount(db, { "idx/L2.gz": latestIdx, "data/L2.gz": DATA_NOASSET })
 
       const names = await data.packNamesForFilter(new Map())
       for (const n of names) {
@@ -220,5 +228,34 @@ describe("packNamesForFilter", () => {
       }
       expect(names).toContain("idx/L2.gz")
       expect(names).toContain("data/L2.gz")
+   })
+
+   it("includes self-hosted assets/ keys referenced by the pinned data packs", async () => {
+      // A pinned scope must also cache the assets/ images its articles link to,
+      // or they show broken offline. packNamesForFilter parses each pinned data
+      // pack and emits every assets/<2hex>/<16hex> key it finds.
+      const db: Partial<IDB> = {
+         total_art: 1,
+         seq: 1,
+         next_pid: 1,
+         pack_off: 50,
+         mp: 0,
+         mt: 1,
+         feeds: {
+            0: { id: 0, title: "A", total_art: 1, add_idx: 0 },
+         } as unknown as IDB["feeds"],
+      }
+      const latestIdx = packBuf([{ feedId: 0 }], 1, 0)
+      const withAsset =
+         '{"f":0,"a":1,"c":"<p>see <img src=\\"assets/ab/0123456789abcdef.webp\\"> and ' +
+         '<a href=\\"assets/cd/fedcba9876543210.pdf\\">doc</a></p>"}\n'
+      const data = await mount(db, { "idx/L1.gz": latestIdx, "data/L1.gz": withAsset })
+
+      const names = await data.packNamesForFilter(new Map())
+      expect(names).toContain("assets/ab/0123456789abcdef.webp")
+      expect(names).toContain("assets/cd/fedcba9876543210.pdf")
+      // The pack names themselves still pass the SW grammar; assets are validated
+      // separately (RE_ASSET) on the SW side.
+      expect(names).toContain("data/L1.gz")
    })
 })

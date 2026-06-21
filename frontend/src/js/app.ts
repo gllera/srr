@@ -113,10 +113,20 @@ async function pinCurrentFilter(): Promise<void> {
    // Track whether this pin was taken in unread-only mode so the completion
    // message can surface the snapshot caveat (new unread won't auto-update).
    pinIsUnreadSnapshot = nav.isUnreadOnly() && nav.filter.active
-   pinFilter(key, names)
    const { port1, port2 } = new MessageChannel()
    port1.onmessage = (e: MessageEvent<{ type: string; done: number; total: number; cached?: number }>) => {
-      if (e.data?.type === "pin-progress") showPinProgress(e.data.done, e.data.total, e.data.cached)
+      if (e.data?.type !== "pin-progress") return
+      showPinProgress(e.data.done, e.data.total, e.data.cached)
+      // Record the pin in the registry only once the SW confirms it actually
+      // cached something. A fully-failed (offline) pin reports cached === 0 on
+      // completion; recording it then would leave a phantom "Remove offline
+      // copy" entry over bytes that were never saved. Re-render the open config
+      // so the row reflects the true outcome.
+      if (e.data.done >= e.data.total) {
+         if ((e.data.cached ?? 0) > 0) pinFilter(key, names)
+         else unpinFilter(key)
+         if (config.isOpen()) config.render()
+      }
    }
    controller.postMessage({ type: "pin", names }, [port2])
    showPinProgress(0, names.length)
@@ -125,11 +135,18 @@ async function pinCurrentFilter(): Promise<void> {
 function unpinCurrentFilter(): void {
    const controller = navigator.serviceWorker?.controller
    const key = pinKey()
-   // Read the stored names before removing the registry entry, so we can tell
-   // the SW exactly which cache entries to delete.
-   const names = listPins().get(key)?.names ?? []
+   // Read the stored names before removing the registry entry, then subtract any
+   // name still referenced by another pinned scope: the shared latest packs
+   // (idx/L, data/L, meta/L) and any overlapping finalized packs/assets must NOT
+   // be deleted while a different active pin still needs them. Only the names
+   // unique to this scope are dropped from the SW cache.
+   const pins = listPins()
+   const names = pins.get(key)?.names ?? []
+   const stillNeeded = new Set<string>()
+   for (const [k, entry] of pins) if (k !== key) for (const n of entry.names) stillNeeded.add(n)
+   const toDelete = names.filter((n) => !stillNeeded.has(n))
    unpinFilter(key)
-   if (controller) controller.postMessage({ type: "unpin", names })
+   if (controller) controller.postMessage({ type: "unpin", names: toDelete })
    // Re-render the open config surface so the pin row flips to "Download for
    // offline" now that the cached copy is gone.
    if (config.isOpen()) config.render()
@@ -526,6 +543,10 @@ function toggleUnseenOnly() {
 // Two-finger vertical swipe = step the filter. In the reader, cycle to the next
 // filter's article; on the list, re-filter the list to the next entry.
 function onCycle(dir: number) {
+   // The two-finger cycle gesture must not drive the reader that sits hidden
+   // behind the open config surface (same input-leak class as the keyboard and
+   // one-finger-swipe guards).
+   if (view === "config") return
    if (nav.getFilterEntries().length <= 1) return
    // cycleToken steps relative to cycleOriginKey (a single tagged-feed filter
    // cycles by its tag), so the list and the reader share one rotation.
@@ -557,8 +578,18 @@ function bumpReaderEdge(side: "prev" | "next") {
 // Each step/cycle key has an arrow + letter alias; define the action once and
 // point both keys at it. step toward a dead edge rings the reader margin bell;
 // cycle is a no-op when the filter rotation has a single entry.
-const stepLeft = () => (el.prev.disabled ? bumpReaderEdge("prev") : guard(() => nav.left()))
-const stepRight = () => (el.next.disabled ? bumpReaderEdge("next") : guard(() => nav.right()))
+// stepLeft/stepRight back BOTH the reader keymap and the one-finger swipe
+// (gestures' goPrev/goNext). The config guard here covers the touch path so a
+// swipe over the open settings surface can't navigate the hidden reader; the
+// keyboard path is additionally gated in the document keydown handler.
+const stepLeft = () => {
+   if (view === "config") return
+   return el.prev.disabled ? bumpReaderEdge("prev") : guard(() => nav.left())
+}
+const stepRight = () => {
+   if (view === "config") return
+   return el.next.disabled ? bumpReaderEdge("next") : guard(() => nav.right())
+}
 const cycle = (dir: -1 | 1) => () => nav.getFilterEntries().length > 1 && guard(() => nav.cycleFilter(dir))
 const cyclePrev = cycle(-1)
 const cycleNext = cycle(1)
@@ -752,6 +783,11 @@ async function init() {
          }
          return
       }
+      // The settings (config) surface stacks over a still-mounted reader; without
+      // this guard the reader keymap (arrows/letters, cycle, save, open-link)
+      // would drive that hidden reader and even switch surfaces from behind the
+      // panel. Escape is handled above (closeConfig), so config keeps its own UI.
+      if (view === "config") return
       const action = KEY_ACTIONS[e.key]
       if (action) {
          e.preventDefault()

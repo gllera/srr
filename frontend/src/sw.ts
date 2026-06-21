@@ -37,6 +37,7 @@
 // off the network, exactly as before. Self-contained: no SRR_CDN_URL, so it works
 // under any cdn-url prefix.
 import { LATEST_KEEP, PACK_SERIES_KINDS, type IDBWire } from "./js/format.gen"
+import { parsePackName, RE_ASSET, RE_DB, RE_SHELL_HASHED } from "./js/sw-grammar"
 
 const sw = self as unknown as ServiceWorkerGlobalScope
 
@@ -67,29 +68,10 @@ const KEEP = new Set([ASSETS, PACKS, SHELL, META, PINNED])
 // a sibling deployment sharing the origin.
 const SCOPE = new URL(sw.registration.scope).pathname
 
-// Matched anywhere in the path so they hold whatever prefix the cdn-url adds.
-const RE_ASSET = /\/assets\/[0-9a-f]{2}\/[0-9a-f]{16}(?:\.\w+)?$/i
-// The one pack-name grammar (parsed by parsePackName below), built from the
-// generated PACK_SERIES_KINDS table: write-once names only — finalized numeric
-// stems, L<seq> latest generations, and the idx/h<N> / meta/s<N> summaries
-// (each published before the db.gz that names it). The regex captures any kind
-// letter on any series; parsePackName then rejects kinds another series owns.
-const PACK_KINDS = [...new Set(Object.values(PACK_SERIES_KINDS).join(""))].join("") // "Lhs"
-const RE_PACK = new RegExp(`/packs/(${Object.keys(PACK_SERIES_KINDS).join("|")})/([${PACK_KINDS}]?)(\\d+)\\.gz$`)
-const RE_DB = /\/packs\/db\.gz$/ // the store's only mutable key
-const RE_SHELL_HASHED = /\.[0-9a-f]{8,}\.(?:js|css)$/i // Parcel content-hashed bundles
-
-// parsePackName decodes a pack path: the series, the stem kind ("" finalized,
-// "l" latest generation, "h" idx header summary, "s" search bloom summary —
-// lowercased for keying), and the numeric stem. Strict per-series like the
-// backend store's packKeyRe: a kind letter another series owns (data/h3.gz)
-// is not a pack name. The fetch route, the cache bound, and the manifest
-// prunes all consume this one grammar.
-function parsePackName(path: string): { series: string; kind: string; n: number } | null {
-   const m = RE_PACK.exec(path)
-   if (!m || !PACK_SERIES_KINDS[m[1]].includes(m[2])) return null
-   return { series: m[1], kind: m[2].toLowerCase(), n: Number(m[3]) }
-}
+// The pack-name grammar (RE_ASSET / RE_PACK / RE_DB / RE_SHELL_HASHED +
+// parsePackName) lives in ./js/sw-grammar so it can be unit-tested without the
+// worker global scope. The fetch route, the cache bound, and the manifest
+// prunes all consume that one grammar.
 
 sw.addEventListener("install", () => {
    // A fresh worker is useful immediately; nothing to pre-cache.
@@ -106,12 +88,26 @@ sw.addEventListener("activate", (event) => {
    )
 })
 
+// A pinnable name is either a write-once pack name (parsePackName) or a
+// content-hash asset key (RE_ASSET): the page's packNamesForFilter enumerates
+// both so a pinned scope renders its self-hosted images offline. The /packs/
+// prefix mirrors what the fetch handler sees after the cdn-url base. Validating
+// here keeps the cache-key surface closed — no arbitrary injection.
+function isPinnableName(n: unknown): n is string {
+   if (typeof n !== "string") return false
+   const p = `/packs/${n}`
+   return parsePackName(p) !== null || RE_ASSET.test(p)
+}
+
 // Message handler — protocol between the page and the SW:
 //
 //   { type: "pin", names: string[], port?: MessagePort }
 //     Caches each name into the eviction-exempt PINNED bucket. Names MUST pass
-//     parsePackName validation (series/kind/n) — anything else is silently
-//     dropped (no arbitrary cache-key injection). Each name is fetched with
+//     isPinnableName validation (a write-once pack name OR a content-hash asset
+//     key) — anything else is silently dropped (no arbitrary cache-key
+//     injection). Asset keys let a pinned scope render its self-hosted images
+//     offline; packCacheFirst/assetCacheFirst both consult PINNED first. Each
+//     name is fetched with
 //     cache:"no-cache" so fresh bytes are always written (the SW's own
 //     cache-first could serve a stale copy under a reused name before a gen
 //     bump — using no-cache here means the pinned entry is always fresh at pin
@@ -137,12 +133,8 @@ sw.addEventListener("message", (event) => {
 
    if (msg.type === "pin") {
       const rawNames = Array.isArray(msg.names) ? msg.names : []
-      // Validate every name via parsePackName — reject non-pack paths.
-      const validNames = rawNames.filter((n) => {
-         if (typeof n !== "string") return false
-         // Build a fake path with the /packs/ prefix that parsePackName expects.
-         return parsePackName(`/packs/${n}`) !== null
-      })
+      // Validate every name as a pinnable pack OR asset key — reject anything else.
+      const validNames = rawNames.filter(isPinnableName)
       const total = validNames.length
       let done = 0
       event.waitUntil(
@@ -189,12 +181,8 @@ sw.addEventListener("message", (event) => {
 
    if (msg.type === "unpin") {
       const rawNames = Array.isArray(msg.names) ? msg.names : []
-      // Validate every name via parsePackName — reject non-pack paths.
-      const validNames = rawNames.filter((n) => {
-         if (typeof n !== "string") return false
-         // Build a fake path with the /packs/ prefix that parsePackName expects.
-         return parsePackName(`/packs/${n}`) !== null
-      })
+      // Validate every name as a pinnable pack OR asset key — reject anything else.
+      const validNames = rawNames.filter(isPinnableName)
       event.waitUntil(
          (async () => {
             const pinned = await caches.open(PINNED)
@@ -235,6 +223,18 @@ async function packCacheFirst(req: Request): Promise<Response> {
    const pinnedHit = await pinned.match(req)
    if (pinnedHit) return pinnedHit
    return cacheFirst(req, PACKS, true)
+}
+
+// Asset-specific cache-first: check the eviction-exempt PINNED bucket first — a
+// pinned filter scope caches the assets/ images its articles reference there
+// (via the "pin" message) — then fall through to the rolling ASSETS bucket.
+// Mirrors packCacheFirst so a pinned image survives ASSETS eviction and stays
+// readable offline. assets are content-hashed, so a hit can never be stale.
+async function assetCacheFirst(req: Request): Promise<Response> {
+   const pinned = await caches.open(PINNED)
+   const pinnedHit = await pinned.match(req)
+   if (pinnedHit) return pinnedHit
+   return cacheFirst(req, ASSETS)
 }
 
 // Prefer the network (refreshing the cache); fall back to cache only when the
@@ -433,7 +433,7 @@ sw.addEventListener("fetch", (event) => {
    }
 
    const path = url.pathname
-   if (RE_ASSET.test(path)) event.respondWith(cacheFirst(req, ASSETS))
+   if (RE_ASSET.test(path)) event.respondWith(assetCacheFirst(req))
    else if (RE_DB.test(path)) event.respondWith(dbNetworkFirst(req, event))
    else if (parsePackName(path)) event.respondWith(packCacheFirst(req))
    else if (RE_SHELL_HASHED.test(path)) event.respondWith(cacheFirst(req, SHELL))

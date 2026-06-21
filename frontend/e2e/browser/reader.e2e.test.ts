@@ -750,7 +750,7 @@ describe("browser: real SPA over real packs", () => {
          // Send a pin message with two valid pack names. The SW should fetch them
          // into srr-pinned-v1. Use real pack names that exist in the test store
          // (the store has total_art=6, seq=1, so idx/L1.gz and data/L1.gz exist).
-         const result = await page.evaluate(async (base) => {
+         const result = await page.evaluate(async () => {
             const sw = navigator.serviceWorker.controller!
             const { port1, port2 } = new MessageChannel()
             const progress: { done: number; total: number }[] = []
@@ -767,7 +767,7 @@ describe("browser: real SPA over real packs", () => {
             const pinned = await caches.open("srr-pinned-v1")
             const keys = (await pinned.keys()).map((k) => new URL(k.url).pathname)
             return { keys, progress }
-         }, baseUrl)
+         })
 
          // Both packs should be in srr-pinned-v1.
          expect(result.keys.some((k) => k.endsWith("/packs/idx/L1.gz"))).toBe(true)
