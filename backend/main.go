@@ -25,14 +25,14 @@ var globals *Globals
 const (
 	defaultPackSize     = 200
 	defaultMaxFeedSize  = 5000
-	defaultMaxMediaSize = 25000
+	defaultMaxAssetSize = 25000
 )
 
 type Globals struct {
 	Workers      int    `short:"w" default:"${nproc}" env:"SRR_WORKERS"       help:"Number of concurrent downloads."`
 	PackSize     int    `short:"s" default:"${packSize}"      env:"SRR_PACK_SIZE"     help:"Target pack size in KB."`
 	MaxFeedSize  int    `short:"m" default:"${maxFeedSize}"     env:"SRR_MAX_FEED_SIZE" help:"Max feed download size in KB."`
-	MaxMediaSize int    `          default:"${maxMediaSize}"    env:"SRR_MAX_MEDIA_SIZE" help:"Max self-hosted media object size in KB."`
+	MaxAssetSize int    `          default:"${maxAssetSize}"    env:"SRR_MAX_ASSET_SIZE" help:"Max self-hosted asset object size in KB."`
 	AssetFilter  string `                             env:"SRR_ASSET_FILTER" help:"Command run on every self-hosted asset just before upload to process its bytes, e.g. transcode media (the cache file path is appended as the final arg; processed bytes are read from stdout; non-zero exit or empty output keeps the original). Skipped when the source is already uploaded. Empty disables. E.g. \"webify -m 720\"."`
 	CacheDir     string `                             env:"SRR_CACHE_DIR"     help:"Local download cache for external ingest media (default $XDG_CACHE_HOME/srr)."`
 	Store        string `short:"o" default:"packs"    env:"SRR_STORE"         help:"Storage destination path."`
@@ -168,7 +168,7 @@ func main() {
 			"nproc":        fmt.Sprint(runtime.NumCPU()),
 			"packSize":     fmt.Sprint(defaultPackSize),
 			"maxFeedSize":  fmt.Sprint(defaultMaxFeedSize),
-			"maxMediaSize": fmt.Sprint(defaultMaxMediaSize),
+			"maxAssetSize": fmt.Sprint(defaultMaxAssetSize),
 		},
 		kong.Name("srr"),
 		kong.Description("Static RSS Reader backend."),
@@ -204,8 +204,8 @@ func main() {
 	// Floor like the other size globals: a value <= 0 would make the asset
 	// fetcher's maxBytes <= 0, which disables every size-cap guard and lets an
 	// attacker-controlled response stream unbounded into memory/the store.
-	if globals.MaxMediaSize < 1 {
-		globals.MaxMediaSize = defaultMaxMediaSize
+	if globals.MaxAssetSize < 1 {
+		globals.MaxAssetSize = defaultMaxAssetSize
 	}
 
 	if globals.Workers < 1 {

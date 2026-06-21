@@ -69,7 +69,7 @@ func newAssetFetcher(be store.Backend, maxKB int, filterCmd string) *assetFetche
 //
 // Guards (localname comes from item content, which may be attacker-influenced):
 // the resolved path must stay within cacheDir (no "..", no symlinked escape),
-// must be a regular file, and the stored object must not exceed the media size
+// must be a regular file, and the stored object must not exceed the asset size
 // cap.
 func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname string) (string, error) {
 	if localname == "" {
