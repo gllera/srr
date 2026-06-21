@@ -1,4 +1,4 @@
-.PHONY: verify verify-fe verify-be lint-fe format-check-fe format-fe test-fe build-fe dev-fe vet-be lint-be format-check-be format-be build-be test-be test-contract test-browser test-stress test-e2e generate generate-check release clean design-fixture design
+.PHONY: verify verify-fe verify-be lint-fe format-check-fe format-fe test-fe build-fe dev-fe vet-be lint-be format-check-be format-be build-be test-be test-contract test-browser test-stress test-e2e generate generate-check release clean design-fixture design design-shots
 
 SHELL := /bin/bash -e
 
@@ -82,6 +82,7 @@ build-be: | dist
 	cd backend && go build -o ../dist/srrb .
 
 release: verify-be | dist
+	@[ -n "$(VERSION)" ] || { echo 'VERSION= is required for release (e.g. make release VERSION=v1.2.3)' >&2; exit 1; }
 	@cd backend; for p in $(PLATFORMS); do \
 	  os=$${p%/*}; arch=$${p#*/}; ext=; \
 	  [ $$os = windows ] && ext=.exe; \

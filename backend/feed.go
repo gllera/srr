@@ -50,7 +50,8 @@ type Feed struct {
 	// Watermark is the max published unix-second ever seen across fetches.
 	Watermark int64 `json:"wm,omitempty"`
 	// BoundaryGUIDs is the GUIDs from the most recent non-empty fetch whose
-	// pub equals Watermark (the dated boundary) or equals 0 (dateless).
+	// pub is >= Watermark (the dated boundary, incl. re-dated items bumped above
+	// the unraised watermark) or == 0 (dateless).
 	// Repopulated each non-empty fetch from the current response so its size
 	// stays bounded by what the publisher currently exposes, and hard-capped
 	// at maxBoundaryGUIDs (over-cap items are skipped, not ingested); a 200 OK

@@ -11,10 +11,17 @@ permissions:
   pages: write
   id-token: write
 
+# Serialize Pages deploys so overlapping tag pushes don't race deploy-pages;
+# let an in-flight deploy finish rather than cancelling it.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
 jobs:
   release:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       VERSION: ${{ github.ref_name }}
     steps:
@@ -29,6 +36,7 @@ jobs:
 
   pages:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: ci
     env:
       SRR_CONFIG_INLINE: ${{ secrets.SRR_CONFIG_INLINE }}

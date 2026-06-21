@@ -75,9 +75,9 @@ function showPinProgress(done: number, total: number, cached?: number): void {
    } else {
       text = `Downloading ${done} / ${total}…`
    }
-   // A dedicated non-live node: NOT the aria-live freshness banner, so per-pack
-   // ticks don't flood screen readers and a concurrent refreshStatus (which only
-   // writes el.status) can't clobber the progress/completion message.
+   // A dedicated non-live node (.srr-pin-progress), separate from config.ts's
+   // role=status freshness line (.srr-config-status), so per-pack ticks don't
+   // flood screen readers or clobber that status message.
    el.pinProgress.textContent = text
    el.pinProgress.hidden = false
    if (finished) {
