@@ -1,4 +1,4 @@
-.PHONY: verify verify-fe verify-be lint-fe format-check-fe format-fe test-fe build-fe dev-fe vet-be lint-be format-check-be format-be build-be test-be test-contract test-browser test-stress test-e2e generate generate-check release clean design-fixture design design-shots
+.PHONY: verify verify-fe verify-be lint-fe format-check-fe format-fe test-fe build-fe smoke-fe dev-fe vet-be lint-be format-check-be format-be build-be test-be test-contract test-browser test-stress test-e2e generate generate-check release clean design-fixture design design-shots
 
 SHELL := /bin/bash -e
 
@@ -7,7 +7,10 @@ PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 win
 # verify includes the fast jsdom e2e contract layer; the heavier headless-browser
 # layer (test-browser) is opt-in via test-e2e.
 verify: verify-fe verify-be test-contract
-verify-fe: lint-fe format-check-fe test-fe build-fe
+# smoke-fe runs the built bundle through a fast, Chrome-free boot check — it
+# fails if Parcel dropped a build-time define, the regression that shipped a
+# bundle which threw on boot while every other gate stayed green.
+verify-fe: lint-fe format-check-fe test-fe build-fe smoke-fe
 # verify-be mirrors verify-fe's gates: vet + gofmt check + build + test +
 # contract freshness. lint-be (golangci-lint) is a separate opt-in target (not
 # yet gate-clean), like nothing in verify-fe blocks on it either.
@@ -57,8 +60,12 @@ design-shots: frontend/node_modules/.package-lock.json
 frontend/node_modules/.package-lock.json: frontend/package-lock.json
 	cd frontend && npm ci
 
-lint-fe format-check-fe format-fe test-fe build-fe dev-fe: frontend/node_modules/.package-lock.json
+lint-fe format-check-fe format-fe test-fe build-fe smoke-fe dev-fe: frontend/node_modules/.package-lock.json
 	cd frontend && npm run $(@:-fe=)
+
+# The boot smoke reads the build output, so it must run after build-fe (the
+# order-only prereq holds even under parallel make).
+smoke-fe: build-fe
 
 vet-be test-be:
 	cd backend && go $(@:-be=) ./...

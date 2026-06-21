@@ -16,15 +16,16 @@
     "serve": "SRR_CDN_URL=${SRR_CDN_URL:-http://localhost:3000} parcel serve src/index.html src/design.html --no-cache",
     "servep": "npx serve --cors -l 3000 \"$(node parcel/resolve-store.js)\"",
     "build": "parcel build --no-cache --no-source-maps",
+    "smoke": "node e2e/boot-smoke.mjs",
     "test": "vitest run",
     "test-contract": "vitest run --config vitest.contract.config.ts",
     "test-browser": "vitest run --config vitest.browser.config.ts",
     "test-stress": "vitest run --config vitest.stress.config.ts",
     "gen-design": "vitest run --config vitest.design.config.ts",
     "shoot-design": "vitest run --config vitest.design-shots.config.ts",
-    "lint": "eslint src/js",
-    "format": "prettier --write src",
-    "format-check": "prettier --check src"
+    "lint": "eslint src/js e2e",
+    "format": "prettier --write src \"e2e/**/*.{ts,mjs}\" parcel \"vitest*.ts\" eslint.config.mjs",
+    "format-check": "prettier --check src \"e2e/**/*.{ts,mjs}\" parcel \"vitest*.ts\" eslint.config.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

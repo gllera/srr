@@ -18,8 +18,22 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Gate every release artifact on a green `make verify` (lint + format + tests +
+  # build + the boot smoke + the e2e contract layer). Without this, a tag push
+  # publishes binaries and deploys the frontend to Pages without the build ever
+  # passing its own gates — exactly how a frontend that fails its tests (or a
+  # bundle that doesn't boot) could reach production.
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+    - uses: actions/checkout@v6
+    - uses: ./.github/actions/setup-toolchain
+    - run: make verify
+
   release:
     if: github.event_name == 'push'
+    needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -35,6 +49,7 @@ jobs:
         files: dist/srr-*
 
   pages:
+    needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: ci
