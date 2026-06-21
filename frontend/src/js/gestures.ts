@@ -27,7 +27,11 @@ export function setupGestures(deps: GestureDeps): Gestures {
    let touchStartX = 0
    let touchStartY = 0
    let twoFingerStartY = 0
+   let twoFingerStartDist = 0
    let twoFingerDy = 0
+   // Set once a two-finger gesture is recognised as a pinch-zoom rather than a
+   // vertical pan, so the move handler stops claiming it and touchend doesn't cycle.
+   let pinch = false
    // The tracked gesture, if any. A swipe is only evaluated when it began as
    // a single-finger gesture ("single"), so a 3+-finger tap/lift ("none")
    // can't fire a spurious prev/next off a stale touchStartX.
@@ -45,7 +49,12 @@ export function setupGestures(deps: GestureDeps): Gestures {
          if (e.touches.length === 2) {
             mode = "two"
             twoFingerStartY = (e.touches[0].clientY + e.touches[1].clientY) / 2
+            twoFingerStartDist = Math.hypot(
+               e.touches[0].clientX - e.touches[1].clientX,
+               e.touches[0].clientY - e.touches[1].clientY,
+            )
             twoFingerDy = 0
+            pinch = false
          } else if (e.touches.length === 1) {
             trackSingle(e.touches[0])
          } else {
@@ -59,6 +68,18 @@ export function setupGestures(deps: GestureDeps): Gestures {
       "touchmove",
       (e) => {
          if (mode === "two" && e.touches.length === 2) {
+            // A pinch-zoom is also a two-finger move, but it changes the
+            // inter-finger distance; the filter-cycle pan keeps the fingers
+            // parallel (distance ~constant) and moves their centroid. Once the
+            // distance shifts past a threshold, treat it as a pinch: stop claiming
+            // the gesture so the browser can zoom (accessibility — the viewport
+            // meta intentionally allows zoom), and don't cycle on touchend.
+            const dist = Math.hypot(
+               e.touches[0].clientX - e.touches[1].clientX,
+               e.touches[0].clientY - e.touches[1].clientY,
+            )
+            if (Math.abs(dist - twoFingerStartDist) > 25) pinch = true
+            if (pinch) return
             e.preventDefault()
             twoFingerDy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - twoFingerStartY
          }
@@ -71,7 +92,7 @@ export function setupGestures(deps: GestureDeps): Gestures {
          if (mode === "two") {
             if (e.touches.length === 0) {
                mode = "none"
-               if (Math.abs(twoFingerDy) >= 50) deps.onCycle(twoFingerDy < 0 ? -1 : 1)
+               if (!pinch && Math.abs(twoFingerDy) >= 50) deps.onCycle(twoFingerDy < 0 ? -1 : 1)
             } else if (e.touches.length === 1) {
                // Fingers lifted one at a time: the two-finger gesture is over.
                // Re-seed the remaining finger as a fresh single-finger swipe

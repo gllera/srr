@@ -43,16 +43,14 @@ func TestDiscoverFeedLinkAtomType(t *testing.T) {
 	}
 }
 
-func TestDiscoverFeedLinkJSONFeedType(t *testing.T) {
+func TestDiscoverFeedLinkJSONFeedIgnored(t *testing.T) {
+	// application/feed+json is NOT discoverable: the #feed parser reads only XML
+	// feeds, so discovering a JSON-only feed would repoint to an unparseable URL.
 	html := `<html><head>
 <link rel="alternate" type="application/feed+json" href="https://example.com/feed.json">
 </head></html>`
-	got, ok := discoverFeedLink([]byte(html), "https://example.com/")
-	if !ok {
-		t.Fatal("expected to find json feed link, got false")
-	}
-	if got != "https://example.com/feed.json" {
-		t.Errorf("got %q, want %q", got, "https://example.com/feed.json")
+	if _, ok := discoverFeedLink([]byte(html), "https://example.com/"); ok {
+		t.Error("expected false: application/feed+json is not a parseable feed type")
 	}
 }
 

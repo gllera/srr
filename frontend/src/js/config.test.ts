@@ -37,6 +37,7 @@ vi.mock("./fmt", () => ({
    formatDate: (t: number) => `D${t}`,
    timeAgoProse: (t: number) => `ago${t}`,
    isStale: vi.fn(() => false),
+   URL_DENY: /^\s*(?:javascript|data|vbscript|file)\s*:/i,
 }))
 import { isStale } from "./fmt"
 

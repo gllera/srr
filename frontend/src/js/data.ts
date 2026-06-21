@@ -61,6 +61,11 @@ function assertPackOk(res: Response, isLatest: boolean): void {
 
 export async function init() {
    const res = await dbFetch
+   // A missing/erroring store (404 on a fresh/empty store or a misconfigured CDN
+   // URL, or a 5xx) would otherwise try to gunzip an HTML error body and reject
+   // with a cryptic "incorrect header check"; surface the real status instead
+   // (mirrors assertPackOk for the pack fetches).
+   if (!res.ok) throw new Error(`db.gz fetch failed: ${res.status} ${res.url}`)
    const raw: IDB = await new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).json()
    raw.feeds ??= {}
    raw.seq ??= 0 // backend omitempty: absent for an empty store

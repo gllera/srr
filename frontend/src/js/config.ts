@@ -9,7 +9,7 @@
 // is the former toolbar feed-menu, ported to a static in-flow panel; it reuses the
 // same class names so the row styles (now under .srr-config-filter) carry over.
 import * as data from "./data"
-import { formatDate, isStale, srcColorIndex, timeAgoProse } from "./fmt"
+import { formatDate, isStale, srcColorIndex, timeAgoProse, URL_DENY } from "./fmt"
 import * as nav from "./nav"
 
 export type ConfigHooks = {
@@ -451,7 +451,9 @@ function buildFeedInfo(ch: IFeed): DocumentFragment {
 
    const src = infoSection("Source")
    const a = document.createElement("a")
-   a.href = ch.url
+   // Defense-in-depth: only link out when the URL's scheme is allowed (mirrors the
+   // reader's article-link guard in app.ts); a denied scheme renders as plain text.
+   if (!URL_DENY.test(ch.url)) a.href = ch.url
    a.textContent = ch.url
    a.className = "srr-info-link"
    a.rel = "noreferrer"
