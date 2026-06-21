@@ -32,8 +32,8 @@ type S3Config struct {
 	Endpoint        string `yaml:"endpoint"`
 	Profile         string `yaml:"profile"`
 	AccessKeyID     string `yaml:"access-key-id"`
-	SecretAccessKey string `yaml:"secret-access-key"`
-	SessionToken    string `yaml:"session-token"`
+	SecretAccessKey string `yaml:"secret-access-key" secret:"true"`
+	SessionToken    string `yaml:"session-token" secret:"true"`
 }
 
 func init() {

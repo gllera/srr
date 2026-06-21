@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"gopkg.in/yaml.v3"
 )
@@ -189,6 +190,18 @@ func loadEnv(scheme string, cfg any) error {
 // Configs returns the registered backend config structs keyed by scheme.
 func Configs() map[string]any {
 	return configs
+}
+
+// tmpWriteCounter makes atomic-write temp names unique across concurrent writers
+// of the SAME key. The asset uploader writes one content-hash key from several
+// fetch workers at once; a fixed "<file>.tmp" would have them share — and
+// corrupt — one temp file, spuriously failing a whole feed fetch.
+var tmpWriteCounter atomic.Uint64
+
+// uniqueTempName returns a collision-free temp path for an atomic write of file
+// (temp-then-rename), unique per call even for concurrent writers of the same key.
+func uniqueTempName(file string) string {
+	return fmt.Sprintf("%s.tmp.%d.%d", file, os.Getpid(), tmpWriteCounter.Add(1))
 }
 
 func Open(ctx context.Context, outputPath string) (Backend, error) {
