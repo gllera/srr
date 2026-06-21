@@ -682,7 +682,7 @@ func TestFetchVitals(t *testing.T) {
 
 	t.Run("not_modified_304_sets_lastok_resets_failstreak_leaves_lastnew", func(t *testing.T) {
 		// Server responds 304 when the conditional header (If-None-Match) is
-		// present, unconditionally otherwise — ensures the real #rss path fires
+		// present, unconditionally otherwise — ensures the real #feed path fires
 		// the Not-Modified branch.
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Header.Get("If-None-Match") != "" {
@@ -750,7 +750,7 @@ func TestFetchDroppedItemNotInStore(t *testing.T) {
 	}
 
 	// The dropped item's GUID must be in BoundaryGUIDs so it won't be re-evaluated.
-	// We use the FNV-32a hash that the ingest/rss.go `hash` function uses.
+	// We use the FNV-32a hash that the ingest/feed.go `hash` function uses.
 	// Rather than recomputing the hash here, check that a second fetch sees 0 new items
 	// (which proves the GUID was retained in the boundary set).
 	ch.ETag, ch.LastModified = "", ""

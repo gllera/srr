@@ -70,7 +70,7 @@ type Feed struct {
 	Tag     string   `json:"tag,omitempty"`
 	Pipe    []string `json:"pipe,omitempty"`
 	// Ingest is the feed-level extraction strategy. Empty falls through
-	// to the db.gz root Ingest → built-in "#rss".
+	// to the db.gz root Ingest → built-in "#feed".
 	Ingest   string `json:"ingest,omitempty"`
 	TotalArt int    `json:"total_art"`
 	AddIdx   int    `json:"add_idx"`
@@ -134,7 +134,7 @@ func (c *Feed) Fetch(ctx context.Context, run *fetchRun, buf []byte, processor *
 
 // fetchURL routes the feed's single URL through the selected FetchFunc so
 // the dedup / watermark / pipeline path stays uniform across the built-in
-// (#rss) and external ingest strategies. ingestName is resolved once by
+// (#feed) and external ingest strategies. ingestName is resolved once by
 // Feed.Fetch before this is called.
 func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processor *mod.Module, pipeline []string, ingestName string) ([]*Item, error) {
 	slog.Debug("downloading feed", "url", c.URL, "feed", c)
@@ -155,7 +155,7 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 		return nil, fmt.Errorf("ingest %q: %w", ingestName, err)
 	}
 
-	// Auto-discovery repoint: the #rss fetcher found a feed URL embedded in an
+	// Auto-discovery repoint: the #feed fetcher found a feed URL embedded in an
 	// HTML page and fetched from that URL instead. Persist the repoint so the
 	// next fetch goes directly to the feed without rediscovering. We do NOT call
 	// setFeedURL here — that would reset dedup/etag/vitals. This is the same
@@ -346,7 +346,7 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 		// wedges the feed until it is fixed.
 		//
 		// RewriteAttrs handles the marker convention: it skips content with no
-		// marker-shaped attribute (the common case, as built-in #rss feeds never
+		// marker-shaped attribute (the common case, as built-in #feed feeds never
 		// emit markers) and hands fn the path with the "#" already stripped.
 		i.Content, err = mod.RewriteAttrs(i.Content, func(local string) (string, bool, error) {
 			key, err := run.assets.UploadCacheRef(ctx, run.cacheDir, local)

@@ -1,5 +1,5 @@
 // Package ingest abstracts the I/O+parse step that turns a source URL
-// into a slice of mod.RawItems. The built-in fetcher (#rss) registers
+// into a slice of mod.RawItems. The built-in fetcher (#feed) registers
 // itself at init(); any other name is treated as a shell command per the
 // external-fetcher wire protocol (see Fetcher.Fetch).
 //
@@ -55,7 +55,7 @@ type Result struct {
 	ETag         string         `json:"etag,omitempty"`
 	LastModified string         `json:"last_modified,omitempty"`
 	Items        []*mod.RawItem `json:"items,omitempty"`
-	// ResolvedURL is set when the #rss fetcher auto-discovered a feed URL
+	// ResolvedURL is set when the #feed fetcher auto-discovered a feed URL
 	// from an HTML page and refetched from that URL. The caller should persist
 	// ch.URL = ResolvedURL to avoid re-discovering on every subsequent fetch.
 	// omitempty keeps the external-fetcher wire protocol unaffected.
@@ -106,15 +106,20 @@ func Register(name string, fn FetchFunc) {
 	registry[name] = fn
 }
 
+// Builtin is the token of the zero-config built-in fetcher (registered as
+// "feed" → "#feed"). It is the final fallback of Select and the value callers
+// compare against to decide whether subscribe-time discovery applies.
+const Builtin = "#feed"
+
 // Select applies the caller's precedence rule: feed > global default
-// > built-in "#rss". Empty strings fall through.
+// > built-in "#feed". Empty strings fall through.
 func Select(feedFetcher, globalFetcher string) string {
 	for _, name := range []string{feedFetcher, globalFetcher} {
 		if name != "" {
 			return name
 		}
 	}
-	return "#rss"
+	return Builtin
 }
 
 // Fetcher is the dispatcher. New() builds one over the registered built-ins;

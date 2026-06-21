@@ -21,7 +21,7 @@ func TestIngestCmdSetAndClear(t *testing.T) {
 	}
 	db.Close(context.Background())
 
-	// "" arg → clear; field falls back to built-in "#rss" via ingest.Select.
+	// "" arg → clear; field falls back to built-in "#feed" via ingest.Select.
 	if err := (&IngestCmd{Ingest: strPtr("")}).Run(); err != nil {
 		t.Fatalf("clear: %v", err)
 	}

@@ -12,11 +12,29 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"srrb/ingest"
 )
 
 // stdout is the destination for printFormatted. Tests substitute this to
 // capture command output without spawning a subprocess.
 var stdout io.Writer = os.Stdout
+
+// resolveFeedURL resolves a subscription URL to its canonical feed URL via the
+// built-in #feed fetcher's auto-discovery (a homepage URL is repointed to its
+// <link rel=alternate> feed; an unresolvable URL returns an error so callers
+// hard-fail). A package var so tests stub it offline. Only invoked when the
+// feed's effective ingest strategy is the built-in #feed (see resolvesFeed).
+var resolveFeedURL = func(ctx context.Context, rawURL string) (string, error) {
+	return ingest.Resolve(ctx, newFetchClient(1), rawURL, globals.MaxFeedSize*(1<<10))
+}
+
+// resolvesFeed reports whether subscribe-time discovery applies: only when the
+// feed's effective ingest strategy is the built-in #feed. External ingest
+// strategies own their own (non-HTTP-feed) source and must be stored as-is.
+func resolvesFeed(feedIngest, rootIngest string) bool {
+	return ingest.Select(feedIngest, rootIngest) == ingest.Builtin
+}
 
 func printFormatted(format string, v any) error {
 	var output []byte
@@ -76,7 +94,7 @@ type AddCmd struct {
 	URL     *string  `short:"u" required:""              help:"Feed RSS url."`
 	Tag     *string  `short:"g" optional:""              help:"Feed tag."`
 	Parsers []string `short:"p" sep:"none" optional:"" help:"Feed pipe step; repeat -p per step (not comma-separated). Empty (\"\") for default."`
-	Ingest  *string  `short:"i" optional:""              help:"Ingest strategy: built-in ('#rss') or shell command."`
+	Ingest  *string  `short:"i" optional:""              help:"Ingest strategy: built-in ('#feed') or shell command."`
 }
 
 func (o *AddCmd) Run() error {
@@ -98,6 +116,13 @@ func (o *AddCmd) Run() error {
 		v.Ingest = *o.Ingest
 	}
 	return withDB(true, func(ctx context.Context, db *DB) error {
+		if resolvesFeed(v.Ingest, db.core.Ingest) {
+			resolved, err := resolveFeedURL(ctx, v.URL)
+			if err != nil {
+				return fmt.Errorf("resolve feed %q: %w", v.URL, err)
+			}
+			v.URL = resolved
+		}
 		return applyViews(ctx, db, []*feedView{v})
 	})
 }
@@ -169,7 +194,18 @@ func (o *UpdCmd) Run() error {
 			if !validFeedURL(*o.URL) {
 				return fmt.Errorf("invalid url %q", *o.URL)
 			}
-			setFeedURL(ch, *o.URL)
+			newURL := *o.URL
+			// Resolve only when the URL actually changes (a repoint) and the
+			// effective ingest is the built-in #feed. ch.Ingest already reflects
+			// any -i update applied above.
+			if newURL != ch.URL && resolvesFeed(ch.Ingest, db.core.Ingest) {
+				resolved, err := resolveFeedURL(ctx, newURL)
+				if err != nil {
+					return fmt.Errorf("resolve feed %q: %w", newURL, err)
+				}
+				newURL = resolved
+			}
+			setFeedURL(ch, newURL)
 		}
 
 		if err := normalizeFeed(ch); err != nil {

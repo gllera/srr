@@ -176,7 +176,9 @@ Every backend field is also overridable by an environment variable named `SRR_<S
 
 ## Ingest Strategies
 
-An *ingest strategy* is the I/O + parse step that turns a subscription URL into a list of articles, before the [pipe pipeline](#pipe-pipeline) transforms them. The default strategy, `#rss`, fetches the URL over HTTP and parses RSS/Atom/RDF. If the URL returns an HTML page instead of a feed, `#rss` auto-discovers the feed via `<link rel="alternate">` in the HTML `<head>` and retries from that URL (one-hop guard — no loops); on success the feed's stored URL is updated to the discovered one. Sources that aren't feeds — a private API, a site that needs scraping, anything bespoke — are handled by an **external command** that speaks a small JSON protocol. No rebuild is required, and nothing source-specific lives in this repo.
+An *ingest strategy* is the I/O + parse step that turns a subscription URL into a list of articles, before the [pipe pipeline](#pipe-pipeline) transforms them. The default strategy, `#feed`, fetches the URL over HTTP and parses RSS/Atom/RDF. If the URL returns an HTML page instead of a feed, `#feed` auto-discovers the feed via `<link rel="alternate">` in the HTML `<head>` and retries from that URL (one-hop guard — no loops); on success the feed's stored URL is updated to the discovered one. Sources that aren't feeds — a private API, a site that needs scraping, anything bespoke — are handled by an **external command** that speaks a small JSON protocol. No rebuild is required, and nothing source-specific lives in this repo.
+
+**Auto-discovery runs at subscribe time, too.** For `#feed` feeds, `srr feed add`, `srr feed upd -u` (when the URL changes), and `srr feed import` resolve the URL the moment you subscribe — paste a site's homepage and SRR stores its actual feed URL. `add`/`upd -u` **hard-fail** if no feed can be found at the URL (nothing is stored); `import` is **partial-success** — it imports every feed it can resolve and reports the rest (so one dead URL in a large OPML doesn't block the batch). These commands therefore make a network request; `feed apply`/`feed edit` stay offline. The same discovery still runs at fetch time as a fallback, so a feed URL that later starts redirecting to a homepage self-heals.
 
 ### Selecting a strategy
 
@@ -184,9 +186,9 @@ The effective strategy is resolved per feed, most specific wins:
 
 1. The feed's `ingest` field (`srr feed add -i ...` / `srr feed upd -i ...`)
 2. The db.gz root default (`srr ingest ...`)
-3. The built-in `#rss` (when both are empty)
+3. The built-in `#feed` (when both are empty)
 
-Built-in strategy names start with `#` (only `#rss` ships built-in). **Any value that does not start with `#` is run as a shell command** via `/bin/sh -c`.
+Built-in strategy names start with `#` (only `#feed` ships built-in). **Any value that does not start with `#` is run as a shell command** via `/bin/sh -c`.
 
 ```bash
 # Route one feed through an external command
@@ -364,7 +366,7 @@ A pipeline step whose first word is not a built-in `#`-token is run as an extern
 
 To **drop** an item (prevent it from being stored), emit `{"drop":true}` — or include it alongside other fields, e.g. `{"drop":true,"guid":…}`. A dropped item is silently discarded and its GUID is retained in the feed's dedup boundary so it is not re-evaluated on the next fetch. Dropping is not an error; subsequent pipeline steps are skipped for a dropped item.
 
-**Example.** For one item from a `#rss` source, SRR writes this object to the mod's stdin (pretty-printed). `raw` mirrors the parsed feed entry — element name → list of occurrences, each `{@: text, $: attributes, +: children}`; it is `null` for items from an external ingest command, which don't populate it:
+**Example.** For one item from a `#feed` source, SRR writes this object to the mod's stdin (pretty-printed). `raw` mirrors the parsed feed entry — element name → list of occurrences, each `{@: text, $: attributes, +: children}`; it is `null` for items from an external ingest command, which don't populate it:
 
 ```json
 {

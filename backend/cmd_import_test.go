@@ -1,8 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -10,6 +16,80 @@ import (
 // ImportCmd.Run.
 func newImportWalker(selectedIDs []string) *importWalker {
 	return &importWalker{w: io.Discard, selectedIDs: selectedIDs, seen: map[string]bool{}}
+}
+
+// resolveImportFeeds resolves #feed feeds, skips external-ingest ones, and
+// partitions into kept (with resolved URLs) and failed.
+func TestResolveImportFeedsPartial(t *testing.T) {
+	setupEmptyDB(t)
+	resolveFeedURL = func(_ context.Context, url string) (string, error) {
+		if strings.Contains(url, "bad") {
+			return "", fmt.Errorf("no feed found")
+		}
+		return url + "/feed.xml", nil
+	}
+	feeds := []*Feed{
+		{Title: "Good", URL: "https://good.example.com"},
+		{Title: "Bad", URL: "https://bad.example.com"},
+		{Title: "Ext", URL: "https://ext.example.com", Ingest: "my-fetcher"},
+	}
+	kept, failed := resolveImportFeeds(context.Background(), feeds, "")
+
+	if len(kept) != 2 {
+		t.Fatalf("kept = %d, want 2 (Good resolved, Ext unchanged)", len(kept))
+	}
+	if len(failed) != 1 || failed[0].URL != "https://bad.example.com" {
+		t.Fatalf("failed = %+v, want exactly Bad", failed)
+	}
+	got := map[string]string{}
+	for _, c := range kept {
+		got[c.Title] = c.URL
+	}
+	if got["Good"] != "https://good.example.com/feed.xml" {
+		t.Errorf("Good URL = %q, want resolved feed URL", got["Good"])
+	}
+	if got["Ext"] != "https://ext.example.com" {
+		t.Errorf("Ext URL = %q, want unchanged (external ingest skips resolve)", got["Ext"])
+	}
+}
+
+// feed import imports the resolvable feeds and reports the unresolvable ones,
+// without aborting the whole batch.
+func TestImportRunPartialSuccess(t *testing.T) {
+	setupEmptyDB(t)
+	resolveFeedURL = func(_ context.Context, url string) (string, error) {
+		if strings.Contains(url, "bad") {
+			return "", fmt.Errorf("no feed found")
+		}
+		return url, nil
+	}
+	opml := `<?xml version="1.0"?><opml version="2.0"><body>
+<outline title="Good" text="Good" xmlUrl="https://good.example.com/feed"/>
+<outline title="Bad" text="Bad" xmlUrl="https://bad.example.com/feed"/>
+</body></opml>`
+	path := filepath.Join(t.TempDir(), "feeds.opml")
+	if err := os.WriteFile(path, []byte(opml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	stdout = &out
+	t.Cleanup(func() { stdout = os.Stdout })
+
+	if err := (&ImportCmd{Path: path, All: true}).Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	db := reopenDB(t)
+	if len(db.Feeds()) != 1 {
+		t.Fatalf("Feeds = %d, want 1 (only Good imported)", len(db.Feeds()))
+	}
+	if db.Feeds()[0].Title != "Good" {
+		t.Errorf("imported %q, want Good", db.Feeds()[0].Title)
+	}
+	if !strings.Contains(out.String(), "bad.example.com") {
+		t.Errorf("report %q should name the skipped URL", out.String())
+	}
 }
 
 func TestIsSelected(t *testing.T) {
@@ -222,7 +302,7 @@ func TestImportDedupCrossFolder(t *testing.T) {
 
 func TestApplyImportDefaultsNothingSet(t *testing.T) {
 	feeds := []*Feed{
-		{Title: "A", Tag: "auto", Pipe: []string{"#sanitize"}, Ingest: "#rss"},
+		{Title: "A", Tag: "auto", Pipe: []string{"#sanitize"}, Ingest: "#feed"},
 		{Title: "B"},
 	}
 	applyImportDefaults(feeds, nil, nil, nil)
@@ -233,8 +313,8 @@ func TestApplyImportDefaultsNothingSet(t *testing.T) {
 	if !slices.Equal(feeds[0].Pipe, []string{"#sanitize"}) {
 		t.Errorf("feeds[0].Pipe = %v, want [#sanitize]", feeds[0].Pipe)
 	}
-	if feeds[0].Ingest != "#rss" {
-		t.Errorf("feeds[0].Ingest = %q, want %q", feeds[0].Ingest, "#rss")
+	if feeds[0].Ingest != "#feed" {
+		t.Errorf("feeds[0].Ingest = %q, want %q", feeds[0].Ingest, "#feed")
 	}
 }
 

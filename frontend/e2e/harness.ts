@@ -1,6 +1,6 @@
 // Shared e2e harness: build/locate the real `srrb` binary, run it to produce
 // real pack stores from canned feeds, and serve those feeds over HTTP so the
-// built-in `#rss` ingest can fetch them. Used by both the contract (jsdom) and
+// built-in `#feed` ingest can fetch them. Used by both the contract (jsdom) and
 // browser (puppeteer) layers.
 
 import { execFile, execFileSync } from "node:child_process"

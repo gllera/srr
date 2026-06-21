@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -195,6 +196,96 @@ func TestParseInvalidXML(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("expected error for invalid XML")
+	}
+}
+
+// A document that isn't a recognized feed (HTML page, unknown XML root, or
+// non-XML) must be classified as errNotFeed so the caller can branch into
+// auto-discovery rather than treating it as a generic parse fault.
+func TestParseFeedNotFeedClassification(t *testing.T) {
+	cases := []struct{ name, data string }{
+		{"html-doctype", `<!doctype html><html><head></head><body>hi</body></html>`},
+		{"html-bare", `<html><body>Not a feed</body></html>`},
+		{"unknown-root", `<?xml version="1.0"?><foo><bar/></foo>`},
+		{"plain-text", `not xml at all`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := ParseFeed([]byte(c.data), func(*mod.RawItem) error { return nil })
+			if err == nil {
+				t.Fatalf("expected an error for a non-feed document")
+			}
+			if !errors.Is(err, errNotFeed) {
+				t.Errorf("error %v is not classified errNotFeed", err)
+			}
+		})
+	}
+}
+
+// A valid feed must not be classified errNotFeed (it parses cleanly), and a
+// recognized-but-broken feed must surface a real error that is NOT errNotFeed
+// (so a mid-stream fault never spuriously triggers discovery).
+func TestParseFeedValidNotClassifiedNotFeed(t *testing.T) {
+	err := ParseFeed([]byte(`<rss version="2.0"><feed><item><title>A</title></item></feed></rss>`),
+		func(*mod.RawItem) error { return nil })
+	if err != nil {
+		t.Fatalf("valid feed returned error: %v", err)
+	}
+}
+
+// Resolve returns the URL unchanged when it already serves a feed.
+func TestResolveDirectFeed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		fmt.Fprint(w, rssFixture)
+	}))
+	defer srv.Close()
+
+	got, err := Resolve(context.Background(), srv.Client(), srv.URL, 1<<20)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got != srv.URL {
+		t.Errorf("Resolve = %q, want unchanged %q", got, srv.URL)
+	}
+}
+
+// Resolve returns the discovered feed URL when the given URL is an HTML page
+// advertising a <link rel=alternate> feed.
+func TestResolveDiscoversFromHTML(t *testing.T) {
+	feedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		fmt.Fprint(w, rssFixture)
+	}))
+	defer feedSrv.Close()
+	htmlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, `<!doctype html><html><head>
+<link rel="alternate" type="application/rss+xml" href="%s">
+</head><body>hi</body></html>`, feedSrv.URL)
+	}))
+	defer htmlSrv.Close()
+
+	got, err := Resolve(context.Background(), htmlSrv.Client(), htmlSrv.URL, 1<<20)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got != feedSrv.URL {
+		t.Errorf("Resolve = %q, want discovered %q", got, feedSrv.URL)
+	}
+}
+
+// Resolve errors when the URL is reachable but yields neither a feed nor a
+// discoverable feed link — the hard-fail signal the CLI commands rely on.
+func TestResolveNoFeedErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<!doctype html><html><head><title>no feed here</title></head><body>x</body></html>`)
+	}))
+	defer srv.Close()
+
+	if _, err := Resolve(context.Background(), srv.Client(), srv.URL, 1<<20); err == nil {
+		t.Error("expected error when no feed can be resolved")
 	}
 }
 
@@ -693,13 +784,13 @@ const rssFixture = `<?xml version="1.0"?>
   </feed>
 </rss>`
 
-// rssFunc is the registered #rss FetchFunc, exposed for test access via the
+// feedFunc is the registered #feed FetchFunc, exposed for test access via the
 // package-internal registry.
-func rssFunc(t *testing.T) FetchFunc {
+func feedFunc(t *testing.T) FetchFunc {
 	t.Helper()
-	fn, ok := registry["#rss"]
+	fn, ok := registry["#feed"]
 	if !ok {
-		t.Fatal("no #rss registered")
+		t.Fatal("no #feed registered")
 	}
 	return fn
 }
@@ -724,7 +815,7 @@ func TestRSSDiscoveryHTMLPage(t *testing.T) {
 	}))
 	defer htmlSrv.Close()
 
-	fn := rssFunc(t)
+	fn := feedFunc(t)
 	buf := make([]byte, 1<<20)
 	result, err := fn(context.Background(), feedSrv.Client(), buf, Request{
 		URL:     htmlSrv.URL,
@@ -764,7 +855,7 @@ func TestRSSDiscoveryOneHopGuard(t *testing.T) {
 	}))
 	defer firstSrv.Close()
 
-	fn := rssFunc(t)
+	fn := feedFunc(t)
 	buf := make([]byte, 1<<20)
 	_, err := fn(context.Background(), firstSrv.Client(), buf, Request{
 		URL:     firstSrv.URL,
@@ -785,7 +876,7 @@ func TestRSSDiscoveryNormalFeedUnchanged(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	fn := rssFunc(t)
+	fn := feedFunc(t)
 	buf := make([]byte, 1<<20)
 	result, err := fn(context.Background(), srv.Client(), buf, Request{
 		URL:     srv.URL,

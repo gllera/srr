@@ -17,7 +17,7 @@ import (
 	"srrb/mod"
 )
 
-// "#rss" is the default zero-config fetcher: HTTP GET with If-None-Match
+// "#feed" is the default zero-config fetcher: HTTP GET with If-None-Match
 // / If-Modified-Since hints, streamed into the shared per-worker buffer,
 // then handed to the streaming RSS/Atom/RDF parser (ParseFeed) defined
 // below.
@@ -29,15 +29,15 @@ import (
 // Result.ResolvedURL is set to the discovered URL so the caller can persist
 // the repoint. The one-hop guard prevents infinite loops.
 func init() {
-	Register("rss", func(ctx context.Context, client *http.Client, buf []byte, req Request) (Result, error) {
-		return rssFetch(ctx, client, buf, req, false)
+	Register("feed", func(ctx context.Context, client *http.Client, buf []byte, req Request) (Result, error) {
+		return feedFetch(ctx, client, buf, req, false)
 	})
 }
 
-// rssFetch is the implementation of the #rss FetchFunc. discovered signals
+// feedFetch is the implementation of the #feed FetchFunc. discovered signals
 // that this call is itself a discovery retry — it must not discover again
 // (one-hop guard).
-func rssFetch(ctx context.Context, client *http.Client, buf []byte, req Request, discovered bool) (Result, error) {
+func feedFetch(ctx context.Context, client *http.Client, buf []byte, req Request, discovered bool) (Result, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, "GET", req.URL, nil)
 	if err != nil {
 		return Result{}, err
@@ -76,9 +76,11 @@ func rssFetch(ctx context.Context, client *http.Client, buf []byte, req Request,
 	})
 	if parseErr != nil {
 		// On parse failure, attempt feed auto-discovery if:
-		//   1. This is not already a discovery retry (one-hop guard).
-		//   2. The response body looks like HTML.
-		if !discovered && looksLikeHTML(res.Header.Get("Content-Type"), data) {
+		//   1. The failure means "not a feed" (errNotFeed), not a fault parsing a
+		//      recognized feed — a broken feed must never trigger discovery.
+		//   2. This is not already a discovery retry (one-hop guard).
+		//   3. The response body looks like HTML.
+		if errors.Is(parseErr, errNotFeed) && !discovered && looksLikeHTML(res.Header.Get("Content-Type"), data) {
 			if feedURL, ok := discoverFeedLink(data, req.URL); ok {
 				slog.Debug("auto-discovering feed from HTML page", "html_url", req.URL, "feed_url", feedURL)
 				retryReq := Request{
@@ -88,7 +90,7 @@ func rssFetch(ctx context.Context, client *http.Client, buf []byte, req Request,
 					// Do not forward ETag/LastModified: they belonged to the HTML
 					// page, not the newly discovered feed URL.
 				}
-				result, err := rssFetch(ctx, client, buf, retryReq, true)
+				result, err := feedFetch(ctx, client, buf, retryReq, true)
 				if err != nil {
 					return Result{}, err
 				}
@@ -121,6 +123,26 @@ func looksLikeHTML(contentType string, data []byte) bool {
 	b = bytes.TrimSpace(b)
 	prefix := strings.ToLower(string(b[:min(len(b), 14)]))
 	return strings.HasPrefix(prefix, "<!doctype html") || strings.HasPrefix(prefix, "<html")
+}
+
+// Resolve probes rawURL via the built-in #feed fetcher and returns the URL a
+// subscription should store: rawURL itself when it already serves a feed, the
+// discovered <link rel=alternate> target when rawURL is an HTML page that
+// advertises one, or an error when it yields neither (not a feed and no
+// discoverable link, or a fetch failure). maxSize bounds the body read, sizing
+// the buffer exactly as the fetch loop does (cap-1 is the real limit). Only
+// meaningful for the built-in #feed strategy; callers must skip it for external
+// ingest strategies, whose sources are not HTTP-fetchable feeds.
+func Resolve(ctx context.Context, client *http.Client, rawURL string, maxSize int) (string, error) {
+	buf := make([]byte, maxSize+1)
+	res, err := feedFetch(ctx, client, buf, Request{URL: rawURL, MaxSize: maxSize}, false)
+	if err != nil {
+		return "", err
+	}
+	if res.ResolvedURL != "" {
+		return res.ResolvedURL, nil
+	}
+	return rawURL, nil
 }
 
 // --- RSS/Atom/RDF feed parser -----------------------------------------
@@ -268,8 +290,15 @@ func rawToFeedItem(r mod.RawFeedItem, dateHint *string) *mod.RawItem {
 	}
 }
 
+// errNotFeed classifies a document that is simply not a recognized feed — an
+// HTML page, an unknown XML root, or non-XML bytes — as opposed to a genuine
+// I/O or decoder fault while parsing something that *was* a feed. The caller
+// branches on it (errors.Is) to attempt auto-discovery instead of failing hard.
+var errNotFeed = errors.New("not a recognized feed")
+
 // ParseFeed streams feed items to the callback. An error from the callback is
-// propagated.
+// propagated. A document that is not a recognized feed is reported wrapped in
+// errNotFeed; a fault while parsing a recognized feed is a plain error.
 func ParseFeed(data []byte, fn func(*mod.RawItem) error) error {
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	// Transcode declared non-UTF-8 encodings (ISO-8859-1, windows-1252, …) to
@@ -286,7 +315,7 @@ func ParseFeed(data []byte, fn func(*mod.RawItem) error) error {
 	for {
 		tok, err := dec.Token()
 		if err != nil {
-			return fmt.Errorf("detecting feed format: %w", err)
+			return fmt.Errorf("%w: detecting feed format: %w", errNotFeed, err)
 		}
 		if se, ok := tok.(xml.StartElement); ok {
 			switch se.Name.Local {
@@ -295,7 +324,7 @@ func ParseFeed(data []byte, fn func(*mod.RawItem) error) error {
 			case "feed":
 				itemTag = "entry"
 			default:
-				return fmt.Errorf("unsupported feed format: <%s>", se.Name.Local)
+				return fmt.Errorf("%w: unexpected root <%s>", errNotFeed, se.Name.Local)
 			}
 			break
 		}
