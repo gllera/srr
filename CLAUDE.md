@@ -80,7 +80,7 @@ Two levels store an optional mod pipeline (`pipe` field): db.gz root and feed. R
 - An empty feed `pipe` (nil/absent or empty slice) **inherits** root.
 - A non-empty feed `pipe` **overrides** root.
 - The `#base` token inside a feed override expands inline to the root pipe; non-token entries pass through verbatim.
-- Built-in mods use the `#` prefix (`#sanitize`, `#minify`, `#readability`); anything else is a shell command (see backend `mod/` docs).
+- Built-in mods use the `#` prefix (`#sanitize`, `#minify`, `#readability`, `#filter`); anything else is a shell command (see backend `mod/` docs).
 - When the loaded root `pipe` is nil/absent, `NewDB` substitutes `["#sanitize", "#minify"]` as the default; the value is persisted on the next `Commit`. Clearing root or feed pipe (`srr pipe ""` / `srr feed upd <id> -p ""`) reverts to inherit-root semantics on the next load.
 
 `feeds` is a JSON object (`Record<number, IFeed>`) keyed by feed ID. Backend struct: `Feed` carries `URL` + its own fetch state directly. JSON uses short keys (`url`, `etag`, `last_modified`, `wm`, `bg`, `ferr`, `pipe`, `ingest`, …) — see the `Feed`/`DBCore` struct tags.
