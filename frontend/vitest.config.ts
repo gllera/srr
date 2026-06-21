@@ -1,9 +1,8 @@
 import { defineConfig, configDefaults } from "vitest/config"
+import { cdnDefine } from "./vitest.shared"
 
 export default defineConfig({
-   define: {
-      SRR_CDN_URL: JSON.stringify("http://localhost:3000"),
-   },
+   define: cdnDefine,
    test: {
       environment: "jsdom",
       // e2e specs (e2e/**/*.e2e.test.ts) match the default test glob; keep the

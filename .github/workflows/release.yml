@@ -19,10 +19,9 @@ jobs:
       VERSION: ${{ github.ref_name }}
     steps:
     - uses: actions/checkout@v6
-    - uses: actions/setup-go@v6
+    - uses: ./.github/actions/setup-toolchain
       with:
-        go-version-file: backend/go.mod
-        cache-dependency-path: backend/go.sum
+        node: "false"
     - run: make release
     - uses: softprops/action-gh-release@v3
       with:
@@ -35,11 +34,9 @@ jobs:
       SRR_CONFIG_INLINE: ${{ secrets.SRR_CONFIG_INLINE }}
     steps:
     - uses: actions/checkout@v6
-    - uses: actions/setup-node@v6
+    - uses: ./.github/actions/setup-toolchain
       with:
-        node-version: 22
-        cache: 'npm'
-        cache-dependency-path: frontend/package-lock.json
+        go: "false"
     - run: make build-fe
     - uses: actions/upload-pages-artifact@v5
       with:

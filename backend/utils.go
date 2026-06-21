@@ -29,9 +29,20 @@ func fieldName(f reflect.StructField) string {
 	return toKebab(f.Name)
 }
 
-func printFields(v reflect.Value, indent string) {
+// printFields prints each field as "name: value", optionally annotated with the
+// env var that sets it. envName derives that name per field (the kong env: tag
+// for globals, the derived SRR_<SCHEME>_<FIELD> for backend configs); pass nil
+// to print values only.
+func printFields(v reflect.Value, indent string, envName func(reflect.StructField) string) {
 	t := v.Type()
 	for i := range t.NumField() {
-		fmt.Printf("%s%s: %v\n", indent, fieldName(t.Field(i)), v.Field(i).Interface())
+		f := t.Field(i)
+		line := fmt.Sprintf("%s%s: %v", indent, fieldName(f), v.Field(i).Interface())
+		if envName != nil {
+			if e := envName(f); e != "" {
+				line += fmt.Sprintf("  [%s]", e)
+			}
+		}
+		fmt.Println(line)
 	}
 }

@@ -1,4 +1,4 @@
-.PHONY: verify verify-fe verify-be lint-fe format-check-fe format-fe test-fe build-fe dev-fe vet-be build-be test-be test-contract test-browser test-stress test-e2e generate generate-check release clean design-fixture design
+.PHONY: verify verify-fe verify-be lint-fe format-check-fe format-fe test-fe build-fe dev-fe vet-be lint-be format-check-be format-be build-be test-be test-contract test-browser test-stress test-e2e generate generate-check release clean design-fixture design
 
 SHELL := /bin/bash -e
 
@@ -8,7 +8,10 @@ PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 win
 # layer (test-browser) is opt-in via test-e2e.
 verify: verify-fe verify-be test-contract
 verify-fe: lint-fe format-check-fe test-fe build-fe
-verify-be: vet-be build-be test-be generate-check
+# verify-be mirrors verify-fe's gates: vet + gofmt check + build + test +
+# contract freshness. lint-be (golangci-lint) is a separate opt-in target (not
+# yet gate-clean), like nothing in verify-fe blocks on it either.
+verify-be: vet-be format-check-be build-be test-be generate-check
 
 # frontend/src/js/format.gen.ts is generated from the backend's Go
 # data-contract declarations (srr gen-ts). generate rewrites it;
@@ -59,6 +62,18 @@ lint-fe format-check-fe format-fe test-fe build-fe dev-fe: frontend/node_modules
 
 vet-be test-be:
 	cd backend && go $(@:-be=) ./...
+
+# Go format gate + linter, mirroring lint-fe/format-fe/format-check-fe. gofmt is
+# part of verify-be (format-check-be); golangci-lint is opt-in (`make lint-be`).
+format-be:
+	cd backend && gofmt -w .
+
+format-check-be:
+	@cd backend && out=$$(gofmt -l .); if [ -n "$$out" ]; then \
+	  echo "gofmt needed (run 'make format-be'):"; echo "$$out"; exit 1; fi
+
+lint-be:
+	cd backend && golangci-lint run ./...
 
 dist:
 	@mkdir -p $@

@@ -1,0 +1,25 @@
+name: Setup toolchain
+description: >
+  Set up the SRR monorepo toolchain (Go and/or Node) with dependency caching.
+  Single-sources the versions: Go from backend/go.mod, Node from .nvmrc.
+inputs:
+  go:
+    description: Set up Go (backend toolchain).
+    default: "true"
+  node:
+    description: Set up Node (frontend toolchain).
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - if: inputs.go == 'true'
+      uses: actions/setup-go@v6
+      with:
+        go-version-file: backend/go.mod
+        cache-dependency-path: backend/go.sum
+    - if: inputs.node == 'true'
+      uses: actions/setup-node@v6
+      with:
+        node-version-file: .nvmrc
+        cache: 'npm'
+        cache-dependency-path: frontend/package-lock.json

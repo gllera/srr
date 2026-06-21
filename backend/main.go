@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
 
+	"srrb/mod"
 	"srrb/store"
 
 	"github.com/alecthomas/kong"
@@ -17,17 +19,31 @@ import (
 var version = "development"
 var globals *Globals
 
+// Size-global defaults, single-sourced: each is fed to kong as a default via
+// kong.Vars (so it shows in --help) AND used as the post-parse floor below, so
+// the literal lives in exactly one place per field.
+const (
+	defaultPackSize     = 200
+	defaultMaxFeedSize  = 5000
+	defaultMaxMediaSize = 25000
+)
+
 type Globals struct {
 	Workers      int    `short:"w" default:"${nproc}" env:"SRR_WORKERS"       help:"Number of concurrent downloads."`
-	PackSize     int    `short:"s" default:"200"      env:"SRR_PACK_SIZE"     help:"Target pack size in KB."`
-	MaxFeedSize  int    `short:"m" default:"5000"     env:"SRR_MAX_FEED_SIZE" help:"Max feed download size in KB."`
-	MaxMediaSize int    `          default:"25000"    env:"SRR_MAX_MEDIA_SIZE" help:"Max self-hosted media object size in KB."`
+	PackSize     int    `short:"s" default:"${packSize}"      env:"SRR_PACK_SIZE"     help:"Target pack size in KB."`
+	MaxFeedSize  int    `short:"m" default:"${maxFeedSize}"     env:"SRR_MAX_FEED_SIZE" help:"Max feed download size in KB."`
+	MaxMediaSize int    `          default:"${maxMediaSize}"    env:"SRR_MAX_MEDIA_SIZE" help:"Max self-hosted media object size in KB."`
 	AssetFilter  string `                             env:"SRR_ASSET_FILTER" help:"Command run on every self-hosted asset just before upload to process its bytes, e.g. transcode media (the cache file path is appended as the final arg; processed bytes are read from stdout; non-zero exit or empty output keeps the original). Skipped when the source is already uploaded. Empty disables. E.g. \"webify -m 720\"."`
 	CacheDir     string `                             env:"SRR_CACHE_DIR"     help:"Local download cache for external ingest media (default $XDG_CACHE_HOME/srr)."`
 	Store        string `short:"o" default:"packs"    env:"SRR_STORE"         help:"Storage destination path."`
 	Force        bool   `                             env:"SRR_FORCE"         help:"Override DB write lock if needed."`
 	Debug        bool   `short:"d"                    env:"SRR_DEBUG"         help:"Enable debug mode."`
-	CdnURL       string `hidden:""                    env:"SRR_CDN_URL"       help:"CDN URL for frontend builds."`
+	// CmdTimeout / AllowPrivateFetch were previously env-only (read straight from
+	// os.Getenv in mod/); promoted to real flags so they show in --help and
+	// `srr config`. main applies them into the mod package after parse.
+	CmdTimeout        time.Duration `default:"5m" env:"SRR_CMD_TIMEOUT" help:"Timeout for a single external ingest/mod command (Go duration)."`
+	AllowPrivateFetch bool          `env:"SRR_ALLOW_PRIVATE_FETCH" help:"Disable the SSRF guard, allowing fetches from private/loopback addresses. Security override — leave off unless you fetch LAN/localhost feeds."`
+	CdnURL            string        `hidden:"" env:"SRR_CDN_URL" help:"CDN URL for frontend builds."`
 }
 
 type FeedGroup struct {
@@ -149,7 +165,10 @@ func main() {
 
 	ctx := kong.Parse(&cli,
 		kong.Vars{
-			"nproc": fmt.Sprint(runtime.NumCPU()),
+			"nproc":        fmt.Sprint(runtime.NumCPU()),
+			"packSize":     fmt.Sprint(defaultPackSize),
+			"maxFeedSize":  fmt.Sprint(defaultMaxFeedSize),
+			"maxMediaSize": fmt.Sprint(defaultMaxMediaSize),
 		},
 		kong.Name("srr"),
 		kong.Description("Static RSS Reader backend."),
@@ -175,23 +194,28 @@ func main() {
 	}
 
 	if globals.PackSize < 1 {
-		globals.PackSize = 200
+		globals.PackSize = defaultPackSize
 	}
 
 	if globals.MaxFeedSize < 1 {
-		globals.MaxFeedSize = 5000
+		globals.MaxFeedSize = defaultMaxFeedSize
 	}
 
 	// Floor like the other size globals: a value <= 0 would make the asset
 	// fetcher's maxBytes <= 0, which disables every size-cap guard and lets an
 	// attacker-controlled response stream unbounded into memory/the store.
 	if globals.MaxMediaSize < 1 {
-		globals.MaxMediaSize = 25000
+		globals.MaxMediaSize = defaultMaxMediaSize
 	}
 
 	if globals.Workers < 1 {
 		globals.Workers = runtime.NumCPU()
 	}
+
+	// Apply the resolved config into the mod package (its external-command
+	// timeout + SSRF opt-out were formerly read straight from the environment).
+	mod.CmdTimeout = globals.CmdTimeout
+	mod.AllowPrivateFetch = globals.AllowPrivateFetch
 
 	if err := ctx.Run(); err != nil {
 		fatal(err.Error())

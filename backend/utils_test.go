@@ -34,7 +34,7 @@ func TestPrintFieldsKebabCase(t *testing.T) {
 		MaxFeedSize int
 	}
 	out := captureStdout(t, func() {
-		printFields(reflect.ValueOf(S{PackSize: 200, MaxFeedSize: 5000}), "")
+		printFields(reflect.ValueOf(S{PackSize: 200, MaxFeedSize: 5000}), "", nil)
 	})
 	if !strings.Contains(out, "pack-size: 200\n") {
 		t.Errorf("missing kebab-cased pack-size line: %q", out)
@@ -49,10 +49,24 @@ func TestPrintFieldsRespectsYAMLTag(t *testing.T) {
 		Region string `yaml:"my-region"`
 	}
 	out := captureStdout(t, func() {
-		printFields(reflect.ValueOf(S{Region: "us-east-1"}), "  ")
+		printFields(reflect.ValueOf(S{Region: "us-east-1"}), "  ", nil)
 	})
 	if !strings.Contains(out, "  my-region: us-east-1\n") {
 		t.Errorf("expected yaml-tag-named indented line: %q", out)
+	}
+}
+
+func TestPrintFieldsAnnotatesEnvName(t *testing.T) {
+	type S struct {
+		Workers int `env:"SRR_WORKERS"`
+	}
+	out := captureStdout(t, func() {
+		printFields(reflect.ValueOf(S{Workers: 4}), "", func(f reflect.StructField) string {
+			return f.Tag.Get("env")
+		})
+	})
+	if !strings.Contains(out, "workers: 4  [SRR_WORKERS]\n") {
+		t.Errorf("expected env-annotated line, got: %q", out)
 	}
 }
 

@@ -13,6 +13,20 @@ type ConfigCmd struct {
 	Key string `arg:"" optional:"" help:"Config key to print (omit for all)."`
 }
 
+// globalEnvName returns the env var that sets a global flag (its kong env: tag).
+func globalEnvName(f reflect.StructField) string {
+	return f.Tag.Get("env")
+}
+
+// backendEnvNameFor returns a per-field env-name deriver for a backend config
+// section, bound to scheme: it prints the very name store.loadEnv reads, since
+// both go through store.EnvName.
+func backendEnvNameFor(scheme string) func(reflect.StructField) string {
+	return func(f reflect.StructField) string {
+		return store.EnvName(scheme, f)
+	}
+}
+
 func (o *ConfigCmd) Run() error {
 	gv := reflect.ValueOf(*globals)
 	gt := gv.Type()
@@ -27,10 +41,10 @@ func (o *ConfigCmd) Run() error {
 	storeCfg, hasStoreCfg := store.Configs()[scheme]
 
 	if o.Key == "" {
-		printFields(gv, "")
+		printFields(gv, "", globalEnvName)
 		if hasStoreCfg {
 			fmt.Printf("%s:\n", scheme)
-			printFields(reflect.ValueOf(storeCfg).Elem(), "  ")
+			printFields(reflect.ValueOf(storeCfg).Elem(), "  ", backendEnvNameFor(scheme))
 		}
 		return nil
 	}
@@ -47,7 +61,7 @@ func (o *ConfigCmd) Run() error {
 		ct := cv.Type()
 
 		if o.Key == scheme {
-			printFields(cv, "")
+			printFields(cv, "", backendEnvNameFor(scheme))
 			return nil
 		}
 
