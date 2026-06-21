@@ -80,20 +80,45 @@ var subprocessWaitDelay = 5 * time.Second
 // returning err=nil. With WaitDelay, os/exec force-closes the pipe after
 // cancellation and cmd.Run() returns promptly with a non-nil error.
 func RunSubprocess(ctx context.Context, args string, env []string, dir string, stdin io.Reader) ([]byte, error) {
-	out := &cappedBuffer{limit: maxSubprocessOutput}
 	cctx, cancel := context.WithTimeout(ctx, SubprocessTimeout())
 	defer cancel()
 	cmd := exec.CommandContext(cctx, "/bin/sh", "-c", args)
 	cmd.Stdin = stdin
-	cmd.Stdout = out
-	cmd.Stderr = os.Stderr
 	cmd.Env = env
 	cmd.Dir = dir
+	out, err := runBounded(cmd)
+	if err != nil {
+		return nil, err
+	}
+	return bytes.TrimSpace(out), nil
+}
+
+// RunCommand runs argv (name plus args) under the same external-command bounds
+// as RunSubprocess — SubprocessTimeout off ctx, subprocessWaitDelay, and a
+// maxSubprocessOutput-capped stdout — but via direct exec rather than /bin/sh,
+// and WITHOUT trimming, since its stdout may be binary (e.g. a transcoded
+// asset). Used by the per-asset filter (assets.go), which would otherwise carry
+// its own unbounded, deadline-free copy of subprocess exec.
+func RunCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
+	cctx, cancel := context.WithTimeout(ctx, SubprocessTimeout())
+	defer cancel()
+	return runBounded(exec.CommandContext(cctx, name, args...))
+}
+
+// runBounded is the shared hardened exec core: stdout captured into a
+// maxSubprocessOutput-capped buffer, stderr passed through, and WaitDelay set so
+// a backgrounded grandchild can't hold the pipe open past the deadline. The
+// caller builds cmd from a SubprocessTimeout-bounded context and sets any
+// stdin/env/dir.
+func runBounded(cmd *exec.Cmd) ([]byte, error) {
+	out := &cappedBuffer{limit: maxSubprocessOutput}
+	cmd.Stdout = out
+	cmd.Stderr = os.Stderr
 	cmd.WaitDelay = subprocessWaitDelay
 	if err := cmd.Run(); err != nil {
 		return nil, err
 	}
-	return bytes.TrimSpace(out.buf.Bytes()), nil
+	return out.buf.Bytes(), nil
 }
 
 type RawItem struct {

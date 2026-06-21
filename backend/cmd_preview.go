@@ -101,6 +101,12 @@ func (o *PreviewCmd) Run() error {
 
 	articles := make([]*Item, 0, len(result.Items))
 	for _, i := range result.Items {
+		// An external ingest strategy can emit a null item in its JSON, which
+		// decodes to a nil *mod.RawItem; skip it like feed.fetchURL does rather
+		// than panic dereferencing it in processItem.
+		if i == nil {
+			continue
+		}
 		// No asset host in preview: self-hosting needs a store backend, and
 		// preview only renders. The upload step lives in feed.fetch, not
 		// processItem, so preview simply never runs it.

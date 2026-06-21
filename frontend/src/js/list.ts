@@ -746,11 +746,14 @@ async function fetchOlder(my: object): Promise<void> {
          exhaustedBottom = true
          return
       }
-      oldest = chrons[chrons.length - 1]
-      if (exhausted || oldest === 0) exhaustedBottom = true
       const seen = nav.getSeenMap()
       const arts = await Promise.all(chrons.map((c) => data.loadMeta(c)))
       if (my !== tok || !rowsEl) return
+      // Commit the window cursor only after loadMeta resolves: a transient
+      // rejection must not advance oldest/exhaustedBottom past a batch that never
+      // rendered, which would permanently skip those rows on the next page.
+      oldest = chrons[chrons.length - 1]
+      if (exhausted || oldest === 0) exhaustedBottom = true
       const frag = document.createDocumentFragment()
       const older: HTMLElement[] = []
       chrons.forEach((c, k) => {
@@ -784,11 +787,12 @@ async function fetchNewer(my: object): Promise<void> {
          exhaustedTop = true
          return
       }
-      newest = chrons[chrons.length - 1]
-      if (exhausted || newest === data.db.total_art - 1) exhaustedTop = true
       const seen = nav.getSeenMap()
       const arts = await Promise.all(chrons.map((c) => data.loadMeta(c)))
       if (my !== tok) return
+      // Commit the cursor only after loadMeta resolves (see fetchOlder).
+      newest = chrons[chrons.length - 1]
+      if (exhausted || newest === data.db.total_art - 1) exhaustedTop = true
       const frag = document.createDocumentFragment()
       // chrons is ascending; prepend newest-first so the block reads top-down.
       const fresh: HTMLElement[] = []

@@ -9,11 +9,11 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
 
+	"srrb/mod"
 	"srrb/store"
 )
 
@@ -150,22 +150,21 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 // appended as the command's final argument; stderr passes through for
 // diagnostics. Fail-soft: it returns ok=false — the caller uploads the original
 // unchanged — when the command errors or produces no output, so a filter hiccup,
-// or a file type the filter does not handle, never wedges a feed. Output is
-// buffered in memory, bounded in practice by the upstream download cap.
+// or a file type the filter does not handle, never wedges a feed. Runs through
+// mod.RunCommand so it shares the external-command bounds (a SubprocessTimeout
+// deadline, WaitDelay, and a capped stdout): a hung transcoder can't wedge the
+// worker and runaway output can't OOM it.
 func (a *assetFetcher) runFilter(ctx context.Context, full, localname string) ([]byte, bool) {
-	cmd := exec.CommandContext(ctx, a.filter[0], append(append([]string(nil), a.filter[1:]...), full)...)
-	cmd.Stderr = os.Stderr
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
+	out, err := mod.RunCommand(ctx, a.filter[0], append(append([]string(nil), a.filter[1:]...), full)...)
+	if err != nil {
 		slog.Warn("asset filter failed; uploading original", "asset", localname, "cmd", a.filter[0], "err", err)
 		return nil, false
 	}
-	if out.Len() == 0 {
+	if len(out) == 0 {
 		slog.Warn("asset filter produced no output; uploading original", "asset", localname, "cmd", a.filter[0])
 		return nil, false
 	}
-	return out.Bytes(), true
+	return out, true
 }
 
 // contentHashKey derives the relative store key (assets/<2>/<16><ext>) from the

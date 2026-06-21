@@ -96,7 +96,7 @@ func (d *Local) AtomicPut(_ context.Context, key string, r io.Reader) error {
 	if err := d.ensureDir(file); err != nil {
 		return err
 	}
-	tmpFile := file + ".tmp"
+	tmpFile := uniqueTempName(file)
 
 	fs, err := os.OpenFile(tmpFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {

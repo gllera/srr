@@ -33,11 +33,25 @@ func fieldName(f reflect.StructField) string {
 // env var that sets it. envName derives that name per field (the kong env: tag
 // for globals, the derived SRR_<SCHEME>_<FIELD> for backend configs); pass nil
 // to print values only.
+// maskSecret renders a `secret:"true"`-tagged field's value so `srr config` never
+// prints credentials (S3 secret key / session token, SFTP password) in cleartext:
+// a fixed placeholder when set, empty when unset.
+func maskSecret(v any) any {
+	if s, ok := v.(string); ok && s == "" {
+		return ""
+	}
+	return "********"
+}
+
 func printFields(v reflect.Value, indent string, envName func(reflect.StructField) string) {
 	t := v.Type()
 	for i := range t.NumField() {
 		f := t.Field(i)
-		line := fmt.Sprintf("%s%s: %v", indent, fieldName(f), v.Field(i).Interface())
+		val := v.Field(i).Interface()
+		if f.Tag.Get("secret") == "true" {
+			val = maskSecret(val)
+		}
+		line := fmt.Sprintf("%s%s: %v", indent, fieldName(f), val)
 		if envName != nil {
 			if e := envName(f); e != "" {
 				line += fmt.Sprintf("  [%s]", e)

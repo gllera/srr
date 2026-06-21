@@ -23,7 +23,7 @@ var sftpCfg SFTPConfig
 
 type SFTPConfig struct {
 	User           string `yaml:"user"`
-	Password       string `yaml:"password"`
+	Password       string `yaml:"password" secret:"true"`
 	PrivateKey     string `yaml:"private-key"`
 	KnownHostsFile string `yaml:"known-hosts-file"`
 	Insecure       bool   `yaml:"insecure"`
@@ -179,7 +179,7 @@ func (d *SFTP) AtomicPut(_ context.Context, key string, r io.Reader) error {
 	if err := d.ensureDir(file); err != nil {
 		return err
 	}
-	tmpFile := file + ".tmp"
+	tmpFile := uniqueTempName(file)
 
 	fs, err := d.client.OpenFile(tmpFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 	if err != nil {

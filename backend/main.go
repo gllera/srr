@@ -141,7 +141,10 @@ func assetCacheRoot() string {
 func envFirstResolver(inner kong.Resolver) kong.Resolver {
 	return kong.ResolverFunc(func(ctx *kong.Context, parent *kong.Path, flag *kong.Flag) (any, error) {
 		for _, env := range flag.Tag.Envs {
-			if _, ok := os.LookupEnv(env); ok {
+			// A set-but-empty env var is treated as unset (matching the
+			// SRR_CONFIG_INLINE convention) so a blank SRR_* doesn't suppress the
+			// YAML/default value and leave the flag empty.
+			if v, ok := os.LookupEnv(env); ok && v != "" {
 				return nil, nil
 			}
 		}
