@@ -244,22 +244,30 @@ func TestS3RmExistingAndMissing(t *testing.T) {
 }
 
 // The writer↔CDN cache contract rides on PutObject headers: Cache-Control is
-// resolved from the LOGICAL key (before the path prefix) and Content-Type by
-// extension so self-hosted assets render in-browser.
+// resolved from the LOGICAL key (before the path prefix). Content-Type comes
+// from the extension for packs, but for assets/ (whose key keeps the SOURCE
+// extension) it is SNIFFED from the bytes — so a transcoding asset filter can't
+// leave a .jpg-named WebP mislabeled image/jpeg.
 func TestS3PutCacheControlAndContentType(t *testing.T) {
 	b, f := setupFakeS3(t)
+	const jpeg = "\xff\xd8\xff\xe0JFIF"             // sniffs image/jpeg
+	const webp = "RIFF\x10\x00\x00\x00WEBPVP8 ...." // sniffs image/webp
 	cases := []struct {
-		key, wantCC, wantCT string
+		key, body, wantCC, wantCT string
 	}{
-		{"db.gz", cacheRevalidate, "application/gzip"},
-		{"idx/0.gz", cacheImmutable, "application/gzip"},
-		{"data/L3.gz", cacheImmutable, "application/gzip"},
-		{"assets/ab/0123456789abcdef.jpg", cacheImmutable, "image/jpeg"},
-		{".locked", "", ""}, // no policy; CT unchecked (the SDK stamps a default when we pass none)
+		{"db.gz", "x", cacheRevalidate, "application/gzip"},
+		{"idx/0.gz", "x", cacheImmutable, "application/gzip"},
+		{"data/L3.gz", "x", cacheImmutable, "application/gzip"},
+		// Asset bytes matching the source extension: sniff agrees with it.
+		{"assets/ab/0123456789abcdef.jpg", jpeg, cacheImmutable, "image/jpeg"},
+		// Asset transcoded away from its source extension (S40): the sniff
+		// overrides the stale .jpg extension so the object is labeled correctly.
+		{"assets/cd/fedcba9876543210.jpg", webp, cacheImmutable, "image/webp"},
+		{".locked", "x", "", ""}, // no policy; CT unchecked (the SDK stamps a default when we pass none)
 	}
 	for _, c := range cases {
 		t.Run(c.key, func(t *testing.T) {
-			if err := b.Put(ctx, c.key, strings.NewReader("x"), true); err != nil {
+			if err := b.Put(ctx, c.key, strings.NewReader(c.body), true); err != nil {
 				t.Fatalf("Put: %v", err)
 			}
 			h := f.headers["prefix/"+c.key]

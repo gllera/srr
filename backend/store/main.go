@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -121,7 +122,18 @@ func LoadConfigs(data []byte) error {
 		}
 		for scheme, cfg := range configs {
 			if node, ok := raw[scheme]; ok {
-				if err := node.Decode(cfg); err != nil {
+				// Decode strictly so a misspelled/unknown key (e.g. "endpont:")
+				// is a hard error rather than silently dropped — matching the
+				// loud-on-unknown-key philosophy elsewhere (mod Params.only,
+				// loadEnv's unsupported-kind error). yaml.Node.Decode has no
+				// KnownFields knob, so round-trip the node through a strict Decoder.
+				buf, err := yaml.Marshal(&node)
+				if err != nil {
+					return fmt.Errorf("encoding %q config: %w", scheme, err)
+				}
+				dec := yaml.NewDecoder(bytes.NewReader(buf))
+				dec.KnownFields(true)
+				if err := dec.Decode(cfg); err != nil {
 					return fmt.Errorf("decoding %q config: %w", scheme, err)
 				}
 			}
@@ -173,7 +185,11 @@ func loadEnv(scheme string, cfg any) error {
 		case reflect.String:
 			f.SetString(val)
 		case reflect.Bool:
-			f.SetBool(val == "true" || val == "1")
+			b, err := strconv.ParseBool(val)
+			if err != nil {
+				return fmt.Errorf("%s: %w", envKey, err)
+			}
+			f.SetBool(b)
 		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 			n, err := strconv.ParseInt(val, 10, 64)
 			if err != nil {

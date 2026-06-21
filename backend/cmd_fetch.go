@@ -56,16 +56,22 @@ func (o *FetchCmd) Run() error {
 // once per Run() invocation so the same client (and its transport's idle-conn
 // pool) is reused across --interval cycles, preventing the per-cycle Transport
 // leak where readLoop goroutines keep idle sockets/FDs alive until the remote
-// server closes them.  IdleConnTimeout matches the SSRF-guarded transport in
-// mod/helper_ssrf.go (90 s).
+// server closes them.
+//
+// It is built on mod.SafeTransport so the dial-time SSRF guard screens the
+// feed-fetch path: the #feed fetcher drives this client for BOTH the configured
+// feed URL and the auto-discovered <link rel=alternate> target — a URL pulled
+// out of fetched HTML, i.e. attacker-influenced — and the guard re-checks every
+// redirect hop. It honors SRR_ALLOW_PRIVATE_FETCH (via mod.AllowPrivateFetch),
+// so the flag's documented scope actually covers feed fetches. Pooling limits
+// are sized to the worker count; SafeTransport's IdleConnTimeout is 90 s.
 func newFetchClient(workers int) *http.Client {
+	t := mod.SafeTransport()
+	t.MaxIdleConnsPerHost = workers
+	t.MaxConnsPerHost = workers
 	return &http.Client{
-		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			MaxIdleConnsPerHost: workers,
-			MaxConnsPerHost:     workers,
-			IdleConnTimeout:     90 * time.Second,
-		},
+		Timeout:   10 * time.Second,
+		Transport: t,
 	}
 }
 
