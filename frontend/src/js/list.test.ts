@@ -1048,6 +1048,40 @@ describe("list", () => {
       expect(spy).toHaveBeenCalledWith(0, 132)
    })
 
+   // ── Roving tabindex ────────────────────────────────────────────────────────
+   // Tab lands on the cursor only, not every article: exactly one row sits in the
+   // Tab order (tabindex 0) — the selected row, or the first row when none is.
+   const $tabbable = () =>
+      $rows()
+         .filter((a) => a.tabIndex === 0)
+         .map((a) => Number(a.dataset.chron))
+
+   it("keeps only the selected row in the Tab order", async () => {
+      setIndex(10)
+      nav._setAnchor(5) // reader's article → row 5 is the selection
+      await list.render()
+      expect($tabbable()).toEqual([5]) // exactly one Tab stop, on the cursor
+      expect($rows().every((a) => a.tabIndex === (Number(a.dataset.chron) === 5 ? 0 : -1))).toBe(true)
+   })
+
+   it("with no selection, the first row is the lone Tab stop", async () => {
+      setIndex(4) // newest-default ([ALL]) → nothing pre-selected (pos -1)
+      await list.render()
+      expect($current()).toEqual([]) // no cursor…
+      expect($tabbable()).toEqual([3]) // …so the first (newest) row is reachable by Tab
+   })
+
+   it("the Tab stop follows the cursor as moveSelection steps", async () => {
+      setIndex(10)
+      nav._setAnchor(5)
+      await list.render()
+      expect($tabbable()).toEqual([5])
+      await list.moveSelection("older")
+      expect($tabbable()).toEqual([4]) // moved with the highlight
+      await list.moveSelection("newer")
+      expect($tabbable()).toEqual([5])
+   })
+
    // ── Anchor re-seed + divider integrity ─────────────────────────────────────
    it("re-seeds to the newest match when the anchor lies below the filter's oldest article", async () => {
       // 0,1 = ch2 (excluded); 2,3 = ch1. Anchor at 0 (a ch2 row): feedLeft(0)
