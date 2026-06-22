@@ -164,10 +164,10 @@ video {
    margin: 0 0.4rem;
 }
 
-/* Content — the prose voice is serif; headings, code and captions stay in the
-   wire chrome's sans/mono (set below). */
+/* Content — the prose voice is sans; headings stay sans but heavier, code and
+   captions in the wire chrome's mono (set below). */
 .srr-content {
-   font-family: var(--font-serif);
+   font-family: var(--font-sans);
    font-size: 1.05rem;
    line-height: 1.65;
    transition:
@@ -192,8 +192,8 @@ video {
    & h4,
    & h5,
    & h6 {
-      /* Sans subheads punctuate the serif prose — editorial signposts, not part
-         of the running text. */
+      /* Heavier subheads punctuate the running prose — editorial signposts, not
+         part of the running text. */
       font-family: var(--font-sans);
       font-weight: 650;
       line-height: 1.3;
