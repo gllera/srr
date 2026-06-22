@@ -155,6 +155,10 @@ export function rowEl(
    a.className = "srr-row"
    a.href = "#" + chron + nav.tokensSuffix()
    a.dataset.chron = String(chron)
+   // Roving tabindex: every row defaults OUT of the Tab order; syncRovingTab puts
+   // exactly one back in (the cursor, or the first row), so Tab lands on the
+   // selection instead of stepping through every article.
+   a.tabIndex = -1
    // The article currently in the reader (the one you were just reading) is
    // highlighted wherever it appears, so returning to the list lands you on it.
    if (chron === nav.currentChron()) a.classList.add("srr-row-current")
@@ -531,6 +535,7 @@ export async function render(center = false, onInteractive?: () => void): Promis
    container.append(topSentinel, rowsEl, bottomSentinel)
    syncBottomTerminus() // cap the rows when the whole view fits one batch
    syncTopTerminus() // and cap the top when we're already anchored at the newest
+   syncRovingTab() // the seed row (or, with no selection, the first row) is the lone Tab stop
 
    // Position the surface, then hand it over (interactive) before the fills land.
    // Returning from the reader (center) lands on the live article immediately — its
@@ -660,6 +665,7 @@ async function renderSearch(my: object, onInteractive?: () => void): Promise<voi
    container.append(topSentinel, rowsEl, bottomSentinel)
    syncBottomTerminus()
    syncTopTerminus()
+   syncRovingTab() // the newest hit (selected by renderSearch) is the lone Tab stop
    window.scrollTo(0, 0)
    notifyScroll()
    userScrolled = false
@@ -730,6 +736,7 @@ export function refresh(): void {
       relabelDividers() // drop any day divider orphaned by the removed rows (#11)
       if (rowsEl && !rowsEl.querySelector("a.srr-row")) showEmptyState() // (#1)
    }
+   syncRovingTab() // the live current highlight (or a saved-view removal) may have moved the cursor
 }
 
 // Force a rebuild regardless of builtKey — used after an unseen-only toggle or a
@@ -1036,6 +1043,20 @@ function rowSibling(row: HTMLElement, dir: "older" | "newer"): HTMLElement | nul
    return sib
 }
 
+// Roving tabindex: keep exactly ONE row in the Tab order — the selected
+// (.srr-row-current) row, or the first row when nothing is selected yet — so Tab
+// lands on the cursor and then leaves the list, rather than stepping through every
+// article. A/←·D/→ (moveSelection) move the cursor between rows; .focus() still
+// works on the off-tab-order rows since tabindex -1 is programmatically focusable.
+function syncRovingTab(): void {
+   if (!rowsEl) return
+   const rows = rowsEl.querySelectorAll<HTMLElement>("a.srr-row")
+   const tabbable = rowsEl.querySelector<HTMLElement>("a.srr-row.srr-row-current") ?? rows[0] ?? null
+   rows.forEach((a) => {
+      a.tabIndex = a === tabbable ? 0 : -1
+   })
+}
+
 // Make `row` the cursor: move the highlight, sync nav.pos (so the selection IS
 // the reader's "current article"), and scroll it into view. notifyScroll resyncs
 // the gesture toolbar baseline so the programmatic scroll doesn't read as a
@@ -1047,6 +1068,7 @@ function selectRow(row: HTMLElement): void {
    rowsEl.querySelector("[data-select-pending]")?.removeAttribute("data-select-pending")
    rowsEl.querySelector(".srr-row-current")?.classList.remove("srr-row-current")
    row.classList.add("srr-row-current")
+   syncRovingTab() // the cursor moved — it is now the one tabbable row
    // Move DOM focus to the row anchor so the keyboard selection is announced to
    // screen readers and the focus ring tracks the cursor; preventScroll leaves
    // positioning to scrollRowIntoView below (the visual highlight alone never
