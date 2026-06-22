@@ -28,14 +28,15 @@ declare module "vitest" {
 
 export default async function setup({ provide }: GlobalSetupContext) {
    const cwd = process.cwd() // frontend/
-   const appDir = resolve(cwd, "../dist/srrf") // Parcel's configured target dir
+   const appDir = resolve(cwd, "../dist/srrf") // build output dir (passed via --dist-dir)
    const packsDir = mkdtempSync(join(tmpdir(), "srr-e2e-browser-"))
 
    // Build the real bundle pointed at the same-origin /packs/ path.
-   await execFileAsync(resolve(cwd, "node_modules/.bin/parcel"), ["build", "--no-cache", "--no-source-maps"], {
-      cwd,
-      env: { ...process.env, SRR_CDN_URL: "/packs/" },
-   })
+   await execFileAsync(
+      resolve(cwd, "node_modules/.bin/parcel"),
+      ["build", "--dist-dir", "../dist/srrf", "--no-cache", "--no-source-maps"],
+      { cwd, env: { ...process.env, SRR_CDN_URL: "/packs/" } },
+   )
 
    const { server, baseUrl } = await startStaticServer({ appDir, packsDir })
    provide("baseUrl", `${baseUrl}/`)
