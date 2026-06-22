@@ -186,23 +186,21 @@ describe("browser: real SPA over real packs", () => {
       try {
          await page.setViewport({ width: 500, height: 600 }) // tall enough for all 6 rows
          await waitList(page)
-         expect(await $currentTitle(page)).toBeNull() // fresh boot: nothing selected
+         // [ALL] boots anchored at the oldest unread row (start of the backlog),
+         // which is the selected cursor — nothing seen, so that's the oldest article.
+         await waitCurrent(page, "news title 0")
 
-         // First key drops the cursor on the topmost visible row (the newest), no step.
+         // D / → step to the NEWER neighbor (up the newest-first list).
          await page.keyboard.press("d")
-         await waitCurrent(page, "sport title 1")
-
-         // A / ← step to the OLDER neighbor (down the newest-first list).
-         await page.keyboard.press("a")
-         await waitCurrent(page, "sport title 0")
-         await page.keyboard.press("ArrowLeft")
-         await waitCurrent(page, "tech title 1")
-
-         // D / → step back to the NEWER neighbor (up).
+         await waitCurrent(page, "news title 1")
          await page.keyboard.press("ArrowRight")
-         await waitCurrent(page, "sport title 0")
-         await page.keyboard.press("d")
-         await waitCurrent(page, "sport title 1")
+         await waitCurrent(page, "tech title 0")
+
+         // A / ← step back to the OLDER neighbor (down).
+         await page.keyboard.press("ArrowLeft")
+         await waitCurrent(page, "news title 1")
+         await page.keyboard.press("a")
+         await waitCurrent(page, "news title 0")
 
          // Exactly one row is ever highlighted, and the reader never opened.
          expect(await page.$$eval(".srr-list a.srr-row-current", (e) => e.length)).toBe(1)
@@ -222,7 +220,10 @@ describe("browser: real SPA over real packs", () => {
          // could collide with the bottom toolbar.
          await page.setViewport({ width: 500, height: 320 })
          await waitList(page)
-         await page.keyboard.press("d") // establish the cursor on the newest visible row
+         await waitCurrent(page, "news title 0") // boot anchors at the oldest unread, selected
+         // Climb to the newest, then step back DOWN to the oldest so the final
+         // downward step has to scroll the list toward the bottom toolbar.
+         for (let i = 0; i < 5; i++) await page.keyboard.press("d") // newer ×5 → the newest row
          await waitCurrent(page, "sport title 1")
          for (let i = 0; i < 5; i++) await page.keyboard.press("a") // older ×5 → the oldest row
          await waitCurrent(page, "news title 0")
@@ -248,11 +249,8 @@ describe("browser: real SPA over real packs", () => {
       const [page, close] = await open()
       try {
          await waitList(page)
-         await page.keyboard.press("d") // cursor on the newest row
-         await waitCurrent(page, "sport title 1")
-         for (let i = 0; i < 5; i++) await page.keyboard.press("a") // older → the oldest row
-         await waitCurrent(page, "news title 0")
-         // One more older step can't advance — the row takes the down-bump cue.
+         await waitCurrent(page, "news title 0") // boot anchors at the oldest end, selected
+         // Already at the oldest — one more older step can't advance; the row takes the down-bump cue.
          await page.keyboard.press("a")
          await page.waitForFunction(
             () => {
@@ -333,27 +331,31 @@ describe("browser: real SPA over real packs", () => {
       const [page, close] = await open()
       try {
          // Short viewport so the filtered list is taller than the fold and scrollable.
-         await page.setViewport({ width: 500, height: 140 })
-         await waitList(page)
+         await page.setViewport({ width: 500, height: 240 })
 
-         // Pick the never-read "world" tag (News + Tech) from a fresh boot.
-         await page.click(".srr-feed")
-         await page.waitForSelector('#srr-feed-menu.srr-open a[data-value="world"]', { timeout: 20000 })
-         await page.click('#srr-feed-menu a[data-value="world"]')
+         // Deep-link straight to the never-read "world" tag (News + Tech) — a fresh
+         // boot at #!world, every article unread.
+         await page.goto(baseUrl + "#!world", { waitUntil: "load" })
          await waitList(page)
          expect(await page.evaluate(() => location.hash)).toBe("#!world")
 
-         // Oldest world (news title 0) is the anchor + selection; the list scrolled
-         // down to it so the newer world rows sit ABOVE the fold — only possible
-         // when it anchored at the oldest, not pinned at the newest ([ALL]).
+         // Oldest world (news title 0) is the anchor + selection, and the list
+         // scrolled down to bring it ON SCREEN (above the bottom toolbar) with the
+         // newer world rows pushed ABOVE the fold — only possible when it anchored
+         // at the oldest (not pinned at the newest) AND the post-fill re-anchor put
+         // that bottom-most selected row into view rather than below the fold.
          await waitCurrent(page, "news title 0")
          await page.waitForFunction(() => window.scrollY > 0, { timeout: 20000 })
          expect(await $rowTop(page, "tech title 1")).toBeLessThan(0) // newest world, scrolled off above
-         expect(await $rowTop(page, "tech title 0")).toBeLessThan(0)
-         const oldestTop = await $rowTop(page, "news title 0") // oldest world = the anchor, near the top
-         expect(oldestTop).not.toBeNull()
-         expect(oldestTop!).toBeGreaterThanOrEqual(0)
-         expect(oldestTop!).toBeLessThan(140)
+         const sel = await page.evaluate(() => {
+            const row = [...document.querySelectorAll(".srr-list a.srr-row")].find((e) =>
+               e.classList.contains("srr-row-current"),
+            )!
+            const r = row.getBoundingClientRect()
+            const b = document.querySelector(".srr-toolbar")!.getBoundingClientRect()
+            return { top: r.top, visibleAboveToolbar: r.top >= 0 && r.bottom <= b.top + 0.5 }
+         })
+         expect(sel.visibleAboveToolbar).toBe(true) // the selected oldest row is fully on screen
          // Sport (tag "play") is excluded entirely.
          expect(await $rowTop(page, "sport title 1")).toBeNull()
       } finally {
@@ -986,12 +988,11 @@ describe("browser: real SPA over real packs", () => {
       try {
          await page.goto(baseUrl, { waitUntil: "load" })
          await waitList(page)
-         // Drop the list cursor on the NEWEST row (chron 99) — a live anchor with
-         // ~99 older unread rows below it. nav.select sets pos without recordSeen,
-         // so it stays the anchor through the unread toggle (a reader open would
-         // mark it seen and disqualify it).
-         await page.keyboard.press("d")
-         await waitCurrent(page, "bulk title 99")
+         // [ALL] boots anchored at the oldest unread row (chron 0) — a live anchor
+         // (render's nav.select sets pos without recordSeen), so it stays the anchor
+         // through the unread toggle. ~99 newer unread rows sit above it; the toggle
+         // must still rerender a BOUNDED window, not page the whole archive.
+         await waitCurrent(page, "bulk title 0")
          // Open settings → the list goes display:none behind the config surface.
          await page.click(".srr-settings")
          await page.waitForSelector(".srr-config-unread", { visible: true })

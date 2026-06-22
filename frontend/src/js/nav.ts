@@ -115,24 +115,31 @@ export function anchorChron(): number {
 // tracks it (render's nav.select), the article the list SELECTS on a fresh
 // filter. The reader's live article still wins when it matches the active filter
 // (you tapped back from reading it — anchorChron). Otherwise:
-//   • a feed/tag opens at its OLDEST UNREAD article — the start of the unread
-//     backlog, to read forward (newer) from there — falling back to its newest
-//     article (the -1 newest-default below) when nothing is unread. Computed by
+//   • a feed/tag/[ALL] opens at its OLDEST UNREAD article — the start of the
+//     unread backlog, to read forward (newer) from there — falling back to its
+//     newest article (the -1 newest-default below) when nothing is unread. Computed by
 //     raising each member's bound past its seen high-water (idempotent with
 //     unseen-only's already-raised bounds; a never-seen feed keeps its bound, so
 //     its full backlog counts as unread) and taking the OLDEST match under those
 //     bounds — the same unread set unseen-only navigation walks, evaluated
 //     transiently here without touching filter.feeds, so the list still SHOWS
-//     every article (read rows below the anchor, unread above).
-//   • [ALL], ★ Saved and search keep the newest-first default (-1): the latest
+//     every article (read rows below the anchor, unread above). [ALL] runs this
+//     identical scan across every feed (filter.clear populates filter.feeds with
+//     all of them); on a fresh device with nothing read it lands at the oldest
+//     article overall, exactly as a never-opened tag does.
+//   • ★ Saved and search keep the newest-first default (-1): the latest
 //     available article. A query in particular always shows its newest hit,
-//     regardless of seen state.
+//     regardless of seen state. An empty store (no feeds) also stays at -1.
 // Async because findRight may touch an idx pack; anchorChron stays synchronous
 // for the live-position callers.
 export async function listAnchor(): Promise<number> {
    const live = anchorChron()
    if (live >= 0) return live
-   if (!filter.active || filter.saved || filter.search) return -1
+   // [ALL] (filter.clear) populates filter.feeds with every feed, so it runs the
+   // same oldest-unread scan as a feed/tag — just spanning all feeds. Only saved/
+   // search (feed-agnostic, filter.feeds empty) and an empty store (no feeds, which
+   // would also make Math.min below Infinity) keep the newest-first default.
+   if (filter.saved || filter.search || filter.feeds.size === 0) return -1
    const seen = readSeen()
    const unread = new Map<number, number>()
    for (const [id, bound] of filter.feeds) {

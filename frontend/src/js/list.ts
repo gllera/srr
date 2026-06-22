@@ -561,6 +561,35 @@ export async function render(center = false, onInteractive?: () => void): Promis
    if (my !== tok) return
    relabelDividers()
    if (anchoredMid) reassertAnchor(seed, center && seed === nav.anchorChron())
+
+   // Late re-anchor: content-visibility rows expand to their real painted height
+   // and web fonts reflow AFTER this synchronous fill+reassert, growing the
+   // document. For a seed near the oldest end (few/no rows below it) that growth
+   // drops the selected row back below the fold — selected but off-screen, the
+   // bug a fresh oldest-unread [ALL]/feed/tag would otherwise show on every open.
+   // `settle` re-asserts across frames until the scroll position stops moving
+   // (each frame paints more rows near the seed, so it converges), bounded so a
+   // never-settling layout can't spin, and abandoned the moment the user scrolls
+   // (reassertAnchor no-ops once userScrolled). Run it now for the content-visibility
+   // growth AND again on document.fonts.ready, because a web-font swap reflows the
+   // rows taller well after the first settle window has closed.
+   if (anchoredMid && typeof requestAnimationFrame === "function") {
+      const settle = (): void => {
+         let lastY = -1
+         let tries = 0
+         const step = (): void => {
+            if (my !== tok || userScrolled || tries++ > 8) return
+            reassertAnchor(seed, center && seed === nav.anchorChron())
+            if (window.scrollY !== lastY) {
+               lastY = window.scrollY
+               requestAnimationFrame(step)
+            }
+         }
+         requestAnimationFrame(step)
+      }
+      settle()
+      document.fonts?.ready?.then(settle)
+   }
 }
 
 // Search render: the full hit-set is pre-loaded into nav's snapshot via
