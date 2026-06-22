@@ -728,6 +728,17 @@ body.srr-view-list .srr-toolbar {
    &:active {
       transform: scale(0.92);
    }
+   /* Unhealthy feed: tint the ⓘ by grade so the details affordance is itself the
+      health flag (warn = amber, crit = accent red — matching the row's err dot);
+      hold the tint on hover too. */
+   &.srr-info-warn,
+   &.srr-info-warn:hover {
+      color: #c98000;
+   }
+   &.srr-info-crit,
+   &.srr-info-crit:hover {
+      color: var(--accent);
+   }
 }
 
 /* Title search bar — pinned atop the list while a "q:<query>" filter is active
