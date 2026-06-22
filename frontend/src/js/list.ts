@@ -532,21 +532,30 @@ export async function render(center = false, onInteractive?: () => void): Promis
    syncBottomTerminus() // cap the rows when the whole view fits one batch
    syncTopTerminus() // and cap the top when we're already anchored at the newest
 
-   // Position on the skeletons, then hand the surface over (interactive) before
-   // the network fills land.
-   if (anchoredMid) scrollChronToView(seed, center && seed === nav.anchorChron())
+   // Position the surface, then hand it over (interactive) before the fills land.
+   // Returning from the reader (center) lands on the live article immediately — its
+   // pack is warm, so it anchors before the fill and re-asserts as neighbors grow.
+   // A FRESH anchor (boot/filter change — landOnceMode) instead stays at the top
+   // during load and lands ONCE after layout settles (below): scrolling onto
+   // still-skeleton, pre-font rows and then correcting as they paint/reflow taller
+   // is exactly the visible "bump". The newest-default (-1) is plain top.
+   const landOnceMode = anchoredMid && !center
+   if (anchoredMid && center) scrollChronToView(seed, true)
    else window.scrollTo(0, 0)
    notifyScroll()
    userScrolled = false
    onInteractive?.()
-   observe(my)
+   // Hold the infinite-scroll observer until the land-once scroll: at the top during
+   // load its top sentinel would page newer rows in (a large filter could runaway)
+   // before we've reached the seed. The centered/newest paths observe right away.
+   if (!landOnceMode) observe(my)
 
    // Fill rows NEAREST the anchor first (bounded concurrency), so the packs for
    // what you're looking at resolve before off-screen rows — progressive fill
    // prioritized by navigation position. Out-of-order arrival within a wave is
    // fine: each card fills its own row. Pin the row's real height, relabel
-   // dividers (which skip still-skeleton rows), and re-assert the anchor (guarded)
-   // so a height change above the seed doesn't drift it.
+   // dividers (which skip still-skeleton rows), and re-assert the anchor (centered
+   // reader-return only) so a height change above the seed doesn't drift it.
    const anchorIdx = chronsDesc.indexOf(seed)
    const fillOrder = chronsDesc.map((_, k) => k).sort((a, b) => Math.abs(a - anchorIdx) - Math.abs(b - anchorIdx))
    await runPool(fillOrder, FILL_CONCURRENCY, async (k) => {
@@ -556,39 +565,54 @@ export async function render(center = false, onInteractive?: () => void): Promis
       fillRow(rows[k], card, seen)
       pinHeights([rows[k]])
       relabelDividers()
-      if (anchoredMid) reassertAnchor(seed, center && seed === nav.anchorChron())
+      if (anchoredMid && center) reassertAnchor(seed, true)
    })
    if (my !== tok) return
    relabelDividers()
-   if (anchoredMid) reassertAnchor(seed, center && seed === nav.anchorChron())
+   if (anchoredMid && center) reassertAnchor(seed, true)
 
-   // Late re-anchor: content-visibility rows expand to their real painted height
-   // and web fonts reflow AFTER this synchronous fill+reassert, growing the
-   // document. For a seed near the oldest end (few/no rows below it) that growth
-   // drops the selected row back below the fold — selected but off-screen, the
-   // bug a fresh oldest-unread [ALL]/feed/tag would otherwise show on every open.
-   // `settle` re-asserts across frames until the scroll position stops moving
-   // (each frame paints more rows near the seed, so it converges), bounded so a
-   // never-settling layout can't spin, and abandoned the moment the user scrolls
-   // (reassertAnchor no-ops once userScrolled). Run it now for the content-visibility
-   // growth AND again on document.fonts.ready, because a web-font swap reflows the
-   // rows taller well after the first settle window has closed.
-   if (anchoredMid && typeof requestAnimationFrame === "function") {
-      const settle = (): void => {
-         let lastY = -1
-         let tries = 0
-         const step = (): void => {
-            if (my !== tok || userScrolled || tries++ > 8) return
-            reassertAnchor(seed, center && seed === nav.anchorChron())
-            if (window.scrollY !== lastY) {
-               lastY = window.scrollY
-               requestAnimationFrame(step)
-            }
+   // Land-once for a fresh anchor: content-visibility rows paint taller and web
+   // fonts reflow AFTER the fill, so scrolling now would land short and then bump as
+   // the rows grow. Instead CONVERGE THE MEASUREMENT without moving: each frame
+   // re-pin every row's current true height (so even off-screen rows reserve their
+   // real size) and compute where the seed WOULD scroll to; once that target stops
+   // changing for two frames, the layout has settled — scroll there a single time
+   // and only now start the observer. Bounded so a never-settling layout can't spin;
+   // abandoned if the user scrolls first. No requestAnimationFrame (jsdom) → land
+   // synchronously.
+   if (landOnceMode) {
+      const allRows = (): HTMLElement[] => (rowsEl ? [...rowsEl.querySelectorAll<HTMLElement>("a.srr-row")] : [])
+      const commit = (): void => {
+         if (!userScrolled) {
+            scrollChronToView(seed, false)
+            notifyScroll()
+            userScrolled = false
          }
-         requestAnimationFrame(step)
+         observe(my)
       }
-      settle()
-      document.fonts?.ready?.then(settle)
+      if (typeof requestAnimationFrame === "function") {
+         let lastTarget = -1
+         let stable = 0
+         let tries = 0
+         const tick = (): void => {
+            if (my !== tok) return
+            if (userScrolled || !rowsEl) return commit()
+            pinHeights(allRows()) // re-measure true (post-paint/post-font) heights
+            const target = chronScrollTarget(seed, false) ?? -1
+            if (target === lastTarget) stable++
+            else {
+               stable = 0
+               lastTarget = target
+            }
+            if (stable >= 2 || tries++ > 20) return commit()
+            requestAnimationFrame(tick)
+         }
+         const fontsReady = document.fonts?.ready ?? Promise.resolve()
+         void fontsReady.then(() => requestAnimationFrame(tick))
+      } else {
+         pinHeights(allRows())
+         commit()
+      }
    }
 }
 
@@ -729,15 +753,23 @@ function findRow(chron: number): HTMLElement | null {
 // if the row isn't rendered (e.g. saved view dropped it on return) — the caller
 // then keeps the current scroll.
 function scrollChronToView(chron: number, center: boolean): void {
+   const target = chronScrollTarget(chron, center)
+   if (target !== null) window.scrollTo(0, target)
+}
+
+// The clamped scrollY that would bring `chron`'s row into view — the pure
+// computation behind scrollChronToView, also used by the land-once loop to detect
+// when the target has stopped moving (layout settled) BEFORE committing a single
+// scroll. null if the row isn't rendered. Top-align clears the whole top chrome
+// (topInset = sticky bar + day divider), the same inset scrollRowIntoView uses;
+// centering parks the row mid-band, away from the divider, reserving only the bar.
+function chronScrollTarget(chron: number, center: boolean): number | null {
    const row = findRow(chron)
-   if (!row) return
+   if (!row) return null
    const rect = row.getBoundingClientRect()
    const top = rect.top + window.scrollY
-   // Top-align clears the whole top chrome (topInset = sticky bar + day divider),
-   // the same inset scrollRowIntoView/firstVisibleRow use; centering parks the row
-   // mid-band, away from the divider, so it reserves only the search bar.
    const target = center ? top + rect.height / 2 - (window.innerHeight + stickyOffset()) / 2 : top - topInset()
-   window.scrollTo(0, Math.max(0, target))
+   return Math.max(0, target)
 }
 
 function stickyOffset(): number {
