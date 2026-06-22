@@ -21,15 +21,13 @@
    /* modal backdrop — a FIXED dark veil, not --fg (which inverts to a pale fog in dark mode) */
    --scrim: rgba(0, 0, 0, 0.5);
 
-   /* Fonts. --font-mono / --font-serif lead with the brand webfonts (JetBrains
-      Mono / Charter); the Claude Design export loads those families from a CDN
-      (see .design-sync/fonts.css), while the SRR app ships no webfonts and falls
-      through to the system stacks behind them — same look where the OS has them. */
+   /* Fonts — system stacks only; the app ships no webfonts (no CDN font
+      dependency). --font-mono is the "wire" voice (metadata/labels/code). */
    --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
-   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+   --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
    /* The reader's prose voice. Pairs with the sans/mono "wire" chrome (headings,
       code): machine metadata wraps human prose. */
-   --font-serif: "Charter", ui-serif, Georgia, "Times New Roman", serif;
+   --font-serif: ui-serif, Georgia, "Times New Roman", serif;
 
    /* Type scale (1.125 ratio). em multipliers in .srr-content mirror these ratios. */
    --text-sm: 0.875rem;
