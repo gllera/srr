@@ -34,11 +34,10 @@ categorical color (rails, eyebrows, badges).
 **Shape** — `--radius` (4px corners), `--shadow` (the elevation shadow for popups/cards).
 
 **Type** — three roles, deliberately paired ("wire chrome wraps human prose"):
-`--font-sans` for UI chrome (system stack), `--font-mono` for metadata/wire labels
-(e.g. a `source · age` eyebrow) — leads with **JetBrains Mono**, and `--font-serif`
-for reading prose — leads with **Charter**. The mono + serif families load from a
-CDN (`fonts/fonts.css`, inside the styles.css closure) so designs render the real
-faces, with system stacks behind them as fallback. Scale (1.125 ratio): `--text-sm`,
+`--font-sans` for UI chrome, `--font-mono` for metadata/wire labels (e.g. a
+`source · age` eyebrow), and `--font-serif` for reading prose. All three are
+**system font stacks** (`system-ui` / `ui-monospace` / `ui-serif` and their platform
+fallbacks) — no webfonts, no CDN font dependency. Scale (1.125 ratio): `--text-sm`,
 `--text-base`, `--text-lg`, `--text-xl`.
 
 **Spacing** — `--space-1` (0.25rem), `--space-2` (0.5rem), `--space-3` (0.75rem),

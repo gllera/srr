@@ -29,20 +29,19 @@ cp .design-sync/conventions.md ds-bundle/README.md
 - `styles.css` is the **entry** (designs receive its `@import` closure): fonts, then tokens, then the `.srr-*` component styles.
 - `components.css` = `frontend/src/styles.css` minus its own `@import "./tokens.css"` (the entry imports tokens instead).
 - `tokens/tokens.css` = `frontend/src/tokens.css` verbatim — the reusable part.
-- `fonts/fonts.css` = `.design-sync/fonts.css` — CDN `@import`s for the brand webfonts.
+- `fonts/fonts.css` = `.design-sync/fonts.css` — empty no-op (no webfonts; tokens use system stacks).
 - `README.md` = `.design-sync/conventions.md` (the design-agent conventions header; edit the source copy, not the build output).
 
-### Fonts — CDN webfonts, version-controlled here
+### Fonts — system stacks only, no webfonts
 
-The brand families the tokens name are **JetBrains Mono** (mono) and **Charter** (serif),
-and `tokens.css` now lists them FIRST in `--font-mono`/`--font-serif`. They load from
-popular CDNs via `.design-sync/fonts.css` (Google Fonts for JetBrains Mono, jsDelivr's
-`charter-webfont` for Charter) — **no self-hosted binaries**. The build copies that file
-to `ds-bundle/fonts/fonts.css` and `styles.css` `@import`s it, so the closure carries the
-real faces. The SRR **app** ships no webfonts, so it falls through to the system stacks
-behind them (same look where the OS has the family). An earlier sync had self-hosted
-`fonts/*.woff2`/`*.ttf` binaries added in-app; the CDN switch retired them (the re-sync
-deletes everything under `fonts/` except the rebuilt `fonts.css`).
+The tokens use **system font stacks only** — `--font-sans`/`--font-mono`/`--font-serif`
+in `tokens.css` lead with `system-ui`/`ui-monospace`/`ui-serif` and their platform
+fallbacks; there are **no brand webfonts** and **no CDN font dependency**.
+`.design-sync/fonts.css` is therefore an empty no-op, still copied to
+`ds-bundle/fonts/fonts.css` and `@import`ed by `styles.css` so the build recipe is
+unchanged. Earlier syncs loaded brand webfonts (JetBrains Mono / Charter) — first
+self-hosted `fonts/*.woff2`/`*.ttf` binaries, then CDN `@import`s; both were removed.
+The re-sync deletes everything under `fonts/` except the rebuilt (empty) `fonts.css`.
 
 ### ⚠ In-app edits to managed files get OVERWRITTEN
 
