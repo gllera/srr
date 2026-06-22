@@ -1742,9 +1742,38 @@ describe("listAnchor", () => {
       expect(await nav.listAnchor()).toBe(1)
    })
 
-   it("returns -1 (newest-first) for [ALL] with no live position", async () => {
-      setupIndex([{ feedId: 1 }, { feedId: 2 }])
+   it("anchors [ALL] at the oldest unread across all feeds (fresh device = oldest overall)", async () => {
+      // Nothing seen → every article unread → [ALL] lands at the oldest article,
+      // exactly as a never-opened tag does over its members.
+      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }])
       nav.select(-1, -1) // no reader article
+      nav.filter.clear()
+      expect(await nav.listAnchor()).toBe(0)
+   })
+
+   it("anchors [ALL] at the oldest UNREAD across feeds, skipping older read articles", async () => {
+      // feed 1 (chron 0,1) fully read; feed 2 (chron 2,3) read through chron 2.
+      // Oldest unread overall = chron 3; the read feed-1 articles below it are
+      // skipped — the same oldest-unread scan a tag runs, spanning every feed.
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 2 }, { feedId: 2 }])
+      seedSeen({ "feed:1": 1, "feed:2": 2 })
+      nav.select(-1, -1)
+      nav.filter.clear()
+      expect(await nav.listAnchor()).toBe(3)
+   })
+
+   it("falls back to newest-first (-1) for [ALL] with nothing unread (fully caught up)", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 2 }])
+      seedSeen({ "feed:1": 0, "feed:2": 1 }) // both read through their newest
+      nav.select(-1, -1)
+      nav.filter.clear()
+      expect(await nav.listAnchor()).toBe(-1)
+   })
+
+   it("returns -1 for [ALL] on an empty store (no feeds with articles)", async () => {
+      // No setupIndex → no feeds; filter.clear() leaves filter.feeds empty, so the
+      // oldest-unread scan is skipped (no Math.min over an empty map).
+      nav.select(-1, -1)
       nav.filter.clear()
       expect(await nav.listAnchor()).toBe(-1)
    })
