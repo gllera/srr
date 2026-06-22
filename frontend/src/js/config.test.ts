@@ -229,6 +229,21 @@ describe("filter list", () => {
       const row = $<HTMLAnchorElement>('.srr-config-filter a[data-value="9"]')
       expect(row.querySelector(".srr-err-dot")).not.toBeNull()
       expect(row.title).toBe("boom")
+      // The ⓘ details button is tinted red (crit) so it reads as the health flag.
+      expect(row.querySelector(".srr-info-btn")!.classList.contains("srr-info-crit")).toBe(true)
+   })
+
+   it("leaves a healthy feed's ⓘ untinted", async () => {
+      data.groupFeedsByTag.mockReturnValue({
+         tagged: new Map(),
+         sortedTags: [],
+         untagged: [feed({ id: 9, title: "Fine" })],
+      })
+      const config = await mount()
+      config.open()
+      const info = $('.srr-config-filter a[data-value="9"] .srr-info-btn')
+      expect(info.classList.contains("srr-info-crit")).toBe(false)
+      expect(info.classList.contains("srr-info-warn")).toBe(false)
    })
 })
 
