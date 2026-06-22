@@ -62,7 +62,7 @@ describe("design-state screenshots", () => {
       // excludes design.html) with a same-origin /packs/ CDN path.
       await execFileAsync(
          resolve(CWD, "node_modules/.bin/parcel"),
-         ["build", "src/design.html", "--no-cache", "--no-source-maps"],
+         ["build", "src/design.html", "--dist-dir", "../dist/srrf", "--no-cache", "--no-source-maps"],
          { cwd: CWD, env: { ...process.env, SRR_CDN_URL: "/packs/" } },
       )
       srv = await startStaticServer({ appDir: APP_DIR, packsDir: PACKS_DIR, indexFile: "design.html" })
