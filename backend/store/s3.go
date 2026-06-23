@@ -123,7 +123,7 @@ func (d *S3) Put(ctx context.Context, key string, r io.Reader, ignoreExisting bo
 	// prefix, so the CDN serves finalized packs immutable and db.gz/latest
 	// always-revalidate.
 	cacheControl := cacheControlForKey(key)
-	// assets/ keys carry the SOURCE extension, which a transcoding asset filter
+	// assets/ keys carry the SOURCE extension, which a transcoding asset encoder
 	// can leave disagreeing with the bytes; remember the class before the path
 	// prefix so we can sniff the real Content-Type below.
 	isAsset := strings.HasPrefix(key, "assets/")
@@ -142,7 +142,7 @@ func (d *S3) Put(ctx context.Context, key string, r io.Reader, ignoreExisting bo
 		contentType = aws.String(ct)
 	}
 	// For assets the key's (source) extension can disagree with the bytes after a
-	// transcoding asset filter (e.g. a .jpg source stored as WebP), which would
+	// transcoding asset encoder (e.g. a .jpg source stored as WebP), which would
 	// stamp the wrong Content-Type and break in-browser rendering. Buffer the
 	// payload (already size-capped upstream) and sniff it; prefer a confident
 	// detection over the extension, falling back to the extension when the sniff

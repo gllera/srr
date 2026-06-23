@@ -97,7 +97,7 @@ func RunSubprocess(ctx context.Context, args string, env []string, dir string, s
 // as RunSubprocess — SubprocessTimeout off ctx, subprocessWaitDelay, and a
 // maxSubprocessOutput-capped stdout — but via direct exec rather than /bin/sh,
 // and WITHOUT trimming, since its stdout may be binary (e.g. a transcoded
-// asset). Used by the per-asset filter (assets.go), which would otherwise carry
+// asset). Used by the per-asset encoder (assets.go), which would otherwise carry
 // its own unbounded, deadline-free copy of subprocess exec.
 func RunCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
 	cctx, cancel := context.WithTimeout(ctx, SubprocessTimeout())
