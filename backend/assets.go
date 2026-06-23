@@ -32,7 +32,7 @@ var errNotAsset = errors.New("not a cache asset")
 type assetFetcher struct {
 	be       store.Backend
 	maxBytes int64
-	filter   []string
+	encoder  []string
 }
 
 // assetPrefix is the reserved store prefix for self-hosted media, analogous to
@@ -41,15 +41,15 @@ type assetFetcher struct {
 const assetPrefix = "assets/"
 
 // newAssetFetcher builds the run's asset uploader. maxKB caps a single stored
-// object's size. filterCmd, when non-empty, is a command run on every asset
+// object's size. encoderCmd, when non-empty, is a command run on every asset
 // just before upload to process its bytes (e.g. transcode media): it is split
 // on whitespace, the cache file path is appended as its final argument, and the
-// processed bytes are read from its stdout. Empty disables filtering.
-func newAssetFetcher(be store.Backend, maxKB int, filterCmd string) *assetFetcher {
+// processed bytes are read from its stdout. Empty disables encoding.
+func newAssetFetcher(be store.Backend, maxKB int, encoderCmd string) *assetFetcher {
 	return &assetFetcher{
 		be:       be,
 		maxBytes: int64(maxKB) * (1 << 10),
-		filter:   strings.Fields(filterCmd),
+		encoder:  strings.Fields(encoderCmd),
 	}
 }
 
@@ -62,8 +62,8 @@ func newAssetFetcher(be store.Backend, maxKB int, filterCmd string) *assetFetche
 // the upload, so the fetcher needs no store credentials.
 //
 // The existence check keys on the source so it can run BEFORE the optional
-// per-asset filter: an asset already in the store is returned without
-// re-running the filter or the upload. On a miss the filter (if configured)
+// per-asset encoder: an asset already in the store is returned without
+// re-running the encoder or the upload. On a miss the encoder (if configured)
 // processes the file just before upload; the stored object keeps the source
 // extension.
 //
@@ -108,11 +108,11 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 	// attacker-influenceable (an external ingest command or a content-marker mod
 	// can drop an arbitrarily large file); without this an oversized file would
 	// OOM the worker at the ReadFile below, before the post-payload cap fires.
-	// Skip the pre-read cap when a filter is configured: the filter may shrink an
-	// over-cap source (e.g. transcoding a large image), so only its output —
+	// Skip the pre-read cap when an encoder is configured: the encoder may shrink
+	// an over-cap source (e.g. transcoding a large image), so only its output —
 	// capped below — must fit, and the operator who enabled arbitrary asset
 	// processing accepts the unbounded source read it implies.
-	if a.maxBytes > 0 && len(a.filter) == 0 && fi.Size() > a.maxBytes {
+	if a.maxBytes > 0 && len(a.encoder) == 0 && fi.Size() > a.maxBytes {
 		return "", fmt.Errorf("asset %q source exceeds %d bytes (size %d)", localname, a.maxBytes, fi.Size())
 	}
 
@@ -126,9 +126,9 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 	sum := sha256.Sum256(orig)
 	key := contentHashKey(path.Ext(localname), sum)
 
-	// Already uploaded? Skip BOTH the filter and the upload — the common case for
+	// Already uploaded? Skip BOTH the encoder and the upload — the common case for
 	// an image reused across articles or feeds, and the reason the existence
-	// check keys on the source rather than on the filter's output.
+	// check keys on the source rather than on the encoder's output.
 	if rc, err := a.be.Get(ctx, key, true); err != nil {
 		return "", fmt.Errorf("check asset %q: %w", key, err)
 	} else if rc != nil {
@@ -136,13 +136,13 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 		return key, nil
 	}
 
-	// First time we've seen these bytes: run the configured per-asset filter (any
+	// First time we've seen these bytes: run the configured per-asset encoder (any
 	// processing — e.g. media transcoding) on the file just before upload, then
-	// store the result under the source-hash key. Fail-soft: a filter that errors
+	// store the result under the source-hash key. Fail-soft: an encoder that errors
 	// or emits nothing uploads the original unchanged.
 	payload := orig
-	if len(a.filter) > 0 {
-		if b, ok := a.runFilter(ctx, full, localname); ok {
+	if len(a.encoder) > 0 {
+		if b, ok := a.runEncoder(ctx, full, localname); ok {
 			payload = b
 		}
 	}
@@ -156,23 +156,23 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 	return key, nil
 }
 
-// runFilter runs the configured per-asset filter on the cache file just before
+// runEncoder runs the configured per-asset encoder on the cache file just before
 // upload, returning its stdout and ok=true on success. The cache file path is
 // appended as the command's final argument; stderr passes through for
 // diagnostics. Fail-soft: it returns ok=false — the caller uploads the original
-// unchanged — when the command errors or produces no output, so a filter hiccup,
-// or a file type the filter does not handle, never wedges a feed. Runs through
+// unchanged — when the command errors or produces no output, so an encoder hiccup,
+// or a file type the encoder does not handle, never wedges a feed. Runs through
 // mod.RunCommand so it shares the external-command bounds (a SubprocessTimeout
 // deadline, WaitDelay, and a capped stdout): a hung transcoder can't wedge the
 // worker and runaway output can't OOM it.
-func (a *assetFetcher) runFilter(ctx context.Context, full, localname string) ([]byte, bool) {
-	out, err := mod.RunCommand(ctx, a.filter[0], append(append([]string(nil), a.filter[1:]...), full)...)
+func (a *assetFetcher) runEncoder(ctx context.Context, full, localname string) ([]byte, bool) {
+	out, err := mod.RunCommand(ctx, a.encoder[0], append(append([]string(nil), a.encoder[1:]...), full)...)
 	if err != nil {
-		slog.Warn("asset filter failed; uploading original", "asset", localname, "cmd", a.filter[0], "err", err)
+		slog.Warn("asset encoder failed; uploading original", "asset", localname, "cmd", a.encoder[0], "err", err)
 		return nil, false
 	}
 	if len(out) == 0 {
-		slog.Warn("asset filter produced no output; uploading original", "asset", localname, "cmd", a.filter[0])
+		slog.Warn("asset encoder produced no output; uploading original", "asset", localname, "cmd", a.encoder[0])
 		return nil, false
 	}
 	return out, true
