@@ -35,6 +35,7 @@ type Globals struct {
 	MaxAssetSize int    `          default:"${maxAssetSize}"    env:"SRR_MAX_ASSET_SIZE" help:"Max self-hosted asset object size in KB."`
 	AssetProcess string `                             env:"SRR_ASSET_PROCESS" help:"Command run on every self-hosted asset just before upload to process its bytes, e.g. transcode media. The cache file path is substituted for each {input} token, or appended as the final arg when absent. With a {output} token the command writes its result to that file and prints a {mimetype,extension,encoding} JSON to stdout (setting the stored Content-Type/-Encoding); without {output}, processed bytes are read from stdout. Non-zero exit or empty output keeps the original. Skipped when the source is already uploaded. Empty disables. E.g. \"webify -m 720\" or \"conv -i {input} -o {output}\"."`
 	AssetPeek    string `                             env:"SRR_ASSET_PEEK" help:"Command run on every self-hosted asset (before the dedup check) to identify it: it receives the cache file path (substituted for each {input} token, or appended) and prints a {mimetype,extension,supported} JSON to stdout. The extension sets the stored object's key/extension (so a transcoded asset carries its true output extension) and mimetype its Content-Type; supported=false hosts the original bytes and skips asset-process. A non-zero exit or invalid JSON falls back to the source extension. Empty disables. E.g. \"identify-asset {input}\"."`
+	AssetWorkers int    `                             env:"SRR_ASSET_WORKERS" default:"${nproc}" help:"Max assets processed concurrently across all feeds (peek/transcode/upload). Independent of --workers."`
 	CacheDir     string `                             env:"SRR_CACHE_DIR"     help:"Local download cache for external ingest media (default $XDG_CACHE_HOME/srr)."`
 	Store        string `short:"o" default:"packs"    env:"SRR_STORE"         help:"Storage destination path."`
 	Force        bool   `                             env:"SRR_FORCE"         help:"Override DB write lock if needed."`
@@ -213,6 +214,10 @@ func main() {
 
 	if globals.Workers < 1 {
 		globals.Workers = runtime.NumCPU()
+	}
+
+	if globals.AssetWorkers < 1 {
+		globals.AssetWorkers = runtime.NumCPU()
 	}
 
 	// Apply the resolved config into the mod package (its external-command
