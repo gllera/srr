@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 )
@@ -31,9 +30,13 @@ func TestResolveImportFeedsPartial(t *testing.T) {
 	feeds := []*Feed{
 		{Title: "Good", URL: "https://good.example.com"},
 		{Title: "Bad", URL: "https://bad.example.com"},
-		{Title: "Ext", URL: "https://ext.example.com", Ingest: "my-fetcher"},
+		{Title: "Ext", URL: "https://ext.example.com", Recipe: "ext"},
 	}
-	kept, failed := resolveImportFeeds(context.Background(), feeds, "")
+	recipes := map[string]Recipe{
+		"default": {},
+		"ext":     {Ingest: "my-fetcher"},
+	}
+	kept, failed := resolveImportFeeds(context.Background(), feeds, recipes)
 
 	if len(kept) != 2 {
 		t.Fatalf("kept = %d, want 2 (Good resolved, Ext unchanged)", len(kept))
@@ -302,26 +305,23 @@ func TestImportDedupCrossFolder(t *testing.T) {
 
 func TestApplyImportDefaultsNothingSet(t *testing.T) {
 	feeds := []*Feed{
-		{Title: "A", Tag: "auto", Pipe: []string{"#sanitize"}, Ingest: "#feed"},
+		{Title: "A", Tag: "auto", Recipe: "keep"},
 		{Title: "B"},
 	}
-	applyImportDefaults(feeds, nil, nil, nil)
-	// Untouched: existing Tag / Pipe / Ingest preserved.
+	applyImportDefaults(feeds, nil, nil)
+	// Untouched: existing Tag / Recipe preserved.
 	if feeds[0].Tag != "auto" {
 		t.Errorf("feeds[0].Tag = %q, want %q", feeds[0].Tag, "auto")
 	}
-	if !slices.Equal(feeds[0].Pipe, []string{"#sanitize"}) {
-		t.Errorf("feeds[0].Pipe = %v, want [#sanitize]", feeds[0].Pipe)
-	}
-	if feeds[0].Ingest != "#feed" {
-		t.Errorf("feeds[0].Ingest = %q, want %q", feeds[0].Ingest, "#feed")
+	if feeds[0].Recipe != "keep" {
+		t.Errorf("feeds[0].Recipe = %q, want %q", feeds[0].Recipe, "keep")
 	}
 }
 
 func TestApplyImportDefaultsTagOverride(t *testing.T) {
 	feeds := []*Feed{{Title: "A", Tag: "auto"}, {Title: "B", Tag: "other"}}
 	tag := "explicit"
-	applyImportDefaults(feeds, nil, nil, &tag)
+	applyImportDefaults(feeds, nil, &tag)
 	for _, c := range feeds {
 		if c.Tag != "explicit" {
 			t.Errorf("c.Tag = %q, want %q", c.Tag, "explicit")
@@ -332,58 +332,29 @@ func TestApplyImportDefaultsTagOverride(t *testing.T) {
 func TestApplyImportDefaultsTagClearsToEmpty(t *testing.T) {
 	feeds := []*Feed{{Title: "A", Tag: "auto"}}
 	empty := ""
-	applyImportDefaults(feeds, nil, nil, &empty)
+	applyImportDefaults(feeds, nil, &empty)
 	if feeds[0].Tag != "" {
 		t.Errorf("c.Tag = %q, want empty", feeds[0].Tag)
 	}
 }
 
-func TestApplyImportDefaultsPipeApplied(t *testing.T) {
+func TestApplyImportDefaultsRecipeApplied(t *testing.T) {
 	feeds := []*Feed{{Title: "A"}, {Title: "B"}}
-	parsers := []string{"#sanitize", "#minify"}
-	applyImportDefaults(feeds, parsers, nil, nil)
+	recipe := "read"
+	applyImportDefaults(feeds, &recipe, nil)
 	for _, c := range feeds {
-		if !slices.Equal(c.Pipe, []string{"#sanitize", "#minify"}) {
-			t.Errorf("c.Pipe = %v, want [#sanitize #minify]", c.Pipe)
+		if c.Recipe != "read" {
+			t.Errorf("c.Recipe = %q, want %q", c.Recipe, "read")
 		}
 	}
 }
 
-func TestApplyImportDefaultsPipeEmptyClears(t *testing.T) {
-	feeds := []*Feed{{Title: "A", Pipe: []string{"#sanitize"}}}
-	parsers := []string{""}
-	applyImportDefaults(feeds, parsers, nil, nil)
-	if feeds[0].Pipe != nil {
-		t.Errorf("c.Pipe = %v, want nil (filterPipe drops empties)", feeds[0].Pipe)
-	}
-}
-
-func TestApplyImportDefaultsPipeFiltersEmpty(t *testing.T) {
-	feeds := []*Feed{{Title: "A"}}
-	parsers := []string{"#sanitize", "", "#minify"}
-	applyImportDefaults(feeds, parsers, nil, nil)
-	if !slices.Equal(feeds[0].Pipe, []string{"#sanitize", "#minify"}) {
-		t.Errorf("c.Pipe = %v, want [#sanitize #minify]", feeds[0].Pipe)
-	}
-}
-
-func TestApplyImportDefaultsIngestApplied(t *testing.T) {
-	feeds := []*Feed{{Title: "A"}, {Title: "B"}}
-	ingest := "my-fetcher"
-	applyImportDefaults(feeds, nil, &ingest, nil)
-	for _, c := range feeds {
-		if c.Ingest != "my-fetcher" {
-			t.Errorf("c.Ingest = %q, want %q", c.Ingest, "my-fetcher")
-		}
-	}
-}
-
-func TestApplyImportDefaultsIngestClearsToEmpty(t *testing.T) {
-	feeds := []*Feed{{Title: "A", Ingest: "my-fetcher"}}
+func TestApplyImportDefaultsRecipeClearsToEmpty(t *testing.T) {
+	feeds := []*Feed{{Title: "A", Recipe: "read"}}
 	empty := ""
-	applyImportDefaults(feeds, nil, &empty, nil)
-	if feeds[0].Ingest != "" {
-		t.Errorf("c.Ingest = %q, want empty", feeds[0].Ingest)
+	applyImportDefaults(feeds, &empty, nil)
+	if feeds[0].Recipe != "" {
+		t.Errorf("c.Recipe = %q, want empty", feeds[0].Recipe)
 	}
 }
 
@@ -391,19 +362,15 @@ func TestImportRunFlagsThreadIntoFeeds(t *testing.T) {
 	// Drive applyImportDefaults via the same call site Run uses, with
 	// fields populated from an ImportCmd. Guards the wiring after the
 	// rename / refactor.
-	parsers := []string{"#sanitize", "#minify"}
-	ingest := "my-fetcher"
+	recipe := "read"
 	tag := "news"
-	o := &ImportCmd{Parsers: parsers, Ingest: &ingest, Tag: &tag}
+	o := &ImportCmd{Recipe: &recipe, Tag: &tag}
 
 	feeds := []*Feed{{Title: "A"}}
-	applyImportDefaults(feeds, o.Parsers, o.Ingest, o.Tag)
+	applyImportDefaults(feeds, o.Recipe, o.Tag)
 
-	if !slices.Equal(feeds[0].Pipe, []string{"#sanitize", "#minify"}) {
-		t.Errorf("Pipe = %v", feeds[0].Pipe)
-	}
-	if feeds[0].Ingest != "my-fetcher" {
-		t.Errorf("Ingest = %q", feeds[0].Ingest)
+	if feeds[0].Recipe != "read" {
+		t.Errorf("Recipe = %q", feeds[0].Recipe)
 	}
 	if feeds[0].Tag != "news" {
 		t.Errorf("Tag = %q", feeds[0].Tag)

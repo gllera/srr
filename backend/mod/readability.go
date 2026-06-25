@@ -16,7 +16,7 @@ import (
 // #readability fetches an item's Link and replaces Content with the article's
 // main body extracted via readability. It exists for feeds that syndicate
 // only a teaser/summary; placing "#readability" before "#sanitize" (e.g. a
-// feed pipe of "#readability #base") expands the body, then the usual
+// recipe pipe of "#readability #default") expands the body, then the usual
 // sanitize/minify steps clamp the fetched HTML to the allowed element set.
 //
 // The module is fail-open: any problem (no link, unreachable origin,

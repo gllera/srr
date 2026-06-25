@@ -1151,3 +1151,43 @@ func TestNewDBSeedsDefaultRecipe(t *testing.T) {
 		t.Errorf("default recipe ingest = %q, want empty", r.Ingest)
 	}
 }
+
+// writeLegacyDB gzip-compresses jsonStr to <dir>/db.gz, mirroring db.Commit's
+// gzip path, so tests can hand NewDB a hand-built (e.g. pre-recipes) db.gz.
+func writeLegacyDB(t *testing.T, dir, jsonStr string) {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write([]byte(jsonStr)); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	gz.Close()
+	if err := os.WriteFile(filepath.Join(dir, "db.gz"), buf.Bytes(), 0o644); err != nil {
+		t.Fatalf("write db.gz: %v", err)
+	}
+}
+
+func TestNewDBDropsLegacyPipeIngest(t *testing.T) {
+	// Write a legacy db.gz by hand (old root pipe/ingest + a feed with inline
+	// pipe/ingest) into a temp store, then open it with NewDB.
+	dir := t.TempDir()
+	globals = &Globals{PackSize: 1, Store: dir}
+	legacy := `{"fetched_at":0,"total_art":0,"next_pid":0,"pack_off":0,` +
+		`"pipe":["#readability"],"ingest":"old-ingest",` +
+		`"feeds":{"0":{"title":"T","url":"http://example.com/rss","pipe":["#minify"],"ingest":"x"}}}`
+	writeLegacyDB(t, dir, legacy)
+
+	db, err := NewDB(context.Background(), false)
+	if err != nil {
+		t.Fatalf("NewDB: %v", err)
+	}
+	defer db.Close(context.Background())
+
+	if db.core.Recipes[defaultRecipeName].Ingest != "" ||
+		!slices.Equal(db.core.Recipes[defaultRecipeName].Pipe, defaultRootPipe()) {
+		t.Errorf("default recipe not seeded fresh; got %+v", db.core.Recipes[defaultRecipeName])
+	}
+	if db.core.Feeds[0].Recipe != "" {
+		t.Errorf("legacy feed Recipe = %q, want empty (⇒ default)", db.core.Feeds[0].Recipe)
+	}
+}

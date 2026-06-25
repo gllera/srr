@@ -117,13 +117,12 @@ func (o *FetchCmd) fetch(ctx context.Context, client *http.Client) error {
 		// Run-scoped deps shared across all workers (all concurrent-safe). The
 		// per-worker buf/processor are pulled from their pools inside each worker.
 		run := &fetchRun{
-			client:     client,
-			engine:     engine,
-			assets:     assets,
-			cacheDir:   cacheDir,
-			fetchedAt:  db.core.FetchedAt,
-			rootPipe:   db.core.Pipe,
-			rootIngest: db.core.Ingest,
+			client:    client,
+			engine:    engine,
+			assets:    assets,
+			cacheDir:  cacheDir,
+			fetchedAt: db.core.FetchedAt,
+			recipes:   db.core.Recipes,
 		}
 
 		g, gctx := errgroup.WithContext(ctx)

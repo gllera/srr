@@ -79,8 +79,7 @@ export interface IFeedWire {
    fail_streak?: number // FailStreak
    last_new?: number // LastNew
    tag?: string // Tag
-   pipe?: string[] // Pipe
-   ingest?: string // Ingest
+   recipe?: string // Recipe
    total_art: number // TotalArt
    add_idx: number // AddIdx
 }
@@ -108,8 +107,6 @@ export interface IDBWire {
    total_art: number // TotalArticles
    next_pid: number // NextPackID
    pack_off: number // PackOffset
-   pipe?: string[] // Pipe
-   ingest?: string // Ingest
    gen?: number // Gen
    hdrs?: number // HdrPacks
    mp?: number // MetaPacks

@@ -74,3 +74,29 @@ func TestRecipeRmRemoves(t *testing.T) {
 		return nil
 	})
 }
+
+func TestRecipeSetDefaultRejectsDefaultToken(t *testing.T) {
+	setupRecipeTestStore(t)
+	// #default is forbidden inside the default recipe (it IS the default).
+	if err := recipeSet(t, defaultRecipeName, "", "#default", "#minify"); err == nil {
+		t.Error("recipe set default with #default accepted, want error")
+	}
+	// but allowed in any other recipe
+	if err := recipeSet(t, "x", "", "#default"); err != nil {
+		t.Errorf("recipe set x with #default rejected: %v", err)
+	}
+}
+
+func TestRecipeRmRefusesReferenced(t *testing.T) {
+	setupRecipeTestStore(t)
+	_ = recipeSet(t, "read", "", "#readability", "#default")
+	_ = withDB(true, func(ctx context.Context, db *DB) error {
+		if err := db.AddFeed(&Feed{Title: "T", URL: "http://example.com/rss", Recipe: "read"}); err != nil {
+			return err
+		}
+		return db.Commit(ctx)
+	})
+	if err := (&RecipeRmCmd{Name: "read"}).Run(); err == nil {
+		t.Error("recipe rm of a referenced recipe accepted, want error listing feed ids")
+	}
+}

@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
+
+	"srrb/mod"
 )
 
 // RecipeGroup holds the `srr recipe` sub-commands. Recipes are named
@@ -88,7 +91,11 @@ func (o *RecipeRmCmd) Run() error {
 			return fmt.Errorf("recipe %q not found", o.Name)
 		}
 		var refs []int
-		// TODO(later task): scan db.Feeds() for ch.Recipe == o.Name and refuse if any.
+		for id, ch := range db.Feeds() {
+			if ch.Recipe == o.Name {
+				refs = append(refs, id)
+			}
+		}
 		if len(refs) > 0 {
 			sort.Ints(refs)
 			parts := make([]string, len(refs))
@@ -100,4 +107,46 @@ func (o *RecipeRmCmd) Run() error {
 		delete(db.core.Recipes, o.Name)
 		return db.Commit(ctx)
 	})
+}
+
+// filterPipe trims each step and drops empty/whitespace-only entries. Returns
+// nil when the result is empty so callers can use that as the "clear / inherit
+// default" sentinel. Trimming matters: a whitespace-only step would otherwise
+// be stored and later run as an empty `/bin/sh -c`, silently breaking a fetch.
+func filterPipe(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, m := range in {
+		if m = strings.TrimSpace(m); m != "" {
+			out = append(out, m)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// validatePipe rejects pipeline steps that would silently break a fetch: an
+// unknown "#"-prefixed token (a typo'd built-in like "#sanitise"). "#default"
+// is valid only in a non-default recipe (allowDefault); the default recipe is
+// what it expands to, so it forbids self-reference. Run after filterPipe.
+func validatePipe(steps []string, allowDefault bool) error {
+	names := mod.Builtins()
+	for _, s := range steps {
+		fields := strings.Fields(s)
+		if len(fields) == 0 {
+			continue
+		}
+		name := fields[0]
+		if name == pipeDefault {
+			if !allowDefault {
+				return fmt.Errorf("%q is not valid inside the %q recipe (it is the default)", pipeDefault, defaultRecipeName)
+			}
+			continue
+		}
+		if strings.HasPrefix(name, "#") && !slices.Contains(names, name) {
+			return fmt.Errorf("unknown built-in module %q (known: %s)", name, strings.Join(names, ", "))
+		}
+	}
+	return nil
 }

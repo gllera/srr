@@ -123,13 +123,11 @@ type DBCore struct {
 	// bumps it in memory only after both L<Seq+1> saves succeed, and Commit
 	// publishes it — so a generation name is never visible to readers
 	// before its content is complete, and never rewritten afterwards.
-	Seq           int      `json:"seq,omitempty"`
-	FetchedAt     int64    `json:"fetched_at"`
-	TotalArticles int      `json:"total_art"`
-	NextPackID    int      `json:"next_pid"`
-	PackOffset    int      `json:"pack_off"`
-	Pipe          []string `json:"pipe,omitempty"`
-	Ingest        string   `json:"ingest,omitempty"`
+	Seq           int   `json:"seq,omitempty"`
+	FetchedAt     int64 `json:"fetched_at"`
+	TotalArticles int   `json:"total_art"`
+	NextPackID    int   `json:"next_pid"`
+	PackOffset    int   `json:"pack_off"`
 	// Gen is the store generation: bumped (srr gen --bump) after an in-place
 	// store rebuild reuses finalized pack ids with new bytes, so the frontend
 	// service worker can self-invalidate its cache-first pack cache. omitempty
@@ -245,10 +243,6 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 			db.Close(ctx)
 			return nil, fmt.Errorf("decode %s: %w", dbFileKey, err)
 		}
-	}
-
-	if db.core.Pipe == nil {
-		db.core.Pipe = defaultRootPipe()
 	}
 
 	if db.core.Recipes == nil {
