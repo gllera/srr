@@ -46,7 +46,7 @@ Shared format between backend (writer) and frontend (reader).
 ### `db.gz`
 
 ```
-{ seq?, fetched_at, total_art, next_pid, pack_off, feeds{}, pipe?, ingest?, gen?, hdrs?, mp?, mt?, out? }
+{ seq?, fetched_at, total_art, next_pid, pack_off, feeds{}, recipes?, gen?, hdrs?, mp?, mt?, out? }
 ```
 
 | Field | Type | Description |
@@ -57,8 +57,7 @@ Shared format between backend (writer) and frontend (reader).
 | `next_pid` | int | Next data pack ID; packs with `id < next_pid` are finalized/immutable |
 | `pack_off` | int | Current offset in latest data pack |
 | `feeds` | object | JSON object keyed by feed ID (number); may be `null` in JSON (default `{}`) |
-| `pipe` | string[] | Root-level default pipeline inherited by feeds whose `pipe` is absent. `omitempty`. If absent at load, `NewDB` substitutes `["#sanitize", "#minify"]`. |
-| `ingest` | string | Root-level default ingest strategy inherited by feeds whose `ingest` is empty. `omitempty`. Empty falls through to built-in `#feed`. Set/print via `srr ingest`. |
+| `recipes` | object | Map of named `{ingest, pipe}` bundles (`Record<string, Recipe>`). Always contains a reserved `default` entry (seeded `["#sanitize","#minify"]`), the fallback for every feed and the home for what root pipe/ingest expressed. Feeds reference one by `recipe` name. Backend-only config: the frontend/service-worker ignores it (like `out`). `omitempty`; `NewDB` re-seeds `default` if absent. Managed via `srr recipe`. |
 | `gen` | int | Store generation counter. Bumped manually (`srr gen --bump`) after an in-place store rebuild reuses finalized pack ids with new bytes; the frontend service worker purges its cache-first pack cache when the value changes (any change, not just increments). `omitempty`; absent == 0. |
 | `hdrs` | int | Idx header-summary coverage: `idx/h<hdrs>.gz` holds the verbatim variable-length headers of finalized idx packs `0..hdrs-1` (each is `idxHeaderPrefix + numSlots*4` bytes; concatenated, so the summary is parsed by a sequential variable-stride walk). Maintained by `SyncIdxSummary` each fetch (write summary first, publish `hdrs` via Commit — same crash argument as `seq`); `srr gen --bump` resets it to 0 so the next fetch rebuilds against the rebuilt packs. The reader uses the summary only when `hdrs == numFinalized`, else falls back to eager idx loading. `omitempty`; absent == 0. |
 | `mp` | int | Finalized meta-shard coverage (`MetaPacks`): `meta/<n>.gz` exists for n in `[0, mp)` and `meta/s<mp>.gz` concatenates their bloom headers. Set only after every save succeeds (same crash argument as `seq`/`hdrs`); `srr gen --bump` resets to 0. The reader offers search and list-from-meta only when `metaReady()` is true (`mp === numFinalizedMeta` and `mp * metaPackSize + mt === total_art`). `omitempty`; absent == 0. |
@@ -69,21 +68,29 @@ Shared format between backend (writer) and frontend (reader).
 
 **One feed = one source URL.** All fields are flat on the feed:
 
-`{ id, title, url, etag?, last_modified?, wm?, bg?, ferr?, total_art, add_idx, pipe?:string[], ingest?, tag? }`
+`{ id, title, url, etag?, last_modified?, wm?, bg?, ferr?, total_art, add_idx, tag?, recipe? }`
 
-`url` is the single source URL. `wm` (Watermark) is the max published unix-second ever seen; `bg` (BoundaryGUIDs) is the FNV-32a hash array used for dedup, capped at 1024 entries (`maxBoundaryGUIDs` in `backend/feed.go`); `etag`/`last_modified` are the incremental-fetch HTTP validators; `ferr` is the last fetch error (empty when healthy). The `Feed` type was removed (2026-06-17): re-importing OPML now yields one feed per `xmlUrl` rather than merging several under one id. Up to `feedIDCeiling` (65536) feeds — `feed_id` is a u16 in each idx entry.
+`url` is the single source URL. `wm` (Watermark) is the max published unix-second ever seen; `bg` (BoundaryGUIDs) is the FNV-32a hash array used for dedup, capped at 1024 entries (`maxBoundaryGUIDs` in `backend/feed.go`); `etag`/`last_modified` are the incremental-fetch HTTP validators; `ferr` is the last fetch error (empty when healthy); `recipe` is the name of the `{ingest, pipe}` recipe this feed uses (empty or absent ⇒ `default`). The `Feed` type was removed (2026-06-17): re-importing OPML now yields one feed per `xmlUrl` rather than merging several under one id. Up to `feedIDCeiling` (65536) feeds — `feed_id` is a u16 in each idx entry.
 
-### Pipe Hierarchy
+### Recipes
 
-Two levels store an optional mod pipeline (`pipe` field): db.gz root and feed. Resolution walks root → feed:
+Processing config lives in named `{ingest, pipe}` recipes in db.gz (`recipes` map),
+referenced by feeds via the `recipe` field. The reserved `default` recipe (always
+present, seeded `["#sanitize","#minify"]`) is the fallback.
 
-- An empty feed `pipe` (nil/absent or empty slice) **inherits** root.
-- A non-empty feed `pipe` **overrides** root.
-- The `#base` token inside a feed override expands inline to the root pipe; non-token entries pass through verbatim.
-- Built-in mods use the `#` prefix (`#sanitize`, `#minify`, `#readability`, `#filter`); anything else is a shell command (see backend `mod/` docs).
-- When the loaded root `pipe` is nil/absent, `NewDB` substitutes `["#sanitize", "#minify"]` as the default; the value is persisted on the next `Commit`. Clearing root or feed pipe (`srr pipe ""` / `srr feed upd <id> -p ""`) reverts to inherit-root semantics on the next load.
+- A feed with empty/absent `recipe` resolves to `default`.
+- Each axis falls back to `default` independently: a recipe that sets only `ingest`
+  uses its own ingest and `default`'s pipe; only `pipe` ⇒ its pipe and `default`'s ingest.
+- `#default` inside a recipe's pipe expands inline to the `default` recipe's pipe;
+  the `default` recipe forbids `#default` (it is the default).
+- Built-in mods use `#` (`#sanitize`, `#minify`, `#readability`, `#filter`, `#selfhost`);
+  anything else is a shell command. Ingest: built-in `#feed`, or a shell command.
+- Resolution: `pipe = resolvePipe(default.Pipe, recipe.Pipe)`,
+  `ingest = ingest.Select(recipe.Ingest, default.Ingest)`.
+- Managed via `srr recipe set/ls/show/rm`. Clean break: a pre-recipes db.gz drops its
+  legacy root/feed `pipe`/`ingest` on load and every feed reverts to `default`.
 
-`feeds` is a JSON object (`Record<number, IFeed>`) keyed by feed ID. Backend struct: `Feed` carries `URL` + its own fetch state directly. JSON uses short keys (`url`, `etag`, `last_modified`, `wm`, `bg`, `ferr`, `pipe`, `ingest`, …) — see the `Feed`/`DBCore` struct tags.
+`feeds` is a JSON object (`Record<number, IFeed>`) keyed by feed ID. Backend struct: `Feed` carries `URL` + its own fetch state directly. JSON uses short keys (`url`, `etag`, `last_modified`, `wm`, `bg`, `ferr`, `recipe`, …) — see the `Feed`/`DBCore` struct tags.
 
 ### Pack Storage
 

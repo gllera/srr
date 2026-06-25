@@ -34,7 +34,7 @@ Commands are grouped under `feed` (feed management), `art` (articles), `preview`
 | Command            | Description                                        |
 |--------------------|----------------------------------------------------|
 | `feed add`         | Subscribe to a new feed (one feed URL); always allocates a fresh id |
-| `feed upd <id>`    | Update a feed (`-t` title, `-g` tag, `-p` pipe, `-i` ingest; `-u` repoints the single feed URL) |
+| `feed upd <id>`    | Update a feed (`-t` title, `-g` tag, `-r` recipe; `-u` repoints the single feed URL) |
 | `feed rm`          | Unsubscribe from feed(s) by id                  |
 | `feed ls`          | List feeds (`-g` tag filter, `-f` format)       |
 | `feed show <id>`   | Print one feed (yaml/json)                      |
@@ -43,8 +43,7 @@ Commands are grouped under `feed` (feed management), `art` (articles), `preview`
 | `feed import`      | Import feeds from an OPML file                  |
 | `art fetch`        | Fetch new articles from all feeds               |
 | `art ls`           | List stored articles                               |
-| `pipe`             | Set or print root-level pipe (default pipeline)    |
-| `ingest`           | Set or print root-level ingest strategy            |
+| `recipe`           | Manage processing recipes (named `{ingest, pipe}` bundles) |
 | `preview`          | Preview processed feed articles in a browser       |
 | `inspect`          | Validate pack consistency / debug chronIdx lookups |
 | `config`           | Print resolved configuration                       |
@@ -53,26 +52,24 @@ Commands are grouped under `feed` (feed management), `art` (articles), `preview`
 ### Examples
 
 ```bash
-# Add a feed
+# Add a feed (uses the 'default' recipe automatically)
 srr feed add -t "Tech News" -u https://example.com/feed.xml -g tech/news
 
-# Add with processing pipeline
-srr feed add -t "Blog" -u https://example.com/rss -p "#sanitize" -p "#minify"
+# Create a recipe and assign it to a feed
+srr recipe set readability -p "#readability" -p "#default"
+srr feed add -t "Blog" -u https://example.com/rss -r readability
+
+# List all recipes
+srr recipe ls
+
+# Show one recipe
+srr recipe show readability
+
+# Update a feed's recipe
+srr feed upd 1 -r readability
 
 # Repoint a feed at a new feed URL (resets its fetch/dedup state)
 srr feed upd 1 -u https://example.com/new-feed.xml
-
-# Update an existing feed's pipeline (use #base to keep root mods)
-srr feed upd 1 -p "#base" -p "jq '.content |= ascii_downcase'"
-
-# Set root-level pipe (inherited by every feed whose pipe is absent)
-srr pipe "#sanitize" "#minify"
-
-# Print current root-level pipe (defaults to "#sanitize", "#minify" when unset)
-srr pipe
-
-# Clear root-level pipe — reverts to the built-in default on next load
-srr pipe ""
 
 # List feeds (filter by tag)
 srr feed ls -g tech
@@ -89,11 +86,17 @@ srr -w 8 art fetch
 # Import from OPML (all feeds)
 srr feed import feeds.opml -a
 
-# Import selectively with dry-run
-srr feed import feeds.opml -i "1" -i "2.3" -n
+# Import selectively with a recipe and dry-run
+srr feed import feeds.opml -i "1" -i "2.3" -r readability -n
 
-# Preview a feed with processors
-srr preview https://example.com/feed.xml -p "#sanitize" -p "#minify"
+# Preview a feed using the default recipe
+srr preview https://example.com/feed.xml
+
+# Preview with a named recipe
+srr preview https://example.com/feed.xml -r readability
+
+# Preview with ad-hoc pipe override (does not require a saved recipe)
+srr preview https://example.com/feed.xml -p "#readability" -p "#default"
 ```
 
 ## Global Flags
@@ -183,24 +186,22 @@ An *ingest strategy* is the I/O + parse step that turns a subscription URL into 
 
 ### Selecting a strategy
 
-The effective strategy is resolved per feed, most specific wins:
-
-1. The feed's `ingest` field (`srr feed add -i ...` / `srr feed upd -i ...`)
-2. The db.gz root default (`srr ingest ...`)
-3. The built-in `#feed` (when both are empty)
+The effective strategy is resolved per feed from its recipe. Each feed names one recipe (`-r/--recipe` at add/upd/import time; empty or absent ⇒ `default`). The recipe's `ingest` field is used; if empty, it falls back to the `default` recipe's ingest; if that is also empty, the built-in `#feed` is used. Recipes are managed with `srr recipe`.
 
 Built-in strategy names start with `#` (only `#feed` ships built-in). **Any value that does not start with `#` is run as a shell command** via `/bin/sh -c`.
 
 ```bash
-# Route one feed through an external command
-srr feed add -t "My source" -u "https://example.com/x" -i "myfetch --token=$TOK"
+# Create a recipe that uses an external ingest command
+srr recipe set mytelegram -i "myfetch --token=$TOK"
+
+# Route one feed through it
+srr feed add -t "My source" -u "https://example.com/x" -r mytelegram
 
 # Make an external command the default for every feed
-srr ingest "myfetch"
+srr recipe set default -i "myfetch"
 
-# Print the current root default; clear it with ""
-srr ingest
-srr ingest ""
+# Preview with an ad-hoc ingest override (does not require a saved recipe)
+srr preview "https://example.com/x" -i "myfetch --token=$TOK"
 ```
 
 ### External command protocol
@@ -332,7 +333,7 @@ json.dump({"items": items}, sys.stdout)
 
 ## Pipe Pipeline
 
-Articles pass through a chain of mods during fetch. The pipe is defined at two levels — root (db.gz default) and per feed — and feeds inherit the root unless they explicitly override.
+Articles pass through a chain of mods during fetch. The pipe is defined per recipe and feeds reference a recipe by name (`-r/--recipe`). The reserved `default` recipe seeds `["#sanitize","#minify"]`. The `#default` token in a recipe's pipe expands inline to the `default` recipe's pipe (forbidden inside `default` itself).
 
 **Built-in mods:**
 
@@ -340,13 +341,13 @@ Articles pass through a chain of mods during fetch. The pipe is defined at two l
 - `#minify` — HTML minification (tdewolff/minify)
 - `#readability` — fetches an item's `Link` and replaces `Content` with the extracted article body (for teaser-only feeds; fail-open)
 - `#filter` — content-based item dropping (see [below](#filter))
-- `#selfhost` — downloads remote `<img>`/`<video>`/`<audio>` media → `#`-marker → existing upload step converts (`SRR_ASSET_PROCESS`) and self-hosts to `assets/`; network-bound + fail-open per asset; place after `#base` (e.g. `["#base", "#selfhost"]`)
+- `#selfhost` — downloads remote `<img>`/`<video>`/`<audio>` media → `#`-marker → existing upload step converts (`SRR_ASSET_PROCESS`) and self-hosts to `assets/`; network-bound + fail-open per asset; place after `#default` so only sanitizer-approved media is downloaded (e.g. `["#default", "#selfhost"]`)
 
 **Custom mods** — any shell command that reads/writes JSON via stdin/stdout (see [External mod protocol](#external-mod-protocol)):
 
 ```bash
-srr feed add -t "Feed" -u https://example.com/rss \
-  -p "#sanitize" -p "#minify" -p "jq '.content |= ascii_downcase'"
+srr recipe set lower -p "#default" -p "jq '.content |= ascii_downcase'"
+srr feed add -t "Feed" -u https://example.com/rss -r lower
 ```
 
 ### External mod protocol
@@ -405,8 +406,8 @@ Printing nothing (or only whitespace) leaves the item exactly as received.
 A minimal reference mod — lowercase every title — using `jq`:
 
 ```bash
-srr feed add -t "Feed" -u https://example.com/rss \
-  -p "#base" -p "jq -c '.title |= ascii_downcase'"
+srr recipe set lower -p "#default" -p "jq -c '.title |= ascii_downcase'"
+srr feed add -t "Feed" -u https://example.com/rss -r lower
 ```
 
 ### #filter
@@ -426,22 +427,20 @@ srr feed add -t "Feed" -u https://example.com/rss \
 Regex syntax: `/pattern/` or `/pattern/i` (flag `i` = case-insensitive). A malformed regex or unknown parameter is a hard configuration error. The word-count check (`min_words`) runs against the raw content string including any HTML tags. A regex param value **cannot contain a literal space** — the pipeline token is split on whitespace before its parameters are parsed — so use a whitespace metacharacter instead: `drop_title=/breaking\s+news/` or `drop_title=/breaking[ ]news/`, not `drop_title=/breaking news/`.
 
 ```bash
-# Drop sponsored posts and items with fewer than 100 words
-srr feed upd 3 -p "#filter drop_title=/^(sponsored|ad):?/i min_words=100" -p "#base"
+# Create a recipe that filters sponsored posts and low-word articles
+srr recipe set filtered -p "#filter drop_title=/^(sponsored|ad):?/i min_words=100" -p "#default"
+srr feed upd 3 -r filtered
 
-# Only keep items whose title mentions "golang"
-srr feed upd 5 -p "#filter keep_title=/golang/i" -p "#base"
+# Create a recipe that keeps only golang articles
+srr recipe set golang -p "#filter keep_title=/golang/i" -p "#default"
+srr feed upd 5 -r golang
 ```
 
-**Hierarchy & resolution.** A `pipe` field lives at two levels: db.gz root (`srr pipe`) and feed (`srr feed add -p ...` / `srr feed upd -p ...`). For each feed the effective pipeline is resolved root → feed:
+**Recipe model.** Processing config lives in named `{ingest, pipe}` recipes (`srr recipe set/ls/show/rm`). Feeds reference one by name (`-r/--recipe`); empty or absent ⇒ `default`. Each axis (ingest, pipe) falls back to the `default` recipe independently. The `#default` token in a recipe's pipe expands inline to the `default` recipe's pipe (forbidden inside `default` itself).
 
-- An absent feed `pipe` inherits the root pipe.
-- A present feed `pipe` overrides root (an explicit empty list means "no pipe").
-- The `#base` token in a feed override expands inline to the root pipe.
+For example, with `default` pipe `[#sanitize, #minify]` and a recipe `[#default, #selfhost]`, feeds using that recipe run `#sanitize → #minify → #selfhost`.
 
-For example, with root `[#sanitize]` and feed override `[#base, #minify]`, the feed runs `#sanitize → #minify`.
-
-**Root default.** When root `pipe` is absent from `db.gz`, the backend substitutes `["#sanitize", "#minify"]` at load time so fresh installs (and DBs predating this feature) get safe-by-default sanitization and minification. Run `srr pipe <args>` to override; `srr pipe ""` clears the stored value, reverting to the default on the next load. To opt out for a specific feed regardless of the root default, use `srr feed upd <id> -p ""` (sets an explicit empty override).
+**Default recipe.** The `default` recipe is always present (seeded `["#sanitize","#minify"]` on a fresh or pre-recipes store). Update it via `srr recipe set default -p "#sanitize" -p "#minify"`. To extend it, create a named recipe that uses `#default`: `srr recipe set heavy -p "#readability" -p "#default"`. To opt a feed into a completely different pipeline without touching `default`, assign a recipe with the desired pipe and no `#default`.
 
 ## Pack Format
 
