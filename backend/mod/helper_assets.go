@@ -28,18 +28,25 @@ func cacheDirFromContext(ctx context.Context) string {
 	return dir
 }
 
-// assetAttrs lists every element/attribute pair whose value may reference a
-// self-hostable file: the embedded-media set plus <a href>, so a linked file
-// (PDF, doc, …) can be hosted alongside images and video. Used by RewriteAttrs
-// (the end-of-pipeline upload step). Every entry must be one the sanitizer
-// keeps (mod/sanitize.go) or the rewritten key would be stripped before
-// storage — img/video src and a href survive as relative URLs; <video poster>
-// is constrained to ^(https?://|assets/) and only round-trips a rewritten
-// assets/ key, not an arbitrary upload marker.
+// assetAttrs lists every element/attribute pair whose value the END-OF-PIPELINE
+// UPLOAD STEP may rewrite from a "#"-marker to an assets/ key: embedded media
+// plus <a href> (linked files). Every entry must be one the sanitizer keeps
+// (mod/sanitize.go) or the rewritten key would be stripped before storage.
 var assetAttrs = map[string][]string{
 	"img":   {"src"},
 	"video": {"src", "poster"},
+	"audio": {"src"},
 	"a":     {"href"},
+}
+
+// mediaAttrs is the subset #selfhost DOWNLOADS: embedded-media src/poster only,
+// NOT <a href> (a link is navigation, not auto-loaded media). <video poster>
+// self-hosts because #selfhost runs after #sanitize (see the design's placement
+// section), so the marker it writes is never re-sanitized.
+var mediaAttrs = map[string][]string{
+	"img":   {"src"},
+	"video": {"src", "poster"},
+	"audio": {"src"},
 }
 
 // markerShapeRe matches the raw shape every marker-bearing attribute must
@@ -50,32 +57,35 @@ var assetAttrs = map[string][]string{
 // the literal "#", and the pipeline built-ins never entity-encode it.
 var markerShapeRe = regexp.MustCompile(`=\s*["']?#`)
 
-// RewriteAttrs walks every self-hostable attribute value in content (img/video
-// src/poster, a href — see assetAttrs) and rewrites its "#"-prefixed upload
-// markers: for each marker it calls fn with the remainder (the "#" already
-// stripped), which returns (newValue, true, nil) to replace the whole value,
-// (_, false, nil) to leave the marker untouched, or a non-nil error to abort the
-// walk and surface it to the caller. Non-marker values are passed through without
-// reaching fn. It is the asset-upload walk behind the end-of-pipeline step
-// inlined in main.Feed.fetch: fn owns the upload policy — how the referenced
-// files are stored and which failures are fatal — while the marker convention
-// (the "#" prefix) lives here. Unparseable content and a no-op pass both return
-// the original string verbatim (no re-render), so quoting/whitespace survives
-// when nothing changed; a fn or render error is returned alongside an empty
-// string.
+// RewriteAttrs walks the assetAttrs values in content and rewrites their
+// "#"-prefixed upload markers via fn (the "#" already stripped). Non-marker
+// values never reach fn. Unparseable content and a no-op pass both return the
+// original string verbatim. It is the asset-upload walk behind the
+// end-of-pipeline step in main.Feed.fetch: fn owns the upload policy.
 func RewriteAttrs(content string, fn func(marker string) (string, bool, error)) (string, error) {
 	// A marker is always a whole attribute value, so content without the
-	// `=["']?#` shape can hold none (this also covers empty content): skip the
-	// parse+walk entirely. The Contains pass keeps the common case — built-in
-	// #feed feeds never emit markers, and most content has no "#" at all — at
-	// memchr speed; the regexp scan runs only when a "#" exists, sparing the
-	// fragment parse for bare URL fragments and entities.
+	// `=["']?#` shape can hold none: skip the parse entirely (memchr-speed
+	// common case — #feed feeds never emit markers).
 	if !strings.Contains(content, "#") || !markerShapeRe.MatchString(content) {
 		return content, nil
 	}
+	return walkAssetAttrs(content, assetAttrs, func(_, _, val string) (string, bool, error) {
+		if !strings.HasPrefix(val, "#") {
+			return "", false, nil
+		}
+		return fn(strings.TrimPrefix(val, "#"))
+	})
+}
 
-	// Parse as a fragment so we don't inject <html>/<head>/<body> wrappers the
-	// downstream #sanitize/#minify steps would otherwise have to strip.
+// walkAssetAttrs parses content as an HTML fragment and calls fn(tag, attr,
+// value) for every attribute listed in attrs (tag -> attr names). fn returns
+// (newValue, true, nil) to replace the value, (_, false, nil) to leave it, or a
+// non-nil error to abort the walk. Unparseable content and a no-op pass both
+// return content verbatim (no re-render), so quoting/whitespace survive when
+// nothing changed; an fn or render error is returned with an empty string. It
+// is the shared HTML walk behind both the upload step (RewriteAttrs, marker ->
+// key) and #selfhost (URL -> marker).
+func walkAssetAttrs(content string, attrs map[string][]string, fn func(tag, attr, val string) (string, bool, error)) (string, error) {
 	nodes, err := html.ParseFragment(strings.NewReader(content), &html.Node{
 		Type:     html.ElementNode,
 		Data:     "body",
@@ -88,7 +98,7 @@ func RewriteAttrs(content string, fn func(marker string) (string, bool, error)) 
 
 	changed := false
 	for _, n := range nodes {
-		c, err := applyAttrs(n, fn)
+		c, err := walkNode(n, attrs, fn)
 		if err != nil {
 			return "", err
 		}
@@ -109,27 +119,19 @@ func RewriteAttrs(content string, fn func(marker string) (string, bool, error)) 
 	return b.String(), nil
 }
 
-// applyAttrs walks n and its descendants, rewriting the "#"-prefixed upload
-// markers among the assetAttrs values in place: for each marker it calls fn
-// with the remainder (the "#" stripped) and replaces the whole value when fn
-// returns ok. Non-marker values are skipped without reaching fn. Returns true
-// if any value was rewritten, or the first error fn returns (which stops the
-// walk).
-func applyAttrs(n *html.Node, fn func(marker string) (string, bool, error)) (bool, error) {
+// walkNode applies fn to the attrs-listed attributes on n and its descendants,
+// replacing each value when fn returns ok. Returns true if any value changed, or
+// the first error fn returns (which stops the walk).
+func walkNode(n *html.Node, attrs map[string][]string, fn func(tag, attr, val string) (string, bool, error)) (bool, error) {
 	changed := false
 	if n.Type == html.ElementNode {
-		if names, ok := assetAttrs[n.Data]; ok {
+		if names, ok := attrs[n.Data]; ok {
 			for _, name := range names {
 				for i := range n.Attr {
 					if n.Attr[i].Key != name {
 						continue
 					}
-					// Only "#"-prefixed values are upload markers; hand fn the remainder.
-					val := n.Attr[i].Val
-					if !strings.HasPrefix(val, "#") {
-						continue
-					}
-					nv, ok, err := fn(strings.TrimPrefix(val, "#"))
+					nv, ok, err := fn(n.Data, name, n.Attr[i].Val)
 					if err != nil {
 						return false, err
 					}
@@ -142,7 +144,7 @@ func applyAttrs(n *html.Node, fn func(marker string) (string, bool, error)) (boo
 		}
 	}
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		cc, err := applyAttrs(c, fn)
+		cc, err := walkNode(c, attrs, fn)
 		if err != nil {
 			return false, err
 		}
