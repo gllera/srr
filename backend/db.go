@@ -53,11 +53,9 @@ const (
 	searchBloomK = 7
 )
 
-// defaultRootPipe returns a fresh copy of the pipeline applied as the
-// db.gz root default when no explicit root pipe is stored. Feeds
-// still inherit/override normally; this just supplies the fallback for
-// the topmost level. Returning a fresh slice each call keeps callers
-// from accidentally mutating shared state.
+// defaultRootPipe returns a fresh copy of the pipeline seeded into the
+// reserved `default` recipe when a loaded db.gz has none. Returning a fresh
+// slice each call keeps callers from mutating shared state.
 func defaultRootPipe() []string {
 	return []string{"#sanitize", "#minify"}
 }
@@ -65,7 +63,7 @@ func defaultRootPipe() []string {
 // defaultRecipeName is the reserved recipe every feed falls back to and the
 // new home for what the old root pipe/ingest expressed. It always exists
 // (NewDB seeds it); its pipe must not contain the #default composition token
-// (enforced by the CLI once that token is added).
+// (enforced by the CLI: `recipe set default` rejects `#default`).
 const defaultRecipeName = "default"
 
 // Recipe is a named {ingest, pipe} bundle referenced by feeds (Feed.Recipe).
@@ -311,11 +309,6 @@ func (o *DB) Commit(ctx context.Context) error {
 
 func (o *DB) Feeds() map[int]*Feed {
 	return o.core.Feeds
-}
-
-// recipeFor resolves a recipe name against this DB's recipes map.
-func (o *DB) recipeFor(name string) Recipe {
-	return recipeFor(o.core.Recipes, name)
 }
 
 func (o *DB) AddFeed(c *Feed) error {

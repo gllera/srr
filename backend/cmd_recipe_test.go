@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// setupRecipeTestStore points globals.Store at a fresh temp dir, mirroring the
-// inline setup used by cmd_pipe_test.go tests.
+// setupRecipeTestStore points globals.Store at a fresh temp dir, the
+// established test-store setup pattern.
 func setupRecipeTestStore(t *testing.T) {
 	t.Helper()
 	globals = &Globals{PackSize: 1, Store: t.TempDir()}
@@ -21,8 +21,8 @@ func recipeSet(t *testing.T, name, ingest string, pipe ...string) error {
 }
 
 func TestRecipeSetUpsertAndShow(t *testing.T) {
-	setupRecipeTestStore(t) // points globals.Store at a temp dir (see cmd_pipe_test.go)
-	// builtin-only pipe: the #default composition token is not special until a later task.
+	setupRecipeTestStore(t) // points globals.Store at a temp dir
+	// #default is the composition token; recipes other than default may use it.
 	if err := recipeSet(t, "read", "", "#readability", "#sanitize"); err != nil {
 		t.Fatalf("recipe set: %v", err)
 	}

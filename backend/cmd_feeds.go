@@ -132,6 +132,13 @@ func (o *AddCmd) Run() error {
 		v.Recipe = *o.Recipe
 	}
 	return withDB(true, func(ctx context.Context, db *DB) error {
+		// Validate the recipe reference up front, before the network probe:
+		// resolvesFeed is lenient (an unknown recipe falls back to default ⇒
+		// #feed ⇒ true), so a typo'd -r would otherwise probe the URL and
+		// surface a resolve error instead of the clearer "recipe does not exist".
+		if err := validateRecipeRef(db.core.Recipes, v.Recipe); err != nil {
+			return err
+		}
 		if resolvesFeed(db.core.Recipes, v.Recipe) {
 			resolved, err := resolveFeedURL(ctx, v.URL)
 			if err != nil {
@@ -199,6 +206,13 @@ func (o *UpdCmd) Run() error {
 		}
 		if o.Recipe != nil {
 			ch.Recipe = *o.Recipe
+		}
+		// Validate the recipe reference before the URL-repoint network probe:
+		// resolvesFeed is lenient (unknown ⇒ default ⇒ #feed ⇒ true), so a
+		// typo'd -r would otherwise probe and surface a resolve error instead of
+		// the clearer "recipe does not exist".
+		if err := validateRecipeRef(db.core.Recipes, ch.Recipe); err != nil {
+			return err
 		}
 		if o.URL != nil {
 			if !validFeedURL(*o.URL) {
