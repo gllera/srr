@@ -1,6 +1,7 @@
 package mod
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -111,5 +112,15 @@ func TestRewriteAttrsPropagatesFnError(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("walk did not stop on first error: fn called %d times", calls)
+	}
+}
+
+func TestCacheDirContextRoundTrips(t *testing.T) {
+	ctx := WithCacheDir(context.Background(), "/tmp/run-cache")
+	if got := cacheDirFromContext(ctx); got != "/tmp/run-cache" {
+		t.Errorf("cacheDirFromContext = %q, want %q", got, "/tmp/run-cache")
+	}
+	if got := cacheDirFromContext(context.Background()); got != "" {
+		t.Errorf("absent cache dir = %q, want empty string", got)
 	}
 }
