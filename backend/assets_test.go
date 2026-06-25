@@ -166,6 +166,46 @@ func TestUploadCacheRefProcessFailsSoftToOriginal(t *testing.T) {
 	}
 }
 
+func TestUploadCacheRefProcessSubstitutesInputToken(t *testing.T) {
+	be := tempStore(t)
+	// The script echoes its FIRST positional arg. With {input} substituted in
+	// place the cache path lands at $1; if the path were instead appended (the
+	// no-token fallback) $1 would be the literal "{input}".
+	af := newAssetFetcher(be, 1024, fakeProcess(t, `printf 'GOT:%s' "$1"`)+" {input}")
+
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+	full := filepath.Join(cacheDir, "photo.jpg")
+
+	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	if err != nil {
+		t.Fatalf("UploadCacheRef: %v", err)
+	}
+	if got, want := string(readKey(t, be, key)), "GOT:"+full; got != want {
+		t.Errorf("stored body = %q, want %q ({input} not substituted in place)", got, want)
+	}
+}
+
+func TestUploadCacheRefProcessSubstitutesInputTokenWithinArg(t *testing.T) {
+	be := tempStore(t)
+	// {input} inside a larger arg (--in=<path>) must be replaced per-field, not
+	// only when it is the whole arg. The script strips the flag prefix and cats
+	// the file, prefixed so a fail-soft fallback (which would upload the original
+	// jpeg bytes) is distinguishable from a real run.
+	af := newAssetFetcher(be, 1024, fakeProcess(t, "f=\"${1#--in=}\"\nprintf 'OK'\ncat \"$f\"")+" --in={input}")
+
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+
+	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	if err != nil {
+		t.Fatalf("UploadCacheRef: %v", err)
+	}
+	if got, want := string(readKey(t, be, key)), "OK"+jpegBytes; got != want {
+		t.Errorf("stored body = %q, want %q ({input} not substituted within --in=)", got, want)
+	}
+}
+
 func TestUploadCacheRefStoresUnderContentHashKey(t *testing.T) {
 	const body = "IMAGEBYTES"
 	be := tempStore(t)

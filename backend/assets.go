@@ -157,17 +157,42 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 	return key, nil
 }
 
+// inputToken, when present in the asset-process command, marks where the cache
+// file path is substituted (each occurrence, per arg). A command that needs the
+// input as a named/positioned argument (e.g. "enc -i {input} --flags") uses it;
+// otherwise the path is appended as the final argument. Output is always read
+// from stdout, so the command must write its result there.
+const inputToken = "{input}"
+
 // runProcess runs the configured asset-process command on the cache file just
 // before upload, returning its stdout and ok=true on success. The cache file
-// path is appended as the command's final argument; stderr passes through for
-// diagnostics. Fail-soft: it returns ok=false — the caller uploads the original
-// unchanged — when the command errors or produces no output, so a processing
-// hiccup, or a file type the command does not handle, never wedges a feed. Runs
-// through mod.RunCommand so it shares the external-command bounds (a
-// SubprocessTimeout deadline, WaitDelay, and a capped stdout): a hung transcoder
-// can't wedge the worker and runaway output can't OOM it.
+// path is substituted for every {input} token (per arg); with no token it is
+// appended as the command's final argument. Output is read from stdout; stderr
+// passes through for diagnostics. Fail-soft: it returns ok=false — the caller
+// uploads the original unchanged — when the command errors or produces no
+// output, so a processing hiccup, or a file type the command does not handle,
+// never wedges a feed. Runs through mod.RunCommand so it shares the
+// external-command bounds (a SubprocessTimeout deadline, WaitDelay, and a capped
+// stdout): a hung transcoder can't wedge the worker and runaway output can't OOM
+// it.
 func (a *assetFetcher) runProcess(ctx context.Context, full, localname string) ([]byte, bool) {
-	out, err := mod.RunCommand(ctx, a.proc[0], append(append([]string(nil), a.proc[1:]...), full)...)
+	// Build a fresh argv (never mutate a.proc — it is shared across workers).
+	// Substitute the input path in place where {input} appears; if no arg carries
+	// the token, append the path as the final argument (the default convention).
+	argv := make([]string, len(a.proc))
+	hasToken := false
+	for i, f := range a.proc {
+		if strings.Contains(f, inputToken) {
+			hasToken = true
+			f = strings.ReplaceAll(f, inputToken, full)
+		}
+		argv[i] = f
+	}
+	if !hasToken {
+		argv = append(argv, full)
+	}
+
+	out, err := mod.RunCommand(ctx, argv[0], argv[1:]...)
 	if err != nil {
 		slog.Warn("asset-process command failed; uploading original", "asset", localname, "cmd", a.proc[0], "err", err)
 		return nil, false
