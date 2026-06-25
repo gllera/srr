@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -781,6 +782,55 @@ func TestFetchDroppedItemGUIDInBoundary(t *testing.T) {
 	// BoundaryGUIDs must be non-empty: the dropped item's GUID must be recorded.
 	if len(ch.BoundaryGUIDs) == 0 {
 		t.Error("BoundaryGUIDs is empty after a drop — dropped GUID not retained")
+	}
+}
+
+func TestSelfhostMarkerRoundTripsToAssetsKey(t *testing.T) {
+	// Allow the loopback test server through the mod's SSRF guard.
+	prevSSRF := mod.AllowPrivateFetch
+	mod.AllowPrivateFetch = true
+	t.Cleanup(func() { mod.AllowPrivateFetch = prevSSRF })
+
+	const body = "\xff\xd8\xff\xe0\x00\x10JFIF-some-jpeg-bytes"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	be := tempStore(t)
+	af := newAssetFetcher(be, 1<<20, "") // no SRR_ASSET_PROCESS: store source bytes
+	cacheDir := t.TempDir()
+	ctx := mod.WithCacheDir(context.Background(), cacheDir)
+
+	// 1) #selfhost downloads the remote image and rewrites src to a "#"-marker.
+	item := &mod.RawItem{Content: `<p><img src="` + srv.URL + `/x.jpg"></p>`}
+	m := mod.New()
+	if err := m.Process(ctx, "#selfhost", item); err != nil {
+		t.Fatalf("selfhost: %v", err)
+	}
+	if !strings.Contains(item.Content, `src="#`) {
+		t.Fatalf("expected an upload marker, got %q", item.Content)
+	}
+
+	// 2) The upload step (mirrors feed.go fetchURL): marker -> assets/ key.
+	out, err := mod.RewriteAttrs(item.Content, func(local string) (string, bool, error) {
+		key, err := af.UploadCacheRef(ctx, cacheDir, local)
+		if err != nil {
+			return "", false, err
+		}
+		return key, true, nil
+	})
+	if err != nil {
+		t.Fatalf("upload step: %v", err)
+	}
+
+	sum := sha256.Sum256([]byte(body))
+	wantKey := contentHashKey(".jpg", sum)
+	if !strings.Contains(out, wantKey) {
+		t.Fatalf("content %q missing assets key %q", out, wantKey)
+	}
+	if got := string(readKey(t, be, wantKey)); got != body {
+		t.Errorf("stored bytes = %q, want %q", got, body)
 	}
 }
 
