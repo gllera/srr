@@ -13,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"srrb/mod"
 	"srrb/store"
@@ -35,6 +36,13 @@ type assetFetcher struct {
 	maxBytes int64
 	proc     []string // asset-process command (transcode/process bytes); see runProcess
 	peek     []string // asset-peek command (identify the asset up front); see runPeek
+
+	// seen memoizes source-content-hash -> resolved store key for this run, so a
+	// marker reused across a feed's articles (or across feeds) skips the repeat
+	// asset-peek subprocess and store existence round-trip. Concurrent-safe (the
+	// fetcher is shared across workers); the store existence check below stays the
+	// cross-run and cross-worker-race backstop.
+	seen sync.Map
 }
 
 // assetPrefix is the reserved store prefix for self-hosted media, analogous to
@@ -128,6 +136,13 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 	}
 	sum := sha256.Sum256(orig)
 
+	// Within-run memo: identical source bytes resolve to one key, so a marker
+	// reused across articles/feeds in this fetch short-circuits before the repeat
+	// asset-peek subprocess and the store existence round-trip below.
+	if cached, ok := a.seen.Load(sum); ok {
+		return cached.(string), nil
+	}
+
 	// asset-peek (if configured) identifies the asset up front — before the dedup
 	// check — so the key reflects the post-process format while dedup still keys
 	// on the source bytes. It sets the stored extension (a transcoded asset then
@@ -156,6 +171,7 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 		return "", fmt.Errorf("check asset %q: %w", key, err)
 	} else if rc != nil {
 		rc.Close()
+		a.seen.Store(sum, key)
 		return key, nil
 	}
 
@@ -186,6 +202,7 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 	if err := a.be.AtomicPut(ctx, key, bytes.NewReader(payload), meta); err != nil {
 		return "", fmt.Errorf("store asset %q: %w", key, err)
 	}
+	a.seen.Store(sum, key)
 	return key, nil
 }
 

@@ -549,3 +549,33 @@ func TestUploadCacheRefNoPartialFileOnAtomicPutFailure(t *testing.T) {
 		t.Errorf("partial object found at immutable key %q after failed upload; AtomicPut should prevent this", key)
 	}
 }
+
+// TestUploadCacheRefMemoizesWithinRun verifies the within-run memo: a marker
+// reused in one fetch short-circuits the repeat before the asset-peek subprocess
+// (and the store existence round-trip it precedes), so peek runs exactly once for
+// the same source bytes.
+func TestUploadCacheRefMemoizesWithinRun(t *testing.T) {
+	cap := &metaCaptureBackend{Backend: tempStore(t)}
+	af := newAssetFetcher(cap, 1024, "") // no asset-process; peek alone
+	runs := filepath.Join(t.TempDir(), "peekruns")
+	af.peek = strings.Fields(fakeProcess(t,
+		`printf x >> '`+runs+`'; printf '{"mimetype":"image/webp","extension":"webp","supported":true}'`) + " {input}")
+
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+
+	k1, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	if err != nil {
+		t.Fatalf("first UploadCacheRef: %v", err)
+	}
+	k2, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	if err != nil {
+		t.Fatalf("second UploadCacheRef: %v", err)
+	}
+	if k1 != k2 {
+		t.Errorf("keys differ across the same-bytes references: %q vs %q", k1, k2)
+	}
+	if b, _ := os.ReadFile(runs); len(b) != 1 {
+		t.Errorf("asset-peek ran %d times, want 1 (within-run memo should skip the repeat)", len(b))
+	}
+}
