@@ -41,6 +41,17 @@ func init() {
 		policy.AllowAttrs("width", "height").Matching(bluemonday.NumberOrPercent).OnElements("video")
 		policy.AllowElements("video")
 
+		// <audio> mirrors <video> minus the visual/poster attrs. bluemonday
+		// URL-scheme-validates "src" like it does for video/img. controls and
+		// preload are constrained to their valid token sets. #selfhost runs after
+		// #sanitize, so <audio> must survive here for its media to be self-hosted;
+		// the frontend (fmt.ts) forces controls so a control-less feed <audio>
+		// still renders a player.
+		policy.AllowAttrs("src").OnElements("audio")
+		policy.AllowAttrs("preload").Matching(regexp.MustCompile(`(?i)^(none|metadata|auto)$`)).OnElements("audio")
+		policy.AllowAttrs("controls").Matching(regexp.MustCompile(`(?i)^(|controls)$`)).OnElements("audio")
+		policy.AllowElements("audio")
+
 		policy.RequireParseableURLs(true)
 		policy.AllowRelativeURLs(true)
 		policy.AllowURLSchemes("mailto", "http", "https")
