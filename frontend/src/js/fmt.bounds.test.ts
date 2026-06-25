@@ -59,4 +59,8 @@ describe("sanitizeHtml relative URL bounds (subpath pack base)", () => {
    it("drops a ../ traversal on a video poster too (poster takes the asset/bounds path)", () => {
       expect(attr('<video poster="../../p.jpg"></video>', "video", "poster")).toBeNull()
    })
+
+   it("drops a ../ traversal on an audio src too (audio takes the asset/bounds path)", () => {
+      expect(attr('<audio src="../../clip.mp3"></audio>', "audio", "src")).toBeNull()
+   })
 })
