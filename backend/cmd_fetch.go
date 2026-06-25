@@ -123,6 +123,7 @@ func (o *FetchCmd) fetch(ctx context.Context, client *http.Client) error {
 			cacheDir:  cacheDir,
 			fetchedAt: db.core.FetchedAt,
 			recipes:   db.core.Recipes,
+			assetSem:  make(chan struct{}, globals.AssetWorkers),
 		}
 
 		g, gctx := errgroup.WithContext(ctx)
