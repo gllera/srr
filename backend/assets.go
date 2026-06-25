@@ -144,7 +144,7 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 				storedExt = ext
 			}
 			supported = pr.Supported
-			meta = store.ObjectMeta{ContentType: pr.Mimetype, ContentEncoding: pr.Encoding}
+			meta = pr.objectMeta()
 		}
 	}
 	key := contentHashKey(storedExt, sum)
@@ -172,7 +172,7 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 		if b, pm, ok := a.runProcess(ctx, full, localname); ok {
 			payload = b
 			if pm.Mimetype != "" || pm.Encoding != "" {
-				meta = store.ObjectMeta{ContentType: pm.Mimetype, ContentEncoding: pm.Encoding}
+				meta = pm.objectMeta()
 			}
 			if pe := normalizeExt(pm.Extension); pe != "" && pe != storedExt {
 				slog.Warn("asset-process extension differs from asset-peek; keeping the peek key", "asset", localname, "peek", storedExt, "process", pe)
@@ -232,6 +232,12 @@ type assetMeta struct {
 	Mimetype  string `json:"mimetype"`
 	Extension string `json:"extension"`
 	Encoding  string `json:"encoding"`
+}
+
+// objectMeta maps the reported type/encoding onto the store's response-header
+// metadata (the field-name translation lives here, not at each call site).
+func (m assetMeta) objectMeta() store.ObjectMeta {
+	return store.ObjectMeta{ContentType: m.Mimetype, ContentEncoding: m.Encoding}
 }
 
 // peekResult is the JSON an asset-peek command prints to stdout: the identified

@@ -503,34 +503,20 @@ func TestUploadCacheRefMissingFile(t *testing.T) {
 
 // failMidWriteBackend wraps a real Backend and fails AtomicPut after writing
 // writeOK bytes, simulating a mid-stream crash or I/O error.  Get/Put/Rm/Close
-// delegate to the inner backend unchanged so the existence check works normally.
+// are promoted from the embedded backend so the existence check works normally.
 type failMidWriteBackend struct {
-	inner    store.Backend
-	writeOK  int64 // bytes to copy before injecting an error
-	atomicOK bool  // once set, AtomicPut succeeds (used to let the seeded Put through)
+	store.Backend       // inner backend; Get/Put/Rm/Close pass through
+	writeOK       int64 // bytes to copy before injecting an error
 }
 
 var errMidWrite = io.ErrUnexpectedEOF
 
-func (f *failMidWriteBackend) Get(ctx context.Context, key string, ignoreMissing bool) (io.ReadCloser, error) {
-	return f.inner.Get(ctx, key, ignoreMissing)
-}
-func (f *failMidWriteBackend) Put(ctx context.Context, key string, r io.Reader, ignoreExisting bool) error {
-	return f.inner.Put(ctx, key, r, ignoreExisting)
-}
-func (f *failMidWriteBackend) AtomicPut(ctx context.Context, key string, r io.Reader, meta store.ObjectMeta) error {
-	if f.atomicOK {
-		return f.inner.AtomicPut(ctx, key, r, meta)
-	}
+func (f *failMidWriteBackend) AtomicPut(_ context.Context, _ string, r io.Reader, _ store.ObjectMeta) error {
 	// Drain exactly writeOK bytes then return an error, simulating a mid-write failure.
 	buf := make([]byte, f.writeOK)
 	io.ReadFull(r, buf) //nolint:errcheck — we intentionally discard the partial read
 	return errMidWrite
 }
-func (f *failMidWriteBackend) Rm(ctx context.Context, key string) error {
-	return f.inner.Rm(ctx, key)
-}
-func (f *failMidWriteBackend) Close() error { return f.inner.Close() }
 
 // TestUploadCacheRefNoPartialFileOnAtomicPutFailure is the B6 regression test:
 // a mid-upload failure must leave no partial object at the immutable
@@ -539,7 +525,7 @@ func (f *failMidWriteBackend) Close() error { return f.inner.Close() }
 // existence check returns "not found" rather than truncated bytes.
 func TestUploadCacheRefNoPartialFileOnAtomicPutFailure(t *testing.T) {
 	inner := tempStore(t)
-	be := &failMidWriteBackend{inner: inner, writeOK: 4} // fail after 4 bytes
+	be := &failMidWriteBackend{Backend: inner, writeOK: 4} // fail after 4 bytes
 
 	af := newAssetFetcher(be, 1024, "")
 	cacheDir := t.TempDir()
