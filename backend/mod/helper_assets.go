@@ -73,9 +73,8 @@ func HasAssetMarkers(content string) bool {
 // original string verbatim. It is the asset-upload walk behind the
 // end-of-pipeline step in main.Feed.fetch: fn owns the upload policy.
 func RewriteAttrs(content string, fn func(marker string) (string, bool, error)) (string, error) {
-	// A marker is always a whole attribute value, so content without the
-	// `=["']?#` shape can hold none: skip the parse entirely (memchr-speed
-	// common case — #feed feeds never emit markers).
+	// Marker-less content holds no upload markers — skip the HTML parse entirely
+	// (see HasAssetMarkers for the why; #feed feeds hit this common case).
 	if !HasAssetMarkers(content) {
 		return content, nil
 	}
