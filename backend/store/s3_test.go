@@ -246,8 +246,8 @@ func TestS3RmExistingAndMissing(t *testing.T) {
 // The writer↔CDN cache contract rides on PutObject headers: Cache-Control is
 // resolved from the LOGICAL key (before the path prefix). Content-Type comes
 // from the extension for packs, but for assets/ (whose key keeps the SOURCE
-// extension) it is SNIFFED from the bytes — so a transcoding asset encoder can't
-// leave a .jpg-named WebP mislabeled image/jpeg.
+// extension) it is SNIFFED from the bytes — so a transcoding asset-process command
+// can't leave a .jpg-named WebP mislabeled image/jpeg.
 func TestS3PutCacheControlAndContentType(t *testing.T) {
 	b, f := setupFakeS3(t)
 	const jpeg = "\xff\xd8\xff\xe0JFIF"             // sniffs image/jpeg
