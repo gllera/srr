@@ -58,6 +58,8 @@ var tsTypes = []struct {
 	{"IFeedWire", "a db.gz feeds{} value (backend Feed)", reflect.TypeOf(Feed{})},
 	// IOutFeedWire is backend-only config; the frontend/service-worker ignores it.
 	{"IOutFeedWire", "a db.gz out[] entry (backend OutFeed)", reflect.TypeOf(OutFeed{})},
+	// IRecipeWire is backend-only config; the frontend/service-worker ignores it.
+	{"IRecipeWire", "a db.gz recipes{} value (backend Recipe)", reflect.TypeOf(Recipe{})},
 	{"IDBWire", "db.gz itself (backend DBCore)", reflect.TypeOf(DBCore{})},
 }
 
