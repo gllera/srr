@@ -50,14 +50,14 @@ func writeCacheFile(t *testing.T, cacheDir, name, content string) {
 	}
 }
 
-// fakeEncoder writes an executable shell script to a temp dir and returns its
-// path (the command for newAssetFetcher). body is the script after the shebang;
-// the cache file path arrives as "$1".
-func fakeEncoder(t *testing.T, body string) string {
+// fakeProcess writes an executable shell script to a temp dir and returns its
+// path (the asset-process command for newAssetFetcher). body is the script
+// after the shebang; the cache file path arrives as "$1".
+func fakeProcess(t *testing.T, body string) string {
 	t.Helper()
-	p := filepath.Join(t.TempDir(), "encoder.sh")
+	p := filepath.Join(t.TempDir(), "process.sh")
 	if err := os.WriteFile(p, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
-		t.Fatalf("write encoder: %v", err)
+		t.Fatalf("write process script: %v", err)
 	}
 	return p
 }
@@ -66,14 +66,14 @@ const encodedBytes = "ENCODED-OUTPUT-BYTES"
 const jpegBytes = "\xff\xd8\xff\xe0\x00\x10JFIF\x00original-jpeg"
 const pdfBytes = "%PDF-1.4\n original pdf"
 
-func TestUploadCacheRefRunsEncoderBeforeUpload(t *testing.T) {
+func TestUploadCacheRefRunsProcessBeforeUpload(t *testing.T) {
 	be := tempStore(t)
-	// Encoder ignores its input and emits fixed bytes — stands in for a transcoder.
+	// The command ignores its input and emits fixed bytes — stands in for a transcoder.
 	out := filepath.Join(t.TempDir(), "out.bin")
 	if err := os.WriteFile(out, []byte(encodedBytes), 0o644); err != nil {
 		t.Fatalf("write out: %v", err)
 	}
-	af := newAssetFetcher(be, 1024, fakeEncoder(t, "cat '"+out+"'"))
+	af := newAssetFetcher(be, 1024, fakeProcess(t, "cat '"+out+"'"))
 
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
@@ -94,7 +94,7 @@ func TestUploadCacheRefRunsEncoderBeforeUpload(t *testing.T) {
 	}
 }
 
-func TestUploadCacheRefSkipsEncoderWhenSourceAlreadyUploaded(t *testing.T) {
+func TestUploadCacheRefSkipsProcessWhenSourceAlreadyUploaded(t *testing.T) {
 	be := tempStore(t)
 	// Pre-seed the store at the source-hash key with a sentinel.
 	sum := sha256.Sum256([]byte(jpegBytes))
@@ -103,9 +103,9 @@ func TestUploadCacheRefSkipsEncoderWhenSourceAlreadyUploaded(t *testing.T) {
 		t.Fatalf("seed store: %v", err)
 	}
 
-	// An encoder with a side effect: if it runs, it creates ran.
+	// A command with a side effect: if it runs, it creates ran.
 	ran := filepath.Join(t.TempDir(), "ran")
-	af := newAssetFetcher(be, 1024, fakeEncoder(t, "touch '"+ran+"'\ncat \"$1\""))
+	af := newAssetFetcher(be, 1024, fakeProcess(t, "touch '"+ran+"'\ncat \"$1\""))
 
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
@@ -125,12 +125,12 @@ func TestUploadCacheRefSkipsEncoderWhenSourceAlreadyUploaded(t *testing.T) {
 	}
 }
 
-func TestUploadCacheRefEncoderRunsForEveryFileType(t *testing.T) {
+func TestUploadCacheRefProcessRunsForEveryFileType(t *testing.T) {
 	be := tempStore(t)
-	// A pass-through encoder with a side effect, on a non-media (PDF) file: the
-	// encoder must still run (no media gate) and its output is stored verbatim.
+	// A pass-through command with a side effect, on a non-media (PDF) file: the
+	// command must still run (no media gate) and its output is stored verbatim.
 	ran := filepath.Join(t.TempDir(), "ran")
-	af := newAssetFetcher(be, 1024, fakeEncoder(t, "touch '"+ran+"'\ncat \"$1\""))
+	af := newAssetFetcher(be, 1024, fakeProcess(t, "touch '"+ran+"'\ncat \"$1\""))
 
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "doc.pdf", pdfBytes)
@@ -150,9 +150,9 @@ func TestUploadCacheRefEncoderRunsForEveryFileType(t *testing.T) {
 	}
 }
 
-func TestUploadCacheRefEncoderFailsSoftToOriginal(t *testing.T) {
+func TestUploadCacheRefProcessFailsSoftToOriginal(t *testing.T) {
 	be := tempStore(t)
-	af := newAssetFetcher(be, 1024, fakeEncoder(t, "echo boom >&2\nexit 1"))
+	af := newAssetFetcher(be, 1024, fakeProcess(t, "echo boom >&2\nexit 1"))
 
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)

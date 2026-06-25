@@ -104,7 +104,7 @@ srr preview https://example.com/feed.xml -p "#sanitize" -p "#minify"
 | `-s, --pack-size` | 200 | Target pack size (KB) |
 | `-m, --max-feed-size` | 5000 | Max feed download size (KB) |
 | `--max-asset-size` | 25000 | Max self-hosted asset object size (KB); breach hard-fails the feed |
-| `--asset-encoder` | (none) | Command run on every self-hosted asset just before upload to transcode/process its bytes (e.g. `webify -m 720`); the asset's cache-file path is appended as the final arg and processed bytes are read from stdout — non-zero exit or empty output keeps the original; skipped when the source was already uploaded. Empty disables. |
+| `--asset-process` | (none) | Command run on every self-hosted asset just before upload to transcode/process its bytes (e.g. `webify -m 720`); the asset's cache-file path is appended as the final arg and processed bytes are read from stdout — non-zero exit or empty output keeps the original; skipped when the source was already uploaded. Empty disables. |
 | `--cache-dir` | $XDG_CACHE_HOME/srr | Download cache root for self-hosted external-ingest media |
 | `-o, --store` | packs | Storage destination |
 | `--force` | false | Override DB write lock |
@@ -283,7 +283,7 @@ After the pipe pipeline runs, SRR's automatic final step scans each item's `cont
 
 > **Note:** `<video poster>` is *not* a supported marker target — the `#sanitize` step strips a `#`-prefixed poster before the upload step runs (its allowlist constrains posters to `http(s)://` or `assets/`). Reference posters as `http(s)` URLs, or host the image via `<img>` instead.
 
-> **Asset processing.** If the operator configured `--asset-encoder` / `SRR_ASSET_ENCODER` (e.g. `webify -m 720`), every asset is piped through that command to transcode/shrink its bytes just before upload — so a file you self-host may be re-encoded (and the size cap applies to the processed output). It runs only on the first upload of a given source file (re-used assets are never re-processed) and is fail-soft (an encoder error keeps the original bytes); the stored key keeps the *source* extension even if the format changes.
+> **Asset processing.** If the operator configured `--asset-process` / `SRR_ASSET_PROCESS` (e.g. `webify -m 720`), every asset is piped through that command to transcode/shrink its bytes just before upload — so a file you self-host may be re-encoded (and the size cap applies to the processed output). It runs only on the first upload of a given source file (re-used assets are never re-processed) and is fail-soft (a command error keeps the original bytes); the stored key keeps the *source* extension even if the format changes.
 
 Two dedup layers result: the **cache** (yours) avoids re-downloading; the **content hash** (SRR's) avoids re-uploading. The cache root defaults to `$XDG_CACHE_HOME/srr` — override with `--cache-dir` / `SRR_CACHE_DIR`. It is disposable (the store is the source of truth) but **grows unbounded**: prune it yourself if disk is tight.
 
