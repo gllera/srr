@@ -34,6 +34,11 @@ type assetFetcher struct {
 	be       store.Backend
 	maxBytes int64
 	proc     []string
+	// peek, when set, is the asset-process command's companion probe (see
+	// runPeek): it identifies each asset up front to decide the stored extension,
+	// its Content-Type/-Encoding, and whether asset-process should run at all.
+	// Set once at construction (cmd_fetch), before workers run.
+	peek []string
 }
 
 // assetPrefix is the reserved store prefix for self-hosted media, analogous to
@@ -64,11 +69,12 @@ func newAssetFetcher(be store.Backend, maxKB int, procCmd string) *assetFetcher 
 // (sha256 of the source bytes, so identical content from any source dedups) and
 // the upload, so the fetcher needs no store credentials.
 //
-// The existence check keys on the source so it can run BEFORE the optional
-// per-asset processing: an asset already in the store is returned without
-// re-running the asset-process command or the upload. On a miss the command (if
-// configured) processes the file just before upload; the stored object keeps
-// the source extension.
+// The dedup key hashes the SOURCE bytes (so an asset already in the store is
+// returned without re-running asset-process or the upload), but its extension
+// comes from asset-peek when configured — the probe that predicts the
+// post-process format and runs before the existence check. On a miss the
+// asset-process command (if configured, and the asset is peek-supported)
+// processes the file just before upload.
 //
 // Guards (localname comes from item content, which may be attacker-influenced):
 // the resolved path must stay within cacheDir (no "..", no symlinked escape),
@@ -127,11 +133,31 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 		return "", fmt.Errorf("read asset %q: %w", localname, err)
 	}
 	sum := sha256.Sum256(orig)
-	key := contentHashKey(path.Ext(localname), sum)
 
-	// Already uploaded? Skip BOTH the asset-process command and the upload — the
-	// common case for an image reused across articles or feeds, and the reason
-	// the existence check keys on the source rather than on the processed output.
+	// asset-peek (if configured) identifies the asset up front — before the dedup
+	// check — so the key reflects the post-process format while dedup still keys
+	// on the source bytes. It sets the stored extension (a transcoded asset then
+	// carries its true output extension), its Content-Type/-Encoding, and whether
+	// asset-process should run at all (supported). Fail-soft: a peek error or
+	// invalid JSON falls back to the source extension and leaves the asset
+	// supported (asset-process runs if configured).
+	storedExt := path.Ext(localname)
+	supported := true
+	var meta store.ObjectMeta
+	if len(a.peek) > 0 {
+		if pr, ok := a.runPeek(ctx, full, localname); ok {
+			if ext := normalizeExt(pr.Extension); ext != "" {
+				storedExt = ext
+			}
+			supported = pr.Supported
+			meta = store.ObjectMeta{ContentType: pr.Mimetype, ContentEncoding: pr.Encoding}
+		}
+	}
+	key := contentHashKey(storedExt, sum)
+
+	// Already uploaded? Skip the asset-process command and the upload — the common
+	// case for an image reused across articles or feeds. (asset-peek still ran, to
+	// fix the key extension; it is the cheap probe.)
 	if rc, err := a.be.Get(ctx, key, true); err != nil {
 		return "", fmt.Errorf("check asset %q: %w", key, err)
 	} else if rc != nil {
@@ -141,16 +167,22 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 
 	// First time we've seen these bytes: run the configured asset-process command
 	// (any processing — e.g. media transcoding) on the file just before upload,
-	// then store the result under the source-hash key. In {output} mode the
-	// command also declares the result's Content-Type/-Encoding, which ride the
-	// upload. Fail-soft: a command that errors or emits nothing uploads the
-	// original unchanged with no declared metadata.
+	// unless asset-peek marked the asset unsupported (host it as-is). In {output}
+	// mode the command declares the result's Content-Type/-Encoding — the actual
+	// result, so it wins over peek's prediction. The key keeps the peek extension
+	// (decided before the dedup check); a process extension that disagrees only
+	// warns. Fail-soft: a command that errors or emits nothing uploads the
+	// original unchanged.
 	payload := orig
-	var meta store.ObjectMeta
-	if len(a.proc) > 0 {
+	if supported && len(a.proc) > 0 {
 		if res, ok := a.runProcess(ctx, full, localname); ok {
 			payload = res.bytes
-			meta = store.ObjectMeta{ContentType: res.mimetype, ContentEncoding: res.encoding}
+			if res.mimetype != "" || res.encoding != "" {
+				meta = store.ObjectMeta{ContentType: res.mimetype, ContentEncoding: res.encoding}
+			}
+			if pe := normalizeExt(res.ext); pe != "" && pe != storedExt {
+				slog.Warn("asset-process extension differs from asset-peek; keeping the peek key", "asset", localname, "peek", storedExt, "process", pe)
+			}
 		}
 	}
 	if a.maxBytes > 0 && int64(len(payload)) > a.maxBytes {
@@ -294,6 +326,59 @@ func (a *assetFetcher) readProcOutput(outPath, localname string) ([]byte, bool) 
 		return nil, false
 	}
 	return payload, true
+}
+
+// peekResult is the JSON an asset-peek command prints to stdout: the asset's
+// identified type/extension, whether asset-process supports it, and an optional
+// content encoding. Mirrors processResult plus the supported gate.
+type peekResult struct {
+	Mimetype  string `json:"mimetype"`
+	Extension string `json:"extension"`
+	Supported bool   `json:"supported"`
+	Encoding  string `json:"encoding"`
+}
+
+// runPeek runs the configured asset-peek command on the cache file to identify
+// the asset before the dedup check, returning its parsed JSON and ok=true. The
+// cache file path is substituted for every {input} token (per arg); with no
+// token it is appended as the final arg. Fail-soft: ok=false (the caller falls
+// back to the source extension and treats the asset as supported) when the
+// command errors or prints invalid JSON, so a peek hiccup never wedges a feed.
+// Shares mod.RunCommand's external-command bounds.
+func (a *assetFetcher) runPeek(ctx context.Context, full, localname string) (peekResult, bool) {
+	hasInput := false
+	argv := make([]string, len(a.peek))
+	for i, f := range a.peek {
+		if strings.Contains(f, inputToken) {
+			hasInput = true
+		}
+		argv[i] = strings.ReplaceAll(f, inputToken, full)
+	}
+	if !hasInput {
+		argv = append(argv, full)
+	}
+
+	out, err := mod.RunCommand(ctx, argv[0], argv[1:]...)
+	if err != nil {
+		slog.Warn("asset-peek failed; using source extension", "asset", localname, "cmd", a.peek[0], "err", err)
+		return peekResult{}, false
+	}
+	var pr peekResult
+	if err := json.Unmarshal(out, &pr); err != nil {
+		slog.Warn("asset-peek JSON invalid; using source extension", "asset", localname, "cmd", a.peek[0], "err", err)
+		return peekResult{}, false
+	}
+	return pr, true
+}
+
+// normalizeExt returns ext with a leading dot ("webp" -> ".webp"), leaving an
+// empty string and an already-dotted extension untouched, so an asset-peek /
+// asset-process command may report the extension either way.
+func normalizeExt(ext string) string {
+	if ext == "" || strings.HasPrefix(ext, ".") {
+		return ext
+	}
+	return "." + ext
 }
 
 // contentHashKey derives the relative store key (assets/<2>/<16><ext>) from the
