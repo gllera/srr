@@ -81,23 +81,24 @@ func (o *PreviewCmd) Run() error {
 
 	r := recipeFor(recipes, o.Recipe)
 	def := recipeFor(recipes, defaultRecipeName)
-	// Effective pipeline: the recipe's pipe over the default; an ad-hoc -p
-	// overrides the recipe's pipe (still expanding #default), so you can try a
-	// pipeline before saving it as a recipe.
-	chPipe := r.Pipe
+	// Ad-hoc -p/-i overrides are modeled uniformly as mutating the resolved
+	// recipe before resolution, so both axes layer on the same
+	// resolvePipe/ingest.Select trio (r is a local copy of the map value, so
+	// reassigning its fields never touches the stored recipe). This lets you try
+	// a pipeline/ingest before saving it as a recipe; -p still expands #default.
 	if len(o.Pipe) > 0 {
-		chPipe = o.Pipe
+		r.Pipe = o.Pipe
 	}
-	pipe := resolvePipe(def.Pipe, chPipe)
+	if o.Ingest != "" {
+		r.Ingest = o.Ingest
+	}
+	pipe := resolvePipe(def.Pipe, r.Pipe)
 	if err := processor.Validate(ctx, pipe); err != nil {
 		return fmt.Errorf("invalid pipeline %v: %w", pipe, err)
 	}
 
 	buf := make([]byte, globals.MaxFeedSize*(1<<10)+1)
 	name := ingest.Select(r.Ingest, def.Ingest)
-	if o.Ingest != "" {
-		name = o.Ingest
-	}
 
 	result, err := engine.Fetch(ctx, name, client, buf, ingest.Request{
 		URL:     o.URL.String(),
