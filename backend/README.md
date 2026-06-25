@@ -104,7 +104,7 @@ srr preview https://example.com/feed.xml -p "#sanitize" -p "#minify"
 | `-s, --pack-size` | 200 | Target pack size (KB) |
 | `-m, --max-feed-size` | 5000 | Max feed download size (KB) |
 | `--max-asset-size` | 25000 | Max self-hosted asset object size (KB); breach hard-fails the feed |
-| `--asset-process` | (none) | Command run on every self-hosted asset just before upload to transcode/process its bytes (e.g. `webify -m 720`, or `enc -i {input} --flags`); the asset's cache-file path is substituted for each `{input}` token, or appended as the final arg when no token is present, and processed bytes are read from stdout — non-zero exit or empty output keeps the original; skipped when the source was already uploaded. Empty disables. |
+| `--asset-process` | (none) | Command run on every self-hosted asset just before upload to transcode/process its bytes (e.g. `webify -m 720`, or `conv -i {input} -o {output}`); the cache-file path is substituted for each `{input}` token (or appended when absent). With an `{output}` token the command writes its result to that file and prints a `{mimetype,extension,encoding}` JSON to stdout (setting the stored Content-Type/-Encoding); without `{output}`, processed bytes are read from stdout. Non-zero exit or empty output keeps the original; skipped when the source was already uploaded. Empty disables. |
 | `--cache-dir` | $XDG_CACHE_HOME/srr | Download cache root for self-hosted external-ingest media |
 | `-o, --store` | packs | Storage destination |
 | `--force` | false | Override DB write lock |

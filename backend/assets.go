@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -44,8 +45,9 @@ const assetPrefix = "assets/"
 // object's size. procCmd, when non-empty, is the asset-process command run on
 // every asset just before upload to process its bytes (e.g. transcode media):
 // it is split on whitespace, the cache file path is appended as its final
-// argument, and the processed bytes are read from its stdout. Empty disables
-// processing.
+// argument (or substituted for {input}/{output} tokens), and the processed
+// bytes are read from its stdout (or, in {output} mode, the output file). Empty
+// disables processing.
 func newAssetFetcher(be store.Backend, maxKB int, procCmd string) *assetFetcher {
 	return &assetFetcher{
 		be:       be,
@@ -139,69 +141,159 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 
 	// First time we've seen these bytes: run the configured asset-process command
 	// (any processing — e.g. media transcoding) on the file just before upload,
-	// then store the result under the source-hash key. Fail-soft: a command that
-	// errors or emits nothing uploads the original unchanged.
+	// then store the result under the source-hash key. In {output} mode the
+	// command also declares the result's Content-Type/-Encoding, which ride the
+	// upload. Fail-soft: a command that errors or emits nothing uploads the
+	// original unchanged with no declared metadata.
 	payload := orig
+	var meta store.ObjectMeta
 	if len(a.proc) > 0 {
-		if b, ok := a.runProcess(ctx, full, localname); ok {
-			payload = b
+		if res, ok := a.runProcess(ctx, full, localname); ok {
+			payload = res.bytes
+			meta = store.ObjectMeta{ContentType: res.mimetype, ContentEncoding: res.encoding}
 		}
 	}
 	if a.maxBytes > 0 && int64(len(payload)) > a.maxBytes {
 		return "", fmt.Errorf("asset %q exceeds %d bytes (size %d)", localname, a.maxBytes, len(payload))
 	}
 
-	if err := a.be.AtomicPut(ctx, key, bytes.NewReader(payload), store.ObjectMeta{}); err != nil {
+	if err := a.be.AtomicPut(ctx, key, bytes.NewReader(payload), meta); err != nil {
 		return "", fmt.Errorf("store asset %q: %w", key, err)
 	}
 	return key, nil
 }
 
-// inputToken, when present in the asset-process command, marks where the cache
-// file path is substituted (each occurrence, per arg). A command that needs the
-// input as a named/positioned argument (e.g. "enc -i {input} --flags") uses it;
-// otherwise the path is appended as the final argument. Output is always read
-// from stdout, so the command must write its result there.
-const inputToken = "{input}"
+// inputToken / outputToken mark where the asset-process command receives the
+// cache file path and (optionally) an output path. {input} is substituted per
+// arg (e.g. "enc -i {input} --flags"); with no {input} the path is appended as
+// the final arg. {output} switches the command to file mode: SRR substitutes a
+// fresh temp path, reads the processed bytes back from it, and parses a metadata
+// JSON ({mimetype, extension, encoding}) from stdout. With no {output} the
+// command writes processed bytes to stdout (no metadata).
+const (
+	inputToken  = "{input}"
+	outputToken = "{output}"
+)
+
+// processResult is the JSON an asset-process command prints to stdout in
+// {output} mode: the type/encoding of the bytes it wrote to the output file.
+type processResult struct {
+	Mimetype  string `json:"mimetype"`
+	Extension string `json:"extension"`
+	Encoding  string `json:"encoding"`
+}
+
+// procRun is one asset-process run's outcome: the processed bytes plus the
+// metadata declared in {output} mode (zero-valued in stdout mode).
+type procRun struct {
+	bytes    []byte
+	mimetype string
+	ext      string
+	encoding string
+}
 
 // runProcess runs the configured asset-process command on the cache file just
-// before upload, returning its stdout and ok=true on success. The cache file
-// path is substituted for every {input} token (per arg); with no token it is
-// appended as the command's final argument. Output is read from stdout; stderr
-// passes through for diagnostics. Fail-soft: it returns ok=false — the caller
-// uploads the original unchanged — when the command errors or produces no
-// output, so a processing hiccup, or a file type the command does not handle,
-// never wedges a feed. Runs through mod.RunCommand so it shares the
-// external-command bounds (a SubprocessTimeout deadline, WaitDelay, and a capped
-// stdout): a hung transcoder can't wedge the worker and runaway output can't OOM
-// it.
-func (a *assetFetcher) runProcess(ctx context.Context, full, localname string) ([]byte, bool) {
-	// Build a fresh argv (never mutate a.proc — it is shared across workers).
-	// Substitute the input path in place where {input} appears; if no arg carries
-	// the token, append the path as the final argument (the default convention).
-	argv := make([]string, len(a.proc))
-	hasToken := false
-	for i, f := range a.proc {
+// before upload. The cache file path is substituted for every {input} token
+// (per arg); with no token it is appended as the command's final argument. In
+// {output} mode (an arg carries {output}) SRR substitutes a fresh temp path,
+// reads the processed bytes back from that file, and parses a metadata JSON from
+// stdout; otherwise the bytes are read from stdout. stderr passes through for
+// diagnostics. Fail-soft: it returns ok=false — the caller uploads the original
+// unchanged — when the command errors, writes no output, or (file mode) prints
+// invalid metadata, so a processing hiccup or an unhandled file type never
+// wedges a feed. Runs through mod.RunCommand so it shares the external-command
+// bounds (a SubprocessTimeout deadline, WaitDelay, and a capped stdout): a hung
+// transcoder can't wedge the worker and runaway output can't OOM it.
+func (a *assetFetcher) runProcess(ctx context.Context, full, localname string) (procRun, bool) {
+	hasInput, hasOutput := false, false
+	for _, f := range a.proc {
 		if strings.Contains(f, inputToken) {
-			hasToken = true
-			f = strings.ReplaceAll(f, inputToken, full)
+			hasInput = true
+		}
+		if strings.Contains(f, outputToken) {
+			hasOutput = true
+		}
+	}
+
+	// {output} mode: a fresh temp file the command writes its result to. The
+	// source extension is a hint for tools that pick a format from it; SRR reads
+	// the bytes back regardless.
+	var outPath string
+	if hasOutput {
+		tmp, err := os.CreateTemp("", "srr-asset-*"+path.Ext(localname))
+		if err != nil {
+			slog.Warn("asset-process: create output file failed; uploading original", "asset", localname, "err", err)
+			return procRun{}, false
+		}
+		outPath = tmp.Name()
+		tmp.Close()
+		defer os.Remove(outPath)
+	}
+
+	// Build a fresh argv (never mutate a.proc — it is shared across workers).
+	argv := make([]string, len(a.proc))
+	for i, f := range a.proc {
+		f = strings.ReplaceAll(f, inputToken, full)
+		if hasOutput {
+			f = strings.ReplaceAll(f, outputToken, outPath)
 		}
 		argv[i] = f
 	}
-	if !hasToken {
+	if !hasInput {
 		argv = append(argv, full)
 	}
 
 	out, err := mod.RunCommand(ctx, argv[0], argv[1:]...)
 	if err != nil {
 		slog.Warn("asset-process command failed; uploading original", "asset", localname, "cmd", a.proc[0], "err", err)
+		return procRun{}, false
+	}
+
+	if !hasOutput {
+		// stdout mode: the processed bytes are stdout; no declared metadata.
+		if len(out) == 0 {
+			slog.Warn("asset-process command produced no output; uploading original", "asset", localname, "cmd", a.proc[0])
+			return procRun{}, false
+		}
+		return procRun{bytes: out}, true
+	}
+
+	// {output} mode: bytes from the file, metadata JSON from stdout.
+	payload, ok := a.readProcOutput(outPath, localname)
+	if !ok {
+		return procRun{}, false
+	}
+	var meta processResult
+	if err := json.Unmarshal(out, &meta); err != nil {
+		slog.Warn("asset-process metadata JSON invalid; uploading original", "asset", localname, "cmd", a.proc[0], "err", err)
+		return procRun{}, false
+	}
+	return procRun{bytes: payload, mimetype: meta.Mimetype, ext: meta.Extension, encoding: meta.Encoding}, true
+}
+
+// readProcOutput reads the {output}-mode result file, bounding the read by the
+// asset size cap so a runaway output can't OOM the worker (the cap is re-checked
+// on the payload upstream). An empty, oversize, or unreadable file fails soft.
+func (a *assetFetcher) readProcOutput(outPath, localname string) ([]byte, bool) {
+	fi, err := os.Stat(outPath)
+	if err != nil {
+		slog.Warn("asset-process: stat output failed; uploading original", "asset", localname, "err", err)
 		return nil, false
 	}
-	if len(out) == 0 {
-		slog.Warn("asset-process command produced no output; uploading original", "asset", localname, "cmd", a.proc[0])
+	if a.maxBytes > 0 && fi.Size() > a.maxBytes {
+		slog.Warn("asset-process output exceeds cap; uploading original", "asset", localname, "size", fi.Size(), "cap", a.maxBytes)
 		return nil, false
 	}
-	return out, true
+	payload, err := os.ReadFile(outPath)
+	if err != nil {
+		slog.Warn("asset-process: read output failed; uploading original", "asset", localname, "err", err)
+		return nil, false
+	}
+	if len(payload) == 0 {
+		slog.Warn("asset-process produced no output file; uploading original", "asset", localname, "cmd", a.proc[0])
+		return nil, false
+	}
+	return payload, true
 }
 
 // contentHashKey derives the relative store key (assets/<2>/<16><ext>) from the
