@@ -110,9 +110,16 @@ func TestFeedAddSkipsResolveForExternalIngest(t *testing.T) {
 	}
 }
 
-// feed add eagerly rejects a reference to a recipe that does not exist.
+// feed add eagerly rejects a reference to a recipe that does not exist —
+// BEFORE the subscribe-time network probe (so the operator gets the clear
+// "recipe does not exist" rather than a resolve error). The resolver is rigged
+// to fail the test if it is ever called.
 func TestFeedAddRejectsUnknownRecipe(t *testing.T) {
 	setupEmptyDB(t)
+	resolveFeedURL = func(_ context.Context, _ string) (string, error) {
+		t.Error("resolveFeedURL must not run when the recipe ref is invalid")
+		return "", fmt.Errorf("network probe should not have happened")
+	}
 	cmd := &AddCmd{Title: strPtr("X"), URL: strPtr("https://x.example.com/feed"), Recipe: strPtr("nope")}
 	wantErr(t, cmd.Run(), `recipe "nope" does not exist`)
 	if n := len(reopenDB(t).Feeds()); n != 0 {
