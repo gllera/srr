@@ -297,6 +297,105 @@ func TestUploadCacheRefProcessOutputBadJSONFailsSoft(t *testing.T) {
 	}
 }
 
+func TestUploadCacheRefPeekSetsKeyExtensionAndMeta(t *testing.T) {
+	cap := &metaCaptureBackend{Backend: tempStore(t)}
+	af := newAssetFetcher(cap, 1024, "") // no asset-process
+	af.peek = strings.Fields(fakeProcess(t, `printf '{"mimetype":"image/webp","extension":"webp","supported":true}'`) + " {input}")
+
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+
+	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	if err != nil {
+		t.Fatalf("UploadCacheRef: %v", err)
+	}
+	// Key keeps the SOURCE hash but takes the PEEK extension.
+	sum := sha256.Sum256([]byte(jpegBytes))
+	if want := contentHashKey(".webp", sum); key != want {
+		t.Errorf("key = %q, want peek-extension key %q", key, want)
+	}
+	if cap.gotMeta.ContentType != "image/webp" {
+		t.Errorf("ContentType = %q, want image/webp (from peek)", cap.gotMeta.ContentType)
+	}
+}
+
+func TestUploadCacheRefPeekUnsupportedHostsOriginalSkipsProcess(t *testing.T) {
+	cap := &metaCaptureBackend{Backend: tempStore(t)}
+	ran := filepath.Join(t.TempDir(), "ran")
+	af := newAssetFetcher(cap, 1024, fakeProcess(t, "touch '"+ran+"'\ncat \"$1\""))
+	af.peek = strings.Fields(fakeProcess(t, `printf '{"mimetype":"image/svg+xml","extension":"svg","supported":false}'`) + " {input}")
+
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+
+	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	if err != nil {
+		t.Fatalf("UploadCacheRef: %v", err)
+	}
+	if _, err := os.Stat(ran); !os.IsNotExist(err) {
+		t.Error("asset-process ran for an unsupported asset")
+	}
+	sum := sha256.Sum256([]byte(jpegBytes))
+	if want := contentHashKey(".svg", sum); key != want {
+		t.Errorf("key = %q, want peek-extension key %q", key, want)
+	}
+	if got := string(readKey(t, cap, key)); got != jpegBytes {
+		t.Errorf("stored body = %q, want original %q (unsupported)", got, jpegBytes)
+	}
+	if cap.gotMeta.ContentType != "image/svg+xml" {
+		t.Errorf("ContentType = %q, want image/svg+xml (from peek)", cap.gotMeta.ContentType)
+	}
+}
+
+func TestUploadCacheRefPeekFailSoftUsesSourceExtension(t *testing.T) {
+	be := tempStore(t)
+	af := newAssetFetcher(be, 1024, "")
+	af.peek = strings.Fields(fakeProcess(t, "echo boom >&2\nexit 1") + " {input}") // peek fails
+
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+
+	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	if err != nil {
+		t.Fatalf("UploadCacheRef: %v", err)
+	}
+	sum := sha256.Sum256([]byte(jpegBytes))
+	if want := contentHashKey(".jpg", sum); key != want {
+		t.Errorf("key = %q, want SOURCE-extension key %q (peek fail-soft)", key, want)
+	}
+	if got := string(readKey(t, be, key)); got != jpegBytes {
+		t.Errorf("stored body = %q, want %q", got, jpegBytes)
+	}
+}
+
+func TestUploadCacheRefProcessMetaOverridesPeekMeta(t *testing.T) {
+	cap := &metaCaptureBackend{Backend: tempStore(t)}
+	// asset-process declares image/avif in {output} mode; peek predicted image/webp.
+	// The actual result's type (process) wins for Content-Type; the key keeps the
+	// peek extension (decided before process runs).
+	body := "printf 'AVIF' > \"$2\"\nprintf '{\"mimetype\":\"image/avif\",\"extension\":\"webp\"}'"
+	af := newAssetFetcher(cap, 1024, fakeProcess(t, body)+" {input} {output}")
+	af.peek = strings.Fields(fakeProcess(t, `printf '{"mimetype":"image/webp","extension":"webp","supported":true}'`) + " {input}")
+
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+
+	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	if err != nil {
+		t.Fatalf("UploadCacheRef: %v", err)
+	}
+	sum := sha256.Sum256([]byte(jpegBytes))
+	if want := contentHashKey(".webp", sum); key != want {
+		t.Errorf("key = %q, want peek-extension key %q", key, want)
+	}
+	if got := string(readKey(t, cap, key)); got != "AVIF" {
+		t.Errorf("stored body = %q, want process output AVIF", got)
+	}
+	if cap.gotMeta.ContentType != "image/avif" {
+		t.Errorf("ContentType = %q, want image/avif (process overrides peek)", cap.gotMeta.ContentType)
+	}
+}
+
 func TestUploadCacheRefStoresUnderContentHashKey(t *testing.T) {
 	const body = "IMAGEBYTES"
 	be := tempStore(t)
