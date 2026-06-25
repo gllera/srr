@@ -340,6 +340,7 @@ Articles pass through a chain of mods during fetch. The pipe is defined at two l
 - `#minify` — HTML minification (tdewolff/minify)
 - `#readability` — fetches an item's `Link` and replaces `Content` with the extracted article body (for teaser-only feeds; fail-open)
 - `#filter` — content-based item dropping (see [below](#filter))
+- `#selfhost` — downloads remote `<img>`/`<video>`/`<audio>` media → `#`-marker → existing upload step converts (`SRR_ASSET_PROCESS`) and self-hosts to `assets/`; network-bound + fail-open per asset; place after `#base` (e.g. `["#base", "#selfhost"]`)
 
 **Custom mods** — any shell command that reads/writes JSON via stdin/stdout (see [External mod protocol](#external-mod-protocol)):
 
