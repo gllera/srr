@@ -217,7 +217,7 @@ func TestS3PutOverwrite(t *testing.T) {
 func TestS3AtomicPutOverwrites(t *testing.T) {
 	b, f := setupFakeS3(t)
 	for _, content := range []string{"first", "second"} {
-		if err := b.AtomicPut(ctx, "atomic.txt", bytes.NewBufferString(content)); err != nil {
+		if err := b.AtomicPut(ctx, "atomic.txt", bytes.NewBufferString(content), ObjectMeta{}); err != nil {
 			t.Fatalf("AtomicPut(%q): %v", content, err)
 		}
 	}
@@ -244,40 +244,52 @@ func TestS3RmExistingAndMissing(t *testing.T) {
 }
 
 // The writer↔CDN cache contract rides on PutObject headers: Cache-Control is
-// resolved from the LOGICAL key (before the path prefix). Content-Type comes
-// from the extension for packs, but for assets/ (whose key keeps the SOURCE
-// extension) it is SNIFFED from the bytes — so a transcoding asset-process command
-// can't leave a .jpg-named WebP mislabeled image/jpeg.
+// resolved from the LOGICAL key (before the path prefix). Content-Type, with no
+// explicit ObjectMeta type, is the application/octet-stream default — SRR no
+// longer derives it from the extension or sniffs the bytes (peek/process is the
+// single source of truth for an asset's type; packs are opaque gzip blobs).
 func TestS3PutCacheControlAndContentType(t *testing.T) {
 	b, f := setupFakeS3(t)
-	const jpeg = "\xff\xd8\xff\xe0JFIF"             // sniffs image/jpeg
-	const webp = "RIFF\x10\x00\x00\x00WEBPVP8 ...." // sniffs image/webp
 	cases := []struct {
-		key, body, wantCC, wantCT string
+		key, wantCC string
 	}{
-		{"db.gz", "x", cacheRevalidate, "application/gzip"},
-		{"idx/0.gz", "x", cacheImmutable, "application/gzip"},
-		{"data/L3.gz", "x", cacheImmutable, "application/gzip"},
-		// Asset bytes matching the source extension: sniff agrees with it.
-		{"assets/ab/0123456789abcdef.jpg", jpeg, cacheImmutable, "image/jpeg"},
-		// Asset transcoded away from its source extension (S40): the sniff
-		// overrides the stale .jpg extension so the object is labeled correctly.
-		{"assets/cd/fedcba9876543210.jpg", webp, cacheImmutable, "image/webp"},
-		{".locked", "x", "", ""}, // no policy; CT unchecked (the SDK stamps a default when we pass none)
+		{"db.gz", cacheRevalidate},
+		{"idx/0.gz", cacheImmutable},
+		{"data/L3.gz", cacheImmutable},
+		{"assets/ab/0123456789abcdef.jpg", cacheImmutable},
+		{".locked", ""}, // no cache policy
 	}
 	for _, c := range cases {
 		t.Run(c.key, func(t *testing.T) {
-			if err := b.Put(ctx, c.key, strings.NewReader(c.body), true); err != nil {
+			if err := b.Put(ctx, c.key, strings.NewReader("x"), true); err != nil {
 				t.Fatalf("Put: %v", err)
 			}
 			h := f.headers["prefix/"+c.key]
 			if got := h.Get("Cache-Control"); got != c.wantCC {
 				t.Errorf("Cache-Control = %q, want %q", got, c.wantCC)
 			}
-			if got := h.Get("Content-Type"); c.wantCT != "" && got != c.wantCT {
-				t.Errorf("Content-Type = %q, want %q", got, c.wantCT)
+			if got := h.Get("Content-Type"); got != "application/octet-stream" {
+				t.Errorf("Content-Type = %q, want application/octet-stream (default)", got)
 			}
 		})
+	}
+}
+
+// AtomicPut stamps the explicit ObjectMeta Content-Type and Content-Encoding —
+// the asset-peek / asset-process path that lets the operator declare an asset's
+// real type and (optional) encoding.
+func TestS3AtomicPutStampsObjectMeta(t *testing.T) {
+	b, f := setupFakeS3(t)
+	meta := ObjectMeta{ContentType: "image/webp", ContentEncoding: "gzip"}
+	if err := b.AtomicPut(ctx, "assets/ab/0123456789abcdef.webp", strings.NewReader("x"), meta); err != nil {
+		t.Fatalf("AtomicPut: %v", err)
+	}
+	h := f.headers["prefix/assets/ab/0123456789abcdef.webp"]
+	if got := h.Get("Content-Type"); got != "image/webp" {
+		t.Errorf("Content-Type = %q, want image/webp", got)
+	}
+	if got := h.Get("Content-Encoding"); got != "gzip" {
+		t.Errorf("Content-Encoding = %q, want gzip", got)
 	}
 }
 

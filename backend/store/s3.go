@@ -1,14 +1,11 @@
 package store
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"mime"
-	"net/http"
 	"net/url"
 	"path"
 	"strings"
@@ -119,14 +116,24 @@ func (d *S3) Get(ctx context.Context, key string, ignoreMissing bool) (io.ReadCl
 }
 
 func (d *S3) Put(ctx context.Context, key string, r io.Reader, ignoreExisting bool) error {
+	return d.put(ctx, key, r, ignoreExisting, ObjectMeta{})
+}
+
+func (d *S3) AtomicPut(ctx context.Context, key string, r io.Reader, meta ObjectMeta) error {
+	return d.put(ctx, key, r, true, meta)
+}
+
+// put is the shared write core. Content-Type comes from meta (the asset-peek /
+// asset-process mimetype), defaulting to application/octet-stream when unset —
+// SRR no longer guesses a type from the key extension or by sniffing the bytes,
+// since peek/process is the single source of truth for an asset's type and packs
+// are opaque gzip blobs the reader decompresses. Content-Encoding is stamped
+// only when meta sets it.
+func (d *S3) put(ctx context.Context, key string, r io.Reader, ignoreExisting bool, meta ObjectMeta) error {
 	// Resolve the cache class from the logical key before it gets the path
 	// prefix, so the CDN serves finalized packs immutable and db.gz/latest
 	// always-revalidate.
 	cacheControl := cacheControlForKey(key)
-	// assets/ keys carry the SOURCE extension, which a transcoding asset-process
-	// command can leave disagreeing with the bytes; remember the class before the
-	// path prefix so we can sniff the real Content-Type below.
-	isAsset := strings.HasPrefix(key, "assets/")
 	key = d.s3path("write", key)
 
 	var condition *string
@@ -134,38 +141,21 @@ func (d *S3) Put(ctx context.Context, key string, r io.Reader, ignoreExisting bo
 		condition = aws.String("*")
 	}
 
-	// Set Content-Type by extension so self-hosted assets (assets/<hash>.jpg,
-	// .mp4, …) render in-browser instead of serving as octet-stream. Empty for
-	// unrecognised extensions; harmless for .gz packs.
-	var contentType *string
-	if ct := mime.TypeByExtension(path.Ext(key)); ct != "" {
-		contentType = aws.String(ct)
-	}
-	// For assets the key's (source) extension can disagree with the bytes after a
-	// transcoding asset-process command (e.g. a .jpg source stored as WebP), which would
-	// stamp the wrong Content-Type and break in-browser rendering. Buffer the
-	// payload (already size-capped upstream) and sniff it; prefer a confident
-	// detection over the extension, falling back to the extension when the sniff
-	// is inconclusive (octet-stream). http.DetectContentType identifies the
-	// common transcode targets (WebP, WebM, PNG/JPEG/GIF, MP4).
-	if isAsset {
-		buf, err := io.ReadAll(r)
-		if err != nil {
-			return fmt.Errorf("s3 read asset %q: %w", key, err)
-		}
-		if ct := http.DetectContentType(buf); ct != "application/octet-stream" {
-			contentType = aws.String(ct)
-		}
-		r = bytes.NewReader(buf)
+	contentType := meta.ContentType
+	if contentType == "" {
+		contentType = "application/octet-stream"
 	}
 
 	input := &s3.PutObjectInput{
 		Bucket:            aws.String(d.bucket),
 		Key:               aws.String(key),
 		Body:              r,
-		ContentType:       contentType,
+		ContentType:       aws.String(contentType),
 		IfNoneMatch:       condition,
 		ChecksumAlgorithm: types.ChecksumAlgorithmCrc32,
+	}
+	if meta.ContentEncoding != "" {
+		input.ContentEncoding = aws.String(meta.ContentEncoding)
 	}
 	if cacheControl != "" {
 		input.CacheControl = aws.String(cacheControl)
@@ -184,10 +174,6 @@ func (d *S3) Put(ctx context.Context, key string, r io.Reader, ignoreExisting bo
 	}
 
 	return nil
-}
-
-func (d *S3) AtomicPut(ctx context.Context, key string, r io.Reader) error {
-	return d.Put(ctx, key, r, true)
 }
 
 func (d *S3) Rm(ctx context.Context, key string) error {

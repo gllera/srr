@@ -174,7 +174,9 @@ func (d *SFTP) Put(_ context.Context, key string, r io.Reader, ignoreExisting bo
 	return nil
 }
 
-func (d *SFTP) AtomicPut(_ context.Context, key string, r io.Reader) error {
+// AtomicPut ignores meta: SFTP files have no stored Content-Type/-Encoding —
+// the static server stamps response headers by extension at request time.
+func (d *SFTP) AtomicPut(_ context.Context, key string, r io.Reader, _ ObjectMeta) error {
 	file := d.sftpPath("atomic write", key)
 	if err := d.ensureDir(file); err != nil {
 		return err

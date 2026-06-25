@@ -272,7 +272,7 @@ func (o *DB) Commit(ctx context.Context) error {
 	if err := gz.Close(); err != nil {
 		return err
 	}
-	return o.AtomicPut(ctx, dbFileKey, &buf)
+	return o.AtomicPut(ctx, dbFileKey, &buf, store.ObjectMeta{})
 }
 
 func (o *DB) Feeds() map[int]*Feed {

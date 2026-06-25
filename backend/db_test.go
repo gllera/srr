@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"srrb/store"
 )
 
 var ctx = context.Background()
@@ -481,7 +483,7 @@ func TestJSONEncodeNoHTMLEscape(t *testing.T) {
 func TestAtomicPut(t *testing.T) {
 	db, _, dir := setupTestDB(t)
 
-	if err := db.AtomicPut(ctx, "state.json", strings.NewReader(`{"ok":true}`)); err != nil {
+	if err := db.AtomicPut(ctx, "state.json", strings.NewReader(`{"ok":true}`), store.ObjectMeta{}); err != nil {
 		t.Fatalf("AtomicPut: %v", err)
 	}
 
