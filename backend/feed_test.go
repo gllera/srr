@@ -4,15 +4,18 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"srrb/ingest"
 	"srrb/mod"
+	"srrb/store"
 )
 
 // The "test-stub" ingest strategy returns a fixed result for every URL —
@@ -909,5 +912,128 @@ func TestFetchRedatedDuplicateDoesNotPoisonWatermark(t *testing.T) {
 	current = feed3
 	if got := fetchOnce(t, ch, srv); len(got) != 1 {
 		t.Errorf("fetch3: got %d, want 1 — B at 00:05 dropped because a re-dated dup poisoned the watermark", len(got))
+	}
+}
+
+// gateBackend wraps a store.Backend to make AtomicPut block on a per-call
+// release, so a test can drive exactly how many uploads run concurrently and
+// assert the observed peak never exceeds the semaphore cap. Deterministic: no
+// sleeps — the test releases jobs one at a time and watches arrivals.
+type gateBackend struct {
+	store.Backend
+	mu      sync.Mutex
+	cur     int
+	max     int
+	arrived chan struct{} // one send per AtomicPut entry
+	release chan struct{} // one receive unblocks one AtomicPut
+}
+
+func (g *gateBackend) AtomicPut(ctx context.Context, key string, r io.Reader, meta store.ObjectMeta) error {
+	g.mu.Lock()
+	g.cur++
+	if g.cur > g.max {
+		g.max = g.cur
+	}
+	g.mu.Unlock()
+	g.arrived <- struct{}{}
+	<-g.release
+	g.mu.Lock()
+	g.cur--
+	g.mu.Unlock()
+	return g.Backend.AtomicPut(ctx, key, r, meta)
+}
+
+// assetItems builds n items each referencing a distinct cache file (distinct
+// bytes ⇒ distinct source hash ⇒ no seen/existence dedup), plus the cache dir.
+func assetItems(t *testing.T, n int) (string, []*Item) {
+	t.Helper()
+	cacheDir := t.TempDir()
+	items := make([]*Item, n)
+	for k := 0; k < n; k++ {
+		name := fmt.Sprintf("a%d.jpg", k)
+		writeCacheFile(t, cacheDir, name, fmt.Sprintf("BYTES-%d", k))
+		items[k] = &Item{Content: fmt.Sprintf(`<p><img src="#/%s"></p>`, name)}
+	}
+	return cacheDir, items
+}
+
+func TestUploadAssetsConcurrencyBound(t *testing.T) {
+	const limit, n = 2, 3
+	gate := &gateBackend{
+		Backend: tempStore(t),
+		arrived: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	cacheDir, items := assetItems(t, n)
+	run := &fetchRun{
+		assets:   newAssetFetcher(gate, 1<<20, ""),
+		cacheDir: cacheDir,
+		assetSem: make(chan struct{}, limit),
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- run.uploadAssets(context.Background(), items) }()
+
+	// Exactly `limit` jobs reach AtomicPut and block.
+	for k := 0; k < limit; k++ {
+		<-gate.arrived
+	}
+	// Release one → frees a slot → the (limit+1)-th job now arrives. Proves the
+	// cap both holds (only `limit` arrived first) and makes progress.
+	gate.release <- struct{}{}
+	<-gate.arrived
+	// Release the rest.
+	for k := 0; k < n-1; k++ {
+		gate.release <- struct{}{}
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("uploadAssets: %v", err)
+	}
+	if gate.max > limit {
+		t.Errorf("peak concurrency = %d, want <= %d", gate.max, limit)
+	}
+	for k, it := range items {
+		if strings.Contains(it.Content, "#/") {
+			t.Errorf("item %d not rewritten: %q", k, it.Content)
+		}
+		if !strings.Contains(it.Content, "assets/") {
+			t.Errorf("item %d missing assets/ key: %q", k, it.Content)
+		}
+	}
+}
+
+func TestUploadAssetsRewritesAndSkipsMarkerless(t *testing.T) {
+	be := tempStore(t)
+	cacheDir, marked := assetItems(t, 2)
+	plain := &Item{Content: `<p>no markers, cost #1</p>`}
+	items := append(marked, plain)
+	run := &fetchRun{
+		assets:   newAssetFetcher(be, 1<<20, ""),
+		cacheDir: cacheDir,
+		assetSem: make(chan struct{}, 4),
+	}
+	if err := run.uploadAssets(context.Background(), items); err != nil {
+		t.Fatalf("uploadAssets: %v", err)
+	}
+	for k := 0; k < 2; k++ {
+		if !strings.Contains(items[k].Content, "assets/") {
+			t.Errorf("marked item %d not rewritten: %q", k, items[k].Content)
+		}
+	}
+	if plain.Content != `<p>no markers, cost #1</p>` {
+		t.Errorf("marker-less item mutated: %q", plain.Content)
+	}
+}
+
+func TestUploadAssetsFailsFeedOnUploadError(t *testing.T) {
+	be := &failMidWriteBackend{Backend: tempStore(t), writeOK: 2}
+	cacheDir, items := assetItems(t, 2)
+	run := &fetchRun{
+		assets:   newAssetFetcher(be, 1<<20, ""),
+		cacheDir: cacheDir,
+		assetSem: make(chan struct{}, 4),
+	}
+	if err := run.uploadAssets(context.Background(), items); err == nil {
+		t.Fatal("expected uploadAssets to fail the feed, got nil")
 	}
 }

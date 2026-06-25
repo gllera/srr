@@ -10,6 +10,8 @@ import (
 
 	"srrb/ingest"
 	"srrb/mod"
+
+	"golang.org/x/sync/errgroup"
 )
 
 // maxBoundaryGUIDs caps the persisted per-feed BoundaryGUIDs array. Real
@@ -104,6 +106,12 @@ type fetchRun struct {
 	// recipes is the full db.gz recipes map, read-only during a fetch run;
 	// each feed resolves its recipe (and the default) from it.
 	recipes map[string]Recipe
+	// assetSem is the run-global asset-processing pool (SRR_ASSET_WORKERS): every
+	// feed's uploadAssets acquires a slot per marker-bearing item, so the total
+	// number of concurrent peek/transcode/upload jobs across ALL feeds this run is
+	// capped at cap(assetSem). A nil / zero-capacity channel (unit tests) makes
+	// uploadAssets run serially — identical to the pre-parallel behaviour.
+	assetSem chan struct{}
 }
 
 func (c *Feed) Fetch(ctx context.Context, run *fetchRun, buf []byte, processor *mod.Module) {
@@ -381,15 +389,39 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 // emit no markers). Concurrency is added in uploadAssets's parallel path (see
 // run.assetSem); this serial form is the cap(assetSem)==0 fallback.
 func (run *fetchRun) uploadAssets(ctx context.Context, items []*Item) error {
+	// Serial fallback: no asset pool configured (unit tests with a nil channel).
+	if cap(run.assetSem) == 0 {
+		for _, i := range items {
+			if !mod.HasAssetMarkers(i.Content) {
+				continue
+			}
+			if err := run.rewriteItemAssets(ctx, i); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	// Parallel: one goroutine per marker-bearing item, each acquiring a slot from
+	// the run-global pool so concurrent asset jobs across all feeds stay capped at
+	// cap(assetSem). The per-feed errgroup returns the first hard error and
+	// cancels its siblings (gctx), failing the whole feed.
+	g, gctx := errgroup.WithContext(ctx)
 	for _, i := range items {
 		if !mod.HasAssetMarkers(i.Content) {
 			continue
 		}
-		if err := run.rewriteItemAssets(ctx, i); err != nil {
-			return err
-		}
+		g.Go(func() error {
+			select {
+			case run.assetSem <- struct{}{}:
+			case <-gctx.Done():
+				return gctx.Err()
+			}
+			defer func() { <-run.assetSem }()
+			return run.rewriteItemAssets(gctx, i)
+		})
 	}
-	return nil
+	return g.Wait()
 }
 
 // rewriteItemAssets rewrites one item's "#"-upload markers to assets/ keys via
