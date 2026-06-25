@@ -8,7 +8,7 @@ import (
 )
 
 // RecipeGroup holds the `srr recipe` sub-commands. Recipes are named
-// {ingest, pipe} bundles feeds reference by name; the reserved "default"
+// {ingest, pipe} bundles that feeds reference by name; the reserved "default"
 // recipe is the fallback for every feed and is edited through the same
 // `recipe set` path as any other.
 type RecipeGroup struct {
@@ -48,6 +48,9 @@ func (o *RecipeShowCmd) Run() error {
 // RecipeSetCmd upserts a recipe (full replace, like `srr syndicate set`): the
 // stored recipe is exactly {Ingest from -i, Pipe from -p}. Pass both axes to
 // set both. -i "" / no -p clear that axis (inherit default).
+// Note: for "default" specifically, omitting -p clears the pipeline entirely —
+// there is no fallback to inherit, so feeds using the default recipe will run
+// with no pipeline until -p is set.
 type RecipeSetCmd struct {
 	Name   string   `arg:"" help:"Recipe name. 'default' is the reserved fallback recipe."`
 	Ingest string   `short:"i" help:"Ingest strategy: built-in ('#feed') or shell command. Empty inherits the default recipe (⇒ #feed)."`
@@ -63,9 +66,6 @@ func (o *RecipeSetCmd) Run() error {
 		// #default is allowed in every recipe except 'default' itself.
 		if err := validatePipe(pipe, o.Name != defaultRecipeName); err != nil {
 			return err
-		}
-		if db.core.Recipes == nil {
-			db.core.Recipes = map[string]Recipe{}
 		}
 		db.core.Recipes[o.Name] = Recipe{Ingest: o.Ingest, Pipe: pipe}
 		return db.Commit(ctx)

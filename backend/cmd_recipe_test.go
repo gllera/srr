@@ -58,3 +58,19 @@ func TestRecipeRmRefusesDefault(t *testing.T) {
 		t.Error("recipe rm default accepted, want error")
 	}
 }
+
+func TestRecipeRmRemoves(t *testing.T) {
+	setupRecipeTestStore(t)
+	if err := recipeSet(t, "gone", "", "#sanitize"); err != nil {
+		t.Fatalf("recipe set: %v", err)
+	}
+	if err := (&RecipeRmCmd{Name: "gone"}).Run(); err != nil {
+		t.Fatalf("recipe rm: %v", err)
+	}
+	_ = withDB(false, func(_ context.Context, db *DB) error {
+		if _, ok := db.core.Recipes["gone"]; ok {
+			t.Error("recipe \"gone\" still present after rm")
+		}
+		return nil
+	})
+}
