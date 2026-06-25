@@ -1,12 +1,32 @@
 package mod
 
 import (
+	"context"
 	"regexp"
 	"strings"
 
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
 )
+
+// cacheDirKey is the unexported context key carrying the fetch run's shared
+// asset cache dir. main.Feed.Fetch stamps it via WithCacheDir; #selfhost reads
+// it via cacheDirFromContext. A run-scoped working directory crossing the
+// main->mod boundary is a legitimate context.Value use; an absent value (e.g.
+// srr preview, the Validate sentinel) reads back as "" and #selfhost no-ops.
+type cacheDirKey struct{}
+
+// WithCacheDir returns ctx with the fetch run's shared cache dir attached.
+func WithCacheDir(ctx context.Context, dir string) context.Context {
+	return context.WithValue(ctx, cacheDirKey{}, dir)
+}
+
+// cacheDirFromContext returns the cache dir stamped by WithCacheDir, or "" when
+// none is set.
+func cacheDirFromContext(ctx context.Context) string {
+	dir, _ := ctx.Value(cacheDirKey{}).(string)
+	return dir
+}
 
 // assetAttrs lists every element/attribute pair whose value may reference a
 // self-hostable file: the embedded-media set plus <a href>, so a linked file
