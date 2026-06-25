@@ -124,3 +124,47 @@ func TestCacheDirContextRoundTrips(t *testing.T) {
 		t.Errorf("absent cache dir = %q, want empty string", got)
 	}
 }
+
+// walkAssetAttrs visits EVERY listed attribute (not just "#"-markers); the
+// callback decides. Here it uppercases each img/video/audio src to prove the
+// generic walk + selective rewrite + no-op-preserves-original behavior.
+func TestWalkAssetAttrsRewritesSelected(t *testing.T) {
+	in := `<img src="a"><video src="b"></video><audio src="c"></audio><a href="d">x</a>`
+	out, err := walkAssetAttrs(in, mediaAttrs, func(tag, attr, val string) (string, bool, error) {
+		return strings.ToUpper(val), true, nil
+	})
+	if err != nil {
+		t.Fatalf("walkAssetAttrs: %v", err)
+	}
+	for _, want := range []string{`src="A"`, `src="B"`, `src="C"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in %s", want, out)
+		}
+	}
+	// mediaAttrs does NOT include <a href>, so the link is untouched.
+	if !strings.Contains(out, `href="d"`) {
+		t.Errorf("anchor href should be untouched: %s", out)
+	}
+}
+
+func TestWalkAssetAttrsNoMatchReturnsOriginal(t *testing.T) {
+	in := `<p>no media here</p>`
+	out, err := walkAssetAttrs(in, mediaAttrs, func(_, _, _ string) (string, bool, error) {
+		t.Fatal("fn must not be called when no listed attribute is present")
+		return "", false, nil
+	})
+	if err != nil || out != in {
+		t.Errorf("got (%q, %v), want original unchanged", out, err)
+	}
+}
+
+// assetAttrs now covers <audio src>, so the upload step rewrites an audio marker.
+func TestRewriteAttrsCoversAudio(t *testing.T) {
+	out, err := RewriteAttrs(`<audio src="#/clip.mp3"></audio>`, upMarker("assets/zz"))
+	if err != nil {
+		t.Fatalf("RewriteAttrs: %v", err)
+	}
+	if !strings.Contains(out, "assets/zz/clip.mp3") {
+		t.Errorf("audio marker not rewritten: %s", out)
+	}
+}
