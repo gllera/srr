@@ -308,8 +308,9 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 		bg = kept
 	}
 
-	// Second pass: pipeline + asset upload for the items committed to
-	// ingestion.
+	// Second pass: run the module pipeline for the items committed to ingestion.
+	// Asset self-hosting (the "#"-marker upload) is deferred to uploadAssets below
+	// so it can run concurrently across the feed's items.
 	var items []*Item
 	for _, cand := range candidates {
 		i := cand.item
@@ -338,44 +339,6 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 		if i.Drop {
 			continue
 		}
-		// Store-side end-of-pipeline step, kept out of processItem (which stays a
-		// pure, store-free transform): scan the item's self-hostable attributes
-		// (img/video src/poster, a href — see mod.RewriteAttrs) for upload markers
-		// and rewrite them to their final store keys. A marker is a value starting
-		// with "#" whose remainder names a regular file the fetcher left in
-		// run.cacheDir (e.g. "#/photo.jpg"); a "#..." naming no such file is an
-		// ordinary in-page fragment (#section), left as-is.
-		//
-		// A failed upload (store error, or an UploadCacheRef guard tripping on
-		// oversize/traversal) hard-fails the whole feed fetch rather than
-		// publish an item still pointing at "#/..." for an asset that never
-		// reached the store. Feed state (watermark, dedup, etag) is left
-		// untouched on the error path, so a transient store failure self-heals
-		// next fetch; a permanently-rejected asset (e.g. over SRR_MAX_ASSET_SIZE)
-		// wedges the feed until it is fixed.
-		//
-		// RewriteAttrs handles the marker convention: it skips content with no
-		// marker-shaped attribute (the common case, as built-in #feed feeds never
-		// emit markers) and hands fn the path with the "#" already stripped.
-		i.Content, err = mod.RewriteAttrs(i.Content, func(local string) (string, bool, error) {
-			key, err := run.assets.UploadCacheRef(ctx, run.cacheDir, local)
-			switch {
-			case err == nil:
-				return key, true, nil
-			case errors.Is(err, errNotAsset):
-				// Not a real upload marker: a bare fragment (#section → "section")
-				// names no file in the cache dir, and a value escaping the dir
-				// (e.g. "#../secret", attacker-influenced content) must be declined
-				// rather than wedge the feed permanently. Genuine in-cache upload
-				// failures (oversize, store error) still fail the feed below.
-				return "", false, nil
-			default:
-				return "", false, fmt.Errorf("self-host asset %q: %w", local, err)
-			}
-		})
-		if err != nil {
-			return nil, err
-		}
 		items = append(items, &Item{
 			Feed:      c,
 			Title:     i.Title,
@@ -383,6 +346,12 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 			Link:      i.Link,
 			Published: cand.pub,
 		})
+	}
+
+	// Store-side end-of-pipeline step (kept out of processItem, which stays a
+	// pure, store-free transform): self-host each item's "#"-marked assets.
+	if err := run.uploadAssets(ctx, items); err != nil {
+		return nil, err
 	}
 
 	if len(items) > 0 {
@@ -393,6 +362,57 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 	c.ETag = result.ETag
 	c.LastModified = result.LastModified
 	return items, nil
+}
+
+// uploadAssets runs the end-of-pipeline self-hosting step on each item's
+// content: it scans the item's self-hostable attributes (img/video/audio src,
+// video poster, a href — see mod.RewriteAttrs) for "#"-upload markers naming a
+// file the fetcher left in run.cacheDir (e.g. "#/photo.jpg") and rewrites each
+// to its final assets/ store key. A "#..." naming no such file is an ordinary
+// in-page fragment, left as-is (declined via errNotAsset).
+//
+// A failed upload (store error, or an UploadCacheRef guard tripping on
+// oversize/traversal) hard-fails the whole feed by returning the error: the
+// caller leaves feed state (watermark, dedup, etag) untouched, so a transient
+// store failure self-heals next fetch while a permanently-rejected asset wedges
+// the feed until fixed.
+//
+// Marker-less items are skipped without any work (the common case: #feed feeds
+// emit no markers). Concurrency is added in uploadAssets's parallel path (see
+// run.assetSem); this serial form is the cap(assetSem)==0 fallback.
+func (run *fetchRun) uploadAssets(ctx context.Context, items []*Item) error {
+	for _, i := range items {
+		if !mod.HasAssetMarkers(i.Content) {
+			continue
+		}
+		if err := run.rewriteItemAssets(ctx, i); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// rewriteItemAssets rewrites one item's "#"-upload markers to assets/ keys via
+// UploadCacheRef. errNotAsset references (bare #fragments, paths escaping the
+// cache dir) are declined and left untouched; any other upload failure is
+// returned (failing the feed).
+func (run *fetchRun) rewriteItemAssets(ctx context.Context, i *Item) error {
+	content, err := mod.RewriteAttrs(i.Content, func(local string) (string, bool, error) {
+		key, err := run.assets.UploadCacheRef(ctx, run.cacheDir, local)
+		switch {
+		case err == nil:
+			return key, true, nil
+		case errors.Is(err, errNotAsset):
+			return "", false, nil
+		default:
+			return "", false, fmt.Errorf("self-host asset %q: %w", local, err)
+		}
+	})
+	if err != nil {
+		return err
+	}
+	i.Content = content
+	return nil
 }
 
 func uint32Set(s []uint32) map[uint32]struct{} {
