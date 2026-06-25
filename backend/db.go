@@ -62,6 +62,33 @@ func defaultRootPipe() []string {
 	return []string{"#sanitize", "#minify"}
 }
 
+// defaultRecipeName is the reserved recipe every feed falls back to and the
+// new home for what the old root pipe/ingest expressed. It always exists
+// (NewDB seeds it) and its pipe forbids the #default composition token.
+const defaultRecipeName = "default"
+
+// Recipe is a named {ingest, pipe} bundle referenced by feeds (Feed.Recipe).
+// An empty field means "inherit the default recipe's value for that axis":
+// each axis falls back independently (see recipeFor + Feed.Fetch).
+type Recipe struct {
+	Ingest string   `json:"ingest,omitempty"`
+	Pipe   []string `json:"pipe,omitempty"`
+}
+
+// recipeFor resolves a recipe name against the map. An empty or unknown name
+// returns the default recipe — lenient, so a dangling reference (hand-edited
+// db.gz) never crashes a fetch; the CLI prevents creating dangling refs. A
+// plain map (not *DB) so the fetch path can resolve from fetchRun without
+// threading the whole DB through Feed.Fetch.
+func recipeFor(recipes map[string]Recipe, name string) Recipe {
+	if name != "" {
+		if r, ok := recipes[name]; ok {
+			return r
+		}
+	}
+	return recipes[defaultRecipeName]
+}
+
 func jsonEncode(v any) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -130,8 +157,13 @@ type DBCore struct {
 	// (meta/L<Seq>.gz). SyncMeta trusts a read-back tail only when its count
 	// matches, so a stale shard from a crash or a pre-`gen --bump` store is
 	// rebuilt from data packs instead of extended.
-	MetaTail int           `json:"mt,omitempty"`
-	Feeds    map[int]*Feed `json:"feeds"`
+	MetaTail int `json:"mt,omitempty"`
+	// Recipes is the map of named {ingest, pipe} bundles feeds reference by
+	// name (Feed.Recipe). Always contains the reserved "default" entry (seeded
+	// by NewDB). Backend-only config: the frontend/service-worker ignores it,
+	// like Out. omitempty is harmless — NewDB re-seeds an absent map.
+	Recipes map[string]Recipe `json:"recipes,omitempty"`
+	Feeds   map[int]*Feed     `json:"feeds"`
 	// Out is the list of named syndication output feeds written by SyncOutFeeds
 	// during each fetch cycle. Each OutFeed maps chosen tags/feed ids to one
 	// RSS 2.0 or JSON Feed 1.1 file at out/<name>.<ext> on the CDN. Off by
@@ -218,6 +250,13 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 		db.core.Pipe = defaultRootPipe()
 	}
 
+	if db.core.Recipes == nil {
+		db.core.Recipes = map[string]Recipe{}
+	}
+	if _, ok := db.core.Recipes[defaultRecipeName]; !ok {
+		db.core.Recipes[defaultRecipeName] = Recipe{Pipe: defaultRootPipe()}
+	}
+
 	for id, ch := range db.core.Feeds {
 		// feed_id is a uint16 in each idx entry, so ids run [0, feedIDCeiling).
 		// An out-of-range id (hand-edited / migrated db.gz) would overflow the
@@ -277,6 +316,11 @@ func (o *DB) Commit(ctx context.Context) error {
 
 func (o *DB) Feeds() map[int]*Feed {
 	return o.core.Feeds
+}
+
+// recipeFor resolves a recipe name against this DB's recipes map.
+func (o *DB) recipeFor(name string) Recipe {
+	return recipeFor(o.core.Recipes, name)
 }
 
 func (o *DB) AddFeed(c *Feed) error {
