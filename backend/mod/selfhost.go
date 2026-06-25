@@ -129,19 +129,19 @@ func downloadToCache(ctx context.Context, client *http.Client, cacheDir, rawURL 
 
 	// LimitReader to maxBody+1 so an over-cap body is detected (n > maxBody) and
 	// rejected rather than silently truncated and stored.
-	if !streamToCacheFile(cacheDir, full, io.LimitReader(resp.Body, maxBody+1), maxBody) {
+	if !streamToCacheFile(full, io.LimitReader(resp.Body, maxBody+1), maxBody) {
 		return "", false
 	}
 	return "#" + name, true
 }
 
-// streamToCacheFile spools r to a temp file in cacheDir and atomically renames
-// it into place. Returns false (removing the temp file) on an over-cap body
-// (n > maxBody) or any IO error, so the caller leaves the original URL. Atomic
-// rename means a cancelled/failed download never leaves a partial file a
-// concurrent worker could pick up.
-func streamToCacheFile(cacheDir, full string, r io.Reader, maxBody int64) bool {
-	tmp, err := os.CreateTemp(cacheDir, ".selfhost-*")
+// streamToCacheFile spools r to a temp file in full's directory and atomically
+// renames it onto full. Returns false (removing the temp file) on an over-cap
+// body (n > maxBody) or any IO error, so the caller leaves the original URL.
+// The temp file shares full's directory so the rename is intra-directory and
+// atomic; a cancelled/failed download never leaves a partial file at full.
+func streamToCacheFile(full string, r io.Reader, maxBody int64) bool {
+	tmp, err := os.CreateTemp(filepath.Dir(full), ".selfhost-*")
 	if err != nil {
 		slog.Warn("selfhost: temp create failed", "err", err)
 		return false
