@@ -224,7 +224,7 @@ func TestSFTPPutOverwrite(t *testing.T) {
 
 func TestSFTPAtomicPutNoTempFileRemains(t *testing.T) {
 	d, base := setupSFTPPipe(t)
-	if err := d.AtomicPut(ctx, "atomic.txt", strings.NewReader("content")); err != nil {
+	if err := d.AtomicPut(ctx, "atomic.txt", strings.NewReader("content"), ObjectMeta{}); err != nil {
 		t.Fatalf("AtomicPut: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(base, "atomic.txt.tmp")); !os.IsNotExist(err) {
@@ -241,7 +241,7 @@ func TestSFTPAtomicPutNoTempFileRemains(t *testing.T) {
 func TestSFTPAtomicPutFailureRemovesTempFile(t *testing.T) {
 	d, base := setupSFTPPipe(t)
 	wantErr := errors.New("injected read failure")
-	if err := d.AtomicPut(ctx, "atomic.txt", iotest.ErrReader(wantErr)); err == nil {
+	if err := d.AtomicPut(ctx, "atomic.txt", iotest.ErrReader(wantErr), ObjectMeta{}); err == nil {
 		t.Fatal("AtomicPut with a failing reader should return an error")
 	}
 	if _, err := os.Stat(filepath.Join(base, "atomic.txt.tmp")); !os.IsNotExist(err) {

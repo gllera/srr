@@ -91,7 +91,9 @@ func (d *Local) Put(_ context.Context, key string, r io.Reader, ignoreExisting b
 	return nil
 }
 
-func (d *Local) AtomicPut(_ context.Context, key string, r io.Reader) error {
+// AtomicPut ignores meta: local files have no stored Content-Type/-Encoding —
+// the static server stamps response headers by extension at request time.
+func (d *Local) AtomicPut(_ context.Context, key string, r io.Reader, _ ObjectMeta) error {
 	file := d.localPath("atomic write", key)
 	if err := d.ensureDir(file); err != nil {
 		return err

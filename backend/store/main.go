@@ -83,9 +83,23 @@ func cacheControlForKey(key string) string {
 type Backend interface {
 	Get(ctx context.Context, key string, ignoreMissing bool) (io.ReadCloser, error)
 	Put(ctx context.Context, key string, r io.Reader, ignoreExisting bool) error
-	AtomicPut(ctx context.Context, key string, r io.Reader) error
+	// AtomicPut writes via temp-then-rename (local/SFTP) or overwrite (S3). meta
+	// carries optional response metadata (Content-Type / Content-Encoding) — used
+	// by backends that store it (S3); ignored by backends whose headers come from
+	// a static server at request time (local/SFTP).
+	AtomicPut(ctx context.Context, key string, r io.Reader, meta ObjectMeta) error
 	Rm(ctx context.Context, key string) error
 	Close() error
+}
+
+// ObjectMeta is optional response metadata for a stored object. Backends that
+// persist it (S3) stamp these headers; backends whose headers are the static
+// server's at request time (local/SFTP) ignore them. An empty ContentType means
+// the default (S3 stamps application/octet-stream); an empty ContentEncoding is
+// omitted (no Content-Encoding header).
+type ObjectMeta struct {
+	ContentType     string
+	ContentEncoding string
 }
 
 // InitFunc builds a backend for an output URL.

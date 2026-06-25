@@ -328,9 +328,9 @@ func (f *failMidWriteBackend) Get(ctx context.Context, key string, ignoreMissing
 func (f *failMidWriteBackend) Put(ctx context.Context, key string, r io.Reader, ignoreExisting bool) error {
 	return f.inner.Put(ctx, key, r, ignoreExisting)
 }
-func (f *failMidWriteBackend) AtomicPut(ctx context.Context, key string, r io.Reader) error {
+func (f *failMidWriteBackend) AtomicPut(ctx context.Context, key string, r io.Reader, meta store.ObjectMeta) error {
 	if f.atomicOK {
-		return f.inner.AtomicPut(ctx, key, r)
+		return f.inner.AtomicPut(ctx, key, r, meta)
 	}
 	// Drain exactly writeOK bytes then return an error, simulating a mid-write failure.
 	buf := make([]byte, f.writeOK)

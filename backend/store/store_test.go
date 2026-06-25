@@ -75,7 +75,7 @@ func TestLocalPutExclusiveCreateReturnsError(t *testing.T) {
 func TestLocalAtomicPutNoTempFileRemains(t *testing.T) {
 	b, dir := setupLocalStore(t)
 
-	if err := b.AtomicPut(ctx, "atomic.txt", strings.NewReader("content")); err != nil {
+	if err := b.AtomicPut(ctx, "atomic.txt", strings.NewReader("content"), ObjectMeta{}); err != nil {
 		t.Fatalf("AtomicPut: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "atomic.txt.tmp")); !os.IsNotExist(err) {
