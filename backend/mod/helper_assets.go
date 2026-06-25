@@ -57,6 +57,16 @@ var mediaAttrs = map[string][]string{
 // the literal "#", and the pipeline built-ins never entity-encode it.
 var markerShapeRe = regexp.MustCompile(`=\s*["']?#`)
 
+// HasAssetMarkers reports whether content can carry any "#"-upload marker. A
+// marker is always a whole attribute value, so content without the `=["']?#`
+// shape holds none — this is the cheap pre-check (memchr-speed common case:
+// #feed feeds never emit markers). The asset-upload pass uses it to skip
+// marker-less items without spawning a goroutine; RewriteAttrs uses it to skip
+// the HTML parse entirely.
+func HasAssetMarkers(content string) bool {
+	return strings.Contains(content, "#") && markerShapeRe.MatchString(content)
+}
+
 // RewriteAttrs walks the assetAttrs values in content and rewrites their
 // "#"-prefixed upload markers via fn (the "#" already stripped). Non-marker
 // values never reach fn. Unparseable content and a no-op pass both return the
@@ -66,7 +76,7 @@ func RewriteAttrs(content string, fn func(marker string) (string, bool, error)) 
 	// A marker is always a whole attribute value, so content without the
 	// `=["']?#` shape can hold none: skip the parse entirely (memchr-speed
 	// common case — #feed feeds never emit markers).
-	if !strings.Contains(content, "#") || !markerShapeRe.MatchString(content) {
+	if !HasAssetMarkers(content) {
 		return content, nil
 	}
 	return walkAssetAttrs(content, assetAttrs, func(_, _, val string) (string, bool, error) {
