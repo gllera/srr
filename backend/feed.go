@@ -385,27 +385,22 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 // store failure self-heals next fetch while a permanently-rejected asset wedges
 // the feed until fixed.
 //
-// Marker-less items are skipped without any work (the common case: #feed feeds
-// emit no markers). Concurrency is added in uploadAssets's parallel path (see
-// run.assetSem); this serial form is the cap(assetSem)==0 fallback.
+// Marker-bearing items are processed concurrently, each goroutine acquiring a
+// slot from the run-global pool (run.assetSem) so concurrent peek/transcode/
+// upload jobs across ALL feeds stay capped at cap(assetSem). The per-feed
+// errgroup returns the first hard error and cancels its siblings. Marker-less
+// items are skipped without spawning a goroutine (the common case: #feed feeds
+// emit no markers). A nil/zero-capacity assetSem (unit-test fetchRun literals)
+// falls back to a local cap-1 pool — i.e. serial.
 func (run *fetchRun) uploadAssets(ctx context.Context, items []*Item) error {
-	// Serial fallback: no asset pool configured (unit tests with a nil channel).
-	if cap(run.assetSem) == 0 {
-		for _, i := range items {
-			if !mod.HasAssetMarkers(i.Content) {
-				continue
-			}
-			if err := run.rewriteItemAssets(ctx, i); err != nil {
-				return err
-			}
-		}
-		return nil
+	// Production always sizes assetSem from SRR_ASSET_WORKERS (>= 1); a nil/zero
+	// channel only appears in unit-test fetchRun literals, where a cap-1 (serial)
+	// pool keeps a single code path covering both.
+	sem := run.assetSem
+	if cap(sem) == 0 {
+		sem = make(chan struct{}, 1)
 	}
 
-	// Parallel: one goroutine per marker-bearing item, each acquiring a slot from
-	// the run-global pool so concurrent asset jobs across all feeds stay capped at
-	// cap(assetSem). The per-feed errgroup returns the first hard error and
-	// cancels its siblings (gctx), failing the whole feed.
 	g, gctx := errgroup.WithContext(ctx)
 	for _, i := range items {
 		if !mod.HasAssetMarkers(i.Content) {
@@ -413,11 +408,11 @@ func (run *fetchRun) uploadAssets(ctx context.Context, items []*Item) error {
 		}
 		g.Go(func() error {
 			select {
-			case run.assetSem <- struct{}{}:
+			case sem <- struct{}{}:
 			case <-gctx.Done():
 				return gctx.Err()
 			}
-			defer func() { <-run.assetSem }()
+			defer func() { <-sem }()
 			return run.rewriteItemAssets(gctx, i)
 		})
 	}
