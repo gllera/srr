@@ -107,6 +107,11 @@ type fetchRun struct {
 
 func (c *Feed) Fetch(ctx context.Context, run *fetchRun, buf []byte, processor *mod.Module) {
 	c.newItems = c.newItems[:0]
+	// Expose the run's shared asset cache dir to pipeline mods (e.g. #selfhost)
+	// via context, so a built-in can download media into it and emit upload
+	// markers. Set before Validate so every downstream step (and the throwaway
+	// Validate run) sees it; srr preview never sets it, so #selfhost no-ops there.
+	ctx = mod.WithCacheDir(ctx, run.cacheDir)
 	pipe := resolvePipe(run.rootPipe, c.Pipe)
 	// Validate the resolved pipeline once, before the item loop. A bad token
 	// (unknown built-in, stray #base, malformed params) is a config error that
