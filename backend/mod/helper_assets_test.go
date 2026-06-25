@@ -168,3 +168,26 @@ func TestRewriteAttrsCoversAudio(t *testing.T) {
 		t.Errorf("audio marker not rewritten: %s", out)
 	}
 }
+
+func TestHasAssetMarkers(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"img marker", `<img src="#/a.jpg">`, true},
+		{"anchor marker", `<a href="#/doc.pdf">x</a>`, true},
+		{"single-quoted marker", `<img src='#/a.jpg'>`, true},
+		{"bare fragment anchor", `<a href="#section">x</a>`, true}, // shape matches; fn declines later
+		{"plain hash text", `<p>cost is #1 today</p>`, false},
+		{"no hash at all", `<p><img src="https://x/a.jpg"></p>`, false},
+		{"empty", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := HasAssetMarkers(c.in); got != c.want {
+				t.Errorf("HasAssetMarkers(%q) = %v, want %v", c.in, got, c.want)
+			}
+		})
+	}
+}
