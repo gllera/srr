@@ -165,8 +165,9 @@ func TestSelfhostNoCacheDirIsNoop(t *testing.T) {
 
 func TestSelfhostRejectsBadParams(t *testing.T) {
 	m := New()
-	dir := t.TempDir()
-	ctx := WithCacheDir(context.Background(), dir)
+	// A bad/unknown param errors during param parsing, before the cache dir is
+	// read — so no WithCacheDir context is needed.
+	ctx := context.Background()
 	for _, token := range []string{
 		"#selfhost foo=bar",
 		"#selfhost timeout=abc",
