@@ -89,21 +89,34 @@ func TestFeedAddHardFailsWhenUnresolvable(t *testing.T) {
 	}
 }
 
-// feed add skips resolution for an external ingest strategy — that source is
-// not an HTTP-fetchable feed, so probing it would wrongly reject the add.
+// feed add skips resolution when its recipe's ingest is external — that source
+// is not an HTTP-fetchable feed, so probing it would wrongly reject the add.
 func TestFeedAddSkipsResolveForExternalIngest(t *testing.T) {
 	setupEmptyDB(t)
+	if err := recipeSet(t, "ext", "my-fetcher"); err != nil {
+		t.Fatalf("recipe set: %v", err)
+	}
 	called := false
 	resolveFeedURL = func(_ context.Context, rawURL string) (string, error) {
 		called = true
 		return rawURL, nil
 	}
-	cmd := &AddCmd{Title: strPtr("X"), URL: strPtr("https://x.example/"), Ingest: strPtr("my-fetcher")}
+	cmd := &AddCmd{Title: strPtr("X"), URL: strPtr("https://x.example/"), Recipe: strPtr("ext")}
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if called {
 		t.Error("resolveFeedURL must not run for an external ingest strategy")
+	}
+}
+
+// feed add eagerly rejects a reference to a recipe that does not exist.
+func TestFeedAddRejectsUnknownRecipe(t *testing.T) {
+	setupEmptyDB(t)
+	cmd := &AddCmd{Title: strPtr("X"), URL: strPtr("https://x.example.com/feed"), Recipe: strPtr("nope")}
+	wantErr(t, cmd.Run(), `recipe "nope" does not exist`)
+	if n := len(reopenDB(t).Feeds()); n != 0 {
+		t.Errorf("Feeds len = %d, want 0 (add rejected)", n)
 	}
 }
 
@@ -240,15 +253,18 @@ func TestRmCmdNoOpForMissingID(t *testing.T) {
 	}
 }
 
-func TestLsCmdEmitsPipe(t *testing.T) {
+func TestLsCmdEmitsRecipe(t *testing.T) {
 	setupEmptyDB(t)
+	if err := recipeSet(t, "read", "", "#sanitize"); err != nil {
+		t.Fatalf("recipe set: %v", err)
+	}
 	mustRun := func(c interface{ Run() error }) {
 		t.Helper()
 		if err := c.Run(); err != nil {
 			t.Fatalf("Run: %v", err)
 		}
 	}
-	mustRun(&AddCmd{Title: strPtr("A"), URL: strPtr("https://a.example.com/feed"), Parsers: []string{"#sanitize"}})
+	mustRun(&AddCmd{Title: strPtr("A"), URL: strPtr("https://a.example.com/feed"), Recipe: strPtr("read")})
 
 	var out bytes.Buffer
 	saved := stdout
@@ -258,8 +274,8 @@ func TestLsCmdEmitsPipe(t *testing.T) {
 	if err := (&LsCmd{Format: "json"}).Run(); err != nil {
 		t.Fatalf("LsCmd: %v", err)
 	}
-	if !strings.Contains(out.String(), `"pipe":["#sanitize"]`) {
-		t.Errorf("ls output missing pipe field: %s", out.String())
+	if !strings.Contains(out.String(), `"recipe":"read"`) {
+		t.Errorf("ls output missing recipe field: %s", out.String())
 	}
 }
 
@@ -396,53 +412,41 @@ func TestFeedUpdClearsTag(t *testing.T) {
 	}
 }
 
-func TestFeedUpdSetsPipeline(t *testing.T) {
+func TestFeedUpdSetsRecipe(t *testing.T) {
 	setupFeedsTestDB(t)
-	cmd := &UpdCmd{ID: 0, Parsers: []string{"#sanitize", "#minify"}}
+	if err := recipeSet(t, "read", "", "#readability", "#default"); err != nil {
+		t.Fatalf("recipe set: %v", err)
+	}
+	cmd := &UpdCmd{ID: 0, Recipe: strPtr("read")}
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	ch := reopenDB(t).Feeds()[0]
-	if len(ch.Pipe) != 2 || ch.Pipe[0] != "#sanitize" || ch.Pipe[1] != "#minify" {
-		t.Errorf("Pipeline = %v, want [#sanitize #minify]", ch.Pipe)
+	if got := reopenDB(t).Feeds()[0].Recipe; got != "read" {
+		t.Errorf("Recipe = %q, want %q", got, "read")
 	}
 }
 
-func TestFeedUpdClearsPipeline(t *testing.T) {
+func TestFeedUpdClearsRecipe(t *testing.T) {
 	setupFeedsTestDB(t)
-	if err := (&UpdCmd{ID: 0, Parsers: []string{"#sanitize"}}).Run(); err != nil {
-		t.Fatalf("set pipeline: %v", err)
+	if err := recipeSet(t, "read", "", "#sanitize"); err != nil {
+		t.Fatalf("recipe set: %v", err)
 	}
-	if err := (&UpdCmd{ID: 0, Parsers: []string{""}}).Run(); err != nil {
-		t.Fatalf("clear pipeline: %v", err)
+	if err := (&UpdCmd{ID: 0, Recipe: strPtr("read")}).Run(); err != nil {
+		t.Fatalf("set recipe: %v", err)
 	}
-	ch := reopenDB(t).Feeds()[0]
-	if len(ch.Pipe) != 0 {
-		t.Errorf("Pipeline = %v, want empty", ch.Pipe)
+	if err := (&UpdCmd{ID: 0, Recipe: strPtr("")}).Run(); err != nil {
+		t.Fatalf("clear recipe: %v", err)
+	}
+	if got := reopenDB(t).Feeds()[0].Recipe; got != "" {
+		t.Errorf("Recipe = %q, want \"\" (⇒ default)", got)
 	}
 }
 
-func TestFeedUpdSetsIngest(t *testing.T) {
+func TestFeedUpdRejectsUnknownRecipe(t *testing.T) {
 	setupFeedsTestDB(t)
-	cmd := &UpdCmd{ID: 0, Ingest: strPtr("my-fetcher")}
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if got := reopenDB(t).Feeds()[0].Ingest; got != "my-fetcher" {
-		t.Errorf("Ingest = %q, want %q", got, "my-fetcher")
-	}
-}
-
-func TestFeedUpdClearsIngest(t *testing.T) {
-	setupFeedsTestDB(t)
-	if err := (&UpdCmd{ID: 0, Ingest: strPtr("my-fetcher")}).Run(); err != nil {
-		t.Fatalf("set: %v", err)
-	}
-	if err := (&UpdCmd{ID: 0, Ingest: strPtr("")}).Run(); err != nil {
-		t.Fatalf("clear: %v", err)
-	}
-	if got := reopenDB(t).Feeds()[0].Ingest; got != "" {
-		t.Errorf("Ingest = %q, want \"\"", got)
+	wantErr(t, (&UpdCmd{ID: 0, Recipe: strPtr("nope")}).Run(), `recipe "nope" does not exist`)
+	if got := reopenDB(t).Feeds()[0].Recipe; got != "" {
+		t.Errorf("Recipe = %q, want unchanged (commit rejected)", got)
 	}
 }
 
@@ -525,12 +529,15 @@ func TestFeedShowIDNegative(t *testing.T) {
 	wantErr(t, (&ShowCmd{ID: -1, Format: "json"}).Run(), "[0, 65535]")
 }
 
-func TestFeedShowEmitsPipe(t *testing.T) {
+func TestFeedShowEmitsRecipe(t *testing.T) {
 	setupEmptyDB(t)
+	if err := recipeSet(t, "read", "", "#sanitize"); err != nil {
+		t.Fatalf("recipe set: %v", err)
+	}
 	if err := (&AddCmd{
-		Title:   strPtr("P"),
-		URL:     strPtr("https://p.example.com/feed"),
-		Parsers: []string{"#sanitize"},
+		Title:  strPtr("P"),
+		URL:    strPtr("https://p.example.com/feed"),
+		Recipe: strPtr("read"),
 	}).Run(); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
@@ -544,8 +551,8 @@ func TestFeedShowEmitsPipe(t *testing.T) {
 	if err := (&ShowCmd{ID: ch.id, Format: "json"}).Run(); err != nil {
 		t.Fatalf("ShowCmd: %v", err)
 	}
-	if !strings.Contains(out.String(), `"pipe":["#sanitize"]`) {
-		t.Errorf("show output missing pipe field: %s", out.String())
+	if !strings.Contains(out.String(), `"recipe":"read"`) {
+		t.Errorf("show output missing recipe field: %s", out.String())
 	}
 }
 
@@ -692,8 +699,8 @@ func TestFeedApplyCreateMissingURL(t *testing.T) {
 func TestFeedApplyIgnoresReadOnlyFields(t *testing.T) {
 	setupFeedsTestDB(t)
 	// Input includes "etag"; stored ETag must NOT be overwritten (it's a
-	// read-only-from-input field — only the feedView's url/title/tag/pipe/
-	// ingest are applied).
+	// read-only-from-input field — only the feedView's url/title/tag/recipe
+	// are applied).
 	err := applyFromString(t, `{"id":0,"title":"Test","url":"https://a.example.com/feed","etag":"bogus-from-input"}`)
 	if err != nil {
 		t.Fatalf("Run: %v", err)

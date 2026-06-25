@@ -17,18 +17,18 @@ func TestValidateTagRejectsNumeric(t *testing.T) {
 }
 
 func TestValidatePipe(t *testing.T) {
-	// Root pipe: #base disallowed; unknown #-token disallowed; built-ins/shell ok.
+	// default recipe: #default disallowed; unknown #-token disallowed; built-ins/shell ok.
 	if err := validatePipe([]string{"#sanitize", "#minify", "jq ."}, false); err != nil {
-		t.Errorf("valid root pipe rejected: %v", err)
+		t.Errorf("valid default pipe rejected: %v", err)
 	}
-	if err := validatePipe([]string{"#base"}, false); err == nil {
-		t.Error("root pipe accepted #base, want error")
+	if err := validatePipe([]string{"#default"}, false); err == nil {
+		t.Error("default recipe accepted #default, want error")
 	}
 	if err := validatePipe([]string{"#sanitise"}, false); err == nil {
-		t.Error("accepted typo'd built-in #sanitise, want error")
+		t.Error("accepted typo'd #sanitise, want error")
 	}
-	// Feed pipe: #base allowed.
-	if err := validatePipe([]string{"#readability", "#base"}, true); err != nil {
-		t.Errorf("feed pipe with #base rejected: %v", err)
+	// non-default recipe: #default allowed.
+	if err := validatePipe([]string{"#readability", "#default"}, true); err != nil {
+		t.Errorf("non-default recipe with #default rejected: %v", err)
 	}
 }

@@ -68,8 +68,6 @@ type CLI struct {
 	Globals
 	Feed      FeedGroup      `cmd:"" aliases:"ch" help:"Feed management."`
 	Art       ArtGroup       `cmd:"" aliases:"a" help:"Article management."`
-	Pipe      PipeCmd        `cmd:"" help:"Set or print root pipe (default pipeline inherited by feeds)."`
-	Ingest    IngestCmd      `cmd:"" help:"Set or print root ingest strategy (default inherited by feeds)."`
 	Syndicate SyndicateGroup `cmd:"" help:"Manage syndication output feeds (out/*)."`
 	Recipe    RecipeGroup    `cmd:"" help:"Manage processing recipes (named {ingest, pipe} bundles)."`
 	Gen       GenCmd         `cmd:"" help:"Print or bump the store generation (db.gz 'gen'; frontend SW cache key)."`

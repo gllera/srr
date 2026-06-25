@@ -15,8 +15,9 @@ import (
 
 type PreviewCmd struct {
 	URL    *url.URL `arg:"" help:"URL to preview."`
-	Pipe   []string `short:"p" sep:"none" help:"Pipeline step to apply; repeat -p per step (not comma-separated)."`
-	Ingest string   `short:"i" help:"Ingest strategy: built-in ('#feed') or shell command. Empty falls back to the db.gz root ingest."`
+	Recipe string   `short:"r" default:"default" help:"Preview as if the feed used this recipe."`
+	Pipe   []string `short:"p" sep:"none" help:"Ad-hoc pipeline override (repeat -p per step); overrides the recipe's pipe. #default expands to the default recipe's pipe."`
+	Ingest string   `short:"i" help:"Ad-hoc ingest override: built-in ('#feed') or shell command. Overrides the recipe's ingest."`
 	Addr   string   `short:"a" default:"localhost:8080" env:"SRR_PREVIEW_ADDR" help:"Address to listen on."`
 }
 
@@ -65,11 +66,9 @@ var previewTmpl = template.Must(template.New("preview").Funcs(template.FuncMap{
 </html>`))
 
 func (o *PreviewCmd) Run() error {
-	var rootIngest string
-	var rootPipe []string
+	var recipes map[string]Recipe
 	if err := withDB(false, func(_ context.Context, db *DB) error {
-		rootIngest = db.core.Ingest
-		rootPipe = db.core.Pipe
+		recipes = db.core.Recipes
 		return nil
 	}); err != nil {
 		return err
@@ -80,16 +79,25 @@ func (o *PreviewCmd) Run() error {
 	processor := mod.New()
 	engine := ingest.New()
 
-	// Resolve the effective pipeline exactly like a feed: an empty -p
-	// inherits the root pipe (which defaults to #sanitize/#minify), so preview
-	// never serves raw, unsanitized feed HTML via the template's rawHTML helper.
-	pipe := resolvePipe(rootPipe, o.Pipe)
+	r := recipeFor(recipes, o.Recipe)
+	def := recipeFor(recipes, defaultRecipeName)
+	// Effective pipeline: the recipe's pipe over the default; an ad-hoc -p
+	// overrides the recipe's pipe (still expanding #default), so you can try a
+	// pipeline before saving it as a recipe.
+	chPipe := r.Pipe
+	if len(o.Pipe) > 0 {
+		chPipe = o.Pipe
+	}
+	pipe := resolvePipe(def.Pipe, chPipe)
 	if err := processor.Validate(ctx, pipe); err != nil {
 		return fmt.Errorf("invalid pipeline %v: %w", pipe, err)
 	}
 
 	buf := make([]byte, globals.MaxFeedSize*(1<<10)+1)
-	name := ingest.Select(o.Ingest, rootIngest)
+	name := ingest.Select(r.Ingest, def.Ingest)
+	if o.Ingest != "" {
+		name = o.Ingest
+	}
 
 	result, err := engine.Fetch(ctx, name, client, buf, ingest.Request{
 		URL:     o.URL.String(),

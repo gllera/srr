@@ -21,7 +21,7 @@ import (
 // assetFetcher.UploadCacheRef) peeks, converts via SRR_ASSET_PROCESS, and
 // content-hash uploads it to assets/. The mod itself stores/converts nothing.
 //
-// Place it AFTER #base (feed pipe ["#base", "#selfhost"]): it then downloads
+// Place it AFTER #default (recipe pipe ["#default", "#selfhost"]): it then downloads
 // only sanitizer-approved media, and its markers (incl. <video poster>) never
 // round-trip through #sanitize. Network-bound, so it honours the fetch context.
 //

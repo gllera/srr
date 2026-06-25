@@ -13,13 +13,12 @@ import (
 )
 
 type ImportCmd struct {
-	Path    string   `arg:""                help:"Feeds opml file."`
-	ID      []string `short:"i"             help:"Ids to import."`
-	All     bool     `short:"a"             help:"Import all."`
-	Tag     *string  `short:"g"             help:"Tag to assign to imported feeds. Overrides OPML group tags."`
-	DryRun  bool     `short:"n"             help:"Dry run. List resulting feeds without importing."`
-	Parsers []string `short:"p" sep:"none" optional:"" help:"Feed pipe applied to every imported feed; repeat -p per step (not comma-separated). Empty (\"\") clears (inherit root)."`
-	Ingest  *string  `          optional:"" help:"Feed ingest strategy applied to every imported feed. Empty (\"\") clears (inherit root)."`
+	Path   string   `arg:""                help:"Feeds opml file."`
+	ID     []string `short:"i"             help:"Ids to import."`
+	All    bool     `short:"a"             help:"Import all."`
+	Tag    *string  `short:"g"             help:"Tag to assign to imported feeds. Overrides OPML group tags."`
+	DryRun bool     `short:"n"             help:"Dry run. List resulting feeds without importing."`
+	Recipe *string  `short:"r" optional:"" help:"Recipe name applied to every imported feed (must exist). Empty (\"\") clears (⇒ default)."`
 }
 
 func (o *ImportCmd) Run() error {
@@ -48,16 +47,14 @@ func (o *ImportCmd) Run() error {
 		return nil
 	}
 
-	applyImportDefaults(newFeeds, o.Parsers, o.Ingest, o.Tag)
+	applyImportDefaults(newFeeds, o.Recipe, o.Tag)
 
-	// Subscribe-time discovery: probe every #feed feed, repointing homepage URLs
-	// to their discovered feed and skipping (reporting) the unresolvable ones.
-	// Partial success — a few dead URLs don't abort the batch.
-	rootIngest, err := importRootIngest()
+	// Subscribe-time discovery gate reads the recipes map (read-only).
+	recipes, err := importRecipes()
 	if err != nil {
 		return err
 	}
-	kept, failed := resolveImportFeeds(context.Background(), newFeeds, rootIngest)
+	kept, failed := resolveImportFeeds(context.Background(), newFeeds, recipes)
 	reportImportFailures(failed)
 
 	if o.DryRun {
@@ -77,7 +74,7 @@ func (o *ImportCmd) Run() error {
 
 	return withDB(true, func(ctx context.Context, db *DB) error {
 		for _, c := range kept {
-			if err := normalizeFeed(c); err != nil {
+			if err := normalizeFeed(c, db.core.Recipes); err != nil {
 				return err
 			}
 			if err := db.AddFeed(c); err != nil {
@@ -172,21 +169,12 @@ func (iw *importWalker) isSelected(id string, importAll bool) bool {
 	return false
 }
 
-// applyImportDefaults stamps Pipe / Ingest / Tag onto every feed
-// emitted by the importer. parsers (a slice) and the ingestStrategy/tag pointers are
-// `nil` when the corresponding CLI flag is absent. parsers passes through
-// filterPipe so empty entries drop and an all-empty input becomes nil
-// (inherit-root semantics).
-func applyImportDefaults(feeds []*Feed, parsers []string, ingestStrategy, tag *string) {
-	if parsers != nil {
-		pipe := filterPipe(parsers)
+// applyImportDefaults stamps Recipe / Tag onto every imported feed. recipe and
+// tag pointers are nil when the corresponding CLI flag is absent.
+func applyImportDefaults(feeds []*Feed, recipe, tag *string) {
+	if recipe != nil {
 		for _, c := range feeds {
-			c.Pipe = append([]string(nil), pipe...)
-		}
-	}
-	if ingestStrategy != nil {
-		for _, c := range feeds {
-			c.Ingest = *ingestStrategy
+			c.Recipe = *recipe
 		}
 	}
 	if tag != nil {
@@ -210,14 +198,14 @@ type importFailure struct {
 // external-ingest feeds pass through untouched. It returns the feeds to import
 // (with resolved URLs) and the ones that could not be resolved — import is
 // partial-success, not all-or-nothing.
-func resolveImportFeeds(ctx context.Context, feeds []*Feed, rootIngest string) (kept []*Feed, failed []importFailure) {
+func resolveImportFeeds(ctx context.Context, feeds []*Feed, recipes map[string]Recipe) (kept []*Feed, failed []importFailure) {
 	resolved := make([]string, len(feeds))
 	errs := make([]error, len(feeds))
 
 	sem := make(chan struct{}, max(1, globals.Workers))
 	var wg sync.WaitGroup
 	for i, c := range feeds {
-		if !resolvesFeed(c.Ingest, rootIngest) {
+		if !resolvesFeed(recipes, c.Recipe) {
 			resolved[i] = c.URL // external ingest: stored as-is, never probed
 			continue
 		}
@@ -242,15 +230,15 @@ func resolveImportFeeds(ctx context.Context, feeds []*Feed, rootIngest string) (
 	return kept, failed
 }
 
-// importRootIngest reads the db.gz root ingest strategy (read-only, unlocked) so
-// resolveImportFeeds can gate which feeds are #feed.
-func importRootIngest() (string, error) {
-	var root string
+// importRecipes reads the db.gz recipes map (read-only, unlocked) so
+// resolveImportFeeds can resolve each feed's recipe to gate #feed discovery.
+func importRecipes() (map[string]Recipe, error) {
+	var recipes map[string]Recipe
 	err := withDB(false, func(_ context.Context, db *DB) error {
-		root = db.core.Ingest
+		recipes = db.core.Recipes
 		return nil
 	})
-	return root, err
+	return recipes, err
 }
 
 // reportImportFailures prints the feeds skipped because no feed could be

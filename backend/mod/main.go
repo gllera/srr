@@ -256,7 +256,7 @@ func Builtins() []string {
 // Validate checks an already-resolved pipeline before the per-item fetch loop,
 // so a misconfigured pipe fails loudly (a feed-level error) instead of
 // silently dropping every item. For each step: an empty step or an unknown
-// "#"-prefixed token (incl. a stray "#base" or "#base key=val") is rejected; a
+// "#"-prefixed token (incl. a stray "#default" or "#default key=val") is rejected; a
 // known built-in is run once against a throwaway item to surface parameter
 // errors (bad value, unknown key); external shell steps are not executed here.
 func (o *Module) Validate(ctx context.Context, pipeline []string) error {

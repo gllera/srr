@@ -355,7 +355,7 @@ func TestModuleValidate(t *testing.T) {
 		{"#sanitise"},                 // typo'd built-in
 		{"#readability timeout=nope"}, // bad param value
 		{"#sanitize x=1"},             // unknown param
-		{"#base"},                     // resolvePipe expands #base earlier; a leftover is invalid
+		{"#default"},                  // resolvePipe expands #default earlier; a leftover is invalid
 		{""},                          // empty step
 	} {
 		if err := m.Validate(ctx, bad); err == nil {

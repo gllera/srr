@@ -30,10 +30,13 @@ var resolveFeedURL = func(ctx context.Context, rawURL string) (string, error) {
 }
 
 // resolvesFeed reports whether subscribe-time discovery applies: only when the
-// feed's effective ingest strategy is the built-in #feed. External ingest
-// strategies own their own (non-HTTP-feed) source and must be stored as-is.
-func resolvesFeed(feedIngest, rootIngest string) bool {
-	return ingest.Select(feedIngest, rootIngest) == ingest.Builtin
+// feed's effective ingest strategy (its recipe's, falling back to default's)
+// is the built-in #feed. External ingest strategies own their own source and
+// are stored as-is.
+func resolvesFeed(recipes map[string]Recipe, recipeName string) bool {
+	r := recipeFor(recipes, recipeName)
+	def := recipeFor(recipes, defaultRecipeName)
+	return ingest.Select(r.Ingest, def.Ingest) == ingest.Builtin
 }
 
 func printFormatted(format string, v any) error {
@@ -56,16 +59,31 @@ func printJSON(v any) error {
 	return printFormatted("json", v)
 }
 
-// normalizeFeed trims/validates a feed's pipe and tag just before it is
-// persisted (the single chokepoint for add / upd / apply / edit / import), so a
-// bad value fails loudly at config time instead of silently breaking the fetch
-// later. Feed pipes may use #base (allowBase=true).
-func normalizeFeed(ch *Feed) error {
-	ch.Pipe = filterPipe(ch.Pipe)
-	if err := validatePipe(ch.Pipe, true); err != nil {
+// normalizeFeed validates a feed just before it is persisted (the single
+// chokepoint for add/upd/apply/edit/import): its recipe reference must exist
+// (no dangling refs created via the CLI) and its tag must be OPML-safe.
+func normalizeFeed(ch *Feed, recipes map[string]Recipe) error {
+	if err := validateRecipeRef(recipes, ch.Recipe); err != nil {
 		return err
 	}
 	return validateTag(ch.Tag)
+}
+
+// validateRecipeRef accepts an empty name (⇒ default) or any existing recipe;
+// a non-empty unknown name is an eager error listing the available recipes.
+func validateRecipeRef(recipes map[string]Recipe, name string) error {
+	if name == "" {
+		return nil
+	}
+	if _, ok := recipes[name]; ok {
+		return nil
+	}
+	avail := make([]string, 0, len(recipes))
+	for n := range recipes {
+		avail = append(avail, n)
+	}
+	sort.Strings(avail)
+	return fmt.Errorf("recipe %q does not exist (available: %s)", name, strings.Join(avail, ", "))
 }
 
 // validateTag rejects tags that OPML import would mutate or refuse, so that
@@ -90,11 +108,10 @@ func validateTag(tag string) error {
 }
 
 type AddCmd struct {
-	Title   *string  `short:"t" required:""              help:"Feed title."`
-	URL     *string  `short:"u" required:""              help:"Feed RSS url."`
-	Tag     *string  `short:"g" optional:""              help:"Feed tag."`
-	Parsers []string `short:"p" sep:"none" optional:"" help:"Feed pipe step; repeat -p per step (not comma-separated). Empty (\"\") for default."`
-	Ingest  *string  `short:"i" optional:""              help:"Ingest strategy: built-in ('#feed') or shell command."`
+	Title  *string `short:"t" required:"" help:"Feed title."`
+	URL    *string `short:"u" required:"" help:"Feed RSS url."`
+	Tag    *string `short:"g" optional:"" help:"Feed tag."`
+	Recipe *string `short:"r" optional:"" help:"Recipe name (must exist). Empty inherits 'default'."`
 }
 
 func (o *AddCmd) Run() error {
@@ -107,16 +124,15 @@ func (o *AddCmd) Run() error {
 	v := &feedView{
 		Title: *o.Title,
 		URL:   *o.URL,
-		Pipe:  o.Parsers,
 	}
 	if o.Tag != nil {
 		v.Tag = *o.Tag
 	}
-	if o.Ingest != nil {
-		v.Ingest = *o.Ingest
+	if o.Recipe != nil {
+		v.Recipe = *o.Recipe
 	}
 	return withDB(true, func(ctx context.Context, db *DB) error {
-		if resolvesFeed(v.Ingest, db.core.Ingest) {
+		if resolvesFeed(db.core.Recipes, v.Recipe) {
 			resolved, err := resolveFeedURL(ctx, v.URL)
 			if err != nil {
 				return fmt.Errorf("resolve feed %q: %w", v.URL, err)
@@ -133,13 +149,12 @@ func (o *AddCmd) Run() error {
 // feed = one URL: the URL is a flat field; the last fetch error (if any)
 // rides alongside it as a read-only `error` for visibility.
 type feedView struct {
-	ID     *int     `json:"id,omitempty" yaml:"id,omitempty"`
-	Title  string   `json:"title"        yaml:"title"`
-	URL    string   `json:"url"          yaml:"url"`
-	Error  string   `json:"error,omitempty" yaml:"error,omitempty"`
-	Tag    string   `json:"tag,omitempty" yaml:"tag,omitempty"`
-	Pipe   []string `json:"pipe,omitempty" yaml:"pipe,omitempty"`
-	Ingest string   `json:"ingest,omitempty" yaml:"ingest,omitempty"`
+	ID     *int   `json:"id,omitempty" yaml:"id,omitempty"`
+	Title  string `json:"title"        yaml:"title"`
+	URL    string `json:"url"          yaml:"url"`
+	Error  string `json:"error,omitempty" yaml:"error,omitempty"`
+	Tag    string `json:"tag,omitempty" yaml:"tag,omitempty"`
+	Recipe string `json:"recipe,omitempty" yaml:"recipe,omitempty"`
 }
 
 // viewOf builds an output feedView for a stored Feed.
@@ -151,22 +166,20 @@ func viewOf(ch *Feed) *feedView {
 		URL:    ch.URL,
 		Error:  ch.FetchError,
 		Tag:    ch.Tag,
-		Pipe:   append([]string(nil), ch.Pipe...),
-		Ingest: ch.Ingest,
+		Recipe: ch.Recipe,
 	}
 }
 
 type UpdCmd struct {
-	ID      int      `arg:""                                 help:"Feed id to update."`
-	Title   *string  `short:"t" optional:""                  help:"Feed title (empty rejected)."`
-	URL     *string  `short:"u" optional:""                  help:"Feed RSS url. Changing it resets the feed's fetch state (etag/watermark/dedup)."`
-	Tag     *string  `short:"g" optional:""                  help:"Feed tag. Empty (\"\") to clear."`
-	Parsers []string `short:"p" sep:"none" optional:"" help:"Feed pipe step; repeat -p per step (not comma-separated). Empty (\"\") to clear."`
-	Ingest  *string  `short:"i" optional:""                  help:"Feed ingest strategy. Empty (\"\") to clear."`
+	ID     int     `arg:""                help:"Feed id to update."`
+	Title  *string `short:"t" optional:"" help:"Feed title (empty rejected)."`
+	URL    *string `short:"u" optional:"" help:"Feed RSS url. Changing it resets the feed's fetch state (etag/watermark/dedup)."`
+	Tag    *string `short:"g" optional:"" help:"Feed tag. Empty (\"\") to clear."`
+	Recipe *string `short:"r" optional:"" help:"Recipe name (must exist). Empty (\"\") to clear (⇒ default)."`
 }
 
 func (o *UpdCmd) Run() error {
-	if o.Title == nil && o.Tag == nil && o.Parsers == nil && o.Ingest == nil && o.URL == nil {
+	if o.Title == nil && o.Tag == nil && o.Recipe == nil && o.URL == nil {
 		return fmt.Errorf("nothing to update")
 	}
 
@@ -184,11 +197,8 @@ func (o *UpdCmd) Run() error {
 		if o.Tag != nil {
 			ch.Tag = *o.Tag
 		}
-		if o.Parsers != nil {
-			ch.Pipe = o.Parsers // normalizeFeed trims/validates below
-		}
-		if o.Ingest != nil {
-			ch.Ingest = *o.Ingest
+		if o.Recipe != nil {
+			ch.Recipe = *o.Recipe
 		}
 		if o.URL != nil {
 			if !validFeedURL(*o.URL) {
@@ -196,9 +206,9 @@ func (o *UpdCmd) Run() error {
 			}
 			newURL := *o.URL
 			// Resolve only when the URL actually changes (a repoint) and the
-			// effective ingest is the built-in #feed. ch.Ingest already reflects
-			// any -i update applied above.
-			if newURL != ch.URL && resolvesFeed(ch.Ingest, db.core.Ingest) {
+			// effective ingest is the built-in #feed. ch.Recipe already reflects
+			// any -r update applied above.
+			if newURL != ch.URL && resolvesFeed(db.core.Recipes, ch.Recipe) {
 				resolved, err := resolveFeedURL(ctx, newURL)
 				if err != nil {
 					return fmt.Errorf("resolve feed %q: %w", newURL, err)
@@ -208,7 +218,7 @@ func (o *UpdCmd) Run() error {
 			setFeedURL(ch, newURL)
 		}
 
-		if err := normalizeFeed(ch); err != nil {
+		if err := normalizeFeed(ch, db.core.Recipes); err != nil {
 			return err
 		}
 		return db.Commit(ctx)
@@ -359,7 +369,7 @@ func applyViews(ctx context.Context, db *DB, views []*feedView) error {
 			target = &Feed{}
 		}
 		writeFeedView(target, op.view)
-		if err := normalizeFeed(target); err != nil {
+		if err := normalizeFeed(target, db.core.Recipes); err != nil {
 			return fmt.Errorf("feed %q: %w", op.view.Title, err)
 		}
 		if op.ch == nil {
@@ -378,8 +388,7 @@ func writeFeedView(ch *Feed, v *feedView) {
 	ch.Title = v.Title
 	setFeedURL(ch, v.URL)
 	ch.Tag = v.Tag
-	ch.Pipe = append([]string(nil), v.Pipe...)
-	ch.Ingest = v.Ingest
+	ch.Recipe = v.Recipe
 }
 
 // parseApplyInput accepts either a single feedView or an array.

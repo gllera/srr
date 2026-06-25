@@ -33,7 +33,7 @@ func init() {
 // fetchOnce points ch at the test server and runs one fetchURL cycle. ETag /
 // LastModified are cleared each call so a re-fetch from the same server is not
 // answered with a 304 — the dedup tests rely on every fetch seeing the body.
-func fetchOnce(t *testing.T, ch *Feed, srv *httptest.Server) []*Item {
+func fetchOnce(t *testing.T, ch *Feed, srv *httptest.Server, pipe ...string) []*Item {
 	t.Helper()
 	buf := make([]byte, 1<<20)
 	ch.URL = srv.URL
@@ -42,7 +42,7 @@ func fetchOnce(t *testing.T, ch *Feed, srv *httptest.Server) []*Item {
 	// the future-clamp without affecting the dedup expectations the tests check.
 	const fetchedAt int64 = 4_102_444_800 // 2100-01-01
 	run := &fetchRun{client: srv.Client(), engine: ingest.New(), fetchedAt: fetchedAt}
-	items, err := ch.fetchURL(context.Background(), run, buf, mod.New(), ch.Pipe, ingest.Select(ch.Ingest, ""))
+	items, err := ch.fetchURL(context.Background(), run, buf, mod.New(), pipe, ingest.Select("", ""))
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
@@ -50,35 +50,35 @@ func fetchOnce(t *testing.T, ch *Feed, srv *httptest.Server) []*Item {
 }
 
 // dispatchStub runs one fetchURL cycle against the engine's registry (no HTTP
-// server) — the URL is irrelevant since test-stub ignores it.
-func dispatchStub(t *testing.T, ch *Feed, rootIngest string) []*Item {
+// server) with an explicit ingest name — the URL is irrelevant since test-stub
+// ignores it.
+func dispatchStub(t *testing.T, ch *Feed, ingestName string) []*Item {
 	t.Helper()
 	buf := make([]byte, 1<<20)
 	const fetchedAt int64 = 4_102_444_800
-	ingestName := ingest.Select(ch.Ingest, rootIngest)
 	run := &fetchRun{engine: ingest.New(), fetchedAt: fetchedAt}
-	items, err := ch.fetchURL(context.Background(), run, buf, mod.New(), ch.Pipe, ingestName)
+	items, err := ch.fetchURL(context.Background(), run, buf, mod.New(), nil, ingestName)
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
 	return items
 }
 
-// A feed-level ingest strategy is used by fetchURL.
+// fetchURL dispatches through the engine's registry by the resolved ingest name.
 func TestFetchInheritsIngestFromFeed(t *testing.T) {
-	ch := &Feed{Title: "T", URL: "irrelevant://value", Ingest: "#test-stub"}
-	items := dispatchStub(t, ch, "")
+	ch := &Feed{Title: "T", URL: "irrelevant://value"}
+	items := dispatchStub(t, ch, "#test-stub")
 	if len(items) != 2 {
-		t.Fatalf("got %d items, want 2 (feed-level ingest used)", len(items))
+		t.Fatalf("got %d items, want 2 (resolved ingest used)", len(items))
 	}
 }
 
-// The db.gz root Ingest applies when the feed has no override.
+// fetchURL dispatches through the engine's registry by the resolved ingest name.
 func TestFetchUsesRootIngest(t *testing.T) {
 	ch := &Feed{Title: "T", URL: "irrelevant://value"}
 	items := dispatchStub(t, ch, "#test-stub")
 	if len(items) != 2 {
-		t.Fatalf("got %d items, want 2 (root ingest applied)", len(items))
+		t.Fatalf("got %d items, want 2 (resolved ingest applied)", len(items))
 	}
 }
 
@@ -353,7 +353,7 @@ func TestFetchFutureDatedItemClampedToFetchedAt(t *testing.T) {
 	const fetchedAt int64 = 1_700_000_000
 	buf := make([]byte, 1<<20)
 	run := &fetchRun{client: srv.Client(), engine: ingest.New(), fetchedAt: fetchedAt}
-	items, err := ch.fetchURL(context.Background(), run, buf, mod.New(), ch.Pipe, ingest.Select(ch.Ingest, ""))
+	items, err := ch.fetchURL(context.Background(), run, buf, mod.New(), nil, ingest.Select("", ""))
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
@@ -739,10 +739,11 @@ func TestFetchDroppedItemNotInStore(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ch := &Feed{Title: "T", Pipe: []string{"#filter drop_title=/^sponsored/i"}}
+	ch := &Feed{Title: "T"}
+	const dropPipe = "#filter drop_title=/^sponsored/i"
 
 	// First fetch: 2 items in feed, 1 dropped, 1 stored.
-	items := fetchOnce(t, ch, srv)
+	items := fetchOnce(t, ch, srv, dropPipe)
 	if len(items) != 1 {
 		t.Fatalf("fetch1: got %d items, want 1 (dropped item must not be stored)", len(items))
 	}
@@ -755,7 +756,7 @@ func TestFetchDroppedItemNotInStore(t *testing.T) {
 	// Rather than recomputing the hash here, check that a second fetch sees 0 new items
 	// (which proves the GUID was retained in the boundary set).
 	ch.ETag, ch.LastModified = "", ""
-	items2 := fetchOnce(t, ch, srv)
+	items2 := fetchOnce(t, ch, srv, dropPipe)
 	if len(items2) != 0 {
 		t.Errorf("fetch2: got %d items, want 0 (dropped item re-evaluated — GUID not in boundary)", len(items2))
 	}
@@ -772,8 +773,8 @@ func TestFetchDroppedItemGUIDInBoundary(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ch := &Feed{Title: "T", Pipe: []string{"#filter drop_title=/sponsored/i"}}
-	items := fetchOnce(t, ch, srv)
+	ch := &Feed{Title: "T"}
+	items := fetchOnce(t, ch, srv, "#filter drop_title=/sponsored/i")
 
 	if len(items) != 0 {
 		t.Fatalf("fetch1: got %d items, want 0 (item should be dropped)", len(items))

@@ -19,21 +19,21 @@ import (
 // cap logic in fetchURL for the over-cap semantics.
 const maxBoundaryGUIDs = 1024
 
-// pipeBase is the token expanded inline to the root pipe at the
-// position where it appears in a feed's Pipe slice.
-const pipeBase = "#base"
+// pipeDefault is the token expanded inline to the default recipe's pipe at the
+// position where it appears in a recipe's Pipe slice.
+const pipeDefault = "#default"
 
-// resolvePipe composes the effective pipeline by expanding "#base"
-// tokens in chPipe to root. An empty chPipe (nil or []) inherits root;
-// a non-empty chPipe overrides.
-func resolvePipe(root, chPipe []string) []string {
-	if len(chPipe) == 0 {
-		return root
+// resolvePipe composes the effective pipeline by expanding "#default"
+// tokens in recipePipe to def (the default recipe's pipe). An empty
+// recipePipe (nil or []) inherits def; a non-empty recipePipe overrides.
+func resolvePipe(def, recipePipe []string) []string {
+	if len(recipePipe) == 0 {
+		return def
 	}
-	out := make([]string, 0, len(chPipe)+len(root))
-	for _, m := range chPipe {
-		if m == pipeBase {
-			out = append(out, root...)
+	out := make([]string, 0, len(recipePipe)+len(def))
+	for _, m := range recipePipe {
+		if m == pipeDefault {
+			out = append(out, def...)
 		} else {
 			out = append(out, m)
 		}
@@ -67,12 +67,12 @@ type Feed struct {
 	FailStreak int `json:"fail_streak,omitempty"`
 	// LastNew is the unix-second of the last fetch that ingested ≥1 new article.
 	// Not updated on 304 or on a 200 with zero new items.
-	LastNew int64    `json:"last_new,omitempty"`
-	Tag     string   `json:"tag,omitempty"`
-	Pipe    []string `json:"pipe,omitempty"`
-	// Ingest is the feed-level extraction strategy. Empty falls through
-	// to the db.gz root Ingest → built-in "#feed".
-	Ingest   string `json:"ingest,omitempty"`
+	LastNew int64  `json:"last_new,omitempty"`
+	Tag     string `json:"tag,omitempty"`
+	// Recipe is the name of the {ingest, pipe} recipe this feed uses. Empty
+	// resolves to the "default" recipe (recipeFor). A dangling name is tolerated
+	// at read time (⇒ default) but the CLI refuses to create one.
+	Recipe   string `json:"recipe,omitempty"`
 	TotalArt int    `json:"total_art"`
 	AddIdx   int    `json:"add_idx"`
 	newItems []*Item
@@ -99,10 +99,11 @@ type fetchRun struct {
 	// run, built once in FetchCmd.fetch (always non-empty). Any fetcher (built-in
 	// or external) may stash files here and self-host them, owning the layout
 	// inside.
-	cacheDir   string
-	fetchedAt  int64
-	rootPipe   []string
-	rootIngest string
+	cacheDir  string
+	fetchedAt int64
+	// recipes is the full db.gz recipes map, read-only during a fetch run;
+	// each feed resolves its recipe (and the default) from it.
+	recipes map[string]Recipe
 }
 
 func (c *Feed) Fetch(ctx context.Context, run *fetchRun, buf []byte, processor *mod.Module) {
@@ -112,9 +113,11 @@ func (c *Feed) Fetch(ctx context.Context, run *fetchRun, buf []byte, processor *
 	// markers. Set before Validate so every downstream step (and the throwaway
 	// Validate run) sees it; srr preview never sets it, so #selfhost no-ops there.
 	ctx = mod.WithCacheDir(ctx, run.cacheDir)
-	pipe := resolvePipe(run.rootPipe, c.Pipe)
+	r := recipeFor(run.recipes, c.Recipe)
+	def := recipeFor(run.recipes, defaultRecipeName)
+	pipe := resolvePipe(def.Pipe, r.Pipe)
 	// Validate the resolved pipeline once, before the item loop. A bad token
-	// (unknown built-in, stray #base, malformed params) is a config error that
+	// (unknown built-in, stray #default, malformed params) is a config error that
 	// would fail identically for every item; surface it loudly here instead of
 	// letting fetchURL skip every item one by one.
 	if err := processor.Validate(ctx, pipe); err != nil {
@@ -124,7 +127,7 @@ func (c *Feed) Fetch(ctx context.Context, run *fetchRun, buf []byte, processor *
 		c.FailStreak++
 		return
 	}
-	ingestName := ingest.Select(c.Ingest, run.rootIngest)
+	ingestName := ingest.Select(r.Ingest, def.Ingest)
 	items, err := c.fetchURL(ctx, run, buf, processor, pipe, ingestName)
 	if err != nil {
 		c.FetchError = err.Error()
