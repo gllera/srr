@@ -230,6 +230,21 @@ describe("sanitizeHtml security edge cases", () => {
       )
       expect(out).not.toContain("srcset")
    })
+
+   it("keeps <audio> and forces controls (a control-less feed <audio> is invisible)", () => {
+      const out = sanitizeHtml('<audio src="assets/ab/cd.webm"></audio>')
+      expect(out).toContain("<audio")
+      expect(out).toContain("controls")
+   })
+
+   it("resolves a relative <audio src> against the pack base", () => {
+      expect(attr('<audio src="assets/ab/cd.webm">', "audio", "src")).toBe("http://localhost:3000/assets/ab/cd.webm")
+   })
+
+   it("passes an external <audio src> through unproxied (audio is not an image)", () => {
+      setImgProxy("https://p.example/?u=")
+      expect(attr('<audio src="https://feed.example/a.mp3">', "audio", "src")).toBe("https://feed.example/a.mp3")
+   })
 })
 
 describe("collapseBrokenMedia", () => {

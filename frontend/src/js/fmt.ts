@@ -158,6 +158,15 @@ export function sanitizeHtml(html: string): string {
          // path like img.src (leaving them direct would leak the user's IP).
          resolveMediaAttr(node, "src", proxyPrefix, false)
          resolveMediaAttr(node, "poster", proxyPrefix, true)
+      } else if (tag === "AUDIO") {
+         // A feed <audio> often omits `controls`, which renders the element with
+         // no player UI (invisible). Force it — like <img> gets forced lazy/async
+         // above — so self-hosted audio is actually playable. src isn't an image:
+         // a relative assets/ key resolves against the pack base, an external
+         // http(s) src passes through (proxy:false — image proxies don't handle
+         // audio), exactly like <video src>.
+         node.setAttribute("controls", "")
+         resolveMediaAttr(node, "src", proxyPrefix, false)
       } else if (tag === "SOURCE") {
          // srcset is stripped unconditionally: a multi-value descriptor bypasses
          // URL_DENY and the single-src bounds check (same reason <img srcset> is
