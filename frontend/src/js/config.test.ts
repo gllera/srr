@@ -267,7 +267,7 @@ describe("info dialog", () => {
       data.groupFeedsByTag.mockReturnValue({
          tagged: new Map(),
          sortedTags: [],
-         untagged: [feed({ id: 5, title: "Feed5", url: "http://example.com/rss", ingest: "#feed", total_art: 12 })],
+         untagged: [feed({ id: 5, title: "Feed5", url: "http://example.com/rss", recipe: "default", total_art: 12 })],
       })
       nav.unreadCounts.mockResolvedValue(new Map([[5, 7]]))
       const config = await mount()
