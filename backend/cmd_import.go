@@ -54,6 +54,14 @@ func (o *ImportCmd) Run() error {
 	if err != nil {
 		return err
 	}
+	// Validate the stamped recipe up front, mirroring the eager check in feed
+	// add/upd: a typo'd --recipe must fail before probing every OPML URL over the
+	// network (resolvesFeed is lenient and would otherwise treat it as #feed).
+	if o.Recipe != nil {
+		if err := validateRecipeRef(recipes, *o.Recipe); err != nil {
+			return err
+		}
+	}
 	kept, failed := resolveImportFeeds(context.Background(), newFeeds, recipes)
 	reportImportFailures(failed)
 
