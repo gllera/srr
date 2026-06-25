@@ -64,8 +64,8 @@ func dispatchStub(t *testing.T, ch *Feed, ingestName string) []*Item {
 	return items
 }
 
-// fetchURL dispatches through the engine's registry by the resolved ingest name.
-func TestFetchInheritsIngestFromFeed(t *testing.T) {
+// fetchURL dispatches through the engine's registry by the passed ingest name.
+func TestFetchURLDispatchesByIngestName(t *testing.T) {
 	ch := &Feed{Title: "T", URL: "irrelevant://value"}
 	items := dispatchStub(t, ch, "#test-stub")
 	if len(items) != 2 {
@@ -73,12 +73,50 @@ func TestFetchInheritsIngestFromFeed(t *testing.T) {
 	}
 }
 
-// fetchURL dispatches through the engine's registry by the resolved ingest name.
-func TestFetchUsesRootIngest(t *testing.T) {
-	ch := &Feed{Title: "T", URL: "irrelevant://value"}
-	items := dispatchStub(t, ch, "#test-stub")
-	if len(items) != 2 {
-		t.Fatalf("got %d items, want 2 (resolved ingest applied)", len(items))
+// Feed.Fetch (the production path) selects the ingest from the feed's recipe
+// via run.recipes, not from any feed-level field.
+func TestFeedFetchSelectsRecipeIngest(t *testing.T) {
+	const fetchedAt int64 = 4_102_444_800
+	buf := make([]byte, 1<<20)
+	// recipe "stub" supplies the ingest; default supplies the (empty) pipe.
+	run := &fetchRun{
+		engine:    ingest.New(),
+		fetchedAt: fetchedAt,
+		recipes: map[string]Recipe{
+			defaultRecipeName: {},
+			"stub":            {Ingest: "#test-stub"},
+		},
+	}
+	ch := &Feed{Title: "T", URL: "irrelevant://value", Recipe: "stub"}
+	ch.Fetch(context.Background(), run, buf, mod.New())
+	if ch.FetchError != "" {
+		t.Fatalf("FetchError = %q, want empty", ch.FetchError)
+	}
+	if len(ch.newItems) != 2 {
+		t.Fatalf("got %d items, want 2 (recipe ingest #test-stub selected)", len(ch.newItems))
+	}
+}
+
+// Feed.Fetch falls back to the default recipe's ingest when the feed's recipe
+// sets only a pipe — proving axis-independent fallback through run.recipes.
+func TestFeedFetchFallsBackToDefaultIngest(t *testing.T) {
+	const fetchedAt int64 = 4_102_444_800
+	buf := make([]byte, 1<<20)
+	run := &fetchRun{
+		engine:    ingest.New(),
+		fetchedAt: fetchedAt,
+		recipes: map[string]Recipe{
+			defaultRecipeName: {Ingest: "#test-stub"},
+			"onlypipe":        {Pipe: []string{"#sanitize"}}, // no ingest ⇒ inherit default's
+		},
+	}
+	ch := &Feed{Title: "T", URL: "irrelevant://value", Recipe: "onlypipe"}
+	ch.Fetch(context.Background(), run, buf, mod.New())
+	if ch.FetchError != "" {
+		t.Fatalf("FetchError = %q, want empty", ch.FetchError)
+	}
+	if len(ch.newItems) != 2 {
+		t.Fatalf("got %d items, want 2 (fell back to default's #test-stub ingest)", len(ch.newItems))
 	}
 }
 
