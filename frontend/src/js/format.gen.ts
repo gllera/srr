@@ -95,6 +95,12 @@ export interface IOutFeedWire {
    limit?: number // Limit
 }
 
+// Wire shape of a db.gz recipes{} value (backend Recipe).
+export interface IRecipeWire {
+   ingest?: string // Ingest
+   pipe?: string[] // Pipe
+}
+
 // Wire shape of db.gz itself (backend DBCore).
 export interface IDBWire {
    seq?: number // Seq
@@ -108,6 +114,7 @@ export interface IDBWire {
    hdrs?: number // HdrPacks
    mp?: number // MetaPacks
    mt?: number // MetaTail
+   recipes?: Record<string, IRecipeWire> // Recipes
    feeds: Record<number, IFeedWire> | null // Feeds
    out?: IOutFeedWire[] // Out
 }

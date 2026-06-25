@@ -64,7 +64,8 @@ func defaultRootPipe() []string {
 
 // defaultRecipeName is the reserved recipe every feed falls back to and the
 // new home for what the old root pipe/ingest expressed. It always exists
-// (NewDB seeds it) and its pipe forbids the #default composition token.
+// (NewDB seeds it); its pipe must not contain the #default composition token
+// (enforced by the CLI once that token is added).
 const defaultRecipeName = "default"
 
 // Recipe is a named {ingest, pipe} bundle referenced by feeds (Feed.Recipe).
