@@ -206,6 +206,97 @@ func TestUploadCacheRefProcessSubstitutesInputTokenWithinArg(t *testing.T) {
 	}
 }
 
+// metaCaptureBackend records the ObjectMeta handed to AtomicPut so a test can
+// assert the Content-Type / Content-Encoding the asset layer threaded through.
+type metaCaptureBackend struct {
+	store.Backend
+	gotKey  string
+	gotMeta store.ObjectMeta
+}
+
+func (m *metaCaptureBackend) AtomicPut(ctx context.Context, key string, r io.Reader, meta store.ObjectMeta) error {
+	m.gotKey = key
+	m.gotMeta = meta
+	return m.Backend.AtomicPut(ctx, key, r, meta)
+}
+
+func TestUploadCacheRefProcessOutputWritesFileBytes(t *testing.T) {
+	be := tempStore(t)
+	// {output} mode: the command writes the processed bytes to the output file
+	// and prints metadata JSON to stdout. The stored bytes must come from the
+	// FILE, not stdout.
+	body := "printf 'PROCESSED' > \"$2\"\nprintf '{\"mimetype\":\"image/webp\",\"extension\":\"webp\"}'"
+	af := newAssetFetcher(be, 1024, fakeProcess(t, body)+" {input} {output}")
+
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+
+	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	if err != nil {
+		t.Fatalf("UploadCacheRef: %v", err)
+	}
+	if got := string(readKey(t, be, key)); got != "PROCESSED" {
+		t.Errorf("stored body = %q, want the output-file bytes %q", got, "PROCESSED")
+	}
+}
+
+func TestUploadCacheRefProcessOutputThreadsObjectMeta(t *testing.T) {
+	cap := &metaCaptureBackend{Backend: tempStore(t)}
+	body := "printf 'P' > \"$2\"\nprintf '{\"mimetype\":\"image/webp\",\"extension\":\"webp\",\"encoding\":\"gzip\"}'"
+	af := newAssetFetcher(cap, 1024, fakeProcess(t, body)+" {input} {output}")
+
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+
+	if _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg"); err != nil {
+		t.Fatalf("UploadCacheRef: %v", err)
+	}
+	if cap.gotMeta.ContentType != "image/webp" {
+		t.Errorf("ContentType = %q, want image/webp (from process JSON)", cap.gotMeta.ContentType)
+	}
+	if cap.gotMeta.ContentEncoding != "gzip" {
+		t.Errorf("ContentEncoding = %q, want gzip (from process JSON)", cap.gotMeta.ContentEncoding)
+	}
+}
+
+func TestUploadCacheRefProcessOutputEmptyFileFailsSoft(t *testing.T) {
+	cap := &metaCaptureBackend{Backend: tempStore(t)}
+	// Prints JSON but never writes the output file → empty output → fail-soft.
+	af := newAssetFetcher(cap, 1024, fakeProcess(t, "printf '{\"mimetype\":\"image/webp\"}'")+" {input} {output}")
+
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+
+	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	if err != nil {
+		t.Fatalf("UploadCacheRef should fail soft, got error: %v", err)
+	}
+	if got := string(readKey(t, cap, key)); got != jpegBytes {
+		t.Errorf("stored body = %q, want original %q (fail-soft)", got, jpegBytes)
+	}
+	if cap.gotMeta != (store.ObjectMeta{}) {
+		t.Errorf("ObjectMeta = %+v, want empty on fail-soft", cap.gotMeta)
+	}
+}
+
+func TestUploadCacheRefProcessOutputBadJSONFailsSoft(t *testing.T) {
+	be := tempStore(t)
+	// Writes the output file but emits non-JSON on stdout → metadata parse fails
+	// → fail-soft to the original.
+	af := newAssetFetcher(be, 1024, fakeProcess(t, "printf 'DATA' > \"$2\"\nprintf 'not json'")+" {input} {output}")
+
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+
+	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	if err != nil {
+		t.Fatalf("UploadCacheRef should fail soft, got error: %v", err)
+	}
+	if got := string(readKey(t, be, key)); got != jpegBytes {
+		t.Errorf("stored body = %q, want original %q (fail-soft)", got, jpegBytes)
+	}
+}
+
 func TestUploadCacheRefStoresUnderContentHashKey(t *testing.T) {
 	const body = "IMAGEBYTES"
 	be := tempStore(t)
