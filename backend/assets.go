@@ -33,12 +33,8 @@ var errNotAsset = errors.New("not a cache asset")
 type assetFetcher struct {
 	be       store.Backend
 	maxBytes int64
-	proc     []string
-	// peek, when set, is the asset-process command's companion probe (see
-	// runPeek): it identifies each asset up front to decide the stored extension,
-	// its Content-Type/-Encoding, and whether asset-process should run at all.
-	// Set once at construction (cmd_fetch), before workers run.
-	peek []string
+	proc     []string // asset-process command (transcode/process bytes); see runProcess
+	peek     []string // asset-peek command (identify the asset up front); see runPeek
 }
 
 // assetPrefix is the reserved store prefix for self-hosted media, analogous to
@@ -47,12 +43,11 @@ type assetFetcher struct {
 const assetPrefix = "assets/"
 
 // newAssetFetcher builds the run's asset uploader. maxKB caps a single stored
-// object's size. procCmd, when non-empty, is the asset-process command run on
-// every asset just before upload to process its bytes (e.g. transcode media):
-// it is split on whitespace, the cache file path is appended as its final
-// argument (or substituted for {input}/{output} tokens), and the processed
-// bytes are read from its stdout (or, in {output} mode, the output file). Empty
-// disables processing.
+// object's size. procCmd (asset-process) is the optional command run per asset
+// to process its bytes — split on whitespace, empty disabling it. The optional
+// asset-peek command is assigned to the returned fetcher's peek field by the
+// caller (cmd_fetch), before workers run. See runProcess / runPeek for the
+// {input}/{output} token contract.
 func newAssetFetcher(be store.Backend, maxKB int, procCmd string) *assetFetcher {
 	return &assetFetcher{
 		be:       be,
@@ -126,8 +121,7 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 	}
 
 	// Key on the ORIGINAL file's content hash so an asset already in the store is
-	// recognized before the (possibly expensive) pre-upload processing runs. The
-	// key keeps the source extension; identical source bytes dedup to one key.
+	// recognized before the (possibly expensive) pre-upload processing runs.
 	orig, err := os.ReadFile(full)
 	if err != nil {
 		return "", fmt.Errorf("read asset %q: %w", localname, err)
@@ -175,12 +169,12 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 	// original unchanged.
 	payload := orig
 	if supported && len(a.proc) > 0 {
-		if res, ok := a.runProcess(ctx, full, localname); ok {
-			payload = res.bytes
-			if res.mimetype != "" || res.encoding != "" {
-				meta = store.ObjectMeta{ContentType: res.mimetype, ContentEncoding: res.encoding}
+		if b, pm, ok := a.runProcess(ctx, full, localname); ok {
+			payload = b
+			if pm.Mimetype != "" || pm.Encoding != "" {
+				meta = store.ObjectMeta{ContentType: pm.Mimetype, ContentEncoding: pm.Encoding}
 			}
-			if pe := normalizeExt(res.ext); pe != "" && pe != storedExt {
+			if pe := normalizeExt(pm.Extension); pe != "" && pe != storedExt {
 				slog.Warn("asset-process extension differs from asset-peek; keeping the peek key", "asset", localname, "peek", storedExt, "process", pe)
 			}
 		}
@@ -195,55 +189,78 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 	return key, nil
 }
 
-// inputToken / outputToken mark where the asset-process command receives the
-// cache file path and (optionally) an output path. {input} is substituted per
-// arg (e.g. "enc -i {input} --flags"); with no {input} the path is appended as
-// the final arg. {output} switches the command to file mode: SRR substitutes a
-// fresh temp path, reads the processed bytes back from it, and parses a metadata
-// JSON ({mimetype, extension, encoding}) from stdout. With no {output} the
-// command writes processed bytes to stdout (no metadata).
+// inputToken / outputToken mark where an asset command (process or peek)
+// receives the cache file path and (asset-process only) an output path. {input}
+// is substituted per arg (e.g. "enc -i {input} --flags"); with no {input} the
+// path is appended as the final arg. {output} switches asset-process to file
+// mode: SRR substitutes a fresh temp path, reads the processed bytes back from
+// it, and parses a metadata JSON from stdout. With no {output} the command
+// writes processed bytes to stdout.
 const (
 	inputToken  = "{input}"
 	outputToken = "{output}"
 )
 
-// processResult is the JSON an asset-process command prints to stdout in
-// {output} mode: the type/encoding of the bytes it wrote to the output file.
-type processResult struct {
+// buildAssetArgv assembles the argv for an asset command: full is substituted
+// for every {input} token (appended as the final arg when no arg carries one),
+// and outPath — when non-empty — for every {output} token. It never mutates spec
+// (shared across workers). Shared by runProcess and runPeek so the token
+// contract lives in one place.
+func buildAssetArgv(spec []string, full, outPath string) []string {
+	hasInput := false
+	argv := make([]string, len(spec))
+	for i, f := range spec {
+		if strings.Contains(f, inputToken) {
+			hasInput = true
+		}
+		f = strings.ReplaceAll(f, inputToken, full)
+		if outPath != "" {
+			f = strings.ReplaceAll(f, outputToken, outPath)
+		}
+		argv[i] = f
+	}
+	if !hasInput {
+		argv = append(argv, full)
+	}
+	return argv
+}
+
+// assetMeta is the type/encoding an asset-peek or asset-process command reports
+// on stdout (JSON): it feeds the stored object's Content-Type/-Encoding and, for
+// peek, the key extension.
+type assetMeta struct {
 	Mimetype  string `json:"mimetype"`
 	Extension string `json:"extension"`
 	Encoding  string `json:"encoding"`
 }
 
-// procRun is one asset-process run's outcome: the processed bytes plus the
-// metadata declared in {output} mode (zero-valued in stdout mode).
-type procRun struct {
-	bytes    []byte
-	mimetype string
-	ext      string
-	encoding string
+// peekResult is the JSON an asset-peek command prints to stdout: the identified
+// assetMeta plus whether asset-process supports the file.
+type peekResult struct {
+	assetMeta
+	Supported bool `json:"supported"`
 }
 
 // runProcess runs the configured asset-process command on the cache file just
-// before upload. The cache file path is substituted for every {input} token
-// (per arg); with no token it is appended as the command's final argument. In
+// before upload, returning the processed bytes and (in {output} mode) the
+// metadata it declared. The cache file path is substituted for every {input}
+// token (per arg); with no token it is appended as the final argument. In
 // {output} mode (an arg carries {output}) SRR substitutes a fresh temp path,
 // reads the processed bytes back from that file, and parses a metadata JSON from
-// stdout; otherwise the bytes are read from stdout. stderr passes through for
-// diagnostics. Fail-soft: it returns ok=false — the caller uploads the original
-// unchanged — when the command errors, writes no output, or (file mode) prints
-// invalid metadata, so a processing hiccup or an unhandled file type never
-// wedges a feed. Runs through mod.RunCommand so it shares the external-command
-// bounds (a SubprocessTimeout deadline, WaitDelay, and a capped stdout): a hung
-// transcoder can't wedge the worker and runaway output can't OOM it.
-func (a *assetFetcher) runProcess(ctx context.Context, full, localname string) (procRun, bool) {
-	hasInput, hasOutput := false, false
+// stdout; otherwise the bytes are read from stdout (no declared metadata).
+// stderr passes through for diagnostics. Fail-soft: it returns ok=false — the
+// caller uploads the original unchanged — when the command errors, writes no
+// output, or (file mode) prints invalid metadata, so a processing hiccup or an
+// unhandled file type never wedges a feed. Runs through mod.RunCommand so it
+// shares the external-command bounds (a SubprocessTimeout deadline, WaitDelay,
+// and a capped stdout): a hung transcoder can't wedge the worker and runaway
+// output can't OOM it.
+func (a *assetFetcher) runProcess(ctx context.Context, full, localname string) ([]byte, assetMeta, bool) {
+	hasOutput := false
 	for _, f := range a.proc {
-		if strings.Contains(f, inputToken) {
-			hasInput = true
-		}
 		if strings.Contains(f, outputToken) {
 			hasOutput = true
+			break
 		}
 	}
 
@@ -255,52 +272,40 @@ func (a *assetFetcher) runProcess(ctx context.Context, full, localname string) (
 		tmp, err := os.CreateTemp("", "srr-asset-*"+path.Ext(localname))
 		if err != nil {
 			slog.Warn("asset-process: create output file failed; uploading original", "asset", localname, "err", err)
-			return procRun{}, false
+			return nil, assetMeta{}, false
 		}
 		outPath = tmp.Name()
 		tmp.Close()
 		defer os.Remove(outPath)
 	}
 
-	// Build a fresh argv (never mutate a.proc — it is shared across workers).
-	argv := make([]string, len(a.proc))
-	for i, f := range a.proc {
-		f = strings.ReplaceAll(f, inputToken, full)
-		if hasOutput {
-			f = strings.ReplaceAll(f, outputToken, outPath)
-		}
-		argv[i] = f
-	}
-	if !hasInput {
-		argv = append(argv, full)
-	}
-
+	argv := buildAssetArgv(a.proc, full, outPath)
 	out, err := mod.RunCommand(ctx, argv[0], argv[1:]...)
 	if err != nil {
 		slog.Warn("asset-process command failed; uploading original", "asset", localname, "cmd", a.proc[0], "err", err)
-		return procRun{}, false
+		return nil, assetMeta{}, false
 	}
 
 	if !hasOutput {
 		// stdout mode: the processed bytes are stdout; no declared metadata.
 		if len(out) == 0 {
 			slog.Warn("asset-process command produced no output; uploading original", "asset", localname, "cmd", a.proc[0])
-			return procRun{}, false
+			return nil, assetMeta{}, false
 		}
-		return procRun{bytes: out}, true
+		return out, assetMeta{}, true
 	}
 
 	// {output} mode: bytes from the file, metadata JSON from stdout.
 	payload, ok := a.readProcOutput(outPath, localname)
 	if !ok {
-		return procRun{}, false
+		return nil, assetMeta{}, false
 	}
-	var meta processResult
-	if err := json.Unmarshal(out, &meta); err != nil {
+	var m assetMeta
+	if err := json.Unmarshal(out, &m); err != nil {
 		slog.Warn("asset-process metadata JSON invalid; uploading original", "asset", localname, "cmd", a.proc[0], "err", err)
-		return procRun{}, false
+		return nil, assetMeta{}, false
 	}
-	return procRun{bytes: payload, mimetype: meta.Mimetype, ext: meta.Extension, encoding: meta.Encoding}, true
+	return payload, m, true
 }
 
 // readProcOutput reads the {output}-mode result file, bounding the read by the
@@ -328,16 +333,6 @@ func (a *assetFetcher) readProcOutput(outPath, localname string) ([]byte, bool) 
 	return payload, true
 }
 
-// peekResult is the JSON an asset-peek command prints to stdout: the asset's
-// identified type/extension, whether asset-process supports it, and an optional
-// content encoding. Mirrors processResult plus the supported gate.
-type peekResult struct {
-	Mimetype  string `json:"mimetype"`
-	Extension string `json:"extension"`
-	Supported bool   `json:"supported"`
-	Encoding  string `json:"encoding"`
-}
-
 // runPeek runs the configured asset-peek command on the cache file to identify
 // the asset before the dedup check, returning its parsed JSON and ok=true. The
 // cache file path is substituted for every {input} token (per arg); with no
@@ -346,18 +341,7 @@ type peekResult struct {
 // command errors or prints invalid JSON, so a peek hiccup never wedges a feed.
 // Shares mod.RunCommand's external-command bounds.
 func (a *assetFetcher) runPeek(ctx context.Context, full, localname string) (peekResult, bool) {
-	hasInput := false
-	argv := make([]string, len(a.peek))
-	for i, f := range a.peek {
-		if strings.Contains(f, inputToken) {
-			hasInput = true
-		}
-		argv[i] = strings.ReplaceAll(f, inputToken, full)
-	}
-	if !hasInput {
-		argv = append(argv, full)
-	}
-
+	argv := buildAssetArgv(a.peek, full, "")
 	out, err := mod.RunCommand(ctx, argv[0], argv[1:]...)
 	if err != nil {
 		slog.Warn("asset-peek failed; using source extension", "asset", localname, "cmd", a.peek[0], "err", err)
