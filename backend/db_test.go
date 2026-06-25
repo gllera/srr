@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1112,5 +1113,41 @@ func TestReadGzCorruptedReturnsError(t *testing.T) {
 	}
 	if _, err := db.readGz(ctx, "bad.gz"); err == nil {
 		t.Error("expected decompress error")
+	}
+}
+
+func TestRecipeForFallback(t *testing.T) {
+	recipes := map[string]Recipe{
+		"default": {Pipe: []string{"#sanitize", "#minify"}},
+		"read":    {Pipe: []string{"#readability", "#default"}},
+		"tg":      {Ingest: "srr-telegram"}, // pipe omitted ⇒ falls back to default's
+	}
+	if got := recipeFor(recipes, "read"); !slices.Equal(got.Pipe, []string{"#readability", "#default"}) {
+		t.Errorf("recipeFor(read).Pipe = %v", got.Pipe)
+	}
+	if got := recipeFor(recipes, "tg"); got.Ingest != "srr-telegram" || got.Pipe != nil {
+		t.Errorf("recipeFor(tg) = %+v, want {srr-telegram, nil}", got)
+	}
+	// empty name ⇒ default
+	if got := recipeFor(recipes, ""); !slices.Equal(got.Pipe, []string{"#sanitize", "#minify"}) {
+		t.Errorf("recipeFor(\"\") = %v, want default", got.Pipe)
+	}
+	// unknown name ⇒ default (lenient: a dangling ref never crashes a fetch)
+	if got := recipeFor(recipes, "nope"); !slices.Equal(got.Pipe, []string{"#sanitize", "#minify"}) {
+		t.Errorf("recipeFor(nope) = %v, want default", got.Pipe)
+	}
+}
+
+func TestNewDBSeedsDefaultRecipe(t *testing.T) {
+	db, _, _ := setupTestDB(t) // fresh, empty store
+	r, ok := db.core.Recipes[defaultRecipeName]
+	if !ok {
+		t.Fatalf("fresh DB has no %q recipe", defaultRecipeName)
+	}
+	if !slices.Equal(r.Pipe, defaultRootPipe()) {
+		t.Errorf("default recipe pipe = %v, want %v", r.Pipe, defaultRootPipe())
+	}
+	if r.Ingest != "" {
+		t.Errorf("default recipe ingest = %q, want empty", r.Ingest)
 	}
 }
