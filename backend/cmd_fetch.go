@@ -85,6 +85,7 @@ func (o *FetchCmd) fetch(ctx context.Context, client *http.Client) error {
 		// content-hash key — no outbound HTTP of its own.
 		assets := newAssetFetcher(db.Backend, globals.MaxAssetSize, globals.AssetProcess)
 		assets.peek = strings.Fields(globals.AssetPeek)
+		assets.procTimeout = globals.AssetProcessTimeout
 		bufPool := sync.Pool{
 			New: func() any {
 				return make([]byte, globals.MaxFeedSize*(1<<10)+1)
@@ -116,15 +117,7 @@ func (o *FetchCmd) fetch(ctx context.Context, client *http.Client) error {
 
 		// Run-scoped deps shared across all workers (all concurrent-safe). The
 		// per-worker buf/processor are pulled from their pools inside each worker.
-		run := &fetchRun{
-			client:    client,
-			engine:    engine,
-			assets:    assets,
-			cacheDir:  cacheDir,
-			fetchedAt: db.core.FetchedAt,
-			recipes:   db.core.Recipes,
-			assetSem:  make(chan struct{}, globals.AssetWorkers),
-		}
+		run := newFetchRun(client, engine, assets, cacheDir, db.core.FetchedAt, db.core.Recipes, globals.AssetWorkers)
 
 		g, gctx := errgroup.WithContext(ctx)
 		g.SetLimit(globals.Workers)

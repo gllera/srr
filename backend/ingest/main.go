@@ -31,6 +31,12 @@ type Request struct {
 	ETag         string `json:"etag,omitempty"`
 	LastModified string `json:"last_modified,omitempty"`
 	MaxSize      int    `json:"max_size"`
+	// MaxAssetSize is the size cap in bytes for any single file the fetcher
+	// self-hosts via a "#"-marker (from --max-asset-size). The fetcher MUST honor
+	// it at download — skip an over-cap file and leave its remote URL — because the
+	// caller's upload step trusts whatever the marker points at and no longer
+	// re-checks size. Zero means unset (no asset cap).
+	MaxAssetSize int `json:"max_asset_size,omitempty"`
 	// AssetDir is the fetcher's persistent download cache, one directory shared by
 	// every feed this run: the caller creates it (and never deletes it) and, for
 	// an external strategy, the command runs in it (its working directory, set as

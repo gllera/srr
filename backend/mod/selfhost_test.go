@@ -128,6 +128,31 @@ func TestSelfhostMaxBodyFailsOpen(t *testing.T) {
 	}
 }
 
+// The --max-asset-size cap (MaxAssetSize package var) clamps the download even
+// with no per-pipeline maxbody: an over-cap body is left as the remote URL.
+func TestSelfhostAssetSizeCapFailsOpen(t *testing.T) {
+	allowPrivateForTest(t)
+	orig := MaxAssetSize
+	MaxAssetSize = 4 // bytes; clamps the default 128MiB maxbody
+	defer func() { MaxAssetSize = orig }()
+
+	srv, _ := mediaServer(t, "THIS-BODY-IS-LONGER-THAN-THE-CAP")
+	dir := t.TempDir()
+	m := New()
+	ctx := WithCacheDir(context.Background(), dir)
+	content := `<img src="` + srv.URL + `/big.jpg">`
+	item := &RawItem{Content: content}
+	if err := m.Process(ctx, "#selfhost", item); err != nil { // no maxbody param
+		t.Fatalf("Process should fail open, got %v", err)
+	}
+	if item.Content != content {
+		t.Errorf("asset over MaxAssetSize should leave the URL, got %q", item.Content)
+	}
+	if got := cacheFileCount(t, dir); got != 0 {
+		t.Errorf("over-cap asset must not leave a cache file, got %d", got)
+	}
+}
+
 func TestSelfhostBlocksSSRF(t *testing.T) {
 	// No allowPrivateForTest: the loopback test server must be refused by the
 	// SSRF guard, and #selfhost must fail open (leave the URL).

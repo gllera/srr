@@ -103,14 +103,39 @@ type fetchRun struct {
 	// inside.
 	cacheDir  string
 	fetchedAt int64
+	// maxAssetSize is the self-hosted-object size cap in bytes (--max-asset-size),
+	// passed to each ingest Request so an external fetcher enforces it at download.
+	// newFetchRun reuses assets.maxBytes (the same cap, already converted) rather
+	// than redoing the KB→bytes conversion.
+	maxAssetSize int
 	// recipes is the full db.gz recipes map, read-only during a fetch run;
 	// each feed resolves its recipe (and the default) from it.
 	recipes map[string]Recipe
 	// assetSem is the run-global asset-processing pool (SRR_ASSET_WORKERS): every
 	// feed's uploadAssets acquires a slot per marker-bearing item, so the total
 	// number of concurrent peek/transcode/upload jobs across ALL feeds this run is
-	// capped at cap(assetSem).
+	// capped at cap(assetSem). newFetchRun always sizes it (cap >= 1), so
+	// uploadAssets acquires on it directly without a degenerate-pool guard.
 	assetSem chan struct{}
+}
+
+// newFetchRun assembles the run-scoped deps shared by every feed in one fetch
+// (built once in FetchCmd.fetch, concurrent-safe). It owns the asset-pipeline
+// invariants its consumers rely on: maxAssetSize reuses the uploader's
+// already-converted byte cap (no extra KB→bytes step here), and assetSem is
+// always a usable pool (cap >= 1, flooring a stray assetWorkers < 1) so
+// uploadAssets needs no degenerate-semaphore guard.
+func newFetchRun(client *http.Client, engine *ingest.Fetcher, assets *assetFetcher, cacheDir string, fetchedAt int64, recipes map[string]Recipe, assetWorkers int) *fetchRun {
+	return &fetchRun{
+		client:       client,
+		engine:       engine,
+		assets:       assets,
+		cacheDir:     cacheDir,
+		fetchedAt:    fetchedAt,
+		recipes:      recipes,
+		maxAssetSize: int(assets.maxBytes),
+		assetSem:     make(chan struct{}, max(1, assetWorkers)),
+	}
 }
 
 func (c *Feed) Fetch(ctx context.Context, run *fetchRun, buf []byte, processor *mod.Module) {
@@ -165,6 +190,7 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 		ETag:         c.ETag,
 		LastModified: c.LastModified,
 		MaxSize:      cap(buf) - 1,
+		MaxAssetSize: run.maxAssetSize,
 		AssetDir:     run.cacheDir,
 	})
 	if err != nil {
@@ -380,18 +406,9 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 // #feed feeds emit no markers). The per-feed errgroup returns the first hard
 // upload error and cancels its siblings, failing the whole feed — the caller
 // leaves feed state (watermark, dedup, etag) untouched, so a transient store
-// failure self-heals next fetch while a permanently-rejected asset wedges the
-// feed until fixed.
+// error self-heals next fetch while a persistent one wedges the feed until the
+// store recovers.
 func (run *fetchRun) uploadAssets(ctx context.Context, items []*Item) error {
-	// Guard a degenerate assetSem (nil or unbuffered, both cap 0): the parallel
-	// acquire below would deadlock on it. Production always sizes it from
-	// SRR_ASSET_WORKERS (>= 1); a cap-1 pool keeps one code path and runs any such
-	// case serially.
-	sem := run.assetSem
-	if cap(sem) == 0 {
-		sem = make(chan struct{}, 1)
-	}
-
 	g, gctx := errgroup.WithContext(ctx)
 	for _, i := range items {
 		if !mod.HasAssetMarkers(i.Content) {
@@ -399,11 +416,11 @@ func (run *fetchRun) uploadAssets(ctx context.Context, items []*Item) error {
 		}
 		g.Go(func() error {
 			select {
-			case sem <- struct{}{}:
+			case run.assetSem <- struct{}{}:
 			case <-gctx.Done():
 				return gctx.Err()
 			}
-			defer func() { <-sem }()
+			defer func() { <-run.assetSem }()
 			return run.rewriteItemAssets(gctx, i)
 		})
 	}

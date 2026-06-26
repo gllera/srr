@@ -14,6 +14,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
+
+	"golang.org/x/sync/singleflight"
 
 	"srrb/mod"
 	"srrb/store"
@@ -32,10 +35,20 @@ var errNotAsset = errors.New("not a cache asset")
 // overwrite-safe and idempotent: it backs the end-of-pipeline self-hosting step
 // (see UploadCacheRef).
 type assetFetcher struct {
-	be       store.Backend
+	be store.Backend
+	// maxBytes is the asset size cap in bytes. The cap is ENFORCED AT DOWNLOAD
+	// (#selfhost / external ingest); here it survives only as a fail-soft OOM
+	// bound on the asset-process output read (readProcOutput), which is generated
+	// at upload and so isn't download-bounded. Zero disables that guard.
 	maxBytes int64
 	proc     []string // asset-process command (transcode/process bytes); see runProcess
 	peek     []string // asset-peek command (identify the asset up front); see runPeek
+
+	// procTimeout bounds a single asset-process command invocation, separate from
+	// the shared SubprocessTimeout (--cmd-timeout) because media transcoding can
+	// run far longer than a feed/ingest command. Set from --asset-process-timeout
+	// in cmd_fetch.go; a zero value falls back to SubprocessTimeout (tests / unset).
+	procTimeout time.Duration
 
 	// seen memoizes source-content-hash -> resolved store key for this run, so a
 	// marker reused across a feed's articles (or across feeds) skips the repeat
@@ -43,6 +56,16 @@ type assetFetcher struct {
 	// fetcher is shared across workers); the store existence check below stays the
 	// cross-run and cross-worker-race backstop.
 	seen sync.Map
+
+	// flight coalesces concurrent UploadCacheRef calls for the same source bytes
+	// into a single peek/process/upload. The parallel upload step
+	// (fetchRun.uploadAssets) can hand one asset to several item goroutines at
+	// once — within a feed or across feeds sharing this run's fetcher — and the
+	// seen memo only short-circuits AFTER the first finishes, so a concurrent wave
+	// would otherwise each re-transcode and re-upload the same already-seen asset.
+	// Keyed by source content hash (the seen key), so distinct sources never
+	// serialize against each other.
+	flight singleflight.Group
 }
 
 // assetPrefix is the reserved store prefix for self-hosted media, analogous to
@@ -80,9 +103,10 @@ func newAssetFetcher(be store.Backend, maxKB int, procCmd string) *assetFetcher 
 // processes the file just before upload.
 //
 // Guards (localname comes from item content, which may be attacker-influenced):
-// the resolved path must stay within cacheDir (no "..", no symlinked escape),
-// must be a regular file, and the stored object must not exceed the asset size
-// cap.
+// the resolved path must stay within cacheDir (no "..", no symlinked escape) and
+// must be a regular file. The asset size cap is NOT checked here — it is enforced
+// at download by whoever fetched the file (#selfhost / external ingest), so the
+// cache file is trusted; only the asset-process output keeps a fail-soft guard.
 func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname string) (string, error) {
 	if localname == "" {
 		return "", fmt.Errorf("empty asset reference: %w", errNotAsset)
@@ -115,19 +139,12 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 		return "", fmt.Errorf("asset %q escapes cache dir: %w", localname, errNotAsset)
 	}
 
-	// Bound the source read by the asset size cap BEFORE pulling the whole file
-	// into memory. localname comes from item content, so the cache dir is
-	// attacker-influenceable (an external ingest command or a content-marker mod
-	// can drop an arbitrarily large file); without this an oversized file would
-	// OOM the worker at the ReadFile below, before the post-payload cap fires.
-	// Skip the pre-read cap when an asset-process command is configured: it may
-	// shrink an over-cap source (e.g. transcoding a large image), so only its
-	// output — capped below — must fit, and the operator who enabled arbitrary
-	// asset processing accepts the unbounded source read it implies.
-	if a.maxBytes > 0 && len(a.proc) == 0 && fi.Size() > a.maxBytes {
-		return "", fmt.Errorf("asset %q source exceeds %d bytes (size %d)", localname, a.maxBytes, fi.Size())
-	}
-
+	// The self-hosted-object size cap is enforced at DOWNLOAD by whoever fetched
+	// the file (the #selfhost mod or an external ingest command, via
+	// Request.MaxAssetSize) — so the cache file is trusted here and read without a
+	// re-check. Only the asset-process output, generated below and NOT
+	// download-bounded, keeps a fail-soft size guard (see readProcOutput).
+	//
 	// Key on the ORIGINAL file's content hash so an asset already in the store is
 	// recognized before the (possibly expensive) pre-upload processing runs.
 	orig, err := os.ReadFile(full)
@@ -143,6 +160,28 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 		return cached.(string), nil
 	}
 
+	// Coalesce a concurrent wave referencing the SAME source bytes into one
+	// peek/process/upload (the parallel upload step can hand one asset to many
+	// item goroutines before the memo above is populated). The leader's result —
+	// success or error — is shared with the wave: a shared asset that fails to
+	// upload correctly fails every feed referencing it (none can publish content
+	// pointing at a missing asset; each self-heals next fetch), and singleflight
+	// re-runs the function for the next wave, so a transient failure isn't cached.
+	key, err, _ := a.flight.Do(string(sum[:]), func() (any, error) {
+		return a.resolveAndUpload(ctx, full, localname, orig, sum)
+	})
+	if err != nil {
+		return "", err
+	}
+	return key.(string), nil
+}
+
+// resolveAndUpload is the single-flighted body of UploadCacheRef: it identifies
+// the asset (asset-peek), checks the store for the content-hash key, and — on a
+// miss — runs asset-process and uploads, memoizing the resolved key. full is the
+// validated cache-file path, orig its bytes, sum their hash. Concurrent
+// UploadCacheRef calls for the same sum share one invocation (see flight).
+func (a *assetFetcher) resolveAndUpload(ctx context.Context, full, localname string, orig []byte, sum [32]byte) (string, error) {
 	// asset-peek (if configured) identifies the asset up front — before the dedup
 	// check — so the key reflects the post-process format while dedup still keys
 	// on the source bytes. It sets the stored extension (a transcoded asset then
@@ -171,9 +210,11 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 		return "", fmt.Errorf("check asset %q: %w", key, err)
 	} else if rc != nil {
 		rc.Close()
+		slog.Debug("asset already stored, skipping process+upload", "asset", localname, "key", key)
 		a.seen.Store(sum, key)
 		return key, nil
 	}
+	slog.Debug("asset store miss, processing+uploading", "asset", localname, "key", key)
 
 	// First time we've seen these bytes: run the configured asset-process command
 	// (any processing — e.g. media transcoding) on the file just before upload,
@@ -194,9 +235,6 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 				slog.Warn("asset-process extension differs from asset-peek; keeping the peek key", "asset", localname, "peek", storedExt, "process", pe)
 			}
 		}
-	}
-	if a.maxBytes > 0 && int64(len(payload)) > a.maxBytes {
-		return "", fmt.Errorf("asset %q exceeds %d bytes (size %d)", localname, a.maxBytes, len(payload))
 	}
 
 	if err := a.be.AtomicPut(ctx, key, bytes.NewReader(payload), meta); err != nil {
@@ -274,9 +312,10 @@ type peekResult struct {
 // stderr passes through for diagnostics. Fail-soft: it returns ok=false — the
 // caller uploads the original unchanged — when the command errors, writes no
 // output, or (file mode) prints invalid metadata, so a processing hiccup or an
-// unhandled file type never wedges a feed. Runs through mod.RunCommand so it
-// shares the external-command bounds (a SubprocessTimeout deadline, WaitDelay,
-// and a capped stdout): a hung transcoder can't wedge the worker and runaway
+// unhandled file type never wedges a feed. Runs through mod.RunCommandTimeout
+// under procTimeout (--asset-process-timeout, its own much longer bound since
+// transcoding can outlast a feed/ingest command), keeping the WaitDelay and
+// capped-stdout hardening: a hung transcoder can't wedge the worker and runaway
 // output can't OOM it.
 func (a *assetFetcher) runProcess(ctx context.Context, full, localname string) ([]byte, assetMeta, bool) {
 	hasOutput := false
@@ -303,7 +342,11 @@ func (a *assetFetcher) runProcess(ctx context.Context, full, localname string) (
 	}
 
 	argv := buildAssetArgv(a.proc, full, outPath)
-	out, err := mod.RunCommand(ctx, argv[0], argv[1:]...)
+	timeout := a.procTimeout
+	if timeout <= 0 {
+		timeout = mod.SubprocessTimeout()
+	}
+	out, err := mod.RunCommandTimeout(ctx, timeout, argv[0], argv[1:]...)
 	if err != nil {
 		slog.Warn("asset-process command failed; uploading original", "asset", localname, "cmd", a.proc[0], "err", err)
 		return nil, assetMeta{}, false
@@ -332,8 +375,8 @@ func (a *assetFetcher) runProcess(ctx context.Context, full, localname string) (
 }
 
 // readProcOutput reads the {output}-mode result file, bounding the read by the
-// asset size cap so a runaway output can't OOM the worker (the cap is re-checked
-// on the payload upstream). An empty, oversize, or unreadable file fails soft.
+// asset size cap so a runaway output can't OOM the worker. An empty, oversize,
+// or unreadable file fails soft.
 func (a *assetFetcher) readProcOutput(outPath, localname string) ([]byte, bool) {
 	fi, err := os.Stat(outPath)
 	if err != nil {
