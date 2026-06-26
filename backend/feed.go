@@ -431,8 +431,11 @@ func (run *fetchRun) uploadAssets(ctx context.Context, items []*Item) error {
 // UploadCacheRef. errNotAsset references (bare #fragments, paths escaping the
 // cache dir) are declined and left untouched; any other upload failure is
 // returned (failing the feed).
-func (run *fetchRun) rewriteItemAssets(ctx context.Context, i *Item) error {
-	content, err := mod.RewriteAttrs(i.Content, func(local string) (string, bool, error) {
+func (run *fetchRun) rewriteItemAssets(ctx context.Context, i *Item) (err error) {
+	// On a hard upload error RewriteAttrs's returned content is unused: the error
+	// fails the feed (uploadAssets → fetchURL returns no items), so the item — and
+	// this i.Content write — is discarded and never observed.
+	i.Content, err = mod.RewriteAttrs(i.Content, func(local string) (string, bool, error) {
 		key, err := run.assets.UploadCacheRef(ctx, run.cacheDir, local)
 		switch {
 		case err == nil:
@@ -443,11 +446,7 @@ func (run *fetchRun) rewriteItemAssets(ctx context.Context, i *Item) error {
 			return "", false, fmt.Errorf("self-host asset %q: %w", local, err)
 		}
 	})
-	if err != nil {
-		return err
-	}
-	i.Content = content
-	return nil
+	return err
 }
 
 func uint32Set(s []uint32) map[uint32]struct{} {

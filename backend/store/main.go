@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/url"
 	"os"
 	"reflect"
@@ -232,6 +233,25 @@ var tmpWriteCounter atomic.Uint64
 // (temp-then-rename), unique per call even for concurrent writers of the same key.
 func uniqueTempName(file string) string {
 	return fmt.Sprintf("%s.tmp.%d.%d", file, os.Getpid(), tmpWriteCounter.Add(1))
+}
+
+// rmErr maps a remove error to the store's missing-key Rm contract, shared by
+// the Local and SFTP backends (whose handling is otherwise identical). A nil
+// error or a missing key is success: Rm is contractually silent on missing
+// keys, and the GC sweeps (gcSweep) deliberately re-delete a trailing window of
+// already-gone names to self-heal crash-leaked packs — so a missing key here is
+// expected, not warn-worthy. Debug keeps it inspectable; any other error wraps.
+// S3.Rm has no missing-key branch (a delete of a missing key is already
+// success) and does not use this.
+func rmErr(err error, file string) error {
+	if err == nil {
+		return nil
+	}
+	if os.IsNotExist(err) {
+		slog.Debug("db not found", "key", file)
+		return nil
+	}
+	return fmt.Errorf("removing %s: %w", file, err)
 }
 
 func Open(ctx context.Context, outputPath string) (Backend, error) {

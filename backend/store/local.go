@@ -134,19 +134,7 @@ func (d *Local) AtomicPut(_ context.Context, key string, r io.Reader, _ ObjectMe
 
 func (d *Local) Rm(_ context.Context, key string) error {
 	file := d.localPath("delete", key)
-
-	if err := os.Remove(file); err != nil {
-		if os.IsNotExist(err) {
-			// Rm is contractually silent on missing keys, and the GC sweeps
-			// (gcSweep) deliberately re-delete a trailing window of already-gone
-			// names to self-heal crash-leaked packs — so a missing key here is
-			// expected, not warn-worthy. Debug keeps it inspectable.
-			slog.Debug("db not found", "key", file)
-		} else {
-			return fmt.Errorf("removing %s: %w", file, err)
-		}
-	}
-	return nil
+	return rmErr(os.Remove(file), file)
 }
 
 func (d *Local) Close() error {
