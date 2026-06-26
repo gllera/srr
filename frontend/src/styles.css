@@ -541,8 +541,8 @@ body.srr-view-list .srr-toolbar {
 
 /* Config filter list — the feed / tag / [ALL] / ★Saved picker inside the config
    surface. Reuses the row-content styles the retired toolbar dropdown used (rows,
-   tag groups, source chips, error dots, unread badges); it's a static in-flow
-   panel, not a floating menu, so it carries no absolute positioning. */
+   tag groups, source chips, health-tinted labels, unread badges); it's a static
+   in-flow panel, not a floating menu, so it carries no absolute positioning. */
 /* The feed / tag picker sits between the quick actions and the freshness footer;
    a top rule + spacing set it off as its own navigation section under the actions
    above (the status footer below carries its own top rule). */
@@ -584,23 +584,6 @@ body.srr-view-list .srr-toolbar {
       }
       &.srr-active:hover {
          background: color-mix(in srgb, var(--accent) 22%, transparent);
-      }
-   }
-   & .srr-err-dot {
-      display: inline-block;
-      flex-shrink: 0;
-      width: 0.4rem;
-      height: 0.4rem;
-      border-radius: 50%;
-      background: var(--accent);
-      margin-right: 0.35rem;
-      vertical-align: middle;
-      /* Graded health: warn = amber, crit = accent red (default). */
-      &.srr-stale-warn {
-         background: #c98000;
-      }
-      &.srr-stale-crit {
-         background: var(--accent);
       }
    }
    /* Source-color chip on feed rows — the same per-feed color (data-src →
@@ -739,6 +722,21 @@ body.srr-view-list .srr-toolbar {
    &.srr-info-crit:hover {
       color: var(--accent);
    }
+}
+
+/* Feed / tag health, replacing the old leading error dot: an unhealthy feed (or a
+   tag group containing one) tints its LABEL by grade — warn amber, crit accent —
+   via data-grade on the row. Color only, so every label keeps the same left edge
+   (the dot used to push flagged titles rightward and misalign the list); the
+   right-edge ⓘ stays tinted too. The active selection wins (rule placed last). */
+.srr-config-filter a[data-grade="warn"] .srr-row-title {
+   color: #c98000;
+}
+.srr-config-filter a[data-grade="crit"] .srr-row-title {
+   color: var(--accent);
+}
+.srr-config-filter a.srr-active .srr-row-title {
+   color: var(--accent);
 }
 
 /* Title search bar — pinned atop the list while a "q:<query>" filter is active

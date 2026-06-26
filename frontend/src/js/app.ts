@@ -665,8 +665,14 @@ async function init() {
          void enterSearch()
       },
       onSelect: (token) => {
-         config.close()
-         void selectFilter(token)
+         // A filter pick opens the article (reader) surface at that filter's resume
+         // position — switchFilter is the reader's own "go to this filter" op (the
+         // same primitive the two-finger / arrow filter-cycle uses), so the picked
+         // feed/tag resumes where you left off (its first/newest if never read),
+         // not the list overview. guard()'s render() swaps to the reader (closing
+         // config) once the article resolves; an empty feed degrades to the
+         // "(no matching articles)" placeholder.
+         void guard(() => nav.switchFilter(token))
       },
       onUnreadToggle: () => {
          toggleUnseenOnly()

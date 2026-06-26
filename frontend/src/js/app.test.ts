@@ -342,10 +342,9 @@ describe("error popup — focus trap + close", () => {
    })
 })
 
-// FE-S7 follow-up: the list-vs-reader routing in the feed-menu onSelect callback
-// moved from dropdown.ts into app.ts. These tests pin that decision: selecting a
-// filter from the feed menu must call selectFilter (list surface) or
-// guard(switchFilter) (reader surface), never the wrong one.
+// The list-vs-reader routing in the config picker's onSelect callback lives in
+// app.ts. These tests pin that decision: picking a filter opens the reader at that
+// filter (guard(switchFilter)), NOT the list (selectFilter / applyFilter).
 describe("list → reader — open-article button", () => {
    it("enters the reader at the current article (the tap counterpart of Escape)", async () => {
       await boot() // list surface
@@ -424,16 +423,17 @@ describe("config surface — open + filter / settings routing", () => {
       expect(document.body.classList.contains("srr-view-config")).toBe(false)
    })
 
-   it("config.onSelect closes config and re-filters the list (applyFilter)", async () => {
-      await boot()
+   it("config.onSelect opens the reader at the picked filter (switchFilter), not the list", async () => {
+      await boot() // list surface
+      nav.switchFilter.mockClear()
       nav.applyFilter.mockClear()
-      config.close.mockClear()
-      await configHooks()!.onSelect("42")
+      configHooks()!.onSelect("42")
       await flush()
-      expect(config.close).toHaveBeenCalled()
-      expect(nav.applyFilter).toHaveBeenCalledWith(["42"])
-      // selectFilter is the only filter path now — the reader switchFilter menu is gone.
-      expect(nav.switchFilter).not.toHaveBeenCalled()
+      expect(nav.switchFilter).toHaveBeenCalledWith("42")
+      // Reader path only — it must NOT take the list filter path (applyFilter/goToList).
+      expect(nav.applyFilter).not.toHaveBeenCalled()
+      expect(document.body.classList.contains("srr-view-list")).toBe(false)
+      expect(document.querySelector(".srr-reader")!.hasAttribute("hidden")).toBe(false)
    })
 
    it("config.onUnreadToggle flips unread-only and rebuilds the list", async () => {

@@ -16,8 +16,8 @@ export type ConfigHooks = {
    // Leave config for the list with the search bar open (the "Search articles…"
    // row). The row is disabled in render() while nav.searchAvailable() is false.
    onSearch: () => void
-   // Pick a filter (feed id / tag / "" for [ALL] / ~saved). The caller closes
-   // config and re-filters the list.
+   // Pick a filter (feed id / tag / "" for [ALL] / ~saved). The caller switches to
+   // that filter and opens the article (reader) surface at its resume position.
    onSelect: (token: string) => void
    // Flip the global unread-only mode and rebuild the list.
    onUnreadToggle: () => void
@@ -167,7 +167,7 @@ function infoBtn(label: string, onOpen: () => void): HTMLSpanElement {
    return s
 }
 
-// Feed-health grade for the row error dot (ported from dropdown.ts). "" healthy,
+// Feed-health grade for the row's health tint (ported from dropdown.ts). "" healthy,
 // "warn" amber, "crit" red. Degrades gracefully when the new vitals are absent.
 const STALE_WARN_SEC = 3 * 86400
 const STALE_CRIT_SEC = 14 * 86400
@@ -183,13 +183,6 @@ function feedGrade(ch: IFeed): "" | "warn" | "crit" {
       if (ageSec >= STALE_WARN_SEC) return "warn"
    }
    return ""
-}
-
-function errDot(grade: "warn" | "crit"): HTMLSpanElement {
-   const s = document.createElement("span")
-   s.className = `srr-err-dot srr-stale-${grade}`
-   s.setAttribute("aria-hidden", "true")
-   return s
 }
 
 function srcChip(feedId: number): HTMLSpanElement {
@@ -209,7 +202,10 @@ function feedLink(ch: IFeed, className: string): HTMLAnchorElement {
          a.title = ferr
          a.setAttribute("aria-label", `${ch.title} — feed error: ${ferr}`)
       }
-      a.prepend(errDot(grade))
+      // Health is a label tint (data-grade → CSS colors the title), not a leading
+      // dot: a dot only flagged rows would carry shifted their title rightward and
+      // misaligned the list. Color only, so every label keeps the same left edge.
+      a.dataset.grade = grade
    }
    a.prepend(srcChip(ch.id))
    const info = infoBtn(`Details for ${ch.title}`, () => openFeedInfo(ch))
@@ -239,7 +235,11 @@ function activeTag(): string {
 let fillToken: object | null = null
 
 function renderFilterList(): void {
-   const { tagged, sortedTags, untagged } = data.groupFeedsByTag()
+   // When read items are shown (unread-only off) the picker also lists feeds with
+   // no articles yet (never-fetched / empty), so they can be inspected or picked;
+   // unread-only mode lists only feeds that have articles (and fillUnread further
+   // hides the fully-read ones below).
+   const { tagged, sortedTags, untagged } = data.groupFeedsByTag(!nav.isUnreadOnly())
    const current = nav.getCurrentFilterKey()
    const currentTag = activeTag()
    const cls = (base: string, v: string) => (v === current ? `${base} srr-active`.trim() : base)
@@ -268,7 +268,7 @@ function renderFilterList(): void {
          (g, ch) => (g === "crit" || feedGrade(ch) === "crit" ? "crit" : feedGrade(ch) || g),
          "",
       )
-      if (worst) header.prepend(errDot(worst))
+      if (worst) header.dataset.grade = worst
       headerRows.push([header, group])
       const toggle = document.createElement("span")
       toggle.className = "srr-tag-toggle"
