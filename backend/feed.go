@@ -109,8 +109,7 @@ type fetchRun struct {
 	// assetSem is the run-global asset-processing pool (SRR_ASSET_WORKERS): every
 	// feed's uploadAssets acquires a slot per marker-bearing item, so the total
 	// number of concurrent peek/transcode/upload jobs across ALL feeds this run is
-	// capped at cap(assetSem). A nil / zero-capacity channel (unit tests) makes
-	// uploadAssets run serially — identical to the pre-parallel behaviour.
+	// capped at cap(assetSem).
 	assetSem chan struct{}
 }
 
@@ -372,30 +371,22 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 	return items, nil
 }
 
-// uploadAssets runs the end-of-pipeline self-hosting step on each item's
-// content: it scans the item's self-hostable attributes (img/video/audio src,
-// video poster, a href — see mod.RewriteAttrs) for "#"-upload markers naming a
-// file the fetcher left in run.cacheDir (e.g. "#/photo.jpg") and rewrites each
-// to its final assets/ store key. A "#..." naming no such file is an ordinary
-// in-page fragment, left as-is (declined via errNotAsset).
-//
-// A failed upload (store error, or an UploadCacheRef guard tripping on
-// oversize/traversal) hard-fails the whole feed by returning the error: the
-// caller leaves feed state (watermark, dedup, etag) untouched, so a transient
-// store failure self-heals next fetch while a permanently-rejected asset wedges
-// the feed until fixed.
-//
-// Marker-bearing items are processed concurrently, each goroutine acquiring a
-// slot from the run-global pool (run.assetSem) so concurrent peek/transcode/
-// upload jobs across ALL feeds stay capped at cap(assetSem). The per-feed
-// errgroup returns the first hard error and cancels its siblings. Marker-less
-// items are skipped without spawning a goroutine (the common case: #feed feeds
-// emit no markers). A nil/zero-capacity assetSem (unit-test fetchRun literals)
-// falls back to a local cap-1 pool — i.e. serial.
+// uploadAssets is the end-of-pipeline self-hosting step: it rewrites each item's
+// "#"-upload markers to their final assets/ store keys (the per-item work lives
+// in rewriteItemAssets). Marker-bearing items are processed concurrently, each
+// goroutine acquiring a slot from the run-global pool (run.assetSem) so concurrent
+// peek/transcode/upload jobs across ALL feeds stay capped at cap(assetSem);
+// marker-less items are skipped without spawning a goroutine (the common case:
+// #feed feeds emit no markers). The per-feed errgroup returns the first hard
+// upload error and cancels its siblings, failing the whole feed — the caller
+// leaves feed state (watermark, dedup, etag) untouched, so a transient store
+// failure self-heals next fetch while a permanently-rejected asset wedges the
+// feed until fixed.
 func (run *fetchRun) uploadAssets(ctx context.Context, items []*Item) error {
-	// Production always sizes assetSem from SRR_ASSET_WORKERS (>= 1); a nil/zero
-	// channel only appears in unit-test fetchRun literals, where a cap-1 (serial)
-	// pool keeps a single code path covering both.
+	// Guard a degenerate assetSem (nil or unbuffered, both cap 0): the parallel
+	// acquire below would deadlock on it. Production always sizes it from
+	// SRR_ASSET_WORKERS (>= 1); a cap-1 pool keeps one code path and runs any such
+	// case serially.
 	sem := run.assetSem
 	if cap(sem) == 0 {
 		sem = make(chan struct{}, 1)
