@@ -137,7 +137,11 @@ func (d *Local) Rm(_ context.Context, key string) error {
 
 	if err := os.Remove(file); err != nil {
 		if os.IsNotExist(err) {
-			slog.Warn("db not found", "key", file)
+			// Rm is contractually silent on missing keys, and the GC sweeps
+			// (gcSweep) deliberately re-delete a trailing window of already-gone
+			// names to self-heal crash-leaked packs — so a missing key here is
+			// expected, not warn-worthy. Debug keeps it inspectable.
+			slog.Debug("db not found", "key", file)
 		} else {
 			return fmt.Errorf("removing %s: %w", file, err)
 		}
