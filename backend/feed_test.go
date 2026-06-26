@@ -943,6 +943,131 @@ func (g *gateBackend) AtomicPut(ctx context.Context, key string, r io.Reader, me
 	return g.Backend.AtomicPut(ctx, key, r, meta)
 }
 
+// ctxGateBackend blocks AtomicPut until released OR the passed ctx is cancelled,
+// so a test can prove WHICH context the singleflight body runs under: cancelling
+// the body's ctx aborts the store, cancelling an unrelated caller's ctx does not.
+// (Only S3-class stores thread ctx into AtomicPut; this models that.)
+type ctxGateBackend struct {
+	store.Backend
+	arrived chan struct{} // buffered; one send per AtomicPut entry
+	release chan struct{} // buffered; one receive unblocks the store
+	stored  chan struct{} // signalled after a real (non-aborted) AtomicPut
+}
+
+func (g *ctxGateBackend) AtomicPut(ctx context.Context, key string, r io.Reader, meta store.ObjectMeta) error {
+	g.arrived <- struct{}{}
+	select {
+	case <-g.release:
+		err := g.Backend.AtomicPut(ctx, key, r, meta)
+		if err == nil {
+			g.stored <- struct{}{}
+		}
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// A shared asset's singleflight body runs under the run ctx (a.baseCtx), NOT the
+// leader feed's caller ctx: cancelling the LEADER caller must not fail a FOLLOWER
+// feed coalescing on the same bytes. Regression for the cross-feed cancellation
+// bug — pre-fix the body ran under the leader's per-feed ctx and broadcast its
+// context.Canceled to every waiter.
+func TestUploadCacheRefLeaderCancelDoesNotPoisonFollower(t *testing.T) {
+	gate := &ctxGateBackend{
+		Backend: tempStore(t),
+		arrived: make(chan struct{}, 4),
+		release: make(chan struct{}, 1),
+		stored:  make(chan struct{}, 1),
+	}
+	af := testAssetFetcher(gate, 1<<20, "", 4) // baseCtx defaults to Background (the run ctx)
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "shared.jpg", jpegBytes)
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	leaderDone := make(chan struct{})
+	go func() {
+		_, _ = af.UploadCacheRef(leaderCtx, cacheDir, "shared.jpg") // leader; may bail on cancel
+		close(leaderDone)
+	}()
+	<-gate.arrived // leader is in-flight, blocked at AtomicPut(baseCtx)
+
+	followerRes := make(chan error, 1)
+	go func() {
+		_, err := af.UploadCacheRef(context.Background(), cacheDir, "shared.jpg") // follower, healthy ctx
+		followerRes <- err
+	}()
+
+	cancelLeader()             // the leader feed cancels mid-flight
+	gate.release <- struct{}{} // the body (under baseCtx) proceeds and stores once
+	select {
+	case <-gate.stored:
+	case <-time.After(2 * time.Second):
+		t.Fatal("body did not store under the run ctx — leader cancel aborted the shared upload")
+	}
+
+	if err := <-followerRes; err != nil {
+		t.Fatalf("follower feed poisoned by the leader's cancel: %v", err)
+	}
+	<-leaderDone
+	select { // coalesced: no second AtomicPut arrival
+	case <-gate.arrived:
+		t.Error("asset uploaded more than once (singleflight did not coalesce)")
+	default:
+	}
+}
+
+// A follower coalescing on an in-flight shared upload honours its OWN ctx: when
+// its feed cancels it returns promptly (DoChan caller-select) without waiting on
+// the leader — and never held a worker slot. Covers the slot-pinning fix.
+func TestUploadCacheRefFollowerBailsOnOwnCtx(t *testing.T) {
+	gate := &gateBackend{
+		Backend: tempStore(t),
+		arrived: make(chan struct{}, 4),
+		release: make(chan struct{}),
+	}
+	af := testAssetFetcher(gate, 1<<20, "", 4)
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "shared.jpg", jpegBytes)
+
+	leaderDone := make(chan struct{})
+	go func() {
+		if _, err := af.UploadCacheRef(context.Background(), cacheDir, "shared.jpg"); err != nil {
+			t.Errorf("leader failed: %v", err)
+		}
+		close(leaderDone)
+	}()
+	<-gate.arrived // leader blocked at the gate
+
+	followerCtx, cancelFollower := context.WithCancel(context.Background())
+	followerRes := make(chan error, 1)
+	go func() {
+		_, err := af.UploadCacheRef(followerCtx, cacheDir, "shared.jpg")
+		followerRes <- err
+	}()
+	cancelFollower() // the follower's feed cancels; it must not wait for the leader
+	select {
+	case err := <-followerRes:
+		if err != context.Canceled {
+			t.Fatalf("follower err = %v, want context.Canceled (bailed on own ctx)", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("follower blocked on the leader instead of honouring its own ctx")
+	}
+	gate.release <- struct{}{} // let the leader finish
+	<-leaderDone
+}
+
+// testAssetFetcher builds an assetFetcher wired the way FetchCmd.fetch does: a
+// run/shutdown baseCtx and a worker pool of the given size (cap >= 1), which the
+// singleflight leader job holds. Tests that drive uploadAssets construct the
+// fetcher through this so the pool/ctx live where production puts them.
+func testAssetFetcher(be store.Backend, maxKB int, procCmd string, workers int) *assetFetcher {
+	a := newAssetFetcher(be, maxKB, procCmd)
+	a.sem = make(chan struct{}, max(1, workers))
+	return a
+}
+
 // assetItems builds n items each referencing a distinct cache file (distinct
 // bytes ⇒ distinct source hash ⇒ no seen/existence dedup), plus the cache dir.
 func assetItems(t *testing.T, n int) (string, []*Item) {
@@ -966,9 +1091,8 @@ func TestUploadAssetsConcurrencyBound(t *testing.T) {
 	}
 	cacheDir, items := assetItems(t, n)
 	run := &fetchRun{
-		assets:   newAssetFetcher(gate, 1<<20, ""),
+		assets:   testAssetFetcher(gate, 1<<20, "", limit),
 		cacheDir: cacheDir,
-		assetSem: make(chan struct{}, limit),
 	}
 
 	done := make(chan error, 1)
@@ -1008,9 +1132,8 @@ func TestUploadAssetsRewritesAndSkipsMarkerless(t *testing.T) {
 	plain := &Item{Content: `<p>no markers, cost #1</p>`}
 	items := append(marked, plain)
 	run := &fetchRun{
-		assets:   newAssetFetcher(be, 1<<20, ""),
+		assets:   testAssetFetcher(be, 1<<20, "", 4),
 		cacheDir: cacheDir,
-		assetSem: make(chan struct{}, 4),
 	}
 	if err := run.uploadAssets(context.Background(), items); err != nil {
 		t.Fatalf("uploadAssets: %v", err)
@@ -1029,9 +1152,8 @@ func TestUploadAssetsFailsFeedOnUploadError(t *testing.T) {
 	be := &failMidWriteBackend{Backend: tempStore(t), writeOK: 2}
 	cacheDir, items := assetItems(t, 2)
 	run := &fetchRun{
-		assets:   newAssetFetcher(be, 1<<20, ""),
+		assets:   testAssetFetcher(be, 1<<20, "", 4),
 		cacheDir: cacheDir,
-		assetSem: make(chan struct{}, 4),
 	}
 	if err := run.uploadAssets(context.Background(), items); err == nil {
 		t.Fatal("expected uploadAssets to fail the feed, got nil")
@@ -1076,9 +1198,8 @@ func TestFetchDoesNotReconvertAlreadySeenArticleAsset(t *testing.T) {
 		run := &fetchRun{
 			engine:    ingest.New(),
 			fetchedAt: fetchedAt,
-			assets:    newAssetFetcher(be, 1<<20, proc), // fresh fetcher per run
+			assets:    testAssetFetcher(be, 1<<20, proc, 4), // fresh fetcher per run
 			cacheDir:  cacheDir,
-			assetSem:  make(chan struct{}, 4),
 		}
 		items, err := ch.fetchURL(context.Background(), run, buf, mod.New(), nil, "#asset-stub")
 		if err != nil {
@@ -1120,9 +1241,8 @@ func TestUploadAssetsProcessesSharedAssetOnce(t *testing.T) {
 	}
 
 	run := &fetchRun{
-		assets:   newAssetFetcher(tempStore(t), 1<<20, proc),
+		assets:   testAssetFetcher(tempStore(t), 1<<20, proc, n), // all items run concurrently
 		cacheDir: cacheDir,
-		assetSem: make(chan struct{}, n), // all items run concurrently
 	}
 	if err := run.uploadAssets(context.Background(), items); err != nil {
 		t.Fatalf("uploadAssets: %v", err)
