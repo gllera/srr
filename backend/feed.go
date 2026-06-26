@@ -111,21 +111,14 @@ type fetchRun struct {
 	// recipes is the full db.gz recipes map, read-only during a fetch run;
 	// each feed resolves its recipe (and the default) from it.
 	recipes map[string]Recipe
-	// assetSem is the run-global asset-processing pool (SRR_ASSET_WORKERS): every
-	// feed's uploadAssets acquires a slot per marker-bearing item, so the total
-	// number of concurrent peek/transcode/upload jobs across ALL feeds this run is
-	// capped at cap(assetSem). newFetchRun always sizes it (cap >= 1), so
-	// uploadAssets acquires on it directly without a degenerate-pool guard.
-	assetSem chan struct{}
 }
 
 // newFetchRun assembles the run-scoped deps shared by every feed in one fetch
-// (built once in FetchCmd.fetch, concurrent-safe). It owns the asset-pipeline
-// invariants its consumers rely on: maxAssetSize reuses the uploader's
-// already-converted byte cap (no extra KB→bytes step here), and assetSem is
-// always a usable pool (cap >= 1, flooring a stray assetWorkers < 1) so
-// uploadAssets needs no degenerate-semaphore guard.
-func newFetchRun(client *http.Client, engine *ingest.Fetcher, assets *assetFetcher, cacheDir string, fetchedAt int64, recipes map[string]Recipe, assetWorkers int) *fetchRun {
+// (built once in FetchCmd.fetch, concurrent-safe). maxAssetSize reuses the
+// uploader's already-converted byte cap (no extra KB→bytes step here). The
+// asset worker pool lives on the shared assetFetcher (a.sem, sized in
+// FetchCmd.fetch), held by the singleflight leader job only.
+func newFetchRun(client *http.Client, engine *ingest.Fetcher, assets *assetFetcher, cacheDir string, fetchedAt int64, recipes map[string]Recipe) *fetchRun {
 	return &fetchRun{
 		client:       client,
 		engine:       engine,
@@ -134,7 +127,6 @@ func newFetchRun(client *http.Client, engine *ingest.Fetcher, assets *assetFetch
 		fetchedAt:    fetchedAt,
 		recipes:      recipes,
 		maxAssetSize: int(assets.maxBytes),
-		assetSem:     make(chan struct{}, max(1, assetWorkers)),
 	}
 }
 
@@ -399,12 +391,15 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 
 // uploadAssets is the end-of-pipeline self-hosting step: it rewrites each item's
 // "#"-upload markers to their final assets/ store keys (the per-item work lives
-// in rewriteItemAssets). Marker-bearing items are processed concurrently, each
-// goroutine acquiring a slot from the run-global pool (run.assetSem) so concurrent
-// peek/transcode/upload jobs across ALL feeds stay capped at cap(assetSem);
+// in rewriteItemAssets). Marker-bearing items are processed concurrently;
 // marker-less items are skipped without spawning a goroutine (the common case:
-// #feed feeds emit no markers). The per-feed errgroup returns the first hard
-// upload error and cancels its siblings, failing the whole feed — the caller
+// #feed feeds emit no markers). The run-global asset worker pool lives on the
+// shared assetFetcher and is held by the singleflight LEADER job only (see
+// UploadCacheRef), so this fan-out is unbounded per feed but the actual
+// peek/transcode/upload concurrency across ALL feeds stays capped at cap(a.sem).
+// The per-feed errgroup returns the first hard upload error and cancels its
+// siblings via gctx — which also lets a follower coalescing on a shared asset
+// bail promptly (DoChan caller-select) — failing the whole feed; the caller
 // leaves feed state (watermark, dedup, etag) untouched, so a transient store
 // error self-heals next fetch while a persistent one wedges the feed until the
 // store recovers.
@@ -415,12 +410,6 @@ func (run *fetchRun) uploadAssets(ctx context.Context, items []*Item) error {
 			continue
 		}
 		g.Go(func() error {
-			select {
-			case run.assetSem <- struct{}{}:
-			case <-gctx.Done():
-				return gctx.Err()
-			}
-			defer func() { <-run.assetSem }()
 			return run.rewriteItemAssets(gctx, i)
 		})
 	}

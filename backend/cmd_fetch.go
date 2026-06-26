@@ -86,6 +86,13 @@ func (o *FetchCmd) fetch(ctx context.Context, client *http.Client) error {
 		assets := newAssetFetcher(db.Backend, globals.MaxAssetSize, globals.AssetProcess)
 		assets.peek = strings.Fields(globals.AssetPeek)
 		assets.procTimeout = globals.AssetProcessTimeout
+		// Run-global asset worker pool + run/shutdown ctx for the singleflight body:
+		// the slot is held by the leader job only (see assetFetcher), and the body
+		// is decoupled from any single feed's errgroup so one feed's cancellation
+		// can't poison a follower feed sharing an asset. ctx here is the fetch ctx
+		// (the errgroup parent below), so run shutdown still aborts a long transcode.
+		assets.baseCtx = ctx
+		assets.sem = make(chan struct{}, max(1, globals.AssetWorkers))
 		bufPool := sync.Pool{
 			New: func() any {
 				return make([]byte, globals.MaxFeedSize*(1<<10)+1)
@@ -117,7 +124,7 @@ func (o *FetchCmd) fetch(ctx context.Context, client *http.Client) error {
 
 		// Run-scoped deps shared across all workers (all concurrent-safe). The
 		// per-worker buf/processor are pulled from their pools inside each worker.
-		run := newFetchRun(client, engine, assets, cacheDir, db.core.FetchedAt, db.core.Recipes, globals.AssetWorkers)
+		run := newFetchRun(client, engine, assets, cacheDir, db.core.FetchedAt, db.core.Recipes)
 
 		g, gctx := errgroup.WithContext(ctx)
 		g.SetLimit(globals.Workers)

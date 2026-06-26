@@ -590,6 +590,26 @@ func TestUploadCacheRefProcessOutputOversizeFailsSoft(t *testing.T) {
 	}
 }
 
+// The stdout-mode asset-process output is generated at upload too (not
+// download-bounded), so the same fail-soft cap as the {output} path applies: an
+// over-cap stdout result uploads the original. (Regression: the cap check was
+// only restored to the {output} branch; webify writes to stdout.)
+func TestUploadCacheRefProcessStdoutOversizeFailsSoft(t *testing.T) {
+	be := tempStore(t)
+	// stdout mode (no {output} token): emit 4 KB to stdout. With a 1 KB cap the
+	// output exceeds it, so runProcess fails soft and the original is stored.
+	af := newAssetFetcher(be, 1, fakeProcess(t, `head -c 4096 /dev/zero`)) // 1 KB cap
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	if err != nil {
+		t.Fatalf("UploadCacheRef should fail soft on oversize stdout output, got: %v", err)
+	}
+	if got := string(readKey(t, be, key)); got != jpegBytes {
+		t.Errorf("stored body = %q, want original %q (oversize stdout output fails soft)", got, jpegBytes)
+	}
+}
+
 func TestUploadCacheRefMissingFile(t *testing.T) {
 	af := newAssetFetcher(tempStore(t), 1024, "")
 	if _, err := af.UploadCacheRef(context.Background(), t.TempDir(), "nope.jpg"); err == nil {

@@ -66,6 +66,19 @@ type assetFetcher struct {
 	// Keyed by source content hash (the seen key), so distinct sources never
 	// serialize against each other.
 	flight singleflight.Group
+
+	// sem is the run-global asset worker pool: only the singleflight LEADER (the
+	// goroutine that actually peeks/transcodes/uploads a unique asset) holds a
+	// slot, so followers coalescing on the same bytes never pin one. Sized by
+	// SRR_ASSET_WORKERS in cmd_fetch.go (cap >= 1).
+	sem chan struct{}
+
+	// baseCtx is the run/shutdown context the singleflight body runs under (set in
+	// cmd_fetch.go). It is deliberately decoupled from any single feed's errgroup
+	// context: the fetcher is shared across feeds, so a follower feed must not be
+	// poisoned by the leader feed's cancellation — only run shutdown aborts the
+	// shared peek/transcode/upload. (containedctx: a run-scoped helper, by design.)
+	baseCtx context.Context
 }
 
 // assetPrefix is the reserved store prefix for self-hosted media, analogous to
@@ -84,6 +97,12 @@ func newAssetFetcher(be store.Backend, maxKB int, procCmd string) *assetFetcher 
 		be:       be,
 		maxBytes: int64(maxKB) * (1 << 10),
 		proc:     strings.Fields(procCmd),
+		// Valid out of the box so any caller can run UploadCacheRef: a never-cancel
+		// base ctx and a single-slot worker pool. FetchCmd.fetch overrides both —
+		// baseCtx with the run/shutdown ctx, sem sized by SRR_ASSET_WORKERS — before
+		// workers run, so run shutdown propagates and the pool matches the flag.
+		baseCtx: context.Background(),
+		sem:     make(chan struct{}, 1),
 	}
 }
 
@@ -162,18 +181,36 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 
 	// Coalesce a concurrent wave referencing the SAME source bytes into one
 	// peek/process/upload (the parallel upload step can hand one asset to many
-	// item goroutines before the memo above is populated). The leader's result —
-	// success or error — is shared with the wave: a shared asset that fails to
-	// upload correctly fails every feed referencing it (none can publish content
-	// pointing at a missing asset; each self-heals next fetch), and singleflight
-	// re-runs the function for the next wave, so a transient failure isn't cached.
-	key, err, _ := a.flight.Do(string(sum[:]), func() (any, error) {
-		return a.resolveAndUpload(ctx, full, localname, orig, sum)
+	// item goroutines before the memo above is populated). Only the LEADER runs
+	// the body — and holds a worker slot (a.sem); followers wait on the channel
+	// WITHOUT a slot, so a heavy shared transcode can't starve distinct-asset
+	// jobs. The body runs under a.baseCtx (the run/shutdown ctx), NOT the caller's
+	// per-feed ctx, so one feed's cancellation can't poison a follower feed sharing
+	// the asset; only run shutdown aborts it. The leader's result — success or
+	// error — is shared with the wave (a shared asset that fails to upload fails
+	// every referencing feed; each self-heals next fetch), and singleflight re-runs
+	// for the next wave, so a transient failure isn't cached.
+	ch := a.flight.DoChan(string(sum[:]), func() (any, error) {
+		select {
+		case a.sem <- struct{}{}:
+		case <-a.baseCtx.Done():
+			return nil, a.baseCtx.Err()
+		}
+		defer func() { <-a.sem }()
+		return a.resolveAndUpload(a.baseCtx, full, localname, orig, sum)
 	})
-	if err != nil {
-		return "", err
+	// A follower whose own feed is cancelling bails here without waiting on the
+	// leader (and without ever taking a slot); the leader's body still completes
+	// and caches the result for the next wave.
+	select {
+	case res := <-ch:
+		if res.Err != nil {
+			return "", res.Err
+		}
+		return res.Val.(string), nil
+	case <-ctx.Done():
+		return "", ctx.Err()
 	}
-	return key.(string), nil
 }
 
 // resolveAndUpload is the single-flighted body of UploadCacheRef: it identifies
@@ -356,6 +393,14 @@ func (a *assetFetcher) runProcess(ctx context.Context, full, localname string) (
 		// stdout mode: the processed bytes are stdout; no declared metadata.
 		if len(out) == 0 {
 			slog.Warn("asset-process command produced no output; uploading original", "asset", localname, "cmd", a.proc[0])
+			return nil, assetMeta{}, false
+		}
+		// Same fail-soft size guard as the {output} path (readProcOutput): the
+		// process output is generated here and isn't download-bounded, so an
+		// over-cap result uploads the original instead. (RunCommandTimeout already
+		// bounds stdout at 64 MiB for OOM safety; this enforces --max-asset-size.)
+		if a.maxBytes > 0 && int64(len(out)) > a.maxBytes {
+			slog.Warn("asset-process output exceeds cap; uploading original", "asset", localname, "size", len(out), "cap", a.maxBytes)
 			return nil, assetMeta{}, false
 		}
 		return out, assetMeta{}, true
