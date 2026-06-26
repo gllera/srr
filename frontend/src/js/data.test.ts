@@ -28,9 +28,9 @@ vi.mock("./data", () => ({
       const hdrs = (state.db as IDB & { hdrs?: number }).hdrs ?? 0
       return nf > 0 && hdrs > 0 && hdrs < nf
    },
-   groupFeedsByTag(): { tagged: Map<string, IFeed[]>; sortedTags: string[]; untagged: IFeed[] } {
+   groupFeedsByTag(includeEmpty = false): { tagged: Map<string, IFeed[]>; sortedTags: string[]; untagged: IFeed[] } {
       const subs = Object.values(state.db.feeds ?? {})
-         .filter((sub: IFeed) => sub.total_art > 0)
+         .filter((sub: IFeed) => includeEmpty || sub.total_art > 0)
          .sort((a: IFeed, b: IFeed) => (a.title < b.title ? -1 : 1))
       const tagged = new Map<string, IFeed[]>()
       const untagged: IFeed[] = []
@@ -107,6 +107,19 @@ describe("groupFeedsByTag", () => {
       } as unknown as IDB
       const result = data.groupFeedsByTag()
       expect(result.tagged.size).toBe(0)
+      expect(result.untagged.length).toBe(1)
+   })
+
+   it("includes subs with zero articles when includeEmpty is set", () => {
+      state.db = {
+         feeds: {
+            1: { id: 1, title: "A", total_art: 0, tag: "news" },
+            2: { id: 2, title: "B", total_art: 1 },
+         },
+      } as unknown as IDB
+      const result = data.groupFeedsByTag(true)
+      expect(result.sortedTags).toEqual(["news"])
+      expect(result.tagged.get("news")!.length).toBe(1)
       expect(result.untagged.length).toBe(1)
    })
 })

@@ -357,14 +357,21 @@ export async function loadMeta(chronIdx: number): Promise<IMetaWire> {
 }
 
 type GroupResult = { tagged: Map<string, IFeed[]>; sortedTags: string[]; untagged: IFeed[] }
-let groupCache: GroupResult | null = null
+// Cached per includeEmpty flag (feeds are fixed for the session): the active-only
+// grouping (total_art > 0 — the default, used by nav's cycle rotation, which must
+// never land on a feed with nothing to read) and the include-empty grouping (the
+// config picker when read items are shown — it also surfaces never-fetched / empty
+// feeds so they can be inspected or selected).
+const groupCache: Partial<Record<"active" | "all", GroupResult>> = {}
 
-export function groupFeedsByTag(): GroupResult {
-   if (groupCache) return groupCache
+export function groupFeedsByTag(includeEmpty = false): GroupResult {
+   const key = includeEmpty ? "all" : "active"
+   const cached = groupCache[key]
+   if (cached) return cached
    const tagged = new Map<string, IFeed[]>()
    const untagged: IFeed[] = []
    const feeds = Object.values(db.feeds)
-      .filter((ch) => ch.total_art > 0)
+      .filter((ch) => includeEmpty || ch.total_art > 0)
       .sort((a, b) => (a.title < b.title ? -1 : 1))
    for (const ch of feeds) {
       if (ch.tag) {
@@ -378,8 +385,9 @@ export function groupFeedsByTag(): GroupResult {
          untagged.push(ch)
       }
    }
-   groupCache = { tagged, sortedTags: Array.from(tagged.keys()).sort(), untagged }
-   return groupCache
+   const result = { tagged, sortedTags: Array.from(tagged.keys()).sort(), untagged }
+   groupCache[key] = result
+   return result
 }
 
 // packNamesForFilter enumerates the write-once pack names needed to read a

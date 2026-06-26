@@ -169,6 +169,18 @@ describe("filter list", () => {
       expect(hooks.onSelect).toHaveBeenCalledWith("")
    })
 
+   it("lists empty feeds (includeEmpty) only when read items are shown (unread-only off)", async () => {
+      nav.isUnreadOnly.mockReturnValue(false) // read items shown → empty feeds too
+      const config = await mount()
+      config.open()
+      expect(data.groupFeedsByTag).toHaveBeenCalledWith(true)
+
+      data.groupFeedsByTag.mockClear()
+      nav.isUnreadOnly.mockReturnValue(true) // unread-only → feeds with articles only
+      config.render()
+      expect(data.groupFeedsByTag).toHaveBeenCalledWith(false)
+   })
+
    it("shows a ★ Saved row only when something is saved", async () => {
       const config = await mount()
       config.open()
@@ -218,7 +230,7 @@ describe("filter list", () => {
       expect(none.classList.contains("srr-hidden")).toBe(true) // 0 unread, hidden in unread-only
    })
 
-   it("marks a feed with a fetch error via the error dot", async () => {
+   it("marks a feed with a fetch error by tinting its label, no leading dot", async () => {
       data.groupFeedsByTag.mockReturnValue({
          tagged: new Map(),
          sortedTags: [],
@@ -227,13 +239,32 @@ describe("filter list", () => {
       const config = await mount()
       config.open()
       const row = $<HTMLAnchorElement>('.srr-config-filter a[data-value="9"]')
-      expect(row.querySelector(".srr-err-dot")).not.toBeNull()
+      // Health rides on data-grade (CSS tints the label); no leading dot that would
+      // shift the title rightward and misalign the list.
+      expect(row.dataset.grade).toBe("crit")
+      expect(row.querySelector(".srr-err-dot")).toBeNull()
       expect(row.title).toBe("boom")
       // The ⓘ details button is tinted red (crit) so it reads as the health flag.
       expect(row.querySelector(".srr-info-btn")!.classList.contains("srr-info-crit")).toBe(true)
    })
 
-   it("leaves a healthy feed's ⓘ untinted", async () => {
+   it("tints a tag header by its worst member's grade", async () => {
+      data.groupFeedsByTag.mockReturnValue({
+         tagged: new Map([
+            [
+               "news",
+               [feed({ id: 1, title: "A", tag: "news" }), feed({ id: 2, title: "B", tag: "news", ferr: "boom" })],
+            ],
+         ]),
+         sortedTags: ["news"],
+         untagged: [],
+      })
+      const config = await mount()
+      config.open()
+      expect($<HTMLAnchorElement>(".srr-config-filter .srr-tag-header").dataset.grade).toBe("crit")
+   })
+
+   it("leaves a healthy feed untinted (no data-grade, untinted ⓘ)", async () => {
       data.groupFeedsByTag.mockReturnValue({
          tagged: new Map(),
          sortedTags: [],
@@ -241,7 +272,9 @@ describe("filter list", () => {
       })
       const config = await mount()
       config.open()
-      const info = $('.srr-config-filter a[data-value="9"] .srr-info-btn')
+      const row = $<HTMLAnchorElement>('.srr-config-filter a[data-value="9"]')
+      expect(row.dataset.grade).toBeUndefined()
+      const info = row.querySelector(".srr-info-btn")!
       expect(info.classList.contains("srr-info-crit")).toBe(false)
       expect(info.classList.contains("srr-info-warn")).toBe(false)
    })
