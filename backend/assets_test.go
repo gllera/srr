@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"srrb/mod"
 	"srrb/store"
 )
 
@@ -163,6 +165,55 @@ func TestUploadCacheRefProcessFailsSoftToOriginal(t *testing.T) {
 	}
 	if got := string(readKey(t, be, key)); got != jpegBytes {
 		t.Errorf("stored body = %q, want original %q (fail-soft)", got, jpegBytes)
+	}
+}
+
+// A process command that overruns procTimeout is killed and fails soft to the
+// original bytes — proving the asset-process command IS bounded by procTimeout.
+func TestUploadCacheRefProcessTimesOutViaAssetTimeout(t *testing.T) {
+	be := tempStore(t)
+	af := newAssetFetcher(be, 1024, fakeProcess(t, "exec sleep 5"))
+	af.procTimeout = 30 * time.Millisecond // well under the 5s sleep
+
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+
+	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	if err != nil {
+		t.Fatalf("UploadCacheRef should fail soft on timeout, got error: %v", err)
+	}
+	if got := string(readKey(t, be, key)); got != jpegBytes {
+		t.Errorf("stored body = %q, want original %q (process timed out)", got, jpegBytes)
+	}
+}
+
+// The asset-process timeout is independent of the shared --cmd-timeout: with a
+// tiny cmd-timeout but a generous procTimeout, a process that runs longer than
+// cmd-timeout still completes. Under the old shared-timeout wiring this process
+// would have been killed and failed soft to the original.
+func TestUploadCacheRefProcessTimeoutIndependentOfCmdTimeout(t *testing.T) {
+	be := tempStore(t)
+	out := filepath.Join(t.TempDir(), "out.bin")
+	if err := os.WriteFile(out, []byte(encodedBytes), 0o644); err != nil {
+		t.Fatalf("write out: %v", err)
+	}
+	// Sleeps longer than the shared cmd-timeout set below, but far under its own.
+	af := newAssetFetcher(be, 1024, fakeProcess(t, "sleep 0.2\ncat '"+out+"'"))
+	af.procTimeout = 10 * time.Second
+
+	orig := mod.CmdTimeout
+	mod.CmdTimeout = 20 * time.Millisecond // shrink the SHARED bound below the sleep
+	defer func() { mod.CmdTimeout = orig }()
+
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+
+	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	if err != nil {
+		t.Fatalf("UploadCacheRef: %v", err)
+	}
+	if got := string(readKey(t, be, key)); got != encodedBytes {
+		t.Errorf("stored body = %q, want encoded %q (asset timeout, not cmd-timeout, applies)", got, encodedBytes)
 	}
 }
 
@@ -484,13 +535,40 @@ func TestUploadCacheRefRejectsSymlink(t *testing.T) {
 	}
 }
 
-func TestUploadCacheRefRejectsOversize(t *testing.T) {
+// An oversize SOURCE is no longer rejected at upload — the cap moved to download
+// (#selfhost / external ingest). The cache file is trusted and stored as-is.
+func TestUploadCacheRefStoresOversizeSourceUnchecked(t *testing.T) {
 	be := tempStore(t)
-	af := newAssetFetcher(be, 1, "") // 1 KB cap
+	af := newAssetFetcher(be, 1, "") // 1 KB cap, but no source check anymore
 	cacheDir := t.TempDir()
-	writeCacheFile(t, cacheDir, "big.jpg", strings.Repeat("x", 4096))
-	if _, err := af.UploadCacheRef(context.Background(), cacheDir, "big.jpg"); err == nil {
-		t.Fatal("expected oversize rejection, got nil")
+	big := strings.Repeat("x", 4096)
+	writeCacheFile(t, cacheDir, "big.jpg", big)
+	key, err := af.UploadCacheRef(context.Background(), cacheDir, "big.jpg")
+	if err != nil {
+		t.Fatalf("UploadCacheRef should not size-check the source, got: %v", err)
+	}
+	if got := string(readKey(t, be, key)); got != big {
+		t.Errorf("stored body len = %d, want the full %d-byte source", len(got), len(big))
+	}
+}
+
+// The asset-process OUTPUT is generated at upload (not download-bounded), so a
+// fail-soft size guard remains: an over-cap transcode output uploads the original.
+func TestUploadCacheRefProcessOutputOversizeFailsSoft(t *testing.T) {
+	be := tempStore(t)
+	// {output} mode: write a 4 KB result + valid metadata. With a 1 KB cap the
+	// output exceeds it, so readProcOutput fails soft and the original is stored.
+	body := `head -c 4096 /dev/zero > "$2"` + "\n" +
+		`printf '{"mimetype":"image/webp","extension":"webp"}'`
+	af := newAssetFetcher(be, 1, fakeProcess(t, body)+" {input} {output}") // 1 KB cap
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	if err != nil {
+		t.Fatalf("UploadCacheRef should fail soft on oversize output, got: %v", err)
+	}
+	if got := string(readKey(t, be, key)); got != jpegBytes {
+		t.Errorf("stored body = %q, want original %q (oversize output fails soft)", got, jpegBytes)
 	}
 }
 

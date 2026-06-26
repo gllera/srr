@@ -106,7 +106,7 @@ srr preview https://example.com/feed.xml -p "#readability" -p "#default"
 | `-w, --workers` | nproc | Concurrent downloads |
 | `-s, --pack-size` | 200 | Target pack size (KB) |
 | `-m, --max-feed-size` | 5000 | Max feed download size (KB) |
-| `--max-asset-size` | 25000 | Max self-hosted asset object size (KB); breach hard-fails the feed |
+| `--max-asset-size` | 25000 | Max self-hosted asset object size (KB), enforced **at download** by the self-hosting mod (`#selfhost`) and passed to ingest commands as `max_asset_size`: an over-cap asset is skipped, leaving its remote URL — not stored. The upload step no longer re-checks (only the `--asset-process` output keeps a fail-soft guard at the same size). |
 | `--asset-process` | (none) | Command run on every self-hosted asset just before upload to transcode/process its bytes (e.g. `webify -m 720`, or `conv -i {input} -o {output}`); the cache-file path is substituted for each `{input}` token (or appended when absent). With an `{output}` token the command writes its result to that file and prints a `{mimetype,extension,encoding}` JSON to stdout (setting the stored Content-Type/-Encoding); without `{output}`, processed bytes are read from stdout. Non-zero exit or empty output keeps the original; skipped when the source was already uploaded. Empty disables. |
 | `--asset-peek` | (none) | Command run on every self-hosted asset (before the dedup check) to identify it: it receives the cache-file path (`{input}` token or appended) and prints a `{mimetype,extension,supported}` JSON to stdout. The extension becomes the stored object's extension (so a transcoded asset carries its true output extension, while dedup still keys on the source bytes) and the mimetype its Content-Type; `supported:false` hosts the original bytes and skips `--asset-process`. Non-zero exit or invalid JSON falls back to the source extension. Empty disables. |
 | `--cache-dir` | $XDG_CACHE_HOME/srr | Download cache root for self-hosted external-ingest media |
@@ -216,6 +216,7 @@ The command receives a JSON **request** on `stdin` and must print a JSON **respo
 | `etag` | string | The `etag` your command returned last run (empty on first call). |
 | `last_modified` | string | The `last_modified` your command returned last run. |
 | `max_size` | int | Advisory cap (bytes) on what the command should buffer/return. |
+| `max_asset_size` | int | Size cap (bytes) for any single file you self-host via a `#`-marker. **Honor it at download**: skip an over-cap file and leave its remote URL — the caller's upload step trusts the marker and no longer re-checks size. Absent/0 = no asset cap. |
 | `asset_dir` | string | Persistent download cache for self-hosting files, shared by all feeds (see below). The command also **runs with this as its working directory**. Absent when self-hosting is off (e.g. `srr preview`). |
 
 **Response** (stdout):
@@ -242,7 +243,7 @@ The command receives a JSON **request** on `stdin` and must print a JSON **respo
 **Example exchange.** SRR writes exactly one request object to the command's stdin (one line, no trailing input):
 
 ```json
-{"url":"https://example.com/x","etag":"","last_modified":"","max_size":5119999,"asset_dir":"/home/you/.cache/srr"}
+{"url":"https://example.com/x","etag":"","last_modified":"","max_size":5119999,"max_asset_size":25600000,"asset_dir":"/home/you/.cache/srr"}
 ```
 
 The command reads it, fetches its source, and prints exactly one response object to stdout (whitespace is ignored; pretty-printed here):
@@ -303,7 +304,7 @@ def fnv1a32(s: str) -> int:
         h = ((h ^ b) * 0x01000193) & 0xFFFFFFFF
     return h
 
-req = json.load(sys.stdin)          # {"url", "etag", "last_modified", "max_size", "asset_dir"}
+req = json.load(sys.stdin)          # {"url", "etag", "last_modified", "max_size", "max_asset_size", "asset_dir"}
 cache = req.get("asset_dir")        # None when self-hosting is off; else the cwd
 
 def host(media_url: str) -> str:

@@ -39,6 +39,14 @@ const (
 	selfhostUserAgent = "Mozilla/5.0 (compatible; SRR/1.0; +media-self-host)"
 )
 
+// MaxAssetSize is the self-hosted-object size cap in bytes (--max-asset-size),
+// set by main before the fetch run. #selfhost enforces it HERE, at download: a
+// body exceeding it is left as its remote URL (fail-open), so the cap is spent
+// before the bytes hit disk and the upload step can trust the cache file without
+// re-checking. It clamps the per-pipeline maxbody (the effective download cap is
+// min(maxbody, MaxAssetSize)). Zero means unset (only maxbody applies).
+var MaxAssetSize int64
+
 func init() {
 	Register("selfhost", func() Processor {
 		// One SSRF-guarded client per Module (per fetch worker via procPool):
@@ -56,6 +64,12 @@ func init() {
 			}
 			if err := p.only("timeout", "maxbody"); err != nil {
 				return err
+			}
+			// The self-host object cap is enforced at download: clamp the download
+			// limit to it so an over-cap asset is never written to the cache (the
+			// upload step trusts whatever lands there).
+			if MaxAssetSize > 0 && MaxAssetSize < maxBody {
+				maxBody = MaxAssetSize
 			}
 
 			cacheDir := cacheDirFromContext(ctx)
@@ -152,7 +166,7 @@ func streamToCacheFile(full string, r io.Reader, maxBody int64) bool {
 	if copyErr != nil || closeErr != nil || n > maxBody {
 		os.Remove(tmpName)
 		if n > maxBody {
-			slog.Warn("selfhost: asset over maxbody; keeping remote URL", "max", maxBody)
+			slog.Warn("selfhost: asset over size cap; keeping remote URL", "max", maxBody)
 		} else {
 			// A genuine IO failure (mid-body reset, flush error): fail-open like
 			// the rest of the module, but never silently — ops needs to know why

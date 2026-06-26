@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -1035,5 +1036,117 @@ func TestUploadAssetsFailsFeedOnUploadError(t *testing.T) {
 	}
 	if err := run.uploadAssets(context.Background(), items); err == nil {
 		t.Fatal("expected uploadAssets to fail the feed, got nil")
+	}
+}
+
+// assetStubItems is the per-call result of the "asset-stub" ingest strategy; a
+// test sets it before driving fetchURL. Registered once below.
+var assetStubItems []*mod.RawItem
+
+func init() {
+	ingest.Register("asset-stub", func(_ context.Context, _ *http.Client, _ []byte, _ ingest.Request) (ingest.Result, error) {
+		return ingest.Result{Items: assetStubItems}, nil
+	})
+}
+
+// TestFetchDoesNotReconvertAlreadySeenArticleAsset reproduces the user's report
+// — "article assets are processed even when already seen / converted every fetch."
+// It drives two full fetchURL cycles over the SAME feed (dedup state carried on
+// ch), each with a fresh assetFetcher against ONE persistent store, exactly as
+// production does (a new fetcher per run, one durable backend). The marker-bearing
+// item is new in cycle 1 (asset converted once) and an already-seen duplicate in
+// cycle 2 (deduped before the pipeline, so never re-converted). asset-process must
+// run exactly once across both fetches.
+func TestFetchDoesNotReconvertAlreadySeenArticleAsset(t *testing.T) {
+	countDir := t.TempDir()
+	proc := fakeProcess(t, "mktemp '"+countDir+"/run.XXXXXX' >/dev/null\ncat \"$1\"")
+
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "shared.jpg", jpegBytes)
+	pub := time.Unix(1700000000, 0)
+	assetStubItems = []*mod.RawItem{
+		{GUID: 42, Title: "msg", Link: "https://tg/42", Published: &pub,
+			Content: `<p><img src="#/shared.jpg"></p>`},
+	}
+
+	be := tempStore(t) // one persistent store across both cycles
+	ch := &Feed{Title: "tg", URL: "irrelevant://value"}
+	buf := make([]byte, 1<<20)
+	const fetchedAt int64 = 4_102_444_800
+
+	fetchCycle := func() []*Item {
+		run := &fetchRun{
+			engine:    ingest.New(),
+			fetchedAt: fetchedAt,
+			assets:    newAssetFetcher(be, 1<<20, proc), // fresh fetcher per run
+			cacheDir:  cacheDir,
+			assetSem:  make(chan struct{}, 4),
+		}
+		items, err := ch.fetchURL(context.Background(), run, buf, mod.New(), nil, "#asset-stub")
+		if err != nil {
+			t.Fatalf("fetch: %v", err)
+		}
+		return items
+	}
+
+	first := fetchCycle()
+	if len(first) != 1 {
+		t.Fatalf("cycle 1: got %d new items, want 1", len(first))
+	}
+	second := fetchCycle()
+	if len(second) != 0 {
+		t.Fatalf("cycle 2: got %d new items, want 0 (article already seen)", len(second))
+	}
+
+	runs, err := os.ReadDir(countDir)
+	if err != nil {
+		t.Fatalf("read count dir: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Errorf("asset-process ran %d times across two fetches of one article, want 1", len(runs))
+	}
+}
+
+// TestUploadAssetsProcessesSharedAssetOnce pins the within-run dedup guarantee
+// under the parallel upload path: when several of a feed's articles reference
+// the SAME asset (identical bytes ⇒ identical source hash), the asset-process
+// command must run exactly once across the whole fetch, not once per article.
+// The serial path always hit the memo/store-existence check; the parallel path
+// must not regress that into N concurrent transcodes of one already-seen asset.
+func TestUploadAssetsProcessesSharedAssetOnce(t *testing.T) {
+	const n = 6
+	// Each asset-process invocation drops a uniquely-named file into countDir;
+	// the count of files is the number of times the asset was processed.
+	countDir := t.TempDir()
+	proc := fakeProcess(t, "mktemp '"+countDir+"/run.XXXXXX' >/dev/null\ncat \"$1\"")
+
+	// One cache file, n items all referencing it ⇒ one source hash, n markers.
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "shared.jpg", jpegBytes)
+	items := make([]*Item, n)
+	for k := range items {
+		items[k] = &Item{Content: `<p><img src="#/shared.jpg"></p>`}
+	}
+
+	run := &fetchRun{
+		assets:   newAssetFetcher(tempStore(t), 1<<20, proc),
+		cacheDir: cacheDir,
+		assetSem: make(chan struct{}, n), // all items run concurrently
+	}
+	if err := run.uploadAssets(context.Background(), items); err != nil {
+		t.Fatalf("uploadAssets: %v", err)
+	}
+
+	runs, err := os.ReadDir(countDir)
+	if err != nil {
+		t.Fatalf("read count dir: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Errorf("asset-process ran %d times for one shared asset, want 1", len(runs))
+	}
+	for k, it := range items {
+		if !strings.Contains(it.Content, "assets/") {
+			t.Errorf("item %d not rewritten: %q", k, it.Content)
+		}
 	}
 }
