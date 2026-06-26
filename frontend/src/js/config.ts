@@ -201,10 +201,16 @@ function feedLink(ch: IFeed, className: string): HTMLAnchorElement {
       if (ferr) {
          a.title = ferr
          a.setAttribute("aria-label", `${ch.title} — feed error: ${ferr}`)
+      } else {
+         // Stale-by-age (no ferr): give the row a non-color text cue too, so the
+         // health state reaches screen-reader / hover users, not just sighted ones.
+         const note = grade === "crit" ? "feed may be unavailable" : "feed may be stale"
+         a.title = note
+         a.setAttribute("aria-label", `${ch.title} — ${note}`)
       }
-      // Health is a label tint (data-grade → CSS colors the title), not a leading
-      // dot: a dot only flagged rows would carry shifted their title rightward and
-      // misaligned the list. Color only, so every label keeps the same left edge.
+      // Health shows as a label tint (data-grade → CSS colors the title); the ⓘ
+      // is tinted by grade too. No leading dot, so the label's left edge is
+      // unchanged. The title/aria-label (above) carries the state non-visually.
       a.dataset.grade = grade
    }
    a.prepend(srcChip(ch.id))
@@ -268,7 +274,10 @@ function renderFilterList(): void {
          (g, ch) => (g === "crit" || feedGrade(ch) === "crit" ? "crit" : feedGrade(ch) || g),
          "",
       )
-      if (worst) header.dataset.grade = worst
+      if (worst) {
+         header.dataset.grade = worst
+         header.title = worst === "crit" ? "a feed in this tag may be unavailable" : "a feed in this tag may be stale"
+      }
       headerRows.push([header, group])
       const toggle = document.createElement("span")
       toggle.className = "srr-tag-toggle"
