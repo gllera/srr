@@ -617,6 +617,16 @@ describe("switchFilter", () => {
       expect(data.loadArticle).toHaveBeenLastCalledWith(0)
    })
 
+   it("picking an empty feed shows the placeholder scoped to it, not [ALL]'s newest", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 2 }]) // real articles for feeds 1 and 2
+      data.db.feeds[9] = makeFeed({ id: 9, total_art: 0 }) // a pickable empty feed
+      await nav.fromHash("0")
+      const result = await nav.switchFilter("9")
+      expect(result.placeholder).toBe(true) // not a teleport to feed 2's newest
+      expect(nav.getCurrentFilterKey()).toBe("9") // filter scoped to the picked feed
+      expect(nav.filter.feeds.size).toBe(0) // no navigable members
+   })
+
    it("resumes a multi-feed tag at its oldest (min) member position", async () => {
       data.db.feeds[5] = makeFeed({ id: 5, tag: "news" })
       data.db.feeds[6] = makeFeed({ id: 6, tag: "news" })

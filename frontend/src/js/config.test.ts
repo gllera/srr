@@ -248,6 +248,22 @@ describe("filter list", () => {
       expect(row.querySelector(".srr-info-btn")!.classList.contains("srr-info-crit")).toBe(true)
    })
 
+   it("adds a non-color title/aria cue to a stale-by-age feed (no ferr)", async () => {
+      data.groupFeedsByTag.mockReturnValue({
+         tagged: new Map(),
+         sortedTags: [],
+         // last_ok well past the crit staleness window, no ferr.
+         untagged: [feed({ id: 7, title: "Stale", last_ok: 1 })],
+      })
+      const config = await mount()
+      config.open()
+      const row = $<HTMLAnchorElement>('.srr-config-filter a[data-value="7"]')
+      expect(row.dataset.grade).toBe("crit")
+      // No ferr, but the row still exposes a non-color text cue.
+      expect(row.title).not.toBe("")
+      expect(row.getAttribute("aria-label")).toMatch(/Stale/)
+   })
+
    it("tints a tag header by its worst member's grade", async () => {
       data.groupFeedsByTag.mockReturnValue({
          tagged: new Map([

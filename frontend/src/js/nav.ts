@@ -691,6 +691,15 @@ async function isValidSeen(idx: number): Promise<boolean> {
    return filter.matches(feedId, idx)
 }
 
+// Does this filter token name a real feed (numeric id) or tag in the store?
+// Used by switchFilter to tell a known-but-empty pick (→ placeholder) from a
+// stale/bogus token (→ [ALL]).
+function isKnownToken(token: string): boolean {
+   const num = Number(token)
+   if (Number.isFinite(num)) return data.db.feeds[num] !== undefined
+   return Object.values(data.db.feeds).some((ch) => ch.tag === token)
+}
+
 // Opening a tag/feed resumes at its CURRENT position — the saved seen
 // position (a feed's own; a tag's oldest member, see getSeen) — in every
 // mode, including unseen-only: you land on the article you left off on, not the
@@ -704,7 +713,18 @@ export async function switchFilter(token: string): Promise<IShowFeed> {
       return last()
    }
    filter.set([token])
-   if (!filter.active) return last()
+   if (!filter.active) {
+      // filter.set cleared to [ALL] because the token matched no articles. A real
+      // feed/tag with total_art===0 is now pickable (the config picker lists empty
+      // feeds when read items are shown): scope the filter to it and show the
+      // empty-state placeholder rather than teleporting into [ALL]'s newest article.
+      // An unrecognised token (not reachable from the picker today) still falls
+      // back to [ALL].
+      if (!isKnownToken(token)) return last()
+      filter.tokens = [token]
+      filter.feeds = new Map<number, number>()
+      return resolveNoMatch()
+   }
    // Saved/search have no per-feed resume position; open at the newest member
    // (top of the list), the same place selecting them on the list shows.
    if (filter.saved || filter.search) return last()
