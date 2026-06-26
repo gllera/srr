@@ -64,6 +64,24 @@ func fakeProcess(t *testing.T, body string) string {
 	return p
 }
 
+// procCounter returns a fakeProcess command that drops one uniquely-named file
+// into a temp dir on every invocation, plus count() returning how many times it
+// has run (the file count) — i.e. how many times asset-process was invoked.
+func procCounter(t *testing.T) (proc string, count func() int) {
+	t.Helper()
+	countDir := t.TempDir()
+	proc = fakeProcess(t, "mktemp '"+countDir+"/run.XXXXXX' >/dev/null\ncat \"$1\"")
+	count = func() int {
+		t.Helper()
+		runs, err := os.ReadDir(countDir)
+		if err != nil {
+			t.Fatalf("read count dir: %v", err)
+		}
+		return len(runs)
+	}
+	return proc, count
+}
+
 const encodedBytes = "ENCODED-OUTPUT-BYTES"
 const jpegBytes = "\xff\xd8\xff\xe0\x00\x10JFIF\x00original-jpeg"
 const pdfBytes = "%PDF-1.4\n original pdf"

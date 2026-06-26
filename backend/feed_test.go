@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -1058,8 +1057,7 @@ func init() {
 // cycle 2 (deduped before the pipeline, so never re-converted). asset-process must
 // run exactly once across both fetches.
 func TestFetchDoesNotReconvertAlreadySeenArticleAsset(t *testing.T) {
-	countDir := t.TempDir()
-	proc := fakeProcess(t, "mktemp '"+countDir+"/run.XXXXXX' >/dev/null\ncat \"$1\"")
+	proc, processRuns := procCounter(t)
 
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "shared.jpg", jpegBytes)
@@ -1098,12 +1096,8 @@ func TestFetchDoesNotReconvertAlreadySeenArticleAsset(t *testing.T) {
 		t.Fatalf("cycle 2: got %d new items, want 0 (article already seen)", len(second))
 	}
 
-	runs, err := os.ReadDir(countDir)
-	if err != nil {
-		t.Fatalf("read count dir: %v", err)
-	}
-	if len(runs) != 1 {
-		t.Errorf("asset-process ran %d times across two fetches of one article, want 1", len(runs))
+	if n := processRuns(); n != 1 {
+		t.Errorf("asset-process ran %d times across two fetches of one article, want 1", n)
 	}
 }
 
@@ -1115,10 +1109,7 @@ func TestFetchDoesNotReconvertAlreadySeenArticleAsset(t *testing.T) {
 // must not regress that into N concurrent transcodes of one already-seen asset.
 func TestUploadAssetsProcessesSharedAssetOnce(t *testing.T) {
 	const n = 6
-	// Each asset-process invocation drops a uniquely-named file into countDir;
-	// the count of files is the number of times the asset was processed.
-	countDir := t.TempDir()
-	proc := fakeProcess(t, "mktemp '"+countDir+"/run.XXXXXX' >/dev/null\ncat \"$1\"")
+	proc, processRuns := procCounter(t)
 
 	// One cache file, n items all referencing it ⇒ one source hash, n markers.
 	cacheDir := t.TempDir()
@@ -1137,12 +1128,8 @@ func TestUploadAssetsProcessesSharedAssetOnce(t *testing.T) {
 		t.Fatalf("uploadAssets: %v", err)
 	}
 
-	runs, err := os.ReadDir(countDir)
-	if err != nil {
-		t.Fatalf("read count dir: %v", err)
-	}
-	if len(runs) != 1 {
-		t.Errorf("asset-process ran %d times for one shared asset, want 1", len(runs))
+	if n := processRuns(); n != 1 {
+		t.Errorf("asset-process ran %d times for one shared asset, want 1", n)
 	}
 	for k, it := range items {
 		if !strings.Contains(it.Content, "assets/") {
