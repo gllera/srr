@@ -611,6 +611,17 @@ describe("list", () => {
       expect(container.querySelector(".srr-list-empty")).not.toBeNull()
    })
 
+   it("names the filtered feed (not its raw id) in the no-articles message", async () => {
+      setIndex(4, () => 1)
+      nav.filter.active = true
+      nav.filter.feeds = new Map([[99, 0]]) // an empty single-feed filter
+      nav.getCurrentFilterKey.mockReturnValueOnce("99") // single untagged-feed filter: key is the id
+      await list.render()
+      const empty = container.querySelector(".srr-list-empty")
+      expect(empty!.querySelector(".srr-empty-em")!.textContent).toBe("Feed99")
+      expect(empty!.querySelector(".srr-empty-msg")!.textContent).toBe("Nothing in Feed99 yet.")
+   })
+
    it("search mode shows a 'no matching articles' state when the query has no hits", async () => {
       setIndex(4, () => 1)
       nav._setSearch("zzz")

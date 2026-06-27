@@ -97,6 +97,14 @@ const list = vi.hoisted(() => ({
    show: vi.fn(async () => {}),
    rerender: vi.fn(async () => {}),
    moveSelection: vi.fn(async () => 0),
+   // The shared directed empty-state element; the reader mounts it for placeholders.
+   // The real wording/branches are exercised in list.test.ts — here it's a marker.
+   emptyStateEl: vi.fn(() => {
+      const e = document.createElement("div")
+      e.className = "srr-list-empty"
+      e.textContent = "No articles under this filter yet."
+      return e
+   }),
 }))
 vi.mock("./list", () => list)
 
@@ -248,6 +256,50 @@ describe("route() — surface selection from the hash", () => {
       hashTo("#!a%2Bb+%E0%A4%A") // "a+b" (escaped +) then a lone malformed %-escape
       await flush()
       expect(nav.applyFilter).toHaveBeenCalledWith(["a+b", "%E0%A4%A"])
+   })
+})
+
+describe("reader placeholder — directed empty state (no matching articles)", () => {
+   it("mounts the shared empty state, hides the article chrome, and disables prev/next/save", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(
+         showFeed({ placeholder: true, article: { f: 0, a: 0, p: 0, t: "(no matching articles)", l: "", c: "" } }),
+      )
+      hashTo("#5")
+      await flush()
+
+      const reader = document.querySelector(".srr-reader") as HTMLElement
+      expect(reader.hasAttribute("hidden")).toBe(false) // reader surface is shown
+      // The list's directed empty state is mounted in the content area instead of a
+      // bare title + empty body.
+      expect(list.emptyStateEl).toHaveBeenCalled()
+      expect(reader.querySelector(".srr-content .srr-list-empty")).not.toBeNull()
+      // Chrome hidden (no stray "[DELETED]" source for the synthetic feed 0), and
+      // the bare placeholder title is cleared.
+      expect(reader.classList.contains("srr-reader-empty")).toBe(true)
+      expect((document.querySelector(".srr-title") as HTMLElement).textContent).toBe("")
+      // Nothing to step to or save.
+      expect((document.querySelector(".srr-prev") as HTMLButtonElement).disabled).toBe(true)
+      expect((document.querySelector(".srr-next") as HTMLButtonElement).disabled).toBe(true)
+      expect((document.querySelector(".srr-save") as HTMLButtonElement).disabled).toBe(true)
+   })
+
+   it("clears the empty-state marker when a real article renders next", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(
+         showFeed({ placeholder: true, article: { f: 0, a: 0, p: 0, t: "(no matching articles)", l: "", c: "" } }),
+      )
+      hashTo("#5")
+      await flush()
+      expect((document.querySelector(".srr-reader") as HTMLElement).classList.contains("srr-reader-empty")).toBe(true)
+
+      nav.fromHash.mockResolvedValue(showFeed({ article: { f: 1, a: 0, p: 0, t: "Real", l: "", c: "<p>hi</p>" } }))
+      hashTo("#6")
+      await flush()
+      const reader = document.querySelector(".srr-reader") as HTMLElement
+      expect(reader.classList.contains("srr-reader-empty")).toBe(false)
+      expect(reader.querySelector(".srr-list-empty")).toBeNull()
+      expect((document.querySelector(".srr-title") as HTMLElement).textContent).toBe("Real")
    })
 })
 

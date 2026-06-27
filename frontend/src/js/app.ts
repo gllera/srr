@@ -273,6 +273,8 @@ function render(o: IShowFeed) {
    // timer fires applySearchQuery under the now-hidden list and rewrites the
    // reader's hash to the positionless #!q:<query>, losing the resume position.
    clearTimeout(searchDebounce)
+   if (o.placeholder) return renderEmptyReader()
+   el.article.classList.remove("srr-reader-empty")
    // t/l are omitempty on the wire — an untitled article must not render "undefined"
    el.title.textContent = o.article.t ?? ""
    el.content.style.transition = "none"
@@ -311,6 +313,34 @@ function render(o: IShowFeed) {
    // re-enables transitions so the fade-in animates.
    requestAnimationFrame(() => requestAnimationFrame(clearContentTransition))
 
+   persistHash(location.hash)
+}
+
+// The reader's no-match state. Instead of a bare "(no matching articles)" title
+// over an empty body (with a stray "[DELETED]" source for the synthetic feed 0),
+// show the SAME directed empty state the list uses (list.emptyStateEl) so both
+// surfaces speak one wire voice — search / caught-up / saved / filtered wording,
+// keyed off the same nav state. The article chrome (source · date · h1) is hidden
+// via .srr-reader-empty; prev/next/save are disabled — a placeholder has no
+// neighbors to step to and nothing to save.
+function renderEmptyReader() {
+   el.article.classList.add("srr-reader-empty")
+   delete el.article.dataset.src
+   el.title.textContent = ""
+   el.titleLink.removeAttribute("href")
+   el.prev.disabled = true
+   el.next.disabled = true
+   refreshSaveButton(false)
+
+   // Static panel: no fade-in (clear any inline opacity/transform a prior article
+   // render left behind), and swap the body for the shared empty-state element.
+   clearContentTransition()
+   el.content.replaceChildren(list.emptyStateEl())
+
+   refreshFeedLabel()
+   document.title = "SRR"
+   window.scrollTo(0, 0)
+   el.title.focus() // keep keyboard focus inside the reader region
    persistHash(location.hash)
 }
 

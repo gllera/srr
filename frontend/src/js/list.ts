@@ -249,7 +249,11 @@ function pinHeights(rows: HTMLElement[]): void {
 // a mono eyebrow (the wire voice) over one plain, specific line that says what's
 // true and what to do next, instead of a vague "Nothing here". The caught-up
 // state (unseen-only on, everything read) is the reward for the app's purpose.
-function emptyState(): void {
+// Returns the element so BOTH surfaces mount the same voice: the list (home) drops
+// it into the feed, and the reader (app.ts) shows it in place of the bare
+// "(no matching articles)" placeholder — keyed off the same nav state, so the two
+// can't drift.
+export function emptyStateEl(): HTMLElement {
    const wrap = el("div", "srr-list-empty")
    const eyebrow = (text: string): void => {
       const e = el("span", "srr-empty-eyebrow")
@@ -292,13 +296,22 @@ function emptyState(): void {
       star.textContent = "★"
       msg.append("Tap ", star, " on any article to keep it here for later.")
    } else if (nav.filter.active) {
-      msg.textContent = "No articles under this filter yet."
+      // Name the scope when it's a single feed/tag (filterLabel resolves a raw id
+      // to its title) — the common case for the reader's empty-feed placeholder; a
+      // multi-token filter's key is "" → the unscoped line.
+      const key = nav.getCurrentFilterKey()
+      if (key) msg.append("Nothing in ", em(nav.filterLabel(key)), " yet.")
+      else msg.textContent = "No articles under this filter yet."
    } else {
       eyebrow("No dispatches")
       msg.textContent = "New articles show up here once your feeds are fetched."
    }
    wrap.appendChild(msg)
-   container.appendChild(wrap)
+   return wrap
+}
+
+function emptyState(): void {
+   container.appendChild(emptyStateEl())
 }
 
 // Collapse a now-empty list (the Saved view after un-saving the last row) to its
