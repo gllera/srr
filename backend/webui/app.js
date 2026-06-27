@@ -22,21 +22,25 @@ async function streamSSE(path, onEvent) {
   const reader = res.body.getReader();
   const dec = new TextDecoder();
   let buf = "";
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let i;
-    while ((i = buf.indexOf("\n\n")) >= 0) {
-      const frame = buf.slice(0, i);
-      buf = buf.slice(i + 2);
-      let ev = "message", data = "";
-      for (const line of frame.split("\n")) {
-        if (line.startsWith("event:")) ev = line.slice(6).trim();
-        else if (line.startsWith("data:")) data += line.slice(5).trim();
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n\n")) >= 0) {
+        const frame = buf.slice(0, i);
+        buf = buf.slice(i + 2);
+        let ev = "message", data = "";
+        for (const line of frame.split("\n")) {
+          if (line.startsWith("event:")) ev = line.slice(6).trim();
+          else if (line.startsWith("data:")) data += (data ? "\n" : "") + line.slice(5).trim();
+        }
+        onEvent({ event: ev, data: data ? JSON.parse(data) : null });
       }
-      onEvent({ event: ev, data: data ? JSON.parse(data) : null });
     }
+  } finally {
+    reader.cancel();
   }
 }
 
@@ -143,7 +147,7 @@ function drawFeeds() {
       if (!file) return;
       try {
         const text = await file.text();
-        const res = await fetch("/api/import", { method: "POST", body: text });
+        const res = await fetch("/api/import", { method: "POST", headers: { "Content-Type": "application/xml" }, body: text });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || res.statusText);
         banner(`Imported ${data.imported}, skipped ${data.skipped.length}`, true);
@@ -405,10 +409,12 @@ function openOutModal(o) {
   const err = el("div", { class: "muted" });
   const save = el("button", { class: "btn", onclick: async () => {
     const nm = (v.name || name.value).trim();
+    const feedNums = feeds.value.split(",").map((s) => s.trim()).filter(Boolean).map(Number);
+    if (feedNums.some(Number.isNaN)) { err.textContent = "Feed ids must be numbers"; return; }
     const body = {
       title: title.value.trim(), format: fmt.value,
       tags: tags.value.split(",").map((s) => s.trim()).filter(Boolean),
-      feeds: feeds.value.split(",").map((s) => s.trim()).filter(Boolean).map(Number),
+      feeds: feedNums,
       limit: Number(limit.value) || 0,
     };
     try {
@@ -450,8 +456,11 @@ async function renderTools() {
         else if (event === "done") log.textContent += "done.\n";
         else if (event === "error") log.textContent += "ERROR: " + data.error + "\n";
       });
-    } catch (e) { log.textContent += "stream error: " + e.message + "\n"; }
-    fetchBtn.disabled = false;
+    } catch (e) {
+      log.textContent += "stream error: " + e.message + "\n";
+    } finally {
+      fetchBtn.disabled = false;
+    }
   } }, "Fetch now");
   root.append(el("h3", {}, "Fetch"),
     el("div", { class: "toolbar" }, feedSel, fetchBtn), log);
