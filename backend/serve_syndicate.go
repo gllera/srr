@@ -21,25 +21,12 @@ func listSyndicate(w http.ResponseWriter, r *http.Request) {
 }
 
 func putSyndicate(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Title  string   `json:"title"`
-		Format string   `json:"format"`
-		Tags   []string `json:"tags"`
-		Feeds  []int    `json:"feeds"`
-		Limit  int      `json:"limit"`
-	}
-	if err := decodeJSON(r, &body); err != nil {
+	var entry OutFeed
+	if err := decodeJSON(r, &entry); err != nil {
 		writeErr(w, err)
 		return
 	}
-	entry := OutFeed{
-		Name:   r.PathValue("name"),
-		Title:  body.Title,
-		Format: body.Format,
-		Tags:   body.Tags,
-		Feeds:  body.Feeds,
-		Limit:  body.Limit,
-	}
+	entry.Name = r.PathValue("name") // the path is the authority for the name
 	err := withDBCtx(r.Context(), true, func(ctx context.Context, db *DB) error {
 		return setOutFeed(ctx, db, entry)
 	})

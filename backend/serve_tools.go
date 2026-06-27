@@ -135,7 +135,7 @@ func handleImport(w http.ResponseWriter, r *http.Request) {
 	}
 	applyImportDefaults(newFeeds, recipe, tag)
 
-	recipes, err := importRecipes()
+	recipes, err := importRecipes(r.Context())
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -168,15 +168,7 @@ func handleImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	err = withDBCtx(r.Context(), true, func(ctx context.Context, db *DB) error {
-		for _, c := range kept {
-			if err := normalizeFeed(c, db.core.Recipes); err != nil {
-				return err
-			}
-			if err := db.AddFeed(c); err != nil {
-				return err
-			}
-		}
-		return db.Commit(ctx)
+		return commitImportedFeeds(ctx, db, kept)
 	})
 	if err != nil {
 		writeErr(w, err)

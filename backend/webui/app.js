@@ -94,6 +94,13 @@ function appendRecipeOptions(sel, selected, recipes) {
   else apiGet("/api/recipes").then(fill).catch((e) => banner("Could not load recipes: " + e.message));
 }
 
+// dialogRow is the shared Cancel + Save footer row every modal ends with.
+function dialogRow(dlg, saveBtn) {
+  return el("div", { class: "row" },
+    el("button", { class: "btn", onclick: () => dlg.close() }, "Cancel"),
+    saveBtn);
+}
+
 // --- tab router -------------------------------------------------------------
 const renderers = {}; // tab name -> async render fn (filled by later phases)
 
@@ -113,7 +120,7 @@ document.querySelectorAll("#tabs button").forEach((b) =>
 showTab("feeds");
 
 // --- feeds tab --------------------------------------------------------------
-const feedsState = { feeds: [], tags: [], search: "", tag: "" };
+const feedsState = { feeds: [], tags: [], recipes: {}, search: "", tag: "" };
 const UNTAGGED = "\x00"; // sentinel: the "(untagged)" filter option value, distinct from "" (= all tags)
 
 function healthDot(f) {
@@ -141,9 +148,10 @@ function feedMatches(f) {
 }
 
 async function renderFeeds() {
-  [feedsState.feeds, feedsState.tags] = await Promise.all([
+  [feedsState.feeds, feedsState.tags, feedsState.recipes] = await Promise.all([
     apiGet("/api/feeds"),
     apiGet("/api/tags"),
+    apiGet("/api/recipes"),
   ]);
   drawFeeds();
 }
@@ -234,7 +242,7 @@ function openFeedModal(f) {
   const url = el("input", { id: "f_url", value: v.url });
   const tag = el("input", { id: "f_tag", value: v.tag || "" });
   const recipe = el("select", { id: "f_recipe" }, el("option", { value: "" }, "default"));
-  appendRecipeOptions(recipe, v.recipe || "");
+  appendRecipeOptions(recipe, v.recipe || "", feedsState.recipes);
   const err = el("div", { class: "muted" });
 
   const save = el("button", { class: "btn", onclick: async () => {
@@ -258,9 +266,7 @@ function openFeedModal(f) {
     el("label", {}, "Tag"), tag,
     el("label", {}, "Recipe (blank = default)"), recipe,
     err,
-    el("div", { class: "row" },
-      el("button", { class: "btn", onclick: () => feedDialog.close() }, "Cancel"),
-      save));
+    dialogRow(feedDialog, save));
   feedDialog.showModal();
 }
 
@@ -341,8 +347,7 @@ function openRecipeModal(name, rcp) {
     el("label", {}, "Ingest (blank = inherit default)"), ingestIn,
     el("label", {}, "Pipe steps"), stepsBox,
     err,
-    el("div", { class: "row" },
-      el("button", { class: "btn", onclick: () => recipeDialog.close() }, "Cancel"), save));
+    dialogRow(recipeDialog, save));
   recipeDialog.showModal();
 }
 
@@ -439,8 +444,7 @@ function openOutModal(o) {
     el("label", {}, "Feed ids"), feeds,
     el("label", {}, "Limit"), limit,
     err,
-    el("div", { class: "row" },
-      el("button", { class: "btn", onclick: () => outDialog.close() }, "Cancel"), save));
+    dialogRow(outDialog, save));
   outDialog.showModal();
 }
 
