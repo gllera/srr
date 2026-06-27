@@ -90,6 +90,9 @@ func TestFetchSSE(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.StatusCode)
+	}
 	body, _ := io.ReadAll(res.Body)
 	s := string(body)
 	if !strings.Contains(s, "event: feed") {
