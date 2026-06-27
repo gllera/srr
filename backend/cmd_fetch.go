@@ -107,7 +107,7 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, filter fun
 		assets.sem = make(chan struct{}, max(1, globals.AssetWorkers))
 		bufPool := sync.Pool{
 			New: func() any {
-				return make([]byte, max(1, globals.MaxFeedSize)*(1<<10)+1)
+				return make([]byte, globals.MaxFeedSize*(1<<10)+1)
 			},
 		}
 		// Per-worker module processors: built-in processors hold mutable state
@@ -139,7 +139,7 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, filter fun
 		run := newFetchRun(client, engine, assets, cacheDir, db.core.FetchedAt, db.core.Recipes)
 
 		g, gctx := errgroup.WithContext(ctx)
-		g.SetLimit(max(1, globals.Workers))
+		g.SetLimit(globals.Workers)
 
 		for _, ch := range db.Feeds() {
 			if filter != nil && !filter(ch) {

@@ -65,6 +65,35 @@ function el(tag, attrs, ...kids) {
   return e;
 }
 
+// confirmDelete is the shared confirm → DELETE → banner → refresh flow used by
+// every tab's delete action.
+async function confirmDelete(question, url, successMsg, refresh) {
+  if (!confirm(question)) return;
+  try {
+    await api("DELETE", url);
+    banner(successMsg, true);
+    await refresh();
+  } catch (e) {
+    banner(e.message);
+  }
+}
+
+// appendRecipeOptions fills a <select> with recipe-name options (skipping the
+// implicit "default"), marking `selected` chosen. Pass the already-fetched
+// recipes map to populate synchronously; omit it to fetch lazily.
+function appendRecipeOptions(sel, selected, recipes) {
+  const fill = (rs) => {
+    for (const n of Object.keys(rs).sort()) {
+      if (n === "default") continue;
+      const o = el("option", { value: n }, n);
+      if (n === selected) o.selected = true;
+      sel.append(o);
+    }
+  };
+  if (recipes) fill(recipes);
+  else apiGet("/api/recipes").then(fill).catch((e) => banner("Could not load recipes: " + e.message));
+}
+
 // --- tab router -------------------------------------------------------------
 const renderers = {}; // tab name -> async render fn (filled by later phases)
 
@@ -190,12 +219,7 @@ function drawTable() {
 }
 
 async function deleteFeed(f) {
-  if (!confirm(`Delete feed "${f.title}"?`)) return;
-  try {
-    await api("DELETE", "/api/feeds/" + f.id);
-    banner("Deleted " + f.title, true);
-    await renderFeeds();
-  } catch (e) { banner(e.message); }
+  return confirmDelete(`Delete feed "${f.title}"?`, "/api/feeds/" + f.id, "Deleted " + f.title, renderFeeds);
 }
 
 let feedDialog;
@@ -210,14 +234,7 @@ function openFeedModal(f) {
   const url = el("input", { id: "f_url", value: v.url });
   const tag = el("input", { id: "f_tag", value: v.tag || "" });
   const recipe = el("select", { id: "f_recipe" }, el("option", { value: "" }, "default"));
-  apiGet("/api/recipes").then((rs) => {
-    for (const n of Object.keys(rs).sort()) {
-      if (n === "default") continue;
-      const o = el("option", { value: n }, n);
-      if (n === (v.recipe || "")) o.selected = true;
-      recipe.append(o);
-    }
-  }).catch((e) => banner("Could not load recipes: " + e.message));
+  appendRecipeOptions(recipe, v.recipe || "");
   const err = el("div", { class: "muted" });
 
   const save = el("button", { class: "btn", onclick: async () => {
@@ -273,17 +290,12 @@ async function renderRecipes() {
   }
   table.append(tb);
   root.append(table);
-  root.append(previewPanel());
+  root.append(previewPanel(recipes));
 }
 renderers.recipes = renderRecipes;
 
 async function deleteRecipe(name) {
-  if (!confirm(`Delete recipe "${name}"?`)) return;
-  try {
-    await api("DELETE", "/api/recipes/" + encodeURIComponent(name));
-    banner("Deleted recipe " + name, true);
-    await renderRecipes();
-  } catch (e) { banner(e.message); }
+  return confirmDelete(`Delete recipe "${name}"?`, "/api/recipes/" + encodeURIComponent(name), "Deleted recipe " + name, renderRecipes);
 }
 
 let recipeDialog;
@@ -335,12 +347,10 @@ function openRecipeModal(name, rcp) {
 }
 
 // --- inline preview (used inside the Recipes tab) ---------------------------
-function previewPanel() {
+function previewPanel(recipes) {
   const url = el("input", { type: "url", placeholder: "https://example.com/feed", style: "min-width:24em" });
   const recipeSel = el("select", {}, el("option", { value: "default" }, "default"));
-  apiGet("/api/recipes").then((rs) => {
-    for (const n of Object.keys(rs).sort()) if (n !== "default") recipeSel.append(el("option", { value: n }, n));
-  }).catch((e) => banner("Could not load recipes: " + e.message));
+  appendRecipeOptions(recipeSel, "", recipes);
   const out = el("div", {});
   const go = el("button", { class: "btn", onclick: async () => {
     out.replaceChildren(el("div", { class: "muted" }, "loading…"));
@@ -389,9 +399,7 @@ async function renderSyndicate() {
 renderers.syndicate = renderSyndicate;
 
 async function deleteOut(name) {
-  if (!confirm(`Delete output "${name}"?`)) return;
-  try { await api("DELETE", "/api/syndicate/" + encodeURIComponent(name)); await renderSyndicate(); }
-  catch (e) { banner(e.message); }
+  return confirmDelete(`Delete output "${name}"?`, "/api/syndicate/" + encodeURIComponent(name), "Deleted " + name, renderSyndicate);
 }
 
 let outDialog;
@@ -441,8 +449,8 @@ async function renderTools() {
   const root = document.getElementById("tools");
   root.replaceChildren();
 
-  // Fetch
-  const feeds = await apiGet("/api/feeds");
+  // Fetch (both reads are independent — fetch them together)
+  const [feeds, g] = await Promise.all([apiGet("/api/feeds"), apiGet("/api/gen")]);
   const feedSel = el("select", {}, el("option", { value: "" }, "all feeds"));
   for (const f of feeds) feedSel.append(el("option", { value: f.id }, `#${f.id} ${f.title}`));
   const log = el("pre", { class: "log" });
@@ -465,8 +473,7 @@ async function renderTools() {
   root.append(el("h3", {}, "Fetch"),
     el("div", { class: "toolbar" }, feedSel, fetchBtn), log);
 
-  // Gen
-  const g = await apiGet("/api/gen");
+  // Gen (g fetched above alongside feeds)
   const genLabel = el("span", {}, "generation: " + g.gen);
   const bumpBtn = el("button", { class: "btn", onclick: async () => {
     if (!confirm("Bump the store generation? This forces every reader's service worker to purge its pack cache.")) return;

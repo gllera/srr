@@ -97,13 +97,16 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = enc.Encode(v)
 }
 
+// msgLockContention is the operator-facing message when a mutating request can't
+// acquire the store lock. Shared with the SSE fetch handler, which can't go
+// through writeErr after its 200 headers are sent.
+const msgLockContention = "store is locked by another srr process — the fetch loop may be running; try again"
+
 // writeErr maps a handler error to a status: lock contention → 409,
 // "not found" → 404, everything else → 400. The message is always echoed.
 func writeErr(w http.ResponseWriter, err error) {
 	if errors.Is(err, os.ErrExist) {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "store is locked by another srr process — the fetch loop may be running; try again",
-		})
+		writeJSON(w, http.StatusConflict, map[string]string{"error": msgLockContention})
 		return
 	}
 	// Default 400: handler errors here are overwhelmingly validation rejections

@@ -57,7 +57,7 @@ func handleFetch(w http.ResponseWriter, r *http.Request) {
 	if err := <-done; err != nil {
 		msg := err.Error()
 		if errors.Is(err, os.ErrExist) {
-			msg = "store is locked by another srr process — the fetch loop may be running; try again"
+			msg = msgLockContention
 		}
 		writeSSE(w, flusher, "error", map[string]string{"error": msg})
 		return

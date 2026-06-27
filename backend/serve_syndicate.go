@@ -6,17 +6,16 @@ import (
 )
 
 func listSyndicate(w http.ResponseWriter, r *http.Request) {
-	var out []OutFeed
+	// Seed with a non-nil empty slice so an empty store serializes as [] (not
+	// null) without a separate guard.
+	out := []OutFeed{}
 	err := withDBCtx(r.Context(), false, func(_ context.Context, db *DB) error {
-		out = append([]OutFeed(nil), db.core.Out...)
+		out = append(out, db.core.Out...)
 		return nil
 	})
 	if err != nil {
 		writeErr(w, err)
 		return
-	}
-	if out == nil {
-		out = []OutFeed{}
 	}
 	writeJSON(w, http.StatusOK, out)
 }

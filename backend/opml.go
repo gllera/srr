@@ -84,10 +84,18 @@ func normalizeGroupName(name string) (string, error) {
 }
 
 func ParseOPMLTree(file string) ([]*OPMLNode, error) {
-	var root OPML
-	if b, err := os.ReadFile(file); err != nil {
+	b, err := os.ReadFile(file)
+	if err != nil {
 		return nil, err
-	} else if err = xml.Unmarshal(b, &root); err != nil {
+	}
+	return ParseOPMLBytes(b)
+}
+
+// ParseOPMLBytes parses an OPML document already in memory — used by the HTTP
+// import handler, which has the request body in hand and needs no temp file.
+func ParseOPMLBytes(data []byte) ([]*OPMLNode, error) {
+	var root OPML
+	if err := xml.Unmarshal(data, &root); err != nil {
 		return nil, err
 	}
 	return buildTree(root.Body.Outlines), nil

@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -25,6 +26,10 @@ func setupTestDB(t *testing.T) (*DB, *DBCore, string) {
 	globals = &Globals{
 		PackSize: 1, // 1 KB, small to test pack splitting
 		Store:    dir,
+		// Floor Workers/MaxFeedSize like main() does, so the fetch/preview paths
+		// see realistic values under test without per-call-site guards.
+		Workers:     runtime.NumCPU(),
+		MaxFeedSize: defaultMaxFeedSize,
 	}
 
 	// Skip zopfli recompression of finalized packs: the 50k-boundary tests

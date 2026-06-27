@@ -114,10 +114,8 @@ func saveFeed(ctx context.Context, db *DB, v *feedView) (*Feed, error) {
 		}
 		newURL = resolved
 	}
-	ch.Title = v.Title
-	setFeedURL(ch, newURL)
-	ch.Tag = v.Tag
-	ch.Recipe = v.Recipe
+	v.URL = newURL // fold the resolved URL back in, then reuse the shared field-writer
+	writeFeedView(ch, v)
 	if err := normalizeFeed(ch, db.core.Recipes); err != nil {
 		return nil, err
 	}

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 )
 
 // previewArticle is the JSON shape GET /api/preview returns (decoupled from the
@@ -104,27 +105,14 @@ func handleExport(w http.ResponseWriter, r *http.Request) {
 // Optional query params: tag (override OPML group tags), recipe (stamp all),
 // dry_run=1 (preview only). Subscribe-time discovery resolves homepage URLs.
 func handleImport(w http.ResponseWriter, r *http.Request) {
-	dryRun := r.URL.Query().Get("dry_run") == "1"
+	q := r.URL.Query()
+	dryRun := q.Get("dry_run") == "1"
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	// ParseOPMLTree reads a path, so spill the body to a temp file.
-	tmp, err := os.CreateTemp("", "srr-import-*.opml")
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(body); err != nil {
-		tmp.Close()
-		writeErr(w, err)
-		return
-	}
-	tmp.Close()
-
-	nodes, err := ParseOPMLTree(tmp.Name())
+	nodes, err := ParseOPMLBytes(body)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -137,11 +125,11 @@ func handleImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var tag, recipe *string
-	if q := r.URL.Query(); q.Has("tag") {
+	if q.Has("tag") {
 		v := q.Get("tag")
 		tag = &v
 	}
-	if q := r.URL.Query(); q.Has("recipe") {
+	if q.Has("recipe") {
 		v := q.Get("recipe")
 		recipe = &v
 	}
@@ -241,11 +229,11 @@ func errString(err error) string {
 // captureInspectStdout redirects os.Stdout to a pipe for the duration of fn and
 // returns what was written. Serialized by serveStdoutMu so concurrent inspect
 // calls do not interleave (inspect is a rare, operator-driven action).
-var serveStdoutMu = make(chan struct{}, 1)
+var serveStdoutMu sync.Mutex
 
 func captureInspectStdout(fn func() error) (string, error) {
-	serveStdoutMu <- struct{}{}
-	defer func() { <-serveStdoutMu }()
+	serveStdoutMu.Lock()
+	defer serveStdoutMu.Unlock()
 
 	orig := os.Stdout
 	rd, wr, err := os.Pipe()
