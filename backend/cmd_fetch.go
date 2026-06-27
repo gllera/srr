@@ -28,6 +28,14 @@ type FetchCmd struct {
 	lastOutSig string
 }
 
+// feedProgress reports one feed's outcome to a runFetch caller (the SSE handler).
+type feedProgress struct {
+	ID    int    `json:"id"`
+	Title string `json:"title"`
+	Error string `json:"error,omitempty"`
+	New   int    `json:"new"`
+}
+
 func (o *FetchCmd) Run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -40,7 +48,7 @@ func (o *FetchCmd) Run() error {
 
 	if o.Interval > 0 {
 		for {
-			if err := o.fetch(ctx, client); err != nil {
+			if err := o.runFetch(ctx, client, nil, nil); err != nil {
 				slog.Error("fetch iteration failed", "err", err)
 			}
 			select {
@@ -50,7 +58,7 @@ func (o *FetchCmd) Run() error {
 			}
 		}
 	}
-	return o.fetch(ctx, client)
+	return o.runFetch(ctx, client, nil, nil)
 }
 
 // newFetchClient builds the shared HTTP client for a fetch run.  It is called
@@ -76,7 +84,11 @@ func newFetchClient(workers int) *http.Client {
 	}
 }
 
-func (o *FetchCmd) fetch(ctx context.Context, client *http.Client) error {
+// runFetch runs one fetch cycle over the feeds matching filter (nil = all),
+// invoking onFeed (if non-nil) once per feed as it finishes. onFeed may run
+// concurrently from worker goroutines — callers must guard it. The CLI passes
+// (nil, nil); the SSE handler passes a feed filter and a channel-pushing onFeed.
+func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, filter func(*Feed) bool, onFeed func(feedProgress)) error {
 	return withDBCtx(ctx, true, func(ctx context.Context, db *DB) error {
 		db.core.FetchedAt = time.Now().UTC().Unix()
 		// Asset uploader for the end-of-pipeline self-hosting step, shared across
@@ -95,7 +107,7 @@ func (o *FetchCmd) fetch(ctx context.Context, client *http.Client) error {
 		assets.sem = make(chan struct{}, max(1, globals.AssetWorkers))
 		bufPool := sync.Pool{
 			New: func() any {
-				return make([]byte, globals.MaxFeedSize*(1<<10)+1)
+				return make([]byte, max(1, globals.MaxFeedSize)*(1<<10)+1)
 			},
 		}
 		// Per-worker module processors: built-in processors hold mutable state
@@ -127,9 +139,12 @@ func (o *FetchCmd) fetch(ctx context.Context, client *http.Client) error {
 		run := newFetchRun(client, engine, assets, cacheDir, db.core.FetchedAt, db.core.Recipes)
 
 		g, gctx := errgroup.WithContext(ctx)
-		g.SetLimit(globals.Workers)
+		g.SetLimit(max(1, globals.Workers))
 
 		for _, ch := range db.Feeds() {
+			if filter != nil && !filter(ch) {
+				continue
+			}
 			if ctx.Err() != nil {
 				break
 			}
@@ -139,6 +154,9 @@ func (o *FetchCmd) fetch(ctx context.Context, client *http.Client) error {
 				processor := procPool.Get().(*mod.Module)
 				defer procPool.Put(processor)
 				ch.Fetch(gctx, run, buf, processor)
+				if onFeed != nil {
+					onFeed(feedProgress{ID: ch.id, Title: ch.Title, Error: ch.FetchError, New: len(ch.newItems)})
+				}
 				return nil
 			})
 		}
