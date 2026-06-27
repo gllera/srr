@@ -1,0 +1,70 @@
+package main
+
+import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+func doReq(t *testing.T, h http.Handler, method, target, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	var r io.Reader
+	if body != "" {
+		r = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, target, r)
+	req.Host = "localhost"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func seedFeed(t *testing.T, db *DB, ch *Feed) {
+	t.Helper()
+	if err := db.AddFeed(ch); err != nil {
+		t.Fatalf("AddFeed: %v", err)
+	}
+	if err := db.Commit(context.Background()); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+}
+
+func TestServeUIIndex(t *testing.T) {
+	h := newMux()
+	rec := doReq(t, h, "GET", "/", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET / = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("content-type = %q, want text/html", ct)
+	}
+	if !strings.Contains(rec.Body.String(), "<title>SRR Admin</title>") {
+		t.Fatalf("index body missing title; got:\n%s", rec.Body.String()[:200])
+	}
+}
+
+func TestServeHostGuardRejectsNonLoopback(t *testing.T) {
+	h := newMux()
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Host = "evil.example.com"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("non-loopback Host = %d, want 403", rec.Code)
+	}
+}
+
+func TestServeHostGuardRejectsCrossOrigin(t *testing.T) {
+	h := newMux()
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Host = "localhost"
+	req.Header.Set("Origin", "http://evil.example.com")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin = %d, want 403", rec.Code)
+	}
+}
