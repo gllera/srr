@@ -60,7 +60,9 @@ func TestGenShowAndBump(t *testing.T) {
 	var g struct {
 		Gen int `json:"gen"`
 	}
-	json.Unmarshal(rec.Body.Bytes(), &g)
+	if err := json.Unmarshal(rec.Body.Bytes(), &g); err != nil {
+		t.Fatalf("decode gen: %v", err)
+	}
 	if g.Gen != 0 {
 		t.Fatalf("initial gen = %d, want 0", g.Gen)
 	}
