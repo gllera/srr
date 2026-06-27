@@ -130,7 +130,10 @@ func TestUpdateFeedPreservesStateOnSameURL(t *testing.T) {
 	}
 	// Same URL ⇒ fetch state preserved.
 	err := withDB(false, func(_ context.Context, d *DB) error {
-		ch, _ := d.FeedByID(0)
+		ch, e := d.FeedByID(0)
+		if e != nil {
+			return e
+		}
 		if ch.Title != "Renamed" || ch.Tag != "news" {
 			t.Fatalf("not updated: %+v", ch)
 		}
@@ -150,14 +153,23 @@ func TestUpdateFeedResetsStateOnNewURL(t *testing.T) {
 	seedFeed(t, db, &Feed{Title: "Old", URL: "https://u.example/feed", FailStreak: 3, FetchError: "x"})
 
 	body := `{"title":"Old","url":"https://v.example/feed"}`
-	doReq(t, newMux(), "PUT", "/api/feeds/0", body)
-	withDB(false, func(_ context.Context, d *DB) error {
-		ch, _ := d.FeedByID(0)
+	rec := doReq(t, newMux(), "PUT", "/api/feeds/0", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
+	}
+	err := withDB(false, func(_ context.Context, d *DB) error {
+		ch, e := d.FeedByID(0)
+		if e != nil {
+			return e
+		}
 		if ch.URL != "https://v.example/feed" || ch.FailStreak != 0 || ch.FetchError != "" {
 			t.Fatalf("new URL should reset state: %+v", ch)
 		}
 		return nil
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestDeleteFeed(t *testing.T) {
