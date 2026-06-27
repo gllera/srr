@@ -41,7 +41,7 @@ func TestServeUIIndex(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
 		t.Fatalf("content-type = %q, want text/html", ct)
 	}
-	if !strings.Contains(rec.Body.String(), "<title>SRR Control</title>") {
+	if !strings.Contains(rec.Body.String(), "<title>SRRB</title>") {
 		body := rec.Body.String()
 		if len(body) > 200 {
 			body = body[:200]

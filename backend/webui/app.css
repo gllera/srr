@@ -1,4 +1,4 @@
-/* SRR Control — the operator's console for the writer side.
+/* SRRB — the operator's console for the writer side.
 
    Visual identity is lifted from the SRR reader ("wire chrome wraps human
    prose"): the same warm-paper palette, the mono "wire voice" for all chrome
@@ -177,14 +177,6 @@ header {
    font-size: 1.15rem;
    letter-spacing: 0.12em;
    color: var(--fg);
-}
-.ident-tag {
-   font-family: var(--font-mono);
-   font-size: 0.62rem;
-   font-weight: 600;
-   letter-spacing: 0.26em;
-   text-transform: uppercase;
-   color: var(--muted);
 }
 /* The mark goes "on the air" while a fetch streams (body.fetching, toggled in
    app.js) — the one signature motion, gated to a real live operation. */
