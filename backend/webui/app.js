@@ -78,20 +78,15 @@ async function confirmDelete(question, url, successMsg, refresh) {
   }
 }
 
-// appendRecipeOptions fills a <select> with recipe-name options (skipping the
-// implicit "default"), marking `selected` chosen. Pass the already-fetched
-// recipes map to populate synchronously; omit it to fetch lazily.
+// appendRecipeOptions fills a <select> with recipe-name options from the given
+// recipes map (skipping the implicit "default"), marking `selected` chosen.
 function appendRecipeOptions(sel, selected, recipes) {
-  const fill = (rs) => {
-    for (const n of Object.keys(rs).sort()) {
-      if (n === "default") continue;
-      const o = el("option", { value: n }, n);
-      if (n === selected) o.selected = true;
-      sel.append(o);
-    }
-  };
-  if (recipes) fill(recipes);
-  else apiGet("/api/recipes").then(fill).catch((e) => banner("Could not load recipes: " + e.message));
+  for (const n of Object.keys(recipes).sort()) {
+    if (n === "default") continue;
+    const o = el("option", { value: n }, n);
+    if (n === selected) o.selected = true;
+    sel.append(o);
+  }
 }
 
 // dialogRow is the shared Cancel + Save footer row every modal ends with.
@@ -203,15 +198,14 @@ function drawTable() {
   const rows = feedsState.feeds.filter(feedMatches);
   const table = el("table", {},
     el("thead", {}, el("tr", {},
-      el("th", {}, ""), el("th", {}, "title"), el("th", {}, "url"),
+      el("th", {}, ""), el("th", {}, "title"),
       el("th", {}, "tag"), el("th", {}, "recipe"),
       el("th", {}, "arts"), el("th", {}, ""))));
   const tb = el("tbody", {});
   for (const f of rows) {
     tb.append(el("tr", {},
       el("td", {}, healthDot(f)),
-      el("td", {}, f.title),
-      el("td", {}, el("a", { href: f.url, target: "_blank", rel: "noopener" }, f.url)),
+      el("td", {}, el("a", { href: f.url, target: "_blank", rel: "noopener" }, f.title)),
       el("td", {}, f.tag || ""),
       el("td", {}, f.recipe || ""),
       el("td", {}, String(f.total_art)),
