@@ -56,6 +56,7 @@ showTab("feeds");
 
 // --- feeds tab --------------------------------------------------------------
 const feedsState = { feeds: [], tags: [], search: "", tag: "" };
+const UNTAGGED = "\x00"; // sentinel: the "(untagged)" filter option value, distinct from "" (= all tags)
 
 function healthDot(f) {
   let cls = "green";
@@ -70,7 +71,10 @@ function healthDot(f) {
 }
 
 function feedMatches(f) {
-  if (feedsState.tag && f.tag !== feedsState.tag) return false;
+  if (feedsState.tag) {
+    const want = feedsState.tag === UNTAGGED ? "" : feedsState.tag;
+    if ((f.tag || "") !== want) return false;
+  }
   if (feedsState.search) {
     const q = feedsState.search.toLowerCase();
     if (!(f.title + " " + f.url).toLowerCase().includes(q)) return false;
@@ -99,9 +103,10 @@ function drawFeeds() {
     onchange: (e) => { feedsState.tag = e.target.value; drawTable(); },
   }, el("option", { value: "" }, "all tags"));
   for (const t of feedsState.tags) {
+    const optVal = t.tag === "" ? UNTAGGED : t.tag;
     const label = (t.tag || "(untagged)") + ` — ${t.feeds}`;
-    const o = el("option", { value: t.tag }, label);
-    if (t.tag === feedsState.tag) o.selected = true;
+    const o = el("option", { value: optVal }, label);
+    if (optVal === feedsState.tag) o.selected = true;
     tagSel.append(o);
   }
   const add = el("button", { class: "btn", onclick: () => openFeedModal(null) }, "+ Add feed");
@@ -170,9 +175,9 @@ function openFeedModal(f) {
     try {
       if (isEdit) await api("PUT", "/api/feeds/" + f.id, body);
       else await api("POST", "/api/feeds", body);
+      await renderFeeds();
       feedDialog.close();
       banner((isEdit ? "Updated " : "Added ") + body.title, true);
-      await renderFeeds();
     } catch (e) { err.textContent = e.message; }
   } }, "Save");
 
