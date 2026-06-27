@@ -1356,6 +1356,11 @@ body.srr-view-config .srr-toolbar {
    min-height: 58vh;
    text-align: center;
    padding: 2rem 1.5rem;
+   /* Own the typography so the block renders identically in BOTH hosts: the list
+      (.srr-list, body 1rem) and the reader (.srr-content sets prose 1.05rem/1.65,
+      which would otherwise bloat the message and shift the centered station). */
+   font-size: var(--text-base);
+   line-height: 1.6;
 }
 .srr-empty-eyebrow {
    font-family: var(--font-mono);
@@ -1365,7 +1370,11 @@ body.srr-view-config .srr-toolbar {
    text-transform: uppercase;
    color: var(--muted);
 }
-.srr-empty-msg {
+/* Scoped under .srr-list-empty so the margin reset (0,2,0) outranks the reader's
+   prose rule .srr-content p (0,1,1, a 1em bottom margin) — otherwise the message
+   gains a margin in the reader only, growing the centered block and nudging it up
+   ~8px out of alignment with the list. */
+.srr-list-empty .srr-empty-msg {
    margin: 0;
    max-width: 30ch;
    line-height: 1.5;
@@ -1404,6 +1413,12 @@ body.srr-view-config .srr-toolbar {
       opacity: 1;
       transform: translateY(0) scale(1);
    }
+}
+/* Reader no-match placeholder: hide the article chrome (source · date · title) so
+   the shared .srr-list-empty block centers in the reading column on its own, the
+   same directed station the list shows. */
+.srr-reader-empty .srr-title-row {
+   display: none;
 }
 .srr-list-sentinel {
    height: 1px;
