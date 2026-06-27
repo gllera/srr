@@ -145,4 +145,5 @@ func registerAPI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/recipes", listRecipes)
 	mux.HandleFunc("PUT /api/recipes/{name}", putRecipe)
 	mux.HandleFunc("DELETE /api/recipes/{name}", deleteRecipe)
+	mux.HandleFunc("GET /api/preview", handlePreview)
 }
