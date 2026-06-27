@@ -117,3 +117,67 @@ func TestCreateFeedLockContention(t *testing.T) {
 }
 
 func osWriteFile(path string) error { return os.WriteFile(path, nil, 0o644) }
+
+func TestUpdateFeedPreservesStateOnSameURL(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	stubResolve(t)
+	seedFeed(t, db, &Feed{Title: "Old", URL: "https://u.example/feed", FailStreak: 3, FetchError: "x"})
+
+	body := `{"title":"Renamed","url":"https://u.example/feed","tag":"news"}`
+	rec := doReq(t, newMux(), "PUT", "/api/feeds/0", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
+	}
+	// Same URL ⇒ fetch state preserved.
+	err := withDB(false, func(_ context.Context, d *DB) error {
+		ch, _ := d.FeedByID(0)
+		if ch.Title != "Renamed" || ch.Tag != "news" {
+			t.Fatalf("not updated: %+v", ch)
+		}
+		if ch.FailStreak != 3 || ch.FetchError != "x" {
+			t.Fatalf("fetch state should be preserved: %+v", ch)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUpdateFeedResetsStateOnNewURL(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	stubResolve(t)
+	seedFeed(t, db, &Feed{Title: "Old", URL: "https://u.example/feed", FailStreak: 3, FetchError: "x"})
+
+	body := `{"title":"Old","url":"https://v.example/feed"}`
+	doReq(t, newMux(), "PUT", "/api/feeds/0", body)
+	withDB(false, func(_ context.Context, d *DB) error {
+		ch, _ := d.FeedByID(0)
+		if ch.URL != "https://v.example/feed" || ch.FailStreak != 0 || ch.FetchError != "" {
+			t.Fatalf("new URL should reset state: %+v", ch)
+		}
+		return nil
+	})
+}
+
+func TestDeleteFeed(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	seedFeed(t, db, &Feed{Title: "Doomed", URL: "https://d.example/feed"})
+
+	rec := doReq(t, newMux(), "DELETE", "/api/feeds/0", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
+	}
+	get := doReq(t, newMux(), "GET", "/api/feeds/0", "")
+	if get.Code != http.StatusNotFound {
+		t.Fatalf("after delete GET = %d, want 404", get.Code)
+	}
+}
+
+func TestDeleteFeedNotFound(t *testing.T) {
+	setupTestDB(t)
+	rec := doReq(t, newMux(), "DELETE", "/api/feeds/42", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}

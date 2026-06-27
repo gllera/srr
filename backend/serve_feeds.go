@@ -128,6 +128,51 @@ func saveFeed(ctx context.Context, db *DB, v *feedView) (*Feed, error) {
 	return ch, db.Commit(ctx)
 }
 
+func updateFeed(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	var v feedView
+	if err := decodeJSON(r, &v); err != nil {
+		writeErr(w, err)
+		return
+	}
+	v.ID = &id
+	var saved *Feed
+	err = withDBCtx(r.Context(), true, func(ctx context.Context, db *DB) error {
+		s, e := saveFeed(ctx, db, &v)
+		saved = s
+		return e
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, listViewOf(saved))
+}
+
+func deleteFeed(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	err = withDBCtx(r.Context(), true, func(ctx context.Context, db *DB) error {
+		if _, e := db.FeedByID(id); e != nil {
+			return e // 404 when absent
+		}
+		db.RemoveFeed(id)
+		return db.Commit(ctx)
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
 func createFeed(w http.ResponseWriter, r *http.Request) {
 	var v feedView
 	if err := decodeJSON(r, &v); err != nil {

@@ -138,4 +138,6 @@ func registerAPI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/feeds", listFeeds)
 	mux.HandleFunc("POST /api/feeds", createFeed)
 	mux.HandleFunc("GET /api/feeds/{id}", getFeed)
+	mux.HandleFunc("PUT /api/feeds/{id}", updateFeed)
+	mux.HandleFunc("DELETE /api/feeds/{id}", deleteFeed)
 }
