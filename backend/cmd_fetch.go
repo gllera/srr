@@ -239,8 +239,14 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, filter fun
 			}
 		}
 
+		// Count only the feeds this run actually processed: a filtered run (one
+		// feed via the GUI) must not report other feeds' stale FetchError from a
+		// prior run. filter==nil (the CLI) counts everything, unchanged.
 		var failed, totalFeeds int
 		for _, ch := range db.Feeds() {
+			if filter != nil && !filter(ch) {
+				continue
+			}
 			totalFeeds++
 			if ch.FetchError != "" {
 				failed++
