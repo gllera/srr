@@ -99,8 +99,8 @@ function emptyState(eyebrow, msg) {
 }
 
 // confirmDelete is the shared confirm → DELETE → banner → refresh flow used by
-// every tab's delete action.
-async function confirmDelete(question, url, successMsg, refresh) {
+// every tab's delete action; refresh() re-pulls the snapshot after the delete.
+async function confirmDelete(question, url, successMsg) {
   if (!confirm(question)) return false;
   try {
     await api("DELETE", url);
@@ -140,17 +140,38 @@ function dialogRow(dlg, saveBtn, onDelete) {
   return el("div", { class: "row" }, ...kids);
 }
 
-// --- tab router -------------------------------------------------------------
-const renderers = {}; // tab name -> async render fn (filled by later phases)
+// --- store snapshot + tab router --------------------------------------------
+// The whole store (GET /api/overview) is fetched once into `snapshot`; every tab
+// renders from it, so switching tabs never hits the store. The store is re-read
+// only on boot (a browser reload re-runs it) and after a mutation, via refresh().
+const renderers = {}; // tab name -> sync render fn, drawing from `snapshot`
+let snapshot = { feeds: [], tags: [], recipes: {}, out: [], gen: 0 };
+let currentTab = "feeds";
+
+// drawTab (re)renders the current tab from the cached snapshot — no fetch.
+function drawTab() {
+  const r = renderers[currentTab];
+  if (r) {
+    try { r(); } catch (e) { banner(e.message); }
+  }
+}
 
 function showTab(name) {
+  currentTab = name;
   for (const b of document.querySelectorAll("#tabs button"))
     b.classList.toggle("active", b.dataset.tab === name);
   for (const s of document.querySelectorAll(".tab"))
     s.classList.toggle("active", s.id === name);
   clearBanner();
-  const r = renderers[name];
-  if (r) r().catch((e) => banner(e.message));
+  drawTab();
+}
+
+// refresh re-pulls the snapshot and redraws the current tab. It deliberately
+// does NOT clear the banner, so a caller can set a success message and then
+// refresh the data under it.
+async function refresh() {
+  snapshot = await apiGet("/api/overview");
+  drawTab();
 }
 
 document.querySelectorAll("#tabs button").forEach((b) =>
@@ -168,13 +189,17 @@ function feedGrade(f) {
 }
 const GRADE_DOT = { ok: "green", warn: "amber", err: "red", idle: "gray" };
 
-function healthDot(f) {
+// healthDot is the small status dot. Its native title carries the health detail
+// (last fetch / never fetched). For a failing feed the error rides a richer
+// hover/focus tooltip instead (see feedRow), so pass suppressTitle to avoid a
+// duplicate native bubble.
+function healthDot(f, suppressTitle) {
   const title = f.error
     ? `${f.error} (fail streak ${f.fail_streak})`
     : f.last_ok
     ? "ok, last fetch " + new Date(f.last_ok * 1000).toLocaleString()
     : "never fetched";
-  return el("span", { class: "dot " + GRADE_DOT[feedGrade(f)], title });
+  return el("span", { class: "dot " + GRADE_DOT[feedGrade(f)], title: suppressTitle ? null : title });
 }
 
 // healthBoard is the Feeds-tab hero: a one-line readout of the whole wire's
@@ -209,12 +234,11 @@ function feedMatches(f) {
   return true;
 }
 
-async function renderFeeds() {
-  [feedsState.feeds, feedsState.tags, feedsState.recipes] = await Promise.all([
-    apiGet("/api/feeds"),
-    apiGet("/api/tags"),
-    apiGet("/api/recipes"),
-  ]);
+function renderFeeds() {
+  // Drawn from the cached snapshot — no store read on tab switch.
+  feedsState.feeds = snapshot.feeds;
+  feedsState.tags = snapshot.tags;
+  feedsState.recipes = snapshot.recipes;
   drawFeeds();
 }
 renderers.feeds = renderFeeds;
@@ -250,7 +274,7 @@ function drawFeeds() {
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || res.statusText);
         banner(`Imported ${data.imported}, skipped ${data.skipped.length}`, true);
-        await renderFeeds();
+        await refresh();
       } catch (err) { banner(err.message); }
       e.target.value = "";
     } });
@@ -259,6 +283,33 @@ function drawFeeds() {
   root.append(el("div", { class: "toolbar" }, search, tagSel, add, importBtn, importInput, exportBtn));
   root.append(el("div", { id: "feedTableWrap" }));
   drawTable();
+}
+
+// feedRow builds one Feeds-table row. A healthy feed shows a plain status dot; a
+// failing feed wraps its dot in a focusable trigger that reveals the last fetch
+// error as a hover/focus tooltip (the styled wire-log bubble; the wrapper's
+// aria-label carries the same text for screen readers).
+function feedRow(f) {
+  let statusCell;
+  if (f.error) {
+    const tip = el("span", { class: "tip", "aria-hidden": "true" },
+      el("span", { class: "streak" }, `fail ×${f.fail_streak}`),
+      el("span", { class: "msg" }, f.error));
+    const wrap = el("span", {
+      class: "dotwrap", tabindex: "0", "data-grade": feedGrade(f),
+      "aria-label": `Fetch error (fail streak ${f.fail_streak}): ${f.error}`,
+    }, healthDot(f, true), tip);
+    statusCell = el("td", { class: "status" }, wrap);
+  } else {
+    statusCell = el("td", { class: "status" }, healthDot(f));
+  }
+  return el("tr", { "data-src": String(srcColorIndex(f.id)) },
+    statusCell,
+    el("td", { class: "title" }, el("a", { class: "feed-title", href: f.url, target: "_blank", rel: "noopener" }, f.title)),
+    el("td", {}, f.tag ? el("span", { class: "chip" }, f.tag) : ""),
+    el("td", {}, f.recipe ? el("span", { class: "chip" }, f.recipe) : ""),
+    el("td", { class: "actions" },
+      el("button", { class: "btn icon", title: "Edit", "aria-label": "Edit", onclick: () => openFeedModal(f), html: ICON_EDIT })));
 }
 
 function drawTable() {
@@ -270,15 +321,7 @@ function drawTable() {
       el("th", {}, "tag"), el("th", {}, "recipe"),
       el("th", {}, ""))));
   const tb = el("tbody", {});
-  for (const f of rows) {
-    tb.append(el("tr", { "data-src": String(srcColorIndex(f.id)) },
-      el("td", { class: "status" }, healthDot(f)),
-      el("td", { class: "title" }, el("a", { href: f.url, target: "_blank", rel: "noopener" }, f.title)),
-      el("td", {}, f.tag ? el("span", { class: "chip" }, f.tag) : ""),
-      el("td", {}, f.recipe ? el("span", { class: "chip" }, f.recipe) : ""),
-      el("td", { class: "actions" },
-        el("button", { class: "btn icon", title: "Edit", "aria-label": "Edit", onclick: () => openFeedModal(f), html: ICON_EDIT }))));
-  }
+  for (const f of rows) tb.append(feedRow(f));
   table.append(tb);
   wrap.replaceChildren(
     el("div", { class: "count" }, `showing ${rows.length} of ${feedsState.feeds.length}`),
@@ -286,7 +329,7 @@ function drawTable() {
 }
 
 async function deleteFeed(f) {
-  return confirmDelete(`Delete feed "${f.title}"?`, "/api/feeds/" + f.id, "Deleted " + f.title, renderFeeds);
+  return confirmDelete(`Delete feed "${f.title}"?`, "/api/feeds/" + f.id, "Deleted " + f.title);
 }
 
 let feedDialog;
@@ -312,7 +355,7 @@ function openFeedModal(f) {
     try {
       if (isEdit) await api("PUT", "/api/feeds/" + f.id, body);
       else await api("POST", "/api/feeds", body);
-      await renderFeeds();
+      await refresh();
       feedDialog.close();
       banner((isEdit ? "Updated " : "Added ") + body.title, true);
     } catch (e) { err.textContent = e.message; }
@@ -330,8 +373,8 @@ function openFeedModal(f) {
 }
 
 // --- recipes tab ------------------------------------------------------------
-async function renderRecipes() {
-  const recipes = await apiGet("/api/recipes");
+function renderRecipes() {
+  const recipes = snapshot.recipes; // from the cached snapshot — no store read
   const root = document.getElementById("recipes");
   root.replaceChildren();
   root.append(el("div", { class: "toolbar" },
@@ -357,7 +400,7 @@ async function renderRecipes() {
 renderers.recipes = renderRecipes;
 
 async function deleteRecipe(name) {
-  return confirmDelete(`Delete recipe "${name}"?`, "/api/recipes/" + encodeURIComponent(name), "Deleted recipe " + name, renderRecipes);
+  return confirmDelete(`Delete recipe "${name}"?`, "/api/recipes/" + encodeURIComponent(name), "Deleted recipe " + name);
 }
 
 let recipeDialog;
@@ -393,7 +436,7 @@ function openRecipeModal(name, rcp) {
       await api("PUT", "/api/recipes/" + encodeURIComponent(nm), body);
       recipeDialog.close();
       banner((isEdit ? "Updated " : "Created ") + "recipe " + nm, true);
-      await renderRecipes();
+      await refresh();
     } catch (e) { err.textContent = e.message; }
   } }, "Save");
 
@@ -431,8 +474,8 @@ function previewPanel(recipes) {
 }
 
 // --- syndicate tab ----------------------------------------------------------
-async function renderSyndicate() {
-  const outs = await apiGet("/api/syndicate");
+function renderSyndicate() {
+  const outs = snapshot.out; // from the cached snapshot — no store read
   const root = document.getElementById("syndicate");
   root.replaceChildren(el("div", { class: "toolbar" },
     el("button", { class: "btn primary", onclick: () => openOutModal(null) }, "+ New output")));
@@ -461,7 +504,7 @@ async function renderSyndicate() {
 renderers.syndicate = renderSyndicate;
 
 async function deleteOut(name) {
-  return confirmDelete(`Delete output "${name}"?`, "/api/syndicate/" + encodeURIComponent(name), "Deleted " + name, renderSyndicate);
+  return confirmDelete(`Delete output "${name}"?`, "/api/syndicate/" + encodeURIComponent(name), "Deleted " + name);
 }
 
 let outDialog;
@@ -489,7 +532,7 @@ function openOutModal(o) {
     };
     try {
       await api("PUT", "/api/syndicate/" + encodeURIComponent(nm), body);
-      outDialog.close(); banner("Saved output " + nm, true); await renderSyndicate();
+      outDialog.close(); banner("Saved output " + nm, true); await refresh();
     } catch (e) { err.textContent = e.message; }
   } }, "Save");
   outDialog.replaceChildren(
@@ -506,12 +549,12 @@ function openOutModal(o) {
 }
 
 // --- tools tab --------------------------------------------------------------
-async function renderTools() {
+function renderTools() {
   const root = document.getElementById("tools");
   root.replaceChildren();
 
-  // Fetch (both reads are independent — fetch them together)
-  const [feeds, g] = await Promise.all([apiGet("/api/feeds"), apiGet("/api/gen")]);
+  // Feed selector + generation readout come from the cached snapshot — no read.
+  const feeds = snapshot.feeds;
   const feedSel = el("select", {}, el("option", { value: "" }, "all feeds"));
   for (const f of feeds) feedSel.append(el("option", { value: f.id }, `#${f.id} ${f.title}`));
   const log = el("pre", { class: "log", "data-placeholder": "Idle — press Fetch now to stream the fetch log." });
@@ -537,13 +580,13 @@ async function renderTools() {
     el("h3", {}, "Fetch"),
     el("div", { class: "toolbar" }, feedSel, fetchBtn), log));
 
-  // Gen (g fetched above alongside feeds)
+  // Gen (from the cached snapshot)
   const genLabel = el("span", { class: "gen-readout" });
   const setGen = (n) => genLabel.replaceChildren("generation ", el("b", {}, String(n)));
-  setGen(g.gen);
+  setGen(snapshot.gen);
   const bumpBtn = el("button", { class: "btn", onclick: async () => {
     if (!confirm("Bump the store generation? This forces every reader's service worker to purge its pack cache.")) return;
-    try { const r = await api("POST", "/api/gen/bump"); setGen(r.gen); banner("Bumped to " + r.gen, true); }
+    try { const r = await api("POST", "/api/gen/bump"); snapshot.gen = r.gen; setGen(r.gen); banner("Bumped to " + r.gen, true); }
     catch (e) { banner(e.message); }
   } }, "Bump generation");
   root.append(el("section", { class: "panel" },
@@ -569,6 +612,14 @@ async function renderTools() {
 }
 renderers.tools = renderTools;
 
-// All tab renderers are registered above — render the default tab last so the
-// initial showTab() finds renderers.feeds (else the default tab loads empty).
-showTab("feeds");
+// Boot: pull the whole-store snapshot once, then render the default tab from it.
+// Tab switches read this cache; the store is re-read only here (a browser reload
+// re-runs boot) and after a mutation. There is no in-app refresh — use reload.
+(async () => {
+  try {
+    snapshot = await apiGet("/api/overview");
+  } catch (e) {
+    banner(e.message);
+  }
+  showTab("feeds");
+})();

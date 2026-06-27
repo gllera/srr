@@ -12,10 +12,17 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path"
 	"strconv"
 	"strings"
 	"syscall"
+	"testing/fstest"
 	"time"
+
+	"github.com/tdewolff/minify"
+	"github.com/tdewolff/minify/css"
+	"github.com/tdewolff/minify/html"
+	"github.com/tdewolff/minify/js"
 )
 
 //go:embed webui
@@ -51,12 +58,49 @@ func (o *ServeCmd) Run() error {
 func newMux() http.Handler {
 	mux := http.NewServeMux()
 	registerAPI(mux)
+	mux.Handle("GET /", http.FileServerFS(minifiedWebUI()))
+	return hostGuard(mux)
+}
+
+// minifiedWebUI minifies the embedded webui assets once at startup and serves
+// them from an in-memory FS. It reuses the tdewolff/minify the #minify mod
+// already vendors, so the build stays pure-Go with no JS toolchain. Embed reads
+// cannot fail at runtime, so a failure here is a build bug.
+func minifiedWebUI() fs.FS {
 	sub, err := fs.Sub(webuiFS, "webui")
 	if err != nil {
 		panic(err) // embed is compile-time; a failure here is a build bug
 	}
-	mux.Handle("GET /", http.FileServerFS(sub))
-	return hostGuard(mux)
+	m := minify.New()
+	m.AddFunc("text/css", css.Minify)
+	m.AddFunc("text/html", html.Minify)
+	m.AddFunc("application/javascript", js.Minify)
+	mediaType := map[string]string{
+		".css":  "text/css",
+		".html": "text/html",
+		".js":   "application/javascript",
+	}
+	out := fstest.MapFS{}
+	err = fs.WalkDir(sub, ".", func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil || d.IsDir() {
+			return walkErr
+		}
+		b, err := fs.ReadFile(sub, p)
+		if err != nil {
+			return err
+		}
+		if mt, ok := mediaType[path.Ext(p)]; ok {
+			if mb, err := m.Bytes(mt, b); err == nil {
+				b = mb // fall back to the original bytes if minify chokes
+			}
+		}
+		out[p] = &fstest.MapFile{Data: b}
+		return nil
+	})
+	if err != nil {
+		panic(err) // reading the embedded FS cannot fail at runtime
+	}
+	return out
 }
 
 // hostGuard rejects requests whose Host (or cross-origin Origin) is not a
@@ -138,6 +182,7 @@ func pathID(r *http.Request) (int, error) {
 
 // registerAPI is grown across phases. Routes are added by their tasks.
 func registerAPI(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/overview", getOverview)
 	mux.HandleFunc("GET /api/feeds", listFeeds)
 	mux.HandleFunc("POST /api/feeds", createFeed)
 	mux.HandleFunc("POST /api/feeds/apply", applyFeedsHandler)

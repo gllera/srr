@@ -41,7 +41,7 @@ func TestServeUIIndex(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
 		t.Fatalf("content-type = %q, want text/html", ct)
 	}
-	if !strings.Contains(rec.Body.String(), "<title>SRR Admin</title>") {
+	if !strings.Contains(rec.Body.String(), "<title>SRR Control</title>") {
 		body := rec.Body.String()
 		if len(body) > 200 {
 			body = body[:200]
@@ -77,7 +77,7 @@ func TestServeStaticAssets(t *testing.T) {
 	h := newMux()
 	for _, tc := range []struct{ path, needle string }{
 		{"/app.js", "renderFeeds"},
-		{"/app.css", "--accent"},
+		{"/app.css", "--signal"},
 	} {
 		rec := doReq(t, h, "GET", tc.path, "")
 		if rec.Code != http.StatusOK {

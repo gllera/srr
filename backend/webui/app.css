@@ -414,22 +414,97 @@ td.status {
    box-shadow: inset 3px 0 0 var(--src, var(--border));
    padding-left: 0.85em;
 }
-/* Title is the human value (sans); its url opens in a new tab. */
+/* A failing feed's dot is a tooltip trigger: hover or keyboard-focus it to reveal
+   the fetch error. Padding (offset by a negative margin so the dot stays put)
+   enlarges the hover/focus target; cursor:help marks it as inspectable. */
+.dotwrap {
+   position: relative;
+   display: inline-flex;
+   align-items: center;
+   padding: 0.3em;
+   margin: -0.3em;
+   border-radius: 50%;
+   cursor: help;
+}
+.dotwrap:focus-visible {
+   outline: 2px solid var(--signal);
+   outline-offset: 1px;
+}
+/* Title is the human value (sans); its url opens in a new tab. The cell absorbs
+   leftover width (max-width:0 + width:100%); truncation lives on the link, which
+   ellipsizes a too-long title to one line. */
 td.title {
    max-width: 0;
    width: 100%;
+}
+a.feed-title {
+   display: block;
+   max-width: 100%;
    white-space: nowrap;
    overflow: hidden;
    text-overflow: ellipsis;
-}
-td.title a {
    color: var(--fg);
    text-decoration: none;
    font-weight: 550;
 }
-td.title a:hover {
+a.feed-title:hover {
    text-decoration: underline;
    text-underline-offset: 2px;
+}
+/* The fetch-error tooltip — a wire-log bubble shown on the dot's hover/focus.
+   It sits below the dot and grows rightward (the dot is at the row's left edge,
+   so it never clips off-screen). The streak badge carries the grade color (warn
+   amber / fault red); the message is the verbatim error, wrapping long URLs. */
+.tip {
+   position: absolute;
+   top: calc(100% + 0.5em);
+   left: -0.2em;
+   z-index: 50;
+   /* A fixed wrap width (capped to the viewport on small screens) so the long
+      error reliably wraps to multiple lines instead of overflowing — block flow,
+      not flex, and not max-content (which clamps the box but lays the text out at
+      full width and spills past it). */
+   width: 30em;
+   max-width: calc(100vw - 3em);
+   /* reset the nowrap inherited from td.status — else the message can't wrap. */
+   white-space: normal;
+   padding: 0.5em 0.65em;
+   border-radius: var(--radius);
+   background: var(--well);
+   color: var(--well-ink);
+   box-shadow: var(--shadow);
+   line-height: 1.45;
+   visibility: hidden;
+   opacity: 0;
+   transition:
+      opacity 0.12s ease,
+      visibility 0.12s;
+   pointer-events: none;
+}
+.dotwrap:hover .tip,
+.dotwrap:focus-visible .tip,
+.dotwrap:focus-within .tip {
+   visibility: visible;
+   opacity: 1;
+}
+.tip .streak {
+   font-family: var(--font-mono);
+   font-size: 0.62rem;
+   font-weight: 600;
+   letter-spacing: 0.08em;
+   text-transform: uppercase;
+   color: var(--warn);
+   white-space: nowrap;
+   margin-right: 0.55em;
+}
+.dotwrap[data-grade="err"] .tip .streak {
+   color: var(--err);
+}
+.tip .msg {
+   font-family: var(--font-mono);
+   font-size: 0.76rem;
+   color: var(--well-ink);
+   overflow-wrap: anywhere;
 }
 td.actions {
    white-space: nowrap;
