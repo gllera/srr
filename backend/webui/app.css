@@ -1,156 +1,640 @@
+/* SRR Control — the operator's console for the writer side.
+
+   Visual identity is lifted from the SRR reader ("wire chrome wraps human
+   prose"): the same warm-paper palette, the mono "wire voice" for all chrome
+   (tabs, headers, ids, counts, pipe tokens, logs), the per-feed source-color
+   rail, and the RSS broadcast mark — here as the station ident that pulses
+   while a fetch streams. Tokens mirror frontend/src/tokens.css so the console
+   and the reader read as one product. Re-theme in :root; components below only
+   reference var(--*). */
+
 :root {
    color-scheme: light dark;
-   --accent: #f26522;
-   --line: #ccc;
+
+   /* Palette (light) — mirrors the reader's tokens. */
+   --bg: #fafaf7;
+   --surface-raised: #ffffff;
+   --fg: #1c1c1a;
+   --fg-2: #5e5c56;
+   --muted: #8a8780;
+   --faint: #d5d2cb;
+   --border: #cbc7be;
+   --hover: rgba(0, 0, 0, 0.04);
+   --radius: 4px;
+   --shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 12px 28px rgba(0, 0, 0, 0.08);
+   --scrim: rgba(0, 0, 0, 0.5);
+
+   /* Signal accent — the RSS amber. The writer side literally broadcasts the
+      feed, so the brand mark color is the operator's "live" accent (the reader
+      reserves its rose --accent for the save/reward gesture). */
+   --signal: #f26522;
+   --signal-ink: #ffffff; /* text over a filled signal surface */
+
+   /* Status grades — the wire's health (same buckets as the reader's feed
+      health: live / warn / fault / idle). */
+   --ok: #2e9e44;
+   --warn: #d98b00;
+   --err: #d33;
+   --idle: #9a968d;
+
+   /* The "wire log" well (Tools fetch/inspect output) — a recessed console
+      surface, darker than the page in both themes. */
+   --well: #1d2127;
+   --well-ink: #cdd3da;
+
+   /* Fonts — system stacks only (no webfonts, like the reader). --font-sans is
+      human content (titles, values); --font-mono is the wire voice (chrome). */
+   --font-sans:
+      system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+   --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
+
+/* Source-color ramp — copied from the reader so a feed's rail color here is the
+   same color it carries in the reader (data-src = feed_id % 8). */
+[data-src="0"] {
+   --src: oklch(0.55 0.13 25);
+}
+[data-src="1"] {
+   --src: oklch(0.55 0.13 250);
+}
+[data-src="2"] {
+   --src: oklch(0.55 0.13 160);
+}
+[data-src="3"] {
+   --src: oklch(0.55 0.13 295);
+}
+[data-src="4"] {
+   --src: oklch(0.55 0.13 70);
+}
+[data-src="5"] {
+   --src: oklch(0.55 0.13 205);
+}
+[data-src="6"] {
+   --src: oklch(0.55 0.13 340);
+}
+[data-src="7"] {
+   --src: oklch(0.55 0.13 115);
+}
+
+@media (prefers-color-scheme: dark) {
+   :root {
+      --bg: #111110;
+      --surface-raised: #1c1c1a;
+      --fg: #ccc9c2;
+      --fg-2: #8a877f;
+      --muted: #6e6c66;
+      --faint: #2a2928;
+      --border: #383734;
+      --hover: rgba(255, 255, 255, 0.05);
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 28px rgba(0, 0, 0, 0.55);
+      --scrim: rgba(0, 0, 0, 0.6);
+      --signal: #ff7a3c;
+      --signal-ink: #1a1410;
+      --ok: #45b85f;
+      --warn: #e0a83a;
+      --err: #e5645f;
+      --idle: #6e6c66;
+      --well: #0c0e11;
+      --well-ink: #c4cad1;
+   }
+   [data-src="0"] {
+      --src: oklch(0.74 0.125 25);
+   }
+   [data-src="1"] {
+      --src: oklch(0.74 0.125 250);
+   }
+   [data-src="2"] {
+      --src: oklch(0.74 0.125 160);
+   }
+   [data-src="3"] {
+      --src: oklch(0.74 0.125 295);
+   }
+   [data-src="4"] {
+      --src: oklch(0.74 0.125 70);
+   }
+   [data-src="5"] {
+      --src: oklch(0.74 0.125 205);
+   }
+   [data-src="6"] {
+      --src: oklch(0.74 0.125 340);
+   }
+   [data-src="7"] {
+      --src: oklch(0.74 0.125 115);
+   }
+}
+
+@media (prefers-contrast: more) {
+   :root {
+      --fg-2: #333;
+      --muted: #555;
+      --faint: #999;
+      --border: #777;
+   }
+}
+
 * {
    box-sizing: border-box;
 }
 body {
-   max-width: 1000px;
+   max-width: 1040px;
    margin: 0 auto;
-   padding: 1em;
-   font-family: system-ui, sans-serif;
-   line-height: 1.4;
+   padding: 1.1em 1.2em 4em;
+   font-family: var(--font-sans);
+   font-size: 15px;
+   line-height: 1.45;
+   color: var(--fg);
+   background: var(--bg);
 }
+
+/* --- masthead: station ident + section nav ------------------------------- */
 header {
    display: flex;
-   align-items: baseline;
+   align-items: center;
    gap: 1.5em;
-   border-bottom: 2px solid var(--accent);
-   padding-bottom: 0.5em;
+   flex-wrap: wrap;
+   padding-bottom: 0.7em;
+   border-bottom: 1px solid var(--border);
 }
-h1 {
-   margin: 0;
-   font-size: 1.3em;
-   color: var(--accent);
+.ident {
+   display: flex;
+   align-items: baseline;
+   gap: 0.5em;
+   white-space: nowrap;
 }
-nav button {
+.signal {
+   align-self: center;
+   display: inline-flex;
+   color: var(--signal);
+}
+.signal svg {
+   width: 1.15em;
+   height: 1.15em;
+   display: block;
+}
+.wordmark {
+   font-family: var(--font-mono);
+   font-weight: 700;
+   font-size: 1.15rem;
+   letter-spacing: 0.12em;
+   color: var(--fg);
+}
+.ident-tag {
+   font-family: var(--font-mono);
+   font-size: 0.62rem;
+   font-weight: 600;
+   letter-spacing: 0.26em;
+   text-transform: uppercase;
+   color: var(--muted);
+}
+/* The mark goes "on the air" while a fetch streams (body.fetching, toggled in
+   app.js) — the one signature motion, gated to a real live operation. */
+@media (prefers-reduced-motion: no-preference) {
+   body.fetching .signal {
+      animation: broadcast 1.1s ease-out infinite;
+   }
+}
+@keyframes broadcast {
+   0% {
+      opacity: 0.55;
+      transform: scale(0.9);
+   }
+   60% {
+      opacity: 1;
+      transform: scale(1.04);
+   }
+   100% {
+      opacity: 0.55;
+      transform: scale(0.9);
+   }
+}
+
+#tabs {
+   display: flex;
+   gap: 0.15em;
+   margin-left: auto;
+   flex-wrap: wrap;
+}
+#tabs button {
    background: none;
-   border: none;
-   font: inherit;
-   padding: 0.4em 0.6em;
+   border: 0;
+   border-bottom: 2px solid transparent;
+   font-family: var(--font-mono);
+   font-size: 0.78rem;
+   letter-spacing: 0.1em;
+   text-transform: uppercase;
+   padding: 0.5em 0.75em;
    cursor: pointer;
-   color: inherit;
-   opacity: 0.6;
+   color: var(--muted);
 }
-nav button.active {
-   opacity: 1;
-   border-bottom: 2px solid var(--accent);
+#tabs button:hover {
+   color: var(--fg);
 }
+#tabs button.active {
+   color: var(--fg);
+   border-bottom-color: var(--signal);
+}
+#tabs button:focus-visible {
+   outline: 2px solid var(--signal);
+   outline-offset: 2px;
+   border-radius: 2px;
+}
+
 .tab {
    display: none;
-   padding-top: 1em;
+   padding-top: 1.2em;
 }
 .tab.active {
    display: block;
 }
+
+/* --- banner -------------------------------------------------------------- */
 #banner {
-   margin: 0.6em 0;
+   margin: 0.8em 0 0;
    padding: 0.6em 0.8em;
-   border-radius: 4px;
-   background: #fdecea;
-   color: #611a15;
-   border: 1px solid #f5c6cb;
+   border-radius: var(--radius);
+   border: 1px solid var(--err);
+   background: color-mix(in srgb, var(--err) 12%, var(--surface-raised));
+   color: var(--fg);
    white-space: pre-wrap;
+   font-size: 0.92em;
 }
 #banner.ok {
-   background: #e6f4ea;
-   color: #1e4620;
-   border-color: #b7dfc1;
+   border-color: var(--ok);
+   background: color-mix(in srgb, var(--ok) 14%, var(--surface-raised));
 }
-table {
-   width: 100%;
-   border-collapse: collapse;
+
+/* --- health board: the Feeds-tab hero readout ---------------------------- */
+.board {
+   display: flex;
+   align-items: baseline;
+   gap: 1.1em;
+   flex-wrap: wrap;
+   font-family: var(--font-mono);
+   font-size: 0.74rem;
+   letter-spacing: 0.08em;
+   text-transform: uppercase;
+   color: var(--muted);
+   padding: 0.1em 0 0.9em;
 }
-th,
-td {
-   text-align: left;
-   padding: 0.35em 0.5em;
-   border-bottom: 1px solid var(--line);
-   vertical-align: top;
+.board .total {
+   font-size: 0.82rem;
+   letter-spacing: 0.06em;
+   color: var(--fg);
 }
-th {
-   font-weight: 600;
+.board .total b {
+   font-size: 1.15rem;
+   font-weight: 700;
 }
-td a {
-   color: inherit;
+.board .stat {
+   display: inline-flex;
+   align-items: center;
+   gap: 0.45em;
 }
-button.btn {
-   font: inherit;
-   padding: 0.35em 0.7em;
-   cursor: pointer;
+.board .stat b {
+   color: var(--fg);
+   font-weight: 700;
 }
+
+/* --- toolbars (filters + actions) ---------------------------------------- */
 .toolbar {
    display: flex;
    gap: 0.5em;
    align-items: center;
    flex-wrap: wrap;
-   margin-bottom: 0.8em;
+   margin-bottom: 1em;
 }
-.toolbar input,
-.toolbar select {
+.toolbar.spread {
+   margin-bottom: 0.6em;
+}
+input,
+select,
+textarea {
    font: inherit;
-   padding: 0.3em;
+   color: inherit;
+   background: var(--surface-raised);
+   border: 1px solid var(--border);
+   border-radius: var(--radius);
+   padding: 0.42em 0.55em;
 }
+.toolbar input[type="search"] {
+   min-width: 14em;
+}
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+   outline: 2px solid var(--signal);
+   outline-offset: -1px;
+   border-color: var(--signal);
+}
+
+/* --- buttons ------------------------------------------------------------- */
+button.btn {
+   font-family: var(--font-mono);
+   font-size: 0.78rem;
+   letter-spacing: 0.04em;
+   background: var(--surface-raised);
+   color: var(--fg);
+   border: 1px solid var(--border);
+   border-radius: var(--radius);
+   padding: 0.45em 0.8em;
+   cursor: pointer;
+}
+button.btn:hover {
+   background: var(--hover);
+   border-color: var(--muted);
+}
+button.btn:focus-visible {
+   outline: 2px solid var(--signal);
+   outline-offset: 2px;
+}
+button.btn:disabled {
+   opacity: 0.5;
+   cursor: default;
+}
+/* Primary = the section's main create/run action. Filled signal amber. */
+button.btn.primary {
+   background: var(--signal);
+   border-color: var(--signal);
+   color: var(--signal-ink);
+   font-weight: 600;
+}
+button.btn.primary:hover {
+   background: color-mix(in srgb, var(--signal) 88%, #000);
+   border-color: color-mix(in srgb, var(--signal) 88%, #000);
+}
+/* Icon-only row actions: square, SVG block-centered, inherits text color. */
+button.btn.icon {
+   padding: 0.35em 0.45em;
+   color: var(--muted);
+}
+button.btn.icon:hover {
+   color: var(--fg);
+}
+button.btn.icon svg {
+   display: block;
+}
+button.btn.danger {
+   color: var(--err);
+   border-color: color-mix(in srgb, var(--err) 45%, var(--border));
+}
+button.btn.danger:hover {
+   background: color-mix(in srgb, var(--err) 12%, var(--surface-raised));
+   border-color: var(--err);
+}
+
+/* --- tables -------------------------------------------------------------- */
+table {
+   width: 100%;
+   border-collapse: collapse;
+}
+thead th {
+   font-family: var(--font-mono);
+   font-size: 0.66rem;
+   font-weight: 600;
+   letter-spacing: 0.13em;
+   text-transform: uppercase;
+   color: var(--muted);
+   text-align: left;
+   padding: 0 0.55em 0.5em;
+   border-bottom: 1px solid var(--border);
+}
+tbody td {
+   padding: 0.5em 0.55em;
+   border-bottom: 1px solid var(--faint);
+   vertical-align: middle;
+}
+tbody tr:hover td {
+   background: var(--hover);
+}
+/* Source-color rail on the leading cell — origin at a glance, keyed to the
+   reader. The status cell carries both the rail (left edge) and the health dot. */
+td.status {
+   width: 1px;
+   white-space: nowrap;
+   box-shadow: inset 3px 0 0 var(--src, var(--border));
+   padding-left: 0.85em;
+}
+/* Title is the human value (sans); its url opens in a new tab. */
+td.title {
+   max-width: 0;
+   width: 100%;
+   white-space: nowrap;
+   overflow: hidden;
+   text-overflow: ellipsis;
+}
+td.title a {
+   color: var(--fg);
+   text-decoration: none;
+   font-weight: 550;
+}
+td.title a:hover {
+   text-decoration: underline;
+   text-underline-offset: 2px;
+}
+td.actions {
+   white-space: nowrap;
+   text-align: right;
+}
+
+/* Chips — a tag or recipe reference in the wire voice. */
+.chip {
+   display: inline-block;
+   font-family: var(--font-mono);
+   font-size: 0.72rem;
+   letter-spacing: 0.02em;
+   padding: 0.12em 0.5em;
+   border: 1px solid var(--border);
+   border-radius: 999px;
+   color: var(--fg-2);
+   background: var(--surface-raised);
+}
+
+/* Pipe steps as connected wire tokens — the processing pipeline made visible. */
+.pipe {
+   display: flex;
+   align-items: center;
+   gap: 0.4em;
+   flex-wrap: wrap;
+   font-family: var(--font-mono);
+   font-size: 0.78rem;
+}
+.pipe .tok {
+   padding: 0.1em 0.45em;
+   border: 1px solid var(--border);
+   border-radius: var(--radius);
+   background: var(--surface-raised);
+}
+.pipe .tok.builtin {
+   color: var(--signal);
+   border-color: color-mix(in srgb, var(--signal) 40%, var(--border));
+}
+.pipe .arrow {
+   color: var(--muted);
+}
+
+/* --- status dots --------------------------------------------------------- */
 .dot {
    display: inline-block;
-   width: 0.7em;
-   height: 0.7em;
+   width: 0.62em;
+   height: 0.62em;
    border-radius: 50%;
+   vertical-align: middle;
 }
 .dot.green {
-   background: #2e9e44;
+   background: var(--ok);
 }
 .dot.amber {
-   background: #e0a800;
+   background: var(--warn);
 }
 .dot.red {
-   background: #d33;
+   background: var(--err);
 }
 .dot.gray {
-   background: #999;
+   background: transparent;
+   box-shadow: inset 0 0 0 1.5px var(--idle);
 }
+
+/* --- panels (Tools) ------------------------------------------------------ */
+.panel {
+   border: 1px solid var(--border);
+   border-radius: var(--radius);
+   background: var(--surface-raised);
+   padding: 0.9em 1em 1.1em;
+   margin-bottom: 1.1em;
+}
+.panel > h3,
+.section-head {
+   margin: 0 0 0.7em;
+   font-family: var(--font-mono);
+   font-size: 0.7rem;
+   font-weight: 600;
+   letter-spacing: 0.13em;
+   text-transform: uppercase;
+   color: var(--muted);
+}
+.panel .hint {
+   color: var(--muted);
+   font-size: 0.85em;
+   margin: 0.5em 0 0;
+}
+.gen-readout {
+   font-family: var(--font-mono);
+   font-size: 0.9rem;
+}
+.gen-readout b {
+   color: var(--signal);
+}
+
+/* --- wire log (Tools fetch/inspect output) ------------------------------- */
+pre.log {
+   font-family: var(--font-mono);
+   font-size: 0.82rem;
+   line-height: 1.55;
+   background: var(--well);
+   color: var(--well-ink);
+   padding: 0.7em 0.85em;
+   border-radius: var(--radius);
+   max-height: 50vh;
+   overflow: auto;
+   white-space: pre-wrap;
+   margin: 0.7em 0 0;
+}
+pre.log:empty::before {
+   content: attr(data-placeholder);
+   color: color-mix(in srgb, var(--well-ink) 45%, transparent);
+}
+
+/* --- dialogs ------------------------------------------------------------- */
 dialog {
-   border: 1px solid var(--line);
+   border: 1px solid var(--border);
    border-radius: 6px;
-   padding: 1em;
-   min-width: 340px;
+   padding: 1.1em 1.2em;
+   min-width: 360px;
+   max-width: 92vw;
+   color: var(--fg);
+   background: var(--surface-raised);
+   box-shadow: var(--shadow);
+}
+dialog::backdrop {
+   background: var(--scrim);
+}
+dialog h3 {
+   margin: 0 0 0.4em;
+   font-family: var(--font-mono);
+   font-size: 0.78rem;
+   font-weight: 600;
+   letter-spacing: 0.1em;
+   text-transform: uppercase;
+   color: var(--fg);
 }
 dialog label {
    display: block;
-   margin: 0.5em 0 0.15em;
-   font-size: 0.9em;
+   margin: 0.7em 0 0.2em;
+   font-family: var(--font-mono);
+   font-size: 0.68rem;
+   letter-spacing: 0.06em;
+   text-transform: uppercase;
+   color: var(--muted);
 }
 dialog input,
 dialog select {
    width: 100%;
-   font: inherit;
-   padding: 0.35em;
 }
 dialog .row {
    display: flex;
    gap: 0.5em;
    justify-content: flex-end;
-   margin-top: 1em;
+   margin-top: 1.2em;
 }
-.muted {
-   color: #888;
-   font-size: 0.85em;
-}
+
+/* --- preview ------------------------------------------------------------- */
 article.preview {
-   border-bottom: 1px solid var(--line);
-   padding: 0.8em 0;
+   border-top: 1px solid var(--faint);
+   padding: 0.9em 0;
+}
+article.preview h4 {
+   margin: 0 0 0.4em;
+}
+article.preview h4 a {
+   color: var(--fg);
 }
 article.preview .content img {
    max-width: 100%;
    height: auto;
 }
-pre.log {
-   background: #0001;
-   padding: 0.6em;
-   border-radius: 4px;
-   max-height: 50vh;
-   overflow: auto;
-   white-space: pre-wrap;
+
+/* --- directed empty states (the reader's voice) -------------------------- */
+.empty {
+   text-align: center;
+   padding: 2.6em 1em;
+   color: var(--fg-2);
+}
+.empty-eyebrow {
+   font-family: var(--font-mono);
+   font-size: 0.68rem;
+   font-weight: 600;
+   letter-spacing: 0.16em;
+   text-transform: uppercase;
+   color: var(--muted);
+   margin-bottom: 0.5em;
+}
+.empty-msg {
+   max-width: 42ch;
+   margin: 0 auto;
+}
+
+.muted {
+   color: var(--muted);
+   font-size: 0.85em;
+}
+.count {
+   font-family: var(--font-mono);
+   font-size: 0.72rem;
+   letter-spacing: 0.06em;
+   text-transform: uppercase;
+   color: var(--muted);
+   margin: 0 0 0.5em;
+}
+a {
+   color: var(--signal);
 }
