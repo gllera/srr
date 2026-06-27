@@ -260,8 +260,18 @@ func captureInspectStdout(fn func() error) (string, error) {
 		out <- buf.String()
 	}()
 
-	runErr := fn()
-	wr.Close()
-	os.Stdout = orig
+	// Restore os.Stdout and close the pipe writer even if fn panics — otherwise a
+	// panic in InspectCmd.Run would leave the whole process's stdout redirected to
+	// a closed pipe and leak the reader goroutine. Closing wr here (before the
+	// receive on out) signals EOF so the reader completes; an inner closure keeps
+	// the close ordered before <-out on the normal path (a top-level defer would
+	// deadlock, since <-out needs EOF first).
+	runErr := func() error {
+		defer func() {
+			wr.Close()
+			os.Stdout = orig
+		}()
+		return fn()
+	}()
 	return strings.TrimRight(<-out, "\n"), runErr
 }
