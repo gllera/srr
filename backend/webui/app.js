@@ -15,6 +15,31 @@ async function api(method, path, body) {
 }
 const apiGet = (p) => api("GET", p);
 
+// streamSSE POSTs to path and invokes onEvent({event, data}) for each SSE frame.
+async function streamSSE(path, onEvent) {
+  const res = await fetch(path, { method: "POST" });
+  if (!res.ok) throw new Error(res.statusText);
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let i;
+    while ((i = buf.indexOf("\n\n")) >= 0) {
+      const frame = buf.slice(0, i);
+      buf = buf.slice(i + 2);
+      let ev = "message", data = "";
+      for (const line of frame.split("\n")) {
+        if (line.startsWith("event:")) ev = line.slice(6).trim();
+        else if (line.startsWith("data:")) data += line.slice(5).trim();
+      }
+      onEvent({ event: ev, data: data ? JSON.parse(data) : null });
+    }
+  }
+}
+
 function banner(msg, ok) {
   const b = document.getElementById("banner");
   b.textContent = msg;
@@ -111,7 +136,23 @@ function drawFeeds() {
   }
   const add = el("button", { class: "btn", onclick: () => openFeedModal(null) }, "+ Add feed");
 
-  root.append(el("div", { class: "toolbar" }, search, tagSel, add));
+  const exportBtn = el("button", { class: "btn", onclick: () => { window.location = "/api/export"; } }, "Export OPML");
+  const importInput = el("input", { type: "file", accept: ".opml,.xml,text/xml", style: "display:none",
+    onchange: async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      try {
+        const text = await file.text();
+        const res = await fetch("/api/import", { method: "POST", body: text });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || res.statusText);
+        banner(`Imported ${data.imported}, skipped ${data.skipped.length}`, true);
+        await renderFeeds();
+      } catch (err) { banner(err.message); }
+      e.target.value = "";
+    } });
+  const importBtn = el("button", { class: "btn", onclick: () => importInput.click() }, "Import OPML");
+  root.append(el("div", { class: "toolbar" }, search, tagSel, add, importBtn, importInput, exportBtn));
   root.append(el("div", { id: "feedTableWrap" }));
   drawTable();
 }
@@ -313,3 +354,131 @@ function previewPanel() {
     el("h3", {}, "Preview a recipe against a URL"),
     el("div", { class: "toolbar" }, url, recipeSel, go), out);
 }
+
+// --- syndicate tab ----------------------------------------------------------
+async function renderSyndicate() {
+  const outs = await apiGet("/api/syndicate");
+  const root = document.getElementById("syndicate");
+  root.replaceChildren(el("div", { class: "toolbar" },
+    el("button", { class: "btn", onclick: () => openOutModal(null) }, "+ New output")));
+  if (!outs.length) {
+    root.append(el("div", { class: "muted" }, "No syndication outputs. (Writing them needs SRR_CDN_URL set on the fetch loop.)"));
+  }
+  const table = el("table", {}, el("thead", {}, el("tr", {},
+    el("th", {}, "name"), el("th", {}, "format"), el("th", {}, "tags"),
+    el("th", {}, "feeds"), el("th", {}, "limit"), el("th", {}, ""))));
+  const tb = el("tbody", {});
+  for (const o of outs) {
+    tb.append(el("tr", {},
+      el("td", {}, o.name),
+      el("td", {}, o.format),
+      el("td", {}, (o.tags || []).join(", ")),
+      el("td", {}, (o.feeds || []).join(", ")),
+      el("td", {}, String(o.limit || "")),
+      el("td", {},
+        el("button", { class: "btn", onclick: () => openOutModal(o) }, "edit"), " ",
+        el("button", { class: "btn", onclick: () => deleteOut(o.name) }, "✕"))));
+  }
+  table.append(tb);
+  root.append(table);
+}
+renderers.syndicate = renderSyndicate;
+
+async function deleteOut(name) {
+  if (!confirm(`Delete output "${name}"?`)) return;
+  try { await api("DELETE", "/api/syndicate/" + encodeURIComponent(name)); await renderSyndicate(); }
+  catch (e) { banner(e.message); }
+}
+
+let outDialog;
+function openOutModal(o) {
+  if (!outDialog) { outDialog = el("dialog", {}); document.body.append(outDialog); }
+  const isEdit = !!o;
+  const v = o || { name: "", title: "", format: "rss", tags: [], feeds: [], limit: 50 };
+  const name = el("input", { value: v.name, disabled: isEdit ? "" : null });
+  const fmt = el("select", {}, el("option", { value: "rss" }, "rss"), el("option", { value: "json" }, "json"));
+  fmt.value = v.format;
+  const title = el("input", { value: v.title || "" });
+  const tags = el("input", { value: (v.tags || []).join(","), placeholder: "comma-separated tags" });
+  const feeds = el("input", { value: (v.feeds || []).join(","), placeholder: "comma-separated feed ids" });
+  const limit = el("input", { type: "number", value: v.limit || 50 });
+  const err = el("div", { class: "muted" });
+  const save = el("button", { class: "btn", onclick: async () => {
+    const nm = (v.name || name.value).trim();
+    const body = {
+      title: title.value.trim(), format: fmt.value,
+      tags: tags.value.split(",").map((s) => s.trim()).filter(Boolean),
+      feeds: feeds.value.split(",").map((s) => s.trim()).filter(Boolean).map(Number),
+      limit: Number(limit.value) || 0,
+    };
+    try {
+      await api("PUT", "/api/syndicate/" + encodeURIComponent(nm), body);
+      outDialog.close(); banner("Saved output " + nm, true); await renderSyndicate();
+    } catch (e) { err.textContent = e.message; }
+  } }, "Save");
+  outDialog.replaceChildren(
+    el("h3", {}, isEdit ? "Edit output" : "New output"),
+    el("label", {}, "Name"), name,
+    el("label", {}, "Format"), fmt,
+    el("label", {}, "Title"), title,
+    el("label", {}, "Tags"), tags,
+    el("label", {}, "Feed ids"), feeds,
+    el("label", {}, "Limit"), limit,
+    err,
+    el("div", { class: "row" },
+      el("button", { class: "btn", onclick: () => outDialog.close() }, "Cancel"), save));
+  outDialog.showModal();
+}
+
+// --- tools tab --------------------------------------------------------------
+async function renderTools() {
+  const root = document.getElementById("tools");
+  root.replaceChildren();
+
+  // Fetch
+  const feeds = await apiGet("/api/feeds");
+  const feedSel = el("select", {}, el("option", { value: "" }, "all feeds"));
+  for (const f of feeds) feedSel.append(el("option", { value: f.id }, `#${f.id} ${f.title}`));
+  const log = el("pre", { class: "log" });
+  const fetchBtn = el("button", { class: "btn", onclick: async () => {
+    log.textContent = "";
+    const q = feedSel.value ? "?feed=" + encodeURIComponent(feedSel.value) : "";
+    fetchBtn.disabled = true;
+    try {
+      await streamSSE("/api/fetch" + q, ({ event, data }) => {
+        if (event === "feed") log.textContent += `#${data.id} ${data.title}: ${data.error ? "ERROR " + data.error : data.new + " new"}\n`;
+        else if (event === "done") log.textContent += "done.\n";
+        else if (event === "error") log.textContent += "ERROR: " + data.error + "\n";
+      });
+    } catch (e) { log.textContent += "stream error: " + e.message + "\n"; }
+    fetchBtn.disabled = false;
+  } }, "Fetch now");
+  root.append(el("h3", {}, "Fetch"),
+    el("div", { class: "toolbar" }, feedSel, fetchBtn), log);
+
+  // Gen
+  const g = await apiGet("/api/gen");
+  const genLabel = el("span", {}, "generation: " + g.gen);
+  const bumpBtn = el("button", { class: "btn", onclick: async () => {
+    if (!confirm("Bump the store generation? This forces every reader's service worker to purge its pack cache.")) return;
+    try { const r = await api("POST", "/api/gen/bump"); genLabel.textContent = "generation: " + r.gen; banner("Bumped to " + r.gen, true); }
+    catch (e) { banner(e.message); }
+  } }, "Bump generation");
+  root.append(el("h3", {}, "Generation"), el("div", { class: "toolbar" }, genLabel, bumpBtn));
+
+  // Inspect
+  const out = el("pre", { class: "log" });
+  const hashIn = el("input", { placeholder: "hash e.g. 0,2485!big_info", style: "min-width:18em" });
+  const runInspect = async (mode, extra) => {
+    out.textContent = "running…";
+    try { const r = await apiGet(`/api/inspect?mode=${mode}${extra || ""}`); out.textContent = (r.ok ? "" : "FAILED: " + (r.error || "") + "\n\n") + r.report; }
+    catch (e) { out.textContent = e.message; }
+  };
+  root.append(el("h3", {}, "Inspect"),
+    el("div", { class: "toolbar" },
+      el("button", { class: "btn", onclick: () => runInspect("validate") }, "Validate store"),
+      hashIn,
+      el("button", { class: "btn", onclick: () => runInspect("from-hash", "&hash=" + encodeURIComponent(hashIn.value)) }, "From hash")),
+    out);
+}
+renderers.tools = renderTools;
