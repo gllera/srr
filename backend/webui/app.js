@@ -65,16 +65,51 @@ function el(tag, attrs, ...kids) {
   return e;
 }
 
+// Inline monochrome icons (Feather-style, currentColor) shared by the row-action
+// buttons (edit / delete) across every tab.
+const ICON_EDIT =
+  '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>';
+const ICON_DELETE =
+  '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>';
+
+// Source-color slot for a feed id — mirrors the reader's fmt.srcColorIndex so a
+// feed's rail color in the console matches the color it carries in the reader.
+const SRC_COLORS = 8;
+const srcColorIndex = (id) => ((id % SRC_COLORS) + SRC_COLORS) % SRC_COLORS;
+
+// pipeTokens renders a recipe's pipe steps as connected wire tokens (mono chips
+// joined by → arrows); a built-in #mod gets the signal tint. Empty pipe → em dash.
+function pipeTokens(pipe) {
+  const steps = pipe || [];
+  if (!steps.length) return el("span", { class: "muted" }, "—");
+  const kids = [];
+  steps.forEach((s, i) => {
+    if (i) kids.push(el("span", { class: "arrow" }, "→"));
+    kids.push(el("span", { class: "tok" + (s.startsWith("#") ? " builtin" : "") }, s));
+  });
+  return el("div", { class: "pipe" }, ...kids);
+}
+
+// emptyState is the shared directed empty panel — a wire eyebrow over a one-line
+// invitation, matching the reader's empty-state voice.
+function emptyState(eyebrow, msg) {
+  return el("div", { class: "empty" },
+    el("div", { class: "empty-eyebrow" }, eyebrow),
+    el("div", { class: "empty-msg" }, msg));
+}
+
 // confirmDelete is the shared confirm → DELETE → banner → refresh flow used by
 // every tab's delete action.
 async function confirmDelete(question, url, successMsg, refresh) {
-  if (!confirm(question)) return;
+  if (!confirm(question)) return false;
   try {
     await api("DELETE", url);
     banner(successMsg, true);
     await refresh();
+    return true;
   } catch (e) {
     banner(e.message);
+    return false;
   }
 }
 
@@ -90,10 +125,19 @@ function appendRecipeOptions(sel, selected, recipes) {
 }
 
 // dialogRow is the shared Cancel + Save footer row every modal ends with.
-function dialogRow(dlg, saveBtn) {
-  return el("div", { class: "row" },
-    el("button", { class: "btn", onclick: () => dlg.close() }, "Cancel"),
-    saveBtn);
+// dialogRow builds the modal footer: Cancel + Save on the right, plus — when an
+// onDelete is given (edit of an existing, deletable item) — a Delete button on
+// the left. onDelete resolves truthy on a confirmed delete, then the dialog closes.
+function dialogRow(dlg, saveBtn, onDelete) {
+  const kids = [];
+  if (onDelete) {
+    kids.push(el("button", {
+      class: "btn danger", style: "margin-right:auto",
+      onclick: async () => { if (await onDelete()) dlg.close(); },
+    }, "Delete"));
+  }
+  kids.push(el("button", { class: "btn", onclick: () => dlg.close() }, "Cancel"), saveBtn);
+  return el("div", { class: "row" }, ...kids);
 }
 
 // --- tab router -------------------------------------------------------------
@@ -112,22 +156,45 @@ function showTab(name) {
 document.querySelectorAll("#tabs button").forEach((b) =>
   b.addEventListener("click", () => showTab(b.dataset.tab)));
 
-showTab("feeds");
-
 // --- feeds tab --------------------------------------------------------------
 const feedsState = { feeds: [], tags: [], recipes: {}, search: "", tag: "" };
 const UNTAGGED = "\x00"; // sentinel: the "(untagged)" filter option value, distinct from "" (= all tags)
 
+// feedGrade buckets a feed's health: ok (live) / warn (failing, recoverable) /
+// err (fault, streak >= 3) / idle (never fetched). The dot + board share it.
+function feedGrade(f) {
+  if (f.error) return f.fail_streak >= 3 ? "err" : "warn";
+  return f.last_ok ? "ok" : "idle";
+}
+const GRADE_DOT = { ok: "green", warn: "amber", err: "red", idle: "gray" };
+
 function healthDot(f) {
-  let cls = "green";
-  if (f.error) cls = f.fail_streak >= 3 ? "red" : "amber";
-  else if (!f.last_ok) cls = "gray";
   const title = f.error
     ? `${f.error} (fail streak ${f.fail_streak})`
     : f.last_ok
     ? "ok, last fetch " + new Date(f.last_ok * 1000).toLocaleString()
     : "never fetched";
-  return el("span", { class: "dot " + cls, title });
+  return el("span", { class: "dot " + GRADE_DOT[feedGrade(f)], title });
+}
+
+// healthBoard is the Feeds-tab hero: a one-line readout of the whole wire's
+// health (total sources, then each non-empty grade with its count).
+function healthBoard() {
+  const c = { ok: 0, warn: 0, err: 0, idle: 0 };
+  for (const f of feedsState.feeds) c[feedGrade(f)]++;
+  const total = feedsState.feeds.length;
+  const board = el("div", { class: "board" },
+    el("span", { class: "total" }, el("b", {}, String(total)), total === 1 ? " source" : " sources"));
+  const add = (n, dot, label) => {
+    if (!n) return;
+    board.append(el("span", { class: "stat" },
+      el("i", { class: "dot " + dot }), el("b", {}, String(n)), " " + label));
+  };
+  add(c.ok, "green", "live");
+  add(c.warn, "amber", "warn");
+  add(c.err, "red", "fault");
+  add(c.idle, "gray", "idle");
+  return board;
 }
 
 function feedMatches(f) {
@@ -170,7 +237,7 @@ function drawFeeds() {
     if (optVal === feedsState.tag) o.selected = true;
     tagSel.append(o);
   }
-  const add = el("button", { class: "btn", onclick: () => openFeedModal(null) }, "+ Add feed");
+  const add = el("button", { class: "btn primary", onclick: () => openFeedModal(null) }, "+ Add feed");
 
   const exportBtn = el("button", { class: "btn", onclick: () => { window.location = "/api/export"; } }, "Export OPML");
   const importInput = el("input", { type: "file", accept: ".opml,.xml,text/xml", style: "display:none",
@@ -188,6 +255,7 @@ function drawFeeds() {
       e.target.value = "";
     } });
   const importBtn = el("button", { class: "btn", onclick: () => importInput.click() }, "Import OPML");
+  root.append(healthBoard());
   root.append(el("div", { class: "toolbar" }, search, tagSel, add, importBtn, importInput, exportBtn));
   root.append(el("div", { id: "feedTableWrap" }));
   drawTable();
@@ -200,23 +268,20 @@ function drawTable() {
     el("thead", {}, el("tr", {},
       el("th", {}, ""), el("th", {}, "title"),
       el("th", {}, "tag"), el("th", {}, "recipe"),
-      el("th", {}, "arts"), el("th", {}, ""))));
+      el("th", {}, ""))));
   const tb = el("tbody", {});
   for (const f of rows) {
-    tb.append(el("tr", {},
-      el("td", {}, healthDot(f)),
-      el("td", {}, el("a", { href: f.url, target: "_blank", rel: "noopener" }, f.title)),
-      el("td", {}, f.tag || ""),
-      el("td", {}, f.recipe || ""),
-      el("td", {}, String(f.total_art)),
-      el("td", {},
-        el("button", { class: "btn", onclick: () => openFeedModal(f) }, "edit"),
-        " ",
-        el("button", { class: "btn", onclick: () => deleteFeed(f) }, "✕"))));
+    tb.append(el("tr", { "data-src": String(srcColorIndex(f.id)) },
+      el("td", { class: "status" }, healthDot(f)),
+      el("td", { class: "title" }, el("a", { href: f.url, target: "_blank", rel: "noopener" }, f.title)),
+      el("td", {}, f.tag ? el("span", { class: "chip" }, f.tag) : ""),
+      el("td", {}, f.recipe ? el("span", { class: "chip" }, f.recipe) : ""),
+      el("td", { class: "actions" },
+        el("button", { class: "btn icon", title: "Edit", "aria-label": "Edit", onclick: () => openFeedModal(f), html: ICON_EDIT }))));
   }
   table.append(tb);
   wrap.replaceChildren(
-    el("div", { class: "muted" }, `${rows.length} of ${feedsState.feeds.length} feeds`),
+    el("div", { class: "count" }, `showing ${rows.length} of ${feedsState.feeds.length}`),
     table);
 }
 
@@ -239,7 +304,7 @@ function openFeedModal(f) {
   appendRecipeOptions(recipe, v.recipe || "", feedsState.recipes);
   const err = el("div", { class: "muted" });
 
-  const save = el("button", { class: "btn", onclick: async () => {
+  const save = el("button", { class: "btn primary", onclick: async () => {
     const body = {
       title: title.value.trim(), url: url.value.trim(),
       tag: tag.value.trim(), recipe: recipe.value.trim(),
@@ -260,7 +325,7 @@ function openFeedModal(f) {
     el("label", {}, "Tag"), tag,
     el("label", {}, "Recipe (blank = default)"), recipe,
     err,
-    dialogRow(feedDialog, save));
+    dialogRow(feedDialog, save, isEdit ? () => deleteFeed(f) : null));
   feedDialog.showModal();
 }
 
@@ -270,22 +335,19 @@ async function renderRecipes() {
   const root = document.getElementById("recipes");
   root.replaceChildren();
   root.append(el("div", { class: "toolbar" },
-    el("button", { class: "btn", onclick: () => openRecipeModal(null, null) }, "+ New recipe")));
+    el("button", { class: "btn primary", onclick: () => openRecipeModal(null, null) }, "+ New recipe")));
 
   const table = el("table", {}, el("thead", {}, el("tr", {},
     el("th", {}, "name"), el("th", {}, "ingest"), el("th", {}, "pipe"), el("th", {}, ""))));
   const tb = el("tbody", {});
   for (const name of Object.keys(recipes).sort()) {
     const rcp = recipes[name];
-    const actions = el("td", {},
-      el("button", { class: "btn", onclick: () => openRecipeModal(name, rcp) }, "edit"));
-    if (name !== "default") {
-      actions.append(" ", el("button", { class: "btn", onclick: () => deleteRecipe(name) }, "✕"));
-    }
+    const actions = el("td", { class: "actions" },
+      el("button", { class: "btn icon", title: "Edit", "aria-label": "Edit", onclick: () => openRecipeModal(name, rcp), html: ICON_EDIT }));
     tb.append(el("tr", {},
-      el("td", {}, name),
-      el("td", {}, rcp.ingest || ""),
-      el("td", {}, (rcp.pipe || []).join("  →  ")),
+      el("td", {}, el("span", { class: "chip" }, name)),
+      el("td", {}, rcp.ingest ? el("span", { class: "chip" }, rcp.ingest) : el("span", { class: "muted" }, "#feed")),
+      el("td", {}, pipeTokens(rcp.pipe)),
       actions));
   }
   table.append(tb);
@@ -316,13 +378,13 @@ function openRecipeModal(name, rcp) {
     steps.forEach((s, i) => {
       const inp = el("input", { value: s, oninput: (e) => (steps[i] = e.target.value) });
       stepsBox.append(el("div", { class: "toolbar" }, inp,
-        el("button", { class: "btn", onclick: () => { steps.splice(i, 1); drawSteps(); } }, "✕")));
+        el("button", { class: "btn icon", title: "Remove step", "aria-label": "Remove step", onclick: () => { steps.splice(i, 1); drawSteps(); }, html: ICON_DELETE })));
     });
     stepsBox.append(el("button", { class: "btn", onclick: () => { steps.push(""); drawSteps(); } }, "+ step"));
   }
   drawSteps();
 
-  const save = el("button", { class: "btn", onclick: async () => {
+  const save = el("button", { class: "btn primary", onclick: async () => {
     err.textContent = "";
     const nm = (name || nameIn.value).trim();
     if (!nm) { err.textContent = "name required"; return; }
@@ -341,7 +403,7 @@ function openRecipeModal(name, rcp) {
     el("label", {}, "Ingest (blank = inherit default)"), ingestIn,
     el("label", {}, "Pipe steps"), stepsBox,
     err,
-    dialogRow(recipeDialog, save));
+    dialogRow(recipeDialog, save, isEdit && name !== "default" ? () => deleteRecipe(name) : null));
   recipeDialog.showModal();
 }
 
@@ -363,8 +425,8 @@ function previewPanel(recipes) {
       }
     } catch (e) { out.replaceChildren(el("div", { class: "muted" }, e.message)); }
   } }, "Preview");
-  return el("div", {},
-    el("h3", {}, "Preview a recipe against a URL"),
+  return el("div", { style: "margin-top:1.6em" },
+    el("h3", { class: "section-head" }, "Preview a recipe against a URL"),
     el("div", { class: "toolbar" }, url, recipeSel, go), out);
 }
 
@@ -373,9 +435,11 @@ async function renderSyndicate() {
   const outs = await apiGet("/api/syndicate");
   const root = document.getElementById("syndicate");
   root.replaceChildren(el("div", { class: "toolbar" },
-    el("button", { class: "btn", onclick: () => openOutModal(null) }, "+ New output")));
+    el("button", { class: "btn primary", onclick: () => openOutModal(null) }, "+ New output")));
   if (!outs.length) {
-    root.append(el("div", { class: "muted" }, "No syndication outputs. (Writing them needs SRR_CDN_URL set on the fetch loop.)"));
+    root.append(emptyState("No outputs yet",
+      "Publish chosen tags or feeds as a rolling RSS or JSON feed. Writing them needs SRR_CDN_URL set on the fetch loop."));
+    return;
   }
   const table = el("table", {}, el("thead", {}, el("tr", {},
     el("th", {}, "name"), el("th", {}, "format"), el("th", {}, "tags"),
@@ -383,14 +447,13 @@ async function renderSyndicate() {
   const tb = el("tbody", {});
   for (const o of outs) {
     tb.append(el("tr", {},
-      el("td", {}, o.name),
-      el("td", {}, o.format),
+      el("td", {}, el("span", { class: "chip" }, o.name)),
+      el("td", {}, el("span", { class: "chip" }, o.format)),
       el("td", {}, (o.tags || []).join(", ")),
       el("td", {}, (o.feeds || []).join(", ")),
       el("td", {}, String(o.limit || "")),
-      el("td", {},
-        el("button", { class: "btn", onclick: () => openOutModal(o) }, "edit"), " ",
-        el("button", { class: "btn", onclick: () => deleteOut(o.name) }, "✕"))));
+      el("td", { class: "actions" },
+        el("button", { class: "btn icon", title: "Edit", "aria-label": "Edit", onclick: () => openOutModal(o), html: ICON_EDIT }))));
   }
   table.append(tb);
   root.append(table);
@@ -414,7 +477,7 @@ function openOutModal(o) {
   const feeds = el("input", { value: (v.feeds || []).join(","), placeholder: "comma-separated feed ids" });
   const limit = el("input", { type: "number", value: v.limit || 50 });
   const err = el("div", { class: "muted" });
-  const save = el("button", { class: "btn", onclick: async () => {
+  const save = el("button", { class: "btn primary", onclick: async () => {
     const nm = (v.name || name.value).trim();
     const feedNums = feeds.value.split(",").map((s) => s.trim()).filter(Boolean).map(Number);
     if (feedNums.some(Number.isNaN)) { err.textContent = "Feed ids must be numbers"; return; }
@@ -438,7 +501,7 @@ function openOutModal(o) {
     el("label", {}, "Feed ids"), feeds,
     el("label", {}, "Limit"), limit,
     err,
-    dialogRow(outDialog, save));
+    dialogRow(outDialog, save, isEdit ? () => deleteOut(o.name) : null));
   outDialog.showModal();
 }
 
@@ -451,11 +514,12 @@ async function renderTools() {
   const [feeds, g] = await Promise.all([apiGet("/api/feeds"), apiGet("/api/gen")]);
   const feedSel = el("select", {}, el("option", { value: "" }, "all feeds"));
   for (const f of feeds) feedSel.append(el("option", { value: f.id }, `#${f.id} ${f.title}`));
-  const log = el("pre", { class: "log" });
-  const fetchBtn = el("button", { class: "btn", onclick: async () => {
+  const log = el("pre", { class: "log", "data-placeholder": "Idle — press Fetch now to stream the fetch log." });
+  const fetchBtn = el("button", { class: "btn primary", onclick: async () => {
     log.textContent = "";
     const q = feedSel.value ? "?feed=" + encodeURIComponent(feedSel.value) : "";
     fetchBtn.disabled = true;
+    document.body.classList.add("fetching"); // "on the air" — pulses the masthead signal mark
     try {
       await streamSSE("/api/fetch" + q, ({ event, data }) => {
         if (event === "feed") log.textContent += `#${data.id} ${data.title}: ${data.error ? "ERROR " + data.error : data.new + " new"}\n`;
@@ -466,33 +530,45 @@ async function renderTools() {
       log.textContent += "stream error: " + e.message + "\n";
     } finally {
       fetchBtn.disabled = false;
+      document.body.classList.remove("fetching");
     }
   } }, "Fetch now");
-  root.append(el("h3", {}, "Fetch"),
-    el("div", { class: "toolbar" }, feedSel, fetchBtn), log);
+  root.append(el("section", { class: "panel" },
+    el("h3", {}, "Fetch"),
+    el("div", { class: "toolbar" }, feedSel, fetchBtn), log));
 
   // Gen (g fetched above alongside feeds)
-  const genLabel = el("span", {}, "generation: " + g.gen);
+  const genLabel = el("span", { class: "gen-readout" });
+  const setGen = (n) => genLabel.replaceChildren("generation ", el("b", {}, String(n)));
+  setGen(g.gen);
   const bumpBtn = el("button", { class: "btn", onclick: async () => {
     if (!confirm("Bump the store generation? This forces every reader's service worker to purge its pack cache.")) return;
-    try { const r = await api("POST", "/api/gen/bump"); genLabel.textContent = "generation: " + r.gen; banner("Bumped to " + r.gen, true); }
+    try { const r = await api("POST", "/api/gen/bump"); setGen(r.gen); banner("Bumped to " + r.gen, true); }
     catch (e) { banner(e.message); }
   } }, "Bump generation");
-  root.append(el("h3", {}, "Generation"), el("div", { class: "toolbar" }, genLabel, bumpBtn));
+  root.append(el("section", { class: "panel" },
+    el("h3", {}, "Generation"),
+    el("div", { class: "toolbar" }, genLabel, bumpBtn),
+    el("p", { class: "hint" }, "Bump after an in-place store rebuild so every reader purges its cached packs.")));
 
   // Inspect
-  const out = el("pre", { class: "log" });
+  const out = el("pre", { class: "log", "data-placeholder": "No report yet — validate the store or look up a hash." });
   const hashIn = el("input", { placeholder: "hash e.g. 0,2485!big_info", style: "min-width:18em" });
   const runInspect = async (mode, extra) => {
     out.textContent = "running…";
     try { const r = await apiGet(`/api/inspect?mode=${mode}${extra || ""}`); out.textContent = (r.ok ? "" : "FAILED: " + (r.error || "") + "\n\n") + r.report; }
     catch (e) { out.textContent = e.message; }
   };
-  root.append(el("h3", {}, "Inspect"),
+  root.append(el("section", { class: "panel" },
+    el("h3", {}, "Inspect"),
     el("div", { class: "toolbar" },
       el("button", { class: "btn", onclick: () => runInspect("validate") }, "Validate store"),
       hashIn,
       el("button", { class: "btn", onclick: () => runInspect("from-hash", "&hash=" + encodeURIComponent(hashIn.value)) }, "From hash")),
-    out);
+    out));
 }
 renderers.tools = renderTools;
+
+// All tab renderers are registered above — render the default tab last so the
+// initial showTab() finds renderers.feeds (else the default tab loads empty).
+showTab("feeds");
