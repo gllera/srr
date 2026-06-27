@@ -5,13 +5,20 @@ import (
 	"net/http"
 )
 
+// buildRecipeMap copies the db.gz recipes map for read-only JSON output. Pure,
+// so listRecipes and the overview bundle share it within one withDB scope.
+func buildRecipeMap(db *DB) map[string]Recipe {
+	recipes := make(map[string]Recipe, len(db.core.Recipes))
+	for k, v := range db.core.Recipes {
+		recipes[k] = v
+	}
+	return recipes
+}
+
 func listRecipes(w http.ResponseWriter, r *http.Request) {
 	var recipes map[string]Recipe
 	err := withDBCtx(r.Context(), false, func(_ context.Context, db *DB) error {
-		recipes = make(map[string]Recipe, len(db.core.Recipes))
-		for k, v := range db.core.Recipes {
-			recipes[k] = v
-		}
+		recipes = buildRecipeMap(db)
 		return nil
 	})
 	if err != nil {

@@ -1,0 +1,56 @@
+package main
+
+import (
+	"encoding/json"
+	"net/http"
+	"testing"
+)
+
+// TestOverview asserts the one snapshot endpoint hands the webui the whole store
+// in a single request — feeds (UI-projected), the derived tags, recipes, the
+// syndication outputs, gen and scalars — so every read-tab needs one store read.
+func TestOverview(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	seedFeed(t, db, &Feed{Title: "Beta", URL: "https://b.example/feed", Tag: "news", TotalArt: 3, FetchError: "boom", FailStreak: 4})
+	seedFeed(t, db, &Feed{Title: "Alpha", URL: "https://a.example/feed"}) // untagged
+
+	rec := doReq(t, newMux(), "GET", "/api/overview", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body)
+	}
+	var got overviewView
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// Feeds: both present, sorted case-insensitively by title, with the UI-shape
+	// id + friendly error (not the wire `ferr`).
+	if len(got.Feeds) != 2 || got.Feeds[0].Title != "Alpha" || got.Feeds[1].Title != "Beta" {
+		t.Fatalf("feeds = %+v, want [Alpha, Beta]", got.Feeds)
+	}
+	if got.Feeds[1].Error != "boom" || got.Feeds[1].FailStreak != 4 {
+		t.Fatalf("feed health fields missing: %+v", got.Feeds[1])
+	}
+	// Tags: the news bucket counts its one feed; the untagged bucket exists too.
+	var news *tagCount
+	for i := range got.Tags {
+		if got.Tags[i].Tag == "news" {
+			news = &got.Tags[i]
+		}
+	}
+	if news == nil || news.Feeds != 1 || news.Articles != 3 {
+		t.Fatalf("news tag wrong: %+v (all: %+v)", news, got.Tags)
+	}
+	// Recipes: the seeded store always carries the reserved default recipe.
+	if _, ok := got.Recipes[defaultRecipeName]; !ok {
+		t.Fatalf("recipes missing %q: %+v", defaultRecipeName, got.Recipes)
+	}
+	// Out: empty store ⇒ a non-nil empty slice (serialized as [], the syndicate
+	// tab reads .length). gen/scalars start at 0.
+	if got.Out == nil || len(got.Out) != 0 {
+		t.Fatalf("out = %+v, want []", got.Out)
+	}
+	if got.Gen != 0 || got.TotalArt != 0 {
+		t.Fatalf("gen=%d total_art=%d, want 0,0", got.Gen, got.TotalArt)
+	}
+}
