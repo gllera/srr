@@ -73,6 +73,22 @@ func TestServeHostGuardRejectsCrossOrigin(t *testing.T) {
 	}
 }
 
+func TestServeStaticAssets(t *testing.T) {
+	h := newMux()
+	for _, tc := range []struct{ path, needle string }{
+		{"/app.js", "renderFeeds"},
+		{"/app.css", "--accent"},
+	} {
+		rec := doReq(t, h, "GET", tc.path, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d, want 200", tc.path, rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), tc.needle) {
+			t.Fatalf("GET %s missing %q", tc.path, tc.needle)
+		}
+	}
+}
+
 func TestLoopbackHost(t *testing.T) {
 	for _, tc := range []struct {
 		host string
