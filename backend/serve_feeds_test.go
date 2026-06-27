@@ -193,3 +193,57 @@ func TestDeleteFeedNotFound(t *testing.T) {
 		t.Fatalf("status = %d, want 404", rec.Code)
 	}
 }
+
+func TestApplyFeedsArray(t *testing.T) {
+	setupTestDB(t)
+	body := `[{"title":"One","url":"https://1.example/feed"},{"title":"Two","url":"https://2.example/feed","tag":"news"}]`
+	rec := doReq(t, newMux(), "POST", "/api/feeds/apply", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
+	}
+	list := doReq(t, newMux(), "GET", "/api/feeds", "")
+	var got []feedListView
+	json.Unmarshal(list.Body.Bytes(), &got)
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+}
+
+func TestApplyFeedsAtomicOnBadElement(t *testing.T) {
+	setupTestDB(t)
+	// Second element has no url ⇒ whole batch rejected, nothing persisted.
+	body := `[{"title":"Good","url":"https://g.example/feed"},{"title":"Bad"}]`
+	rec := doReq(t, newMux(), "POST", "/api/feeds/apply", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	list := doReq(t, newMux(), "GET", "/api/feeds", "")
+	var got []feedListView
+	json.Unmarshal(list.Body.Bytes(), &got)
+	if len(got) != 0 {
+		t.Fatalf("batch should be atomic; got %d feeds", len(got))
+	}
+}
+
+func TestListTags(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	seedFeed(t, db, &Feed{Title: "A", URL: "https://a.example/feed", Tag: "news", TotalArt: 5})
+	seedFeed(t, db, &Feed{Title: "B", URL: "https://b.example/feed", Tag: "news", TotalArt: 3})
+	seedFeed(t, db, &Feed{Title: "C", URL: "https://c.example/feed"}) // untagged
+
+	rec := doReq(t, newMux(), "GET", "/api/tags", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var got []tagCount
+	json.Unmarshal(rec.Body.Bytes(), &got)
+	var news *tagCount
+	for i := range got {
+		if got[i].Tag == "news" {
+			news = &got[i]
+		}
+	}
+	if news == nil || news.Feeds != 2 || news.Articles != 8 {
+		t.Fatalf("news tag wrong: %+v (all: %+v)", news, got)
+	}
+}
