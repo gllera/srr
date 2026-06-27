@@ -65,6 +65,60 @@ var previewTmpl = template.Must(template.New("preview").Funcs(template.FuncMap{
 </body>
 </html>`))
 
+// renderPreview fetches url through the resolved recipe's ingest, runs the
+// module pipeline, and returns the processed articles. Shared by PreviewCmd
+// (HTML page) and GET /api/preview (JSON). Optional ad-hoc overrides: a non-nil
+// pipeOverride replaces the recipe's pipe; a non-empty ingestOverride replaces
+// its ingest.
+func renderPreview(ctx context.Context, recipes map[string]Recipe, recipeName string, pipeOverride []string, ingestOverride, rawURL string) ([]*Item, error) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	processor := mod.New()
+	engine := ingest.New()
+
+	r := recipeFor(recipes, recipeName)
+	def := recipeFor(recipes, defaultRecipeName)
+	if len(pipeOverride) > 0 {
+		r.Pipe = pipeOverride
+	}
+	if ingestOverride != "" {
+		r.Ingest = ingestOverride
+	}
+	pipe := resolvePipe(def.Pipe, r.Pipe)
+	if err := processor.Validate(ctx, pipe); err != nil {
+		return nil, fmt.Errorf("invalid pipeline %v: %w", pipe, err)
+	}
+
+	maxFeedSize := globals.MaxFeedSize
+	if maxFeedSize < 1 {
+		maxFeedSize = defaultMaxFeedSize
+	}
+	buf := make([]byte, maxFeedSize*(1<<10)+1)
+	name := ingest.Select(r.Ingest, def.Ingest)
+	result, err := engine.Fetch(ctx, name, client, buf, ingest.Request{URL: rawURL, MaxSize: cap(buf) - 1})
+	if err != nil {
+		return nil, fmt.Errorf("ingest %q: %w", name, err)
+	}
+
+	articles := make([]*Item, 0, len(result.Items))
+	for _, i := range result.Items {
+		if i == nil {
+			continue
+		}
+		if err := processItem(ctx, processor, pipe, i); err != nil {
+			return nil, err
+		}
+		if i.Drop {
+			continue
+		}
+		var pub int64
+		if i.Published != nil {
+			pub = i.Published.Unix()
+		}
+		articles = append(articles, &Item{Title: i.Title, Content: i.Content, Link: i.Link, Published: pub})
+	}
+	return articles, nil
+}
+
 func (o *PreviewCmd) Run() error {
 	var recipes map[string]Recipe
 	if err := withDB(false, func(_ context.Context, db *DB) error {
@@ -75,72 +129,12 @@ func (o *PreviewCmd) Run() error {
 	}
 
 	ctx := context.Background()
-	client := &http.Client{Timeout: 10 * time.Second}
-	processor := mod.New()
-	engine := ingest.New()
-
-	r := recipeFor(recipes, o.Recipe)
-	def := recipeFor(recipes, defaultRecipeName)
-	// Ad-hoc -p/-i overrides are modeled uniformly as mutating the resolved
-	// recipe before resolution, so both axes layer on the same
-	// resolvePipe/ingest.Select trio (r is a local copy of the map value, so
-	// reassigning its fields never touches the stored recipe). This lets you try
-	// a pipeline/ingest before saving it as a recipe; -p still expands #default.
-	if len(o.Pipe) > 0 {
-		r.Pipe = o.Pipe
-	}
-	if o.Ingest != "" {
-		r.Ingest = o.Ingest
-	}
-	pipe := resolvePipe(def.Pipe, r.Pipe)
-	if err := processor.Validate(ctx, pipe); err != nil {
-		return fmt.Errorf("invalid pipeline %v: %w", pipe, err)
-	}
-
-	buf := make([]byte, globals.MaxFeedSize*(1<<10)+1)
-	name := ingest.Select(r.Ingest, def.Ingest)
-
-	result, err := engine.Fetch(ctx, name, client, buf, ingest.Request{
-		URL:     o.URL.String(),
-		MaxSize: cap(buf) - 1,
-	})
+	articles, err := renderPreview(ctx, recipes, o.Recipe, o.Pipe, o.Ingest, o.URL.String())
 	if err != nil {
-		return fmt.Errorf("ingest %q: %w", name, err)
-	}
-
-	articles := make([]*Item, 0, len(result.Items))
-	for _, i := range result.Items {
-		// An external ingest strategy can emit a null item in its JSON, which
-		// decodes to a nil *mod.RawItem; skip it like feed.fetchURL does rather
-		// than panic dereferencing it in processItem.
-		if i == nil {
-			continue
-		}
-		// No asset host in preview: self-hosting needs a store backend, and
-		// preview only renders. The upload step lives in feed.fetch, not
-		// processItem, so preview simply never runs it.
-		if err := processItem(ctx, processor, pipe, i); err != nil {
-			return err
-		}
-		// A pipeline step may drop this item (i.Drop=true). Preview simply
-		// omits dropped items — no store, so no boundary to update.
-		if i.Drop {
-			continue
-		}
-		var pub int64
-		if i.Published != nil {
-			pub = i.Published.Unix()
-		}
-		articles = append(articles, &Item{
-			Title:     i.Title,
-			Content:   i.Content,
-			Link:      i.Link,
-			Published: pub,
-		})
+		return err
 	}
 
 	fmt.Printf("Serving %d articles at http://%s\n", len(articles), o.Addr)
-
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -148,6 +142,5 @@ func (o *PreviewCmd) Run() error {
 			log.Println("template error:", err)
 		}
 	})
-
 	return http.ListenAndServe(o.Addr, mux)
 }
