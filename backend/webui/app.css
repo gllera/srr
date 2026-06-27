@@ -1,0 +1,156 @@
+:root {
+   color-scheme: light dark;
+   --accent: #f26522;
+   --line: #ccc;
+}
+* {
+   box-sizing: border-box;
+}
+body {
+   max-width: 1000px;
+   margin: 0 auto;
+   padding: 1em;
+   font-family: system-ui, sans-serif;
+   line-height: 1.4;
+}
+header {
+   display: flex;
+   align-items: baseline;
+   gap: 1.5em;
+   border-bottom: 2px solid var(--accent);
+   padding-bottom: 0.5em;
+}
+h1 {
+   margin: 0;
+   font-size: 1.3em;
+   color: var(--accent);
+}
+nav button {
+   background: none;
+   border: none;
+   font: inherit;
+   padding: 0.4em 0.6em;
+   cursor: pointer;
+   color: inherit;
+   opacity: 0.6;
+}
+nav button.active {
+   opacity: 1;
+   border-bottom: 2px solid var(--accent);
+}
+.tab {
+   display: none;
+   padding-top: 1em;
+}
+.tab.active {
+   display: block;
+}
+#banner {
+   margin: 0.6em 0;
+   padding: 0.6em 0.8em;
+   border-radius: 4px;
+   background: #fdecea;
+   color: #611a15;
+   border: 1px solid #f5c6cb;
+   white-space: pre-wrap;
+}
+#banner.ok {
+   background: #e6f4ea;
+   color: #1e4620;
+   border-color: #b7dfc1;
+}
+table {
+   width: 100%;
+   border-collapse: collapse;
+}
+th,
+td {
+   text-align: left;
+   padding: 0.35em 0.5em;
+   border-bottom: 1px solid var(--line);
+   vertical-align: top;
+}
+th {
+   font-weight: 600;
+}
+td a {
+   color: inherit;
+}
+button.btn {
+   font: inherit;
+   padding: 0.35em 0.7em;
+   cursor: pointer;
+}
+.toolbar {
+   display: flex;
+   gap: 0.5em;
+   align-items: center;
+   flex-wrap: wrap;
+   margin-bottom: 0.8em;
+}
+.toolbar input,
+.toolbar select {
+   font: inherit;
+   padding: 0.3em;
+}
+.dot {
+   display: inline-block;
+   width: 0.7em;
+   height: 0.7em;
+   border-radius: 50%;
+}
+.dot.green {
+   background: #2e9e44;
+}
+.dot.amber {
+   background: #e0a800;
+}
+.dot.red {
+   background: #d33;
+}
+.dot.gray {
+   background: #999;
+}
+dialog {
+   border: 1px solid var(--line);
+   border-radius: 6px;
+   padding: 1em;
+   min-width: 340px;
+}
+dialog label {
+   display: block;
+   margin: 0.5em 0 0.15em;
+   font-size: 0.9em;
+}
+dialog input,
+dialog select {
+   width: 100%;
+   font: inherit;
+   padding: 0.35em;
+}
+dialog .row {
+   display: flex;
+   gap: 0.5em;
+   justify-content: flex-end;
+   margin-top: 1em;
+}
+.muted {
+   color: #888;
+   font-size: 0.85em;
+}
+article.preview {
+   border-bottom: 1px solid var(--line);
+   padding: 0.8em 0;
+}
+article.preview .content img {
+   max-width: 100%;
+   height: auto;
+}
+pre.log {
+   background: #0001;
+   padding: 0.6em;
+   border-radius: 4px;
+   max-height: 50vh;
+   overflow: auto;
+   white-space: pre-wrap;
+}

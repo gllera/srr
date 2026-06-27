@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+   <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <link
+         rel="icon"
+         href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8' fill='%23f26522'><circle cx='1' cy='7' r='1'/><path d='M0 3v1a4 4 0 014 4h1A5 5 0 000 3z'/><path d='M0 0v1a7 7 0 017 7h1A8 8 0 000 0z'/></svg>"
+      />
+      <title>SRR Admin</title>
+      <link rel="stylesheet" href="app.css" />
+   </head>
+   <body>
+      <header>
+         <h1>SRR Admin</h1>
+         <nav id="tabs">
+            <button data-tab="feeds" class="active">Feeds</button>
+            <button data-tab="recipes">Recipes</button>
+            <button data-tab="syndicate">Syndicate</button>
+            <button data-tab="tools">Tools</button>
+         </nav>
+      </header>
+      <div id="banner" hidden></div>
+      <main>
+         <section id="feeds" class="tab active"></section>
+         <section id="recipes" class="tab"></section>
+         <section id="syndicate" class="tab"></section>
+         <section id="tools" class="tab"></section>
+      </main>
+      <script src="app.js"></script>
+   </body>
+</html>
