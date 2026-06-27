@@ -30,7 +30,9 @@ func (o *ServeCmd) Run() error {
 	defer cancel()
 
 	srv := &http.Server{Addr: o.Addr, Handler: newMux()}
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		<-ctx.Done()
 		sctx, c := context.WithTimeout(context.Background(), 5*time.Second)
 		defer c()
@@ -41,6 +43,7 @@ func (o *ServeCmd) Run() error {
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
+	<-done
 	return nil
 }
 
@@ -103,6 +106,11 @@ func writeErr(w http.ResponseWriter, err error) {
 		})
 		return
 	}
+	// Default 400: handler errors here are overwhelmingly validation rejections
+	// (bad recipe/url/format, dangling refs) which downstream tests assert as 400.
+	// The rarer store-IO/open failure also surfaces as 400 but always carries its
+	// message in the body; without typed errors (repo forbids custom sentinels)
+	// validation and infra errors aren't distinguishable at this shared helper.
 	status := http.StatusBadRequest
 	if strings.Contains(err.Error(), "not found") {
 		status = http.StatusNotFound
@@ -120,7 +128,7 @@ func decodeJSON(r *http.Request, v any) error {
 func pathID(r *http.Request) (int, error) {
 	id, err := strconv.Atoi(r.PathValue("id"))
 	if err != nil {
-		return 0, fmt.Errorf("invalid feed id %q", r.PathValue("id"))
+		return 0, fmt.Errorf("invalid feed id %q: %w", r.PathValue("id"), err)
 	}
 	return id, nil
 }

@@ -42,7 +42,11 @@ func TestServeUIIndex(t *testing.T) {
 		t.Fatalf("content-type = %q, want text/html", ct)
 	}
 	if !strings.Contains(rec.Body.String(), "<title>SRR Admin</title>") {
-		t.Fatalf("index body missing title; got:\n%s", rec.Body.String()[:200])
+		body := rec.Body.String()
+		if len(body) > 200 {
+			body = body[:200]
+		}
+		t.Fatalf("index body missing title; got:\n%s", body)
 	}
 }
 
@@ -66,5 +70,28 @@ func TestServeHostGuardRejectsCrossOrigin(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("cross-origin = %d, want 403", rec.Code)
+	}
+}
+
+func TestLoopbackHost(t *testing.T) {
+	for _, tc := range []struct {
+		host string
+		want bool
+	}{
+		{"localhost", true},
+		{"localhost:8088", true},
+		{"127.0.0.1", true},
+		{"127.0.0.1:8088", true},
+		{"::1", true},
+		{"[::1]", true},
+		{"[::1]:8088", true},
+		{"evil.example.com", false},
+		{"evil.example.com:8088", false},
+		{"", false},
+		{"192.168.1.4:8080", false},
+	} {
+		if got := loopbackHost(tc.host); got != tc.want {
+			t.Errorf("loopbackHost(%q) = %v, want %v", tc.host, got, tc.want)
+		}
 	}
 }
