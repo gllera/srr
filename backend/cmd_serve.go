@@ -137,7 +137,9 @@ func pathID(r *http.Request) (int, error) {
 func registerAPI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/feeds", listFeeds)
 	mux.HandleFunc("POST /api/feeds", createFeed)
+	mux.HandleFunc("POST /api/feeds/apply", applyFeedsHandler)
 	mux.HandleFunc("GET /api/feeds/{id}", getFeed)
 	mux.HandleFunc("PUT /api/feeds/{id}", updateFeed)
 	mux.HandleFunc("DELETE /api/feeds/{id}", deleteFeed)
+	mux.HandleFunc("GET /api/tags", listTags)
 }

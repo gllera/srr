@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -191,4 +192,61 @@ func createFeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, listViewOf(saved))
+}
+
+func applyFeedsHandler(w http.ResponseWriter, r *http.Request) {
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	views, err := parseApplyInput(data)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	err = withDBCtx(r.Context(), true, func(ctx context.Context, db *DB) error {
+		return applyViews(ctx, db, views)
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"count": len(views)})
+}
+
+// tagCount is one tag bucket for the GUI tag filter. Tag "" is the untagged
+// bucket. Unlike `srr inspect --list-tags`, feeds with 0 articles are counted
+// so brand-new feeds' tags still appear in the filter.
+type tagCount struct {
+	Tag      string `json:"tag"`
+	Feeds    int    `json:"feeds"`
+	Articles int    `json:"articles"`
+}
+
+func listTags(w http.ResponseWriter, r *http.Request) {
+	var out []tagCount
+	err := withDBCtx(r.Context(), false, func(_ context.Context, db *DB) error {
+		agg := map[string]*tagCount{}
+		for _, ch := range db.Feeds() {
+			t := agg[ch.Tag]
+			if t == nil {
+				t = &tagCount{Tag: ch.Tag}
+				agg[ch.Tag] = t
+			}
+			t.Feeds++
+			t.Articles += ch.TotalArt
+		}
+		out = make([]tagCount, 0, len(agg))
+		for _, t := range agg {
+			out = append(out, *t)
+		}
+		return nil
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Tag < out[j].Tag })
+	writeJSON(w, http.StatusOK, out)
 }
