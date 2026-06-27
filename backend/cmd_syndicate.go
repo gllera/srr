@@ -51,63 +51,14 @@ type SyndicateSetCmd struct {
 
 func (o *SyndicateSetCmd) Run() error {
 	return withDB(true, func(ctx context.Context, db *DB) error {
-		// Validate name: must be a safe file stem with no path components.
-		if !validOutName(o.Name) {
-			return fmt.Errorf("syndication name %q must match [A-Za-z0-9._-] and not be '.' or '..'", o.Name)
-		}
-		// Validate format.
-		if o.Format != "rss" && o.Format != "json" {
-			return fmt.Errorf("format %q is invalid; must be rss or json", o.Format)
-		}
-		// Require at least one selector.
-		if len(o.Tags) == 0 && len(o.FeedIDs) == 0 {
-			return fmt.Errorf("at least one of --tags or --feeds must be non-empty")
-		}
-		// Validate every explicit feed id.
-		for _, id := range o.FeedIDs {
-			if _, err := db.FeedByID(id); err != nil {
-				return fmt.Errorf("feed id %d: %w", id, err)
-			}
-		}
-		// Default limit.
-		limit := o.Limit
-		if limit <= 0 {
-			limit = outDefaultLimit
-		}
-
-		entry := OutFeed{
+		return setOutFeed(ctx, db, OutFeed{
 			Name:   o.Name,
 			Title:  o.Title,
 			Format: o.Format,
 			Tags:   o.Tags,
 			Feeds:  o.FeedIDs,
-			Limit:  limit,
-		}
-
-		// Upsert by name. Capture the prior format so a format change can reap the
-		// now-orphaned old-extension out/* file (SyncOutFeeds only ever writes the
-		// current extension, so the old file would be served stale forever).
-		found := false
-		oldFormat := ""
-		for i, e := range db.core.Out {
-			if e.Name == o.Name {
-				oldFormat = e.Format
-				db.core.Out[i] = entry
-				found = true
-				break
-			}
-		}
-		if !found {
-			db.core.Out = append(db.core.Out, entry)
-		}
-		if err := db.Commit(ctx); err != nil {
-			return err
-		}
-		if found && oldFormat != "" && oldFormat != o.Format {
-			// Best-effort delete the orphaned old-extension file (Rm is silent-on-missing).
-			_ = db.Rm(ctx, outFileKey(OutFeed{Name: o.Name, Format: oldFormat}))
-		}
-		return nil
+			Limit:  o.Limit,
+		})
 	})
 }
 
@@ -119,37 +70,80 @@ type SyndicateRmCmd struct {
 
 func (o *SyndicateRmCmd) Run() error {
 	return withDB(true, func(ctx context.Context, db *DB) error {
-		// Find the entry so we know the format for key cleanup.
-		var format string
-		out := db.core.Out[:0]
-		for _, e := range db.core.Out {
-			if e.Name == o.Name {
-				format = e.Format
-				continue
-			}
-			out = append(out, e)
-		}
-		db.core.Out = out
-
-		if err := db.Commit(ctx); err != nil {
-			return err
-		}
-
-		// Best-effort delete the out/ file (silent-on-missing via Rm contract).
-		// If format was empty (name not found), still attempt both extensions so
-		// a leftover file from a previous run is also cleaned.
-		exts := map[string]string{"rss": ".rss", "json": ".json"}
-		if ext := exts[format]; format != "" && ext != "" {
-			_ = db.Rm(ctx, "out/"+o.Name+ext)
-		} else {
-			// Unknown/empty format (e.g. a hand-edited db.gz value): delete both
-			// possible extensions so the real out/* file isn't left orphaned.
-			for _, ext := range exts {
-				_ = db.Rm(ctx, "out/"+o.Name+ext)
-			}
-		}
-		return nil
+		return removeOutFeed(ctx, db, o.Name)
 	})
+}
+
+// setOutFeed validates and upserts one syndication output entry, reaping the
+// orphaned old-extension file on a format change. Shared by `srr syndicate set`
+// and the PUT handler. The caller supplies a fully-built OutFeed (Limit 0 ⇒
+// default applied here).
+func setOutFeed(ctx context.Context, db *DB, in OutFeed) error {
+	if !validOutName(in.Name) {
+		return fmt.Errorf("syndication name %q must match [A-Za-z0-9._-] and not be '.' or '..'", in.Name)
+	}
+	if in.Format != "rss" && in.Format != "json" {
+		return fmt.Errorf("format %q is invalid; must be rss or json", in.Format)
+	}
+	if len(in.Tags) == 0 && len(in.Feeds) == 0 {
+		return fmt.Errorf("at least one of tags or feeds must be non-empty")
+	}
+	for _, id := range in.Feeds {
+		if _, err := db.FeedByID(id); err != nil {
+			return fmt.Errorf("feed id %d: unknown", id)
+		}
+	}
+	if in.Limit <= 0 {
+		in.Limit = outDefaultLimit
+	}
+
+	found := false
+	oldFormat := ""
+	for i, e := range db.core.Out {
+		if e.Name == in.Name {
+			oldFormat = e.Format
+			db.core.Out[i] = in
+			found = true
+			break
+		}
+	}
+	if !found {
+		db.core.Out = append(db.core.Out, in)
+	}
+	if err := db.Commit(ctx); err != nil {
+		return err
+	}
+	if found && oldFormat != "" && oldFormat != in.Format {
+		_ = db.Rm(ctx, outFileKey(OutFeed{Name: in.Name, Format: oldFormat}))
+	}
+	return nil
+}
+
+// removeOutFeed deletes a syndication entry by name and best-effort removes its
+// out/* files. Shared by `srr syndicate rm` and the DELETE handler.
+func removeOutFeed(ctx context.Context, db *DB, name string) error {
+	var format string
+	out := db.core.Out[:0]
+	for _, e := range db.core.Out {
+		if e.Name == name {
+			format = e.Format
+			continue
+		}
+		out = append(out, e)
+	}
+	db.core.Out = out
+	if err := db.Commit(ctx); err != nil {
+		return err
+	}
+	exts := map[string]string{"rss": ".rss", "json": ".json"}
+	if ext := exts[format]; format != "" && ext != "" {
+		_ = db.Rm(ctx, "out/"+name+ext)
+	} else {
+		for _, ext := range exts {
+			_ = db.Rm(ctx, "out/"+name+ext)
+		}
+	}
+	return nil
 }
 
 // outFileKey returns the store key for an OutFeed's output file.
