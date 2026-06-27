@@ -124,6 +124,11 @@ func TestInspectValidate(t *testing.T) {
 	if !got.OK {
 		t.Fatalf("empty store should validate ok; report:\n%s", got.Report)
 	}
+	// Confirm the report was actually captured (the db header always prints it),
+	// so a silently-broken capture can't pass as ok.
+	if !strings.Contains(got.Report, "total_art") {
+		t.Fatalf("report missing captured content:\n%s", got.Report)
+	}
 }
 
 func TestInspectBadMode(t *testing.T) {
@@ -131,5 +136,13 @@ func TestInspectBadMode(t *testing.T) {
 	rec := doReq(t, newMux(), "GET", "/api/inspect?mode=bogus", "")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestInspectFromHashMissingParam(t *testing.T) {
+	setupTestDB(t)
+	rec := doReq(t, newMux(), "GET", "/api/inspect?mode=from-hash", "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (missing hash)", rec.Code)
 	}
 }
