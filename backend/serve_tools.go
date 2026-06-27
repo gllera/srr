@@ -218,13 +218,11 @@ func handleInspect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// InspectCmd.Run reads db.gz via readGz (ignoreMissing=false). Commit the
-	// current state first so db.gz is guaranteed to exist on disk. Best-effort:
-	// if the store is locked by a running fetch the db.gz it maintains is current.
-	_ = withDBCtx(r.Context(), true, func(ctx context.Context, db *DB) error {
-		return db.Commit(ctx)
-	})
-
+	// Read-only: InspectCmd.Run opens the store with NewDB(locked=false) and only
+	// reads db.gz + packs, so /api/inspect never touches .locked (per the locking
+	// contract). A store with no committed db.gz (a fresh, never-fetched dir)
+	// surfaces as ok=false with the read error in the report — inspect must not
+	// create db.gz as a side effect.
 	report, runErr := captureInspectStdout(func() error { return cmd.Run() })
 	writeJSON(w, http.StatusOK, map[string]any{
 		"report": report,
