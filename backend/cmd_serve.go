@@ -133,6 +133,8 @@ func pathID(r *http.Request) (int, error) {
 	return id, nil
 }
 
-// registerAPI is grown across phases. Phase 1 wires only the UI placeholder;
-// real routes are added by their tasks.
-func registerAPI(mux *http.ServeMux) {}
+// registerAPI is grown across phases. Routes are added by their tasks.
+func registerAPI(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/feeds", listFeeds)
+	mux.HandleFunc("GET /api/feeds/{id}", getFeed)
+}
