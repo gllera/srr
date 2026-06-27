@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -55,3 +58,62 @@ func TestGetFeedNotFound(t *testing.T) {
 		t.Fatalf("status = %d, want 404", rec.Code)
 	}
 }
+
+// stubResolve makes subscribe-time discovery a no-op (offline) for the test.
+func stubResolve(t *testing.T) {
+	t.Helper()
+	prev := resolveFeedURL
+	resolveFeedURL = func(_ context.Context, url string) (string, error) { return url, nil }
+	t.Cleanup(func() { resolveFeedURL = prev })
+}
+
+func TestCreateFeed(t *testing.T) {
+	setupTestDB(t)
+	stubResolve(t)
+	body := `{"title":"New","url":"https://n.example/feed","tag":"news"}`
+	rec := doReq(t, newMux(), "POST", "/api/feeds", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body)
+	}
+	var got feedListView
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.ID != 0 || got.Title != "New" || got.Tag != "news" {
+		t.Fatalf("got %+v", got)
+	}
+
+	// Round-trip: it is now listed.
+	list := doReq(t, newMux(), "GET", "/api/feeds", "")
+	if !strings.Contains(list.Body.String(), "https://n.example/feed") {
+		t.Fatalf("created feed not listed: %s", list.Body)
+	}
+}
+
+func TestCreateFeedBadRecipe(t *testing.T) {
+	setupTestDB(t)
+	stubResolve(t)
+	body := `{"title":"X","url":"https://x.example/feed","recipe":"nope"}`
+	rec := doReq(t, newMux(), "POST", "/api/feeds", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestCreateFeedLockContention(t *testing.T) {
+	db, _, dir := setupTestDB(t)
+	_ = db
+	stubResolve(t)
+	// Hold the lock the way another srr process would.
+	lock := dir + "/" + dbLockKey
+	if err := osWriteFile(lock); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"title":"X","url":"https://x.example/feed"}`
+	rec := doReq(t, newMux(), "POST", "/api/feeds", body)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (%s)", rec.Code, rec.Body)
+	}
+}
+
+func osWriteFile(path string) error { return os.WriteFile(path, nil, 0o644) }

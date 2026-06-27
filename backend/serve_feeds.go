@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -77,4 +78,72 @@ func getFeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, view)
+}
+
+// saveFeed upserts one feedView, with the same subscribe-time discovery gating
+// as `feed add`/`feed upd -u`: probe when the effective ingest is #feed and the
+// URL is new (create) or changed (update). Shared by the POST and PUT handlers
+// so the GUI matches the CLI. Returns the stored *Feed for echo-back.
+func saveFeed(ctx context.Context, db *DB, v *feedView) (*Feed, error) {
+	if v.Title == "" {
+		return nil, fmt.Errorf("title required")
+	}
+	if !validFeedURL(v.URL) {
+		return nil, fmt.Errorf("invalid url %q", v.URL)
+	}
+	if err := validateRecipeRef(db.core.Recipes, v.Recipe); err != nil {
+		return nil, err
+	}
+	isCreate := v.ID == nil
+	var ch *Feed
+	if isCreate {
+		ch = &Feed{}
+	} else {
+		existing, err := db.FeedByID(*v.ID)
+		if err != nil {
+			return nil, err
+		}
+		ch = existing
+	}
+	newURL := v.URL
+	if ch.URL != newURL && resolvesFeed(db.core.Recipes, v.Recipe) {
+		resolved, err := resolveFeedURL(ctx, newURL)
+		if err != nil {
+			return nil, fmt.Errorf("resolve feed %q: %w", newURL, err)
+		}
+		newURL = resolved
+	}
+	ch.Title = v.Title
+	setFeedURL(ch, newURL)
+	ch.Tag = v.Tag
+	ch.Recipe = v.Recipe
+	if err := normalizeFeed(ch, db.core.Recipes); err != nil {
+		return nil, err
+	}
+	if isCreate {
+		if err := db.AddFeed(ch); err != nil {
+			return nil, err
+		}
+	}
+	return ch, db.Commit(ctx)
+}
+
+func createFeed(w http.ResponseWriter, r *http.Request) {
+	var v feedView
+	if err := decodeJSON(r, &v); err != nil {
+		writeErr(w, err)
+		return
+	}
+	v.ID = nil // create ignores any id in the body
+	var saved *Feed
+	err := withDBCtx(r.Context(), true, func(ctx context.Context, db *DB) error {
+		s, e := saveFeed(ctx, db, &v)
+		saved = s
+		return e
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, listViewOf(saved))
 }
