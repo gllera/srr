@@ -14,7 +14,9 @@ func TestListRecipes(t *testing.T) {
 		t.Fatalf("status = %d", rec.Code)
 	}
 	var got map[string]Recipe
-	json.Unmarshal(rec.Body.Bytes(), &got)
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
 	if _, ok := got["default"]; !ok {
 		t.Fatalf("default recipe missing: %+v", got)
 	}
@@ -27,13 +29,15 @@ func TestPutRecipe(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
 	}
-	withDB(false, func(_ context.Context, d *DB) error {
+	if err := withDB(false, func(_ context.Context, d *DB) error {
 		r, ok := d.core.Recipes["clean"]
 		if !ok || len(r.Pipe) != 2 {
 			t.Fatalf("recipe not stored: %+v", d.core.Recipes)
 		}
 		return nil
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestPutRecipeRejectsDefaultTokenInDefault(t *testing.T) {
