@@ -186,10 +186,12 @@ func applyImportDefaults(feeds []*Feed, recipe, tag *string) {
 
 // importFailure records a feed whose URL could not be resolved to a feed at
 // subscribe time, so it is skipped (and reported) rather than aborting the batch.
+// Error is the failure text as a string (not an error) so the HTTP import handler
+// can serialize the slice directly to JSON.
 type importFailure struct {
-	Title string
-	URL   string
-	Err   error
+	Title string `json:"title"`
+	URL   string `json:"url"`
+	Error string `json:"error"`
 }
 
 // resolveImportFeeds runs subscribe-time discovery over the import set: feeds
@@ -221,7 +223,7 @@ func resolveImportFeeds(ctx context.Context, feeds []*Feed, recipes map[string]R
 
 	for i, c := range feeds {
 		if errs[i] != nil {
-			failed = append(failed, importFailure{Title: c.Title, URL: c.URL, Err: errs[i]})
+			failed = append(failed, importFailure{Title: c.Title, URL: c.URL, Error: errs[i].Error()})
 			continue
 		}
 		c.URL = resolved[i]
@@ -264,7 +266,7 @@ func reportImportFailures(failed []importFailure) {
 	}
 	fmt.Fprintf(stdout, "\nSkipped %d feed(s) — no feed found at the URL:\n", len(failed))
 	for _, f := range failed {
-		fmt.Fprintf(stdout, "  %s\t%s\t%v\n", f.Title, f.URL, f.Err)
+		fmt.Fprintf(stdout, "  %s\t%s\t%s\n", f.Title, f.URL, f.Error)
 	}
 }
 

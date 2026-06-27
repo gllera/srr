@@ -147,15 +147,8 @@ func handleImport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	kept, failed := resolveImportFeeds(r.Context(), newFeeds, recipes)
-
-	type skip struct {
-		Title string `json:"title"`
-		URL   string `json:"url"`
-		Error string `json:"error"`
-	}
-	skips := make([]skip, 0, len(failed))
-	for _, f := range failed {
-		skips = append(skips, skip{Title: f.Title, URL: f.URL, Error: f.Err.Error()})
+	if failed == nil {
+		failed = []importFailure{} // serialize as [] (the UI reads .skipped.length)
 	}
 
 	if dryRun {
@@ -163,7 +156,7 @@ func handleImport(w http.ResponseWriter, r *http.Request) {
 		for _, c := range kept {
 			previews = append(previews, feedView{Title: c.Title, URL: c.URL, Tag: c.Tag, Recipe: c.Recipe})
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"feeds": previews, "skipped": skips})
+		writeJSON(w, http.StatusOK, map[string]any{"feeds": previews, "skipped": failed})
 		return
 	}
 
@@ -174,7 +167,7 @@ func handleImport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"imported": len(kept), "skipped": skips})
+	writeJSON(w, http.StatusOK, map[string]any{"imported": len(kept), "skipped": failed})
 }
 
 // handleInspect runs `srr inspect` in-process for the supported GUI modes
