@@ -50,7 +50,9 @@ func TestPutSyndicateUnknownFeed(t *testing.T) {
 func TestDeleteSyndicate(t *testing.T) {
 	db, _, _ := setupTestDB(t)
 	seedFeed(t, db, &Feed{Title: "F", URL: "https://f.example/feed", Tag: "news"})
-	doReq(t, newMux(), "PUT", "/api/syndicate/mine", `{"format":"rss","tags":["news"]}`)
+	if put := doReq(t, newMux(), "PUT", "/api/syndicate/mine", `{"format":"rss","tags":["news"]}`); put.Code != http.StatusOK {
+		t.Fatalf("setup PUT = %d (%s)", put.Code, put.Body)
+	}
 	rec := doReq(t, newMux(), "DELETE", "/api/syndicate/mine", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
