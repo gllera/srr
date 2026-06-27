@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/xml"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
 )
 
 // previewArticle is the JSON shape GET /api/preview returns (decoupled from the
@@ -41,4 +44,153 @@ func handlePreview(w http.ResponseWriter, r *http.Request) {
 		out = append(out, previewArticle{Title: i.Title, Link: i.Link, Published: i.Published, Content: i.Content})
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func getGen(w http.ResponseWriter, r *http.Request) {
+	var gen int
+	err := withDBCtx(r.Context(), false, func(_ context.Context, db *DB) error {
+		gen = db.core.Gen
+		return nil
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"gen": gen})
+}
+
+func bumpGen(w http.ResponseWriter, r *http.Request) {
+	var gen int
+	err := withDBCtx(r.Context(), true, func(ctx context.Context, db *DB) error {
+		db.BumpGen()
+		gen = db.core.Gen
+		return db.Commit(ctx)
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"gen": gen})
+}
+
+func handleExport(w http.ResponseWriter, r *http.Request) {
+	var data []byte
+	err := withDBCtx(r.Context(), false, func(_ context.Context, db *DB) error {
+		feeds := make([]*Feed, 0, len(db.Feeds()))
+		for _, ch := range db.Feeds() {
+			feeds = append(feeds, ch)
+		}
+		out, e := xml.MarshalIndent(buildOPML(feeds), "", "  ")
+		if e != nil {
+			return fmt.Errorf("encoding opml: %w", e)
+		}
+		data = append([]byte(xml.Header), out...)
+		data = append(data, '\n')
+		return nil
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/x-opml; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="srr-feeds.opml"`)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+// handleImport imports every feed in the uploaded OPML body (like `srr import -a`).
+// Optional query params: tag (override OPML group tags), recipe (stamp all),
+// dry_run=1 (preview only). Subscribe-time discovery resolves homepage URLs.
+func handleImport(w http.ResponseWriter, r *http.Request) {
+	dryRun := r.URL.Query().Get("dry_run") == "1"
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	// ParseOPMLTree reads a path, so spill the body to a temp file.
+	tmp, err := os.CreateTemp("", "srr-import-*.opml")
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(body); err != nil {
+		tmp.Close()
+		writeErr(w, err)
+		return
+	}
+	tmp.Close()
+
+	nodes, err := ParseOPMLTree(tmp.Name())
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	iw := &importWalker{w: io.Discard, seen: map[string]bool{}}
+	newFeeds, err := iw.walk(nodes, "", "", nil, true)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	var tag, recipe *string
+	if q := r.URL.Query(); q.Has("tag") {
+		v := q.Get("tag")
+		tag = &v
+	}
+	if q := r.URL.Query(); q.Has("recipe") {
+		v := q.Get("recipe")
+		recipe = &v
+	}
+	applyImportDefaults(newFeeds, recipe, tag)
+
+	recipes, err := importRecipes()
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if recipe != nil {
+		if err := validateRecipeRef(recipes, *recipe); err != nil {
+			writeErr(w, err)
+			return
+		}
+	}
+	kept, failed := resolveImportFeeds(r.Context(), newFeeds, recipes)
+
+	type skip struct {
+		Title string `json:"title"`
+		URL   string `json:"url"`
+		Error string `json:"error"`
+	}
+	skips := make([]skip, 0, len(failed))
+	for _, f := range failed {
+		skips = append(skips, skip{Title: f.Title, URL: f.URL, Error: f.Err.Error()})
+	}
+
+	if dryRun {
+		previews := make([]feedView, 0, len(kept))
+		for _, c := range kept {
+			previews = append(previews, feedView{Title: c.Title, URL: c.URL, Tag: c.Tag, Recipe: c.Recipe})
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"feeds": previews, "skipped": skips})
+		return
+	}
+
+	err = withDBCtx(r.Context(), true, func(ctx context.Context, db *DB) error {
+		for _, c := range kept {
+			if err := normalizeFeed(c, db.core.Recipes); err != nil {
+				return err
+			}
+			if err := db.AddFeed(c); err != nil {
+				return err
+			}
+		}
+		return db.Commit(ctx)
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"imported": len(kept), "skipped": skips})
 }

@@ -53,3 +53,50 @@ func TestPreviewRequiresURL(t *testing.T) {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
 }
+
+func TestGenShowAndBump(t *testing.T) {
+	setupTestDB(t)
+	rec := doReq(t, newMux(), "GET", "/api/gen", "")
+	var g struct {
+		Gen int `json:"gen"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &g)
+	if g.Gen != 0 {
+		t.Fatalf("initial gen = %d, want 0", g.Gen)
+	}
+	bump := doReq(t, newMux(), "POST", "/api/gen/bump", "")
+	if bump.Code != http.StatusOK {
+		t.Fatalf("bump = %d (%s)", bump.Code, bump.Body)
+	}
+	json.Unmarshal(bump.Body.Bytes(), &g)
+	if g.Gen != 1 {
+		t.Fatalf("after bump gen = %d, want 1", g.Gen)
+	}
+}
+
+func TestServeExportImportRoundTrip(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	stubResolve(t)
+	seedFeed(t, db, &Feed{Title: "Alpha", URL: "https://a.example/feed", Tag: "news"})
+
+	exp := doReq(t, newMux(), "GET", "/api/export", "")
+	if exp.Code != http.StatusOK {
+		t.Fatalf("export = %d", exp.Code)
+	}
+	opml := exp.Body.String()
+	if !strings.Contains(opml, "https://a.example/feed") {
+		t.Fatalf("export missing feed: %s", opml)
+	}
+
+	// Fresh store; import the exported OPML.
+	setupTestDB(t)
+	stubResolve(t)
+	imp := doReqRaw(t, newMux(), "POST", "/api/import", opml)
+	if imp.Code != http.StatusOK {
+		t.Fatalf("import = %d (%s)", imp.Code, imp.Body)
+	}
+	list := doReq(t, newMux(), "GET", "/api/feeds", "")
+	if !strings.Contains(list.Body.String(), "https://a.example/feed") {
+		t.Fatalf("imported feed not listed: %s", list.Body)
+	}
+}
