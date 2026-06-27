@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"strings"
 )
 
 // previewArticle is the JSON shape GET /api/preview returns (decoupled from the
@@ -193,4 +195,75 @@ func handleImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"imported": len(kept), "skipped": skips})
+}
+
+// handleInspect runs `srr inspect` in-process for the supported GUI modes
+// (validate, from-hash) and returns its textual report. It reuses InspectCmd by
+// capturing os.Stdout for the call — the report functions print via fmt.Printf.
+func handleInspect(w http.ResponseWriter, r *http.Request) {
+	mode := r.URL.Query().Get("mode")
+	cmd := &InspectCmd{}
+	switch mode {
+	case "validate":
+		cmd.Validate = true
+	case "from-hash":
+		hash := r.URL.Query().Get("hash")
+		if hash == "" {
+			writeErr(w, fmt.Errorf("hash is required for mode=from-hash"))
+			return
+		}
+		cmd.FromHash = hash
+	default:
+		writeErr(w, fmt.Errorf("unsupported mode %q (use validate or from-hash)", mode))
+		return
+	}
+
+	// InspectCmd.Run reads db.gz via readGz (ignoreMissing=false). Commit the
+	// current state first so db.gz is guaranteed to exist on disk. Best-effort:
+	// if the store is locked by a running fetch the db.gz it maintains is current.
+	_ = withDBCtx(r.Context(), true, func(ctx context.Context, db *DB) error {
+		return db.Commit(ctx)
+	})
+
+	report, runErr := captureInspectStdout(func() error { return cmd.Run() })
+	writeJSON(w, http.StatusOK, map[string]any{
+		"report": report,
+		"ok":     runErr == nil,
+		"error":  errString(runErr),
+	})
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// captureInspectStdout redirects os.Stdout to a pipe for the duration of fn and
+// returns what was written. Serialized by serveStdoutMu so concurrent inspect
+// calls do not interleave (inspect is a rare, operator-driven action).
+var serveStdoutMu = make(chan struct{}, 1)
+
+func captureInspectStdout(fn func() error) (string, error) {
+	serveStdoutMu <- struct{}{}
+	defer func() { <-serveStdoutMu }()
+
+	orig := os.Stdout
+	rd, wr, err := os.Pipe()
+	if err != nil {
+		return "", err
+	}
+	os.Stdout = wr
+	out := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = buf.ReadFrom(rd)
+		out <- buf.String()
+	}()
+
+	runErr := fn()
+	wr.Close()
+	os.Stdout = orig
+	return strings.TrimRight(<-out, "\n"), runErr
 }

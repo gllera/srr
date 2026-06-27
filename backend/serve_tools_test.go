@@ -102,3 +102,29 @@ func TestServeExportImportRoundTrip(t *testing.T) {
 		t.Fatalf("imported feed not listed: %s", list.Body)
 	}
 }
+
+func TestInspectValidate(t *testing.T) {
+	setupTestDB(t) // empty store is internally consistent
+	rec := doReq(t, newMux(), "GET", "/api/inspect?mode=validate", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
+	}
+	var got struct {
+		Report string `json:"report"`
+		OK     bool   `json:"ok"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.OK {
+		t.Fatalf("empty store should validate ok; report:\n%s", got.Report)
+	}
+}
+
+func TestInspectBadMode(t *testing.T) {
+	setupTestDB(t)
+	rec := doReq(t, newMux(), "GET", "/api/inspect?mode=bogus", "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
