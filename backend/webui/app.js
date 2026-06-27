@@ -172,7 +172,7 @@ function openFeedModal(f) {
       if (n === (v.recipe || "")) o.selected = true;
       recipe.append(o);
     }
-  });
+  }).catch((e) => banner("Could not load recipes: " + e.message));
   const err = el("div", { class: "muted" });
 
   const save = el("button", { class: "btn", onclick: async () => {
@@ -266,6 +266,7 @@ function openRecipeModal(name, rcp) {
   drawSteps();
 
   const save = el("button", { class: "btn", onclick: async () => {
+    err.textContent = "";
     const nm = (name || nameIn.value).trim();
     if (!nm) { err.textContent = "name required"; return; }
     const body = { ingest: ingestIn.value.trim(), pipe: steps.map((s) => s.trim()).filter(Boolean) };
@@ -294,7 +295,7 @@ function previewPanel() {
   const recipeSel = el("select", {}, el("option", { value: "default" }, "default"));
   apiGet("/api/recipes").then((rs) => {
     for (const n of Object.keys(rs).sort()) if (n !== "default") recipeSel.append(el("option", { value: n }, n));
-  });
+  }).catch((e) => banner("Could not load recipes: " + e.message));
   const out = el("div", {});
   const go = el("button", { class: "btn", onclick: async () => {
     out.replaceChildren(el("div", { class: "muted" }, "loading…"));
