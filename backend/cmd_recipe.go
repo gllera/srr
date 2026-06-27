@@ -62,16 +62,7 @@ type RecipeSetCmd struct {
 
 func (o *RecipeSetCmd) Run() error {
 	return withDB(true, func(ctx context.Context, db *DB) error {
-		if o.Name == "" {
-			return fmt.Errorf("recipe name is required")
-		}
-		pipe := filterPipe(o.Pipe)
-		// #default is allowed in every recipe except 'default' itself.
-		if err := validatePipe(pipe, o.Name != defaultRecipeName); err != nil {
-			return err
-		}
-		db.core.Recipes[o.Name] = Recipe{Ingest: o.Ingest, Pipe: pipe}
-		return db.Commit(ctx)
+		return setRecipe(ctx, db, o.Name, o.Ingest, o.Pipe)
 	})
 }
 
@@ -84,29 +75,49 @@ type RecipeRmCmd struct {
 
 func (o *RecipeRmCmd) Run() error {
 	return withDB(true, func(ctx context.Context, db *DB) error {
-		if o.Name == defaultRecipeName {
-			return fmt.Errorf("cannot remove the reserved %q recipe", defaultRecipeName)
-		}
-		if _, ok := db.core.Recipes[o.Name]; !ok {
-			return fmt.Errorf("recipe %q not found", o.Name)
-		}
-		var refs []int
-		for id, ch := range db.Feeds() {
-			if ch.Recipe == o.Name {
-				refs = append(refs, id)
-			}
-		}
-		if len(refs) > 0 {
-			sort.Ints(refs)
-			parts := make([]string, len(refs))
-			for i, id := range refs {
-				parts[i] = fmt.Sprint(id)
-			}
-			return fmt.Errorf("recipe %q is referenced by feed(s) %s; re-point them first", o.Name, strings.Join(parts, ", "))
-		}
-		delete(db.core.Recipes, o.Name)
-		return db.Commit(ctx)
+		return removeRecipe(ctx, db, o.Name)
 	})
+}
+
+// setRecipe upserts a recipe (full-replace), shared by `srr recipe set` and the
+// PUT /api/recipes handler. filterPipe + validatePipe enforce the #default rules.
+func setRecipe(ctx context.Context, db *DB, name, ingest string, pipe []string) error {
+	if name == "" {
+		return fmt.Errorf("recipe name is required")
+	}
+	pipe = filterPipe(pipe)
+	if err := validatePipe(pipe, name != defaultRecipeName); err != nil {
+		return err
+	}
+	db.core.Recipes[name] = Recipe{Ingest: ingest, Pipe: pipe}
+	return db.Commit(ctx)
+}
+
+// removeRecipe deletes a recipe, refusing 'default' and any name still
+// referenced by a feed. Shared by `srr recipe rm` and the DELETE handler.
+func removeRecipe(ctx context.Context, db *DB, name string) error {
+	if name == defaultRecipeName {
+		return fmt.Errorf("cannot remove the reserved %q recipe", defaultRecipeName)
+	}
+	if _, ok := db.core.Recipes[name]; !ok {
+		return fmt.Errorf("recipe %q not found", name)
+	}
+	var refs []int
+	for id, ch := range db.Feeds() {
+		if ch.Recipe == name {
+			refs = append(refs, id)
+		}
+	}
+	if len(refs) > 0 {
+		sort.Ints(refs)
+		parts := make([]string, len(refs))
+		for i, id := range refs {
+			parts[i] = fmt.Sprint(id)
+		}
+		return fmt.Errorf("recipe %q is referenced by feed(s) %s; re-point them first", name, strings.Join(parts, ", "))
+	}
+	delete(db.core.Recipes, name)
+	return db.Commit(ctx)
 }
 
 // filterPipe trims each step and drops empty/whitespace-only entries. Returns
