@@ -31,6 +31,9 @@ func TestRunFetchAllAndProgress(t *testing.T) {
 	allowLoopback(t)
 	seedFeed(t, db, &Feed{Title: "Live", URL: rssServer(t)})
 
+	// Exactly one feed is seeded, so onFeed fires once from a single worker —
+	// the unguarded append is safe here. A multi-feed caller (e.g. the SSE
+	// handler) must guard onFeed; it does so by pushing to a channel.
 	var seen []feedProgress
 	err := (&FetchCmd{}).runFetch(ctx, newFetchClient(1), nil, func(p feedProgress) {
 		seen = append(seen, p)
