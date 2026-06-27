@@ -104,7 +104,12 @@ func TestServeExportImportRoundTrip(t *testing.T) {
 }
 
 func TestInspectValidate(t *testing.T) {
-	setupTestDB(t) // empty store is internally consistent
+	db, _, _ := setupTestDB(t) // empty store is internally consistent
+	// A real store always has a committed db.gz; setupTestDB doesn't write one,
+	// so commit here — the read-only inspect handler must not create it itself.
+	if err := db.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
 	rec := doReq(t, newMux(), "GET", "/api/inspect?mode=validate", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
