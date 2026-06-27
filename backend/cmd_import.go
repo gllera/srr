@@ -50,7 +50,7 @@ func (o *ImportCmd) Run() error {
 	applyImportDefaults(newFeeds, o.Recipe, o.Tag)
 
 	// Subscribe-time discovery gate reads the recipes map (read-only).
-	recipes, err := importRecipes()
+	recipes, err := importRecipes(context.Background())
 	if err != nil {
 		return err
 	}
@@ -81,15 +81,7 @@ func (o *ImportCmd) Run() error {
 	}
 
 	return withDB(true, func(ctx context.Context, db *DB) error {
-		for _, c := range kept {
-			if err := normalizeFeed(c, db.core.Recipes); err != nil {
-				return err
-			}
-			if err := db.AddFeed(c); err != nil {
-				return err
-			}
-		}
-		return db.Commit(ctx)
+		return commitImportedFeeds(ctx, db, kept)
 	})
 }
 
@@ -240,13 +232,28 @@ func resolveImportFeeds(ctx context.Context, feeds []*Feed, recipes map[string]R
 
 // importRecipes reads the db.gz recipes map (read-only, unlocked) so
 // resolveImportFeeds can resolve each feed's recipe to gate #feed discovery.
-func importRecipes() (map[string]Recipe, error) {
+func importRecipes(ctx context.Context) (map[string]Recipe, error) {
 	var recipes map[string]Recipe
-	err := withDB(false, func(_ context.Context, db *DB) error {
+	err := withDBCtx(ctx, false, func(_ context.Context, db *DB) error {
 		recipes = db.core.Recipes
 		return nil
 	})
 	return recipes, err
+}
+
+// commitImportedFeeds normalizes and adds each resolved feed, then commits.
+// Shared by `srr import` and the HTTP import handler; call it inside a
+// withDB(true)/withDBCtx(…, true) scope.
+func commitImportedFeeds(ctx context.Context, db *DB, feeds []*Feed) error {
+	for _, c := range feeds {
+		if err := normalizeFeed(c, db.core.Recipes); err != nil {
+			return err
+		}
+		if err := db.AddFeed(c); err != nil {
+			return err
+		}
+	}
+	return db.Commit(ctx)
 }
 
 // reportImportFailures prints the feeds skipped because no feed could be

@@ -133,14 +133,21 @@ func updateFeed(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	handleFeedSave(w, r, &id)
+}
+
+// handleFeedSave decodes a feedView, stamps its id (nil = create, non-nil =
+// update), upserts via saveFeed, and echoes the stored feed. Shared by
+// createFeed + updateFeed.
+func handleFeedSave(w http.ResponseWriter, r *http.Request, id *int) {
 	var v feedView
 	if err := decodeJSON(r, &v); err != nil {
 		writeErr(w, err)
 		return
 	}
-	v.ID = &id
+	v.ID = id
 	var saved *Feed
-	err = withDBCtx(r.Context(), true, func(ctx context.Context, db *DB) error {
+	err := withDBCtx(r.Context(), true, func(ctx context.Context, db *DB) error {
 		s, e := saveFeed(ctx, db, &v)
 		saved = s
 		return e
@@ -173,23 +180,7 @@ func deleteFeed(w http.ResponseWriter, r *http.Request) {
 }
 
 func createFeed(w http.ResponseWriter, r *http.Request) {
-	var v feedView
-	if err := decodeJSON(r, &v); err != nil {
-		writeErr(w, err)
-		return
-	}
-	v.ID = nil // create ignores any id in the body
-	var saved *Feed
-	err := withDBCtx(r.Context(), true, func(ctx context.Context, db *DB) error {
-		s, e := saveFeed(ctx, db, &v)
-		saved = s
-		return e
-	})
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, listViewOf(saved))
+	handleFeedSave(w, r, nil) // nil id ⇒ create (any id in the body is ignored)
 }
 
 func applyFeedsHandler(w http.ResponseWriter, r *http.Request) {

@@ -106,7 +106,7 @@ func TestCreateFeedLockContention(t *testing.T) {
 	stubResolve(t)
 	// Hold the lock the way another srr process would.
 	lock := dir + "/" + dbLockKey
-	if err := osWriteFile(lock); err != nil {
+	if err := os.WriteFile(lock, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	body := `{"title":"X","url":"https://x.example/feed"}`
@@ -115,8 +115,6 @@ func TestCreateFeedLockContention(t *testing.T) {
 		t.Fatalf("status = %d, want 409 (%s)", rec.Code, rec.Body)
 	}
 }
-
-func osWriteFile(path string) error { return os.WriteFile(path, nil, 0o644) }
 
 func TestUpdateFeedPreservesStateOnSameURL(t *testing.T) {
 	db, _, _ := setupTestDB(t)
