@@ -153,4 +153,5 @@ func registerAPI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/syndicate", listSyndicate)
 	mux.HandleFunc("PUT /api/syndicate/{name}", putSyndicate)
 	mux.HandleFunc("DELETE /api/syndicate/{name}", deleteSyndicate)
+	mux.HandleFunc("POST /api/fetch", handleFetch)
 }
