@@ -43,6 +43,10 @@ func handleFetch(w http.ResponseWriter, r *http.Request) {
 		err := (&FetchCmd{}).runFetch(r.Context(), client, filter, func(p feedProgress) {
 			progress <- p
 		})
+		// Per-request transport: drop its idle keep-alive sockets now rather than
+		// letting them linger ~90s (IdleConnTimeout), so rapid GUI re-triggers
+		// don't pile up orphaned connections.
+		client.CloseIdleConnections()
 		done <- err
 		close(progress)
 	}()
