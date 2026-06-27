@@ -71,7 +71,7 @@ var previewTmpl = template.Must(template.New("preview").Funcs(template.FuncMap{
 // pipeOverride replaces the recipe's pipe; a non-empty ingestOverride replaces
 // its ingest.
 func renderPreview(ctx context.Context, recipes map[string]Recipe, recipeName string, pipeOverride []string, ingestOverride, rawURL string) ([]*Item, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := newFetchClient(1)
 	processor := mod.New()
 	engine := ingest.New()
 

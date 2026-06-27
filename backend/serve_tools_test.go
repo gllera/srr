@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"srrb/mod"
@@ -36,6 +37,12 @@ func TestPreview(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Title != "Hello" {
 		t.Fatalf("got %+v", got)
+	}
+	if got[0].Link != "https://e.example/a" {
+		t.Errorf("link = %q, want https://e.example/a", got[0].Link)
+	}
+	if !strings.Contains(got[0].Content, "Body") {
+		t.Errorf("content = %q, want it to contain Body", got[0].Content)
 	}
 }
 
