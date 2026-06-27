@@ -164,7 +164,15 @@ function openFeedModal(f) {
   const title = el("input", { id: "f_title", value: v.title });
   const url = el("input", { id: "f_url", value: v.url });
   const tag = el("input", { id: "f_tag", value: v.tag || "" });
-  const recipe = el("input", { id: "f_recipe", value: v.recipe || "", placeholder: "default" });
+  const recipe = el("select", { id: "f_recipe" }, el("option", { value: "" }, "default"));
+  apiGet("/api/recipes").then((rs) => {
+    for (const n of Object.keys(rs).sort()) {
+      if (n === "default") continue;
+      const o = el("option", { value: n }, n);
+      if (n === (v.recipe || "")) o.selected = true;
+      recipe.append(o);
+    }
+  });
   const err = el("div", { class: "muted" });
 
   const save = el("button", { class: "btn", onclick: async () => {
@@ -192,4 +200,115 @@ function openFeedModal(f) {
       el("button", { class: "btn", onclick: () => feedDialog.close() }, "Cancel"),
       save));
   feedDialog.showModal();
+}
+
+// --- recipes tab ------------------------------------------------------------
+async function renderRecipes() {
+  const recipes = await apiGet("/api/recipes");
+  const root = document.getElementById("recipes");
+  root.replaceChildren();
+  root.append(el("div", { class: "toolbar" },
+    el("button", { class: "btn", onclick: () => openRecipeModal(null, null) }, "+ New recipe")));
+
+  const table = el("table", {}, el("thead", {}, el("tr", {},
+    el("th", {}, "name"), el("th", {}, "ingest"), el("th", {}, "pipe"), el("th", {}, ""))));
+  const tb = el("tbody", {});
+  for (const name of Object.keys(recipes).sort()) {
+    const rcp = recipes[name];
+    const actions = el("td", {},
+      el("button", { class: "btn", onclick: () => openRecipeModal(name, rcp) }, "edit"));
+    if (name !== "default") {
+      actions.append(" ", el("button", { class: "btn", onclick: () => deleteRecipe(name) }, "✕"));
+    }
+    tb.append(el("tr", {},
+      el("td", {}, name),
+      el("td", {}, rcp.ingest || ""),
+      el("td", {}, (rcp.pipe || []).join("  →  ")),
+      actions));
+  }
+  table.append(tb);
+  root.append(table);
+  root.append(previewPanel());
+}
+renderers.recipes = renderRecipes;
+
+async function deleteRecipe(name) {
+  if (!confirm(`Delete recipe "${name}"?`)) return;
+  try {
+    await api("DELETE", "/api/recipes/" + encodeURIComponent(name));
+    banner("Deleted recipe " + name, true);
+    await renderRecipes();
+  } catch (e) { banner(e.message); }
+}
+
+let recipeDialog;
+function openRecipeModal(name, rcp) {
+  if (!recipeDialog) {
+    recipeDialog = el("dialog", {});
+    document.body.append(recipeDialog);
+  }
+  const isEdit = !!name;
+  const nameIn = el("input", { value: name || "", disabled: isEdit ? "" : null });
+  const ingestIn = el("input", { value: (rcp && rcp.ingest) || "", placeholder: "#feed (default)" });
+  const steps = (rcp && rcp.pipe) ? [...rcp.pipe] : [];
+  const stepsBox = el("div", {});
+  const err = el("div", { class: "muted" });
+
+  function drawSteps() {
+    stepsBox.replaceChildren();
+    steps.forEach((s, i) => {
+      const inp = el("input", { value: s, oninput: (e) => (steps[i] = e.target.value) });
+      stepsBox.append(el("div", { class: "toolbar" }, inp,
+        el("button", { class: "btn", onclick: () => { steps.splice(i, 1); drawSteps(); } }, "✕")));
+    });
+    stepsBox.append(el("button", { class: "btn", onclick: () => { steps.push(""); drawSteps(); } }, "+ step"));
+  }
+  drawSteps();
+
+  const save = el("button", { class: "btn", onclick: async () => {
+    const nm = (name || nameIn.value).trim();
+    if (!nm) { err.textContent = "name required"; return; }
+    const body = { ingest: ingestIn.value.trim(), pipe: steps.map((s) => s.trim()).filter(Boolean) };
+    try {
+      await api("PUT", "/api/recipes/" + encodeURIComponent(nm), body);
+      recipeDialog.close();
+      banner((isEdit ? "Updated " : "Created ") + "recipe " + nm, true);
+      await renderRecipes();
+    } catch (e) { err.textContent = e.message; }
+  } }, "Save");
+
+  recipeDialog.replaceChildren(
+    el("h3", {}, isEdit ? "Edit recipe" : "New recipe"),
+    el("label", {}, "Name"), nameIn,
+    el("label", {}, "Ingest (blank = inherit default)"), ingestIn,
+    el("label", {}, "Pipe steps"), stepsBox,
+    err,
+    el("div", { class: "row" },
+      el("button", { class: "btn", onclick: () => recipeDialog.close() }, "Cancel"), save));
+  recipeDialog.showModal();
+}
+
+// --- inline preview (used inside the Recipes tab) ---------------------------
+function previewPanel() {
+  const url = el("input", { type: "url", placeholder: "https://example.com/feed", style: "min-width:24em" });
+  const recipeSel = el("select", {}, el("option", { value: "default" }, "default"));
+  apiGet("/api/recipes").then((rs) => {
+    for (const n of Object.keys(rs).sort()) if (n !== "default") recipeSel.append(el("option", { value: n }, n));
+  });
+  const out = el("div", {});
+  const go = el("button", { class: "btn", onclick: async () => {
+    out.replaceChildren(el("div", { class: "muted" }, "loading…"));
+    try {
+      const arts = await apiGet(`/api/preview?url=${encodeURIComponent(url.value)}&recipe=${encodeURIComponent(recipeSel.value)}`);
+      out.replaceChildren(el("div", { class: "muted" }, `${arts.length} articles`));
+      for (const a of arts) {
+        out.append(el("article", { class: "preview" },
+          el("h4", {}, a.link ? el("a", { href: a.link, target: "_blank", rel: "noopener" }, a.title) : a.title),
+          el("div", { class: "content", html: a.content })));
+      }
+    } catch (e) { out.replaceChildren(el("div", { class: "muted" }, e.message)); }
+  } }, "Preview");
+  return el("div", {},
+    el("h3", {}, "Preview a recipe against a URL"),
+    el("div", { class: "toolbar" }, url, recipeSel, go), out);
 }
