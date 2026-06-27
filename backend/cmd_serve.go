@@ -136,5 +136,6 @@ func pathID(r *http.Request) (int, error) {
 // registerAPI is grown across phases. Routes are added by their tasks.
 func registerAPI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/feeds", listFeeds)
+	mux.HandleFunc("POST /api/feeds", createFeed)
 	mux.HandleFunc("GET /api/feeds/{id}", getFeed)
 }
