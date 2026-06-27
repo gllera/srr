@@ -93,7 +93,7 @@ func TestServeExportImportRoundTrip(t *testing.T) {
 	// Fresh store; import the exported OPML.
 	setupTestDB(t)
 	stubResolve(t)
-	imp := doReqRaw(t, newMux(), "POST", "/api/import", opml)
+	imp := doReq(t, newMux(), "POST", "/api/import", opml)
 	if imp.Code != http.StatusOK {
 		t.Fatalf("import = %d (%s)", imp.Code, imp.Body)
 	}

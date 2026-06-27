@@ -22,10 +22,6 @@ func doReq(t *testing.T, h http.Handler, method, target, body string) *httptest.
 	return rec
 }
 
-func doReqRaw(t *testing.T, h http.Handler, method, target, body string) *httptest.ResponseRecorder {
-	return doReq(t, h, method, target, body)
-}
-
 func seedFeed(t *testing.T, db *DB, ch *Feed) {
 	t.Helper()
 	if err := db.AddFeed(ch); err != nil {

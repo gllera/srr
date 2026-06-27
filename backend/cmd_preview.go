@@ -88,11 +88,7 @@ func renderPreview(ctx context.Context, recipes map[string]Recipe, recipeName st
 		return nil, fmt.Errorf("invalid pipeline %v: %w", pipe, err)
 	}
 
-	maxFeedSize := globals.MaxFeedSize
-	if maxFeedSize < 1 {
-		maxFeedSize = defaultMaxFeedSize
-	}
-	buf := make([]byte, maxFeedSize*(1<<10)+1)
+	buf := make([]byte, globals.MaxFeedSize*(1<<10)+1)
 	name := ingest.Select(r.Ingest, def.Ingest)
 	result, err := engine.Fetch(ctx, name, client, buf, ingest.Request{URL: rawURL, MaxSize: cap(buf) - 1})
 	if err != nil {
