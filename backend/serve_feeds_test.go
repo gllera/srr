@@ -223,6 +223,37 @@ func TestApplyFeedsAtomicOnBadElement(t *testing.T) {
 	}
 }
 
+// A GUI feed save (PUT body without no_title) must not clobber a feed's stored
+// titleless flag — setting it is scoped to the CLI (feed apply/edit).
+func TestServeFeedUpdatePreservesNoTitle(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	seedFeed(t, db, &Feed{Title: "Chan", URL: "https://t.example.com/feed", NoTitle: true})
+
+	// The exact body the webui edit modal sends: title/url/tag/recipe, no no_title.
+	rec := doReq(t, newMux(), "PUT", "/api/feeds/0",
+		`{"title":"Chan renamed","url":"https://t.example.com/feed","tag":"news"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body %s", rec.Code, rec.Body.String())
+	}
+
+	// Read the persisted state (not the in-memory db which predates the handler).
+	var noTitle bool
+	err := withDB(false, func(_ context.Context, d *DB) error {
+		ch, e := d.FeedByID(0)
+		if e != nil {
+			return e
+		}
+		noTitle = ch.NoTitle
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("FeedByID: %v", err)
+	}
+	if !noTitle {
+		t.Errorf("NoTitle = false after GUI save, want true (must be preserved)")
+	}
+}
+
 func TestListTags(t *testing.T) {
 	db, _, _ := setupTestDB(t)
 	seedFeed(t, db, &Feed{Title: "A", URL: "https://a.example/feed", Tag: "news", TotalArt: 5})
