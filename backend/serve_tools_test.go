@@ -56,19 +56,20 @@ func TestPreviewRequiresURL(t *testing.T) {
 
 func TestGenShowAndBump(t *testing.T) {
 	setupTestDB(t)
-	rec := doReq(t, newMux(), "GET", "/api/gen", "")
-	var g struct {
-		Gen int `json:"gen"`
+	ov := doReq(t, newMux(), "GET", "/api/overview", "")
+	var got overviewView
+	if err := json.Unmarshal(ov.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode overview: %v", err)
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &g); err != nil {
-		t.Fatalf("decode gen: %v", err)
-	}
-	if g.Gen != 0 {
-		t.Fatalf("initial gen = %d, want 0", g.Gen)
+	if got.Gen != 0 {
+		t.Fatalf("initial gen = %d, want 0", got.Gen)
 	}
 	bump := doReq(t, newMux(), "POST", "/api/gen/bump", "")
 	if bump.Code != http.StatusOK {
 		t.Fatalf("bump = %d (%s)", bump.Code, bump.Body)
+	}
+	var g struct {
+		Gen int `json:"gen"`
 	}
 	json.Unmarshal(bump.Body.Bytes(), &g)
 	if g.Gen != 1 {
@@ -97,9 +98,9 @@ func TestServeExportImportRoundTrip(t *testing.T) {
 	if imp.Code != http.StatusOK {
 		t.Fatalf("import = %d (%s)", imp.Code, imp.Body)
 	}
-	list := doReq(t, newMux(), "GET", "/api/feeds", "")
-	if !strings.Contains(list.Body.String(), "https://a.example/feed") {
-		t.Fatalf("imported feed not listed: %s", list.Body)
+	ov := doReq(t, newMux(), "GET", "/api/overview", "")
+	if !strings.Contains(ov.Body.String(), "https://a.example/feed") {
+		t.Fatalf("imported feed not listed in overview: %s", ov.Body)
 	}
 }
 

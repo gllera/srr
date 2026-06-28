@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"net/http"
+	"sort"
+	"strings"
 )
 
 // overviewView is the whole-store snapshot the admin console renders every tab
@@ -25,12 +27,36 @@ type overviewView struct {
 func getOverview(w http.ResponseWriter, r *http.Request) {
 	var out overviewView
 	err := withDBCtx(r.Context(), false, func(_ context.Context, db *DB) error {
+		// Project feeds to the UI list shape, sorted case-insensitively by title.
+		feeds := make([]feedListView, 0, len(db.Feeds()))
+		for _, ch := range db.Feeds() {
+			feeds = append(feeds, listViewOf(ch))
+		}
+		sort.Slice(feeds, func(i, j int) bool {
+			return strings.ToLower(feeds[i].Title) < strings.ToLower(feeds[j].Title)
+		})
+		// Aggregate feeds into tag buckets (tag "" = untagged), sorted by tag.
+		agg := map[string]*tagCount{}
+		for _, ch := range db.Feeds() {
+			tc := agg[ch.Tag]
+			if tc == nil {
+				tc = &tagCount{Tag: ch.Tag}
+				agg[ch.Tag] = tc
+			}
+			tc.Feeds++
+			tc.Articles += ch.TotalArt
+		}
+		tags := make([]tagCount, 0, len(agg))
+		for _, tc := range agg {
+			tags = append(tags, *tc)
+		}
+		sort.Slice(tags, func(i, j int) bool { return tags[i].Tag < tags[j].Tag })
 		out = overviewView{
-			Feeds:   buildFeedViews(db),
-			Tags:    buildTagCounts(db),
+			Feeds:   feeds,
+			Tags:    tags,
 			Recipes: buildRecipeMap(db),
 			// Non-nil empty so an empty store serializes Out as [] (the
-			// syndicate tab reads .length), mirroring listSyndicate.
+			// syndicate tab reads .length), mirroring the old listSyndicate.
 			Out:       append([]OutFeed{}, db.core.Out...),
 			Gen:       db.core.Gen,
 			FetchedAt: db.core.FetchedAt,
