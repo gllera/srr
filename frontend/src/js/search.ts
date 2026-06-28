@@ -1,4 +1,4 @@
-// Title search over the meta/ pack series (design: docs/search-design.md).
+// Title search over the meta/ pack series.
 // Each finalized shard holds META_PACK_SIZE (5,000) entries — a tenth of an
 // idx pack: finalized meta/<n>.gz = bloom[SEARCH_BLOOM_BYTES] ‖ JSONL, the latest
 // meta/L<seq>.gz tail is JSONL only (always scanned), and meta/s<mp>.gz

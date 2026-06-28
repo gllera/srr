@@ -218,8 +218,7 @@ func (o *DB) savePack(ctx context.Context, key string, p *pack) error {
 }
 
 // savePackFinal publishes a finalized pack. Finalized names are immutable
-// and downloaded forever, so it spends zopfli-grade CPU recompressing them
-// (docs/improvement-backlog.md item 4).
+// and downloaded forever, so it spends zopfli-grade CPU recompressing them.
 func (o *DB) savePackFinal(ctx context.Context, key string, p *pack) error {
 	return o.flushPack(ctx, key, p, true)
 }
