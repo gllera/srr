@@ -3,11 +3,8 @@ package main
 import (
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"srrb/mod"
 )
 
 const sampleRSS = `<?xml version="1.0"?><rss version="2.0"><channel>
@@ -17,17 +14,10 @@ const sampleRSS = `<?xml version="1.0"?><rss version="2.0"><channel>
 
 func TestPreview(t *testing.T) {
 	setupTestDB(t)
-	// A local RSS server; allow loopback fetch past the SSRF guard.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/rss+xml")
-		w.Write([]byte(sampleRSS))
-	}))
-	t.Cleanup(srv.Close)
-	prev := mod.AllowPrivateFetch
-	mod.AllowPrivateFetch = true
-	t.Cleanup(func() { mod.AllowPrivateFetch = prev })
+	allowLoopback(t)
+	url := rssServer(t)
 
-	rec := doReq(t, newMux(), "GET", "/api/preview?url="+srv.URL, "")
+	rec := doReq(t, newMux(), "GET", "/api/preview?url="+url, "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
 	}
@@ -79,7 +69,7 @@ func TestGenShowAndBump(t *testing.T) {
 
 func TestServeExportImportRoundTrip(t *testing.T) {
 	db, _, _ := setupTestDB(t)
-	stubResolve(t)
+	stubPassthroughResolve()
 	seedFeed(t, db, &Feed{Title: "Alpha", URL: "https://a.example/feed", Tag: "news"})
 
 	exp := doReq(t, newMux(), "GET", "/api/export", "")
@@ -93,7 +83,7 @@ func TestServeExportImportRoundTrip(t *testing.T) {
 
 	// Fresh store; import the exported OPML.
 	setupTestDB(t)
-	stubResolve(t)
+	stubPassthroughResolve()
 	imp := doReq(t, newMux(), "POST", "/api/import", opml)
 	if imp.Code != http.StatusOK {
 		t.Fatalf("import = %d (%s)", imp.Code, imp.Body)

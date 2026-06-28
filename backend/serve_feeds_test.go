@@ -9,17 +9,9 @@ import (
 	"testing"
 )
 
-// stubResolve makes subscribe-time discovery a no-op (offline) for the test.
-func stubResolve(t *testing.T) {
-	t.Helper()
-	prev := resolveFeedURL
-	resolveFeedURL = func(_ context.Context, url string) (string, error) { return url, nil }
-	t.Cleanup(func() { resolveFeedURL = prev })
-}
-
 func TestCreateFeed(t *testing.T) {
 	setupTestDB(t)
-	stubResolve(t)
+	stubPassthroughResolve()
 	body := `{"title":"New","url":"https://n.example/feed","tag":"news"}`
 	rec := doReq(t, newMux(), "POST", "/api/feeds", body)
 	if rec.Code != http.StatusOK {
@@ -42,7 +34,7 @@ func TestCreateFeed(t *testing.T) {
 
 func TestCreateFeedBadRecipe(t *testing.T) {
 	setupTestDB(t)
-	stubResolve(t)
+	stubPassthroughResolve()
 	body := `{"title":"X","url":"https://x.example/feed","recipe":"nope"}`
 	rec := doReq(t, newMux(), "POST", "/api/feeds", body)
 	if rec.Code != http.StatusBadRequest {
@@ -51,9 +43,8 @@ func TestCreateFeedBadRecipe(t *testing.T) {
 }
 
 func TestCreateFeedLockContention(t *testing.T) {
-	db, _, dir := setupTestDB(t)
-	_ = db
-	stubResolve(t)
+	_, _, dir := setupTestDB(t)
+	stubPassthroughResolve()
 	// Hold the lock the way another srr process would.
 	lock := dir + "/" + dbLockKey
 	if err := os.WriteFile(lock, nil, 0o644); err != nil {
@@ -68,7 +59,7 @@ func TestCreateFeedLockContention(t *testing.T) {
 
 func TestUpdateFeedPreservesStateOnSameURL(t *testing.T) {
 	db, _, _ := setupTestDB(t)
-	stubResolve(t)
+	stubPassthroughResolve()
 	seedFeed(t, db, &Feed{Title: "Old", URL: "https://u.example/feed", FailStreak: 3, FetchError: "x"})
 
 	body := `{"title":"Renamed","url":"https://u.example/feed","tag":"news"}`
@@ -97,7 +88,7 @@ func TestUpdateFeedPreservesStateOnSameURL(t *testing.T) {
 
 func TestUpdateFeedResetsStateOnNewURL(t *testing.T) {
 	db, _, _ := setupTestDB(t)
-	stubResolve(t)
+	stubPassthroughResolve()
 	seedFeed(t, db, &Feed{Title: "Old", URL: "https://u.example/feed", FailStreak: 3, FetchError: "x"})
 
 	body := `{"title":"Old","url":"https://v.example/feed"}`
