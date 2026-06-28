@@ -130,7 +130,7 @@ func TestCacheDirContextRoundTrips(t *testing.T) {
 // generic walk + selective rewrite + no-op-preserves-original behavior.
 func TestWalkAssetAttrsRewritesSelected(t *testing.T) {
 	in := `<img src="a"><video src="b"></video><audio src="c"></audio><a href="d">x</a>`
-	out, err := walkAssetAttrs(in, mediaAttrs, func(tag, attr, val string) (string, bool, error) {
+	out, err := walkAssetAttrs(in, mediaAttrs, func(val string) (string, bool, error) {
 		return strings.ToUpper(val), true, nil
 	})
 	if err != nil {
@@ -149,7 +149,7 @@ func TestWalkAssetAttrsRewritesSelected(t *testing.T) {
 
 func TestWalkAssetAttrsNoMatchReturnsOriginal(t *testing.T) {
 	in := `<p>no media here</p>`
-	out, err := walkAssetAttrs(in, mediaAttrs, func(_, _, _ string) (string, bool, error) {
+	out, err := walkAssetAttrs(in, mediaAttrs, func(_ string) (string, bool, error) {
 		t.Fatal("fn must not be called when no listed attribute is present")
 		return "", false, nil
 	})

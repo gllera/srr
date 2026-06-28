@@ -85,7 +85,7 @@ func init() {
 				return nil
 			}
 
-			content, err := walkAssetAttrs(i.Content, mediaAttrs, func(_, _, val string) (string, bool, error) {
+			content, err := walkAssetAttrs(i.Content, mediaAttrs, func(val string) (string, bool, error) {
 				marker, ok := downloadToCache(ctx, client, cacheDir, val, timeout, maxBody)
 				return marker, ok, nil // fail-open: ok=false leaves the URL; never errors
 			})
