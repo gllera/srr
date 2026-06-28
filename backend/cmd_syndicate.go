@@ -125,11 +125,9 @@ func removeOutFeed(ctx context.Context, db *DB, name string) error {
 	if !validOutName(name) {
 		return fmt.Errorf("syndication name %q must match [A-Za-z0-9._-] and not be '.' or '..'", name)
 	}
-	var format string
 	out := db.core.Out[:0]
 	for _, e := range db.core.Out {
 		if e.Name == name {
-			format = e.Format
 			continue
 		}
 		out = append(out, e)
@@ -138,13 +136,8 @@ func removeOutFeed(ctx context.Context, db *DB, name string) error {
 	if err := db.Commit(ctx); err != nil {
 		return err
 	}
-	exts := map[string]string{"rss": ".rss", "json": ".json"}
-	if ext := exts[format]; format != "" && ext != "" {
+	for _, ext := range []string{".rss", ".json"} {
 		_ = db.Rm(ctx, "out/"+name+ext)
-	} else {
-		for _, ext := range exts {
-			_ = db.Rm(ctx, "out/"+name+ext)
-		}
 	}
 	return nil
 }
