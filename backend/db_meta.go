@@ -18,7 +18,7 @@ import (
 // gzip(bloom[searchBloomBytes] ‖ JSONL of MetaEntry); the latest shard
 // (meta/L<Seq>.gz) holds the tail with no bloom (readers always scan it);
 // meta/s<N>.gz concatenates the N finalized blooms so the reader fetches only
-// shards that can match a query. Design: docs/search-design.md. All writing
+// shards that can match a query. All writing
 // happens here, post-hoc to PutArticles (SyncMeta); the frontend readers are
 // frontend/src/js/data.ts (list) and frontend/src/js/search.ts (search).
 
