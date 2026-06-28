@@ -121,36 +121,64 @@ video {
    opacity: 0.7;
 }
 
-/* Masthead permalink — shown only for titleless feeds (Telegram-style), where
-   the reader hides the <h1> and its link; this stands in for it. Hidden by
-   default; revealed by .srr-reader-titleless below (and only when it has an
-   href, so a linkless article shows no dangling icon). */
+/* Masthead "open original" permalink — the NE arrow after the dateline, present
+   on every article that carries a link (the sole link for titleless feeds, a
+   companion to the title link otherwise). Quiet by default (matches the muted
+   dateline); on interaction it adopts the article's source color — the same
+   per-source identity the masthead source name carries — and the arrow nudges
+   toward its corner, "leaving for the source". Hidden only when linkless. The
+   padding (negative-margin compensated) gives a comfortable touch target
+   without disturbing the baseline kicker row. */
 .srr-kicker-link {
    display: none;
+   align-items: center;
    align-self: center;
    flex-shrink: 0;
-   margin-left: 0.4rem;
-   color: inherit;
+   padding: 0.4rem;
+   margin: -0.4rem -0.25rem -0.4rem 0.1rem;
+   color: var(--muted);
+   border-radius: 4px;
+   transition: color 0.15s ease;
 }
-.srr-kicker-link:hover {
-   color: var(--fg);
+.srr-kicker-link[href] {
+   display: inline-flex;
+}
+.srr-kicker-link:hover,
+.srr-kicker-link:focus-visible {
+   color: var(--src, var(--accent));
+}
+.srr-kicker-link:focus-visible {
+   outline: 2px solid var(--src, var(--accent));
+   outline-offset: 2px;
 }
 .srr-kicker-link-icon {
    display: block;
-   width: 0.95em;
-   height: 0.95em;
+   width: 1em;
+   height: 1em;
    fill: none;
    stroke: currentColor;
-   stroke-width: 1.8;
+   stroke-width: 2;
    stroke-linecap: round;
    stroke-linejoin: round;
+   transition: transform 0.15s ease;
 }
-/* Titleless feeds: swap the heading for the masthead permalink. */
+.srr-kicker-link:hover .srr-kicker-link-icon,
+.srr-kicker-link:focus-visible .srr-kicker-link-icon {
+   transform: translate(1px, -1px);
+}
+@media (prefers-reduced-motion: reduce) {
+   .srr-kicker-link,
+   .srr-kicker-link-icon {
+      transition: none;
+   }
+   .srr-kicker-link:hover .srr-kicker-link-icon,
+   .srr-kicker-link:focus-visible .srr-kicker-link-icon {
+      transform: none;
+   }
+}
+/* Titleless feeds: the heading is hidden; the masthead permalink stands in. */
 .srr-reader-titleless .srr-title-link {
    display: none;
-}
-.srr-reader-titleless .srr-kicker-link[href] {
-   display: inline-flex;
 }
 
 .srr-title {

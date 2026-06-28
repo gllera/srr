@@ -77,12 +77,13 @@
                <div class="srr-kicker">
                   <span class="srr-source"></span>
                   <time class="srr-date"></time>
-                  <!-- Permalink shown only for titleless feeds (Telegram-style),
-                       standing in for the hidden title's link. -->
+                  <!-- "Open original" permalink: present on every article (the only
+                       link for titleless feeds, a companion to the title link
+                       otherwise). Hidden only when the article carries no link. -->
                   <a class="srr-kicker-link" rel="noreferrer" aria-label="Open original" title="Open original">
                      <svg class="srr-kicker-link-icon" viewBox="0 0 24 24" aria-hidden="true">
-                        <path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
-                        <path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+                        <path d="M7 7h10v10" />
+                        <path d="M7 17 17 7" />
                      </svg>
                   </a>
                </div>

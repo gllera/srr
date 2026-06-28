@@ -321,15 +321,22 @@ describe("reader titleless feeds (Telegram-style: title duplicates the body)", (
       )
    })
 
-   it("leaves an ordinary feed's heading in place (no titleless flag)", async () => {
+   it("keeps the heading but still offers the masthead permalink on an ordinary feed", async () => {
       await boot()
       data.db.feeds = { 7: { nt: true } } as unknown as IDB["feeds"]
-      // The article is from feed 1 (no nt flag → absent from the map).
-      nav.fromHash.mockResolvedValue(showFeed({ article: { f: 1, a: 0, p: 0, t: "Real", l: "", c: "<p>x</p>" } }))
+      // Feed 1 has no nt flag (absent from the map); its article carries a link.
+      nav.fromHash.mockResolvedValue(
+         showFeed({ article: { f: 1, a: 0, p: 0, t: "Real", l: "http://example.com/p/1", c: "<p>x</p>" } }),
+      )
       hashTo("#8")
       await flush()
       const reader = document.querySelector(".srr-reader") as HTMLElement
       expect(reader.classList.contains("srr-reader-titleless")).toBe(false)
+      // The permalink is available regardless of titleless (CSS reveals it when
+      // the link has an href; app.ts sets the href on every linked article).
+      expect((document.querySelector(".srr-kicker-link") as HTMLAnchorElement).getAttribute("href")).toBe(
+         "http://example.com/p/1",
+      )
    })
 })
 
