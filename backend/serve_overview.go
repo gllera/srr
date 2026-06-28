@@ -54,7 +54,7 @@ func getOverview(w http.ResponseWriter, r *http.Request) {
 		out = overviewView{
 			Feeds:   feeds,
 			Tags:    tags,
-			Recipes: buildRecipeMap(db),
+			Recipes: db.core.Recipes,
 			// Non-nil empty so an empty store serializes Out as [] (the
 			// syndicate tab reads .length), mirroring the old listSyndicate.
 			Out:       append([]OutFeed{}, db.core.Out...),
