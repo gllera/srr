@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/url"
+	"os"
 	"path"
 	"strings"
 
@@ -165,7 +166,7 @@ func (d *S3) put(ctx context.Context, key string, r io.Reader, ignoreExisting bo
 
 	switch apiErrorCode(err) {
 	case s3ErrPreconditionFailed:
-		return fmt.Errorf("key %q already exists on s3", key)
+		return fmt.Errorf("key %q already exists on s3: %w", key, os.ErrExist)
 	case s3ErrUnauthorized:
 		return fmt.Errorf("unauthorized access to s3")
 	}
