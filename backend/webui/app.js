@@ -118,6 +118,13 @@ async function confirmDelete(question, url, successMsg) {
   }
 }
 
+// saveModal is the shared try/refresh/close/banner/catch boilerplate for every
+// modal save button. Validation and request-body building stay in the caller.
+async function saveModal(dlg, errBox, doApi, okMsg) {
+  try { await doApi(); await refresh(); dlg.close(); banner(okMsg, true); }
+  catch (e) { errBox.textContent = e.message; }
+}
+
 // appendRecipeOptions fills a <select> with recipe-name options from the given
 // recipes map (skipping the implicit "default"), marking `selected` chosen.
 function appendRecipeOptions(sel, selected, recipes) {
@@ -183,7 +190,7 @@ document.querySelectorAll("#tabs button").forEach((b) =>
   b.addEventListener("click", () => showTab(b.dataset.tab)));
 
 // --- feeds tab --------------------------------------------------------------
-const feedsState = { feeds: [], tags: [], recipes: {}, search: "", tag: "" };
+const feedsState = { search: "", tag: "" };
 const UNTAGGED = "\x00"; // sentinel: the "(untagged)" filter option value, distinct from "" (= all tags)
 
 // feedGrade buckets a feed's health: ok (live) / warn (failing, recoverable) /
@@ -196,23 +203,20 @@ const GRADE_DOT = { ok: "green", warn: "amber", err: "red", idle: "gray" };
 
 // healthDot is the small status dot. Its native title carries the health detail
 // (last fetch / never fetched). For a failing feed the error rides a richer
-// hover/focus tooltip instead (see feedRow), so pass suppressTitle to avoid a
-// duplicate native bubble.
-function healthDot(f, suppressTitle) {
-  const title = f.error
-    ? `${f.error} (fail streak ${f.fail_streak})`
-    : f.last_ok
+// hover/focus tooltip instead (see feedRow).
+function healthDot(f) {
+  const title = f.last_ok
     ? "ok, last fetch " + new Date(f.last_ok * 1000).toLocaleString()
     : "never fetched";
-  return el("span", { class: "dot " + GRADE_DOT[feedGrade(f)], title: suppressTitle ? null : title });
+  return el("span", { class: "dot " + GRADE_DOT[feedGrade(f)], title });
 }
 
 // healthBoard is the Feeds-tab hero: a one-line readout of the whole wire's
 // health (total sources, then each non-empty grade with its count).
 function healthBoard() {
   const c = { ok: 0, warn: 0, err: 0, idle: 0 };
-  for (const f of feedsState.feeds) c[feedGrade(f)]++;
-  const total = feedsState.feeds.length;
+  for (const f of snapshot.feeds) c[feedGrade(f)]++;
+  const total = snapshot.feeds.length;
   const board = el("div", { class: "board" },
     el("span", { class: "total" }, el("b", {}, String(total)), total === 1 ? " source" : " sources"));
   const add = (n, dot, label) => {
@@ -239,14 +243,7 @@ function feedMatches(f) {
   return true;
 }
 
-function renderFeeds() {
-  // Drawn from the cached snapshot — no store read on tab switch.
-  feedsState.feeds = snapshot.feeds;
-  feedsState.tags = snapshot.tags;
-  feedsState.recipes = snapshot.recipes;
-  drawFeeds();
-}
-renderers.feeds = renderFeeds;
+renderers.feeds = drawFeeds;
 
 function drawFeeds() {
   const root = document.getElementById("feeds");
@@ -259,7 +256,7 @@ function drawFeeds() {
   const tagSel = el("select", {
     onchange: (e) => { feedsState.tag = e.target.value; drawTable(); },
   }, el("option", { value: "" }, "all tags"));
-  for (const t of feedsState.tags) {
+  for (const t of snapshot.tags) {
     const optVal = t.tag === "" ? UNTAGGED : t.tag;
     const label = (t.tag || "(untagged)") + ` — ${t.feeds}`;
     const o = el("option", { value: optVal }, label);
@@ -303,7 +300,7 @@ function feedRow(f) {
     const wrap = el("span", {
       class: "dotwrap", tabindex: "0", "data-grade": feedGrade(f),
       "aria-label": `Fetch error (fail streak ${f.fail_streak}): ${f.error}`,
-    }, healthDot(f, true), tip);
+    }, healthDot(f), tip);
     statusCell = el("td", { class: "status" }, wrap);
   } else {
     statusCell = el("td", { class: "status" }, healthDot(f));
@@ -319,7 +316,7 @@ function feedRow(f) {
 
 function drawTable() {
   const wrap = document.getElementById("feedTableWrap");
-  const rows = feedsState.feeds.filter(feedMatches);
+  const rows = snapshot.feeds.filter(feedMatches);
   const table = el("table", {},
     el("thead", {}, el("tr", {},
       el("th", {}, ""), el("th", {}, "title"),
@@ -329,7 +326,7 @@ function drawTable() {
   for (const f of rows) tb.append(feedRow(f));
   table.append(tb);
   wrap.replaceChildren(
-    el("div", { class: "count" }, `showing ${rows.length} of ${feedsState.feeds.length}`),
+    el("div", { class: "count" }, `showing ${rows.length} of ${snapshot.feeds.length}`),
     table);
 }
 
@@ -337,19 +334,22 @@ async function deleteFeed(f) {
   return confirmDelete(`Delete feed "${f.title}"?`, "/api/feeds/" + f.id, "Deleted " + f.title);
 }
 
+function makeDialog(attrs) {
+  const d = el("dialog", attrs);
+  document.body.append(d);
+  return d;
+}
+
 let feedDialog;
 function openFeedModal(f) {
-  if (!feedDialog) {
-    feedDialog = el("dialog", { id: "feedModal" });
-    document.body.append(feedDialog);
-  }
+  feedDialog ||= makeDialog({ id: "feedModal" });
   const isEdit = !!f;
   const v = f || { title: "", url: "", tag: "", recipe: "" };
   const title = el("input", { id: "f_title", value: v.title });
   const url = el("input", { id: "f_url", value: v.url });
   const tag = el("input", { id: "f_tag", value: v.tag || "" });
   const recipe = el("select", { id: "f_recipe" }, el("option", { value: "" }, "default"));
-  appendRecipeOptions(recipe, v.recipe || "", feedsState.recipes);
+  appendRecipeOptions(recipe, v.recipe || "", snapshot.recipes);
   const err = el("div", { class: "muted" });
 
   const save = el("button", { class: "btn primary", onclick: async () => {
@@ -357,13 +357,9 @@ function openFeedModal(f) {
       title: title.value.trim(), url: url.value.trim(),
       tag: tag.value.trim(), recipe: recipe.value.trim(),
     };
-    try {
-      if (isEdit) await api("PUT", "/api/feeds/" + f.id, body);
-      else await api("POST", "/api/feeds", body);
-      await refresh();
-      feedDialog.close();
-      banner((isEdit ? "Updated " : "Added ") + body.title, true);
-    } catch (e) { err.textContent = e.message; }
+    await saveModal(feedDialog, err,
+      () => isEdit ? api("PUT", "/api/feeds/" + f.id, body) : api("POST", "/api/feeds", body),
+      (isEdit ? "Updated " : "Added ") + body.title);
   } }, "Save");
 
   feedDialog.replaceChildren(
@@ -410,10 +406,7 @@ async function deleteRecipe(name) {
 
 let recipeDialog;
 function openRecipeModal(name, rcp) {
-  if (!recipeDialog) {
-    recipeDialog = el("dialog", {});
-    document.body.append(recipeDialog);
-  }
+  recipeDialog ||= makeDialog({});
   const isEdit = !!name;
   const nameIn = el("input", { value: name || "", disabled: isEdit ? "" : null });
   const ingestIn = el("input", { value: (rcp && rcp.ingest) || "", placeholder: "#feed (default)" });
@@ -437,12 +430,9 @@ function openRecipeModal(name, rcp) {
     const nm = (name || nameIn.value).trim();
     if (!nm) { err.textContent = "name required"; return; }
     const body = { ingest: ingestIn.value.trim(), pipe: steps.map((s) => s.trim()).filter(Boolean) };
-    try {
-      await api("PUT", "/api/recipes/" + encodeURIComponent(nm), body);
-      recipeDialog.close();
-      banner((isEdit ? "Updated " : "Created ") + "recipe " + nm, true);
-      await refresh();
-    } catch (e) { err.textContent = e.message; }
+    await saveModal(recipeDialog, err,
+      () => api("PUT", "/api/recipes/" + encodeURIComponent(nm), body),
+      (isEdit ? "Updated " : "Created ") + "recipe " + nm);
   } }, "Save");
 
   recipeDialog.replaceChildren(
@@ -522,7 +512,7 @@ async function deleteOut(name) {
 
 let outDialog;
 function openOutModal(o) {
-  if (!outDialog) { outDialog = el("dialog", {}); document.body.append(outDialog); }
+  outDialog ||= makeDialog({});
   const isEdit = !!o;
   const v = o || { name: "", title: "", format: "rss", tags: [], feeds: [], limit: 50 };
   const name = el("input", { value: v.name, disabled: isEdit ? "" : null });
@@ -543,10 +533,9 @@ function openOutModal(o) {
       feeds: feedNums,
       limit: Number(limit.value) || 0,
     };
-    try {
-      await api("PUT", "/api/syndicate/" + encodeURIComponent(nm), body);
-      outDialog.close(); banner("Saved output " + nm, true); await refresh();
-    } catch (e) { err.textContent = e.message; }
+    await saveModal(outDialog, err,
+      () => api("PUT", "/api/syndicate/" + encodeURIComponent(nm), body),
+      "Saved output " + nm);
   } }, "Save");
   outDialog.replaceChildren(
     el("h3", {}, isEdit ? "Edit output" : "New output"),
