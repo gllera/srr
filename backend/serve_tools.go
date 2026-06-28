@@ -116,20 +116,11 @@ func handleImport(w http.ResponseWriter, r *http.Request) {
 		v := q.Get("recipe")
 		recipe = &v
 	}
-	applyImportDefaults(newFeeds, recipe, tag)
-
-	recipes, err := importRecipes(r.Context())
+	kept, failed, err := resolveImportBatch(r.Context(), newFeeds, recipe, tag)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	if recipe != nil {
-		if err := validateRecipeRef(recipes, *recipe); err != nil {
-			writeErr(w, err)
-			return
-		}
-	}
-	kept, failed := resolveImportFeeds(r.Context(), newFeeds, recipes)
 	if failed == nil {
 		failed = []importFailure{} // serialize as [] (the UI reads .skipped.length)
 	}
