@@ -28,14 +28,10 @@ func handlePreview(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, fmt.Errorf("url is required"))
 		return
 	}
-	recipe := q.Get("recipe")
-	if recipe == "" {
-		recipe = defaultRecipeName
-	}
 	var items []*Item
 	err := withDBCtx(r.Context(), false, func(ctx context.Context, db *DB) error {
 		var e error
-		items, e = renderPreview(ctx, db.core.Recipes, recipe, q["pipe"], q.Get("ingest"), rawURL)
+		items, e = renderPreview(ctx, db.core.Recipes, q.Get("recipe"), q["pipe"], q.Get("ingest"), rawURL)
 		return e
 	})
 	if err != nil {
