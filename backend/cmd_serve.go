@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -15,6 +16,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing/fstest"
 	"time"
@@ -29,7 +31,8 @@ import (
 var webuiFS embed.FS
 
 type ServeCmd struct {
-	Addr string `short:"a" default:"localhost:8088" env:"SRR_SERVE_ADDR" help:"Address to listen on (loopback only by default)."`
+	Addr     string        `short:"a" default:"localhost:8088" env:"SRR_SERVE_ADDR" help:"Address to listen on (loopback only by default)."`
+	Interval time.Duration `help:"Also run a background fetch loop at this interval (e.g. 30m); 0 disables." default:"0" env:"SRR_SERVE_INTERVAL"`
 }
 
 func (o *ServeCmd) Run() error {
@@ -46,11 +49,30 @@ func (o *ServeCmd) Run() error {
 		_ = srv.Shutdown(sctx)
 	}()
 
-	fmt.Printf("SRR admin GUI at http://%s  (store: %s)\n", o.Addr, globals.Store)
+	// Optional background fetch loop: when --interval is set, serve runs the same
+	// all-feeds cycle as `srr art fetch --interval`, in-process, sharing the
+	// server's signal context so one Ctrl-C/SIGTERM stops both. A running cycle
+	// holds the store lock for its duration, so a concurrent GUI mutation gets a
+	// 409 (msgLockContention) — the same contract as a separate fetch process.
+	var loop sync.WaitGroup
+	if o.Interval > 0 {
+		client := newFetchClient(globals.Workers)
+		loop.Go(func() {
+			defer client.CloseIdleConnections()
+			if err := (&FetchCmd{Interval: o.Interval}).fetchLoop(ctx, client); err != nil {
+				slog.Error("serve fetch loop failed", "err", err)
+			}
+		})
+		fmt.Printf("SRR admin GUI at http://%s  (store: %s, fetching every %s)\n", o.Addr, globals.Store, o.Interval)
+	} else {
+		fmt.Printf("SRR admin GUI at http://%s  (store: %s)\n", o.Addr, globals.Store)
+	}
+
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	<-done
+	loop.Wait()
 	return nil
 }
 

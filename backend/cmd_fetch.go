@@ -45,20 +45,30 @@ func (o *FetchCmd) Run() error {
 	// readLoop goroutines that keep their sockets/FDs alive until the remote
 	// server closes the connection.
 	client := newFetchClient(globals.Workers)
+	return o.fetchLoop(ctx, client)
+}
 
-	if o.Interval > 0 {
-		for {
-			if err := o.runFetch(ctx, client, nil, nil); err != nil {
-				slog.Error("fetch iteration failed", "err", err)
-			}
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-time.After(o.Interval):
-			}
+// fetchLoop runs the all-feeds fetch cycle, honoring o.Interval. With a
+// positive interval it loops — one cycle, then sleep, repeat — until ctx is
+// cancelled, returning nil on clean shutdown and logging (not propagating) a
+// failed cycle so a transient error never tears the loop down. With a
+// non-positive interval it runs a single cycle and returns its result. Shared
+// by `srr art fetch --interval` and `srr serve --interval`; the supplied client
+// is reused across every cycle so its idle-conn pool isn't orphaned per cycle.
+func (o *FetchCmd) fetchLoop(ctx context.Context, client *http.Client) error {
+	if o.Interval <= 0 {
+		return o.runFetch(ctx, client, nil, nil)
+	}
+	for {
+		if err := o.runFetch(ctx, client, nil, nil); err != nil {
+			slog.Error("fetch iteration failed", "err", err)
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(o.Interval):
 		}
 	}
-	return o.runFetch(ctx, client, nil, nil)
 }
 
 // newFetchClient builds the shared HTTP client for a fetch run.  It is called
