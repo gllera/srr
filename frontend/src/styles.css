@@ -124,7 +124,6 @@ video {
    display: none;
    flex-shrink: 0;
    font-weight: 600;
-   color: var(--muted);
 }
 .srr-desk:not(:empty) {
    display: inline;
@@ -158,7 +157,6 @@ video {
    flex-shrink: 0;
    padding: 0.4rem;
    margin: -0.4rem -0.25rem -0.4rem 0.1rem;
-   color: var(--muted);
    border-radius: 4px;
    transition: color 0.15s ease;
 }
@@ -793,30 +791,22 @@ body.srr-view-list .srr-toolbar {
    &:active {
       transform: scale(0.92);
    }
-   /* Unhealthy feed: tint the ⓘ by grade so the details affordance is itself the
-      health flag (warn = amber, crit = accent red — matching the row's err dot);
-      hold the tint on hover too. */
-   &.srr-info-warn,
-   &.srr-info-warn:hover {
-      color: #c98000;
-   }
-   &.srr-info-crit,
-   &.srr-info-crit:hover {
-      color: var(--accent);
-   }
 }
 
 /* Feed / tag health, replacing the old leading error dot: an unhealthy feed (or a
    tag group containing one) tints its LABEL by grade — warn amber, crit accent —
    via data-grade on the row. Color only, so every label keeps the same left edge
    (the dot used to push flagged titles rightward and misalign the list); the
-   right-edge ⓘ stays tinted too. The active selection wins (rule placed last). */
-.srr-config-filter a[data-grade="warn"] .srr-row-title {
+   right-edge ⓘ inherits the same tint from data-grade. The active selection wins
+   (rule placed last). */
+.srr-config-filter a[data-grade="warn"] .srr-row-title,
+.srr-config-filter a[data-grade="warn"] .srr-info-btn,
+.srr-config-filter a[data-grade="warn"] .srr-info-btn:hover {
    color: #c98000;
 }
-.srr-config-filter a[data-grade="crit"] .srr-row-title {
-   color: var(--accent);
-}
+.srr-config-filter a[data-grade="crit"] .srr-row-title,
+.srr-config-filter a[data-grade="crit"] .srr-info-btn,
+.srr-config-filter a[data-grade="crit"] .srr-info-btn:hover,
 .srr-config-filter a.srr-active .srr-row-title {
    color: var(--accent);
 }
