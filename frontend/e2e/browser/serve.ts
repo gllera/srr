@@ -31,11 +31,17 @@ export default async function setup({ provide }: GlobalSetupContext) {
    const appDir = resolve(cwd, "../dist/srrf") // build output dir (passed via --dist-dir)
    const packsDir = mkdtempSync(join(tmpdir(), "srr-e2e-browser-"))
 
-   // Build the real bundle pointed at the same-origin /packs/ path.
+   // Build the real bundle pointed at the same-origin /packs/ path. Force
+   // NODE_ENV=production: vitest sets NODE_ENV=test on this (global-setup)
+   // process, and `parcel build` keeps an already-set NODE_ENV rather than
+   // forcing production — without this override app.ts's
+   // `process.env.NODE_ENV === "production"` SW-registration branch is
+   // dead-code-eliminated (and the dev branch that UNregisters the SW is kept),
+   // so the SW never controls the page and every SW e2e times out.
    await execFileAsync(
       resolve(cwd, "node_modules/.bin/parcel"),
       ["build", "--dist-dir", "../dist/srrf", "--no-cache", "--no-source-maps"],
-      { cwd, env: { ...process.env, SRR_CDN_URL: "/packs/" } },
+      { cwd, env: { ...process.env, NODE_ENV: "production", SRR_CDN_URL: "/packs/" } },
    )
 
    const { server, baseUrl } = await startStaticServer({ appDir, packsDir })
