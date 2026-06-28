@@ -111,7 +111,7 @@ describe("browser: titleless feeds (reader hides the duplicate heading)", () => 
       }
    })
 
-   it("keeps the heading and hides the masthead permalink for an ordinary feed", async () => {
+   it("keeps the heading AND offers the masthead permalink for an ordinary feed", async () => {
       const [page, close] = await open()
       try {
          await clickRow(page, "news title 0")
@@ -119,7 +119,9 @@ describe("browser: titleless feeds (reader hides the duplicate heading)", () => 
          expect(await $hasTitleless(page)).toBe(false)
          expect(await $titleVisible(page)).toBe(true)
          expect(await $titleText(page)).toBe("news title 0")
-         expect(await $kickerVisible(page)).toBe(false)
+         // The permalink is available on ordinary feeds too, pointing at the article.
+         expect(await $kickerVisible(page)).toBe(true)
+         expect(await $kickerHref(page)).toBe("http://example.com/news/0")
       } finally {
          await close()
       }
