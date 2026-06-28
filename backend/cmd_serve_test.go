@@ -76,7 +76,7 @@ func TestServeHostGuardRejectsCrossOrigin(t *testing.T) {
 func TestServeStaticAssets(t *testing.T) {
 	h := newMux()
 	for _, tc := range []struct{ path, needle string }{
-		{"/app.js", "renderFeeds"},
+		{"/app.js", "drawFeeds"},
 		{"/app.css", "--signal"},
 	} {
 		rec := doReq(t, h, "GET", tc.path, "")
