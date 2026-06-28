@@ -323,7 +323,10 @@ function render(o: IShowFeed) {
 
    document.title = "SRR - " + (o.article.t ?? "")
    window.scrollTo(0, 0)
-   el.title.focus()
+   // A titleless feed hides the <h1>; focusing a display:none element is a no-op,
+   // so move focus to the visible body instead to keep the reader region focused.
+   el.content.tabIndex = -1
+   ;(feed?.nt ? el.content : el.title).focus()
 
    // Double rAF: first ensures the browser has painted with opacity:0, second
    // re-enables transitions so the fade-in animates.
@@ -359,7 +362,10 @@ function renderEmptyReader() {
    refreshFeedLabel()
    document.title = "SRR"
    window.scrollTo(0, 0)
-   el.title.focus() // keep keyboard focus inside the reader region
+   // The empty state hides the whole title row; focus the (visible) content host,
+   // which carries the directed empty-state element.
+   el.content.tabIndex = -1
+   el.content.focus() // keep keyboard focus inside the reader region
    persistHash(location.hash)
 }
 
