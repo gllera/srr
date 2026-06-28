@@ -95,7 +95,6 @@ func (o *ConfigCmd) Run() error {
 			fmt.Println(maskSecret(val))
 			return nil
 		}
-		return fmt.Errorf("unknown config key: %s", o.Key)
 	}
 
 	for i := range gt.NumField() {
