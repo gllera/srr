@@ -47,22 +47,10 @@ func (o *ImportCmd) Run() error {
 		return nil
 	}
 
-	applyImportDefaults(newFeeds, o.Recipe, o.Tag)
-
-	// Subscribe-time discovery gate reads the recipes map (read-only).
-	recipes, err := importRecipes(context.Background())
+	kept, failed, err := resolveImportBatch(context.Background(), newFeeds, o.Recipe, o.Tag)
 	if err != nil {
 		return err
 	}
-	// Validate the stamped recipe up front, mirroring the eager check in feed
-	// add/upd: a typo'd --recipe must fail before probing every OPML URL over the
-	// network (resolvesFeed is lenient and would otherwise treat it as #feed).
-	if o.Recipe != nil {
-		if err := validateRecipeRef(recipes, *o.Recipe); err != nil {
-			return err
-		}
-	}
-	kept, failed := resolveImportFeeds(context.Background(), newFeeds, recipes)
 	reportImportFailures(failed)
 
 	if o.DryRun {
@@ -230,6 +218,27 @@ func resolveImportFeeds(ctx context.Context, feeds []*Feed, recipes map[string]R
 		kept = append(kept, c)
 	}
 	return kept, failed
+}
+
+// resolveImportBatch runs the shared post-walk import pipeline: stamps recipe/tag
+// defaults, reads the recipes map (read-only), validates the stamped recipe up
+// front — a typo'd --recipe must fail before probing every OPML URL over the
+// network (resolvesFeed is lenient and would otherwise treat it as #feed) —
+// then runs subscribe-time discovery. Shared by ImportCmd and handleImport.
+func resolveImportBatch(ctx context.Context, newFeeds []*Feed, recipe, tag *string) ([]*Feed, []importFailure, error) {
+	applyImportDefaults(newFeeds, recipe, tag)
+
+	recipes, err := importRecipes(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if recipe != nil {
+		if err := validateRecipeRef(recipes, *recipe); err != nil {
+			return nil, nil, err
+		}
+	}
+	kept, failed := resolveImportFeeds(ctx, newFeeds, recipes)
+	return kept, failed, nil
 }
 
 // importRecipes reads the db.gz recipes map (read-only, unlocked) so
