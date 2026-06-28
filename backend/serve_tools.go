@@ -49,19 +49,6 @@ func handlePreview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-func getGen(w http.ResponseWriter, r *http.Request) {
-	var gen int
-	err := withDBCtx(r.Context(), false, func(_ context.Context, db *DB) error {
-		gen = db.core.Gen
-		return nil
-	})
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]int{"gen": gen})
-}
-
 func bumpGen(w http.ResponseWriter, r *http.Request) {
 	var gen int
 	err := withDBCtx(r.Context(), true, func(ctx context.Context, db *DB) error {

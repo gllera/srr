@@ -15,11 +15,11 @@ func TestPutSyndicate(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
 	}
-	list := doReq(t, newMux(), "GET", "/api/syndicate", "")
-	var got []OutFeed
-	json.Unmarshal(list.Body.Bytes(), &got)
-	if len(got) != 1 || got[0].Name != "mine" || got[0].Limit != 10 {
-		t.Fatalf("got %+v", got)
+	ov := doReq(t, newMux(), "GET", "/api/overview", "")
+	var got overviewView
+	json.Unmarshal(ov.Body.Bytes(), &got)
+	if len(got.Out) != 1 || got.Out[0].Name != "mine" || got.Out[0].Limit != 10 {
+		t.Fatalf("got %+v", got.Out)
 	}
 }
 
@@ -70,10 +70,10 @@ func TestDeleteSyndicate(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
-	list := doReq(t, newMux(), "GET", "/api/syndicate", "")
-	var got []OutFeed
-	json.Unmarshal(list.Body.Bytes(), &got)
-	if len(got) != 0 {
-		t.Fatalf("not deleted: %+v", got)
+	ov := doReq(t, newMux(), "GET", "/api/overview", "")
+	var got overviewView
+	json.Unmarshal(ov.Body.Bytes(), &got)
+	if len(got.Out) != 0 {
+		t.Fatalf("not deleted: %+v", got.Out)
 	}
 }

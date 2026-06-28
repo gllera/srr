@@ -2,25 +2,9 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"testing"
 )
-
-func TestListRecipes(t *testing.T) {
-	setupTestDB(t)
-	rec := doReq(t, newMux(), "GET", "/api/recipes", "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d", rec.Code)
-	}
-	var got map[string]Recipe
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("unmarshal response: %v", err)
-	}
-	if _, ok := got["default"]; !ok {
-		t.Fatalf("default recipe missing: %+v", got)
-	}
-}
 
 func TestPutRecipe(t *testing.T) {
 	setupTestDB(t)

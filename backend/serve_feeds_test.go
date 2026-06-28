@@ -9,56 +9,6 @@ import (
 	"testing"
 )
 
-func TestListFeeds(t *testing.T) {
-	db, _, _ := setupTestDB(t)
-	seedFeed(t, db, &Feed{Title: "Beta", URL: "https://b.example/feed", Tag: "news", FailStreak: 4, FetchError: "boom", TotalArt: 12})
-	seedFeed(t, db, &Feed{Title: "Alpha", URL: "https://a.example/feed", LastOK: 1700000000})
-
-	rec := doReq(t, newMux(), "GET", "/api/feeds", "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body)
-	}
-	var got []feedListView
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("len = %d, want 2", len(got))
-	}
-	// Sorted case-insensitively by title: Alpha before Beta.
-	if got[0].Title != "Alpha" || got[1].Title != "Beta" {
-		t.Fatalf("order = %q,%q want Alpha,Beta", got[0].Title, got[1].Title)
-	}
-	if got[1].FailStreak != 4 || got[1].Error != "boom" || got[1].TotalArt != 12 {
-		t.Fatalf("health fields missing: %+v", got[1])
-	}
-}
-
-func TestGetFeed(t *testing.T) {
-	db, _, _ := setupTestDB(t)
-	seedFeed(t, db, &Feed{Title: "Only", URL: "https://o.example/feed"})
-
-	rec := doReq(t, newMux(), "GET", "/api/feeds/0", "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body)
-	}
-	var got feedListView
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if got.ID != 0 || got.Title != "Only" {
-		t.Fatalf("got %+v", got)
-	}
-}
-
-func TestGetFeedNotFound(t *testing.T) {
-	setupTestDB(t)
-	rec := doReq(t, newMux(), "GET", "/api/feeds/99", "")
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", rec.Code)
-	}
-}
-
 // stubResolve makes subscribe-time discovery a no-op (offline) for the test.
 func stubResolve(t *testing.T) {
 	t.Helper()
@@ -83,10 +33,10 @@ func TestCreateFeed(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 
-	// Round-trip: it is now listed.
-	list := doReq(t, newMux(), "GET", "/api/feeds", "")
-	if !strings.Contains(list.Body.String(), "https://n.example/feed") {
-		t.Fatalf("created feed not listed: %s", list.Body)
+	// Round-trip: it is now listed in the overview.
+	ov := doReq(t, newMux(), "GET", "/api/overview", "")
+	if !strings.Contains(ov.Body.String(), "https://n.example/feed") {
+		t.Fatalf("created feed not listed in overview: %s", ov.Body)
 	}
 }
 
@@ -178,9 +128,16 @@ func TestDeleteFeed(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
 	}
-	get := doReq(t, newMux(), "GET", "/api/feeds/0", "")
-	if get.Code != http.StatusNotFound {
-		t.Fatalf("after delete GET = %d, want 404", get.Code)
+	// Verify deletion via direct DB read (GET /api/feeds/{id} was removed).
+	err := withDB(false, func(_ context.Context, d *DB) error {
+		_, e := d.FeedByID(0)
+		if e == nil {
+			t.Fatalf("feed 0 still exists after delete")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -199,11 +156,11 @@ func TestApplyFeedsArray(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
 	}
-	list := doReq(t, newMux(), "GET", "/api/feeds", "")
-	var got []feedListView
-	json.Unmarshal(list.Body.Bytes(), &got)
-	if len(got) != 2 {
-		t.Fatalf("len = %d, want 2", len(got))
+	ov := doReq(t, newMux(), "GET", "/api/overview", "")
+	var got overviewView
+	json.Unmarshal(ov.Body.Bytes(), &got)
+	if len(got.Feeds) != 2 {
+		t.Fatalf("len = %d, want 2", len(got.Feeds))
 	}
 }
 
@@ -215,11 +172,11 @@ func TestApplyFeedsAtomicOnBadElement(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
-	list := doReq(t, newMux(), "GET", "/api/feeds", "")
-	var got []feedListView
-	json.Unmarshal(list.Body.Bytes(), &got)
-	if len(got) != 0 {
-		t.Fatalf("batch should be atomic; got %d feeds", len(got))
+	ov := doReq(t, newMux(), "GET", "/api/overview", "")
+	var got overviewView
+	json.Unmarshal(ov.Body.Bytes(), &got)
+	if len(got.Feeds) != 0 {
+		t.Fatalf("batch should be atomic; got %d feeds", len(got.Feeds))
 	}
 }
 
@@ -251,28 +208,5 @@ func TestServeFeedUpdatePreservesNoTitle(t *testing.T) {
 	}
 	if !noTitle {
 		t.Errorf("NoTitle = false after GUI save, want true (must be preserved)")
-	}
-}
-
-func TestListTags(t *testing.T) {
-	db, _, _ := setupTestDB(t)
-	seedFeed(t, db, &Feed{Title: "A", URL: "https://a.example/feed", Tag: "news", TotalArt: 5})
-	seedFeed(t, db, &Feed{Title: "B", URL: "https://b.example/feed", Tag: "news", TotalArt: 3})
-	seedFeed(t, db, &Feed{Title: "C", URL: "https://c.example/feed"}) // untagged
-
-	rec := doReq(t, newMux(), "GET", "/api/tags", "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d", rec.Code)
-	}
-	var got []tagCount
-	json.Unmarshal(rec.Body.Bytes(), &got)
-	var news *tagCount
-	for i := range got {
-		if got[i].Tag == "news" {
-			news = &got[i]
-		}
-	}
-	if news == nil || news.Feeds != 2 || news.Articles != 8 {
-		t.Fatalf("news tag wrong: %+v (all: %+v)", news, got)
 	}
 }

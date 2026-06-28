@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
-	"strings"
 )
 
 // feedListView is the read-only feed shape the GUI table consumes: the writable
@@ -41,55 +39,6 @@ func listViewOf(ch *Feed) feedListView {
 		LastNew:    ch.LastNew,
 		TotalArt:   ch.TotalArt,
 	}
-}
-
-// buildFeedViews returns every feed as a read-only list view, sorted
-// case-insensitively by title. Pure (takes an already-open *DB) so listFeeds and
-// the overview bundle share it within a single withDB scope.
-func buildFeedViews(db *DB) []feedListView {
-	out := make([]feedListView, 0, len(db.Feeds()))
-	for _, ch := range db.Feeds() {
-		out = append(out, listViewOf(ch))
-	}
-	sort.Slice(out, func(i, j int) bool {
-		return strings.ToLower(out[i].Title) < strings.ToLower(out[j].Title)
-	})
-	return out
-}
-
-func listFeeds(w http.ResponseWriter, r *http.Request) {
-	var out []feedListView
-	err := withDBCtx(r.Context(), false, func(_ context.Context, db *DB) error {
-		out = buildFeedViews(db)
-		return nil
-	})
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, out)
-}
-
-func getFeed(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	var view feedListView
-	err = withDBCtx(r.Context(), false, func(_ context.Context, db *DB) error {
-		ch, e := db.FeedByID(id)
-		if e != nil {
-			return e
-		}
-		view = listViewOf(ch)
-		return nil
-	})
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, view)
 }
 
 // saveFeed upserts one feedView, with the same subscribe-time discovery gating
@@ -226,38 +175,4 @@ type tagCount struct {
 	Tag      string `json:"tag"`
 	Feeds    int    `json:"feeds"`
 	Articles int    `json:"articles"`
-}
-
-// buildTagCounts aggregates feeds into tag buckets (tag "" = the untagged
-// bucket), sorted by tag. Pure, so listTags and the overview bundle share it.
-func buildTagCounts(db *DB) []tagCount {
-	agg := map[string]*tagCount{}
-	for _, ch := range db.Feeds() {
-		t := agg[ch.Tag]
-		if t == nil {
-			t = &tagCount{Tag: ch.Tag}
-			agg[ch.Tag] = t
-		}
-		t.Feeds++
-		t.Articles += ch.TotalArt
-	}
-	out := make([]tagCount, 0, len(agg))
-	for _, t := range agg {
-		out = append(out, *t)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Tag < out[j].Tag })
-	return out
-}
-
-func listTags(w http.ResponseWriter, r *http.Request) {
-	var out []tagCount
-	err := withDBCtx(r.Context(), false, func(_ context.Context, db *DB) error {
-		out = buildTagCounts(db)
-		return nil
-	})
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, out)
 }

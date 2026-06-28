@@ -15,19 +15,6 @@ func buildRecipeMap(db *DB) map[string]Recipe {
 	return recipes
 }
 
-func listRecipes(w http.ResponseWriter, r *http.Request) {
-	var recipes map[string]Recipe
-	err := withDBCtx(r.Context(), false, func(_ context.Context, db *DB) error {
-		recipes = buildRecipeMap(db)
-		return nil
-	})
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, recipes)
-}
-
 func putRecipe(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	var body struct {
