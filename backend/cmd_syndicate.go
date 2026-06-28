@@ -122,6 +122,9 @@ func setOutFeed(ctx context.Context, db *DB, in OutFeed) error {
 // removeOutFeed deletes a syndication entry by name and best-effort removes its
 // out/* files. Shared by `srr syndicate rm` and the DELETE handler.
 func removeOutFeed(ctx context.Context, db *DB, name string) error {
+	if !validOutName(name) {
+		return fmt.Errorf("syndication name %q must match [A-Za-z0-9._-] and not be '.' or '..'", name)
+	}
 	var format string
 	out := db.core.Out[:0]
 	for _, e := range db.core.Out {
