@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -59,9 +58,7 @@ func (o *ServeCmd) Run() error {
 		client := newFetchClient(globals.Workers)
 		loop.Go(func() {
 			defer client.CloseIdleConnections()
-			if err := (&FetchCmd{Interval: o.Interval}).fetchLoop(ctx, client); err != nil {
-				slog.Error("serve fetch loop failed", "err", err)
-			}
+			(&FetchCmd{Interval: o.Interval}).fetchLoop(ctx, client) //nolint:errcheck // always nil when Interval > 0
 		})
 		fmt.Printf("SRR admin GUI at http://%s  (store: %s, fetching every %s)\n", o.Addr, globals.Store, o.Interval)
 	} else {
