@@ -628,6 +628,19 @@ func TestSyncOutFeedsAbsoluteURLUnchanged(t *testing.T) {
 	}
 }
 
+func TestRewriteAssetURLsAudio(t *testing.T) {
+	got, err := rewriteAssetURLs(`<audio src="assets/ab/0123456789abcdef.mp3"></audio>`, "https://cdn.example.com")
+	if err != nil {
+		t.Fatalf("rewriteAssetURLs: %v", err)
+	}
+	if !strings.Contains(got, "https://cdn.example.com/assets/ab/0123456789abcdef.mp3") {
+		t.Errorf("audio src not absolutized:\n%s", got)
+	}
+	if strings.Contains(got, `src="assets/`) {
+		t.Errorf("relative audio src still present:\n%s", got)
+	}
+}
+
 // TestSyncOutFeedsMultipleOutputs verifies multiple OutFeed entries all write
 // their own file in one call.
 func TestSyncOutFeedsMultipleOutputs(t *testing.T) {
