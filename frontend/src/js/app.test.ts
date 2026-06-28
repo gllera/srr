@@ -301,6 +301,17 @@ describe("reader placeholder — directed empty state (no matching articles)", (
       expect(reader.querySelector(".srr-list-empty")).toBeNull()
       expect((document.querySelector(".srr-title") as HTMLElement).textContent).toBe("Real")
    })
+
+   it("moves focus into the visible content, not the hidden heading", async () => {
+      // The empty state hides the whole title row; focus must land on .srr-content instead.
+      await boot()
+      nav.fromHash.mockResolvedValue(
+         showFeed({ placeholder: true, article: { f: 0, a: 0, p: 0, t: "(no matching articles)", l: "", c: "" } }),
+      )
+      hashTo("#5")
+      await flush()
+      expect(document.activeElement).toBe(document.querySelector(".srr-content"))
+   })
 })
 
 describe("reader titleless feeds (Telegram-style: title duplicates the body)", () => {
@@ -337,6 +348,18 @@ describe("reader titleless feeds (Telegram-style: title duplicates the body)", (
       expect((document.querySelector(".srr-kicker-link") as HTMLAnchorElement).getAttribute("href")).toBe(
          "http://example.com/p/1",
       )
+   })
+
+   it("moves focus into the visible content, not the hidden heading", async () => {
+      // feed.nt hides the <h1>; focus must land on .srr-content instead.
+      await boot()
+      data.db.feeds = { 7: { nt: true } } as unknown as IDB["feeds"]
+      nav.fromHash.mockResolvedValue(
+         showFeed({ article: { f: 7, a: 0, p: 0, t: "Dup line", l: "http://example.com/p/7", c: "<p>Dup line</p>" } }),
+      )
+      hashTo("#7")
+      await flush()
+      expect(document.activeElement).toBe(document.querySelector(".srr-content"))
    })
 })
 
