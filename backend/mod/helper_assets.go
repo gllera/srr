@@ -78,7 +78,7 @@ func RewriteAttrs(content string, fn func(marker string) (string, bool, error)) 
 	if !HasAssetMarkers(content) {
 		return content, nil
 	}
-	return walkAssetAttrs(content, assetAttrs, func(_, _, val string) (string, bool, error) {
+	return walkAssetAttrs(content, assetAttrs, func(val string) (string, bool, error) {
 		if !strings.HasPrefix(val, "#") {
 			return "", false, nil
 		}
@@ -86,15 +86,15 @@ func RewriteAttrs(content string, fn func(marker string) (string, bool, error)) 
 	})
 }
 
-// walkAssetAttrs parses content as an HTML fragment and calls fn(tag, attr,
-// value) for every attribute listed in attrs (tag -> attr names). fn returns
+// walkAssetAttrs parses content as an HTML fragment and calls fn(value) for
+// every attribute listed in attrs (tag -> attr names). fn returns
 // (newValue, true, nil) to replace the value, (_, false, nil) to leave it, or a
 // non-nil error to abort the walk. Unparseable content and a no-op pass both
 // return content verbatim (no re-render), so quoting/whitespace survive when
 // nothing changed; an fn or render error is returned with an empty string. It
 // is the shared HTML walk behind both the upload step (RewriteAttrs, marker ->
 // key) and #selfhost (URL -> marker).
-func walkAssetAttrs(content string, attrs map[string][]string, fn func(tag, attr, val string) (string, bool, error)) (string, error) {
+func walkAssetAttrs(content string, attrs map[string][]string, fn func(val string) (string, bool, error)) (string, error) {
 	nodes, err := html.ParseFragment(strings.NewReader(content), &html.Node{
 		Type:     html.ElementNode,
 		Data:     "body",
@@ -131,7 +131,7 @@ func walkAssetAttrs(content string, attrs map[string][]string, fn func(tag, attr
 // walkNode applies fn to the attrs-listed attributes on n and its descendants,
 // replacing each value when fn returns ok. Returns true if any value changed, or
 // the first error fn returns (which stops the walk).
-func walkNode(n *html.Node, attrs map[string][]string, fn func(tag, attr, val string) (string, bool, error)) (bool, error) {
+func walkNode(n *html.Node, attrs map[string][]string, fn func(val string) (string, bool, error)) (bool, error) {
 	changed := false
 	if n.Type == html.ElementNode {
 		if names, ok := attrs[n.Data]; ok {
@@ -140,7 +140,7 @@ func walkNode(n *html.Node, attrs map[string][]string, fn func(tag, attr, val st
 					if n.Attr[i].Key != name {
 						continue
 					}
-					nv, ok, err := fn(n.Data, name, n.Attr[i].Val)
+					nv, ok, err := fn(n.Attr[i].Val)
 					if err != nil {
 						return false, err
 					}
