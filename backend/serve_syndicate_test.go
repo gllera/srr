@@ -47,6 +47,19 @@ func TestPutSyndicateUnknownFeed(t *testing.T) {
 	}
 }
 
+func TestRemoveOutFeedRejectsBadName(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	for _, name := range []string{"../../victim", "..", ".", "a/b", "out/../x"} {
+		if err := removeOutFeed(ctx, db, name); err == nil {
+			t.Errorf("removeOutFeed(%q) = nil, want error (path-traversal guard)", name)
+		}
+	}
+	// A valid name still works (no false positive).
+	if err := removeOutFeed(ctx, db, "mine"); err != nil {
+		t.Errorf("removeOutFeed(%q) = %v, want nil", "mine", err)
+	}
+}
+
 func TestDeleteSyndicate(t *testing.T) {
 	db, _, _ := setupTestDB(t)
 	seedFeed(t, db, &Feed{Title: "F", URL: "https://f.example/feed", Tag: "news"})
