@@ -117,7 +117,7 @@ func handleImport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	iw := &importWalker{w: io.Discard, seen: map[string]bool{}}
+	iw := &importWalker{w: io.Discard, seen: map[string]bool{}, tagOverride: q.Has("tag")}
 	newFeeds, err := iw.walk(nodes, "", "", nil, true)
 	if err != nil {
 		writeErr(w, err)

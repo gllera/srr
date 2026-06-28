@@ -103,6 +103,18 @@ func TestServeExportImportRoundTrip(t *testing.T) {
 	}
 }
 
+func TestHandleImportTagOverrideSkipsGroupResolution(t *testing.T) {
+	setupTestDB(t)
+	// A numeric-only folder name ("2024") makes resolveTag/normalizeGroupName error;
+	// a ?tag= override must skip that resolution (the CLI -g does).
+	opml := `<opml version="2.0"><body><outline text="2024">` +
+		`<outline text="Alpha" type="rss" xmlUrl="https://a.example/feed"/></outline></body></opml>`
+	rec := doReq(t, newMux(), "POST", "/api/import?tag=mytag&dry_run=1", opml)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("import status = %d, body %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestInspectValidate(t *testing.T) {
 	db, _, _ := setupTestDB(t) // empty store is internally consistent
 	// A real store always has a committed db.gz; setupTestDB doesn't write one,
