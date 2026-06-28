@@ -17,6 +17,7 @@ const el = {
    title: document.querySelector(".srr-title") as HTMLElement,
    content: document.querySelector(".srr-content") as HTMLElement,
    titleLink: document.querySelector(".srr-title-link") as HTMLAnchorElement,
+   kickerLink: document.querySelector(".srr-kicker-link") as HTMLAnchorElement,
    toolbar: document.querySelector(".srr-toolbar") as HTMLElement,
    prev: document.querySelector(".srr-prev") as HTMLButtonElement,
    next: document.querySelector(".srr-next") as HTMLButtonElement,
@@ -275,15 +276,25 @@ function render(o: IShowFeed) {
    clearTimeout(searchDebounce)
    if (o.placeholder) return renderEmptyReader()
    el.article.classList.remove("srr-reader-empty")
+   // Titleless feeds (Telegram-style: the title is just the content's first
+   // line) hide the <h1> in the reader so the body isn't shown twice; the home
+   // list still uses the title as its row label. The masthead permalink stands
+   // in for the hidden title's link.
+   el.article.classList.toggle("srr-reader-titleless", !!data.db.feeds[o.article.f]?.nt)
    // t/l are omitempty on the wire — an untitled article must not render "undefined"
    el.title.textContent = o.article.t ?? ""
    el.content.style.transition = "none"
    el.content.style.opacity = "0"
    el.content.style.transform = "translateY(6px)"
    el.content.innerHTML = sanitizeHtml(o.article.c)
-   // Reject javascript:/data:/vbscript:/file: in case the writer pipeline let one through
-   if (o.article.l && !URL_DENY.test(o.article.l)) el.titleLink.href = o.article.l
-   else el.titleLink.removeAttribute("href")
+   // Reject javascript:/data:/vbscript:/file: in case the writer pipeline let one
+   // through. Both the title link and the titleless masthead permalink point at
+   // the same article URL; CSS shows whichever one this feed uses.
+   const safeLink = o.article.l && !URL_DENY.test(o.article.l) ? o.article.l : ""
+   for (const a of [el.titleLink, el.kickerLink]) {
+      if (safeLink) a.href = safeLink
+      else a.removeAttribute("href")
+   }
    el.prev.disabled = !o.has_left
    el.next.disabled = !o.has_right
 
@@ -325,9 +336,11 @@ function render(o: IShowFeed) {
 // neighbors to step to and nothing to save.
 function renderEmptyReader() {
    el.article.classList.add("srr-reader-empty")
+   el.article.classList.remove("srr-reader-titleless")
    delete el.article.dataset.src
    el.title.textContent = ""
    el.titleLink.removeAttribute("href")
+   el.kickerLink.removeAttribute("href")
    el.prev.disabled = true
    el.next.disabled = true
    refreshSaveButton(false)

@@ -156,24 +156,26 @@ func (o *AddCmd) Run() error {
 // feed = one URL: the URL is a flat field; the last fetch error (if any)
 // rides alongside it as a read-only `error` for visibility.
 type feedView struct {
-	ID     *int   `json:"id,omitempty" yaml:"id,omitempty"`
-	Title  string `json:"title"        yaml:"title"`
-	URL    string `json:"url"          yaml:"url"`
-	Error  string `json:"error,omitempty" yaml:"error,omitempty"`
-	Tag    string `json:"tag,omitempty" yaml:"tag,omitempty"`
-	Recipe string `json:"recipe,omitempty" yaml:"recipe,omitempty"`
+	ID      *int   `json:"id,omitempty" yaml:"id,omitempty"`
+	Title   string `json:"title"        yaml:"title"`
+	URL     string `json:"url"          yaml:"url"`
+	Error   string `json:"error,omitempty" yaml:"error,omitempty"`
+	Tag     string `json:"tag,omitempty" yaml:"tag,omitempty"`
+	Recipe  string `json:"recipe,omitempty" yaml:"recipe,omitempty"`
+	NoTitle bool   `json:"no_title,omitempty" yaml:"no_title,omitempty"`
 }
 
 // viewOf builds an output feedView for a stored Feed.
 func viewOf(ch *Feed) *feedView {
 	id := ch.id
 	return &feedView{
-		ID:     &id,
-		Title:  ch.Title,
-		URL:    ch.URL,
-		Error:  ch.FetchError,
-		Tag:    ch.Tag,
-		Recipe: ch.Recipe,
+		ID:      &id,
+		Title:   ch.Title,
+		URL:     ch.URL,
+		Error:   ch.FetchError,
+		Tag:     ch.Tag,
+		Recipe:  ch.Recipe,
+		NoTitle: ch.NoTitle,
 	}
 }
 
@@ -403,6 +405,7 @@ func writeFeedView(ch *Feed, v *feedView) {
 	setFeedURL(ch, v.URL)
 	ch.Tag = v.Tag
 	ch.Recipe = v.Recipe
+	ch.NoTitle = v.NoTitle
 }
 
 // parseApplyInput accepts either a single feedView or an array.

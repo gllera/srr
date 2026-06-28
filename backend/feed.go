@@ -74,9 +74,15 @@ type Feed struct {
 	// Recipe is the name of the {ingest, pipe} recipe this feed uses. Empty
 	// resolves to the "default" recipe (recipeFor). A dangling name is tolerated
 	// at read time (⇒ default) but the CLI refuses to create one.
-	Recipe   string `json:"recipe,omitempty"`
-	TotalArt int    `json:"total_art"`
-	AddIdx   int    `json:"add_idx"`
+	Recipe string `json:"recipe,omitempty"`
+	// NoTitle marks a feed whose article titles duplicate the content lead
+	// (microblog sources like Telegram, where the title is the first line of the
+	// body). The reader hides the heading for these; the home list still uses the
+	// title as its row label. Set out-of-band via `feed apply`/`edit` — the
+	// external-ingest protocol emits articles, not feed config.
+	NoTitle  bool `json:"nt,omitempty"`
+	TotalArt int  `json:"total_art"`
+	AddIdx   int  `json:"add_idx"`
 	newItems []*Item
 }
 

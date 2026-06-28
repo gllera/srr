@@ -881,3 +881,35 @@ EOF`)
 		t.Errorf("Title unexpectedly changed despite apply failure")
 	}
 }
+
+// TestFeedApplySetsNoTitle: `feed apply` with no_title:true persists the flag
+// onto the Feed (the reader hides the heading for titleless feeds like Telegram).
+func TestFeedApplySetsNoTitle(t *testing.T) {
+	setupFeedsTestDB(t)
+	err := applyFromString(t, `{"id":0,"title":"T","url":"https://a.example.com/feed","no_title":true}`)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	ch := reopenDB(t).Feeds()[0]
+	if !ch.NoTitle {
+		t.Errorf("NoTitle = false, want true after apply with no_title:true")
+	}
+}
+
+// TestFeedViewEmitsNoTitle: viewOf surfaces the flag so `feed edit` (editor on
+// the feed JSON) round-trips it instead of clearing it on save.
+func TestFeedViewEmitsNoTitle(t *testing.T) {
+	v := viewOf(&Feed{Title: "T", URL: "https://x/feed", NoTitle: true})
+	if !v.NoTitle {
+		t.Errorf("viewOf NoTitle = false, want true (feed edit must round-trip the flag)")
+	}
+}
+
+// TestFeedListViewEmitsNoTitle: the serve GUI projection carries the flag so a
+// feed save through the admin reads-and-rewrites it instead of clobbering it.
+func TestFeedListViewEmitsNoTitle(t *testing.T) {
+	v := listViewOf(&Feed{Title: "T", URL: "https://x/feed", NoTitle: true})
+	if !v.NoTitle {
+		t.Errorf("listViewOf NoTitle = false, want true (serve GUI must round-trip the flag)")
+	}
+}
