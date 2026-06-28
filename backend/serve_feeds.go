@@ -52,9 +52,6 @@ func saveFeed(ctx context.Context, db *DB, v *feedView) (*Feed, error) {
 	if !validFeedURL(v.URL) {
 		return nil, fmt.Errorf("invalid url %q", v.URL)
 	}
-	if err := validateRecipeRef(db.core.Recipes, v.Recipe); err != nil {
-		return nil, err
-	}
 	isCreate := v.ID == nil
 	var ch *Feed
 	if isCreate {
@@ -70,15 +67,11 @@ func saveFeed(ctx context.Context, db *DB, v *feedView) (*Feed, error) {
 		// instead of letting writeFeedView clobber it to the JSON zero value.
 		v.NoTitle = ch.NoTitle
 	}
-	newURL := v.URL
-	if ch.URL != newURL && resolvesFeed(db.core.Recipes, v.Recipe) {
-		resolved, err := resolveFeedURL(ctx, newURL)
-		if err != nil {
-			return nil, fmt.Errorf("resolve feed %q: %w", newURL, err)
-		}
-		newURL = resolved
+	resolved, err := resolveFeedProbe(ctx, db.core.Recipes, v.Recipe, ch.URL, v.URL)
+	if err != nil {
+		return nil, err
 	}
-	v.URL = newURL // fold the resolved URL back in, then reuse the shared field-writer
+	v.URL = resolved // fold the resolved URL back in, then reuse the shared field-writer
 	writeFeedView(ch, v)
 	if err := normalizeFeed(ch, db.core.Recipes); err != nil {
 		return nil, err
