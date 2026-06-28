@@ -356,6 +356,7 @@ func stableGUID(ad ArticleData) string {
 var outAssetAttrs = map[string][]string{
 	"img":   {"src"},
 	"video": {"src", "poster"},
+	"audio": {"src"},
 	"a":     {"href"},
 }
 
