@@ -464,7 +464,15 @@ function previewPanel(recipes) {
       for (const a of arts) {
         out.append(el("article", { class: "preview" },
           el("h4", {}, a.link ? el("a", { href: a.link, target: "_blank", rel: "noopener" }, a.title) : a.title),
-          el("div", { class: "content", html: a.content })));
+          el("iframe", {
+            class: "preview-frame",
+            // Empty sandbox = scripts, inline event handlers and javascript: URLs all
+            // disabled, so a recipe that omits #sanitize can't run feed-supplied JS on
+            // the admin origin. srcdoc renders the HTML inert.
+            sandbox: "",
+            srcdoc: a.content,
+            style: "width:100%;height:16em;border:1px solid var(--line,#3a3a3a);border-radius:6px;background:#fff",
+          })));
       }
     } catch (e) { out.replaceChildren(el("div", { class: "muted" }, e.message)); }
   } }, "Preview");
