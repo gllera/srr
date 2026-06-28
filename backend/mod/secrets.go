@@ -1,8 +1,10 @@
 package mod
 
 import (
+	"maps"
 	"os"
 	"slices"
+	"strings"
 )
 
 // secrets holds the operator-declared environment variables from srr.yaml's
@@ -18,21 +20,32 @@ var secrets map[string]string
 func SetSecrets(s map[string]string) { secrets = s }
 
 // SubprocessEnv returns the environment handed to an external ingest/mod command:
-// os.Environ() with the configured secrets appended at the end. Go's exec.Cmd
-// uses the last occurrence of a key, so a secret placed at the tail WINS over
-// any ambient var of the same name (last-wins semantics). With no secrets it
-// returns os.Environ() unchanged. Shared by mod.New and ingest.New so both
-// subprocess paths see the same merged environment.
+// the process environment (os.Environ) with the configured secrets overlaid so a
+// secret REPLACES — not merely shadows — any ambient var of the same name. The
+// result is deduped to one entry per name and sorted for determinism. (A plain
+// append won't do: exec.Cmd does not dedup env, and whether a later duplicate
+// wins is up to the child runtime — shell/Python keep the last, but glibc/Go
+// getenv return the first, so an ambient var could beat a secret.) With no
+// secrets it returns os.Environ() unchanged. Shared by mod.New and ingest.New so
+// both subprocess paths see the same merged environment.
 func SubprocessEnv() []string {
 	base := os.Environ()
 	if len(secrets) == 0 {
 		return base
 	}
 
-	kv := make([]string, 0, len(secrets))
-	for k, v := range secrets {
-		kv = append(kv, k+"="+v)
+	merged := make(map[string]string, len(base)+len(secrets))
+	for _, kv := range base {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			merged[k] = v
+		}
 	}
-	slices.Sort(kv)
-	return append(base, kv...)
+	maps.Copy(merged, secrets)
+
+	out := make([]string, 0, len(merged))
+	for k, v := range merged {
+		out = append(out, k+"="+v)
+	}
+	slices.Sort(out)
+	return out
 }
