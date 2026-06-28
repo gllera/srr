@@ -52,6 +52,14 @@ func backendEnvNameFor(scheme string) func(reflect.StructField) string {
 	}
 }
 
+// printSecretEntries prints the srr.yaml secrets, sorted by name, with values
+// masked by the shared maskSecret placeholder so `srr config` never reveals them.
+func printSecretEntries(indent string) {
+	for _, name := range slices.Sorted(maps.Keys(secrets)) {
+		fmt.Printf("%s%s: %v\n", indent, name, maskSecret(secrets[name]))
+	}
+}
+
 func (o *ConfigCmd) Run() error {
 	gv := reflect.ValueOf(*globals)
 	gt := gv.Type()
@@ -68,7 +76,26 @@ func (o *ConfigCmd) Run() error {
 			fmt.Printf("%s:\n", scheme)
 			printFields(reflect.ValueOf(cfgs[scheme]).Elem(), "  ", backendEnvNameFor(scheme))
 		}
+		if len(secrets) > 0 {
+			fmt.Println("secrets:")
+			printSecretEntries("  ")
+		}
 		return nil
+	}
+
+	// The srr.yaml secrets section, always masked: the whole section ("secrets")
+	// or one entry ("secrets.TOKEN"). Resolved before the backend-section lookup
+	// since "secrets" is not a store scheme.
+	if o.Key == "secrets" {
+		printSecretEntries("")
+		return nil
+	}
+	if name, ok := strings.CutPrefix(o.Key, "secrets."); ok {
+		if val, exists := secrets[name]; exists {
+			fmt.Println(maskSecret(val))
+			return nil
+		}
+		return fmt.Errorf("unknown config key: %s", o.Key)
 	}
 
 	for i := range gt.NumField() {

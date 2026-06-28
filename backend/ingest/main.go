@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 
 	"srrb/mod"
@@ -140,7 +139,7 @@ type Fetcher struct {
 func New() *Fetcher {
 	return &Fetcher{
 		fetchers: registry,
-		env:      os.Environ(),
+		env:      mod.SubprocessEnv(),
 	}
 }
 

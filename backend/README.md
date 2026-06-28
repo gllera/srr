@@ -130,6 +130,18 @@ Precedence: CLI flags > env vars > config file > defaults. `$SRR_CONFIG_INLINE`,
 
 Only **global** flags are YAML-settable. Per-command flags — `art fetch --interval` (`SRR_FETCH_INTERVAL`) and `preview --addr` (`SRR_PREVIEW_ADDR`) — take a CLI flag or env var but have no YAML key, since they are subcommand-scoped rather than top-level config.
 
+### Secrets
+
+A top-level `secrets:` section in `srr.yaml` defines extra environment variables that are merged into the environment of **external ingest strategies and external (shell) mods** — handy for passing credentials to an external command without exporting them into your shell or service unit. It does **not** affect the `asset-process` / `asset-peek` commands.
+
+```yaml
+secrets:
+  TG_API_ID: "12345"
+  TG_API_HASH: "abcdef0123..."
+```
+
+A secret **overrides** any ambient process-env variable of the same name (config wins). Values are stored in **plaintext** in `srr.yaml`, so restrict the file (`chmod 600`). `srr config` lists the keys but masks the values (`TG_API_ID: ********`), and supports `srr config secrets` / `srr config secrets.TG_API_ID`. Secrets are read once at startup, so restart a running `art fetch --interval` loop after editing them.
+
 ## Storage Backends
 
 The output path (`-o`) determines which backend is used:
@@ -206,7 +218,7 @@ srr preview "https://example.com/x" -i "myfetch --token=$TOK"
 
 ### External command protocol
 
-The command receives a JSON **request** on `stdin` and must print a JSON **response** on `stdout`. `stderr` is passed through to the terminal — use it for logging. The process environment is inherited, so `SRR_*` and any credentials already in the environment are available to the command.
+The command receives a JSON **request** on `stdin` and must print a JSON **response** on `stdout`. `stderr` is passed through to the terminal — use it for logging. The process environment is inherited, so `SRR_*` and any credentials already in the environment are available to the command; the `srr.yaml` [`secrets:`](#secrets) section is merged in too (overriding any ambient value of the same name).
 
 **Request** (stdin):
 
@@ -353,7 +365,7 @@ srr feed add -t "Feed" -u https://example.com/rss -r lower
 
 ### External mod protocol
 
-A pipeline step whose first word is not a built-in `#`-token is run as an external mod: `/bin/sh -c <step>` is invoked **once per item**, in SRR's process working directory, with the process environment inherited and `stderr` passed through to the terminal (use it for logging). Unlike an external ingest command, an external mod is **not** handed an `asset_dir`, so it cannot self-host files — it only transforms the item it is given.
+A pipeline step whose first word is not a built-in `#`-token is run as an external mod: `/bin/sh -c <step>` is invoked **once per item**, in SRR's process working directory, with the process environment inherited (plus the `srr.yaml` [`secrets:`](#secrets) section, which overrides any ambient value of the same name) and `stderr` passed through to the terminal (use it for logging). Unlike an external ingest command, an external mod is **not** handed an `asset_dir`, so it cannot self-host files — it only transforms the item it is given.
 
 **stdin** is the full item as a single JSON object (HTML-escaping disabled, so `<`/`>`/`&` are emitted verbatim):
 

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"srrb/mod"
 )
 
 // requireSh skips a test on the rare platform without /bin/sh, since the
@@ -120,6 +122,32 @@ func TestExternalFetcherEnvPassthrough(t *testing.T) {
 	}
 	if string(data) != "secret123" {
 		t.Errorf("env not passed through: got %q, want %q", string(data), "secret123")
+	}
+}
+
+// TestExternalFetcherSecretEnv proves the srr.yaml `secrets:` map (mod.SetSecrets)
+// is merged into the external fetcher's environment AND overrides an ambient
+// process-env var of the same name (secrets win). SetSecrets must precede New(),
+// which snapshots the environment.
+func TestExternalFetcherSecretEnv(t *testing.T) {
+	requireSh(t)
+
+	t.Setenv("SRR_TEST_SECRET", "ambient") // ambient value the secret must beat
+	t.Cleanup(func() { mod.SetSecrets(nil) })
+	mod.SetSecrets(map[string]string{"SRR_TEST_SECRET": "from-yaml"})
+
+	out := filepath.Join(t.TempDir(), "secret.txt")
+	cmd := fmt.Sprintf(`cat > /dev/null; printf '%%s' "$SRR_TEST_SECRET" > %s; echo '{"items":[]}'`, out)
+
+	if _, err := New().Fetch(context.Background(), cmd, nil, nil, Request{URL: "https://x"}); err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read secret: %v", err)
+	}
+	if string(data) != "from-yaml" {
+		t.Errorf("secret not merged into command env: got %q, want %q", string(data), "from-yaml")
 	}
 }
 
