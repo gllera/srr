@@ -121,6 +121,38 @@ video {
    opacity: 0.7;
 }
 
+/* Masthead permalink — shown only for titleless feeds (Telegram-style), where
+   the reader hides the <h1> and its link; this stands in for it. Hidden by
+   default; revealed by .srr-reader-titleless below (and only when it has an
+   href, so a linkless article shows no dangling icon). */
+.srr-kicker-link {
+   display: none;
+   align-self: center;
+   flex-shrink: 0;
+   margin-left: 0.4rem;
+   color: inherit;
+}
+.srr-kicker-link:hover {
+   color: var(--fg);
+}
+.srr-kicker-link-icon {
+   display: block;
+   width: 0.95em;
+   height: 0.95em;
+   fill: none;
+   stroke: currentColor;
+   stroke-width: 1.8;
+   stroke-linecap: round;
+   stroke-linejoin: round;
+}
+/* Titleless feeds: swap the heading for the masthead permalink. */
+.srr-reader-titleless .srr-title-link {
+   display: none;
+}
+.srr-reader-titleless .srr-kicker-link[href] {
+   display: inline-flex;
+}
+
 .srr-title {
    display: block;
    font-weight: 680;

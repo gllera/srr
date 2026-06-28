@@ -18,6 +18,7 @@ type feedListView struct {
 	URL        string `json:"url"`
 	Tag        string `json:"tag,omitempty"`
 	Recipe     string `json:"recipe,omitempty"`
+	NoTitle    bool   `json:"no_title,omitempty"`
 	Error      string `json:"error,omitempty"`
 	FailStreak int    `json:"fail_streak"`
 	LastOK     int64  `json:"last_ok"`
@@ -32,6 +33,7 @@ func listViewOf(ch *Feed) feedListView {
 		URL:        ch.URL,
 		Tag:        ch.Tag,
 		Recipe:     ch.Recipe,
+		NoTitle:    ch.NoTitle,
 		Error:      ch.FetchError,
 		FailStreak: ch.FailStreak,
 		LastOK:     ch.LastOK,

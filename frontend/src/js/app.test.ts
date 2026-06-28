@@ -154,7 +154,7 @@ const SKELETON = `
       <div class="srr-searchbar"><input class="srr-search-input" /><button class="srr-search-clear"></button>
          <div class="srr-search-note"></div></div>
       <article class="srr-reader" hidden>
-         <div class="srr-kicker"><span class="srr-source"></span><time class="srr-date"></time></div>
+         <div class="srr-kicker"><span class="srr-source"></span><time class="srr-date"></time><a class="srr-kicker-link"></a></div>
          <a class="srr-title-link"><h1 class="srr-title" tabindex="-1"></h1></a>
          <div class="srr-content"></div></article>
       <div class="srr-list" hidden></div>
@@ -300,6 +300,36 @@ describe("reader placeholder — directed empty state (no matching articles)", (
       expect(reader.classList.contains("srr-reader-empty")).toBe(false)
       expect(reader.querySelector(".srr-list-empty")).toBeNull()
       expect((document.querySelector(".srr-title") as HTMLElement).textContent).toBe("Real")
+   })
+})
+
+describe("reader titleless feeds (Telegram-style: title duplicates the body)", () => {
+   it("flags the reader titleless and points the masthead permalink at the article link", async () => {
+      await boot()
+      // Feed 7 is flagged nt (its titles duplicate the content lead).
+      data.db.feeds = { 7: { nt: true } } as unknown as IDB["feeds"]
+      nav.fromHash.mockResolvedValue(
+         showFeed({ article: { f: 7, a: 0, p: 0, t: "Dup line", l: "http://example.com/p/7", c: "<p>Dup line</p>" } }),
+      )
+      hashTo("#7")
+      await flush()
+      const reader = document.querySelector(".srr-reader") as HTMLElement
+      expect(reader.classList.contains("srr-reader-titleless")).toBe(true)
+      // The masthead permalink stands in for the hidden title's link.
+      expect((document.querySelector(".srr-kicker-link") as HTMLAnchorElement).getAttribute("href")).toBe(
+         "http://example.com/p/7",
+      )
+   })
+
+   it("leaves an ordinary feed's heading in place (no titleless flag)", async () => {
+      await boot()
+      data.db.feeds = { 7: { nt: true } } as unknown as IDB["feeds"]
+      // The article is from feed 1 (no nt flag → absent from the map).
+      nav.fromHash.mockResolvedValue(showFeed({ article: { f: 1, a: 0, p: 0, t: "Real", l: "", c: "<p>x</p>" } }))
+      hashTo("#8")
+      await flush()
+      const reader = document.querySelector(".srr-reader") as HTMLElement
+      expect(reader.classList.contains("srr-reader-titleless")).toBe(false)
    })
 })
 

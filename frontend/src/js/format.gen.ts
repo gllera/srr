@@ -80,6 +80,7 @@ export interface IFeedWire {
    last_new?: number // LastNew
    tag?: string // Tag
    recipe?: string // Recipe
+   nt?: boolean // NoTitle
    total_art: number // TotalArt
    add_idx: number // AddIdx
 }
