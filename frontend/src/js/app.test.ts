@@ -154,7 +154,7 @@ const SKELETON = `
       <div class="srr-searchbar"><input class="srr-search-input" /><button class="srr-search-clear"></button>
          <div class="srr-search-note"></div></div>
       <article class="srr-reader" hidden>
-         <div class="srr-kicker"><span class="srr-source"></span><time class="srr-date"></time><a class="srr-kicker-link"></a></div>
+         <div class="srr-kicker"><span class="srr-desk"></span><span class="srr-source"></span><time class="srr-date"></time><a class="srr-kicker-link"></a></div>
          <a class="srr-title-link"><h1 class="srr-title" tabindex="-1"></h1></a>
          <div class="srr-content"></div></article>
       <div class="srr-list" hidden></div>
@@ -337,6 +337,27 @@ describe("reader titleless feeds (Telegram-style: title duplicates the body)", (
       expect((document.querySelector(".srr-kicker-link") as HTMLAnchorElement).getAttribute("href")).toBe(
          "http://example.com/p/1",
       )
+   })
+})
+
+describe("reader desk (the article's tag, shown above the byline)", () => {
+   it("fills the desk with the feed's tag", async () => {
+      await boot()
+      data.db.feeds = { 3: { tag: "ofertas" } } as unknown as IDB["feeds"]
+      nav.fromHash.mockResolvedValue(showFeed({ article: { f: 3, a: 0, p: 0, t: "Deal", l: "", c: "<p>x</p>" } }))
+      hashTo("#3")
+      await flush()
+      // CSS uppercases it; textContent stays the raw tag. :not(:empty) reveals it.
+      expect((document.querySelector(".srr-desk") as HTMLElement).textContent).toBe("ofertas")
+   })
+
+   it("leaves the desk empty (hidden) for an untagged feed", async () => {
+      await boot()
+      data.db.feeds = { 1: {} } as unknown as IDB["feeds"]
+      nav.fromHash.mockResolvedValue(showFeed({ article: { f: 1, a: 0, p: 0, t: "Plain", l: "", c: "<p>x</p>" } }))
+      hashTo("#4")
+      await flush()
+      expect((document.querySelector(".srr-desk") as HTMLElement).textContent).toBe("")
    })
 })
 

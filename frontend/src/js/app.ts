@@ -25,6 +25,7 @@ const el = {
    settings: document.querySelector(".srr-settings") as HTMLButtonElement,
    source: document.querySelector(".srr-source") as HTMLElement,
    date: document.querySelector(".srr-date") as HTMLElement,
+   desk: document.querySelector(".srr-desk") as HTMLElement,
    searchInput: document.querySelector(".srr-search-input") as HTMLInputElement,
    searchClear: document.querySelector(".srr-search-clear") as HTMLButtonElement,
    searchNote: document.querySelector(".srr-search-note") as HTMLElement,
@@ -276,11 +277,15 @@ function render(o: IShowFeed) {
    clearTimeout(searchDebounce)
    if (o.placeholder) return renderEmptyReader()
    el.article.classList.remove("srr-reader-empty")
+   const feed = data.db.feeds[o.article.f]
    // Titleless feeds (Telegram-style: the title is just the content's first
    // line) hide the <h1> in the reader so the body isn't shown twice; the home
    // list still uses the title as its row label. The masthead permalink stands
    // in for the hidden title's link.
-   el.article.classList.toggle("srr-reader-titleless", !!data.db.feeds[o.article.f]?.nt)
+   el.article.classList.toggle("srr-reader-titleless", !!feed?.nt)
+   // Desk/section: the feed's tag, announced above the byline (uppercased in CSS).
+   // Empty for an untagged feed → the .srr-desk row is hidden (:not(:empty)).
+   el.desk.textContent = feed?.tag ?? ""
    // t/l are omitempty on the wire — an untitled article must not render "undefined"
    el.title.textContent = o.article.t ?? ""
    el.content.style.transition = "none"
@@ -338,6 +343,7 @@ function renderEmptyReader() {
    el.article.classList.add("srr-reader-empty")
    el.article.classList.remove("srr-reader-titleless")
    delete el.article.dataset.src
+   el.desk.textContent = ""
    el.title.textContent = ""
    el.titleLink.removeAttribute("href")
    el.kickerLink.removeAttribute("href")
