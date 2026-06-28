@@ -408,19 +408,19 @@ describe("browser: real SPA over real packs", () => {
       }
    })
 
-   // Search drives the MAIN list now (no dropdown): the magnifier toggles the
+   // Search drives the MAIN list now (no dropdown): the `/` shortcut toggles the
    // "q:<query>" list filter, a pinned search bar takes the query, matches render
    // as ordinary list rows, the query rides in the #!q:… hash, and tapping a
-   // result opens the reader walking the search set. The magnifier still renders
-   // as an inner .srr-search-icon <span> filling the button.
+   // result opens the reader walking the search set. The pinned bar carries the
+   // magnifier as an inner .srr-search-icon <span>.
    it("search renders matches into the main list and the reader walks the hits", async () => {
       const [page, close] = await open()
       try {
          await waitList(page)
-         expect(await page.$eval(".srr-search .srr-search-icon", (e) => e.tagName)).toBe("SPAN")
-         await page.click(".srr-search")
-         // The search bar appears (body gains srr-searching) ready for input.
+         // `/` opens the search bar (body gains srr-searching) ready for input.
+         await page.keyboard.press("/")
          await page.waitForFunction(() => document.body.classList.contains("srr-searching"), { timeout: 20000 })
+         expect(await page.$eval(".srr-searchbar .srr-search-icon", (e) => e.tagName)).toBe("SPAN")
          await page.type(".srr-search-input", "tech")
          // The list narrows (debounced) to the two "tech" titles, newest-first.
          await page.waitForFunction(
@@ -478,9 +478,9 @@ describe("browser: real SPA over real packs", () => {
    })
 
    // Saved articles: the reader's ★ toggle adds the current article to the
-   // device-local srr-saved set; "★ Saved" in the feed menu is a distinct
-   // filter view that shows exactly that set, and it survives a reload (the set
-   // lives in localStorage, the #!~saved hash re-enters the view).
+   // device-local srr-saved set; "★ Saved" in the config filter picker is a
+   // distinct filter view that shows exactly that set, and it survives a reload
+   // (the set lives in localStorage, the #!~saved hash re-enters the view).
    it("saves an article, lists it under ★ Saved, and persists across reload", async () => {
       const [page, close] = await open()
       try {
@@ -495,12 +495,20 @@ describe("browser: real SPA over real packs", () => {
          })
          expect(await page.$eval(".srr-save", (e) => e.getAttribute("aria-pressed"))).toBe("true")
 
-         // Back to the list → feed menu → pick "★ Saved".
+         // Back to the list → settings (config) → pick "★ Saved". The picker now
+         // lives in the config surface; choosing a filter opens the READER at that
+         // filter's resume position, so ★ Saved lands on the saved article.
          await page.click(".srr-back")
          await waitList(page)
-         await page.click(".srr-feed")
-         await page.waitForSelector('#srr-feed-menu.srr-open a[data-value="~saved"]', { timeout: 20000 })
-         await page.click('#srr-feed-menu a[data-value="~saved"]')
+         await page.click(".srr-settings")
+         await page.waitForSelector('.srr-config-filter a[data-value="~saved"]', { timeout: 20000 })
+         await page.click('.srr-config-filter a[data-value="~saved"]')
+         await waitReader(page)
+         expect(await $title(page)).toBe("sport title 1")
+
+         // Back to the list under the ★ Saved filter: exactly the saved row, the
+         // saved-row marker, and the shareable #!~saved hash.
+         await page.click(".srr-back")
          await waitList(page)
          await page.waitForFunction(() => document.querySelectorAll(".srr-list a.srr-row").length === 1, {
             timeout: 20000,
@@ -536,6 +544,15 @@ describe("browser: real SPA over real packs", () => {
          await page.goto(baseUrl + "#5", { waitUntil: "load" })
          await waitReader(page)
          await page.waitForFunction(() => navigator.serviceWorker?.controller != null, { timeout: 20000 })
+
+         // This test exercises offline PACK SERVING, not unread filtering. Unread-only
+         // (catch-up) is the first-run default, and deep-linking to the newest article
+         // (#5) marks every feed seen — so in that mode the older neighbor (chron 4)
+         // is seen and a back-step would (correctly) find nothing unread, disabling
+         // prev. Persist show-all ("0") before the SW takes over so the older cached
+         // neighbor stays navigable offline. app.ts only force-enables unread-only
+         // when the key is unset, so a stored "0" sticks across the reloads below.
+         await page.evaluate(() => localStorage.setItem("srr-unread-only", "0"))
 
          // Reload so every shell + pack request now flows through the controlling SW
          // and is cached. The reader at chron 5 pulls in the (single) data pack.
@@ -679,63 +696,15 @@ describe("browser: real SPA over real packs", () => {
       }
    })
 
-   // An in-place store rebuild reuses finalized pack ids (data/N.gz) with new
-   // bytes — the SW's cache-first would serve the stale packs forever. The db.gz
-   // `gen` field is the invalidation signal: when it changes, the SW purges the
-   // packs bucket BEFORE db.gz resolves to the page (which only then requests
-   // idx/data packs). Proves both directions with a real srrb rebuild: without a
-   // gen bump the stale cache wins (that's cache-first working as designed); with
-   // `srr gen --bump` the fresh bytes win. Runs LAST: it replaces the shared store.
-   it("purges stale finalized packs when db.gz gen changes", async () => {
-      // Wipe the served store and write a fresh one with the same shape (one
-      // feed, same item count/order → chron 0 is always data pack 1, offset 0)
-      // but different content. -s 1 + incompressible filler → finalized packs.
-      const rebuild = async (prefix: string) => {
-         for (const f of readdirSync(packsDir)) rmSync(join(packsDir, f), { recursive: true, force: true })
-         feeds.set("/bulk.xml", rssFeed("Bulk", nItems(30, prefix, 8000)))
-         await srr(packsDir, "feed", "add", "-t", "Bulk", "-u", `${feeds.url}/bulk.xml`)
-         await srr(packsDir, "-s", "1", "art", "fetch")
-      }
-
-      await rebuild("alpha")
-      const ctx = await browser.createBrowserContext()
-      const page = await ctx.newPage()
-      try {
-         // Cold load at chron 0 (lives in finalized, cache-first data/1.gz), wait
-         // for the SW to claim, then reload so the pack is cached through it.
-         await page.goto(baseUrl + "#0", { waitUntil: "load" })
-         await waitTitle(page, "alpha title 0")
-         await page.waitForFunction(() => navigator.serviceWorker?.controller != null, { timeout: 20000 })
-         await page.reload({ waitUntil: "load" })
-         await waitTitle(page, "alpha title 0")
-
-         // Rebuild with new content but unchanged gen (absent == 0): the stale
-         // cached pack must still be served — the purge is gen-driven, not a side
-         // effect of the rebuild itself.
-         await rebuild("beta")
-         await page.reload({ waitUntil: "load" })
-         await waitTitle(page, "alpha title 0")
-
-         // Bump gen → next db.gz fetch purges the packs bucket → fresh bytes.
-         await srr(packsDir, "gen", "--bump")
-         await page.reload({ waitUntil: "load" })
-         await waitTitle(page, "beta title 0")
-         expect(await $popupOpen(page)).toBe(false)
-      } finally {
-         await ctx.close()
-      }
-   })
-
    // ── Offline-pin (PINNED bucket) ─────────────────────────────────────────────
    // The "pin" SW message caches pack names into srr-pinned-v1, which is
    // EXEMPT from enforceCacheBounds eviction and PURGED on gen change.
    //
-   // NOTE: these tests require navigator.serviceWorker.controller to be non-null
-   // (the SW must be controlling the page). In this sandbox, the three pre-existing
-   // SW-controller tests above hit a headless-Chrome limitation on that wait. The
-   // pinned-bucket tests use the same waitForFunction pattern; if the SW controller
-   // is unavailable in the environment they will time out in the same way as the
-   // pre-existing tests — that is an environmental limit, not a code bug.
+   // These tests require navigator.serviceWorker.controller to be non-null (the SW
+   // controlling the page); the browser global setup builds with NODE_ENV=production
+   // so app.ts actually registers the SW (a non-production build compiles in the dev
+   // branch that UNregisters it). They also assume the shared 6-article store, so the
+   // store-replacing "purges stale finalized packs" test is ordered AFTER them below.
 
    it("caches named packs into srr-pinned-v1 on a 'pin' message", async () => {
       const ctx = await browser.createBrowserContext()
@@ -905,6 +874,55 @@ describe("browser: real SPA over real packs", () => {
          // would throw in data.init() → popup).
          expect(await $title(page)).toBe("sport title 1")
          expect(await $content(page)).toContain("sport body 1")
+         expect(await $popupOpen(page)).toBe(false)
+      } finally {
+         await ctx.close()
+      }
+   })
+
+   // An in-place store rebuild reuses finalized pack ids (data/N.gz) with new
+   // bytes — the SW's cache-first would serve the stale packs forever. The db.gz
+   // `gen` field is the invalidation signal: when it changes, the SW purges the
+   // packs bucket BEFORE db.gz resolves to the page (which only then requests
+   // idx/data packs). Proves both directions with a real srrb rebuild: without a
+   // gen bump the stale cache wins (that's cache-first working as designed); with
+   // `srr gen --bump` the fresh bytes win. Replaces the shared store, so it is
+   // ordered AFTER every test that reads the original 6-article store (the pinned
+   // tests above); the two store-rebuilding tests below seed their own stores.
+   it("purges stale finalized packs when db.gz gen changes", async () => {
+      // Wipe the served store and write a fresh one with the same shape (one
+      // feed, same item count/order → chron 0 is always data pack 1, offset 0)
+      // but different content. -s 1 + incompressible filler → finalized packs.
+      const rebuild = async (prefix: string) => {
+         for (const f of readdirSync(packsDir)) rmSync(join(packsDir, f), { recursive: true, force: true })
+         feeds.set("/bulk.xml", rssFeed("Bulk", nItems(30, prefix, 8000)))
+         await srr(packsDir, "feed", "add", "-t", "Bulk", "-u", `${feeds.url}/bulk.xml`)
+         await srr(packsDir, "-s", "1", "art", "fetch")
+      }
+
+      await rebuild("alpha")
+      const ctx = await browser.createBrowserContext()
+      const page = await ctx.newPage()
+      try {
+         // Cold load at chron 0 (lives in finalized, cache-first data/1.gz), wait
+         // for the SW to claim, then reload so the pack is cached through it.
+         await page.goto(baseUrl + "#0", { waitUntil: "load" })
+         await waitTitle(page, "alpha title 0")
+         await page.waitForFunction(() => navigator.serviceWorker?.controller != null, { timeout: 20000 })
+         await page.reload({ waitUntil: "load" })
+         await waitTitle(page, "alpha title 0")
+
+         // Rebuild with new content but unchanged gen (absent == 0): the stale
+         // cached pack must still be served — the purge is gen-driven, not a side
+         // effect of the rebuild itself.
+         await rebuild("beta")
+         await page.reload({ waitUntil: "load" })
+         await waitTitle(page, "alpha title 0")
+
+         // Bump gen → next db.gz fetch purges the packs bucket → fresh bytes.
+         await srr(packsDir, "gen", "--bump")
+         await page.reload({ waitUntil: "load" })
+         await waitTitle(page, "beta title 0")
          expect(await $popupOpen(page)).toBe(false)
       } finally {
          await ctx.close()
