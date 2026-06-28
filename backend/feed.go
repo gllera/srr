@@ -111,29 +111,12 @@ type fetchRun struct {
 	fetchedAt int64
 	// maxAssetSize is the self-hosted-object size cap in bytes (--max-asset-size),
 	// passed to each ingest Request so an external fetcher enforces it at download.
-	// newFetchRun reuses assets.maxBytes (the same cap, already converted) rather
-	// than redoing the KB→bytes conversion.
+	// Set from assets.maxBytes (already converted from KB) to avoid a redundant
+	// KB→bytes step.
 	maxAssetSize int
 	// recipes is the full db.gz recipes map, read-only during a fetch run;
 	// each feed resolves its recipe (and the default) from it.
 	recipes map[string]Recipe
-}
-
-// newFetchRun assembles the run-scoped deps shared by every feed in one fetch
-// (built once in FetchCmd.fetch, concurrent-safe). maxAssetSize reuses the
-// uploader's already-converted byte cap (no extra KB→bytes step here). The
-// asset worker pool lives on the shared assetFetcher (a.sem, sized in
-// FetchCmd.fetch), held by the singleflight leader job only.
-func newFetchRun(client *http.Client, engine *ingest.Fetcher, assets *assetFetcher, cacheDir string, fetchedAt int64, recipes map[string]Recipe) *fetchRun {
-	return &fetchRun{
-		client:       client,
-		engine:       engine,
-		assets:       assets,
-		cacheDir:     cacheDir,
-		fetchedAt:    fetchedAt,
-		recipes:      recipes,
-		maxAssetSize: int(assets.maxBytes),
-	}
 }
 
 func (c *Feed) Fetch(ctx context.Context, run *fetchRun, buf []byte, processor *mod.Module) {

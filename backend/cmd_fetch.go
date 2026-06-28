@@ -145,7 +145,15 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 
 		// Run-scoped deps shared across all workers (all concurrent-safe). The
 		// per-worker buf/processor are pulled from their pools inside each worker.
-		run := newFetchRun(client, engine, assets, cacheDir, db.core.FetchedAt, db.core.Recipes)
+		run := &fetchRun{
+			client:       client,
+			engine:       engine,
+			assets:       assets,
+			cacheDir:     cacheDir,
+			fetchedAt:    db.core.FetchedAt,
+			recipes:      db.core.Recipes,
+			maxAssetSize: int(assets.maxBytes),
+		}
 
 		g, gctx := errgroup.WithContext(ctx)
 		g.SetLimit(globals.Workers)
