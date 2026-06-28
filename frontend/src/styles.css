@@ -113,6 +113,28 @@ video {
    white-space: nowrap;
 }
 
+/* Desk/section the dispatch is filed under (the feed's tag) — a wire slug
+   leading the byline ("SECTION / source"). Inherits the kicker's mono / uppercase
+   / tracking; muted so the colored source name stays the anchor. The trailing "/"
+   (vs the dateline "·") marks it as the section, not a byline token. app.ts sets
+   the text to the feed's tag; `:not(:empty)` hides it (and the slash) for an
+   untagged feed. flex-shrink:0 keeps the short tag intact and lets the source
+   ellipsize when space is tight. */
+.srr-desk {
+   display: none;
+   flex-shrink: 0;
+   font-weight: 600;
+   color: var(--muted);
+}
+.srr-desk:not(:empty) {
+   display: inline;
+}
+.srr-desk:not(:empty)::after {
+   content: "/";
+   color: var(--faint);
+   margin: 0 0.4rem;
+}
+
 .srr-title-link {
    text-decoration: none;
 }

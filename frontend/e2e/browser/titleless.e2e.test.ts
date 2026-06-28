@@ -27,6 +27,8 @@ const $titleVisible = (p: Page) => p.$eval(".srr-title-link", (e) => (e as HTMLE
 const $kickerVisible = (p: Page) => p.$eval(".srr-kicker-link", (e) => (e as HTMLElement).offsetParent !== null)
 const $kickerHref = (p: Page) => p.$eval(".srr-kicker-link", (e) => e.getAttribute("href"))
 const $titleText = (p: Page) => p.$eval(".srr-title", (e) => e.textContent)
+const $deskVisible = (p: Page) => p.$eval(".srr-desk", (e) => (e as HTMLElement).offsetParent !== null)
+const $deskText = (p: Page) => p.$eval(".srr-desk", (e) => e.textContent)
 
 const waitReader = (p: Page) =>
    p.waitForFunction(
@@ -70,11 +72,16 @@ describe("browser: titleless feeds (reader hides the duplicate heading)", () => 
       })
       for (const f of readdirSync(packsDir)) rmSync(join(packsDir, f), { recursive: true, force: true })
 
-      // The titleless feed is created via `feed apply` (offline) with no_title:true.
+      // The titleless feed is created via `feed apply` (offline) with no_title:true
+      // and a tag (the reader desk reads the feed's tag).
       const applyDir = mkdtempSync(join(tmpdir(), "srr-titleless-apply-"))
       const applyFile = join(applyDir, "micro.json")
-      writeFileSync(applyFile, JSON.stringify({ title: "Micro", url: `${feeds.url}/micro.xml`, no_title: true }))
+      writeFileSync(
+         applyFile,
+         JSON.stringify({ title: "Micro", url: `${feeds.url}/micro.xml`, no_title: true, tag: "updates" }),
+      )
       await srr(packsDir, "feed", "apply", "-f", applyFile)
+      // News is left untagged → its desk stays empty/hidden.
       await srr(packsDir, "feed", "add", "-t", "News", "-u", `${feeds.url}/news.xml`)
       await srr(packsDir, "art", "fetch")
       rmSync(applyDir, { recursive: true, force: true })
@@ -106,6 +113,9 @@ describe("browser: titleless feeds (reader hides the duplicate heading)", () => 
          // …and the masthead permalink stands in, pointing at the article link.
          expect(await $kickerVisible(page)).toBe(true)
          expect(await $kickerHref(page)).toBe("http://example.com/micro/0")
+         // The desk shows the feed's tag above the byline.
+         expect(await $deskVisible(page)).toBe(true)
+         expect(await $deskText(page)).toBe("updates")
       } finally {
          await close()
       }
@@ -122,6 +132,8 @@ describe("browser: titleless feeds (reader hides the duplicate heading)", () => 
          // The permalink is available on ordinary feeds too, pointing at the article.
          expect(await $kickerVisible(page)).toBe(true)
          expect(await $kickerHref(page)).toBe("http://example.com/news/0")
+         // News is untagged → the desk stays hidden.
+         expect(await $deskVisible(page)).toBe(false)
       } finally {
          await close()
       }
