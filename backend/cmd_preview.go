@@ -72,6 +72,9 @@ var previewTmpl = template.Must(template.New("preview").Funcs(template.FuncMap{
 // its ingest.
 func renderPreview(ctx context.Context, recipes map[string]Recipe, recipeName string, pipeOverride []string, ingestOverride, rawURL string) ([]*Item, error) {
 	client := newFetchClient(1)
+	// One-shot per render; the serve process calls this per request, so reclaim
+	// the transport's idle keep-alive sockets instead of leaking them ~90s each.
+	defer client.CloseIdleConnections()
 	processor := mod.New()
 	engine := ingest.New()
 
