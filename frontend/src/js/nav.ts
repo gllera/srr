@@ -771,8 +771,21 @@ export function getFilterEntries(): string[] {
 // segment (numeric feed ids and tag names; unseen-only's raised bounds apply
 // in single-tag mode). Empty → clear (all feeds).
 export function applyFilter(tokens: string[]): void {
-   if (tokens.length > 0) filter.set(tokens)
-   else filter.clear()
+   if (tokens.length === 0) {
+      filter.clear()
+      return
+   }
+   filter.set(tokens)
+   // Symmetric with switchFilter: a known feed/tag that currently has zero
+   // matching articles (an empty feed, pickable when read items are shown)
+   // makes filter.set fall back to [ALL]. Re-scope it to itself so a reload/back
+   // to `#!<token>` re-renders the empty-state placeholder under that scope
+   // instead of silently showing [ALL]'s full list. A truly unknown/stale token
+   // still falls back to [ALL].
+   if (!filter.active && tokens.length === 1 && isKnownToken(tokens[0])) {
+      filter.tokens = [tokens[0]]
+      filter.feeds = new Map<number, number>()
+   }
 }
 
 // A stable key for the active filter tokens — identifies the token SET

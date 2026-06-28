@@ -677,6 +677,22 @@ describe("switchFilter", () => {
    })
 })
 
+describe("applyFilter", () => {
+   it("keeps a known-but-empty feed scoped (reload of #!<id>)", () => {
+      // Feed 9 has articles; feed 5 exists but has zero articles (known-but-empty).
+      setupIndex([{ feedId: 9 }, { feedId: 9 }, { feedId: 9 }])
+      data.db.feeds[5] = makeFeed({ id: 5, total_art: 0 })
+
+      nav.applyFilter(["5"])
+      expect(nav.filter.tokens).toEqual(["5"]) // not cleared to [ALL]
+      expect(nav.filter.feeds.size).toBe(0) // no navigable members
+
+      // A genuinely unknown token still falls back to [ALL].
+      nav.applyFilter(["999"])
+      expect(nav.filter.tokens).toEqual([])
+   })
+})
+
 describe("pruneSeen", () => {
    it("removes entries for deleted subs and all legacy tag keys", () => {
       data.db.feeds = { 1: makeFeed({ id: 1, tag: "news" }) }
