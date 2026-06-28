@@ -46,15 +46,16 @@ func TestSubprocessEnvMergesSecrets(t *testing.T) {
 		t.Errorf("ambient var should pass through: got %q, want %q", got, "from-env")
 	}
 
-	// secrets win by REPLACEMENT, not shadowing: the overridden key appears once.
-	n := 0
+	// secrets win by last-wins (exec.Cmd semantics): the final occurrence must be
+	// the secret value, regardless of how many times the key appears.
+	last := ""
 	for _, kv := range out {
-		if strings.HasPrefix(kv, "SRR_SECRETS_OVERRIDE=") {
-			n++
+		if after, ok := strings.CutPrefix(kv, "SRR_SECRETS_OVERRIDE="); ok {
+			last = after
 		}
 	}
-	if n != 1 {
-		t.Errorf("overridden key appears %d times, want 1 (deduped)", n)
+	if last != "secret-value" {
+		t.Errorf("secret should be the last (winning) value: got %q, want %q", last, "secret-value")
 	}
 }
 
