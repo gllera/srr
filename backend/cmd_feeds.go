@@ -39,6 +39,25 @@ func resolvesFeed(recipes map[string]Recipe, recipeName string) bool {
 	return ingest.Select(r.Ingest, def.Ingest) == ingest.Builtin
 }
 
+// resolveFeedProbe validates the recipe reference and — when the URL is new
+// or changed (newURL != oldURL) and the effective ingest is #feed — resolves
+// the URL via subscribe-time discovery. Returns the resolved URL (unchanged if
+// no probe ran). Called before any network probe so an unknown recipe surfaces
+// as a clear "recipe does not exist" error rather than a resolve failure.
+func resolveFeedProbe(ctx context.Context, recipes map[string]Recipe, recipe, oldURL, newURL string) (string, error) {
+	if err := validateRecipeRef(recipes, recipe); err != nil {
+		return "", err
+	}
+	if newURL != oldURL && resolvesFeed(recipes, recipe) {
+		resolved, err := resolveFeedURL(ctx, newURL)
+		if err != nil {
+			return "", fmt.Errorf("resolve feed %q: %w", newURL, err)
+		}
+		return resolved, nil
+	}
+	return newURL, nil
+}
+
 func printFormatted(format string, v any) error {
 	var output []byte
 	var err error
@@ -132,20 +151,11 @@ func (o *AddCmd) Run() error {
 		v.Recipe = *o.Recipe
 	}
 	return withDB(true, func(ctx context.Context, db *DB) error {
-		// Validate the recipe reference up front, before the network probe:
-		// resolvesFeed is lenient (an unknown recipe falls back to default ⇒
-		// #feed ⇒ true), so a typo'd -r would otherwise probe the URL and
-		// surface a resolve error instead of the clearer "recipe does not exist".
-		if err := validateRecipeRef(db.core.Recipes, v.Recipe); err != nil {
+		resolved, err := resolveFeedProbe(ctx, db.core.Recipes, v.Recipe, "", v.URL)
+		if err != nil {
 			return err
 		}
-		if resolvesFeed(db.core.Recipes, v.Recipe) {
-			resolved, err := resolveFeedURL(ctx, v.URL)
-			if err != nil {
-				return fmt.Errorf("resolve feed %q: %w", v.URL, err)
-			}
-			v.URL = resolved
-		}
+		v.URL = resolved
 		return applyViews(ctx, db, []*feedView{v})
 	})
 }
@@ -209,29 +219,23 @@ func (o *UpdCmd) Run() error {
 		if o.Recipe != nil {
 			ch.Recipe = *o.Recipe
 		}
-		// Validate the recipe reference before the URL-repoint network probe:
-		// resolvesFeed is lenient (unknown ⇒ default ⇒ #feed ⇒ true), so a
-		// typo'd -r would otherwise probe and surface a resolve error instead of
-		// the clearer "recipe does not exist".
-		if err := validateRecipeRef(db.core.Recipes, ch.Recipe); err != nil {
-			return err
-		}
+		// Determine the candidate URL (unchanged when -u is absent). resolveFeedProbe
+		// validates the recipe reference and probes for discovery only when the URL
+		// is actually changing and the effective ingest is #feed.
+		oldURL := ch.URL
+		newURL := ch.URL
 		if o.URL != nil {
 			if !validFeedURL(*o.URL) {
 				return fmt.Errorf("invalid url %q", *o.URL)
 			}
-			newURL := *o.URL
-			// Resolve only when the URL actually changes (a repoint) and the
-			// effective ingest is the built-in #feed. ch.Recipe already reflects
-			// any -r update applied above.
-			if newURL != ch.URL && resolvesFeed(db.core.Recipes, ch.Recipe) {
-				resolved, err := resolveFeedURL(ctx, newURL)
-				if err != nil {
-					return fmt.Errorf("resolve feed %q: %w", newURL, err)
-				}
-				newURL = resolved
-			}
-			setFeedURL(ch, newURL)
+			newURL = *o.URL
+		}
+		resolved, err := resolveFeedProbe(ctx, db.core.Recipes, ch.Recipe, oldURL, newURL)
+		if err != nil {
+			return err
+		}
+		if o.URL != nil {
+			setFeedURL(ch, resolved)
 		}
 
 		if err := normalizeFeed(ch, db.core.Recipes); err != nil {
