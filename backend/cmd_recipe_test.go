@@ -6,13 +6,6 @@ import (
 	"testing"
 )
 
-// setupRecipeTestStore points globals.Store at a fresh temp dir, the
-// established test-store setup pattern.
-func setupRecipeTestStore(t *testing.T) {
-	t.Helper()
-	globals = &Globals{PackSize: 1, Store: t.TempDir()}
-}
-
 // recipeSet runs `srr recipe set` against the test store.
 func recipeSet(t *testing.T, name, ingest string, pipe ...string) error {
 	t.Helper()
@@ -21,7 +14,7 @@ func recipeSet(t *testing.T, name, ingest string, pipe ...string) error {
 }
 
 func TestRecipeSetUpsertAndShow(t *testing.T) {
-	setupRecipeTestStore(t) // points globals.Store at a temp dir
+	setupEmptyDB(t) // points globals.Store at a temp dir
 	// #default is the composition token; recipes other than default may use it.
 	if err := recipeSet(t, "read", "", "#readability", "#sanitize"); err != nil {
 		t.Fatalf("recipe set: %v", err)
@@ -39,7 +32,7 @@ func TestRecipeSetUpsertAndShow(t *testing.T) {
 }
 
 func TestRecipeSetClearIngest(t *testing.T) {
-	setupRecipeTestStore(t)
+	setupEmptyDB(t)
 	_ = recipeSet(t, "tg", "srr-telegram", "#sanitize")
 	if err := recipeSet(t, "tg", "", "#sanitize"); err != nil { // -i "" clears
 		t.Fatalf("recipe set clear ingest: %v", err)
@@ -53,14 +46,14 @@ func TestRecipeSetClearIngest(t *testing.T) {
 }
 
 func TestRecipeRmRefusesDefault(t *testing.T) {
-	setupRecipeTestStore(t)
+	setupEmptyDB(t)
 	if err := (&RecipeRmCmd{Name: defaultRecipeName}).Run(); err == nil {
 		t.Error("recipe rm default accepted, want error")
 	}
 }
 
 func TestRecipeRmRemoves(t *testing.T) {
-	setupRecipeTestStore(t)
+	setupEmptyDB(t)
 	if err := recipeSet(t, "gone", "", "#sanitize"); err != nil {
 		t.Fatalf("recipe set: %v", err)
 	}
@@ -76,7 +69,7 @@ func TestRecipeRmRemoves(t *testing.T) {
 }
 
 func TestRecipeSetDefaultRejectsDefaultToken(t *testing.T) {
-	setupRecipeTestStore(t)
+	setupEmptyDB(t)
 	// #default is forbidden inside the default recipe (it IS the default).
 	if err := recipeSet(t, defaultRecipeName, "", "#default", "#minify"); err == nil {
 		t.Error("recipe set default with #default accepted, want error")
@@ -88,7 +81,7 @@ func TestRecipeSetDefaultRejectsDefaultToken(t *testing.T) {
 }
 
 func TestRecipeRmRefusesReferenced(t *testing.T) {
-	setupRecipeTestStore(t)
+	setupEmptyDB(t)
 	_ = recipeSet(t, "read", "", "#readability", "#default")
 	_ = withDB(true, func(ctx context.Context, db *DB) error {
 		if err := db.AddFeed(&Feed{Title: "T", URL: "http://example.com/rss", Recipe: "read"}); err != nil {

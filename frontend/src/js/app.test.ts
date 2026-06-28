@@ -334,7 +334,6 @@ describe("reader titleless feeds (Telegram-style: title duplicates the body)", (
 
    it("keeps the heading but still offers the masthead permalink on an ordinary feed", async () => {
       await boot()
-      data.db.feeds = { 7: { nt: true } } as unknown as IDB["feeds"]
       // Feed 1 has no nt flag (absent from the map); its article carries a link.
       nav.fromHash.mockResolvedValue(
          showFeed({ article: { f: 1, a: 0, p: 0, t: "Real", l: "http://example.com/p/1", c: "<p>x</p>" } }),

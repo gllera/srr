@@ -829,9 +829,7 @@ func TestFetchDroppedItemGUIDInBoundary(t *testing.T) {
 
 func TestSelfhostMarkerRoundTripsToAssetsKey(t *testing.T) {
 	// Allow the loopback test server through the mod's SSRF guard.
-	prevSSRF := mod.AllowPrivateFetch
-	mod.AllowPrivateFetch = true
-	t.Cleanup(func() { mod.AllowPrivateFetch = prevSSRF })
+	allowLoopback(t)
 
 	const body = "\xff\xd8\xff\xe0\x00\x10JFIF-some-jpeg-bytes"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
