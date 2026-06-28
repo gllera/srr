@@ -239,13 +239,11 @@ describe("filter list", () => {
       const config = await mount()
       config.open()
       const row = $<HTMLAnchorElement>('.srr-config-filter a[data-value="9"]')
-      // Health rides on data-grade (CSS tints the label); no leading dot that would
-      // shift the title rightward and misalign the list.
+      // Health rides on data-grade (CSS tints the label and ⓘ button); no leading
+      // dot that would shift the title rightward and misalign the list.
       expect(row.dataset.grade).toBe("crit")
       expect(row.querySelector(".srr-err-dot")).toBeNull()
       expect(row.title).toBe("boom")
-      // The ⓘ details button is tinted red (crit) so it reads as the health flag.
-      expect(row.querySelector(".srr-info-btn")!.classList.contains("srr-info-crit")).toBe(true)
    })
 
    it("adds a non-color title/aria cue to a stale-by-age feed (no ferr)", async () => {
@@ -290,9 +288,6 @@ describe("filter list", () => {
       config.open()
       const row = $<HTMLAnchorElement>('.srr-config-filter a[data-value="9"]')
       expect(row.dataset.grade).toBeUndefined()
-      const info = row.querySelector(".srr-info-btn")!
-      expect(info.classList.contains("srr-info-crit")).toBe(false)
-      expect(info.classList.contains("srr-info-warn")).toBe(false)
    })
 })
 

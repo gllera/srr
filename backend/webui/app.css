@@ -301,9 +301,6 @@ header {
    flex-wrap: wrap;
    margin-bottom: 1em;
 }
-.toolbar.spread {
-   margin-bottom: 0.6em;
-}
 input,
 select,
 textarea {

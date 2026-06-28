@@ -215,9 +215,6 @@ function feedLink(ch: IFeed, className: string): HTMLAnchorElement {
    }
    a.prepend(srcChip(ch.id))
    const info = infoBtn(`Details for ${ch.title}`, () => openFeedInfo(ch))
-   // An unhealthy feed tints its ⓘ by grade (warn amber, crit red), so the
-   // details affordance you tap to see why is itself the health flag.
-   if (grade !== "") info.classList.add(`srr-info-${grade}`)
    a.appendChild(info)
    return a
 }
