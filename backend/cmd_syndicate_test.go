@@ -267,5 +267,18 @@ func TestSyndicateSetNameValidation(t *testing.T) {
 	})
 }
 
+func TestOutContentType(t *testing.T) {
+	cases := map[string]string{
+		"rss":  "application/rss+xml",
+		"json": "application/feed+json",
+		"":     "application/rss+xml", // default branch mirrors outFileKey
+	}
+	for format, want := range cases {
+		if got := outContentType(OutFeed{Format: format}); got != want {
+			t.Errorf("outContentType(%q) = %q, want %q", format, got, want)
+		}
+	}
+}
+
 // Verify io.Reader is io.ReadCloser compliant when used in tests via strings.NewReader.
 var _ io.Reader = strings.NewReader("")

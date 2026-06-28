@@ -159,6 +159,16 @@ func outFileKey(o OutFeed) string {
 	}
 }
 
+// outContentType returns the HTTP Content-Type for an OutFeed's output file, so
+// S3-hosted syndication feeds (out/*.rss, out/*.json) are recognized by external
+// readers rather than served as the application/octet-stream default.
+func outContentType(o OutFeed) string {
+	if o.Format == "json" {
+		return "application/feed+json"
+	}
+	return "application/rss+xml"
+}
+
 // outTitle returns the effective channel title (falls back to Name).
 func outTitle(o OutFeed) string {
 	if o.Title != "" {
