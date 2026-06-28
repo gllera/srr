@@ -44,14 +44,19 @@ async function streamSSE(path, onEvent) {
   }
 }
 
+let bannerTimer = 0;
 function banner(msg, ok) {
   const b = document.getElementById("banner");
+  clearTimeout(bannerTimer); // a prior success timer must not hide this banner
   b.textContent = msg;
   b.hidden = false;
   b.classList.toggle("ok", !!ok);
-  if (ok) setTimeout(() => (b.hidden = true), 2500);
+  if (ok) bannerTimer = setTimeout(() => (b.hidden = true), 2500);
 }
-function clearBanner() { document.getElementById("banner").hidden = true; }
+function clearBanner() {
+  clearTimeout(bannerTimer);
+  document.getElementById("banner").hidden = true;
+}
 
 function el(tag, attrs, ...kids) {
   const e = document.createElement(tag);
