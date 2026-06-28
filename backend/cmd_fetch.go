@@ -57,10 +57,10 @@ func (o *FetchCmd) Run() error {
 // is reused across every cycle so its idle-conn pool isn't orphaned per cycle.
 func (o *FetchCmd) fetchLoop(ctx context.Context, client *http.Client) error {
 	if o.Interval <= 0 {
-		return o.runFetch(ctx, client, nil, nil)
+		return o.runFetch(ctx, client, nil)
 	}
 	for {
-		if err := o.runFetch(ctx, client, nil, nil); err != nil {
+		if err := o.runFetch(ctx, client, nil); err != nil {
 			slog.Error("fetch iteration failed", "err", err)
 		}
 		select {
@@ -94,11 +94,10 @@ func newFetchClient(workers int) *http.Client {
 	}
 }
 
-// runFetch runs one fetch cycle over the feeds matching filter (nil = all),
-// invoking onFeed (if non-nil) once per feed as it finishes. onFeed may run
-// concurrently from worker goroutines — callers must guard it. The CLI passes
-// (nil, nil); the SSE handler passes a feed filter and a channel-pushing onFeed.
-func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, filter func(*Feed) bool, onFeed func(feedProgress)) error {
+// runFetch runs one fetch cycle over every feed, invoking onFeed (if non-nil)
+// once per feed as it finishes; onFeed may run from worker goroutines, so
+// callers must guard it.
+func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed func(feedProgress)) error {
 	return withDBCtx(ctx, true, func(ctx context.Context, db *DB) error {
 		db.core.FetchedAt = time.Now().UTC().Unix()
 		// Asset uploader for the end-of-pipeline self-hosting step, shared across
@@ -152,9 +151,6 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, filter fun
 		g.SetLimit(globals.Workers)
 
 		for _, ch := range db.Feeds() {
-			if filter != nil && !filter(ch) {
-				continue
-			}
 			if ctx.Err() != nil {
 				break
 			}
@@ -249,14 +245,8 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, filter fun
 			}
 		}
 
-		// Count only the feeds this run actually processed: a filtered run (one
-		// feed via the GUI) must not report other feeds' stale FetchError from a
-		// prior run. filter==nil (the CLI) counts everything, unchanged.
 		var failed, totalFeeds int
 		for _, ch := range db.Feeds() {
-			if filter != nil && !filter(ch) {
-				continue
-			}
 			totalFeeds++
 			if ch.FetchError != "" {
 				failed++

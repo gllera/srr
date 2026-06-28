@@ -30,7 +30,7 @@ func handleFetch(w http.ResponseWriter, r *http.Request) {
 	done := make(chan error, 1)
 	go func() {
 		client := newFetchClient(globals.Workers)
-		err := (&FetchCmd{}).runFetch(r.Context(), client, nil, func(p feedProgress) {
+		err := (&FetchCmd{}).runFetch(r.Context(), client, func(p feedProgress) {
 			progress <- p
 		})
 		// Per-request transport: drop its idle keep-alive sockets now rather than

@@ -38,7 +38,7 @@ func TestRunFetchAllAndProgress(t *testing.T) {
 	// the unguarded append is safe here. A multi-feed caller (e.g. the SSE
 	// handler) must guard onFeed; it does so by pushing to a channel.
 	var seen []feedProgress
-	err := (&FetchCmd{}).runFetch(ctx, newFetchClient(1), nil, func(p feedProgress) {
+	err := (&FetchCmd{}).runFetch(ctx, newFetchClient(1), func(p feedProgress) {
 		seen = append(seen, p)
 	})
 	if err != nil {
@@ -50,29 +50,6 @@ func TestRunFetchAllAndProgress(t *testing.T) {
 	withDB(false, func(_ context.Context, d *DB) error {
 		if d.core.TotalArticles != 1 {
 			t.Fatalf("TotalArticles = %d, want 1", d.core.TotalArticles)
-		}
-		return nil
-	})
-}
-
-func TestRunFetchFilterExcludes(t *testing.T) {
-	db, _, _ := setupTestDB(t)
-	allowLoopback(t)
-	seedFeed(t, db, &Feed{Title: "Live", URL: rssServer(t)})
-
-	var seen []feedProgress
-	// Filter matches no feed (id 999).
-	err := (&FetchCmd{}).runFetch(ctx, newFetchClient(1), func(ch *Feed) bool { return ch.id == 999 },
-		func(p feedProgress) { seen = append(seen, p) })
-	if err != nil {
-		t.Fatalf("runFetch: %v", err)
-	}
-	if len(seen) != 0 {
-		t.Fatalf("progress = %+v, want none", seen)
-	}
-	withDB(false, func(_ context.Context, d *DB) error {
-		if d.core.TotalArticles != 0 {
-			t.Fatalf("TotalArticles = %d, want 0 (filtered out)", d.core.TotalArticles)
 		}
 		return nil
 	})
