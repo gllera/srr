@@ -55,6 +55,74 @@ func TestConfigKeyResolvesInactiveScheme(t *testing.T) {
 	}
 }
 
+// `srr config` (no arg) appends a masked `secrets:` section: keys listed, values
+// rendered as the shared maskSecret placeholder so the raw value never leaks.
+func TestConfigSecretsMaskedNoArg(t *testing.T) {
+	globals = &Globals{Store: "packs"}
+	secrets = map[string]string{"TOKEN": "supersecret", "API_HASH": "deadbeef"}
+	t.Cleanup(func() { secrets = nil })
+
+	out := captureStdout(t, func() {
+		if err := (&ConfigCmd{}).Run(); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	})
+	if !strings.Contains(out, "secrets:\n") {
+		t.Errorf("missing secrets section\n--- got ---\n%s", out)
+	}
+	if !strings.Contains(out, "TOKEN: ********") {
+		t.Errorf("TOKEN not masked\n--- got ---\n%s", out)
+	}
+	if strings.Contains(out, "supersecret") || strings.Contains(out, "deadbeef") {
+		t.Errorf("secret value leaked into output\n--- got ---\n%s", out)
+	}
+}
+
+// No secrets configured ⇒ no `secrets:` section at all.
+func TestConfigNoSecretsOmitsSection(t *testing.T) {
+	globals = &Globals{Store: "packs"}
+	secrets = nil
+
+	out := captureStdout(t, func() {
+		if err := (&ConfigCmd{}).Run(); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	})
+	if strings.Contains(out, "secrets:") {
+		t.Errorf("no-secrets config must omit the secrets section\n--- got ---\n%s", out)
+	}
+}
+
+// `srr config secrets` prints the masked section; `srr config secrets.KEY` prints
+// just the masked value; an unknown sub-key errors.
+func TestConfigSecretsKeyLookup(t *testing.T) {
+	globals = &Globals{Store: "packs"}
+	secrets = map[string]string{"TOKEN": "supersecret"}
+	t.Cleanup(func() { secrets = nil })
+
+	section := captureStdout(t, func() {
+		if err := (&ConfigCmd{Key: "secrets"}).Run(); err != nil {
+			t.Fatalf("Run(secrets): %v", err)
+		}
+	})
+	if !strings.Contains(section, "TOKEN: ********") || strings.Contains(section, "supersecret") {
+		t.Errorf("section lookup not masked\n--- got ---\n%s", section)
+	}
+
+	single := captureStdout(t, func() {
+		if err := (&ConfigCmd{Key: "secrets.TOKEN"}).Run(); err != nil {
+			t.Fatalf("Run(secrets.TOKEN): %v", err)
+		}
+	})
+	if !strings.Contains(single, "********") || strings.Contains(single, "supersecret") {
+		t.Errorf("single-key lookup not masked\n--- got ---\n%s", single)
+	}
+
+	if err := (&ConfigCmd{Key: "secrets.NOPE"}).Run(); err == nil {
+		t.Error("unknown secret key should error")
+	}
+}
+
 // A conventional env tag (SRR_ + screaming-snake of the field name) is
 // suppressed; a hand-rolled tag that breaks the convention is still shown.
 func TestGlobalEnvName(t *testing.T) {

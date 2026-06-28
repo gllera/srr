@@ -191,6 +191,10 @@ func main() {
 		fatal("loading backend configs", "err", err)
 	}
 
+	if secrets, err = parseSecrets(configData); err != nil {
+		fatal("loading secrets", "err", err)
+	}
+
 	if globals.Debug {
 		slog.SetLogLoggerLevel(slog.LevelDebug)
 	}
@@ -228,6 +232,8 @@ func main() {
 	mod.AllowPrivateFetch = globals.AllowPrivateFetch
 	// #selfhost enforces the asset size cap at download (KB → bytes).
 	mod.MaxAssetSize = int64(globals.MaxAssetSize) * (1 << 10)
+	// srr.yaml `secrets:` merged into external ingest/mod command environments.
+	mod.SetSecrets(secrets)
 
 	if err := ctx.Run(); err != nil {
 		fatal(err.Error())

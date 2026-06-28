@@ -199,7 +199,7 @@ type Module struct {
 func New() *Module {
 	m := &Module{
 		processors: make(map[string]Processor, len(registry)),
-		env:        os.Environ(),
+		env:        SubprocessEnv(),
 	}
 	for name, init := range registry {
 		m.processors[name] = init()
