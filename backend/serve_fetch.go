@@ -6,12 +6,11 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"strconv"
 )
 
-// handleFetch runs one fetch cycle and streams per-feed progress as SSE. An
-// optional ?feed=<id> restricts the cycle to one feed. The triggered fetch holds
-// the store lock for its duration (like `srr art fetch`); if another process
+// handleFetch runs one fetch cycle over every feed in parallel and streams
+// per-feed progress as SSE — the same all-feeds cycle as `srr art fetch`. The
+// triggered fetch holds the store lock for its duration; if another process
 // holds it, the stream carries an in-band `event: error` (SSE has already sent
 // 200, so contention can't be a 409 here).
 func handleFetch(w http.ResponseWriter, r *http.Request) {
@@ -19,15 +18,6 @@ func handleFetch(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		writeErr(w, fmt.Errorf("streaming unsupported"))
 		return
-	}
-	var filter func(*Feed) bool
-	if fid := r.URL.Query().Get("feed"); fid != "" {
-		id, err := strconv.Atoi(fid)
-		if err != nil {
-			writeErr(w, fmt.Errorf("invalid feed id %q", fid))
-			return
-		}
-		filter = func(ch *Feed) bool { return ch.id == id }
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -40,7 +30,7 @@ func handleFetch(w http.ResponseWriter, r *http.Request) {
 	done := make(chan error, 1)
 	go func() {
 		client := newFetchClient(globals.Workers)
-		err := (&FetchCmd{}).runFetch(r.Context(), client, filter, func(p feedProgress) {
+		err := (&FetchCmd{}).runFetch(r.Context(), client, nil, func(p feedProgress) {
 			progress <- p
 		})
 		// Per-request transport: drop its idle keep-alive sockets now rather than

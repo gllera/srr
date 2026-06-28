@@ -553,18 +553,14 @@ function renderTools() {
   const root = document.getElementById("tools");
   root.replaceChildren();
 
-  // Feed selector + generation readout come from the cached snapshot — no read.
-  const feeds = snapshot.feeds;
-  const feedSel = el("select", {}, el("option", { value: "" }, "all feeds"));
-  for (const f of feeds) feedSel.append(el("option", { value: f.id }, `#${f.id} ${f.title}`));
+  // Fetch always covers every feed in parallel — same as `srrb a fetch`.
   const log = el("pre", { class: "log", "data-placeholder": "Idle — press Fetch now to stream the fetch log." });
   const fetchBtn = el("button", { class: "btn primary", onclick: async () => {
     log.textContent = "";
-    const q = feedSel.value ? "?feed=" + encodeURIComponent(feedSel.value) : "";
     fetchBtn.disabled = true;
     document.body.classList.add("fetching"); // "on the air" — pulses the masthead signal mark
     try {
-      await streamSSE("/api/fetch" + q, ({ event, data }) => {
+      await streamSSE("/api/fetch", ({ event, data }) => {
         if (event === "feed") log.textContent += `#${data.id} ${data.title}: ${data.error ? "ERROR " + data.error : data.new + " new"}\n`;
         else if (event === "done") log.textContent += "done.\n";
         else if (event === "error") log.textContent += "ERROR: " + data.error + "\n";
@@ -578,7 +574,7 @@ function renderTools() {
   } }, "Fetch now");
   root.append(el("section", { class: "panel" },
     el("h3", {}, "Fetch"),
-    el("div", { class: "toolbar" }, feedSel, fetchBtn), log));
+    el("div", { class: "toolbar" }, fetchBtn), log));
 
   // Gen (from the cached snapshot)
   const genLabel = el("span", { class: "gen-readout" });
