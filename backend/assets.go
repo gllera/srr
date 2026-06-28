@@ -450,10 +450,10 @@ func (a *assetFetcher) readProcOutput(outPath, localname string) ([]byte, bool) 
 // token it is appended as the final arg. Fail-soft: ok=false (the caller falls
 // back to the source extension and treats the asset as supported) when the
 // command errors or prints invalid JSON, so a peek hiccup never wedges a feed.
-// Shares mod.RunCommand's external-command bounds.
+// Shares mod.RunCommandTimeout's external-command bounds.
 func (a *assetFetcher) runPeek(ctx context.Context, full, localname string) (peekResult, bool) {
 	argv := buildAssetArgv(a.peek, full, "")
-	out, err := mod.RunCommand(ctx, argv[0], argv[1:]...)
+	out, err := mod.RunCommandTimeout(ctx, mod.SubprocessTimeout(), argv[0], argv[1:]...)
 	if err != nil {
 		slog.Warn("asset-peek failed; using source extension", "asset", localname, "cmd", a.peek[0], "err", err)
 		return peekResult{}, false

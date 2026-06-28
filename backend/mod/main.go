@@ -93,28 +93,16 @@ func RunSubprocess(ctx context.Context, args string, env []string, dir string, s
 	return bytes.TrimSpace(out), nil
 }
 
-// RunCommand runs argv under the shared SubprocessTimeout (--cmd-timeout). It is
-// the timeout-default form of RunCommandTimeout, used by the asset-peek command
-// and any caller whose bound is the ordinary external-command one.
-func RunCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return RunCommandTimeout(ctx, SubprocessTimeout(), name, args...)
-}
-
 // RunCommandTimeout runs argv (name plus args) under the same hardened bounds as
 // RunSubprocess — subprocessWaitDelay and a maxSubprocessOutput-capped stdout —
 // but via direct exec rather than /bin/sh, WITHOUT trimming (stdout may be binary,
 // e.g. a transcoded asset), and with an explicit per-invocation timeout instead of
 // the shared SubprocessTimeout. The asset-process command (assets.go) uses this
 // with its own much longer bound (--asset-process-timeout), since media
-// transcoding can outlast a feed/ingest command. A non-positive timeout applies no
-// deadline beyond ctx.
+// transcoding can outlast a feed/ingest command.
 func RunCommandTimeout(ctx context.Context, timeout time.Duration, name string, args ...string) ([]byte, error) {
-	cctx := ctx
-	if timeout > 0 {
-		var cancel context.CancelFunc
-		cctx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-	}
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	return runBounded(exec.CommandContext(cctx, name, args...))
 }
 
