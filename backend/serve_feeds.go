@@ -10,8 +10,9 @@ import (
 )
 
 // feedListView is the read-only feed shape the GUI table consumes: the writable
-// feedView fields plus server-owned health fields. Writes (POST/PUT) accept only
-// the feedView subset (title/url/tag/recipe).
+// feedView fields plus server-owned health fields. Writes (POST/PUT) accept
+// title/url/tag/recipe; no_title is preserved from the stored feed (its setting
+// is scoped to the CLI feed apply/edit path).
 type feedListView struct {
 	ID         int    `json:"id"`
 	Title      string `json:"title"`
@@ -115,6 +116,10 @@ func saveFeed(ctx context.Context, db *DB, v *feedView) (*Feed, error) {
 			return nil, err
 		}
 		ch = existing
+		// Setting the titleless flag is scoped to the CLI (feed apply/edit); the
+		// serve GUI edit form never carries no_title, so preserve the stored value
+		// instead of letting writeFeedView clobber it to the JSON zero value.
+		v.NoTitle = ch.NoTitle
 	}
 	newURL := v.URL
 	if ch.URL != newURL && resolvesFeed(db.core.Recipes, v.Recipe) {
