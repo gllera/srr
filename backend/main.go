@@ -75,6 +75,7 @@ type CLI struct {
 	Gen       GenCmd         `cmd:"" help:"Print or bump the store generation (db.gz 'gen'; frontend SW cache key)."`
 	Preview   PreviewCmd     `cmd:"" aliases:"p" help:"Preview processed feed articles in a browser."`
 	Serve     ServeCmd       `cmd:"" help:"Serve a local web admin GUI for managing feeds, recipes, syndication."`
+	Frontend  FrontendGroup  `cmd:"" aliases:"fe" help:"Manage the self-hosted reader frontend in the store root."`
 	Config    ConfigCmd      `cmd:"" aliases:"c" help:"Print resolved configuration."`
 	Inspect   InspectCmd     `cmd:"" aliases:"i" help:"Inspect pack consistency (validate idx<->data, debug chronIdx lookup)."`
 	GenTS     GenTSCmd       `cmd:"" name:"gen-ts" hidden:"" help:"Generate frontend/src/js/format.gen.ts from the Go data-contract declarations."`

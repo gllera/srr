@@ -58,6 +58,13 @@ var packKeyRe = func() *regexp.Regexp {
 	return regexp.MustCompile(`^(?:` + strings.Join(alts, "|") + `)[0-9]+\.gz$`)
 }()
 
+// feHashedRe matches a content-hashed frontend asset at the store root —
+// "<name>.<8+ hex>.<ext>" with no path separator. Parcel emits such names
+// (frontend.5730a221.css, sw.57d1d92e.js, icon-192.936dab90.png); the hash
+// changes per build, so the bytes are write-once and may be cached forever.
+// Anchored and slash-free so it never matches a pack key (idx/0.gz) or db.gz.
+var feHashedRe = regexp.MustCompile(`^[^/]+\.[0-9a-f]{8,}\.[a-z0-9]+$`)
+
 // cacheControlForKey returns the HTTP Cache-Control directive a backend should
 // attach when writing key, or "" for keys with no caching policy (e.g. the
 // lock marker). Backends that carry HTTP metadata (S3) emit it; filesystem
@@ -73,7 +80,12 @@ func cacheControlForKey(key string) string {
 		// on every fetch cycle. Must-revalidate so clients always see the
 		// latest window. Not in PackSeries/packKeyRe — NOT immutable.
 		return cacheRevalidate
-	case strings.HasPrefix(key, "assets/") || packKeyRe.MatchString(key):
+	case key == "index.html" || key == "manifest.webmanifest" || key == "sitemap.txt":
+		// The self-hosted frontend's mutable root files (`srr frontend update`):
+		// the SPA entry point, its manifest, and the sitemap manifest are
+		// rewritten on every upgrade, so revalidate.
+		return cacheRevalidate
+	case strings.HasPrefix(key, "assets/") || packKeyRe.MatchString(key) || feHashedRe.MatchString(key):
 		return cacheImmutable
 	default:
 		return ""

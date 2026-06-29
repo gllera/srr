@@ -35,18 +35,28 @@ jobs:
     if: github.event_name == 'push'
     needs: verify
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    # `ci` environment exposes SRR_CONFIG_INLINE (the build-time cdn-url) to the
+    # frontend bundle, the same way the `pages` job builds it.
+    environment: ci
     env:
       VERSION: ${{ github.ref_name }}
+      SRR_CONFIG_INLINE: ${{ secrets.SRR_CONFIG_INLINE }}
     steps:
     - uses: actions/checkout@v6
     - uses: ./.github/actions/setup-toolchain
-      with:
-        node: "false"
     - run: make release
+    # Bundle the built SPA as a flat tarball (entries are index.html, hashed
+    # assets — no leading dir) so `srr frontend update` can install it into a
+    # store root. Built with SRR_CONFIG_INLINE so it bakes the configured
+    # (absolute) cdn-url, matching the published Pages build.
+    - run: make build-fe
+    - run: tar czf srrf.tar.gz -C dist/srrf .
     - uses: softprops/action-gh-release@v3
       with:
-        files: dist/srr-*
+        files: |
+          dist/srr-*
+          srrf.tar.gz
 
   pages:
     needs: verify

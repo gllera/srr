@@ -42,6 +42,14 @@ cd frontend && npm ci && npm run build
 # Set SRR_CDN_URL at build time to point at your pack storage
 ```
 
+Or self-host the reader from the same store as the packs — one origin serves both:
+
+```bash
+# Downloads the latest srrf.tar.gz release asset and uploads it into the store
+# root (next to db.gz), tracking files in sitemap.txt for clean upgrades.
+./srr -o ./packs frontend update
+```
+
 ### Automate
 
 The included GitHub Actions workflow (`cron.yml`) runs `srr art fetch` on manual dispatch, and the `pages` job in `release.yml` deploys the frontend on version tags.
@@ -82,6 +90,6 @@ See [backend/README.md](backend/README.md) and [frontend/README.md](frontend/REA
 | Workflow | Trigger | Action |
 |----------|---------|--------|
 | `ci.yml` | Push to `main`, PRs | Runs `make verify` (lint, format, FE+BE tests, builds, jsdom e2e contract) and `make test-browser` (Puppeteer) in parallel jobs |
-| `release.yml` (`release` job) | `v*.*.*` tag | Cross-compiles backend binaries, creates GitHub release |
+| `release.yml` (`release` job) | `v*.*.*` tag | Cross-compiles backend binaries and bundles the SPA as `srrf.tar.gz`, creates GitHub release (`srr frontend update` installs the SPA from this asset) |
 | `release.yml` (`pages` job) | `v*.*.*` tag or manual | Builds and deploys frontend to GitHub Pages |
 | `cron.yml` | Manual dispatch | Downloads latest `srr` binary and runs `srr a fetch` against the configured store |
