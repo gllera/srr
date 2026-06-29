@@ -165,6 +165,38 @@ func TestCacheControlForKey(t *testing.T) {
 	}
 }
 
+// Frontend files live at the store root (next to db.gz), uploaded by
+// `srr frontend update`. The mutable entry point + manifests must revalidate;
+// content-hashed assets are write-once and may be cached forever. Only affects
+// S3 (local/SFTP ignore ObjectMeta).
+func TestCacheControlForKeyFrontend(t *testing.T) {
+	cases := []struct {
+		key, want string
+	}{
+		// Mutable root files: revalidate.
+		{"index.html", cacheRevalidate},
+		{"manifest.webmanifest", cacheRevalidate},
+		{"sitemap.txt", cacheRevalidate},
+		// Content-hashed root assets: immutable.
+		{"frontend.5730a221.css", cacheImmutable},
+		{"frontend.778222e7.js", cacheImmutable},
+		{"sw.57d1d92e.js", cacheImmutable},
+		{"icon.aea4e164.svg", cacheImmutable},
+		{"icon-192.936dab90.png", cacheImmutable},
+		{"apple-touch-icon.bcdd2574.png", cacheImmutable},
+		// Not a hash (too short / non-hex) → no policy.
+		{"frontend.css", ""},
+		{"app.1234.js", ""},
+		// Only sitemap.txt is special; a generic root .txt gets no policy.
+		{"readme.txt", ""},
+	}
+	for _, c := range cases {
+		if got := cacheControlForKey(c.key); got != c.want {
+			t.Errorf("cacheControlForKey(%q) = %q, want %q", c.key, got, c.want)
+		}
+	}
+}
+
 func TestLoadEnvBoolParsing(t *testing.T) {
 	type testConfig struct {
 		Enabled bool `yaml:"enabled"`
