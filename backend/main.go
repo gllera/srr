@@ -68,7 +68,7 @@ type ArtGroup struct {
 
 type CLI struct {
 	Globals
-	Feed      FeedGroup      `cmd:"" aliases:"ch" help:"Feed management."`
+	Feed      FeedGroup      `cmd:"" aliases:"f" help:"Feed management."`
 	Art       ArtGroup       `cmd:"" aliases:"a" help:"Article management."`
 	Syndicate SyndicateGroup `cmd:"" help:"Manage syndication output feeds (out/*)."`
 	Recipe    RecipeGroup    `cmd:"" help:"Manage processing recipes (named {ingest, pipe} bundles)."`
