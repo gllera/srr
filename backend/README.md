@@ -29,7 +29,7 @@ srr <command> [flags]
 
 ### Commands
 
-Commands are grouped under `feed` (feed management), `art` (articles), `preview`, `inspect`, `config`, and `version`. Group names have short aliases (`ch`, `a`, `p`, `i`, `c`).
+Commands are grouped under `feed` (feed management), `art` (articles), `preview`, `inspect`, `config`, and `version`. Group names have short aliases (`f`, `a`, `p`, `i`, `c`).
 
 | Command            | Description                                        |
 |--------------------|----------------------------------------------------|
