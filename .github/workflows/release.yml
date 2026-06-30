@@ -62,12 +62,14 @@ jobs:
     timeout-minutes: 15
     environment: ci
     env:
-      # Build WITH the absolute cdn-url (the `cdn-url:` in this YAML) so PACK_BASE
-      # is the pack store origin: this Cloudflare Pages deployment is the reader
-      # ONLY and fetches packs cross-origin. (The srrf.tar.gz Release asset is
-      # built with NO cdn-url for same-origin self-hosting — don't deploy that
-      # one here, it would 404 on db.gz against the Pages origin.)
-      SRR_CONFIG_INLINE: ${{ secrets.SRR_CONFIG_INLINE }}
+      # Build WITH the absolute cdn-url so PACK_BASE is the pack store origin:
+      # this Cloudflare Pages deployment is the reader ONLY and fetches packs
+      # cross-origin. SRR_CDN_URL is the highest-precedence cdn-url source in
+      # resolve-cdn-url.js (env → config `cdn-url:` → "."). (The srrf.tar.gz
+      # Release asset is built with NO cdn-url for same-origin self-hosting —
+      # don't deploy that one here, it would 404 on db.gz against the Pages
+      # origin.)
+      SRR_CDN_URL: ${{ secrets.SRR_CDN_URL }}
     steps:
     - uses: actions/checkout@v6
     - uses: ./.github/actions/setup-toolchain
