@@ -8,11 +8,10 @@ on:
 
 permissions:
   contents: write
-  pages: write
-  id-token: write
 
-# Serialize Pages deploys so overlapping tag pushes don't race deploy-pages;
-# let an in-flight deploy finish rather than cancelling it.
+# Serialize Cloudflare Pages deploys so overlapping tag pushes don't race to
+# publish the production deployment; let an in-flight deploy finish rather than
+# cancelling it.
 concurrency:
   group: pages
   cancel-in-progress: false
@@ -47,7 +46,7 @@ jobs:
     # store root. Built with NO cdn-url (deliberately no SRR_CONFIG_INLINE here),
     # so resolve-cdn-url.js falls back to "." — the shell fetches packs relative
     # to its own index.html and is origin-portable: it renders from whatever
-    # store root it's installed into. (The `pages` job below keeps the absolute
+    # store root it's installed into. (The `cf-pages` job below keeps the absolute
     # cdn-url; there the hosted reader and the packs live on different origins.)
     - run: make build-fe
     - run: tar czf srrf.tar.gz -C dist/srrf .
@@ -57,12 +56,17 @@ jobs:
           dist/srr-*
           srrf.tar.gz
 
-  pages:
+  cf-pages:
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: ci
     env:
+      # Build WITH the absolute cdn-url (the `cdn-url:` in this YAML) so PACK_BASE
+      # is the pack store origin: this Cloudflare Pages deployment is the reader
+      # ONLY and fetches packs cross-origin. (The srrf.tar.gz Release asset is
+      # built with NO cdn-url for same-origin self-hosting — don't deploy that
+      # one here, it would 404 on db.gz against the Pages origin.)
       SRR_CONFIG_INLINE: ${{ secrets.SRR_CONFIG_INLINE }}
     steps:
     - uses: actions/checkout@v6
@@ -70,7 +74,13 @@ jobs:
       with:
         go: "false"
     - run: make build-fe
-    - uses: actions/upload-pages-artifact@v5
+    # Direct Upload the built SPA (dist/srrf) to Cloudflare Pages. --branch=main
+    # marks it a production deploy — it must equal the project's configured
+    # production branch, and tag pushes carry no branch context so it's passed
+    # explicitly. Needs repo/ci-environment secrets CLOUDFLARE_API_TOKEN (token
+    # scoped to Account → Cloudflare Pages → Edit) and CLOUDFLARE_ACCOUNT_ID.
+    - uses: cloudflare/wrangler-action@v3
       with:
-        path: dist/srrf
-    - uses: actions/deploy-pages@v5
+        apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        command: pages deploy dist/srrf --project-name=srr-frontend --branch=main
