@@ -99,11 +99,16 @@ func RunSubprocess(ctx context.Context, args string, env []string, dir string, s
 // e.g. a transcoded asset), and with an explicit per-invocation timeout instead of
 // the shared SubprocessTimeout. The asset-process command (assets.go) uses this
 // with its own much longer bound (--asset-process-timeout), since media
-// transcoding can outlast a feed/ingest command.
+// transcoding can outlast a feed/ingest command. A timeout <= 0 means UNLIMITED:
+// no deadline is added and the command runs until it exits or ctx is cancelled
+// (SIGINT/SIGTERM) — the WaitDelay + output-cap hardening still applies.
 func RunCommandTimeout(ctx context.Context, timeout time.Duration, name string, args ...string) ([]byte, error) {
-	cctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	return runBounded(exec.CommandContext(cctx, name, args...))
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	return runBounded(exec.CommandContext(ctx, name, args...))
 }
 
 // runBounded is the shared hardened exec core: stdout captured into a

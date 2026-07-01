@@ -235,6 +235,67 @@ func TestUploadCacheRefProcessTimeoutIndependentOfCmdTimeout(t *testing.T) {
 	}
 }
 
+// A zero (unset/default) procTimeout means UNLIMITED: no deadline is applied, so
+// even a command that far outruns the shared --cmd-timeout completes. Proves the
+// default asset-process timeout is uncapped (media transcode can run arbitrarily
+// long) — bounded only by run cancellation, not by any fallback timeout. Under the
+// old wiring a zero procTimeout fell back to SubprocessTimeout and this would have
+// been killed and failed soft to the original.
+func TestUploadCacheRefProcessTimeoutUnlimited(t *testing.T) {
+	be := tempStore(t)
+	out := filepath.Join(t.TempDir(), "out.bin")
+	if err := os.WriteFile(out, []byte(encodedBytes), 0o644); err != nil {
+		t.Fatalf("write out: %v", err)
+	}
+	// Sleeps far longer than the tiny shared cmd-timeout set below.
+	af := newAssetFetcher(be, 1024, fakeProcess(t, "sleep 0.2\ncat '"+out+"'"))
+	af.procTimeout = 0 // unlimited — the default
+
+	orig := mod.CmdTimeout
+	mod.CmdTimeout = 20 * time.Millisecond // shrink the SHARED bound below the sleep
+	defer func() { mod.CmdTimeout = orig }()
+
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+
+	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	if err != nil {
+		t.Fatalf("UploadCacheRef: %v", err)
+	}
+	if got := string(readKey(t, be, key)); got != encodedBytes {
+		t.Errorf("stored body = %q, want encoded %q (unlimited procTimeout must not fall back to cmd-timeout)", got, encodedBytes)
+	}
+}
+
+// asset-peek is bounded by --asset-process-timeout (procTimeout), NOT the shared
+// --cmd-timeout: with a tiny cmd-timeout and the default unlimited procTimeout, a
+// slow peek still completes and its extension is applied. Proves --cmd-timeout no
+// longer affects asset processing (neither peek nor process).
+func TestUploadCacheRefPeekUnaffectedByCmdTimeout(t *testing.T) {
+	be := tempStore(t)
+	af := newAssetFetcher(be, 1024, "") // no asset-process
+	af.peek = strings.Fields(fakeProcess(t, "sleep 0.2\nprintf '{\"mimetype\":\"image/webp\",\"extension\":\"webp\",\"supported\":true}'") + " {input}")
+	af.procTimeout = 0 // unlimited — the default
+
+	orig := mod.CmdTimeout
+	mod.CmdTimeout = 20 * time.Millisecond // shrink the SHARED bound below the peek sleep
+	defer func() { mod.CmdTimeout = orig }()
+
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+
+	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	if err != nil {
+		t.Fatalf("UploadCacheRef: %v", err)
+	}
+	// The slow peek outran --cmd-timeout but must still have applied: the key takes
+	// the peek's .webp extension, not the source .jpg (which would signal fail-soft).
+	sum := sha256.Sum256([]byte(jpegBytes))
+	if want := contentHashKey(".webp", sum); key != want {
+		t.Errorf("key = %q, want peek-extension key %q (peek must not be bound by --cmd-timeout)", key, want)
+	}
+}
+
 func TestUploadCacheRefProcessSubstitutesInputToken(t *testing.T) {
 	be := tempStore(t)
 	// The script echoes its FIRST positional arg. With {input} substituted in

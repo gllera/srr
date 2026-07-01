@@ -109,12 +109,15 @@ srr preview https://example.com/feed.xml -p "#readability" -p "#default"
 | `--max-asset-size` | 25000 | Max self-hosted asset object size (KB), enforced **at download** by the self-hosting mod (`#selfhost`) and passed to ingest commands as `max_asset_size`: an over-cap asset is skipped, leaving its remote URL — not stored. The upload step no longer re-checks (only the `--asset-process` output keeps a fail-soft guard at the same size). |
 | `--asset-process` | (none) | Command run on every self-hosted asset just before upload to transcode/process its bytes (e.g. `webify -m 720`, or `conv -i {input} -o {output}`); the cache-file path is substituted for each `{input}` token (or appended when absent). With an `{output}` token the command writes its result to that file and prints a `{mimetype,extension,encoding}` JSON to stdout (setting the stored Content-Type/-Encoding); without `{output}`, processed bytes are read from stdout. Non-zero exit or empty output keeps the original; skipped when the source was already uploaded. Empty disables. |
 | `--asset-peek` | (none) | Command run on every self-hosted asset (before the dedup check) to identify it: it receives the cache-file path (`{input}` token or appended) and prints a `{mimetype,extension,supported}` JSON to stdout. The extension becomes the stored object's extension (so a transcoded asset carries its true output extension, while dedup still keys on the source bytes) and the mimetype its Content-Type; `supported:false` hosts the original bytes and skips `--asset-process`. Non-zero exit or invalid JSON falls back to the source extension. Empty disables. |
+| `--asset-workers` | nproc | Max assets processed concurrently across all feeds (peek/transcode/upload); independent of `--workers`. |
+| `--asset-process-timeout` | 0 (unlimited) | Timeout for a single `--asset-process` **or** `--asset-peek` command invocation (Go duration). `0` (the default) means **unlimited** — no deadline, since media transcoding can run arbitrarily long; the command is still bounded by run cancellation (SIGINT/SIGTERM). The shared `--cmd-timeout` governs ingest/mod commands only and never affects asset work. |
 | `--cache-dir` | $XDG_CACHE_HOME/srr | Download cache root for self-hosted external-ingest media |
 | `-o, --store` | packs | Storage destination |
 | `--force` | false | Override DB write lock |
 | `-d, --debug` | false | Enable debug logging |
-| `--cmd-timeout` | 5m | Timeout for a single external ingest/mod command (Go duration) |
+| `--cmd-timeout` | 5m | Timeout for a single external ingest/mod command (Go duration). Does **not** bound `--asset-process`/`--asset-peek` — those use `--asset-process-timeout`. |
 | `--allow-private-fetch` | false | Disable the SSRF guard (allow fetching feeds/media from private/loopback addresses) — security override |
+| `--cdn-url` | (none) | Absolute CDN base URL (`SRR_CDN_URL`). Hidden from `--help`; consumed by frontend builds and **required** for syndication output (`out/`, `srr syndicate`) — syndication is skipped with a warning when unset. |
 
 Global flags can also be set via environment variables (prefixed `SRR_`, e.g. `SRR_WORKERS`, `SRR_CMD_TIMEOUT`, `SRR_ALLOW_PRIVATE_FETCH`) or in a YAML config file using their long flag names as keys:
 
@@ -128,7 +131,27 @@ store: /path/to/packs
 
 Precedence: CLI flags > env vars > config file > defaults. `$SRR_CONFIG_INLINE`, when set, supersedes `$SRR_CONFIG`. Run `srr config` to print the resolved values; a value's env var is shown in brackets only when its name deviates from the conventional `SRR_<FIELD>` derivation (a derivable name is omitted to cut noise).
 
-Only **global** flags are YAML-settable. Per-command flags — `art fetch --interval` (`SRR_FETCH_INTERVAL`) and `preview --addr` (`SRR_PREVIEW_ADDR`) — take a CLI flag or env var but have no YAML key, since they are subcommand-scoped rather than top-level config.
+**Per-command flags** are also YAML-settable, but **nested under their command path** (using the command names, not the aliases) rather than at the top level — a top-level `interval:` is ignored, `art: { fetch: { interval: … } }` is applied:
+
+```yaml
+store: /path/to/packs      # global (top-level)
+art:
+  fetch:
+    interval: 30m          # art fetch --interval  (SRR_FETCH_INTERVAL)
+serve:
+  addr: localhost:8088     # serve --addr          (SRR_SERVE_ADDR)
+  interval: 30m            # serve --interval      (SRR_SERVE_INTERVAL)
+```
+
+The command-scoped keys that carry an env var (all take a CLI flag, env var, or the nested YAML key above):
+
+| Command | Nested YAML key | Flag / env | Default | Description |
+|---------|-----------------|-----------|---------|-------------|
+| `art fetch` | `art.fetch.interval` | `--interval` / `SRR_FETCH_INTERVAL` | 0 (single run) | Run fetch in a loop at this interval (`0` = fetch once and exit). |
+| `serve` | `serve.addr` | `--addr` / `SRR_SERVE_ADDR` | localhost:8088 | Admin GUI listen address (loopback only by default). |
+| `serve` | `serve.interval` | `--interval` / `SRR_SERVE_INTERVAL` | 0 (off) | Also run a background fetch loop at this interval. |
+| `preview` | `preview.addr` | `--addr` / `SRR_PREVIEW_ADDR` | localhost:8080 | Preview HTTP listen address. |
+| `frontend update` | `frontend.update.repo` | `--repo` / `SRR_FE_REPO` | gllera/srr | GitHub `owner/name` to install the reader release from. |
 
 ### Secrets
 
