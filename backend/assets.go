@@ -44,10 +44,12 @@ type assetFetcher struct {
 	proc     []string // asset-process command (transcode/process bytes); see runProcess
 	peek     []string // asset-peek command (identify the asset up front); see runPeek
 
-	// procTimeout bounds a single asset-process command invocation, separate from
-	// the shared SubprocessTimeout (--cmd-timeout) because media transcoding can
-	// run far longer than a feed/ingest command. Set from --asset-process-timeout
-	// in cmd_fetch.go; a zero value falls back to SubprocessTimeout (tests / unset).
+	// procTimeout bounds a single asset-process AND asset-peek command invocation,
+	// separate from the shared SubprocessTimeout (--cmd-timeout) — which governs
+	// ingest/mod commands, never asset work — because media transcoding can run far
+	// longer than a feed/ingest command. Set from --asset-process-timeout in
+	// cmd_fetch.go; a zero value (the default) means UNLIMITED — no deadline,
+	// bounded only by run cancellation.
 	procTimeout time.Duration
 
 	// seen memoizes source-content-hash -> resolved store key for this run, so a
@@ -379,11 +381,10 @@ func (a *assetFetcher) runProcess(ctx context.Context, full, localname string) (
 	}
 
 	argv := buildAssetArgv(a.proc, full, outPath)
-	timeout := a.procTimeout
-	if timeout <= 0 {
-		timeout = mod.SubprocessTimeout()
-	}
-	out, err := mod.RunCommandTimeout(ctx, timeout, argv[0], argv[1:]...)
+	// procTimeout <= 0 means unlimited (the default): RunCommandTimeout adds no
+	// deadline, so a long media transcode is never capped by a timeout — only run
+	// cancellation (SIGINT/SIGTERM) stops it. A positive value bounds the command.
+	out, err := mod.RunCommandTimeout(ctx, a.procTimeout, argv[0], argv[1:]...)
 	if err != nil {
 		slog.Warn("asset-process command failed; uploading original", "asset", localname, "cmd", a.proc[0], "err", err)
 		return nil, assetMeta{}, false
@@ -450,10 +451,11 @@ func (a *assetFetcher) readProcOutput(outPath, localname string) ([]byte, bool) 
 // token it is appended as the final arg. Fail-soft: ok=false (the caller falls
 // back to the source extension and treats the asset as supported) when the
 // command errors or prints invalid JSON, so a peek hiccup never wedges a feed.
-// Shares mod.RunCommandTimeout's external-command bounds.
+// Bounded by procTimeout (--asset-process-timeout, unlimited by default), the same
+// as runProcess — the shared --cmd-timeout deliberately does NOT govern asset work.
 func (a *assetFetcher) runPeek(ctx context.Context, full, localname string) (peekResult, bool) {
 	argv := buildAssetArgv(a.peek, full, "")
-	out, err := mod.RunCommandTimeout(ctx, mod.SubprocessTimeout(), argv[0], argv[1:]...)
+	out, err := mod.RunCommandTimeout(ctx, a.procTimeout, argv[0], argv[1:]...)
 	if err != nil {
 		slog.Warn("asset-peek failed; using source extension", "asset", localname, "cmd", a.peek[0], "err", err)
 		return peekResult{}, false
