@@ -30,6 +30,10 @@ func setupTestDB(t *testing.T) (*DB, *DBCore, string) {
 		// see realistic values under test without per-call-site guards.
 		Workers:     runtime.NumCPU(),
 		MaxFeedSize: defaultMaxFeedSize,
+		// CacheDir is always set in production (kong default + main()'s floor);
+		// mirror that here with a per-test dir so fetch-path tests never touch
+		// the real user cache (~/.cache/srr).
+		CacheDir: t.TempDir(),
 	}
 
 	// Skip zopfli recompression of finalized packs: the 50k-boundary tests

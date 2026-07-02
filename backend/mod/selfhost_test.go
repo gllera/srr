@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // mediaServer serves fixed bytes and counts requests, so dedup is observable.
@@ -219,5 +220,41 @@ func TestSelfhostLeavesAnchorHref(t *testing.T) {
 	}
 	if item.Content != content || *hits != 0 {
 		t.Errorf("anchor href is out of scope; content=%q hits=%d", item.Content, *hits)
+	}
+}
+
+// Reusing a cached URL file must refresh its mtime, so the post-cycle cache
+// sweep (age-based) never deletes a file a live feed still consumes.
+func TestSelfhostReuseRefreshesMtime(t *testing.T) {
+	allowPrivateForTest(t)
+	srv, _ := mediaServer(t, "BYTES")
+	dir := t.TempDir()
+	m := New()
+	ctx := WithCacheDir(context.Background(), dir)
+
+	item := &RawItem{GUID: 1, Content: `<img src="` + srv.URL + `/same.jpg">`}
+	if err := m.Process(ctx, "#selfhost", item); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil || len(ents) != 1 {
+		t.Fatalf("expected 1 cached file, got %d (err %v)", len(ents), err)
+	}
+	full := dir + "/" + ents[0].Name()
+	stale := time.Now().Add(-100 * time.Hour)
+	if err := os.Chtimes(full, stale, stale); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	item2 := &RawItem{GUID: 2, Content: `<img src="` + srv.URL + `/same.jpg">`}
+	if err := m.Process(ctx, "#selfhost", item2); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	fi, err := os.Stat(full)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if time.Since(fi.ModTime()) > time.Minute {
+		t.Errorf("cache reuse did not refresh mtime: %v", fi.ModTime())
 	}
 }
