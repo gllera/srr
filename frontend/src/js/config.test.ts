@@ -90,6 +90,8 @@ async function mount(): Promise<Config> {
 
 beforeEach(() => {
    vi.clearAllMocks()
+   // jsdom has no real scroll; keep scrollTo a no-op spy (open() scrolls to top).
+   window.scrollTo = vi.fn()
    nav.getCurrentFilterKey.mockReturnValue("")
    nav.savedCount.mockReturnValue(0)
    nav.searchAvailable.mockReturnValue(true)
@@ -124,11 +126,9 @@ describe("open / close", () => {
    })
 
    it("open scrolls the window to the top (config stacks over a scrolled list)", async () => {
-      const scrollTo = vi.spyOn(window, "scrollTo").mockImplementation(() => {})
       const config = await mount()
       config.open()
-      expect(scrollTo).toHaveBeenCalledWith(0, 0)
-      scrollTo.mockRestore()
+      expect(window.scrollTo).toHaveBeenCalledWith(0, 0)
    })
 })
 
