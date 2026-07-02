@@ -1,10 +1,44 @@
 package main
 
 import (
+	"os"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/alecthomas/kong"
 )
+
+// The CacheDir flag has no static default (its value is computed at runtime), so
+// it must carry a default:"${cacheDir}" tag wired to the kong var; otherwise the
+// field parses empty and `srr config` / --help print a blank cache-dir line. Parse
+// the real CLI with no args and assert the resolved default lands in the field.
+func TestCacheDirDefaultResolved(t *testing.T) {
+	// Ensure no ambient env var masks the default (kong's native env: handling
+	// treats even an empty SRR_CACHE_DIR as a value that overrides the default).
+	if orig, ok := os.LookupEnv("SRR_CACHE_DIR"); ok {
+		os.Unsetenv("SRR_CACHE_DIR")
+		t.Cleanup(func() { os.Setenv("SRR_CACHE_DIR", orig) })
+	}
+
+	var cli CLI
+	parser, err := kong.New(&cli, kong.Vars{
+		"nproc":        "1",
+		"packSize":     "1",
+		"maxFeedSize":  "1",
+		"maxAssetSize": "1",
+		"cacheDir":     defaultCacheDir(),
+	})
+	if err != nil {
+		t.Fatalf("kong.New: %v", err)
+	}
+	if _, err := parser.Parse([]string{"config"}); err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if want := defaultCacheDir(); cli.CacheDir != want {
+		t.Errorf("CacheDir default = %q, want %q (config/--help would print blank)", cli.CacheDir, want)
+	}
+}
 
 // With a local store (empty scheme, no active backend config), `srr config`
 // must still print every registered backend section so unset configs are

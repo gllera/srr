@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -69,6 +71,40 @@ func (o *FetchCmd) fetchLoop(ctx context.Context, client *http.Client) error {
 		case <-time.After(o.Interval):
 		}
 	}
+}
+
+// sweepAssetCache deletes ingest-cache files unused for longer than maxAge,
+// returning how many were removed. A download is consumed — uploaded to the
+// store under its content-hash key — within the cycle that fetched it, and
+// both cache consumers (an external ingest's own reuse check, #selfhost's URL
+// cache) refresh a file's mtime when they reuse it, so anything older than the
+// window is garbage: a dropped item's media, debris from an interrupted run,
+// or a consumed download nothing re-references. A feed warming a big backlog
+// across failing cycles keeps its files fresh through those reuse touches.
+// maxAge <= 0 disables. Best-effort: unreadable entries and remove failures
+// are skipped (warn), a missing dir is a quiet no-op.
+func sweepAssetCache(dir string, maxAge time.Duration) int {
+	if maxAge <= 0 {
+		return 0
+	}
+	cutoff := time.Now().Add(-maxAge)
+	removed := 0
+	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || !d.Type().IsRegular() {
+			return nil
+		}
+		fi, err := d.Info()
+		if err != nil || fi.ModTime().After(cutoff) {
+			return nil
+		}
+		if err := os.Remove(p); err != nil {
+			slog.Warn("sweep asset cache: remove", "file", p, "err", err)
+			return nil
+		}
+		removed++
+		return nil
+	})
+	return removed
 }
 
 // newFetchClient builds the shared HTTP client for a fetch run.  It is called
@@ -138,10 +174,17 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 		// own cwd (littering it, and its self-hosted files would never upload), so
 		// a dir we can't create is a hard error, not a silent disable. Override
 		// the location with --cache-dir/SRR_CACHE_DIR if the default is unwritable.
-		cacheDir := assetCacheRoot()
+		// globals.CacheDir is always set (kong ${cacheDir} default + the
+		// post-parse floor in main; tests set it in setupTestDB), so the shared
+		// cache dir needs no fallback resolution here.
+		cacheDir := globals.CacheDir
 		if err := os.MkdirAll(cacheDir, 0o700); err != nil {
 			return fmt.Errorf("create asset cache dir %q: %w", cacheDir, err)
 		}
+		// Stage asset-process {output} files inside the cache tree (not the OS
+		// temp dir): big transcodes can't fill a tmpfs /tmp, and a crash-leaked
+		// output is reclaimed by the post-cycle age sweep below.
+		assets.procDir = filepath.Join(cacheDir, "_processed")
 
 		// Run-scoped deps shared across all workers (all concurrent-safe). The
 		// per-worker buf/processor are pulled from their pools inside each worker.
@@ -261,6 +304,16 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 			if err := gc.fn(context.WithoutCancel(ctx), latestKeep); err != nil {
 				slog.Warn(gc.msg, "error", err)
 			}
+		}
+
+		// The ingest cache is self-maintaining: a download is consumed (uploaded
+		// to the store under its content-hash key) within the cycle that fetched
+		// it, so files unused past the age window are garbage — dropped items'
+		// media, interrupted-run debris, consumed downloads nothing re-references.
+		// Swept only after a successful Commit; both cache consumers refresh a
+		// file's mtime on reuse, so a warming retry never loses its cache.
+		if n := sweepAssetCache(cacheDir, globals.CacheMaxAge); n > 0 {
+			slog.Info("asset cache swept", "removed", n)
 		}
 
 		var failed, totalFeeds int

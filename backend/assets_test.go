@@ -756,3 +756,35 @@ func TestUploadCacheRefMemoizesWithinRun(t *testing.T) {
 		t.Errorf("asset-peek ran %d times, want 1 (within-run memo should skip the repeat)", len(b))
 	}
 }
+
+// Processed outputs are staged under <cache-dir>/_processed/, not the OS temp
+// dir: big transcodes can't fill a tmpfs /tmp, and a crash-leaked output sits
+// inside the swept cache tree, reclaimed by the post-cycle age sweep. A
+// successful upload still removes the staging file immediately.
+func TestUploadCacheRefProcessOutputStagedUnderCacheDir(t *testing.T) {
+	be := tempStore(t)
+	cacheDir := t.TempDir()
+	rec := filepath.Join(t.TempDir(), "outpath")
+	body := "printf '%s' \"$2\" > " + rec + "\nprintf 'PROCESSED' > \"$2\"\nprintf '{\"mimetype\":\"image/webp\",\"extension\":\"webp\"}'"
+	af := newAssetFetcher(be, 1024, fakeProcess(t, body)+" {input} {output}")
+	af.procDir = filepath.Join(cacheDir, "_processed")
+
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+	if _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg"); err != nil {
+		t.Fatalf("UploadCacheRef: %v", err)
+	}
+	got, err := os.ReadFile(rec)
+	if err != nil {
+		t.Fatalf("read recorded output path: %v", err)
+	}
+	if !strings.HasPrefix(string(got), af.procDir+string(filepath.Separator)) {
+		t.Errorf("output staged at %q, want under %q", got, af.procDir)
+	}
+	ents, err := os.ReadDir(af.procDir)
+	if err != nil {
+		t.Fatalf("read _processed: %v", err)
+	}
+	if len(ents) != 0 {
+		t.Errorf("staging file not cleaned after successful upload: %v", ents)
+	}
+}

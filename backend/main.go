@@ -38,7 +38,8 @@ type Globals struct {
 	AssetPeek           string        `                             env:"SRR_ASSET_PEEK" help:"Command run on every self-hosted asset (before the dedup check) to identify it: it receives the cache file path (substituted for each {input} token, or appended) and prints a {mimetype,extension,supported} JSON to stdout. The extension sets the stored object's key/extension (so a transcoded asset carries its true output extension) and mimetype its Content-Type; supported=false hosts the original bytes and skips asset-process. A non-zero exit or invalid JSON falls back to the source extension. Empty disables. E.g. \"identify-asset {input}\"."`
 	AssetWorkers        int           `                             env:"SRR_ASSET_WORKERS" default:"${nproc}" help:"Max assets processed concurrently across all feeds (peek/transcode/upload). Independent of --workers."`
 	AssetProcessTimeout time.Duration `        env:"SRR_ASSET_PROCESS_TIMEOUT" default:"0" help:"Timeout for a single asset-process or asset-peek command invocation (Go duration). 0 (the default) means unlimited — no deadline, since media transcoding can run arbitrarily long; the command is still bounded by run cancellation (SIGINT/SIGTERM). The shared --cmd-timeout governs ingest/mod commands only and never affects asset processing."`
-	CacheDir            string        `                             env:"SRR_CACHE_DIR"     help:"Local download cache for external ingest media (default $XDG_CACHE_HOME/srr)."`
+	CacheDir            string        `default:"${cacheDir}"        env:"SRR_CACHE_DIR"     help:"Local download cache for external ingest media."`
+	CacheMaxAge         time.Duration `                             env:"SRR_CACHE_MAX_AGE" default:"72h" help:"Delete ingest-cache files unused for longer than this, swept after each fetch cycle. Downloads are consumed (uploaded to the store) within their cycle, and cache reuse refreshes a file's mtime, so old files are garbage. 0 disables the sweep."`
 	Store               string        `short:"o" default:"packs"    env:"SRR_STORE"         help:"Storage destination path."`
 	Force               bool          `                             env:"SRR_FORCE"         help:"Override DB write lock if needed."`
 	Debug               bool          `short:"d"                    env:"SRR_DEBUG"         help:"Enable debug mode."`
@@ -120,16 +121,15 @@ func readConfig() ([]byte, error) {
 	return data, nil
 }
 
-// assetCacheRoot resolves the parent dir under which external ingest strategies
-// get a persistent per-feed media download cache. Precedence:
-// --cache-dir/SRR_CACHE_DIR → os.UserCacheDir()/srr (i.e. $XDG_CACHE_HOME or
-// ~/.cache) → $TMPDIR/srr. Always non-empty so the feature stays on by default;
-// the cache is disposable (the store remains the source of truth), so a
-// less-ideal location only costs re-downloads.
-func assetCacheRoot() string {
-	if globals.CacheDir != "" {
-		return globals.CacheDir
-	}
+// defaultCacheDir computes the fallback ingest-media cache location used when
+// --cache-dir/SRR_CACHE_DIR is unset: os.UserCacheDir()/srr (i.e. $XDG_CACHE_HOME
+// or ~/.cache) → $TMPDIR/srr. Always non-empty. Registered as the kong ${cacheDir}
+// var so this resolved path becomes the CacheDir flag default — visible in --help
+// and `srr config` — and re-applied as the post-parse floor in main(), so
+// globals.CacheDir is ALWAYS set (an explicitly empty `cache-dir:` in YAML would
+// otherwise slip past the kong default). The cache is disposable (the store
+// remains the source of truth), so a less-ideal location only costs re-downloads.
+func defaultCacheDir() string {
 	if dir, err := os.UserCacheDir(); err == nil {
 		return filepath.Join(dir, "srr")
 	}
@@ -183,6 +183,7 @@ func main() {
 			"packSize":     fmt.Sprint(defaultPackSize),
 			"maxFeedSize":  fmt.Sprint(defaultMaxFeedSize),
 			"maxAssetSize": fmt.Sprint(defaultMaxAssetSize),
+			"cacheDir":     defaultCacheDir(),
 		},
 		kong.Name("srr"),
 		kong.Description("Static RSS Reader backend."),
@@ -228,6 +229,13 @@ func main() {
 
 	if globals.Workers < 1 {
 		globals.Workers = runtime.NumCPU()
+	}
+
+	// CacheDir is guaranteed non-empty from here on (the fetch path uses it
+	// directly, no per-site fallback): the kong ${cacheDir} default covers the
+	// unset case, this floor the explicitly-empty one (`cache-dir: ""` in YAML).
+	if globals.CacheDir == "" {
+		globals.CacheDir = defaultCacheDir()
 	}
 
 	if globals.AssetWorkers < 1 {

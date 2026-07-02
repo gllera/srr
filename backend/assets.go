@@ -53,6 +53,14 @@ type assetFetcher struct {
 	// bounded only by run cancellation.
 	procTimeout time.Duration
 
+	// procDir is the staging dir for asset-process {output} files —
+	// <cache-dir>/_processed, set by cmd_fetch.go alongside baseCtx/sem. Big
+	// transcodes must not land in a (often tmpfs, RAM-backed) OS temp dir, and
+	// a crash-leaked output inside the cache tree is reclaimed by the
+	// post-cycle age sweep (sweepAssetCache). Empty falls back to the OS temp
+	// dir (bare newAssetFetcher callers).
+	procDir string
+
 	// seen memoizes source-content-hash -> resolved store key for this run, so a
 	// marker reused across a feed's articles (or across feeds) skips the repeat
 	// asset-peek subprocess and store existence round-trip. Concurrent-safe (the
@@ -180,6 +188,15 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 		return "", fmt.Errorf("read asset %q: %w", localname, err)
 	}
 	sum := sha256.Sum256(orig)
+
+	// Mark the source file as consumed: the post-cycle age sweep
+	// (sweepAssetCache) treats mtime as "last relevant", so touching here —
+	// before the memo/store-hit/upload branching — guarantees a file the
+	// pipeline still references never ages out, even when the ingest strategy
+	// that cached it doesn't refresh mtimes on reuse itself. Best-effort.
+	if now := time.Now(); os.Chtimes(full, now, now) != nil {
+		slog.Debug("asset touch failed", "asset", localname)
+	}
 
 	// Within-run memo: identical source bytes resolve to one key, so a marker
 	// reused across articles/feeds in this fetch short-circuits before the repeat
@@ -354,8 +371,9 @@ type peekResult struct {
 // before upload, returning the processed bytes and (in {output} mode) the
 // metadata it declared. The cache file path is substituted for every {input}
 // token (per arg); with no token it is appended as the final argument. In
-// {output} mode (an arg carries {output}) SRR substitutes a fresh temp path,
-// reads the processed bytes back from that file, and parses a metadata JSON from
+// {output} mode (an arg carries {output}) SRR substitutes a fresh staging path
+// under procDir (<cache-dir>/_processed; OS temp dir when unset), reads the
+// processed bytes back from that file, and parses a metadata JSON from
 // stdout; otherwise the bytes are read from stdout (no declared metadata).
 // stderr is captured, not passed through — a transcoder's progress narration
 // would garble srr's own output — and its tail rides the error into the warn
@@ -376,12 +394,20 @@ func (a *assetFetcher) runProcess(ctx context.Context, full, localname string) (
 		}
 	}
 
-	// {output} mode: a fresh temp file the command writes its result to. The
+	// {output} mode: a fresh staging file the command writes its result to,
+	// under <cache-dir>/_processed (procDir; OS temp dir when unset). The
 	// source extension is a hint for tools that pick a format from it; SRR reads
-	// the bytes back regardless.
+	// the bytes back regardless. Removed on every path below; a leak from a
+	// crash mid-transcode ages out via the cache sweep.
 	var outPath string
 	if hasOutput {
-		tmp, err := os.CreateTemp("", "srr-asset-*"+path.Ext(localname))
+		if a.procDir != "" {
+			if err := os.MkdirAll(a.procDir, 0o700); err != nil {
+				slog.Warn("asset-process: create staging dir failed; uploading original", "asset", localname, "err", err)
+				return nil, assetMeta{}, false
+			}
+		}
+		tmp, err := os.CreateTemp(a.procDir, "srr-asset-*"+path.Ext(localname))
 		if err != nil {
 			slog.Warn("asset-process: create output file failed; uploading original", "asset", localname, "err", err)
 			return nil, assetMeta{}, false

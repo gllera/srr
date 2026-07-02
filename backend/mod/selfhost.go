@@ -117,8 +117,13 @@ func downloadToCache(ctx context.Context, client *http.Client, cacheDir, rawURL 
 	full := filepath.Join(cacheDir, name)
 
 	// URL-level download cache: a URL already fetched (this run or a prior one)
-	// is reused as-is.
+	// is reused as-is. Refresh its mtime so the post-cycle age-based cache
+	// sweep (sweepAssetCache) never deletes a file a live feed still consumes.
 	if _, err := os.Stat(full); err == nil {
+		now := time.Now()
+		if err := os.Chtimes(full, now, now); err != nil {
+			slog.Debug("selfhost: touch cached file", "file", full, "err", err)
+		}
 		return "#" + name, true
 	}
 
