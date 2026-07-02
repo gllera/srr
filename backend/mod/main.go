@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -33,6 +34,52 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 		return 0, fmt.Errorf("subprocess output exceeds %d bytes", c.limit)
 	}
 	return c.buf.Write(p)
+}
+
+// stderrTailBytes bounds the stderr captured from an asset command (see
+// RunCommandTimeout) for failure diagnostics; stderrTailLines is how many of
+// its trailing lines are folded into the returned error.
+const (
+	stderrTailBytes = 4 << 10
+	stderrTailLines = 8
+)
+
+// tailBuffer keeps the most recent limit bytes written and never fails a
+// write, so a chatty subprocess can narrate progress on stderr without
+// OOM'ing the worker or getting a broken pipe mid-run.
+type tailBuffer struct {
+	mu    sync.Mutex
+	buf   []byte
+	limit int
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.buf = append(t.buf, p...)
+	if len(t.buf) > t.limit {
+		t.buf = append(t.buf[:0], t.buf[len(t.buf)-t.limit:]...)
+	}
+	return len(p), nil
+}
+
+// Tail renders the captured stderr for an error message: CR progress rewrites
+// count as line breaks, blank lines are dropped, and only the last
+// stderrTailLines survive (error text clusters at the end; earlier bytes are
+// usually progress spam), joined single-line so it embeds in a log attr.
+func (t *tailBuffer) Tail() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var lines []string
+	for _, l := range strings.FieldsFunc(string(t.buf), func(r rune) bool { return r == '\n' || r == '\r' }) {
+		if l = strings.TrimSpace(l); l != "" {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) > stderrTailLines {
+		lines = lines[len(lines)-stderrTailLines:]
+	}
+	return strings.Join(lines, "; ")
 }
 
 // CmdTimeout overrides the external-command timeout when > 0. main sets it from
@@ -102,24 +149,44 @@ func RunSubprocess(ctx context.Context, args string, env []string, dir string, s
 // transcoding can outlast a feed/ingest command. A timeout <= 0 means UNLIMITED:
 // no deadline is added and the command runs until it exits or ctx is cancelled
 // (SIGINT/SIGTERM) — the WaitDelay + output-cap hardening still applies.
+//
+// Unlike RunSubprocess (whose external ingest/mod commands own the passthrough
+// stderr as their documented log channel), stderr here is CAPTURED, not leaked:
+// asset commands narrate progress on stderr (a transcoder's tty progress bar),
+// and with many running in parallel that garbles srr's own output. On failure
+// the tail of the captured stderr is folded into the returned error so the
+// caller's warn line carries the diagnostic; on success it is discarded.
 func RunCommandTimeout(ctx context.Context, timeout time.Duration, name string, args ...string) ([]byte, error) {
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	return runBounded(exec.CommandContext(ctx, name, args...))
+	cmd := exec.CommandContext(ctx, name, args...)
+	tail := &tailBuffer{limit: stderrTailBytes}
+	cmd.Stderr = tail
+	out, err := runBounded(cmd)
+	if err != nil {
+		if t := tail.Tail(); t != "" {
+			return nil, fmt.Errorf("%w; stderr: %s", err, t)
+		}
+		return nil, err
+	}
+	return out, nil
 }
 
 // runBounded is the shared hardened exec core: stdout captured into a
-// maxSubprocessOutput-capped buffer, stderr passed through, and WaitDelay set so
-// a backgrounded grandchild can't hold the pipe open past the deadline. The
+// maxSubprocessOutput-capped buffer, stderr passed through unless the caller
+// already set one (RunCommandTimeout captures it), and WaitDelay set so a
+// backgrounded grandchild can't hold the pipe open past the deadline. The
 // caller builds cmd from a SubprocessTimeout-bounded context and sets any
 // stdin/env/dir.
 func runBounded(cmd *exec.Cmd) ([]byte, error) {
 	out := &cappedBuffer{limit: maxSubprocessOutput}
 	cmd.Stdout = out
-	cmd.Stderr = os.Stderr
+	if cmd.Stderr == nil {
+		cmd.Stderr = os.Stderr
+	}
 	cmd.WaitDelay = subprocessWaitDelay
 	if err := cmd.Run(); err != nil {
 		return nil, err

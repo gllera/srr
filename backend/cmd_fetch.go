@@ -155,6 +155,12 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 			maxAssetSize: int(assets.maxBytes),
 		}
 
+		// Live stats on the terminal status line while the cycle runs (feeds
+		// done/total, new articles, failures, asset jobs). No-op when stderr
+		// isn't a tty (service/cron runs), so logs stay clean.
+		progress := startFetchProgress(len(db.Feeds()), assets)
+		defer progress.finish()
+
 		g, gctx := errgroup.WithContext(ctx)
 		g.SetLimit(globals.Workers)
 
@@ -168,6 +174,7 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 				processor := procPool.Get().(*mod.Module)
 				defer procPool.Put(processor)
 				ch.Fetch(gctx, run, buf, processor)
+				progress.feedDone(ch.FetchError != "", len(ch.newItems))
 				if onFeed != nil {
 					onFeed(feedProgress{ID: ch.id, Title: ch.Title, Error: ch.FetchError, New: len(ch.newItems)})
 				}
@@ -175,6 +182,9 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 			})
 		}
 		g.Wait()
+		// Feed fan-out done; the rest of the cycle writes packs/summaries
+		// (zopfli-grade finalization can take a while on a big batch).
+		progress.setSaving()
 
 		var articles []*Item
 		for _, ch := range db.Feeds() {
@@ -260,6 +270,7 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 				failed++
 			}
 		}
+		progress.finish()
 		slog.Info("fetch complete",
 			"new_articles", len(articles),
 			"fetched", totalFeeds-failed,

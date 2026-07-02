@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -157,6 +158,12 @@ func envFirstResolver(inner kong.Resolver) kong.Resolver {
 }
 
 func main() {
+	// Route all slog output (the default handler writes via the log package)
+	// through the terminal status line, so a log record and the in-place fetch
+	// stats line never garble each other. Pure passthrough when stderr isn't a
+	// tty or no status is drawn.
+	log.SetOutput(status)
+
 	var cli CLI
 	globals = &cli.Globals
 
