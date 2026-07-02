@@ -31,6 +31,16 @@ import (
 // wrapping messages keep the specific reason.
 var errNotAsset = errors.New("not a cache asset")
 
+// errCorruptAsset classifies a source file that claims a media extension but
+// that asset-peek cannot identify AT ALL (no mimetype, no extension,
+// unsupported) — truncated or otherwise broken bytes, not merely an exotic
+// format (an identified-but-unsupported file is still hosted as-is). The
+// caller declines the marker with a warning instead of publishing garbage the
+// reader will silently collapse (the chron-437 bug), and instead of failing
+// the feed — the bytes won't get better on retry, so a hard error would wedge
+// it forever.
+var errCorruptAsset = errors.New("corrupt media asset")
+
 // assetFetcher uploads files into the store backend under a content-hash key,
 // returning the relative key. The same key for given bytes makes uploads
 // overwrite-safe and idempotent: it backs the end-of-pipeline self-hosting step
@@ -96,6 +106,13 @@ type assetFetcher struct {
 	// done bumped as each leader job completes (success or failure — a job
 	// counter, not a success meter). Followers and memo hits don't count.
 	active, done atomic.Int64
+
+	// procFailed counts asset-peek/asset-process command failures this run and
+	// corrupt counts declined unidentifiable media (errCorruptAsset). Each
+	// failure already warns per asset, but a systemic cause (the command
+	// missing from PATH, a broken transcoder) would drown in per-asset noise —
+	// runFetch aggregates these into one cycle-level warning.
+	procFailed, corrupt atomic.Int64
 }
 
 // assetPrefix is the reserved store prefix for self-hosted media, analogous to
@@ -258,7 +275,20 @@ func (a *assetFetcher) resolveAndUpload(ctx context.Context, full, localname str
 	supported := true
 	var meta store.ObjectMeta
 	if len(a.peek) > 0 {
-		if pr, ok := a.runPeek(ctx, full, localname); ok {
+		pr, ok := a.runPeek(ctx, full, localname)
+		if !ok {
+			a.procFailed.Add(1)
+		} else {
+			// Corrupt-media guard: the peek ran fine but identified NOTHING
+			// (no mimetype, no extension, unsupported) on a file whose source
+			// extension claims media — truncated/broken bytes. Refuse instead
+			// of hosting them as-is; an identified-but-unsupported format (a
+			// real .mov the transcoder skips) still passes through below.
+			unidentified := pr.Mimetype == "" || pr.Mimetype == "application/octet-stream"
+			if !pr.Supported && unidentified && normalizeExt(pr.Extension) == "" && isMediaExt(storedExt) {
+				a.corrupt.Add(1)
+				return "", fmt.Errorf("peek identified nothing for media file %q: %w", localname, errCorruptAsset)
+			}
 			if ext := normalizeExt(pr.Extension); ext != "" {
 				storedExt = ext
 			}
@@ -299,6 +329,8 @@ func (a *assetFetcher) resolveAndUpload(ctx context.Context, full, localname str
 			if pe := normalizeExt(pm.Extension); pe != "" && pe != storedExt {
 				slog.Warn("asset-process extension differs from asset-peek; keeping the peek key", "asset", localname, "peek", storedExt, "process", pe)
 			}
+		} else {
+			a.procFailed.Add(1)
 		}
 	}
 
@@ -503,6 +535,21 @@ func (a *assetFetcher) runPeek(ctx context.Context, full, localname string) (pee
 		return peekResult{}, false
 	}
 	return pr, true
+}
+
+// mediaExts is the conservative set of source extensions the corrupt-media
+// guard treats as "claims to be media": a file named like these that asset-peek
+// cannot identify at all is broken bytes, not a document. Documents and unknown
+// extensions stay outside the guard (host-as-is, srrb can't judge them).
+var mediaExts = map[string]bool{
+	".jpg": true, ".jpeg": true, ".png": true, ".gif": true, ".webp": true, ".avif": true,
+	".mp4": true, ".webm": true, ".mkv": true, ".mov": true, ".avi": true, ".m4v": true,
+	".mp3": true, ".m4a": true, ".ogg": true, ".oga": true, ".opus": true, ".flac": true, ".wav": true,
+}
+
+// isMediaExt reports whether ext (leading dot, any case) claims a media format.
+func isMediaExt(ext string) bool {
+	return mediaExts[strings.ToLower(ext)]
 }
 
 // normalizeExt returns ext with a leading dot ("webp" -> ".webp"), leaving an

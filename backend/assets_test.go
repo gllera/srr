@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -786,5 +787,96 @@ func TestUploadCacheRefProcessOutputStagedUnderCacheDir(t *testing.T) {
 	}
 	if len(ents) != 0 {
 		t.Errorf("staging file not cleaned after successful upload: %v", ents)
+	}
+}
+
+// fakePeek returns an asset-peek command printing the given JSON.
+func fakePeek(t *testing.T, jsonOut string) string {
+	t.Helper()
+	return fakeProcess(t, "printf '%s' '"+jsonOut+"'")
+}
+
+// A peek that cannot identify a file AT ALL (no mimetype, no extension,
+// unsupported) on a source claiming a media extension means the bytes are
+// corrupt, not merely exotic — publishing them verbatim is the chron-437 bug.
+// UploadCacheRef must refuse with errCorruptAsset and store nothing.
+func TestUploadCacheRefCorruptMediaDeclined(t *testing.T) {
+	be := tempStore(t)
+	af := newAssetFetcher(be, 1024, "")
+	af.peek = strings.Fields(fakePeek(t, `{"mimetype":"application/octet-stream","extension":"","supported":false}`))
+
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "clip.mp4", "NOT-A-REAL-MP4")
+
+	_, err := af.UploadCacheRef(context.Background(), cacheDir, "clip.mp4")
+	if !errors.Is(err, errCorruptAsset) {
+		t.Fatalf("err = %v, want errCorruptAsset", err)
+	}
+	sum := sha256.Sum256([]byte("NOT-A-REAL-MP4"))
+	if rc, err := be.Get(context.Background(), contentHashKey(".mp4", sum), true); err != nil {
+		t.Fatalf("Get: %v", err)
+	} else if rc != nil {
+		rc.Close()
+		t.Error("corrupt asset was stored anyway")
+	}
+	if got := af.corrupt.Load(); got != 1 {
+		t.Errorf("corrupt counter = %d, want 1", got)
+	}
+}
+
+// The same unidentifiable peek on a NON-media source (a document) keeps the
+// host-as-is contract: srrb cannot judge a .bin/.pdf by refusing to parse it
+// as media.
+func TestUploadCacheRefUnidentifiedDocumentStillHosted(t *testing.T) {
+	be := tempStore(t)
+	af := newAssetFetcher(be, 1024, "")
+	af.peek = strings.Fields(fakePeek(t, `{"mimetype":"application/octet-stream","extension":"","supported":false}`))
+
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "doc.pdf", pdfBytes)
+
+	key, err := af.UploadCacheRef(context.Background(), cacheDir, "doc.pdf")
+	if err != nil {
+		t.Fatalf("UploadCacheRef: %v", err)
+	}
+	if got := string(readKey(t, be, key)); got != pdfBytes {
+		t.Errorf("stored body = %q, want original", got)
+	}
+}
+
+// supported=false WITH an identification (a real but untranscodable format)
+// keeps the host-as-is contract — only the unidentifiable case is corrupt.
+func TestUploadCacheRefIdentifiedUnsupportedMediaStillHosted(t *testing.T) {
+	be := tempStore(t)
+	af := newAssetFetcher(be, 1024, "")
+	af.peek = strings.Fields(fakePeek(t, `{"mimetype":"video/quicktime","extension":"mov","supported":false}`))
+
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "clip.mp4", "REAL-BUT-EXOTIC")
+
+	key, err := af.UploadCacheRef(context.Background(), cacheDir, "clip.mp4")
+	if err != nil {
+		t.Fatalf("UploadCacheRef: %v", err)
+	}
+	if got := string(readKey(t, be, key)); got != "REAL-BUT-EXOTIC" {
+		t.Errorf("stored body = %q, want original", got)
+	}
+}
+
+// Peek/process command failures are counted per run so runFetch can surface a
+// systemic cause (missing binary, broken PATH) as one cycle-level warning.
+func TestProcFailedCounterOnBrokenCommands(t *testing.T) {
+	be := tempStore(t)
+	af := newAssetFetcher(be, 1024, "/nonexistent-process-cmd")
+	af.peek = []string{"/nonexistent-peek-cmd"}
+
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "pic.jpg", jpegBytes)
+
+	if _, err := af.UploadCacheRef(context.Background(), cacheDir, "pic.jpg"); err != nil {
+		t.Fatalf("UploadCacheRef must fail soft to the original: %v", err)
+	}
+	if got := af.procFailed.Load(); got != 2 {
+		t.Errorf("procFailed = %d, want 2 (peek + process both failed)", got)
 	}
 }
