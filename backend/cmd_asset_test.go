@@ -27,7 +27,7 @@ func TestHealAssetOverwritesExisting(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	if err := healAsset(context.Background(), be, key, healSourceFile(t, "FIXED"), ""); err != nil {
+	if err := healAsset(context.Background(), be, key, healSourceFile(t, "FIXED"), "", false); err != nil {
 		t.Fatalf("healAsset: %v", err)
 	}
 	if got := string(readKey(t, be, key)); got != "FIXED" {
@@ -46,7 +46,7 @@ func TestHealAssetContentTypeOverride(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	if err := healAsset(context.Background(), be, key, healSourceFile(t, "FIXED"), "video/webm"); err != nil {
+	if err := healAsset(context.Background(), be, key, healSourceFile(t, "FIXED"), "video/webm", false); err != nil {
 		t.Fatalf("healAsset: %v", err)
 	}
 	if be.gotMeta.ContentType != "video/webm" {
@@ -58,9 +58,9 @@ func TestHealAssetContentTypeOverride(t *testing.T) {
 // than create an orphan object nothing references.
 func TestHealAssetMissingKeyRefused(t *testing.T) {
 	be := tempStore(t)
-	err := healAsset(context.Background(), be, "assets/ab/0123456789abcdef.mp4", healSourceFile(t, "FIXED"), "")
+	err := healAsset(context.Background(), be, "assets/ab/0123456789abcdef.mp4", healSourceFile(t, "FIXED"), "", false)
 	if err == nil || !strings.Contains(err.Error(), "does not exist") {
-		t.Fatalf("err = %v, want does-not-exist refusal", err)
+		t.Fatalf("err = %v, want missing-key refusal", err)
 	}
 }
 
@@ -69,8 +69,22 @@ func TestHealAssetMissingKeyRefused(t *testing.T) {
 func TestHealAssetRejectsNonAssetKey(t *testing.T) {
 	be := tempStore(t)
 	for _, key := range []string{"db.gz", "data/1.gz", "assets/../db.gz", "assets/zz/nothex.mp4"} {
-		if err := healAsset(context.Background(), be, key, healSourceFile(t, "X"), ""); err == nil {
+		if err := healAsset(context.Background(), be, key, healSourceFile(t, "X"), "", true); err == nil {
 			t.Errorf("key %q accepted, want rejection", key)
 		}
+	}
+}
+
+// --create re-creates a referenced-but-deleted key (e.g. an operator removed a
+// broken object before the repair): the explicit flag keeps the default
+// typo-guard while allowing the legitimate case.
+func TestHealAssetCreateFlagAllowsMissingKey(t *testing.T) {
+	be := &metaCaptureBackend{Backend: tempStore(t)}
+	const key = "assets/ab/0123456789abcdef.mp4"
+	if err := healAsset(context.Background(), be, key, healSourceFile(t, "FIXED"), "", true); err != nil {
+		t.Fatalf("healAsset --create: %v", err)
+	}
+	if got := string(readKey(t, be, key)); got != "FIXED" {
+		t.Errorf("stored body = %q, want FIXED", got)
 	}
 }
