@@ -568,12 +568,43 @@ describe("filterLabel", () => {
 })
 
 describe("switchFilter", () => {
-   it("with empty token clears filter and jumps to last", async () => {
+   it("with empty token clears filter and opens at the oldest article on a fresh device", async () => {
+      // Nothing seen → everything is unread → [ALL] opens at the start of the
+      // global backlog (chron 0), not the newest.
       setupIndex([{ feedId: 1 }, { feedId: 2 }])
-      nav.filter.set(["1"])
-      await nav.fromHash("0")
       const result = await nav.switchFilter("")
       expect(nav.filter.active).toBe(false)
+      expect(data.loadArticle).toHaveBeenLastCalledWith(0)
+      expect(result.article.f).toBe(1)
+   })
+
+   it("opens [ALL] at the oldest unseen article, not the newest", async () => {
+      // feed 1 (chron 0,1) fully read; feed 2 (chron 2,3) untouched. The oldest
+      // unseen overall is chron 2 — the same anchor the list uses (listAnchor),
+      // NOT the newest (chron 3).
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 2 }, { feedId: 2 }])
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 1 }))
+      const result = await nav.switchFilter("")
+      expect(nav.filter.active).toBe(false)
+      expect(data.loadArticle).toHaveBeenLastCalledWith(2)
+      expect(result.article.f).toBe(2)
+   })
+
+   it("selecting [ALL] does not mark the unread backlog as seen", async () => {
+      // Landing on the newest would let recordSeen raise every feed's frontier
+      // to it and wipe all unread counts. Landing on the oldest unseen (chron 2)
+      // marks only that article: chron 3 must stay unread.
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 2 }, { feedId: 2 }])
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 1 }))
+      await nav.switchFilter("")
+      const seen = JSON.parse(localStorage.getItem("srr-seen")!)
+      expect(seen["feed:2"]).toBe(2) // exact resume on the shown article, not 3
+   })
+
+   it("falls back to the newest article for [ALL] when everything is seen", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 2 }])
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 0, "feed:2": 1 }))
+      const result = await nav.switchFilter("")
       expect(data.loadArticle).toHaveBeenLastCalledWith(1)
       expect(result.article.f).toBe(2)
    })

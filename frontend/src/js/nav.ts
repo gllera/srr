@@ -137,9 +137,21 @@ export async function listAnchor(): Promise<number> {
    if (live >= 0) return live
    // [ALL] (filter.clear) populates filter.feeds with every feed, so it runs the
    // same oldest-unread scan as a feed/tag — just spanning all feeds. Only saved/
-   // search (feed-agnostic, filter.feeds empty) and an empty store (no feeds, which
-   // would also make Math.min below Infinity) keep the newest-first default.
-   if (filter.saved || filter.search || filter.feeds.size === 0) return -1
+   // search (feed-agnostic, filter.feeds empty) keep the newest-first default.
+   if (filter.saved || filter.search) return -1
+   return oldestUnread()
+}
+
+// The oldest unread article under the current feed membership: raise each
+// member's bound past its seen high-water (idempotent with unseen-only's
+// already-raised bounds; a never-seen feed keeps its bound, so its full backlog
+// counts as unread) and take the OLDEST match under those bounds — the same
+// unread set unseen-only navigation walks, evaluated transiently without
+// touching filter.feeds. -1 when nothing is unread, or on an empty store (no
+// member feeds, which would also make Math.min below Infinity). Shared by
+// listAnchor (the list's fresh-filter anchor) and switchFilter's [ALL] entry.
+async function oldestUnread(): Promise<number> {
+   if (filter.feeds.size === 0) return -1
    const seen = readSeen()
    const unread = new Map<number, number>()
    for (const [id, bound] of filter.feeds) {
@@ -147,8 +159,7 @@ export async function listAnchor(): Promise<number> {
       unread.set(id, s === undefined ? bound : Math.max(bound, s + 1))
    }
    // Oldest unread: the smallest matching chron under the raised bounds (scan up
-   // from the smallest bound — nothing matches below it). -1 (newest-default,
-   // latest available) when nothing is unread.
+   // from the smallest bound — nothing matches below it).
    const start = Math.min(...unread.values())
    return data.findRight(start, unread)
 }
@@ -710,7 +721,15 @@ function isKnownToken(token: string): boolean {
 export async function switchFilter(token: string): Promise<IShowFeed> {
    if (token === "") {
       filter.clear()
-      return last()
+      // [ALL] opens at the oldest unseen article — the start of the global
+      // unread backlog, the same anchor the list uses — NOT the newest: under
+      // [ALL] filter.feeds holds every feed, so landing on the newest would let
+      // recordSeen raise every feed's frontier to it and mark the whole store
+      // read. Landing on the oldest unseen marks nothing new (everything older
+      // is already seen). Fully caught up (or an empty store) falls back to the
+      // newest available, where that raise is a no-op for the same reason.
+      const idx = await oldestUnread()
+      return idx === -1 ? last() : resolve(idx)
    }
    filter.set([token])
    if (!filter.active) {

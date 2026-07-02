@@ -80,7 +80,7 @@ State: `pos` (chronIdx), `filter` (object with `active`, `feeds`, `tokens`, `mat
 - `filter.set(tokens)`: resolves tokens (numeric feed IDs or tag names) into `feeds` map (`feed_id → add_idx`); falls back to `clear()` if no token resolves
 - `last(replace = false)`: jumps to the last matching article under the current filter (set the filter first via `filter.set`/`switchFilter`)
 - `goTo(idx)`: navigate to chronIdx; if filter active and target doesn't match, snap forward to next match; falls back to `last()` if none
-- `switchFilter(token)`: sets filter to token (or clears if `""`); resumes at last seen position for that feed/tag if valid (in unseen-only mode too — `isValidSeen` validates against the true `add_idx`, not the raised bound, so you open at your current position, not the oldest unseen), otherwise jumps to `first()`
+- `switchFilter(token)`: sets filter to token (or clears if `""`); resumes at last seen position for that feed/tag if valid (in unseen-only mode too — `isValidSeen` validates against the true `add_idx`, not the raised bound, so you open at your current position, not the oldest unseen), otherwise jumps to `first()`. `""` ([ALL]) opens at the **oldest unseen** article across all feeds (the same `oldestUnread` scan `listAnchor` uses), falling back to `last()` only when fully caught up — landing on the newest would let `recordSeen`'s cross-feed frontier raise mark the whole store read
 - `cycleToken(dir)`: returns the next filter-entry token by `dir` (+1/-1) relative to `cycleOriginKey()`
 - `cycleFilter(dir)`: `switchFilter(cycleToken(dir))`
 - `getFilterEntries()`: returns `["", "tagName", ..., "feedId", ...]` built via `data.groupFeedsByTag()`
