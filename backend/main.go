@@ -72,6 +72,7 @@ type CLI struct {
 	Globals
 	Feed      FeedGroup      `cmd:"" aliases:"f" help:"Feed management."`
 	Art       ArtGroup       `cmd:"" aliases:"a" help:"Article management."`
+	Asset     AssetGroup     `cmd:"" help:"Self-hosted asset tooling (repair a published object)."`
 	Syndicate SyndicateGroup `cmd:"" help:"Manage syndication output feeds (out/*)."`
 	Recipe    RecipeGroup    `cmd:"" help:"Manage processing recipes (named {ingest, pipe} bundles)."`
 	Gen       GenCmd         `cmd:"" help:"Print or bump the store generation (db.gz 'gen'; frontend SW cache key)."`

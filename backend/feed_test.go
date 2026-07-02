@@ -1255,3 +1255,22 @@ func TestUploadAssetsProcessesSharedAssetOnce(t *testing.T) {
 		}
 	}
 }
+
+// A corrupt asset (errCorruptAsset from UploadCacheRef) must not fail the feed:
+// the marker is declined — the article publishes without working media — and
+// the run counts it for the cycle-level warning.
+func TestRewriteItemAssetsDeclinesCorrupt(t *testing.T) {
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "clip.mp4", "NOT-A-REAL-MP4")
+	af := testAssetFetcher(tempStore(t), 1024, "", 1)
+	af.peek = strings.Fields(fakePeek(t, `{"mimetype":"application/octet-stream","extension":"","supported":false}`))
+	run := &fetchRun{assets: af, cacheDir: cacheDir}
+
+	item := &Item{Content: `<p><video src="#/clip.mp4"></video></p>`}
+	if err := run.rewriteItemAssets(context.Background(), item); err != nil {
+		t.Fatalf("rewriteItemAssets: %v (corrupt must decline, not fail the feed)", err)
+	}
+	if !strings.Contains(item.Content, `src="#/clip.mp4"`) {
+		t.Errorf("marker rewritten despite corrupt source: %s", item.Content)
+	}
+}

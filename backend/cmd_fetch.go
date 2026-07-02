@@ -316,6 +316,19 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 			slog.Info("asset cache swept", "removed", n)
 		}
 
+		// Aggregate asset-pipeline health: each peek/process failure and each
+		// declined corrupt asset already warned per asset, but a systemic cause
+		// (webify missing from the service PATH, a broken transcoder) drowns in
+		// per-asset noise while every asset silently degrades to an unprocessed
+		// original — surface it once per cycle, loudly.
+		if pf := assets.procFailed.Load(); pf > 0 {
+			slog.Warn("asset processing degraded this cycle — check the asset-peek/asset-process commands (PATH?)",
+				"failed_commands", pf, "asset_jobs", assets.done.Load())
+		}
+		if c := assets.corrupt.Load(); c > 0 {
+			slog.Warn("corrupt media assets declined this cycle (published without media)", "count", c)
+		}
+
 		var failed, totalFeeds int
 		for _, ch := range db.Feeds() {
 			totalFeeds++

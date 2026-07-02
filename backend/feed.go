@@ -420,6 +420,12 @@ func (run *fetchRun) rewriteItemAssets(ctx context.Context, i *Item) (err error)
 			return key, true, nil
 		case errors.Is(err, errNotAsset):
 			return "", false, nil
+		case errors.Is(err, errCorruptAsset):
+			// Broken source bytes won't get better on retry: decline the
+			// marker (the article publishes without working media, the reader
+			// collapses the dead element) instead of wedging the feed forever.
+			slog.Warn("declining corrupt media asset", "asset", local, "link", i.Link, "err", err)
+			return "", false, nil
 		default:
 			return "", false, fmt.Errorf("self-host asset %q: %w", local, err)
 		}
