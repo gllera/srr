@@ -2,6 +2,8 @@ package mod
 
 import (
 	"context"
+	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -361,5 +363,97 @@ func TestModuleValidate(t *testing.T) {
 		if err := m.Validate(ctx, bad); err == nil {
 			t.Errorf("Validate accepted invalid pipeline %v", bad)
 		}
+	}
+}
+
+// TestTailBufferKeepsRecentBytes pins the never-failing stderr capture: writes
+// beyond the limit drop the OLDEST bytes (error text clusters at the end).
+func TestTailBufferKeepsRecentBytes(t *testing.T) {
+	b := &tailBuffer{limit: 8}
+	for _, s := range []string{"aaaa", "bbbb", "cccc"} {
+		if _, err := b.Write([]byte(s)); err != nil {
+			t.Fatalf("Write(%q): %v", s, err)
+		}
+	}
+	if got := string(b.buf); got != "bbbbcccc" {
+		t.Errorf("buf = %q; want most recent 8 bytes %q", got, "bbbbcccc")
+	}
+}
+
+// TestTailBufferTailRendering pins the error-message rendering: CR progress
+// rewrites break lines, blanks drop, and only the trailing lines survive.
+func TestTailBufferTailRendering(t *testing.T) {
+	b := &tailBuffer{limit: stderrTailBytes}
+	b.Write([]byte("progress 10%\rprogress 50%\rprogress 90%\n\n  error: bad input  \nexiting\n"))
+	got := b.Tail()
+	if !strings.Contains(got, "error: bad input") || !strings.Contains(got, "exiting") {
+		t.Errorf("Tail() = %q; want the trailing error lines", got)
+	}
+	if strings.ContainsAny(got, "\r\n") {
+		t.Errorf("Tail() = %q; want a single line", got)
+	}
+}
+
+// TestRunCommandTimeoutStderrNotLeaked is the regression test for the asset
+// stderr leak: a chatty asset command (a transcoder narrating progress) must
+// not write to the process stderr; on success the capture is discarded.
+func TestRunCommandTimeoutStderrNotLeaked(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := os.Stderr
+	os.Stderr = w
+	out, runErr := RunCommandTimeout(context.Background(), time.Minute, "/bin/sh", "-c", "echo noisy progress >&2; printf result")
+	os.Stderr = saved
+	w.Close()
+
+	if runErr != nil {
+		t.Fatalf("RunCommandTimeout: %v", runErr)
+	}
+	if string(out) != "result" {
+		t.Errorf("stdout = %q; want %q", out, "result")
+	}
+	leaked, _ := io.ReadAll(r)
+	r.Close()
+	if len(leaked) != 0 {
+		t.Errorf("stderr leaked to os.Stderr: %q", leaked)
+	}
+}
+
+// TestRunCommandTimeoutStderrInFailure verifies a failing asset command's
+// stderr tail rides the returned error so the caller's warn line carries the
+// diagnostic.
+func TestRunCommandTimeoutStderrInFailure(t *testing.T) {
+	_, err := RunCommandTimeout(context.Background(), time.Minute, "/bin/sh", "-c", "printf 'p1\rp2\r' >&2; echo 'error: kaput' >&2; exit 3")
+	if err == nil {
+		t.Fatal("expected error from exit 3")
+	}
+	if !strings.Contains(err.Error(), "error: kaput") {
+		t.Errorf("err = %q; want it to carry the stderr tail", err)
+	}
+}
+
+// TestRunSubprocessStderrStillPassesThrough pins the OTHER side of the
+// contract: external ingest/mod commands keep stderr passthrough (their
+// documented log channel) — only the asset path captures.
+func TestRunSubprocessStderrStillPassesThrough(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := os.Stderr
+	os.Stderr = w
+	_, runErr := RunSubprocess(context.Background(), "echo mod log >&2", nil, "", nil)
+	os.Stderr = saved
+	w.Close()
+
+	if runErr != nil {
+		t.Fatalf("RunSubprocess: %v", runErr)
+	}
+	got, _ := io.ReadAll(r)
+	r.Close()
+	if !strings.Contains(string(got), "mod log") {
+		t.Errorf("stderr passthrough broken: captured %q", got)
 	}
 }

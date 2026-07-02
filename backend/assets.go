@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -81,6 +82,12 @@ type assetFetcher struct {
 	// poisoned by the leader feed's cancellation — only run shutdown aborts the
 	// shared peek/transcode/upload. (containedctx: a run-scoped helper, by design.)
 	baseCtx context.Context
+
+	// active/done count leader jobs for the fetch status line: active while a
+	// leader holds a worker slot (peeking/transcoding/uploading a unique asset),
+	// done bumped as each leader job completes (success or failure — a job
+	// counter, not a success meter). Followers and memo hits don't count.
+	active, done atomic.Int64
 }
 
 // assetPrefix is the reserved store prefix for self-hosted media, analogous to
@@ -199,6 +206,8 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 			return nil, a.baseCtx.Err()
 		}
 		defer func() { <-a.sem }()
+		a.active.Add(1)
+		defer func() { a.active.Add(-1); a.done.Add(1) }()
 		return a.resolveAndUpload(a.baseCtx, full, localname, orig, sum)
 	})
 	// A follower whose own feed is cancelling bails here without waiting on the
@@ -348,7 +357,9 @@ type peekResult struct {
 // {output} mode (an arg carries {output}) SRR substitutes a fresh temp path,
 // reads the processed bytes back from that file, and parses a metadata JSON from
 // stdout; otherwise the bytes are read from stdout (no declared metadata).
-// stderr passes through for diagnostics. Fail-soft: it returns ok=false — the
+// stderr is captured, not passed through — a transcoder's progress narration
+// would garble srr's own output — and its tail rides the error into the warn
+// line on failure (see mod.RunCommandTimeout). Fail-soft: it returns ok=false — the
 // caller uploads the original unchanged — when the command errors, writes no
 // output, or (file mode) prints invalid metadata, so a processing hiccup or an
 // unhandled file type never wedges a feed. Runs through mod.RunCommandTimeout
