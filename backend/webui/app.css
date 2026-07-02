@@ -650,6 +650,17 @@ dialog input,
 dialog select {
    width: 100%;
 }
+dialog label.check {
+   display: flex;
+   align-items: center;
+   gap: 0.5em;
+   cursor: pointer;
+}
+dialog label.check input[type="checkbox"] {
+   width: auto;
+   margin: 0;
+   accent-color: var(--signal);
+}
 dialog .row {
    display: flex;
    gap: 0.5em;

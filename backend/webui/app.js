@@ -344,18 +344,21 @@ let feedDialog;
 function openFeedModal(f) {
   feedDialog ||= makeDialog({ id: "feedModal" });
   const isEdit = !!f;
-  const v = f || { title: "", url: "", tag: "", recipe: "" };
+  const v = f || { title: "", url: "", tag: "", recipe: "", no_title: false };
   const title = el("input", { id: "f_title", value: v.title });
   const url = el("input", { id: "f_url", value: v.url });
   const tag = el("input", { id: "f_tag", value: v.tag || "" });
   const recipe = el("select", { id: "f_recipe" }, el("option", { value: "" }, "default"));
   appendRecipeOptions(recipe, v.recipe || "", snapshot.recipes);
+  const noTitle = el("input", { id: "f_notitle", type: "checkbox" });
+  noTitle.checked = !!v.no_title;
   const err = el("div", { class: "muted" });
 
   const save = el("button", { class: "btn primary", onclick: async () => {
     const body = {
       title: title.value.trim(), url: url.value.trim(),
       tag: tag.value.trim(), recipe: recipe.value.trim(),
+      no_title: noTitle.checked,
     };
     await saveModal(feedDialog, err,
       () => isEdit ? api("PUT", "/api/feeds/" + f.id, body) : api("POST", "/api/feeds", body),
@@ -368,6 +371,7 @@ function openFeedModal(f) {
     el("label", {}, "URL"), url,
     el("label", {}, "Tag"), tag,
     el("label", {}, "Recipe (blank = default)"), recipe,
+    el("label", { class: "check" }, noTitle, "Hide article titles (titleless feed)"),
     err,
     dialogRow(feedDialog, save, isEdit ? () => deleteFeed(f) : null));
   feedDialog.showModal();
