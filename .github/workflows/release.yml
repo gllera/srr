@@ -81,7 +81,7 @@ jobs:
     # production branch, and tag pushes carry no branch context so it's passed
     # explicitly. Needs repo/ci-environment secrets CLOUDFLARE_API_TOKEN (token
     # scoped to Account → Cloudflare Pages → Edit) and CLOUDFLARE_ACCOUNT_ID.
-    - uses: cloudflare/wrangler-action@v3
+    - uses: cloudflare/wrangler-action@v4
       with:
         apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
