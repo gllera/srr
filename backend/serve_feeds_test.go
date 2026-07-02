@@ -171,33 +171,46 @@ func TestApplyFeedsAtomicOnBadElement(t *testing.T) {
 	}
 }
 
-// A GUI feed save (PUT body without no_title) must not clobber a feed's stored
-// titleless flag — setting it is scoped to the CLI (feed apply/edit).
-func TestServeFeedUpdatePreservesNoTitle(t *testing.T) {
+// A GUI feed save carries the titleless flag (the edit modal checkbox), so a
+// PUT sets and clears it with full-replace semantics like `feed apply`.
+func TestServeFeedSaveRoundTripsNoTitle(t *testing.T) {
 	db, _, _ := setupTestDB(t)
-	seedFeed(t, db, &Feed{Title: "Chan", URL: "https://t.example.com/feed", NoTitle: true})
+	seedFeed(t, db, &Feed{Title: "Chan", URL: "https://t.example.com/feed"})
 
-	// The exact body the webui edit modal sends: title/url/tag/recipe, no no_title.
+	// Read the persisted state (not the in-memory db which predates the handler).
+	readNoTitle := func() bool {
+		t.Helper()
+		var noTitle bool
+		err := withDB(false, func(_ context.Context, d *DB) error {
+			ch, e := d.FeedByID(0)
+			if e != nil {
+				return e
+			}
+			noTitle = ch.NoTitle
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("FeedByID: %v", err)
+		}
+		return noTitle
+	}
+
 	rec := doReq(t, newMux(), "PUT", "/api/feeds/0",
-		`{"title":"Chan renamed","url":"https://t.example.com/feed","tag":"news"}`)
+		`{"title":"Chan","url":"https://t.example.com/feed","no_title":true}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("PUT status = %d, body %s", rec.Code, rec.Body.String())
 	}
-
-	// Read the persisted state (not the in-memory db which predates the handler).
-	var noTitle bool
-	err := withDB(false, func(_ context.Context, d *DB) error {
-		ch, e := d.FeedByID(0)
-		if e != nil {
-			return e
-		}
-		noTitle = ch.NoTitle
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("FeedByID: %v", err)
+	if !readNoTitle() {
+		t.Errorf("NoTitle = false after PUT with no_title:true, want true")
 	}
-	if !noTitle {
-		t.Errorf("NoTitle = false after GUI save, want true (must be preserved)")
+
+	// Unchecked box ⇒ the body carries no_title:false, clearing the flag.
+	rec = doReq(t, newMux(), "PUT", "/api/feeds/0",
+		`{"title":"Chan","url":"https://t.example.com/feed","no_title":false}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	if readNoTitle() {
+		t.Errorf("NoTitle = true after PUT with no_title:false, want false")
 	}
 }

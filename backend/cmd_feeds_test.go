@@ -905,8 +905,8 @@ func TestFeedViewEmitsNoTitle(t *testing.T) {
 	}
 }
 
-// TestFeedListViewEmitsNoTitle: the serve GUI projection carries the flag so a
-// feed save through the admin reads-and-rewrites it instead of clobbering it.
+// TestFeedListViewEmitsNoTitle: the serve GUI projection carries the flag so
+// the edit modal can seed its checkbox from the overview snapshot.
 func TestFeedListViewEmitsNoTitle(t *testing.T) {
 	v := listViewOf(&Feed{Title: "T", URL: "https://x/feed", NoTitle: true})
 	if !v.NoTitle {
