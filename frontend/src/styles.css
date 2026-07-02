@@ -1957,7 +1957,12 @@ body.srr-view-config .srr-toolbar {
    border-radius: 2px;
 }
 
-.srr-title:focus-visible {
+/* The reader region is focused programmatically after navigation to keep keyboard
+   focus inside it — the title, or the content host for titleless feeds / the empty
+   state (app.ts). It's a reading surface, not an interactive control, so suppress
+   the focus ring the global :focus-visible rule would otherwise draw around it. */
+.srr-title:focus-visible,
+.srr-content:focus-visible {
    outline: none;
 }
 
