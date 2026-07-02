@@ -33,6 +33,7 @@ type AssetHealCmd struct {
 	Key         string `arg:"" help:"Store key to overwrite (assets/<2-hex>/<16-hex><ext>)."`
 	File        string `arg:"" type:"existingfile" help:"File whose bytes replace the object."`
 	ContentType string `help:"Content-Type to store (default: derived from the key extension)."`
+	Create      bool   `help:"Also allow writing a key that does not exist — for re-creating a referenced-but-deleted object. Off by default so a typo'd key can't create an orphan."`
 }
 
 func (o *AssetHealCmd) Run() error {
@@ -42,13 +43,15 @@ func (o *AssetHealCmd) Run() error {
 		return err
 	}
 	defer be.Close()
-	return healAsset(ctx, be, o.Key, o.File, o.ContentType)
+	return healAsset(ctx, be, o.Key, o.File, o.ContentType, o.Create)
 }
 
-// healAsset validates the key, requires the object to already exist (a missing
-// key is a typo, and creating it would orphan an object nothing references),
-// and overwrites it with the file's bytes and the given or derived Content-Type.
-func healAsset(ctx context.Context, be store.Backend, key, file, contentType string) error {
+// healAsset validates the key, requires the object to already exist unless
+// create is set (a missing key is usually a typo, and creating it would orphan
+// an object nothing references — but a referenced-but-deleted key is
+// legitimately re-created), and overwrites it with the file's bytes and the
+// given or derived Content-Type.
+func healAsset(ctx context.Context, be store.Backend, key, file, contentType string, create bool) error {
 	if !healKeyRe.MatchString(key) {
 		return fmt.Errorf("key %q is not an assets/<2-hex>/<16-hex><ext> key", key)
 	}
@@ -56,10 +59,12 @@ func healAsset(ctx context.Context, be store.Backend, key, file, contentType str
 	if err != nil {
 		return fmt.Errorf("check %q: %w", key, err)
 	}
-	if rc == nil {
-		return fmt.Errorf("key %q does not exist — heal replaces a published asset, it never creates one", key)
+	if rc == nil && !create {
+		return fmt.Errorf("key %q does not exist — pass --create if an article really references it", key)
 	}
-	rc.Close()
+	if rc != nil {
+		rc.Close()
+	}
 
 	if contentType == "" {
 		contentType = mime.TypeByExtension(path.Ext(key))
