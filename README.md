@@ -52,7 +52,7 @@ Or self-host the reader from the same store as the packs — one origin serves b
 
 ### Automate
 
-The included GitHub Actions workflow (`cron.yml`) runs `srr art fetch` on manual dispatch, and the `pages` job in `release.yml` deploys the frontend on version tags.
+The included GitHub Actions workflow (`cron.yml`) runs `srr art fetch` on manual dispatch, and the `cf-pages` job in `release.yml` deploys the hosted reader to Cloudflare Pages on version tags.
 
 ## Project Structure
 
@@ -91,5 +91,5 @@ See [backend/README.md](backend/README.md) and [frontend/README.md](frontend/REA
 |----------|---------|--------|
 | `ci.yml` | Push to `main`, PRs | Runs `make verify` (lint, format, FE+BE tests, builds, jsdom e2e contract) and `make test-browser` (Puppeteer) in parallel jobs |
 | `release.yml` (`release` job) | `v*.*.*` tag | Cross-compiles backend binaries and bundles the SPA as `srrf.tar.gz`, creates GitHub release (`srr frontend update` installs the SPA from this asset) |
-| `release.yml` (`pages` job) | `v*.*.*` tag or manual | Builds and deploys frontend to GitHub Pages |
+| `release.yml` (`cf-pages` job) | `v*.*.*` tag or manual | Builds the reader with the `SRR_CDN_URL` secret and deploys it to Cloudflare Pages |
 | `cron.yml` | Manual dispatch | Downloads latest `srr` binary and runs `srr a fetch` against the configured store |
