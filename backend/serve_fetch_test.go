@@ -76,6 +76,10 @@ func TestFetchSSE(t *testing.T) {
 	if !strings.Contains(s, "event: feed") {
 		t.Fatalf("stream missing feed event:\n%s", s)
 	}
+	// The webui's live ticker (applyFeedEvent) matches events to rows by id.
+	if !strings.Contains(s, `"id":`) {
+		t.Fatalf("feed event missing id field:\n%s", s)
+	}
 	if !strings.Contains(s, "event: done") {
 		t.Fatalf("stream missing done event:\n%s", s)
 	}
