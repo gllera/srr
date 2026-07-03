@@ -80,16 +80,23 @@ func checkBoundsVsData(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 }
 
 // feedIDStats walks every idx entry once, returning per-feed_id entry
-// counts. Shared by checkDBMeta (registered feeds) and checkUnknownFeedIDs
-// (unregistered ones).
-func feedIDStats(packs []*idxPack) (count map[int]int) {
-	count = map[int]int{}
+// counts: all-time, and live (entries at chron >= the feed's AddIdx; an
+// unregistered id has no AddIdx, so its live tally counts everything and
+// is simply unused). Shared by checkDBMeta (registered feeds) and
+// checkUnknownFeedIDs (unregistered ones).
+func feedIDStats(packs []*idxPack, feeds map[int]*Feed) (count, live map[int]int) {
+	count, live = map[int]int{}, map[int]int{}
 	for _, p := range packs {
-		for _, s := range p.feedIDs {
-			count[int(s)]++
+		base := p.packIndex * idxPackSize
+		for i, s := range p.feedIDs {
+			sid := int(s)
+			count[sid]++
+			if ch := feeds[sid]; ch == nil || base+i >= ch.AddIdx {
+				live[sid]++
+			}
 		}
 	}
-	return count
+	return count, live
 }
 
 // checkDBMeta cross-checks db.gz fields against actual pack contents.
@@ -122,7 +129,7 @@ func checkDBMeta(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 		issues++
 	}
 
-	idxCount := feedIDStats(packs)
+	idxCount, idxLive := feedIDStats(packs, core.Feeds)
 	feedIDs := make([]int, 0, len(core.Feeds))
 	for id := range core.Feeds {
 		feedIDs = append(feedIDs, id)
@@ -136,8 +143,10 @@ func checkDBMeta(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 				id, sub.Title, sub.TotalArt, actual)
 			issues++
 		}
-		// Entries before add_idx are expected (expiration, feed-id reuse);
-		// add_idx and the expired counter just have to stay in range.
+		// Entries before add_idx are expected (expiration, feed-id reuse; the
+		// all-time total_art check above still assumes no id reuse — a known,
+		// pre-existing limitation); add_idx and the expired counter just have
+		// to stay in range.
 		if sub.AddIdx < 0 || sub.AddIdx > core.TotalArticles {
 			fmt.Printf("[db-meta] sub %d (%q): add_idx=%d out of range [0, %d]\n",
 				id, sub.Title, sub.AddIdx, core.TotalArticles)
@@ -146,6 +155,16 @@ func checkDBMeta(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 		if sub.Expired < 0 || sub.Expired > sub.TotalArt {
 			fmt.Printf("[db-meta] sub %d (%q): expired=%d out of range [0, total_art=%d]\n",
 				id, sub.Title, sub.Expired, sub.TotalArt)
+			issues++
+		}
+		// Cross-check the (AddIdx, Expired) pair against the packs: the idx
+		// entries at chron >= add_idx are exactly the live articles the reader
+		// counts (total_art - expired). An in-range but inconsistent pair
+		// silently skews every live count. Reuse-proof: a reused id's legacy
+		// entries sit below add_idx.
+		if idxLive[id] != sub.TotalArt-sub.Expired {
+			fmt.Printf("[db-meta] sub %d (%q): live entries=%d but total_art-expired=%d\n",
+				id, sub.Title, idxLive[id], sub.TotalArt-sub.Expired)
 			issues++
 		}
 	}
@@ -208,7 +227,7 @@ func checkFeedCountsContinuity(packs []*idxPack) int {
 // checkUnknownFeedIDs flags any idx entry whose feed byte isn't
 // registered in db.feeds.
 func checkUnknownFeedIDs(core *DBCore, packs []*idxPack) int {
-	count := feedIDStats(packs)
+	count, _ := feedIDStats(packs, core.Feeds)
 	unknown := 0
 	for sid, c := range count {
 		if _, ok := core.Feeds[sid]; ok {
