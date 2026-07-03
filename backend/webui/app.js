@@ -15,9 +15,11 @@ async function api(method, path, body) {
 }
 const apiGet = (p) => api("GET", p);
 
-// streamSSE POSTs to path and invokes onEvent({event, data}) for each SSE frame.
-async function streamSSE(path, onEvent) {
-  const res = await fetch(path, { method: "POST" });
+// streamSSE POSTs to path and invokes onEvent({event, data}) for each SSE
+// frame; an optional AbortSignal cancels the stream (and, server-side, the
+// fetch cycle it drives — the handler runs under the request context).
+async function streamSSE(path, onEvent, signal) {
+  const res = await fetch(path, { method: "POST", signal });
   if (!res.ok) throw new Error(res.statusText);
   const reader = res.body.getReader();
   const dec = new TextDecoder();
@@ -76,11 +78,27 @@ const ICON_EDIT =
   '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>';
 const ICON_DELETE =
   '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>';
+const ICON_FETCH =
+  '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>';
+const ICON_PREVIEW =
+  '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
 
 // Source-color slot for a feed id — mirrors the reader's fmt.srcColorIndex so a
 // feed's rail color in the console matches the color it carries in the reader.
 const SRC_COLORS = 8;
 const srcColorIndex = (id) => ((id % SRC_COLORS) + SRC_COLORS) % SRC_COLORS;
+
+// relTime renders a unix-seconds timestamp as a coarse "how long ago" readout
+// ("3h ago"); 0 = "never". Coarse on purpose — exact instants ride titles.
+function relTime(sec) {
+  if (!sec) return "never";
+  const s = Math.max(0, Math.floor(Date.now() / 1000 - sec));
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  if (s < 604800) return Math.floor(s / 86400) + "d ago";
+  return Math.floor(s / 604800) + "w ago";
+}
 
 // pipeTokens renders a recipe's pipe steps as connected wire tokens (mono chips
 // joined by → arrows); a built-in #mod gets the signal tint. Empty pipe → em dash.
@@ -157,7 +175,7 @@ function dialogRow(dlg, saveBtn, onDelete) {
 // renders from it, so switching tabs never hits the store. The store is re-read
 // only on boot (a browser reload re-runs it) and after a mutation, via refresh().
 const renderers = {}; // tab name -> sync render fn, drawing from `snapshot`
-let snapshot = { feeds: [], tags: [], recipes: {}, out: [], gen: 0 };
+let snapshot = { feeds: [], tags: [], recipes: {}, out: [], gen: 0, total_art: 0, fetched_at: 0 };
 let currentTab = "feeds";
 
 // drawTab (re)renders the current tab from the cached snapshot — no fetch.
@@ -170,6 +188,7 @@ function drawTab() {
 
 function showTab(name) {
   currentTab = name;
+  history.replaceState(null, "", "#" + name); // deep-linkable; survives the reload-to-refresh model
   for (const b of document.querySelectorAll("#tabs button"))
     b.classList.toggle("active", b.dataset.tab === name);
   for (const s of document.querySelectorAll(".tab"))
@@ -178,60 +197,114 @@ function showTab(name) {
   drawTab();
 }
 
+// loadSnapshot re-pulls the whole-store snapshot without redrawing; snapshotAt
+// drives the focus-refresh throttle below.
+let snapshotAt = 0;
+async function loadSnapshot() {
+  snapshot = await apiGet("/api/overview");
+  snapshotAt = Date.now();
+}
+
 // refresh re-pulls the snapshot and redraws the current tab. It deliberately
 // does NOT clear the banner, so a caller can set a success message and then
 // refresh the data under it.
 async function refresh() {
-  snapshot = await apiGet("/api/overview");
+  await loadSnapshot();
   drawTab();
 }
 
 document.querySelectorAll("#tabs button").forEach((b) =>
   b.addEventListener("click", () => showTab(b.dataset.tab)));
 
+// Same-document hash navigation (a bookmark or hand-edited #tab on an open
+// page) switches tabs too; boot handles the initial hash.
+window.addEventListener("hashchange", () => {
+  const want = location.hash.slice(1);
+  if (renderers[want] && want !== currentTab) showTab(want);
+});
+
+// A hidden tab drifts while the background --interval loop (or a cron fetch)
+// writes the store, so a stale-enough snapshot is re-pulled when the operator
+// comes back. Tools is not redrawn in place — that would wipe its streamed
+// fetch/inspect logs; it re-reads the snapshot on its next render anyway.
+const FOCUS_REFRESH_MS = 30000;
+document.addEventListener("visibilitychange", async () => {
+  if (document.visibilityState !== "visible") return;
+  if (Date.now() - snapshotAt < FOCUS_REFRESH_MS) return;
+  if (document.body.classList.contains("fetching")) return;
+  try {
+    await loadSnapshot();
+    if (currentTab !== "tools") drawTab();
+  } catch {
+    // transient — the next focus (or any mutation) retries
+  }
+});
+
 // --- feeds tab --------------------------------------------------------------
-const feedsState = { search: "", tag: "" };
+const feedsState = { search: "", tag: "", grade: "" };
 const UNTAGGED = "\x00"; // sentinel: the "(untagged)" filter option value, distinct from "" (= all tags)
 
+// A feed that fetches fine but has produced nothing new for this long is a
+// zombie candidate — the publisher stopped, moved, or broke silently.
+const STALE_AFTER = 30 * 86400;
+
 // feedGrade buckets a feed's health: ok (live) / warn (failing, recoverable) /
-// err (fault, streak >= 3) / idle (never fetched). The dot + board share it.
+// err (fault, streak >= 3) / stale (fetching fine, no new article in 30d) /
+// idle (never fetched). The dot + board share it. last_new === 0 with a
+// healthy fetch stays ok: pre-vitals stores never stamped it, and a false
+// "stale" on every migrated feed would drown the real zombies.
 function feedGrade(f) {
   if (f.error) return f.fail_streak >= 3 ? "err" : "warn";
-  return f.last_ok ? "ok" : "idle";
+  if (!f.last_ok) return "idle";
+  if (f.last_new && Date.now() / 1000 - f.last_new > STALE_AFTER) return "stale";
+  return "ok";
 }
-const GRADE_DOT = { ok: "green", warn: "amber", err: "red", idle: "gray" };
+const GRADE_DOT = { ok: "green", warn: "amber", err: "red", stale: "dim", idle: "gray" };
 
 // healthDot is the small status dot. Its native title carries the health detail
-// (last fetch / never fetched). For a failing feed the error rides a richer
+// (last fetch / last new article). For a failing feed the error rides a richer
 // hover/focus tooltip instead (see feedRow).
 function healthDot(f) {
   const title = f.last_ok
-    ? "ok, last fetch " + new Date(f.last_ok * 1000).toLocaleString()
+    ? `last fetch ${relTime(f.last_ok)} · last new article ${relTime(f.last_new)}`
     : "never fetched";
   return el("span", { class: "dot " + GRADE_DOT[feedGrade(f)], title });
 }
 
 // healthBoard is the Feeds-tab hero: a one-line readout of the whole wire's
-// health (total sources, then each non-empty grade with its count).
+// health (total sources, then each non-empty grade with its count), plus the
+// store meta (articles, last fetch). Each grade stat is a filter toggle; the
+// total resets it.
 function healthBoard() {
-  const c = { ok: 0, warn: 0, err: 0, idle: 0 };
+  const c = { ok: 0, warn: 0, err: 0, stale: 0, idle: 0 };
   for (const f of snapshot.feeds) c[feedGrade(f)]++;
   const total = snapshot.feeds.length;
   const board = el("div", { class: "board" },
-    el("span", { class: "total" }, el("b", {}, String(total)), total === 1 ? " source" : " sources"));
-  const add = (n, dot, label) => {
+    el("button", {
+      class: "total", title: "show all feeds",
+      onclick: () => { feedsState.grade = ""; drawFeeds(); },
+    }, el("b", {}, String(total)), total === 1 ? " source" : " sources"));
+  const add = (grade, n, dot, label) => {
     if (!n) return;
-    board.append(el("span", { class: "stat" },
-      el("i", { class: "dot " + dot }), el("b", {}, String(n)), " " + label));
+    const active = feedsState.grade === grade;
+    board.append(el("button", {
+      class: "stat" + (active ? " active" : ""),
+      title: active ? "clear the filter" : "show only " + label + " feeds",
+      onclick: () => { feedsState.grade = active ? "" : grade; drawFeeds(); },
+    }, el("i", { class: "dot " + dot }), el("b", {}, String(n)), " " + label));
   };
-  add(c.ok, "green", "live");
-  add(c.warn, "amber", "warn");
-  add(c.err, "red", "fault");
-  add(c.idle, "gray", "idle");
+  add("ok", c.ok, "green", "live");
+  add("warn", c.warn, "amber", "warn");
+  add("err", c.err, "red", "fault");
+  add("stale", c.stale, "dim", "stale");
+  add("idle", c.idle, "gray", "idle");
+  board.append(el("span", { class: "meta" },
+    `${snapshot.total_art.toLocaleString()} articles · fetched ${relTime(snapshot.fetched_at)}`));
   return board;
 }
 
 function feedMatches(f) {
+  if (feedsState.grade && feedGrade(f) !== feedsState.grade) return false;
   if (feedsState.tag) {
     const want = feedsState.tag === UNTAGGED ? "" : feedsState.tag;
     if ((f.tag || "") !== want) return false;
@@ -266,19 +339,21 @@ function drawFeeds() {
   const add = el("button", { class: "btn primary", onclick: () => openFeedModal(null) }, "+ Add feed");
 
   const exportBtn = el("button", { class: "btn", onclick: () => { window.location = "/api/export"; } }, "Export OPML");
+  // Import is a two-step flow: a dry run first (resolution probes every URL, so
+  // this can take a moment), then a confirm dialog showing what will import and
+  // what gets skipped — import is partial-success, the skip report matters.
   const importInput = el("input", { type: "file", accept: ".opml,.xml,text/xml", style: "display:none",
     onchange: async (e) => {
       const file = e.target.files[0];
+      e.target.value = "";
       if (!file) return;
+      banner("Resolving OPML feeds…", true);
       try {
         const text = await file.text();
-        const res = await fetch("/api/import", { method: "POST", headers: { "Content-Type": "application/xml" }, body: text });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || res.statusText);
-        banner(`Imported ${data.imported}, skipped ${data.skipped.length}`, true);
-        await refresh();
+        const dry = await importReq(text, true);
+        clearBanner();
+        openImportModal(dry, text);
       } catch (err) { banner(err.message); }
-      e.target.value = "";
     } });
   const importBtn = el("button", { class: "btn", onclick: () => importInput.click() }, "Import OPML");
   root.append(healthBoard());
@@ -310,8 +385,36 @@ function feedRow(f) {
     el("td", { class: "title" }, el("a", { class: "feed-title", href: f.url, target: "_blank", rel: "noopener" }, f.title)),
     el("td", {}, f.tag ? el("span", { class: "chip" }, f.tag) : ""),
     el("td", {}, f.recipe ? el("span", { class: "chip" }, f.recipe) : ""),
+    el("td", { class: "when", title: f.last_new ? new Date(f.last_new * 1000).toLocaleString() : null },
+      f.last_new ? relTime(f.last_new) : "—"),
+    el("td", { class: "when" }, String(f.total_art)),
     el("td", { class: "actions" },
+      el("button", { class: "btn icon", title: "Fetch this feed", "aria-label": "Fetch this feed", onclick: (e) => fetchOneFeed(f, e.currentTarget), html: ICON_FETCH }),
+      el("button", { class: "btn icon", title: "Preview", "aria-label": "Preview", onclick: () => openPreviewFor(f), html: ICON_PREVIEW }),
       el("button", { class: "btn icon", title: "Edit", "aria-label": "Edit", onclick: () => openFeedModal(f), html: ICON_EDIT })));
+}
+
+// fetchOneFeed runs a single-feed fetch cycle (POST /api/fetch?id=N) from the
+// row action: outcome in the banner, then a snapshot refresh redraws the row
+// (which also re-enables the button by recreating it).
+async function fetchOneFeed(f, btn) {
+  btn.disabled = true;
+  document.body.classList.add("fetching");
+  let result = null, errMsg = "";
+  try {
+    await streamSSE("/api/fetch?id=" + f.id, ({ event, data }) => {
+      if (event === "feed") result = data;
+      else if (event === "error") errMsg = data.error;
+    });
+  } catch (e) {
+    errMsg = e.message;
+  } finally {
+    document.body.classList.remove("fetching");
+  }
+  if (errMsg) banner(errMsg);
+  else if (result && result.error) banner(`${result.title}: ${result.error}`);
+  else if (result) banner(`${result.title}: ${result.new} new article${result.new === 1 ? "" : "s"}`, true);
+  try { await refresh(); } catch (e) { banner(e.message); }
 }
 
 function drawTable() {
@@ -321,6 +424,7 @@ function drawTable() {
     el("thead", {}, el("tr", {},
       el("th", {}, ""), el("th", {}, "title"),
       el("th", {}, "tag"), el("th", {}, "recipe"),
+      el("th", {}, "last new"), el("th", {}, "articles"),
       el("th", {}, ""))));
   const tb = el("tbody", {});
   for (const f of rows) tb.append(feedRow(f));
@@ -332,6 +436,56 @@ function drawTable() {
 
 async function deleteFeed(f) {
   return confirmDelete(`Delete feed "${f.title}"?`, "/api/feeds/" + f.id, "Deleted " + f.title);
+}
+
+// importReq POSTs OPML XML to /api/import; dry=true only resolves and reports
+// ({feeds, skipped}), dry=false commits ({imported, skipped}).
+async function importReq(xml, dry) {
+  const res = await fetch("/api/import" + (dry ? "?dry_run=1" : ""), {
+    method: "POST", headers: { "Content-Type": "application/xml" }, body: xml });
+  const data = await res.json();
+  if (!res.ok) throw new Error((data && data.error) || res.statusText);
+  return data;
+}
+
+let importDialog;
+// openImportModal shows the dry-run result — what will import, what gets
+// skipped and why — before anything is written; Import runs the real thing.
+function openImportModal(dry, xml) {
+  importDialog ||= makeDialog({});
+  const feeds = dry.feeds || [];
+  const skipped = dry.skipped || [];
+  const err = el("div", { class: "muted" });
+  const kids = [
+    el("h3", {}, "Import OPML"),
+    el("div", { class: "count" }, `${feeds.length} to import · ${skipped.length} skipped`),
+  ];
+  if (feeds.length) {
+    const list = el("div", { class: "import-list" });
+    for (const f of feeds)
+      list.append(el("div", {}, el("b", {}, f.title || f.url), " ", el("span", { class: "muted" }, f.url)));
+    kids.push(el("label", {}, "Will import"), list);
+  } else {
+    kids.push(el("div", { class: "muted" }, "Nothing to import."));
+  }
+  if (skipped.length) {
+    const list = el("div", { class: "import-list" });
+    for (const s of skipped)
+      list.append(el("div", {}, el("span", { class: "bad" }, s.url), " ", el("span", { class: "muted" }, s.error)));
+    kids.push(el("label", {}, "Skipped (unresolvable)"), list);
+  }
+  const doImport = el("button", { class: "btn primary", disabled: feeds.length ? null : "", onclick: async () => {
+    try {
+      const r = await importReq(xml, false);
+      await refresh();
+      importDialog.close();
+      banner(`Imported ${r.imported}, skipped ${r.skipped.length}`, true);
+    } catch (e) { err.textContent = e.message; }
+  } }, "Import");
+  kids.push(err, el("div", { class: "row" },
+    el("button", { class: "btn", onclick: () => importDialog.close() }, "Cancel"), doImport));
+  importDialog.replaceChildren(...kids);
+  importDialog.showModal();
 }
 
 function makeDialog(attrs) {
@@ -450,12 +604,28 @@ function openRecipeModal(name, rcp) {
 }
 
 // --- inline preview (used inside the Recipes tab) ---------------------------
+// previewState carries a feed's url/recipe from the Feeds row action into the
+// panel (and keeps hand-typed values across tab switches); run=true autoruns
+// the preview once on the next render.
+const previewState = { url: "", recipe: "default", run: false };
+
+// openPreviewFor is the Feeds-row action: preview this feed's URL through its
+// effective recipe, over on the Recipes tab.
+function openPreviewFor(f) {
+  previewState.url = f.url;
+  previewState.recipe = f.recipe || "default";
+  previewState.run = true;
+  showTab("recipes");
+}
+
 function previewPanel(recipes) {
-  const url = el("input", { type: "url", placeholder: "https://example.com/feed", style: "min-width:24em" });
-  const recipeSel = el("select", {}, el("option", { value: "default" }, "default"));
-  appendRecipeOptions(recipeSel, "", recipes);
+  const url = el("input", { type: "url", placeholder: "https://example.com/feed", style: "min-width:24em",
+    value: previewState.url, oninput: (e) => (previewState.url = e.target.value) });
+  const recipeSel = el("select", { onchange: (e) => (previewState.recipe = e.target.value) },
+    el("option", { value: "default" }, "default"));
+  appendRecipeOptions(recipeSel, previewState.recipe, recipes);
   const out = el("div", {});
-  const go = el("button", { class: "btn", onclick: async () => {
+  const runPreview = async () => {
     out.replaceChildren(el("div", { class: "muted" }, "loading…"));
     try {
       const arts = await apiGet(`/api/preview?url=${encodeURIComponent(url.value)}&recipe=${encodeURIComponent(recipeSel.value)}`);
@@ -474,7 +644,12 @@ function previewPanel(recipes) {
           })));
       }
     } catch (e) { out.replaceChildren(el("div", { class: "muted" }, e.message)); }
-  } }, "Preview");
+  };
+  const go = el("button", { class: "btn", onclick: runPreview }, "Preview");
+  if (previewState.run) {
+    previewState.run = false;
+    setTimeout(runPreview, 0); // after the panel is in the DOM
+  }
   return el("div", { style: "margin-top:1.6em" },
     el("h3", { class: "section-head" }, "Preview a recipe against a URL"),
     el("div", { class: "toolbar" }, url, recipeSel, go), out);
@@ -496,11 +671,16 @@ function renderSyndicate() {
     el("th", {}, "feeds"), el("th", {}, "limit"), el("th", {}, ""))));
   const tb = el("tbody", {});
   for (const o of outs) {
+    // With a CDN URL configured the name links the live out/<name> file the
+    // fetch loop writes; without one there is nothing to link (writes skip).
+    const name = snapshot.cdn_url
+      ? el("a", { class: "chip", href: outFileURL(o), target: "_blank", rel: "noopener" }, o.name)
+      : el("span", { class: "chip" }, o.name);
     tb.append(el("tr", {},
-      el("td", {}, el("span", { class: "chip" }, o.name)),
+      el("td", {}, name),
       el("td", {}, el("span", { class: "chip" }, o.format)),
       el("td", {}, (o.tags || []).join(", ")),
-      el("td", {}, (o.feeds || []).join(", ")),
+      el("td", {}, feedRefs(o.feeds)),
       el("td", {}, String(o.limit || "")),
       el("td", { class: "actions" },
         el("button", { class: "btn icon", title: "Edit", "aria-label": "Edit", onclick: () => openOutModal(o), html: ICON_EDIT }))));
@@ -510,8 +690,33 @@ function renderSyndicate() {
 }
 renderers.syndicate = renderSyndicate;
 
+const outFileURL = (o) =>
+  snapshot.cdn_url.replace(/\/+$/, "") + "/out/" + o.name + (o.format === "json" ? ".json" : ".rss");
+
+// feedRefs renders an output's feed-id selectors as feed titles (the operator
+// picked titles, not numbers), falling back to #id for a since-deleted feed.
+function feedRefs(ids) {
+  const byId = new Map(snapshot.feeds.map((f) => [f.id, f.title]));
+  return (ids || []).map((id) => byId.get(id) || "#" + id).join(", ");
+}
+
 async function deleteOut(name) {
   return confirmDelete(`Delete output "${name}"?`, "/api/syndicate/" + encodeURIComponent(name), "Deleted " + name);
+}
+
+// checkList renders a scrollable checkbox list and returns [element, selected
+// Set]. Selection lives in the Set; the caller reads it at save time.
+function checkList(items, initial) {
+  const sel = new Set(initial);
+  const box = el("div", { class: "picker" });
+  if (!items.length) box.append(el("div", { class: "muted" }, "none available"));
+  for (const it of items) {
+    const cb = el("input", { type: "checkbox",
+      onchange: () => (cb.checked ? sel.add(it.value) : sel.delete(it.value)) });
+    cb.checked = sel.has(it.value);
+    box.append(el("label", { class: "check" }, cb, it.label));
+  }
+  return [box, sel];
 }
 
 let outDialog;
@@ -523,18 +728,23 @@ function openOutModal(o) {
   const fmt = el("select", {}, el("option", { value: "rss" }, "rss"), el("option", { value: "json" }, "json"));
   fmt.value = v.format;
   const title = el("input", { value: v.title || "" });
-  const tags = el("input", { value: (v.tags || []).join(","), placeholder: "comma-separated tags" });
-  const feeds = el("input", { value: (v.feeds || []).join(","), placeholder: "comma-separated feed ids" });
+  // Selectors are picked from the snapshot (union of tags ∪ feeds), not typed
+  // as raw names/ids — the operator shouldn't need to know feed numbers.
+  const [tagsBox, tagSel] = checkList(
+    snapshot.tags.filter((t) => t.tag)
+      .map((t) => ({ value: t.tag, label: `${t.tag} (${t.feeds} feed${t.feeds === 1 ? "" : "s"})` })),
+    v.tags || []);
+  const [feedsBox, feedSel] = checkList(
+    snapshot.feeds.map((f) => ({ value: f.id, label: f.title })),
+    v.feeds || []);
   const limit = el("input", { type: "number", value: v.limit || 50 });
   const err = el("div", { class: "muted" });
   const save = el("button", { class: "btn primary", onclick: async () => {
     const nm = (v.name || name.value).trim();
-    const feedNums = feeds.value.split(",").map((s) => s.trim()).filter(Boolean).map(Number);
-    if (feedNums.some(Number.isNaN)) { err.textContent = "Feed ids must be numbers"; return; }
     const body = {
       title: title.value.trim(), format: fmt.value,
-      tags: tags.value.split(",").map((s) => s.trim()).filter(Boolean),
-      feeds: feedNums,
+      tags: [...tagSel],
+      feeds: [...feedSel],
       limit: Number(limit.value) || 0,
     };
     await saveModal(outDialog, err,
@@ -546,8 +756,8 @@ function openOutModal(o) {
     el("label", {}, "Name"), name,
     el("label", {}, "Format"), fmt,
     el("label", {}, "Title"), title,
-    el("label", {}, "Tags"), tags,
-    el("label", {}, "Feed ids"), feeds,
+    el("label", {}, "Tags"), tagsBox,
+    el("label", {}, "Feeds"), feedsBox,
     el("label", {}, "Limit"), limit,
     err,
     dialogRow(outDialog, save, isEdit ? () => deleteOut(o.name) : null));
@@ -560,27 +770,37 @@ function renderTools() {
   root.replaceChildren();
 
   // Fetch always covers every feed in parallel — same as `srrb a fetch`.
+  // Aborting the stream cancels the server-side cycle too (request context).
   const log = el("pre", { class: "log", "data-placeholder": "Idle — press Fetch now to stream the fetch log." });
+  let aborter = null;
+  const cancelBtn = el("button", { class: "btn", hidden: "", onclick: () => aborter && aborter.abort() }, "Cancel");
   const fetchBtn = el("button", { class: "btn primary", onclick: async () => {
     log.textContent = "";
     fetchBtn.disabled = true;
+    cancelBtn.hidden = false;
+    aborter = new AbortController();
     document.body.classList.add("fetching"); // "on the air" — pulses the masthead signal mark
     try {
       await streamSSE("/api/fetch", ({ event, data }) => {
         if (event === "feed") log.textContent += `#${data.id} ${data.title}: ${data.error ? "ERROR " + data.error : data.new + " new"}\n`;
         else if (event === "done") log.textContent += "done.\n";
         else if (event === "error") log.textContent += "ERROR: " + data.error + "\n";
-      });
+      }, aborter.signal);
     } catch (e) {
-      log.textContent += "stream error: " + e.message + "\n";
+      log.textContent += aborter.signal.aborted ? "cancelled.\n" : "stream error: " + e.message + "\n";
     } finally {
       fetchBtn.disabled = false;
+      cancelBtn.hidden = true;
       document.body.classList.remove("fetching");
     }
+    // The cycle changed feed health and counts: re-pull the snapshot so the
+    // Feeds tab isn't stale when the operator switches back. No redraw here —
+    // that would wipe the log just streamed; tabs render on entry.
+    try { await loadSnapshot(); } catch (e) { banner(e.message); }
   } }, "Fetch now");
   root.append(el("section", { class: "panel" },
     el("h3", {}, "Fetch"),
-    el("div", { class: "toolbar" }, fetchBtn), log));
+    el("div", { class: "toolbar" }, fetchBtn, cancelBtn), log));
 
   // Gen (from the cached snapshot)
   const genLabel = el("span", { class: "gen-readout" });
@@ -614,14 +834,16 @@ function renderTools() {
 }
 renderers.tools = renderTools;
 
-// Boot: pull the whole-store snapshot once, then render the default tab from it.
-// Tab switches read this cache; the store is re-read only here (a browser reload
-// re-runs boot) and after a mutation. There is no in-app refresh — use reload.
+// Boot: pull the whole-store snapshot once, then render the hash-addressed tab
+// (default Feeds) from it. Tab switches read this cache; the store is re-read
+// here (a browser reload re-runs boot), after a mutation or fetch, and by the
+// focus-refresh above.
 (async () => {
   try {
-    snapshot = await apiGet("/api/overview");
+    await loadSnapshot();
   } catch (e) {
     banner(e.message);
   }
-  showTab("feeds");
+  const want = location.hash.slice(1);
+  showTab(renderers[want] ? want : "feeds");
 })();
