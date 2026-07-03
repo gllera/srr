@@ -360,6 +360,43 @@ var outAssetAttrs = map[string][]string{
 	"a":     {"href"},
 }
 
+// parseBodyFragment parses content as an HTML body fragment. Callers treat a
+// parse failure as "leave the content alone" — published content is immutable.
+func parseBodyFragment(content string) ([]*html.Node, error) {
+	return html.ParseFragment(strings.NewReader(content), &html.Node{
+		Type:     html.ElementNode,
+		Data:     "body",
+		DataAtom: atom.Body,
+	})
+}
+
+// visitAssetAttrs calls fn on each attribute in the outAssetAttrs
+// element/attribute set, depth-first across nodes. Shared by rewriteAssetURLs
+// (CDN-prefixing) and collectAssetRefs (expiration harvesting) so the two
+// can't drift on which attributes carry asset keys.
+func visitAssetAttrs(nodes []*html.Node, fn func(a *html.Attribute)) {
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode {
+			if attrs, ok := outAssetAttrs[n.Data]; ok {
+				for _, name := range attrs {
+					for i := range n.Attr {
+						if n.Attr[i].Key == name {
+							fn(&n.Attr[i])
+						}
+					}
+				}
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	for _, n := range nodes {
+		walk(n)
+	}
+}
+
 // rewriteAssetURLs rewrites relative attribute values (those not starting with
 // a URL scheme or "//") in img/video src/poster and a href to absolute CDN
 // URLs. Absolute values are left untouched. Returns original content on parse
@@ -372,46 +409,21 @@ func rewriteAssetURLs(content, cdn string) (string, error) {
 	if !strings.Contains(content, "assets/") {
 		return content, nil
 	}
-
-	nodes, err := html.ParseFragment(strings.NewReader(content), &html.Node{
-		Type:     html.ElementNode,
-		Data:     "body",
-		DataAtom: atom.Body,
-	})
+	nodes, err := parseBodyFragment(content)
 	if err != nil {
 		// Unparseable: leave untouched.
 		return content, nil
 	}
-
 	changed := false
-	var walkNode func(*html.Node)
-	walkNode = func(n *html.Node) {
-		if n.Type == html.ElementNode {
-			if attrs, ok := outAssetAttrs[n.Data]; ok {
-				for _, attrName := range attrs {
-					for i := range n.Attr {
-						if n.Attr[i].Key != attrName {
-							continue
-						}
-						val := n.Attr[i].Val
-						// Only CDN-prefix self-hosted asset keys (flat
-						// assets/<hex>/<hex>.ext) — never arbitrary relative URLs, or a
-						// real relative <a href> would be repointed to the CDN host.
-						if strings.HasPrefix(val, "assets/") {
-							n.Attr[i].Val = joinURL(cdn, val)
-							changed = true
-						}
-					}
-				}
-			}
+	visitAssetAttrs(nodes, func(a *html.Attribute) {
+		// Only CDN-prefix self-hosted asset keys (flat
+		// assets/<hex>/<hex>.ext) — never arbitrary relative URLs, or a
+		// real relative <a href> would be repointed to the CDN host.
+		if strings.HasPrefix(a.Val, "assets/") {
+			a.Val = joinURL(cdn, a.Val)
+			changed = true
 		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			walkNode(c)
-		}
-	}
-	for _, n := range nodes {
-		walkNode(n)
-	}
+	})
 	if !changed {
 		return content, nil
 	}
