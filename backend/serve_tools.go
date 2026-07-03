@@ -46,12 +46,13 @@ func handlePreview(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleResolve probes a URL through a recipe's ingest without touching the
-// store: GET /api/resolve?url=&recipe= → {url, title, items}. The add-feed
-// dialog calls it to read the wire's own label before the operator commits:
-// the resolved feed URL (subscribe-time discovery folds a homepage to its
-// advertised feed), the feed-level title, and the item count. Read-only and
-// advisory — save re-resolves server-side, so a skipped or failed probe never
-// blocks an add.
+// store: GET /api/resolve?url=&recipe=&ingest= → {url, title, items} (ingest
+// is the optional feed-level override, winning over the recipe's). The
+// add-feed dialog calls it to read the wire's own label before the operator
+// commits: the resolved feed URL (subscribe-time discovery folds a homepage to
+// its advertised feed), the feed-level title, and the item count. Read-only
+// and advisory — save re-resolves server-side, so a skipped or failed probe
+// never blocks an add.
 func handleResolve(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	rawURL := q.Get("url")
@@ -61,7 +62,7 @@ func handleResolve(w http.ResponseWriter, r *http.Request) {
 	}
 	var out map[string]any
 	err := withDBCtx(r.Context(), false, func(ctx context.Context, db *DB) error {
-		res, e := previewFetch(ctx, db.core.Recipes, q.Get("recipe"), "", rawURL)
+		res, e := previewFetch(ctx, db.core.Recipes, q.Get("recipe"), q.Get("ingest"), rawURL)
 		if e != nil {
 			return e
 		}

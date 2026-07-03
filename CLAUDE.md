@@ -70,9 +70,9 @@ Shared format between backend (writer) and frontend (reader).
 
 **One feed = one source URL.** All fields are flat on the feed:
 
-`{ id, title, url, etag?, last_modified?, wm?, bg?, ferr?, last_ok?, fail_streak?, last_new?, nt?, total_art, add_idx, exp?, xp?, tag?, recipe? }`
+`{ id, title, url, etag?, last_modified?, wm?, bg?, ferr?, last_ok?, fail_streak?, last_new?, nt?, total_art, add_idx, exp?, xp?, tag?, recipe?, ingest?, pipe? }`
 
-`url` is the single source URL. `wm` (Watermark) is the max published unix-second ever seen; `bg` (BoundaryGUIDs) is the FNV-32a hash array used for dedup, capped at 1024 entries (`maxBoundaryGUIDs` in `backend/feed.go`); `etag`/`last_modified` are the incremental-fetch HTTP validators; `ferr` is the last fetch error (empty when healthy); `last_ok`/`fail_streak`/`last_new` are per-feed fetch-health vitals (unix-sec of the last successful fetch incl. 304 / consecutive-failure count / unix-sec of the last fetch that ingested a new article); `nt` (NoTitle) marks a titleless microblog-style feed — a reader-consumed contract flag (the frontend hides the article heading); `recipe` is the name of the `{ingest, pipe}` recipe this feed uses (empty or absent ⇒ `default`). The `Feed` type was removed (2026-06-17): re-importing OPML now yields one feed per `xmlUrl` rather than merging several under one id. Up to `feedIDCeiling` (65536) feeds — `feed_id` is a u16 in each idx entry.
+`url` is the single source URL. `wm` (Watermark) is the max published unix-second ever seen; `bg` (BoundaryGUIDs) is the FNV-32a hash array used for dedup, capped at 1024 entries (`maxBoundaryGUIDs` in `backend/feed.go`); `etag`/`last_modified` are the incremental-fetch HTTP validators; `ferr` is the last fetch error (empty when healthy); `last_ok`/`fail_streak`/`last_new` are per-feed fetch-health vitals (unix-sec of the last successful fetch incl. 304 / consecutive-failure count / unix-sec of the last fetch that ingested a new article); `nt` (NoTitle) marks a titleless microblog-style feed — a reader-consumed contract flag (the frontend hides the article heading); `recipe` is the name of the `{ingest, pipe}` recipe this feed uses (empty or absent ⇒ `default`); `ingest`/`pipe` are the optional feed-level overrides on top of that recipe (each axis wins over the recipe when set — see Recipes; backend-only, the frontend/service-worker ignores them like `recipe`). The `Feed` type was removed (2026-06-17): re-importing OPML now yields one feed per `xmlUrl` rather than merging several under one id. Up to `feedIDCeiling` (65536) feeds — `feed_id` is a u16 in each idx entry.
 
 `exp` (ExpireDays) is the per-feed retention window in days (0 = keep forever, max 36500) — each fetch cycle expires that feed's articles fetched longer ago: every `assets/…` object their content references is deleted (no liveness check by design — a shared asset dies too; content-hash re-upload and `srr asset heal --create` are the repair paths) and `add_idx` is bumped past them (logical deletion — packs and idx headers are immutable; entries below `add_idx` now arise from expiration as well as feed id reuse). `xp` (Expired) is the cumulative expired-entry count: readers compute visible-before-pack-P as `header.feedCounts[f] − xp` once `add_idx < P.base` — per-feed `total_art` stays **all-time** because `writeIdxHeader` sources the immutable idx-header cumulative counts from it.
 
@@ -85,14 +85,19 @@ present, seeded `["#sanitize","#minify"]`) is the fallback.
 - A feed with empty/absent `recipe` resolves to `default`.
 - Each axis falls back to `default` independently: a recipe that sets only `ingest`
   uses its own ingest and `default`'s pipe; only `pipe` ⇒ its pipe and `default`'s ingest.
-- `#default` inside a recipe's pipe expands inline to the `default` recipe's pipe;
-  the `default` recipe forbids `#default` (it is the default).
+- A feed may additionally carry its own `ingest`/`pipe` overrides on top of its
+  recipe, again per axis: set, the feed's value wins; empty, it inherits the recipe's.
+- `#default` expands inline to the next pipe down the chain: inside a recipe's pipe,
+  the `default` recipe's pipe; inside a feed's pipe, the feed's effective recipe pipe.
+  The `default` recipe forbids `#default` (it is the default); a feed pipe always allows it.
 - Built-in mods use `#` (`#sanitize`, `#minify`, `#readability`, `#filter`, `#selfhost`);
   anything else is a shell command. Ingest: built-in `#feed`, or a shell command.
-- Resolution: `pipe = resolvePipe(default.Pipe, recipe.Pipe)`,
-  `ingest = ingest.Select(recipe.Ingest, default.Ingest)`.
-- Managed via `srr recipe set/ls/show/rm`. Clean break: a pre-recipes db.gz drops its
-  legacy root/feed `pipe`/`ingest` on load and every feed reverts to `default`.
+- Resolution: `pipe = resolvePipe(resolvePipe(default.Pipe, recipe.Pipe), feed.Pipe)`,
+  `ingest = ingest.Select(feed.Ingest, recipe.Ingest, default.Ingest)` (first non-empty wins).
+- Managed via `srr recipe set/ls/show/rm`; feed-level overrides via
+  `srr feed add/upd -i/-p`. Clean break, amended: a pre-recipes db.gz still drops its
+  legacy root `pipe`/`ingest` on load, but the legacy feed-level keys are the same keys
+  the overrides use today and revive as such (deliberate — same per-feed meaning).
 
 `feeds` is a JSON object (`Record<number, IFeed>`) keyed by feed ID. Backend struct: `Feed` carries `URL` + its own fetch state directly. JSON uses short keys (`url`, `etag`, `last_modified`, `wm`, `bg`, `ferr`, `recipe`, …) — see the `Feed`/`DBCore` struct tags.
 

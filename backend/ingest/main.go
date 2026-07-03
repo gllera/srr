@@ -122,10 +122,11 @@ func Register(name string, fn FetchFunc) {
 // compare against to decide whether subscribe-time discovery applies.
 const Builtin = "#feed"
 
-// Select applies the caller's precedence rule: feed > global default
-// > built-in "#feed". Empty strings fall through.
-func Select(feedFetcher, globalFetcher string) string {
-	for _, name := range []string{feedFetcher, globalFetcher} {
+// Select applies the caller's precedence rule: the first non-empty name wins
+// (feed-level override > feed's recipe > default recipe). Empty strings fall
+// through; all empty falls back to the built-in "#feed".
+func Select(names ...string) string {
+	for _, name := range names {
 		if name != "" {
 			return name
 		}

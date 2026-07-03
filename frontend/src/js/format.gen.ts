@@ -80,6 +80,8 @@ export interface IFeedWire {
    last_new?: number // LastNew
    tag?: string // Tag
    recipe?: string // Recipe
+   ingest?: string // Ingest
+   pipe?: string[] // Pipe
    nt?: boolean // NoTitle
    exp?: number // ExpireDays
    xp?: number // Expired

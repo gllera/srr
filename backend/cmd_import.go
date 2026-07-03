@@ -200,7 +200,7 @@ func resolveImportFeeds(ctx context.Context, feeds []*Feed, recipes map[string]R
 	sem := make(chan struct{}, max(1, globals.Workers))
 	var wg sync.WaitGroup
 	for i, c := range feeds {
-		if !resolvesFeed(recipes, c.Recipe) {
+		if !resolvesFeed(recipes, c.Recipe, c.Ingest) {
 			resolved[i] = c.URL // external ingest: stored as-is, never probed
 			continue
 		}

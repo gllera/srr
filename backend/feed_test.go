@@ -123,6 +123,103 @@ func TestFeedFetchFallsBackToDefaultIngest(t *testing.T) {
 	}
 }
 
+// A feed-level Ingest override wins over both the recipe's ingest and the
+// default's: the recipe names an unknown built-in that would fail the fetch,
+// so items arriving proves the feed's #test-stub was selected instead.
+func TestFeedFetchFeedIngestOverridesRecipe(t *testing.T) {
+	const fetchedAt int64 = 4_102_444_800
+	buf := make([]byte, 1<<20)
+	run := &fetchRun{
+		engine:    ingest.New(),
+		fetchedAt: fetchedAt,
+		recipes: map[string]Recipe{
+			defaultRecipeName: {},
+			"bad":             {Ingest: "#no-such-builtin"},
+		},
+	}
+	ch := &Feed{Title: "T", URL: "irrelevant://value", Recipe: "bad", Ingest: "#test-stub"}
+	ch.Fetch(context.Background(), run, buf, mod.New())
+	if ch.FetchError != "" {
+		t.Fatalf("FetchError = %q, want empty", ch.FetchError)
+	}
+	if len(ch.newItems) != 2 {
+		t.Fatalf("got %d items, want 2 (feed-level ingest override selected)", len(ch.newItems))
+	}
+}
+
+// A feed-level Pipe override REPLACES the recipe's effective pipe (it does not
+// append): the recipe's filter would drop stub-2, the feed's drops stub-1 —
+// exactly one survivor proves only the feed's pipe ran.
+func TestFeedFetchFeedPipeReplacesRecipePipe(t *testing.T) {
+	const fetchedAt int64 = 4_102_444_800
+	buf := make([]byte, 1<<20)
+	run := &fetchRun{
+		engine:    ingest.New(),
+		fetchedAt: fetchedAt,
+		recipes: map[string]Recipe{
+			defaultRecipeName: {Ingest: "#test-stub"},
+			"r":               {Pipe: []string{"#filter drop_title=/stub-2/"}},
+		},
+	}
+	ch := &Feed{Title: "T", URL: "irrelevant://value", Recipe: "r",
+		Pipe: []string{"#filter drop_title=/stub-1/"}}
+	ch.Fetch(context.Background(), run, buf, mod.New())
+	if ch.FetchError != "" {
+		t.Fatalf("FetchError = %q, want empty", ch.FetchError)
+	}
+	if len(ch.newItems) != 1 || ch.newItems[0].Title != "stub-2" {
+		t.Fatalf("newItems = %+v, want exactly [stub-2] (feed pipe replaced recipe pipe)", ch.newItems)
+	}
+}
+
+// #default inside a feed-level Pipe expands to the feed's effective recipe
+// pipe: with the feed pipe [#default, drop stub-1] both filters run and drop
+// everything — proving the recipe's filter was spliced in, not discarded.
+func TestFeedFetchFeedPipeDefaultExpandsToRecipePipe(t *testing.T) {
+	const fetchedAt int64 = 4_102_444_800
+	buf := make([]byte, 1<<20)
+	run := &fetchRun{
+		engine:    ingest.New(),
+		fetchedAt: fetchedAt,
+		recipes: map[string]Recipe{
+			defaultRecipeName: {Ingest: "#test-stub"},
+			"r":               {Pipe: []string{"#filter drop_title=/stub-2/"}},
+		},
+	}
+	ch := &Feed{Title: "T", URL: "irrelevant://value", Recipe: "r",
+		Pipe: []string{"#default", "#filter drop_title=/stub-1/"}}
+	ch.Fetch(context.Background(), run, buf, mod.New())
+	if ch.FetchError != "" {
+		t.Fatalf("FetchError = %q, want empty", ch.FetchError)
+	}
+	if len(ch.newItems) != 0 {
+		t.Fatalf("got %d items, want 0 (recipe pipe spliced in via #default drops the rest)", len(ch.newItems))
+	}
+}
+
+// The pipe fallback chain composes per level: recipe over default, feed over
+// recipe — an empty feed pipe inherits, a non-empty one replaces with #default
+// splicing in the recipe's effective pipe.
+func TestResolvePipeChainsPerLevel(t *testing.T) {
+	def := []string{"#sanitize", "#minify"}
+	recipe := []string{"#readability", "#default"}
+	effRecipe := resolvePipe(def, recipe)
+	if want := []string{"#readability", "#sanitize", "#minify"}; !slices.Equal(effRecipe, want) {
+		t.Fatalf("recipe level = %v, want %v", effRecipe, want)
+	}
+	// Empty feed pipe inherits the recipe's effective pipe untouched.
+	if got := resolvePipe(effRecipe, nil); !slices.Equal(got, effRecipe) {
+		t.Errorf("empty feed pipe = %v, want inherited %v", got, effRecipe)
+	}
+	// Non-empty feed pipe replaces it; #default expands to the recipe's
+	// effective (already default-expanded) pipe.
+	got := resolvePipe(effRecipe, []string{"#filter drop_title=/x/", "#default"})
+	want := []string{"#filter drop_title=/x/", "#readability", "#sanitize", "#minify"}
+	if !slices.Equal(got, want) {
+		t.Errorf("feed level = %v, want %v", got, want)
+	}
+}
+
 // Items the publisher gave no parseable date for must be stored with
 // Published=0 so the frontend renders an empty date (its `p ?? 0` fallback).
 func TestFetchDatelessItemHasZeroPublished(t *testing.T) {

@@ -215,6 +215,73 @@ func TestServeFeedSaveRoundTripsNoTitle(t *testing.T) {
 	}
 }
 
+// The GUI save body is full-replace, so the feed-level {ingest, pipe}
+// overrides must round-trip through PUT: set → echoed + stored, omitted →
+// cleared.
+func TestServeFeedSaveRoundTripsIngestPipe(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	stubPassthroughResolve()
+	seedFeed(t, db, &Feed{Title: "Chan", URL: "https://t.example.com/feed"})
+
+	rec := doReq(t, newMux(), "PUT", "/api/feeds/0",
+		`{"title":"Chan","url":"https://t.example.com/feed","ingest":"my-fetcher","pipe":["#readability","#default"]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	var got feedListView
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Ingest != "my-fetcher" || len(got.Pipe) != 2 {
+		t.Fatalf("echo ingest=%q pipe=%v, want my-fetcher/[#readability #default]", got.Ingest, got.Pipe)
+	}
+	err := withDB(false, func(_ context.Context, d *DB) error {
+		ch, e := d.FeedByID(0)
+		if e != nil {
+			return e
+		}
+		if ch.Ingest != "my-fetcher" || len(ch.Pipe) != 2 {
+			t.Fatalf("stored ingest=%q pipe=%v", ch.Ingest, ch.Pipe)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Full replace: a body without the fields clears both overrides.
+	rec = doReq(t, newMux(), "PUT", "/api/feeds/0",
+		`{"title":"Chan","url":"https://t.example.com/feed"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	err = withDB(false, func(_ context.Context, d *DB) error {
+		ch, e := d.FeedByID(0)
+		if e != nil {
+			return e
+		}
+		if ch.Ingest != "" || ch.Pipe != nil {
+			t.Fatalf("overrides not cleared: ingest=%q pipe=%v", ch.Ingest, ch.Pipe)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A feed-level pipe with a typo'd built-in is rejected by the same validation
+// as a recipe pipe (400, nothing stored).
+func TestServeFeedSaveRejectsBadPipeToken(t *testing.T) {
+	setupTestDB(t)
+	stubPassthroughResolve()
+	body := `{"title":"X","url":"https://x.example/feed","pipe":["#sanitise"]}`
+	rec := doReq(t, newMux(), "POST", "/api/feeds", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (%s)", rec.Code, rec.Body)
+	}
+}
+
 func TestServeFeedExpireDaysRoundTrip(t *testing.T) {
 	db, _, _ := setupTestDB(t)
 	stubPassthroughResolve()

@@ -34,7 +34,7 @@ Commands are grouped under `feed` (feed management), `art` (articles), `preview`
 | Command            | Description                                        |
 |--------------------|----------------------------------------------------|
 | `feed add`         | Subscribe to a new feed (one feed URL); always allocates a fresh id |
-| `feed upd <id>`    | Update a feed (`-t` title, `-g` tag, `-r` recipe; `-u` repoints the single feed URL) |
+| `feed upd <id>`    | Update a feed (`-t` title, `-g` tag, `-r` recipe, `-i` ingest / `-p` pipe feed-level overrides; `-u` repoints the single feed URL) |
 | `feed rm`          | Unsubscribe from feed(s) by id                  |
 | `feed ls`          | List feeds (`-g` tag filter, `-f` format)       |
 | `feed show <id>`   | Print one feed (yaml/json)                      |
@@ -67,6 +67,14 @@ srr recipe show readability
 
 # Update a feed's recipe
 srr feed upd 1 -r readability
+
+# Feed-level overrides: this one feed runs its own pipe on top of its recipe
+# (#default expands to the recipe's effective pipe); -i overrides the ingest
+srr feed upd 1 -p "#default" -p "#selfhost"
+srr feed upd 1 -i "myfetch --token=\$TOK"
+
+# Clear the feed-level overrides again (back to the recipe's values)
+srr feed upd 1 -p "" -i ""
 
 # Repoint a feed at a new feed URL (resets its fetch/dedup state)
 srr feed upd 1 -u https://example.com/new-feed.xml
@@ -221,7 +229,7 @@ An *ingest strategy* is the I/O + parse step that turns a subscription URL into 
 
 ### Selecting a strategy
 
-The effective strategy is resolved per feed from its recipe. Each feed names one recipe (`-r/--recipe` at add/upd/import time; empty or absent ⇒ `default`). The recipe's `ingest` field is used; if empty, it falls back to the `default` recipe's ingest; if that is also empty, the built-in `#feed` is used. Recipes are managed with `srr recipe`.
+The effective strategy is resolved per feed. Each feed names one recipe (`-r/--recipe` at add/upd/import time; empty or absent ⇒ `default`) and may carry its own feed-level override (`-i/--ingest` on `feed add`/`upd`; `-i ""` clears it). First non-empty wins: the feed's own `ingest`, then its recipe's, then the `default` recipe's; if all are empty, the built-in `#feed` is used. Recipes are managed with `srr recipe`.
 
 Built-in strategy names start with `#` (only `#feed` ships built-in). **Any value that does not start with `#` is run as a shell command** via `/bin/sh -c`.
 
@@ -234,6 +242,9 @@ srr feed add -t "My source" -u "https://example.com/x" -r mytelegram
 
 # Make an external command the default for every feed
 srr recipe set default -i "myfetch"
+
+# Or override just one feed, without touching any recipe
+srr feed upd 1 -i "myfetch --token=$TOK"
 
 # Preview with an ad-hoc ingest override (does not require a saved recipe)
 srr preview "https://example.com/x" -i "myfetch --token=$TOK"
@@ -370,7 +381,7 @@ json.dump({"items": items}, sys.stdout)
 
 ## Pipe Pipeline
 
-Articles pass through a chain of mods during fetch. The pipe is defined per recipe and feeds reference a recipe by name (`-r/--recipe`). The reserved `default` recipe seeds `["#sanitize","#minify"]`. The `#default` token in a recipe's pipe expands inline to the `default` recipe's pipe (forbidden inside `default` itself).
+Articles pass through a chain of mods during fetch. The pipe is defined per recipe and feeds reference a recipe by name (`-r/--recipe`); a feed may also carry its own feed-level pipe (`-p` on `feed add`/`upd`, repeatable; a lone `-p ""` clears it) which replaces its recipe's. The reserved `default` recipe seeds `["#sanitize","#minify"]`. The `#default` token expands inline to the next pipe down the chain: in a recipe's pipe, the `default` recipe's pipe (forbidden inside `default` itself); in a feed's pipe, the feed's effective recipe pipe.
 
 **Built-in mods:**
 

@@ -9,23 +9,25 @@ import (
 
 // feedListView is the read-only feed shape the GUI table consumes: the writable
 // feedView fields plus server-owned health fields. Writes (POST/PUT) accept
-// title/url/tag/recipe/no_title/expire_days — full-replace semantics, like
-// `feed apply` (the edit modal always sends the no_title checkbox and
-// expire_days values).
+// title/url/tag/recipe/ingest/pipe/no_title/expire_days — full-replace
+// semantics, like `feed apply` (the edit modal always sends the no_title
+// checkbox, expire_days, and the ingest/pipe override values).
 type feedListView struct {
-	ID         int    `json:"id"`
-	Title      string `json:"title"`
-	URL        string `json:"url"`
-	Tag        string `json:"tag,omitempty"`
-	Recipe     string `json:"recipe,omitempty"`
-	NoTitle    bool   `json:"no_title,omitempty"`
-	Error      string `json:"error,omitempty"`
-	FailStreak int    `json:"fail_streak"`
-	LastOK     int64  `json:"last_ok"`
-	LastNew    int64  `json:"last_new"`
-	TotalArt   int    `json:"total_art"`
-	ExpireDays int    `json:"expire_days,omitempty"`
-	Expired    int    `json:"expired,omitempty"`
+	ID         int      `json:"id"`
+	Title      string   `json:"title"`
+	URL        string   `json:"url"`
+	Tag        string   `json:"tag,omitempty"`
+	Recipe     string   `json:"recipe,omitempty"`
+	Ingest     string   `json:"ingest,omitempty"`
+	Pipe       []string `json:"pipe,omitempty"`
+	NoTitle    bool     `json:"no_title,omitempty"`
+	Error      string   `json:"error,omitempty"`
+	FailStreak int      `json:"fail_streak"`
+	LastOK     int64    `json:"last_ok"`
+	LastNew    int64    `json:"last_new"`
+	TotalArt   int      `json:"total_art"`
+	ExpireDays int      `json:"expire_days,omitempty"`
+	Expired    int      `json:"expired,omitempty"`
 }
 
 func listViewOf(ch *Feed) feedListView {
@@ -35,6 +37,8 @@ func listViewOf(ch *Feed) feedListView {
 		URL:        ch.URL,
 		Tag:        ch.Tag,
 		Recipe:     ch.Recipe,
+		Ingest:     ch.Ingest,
+		Pipe:       ch.Pipe,
 		NoTitle:    ch.NoTitle,
 		Error:      ch.FetchError,
 		FailStreak: ch.FailStreak,
@@ -68,7 +72,7 @@ func saveFeed(ctx context.Context, db *DB, v *feedView) (*Feed, error) {
 		}
 		ch = existing
 	}
-	resolved, err := resolveFeedProbe(ctx, db.core.Recipes, v.Recipe, ch.URL, v.URL)
+	resolved, err := resolveFeedProbe(ctx, db.core.Recipes, v.Recipe, v.Ingest, ch.URL, v.URL)
 	if err != nil {
 		return nil, err
 	}

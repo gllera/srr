@@ -30,25 +30,26 @@ var resolveFeedURL = func(ctx context.Context, rawURL string) (string, error) {
 }
 
 // resolvesFeed reports whether subscribe-time discovery applies: only when the
-// feed's effective ingest strategy (its recipe's, falling back to default's)
-// is the built-in #feed. External ingest strategies own their own source and
-// are stored as-is.
-func resolvesFeed(recipes map[string]Recipe, recipeName string) bool {
+// feed's effective ingest strategy (its own override, falling back to its
+// recipe's, then default's) is the built-in #feed. External ingest strategies
+// own their own source and are stored as-is.
+func resolvesFeed(recipes map[string]Recipe, recipeName, feedIngest string) bool {
 	r := recipeFor(recipes, recipeName)
 	def := recipeFor(recipes, defaultRecipeName)
-	return ingest.Select(r.Ingest, def.Ingest) == ingest.Builtin
+	return ingest.Select(feedIngest, r.Ingest, def.Ingest) == ingest.Builtin
 }
 
 // resolveFeedProbe validates the recipe reference and — when the URL is new
 // or changed (newURL != oldURL) and the effective ingest is #feed — resolves
-// the URL via subscribe-time discovery. Returns the resolved URL (unchanged if
-// no probe ran). Called before any network probe so an unknown recipe surfaces
-// as a clear "recipe does not exist" error rather than a resolve failure.
-func resolveFeedProbe(ctx context.Context, recipes map[string]Recipe, recipe, oldURL, newURL string) (string, error) {
+// the URL via subscribe-time discovery. feedIngest is the feed-level ingest
+// override (may be empty). Returns the resolved URL (unchanged if no probe
+// ran). Called before any network probe so an unknown recipe surfaces as a
+// clear "recipe does not exist" error rather than a resolve failure.
+func resolveFeedProbe(ctx context.Context, recipes map[string]Recipe, recipe, feedIngest, oldURL, newURL string) (string, error) {
 	if err := validateRecipeRef(recipes, recipe); err != nil {
 		return "", err
 	}
-	if newURL != oldURL && resolvesFeed(recipes, recipe) {
+	if newURL != oldURL && resolvesFeed(recipes, recipe, feedIngest) {
 		resolved, err := resolveFeedURL(ctx, newURL)
 		if err != nil {
 			return "", fmt.Errorf("resolve feed %q: %w", newURL, err)
@@ -80,7 +81,9 @@ func printJSON(v any) error {
 
 // normalizeFeed validates a feed just before it is persisted (the single
 // chokepoint for add/upd/apply/edit/import): its recipe reference must exist
-// (no dangling refs created via the CLI) and its tag must be OPML-safe.
+// (no dangling refs created via the CLI), its feed-level pipe override must
+// pass the same token check as a recipe pipe (#default allowed — it expands
+// to the recipe's effective pipe), and its tag must be OPML-safe.
 func normalizeFeed(ch *Feed, recipes map[string]Recipe) error {
 	if ch.ExpireDays < 0 {
 		return fmt.Errorf("expire days must be >= 0 (got %d)", ch.ExpireDays)
@@ -91,6 +94,10 @@ func normalizeFeed(ch *Feed, recipes map[string]Recipe) error {
 		return fmt.Errorf("expire days must be <= 36500 (100 years) (got %d)", ch.ExpireDays)
 	}
 	if err := validateRecipeRef(recipes, ch.Recipe); err != nil {
+		return err
+	}
+	ch.Pipe = filterPipe(ch.Pipe)
+	if err := validatePipe(ch.Pipe, true); err != nil {
 		return err
 	}
 	return validateTag(ch.Tag)
@@ -135,11 +142,13 @@ func validateTag(tag string) error {
 }
 
 type AddCmd struct {
-	Title  *string `short:"t" required:"" help:"Feed title."`
-	URL    *string `short:"u" required:"" help:"Feed RSS url."`
-	Tag    *string `short:"g" optional:"" help:"Feed tag."`
-	Recipe *string `short:"r" optional:"" help:"Recipe name (must exist). Empty inherits 'default'."`
-	Expire *int    `short:"e" name:"expire-days" optional:"" help:"Expire articles after N days (0 = keep forever)."`
+	Title  *string  `short:"t" required:"" help:"Feed title."`
+	URL    *string  `short:"u" required:"" help:"Feed RSS url."`
+	Tag    *string  `short:"g" optional:"" help:"Feed tag."`
+	Recipe *string  `short:"r" optional:"" help:"Recipe name (must exist). Empty inherits 'default'."`
+	Ingest *string  `short:"i" optional:"" help:"Feed-level ingest override: built-in ('#feed') or shell command. Empty inherits the recipe's."`
+	Pipe   []string `short:"p" sep:"none" optional:"" help:"Feed-level pipeline step; repeat -p per step. Overrides the recipe's pipe; #default expands to the recipe's effective pipe."`
+	Expire *int     `short:"e" name:"expire-days" optional:"" help:"Expire articles after N days (0 = keep forever)."`
 }
 
 func (o *AddCmd) Run() error {
@@ -159,11 +168,15 @@ func (o *AddCmd) Run() error {
 	if o.Recipe != nil {
 		v.Recipe = *o.Recipe
 	}
+	if o.Ingest != nil {
+		v.Ingest = *o.Ingest
+	}
+	v.Pipe = o.Pipe
 	if o.Expire != nil {
 		v.ExpireDays = *o.Expire
 	}
 	return withDB(true, func(ctx context.Context, db *DB) error {
-		resolved, err := resolveFeedProbe(ctx, db.core.Recipes, v.Recipe, "", v.URL)
+		resolved, err := resolveFeedProbe(ctx, db.core.Recipes, v.Recipe, v.Ingest, "", v.URL)
 		if err != nil {
 			return err
 		}
@@ -178,14 +191,16 @@ func (o *AddCmd) Run() error {
 // feed = one URL: the URL is a flat field; the last fetch error (if any)
 // rides alongside it as a read-only `error` for visibility.
 type feedView struct {
-	ID         *int   `json:"id,omitempty" yaml:"id,omitempty"`
-	Title      string `json:"title"        yaml:"title"`
-	URL        string `json:"url"          yaml:"url"`
-	Error      string `json:"error,omitempty" yaml:"error,omitempty"`
-	Tag        string `json:"tag,omitempty" yaml:"tag,omitempty"`
-	Recipe     string `json:"recipe,omitempty" yaml:"recipe,omitempty"`
-	NoTitle    bool   `json:"no_title,omitempty" yaml:"no_title,omitempty"`
-	ExpireDays int    `json:"expire_days,omitempty" yaml:"expire_days,omitempty"`
+	ID         *int     `json:"id,omitempty" yaml:"id,omitempty"`
+	Title      string   `json:"title"        yaml:"title"`
+	URL        string   `json:"url"          yaml:"url"`
+	Error      string   `json:"error,omitempty" yaml:"error,omitempty"`
+	Tag        string   `json:"tag,omitempty" yaml:"tag,omitempty"`
+	Recipe     string   `json:"recipe,omitempty" yaml:"recipe,omitempty"`
+	Ingest     string   `json:"ingest,omitempty" yaml:"ingest,omitempty"`
+	Pipe       []string `json:"pipe,omitempty" yaml:"pipe,omitempty"`
+	NoTitle    bool     `json:"no_title,omitempty" yaml:"no_title,omitempty"`
+	ExpireDays int      `json:"expire_days,omitempty" yaml:"expire_days,omitempty"`
 	// Expired is read-only (server-owned, like Error): reported by ls/show/
 	// edit, never applied back by writeFeedView.
 	Expired int `json:"expired,omitempty" yaml:"expired,omitempty"`
@@ -201,6 +216,8 @@ func viewOf(ch *Feed) *feedView {
 		Error:      ch.FetchError,
 		Tag:        ch.Tag,
 		Recipe:     ch.Recipe,
+		Ingest:     ch.Ingest,
+		Pipe:       ch.Pipe,
 		NoTitle:    ch.NoTitle,
 		ExpireDays: ch.ExpireDays,
 		Expired:    ch.Expired,
@@ -208,16 +225,18 @@ func viewOf(ch *Feed) *feedView {
 }
 
 type UpdCmd struct {
-	ID     int     `arg:""                help:"Feed id to update."`
-	Title  *string `short:"t" optional:"" help:"Feed title (empty rejected)."`
-	URL    *string `short:"u" optional:"" help:"Feed RSS url. Changing it resets the feed's fetch state (etag/watermark/dedup)."`
-	Tag    *string `short:"g" optional:"" help:"Feed tag. Empty (\"\") to clear."`
-	Recipe *string `short:"r" optional:"" help:"Recipe name (must exist). Empty (\"\") to clear (⇒ default)."`
-	Expire *int    `short:"e" name:"expire-days" optional:"" help:"Expire articles after N days (0 = keep forever)."`
+	ID     int      `arg:""                help:"Feed id to update."`
+	Title  *string  `short:"t" optional:"" help:"Feed title (empty rejected)."`
+	URL    *string  `short:"u" optional:"" help:"Feed RSS url. Changing it resets the feed's fetch state (etag/watermark/dedup)."`
+	Tag    *string  `short:"g" optional:"" help:"Feed tag. Empty (\"\") to clear."`
+	Recipe *string  `short:"r" optional:"" help:"Recipe name (must exist). Empty (\"\") to clear (⇒ default)."`
+	Ingest *string  `short:"i" optional:"" help:"Feed-level ingest override. Empty (\"\") to clear (⇒ recipe's)."`
+	Pipe   []string `short:"p" sep:"none" optional:"" help:"Feed-level pipeline step; repeat -p per step (#default expands to the recipe's effective pipe). A single -p \"\" clears (⇒ recipe's)."`
+	Expire *int     `short:"e" name:"expire-days" optional:"" help:"Expire articles after N days (0 = keep forever)."`
 }
 
 func (o *UpdCmd) Run() error {
-	if o.Title == nil && o.Tag == nil && o.Recipe == nil && o.URL == nil && o.Expire == nil {
+	if o.Title == nil && o.Tag == nil && o.Recipe == nil && o.Ingest == nil && o.Pipe == nil && o.URL == nil && o.Expire == nil {
 		return fmt.Errorf("nothing to update")
 	}
 
@@ -238,6 +257,13 @@ func (o *UpdCmd) Run() error {
 		if o.Recipe != nil {
 			ch.Recipe = *o.Recipe
 		}
+		if o.Ingest != nil {
+			ch.Ingest = *o.Ingest
+		}
+		if o.Pipe != nil {
+			// normalizeFeed's filterPipe turns a lone -p "" into nil = cleared.
+			ch.Pipe = o.Pipe
+		}
 		if o.Expire != nil {
 			ch.ExpireDays = *o.Expire
 		}
@@ -252,7 +278,7 @@ func (o *UpdCmd) Run() error {
 			}
 			newURL = *o.URL
 		}
-		resolved, err := resolveFeedProbe(ctx, db.core.Recipes, ch.Recipe, oldURL, newURL)
+		resolved, err := resolveFeedProbe(ctx, db.core.Recipes, ch.Recipe, ch.Ingest, oldURL, newURL)
 		if err != nil {
 			return err
 		}
@@ -431,6 +457,8 @@ func writeFeedView(ch *Feed, v *feedView) {
 	setFeedURL(ch, v.URL)
 	ch.Tag = v.Tag
 	ch.Recipe = v.Recipe
+	ch.Ingest = v.Ingest
+	ch.Pipe = v.Pipe
 	ch.NoTitle = v.NoTitle
 	ch.ExpireDays = v.ExpireDays
 }

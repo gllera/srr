@@ -1191,9 +1191,13 @@ func writeLegacyDB(t *testing.T, dir, jsonStr string) {
 	}
 }
 
-func TestNewDBDropsLegacyPipeIngest(t *testing.T) {
+func TestNewDBLegacyPipeIngest(t *testing.T) {
 	// Write a legacy db.gz by hand (old root pipe/ingest + a feed with inline
-	// pipe/ingest) into a temp store, then open it with NewDB.
+	// pipe/ingest) into a temp store, then open it with NewDB. The legacy ROOT
+	// pipe/ingest stay dropped (DBCore has no such fields; the default recipe
+	// is seeded fresh), but the feed-level keys are the SAME keys the per-feed
+	// override fields use today, so those values revive as overrides — accepted
+	// on purpose, the old per-feed meaning matches the new one.
 	dir := t.TempDir()
 	globals = &Globals{PackSize: 1, Store: dir}
 	legacy := `{"fetched_at":0,"total_art":0,"next_pid":0,"pack_off":0,` +
@@ -1213,5 +1217,11 @@ func TestNewDBDropsLegacyPipeIngest(t *testing.T) {
 	}
 	if db.core.Feeds[0].Recipe != "" {
 		t.Errorf("legacy feed Recipe = %q, want empty (⇒ default)", db.core.Feeds[0].Recipe)
+	}
+	if got := db.core.Feeds[0].Ingest; got != "x" {
+		t.Errorf("legacy feed ingest = %q, want %q (revived as feed-level override)", got, "x")
+	}
+	if want := []string{"#minify"}; !slices.Equal(db.core.Feeds[0].Pipe, want) {
+		t.Errorf("legacy feed pipe = %v, want %v (revived as feed-level override)", db.core.Feeds[0].Pipe, want)
 	}
 }
