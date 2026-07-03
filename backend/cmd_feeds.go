@@ -85,6 +85,11 @@ func normalizeFeed(ch *Feed, recipes map[string]Recipe) error {
 	if ch.ExpireDays < 0 {
 		return fmt.Errorf("expire days must be >= 0 (got %d)", ch.ExpireDays)
 	}
+	// Sanity ceiling: keeps the cutoff arithmetic (now − days·86400) far from
+	// int64 overflow and rejects obviously-typo'd values.
+	if ch.ExpireDays > 36500 {
+		return fmt.Errorf("expire days must be <= 36500 (100 years) (got %d)", ch.ExpireDays)
+	}
 	if err := validateRecipeRef(recipes, ch.Recipe); err != nil {
 		return err
 	}

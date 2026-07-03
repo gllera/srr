@@ -948,3 +948,14 @@ func TestNormalizeFeedRejectsNegativeExpireDays(t *testing.T) {
 		t.Fatal("want error for negative expire days")
 	}
 }
+
+func TestNormalizeFeedRejectsHugeExpireDays(t *testing.T) {
+	err := normalizeFeed(&Feed{Title: "A", URL: "https://example.com/f.xml", ExpireDays: 36501}, map[string]Recipe{})
+	if err == nil {
+		t.Fatal("want error for expire days above the 36500 ceiling")
+	}
+	// The ceiling itself is accepted.
+	if err := normalizeFeed(&Feed{Title: "A", URL: "https://example.com/f.xml", ExpireDays: 36500}, map[string]Recipe{}); err != nil {
+		t.Fatalf("ExpireDays == ceiling rejected: %v", err)
+	}
+}

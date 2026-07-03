@@ -93,9 +93,13 @@ func (o *DB) ExpireArticles(ctx context.Context, now int64) error {
 
 // collectAssetRefs adds every self-hosted asset key (assets/…) referenced by
 // content's media/link attributes (the outAssetAttrs set, via the shared
-// visitAssetAttrs walk) to keys. Same fast path as rewriteAssetURLs;
-// unparseable HTML contributes nothing — the content already published
-// as-is, and an error here would wedge retention forever.
+// visitAssetAttrs walk) to keys. Candidates are validated against the strict
+// assetKeyRe grammar, not a bare prefix — these keys feed Rm, which
+// path-joins on local/SFTP, so adversarial feed content like
+// `assets/../victim` must never be harvested (a rejected key is simply not
+// deleted: leak-safe, never delete-unsafe). Same fast path as
+// rewriteAssetURLs; unparseable HTML contributes nothing — the content
+// already published as-is, and an error here would wedge retention forever.
 func collectAssetRefs(content string, keys map[string]struct{}) {
 	if content == "" || !strings.Contains(content, assetKeyPrefix) {
 		return
@@ -105,7 +109,7 @@ func collectAssetRefs(content string, keys map[string]struct{}) {
 		return
 	}
 	visitAssetAttrs(nodes, func(a *html.Attribute) {
-		if strings.HasPrefix(a.Val, assetKeyPrefix) {
+		if assetKeyRe.MatchString(a.Val) {
 			keys[a.Val] = struct{}{}
 		}
 	})

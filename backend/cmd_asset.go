@@ -17,10 +17,13 @@ type AssetGroup struct {
 	Heal AssetHealCmd `cmd:"" help:"Overwrite an existing assets/ object's bytes in place (repair a published-broken asset)."`
 }
 
-// healKeyRe is the assets/ key grammar heal accepts: contentHashKey's
+// assetKeyRe is the strict assets/ key grammar: contentHashKey's
 // assets/<2-hex>/<16-hex><ext> shape (extension optional). Anything else —
-// packs, db.gz, traversal attempts — is refused outright.
-var healKeyRe = regexp.MustCompile(`^assets/[0-9a-f]{2}/[0-9a-f]{16}(\.[A-Za-z0-9]+)?$`)
+// packs, db.gz, traversal attempts — is refused outright. Shared by asset-heal
+// key validation and expire harvesting (collectAssetRefs), where it is the
+// guard keeping adversarial feed content (`assets/../…`) out of Rm's
+// path-joining backends.
+var assetKeyRe = regexp.MustCompile(`^assets/[0-9a-f]{2}/[0-9a-f]{16}(\.[A-Za-z0-9]+)?$`)
 
 // AssetHealCmd replaces a published asset's bytes under its existing key.
 // Articles are immutable and reference the content-hash key forever, so
@@ -52,7 +55,7 @@ func (o *AssetHealCmd) Run() error {
 // legitimately re-created), and overwrites it with the file's bytes and the
 // given or derived Content-Type.
 func healAsset(ctx context.Context, be store.Backend, key, file, contentType string, create bool) error {
-	if !healKeyRe.MatchString(key) {
+	if !assetKeyRe.MatchString(key) {
 		return fmt.Errorf("key %q is not an assets/<2-hex>/<16-hex><ext> key", key)
 	}
 	rc, err := be.Get(ctx, key, true)
