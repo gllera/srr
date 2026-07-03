@@ -913,3 +913,38 @@ func TestFeedListViewEmitsNoTitle(t *testing.T) {
 		t.Errorf("listViewOf NoTitle = false, want true (serve GUI must round-trip the flag)")
 	}
 }
+
+func TestFeedExpireDaysApplyRoundTrip(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	views := []*feedView{{Title: "A", URL: "https://example.com/f.xml", ExpireDays: 30}}
+	if err := applyViews(ctx, db, views); err != nil {
+		t.Fatalf("applyViews: %v", err)
+	}
+	ch := db.core.Feeds[0]
+	if ch.ExpireDays != 30 {
+		t.Fatalf("ExpireDays = %d, want 30", ch.ExpireDays)
+	}
+	if v := viewOf(ch); v.ExpireDays != 30 {
+		t.Fatalf("viewOf ExpireDays = %d, want 30", v.ExpireDays)
+	}
+}
+
+func TestWriteFeedViewIgnoresExpired(t *testing.T) {
+	// Expired is server-owned read-only state (like Error): an apply/edit
+	// round-trip must never zero or overwrite the counter.
+	ch := &Feed{Expired: 7}
+	writeFeedView(ch, &feedView{Title: "A", URL: "https://example.com/f.xml", ExpireDays: 3, Expired: 99})
+	if ch.Expired != 7 {
+		t.Fatalf("Expired = %d, want 7 (read-only)", ch.Expired)
+	}
+	if ch.ExpireDays != 3 {
+		t.Fatalf("ExpireDays = %d, want 3", ch.ExpireDays)
+	}
+}
+
+func TestNormalizeFeedRejectsNegativeExpireDays(t *testing.T) {
+	err := normalizeFeed(&Feed{Title: "A", URL: "https://example.com/f.xml", ExpireDays: -1}, map[string]Recipe{})
+	if err == nil {
+		t.Fatal("want error for negative expire days")
+	}
+}

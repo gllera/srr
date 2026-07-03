@@ -81,6 +81,8 @@ export interface IFeedWire {
    tag?: string // Tag
    recipe?: string // Recipe
    nt?: boolean // NoTitle
+   exp?: number // ExpireDays
+   xp?: number // Expired
    total_art: number // TotalArt
    add_idx: number // AddIdx
 }

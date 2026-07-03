@@ -80,9 +80,20 @@ type Feed struct {
 	// body). The reader hides the heading for these; the home list still uses the
 	// title as its row label. Set out-of-band via `feed apply`/`edit` — the
 	// external-ingest protocol emits articles, not feed config.
-	NoTitle  bool `json:"nt,omitempty"`
-	TotalArt int  `json:"total_art"`
-	AddIdx   int  `json:"add_idx"`
+	NoTitle bool `json:"nt,omitempty"`
+	// ExpireDays is the per-feed retention window in days: each fetch cycle
+	// expires this feed's articles fetched more than ExpireDays·24h ago —
+	// their assets/ objects are deleted and AddIdx is bumped past them (see
+	// db_expire.go). 0 = keep forever (the default).
+	ExpireDays int `json:"exp,omitempty"`
+	// Expired is the cumulative count of this feed's expired idx entries (the
+	// entries in [incarnation start, AddIdx)). Finalized idx headers are
+	// immutable all-time cumulative counts (writeIdxHeader sources them from
+	// TotalArt), so readers subtract Expired to count only visible articles.
+	// Starts at 0 on AddFeed (id reuse included); never decreases otherwise.
+	Expired  int `json:"xp,omitempty"`
+	TotalArt int `json:"total_art"`
+	AddIdx   int `json:"add_idx"`
 	newItems []*Item
 }
 
