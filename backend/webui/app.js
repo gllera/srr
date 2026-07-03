@@ -705,7 +705,7 @@ let feedDialog;
 function openFeedModal(f) {
   feedDialog ||= makeDialog({ id: "feedModal" });
   const isEdit = !!f;
-  const v = f || { title: "", url: "", tag: "", recipe: "", no_title: false };
+  const v = f || { title: "", url: "", tag: "", recipe: "", no_title: false, expire_days: 0 };
   const title = el("input", { id: "f_title", value: v.title,
     placeholder: isEdit ? null : "auto-filled from the feed" });
   const url = el("input", { id: "f_url", value: v.url,
@@ -757,6 +757,8 @@ function openFeedModal(f) {
   drawRecipeChips();
   const noTitle = el("input", { id: "f_notitle", type: "checkbox" });
   noTitle.checked = !!v.no_title;
+  const expire = el("input", { id: "f_expire", type: "number", min: "0", step: "1",
+    value: v.expire_days ? String(v.expire_days) : "", placeholder: "0 — keep forever" });
   const err = el("div", { class: "formerr" });
   const status = el("div", { class: "resolve-status" });
 
@@ -798,6 +800,7 @@ function openFeedModal(f) {
       title: title.value.trim(), url: url.value.trim(),
       tag: tag.value.trim(), recipe: recipeVal,
       no_title: noTitle.checked,
+      expire_days: Math.max(0, Math.floor(Number(expire.value) || 0)),
     };
     save.disabled = true; // save re-resolves the URL server-side — it can take a moment
     try {
@@ -816,6 +819,7 @@ function openFeedModal(f) {
     ...(isEdit ? [...titleField, ...urlField] : [...urlField, ...titleField]),
     el("label", {}, "Tag"), tag, tagChips,
     el("label", {}, "Recipe"), recipeChips,
+    el("label", {}, "Expire after days"), expire,
     el("label", { class: "check" }, noTitle, "Hide article titles (titleless feed)"),
     err,
     dialogRow(feedDialog, save, isEdit ? () => deleteFeed(f) : null));
