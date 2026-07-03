@@ -396,6 +396,11 @@ function drawFeeds() {
   drawTable();
 }
 
+// liveArts is a feed's live article count: total_art is all-time, expired
+// articles are gone from the reader — the table shows and sorts what's
+// actually visible (matching the tag buckets and the reader's info dialog).
+const liveArts = (f) => f.total_art - (f.expired || 0);
+
 // feedRow builds one Feeds-table row. A healthy feed shows a plain status dot; a
 // failing feed wraps its dot in a focusable trigger that reveals the last fetch
 // error as a hover/focus tooltip (the styled wire-log bubble; the wrapper's
@@ -431,7 +436,7 @@ function feedRow(f) {
     // article stamped yet (pre-vitals stores never stamped last_new).
     el("td", { class: "when lastnew", title: f.last_new ? new Date(f.last_new * 1000).toLocaleString() : null },
       f.last_new ? relTime(f.last_new) : f.last_ok ? "—" : "never"),
-    el("td", { class: "when artcount" }, String(f.total_art)),
+    el("td", { class: "when artcount" }, String(liveArts(f))),
     el("td", { class: "actions" },
       el("button", { class: "btn icon", title: "Fetch this feed", "aria-label": "Fetch this feed", onclick: (e) => fetchOneFeed(f, e.currentTarget), html: ICON_FETCH }),
       el("button", { class: "btn icon", title: "Preview", "aria-label": "Preview", onclick: () => openPreviewDialog(f), html: ICON_PREVIEW }),
@@ -518,7 +523,7 @@ async function fetchAllFromStrip(btn) {
 const FEED_SORTS = {
   title: (a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" }),
   last_new: (a, b) => a.last_new - b.last_new,
-  articles: (a, b) => a.total_art - b.total_art,
+  articles: (a, b) => liveArts(a) - liveArts(b),
 };
 
 // sortableTh builds a sort-toggle header cell: a click cycles column/direction
