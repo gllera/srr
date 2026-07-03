@@ -103,7 +103,55 @@ func TestDBMetaFlagsOutOfRangeExpired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadIdxPacks: %v", err)
 	}
-	if issues := checkDBMeta(fetch, core, packs); issues == 0 {
-		t.Fatal("checkDBMeta missed out-of-range Expired")
+	// Exactly two checks fire: the xp range check (5 > total_art=1) and the
+	// live-count cross-check (live=1 but total_art-expired=-4).
+	if issues := checkDBMeta(fetch, core, packs); issues != 2 {
+		t.Fatalf("checkDBMeta reported %d issues, want exactly 2 (xp range + live count)", issues)
+	}
+}
+
+// TestDBMetaFlagsOutOfRangeAddIdx: add_idx outside [0, TotalArticles] is
+// corruption.
+func TestDBMetaFlagsOutOfRangeAddIdx(t *testing.T) {
+	db, core, _ := setupTestDB(t)
+	ch := &Feed{Title: "A", URL: "https://a.example/f"}
+	if err := db.AddFeed(ch); err != nil {
+		t.Fatal(err)
+	}
+	putExpireBatch(t, db, fresh1d, []*Item{{Feed: ch, Title: "f1"}})
+	ch.AddIdx = core.TotalArticles + 1 // out of range [0, 1]
+	fetch := func(key string) ([]byte, error) { return db.readGz(ctx, key) }
+	packs, err := loadIdxPacks(fetch, core)
+	if err != nil {
+		t.Fatalf("loadIdxPacks: %v", err)
+	}
+	// Exactly two checks fire: the add_idx range check (2 > TotalArticles=1)
+	// and the live-count cross-check (no entry sits at chron >= 2, so live=0
+	// but total_art-expired=1).
+	if issues := checkDBMeta(fetch, core, packs); issues != 2 {
+		t.Fatalf("checkDBMeta reported %d issues, want exactly 2 (add_idx range + live count)", issues)
+	}
+}
+
+// TestDBMetaFlagsLiveCountMismatch: an in-range but INCONSISTENT
+// (AddIdx, Expired) pair — Expired bumped without moving AddIdx — must be
+// flagged by the live-count cross-check, and only by it (Expired stays
+// within [0, total_art], so the range checks must NOT fire). This is the
+// drift that silently skews the reader's live counts.
+func TestDBMetaFlagsLiveCountMismatch(t *testing.T) {
+	db, core, _ := setupTestDB(t)
+	ch := &Feed{Title: "A", URL: "https://a.example/f"}
+	if err := db.AddFeed(ch); err != nil {
+		t.Fatal(err)
+	}
+	putExpireBatch(t, db, fresh1d, []*Item{{Feed: ch, Title: "f1"}, {Feed: ch, Title: "f2"}})
+	ch.Expired = 1 // in range [0, TotalArt=2] but AddIdx stays 0 → live=2 != 2-1
+	fetch := func(key string) ([]byte, error) { return db.readGz(ctx, key) }
+	packs, err := loadIdxPacks(fetch, core)
+	if err != nil {
+		t.Fatalf("loadIdxPacks: %v", err)
+	}
+	if issues := checkDBMeta(fetch, core, packs); issues != 1 {
+		t.Fatalf("checkDBMeta reported %d issues, want exactly 1 (live-count mismatch)", issues)
 	}
 }
