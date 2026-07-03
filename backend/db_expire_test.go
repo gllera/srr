@@ -198,13 +198,42 @@ func TestExpirePerFeedCutoffs(t *testing.T) {
 	}
 }
 
+func TestExpireWholeFeedReachesFrontier(t *testing.T) {
+	db, core, _ := setupTestDB(t)
+	ch := &Feed{Title: "A", URL: "https://a.example/f", ExpireDays: 10}
+	if err := db.AddFeed(ch); err != nil {
+		t.Fatal(err)
+	}
+	// EVERY article of the feed expires: AddIdx must reach the store frontier.
+	putExpireBatch(t, db, old20d, []*Item{{Feed: ch, Title: "o1"}, {Feed: ch, Title: "o2"}})
+	if err := db.ExpireArticles(ctx, expNow); err != nil {
+		t.Fatal(err)
+	}
+	if ch.AddIdx != core.TotalArticles || ch.Expired != ch.TotalArt {
+		t.Fatalf("AddIdx=%d Expired=%d, want %d/%d (whole feed expired)",
+			ch.AddIdx, ch.Expired, core.TotalArticles, ch.TotalArt)
+	}
+	// AddIdx == TotalArticles ⇒ the next run takes the minStart guard no-op path.
+	if err := db.ExpireArticles(ctx, expNow); err != nil {
+		t.Fatal(err)
+	}
+	if ch.AddIdx != 2 || ch.Expired != 2 {
+		t.Fatalf("second run changed state: AddIdx=%d Expired=%d, want 2/2", ch.AddIdx, ch.Expired)
+	}
+}
+
 func TestCollectAssetRefs(t *testing.T) {
 	keys := map[string]struct{}{}
 	content := `<img src="assets/aa/1111111111111111.webp">` +
 		`<video src="assets/bb/2222222222222222.webm" poster="assets/cc/3333333333333333.webp"></video>` +
 		`<audio src="assets/dd/4444444444444444.opus"></audio>` +
 		`<a href="assets/ee/5555555555555555.pdf">doc</a>` +
-		`<img src="https://x.example/ext.jpg"><a href="relative/path.html">r</a>`
+		`<img src="https://x.example/ext.jpg"><a href="relative/path.html">r</a>` +
+		// assets/-prefixed but NOT the strict key grammar: traversal attempts
+		// and malformed hashes must never be harvested — Rm path-joins the key
+		// on local/SFTP, so a loose prefix check would delete outside assets/.
+		`<img src="assets/../db.gz"><a href="assets/../../etc/passwd">t</a>` +
+		`<img src="assets/aa/UPPERCASE.webp"><img src="assets/aa/1111.webp">`
 	collectAssetRefs(content, keys)
 	want := []string{
 		"assets/aa/1111111111111111.webp",
