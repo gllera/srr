@@ -64,3 +64,46 @@ func TestFeedCountsFalsePositiveAfterHighestIDDelete(t *testing.T) {
 		t.Errorf("checkFeedCountsContinuity: got %d issue(s), want 0 (false positive after highest-id feed delete)", issues)
 	}
 }
+
+// TestDBMetaCleanAfterExpiration: a store whose feed has expired a prefix
+// (AddIdx mid-history, Expired > 0) must validate clean — entries before
+// AddIdx are expected there, and total_art stays the all-time idx count.
+func TestDBMetaCleanAfterExpiration(t *testing.T) {
+	db, core, _ := setupTestDB(t)
+	ch := &Feed{Title: "A", URL: "https://a.example/f", ExpireDays: 10}
+	if err := db.AddFeed(ch); err != nil {
+		t.Fatal(err)
+	}
+	putExpireBatch(t, db, old20d, []*Item{{Feed: ch, Title: "o1"}, {Feed: ch, Title: "o2"}})
+	putExpireBatch(t, db, fresh1d, []*Item{{Feed: ch, Title: "f1"}})
+	if err := db.ExpireArticles(ctx, expNow); err != nil {
+		t.Fatal(err)
+	}
+	fetch := func(key string) ([]byte, error) { return db.readGz(ctx, key) }
+	packs, err := loadIdxPacks(fetch, core)
+	if err != nil {
+		t.Fatalf("loadIdxPacks: %v", err)
+	}
+	if issues := checkDBMeta(fetch, core, packs); issues != 0 {
+		t.Fatalf("checkDBMeta reported %d issues on an expired store", issues)
+	}
+}
+
+// TestDBMetaFlagsOutOfRangeExpired: xp outside [0, total_art] is corruption.
+func TestDBMetaFlagsOutOfRangeExpired(t *testing.T) {
+	db, core, _ := setupTestDB(t)
+	ch := &Feed{Title: "A", URL: "https://a.example/f"}
+	if err := db.AddFeed(ch); err != nil {
+		t.Fatal(err)
+	}
+	putExpireBatch(t, db, fresh1d, []*Item{{Feed: ch, Title: "f1"}})
+	ch.Expired = 5 // > TotalArt(1)
+	fetch := func(key string) ([]byte, error) { return db.readGz(ctx, key) }
+	packs, err := loadIdxPacks(fetch, core)
+	if err != nil {
+		t.Fatalf("loadIdxPacks: %v", err)
+	}
+	if issues := checkDBMeta(fetch, core, packs); issues == 0 {
+		t.Fatal("checkDBMeta missed out-of-range Expired")
+	}
+}
