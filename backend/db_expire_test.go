@@ -222,6 +222,93 @@ func TestExpireWholeFeedReachesFrontier(t *testing.T) {
 	}
 }
 
+func TestExpireAdvancesDormantFeedFrontier(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	dormant := &Feed{Title: "dormant", URL: "https://a.example/f", ExpireDays: 10}
+	active := &Feed{Title: "active", URL: "https://b.example/f", ExpireDays: 10}
+	for _, f := range []*Feed{dormant, active} {
+		if err := db.AddFeed(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// chron 0: dormant's only (old) article. chron 1..2: active old. chron 3: active fresh.
+	putExpireBatch(t, db, old20d, []*Item{{Feed: dormant, Title: "d0"}, {Feed: active, Title: "a0"}, {Feed: active, Title: "a1"}})
+	putExpireBatch(t, db, fresh1d, []*Item{{Feed: active, Title: "a2"}})
+	if err := db.ExpireArticles(ctx, expNow); err != nil {
+		t.Fatal(err)
+	}
+	// First run: dormant expires its article (AddIdx 1, xp 1); active expires 2
+	// (AddIdx 3, xp 2). An expiring cycle records the natural prefix end — no
+	// frontier jump: dormant stays at 1, not the stop chron (3).
+	if dormant.AddIdx != 1 || dormant.Expired != 1 {
+		t.Fatalf("dormant AddIdx=%d xp=%d, want 1/1", dormant.AddIdx, dormant.Expired)
+	}
+	// A later cycle (clock advanced 5 days): active's fresh article is still live
+	// (a2 fetched expNow-1d >= cutoff later-10d = expNow-5d, so the early stop
+	// fires at chron 3) and blocks active at 3; dormant has NO live articles and
+	// expires nothing, so its frontier must advance to the stop chron (3)
+	// instead of pinning at 1.
+	later := expNow + 5*86400
+	if err := db.ExpireArticles(ctx, later); err != nil {
+		t.Fatal(err)
+	}
+	if dormant.AddIdx != 3 || dormant.Expired != 1 {
+		t.Fatalf("dormant frontier: AddIdx=%d xp=%d, want 3/1 (advance, no new expiry)", dormant.AddIdx, dormant.Expired)
+	}
+	if active.AddIdx != 3 || active.Expired != 2 {
+		t.Fatalf("active unchanged: AddIdx=%d xp=%d, want 3/2", active.AddIdx, active.Expired)
+	}
+}
+
+func TestExpireDormantAdvanceKeepsInvariant(t *testing.T) {
+	// The advanced frontier must keep the inspect cross-check green:
+	// live entries at chron >= AddIdx == TotalArt − Expired.
+	db, core, _ := setupTestDB(t)
+	dormant := &Feed{Title: "dormant", URL: "https://a.example/f", ExpireDays: 10}
+	filler := &Feed{Title: "filler", URL: "https://b.example/f"}
+	for _, f := range []*Feed{dormant, filler} {
+		if err := db.AddFeed(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	putExpireBatch(t, db, old20d, []*Item{{Feed: dormant, Title: "d0"}})
+	putExpireBatch(t, db, fresh1d, []*Item{{Feed: filler, Title: "f0"}, {Feed: filler, Title: "f1"}})
+	if err := db.ExpireArticles(ctx, expNow); err != nil {
+		t.Fatal(err)
+	}
+	// dormant fully expired at its natural prefix end (chron 0 expired → AddIdx
+	// 1; the early stop fires at chron 1, filler's fresh region — an expiring
+	// cycle takes no separate advance).
+	if dormant.AddIdx != 1 || dormant.Expired != 1 {
+		t.Fatalf("AddIdx=%d xp=%d, want 1/1", dormant.AddIdx, dormant.Expired)
+	}
+	fetch := func(key string) ([]byte, error) { return db.readGz(ctx, key) }
+	packs, err := loadIdxPacks(fetch, core)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issues := checkDBMeta(fetch, core, packs); issues != 0 {
+		t.Fatalf("checkDBMeta: %d issues after dormant expiry", issues)
+	}
+	// A much later cycle: filler's articles (no policy, fetched below dormant's
+	// cutoff now) no longer trigger the early stop, the walk exhausts
+	// (stopChron = 3), and dormant — no live own entry, nothing expired —
+	// advances 1 → 3 over filler's region. The invariant must survive the jump.
+	if err := db.ExpireArticles(ctx, expNow+20*86400); err != nil {
+		t.Fatal(err)
+	}
+	if dormant.AddIdx != 3 || dormant.Expired != 1 {
+		t.Fatalf("dormant frontier: AddIdx=%d xp=%d, want 3/1", dormant.AddIdx, dormant.Expired)
+	}
+	packs, err = loadIdxPacks(fetch, core)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issues := checkDBMeta(fetch, core, packs); issues != 0 {
+		t.Fatalf("checkDBMeta: %d issues after dormant advance", issues)
+	}
+}
+
 func TestCollectAssetRefs(t *testing.T) {
 	keys := map[string]struct{}{}
 	content := `<img src="assets/aa/1111111111111111.webp">` +

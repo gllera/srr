@@ -319,6 +319,7 @@ func (o *DB) AddFeed(c *Feed) error {
 		if _, ok := o.core.Feeds[id]; !ok {
 			c.id = id
 			c.AddIdx = o.core.TotalArticles
+			c.Expired = 0 // fresh incarnation has expired nothing (id-reuse invariant, local by construction)
 			o.core.Feeds[id] = c
 			return nil
 		}
