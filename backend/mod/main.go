@@ -269,13 +269,19 @@ func New() *Module {
 
 func (o *Module) Process(ctx context.Context, args string, i *RawItem) error {
 	// A built-in token is "#name [key=value ...]": the first whitespace field
-	// names the step, the rest are its parameters. Only when that first field
-	// is a registered built-in do we strip params and dispatch internally;
-	// anything else (incl. shell commands whose first word merely contains
-	// spaces or "=") falls through to /bin/sh -c with the original args.
-	if fields := strings.Fields(args); len(fields) > 0 {
+	// names the step, the rest are its parameters (quote-aware split, so a
+	// value may carry spaces — see splitParamFields). Only when that first
+	// field is a registered built-in do we strip params and dispatch
+	// internally; anything else (incl. shell commands whose first word merely
+	// contains spaces or "=") falls through to /bin/sh -c with the original args.
+	trimmed := strings.TrimSpace(args)
+	if fields := strings.Fields(trimmed); len(fields) > 0 {
 		if fn, ok := o.processors[fields[0]]; ok {
-			params, err := parseParams(fields[1:])
+			pfields, err := splitParamFields(trimmed[len(fields[0]):])
+			if err != nil {
+				return err
+			}
+			params, err := parseParams(pfields)
 			if err != nil {
 				return err
 			}
@@ -335,7 +341,8 @@ func Builtins() []string {
 func (o *Module) Validate(ctx context.Context, pipeline []string) error {
 	sentinel := &RawItem{}
 	for _, step := range pipeline {
-		fields := strings.Fields(step)
+		trimmed := strings.TrimSpace(step)
+		fields := strings.Fields(trimmed)
 		if len(fields) == 0 {
 			return fmt.Errorf("empty pipeline step")
 		}
@@ -346,7 +353,11 @@ func (o *Module) Validate(ctx context.Context, pipeline []string) error {
 			}
 			continue // external shell command: not validated here
 		}
-		params, err := parseParams(fields[1:])
+		pfields, err := splitParamFields(trimmed[len(fields[0]):])
+		if err != nil {
+			return fmt.Errorf("%s: %w", fields[0], err)
+		}
+		params, err := parseParams(pfields)
 		if err != nil {
 			return fmt.Errorf("%s: %w", fields[0], err)
 		}

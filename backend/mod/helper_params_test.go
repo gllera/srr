@@ -30,6 +30,65 @@ func TestParseParams(t *testing.T) {
 	}
 }
 
+func TestSplitParamFields(t *testing.T) {
+	// Plain fields split on whitespace, as before quoting existed.
+	got, err := splitParamFields("timeout=30s maxbody=8MiB")
+	if err != nil {
+		t.Fatalf("splitParamFields: %v", err)
+	}
+	if len(got) != 2 || got[0] != "timeout=30s" || got[1] != "maxbody=8MiB" {
+		t.Errorf("plain fields: got %q", got)
+	}
+
+	// A double-quoted span keeps its spaces and drops the quotes, so a value
+	// with spaces (a User-Agent) survives as one field.
+	got, err = splitParamFields(`ua="Mozilla/5.0 (X11; Linux) Chrome" timeout=30s`)
+	if err != nil {
+		t.Fatalf("splitParamFields quoted: %v", err)
+	}
+	if len(got) != 2 || got[0] != "ua=Mozilla/5.0 (X11; Linux) Chrome" || got[1] != "timeout=30s" {
+		t.Errorf("quoted value: got %q", got)
+	}
+
+	// Quote toggling mid-field: paired quotes anywhere glue the span together.
+	got, err = splitParamFields(`k=a"b c"d`)
+	if err != nil {
+		t.Fatalf("splitParamFields mid-field: %v", err)
+	}
+	if len(got) != 1 || got[0] != "k=ab cd" {
+		t.Errorf("mid-field quotes: got %q", got)
+	}
+
+	// Empty and whitespace-only input yield no fields.
+	for _, in := range []string{"", "   ", "\t"} {
+		if got, err := splitParamFields(in); err != nil || got != nil {
+			t.Errorf("splitParamFields(%q) = %q, %v; want nil, nil", in, got, err)
+		}
+	}
+
+	// An unterminated quote is a configuration error, not a silent guess.
+	if _, err := splitParamFields(`ua="Mozilla/5.0`); err == nil {
+		t.Errorf("unterminated quote should error")
+	}
+}
+
+func TestParamsString(t *testing.T) {
+	const def = "default-agent"
+
+	// Absent → default.
+	if s, err := Params(nil).String("ua", def); err != nil || s != def {
+		t.Errorf("absent: got %q, %v; want %q, nil", s, err, def)
+	}
+	// Present → verbatim value.
+	if s, err := (Params{"ua": "Custom Agent/2.0"}).String("ua", def); err != nil || s != "Custom Agent/2.0" {
+		t.Errorf("present: got %q, %v", s, err)
+	}
+	// Explicitly empty is a configuration error (an empty UA is never intended).
+	if _, err := (Params{"ua": ""}).String("ua", def); err == nil {
+		t.Errorf("empty value should error")
+	}
+}
+
 func TestParamsOnly(t *testing.T) {
 	if err := Params(nil).only("a", "b"); err != nil {
 		t.Errorf("nil params should pass only(): %v", err)

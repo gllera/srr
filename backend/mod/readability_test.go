@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -125,6 +126,199 @@ func TestReadabilityMaxBodyParamTruncates(t *testing.T) {
 	}
 }
 
+func TestReadabilityUAParam(t *testing.T) {
+	// Some WAFs 406 on UA keywords (blogdechollos.com blocks "extractor"), so
+	// ua= overrides the request User-Agent per pipeline position. The value is
+	// quoted because real UAs contain spaces — this also exercises the
+	// quote-aware param tokenizer end-to-end through Module.Process.
+	allowPrivateForTest(t) // test server is on loopback; opt out of the SSRF guard
+	var mu sync.Mutex
+	var agents []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		agents = append(agents, r.Header.Get("User-Agent"))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(readabilityArticleHTML))
+	}))
+	defer srv.Close()
+
+	m := New()
+	now := time.Now()
+
+	item := &RawItem{GUID: 1, Title: "T", Content: "<p>teaser</p>", Link: srv.URL, Published: &now}
+	if err := m.Process(context.Background(), `#readability ua="Custom Agent/2.0 (Test)"`, item); err != nil {
+		t.Fatalf("Process with ua=: %v", err)
+	}
+	if !strings.Contains(item.Content, "substantial paragraph") {
+		t.Errorf("quoted ua= token should still extract, got %q", item.Content)
+	}
+
+	item2 := &RawItem{GUID: 2, Title: "T", Content: "<p>teaser</p>", Link: srv.URL, Published: &now}
+	if err := m.Process(context.Background(), "#readability", item2); err != nil {
+		t.Fatalf("Process without ua=: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(agents) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(agents))
+	}
+	if agents[0] != "Custom Agent/2.0 (Test)" {
+		t.Errorf("ua= override not sent: got %q", agents[0])
+	}
+	if agents[1] != readabilityUserAgent {
+		t.Errorf("absent ua= should keep the default identity: got %q", agents[1])
+	}
+}
+
+// A page whose genuine article body is short while sidebar/widget chrome is
+// text-dense — the readability heuristic picks the wrong block on such pages
+// (deal blogs), which is what selector= exists to override.
+var readabilityShortBodyHTML = `<!DOCTYPE html>
+<html><head><title>Deal</title></head>
+<body>
+<div class="widget"><h3>MOST VIEWED</h3>
+<p>` + strings.Repeat("Dense sidebar widget text that out-scores a two-sentence deal body in the readability candidate ranking. ", 12) + `</p>
+</div>
+<div class="pic"><img src="x.jpg"></div>
+<div class="entry-content"><div class="inner"><p>The gadget drops to 1,89&euro; on Amazon, 21% off its usual price.</p><p>Deal body second sentence.</p></div></div>
+<footer>copyright</footer>
+</body></html>`
+
+func TestReadabilitySelectorParam(t *testing.T) {
+	allowPrivateForTest(t) // test server is on loopback; opt out of the SSRF guard
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(readabilityShortBodyHTML))
+	}))
+	defer srv.Close()
+
+	m := New()
+	now := time.Now()
+	item := &RawItem{GUID: 1, Title: "T", Content: "<p>teaser</p>", Link: srv.URL, Published: &now}
+	if err := m.Process(context.Background(), "#readability selector=div.entry-content", item); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if !strings.Contains(item.Content, "drops to 1,89") || !strings.Contains(item.Content, "second sentence") {
+		t.Errorf("selector should extract the entry-content body, got %q", item.Content)
+	}
+	if strings.Contains(item.Content, "Dense sidebar widget") {
+		t.Errorf("selector must bypass the heuristic entirely, got %q", item.Content)
+	}
+}
+
+func TestReadabilitySelectorUnionConcatenatesMatches(t *testing.T) {
+	// selector= concatenates EVERY match in document order — how disjoint
+	// blocks (hero image + article body) become one article. blogdechollos
+	// keeps its product image outside the articleBody block, which is the
+	// real-world case behind this.
+	allowPrivateForTest(t) // test server is on loopback; opt out of the SSRF guard
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(readabilityShortBodyHTML))
+	}))
+	defer srv.Close()
+
+	m := New()
+	now := time.Now()
+	item := &RawItem{GUID: 1, Title: "T", Content: "<p>teaser</p>", Link: srv.URL, Published: &now}
+	if err := m.Process(context.Background(), "#readability selector=div.pic,div.entry-content", item); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	img := strings.Index(item.Content, `img src="x.jpg"`)
+	body := strings.Index(item.Content, "drops to 1,89")
+	if img < 0 || body < 0 {
+		t.Fatalf("expected image and body, got %q", item.Content)
+	}
+	if img > body {
+		t.Errorf("blocks must keep document order (image first), got %q", item.Content)
+	}
+	if strings.Contains(item.Content, "Dense sidebar widget") {
+		t.Errorf("union must not pull unselected blocks, got %q", item.Content)
+	}
+}
+
+func TestReadabilitySelectorNestedMatchFoldsIntoAncestor(t *testing.T) {
+	// A match inside an already-matched block is that block's content — it
+	// must not render a second copy.
+	allowPrivateForTest(t) // test server is on loopback; opt out of the SSRF guard
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(readabilityShortBodyHTML))
+	}))
+	defer srv.Close()
+
+	m := New()
+	now := time.Now()
+	item := &RawItem{GUID: 1, Title: "T", Content: "<p>teaser</p>", Link: srv.URL, Published: &now}
+	if err := m.Process(context.Background(), "#readability selector=div.entry-content,div.inner", item); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if got := strings.Count(item.Content, "second sentence"); got != 1 {
+		t.Errorf("nested match duplicated content %d times: %q", got, item.Content)
+	}
+}
+
+func TestReadabilitySelectorChildlessMatchRendersElement(t *testing.T) {
+	// A matched void/childless element (<img>) has no inner HTML — the
+	// element itself is the content.
+	allowPrivateForTest(t) // test server is on loopback; opt out of the SSRF guard
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(readabilityShortBodyHTML))
+	}))
+	defer srv.Close()
+
+	m := New()
+	now := time.Now()
+	item := &RawItem{GUID: 1, Title: "T", Content: "<p>teaser</p>", Link: srv.URL, Published: &now}
+	if err := m.Process(context.Background(), "#readability selector=img", item); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if !strings.Contains(item.Content, `img src="x.jpg"`) {
+		t.Errorf("childless match should render the element itself, got %q", item.Content)
+	}
+}
+
+func TestReadabilitySelectorNoMatchKeepsOriginal(t *testing.T) {
+	allowPrivateForTest(t) // test server is on loopback; opt out of the SSRF guard
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(readabilityShortBodyHTML))
+	}))
+	defer srv.Close()
+
+	m := New()
+	now := time.Now()
+	item := &RawItem{GUID: 1, Title: "T", Content: "<p>keep me</p>", Link: srv.URL, Published: &now}
+	// No fallback to the heuristic on a selector miss: a typo'd selector must
+	// surface as "content never changes" (plus a WARN), not as silently
+	// different extraction behavior.
+	if err := m.Process(context.Background(), "#readability selector=div.nope", item); err != nil {
+		t.Fatalf("Process should fail open on selector miss, got err: %v", err)
+	}
+	if item.Content != "<p>keep me</p>" {
+		t.Errorf("selector miss should keep original content, got %q", item.Content)
+	}
+}
+
+func TestReadabilityDefaultUAAvoidsScraperKeywords(t *testing.T) {
+	// Keyword-scanning WAFs block scraper-sounding UA tokens with a 406
+	// (blogdechollos.com rejects any UA containing "extractor"), so the
+	// default identity must stay keyword-free while still honestly naming
+	// SRR. TestReadabilityUAParam pins that this constant is what actually
+	// rides the wire when ua= is absent.
+	for _, kw := range []string{"extractor", "scraper", "crawler", "spider"} {
+		if strings.Contains(strings.ToLower(readabilityUserAgent), kw) {
+			t.Errorf("default UA contains WAF-trigger keyword %q: %q", kw, readabilityUserAgent)
+		}
+	}
+	if !strings.Contains(readabilityUserAgent, "SRR/") {
+		t.Errorf("default UA should still identify SRR: %q", readabilityUserAgent)
+	}
+}
+
 func TestReadabilityRejectsBadParams(t *testing.T) {
 	m := New()
 	now := time.Now()
@@ -133,6 +327,9 @@ func TestReadabilityRejectsBadParams(t *testing.T) {
 		"#readability timeout=abc",  // unparseable duration
 		"#readability maxbody=12xb", // unparseable size
 		"#readability timeout",      // bare flag where a duration is required
+		"#readability ua=",          // explicitly empty UA
+		`#readability ua="x`,        // unterminated quote
+		"#readability selector=[",   // unparseable CSS selector
 	} {
 		item := &RawItem{GUID: 1, Title: "T", Content: "<p>x</p>", Link: "http://example.com", Published: &now}
 		if err := m.Process(context.Background(), token, item); err == nil {
