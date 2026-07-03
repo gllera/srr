@@ -389,26 +389,8 @@ function drawFeeds() {
   }
   const add = el("button", { class: "btn primary", onclick: () => openFeedModal(null) }, "+ Add feed");
 
-  const exportBtn = el("button", { class: "btn", onclick: () => { window.location = "/api/export"; } }, "Export OPML");
-  // Import is a two-step flow: a dry run first (resolution probes every URL, so
-  // this can take a moment), then the review sheet — pick and edit each feed
-  // (title, tag, recipe) before anything is written; even unresolvable feeds
-  // stay pickable there, since a different recipe may be what resolves them.
-  const importInput = el("input", { type: "file", accept: ".opml,.xml,text/xml", style: "display:none",
-    onchange: async (e) => {
-      const file = e.target.files[0];
-      e.target.value = "";
-      if (!file) return;
-      banner("Resolving OPML feeds…", true);
-      try {
-        const dry = await importDryRun(await file.text());
-        clearBanner();
-        openImportModal(dry);
-      } catch (err) { banner(err.message); }
-    } });
-  const importBtn = el("button", { class: "btn", onclick: () => importInput.click() }, "Import OPML");
   root.append(el("div", { id: "feedsBoard" }));
-  root.append(el("div", { class: "toolbar" }, search, tagSel, add, importBtn, importInput, exportBtn));
+  root.append(el("div", { class: "toolbar" }, search, tagSel, add));
   root.append(el("div", { id: "feedTableWrap" }));
   drawBoard();
   drawTable();
@@ -757,7 +739,7 @@ function openFeedModal(f) {
   drawRecipeChips();
   const noTitle = el("input", { id: "f_notitle", type: "checkbox" });
   noTitle.checked = !!v.no_title;
-  const expire = el("input", { id: "f_expire", type: "number", min: "0", step: "1",
+  const expire = el("input", { id: "f_expire", type: "number", min: "0", max: "36500", step: "1",
     value: v.expire_days ? String(v.expire_days) : "", placeholder: "0 — keep forever" });
   const err = el("div", { class: "formerr" });
   const status = el("div", { class: "resolve-status" });

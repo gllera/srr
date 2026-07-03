@@ -10,7 +10,8 @@ import (
 // feedListView is the read-only feed shape the GUI table consumes: the writable
 // feedView fields plus server-owned health fields. Writes (POST/PUT) accept
 // title/url/tag/recipe/no_title/expire_days — full-replace semantics, like
-// `feed apply` (the edit modal always sends the no_title checkbox value).
+// `feed apply` (the edit modal always sends the no_title checkbox and
+// expire_days values).
 type feedListView struct {
 	ID         int    `json:"id"`
 	Title      string `json:"title"`
