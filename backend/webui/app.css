@@ -669,15 +669,31 @@ td.when {
 }
 /* One-click pickers (feed dialog tag + recipe): the vocabulary laid out as
    toggle chips instead of hiding behind a dropdown. The active choice wears
-   the signal accent; recipe chips keep their dashed identity. */
+   the signal accent; recipe chips keep their dashed identity. Unlike the
+   table's metadata chips these are tap targets, so they grow to finger size —
+   and to the reader's 44px tap standard on touch hardware. */
 .tag-chips {
    display: flex;
    flex-wrap: wrap;
-   gap: 0.35em;
-   margin-top: 0.4em;
+   gap: 0.5em;
+   margin-top: 0.45em;
 }
 .chip.choice {
    cursor: pointer;
+   display: inline-flex;
+   align-items: center;
+   min-height: 2.25rem;
+   padding: 0 0.9em;
+   font-size: 0.78rem;
+}
+@media (pointer: coarse) {
+   .tag-chips {
+      gap: 0.6em;
+   }
+   .chip.choice {
+      min-height: 2.75rem;
+      padding: 0 1.1em;
+   }
 }
 .chip.choice:hover {
    border-color: var(--muted);
