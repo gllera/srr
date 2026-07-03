@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -77,6 +78,76 @@ func TestFetchSSE(t *testing.T) {
 	}
 	if !strings.Contains(s, "event: done") {
 		t.Fatalf("stream missing done event:\n%s", s)
+	}
+}
+
+// TestFetchSSESingleFeed asserts POST /api/fetch?id=N restricts the cycle to
+// that one feed: only its feed event streams, and only its articles land.
+func TestFetchSSESingleFeed(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	allowLoopback(t)
+	live := &Feed{Title: "Live", URL: rssServer(t)}
+	other := &Feed{Title: "Other", URL: rssServer(t)}
+	seedFeed(t, db, live)
+	seedFeed(t, db, other)
+
+	srv := httptest.NewServer(newMux())
+	t.Cleanup(srv.Close)
+	res, err := http.Post(fmt.Sprintf("%s/api/fetch?id=%d", srv.URL, live.id), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	s := string(body)
+	if strings.Count(s, "event: feed") != 1 || !strings.Contains(s, `"Live"`) || strings.Contains(s, `"Other"`) {
+		t.Fatalf("want exactly the Live feed event, got:\n%s", s)
+	}
+	if !strings.Contains(s, "event: done") {
+		t.Fatalf("stream missing done event:\n%s", s)
+	}
+	withDB(false, func(_ context.Context, d *DB) error {
+		if d.core.TotalArticles != 1 {
+			t.Fatalf("TotalArticles = %d, want 1 (only Live fetched)", d.core.TotalArticles)
+		}
+		if d.core.Feeds[other.id].LastOK != 0 {
+			t.Fatalf("Other feed was fetched (last_ok = %d)", d.core.Feeds[other.id].LastOK)
+		}
+		return nil
+	})
+}
+
+// An unknown id can only fail in-band: SSE has already sent 200.
+func TestFetchSSESingleFeedUnknownID(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	allowLoopback(t)
+	seedFeed(t, db, &Feed{Title: "Live", URL: rssServer(t)})
+
+	srv := httptest.NewServer(newMux())
+	t.Cleanup(srv.Close)
+	res, err := http.Post(srv.URL+"/api/fetch?id=999", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	if !strings.Contains(string(body), "event: error") || !strings.Contains(string(body), "not found") {
+		t.Fatalf("expected in-band not-found error event, got:\n%s", body)
+	}
+}
+
+// A malformed id is caught before the SSE headers, so it is a plain 400.
+func TestFetchSSEBadIDParam(t *testing.T) {
+	_, _, _ = setupTestDB(t)
+	srv := httptest.NewServer(newMux())
+	t.Cleanup(srv.Close)
+	res, err := http.Post(srv.URL+"/api/fetch?id=abc", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", res.StatusCode)
 	}
 }
 

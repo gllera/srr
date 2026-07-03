@@ -292,6 +292,35 @@ header {
    color: var(--fg);
    font-weight: 700;
 }
+/* Board stats double as grade filters: plain-text buttons in the board voice,
+   the active one underlined in signal amber. The total resets the filter. */
+.board button {
+   background: none;
+   border: 0;
+   padding: 0;
+   font-family: inherit;
+   font-size: inherit;
+   letter-spacing: inherit;
+   text-transform: inherit;
+   color: inherit;
+   cursor: pointer;
+}
+.board button:hover {
+   color: var(--fg);
+}
+.board button.active {
+   color: var(--fg);
+   box-shadow: 0 2px 0 var(--signal);
+}
+.board button:focus-visible {
+   outline: 2px solid var(--signal);
+   outline-offset: 3px;
+   border-radius: 2px;
+}
+/* Store meta readout (articles · last fetch), pushed to the board's right. */
+.board .meta {
+   margin-left: auto;
+}
 
 /* --- toolbars (filters + actions) ---------------------------------------- */
 .toolbar {
@@ -390,6 +419,7 @@ thead th {
    text-transform: uppercase;
    color: var(--muted);
    text-align: left;
+   white-space: nowrap; /* "last new" must not wrap — the title column absorbs width */
    padding: 0 0.55em 0.5em;
    border-bottom: 1px solid var(--border);
 }
@@ -505,6 +535,13 @@ td.actions {
    white-space: nowrap;
    text-align: right;
 }
+/* Time/count readouts (last new, articles) — wire voice, quiet. */
+td.when {
+   white-space: nowrap;
+   font-family: var(--font-mono);
+   font-size: 0.76rem;
+   color: var(--fg-2);
+}
 
 /* Chips — a tag or recipe reference in the wire voice. */
 .chip {
@@ -562,6 +599,11 @@ td.actions {
 .dot.gray {
    background: transparent;
    box-shadow: inset 0 0 0 1.5px var(--idle);
+}
+/* Stale: fetching fine, but no new article for weeks — filled idle gray, as
+   opposed to the hollow gray of never-fetched. */
+.dot.dim {
+   background: var(--idle);
 }
 
 /* --- panels (Tools) ------------------------------------------------------ */
@@ -666,6 +708,38 @@ dialog .row {
    gap: 0.5em;
    justify-content: flex-end;
    margin-top: 1.2em;
+}
+/* Scrollable checkbox pickers (syndicate tag/feed selectors). Rows are human
+   values — undo the dialog label's mono-uppercase voice. */
+.picker {
+   max-height: 11em;
+   overflow: auto;
+   border: 1px solid var(--border);
+   border-radius: var(--radius);
+   background: var(--surface-raised);
+   padding: 0.25em 0.6em;
+}
+dialog .picker label.check {
+   margin: 0.35em 0;
+   font-family: var(--font-sans);
+   font-size: 0.9rem;
+   letter-spacing: normal;
+   text-transform: none;
+   color: var(--fg);
+}
+/* Import dry-run lists: what will import, what gets skipped and why. */
+.import-list {
+   max-height: 11em;
+   overflow: auto;
+   margin: 0.2em 0 0.4em;
+   font-size: 0.85em;
+   line-height: 1.5;
+}
+.import-list div {
+   overflow-wrap: anywhere;
+}
+.import-list .bad {
+   color: var(--err);
 }
 
 /* --- preview ------------------------------------------------------------- */

@@ -22,6 +22,9 @@ type overviewView struct {
 	Gen       int               `json:"gen"`
 	FetchedAt int64             `json:"fetched_at"`
 	TotalArt  int               `json:"total_art"`
+	// CdnURL lets the syndicate tab link the produced out/<name> files;
+	// omitted when SRR_CDN_URL is unset (syndication writes are skipped then).
+	CdnURL string `json:"cdn_url,omitempty"`
 }
 
 func getOverview(w http.ResponseWriter, r *http.Request) {
@@ -61,6 +64,7 @@ func getOverview(w http.ResponseWriter, r *http.Request) {
 			Gen:       db.core.Gen,
 			FetchedAt: db.core.FetchedAt,
 			TotalArt:  db.core.TotalArticles,
+			CdnURL:    globals.CdnURL,
 		}
 		return nil
 	})

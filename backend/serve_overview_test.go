@@ -54,3 +54,31 @@ func TestOverview(t *testing.T) {
 		t.Fatalf("gen=%d total_art=%d, want 0,0", got.Gen, got.TotalArt)
 	}
 }
+
+// TestOverviewCdnURL asserts the overview carries the configured CDN URL (so
+// the syndicate tab can link the produced out/<name> files), omitted when unset.
+func TestOverviewCdnURL(t *testing.T) {
+	setupTestDB(t)
+	prev := globals.CdnURL
+	globals.CdnURL = "https://cdn.example/store"
+	t.Cleanup(func() { globals.CdnURL = prev })
+
+	rec := doReq(t, newMux(), "GET", "/api/overview", "")
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got["cdn_url"] != "https://cdn.example/store" {
+		t.Fatalf("cdn_url = %v, want the configured CDN URL", got["cdn_url"])
+	}
+
+	globals.CdnURL = ""
+	rec = doReq(t, newMux(), "GET", "/api/overview", "")
+	got = map[string]any{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, present := got["cdn_url"]; present {
+		t.Fatalf("cdn_url should be omitted when unset, got %v", got["cdn_url"])
+	}
+}

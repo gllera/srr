@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 )
 
 // handleFetch runs one fetch cycle over every feed in parallel and streams
@@ -20,6 +21,19 @@ func handleFetch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Optional ?id= restricts the cycle to those feeds (the GUI's per-row
+	// fetch). Malformed ids are rejected here, before the SSE 200; an unknown
+	// id surfaces in-band below, like lock contention.
+	var only []int
+	for _, s := range r.URL.Query()["id"] {
+		id, err := strconv.Atoi(s)
+		if err != nil {
+			writeErr(w, fmt.Errorf("invalid feed id %q: %w", s, err))
+			return
+		}
+		only = append(only, id)
+	}
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -30,7 +44,7 @@ func handleFetch(w http.ResponseWriter, r *http.Request) {
 	done := make(chan error, 1)
 	go func() {
 		client := newFetchClient(globals.Workers)
-		err := (&FetchCmd{}).runFetch(r.Context(), client, func(p feedProgress) {
+		err := (&FetchCmd{only: only}).runFetch(r.Context(), client, func(p feedProgress) {
 			progress <- p
 		})
 		// Per-request transport: drop its idle keep-alive sockets now rather than

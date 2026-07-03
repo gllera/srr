@@ -28,6 +28,11 @@ type FetchCmd struct {
 	// SyncOutFeeds call, carried across --interval cycles so an idle cycle whose
 	// out config + feed tags are unchanged can skip the redundant store walk.
 	lastOutSig string
+
+	// only restricts the cycle to these feed ids (empty = every feed). Set by
+	// the serve SSE handler for the GUI's single-feed fetch; an unknown id
+	// fails the cycle. Not a CLI flag.
+	only []int
 }
 
 // feedProgress reports one feed's outcome to a runFetch caller (the SSE handler).
@@ -198,16 +203,35 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 			maxAssetSize: int(assets.maxBytes),
 		}
 
+		// The cycle's feed set: every feed, or just o.only (the GUI's
+		// single-feed fetch). The filter scopes the fan-out and the progress /
+		// summary counts below — a stale FetchError on an unselected feed must
+		// not count as this cycle's failure.
+		feeds := make([]*Feed, 0, len(db.Feeds()))
+		if len(o.only) > 0 {
+			for _, id := range o.only {
+				ch, err := db.FeedByID(id)
+				if err != nil {
+					return err
+				}
+				feeds = append(feeds, ch)
+			}
+		} else {
+			for _, ch := range db.Feeds() {
+				feeds = append(feeds, ch)
+			}
+		}
+
 		// Live stats on the terminal status line while the cycle runs (feeds
 		// done/total, new articles, failures, asset jobs). No-op when stderr
 		// isn't a tty (service/cron runs), so logs stay clean.
-		progress := startFetchProgress(len(db.Feeds()), assets)
+		progress := startFetchProgress(len(feeds), assets)
 		defer progress.finish()
 
 		g, gctx := errgroup.WithContext(ctx)
 		g.SetLimit(globals.Workers)
 
-		for _, ch := range db.Feeds() {
+		for _, ch := range feeds {
 			if ctx.Err() != nil {
 				break
 			}
@@ -230,7 +254,7 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 		progress.setSaving()
 
 		var articles []*Item
-		for _, ch := range db.Feeds() {
+		for _, ch := range feeds {
 			articles = append(articles, ch.newItems...)
 		}
 		sort.SliceStable(articles, func(i, j int) bool {
@@ -330,7 +354,7 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 		}
 
 		var failed, totalFeeds int
-		for _, ch := range db.Feeds() {
+		for _, ch := range feeds {
 			totalFeeds++
 			if ch.FetchError != "" {
 				failed++
