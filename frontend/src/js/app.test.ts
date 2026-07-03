@@ -10,6 +10,7 @@ interface ShowFeed {
    article: { f: number; a: number; p: number; t: string; l: string; c: string }
    has_left: boolean
    has_right: boolean
+   right_count: number
    feed?: { id: number; tag: string }
    placeholder?: boolean
    filtered?: boolean
@@ -18,11 +19,17 @@ const showFeed = (o: Partial<ShowFeed> = {}): ShowFeed => ({
    article: { f: 1, a: 0, p: 0, t: "Title", l: "", c: "<p>body</p>" },
    has_left: false,
    has_right: false,
+   right_count: 0,
    ...o,
 })
 
 const nav = vi.hoisted(() => {
-   const sf = () => ({ article: { f: 1, a: 0, p: 0, t: "T", l: "", c: "<p>x</p>" }, has_left: false, has_right: false })
+   const sf = () => ({
+      article: { f: 1, a: 0, p: 0, t: "T", l: "", c: "<p>x</p>" },
+      has_left: false,
+      has_right: false,
+      right_count: 0,
+   })
    return {
       SAVED_TOKEN: "~saved",
       SEARCH_PREFIX: "q:",
@@ -137,6 +144,7 @@ vi.mock("./fmt", () => ({
    timeAgo: () => "1h",
    timeAgoProse: (unix: number) => (unix === 0 ? "just now" : "4 minutes ago"),
    isStale: (unix: number) => unix > 0 && unix < 1000,
+   countBadge: (n: number) => (n > 999 ? "999+" : String(n)),
    collapseBrokenMedia: () => {},
    URL_DENY: /^\s*(?:javascript|data|vbscript|file)\s*:/i,
 }))
@@ -163,7 +171,7 @@ const SKELETON = `
          <button class="srr-open-reader"></button>
          <span class="srr-feed"></span>
          <button class="srr-prev" disabled></button>
-         <button class="srr-next" disabled></button>
+         <button class="srr-next" disabled><span class="srr-next-count"></span></button>
          <button class="srr-save" disabled></button>
          <button class="srr-settings"></button>
       </nav>
@@ -256,6 +264,65 @@ describe("route() — surface selection from the hash", () => {
       hashTo("#!a%2Bb+%E0%A4%A") // "a+b" (escaped +) then a lone malformed %-escape
       await flush()
       expect(nav.applyFilter).toHaveBeenCalledWith(["a+b", "%E0%A4%A"])
+   })
+})
+
+describe("next pill pending count", () => {
+   const countEl = () => document.querySelector(".srr-next-count") as HTMLElement
+   const nextBtn = () => document.querySelector(".srr-next") as HTMLButtonElement
+
+   it("shows the pending digits and folds the count into the accessible name", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ has_right: true, right_count: 12 }))
+      hashTo("#5")
+      await flush()
+      expect(countEl().textContent).toBe("12")
+      expect(nextBtn().getAttribute("aria-label")).toBe("Next article — 12 remaining")
+      expect(nextBtn().title).toContain("12 remaining")
+   })
+
+   it("caps the digits at 999+ like the config badges", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ has_right: true, right_count: 4321 }))
+      hashTo("#5")
+      await flush()
+      expect(countEl().textContent).toBe("999+")
+      // The accessible name keeps the exact figure — the cap is a width concern.
+      expect(nextBtn().getAttribute("aria-label")).toBe("Next article — 4321 remaining")
+   })
+
+   it("hides the digits only on an unknown (-1) count", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ has_right: true, right_count: -1 }))
+      hashTo("#5")
+      await flush()
+      expect(countEl().textContent).toBe("") // degraded probe: pill works, digits hidden
+      expect(nextBtn().getAttribute("aria-label")).toBe("Next article")
+   })
+
+   it("shows an explicit 0 on the disabled pill at the last article — nothing ahead, said out loud", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ has_right: false, right_count: 0 }))
+      hashTo("#5")
+      await flush()
+      expect(nextBtn().disabled).toBe(true)
+      expect(countEl().textContent).toBe("0")
+      expect(nextBtn().getAttribute("aria-label")).toBe("Next article — 0 remaining")
+   })
+
+   it("clears stale digits when the placeholder renders", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ has_right: true, right_count: 3 }))
+      hashTo("#5")
+      await flush()
+      expect(countEl().textContent).toBe("3")
+
+      nav.fromHash.mockResolvedValue(
+         showFeed({ placeholder: true, article: { f: 0, a: 0, p: 0, t: "(no matching articles)", l: "", c: "" } }),
+      )
+      hashTo("#6")
+      await flush()
+      expect(countEl().textContent).toBe("")
    })
 })
 

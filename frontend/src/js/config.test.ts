@@ -36,6 +36,7 @@ vi.mock("./fmt", () => ({
    srcColorIndex: (id: number) => id % 8,
    formatDate: (t: number) => `D${t}`,
    timeAgoProse: (t: number) => `ago${t}`,
+   countBadge: (n: number) => (n > 999 ? "999+" : String(n)),
    isStale: vi.fn(() => false),
    URL_DENY: /^\s*(?:javascript|data|vbscript|file)\s*:/i,
 }))

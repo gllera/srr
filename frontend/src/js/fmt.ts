@@ -243,6 +243,14 @@ export function isStale(unix: number): boolean {
    return Math.floor(Date.now() / 1000) - unix >= STALE_AFTER_SEC
 }
 
+// Compact article-count readout shared by the config unread badges and the
+// reader's next-pill count: exact up to 999, then a flat "999+" — a backlog
+// past a thousand reads as "a lot" either way, and the cap bounds the width
+// inside chrome that can't grow (the badge column, the toolbar pill).
+export function countBadge(n: number): string {
+   return n > 999 ? "999+" : String(n)
+}
+
 const pad2 = (n: number) => n.toString().padStart(2, "0")
 export function formatDate(unix: number): string {
    const d = new Date(unix * 1000)

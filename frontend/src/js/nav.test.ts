@@ -519,6 +519,95 @@ describe("showFeed", () => {
    })
 })
 
+// right_count — the reader's pending readout: articles still AHEAD of pos.
+// Feed/tag/[ALL] modes count the filter's unread through the same
+// unreadCounts/tagUnreadFromCounts pair the config surface badges use, minus
+// the article on screen (countCurrent=false) — so the last article reads 0.
+// Saved/search count their explicit sets strictly after pos.
+describe("right_count", () => {
+   afterEach(() => nav.setUnreadOnly(false))
+
+   it("matches the unread total in normal mode, ticking down as you read forward", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 3 }])
+      expect((await nav.fromHash("0")).right_count).toBe(2)
+      expect((await nav.fromHash("1")).right_count).toBe(1)
+      expect((await nav.fromHash("2")).right_count).toBe(0)
+   })
+
+   it("counts only the filtered feed's unread in filtered mode", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }, { feedId: 2 }, { feedId: 1 }])
+      expect((await nav.fromHash("0!1")).right_count).toBe(2) // chron 2, 4
+      expect((await nav.fromHash("2!1")).right_count).toBe(1)
+      expect((await nav.fromHash("4!1")).right_count).toBe(0)
+   })
+
+   it("counts what's ahead in unseen-only mode — the badges' numbers minus the article on screen", async () => {
+      // chron 0=ch1 1=ch2 2=ch1 3=ch2 4=ch1; seen ch1→2, ch2→1; unseen are 3,4.
+      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }, { feedId: 2 }, { feedId: 1 }])
+      for (const id of [1, 2]) data.db.feeds[id].tag = "news"
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:2": 1, "feed:1": 2 }))
+      nav.setUnreadOnly(true)
+      const group = [data.db.feeds[1], data.db.feeds[2]]
+      // The pill's own sum: badge counting with the on-screen article excluded.
+      const pillSum = async () => nav.tagUnreadFromCounts(group, await nav.unreadCounts(group, false))
+
+      // Resumes at the seen position (chron 1, already read); both unseen sit ahead.
+      const opened = await nav.switchFilter("news")
+      expect(opened.right_count).toBe(2)
+      expect(opened.right_count).toBe(await pillSum())
+
+      // Stepping onto an unread article: the settings badge keeps counting it
+      // (feedUnread's onCurrent) but the pill does not — one ahead, one on screen.
+      const onFirst = await nav.right() // chron 3
+      expect(onFirst.right_count).toBe(1)
+      expect(onFirst.right_count).toBe(await pillSum())
+      expect(nav.tagUnreadFromCounts(group, await nav.unreadCounts(group))).toBe(2) // pill + the one on screen
+
+      // The LAST unread: nothing ahead, so the pill reads an explicit 0 — even
+      // though its settings badge still shows the one on screen.
+      const onLast = await nav.right() // chron 4
+      expect(onLast.has_right).toBe(false)
+      expect(onLast.right_count).toBe(0)
+      expect(onLast.right_count).toBe(await pillSum())
+   })
+
+   it("counts the saved set to the right in ★ Saved mode", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }, { feedId: 2 }])
+      localStorage.setItem("srr-saved", JSON.stringify([0, 2, 3]))
+      // Saved opens at the newest saved article — nothing further right.
+      expect((await nav.switchFilter(nav.SAVED_TOKEN)).right_count).toBe(0)
+      expect((await nav.left()).right_count).toBe(1) // on chron 2 → {3} remains
+      expect((await nav.left()).right_count).toBe(2) // on chron 0 → {2, 3}
+   })
+
+   it("counts the hit set to the right in search mode", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      searchMod.search.mockImplementation(async function* () {
+         yield [{ chron: 2 }, { chron: 0 }]
+      })
+      // Search opens at the newest hit (chron 2); the other hit is to the left.
+      expect((await nav.switchFilter("q:foo")).right_count).toBe(0)
+      expect((await nav.left()).right_count).toBe(1) // on chron 0 → {2} remains
+   })
+
+   it("degrades to -1 (digits hidden) when the count probe fails, without failing the render", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 3 }])
+      data.countLeft.mockImplementationOnce(() => {
+         throw new Error("cold pack blip")
+      })
+      const shown = await nav.fromHash("0")
+      expect(shown.has_right).toBe(true) // the neighbor probe still succeeded
+      expect(shown.right_count).toBe(-1)
+   })
+
+   it("is 0 on the last article in normal mode (read on landing, like its badge)", async () => {
+      setupIndex([{ feedId: 1 }])
+      const shown = await nav.fromHash("0")
+      expect(shown.has_right).toBe(false)
+      expect(shown.right_count).toBe(0)
+   })
+})
+
 describe("getFilterEntries", () => {
    it("returns only empty string when no active subs", () => {
       data.groupFeedsByTag.mockReturnValue({ tagged: new Map(), sortedTags: [], untagged: [] })
