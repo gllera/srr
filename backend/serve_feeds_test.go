@@ -214,3 +214,54 @@ func TestServeFeedSaveRoundTripsNoTitle(t *testing.T) {
 		t.Errorf("NoTitle = true after PUT with no_title:false, want false")
 	}
 }
+
+func TestServeFeedExpireDaysRoundTrip(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	stubPassthroughResolve()
+	seedFeed(t, db, &Feed{Title: "Old", URL: "https://u.example/feed", Expired: 7})
+
+	// expire_days is writable; expired is server-owned (like error) — a
+	// client echoing it back must not overwrite the counter.
+	body := `{"title":"Old","url":"https://u.example/feed","expire_days":30,"expired":99}`
+	rec := doReq(t, newMux(), "PUT", "/api/feeds/0", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
+	}
+	var got feedListView
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.ExpireDays != 30 || got.Expired != 7 {
+		t.Fatalf("echo expire_days=%d expired=%d, want 30/7", got.ExpireDays, got.Expired)
+	}
+	err := withDB(false, func(_ context.Context, d *DB) error {
+		ch, e := d.FeedByID(0)
+		if e != nil {
+			return e
+		}
+		if ch.ExpireDays != 30 || ch.Expired != 7 {
+			t.Fatalf("stored ExpireDays=%d Expired=%d, want 30/7", ch.ExpireDays, ch.Expired)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOverviewTagCountsAreLive(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	seedFeed(t, db, &Feed{Title: "A", URL: "https://a.example/f", Tag: "news", TotalArt: 10, Expired: 4})
+
+	rec := doReq(t, newMux(), "GET", "/api/overview", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
+	}
+	var ov overviewView
+	if err := json.Unmarshal(rec.Body.Bytes(), &ov); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(ov.Tags) != 1 || ov.Tags[0].Articles != 6 {
+		t.Fatalf("tags = %+v, want one bucket with 6 live articles", ov.Tags)
+	}
+}

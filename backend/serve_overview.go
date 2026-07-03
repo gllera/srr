@@ -47,7 +47,9 @@ func getOverview(w http.ResponseWriter, r *http.Request) {
 				agg[ch.Tag] = tc
 			}
 			tc.Feeds++
-			tc.Articles += ch.TotalArt
+			// Live count: TotalArt is all-time, Expired articles are gone from
+			// the store — the overview is a display projection.
+			tc.Articles += ch.TotalArt - ch.Expired
 		}
 		tags := make([]tagCount, 0, len(agg))
 		for _, tc := range agg {
