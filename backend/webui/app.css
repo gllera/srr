@@ -261,6 +261,34 @@ header {
    background: color-mix(in srgb, var(--ok) 14%, var(--surface-raised));
 }
 
+/* --- store-pulse alarm ---------------------------------------------------- */
+/* The store-level heartbeat raised to an alarm: when fetched_at ages past the
+   pulse thresholds (app.js storePulse) this strip surfaces the silence, with
+   the remedy inline. Amber = hours quiet; red = a day or more, or never ran. */
+.pulse-alert {
+   display: flex;
+   align-items: center;
+   gap: 1em;
+   flex-wrap: wrap;
+   margin: 0 0 0.9em;
+   padding: 0.6em 0.8em;
+   font-family: var(--font-mono);
+   font-size: 0.74rem;
+   letter-spacing: 0.08em;
+   text-transform: uppercase;
+   color: var(--fg);
+   border: 1px solid var(--warn);
+   border-radius: var(--radius);
+   background: color-mix(in srgb, var(--warn) 12%, var(--surface-raised));
+}
+.pulse-alert[data-grade="red"] {
+   border-color: var(--err);
+   background: color-mix(in srgb, var(--err) 12%, var(--surface-raised));
+}
+.pulse-alert .btn {
+   margin-left: auto;
+}
+
 /* --- health board: the Feeds-tab hero readout ---------------------------- */
 .board {
    display: flex;
@@ -317,9 +345,19 @@ header {
    outline-offset: 3px;
    border-radius: 2px;
 }
-/* Store meta readout (articles · last fetch), pushed to the board's right. */
+/* Store meta readout (articles · last fetch), pushed to the board's right.
+   The fetch-age span tints by the store pulse so freshness reads at a glance. */
 .board .meta {
    margin-left: auto;
+}
+.board .meta .pulse[data-grade="ok"] {
+   color: var(--ok);
+}
+.board .meta .pulse[data-grade="amber"] {
+   color: var(--warn);
+}
+.board .meta .pulse[data-grade="red"] {
+   color: var(--err);
 }
 
 /* --- toolbars (filters + actions) ---------------------------------------- */
@@ -422,6 +460,30 @@ thead th {
    white-space: nowrap; /* "last new" must not wrap — the title column absorbs width */
    padding: 0 0.55em 0.5em;
    border-bottom: 1px solid var(--border);
+}
+/* Sortable headers: the th text doubles as a toggle in the same voice; the
+   active column keeps ink color and carries a signal-amber caret. */
+thead th button.th-sort {
+   background: none;
+   border: 0;
+   padding: 0;
+   font: inherit;
+   letter-spacing: inherit;
+   text-transform: inherit;
+   color: inherit;
+   cursor: pointer;
+}
+thead th button.th-sort:hover,
+thead th[aria-sort] button.th-sort {
+   color: var(--fg);
+}
+thead th button.th-sort:focus-visible {
+   outline: 2px solid var(--signal);
+   outline-offset: 2px;
+   border-radius: 2px;
+}
+thead .caret {
+   color: var(--signal);
 }
 tbody td {
    padding: 0.5em 0.55em;
@@ -531,6 +593,36 @@ a.feed-title:hover {
    color: var(--well-ink);
    overflow-wrap: anywhere;
 }
+/* Inline fetch error — the tooltip's content riding the failing row itself, so
+   triage never needs a hover. The streak badge carries the grade color; the
+   message is the verbatim error, wrapping inside the title column. (Same class
+   names as .tip, deliberately separate colors: the tip sits on the dark well,
+   this sits on paper.) */
+.rowerr {
+   display: flex;
+   align-items: baseline;
+   gap: 0.55em;
+   margin-top: 0.15em;
+   white-space: normal;
+}
+.rowerr .streak {
+   font-family: var(--font-mono);
+   font-size: 0.62rem;
+   font-weight: 600;
+   letter-spacing: 0.08em;
+   text-transform: uppercase;
+   color: var(--warn);
+   white-space: nowrap;
+}
+.rowerr[data-grade="err"] .streak {
+   color: var(--err);
+}
+.rowerr .msg {
+   font-family: var(--font-mono);
+   font-size: 0.72rem;
+   color: var(--fg-2);
+   overflow-wrap: anywhere;
+}
 td.actions {
    white-space: nowrap;
    text-align: right;
@@ -543,17 +635,22 @@ td.when {
    color: var(--fg-2);
 }
 
-/* Chips — a tag or recipe reference in the wire voice. */
+/* Chips — a tag or recipe reference in the wire voice. Recipe chips wear a
+   dashed border so a recipe named like its tag still reads as a different kind. */
 .chip {
    display: inline-block;
    font-family: var(--font-mono);
    font-size: 0.72rem;
    letter-spacing: 0.02em;
+   text-transform: none; /* keep chip names verbatim inside uppercased chrome */
    padding: 0.12em 0.5em;
    border: 1px solid var(--border);
    border-radius: 999px;
    color: var(--fg-2);
    background: var(--surface-raised);
+}
+.chip.recipe {
+   border-style: dashed;
 }
 
 /* Pipe steps as connected wire tokens — the processing pipeline made visible. */
@@ -743,6 +840,22 @@ dialog .picker label.check {
 }
 
 /* --- preview ------------------------------------------------------------- */
+/* The Feeds-row preview dialog: wide, with its own scrolling article list. */
+dialog.preview-dialog {
+   width: min(70em, 92vw);
+}
+dialog.preview-dialog .preview-out {
+   max-height: 65vh;
+   overflow: auto;
+}
+.preview-frame {
+   width: 100%;
+   height: 16em;
+   border: 1px solid var(--border);
+   border-radius: 6px;
+   /* Feed HTML assumes a light page; keep the inert frame paper-white in both themes. */
+   background: #fff;
+}
 article.preview {
    border-top: 1px solid var(--faint);
    padding: 0.9em 0;
@@ -792,4 +905,78 @@ article.preview .content img {
 }
 a {
    color: var(--signal);
+}
+
+/* --- narrow screens: the feeds table stacks to two-line rows -------------- */
+/* Below 720px each row reflows: dot + title + actions on the first line, the
+   meta (tag, recipe, last-new, count) on the second. The title keeps priority —
+   it wraps instead of ellipsizing to "9t…" — and the source rail moves from the
+   status cell to the row's own left edge. */
+@media (max-width: 719px) {
+   #feedTableWrap table,
+   #feedTableWrap tbody {
+      display: block;
+   }
+   #feedTableWrap thead {
+      display: none; /* sort toggles are desktop-only; search/tag filters stay above */
+   }
+   #feedTableWrap tbody tr {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.35em 0.7em;
+      padding: 0.55em 0.4em 0.6em 0.85em;
+      border-bottom: 1px solid var(--faint);
+      box-shadow: inset 3px 0 0 var(--src, var(--border));
+   }
+   #feedTableWrap tbody td {
+      display: block;
+      border-bottom: 0;
+      padding: 0;
+   }
+   #feedTableWrap tbody tr:hover td {
+      background: none; /* flex cells no longer tile the row — skip the patchy wash */
+   }
+   #feedTableWrap td.status {
+      box-shadow: none;
+      width: auto;
+      order: 0;
+   }
+   #feedTableWrap td.title {
+      order: 1;
+      flex: 1 1 auto;
+      width: auto;
+      max-width: none;
+      min-width: 20ch;
+   }
+   #feedTableWrap a.feed-title {
+      white-space: normal;
+      overflow: visible;
+      text-overflow: clip;
+   }
+   #feedTableWrap td.actions {
+      order: 2;
+      margin-left: auto;
+   }
+   /* Forced line break between the title line and the meta line. */
+   #feedTableWrap tbody tr::after {
+      content: "";
+      order: 3;
+      flex-basis: 100%;
+      height: 0;
+   }
+   #feedTableWrap td.tagcell,
+   #feedTableWrap td.recipecell {
+      order: 4;
+   }
+   #feedTableWrap td.when {
+      order: 5;
+   }
+   #feedTableWrap td:empty {
+      display: none; /* untagged / default-recipe rows: no ghost gaps */
+   }
+   #feedTableWrap td.artcount::before {
+      content: "arts ";
+      color: var(--muted);
+   }
 }

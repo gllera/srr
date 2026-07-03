@@ -68,7 +68,7 @@ function el(tag, attrs, ...kids) {
     else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
     else if (v !== null && v !== undefined) e.setAttribute(k, v);
   }
-  for (const kid of kids) e.append(kid);
+  for (const kid of kids) if (kid !== "") e.append(kid); // "" = no child — keeps :empty selectors honest
   return e;
 }
 
@@ -241,12 +241,28 @@ document.addEventListener("visibilitychange", async () => {
 });
 
 // --- feeds tab --------------------------------------------------------------
-const feedsState = { search: "", tag: "", grade: "" };
+const feedsState = { search: "", tag: "", grade: "", sort: "title", dir: 1 };
 const UNTAGGED = "\x00"; // sentinel: the "(untagged)" filter option value, distinct from "" (= all tags)
 
 // A feed that fetches fine but has produced nothing new for this long is a
 // zombie candidate — the publisher stopped, moved, or broke silently.
 const STALE_AFTER = 30 * 86400;
+
+// Store-pulse thresholds: how old the store-wide fetched_at may get before the
+// console raises the alarm. The fetch loop normally cycles every few minutes,
+// so hours of silence mean the loop itself is down — the one failure the
+// per-feed grades can't see.
+const PULSE_AMBER_S = 6 * 3600;
+const PULSE_RED_S = 24 * 3600;
+
+// storePulse grades the store's own heartbeat (ok / amber / red) from the age
+// of the last committed fetch. A never-fetched store with feeds is red (the
+// loop has never run); an empty store is silent — nothing to fetch yet.
+function storePulse() {
+  if (!snapshot.fetched_at) return snapshot.feeds.length ? "red" : "ok";
+  const age = Date.now() / 1000 - snapshot.fetched_at;
+  return age >= PULSE_RED_S ? "red" : age >= PULSE_AMBER_S ? "amber" : "ok";
+}
 
 // feedGrade buckets a feed's health: ok (live) / warn (failing, recoverable) /
 // err (fault, streak >= 3) / stale (fetching fine, no new article in 30d) /
@@ -279,10 +295,13 @@ function healthBoard() {
   const c = { ok: 0, warn: 0, err: 0, stale: 0, idle: 0 };
   for (const f of snapshot.feeds) c[feedGrade(f)]++;
   const total = snapshot.feeds.length;
+  // Grade filters redraw board + table in place (not drawFeeds) so the search
+  // input keeps its focus and value while the operator composes filters.
+  const setGrade = (g) => { feedsState.grade = g; drawBoard(); drawTable(); };
   const board = el("div", { class: "board" },
     el("button", {
       class: "total", title: "show all feeds",
-      onclick: () => { feedsState.grade = ""; drawFeeds(); },
+      onclick: () => setGrade(""),
     }, el("b", {}, String(total)), total === 1 ? " source" : " sources"));
   const add = (grade, n, dot, label) => {
     if (!n) return;
@@ -290,7 +309,7 @@ function healthBoard() {
     board.append(el("button", {
       class: "stat" + (active ? " active" : ""),
       title: active ? "clear the filter" : "show only " + label + " feeds",
-      onclick: () => { feedsState.grade = active ? "" : grade; drawFeeds(); },
+      onclick: () => setGrade(active ? "" : grade),
     }, el("i", { class: "dot " + dot }), el("b", {}, String(n)), " " + label));
   };
   add("ok", c.ok, "green", "live");
@@ -299,8 +318,40 @@ function healthBoard() {
   add("stale", c.stale, "dim", "stale");
   add("idle", c.idle, "gray", "idle");
   board.append(el("span", { class: "meta" },
-    `${snapshot.total_art.toLocaleString()} articles · fetched ${relTime(snapshot.fetched_at)}`));
+    `${snapshot.total_art.toLocaleString()} articles · `,
+    el("span", { class: "pulse", "data-grade": storePulse() },
+      `fetched ${relTime(snapshot.fetched_at)}`)));
   return board;
+}
+
+// pulseStrip is the store-level alarm: when the whole store hasn't fetched in
+// hours (see storePulse) a full-width strip surfaces the silence — with the
+// remedy inline — instead of leaving it to the board's quiet meta readout.
+// Returns null while the pulse is healthy.
+function pulseStrip() {
+  const grade = storePulse();
+  if (grade === "ok") return null;
+  const btn = el("button", {
+    class: "btn",
+    disabled: document.body.classList.contains("fetching") ? "" : null,
+    onclick: (e) => fetchAllFromStrip(e.currentTarget),
+  }, "Fetch now");
+  return el("div", { class: "pulse-alert", "data-grade": grade, role: "alert" },
+    el("span", { class: "pulse-msg" },
+      snapshot.fetched_at
+        ? `last fetch ${relTime(snapshot.fetched_at)} — fetch loop may be down`
+        : "store never fetched — fetch loop may be down"),
+    btn);
+}
+
+// drawBoard fills the stable #feedsBoard container with [pulse alarm?, health
+// board] — the in-place redraw target for grade-filter clicks and live fetch
+// events, kept apart from the toolbar so redraws never touch the search input.
+function drawBoard() {
+  const box = document.getElementById("feedsBoard");
+  if (!box) return;
+  const strip = pulseStrip();
+  box.replaceChildren(...(strip ? [strip] : []), healthBoard());
 }
 
 function feedMatches(f) {
@@ -356,16 +407,18 @@ function drawFeeds() {
       } catch (err) { banner(err.message); }
     } });
   const importBtn = el("button", { class: "btn", onclick: () => importInput.click() }, "Import OPML");
-  root.append(healthBoard());
+  root.append(el("div", { id: "feedsBoard" }));
   root.append(el("div", { class: "toolbar" }, search, tagSel, add, importBtn, importInput, exportBtn));
   root.append(el("div", { id: "feedTableWrap" }));
+  drawBoard();
   drawTable();
 }
 
 // feedRow builds one Feeds-table row. A healthy feed shows a plain status dot; a
 // failing feed wraps its dot in a focusable trigger that reveals the last fetch
 // error as a hover/focus tooltip (the styled wire-log bubble; the wrapper's
-// aria-label carries the same text for screen readers).
+// aria-label carries the same text for screen readers) AND carries the same
+// error inline under its title — triage must not require hovering each dot.
 function feedRow(f) {
   let statusCell;
   if (f.error) {
@@ -380,17 +433,26 @@ function feedRow(f) {
   } else {
     statusCell = el("td", { class: "status" }, healthDot(f));
   }
+  const titleCell = el("td", { class: "title" },
+    el("a", { class: "feed-title", href: f.url, target: "_blank", rel: "noopener" }, f.title));
+  if (f.error) {
+    titleCell.append(el("div", { class: "rowerr", "data-grade": feedGrade(f), "aria-hidden": "true" },
+      el("span", { class: "streak" }, `fail ×${f.fail_streak}`),
+      el("span", { class: "msg" }, f.error)));
+  }
   return el("tr", { "data-src": String(srcColorIndex(f.id)) },
     statusCell,
-    el("td", { class: "title" }, el("a", { class: "feed-title", href: f.url, target: "_blank", rel: "noopener" }, f.title)),
-    el("td", {}, f.tag ? el("span", { class: "chip" }, f.tag) : ""),
-    el("td", {}, f.recipe ? el("span", { class: "chip" }, f.recipe) : ""),
-    el("td", { class: "when", title: f.last_new ? new Date(f.last_new * 1000).toLocaleString() : null },
-      f.last_new ? relTime(f.last_new) : "—"),
-    el("td", { class: "when" }, String(f.total_art)),
+    titleCell,
+    el("td", { class: "tagcell" }, f.tag ? el("span", { class: "chip" }, f.tag) : ""),
+    el("td", { class: "recipecell" }, f.recipe ? el("span", { class: "chip recipe", title: "recipe" }, f.recipe) : ""),
+    // "never" = the feed has never fetched OK; "—" = fetching fine, but no new
+    // article stamped yet (pre-vitals stores never stamped last_new).
+    el("td", { class: "when lastnew", title: f.last_new ? new Date(f.last_new * 1000).toLocaleString() : null },
+      f.last_new ? relTime(f.last_new) : f.last_ok ? "—" : "never"),
+    el("td", { class: "when artcount" }, String(f.total_art)),
     el("td", { class: "actions" },
       el("button", { class: "btn icon", title: "Fetch this feed", "aria-label": "Fetch this feed", onclick: (e) => fetchOneFeed(f, e.currentTarget), html: ICON_FETCH }),
-      el("button", { class: "btn icon", title: "Preview", "aria-label": "Preview", onclick: () => openPreviewFor(f), html: ICON_PREVIEW }),
+      el("button", { class: "btn icon", title: "Preview", "aria-label": "Preview", onclick: () => openPreviewDialog(f), html: ICON_PREVIEW }),
       el("button", { class: "btn icon", title: "Edit", "aria-label": "Edit", onclick: () => openFeedModal(f), html: ICON_EDIT })));
 }
 
@@ -403,7 +465,7 @@ async function fetchOneFeed(f, btn) {
   let result = null, errMsg = "";
   try {
     await streamSSE("/api/fetch?id=" + f.id, ({ event, data }) => {
-      if (event === "feed") result = data;
+      if (event === "feed") { result = data; applyFeedEvent(data); }
       else if (event === "error") errMsg = data.error;
     });
   } catch (e) {
@@ -417,14 +479,90 @@ async function fetchOneFeed(f, btn) {
   try { await refresh(); } catch (e) { banner(e.message); }
 }
 
+// applyFeedEvent folds one SSE per-feed result into the cached snapshot and,
+// on the Feeds tab, redraws board + table in place — the console ticks live
+// while a cycle streams. The vitals are mirrored optimistically (the event
+// carries only id/title/error/new); the authoritative post-stream refresh()
+// reconciles any drift. fetched_at is deliberately untouched — it stamps at
+// cycle commit, not per feed.
+function applyFeedEvent(p) {
+  const f = snapshot.feeds.find((x) => x.id === p.id);
+  if (!f) return;
+  const now = Math.floor(Date.now() / 1000);
+  if (p.error) {
+    f.error = p.error;
+    f.fail_streak = (f.fail_streak || 0) + 1;
+  } else {
+    f.error = "";
+    f.fail_streak = 0;
+    f.last_ok = now;
+    if (p.new) {
+      f.last_new = now;
+      f.total_art += p.new;
+      snapshot.total_art += p.new;
+    }
+  }
+  if (currentTab === "feeds") { drawBoard(); drawTable(); }
+}
+
+// fetchAllFromStrip runs the full fetch cycle from the pulse strip's inline
+// action — the alarm carries its own remedy. Per-feed SSE events tick the
+// board and table live; the final refresh() reconciles and, once fetched_at
+// is fresh, clears the strip.
+async function fetchAllFromStrip(btn) {
+  if (document.body.classList.contains("fetching")) return;
+  btn.disabled = true;
+  document.body.classList.add("fetching");
+  let errMsg = "", failed = 0;
+  try {
+    await streamSSE("/api/fetch", ({ event, data }) => {
+      if (event === "feed") {
+        if (data.error) failed++;
+        applyFeedEvent(data);
+      } else if (event === "error") errMsg = data.error;
+    });
+  } catch (e) {
+    errMsg = e.message;
+  } finally {
+    document.body.classList.remove("fetching");
+  }
+  if (errMsg) banner(errMsg);
+  else banner(failed ? `Fetch done — ${failed} feed${failed === 1 ? "" : "s"} failed` : "Fetch done", !failed);
+  try { await refresh(); } catch (e) { banner(e.message); }
+}
+
+// Column comparators for the sortable headers. Numeric columns first-click
+// descending (newest / biggest first — the triage order); title stays A→Z.
+const FEED_SORTS = {
+  title: (a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" }),
+  last_new: (a, b) => a.last_new - b.last_new,
+  articles: (a, b) => a.total_art - b.total_art,
+};
+
+// sortableTh builds a sort-toggle header cell: a click cycles column/direction
+// and redraws; aria-sort marks the active column for assistive tech.
+function sortableTh(label, key) {
+  const active = feedsState.sort === key;
+  return el("th", { "aria-sort": active ? (feedsState.dir === 1 ? "ascending" : "descending") : null },
+    el("button", {
+      class: "th-sort",
+      onclick: () => {
+        if (feedsState.sort === key) feedsState.dir = -feedsState.dir;
+        else { feedsState.sort = key; feedsState.dir = key === "title" ? 1 : -1; }
+        drawTable();
+      },
+    }, label, active ? el("span", { class: "caret" }, feedsState.dir === 1 ? " ↑" : " ↓") : ""));
+}
+
 function drawTable() {
   const wrap = document.getElementById("feedTableWrap");
-  const rows = snapshot.feeds.filter(feedMatches);
+  const rows = snapshot.feeds.filter(feedMatches); // fresh array — in-place sort below never reorders the snapshot
+  rows.sort((a, b) => FEED_SORTS[feedsState.sort](a, b) * feedsState.dir);
   const table = el("table", {},
     el("thead", {}, el("tr", {},
-      el("th", {}, ""), el("th", {}, "title"),
+      el("th", {}, ""), sortableTh("title", "title"),
       el("th", {}, "tag"), el("th", {}, "recipe"),
-      el("th", {}, "last new"), el("th", {}, "articles"),
+      sortableTh("last new", "last_new"), sortableTh("articles", "articles"),
       el("th", {}, ""))));
   const tb = el("tbody", {});
   for (const f of rows) tb.append(feedRow(f));
@@ -603,19 +741,46 @@ function openRecipeModal(name, rcp) {
   recipeDialog.showModal();
 }
 
-// --- inline preview (used inside the Recipes tab) ---------------------------
-// previewState carries a feed's url/recipe from the Feeds row action into the
-// panel (and keeps hand-typed values across tab switches); run=true autoruns
-// the preview once on the next render.
-const previewState = { url: "", recipe: "default", run: false };
+// --- preview (Feeds-row dialog + Recipes-tab panel) --------------------------
+// previewState keeps the panel's hand-typed url/recipe across tab switches.
+const previewState = { url: "", recipe: "default" };
 
-// openPreviewFor is the Feeds-row action: preview this feed's URL through its
-// effective recipe, over on the Recipes tab.
-function openPreviewFor(f) {
-  previewState.url = f.url;
-  previewState.recipe = f.recipe || "default";
-  previewState.run = true;
-  showTab("recipes");
+// renderPreviewInto renders /api/preview articles for url+recipe into `out`
+// (loading line → article list, each body in a sandboxed inert iframe). Shared
+// by the Recipes-tab panel and the Feeds-row preview dialog.
+async function renderPreviewInto(out, url, recipe) {
+  out.replaceChildren(el("div", { class: "muted" }, "loading…"));
+  try {
+    const arts = await apiGet(`/api/preview?url=${encodeURIComponent(url)}&recipe=${encodeURIComponent(recipe)}`);
+    out.replaceChildren(el("div", { class: "muted" }, `${arts.length} articles`));
+    for (const a of arts) {
+      out.append(el("article", { class: "preview" },
+        el("h4", {}, a.link ? el("a", { href: a.link, target: "_blank", rel: "noopener" }, a.title) : a.title),
+        el("iframe", {
+          class: "preview-frame",
+          // Empty sandbox = scripts, inline event handlers and javascript: URLs all
+          // disabled, so a recipe that omits #sanitize can't run feed-supplied JS on
+          // the admin origin. srcdoc renders the HTML inert.
+          sandbox: "",
+          srcdoc: a.content,
+        })));
+    }
+  } catch (e) { out.replaceChildren(el("div", { class: "muted" }, e.message)); }
+}
+
+let previewDialog;
+// openPreviewDialog is the Feeds-row action: preview this feed's URL through
+// its effective recipe in place — a dialog over the table, no tab switch.
+function openPreviewDialog(f) {
+  previewDialog ||= makeDialog({ class: "preview-dialog" });
+  const out = el("div", { class: "preview-out" });
+  previewDialog.replaceChildren(
+    el("h3", {}, "Preview — " + f.title, " ", el("span", { class: "chip recipe", title: "recipe" }, f.recipe || "default")),
+    out,
+    el("div", { class: "row" },
+      el("button", { class: "btn", onclick: () => previewDialog.close() }, "Close")));
+  previewDialog.showModal();
+  renderPreviewInto(out, f.url, f.recipe || "default");
 }
 
 function previewPanel(recipes) {
@@ -625,31 +790,7 @@ function previewPanel(recipes) {
     el("option", { value: "default" }, "default"));
   appendRecipeOptions(recipeSel, previewState.recipe, recipes);
   const out = el("div", {});
-  const runPreview = async () => {
-    out.replaceChildren(el("div", { class: "muted" }, "loading…"));
-    try {
-      const arts = await apiGet(`/api/preview?url=${encodeURIComponent(url.value)}&recipe=${encodeURIComponent(recipeSel.value)}`);
-      out.replaceChildren(el("div", { class: "muted" }, `${arts.length} articles`));
-      for (const a of arts) {
-        out.append(el("article", { class: "preview" },
-          el("h4", {}, a.link ? el("a", { href: a.link, target: "_blank", rel: "noopener" }, a.title) : a.title),
-          el("iframe", {
-            class: "preview-frame",
-            // Empty sandbox = scripts, inline event handlers and javascript: URLs all
-            // disabled, so a recipe that omits #sanitize can't run feed-supplied JS on
-            // the admin origin. srcdoc renders the HTML inert.
-            sandbox: "",
-            srcdoc: a.content,
-            style: "width:100%;height:16em;border:1px solid var(--line,#3a3a3a);border-radius:6px;background:#fff",
-          })));
-      }
-    } catch (e) { out.replaceChildren(el("div", { class: "muted" }, e.message)); }
-  };
-  const go = el("button", { class: "btn", onclick: runPreview }, "Preview");
-  if (previewState.run) {
-    previewState.run = false;
-    setTimeout(runPreview, 0); // after the panel is in the DOM
-  }
+  const go = el("button", { class: "btn", onclick: () => renderPreviewInto(out, url.value, recipeSel.value) }, "Preview");
   return el("div", { style: "margin-top:1.6em" },
     el("h3", { class: "section-head" }, "Preview a recipe against a URL"),
     el("div", { class: "toolbar" }, url, recipeSel, go), out);
@@ -782,8 +923,10 @@ function renderTools() {
     document.body.classList.add("fetching"); // "on the air" — pulses the masthead signal mark
     try {
       await streamSSE("/api/fetch", ({ event, data }) => {
-        if (event === "feed") log.textContent += `#${data.id} ${data.title}: ${data.error ? "ERROR " + data.error : data.new + " new"}\n`;
-        else if (event === "done") log.textContent += "done.\n";
+        if (event === "feed") {
+          log.textContent += `#${data.id} ${data.title}: ${data.error ? "ERROR " + data.error : data.new + " new"}\n`;
+          applyFeedEvent(data); // keeps the cached snapshot live; guarded so Tools' DOM is never redrawn
+        } else if (event === "done") log.textContent += "done.\n";
         else if (event === "error") log.textContent += "ERROR: " + data.error + "\n";
       }, aborter.signal);
     } catch (e) {
