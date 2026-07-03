@@ -121,6 +121,10 @@
    [data-src="7"] {
       --src: oklch(0.74 0.125 115);
    }
+   /* Dropdown chevron in dark --muted (SVG data URIs can't read CSS vars). */
+   select {
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236e6c66' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+   }
 }
 
 @media (prefers-contrast: more) {
@@ -380,6 +384,17 @@ textarea {
 }
 .toolbar input[type="search"] {
    min-width: 14em;
+}
+/* Every <select> wears the console's Feather chevron instead of the native
+   widget arrow. SVG data URIs can't reference CSS vars, so the stroke is the
+   literal --muted value per theme (overridden in the dark block above). */
+select {
+   appearance: none;
+   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238a8780' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+   background-repeat: no-repeat;
+   background-position: right 0.5em center;
+   background-size: 1em;
+   padding-right: 2em;
 }
 input:focus-visible,
 select:focus-visible,
@@ -652,6 +667,31 @@ td.when {
 .chip.recipe {
    border-style: dashed;
 }
+/* One-click pickers (feed dialog tag + recipe): the vocabulary laid out as
+   toggle chips instead of hiding behind a dropdown. The active choice wears
+   the signal accent; recipe chips keep their dashed identity. */
+.tag-chips {
+   display: flex;
+   flex-wrap: wrap;
+   gap: 0.35em;
+   margin-top: 0.4em;
+}
+.chip.choice {
+   cursor: pointer;
+}
+.chip.choice:hover {
+   border-color: var(--muted);
+   color: var(--fg);
+}
+.chip.choice.active {
+   border-color: var(--signal);
+   color: var(--signal);
+   font-weight: 600;
+}
+.chip.choice:focus-visible {
+   outline: 2px solid var(--signal);
+   outline-offset: 2px;
+}
 
 /* Pipe steps as connected wire tokens — the processing pipeline made visible. */
 .pipe {
@@ -805,6 +845,35 @@ dialog .row {
    gap: 0.5em;
    justify-content: flex-end;
    margin-top: 1.2em;
+}
+/* Dialog form errors — a mistake must read as an error, not as metadata. */
+.formerr {
+   color: var(--err);
+   font-size: 0.85em;
+   white-space: pre-wrap;
+   overflow-wrap: anywhere;
+}
+/* The add-feed wire check: a one-line readout under the URL field ("reading
+   feed…" → green dot + items · the feed's own title, or the fetch error).
+   min-height pins the dialog's layout across the three states. */
+.resolve-status {
+   display: flex;
+   align-items: center;
+   gap: 0.45em;
+   min-height: 1.4em;
+   margin-top: 0.35em;
+   font-family: var(--font-mono);
+   font-size: 0.72rem;
+   color: var(--fg-2);
+}
+.resolve-status .bad {
+   color: var(--err);
+   overflow-wrap: anywhere;
+}
+/* One width across probe states — a long fetch error wraps instead of
+   stretching the dialog (and the URL field earns real paste room). */
+dialog#feedModal {
+   width: min(36em, 92vw);
 }
 /* Scrollable checkbox pickers (syndicate tag/feed selectors). Rows are human
    values — undo the dialog label's mono-uppercase voice. */

@@ -44,6 +44,39 @@ func TestPreviewRequiresURL(t *testing.T) {
 	}
 }
 
+// GET /api/resolve reads the wire's own label: the feed-level title, the item
+// count, and the (possibly discovery-resolved) feed URL — what the add-feed
+// dialog pre-fills before the operator commits.
+func TestResolve(t *testing.T) {
+	setupTestDB(t)
+	allowLoopback(t)
+	url := rssServer(t)
+
+	rec := doReq(t, newMux(), "GET", "/api/resolve?url="+url, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
+	}
+	var got struct {
+		URL   string `json:"url"`
+		Title string `json:"title"`
+		Items int    `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.URL != url || got.Title != "S" || got.Items != 1 {
+		t.Fatalf("got %+v, want url=%s title=S items=1", got, url)
+	}
+}
+
+func TestResolveInvalidURL(t *testing.T) {
+	setupTestDB(t)
+	rec := doReq(t, newMux(), "GET", "/api/resolve?url=notaurl", "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
 func TestGenShowAndBump(t *testing.T) {
 	setupTestDB(t)
 	ov := doReq(t, newMux(), "GET", "/api/overview", "")

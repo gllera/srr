@@ -65,37 +65,52 @@ var previewTmpl = template.Must(template.New("preview").Funcs(template.FuncMap{
 </body>
 </html>`))
 
+// previewFetch runs the ingest half of a preview/resolve probe: it resolves
+// the recipe's effective ingest strategy and fetches rawURL through it on a
+// one-shot client. Shared by renderPreview (which then runs the pipeline) and
+// serve's handleResolve (which only reads the wire's metadata).
+func previewFetch(ctx context.Context, recipes map[string]Recipe, recipeName, ingestOverride, rawURL string) (ingest.Result, error) {
+	client := newFetchClient(1)
+	// One-shot per probe; the serve process calls this per request, so reclaim
+	// the transport's idle keep-alive sockets instead of leaking them ~90s each.
+	defer client.CloseIdleConnections()
+	engine := ingest.New()
+
+	r := recipeFor(recipes, recipeName)
+	def := recipeFor(recipes, defaultRecipeName)
+	if ingestOverride != "" {
+		r.Ingest = ingestOverride
+	}
+	buf := make([]byte, globals.MaxFeedSize*(1<<10)+1)
+	name := ingest.Select(r.Ingest, def.Ingest)
+	result, err := engine.Fetch(ctx, name, client, buf, ingest.Request{URL: rawURL, MaxSize: cap(buf) - 1})
+	if err != nil {
+		return ingest.Result{}, fmt.Errorf("ingest %q: %w", name, err)
+	}
+	return result, nil
+}
+
 // renderPreview fetches url through the resolved recipe's ingest, runs the
 // module pipeline, and returns the processed articles. Shared by PreviewCmd
 // (HTML page) and GET /api/preview (JSON). Optional ad-hoc overrides: a non-nil
 // pipeOverride replaces the recipe's pipe; a non-empty ingestOverride replaces
 // its ingest.
 func renderPreview(ctx context.Context, recipes map[string]Recipe, recipeName string, pipeOverride []string, ingestOverride, rawURL string) ([]*Item, error) {
-	client := newFetchClient(1)
-	// One-shot per render; the serve process calls this per request, so reclaim
-	// the transport's idle keep-alive sockets instead of leaking them ~90s each.
-	defer client.CloseIdleConnections()
 	processor := mod.New()
-	engine := ingest.New()
 
 	r := recipeFor(recipes, recipeName)
 	def := recipeFor(recipes, defaultRecipeName)
 	if len(pipeOverride) > 0 {
 		r.Pipe = pipeOverride
 	}
-	if ingestOverride != "" {
-		r.Ingest = ingestOverride
-	}
 	pipe := resolvePipe(def.Pipe, r.Pipe)
 	if err := processor.Validate(ctx, pipe); err != nil {
 		return nil, fmt.Errorf("invalid pipeline %v: %w", pipe, err)
 	}
 
-	buf := make([]byte, globals.MaxFeedSize*(1<<10)+1)
-	name := ingest.Select(r.Ingest, def.Ingest)
-	result, err := engine.Fetch(ctx, name, client, buf, ingest.Request{URL: rawURL, MaxSize: cap(buf) - 1})
+	result, err := previewFetch(ctx, recipes, recipeName, ingestOverride, rawURL)
 	if err != nil {
-		return nil, fmt.Errorf("ingest %q: %w", name, err)
+		return nil, err
 	}
 
 	articles := make([]*Item, 0, len(result.Items))

@@ -45,6 +45,40 @@ func handlePreview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// handleResolve probes a URL through a recipe's ingest without touching the
+// store: GET /api/resolve?url=&recipe= → {url, title, items}. The add-feed
+// dialog calls it to read the wire's own label before the operator commits:
+// the resolved feed URL (subscribe-time discovery folds a homepage to its
+// advertised feed), the feed-level title, and the item count. Read-only and
+// advisory — save re-resolves server-side, so a skipped or failed probe never
+// blocks an add.
+func handleResolve(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	rawURL := q.Get("url")
+	if !validFeedURL(rawURL) {
+		writeErr(w, fmt.Errorf("invalid url %q", rawURL))
+		return
+	}
+	var out map[string]any
+	err := withDBCtx(r.Context(), false, func(ctx context.Context, db *DB) error {
+		res, e := previewFetch(ctx, db.core.Recipes, q.Get("recipe"), "", rawURL)
+		if e != nil {
+			return e
+		}
+		resolved := res.ResolvedURL
+		if resolved == "" {
+			resolved = rawURL
+		}
+		out = map[string]any{"url": resolved, "title": res.Title, "items": len(res.Items)}
+		return nil
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 func bumpGen(w http.ResponseWriter, r *http.Request) {
 	var gen int
 	err := withDBCtx(r.Context(), true, func(ctx context.Context, db *DB) error {
