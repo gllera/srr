@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Params are the key=value parameters parsed from a pipeline module token.
@@ -14,6 +15,58 @@ import (
 // "#readability" and the Params are {"timeout": "30s", "maxbody": "8MiB"}.
 // They let a single built-in be tuned per pipeline position without new tokens.
 type Params map[string]string
+
+// splitParamFields splits the post-name portion of a built-in token into
+// key=value fields. Whitespace separates fields, but a double-quoted span
+// keeps its whitespace literally and the quotes are dropped, so values that
+// contain spaces (e.g. a browser User-Agent in `ua="Mozilla/5.0 (X11)"`) stay
+// one field. An unterminated quote is a configuration error; there is no
+// escape syntax for a literal '"' inside a quoted span.
+func splitParamFields(s string) ([]string, error) {
+	var fields []string
+	rest := s
+	for {
+		rest = strings.TrimLeftFunc(rest, unicode.IsSpace)
+		if rest == "" {
+			return fields, nil
+		}
+		var b strings.Builder
+		inQuote := false
+		i := 0
+		for ; i < len(rest); i++ {
+			switch c := rest[i]; {
+			case c == '"':
+				inQuote = !inQuote
+			case !inQuote && unicode.IsSpace(rune(c)):
+				// Field boundary. Multi-byte whitespace runes never appear
+				// mid-UTF-8 sequence, so byte-wise scanning is UTF-8 safe;
+				// any non-ASCII whitespace is caught by the outer TrimLeft.
+				goto done
+			default:
+				b.WriteByte(c)
+			}
+		}
+	done:
+		if inQuote {
+			return nil, fmt.Errorf("unterminated quote in parameters %q", s)
+		}
+		fields = append(fields, b.String())
+		rest = rest[i:]
+	}
+}
+
+// String returns the raw value for key, or def when key is absent. The value
+// must be non-empty — quote it when it contains spaces (see splitParamFields).
+func (p Params) String(key, def string) (string, error) {
+	v, ok := p[key]
+	if !ok {
+		return def, nil
+	}
+	if v == "" {
+		return "", fmt.Errorf("parameter %s must not be empty", key)
+	}
+	return v, nil
+}
 
 // parseParams turns the post-name fields of a built-in token into a Params map.
 // Each field must be key=value; a bare token (no '='), an empty key, or a
