@@ -16,8 +16,8 @@ import (
 type PreviewCmd struct {
 	URL    *url.URL `arg:"" help:"URL to preview."`
 	Recipe string   `short:"r" default:"default" help:"Preview as if the feed used this recipe."`
-	Pipe   []string `short:"p" sep:"none" help:"Ad-hoc pipeline override (repeat -p per step); overrides the recipe's pipe. #default expands to the default recipe's pipe."`
-	Ingest string   `short:"i" help:"Ad-hoc ingest override: built-in ('#feed') or shell command. Overrides the recipe's ingest."`
+	Pipe   []string `short:"p" sep:"none" help:"Ad-hoc pipeline override (repeat -p per step), like a feed-level pipe: overrides the recipe's pipe; #default expands to the recipe's effective pipe."`
+	Ingest string   `short:"i" help:"Ad-hoc ingest override, like a feed-level ingest: built-in ('#feed') or shell command. Overrides the recipe's ingest."`
 	Addr   string   `short:"a" default:"localhost:8080" env:"SRR_PREVIEW_ADDR" help:"Address to listen on."`
 }
 
@@ -66,9 +66,10 @@ var previewTmpl = template.Must(template.New("preview").Funcs(template.FuncMap{
 </html>`))
 
 // previewFetch runs the ingest half of a preview/resolve probe: it resolves
-// the recipe's effective ingest strategy and fetches rawURL through it on a
-// one-shot client. Shared by renderPreview (which then runs the pipeline) and
-// serve's handleResolve (which only reads the wire's metadata).
+// the effective ingest strategy (ingestOverride acting as a feed-level
+// override over the recipe's, over the default's) and fetches rawURL through
+// it on a one-shot client. Shared by renderPreview (which then runs the
+// pipeline) and serve's handleResolve (which only reads the wire's metadata).
 func previewFetch(ctx context.Context, recipes map[string]Recipe, recipeName, ingestOverride, rawURL string) (ingest.Result, error) {
 	client := newFetchClient(1)
 	// One-shot per probe; the serve process calls this per request, so reclaim
@@ -78,11 +79,8 @@ func previewFetch(ctx context.Context, recipes map[string]Recipe, recipeName, in
 
 	r := recipeFor(recipes, recipeName)
 	def := recipeFor(recipes, defaultRecipeName)
-	if ingestOverride != "" {
-		r.Ingest = ingestOverride
-	}
 	buf := make([]byte, globals.MaxFeedSize*(1<<10)+1)
-	name := ingest.Select(r.Ingest, def.Ingest)
+	name := ingest.Select(ingestOverride, r.Ingest, def.Ingest)
 	result, err := engine.Fetch(ctx, name, client, buf, ingest.Request{URL: rawURL, MaxSize: cap(buf) - 1})
 	if err != nil {
 		return ingest.Result{}, fmt.Errorf("ingest %q: %w", name, err)
@@ -92,18 +90,17 @@ func previewFetch(ctx context.Context, recipes map[string]Recipe, recipeName, in
 
 // renderPreview fetches url through the resolved recipe's ingest, runs the
 // module pipeline, and returns the processed articles. Shared by PreviewCmd
-// (HTML page) and GET /api/preview (JSON). Optional ad-hoc overrides: a non-nil
-// pipeOverride replaces the recipe's pipe; a non-empty ingestOverride replaces
-// its ingest.
+// (HTML page) and GET /api/preview (JSON). Optional ad-hoc overrides with
+// feed-level semantics (the same resolution Feed.Fetch applies to a feed's
+// own Ingest/Pipe): a non-empty pipeOverride replaces the recipe's effective
+// pipe, #default inside it expanding to that pipe; a non-empty ingestOverride
+// wins over the recipe's ingest.
 func renderPreview(ctx context.Context, recipes map[string]Recipe, recipeName string, pipeOverride []string, ingestOverride, rawURL string) ([]*Item, error) {
 	processor := mod.New()
 
 	r := recipeFor(recipes, recipeName)
 	def := recipeFor(recipes, defaultRecipeName)
-	if len(pipeOverride) > 0 {
-		r.Pipe = pipeOverride
-	}
-	pipe := resolvePipe(def.Pipe, r.Pipe)
+	pipe := resolvePipe(resolvePipe(def.Pipe, r.Pipe), pipeOverride)
 	if err := processor.Validate(ctx, pipe); err != nil {
 		return nil, fmt.Errorf("invalid pipeline %v: %w", pipe, err)
 	}

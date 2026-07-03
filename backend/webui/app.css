@@ -862,6 +862,116 @@ dialog .row {
    justify-content: flex-end;
    margin-top: 1.2em;
 }
+/* Dialog field hints — one quiet sentence under a field, in the human voice
+   (the label above it already speaks wire). Each hint explains exactly one
+   thing: what blank means, what a flag is for. */
+dialog p.hint {
+   margin: 0.3em 0 0;
+   color: var(--muted);
+   font-size: 0.8em;
+}
+/* Inline unit fields (expire: [n] days) — the input shrinks to its magnitude
+   and the unit rides beside it instead of stretching a number box full-width. */
+dialog .inline-field {
+   display: flex;
+   align-items: center;
+   gap: 0.5em;
+}
+dialog .inline-field input {
+   width: 7em;
+}
+dialog .inline-field .unit {
+   color: var(--fg-2);
+   font-size: 0.9em;
+}
+/* The feed dialog's advanced fold: overrides / retention / display flags live
+   behind a native <details> under a hairline, keeping the primary add flow
+   (URL → title → tag → recipe) short. The summary speaks in the label voice
+   with a hand-drawn chevron; while the fold is closed, one chip per value set
+   inside rides the summary (app.js), so saved config never hides silently —
+   open, the fields themselves show and the chips would be noise. */
+details.adv {
+   margin-top: 1.2em;
+   border-top: 1px solid var(--faint);
+   padding-top: 0.75em;
+}
+details.adv > summary {
+   list-style: none;
+   display: flex;
+   align-items: center;
+   gap: 0.6em;
+   cursor: pointer;
+   user-select: none;
+   font-family: var(--font-mono);
+   font-size: 0.68rem;
+   letter-spacing: 0.06em;
+   text-transform: uppercase;
+   color: var(--muted);
+}
+details.adv > summary::-webkit-details-marker {
+   display: none;
+}
+details.adv > summary::before {
+   content: "";
+   flex: none;
+   width: 0.4em;
+   height: 0.4em;
+   margin-top: -0.15em;
+   border-right: 1.5px solid currentColor;
+   border-bottom: 1.5px solid currentColor;
+   transform: rotate(-45deg); /* points right (closed) */
+   transition: transform 0.15s ease;
+}
+details.adv[open] > summary::before {
+   transform: rotate(45deg); /* points down (open) */
+   margin-top: -0.3em;
+}
+@media (prefers-reduced-motion: reduce) {
+   details.adv > summary::before {
+      transition: none;
+   }
+}
+details.adv > summary:hover {
+   color: var(--fg);
+}
+details.adv > summary:focus-visible {
+   outline: 2px solid var(--signal);
+   outline-offset: 2px;
+   border-radius: 2px;
+}
+.adv-chips {
+   display: inline-flex;
+   flex-wrap: wrap;
+   gap: 0.4em;
+}
+details.adv[open] .adv-chips {
+   display: none;
+}
+
+/* Pipeline-step editor (recipe modal + feed dialog's pipe override): compact
+   rows of mono step inputs, "+ step" with the empty-pipe meaning beside it. */
+.steps {
+   display: flex;
+   flex-direction: column;
+   gap: 0.4em;
+}
+.steps .step {
+   display: flex;
+   align-items: center;
+   gap: 0.4em;
+}
+.steps .step input {
+   flex: 1;
+   font-family: var(--font-mono);
+   font-size: 0.85rem;
+}
+.steps .foot {
+   display: flex;
+   align-items: center;
+   gap: 0.6em;
+   margin-top: 0.1em;
+}
+
 /* Dialog form errors — a mistake must read as an error, not as metadata. */
 .formerr {
    color: var(--err);

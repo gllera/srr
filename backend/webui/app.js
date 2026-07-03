@@ -431,7 +431,9 @@ function feedRow(f) {
     statusCell,
     titleCell,
     el("td", { class: "tagcell" }, f.tag ? el("span", { class: "chip" }, f.tag) : ""),
-    el("td", { class: "recipecell" }, f.recipe ? el("span", { class: "chip recipe", title: "recipe" }, f.recipe) : ""),
+    el("td", { class: "recipecell" },
+      f.recipe ? el("span", { class: "chip recipe", title: "recipe" }, f.recipe) : "",
+      overrideChip(f)),
     // "never" = the feed has never fetched OK; "—" = fetching fine, but no new
     // article stamped yet (pre-vitals stores never stamped last_new).
     el("td", { class: "when lastnew", title: f.last_new ? new Date(f.last_new * 1000).toLocaleString() : null },
@@ -683,6 +685,35 @@ function makeDialog(attrs) {
   return d;
 }
 
+// stepsEditor renders an editable pipeline-step list (one input per step,
+// remove buttons, "+ step") into the returned box, mutating `steps` in place.
+// Shared by the recipe modal and the feed modal's feed-level pipe override.
+// opts.emptyNote rides next to "+ step" while the list is empty (what an empty
+// pipe means here); opts.hint appears under the list once steps exist.
+function stepsEditor(steps, opts) {
+  const o = opts || {};
+  const box = el("div", { class: "steps" });
+  function draw() {
+    box.replaceChildren();
+    steps.forEach((s, i) => {
+      const inp = el("input", { value: s, placeholder: o.placeholder || null,
+        oninput: (e) => (steps[i] = e.target.value) });
+      box.append(el("div", { class: "step" }, inp,
+        el("button", { class: "btn icon", title: "Remove step", "aria-label": "Remove step", onclick: () => { steps.splice(i, 1); draw(); }, html: ICON_DELETE })));
+    });
+    const addBtn = el("button", { class: "btn", onclick: () => {
+      steps.push("");
+      draw();
+      box.querySelector(".step:last-of-type input").focus();
+    } }, "+ step");
+    box.append(el("div", { class: "foot" }, addBtn,
+      !steps.length && o.emptyNote ? el("span", { class: "muted" }, o.emptyNote) : ""));
+    if (steps.length && o.hint) box.append(el("p", { class: "hint" }, o.hint));
+  }
+  draw();
+  return box;
+}
+
 let feedDialog;
 // openFeedModal is both halves of feed CRUD. Add mode is URL-first: paste a
 // site or feed URL and checkURL reads the wire's own label (GET /api/resolve)
@@ -692,7 +723,7 @@ let feedDialog;
 function openFeedModal(f) {
   feedDialog ||= makeDialog({ id: "feedModal" });
   const isEdit = !!f;
-  const v = f || { title: "", url: "", tag: "", recipe: "", no_title: false, expire_days: 0 };
+  const v = f || { title: "", url: "", tag: "", recipe: "", ingest: "", pipe: [], no_title: false, expire_days: 0 };
   const title = el("input", { id: "f_title", value: v.title,
     placeholder: isEdit ? null : "auto-filled from the feed" });
   const url = el("input", { id: "f_url", value: v.url,
@@ -742,10 +773,21 @@ function openFeedModal(f) {
     }
   }
   drawRecipeChips();
+  // Feed-level {ingest, pipe} overrides: rarely used (recipes are the shared
+  // mechanism), but they must round-trip here — the save body is full-replace,
+  // so omitting them would silently wipe an override on every GUI edit.
+  const ingestIn = el("input", { id: "f_ingest", value: v.ingest || "",
+    placeholder: "inherits the recipe's ingest" });
+  const pipeSteps = [...(v.pipe || [])];
+  const pipeBox = stepsEditor(pipeSteps, {
+    placeholder: "#sanitize or a shell command",
+    emptyNote: "using the recipe's pipe",
+    hint: "Replaces the recipe's pipe. #default expands to it.",
+  });
   const noTitle = el("input", { id: "f_notitle", type: "checkbox" });
   noTitle.checked = !!v.no_title;
   const expire = el("input", { id: "f_expire", type: "number", min: "0", max: "36500", step: "1",
-    value: v.expire_days ? String(v.expire_days) : "", placeholder: "0 — keep forever" });
+    value: v.expire_days ? String(v.expire_days) : "", placeholder: "0" });
   const err = el("div", { class: "formerr" });
   const status = el("div", { class: "resolve-status" });
 
@@ -762,7 +804,7 @@ function openFeedModal(f) {
     probing = true;
     status.replaceChildren(el("span", { class: "muted" }, "reading feed…"));
     try {
-      const r = await apiGet(`/api/resolve?url=${encodeURIComponent(u)}&recipe=${encodeURIComponent(recipeVal)}`);
+      const r = await apiGet(`/api/resolve?url=${encodeURIComponent(u)}&recipe=${encodeURIComponent(recipeVal)}&ingest=${encodeURIComponent(ingestIn.value.trim())}`);
       if (url.value.trim() !== u) return; // field changed while probing — stale result
       if (r.url && r.url !== u) url.value = r.url; // homepage → its discovered feed
       probed = url.value.trim();
@@ -781,11 +823,21 @@ function openFeedModal(f) {
   url.addEventListener("change", () => checkURL(false)); // blur with a modified value
   url.addEventListener("paste", () => setTimeout(() => checkURL(false), 0)); // pasted value lands next tick
   url.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); checkURL(true); } });
+  // A changed ingest override changes what the probe fetches with — re-probe,
+  // same as picking a different recipe chip.
+  ingestIn.addEventListener("change", () => { if (url.value.trim()) checkURL(true); });
 
   const save = el("button", { class: "btn primary", onclick: async () => {
+    if (!url.value.trim()) {
+      err.textContent = "a URL is required";
+      url.focus();
+      return;
+    }
     const body = {
       title: title.value.trim(), url: url.value.trim(),
       tag: tag.value.trim(), recipe: recipeVal,
+      ingest: ingestIn.value.trim(),
+      pipe: pipeSteps.map((s) => s.trim()).filter(Boolean),
       no_title: noTitle.checked,
       expire_days: Math.max(0, Math.floor(Number(expire.value) || 0)),
     };
@@ -799,6 +851,36 @@ function openFeedModal(f) {
     }
   } }, isEdit ? "Save" : "Add feed");
 
+  // The advanced fold: overrides, retention and display flags leave the primary
+  // add flow (URL → title → tag → recipe) and live behind a native <details>.
+  // It opens itself when anything inside is non-default — saved config must
+  // never sit hidden — and while closed the summary wears one chip per value
+  // set (recomputed on every toggle, so edits made before collapsing show up).
+  const advValues = () => {
+    const days = Math.max(0, Math.floor(Number(expire.value) || 0));
+    return [
+      ingestIn.value.trim() && "ingest",
+      pipeSteps.some((s) => s.trim()) && "pipe",
+      days > 0 && `expire ${days}d`,
+      noTitle.checked && "no titles",
+    ].filter(Boolean);
+  };
+  const advChips = el("span", { class: "adv-chips" });
+  const drawAdvChips = () =>
+    advChips.replaceChildren(...advValues().map((t) => el("span", { class: "chip" }, t)));
+  drawAdvChips();
+  const adv = el("details", { class: "adv", ontoggle: drawAdvChips },
+    el("summary", {}, "Advanced", advChips),
+    el("label", {}, "Ingest"), ingestIn,
+    el("p", { class: "hint" }, "Only this feed. #feed or a shell command."),
+    el("label", {}, "Pipe"), pipeBox,
+    el("label", {}, "Expire after"),
+    el("div", { class: "inline-field" }, expire, el("span", { class: "unit" }, "days")),
+    el("p", { class: "hint" }, "0 keeps articles forever."),
+    el("label", { class: "check" }, noTitle, "Hide article titles"),
+    el("p", { class: "hint" }, "For microblog feeds whose entries have no real titles."));
+  if (advValues().length) adv.open = true;
+
   const urlField = [el("label", {}, "URL"), url, status];
   const titleField = [el("label", {}, "Title"), title];
   feedDialog.replaceChildren(
@@ -806,8 +888,7 @@ function openFeedModal(f) {
     ...(isEdit ? [...titleField, ...urlField] : [...urlField, ...titleField]),
     el("label", {}, "Tag"), tag, tagChips,
     el("label", {}, "Recipe"), recipeChips,
-    el("label", {}, "Expire after days"), expire,
-    el("label", { class: "check" }, noTitle, "Hide article titles (titleless feed)"),
+    adv,
     err,
     dialogRow(feedDialog, save, isEdit ? () => deleteFeed(f) : null));
   feedDialog.showModal();
@@ -851,19 +932,13 @@ function openRecipeModal(name, rcp) {
   const nameIn = el("input", { value: name || "", disabled: isEdit ? "" : null });
   const ingestIn = el("input", { value: (rcp && rcp.ingest) || "", placeholder: "#feed (default)" });
   const steps = (rcp && rcp.pipe) ? [...rcp.pipe] : [];
-  const stepsBox = el("div", {});
+  const stepsBox = stepsEditor(steps, {
+    placeholder: "#sanitize or a shell command",
+    emptyNote: name === "default"
+      ? "no steps — articles pass through unchanged"
+      : "inherits the default recipe's pipe",
+  });
   const err = el("div", { class: "formerr" });
-
-  function drawSteps() {
-    stepsBox.replaceChildren();
-    steps.forEach((s, i) => {
-      const inp = el("input", { value: s, oninput: (e) => (steps[i] = e.target.value) });
-      stepsBox.append(el("div", { class: "toolbar" }, inp,
-        el("button", { class: "btn icon", title: "Remove step", "aria-label": "Remove step", onclick: () => { steps.splice(i, 1); drawSteps(); }, html: ICON_DELETE })));
-    });
-    stepsBox.append(el("button", { class: "btn", onclick: () => { steps.push(""); drawSteps(); } }, "+ step"));
-  }
-  drawSteps();
 
   const save = el("button", { class: "btn primary", onclick: async () => {
     err.textContent = "";
@@ -889,13 +964,27 @@ function openRecipeModal(name, rcp) {
 // previewState keeps the panel's hand-typed url/recipe across tab switches.
 const previewState = { url: "", recipe: "default" };
 
+// overrideChip marks a feed carrying feed-level {ingest, pipe} overrides on
+// top of its recipe; the tooltip says which axis. Empty string (renders as
+// nothing) when the feed has none — the common case.
+function overrideChip(f) {
+  const axes = [f.ingest && "ingest", (f.pipe || []).length && "pipe"].filter(Boolean);
+  if (!axes.length) return "";
+  return el("span", { class: "chip recipe", title: "feed-level " + axes.join(" + ") + " override" }, "override");
+}
+
 // renderPreviewInto renders /api/preview articles for url+recipe into `out`
 // (loading line → article list, each body in a sandboxed inert iframe). Shared
-// by the Recipes-tab panel and the Feeds-row preview dialog.
-async function renderPreviewInto(out, url, recipe) {
+// by the Recipes-tab panel and the Feeds-row preview dialog; the latter also
+// passes the feed's {pipe, ingest} overrides so the preview matches what a
+// fetch of that feed would run.
+async function renderPreviewInto(out, url, recipe, pipe, ingest) {
   out.replaceChildren(el("div", { class: "muted" }, "loading…"));
   try {
-    const arts = await apiGet(`/api/preview?url=${encodeURIComponent(url)}&recipe=${encodeURIComponent(recipe)}`);
+    let qs = `url=${encodeURIComponent(url)}&recipe=${encodeURIComponent(recipe)}`;
+    for (const p of pipe || []) qs += `&pipe=${encodeURIComponent(p)}`;
+    if (ingest) qs += `&ingest=${encodeURIComponent(ingest)}`;
+    const arts = await apiGet(`/api/preview?${qs}`);
     out.replaceChildren(el("div", { class: "muted" }, `${arts.length} articles`));
     for (const a of arts) {
       out.append(el("article", { class: "preview" },
@@ -919,12 +1008,14 @@ function openPreviewDialog(f) {
   previewDialog ||= makeDialog({ class: "preview-dialog" });
   const out = el("div", { class: "preview-out" });
   previewDialog.replaceChildren(
-    el("h3", {}, "Preview — " + f.title, " ", el("span", { class: "chip recipe", title: "recipe" }, f.recipe || "default")),
+    el("h3", {}, "Preview — " + f.title, " ",
+      el("span", { class: "chip recipe", title: "recipe" }, f.recipe || "default"),
+      " ", overrideChip(f)),
     out,
     el("div", { class: "row" },
       el("button", { class: "btn", onclick: () => previewDialog.close() }, "Close")));
   previewDialog.showModal();
-  renderPreviewInto(out, f.url, f.recipe || "default");
+  renderPreviewInto(out, f.url, f.recipe || "default", f.pipe, f.ingest);
 }
 
 function previewPanel(recipes) {

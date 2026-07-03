@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -457,6 +458,72 @@ func TestFeedUpdRejectsUnknownRecipe(t *testing.T) {
 	}
 }
 
+func TestFeedUpdSetsIngestAndPipe(t *testing.T) {
+	setupFeedsTestDB(t)
+	cmd := &UpdCmd{ID: 0, Ingest: strPtr("my-fetcher"), Pipe: []string{"#readability", "#default"}}
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	ch := reopenDB(t).Feeds()[0]
+	if ch.Ingest != "my-fetcher" {
+		t.Errorf("Ingest = %q, want %q", ch.Ingest, "my-fetcher")
+	}
+	if want := []string{"#readability", "#default"}; !slices.Equal(ch.Pipe, want) {
+		t.Errorf("Pipe = %v, want %v", ch.Pipe, want)
+	}
+}
+
+// A lone -p "" clears the feed-level pipe (filterPipe folds it to nil ⇒
+// inherit the recipe's), and -i "" clears the ingest override.
+func TestFeedUpdClearsIngestAndPipe(t *testing.T) {
+	setupFeedsTestDB(t)
+	if err := (&UpdCmd{ID: 0, Ingest: strPtr("my-fetcher"), Pipe: []string{"#minify"}}).Run(); err != nil {
+		t.Fatalf("set overrides: %v", err)
+	}
+	if err := (&UpdCmd{ID: 0, Ingest: strPtr(""), Pipe: []string{""}}).Run(); err != nil {
+		t.Fatalf("clear overrides: %v", err)
+	}
+	ch := reopenDB(t).Feeds()[0]
+	if ch.Ingest != "" {
+		t.Errorf("Ingest = %q, want \"\" (⇒ recipe's)", ch.Ingest)
+	}
+	if ch.Pipe != nil {
+		t.Errorf("Pipe = %v, want nil (⇒ recipe's)", ch.Pipe)
+	}
+}
+
+// A feed-level pipe goes through the same token validation as a recipe pipe:
+// a typo'd built-in is rejected before commit.
+func TestFeedUpdRejectsUnknownPipeBuiltin(t *testing.T) {
+	setupFeedsTestDB(t)
+	wantErr(t, (&UpdCmd{ID: 0, Pipe: []string{"#sanitise"}}).Run(), `unknown built-in module "#sanitise"`)
+	if got := reopenDB(t).Feeds()[0].Pipe; got != nil {
+		t.Errorf("Pipe = %v, want unchanged nil (commit rejected)", got)
+	}
+}
+
+// feed add -i with an external command skips subscribe-time discovery — the
+// feed-level override wins over the (default) recipe's #feed, same gating as
+// an external-ingest recipe.
+func TestFeedAddSkipsResolveForFeedIngestOverride(t *testing.T) {
+	setupEmptyDB(t)
+	called := false
+	resolveFeedURL = func(_ context.Context, rawURL string) (string, error) {
+		called = true
+		return rawURL, nil
+	}
+	cmd := &AddCmd{Title: strPtr("X"), URL: strPtr("https://x.example/"), Ingest: strPtr("my-fetcher")}
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if called {
+		t.Error("resolveFeedURL must not run when the feed-level ingest is external")
+	}
+	if got := reopenDB(t).Feeds()[0].Ingest; got != "my-fetcher" {
+		t.Errorf("Ingest = %q, want %q", got, "my-fetcher")
+	}
+}
+
 func TestFeedUpdNoURLFlagLeavesURLUntouched(t *testing.T) {
 	setupFeedsTestDB(t)
 	if err := (&UpdCmd{ID: 0, Title: strPtr("X")}).Run(); err != nil {
@@ -599,6 +666,34 @@ func TestFeedApplySingleUpdate(t *testing.T) {
 	ch := reopenDB(t).Feeds()[0]
 	if ch.Title != "Renamed" {
 		t.Errorf("Title = %q, want Renamed", ch.Title)
+	}
+}
+
+// apply carries the feed-level ingest/pipe overrides, and its full-replace
+// semantics clear them when a later apply omits the fields.
+func TestFeedApplyIngestPipeRoundTrip(t *testing.T) {
+	setupEmptyDB(t)
+	err := applyFromString(t, `{"title":"O","url":"https://o.example.com/feed",`+
+		`"ingest":"my-fetcher","pipe":["#readability","#default"]}`)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	ch := reopenDB(t).Feeds()[0]
+	if ch.Ingest != "my-fetcher" {
+		t.Errorf("Ingest = %q, want %q", ch.Ingest, "my-fetcher")
+	}
+	if want := []string{"#readability", "#default"}; !slices.Equal(ch.Pipe, want) {
+		t.Errorf("Pipe = %v, want %v", ch.Pipe, want)
+	}
+
+	// Full replace: re-applying without the fields clears both overrides.
+	err = applyFromString(t, `{"id":0,"title":"O","url":"https://o.example.com/feed"}`)
+	if err != nil {
+		t.Fatalf("re-apply: %v", err)
+	}
+	ch = reopenDB(t).Feeds()[0]
+	if ch.Ingest != "" || ch.Pipe != nil {
+		t.Errorf("overrides not cleared by full-replace: ingest=%q pipe=%v", ch.Ingest, ch.Pipe)
 	}
 }
 

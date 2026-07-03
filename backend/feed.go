@@ -21,21 +21,25 @@ import (
 // cap logic in fetchURL for the over-cap semantics.
 const maxBoundaryGUIDs = 1024
 
-// pipeDefault is the token expanded inline to the default recipe's pipe at the
-// position where it appears in a recipe's Pipe slice.
+// pipeDefault is the token expanded inline to the next pipe down the fallback
+// chain at the position where it appears in a Pipe slice: in a recipe's pipe
+// it means the default recipe's pipe, in a feed's pipe the feed's effective
+// recipe pipe.
 const pipeDefault = "#default"
 
 // resolvePipe composes the effective pipeline by expanding "#default"
-// tokens in recipePipe to def (the default recipe's pipe). An empty
-// recipePipe (nil or []) inherits def; a non-empty recipePipe overrides.
-func resolvePipe(def, recipePipe []string) []string {
-	if len(recipePipe) == 0 {
-		return def
+// tokens in override to base (the next pipe down the fallback chain). An
+// empty override (nil or []) inherits base; a non-empty override replaces it.
+// Chained once per level — resolvePipe(resolvePipe(def, recipe), feed) — so a
+// feed pipe's #default expands to its recipe's effective pipe.
+func resolvePipe(base, override []string) []string {
+	if len(override) == 0 {
+		return base
 	}
-	out := make([]string, 0, len(recipePipe)+len(def))
-	for _, m := range recipePipe {
+	out := make([]string, 0, len(override)+len(base))
+	for _, m := range override {
 		if m == pipeDefault {
-			out = append(out, def...)
+			out = append(out, base...)
 		} else {
 			out = append(out, m)
 		}
@@ -75,6 +79,17 @@ type Feed struct {
 	// resolves to the "default" recipe (recipeFor). A dangling name is tolerated
 	// at read time (⇒ default) but the CLI refuses to create one.
 	Recipe string `json:"recipe,omitempty"`
+	// Ingest is the feed-level ingest override: built-in ("#feed") or shell
+	// command. Set it wins over the recipe's ingest (and the default's); empty
+	// inherits the recipe (ingest.Select). Note: the pre-recipes format used the
+	// same JSON key for its per-feed ingest, so loading an ancient db.gz revives
+	// that value as an override — accepted, the meaning is the same.
+	Ingest string `json:"ingest,omitempty"`
+	// Pipe is the feed-level pipeline override. Empty inherits the feed's
+	// effective recipe pipe; non-empty replaces it, with "#default" expanding
+	// inline to that recipe pipe (resolvePipe, chained per level). Same
+	// pre-recipes key-revival note as Ingest.
+	Pipe []string `json:"pipe,omitempty"`
 	// NoTitle marks a feed whose article titles duplicate the content lead
 	// (microblog sources like Telegram, where the title is the first line of the
 	// body). The reader hides the heading for these; the home list still uses the
@@ -139,7 +154,7 @@ func (c *Feed) Fetch(ctx context.Context, run *fetchRun, buf []byte, processor *
 	ctx = mod.WithCacheDir(ctx, run.cacheDir)
 	r := recipeFor(run.recipes, c.Recipe)
 	def := recipeFor(run.recipes, defaultRecipeName)
-	pipe := resolvePipe(def.Pipe, r.Pipe)
+	pipe := resolvePipe(resolvePipe(def.Pipe, r.Pipe), c.Pipe)
 	// Validate the resolved pipeline once, before the item loop. A bad token
 	// (unknown built-in, stray #default, malformed params) is a config error that
 	// would fail identically for every item; surface it loudly here instead of
@@ -151,7 +166,7 @@ func (c *Feed) Fetch(ctx context.Context, run *fetchRun, buf []byte, processor *
 		c.FailStreak++
 		return
 	}
-	ingestName := ingest.Select(r.Ingest, def.Ingest)
+	ingestName := ingest.Select(c.Ingest, r.Ingest, def.Ingest)
 	items, err := c.fetchURL(ctx, run, buf, processor, pipe, ingestName)
 	if err != nil {
 		c.FetchError = err.Error()
