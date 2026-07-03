@@ -1058,7 +1058,7 @@ body.srr-view-config .srr-toolbar {
    renders as a full-width row below (.srr-config-settings .srr-config-action). */
 .srr-config-actions {
    display: grid;
-   grid-template-columns: repeat(4, 1fr);
+   grid-template-columns: repeat(5, 1fr);
    gap: 0.4rem;
    margin: 0.5rem 0 0.7rem;
 }
@@ -1661,10 +1661,12 @@ body.srr-view-config .srr-toolbar {
    }
 }
 
-/* Image-proxy dialog — a true centered modal opened from the ⋯ overflow menu.
-   Unlike the toast-style .srr-popup it takes input, so it dims the page behind a
-   full-viewport backdrop and traps focus (dropdown.ts). */
-.srr-imgproxy-dialog {
+/* Image-proxy + sync dialogs — true centered modals sharing one editor shape
+   (URL input + Disable/Cancel/Save row). Unlike the toast-style .srr-popup they
+   take input, so they dim the page behind a full-viewport backdrop and trap
+   focus (dropdown.ts openModal). */
+.srr-imgproxy-dialog,
+.srr-sync-dialog {
    display: none;
    position: fixed;
    inset: 0;
@@ -1677,7 +1679,8 @@ body.srr-view-config .srr-toolbar {
       display: flex;
    }
 }
-.srr-imgproxy-card {
+.srr-imgproxy-card,
+.srr-sync-card {
    width: min(26rem, 100%);
    max-height: calc(100dvh - 2.5rem);
    overflow-y: auto;
@@ -1689,7 +1692,8 @@ body.srr-view-config .srr-toolbar {
    padding: 1.25rem 1.4rem 1.4rem;
 }
 /* The dialog's title speaks in the wire voice (tracked mono caps). */
-.srr-imgproxy-title {
+.srr-imgproxy-title,
+.srr-sync-title {
    margin: 0 0 0.6rem;
    font-family: var(--font-mono);
    font-size: 0.82rem;
@@ -1698,18 +1702,21 @@ body.srr-view-config .srr-toolbar {
    text-transform: uppercase;
    color: var(--fg);
 }
-.srr-imgproxy-desc {
+.srr-imgproxy-desc,
+.srr-sync-desc {
    margin: 0 0 1rem;
    font-size: var(--text-sm);
    line-height: 1.5;
    color: var(--muted);
 }
-.srr-imgproxy-body {
+.srr-imgproxy-body,
+.srr-sync-body {
    display: flex;
    flex-direction: column;
    gap: 0.9rem;
 }
-.srr-imgproxy-input {
+.srr-imgproxy-input,
+.srr-sync-input {
    width: 100%;
    font: inherit;
    font-size: var(--text-sm);
@@ -1727,13 +1734,15 @@ body.srr-view-config .srr-toolbar {
       background: color-mix(in srgb, var(--accent) 10%, transparent);
    }
 }
-.srr-imgproxy-actions {
+.srr-imgproxy-actions,
+.srr-sync-actions {
    display: flex;
    gap: 0.5rem;
    align-items: center;
 }
 /* Disable sits apart from Cancel/Save — pushed to the far left of the row. */
-.srr-imgproxy-clear {
+.srr-imgproxy-clear,
+.srr-sync-clear {
    margin-right: auto;
 }
 .srr-dialog-btn {
@@ -2041,6 +2050,7 @@ body.srr-view-config .srr-toolbar {
    .srr-popup,
    .srr-imgproxy-dialog,
    .srr-backup-dialog,
+   .srr-sync-dialog,
    .srr-info-dialog {
       display: none !important;
    }

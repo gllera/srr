@@ -1,9 +1,9 @@
 // config.ts — the config / settings surface. A third surface beside the list and
 // the reader (ephemeral, not hash-routed): opened from the list's now-viewing
 // button, it owns the quick-action icon bar (search · unread · image proxy ·
-// backup), the contextual offline-pin row, the filter picker (feed / tag / [ALL]
-// / ★Saved), and last the freshness/degradation status line — a quiet footer
-// below the long picker rather than a banner above it. The four
+// backup · sync), the contextual offline-pin row, the filter picker (feed / tag /
+// [ALL] / ★Saved), and last the freshness/degradation status line — a quiet footer
+// below the long picker rather than a banner above it. The five
 // quick actions are static buttons in the skeleton (config.ts only wires their
 // clicks + the search-disabled / read-toggle pressed state); the filter-list rendering
 // is the former toolbar feed-menu, ported to a static in-flow panel; it reuses the
@@ -11,6 +11,7 @@
 import * as data from "./data"
 import { countBadge, formatDate, isStale, srcColorIndex, timeAgoProse, URL_DENY } from "./fmt"
 import * as nav from "./nav"
+import * as sync from "./sync"
 
 export type ConfigHooks = {
    // Leave config for the list with the search bar open (the "Search articles…"
@@ -27,6 +28,7 @@ export type ConfigHooks = {
    pinEntry: () => { label: string; action: () => void } | null
    openImgProxy: () => void
    openBackup: () => void
+   openSync: () => void
 }
 
 let root: HTMLElement
@@ -58,6 +60,7 @@ export function setup(el: HTMLElement, h: ConfigHooks): void {
    unreadBtn.addEventListener("click", () => hooks.onUnreadToggle())
    ;(el.querySelector(".srr-config-backup") as HTMLElement).addEventListener("click", () => hooks.openBackup())
    ;(el.querySelector(".srr-config-imgproxy") as HTMLElement).addEventListener("click", () => hooks.openImgProxy())
+   ;(el.querySelector(".srr-config-sync") as HTMLElement).addEventListener("click", () => hooks.openSync())
    // Delegated filter pick: every row carries data-value (feed id / tag / "" /
    // ~saved). The tag collapse toggle stops its own click, but guard anyway.
    filterBox.addEventListener("click", (e) => {
@@ -394,8 +397,9 @@ export function refreshStatus(): void {
    const stale = isStale(fetchedAt)
    const metaMissing = data.hasArticles() && !data.metaReady()
    const idxDegraded = data.idxSummaryDegraded()
+   const syncState = sync.state()
 
-   const sig = `${fetchedAt}|${stale}|${metaMissing}|${idxDegraded}`
+   const sig = `${fetchedAt}|${stale}|${metaMissing}|${idxDegraded}|${syncState.on}|${syncState.okAt}|${syncState.error}`
    if (sig === lastStatusSig) return
    lastStatusSig = sig
 
@@ -409,6 +413,14 @@ export function refreshStatus(): void {
    }
    if (metaMissing) statusBox.append(statusFlag("Search unavailable while the index rebuilds"))
    if (idxDegraded) statusBox.append(statusNote("Optimizing for faster loading…"))
+   // Sync readout, only when a sync endpoint is configured: a quiet "Synced …"
+   // note while healthy, an amber flag with the failure when the last cycle
+   // errored, and a pending note before the first cycle completes.
+   if (syncState.on) {
+      if (syncState.error) statusBox.append(statusFlag(`Sync failed — ${syncState.error}`))
+      else if (syncState.okAt > 0) statusBox.append(statusNote(`Synced ${timeAgoProse(syncState.okAt)}`))
+      else statusBox.append(statusNote("Sync pending…"))
+   }
 }
 
 // ── Feed / tag info dialog ─────────────────────────────────────────────────────

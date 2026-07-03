@@ -1,12 +1,13 @@
 import * as config from "./config"
 import * as data from "./data"
-import { setProfileImportHook, showBackupDialog, showImgProxyDialog } from "./dropdown"
+import { setProfileImportHook, showBackupDialog, showImgProxyDialog, showSyncDialog } from "./dropdown"
 import { collapseBrokenMedia, countBadge, formatDate, sanitizeHtml, srcColorIndex, timeAgo, URL_DENY } from "./fmt"
 import { setupGestures, type Gestures } from "./gestures"
 import { UNREAD_ONLY_KEY } from "./keys"
 import * as list from "./list"
 import * as nav from "./nav"
 import { clearAllPins, isPinned, listPins, pinFilter, unpinFilter } from "./pin"
+import * as sync from "./sync"
 
 const el = {
    article: document.querySelector(".srr-reader") as HTMLElement,
@@ -732,17 +733,26 @@ async function init() {
       if (localStorage.getItem(UNREAD_ONLY_KEY) === null) nav.setUnreadOnly(true)
    } catch {}
 
-   // After a successful profile import: prune stale seen keys, rerender the list
-   // under the current filter, and refresh the save button to reflect the
-   // newly-merged state. The config surface re-derives its unread checkbox on open.
-   setProfileImportHook(() => {
-      // importProfile wrote srr-unread-only straight to localStorage, but nav holds
-      // unreadOnly in a module var only mutated via setUnreadOnly — reconcile it
-      // (this also re-applies the filter so the raised unseen bounds take hold).
-      nav.setUnreadOnly(localStorage.getItem(UNREAD_ONLY_KEY) === "1")
+   // Shared refresh after any profile merge — a backup import or a sync pull
+   // that changed local state: prune stale seen keys, refresh the save button,
+   // rebuild the list under the current filter, and re-derive an open config
+   // surface (unread badges + sync status). The reader view skips the list
+   // rebuild — the return path (show() → refresh()) re-derives per-row state
+   // anyway, and rebuilding a display:none list would pin zero row heights.
+   const refreshAfterMerge = () => {
       nav.pruneSeen()
       refreshSaveButton(!el.save.disabled)
-      void list.rerender()
+      if (view !== "reader") void list.rerender()
+      if (config.isOpen()) config.render()
+   }
+   // After a successful profile import (backup dialog), additionally reconcile
+   // prefs: importProfile wrote srr-unread-only straight to localStorage, but nav
+   // holds unreadOnly in a module var only mutated via setUnreadOnly (this also
+   // re-applies the filter so the raised unseen bounds take hold). Sync pulls
+   // never touch prefs (prefs:false), so they skip this.
+   setProfileImportHook(() => {
+      nav.setUnreadOnly(localStorage.getItem(UNREAD_ONLY_KEY) === "1")
+      refreshAfterMerge()
    })
 
    // The config surface: the filter picker, the unread toggle, the settings rows
@@ -775,6 +785,7 @@ async function init() {
       pinEntry: pinMenuEntry,
       openImgProxy: showImgProxyDialog,
       openBackup: () => showBackupDialog(),
+      openSync: showSyncDialog,
    })
 
    // The list opens an article in the reader through the same guard mutex as
@@ -930,6 +941,16 @@ async function init() {
          hash = localStorage.getItem("srr-hash")?.substring(1) || ""
       } catch {}
    await route(hash)
+   // Cross-device sync: pull-merge the remote profile only after the first
+   // surface has rendered (local state is authoritative and paints instantly;
+   // the merge rerenders when it lands), then keep cycling on tab re-focus and
+   // reconnect, flushing pending pushes on hide. No-op until a sync endpoint is
+   // configured (Settings → Sync). The status callback repaints an open config
+   // footer after each cycle — enabling sync from the dialog confirms itself
+   // ("Synced just now") without closing and re-opening settings.
+   sync.init(refreshAfterMerge, () => {
+      if (config.isOpen()) config.refreshStatus()
+   })
    // Signal to the dev design harness (design.ts) that the real app has booted
    // and the first surface is rendered. Inert in production — nothing else
    // listens. Only fires on the success path (init returns early on db.gz error).

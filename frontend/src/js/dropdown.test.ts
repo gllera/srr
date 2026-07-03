@@ -26,11 +26,18 @@ const BACKUP_DIALOG =
    `<h2 class="srr-backup-title" id="srr-backup-title">Backup / Restore</h2>` +
    `<div class="srr-backup-body"></div>` +
    `</div></div>`
+// Sync dialog scaffold — same editor shape as the imgproxy dialog.
+const SYNC_DIALOG =
+   `<div class="srr-sync-dialog" role="dialog">` +
+   `<div class="srr-sync-card">` +
+   `<h2 class="srr-sync-title" id="srr-sync-title">Sync</h2>` +
+   `<div class="srr-sync-body"></div>` +
+   `</div></div>`
 // A stand-in opener (the config settings row, in production) so the focus-restore
 // tests have something to return focus to. dropdown.ts binds its dialog lookups at
 // module load, so the scaffold must exist before import.
 const OPENER = `<button class="srr-opener"></button>`
-const SKELETON = OPENER + IMG_DIALOG + BACKUP_DIALOG
+const SKELETON = OPENER + IMG_DIALOG + BACKUP_DIALOG + SYNC_DIALOG
 
 function key(el: HTMLElement, k: string, shiftKey = false): void {
    el.dispatchEvent(new KeyboardEvent("keydown", { key: k, shiftKey, bubbles: true, cancelable: true }))
@@ -300,5 +307,76 @@ describe("backup/restore dialog", () => {
       dropdown.showBackupDialog()
       $dialog().dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }))
       expect(document.activeElement).toBe(opener)
+   })
+})
+
+describe("sync dialog", () => {
+   let dropdown: Dropdown
+   let sync: typeof import("./sync")
+   let fetchMock: ReturnType<typeof vi.fn>
+   const $dialog = () => document.querySelector<HTMLElement>(".srr-sync-dialog")!
+   const $input = () => $dialog().querySelector<HTMLInputElement>(".srr-sync-input")
+   const $btn = (cls: string) => $dialog().querySelector<HTMLButtonElement>(cls)
+   const isOpen = () => $dialog().classList.contains("srr-open")
+
+   beforeEach(async () => {
+      document.body.innerHTML = SKELETON
+      localStorage.clear()
+      // Saving a new endpoint kicks a real syncNow(true) cycle — stub the network
+      // so the test asserts the kick without leaving jsdom.
+      fetchMock = vi.fn(async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ v: 1 }) }))
+      vi.stubGlobal("fetch", fetchMock)
+      vi.resetModules()
+      sync = await import("./sync")
+      dropdown = await import("./dropdown")
+   })
+   afterEach(() => {
+      if ($dialog()?.classList.contains("srr-open")) key(document.body, "Escape")
+      vi.unstubAllGlobals()
+   })
+
+   it("opens seeded from the stored endpoint", () => {
+      sync.setSyncUrl("https://sync.example/profile")
+      dropdown.showSyncDialog()
+      expect($input()!.value).toBe("https://sync.example/profile")
+   })
+
+   it("Save normalizes (https default, no trailing slash), stores, and kicks a first cycle", async () => {
+      dropdown.showSyncDialog()
+      $input()!.value = "sync.example/profile"
+      $btn(".srr-sync-save")!.click()
+      expect(isOpen()).toBe(false)
+      expect(sync.getSyncUrl()).toBe("https://sync.example/profile")
+      await Promise.resolve()
+      expect(fetchMock).toHaveBeenCalledWith("https://sync.example/profile", expect.anything())
+   })
+
+   it("rejects an invalid URL, marks the input, and stays open", () => {
+      dropdown.showSyncDialog()
+      $input()!.value = "javascript:alert(1)"
+      $btn(".srr-sync-save")!.click()
+      expect(isOpen()).toBe(true)
+      expect($input()!.classList.contains("srr-input-invalid")).toBe(true)
+      expect(sync.getSyncUrl()).toBe("")
+   })
+
+   it("Disable appears only when an endpoint is set, and clears it without a cycle", () => {
+      dropdown.showSyncDialog()
+      expect($btn(".srr-sync-clear")).toBeNull()
+      key(document.body, "Escape")
+
+      sync.setSyncUrl("https://sync.example/profile")
+      dropdown.showSyncDialog()
+      $btn(".srr-sync-clear")!.click()
+      expect(isOpen()).toBe(false)
+      expect(sync.getSyncUrl()).toBe("")
+      expect(fetchMock).not.toHaveBeenCalled()
+   })
+
+   it("opening one modal closes another (shared shell, no stacking)", () => {
+      dropdown.showImgProxyDialog()
+      dropdown.showSyncDialog()
+      expect(document.querySelector(".srr-imgproxy-dialog")!.classList.contains("srr-open")).toBe(false)
+      expect(isOpen()).toBe(true)
    })
 })

@@ -49,6 +49,20 @@
             <div class="srr-backup-body"></div>
          </div>
       </div>
+      <!-- Sync dialog — set the optional cross-device sync endpoint (any URL
+           answering GET/PUT of the profile JSON). Same editor shape as the
+           image-proxy dialog; dropdown.ts populates .srr-sync-body on open. -->
+      <div class="srr-sync-dialog" role="dialog" aria-modal="true" aria-labelledby="srr-sync-title">
+         <div class="srr-sync-card">
+            <h2 class="srr-sync-title" id="srr-sync-title">Sync</h2>
+            <p class="srr-sync-desc">
+               Keep reading progress and saved articles in sync across devices through a URL you control — any endpoint
+               that stores what this reader sends it (HTTP GET and PUT). Leave it empty to keep everything on this
+               device.
+            </p>
+            <div class="srr-sync-body"></div>
+         </div>
+      </div>
       <!-- Feed / tag info dialog — opened from the ⓘ button on a settings filter
            row. A read-only detail card; config.ts builds the per-feed / per-tag
            body into .srr-info-body on open. Same centered-modal pattern as the
@@ -117,9 +131,9 @@
             <div class="srr-config-body">
                <!-- Quick actions as a row of labeled icon buttons. Search leaves
                     config for the list with the search bar open; unread is a toggle
-                    (aria-pressed, fills accent when on); backup / image-proxy open
-                    centered dialogs. The contextual offline-pin action renders below
-                    in .srr-config-settings. -->
+                    (aria-pressed, fills accent when on); image-proxy / backup / sync
+                    open centered dialogs. The contextual offline-pin action renders
+                    below in .srr-config-settings. -->
                <div class="srr-config-actions">
                   <button type="button" class="srr-config-search" aria-label="Search articles">
                      <span class="srr-search-icon" aria-hidden="true"></span>
@@ -142,6 +156,15 @@
                         <path d="M8 4v11M5 12l3 3 3-3M16 20V9M13 12l3-3 3 3" />
                      </svg>
                      <span class="srr-config-action-label">Backup</span>
+                  </button>
+                  <button type="button" class="srr-config-sync" aria-label="Sync across devices">
+                     <svg class="srr-config-action-icon" viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M20 6.5A8.6 8.6 0 0 0 5 8.5" />
+                        <path d="M5 3.5v5h5" />
+                        <path d="M4 17.5a8.6 8.6 0 0 0 15-2" />
+                        <path d="M19 20.5v-5h-5" />
+                     </svg>
+                     <span class="srr-config-action-label">Sync</span>
                   </button>
                </div>
                <div class="srr-config-settings"></div>

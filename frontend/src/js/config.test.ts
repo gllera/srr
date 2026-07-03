@@ -42,6 +42,12 @@ vi.mock("./fmt", () => ({
 }))
 import { isStale } from "./fmt"
 
+// The sync status readout consumed by the status footer.
+const sync = vi.hoisted(() => ({
+   state: vi.fn(() => ({ on: false, okAt: 0, error: "" })),
+}))
+vi.mock("./sync", () => sync)
+
 type Config = typeof import("./config")
 
 const SKELETON =
@@ -54,6 +60,7 @@ const SKELETON =
    `<button class="srr-config-unread" aria-pressed="false"></button>` +
    `<button class="srr-config-imgproxy"></button>` +
    `<button class="srr-config-backup"></button>` +
+   `<button class="srr-config-sync"></button>` +
    `</div>` +
    `<div class="srr-config-settings"></div>` +
    `<div class="srr-config-filter"></div>` +
@@ -79,6 +86,7 @@ const hooks = {
    pinEntry: vi.fn<() => { label: string; action: () => void } | null>(() => null),
    openImgProxy: vi.fn(),
    openBackup: vi.fn(),
+   openSync: vi.fn(),
 }
 
 async function mount(): Promise<Config> {
@@ -104,6 +112,7 @@ beforeEach(() => {
    data.metaReady.mockReturnValue(true)
    data.idxSummaryDegraded.mockReturnValue(false)
    ;(isStale as ReturnType<typeof vi.fn>).mockReturnValue(false)
+   sync.state.mockReturnValue({ on: false, okAt: 0, error: "" })
    hooks.pinEntry.mockReturnValue(null)
 })
 
@@ -369,13 +378,15 @@ describe("unread toggle", () => {
 })
 
 describe("quick actions + settings", () => {
-   it("fires openBackup / openImgProxy when their icon buttons are tapped", async () => {
+   it("fires openBackup / openImgProxy / openSync when their icon buttons are tapped", async () => {
       const config = await mount()
       config.open()
       $<HTMLButtonElement>(".srr-config-backup").click()
       expect(hooks.openBackup).toHaveBeenCalledTimes(1)
       $<HTMLButtonElement>(".srr-config-imgproxy").click()
       expect(hooks.openImgProxy).toHaveBeenCalledTimes(1)
+      $<HTMLButtonElement>(".srr-config-sync").click()
+      expect(hooks.openSync).toHaveBeenCalledTimes(1)
    })
 
    it("renders no settings rows when pinEntry is null", async () => {
@@ -426,6 +437,25 @@ describe("status section", () => {
       config.render()
       expect(flagText()).toContain("Search unavailable while the index rebuilds")
       expect($(".srr-status-note").textContent).toBe("Optimizing for faster loading…")
+   })
+
+   it("reports sync state only when a sync endpoint is configured", async () => {
+      data.lastFetchedAt.mockReturnValue(100)
+      const config = await mount()
+      config.render()
+      expect(text()).not.toContain("Sync") // off → silent
+
+      sync.state.mockReturnValue({ on: true, okAt: 0, error: "" })
+      config.render()
+      expect($$(".srr-status-note").map((n) => n.textContent)).toContain("Sync pending…")
+
+      sync.state.mockReturnValue({ on: true, okAt: 200, error: "" })
+      config.render()
+      expect($$(".srr-status-note").map((n) => n.textContent)).toContain("Synced ago200")
+
+      sync.state.mockReturnValue({ on: true, okAt: 200, error: "HTTP 401" })
+      config.render()
+      expect(flagText()).toContain("Sync failed — HTTP 401")
    })
 
    it("is empty when nothing has been fetched", async () => {
