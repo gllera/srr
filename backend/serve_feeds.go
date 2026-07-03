@@ -9,8 +9,8 @@ import (
 
 // feedListView is the read-only feed shape the GUI table consumes: the writable
 // feedView fields plus server-owned health fields. Writes (POST/PUT) accept
-// title/url/tag/recipe/no_title — full-replace semantics, like `feed apply`
-// (the edit modal always sends the no_title checkbox value).
+// title/url/tag/recipe/no_title/expire_days — full-replace semantics, like
+// `feed apply` (the edit modal always sends the no_title checkbox value).
 type feedListView struct {
 	ID         int    `json:"id"`
 	Title      string `json:"title"`
@@ -23,6 +23,8 @@ type feedListView struct {
 	LastOK     int64  `json:"last_ok"`
 	LastNew    int64  `json:"last_new"`
 	TotalArt   int    `json:"total_art"`
+	ExpireDays int    `json:"expire_days,omitempty"`
+	Expired    int    `json:"expired,omitempty"`
 }
 
 func listViewOf(ch *Feed) feedListView {
@@ -38,6 +40,8 @@ func listViewOf(ch *Feed) feedListView {
 		LastOK:     ch.LastOK,
 		LastNew:    ch.LastNew,
 		TotalArt:   ch.TotalArt,
+		ExpireDays: ch.ExpireDays,
+		Expired:    ch.Expired,
 	}
 }
 
