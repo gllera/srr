@@ -571,6 +571,7 @@ body.srr-view-list .srr-toolbar {
 /* Next is the primary nav action — wider target, emphasized as a filled pill */
 .srr-toolbar .srr-next {
    min-width: 4.75rem;
+   gap: 0.4rem;
 }
 .srr-toolbar .srr-next:not(:disabled) {
    background: var(--accent);
@@ -578,9 +579,29 @@ body.srr-view-list .srr-toolbar {
    & .srr-next-icon {
       border-color: var(--bg);
    }
+   & .srr-next-count {
+      color: var(--bg);
+   }
    &:hover {
       background: var(--accent);
       opacity: 0.85;
+   }
+}
+
+/* The pending readout riding the next pill: how many articles remain to the
+   right under the active filter — the presses left in the button, in the
+   toolbar's mono wire voice. Empty (unknown/zero/disabled) collapses so the
+   pill is exactly the pre-count pill; tabular digits keep it from wobbling
+   as the number ticks down. */
+.srr-next-count {
+   font-family: var(--font-mono);
+   font-size: 0.72rem;
+   font-weight: 600;
+   font-variant-numeric: tabular-nums;
+   letter-spacing: 0.02em;
+   line-height: 1;
+   &:empty {
+      display: none;
    }
 }
 

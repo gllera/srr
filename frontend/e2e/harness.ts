@@ -131,6 +131,9 @@ export interface FeedServer {
    url: string
    // Replace/add a route's body so a second `srr art fetch` sees new content.
    set(path: string, xml: string): void
+   // Drop a route so subsequent fetches 404 (e.g. to provoke a ferr on a feed
+   // that had to resolve validly at `feed add` time).
+   remove(path: string): void
    close(): Promise<void>
 }
 
@@ -156,6 +159,9 @@ export async function feedServer(routes: Record<string, string>): Promise<FeedSe
       url: `http://127.0.0.1:${addr.port}`,
       set(path, xml) {
          table[path] = xml
+      },
+      remove(path) {
+         delete table[path]
       },
       close() {
          return new Promise<void>((rs) => server.close(() => rs()))

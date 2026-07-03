@@ -3,7 +3,7 @@
 // a design.json sidecar of curated targets design.ts reads. Run via
 // `make design-fixture`; excluded from `npm test` (vitest.config.ts only scans
 // src/**) and gated on SRR_DESIGN_GEN so an accidental run is a no-op.
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs"
+import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { gunzipSync } from "node:zlib"
@@ -55,6 +55,9 @@ const gen = process.env.SRR_DESIGN_GEN ? it : it.skip
 
 describe("design fixture store", () => {
    gen("generates a curated store + design.json", async () => {
+      // Regenerate from scratch — a leftover store from an aborted run would
+      // accumulate duplicate feeds/articles and fail inspect --validate.
+      rmSync(OUT, { recursive: true, force: true })
       mkdirSync(OUT, { recursive: true })
 
       const feeds = await feedServer({
@@ -65,7 +68,10 @@ describe("design fixture store", () => {
          "/news.xml": rss("World News", [{ title: "Election results", body: "<p>News.</p>", guid: "n1" }]),
          "/food.xml": rss("Cooking Weekly", [{ title: "Best bread", body: "<p>Bread.</p>", guid: "f1" }]),
          "/gone.xml": rss("Soon Deleted", [{ title: "Vanishing source", body: "<p>Gone.</p>", guid: "g1" }]),
-         // /broken.xml deliberately NOT served → that feed records a ferr on fetch.
+         // /broken.xml resolves validly (empty) at `feed add` time — the backend
+         // rejects an unresolvable add — then gets removed below so `art fetch`
+         // 404s and records the ferr.
+         "/broken.xml": rss("Broken Feed", []),
       })
 
       try {
@@ -76,6 +82,7 @@ describe("design fixture store", () => {
          await srr(OUT, "feed", "add", "-t", "Cooking Weekly", "-g", "topics", "-u", `${feeds.url}/food.xml`)
          await srr(OUT, "feed", "add", "-t", "Soon Deleted", "-u", `${feeds.url}/gone.xml`)
          await srr(OUT, "feed", "add", "-t", "Broken Feed", "-u", `${feeds.url}/broken.xml`)
+         feeds.remove("/broken.xml") // now 404s → art fetch records the ferr
          await srr(OUT, "art", "fetch")
 
          // Validate the fully-consistent store BEFORE the deletion (feed rm only

@@ -9,7 +9,7 @@
 // is the former toolbar feed-menu, ported to a static in-flow panel; it reuses the
 // same class names so the row styles (now under .srr-config-filter) carry over.
 import * as data from "./data"
-import { formatDate, isStale, srcColorIndex, timeAgoProse, URL_DENY } from "./fmt"
+import { countBadge, formatDate, isStale, srcColorIndex, timeAgoProse, URL_DENY } from "./fmt"
 import * as nav from "./nav"
 
 export type ConfigHooks = {
@@ -222,7 +222,7 @@ function feedLink(ch: IFeed, className: string): HTMLAnchorElement {
 function unreadBadge(n: number): HTMLSpanElement {
    const s = document.createElement("span")
    s.className = "srr-unread"
-   s.textContent = n > 999 ? "999+" : String(n)
+   s.textContent = countBadge(n)
    return s
 }
 

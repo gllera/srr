@@ -399,17 +399,43 @@ function unseenActive(): boolean {
 // read it, then drops as you step away. Scoped to unseen-only mode, the current
 // article's feed, and only while that article still matches the (raised) filter
 // — i.e. it is one of the unread you're navigating, not the seen resume position
-// you open on.
-async function feedUnread(ch: IFeed, seenMap: Record<string, number>): Promise<number> {
+// you open on. `countCurrent = false` turns the rule off: the next pill counts
+// only what's AHEAD, so it must not include the article on screen (pendingRight).
+async function feedUnread(ch: IFeed, seenMap: Record<string, number>, countCurrent = true): Promise<number> {
    const map = new Map([[ch.id, ch.add_idx ?? 0]])
    const onCurrent =
-      unseenActive() && ch.id === currentFeed && filter.matches(ch.id, pos) && (seenMap["feed:" + ch.id] ?? -1) === pos
+      countCurrent &&
+      unseenActive() &&
+      ch.id === currentFeed &&
+      filter.matches(ch.id, pos) &&
+      (seenMap["feed:" + ch.id] ?? -1) === pos
          ? 1
          : 0
    const seenIdx = seenMap["feed:" + ch.id]
    if (seenIdx === undefined) return data.countAll(map) + onCurrent
    const upTo = Math.min(seenIdx + 1, data.db.total_art)
    return Math.max(0, data.countAll(map) - (await data.countLeft(upTo, map))) + onCurrent
+}
+
+// The reader's pending readout: what the next pill displays. Saved/search count
+// their explicit sets strictly after pos (no seen concept there). Feed/tag/[ALL]
+// return the filter's unread total EXCLUDING the article on screen — the same
+// unreadCounts/tagUnreadFromCounts pair the config surface badges use, just with
+// feedUnread's onCurrent rule off (countCurrent = false): "pending" means what's
+// AHEAD, so the one you're reading doesn't count and the last article reads 0
+// (the settings badge, by contrast, keeps counting it until you step off it).
+// recordSeen ran before this (resolve() order), so in the forward-reading flow
+// this IS the count of matching articles to the right; it only diverges when you
+// jump back over already-read articles — where the seen frontier is the number
+// that stays honest.
+async function pendingRight(): Promise<number> {
+   if (filter.saved) return savedSorted().filter((c) => c > pos).length
+   if (filter.search) {
+      await ensureSearchSet()
+      return searchSorted.filter((c) => c > pos).length
+   }
+   const members = [...filter.feeds.keys()].map((id) => data.db.feeds[id]).filter(Boolean)
+   return tagUnreadFromCounts(members, await unreadCounts(members, false))
 }
 
 async function showFeed(article: IArticle): Promise<IShowFeed> {
@@ -422,13 +448,19 @@ async function showFeed(article: IArticle): Promise<IShowFeed> {
    // very lookup the neighbor prefetch makes next anyway. A cold-pack fetch for a
    // boundary neighbor can blip (offline/evicted); .catch degrades to "no
    // neighbor" (button disabled, retried on the next render) rather than failing
-   // the already-loaded article into the error popup.
+   // the already-loaded article into the error popup. right_count rides the same
+   // packs the probes touch, and degrades the same way (-1 = digits hidden).
+   // Computed even when has_right is false: on the LAST article the pill shows
+   // an explicit "0" — the readout answers "how many ahead", and at the end the
+   // honest answer is zero, not silence.
    const has_left = (await feedLeft(pos - 1).catch(() => -1)) !== -1
    const has_right = (await feedRight(pos + 1).catch(() => -1)) !== -1
+   const right_count = await pendingRight().catch(() => -1)
    return {
       article,
       has_left,
       has_right,
+      right_count,
    }
 }
 
@@ -562,10 +594,13 @@ function recordSeen(article: IArticle) {
 // Batched per-feed unread (OPT-2): reads the seen map once for the whole
 // batch instead of once per feed (a menu fill badges every visible row).
 // Maps feed id → unread (a never-seen feed maps to its full backlog).
-export async function unreadCounts(chs: IFeed[]): Promise<Map<number, number>> {
+// `countCurrent` forwards to feedUnread's onCurrent rule: the config badges
+// keep the default (the article on screen still counts), the next pill passes
+// false (it counts only what's ahead).
+export async function unreadCounts(chs: IFeed[], countCurrent = true): Promise<Map<number, number>> {
    const seenMap = readSeen()
    const out = new Map<number, number>()
-   await Promise.all(chs.map(async (ch) => out.set(ch.id, await feedUnread(ch, seenMap))))
+   await Promise.all(chs.map(async (ch) => out.set(ch.id, await feedUnread(ch, seenMap, countCurrent))))
    return out
 }
 
@@ -610,6 +645,7 @@ function resolveNoMatch(replace = false): IShowFeed {
       article: { f: 0, a: 0, p: 0, t: "(no matching articles)", l: "", c: "" },
       has_left: false,
       has_right: false,
+      right_count: 0,
       placeholder: true,
    }
 }

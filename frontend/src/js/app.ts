@@ -1,7 +1,7 @@
 import * as config from "./config"
 import * as data from "./data"
 import { setProfileImportHook, showBackupDialog, showImgProxyDialog } from "./dropdown"
-import { collapseBrokenMedia, formatDate, sanitizeHtml, srcColorIndex, timeAgo, URL_DENY } from "./fmt"
+import { collapseBrokenMedia, countBadge, formatDate, sanitizeHtml, srcColorIndex, timeAgo, URL_DENY } from "./fmt"
 import { setupGestures, type Gestures } from "./gestures"
 import { UNREAD_ONLY_KEY } from "./keys"
 import * as list from "./list"
@@ -21,6 +21,7 @@ const el = {
    toolbar: document.querySelector(".srr-toolbar") as HTMLElement,
    prev: document.querySelector(".srr-prev") as HTMLButtonElement,
    next: document.querySelector(".srr-next") as HTMLButtonElement,
+   nextCount: document.querySelector(".srr-next-count") as HTMLElement,
    feed: document.querySelector(".srr-feed") as HTMLElement,
    settings: document.querySelector(".srr-settings") as HTMLButtonElement,
    source: document.querySelector(".srr-source") as HTMLElement,
@@ -268,6 +269,23 @@ function clearContentTransition() {
    el.content.style.transform = ""
 }
 
+// The next pill's pending readout: how many articles are still AHEAD under the
+// active filter — the settings badges' own counting (nav.pendingRight routes
+// through it) minus the article on screen, so it ticks 3, 2, 1 and reads an
+// explicit "0" on the last article (greyed on the disabled pill: nothing ahead,
+// said out loud). Digits show whenever the count is known (o present and ≥ 0);
+// hidden only on a degraded (-1) probe and the no-article states (placeholder /
+// empty reader, the null calls) — never a spinner, never a ghost. The count
+// rides the accessible name rather than a separate live region — it changes on
+// navigation, when the button is re-announced anyway.
+function syncNextCount(o: IShowFeed | null) {
+   const n = o ? o.right_count : -1
+   el.nextCount.textContent = n >= 0 ? countBadge(n) : ""
+   const base = "Next article"
+   el.next.setAttribute("aria-label", n >= 0 ? `${base} — ${n} remaining` : base)
+   el.next.title = n >= 0 ? `${base} — ${n} remaining (→/D)` : `${base} (→/D)`
+}
+
 function render(o: IShowFeed) {
    showReader()
    // Showing the reader supersedes any pending debounced search query. A row-tap
@@ -302,6 +320,7 @@ function render(o: IShowFeed) {
    }
    el.prev.disabled = !o.has_left
    el.next.disabled = !o.has_right
+   syncNextCount(o)
 
    // p is omitted (=> undefined) when the writer couldn't parse a date
    const currentPublished = o.article.p ?? 0
@@ -352,6 +371,7 @@ function renderEmptyReader() {
    el.kickerLink.removeAttribute("href")
    el.prev.disabled = true
    el.next.disabled = true
+   syncNextCount(null)
    refreshSaveButton(false)
 
    // Static panel: no fade-in (clear any inline opacity/transform a prior article
