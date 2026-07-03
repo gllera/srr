@@ -931,10 +931,13 @@ body.srr-view-list.srr-searching:not(.srr-view-config) .srr-searchbar {
 }
 
 /* Back-to-list button — a three-line "list" glyph (the square button shape is
-   the shared icon-button rule above). */
+   the shared icon-button rule above). flex:none — the span is empty, so a long
+   breadcrumb label would flex-shrink it to 0 while its absolute lines keep
+   painting at full width under the label; the label is the shrinkable one. */
 .srr-back-icon {
    display: inline-block;
    position: relative;
+   flex: none;
    width: 1.05rem;
    height: 1.5px;
    background: currentColor;
