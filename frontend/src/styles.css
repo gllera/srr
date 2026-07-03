@@ -113,13 +113,14 @@ video {
    white-space: nowrap;
 }
 
-/* Desk/section the dispatch is filed under (the feed's tag) — a wire slug
-   leading the byline ("SECTION / source"). Inherits the kicker's mono / uppercase
-   / tracking; muted so the colored source name stays the anchor. The trailing "/"
-   (vs the dateline "·") marks it as the section, not a byline token. app.ts sets
-   the text to the feed's tag; `:not(:empty)` hides it (and the slash) for an
-   untagged feed. flex-shrink:0 keeps the short tag intact and lets the source
-   ellipsize when space is tight. */
+/* Desk/section the dispatch is filed under (the feed's tag) — a hashtag after
+   the source name ("source · #SECTION"). Inherits the kicker's mono / uppercase
+   / tracking; muted so the colored source name stays the anchor. The "·"
+   separator matches the dateline's; the "#" marking it as a tag is real text
+   (app.ts prepends it to the feed's tag, so it shares the tag's ink).
+   `:not(:empty)` hides the desk (and the separator) for an untagged feed.
+   flex-shrink:0 keeps the short tag intact and lets the source ellipsize when
+   space is tight. */
 .srr-desk {
    display: none;
    flex-shrink: 0;
@@ -128,8 +129,8 @@ video {
 .srr-desk:not(:empty) {
    display: inline;
 }
-.srr-desk:not(:empty)::after {
-   content: "/";
+.srr-desk:not(:empty)::before {
+   content: "·";
    color: var(--faint);
    margin: 0 0.4rem;
 }
@@ -510,6 +511,36 @@ body.srr-view-list .srr-toolbar {
    list, past save in the reader (one fixed home for "open config"). */
 .srr-toolbar > .srr-settings {
    justify-self: end;
+}
+
+/* Reader breadcrumb — the active-filter token riding the back button (#tag /
+   feed name / ★ Saved), in the same wire voice as the list's now-viewing
+   readout: it names the filtered lane prev/next walk AND the list this button
+   returns to. app.ts fills it (refreshFeedLabel); empty (hidden) on the
+   unfiltered wire — silence means [ALL]. Single-feed filters tint it with the
+   feed's source color (data-src, same ramp as everywhere); a long name
+   ellipsizes inside the button's grid slot (max-width caps the button at its
+   minmax(0,1fr) track so it never shoves the centered prev/next pair). */
+.srr-toolbar .srr-back {
+   gap: 0.4rem;
+   max-width: 100%;
+}
+.srr-back-label {
+   min-width: 0;
+   font-family: var(--font-mono);
+   font-size: 0.62rem;
+   font-weight: 600;
+   letter-spacing: 0.05em;
+   text-transform: uppercase;
+   overflow: hidden;
+   text-overflow: ellipsis;
+   white-space: nowrap;
+}
+.srr-back-label:empty {
+   display: none;
+}
+.srr-back-label[data-src] {
+   color: var(--src);
 }
 
 /* Icon toolbar buttons — square 44px tap targets with a subtle hover fill.
