@@ -76,7 +76,7 @@ func filterReport(core *DBCore, packs []*idxPack, token string, floor int) error
 	feedIDs := make([]int, 0, len(feeds))
 	for id := range feeds {
 		feedIDs = append(feedIDs, id)
-		feedTotal += core.Feeds[id].TotalArt
+		feedTotal += core.Feeds[id].TotalArt - core.Feeds[id].Expired
 	}
 	sort.Ints(feedIDs)
 
@@ -102,10 +102,10 @@ func filterReport(core *DBCore, packs []*idxPack, token string, floor int) error
 	fmt.Printf("\nfilter %q -> %d feed(s): %v\n", token, len(feeds), feedIDs)
 	for _, id := range feedIDs {
 		ch := core.Feeds[id]
-		fmt.Printf("  feed %d: %q tag=%q total_art=%d add_idx=%d\n",
-			id, ch.Title, ch.Tag, ch.TotalArt, ch.AddIdx)
+		fmt.Printf("  feed %d: %q tag=%q total_art=%d add_idx=%d expired=%d\n",
+			id, ch.Title, ch.Tag, ch.TotalArt, ch.AddIdx, ch.Expired)
 	}
-	fmt.Printf("\nfilter.feedTotal (sum of feed.total_art) = %d\n", feedTotal)
+	fmt.Printf("\nfilter.feedTotal (sum of feed.total_art - expired) = %d\n", feedTotal)
 	fmt.Printf("matches in idx                              = %d\n", count)
 	if count != feedTotal {
 		fmt.Printf("  *** mismatch: filter would show wrong counter in UI ***\n")
@@ -136,7 +136,7 @@ func listTagsReport(core *DBCore) error {
 		}
 		if ch.Tag == "" {
 			untagged.feeds++
-			untagged.articles += ch.TotalArt
+			untagged.articles += ch.TotalArt - ch.Expired
 			continue
 		}
 		t := tags[ch.Tag]
@@ -145,7 +145,7 @@ func listTagsReport(core *DBCore) error {
 			tags[ch.Tag] = t
 		}
 		t.feeds++
-		t.articles += ch.TotalArt
+		t.articles += ch.TotalArt - ch.Expired
 	}
 	names := make([]string, 0, len(tags))
 	for n := range tags {
