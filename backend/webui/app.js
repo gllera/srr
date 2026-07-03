@@ -593,7 +593,7 @@ function openImportModal(dry, xml) {
   importDialog ||= makeDialog({});
   const feeds = dry.feeds || [];
   const skipped = dry.skipped || [];
-  const err = el("div", { class: "muted" });
+  const err = el("div", { class: "formerr" });
   const kids = [
     el("h3", {}, "Import OPML"),
     el("div", { class: "count" }, `${feeds.length} to import · ${skipped.length} skipped`),
@@ -633,36 +633,125 @@ function makeDialog(attrs) {
 }
 
 let feedDialog;
+// openFeedModal is both halves of feed CRUD. Add mode is URL-first: paste a
+// site or feed URL and checkURL reads the wire's own label (GET /api/resolve)
+// — a homepage folds to its discovered feed URL, the feed's title fills an
+// empty title box, and the status line reports the signal check. Edit mode
+// keeps the familiar title-first order; the same probe runs on a repointed URL.
 function openFeedModal(f) {
   feedDialog ||= makeDialog({ id: "feedModal" });
   const isEdit = !!f;
   const v = f || { title: "", url: "", tag: "", recipe: "", no_title: false };
-  const title = el("input", { id: "f_title", value: v.title });
-  const url = el("input", { id: "f_url", value: v.url });
-  const tag = el("input", { id: "f_tag", value: v.tag || "" });
-  const recipe = el("select", { id: "f_recipe" }, el("option", { value: "" }, "default"));
-  appendRecipeOptions(recipe, v.recipe || "", snapshot.recipes);
+  const title = el("input", { id: "f_title", value: v.title,
+    placeholder: isEdit ? null : "auto-filled from the feed" });
+  const url = el("input", { id: "f_url", value: v.url,
+    placeholder: "https://site.com/ — site or feed URL" });
+  // The existing tag vocabulary rides as one-click toggle chips under the
+  // input: a click fills it (clicking the active chip clears it), typing keeps
+  // the highlight in sync, and free text still mints a new tag. Chips beat a
+  // datalist here — the vocabulary is small and visible at a glance, and a
+  // typo can't silently mint a near-duplicate of an existing tag.
+  const tag = el("input", { id: "f_tag", value: v.tag || "", placeholder: "new or existing tag" });
+  const tagChips = el("div", { class: "tag-chips" });
+  function drawTagChips() {
+    tagChips.replaceChildren();
+    for (const t of snapshot.tags) {
+      if (!t.tag) continue;
+      const active = tag.value.trim() === t.tag;
+      tagChips.append(el("button", {
+        type: "button", class: "chip choice" + (active ? " active" : ""),
+        "aria-pressed": active ? "true" : "false",
+        onclick: () => { tag.value = active ? "" : t.tag; drawTagChips(); },
+      }, t.tag));
+    }
+  }
+  drawTagChips();
+  tag.addEventListener("input", drawTagChips);
+  // Recipes are a closed set, so the picker is chips alone — no input, no
+  // select: one chip per recipe, `default` first, exactly one always active
+  // (blank resolves to default). Dashed borders keep the table's tag-vs-recipe
+  // distinction; picking one re-probes the URL through the new recipe.
+  let recipeVal = v.recipe || "";
+  const recipeChips = el("div", { class: "tag-chips" });
+  function drawRecipeChips() {
+    recipeChips.replaceChildren();
+    const names = ["", ...Object.keys(snapshot.recipes).filter((n) => n !== "default").sort()];
+    for (const n of names) {
+      const active = recipeVal === n;
+      recipeChips.append(el("button", {
+        type: "button", class: "chip recipe choice" + (active ? " active" : ""),
+        "aria-pressed": active ? "true" : "false",
+        onclick: () => {
+          if (recipeVal === n) return;
+          recipeVal = n;
+          drawRecipeChips();
+          if (url.value.trim()) checkURL(true);
+        },
+      }, n || "default"));
+    }
+  }
+  drawRecipeChips();
   const noTitle = el("input", { id: "f_notitle", type: "checkbox" });
   noTitle.checked = !!v.no_title;
-  const err = el("div", { class: "muted" });
+  const err = el("div", { class: "formerr" });
+  const status = el("div", { class: "resolve-status" });
+
+  // checkURL probes the URL through the chosen recipe. Advisory only: a failed
+  // probe reports in the status line but never blocks Save — the server
+  // re-resolves on save regardless. Value-memoized (`probed`): paste and the
+  // blur that follows it probe once, not twice, and a discovery-folded URL
+  // counts as already checked; the explicit triggers (Enter, recipe change)
+  // force a re-probe of the same value.
+  let probing = false, probed = "";
+  async function checkURL(force) {
+    const u = url.value.trim();
+    if (!u || probing || (!force && u === probed)) return;
+    probing = true;
+    status.replaceChildren(el("span", { class: "muted" }, "reading feed…"));
+    try {
+      const r = await apiGet(`/api/resolve?url=${encodeURIComponent(u)}&recipe=${encodeURIComponent(recipeVal)}`);
+      if (url.value.trim() !== u) return; // field changed while probing — stale result
+      if (r.url && r.url !== u) url.value = r.url; // homepage → its discovered feed
+      probed = url.value.trim();
+      if (!title.value.trim() && r.title) title.value = r.title;
+      status.replaceChildren(el("i", { class: "dot green" }),
+        el("span", {}, `${r.items} item${r.items === 1 ? "" : "s"}${r.title ? " · " + r.title : ""}`));
+    } catch (e) {
+      if (url.value.trim() === u) {
+        probed = u; // a dead URL isn't re-hammered on every blur; Enter retries
+        status.replaceChildren(el("span", { class: "bad" }, e.message));
+      }
+    } finally {
+      probing = false;
+    }
+  }
+  url.addEventListener("change", () => checkURL(false)); // blur with a modified value
+  url.addEventListener("paste", () => setTimeout(() => checkURL(false), 0)); // pasted value lands next tick
+  url.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); checkURL(true); } });
 
   const save = el("button", { class: "btn primary", onclick: async () => {
     const body = {
       title: title.value.trim(), url: url.value.trim(),
-      tag: tag.value.trim(), recipe: recipe.value.trim(),
+      tag: tag.value.trim(), recipe: recipeVal,
       no_title: noTitle.checked,
     };
-    await saveModal(feedDialog, err,
-      () => isEdit ? api("PUT", "/api/feeds/" + f.id, body) : api("POST", "/api/feeds", body),
-      (isEdit ? "Updated " : "Added ") + body.title);
-  } }, "Save");
+    save.disabled = true; // save re-resolves the URL server-side — it can take a moment
+    try {
+      await saveModal(feedDialog, err,
+        () => isEdit ? api("PUT", "/api/feeds/" + f.id, body) : api("POST", "/api/feeds", body),
+        (isEdit ? "Updated " : "Added ") + body.title);
+    } finally {
+      save.disabled = false;
+    }
+  } }, isEdit ? "Save" : "Add feed");
 
+  const urlField = [el("label", {}, "URL"), url, status];
+  const titleField = [el("label", {}, "Title"), title];
   feedDialog.replaceChildren(
     el("h3", {}, isEdit ? "Edit feed #" + f.id : "Add feed"),
-    el("label", {}, "Title"), title,
-    el("label", {}, "URL"), url,
-    el("label", {}, "Tag"), tag,
-    el("label", {}, "Recipe (blank = default)"), recipe,
+    ...(isEdit ? [...titleField, ...urlField] : [...urlField, ...titleField]),
+    el("label", {}, "Tag"), tag, tagChips,
+    el("label", {}, "Recipe"), recipeChips,
     el("label", { class: "check" }, noTitle, "Hide article titles (titleless feed)"),
     err,
     dialogRow(feedDialog, save, isEdit ? () => deleteFeed(f) : null));
@@ -708,7 +797,7 @@ function openRecipeModal(name, rcp) {
   const ingestIn = el("input", { value: (rcp && rcp.ingest) || "", placeholder: "#feed (default)" });
   const steps = (rcp && rcp.pipe) ? [...rcp.pipe] : [];
   const stepsBox = el("div", {});
-  const err = el("div", { class: "muted" });
+  const err = el("div", { class: "formerr" });
 
   function drawSteps() {
     stepsBox.replaceChildren();
@@ -879,7 +968,7 @@ function openOutModal(o) {
     snapshot.feeds.map((f) => ({ value: f.id, label: f.title })),
     v.feeds || []);
   const limit = el("input", { type: "number", value: v.limit || 50 });
-  const err = el("div", { class: "muted" });
+  const err = el("div", { class: "formerr" });
   const save = el("button", { class: "btn primary", onclick: async () => {
     const nm = (v.name || name.value).trim();
     const body = {

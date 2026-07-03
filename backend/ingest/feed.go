@@ -70,7 +70,7 @@ func feedFetch(ctx context.Context, client *http.Client, buf []byte, req Request
 	}
 
 	var items []*mod.RawItem
-	parseErr := ParseFeed(data, func(i *mod.RawItem) error {
+	feedTitle, parseErr := ParseFeed(data, func(i *mod.RawItem) error {
 		items = append(items, i)
 		return nil
 	})
@@ -106,6 +106,7 @@ func feedFetch(ctx context.Context, client *http.Client, buf []byte, req Request
 		ETag:         res.Header.Get("ETag"),
 		LastModified: res.Header.Get("Last-Modified"),
 		Items:        items,
+		Title:        feedTitle,
 	}, nil
 }
 
@@ -296,10 +297,13 @@ func rawToFeedItem(r mod.RawFeedItem, dateHint *string) *mod.RawItem {
 // branches on it (errors.Is) to attempt auto-discovery instead of failing hard.
 var errNotFeed = errors.New("not a recognized feed")
 
-// ParseFeed streams feed items to the callback. An error from the callback is
-// propagated. A document that is not a recognized feed is reported wrapped in
-// errNotFeed; a fault while parsing a recognized feed is a plain error.
-func ParseFeed(data []byte, fn func(*mod.RawItem) error) error {
+// ParseFeed streams feed items to the callback and returns the feed's own
+// channel/feed-level title (the first <title> directly under <channel> or the
+// Atom <feed> root — never an <item>/<image> title; "" when absent). An error
+// from the callback is propagated. A document that is not a recognized feed is
+// reported wrapped in errNotFeed; a fault while parsing a recognized feed is a
+// plain error.
+func ParseFeed(data []byte, fn func(*mod.RawItem) error) (string, error) {
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	// Transcode declared non-UTF-8 encodings (ISO-8859-1, windows-1252, …) to
 	// UTF-8: Go's encoding/xml is UTF-8 only and otherwise errors on the first
@@ -315,7 +319,7 @@ func ParseFeed(data []byte, fn func(*mod.RawItem) error) error {
 	for {
 		tok, err := dec.Token()
 		if err != nil {
-			return fmt.Errorf("%w: detecting feed format: %w", errNotFeed, err)
+			return "", fmt.Errorf("%w: detecting feed format: %w", errNotFeed, err)
 		}
 		if se, ok := tok.(xml.StartElement); ok {
 			switch se.Name.Local {
@@ -324,38 +328,60 @@ func ParseFeed(data []byte, fn func(*mod.RawItem) error) error {
 			case "feed":
 				itemTag = "entry"
 			default:
-				return fmt.Errorf("%w: unexpected root <%s>", errNotFeed, se.Name.Local)
+				return "", fmt.Errorf("%w: unexpected root <%s>", errNotFeed, se.Name.Local)
 			}
 			break
 		}
 	}
 
 	var dateHint string
+	var feedTitle string
+	var stack []string // open-element ancestry inside the root (item subtrees are consumed wholly, never pushed)
 	for {
 		tok, err := dec.Token()
 		if errors.Is(err, io.EOF) {
-			return nil
+			return feedTitle, nil
 		}
 		if err != nil {
-			return fmt.Errorf("parsing feed: %w", err)
+			return feedTitle, fmt.Errorf("parsing feed: %w", err)
 		}
-		se, ok := tok.(xml.StartElement)
-		if !ok || se.Name.Local != itemTag {
-			continue
-		}
-		raw, err := parseElement(dec, se)
-		if err != nil {
-			// A malformed element wedges the decoder (Go's xml decoder rejects a
-			// bare "]]>" even in non-strict mode, and keeps erroring after).
-			// Stop here but keep the items parsed so far rather than dropping the
-			// whole feed: the caller then advances its cache headers and commits
-			// the good items, so one bad element can't blank a feed and leave it
-			// re-failing every fetch forever.
-			slog.Warn("feed parse stopped at malformed element", "err", err)
-			return nil
-		}
-		if err := fn(rawToFeedItem(raw.Chld, &dateHint)); err != nil {
-			return err
+		switch se := tok.(type) {
+		case xml.EndElement:
+			if len(stack) > 0 {
+				stack = stack[:len(stack)-1]
+			}
+		case xml.StartElement:
+			if se.Name.Local == itemTag {
+				raw, err := parseElement(dec, se)
+				if err != nil {
+					// A malformed element wedges the decoder (Go's xml decoder rejects a
+					// bare "]]>" even in non-strict mode, and keeps erroring after).
+					// Stop here but keep the items parsed so far rather than dropping the
+					// whole feed: the caller then advances its cache headers and commits
+					// the good items, so one bad element can't blank a feed and leave it
+					// re-failing every fetch forever.
+					slog.Warn("feed parse stopped at malformed element", "err", err)
+					return feedTitle, nil
+				}
+				if err := fn(rawToFeedItem(raw.Chld, &dateHint)); err != nil {
+					return feedTitle, err
+				}
+				continue
+			}
+			// The feed's own label: the first <title> directly under <channel>
+			// (RSS/RDF) or under the Atom <feed> root itself. <item> titles never
+			// reach here (consumed above) and <image>/<textinput> titles fail the
+			// parent check ("image"/"textinput" tops the stack, not "channel").
+			if feedTitle == "" && se.Name.Local == "title" &&
+				((len(stack) > 0 && stack[len(stack)-1] == "channel") ||
+					(itemTag == "entry" && len(stack) == 0)) {
+				var s string
+				if err := dec.DecodeElement(&s, &se); err == nil {
+					feedTitle = strings.TrimSpace(s)
+				}
+				continue // DecodeElement consumed the whole element — nothing to push
+			}
+			stack = append(stack, se.Name.Local)
 		}
 	}
 }

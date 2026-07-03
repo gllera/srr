@@ -179,7 +179,7 @@ func parseFeedTitle(t *testing.T, rssTitle string) string {
 		`<item><title>` + rssTitle + `</title><link>http://example.com</link></item>` +
 		`</channel></rss>`)
 	var got string
-	err := ingest.ParseFeed(feed, func(i *mod.RawItem) error {
+	_, err := ingest.ParseFeed(feed, func(i *mod.RawItem) error {
 		if err := processItem(context.Background(), mod.New(), nil, i); err != nil {
 			return err
 		}

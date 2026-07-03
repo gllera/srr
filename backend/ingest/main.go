@@ -65,6 +65,12 @@ type Result struct {
 	// ch.URL = ResolvedURL to avoid re-discovering on every subsequent fetch.
 	// omitempty keeps the external-fetcher wire protocol unaffected.
 	ResolvedURL string `json:"resolved_url,omitempty"`
+	// Title is the feed's own channel/feed-level title ("" when the source
+	// declares none). Set by the built-in #feed fetcher; an external strategy
+	// MAY set it too — omitempty keeps the wire protocol backward-compatible.
+	// Consumed by serve's GET /api/resolve to pre-fill the add-feed dialog;
+	// the fetch loop ignores it (a stored feed's title is operator-owned).
+	Title string `json:"title,omitempty"`
 }
 
 // userAgent is the User-Agent header value sent by built-in HTTP-based

@@ -262,6 +262,7 @@ The command receives a JSON **request** on `stdin` and must print a JSON **respo
 | `etag` | string | Opaque cursor echoed back on the next request (optional). |
 | `last_modified` | string | Opaque cursor echoed back on the next request (optional). |
 | `items` | array | The articles (each item below). |
+| `title` | string | The feed's own channel-level title (optional). Read by the admin GUI's add-feed check (`GET /api/resolve`) to pre-fill the title; the fetch loop ignores it — a stored feed's title is operator-owned. |
 
 **Item:**
 

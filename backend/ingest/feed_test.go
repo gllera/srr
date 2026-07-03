@@ -15,7 +15,7 @@ import (
 func collectFeed(t *testing.T, data string) []*mod.RawItem {
 	t.Helper()
 	var items []*mod.RawItem
-	err := ParseFeed([]byte(data), func(item *mod.RawItem) error {
+	_, err := ParseFeed([]byte(data), func(item *mod.RawItem) error {
 		items = append(items, item)
 		return nil
 	})
@@ -23,6 +23,36 @@ func collectFeed(t *testing.T, data string) []*mod.RawItem {
 		t.Fatalf("ParseFeed: %v", err)
 	}
 	return items
+}
+
+// The feed-level title must come from <channel>/<feed> only — an <image> or
+// <item> title must never masquerade as the feed's own label.
+func TestParseFeedTitle(t *testing.T) {
+	cases := []struct {
+		name, data, want string
+	}{
+		{"rss-channel", `<rss version="2.0"><channel><title> The Wire </title>` +
+			`<item><title>Item A</title></item></channel></rss>`, "The Wire"},
+		{"atom-feed", `<feed xmlns="http://www.w3.org/2005/Atom"><title>Atom Wire</title>` +
+			`<entry><title>Entry A</title></entry></feed>`, "Atom Wire"},
+		{"image-title-skipped", `<rss version="2.0"><channel>` +
+			`<image><title>Logo</title></image><title>Real Title</title>` +
+			`<item><title>Item A</title></item></channel></rss>`, "Real Title"},
+		{"item-title-never-leaks", `<rss version="2.0"><channel>` +
+			`<item><title>Item A</title></item></channel></rss>`, ""},
+		{"no-title", `<rss version="2.0"><channel><item><guid>g</guid></item></channel></rss>`, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			title, err := ParseFeed([]byte(c.data), func(*mod.RawItem) error { return nil })
+			if err != nil {
+				t.Fatalf("ParseFeed: %v", err)
+			}
+			if title != c.want {
+				t.Fatalf("title = %q, want %q", title, c.want)
+			}
+		})
+	}
 }
 
 func TestParseRSS2(t *testing.T) {
@@ -181,7 +211,7 @@ func TestParseCDATA(t *testing.T) {
 }
 
 func TestParseUnsupportedFormat(t *testing.T) {
-	err := ParseFeed([]byte(`<html><body>Not a feed</body></html>`), func(*mod.RawItem) error {
+	_, err := ParseFeed([]byte(`<html><body>Not a feed</body></html>`), func(*mod.RawItem) error {
 		t.Fatal("callback should not be called")
 		return nil
 	})
@@ -191,7 +221,7 @@ func TestParseUnsupportedFormat(t *testing.T) {
 }
 
 func TestParseInvalidXML(t *testing.T) {
-	err := ParseFeed([]byte(`not xml at all`), func(*mod.RawItem) error {
+	_, err := ParseFeed([]byte(`not xml at all`), func(*mod.RawItem) error {
 		return nil
 	})
 	if err == nil {
@@ -211,7 +241,7 @@ func TestParseFeedNotFeedClassification(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := ParseFeed([]byte(c.data), func(*mod.RawItem) error { return nil })
+			_, err := ParseFeed([]byte(c.data), func(*mod.RawItem) error { return nil })
 			if err == nil {
 				t.Fatalf("expected an error for a non-feed document")
 			}
@@ -226,7 +256,7 @@ func TestParseFeedNotFeedClassification(t *testing.T) {
 // recognized-but-broken feed must surface a real error that is NOT errNotFeed
 // (so a mid-stream fault never spuriously triggers discovery).
 func TestParseFeedValidNotClassifiedNotFeed(t *testing.T) {
-	err := ParseFeed([]byte(`<rss version="2.0"><feed><item><title>A</title></item></feed></rss>`),
+	_, err := ParseFeed([]byte(`<rss version="2.0"><feed><item><title>A</title></item></feed></rss>`),
 		func(*mod.RawItem) error { return nil })
 	if err != nil {
 		t.Fatalf("valid feed returned error: %v", err)
@@ -329,7 +359,7 @@ func TestParseEmptyFeed(t *testing.T) {
 
 func TestParseCallbackError(t *testing.T) {
 	testErr := fmt.Errorf("custom callback error")
-	err := ParseFeed([]byte(`<rss version="2.0"><feed>
+	_, err := ParseFeed([]byte(`<rss version="2.0"><feed>
     <item><title>A</title></item>
   </feed></rss>`), func(*mod.RawItem) error {
 		return testErr
@@ -495,7 +525,7 @@ func TestParseRSSWithAttributes(t *testing.T) {
 }
 
 func TestParseEmptyXML(t *testing.T) {
-	err := ParseFeed([]byte(""), func(*mod.RawItem) error {
+	_, err := ParseFeed([]byte(""), func(*mod.RawItem) error {
 		return nil
 	})
 	if err == nil {
