@@ -121,8 +121,17 @@ const dropdown = vi.hoisted(() => ({
    setProfileImportHook: vi.fn(),
    showImgProxyDialog: vi.fn(),
    showBackupDialog: vi.fn(),
+   showSyncDialog: vi.fn(),
 }))
 vi.mock("./dropdown", () => dropdown)
+
+// Cross-device sync: app.ts only wires it (sync.init with the shared
+// after-merge refresh, after the first route); the cycles themselves are
+// sync.test.ts's business.
+const sync = vi.hoisted(() => ({
+   init: vi.fn(),
+}))
+vi.mock("./sync", () => sync)
 
 // The config surface is its own module; app.ts drives it via showConfig/config.open
 // and the hooks it passes to config.setup. We mock it and capture those hooks.
@@ -136,7 +145,8 @@ const config = vi.hoisted(() => ({
 }))
 vi.mock("./config", () => config)
 // The hooks object app.ts passes to config.setup (onSelect / onUnreadToggle /
-// onClose / pinEntry / openImgProxy / openBackup) — captured for assertions.
+// onClose / pinEntry / openImgProxy / openBackup / openSync) — captured for
+// assertions.
 const configHooks = () => (config.setup as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[1]
 
 vi.mock("./fmt", () => ({
@@ -690,13 +700,47 @@ describe("config surface — open + filter / settings routing", () => {
       expect(list.rerender).toHaveBeenCalled()
    })
 
-   it("config settings hooks open the image-proxy and backup dialogs", async () => {
+   it("config settings hooks open the image-proxy, backup, and sync dialogs", async () => {
       await boot()
       const hooks = configHooks()!
       hooks.openImgProxy()
       hooks.openBackup()
+      hooks.openSync()
       expect(dropdown.showImgProxyDialog).toHaveBeenCalledTimes(1)
       expect(dropdown.showBackupDialog).toHaveBeenCalledTimes(1)
+      expect(dropdown.showSyncDialog).toHaveBeenCalledTimes(1)
+   })
+})
+
+describe("cross-device sync wiring", () => {
+   it("boots sync with the shared after-merge refresh (list view → rerender)", async () => {
+      await boot() // list surface
+      expect(sync.init).toHaveBeenCalledTimes(1)
+      const afterMerge = sync.init.mock.calls[0][0] as () => void
+      nav.pruneSeen.mockClear()
+      list.rerender.mockClear()
+      config.render.mockClear()
+      config.isOpen.mockReturnValue(true)
+      afterMerge()
+      expect(nav.pruneSeen).toHaveBeenCalledTimes(1)
+      expect(list.rerender).toHaveBeenCalledTimes(1)
+      expect(config.render).toHaveBeenCalledTimes(1) // open config re-derives badges/status
+      // The status callback repaints an open config footer after each cycle.
+      const onStatus = sync.init.mock.calls[0][1] as () => void
+      config.refreshStatus.mockClear()
+      onStatus()
+      expect(config.refreshStatus).toHaveBeenCalledTimes(1)
+      config.isOpen.mockReturnValue(false)
+      onStatus()
+      expect(config.refreshStatus).toHaveBeenCalledTimes(1) // closed config → no repaint
+   })
+
+   it("skips the list rebuild while the reader is on screen (show() re-derives on return)", async () => {
+      await boot("#2") // reader surface
+      const afterMerge = sync.init.mock.calls[0][0] as () => void
+      list.rerender.mockClear()
+      afterMerge()
+      expect(list.rerender).not.toHaveBeenCalled()
    })
 })
 

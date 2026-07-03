@@ -2,6 +2,7 @@ import * as data from "./data"
 import { extractImageUrls, getImgProxy, imgProxy } from "./fmt"
 import { SAVED_KEY, SEEN_KEY, UNREAD_ONLY_KEY } from "./keys"
 import * as search from "./search"
+import * as sync from "./sync"
 
 let pos = -1
 // Feed id of the article currently on screen (-1 = none). feedUnread counts
@@ -83,6 +84,7 @@ export function toggleSaved(chron: number): boolean {
    try {
       localStorage.setItem(SAVED_KEY, JSON.stringify([...set].sort((a, b) => a - b)))
    } catch {}
+   sync.pushSoon()
    next.left = next.right = undefined
    return nowSaved
 }
@@ -623,7 +625,10 @@ function recordSeen(article: IArticle) {
             changed = true
          }
       }
-      if (changed) localStorage.setItem(SEEN_KEY, JSON.stringify(seen))
+      if (changed) {
+         localStorage.setItem(SEEN_KEY, JSON.stringify(seen))
+         sync.pushSoon()
+      }
    } catch {}
 }
 

@@ -1,8 +1,10 @@
 import { getImgProxy, isValidProxy, normalizeProxy, setImgProxy } from "./fmt"
 import { exportProfile, importProfile } from "./profile"
+import { getSyncUrl, isValidSyncUrl, normalizeSyncUrl, setSyncUrl, syncNow } from "./sync"
 
 const imgProxyDialog = document.querySelector<HTMLElement>(".srr-imgproxy-dialog")
 const backupDialog = document.querySelector<HTMLElement>(".srr-backup-dialog")
+const syncDialog = document.querySelector<HTMLElement>(".srr-sync-dialog")
 
 // The toolbar dropdown menus (filter picker + ⋯ settings) were retired when those
 // moved into the config surface (config.ts). closeAllDropdowns stays as a no-op so
@@ -96,20 +98,19 @@ function imgProxyBody(close: () => void): DocumentFragment {
    return frag
 }
 
-// showImgProxyDialog opens the centered image-proxy modal (built fresh each time
-// so the input re-seeds from storage). It's a real modal — dimmed backdrop, focus
-// trapped inside, Escape and a backdrop click both cancel — distinct from the
-// toast-style .srr-popup. The keydown handler is capture-phase + stopPropagation
-// so Escape closes only the dialog (not app.ts's document-level Escape) and Tab
-// wraps within it; on close, focus returns to whatever opened it (the ⋯ button
-// when launched from the overflow menu, since closeAllDropdowns hands focus there).
-let closeImgProxy: (() => void) | null = null
+// ── Modal shell ──────────────────────────────────────────────────────────────
+// One shared shell for the centered modals (image proxy / backup / sync). They
+// are real modals — dimmed backdrop, focus trapped inside, Escape and a backdrop
+// click both cancel — distinct from the toast-style .srr-popup. The keydown
+// handler is capture-phase + stopPropagation so Escape closes only the dialog
+// (not app.ts's document-level Escape) and Tab wraps within it; on close, focus
+// returns to whatever opened it. Body content is (re)built per open into the
+// dialog's stable host node, so re-opens never stack a second editor; the single
+// module-level closer also means opening any modal closes whichever was open.
+let activeClose: (() => void) | null = null
 
-export function showImgProxyDialog(): void {
-   const dialog = imgProxyDialog
-   if (!dialog) return
-   if (closeImgProxy) closeImgProxy() // never stack two opens
-   const body = dialog.querySelector<HTMLElement>(".srr-imgproxy-body")!
+function openModal(dialog: HTMLElement, body: HTMLElement, build: (close: () => void) => Node): void {
+   if (activeClose) activeClose() // never stack two opens
    const restore = document.activeElement as HTMLElement | null
 
    const onKey = (e: KeyboardEvent) => {
@@ -118,7 +119,7 @@ export function showImgProxyDialog(): void {
          e.stopPropagation()
          close()
       } else if (e.key === "Tab") {
-         const f = dialog.querySelectorAll<HTMLElement>("input, button")
+         const f = dialog.querySelectorAll<HTMLElement>("input, button, textarea")
          if (f.length === 0) return
          const first = f[0]
          const last = f[f.length - 1]
@@ -141,15 +142,67 @@ export function showImgProxyDialog(): void {
       body.replaceChildren()
       document.removeEventListener("keydown", onKey, true)
       dialog.removeEventListener("mousedown", onDown)
-      closeImgProxy = null
+      activeClose = null
       restore?.focus()
    }
-   closeImgProxy = close
+   activeClose = close
 
-   body.replaceChildren(imgProxyBody(close)) // editorInput focuses the field on attach
+   body.replaceChildren(build(close)) // editorInput focuses the field on attach
    dialog.classList.add("srr-open")
    document.addEventListener("keydown", onKey, true)
    dialog.addEventListener("mousedown", onDown)
+}
+
+// showImgProxyDialog opens the centered image-proxy modal (built fresh each time
+// so the input re-seeds from storage).
+export function showImgProxyDialog(): void {
+   if (!imgProxyDialog) return
+   openModal(imgProxyDialog, imgProxyDialog.querySelector<HTMLElement>(".srr-imgproxy-body")!, imgProxyBody)
+}
+
+// syncBody is the editable content of the sync dialog: the endpoint-URL input
+// plus the action row, the same editor shape as imgProxyBody. Saving a NEW url
+// kicks a full cycle immediately (pull-merge, then push) so enabling sync seeds
+// the endpoint / adopts its stored profile without waiting for the next reading
+// session; the config status footer reports how it went.
+function syncBody(close: () => void): DocumentFragment {
+   const frag = document.createDocumentFragment()
+   const input = editorInput("url", "srr-sync-input", "Sync endpoint URL (empty disables)")
+   input.placeholder = "sync.example.com/profile"
+   input.value = getSyncUrl()
+
+   const commit = (raw: string) => {
+      const next = raw.trim()
+      if (!isValidSyncUrl(next)) {
+         input.classList.add("srr-input-invalid")
+         input.focus()
+         return
+      }
+      // Scheme is optional (https default); unlike the image proxy, no trailing
+      // "/" is appended — the value is a full endpoint, not a prefix.
+      const value = normalizeSyncUrl(next)
+      if (value !== getSyncUrl()) {
+         setSyncUrl(value)
+         if (value) void syncNow(true)
+      }
+      close()
+   }
+   editorKeys(input, () => commit(input.value), close)
+
+   const actions = divEl("srr-sync-actions")
+   // Disable sits apart (far left, CSS margin), same as the image-proxy dialog.
+   if (getSyncUrl()) actions.append(btn("srr-dialog-btn srr-sync-clear", "disable sync", "Disable", () => commit("")))
+   actions.append(
+      btn("srr-dialog-btn srr-sync-cancel", "cancel", "Cancel", close),
+      btn("srr-dialog-btn srr-dialog-primary srr-sync-save", "save sync endpoint", "Save", () => commit(input.value)),
+   )
+   frag.append(input, actions)
+   return frag
+}
+
+export function showSyncDialog(): void {
+   if (!syncDialog) return
+   openModal(syncDialog, syncDialog.querySelector<HTMLElement>(".srr-sync-body")!, syncBody)
 }
 
 // Hook set by app.ts so the backup dialog can trigger a list rerender +
@@ -163,48 +216,17 @@ export function setProfileImportHook(fn: () => void): void {
 
 // showBackupDialog opens the backup/restore modal. An optional `onImported`
 // callback overrides the module-level hook (used by tests).
-let closeBackup: (() => void) | null = null
-
 export function showBackupDialog(onImported?: () => void): void {
-   const dialog = backupDialog
-   if (!dialog) return
-   if (closeBackup) closeBackup()
-   const body = dialog.querySelector<HTMLElement>(".srr-backup-body")!
-   const restore = document.activeElement as HTMLElement | null
+   if (!backupDialog) return
+   openModal(backupDialog, backupDialog.querySelector<HTMLElement>(".srr-backup-body")!, (close) =>
+      backupBody(close, onImported),
+   )
+}
 
-   const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-         e.preventDefault()
-         e.stopPropagation()
-         close()
-      } else if (e.key === "Tab") {
-         const f = dialog.querySelectorAll<HTMLElement>("input, button, textarea")
-         if (f.length === 0) return
-         const first = f[0]
-         const last = f[f.length - 1]
-         if (e.shiftKey && document.activeElement === first) {
-            e.preventDefault()
-            last.focus()
-         } else if (!e.shiftKey && document.activeElement === last) {
-            e.preventDefault()
-            first.focus()
-         }
-      }
-   }
-   const onDown = (e: MouseEvent) => {
-      if (e.target === dialog) close()
-   }
-   const close = () => {
-      dialog.classList.remove("srr-open")
-      body.replaceChildren()
-      document.removeEventListener("keydown", onKey, true)
-      dialog.removeEventListener("mousedown", onDown)
-      closeBackup = null
-      restore?.focus()
-   }
-   closeBackup = close
-
-   // ── build body ──────────────────────────────────────────────────────────
+// backupBody builds the backup/restore modal's content: the export textarea
+// (+ copy / download), a divider, and the import textarea + prefs checkbox +
+// Import button.
+function backupBody(close: () => void, onImported?: () => void): DocumentFragment {
    const frag = document.createDocumentFragment()
 
    // Export section: read-only textarea pre-filled with the current profile.
@@ -297,9 +319,5 @@ export function showBackupDialog(onImported?: () => void): void {
    })
 
    frag.append(importLabel, prefsRow, errEl, importBtn)
-
-   body.replaceChildren(frag)
-   dialog.classList.add("srr-open")
-   document.addEventListener("keydown", onKey, true)
-   dialog.addEventListener("mousedown", onDown)
+   return frag
 }
