@@ -329,6 +329,22 @@ describe("info dialog", () => {
       $(".srr-info-close").click()
       expect($(".srr-info-dialog").classList.contains("srr-open")).toBe(false)
    })
+
+   it("shows the live article count (total_art − xp) in the detail card", async () => {
+      data.groupFeedsByTag.mockReturnValue({
+         tagged: new Map(),
+         sortedTags: [],
+         untagged: [feed({ id: 5, title: "Feed5", url: "http://example.com/rss", total_art: 10, xp: 4 })],
+      })
+      nav.unreadCounts.mockResolvedValue(new Map([[5, 0]]))
+      const config = await mount()
+      config.open()
+      $('.srr-config-filter a[data-value="5"] .srr-info-btn').dispatchEvent(
+         new MouseEvent("click", { bubbles: true, cancelable: true }),
+      )
+      // dt "Articles" and dd "6" concatenate in textContent.
+      expect($(".srr-info-body").textContent).toContain("Articles6")
+   })
 })
 
 describe("unread toggle", () => {

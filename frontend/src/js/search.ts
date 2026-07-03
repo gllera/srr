@@ -131,6 +131,13 @@ function matchShard(shard: Shard, baseChron: number, words: string[], max: numbe
       const folded = shard.folded[i]
       if (!words.every((w) => folded.includes(w))) continue
       const e = shard.entries[i]
+      const feed = data.db.feeds?.[e.f]
+      // Expired articles (chron < their feed's add_idx) are logically deleted
+      // everywhere else (list/nav/counts); search must not resurrect them.
+      // A deleted feed keeps the status quo (tombstone render). The optional
+      // chain is load-bearing: search.test.ts's mock db omits `feeds`
+      // (production data.init always normalizes it).
+      if (feed && baseChron + i < feed.add_idx) continue
       hits.push({ chron: baseChron + i, f: e.f, w: e.w, t: e.t ?? "" })
    }
    return hits
