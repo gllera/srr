@@ -288,28 +288,33 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 		if err := db.SyncMeta(ctx, written); err != nil {
 			slog.Warn("sync meta", "error", err)
 		}
+		// Warn-only: retention is maintenance — a failed walk or asset delete
+		// must not block committing the durable article batch. ExpireArticles
+		// applies nothing on failure, so the next cycle recomputes the same
+		// window and retries idempotently (Rm is silent on missing). The
+		// AddIdx/Expired bumps it does apply ride this cycle's Commit; runs
+		// before the out-feed sync so the same cycle's syndication already
+		// excludes what just expired. Expiration deliberately runs on every
+		// cycle including the GUI's single-feed fetch (o.only) — it's global
+		// maintenance, like SyncIdxSummary/SyncMeta.
+		if err := db.ExpireArticles(ctx, db.core.FetchedAt); err != nil {
+			slog.Warn("expire articles", "error", err)
+		}
 		// Warn-only: a syndication write failure must not discard the durable
 		// article batch. SyncOutFeeds is a no-op when core.Out is empty (the
 		// default) or SRR_CDN_URL is unset (degrades with a warning). Skip the
 		// store walk on a truly-idle cycle — no new articles AND unchanged
-		// syndication inputs (out config + feed tags) since the last sync — so the
-		// --interval loop doesn't rewrite byte-identical out/* every cycle, while
-		// still materializing config/tag edits made during the lock-free idle
-		// sleep (gating on len(written) alone would skip those — a stale-output bug).
+		// syndication inputs (out config + feed tags/AddIdx) since the last
+		// sync — so the --interval loop doesn't rewrite byte-identical out/*
+		// every cycle, while still materializing config/tag edits made during
+		// the lock-free idle sleep and this cycle's expiration bumps (gating on
+		// len(written) alone would skip those — a stale-output bug).
 		sig := db.outFeedsSig()
 		if len(written) > 0 || sig != o.lastOutSig {
 			if err := db.SyncOutFeeds(ctx); err != nil {
 				slog.Warn("sync out feeds", "error", err)
 			}
 			o.lastOutSig = sig
-		}
-		// Warn-only: retention is maintenance — a failed walk or asset delete
-		// must not block committing the durable article batch. ExpireArticles
-		// applies nothing on failure, so the next cycle recomputes the same
-		// window and retries idempotently (Rm is silent on missing). The
-		// AddIdx/Expired bumps it does apply ride this cycle's Commit.
-		if err := db.ExpireArticles(ctx, db.core.FetchedAt); err != nil {
-			slog.Warn("expire articles", "error", err)
 		}
 		if err := db.Commit(ctx); err != nil {
 			return err
