@@ -107,7 +107,10 @@ export function currentFeedId(): number {
 // state navigation does — raised bounds (unseen-only), the explicit set
 // (saved/search) — so the list anchors exactly where the reader sits.
 export function anchorChron(): number {
-   if (pos >= 0 && currentFeed >= 0 && filter.matches(currentFeed, pos)) return pos
+   // The unseen-only entry anchor counts as a member (it renders as a list row
+   // via the feedLeft/feedRight walks), so returning to the list from it lands
+   // on it instead of losing the position to the oldest-unread fallback.
+   if (pos >= 0 && currentFeed >= 0 && (filter.matches(currentFeed, pos) || pos === filter.anchor)) return pos
    return -1
 }
 
@@ -278,20 +281,44 @@ async function ensureSearchSet(): Promise<void> {
 // mode (the explicit set) vs feed mode (the idx packs) is decided in one
 // place. Async to match data.findLeft/findRight; the saved branch is synchronous,
 // wrapped in a resolved promise.
+// The feed-membership walks fold in filter.anchor — the unseen-only entry
+// article (a SEEN article the reader landed on, which the raised bounds
+// exclude). Slotting it into both directional walks keeps it a member of the
+// navigable sequence, so ← returns to the first article shown after → steps
+// into the unseen, and every consumer of this seam (prev/next enablement,
+// step(), the list's rows, prefetch) agrees it exists.
 export function feedLeft(from: number): Promise<number> {
    if (filter.saved) return Promise.resolve(setLeft(savedSorted(), from))
    if (filter.search) return ensureSearchSet().then(() => setLeft(searchSorted, from))
-   return data.findLeft(from, filter.feeds)
+   const a = filter.anchor
+   // No anchor (the usual case): return the walk's promise untouched — an
+   // unconditional .then would add a microtask tick to every neighbor lookup.
+   if (a < 0) return data.findLeft(from, filter.feeds)
+   return data.findLeft(from, filter.feeds).then((found) => (a <= from && a > found ? a : found))
 }
 export function feedRight(from: number): Promise<number> {
    if (filter.saved) return Promise.resolve(setRight(savedSorted(), from))
    if (filter.search) return ensureSearchSet().then(() => setRight(searchSorted, from))
-   return data.findRight(from, filter.feeds)
+   const a = filter.anchor
+   if (a < 0) return data.findRight(from, filter.feeds)
+   return data.findRight(from, filter.feeds).then((found) => (a >= from && (found === -1 || a < found) ? a : found))
 }
 
 export const filter = {
    feeds: new Map<number, number>(),
    tokens: [] as string[],
+   // Unseen-only ENTRY ANCHOR: the chron of a SEEN article the reader landed on
+   // under raised bounds — switchFilter's resume position or a restored/shared
+   // #pos, the landings isValidSeen accepts by true add_idx. The raised (seen+1)
+   // bounds exclude it, so without this the walk loses it the moment you step
+   // off: → to the first unseen, then ← finds nothing — the entry article is
+   // gone. feedLeft/feedRight slot the anchor into their walks so it stays a
+   // reachable member of the navigable sequence ({anchor} ∪ unseen) until the
+   // filter is re-applied (set/clear reset it; a reload re-establishes it from
+   // the new landing). -1 = none. Set by resolve(); navigation-only — it does
+   // NOT make matches() true, so the unread counting (feedUnread/onCurrent) and
+   // badges are untouched.
+   anchor: -1,
    // "★ Saved" mode: navigation walks the explicit srr-saved set, feed-agnostic
    // (feeds stays empty). Set by set() when the only token is SAVED_TOKEN.
    saved: false,
@@ -314,6 +341,7 @@ export const filter = {
       this.feeds = new Map<number, number>()
       this.saved = false
       this.search = false
+      this.anchor = -1
       for (const ch of Object.values(data.db.feeds)) if (ch.total_art) this.feeds.set(ch.id, ch.add_idx ?? 0)
       this.tokens = []
       // [ALL] honours unseen-only too now (a global "only unread" catch-up view).
@@ -322,6 +350,7 @@ export const filter = {
    set(tokens: string[]) {
       this.tokens = tokens
       this.feeds = new Map<number, number>()
+      this.anchor = -1
       // "★ Saved" is a standalone mode, not a feed resolution: short-circuit
       // before the feed loop (which would find no feeds and clear() back
       // to [ALL]). feeds stays empty; feedLeft/feedRight/matches/showFeed all
@@ -469,6 +498,13 @@ async function resolve(target: number, replace = false): Promise<IShowFeed> {
    const article = await data.loadArticle(target)
    pos = target
    currentFeed = article.f
+   // A landing the raised unseen-only bounds do NOT cover is an entry anchor
+   // (isValidSeen accepted it by true add_idx: switchFilter's resume position,
+   // a restored/shared #pos). Remember it so feedLeft/feedRight keep it in the
+   // navigable sequence — ← must be able to return to the first article shown
+   // after → steps into the unseen. A matching landing leaves the anchor alone:
+   // stepping forward must not orphan the entry it came from.
+   if (unseenActive() && !filter.matches(article.f, target)) filter.anchor = target
    next.left = next.right = undefined
    abortPrefetch()
    updateHash(replace)
@@ -733,7 +769,8 @@ async function isValidSeen(idx: number): Promise<boolean> {
    // position and bounce switchFilter forward to the oldest unseen. Accept that
    // resume position anyway — the same current position a feed or a non-unseen
    // tag resumes to — by validating against the member's TRUE add_idx instead of
-   // the raised bound. Right then steps to the first unseen.
+   // the raised bound. Right then steps to the first unseen, and resolve()
+   // records the accepted landing as filter.anchor so ← can step back to it.
    if (unseenActive()) return filter.feeds.has(feedId) && idx >= (data.db.feeds[feedId]?.add_idx ?? 0)
    return filter.matches(feedId, idx)
 }

@@ -13,6 +13,7 @@ const el = {
    listView: document.querySelector(".srr-list") as HTMLElement,
    config: document.querySelector(".srr-config") as HTMLElement,
    back: document.querySelector(".srr-back") as HTMLButtonElement,
+   backLabel: document.querySelector(".srr-back-label") as HTMLElement,
    openReader: document.querySelector(".srr-open-reader") as HTMLButtonElement,
    title: document.querySelector(".srr-title") as HTMLElement,
    content: document.querySelector(".srr-content") as HTMLElement,
@@ -301,9 +302,10 @@ function render(o: IShowFeed) {
    // list still uses the title as its row label. The masthead permalink stands
    // in for the hidden title's link.
    el.article.classList.toggle("srr-reader-titleless", !!feed?.nt)
-   // Desk/section: the feed's tag, announced above the byline (uppercased in CSS).
-   // Empty for an untagged feed → the .srr-desk row is hidden (:not(:empty)).
-   el.desk.textContent = feed?.tag ?? ""
+   // Desk/section: the feed's tag as a hashtag ("#" is real text so it shares
+   // the tag's ink; the "·" separator is CSS). Empty for an untagged feed →
+   // the .srr-desk row is hidden (:not(:empty)).
+   el.desk.textContent = feed?.tag ? "#" + feed.tag : ""
    // t/l are omitempty on the wire — an untitled article must not render "undefined"
    el.title.textContent = o.article.t ?? ""
    el.content.style.transition = "none"
@@ -404,12 +406,26 @@ function refreshFeedLabel() {
    // A single-feed filter tints the toolbar label with that feed's source
    // color (the wire-desk identity in the toolbar); [ALL]/tag/saved/search stay
    // neutral. The chip-less label still says which source you're viewing.
-   if (/^\d+$/.test(key)) el.feed.dataset.src = String(srcColorIndex(Number(key)))
+   const isFeed = /^\d+$/.test(key)
+   if (isFeed) el.feed.dataset.src = String(srcColorIndex(Number(key)))
    else delete el.feed.dataset.src
    el.feed.classList.toggle("srr-filter-on", key !== "")
    // Tooltip shows the full filter name when a long one ellipsizes; the label is
    // non-interactive, so its visible text is its accessible name (no aria-label).
    el.feed.title = key === "" ? "All feeds" : `Filtered: ${label}`
+
+   // Reader breadcrumb: the back button names the filtered list it returns to
+   // (#tag / feed name in its source color / ★ Saved) so the reader says which
+   // lane prev/next walk. Empty on the unfiltered wire — silence means [ALL],
+   // the same rule that keeps the list readout neutral. The span is aria-hidden;
+   // the filter rides the button's aria-label/tooltip instead.
+   const crumb = key === "" ? "" : isFeed || key === nav.SAVED_TOKEN ? label : "#" + label
+   el.backLabel.textContent = crumb
+   if (isFeed) el.backLabel.dataset.src = String(srcColorIndex(Number(key)))
+   else delete el.backLabel.dataset.src
+   const backName = crumb === "" ? "Back to list" : `Back to list — filtered: ${crumb}`
+   el.back.setAttribute("aria-label", backName)
+   el.back.title = backName
 }
 
 // The reader's save (★) toggle reflects whether the current article is in the

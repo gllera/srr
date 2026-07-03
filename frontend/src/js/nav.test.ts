@@ -608,6 +608,80 @@ describe("right_count", () => {
    })
 })
 
+// The unseen-only entry anchor (filter.anchor): opening a filter can land on a
+// SEEN article — switchFilter's resume position, a restored/shared #pos — that
+// the raised (seen+1) bounds exclude. feedLeft/feedRight keep that entry in the
+// navigable sequence so ← can return to the first article shown after → steps
+// into the unseen; the anchor resets when the filter changes.
+describe("unseen-only entry anchor", () => {
+   afterEach(() => nav.setUnreadOnly(false))
+
+   // chron 0=ch1 1=ch2 2=ch1 3=ch2 4=ch1, both feeds tagged "news".
+   function setupNews() {
+      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }, { feedId: 2 }, { feedId: 1 }])
+      for (const id of [1, 2]) data.db.feeds[id].tag = "news"
+   }
+
+   it("← returns to the resume article after → steps into the unseen", async () => {
+      setupNews()
+      // seen ch1→2, ch2→1 ⇒ the tag resumes at min = chron 1; unseen are 3, 4.
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 2, "feed:2": 1 }))
+      nav.setUnreadOnly(true)
+
+      const opened = await nav.switchFilter("news")
+      expect(nav.currentChron()).toBe(1) // the first article shown — a seen resume position
+      expect(opened.has_left).toBe(false) // nothing before the entry
+      expect(opened.has_right).toBe(true)
+
+      const ahead = await nav.right()
+      expect(nav.currentChron()).toBe(3) // first unseen
+      expect(ahead.has_left).toBe(true) // the entry stays reachable…
+
+      await nav.left() // …and ← lands back on it
+      expect(nav.currentChron()).toBe(1)
+   })
+
+   it("keeps a restored #pos deep link reachable the same way", async () => {
+      setupNews()
+      // seen ch1→2, ch2→3 ⇒ the only unseen is chron 4.
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 2, "feed:2": 3 }))
+      nav.setUnreadOnly(true)
+
+      await nav.fromHash("0!news") // a read article, honored as the entry anchor
+      expect(nav.currentChron()).toBe(0)
+      await nav.right()
+      expect(nav.currentChron()).toBe(4)
+      await nav.left()
+      expect(nav.currentChron()).toBe(0)
+   })
+
+   it("→ can return to an anchor sitting past the unseen backlog", async () => {
+      setupNews()
+      // seen ch1→4, ch2→1 ⇒ the only unseen is chron 3, OLDER than the entry.
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 4, "feed:2": 1 }))
+      nav.setUnreadOnly(true)
+
+      const opened = await nav.fromHash("4!news") // a read article newer than every unseen
+      expect(opened.has_right).toBe(false) // nothing after the entry
+      expect(opened.has_left).toBe(true)
+      await nav.left()
+      expect(nav.currentChron()).toBe(3)
+      await nav.right() // the walk slots the anchor back in from the left too
+      expect(nav.currentChron()).toBe(4)
+   })
+
+   it("resets when the filter changes", async () => {
+      setupNews()
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 2, "feed:2": 1 }))
+      nav.setUnreadOnly(true)
+
+      await nav.switchFilter("news")
+      expect(nav.filter.anchor).toBe(1)
+      await nav.switchFilter("") // [ALL] lands on the oldest unseen — a matching article
+      expect(nav.filter.anchor).toBe(-1)
+   })
+})
+
 describe("getFilterEntries", () => {
    it("returns only empty string when no active subs", () => {
       data.groupFeedsByTag.mockReturnValue({ tagged: new Map(), sortedTags: [], untagged: [] })
@@ -1275,17 +1349,18 @@ describe("unread-only mode", () => {
       expect(shown.has_left).toBe(false) // the seen chron 0 is excluded, nothing unseen left
    })
 
-   it("walking right past the resume position leaves unseen on the left", async () => {
+   it("walking right past the resume position keeps it reachable on the left", async () => {
       await readSome() // ch1→2, ch2→1; unseen are chron 3 (ch2), 4 (ch1) → 2 total
       nav.setUnreadOnly(true)
       // Open at the resume position (chron 1, seen): both unseen are to the right,
       // none to the left.
       const a = await nav.switchFilter("news") // chron 1 (resume, seen)
       expect(a.has_left).toBe(false)
-      // Walk onto the oldest unseen, then the last; only past the first does an
-      // unseen sit on the left.
+      // Step onto the oldest unseen: the entry anchor (chron 1) now sits on the
+      // left (filter.anchor keeps the entry navigable — see the entry-anchor
+      // suite); past it, the first unseen does too.
       const b = await nav.right() // chron 3 (oldest unseen)
-      expect(b.has_left).toBe(false)
+      expect(b.has_left).toBe(true)
       const c = await nav.right() // chron 4 (last unseen)
       expect(c.has_left).toBe(true)
    })

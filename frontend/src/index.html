@@ -75,10 +75,10 @@
          <article class="srr-reader" hidden>
             <div class="srr-title-row">
                <div class="srr-kicker">
-                  <!-- Desk/section the dispatch is filed under (the feed's tag), a
-                       wire slug leading the byline. Empty (hidden) when untagged. -->
-                  <span class="srr-desk"></span>
                   <span class="srr-source"></span>
+                  <!-- Desk/section the dispatch is filed under (the feed's tag), a
+                       wire slug after the source name. Empty (hidden) when untagged. -->
+                  <span class="srr-desk"></span>
                   <time class="srr-date"></time>
                   <!-- "Open original" permalink: present on every article (the only
                        link for titleless feeds, a companion to the title link
@@ -158,6 +158,11 @@
          <nav class="srr-toolbar" aria-label="Article navigation">
             <button class="srr-back" aria-label="Back to list" title="Back to list">
                <span class="srr-back-icon" aria-hidden="true"></span>
+               <!-- Active-filter breadcrumb: names the filtered list this button
+                    returns to (#tag / feed name / ★ Saved). Empty (hidden) when
+                    reading the full unfiltered wire. aria-hidden: the button's
+                    aria-label carries the filter for AT (app.ts). -->
+               <span class="srr-back-label" aria-hidden="true"></span>
             </button>
             <button class="srr-open-reader" aria-label="Open the current article" title="Article">
                <span class="srr-open-reader-icon" aria-hidden="true"></span>

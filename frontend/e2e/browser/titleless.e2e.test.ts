@@ -113,9 +113,9 @@ describe("browser: titleless feeds (reader hides the duplicate heading)", () => 
          // …and the masthead permalink stands in, pointing at the article link.
          expect(await $kickerVisible(page)).toBe(true)
          expect(await $kickerHref(page)).toBe("http://example.com/micro/0")
-         // The desk shows the feed's tag above the byline.
+         // The desk shows the feed's tag (as a hashtag) above the byline.
          expect(await $deskVisible(page)).toBe(true)
-         expect(await $deskText(page)).toBe("updates")
+         expect(await $deskText(page)).toBe("#updates")
       } finally {
          await close()
       }

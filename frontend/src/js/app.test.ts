@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
+import { srcColorIndex } from "./fmt"
 
 // app.ts is the DOM/async orchestrator: it has no exports, runs init() at import,
 // and wires every listener. We mock its collaborators, seed the full toolbar +
@@ -54,6 +55,7 @@ const nav = vi.hoisted(() => {
                }
             })
       },
+      SAVED_TOKEN: "~saved",
       getCurrentFilterKey: vi.fn(() => ""),
       filterLabel: vi.fn((key: string) =>
          key === "" ? "All" : key === "~saved" ? "★ Saved" : /^\d+$/.test(key) ? data.feedTitle(Number(key)) : key,
@@ -162,12 +164,12 @@ const SKELETON = `
       <div class="srr-searchbar"><input class="srr-search-input" /><button class="srr-search-clear"></button>
          <div class="srr-search-note"></div></div>
       <article class="srr-reader" hidden>
-         <div class="srr-kicker"><span class="srr-desk"></span><span class="srr-source"></span><time class="srr-date"></time><a class="srr-kicker-link"></a></div>
+         <div class="srr-kicker"><span class="srr-source"></span><span class="srr-desk"></span><time class="srr-date"></time><a class="srr-kicker-link"></a></div>
          <a class="srr-title-link"><h1 class="srr-title" tabindex="-1"></h1></a>
          <div class="srr-content"></div></article>
       <div class="srr-list" hidden></div>
       <nav class="srr-toolbar">
-         <button class="srr-back"></button>
+         <button class="srr-back"><span class="srr-back-icon"></span><span class="srr-back-label"></span></button>
          <button class="srr-open-reader"></button>
          <span class="srr-feed"></span>
          <button class="srr-prev" disabled></button>
@@ -436,8 +438,8 @@ describe("reader desk (the article's tag, shown above the byline)", () => {
       nav.fromHash.mockResolvedValue(showFeed({ article: { f: 3, a: 0, p: 0, t: "Deal", l: "", c: "<p>x</p>" } }))
       hashTo("#3")
       await flush()
-      // CSS uppercases it; textContent stays the raw tag. :not(:empty) reveals it.
-      expect((document.querySelector(".srr-desk") as HTMLElement).textContent).toBe("ofertas")
+      // CSS uppercases it; app.ts prepends the "#". :not(:empty) reveals it.
+      expect((document.querySelector(".srr-desk") as HTMLElement).textContent).toBe("#ofertas")
    })
 
    it("leaves the desk empty (hidden) for an untagged feed", async () => {
@@ -447,6 +449,49 @@ describe("reader desk (the article's tag, shown above the byline)", () => {
       hashTo("#4")
       await flush()
       expect((document.querySelector(".srr-desk") as HTMLElement).textContent).toBe("")
+   })
+})
+
+describe("back-button filter breadcrumb (which lane is the reader in)", () => {
+   const backLabel = () => document.querySelector(".srr-back-label") as HTMLElement
+   const back = () => document.querySelector(".srr-back") as HTMLButtonElement
+
+   it("names a tag filter as a hashtag and folds it into the button's accessible name", async () => {
+      await boot()
+      nav.getCurrentFilterKey.mockReturnValue("info")
+      hashTo("#3!info")
+      await flush()
+      expect(backLabel().textContent).toBe("#info")
+      expect(back().getAttribute("aria-label")).toBe("Back to list — filtered: #info")
+      expect(back().title).toBe("Back to list — filtered: #info")
+   })
+
+   it("names a single-feed filter by title, tinted with its source color", async () => {
+      await boot()
+      nav.getCurrentFilterKey.mockReturnValue("7")
+      hashTo("#3!7")
+      await flush()
+      expect(backLabel().textContent).toBe("Feed") // data.feedTitle mock
+      expect(backLabel().dataset.src).toBe(String(srcColorIndex(7)))
+   })
+
+   it("names the saved smart-folder without a hashtag", async () => {
+      await boot()
+      nav.getCurrentFilterKey.mockReturnValue("~saved")
+      hashTo("#3!~saved")
+      await flush()
+      expect(backLabel().textContent).toBe("★ Saved")
+      expect(backLabel().dataset.src).toBeUndefined()
+   })
+
+   it("stays empty (hidden) on the unfiltered wire — silence means [ALL]", async () => {
+      await boot()
+      // clearAllMocks resets calls, not mockReturnValue — pin the key explicitly.
+      nav.getCurrentFilterKey.mockReturnValue("")
+      hashTo("#3")
+      await flush()
+      expect(backLabel().textContent).toBe("")
+      expect(back().getAttribute("aria-label")).toBe("Back to list")
    })
 })
 
