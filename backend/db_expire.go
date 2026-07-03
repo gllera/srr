@@ -31,6 +31,18 @@ var errExpireDone = errors.New("expire walk done")
 // trade-off): there is no liveness check — an asset shared with a still-live
 // article is deleted too; the reader collapses the broken media and
 // `srr asset heal --create` is the repair path.
+//
+// Dormant-feed frontier advance: an expiring feed that saw no LIVE own entry
+// in the walked window and expired nothing this cycle has its AddIdx advanced
+// to the stop frontier (the chron where the early stop fired, or the store
+// end). Every own entry in [AddIdx, stopChron) is either live (which pins the
+// feed here) or expired this cycle (which records the natural prefix end
+// instead), so an advancing feed skips a region with ZERO own entries:
+// Expired is untouched and the reader/inspect invariant (own live entries at
+// chron >= AddIdx == TotalArt − Expired) holds. Without this, a fully-expired
+// feed that stops posting would pin minStart at its last article forever
+// while the stop frontier advances with the clock — every cycle re-reading a
+// growing window of OTHER feeds' data packs, expiring nothing.
 func (o *DB) ExpireArticles(ctx context.Context, now int64) error {
 	c := &o.core
 	cutoffs := map[int]int64{} // feed id → fetched_at cutoff (exclusive)
@@ -50,16 +62,26 @@ func (o *DB) ExpireArticles(ctx context.Context, now int64) error {
 
 	newAddIdx := map[int]int{}
 	newlyExpired := map[int]int{}
+	sawLive := map[int]bool{}
 	assetKeys := map[string]struct{}{}
 	cur := minStart
+	stopChron := c.TotalArticles // walk-exhausted default; entries [minStart, stopChron) were fully processed
 	err := o.walkArticles(ctx, minStart, c.TotalArticles, func(ad *ArticleData) error {
 		chron := cur
 		cur++
 		if ad.FetchedAt >= maxCutoff {
+			stopChron = chron
 			return errExpireDone
 		}
 		cutoff, ok := cutoffs[ad.FeedID]
-		if !ok || chron < c.Feeds[ad.FeedID].AddIdx || ad.FetchedAt >= cutoff {
+		if !ok || chron < c.Feeds[ad.FeedID].AddIdx {
+			return nil
+		}
+		if ad.FetchedAt >= cutoff {
+			// Live for its own feed even though below maxCutoff (per-feed
+			// windows differ): pins this feed's frontier — AddIdx never
+			// skips a live own article.
+			sawLive[ad.FeedID] = true
 			return nil
 		}
 		newAddIdx[ad.FeedID] = chron + 1
@@ -69,6 +91,25 @@ func (o *DB) ExpireArticles(ctx context.Context, now int64) error {
 	})
 	if err != nil && !errors.Is(err, errExpireDone) {
 		return fmt.Errorf("expire walk: %w", err)
+	}
+
+	// Advance dormant frontiers to the stop chron (see the doc comment): a
+	// feed with no live own entry and no expiry this cycle owns zero entries
+	// in [AddIdx, stopChron), so the jump changes no counts — it only unpins
+	// minStart for the next cycle.
+	advanced := 0
+	for id := range cutoffs {
+		if sawLive[id] {
+			continue
+		}
+		if _, expiredSome := newAddIdx[id]; expiredSome {
+			continue
+		}
+		if stopChron <= c.Feeds[id].AddIdx {
+			continue
+		}
+		newAddIdx[id] = stopChron
+		advanced++
 	}
 	if len(newAddIdx) == 0 {
 		return nil
@@ -84,10 +125,10 @@ func (o *DB) ExpireArticles(ctx context.Context, now int64) error {
 	for id, idx := range newAddIdx {
 		ch := c.Feeds[id]
 		ch.AddIdx = idx
-		ch.Expired += newlyExpired[id]
+		ch.Expired += newlyExpired[id] // advanced-only feeds add the map default 0
 		expired += newlyExpired[id]
 	}
-	slog.Info("expired articles", "articles", expired, "assets", len(assetKeys), "feeds", len(newAddIdx))
+	slog.Info("expired articles", "articles", expired, "assets", len(assetKeys), "feeds", len(newlyExpired), "advanced", advanced)
 	return nil
 }
 

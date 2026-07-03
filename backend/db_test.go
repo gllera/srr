@@ -701,6 +701,21 @@ func TestAddFeedSetsAddIdx(t *testing.T) {
 	}
 }
 
+func TestAddFeedResetsExpired(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+
+	// A reused id's fresh incarnation has expired nothing: AddFeed must zero
+	// a caller-populated Expired rather than trust a zero-valued Feed.
+	s := &Feed{Title: "Feed", URL: "http://example.com", Expired: 9}
+	if err := db.AddFeed(s); err != nil {
+		t.Fatalf("AddFeed: %v", err)
+	}
+
+	if s.Expired != 0 {
+		t.Errorf("Expired = %d, want 0", s.Expired)
+	}
+}
+
 func TestPutArticlesSeqIncrements(t *testing.T) {
 	db, c, _ := setupTestDB(t)
 	ch := &Feed{id: 1}

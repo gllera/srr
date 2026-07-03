@@ -218,7 +218,14 @@ func TestServeFeedSaveRoundTripsNoTitle(t *testing.T) {
 func TestServeFeedExpireDaysRoundTrip(t *testing.T) {
 	db, _, _ := setupTestDB(t)
 	stubPassthroughResolve()
-	seedFeed(t, db, &Feed{Title: "Old", URL: "https://u.example/feed", Expired: 7})
+	old := &Feed{Title: "Old", URL: "https://u.example/feed"}
+	seedFeed(t, db, old)
+	// Expired is server-owned state (AddFeed zeroes it on create), so the
+	// fixture sets it post-add and re-commits.
+	old.Expired = 7
+	if err := db.Commit(context.Background()); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
 
 	// expire_days is writable; expired is server-owned (like error) — a
 	// client echoing it back must not overwrite the counter.
@@ -278,7 +285,14 @@ func TestServeFeedSaveOmittedExpireDaysZeroes(t *testing.T) {
 
 func TestOverviewTagCountsAreLive(t *testing.T) {
 	db, _, _ := setupTestDB(t)
-	seedFeed(t, db, &Feed{Title: "A", URL: "https://a.example/f", Tag: "news", TotalArt: 10, Expired: 4})
+	a := &Feed{Title: "A", URL: "https://a.example/f", Tag: "news", TotalArt: 10}
+	seedFeed(t, db, a)
+	// Expired is server-owned state (AddFeed zeroes it on create), so the
+	// fixture sets it post-add and re-commits.
+	a.Expired = 4
+	if err := db.Commit(context.Background()); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
 
 	rec := doReq(t, newMux(), "GET", "/api/overview", "")
 	if rec.Code != http.StatusOK {
