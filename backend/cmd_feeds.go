@@ -82,6 +82,9 @@ func printJSON(v any) error {
 // chokepoint for add/upd/apply/edit/import): its recipe reference must exist
 // (no dangling refs created via the CLI) and its tag must be OPML-safe.
 func normalizeFeed(ch *Feed, recipes map[string]Recipe) error {
+	if ch.ExpireDays < 0 {
+		return fmt.Errorf("expire days must be >= 0 (got %d)", ch.ExpireDays)
+	}
 	if err := validateRecipeRef(recipes, ch.Recipe); err != nil {
 		return err
 	}
@@ -131,6 +134,7 @@ type AddCmd struct {
 	URL    *string `short:"u" required:"" help:"Feed RSS url."`
 	Tag    *string `short:"g" optional:"" help:"Feed tag."`
 	Recipe *string `short:"r" optional:"" help:"Recipe name (must exist). Empty inherits 'default'."`
+	Expire *int    `short:"e" name:"expire-days" optional:"" help:"Expire articles after N days (0 = keep forever)."`
 }
 
 func (o *AddCmd) Run() error {
@@ -150,6 +154,9 @@ func (o *AddCmd) Run() error {
 	if o.Recipe != nil {
 		v.Recipe = *o.Recipe
 	}
+	if o.Expire != nil {
+		v.ExpireDays = *o.Expire
+	}
 	return withDB(true, func(ctx context.Context, db *DB) error {
 		resolved, err := resolveFeedProbe(ctx, db.core.Recipes, v.Recipe, "", v.URL)
 		if err != nil {
@@ -166,26 +173,32 @@ func (o *AddCmd) Run() error {
 // feed = one URL: the URL is a flat field; the last fetch error (if any)
 // rides alongside it as a read-only `error` for visibility.
 type feedView struct {
-	ID      *int   `json:"id,omitempty" yaml:"id,omitempty"`
-	Title   string `json:"title"        yaml:"title"`
-	URL     string `json:"url"          yaml:"url"`
-	Error   string `json:"error,omitempty" yaml:"error,omitempty"`
-	Tag     string `json:"tag,omitempty" yaml:"tag,omitempty"`
-	Recipe  string `json:"recipe,omitempty" yaml:"recipe,omitempty"`
-	NoTitle bool   `json:"no_title,omitempty" yaml:"no_title,omitempty"`
+	ID         *int   `json:"id,omitempty" yaml:"id,omitempty"`
+	Title      string `json:"title"        yaml:"title"`
+	URL        string `json:"url"          yaml:"url"`
+	Error      string `json:"error,omitempty" yaml:"error,omitempty"`
+	Tag        string `json:"tag,omitempty" yaml:"tag,omitempty"`
+	Recipe     string `json:"recipe,omitempty" yaml:"recipe,omitempty"`
+	NoTitle    bool   `json:"no_title,omitempty" yaml:"no_title,omitempty"`
+	ExpireDays int    `json:"expire_days,omitempty" yaml:"expire_days,omitempty"`
+	// Expired is read-only (server-owned, like Error): reported by ls/show/
+	// edit, never applied back by writeFeedView.
+	Expired int `json:"expired,omitempty" yaml:"expired,omitempty"`
 }
 
 // viewOf builds an output feedView for a stored Feed.
 func viewOf(ch *Feed) *feedView {
 	id := ch.id
 	return &feedView{
-		ID:      &id,
-		Title:   ch.Title,
-		URL:     ch.URL,
-		Error:   ch.FetchError,
-		Tag:     ch.Tag,
-		Recipe:  ch.Recipe,
-		NoTitle: ch.NoTitle,
+		ID:         &id,
+		Title:      ch.Title,
+		URL:        ch.URL,
+		Error:      ch.FetchError,
+		Tag:        ch.Tag,
+		Recipe:     ch.Recipe,
+		NoTitle:    ch.NoTitle,
+		ExpireDays: ch.ExpireDays,
+		Expired:    ch.Expired,
 	}
 }
 
@@ -195,10 +208,11 @@ type UpdCmd struct {
 	URL    *string `short:"u" optional:"" help:"Feed RSS url. Changing it resets the feed's fetch state (etag/watermark/dedup)."`
 	Tag    *string `short:"g" optional:"" help:"Feed tag. Empty (\"\") to clear."`
 	Recipe *string `short:"r" optional:"" help:"Recipe name (must exist). Empty (\"\") to clear (⇒ default)."`
+	Expire *int    `short:"e" name:"expire-days" optional:"" help:"Expire articles after N days (0 = keep forever)."`
 }
 
 func (o *UpdCmd) Run() error {
-	if o.Title == nil && o.Tag == nil && o.Recipe == nil && o.URL == nil {
+	if o.Title == nil && o.Tag == nil && o.Recipe == nil && o.URL == nil && o.Expire == nil {
 		return fmt.Errorf("nothing to update")
 	}
 
@@ -218,6 +232,9 @@ func (o *UpdCmd) Run() error {
 		}
 		if o.Recipe != nil {
 			ch.Recipe = *o.Recipe
+		}
+		if o.Expire != nil {
+			ch.ExpireDays = *o.Expire
 		}
 		// Determine the candidate URL (unchanged when -u is absent). resolveFeedProbe
 		// validates the recipe reference and probes for discovery only when the URL
@@ -410,6 +427,7 @@ func writeFeedView(ch *Feed, v *feedView) {
 	ch.Tag = v.Tag
 	ch.Recipe = v.Recipe
 	ch.NoTitle = v.NoTitle
+	ch.ExpireDays = v.ExpireDays
 }
 
 // parseApplyInput accepts either a single feedView or an array.
