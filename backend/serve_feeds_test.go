@@ -249,6 +249,33 @@ func TestServeFeedExpireDaysRoundTrip(t *testing.T) {
 	}
 }
 
+func TestServeFeedSaveOmittedExpireDaysZeroes(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	stubPassthroughResolve()
+	seedFeed(t, db, &Feed{Title: "Old", URL: "https://u.example/feed", ExpireDays: 30})
+
+	// Full-replace semantics: a body omitting expire_days clears it — the
+	// reason the webui modal must always send the field.
+	body := `{"title":"Old","url":"https://u.example/feed"}`
+	rec := doReq(t, newMux(), "PUT", "/api/feeds/0", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
+	}
+	err := withDB(false, func(_ context.Context, d *DB) error {
+		ch, e := d.FeedByID(0)
+		if e != nil {
+			return e
+		}
+		if ch.ExpireDays != 0 {
+			t.Fatalf("ExpireDays = %d, want 0 (full replace)", ch.ExpireDays)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOverviewTagCountsAreLive(t *testing.T) {
 	db, _, _ := setupTestDB(t)
 	seedFeed(t, db, &Feed{Title: "A", URL: "https://a.example/f", Tag: "news", TotalArt: 10, Expired: 4})
