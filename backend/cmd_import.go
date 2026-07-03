@@ -175,10 +175,15 @@ func applyImportDefaults(feeds []*Feed, recipe, tag *string) {
 // importFailure records a feed whose URL could not be resolved to a feed at
 // subscribe time, so it is skipped (and reported) rather than aborting the batch.
 // Error is the failure text as a string (not an error) so the HTTP import handler
-// can serialize the slice directly to JSON.
+// can serialize the slice directly to JSON. Tag rides along because the failure
+// is only final for the CLI's import-all: the webui review sheet keeps these
+// feeds as unchecked editable rows (the probe ran the default recipe's ingest —
+// a recipe with an external ingest may be exactly what makes the URL fetchable),
+// and rebuilding that row needs the OPML group tag.
 type importFailure struct {
 	Title string `json:"title"`
 	URL   string `json:"url"`
+	Tag   string `json:"tag,omitempty"`
 	Error string `json:"error"`
 }
 
@@ -211,7 +216,7 @@ func resolveImportFeeds(ctx context.Context, feeds []*Feed, recipes map[string]R
 
 	for i, c := range feeds {
 		if errs[i] != nil {
-			failed = append(failed, importFailure{Title: c.Title, URL: c.URL, Error: errs[i].Error()})
+			failed = append(failed, importFailure{Title: c.Title, URL: c.URL, Tag: c.Tag, Error: errs[i].Error()})
 			continue
 		}
 		c.URL = resolved[i]

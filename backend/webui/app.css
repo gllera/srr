@@ -909,19 +909,80 @@ dialog .picker label.check {
    text-transform: none;
    color: var(--fg);
 }
-/* Import dry-run lists: what will import, what gets skipped and why. */
-.import-list {
-   max-height: 11em;
-   overflow: auto;
-   margin: 0.2em 0 0.4em;
-   font-size: 0.85em;
-   line-height: 1.5;
+/* Import review sheet: one editable row per OPML feed — include checkbox,
+   title, tag, recipe — with its resolved URL beneath. A URL already subscribed
+   wears the warn note and starts unchecked (importing it again would mint a
+   duplicate feed); a URL the dry run could not resolve wears the err note with
+   the error inline and starts unchecked too — but stays pickable, because the
+   probe ran the default ingest and a different recipe may be what resolves it. */
+dialog.import-dialog {
+   width: min(56em, 94vw);
 }
-.import-list div {
+.import-review {
+   max-height: 55vh;
+   overflow: auto;
+   border: 1px solid var(--border);
+   border-radius: var(--radius);
+   background: var(--surface-raised);
+   padding: 0.2em 0.7em;
+}
+.import-row {
+   display: grid;
+   grid-template-columns: auto minmax(12em, 1fr) 9em 9em;
+   gap: 0.3em 0.6em;
+   align-items: center;
+   padding: 0.55em 0;
+   border-top: 1px solid var(--faint);
+}
+.import-row:first-child {
+   border-top: 0;
+}
+.import-row input[type="checkbox"] {
+   width: auto;
+   margin: 0;
+   accent-color: var(--signal);
+}
+.import-row input,
+.import-row select {
+   font-size: 0.85rem;
+}
+.import-row .import-url {
+   grid-column: 2 / -1;
+   font-family: var(--font-mono);
+   font-size: 0.72rem;
    overflow-wrap: anywhere;
 }
-.import-list .bad {
+.import-url .dup,
+.import-url .unres {
+   text-transform: uppercase;
+   letter-spacing: 0.06em;
+   margin-right: 0.6em;
+}
+.import-url .dup {
+   color: var(--warn);
+}
+.import-url .unres {
    color: var(--err);
+}
+/* An excluded row stays legible but visibly out of the batch. */
+.import-row.off input:not([type="checkbox"]),
+.import-row.off select,
+.import-row.off .import-url {
+   opacity: 0.45;
+}
+@media (max-width: 600px) {
+   .import-row {
+      grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr);
+   }
+   .import-row .imp-title {
+      grid-column: 2 / -1;
+   }
+   .import-row .imp-tag {
+      grid-column: 2;
+   }
+   .import-row .imp-recipe {
+      grid-column: 3;
+   }
 }
 
 /* --- preview ------------------------------------------------------------- */

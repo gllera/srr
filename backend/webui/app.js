@@ -391,8 +391,9 @@ function drawFeeds() {
 
   const exportBtn = el("button", { class: "btn", onclick: () => { window.location = "/api/export"; } }, "Export OPML");
   // Import is a two-step flow: a dry run first (resolution probes every URL, so
-  // this can take a moment), then a confirm dialog showing what will import and
-  // what gets skipped — import is partial-success, the skip report matters.
+  // this can take a moment), then the review sheet — pick and edit each feed
+  // (title, tag, recipe) before anything is written; even unresolvable feeds
+  // stay pickable there, since a different recipe may be what resolves them.
   const importInput = el("input", { type: "file", accept: ".opml,.xml,text/xml", style: "display:none",
     onchange: async (e) => {
       const file = e.target.files[0];
@@ -400,10 +401,9 @@ function drawFeeds() {
       if (!file) return;
       banner("Resolving OPML feeds…", true);
       try {
-        const text = await file.text();
-        const dry = await importReq(text, true);
+        const dry = await importDryRun(await file.text());
         clearBanner();
-        openImportModal(dry, text);
+        openImportModal(dry);
       } catch (err) { banner(err.message); }
     } });
   const importBtn = el("button", { class: "btn", onclick: () => importInput.click() }, "Import OPML");
@@ -576,10 +576,13 @@ async function deleteFeed(f) {
   return confirmDelete(`Delete feed "${f.title}"?`, "/api/feeds/" + f.id, "Deleted " + f.title);
 }
 
-// importReq POSTs OPML XML to /api/import; dry=true only resolves and reports
-// ({feeds, skipped}), dry=false commits ({imported, skipped}).
-async function importReq(xml, dry) {
-  const res = await fetch("/api/import" + (dry ? "?dry_run=1" : ""), {
+// importDryRun POSTs OPML XML to /api/import?dry_run=1: the server walks the
+// outline tree and resolves every URL (a homepage folds to its discovered
+// feed) without writing anything — {feeds, skipped}. The commit path is
+// POST /api/feeds/apply with the reviewed rows, so each URL is probed once
+// and only what the operator kept is created.
+async function importDryRun(xml) {
+  const res = await fetch("/api/import?dry_run=1", {
     method: "POST", headers: { "Content-Type": "application/xml" }, body: xml });
   const data = await res.json();
   if (!res.ok) throw new Error((data && data.error) || res.statusText);
@@ -587,41 +590,102 @@ async function importReq(xml, dry) {
 }
 
 let importDialog;
-// openImportModal shows the dry-run result — what will import, what gets
-// skipped and why — before anything is written; Import runs the real thing.
-function openImportModal(dry, xml) {
-  importDialog ||= makeDialog({});
-  const feeds = dry.feeds || [];
-  const skipped = dry.skipped || [];
+// openImportModal is the OPML review sheet: every OPML feed is an editable
+// row — include-checkbox, title, tag, recipe — so the operator prunes and
+// adjusts the set before anything is written. A feed whose URL is already
+// subscribed starts unchecked and wears a note (re-importing an OPML must not
+// mint duplicates). A feed the dry run could NOT resolve is a row too, not a
+// casualty: the probe ran the default recipe's ingest, so "unresolved" may
+// just mean the URL needs a recipe with a different ingest — it starts
+// unchecked with its error inline, and picking it back in is the operator's
+// call. Import commits the checked rows via /api/feeds/apply — atomic, and
+// offline (resolved URLs were already folded by the dry run; unresolved ones
+// store as-is, like external-ingest feeds always do).
+function openImportModal(dry) {
+  importDialog ||= makeDialog({ class: "import-dialog" });
+  const subscribed = new Set(snapshot.feeds.map((f) => f.url));
   const err = el("div", { class: "formerr" });
-  const kids = [
-    el("h3", {}, "Import OPML"),
-    el("div", { class: "count" }, `${feeds.length} to import · ${skipped.length} skipped`),
-  ];
-  if (feeds.length) {
-    const list = el("div", { class: "import-list" });
-    for (const f of feeds)
-      list.append(el("div", {}, el("b", {}, f.title || f.url), " ", el("span", { class: "muted" }, f.url)));
-    kids.push(el("label", {}, "Will import"), list);
+  const counts = el("div", { class: "count" });
+  const master = el("input", { type: "checkbox" });
+  const importBtn = el("button", { class: "btn primary" }, "Import");
+
+  const rows = [...(dry.feeds || []), ...(dry.skipped || [])].map((f) => {
+    const known = subscribed.has(f.url);
+    const recipe = el("select", { class: "imp-recipe" }, el("option", { value: "" }, "default"));
+    appendRecipeOptions(recipe, f.recipe || "", snapshot.recipes);
+    return {
+      on: !known && !f.error, known, url: f.url, error: f.error || "",
+      check: el("input", { type: "checkbox" }),
+      title: el("input", { class: "imp-title", value: f.title || "", placeholder: "title (required)" }),
+      tag: el("input", { class: "imp-tag", value: f.tag || "", placeholder: "tag" }),
+      recipe,
+    };
+  });
+
+  function syncHeader() {
+    const n = rows.filter((r) => r.on).length;
+    const unres = rows.filter((r) => r.error).length;
+    counts.textContent = `${n} of ${rows.length} selected` + (unres ? ` · ${unres} unresolved` : "");
+    importBtn.textContent = n ? `Import ${n} feed${n === 1 ? "" : "s"}` : "Import";
+    importBtn.disabled = n === 0;
+    master.checked = n > 0 && n === rows.length;
+    master.indeterminate = n > 0 && n < rows.length;
+  }
+
+  const list = el("div", { class: "import-review" });
+  for (const r of rows) {
+    r.check.checked = r.on;
+    r.el = el("div", { class: "import-row" + (r.on ? "" : " off") },
+      r.check, r.title, r.tag, r.recipe,
+      el("div", { class: "import-url" },
+        r.known ? el("span", { class: "dup" }, "subscribed") : "",
+        r.error ? el("span", { class: "unres" }, "unresolved") : "",
+        el("span", { class: "muted" }, r.url + (r.error ? " — " + r.error : ""))));
+    r.check.addEventListener("change", () => {
+      r.on = r.check.checked;
+      r.el.classList.toggle("off", !r.on);
+      syncHeader();
+    });
+    list.append(r.el);
+  }
+  master.addEventListener("change", () => {
+    for (const r of rows) {
+      r.on = master.checked;
+      r.check.checked = r.on;
+      r.el.classList.toggle("off", !r.on);
+    }
+    syncHeader();
+  });
+
+  importBtn.addEventListener("click", async () => {
+    const sel = rows.filter((r) => r.on);
+    const blank = sel.find((r) => !r.title.value.trim());
+    if (blank) {
+      err.textContent = "every selected feed needs a title";
+      blank.title.focus();
+      return;
+    }
+    const body = sel.map((r) => ({
+      title: r.title.value.trim(), url: r.url,
+      tag: r.tag.value.trim(), recipe: r.recipe.value,
+    }));
+    importBtn.disabled = true;
+    try {
+      await saveModal(importDialog, err, () => api("POST", "/api/feeds/apply", body),
+        `Imported ${body.length} feed${body.length === 1 ? "" : "s"}`);
+    } finally {
+      importBtn.disabled = false;
+    }
+  });
+
+  const kids = [el("h3", {}, "Import OPML"), counts];
+  if (rows.length) {
+    kids.push(el("label", { class: "check" }, master, "select all"), list);
   } else {
     kids.push(el("div", { class: "muted" }, "Nothing to import."));
   }
-  if (skipped.length) {
-    const list = el("div", { class: "import-list" });
-    for (const s of skipped)
-      list.append(el("div", {}, el("span", { class: "bad" }, s.url), " ", el("span", { class: "muted" }, s.error)));
-    kids.push(el("label", {}, "Skipped (unresolvable)"), list);
-  }
-  const doImport = el("button", { class: "btn primary", disabled: feeds.length ? null : "", onclick: async () => {
-    try {
-      const r = await importReq(xml, false);
-      await refresh();
-      importDialog.close();
-      banner(`Imported ${r.imported}, skipped ${r.skipped.length}`, true);
-    } catch (e) { err.textContent = e.message; }
-  } }, "Import");
-  kids.push(err, el("div", { class: "row" },
-    el("button", { class: "btn", onclick: () => importDialog.close() }, "Cancel"), doImport));
+  syncHeader();
+  kids.push(err, dialogRow(importDialog, importBtn, null));
   importDialog.replaceChildren(...kids);
   importDialog.showModal();
 }

@@ -121,6 +121,9 @@ func handleExport(w http.ResponseWriter, r *http.Request) {
 // handleImport imports every feed in the uploaded OPML body (like `srr import -a`).
 // Optional query params: tag (override OPML group tags), recipe (stamp all),
 // dry_run=1 (preview only). Subscribe-time discovery resolves homepage URLs.
+// The webui only calls the dry run — its review sheet commits the operator's
+// selection via POST /api/feeds/apply — but the commit path stays for direct
+// API users wanting the one-shot import-all behavior.
 func handleImport(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	dryRun := q.Get("dry_run") == "1"
