@@ -303,6 +303,14 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 			}
 			o.lastOutSig = sig
 		}
+		// Warn-only: retention is maintenance — a failed walk or asset delete
+		// must not block committing the durable article batch. ExpireArticles
+		// applies nothing on failure, so the next cycle recomputes the same
+		// window and retries idempotently (Rm is silent on missing). The
+		// AddIdx/Expired bumps it does apply ride this cycle's Commit.
+		if err := db.ExpireArticles(ctx, db.core.FetchedAt); err != nil {
+			slog.Warn("expire articles", "error", err)
+		}
 		if err := db.Commit(ctx); err != nil {
 			return err
 		}
