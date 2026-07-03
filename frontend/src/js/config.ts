@@ -473,7 +473,7 @@ function buildFeedInfo(ch: IFeed): DocumentFragment {
    frag.appendChild(src.sec)
 
    const content = infoSection("Content")
-   addRow(content.dl, "Articles", String(ch.total_art))
+   addRow(content.dl, "Articles", String(ch.total_art - (ch.xp ?? 0)))
    addRow(content.dl, "Unread", "…", "srr-info-unread")
    frag.appendChild(content.sec)
 

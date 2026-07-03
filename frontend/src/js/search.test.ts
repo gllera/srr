@@ -271,4 +271,20 @@ describe("search", () => {
       expect(isLatestByPath["meta/0.gz"]).toBe(false) // finalized shard — immutable
       expect(isLatestByPath["meta/1.gz"]).toBe(false) // finalized shard — immutable
    })
+
+   it("filters hits expired by their feed's add_idx", async () => {
+      // Every fixture entry belongs to feed 1. Expiring everything below
+      // shard 1 (add_idx = META_PACK_SIZE) must drop shard-0 hits while
+      // shard-1 and latest-tail hits survive.
+      mockData.db.feeds = { 1: { add_idx: META_PACK_SIZE } }
+      const batches = await collect(search.search("alpha"))
+      expect(batches.flat().map((h) => h.chron)).toEqual([2 * META_PACK_SIZE, META_PACK_SIZE])
+   })
+
+   it("keeps hits whose feed record is gone (deleted-feed tombstone)", async () => {
+      // No feeds record at all (the suite default) — deleted-feed hits keep
+      // the status quo and still render with the tombstone title.
+      const batches = await collect(search.search("alpha"))
+      expect(batches.flat()).toHaveLength(3)
+   })
 })
