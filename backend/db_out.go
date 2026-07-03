@@ -349,6 +349,12 @@ func stableGUID(ad ArticleData) string {
 	return fmt.Sprintf("urn:srr:%08x", h)
 }
 
+// assetKeyPrefix is the reserved store prefix of self-hosted asset keys
+// (assets/<2-hex>/<16-hex><ext>). Shared by rewriteAssetURLs (CDN-prefixing)
+// and collectAssetRefs (expiration harvesting) so the two predicates can't
+// drift.
+const assetKeyPrefix = "assets/"
+
 // outAssetAttrs mirrors mod.assetAttrs: the element/attribute pairs whose
 // values may contain relative asset references we need to CDN-prefix.
 // We duplicate the list here rather than exporting it from mod to keep
@@ -406,7 +412,7 @@ func rewriteAssetURLs(content, cdn string) (string, error) {
 		return content, nil
 	}
 	// Fast path: no relative asset refs. We check for common relative prefixes.
-	if !strings.Contains(content, "assets/") {
+	if !strings.Contains(content, assetKeyPrefix) {
 		return content, nil
 	}
 	nodes, err := parseBodyFragment(content)
@@ -419,7 +425,7 @@ func rewriteAssetURLs(content, cdn string) (string, error) {
 		// Only CDN-prefix self-hosted asset keys (flat
 		// assets/<hex>/<hex>.ext) — never arbitrary relative URLs, or a
 		// real relative <a href> would be repointed to the CDN host.
-		if strings.HasPrefix(a.Val, "assets/") {
+		if strings.HasPrefix(a.Val, assetKeyPrefix) {
 			a.Val = joinURL(cdn, a.Val)
 			changed = true
 		}
