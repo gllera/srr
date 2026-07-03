@@ -46,10 +46,13 @@ func (o *DB) SyncOutFeeds(ctx context.Context) error {
 
 // outFeedsSig is a cheap, deterministic signature of the inputs that determine
 // syndication output: the out-feed config plus every feed's tag (a feed's tag
-// change can alter which feeds a tag-scoped out feed includes). cmd_fetch uses it
-// to skip the SyncOutFeeds walk on a truly-idle cycle — no new articles AND an
-// unchanged signature — without skipping config/tag edits made during the
-// lock-free --interval sleep. Empty when no out feeds are configured.
+// change can alter which feeds a tag-scoped out feed includes) and AddIdx (an
+// expiration-driven bump removes articles from the output, so it must un-gate
+// the rewrite — a quiet store would otherwise serve expired items, pointing at
+// deleted assets, forever). cmd_fetch uses it to skip the SyncOutFeeds walk on
+// a truly-idle cycle — no new articles AND an unchanged signature — without
+// skipping config/tag edits made during the lock-free --interval sleep. Empty
+// when no out feeds are configured.
 func (o *DB) outFeedsSig() string {
 	if len(o.core.Out) == 0 {
 		return ""
@@ -62,7 +65,7 @@ func (o *DB) outFeedsSig() string {
 	}
 	sort.Ints(ids)
 	for _, id := range ids {
-		fmt.Fprintf(&b, "%d=%s;", id, o.core.Feeds[id].Tag)
+		fmt.Fprintf(&b, "%d=%s@%d;", id, o.core.Feeds[id].Tag, o.core.Feeds[id].AddIdx)
 	}
 	return b.String()
 }
@@ -117,29 +120,39 @@ func (o *DB) syncOneOutFeed(ctx context.Context, of OutFeed, cdn string) error {
 	from := total - k
 
 	// Collect all matches in the tail (oldest→newest via walkArticles), then
-	// take the last `limit` to get the newest-first window.
+	// take the last `limit` to get the newest-first window. collect builds the
+	// callback for one walk over [start, total): besides the tag/feed-id
+	// selector it skips expired articles — chron < the feed's AddIdx
+	// (retention bumped past them and deleted their assets, so emitting one
+	// would syndicate 404s). Chron rides a counter beside the walk, like
+	// ExpireArticles; both walk passes share this one filtered collector. The
+	// Feeds lookup is nil-safe for a deleted feed (already excluded by the
+	// selector anyway).
 	var matches []ArticleData
-	err := o.walkArticles(ctx, from, total, func(ad *ArticleData) error {
-		if include[ad.FeedID] {
+	collect := func(start int) func(*ArticleData) error {
+		cur := start
+		return func(ad *ArticleData) error {
+			chron := cur
+			cur++
+			if !include[ad.FeedID] {
+				return nil
+			}
+			if ch := o.core.Feeds[ad.FeedID]; ch != nil && chron < ch.AddIdx {
+				return nil
+			}
 			cp := *ad
 			matches = append(matches, cp)
+			return nil
 		}
-		return nil
-	})
-	if err != nil {
+	}
+	if err := o.walkArticles(ctx, from, total, collect(from)); err != nil {
 		return fmt.Errorf("walk articles for %q: %w", of.Name, err)
 	}
 
 	// If the scan window didn't fill the limit, widen to the full store.
 	if len(matches) < limit && from > 0 {
 		matches = nil
-		if err := o.walkArticles(ctx, 0, total, func(ad *ArticleData) error {
-			if include[ad.FeedID] {
-				cp := *ad
-				matches = append(matches, cp)
-			}
-			return nil
-		}); err != nil {
+		if err := o.walkArticles(ctx, 0, total, collect(0)); err != nil {
 			return fmt.Errorf("walk all articles for %q: %w", of.Name, err)
 		}
 	}

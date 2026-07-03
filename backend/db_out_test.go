@@ -641,6 +641,156 @@ func TestRewriteAssetURLsAudio(t *testing.T) {
 	}
 }
 
+// TestSyncOutFeedsSkipsExpired verifies syndication honors AddIdx: an article
+// expired by retention (chron < its feed's AddIdx) must not be emitted into
+// the out file — its assets are already deleted, so a stale item would
+// syndicate 404s.
+func TestSyncOutFeedsSkipsExpired(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	c.FetchedAt = 1700000000
+
+	ch := &Feed{id: 0, URL: "http://a", Tag: "exp"}
+	c.Feeds = map[int]*Feed{ch.id: ch}
+
+	// Three articles at chron 0..2 (oldest→newest).
+	for i := 1; i <= 3; i++ {
+		if _, err := db.PutArticles(ctx, []*Item{
+			{Feed: ch, Title: fmt.Sprintf("Exp%d", i), Content: "<p>b</p>",
+				Link: fmt.Sprintf("http://x/%d", i), Published: int64(i * 1000)},
+		}); err != nil {
+			t.Fatalf("PutArticles #%d: %v", i, err)
+		}
+	}
+
+	// Simulate an expiration run having bumped past chron 0 and 1.
+	ch.AddIdx = 2
+	ch.Expired = 2
+
+	globals.CdnURL = "https://cdn.example.com"
+	defer func() { globals.CdnURL = "" }()
+
+	db.core.Out = []OutFeed{
+		{Name: "exp", Format: "rss", Tags: []string{"exp"}, Limit: 10},
+	}
+
+	if err := db.SyncOutFeeds(ctx); err != nil {
+		t.Fatalf("SyncOutFeeds: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "out/exp.rss"))
+	if err != nil {
+		t.Fatalf("read out/exp.rss: %v", err)
+	}
+	var feed rssRoot
+	if err := xml.Unmarshal(data, &feed); err != nil {
+		t.Fatalf("parse RSS: %v\n%s", err, data)
+	}
+	if len(feed.Channel.Items) != 1 {
+		t.Fatalf("items = %d, want 1 (only the live article)", len(feed.Channel.Items))
+	}
+	if feed.Channel.Items[0].Title != "Exp3" {
+		t.Errorf("item[0].Title = %q, want Exp3", feed.Channel.Items[0].Title)
+	}
+	for _, gone := range []string{"Exp1", "Exp2"} {
+		if strings.Contains(string(data), gone) {
+			t.Errorf("expired article %s still present in output:\n%s", gone, data)
+		}
+	}
+}
+
+// TestSyncOutFeedsSkipsExpiredInWidenedWalk verifies the AddIdx filter also
+// applies on the widened full-store walk (the second pass, when the tail
+// window doesn't fill the limit). Same store shape as
+// TestSyncOutFeedsWindowWidening, but the rare feed's first article is
+// expired: the widen pass must not resurrect it.
+func TestSyncOutFeedsSkipsExpiredInWidenedWalk(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	c.FetchedAt = 1700000000
+
+	rare := &Feed{id: 0, URL: "http://rare", Tag: "rare"}
+	noise := &Feed{id: 1, URL: "http://noise", Tag: "noise"}
+	c.Feeds = map[int]*Feed{rare.id: rare, noise.id: noise}
+
+	const limit = 5
+	// 5 rare articles at chron 0-4, then 65 noise articles: the tail window
+	// [20, 70) is all noise, so the widen branch fires (see
+	// TestSyncOutFeedsWindowWidening for the math).
+	for i := 1; i <= 5; i++ {
+		if _, err := db.PutArticles(ctx, []*Item{
+			{Feed: rare, Title: fmt.Sprintf("Rare%d", i), Content: "r",
+				Link: fmt.Sprintf("http://rare/%d", i), Published: int64(i * 100)},
+		}); err != nil {
+			t.Fatalf("PutArticles rare#%d: %v", i, err)
+		}
+	}
+	for i := 1; i <= 65; i++ {
+		if _, err := db.PutArticles(ctx, []*Item{
+			{Feed: noise, Title: fmt.Sprintf("Noise%d", i), Content: "n",
+				Link: fmt.Sprintf("http://noise/%d", i), Published: int64(1000 + i)},
+		}); err != nil {
+			t.Fatalf("PutArticles noise#%d: %v", i, err)
+		}
+	}
+
+	// Expire Rare1 (chron 0).
+	rare.AddIdx = 1
+	rare.Expired = 1
+
+	globals.CdnURL = "https://cdn.example.com"
+	defer func() { globals.CdnURL = "" }()
+
+	db.core.Out = []OutFeed{
+		{Name: "rare", Format: "rss", Tags: []string{"rare"}, Limit: limit},
+	}
+
+	if err := db.SyncOutFeeds(ctx); err != nil {
+		t.Fatalf("SyncOutFeeds: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "out/rare.rss"))
+	if err != nil {
+		t.Fatalf("read out/rare.rss: %v", err)
+	}
+	var feed rssRoot
+	if err := xml.Unmarshal(data, &feed); err != nil {
+		t.Fatalf("parse RSS: %v\n%s", err, data)
+	}
+	// Only the 4 live rare articles, newest-first: Rare5 … Rare2.
+	if len(feed.Channel.Items) != 4 {
+		t.Fatalf("items = %d, want 4 (Rare1 expired)", len(feed.Channel.Items))
+	}
+	for i := 0; i < 4; i++ {
+		want := fmt.Sprintf("Rare%d", 5-i)
+		if feed.Channel.Items[i].Title != want {
+			t.Errorf("item[%d].Title = %q, want %q", i, feed.Channel.Items[i].Title, want)
+		}
+	}
+	if strings.Contains(string(data), "Rare1<") {
+		t.Errorf("expired Rare1 still present in output:\n%s", data)
+	}
+}
+
+// TestOutFeedsSigChangesOnAddIdx verifies an expiration-driven AddIdx bump
+// flips the syndication signature, un-gating the next SyncOutFeeds so a quiet
+// store doesn't serve stale output containing expired articles forever.
+func TestOutFeedsSigChangesOnAddIdx(t *testing.T) {
+	db, c, _ := setupTestDB(t)
+	ch := &Feed{id: 0, URL: "http://a", Tag: "news"}
+	c.Feeds = map[int]*Feed{ch.id: ch}
+	db.core.Out = []OutFeed{
+		{Name: "news", Format: "rss", Tags: []string{"news"}, Limit: 10},
+	}
+
+	before := db.outFeedsSig()
+	if again := db.outFeedsSig(); again != before {
+		t.Fatalf("sig not stable: %q vs %q", before, again)
+	}
+	ch.AddIdx = 2
+	if after := db.outFeedsSig(); after == before {
+		t.Errorf("sig unchanged after AddIdx bump: %q", after)
+	}
+}
+
 // TestSyncOutFeedsMultipleOutputs verifies multiple OutFeed entries all write
 // their own file in one call.
 func TestSyncOutFeedsMultipleOutputs(t *testing.T) {
