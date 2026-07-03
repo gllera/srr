@@ -1084,6 +1084,31 @@ function renderTools() {
     el("h3", {}, "Fetch"),
     el("div", { class: "toolbar" }, fetchBtn, cancelBtn), log));
 
+  // OPML — the feed set as a portable document. Import is a two-step flow: a
+  // dry run first (resolution probes every URL, so this can take a moment),
+  // then the review sheet — pick and edit each feed (title, tag, recipe)
+  // before anything is written; even unresolvable feeds stay pickable there,
+  // since a different recipe may be what resolves them.
+  const importInput = el("input", { type: "file", accept: ".opml,.xml,text/xml", style: "display:none",
+    onchange: async (e) => {
+      const file = e.target.files[0];
+      e.target.value = "";
+      if (!file) return;
+      banner("Resolving OPML feeds…", true);
+      try {
+        const dry = await importDryRun(await file.text());
+        clearBanner();
+        openImportModal(dry);
+      } catch (err) { banner(err.message); }
+    } });
+  root.append(el("section", { class: "panel" },
+    el("h3", {}, "OPML"),
+    el("div", { class: "toolbar" },
+      el("button", { class: "btn", onclick: () => importInput.click() }, "Import OPML"),
+      importInput,
+      el("button", { class: "btn", onclick: () => { window.location = "/api/export"; } }, "Export OPML")),
+    el("p", { class: "hint" }, "Import opens a review sheet — pick and edit each feed before anything is written. Export downloads every feed as OPML 2.0.")));
+
   // Gen (from the cached snapshot)
   const genLabel = el("span", { class: "gen-readout" });
   const setGen = (n) => genLabel.replaceChildren("generation ", el("b", {}, String(n)));
