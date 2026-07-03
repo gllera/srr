@@ -73,3 +73,37 @@ func TestFetchLoopRepeatsUntilCancel(t *testing.T) {
 		t.Fatal("fetchLoop did not return within 2s of cancel")
 	}
 }
+
+// TestFetchCycleExpiresArticles verifies the cycle wiring: a feed with
+// expire-days set sheds its over-age backlog (AddIdx/Expired bumped, asset
+// deleted) during a normal fetch cycle, before Commit publishes it.
+func TestFetchCycleExpiresArticles(t *testing.T) {
+	db, _, dir := setupTestDB(t)
+	allowLoopback(t)
+	ch := &Feed{Title: "Old", URL: rssServer(t), ExpireDays: 30}
+	seedFeed(t, db, ch)
+
+	key := "assets/aa/00112233445566aa.webp"
+	p := mustWriteAsset(t, dir, key)
+	db.core.FetchedAt = time.Now().Unix() - 40*86400
+	if _, err := db.PutArticles(ctx, []*Item{{Feed: ch, Title: "stale", Content: `<img src="` + key + `">`}}); err != nil {
+		t.Fatalf("PutArticles: %v", err)
+	}
+	if err := db.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	if err := (&FetchCmd{}).fetchLoop(ctx, newFetchClient(1)); err != nil {
+		t.Fatalf("fetchLoop: %v", err)
+	}
+	withDB(false, func(_ context.Context, d *DB) error {
+		got := d.core.Feeds[0]
+		if got.AddIdx != 1 || got.Expired != 1 {
+			t.Fatalf("AddIdx=%d Expired=%d, want 1/1", got.AddIdx, got.Expired)
+		}
+		return nil
+	})
+	if !assetGone(t, p) {
+		t.Fatalf("asset %s not deleted by the cycle", key)
+	}
+}
