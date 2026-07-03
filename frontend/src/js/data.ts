@@ -37,6 +37,7 @@ let latestIdx: IdxPack
 // (feedIds/ownFeedCounts and the filter lookup). Sized to the actual feed
 // count, not the format ceiling. Computed once at init from db.feeds.
 let slots = 1
+let expiredCounts = new Uint32Array(0)
 
 // A pack name is write-once, so a non-OK response means the name itself no
 // longer matches the store. For a latest pack (L<seq>) that means this tab's
@@ -77,6 +78,11 @@ export async function init() {
    // bounds the typed-array allocations by the actual feed count.
    const ids = Object.keys(db.feeds).map(Number)
    slots = ids.length > 0 ? Math.max(...ids) + 1 : 1
+
+   // Per-feed expired totals (db.gz xp), threaded into countLeft so the
+   // immutable header cumulative counts are corrected to visible articles.
+   expiredCounts = new Uint32Array(slots)
+   for (const ch of Object.values(db.feeds)) expiredCounts[ch.id] = ch.xp ?? 0
 
    if (db.total_art === 0) {
       sessionStorage.removeItem(RELOAD_GUARD)
@@ -192,13 +198,13 @@ export async function getFeedId(chronIdx: number): Promise<number> {
 // nav's filter bookkeeping never waits on a fetch.
 export function countAll(feeds: Map<number, number>): number {
    if (db.total_art === 0) return 0
-   return latestIdx.countLeft(db.total_art, feeds, makeFeedsLookup(feeds, slots))
+   return latestIdx.countLeft(db.total_art, feeds, makeFeedsLookup(feeds, slots), expiredCounts)
 }
 
 export async function countLeft(chronIdx: number, feeds: Map<number, number>): Promise<number> {
    if (db.total_art === 0) return 0
    const n = packIdx(chronIdx)
-   return (await fetchIdxPack(n)).countLeft(chronIdx, feeds, makeFeedsLookup(feeds, slots))
+   return (await fetchIdxPack(n)).countLeft(chronIdx, feeds, makeFeedsLookup(feeds, slots), expiredCounts)
 }
 
 // A finalized pack can be skipped without fetching it: its per-feed

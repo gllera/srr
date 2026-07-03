@@ -28,7 +28,7 @@ export interface IdxPack {
    ownFeedCounts: Uint32Array
    bounds: { packId: number; startChron: number }[]
    parse(): IdxPack
-   countLeft(chronIdx: number, feeds: Map<number, number>, lookup: Int32Array): number
+   countLeft(chronIdx: number, feeds: Map<number, number>, lookup: Int32Array, expired?: Uint32Array): number
    findLeft(chronFrom: number, feeds: Map<number, number>, lookup: Int32Array): number
    findRight(chronFrom: number, feeds: Map<number, number>, lookup: Int32Array): number
 }
@@ -175,11 +175,18 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
          rawBuf = null
          return pack
       },
-      countLeft(chronIdx: number, feeds: Map<number, number>, lookup: Int32Array): number {
+      countLeft(chronIdx: number, feeds: Map<number, number>, lookup: Int32Array, expired?: Uint32Array): number {
          pack.parse()
          let count = 0
          for (const [feedId, addIdx] of feeds) {
-            if (addIdx < baseChron) count += countAt(pack.header.feedCounts, feedId)
+            if (addIdx < baseChron) {
+               // Finalized headers are immutable ALL-TIME cumulative counts;
+               // expiration moves add_idx mid-history without rewriting them,
+               // so subtract the feed's expired total (db.gz xp) to count only
+               // visible entries. Clamped: a corrupt xp must not go negative.
+               const prior = countAt(pack.header.feedCounts, feedId) - (expired ? countAt(expired, feedId) : 0)
+               count += Math.max(0, prior)
+            }
          }
          const limit = Math.min(chronIdx - baseChron, packSize)
          if (limit <= 0) return count

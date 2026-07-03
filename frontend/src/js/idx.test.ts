@@ -290,6 +290,33 @@ describe("makeIdxPack.countLeft", () => {
       const feeds = new Map([[1, 0]])
       expect(pack.countLeft(99999, feeds, lk(feeds))).toBe(3)
    })
+
+   it("subtracts per-feed expired from the header shortcut", () => {
+      const buf = buildBuf({ feedCounts: { 1: 200 }, entries: [e(1)] })
+      const pack = makeIdxPack(buf, 1, 1, SLOTS)
+      const feeds = new Map([[1, 0]])
+      const xp = new Uint32Array(SLOTS)
+      xp[1] = 40
+      // 200 all-time in earlier packs − 40 expired = 160 visible, +1 own entry
+      expect(pack.countLeft(IDX_PACK_SIZE, feeds, lk(feeds), xp)).toBe(160)
+      expect(pack.countLeft(IDX_PACK_SIZE + 1, feeds, lk(feeds), xp)).toBe(161)
+   })
+
+   it("clamps a corrected prior count at 0", () => {
+      const buf = buildBuf({ feedCounts: { 1: 10 }, entries: [e(1)] })
+      const pack = makeIdxPack(buf, 1, 1, SLOTS)
+      const feeds = new Map([[1, 0]])
+      const xp = new Uint32Array(SLOTS)
+      xp[1] = 999 // defensive: corrupt xp must not go negative
+      expect(pack.countLeft(IDX_PACK_SIZE, feeds, lk(feeds), xp)).toBe(0)
+   })
+
+   it("without an expired lookup keeps today's counts", () => {
+      const buf = buildBuf({ feedCounts: { 1: 200 }, entries: [e(1)] })
+      const pack = makeIdxPack(buf, 1, 1, SLOTS)
+      const feeds = new Map([[1, 0]])
+      expect(pack.countLeft(IDX_PACK_SIZE, feeds, lk(feeds))).toBe(200)
+   })
 })
 
 // idx/h<N>.gz is the verbatim concatenation of finalized-pack headers, each
