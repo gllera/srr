@@ -319,6 +319,38 @@ func TestEnvName(t *testing.T) {
 	}
 }
 
+// A map[string]string field parses the comma-separated "Name: value" env
+// encoding (split on the FIRST colon per entry), replacing the YAML map whole.
+func TestLoadEnvHeadersMap(t *testing.T) {
+	type testConfig struct {
+		Headers map[string]string `yaml:"headers"`
+	}
+
+	cfg := &testConfig{Headers: map[string]string{"Old": "gone"}}
+	t.Setenv("SRR_TEST_HEADERS", "CF-Access-Client-Id: abc, X-Url: http://h:8080/x")
+	if err := loadEnv("test", cfg); err != nil {
+		t.Fatalf("loadEnv: %v", err)
+	}
+	want := map[string]string{"CF-Access-Client-Id": "abc", "X-Url": "http://h:8080/x"}
+	if !reflect.DeepEqual(cfg.Headers, want) {
+		t.Errorf("Headers = %#v, want %#v", cfg.Headers, want)
+	}
+}
+
+func TestLoadEnvHeadersMapMalformed(t *testing.T) {
+	type testConfig struct {
+		Headers map[string]string `yaml:"headers"`
+	}
+
+	for _, bad := range []string{"no-colon-here", ": novalue"} {
+		cfg := &testConfig{}
+		t.Setenv("SRR_TEST_HEADERS", bad)
+		if err := loadEnv("test", cfg); err == nil {
+			t.Errorf("loadEnv(%q): want error for malformed entry", bad)
+		}
+	}
+}
+
 func TestLoadEnvUnsupportedKindErrors(t *testing.T) {
 	// A field kind loadEnv can't apply must error when an override is present,
 	// rather than silently leaving it un-overridable (the "env beats YAML"

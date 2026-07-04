@@ -182,6 +182,7 @@ The output path (`-o`) determines which backend is used:
 | Local | `srr -o ./packs art fetch` | Default. Auto-creates directories. |
 | S3 | `srr -o s3://bucket/prefix art fetch` | Uses standard AWS SDK credentials. |
 | SFTP | `srr -o sftp://user@host/path art fetch` | Auth: URL password, config password, config private key, `~/.ssh/` keys, or SSH agent. |
+| HTTP | `srr -o https://host/prefix art fetch` | A WebDAV-style or S3-compatible endpoint: GET reads, PUT writes, DELETE removes. Auth: URL userinfo (basic) or config `token` (bearer). Exclusive create (the `.locked` marker) uses `If-None-Match: *`, so locking is best-effort on servers that ignore conditional requests. |
 
 ### Backend Configuration
 
@@ -204,7 +205,17 @@ sftp:
   private-key: /path/to/key
   known-hosts-file: ~/.ssh/known_hosts
   insecure: false
+
+# HTTP backend (applies to both http:// and https:// store URLs)
+http:
+  token: bearer-token...   # sent as "Authorization: Bearer <token>"
+  headers:                 # extra request headers on every operation
+    CF-Access-Client-Id: xxx       # e.g. Cloudflare Access service tokens
+    CF-Access-Client-Secret: yyy   # an Authorization entry here wins over `token`
+  insecure: false          # skip TLS certificate verification
 ```
+
+`http.headers` values may be credentials, so `srr config` masks the whole map. Set entries in YAML or through the `SRR_HTTP_HEADERS` env var — comma-separated `Name: value` entries (split on the first colon per entry, whitespace-trimmed): `SRR_HTTP_HEADERS="CF-Access-Client-Id: xxx, CF-Access-Client-Secret: yyy"`. The env value replaces the YAML map whole (env beats YAML, as everywhere); a header value containing a comma is only expressible in YAML. The backend refuses to follow a redirect on a write or delete (a 301/302/303 would silently downgrade PUT/DELETE to GET in Go's HTTP client and fake a success) — point the store URL at the canonical origin; plain GETs still follow redirects.
 
 SFTP auth chain (in order): URL password → config password → config `private-key` → `~/.ssh/` keys → SSH agent. Uses `~/.ssh/known_hosts` for host key verification by default. Set `insecure: true` to skip verification.
 

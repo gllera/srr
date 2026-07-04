@@ -193,3 +193,18 @@ func TestBackendEnvNameFor(t *testing.T) {
 		}
 	}
 }
+
+// maskSecret must render an unset (nil/empty) secret map as empty, and any
+// populated one as the fixed placeholder — never the values (the http backend's
+// secret-tagged `headers` map rides the no-arg print through it).
+func TestMaskSecretMap(t *testing.T) {
+	if got := maskSecret(map[string]string(nil)); got != "" {
+		t.Errorf("maskSecret(nil map) = %v, want empty", got)
+	}
+	if got := maskSecret(map[string]string{}); got != "" {
+		t.Errorf("maskSecret(empty map) = %v, want empty", got)
+	}
+	if got := maskSecret(map[string]string{"X-Api-Key": "abc"}); got != "********" {
+		t.Errorf("maskSecret(populated map) = %v, want ********", got)
+	}
+}
