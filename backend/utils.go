@@ -37,8 +37,15 @@ func fieldName(f reflect.StructField) string {
 // prints credentials (S3 secret key / session token, SFTP password) in cleartext:
 // a fixed placeholder when set, empty when unset.
 func maskSecret(v any) any {
-	if s, ok := v.(string); ok && s == "" {
-		return ""
+	switch t := v.(type) {
+	case string:
+		if t == "" {
+			return ""
+		}
+	case map[string]string:
+		if len(t) == 0 {
+			return ""
+		}
 	}
 	return "********"
 }

@@ -223,11 +223,42 @@ func loadEnv(scheme string, cfg any) error {
 				return fmt.Errorf("%s: %w", envKey, err)
 			}
 			f.SetInt(n)
+		case reflect.Map:
+			if f.Type() != reflect.TypeFor[map[string]string]() {
+				return fmt.Errorf("%s: unsupported config field type %s", envKey, f.Type())
+			}
+			m, err := parseEnvMap(val)
+			if err != nil {
+				return fmt.Errorf("%s: %w", envKey, err)
+			}
+			f.Set(reflect.ValueOf(m))
 		default:
 			return fmt.Errorf("%s: unsupported config field kind %s", envKey, f.Kind())
 		}
 	}
 	return nil
+}
+
+// parseEnvMap parses the env-var encoding of a map[string]string config field
+// (e.g. SRR_HTTP_HEADERS): comma-separated "Name: value" entries, split on the
+// FIRST colon per entry, names and values space-trimmed. The env value
+// replaces the YAML map whole (same env-beats-YAML rule as scalar fields). A
+// value containing a comma is not expressible here — set it in YAML instead.
+func parseEnvMap(val string) (map[string]string, error) {
+	m := map[string]string{}
+	for entry := range strings.SplitSeq(val, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		name, value, ok := strings.Cut(entry, ":")
+		name = strings.TrimSpace(name)
+		if !ok || name == "" {
+			return nil, fmt.Errorf("malformed entry %q (want \"Name: value\")", entry)
+		}
+		m[name] = strings.TrimSpace(value)
+	}
+	return m, nil
 }
 
 // Configs returns the registered backend config structs keyed by scheme.
