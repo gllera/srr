@@ -5,6 +5,15 @@
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover" />
       <meta name="description" content="Static RSS reader." />
+      <!-- Document-wide referrer suppression: fmt.ts already stamps
+           referrerpolicy=no-referrer on every <img>, but <video>/<source>/<audio>
+           take no such attribute (HTML spec gap), so hotlink-protected media
+           hosts see this page's origin as Referer and refuse — video.twimg.com
+           403s any non-Twitter Referer (measured 2026-07-05). CORS flows are
+           unaffected: cors-mode requests always send Origin regardless of
+           referrer policy, and the reader issues no cross-origin non-GET
+           no-cors requests (the one case where no-referrer nulls Origin). -->
+      <meta name="referrer" content="no-referrer" />
       <meta name="format-detection" content="telephone=no" />
       <meta name="theme-color" content="#fafaf7" media="(prefers-color-scheme: light)" />
       <meta name="theme-color" content="#111110" media="(prefers-color-scheme: dark)" />
