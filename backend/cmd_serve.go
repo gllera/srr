@@ -124,13 +124,19 @@ func minifiedWebUI() fs.FS {
 
 // hostGuard rejects requests whose Host (or cross-origin Origin) is not a
 // loopback address — anti-CSRF/DNS-rebinding hardening for the mutating API.
+// A GUI fronted by a Host-rewriting proxy (cloudflared tunnel + httpHostHeader)
+// passes the Host check but its browser mutations carry the outer, non-loopback
+// Origin; those are allowed only when the browser-set (unforgeable) fetch
+// metadata asserts the request initiator shares that outer origin. The Host
+// check stays unconditional: a DNS-rebinding page is same-origin to the browser
+// but cannot present a loopback Host.
 func hostGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !loopbackHost(r.Host) {
 			http.Error(w, "forbidden: non-loopback Host", http.StatusForbidden)
 			return
 		}
-		if origin := r.Header.Get("Origin"); origin != "" {
+		if origin := r.Header.Get("Origin"); origin != "" && r.Header.Get("Sec-Fetch-Site") != "same-origin" {
 			u, err := url.Parse(origin)
 			if err != nil || !loopbackHost(u.Host) {
 				http.Error(w, "forbidden: cross-origin request", http.StatusForbidden)
