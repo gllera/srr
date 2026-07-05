@@ -9,8 +9,15 @@ async function api(method, path, body) {
   }
   const res = await fetch(path, opts);
   const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
-  if (!res.ok) throw new Error((data && data.error) || res.statusText);
+  // Errors are not always our JSON {error}: hostGuard and intermediaries
+  // (tunnel, Access) answer plain text or HTML — surface that body verbatim.
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    if (res.ok) throw new Error("invalid JSON from " + path);
+  }
+  if (!res.ok) throw new Error((data && data.error) || text.trim().slice(0, 300) || res.statusText);
   return data;
 }
 const apiGet = (p) => api("GET", p);
@@ -20,7 +27,8 @@ const apiGet = (p) => api("GET", p);
 // fetch cycle it drives — the handler runs under the request context).
 async function streamSSE(path, onEvent, signal) {
   const res = await fetch(path, { method: "POST", signal });
-  if (!res.ok) throw new Error(res.statusText);
+  // statusText is empty over HTTP/2 — prefer the error body (see api()).
+  if (!res.ok) throw new Error((await res.text()).trim().slice(0, 300) || res.statusText);
   const reader = res.body.getReader();
   const dec = new TextDecoder();
   let buf = "";

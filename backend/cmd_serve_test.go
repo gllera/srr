@@ -73,6 +73,51 @@ func TestServeHostGuardRejectsCrossOrigin(t *testing.T) {
 	}
 }
 
+// A GUI served through a Host-rewriting proxy (cloudflared tunnel with a
+// httpHostHeader override) presents a loopback Host but the browser's real,
+// non-loopback Origin on every mutation. The browser-set Sec-Fetch-Site header
+// distinguishes the GUI's own requests (same-origin) from a CSRF attacker's
+// (cross-site), so only the former may bypass the loopback-Origin requirement.
+func TestServeHostGuardProxiedOrigin(t *testing.T) {
+	for _, tc := range []struct {
+		fetchSite string
+		want      int
+	}{
+		{"same-origin", http.StatusOK},
+		{"cross-site", http.StatusForbidden},
+		{"same-site", http.StatusForbidden},
+		{"", http.StatusForbidden},
+	} {
+		h := newMux()
+		req := httptest.NewRequest("GET", "/", nil)
+		req.Host = "localhost:8088"
+		req.Header.Set("Origin", "https://srr.example.com")
+		if tc.fetchSite != "" {
+			req.Header.Set("Sec-Fetch-Site", tc.fetchSite)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != tc.want {
+			t.Errorf("Sec-Fetch-Site %q = %d, want %d", tc.fetchSite, rec.Code, tc.want)
+		}
+	}
+}
+
+// Sec-Fetch-Site must not weaken the Host check: a DNS-rebinding page IS
+// same-origin from the browser's perspective, but its Host is the attacker's
+// hostname — the guard rejects it regardless of fetch metadata.
+func TestServeHostGuardRebindingDespiteSameOrigin(t *testing.T) {
+	h := newMux()
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Host = "evil.example.com:8088"
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("rebound Host with same-origin fetch metadata = %d, want 403", rec.Code)
+	}
+}
+
 func TestServeStaticAssets(t *testing.T) {
 	h := newMux()
 	for _, tc := range []struct{ path, needle string }{
