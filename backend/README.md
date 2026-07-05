@@ -400,6 +400,7 @@ Articles pass through a chain of mods during fetch. The pipe is defined per reci
 - `#minify` — HTML minification (tdewolff/minify)
 - `#readability` — fetches an item's `Link` and replaces `Content` with the extracted article body (for teaser-only feeds; fail-open)
 - `#filter` — content-based item dropping (see [below](#filter))
+- `#dedupmedia` — removes duplicate copies of the same image/video/audio within an article (WordPress featured-image-in-feed dupes, `-WxH` size variants, wp.com Photon proxies), keeping the richest copy and pruning emptied wrappers; inline emoji/spacer glyphs are exempt; place before `#sanitize` (e.g. `["#dedupmedia", "#default"]`) so its glyph heuristics see class/style attributes
 - `#selfhost` — downloads remote `<img>`/`<video>`/`<audio>` media → `#`-marker → existing upload step converts (`SRR_ASSET_PROCESS`) and self-hosts to `assets/`; network-bound + fail-open per asset; place after `#default` so only sanitizer-approved media is downloaded (e.g. `["#default", "#selfhost"]`)
 
 **Custom mods** — any shell command that reads/writes JSON via stdin/stdout (see [External mod protocol](#external-mod-protocol)):
