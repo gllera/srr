@@ -59,6 +59,9 @@ function clearBanner() {
   clearTimeout(bannerTimer);
   document.getElementById("banner").hidden = true;
 }
+// The banner floats over the page (fixed), so it must always be dismissible
+// even when it covers the tab nav.
+document.getElementById("banner").addEventListener("click", clearBanner);
 
 function el(tag, attrs, ...kids) {
   const e = document.createElement(tag);
