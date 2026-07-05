@@ -1,9 +1,9 @@
 # SRR end-to-end tests
 
-SRR is a **writer** (Go `srrb` CLI) and a **reader** (this TS SPA) joined by a
+SRR is a **writer** (Go `srr` CLI) and a **reader** (this TS SPA) joined by a
 file-format contract (`db.gz` + binary `idx/` packs + JSONL `data/` packs), not
 an API. The unit tests exercise each side in isolation (the frontend ones mock
-`./data` entirely). These e2e tests close the gap: they run the **real `srrb`
+`./data` entirely). These e2e tests close the gap: they run the **real `srr`
 binary** to write packs from canned feeds, then read them back with the **real
 frontend code** — catching writer↔reader drift (idx layout, pack-split math,
 `seq` latest-pack generations, dedup/watermark, JSONL keys) that neither
@@ -38,7 +38,7 @@ make test-browser    # headless-browser layer
 make test-e2e        # both
 make test-stress     # large-store stress/perf layer (opt-in)
 # or directly (after `make build-be`):
-cd frontend && SRR_BIN=../dist/srrb npm run test-contract
+cd frontend && SRR_BIN=../dist/srr npm run test-contract
 ```
 
 ### Stress layer
@@ -79,7 +79,7 @@ What it asserts (deterministic, machine-independent) vs. logs (timings):
 The generated store is a durable cache (not deleted on teardown). The PERF table
 prints to the terminal (console interception is disabled for this layer).
 
-`$SRR_BIN` points at the `srrb` binary (the Makefile sets `../dist/srrb`); if
+`$SRR_BIN` points at the `srr` binary (the Makefile sets `../dist/srr`); if
 unset/missing the harness builds it on demand from `backend/`. The browser layer
 needs the Chromium under `~/.cache/puppeteer/` (installed with `puppeteer`).
 

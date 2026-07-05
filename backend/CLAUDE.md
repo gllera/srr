@@ -8,7 +8,7 @@
 
 The root `Makefile` is the unified entry point for both halves of the monorepo; prefer it over raw `go` commands:
 
-- `make build-be` — build the binary to `dist/srrb`
+- `make build-be` — build the binary to `dist/srr`
 - `make test-be` — `go test ./...`
 - `make vet-be` — `go vet ./...`
 - `make format-be` / `make format-check-be` — `gofmt -w .` / gofmt gate (the latter runs inside `make verify-be`)
@@ -17,7 +17,7 @@ The root `Makefile` is the unified entry point for both halves of the monorepo; 
 - `make verify-be` — vet + gofmt check + build + test + generate-check
 - `make release VERSION=…` — cross-compile all platforms (`CGO_ENABLED=0 -ldflags "-s -w"`)
 
-Direct equivalents when working inside `backend/`: `go build -o srrb .` (the Makefile artifact is `dist/srrb`), `go test ./...`, `go test -run TestName .`, `go test -v ./store/`.
+Direct equivalents when working inside `backend/`: `go build -o srr .` (the Makefile artifact is `dist/srr`), `go test ./...`, `go test -run TestName .`, `go test -v ./store/`.
 
 ## Architecture
 

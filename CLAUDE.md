@@ -18,10 +18,10 @@ All commands run from the repo root via `make`:
 | `make verify-be` | Backend pipeline only |
 | `make test-fe` | Frontend unit tests |
 | `make test-be` | Backend unit tests |
-| `make test-contract` | E2e contract layer: real `srrb` packs → real `idx.ts`/`data.ts`/`nav.ts` (jsdom, fast; in `verify`) |
+| `make test-contract` | E2e contract layer: real `srr` packs → real `idx.ts`/`data.ts`/`nav.ts` (jsdom, fast; in `verify`) |
 | `make test-browser` | E2e browser layer: real built SPA in headless Chrome over real packs (Puppeteer; opt-in locally, but a required CI job — `ci.yml` runs it on every push/PR) |
 | `make test-e2e` | Both e2e layers — the writer↔reader contract. Suite lives in `frontend/e2e/` |
-| `make test-stress` | Large-store (>50k) stress/perf layer: real `srrb` output → real `idx`/`data`/`nav`/`search`, measuring navigation/filtering/query at scale (jsdom; opt-in, NOT in `verify`; generates or reuses a synthetic store via `genbig_test.go`, tune with `SRR_STRESS_N`/`SRR_STRESS_STORE`). Suite in `frontend/e2e/stress/` |
+| `make test-stress` | Large-store (>50k) stress/perf layer: real `srr` output → real `idx`/`data`/`nav`/`search`, measuring navigation/filtering/query at scale (jsdom; opt-in, NOT in `verify`; generates or reuses a synthetic store via `genbig_test.go`, tune with `SRR_STRESS_N`/`SRR_STRESS_STORE`). Suite in `frontend/e2e/stress/` |
 | `make lint-fe` | ESLint |
 | `make format-fe` | Prettier write |
 | `make format-check-fe` | Prettier check only |

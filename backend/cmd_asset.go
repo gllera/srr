@@ -9,7 +9,7 @@ import (
 	"path"
 	"regexp"
 
-	"srrb/store"
+	"srr/store"
 )
 
 // AssetGroup hosts operator tooling for the self-hosted assets/ store prefix.

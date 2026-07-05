@@ -6,7 +6,7 @@ import puppeteer, { type Browser, type Page } from "puppeteer"
 import { feedServer, srr, type FeedServer } from "../harness"
 import { nItems, rssFeed } from "../fixtures"
 
-// Drives the REAL built SPA in headless Chrome against real srrb packs: proves
+// Drives the REAL built SPA in headless Chrome against real srr packs: proves
 // the Parcel build, app.ts render, hash routing (list home + reader drill-down),
 // and real-browser fetch/DecompressionStream all work end-to-end.
 
@@ -884,7 +884,7 @@ describe("browser: real SPA over real packs", () => {
    // bytes — the SW's cache-first would serve the stale packs forever. The db.gz
    // `gen` field is the invalidation signal: when it changes, the SW purges the
    // packs bucket BEFORE db.gz resolves to the page (which only then requests
-   // idx/data packs). Proves both directions with a real srrb rebuild: without a
+   // idx/data packs). Proves both directions with a real srr rebuild: without a
    // gen bump the stale cache wins (that's cache-first working as designed); with
    // `srr gen --bump` the fresh bytes win. Replaces the shared store, so it is
    // ordered AFTER every test that reads the original 6-article store (the pinned

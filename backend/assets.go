@@ -19,8 +19,8 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
-	"srrb/mod"
-	"srrb/store"
+	"srr/mod"
+	"srr/store"
 )
 
 // errNotAsset classifies UploadCacheRef failures meaning "this reference is
@@ -540,7 +540,7 @@ func (a *assetFetcher) runPeek(ctx context.Context, full, localname string) (pee
 // mediaExts is the conservative set of source extensions the corrupt-media
 // guard treats as "claims to be media": a file named like these that asset-peek
 // cannot identify at all is broken bytes, not a document. Documents and unknown
-// extensions stay outside the guard (host-as-is, srrb can't judge them).
+// extensions stay outside the guard (host-as-is, srr can't judge them).
 var mediaExts = map[string]bool{
 	".jpg": true, ".jpeg": true, ".png": true, ".gif": true, ".webp": true, ".avif": true,
 	".mp4": true, ".webm": true, ".mkv": true, ".mov": true, ".avi": true, ".m4v": true,

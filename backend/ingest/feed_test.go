@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"srrb/mod"
+	"srr/mod"
 )
 
 func collectFeed(t *testing.T, data string) []*mod.RawItem {

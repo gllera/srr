@@ -18,7 +18,7 @@ import (
 	"net/http"
 	"strings"
 
-	"srrb/mod"
+	"srr/mod"
 )
 
 // Request is what a FetchFunc receives. ETag / LastModified are advisory;

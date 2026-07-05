@@ -13,7 +13,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"srrb/ingest"
+	"srr/ingest"
 )
 
 // stdout is the destination for printFormatted. Tests substitute this to

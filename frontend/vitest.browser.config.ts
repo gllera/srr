@@ -1,7 +1,7 @@
 import { defineConfig } from "vitest/config"
 
 // Browser e2e layer: real built bundle driven in headless Chrome (Puppeteer)
-// against real srrb packs. Heavier than the contract layer — runs via
+// against real srr packs. Heavier than the contract layer — runs via
 // `make test-browser` / `make test-e2e`, not in `make verify`. Serialized: all
 // scenarios share one same-origin pack server (built into the bundle).
 export default defineConfig({

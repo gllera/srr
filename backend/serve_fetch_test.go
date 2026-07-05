@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"srrb/mod"
+	"srr/mod"
 )
 
 func rssServer(t *testing.T) string {

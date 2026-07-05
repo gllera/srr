@@ -14,7 +14,7 @@ import (
 
 	"golang.org/x/net/html/charset"
 
-	"srrb/mod"
+	"srr/mod"
 )
 
 // "#feed" is the default zero-config fetcher: HTTP GET with If-None-Match

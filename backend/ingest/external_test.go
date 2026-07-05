@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"srrb/mod"
+	"srr/mod"
 )
 
 // requireSh skips a test on the rare platform without /bin/sh, since the

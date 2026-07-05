@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"strings"
 
-	"srrb/store"
+	"srr/store"
 )
 
 //go:generate go run . gen-ts
