@@ -60,5 +60,21 @@ for (const ref of refs) {
    }
 }
 
+// The document-level referrer policy must survive into the built page: <video>
+// has no referrerpolicy attribute (unlike <img>, handled in fmt.ts), so this
+// meta is the only thing keeping the reader's origin out of media requests —
+// video.twimg.com 403s any non-Twitter Referer (measured 2026-07-05), so
+// losing the tag silently breaks X video playback while everything else stays
+// green. Attr order/quoting tolerant: htmlnano may rewrite both.
+const referrerMeta = [...html.matchAll(/<meta\b[^>]*>/g)].some(
+   (m) => /\bname=["']?referrer\b/.test(m[0]) && /\bcontent=["']?no-referrer\b/.test(m[0]),
+)
+if (!referrerMeta) {
+   console.error(
+      'boot-smoke: index.html lost <meta name="referrer" content="no-referrer"> — cross-origin <video> (X/Twitter CDN) 403s on hotlink-protected hosts without it',
+   )
+   failed = true
+}
+
 if (failed) process.exit(1)
-console.log(`boot-smoke: OK — ${refs.length} loaded bundle(s) inlined all build-time defines`)
+console.log(`boot-smoke: OK — ${refs.length} loaded bundle(s) inlined all build-time defines + referrer meta present`)

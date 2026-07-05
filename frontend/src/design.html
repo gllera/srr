@@ -4,6 +4,9 @@
       <title>SRR · Design Harness</title>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover" />
+      <!-- Mirrors index.html's referrer policy so the harness renders media
+           exactly like the shipped reader (see index.html for the rationale). -->
+      <meta name="referrer" content="no-referrer" />
       <meta name="robots" content="noindex" />
       <!-- Dev-serve fallback: guarantees SRR_CDN_URL is defined before the module
            bundle evaluates, regardless of how parcel serve orders shared bundles.
