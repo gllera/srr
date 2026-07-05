@@ -1,7 +1,7 @@
 import { defineConfig, mergeConfig } from "vitest/config"
 import { jsdomE2EBase } from "./vitest.shared"
 
-// Contract e2e layer: real srrb output → real data-layer modules, in jsdom.
+// Contract e2e layer: real srr output → real data-layer modules, in jsdom.
 // Inherits the SRR_CDN_URL define + jsdom origin from jsdomE2EBase.
 export default mergeConfig(
    jsdomE2EBase,

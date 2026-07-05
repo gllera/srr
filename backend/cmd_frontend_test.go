@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"srrb/store"
+	"srr/store"
 )
 
 // makeTarGz builds a gzip-compressed tar of name→content, the way

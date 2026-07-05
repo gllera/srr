@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"slices"
 
-	"srrb/ingest"
-	"srrb/mod"
+	"srr/ingest"
+	"srr/mod"
 
 	"golang.org/x/sync/errgroup"
 )

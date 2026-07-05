@@ -1,4 +1,4 @@
-module srrb
+module srr
 
 go 1.26.0
 

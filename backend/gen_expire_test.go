@@ -9,7 +9,7 @@ import (
 
 // TestGenExpireStore is a gated fixture generator (genbig_test.go precedent):
 // it writes, through the production write path, a small store whose first
-// batch is 40 days old — so a subsequent REAL `srrb art fetch` cycle (real
+// batch is 40 days old — so a subsequent REAL `srr art fetch` cycle (real
 // wall clock, no time seam in the binary) expires it. Consumed by
 // frontend/e2e/contract/expire.e2e.test.ts.
 //

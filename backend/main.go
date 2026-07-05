@@ -10,8 +10,8 @@ import (
 	"runtime"
 	"time"
 
-	"srrb/mod"
-	"srrb/store"
+	"srr/mod"
+	"srr/store"
 
 	"github.com/alecthomas/kong"
 	kongyaml "github.com/alecthomas/kong-yaml"

@@ -1,5 +1,5 @@
 // design-store.gen.test.ts — GATED generator (not a real test). Builds a small,
-// curated srrb store that exercises the harness's visual edge cases, then writes
+// curated srr store that exercises the harness's visual edge cases, then writes
 // a design.json sidecar of curated targets design.ts reads. Run via
 // `make design-fixture`; excluded from `npm test` (vitest.config.ts only scans
 // src/**) and gated on SRR_DESIGN_GEN so an accidental run is a no-op.

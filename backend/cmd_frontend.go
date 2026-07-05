@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"srrb/store"
+	"srr/store"
 )
 
 // githubAPIBase is the GitHub REST API root. A package var so tests can point it

@@ -1,4 +1,4 @@
-// Shared e2e harness: build/locate the real `srrb` binary, run it to produce
+// Shared e2e harness: build/locate the real `srr` binary, run it to produce
 // real pack stores from canned feeds, and serve those feeds over HTTP so the
 // built-in `#feed` ingest can fetch them. Used by both the contract (jsdom) and
 // browser (puppeteer) layers.
@@ -20,12 +20,12 @@ const REPO = resolve(HERE, "../..") // repo root
 
 let cachedBin: string | null = null
 
-// Resolve the srrb binary. Honors $SRR_BIN (set by the Makefile, relative to the
-// cwd npm runs in — i.e. frontend/); otherwise defaults to <repo>/dist/srrb and
+// Resolve the srr binary. Honors $SRR_BIN (set by the Makefile, relative to the
+// cwd npm runs in — i.e. frontend/); otherwise defaults to <repo>/dist/srr and
 // builds it on demand so `npm run test-*` works without `make`.
 export function srrBin(): string {
    if (cachedBin) return cachedBin
-   const bin = process.env.SRR_BIN ? resolve(process.cwd(), process.env.SRR_BIN) : resolve(REPO, "dist/srrb")
+   const bin = process.env.SRR_BIN ? resolve(process.cwd(), process.env.SRR_BIN) : resolve(REPO, "dist/srr")
    if (!existsSync(bin)) {
       execFileSync("go", ["build", "-o", bin, "."], { cwd: resolve(REPO, "backend"), stdio: "inherit" })
    }
@@ -33,7 +33,7 @@ export function srrBin(): string {
    return bin
 }
 
-// Run `srrb -o <storeDir> <args...>` and return stdout. Async (execFile, not
+// Run `srr -o <storeDir> <args...>` and return stdout. Async (execFile, not
 // execFileSync) is REQUIRED: `art fetch` reaches back to feedServer() which runs
 // in this same Node process — a synchronous spawn would block the event loop and
 // the feed server could never answer, so every fetch would time out. Throws on
@@ -56,7 +56,7 @@ export async function srr(storeDir: string, ...args: string[]): Promise<string> 
    }
 }
 
-// `srrb inspect --validate` — the Go-side mirror of the frontend parser. Returns
+// `srr inspect --validate` — the Go-side mirror of the frontend parser. Returns
 // stdout; callers assert it contains "OK: all checks passed".
 export function inspectValidate(storeDir: string): Promise<string> {
    return srr(storeDir, "inspect", "--validate")

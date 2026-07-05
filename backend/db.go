@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"srrb/store"
+	"srr/store"
 )
 
 // Format atoms of the writer↔reader data contract. These are the single

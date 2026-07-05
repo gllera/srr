@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"srrb/ingest"
-	"srrb/mod"
+	"srr/ingest"
+	"srr/mod"
 )
 
 func init() {

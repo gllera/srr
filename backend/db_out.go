@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"srrb/store"
+	"srr/store"
 
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"

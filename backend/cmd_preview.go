@@ -9,8 +9,8 @@ import (
 	"net/url"
 	"time"
 
-	"srrb/ingest"
-	"srrb/mod"
+	"srr/ingest"
+	"srr/mod"
 )
 
 type PreviewCmd struct {

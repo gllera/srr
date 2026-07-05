@@ -1145,7 +1145,7 @@ function renderTools() {
   const root = document.getElementById("tools");
   root.replaceChildren();
 
-  // Fetch always covers every feed in parallel — same as `srrb a fetch`.
+  // Fetch always covers every feed in parallel — same as `srr a fetch`.
   // Aborting the stream cancels the server-side cycle too (request context).
   const log = el("pre", { class: "log", "data-placeholder": "Idle — press Fetch now to stream the fetch log." });
   let aborter = null;

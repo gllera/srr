@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"srrb/mod"
-	"srrb/store"
+	"srr/mod"
+	"srr/store"
 )
 
 func tempStore(t *testing.T) store.Backend {
@@ -825,7 +825,7 @@ func TestUploadCacheRefCorruptMediaDeclined(t *testing.T) {
 }
 
 // The same unidentifiable peek on a NON-media source (a document) keeps the
-// host-as-is contract: srrb cannot judge a .bin/.pdf by refusing to parse it
+// host-as-is contract: srr cannot judge a .bin/.pdf by refusing to parse it
 // as media.
 func TestUploadCacheRefUnidentifiedDocumentStillHosted(t *testing.T) {
 	be := tempStore(t)

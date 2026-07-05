@@ -15,7 +15,7 @@ import (
 	"strings"
 	"testing"
 
-	"srrb/store"
+	"srr/store"
 )
 
 var ctx = context.Background()

@@ -11,7 +11,7 @@ import { mountReader } from "./mount"
 // Per-feed article expiration end-to-end: the gated Go generator
 // (backend/gen_expire_test.go TestGenExpireStore) writes, through the
 // production write path, a store whose first batch is 40 days old — feed 0
-// carries exp=30 — then a REAL `srrb art fetch` cycle (both feeds
+// carries exp=30 — then a REAL `srr art fetch` cycle (both feeds
 // unreachable, so zero new articles; per-feed fetch errors are non-fatal and
 // the cycle exits 0) runs ExpireArticles and commits. The REAL reader +
 // inspector then verify every side of the contract: db.gz add_idx/xp bumps,

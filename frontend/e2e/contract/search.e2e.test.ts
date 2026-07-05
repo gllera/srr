@@ -5,7 +5,7 @@ import { feedServer, inspectValidate, makeStore, srr, type FeedServer } from "..
 import { pubDate, rssFeed, type FeedItem } from "../fixtures"
 import { mountReader } from "./mount"
 
-// The meta/ series end-to-end: real srrb writes the latest meta tail
+// The meta/ series end-to-end: real srr writes the latest meta tail
 // (SyncMeta) from real pipeline-processed titles; the real search.ts reads
 // it back. Pins the write-side JSONL contract, the available() gate, TS
 // folding at query time over Go-written titles, generation naming across

@@ -42,7 +42,7 @@ package main
 // Resume across separate invocations (no FORCE => append to the existing store):
 //   SRR_GENBIG_OUT=../big SRR_GENBIG_N=20000 go test -run TestGenBigStore -count=1 .  # +20k/run
 // Then verify / serve:
-//   ./dist/srrb -o bigstore inspect --validate
+//   ./dist/srr -o bigstore inspect --validate
 //   SRR_STORE=$PWD/bigstore make dev-fe        # serve to the real reader
 //
 // Env knobs (all optional except SRR_GENBIG_OUT):

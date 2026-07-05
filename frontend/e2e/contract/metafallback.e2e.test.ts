@@ -10,7 +10,7 @@ import { mountReader } from "./mount"
 // truth. This is the safety guarantee of the warn-only derived design — a
 // failed SyncMeta never breaks the list or search.
 //
-// We force metaReady()=false after a real srrb fetch by patching db.mp/db.mt
+// We force metaReady()=false after a real srr fetch by patching db.mp/db.mt
 // to values that leave the store "uncovered" (mp=0, mt=0), then assert that
 // loadMeta(chronIdx) returns the same {f, w, t} card as the underlying data/
 // pack at every chronIdx.

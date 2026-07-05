@@ -1,5 +1,5 @@
 // Browser-layer global setup: build the REAL production bundle and serve it next
-// to real srrb-produced packs, so Puppeteer drives the actual SPA (Parcel build,
+// to real srr-produced packs, so Puppeteer drives the actual SPA (Parcel build,
 // app.ts render, hash routing, real browser fetch/DecompressionStream).
 //
 // The bundle is built with a RELATIVE SRR_CDN_URL=/packs/ so the app fetches

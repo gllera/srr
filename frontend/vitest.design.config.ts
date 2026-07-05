@@ -1,7 +1,7 @@
 import { defineConfig } from "vitest/config"
 
 // Isolated config for the gated design-fixture generator. Node env (it shells
-// out to srrb + runs an in-process feed server), only the generator file, long
+// out to srr + runs an in-process feed server), only the generator file, long
 // timeout. Excluded from `npm test` because vitest.config.ts only picks up src/**.
 export default defineConfig({
    test: {

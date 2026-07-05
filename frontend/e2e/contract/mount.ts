@@ -1,5 +1,5 @@
 // Contract-layer reader mount: drive the REAL frontend data modules
-// (idx.ts/data.ts/nav.ts) against REAL srrb-produced pack bytes on disk.
+// (idx.ts/data.ts/nav.ts) against REAL srr-produced pack bytes on disk.
 //
 // data.ts fetches db.gz at module load (an eager `const dbFetch = fetch(...)`),
 // so the fetch shim must be installed BEFORE the module is imported. We

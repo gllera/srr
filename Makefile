@@ -25,10 +25,10 @@ generate:
 generate-check:
 	cd backend && go run . gen-ts --check
 
-# End-to-end (writer<->reader contract). Both layers run the real srrb binary
+# End-to-end (writer<->reader contract). Both layers run the real srr binary
 # ($SRR_BIN, built by build-be) and read its packs with the real frontend code.
 test-contract test-browser: build-be frontend/node_modules/.package-lock.json
-	cd frontend && SRR_BIN=../dist/srrb npm run $@
+	cd frontend && SRR_BIN=../dist/srr npm run $@
 
 test-e2e: test-contract test-browser
 
@@ -38,13 +38,13 @@ test-e2e: test-contract test-browser
 #   SRR_STRESS_N=<articles>      store size to generate (default 60000)
 #   SRR_STRESS_STORE=<dir>       use an existing store instead of generating
 test-stress: build-be frontend/node_modules/.package-lock.json
-	cd frontend && SRR_BIN=../dist/srrb npm run test-stress
+	cd frontend && SRR_BIN=../dist/srr npm run test-stress
 
-# Build the curated design-harness fixture store (real srrb), then run the dev
+# Build the curated design-harness fixture store (real srr), then run the dev
 # servers against it so /design.html shows every curated state. design-fixture
-# needs the srrb binary (build-be) and gates the generator on SRR_DESIGN_GEN.
+# needs the srr binary (build-be) and gates the generator on SRR_DESIGN_GEN.
 design-fixture: build-be frontend/node_modules/.package-lock.json
-	cd frontend && SRR_BIN=../dist/srrb SRR_DESIGN_GEN=1 npm run gen-design
+	cd frontend && SRR_BIN=../dist/srr SRR_DESIGN_GEN=1 npm run gen-design
 
 design: frontend/node_modules/.package-lock.json
 	cd frontend && SRR_STORE=e2e/fixtures/design-store npm run dev
@@ -55,7 +55,7 @@ design: frontend/node_modules/.package-lock.json
 # `make design-fixture` to force a rebuild).
 design-shots: frontend/node_modules/.package-lock.json
 	@test -f frontend/e2e/fixtures/design-store/db.gz || $(MAKE) design-fixture
-	cd frontend && SRR_BIN=../dist/srrb npm run shoot-design
+	cd frontend && SRR_BIN=../dist/srr npm run shoot-design
 
 frontend/node_modules/.package-lock.json: frontend/package-lock.json
 	cd frontend && npm ci
@@ -86,7 +86,7 @@ dist:
 	@mkdir -p $@
 
 build-be: | dist
-	cd backend && go build -o ../dist/srrb .
+	cd backend && go build -o ../dist/srr .
 
 release: verify-be | dist
 	@[ -n "$(VERSION)" ] || { echo 'VERSION= is required for release (e.g. make release VERSION=v1.2.3)' >&2; exit 1; }

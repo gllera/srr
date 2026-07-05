@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"srrb/ingest"
-	"srrb/mod"
-	"srrb/store"
+	"srr/ingest"
+	"srr/mod"
+	"srr/store"
 )
 
 // The "test-stub" ingest strategy returns a fixed result for every URL —

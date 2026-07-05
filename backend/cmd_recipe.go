@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"srrb/mod"
+	"srr/mod"
 )
 
 // RecipeGroup holds the `srr recipe` sub-commands. Recipes are named

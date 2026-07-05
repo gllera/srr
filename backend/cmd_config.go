@@ -7,7 +7,7 @@ import (
 	"slices"
 	"strings"
 
-	"srrb/store"
+	"srr/store"
 )
 
 type ConfigCmd struct {
