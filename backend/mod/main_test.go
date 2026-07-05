@@ -55,7 +55,7 @@ func TestModuleBuiltinSanitizePreservesVideo(t *testing.T) {
 	item := &RawItem{
 		GUID:  1,
 		Title: "T",
-		Content: `<p><video src="https://x/v.mp4" poster="https://x/p.jpg" controls preload="metadata" playsinline></video></p>` +
+		Content: `<p><video src="https://x/v.mp4" poster="https://x/p.jpg" controls preload="metadata" playsinline autoplay muted loop></video></p>` +
 			`<video onerror="x()" src="javascript:alert(1)"></video>`,
 		Link:      "http://example.com",
 		Published: &now,
@@ -70,6 +70,11 @@ func TestModuleBuiltinSanitizePreservesVideo(t *testing.T) {
 		"controls",
 		`preload="metadata"`,
 		"playsinline",
+		// GIF-style playback (srr-x rebuilds GIF tweets as muted looping
+		// video): these must survive or GIFs render click-to-play.
+		"autoplay",
+		"muted",
+		"loop",
 	} {
 		if !strings.Contains(item.Content, want) {
 			t.Errorf("sanitized output missing %q: %q", want, item.Content)
