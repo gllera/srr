@@ -38,6 +38,12 @@ func init() {
 		policy.AllowAttrs("preload").Matching(regexp.MustCompile(`(?i)^(none|metadata|auto)$`)).OnElements("video")
 		policy.AllowAttrs("controls").Matching(regexp.MustCompile(`(?i)^(|controls)$`)).OnElements("video")
 		policy.AllowAttrs("playsinline").Matching(regexp.MustCompile(`(?i)^(|playsinline)$`)).OnElements("video")
+		// GIF-style playback: srr-x (v1.4) rebuilds GIF tweets as muted looping
+		// autoplaying video — the way every platform renders GIFs. Autoplay is
+		// only honored by browsers when muted, so the trio is emitted together.
+		policy.AllowAttrs("autoplay").Matching(regexp.MustCompile(`(?i)^(|autoplay)$`)).OnElements("video")
+		policy.AllowAttrs("muted").Matching(regexp.MustCompile(`(?i)^(|muted)$`)).OnElements("video")
+		policy.AllowAttrs("loop").Matching(regexp.MustCompile(`(?i)^(|loop)$`)).OnElements("video")
 		policy.AllowAttrs("width", "height").Matching(bluemonday.NumberOrPercent).OnElements("video")
 		policy.AllowElements("video")
 
