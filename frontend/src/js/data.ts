@@ -19,7 +19,10 @@ export { IDX_PACK_SIZE, META_PACK_SIZE }
 // `#14099` silently fall back to the last article via the `>= total_art` clamp
 // in nav.fromHash. 304 keeps the hot path cheap when the CDN sends ETag /
 // Last-Modified; the <link rel="preload"> in built HTML still warms the entry.
-const dbFetch = fetch(new URL("db.gz", PACK_BASE), { cache: "no-cache" })
+function fetchDb(): Promise<Response> {
+   return fetch(new URL("db.gz", PACK_BASE), { cache: "no-cache" })
+}
+const dbFetch = fetchDb()
 
 export let db: IDB
 
@@ -60,8 +63,7 @@ function assertPackOk(res: Response, isLatest: boolean): void {
    throw new Error(`pack fetch failed: ${res.status} ${res.url}`)
 }
 
-export async function init() {
-   const res = await dbFetch
+async function parseDb(res: Response): Promise<IDB> {
    // A missing/erroring store (404 on a fresh/empty store or a misconfigured CDN
    // URL, or a 5xx) would otherwise try to gunzip an HTML error body and reject
    // with a cryptic "incorrect header check"; surface the real status instead
@@ -71,6 +73,14 @@ export async function init() {
    raw.feeds ??= {}
    raw.seq ??= 0 // backend omitempty: absent for an empty store
    for (const [k, ch] of Object.entries(raw.feeds)) ch.id = Number(k)
+   return raw
+}
+
+// The (re-runnable) boot body: swap the snapshot in and rebuild everything
+// derived from it. Also the refresh() path — the caches are recreated
+// wholesale (one code path, no diff logic); refetches ride the SW/HTTP cache,
+// and on a gen change the stale bytes MUST go anyway.
+async function applyDb(raw: IDB): Promise<void> {
    db = raw
 
    // Size the per-pack feed lookup arrays to the store's high-water id + 1
@@ -84,7 +94,12 @@ export async function init() {
    expiredCounts = new Uint32Array(slots)
    for (const ch of Object.values(db.feeds)) expiredCounts[ch.id] = ch.xp ?? 0
 
+   dataCache = makeLRU<Promise<IArticle[]>>(20)
+   metaCache = makeLRU<Promise<IMetaWire[]>>(20)
+   groupCache = {}
+
    if (db.total_art === 0) {
+      idxHeaders = [] // defensive: a re-run must never leave headers from a previous snapshot
       sessionStorage.removeItem(RELOAD_GUARD)
       return
    }
@@ -120,6 +135,31 @@ export async function init() {
    headers.push(latestIdx.header)
    idxHeaders = headers
    sessionStorage.removeItem(RELOAD_GUARD)
+}
+
+export async function init() {
+   await applyDb(await parseDb(await dbFetch))
+}
+
+// refresh() re-fetches db.gz and re-runs the boot path when the store moved.
+// "unchanged" when the snapshot is byte-equivalent on the fields that matter:
+// fetched_at catches every fetch-cycle commit; gen independently catches an
+// in-place rebuild published by `srr gen --bump` (no fetch, so fetched_at
+// doesn't move); total_art/seq are cheap belt-and-braces. A gen change takes
+// the same path — everything derived is discarded anyway, and the SW's
+// checkManifest rides this same response, purging its buckets before our
+// subsequent pack refetches.
+export async function refresh(): Promise<"unchanged" | "updated"> {
+   const raw = await parseDb(await fetchDb())
+   if (
+      raw.fetched_at === db.fetched_at &&
+      raw.total_art === db.total_art &&
+      raw.seq === db.seq &&
+      (raw.gen ?? 0) === (db.gen ?? 0)
+   )
+      return "unchanged"
+   await applyDb(raw)
+   return "updated"
 }
 
 // Finalized idx-pack count for the current store (the latest pack holds the
@@ -212,11 +252,13 @@ export async function countLeft(chronIdx: number, feeds: Map<number, number>): P
 // pack has no next boundary — it is resident anyway and scans cheaply.
 function packHasCandidate(p: number, feeds: Map<number, number>): boolean {
    if (p >= numFinalizedIdx()) return true
-   const cur = idxHeaders[p].feedCounts
-   const next = idxHeaders[p + 1].feedCounts
+   // Mid-refresh header swap can briefly outrun this array — treat unknown as candidate.
+   const cur = idxHeaders[p]
+   const next = idxHeaders[p + 1]
+   if (!cur || !next) return true
    const packEnd = (p + 1) * IDX_PACK_SIZE
    for (const [feedId, addIdx] of feeds) {
-      const delta = countAt(next, feedId) - countAt(cur, feedId)
+      const delta = countAt(next.feedCounts, feedId) - countAt(cur.feedCounts, feedId)
       if (delta > 0 && addIdx < packEnd) return true
    }
    return false
@@ -254,7 +296,7 @@ async function getPackRef(chronIdx: number): Promise<{ packId: number; offset: n
    return { packId: bound.packId, offset: chronIdx - bound.startChron }
 }
 
-const dataCache = makeLRU<Promise<IArticle[]>>(20)
+let dataCache = makeLRU<Promise<IArticle[]>>(20)
 
 async function fetchDataPack(packId: number): Promise<IArticle[]> {
    const isFinalized = packId < db.next_pid
@@ -329,7 +371,7 @@ export function metaReady(): boolean {
    return mp === numFinalizedMeta() && mp * META_PACK_SIZE + (db.mt ?? 0) === db.total_art
 }
 
-const metaCache = makeLRU<Promise<IMetaWire[]>>(20)
+let metaCache = makeLRU<Promise<IMetaWire[]>>(20)
 
 function metaPackId(chronIdx: number): number {
    return Math.min(Math.floor(chronIdx / META_PACK_SIZE), numFinalizedMeta())
@@ -368,7 +410,7 @@ type GroupResult = { tagged: Map<string, IFeed[]>; sortedTags: string[]; untagge
 // never land on a feed with nothing to read) and the include-empty grouping (the
 // config picker when read items are shown — it also surfaces never-fetched / empty
 // feeds so they can be inspected or selected).
-const groupCache: Partial<Record<"active" | "all", GroupResult>> = {}
+let groupCache: Partial<Record<"active" | "all", GroupResult>> = {}
 
 export function groupFeedsByTag(includeEmpty = false): GroupResult {
    const key = includeEmpty ? "all" : "active"
