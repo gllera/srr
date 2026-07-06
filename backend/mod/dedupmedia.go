@@ -7,7 +7,6 @@ import (
 	"unicode/utf8"
 
 	"golang.org/x/net/html"
-	"golang.org/x/net/html/atom"
 )
 
 // #dedupmedia — an article never shows the same picture (or video/audio)
@@ -85,22 +84,11 @@ func dedupMedia(content string) string {
 		return content
 	}
 
-	nodes, err := html.ParseFragment(strings.NewReader(content), &html.Node{
-		Type:     html.ElementNode,
-		Data:     "body",
-		DataAtom: atom.Body,
-	})
-	if err != nil {
-		return content
-	}
 	// One synthetic body over the fragment so removal and wrapper pruning
 	// treat top-level nodes like any other.
-	body := &html.Node{Type: html.ElementNode, Data: "body", DataAtom: atom.Body}
-	for _, n := range nodes {
-		if n.Parent != nil {
-			n.Parent.RemoveChild(n)
-		}
-		body.AppendChild(n)
+	body := parseBodyHTML(content)
+	if body == nil {
+		return content
 	}
 
 	type fileKey struct{ tag, file string }
@@ -144,13 +132,11 @@ func dedupMedia(content string) string {
 		return content
 	}
 
-	var b strings.Builder
-	for c := body.FirstChild; c != nil; c = c.NextSibling {
-		if err := html.Render(&b, c); err != nil {
-			return content
-		}
+	out, ok := renderBodyHTML(body)
+	if !ok {
+		return content
 	}
-	return b.String()
+	return out
 }
 
 // mediaFileID normalizes a media URL to the file identity behind it (see the
