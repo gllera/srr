@@ -620,13 +620,14 @@ function getSeen(token: string): number | undefined {
 }
 
 function recordSeen(article: IArticle) {
-   // Search (q:) mode jumps to title-search hits, not a contiguous read-through:
-   // advancing the seen frontier here would mark every article up to the hit as
-   // seen, including ones never shown. So search navigations never touch the
-   // seen frontier — a hit you peek at via search stays unread until you
-   // actually read it in the feed. (This is the "unless in query mode" carve-out
-   // for the mark-previous-as-seen rule below.)
-   if (filter.search) return
+   // Peek modes never touch the seen frontier. Search (q:) jumps to hits, not a
+   // contiguous read-through — advancing here would mark everything up to the
+   // hit as seen. ★ Saved is the same shape: re-reading an archived item is not
+   // resuming its feed, and the own-feed exact-position write below would REWIND
+   // that feed's resume position (inflating its unread badge — and under LWW
+   // sync, propagating the rewind to every device). A saved/search article you
+   // peek at stays unread until you actually read it in its feed.
+   if (filter.search || filter.saved) return
    const ch = data.db.feeds[article.f]
    if (!ch) return
    try {
@@ -648,10 +649,10 @@ function recordSeen(article: IArticle) {
       // "everything before here is caught up" the reader expects. A one-way
       // raise (never lowers), so scrubbing back to an older article can't
       // un-mark a feed you'd already caught up on; only the current feed
-      // (above) tracks an exact resume position. Saved mode keeps filter.feeds
-      // empty (feed-agnostic) and search returned above, so this loop only
-      // fires for feed/tag/[ALL] navigation — the contiguous read-throughs
-      // where a "previous = seen" frontier across feeds is meaningful.
+      // (above) tracks an exact resume position. Search and saved both
+      // returned above, so this loop only fires for feed/tag/[ALL] navigation
+      // — the contiguous read-throughs where a "previous = seen" frontier
+      // across feeds is meaningful.
       for (const feedId of filter.feeds.keys()) {
          if (feedId === article.f) continue
          const key = "feed:" + feedId

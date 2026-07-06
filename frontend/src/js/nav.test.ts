@@ -1006,15 +1006,26 @@ describe("recordSeen marks previous articles seen across the list", () => {
       searchMod.search.mockReset()
    })
 
-   it("saved mode marks only the opened article's own feed (feed-agnostic set)", async () => {
+   it("saved mode never records seen — it's a peek like search", async () => {
       // chron 0=ch1 1=ch2 2=ch1; saved set spans both feeds.
       setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }])
       localStorage.setItem("srr-saved", JSON.stringify([0, 1, 2]))
       await nav.switchFilter(nav.SAVED_TOKEN) // opens at the newest saved (chron 2, ch1)
       const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
-      // filter.feeds is empty in saved mode, so "mark previous across the list"
-      // can't apply (it would over-mark non-saved articles) — only the current
-      // article's own feed is recorded.
+      // recordSeen now exempts saved mode entirely, the same carve-out as
+      // search — opening a saved article never touches the seen frontier.
+      expect(seen).toEqual({})
+   })
+
+   it("saved mode never records seen — opening an old saved article is a peek", async () => {
+      // chron 0=ch1 1=ch1 2=ch1 (old/mid/new); the feed is already read up to
+      // chron 2 and only the oldest article is saved.
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 2 }))
+      localStorage.setItem("srr-saved", JSON.stringify([0]))
+      await nav.switchFilter(nav.SAVED_TOKEN) // opens the only saved article, chron 0
+      const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
+      // Own feed's resume position must NOT rewind to 0.
       expect(seen).toEqual({ "feed:1": 2 })
    })
 })
