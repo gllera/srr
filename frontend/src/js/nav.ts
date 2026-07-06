@@ -306,6 +306,29 @@ export function feedRight(from: number): Promise<number> {
    return data.findRight(from, filter.feeds).then((found) => (a >= from && (found === -1 || a < found) ? a : found))
 }
 
+// Resolve a token list to its feed membership at natural add_idx bounds —
+// numeric token = that feed, else a tag's members; only feeds with articles
+// join. Empty tokens = every feed ([ALL]). The ONE copy of the resolution
+// rule: filter.set, filter.clear, and onStoreRefreshed must never drift on
+// what a token means.
+function resolveMembership(tokens: string[]): Map<number, number> {
+   const feeds = new Map<number, number>()
+   if (tokens.length === 0) {
+      for (const ch of Object.values(data.db.feeds)) if (ch.total_art) feeds.set(ch.id, ch.add_idx ?? 0)
+      return feeds
+   }
+   for (const token of tokens) {
+      const num = Number(token)
+      if (Number.isFinite(num)) {
+         const ch = data.db.feeds[num]
+         if (ch?.total_art && !feeds.has(num)) feeds.set(num, ch.add_idx ?? 0)
+      } else
+         for (const ch of Object.values(data.db.feeds))
+            if (ch.tag === token && ch.total_art && !feeds.has(ch.id)) feeds.set(ch.id, ch.add_idx ?? 0)
+   }
+   return feeds
+}
+
 export const filter = {
    feeds: new Map<number, number>(),
    tokens: [] as string[],
@@ -340,11 +363,10 @@ export const filter = {
       return addIdx !== undefined && chronIdx >= addIdx
    },
    clear() {
-      this.feeds = new Map<number, number>()
       this.saved = false
       this.search = false
       this.anchor = -1
-      for (const ch of Object.values(data.db.feeds)) if (ch.total_art) this.feeds.set(ch.id, ch.add_idx ?? 0)
+      this.feeds = resolveMembership([])
       this.tokens = []
       // [ALL] honours unseen-only too now (a global "only unread" catch-up view).
       this.applyUnseen(readSeen())
@@ -375,15 +397,7 @@ export const filter = {
       }
       // Resolve membership at natural add_idx bounds (numeric token = a feed,
       // else a tag's members), then fold in unseen-only via applyUnseen.
-      for (const token of tokens) {
-         const num = Number(token)
-         if (Number.isFinite(num)) {
-            const ch = data.db.feeds[num]
-            if (ch?.total_art && !this.feeds.has(num)) this.feeds.set(num, ch.add_idx ?? 0)
-         } else
-            for (const ch of Object.values(data.db.feeds))
-               if (ch.tag === token && ch.total_art && !this.feeds.has(ch.id)) this.feeds.set(ch.id, ch.add_idx ?? 0)
-      }
+      this.feeds = resolveMembership(tokens)
       if (this.feeds.size === 0) {
          this.clear()
          return
@@ -421,22 +435,9 @@ export async function onStoreRefreshed(): Promise<void> {
       // Recompute the fresh membership set exactly as filter.set/clear would:
       // [ALL] (no active tokens) = every feed with total_art>0; a feed/tag
       // filter = the union its tokens resolve to (numeric ids as feeds, else a
-      // tag match) — the SAME resolution loop filter.set uses, so a mixed
+      // tag match) — the SAME resolveMembership filter.set/clear use, so a mixed
       // multi-token filter (feed ids + tags) gets the identical union.
-      const fresh = new Map<number, number>()
-      if (filter.active) {
-         for (const token of filter.tokens) {
-            const num = Number(token)
-            if (Number.isFinite(num)) {
-               const ch = data.db.feeds[num]
-               if (ch?.total_art && !fresh.has(num)) fresh.set(num, ch.add_idx ?? 0)
-            } else
-               for (const ch of Object.values(data.db.feeds))
-                  if (ch.tag === token && ch.total_art && !fresh.has(ch.id)) fresh.set(ch.id, ch.add_idx ?? 0)
-         }
-      } else {
-         for (const ch of Object.values(data.db.feeds)) if (ch.total_art) fresh.set(ch.id, ch.add_idx ?? 0)
-      }
+      const fresh = resolveMembership(filter.active ? filter.tokens : [])
       const seenMap = readSeen()
       for (const [id, addIdx] of fresh) {
          const old = filter.feeds.get(id)
