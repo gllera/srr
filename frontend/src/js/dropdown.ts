@@ -162,8 +162,9 @@ export function showImgProxyDialog(): void {
 
 // syncBody is the editable content of the sync dialog: the endpoint-URL input
 // plus the action row, the same editor shape as imgProxyBody. Saving a NEW url
-// kicks a full cycle immediately (pull-merge, then push) so enabling sync seeds
-// the endpoint / adopts its stored profile without waiting for the next reading
+// kicks a MANUAL cycle immediately (pure LWW: adopt the endpoint's blob when
+// newer — even regressive — then always push) so enabling sync seeds the
+// endpoint / adopts its stored profile without waiting for the next reading
 // session; the config status footer reports how it went.
 function syncBody(close: () => void): DocumentFragment {
    const frag = document.createDocumentFragment()
@@ -183,7 +184,7 @@ function syncBody(close: () => void): DocumentFragment {
       const value = normalizeSyncUrl(next)
       if (value !== getSyncUrl()) {
          setSyncUrl(value)
-         if (value) void syncNow(true)
+         if (value) void syncNow({ manual: true })
       }
       close()
    }
