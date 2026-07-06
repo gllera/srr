@@ -125,26 +125,30 @@ func (d *S3) AtomicPut(ctx context.Context, key string, r io.Reader, meta Object
 }
 
 // put is the shared write core. Content-Type comes from meta (the asset-peek /
-// asset-process mimetype), defaulting to application/octet-stream when unset —
-// SRR no longer guesses a type from the key extension or by sniffing the bytes,
-// since peek/process is the single source of truth for an asset's type and packs
-// are opaque gzip blobs the reader decompresses. Content-Encoding is stamped
-// only when meta sets it.
+// asset-process mimetype), then contentTypeForKey (SRR's own gzip objects —
+// db.gz + pack-grammar names — declare application/gzip), then the
+// application/octet-stream default — SRR still never guesses an asset's type
+// from the key extension or by sniffing the bytes, since peek/process is the
+// single source of truth there. Content-Encoding is stamped only when meta
+// sets it; pack writes never set it (the reader gunzips manually — see
+// contentTypeGzip).
 func (d *S3) put(ctx context.Context, key string, r io.Reader, ignoreExisting bool, meta ObjectMeta) error {
-	// Resolve the cache class from the logical key before it gets the path
-	// prefix, so the CDN serves finalized packs immutable and db.gz/latest
-	// always-revalidate.
+	// Resolve the cache class and key-derived type from the logical key before
+	// it gets the path prefix, so the CDN serves finalized packs immutable and
+	// db.gz/latest always-revalidate.
 	cacheControl := cacheControlForKey(key)
+	contentType := meta.ContentType
+	if contentType == "" {
+		contentType = contentTypeForKey(key)
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
 	key = d.s3path("write", key)
 
 	var condition *string
 	if !ignoreExisting {
 		condition = aws.String("*")
-	}
-
-	contentType := meta.ContentType
-	if contentType == "" {
-		contentType = "application/octet-stream"
 	}
 
 	input := &s3.PutObjectInput{

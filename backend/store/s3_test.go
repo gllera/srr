@@ -243,21 +243,24 @@ func TestS3RmExistingAndMissing(t *testing.T) {
 	}
 }
 
-// The writer↔CDN cache contract rides on PutObject headers: Cache-Control is
-// resolved from the LOGICAL key (before the path prefix). Content-Type, with no
-// explicit ObjectMeta type, is the application/octet-stream default — SRR no
-// longer derives it from the extension or sniffs the bytes (peek/process is the
-// single source of truth for an asset's type; packs are opaque gzip blobs).
+// The writer↔CDN contract rides on PutObject headers, both resolved from the
+// LOGICAL key (before the path prefix): Cache-Control via cacheControlForKey,
+// and — with no explicit ObjectMeta type — Content-Type via contentTypeForKey
+// (SRR's own gzip objects declare application/gzip; anything else keeps the
+// application/octet-stream default — never derived from the extension or by
+// sniffing the bytes). Pack writes must never stamp Content-Encoding: the
+// reader gunzips manually, so a transparently-decompressing CDN would break it.
 func TestS3PutCacheControlAndContentType(t *testing.T) {
 	b, f := setupFakeS3(t)
 	cases := []struct {
-		key, wantCC string
+		key, wantCC, wantCT string
 	}{
-		{"db.gz", cacheRevalidate},
-		{"idx/0.gz", cacheImmutable},
-		{"data/L3.gz", cacheImmutable},
-		{"assets/ab/0123456789abcdef.jpg", cacheImmutable},
-		{".locked", ""}, // no cache policy
+		{"db.gz", cacheRevalidate, "application/gzip"},
+		{"idx/0.gz", cacheImmutable, "application/gzip"},
+		{"data/L3.gz", cacheImmutable, "application/gzip"},
+		{"meta/s4.gz", cacheImmutable, "application/gzip"},
+		{"assets/ab/0123456789abcdef.jpg", cacheImmutable, "application/octet-stream"},
+		{".locked", "", "application/octet-stream"}, // no cache policy, no key-derived type
 	}
 	for _, c := range cases {
 		t.Run(c.key, func(t *testing.T) {
@@ -268,8 +271,16 @@ func TestS3PutCacheControlAndContentType(t *testing.T) {
 			if got := h.Get("Cache-Control"); got != c.wantCC {
 				t.Errorf("Cache-Control = %q, want %q", got, c.wantCC)
 			}
-			if got := h.Get("Content-Type"); got != "application/octet-stream" {
-				t.Errorf("Content-Type = %q, want application/octet-stream (default)", got)
+			if got := h.Get("Content-Type"); got != c.wantCT {
+				t.Errorf("Content-Type = %q, want %q", got, c.wantCT)
+			}
+			// The SDK frames checksum-trailer uploads as aws-chunked on the
+			// wire; S3 strips that token from the stored metadata. Nothing
+			// else may ride the header.
+			for tok := range strings.SplitSeq(h.Get("Content-Encoding"), ",") {
+				if tok = strings.TrimSpace(tok); tok != "" && tok != "aws-chunked" {
+					t.Errorf("Content-Encoding carries %q, want none", tok)
+				}
 			}
 		})
 	}
