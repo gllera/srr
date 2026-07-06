@@ -91,7 +91,8 @@ present, seeded `["#sanitize","#minify"]`) is the fallback.
   the `default` recipe's pipe; inside a feed's pipe, the feed's effective recipe pipe.
   The `default` recipe forbids `#default` (it is the default); a feed pipe always allows it.
 - Built-in mods use `#` (`#sanitize`, `#minify`, `#readability`, `#filter`, `#dedupmedia`,
-  `#selfhost`); anything else is a shell command. Ingest: built-in `#feed`, or a shell command.
+  `#unlazy`, `#embed`, `#enclosure`, `#untrack`, `#selfhost`); anything else is a shell
+  command. Ingest: built-in `#feed`, or a shell command.
 - Resolution: `pipe = resolvePipe(resolvePipe(default.Pipe, recipe.Pipe), feed.Pipe)`,
   `ingest = ingest.Select(feed.Ingest, recipe.Ingest, default.Ingest)` (first non-empty wins).
 - Managed via `srr recipe set/ls/show/rm`; feed-level overrides via

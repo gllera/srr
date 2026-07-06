@@ -194,7 +194,8 @@ func TestRegisterBuiltins(t *testing.T) {
 	m := New()
 
 	// Verify built-in processors are registered
-	builtins := []string{"#filter", "#sanitize", "#minify", "#readability", "#dedupmedia"}
+	builtins := []string{"#filter", "#sanitize", "#minify", "#readability", "#dedupmedia",
+		"#unlazy", "#embed", "#enclosure", "#untrack"}
 	for _, name := range builtins {
 		if _, ok := m.processors[name]; !ok {
 			t.Errorf("built-in %q not registered", name)
@@ -207,7 +208,8 @@ func TestRegisterBuiltins(t *testing.T) {
 func TestModuleBuiltinRejectsUnexpectedParam(t *testing.T) {
 	m := New()
 	now := time.Now()
-	for _, token := range []string{"#sanitize x=1", "#minify foo=bar", "#dedupmedia foo=bar"} {
+	for _, token := range []string{"#sanitize x=1", "#minify foo=bar", "#dedupmedia foo=bar",
+		"#unlazy x=1", "#embed x=1", "#enclosure x=1", "#untrack x=1"} {
 		item := &RawItem{GUID: 1, Title: "T", Content: "<p>a</p>", Link: "http://example.com", Published: &now}
 		if err := m.Process(context.Background(), token, item); err == nil {
 			t.Errorf("token %q: expected unknown-parameter error", token)
