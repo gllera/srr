@@ -322,8 +322,8 @@ describe("sync dialog", () => {
    beforeEach(async () => {
       document.body.innerHTML = SKELETON
       localStorage.clear()
-      // Saving a new endpoint kicks a real syncNow(true) cycle — stub the network
-      // so the test asserts the kick without leaving jsdom.
+      // Saving a new endpoint kicks a real syncNow({manual:true}) cycle — stub
+      // the network so the test asserts the kick without leaving jsdom.
       fetchMock = vi.fn(async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ v: 1 }) }))
       vi.stubGlobal("fetch", fetchMock)
       vi.resetModules()
