@@ -519,11 +519,12 @@ describe("showFeed", () => {
    })
 })
 
-// right_count — the reader's pending readout: articles still AHEAD of pos.
-// Feed/tag/[ALL] modes count the filter's unread through the same
-// unreadCounts/tagUnreadFromCounts pair the config surface badges use, minus
-// the article on screen (countCurrent=false) — so the last article reads 0.
-// Saved/search count their explicit sets strictly after pos.
+// right_count — the reader's pending readout: matching articles strictly
+// AFTER pos under the active filter (positional, so it ticks down on every
+// →-step even when re-reading seen articles). Feed/tag/[ALL] count over
+// filter.feeds — whose bounds are raised in unseen-only mode, so "ahead"
+// means unseen-ahead there; saved/search count their explicit sets. The last
+// article reads 0.
 describe("right_count", () => {
    afterEach(() => nav.setUnreadOnly(false))
 
@@ -534,6 +535,19 @@ describe("right_count", () => {
       expect((await nav.fromHash("2")).right_count).toBe(0)
    })
 
+   it("ticks down positionally when re-reading already-seen articles", async () => {
+      // Live-store regression (#2810→#2813 frozen at 161): every member feed's
+      // seen frontier sits AHEAD of the walk, so a frontier-based pill never
+      // moves. The pill is a countdown of remaining →-steps — it must count
+      // matching articles after pos, read or not.
+      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }, { feedId: 2 }])
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 3, "feed:2": 3 }))
+      expect((await nav.fromHash("0")).right_count).toBe(3)
+      expect((await nav.right()).right_count).toBe(2)
+      expect((await nav.right()).right_count).toBe(1)
+      expect((await nav.right()).right_count).toBe(0)
+   })
+
    it("counts only the filtered feed's unread in filtered mode", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }, { feedId: 2 }, { feedId: 1 }])
       expect((await nav.fromHash("0!1")).right_count).toBe(2) // chron 2, 4
@@ -541,34 +555,31 @@ describe("right_count", () => {
       expect((await nav.fromHash("4!1")).right_count).toBe(0)
    })
 
-   it("counts what's ahead in unseen-only mode — the badges' numbers minus the article on screen", async () => {
+   it("counts what's ahead in unseen-only mode — the raised bounds keep seen articles out", async () => {
       // chron 0=ch1 1=ch2 2=ch1 3=ch2 4=ch1; seen ch1→2, ch2→1; unseen are 3,4.
       setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }, { feedId: 2 }, { feedId: 1 }])
       for (const id of [1, 2]) data.db.feeds[id].tag = "news"
       localStorage.setItem("srr-seen", JSON.stringify({ "feed:2": 1, "feed:1": 2 }))
       nav.setUnreadOnly(true)
       const group = [data.db.feeds[1], data.db.feeds[2]]
-      // The pill's own sum: badge counting with the on-screen article excluded.
-      const pillSum = async () => nav.tagUnreadFromCounts(group, await nav.unreadCounts(group, false))
 
       // Resumes at the seen position (chron 1, already read); both unseen sit ahead.
       const opened = await nav.switchFilter("news")
       expect(opened.right_count).toBe(2)
-      expect(opened.right_count).toBe(await pillSum())
 
       // Stepping onto an unread article: the settings badge keeps counting it
       // (feedUnread's onCurrent) but the pill does not — one ahead, one on screen.
       const onFirst = await nav.right() // chron 3
       expect(onFirst.right_count).toBe(1)
-      expect(onFirst.right_count).toBe(await pillSum())
       expect(nav.tagUnreadFromCounts(group, await nav.unreadCounts(group))).toBe(2) // pill + the one on screen
 
-      // The LAST unread: nothing ahead, so the pill reads an explicit 0 — even
-      // though its settings badge still shows the one on screen.
+      // The LAST unread: nothing ahead, so the pill reads an explicit 0 — and
+      // with no forward step left to ever drop the on-screen +1, the settings
+      // badge agrees: caught up reads 0, not a stuck 1.
       const onLast = await nav.right() // chron 4
       expect(onLast.has_right).toBe(false)
       expect(onLast.right_count).toBe(0)
-      expect(onLast.right_count).toBe(await pillSum())
+      expect(nav.tagUnreadFromCounts(group, await nav.unreadCounts(group))).toBe(0)
    })
 
    it("counts the saved set to the right in ★ Saved mode", async () => {
@@ -1519,6 +1530,8 @@ describe("prefetch abort", () => {
    const RealRIC = window.requestIdleCallback
    const PROXY_PREFIX = "https://proxy.test/?u="
    let images: HTMLImageElement[]
+   let videos: HTMLVideoElement[]
+   let createSpy: ReturnType<typeof vi.spyOn>
    let pendingIdle: Array<() => Promise<void>>
 
    beforeEach(() => {
@@ -1526,12 +1539,22 @@ describe("prefetch abort", () => {
       // a prefix so the assertions about encoded srcs exercise the proxy path.
       setImgProxy(PROXY_PREFIX)
       images = []
+      videos = []
       pendingIdle = []
       window.Image = function () {
          const img = new RealImage()
          images.push(img)
          return img
       } as unknown as typeof Image
+      const realCreateElement = document.createElement.bind(document)
+      createSpy = vi.spyOn(document, "createElement").mockImplementation(((
+         tag: string,
+         opts?: ElementCreationOptions,
+      ) => {
+         const el = realCreateElement(tag, opts)
+         if (tag === "video") videos.push(el as HTMLVideoElement)
+         return el
+      }) as typeof document.createElement)
       window.requestIdleCallback = ((cb: () => unknown) => {
          pendingIdle.push(cb as () => Promise<void>)
          return 0
@@ -1541,6 +1564,7 @@ describe("prefetch abort", () => {
    afterEach(() => {
       window.Image = RealImage
       window.requestIdleCallback = RealRIC
+      createSpy.mockRestore()
    })
 
    async function flushIdle() {
@@ -1602,6 +1626,70 @@ describe("prefetch abort", () => {
 
       await nav.goTo(3)
       expect(prefetched.getAttribute("src")).toBe("")
+   })
+
+   it("caps the image prefetch at 6 (an image-stuffed neighbor must not flood the connection)", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      const many = Array.from({ length: 9 }, (_, i) => `<img src="http://example.com/${i}.jpg">`).join("")
+      data.loadArticle.mockImplementation(async () => makeArticle({ c: many }))
+      await nav.fromHash("0")
+      await nav.right()
+      await flushIdle()
+      expect(images).toHaveLength(6)
+   })
+
+   it("does NOT abort when navigating onto the prefetched neighbor itself (loads must survive arrival)", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      data.loadArticle.mockImplementation(async (idx: number) =>
+         makeArticle({ c: `<img src="http://example.com/${idx}.jpg">` }),
+      )
+      await nav.fromHash("0")
+      await nav.right()
+      await flushIdle()
+      const prefetched = images[0]
+      expect(prefetched.getAttribute("src")).not.toBe("")
+
+      await nav.right() // arrive at the article those images belong to
+      expect(prefetched.getAttribute("src")).not.toBe("")
+   })
+
+   it("prefetches the video poster (proxied) and the video metadata (un-proxied src, preload=metadata)", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      data.loadArticle.mockImplementation(async () =>
+         makeArticle({ c: '<video poster="http://example.com/p.jpg" src="http://example.com/v.mp4"></video>' }),
+      )
+      await nav.fromHash("0")
+      await nav.right()
+      await flushIdle()
+      expect(images).toHaveLength(1)
+      expect(images[0].src).toContain(encodeURIComponent("http://example.com/p.jpg"))
+      expect(videos).toHaveLength(1)
+      expect(videos[0].getAttribute("preload")).toBe("metadata")
+      expect(videos[0].getAttribute("src")).toBe("http://example.com/v.mp4")
+   })
+
+   it("caps the video metadata prefetch at 2", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      const many = Array.from({ length: 4 }, (_, i) => `<video src="http://example.com/${i}.mp4"></video>`).join("")
+      data.loadArticle.mockImplementation(async () => makeArticle({ c: many }))
+      await nav.fromHash("0")
+      await nav.right()
+      await flushIdle()
+      expect(videos).toHaveLength(2)
+   })
+
+   it("aborts prefetched videos too when navigating away (src emptied)", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      data.loadArticle.mockImplementation(async () =>
+         makeArticle({ c: '<video src="http://example.com/v.mp4"></video>' }),
+      )
+      await nav.fromHash("0")
+      await nav.right()
+      await flushIdle()
+      expect(videos[0].getAttribute("src")).toBe("http://example.com/v.mp4")
+
+      await nav.goTo(3)
+      expect(videos[0].getAttribute("src")).toBe("")
    })
 
    it("falls back to setTimeout when requestIdleCallback is missing (WebKit)", async () => {
@@ -2252,6 +2340,23 @@ describe("feedUnread onCurrent guard: select vs recordSeen (#6)", () => {
       // Badge must still be 2: base count excludes chron 1 (now seen), +1 adds it back.
       const counts = await nav.unreadCounts([data.db.feeds[1]])
       expect(counts.get(1)).toBe(2)
+   })
+
+   it("drops the +1 on the filter's last match — a caught-up feed reads 0, not a stuck 1", async () => {
+      // Same setup, but open the LAST article. recordSeen sets seen = 2 (== pos)
+      // and nothing matches ahead, so there is no forward step left to ever drop
+      // the on-screen +1 — counting it would leave the settings badge stuck at 1
+      // on a fully-read feed (across reloads too: pos, seen and the unread
+      // toggle all persist).
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      nav.setUnreadOnly(true)
+      seedSeen({ "feed:1": 0 })
+      nav.filter.set(["1"])
+
+      await nav.fromHash("2!1")
+
+      const counts = await nav.unreadCounts([data.db.feeds[1]])
+      expect(counts.get(1)).toBe(0)
    })
 })
 

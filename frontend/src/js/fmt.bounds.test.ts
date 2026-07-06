@@ -10,6 +10,7 @@ vi.mock("./base", () => ({ PACK_BASE: new URL(SUB) }))
 
 type Fmt = typeof import("./fmt")
 let sanitizeHtml: Fmt["sanitizeHtml"]
+let extractPrefetchMedia: Fmt["extractPrefetchMedia"]
 
 const attr = (html: string, sel: string, name: string): string | null => {
    const t = document.createElement("template")
@@ -20,7 +21,7 @@ const attr = (html: string, sel: string, name: string): string | null => {
 beforeEach(async () => {
    localStorage.clear()
    vi.resetModules()
-   ;({ sanitizeHtml } = await import("./fmt"))
+   ;({ sanitizeHtml, extractPrefetchMedia } = await import("./fmt"))
 })
 
 describe("sanitizeHtml relative URL bounds (subpath pack base)", () => {
@@ -62,5 +63,17 @@ describe("sanitizeHtml relative URL bounds (subpath pack base)", () => {
 
    it("drops a ../ traversal on an audio src too (audio takes the asset/bounds path)", () => {
       expect(attr('<audio src="../../clip.mp3"></audio>', "audio", "src")).toBeNull()
+   })
+})
+
+describe("extractPrefetchMedia relative URL bounds (subpath pack base)", () => {
+   it("resolves in-subtree refs and drops escaping ones, per media list", () => {
+      const html =
+         '<img src="assets/ab/cd.webp"><img src="../../secret.jpg">' +
+         '<video poster="../../p.jpg" src="assets/ab/cd.webm"></video><video src="//evil.example/v.mp4"></video>'
+      expect(extractPrefetchMedia(html)).toEqual({
+         images: [SUB + "assets/ab/cd.webp"],
+         videos: [SUB + "assets/ab/cd.webm"],
+      })
    })
 })

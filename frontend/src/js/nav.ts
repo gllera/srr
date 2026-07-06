@@ -1,5 +1,5 @@
 import * as data from "./data"
-import { extractImageUrls, getImgProxy, imgProxy } from "./fmt"
+import { extractPrefetchMedia } from "./fmt"
 import { SAVED_KEY, SEEN_KEY, UNREAD_ONLY_KEY } from "./keys"
 import * as search from "./search"
 import * as sync from "./sync"
@@ -430,43 +430,43 @@ function unseenActive(): boolean {
 // read it, then drops as you step away. Scoped to unseen-only mode, the current
 // article's feed, and only while that article still matches the (raised) filter
 // — i.e. it is one of the unread you're navigating, not the seen resume position
-// you open on. `countCurrent = false` turns the rule off: the next pill counts
-// only what's AHEAD, so it must not include the article on screen (pendingRight).
-async function feedUnread(ch: IFeed, seenMap: Record<string, number>, countCurrent = true): Promise<number> {
+// you open on. And only while the catch-up walk still has a step ahead: on the
+// filter's LAST match there is no forward step left to ever drop the +1, so it
+// would stick — a fully-caught-up feed (and its tag header) read a permanent 1
+// in the settings view, across reloads too (pos, seen and the unread toggle all
+// persist). Nothing ahead means caught up: the badge reads 0, agreeing with the
+// pill's explicit 0 (pendingRight is that same readout).
+async function feedUnread(ch: IFeed, seenMap: Record<string, number>): Promise<number> {
    const map = new Map([[ch.id, ch.add_idx ?? 0]])
-   const onCurrent =
-      countCurrent &&
-      unseenActive() &&
-      ch.id === currentFeed &&
-      filter.matches(ch.id, pos) &&
-      (seenMap["feed:" + ch.id] ?? -1) === pos
+   let onCurrent =
+      unseenActive() && ch.id === currentFeed && filter.matches(ch.id, pos) && (seenMap["feed:" + ch.id] ?? -1) === pos
          ? 1
          : 0
+   if (onCurrent && (await pendingRight()) === 0) onCurrent = 0
    const seenIdx = seenMap["feed:" + ch.id]
    if (seenIdx === undefined) return data.countAll(map) + onCurrent
    const upTo = Math.min(seenIdx + 1, data.db.total_art)
    return Math.max(0, data.countAll(map) - (await data.countLeft(upTo, map))) + onCurrent
 }
 
-// The reader's pending readout: what the next pill displays. Saved/search count
-// their explicit sets strictly after pos (no seen concept there). Feed/tag/[ALL]
-// return the filter's unread total EXCLUDING the article on screen — the same
-// unreadCounts/tagUnreadFromCounts pair the config surface badges use, just with
-// feedUnread's onCurrent rule off (countCurrent = false): "pending" means what's
-// AHEAD, so the one you're reading doesn't count and the last article reads 0
-// (the settings badge, by contrast, keeps counting it until you step off it).
-// recordSeen ran before this (resolve() order), so in the forward-reading flow
-// this IS the count of matching articles to the right; it only diverges when you
-// jump back over already-read articles — where the seen frontier is the number
-// that stays honest.
+// The reader's pending readout: what the next pill displays — matching
+// articles strictly AFTER pos under the active filter. Saved/search count
+// their explicit sets; feed/tag/[ALL] count positionally over filter.feeds
+// (whose bounds are already raised in unseen-only mode, so "ahead" means
+// unseen-ahead there). Positional on purpose: the pill is a countdown of the
+// remaining →-steps, so re-reading below the seen frontier still ticks it
+// down step by step — a frontier-based count froze there (matching articles
+// between pos and the frontier are all seen, so the number never moved while
+// stepping through them). Unread-with-the-frontier is the config badges' job
+// (feedUnread), not this readout's. In the forward-reading flow the two agree.
+// The last article reads 0.
 async function pendingRight(): Promise<number> {
    if (filter.saved) return savedSorted().filter((c) => c > pos).length
    if (filter.search) {
       await ensureSearchSet()
       return searchSorted.filter((c) => c > pos).length
    }
-   const members = [...filter.feeds.keys()].map((id) => data.db.feeds[id]).filter(Boolean)
-   return tagUnreadFromCounts(members, await unreadCounts(members, false))
+   return Math.max(0, data.countAll(filter.feeds) - (await data.countLeft(pos + 1, filter.feeds)))
 }
 
 async function showFeed(article: IArticle): Promise<IShowFeed> {
@@ -508,40 +508,76 @@ async function resolve(target: number, replace = false): Promise<IShowFeed> {
    // stepping forward must not orphan the entry it came from.
    if (unseenActive() && !filter.matches(article.f, target)) filter.anchor = target
    next.left = next.right = undefined
-   abortPrefetch()
+   // Arriving at the article being prefetched must NOT abort it: its in-flight
+   // loads are exactly what the rendered content is about to attach to (same-URL
+   // image loads coalesce within a document — aborting here restarted every
+   // image from scratch, which made the prefetch useless for any neighbor whose
+   // images hadn't all finished). Drop the refs instead; the rendered elements
+   // own the loads from here. Any other navigation aborts as before.
+   if (currentPrefetch?.target === target) currentPrefetch = null
+   else abortPrefetch()
    updateHash(replace)
    recordSeen(article)
    return showFeed(article)
 }
 
-// Holds refs to the last neighbor's prefetched Image objects so we can both
-// abort their in-flight loads (img.src = "" per WHATWG image-update steps)
-// and drop the references, bounding memory to one neighbor at a time. Array
+// Caps on the neighbor prefetch. Uncapped, an image-stuffed neighbor (live
+// store measured articles with 300+ <img> tags) floods the connection with
+// low-priority downloads that split bandwidth so thin none completes before
+// the user steps — and competes with the on-screen article's own lazy loads.
+// The rendered article only needs its first viewport immediately (its images
+// are loading=lazy), so warm just that many; a capped prefetch actually
+// finishes within a normal reading dwell. Videos are metadata-only fetches
+// (duration/dimensions/first frame — cheap for faststart assets), 2 is plenty.
+const PREFETCH_IMAGES = 6
+const PREFETCH_VIDEOS = 2
+
+// Holds refs to the last neighbor's prefetched media so we can both abort
+// their in-flight loads (src = "" — the WHATWG image-update steps for <img>,
+// the media-load algorithm's abort for <video>) and drop the references,
+// bounding memory to one neighbor at a time. `target` lets resolve() tell
+// arrival at the prefetched article apart from navigating elsewhere. Object
 // identity also acts as the freshness token: a pending idle callback that
-// finds `my !== currentPrefetch` bails instead of pushing into a stale array.
-let currentPrefetch: HTMLImageElement[] | null = null
+// finds `my !== currentPrefetch` bails instead of pushing into a stale record.
+interface Prefetch {
+   target: number
+   imgs: HTMLImageElement[]
+   vids: HTMLVideoElement[]
+}
+let currentPrefetch: Prefetch | null = null
 
 function abortPrefetch() {
-   if (currentPrefetch) for (const img of currentPrefetch) img.src = ""
+   if (currentPrefetch) {
+      for (const img of currentPrefetch.imgs) img.src = ""
+      for (const vid of currentPrefetch.vids) vid.src = ""
+   }
    currentPrefetch = null
 }
 
 function schedulePrefetch(target: number) {
    if (target === -1) return
-   const my: HTMLImageElement[] = []
+   const my: Prefetch = { target, imgs: [], vids: [] }
    currentPrefetch = my
    const run = async () => {
       if (my !== currentPrefetch) return
       try {
          const art = await data.loadArticle(target)
          if (my !== currentPrefetch) return
-         const proxyPrefix = getImgProxy()
-         for (const raw of extractImageUrls(art.c)) {
+         const media = extractPrefetchMedia(art.c)
+         for (const url of media.images.slice(0, PREFETCH_IMAGES)) {
             const img = new Image()
             img.fetchPriority = "low"
             img.decoding = "async"
-            img.src = imgProxy(raw, proxyPrefix)
-            my.push(img)
+            img.src = url
+            my.imgs.push(img)
+         }
+         for (const url of media.videos.slice(0, PREFETCH_VIDEOS)) {
+            // preload must be set before src: assigning src invokes the media
+            // load algorithm, which reads the preload hint.
+            const vid = document.createElement("video")
+            vid.preload = "metadata"
+            vid.src = url
+            my.vids.push(vid)
          }
       } catch {
          // Best-effort; errors surface on user nav.
@@ -635,13 +671,10 @@ function recordSeen(article: IArticle) {
 // Batched per-feed unread (OPT-2): reads the seen map once for the whole
 // batch instead of once per feed (a menu fill badges every visible row).
 // Maps feed id → unread (a never-seen feed maps to its full backlog).
-// `countCurrent` forwards to feedUnread's onCurrent rule: the config badges
-// keep the default (the article on screen still counts), the next pill passes
-// false (it counts only what's ahead).
-export async function unreadCounts(chs: IFeed[], countCurrent = true): Promise<Map<number, number>> {
+export async function unreadCounts(chs: IFeed[]): Promise<Map<number, number>> {
    const seenMap = readSeen()
    const out = new Map<number, number>()
-   await Promise.all(chs.map(async (ch) => out.set(ch.id, await feedUnread(ch, seenMap, countCurrent))))
+   await Promise.all(chs.map(async (ch) => out.set(ch.id, await feedUnread(ch, seenMap))))
    return out
 }
 

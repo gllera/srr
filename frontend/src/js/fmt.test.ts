@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import {
    collapseBrokenMedia,
-   extractImageUrls,
+   extractPrefetchMedia,
    sanitizeHtml,
    timeAgo,
    timeAgoProse,
@@ -427,58 +427,96 @@ describe("timeAgo", () => {
    })
 })
 
-describe("extractImageUrls", () => {
-   it("returns all http(s) image URLs", () => {
+describe("extractPrefetchMedia", () => {
+   const BASE = "http://localhost:3000/"
+
+   it("returns all http(s) img srcs as images", () => {
       const html = '<p>x</p><img src="http://a.com/1.jpg"><img src="https://b.com/2.png"><img src="http://c.com/3.gif">'
-      expect(extractImageUrls(html)).toEqual(["http://a.com/1.jpg", "https://b.com/2.png", "http://c.com/3.gif"])
+      expect(extractPrefetchMedia(html).images).toEqual([
+         "http://a.com/1.jpg",
+         "https://b.com/2.png",
+         "http://c.com/3.gif",
+      ])
    })
 
-   it("ignores non-http schemes", () => {
-      const html = '<img src="data:image/png;base64,xx"><img src="//cdn/x.jpg"><img src="https://ok.com/x.jpg">'
-      expect(extractImageUrls(html)).toEqual(["https://ok.com/x.jpg"])
-   })
-
-   it("returns empty for no images or empty input", () => {
-      expect(extractImageUrls("<p>no images</p>")).toEqual([])
-      expect(extractImageUrls("")).toEqual([])
+   it("returns empty lists for no media or empty input", () => {
+      expect(extractPrefetchMedia("<p>no images</p>")).toEqual({ images: [], videos: [] })
+      expect(extractPrefetchMedia("")).toEqual({ images: [], videos: [] })
    })
 
    it("extracts unquoted src (backend #minify strips quotes for clean URLs)", () => {
-      // The #minify pass on the backend drops attribute quotes when the value
-      // has no special chars — common for clean CDN URLs. Both forms must be
-      // recognised or those feeds never prefetch.
       const html = "<p><a href=https://example.com/post/ABC><img src=https://cdn.example/img/ABC.jpg alt=t></a></p>"
-      expect(extractImageUrls(html)).toEqual(["https://cdn.example/img/ABC.jpg"])
+      expect(extractPrefetchMedia(html).images).toEqual(["https://cdn.example/img/ABC.jpg"])
    })
 
-   it("mixes quoted and unquoted img tags in one pass", () => {
-      const html = "<img src=\"http://a.com/1.jpg\"><img src=https://b.com/2.png><img src='http://c.com/3.gif'>"
-      expect(extractImageUrls(html)).toEqual(["http://a.com/1.jpg", "https://b.com/2.png", "http://c.com/3.gif"])
+   it("skips non-http schemes and drops an off-base protocol-relative ref", () => {
+      // data: has a scheme (not relative, not http) — skipped. "//cdn/x.jpg" is
+      // scheme-less, so it takes the relative path and the bounds check drops it
+      // (resolves to a foreign origin) — same routing as sanitizeHtml's render.
+      const html = '<img src="data:image/png;base64,xx"><img src="//cdn/x.jpg"><img src="https://ok.com/x.jpg">'
+      expect(extractPrefetchMedia(html).images).toEqual(["https://ok.com/x.jpg"])
    })
 
-   it("matches the exact URL sanitizeHtml writes (so preload hrefs share cache)", () => {
-      // Serialized HTML escapes & as &amp;; the browser decodes it on parse, so
-      // compare the parsed attribute value (not the serialized string).
+   it("resolves a relative assets/ src against the pack base (self-hosted media prefetches too)", () => {
+      expect(extractPrefetchMedia('<img src="assets/ab/cd.webp">').images).toEqual([BASE + "assets/ab/cd.webp"])
+   })
+
+   it("proxies img src and video poster, exactly as sanitizeHtml renders them", () => {
+      const prefix = "https://proxy.test/?u="
+      setImgProxy(prefix)
+      const html = '<img src="http://a.com/1.jpg"><video poster="http://b.com/p.jpg" src="http://b.com/v.mp4"></video>'
+      const media = extractPrefetchMedia(html)
+      expect(media.images).toEqual([imgProxy("http://a.com/1.jpg", prefix), imgProxy("http://b.com/p.jpg", prefix)])
+      // Video sources are never proxied (image proxies don't handle video).
+      expect(media.videos).toEqual(["http://b.com/v.mp4"])
+   })
+
+   it("extracts video poster into images and video src into videos", () => {
+      const html = '<video poster="https://cdn.example/p.jpg" src="https://cdn.example/v.webm"></video>'
+      expect(extractPrefetchMedia(html)).toEqual({
+         images: ["https://cdn.example/p.jpg"],
+         videos: ["https://cdn.example/v.webm"],
+      })
+   })
+
+   it("falls back to the first <source> when <video> has no src", () => {
+      const html = '<video><source src="https://cdn.example/v1.webm"><source src="https://cdn.example/v2.mp4"></video>'
+      expect(extractPrefetchMedia(html).videos).toEqual(["https://cdn.example/v1.webm"])
+   })
+
+   it("resolves a relative video src against the pack base", () => {
+      expect(extractPrefetchMedia('<video src="assets/ab/cd.webm"></video>').videos).toEqual([
+         BASE + "assets/ab/cd.webm",
+      ])
+   })
+
+   it("dedupes repeated URLs (pre-#dedupmedia articles repeat media)", () => {
+      const html = '<img src="https://a.com/x.jpg"><img src="https://a.com/x.jpg"><img src="https://a.com/y.jpg">'
+      expect(extractPrefetchMedia(html).images).toEqual(["https://a.com/x.jpg", "https://a.com/y.jpg"])
+   })
+
+   it("ignores an <img> with only srcset or only data-src (nothing the render would fetch)", () => {
+      // DOM parse reads the real src attribute — a data-src lazy placeholder is
+      // not scraped (the old regex's \bsrc fallback was a documented accident).
+      expect(extractPrefetchMedia('<img srcset="https://cdn.example/a 1x, https://cdn.example/b 2x">').images).toEqual(
+         [],
+      )
+      expect(extractPrefetchMedia('<img data-src="https://lazy.example/x.jpg">').images).toEqual([])
+   })
+
+   it("reads the real src when a data-src placeholder precedes it", () => {
+      const html = '<img data-src="https://lazy.example/placeholder.gif" src="https://cdn.example/real.jpg">'
+      expect(extractPrefetchMedia(html).images).toEqual(["https://cdn.example/real.jpg"])
+   })
+
+   it("matches the exact URL sanitizeHtml writes (prefetch and render share one cache entry)", () => {
+      setImgProxy("https://proxy.test/?u=")
       const raw = "http://example.com/pic.jpg"
       const t = document.createElement("template")
       t.innerHTML = sanitizeHtml(`<img src="${raw}">`)
-      const img = t.content.querySelector("img")!
-      expect(img.getAttribute("src")).toBe(imgProxy(raw, getImgProxy()))
-   })
-
-   it("ignores an <img> with only srcset (no src) — nothing to prefetch", () => {
-      expect(extractImageUrls('<img srcset="https://cdn.example/a 1x, https://cdn.example/b 2x">')).toEqual([])
-   })
-
-   it("prefers the real src when a data-src placeholder precedes it (greedy match lands on the last src=)", () => {
-      const html = '<img data-src="https://lazy.example/placeholder.gif" src="https://cdn.example/real.jpg">'
-      expect(extractImageUrls(html)).toEqual(["https://cdn.example/real.jpg"])
-   })
-
-   it("scrapes a lone data-src as a fallback (documented: \\bsrc matches data-src; harmless for prefetch)", () => {
-      // Pins current behavior — the prefetch list is best-effort warming, so
-      // warming a data-src lazy URL when there's no real src is acceptable.
-      expect(extractImageUrls('<img data-src="https://lazy.example/x.jpg">')).toEqual(["https://lazy.example/x.jpg"])
+      expect(extractPrefetchMedia(`<img src="${raw}">`).images).toEqual([
+         t.content.querySelector("img")!.getAttribute("src"),
+      ])
    })
 })
 
