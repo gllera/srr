@@ -2398,3 +2398,89 @@ describe("resolveNoMatch writes positionless hash (#9)", () => {
       expect(/^-?\d+$/.test(posStr)).toBe(false)
    })
 })
+
+// ── Task 6: onStoreRefreshed / probeCurrent ─────────────────────────────────
+// data.refresh() (merged) swaps in a fresh db.gz snapshot; search.invalidate()
+// (merged) drops search.ts's caches. onStoreRefreshed() is nav's side of that
+// same reconciliation: adopt the new snapshot's membership/bounds WITHOUT
+// re-snapshotting the walk (bounds only ever RISE, by a grown add_idx —
+// re-deriving from seen would yank the unseen-only sequence mid-session), drop
+// the stale neighbor caches, and reload an active search snapshot.
+describe("onStoreRefreshed", () => {
+   afterEach(() => nav.setUnreadOnly(false))
+
+   it("keeps existing bounds, raises only by a grown add_idx, adds new members", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }]) // [ALL] over feed 1 (2 articles, add_idx 0)
+      expect(nav.filter.feeds.get(1)).toBe(0)
+
+      // Simulate a refresh: feed 1 expired past chron 0 (add_idx advances to 1)
+      // and a brand-new feed 2 appears (add_idx 2); total_art grows to 3.
+      data.db.feeds[1].add_idx = 1
+      data.db.feeds[2] = makeFeed({ id: 2, total_art: 1, add_idx: 2 })
+      data.db.total_art = 3
+
+      await nav.onStoreRefreshed()
+      expect(nav.filter.feeds.get(1)).toBe(1) // raised by the grown add_idx
+      expect(nav.filter.feeds.get(2)).toBe(2) // new member joins at its own add_idx
+   })
+
+   it("does NOT re-snapshot unseen-only bounds from seen", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }]) // 3 articles, add_idx 0
+      nav.setUnreadOnly(true)
+      nav.filter.set(["1"]) // never seen ⇒ bound snapshots at max(0, -1+1) = 0
+      expect(nav.filter.feeds.get(1)).toBe(0)
+
+      // User reads onward THIS session — srr-seen now records chron 1 as seen.
+      // Re-deriving the bound from seen would raise it to 2 (seen+1) and yank
+      // the walk past the article just read.
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 1 }))
+      await nav.onStoreRefreshed()
+      expect(nav.filter.feeds.get(1)).toBe(0) // unchanged — no re-snapshot
+   })
+
+   it("drops a feed deleted from the store", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }]) // [ALL]
+      expect(nav.filter.feeds.has(1)).toBe(true)
+      delete data.db.feeds[1]
+      await nav.onStoreRefreshed()
+      expect(nav.filter.feeds.has(1)).toBe(false)
+   })
+
+   it("reloads the search snapshot when a q: filter is active", async () => {
+      // loadHits is the seam nav calls; drive it directly (like the
+      // "search hit-set snapshot" suite above) rather than through the
+      // search()-generator stand-in — cleanest way to prove a grown hit set.
+      searchMod.loadHits.mockReset()
+      setupIndex(Array.from({ length: 20 }, () => ({ feedId: 1 })))
+
+      searchMod.loadHits.mockResolvedValueOnce({ chrons: [5], truncated: false })
+      nav.applyFilter([nav.SEARCH_PREFIX + "refresh1"])
+      expect(await nav.feedRight(0)).toBe(5)
+
+      // Simulate a refresh that grew the hit set: a newer article now matches.
+      searchMod.loadHits.mockResolvedValueOnce({ chrons: [5, 12], truncated: false })
+      await nav.onStoreRefreshed()
+      expect(await nav.feedRight(6)).toBe(12) // sees the new hit
+   })
+})
+
+describe("probeCurrent", () => {
+   it("recomputes has_right/right_count for the current position after growth", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }])
+      await nav.goTo(1) // lands on chron 1, the newest of the original 2 articles
+
+      // Grow the store: a new article appears at chron 2 (still feed 1).
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      await nav.onStoreRefreshed() // reconciles the filter, drops stale neighbor caches
+
+      const o = await nav.probeCurrent()
+      expect(o).not.toBeNull()
+      expect(o!.has_right).toBe(true)
+      expect(o!.right_count).toBe(1)
+   })
+
+   it("returns null with no article on screen", async () => {
+      nav.select(-1, -1)
+      expect(await nav.probeCurrent()).toBeNull()
+   })
+})
