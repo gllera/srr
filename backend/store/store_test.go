@@ -197,6 +197,44 @@ func TestCacheControlForKeyFrontend(t *testing.T) {
 	}
 }
 
+// SRR's own gzip objects — db.gz and every pack-grammar name — declare
+// application/gzip when the caller sets no explicit ObjectMeta type. Nothing
+// else gets a key-derived type: assets are typed by peek/process alone, and
+// unknown keys fall to the backend's octet-stream default. There is
+// deliberately no encoding counterpart — packs must never carry
+// Content-Encoding (the reader gunzips manually via DecompressionStream).
+func TestContentTypeForKey(t *testing.T) {
+	cases := []struct{ key, want string }{
+		{"db.gz", contentTypeGzip},
+		{"idx/0.gz", contentTypeGzip},
+		{"idx/L1.gz", contentTypeGzip},
+		{"idx/h2.gz", contentTypeGzip},
+		{"data/250.gz", contentTypeGzip},
+		{"data/L7.gz", contentTypeGzip},
+		{"meta/0.gz", contentTypeGzip},
+		{"meta/L3.gz", contentTypeGzip},
+		{"meta/s4.gz", contentTypeGzip},
+		// Not pack names: kind letter owned by another series / malformed stems.
+		{"data/h3.gz", ""},
+		{"idx/s3.gz", ""},
+		{"idx/L.gz", ""},
+		{"L1.gz", ""},
+		{"idx/sub/3.gz", ""},
+		// Assets: peek/process is the single source of truth — no key-derived type.
+		{"assets/ab/0123456789abcdef.jpg", ""},
+		// Non-gzip object classes.
+		{"out/myfeed.rss", ""},
+		{".locked", ""},
+		{"index.html", ""},
+		{"unknown.txt", ""},
+	}
+	for _, c := range cases {
+		if got := contentTypeForKey(c.key); got != c.want {
+			t.Errorf("contentTypeForKey(%q) = %q, want %q", c.key, got, c.want)
+		}
+	}
+}
+
 func TestLoadEnvBoolParsing(t *testing.T) {
 	type testConfig struct {
 		Enabled bool `yaml:"enabled"`

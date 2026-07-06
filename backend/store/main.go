@@ -92,6 +92,29 @@ func cacheControlForKey(key string) string {
 	}
 }
 
+// contentTypeGzip is the Content-Type of SRR's own gzip object classes (RFC
+// 6713): db.gz and every pack-grammar name. It describes the bytes on the
+// wire — the reader decompresses packs itself (DecompressionStream in
+// data.ts), so these objects must NEVER carry `Content-Encoding: gzip`: a
+// transparently-decompressing CDN/browser would hand the reader already-
+// inflated bytes and break every deployed client.
+const contentTypeGzip = "application/gzip"
+
+// contentTypeForKey returns the Content-Type a backend should attach when
+// writing key with no explicit ObjectMeta type, or "" for keys with no
+// key-derived type (assets are typed by peek/process alone — never by
+// extension or byte-sniffing; unknown keys fall to the backend's
+// application/octet-stream default). This is grammar classification of SRR's
+// own key classes, not extension guessing: a pack key's .gz is truthful by
+// construction. Centralised next to cacheControlForKey so the writer↔CDN
+// contract stays in one place.
+func contentTypeForKey(key string) string {
+	if key == "db.gz" || packKeyRe.MatchString(key) {
+		return contentTypeGzip
+	}
+	return ""
+}
+
 // Backend defines the storage operations used by the application.
 type Backend interface {
 	Get(ctx context.Context, key string, ignoreMissing bool) (io.ReadCloser, error)

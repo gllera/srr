@@ -167,6 +167,28 @@ func TestHTTPAtomicPutContentType(t *testing.T) {
 	}
 }
 
+// A pack write with no explicit ObjectMeta type declares application/gzip via
+// contentTypeForKey (mirrors S3); it must carry no Content-Encoding — the
+// reader gunzips manually.
+func TestHTTPPutPackContentType(t *testing.T) {
+	f := newHTTPFixture(t)
+	b := openHTTPStore(t, f)
+
+	if err := b.Put(ctx, "data/L3.gz", strings.NewReader("x"), true); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	f.mu.Lock()
+	ct := f.contentTypes["/base/data/L3.gz"]
+	enc := f.lastHeaders.Get("Content-Encoding")
+	f.mu.Unlock()
+	if ct != "application/gzip" {
+		t.Errorf("Content-Type = %q, want application/gzip", ct)
+	}
+	if enc != "" {
+		t.Errorf("Content-Encoding = %q, want none", enc)
+	}
+}
+
 func TestHTTPRm(t *testing.T) {
 	f := newHTTPFixture(t)
 	b := openHTTPStore(t, f)

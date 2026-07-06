@@ -148,9 +148,11 @@ func (d *HTTP) AtomicPut(ctx context.Context, key string, r io.Reader, meta Obje
 	return d.put(ctx, key, r, true, meta)
 }
 
-// put is the shared write core, mirroring S3's: Content-Type from meta
-// (default application/octet-stream), Content-Encoding only when set,
-// Cache-Control from the writer↔CDN contract, and `If-None-Match: *` as the
+// put is the shared write core, mirroring S3's: Content-Type from meta, then
+// contentTypeForKey (db.gz + pack names → application/gzip), then the
+// application/octet-stream default; Content-Encoding only when meta sets it
+// (never on packs — the reader gunzips manually, see contentTypeGzip);
+// Cache-Control from the writer↔CDN contract; and `If-None-Match: *` as the
 // exclusive-create condition. A server that ignores conditional requests
 // overwrites — exclusive create (the .locked marker) is then best-effort.
 func (d *HTTP) put(ctx context.Context, key string, r io.Reader, ignoreExisting bool, meta ObjectMeta) error {
@@ -165,6 +167,9 @@ func (d *HTTP) put(ctx context.Context, key string, r io.Reader, ignoreExisting 
 	}
 
 	contentType := meta.ContentType
+	if contentType == "" {
+		contentType = contentTypeForKey(key)
+	}
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
