@@ -405,6 +405,85 @@ export const filter = {
    },
 }
 
+// After data.refresh() swapped the store snapshot: reconcile the filter and the
+// navigation caches WITHOUT re-snapshotting the walk. Bounds only ever rise by
+// a grown add_idx (expiration) — never re-derived from seen, which would yank
+// the unseen-only sequence mid-session (articles read this session would drop
+// out from under ←). New members (a new feed under [ALL], a feed newly tagged
+// into the active tag) join with the same bound set()/applyUnseen would give
+// them; members gone from the store leave. New articles need no bound work at
+// all — they sit above every existing bound, so matches()/findRight see them
+// automatically. pos is untouched: chronIdx is a permanent address and
+// total_art only ever grows. Saved/search have no per-feed bounds (filter.feeds
+// stays empty for them) — skipped here.
+export async function onStoreRefreshed(): Promise<void> {
+   if (!filter.saved && !filter.search) {
+      // Recompute the fresh membership set exactly as filter.set/clear would:
+      // [ALL] (no active tokens) = every feed with total_art>0; a feed/tag
+      // filter = the union its tokens resolve to (numeric ids as feeds, else a
+      // tag match) — the SAME resolution loop filter.set uses, so a mixed
+      // multi-token filter (feed ids + tags) gets the identical union.
+      const fresh = new Map<number, number>()
+      if (filter.active) {
+         for (const token of filter.tokens) {
+            const num = Number(token)
+            if (Number.isFinite(num)) {
+               const ch = data.db.feeds[num]
+               if (ch?.total_art && !fresh.has(num)) fresh.set(num, ch.add_idx ?? 0)
+            } else
+               for (const ch of Object.values(data.db.feeds))
+                  if (ch.tag === token && ch.total_art && !fresh.has(ch.id)) fresh.set(ch.id, ch.add_idx ?? 0)
+         }
+      } else {
+         for (const ch of Object.values(data.db.feeds)) if (ch.total_art) fresh.set(ch.id, ch.add_idx ?? 0)
+      }
+      const seenMap = readSeen()
+      for (const [id, addIdx] of fresh) {
+         const old = filter.feeds.get(id)
+         if (old !== undefined) {
+            // Existing member: raise the bound only if add_idx grew (expiration
+            // advanced past it) — never re-derive it from seen.
+            if (addIdx > old) filter.feeds.set(id, addIdx)
+         } else {
+            // A brand-new member: join with the same bound a fresh set()/
+            // applyUnseen would give it (raised past its seen high-water only
+            // in unseen-only mode; a never-seen member keeps its natural add_idx).
+            const s = unreadOnly ? (seenMap["feed:" + id] ?? -1) : -1
+            filter.feeds.set(id, Math.max(addIdx, s + 1))
+         }
+      }
+      // A member gone from the store (feed deleted, or dropped from the tag/
+      // [ALL] scope) leaves.
+      for (const id of [...filter.feeds.keys()]) if (!fresh.has(id)) filter.feeds.delete(id)
+   }
+   // Cached neighbor probes are exactly what new content invalidates (a stored
+   // "no right neighbor" at the article that was newest before the refresh,
+   // most of all), and any in-flight prefetch may equally target stale content.
+   // Drop both; the next step re-probes fresh.
+   next.left = next.right = undefined
+   abortPrefetch()
+   // An active search walks a snapshot computed against the old store. The
+   // caller (refresh.ts) invalidates search.ts's caches first — see
+   // search.invalidate()'s docblock — so this is nav's half of that pairing:
+   // drop nav's own snapshot and reload it. ensureSearchSet's supersession
+   // guard absorbs a concurrent query change racing this reload.
+   if (filter.search) {
+      resetSearchStream()
+      await ensureSearchSet()
+   }
+}
+
+// Recompute the reader chrome (has_left/has_right/right_count) for the article
+// already on screen — after a store refresh, without re-rendering the content
+// (no fade, no scroll: the silent-refresh contract). null when nothing is
+// showing. data.loadArticle(pos) is cache-warm (the article itself didn't
+// change), so this costs idx/meta probes at most, no re-fetch of the article.
+export async function probeCurrent(): Promise<IShowFeed | null> {
+   if (pos < 0) return null
+   const article = await data.loadArticle(pos)
+   return showFeed(article)
+}
+
 // True only in unseen-only mode with a feed/tag filter active (not saved, not
 // search). Matches the exact conditions under which applyUnseen raises bounds,
 // so feedUnread and isValidSeen can branch on the same predicate.
