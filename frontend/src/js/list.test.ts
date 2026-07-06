@@ -1290,4 +1290,121 @@ describe("list", () => {
          return { f: a.f, w: a.p || a.a, t: a.t }
       })
    })
+
+   // ── onStoreGrown — silent top-reopen after a store refresh ───────────────
+   // A grown store (data.refresh + nav.onStoreRefreshed, both merged) must NOT
+   // rebuild or move the viewport: the top merely reopens (terminus off, sentinel
+   // kicked live again) so newer rows arrive through the existing prepend +
+   // scroll-compensation machinery — invisibly above the fold when parked at the
+   // top, on the next upward scroll otherwise. Exception: an empty state
+   // (nothing on screen to disturb) rebuilds instead.
+   describe("onStoreGrown", () => {
+      it("reopens an exhausted top when a newer match exists (terminus off, no rebuild)", async () => {
+         setIndex(3) // chrons 0..2, anchored at newest → exhaustedTop, LATEST terminus
+         await list.render()
+         expect($top()).not.toBeNull()
+         const rowsBefore = $rows().length
+
+         // Grow the store: article 3 lands above the current window.
+         data._arts.set(3, art({ f: 1, t: "title 3", a: 3 }))
+         data.db.total_art = 4
+
+         await list.onStoreGrown()
+         expect($top()).toBeNull() // reopened
+         expect($rows().length).toBe(rowsBefore) // no prepend — fully silent
+         // The top is genuinely live again (exhaustedTop cleared, not just the
+         // terminus DOM): an explicit page-in prepends the new article and
+         // re-exhausts at the new newest end.
+         await list.loadNewer()
+         expect($chrons()[0]).toBe(3)
+         expect($top()).not.toBeNull()
+      })
+
+      it("keeps the terminus when the refresh brought nothing for this filter", async () => {
+         setIndex(3)
+         await list.render()
+         expect($top()).not.toBeNull()
+         await list.onStoreGrown() // no growth: the probe finds nothing newer
+         expect($top()).not.toBeNull() // terminus untouched, no flicker
+      })
+
+      it("rebuilds when the list shows an empty state", async () => {
+         setIndex(0)
+         await list.render()
+         expect(container.querySelector(".srr-list-empty")).not.toBeNull()
+
+         data._arts.set(0, art({ f: 1, t: "title 0", a: 0 }))
+         data.db.total_art = 1
+
+         await list.onStoreGrown()
+         expect($rows().length).toBeGreaterThan(0)
+         expect(container.querySelector(".srr-list-empty")).toBeNull()
+      })
+
+      it("a stale probe bails on the token guard when a rerender supersedes it mid-flight", async () => {
+         // Same discipline as "a superseding render aborts the gated one": gate
+         // the reopen probe, rebuild while it's pending, then release it — the
+         // stale onStoreGrown must not reopen the NEW render's top.
+         setIndex(3)
+         await list.render()
+         data._arts.set(3, art({ f: 1, t: "title 3", a: 3 }))
+         data.db.total_art = 4
+
+         let release: (() => void) | null = null
+         const gate = new Promise<void>((r) => (release = () => r()))
+         nav.feedRight.mockImplementationOnce(async (from: number) => {
+            await gate
+            return data.findRight(from)
+         })
+
+         const p = list.onStoreGrown() // probe dispatched, gated
+         await list.rerender() // supersede: fresh token, rows [3..0], terminus present
+         expect($chrons()).toEqual([3, 2, 1, 0])
+         expect($top()).not.toBeNull()
+         release!()
+         await p
+         // The stale probe found a match but bailed on the token guard: the new
+         // render's terminus stays, exactly once.
+         expect(container.querySelectorAll(".srr-wire-top").length).toBe(1)
+      })
+
+      it("kicks the top-sentinel observer on reopen so a user parked at the top still pages", async () => {
+         // IntersectionObserver only fires on intersection CHANGES, and the usual
+         // exhaustedTop position is parked at scroll 0 with the top sentinel
+         // ALREADY intersecting — removing the terminus alone would never resume
+         // paging there. The reopen must unobserve+re-observe the top sentinel,
+         // which re-delivers its CURRENT intersection state.
+         const calls: { op: string; el: Element }[] = []
+         class FakeIO {
+            observe(el: Element): void {
+               calls.push({ op: "observe", el })
+            }
+            unobserve(el: Element): void {
+               calls.push({ op: "unobserve", el })
+            }
+            disconnect(): void {
+               // teardownObserver calls this on rebuild; nothing to record
+            }
+         }
+         vi.stubGlobal("IntersectionObserver", FakeIO)
+         try {
+            setIndex(3)
+            await list.render()
+            // render lays [topSentinel, rows, bottomSentinel] into the container.
+            const sentinel = container.firstElementChild!
+            expect(sentinel.className).toBe("srr-list-sentinel")
+            calls.length = 0
+
+            data._arts.set(3, art({ f: 1, t: "title 3", a: 3 }))
+            data.db.total_art = 4
+            await list.onStoreGrown()
+            expect(calls).toEqual([
+               { op: "unobserve", el: sentinel },
+               { op: "observe", el: sentinel },
+            ])
+         } finally {
+            vi.unstubAllGlobals()
+         }
+      })
+   })
 })

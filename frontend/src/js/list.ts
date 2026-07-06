@@ -79,6 +79,7 @@ let exhaustedBottom = false // walked off the oldest end of the (filtered) feed
 let loadingTop = false // a newer-load is in flight (re-entry guard for fetchNewer)
 let loadingBottom = false // an older-load is in flight (re-entry guard for fetchOlder)
 let pumping = false // a downward viewport-fill loop is running (re-entry guard for pump)
+let growing = false // an onStoreGrown reopen/rebuild is in flight (re-entry guard)
 let builtKey: string | null = null // filterKey() the current DOM was built for
 let observer: IntersectionObserver | null = null
 // Set by a genuine user scroll gesture (wheel/touch/key) during a render, so the
@@ -758,6 +759,53 @@ export function refresh(): void {
 export function rerender(): Promise<void> {
    builtKey = null
    return render()
+}
+
+// After a store refresh grew the feed: reopen the top of the list WITHOUT
+// rebuilding or moving the viewport (the fully-silent contract). Probes for a
+// newer MATCH first so the LATEST terminus doesn't flicker off when the refresh
+// brought nothing for this filter; when one exists, the terminus comes off
+// (scroll-compensated) and the top sentinel resumes paging — parked at the very
+// top (the usual exhaustedTop position) the reopened runway pages in immediately
+// but invisibly (the prepend compensation keeps the viewport pinned, so the new
+// rows sit above the fold until the user scrolls up); away from the top it pages
+// in when the sentinel next enters its rootMargin. An empty state (fresh store,
+// all-caught-up, no rows) rebuilds instead: there is nothing on screen to
+// disturb.
+export async function onStoreGrown(): Promise<void> {
+   if (growing) return
+   growing = true
+   try {
+      if (!rowsEl || !rowsEl.querySelector("a.srr-row")) {
+         await rerender()
+         return
+      }
+      refresh() // re-derive row state; cheap, covers a gen-rebuild's changed feeds
+      // refresh() can collapse a now-empty Saved view to its empty state
+      // (showEmptyState nulls rowsEl) — nothing left to reopen.
+      if (!rowsEl) return
+      if (!exhaustedTop || newest < 0) return
+      const my = tok
+      const found = await nav.feedRight(newest + 1).catch(() => -1)
+      if (my !== tok || found === -1) return // superseded by a rebuild, or nothing newer
+      exhaustedTop = false
+      syncTopTerminus(true)
+      // Kick the observer: IntersectionObserver only fires on intersection
+      // CHANGES, and at the usual exhaustedTop position (parked at scroll 0) the
+      // top sentinel is ALREADY intersecting — removing the terminus doesn't
+      // change that, and from scroll 0 there is no upward scroll left to create
+      // a re-entry edge. Re-observing re-delivers the sentinel's CURRENT
+      // intersection state, so the reopened runway still pages in through the
+      // normal fetchNewer path (loadingTop + tok + scroll compensation keep it
+      // silent: the viewport stays pinned, the new rows become visible when the
+      // user scrolls up).
+      if (observer) {
+         observer.unobserve(topSentinel)
+         observer.observe(topSentinel)
+      }
+   } finally {
+      growing = false
+   }
 }
 
 function findRow(chron: number): HTMLElement | null {
