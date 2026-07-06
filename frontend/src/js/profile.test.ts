@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest"
 // profile.ts is a pure module (no DOM, no module-load side effects) so we can
 // import it statically — no vi.resetModules() needed.
-import { exportProfile, importProfile } from "./profile"
+import { exportProfile, importProfile, profileTs, touchProfile, localSeen } from "./profile"
 
 const SEEN_KEY = "srr-seen"
 const SAVED_KEY = "srr-saved"
@@ -22,10 +22,10 @@ describe("exportProfile", () => {
       localStorage.clear()
    })
 
-   it("returns a JSON object with v:1 and the four portable keys", () => {
+   it("returns a JSON object with v:2 and the four portable keys", () => {
       seedAll()
       const obj = JSON.parse(exportProfile())
-      expect(obj.v).toBe(1)
+      expect(obj.v).toBe(2)
       expect(obj.seen).toEqual({ "feed:1": 42, "feed:2": 7 })
       expect(obj.saved).toEqual([3, 5, 10]) // sorted ascending
       expect(obj.unreadOnly).toBe(true)
@@ -42,7 +42,7 @@ describe("exportProfile", () => {
 
    it("exports empty defaults when nothing is stored", () => {
       const obj = JSON.parse(exportProfile())
-      expect(obj.v).toBe(1)
+      expect(obj.v).toBe(2)
       expect(obj.seen).toEqual({})
       expect(obj.saved).toEqual([])
       expect(obj.unreadOnly).toBe(false)
@@ -64,8 +64,8 @@ describe("importProfile", () => {
       expect(JSON.parse(localStorage.getItem(SEEN_KEY)!)).toEqual({ "feed:1": 5 })
    })
 
-   it("rejects v !== 1 with ok:false and mutates nothing", () => {
-      const r = importProfile(JSON.stringify({ v: 2, seen: {}, saved: [], unreadOnly: false, imgProxy: "" }), {
+   it("rejects an unsupported v (not 1 or 2) with ok:false and mutates nothing", () => {
+      const r = importProfile(JSON.stringify({ v: 3, seen: {}, saved: [], unreadOnly: false, imgProxy: "" }), {
          prefs: false,
       })
       expect(r.ok).toBe(false)
@@ -201,5 +201,97 @@ describe("importProfile", () => {
       expect(r2.ok).toBe(true)
       // string "NaN" fails typeof v === "number"; nothing written
       expect(localStorage.getItem(SEEN_KEY)).toBeNull()
+   })
+})
+
+describe("v2 blob / ts / adopt", () => {
+   beforeEach(() => {
+      localStorage.clear()
+   })
+
+   it("exportProfile emits v:2 with the stored ts (0 when never stamped)", () => {
+      localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 5 }))
+      expect(JSON.parse(exportProfile())).toMatchObject({ v: 2, ts: 0 })
+      touchProfile(1234)
+      expect(JSON.parse(exportProfile())).toMatchObject({ v: 2, ts: 1234 })
+      expect(profileTs()).toBe(1234)
+   })
+
+   it("adopt replaces seen and saved wholesale and takes the blob's ts", () => {
+      localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 500, "feed:2": 90 }))
+      localStorage.setItem(SAVED_KEY, JSON.stringify([1, 2, 3]))
+      touchProfile(100)
+      const blob = JSON.stringify({
+         v: 2,
+         ts: 200,
+         seen: { "feed:1": 10 },
+         saved: [7],
+         unreadOnly: false,
+         imgProxy: "",
+      })
+      expect(importProfile(blob, { prefs: false, adopt: true }).ok).toBe(true)
+      expect(JSON.parse(localStorage.getItem(SEEN_KEY)!)).toEqual({ "feed:1": 10 }) // feed:2 dropped — wholesale
+      expect(JSON.parse(localStorage.getItem(SAVED_KEY)!)).toEqual([7]) // un-saves propagate
+      expect(profileTs()).toBe(200)
+   })
+
+   it("adopt never applies prefs (prefs stay carried-not-applied)", () => {
+      localStorage.setItem(UNREAD_ONLY_KEY, "1")
+      const blob = JSON.stringify({ v: 2, ts: 9, seen: {}, saved: [], unreadOnly: false, imgProxy: "" })
+      importProfile(blob, { prefs: false, adopt: true })
+      expect(localStorage.getItem(UNREAD_ONLY_KEY)).toBe("1")
+   })
+
+   it("adopt with malformed seen still replaces wholesale (empty map) and takes ts", () => {
+      localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 500 }))
+      const blob = JSON.stringify({ v: 2, ts: 5, seen: "garbage", saved: [] })
+      expect(importProfile(blob, { prefs: false, adopt: true }).ok).toBe(true)
+      expect(JSON.parse(localStorage.getItem(SEEN_KEY)!)).toEqual({})
+      expect(profileTs()).toBe(5)
+   })
+
+   it("adopt floors a fractional ts and clamps a negative ts to 0", () => {
+      const blob = (ts: number) => JSON.stringify({ v: 2, ts, seen: {}, saved: [], unreadOnly: false, imgProxy: "" })
+      importProfile(blob(200.9), { prefs: false, adopt: true })
+      expect(profileTs()).toBe(200)
+      importProfile(blob(-5), { prefs: false, adopt: true })
+      expect(profileTs()).toBe(0)
+   })
+
+   it("a merge that changes nothing does not stamp ts", () => {
+      localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 500 }))
+      localStorage.setItem(SAVED_KEY, JSON.stringify([7]))
+      touchProfile(777)
+      const blob = JSON.stringify({ v: 1, seen: { "feed:1": 10 }, saved: [7], unreadOnly: false, imgProxy: "" })
+      expect(importProfile(blob, { prefs: false }).ok).toBe(true)
+      expect(profileTs()).toBe(777) // lower seen + already-saved id = no-op, ts untouched
+   })
+
+   it("v1 blob still merges monotonically (max/union) and a merge stamps ts", () => {
+      localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 500 }))
+      localStorage.setItem(SAVED_KEY, JSON.stringify([3]))
+      const blob = JSON.stringify({
+         v: 1,
+         seen: { "feed:1": 10, "feed:2": 4 },
+         saved: [7],
+         unreadOnly: true,
+         imgProxy: "",
+      })
+      expect(importProfile(blob, { prefs: false }).ok).toBe(true)
+      expect(JSON.parse(localStorage.getItem(SEEN_KEY)!)).toEqual({ "feed:1": 500, "feed:2": 4 })
+      expect(JSON.parse(localStorage.getItem(SAVED_KEY)!)).toEqual([3, 7])
+      expect(profileTs()).toBeGreaterThan(0)
+   })
+
+   it("v2 blob WITHOUT adopt (file restore) merges like v1", () => {
+      localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 500 }))
+      const blob = JSON.stringify({ v: 2, ts: 999, seen: { "feed:1": 10 }, saved: [], unreadOnly: false, imgProxy: "" })
+      importProfile(blob, { prefs: false })
+      expect(JSON.parse(localStorage.getItem(SEEN_KEY)!)).toEqual({ "feed:1": 500 })
+   })
+
+   it("localSeen returns the parsed map", () => {
+      localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:9": 42 }))
+      expect(localSeen()).toEqual({ "feed:9": 42 })
    })
 })

@@ -135,7 +135,7 @@ describe("push", () => {
       const body = JSON.parse(put[1].body)
       expect(body.seen).toEqual({ "feed:2": 10, "feed:1": 50 }) // remote ∪ local
       expect(body.saved).toEqual([7])
-      expect(body.v).toBe(1)
+      expect(body.v).toBe(2)
    })
 
    it("skips the PUT when the pull fails (never clobber an unread remote)", async () => {
