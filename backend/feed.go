@@ -230,12 +230,21 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 	// Back-dated items below Watermark are not recovered (single-cursor
 	// limitation), and watermark-second or dateless items that disappear
 	// from the feed and reappear are re-ingested as duplicates (snapshot
-	// semantics over carry-over).
+	// semantics over carry-over). The stale-response guard below removes the
+	// common flap — a stale cache copy predating every watermark item — but a
+	// response that keeps one watermark sibling while dropping another still
+	// re-ingests the dropped one.
 	priorWatermark := c.Watermark
 	priorBoundary := uint32Set(c.BoundaryGUIDs)
 
 	maxPub := priorWatermark
 	boundary := make(map[uint32]int64)
+
+	// Stale-response detection inputs, gathered over first occurrences of
+	// every GUID (seen or not — a response containing the watermark item at
+	// its original pub proves it is fresh enough).
+	var maxSeen int64
+	var hasDateless bool
 
 	// First pass: cheap dedup/watermark classification over the whole
 	// response, no pipeline work yet. The boundary cap below must see the
@@ -271,6 +280,12 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 
 		boundary[i.GUID] = pubUnix
 
+		if pubUnix == 0 {
+			hasDateless = true
+		} else if pubUnix > maxSeen {
+			maxSeen = pubUnix
+		}
+
 		if _, prev := priorBoundary[i.GUID]; prev {
 			// A GUID we have already seen: keep deduping it, but do NOT let a
 			// publisher re-dating an existing post raise Watermark. Otherwise a
@@ -286,6 +301,20 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 			continue
 		}
 		candidates = append(candidates, candidate{i, pubUnix})
+	}
+
+	// Stale-response guard: a 200 whose newest dated item sits strictly below
+	// the watermark is a stale copy of the feed (a flappy CDN cache serving an
+	// older generation), not new content. Every dated item in it would be
+	// skipped by the watermark check anyway, but rebuilding the boundary
+	// snapshot from it evicts the watermark items' GUIDs — so the fresh copy
+	// one cycle later re-ingests them as duplicates. Ignore it wholesale,
+	// preserving Watermark/BoundaryGUIDs and the HTTP validators. Dateless
+	// items bypass the watermark by design, so any dateless presence means
+	// the response may carry new content and disables the guard.
+	if maxSeen > 0 && maxSeen < priorWatermark && !hasDateless {
+		slog.Warn("ignoring stale feed response", "url", c.URL, "newest", maxSeen, "watermark", priorWatermark)
+		return nil, nil
 	}
 
 	bg := make([]uint32, 0, len(boundary))

@@ -417,6 +417,83 @@ func TestFetchEmptyResponsePreservesDedupState(t *testing.T) {
 	}
 }
 
+// A stale cache copy of the feed — every dated item strictly below the
+// watermark — must be ignored wholesale, preserving dedup state. Rebuilding
+// the boundary snapshot from it evicts the watermark item's GUID, so the
+// fresh copy one cycle later re-ingests that item as a duplicate (observed
+// with YouTube's flappy feed CDN: a new video flickers out of one response
+// and comes back the next).
+func TestFetchStaleResponsePreservesDedupState(t *testing.T) {
+	feedFresh := `<rss version="2.0"><feed>
+		<item><title>NEW</title><guid>new</guid><pubDate>Tue, 02 Jan 2024 00:00:00 GMT</pubDate></item>
+		<item><title>OLD</title><guid>old</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
+	</feed></rss>`
+	feedStale := `<rss version="2.0"><feed>
+		<item><title>OLD</title><guid>old</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
+	</feed></rss>`
+
+	current := feedFresh
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(current))
+	}))
+	defer srv.Close()
+
+	ch := &Feed{Title: "T"}
+
+	if got := fetchOnce(t, ch, srv); len(got) != 2 {
+		t.Fatalf("fetch1: got %d, want 2", len(got))
+	}
+	priorWatermark := ch.Watermark
+	priorBoundary := append([]uint32(nil), ch.BoundaryGUIDs...)
+
+	current = feedStale
+	if got := fetchOnce(t, ch, srv); len(got) != 0 {
+		t.Fatalf("fetch2 (stale): got %d, want 0", len(got))
+	}
+	if ch.Watermark != priorWatermark {
+		t.Errorf("Watermark = %d, want %d (preserved across stale fetch)", ch.Watermark, priorWatermark)
+	}
+	if !slices.Equal(ch.BoundaryGUIDs, priorBoundary) {
+		t.Errorf("BoundaryGUIDs = %v, want %v (preserved across stale fetch)", ch.BoundaryGUIDs, priorBoundary)
+	}
+
+	current = feedFresh
+	if got := fetchOnce(t, ch, srv); len(got) != 0 {
+		t.Errorf("fetch3: got %d, want 0 (watermark item re-ingested after stale fetch)", len(got))
+	}
+}
+
+// The stale-response guard must stand down when the response carries any
+// dateless item: dateless items bypass the watermark by design, so a response
+// whose dated items all sit below the watermark can still hold new content.
+func TestFetchStaleGuardStandsDownForDatelessItems(t *testing.T) {
+	feedFresh := `<rss version="2.0"><feed>
+		<item><title>NEW</title><guid>new</guid><pubDate>Tue, 02 Jan 2024 00:00:00 GMT</pubDate></item>
+	</feed></rss>`
+	feedMixed := `<rss version="2.0"><feed>
+		<item><title>DATELESS</title><guid>dateless</guid></item>
+		<item><title>OLD</title><guid>old</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
+	</feed></rss>`
+
+	current := feedFresh
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(current))
+	}))
+	defer srv.Close()
+
+	ch := &Feed{Title: "T"}
+
+	if got := fetchOnce(t, ch, srv); len(got) != 1 {
+		t.Fatalf("fetch1: got %d, want 1", len(got))
+	}
+
+	current = feedMixed
+	got := fetchOnce(t, ch, srv)
+	if len(got) != 1 || got[0].Title != "DATELESS" {
+		t.Errorf("fetch2: got %d items %v, want just DATELESS (guard swallowed a dateless item)", len(got), got)
+	}
+}
+
 // A within-fetch duplicate GUID with a lower pub on the later occurrence must
 // not corrupt BoundaryGUIDs. The first occurrence wins for boundary state, so
 // the GUID stays in the snapshot and subsequent fetches still dedup it.
