@@ -11,6 +11,7 @@
 import * as data from "./data"
 import { countBadge, formatDate, isStale, srcColorIndex, timeAgoProse, URL_DENY } from "./fmt"
 import * as nav from "./nav"
+import * as refresh from "./refresh"
 import * as sync from "./sync"
 
 export type ConfigHooks = {
@@ -29,6 +30,8 @@ export type ConfigHooks = {
    openImgProxy: () => void
    openBackup: () => void
    openSync: () => void
+   // Sync now: content refresh + a manual (pure-LWW) profile cycle.
+   onRefresh: () => void
 }
 
 let root: HTMLElement
@@ -61,6 +64,7 @@ export function setup(el: HTMLElement, h: ConfigHooks): void {
    ;(el.querySelector(".srr-config-backup") as HTMLElement).addEventListener("click", () => hooks.openBackup())
    ;(el.querySelector(".srr-config-imgproxy") as HTMLElement).addEventListener("click", () => hooks.openImgProxy())
    ;(el.querySelector(".srr-config-sync") as HTMLElement).addEventListener("click", () => hooks.openSync())
+   ;(el.querySelector(".srr-config-refresh") as HTMLElement).addEventListener("click", () => hooks.onRefresh())
    // Delegated filter pick: every row carries data-value (feed id / tag / "" /
    // ~saved). The tag collapse toggle stops its own click, but guard anyway.
    filterBox.addEventListener("click", (e) => {
@@ -398,8 +402,9 @@ export function refreshStatus(): void {
    const metaMissing = data.hasArticles() && !data.metaReady()
    const idxDegraded = data.idxSummaryDegraded()
    const syncState = sync.state()
+   const refreshErr = refresh.lastRefreshError()
 
-   const sig = `${fetchedAt}|${stale}|${metaMissing}|${idxDegraded}|${syncState.on}|${syncState.okAt}|${syncState.error}`
+   const sig = `${fetchedAt}|${stale}|${metaMissing}|${idxDegraded}|${syncState.on}|${syncState.okAt}|${syncState.error}|${syncState.parked}|${refreshErr}`
    if (sig === lastStatusSig) return
    lastStatusSig = sig
 
@@ -421,6 +426,13 @@ export function refreshStatus(): void {
       else if (syncState.okAt > 0) statusBox.append(statusNote(`Synced ${timeAgoProse(syncState.okAt)}`))
       else statusBox.append(statusNote("Sync pending…"))
    }
+   // A parked background cycle refused to rewind read progress — surface the
+   // pause with the sync rows, since a manual Sync now is the way out.
+   if (syncState.on && syncState.parked)
+      statusBox.append(statusFlag("Sync paused — read progress would rewind. Sync now to resolve."))
+   // The last content-refresh failure (background or manual); the manual path
+   // also popups it, but a background failure only reaches the user here.
+   if (refreshErr) statusBox.append(statusFlag(`Refresh failed — ${refreshErr}`))
 }
 
 // ── Feed / tag info dialog ─────────────────────────────────────────────────────
