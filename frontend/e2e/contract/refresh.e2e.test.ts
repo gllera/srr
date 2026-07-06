@@ -1,4 +1,6 @@
-import { rmSync } from "node:fs"
+import { readFileSync, renameSync, rmSync } from "node:fs"
+import { join } from "node:path"
+import { gunzipSync } from "node:zlib"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
 import { feedServer, inspectValidate, makeStore, srr, type FeedServer } from "../harness"
@@ -65,6 +67,39 @@ describe("contract: in-place refresh across a fetch cycle", () => {
       await srr(store, "gen", "--bump")
       expect(await reader.data.refresh()).toBe("updated")
       expect((await reader.data.loadArticle(4)).t).toBe(all[4].title) // still readable
+   })
+
+   it("a failed apply restores the previous snapshot and stays retryable", async () => {
+      // Publish a 6th article. nItems is deterministic/seeded by (prefix, index),
+      // so items 0..4 of this call are byte-identical to `all` — only index 5 is new.
+      const extra = nItems(6, "alpha")
+      feeds.set("/a.xml", rssFeed("Alpha", extra))
+      await srr(store, "art", "fetch")
+
+      // Read the real new generation off disk rather than assuming a seq value —
+      // this cycle bumps seq again (the prior "gen --bump" test did not).
+      const newDb = JSON.parse(gunzipSync(readFileSync(join(store, "db.gz"))).toString("utf8")) as { seq: number }
+      const idxPath = join(store, "idx", `L${newDb.seq}.gz`)
+      const idxBak = `${idxPath}.bak`
+      renameSync(idxPath, idxBak)
+
+      // db.gz has already advanced (fetched_at/total_art/seq all moved) by the time
+      // applyDb awaits the latest idx pack fetch, which 404s on the renamed-away file.
+      await expect(reader.data.refresh()).rejects.toThrow()
+
+      // The reader must still be coherent on the OLD snapshot — not half-swapped
+      // with a new db but stale idx structures.
+      expect(reader.data.db.total_art).toBe(all.length)
+      expect((await reader.data.loadArticle(all.length - 1)).t).toBe(all[all.length - 1].title)
+      reader.nav.filter.clear()
+      expect((await reader.nav.last()).article.t).toBe(all[all.length - 1].title)
+
+      // Restore the pack; refresh() retries cleanly from the old fetched_at and
+      // now adopts the 6th article.
+      renameSync(idxBak, idxPath)
+      expect(await reader.data.refresh()).toBe("updated")
+      expect(reader.data.db.total_art).toBe(all.length + 1)
+      expect((await reader.data.loadArticle(all.length)).t).toBe(extra[all.length].title)
    })
 
    it("backend inspect --validate agrees", async () => {

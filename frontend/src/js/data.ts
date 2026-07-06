@@ -158,7 +158,21 @@ export async function refresh(): Promise<"unchanged" | "updated"> {
       (raw.gen ?? 0) === (db.gen ?? 0)
    )
       return "unchanged"
-   await applyDb(raw)
+   // applyDb swaps db first (fetchIdxPack and the finalized-count math read the
+   // module state), so a rejected pack fetch mid-apply would otherwise strand a
+   // half-swapped snapshot — new db, stale idx structures — that the NEXT
+   // refresh() can't repair (its compare above sees the new fetched_at and
+   // reports "unchanged"). Restore the previous coherent snapshot wholesale on
+   // failure: nothing mutates the old structures (applyDb replaces, never
+   // edits), so they are still valid, and the next refresh() retries from the
+   // old fetched_at like the failure never happened.
+   const prev = { db, slots, expiredCounts, idxFetches, latestIdx, idxHeaders, dataCache, metaCache, groupCache }
+   try {
+      await applyDb(raw)
+   } catch (e) {
+      ;({ db, slots, expiredCounts, idxFetches, latestIdx, idxHeaders, dataCache, metaCache, groupCache } = prev)
+      throw e
+   }
    return "updated"
 }
 

@@ -1,10 +1,10 @@
 // config.ts — the config / settings surface. A third surface beside the list and
 // the reader (ephemeral, not hash-routed): opened from the list's now-viewing
 // button, it owns the quick-action icon bar (search · unread · image proxy ·
-// backup · sync), the contextual offline-pin row, the filter picker (feed / tag /
-// [ALL] / ★Saved), and last the freshness/degradation status line — a quiet footer
-// below the long picker rather than a banner above it. The five
-// quick actions are static buttons in the skeleton (config.ts only wires their
+// backup · sync · refresh), the contextual offline-pin row, the filter picker
+// (feed / tag / [ALL] / ★Saved), and last the freshness/degradation status
+// line — a quiet footer below the long picker rather than a banner above it.
+// The six quick actions are static buttons in the skeleton (config.ts only wires their
 // clicks + the search-disabled / read-toggle pressed state); the filter-list rendering
 // is the former toolbar feed-menu, ported to a static in-flow panel; it reuses the
 // same class names so the row styles (now under .srr-config-filter) carry over.
@@ -350,8 +350,9 @@ async function fillUnread(rows: [HTMLAnchorElement, IFeed][], headers: [HTMLAnch
 // The offline-pin entry is a full-width labeled row (not an icon): its label is
 // scope-dependent ("Download <tag> for offline" / "Remove offline copy") and it
 // reports progress in the status bar, so it doesn't fold into a fixed glyph like
-// the four quick actions above. Search / unread / backup / image-proxy are static
-// icon buttons in the skeleton; this is the only thing settingsBox renders.
+// the six quick actions above. Search / unread / image-proxy / backup / sync /
+// refresh are static icon buttons in the skeleton; this is the only thing
+// settingsBox renders.
 function actionRow(label: string, onClick: () => void): HTMLButtonElement {
    const b = document.createElement("button")
    b.type = "button"
