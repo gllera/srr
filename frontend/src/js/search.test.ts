@@ -287,4 +287,18 @@ describe("search", () => {
       const batches = await collect(search.search("alpha"))
       expect(batches.flat()).toHaveLength(3)
    })
+
+   it("invalidate() drops the cached tail/summary/shards/hits so the next query re-reads", async () => {
+      const first = await search.loadHits("alpha", 500)
+      const before = mockData.fetchPackBytes.mock.calls.length
+      await search.loadHits("alpha", 500) // cached — no new fetches
+      expect(mockData.fetchPackBytes.mock.calls.length).toBe(before)
+      search.invalidate()
+      const second = await search.loadHits("alpha", 500)
+      expect(mockData.fetchPackBytes.mock.calls.length).toBeGreaterThan(before) // re-read
+      // The unchanged store yields the same hit set — invalidation drops caches,
+      // never the results.
+      expect(second.chrons).toEqual(first.chrons)
+      expect(second.cards).toEqual(first.cards)
+   })
 })

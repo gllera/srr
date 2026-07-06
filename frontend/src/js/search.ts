@@ -102,19 +102,23 @@ function parseShard(buf: ArrayBuffer, skipBloom: boolean): Shard {
 // boot stays O(1). All three loaders follow data.ts's retry discipline —
 // a rejected promise clears its slot so the next query refetches.
 
-const loadSummary = lazySlot(async () => {
-   const nf = data.numFinalizedMeta()
-   const blooms = new Uint8Array(await data.fetchPackBytes(`meta/s${data.db.mp}.gz`, false))
-   if (blooms.length !== nf * SEARCH_BLOOM_BYTES)
-      throw new Error(`meta summary: ${blooms.length} bytes for ${nf} shards`)
-   return blooms
-})
+// Factory so invalidate() below can reissue a fresh slot — lazySlot has no reset of its own.
+const makeSummarySlot = () =>
+   lazySlot(async () => {
+      const nf = data.numFinalizedMeta()
+      const blooms = new Uint8Array(await data.fetchPackBytes(`meta/s${data.db.mp}.gz`, false))
+      if (blooms.length !== nf * SEARCH_BLOOM_BYTES)
+         throw new Error(`meta summary: ${blooms.length} bytes for ${nf} shards`)
+      return blooms
+   })
+let loadSummary = makeSummarySlot()
 
-const loadLatest = lazySlot(() =>
-   data.fetchPackBytes(`meta/L${data.db.seq}.gz`, true).then((buf) => parseShard(buf, false)),
-)
+// Factory so invalidate() below can reissue a fresh slot — lazySlot has no reset of its own.
+const makeLatestSlot = () =>
+   lazySlot(() => data.fetchPackBytes(`meta/L${data.db.seq}.gz`, true).then((buf) => parseShard(buf, false)))
+let loadLatest = makeLatestSlot()
 
-const shardCache = makeLRU<Promise<Shard>>(8)
+let shardCache = makeLRU<Promise<Shard>>(8)
 function loadShard(n: number): Promise<Shard> {
    return cachedPromise(shardCache, n, () =>
       data.fetchPackBytes(`meta/${n}.gz`, false).then((buf) => parseShard(buf, true)),
@@ -204,7 +208,7 @@ export interface HitSet {
    cards: Map<number, import("./format.gen").IMetaWire>
 }
 
-const hitCache = makeLRU<Promise<HitSet>, string>(8)
+let hitCache = makeLRU<Promise<HitSet>, string>(8)
 
 // `cap` must be constant per query key: the cache is keyed on `query` alone and
 // ignores `cap` on a hit, so a varying cap for the same query would silently
@@ -235,4 +239,19 @@ export function loadHits(query: string, cap: number): Promise<HitSet> {
       chrons.sort((a, b) => a - b)
       return { chrons, truncated, cards }
    })
+}
+
+// Drop every cached read so the next query re-reads the refreshed store: the
+// latest tail and bloom summary are generation-named (stale after a refresh),
+// the hit sets were computed against the old snapshot, and on a gen change even
+// finalized shards changed bytes. Refetches ride the SW cache. Called by
+// refresh.ts after data.refresh() adopts a new snapshot. Caller contract: while
+// a q: filter is active this alone is not enough — nav.ts keeps its own snapshot
+// (searchSorted/searchLoadedFor), so pair with nav's resetSearchStream() + an
+// ensureSearchSet re-run.
+export function invalidate(): void {
+   loadSummary = makeSummarySlot()
+   loadLatest = makeLatestSlot()
+   shardCache = makeLRU<Promise<Shard>>(8)
+   hitCache = makeLRU<Promise<HitSet>, string>(8)
 }
