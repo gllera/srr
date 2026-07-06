@@ -227,7 +227,7 @@ describe("backup/restore dialog", () => {
       dropdown.showBackupDialog()
       const exportText = $exportArea()!.value
       const obj = JSON.parse(exportText)
-      expect(obj.v).toBe(1)
+      expect(obj.v).toBe(2)
       expect(obj.seen).toEqual({ "feed:1": 5 })
       expect(obj.saved).toEqual([3, 7])
    })
