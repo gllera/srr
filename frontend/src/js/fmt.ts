@@ -191,21 +191,42 @@ export function collapseBrokenMedia(e: Event): void {
    victim?.classList.add("srr-broken")
 }
 
-// Regex (not DOM parse) keeps this cheap; sanitization runs on actual render.
-// Handles both quoted (`src="..."`) and unquoted (`src=...`) forms because the
-// backend's `#minify` pass (tdewolff/minify) drops attribute quotes when the
-// value has no special chars — that fires for clean CDN URLs (no `?` or
-// `&`), so a quote-only regex missed them entirely and the prefetch list
-// came back empty for those feeds.
-const IMG_SRC_RE = /<img\b[^>]*\bsrc\s*=\s*(?:(["'])([^"']+)\1|([^\s>]+))/gi
-export function extractImageUrls(html: string): string[] {
-   const out: string[] = []
-   if (!html) return out
-   for (const m of html.matchAll(IMG_SRC_RE)) {
-      const url = m[2] ?? m[3]
-      if (HTTP_RE.test(url)) out.push(url)
+// The neighbor-prefetch's media lists (nav.ts schedulePrefetch). Every URL is
+// routed exactly as sanitizeHtml's render path routes it (resolveMediaAttr) —
+// relative refs resolve against the pack base (dropped when they escape it),
+// external http(s) images/posters take the image proxy, video sources pass
+// through un-proxied — so a prefetched URL and its rendered element share one
+// cache entry; anything else (data:, mailto:, …) is not a warmable fetch and is
+// skipped. images = <img src> + <video poster>; videos = <video src>, falling
+// back to the first <source> (the one the rendered element would pick). DOM
+// parse rather than regex: it runs off the critical path (idle callback),
+// template content is inert (nothing loads during the parse), and it natively
+// handles the quote-stripped attributes #minify emits. De-duplicated because
+// pre-#dedupmedia articles repeat media.
+export interface IPrefetchMedia {
+   images: string[]
+   videos: string[]
+}
+export function extractPrefetchMedia(html: string): IPrefetchMedia {
+   const images = new Set<string>()
+   const videos = new Set<string>()
+   if (html) {
+      tmpl.innerHTML = html
+      const proxyPrefix = getImgProxy()
+      const add = (set: Set<string>, v: string | null, proxy: boolean) => {
+         if (!v) return
+         if (isRelative(v)) {
+            const resolved = resolvePackRelative(v)
+            if (resolved) set.add(resolved)
+         } else if (HTTP_RE.test(v)) set.add(proxy ? imgProxy(v, proxyPrefix) : v)
+      }
+      for (const img of tmpl.content.querySelectorAll("img")) add(images, img.getAttribute("src"), true)
+      for (const vid of tmpl.content.querySelectorAll("video")) {
+         add(images, vid.getAttribute("poster"), true)
+         add(videos, vid.getAttribute("src") ?? vid.querySelector("source")?.getAttribute("src") ?? null, false)
+      }
    }
-   return out
+   return { images: [...images], videos: [...videos] }
 }
 
 export function timeAgo(unix: number): string {
