@@ -7,6 +7,7 @@ import { UNREAD_ONLY_KEY } from "./keys"
 import * as list from "./list"
 import * as nav from "./nav"
 import { clearAllPins, isPinned, listPins, pinFilter, unpinFilter } from "./pin"
+import * as refresh from "./refresh"
 import * as sync from "./sync"
 
 const el = {
@@ -261,6 +262,20 @@ async function guard(fn: () => Promise<IShowFeed>) {
       showError(e, () => guard(fn))
    } finally {
       document.body.classList.remove("srr-loading")
+      busy = false
+   }
+}
+
+// The background variant of guard(): same busy mutex, no render/error popup — a
+// caller that loses the race is skipped, not queued (its next trigger retries).
+// Used by the store refresh so a state swap can't interleave with navigation.
+async function guardBg(fn: () => Promise<void>): Promise<boolean> {
+   if (busy) return false
+   busy = true
+   try {
+      await fn()
+      return true
+   } finally {
       busy = false
    }
 }
@@ -745,6 +760,51 @@ async function init() {
       if (view !== "reader") void list.rerender()
       if (config.isOpen()) config.render()
    }
+
+   // Shared reconciliation after a store refresh adopted a newer db.gz — the
+   // fully-silent contract: no reload, no scroll, no content re-render. The
+   // toolbar label re-derives, the reader's prev/next chrome re-probes (a cached
+   // "no newer article" is exactly what new content invalidates), the list
+   // reopens its top, and an open config repaints its freshness line.
+   const refreshAfterStore = () => {
+      refreshFeedLabel()
+      if (view === "reader") {
+         // A prev/next step during the probe window supersedes it: re-check the
+         // probed position so stale chrome is never stamped over the new article.
+         const probed = nav.currentChron()
+         void nav
+            .probeCurrent()
+            .then((o) => {
+               if (o && view === "reader" && nav.currentChron() === probed) {
+                  el.prev.disabled = !o.has_left
+                  el.next.disabled = !o.has_right
+                  syncNextCount(o)
+               }
+            })
+            .catch(() => {})
+      } else {
+         void list.onStoreGrown()
+      }
+      if (config.isOpen()) config.render()
+   }
+
+   // Sync now (config quick-action): make this browser current in both
+   // directions — the content refresh and a manual (pure-LWW, always-push)
+   // profile cycle, run concurrently (they're independent). Content errors get
+   // the popup (the one user-initiated path); sync errors stay on the status
+   // line as always. Config stays open so its freshness line confirms the result.
+   // Either half can silently no-op: the content refresh busy-skips when a
+   // navigation holds the mutex, and syncNow skips when a cycle is inflight —
+   // both recoverable by re-tapping, same posture as sync's documented no-op.
+   const manualSyncNow = async () => {
+      const [contentErr] = await Promise.all([refresh.refreshNow(), sync.syncNow({ manual: true })])
+      // No explicit config repaint: on real changes refreshAfterStore /
+      // refreshAfterMerge already re-render an open config, and a no-change
+      // cycle repaints the sig-guarded status footer via sync's onStatus hook —
+      // an unconditional render() here would only re-kick the filter-list
+      // rebuild redundantly.
+      if (contentErr) showError(new Error(contentErr), () => void manualSyncNow())
+   }
    // After a successful profile import (backup dialog), additionally reconcile
    // prefs: importProfile wrote srr-unread-only straight to localStorage, but nav
    // holds unreadOnly in a module var only mutated via setUnreadOnly (this also
@@ -786,6 +846,7 @@ async function init() {
       openImgProxy: showImgProxyDialog,
       openBackup: () => showBackupDialog(),
       openSync: showSyncDialog,
+      onRefresh: () => void manualSyncNow(),
    })
 
    // The list opens an article in the reader through the same guard mutex as
@@ -941,9 +1002,10 @@ async function init() {
          hash = localStorage.getItem("srr-hash")?.substring(1) || ""
       } catch {}
    await route(hash)
-   // Cross-device sync: pull-merge the remote profile only after the first
+   // Cross-device sync: run the LWW profile cycle (pull-adopt when the remote is
+   // newer, guarded push when local changes are pending) only after the first
    // surface has rendered (local state is authoritative and paints instantly;
-   // the merge rerenders when it lands), then keep cycling on tab re-focus and
+   // an adopt rerenders when it lands), then keep cycling on tab re-focus and
    // reconnect, flushing pending pushes on hide. No-op until a sync endpoint is
    // configured (Settings → Sync). The status callback repaints an open config
    // footer after each cycle — enabling sync from the dialog confirms itself
@@ -951,6 +1013,9 @@ async function init() {
    sync.init(refreshAfterMerge, () => {
       if (config.isOpen()) config.refreshStatus()
    })
+   // Live content sync: boot is already fresh (data.init just ran), so only the
+   // ongoing triggers are wired — re-focus (throttled), reconnect, heartbeat.
+   refresh.init(guardBg, refreshAfterStore)
    // Signal to the dev design harness (design.ts) that the real app has booted
    // and the first surface is rendered. Inert in production — nothing else
    // listens. Only fires on the success path (init returns early on db.gz error).

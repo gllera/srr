@@ -44,9 +44,14 @@ import { isStale } from "./fmt"
 
 // The sync status readout consumed by the status footer.
 const sync = vi.hoisted(() => ({
-   state: vi.fn(() => ({ on: false, okAt: 0, error: "" })),
+   state: vi.fn(() => ({ on: false, okAt: 0, error: "", parked: false })),
 }))
 vi.mock("./sync", () => sync)
+
+// config.ts reads refresh.lastRefreshError() in its status footer; the live
+// content refresh itself is app.ts's wiring, so the status source is all config
+// needs here.
+vi.mock("./refresh", () => ({ lastRefreshError: () => "" }))
 
 type Config = typeof import("./config")
 
@@ -61,6 +66,7 @@ const SKELETON =
    `<button class="srr-config-imgproxy"></button>` +
    `<button class="srr-config-backup"></button>` +
    `<button class="srr-config-sync"></button>` +
+   `<button class="srr-config-refresh"></button>` +
    `</div>` +
    `<div class="srr-config-settings"></div>` +
    `<div class="srr-config-filter"></div>` +
@@ -87,6 +93,7 @@ const hooks = {
    openImgProxy: vi.fn(),
    openBackup: vi.fn(),
    openSync: vi.fn(),
+   onRefresh: vi.fn(),
 }
 
 async function mount(): Promise<Config> {
@@ -112,7 +119,7 @@ beforeEach(() => {
    data.metaReady.mockReturnValue(true)
    data.idxSummaryDegraded.mockReturnValue(false)
    ;(isStale as ReturnType<typeof vi.fn>).mockReturnValue(false)
-   sync.state.mockReturnValue({ on: false, okAt: 0, error: "" })
+   sync.state.mockReturnValue({ on: false, okAt: 0, error: "", parked: false })
    hooks.pinEntry.mockReturnValue(null)
 })
 
@@ -389,6 +396,13 @@ describe("quick actions + settings", () => {
       expect(hooks.openSync).toHaveBeenCalledTimes(1)
    })
 
+   it("the refresh quick-action fires onRefresh", async () => {
+      const config = await mount()
+      config.open()
+      $<HTMLButtonElement>(".srr-config-refresh").click()
+      expect(hooks.onRefresh).toHaveBeenCalledTimes(1)
+   })
+
    it("renders no settings rows when pinEntry is null", async () => {
       const config = await mount()
       config.open()
@@ -445,17 +459,25 @@ describe("status section", () => {
       config.render()
       expect(text()).not.toContain("Sync") // off → silent
 
-      sync.state.mockReturnValue({ on: true, okAt: 0, error: "" })
+      sync.state.mockReturnValue({ on: true, okAt: 0, error: "", parked: false })
       config.render()
       expect($$(".srr-status-note").map((n) => n.textContent)).toContain("Sync pending…")
 
-      sync.state.mockReturnValue({ on: true, okAt: 200, error: "" })
+      sync.state.mockReturnValue({ on: true, okAt: 200, error: "", parked: false })
       config.render()
       expect($$(".srr-status-note").map((n) => n.textContent)).toContain("Synced ago200")
 
-      sync.state.mockReturnValue({ on: true, okAt: 200, error: "HTTP 401" })
+      sync.state.mockReturnValue({ on: true, okAt: 200, error: "HTTP 401", parked: false })
       config.render()
       expect(flagText()).toContain("Sync failed — HTTP 401")
+   })
+
+   it("flags a parked background sync (read progress would rewind)", async () => {
+      data.lastFetchedAt.mockReturnValue(100)
+      sync.state.mockReturnValue({ on: true, okAt: 200, error: "", parked: true })
+      const config = await mount()
+      config.render()
+      expect(flagText()).toContain("Sync paused — read progress would rewind. Sync now to resolve.")
    })
 
    it("is empty when nothing has been fetched", async () => {

@@ -1061,7 +1061,7 @@ body.srr-view-config .srr-toolbar {
    renders as a full-width row below (.srr-config-settings .srr-config-action). */
 .srr-config-actions {
    display: grid;
-   grid-template-columns: repeat(5, 1fr);
+   grid-template-columns: repeat(6, 1fr);
    gap: 0.4rem;
    margin: 0.5rem 0 0.7rem;
 }

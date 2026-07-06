@@ -130,8 +130,19 @@ vi.mock("./dropdown", () => dropdown)
 // sync.test.ts's business.
 const sync = vi.hoisted(() => ({
    init: vi.fn(),
+   syncNow: vi.fn(async () => {}),
 }))
 vi.mock("./sync", () => sync)
+
+// Live content sync: app.ts only wires it (refresh.init with the background
+// guard + after-store refresh, and manualSyncNow calls refreshNow). The refresh
+// cycles themselves are refresh.test.ts's business.
+const refresh = vi.hoisted(() => ({
+   init: vi.fn(),
+   refreshNow: vi.fn(async () => ""),
+   lastRefreshError: vi.fn(() => ""),
+}))
+vi.mock("./refresh", () => refresh)
 
 // The config surface is its own module; app.ts drives it via showConfig/config.open
 // and the hooks it passes to config.setup. We mock it and capture those hooks.
@@ -741,6 +752,37 @@ describe("cross-device sync wiring", () => {
       list.rerender.mockClear()
       afterMerge()
       expect(list.rerender).not.toHaveBeenCalled()
+   })
+})
+
+describe("live content sync wiring", () => {
+   it("wires refresh.init with the background guard and after-store refresh", async () => {
+      await boot()
+      expect(refresh.init).toHaveBeenCalledTimes(1)
+      expect(typeof refresh.init.mock.calls[0][0]).toBe("function") // guardBg
+      expect(typeof refresh.init.mock.calls[0][1]).toBe("function") // refreshAfterStore
+   })
+
+   it("the config Sync-now quick-action runs a content refresh + a manual sync cycle", async () => {
+      await boot()
+      refresh.refreshNow.mockClear()
+      sync.syncNow.mockClear()
+      configHooks()!.onRefresh()
+      await flush()
+      expect(refresh.refreshNow).toHaveBeenCalledTimes(1)
+      expect(sync.syncNow).toHaveBeenCalledWith({ manual: true })
+   })
+
+   it("a failed content refresh surfaces the error popup with a Retry", async () => {
+      await boot()
+      refresh.refreshNow.mockResolvedValueOnce("boom")
+      configHooks()!.onRefresh()
+      await flush()
+      const popup = document.querySelector(".srr-popup")!
+      expect(popup.classList.contains("srr-open")).toBe(true)
+      expect(document.querySelector(".srr-popup-text")!.textContent).toContain("boom")
+      // The retry re-runs manualSyncNow — same recovery affordance as guard().
+      expect(document.querySelector(".srr-popup-retry")!.classList.contains("srr-hidden")).toBe(false)
    })
 })
 

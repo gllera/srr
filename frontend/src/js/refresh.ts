@@ -8,7 +8,9 @@
 //
 // Runs under app's guard mutex (injected as `exclusive`) so the swap can never
 // interleave with a navigation; a busy mutex SKIPS the tick — the next trigger
-// retries — rather than queueing.
+// retries — rather than queueing. The mutex deliberately spans the db.gz fetch
+// as well as the swap: a dropped tick just retries, whereas splitting fetch
+// from swap would reintroduce the interleave the mutex exists to prevent.
 import * as data from "./data"
 import * as nav from "./nav"
 import * as search from "./search"
