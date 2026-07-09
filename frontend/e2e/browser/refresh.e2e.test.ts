@@ -7,11 +7,14 @@ import { feedServer, srr, type FeedServer } from "../harness"
 import { nItems, rssFeed } from "../fixtures"
 
 // Live content sync in the real SPA: publish a second fetch cycle to the pack
-// dir while a page is open, tap the Refresh ("Sync now") quick action in the
-// config surface, and the new article is reachable WITHOUT a page reload — the
-// silent contract list.onStoreGrown()/refresh.ts implement. Own beforeAll
-// clears + rebuilds the shared packsDir (browser files run serially —
-// vitest.browser.config fileParallelism:false — so each owns it in turn).
+// dir while a page is open, fire one of refresh.ts's real background triggers
+// (the `online` event — unthrottled, unlike re-focus), and the new article is
+// reachable WITHOUT a page reload — the silent contract
+// list.onStoreGrown()/refresh.ts implement. There is no manual refresh button
+// (a page reload is the manual gesture), so the trigger is dispatched directly.
+// Own beforeAll clears + rebuilds the shared packsDir (browser files run
+// serially — vitest.browser.config fileParallelism:false — so each owns it in
+// turn).
 
 declare global {
    interface Window {
@@ -50,18 +53,10 @@ const waitList = (p: Page) =>
       },
       { timeout: 20000 },
    )
-const waitReader = (p: Page) =>
-   p.waitForFunction(
-      () => {
-         const a = document.querySelector(".srr-reader") as HTMLElement | null
-         return !!a && !a.hidden && (document.querySelector(".srr-title")?.textContent?.length ?? 0) > 0
-      },
-      { timeout: 20000 },
-   )
 const waitTitle = (p: Page, t: string) =>
    p.waitForFunction((want) => document.querySelector(".srr-title")?.textContent === want, { timeout: 20000 }, t)
 
-describe("browser: in-place refresh via Sync now", () => {
+describe("browser: in-place refresh via a background trigger", () => {
    let browser: Browser
    let page: Page
    let feeds: FeedServer
@@ -94,57 +89,49 @@ describe("browser: in-place refresh via Sync now", () => {
       // Stamp the window so a reload anywhere in this flow would be caught.
       await page.evaluate(() => (window.__srrStamp = 1))
 
-      // Baseline: two articles, newest-first, parked at (or very near) the top —
-      // the "already intersecting" precondition the sentinel kick targets.
+      // Baseline: two articles, newest-first. Then wait for the boot render's
+      // land-once anchor scroll — on this fresh profile everything is unread, so
+      // the list top-aligns the OLDEST row ("live title 0") once fonts/layout
+      // settle. Any position captured before that landing would misattribute the
+      // landing scroll (~160px here) to the refresh flow under test. The landed
+      // position keeps the top sentinel well inside the observer's 800px
+      // rootMargin, so the sentinel kick still pages silently from here.
       expect(await $rowTitles(page)).toEqual(["live title 1", "live title 0"])
-      expect(await page.evaluate(() => window.scrollY)).toBeLessThan(50)
+      await page.waitForFunction(
+         () => {
+            const t0 = [...document.querySelectorAll(".srr-list a.srr-row")].find(
+               (r) => r.querySelector(".srr-row-title")?.textContent === "live title 0",
+            )
+            return t0 ? t0.getBoundingClientRect().top < 100 : false
+         },
+         { timeout: 20_000 },
+      )
 
       // Publish the third item as a second backend fetch cycle — no reload, no
-      // adoption yet (that only happens once Sync now runs).
+      // adoption yet (that only happens once a refresh trigger fires).
       feeds.set("/live.xml", rssFeed("Live", items))
       await srr(packsDir, "art", "fetch")
 
-      // Sync now, from the config surface's Refresh quick action.
-      await page.click(".srr-settings")
-      await page.waitForSelector(".srr-config-refresh")
-      await page.click(".srr-config-refresh")
-      // manualSyncNow's content-refresh chain (data.refresh -> search.invalidate
-      // -> nav.onStoreRefreshed -> list.onStoreGrown, all under app.ts's shared
-      // busy mutex) is fire-and-forget from the click handler. Wait for its
-      // network round-trip (db.gz + the regenerated latest idx pack) to fully
-      // settle before touching any surface transition below — those share the
-      // same mutex (guard()/guardBg()), and racing a still-busy cycle would
-      // silently drop the transition rather than queue it.
-      await page.waitForNetworkIdle({ timeout: 20_000 })
-
-      // Close config back to the list. There is no direct config -> list
-      // shortcut in the real UI: Escape routes config -> reader, then
-      // reader -> list (see app.ts's keydown handler closeConfig()/goToList()) —
-      // mirror that exactly rather than reaching for an internal API.
-      await page.keyboard.press("Escape")
-      await waitReader(page)
-      await page.keyboard.press("Escape")
-      await waitList(page)
-
-      // Reference point for the "no visual jump" check below, captured the
-      // moment the list is back on screen. NOT the original boot measurement:
-      // getting here detoured through config (which hides the list — so
-      // onStoreGrown's own removal of the exhausted-top "LATEST" sign-off runs
-      // invisibly) and the reader (whose return path re-anchors on the CURRENT
-      // article, centered, rather than the boot's top-aligned anchor) — both
-      // legitimate, unrelated position changes that would swamp the one delta
-      // this test actually cares about: whether the sentinel-kicked prepend
-      // itself holds the viewport still. Per manual runs the prepend can already
-      // have landed by this point. If it has, the delta assertion below only
-      // proves self-consistency (the row holds its place), not the compensation
-      // itself — which is why no row-count is asserted here.
+      // Reference point for the "no visual jump" check below, captured with the
+      // list on screen BEFORE the trigger: the prepend compensation must hold
+      // this row at the same viewport Y while the new article slots in above.
       const beforeTop1 = await $rowTop(page, "live title 1")
       expect(beforeTop1).not.toBeNull()
 
-      // THE PARKED-AT-TOP PROOF: this test never scrolls the list. If the
-      // sentinel kick (list.onStoreGrown's unobserve/observe of the still-
-      // intersecting top sentinel) didn't silently reopen the exhausted top,
-      // the new article would need a manual refresh/reload to ever appear.
+      // Fire the regained-connectivity trigger refresh.init wires — the
+      // unthrottled one, so no clock games. The content-refresh chain
+      // (data.refresh -> search.invalidate -> nav.onStoreRefreshed ->
+      // list.onStoreGrown, all under app.ts's shared busy mutex) is
+      // fire-and-forget from the event; wait for its network round-trip
+      // (db.gz + the regenerated latest idx pack) to settle.
+      await page.evaluate(() => window.dispatchEvent(new Event("online")))
+      await page.waitForNetworkIdle({ timeout: 20_000 })
+
+      // THE PARKED-AT-ANCHOR PROOF: this test never scrolls the list. If the
+      // sentinel kick (list.onStoreGrown's unobserve/observe of the top
+      // sentinel, still inside the observer's rootMargin at the landed anchor)
+      // didn't silently reopen the exhausted top, the new article would need a
+      // page reload to ever appear.
       await page.waitForFunction(
          () =>
             [...document.querySelectorAll(".srr-list a.srr-row .srr-row-title")].some(

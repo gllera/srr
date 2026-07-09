@@ -66,7 +66,6 @@ const SKELETON =
    `<button class="srr-config-imgproxy"></button>` +
    `<button class="srr-config-backup"></button>` +
    `<button class="srr-config-sync"></button>` +
-   `<button class="srr-config-refresh"></button>` +
    `</div>` +
    `<div class="srr-config-settings"></div>` +
    `<div class="srr-config-filter"></div>` +
@@ -93,7 +92,6 @@ const hooks = {
    openImgProxy: vi.fn(),
    openBackup: vi.fn(),
    openSync: vi.fn(),
-   onRefresh: vi.fn(),
 }
 
 async function mount(): Promise<Config> {
@@ -394,13 +392,6 @@ describe("quick actions + settings", () => {
       expect(hooks.openImgProxy).toHaveBeenCalledTimes(1)
       $<HTMLButtonElement>(".srr-config-sync").click()
       expect(hooks.openSync).toHaveBeenCalledTimes(1)
-   })
-
-   it("the refresh quick-action fires onRefresh", async () => {
-      const config = await mount()
-      config.open()
-      $<HTMLButtonElement>(".srr-config-refresh").click()
-      expect(hooks.onRefresh).toHaveBeenCalledTimes(1)
    })
 
    it("renders no settings rows when pinEntry is null", async () => {

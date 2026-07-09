@@ -31,9 +31,10 @@ export function lastRefreshError(): string {
 }
 
 // One refresh cycle. Resolves to "" on success or a skipped (busy) tick, else
-// the error message — the manual Sync-now path popups it; background triggers
-// ignore the return and leave it on the status line. Offline failures stay
-// silent, like sync.ts — the SW makes offline reading a supported state.
+// the error message; the background triggers ignore the return and leave the
+// failure on the config status line (there is no manual button — a page reload
+// is the manual gesture, and it re-fetches everything anyway). Offline failures
+// stay silent, like sync.ts — the SW makes offline reading a supported state.
 export async function refreshNow(): Promise<string> {
    let result = ""
    await runExclusive(async () => {

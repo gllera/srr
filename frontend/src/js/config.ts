@@ -1,7 +1,7 @@
 // config.ts — the config / settings surface. A third surface beside the list and
 // the reader (ephemeral, not hash-routed): opened from the list's now-viewing
 // button, it owns the quick-action icon bar (search · unread · image proxy ·
-// backup · sync · refresh), the contextual offline-pin row, the filter picker
+// backup · sync), the contextual offline-pin row, the filter picker
 // (feed / tag / [ALL] / ★Saved), and last the freshness/degradation status
 // line — a quiet footer below the long picker rather than a banner above it.
 // The six quick actions are static buttons in the skeleton (config.ts only wires their
@@ -31,8 +31,6 @@ export type ConfigHooks = {
    openImgProxy: () => void
    openBackup: () => void
    openSync: () => void
-   // Sync now: content refresh + a manual (pure-LWW) profile cycle.
-   onRefresh: () => void
 }
 
 let root: HTMLElement
@@ -65,7 +63,6 @@ export function setup(el: HTMLElement, h: ConfigHooks): void {
    ;(el.querySelector(".srr-config-backup") as HTMLElement).addEventListener("click", () => hooks.openBackup())
    ;(el.querySelector(".srr-config-imgproxy") as HTMLElement).addEventListener("click", () => hooks.openImgProxy())
    ;(el.querySelector(".srr-config-sync") as HTMLElement).addEventListener("click", () => hooks.openSync())
-   ;(el.querySelector(".srr-config-refresh") as HTMLElement).addEventListener("click", () => hooks.onRefresh())
    // Delegated filter pick: every row carries data-value (feed id / tag / "" /
    // ~saved). The tag collapse toggle stops its own click, but guard anyway.
    filterBox.addEventListener("click", (e) => {
@@ -351,8 +348,8 @@ async function fillUnread(rows: [HTMLAnchorElement, IFeed][], headers: [HTMLAnch
 // The offline-pin entry is a full-width labeled row (not an icon): its label is
 // scope-dependent ("Download <tag> for offline" / "Remove offline copy") and it
 // reports progress in the status bar, so it doesn't fold into a fixed glyph like
-// the six quick actions above. Search / unread / image-proxy / backup / sync /
-// refresh are static icon buttons in the skeleton; this is the only thing
+// the five quick actions above. Search / unread / image-proxy / backup / sync
+// are static icon buttons in the skeleton; this is the only thing
 // settingsBox renders.
 function actionRow(label: string, onClick: () => void): HTMLButtonElement {
    const b = document.createElement("button")
@@ -428,8 +425,8 @@ export function refreshStatus(): void {
       else if (syncState.okAt > 0) statusBox.append(statusNote(`Synced ${timeAgoProse(syncState.okAt)}`))
       else statusBox.append(statusNote("Sync pending…"))
    }
-   // The last content-refresh failure (background or manual); the manual path
-   // also popups it, but a background failure only reaches the user here.
+   // The last background content-refresh failure — this row is the only place
+   // it reaches the user (a page reload is the manual recovery gesture).
    if (refreshErr) statusBox.append(statusFlag(`Refresh failed — ${refreshErr}`))
    // The build's version label, always last and always present (even on an
    // empty store — it's exactly what a bug report needs). VERSION is base.ts's
