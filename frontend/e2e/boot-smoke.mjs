@@ -40,6 +40,7 @@ if (refs.length === 0) {
 // survival means the define transformer didn't run on that asset.
 const FORBIDDEN = [
    ["SRR_CDN_URL", "CDN base global was not inlined — boot throws ReferenceError"],
+   ["SRR_VERSION", "version global was not inlined — config surface throws ReferenceError"],
    ["process.env.NODE_ENV", "NODE_ENV was not inlined — boot throws 'process is not defined'"],
 ]
 

@@ -472,10 +472,13 @@ describe("status section", () => {
       expect(flagText()).toContain("Sync failed — HTTP 401")
    })
 
-   it("is empty when nothing has been fetched", async () => {
+   it("always shows the build version, even before anything is fetched", async () => {
+      // SRR_VERSION is a build-time define; vitest.shared.ts pins it to "test".
       data.lastFetchedAt.mockReturnValue(0)
       const config = await mount()
       config.render()
-      expect(text()).toBe("")
+      expect($(".srr-status-version").textContent).toBe("srr test")
+      // …and it is the ONLY status content on an empty store.
+      expect(text()).toBe("srr test")
    })
 })

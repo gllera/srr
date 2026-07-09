@@ -8,6 +8,7 @@
 // clicks + the search-disabled / read-toggle pressed state); the filter-list rendering
 // is the former toolbar feed-menu, ported to a static in-flow panel; it reuses the
 // same class names so the row styles (now under .srr-config-filter) carry over.
+import { VERSION } from "./base"
 import * as data from "./data"
 import { countBadge, formatDate, isStale, srcColorIndex, timeAgoProse, URL_DENY } from "./fmt"
 import * as nav from "./nav"
@@ -430,6 +431,13 @@ export function refreshStatus(): void {
    // The last content-refresh failure (background or manual); the manual path
    // also popups it, but a background failure only reaches the user here.
    if (refreshErr) statusBox.append(statusFlag(`Refresh failed — ${refreshErr}`))
+   // The build's version label, always last and always present (even on an
+   // empty store — it's exactly what a bug report needs). VERSION is base.ts's
+   // build-time define: the release tag in CI builds, "dev" locally.
+   const ver = document.createElement("div")
+   ver.className = "srr-status-version"
+   ver.textContent = `srr ${VERSION}`
+   statusBox.append(ver)
 }
 
 // ── Feed / tag info dialog ─────────────────────────────────────────────────────

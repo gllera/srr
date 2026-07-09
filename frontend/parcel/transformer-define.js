@@ -17,6 +17,9 @@ const { Transformer } = require("@parcel/plugin")
 // Resolution still lives in resolve-cdn-url.js; this only substitutes results.
 const cdnUrl = require("./resolve-cdn-url")()
 const nodeEnv = process.env.NODE_ENV || "production"
+// SRR_VERSION → the build's version label (config.ts's status footer). CI sets
+// VERSION to the release tag (release.yml, both build jobs); elsewhere "dev".
+const version = process.env.VERSION || "dev"
 
 module.exports = new Transformer({
    async transform({ asset }) {
@@ -24,6 +27,10 @@ module.exports = new Transformer({
       let changed = false
       if (code.includes("SRR_CDN_URL")) {
          code = code.replaceAll("SRR_CDN_URL", JSON.stringify(cdnUrl))
+         changed = true
+      }
+      if (code.includes("SRR_VERSION")) {
+         code = code.replaceAll("SRR_VERSION", JSON.stringify(version))
          changed = true
       }
       if (code.includes("process.env.NODE_ENV")) {

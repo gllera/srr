@@ -25,6 +25,9 @@ type overviewView struct {
 	// CdnURL lets the syndicate tab link the produced out/<name> files;
 	// omitted when SRR_CDN_URL is unset (syndication writes are skipped then).
 	CdnURL string `json:"cdn_url,omitempty"`
+	// Version is the running binary's version ("development" outside release
+	// builds — main.go's ldflags var), so the webui can label itself.
+	Version string `json:"version"`
 }
 
 func getOverview(w http.ResponseWriter, r *http.Request) {
@@ -67,6 +70,7 @@ func getOverview(w http.ResponseWriter, r *http.Request) {
 			FetchedAt: db.core.FetchedAt,
 			TotalArt:  db.core.TotalArticles,
 			CdnURL:    globals.CdnURL,
+			Version:   version,
 		}
 		return nil
 	})
