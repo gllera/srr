@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -317,38 +318,48 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 		return nil, nil
 	}
 
-	bg := make([]uint32, 0, len(boundary))
+	// BoundaryGUIDs must remember as much of the current feed window as the cap
+	// allows so a feed that re-dates its whole window to ~now on every rebuild
+	// (fresh pubDates, stable GUIDs) still dedups — the watermark can't skip
+	// re-dated items because they always sit above it. Two dedup classes:
+	//
+	//   must — dateless (p==0) or p >= maxPub: the watermark will NOT skip these
+	//     next fetch, so each must either live in bg or be skipped from
+	//     ingestion, else it re-ingests forever.
+	//   opt  — p < maxPub: the watermark skips these next fetch WHEN the feed
+	//     keeps their date stable. We still remember them (most-recent first, up
+	//     to the remaining cap) so a re-dating feed's whole window dedups; but
+	//     evicting one is safe — it stays watermark-protected in the stable
+	//     case — so an opt GUID is never dropped from ingestion.
+	type datedGUID struct {
+		g uint32
+		p int64
+	}
+	must := make([]uint32, 0, len(boundary))
+	opt := make([]datedGUID, 0, len(boundary))
 	for g, p := range boundary {
-		// Keep dateless GUIDs and everything at or above the watermark so they
-		// dedup next fetch. ">= maxPub" (not "==") also retains a re-dated
-		// existing item whose bumped pub exceeds the (deliberately unraised)
-		// watermark, so it stays deduped instead of re-ingesting.
 		if p == 0 || p >= maxPub {
-			bg = append(bg, g)
+			must = append(must, g)
+		} else {
+			opt = append(opt, datedGUID{g, p})
 		}
 	}
-	slices.Sort(bg)
+	slices.Sort(must)
 
-	// Cap bg at maxBoundaryGUIDs. When over cap, prefer retaining GUIDs that
-	// are already in priorBoundary (already stored) before filling remaining
-	// slots with the smallest hashes of the rest. This prevents re-ingestion
-	// of already-stored items: under the pure smallest-hash rule a batch of
-	// new items with smaller hashes would evict high-hash stored items from bg
-	// even though those items were already ingested — they would then look new
-	// on the very next fetch and duplicate forever.
-	//
-	// Partition order: bg is sorted ascending; walk it once to separate prior
-	// GUIDs (already stored) from rest (new or unknown), preserving sort order
-	// within each group. Keep all prior GUIDs first (up to cap), then fill
-	// remaining slots with the smallest-hash rest items. Dropped GUIDs must
-	// not be ingested at all (the gate in the second pass below):
-	// ingested-but-unremembered items duplicate on every subsequent fetch.
+	// Cap the must class at maxBoundaryGUIDs. When over cap, prefer retaining
+	// GUIDs already in priorBoundary (already stored) before filling remaining
+	// slots with the smallest hashes of the rest: under a pure smallest-hash
+	// rule a batch of new items with smaller hashes would evict high-hash stored
+	// items even though those were already ingested — they would then look new,
+	// and duplicate forever, on the very next fetch. Over-cap must GUIDs are
+	// dropped and skipped from ingestion (the gate in the second pass below);
+	// ingesting one without remembering it duplicates it every subsequent fetch.
 	var dropped map[uint32]struct{}
-	if len(bg) > maxBoundaryGUIDs {
-		slog.Warn("boundary GUIDs over cap, skipping over-cap items", "url", c.URL, "total", len(bg), "cap", maxBoundaryGUIDs)
-		prior := bg[:0:0] // already-stored GUIDs from bg (sorted)
-		rest := bg[:0:0]  // new GUIDs from bg (sorted)
-		for _, g := range bg {
+	if len(must) > maxBoundaryGUIDs {
+		slog.Warn("boundary GUIDs over cap, skipping over-cap items", "url", c.URL, "total", len(must), "cap", maxBoundaryGUIDs)
+		prior := must[:0:0] // already-stored GUIDs from must (sorted)
+		rest := must[:0:0]  // new GUIDs from must (sorted)
+		for _, g := range must {
 			if _, ok := priorBoundary[g]; ok {
 				prior = append(prior, g)
 			} else {
@@ -361,21 +372,35 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 		if len(kept) > maxBoundaryGUIDs {
 			kept = kept[:maxBoundaryGUIDs]
 		}
-		remaining := maxBoundaryGUIDs - len(kept)
-		if remaining > len(rest) {
-			remaining = len(rest)
-		}
+		remaining := min(maxBoundaryGUIDs-len(kept), len(rest))
 		kept = append(kept, rest[:remaining]...)
-		slices.Sort(kept) // restore sorted order for deterministic bg
-		dropped = make(map[uint32]struct{}, len(bg)-len(kept))
-		for _, g := range bg {
+		dropped = make(map[uint32]struct{}, len(must)-len(kept))
+		for _, g := range must {
 			dropped[g] = struct{}{}
 		}
 		for _, g := range kept {
 			delete(dropped, g)
 		}
-		bg = kept
+		must = kept
 	}
+
+	// Fill any cap slots the must class left free with the most-recent protected
+	// (opt) GUIDs — a higher pub is likelier to still be in the window next
+	// fetch; ties broken by hash for determinism. Evicting an opt GUID here
+	// never skips ingestion, so opt never contributes to dropped.
+	bg := must
+	if remaining := maxBoundaryGUIDs - len(bg); remaining > 0 && len(opt) > 0 {
+		slices.SortFunc(opt, func(x, y datedGUID) int {
+			if c := cmp.Compare(y.p, x.p); c != 0 {
+				return c
+			}
+			return cmp.Compare(x.g, y.g)
+		})
+		for _, d := range opt[:min(remaining, len(opt))] {
+			bg = append(bg, d.g)
+		}
+	}
+	slices.Sort(bg)
 
 	// Second pass: run the module pipeline for the items committed to ingestion.
 	// Asset self-hosting (the "#"-marker upload) is deferred to uploadAssets below
