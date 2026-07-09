@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -21,8 +22,25 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// feedFilter restricts a fetch cycle to a subset of feeds by tag and/or feed
+// id, with both include and exclude logic. It is embedded in FetchCmd (backs
+// `srr art fetch`) and ServeCmd (backs `srr serve --interval`) so the same
+// SRR_FETCH_* env reaches the persistent loop. All four are sep:"," slices, so
+// each accepts comma-separated values AND repeats (`--tag a,b` ≡ `--tag a
+// --tag b`), and kong splits env values on the same separator. Tag selectors
+// match hierarchically (see matchTag). Empty = no restriction (fetch every
+// feed), the historical default.
+type feedFilter struct {
+	Tag         []string `short:"g" sep:"," env:"SRR_FETCH_TAG" help:"Only fetch feeds whose tag is (or is under) one of these; comma-separated or repeated. Hierarchical: 'news' also matches 'news/tech'."`
+	Feed        []int    `short:"i" sep:"," env:"SRR_FETCH_FEED" help:"Only fetch these feed ids; comma-separated or repeated."`
+	ExcludeTag  []string `sep:"," env:"SRR_FETCH_EXCLUDE_TAG" help:"Skip feeds whose tag is (or is under) one of these; comma-separated or repeated. Hierarchical, like --tag."`
+	ExcludeFeed []int    `sep:"," env:"SRR_FETCH_EXCLUDE_FEED" help:"Skip these feed ids; comma-separated or repeated."`
+}
+
 type FetchCmd struct {
 	Interval time.Duration `help:"Run fetch in a loop with this interval." default:"0" env:"SRR_FETCH_INTERVAL"`
+
+	feedFilter
 
 	// lastOutSig is the syndication-input signature (db.outFeedsSig) at the last
 	// SyncOutFeeds call, carried across --interval cycles so an idle cycle whose
@@ -31,8 +49,111 @@ type FetchCmd struct {
 
 	// only restricts the cycle to these feed ids (empty = every feed). Set by
 	// the serve SSE handler for the GUI's single-feed fetch; an unknown id
-	// fails the cycle. Not a CLI flag.
+	// fails the cycle. Distinct from the feedFilter above: this is the GUI's
+	// exact-id path with a hard-error-on-unknown contract. Not a CLI flag.
 	only []int
+}
+
+// matchTag reports whether a feed's tag satisfies a hierarchical tag selector:
+// an exact match, or the tag sitting under the selector's subtree. The trailing
+// "/" guards against false prefixes, so selector "news" matches "news" and
+// "news/tech" but not the sibling "news2".
+func matchTag(feedTag, sel string) bool {
+	return feedTag == sel || strings.HasPrefix(feedTag, sel+"/")
+}
+
+// apply selects feeds from all per the include/exclude filter. The candidate
+// set is the union of feeds matching any include tag (prefix) or include feed
+// id — or every feed when no include selector is given — with any feed matching
+// an exclude tag (prefix) or exclude feed id then removed. Selected feeds are
+// returned sorted by id (deterministic). It never errors: a selector matching
+// no feed in the store, and an empty result, are reported as human-readable
+// warnings for the caller to log (typo detection without aborting a shared
+// per-box config). Match tracking scans the whole store per selector,
+// independent of the include/exclude interplay, so the warning means "this
+// selector names nothing that exists", not "this selector changed the result".
+func (f feedFilter) apply(all map[int]*Feed) (selected []*Feed, warnings []string) {
+	hasInclude := len(f.Tag) > 0 || len(f.Feed) > 0
+
+	ids := make([]int, 0, len(all))
+	for id := range all {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+
+	for _, id := range ids {
+		ch := all[id]
+		if !hasInclude || feedMatchesTag(ch.Tag, f.Tag) || slices.Contains(f.Feed, id) {
+			if !feedMatchesTag(ch.Tag, f.ExcludeTag) && !slices.Contains(f.ExcludeFeed, id) {
+				selected = append(selected, ch)
+			}
+		}
+	}
+
+	tagExists := func(sel string) bool {
+		for _, id := range ids {
+			if matchTag(all[id].Tag, sel) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, t := range f.Tag {
+		if !tagExists(t) {
+			warnings = append(warnings, fmt.Sprintf("--tag %q matched no feeds", t))
+		}
+	}
+	for _, id := range f.Feed {
+		if _, ok := all[id]; !ok {
+			warnings = append(warnings, fmt.Sprintf("--feed %d matched no feeds", id))
+		}
+	}
+	for _, t := range f.ExcludeTag {
+		if !tagExists(t) {
+			warnings = append(warnings, fmt.Sprintf("--exclude-tag %q matched no feeds", t))
+		}
+	}
+	for _, id := range f.ExcludeFeed {
+		if _, ok := all[id]; !ok {
+			warnings = append(warnings, fmt.Sprintf("--exclude-feed %d matched no feeds", id))
+		}
+	}
+	if len(selected) == 0 {
+		warnings = append(warnings, "feed filter selected no feeds this cycle (maintenance still runs)")
+	}
+	return selected, warnings
+}
+
+func feedMatchesTag(feedTag string, sels []string) bool {
+	for _, sel := range sels {
+		if matchTag(feedTag, sel) {
+			return true
+		}
+	}
+	return false
+}
+
+// selectFeeds resolves the feeds a cycle should fetch. The GUI single-feed path
+// (o.only) resolves exact ids and hard-errors on an unknown one; otherwise the
+// include/exclude filter runs over every feed, logging (never erroring on) any
+// no-match selector or an empty result.
+func (o *FetchCmd) selectFeeds(db *DB) ([]*Feed, error) {
+	if len(o.only) > 0 {
+		feeds := make([]*Feed, 0, len(o.only))
+		for _, id := range o.only {
+			ch, err := db.FeedByID(id)
+			if err != nil {
+				return nil, err
+			}
+			feeds = append(feeds, ch)
+		}
+		return feeds, nil
+	}
+	feeds, warnings := o.feedFilter.apply(db.Feeds())
+	for _, w := range warnings {
+		slog.Warn("feed filter: " + w)
+	}
+	return feeds, nil
 }
 
 // feedProgress reports one feed's outcome to a runFetch caller (the SSE handler).
@@ -203,23 +324,13 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 			maxAssetSize: int(assets.maxBytes),
 		}
 
-		// The cycle's feed set: every feed, or just o.only (the GUI's
-		// single-feed fetch). The filter scopes the fan-out and the progress /
-		// summary counts below — a stale FetchError on an unselected feed must
-		// not count as this cycle's failure.
-		feeds := make([]*Feed, 0, len(db.Feeds()))
-		if len(o.only) > 0 {
-			for _, id := range o.only {
-				ch, err := db.FeedByID(id)
-				if err != nil {
-					return err
-				}
-				feeds = append(feeds, ch)
-			}
-		} else {
-			for _, ch := range db.Feeds() {
-				feeds = append(feeds, ch)
-			}
+		// The cycle's feed set: the GUI single-feed fetch (o.only), the
+		// include/exclude filter, or every feed. The filter scopes the fan-out
+		// and the progress / summary counts below — a stale FetchError on an
+		// unselected feed must not count as this cycle's failure.
+		feeds, err := o.selectFeeds(db)
+		if err != nil {
+			return err
 		}
 
 		// Live stats on the terminal status line while the cycle runs (feeds
