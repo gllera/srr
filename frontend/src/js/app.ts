@@ -748,6 +748,14 @@ async function init() {
       if (localStorage.getItem(UNREAD_ONLY_KEY) === null) nav.setUnreadOnly(true)
    } catch {}
 
+   // Has the person touched anything yet this session? The boot sync pull
+   // re-anchors the list only BEFORE the first interaction (the device-switch
+   // moment: read on the phone, then reload this tab); once you've tapped /
+   // typed / scrolled, a background merge must not move anything under you.
+   let hasInteracted = false
+   for (const t of ["pointerdown", "keydown", "wheel", "touchstart"])
+      document.addEventListener(t, () => (hasInteracted = true), { capture: true, passive: true, once: true })
+
    // Shared refresh after any profile merge — a backup import or a sync pull
    // that changed local state: prune stale seen keys, refresh the save button,
    // rebuild the list under the current filter, and re-derive an open config
@@ -757,7 +765,22 @@ async function init() {
    const refreshAfterMerge = () => {
       nav.pruneSeen()
       refreshSaveButton(!el.save.disabled)
-      if (view !== "reader") void list.rerender()
+      if (view === "list" && !hasInteracted && !nav.filter.saved && !nav.filter.search) {
+         // The BOOT pull changed the profile before anything was touched — the
+         // device-switch moment, and the navigator half of the sync feature
+         // (the profile syncs on page load; there is deliberately no button):
+         // re-derive the unseen bounds from the new seen map and rebuild the
+         // list anchored at the new range (listAnchor → the new oldest unread)
+         // instead of the gentle rebuild. Saved/search are exempt peek modes
+         // (their sets are seen-independent), and a boot into the READER stays
+         // gentle: that position is a restored mid-article read or a shared
+         // deep link — swapping the on-screen article out from under the reader
+         // would be wrong in both cases.
+         nav.applyFilter([...nav.filter.tokens])
+         void list.render()
+      } else if (view !== "reader") {
+         void list.rerender()
+      }
       if (config.isOpen()) config.render()
    }
 
@@ -788,22 +811,18 @@ async function init() {
       if (config.isOpen()) config.render()
    }
 
-   // Sync now (config quick-action): make this browser current in both
-   // directions — the content refresh and a manual (pure-LWW, always-push)
-   // profile cycle, run concurrently (they're independent). Content errors get
-   // the popup (the one user-initiated path); sync errors stay on the status
-   // line as always. Config stays open so its freshness line confirms the result.
-   // Either half can silently no-op: the content refresh busy-skips when a
-   // navigation holds the mutex, and syncNow skips when a cycle is inflight —
-   // both recoverable by re-tapping, same posture as sync's documented no-op.
-   const manualSyncNow = async () => {
-      const [contentErr] = await Promise.all([refresh.refreshNow(), sync.syncNow({ manual: true })])
-      // No explicit config repaint: on real changes refreshAfterStore /
-      // refreshAfterMerge already re-render an open config, and a no-change
-      // cycle repaints the sig-guarded status footer via sync's onStatus hook —
-      // an unconditional render() here would only re-kick the filter-list
-      // rebuild redundantly.
-      if (contentErr) showError(new Error(contentErr), () => void manualSyncNow())
+   // Refresh (config quick-action): pull newer store CONTENT into the open tab.
+   // The profile sync deliberately has no button — it runs on every page load
+   // (the boot pull in init below; refreshAfterMerge re-anchors the list when
+   // it changed something) and continuously in the background (pushSoon /
+   // re-focus / online), and under the raise-only merge no cycle needs a human
+   // authorization anymore. Content errors get the popup (the one
+   // user-initiated path); it can silently no-op when a navigation holds the
+   // mutex — recoverable by re-tapping. No explicit config repaint: on real
+   // changes refreshAfterStore already re-renders an open config.
+   const manualRefresh = async () => {
+      const contentErr = await refresh.refreshNow()
+      if (contentErr) showError(new Error(contentErr), () => void manualRefresh())
    }
    // After a successful profile import (backup dialog), additionally reconcile
    // prefs: importProfile wrote srr-unread-only straight to localStorage, but nav
@@ -846,7 +865,7 @@ async function init() {
       openImgProxy: showImgProxyDialog,
       openBackup: () => showBackupDialog(),
       openSync: showSyncDialog,
-      onRefresh: () => void manualSyncNow(),
+      onRefresh: () => void manualRefresh(),
    })
 
    // The list opens an article in the reader through the same guard mutex as

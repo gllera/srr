@@ -61,7 +61,7 @@ describe("url validation / normalization", () => {
       sync.setSyncUrl("")
       expect(localStorage.getItem(SYNC_URL_KEY)).toBeNull()
       expect(sync.enabled()).toBe(false)
-      expect(sync.state()).toEqual({ on: false, okAt: 0, error: "", parked: false })
+      expect(sync.state()).toEqual({ on: false, okAt: 0, error: "" })
    })
 })
 
@@ -90,8 +90,8 @@ describe("pull-merge (legacy v1 remote)", () => {
       expect(localStorage.getItem(UNREAD_ONLY_KEY)).toBe("0") // remote said "1"; prefs stay local
       expect(sync.state().okAt).toBeGreaterThan(0)
       expect(sync.state().error).toBe("")
-      // A v1 remote always forces an upgrade push (dirty=true) — guarded, but
-      // the merge result here dominates the remote's own seen so it can't park.
+      // A v1 remote always forces an upgrade push (dirty=true) so the endpoint
+      // moves to v2 even when the merge itself raised nothing.
       expect(fetchMock).toHaveBeenCalledTimes(2)
       expect(fetchMock.mock.calls[1][1].method).toBe("PUT")
    })
@@ -128,59 +128,67 @@ describe("pull-merge (legacy v1 remote)", () => {
    })
 })
 
-describe("LWW pull", () => {
+describe("sync pull (raise-only seen, LWW saved)", () => {
    beforeEach(() => sync.setSyncUrl(URL))
 
-   it("adopts a newer non-regressive remote wholesale", async () => {
+   it("raises seen and adopts saved/ts from a newer remote, and reports changed", async () => {
       localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 10 }))
+      localStorage.setItem(SAVED_KEY, JSON.stringify([1]))
       localStorage.setItem(PROFILE_TS_KEY, "100")
-      fetchMock.mockResolvedValueOnce(res(200, v2Blob(200, { "feed:1": 50 })))
-      await sync.syncNow()
+      fetchMock.mockResolvedValueOnce(res(200, v2Blob(200, { "feed:1": 50 }, [7])))
+      expect(await sync.syncNow()).toBe(true)
       expect(JSON.parse(localStorage.getItem(SEEN_KEY)!)).toEqual({ "feed:1": 50 })
+      expect(JSON.parse(localStorage.getItem(SAVED_KEY)!)).toEqual([7]) // un-save of 1 propagated
       expect(localStorage.getItem(PROFILE_TS_KEY)).toBe("200")
-      expect(sync.state().parked).toBe(false)
+      // local ⊑ remote after the merge — nothing to push back
+      expect(fetchMock).toHaveBeenCalledTimes(1)
    })
 
-   it("keeps local when remote is older, then pushes only if dirty", async () => {
+   it("NEVER lowers local seen — not even from a newer remote — and self-heals the endpoint", async () => {
+      localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 90, "feed:2": 5 }))
+      localStorage.setItem(PROFILE_TS_KEY, "100")
+      // Newer remote with a lower feed:1 and feed:2 missing entirely.
+      fetchMock.mockResolvedValue(res(200, v2Blob(200, { "feed:1": 50 }, [])))
+      const changed = await sync.syncNow()
+      expect(JSON.parse(localStorage.getItem(SEEN_KEY)!)).toEqual({ "feed:1": 90, "feed:2": 5 })
+      expect(localStorage.getItem(PROFILE_TS_KEY)).toBe("200") // ts still converges to max
+      expect(changed).toBe(false) // nothing the UI shows moved (ts-only)
+      expect("parked" in sync.state()).toBe(false) // parking is gone as a concept
+      // The endpoint's seen is BEHIND local → the delta-derived push re-raises it.
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(fetchMock.mock.calls[1][1].method).toBe("PUT")
+      expect(JSON.parse(fetchMock.mock.calls[1][1].body).seen).toEqual({ "feed:1": 90, "feed:2": 5 })
+   })
+
+   it("re-raises a behind endpoint even with dirty lost (fresh module, no pending reads)", async () => {
       localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 90 }))
       localStorage.setItem(PROFILE_TS_KEY, "300")
-      fetchMock.mockResolvedValueOnce(res(200, v2Blob(200, { "feed:1": 50 })))
-      await sync.syncNow()
+      fetchMock.mockResolvedValue(res(200, v2Blob(200, { "feed:1": 50 }, [])))
+      await sync.syncNow() // background; dirty=false (this "tab" just loaded)
       expect(JSON.parse(localStorage.getItem(SEEN_KEY)!)).toEqual({ "feed:1": 90 })
-      expect(fetchMock).toHaveBeenCalledTimes(1) // GET only, not dirty
+      // The reload-lost-dirty heal: local is ahead → push fires anyway.
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(fetchMock.mock.calls[1][1].method).toBe("PUT")
    })
 
-   it("parks instead of adopting a newer REGRESSIVE remote (and skips the push)", async () => {
-      localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 90 }))
-      // pushSoon stamps ts to "now" via touchProfile — pin the fake clock so
-      // that stamp lands at 100 (older than the remote's 200 below), which is
-      // the "local is dirty but stale" setup this test needs.
-      vi.setSystemTime(100_000)
-      sync.pushSoon() // local is dirty; ts = 100
-      fetchMock.mockResolvedValue(res(200, v2Blob(200, { "feed:1": 50 })))
-      await sync.syncNow()
-      expect(JSON.parse(localStorage.getItem(SEEN_KEY)!)).toEqual({ "feed:1": 90 }) // not adopted
-      expect(fetchMock).toHaveBeenCalledTimes(1) // no PUT either
-      expect(sync.state().parked).toBe(true)
-   })
-
-   it("a dropped feed key counts as regressive", async () => {
-      localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 50, "feed:2": 5 }))
+   it("a ts-only convergence reports changed=false and pushes nothing", async () => {
+      localStorage.setItem(SAVED_KEY, JSON.stringify([7]))
       localStorage.setItem(PROFILE_TS_KEY, "100")
-      fetchMock.mockResolvedValueOnce(res(200, v2Blob(200, { "feed:1": 50 }))) // feed:2 absent
-      await sync.syncNow()
-      expect(sync.state().parked).toBe(true)
+      fetchMock.mockResolvedValueOnce(res(200, v2Blob(200, {}, [7])))
+      expect(await sync.syncNow()).toBe(false)
+      expect(localStorage.getItem(PROFILE_TS_KEY)).toBe("200")
+      expect(fetchMock).toHaveBeenCalledTimes(1) // GET only
    })
 
-   it("MANUAL adopts a regressive newer remote and always pushes (pure LWW)", async () => {
+   it("MANUAL also merges raise-only — it can no longer rewind — and always pushes", async () => {
       localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 90 }))
       localStorage.setItem(PROFILE_TS_KEY, "100")
-      fetchMock.mockResolvedValue(res(200, v2Blob(200, { "feed:1": 50 })))
+      fetchMock.mockResolvedValue(res(200, v2Blob(200, { "feed:1": 50 }, [])))
       await sync.syncNow({ manual: true })
-      expect(JSON.parse(localStorage.getItem(SEEN_KEY)!)).toEqual({ "feed:1": 50 })
+      expect(JSON.parse(localStorage.getItem(SEEN_KEY)!)).toEqual({ "feed:1": 90 }) // NOT rewound
       expect(fetchMock).toHaveBeenCalledTimes(2) // GET then PUT
       expect(fetchMock.mock.calls[1][1].method).toBe("PUT")
-      expect(sync.state().parked).toBe(false)
+      expect(JSON.parse(fetchMock.mock.calls[1][1].body).seen).toEqual({ "feed:1": 90 })
    })
 
    it("a v1 remote gets one monotone merge and an upgrade push", async () => {
@@ -192,28 +200,25 @@ describe("LWW pull", () => {
       expect(JSON.parse(fetchMock.mock.calls[1][1].body).v).toBe(2)
    })
 
-   it("adopting cancels a pending debounce push (nothing left to publish)", async () => {
+   it("a cycle with pending local reads pushes them and cancels the debounce timer", async () => {
       vi.setSystemTime(100_000)
       localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 10 }))
       sync.pushSoon() // dirty, timer armed; ts = 100
-      fetchMock.mockResolvedValue(res(200, v2Blob(200, { "feed:1": 50 })))
-      await sync.syncNow() // adopts (newer, non-regressive) → dirty=false
-      const calls = fetchMock.mock.calls.length // the GET only
+      fetchMock.mockResolvedValue(res(200, v2Blob(200, { "feed:1": 50 }, [])))
+      await sync.syncNow() // raises seen from remote; dirty → PUT in this same cycle
+      expect(fetchMock.mock.calls.filter((c) => c[1]?.method === "PUT")).toHaveLength(1)
+      const calls = fetchMock.mock.calls.length
       await vi.advanceTimersByTimeAsync(10_000)
-      // The stale debounce timer was cancelled with the adopt — no redundant
-      // GET-only cycle fires after it.
+      // The debounce timer was cancelled with the push — no redundant cycle.
       expect(fetchMock.mock.calls.length).toBe(calls)
    })
 
-   it("a manual cycle resolves a parked state", async () => {
-      localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 90 }))
-      localStorage.setItem(PROFILE_TS_KEY, "100")
-      fetchMock.mockResolvedValue(res(200, v2Blob(200, { "feed:1": 50 })))
-      await sync.syncNow() // newer regressive remote → background cycle parks
-      expect(sync.state().parked).toBe(true)
-      await sync.syncNow({ manual: true }) // the human tap authorizes the rewind
-      expect(sync.state().parked).toBe(false)
-      expect(JSON.parse(localStorage.getItem(SEEN_KEY)!)).toEqual({ "feed:1": 50 }) // adopted
+   it("reports changed=false when the pull moved nothing at all", async () => {
+      localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 50 }))
+      localStorage.setItem(SAVED_KEY, JSON.stringify([7]))
+      localStorage.setItem(PROFILE_TS_KEY, "300")
+      fetchMock.mockResolvedValue(res(200, v2Blob(200, { "feed:1": 50 }, [7])))
+      expect(await sync.syncNow()).toBe(false)
    })
 })
 
@@ -226,44 +231,47 @@ describe("regressiveSeen", () => {
    })
 })
 
-describe("regression-guarded push / flush", () => {
+describe("flush guard (stale-tab protection)", () => {
    beforeEach(() => sync.setSyncUrl(URL))
 
-   it("parks a background push that would rewind the endpoint", async () => {
-      // pushSoon stamps ts to "now" via touchProfile — pin the fake clock so
-      // that stamp (400) stays ABOVE the remote's ts (200). Without the pin
-      // this silently depends on vitest's default fake clock being ≫ 200; a
-      // fakeTimers config change starting the clock near 0 would flip the
-      // cycle into the adopt path instead of exercising the push guard.
+   it("a push after a pull can never rewind the endpoint — the merge absorbed it", async () => {
       vi.setSystemTime(400_000)
       localStorage.setItem(PROFILE_TS_KEY, "300")
-      fetchMock.mockResolvedValue(res(200, v2Blob(200, { "feed:1": 90 })))
-      await sync.syncNow() // remote older → keep local; local seen LACKS feed:1
+      fetchMock.mockResolvedValue(res(200, v2Blob(200, { "feed:1": 90 }, [])))
+      await sync.syncNow() // remote's feed:1 progress absorbed into local seen
       sync.pushSoon()
       await vi.advanceTimersByTimeAsync(6000)
-      expect(fetchMock.mock.calls.filter((c) => c[1]?.method === "PUT")).toHaveLength(0)
-      expect(sync.state().parked).toBe(true)
+      const puts = fetchMock.mock.calls.filter((c) => c[1]?.method === "PUT")
+      expect(puts.length).toBeGreaterThan(0)
+      // Every published blob carries the absorbed remote progress.
+      for (const p of puts) expect(JSON.parse(p[1].body).seen["feed:1"]).toBe(90)
    })
 
-   it("flush skips when the blob would rewind the endpoint, leaving dirty set", async () => {
+   it("flush skips when local seen fell below the remembered remote, leaving dirty set", async () => {
       vi.setSystemTime(400_000)
       localStorage.setItem(PROFILE_TS_KEY, "300")
-      fetchMock.mockResolvedValue(res(200, v2Blob(200, { "feed:1": 90 })))
-      await sync.syncNow() // remote older → keep local; local seen LACKS feed:1
-      sync.pushSoon() // ts = 400 ≥ lastRemoteTs 200, but the blob is regressive
+      fetchMock.mockResolvedValue(res(200, v2Blob(200, { "feed:1": 90 }, [])))
+      await sync.syncNow() // remembered remote (post-push): seen has feed:1=90
+      // Local seen drops below the snapshot afterwards (nav.pruneSeen dropping a
+      // deleted feed's key is the legitimate way this happens).
+      localStorage.setItem(SEEN_KEY, "{}")
+      sync.pushSoon() // ts newer than the snapshot, but the blob is regressive
       sync.flush()
-      expect(fetchMock.mock.calls.filter((c) => c[1]?.method === "PUT")).toHaveLength(0)
-      // The skip left dirty set AND the debounce timer armed: once local
-      // catches up to the endpoint's progress, the pending cycle publishes.
-      localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 90 }))
+      const putsAfterFlush = fetchMock.mock.calls.filter((c) => c[1]?.method === "PUT").length
+      // The flush was skipped: no NEW put beyond the cycle's own one.
+      expect(putsAfterFlush).toBe(1)
+      // The skip left dirty set AND the debounce timer armed: the pending full
+      // cycle pulls first, re-absorbs the remote's progress, and publishes.
       await vi.advanceTimersByTimeAsync(6000)
-      expect(fetchMock.mock.calls.filter((c) => c[1]?.method === "PUT")).toHaveLength(1)
+      const puts = fetchMock.mock.calls.filter((c) => c[1]?.method === "PUT")
+      expect(puts).toHaveLength(2)
+      expect(JSON.parse(puts[1][1].body).seen["feed:1"]).toBe(90) // re-absorbed, not rewound
    })
 
    it("flush skips when local ts is older than the last-pulled remote", async () => {
       localStorage.setItem(PROFILE_TS_KEY, "100")
-      fetchMock.mockResolvedValue(res(200, v2Blob(200, { "feed:1": 50 })))
-      await sync.syncNow() // adopts; ts = 200; not dirty
+      fetchMock.mockResolvedValue(res(200, v2Blob(200, { "feed:1": 50 }, [])))
+      await sync.syncNow() // seen raised + ts converged to 200; nothing pushed
       // pushSoon stamps ts to "now" via touchProfile — pin the fake clock so
       // that stamp (150) lands BEFORE the last-pulled remote's ts (200),
       // simulating a stale tab that fell behind between pulls.
@@ -279,19 +287,17 @@ describe("regression-guarded push / flush", () => {
       expect(fetchMock.mock.calls.filter((c) => c[1]?.method === "PUT")).toHaveLength(1)
    })
 
-   it("a 404 pull forgets the guard snapshot — the wiped endpoint has nothing to regress", async () => {
+   it("a 404 pull forgets the guard snapshot and seeds the endpoint", async () => {
       vi.setSystemTime(400_000)
       localStorage.setItem(PROFILE_TS_KEY, "300")
-      fetchMock.mockResolvedValueOnce(res(200, v2Blob(200, { "feed:1": 90 })))
-      await sync.syncNow() // snapshot: remote has feed:1; local seen LACKS it
+      fetchMock.mockResolvedValueOnce(res(200, v2Blob(200, { "feed:1": 90 }, [])))
+      await sync.syncNow() // pull + push (local ts newer) — snapshot set
       // Endpoint wiped: GETs now 404 (PUTs still succeed).
       fetchMock.mockImplementation(async (_u, init) => ((init as RequestInit)?.method === "PUT" ? res(200) : res(404)))
-      sync.pushSoon()
       await sync.syncNow()
-      // The 404 reset the snapshot, so the seeding PUT is unguarded — without
-      // the reset the stale pre-404 snapshot would spuriously park it.
-      expect(fetchMock.mock.calls.filter((c) => c[1]?.method === "PUT")).toHaveLength(1)
-      expect(sync.state().parked).toBe(false)
+      // The 404 forgot the snapshot and triggered the seeding PUT directly —
+      // even with dirty false (nothing pending locally).
+      expect(fetchMock.mock.calls.filter((c) => c[1]?.method === "PUT")).toHaveLength(2)
    })
 })
 

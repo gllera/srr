@@ -162,10 +162,12 @@ export function showImgProxyDialog(): void {
 
 // syncBody is the editable content of the sync dialog: the endpoint-URL input
 // plus the action row, the same editor shape as imgProxyBody. Saving a NEW url
-// kicks a MANUAL cycle immediately (pure LWW: adopt the endpoint's blob when
-// newer — even regressive — then always push) so enabling sync seeds the
-// endpoint / adopts its stored profile without waiting for the next reading
-// session; the config status footer reports how it went.
+// kicks a MANUAL cycle immediately (the one-reader merge: raise seen from the
+// endpoint's blob, adopt its saved set when newer, then push) so enabling sync
+// seeds the endpoint / takes over its stored progress without waiting for the
+// next reading session — a fresh device's empty seen map takes the endpoint's
+// progress wholesale, every value being a raise from absent. The config status
+// footer reports how it went.
 function syncBody(close: () => void): DocumentFragment {
    const frag = document.createDocumentFragment()
    const input = editorInput("url", "srr-sync-input", "Sync endpoint URL (empty disables)")

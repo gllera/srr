@@ -8,29 +8,31 @@
 // localStorage (keys.ts SYNC_URL_KEY) and no request is made until one is set.
 //
 // The synced payload IS the backup blob (profile.ts exportProfile, v:2), so the
-// endpoint's content doubles as a restorable backup. The cycle is whole-blob
-// last-write-wins by `ts` (profile.ts's LWW ordering field, stamped on every
-// seen/saved mutation): the newest push simply wins. That's a step down from
-// v1's monotone merge in one respect — a merge could never lower progress, so
-// a bad PUT was always recoverable (the next merge just re-raised it); LWW can
-// genuinely erase progress if it adopts or publishes the wrong blob. The
-// progress-regression guard is the replacement safety net: a BACKGROUND cycle
-// (tab re-focus, `online`, the debounced pushSoon timer) may never DECREASE
-// read progress in either direction — it won't adopt a remote that would
-// rewind local seen positions, and it won't publish a local blob that would
-// rewind the endpoint's. Either case PARKS the cycle (no adopt, no push,
-// `state().parked` flagged) instead of resolving it silently, and waits for a
-// human decision. A MANUAL cycle (`syncNow({manual:true})`, wired to the sync
-// dialog's Save) applies pure LWW with no guard at all — the tap IS the
-// authorization to rewind (e.g. discarding a device's bogus state on purpose).
+// endpoint's content doubles as a restorable backup. The model assumes ONE
+// reader on every device, so every cycle — background and manual alike — is the
+// same hybrid merge (profile.ts importProfile mode:"sync"):
+//   seen     — per-feed max: read progress is the union of what the one person
+//              read anywhere, so it only ever RISES, on this device and on the
+//              endpoint. No timestamps, no guards, no parking — a lower remote
+//              value is never newer information, just an older snapshot of the
+//              same reader.
+//   saved+ts — last-write-wins by `ts` (profile.ts's ordering field, stamped on
+//              every local seen/saved mutation): the saved set is the person's
+//              current intent, so un-saves propagate.
+// The push needs no guard: after the merge, local ⊒ the just-pulled remote on
+// seen and holds the LWW-newest saved/ts, so a PUT can never lower the
+// endpoint. And it fires whenever the endpoint is actually BEHIND (its seen
+// regressive against local / its ts older / a 404 to seed) — derived from the
+// pulled blob, not just the in-memory dirty flag, because a reload loses that
+// flag and an endpoint regressed by a stale tab's flush or an old-build LWW
+// device must heal on any device's next cycle. There is deliberately NO path
+// that lowers read progress; the one surviving guard (`flush`, below) only
+// protects the endpoint from a stale tab's blind PUT.
 //
 // A v1 remote (a pre-upgrade endpoint, or another device still on the old
-// build) has no `ts` to LWW-compare, so it gets one legacy monotone merge via
-// importProfile instead of an adopt, and — regardless of manual/background —
-// always forces a push afterward so the endpoint upgrades to v2. That forced
-// push still runs through the same guard machinery, but it can never actually
-// park: a one-way-raising merge can't end up regressive against the very blob
-// it was merged from.
+// build) has no `ts` to order saved by, so it gets one legacy monotone merge
+// (mode:"merge" — seen max + saved union) and always forces a push afterward so
+// the endpoint upgrades to v2.
 //
 // Like profile.ts, this module imports only keys.ts + profile.ts (no data.ts /
 // fmt.ts) so it unit-tests without a pack server or the base.ts URL side effect.
@@ -53,8 +55,7 @@ let lastPullAt = 0 // ms; attempt-based, so a dead endpoint isn't hammered
 let lastOkAt = 0 // unix SECONDS of the last completed cycle (fmt.timeAgoProse scale)
 let lastError = ""
 let lastRemoteTs = -1 // ts of the last successfully pulled remote (-1 = never pulled)
-let lastRemoteSeen: Record<string, number> | null = null // its seen map, for the regression guard
-let parkedFlag = false // last BACKGROUND cycle parked on a would-be progress regression
+let lastRemoteSeen: Record<string, number> | null = null // its seen map, for flush()'s stale-tab guard
 
 export function getSyncUrl(): string {
    try {
@@ -77,7 +78,6 @@ export function setSyncUrl(value: string): void {
    lastPullAt = 0
    lastRemoteTs = -1
    lastRemoteSeen = null
-   parkedFlag = false
 }
 
 export function enabled(): boolean {
@@ -109,17 +109,17 @@ export interface SyncState {
    on: boolean
    okAt: number // unix seconds of the last completed cycle; 0 = never
    error: string // last cycle's failure ("" = healthy)
-   parked: boolean // last BACKGROUND cycle parked on a would-be progress regression
 }
 
 export function state(): SyncState {
-   return { on: enabled(), okAt: lastOkAt, error: lastError, parked: parkedFlag }
+   return { on: enabled(), okAt: lastOkAt, error: lastError }
 }
 
-// True when publishing/adopting `incoming` over `cur` would DECREASE read
-// progress: some feed key of `cur` is absent from `incoming` or maps to a
-// lower number. Seen axis ONLY — saved-set changes (including un-saves) never
-// park a cycle; letting deletions propagate is the whole point of LWW.
+// True when `incoming` holds LESS read progress than `cur`: some feed key of
+// `cur` is absent from `incoming` or maps to a lower number. Two consumers:
+// the cycle's push trigger (the pulled remote is behind local → re-raise the
+// endpoint) and flush()'s stale-tab guard. Seen axis ONLY — saved-set deltas
+// (including un-saves) are ordered by ts, not by progress.
 export function regressiveSeen(cur: Record<string, number>, incoming: Record<string, number>): boolean {
    for (const [k, v] of Object.entries(cur)) {
       const inc = incoming[k]
@@ -176,77 +176,68 @@ async function put(url: string, keepalive = false): Promise<void> {
    if (!res.ok) throw new Error(`HTTP ${res.status}`)
 }
 
-// One full cycle under whole-blob LWW. Background cycles are progress-monotone:
-// any adoption or publication that would DECREASE read progress (regressiveSeen)
-// parks the cycle instead — no adopt, no push, status flagged — and waits for a
-// manual Sync now, which applies pure LWW in both directions (the human tap is
-// the authorization to rewind). A pull failure skips the push (never PUT over a
-// remote we failed to read); offline failures stay silent — the SW makes
-// offline reading a supported state, not a sync fault.
-export async function syncNow(opts: { manual?: boolean } = {}): Promise<void> {
+// One full cycle of the one-reader hybrid merge (module docblock): pull, merge
+// (seen max-raise + saved/ts LWW; a v1 remote gets the legacy monotone merge
+// and a forced upgrade push), then push whenever the endpoint is behind.
+// Returns whether the pull CHANGED local seen/saved — the caller's re-anchor
+// signal (a ts-only convergence returns false; so do failures and no-ops).
+// `manual` no longer changes the merge — it only forces the push (the Refresh
+// tap republishes even a fully-converged blob). A pull failure skips the push
+// (never PUT over a remote we failed to read); offline failures stay silent —
+// the SW makes offline reading a supported state, not a sync fault.
+export async function syncNow(opts: { manual?: boolean } = {}): Promise<boolean> {
    const url = getSyncUrl()
-   if (!url || inflight) return
+   if (!url || inflight) return false
    inflight = true
    lastPullAt = Date.now()
+   let changed = false
    try {
       const remote = await pullRemote(url)
-      let adopted = false
-      let parked = false
       if (remote) {
          lastRemoteTs = remote.ts
          lastRemoteSeen = remote.seen
-         if (remote.v === 1) {
-            // One-time legacy path: monotone-merge the v1 blob (old rules), then
-            // force a push so the endpoint upgrades to v2.
-            const before = exportProfile()
-            const r = importProfile(remote.raw, { prefs: false })
-            if (!r.ok) throw new Error(r.error ?? "invalid profile")
-            adopted = exportProfile() !== before
-            dirty = true
-         } else if (remote.ts > profileTs()) {
-            if (!opts.manual && regressiveSeen(localSeen(), remote.seen)) {
-               parked = true // newer remote would rewind local read progress
-            } else {
-               const before = exportProfile()
-               const r = importProfile(remote.raw, { prefs: false, adopt: true })
-               if (!r.ok) throw new Error(r.error ?? "invalid profile")
-               adopted = exportProfile() !== before
-               dirty = false // local state IS the remote state now
-               // A debounce timer armed before the adopt would only fire one
-               // redundant GET-only cycle later — nothing left to push.
-               clearTimeout(pushTimer)
-            }
-         }
+         const r = importProfile(remote.raw, { prefs: false, mode: remote.v === 1 ? "merge" : "sync" })
+         if (!r.ok) throw new Error(r.error ?? "invalid profile")
+         changed = r.changed === true
+         // A v1 remote always upgrade-pushes so the endpoint moves to v2.
+         if (remote.v === 1) dirty = true
       } else {
          // 404 — the endpoint holds nothing NOW (wiped or reset since any
-         // earlier pull), so forget the guard snapshot: per the contract a push
-         // after a 404 is unguarded (nothing to regress against). A stale
-         // snapshot from before the 404 could otherwise spuriously park the
-         // seeding PUT below.
+         // earlier pull), so forget flush()'s guard snapshot; the seeding push
+         // below has nothing to regress against.
          lastRemoteTs = -1
          lastRemoteSeen = null
       }
-      if (adopted) onMerged?.()
-      const wantPush = opts.manual || dirty
-      if (wantPush && !opts.manual && !parked && lastRemoteSeen && regressiveSeen(lastRemoteSeen, localSeen())) {
-         parked = true // publishing local would rewind the endpoint's progress
-      }
-      if (wantPush && !parked) {
+      if (changed) onMerged?.()
+      // Push whenever the endpoint is behind, derived from the pulled blob
+      // itself (see the module docblock): `dirty` alone is an in-memory flag a
+      // reload loses, and a transiently-regressed endpoint must heal on any
+      // device's next cycle. A 404 endpoint is seeded — but only when local
+      // holds any state (a fresh device against a fresh endpoint has nothing
+      // to say). Safe unguarded — the merge above made local ⊒ remote on seen,
+      // and local saved/ts is the LWW newest.
+      const wantPush =
+         opts.manual ||
+         dirty ||
+         (remote
+            ? regressiveSeen(localSeen(), remote.seen) || profileTs() > remote.ts
+            : profileTs() > 0 || Object.keys(localSeen()).length > 0)
+      if (wantPush) {
          await put(url)
          dirty = false
          clearTimeout(pushTimer)
          lastRemoteTs = profileTs()
          lastRemoteSeen = localSeen()
       }
-      parkedFlag = parked
       lastOkAt = Math.floor(Date.now() / 1000)
       lastError = ""
    } catch (e) {
       if (navigator.onLine !== false) lastError = e instanceof Error ? e.message : String(e)
    } finally {
       inflight = false
-      onStatus?.() // okAt/error/parked moved — let an open config footer repaint
+      onStatus?.() // okAt/error moved — let an open config footer repaint
    }
+   return changed
 }
 
 // Debounced push, called from nav.ts's two mutation seams (recordSeen /
@@ -264,14 +255,17 @@ export function pushSoon(): void {
 }
 
 // Last-chance PUT when the page hides/unloads: keepalive lets the request
-// outlive the page; there's no time for a pre-push pull, so the guard below
-// stands in for it. LWW makes a bare PUT dangerous in ways v1's monotone merge
-// wasn't — a stale tab could replace a newer remote blob, or rewind the
-// endpoint's progress — so a tab that HAS pulled before (lastRemoteTs set)
-// checks its remembered remote before publishing; a tab that never pulled
-// flushes unguarded, as before (nothing to regress against yet). A skip (or a
-// failed PUT) leaves `dirty` set, so the next full cycle — which pulls first —
-// resolves it.
+// outlive the page; there's no time for the pre-push pull whose merge makes a
+// normal push safe, so the guard below stands in for it. A blind PUT from a
+// stale tab could still lower the endpoint — its seen can sit below the
+// endpoint's (nav.pruneSeen legitimately drops deleted feeds' keys), and its
+// saved/ts can predate a newer device's blob — so a tab that HAS pulled before
+// (lastRemoteTs set) checks its remembered remote before publishing; a tab
+// that never pulled flushes unguarded, as before (nothing to regress against
+// yet). A skip (or a failed PUT) leaves `dirty` set, so the next full cycle —
+// which pulls first — resolves it. And even if a stale snapshot lets a
+// regressive flush through, the raise-only merge means any device holding the
+// higher value re-raises the endpoint on its next cycle — flush mistakes heal.
 export function flush(): void {
    if (!dirty) return
    const url = getSyncUrl()
