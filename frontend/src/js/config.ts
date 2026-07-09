@@ -405,7 +405,7 @@ export function refreshStatus(): void {
    const syncState = sync.state()
    const refreshErr = refresh.lastRefreshError()
 
-   const sig = `${fetchedAt}|${stale}|${metaMissing}|${idxDegraded}|${syncState.on}|${syncState.okAt}|${syncState.error}|${syncState.parked}|${refreshErr}`
+   const sig = `${fetchedAt}|${stale}|${metaMissing}|${idxDegraded}|${syncState.on}|${syncState.okAt}|${syncState.error}|${refreshErr}`
    if (sig === lastStatusSig) return
    lastStatusSig = sig
 
@@ -427,10 +427,6 @@ export function refreshStatus(): void {
       else if (syncState.okAt > 0) statusBox.append(statusNote(`Synced ${timeAgoProse(syncState.okAt)}`))
       else statusBox.append(statusNote("Sync pending…"))
    }
-   // A parked background cycle refused to rewind read progress — surface the
-   // pause with the sync rows, since a manual Sync now is the way out.
-   if (syncState.on && syncState.parked)
-      statusBox.append(statusFlag("Sync paused — read progress would rewind. Sync now to resolve."))
    // The last content-refresh failure (background or manual); the manual path
    // also popups it, but a background failure only reaches the user here.
    if (refreshErr) statusBox.append(statusFlag(`Refresh failed — ${refreshErr}`))

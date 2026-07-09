@@ -44,7 +44,7 @@ import { isStale } from "./fmt"
 
 // The sync status readout consumed by the status footer.
 const sync = vi.hoisted(() => ({
-   state: vi.fn(() => ({ on: false, okAt: 0, error: "", parked: false })),
+   state: vi.fn(() => ({ on: false, okAt: 0, error: "" })),
 }))
 vi.mock("./sync", () => sync)
 
@@ -119,7 +119,7 @@ beforeEach(() => {
    data.metaReady.mockReturnValue(true)
    data.idxSummaryDegraded.mockReturnValue(false)
    ;(isStale as ReturnType<typeof vi.fn>).mockReturnValue(false)
-   sync.state.mockReturnValue({ on: false, okAt: 0, error: "", parked: false })
+   sync.state.mockReturnValue({ on: false, okAt: 0, error: "" })
    hooks.pinEntry.mockReturnValue(null)
 })
 
@@ -459,25 +459,17 @@ describe("status section", () => {
       config.render()
       expect(text()).not.toContain("Sync") // off → silent
 
-      sync.state.mockReturnValue({ on: true, okAt: 0, error: "", parked: false })
+      sync.state.mockReturnValue({ on: true, okAt: 0, error: "" })
       config.render()
       expect($$(".srr-status-note").map((n) => n.textContent)).toContain("Sync pending…")
 
-      sync.state.mockReturnValue({ on: true, okAt: 200, error: "", parked: false })
+      sync.state.mockReturnValue({ on: true, okAt: 200, error: "" })
       config.render()
       expect($$(".srr-status-note").map((n) => n.textContent)).toContain("Synced ago200")
 
-      sync.state.mockReturnValue({ on: true, okAt: 200, error: "HTTP 401", parked: false })
+      sync.state.mockReturnValue({ on: true, okAt: 200, error: "HTTP 401" })
       config.render()
       expect(flagText()).toContain("Sync failed — HTTP 401")
-   })
-
-   it("flags a parked background sync (read progress would rewind)", async () => {
-      data.lastFetchedAt.mockReturnValue(100)
-      sync.state.mockReturnValue({ on: true, okAt: 200, error: "", parked: true })
-      const config = await mount()
-      config.render()
-      expect(flagText()).toContain("Sync paused — read progress would rewind. Sync now to resolve.")
    })
 
    it("is empty when nothing has been fetched", async () => {

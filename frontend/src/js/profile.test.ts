@@ -204,7 +204,7 @@ describe("importProfile", () => {
    })
 })
 
-describe("v2 blob / ts / adopt", () => {
+describe("v2 blob / ts / sync mode", () => {
    beforeEach(() => {
       localStorage.clear()
    })
@@ -217,45 +217,108 @@ describe("v2 blob / ts / adopt", () => {
       expect(profileTs()).toBe(1234)
    })
 
-   it("adopt replaces seen and saved wholesale and takes the blob's ts", () => {
+   it("sync mode never lowers seen, even from a newer-ts blob", () => {
       localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 500, "feed:2": 90 }))
-      localStorage.setItem(SAVED_KEY, JSON.stringify([1, 2, 3]))
       touchProfile(100)
       const blob = JSON.stringify({
          v: 2,
          ts: 200,
-         seen: { "feed:1": 10 },
-         saved: [7],
+         seen: { "feed:1": 10, "feed:3": 7 },
+         saved: [],
          unreadOnly: false,
          imgProxy: "",
       })
-      expect(importProfile(blob, { prefs: false, adopt: true }).ok).toBe(true)
-      expect(JSON.parse(localStorage.getItem(SEEN_KEY)!)).toEqual({ "feed:1": 10 }) // feed:2 dropped — wholesale
+      expect(importProfile(blob, { prefs: false, mode: "sync" }).ok).toBe(true)
+      // feed:1 kept at 500 (blob lower), feed:2 kept (absent from blob), feed:3 joined
+      expect(JSON.parse(localStorage.getItem(SEEN_KEY)!)).toEqual({ "feed:1": 500, "feed:2": 90, "feed:3": 7 })
+   })
+
+   it("sync mode raises seen from an older-ts blob WITHOUT stamping ts", () => {
+      localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 10 }))
+      touchProfile(300)
+      const blob = JSON.stringify({ v: 2, ts: 50, seen: { "feed:1": 99 }, saved: [], unreadOnly: false, imgProxy: "" })
+      const r = importProfile(blob, { prefs: false, mode: "sync" })
+      expect(r.ok).toBe(true)
+      expect(r.changed).toBe(true)
+      expect(JSON.parse(localStorage.getItem(SEEN_KEY)!)).toEqual({ "feed:1": 99 })
+      // The raise came from the remote, not a local action — the saved-LWW
+      // ordering field must not move (blob older, so no adoption either).
+      expect(profileTs()).toBe(300)
+   })
+
+   it("sync mode adopts saved wholesale (un-saves propagate) and takes ts when the blob is newer", () => {
+      localStorage.setItem(SAVED_KEY, JSON.stringify([1, 2, 3]))
+      touchProfile(100)
+      const blob = JSON.stringify({ v: 2, ts: 200, seen: {}, saved: [7], unreadOnly: false, imgProxy: "" })
+      const r = importProfile(blob, { prefs: false, mode: "sync" })
+      expect(r.ok).toBe(true)
+      expect(r.changed).toBe(true)
       expect(JSON.parse(localStorage.getItem(SAVED_KEY)!)).toEqual([7]) // un-saves propagate
       expect(profileTs()).toBe(200)
    })
 
-   it("adopt never applies prefs (prefs stay carried-not-applied)", () => {
+   it("sync mode keeps local saved and ts when the blob's ts is older or equal", () => {
+      localStorage.setItem(SAVED_KEY, JSON.stringify([1, 2]))
+      touchProfile(300)
+      const blob = (ts: number) => JSON.stringify({ v: 2, ts, seen: {}, saved: [9], unreadOnly: false, imgProxy: "" })
+      expect(importProfile(blob(200), { prefs: false, mode: "sync" }).changed).toBe(false)
+      expect(JSON.parse(localStorage.getItem(SAVED_KEY)!)).toEqual([1, 2])
+      expect(profileTs()).toBe(300)
+      expect(importProfile(blob(300), { prefs: false, mode: "sync" }).changed).toBe(false) // tie → local wins
+      expect(JSON.parse(localStorage.getItem(SAVED_KEY)!)).toEqual([1, 2])
+      expect(profileTs()).toBe(300)
+   })
+
+   it("a ts-only adoption (newer blob, identical saved, no seen raise) reports changed:false", () => {
+      localStorage.setItem(SAVED_KEY, JSON.stringify([4]))
+      localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 50 }))
+      touchProfile(100)
+      const blob = JSON.stringify({
+         v: 2,
+         ts: 200,
+         seen: { "feed:1": 50 },
+         saved: [4],
+         unreadOnly: false,
+         imgProxy: "",
+      })
+      const r = importProfile(blob, { prefs: false, mode: "sync" })
+      expect(r.ok).toBe(true)
+      expect(r.changed).toBe(false) // ts converged, but nothing the UI shows moved
+      expect(profileTs()).toBe(200) // ts still converges to max
+   })
+
+   it("sync mode never applies prefs (prefs stay carried-not-applied)", () => {
       localStorage.setItem(UNREAD_ONLY_KEY, "1")
       const blob = JSON.stringify({ v: 2, ts: 9, seen: {}, saved: [], unreadOnly: false, imgProxy: "" })
-      importProfile(blob, { prefs: false, adopt: true })
+      importProfile(blob, { prefs: false, mode: "sync" })
       expect(localStorage.getItem(UNREAD_ONLY_KEY)).toBe("1")
    })
 
-   it("adopt with malformed seen still replaces wholesale (empty map) and takes ts", () => {
+   it("sync mode with malformed seen merges nothing and still LWW-adopts saved/ts", () => {
       localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 500 }))
-      const blob = JSON.stringify({ v: 2, ts: 5, seen: "garbage", saved: [] })
-      expect(importProfile(blob, { prefs: false, adopt: true }).ok).toBe(true)
-      expect(JSON.parse(localStorage.getItem(SEEN_KEY)!)).toEqual({})
+      const blob = JSON.stringify({ v: 2, ts: 5, seen: "garbage", saved: [8] })
+      expect(importProfile(blob, { prefs: false, mode: "sync" }).ok).toBe(true)
+      expect(JSON.parse(localStorage.getItem(SEEN_KEY)!)).toEqual({ "feed:1": 500 }) // untouched, never wiped
+      expect(JSON.parse(localStorage.getItem(SAVED_KEY)!)).toEqual([8]) // ts 5 > local 0 → adopted
       expect(profileTs()).toBe(5)
    })
 
-   it("adopt floors a fractional ts and clamps a negative ts to 0", () => {
+   it("sync mode floors a fractional blob ts and ignores an invalid (negative) one", () => {
+      touchProfile(100)
       const blob = (ts: number) => JSON.stringify({ v: 2, ts, seen: {}, saved: [], unreadOnly: false, imgProxy: "" })
-      importProfile(blob(200.9), { prefs: false, adopt: true })
+      importProfile(blob(200.9), { prefs: false, mode: "sync" })
       expect(profileTs()).toBe(200)
-      importProfile(blob(-5), { prefs: false, adopt: true })
-      expect(profileTs()).toBe(0)
+      importProfile(blob(-5), { prefs: false, mode: "sync" })
+      expect(profileTs()).toBe(200) // invalid ts → no adoption, local ordering kept
+   })
+
+   it("merge mode reports changed only when it actually raised something", () => {
+      localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 500 }))
+      localStorage.setItem(SAVED_KEY, JSON.stringify([7]))
+      const noop = JSON.stringify({ v: 1, seen: { "feed:1": 10 }, saved: [7], unreadOnly: false, imgProxy: "" })
+      expect(importProfile(noop, { prefs: false }).changed).toBe(false)
+      const raise = JSON.stringify({ v: 1, seen: { "feed:1": 600 }, saved: [7], unreadOnly: false, imgProxy: "" })
+      expect(importProfile(raise, { prefs: false }).changed).toBe(true)
    })
 
    it("a merge that changes nothing does not stamp ts", () => {

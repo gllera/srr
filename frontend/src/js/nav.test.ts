@@ -882,6 +882,29 @@ describe("switchFilter", () => {
    })
 })
 
+// The boot re-anchor after a sync pull raised the seen map is app.ts's job
+// (applyFilter + list.render — see app.test.ts "profile re-anchor"); nav's own
+// contribution is that applyFilter re-snapshots the unseen bounds from LIVE
+// seen, which the applyFilter suite below and the unseen-only suites pin.
+describe("applyFilter re-derives bounds from live seen (the sync re-anchor seam)", () => {
+   it("a re-apply after seen rose elsewhere raises the member bounds", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 2 }, { feedId: 2 }])
+      nav.setUnreadOnly(true)
+      try {
+         nav.applyFilter([])
+         // Everything unread: the oldest match under the raised bounds is chron 0.
+         expect(await nav.feedRight(0)).toBe(0)
+         // A sync pull raised feed:1 past its whole backlog (read on another device).
+         localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 1 }))
+         nav.applyFilter([])
+         // Re-applying re-reads live seen: feed:1's rows are out of the walk now.
+         expect(await nav.feedRight(0)).toBe(2)
+      } finally {
+         nav.setUnreadOnly(false)
+      }
+   })
+})
+
 describe("applyFilter", () => {
    it("keeps a known-but-empty feed scoped (reload of #!<id>)", () => {
       // Feed 9 has articles; feed 5 exists but has zero articles (known-but-empty).

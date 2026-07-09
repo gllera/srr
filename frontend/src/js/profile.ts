@@ -9,15 +9,25 @@
 // unit-testable without a running pack server.
 //
 // Import strategy — two modes:
-//   merge (v1, or v2 without opts.adopt — file restores) —
+//   merge (default; always for v1 — file restores) —
 //      seen  — per-key Math.max() merge (one-way raise; never lowers progress)
 //      saved — set union, re-sorted ascending
 //      prefs — last-writer-wins, gated by opts.prefs (opt-in checkbox)
-//   adopt (v2 + opts.adopt — a sync.ts LWW pull) —
-//      seen/saved are replaced wholesale with the blob's, and the local `ts`
-//      is set from the blob's `ts` — this device becomes exactly the blob.
-//      prefs stay gated by opts.prefs exactly as in merge mode; sync.ts just
+//   sync (mode:"sync" + v2 — a sync.ts pull) — the one-reader hybrid:
+//      seen  — per-key Math.max() like merge, but WITHOUT stamping `ts`: the
+//              raise came from the remote, not from a local user action, and
+//              stamping would make this device "newest" and steal the saved-LWW
+//              ordering from the device where the person actually acted (same
+//              reasoning as the prefs-don't-stamp rule on profileTs below).
+//      saved+ts — last-write-wins by `ts`: a strictly newer blob replaces saved
+//              wholesale (un-saves propagate) and `ts` takes the blob's value;
+//              otherwise both stay local (a tie keeps local). Net effect: `ts`
+//              converges to max(local, blob).
+//      prefs — gated by opts.prefs exactly as in merge mode; sync.ts just
 //      always passes prefs:false (see profileTs's comment below for why).
+// There is deliberately NO mode that can LOWER seen — all devices belong to one
+// reader, whose true read state is the union of what they read anywhere, so
+// read progress is raise-only everywhere.
 
 import { IMG_PROXY_KEY, PROFILE_TS_KEY, SAVED_KEY, SEEN_KEY, UNREAD_ONLY_KEY } from "./keys"
 
@@ -96,6 +106,33 @@ function normalizeProxy(v: string): string {
 export interface ImportResult {
    ok: boolean
    error?: string
+   // seen or saved actually mutated. A ts-only convergence (newer blob with
+   // identical saved and no seen raise) is NOT a change — nothing the UI shows
+   // moved, so callers must not re-render or re-anchor on it.
+   changed?: boolean
+}
+
+// seen — one-way per-key raise, shared verbatim by both import modes; returns
+// whether anything actually rose (a stale blob that moves nothing is a no-op).
+function raiseSeen(incoming: unknown): boolean {
+   try {
+      if (incoming === null || typeof incoming !== "object" || Array.isArray(incoming)) return false
+      const existing = readSeen()
+      let changed = false
+      for (const [k, v] of Object.entries(incoming as Record<string, unknown>)) {
+         if (typeof v === "number" && Number.isFinite(v)) {
+            const nv = Math.max(existing[k] ?? -1, v)
+            if (nv !== existing[k]) {
+               existing[k] = nv
+               changed = true
+            }
+         }
+      }
+      if (changed) lsSet(SEEN_KEY, JSON.stringify(existing))
+      return changed
+   } catch {
+      return false
+   }
 }
 
 // exportProfile serialises all four portable keys plus the LWW `ts` into a
@@ -116,13 +153,13 @@ export function exportProfile(): string {
 //      saved  — union of existing + incoming integers, sorted ascending
 //      a merge that actually changed seen/saved stamps `ts` to now (it's a
 //      local mutation like any other seen/save)
-//   adopt (opts.adopt && v2) — seen/saved are replaced wholesale with the
-//      blob's, and `ts` is set from the blob's `ts` (floored/validated, NOT
-//      re-stamped to now — the point is to take the sender's ordering, not
-//      overwrite it)
+//   sync (opts.mode === "sync" && v2) — raise-only seen (same max-merge, but
+//      never stamping `ts`); saved + `ts` adopt the blob's values only when the
+//      blob's `ts` is strictly newer (LWW; the blob's ts is floored/validated,
+//      NOT re-stamped to now — the point is to take the sender's ordering)
 // prefs — only applied when opts.prefs is true (either mode); invalid
 // imgProxy is ignored.
-export function importProfile(json: string, opts: { prefs: boolean; adopt?: boolean }): ImportResult {
+export function importProfile(json: string, opts: { prefs: boolean; mode?: "merge" | "sync" }): ImportResult {
    // ── parse + validate ──────────────────────────────────────────────────────
    let blob: unknown
    try {
@@ -138,54 +175,36 @@ export function importProfile(json: string, opts: { prefs: boolean; adopt?: bool
       return { ok: false, error: `Unsupported profile version: ${obj["v"]}` }
    }
 
-   if (opts.adopt && obj["v"] === 2) {
-      // ── adopt (whole-blob LWW pull) — replace seen/saved, take the blob's ts.
-      // NOT for file restores — those go through the merge branch below even
-      // on a v2 blob (opts.adopt is unset).
-      try {
-         const incoming = obj["seen"]
-         const cleaned: Record<string, number> = {}
-         if (incoming !== null && typeof incoming === "object" && !Array.isArray(incoming))
-            for (const [k, v] of Object.entries(incoming as Record<string, unknown>))
-               if (typeof v === "number" && Number.isFinite(v)) cleaned[k] = v
-         lsSet(SEEN_KEY, JSON.stringify(cleaned))
-      } catch {}
-      try {
-         const incoming = obj["saved"]
-         const cleaned = Array.isArray(incoming)
-            ? incoming.filter((n) => Number.isInteger(n) && n >= 0).sort((a: number, b: number) => a - b)
-            : []
-         lsSet(SAVED_KEY, JSON.stringify(cleaned))
-      } catch {}
-      const ts = obj["ts"]
-      lsSet(PROFILE_TS_KEY, String(typeof ts === "number" && Number.isFinite(ts) && ts > 0 ? Math.floor(ts) : 0))
-   } else {
-      // ── merge (v1, or v2 without adopt — a file restore) ───────────────────
-      let changed = false
-
-      // seen — one-way raise
-      try {
-         const existing = readSeen()
-         const incoming = obj["seen"]
-         if (incoming !== null && typeof incoming === "object" && !Array.isArray(incoming)) {
-            let seenChanged = false
-            for (const [k, v] of Object.entries(incoming as Record<string, unknown>)) {
-               if (typeof v === "number" && Number.isFinite(v)) {
-                  // Only a real raise counts as a change — a stale restore that
-                  // moves nothing must not stamp `ts` (see below).
-                  const nv = Math.max(existing[k] ?? -1, v)
-                  if (nv !== existing[k]) {
-                     existing[k] = nv
-                     seenChanged = true
-                  }
-               }
-            }
-            if (seenChanged) {
-               lsSet(SEEN_KEY, JSON.stringify(existing))
+   let changed = false
+   if (opts.mode === "sync" && obj["v"] === 2) {
+      // ── sync (one-reader hybrid pull) — NOT for file restores; those go
+      // through the merge branch below even on a v2 blob (opts.mode unset).
+      changed = raiseSeen(obj["seen"]) // seen rises, ts deliberately untouched
+      const tsRaw = obj["ts"]
+      const blobTs = typeof tsRaw === "number" && Number.isFinite(tsRaw) && tsRaw > 0 ? Math.floor(tsRaw) : 0
+      if (blobTs > profileTs()) {
+         // saved + ts — the blob is strictly newer: its saved set is the
+         // person's current intent (un-saves propagate). Identical content
+         // still converges ts but is not a "change".
+         try {
+            const incoming = obj["saved"]
+            const cleaned = Array.isArray(incoming)
+               ? incoming.filter((n) => Number.isInteger(n) && n >= 0).sort((a: number, b: number) => a - b)
+               : []
+            const next = JSON.stringify(cleaned)
+            if (next !== JSON.stringify(readSavedSorted())) {
+               lsSet(SAVED_KEY, next)
                changed = true
             }
-         }
-      } catch {}
+         } catch {}
+         lsSet(PROFILE_TS_KEY, String(blobTs))
+      }
+   } else {
+      // ── merge (v1, or v2 without mode:"sync" — a file restore) ─────────────
+
+      // seen — one-way raise. Only a real raise counts as a change: a stale
+      // restore that moves nothing must not stamp `ts` (see below).
+      if (raiseSeen(obj["seen"])) changed = true
 
       // saved — union, sorted
       try {
@@ -227,5 +246,5 @@ export function importProfile(json: string, opts: { prefs: boolean; adopt?: bool
       } catch {}
    }
 
-   return { ok: true }
+   return { ok: true, changed }
 }

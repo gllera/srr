@@ -84,7 +84,7 @@ const nav = vi.hoisted(() => {
       seek: vi.fn(async () => 0),
       unreadCounts: vi.fn(async () => new Map<number, number>()),
       filterKey: vi.fn(() => ""),
-      filter: { feeds: new Map<number, number>(), saved: false, search: false, active: false },
+      filter: { feeds: new Map<number, number>(), saved: false, search: false, active: false, tokens: [] as string[] },
    }
 })
 vi.mock("./nav", () => nav)
@@ -104,6 +104,7 @@ vi.mock("./data", () => data)
 const list = vi.hoisted(() => ({
    setup: vi.fn(),
    show: vi.fn(async () => {}),
+   render: vi.fn(async () => {}),
    rerender: vi.fn(async () => {}),
    moveSelection: vi.fn(async () => 0),
    // The shared directed empty-state element; the reader mounts it for placeholders.
@@ -728,6 +729,9 @@ describe("cross-device sync wiring", () => {
       await boot() // list surface
       expect(sync.init).toHaveBeenCalledTimes(1)
       const afterMerge = sync.init.mock.calls[0][0] as () => void
+      // An interaction first: the pre-interaction boot merge re-anchors instead
+      // (covered in the profile re-anchor suite) — this test pins the GENTLE path.
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true }))
       nav.pruneSeen.mockClear()
       list.rerender.mockClear()
       config.render.mockClear()
@@ -763,14 +767,14 @@ describe("live content sync wiring", () => {
       expect(typeof refresh.init.mock.calls[0][1]).toBe("function") // refreshAfterStore
    })
 
-   it("the config Sync-now quick-action runs a content refresh + a manual sync cycle", async () => {
+   it("the config Refresh quick-action runs a content refresh only — the profile syncs on page load", async () => {
       await boot()
       refresh.refreshNow.mockClear()
       sync.syncNow.mockClear()
       configHooks()!.onRefresh()
       await flush()
       expect(refresh.refreshNow).toHaveBeenCalledTimes(1)
-      expect(sync.syncNow).toHaveBeenCalledWith({ manual: true })
+      expect(sync.syncNow).not.toHaveBeenCalled()
    })
 
    it("a failed content refresh surfaces the error popup with a Retry", async () => {
@@ -783,6 +787,67 @@ describe("live content sync wiring", () => {
       expect(document.querySelector(".srr-popup-text")!.textContent).toContain("boom")
       // The retry re-runs manualSyncNow — same recovery affordance as guard().
       expect(document.querySelector(".srr-popup-retry")!.classList.contains("srr-hidden")).toBe(false)
+   })
+})
+
+// The navigator half of the sync feature: the profile syncs on PAGE LOAD (there
+// is deliberately no button) — when the boot pull CHANGES the read state (read
+// elsewhere, then reload this tab: the device-switch moment), the navigable
+// range is stale, so before the first interaction the list re-derives its
+// filter bounds from the new seen map and re-anchors at the new resume
+// position. Everything after the first interaction stays gentle.
+describe("profile re-anchor — the boot pull changed read positions", () => {
+   it("re-anchors the list before any interaction (device-switch moment)", async () => {
+      await boot() // list view, nothing touched yet
+      const afterMerge = sync.init.mock.calls[0][0] as () => void
+      nav.applyFilter.mockClear()
+      list.render.mockClear()
+      list.rerender.mockClear()
+      afterMerge()
+      await flush()
+      expect(nav.applyFilter).toHaveBeenCalledWith([]) // re-snapshot bounds for the current tokens
+      expect(list.render).toHaveBeenCalledTimes(1) // the full re-anchor…
+      expect(list.rerender).not.toHaveBeenCalled() // …not the gentle rebuild
+   })
+
+   it("a merge after the first interaction stays gentle (no re-anchor)", async () => {
+      await boot()
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true }))
+      const afterMerge = sync.init.mock.calls[0][0] as () => void
+      nav.applyFilter.mockClear()
+      list.render.mockClear()
+      list.rerender.mockClear()
+      afterMerge()
+      await flush()
+      expect(list.render).not.toHaveBeenCalled()
+      expect(list.rerender).toHaveBeenCalledTimes(1)
+   })
+
+   it("exempts the saved/search peek modes (gentle rebuild instead)", async () => {
+      await boot()
+      nav.filter.saved = true
+      try {
+         const afterMerge = sync.init.mock.calls[0][0] as () => void
+         nav.applyFilter.mockClear()
+         list.render.mockClear()
+         list.rerender.mockClear()
+         afterMerge()
+         await flush()
+         expect(nav.applyFilter).not.toHaveBeenCalled()
+         expect(list.render).not.toHaveBeenCalled()
+         expect(list.rerender).toHaveBeenCalledTimes(1)
+      } finally {
+         nav.filter.saved = false
+      }
+   })
+
+   it("a boot merge in the READER stays gentle (restored positions and deep links hold)", async () => {
+      await boot("#2") // reader view, no interaction
+      const afterMerge = sync.init.mock.calls[0][0] as () => void
+      list.render.mockClear()
+      afterMerge()
+      await flush()
+      expect(list.render).not.toHaveBeenCalled()
    })
 })
 
