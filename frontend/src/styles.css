@@ -1153,8 +1153,8 @@ body.srr-view-config .srr-toolbar {
 }
 /* Freshness footer — now the LAST block in the config body, below the feed / tag
    picker (was a banner above it). A top rule + matching top spacing set it off as
-   a quiet footer under the long picker; :empty collapses it (rule and all) when
-   nothing has been fetched and no flags fire. */
+   a quiet footer under the long picker. (Never :empty anymore — the version line
+   below is always present; the :empty collapse stays as a safety net only.) */
 .srr-config-status {
    display: flex;
    flex-direction: column;
@@ -1183,6 +1183,13 @@ body.srr-view-config .srr-toolbar {
    height: 0.4rem;
    border-radius: 50%;
    background: currentColor;
+}
+/* The build's version label — the footer's quiet last line, wire-voice mono. */
+.srr-status-version {
+   font-family: var(--font-mono);
+   font-size: 0.7rem;
+   letter-spacing: 0.06em;
+   margin-top: 0.3rem;
 }
 
 /* List surface — a scannable feed of headline rows. The list is a bidirectional

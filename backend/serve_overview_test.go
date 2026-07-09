@@ -53,6 +53,11 @@ func TestOverview(t *testing.T) {
 	if got.Gen != 0 || got.TotalArt != 0 {
 		t.Fatalf("gen=%d total_art=%d, want 0,0", got.Gen, got.TotalArt)
 	}
+	// Version: the running binary's version rides the snapshot so the webui can
+	// label itself ("development" here; release ldflags set the real tag).
+	if got.Version != "development" {
+		t.Fatalf("version = %q, want %q", got.Version, "development")
+	}
 }
 
 // TestOverviewCdnURL asserts the overview carries the configured CDN URL (so

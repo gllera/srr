@@ -214,6 +214,9 @@ let snapshotAt = 0;
 async function loadSnapshot() {
   snapshot = await apiGet("/api/overview");
   snapshotAt = Date.now();
+  // The header's version label rides the snapshot (the running binary's
+  // version) — set here so every snapshot path keeps it current.
+  document.getElementById("ver").textContent = snapshot.version || "";
 }
 
 // refresh re-pulls the snapshot and redraws the current tab. It deliberately

@@ -70,6 +70,9 @@ jobs:
       # don't deploy that one here, it would 404 on db.gz against the Pages
       # origin.)
       SRR_CDN_URL: ${{ secrets.SRR_CDN_URL }}
+      # The build's version label (config footer / transformer-define.js's
+      # SRR_VERSION): the tag on tag builds, the branch name on manual dispatch.
+      VERSION: ${{ github.ref_name }}
     steps:
     - uses: actions/checkout@v6
     - uses: ./.github/actions/setup-toolchain

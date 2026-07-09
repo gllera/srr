@@ -1,4 +1,5 @@
 declare const SRR_CDN_URL: string
+declare const SRR_VERSION: string
 declare const process: { env: { NODE_ENV: string } }
 
 // Wire shapes come from the generated contract (format.gen.ts, emitted from
