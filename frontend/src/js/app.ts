@@ -811,19 +811,6 @@ async function init() {
       if (config.isOpen()) config.render()
    }
 
-   // Refresh (config quick-action): pull newer store CONTENT into the open tab.
-   // The profile sync deliberately has no button — it runs on every page load
-   // (the boot pull in init below; refreshAfterMerge re-anchors the list when
-   // it changed something) and continuously in the background (pushSoon /
-   // re-focus / online), and under the raise-only merge no cycle needs a human
-   // authorization anymore. Content errors get the popup (the one
-   // user-initiated path); it can silently no-op when a navigation holds the
-   // mutex — recoverable by re-tapping. No explicit config repaint: on real
-   // changes refreshAfterStore already re-renders an open config.
-   const manualRefresh = async () => {
-      const contentErr = await refresh.refreshNow()
-      if (contentErr) showError(new Error(contentErr), () => void manualRefresh())
-   }
    // After a successful profile import (backup dialog), additionally reconcile
    // prefs: importProfile wrote srr-unread-only straight to localStorage, but nav
    // holds unreadOnly in a module var only mutated via setUnreadOnly (this also
@@ -865,7 +852,6 @@ async function init() {
       openImgProxy: showImgProxyDialog,
       openBackup: () => showBackupDialog(),
       openSync: showSyncDialog,
-      onRefresh: () => void manualRefresh(),
    })
 
    // The list opens an article in the reader through the same guard mutex as

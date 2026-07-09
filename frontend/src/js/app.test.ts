@@ -136,8 +136,8 @@ const sync = vi.hoisted(() => ({
 vi.mock("./sync", () => sync)
 
 // Live content sync: app.ts only wires it (refresh.init with the background
-// guard + after-store refresh, and manualSyncNow calls refreshNow). The refresh
-// cycles themselves are refresh.test.ts's business.
+// guard + after-store refresh). The refresh cycles themselves are
+// refresh.test.ts's business.
 const refresh = vi.hoisted(() => ({
    init: vi.fn(),
    refreshNow: vi.fn(async () => ""),
@@ -765,28 +765,6 @@ describe("live content sync wiring", () => {
       expect(refresh.init).toHaveBeenCalledTimes(1)
       expect(typeof refresh.init.mock.calls[0][0]).toBe("function") // guardBg
       expect(typeof refresh.init.mock.calls[0][1]).toBe("function") // refreshAfterStore
-   })
-
-   it("the config Refresh quick-action runs a content refresh only — the profile syncs on page load", async () => {
-      await boot()
-      refresh.refreshNow.mockClear()
-      sync.syncNow.mockClear()
-      configHooks()!.onRefresh()
-      await flush()
-      expect(refresh.refreshNow).toHaveBeenCalledTimes(1)
-      expect(sync.syncNow).not.toHaveBeenCalled()
-   })
-
-   it("a failed content refresh surfaces the error popup with a Retry", async () => {
-      await boot()
-      refresh.refreshNow.mockResolvedValueOnce("boom")
-      configHooks()!.onRefresh()
-      await flush()
-      const popup = document.querySelector(".srr-popup")!
-      expect(popup.classList.contains("srr-open")).toBe(true)
-      expect(document.querySelector(".srr-popup-text")!.textContent).toContain("boom")
-      // The retry re-runs manualSyncNow — same recovery affordance as guard().
-      expect(document.querySelector(".srr-popup-retry")!.classList.contains("srr-hidden")).toBe(false)
    })
 })
 
