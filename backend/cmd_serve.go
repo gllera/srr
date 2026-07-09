@@ -32,6 +32,10 @@ var webuiFS embed.FS
 type ServeCmd struct {
 	Addr     string        `short:"a" default:"localhost:8088" env:"SRR_SERVE_ADDR" help:"Address to listen on (loopback only by default)."`
 	Interval time.Duration `help:"Also run a background fetch loop at this interval (e.g. 30m); 0 disables." default:"0" env:"SRR_SERVE_INTERVAL"`
+
+	// feedFilter scopes the background fetch loop to a subset of feeds (same
+	// SRR_FETCH_* env/flags as `srr art fetch`), copied into the FetchCmd below.
+	feedFilter
 }
 
 func (o *ServeCmd) Run() error {
@@ -58,7 +62,7 @@ func (o *ServeCmd) Run() error {
 		client := newFetchClient(globals.Workers)
 		loop.Go(func() {
 			defer client.CloseIdleConnections()
-			(&FetchCmd{Interval: o.Interval}).fetchLoop(ctx, client) //nolint:errcheck // always nil when Interval > 0
+			(&FetchCmd{Interval: o.Interval, feedFilter: o.feedFilter}).fetchLoop(ctx, client) //nolint:errcheck // always nil when Interval > 0
 		})
 		fmt.Printf("SRR admin GUI at http://%s  (store: %s, fetching every %s)\n", o.Addr, globals.Store, o.Interval)
 	} else {
