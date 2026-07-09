@@ -377,6 +377,44 @@ func TestFetchSiblingsAtBoundarySecondBothInBoundary(t *testing.T) {
 	}
 }
 
+// A "deals" feed that re-dates its whole window to ~now on every rebuild
+// (stable GUIDs, fresh pubDates) must not re-ingest the same articles. The
+// watermark can't help — re-dated items always sit above it — so
+// BoundaryGUIDs must remember the whole recent window, not only the newest
+// item(s) at the watermark second. Real case: blog.ofertitas.es bumps every
+// post's pubDate to the fetch minute, so ~half its stored feed was duplicates.
+func TestFetchRedatedWholeWindowDedupes(t *testing.T) {
+	build := func(day string) string {
+		return fmt.Sprintf(`<rss version="2.0"><feed>
+			<item><title>A</title><guid>a</guid><pubDate>%s 00:02:00 GMT</pubDate></item>
+			<item><title>B</title><guid>b</guid><pubDate>%s 00:01:00 GMT</pubDate></item>
+			<item><title>C</title><guid>c</guid><pubDate>%s 00:00:00 GMT</pubDate></item>
+		</feed></rss>`, day, day, day)
+	}
+	current := build("Mon, 01 Jan 2024")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(current))
+	}))
+	defer srv.Close()
+
+	ch := &Feed{Title: "T"}
+
+	if got := fetchOnce(t, ch, srv); len(got) != 3 {
+		t.Fatalf("fetch1: got %d, want 3 (all new)", len(got))
+	}
+	// Publisher rebuilds the feed, re-dating every item a day later; GUIDs
+	// unchanged. Nothing is actually new.
+	current = build("Tue, 02 Jan 2024")
+	if got := fetchOnce(t, ch, srv); len(got) != 0 {
+		t.Errorf("fetch2: got %d, want 0 (re-dated window re-ingested — bg forgot every item below the newest)", len(got))
+	}
+	// Again, further ahead — dedup must hold across repeated rebuilds.
+	current = build("Wed, 03 Jan 2024")
+	if got := fetchOnce(t, ch, srv); len(got) != 0 {
+		t.Errorf("fetch3: got %d, want 0 (re-dated window re-ingested again)", len(got))
+	}
+}
+
 // A transient empty fetch must preserve prior dedup state — Watermark and
 // BoundaryGUIDs — otherwise items at the watermark second get re-ingested
 // when the feed recovers.
