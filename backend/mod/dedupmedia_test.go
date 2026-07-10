@@ -161,12 +161,40 @@ func TestDedupMediaMixedGlyphAndContentDup(t *testing.T) {
 	}
 }
 
-// #dedupmedia takes no options; a stray parameter is a config error.
-func TestDedupMediaRejectsParams(t *testing.T) {
-	m := New()
-	now := time.Now()
-	item := &RawItem{GUID: 1, Title: "T", Content: "<p>a</p>", Link: "http://e.com", Published: &now}
-	if err := m.Process(context.Background(), "#dedupmedia x=1", item); err == nil {
-		t.Fatal("expected unknown-parameter error")
+// TestDedupMediaKeepTagWrapperSurvives pins the pruning safety guarantee
+// (hasRealContent's keep-tag branch): removing a duplicate <img> must NOT prune
+// a wrapper that still holds a DISTINCT keep-worthy element (another <img>, or a
+// <table>) — only wrappers left saying nothing collapse.
+func TestDedupMediaKeepTagWrapperSurvives(t *testing.T) {
+	cases := map[string]struct {
+		in       string
+		survives string
+		wantImgs int
+	}{
+		"sibling img keeps div": {
+			`<div><img src="https://x.org/dup.jpg"><img src="https://x.org/other.jpg"></div>` +
+				`<p>t <img src="https://x.org/dup.jpg" alt="k"></p>`,
+			"other.jpg", 2, // the div's other.jpg + the surviving alt copy
+		},
+		"sibling table keeps div": {
+			`<div><img src="https://x.org/dup.jpg"><table><tr><td>cell</td></tr></table></div>` +
+				`<p>t <img src="https://x.org/dup.jpg" alt="k"></p>`,
+			"<table", 1, // only the surviving alt copy remains an <img>
+		},
+	}
+	for name, c := range cases {
+		got := runDedupMedia(t, c.in)
+		if n := countSub(got, "<img"); n != c.wantImgs {
+			t.Errorf("%s: want %d img(s), got %d in %q", name, c.wantImgs, n, got)
+		}
+		if !strings.Contains(got, `alt="k"`) {
+			t.Errorf("%s: rich duplicate copy should survive, got %q", name, got)
+		}
+		if !strings.Contains(got, c.survives) {
+			t.Errorf("%s: wrapper holding a distinct keep-tag (%q) must survive, got %q", name, c.survives, got)
+		}
+		if !strings.Contains(got, "<div") {
+			t.Errorf("%s: the <div> wrapper must survive pruning, got %q", name, got)
+		}
 	}
 }

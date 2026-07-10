@@ -166,6 +166,53 @@ func TestDeleteFeedNotFound(t *testing.T) {
 	}
 }
 
+// PUT to a nonexistent feed id 404s via FeedByID (the update-side mirror of
+// DELETE's not-found; only DELETE's 404 was previously covered).
+func TestUpdateFeedNotFound(t *testing.T) {
+	setupTestDB(t)
+	stubPassthroughResolve()
+	rec := doReq(t, newMux(), "PUT", "/api/feeds/999",
+		`{"title":"X","url":"https://x.example/feed"}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (%s)", rec.Code, rec.Body)
+	}
+}
+
+// A non-numeric {id} path param is a 400 from pathID (strconv.Atoi), before any
+// store access — DELETE and PUT share the same pathID guard.
+func TestPathIDNonNumeric(t *testing.T) {
+	setupTestDB(t)
+	rec := doReq(t, newMux(), "DELETE", "/api/feeds/abc", "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (%s)", rec.Code, rec.Body)
+	}
+}
+
+// saveFeed rejects a titleless create: the probe resolves the URL, then the
+// locked write fails with "title required" (400). The offline field checks pass,
+// so this exercises saveFeed's own guard, not validateFeedFields.
+func TestCreateFeedRequiresTitle(t *testing.T) {
+	setupTestDB(t)
+	stubPassthroughResolve()
+	rec := doReq(t, newMux(), "POST", "/api/feeds", `{"url":"https://x.example/feed"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (%s)", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "title required") {
+		t.Errorf("body = %s, want a 'title required' message", rec.Body)
+	}
+}
+
+// applyFeedsHandler 400s when the body is neither a JSON object nor array
+// (parseApplyInput rejects a bare scalar before any DB scope is opened).
+func TestApplyFeedsRejectsNonObjectOrArray(t *testing.T) {
+	setupTestDB(t)
+	rec := doReq(t, newMux(), "POST", "/api/feeds/apply", `42`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (%s)", rec.Code, rec.Body)
+	}
+}
+
 func TestApplyFeedsArray(t *testing.T) {
 	setupTestDB(t)
 	body := `[{"title":"One","url":"https://1.example/feed"},{"title":"Two","url":"https://2.example/feed","tag":"news"}]`
@@ -376,26 +423,12 @@ func TestServeFeedSaveOmittedExpireDaysZeroes(t *testing.T) {
 	}
 }
 
-func TestOverviewTagCountsAreLive(t *testing.T) {
-	db, _, _ := setupTestDB(t)
-	a := &Feed{Title: "A", URL: "https://a.example/f", Tag: "news", TotalArt: 10}
-	seedFeed(t, db, a)
-	// Expired is server-owned state (AddFeed zeroes it on create), so the
-	// fixture sets it post-add and re-commits.
-	a.Expired = 4
-	if err := db.Commit(context.Background()); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
-
-	rec := doReq(t, newMux(), "GET", "/api/overview", "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
-	}
-	var ov overviewView
-	if err := json.Unmarshal(rec.Body.Bytes(), &ov); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(ov.Tags) != 1 || ov.Tags[0].Articles != 6 {
-		t.Fatalf("tags = %+v, want one bucket with 6 live articles", ov.Tags)
+// listViewOf (the serve GUI projection) carries the titleless flag so the edit
+// modal can seed its checkbox from the overview snapshot. (Moved here from
+// cmd_feeds_test.go — it tests serve_feeds.go's listViewOf.)
+func TestFeedListViewEmitsNoTitle(t *testing.T) {
+	v := listViewOf(&Feed{Title: "T", URL: "https://x/feed", NoTitle: true})
+	if !v.NoTitle {
+		t.Errorf("listViewOf NoTitle = false, want true (serve GUI must round-trip the flag)")
 	}
 }

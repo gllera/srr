@@ -34,19 +34,6 @@ func TestRewriteAttrsRewritesImgVideoAnchor(t *testing.T) {
 	}
 }
 
-// RewriteAttrs covers <a href> (the generic-file path), so a linked file can be
-// self-hosted alongside embedded media.
-func TestRewriteAttrsCoversAnchorHref(t *testing.T) {
-	in := `<a href="#/doc.pdf">file</a>`
-	out, err := RewriteAttrs(in, upMarker("assets/zz"))
-	if err != nil {
-		t.Fatalf("RewriteAttrs: %v", err)
-	}
-	if !strings.Contains(out, "assets/zz/doc.pdf") {
-		t.Errorf("RewriteAttrs did not rewrite anchor href:\n%s", out)
-	}
-}
-
 // Non-marker attribute values (no "#" prefix) are passed through untouched and
 // never reach fn — the marker convention lives in the walk, so fn only ever sees
 // markers.

@@ -207,6 +207,23 @@ func TestSelfhostRejectsBadParams(t *testing.T) {
 	}
 }
 
+// TestCleanExtRejections pins cleanExt's rejects: no extension, a non-alnum
+// char in the extension, and an over-6-char extension all yield "" (the cache
+// extension is only a hint — peek/process identify the real type by bytes).
+func TestCleanExtRejections(t *testing.T) {
+	cases := map[string]string{
+		"/img":        "",     // no dot → no extension
+		"/a.j@g":      "",     // non-alphanumeric char in the extension
+		"/a.jpeglong": "",     // extension longer than 6 chars (incl. the dot)
+		"/photo.JPG":  ".jpg", // valid → lower-cased (sanity anchor)
+	}
+	for in, want := range cases {
+		if got := cleanExt(in); got != want {
+			t.Errorf("cleanExt(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestSelfhostLeavesAnchorHref(t *testing.T) {
 	allowPrivateForTest(t)
 	srv, hits := mediaServer(t, "BYTES")

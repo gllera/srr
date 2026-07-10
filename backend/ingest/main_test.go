@@ -37,3 +37,21 @@ func TestBuiltinsRegistered(t *testing.T) {
 		}
 	}
 }
+
+// IsBuiltin is the config-time gate rejecting a typo'd #-ingest before it falls
+// through to shell exec: only a registered "#"-prefixed name is a built-in.
+func TestIsBuiltin(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"#feed", true},
+		{"#nope", false},
+		{"feed", false}, // must carry the leading '#'
+	}
+	for _, c := range cases {
+		if got := IsBuiltin(c.name); got != c.want {
+			t.Errorf("IsBuiltin(%q) = %v, want %v", c.name, got, c.want)
+		}
+	}
+}

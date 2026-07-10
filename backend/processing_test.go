@@ -58,6 +58,21 @@ func TestProcessItemRejectsImmutableFieldChange(t *testing.T) {
 	}
 }
 
+// A pipeline step that hard-errors (here a shell mod exiting non-zero) must have
+// its error wrapped by processItem as `module "<name>" failed`, attributing the
+// offending step — distinct from the GUID/Published-immutability errors, which
+// fire on a step that returns nil but mutates a frozen field.
+func TestProcessItemWrapsModuleError(t *testing.T) {
+	item := &mod.RawItem{GUID: 1, Title: "t", Content: "c", Link: "http://example.com"}
+	err := processItem(context.Background(), mod.New(), []string{"exit 1"}, item)
+	if err == nil {
+		t.Fatal("expected an error from a failing module step, got nil")
+	}
+	if !strings.Contains(err.Error(), `module "exit 1" failed`) {
+		t.Errorf("err = %v, want it to contain `module \"exit 1\" failed`", err)
+	}
+}
+
 const hostileHTML = `<p>safe text</p><script>window.x=1</script><img src=x onerror="window.x=1">`
 
 // Sanitization is NOT implicit: dangerous markup is only neutralized when the

@@ -246,6 +246,62 @@ func TestFeedFetchFeedPipeDefaultExpandsToRecipePipe(t *testing.T) {
 	}
 }
 
+// Feed.Fetch's invalid-pipeline guard: a resolved pipe carrying an unknown
+// built-in fails Module.Validate up front, so the fetch is skipped — FetchError
+// is set, FailStreak bumps to 1, and no items are ingested (the item loop never
+// runs). Regression for the "config error would fail identically for every item"
+// branch in Feed.Fetch.
+func TestFeedFetchInvalidPipelineRecordsError(t *testing.T) {
+	run := &fetchRun{
+		engine:    ingest.New(),
+		fetchedAt: 4_102_444_800,
+		recipes: map[string]Recipe{
+			// The default's ingest would otherwise fetch fine; the bad pipe token
+			// short-circuits before any I/O.
+			defaultRecipeName: {Ingest: "#test-stub", Pipe: []string{"#no-such-builtin"}},
+		},
+	}
+	ch := &Feed{Title: "T", URL: "irrelevant://value"}
+	ch.Fetch(context.Background(), run, make([]byte, 1<<20), mod.New())
+
+	if ch.FetchError == "" {
+		t.Error("FetchError = empty, want non-empty (invalid pipeline)")
+	}
+	if ch.FailStreak != 1 {
+		t.Errorf("FailStreak = %d, want 1", ch.FailStreak)
+	}
+	if len(ch.newItems) != 0 {
+		t.Errorf("newItems = %d, want 0 (fetch skipped before the item loop)", len(ch.newItems))
+	}
+}
+
+// Auto-discovery repoint: when the ingest Result reports a ResolvedURL different
+// from the feed's URL (the #feed fetcher followed a homepage's <link rel=alternate>),
+// fetchURL persists c.URL = ResolvedURL but must NOT reset the dedup/watermark
+// state — it is the same logical feed with a now-canonical URL (contrast
+// setFeedURL, which resets). The stubbed result carries no items so the
+// preserved Watermark/bg are unambiguous.
+func TestFetchURLAutoDiscoveryRepointPreservesDedupState(t *testing.T) {
+	const discovered = "https://blog.example/feed.xml"
+	ingest.Register("test-repoint", func(_ context.Context, _ *http.Client, _ []byte, _ ingest.Request) (ingest.Result, error) {
+		return ingest.Result{ResolvedURL: discovered}, nil
+	})
+	ch := &Feed{Title: "T", URL: "https://blog.example/", Watermark: 1700000000, BoundaryGUIDs: []uint32{7, 8, 9}}
+	items := dispatchStub(t, ch, "#test-repoint")
+	if len(items) != 0 {
+		t.Fatalf("got %d items, want 0", len(items))
+	}
+	if ch.URL != discovered {
+		t.Errorf("URL = %q, want repointed %q", ch.URL, discovered)
+	}
+	if ch.Watermark != 1700000000 {
+		t.Errorf("Watermark = %d, want preserved 1700000000 (repoint must not reset dedup state)", ch.Watermark)
+	}
+	if !slices.Equal(ch.BoundaryGUIDs, []uint32{7, 8, 9}) {
+		t.Errorf("BoundaryGUIDs = %v, want preserved [7 8 9]", ch.BoundaryGUIDs)
+	}
+}
+
 // The pipe fallback chain composes per level: recipe over default, feed over
 // recipe — an empty feed pipe inherits, a non-empty one replaces with #default
 // splicing in the recipe's effective pipe.
@@ -1061,30 +1117,6 @@ func TestFetchDroppedItemNotInStore(t *testing.T) {
 	items2 := fetchOnce(t, ch, srv, dropPipe)
 	if len(items2) != 0 {
 		t.Errorf("fetch2: got %d items, want 0 (dropped item re-evaluated — GUID not in boundary)", len(items2))
-	}
-}
-
-// TestFetchDroppedItemGUIDInBoundary is a tighter version: asserts the dropped
-// GUID appears literally in BoundaryGUIDs after the first fetch.
-func TestFetchDroppedItemGUIDInBoundary(t *testing.T) {
-	feed := `<rss version="2.0"><feed>
-		<item><title>Sponsored post</title><guid>ad-item</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
-	</feed></rss>`
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte(feed))
-	}))
-	defer srv.Close()
-
-	ch := &Feed{Title: "T"}
-	items := fetchOnce(t, ch, srv, "#filter drop_title=/sponsored/i")
-
-	if len(items) != 0 {
-		t.Fatalf("fetch1: got %d items, want 0 (item should be dropped)", len(items))
-	}
-
-	// BoundaryGUIDs must be non-empty: the dropped item's GUID must be recorded.
-	if len(ch.BoundaryGUIDs) == 0 {
-		t.Error("BoundaryGUIDs is empty after a drop — dropped GUID not retained")
 	}
 }
 

@@ -75,4 +75,13 @@ func TestDeleteRecipe(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
 	}
+	// Re-read: the recipe is actually gone from the committed store (not just 200).
+	if err := withDB(false, func(_ context.Context, d *DB) error {
+		if _, ok := d.core.Recipes["tmp"]; ok {
+			t.Error(`recipe "tmp" still present after DELETE`)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 }

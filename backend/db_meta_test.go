@@ -2,11 +2,17 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
+	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"srr/store"
 )
 
 // foldSearchText is a writer↔reader contract (mirrored by search.ts fold());
@@ -382,6 +388,126 @@ func TestSyncMetaInconsistentCoverageRebuilds(t *testing.T) {
 	entries := readMetaEntries(t, dir, "meta/L2.gz", false)
 	if len(entries) != 2 {
 		t.Fatalf("latest entries = %d, want 2", len(entries))
+	}
+}
+
+// metaTPutFailBackend fails every Put/AtomicPut while promoting reads, so a test
+// can inject a store-write failure partway through a sync that still needs to
+// read packs.
+type metaTPutFailBackend struct {
+	store.Backend
+}
+
+var errMetaTPutFail = errors.New("injected meta put failure")
+
+func (metaTPutFailBackend) Put(context.Context, string, io.Reader, bool) error {
+	return errMetaTPutFail
+}
+
+// SyncMeta is warn-only, but it must set the mp/mt coverage fields ONLY after
+// every save succeeds — a mid-sync save failure must leave coverage untouched so
+// the next cycle recomputes the same window. Inject a Put failure at the shard
+// finalize of a boundary-crossing store and assert the error surfaces and
+// coverage stays 0.
+func TestSyncMetaSaveFailureLeavesCoverageUnchanged(t *testing.T) {
+	db, _ := setupMetaBoundaryDB(t)
+	c := &db.core
+	// Reads (the walk) keep working through the promoted backend; the first meta
+	// save — finalizing shard 0 at the metaPackSize boundary — fails.
+	db.Backend = metaTPutFailBackend{Backend: db.Backend}
+
+	if err := db.SyncMeta(ctx, nil); err == nil {
+		t.Fatal("SyncMeta should surface the injected Put failure")
+	}
+	if c.MetaPacks != 0 || c.MetaTail != 0 {
+		t.Fatalf("coverage advanced despite save failure: mp=%d mt=%d, want 0/0", c.MetaPacks, c.MetaTail)
+	}
+}
+
+// SyncMeta trusts a read-back tail only when its line count matches MetaTail.
+// This exercises the count-MISMATCH branch (an existing but wrong-length tail),
+// distinct from the missing-tail read-ERROR branch (TestSyncMetaRebuildsMissingTail):
+// the mismatched tail is discarded and the tail rebuilt from the data packs.
+func TestSyncMetaTailCountMismatchRebuilds(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	ch := &Feed{id: 1, URL: "https://example.com/1"}
+	c.Feeds = map[int]*Feed{ch.id: ch}
+	c.FetchedAt = 1700000000
+
+	putOneArticle(t, db, ch, 1)
+	putOneArticle(t, db, ch, 2)
+	if err := db.SyncMeta(ctx, nil); err != nil {
+		t.Fatalf("SyncMeta #1: %v", err)
+	}
+	if c.MetaTail != 2 {
+		t.Fatalf("MetaTail = %d, want 2", c.MetaTail)
+	}
+
+	// A third article lands; the read-back candidate is meta/L2 (Seq is now 3).
+	putOneArticle(t, db, ch, 3)
+
+	// Overwrite that tail with a single line so its count (1) disagrees with the
+	// stale MetaTail (2), tripping the count-mismatch rebuild.
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write([]byte(`{"f":1,"w":1,"t":"stale"}` + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, genKey("meta", 2)), buf.Bytes(), 0o644); err != nil {
+		t.Fatalf("corrupt tail: %v", err)
+	}
+
+	if err := db.SyncMeta(ctx, nil); err != nil {
+		t.Fatalf("SyncMeta (rebuild): %v", err)
+	}
+	if c.MetaTail != 3 {
+		t.Fatalf("MetaTail = %d, want 3 (rebuilt)", c.MetaTail)
+	}
+	entries := readMetaEntries(t, dir, "meta/L3.gz", false)
+	if len(entries) != 3 || entries[0].Title != "A1" || entries[2].Title != "A3" {
+		t.Fatalf("latest = %+v, want A1..A3 (tail rebuilt from data packs)", entries)
+	}
+}
+
+// walkArticles guards against a data pack shorter than the idx promises (the
+// "(reading 'f')" crash class): a resolved offset beyond the data pack must be a
+// clean error, not an index panic.
+func TestWalkArticlesRejectsTruncatedDataPack(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	ch := &Feed{id: 1, URL: "https://example.com/1"}
+	c.Feeds = map[int]*Feed{ch.id: ch}
+	c.FetchedAt = 1700000000
+	if _, err := db.PutArticles(ctx, []*Item{
+		{Feed: ch, Title: "A1", Content: "c1", Published: 1000},
+		{Feed: ch, Title: "A2", Content: "c2", Published: 2000},
+	}); err != nil {
+		t.Fatalf("PutArticles: %v", err)
+	}
+
+	// Rewrite the latest data pack to hold only 1 entry while idx still promises
+	// 2, so chron 1 resolves to an offset past the data pack.
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	line, err := jsonEncode(&ArticleData{FeedID: 1, FetchedAt: 1700000000, Published: 1000, Title: "A1", Content: "c1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gz.Write(line); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, latestKey(c, "data")), buf.Bytes(), 0o644); err != nil {
+		t.Fatalf("corrupt data pack: %v", err)
+	}
+
+	err = db.walkArticles(ctx, 0, c.TotalArticles, func(*ArticleData) error { return nil })
+	if err == nil || !strings.Contains(err.Error(), "beyond data pack") {
+		t.Fatalf("walkArticles err = %v, want the 'beyond data pack' corruption guard", err)
 	}
 }
 

@@ -32,6 +32,24 @@ func seedFeed(t *testing.T, db *DB, ch *Feed) {
 	}
 }
 
+// A malformed JSON body is rejected with 400 by every mutating handler that
+// decodes one (the shared decodeJSON seam): feeds save, recipe put, syndicate
+// put. decodeJSON runs before any DB scope, so a bad body never touches state.
+func TestServeMalformedJSONBodyRejected(t *testing.T) {
+	setupTestDB(t)
+	stubPassthroughResolve()
+	for _, tc := range []struct{ method, path string }{
+		{"POST", "/api/feeds"},
+		{"PUT", "/api/recipes/x"},
+		{"PUT", "/api/syndicate/x"},
+	} {
+		rec := doReq(t, newMux(), tc.method, tc.path, `{bad`)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s %s with malformed body = %d, want 400 (%s)", tc.method, tc.path, rec.Code, rec.Body)
+		}
+	}
+}
+
 func TestServeUIIndex(t *testing.T) {
 	h := newMux()
 	rec := doReq(t, h, "GET", "/", "")

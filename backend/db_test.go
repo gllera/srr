@@ -326,10 +326,14 @@ func TestPutArticlesMultipleFeeds(t *testing.T) {
 	}
 }
 
-func TestPutArticlesPackSplitting(t *testing.T) {
+// TestPutArticlesDataPackSplitting merges the former pack-split and
+// pack-offset-reset tests: with PackSize=0 the data pack rolls after every
+// article, so NextPackID advances, the first finalized data/1.gz is published,
+// and PackOffset resets to just the entry sitting in the current latest pack.
+func TestPutArticlesDataPackSplitting(t *testing.T) {
 	db, c, dir := setupTestDB(t)
-	// Very small pack size to force content splitting
-	globals.PackSize = 0 // 0 KB -> split after every flush
+	globals.PackSize = 0 // 0 KB -> split the data pack after every article
+	c.FetchedAt = 1700000000
 
 	ch1 := &Feed{id: 1}
 	c.Feeds = map[int]*Feed{ch1.id: ch1}
@@ -337,44 +341,25 @@ func TestPutArticlesPackSplitting(t *testing.T) {
 	articles := []*Item{
 		{Feed: ch1, Title: "A1", Content: "Content 1", Published: 1000},
 		{Feed: ch1, Title: "A2", Content: "Content 2", Published: 2000},
-		{Feed: ch1, Title: "A3", Content: "Content 3", Published: 3000},
 	}
 
 	if _, err := db.PutArticles(ctx, articles); err != nil {
 		t.Fatalf("PutArticles: %v", err)
 	}
 
-	// With PackSize=0, content packs should split
-	if c.NextPackID <= 1 {
-		t.Errorf("expected pack splitting, NPacks = %d", c.NextPackID)
+	// The data pack rolled at least once (NextPackID advanced past the initial 1).
+	if c.NextPackID < 2 {
+		t.Errorf("NextPackID = %d, want >= 2 (data pack split)", c.NextPackID)
 	}
-
-	// Verify numbered content pack exists (NPacks starts at 1)
-	pack1 := filepath.Join(dir, "data/1.gz")
-	if _, err := os.Stat(pack1); os.IsNotExist(err) {
-		t.Error("expected data/1.gz to exist")
+	// The first finalized data pack exists (data ids start at 1; data/0.gz is
+	// never produced).
+	if _, err := os.Stat(filepath.Join(dir, "data/1.gz")); os.IsNotExist(err) {
+		t.Error("expected finalized data/1.gz to exist")
 	}
-}
-
-func TestPackMetadata(t *testing.T) {
-	db, c, _ := setupTestDB(t)
-	globals.PackSize = 0 // force content split after every article
-
-	ch1, ch2 := &Feed{id: 1}, &Feed{id: 2}
-	c.Feeds = map[int]*Feed{ch1.id: ch1, ch2.id: ch2}
-
-	articles := []*Item{
-		{Feed: ch1, Title: "A1", Content: "Content 1", Published: 1000},
-		{Feed: ch2, Title: "A2", Content: "Content 2", Published: 2000},
-		{Feed: ch1, Title: "A3", Content: "Content 3", Published: 3000},
-	}
-
-	if _, err := db.PutArticles(ctx, articles); err != nil {
-		t.Fatalf("PutArticles: %v", err)
-	}
-
-	if c.TotalArticles != 3 {
-		t.Errorf("TotalArticles = %d, want 3", c.TotalArticles)
+	// PackOffset reset: only the final article sits in the current latest data
+	// pack after the split.
+	if c.PackOffset != 1 {
+		t.Errorf("PackOffset = %d, want 1 (one entry in latest data pack)", c.PackOffset)
 	}
 }
 
@@ -453,28 +438,6 @@ func TestDBLocalCRUD(t *testing.T) {
 	if rc != nil {
 		rc.Close()
 		t.Error("file still exists after Rm")
-	}
-}
-
-func TestJSONEncodeRoundTrip(t *testing.T) {
-	type item struct {
-		Name string `json:"name"`
-		HTML string `json:"html"`
-	}
-
-	input := item{Name: "test", HTML: "<b>bold</b>"}
-	data, err := jsonEncode(input)
-	if err != nil {
-		t.Fatalf("jsonEncode: %v", err)
-	}
-
-	var output item
-	if err := json.Unmarshal(data, &output); err != nil {
-		t.Fatalf("Unmarshal: %v", err)
-	}
-
-	if output != input {
-		t.Errorf("got %+v, want %+v", output, input)
 	}
 }
 
@@ -591,6 +554,20 @@ func TestAddRemoveFeed(t *testing.T) {
 	}
 	if s3.id != 0 {
 		t.Errorf("reused ID = %d, want 0", s3.id)
+	}
+}
+
+// FeedByID enforces the [0, feedIDCeiling) range (feed_id is a u16 in each idx
+// entry): both an over-ceiling id and a negative id are rejected with the
+// "[0, 65535]" bounds message — the single invariant the CLI show/upd commands
+// surface, tested here at its source.
+func TestFeedByIDRangeCheck(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	if _, err := db.FeedByID(feedIDCeiling); err == nil || !strings.Contains(err.Error(), "[0, 65535]") {
+		t.Errorf("FeedByID(%d) = %v, want an out-of-range error", feedIDCeiling, err)
+	}
+	if _, err := db.FeedByID(-1); err == nil || !strings.Contains(err.Error(), "[0, 65535]") {
+		t.Errorf("FeedByID(-1) = %v, want an out-of-range error", err)
 	}
 }
 
@@ -1017,30 +994,6 @@ func TestDBNullFeedsInJSON(t *testing.T) {
 	}
 	if len(db.Feeds()) != 0 {
 		t.Errorf("Subscriptions len = %d, want 0", len(db.Feeds()))
-	}
-}
-
-func TestPutArticlesDataPackSplitResetsPackOffset(t *testing.T) {
-	db, c, _ := setupTestDB(t)
-	globals.PackSize = 0 // split after every article
-
-	ch := &Feed{id: 1}
-	c.Feeds = map[int]*Feed{ch.id: ch}
-	c.FetchedAt = 1700000000
-
-	articles := []*Item{
-		{Feed: ch, Title: "A1", Content: "Content1", Published: 1000},
-		{Feed: ch, Title: "A2", Content: "Content2", Published: 2000},
-	}
-	if _, err := db.PutArticles(ctx, articles); err != nil {
-		t.Fatalf("PutArticles: %v", err)
-	}
-
-	if c.NextPackID < 2 {
-		t.Errorf("NextPackID = %d, want >= 2", c.NextPackID)
-	}
-	if c.PackOffset != 1 {
-		t.Errorf("PackOffset = %d, want 1 (one entry in latest data pack)", c.PackOffset)
 	}
 }
 

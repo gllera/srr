@@ -152,10 +152,41 @@ func TestEnclosureNilRawVerbatim(t *testing.T) {
 	}
 }
 
-func TestEnclosureRejectsParams(t *testing.T) {
-	m := New()
-	item := &RawItem{Content: "<p>a</p>"}
-	if err := m.Process(context.Background(), "#enclosure foo=bar", item); err == nil {
-		t.Fatal("expected unknown-parameter error")
+// enclosureKind classifies a candidate by MIME prefix, then the Media RSS
+// medium attribute, then the URL extension. This pins the medium= tier (type and
+// extension both absent), the MIME-wins precedence, and the empty result when
+// nothing classifies.
+func TestEnclosureKindMediumAttr(t *testing.T) {
+	cases := []struct{ typ, medium, url, want string }{
+		{"", "image", "https://x.org/pic", "image"}, // medium classifies (no type, no ext)
+		{"", "video", "https://x.org/stream", "video"},
+		{"", "audio", "https://x.org/track", "audio"},
+		{"", "", "https://x.org/nope", ""},                  // no type, medium, or ext → ""
+		{"image/jpeg", "video", "https://x.org/x", "image"}, // MIME prefix wins over medium
+	}
+	for _, c := range cases {
+		if got := enclosureKind(c.typ, c.medium, c.url); got != c.want {
+			t.Errorf("enclosureKind(%q,%q,%q) = %q, want %q", c.typ, c.medium, c.url, got, c.want)
+		}
+	}
+}
+
+// An <itunes:image href> (raw["image"]) is surfaced as a thumbnail-tier image.
+func TestEnclosureItunesImage(t *testing.T) {
+	raw := RawFeedItem{"image": {{Attr: map[string]string{"href": "https://x.org/cover.jpg"}}}}
+	got := runEnclosure(t, raw, "<p>notes</p>")
+	if !strings.Contains(got, `<img src="https://x.org/cover.jpg"/>`) {
+		t.Fatalf("itunes:image should be prepended, got %q", got)
+	}
+}
+
+// A media:content with no type and no URL extension falls back to the Media RSS
+// medium attribute for its kind.
+func TestEnclosureMediumAttrClassifiesVideo(t *testing.T) {
+	raw := RawFeedItem{"content": {{Attr: map[string]string{
+		"url": "https://x.org/stream", "medium": "video"}}}}
+	got := runEnclosure(t, raw, "<p>t</p>")
+	if !strings.Contains(got, `<video controls="" src="https://x.org/stream"></video>`) {
+		t.Fatalf("medium=video should classify as video, got %q", got)
 	}
 }

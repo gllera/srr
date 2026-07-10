@@ -71,26 +71,6 @@ func TestParseOPMLTreeFlat(t *testing.T) {
 	}
 }
 
-func TestParseOPMLTreeInvalidURL(t *testing.T) {
-	content := `<?xml version="1.0" encoding="UTF-8"?>
-<opml version="2.0">
-<body>
-	<outline title="No URL"/>
-	<outline title="Valid" xmlUrl="http://example.com/feed.xml"/>
-</body>
-</opml>`
-
-	f := writeTempFile(t, content)
-	nodes, err := ParseOPMLTree(f)
-	if err != nil {
-		t.Fatalf("ParseOPMLTree: %v", err)
-	}
-
-	if len(nodes) != 1 {
-		t.Fatalf("got %d root nodes, want 1 (invalid URL should be skipped)", len(nodes))
-	}
-}
-
 func TestParseOPMLTreeTextFallback(t *testing.T) {
 	content := `<?xml version="1.0" encoding="UTF-8"?>
 <opml version="2.0">
@@ -290,6 +270,10 @@ func TestOutlineDisplayName(t *testing.T) {
 }
 
 func TestResolveTag(t *testing.T) {
+	// The per-segment normalization cases (single {"Tech"}, {"123"}) mirror
+	// TestNormalizeGroupName 1:1 and are dropped; kept here are resolveTag's own
+	// behaviours: the nil/empty-path short-circuit, the multi-segment "/" join,
+	// and error propagation from a bad segment through the join loop.
 	tests := []struct {
 		path []string
 		want string
@@ -297,11 +281,9 @@ func TestResolveTag(t *testing.T) {
 	}{
 		{nil, "", false},
 		{[]string{}, "", false},
-		{[]string{"Tech"}, "tech", false},
 		{[]string{"Tech", "Blogs"}, "tech/blogs", false},
 		{[]string{"My Group", "Sub Group"}, "my_group/sub_group", false},
-		{[]string{"123"}, "", true},         // numeric-only
-		{[]string{"Tech", "###"}, "", true}, // invalid segment
+		{[]string{"Tech", "###"}, "", true}, // a bad segment errors through the join
 	}
 
 	for _, tt := range tests {

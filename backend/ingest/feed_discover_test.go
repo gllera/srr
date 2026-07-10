@@ -97,10 +97,17 @@ func TestDiscoverFeedLinkWrongTypeIgnored(t *testing.T) {
 }
 
 func TestDiscoverFeedLinkMalformedHTML(t *testing.T) {
-	// Truncated / malformed HTML should not panic and may or may not find a link.
-	html := `<html><head><link rel="alternate" type="application/rss+xml" href="https://example.com/feed.xml"`
-	// Just verify no panic; result is acceptable either way.
-	discoverFeedLink([]byte(html), "https://example.com/") //nolint:errcheck
+	// Truncated document, but the feed <link> tag itself is complete and present
+	// (no </head></html>): the tokenizer is robust to the cut-off tail and must
+	// still return the link.
+	html := `<html><head><link rel="alternate" type="application/rss+xml" href="https://example.com/feed.xml">`
+	got, ok := discoverFeedLink([]byte(html), "https://example.com/")
+	if !ok {
+		t.Fatal("expected the present-but-truncated markup to still yield the feed link")
+	}
+	if got != "https://example.com/feed.xml" {
+		t.Errorf("got %q, want %q", got, "https://example.com/feed.xml")
+	}
 }
 
 func TestDiscoverFeedLinkCaseInsensitiveRel(t *testing.T) {

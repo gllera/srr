@@ -199,16 +199,6 @@ func TestSFTPPutCreatesSubdirectories(t *testing.T) {
 	}
 }
 
-func TestSFTPPutExclusiveCreateReturnsError(t *testing.T) {
-	d, _ := setupSFTPPipe(t)
-	if err := d.Put(ctx, "f.txt", strings.NewReader("first"), false); err != nil {
-		t.Fatalf("Put(first): %v", err)
-	}
-	if err := d.Put(ctx, "f.txt", strings.NewReader("second"), false); err == nil {
-		t.Error("Put(ignoreExisting=false) on existing file should fail")
-	}
-}
-
 // TestSFTPPutExclusiveCreateReportsErrExist pins the store-lock 409 contract for
 // the SFTP backend: an exclusive-create conflict must satisfy
 // errors.Is(err, os.ErrExist) like S3/HTTP/local, so cmd_serve's writeErr maps

@@ -54,6 +54,30 @@ func TestReadabilityReplacesTruncatedContent(t *testing.T) {
 	}
 }
 
+// modRoundTripFunc adapts a function to http.RoundTripper for tests.
+type modRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f modRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestFetchReadableNonHTTPLinkFailOpen pins the non-http(s) Link fail-open:
+// fetchReadable returns ("", nil) before building any request, so #readability
+// keeps the original content and issues NO network call.
+func TestFetchReadableNonHTTPLinkFailOpen(t *testing.T) {
+	client := &http.Client{Transport: modRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		t.Fatalf("no request should be issued for a non-http link, got %s", r.URL)
+		return nil, nil
+	})}
+	for _, link := range []string{"ftp://x/y", "mailto:a@b.c", "://nohost", ""} {
+		got, err := fetchReadable(context.Background(), client, link, 1<<20, "ua", nil)
+		if err != nil {
+			t.Errorf("fetchReadable(%q) err = %v, want nil (fail-open)", link, err)
+		}
+		if got != "" {
+			t.Errorf("fetchReadable(%q) = %q, want empty (nothing to extract)", link, got)
+		}
+	}
+}
+
 func TestReadabilityEmptyLinkIsNoop(t *testing.T) {
 	m := New()
 	now := time.Now()

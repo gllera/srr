@@ -255,3 +255,32 @@ func TestOwnFeedCountForFeedAddedMidPack(t *testing.T) {
 		t.Errorf("ownFeedCount(0) = %d, want 1", got)
 	}
 }
+
+// feedCount's bounds guard (idx_read.go): an id outside [0, numSlots) reads 0
+// (a feed added after this pack's header was frozen), never an OOB panic.
+func TestFeedCountBoundsGuard(t *testing.T) {
+	p := &idxPack{numSlots: 2, feedCounts: []uint32{3, 7}}
+	if got := p.feedCount(-1); got != 0 {
+		t.Errorf("feedCount(-1) = %d, want 0 (below range)", got)
+	}
+	if got := p.feedCount(p.numSlots); got != 0 {
+		t.Errorf("feedCount(numSlots=%d) = %d, want 0 (at/above range)", p.numSlots, got)
+	}
+	if got := p.feedCount(1); got != 7 {
+		t.Errorf("feedCount(1) = %d, want 7 (in range)", got)
+	}
+}
+
+// packIdxFor (idx_read.go, mirrors data.ts packIdx) clamps a chron past the
+// last pack to the final pack index; an in-range chron maps to chron/idxPackSize.
+func TestPackIdxForClamp(t *testing.T) {
+	if got := packIdxFor(3*idxPackSize, 2); got != 1 {
+		t.Errorf("packIdxFor(3*idxPackSize, 2) = %d, want 1 (clamped to n-1)", got)
+	}
+	if got := packIdxFor(idxPackSize, 3); got != 1 {
+		t.Errorf("packIdxFor(idxPackSize, 3) = %d, want 1 (in range)", got)
+	}
+	if got := packIdxFor(0, 3); got != 0 {
+		t.Errorf("packIdxFor(0, 3) = %d, want 0", got)
+	}
+}

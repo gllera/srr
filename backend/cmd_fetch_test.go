@@ -28,19 +28,13 @@ func TestNewFetchClientIdleConnTimeout(t *testing.T) {
 	if tr.IdleConnTimeout != want {
 		t.Errorf("IdleConnTimeout = %v, want %v", tr.IdleConnTimeout, want)
 	}
-}
-
-// TestNewFetchClientPoolingMatchesWorkers verifies that the connection-pool
-// limits on the transport are set to the supplied workers value.
-func TestNewFetchClientPoolingMatchesWorkers(t *testing.T) {
-	const workers = 8
-	c := newFetchClient(workers)
-	tr := c.Transport.(*http.Transport)
-	if tr.MaxIdleConnsPerHost != workers {
-		t.Errorf("MaxIdleConnsPerHost = %d, want %d", tr.MaxIdleConnsPerHost, workers)
+	// The connection pool is sized to the worker count so a burst of feed fetches
+	// can reuse connections instead of exhausting file descriptors.
+	if tr.MaxIdleConnsPerHost != 4 {
+		t.Errorf("MaxIdleConnsPerHost = %d, want 4 (== workers)", tr.MaxIdleConnsPerHost)
 	}
-	if tr.MaxConnsPerHost != workers {
-		t.Errorf("MaxConnsPerHost = %d, want %d", tr.MaxConnsPerHost, workers)
+	if tr.MaxConnsPerHost != 4 {
+		t.Errorf("MaxConnsPerHost = %d, want 4 (== workers)", tr.MaxConnsPerHost)
 	}
 }
 
