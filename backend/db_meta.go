@@ -355,6 +355,19 @@ func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 	// wrote as meta/L<Seq>, so it is safe to remember. rawLines is not touched
 	// again after this point; the next cycle's memoized() hands out a copy.
 	metaTailMemo.store(c.Seq, rawLines)
+
+	// Refresh the newest-glance head projection from the tail we just wrote:
+	// the newest min(headMax, tail) cards, parsed back from the very lines the
+	// pack holds so the projection can't drift from it, anchored to their
+	// explicit base chron (see DBCore.HeadBase — a later failed sync must not
+	// shift the addressing). Commit publishes it alongside mp/mt.
+	headLines := rawLines[max(0, len(rawLines)-headMax):]
+	head, err := parseMetaEntries(bytes.Join(headLines, nil))
+	if err != nil {
+		return fmt.Errorf("head projection: %w", err)
+	}
+	c.Head = head
+	c.HeadBase = c.TotalArticles - len(head)
 	return nil
 }
 

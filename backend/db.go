@@ -27,6 +27,12 @@ const (
 	// feedIDCeiling is the feed-id ceiling: feed_id is a uint16 in each idx
 	// entry, so ids run [0, feedIDCeiling).
 	feedIDCeiling = 65536
+	// headMax caps the newest-glance head projection carried inside db.gz
+	// (DBCore.Head): the newest headMax meta cards ride the one object the
+	// reader fetches no-cache on every load, so the home list's newest window
+	// renders with zero meta-pack fetches. Sized to cover the list's first
+	// page (BATCH=30) with headroom while adding ~1-2KB to db.gz.
+	headMax = 40
 	// idxStateSize is the 2 leading uint32 LE idx-header state fields
 	// (packId/packOff bases).
 	idxStateSize = 2 * 4
@@ -169,6 +175,25 @@ type DBCore struct {
 	// the frontend/service-worker ignores the `out` field entirely (backend-only
 	// config and output key space).
 	Out []OutFeed `json:"out,omitempty"`
+	// Head is the newest-glance projection: the newest min(headMax, MetaTail)
+	// meta cards, in chron order — Head[i] is the card at chron HeadBase+i.
+	// Maintained by SyncMeta from the tail lines it just wrote (never a
+	// separate store read). The reader's loadMeta serves that chron window
+	// straight from it (db.gz is fetched no-cache every load), skipping the
+	// ~200KB generation-named meta tail no edge cache can hold. Right after a
+	// shard finalization the tail — and so Head — can run shorter than
+	// headMax; the reader falls back to meta/data packs outside the window.
+	// omitempty; absent (old writer) simply disables the fast path.
+	Head []MetaEntry `json:"head,omitempty"`
+	// HeadBase is the chron of Head[0], written by the same successful
+	// SyncMeta. The base is explicit — NOT derived from TotalArticles by the
+	// reader — because SyncMeta is warn-only: a failed sync commits a db.gz
+	// with a grown TotalArticles and the previous cycle's Head, and a derived
+	// base would misaddress every card by the batch size. Anchored to its own
+	// base, a stale Head still serves correct (immutable) cards for its own
+	// range while the new chrons fall through to the meta/data path.
+	// omitempty; 0 is the natural base for a store under headMax articles.
+	HeadBase int `json:"hb,omitempty"`
 }
 
 // OutFeed declares one named syndication output: a rolling newest-N window of
@@ -291,6 +316,8 @@ func (o *DB) BumpGen() {
 	o.core.HdrPacks = 0
 	o.core.MetaPacks = 0
 	o.core.MetaTail = 0
+	o.core.Head = nil
+	o.core.HeadBase = 0
 	// A rebuild reuses finalized pack names with new bytes, and the CDN edge
 	// caches those names under a year-long immutable TTL — the store-side
 	// reset above cannot reach that cache, only an operator purge can.

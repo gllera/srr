@@ -405,12 +405,24 @@ function loadMetaPack(n: number): Promise<IMetaWire[]> {
    })
 }
 
-// loadMeta returns one card. Uses meta/ when the projection is consistent
-// (metaReady), otherwise reads the data/ source of truth (projected) so the
-// home list never breaks while meta lags after a failed SyncMeta. A stale-tab
-// 404 on the latest meta pack is NOT handled here — it self-heals via the
-// guarded reload in fetchPackBytes (same as the reader's data/ path).
+// loadMeta returns one card. The newest window comes straight from db.head
+// (the writer's newest-glance projection riding db.gz — the one object every
+// load already fetches, so the home list's landing costs zero meta fetches);
+// below that, meta/ when the projection is consistent (metaReady), otherwise
+// the data/ source of truth (projected) so the home list never breaks while
+// meta lags after a failed SyncMeta. head is addressed by its OWN base chron
+// (db.hb, absent = 0) rather than total_art: SyncMeta is warn-only, so a
+// db.gz can carry a grown total_art with the previous cycle's head — anchored
+// to hb, that stale head still serves correct (immutable) cards for its own
+// range and the new chrons fall through. head needs no metaReady gate. A
+// stale-tab 404 on the latest meta pack is NOT handled here — it self-heals
+// via the guarded reload in fetchPackBytes (same as the reader's data/ path).
 export async function loadMeta(chronIdx: number): Promise<IMetaWire> {
+   const head = db.head
+   if (head?.length) {
+      const base = db.hb ?? 0
+      if (chronIdx >= base && chronIdx < base + head.length) return head[chronIdx - base]
+   }
    if (metaReady()) {
       const n = metaPackId(chronIdx)
       const entries = await loadMetaPack(n)

@@ -705,3 +705,73 @@ func TestMetaTailMemoCopyIsolation(t *testing.T) {
 		t.Fatal("memoized after reset must miss")
 	}
 }
+
+// TestSyncMetaHeadProjection pins the newest-glance head: after every sync,
+// db.Head holds the newest min(headMax, MetaTail) cards in chron order —
+// Head[i] is the card at chron TotalArticles-len(Head)+i — parsed from the
+// very lines the tail pack holds. A shard finalization shrinks the tail, and
+// Head with it.
+func TestSyncMetaHeadProjection(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	ch := &Feed{id: 1, URL: "https://example.com/1"}
+	c.Feeds = map[int]*Feed{ch.id: ch}
+	c.FetchedAt = 1700000000
+
+	for i := 1; i <= headMax+5; i++ {
+		putOneArticle(t, db, ch, i)
+	}
+	if err := db.SyncMeta(ctx, nil); err != nil {
+		t.Fatalf("SyncMeta: %v", err)
+	}
+	if len(c.Head) != headMax {
+		t.Fatalf("len(Head) = %d, want capped at %d", len(c.Head), headMax)
+	}
+	// Head[i] must be the card at chron HeadBase+i, and the base must be
+	// written explicitly (a later warn-only sync failure must not shift it).
+	base := c.HeadBase
+	if base != c.TotalArticles-len(c.Head) {
+		t.Fatalf("HeadBase = %d, want %d", base, c.TotalArticles-len(c.Head))
+	}
+	for i, e := range c.Head {
+		want := fmt.Sprintf("A%d", base+i+1) // A<n> titles are 1-based
+		if e.Title != want || e.FeedID != ch.id {
+			t.Fatalf("Head[%d] = %+v, want title %q", i, e, want)
+		}
+	}
+
+	// The head must agree with the published tail's newest lines.
+	tail := readMetaEntries(t, dir, genKey("meta", c.Seq), false)
+	if tail[len(tail)-1] != c.Head[len(c.Head)-1] {
+		t.Fatalf("Head newest %+v != tail newest %+v", c.Head[len(c.Head)-1], tail[len(tail)-1])
+	}
+}
+
+// TestSyncMetaHeadShrinksAtBoundary: right after a shard finalization the
+// tail is shorter than headMax and Head mirrors it (readers fall back to
+// packs below its base).
+func TestSyncMetaHeadShrinksAtBoundary(t *testing.T) {
+	db, _ := setupMetaBoundaryDB(t)
+	c := &db.core
+	if err := db.SyncMeta(ctx, nil); err != nil {
+		t.Fatalf("SyncMeta: %v", err)
+	}
+	if len(c.Head) != 1 || c.Head[0].Title != "Last" {
+		t.Fatalf("Head = %+v, want the single post-boundary card", c.Head)
+	}
+	if c.HeadBase != metaPackSize {
+		t.Fatalf("HeadBase = %d, want %d (the tail starts at the finalized boundary)", c.HeadBase, metaPackSize)
+	}
+}
+
+// TestBumpGenClearsHead: the bump-implies-reset invariant covers the head
+// projection too — a rebuilt store must not serve pre-rebuild cards from
+// db.gz while its meta series regenerates.
+func TestBumpGenClearsHead(t *testing.T) {
+	db, c, _ := setupTestDB(t)
+	c.Head = []MetaEntry{{FeedID: 1, When: 1, Title: "stale"}}
+	c.HeadBase = 7
+	db.BumpGen()
+	if c.Head != nil || c.HeadBase != 0 {
+		t.Fatalf("Head/HeadBase = %+v/%d, want nil/0 after BumpGen", c.Head, c.HeadBase)
+	}
+}
