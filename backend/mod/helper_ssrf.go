@@ -14,14 +14,40 @@ import (
 // the resolved global after parsing. Defaults false (guard on).
 var AllowPrivateFetch bool
 
+// extraBlockedCIDRs are ranges the stdlib IP predicates don't cover but an SSRF
+// probe can still reach into infrastructure:
+//   - 100.64.0.0/10 — CGNAT / carrier-grade NAT; some providers put internal
+//     services here (Alibaba Cloud's metadata endpoint is 100.100.100.200).
+//   - 64:ff9b::/96 — the NAT64 well-known prefix; it embeds an IPv4 address, so
+//     64:ff9b::a9fe:a9fe reaches 169.254.169.254 where a NAT64 gateway exists.
+//   - 198.18.0.0/15 — IETF benchmarking assignment (RFC 2544).
+var extraBlockedCIDRs = func() []*net.IPNet {
+	nets := make([]*net.IPNet, 0, 3)
+	for _, c := range []string{"100.64.0.0/10", "64:ff9b::/96", "198.18.0.0/15"} {
+		if _, n, err := net.ParseCIDR(c); err == nil {
+			nets = append(nets, n)
+		}
+	}
+	return nets
+}()
+
 // blockedIP reports whether ip is a private, loopback, link-local, unique-local
-// (covered by IsPrivate for fc00::/7), unspecified, or multicast address — the
-// ranges an SSRF probe would target (internal services, cloud metadata at
-// 169.254.169.254, localhost-bound admin ports).
+// (covered by IsPrivate for fc00::/7), unspecified, or multicast address — plus
+// the extraBlockedCIDRs — i.e. the ranges an SSRF probe would target (internal
+// services, cloud metadata at 169.254.169.254 or 100.100.100.200, NAT64,
+// localhost-bound admin ports).
 func blockedIP(ip net.IP) bool {
-	return ip.IsLoopback() || ip.IsPrivate() ||
+	if ip.IsLoopback() || ip.IsPrivate() ||
 		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-		ip.IsUnspecified() || ip.IsMulticast()
+		ip.IsUnspecified() || ip.IsMulticast() {
+		return true
+	}
+	for _, n := range extraBlockedCIDRs {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // guardDialControl is a net.Dialer.Control hook: it runs after DNS resolution

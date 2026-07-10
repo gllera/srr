@@ -43,6 +43,16 @@ func TestUntrackFullQueryRemoved(t *testing.T) {
 	}
 }
 
+// A URL with NO query whose fragment itself contains "?" must be left intact —
+// the "?" belongs to the fragment (a hash router route), not a query, so nothing
+// is stripped.
+func TestUntrackQuerylessFragmentWithQuestionMarkKept(t *testing.T) {
+	got := runUntrack(t, `<a href="https://x.org/a#route?fbclid=123">l</a>`)
+	if !strings.Contains(got, `href="https://x.org/a#route?fbclid=123"`) {
+		t.Fatalf("fragment containing ? must be preserved verbatim, got %q", got)
+	}
+}
+
 // Media srcs are cleaned like anchors.
 func TestUntrackImgSrcParams(t *testing.T) {
 	got := runUntrack(t, `<img src="https://x.org/a.jpg?w=640&amp;mc_eid=xyz">`)
