@@ -15,6 +15,9 @@ export const IDX_PACK_SIZE = 50000
 // entries per finalized meta shard (the meta/ split stride; a divisor of IDX_PACK_SIZE)
 export const META_PACK_SIZE = 5000
 
+// cap on the newest-glance head projection in db.gz (db.head: the newest cards, chron order)
+export const HEAD_MAX = 40
+
 // bytes: the 2 leading uint32 LE idx-header state fields (packId/packOff bases)
 export const IDX_STATE_SIZE = 8
 
@@ -121,4 +124,6 @@ export interface IDBWire {
    recipes?: Record<string, IRecipeWire> // Recipes
    feeds: Record<number, IFeedWire> | null // Feeds
    out?: IOutFeedWire[] // Out
+   head?: IMetaWire[] // Head
+   hb?: number // HeadBase
 }

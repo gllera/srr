@@ -34,6 +34,7 @@ var tsConsts = []struct {
 }{
 	{"IDX_PACK_SIZE", idxPackSize, "entries per finalized idx pack (split threshold)"},
 	{"META_PACK_SIZE", metaPackSize, "entries per finalized meta shard (the meta/ split stride; a divisor of IDX_PACK_SIZE)"},
+	{"HEAD_MAX", headMax, "cap on the newest-glance head projection in db.gz (db.head: the newest cards, chron order)"},
 	{"IDX_STATE_SIZE", idxStateSize, "bytes: the 2 leading uint32 LE idx-header state fields (packId/packOff bases)"},
 	{"IDX_HEADER_PREFIX", idxHeaderPrefix, "bytes: idx-header fixed prefix (2 state uint32s + numSlots uint32); the variable count array follows"},
 	{"IDX_ENTRY_SIZE", idxEntrySize, "bytes per idx entry: feed_id uint16 LE (pack boundaries live in the footer)"},

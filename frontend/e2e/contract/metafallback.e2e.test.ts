@@ -45,12 +45,51 @@ describe("contract: meta fallback to data/", () => {
       expect(reader.data.db.total_art).toBe(ITEMS.length)
    })
 
+   it("serves the newest window from db.head with zero meta fetches", async () => {
+      // The writer's newest-glance projection rides db.gz: every card in the
+      // head window must resolve without ANY meta/ request (the whole point —
+      // the generation-named tail is the one object no cache can hold).
+      const db = reader.data.db
+      expect(db.head).toBeDefined()
+      expect(db.head!.length).toBe(ITEMS.length)
+      expect(db.hb ?? 0).toBe(0)
+      const before = reader.fetchMock.mock.calls.length
+      for (let chron = 0; chron < ITEMS.length; chron++) {
+         const card = await reader.data.loadMeta(chron)
+         const art = await reader.data.loadArticle(chron)
+         expect(card.f, `chron ${chron} f`).toBe(art.f)
+         expect(card.w, `chron ${chron} w`).toBe(art.p || art.a)
+         expect(card.t, `chron ${chron} t`).toBe(art.t)
+      }
+      const metaFetches = reader.fetchMock.mock.calls.slice(before).filter(([url]) => String(url).includes("meta/"))
+      expect(metaFetches).toEqual([])
+   })
+
+   it("a stale head (failed-sync commit) still serves ITS OWN chrons correctly", async () => {
+      // SyncMeta is warn-only: a failed sync commits a grown total_art with
+      // the previous cycle's head. Anchored to db.hb the stale head must keep
+      // serving its own (immutable) range — never shifted addressing.
+      const db = reader.data.db
+      const savedTotal = db.total_art
+      db.total_art = savedTotal + 5 // pretend a batch landed without a sync
+      try {
+         const card0 = await reader.data.loadMeta(0)
+         expect(card0.t).toBe(ITEMS[0].title)
+      } finally {
+         db.total_art = savedTotal
+      }
+   })
+
    it("loadMeta falls back to data/ when metaReady() is false", async () => {
       // Force metaReady()=false by setting mp=0 and mt=0.
       // (Real scenario: SyncMeta failed warn-only, or first run before any meta
       // is written — both leave mp/mt at 0.)
       reader.data.db.mp = 0
       reader.data.db.mt = 0
+      // Clear the head projection too: it rides the same sync, so the
+      // failed-sync scenario leaves it absent as well — and it would
+      // otherwise satisfy these newest chrons before the fallback runs.
+      reader.data.db.head = undefined
       expect(reader.data.metaReady()).toBe(false)
 
       // Every chronIdx must still return the correct card via data/ fallback.
@@ -68,6 +107,7 @@ describe("contract: meta fallback to data/", () => {
       // All our items have a pubDate, so w should equal published (art.p).
       reader.data.db.mp = 0
       reader.data.db.mt = 0
+      reader.data.db.head = undefined
       const art0 = await reader.data.loadArticle(0)
       expect(art0.p).toBe(pubUnix(0))
       const card0 = await reader.data.loadMeta(0)
