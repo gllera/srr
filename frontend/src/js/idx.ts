@@ -96,6 +96,74 @@ export function makeFeedsLookup(feeds: Map<number, number>, slots: number): Int3
    return arr
 }
 
+// tallyUnread computes EVERY feed's unread count — visible articles strictly
+// after its seen frontier — in one pass over the latest pack, replacing the
+// per-feed countAll/countLeft fan-out that re-scanned the same tail once per
+// feed (O(feeds × tail), per lane-cycle keypress in unread-only mode). Per
+// feed the result is exactly `countAll − countLeft(min(seen+1, totalArt))`
+// over its one-feed map — the feedUnread oracle; the differential test in
+// idx.test.ts pins the equivalence across the seen matrix:
+//  - never seen: the full visible backlog — the pre-tail term comes O(1) from
+//    the latest header's all-time cumulative count minus the feed's expired
+//    total (only when add_idx < base: otherwise everything before the tail is
+//    logically deleted), plus the tail entries at chron ≥ add_idx. Idx-derived
+//    on purpose (countAt(header), never feed.total_art) so db.gz drift can't
+//    skew it — the same anti-drift stance as countLeft's header shortcut.
+//  - seen in the tail (seen+1 ≥ base): the pre-tail contributions cancel in
+//    the countAll − countLeft subtraction, leaving just the tail entries at
+//    chron ≥ max(add_idx, seen+1). (A markUnreadFrom(0) frontier stores −1;
+//    seen+1 = 0 lands here when base is 0 and rare below otherwise.)
+//  - seen below the tail base: an exact count needs finalized-pack scans (and
+//    possibly their fetches) — those feeds return in `rare` for the caller's
+//    per-feed async oracle fallback. Structurally empty while
+//    totalArt ≤ IDX_PACK_SIZE (no finalized pack to have been seen in).
+export interface TallyFeed {
+   id: number
+   add_idx?: number
+}
+
+export function tallyUnread<T extends TallyFeed>(
+   latest: IdxPack,
+   base: number, // the latest pack's first chron (numFinalized × IDX_PACK_SIZE)
+   totalArt: number,
+   slots: number,
+   chs: T[],
+   seenOf: (id: number) => number | undefined,
+   expired?: Uint32Array,
+): { counts: Map<number, number>; rare: T[] } {
+   const counts = new Map<number, number>()
+   const rare: T[] = []
+   const pack = latest.parse()
+   const header = pack.header.feedCounts
+   const threshold = new Int32Array(slots).fill(-1) // -1 = not tallied in the pass
+   const pre = new Float64Array(slots) // never-seen feeds' O(1) pre-tail term
+
+   for (const ch of chs) {
+      const addIdx = ch.add_idx ?? 0
+      const seen = seenOf(ch.id)
+      if (seen !== undefined && seen + 1 < base) {
+         rare.push(ch)
+         continue
+      }
+      threshold[ch.id] = seen === undefined ? addIdx : Math.max(seen + 1, addIdx)
+      if (seen === undefined && addIdx < base) {
+         pre[ch.id] = Math.max(0, countAt(header, ch.id) - (expired ? countAt(expired, ch.id) : 0))
+      }
+      counts.set(ch.id, 0)
+   }
+
+   const feedIds = pack.feedIds
+   const tally = new Uint32Array(slots)
+   const limit = Math.min(totalArt - base, feedIds.length)
+   for (let i = 0; i < limit; i++) {
+      const id = feedIds[i]
+      const th = id < slots ? threshold[id] : -1
+      if (th !== -1 && base + i >= th) tally[id]++
+   }
+   for (const id of counts.keys()) counts.set(id, pre[id] + tally[id])
+   return { counts, rare }
+}
+
 export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: number, slots: number): IdxPack {
    // header is decoded eagerly below so its numSlots is available before the
    // short-body guard (the header itself is variable-length).

@@ -100,6 +100,7 @@ const nav = vi.hoisted(() => {
          return v === undefined || chron > v
       }),
       isSaved: vi.fn((chron: number) => saved.has(chron)),
+      getSavedSet: vi.fn(() => new Set(saved)),
       toggleSaved: vi.fn((chron: number) => {
          if (saved.has(chron)) {
             saved.delete(chron)
@@ -132,8 +133,11 @@ vi.mock("./nav", () => nav)
 vi.mock("./fmt", () => ({
    timeAgo: (n: number) => `${n}s`,
    srcColorIndex: (id: number) => id % 8,
-   // Two chrons per "day" so a small fixture spans multiple strata.
+   // Two chrons per "day" so a small fixture spans multiple strata. list.ts
+   // relabels through the hoisted-ctx pair; the ctx itself is opaque to it.
    dayLabel: (n: number) => "D" + Math.floor(n / 2),
+   dayLabelCtx: () => ({ nowYear: 0, midnightNow: 0 }),
+   dayLabelWith: (n: number) => "D" + Math.floor(n / 2),
    CHECK_SVG: "<svg></svg>",
 }))
 

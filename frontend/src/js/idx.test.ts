@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest"
 import { IDX_BOUNDARY_SIZE, IDX_ENTRY_SIZE, IDX_HEADER_PREFIX, IDX_STATE_SIZE } from "./format.gen"
-import { IDX_PACK_SIZE, lowerBound, makeFeedsLookup, makeIdxPack, parseIdxHeaders } from "./idx"
+import { IDX_PACK_SIZE, lowerBound, makeFeedsLookup, makeIdxPack, parseIdxHeaders, tallyUnread } from "./idx"
 
 // The scan methods take the prebuilt reverse lookup data.ts hoists once per nav
 // call; tests build it from the same feeds Map at SLOTS width.
@@ -390,5 +390,106 @@ describe("parseIdxHeaders", () => {
       const padded = new Uint8Array(buf.byteLength + 8)
       padded.set(new Uint8Array(buf))
       expect(() => parseIdxHeaders(padded.buffer, 1)).toThrow(/summary/)
+   })
+})
+
+describe("tallyUnread", () => {
+   // The differential oracle: nav.feedUnread's exact per-feed formula computed
+   // on the same pack — countAll for a never-seen feed, else
+   // countAll − countLeft(min(seen+1, totalArt)) — so the single pass and the
+   // fan-out it replaces can never drift apart.
+   function oracle(
+      pack: ReturnType<typeof makeIdxPack>,
+      totalArt: number,
+      ch: { id: number; add_idx?: number },
+      seen: number | undefined,
+      expired?: Uint32Array,
+   ): number {
+      // Lookup width must cover the suite's high feed id (300) — the shared lk
+      // helper's SLOTS=256 would silently drop it (production sizes slots to
+      // the store high-water id + 1, so this is a test-only concern).
+      const map = new Map([[ch.id, ch.add_idx ?? 0]])
+      const wide = makeFeedsLookup(map, 512)
+      const all = pack.countLeft(totalArt, map, wide, expired)
+      if (seen === undefined) return all
+      const upTo = Math.min(seen + 1, totalArt)
+      return Math.max(0, all - pack.countLeft(upTo, map, wide, expired))
+   }
+
+   // A "latest" pack at packIndex 1: base 50000, cumulative header counts for
+   // the finalized region, and a 8-entry tail. Feed 9 exists only pre-tail;
+   // feed 300 is beyond the header's numSlots (added later — countAt reads 0).
+   const base = IDX_PACK_SIZE
+   const tail = [e(1), e(2), e(1), e(3), e(1), e(2), e(300), e(1)]
+   const totalArt = base + tail.length
+   const buildLatest = () =>
+      makeIdxPack(buildBuf({ feedCounts: { 1: 10, 2: 5, 3: 0, 9: 4 }, entries: tail }), 1, tail.length, 512)
+
+   it("matches the per-feed oracle across the seen matrix", () => {
+      const pack = buildLatest()
+      const expired = new Uint32Array(512)
+      expired[1] = 3 // xp > 0: feed 1 expired 3 of its pre-tail articles
+      const feeds = [
+         { id: 1, add_idx: 0 },
+         { id: 2, add_idx: 0 },
+         { id: 3, add_idx: 0 },
+         { id: 9, add_idx: 0 },
+         { id: 300, add_idx: 0 },
+         { id: 1, add_idx: base + 2 }, // expiration advanced into the tail
+      ]
+      const seenCases: (number | undefined)[] = [
+         undefined, // never seen
+         base - 1, // seen the last finalized article: tail-only
+         base, // seen the first tail entry
+         base + 3, // mid-tail
+         totalArt - 1, // fully caught up
+         totalArt + 100, // beyond the store (clamps to 0 unread)
+      ]
+      for (const ch of feeds) {
+         for (const seen of seenCases) {
+            const { counts, rare } = tallyUnread(pack, base, totalArt, 512, [ch], () => seen, expired)
+            expect(rare, `feed ${ch.id} seen ${seen} must not be rare`).toEqual([])
+            expect(counts.get(ch.id), `feed ${ch.id} add_idx ${ch.add_idx} seen ${seen}`).toBe(
+               oracle(pack, totalArt, ch, seen, expired),
+            )
+         }
+      }
+   })
+
+   it("tallies every feed in one call, same numbers as feed-at-a-time", () => {
+      const pack = buildLatest()
+      const feeds = [
+         { id: 1, add_idx: 0 },
+         { id: 2, add_idx: 0 },
+         { id: 3, add_idx: 0 },
+      ]
+      const seenMap: Record<number, number | undefined> = { 1: base + 1, 2: undefined, 3: base + 3 }
+      const { counts, rare } = tallyUnread(pack, base, totalArt, 512, feeds, (id) => seenMap[id])
+      expect(rare).toEqual([])
+      for (const ch of feeds) {
+         expect(counts.get(ch.id), `feed ${ch.id}`).toBe(oracle(pack, totalArt, ch, seenMap[ch.id]))
+      }
+   })
+
+   it("returns feeds seen below the pack base as rare (oracle fallback)", () => {
+      const pack = buildLatest()
+      const chDeep = { id: 1, add_idx: 0 }
+      const { counts, rare } = tallyUnread(pack, base, totalArt, 512, [chDeep], () => base - 2)
+      expect(rare).toEqual([chDeep])
+      expect(counts.has(1)).toBe(false)
+      // A markUnreadFrom(0) frontier stores -1: seen+1 = 0 < base → rare too.
+      expect(tallyUnread(pack, base, totalArt, 512, [chDeep], () => -1).rare).toEqual([chDeep])
+   })
+
+   it("a -1 frontier on a no-finalized store equals the full backlog", () => {
+      // base 0: seen+1 = 0 is in-pack, so the pass handles it — and must agree
+      // with never-seen (markUnreadFrom's "never-seen equivalent" contract).
+      const pack = makeIdxPack(buildBuf({ entries: [e(1), e(2), e(1)] }), 0, 3, SLOTS)
+      const ch = { id: 1, add_idx: 0 }
+      const rewound = tallyUnread(pack, 0, 3, SLOTS, [ch], () => -1)
+      const fresh = tallyUnread(pack, 0, 3, SLOTS, [ch], () => undefined)
+      expect(rewound.rare).toEqual([])
+      expect(rewound.counts.get(1)).toBe(2)
+      expect(rewound.counts.get(1)).toBe(fresh.counts.get(1))
    })
 })

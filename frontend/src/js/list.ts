@@ -1,5 +1,5 @@
 import * as data from "./data"
-import { timeAgo, srcColorIndex, dayLabel, CHECK_SVG } from "./fmt"
+import { timeAgo, srcColorIndex, dayLabelCtx, dayLabelWith, CHECK_SVG } from "./fmt"
 import * as nav from "./nav"
 
 // The list surface — the app's home: a scannable feed of headlines under the
@@ -148,6 +148,9 @@ export function rowEl(
    chron: number,
    art: import("./format.gen").IMetaWire | null,
    seen: Record<string, number>,
+   // One saved-set parse per BATCH, threaded by the render/page/refresh passes
+   // (the default covers direct one-off callers, e.g. tests).
+   savedSet: Set<number> = nav.getSavedSet(),
 ): HTMLElement {
    const a = document.createElement("a")
    a.className = "srr-row"
@@ -160,7 +163,7 @@ export function rowEl(
    // The article currently in the reader (the one you were just reading) is
    // highlighted wherever it appears, so returning to the list lands you on it.
    if (chron === nav.currentChron()) a.classList.add("srr-row-current")
-   const saved = nav.isSaved(chron)
+   const saved = savedSet.has(chron)
    if (saved) a.classList.add("srr-row-saved")
    const body = el("div", "srr-row-body")
    // Source-first head: the source name (the primary triage key) leads as a
@@ -356,9 +359,10 @@ function relabelDividers(): void {
    rowsEl.querySelectorAll(".srr-day-divider").forEach((d) => d.remove())
    if (nav.isSearchFilter()) return
    let prev: string | null = null
+   const ctx = dayLabelCtx() // hoisted: the pass walks every loaded row
    for (const row of rowsEl.querySelectorAll<HTMLElement>("a.srr-row")) {
       if (row.dataset.ts === undefined) continue // skeleton: no timestamp yet
-      const label = dayLabel(Number(row.dataset.ts))
+      const label = dayLabelWith(Number(row.dataset.ts), ctx)
       if (label !== prev) {
          const d = el("div", "srr-day-divider")
          d.textContent = label
@@ -548,12 +552,13 @@ export async function render(center = false, onInteractive?: () => void): Promis
 
    const chronsDesc = newer.chrons.slice().reverse().concat(older.chrons) // newest-first
    const seen = nav.getSeenMap()
+   const savedSet = nav.getSavedSet()
 
    rowsEl = el("div", "srr-list-rows")
    topSentinel = el("div", "srr-list-sentinel")
    bottomSentinel = el("div", "srr-list-sentinel")
    const frag = document.createDocumentFragment()
-   const rows = chronsDesc.map((c) => rowEl(c, null, seen)) // skeletons, in order
+   const rows = chronsDesc.map((c) => rowEl(c, null, seen, savedSet)) // skeletons, in order
    rows.forEach((r) => frag.appendChild(r))
    rowsEl.appendChild(frag)
    container.append(topSentinel, rowsEl, bottomSentinel)
@@ -700,11 +705,12 @@ async function renderSearch(my: object, onInteractive?: () => void): Promise<voi
    exhaustedTop = true // nothing newer than the newest hit
 
    const seen = nav.getSeenMap()
+   const savedSet = nav.getSavedSet()
    rowsEl = el("div", "srr-list-rows")
    topSentinel = el("div", "srr-list-sentinel")
    bottomSentinel = el("div", "srr-list-sentinel")
    const frag = document.createDocumentFragment()
-   const rows = older.chrons.map((c) => rowEl(c, nav.searchCard(c) ?? null, seen))
+   const rows = older.chrons.map((c) => rowEl(c, nav.searchCard(c) ?? null, seen, savedSet))
    rows.forEach((r) => frag.appendChild(r))
    rowsEl.appendChild(frag)
    container.append(topSentinel, rowsEl, bottomSentinel)
@@ -770,6 +776,7 @@ export async function show(center = false, onInteractive?: () => void): Promise<
 export function refresh(): void {
    if (!rowsEl) return
    const seen = nav.getSeenMap()
+   const savedSet = nav.getSavedSet()
    const savedView = nav.filter.saved
    const current = nav.currentChron()
    let removedAny = false
@@ -777,7 +784,7 @@ export function refresh(): void {
       const chron = Number(a.dataset.chron)
       a.classList.toggle("srr-row-unread", nav.isRowUnread(chron, Number(a.dataset.feed), seen))
       a.classList.toggle("srr-row-current", chron === current)
-      const saved = nav.isSaved(chron)
+      const saved = savedSet.has(chron)
       a.classList.toggle("srr-row-saved", saved)
       a.querySelector(".srr-row-star")?.setAttribute("aria-pressed", String(saved))
       // In the Saved view, an article un-saved from the reader is gone from the
@@ -917,6 +924,7 @@ async function fetchOlder(my: object): Promise<void> {
          return
       }
       const seen = nav.getSeenMap()
+      const savedSet = nav.getSavedSet()
       const arts = await Promise.all(chrons.map((c) => data.loadMeta(c)))
       if (my !== tok || !rowsEl) return
       // Commit the window cursor only after loadMeta resolves: a transient
@@ -927,7 +935,7 @@ async function fetchOlder(my: object): Promise<void> {
       const frag = document.createDocumentFragment()
       const older: HTMLElement[] = []
       chrons.forEach((c, k) => {
-         const row = rowEl(c, arts[k], seen)
+         const row = rowEl(c, arts[k], seen, savedSet)
          older.push(row)
          frag.appendChild(row)
       })
@@ -958,6 +966,7 @@ async function fetchNewer(my: object): Promise<void> {
          return
       }
       const seen = nav.getSeenMap()
+      const savedSet = nav.getSavedSet()
       const arts = await Promise.all(chrons.map((c) => data.loadMeta(c)))
       if (my !== tok) return
       // Commit the cursor only after loadMeta resolves (see fetchOlder).
@@ -967,7 +976,7 @@ async function fetchNewer(my: object): Promise<void> {
       // chrons is ascending; prepend newest-first so the block reads top-down.
       const fresh: HTMLElement[] = []
       for (let k = chrons.length - 1; k >= 0; k--) {
-         const row = rowEl(chrons[k], arts[k], seen)
+         const row = rowEl(chrons[k], arts[k], seen, savedSet)
          fresh.push(row)
          frag.appendChild(row)
       }
@@ -1150,13 +1159,19 @@ function rowSibling(row: HTMLElement, dir: "older" | "newer"): HTMLElement | nul
 // lands on the cursor and then leaves the list, rather than stepping through every
 // article. A/←·D/→ (moveSelection) move the cursor between rows; .focus() still
 // works on the off-tab-order rows since tabindex -1 is programmatically focusable.
+let lastTabbable: HTMLElement | null = null
 function syncRovingTab(): void {
    if (!rowsEl) return
-   const rows = rowsEl.querySelectorAll<HTMLElement>("a.srr-row")
-   const tabbable = rowsEl.querySelector<HTMLElement>("a.srr-row.srr-row-current") ?? rows[0] ?? null
-   rows.forEach((a) => {
-      a.tabIndex = a === tabbable ? 0 : -1
-   })
+   const tabbable =
+      rowsEl.querySelector<HTMLElement>("a.srr-row.srr-row-current") ?? rowsEl.querySelector<HTMLElement>("a.srr-row")
+   if (tabbable === lastTabbable) return
+   // Flip only the two affected rows — every row is born tabIndex -1 (rowEl),
+   // so the previous tabbable is the one stray to clear. A rebuild replaces
+   // the rows wholesale; the disconnected old ref is simply dropped (no reset
+   // hook needed in every rebuild path).
+   if (lastTabbable?.isConnected) lastTabbable.tabIndex = -1
+   if (tabbable) tabbable.tabIndex = 0
+   lastTabbable = tabbable
 }
 
 // Make `row` the cursor: move the highlight, sync nav.pos (so the selection IS
