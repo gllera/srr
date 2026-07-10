@@ -159,13 +159,17 @@ func stripTrackingParams(raw string) (string, bool) {
 	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
 		return raw, false
 	}
-	base, query, found := strings.Cut(raw, "?")
+	// Split the fragment off FIRST: a fragment may itself contain "?" (a hash
+	// router route like "#route?x=1"), so cutting on "?" before "#" would parse a
+	// spurious query out of the fragment and drop part of it. A real query always
+	// precedes the fragment, so this ordering is also correct for the common case.
+	beforeFrag, frag := raw, ""
+	if before, after, cut := strings.Cut(raw, "#"); cut {
+		beforeFrag, frag = before, "#"+after
+	}
+	base, query, found := strings.Cut(beforeFrag, "?")
 	if !found {
 		return raw, false
-	}
-	frag := ""
-	if before, after, found := strings.Cut(query, "#"); found {
-		query, frag = before, "#"+after
 	}
 	var kept []string
 	dropped := false

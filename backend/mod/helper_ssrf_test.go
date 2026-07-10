@@ -11,7 +11,10 @@ func TestBlockedIP(t *testing.T) {
 		"10.0.0.1", "192.168.1.1", "172.16.0.1", // RFC1918
 		"169.254.169.254", "fe80::1", // link-local (incl. cloud metadata)
 		"0.0.0.0", "::", // unspecified
-		"fc00::1", // unique-local
+		"fc00::1",                       // unique-local
+		"100.64.0.1", "100.100.100.200", // CGNAT (incl. Alibaba Cloud metadata)
+		"64:ff9b::a9fe:a9fe", // NAT64 of 169.254.169.254
+		"198.18.0.1",         // IETF benchmarking range
 	} {
 		if !blockedIP(net.ParseIP(s)) {
 			t.Errorf("blockedIP(%s) = false, want true", s)
