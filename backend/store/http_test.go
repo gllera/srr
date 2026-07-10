@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -40,6 +41,14 @@ func newHTTPFixture(t *testing.T) *httpFixture {
 				return
 			}
 			w.Write(b)
+		case http.MethodHead:
+			b, ok := f.objs[key]
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Length", strconv.Itoa(len(b)))
+			w.WriteHeader(http.StatusOK)
 		case http.MethodPut:
 			if r.Header.Get("If-None-Match") == "*" {
 				if _, exists := f.objs[key]; exists {
@@ -208,6 +217,21 @@ func TestHTTPRm(t *testing.T) {
 	}
 }
 
+func TestHTTPStat(t *testing.T) {
+	b := openHTTPStore(t, newHTTPFixture(t))
+
+	if err := b.Put(ctx, "obj.bin", strings.NewReader("12345"), true); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if n, err := b.Stat(ctx, "obj.bin"); err != nil || n != 5 {
+		t.Errorf("Stat = (%d, %v), want (5, nil)", n, err)
+	}
+	// A missing key is (0, nil) per the Backend contract (silent like Rm).
+	if n, err := b.Stat(ctx, "missing.bin"); err != nil || n != 0 {
+		t.Errorf("Stat(missing) = (%d, %v), want (0, nil)", n, err)
+	}
+}
+
 // newRedirectFront fronts the fixture with a server that 302s every request to
 // the same path on the real fixture — the nginx/https-upgrade shape.
 func newRedirectFront(t *testing.T, f *httpFixture) *httptest.Server {
@@ -341,5 +365,24 @@ func TestHTTPBasicAuthFromURL(t *testing.T) {
 	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("alice:pw"))
 	if auth != want {
 		t.Errorf("Authorization = %q, want %q", auth, want)
+	}
+}
+
+// HEAD (Stat) may follow redirects like GET — both are bodiless reads; the
+// guard still refuses redirected writes (TestHTTPWriteRedirectFailsLoudly).
+func TestHTTPStatFollowsRedirect(t *testing.T) {
+	f := newHTTPFixture(t)
+	f.mu.Lock()
+	f.objs["/base/file.txt"] = []byte("data")
+	f.mu.Unlock()
+	front := newRedirectFront(t, f)
+	b, err := Open(ctx, front.URL+"/front/base")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { b.Close() })
+
+	if n, err := b.Stat(ctx, "file.txt"); err != nil || n != 4 {
+		t.Errorf("Stat through redirect = (%d, %v), want (4, nil)", n, err)
 	}
 }

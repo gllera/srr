@@ -132,6 +132,21 @@ func (d *Local) AtomicPut(_ context.Context, key string, r io.Reader, _ ObjectMe
 	return nil
 }
 
+// Stat returns the file's size; a missing key is (0, nil) per the Backend
+// contract.
+func (d *Local) Stat(_ context.Context, key string) (int64, error) {
+	file := d.localPath("stat", key)
+	fi, err := os.Stat(file)
+	if os.IsNotExist(err) {
+		slog.Debug("db not found", "key", file)
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("stat file %s: %w", file, err)
+	}
+	return fi.Size(), nil
+}
+
 func (d *Local) Rm(_ context.Context, key string) error {
 	file := d.localPath("delete", key)
 	return rmErr(os.Remove(file), file)

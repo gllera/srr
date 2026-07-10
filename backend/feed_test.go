@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1066,7 +1067,7 @@ func TestSelfhostMarkerRoundTripsToAssetsKey(t *testing.T) {
 
 	// 2) The upload step (mirrors feed.go fetchURL): marker -> assets/ key.
 	out, err := mod.RewriteAttrs(item.Content, func(local string) (string, bool, error) {
-		key, err := af.UploadCacheRef(ctx, cacheDir, local)
+		key, _, err := af.UploadCacheRef(ctx, cacheDir, local)
 		if err != nil {
 			return "", false, err
 		}
@@ -1197,14 +1198,14 @@ func TestUploadCacheRefLeaderCancelDoesNotPoisonFollower(t *testing.T) {
 	leaderCtx, cancelLeader := context.WithCancel(context.Background())
 	leaderDone := make(chan struct{})
 	go func() {
-		_, _ = af.UploadCacheRef(leaderCtx, cacheDir, "shared.jpg") // leader; may bail on cancel
+		_, _, _ = af.UploadCacheRef(leaderCtx, cacheDir, "shared.jpg") // leader; may bail on cancel
 		close(leaderDone)
 	}()
 	<-gate.arrived // leader is in-flight, blocked at AtomicPut(baseCtx)
 
 	followerRes := make(chan error, 1)
 	go func() {
-		_, err := af.UploadCacheRef(context.Background(), cacheDir, "shared.jpg") // follower, healthy ctx
+		_, _, err := af.UploadCacheRef(context.Background(), cacheDir, "shared.jpg") // follower, healthy ctx
 		followerRes <- err
 	}()
 
@@ -1242,7 +1243,7 @@ func TestUploadCacheRefFollowerBailsOnOwnCtx(t *testing.T) {
 
 	leaderDone := make(chan struct{})
 	go func() {
-		if _, err := af.UploadCacheRef(context.Background(), cacheDir, "shared.jpg"); err != nil {
+		if _, _, err := af.UploadCacheRef(context.Background(), cacheDir, "shared.jpg"); err != nil {
 			t.Errorf("leader failed: %v", err)
 		}
 		close(leaderDone)
@@ -1252,7 +1253,7 @@ func TestUploadCacheRefFollowerBailsOnOwnCtx(t *testing.T) {
 	followerCtx, cancelFollower := context.WithCancel(context.Background())
 	followerRes := make(chan error, 1)
 	go func() {
-		_, err := af.UploadCacheRef(followerCtx, cacheDir, "shared.jpg")
+		_, _, err := af.UploadCacheRef(followerCtx, cacheDir, "shared.jpg")
 		followerRes <- err
 	}()
 	cancelFollower() // the follower's feed cancels; it must not wait for the leader
@@ -1306,7 +1307,7 @@ func TestUploadAssetsConcurrencyBound(t *testing.T) {
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- run.uploadAssets(context.Background(), items) }()
+	go func() { done <- run.uploadAssets(context.Background(), &Feed{}, items) }()
 
 	// Exactly `limit` jobs reach AtomicPut and block.
 	for k := 0; k < limit; k++ {
@@ -1345,7 +1346,7 @@ func TestUploadAssetsRewritesAndSkipsMarkerless(t *testing.T) {
 		assets:   testAssetFetcher(be, 1<<20, "", 4),
 		cacheDir: cacheDir,
 	}
-	if err := run.uploadAssets(context.Background(), items); err != nil {
+	if err := run.uploadAssets(context.Background(), &Feed{}, items); err != nil {
 		t.Fatalf("uploadAssets: %v", err)
 	}
 	for k := 0; k < 2; k++ {
@@ -1365,7 +1366,7 @@ func TestUploadAssetsFailsFeedOnUploadError(t *testing.T) {
 		assets:   testAssetFetcher(be, 1<<20, "", 4),
 		cacheDir: cacheDir,
 	}
-	if err := run.uploadAssets(context.Background(), items); err == nil {
+	if err := run.uploadAssets(context.Background(), &Feed{}, items); err == nil {
 		t.Fatal("expected uploadAssets to fail the feed, got nil")
 	}
 }
@@ -1422,9 +1423,17 @@ func TestFetchDoesNotReconvertAlreadySeenArticleAsset(t *testing.T) {
 	if len(first) != 1 {
 		t.Fatalf("cycle 1: got %d new items, want 1", len(first))
 	}
+	// The full fetchURL path charges the feed for the stored payload (the
+	// procCounter command is a pass-through, so payload == source bytes).
+	if want := int64(len(jpegBytes)); ch.AssetBytes != want {
+		t.Errorf("cycle 1 AssetBytes = %d, want %d", ch.AssetBytes, want)
+	}
 	second := fetchCycle()
 	if len(second) != 0 {
 		t.Fatalf("cycle 2: got %d new items, want 0 (article already seen)", len(second))
+	}
+	if want := int64(len(jpegBytes)); ch.AssetBytes != want {
+		t.Errorf("cycle 2 AssetBytes = %d, want %d (no double charge across cycles)", ch.AssetBytes, want)
 	}
 
 	if n := processRuns(); n != 1 {
@@ -1450,16 +1459,21 @@ func TestUploadAssetsProcessesSharedAssetOnce(t *testing.T) {
 		items[k] = &Item{Content: `<p><img src="#/shared.jpg"></p>`}
 	}
 
+	ch := &Feed{}
 	run := &fetchRun{
 		assets:   testAssetFetcher(tempStore(t), 1<<20, proc, n), // all items run concurrently
 		cacheDir: cacheDir,
 	}
-	if err := run.uploadAssets(context.Background(), items); err != nil {
+	if err := run.uploadAssets(context.Background(), ch, items); err != nil {
 		t.Fatalf("uploadAssets: %v", err)
 	}
 
 	if n := processRuns(); n != 1 {
 		t.Errorf("asset-process ran %d times for one shared asset, want 1", n)
+	}
+	// One stored object ⇒ one charge, however many concurrent markers raced.
+	if want := int64(len(jpegBytes)); ch.AssetBytes != want {
+		t.Errorf("AssetBytes = %d, want %d (one charge for one stored object)", ch.AssetBytes, want)
 	}
 	for k, it := range items {
 		if !strings.Contains(it.Content, "assets/") {
@@ -1479,10 +1493,122 @@ func TestRewriteItemAssetsDeclinesCorrupt(t *testing.T) {
 	run := &fetchRun{assets: af, cacheDir: cacheDir}
 
 	item := &Item{Content: `<p><video src="#/clip.mp4"></video></p>`}
-	if err := run.rewriteItemAssets(context.Background(), item); err != nil {
+	if err := run.rewriteItemAssets(context.Background(), item, new(atomic.Int64)); err != nil {
 		t.Fatalf("rewriteItemAssets: %v (corrupt must decline, not fail the feed)", err)
 	}
 	if !strings.Contains(item.Content, `src="#/clip.mp4"`) {
 		t.Errorf("marker rewritten despite corrupt source: %s", item.Content)
+	}
+}
+
+// AssetBytes accounting: a feed is charged each stored object's bytes exactly
+// once — a marker repeated across the feed's items adds nothing beyond the one
+// upload, and a later run whose assets already sit in the store adds nothing.
+func TestUploadAssetsCountsBytesOncePerStoredObject(t *testing.T) {
+	be := tempStore(t)
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "a.jpg", "AAAA")     // 4 bytes
+	writeCacheFile(t, cacheDir, "b.jpg", "BBBBBBBB") // 8 bytes
+	items := []*Item{
+		{Content: `<p><img src="#/a.jpg"></p>`},
+		{Content: `<p><img src="#/b.jpg"><img src="#/a.jpg"></p>`}, // a.jpg repeated
+	}
+	ch := &Feed{}
+	run := &fetchRun{assets: testAssetFetcher(be, 1<<20, "", 4), cacheDir: cacheDir}
+	if err := run.uploadAssets(context.Background(), ch, items); err != nil {
+		t.Fatalf("uploadAssets: %v", err)
+	}
+	if ch.AssetBytes != 12 {
+		t.Fatalf("AssetBytes = %d, want 12 (each stored object charged once)", ch.AssetBytes)
+	}
+
+	// Fresh fetcher (no memo), same store: both keys dedup on the existence
+	// check — nothing added, nothing charged.
+	ch2 := &Feed{}
+	run2 := &fetchRun{assets: testAssetFetcher(be, 1<<20, "", 4), cacheDir: cacheDir}
+	items2 := []*Item{{Content: `<p><img src="#/a.jpg"><img src="#/b.jpg"></p>`}}
+	if err := run2.uploadAssets(context.Background(), ch2, items2); err != nil {
+		t.Fatalf("uploadAssets 2: %v", err)
+	}
+	if ch2.AssetBytes != 0 {
+		t.Fatalf("AssetBytes on dedup-hit run = %d, want 0", ch2.AssetBytes)
+	}
+}
+
+// The run-global fetcher is shared across feeds; when several feeds' fetches
+// reference the SAME asset concurrently, exactly one of them (the singleflight
+// leader's) is charged — the total across feeds equals the stored size once.
+func TestUploadAssetsSharedAcrossFeedsChargesOnce(t *testing.T) {
+	const feeds = 4
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "shared.jpg", jpegBytes)
+	run := &fetchRun{assets: testAssetFetcher(tempStore(t), 1<<20, "", feeds), cacheDir: cacheDir}
+
+	chs := make([]*Feed, feeds)
+	errs := make([]error, feeds)
+	var wg sync.WaitGroup
+	for k := range chs {
+		chs[k] = &Feed{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			items := []*Item{{Content: `<p><img src="#/shared.jpg"></p>`}}
+			errs[k] = run.uploadAssets(context.Background(), chs[k], items)
+		}()
+	}
+	wg.Wait()
+
+	var total int64
+	for k, ch := range chs {
+		if errs[k] != nil {
+			t.Fatalf("uploadAssets[%d]: %v", k, errs[k])
+		}
+		total += ch.AssetBytes
+	}
+	if want := int64(len(jpegBytes)); total != want {
+		t.Fatalf("total AssetBytes across feeds = %d, want %d (charged exactly once)", total, want)
+	}
+}
+
+// failAfterNPutsBackend lets okPuts AtomicPuts through to the inner backend,
+// then fails every subsequent one.
+type failAfterNPutsBackend struct {
+	store.Backend
+	mu     sync.Mutex
+	okPuts int
+}
+
+func (f *failAfterNPutsBackend) AtomicPut(ctx context.Context, key string, r io.Reader, meta store.ObjectMeta) error {
+	f.mu.Lock()
+	ok := f.okPuts > 0
+	if ok {
+		f.okPuts--
+	}
+	f.mu.Unlock()
+	if !ok {
+		return io.ErrUnexpectedEOF
+	}
+	return f.Backend.AtomicPut(ctx, key, r, meta)
+}
+
+// A batch that fails mid-way still charges the feed for the Puts that DID
+// complete: those bytes are in the store regardless, and the retry next fetch
+// dedups against them (adding nothing), so skipping the charge would lose
+// them forever.
+func TestUploadAssetsPartialFailureChargesCompletedPuts(t *testing.T) {
+	be := &failAfterNPutsBackend{Backend: tempStore(t), okPuts: 1}
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "a.jpg", "AAAA")     // 4 bytes — first Put, succeeds
+	writeCacheFile(t, cacheDir, "b.jpg", "BBBBBBBB") // second Put, fails
+	// One item, two markers: RewriteAttrs uploads sequentially in document
+	// order, so the success/failure split is deterministic.
+	items := []*Item{{Content: `<p><img src="#/a.jpg"><img src="#/b.jpg"></p>`}}
+	ch := &Feed{}
+	run := &fetchRun{assets: testAssetFetcher(be, 1<<20, "", 1), cacheDir: cacheDir}
+	if err := run.uploadAssets(context.Background(), ch, items); err == nil {
+		t.Fatal("expected uploadAssets to fail on the second Put")
+	}
+	if ch.AssetBytes != 4 {
+		t.Fatalf("AssetBytes = %d, want 4 (the completed a.jpg Put)", ch.AssetBytes)
 	}
 }

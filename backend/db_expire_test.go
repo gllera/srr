@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"srr/store"
 )
 
 const (
@@ -342,5 +346,121 @@ func TestCollectAssetRefs(t *testing.T) {
 	collectAssetRefs("<p>no asset refs at all</p>", keys)
 	if len(keys) != len(want) {
 		t.Fatalf("no-ref content added keys: %v", keys)
+	}
+}
+
+// Expiring an article must give its deleted assets' bytes back to the feed's
+// AssetBytes counter (measured by Stat just before the Rm), leaving assets of
+// still-live articles uncounted and untouched.
+func TestExpireReducesAssetBytes(t *testing.T) {
+	db, _, dir := setupTestDB(t)
+	ch := &Feed{Title: "A", URL: "https://a.example/f", ExpireDays: 10}
+	if err := db.AddFeed(ch); err != nil {
+		t.Fatal(err)
+	}
+	kOld := "assets/aa/1111111111111111.webp"
+	kFresh := "assets/cc/3333333333333333.webp"
+	mustWriteAsset(t, dir, kOld) // "asset-bytes" = 11 bytes
+	mustWriteAsset(t, dir, kFresh)
+	ch.AssetBytes = 30 // as if the feed had uploaded 30 asset bytes all-time
+
+	putExpireBatch(t, db, old20d, []*Item{
+		{Feed: ch, Title: "o1", Content: `<img src="` + kOld + `">`},
+	})
+	putExpireBatch(t, db, fresh1d, []*Item{
+		{Feed: ch, Title: "f1", Content: `<img src="` + kFresh + `">`},
+	})
+	if err := db.ExpireArticles(ctx, expNow); err != nil {
+		t.Fatalf("ExpireArticles: %v", err)
+	}
+	if ch.AssetBytes != 30-11 {
+		t.Fatalf("AssetBytes = %d, want %d (deleted asset size subtracted)", ch.AssetBytes, 30-11)
+	}
+}
+
+// A cross-feed shared asset can be charged to the uploading feed but expired
+// via another feed's article: the decrement clamps at 0 instead of going
+// negative on the feed that was never charged.
+func TestExpireAssetBytesClampsAtZero(t *testing.T) {
+	db, _, dir := setupTestDB(t)
+	ch := &Feed{Title: "A", URL: "https://a.example/f", ExpireDays: 10}
+	if err := db.AddFeed(ch); err != nil {
+		t.Fatal(err)
+	}
+	kOld := "assets/aa/1111111111111111.webp"
+	mustWriteAsset(t, dir, kOld) // 11 bytes; ch was never charged for them
+	putExpireBatch(t, db, old20d, []*Item{
+		{Feed: ch, Title: "o1", Content: `<img src="` + kOld + `">`},
+	})
+	if err := db.ExpireArticles(ctx, expNow); err != nil {
+		t.Fatalf("ExpireArticles: %v", err)
+	}
+	if ch.AssetBytes != 0 {
+		t.Fatalf("AssetBytes = %d, want 0 (clamped)", ch.AssetBytes)
+	}
+}
+
+// A shared asset expired via articles of TWO feeds decrements only the first
+// (chron-order) referent — deterministic attribution, no double subtraction.
+func TestExpireSharedAssetDecrementsFirstReferent(t *testing.T) {
+	db, _, dir := setupTestDB(t)
+	a := &Feed{Title: "A", URL: "https://a.example/f", ExpireDays: 10}
+	b := &Feed{Title: "B", URL: "https://b.example/f", ExpireDays: 10}
+	for _, f := range []*Feed{a, b} {
+		if err := db.AddFeed(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	key := "assets/aa/1111111111111111.webp"
+	mustWriteAsset(t, dir, key) // "asset-bytes" = 11 bytes
+	a.AssetBytes, b.AssetBytes = 20, 20
+
+	// chron 0 = A's article (first referent), chron 1 = B's; both expire.
+	putExpireBatch(t, db, old20d, []*Item{
+		{Feed: a, Title: "o1", Content: `<img src="` + key + `">`},
+		{Feed: b, Title: "o2", Content: `<img src="` + key + `">`},
+	})
+	if err := db.ExpireArticles(ctx, expNow); err != nil {
+		t.Fatalf("ExpireArticles: %v", err)
+	}
+	if a.AssetBytes != 9 || b.AssetBytes != 20 {
+		t.Fatalf("AssetBytes = A:%d B:%d, want A:9 B:20 (first referent decremented once)", a.AssetBytes, b.AssetBytes)
+	}
+}
+
+// statFailBackend fails every Stat, pinning the measure-then-delete order.
+type statFailBackend struct {
+	store.Backend
+}
+
+func (f *statFailBackend) Stat(context.Context, string) (int64, error) {
+	return 0, errors.New("injected stat failure")
+}
+
+// A Stat failure must abort the cycle BEFORE any asset is deleted (all
+// measuring happens up front), so the retry recomputes a clean window with
+// every object still in place — no decrement is ever lost to it.
+func TestExpireStatFailureAbortsBeforeDeletes(t *testing.T) {
+	db, _, dir := setupTestDB(t)
+	ch := &Feed{Title: "A", URL: "https://a.example/f", ExpireDays: 10}
+	if err := db.AddFeed(ch); err != nil {
+		t.Fatal(err)
+	}
+	key := "assets/aa/1111111111111111.webp"
+	p := mustWriteAsset(t, dir, key)
+	ch.AssetBytes = 20
+	putExpireBatch(t, db, old20d, []*Item{
+		{Feed: ch, Title: "o1", Content: `<img src="` + key + `">`},
+	})
+
+	db.Backend = &statFailBackend{Backend: db.Backend}
+	if err := db.ExpireArticles(ctx, expNow); err == nil {
+		t.Fatal("want error from failing Stat")
+	}
+	if assetGone(t, p) {
+		t.Fatal("asset deleted despite the Stat failure — measuring must precede ANY delete")
+	}
+	if ch.AddIdx != 0 || ch.Expired != 0 || ch.AssetBytes != 20 {
+		t.Fatalf("state applied despite Stat failure: AddIdx=%d Expired=%d AssetBytes=%d", ch.AddIdx, ch.Expired, ch.AssetBytes)
 	}
 }

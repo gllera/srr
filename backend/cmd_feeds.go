@@ -204,23 +204,30 @@ type feedView struct {
 	// Expired is read-only (server-owned, like Error): reported by ls/show/
 	// edit, never applied back by writeFeedView.
 	Expired int `json:"expired,omitempty" yaml:"expired,omitempty"`
+	// ContentBytes/AssetBytes are read-only like Expired: the cumulative
+	// uncompressed JSONL bytes the feed's articles added to data/ packs, and
+	// the live store footprint of its self-hosted assets/ objects.
+	ContentBytes int64 `json:"content_bytes,omitempty" yaml:"content_bytes,omitempty"`
+	AssetBytes   int64 `json:"asset_bytes,omitempty" yaml:"asset_bytes,omitempty"`
 }
 
 // viewOf builds an output feedView for a stored Feed.
 func viewOf(ch *Feed) *feedView {
 	id := ch.id
 	return &feedView{
-		ID:         &id,
-		Title:      ch.Title,
-		URL:        ch.URL,
-		Error:      ch.FetchError,
-		Tag:        ch.Tag,
-		Recipe:     ch.Recipe,
-		Ingest:     ch.Ingest,
-		Pipe:       ch.Pipe,
-		NoTitle:    ch.NoTitle,
-		ExpireDays: ch.ExpireDays,
-		Expired:    ch.Expired,
+		ID:           &id,
+		Title:        ch.Title,
+		URL:          ch.URL,
+		Error:        ch.FetchError,
+		Tag:          ch.Tag,
+		Recipe:       ch.Recipe,
+		Ingest:       ch.Ingest,
+		Pipe:         ch.Pipe,
+		NoTitle:      ch.NoTitle,
+		ExpireDays:   ch.ExpireDays,
+		Expired:      ch.Expired,
+		ContentBytes: ch.ContentBytes,
+		AssetBytes:   ch.AssetBytes,
 	}
 }
 

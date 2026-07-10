@@ -70,10 +70,11 @@ func newHTTP(_ context.Context, u *url.URL) (Backend, error) {
 		// net/http silently replays a 301/302/303-redirected PUT/DELETE as a
 		// bodiless GET and reports the redirected GET's status — a write or
 		// delete that never happened would read as success. Follow redirects
-		// only for reads; a redirected write is a loud configuration error
-		// (point the store URL at the canonical origin).
+		// only for reads (GET, and HEAD which is bodiless by definition); a
+		// redirected write is a loud configuration error (point the store URL
+		// at the canonical origin).
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if via[0].Method == http.MethodGet {
+			if via[0].Method == http.MethodGet || via[0].Method == http.MethodHead {
 				return nil
 			}
 			return fmt.Errorf("%s redirected to %s: writes must target the canonical store URL", via[0].Method, req.URL.Redacted())
@@ -193,6 +194,31 @@ func (d *HTTP) put(ctx context.Context, key string, r io.Reader, ignoreExisting 
 		return fmt.Errorf("http put %s: %s", u.Redacted(), resp.Status)
 	}
 	return nil
+}
+
+// Stat returns the object's size via a HEAD request; a missing key is (0, nil)
+// per the Backend contract. A server that omits Content-Length on HEAD
+// (chunked/unknown, reported as -1) counts as 0 — accounting is best-effort on
+// plain HTTP stores.
+func (d *HTTP) Stat(ctx context.Context, key string) (int64, error) {
+	u := d.keyURL("stat", key)
+	req, err := d.newRequest(ctx, http.MethodHead, u, nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := d.client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("http head %s: %w", u.Redacted(), err)
+	}
+	defer drainClose(resp.Body)
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+		slog.Debug("db not found", "key", u.Redacted())
+		return 0, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return 0, fmt.Errorf("http head %s: %s", u.Redacted(), resp.Status)
+	}
+	return max(0, resp.ContentLength), nil
 }
 
 func (d *HTTP) Rm(ctx context.Context, key string) error {

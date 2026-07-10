@@ -160,9 +160,16 @@ func newAssetFetcher(be store.Backend, maxKB int, procCmd string) *assetFetcher 
 // must be a regular file. The asset size cap is NOT checked here — it is enforced
 // at download by whoever fetched the file (#selfhost / external ingest), so the
 // cache file is trusted; only the asset-process output keeps a fail-soft guard.
-func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname string) (string, error) {
+//
+// The second return is the bytes this call actually added to the store (the Put
+// payload): 0 on a memo/store dedup hit, and 0 for singleflight followers — only
+// the leader call that ran the upload reports them, so callers summing it count
+// each stored object exactly once. (A leader that bails on its own ctx before
+// the shared body finishes leaves that upload unattributed — its feed is failing
+// anyway, and the next fetch dedups against the stored object.)
+func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname string) (string, int64, error) {
 	if localname == "" {
-		return "", fmt.Errorf("empty asset reference: %w", errNotAsset)
+		return "", 0, fmt.Errorf("empty asset reference: %w", errNotAsset)
 	}
 
 	full := filepath.Join(cacheDir, filepath.FromSlash(localname))
@@ -171,10 +178,10 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 	// final component).
 	fi, err := os.Lstat(full)
 	if err != nil {
-		return "", fmt.Errorf("stat asset %q: %w: %w", localname, errNotAsset, err)
+		return "", 0, fmt.Errorf("stat asset %q: %w: %w", localname, errNotAsset, err)
 	}
 	if !fi.Mode().IsRegular() {
-		return "", fmt.Errorf("asset %q is not a regular file: %w", localname, errNotAsset)
+		return "", 0, fmt.Errorf("asset %q is not a regular file: %w", localname, errNotAsset)
 	}
 
 	// Containment: resolve symlinks on both sides and confirm the file stays
@@ -182,14 +189,14 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 	// component can point the upload at an arbitrary file.
 	root, err := filepath.EvalSymlinks(cacheDir)
 	if err != nil {
-		return "", fmt.Errorf("resolve cache dir: %w", err)
+		return "", 0, fmt.Errorf("resolve cache dir: %w", err)
 	}
 	real, err := filepath.EvalSymlinks(full)
 	if err != nil {
-		return "", fmt.Errorf("resolve asset %q: %w", localname, err)
+		return "", 0, fmt.Errorf("resolve asset %q: %w", localname, err)
 	}
 	if rel, err := filepath.Rel(root, real); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("asset %q escapes cache dir: %w", localname, errNotAsset)
+		return "", 0, fmt.Errorf("asset %q escapes cache dir: %w", localname, errNotAsset)
 	}
 
 	// The self-hosted-object size cap is enforced at DOWNLOAD by whoever fetched
@@ -202,7 +209,7 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 	// recognized before the (possibly expensive) pre-upload processing runs.
 	orig, err := os.ReadFile(full)
 	if err != nil {
-		return "", fmt.Errorf("read asset %q: %w", localname, err)
+		return "", 0, fmt.Errorf("read asset %q: %w", localname, err)
 	}
 	sum := sha256.Sum256(orig)
 
@@ -219,7 +226,7 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 	// reused across articles/feeds in this fetch short-circuits before the repeat
 	// asset-peek subprocess and the store existence round-trip below.
 	if cached, ok := a.seen.Load(sum); ok {
-		return cached.(string), nil
+		return cached.(string), 0, nil
 	}
 
 	// Coalesce a concurrent wave referencing the SAME source bytes into one
@@ -233,6 +240,11 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 	// error — is shared with the wave (a shared asset that fails to upload fails
 	// every referencing feed; each self-heals next fetch), and singleflight re-runs
 	// for the next wave, so a transient failure isn't cached.
+	// uploaded is written only when THIS call's closure runs — i.e. this call is
+	// the singleflight leader (followers' closures never execute, so their var
+	// stays 0). The channel receive below orders the read after the write, and
+	// the wave shares the key but the byte count is reported exactly once.
+	var uploaded int64
 	ch := a.flight.DoChan(string(sum[:]), func() (any, error) {
 		select {
 		case a.sem <- struct{}{}:
@@ -242,7 +254,9 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 		defer func() { <-a.sem }()
 		a.active.Add(1)
 		defer func() { a.active.Add(-1); a.done.Add(1) }()
-		return a.resolveAndUpload(a.baseCtx, full, localname, orig, sum)
+		key, n, err := a.resolveAndUpload(a.baseCtx, full, localname, orig, sum)
+		uploaded = n
+		return key, err
 	})
 	// A follower whose own feed is cancelling bails here without waiting on the
 	// leader (and without ever taking a slot); the leader's body still completes
@@ -250,11 +264,11 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 	select {
 	case res := <-ch:
 		if res.Err != nil {
-			return "", res.Err
+			return "", 0, res.Err
 		}
-		return res.Val.(string), nil
+		return res.Val.(string), uploaded, nil
 	case <-ctx.Done():
-		return "", ctx.Err()
+		return "", 0, ctx.Err()
 	}
 }
 
@@ -262,8 +276,10 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 // the asset (asset-peek), checks the store for the content-hash key, and — on a
 // miss — runs asset-process and uploads, memoizing the resolved key. full is the
 // validated cache-file path, orig its bytes, sum their hash. Concurrent
-// UploadCacheRef calls for the same sum share one invocation (see flight).
-func (a *assetFetcher) resolveAndUpload(ctx context.Context, full, localname string, orig []byte, sum [32]byte) (string, error) {
+// UploadCacheRef calls for the same sum share one invocation (see flight). The
+// second return is the size of the payload it Put (0 on a store hit) — the
+// AssetBytes accounting.
+func (a *assetFetcher) resolveAndUpload(ctx context.Context, full, localname string, orig []byte, sum [32]byte) (string, int64, error) {
 	// asset-peek (if configured) identifies the asset up front — before the dedup
 	// check — so the key reflects the post-process format while dedup still keys
 	// on the source bytes. It sets the stored extension (a transcoded asset then
@@ -287,7 +303,7 @@ func (a *assetFetcher) resolveAndUpload(ctx context.Context, full, localname str
 			unidentified := pr.Mimetype == "" || pr.Mimetype == "application/octet-stream"
 			if !pr.Supported && unidentified && normalizeExt(pr.Extension) == "" && isMediaExt(storedExt) {
 				a.corrupt.Add(1)
-				return "", fmt.Errorf("peek identified nothing for media file %q: %w", localname, errCorruptAsset)
+				return "", 0, fmt.Errorf("peek identified nothing for media file %q: %w", localname, errCorruptAsset)
 			}
 			if ext := normalizeExt(pr.Extension); ext != "" {
 				storedExt = ext
@@ -302,12 +318,12 @@ func (a *assetFetcher) resolveAndUpload(ctx context.Context, full, localname str
 	// case for an image reused across articles or feeds. (asset-peek still ran, to
 	// fix the key extension; it is the cheap probe.)
 	if rc, err := a.be.Get(ctx, key, true); err != nil {
-		return "", fmt.Errorf("check asset %q: %w", key, err)
+		return "", 0, fmt.Errorf("check asset %q: %w", key, err)
 	} else if rc != nil {
 		rc.Close()
 		slog.Debug("asset already stored, skipping process+upload", "asset", localname, "key", key)
 		a.seen.Store(sum, key)
-		return key, nil
+		return key, 0, nil
 	}
 	slog.Debug("asset store miss, processing+uploading", "asset", localname, "key", key)
 
@@ -335,10 +351,10 @@ func (a *assetFetcher) resolveAndUpload(ctx context.Context, full, localname str
 	}
 
 	if err := a.be.AtomicPut(ctx, key, bytes.NewReader(payload), meta); err != nil {
-		return "", fmt.Errorf("store asset %q: %w", key, err)
+		return "", 0, fmt.Errorf("store asset %q: %w", key, err)
 	}
 	a.seen.Store(sum, key)
-	return key, nil
+	return key, int64(len(payload)), nil
 }
 
 // inputToken / outputToken mark where an asset command (process or peek)

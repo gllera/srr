@@ -118,6 +118,12 @@ func contentTypeForKey(key string) string {
 // Backend defines the storage operations used by the application.
 type Backend interface {
 	Get(ctx context.Context, key string, ignoreMissing bool) (io.ReadCloser, error)
+	// Stat returns the stored size of key in bytes without reading the body
+	// (filesystem stat, S3 HeadObject, HTTP HEAD). A missing key is (0, nil) —
+	// silent like Rm: the caller (expiration's per-feed asset-bytes accounting)
+	// treats absent as zero, and a retried expire cycle re-stats keys an
+	// aborted predecessor already deleted.
+	Stat(ctx context.Context, key string) (int64, error)
 	Put(ctx context.Context, key string, r io.Reader, ignoreExisting bool) error
 	// AtomicPut writes via temp-then-rename (local/SFTP) or overwrite (S3). meta
 	// carries optional response metadata (Content-Type / Content-Encoding) — used

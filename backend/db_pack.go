@@ -172,13 +172,14 @@ func writeIdxHeader(p *pack, packID, packOff int, feeds map[int]*Feed) error {
 	return err
 }
 
-func (p *pack) writeArticle(ad *ArticleData) error {
+// writeArticle appends the article's JSONL line and returns its uncompressed
+// byte length (newline included) — the unit of Feed.ContentBytes accounting.
+func (p *pack) writeArticle(ad *ArticleData) (int, error) {
 	data, err := jsonEncode(ad)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	_, err = p.Write(data)
-	return err
+	return p.Write(data)
 }
 
 // loadPack fetches and decompresses the pack at key into its raw bytes, or nil
@@ -563,13 +564,15 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) ([]ArticleData, 
 		prevPackID = c.NextPackID
 
 		ad := item.articleData(c.FetchedAt)
-		if err := data.writeArticle(&ad); err != nil {
+		n, err := data.writeArticle(&ad)
+		if err != nil {
 			return nil, err
 		}
 		written = append(written, ad)
 
 		c.TotalArticles++
 		item.Feed.TotalArt++
+		item.Feed.ContentBytes += int64(n)
 		c.PackOffset++
 	}
 

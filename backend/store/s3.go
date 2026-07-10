@@ -20,7 +20,10 @@ import (
 )
 
 const (
-	s3ErrNoSuchKey          = "NoSuchKey"
+	s3ErrNoSuchKey = "NoSuchKey"
+	// s3ErrNotFound is HeadObject's missing-key code: HEAD responses carry no
+	// body, so the SDK maps them to the generic NotFound instead of NoSuchKey.
+	s3ErrNotFound           = "NotFound"
 	s3ErrUnauthorized       = "Unauthorized"
 	s3ErrPreconditionFailed = "PreconditionFailed"
 )
@@ -179,6 +182,29 @@ func (d *S3) put(ctx context.Context, key string, r io.Reader, ignoreExisting bo
 	}
 
 	return nil
+}
+
+// Stat returns the object's size via HeadObject (no body transfer); a missing
+// key is (0, nil) per the Backend contract.
+func (d *S3) Stat(ctx context.Context, key string) (int64, error) {
+	key = d.s3path("stat", key)
+
+	res, err := d.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(d.bucket),
+		Key:    aws.String(key),
+	})
+
+	switch apiErrorCode(err) {
+	case s3ErrNotFound, s3ErrNoSuchKey:
+		slog.Debug("db not found", "key", key)
+		return 0, nil
+	case s3ErrUnauthorized:
+		return 0, fmt.Errorf("unauthorized access to s3")
+	}
+	if err != nil {
+		return 0, fmt.Errorf("s3 head %q: %w", key, err)
+	}
+	return aws.ToInt64(res.ContentLength), nil
 }
 
 func (d *S3) Rm(ctx context.Context, key string) error {

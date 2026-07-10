@@ -87,3 +87,17 @@ func TestLocalPutNoDoubleCloseOnCopyError(t *testing.T) {
 type errorReader struct{ err error }
 
 func (r *errorReader) Read(_ []byte) (int, error) { return 0, r.err }
+
+func TestLocalStat(t *testing.T) {
+	b, _ := setupLocalStore(t)
+	if err := b.Put(ctx, "sub/obj.bin", strings.NewReader("12345"), true); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if n, err := b.Stat(ctx, "sub/obj.bin"); err != nil || n != 5 {
+		t.Errorf("Stat = (%d, %v), want (5, nil)", n, err)
+	}
+	// A missing key is (0, nil) per the Backend contract (silent like Rm).
+	if n, err := b.Stat(ctx, "missing.bin"); err != nil || n != 0 {
+		t.Errorf("Stat(missing) = (%d, %v), want (0, nil)", n, err)
+	}
+}

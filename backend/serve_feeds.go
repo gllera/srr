@@ -28,25 +28,31 @@ type feedListView struct {
 	TotalArt   int      `json:"total_art"`
 	ExpireDays int      `json:"expire_days,omitempty"`
 	Expired    int      `json:"expired,omitempty"`
+	// ContentBytes/AssetBytes are server-owned counters (see Feed): uncompressed
+	// data-pack bytes added by the feed, and its live assets/ footprint.
+	ContentBytes int64 `json:"content_bytes,omitempty"`
+	AssetBytes   int64 `json:"asset_bytes,omitempty"`
 }
 
 func listViewOf(ch *Feed) feedListView {
 	return feedListView{
-		ID:         ch.id,
-		Title:      ch.Title,
-		URL:        ch.URL,
-		Tag:        ch.Tag,
-		Recipe:     ch.Recipe,
-		Ingest:     ch.Ingest,
-		Pipe:       ch.Pipe,
-		NoTitle:    ch.NoTitle,
-		Error:      ch.FetchError,
-		FailStreak: ch.FailStreak,
-		LastOK:     ch.LastOK,
-		LastNew:    ch.LastNew,
-		TotalArt:   ch.TotalArt,
-		ExpireDays: ch.ExpireDays,
-		Expired:    ch.Expired,
+		ID:           ch.id,
+		Title:        ch.Title,
+		URL:          ch.URL,
+		Tag:          ch.Tag,
+		Recipe:       ch.Recipe,
+		Ingest:       ch.Ingest,
+		Pipe:         ch.Pipe,
+		NoTitle:      ch.NoTitle,
+		Error:        ch.FetchError,
+		FailStreak:   ch.FailStreak,
+		LastOK:       ch.LastOK,
+		LastNew:      ch.LastNew,
+		TotalArt:     ch.TotalArt,
+		ExpireDays:   ch.ExpireDays,
+		Expired:      ch.Expired,
+		ContentBytes: ch.ContentBytes,
+		AssetBytes:   ch.AssetBytes,
 	}
 }
 

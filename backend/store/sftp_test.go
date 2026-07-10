@@ -291,3 +291,17 @@ func TestSFTPRmExisting(t *testing.T) {
 		t.Errorf("Get after Rm = (%v, %v), want (nil, nil)", rc, err)
 	}
 }
+
+func TestSFTPStat(t *testing.T) {
+	d, _ := setupSFTPPipe(t)
+	if err := d.Put(ctx, "sub/obj.bin", strings.NewReader("12345"), true); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if n, err := d.Stat(ctx, "sub/obj.bin"); err != nil || n != 5 {
+		t.Errorf("Stat = (%d, %v), want (5, nil)", n, err)
+	}
+	// A missing key is (0, nil) per the Backend contract (silent like Rm).
+	if n, err := d.Stat(ctx, "missing.bin"); err != nil || n != 0 {
+		t.Errorf("Stat(missing) = (%d, %v), want (0, nil)", n, err)
+	}
+}
