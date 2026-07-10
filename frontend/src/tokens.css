@@ -37,6 +37,7 @@
    --z-sticky: 1; /* list day dividers, reader spine */
    --z-searchbar: 5; /* pinned search bar */
    --z-toolbar: 6; /* bottom toolbar + its upward-opening menus */
+   --z-overlay: 10; /* full-viewport filter-picker overlay (above toolbar, below popups) */
    --z-popup: 1000; /* error popup / imgproxy backdrop + card */
    --z-popup-top: 1001; /* topmost popup layer (popup accent bar) */
 

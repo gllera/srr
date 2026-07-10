@@ -222,12 +222,85 @@ describe("sync pull (raise-only seen, LWW saved)", () => {
    })
 })
 
-describe("regressiveSeen", () => {
-   it("detects rewinds on the seen axis only", () => {
-      expect(sync.regressiveSeen({ "feed:1": 50 }, { "feed:1": 50 })).toBe(false) // equal
-      expect(sync.regressiveSeen({ "feed:1": 50 }, { "feed:1": 49 })).toBe(true) // lower value
-      expect(sync.regressiveSeen({ "feed:1": 50, "feed:2": 5 }, { "feed:1": 50 })).toBe(true) // dropped key
-      expect(sync.regressiveSeen({ "feed:1": 50 }, { "feed:1": 50, "feed:2": 5 })).toBe(false) // extra incoming key
+describe("seenBehind", () => {
+   it("detects missing progress on the seen axis (legacy, no per-key timestamps)", () => {
+      expect(sync.seenBehind({ "feed:1": 50 }, {}, { "feed:1": 50 }, {})).toBe(false) // equal
+      expect(sync.seenBehind({ "feed:1": 50 }, {}, { "feed:1": 49 }, {})).toBe(true) // lower value
+      expect(sync.seenBehind({ "feed:1": 50, "feed:2": 5 }, {}, { "feed:1": 50 }, {})).toBe(true) // dropped key
+      expect(sync.seenBehind({ "feed:1": 50 }, {}, { "feed:1": 50, "feed:2": 5 }, {})).toBe(false) // extra b key
+   })
+
+   it("orders by per-key timestamp when both sides carry one — a newer rewind counts as ahead", () => {
+      const a = { "feed:1": 10 }
+      const b = { "feed:1": 50 }
+      // a holds a LOWER value with a NEWER timestamp (an explicit rewind): b is behind.
+      expect(sync.seenBehind(a, { "feed:1": 200 }, b, { "feed:1": 100 })).toBe(true)
+      // …and a is NOT behind b, despite b's higher value (b's raise is older intent).
+      expect(sync.seenBehind(b, { "feed:1": 100 }, a, { "feed:1": 200 })).toBe(false)
+      // Equal timestamps tie-break by value (max), like the merge.
+      expect(sync.seenBehind(b, { "feed:1": 100 }, a, { "feed:1": 100 })).toBe(true)
+      // A newer timestamp at EQUAL values still counts — the ordering metadata
+      // itself must propagate.
+      expect(sync.seenBehind(a, { "feed:1": 200 }, { ...a }, { "feed:1": 100 })).toBe(true)
+      // One side without a timestamp falls back to the value comparison.
+      expect(sync.seenBehind(a, { "feed:1": 200 }, b, {})).toBe(false)
+      expect(sync.seenBehind(b, {}, a, { "feed:1": 200 })).toBe(true)
+   })
+})
+
+describe("explicit rewind round-trip (per-key st)", () => {
+   beforeEach(() => sync.setSyncUrl(URL))
+
+   // The markUnreadFrom scenario: the device that just rewound pulls a remote
+   // still holding the OLD higher frontier (with an older per-key stamp). The
+   // merge must NOT re-raise the rewind, and the push must fire so the endpoint
+   // adopts it — this is exactly what blob-level max-merge got wrong.
+   it("a local rewind survives its own next cycle and republishes the endpoint", async () => {
+      localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 20 }))
+      localStorage.setItem("srr-seen-ts", JSON.stringify({ "feed:1": 500 }))
+      localStorage.setItem(PROFILE_TS_KEY, "500")
+      const remote = JSON.stringify({
+         v: 2,
+         ts: 400,
+         seen: { "feed:1": 90 },
+         st: { "feed:1": 400 },
+         saved: [],
+         unreadOnly: false,
+         imgProxy: "",
+      })
+      fetchMock.mockImplementation(async (_u, init) =>
+         (init as RequestInit)?.method === "PUT" ? res(200) : res(200, remote),
+      )
+      await sync.syncNow()
+      // The older remote raise did not undo the rewind…
+      expect(JSON.parse(localStorage.getItem(SEEN_KEY)!)).toEqual({ "feed:1": 20 })
+      // …and the endpoint was behind (older per-key stamp), so the PUT fired
+      // carrying the rewound frontier and its stamp.
+      const puts = fetchMock.mock.calls.filter((c) => c[1]?.method === "PUT")
+      expect(puts).toHaveLength(1)
+      const body = JSON.parse(puts[0][1].body)
+      expect(body.seen).toEqual({ "feed:1": 20 })
+      expect(body.st).toEqual({ "feed:1": 500 })
+   })
+
+   it("another device adopts a remote rewind with a newer per-key stamp", async () => {
+      localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 90 }))
+      localStorage.setItem("srr-seen-ts", JSON.stringify({ "feed:1": 400 }))
+      localStorage.setItem(PROFILE_TS_KEY, "400")
+      const remote = JSON.stringify({
+         v: 2,
+         ts: 500,
+         seen: { "feed:1": 20 },
+         st: { "feed:1": 500 },
+         saved: [],
+         unreadOnly: false,
+         imgProxy: "",
+      })
+      fetchMock.mockResolvedValue(res(200, remote))
+      expect(await sync.syncNow()).toBe(true) // the rewind changed local state
+      expect(JSON.parse(localStorage.getItem(SEEN_KEY)!)).toEqual({ "feed:1": 20 })
+      // Local now equals the remote — nothing to push back.
+      expect(fetchMock.mock.calls.filter((c) => c[1]?.method === "PUT")).toHaveLength(0)
    })
 })
 
@@ -285,6 +358,48 @@ describe("flush guard (stale-tab protection)", () => {
       sync.pushSoon()
       sync.flush()
       expect(fetchMock.mock.calls.filter((c) => c[1]?.method === "PUT")).toHaveLength(1)
+   })
+
+   it("flush delivers progress a FAILED background push left ahead, with dirty never set", async () => {
+      vi.setSystemTime(400_000)
+      localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 90 }))
+      localStorage.setItem(PROFILE_TS_KEY, "300")
+      // A background cycle pulls a BEHIND remote (feed:1=50) — the delta-derived
+      // push fires (local is ahead) but the PUT 500s, so it never clears/sets
+      // `dirty`. Local (feed:1=90) is now ahead of the endpoint with dirty false.
+      fetchMock.mockImplementation(async (_u, init) =>
+         (init as RequestInit)?.method === "PUT" ? res(500) : res(200, v2Blob(200, { "feed:1": 50 }, [])),
+      )
+      await sync.syncNow()
+      expect(fetchMock.mock.calls.filter((c) => c[1]?.method === "PUT")).toHaveLength(1) // the failed one
+      expect(sync.state().error).toBe("HTTP 500")
+
+      // On page-hide the keepalive flush retries — local is provably ahead of the
+      // remembered remote, so it publishes despite `dirty` being false (the old
+      // `if (!dirty) return` would have silently dropped this on the floor).
+      fetchMock.mockImplementation(async () => res(200))
+      sync.flush()
+      await vi.advanceTimersByTimeAsync(0)
+      const puts = fetchMock.mock.calls.filter((c) => c[1]?.method === "PUT")
+      expect(puts).toHaveLength(2)
+      expect(puts[1][1].keepalive).toBe(true)
+      expect(JSON.parse(puts[1][1].body).seen["feed:1"]).toBe(90) // the missing progress, delivered
+   })
+
+   it("flush stays quiet when local is already even with the endpoint (no redundant PUT)", async () => {
+      vi.setSystemTime(400_000)
+      localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 90 }))
+      localStorage.setItem(PROFILE_TS_KEY, "300")
+      // Pull a behind remote → the cycle pushes local up to the endpoint and the
+      // remembered remote becomes local. Nothing is pending afterwards.
+      fetchMock.mockImplementation(async (_u, init) =>
+         (init as RequestInit)?.method === "PUT" ? res(200) : res(200, v2Blob(200, { "feed:1": 50 }, [])),
+      )
+      await sync.syncNow()
+      const before = fetchMock.mock.calls.filter((c) => c[1]?.method === "PUT").length
+      sync.flush() // local == remote on seen and ts → no delta, no PUT
+      await vi.advanceTimersByTimeAsync(0)
+      expect(fetchMock.mock.calls.filter((c) => c[1]?.method === "PUT")).toHaveLength(before)
    })
 
    it("a 404 pull forgets the guard snapshot and seeds the endpoint", async () => {

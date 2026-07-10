@@ -1,13 +1,13 @@
-// config.ts — the config / settings surface. A third surface beside the list and
-// the reader (ephemeral, not hash-routed): opened from the list's now-viewing
-// button, it owns the quick-action icon bar (search · unread · image proxy ·
-// backup · sync), the contextual offline-pin row, the filter picker
-// (feed / tag / [ALL] / ★Saved), and last the freshness/degradation status
-// line — a quiet footer below the long picker rather than a banner above it.
-// The six quick actions are static buttons in the skeleton (config.ts only wires their
-// clicks + the search-disabled / read-toggle pressed state); the filter-list rendering
-// is the former toolbar feed-menu, ported to a static in-flow panel; it reuses the
-// same class names so the row styles (now under .srr-config-filter) carry over.
+// picker.ts — the feed / tag filter picker: a full-viewport overlay opened by
+// tapping the list toolbar's now-viewing readout (.srr-feed). Ephemeral (not
+// hash-routed) and fixed-position, so the list underneath keeps its scroll
+// position untouched while it's open. It owns the filter rows ([ALL], ★ Saved,
+// tag groups and feeds — source-color chips, health-tinted labels, async unread
+// badges, ⓘ detail buttons) and the feed/tag/store info dialogs those ⓘ buttons
+// open. Picking a row closes the overlay and re-filters the LIST (app.ts
+// onSelect → selectFilter). The settings that used to share a surface with this
+// picker live on the gear's anchored menu now (app.ts openSettingsMenu), which
+// borrows renderStatus() below for its status footer.
 import { VERSION } from "./base"
 import * as data from "./data"
 import { countBadge, formatDate, isStale, srcColorIndex, timeAgoProse, URL_DENY } from "./fmt"
@@ -15,32 +15,21 @@ import * as nav from "./nav"
 import * as refresh from "./refresh"
 import * as sync from "./sync"
 
-export type ConfigHooks = {
-   // Leave config for the list with the search bar open (the "Search articles…"
-   // row). The row is disabled in render() while nav.searchAvailable() is false.
-   onSearch: () => void
-   // Pick a filter (feed id / tag / "" for [ALL] / ~saved). The caller switches to
-   // that filter and opens the article (reader) surface at its resume position.
+export type PickerHooks = {
+   // Pick a filter (feed id / tag / "" for [ALL] / ~saved). The caller closes the
+   // overlay and shows the LIST under that filter.
    onSelect: (token: string) => void
-   // Flip the global unread-only mode and rebuild the list.
-   onUnreadToggle: () => void
-   // Escape / ✕ → leave config (app.ts routes this to the reader).
+   // Escape / ✕ → close the overlay back to the list.
    onClose: () => void
-   // The offline-pin row for the current filter scope, or null when unavailable.
-   pinEntry: () => { label: string; action: () => void } | null
-   openImgProxy: () => void
-   openBackup: () => void
-   openSync: () => void
 }
 
 let root: HTMLElement
 let filterBox: HTMLElement
-let settingsBox: HTMLElement
-let statusBox: HTMLElement
-let unreadBtn: HTMLButtonElement
-let searchBtn: HTMLButtonElement
-let hooks: ConfigHooks
-// The feed / tag info modal (a top-level sibling of the config surface, like the
+let hooks: PickerHooks
+// Focus restore target across open/close — the readout button that opened the
+// overlay (mirrors the modals' restore discipline).
+let restoreFocus: HTMLElement | null = null
+// The feed / tag info modal (a top-level sibling of the picker overlay, like the
 // image-proxy / backup dialogs). Refs grabbed in setup(); closeInfo holds the
 // active teardown so a re-open never stacks two.
 let infoDialog: HTMLElement | null = null
@@ -49,20 +38,11 @@ let infoBodyEl: HTMLElement
 let closeInfo: (() => void) | null = null
 let infoFillToken: object | null = null
 
-export function setup(el: HTMLElement, h: ConfigHooks): void {
+export function setup(el: HTMLElement, h: PickerHooks): void {
    root = el
    hooks = h
-   filterBox = el.querySelector(".srr-config-filter") as HTMLElement
-   settingsBox = el.querySelector(".srr-config-settings") as HTMLElement
-   statusBox = el.querySelector(".srr-config-status") as HTMLElement
-   unreadBtn = el.querySelector(".srr-config-unread") as HTMLButtonElement
-   searchBtn = el.querySelector(".srr-config-search") as HTMLButtonElement
-   ;(el.querySelector(".srr-config-close") as HTMLElement).addEventListener("click", () => hooks.onClose())
-   searchBtn.addEventListener("click", () => hooks.onSearch())
-   unreadBtn.addEventListener("click", () => hooks.onUnreadToggle())
-   ;(el.querySelector(".srr-config-backup") as HTMLElement).addEventListener("click", () => hooks.openBackup())
-   ;(el.querySelector(".srr-config-imgproxy") as HTMLElement).addEventListener("click", () => hooks.openImgProxy())
-   ;(el.querySelector(".srr-config-sync") as HTMLElement).addEventListener("click", () => hooks.openSync())
+   filterBox = el.querySelector(".srr-picker-filter") as HTMLElement
+   ;(el.querySelector(".srr-picker-close") as HTMLElement).addEventListener("click", () => hooks.onClose())
    // Delegated filter pick: every row carries data-value (feed id / tag / "" /
    // ~saved). The tag collapse toggle stops its own click, but guard anyway.
    filterBox.addEventListener("click", (e) => {
@@ -87,29 +67,28 @@ export function isOpen(): boolean {
 }
 
 export function open(): void {
+   if (root.hidden) restoreFocus = document.activeElement as HTMLElement | null
    render()
    root.hidden = false
-   // Config stacks over the list, which keeps the window scrolled wherever the
-   // reader left it; always land at the top so the header / quick actions show
-   // first. Only on open() — a re-render (e.g. the Read toggle) must not jump.
-   window.scrollTo(0, 0)
+   // The overlay owns its own scroll (the list's window scroll is untouched
+   // underneath); land at the top so [ALL] / ★ Saved show first on every open.
+   root.scrollTop = 0
+   // Focus the overlay container so Escape/arrows land here without painting a
+   // row pre-selected (:focus-visible fires on programmatic focus — the same
+   // reasoning as the context menu's container focus).
+   root.tabIndex = -1
+   root.focus()
 }
 
 export function close(): void {
+   if (root.hidden) return
    root.hidden = true
+   restoreFocus?.focus()
+   restoreFocus = null
 }
 
 export function render(): void {
-   // Search needs the meta/ index; disable the row while it rebuilds (the status
-   // line below explains why), matching the old toolbar magnifier's gate.
-   searchBtn.disabled = !nav.searchAvailable()
-   // Inverted toggle: unread-only is the default view, so this button is OFF in
-   // that default and pressed only when the reader has opted to ALSO show the
-   // articles they've already read (unread-only off) — see styles.css.
-   unreadBtn.setAttribute("aria-pressed", String(!nav.isUnreadOnly()))
    renderFilterList()
-   renderSettings()
-   refreshStatus()
 }
 
 // ── Filter list ──────────────────────────────────────────────────────────────
@@ -142,7 +121,7 @@ function svgEl(tag: string, attrs: Record<string, string>): SVGElement {
    return e
 }
 
-// The ⓘ details button on a feed / tag row. A button-semantic span — a real
+// The ⓘ details button on a feed / [ALL] row. A button-semantic span — a real
 // <button> can't nest inside the row's <a> — so it carries role/tabindex and an
 // Enter/Space keymap. Its click stops short of the row's filter-select.
 function infoBtn(label: string, onOpen: () => void): HTMLSpanElement {
@@ -152,12 +131,15 @@ function infoBtn(label: string, onOpen: () => void): HTMLSpanElement {
    s.setAttribute("tabindex", "0")
    s.setAttribute("aria-label", label)
    s.title = "Details"
+   // A solid disc with a knocked-out "i" — a filled badge, so it can't be
+   // confused with the tag headers' open caret one row over (the two share the
+   // same right gutter; fill vs line is what tells them apart at a glance).
    const svg = svgEl("svg", { viewBox: "0 0 24 24" })
    svg.setAttribute("aria-hidden", "true")
    svg.append(
-      svgEl("circle", { cx: "12", cy: "12", r: "9" }),
-      svgEl("line", { x1: "12", y1: "11", x2: "12", y2: "16" }),
-      svgEl("circle", { cx: "12", cy: "7.6", r: "0.6" }),
+      svgEl("circle", { class: "srr-info-disc", cx: "12", cy: "12", r: "9" }),
+      svgEl("line", { x1: "12", y1: "11", x2: "12", y2: "16.5" }),
+      svgEl("circle", { class: "srr-info-dot", cx: "12", cy: "7.75", r: "1.3" }),
    )
    s.appendChild(svg)
    const act = (e: Event) => {
@@ -255,7 +237,11 @@ function renderFilterList(): void {
    const unreadRows: [HTMLAnchorElement, IFeed][] = []
    const headerRows: [HTMLAnchorElement, IFeed[]][] = []
 
-   frag.appendChild(link("", "[ALL]", cls("", "")))
+   // [ALL] is a flex feed-row like the per-feed rows, so its unread badge and ⓘ
+   // share their exact right-edge geometry (numeric column + gutter glyph).
+   const allRow = link("", "[ALL]", cls("srr-feed-row", ""))
+   allRow.appendChild(infoBtn("Details for all feeds", () => openStoreInfo()))
+   frag.appendChild(allRow)
 
    const savedN = nav.savedCount()
    if (savedN > 0) {
@@ -306,18 +292,30 @@ function renderFilterList(): void {
    }
 
    filterBox.replaceChildren(frag)
-   void fillUnread(unreadRows, headerRows)
+   void fillUnread(unreadRows, headerRows, allRow)
 }
 
 // Unread badges fill in after the list renders so a cold seen position never
 // delays the panel. One freshness token guards every DOM write (a re-render or
 // close orphans a stale pass). When unread-only is on, fully-read rows/tags hide.
-async function fillUnread(rows: [HTMLAnchorElement, IFeed][], headers: [HTMLAnchorElement, IFeed[]][]) {
+async function fillUnread(
+   rows: [HTMLAnchorElement, IFeed][],
+   headers: [HTMLAnchorElement, IFeed[]][],
+   allRow: HTMLAnchorElement,
+) {
    const my = {}
    fillToken = my
    try {
       const counts = await nav.unreadCounts(rows.map(([, ch]) => ch))
       if (my !== fillToken) return
+      // [ALL]'s number is the whole backlog — the sum over every listed feed
+      // (rows the mode hides as fully-read contribute 0). Absent at zero, like
+      // every row's badge; before the ⓘ, like every feed row's.
+      const total = nav.tagUnreadFromCounts(
+         rows.map(([, ch]) => ch),
+         counts,
+      )
+      if (total > 0) allRow.insertBefore(unreadBadge(total), allRow.querySelector(".srr-info-btn"))
       const hideRead = nav.isUnreadOnly()
       const activeKey = nav.getCurrentFilterKey()
       for (const [a, ch] of rows) {
@@ -343,32 +341,7 @@ async function fillUnread(rows: [HTMLAnchorElement, IFeed][], headers: [HTMLAnch
    }
 }
 
-// ── Settings ─────────────────────────────────────────────────────────────────
-
-// The offline-pin entry is a full-width labeled row (not an icon): its label is
-// scope-dependent ("Download <tag> for offline" / "Remove offline copy") and it
-// reports progress in the status bar, so it doesn't fold into a fixed glyph like
-// the five quick actions above. Search / unread / image-proxy / backup / sync
-// are static icon buttons in the skeleton; this is the only thing
-// settingsBox renders.
-function actionRow(label: string, onClick: () => void): HTMLButtonElement {
-   const b = document.createElement("button")
-   b.type = "button"
-   b.className = "srr-config-action"
-   b.textContent = label
-   b.addEventListener("click", onClick)
-   return b
-}
-
-function renderSettings(): void {
-   settingsBox.replaceChildren()
-   const pin = hooks.pinEntry()
-   if (pin) settingsBox.append(actionRow(pin.label, () => pin.action()))
-}
-
 // ── Status ───────────────────────────────────────────────────────────────────
-
-let lastStatusSig: string | null = null
 
 // A flagged status — an amber caution row with a leading dot, matching the
 // graded-health "warn" used by the feed-error dots and the feed info card.
@@ -390,51 +363,46 @@ function statusNote(text: string): HTMLElement {
    return row
 }
 
-// The relocated freshness / degradation block — the former bottom banner, now a
-// section of the config surface (silent everywhere else). The neutral "last
-// updated" fact reads muted; anything wrong is broken out as its own amber flag
-// row rather than tinting the whole line. A state-signature early return mirrors
-// the banner's old text cache (skip the DOM rebuild when nothing changed).
-export function refreshStatus(): void {
+// The freshness / degradation block — the settings menu's footer (app.ts builds
+// the node and hands it to showContextMenu). The neutral "Updated …" fact reads
+// muted and stays relative-only (the absolute date would crowd a menu footer);
+// anything wrong is broken out as its own amber flag row rather than tinting
+// the whole line. Rebuilt unconditionally — the footer is built per menu open,
+// and the live sync callback re-fills the same node in place.
+export function renderStatus(box: HTMLElement): void {
    const fetchedAt = data.lastFetchedAt()
-   const stale = isStale(fetchedAt)
    const metaMissing = data.hasArticles() && !data.metaReady()
-   const idxDegraded = data.idxSummaryDegraded()
    const syncState = sync.state()
    const refreshErr = refresh.lastRefreshError()
 
-   const sig = `${fetchedAt}|${stale}|${metaMissing}|${idxDegraded}|${syncState.on}|${syncState.okAt}|${syncState.error}|${refreshErr}`
-   if (sig === lastStatusSig) return
-   lastStatusSig = sig
-
-   statusBox.replaceChildren()
+   box.replaceChildren()
    if (fetchedAt > 0) {
       const fresh = document.createElement("div")
       fresh.className = "srr-status-fresh"
-      fresh.textContent = `Last updated ${formatDate(fetchedAt)} · ${timeAgoProse(fetchedAt)}`
-      statusBox.append(fresh)
-      if (stale) statusBox.append(statusFlag("Feed updates may have paused"))
+      fresh.textContent = `Updated ${timeAgoProse(fetchedAt)}`
+      box.append(fresh)
+      if (isStale(fetchedAt)) box.append(statusFlag("Feed updates may have paused"))
    }
-   if (metaMissing) statusBox.append(statusFlag("Search unavailable while the index rebuilds"))
-   if (idxDegraded) statusBox.append(statusNote("Optimizing for faster loading…"))
+   if (metaMissing) box.append(statusFlag("Search unavailable while the index rebuilds"))
+   if (data.idxSummaryDegraded()) box.append(statusNote("Optimizing for faster loading…"))
    // Sync readout, only when a sync endpoint is configured: a quiet "Synced …"
    // note while healthy, an amber flag with the failure when the last cycle
    // errored, and a pending note before the first cycle completes.
    if (syncState.on) {
-      if (syncState.error) statusBox.append(statusFlag(`Sync failed — ${syncState.error}`))
-      else if (syncState.okAt > 0) statusBox.append(statusNote(`Synced ${timeAgoProse(syncState.okAt)}`))
-      else statusBox.append(statusNote("Sync pending…"))
+      if (syncState.error) box.append(statusFlag(`Sync failed — ${syncState.error}`))
+      else if (syncState.okAt > 0) box.append(statusNote(`Synced ${timeAgoProse(syncState.okAt)}`))
+      else box.append(statusNote("Sync pending…"))
    }
    // The last background content-refresh failure — this row is the only place
    // it reaches the user (a page reload is the manual recovery gesture).
-   if (refreshErr) statusBox.append(statusFlag(`Refresh failed — ${refreshErr}`))
+   if (refreshErr) box.append(statusFlag(`Refresh failed — ${refreshErr}`))
    // The build's version label, always last and always present (even on an
    // empty store — it's exactly what a bug report needs). VERSION is base.ts's
    // build-time define: the release tag in CI builds, "dev" locally.
    const ver = document.createElement("div")
    ver.className = "srr-status-version"
    ver.textContent = `srr ${VERSION}`
-   statusBox.append(ver)
+   box.append(ver)
 }
 
 // ── Feed / tag info dialog ─────────────────────────────────────────────────────
@@ -546,6 +514,62 @@ async function fillFeedUnread(ch: IFeed): Promise<void> {
       if (my !== infoFillToken) return
       const el = infoBodyEl.querySelector(".srr-info-unread")
       if (el) el.textContent = String(counts.get(ch.id) ?? 0)
+   } catch {
+      // Best-effort: the card stands on its stored fields; the count stays "…".
+   }
+}
+
+// The [ALL] row's card: the store-wide rollup none of the per-feed cards can
+// show — inventory, a health census of every feed's grade, and pack-level
+// vitals. Freshness stays out (the settings menu's status footer owns it).
+function buildStoreInfo(): DocumentFragment {
+   const frag = document.createDocumentFragment()
+   const feeds = Object.values(data.db.feeds ?? {})
+
+   const content = infoSection("Content")
+   addRow(content.dl, "Feeds", String(feeds.length))
+   addRow(content.dl, "Tags", String(new Set(feeds.map((ch) => ch.tag).filter(Boolean)).size))
+   // Live count, expired excluded — the same semantics as the feed card's row.
+   addRow(content.dl, "Articles", String(feeds.reduce((sum, ch) => sum + ch.total_art - (ch.xp ?? 0), 0)))
+   addRow(content.dl, "Unread", "…", "srr-info-unread")
+   addRow(content.dl, "Saved", String(nav.savedCount()))
+   frag.appendChild(content.sec)
+
+   // The health census: feedGrade counts in the chip vocabulary (Healthy /
+   // Stale / Error). Problem rows appear only when nonzero, so a healthy store
+   // reads as one quiet line.
+   const health = infoSection("Health")
+   const grades = feeds.map(feedGrade)
+   addRow(health.dl, "Healthy", String(grades.filter((g) => g === "").length))
+   const warn = grades.filter((g) => g === "warn").length
+   const crit = grades.filter((g) => g === "crit").length
+   if (warn > 0) addRow(health.dl, "Stale", String(warn))
+   if (crit > 0) addRow(health.dl, "Error", String(crit))
+   frag.appendChild(health.sec)
+
+   const tech = infoSection("Technical")
+   addRow(tech.dl, "Generation", String(data.db.gen ?? 0))
+   addRow(tech.dl, "Latest packs", `L${data.db.seq ?? 0}`)
+   addRow(tech.dl, "Search index", data.metaReady() ? "Ready" : "Rebuilding")
+   frag.appendChild(tech.sec)
+
+   return frag
+}
+
+function openStoreInfo(): void {
+   openInfoDialog("All feeds", buildStoreInfo())
+   void fillStoreUnread(Object.values(data.db.feeds ?? {}))
+}
+
+// The feed card's async live-unread fill, summed store-wide.
+async function fillStoreUnread(feeds: IFeed[]): Promise<void> {
+   const my = {}
+   infoFillToken = my
+   try {
+      const counts = await nav.unreadCounts(feeds)
+      if (my !== infoFillToken) return
+      const el = infoBodyEl.querySelector(".srr-info-unread")
+      if (el) el.textContent = String(nav.tagUnreadFromCounts(feeds, counts))
    } catch {
       // Best-effort: the card stands on its stored fields; the count stays "…".
    }

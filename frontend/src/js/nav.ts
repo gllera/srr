@@ -1,6 +1,6 @@
 import * as data from "./data"
 import { extractPrefetchMedia } from "./fmt"
-import { SAVED_KEY, SEEN_KEY, UNREAD_ONLY_KEY } from "./keys"
+import { SAVED_KEY, SEEN_KEY, SEEN_TS_KEY, UNREAD_ONLY_KEY } from "./keys"
 import * as search from "./search"
 import * as sync from "./sync"
 
@@ -513,7 +513,7 @@ function unseenActive(): boolean {
 // you open on. And only while the catch-up walk still has a step ahead: on the
 // filter's LAST match there is no forward step left to ever drop the +1, so it
 // would stick — a fully-caught-up feed (and its tag header) read a permanent 1
-// in the settings view, across reloads too (pos, seen and the unread toggle all
+// in the picker, across reloads too (pos, seen and the unread toggle all
 // persist). Nothing ahead means caught up: the badge reads 0, agreeing with the
 // pill's explicit 0 (pendingRight is that same readout).
 async function feedUnread(ch: IFeed, seenMap: Record<string, number>): Promise<number> {
@@ -537,7 +537,7 @@ async function feedUnread(ch: IFeed, seenMap: Record<string, number>): Promise<n
 // remaining →-steps, so re-reading below the seen frontier still ticks it
 // down step by step — a frontier-based count froze there (matching articles
 // between pos and the frontier are all seen, so the number never moved while
-// stepping through them). Unread-with-the-frontier is the config badges' job
+// stepping through them). Unread-with-the-frontier is the picker badges' job
 // (feedUnread), not this readout's. In the forward-reading flow the two agree.
 // The last article reads 0.
 async function pendingRight(): Promise<number> {
@@ -678,8 +678,25 @@ function readSeen(): Record<string, number> {
    }
 }
 
-// A feed stores its own seen position (chronIdx of the last article viewed
-// from it). A tag has no position of its own: it resumes from the oldest seen
+// Persist a mutated seen map and stamp the per-key ordering timestamps
+// (srr-seen-ts, profile.ts's `st`) for the keys this mutation touched — the
+// unix-second that lets sync order a key's latest local action (raise or
+// explicit rewind) against other devices. Every seen write goes through here
+// so no mutation ships unordered.
+function writeSeen(seen: Record<string, number>, touched: string[]): void {
+   localStorage.setItem(SEEN_KEY, JSON.stringify(seen))
+   try {
+      const raw = localStorage.getItem(SEEN_TS_KEY)
+      const st: Record<string, number> = raw ? JSON.parse(raw) : {}
+      const now = Math.floor(Date.now() / 1000)
+      for (const k of touched) st[k] = now
+      localStorage.setItem(SEEN_TS_KEY, JSON.stringify(st))
+   } catch {}
+}
+
+// A feed stores its own seen position — its read high-water (the newest chron
+// ever marked seen for it; recordSeen only raises it, markUnreadFrom is the
+// explicit rewind). A tag has no position of its own: it resumes from the oldest seen
 // position (min seen chronIdx) among its member feeds, so opening the tag
 // drops you at the least-recently-read member and no member's unread (each of
 // which sits at or after that member's own seen position) is skipped to the
@@ -703,50 +720,104 @@ function recordSeen(article: IArticle) {
    // Peek modes never touch the seen frontier. Search (q:) jumps to hits, not a
    // contiguous read-through — advancing here would mark everything up to the
    // hit as seen. ★ Saved is the same shape: re-reading an archived item is not
-   // resuming its feed, and the own-feed exact-position write below would REWIND
-   // that feed's resume position (inflating its unread badge — and under LWW
-   // sync, propagating the rewind to every device). A saved/search article you
-   // peek at stays unread until you actually read it in its feed.
+   // resuming its feed. A saved/search article you peek at stays unread until
+   // you actually read it in its feed.
    if (filter.search || filter.saved) return
    const ch = data.db.feeds[article.f]
    if (!ch) return
    try {
       const seen = readSeen()
-      let changed = false
-      // The article's OWN feed stores its resume position — the exact pos, so
-      // stepping back to an older article moves the resume point with you. A
-      // tag's position is derived from its feeds in getSeen, so bumping the
-      // feed advances the tag too.
-      const feedKey = "feed:" + article.f
-      if (seen[feedKey] !== pos) {
-         seen[feedKey] = pos
-         changed = true
-      }
+      const touched: string[] = []
       // Opening an article marks every OLDER article in the navigation list as
-      // seen, not just ones from its own feed: for each OTHER feed in the
-      // active filter (the list you're reading), raise its seen frontier to pos
-      // so all of its articles at-or-below pos read as seen — the chronological
+      // seen: for the article's own feed AND each other feed in the active
+      // filter (the list you're reading), raise its seen frontier to pos so
+      // all of its articles at-or-below pos read as seen — the chronological
       // "everything before here is caught up" the reader expects. A one-way
-      // raise (never lowers), so scrubbing back to an older article can't
-      // un-mark a feed you'd already caught up on; only the current feed
-      // (above) tracks an exact resume position. Search and saved both
-      // returned above, so this loop only fires for feed/tag/[ALL] navigation
-      // — the contiguous read-throughs where a "previous = seen" frontier
-      // across feeds is meaningful.
-      for (const feedId of filter.feeds.keys()) {
-         if (feedId === article.f) continue
+      // raise for EVERY feed, the current one included: stepping back to an
+      // older article re-reads it without un-marking anything — read progress
+      // only rewinds through the explicit markUnreadFrom gesture. (The own feed
+      // is raised outside the loop because a deep-linked article's feed can
+      // sit outside the filter membership.) Search and saved both returned
+      // above, so this only fires for feed/tag/[ALL] navigation — the
+      // contiguous read-throughs where a "previous = seen" frontier across
+      // feeds is meaningful.
+      const raise = (feedId: number) => {
          const key = "feed:" + feedId
          const prev = seen[key]
          if (prev === undefined || prev < pos) {
             seen[key] = pos
-            changed = true
+            touched.push(key)
          }
       }
-      if (changed) {
-         localStorage.setItem(SEEN_KEY, JSON.stringify(seen))
+      raise(article.f)
+      for (const feedId of filter.feeds.keys()) if (feedId !== article.f) raise(feedId)
+      if (touched.length > 0) {
+         writeSeen(seen, touched)
          sync.pushSoon()
       }
    } catch {}
+}
+
+// Mark the whole current feed/tag/[ALL] selection read: raise every filter
+// member's seen frontier to the newest chron in the store — the same one-way
+// high-water recordSeen writes for "other" feeds, so a foreign chron as the
+// frontier is the established shape. Pure raise ⇒ trivially compatible with
+// sync's merge. Peek modes (saved/search) have no frontier to move and return
+// untouched. Returns whether anything actually changed (the caller only
+// rebuilds the list / re-counts when it did).
+export function markAllRead(): boolean {
+   if (filter.search || filter.saved || data.db.total_art === 0) return false
+   const top = data.db.total_art - 1
+   try {
+      const seen = readSeen()
+      const touched: string[] = []
+      for (const feedId of filter.feeds.keys()) {
+         const key = "feed:" + feedId
+         const prev = seen[key]
+         if (prev === undefined || prev < top) {
+            seen[key] = top
+            touched.push(key)
+         }
+      }
+      if (touched.length === 0) return false
+      writeSeen(seen, touched)
+      sync.pushSoon()
+      return true
+   } catch {
+      return false
+   }
+}
+
+// The explicit unread rewind — the ONLY path that lowers a seen frontier:
+// mark everything from `chron` (inclusive) to the latest article unread under
+// the current selection, by lowering every filter member's frontier to
+// chron−1 (members already below stay put — their older unread is untouched).
+// −1 (chron 0) is stored, not deleted: a stored −1 reads exactly like
+// never-seen everywhere, and keeping the key preserves the per-key timestamp
+// that lets this rewind outrank older raises on other devices (writeSeen
+// stamps it; profile.ts's per-key LWW propagates it). Peek modes are exempt,
+// mirroring recordSeen. Returns whether anything changed.
+export function markUnreadFrom(chron: number): boolean {
+   if (filter.search || filter.saved || chron < 0) return false
+   const floor = chron - 1
+   try {
+      const seen = readSeen()
+      const touched: string[] = []
+      for (const feedId of filter.feeds.keys()) {
+         const key = "feed:" + feedId
+         const prev = seen[key]
+         if (prev !== undefined && prev > floor) {
+            seen[key] = floor
+            touched.push(key)
+         }
+      }
+      if (touched.length === 0) return false
+      writeSeen(seen, touched)
+      sync.pushSoon()
+      return true
+   } catch {
+      return false
+   }
 }
 
 // Batched per-feed unread (OPT-2): reads the seen map once for the whole
@@ -789,6 +860,17 @@ export function pruneSeen() {
          }
       }
       if (changed) localStorage.setItem(SEEN_KEY, JSON.stringify(seen))
+      // The per-key ordering timestamps shadow the seen map — any st key whose
+      // seen entry is gone (pruned above, or never existed) is dead weight too.
+      const rawSt = localStorage.getItem(SEEN_TS_KEY)
+      const st: Record<string, number> = rawSt ? JSON.parse(rawSt) : {}
+      let stChanged = false
+      for (const key of Object.keys(st))
+         if (seen[key] === undefined) {
+            delete st[key]
+            stChanged = true
+         }
+      if (stChanged) localStorage.setItem(SEEN_TS_KEY, JSON.stringify(st))
    } catch {}
 }
 

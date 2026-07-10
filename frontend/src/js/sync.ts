@@ -11,23 +11,29 @@
 // endpoint's content doubles as a restorable backup. The model assumes ONE
 // reader on every device, so every cycle — background and manual alike — is the
 // same hybrid merge (profile.ts importProfile mode:"sync"):
-//   seen     — per-feed max: read progress is the union of what the one person
-//              read anywhere, so it only ever RISES, on this device and on the
-//              endpoint. No timestamps, no guards, no parking — a lower remote
-//              value is never newer information, just an older snapshot of the
-//              same reader.
+//   seen+st  — per-feed LWW by the per-key `st` timestamps (stamped by nav.ts
+//              on every local seen mutation), falling back to per-feed max when
+//              a key lacks ordering info on either side. Reading only ever
+//              RAISES a frontier, so ordinary progress still merges as the
+//              union of what the one person read anywhere; the ONE path that
+//              lowers a frontier is an explicit rewind (nav.markUnreadFrom),
+//              whose fresher `st` outranks the older raise on every device —
+//              intent, ordered like saved, not lost progress.
 //   saved+ts — last-write-wins by `ts` (profile.ts's ordering field, stamped on
 //              every local seen/saved mutation): the saved set is the person's
 //              current intent, so un-saves propagate.
 // The push needs no guard: after the merge, local ⊒ the just-pulled remote on
-// seen and holds the LWW-newest saved/ts, so a PUT can never lower the
-// endpoint. And it fires whenever the endpoint is actually BEHIND (its seen
-// regressive against local / its ts older / a 404 to seed) — derived from the
+// seen (per-key: the newer-ordered or higher value everywhere) and holds the
+// LWW-newest saved/ts, so a PUT can never cost the endpoint state. And it
+// fires whenever the endpoint is actually BEHIND (its seen missing local
+// progress or ordering / its ts older / a 404 to seed) — derived from the
 // pulled blob, not just the in-memory dirty flag, because a reload loses that
 // flag and an endpoint regressed by a stale tab's flush or an old-build LWW
-// device must heal on any device's next cycle. There is deliberately NO path
-// that lowers read progress; the one surviving guard (`flush`, below) only
-// protects the endpoint from a stale tab's blind PUT.
+// device must heal on any device's next cycle. The one surviving guard
+// (`flush`, below) only protects the endpoint from a stale tab's blind PUT —
+// and flush fires on the same delta (not just `dirty`), so a page-hide still
+// delivers progress the endpoint is missing when the flag was lost or a
+// background push failed.
 //
 // A v1 remote (a pre-upgrade endpoint, or another device still on the old
 // build) has no `ts` to order saved by, so it gets one legacy monotone merge
@@ -38,7 +44,7 @@
 // fmt.ts) so it unit-tests without a pack server or the base.ts URL side effect.
 
 import { SYNC_URL_KEY } from "./keys"
-import { exportProfile, importProfile, localSeen, profileTs, touchProfile } from "./profile"
+import { exportProfile, importProfile, localSeen, localSeenTs, profileTs, touchProfile } from "./profile"
 
 // Push settles PUSH_DEBOUNCE_MS after the last seen/saved change (a reading
 // burst is one PUT); background pulls (tab re-focus) are at most one per
@@ -56,6 +62,7 @@ let lastOkAt = 0 // unix SECONDS of the last completed cycle (fmt.timeAgoProse s
 let lastError = ""
 let lastRemoteTs = -1 // ts of the last successfully pulled remote (-1 = never pulled)
 let lastRemoteSeen: Record<string, number> | null = null // its seen map, for flush()'s stale-tab guard
+let lastRemoteSt: Record<string, number> = {} // its per-key seen timestamps, paired with lastRemoteSeen
 
 export function getSyncUrl(): string {
    try {
@@ -78,6 +85,7 @@ export function setSyncUrl(value: string): void {
    lastPullAt = 0
    lastRemoteTs = -1
    lastRemoteSeen = null
+   lastRemoteSt = {}
 }
 
 export function enabled(): boolean {
@@ -104,7 +112,7 @@ export function normalizeSyncUrl(v: string): string {
    return s
 }
 
-// The status readout consumed by the config surface's freshness footer.
+// The status readout consumed by the settings menu's status footer.
 export interface SyncState {
    on: boolean
    okAt: number // unix seconds of the last completed cycle; 0 = never
@@ -115,15 +123,31 @@ export function state(): SyncState {
    return { on: enabled(), okAt: lastOkAt, error: lastError }
 }
 
-// True when `incoming` holds LESS read progress than `cur`: some feed key of
-// `cur` is absent from `incoming` or maps to a lower number. Two consumers:
-// the cycle's push trigger (the pulled remote is behind local → re-raise the
-// endpoint) and flush()'s stale-tab guard. Seen axis ONLY — saved-set deltas
-// (including un-saves) are ordered by ts, not by progress.
-export function regressiveSeen(cur: Record<string, number>, incoming: Record<string, number>): boolean {
-   for (const [k, v] of Object.entries(cur)) {
-      const inc = incoming[k]
-      if (inc === undefined || inc < v) return true
+// True when `b` is MISSING seen state that `a` holds: some feed key of `a` is
+// absent from `b`, carries a strictly newer per-key timestamp on `a`'s side
+// (a's value — raise OR explicit rewind — is newer intent), or, when either
+// side lacks the key's timestamp, maps to a lower number on `b` (the legacy
+// progress-only comparison). Two consumers, in both directions: the cycle's
+// push trigger (the pulled remote is behind local → republish the endpoint)
+// and flush()'s stale-tab guard (local behind the remembered remote → skip).
+// Seen axis ONLY — saved-set deltas (including un-saves) are ordered by the
+// blob-level ts, not by this.
+export function seenBehind(
+   a: Record<string, number>,
+   aTs: Record<string, number>,
+   b: Record<string, number>,
+   bTs: Record<string, number>,
+): boolean {
+   for (const [k, v] of Object.entries(a)) {
+      const bv = b[k]
+      if (bv === undefined) return true
+      const at = aTs[k] ?? 0
+      const bt = bTs[k] ?? 0
+      // profile.ts mergeSeen's adopt rule, asked from b's side: would merging
+      // a into b move b's value or its ordering metadata? Yes ⇒ b is behind.
+      // (A newer a-side timestamp counts even at equal values: the ordering
+      // itself must propagate, or a rewind's precedence dies at the endpoint.)
+      if (at > 0 && bt > 0 && at !== bt ? at > bt : v > bv) return true
    }
    return false
 }
@@ -132,6 +156,7 @@ interface RemoteBlob {
    v: 1 | 2
    ts: number
    seen: Record<string, number>
+   st: Record<string, number>
    raw: string
 }
 
@@ -162,7 +187,14 @@ async function pullRemote(url: string): Promise<RemoteBlob | null> {
    if (seenRaw !== null && typeof seenRaw === "object" && !Array.isArray(seenRaw))
       for (const [k, val] of Object.entries(seenRaw as Record<string, unknown>))
          if (typeof val === "number" && Number.isFinite(val)) seen[k] = val
-   return { v: v as 1 | 2, ts, seen, raw }
+   // The per-key seen timestamps (absent on v1 / pre-upgrade v2 blobs → {} —
+   // every comparison then degrades to the legacy progress-only rule).
+   const st: Record<string, number> = {}
+   const stRaw = obj["st"]
+   if (stRaw !== null && typeof stRaw === "object" && !Array.isArray(stRaw))
+      for (const [k, val] of Object.entries(stRaw as Record<string, unknown>))
+         if (typeof val === "number" && Number.isFinite(val) && val > 0) st[k] = Math.floor(val)
+   return { v: v as 1 | 2, ts, seen, st, raw }
 }
 
 async function put(url: string, keepalive = false): Promise<void> {
@@ -196,6 +228,7 @@ export async function syncNow(opts: { manual?: boolean } = {}): Promise<boolean>
       if (remote) {
          lastRemoteTs = remote.ts
          lastRemoteSeen = remote.seen
+         lastRemoteSt = remote.st
          const r = importProfile(remote.raw, { prefs: false, mode: remote.v === 1 ? "merge" : "sync" })
          if (!r.ok) throw new Error(r.error ?? "invalid profile")
          changed = r.changed === true
@@ -207,6 +240,7 @@ export async function syncNow(opts: { manual?: boolean } = {}): Promise<boolean>
          // below has nothing to regress against.
          lastRemoteTs = -1
          lastRemoteSeen = null
+         lastRemoteSt = {}
       }
       if (changed) onMerged?.()
       // Push whenever the endpoint is behind, derived from the pulled blob
@@ -220,7 +254,7 @@ export async function syncNow(opts: { manual?: boolean } = {}): Promise<boolean>
          opts.manual ||
          dirty ||
          (remote
-            ? regressiveSeen(localSeen(), remote.seen) || profileTs() > remote.ts
+            ? seenBehind(localSeen(), localSeenTs(), remote.seen, remote.st) || profileTs() > remote.ts
             : profileTs() > 0 || Object.keys(localSeen()).length > 0)
       if (wantPush) {
          await put(url)
@@ -228,6 +262,7 @@ export async function syncNow(opts: { manual?: boolean } = {}): Promise<boolean>
          clearTimeout(pushTimer)
          lastRemoteTs = profileTs()
          lastRemoteSeen = localSeen()
+         lastRemoteSt = localSeenTs()
       }
       lastOkAt = Math.floor(Date.now() / 1000)
       lastError = ""
@@ -235,7 +270,7 @@ export async function syncNow(opts: { manual?: boolean } = {}): Promise<boolean>
       if (navigator.onLine !== false) lastError = e instanceof Error ? e.message : String(e)
    } finally {
       inflight = false
-      onStatus?.() // okAt/error moved — let an open config footer repaint
+      onStatus?.() // okAt/error moved — let an open settings-menu footer refill
    }
    return changed
 }
@@ -256,24 +291,43 @@ export function pushSoon(): void {
 
 // Last-chance PUT when the page hides/unloads: keepalive lets the request
 // outlive the page; there's no time for the pre-push pull whose merge makes a
-// normal push safe, so the guard below stands in for it. A blind PUT from a
-// stale tab could still lower the endpoint — its seen can sit below the
-// endpoint's (nav.pruneSeen legitimately drops deleted feeds' keys), and its
-// saved/ts can predate a newer device's blob — so a tab that HAS pulled before
-// (lastRemoteTs set) checks its remembered remote before publishing; a tab
-// that never pulled flushes unguarded, as before (nothing to regress against
-// yet). A skip (or a failed PUT) leaves `dirty` set, so the next full cycle —
-// which pulls first — resolves it. And even if a stale snapshot lets a
-// regressive flush through, the raise-only merge means any device holding the
-// higher value re-raises the endpoint on its next cycle — flush mistakes heal.
+// normal push safe, so the guard below stands in for it.
+//
+// TRIGGER — fire whenever the endpoint is (or may be) BEHIND local, mirroring
+// syncNow's delta-derived wantPush rather than trusting the in-memory `dirty`
+// flag alone. `dirty` is set only by a local mutation (pushSoon), yet local can
+// sit ahead of the endpoint with `dirty` false: a background push that FAILED
+// (its catch never re-armed the flag, and a delta-driven push never set it) or
+// a reload that lost it outright. So also push when local is provably ahead of
+// the last remembered remote — its seen regressive against local, or a newer
+// local ts. A tab that never pulled (lastRemoteTs < 0) has no remote to compare
+// and so still needs `dirty` to have something worth sending; local == remote ⇒
+// no PUT, so the common quiet tab-switch stays quiet.
+//
+// GUARD — a blind PUT from a stale tab could still LOWER the endpoint: its seen
+// can sit below the endpoint's (nav.pruneSeen legitimately drops a deleted
+// feed's key) and its saved/ts can predate a newer device's blob. So a tab that
+// HAS pulled before (lastRemoteTs set) refuses to publish a blob that regresses
+// its remembered remote. A skip (or a failed PUT) leaves `dirty` set, so the
+// next full cycle — which pulls first — resolves it. And even if a stale
+// snapshot lets a regressive flush through, the raise-only merge means any
+// device holding the higher value re-raises the endpoint next cycle — flush
+// mistakes heal.
 export function flush(): void {
-   if (!dirty) return
    const url = getSyncUrl()
    if (!url) return
+   const seen = localSeen()
+   const seenTs = localSeenTs()
    if (lastRemoteTs >= 0) {
       if (profileTs() < lastRemoteTs) return
-      if (lastRemoteSeen && regressiveSeen(lastRemoteSeen, localSeen())) return
+      if (lastRemoteSeen && seenBehind(lastRemoteSeen, lastRemoteSt, seen, seenTs)) return
    }
+   const behind =
+      dirty ||
+      (lastRemoteTs >= 0 &&
+         ((lastRemoteSeen !== null && seenBehind(seen, seenTs, lastRemoteSeen, lastRemoteSt)) ||
+            profileTs() > lastRemoteTs))
+   if (!behind) return
    clearTimeout(pushTimer)
    dirty = false
    void put(url, true).catch(() => {
@@ -284,7 +338,7 @@ export function flush(): void {
 // Wire the lifecycle: boot pull (when enabled), re-pull on tab re-focus
 // (throttled) and on regaining connectivity, flush on hide/pagehide. `merged`
 // is app.ts's refresh routine — rerender the list / badges after a pull
-// changed local state; `status` repaints an open config footer after every
+// changed local state; `status` refills an open settings-menu footer after every
 // cycle (so enabling sync from the dialog confirms itself without a re-open).
 export function init(merged: () => void, status?: () => void): void {
    onMerged = merged

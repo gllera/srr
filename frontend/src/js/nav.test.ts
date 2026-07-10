@@ -836,8 +836,11 @@ describe("switchFilter", () => {
       data.db.feeds[5] = makeFeed({ id: 5, tag: "news" })
       data.db.feeds[6] = makeFeed({ id: 6, tag: "news" })
       setupIndex([{ feedId: 5 }, { feedId: 6 }, { feedId: 5 }, { feedId: 6 }, { feedId: 5 }])
-      await nav.fromHash("4") // view chron 4 (ch5) → feed:5 = 4
-      await nav.fromHash("1") // view chron 1 (ch6) → feed:6 = 1
+      // Seeded directly: navigation can no longer produce a lower frontier for
+      // ch6 after ch5 was read further (the seen frontier is raise-only now);
+      // a synced-in or historical state still can, and the tag must resume at
+      // its least-recently-read member either way.
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:5": 4, "feed:6": 1 }))
       await nav.switchFilter("news")
       expect(nav.filter.active).toBe(true)
       // min(4, 1) = 1: open at the least-recently-read member so every unread
@@ -1006,14 +1009,25 @@ describe("recordSeen marks previous articles seen across the list", () => {
       expect(seen["feed:3"]).toBeUndefined() // outside the filter — untouched
    })
 
-   it("never lowers another feed's frontier when scrubbing back to an older article", async () => {
+   it("never lowers ANY frontier when scrubbing back to an older article — the own feed included", async () => {
       // chron 0=ch1 1=ch2 2=ch1 3=ch2.
       setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }, { feedId: 2 }])
       await nav.fromHash("3") // chron 3 (ch2): all caught up to 3
       await nav.fromHash("0") // step back to chron 0 (ch1)
       const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
-      expect(seen["feed:1"]).toBe(0) // current feed tracks the exact resume position
-      expect(seen["feed:2"]).toBe(3) // kept its higher frontier — a one-way raise
+      // Re-reading an older article is not un-reading the newer ones: the seen
+      // frontier is raise-only everywhere — only the explicit markUnreadFrom
+      // rewinds it.
+      expect(seen["feed:1"]).toBe(3)
+      expect(seen["feed:2"]).toBe(3)
+   })
+
+   it("stamps a per-key ordering timestamp (srr-seen-ts) beside every frontier raise", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 2 }])
+      await nav.fromHash("1")
+      const st = JSON.parse(localStorage.getItem("srr-seen-ts") || "{}")
+      expect(st["feed:1"]).toBeGreaterThan(0)
+      expect(st["feed:2"]).toBeGreaterThan(0)
    })
 
    it("query (search) mode never advances the seen frontier", async () => {
@@ -1050,6 +1064,74 @@ describe("recordSeen marks previous articles seen across the list", () => {
       const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
       // Own feed's resume position must NOT rewind to 0.
       expect(seen).toEqual({ "feed:1": 2 })
+   })
+})
+
+describe("markAllRead / markUnreadFrom — the explicit frontier gestures", () => {
+   it("markAllRead raises every filter member to the newest chron, and only them", async () => {
+      data.db.feeds[1] = makeFeed({ id: 1, tag: "news" })
+      data.db.feeds[2] = makeFeed({ id: 2, tag: "news" })
+      data.db.feeds[3] = makeFeed({ id: 3 }) // untagged — outside the filter
+      // chron 0=ch1 1=ch3 2=ch2 3=ch1.
+      setupIndex([{ feedId: 1 }, { feedId: 3 }, { feedId: 2 }, { feedId: 1 }])
+      await nav.switchFilter("news") // never seen → opens at first(), frontier 0
+      expect(nav.markAllRead()).toBe(true)
+      const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
+      expect(seen["feed:1"]).toBe(3) // the store's newest chron — the same
+      expect(seen["feed:2"]).toBe(3) // foreign-chron high-water recordSeen writes
+      expect(seen["feed:3"]).toBeUndefined() // outside the filter — untouched
+      const st = JSON.parse(localStorage.getItem("srr-seen-ts") || "{}")
+      expect(st["feed:1"]).toBeGreaterThan(0)
+      // Idempotent: with everything already at the top there is nothing to raise.
+      expect(nav.markAllRead()).toBe(false)
+   })
+
+   it("markAllRead is a no-op in peek modes (saved/search)", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }])
+      localStorage.setItem("srr-saved", JSON.stringify([0]))
+      await nav.switchFilter(nav.SAVED_TOKEN)
+      expect(nav.markAllRead()).toBe(false)
+      expect(JSON.parse(localStorage.getItem("srr-seen") || "{}")).toEqual({})
+   })
+
+   it("markUnreadFrom lowers every member frontier at-or-past the position to chron−1, leaving lower ones alone", async () => {
+      data.db.feeds[1] = makeFeed({ id: 1, tag: "news" })
+      data.db.feeds[2] = makeFeed({ id: 2, tag: "news" })
+      // chron 0=ch1 1=ch2 2=ch1 3=ch2.
+      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }, { feedId: 2 }])
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 3, "feed:2": 1 }))
+      await nav.fromHash("2!news") // reader at chron 2 (recordSeen raises ch2 1→2)
+      expect(nav.markUnreadFrom(2)).toBe(true)
+      const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
+      // Everything from chron 2 to the latest is unread again for the lane.
+      expect(seen["feed:1"]).toBe(1)
+      expect(seen["feed:2"]).toBe(1)
+      expect(nav.isRowUnread(2, 1, seen)).toBe(true)
+      expect(nav.isRowUnread(3, 2, seen)).toBe(true)
+      expect(nav.isRowUnread(0, 1, seen)).toBe(false) // older read stays read
+   })
+
+   it("markUnreadFrom(0) stores −1 (never-seen equivalent) and keeps its ordering timestamp", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }])
+      await nav.fromHash("1") // raises feed:1 to 1
+      expect(nav.markUnreadFrom(0)).toBe(true)
+      const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
+      // −1 reads as never-seen everywhere, but the KEY survives so its st
+      // timestamp can outrank older raises on other devices (sync's per-key LWW).
+      expect(seen["feed:1"]).toBe(-1)
+      expect(nav.isRowUnread(0, 1, seen)).toBe(true)
+      const st = JSON.parse(localStorage.getItem("srr-seen-ts") || "{}")
+      expect(st["feed:1"]).toBeGreaterThan(0)
+   })
+
+   it("markUnreadFrom is a no-op in peek modes and below zero", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }])
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 1 }))
+      localStorage.setItem("srr-saved", JSON.stringify([0]))
+      await nav.switchFilter(nav.SAVED_TOKEN)
+      expect(nav.markUnreadFrom(0)).toBe(false)
+      expect(nav.markUnreadFrom(-1)).toBe(false)
+      expect(JSON.parse(localStorage.getItem("srr-seen") || "{}")).toEqual({ "feed:1": 1 })
    })
 })
 

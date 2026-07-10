@@ -134,6 +134,7 @@ vi.mock("./fmt", () => ({
    srcColorIndex: (id: number) => id % 8,
    // Two chrons per "day" so a small fixture spans multiple strata.
    dayLabel: (n: number) => "D" + Math.floor(n / 2),
+   CHECK_SVG: "<svg></svg>",
 }))
 
 type List = typeof import("./list")

@@ -8,14 +8,26 @@
 // in data.ts's eager db.gz fetch as a side effect, which makes the module
 // unit-testable without a running pack server.
 //
-// Import strategy — two modes:
+// Import strategy — two modes, sharing ONE per-key seen rule:
+//   seen — per-key LWW by the `st` (seen-ts) side map, falling back to
+//      Math.max() when either side lacks a key's timestamp. `st` stamps the
+//      unix-second of each key's last LOCAL mutation (nav.ts writes it beside
+//      every seen write), so a key whose incoming timestamp is strictly newer
+//      wins IN EITHER DIRECTION — that's what lets an explicit "mark unread
+//      from here" rewind (nav.markUnreadFrom) survive the next pull instead of
+//      being re-raised by a max-merge. Keys without a timestamp on both sides
+//      (v1 blobs, pre-upgrade v2 blobs, pre-upgrade local state) keep the
+//      legacy raise-only max — an implicit rewind still cannot happen; only
+//      the explicit, freshly-stamped kind propagates. Adopting a remote value
+//      adopts its timestamp verbatim (never re-stamped to now — the ordering
+//      belongs to the device where the person acted).
 //   merge (default; always for v1 — file restores) —
-//      seen  — per-key Math.max() merge (one-way raise; never lowers progress)
+//      seen  — the per-key rule above
 //      saved — set union, re-sorted ascending
 //      prefs — last-writer-wins, gated by opts.prefs (opt-in checkbox)
 //   sync (mode:"sync" + v2 — a sync.ts pull) — the one-reader hybrid:
-//      seen  — per-key Math.max() like merge, but WITHOUT stamping `ts`: the
-//              raise came from the remote, not from a local user action, and
+//      seen  — the per-key rule above, but WITHOUT stamping `ts`: the change
+//              came from the remote, not from a local user action, and
 //              stamping would make this device "newest" and steal the saved-LWW
 //              ordering from the device where the person actually acted (same
 //              reasoning as the prefs-don't-stamp rule on profileTs below).
@@ -25,11 +37,12 @@
 //              converges to max(local, blob).
 //      prefs — gated by opts.prefs exactly as in merge mode; sync.ts just
 //      always passes prefs:false (see profileTs's comment below for why).
-// There is deliberately NO mode that can LOWER seen — all devices belong to one
-// reader, whose true read state is the union of what they read anywhere, so
-// read progress is raise-only everywhere.
+// The ONLY path that can LOWER seen is a strictly newer per-key `st` — the
+// explicit rewind a person asked for on some device. Everything else stays
+// raise-only: all devices belong to one reader, whose read state is the union
+// of what they read anywhere plus their latest explicit rewinds.
 
-import { IMG_PROXY_KEY, PROFILE_TS_KEY, SAVED_KEY, SEEN_KEY, UNREAD_ONLY_KEY } from "./keys"
+import { IMG_PROXY_KEY, PROFILE_TS_KEY, SAVED_KEY, SEEN_KEY, SEEN_TS_KEY, UNREAD_ONLY_KEY } from "./keys"
 
 function lsGet(key: string): string {
    try {
@@ -52,6 +65,29 @@ function readSeen(): Record<string, number> {
    } catch {
       return {}
    }
+}
+
+// The per-key seen timestamps (srr-seen-ts): unix-second of each seen key's
+// last local mutation, written by nav.ts beside every seen write. Absent key
+// == 0 == "no ordering information" (pre-upgrade state) — merges fall back to
+// the legacy raise-only max for it.
+function readSeenTs(): Record<string, number> {
+   try {
+      const raw = lsGet(SEEN_TS_KEY)
+      return raw ? JSON.parse(raw) : {}
+   } catch {
+      return {}
+   }
+}
+
+// Parse an incoming st-shaped value (a blob's `st` field) into a clean map;
+// anything malformed degrades to {} (every key then merges by legacy max).
+function cleanTsMap(incoming: unknown): Record<string, number> {
+   const out: Record<string, number> = {}
+   if (incoming === null || typeof incoming !== "object" || Array.isArray(incoming)) return out
+   for (const [k, v] of Object.entries(incoming as Record<string, unknown>))
+      if (typeof v === "number" && Number.isFinite(v) && v > 0) out[k] = Math.floor(v)
+   return out
 }
 
 function readSavedSorted(): number[] {
@@ -80,6 +116,12 @@ export function touchProfile(now = Math.floor(Date.now() / 1000)): void {
 // The parsed local seen map — sync.ts's regression guard compares blobs by it.
 export function localSeen(): Record<string, number> {
    return readSeen()
+}
+
+// The parsed per-key seen timestamps — sync.ts's behind/guard comparisons pair
+// them with localSeen().
+export function localSeenTs(): Record<string, number> {
+   return readSeenTs()
 }
 
 // isValidProxy / normalizeProxy mirror fmt.ts's behaviour exactly. profile.ts
@@ -112,37 +154,59 @@ export interface ImportResult {
    changed?: boolean
 }
 
-// seen — one-way per-key raise, shared verbatim by both import modes; returns
-// whether anything actually rose (a stale blob that moves nothing is a no-op).
-function raiseSeen(incoming: unknown): boolean {
+// seen — the per-key rule shared verbatim by both import modes: a key whose
+// incoming `st` timestamp is strictly newer than the local one wins in either
+// direction (raise or explicit rewind); a key without a timestamp on either
+// side falls back to the legacy one-way max. Adopting an incoming value adopts
+// its timestamp verbatim (or drops the local one when the incoming side has
+// none — the value's ordering is then genuinely unknown). Returns whether any
+// seen VALUE actually changed (timestamp-only convergence is not a change).
+function mergeSeen(incoming: unknown, incomingTs: Record<string, number>): boolean {
    try {
       if (incoming === null || typeof incoming !== "object" || Array.isArray(incoming)) return false
       const existing = readSeen()
+      const existingTs = readSeenTs()
       let changed = false
+      let tsChanged = false
       for (const [k, v] of Object.entries(incoming as Record<string, unknown>)) {
-         if (typeof v === "number" && Number.isFinite(v)) {
-            const nv = Math.max(existing[k] ?? -1, v)
-            if (nv !== existing[k]) {
-               existing[k] = nv
-               changed = true
-            }
+         if (typeof v !== "number" || !Number.isFinite(v)) continue
+         const localV = existing[k]
+         const localTs = existingTs[k] ?? 0
+         const remoteTs = incomingTs[k] ?? 0
+         // Both sides carry ordering info and disagree → strict LWW (this is
+         // the one path that can lower a value: an explicit rewind). Otherwise
+         // legacy raise-only max — and when the max ADOPTS the incoming value,
+         // its timestamp (or lack of one) comes along.
+         const adopt = localTs > 0 && remoteTs > 0 && remoteTs !== localTs ? remoteTs > localTs : v > (localV ?? -1) // tie or no ordering → one-way raise
+         if (!adopt) continue
+         if (v !== localV) {
+            existing[k] = v
+            changed = true
+         }
+         if (remoteTs !== localTs) {
+            if (remoteTs > 0) existingTs[k] = remoteTs
+            else delete existingTs[k]
+            tsChanged = true
          }
       }
       if (changed) lsSet(SEEN_KEY, JSON.stringify(existing))
+      if (tsChanged) lsSet(SEEN_TS_KEY, JSON.stringify(existingTs))
       return changed
    } catch {
       return false
    }
 }
 
-// exportProfile serialises all four portable keys plus the LWW `ts` into a
-// v:2 blob. srr-hash is never included.
+// exportProfile serialises all four portable keys plus the LWW `ts` and the
+// per-key seen timestamps `st` into a v:2 blob (st is additive — old builds
+// ignore it and keep their raise-only max, so the version needs no bump).
+// srr-hash is never included.
 export function exportProfile(): string {
    const seen = readSeen()
    const saved = readSavedSorted()
    const unreadOnly = lsGet(UNREAD_ONLY_KEY) === "1"
    const imgProxy = lsGet(IMG_PROXY_KEY)
-   return JSON.stringify({ v: 2, ts: profileTs(), seen, saved, unreadOnly, imgProxy })
+   return JSON.stringify({ v: 2, ts: profileTs(), seen, st: readSeenTs(), saved, unreadOnly, imgProxy })
 }
 
 // importProfile parses `json` and applies it to the current device's state.
@@ -176,10 +240,11 @@ export function importProfile(json: string, opts: { prefs: boolean; mode?: "merg
    }
 
    let changed = false
+   const incomingSt = cleanTsMap(obj["st"])
    if (opts.mode === "sync" && obj["v"] === 2) {
       // ── sync (one-reader hybrid pull) — NOT for file restores; those go
       // through the merge branch below even on a v2 blob (opts.mode unset).
-      changed = raiseSeen(obj["seen"]) // seen rises, ts deliberately untouched
+      changed = mergeSeen(obj["seen"], incomingSt) // per-key rule, ts deliberately untouched
       const tsRaw = obj["ts"]
       const blobTs = typeof tsRaw === "number" && Number.isFinite(tsRaw) && tsRaw > 0 ? Math.floor(tsRaw) : 0
       if (blobTs > profileTs()) {
@@ -202,9 +267,10 @@ export function importProfile(json: string, opts: { prefs: boolean; mode?: "merg
    } else {
       // ── merge (v1, or v2 without mode:"sync" — a file restore) ─────────────
 
-      // seen — one-way raise. Only a real raise counts as a change: a stale
-      // restore that moves nothing must not stamp `ts` (see below).
-      if (raiseSeen(obj["seen"])) changed = true
+      // seen — the shared per-key rule (raise, or an st-ordered explicit
+      // rewind). Only a real value change counts: a stale restore that moves
+      // nothing must not stamp `ts` (see below).
+      if (mergeSeen(obj["seen"], incomingSt)) changed = true
 
       // saved — union, sorted
       try {

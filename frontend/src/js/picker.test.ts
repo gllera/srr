@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
 
-// config.ts owns the config surface (filter picker + unread toggle + settings +
-// status). It reads DOM refs inside setup(), so the skeleton is seeded first; the
-// module holds per-instance state (status cache, fill token), so each test gets a
-// fresh instance via vi.resetModules() + dynamic import.
+// picker.ts owns the filter-picker overlay (feed / tag rows + info dialogs) and
+// the renderStatus builder the settings menu borrows for its footer. It reads
+// DOM refs inside setup(), so the skeleton is seeded first; the module holds
+// per-instance state (fill tokens, focus restore), so each test gets a fresh
+// instance via vi.resetModules() + dynamic import.
 const data = vi.hoisted(() => {
    const mock = {
       db: { feeds: {} } as IDB,
@@ -21,7 +22,6 @@ const nav = vi.hoisted(() => ({
    getCurrentFilterKey: vi.fn(() => ""),
    savedCount: vi.fn(() => 0),
    SAVED_TOKEN: "~saved",
-   searchAvailable: vi.fn(() => true),
    isUnreadOnly: vi.fn(() => false),
    setUnreadOnly: vi.fn<(on: boolean) => void>(),
    unreadCounts: vi.fn<(chs: IFeed[]) => Promise<Map<number, number>>>(async () => new Map()),
@@ -42,35 +42,24 @@ vi.mock("./fmt", () => ({
 }))
 import { isStale } from "./fmt"
 
-// The sync status readout consumed by the status footer.
+// The sync status readout consumed by renderStatus.
 const sync = vi.hoisted(() => ({
    state: vi.fn(() => ({ on: false, okAt: 0, error: "" })),
 }))
 vi.mock("./sync", () => sync)
 
-// config.ts reads refresh.lastRefreshError() in its status footer; the live
-// content refresh itself is app.ts's wiring, so the status source is all config
-// needs here.
+// picker.ts reads refresh.lastRefreshError() in renderStatus; the live content
+// refresh itself is app.ts's wiring, so the status source is all picker needs.
 vi.mock("./refresh", () => ({ lastRefreshError: () => "" }))
 
-type Config = typeof import("./config")
+type Picker = typeof import("./picker")
 
 const SKELETON =
-   `<section class="srr-config" hidden>` +
-   `<header class="srr-config-head"><h2 class="srr-config-title">Settings</h2>` +
-   `<button class="srr-config-close"></button></header>` +
-   `<div class="srr-config-body">` +
-   `<div class="srr-config-actions">` +
-   `<button class="srr-config-search"></button>` +
-   `<button class="srr-config-unread" aria-pressed="false"></button>` +
-   `<button class="srr-config-imgproxy"></button>` +
-   `<button class="srr-config-backup"></button>` +
-   `<button class="srr-config-sync"></button>` +
-   `</div>` +
-   `<div class="srr-config-settings"></div>` +
-   `<div class="srr-config-filter"></div>` +
-   `<div class="srr-config-status"></div>` +
-   `</div></section>` +
+   `<section class="srr-picker" hidden>` +
+   `<header class="srr-picker-head"><h2 class="srr-picker-title">Feeds</h2>` +
+   `<button class="srr-picker-close"></button></header>` +
+   `<div class="srr-picker-filter"></div>` +
+   `</section>` +
    `<div class="srr-info-dialog">` +
    `<div class="srr-info-card"><header class="srr-info-head">` +
    `<h2 class="srr-info-title"></h2><button class="srr-info-close"></button></header>` +
@@ -84,31 +73,23 @@ const $$ = <T extends HTMLElement>(sel: string) => [...document.querySelectorAll
 const flush = () => new Promise((r) => setTimeout(r, 0)) // let fillUnread's await settle
 
 const hooks = {
-   onSearch: vi.fn(),
    onSelect: vi.fn(),
-   onUnreadToggle: vi.fn(),
    onClose: vi.fn(),
-   pinEntry: vi.fn<() => { label: string; action: () => void } | null>(() => null),
-   openImgProxy: vi.fn(),
-   openBackup: vi.fn(),
-   openSync: vi.fn(),
 }
 
-async function mount(): Promise<Config> {
+async function mount(): Promise<Picker> {
    document.body.innerHTML = SKELETON
    vi.resetModules()
-   const config = await import("./config")
-   config.setup($(".srr-config"), hooks)
-   return config
+   const picker = await import("./picker")
+   picker.setup($(".srr-picker"), hooks)
+   return picker
 }
 
 beforeEach(() => {
    vi.clearAllMocks()
-   // jsdom has no real scroll; keep scrollTo a no-op spy (open() scrolls to top).
-   window.scrollTo = vi.fn()
+   data.db.feeds = {} // plain shared state, not a mock — reset by hand
    nav.getCurrentFilterKey.mockReturnValue("")
    nav.savedCount.mockReturnValue(0)
-   nav.searchAvailable.mockReturnValue(true)
    nav.isUnreadOnly.mockReturnValue(false)
    nav.unreadCounts.mockResolvedValue(new Map())
    data.groupFeedsByTag.mockReturnValue({ tagged: new Map(), sortedTags: [], untagged: [] })
@@ -118,50 +99,39 @@ beforeEach(() => {
    data.idxSummaryDegraded.mockReturnValue(false)
    ;(isStale as ReturnType<typeof vi.fn>).mockReturnValue(false)
    sync.state.mockReturnValue({ on: false, okAt: 0, error: "" })
-   hooks.pinEntry.mockReturnValue(null)
 })
 
 describe("open / close", () => {
-   it("open reveals the surface and close hides it", async () => {
-      const config = await mount()
-      expect($(".srr-config").hidden).toBe(true)
-      config.open()
-      expect($(".srr-config").hidden).toBe(false)
-      expect(config.isOpen()).toBe(true)
-      config.close()
-      expect($(".srr-config").hidden).toBe(true)
-      expect(config.isOpen()).toBe(false)
+   it("open reveals the overlay and close hides it", async () => {
+      const picker = await mount()
+      expect($(".srr-picker").hidden).toBe(true)
+      picker.open()
+      expect($(".srr-picker").hidden).toBe(false)
+      expect(picker.isOpen()).toBe(true)
+      picker.close()
+      expect($(".srr-picker").hidden).toBe(true)
+      expect(picker.isOpen()).toBe(false)
    })
 
    it("the close button fires onClose", async () => {
-      const config = await mount()
-      config.open()
-      $(".srr-config-close").click()
+      const picker = await mount()
+      picker.open()
+      $(".srr-picker-close").click()
       expect(hooks.onClose).toHaveBeenCalledTimes(1)
    })
 
-   it("open scrolls the window to the top (config stacks over a scrolled list)", async () => {
-      const config = await mount()
-      config.open()
-      expect(window.scrollTo).toHaveBeenCalledWith(0, 0)
-   })
-})
-
-describe("search row", () => {
-   it("fires onSearch when tapped and is enabled while search is available", async () => {
-      const config = await mount()
-      config.open()
-      const btn = $<HTMLButtonElement>(".srr-config-search")
-      expect(btn.disabled).toBe(false)
-      btn.click()
-      expect(hooks.onSearch).toHaveBeenCalledTimes(1)
-   })
-
-   it("is disabled while the search index is unavailable (rebuilding)", async () => {
-      nav.searchAvailable.mockReturnValue(false)
-      const config = await mount()
-      config.open()
-      expect($<HTMLButtonElement>(".srr-config-search").disabled).toBe(true)
+   it("open focuses the overlay container; close restores focus to the opener", async () => {
+      const picker = await mount()
+      // Simulate the toolbar readout that opened the overlay.
+      const opener = document.createElement("button")
+      document.body.appendChild(opener)
+      opener.focus()
+      picker.open()
+      // Container focus (not a row) — Escape lands in the picker without
+      // painting a filter row pre-selected.
+      expect(document.activeElement).toBe($(".srr-picker"))
+      picker.close()
+      expect(document.activeElement).toBe(opener)
    })
 })
 
@@ -172,11 +142,11 @@ describe("filter list", () => {
          sortedTags: [],
          untagged: [feed({ id: 5, title: "Feed5" })],
       })
-      const config = await mount()
-      config.open()
-      const all = $<HTMLAnchorElement>('.srr-config-filter a[data-value=""]')
+      const picker = await mount()
+      picker.open()
+      const all = $<HTMLAnchorElement>('.srr-picker-filter a[data-value=""]')
       expect(all.textContent).toContain("[ALL]")
-      $<HTMLAnchorElement>('.srr-config-filter a[data-value="5"]').dispatchEvent(
+      $<HTMLAnchorElement>('.srr-picker-filter a[data-value="5"]').dispatchEvent(
          new MouseEvent("click", { bubbles: true, cancelable: true }),
       )
       expect(hooks.onSelect).toHaveBeenCalledWith("5")
@@ -186,23 +156,23 @@ describe("filter list", () => {
 
    it("lists empty feeds (includeEmpty) only when read items are shown (unread-only off)", async () => {
       nav.isUnreadOnly.mockReturnValue(false) // read items shown → empty feeds too
-      const config = await mount()
-      config.open()
+      const picker = await mount()
+      picker.open()
       expect(data.groupFeedsByTag).toHaveBeenCalledWith(true)
 
       data.groupFeedsByTag.mockClear()
       nav.isUnreadOnly.mockReturnValue(true) // unread-only → feeds with articles only
-      config.render()
+      picker.render()
       expect(data.groupFeedsByTag).toHaveBeenCalledWith(false)
    })
 
    it("shows a ★ Saved row only when something is saved", async () => {
-      const config = await mount()
-      config.open()
-      expect($(".srr-config-filter").querySelector('a[data-value="~saved"]')).toBeNull()
+      const picker = await mount()
+      picker.open()
+      expect($(".srr-picker-filter").querySelector('a[data-value="~saved"]')).toBeNull()
       nav.savedCount.mockReturnValue(4)
-      config.render()
-      const saved = $<HTMLAnchorElement>('.srr-config-filter a[data-value="~saved"]')
+      picker.render()
+      const saved = $<HTMLAnchorElement>('.srr-picker-filter a[data-value="~saved"]')
       expect(saved.textContent).toContain("★ Saved")
    })
 
@@ -212,11 +182,11 @@ describe("filter list", () => {
          sortedTags: ["news"],
          untagged: [],
       })
-      const config = await mount()
-      config.open()
-      const group = $(".srr-config-filter .srr-tag-group")
+      const picker = await mount()
+      picker.open()
+      const group = $(".srr-picker-filter .srr-tag-group")
       expect(group.classList.contains("srr-tag-collapsed")).toBe(true) // not the active tag
-      $(".srr-config-filter .srr-tag-toggle").dispatchEvent(
+      $(".srr-picker-filter .srr-tag-toggle").dispatchEvent(
          new MouseEvent("click", { bubbles: true, cancelable: true }),
       )
       expect(group.classList.contains("srr-tag-collapsed")).toBe(false)
@@ -236,13 +206,45 @@ describe("filter list", () => {
             [2, 0],
          ]),
       )
-      const config = await mount()
-      config.open()
+      const picker = await mount()
+      picker.open()
       await flush()
-      const has = $<HTMLAnchorElement>('.srr-config-filter a[data-value="1"]')
-      const none = $<HTMLAnchorElement>('.srr-config-filter a[data-value="2"]')
+      const has = $<HTMLAnchorElement>('.srr-picker-filter a[data-value="1"]')
+      const none = $<HTMLAnchorElement>('.srr-picker-filter a[data-value="2"]')
       expect(has.querySelector(".srr-unread")!.textContent).toBe("3")
       expect(none.classList.contains("srr-hidden")).toBe(true) // 0 unread, hidden in unread-only
+   })
+
+   it("badges [ALL] with the total unread across every listed feed", async () => {
+      data.groupFeedsByTag.mockReturnValue({
+         tagged: new Map([["news", [feed({ id: 1, title: "A", tag: "news" })]]]),
+         sortedTags: ["news"],
+         untagged: [feed({ id: 2, title: "B" })],
+      })
+      nav.unreadCounts.mockResolvedValue(
+         new Map([
+            [1, 3],
+            [2, 4],
+         ]),
+      )
+      const picker = await mount()
+      picker.open()
+      await flush()
+      const all = $<HTMLAnchorElement>('.srr-picker-filter a[data-value=""]')
+      expect(all.querySelector(".srr-unread")!.textContent).toBe("7")
+   })
+
+   it("leaves [ALL] unnumbered when everything is read (badge only above zero)", async () => {
+      data.groupFeedsByTag.mockReturnValue({
+         tagged: new Map(),
+         sortedTags: [],
+         untagged: [feed({ id: 1, title: "A" })],
+      })
+      nav.unreadCounts.mockResolvedValue(new Map([[1, 0]]))
+      const picker = await mount()
+      picker.open()
+      await flush()
+      expect($<HTMLAnchorElement>('.srr-picker-filter a[data-value=""]').querySelector(".srr-unread")).toBeNull()
    })
 
    it("marks a feed with a fetch error by tinting its label, no leading dot", async () => {
@@ -251,9 +253,9 @@ describe("filter list", () => {
          sortedTags: [],
          untagged: [feed({ id: 9, title: "Broken", ferr: "boom" })],
       })
-      const config = await mount()
-      config.open()
-      const row = $<HTMLAnchorElement>('.srr-config-filter a[data-value="9"]')
+      const picker = await mount()
+      picker.open()
+      const row = $<HTMLAnchorElement>('.srr-picker-filter a[data-value="9"]')
       // Health rides on data-grade (CSS tints the label and ⓘ button); no leading
       // dot that would shift the title rightward and misalign the list.
       expect(row.dataset.grade).toBe("crit")
@@ -268,9 +270,9 @@ describe("filter list", () => {
          // last_ok well past the crit staleness window, no ferr.
          untagged: [feed({ id: 7, title: "Stale", last_ok: 1 })],
       })
-      const config = await mount()
-      config.open()
-      const row = $<HTMLAnchorElement>('.srr-config-filter a[data-value="7"]')
+      const picker = await mount()
+      picker.open()
+      const row = $<HTMLAnchorElement>('.srr-picker-filter a[data-value="7"]')
       expect(row.dataset.grade).toBe("crit")
       // No ferr, but the row still exposes a non-color text cue.
       expect(row.title).not.toBe("")
@@ -288,9 +290,9 @@ describe("filter list", () => {
          sortedTags: ["news"],
          untagged: [],
       })
-      const config = await mount()
-      config.open()
-      expect($<HTMLAnchorElement>(".srr-config-filter .srr-tag-header").dataset.grade).toBe("crit")
+      const picker = await mount()
+      picker.open()
+      expect($<HTMLAnchorElement>(".srr-picker-filter .srr-tag-header").dataset.grade).toBe("crit")
    })
 
    it("leaves a healthy feed untinted (no data-grade, untinted ⓘ)", async () => {
@@ -299,27 +301,63 @@ describe("filter list", () => {
          sortedTags: [],
          untagged: [feed({ id: 9, title: "Fine" })],
       })
-      const config = await mount()
-      config.open()
-      const row = $<HTMLAnchorElement>('.srr-config-filter a[data-value="9"]')
+      const picker = await mount()
+      picker.open()
+      const row = $<HTMLAnchorElement>('.srr-picker-filter a[data-value="9"]')
       expect(row.dataset.grade).toBeUndefined()
    })
 })
 
 describe("info dialog", () => {
-   it("puts an ⓘ details button on feed rows only (not tags / [ALL] / ★ Saved)", async () => {
+   it("puts an ⓘ details button on feed rows and [ALL] (not tags / ★ Saved)", async () => {
       nav.savedCount.mockReturnValue(1)
       data.groupFeedsByTag.mockReturnValue({
          tagged: new Map([["news", [feed({ id: 1, title: "A", tag: "news" })]]]),
          sortedTags: ["news"],
          untagged: [feed({ id: 5, title: "Feed5" })],
       })
-      const config = await mount()
-      config.open()
-      expect($('.srr-config-filter a[data-value="5"] .srr-info-btn')).not.toBeNull()
-      expect($(".srr-config-filter .srr-tag-header").querySelector(".srr-info-btn")).toBeNull()
-      expect($('.srr-config-filter a[data-value=""]').querySelector(".srr-info-btn")).toBeNull()
-      expect($('.srr-config-filter a[data-value="~saved"]').querySelector(".srr-info-btn")).toBeNull()
+      const picker = await mount()
+      picker.open()
+      expect($('.srr-picker-filter a[data-value="5"] .srr-info-btn')).not.toBeNull()
+      expect($('.srr-picker-filter a[data-value=""]').querySelector(".srr-info-btn")).not.toBeNull()
+      expect($(".srr-picker-filter .srr-tag-header").querySelector(".srr-info-btn")).toBeNull()
+      expect($('.srr-picker-filter a[data-value="~saved"]').querySelector(".srr-info-btn")).toBeNull()
+   })
+
+   it("opens the store-wide card from [ALL]'s ⓘ — inventory, health census, live unread", async () => {
+      const a = feed({ id: 1, title: "A", tag: "news", total_art: 10, xp: 2 })
+      const b = feed({ id: 2, title: "B", ferr: "boom" }) // crit; total_art 1
+      data.db.feeds = { 1: a, 2: b }
+      data.groupFeedsByTag.mockReturnValue({
+         tagged: new Map([["news", [a]]]),
+         sortedTags: ["news"],
+         untagged: [b],
+      })
+      nav.savedCount.mockReturnValue(3)
+      nav.unreadCounts.mockResolvedValue(
+         new Map([
+            [1, 4],
+            [2, 1],
+         ]),
+      )
+      const picker = await mount()
+      picker.open()
+      $('.srr-picker-filter a[data-value=""] .srr-info-btn').dispatchEvent(
+         new MouseEvent("click", { bubbles: true, cancelable: true }),
+      )
+      await flush()
+      expect($(".srr-info-title").textContent).toBe("All feeds")
+      const rows = new Map($$(".srr-info-grid dt").map((dt) => [dt.textContent, dt.nextElementSibling!.textContent]))
+      expect(rows.get("Feeds")).toBe("2")
+      expect(rows.get("Tags")).toBe("1")
+      expect(rows.get("Articles")).toBe("9") // live: (10−2) + 1, expired excluded
+      expect(rows.get("Saved")).toBe("3")
+      expect(rows.get("Healthy")).toBe("1")
+      expect(rows.get("Error")).toBe("1")
+      expect(rows.has("Stale")).toBe(false) // zero problem rows stay absent
+      expect(rows.get("Search index")).toBe("Ready")
+      expect($(".srr-info-unread").textContent).toBe("5") // async store-wide sum
+      expect(hooks.onSelect).not.toHaveBeenCalled() // ⓘ never selects the row
    })
 
    it("opens a feed detail card with its fields and live unread, without selecting the row", async () => {
@@ -329,9 +367,9 @@ describe("info dialog", () => {
          untagged: [feed({ id: 5, title: "Feed5", url: "http://example.com/rss", recipe: "default", total_art: 12 })],
       })
       nav.unreadCounts.mockResolvedValue(new Map([[5, 7]]))
-      const config = await mount()
-      config.open()
-      $('.srr-config-filter a[data-value="5"] .srr-info-btn').dispatchEvent(
+      const picker = await mount()
+      picker.open()
+      $('.srr-picker-filter a[data-value="5"] .srr-info-btn').dispatchEvent(
          new MouseEvent("click", { bubbles: true, cancelable: true }),
       )
       expect(hooks.onSelect).not.toHaveBeenCalled() // ⓘ is not a row selection
@@ -351,9 +389,9 @@ describe("info dialog", () => {
          untagged: [feed({ id: 5, title: "Feed5", url: "http://example.com/rss", total_art: 10, xp: 4 })],
       })
       nav.unreadCounts.mockResolvedValue(new Map([[5, 0]]))
-      const config = await mount()
-      config.open()
-      $('.srr-config-filter a[data-value="5"] .srr-info-btn').dispatchEvent(
+      const picker = await mount()
+      picker.open()
+      $('.srr-picker-filter a[data-value="5"] .srr-info-btn').dispatchEvent(
          new MouseEvent("click", { bubbles: true, cancelable: true }),
       )
       // dt "Articles" and dd "6" concatenate in textContent.
@@ -361,115 +399,69 @@ describe("info dialog", () => {
    })
 })
 
-describe("unread toggle", () => {
-   // Inverted toggle: the "Read" button is pressed only when read articles are
-   // ALSO shown (unread-only off), unpressed in the unread-only default.
-   it("is NOT pressed in the unread-only default and fires onUnreadToggle on click", async () => {
-      nav.isUnreadOnly.mockReturnValue(true)
-      const config = await mount()
-      config.open()
-      const btn = $<HTMLButtonElement>(".srr-config-unread")
-      expect(btn.getAttribute("aria-pressed")).toBe("false")
-      btn.click()
-      expect(hooks.onUnreadToggle).toHaveBeenCalledTimes(1)
-   })
+describe("renderStatus (the settings menu's footer)", () => {
+   // renderStatus fills a caller-owned node — app.ts builds the footer div per
+   // menu open and hands it to showContextMenu.
+   let box: HTMLElement
+   const render = async () => {
+      const picker = await mount()
+      box = document.createElement("div")
+      picker.renderStatus(box)
+      return picker
+   }
+   const flagText = () => [...box.querySelectorAll(".srr-status-flag")].map((f) => f.textContent)
+   const noteText = () => [...box.querySelectorAll(".srr-status-note")].map((n) => n.textContent)
 
-   it("is pressed when unread-only is off (read articles are shown)", async () => {
-      nav.isUnreadOnly.mockReturnValue(false)
-      const config = await mount()
-      config.open()
-      expect($<HTMLButtonElement>(".srr-config-unread").getAttribute("aria-pressed")).toBe("true")
-   })
-})
-
-describe("quick actions + settings", () => {
-   it("fires openBackup / openImgProxy / openSync when their icon buttons are tapped", async () => {
-      const config = await mount()
-      config.open()
-      $<HTMLButtonElement>(".srr-config-backup").click()
-      expect(hooks.openBackup).toHaveBeenCalledTimes(1)
-      $<HTMLButtonElement>(".srr-config-imgproxy").click()
-      expect(hooks.openImgProxy).toHaveBeenCalledTimes(1)
-      $<HTMLButtonElement>(".srr-config-sync").click()
-      expect(hooks.openSync).toHaveBeenCalledTimes(1)
-   })
-
-   it("renders no settings rows when pinEntry is null", async () => {
-      const config = await mount()
-      config.open()
-      expect(document.querySelectorAll(".srr-config-settings .srr-config-action").length).toBe(0)
-   })
-
-   it("renders the offline-pin row from pinEntry and runs its action", async () => {
-      const action = vi.fn()
-      hooks.pinEntry.mockReturnValue({ label: "Download for offline", action })
-      const config = await mount()
-      config.open()
-      const pin = [...document.querySelectorAll<HTMLButtonElement>(".srr-config-settings .srr-config-action")].find(
-         (b) => b.textContent === "Download for offline",
-      )!
-      pin.click()
-      expect(action).toHaveBeenCalledTimes(1)
-   })
-})
-
-describe("status section", () => {
-   const text = () => $(".srr-config-status").textContent
-   const flagText = () => $$(".srr-status-flag").map((f) => f.textContent)
-
-   it("shows the freshness line when healthy (no flag)", async () => {
+   it("shows the freshness line relative-only when healthy (no flag, no absolute date)", async () => {
       data.lastFetchedAt.mockReturnValue(100)
-      const config = await mount()
-      config.render()
-      expect($(".srr-status-fresh").textContent).toBe("Last updated D100 · ago100")
-      expect($$(".srr-status-flag")).toHaveLength(0)
+      await render()
+      // Relative time only — the absolute date would crowd a menu footer.
+      expect(box.querySelector(".srr-status-fresh")!.textContent).toBe("Updated ago100")
+      expect(box.textContent).not.toContain("D100")
+      expect(flagText()).toHaveLength(0)
    })
 
    it("flags a stale fetch in user-facing terms (no 'backend')", async () => {
       data.lastFetchedAt.mockReturnValue(100)
       ;(isStale as ReturnType<typeof vi.fn>).mockReturnValue(true)
-      const config = await mount()
-      config.render()
+      await render()
       expect(flagText()).toContain("Feed updates may have paused")
-      expect(text()).not.toContain("backend")
+      expect(box.textContent).not.toContain("backend")
    })
 
    it("flags a rebuilding search index and a degrading idx", async () => {
       data.lastFetchedAt.mockReturnValue(100)
       data.metaReady.mockReturnValue(false)
       data.idxSummaryDegraded.mockReturnValue(true)
-      const config = await mount()
-      config.render()
+      await render()
       expect(flagText()).toContain("Search unavailable while the index rebuilds")
-      expect($(".srr-status-note").textContent).toBe("Optimizing for faster loading…")
+      expect(noteText()).toContain("Optimizing for faster loading…")
    })
 
    it("reports sync state only when a sync endpoint is configured", async () => {
       data.lastFetchedAt.mockReturnValue(100)
-      const config = await mount()
-      config.render()
-      expect(text()).not.toContain("Sync") // off → silent
+      const picker = await render()
+      expect(box.textContent).not.toContain("Sync") // off → silent
 
       sync.state.mockReturnValue({ on: true, okAt: 0, error: "" })
-      config.render()
-      expect($$(".srr-status-note").map((n) => n.textContent)).toContain("Sync pending…")
+      picker.renderStatus(box)
+      expect(noteText()).toContain("Sync pending…")
 
       sync.state.mockReturnValue({ on: true, okAt: 200, error: "" })
-      config.render()
-      expect($$(".srr-status-note").map((n) => n.textContent)).toContain("Synced ago200")
+      picker.renderStatus(box)
+      expect(noteText()).toContain("Synced ago200")
 
       sync.state.mockReturnValue({ on: true, okAt: 200, error: "HTTP 401" })
-      config.render()
+      picker.renderStatus(box)
       expect(flagText()).toContain("Sync failed — HTTP 401")
    })
 
    it("always shows the build version, even before anything is fetched", async () => {
       // SRR_VERSION is a build-time define; vitest.shared.ts pins it to "test".
       data.lastFetchedAt.mockReturnValue(0)
-      const config = await mount()
-      config.render()
-      expect($(".srr-status-version").textContent).toBe("srr test")
+      await render()
+      expect(box.querySelector(".srr-status-version")!.textContent).toBe("srr test")
       // …and it is the ONLY status content on an empty store.
-      expect(text()).toBe("srr test")
+      expect(box.textContent).toBe("srr test")
    })
 })
