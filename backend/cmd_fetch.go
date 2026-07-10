@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
 	"sort"
 	"strings"
@@ -140,11 +141,20 @@ func feedMatchesTag(feedTag string, sels []string) bool {
 func (o *FetchCmd) selectFeeds(db *DB) ([]*Feed, error) {
 	if len(o.only) > 0 {
 		feeds := make([]*Feed, 0, len(o.only))
+		seen := make(map[int]struct{}, len(o.only))
 		for _, id := range o.only {
+			// Dedup: a repeated id (e.g. a crafted /api/fetch?id=5&id=5) would
+			// otherwise resolve to the SAME *Feed twice — the fan-out then races
+			// two goroutines on it and the aggregation writes its new articles
+			// into the immutable packs twice.
+			if _, dup := seen[id]; dup {
+				continue
+			}
 			ch, err := db.FeedByID(id)
 			if err != nil {
 				return nil, err
 			}
+			seen[id] = struct{}{}
 			feeds = append(feeds, ch)
 		}
 		return feeds, nil
@@ -154,6 +164,39 @@ func (o *FetchCmd) selectFeeds(db *DB) ([]*Feed, error) {
 		slog.Warn("feed filter: " + w)
 	}
 	return feeds, nil
+}
+
+// runCycleSafe runs one fetch cycle, converting a panic anywhere in it (outside
+// the per-feed fan-out, which recovers itself via runFeedFetch) into an error so
+// the long-running `srr serve` --interval loop and the SSE fetch goroutine
+// survive a bad cycle instead of crashing the whole process. A normal cycle
+// error passes through unchanged.
+func runCycleSafe(cycle func() error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("fetch cycle panicked: %v", r)
+			slog.Error("fetch cycle panicked; recovered", "panic", r, "stack", string(debug.Stack()))
+		}
+	}()
+	return cycle()
+}
+
+// runFeedFetch runs one feed's fetch and converts a panic in the (third-party,
+// attacker-influenced) content pipeline into a recorded feed error, so a single
+// feed can never crash the whole fetch process. The fan-out goroutines below —
+// and the `srr serve` --interval loop and SSE fetch that drive runFetch — run
+// OUTSIDE net/http's per-request panic recovery, so an unrecovered panic there
+// would terminate the admin GUI and the fetch loop together. A recovered feed
+// is marked failed (like any fetch error) and the cycle continues.
+func runFeedFetch(ch *Feed, fetch func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			ch.FetchError = fmt.Sprintf("panic: %v", r)
+			ch.FailStreak++
+			slog.Error("feed fetch panicked; recovered", "feed", ch, "panic", r, "stack", string(debug.Stack()))
+		}
+	}()
+	fetch()
 }
 
 // feedProgress reports one feed's outcome to a runFetch caller (the SSE handler).
@@ -185,10 +228,10 @@ func (o *FetchCmd) Run() error {
 // is reused across every cycle so its idle-conn pool isn't orphaned per cycle.
 func (o *FetchCmd) fetchLoop(ctx context.Context, client *http.Client) error {
 	if o.Interval <= 0 {
-		return o.runFetch(ctx, client, nil)
+		return runCycleSafe(func() error { return o.runFetch(ctx, client, nil) })
 	}
 	for {
-		if err := o.runFetch(ctx, client, nil); err != nil {
+		if err := runCycleSafe(func() error { return o.runFetch(ctx, client, nil) }); err != nil {
 			slog.Error("fetch iteration failed", "err", err)
 		}
 		select {
@@ -351,7 +394,7 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 				defer bufPool.Put(buf)
 				processor := procPool.Get().(*mod.Module)
 				defer procPool.Put(processor)
-				ch.Fetch(gctx, run, buf, processor)
+				runFeedFetch(ch, func() { ch.Fetch(gctx, run, buf, processor) })
 				progress.feedDone(ch.FetchError != "", len(ch.newItems))
 				if onFeed != nil {
 					onFeed(feedProgress{ID: ch.id, Title: ch.Title, Error: ch.FetchError, New: len(ch.newItems)})

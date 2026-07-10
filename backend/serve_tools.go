@@ -128,7 +128,7 @@ func handleExport(w http.ResponseWriter, r *http.Request) {
 func handleImport(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	dryRun := q.Get("dry_run") == "1"
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
 	if err != nil {
 		writeErr(w, err)
 		return

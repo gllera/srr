@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -176,6 +177,56 @@ func TestFeedFilterApply(t *testing.T) {
 			t.Errorf("warnings = %v, want an empty-result warning", warns)
 		}
 	})
+}
+
+// TestRunCycleSafeRecoversPanic guards the whole-cycle net: a panic anywhere in
+// a fetch cycle OUTSIDE the per-feed fan-out (PutArticles/Commit/sync steps)
+// must become an error so the long-running `srr serve` loop / SSE goroutine
+// survives, while a normal error passes through unchanged.
+func TestRunCycleSafeRecoversPanic(t *testing.T) {
+	if err := runCycleSafe(func() error { panic("boom") }); err == nil {
+		t.Fatal("panic was not converted to an error")
+	}
+	sentinel := fmt.Errorf("plain cycle error")
+	if got := runCycleSafe(func() error { return sentinel }); got != sentinel {
+		t.Fatalf("runCycleSafe passthrough = %v, want %v", got, sentinel)
+	}
+}
+
+// TestRunFeedFetchRecoversPanic guards that a panic while processing one feed's
+// (third-party, attacker-influenced) content is recovered and recorded as that
+// feed's error, rather than propagating out of the fan-out goroutine and
+// crashing the whole process — the `srr serve` loop/SSE goroutines run outside
+// net/http's per-request recover, so an unrecovered panic there takes the admin
+// GUI and the fetch loop down together.
+func TestRunFeedFetchRecoversPanic(t *testing.T) {
+	ch := &Feed{id: 1, Title: "P", URL: "http://p.example/feed"}
+	runFeedFetch(ch, func() { panic("boom") }) // must not propagate
+	if ch.FetchError == "" {
+		t.Fatal("panic was not recorded as a feed error")
+	}
+	if ch.FailStreak != 1 {
+		t.Fatalf("FailStreak = %d, want 1", ch.FailStreak)
+	}
+}
+
+// TestSelectFeedsOnlyPathDedupsRepeatedIDs guards against a crafted
+// /api/fetch?id=5&id=5: without dedup, selectFeeds returns the SAME *Feed
+// pointer twice, so the fan-out races two goroutines on it and the aggregation
+// writes that feed's new articles into the immutable packs twice.
+func TestSelectFeedsOnlyPathDedupsRepeatedIDs(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	if err := db.AddFeed(&Feed{Title: "A", URL: "http://a.example/feed"}); err != nil {
+		t.Fatalf("AddFeed: %v", err)
+	}
+
+	got, err := (&FetchCmd{only: []int{0, 0}}).selectFeeds(db)
+	if err != nil {
+		t.Fatalf("selectFeeds(only=[0,0]): %v", err)
+	}
+	if len(got) != 1 || got[0].id != 0 {
+		t.Fatalf("selectFeeds(only=[0,0]) = %v, want a single feed id 0 (deduped)", selectedIDs(got))
+	}
 }
 
 func TestSelectFeedsOnlyPathUnknownIDErrors(t *testing.T) {

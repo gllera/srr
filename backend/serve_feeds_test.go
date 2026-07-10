@@ -57,6 +57,32 @@ func TestCreateFeedLockContention(t *testing.T) {
 	}
 }
 
+// TestCreateFeedProbesOutsideLock guards that subscribe-time discovery runs
+// BEFORE the store lock is taken (like handleImport), so a slow feed URL can't
+// hold .locked for the probe's duration and 409 the fetch loop / other GUI
+// mutations. The resolve seam records whether .locked exists at probe time.
+func TestCreateFeedProbesOutsideLock(t *testing.T) {
+	_, _, dir := setupTestDB(t)
+	lock := dir + "/" + dbLockKey
+	prev := resolveFeedURL
+	t.Cleanup(func() { resolveFeedURL = prev })
+	var lockedDuringProbe bool
+	resolveFeedURL = func(_ context.Context, u string) (string, error) {
+		_, err := os.Stat(lock)
+		lockedDuringProbe = err == nil
+		return u, nil
+	}
+
+	body := `{"title":"X","url":"https://x.example/feed"}`
+	rec := doReq(t, newMux(), "POST", "/api/feeds", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body)
+	}
+	if lockedDuringProbe {
+		t.Fatal("resolveFeedURL ran while .locked was held; the network probe must run outside the store lock")
+	}
+}
+
 func TestUpdateFeedPreservesStateOnSameURL(t *testing.T) {
 	db, _, _ := setupTestDB(t)
 	stubPassthroughResolve()
