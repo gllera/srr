@@ -8,8 +8,10 @@ import {
    makeFeedsLookup,
    makeIdxPack,
    parseIdxHeaders,
+   tallyUnread,
    type IdxHeader,
    type IdxPack,
+   type TallyFeed,
 } from "./idx"
 
 export { IDX_PACK_SIZE, META_PACK_SIZE }
@@ -263,6 +265,21 @@ export async function countLeft(chronIdx: number, feeds: Map<number, number>): P
    if (db.total_art === 0) return 0
    const n = packIdx(chronIdx)
    return (await fetchIdxPack(n)).countLeft(chronIdx, feeds, makeFeedsLookup(feeds, slots), expiredCounts)
+}
+
+// Batched per-feed unread counting: ONE latest-tail pass for every feed at
+// once (idx.tallyUnread) instead of the per-feed countAll/countLeft fan-out
+// that re-scanned the same resident pack once per feed. Synchronous like
+// countAll — the latest pack is resident since init. Feeds whose seen
+// frontier sits below the latest pack's base need finalized-pack scans (and
+// possibly fetches); they come back in `rare` for the caller's per-feed async
+// fallback — structurally empty while total_art ≤ IDX_PACK_SIZE.
+export function unreadTally<T extends TallyFeed>(
+   chs: T[],
+   seenOf: (id: number) => number | undefined,
+): { counts: Map<number, number>; rare: T[] } {
+   if (db.total_art === 0) return { counts: new Map(chs.map((c) => [c.id, 0])), rare: [] }
+   return tallyUnread(latestIdx, numFinalizedIdx() * IDX_PACK_SIZE, db.total_art, slots, chs, seenOf, expiredCounts)
 }
 
 // A finalized pack can be skipped without fetching it: its per-feed

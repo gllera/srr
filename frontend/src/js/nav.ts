@@ -71,6 +71,11 @@ function savedSorted(): number[] {
 export function isSaved(chron: number): boolean {
    return readSavedSet().has(chron)
 }
+// The bulk-read twin of getSeenMap: one parse for a whole render/refresh pass
+// (list.ts threads it through rowEl) instead of a localStorage read per row.
+export function getSavedSet(): Set<number> {
+   return readSavedSet()
+}
 export function savedCount(): number {
    return readSavedSet().size
 }
@@ -819,14 +824,20 @@ export function markUnreadFrom(chron: number): boolean {
    }
 }
 
-// Batched per-feed unread (OPT-2): reads the seen map once for the whole
-// batch instead of once per feed (a menu fill badges every visible row).
-// Maps feed id → unread (a never-seen feed maps to its full backlog).
+// Batched per-feed unread: reads the seen map once and tallies EVERY feed in
+// one synchronous latest-tail pass (data.unreadTally — the old path re-scanned
+// the same resident pack once per feed, O(feeds × tail) on every lane-cycle
+// keypress in unread-only mode and every picker open). Feeds whose seen
+// frontier predates the latest pack come back in `rare` and fall back to the
+// per-feed feedUnread oracle — the exact formula the pass mirrors, kept as
+// the in-code source of truth (and the differential test's anchor) so the
+// badge↔pill agreement can't drift. Maps feed id → unread (a never-seen feed
+// maps to its full backlog).
 export async function unreadCounts(chs: IFeed[]): Promise<Map<number, number>> {
    const seenMap = readSeen()
-   const out = new Map<number, number>()
-   await Promise.all(chs.map(async (ch) => out.set(ch.id, await feedUnread(ch, seenMap))))
-   return out
+   const { counts, rare } = data.unreadTally(chs, (id) => seenMap["feed:" + id])
+   await Promise.all(rare.map(async (ch) => counts.set(ch.id, await feedUnread(ch, seenMap))))
+   return counts
 }
 
 // The tag-header aggregate the dropdown displays as the tag badge: the sum of

@@ -20,6 +20,11 @@ const data = vi.hoisted(() => ({
       return count
    }),
    countAll: vi.fn((feeds: Map<number, number>) => data.countLeft(data.db.total_art, feeds)),
+   // Route every feed through the `rare` fallback so unreadCounts keeps
+   // exercising the per-feed feedUnread oracle these tests drive via the
+   // getFeedId/countLeft mocks (the single-pass tally is pinned against that
+   // same oracle by idx.test.ts's differential suite).
+   unreadTally: vi.fn(<T extends { id: number }>(chs: T[]) => ({ counts: new Map<number, number>(), rare: chs })),
    findLeft: vi.fn(async (from: number, feeds: Map<number, number>) => {
       for (let i = from; i >= 0; i--) {
          const feedId = data.getFeedId(i)

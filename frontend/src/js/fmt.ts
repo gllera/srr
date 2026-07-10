@@ -390,12 +390,32 @@ const MON = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT
 // per-row age). Math.round on the local-midnight difference stays correct
 // across a DST hour.
 export function dayLabel(unix: number): string {
-   const d = new Date(unix * 1000)
+   return dayLabelWith(unix, dayLabelCtx())
+}
+
+// The per-call invariants of dayLabel (current time + its local midnight),
+// hoisted so a bulk pass (list.ts relabelDividers walks every loaded row)
+// builds them once instead of twice per row.
+export interface DayLabelCtx {
+   nowYear: number
+   midnightNow: number
+}
+
+export function dayLabelCtx(): DayLabelCtx {
    const now = new Date()
-   const midnight = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime()
-   const diff = Math.round((midnight(now) - midnight(d)) / 86400000)
+   return {
+      nowYear: now.getFullYear(),
+      midnightNow: new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime(),
+   }
+}
+
+export function dayLabelWith(unix: number, ctx: DayLabelCtx): string {
+   const d = new Date(unix * 1000)
+   const diff = Math.round(
+      (ctx.midnightNow - new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()) / 86400000,
+   )
    if (diff === 0) return "TODAY"
    if (diff === 1) return "YESTERDAY"
    const base = `${DOW[d.getDay()]} ${d.getDate()} ${MON[d.getMonth()]}`
-   return d.getFullYear() === now.getFullYear() ? base : `${base} ${d.getFullYear()}`
+   return d.getFullYear() === ctx.nowYear ? base : `${base} ${d.getFullYear()}`
 }
