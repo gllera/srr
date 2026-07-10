@@ -41,6 +41,11 @@ func setupTestDB(t *testing.T) (*DB, *DBCore, string) {
 	// gzipBest's own tests already pin. Identity keeps the published bytes
 	// exactly what the assertions read back.
 	finalGzip = func(_ string, gz []byte) ([]byte, error) { return gz, nil }
+
+	// The meta-tail memo is process-global: fresh test stores share seq/count
+	// shapes, so a stale entry from the previous test could be trusted here
+	// and hand it another store's tail lines.
+	metaTailMemo.reset()
 	t.Cleanup(func() { finalGzip = gzipBest })
 
 	db, err := NewDB(ctx, false)

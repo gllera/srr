@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"unicode"
 
 	"golang.org/x/text/unicode/norm"
@@ -192,6 +193,49 @@ func numFinalizedMeta(totalArticles int) int {
 // save succeeds and the caller's Commit publishes them — so, like
 // Seq/HdrPacks, no reader can learn a name before its content is durable.
 // SyncMeta feeds BOTH the list (data.ts loadMeta) and search (search.ts).
+// metaTailMemo caches the tail lines the last successful SyncMeta in this
+// process wrote, so the next cycle's read-back skips the meta/L<Seq-1> GET +
+// gunzip (the serve loop re-reads what it itself just wrote, every cycle).
+// Trust is structural: latest names are write-once, so memo.seq == Seq-1
+// plus the entry count matching MetaTail guarantees the memo holds exactly
+// the bytes the GET would return (jsonEncode lines, trailing \n included —
+// the same form readMetaLines yields). Any other state — failed commit,
+// external writer, gen --bump (zeroes MetaTail, skipping the read-back
+// entirely), a fresh process — misses and falls through to today's GET +
+// rebuild path, which stays the correctness backstop.
+type metaTailCache struct {
+	mu    sync.Mutex
+	seq   int
+	lines [][]byte
+}
+
+var metaTailMemo = &metaTailCache{}
+
+// memoized returns a private copy of the cached tail when it provably matches
+// the read-back target (see metaTailCache). The copy is mandatory: the caller
+// truncates-and-reuses its slice on a shard flush, which must not scribble
+// the memo's backing array.
+func (m *metaTailCache) memoized(seq, tail int) ([][]byte, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.seq != seq || len(m.lines) != tail {
+		return nil, false
+	}
+	return append([][]byte(nil), m.lines...), true
+}
+
+func (m *metaTailCache) store(seq int, lines [][]byte) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.seq, m.lines = seq, lines
+}
+
+func (m *metaTailCache) reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.seq, m.lines = 0, nil
+}
+
 func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 	c := &o.core
 	if c.TotalArticles == 0 {
@@ -239,14 +283,18 @@ func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 	// since); after consecutive failed syncs the name is gone and the tail
 	// rebuilds from data packs instead — heavier, still correct.
 	if c.MetaTail > 0 {
-		prevKey := genKey("meta", c.Seq-1)
-		if lines, err := o.readMetaLines(ctx, prevKey); err != nil {
-			slog.Warn("meta tail read-back failed, rebuilding tail", "key", prevKey, "error", err)
-		} else if len(lines) != c.MetaTail {
-			slog.Warn("meta tail read-back mismatch, rebuilding tail",
-				"key", prevKey, "entries", len(lines), "mt", c.MetaTail)
-		} else {
+		if lines, ok := metaTailMemo.memoized(c.Seq-1, c.MetaTail); ok {
 			rawLines = lines
+		} else {
+			prevKey := genKey("meta", c.Seq-1)
+			if lines, err := o.readMetaLines(ctx, prevKey); err != nil {
+				slog.Warn("meta tail read-back failed, rebuilding tail", "key", prevKey, "error", err)
+			} else if len(lines) != c.MetaTail {
+				slog.Warn("meta tail read-back mismatch, rebuilding tail",
+					"key", prevKey, "entries", len(lines), "mt", c.MetaTail)
+			} else {
+				rawLines = lines
+			}
 		}
 	}
 
@@ -303,6 +351,10 @@ func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 	}
 
 	c.MetaPacks, c.MetaTail = nf, len(rawLines)
+	// Every save succeeded and the coverage counters now describe the tail we
+	// wrote as meta/L<Seq>, so it is safe to remember. rawLines is not touched
+	// again after this point; the next cycle's memoized() hands out a copy.
+	metaTailMemo.store(c.Seq, rawLines)
 	return nil
 }
 

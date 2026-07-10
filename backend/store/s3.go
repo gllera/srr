@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -50,18 +51,35 @@ type S3 struct {
 	client *s3.Client
 }
 
-func newS3(ctx context.Context, u *url.URL) (Backend, error) {
-	var opts []func(*config.LoadOptions) error
+// s3Clients memoizes the SDK client per resolved config, so the serve loop's
+// per-cycle store.Open (and every serve-API request's withDB scope) reuses one
+// client — with its transport pool and lazily-refreshing credential cache —
+// instead of rebuilding config + transport 288×/day. The client is
+// bucket-agnostic (the bucket rides each op), so one entry serves every store
+// URL under the same config; a config change (tests, env override) simply
+// keys a fresh entry.
+var (
+	s3ClientsMu sync.Mutex
+	s3Clients   = map[S3Config]*s3.Client{}
+)
 
-	if s3Cfg.Region != "" {
-		opts = append(opts, config.WithRegion(s3Cfg.Region))
+func s3ClientFor(ctx context.Context, c S3Config) (*s3.Client, error) {
+	s3ClientsMu.Lock()
+	defer s3ClientsMu.Unlock()
+	if cl, ok := s3Clients[c]; ok {
+		return cl, nil
 	}
-	if s3Cfg.Profile != "" {
-		opts = append(opts, config.WithSharedConfigProfile(s3Cfg.Profile))
+
+	var opts []func(*config.LoadOptions) error
+	if c.Region != "" {
+		opts = append(opts, config.WithRegion(c.Region))
 	}
-	if s3Cfg.AccessKeyID != "" {
+	if c.Profile != "" {
+		opts = append(opts, config.WithSharedConfigProfile(c.Profile))
+	}
+	if c.AccessKeyID != "" {
 		opts = append(opts, config.WithCredentialsProvider(
-			credentials.NewStaticCredentialsProvider(s3Cfg.AccessKeyID, s3Cfg.SecretAccessKey, s3Cfg.SessionToken),
+			credentials.NewStaticCredentialsProvider(c.AccessKeyID, c.SecretAccessKey, c.SessionToken),
 		))
 	}
 
@@ -70,14 +88,24 @@ func newS3(ctx context.Context, u *url.URL) (Backend, error) {
 		return nil, fmt.Errorf("loading AWS config: %w", err)
 	}
 
-	if s3Cfg.Endpoint != "" {
-		cfg.BaseEndpoint = aws.String(s3Cfg.Endpoint)
+	if c.Endpoint != "" {
+		cfg.BaseEndpoint = aws.String(c.Endpoint)
 	}
 
+	cl := s3.NewFromConfig(cfg)
+	s3Clients[c] = cl
+	return cl, nil
+}
+
+func newS3(ctx context.Context, u *url.URL) (Backend, error) {
+	client, err := s3ClientFor(ctx, s3Cfg)
+	if err != nil {
+		return nil, err
+	}
 	return &S3{
 		bucket: u.Host,
 		path:   strings.TrimPrefix(u.Path, "/"),
-		client: s3.NewFromConfig(cfg),
+		client: client,
 	}, nil
 }
 

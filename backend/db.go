@@ -291,6 +291,10 @@ func (o *DB) BumpGen() {
 	o.core.HdrPacks = 0
 	o.core.MetaPacks = 0
 	o.core.MetaTail = 0
+	// A rebuild reuses finalized pack names with new bytes, and the CDN edge
+	// caches those names under a year-long immutable TTL — the store-side
+	// reset above cannot reach that cache, only an operator purge can.
+	slog.Warn("gen bumped: if a CDN edge cache fronts this store (cdn.llera.eu), purge it now — cached packs under reused names serve stale bytes until then")
 }
 
 func (o *DB) Commit(ctx context.Context) error {

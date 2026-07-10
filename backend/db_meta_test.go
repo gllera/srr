@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -306,6 +307,7 @@ func TestSyncMetaRebuildsMissingTail(t *testing.T) {
 	}
 	putOneArticle(t, db, ch, 3)
 	os.Remove(filepath.Join(dir, "meta/L2.gz")) // the read-back candidate
+	metaTailMemo.reset()                        // force the GET path — this test covers the missing-tail rebuild
 
 	if err := db.SyncMeta(ctx, nil); err != nil {
 		t.Fatalf("SyncMeta (rebuild): %v", err)
@@ -459,6 +461,7 @@ func TestSyncMetaTailCountMismatchRebuilds(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, genKey("meta", 2)), buf.Bytes(), 0o644); err != nil {
 		t.Fatalf("corrupt tail: %v", err)
 	}
+	metaTailMemo.reset() // force the GET path — this test covers the count-mismatch rebuild
 
 	if err := db.SyncMeta(ctx, nil); err != nil {
 		t.Fatalf("SyncMeta (rebuild): %v", err)
@@ -624,5 +627,81 @@ func TestCommitMetaFieldsOmitemptyWhenZero(t *testing.T) {
 		if !strings.Contains(raw, want) {
 			t.Errorf("db.gz missing %s: %s", want, raw)
 		}
+	}
+}
+
+// TestSyncMetaTailMemoHit pins the memo fast path: the cycle after a
+// successful sync must extend the tail WITHOUT re-reading meta/L<Seq-1> from
+// the store. Observable: the on-disk tail is deleted, so a memo miss would
+// take the GET path and log the "read-back failed" warn before rebuilding —
+// the memo path logs nothing and still produces identical entries.
+func TestSyncMetaTailMemoHit(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	ch := &Feed{id: 1, URL: "https://example.com/1"}
+	c.Feeds = map[int]*Feed{ch.id: ch}
+	c.FetchedAt = 1700000000
+
+	putOneArticle(t, db, ch, 1)
+	putOneArticle(t, db, ch, 2)
+	if err := db.SyncMeta(ctx, nil); err != nil {
+		t.Fatalf("SyncMeta #1: %v", err)
+	}
+	if lines, ok := metaTailMemo.memoized(c.Seq, c.MetaTail); !ok || len(lines) != 2 {
+		t.Fatalf("memo after sync = (%d lines, %v), want (2, true)", len(lines), ok)
+	}
+
+	putOneArticle(t, db, ch, 3)
+	os.Remove(filepath.Join(dir, "meta/L2.gz")) // memo must make this GET unnecessary
+
+	var logbuf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logbuf, nil)))
+	defer slog.SetDefault(old)
+
+	if err := db.SyncMeta(ctx, nil); err != nil {
+		t.Fatalf("SyncMeta #2: %v", err)
+	}
+	if strings.Contains(logbuf.String(), "read-back") {
+		t.Fatalf("memo missed — tail read-back hit the store:\n%s", logbuf.String())
+	}
+	if c.MetaTail != 3 {
+		t.Fatalf("MetaTail = %d, want 3", c.MetaTail)
+	}
+	entries := readMetaEntries(t, dir, "meta/L3.gz", false)
+	if len(entries) != 3 || entries[0].Title != "A1" || entries[2].Title != "A3" {
+		t.Fatalf("latest = %+v, want A1..A3", entries)
+	}
+}
+
+// TestMetaTailMemoCopyIsolation pins the copy contract: the caller truncates
+// and appends to the slice memoized() hands out (the shard-flush path), which
+// must never scribble the memo's own backing array; and mismatched seq/count
+// or a reset must miss.
+func TestMetaTailMemoCopyIsolation(t *testing.T) {
+	m := &metaTailCache{}
+	m.store(5, [][]byte{[]byte("a\n"), []byte("b\n")})
+
+	got, ok := m.memoized(5, 2)
+	if !ok || len(got) != 2 {
+		t.Fatalf("memoized(5,2) = (%d, %v), want (2, true)", len(got), ok)
+	}
+	got = got[:0]
+	got = append(got, []byte("scribble\n"), []byte("scribble\n"))
+	_ = got
+
+	again, ok := m.memoized(5, 2)
+	if !ok || string(again[0]) != "a\n" || string(again[1]) != "b\n" {
+		t.Fatalf("memo scribbled by caller mutation: %q", again)
+	}
+
+	if _, ok := m.memoized(4, 2); ok {
+		t.Fatal("memoized(wrong seq) must miss")
+	}
+	if _, ok := m.memoized(5, 1); ok {
+		t.Fatal("memoized(wrong count) must miss")
+	}
+	m.reset()
+	if _, ok := m.memoized(5, 2); ok {
+		t.Fatal("memoized after reset must miss")
 	}
 }
