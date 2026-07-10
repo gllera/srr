@@ -24,6 +24,9 @@ var errExpireDone = errors.New("expire walk done")
 // immutable). Feed.Expired accumulates the expired entry count so readers
 // can correct the immutable idx-header cumulative counts (visible-before-P
 // == header count − Expired for packs past AddIdx — see the data contract).
+// Each deleted asset's size (measured by Stat just before the delete) reduces
+// the expiring feed's AssetBytes, keeping that counter tracking the feed's
+// live asset footprint.
 //
 // All-or-nothing: any walk or delete failure returns before ANY AddIdx/
 // Expired change is applied, so the next cycle recomputes the same window
@@ -63,7 +66,7 @@ func (o *DB) ExpireArticles(ctx context.Context, now int64) error {
 	newAddIdx := map[int]int{}
 	newlyExpired := map[int]int{}
 	sawLive := map[int]bool{}
-	assetKeys := map[string]struct{}{}
+	assetOwner := map[string]int{} // asset key → the expiring feed that first referenced it
 	cur := minStart
 	stopChron := c.TotalArticles // walk-exhausted default; entries [minStart, stopChron) were fully processed
 	err := o.walkArticles(ctx, minStart, c.TotalArticles, func(ad *ArticleData) error {
@@ -86,7 +89,15 @@ func (o *DB) ExpireArticles(ctx context.Context, now int64) error {
 		}
 		newAddIdx[ad.FeedID] = chron + 1
 		newlyExpired[ad.FeedID]++
-		collectAssetRefs(ad.Content, assetKeys)
+		refs := map[string]struct{}{}
+		collectAssetRefs(ad.Content, refs)
+		for key := range refs {
+			// First expiring referent wins the AssetBytes attribution (chron
+			// order, deterministic); the delete itself is deduped by the map.
+			if _, ok := assetOwner[key]; !ok {
+				assetOwner[key] = ad.FeedID
+			}
+		}
 		return nil
 	})
 	if err != nil && !errors.Is(err, errExpireDone) {
@@ -115,7 +126,24 @@ func (o *DB) ExpireArticles(ctx context.Context, now int64) error {
 		return nil
 	}
 
-	for key := range assetKeys {
+	// Measure, then delete: Stat every key first so a stat failure aborts with
+	// nothing deleted (a clean all-or-nothing retry). freed is the per-feed
+	// AssetBytes reduction — what actually leaves the store, attributed to the
+	// expiring feed that referenced the key. A key an aborted predecessor
+	// already deleted stats as 0 (missing → (0, nil)); a mid-delete Rm failure
+	// therefore loses the decrement for the keys it did delete — accepted skew,
+	// same class as the no-liveness-check trade-off.
+	freed := map[int]int64{}
+	var freedBytes int64
+	for key, owner := range assetOwner {
+		size, err := o.Stat(ctx, key)
+		if err != nil {
+			return fmt.Errorf("stat %s: %w", key, err)
+		}
+		freed[owner] += size
+		freedBytes += size
+	}
+	for key := range assetOwner {
 		if err := o.Rm(ctx, key); err != nil {
 			return fmt.Errorf("delete %s: %w", key, err)
 		}
@@ -126,9 +154,12 @@ func (o *DB) ExpireArticles(ctx context.Context, now int64) error {
 		ch := c.Feeds[id]
 		ch.AddIdx = idx
 		ch.Expired += newlyExpired[id] // advanced-only feeds add the map default 0
+		// Clamped: a cross-feed shared asset may have been charged to the
+		// uploading feed but expired via another's article (see Feed.AssetBytes).
+		ch.AssetBytes = max(0, ch.AssetBytes-freed[id])
 		expired += newlyExpired[id]
 	}
-	slog.Info("expired articles", "articles", expired, "assets", len(assetKeys), "feeds", len(newlyExpired), "advanced", advanced)
+	slog.Info("expired articles", "articles", expired, "assets", len(assetOwner), "asset_bytes", freedBytes, "feeds", len(newlyExpired), "advanced", advanced)
 	return nil
 }
 

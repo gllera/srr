@@ -105,6 +105,17 @@ func (f *fakeS3) handler(w http.ResponseWriter, r *http.Request) {
 		}
 		f.objects[key] = body
 		f.headers[key] = r.Header.Clone()
+	case http.MethodHead:
+		body, ok := f.objects[key]
+		if !ok {
+			// Real S3 HEAD responses are bodyless: the SDK derives the generic
+			// "NotFound" code from the bare 404 (there is no XML carrying
+			// NoSuchKey to parse) — the case S3.Stat's switch must handle.
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(http.StatusOK)
 	case http.MethodDelete:
 		delete(f.objects, key)
 		w.WriteHeader(http.StatusNoContent)
@@ -323,5 +334,19 @@ func TestS3PutGetRoundTripBody(t *testing.T) {
 	}
 	if got := readAllClose(t, rc); got != payload {
 		t.Errorf("round-trip bytes differ: %d vs %d chars", len(got), len(payload))
+	}
+}
+
+func TestS3Stat(t *testing.T) {
+	b, f := setupFakeS3(t)
+	f.objects["prefix/obj.bin"] = []byte("12345")
+
+	if n, err := b.Stat(ctx, "obj.bin"); err != nil || n != 5 {
+		t.Errorf("Stat = (%d, %v), want (5, nil)", n, err)
+	}
+	// A missing key is (0, nil) per the Backend contract — exercised against
+	// the bodyless-404 "NotFound" code HeadObject really returns (not NoSuchKey).
+	if n, err := b.Stat(ctx, "missing.bin"); err != nil || n != 0 {
+		t.Errorf("Stat(missing) = (%d, %v), want (0, nil)", n, err)
 	}
 }

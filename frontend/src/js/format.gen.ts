@@ -87,6 +87,8 @@ export interface IFeedWire {
    xp?: number // Expired
    total_art: number // TotalArt
    add_idx: number // AddIdx
+   cb?: number // ContentBytes
+   ab?: number // AssetBytes
 }
 
 // Wire shape of a db.gz out[] entry (backend OutFeed).

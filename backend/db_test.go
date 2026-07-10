@@ -1225,3 +1225,75 @@ func TestNewDBLegacyPipeIngest(t *testing.T) {
 		t.Errorf("legacy feed pipe = %v, want %v (revived as feed-level override)", db.core.Feeds[0].Pipe, want)
 	}
 }
+
+// PutArticles must charge each feed's ContentBytes with the exact uncompressed
+// JSONL line lengths it wrote to the data/ series, accumulating across batches.
+func TestPutArticlesCountsContentBytes(t *testing.T) {
+	db, c, _ := setupTestDB(t)
+	ch1, ch2 := &Feed{id: 1}, &Feed{id: 2}
+	c.Feeds = map[int]*Feed{ch1.id: ch1, ch2.id: ch2}
+
+	articles := []*Item{
+		{Feed: ch1, Title: "A1", Content: "C1", Link: "http://a/1", Published: 1000},
+		{Feed: ch2, Title: "unicode Ünïcode", Content: strings.Repeat("x", 100)},
+		{Feed: ch1, Title: "A2", Content: "C2"},
+	}
+	want := map[int]int64{}
+	for _, it := range articles {
+		ad := it.articleData(c.FetchedAt)
+		line, err := jsonEncode(&ad)
+		if err != nil {
+			t.Fatalf("jsonEncode: %v", err)
+		}
+		want[it.Feed.id] += int64(len(line))
+	}
+
+	if _, err := db.PutArticles(ctx, articles); err != nil {
+		t.Fatalf("PutArticles: %v", err)
+	}
+	if ch1.ContentBytes != want[1] || ch2.ContentBytes != want[2] {
+		t.Fatalf("ContentBytes = %d/%d, want %d/%d", ch1.ContentBytes, ch2.ContentBytes, want[1], want[2])
+	}
+
+	// A second batch accumulates on top of the first.
+	if _, err := db.PutArticles(ctx, []*Item{{Feed: ch1, Title: "B", Content: "CB"}}); err != nil {
+		t.Fatalf("PutArticles batch2: %v", err)
+	}
+	if ch1.ContentBytes <= want[1] {
+		t.Fatalf("ContentBytes did not accumulate: %d, want > %d", ch1.ContentBytes, want[1])
+	}
+}
+
+// The byte counters must survive a Commit → reload round-trip (the cb/ab
+// db.gz keys) and ride the CLI/GUI projections read-only.
+func TestFeedByteCountersPersistAcrossReload(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	ch := &Feed{Title: "A", URL: "https://a.example/f"}
+	if err := db.AddFeed(ch); err != nil {
+		t.Fatal(err)
+	}
+	ch.ContentBytes = 12345
+	ch.AssetBytes = 678
+	if err := db.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	db2, err := NewDB(ctx, false)
+	if err != nil {
+		t.Fatalf("NewDB reload: %v", err)
+	}
+	defer db2.Close(ctx)
+	loaded, err := db2.FeedByID(ch.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ContentBytes != 12345 || loaded.AssetBytes != 678 {
+		t.Fatalf("reloaded counters = %d/%d, want 12345/678", loaded.ContentBytes, loaded.AssetBytes)
+	}
+	if v := viewOf(loaded); v.ContentBytes != 12345 || v.AssetBytes != 678 {
+		t.Fatalf("feedView counters = %d/%d, want 12345/678", v.ContentBytes, v.AssetBytes)
+	}
+	if lv := listViewOf(loaded); lv.ContentBytes != 12345 || lv.AssetBytes != 678 {
+		t.Fatalf("feedListView counters = %d/%d, want 12345/678", lv.ContentBytes, lv.AssetBytes)
+	}
+}

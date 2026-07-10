@@ -78,7 +78,7 @@ func TestUploadCacheRefTouchesSourceFile(t *testing.T) {
 	writeAged(t, full, 100*time.Hour)
 
 	af := newAssetFetcher(tempStore(t), 0, "")
-	if _, err := af.UploadCacheRef(t.Context(), dir, "pic.jpg"); err != nil {
+	if _, _, err := af.UploadCacheRef(t.Context(), dir, "pic.jpg"); err != nil {
 		t.Fatalf("UploadCacheRef: %v", err)
 	}
 	fi, err := os.Stat(full)

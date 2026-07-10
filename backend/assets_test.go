@@ -99,7 +99,7 @@ func TestUploadCacheRefRunsProcessBeforeUpload(t *testing.T) {
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
 
-	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	key, _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
 	if err != nil {
 		t.Fatalf("UploadCacheRef: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestUploadCacheRefSkipsProcessWhenSourceAlreadyUploaded(t *testing.T) {
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
 
-	got, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	got, _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
 	if err != nil {
 		t.Fatalf("UploadCacheRef: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestUploadCacheRefProcessRunsForEveryFileType(t *testing.T) {
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "doc.pdf", pdfBytes)
 
-	key, err := af.UploadCacheRef(context.Background(), cacheDir, "doc.pdf")
+	key, _, err := af.UploadCacheRef(context.Background(), cacheDir, "doc.pdf")
 	if err != nil {
 		t.Fatalf("UploadCacheRef: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestUploadCacheRefProcessFailsSoftToOriginal(t *testing.T) {
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
 
-	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	key, _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
 	if err != nil {
 		t.Fatalf("UploadCacheRef should fail soft, got error: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestUploadCacheRefProcessTimesOutViaAssetTimeout(t *testing.T) {
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
 
-	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	key, _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
 	if err != nil {
 		t.Fatalf("UploadCacheRef should fail soft on timeout, got error: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestUploadCacheRefProcessTimeoutIndependentOfCmdTimeout(t *testing.T) {
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
 
-	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	key, _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
 	if err != nil {
 		t.Fatalf("UploadCacheRef: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestUploadCacheRefProcessTimeoutUnlimited(t *testing.T) {
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
 
-	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	key, _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
 	if err != nil {
 		t.Fatalf("UploadCacheRef: %v", err)
 	}
@@ -285,7 +285,7 @@ func TestUploadCacheRefPeekUnaffectedByCmdTimeout(t *testing.T) {
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
 
-	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	key, _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
 	if err != nil {
 		t.Fatalf("UploadCacheRef: %v", err)
 	}
@@ -308,7 +308,7 @@ func TestUploadCacheRefProcessSubstitutesInputToken(t *testing.T) {
 	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
 	full := filepath.Join(cacheDir, "photo.jpg")
 
-	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	key, _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
 	if err != nil {
 		t.Fatalf("UploadCacheRef: %v", err)
 	}
@@ -328,7 +328,7 @@ func TestUploadCacheRefProcessSubstitutesInputTokenWithinArg(t *testing.T) {
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
 
-	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	key, _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
 	if err != nil {
 		t.Fatalf("UploadCacheRef: %v", err)
 	}
@@ -362,7 +362,7 @@ func TestUploadCacheRefProcessOutputWritesFileBytes(t *testing.T) {
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
 
-	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	key, _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
 	if err != nil {
 		t.Fatalf("UploadCacheRef: %v", err)
 	}
@@ -379,7 +379,7 @@ func TestUploadCacheRefProcessOutputThreadsObjectMeta(t *testing.T) {
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
 
-	if _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg"); err != nil {
+	if _, _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg"); err != nil {
 		t.Fatalf("UploadCacheRef: %v", err)
 	}
 	if cap.gotMeta.ContentType != "image/webp" {
@@ -398,7 +398,7 @@ func TestUploadCacheRefProcessOutputEmptyFileFailsSoft(t *testing.T) {
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
 
-	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	key, _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
 	if err != nil {
 		t.Fatalf("UploadCacheRef should fail soft, got error: %v", err)
 	}
@@ -419,7 +419,7 @@ func TestUploadCacheRefProcessOutputBadJSONFailsSoft(t *testing.T) {
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
 
-	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	key, _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
 	if err != nil {
 		t.Fatalf("UploadCacheRef should fail soft, got error: %v", err)
 	}
@@ -436,7 +436,7 @@ func TestUploadCacheRefPeekSetsKeyExtensionAndMeta(t *testing.T) {
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
 
-	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	key, _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
 	if err != nil {
 		t.Fatalf("UploadCacheRef: %v", err)
 	}
@@ -459,7 +459,7 @@ func TestUploadCacheRefPeekUnsupportedHostsOriginalSkipsProcess(t *testing.T) {
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
 
-	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	key, _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
 	if err != nil {
 		t.Fatalf("UploadCacheRef: %v", err)
 	}
@@ -486,7 +486,7 @@ func TestUploadCacheRefPeekFailSoftUsesSourceExtension(t *testing.T) {
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
 
-	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	key, _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
 	if err != nil {
 		t.Fatalf("UploadCacheRef: %v", err)
 	}
@@ -511,7 +511,7 @@ func TestUploadCacheRefProcessMetaOverridesPeekMeta(t *testing.T) {
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
 
-	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	key, _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
 	if err != nil {
 		t.Fatalf("UploadCacheRef: %v", err)
 	}
@@ -535,7 +535,7 @@ func TestUploadCacheRefStoresUnderContentHashKey(t *testing.T) {
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "sub/photo.jpg", body)
 
-	key, err := af.UploadCacheRef(context.Background(), cacheDir, "sub/photo.jpg")
+	key, _, err := af.UploadCacheRef(context.Background(), cacheDir, "sub/photo.jpg")
 	if err != nil {
 		t.Fatalf("UploadCacheRef: %v", err)
 	}
@@ -558,7 +558,7 @@ func TestUploadCacheRefSkipsWhenAlreadyPresent(t *testing.T) {
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "p.jpg", "ORIGINAL")
 
-	key, err := af.UploadCacheRef(context.Background(), cacheDir, "p.jpg")
+	key, _, err := af.UploadCacheRef(context.Background(), cacheDir, "p.jpg")
 	if err != nil {
 		t.Fatalf("first UploadCacheRef: %v", err)
 	}
@@ -568,7 +568,7 @@ func TestUploadCacheRefSkipsWhenAlreadyPresent(t *testing.T) {
 	if err := be.Put(context.Background(), key, strings.NewReader("SENTINEL"), true); err != nil {
 		t.Fatalf("seed store: %v", err)
 	}
-	key2, err := af.UploadCacheRef(context.Background(), cacheDir, "p.jpg")
+	key2, _, err := af.UploadCacheRef(context.Background(), cacheDir, "p.jpg")
 	if err != nil {
 		t.Fatalf("second UploadCacheRef: %v", err)
 	}
@@ -591,7 +591,7 @@ func TestUploadCacheRefRejectsTraversal(t *testing.T) {
 		t.Fatalf("write outside: %v", err)
 	}
 	af := newAssetFetcher(tempStore(t), 1024, "")
-	if _, err := af.UploadCacheRef(context.Background(), cacheDir, "../outside.jpg"); err == nil {
+	if _, _, err := af.UploadCacheRef(context.Background(), cacheDir, "../outside.jpg"); err == nil {
 		t.Fatal("expected traversal rejection, got nil")
 	}
 }
@@ -610,7 +610,7 @@ func TestUploadCacheRefRejectsSymlink(t *testing.T) {
 		t.Skipf("symlink unsupported: %v", err)
 	}
 	af := newAssetFetcher(tempStore(t), 1024, "")
-	if _, err := af.UploadCacheRef(context.Background(), cacheDir, "link.jpg"); err == nil {
+	if _, _, err := af.UploadCacheRef(context.Background(), cacheDir, "link.jpg"); err == nil {
 		t.Fatal("expected symlink rejection, got nil")
 	}
 }
@@ -623,7 +623,7 @@ func TestUploadCacheRefStoresOversizeSourceUnchecked(t *testing.T) {
 	cacheDir := t.TempDir()
 	big := strings.Repeat("x", 4096)
 	writeCacheFile(t, cacheDir, "big.jpg", big)
-	key, err := af.UploadCacheRef(context.Background(), cacheDir, "big.jpg")
+	key, _, err := af.UploadCacheRef(context.Background(), cacheDir, "big.jpg")
 	if err != nil {
 		t.Fatalf("UploadCacheRef should not size-check the source, got: %v", err)
 	}
@@ -643,7 +643,7 @@ func TestUploadCacheRefProcessOutputOversizeFailsSoft(t *testing.T) {
 	af := newAssetFetcher(be, 1, fakeProcess(t, body)+" {input} {output}") // 1 KB cap
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
-	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	key, _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
 	if err != nil {
 		t.Fatalf("UploadCacheRef should fail soft on oversize output, got: %v", err)
 	}
@@ -663,7 +663,7 @@ func TestUploadCacheRefProcessStdoutOversizeFailsSoft(t *testing.T) {
 	af := newAssetFetcher(be, 1, fakeProcess(t, `head -c 4096 /dev/zero`)) // 1 KB cap
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
-	key, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	key, _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
 	if err != nil {
 		t.Fatalf("UploadCacheRef should fail soft on oversize stdout output, got: %v", err)
 	}
@@ -674,7 +674,7 @@ func TestUploadCacheRefProcessStdoutOversizeFailsSoft(t *testing.T) {
 
 func TestUploadCacheRefMissingFile(t *testing.T) {
 	af := newAssetFetcher(tempStore(t), 1024, "")
-	if _, err := af.UploadCacheRef(context.Background(), t.TempDir(), "nope.jpg"); err == nil {
+	if _, _, err := af.UploadCacheRef(context.Background(), t.TempDir(), "nope.jpg"); err == nil {
 		t.Fatal("expected error for missing file, got nil")
 	}
 }
@@ -710,7 +710,7 @@ func TestUploadCacheRefNoPartialFileOnAtomicPutFailure(t *testing.T) {
 	// Content longer than writeOK so the mid-stream failure fires.
 	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
 
-	_, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	_, _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
 	if err == nil {
 		t.Fatal("expected upload error, got nil")
 	}
@@ -742,11 +742,11 @@ func TestUploadCacheRefMemoizesWithinRun(t *testing.T) {
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
 
-	k1, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	k1, _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
 	if err != nil {
 		t.Fatalf("first UploadCacheRef: %v", err)
 	}
-	k2, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	k2, _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
 	if err != nil {
 		t.Fatalf("second UploadCacheRef: %v", err)
 	}
@@ -771,7 +771,7 @@ func TestUploadCacheRefProcessOutputStagedUnderCacheDir(t *testing.T) {
 	af.procDir = filepath.Join(cacheDir, "_processed")
 
 	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
-	if _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg"); err != nil {
+	if _, _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg"); err != nil {
 		t.Fatalf("UploadCacheRef: %v", err)
 	}
 	got, err := os.ReadFile(rec)
@@ -808,7 +808,7 @@ func TestUploadCacheRefCorruptMediaDeclined(t *testing.T) {
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "clip.mp4", "NOT-A-REAL-MP4")
 
-	_, err := af.UploadCacheRef(context.Background(), cacheDir, "clip.mp4")
+	_, _, err := af.UploadCacheRef(context.Background(), cacheDir, "clip.mp4")
 	if !errors.Is(err, errCorruptAsset) {
 		t.Fatalf("err = %v, want errCorruptAsset", err)
 	}
@@ -835,7 +835,7 @@ func TestUploadCacheRefUnidentifiedDocumentStillHosted(t *testing.T) {
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "doc.pdf", pdfBytes)
 
-	key, err := af.UploadCacheRef(context.Background(), cacheDir, "doc.pdf")
+	key, _, err := af.UploadCacheRef(context.Background(), cacheDir, "doc.pdf")
 	if err != nil {
 		t.Fatalf("UploadCacheRef: %v", err)
 	}
@@ -854,7 +854,7 @@ func TestUploadCacheRefIdentifiedUnsupportedMediaStillHosted(t *testing.T) {
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "clip.mp4", "REAL-BUT-EXOTIC")
 
-	key, err := af.UploadCacheRef(context.Background(), cacheDir, "clip.mp4")
+	key, _, err := af.UploadCacheRef(context.Background(), cacheDir, "clip.mp4")
 	if err != nil {
 		t.Fatalf("UploadCacheRef: %v", err)
 	}
@@ -873,10 +873,51 @@ func TestProcFailedCounterOnBrokenCommands(t *testing.T) {
 	cacheDir := t.TempDir()
 	writeCacheFile(t, cacheDir, "pic.jpg", jpegBytes)
 
-	if _, err := af.UploadCacheRef(context.Background(), cacheDir, "pic.jpg"); err != nil {
+	if _, _, err := af.UploadCacheRef(context.Background(), cacheDir, "pic.jpg"); err != nil {
 		t.Fatalf("UploadCacheRef must fail soft to the original: %v", err)
 	}
 	if got := af.procFailed.Load(); got != 2 {
 		t.Errorf("procFailed = %d, want 2 (peek + process both failed)", got)
+	}
+}
+
+// UploadCacheRef's second return is the bytes actually added to the store:
+// the stored payload size on a fresh upload, 0 on a memo or store dedup hit.
+func TestUploadCacheRefReportsUploadedBytes(t *testing.T) {
+	be := tempStore(t)
+	af := newAssetFetcher(be, 1024, "")
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+
+	if _, n, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg"); err != nil || n != int64(len(jpegBytes)) {
+		t.Fatalf("first upload = (%d, %v), want (%d, nil)", n, err, len(jpegBytes))
+	}
+	// Same fetcher again: memo hit. Fresh fetcher, same store: existence hit.
+	if _, n, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg"); err != nil || n != 0 {
+		t.Fatalf("memo hit = (%d, %v), want (0, nil)", n, err)
+	}
+	af2 := newAssetFetcher(be, 1024, "")
+	if _, n, err := af2.UploadCacheRef(context.Background(), cacheDir, "photo.jpg"); err != nil || n != 0 {
+		t.Fatalf("store hit = (%d, %v), want (0, nil)", n, err)
+	}
+}
+
+// With asset-process configured, the charged size is the stored PROCESSED
+// payload, not the source file's.
+func TestUploadCacheRefReportsProcessedBytes(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "out.bin")
+	if err := os.WriteFile(out, []byte(encodedBytes), 0o644); err != nil {
+		t.Fatalf("write out: %v", err)
+	}
+	af := newAssetFetcher(tempStore(t), 1024, fakeProcess(t, "cat '"+out+"'"))
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+
+	_, n, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	if err != nil {
+		t.Fatalf("UploadCacheRef: %v", err)
+	}
+	if want := int64(len(encodedBytes)); n != want {
+		t.Fatalf("uploaded = %d, want %d (processed payload, not the %d-byte source)", n, want, len(jpegBytes))
 	}
 }

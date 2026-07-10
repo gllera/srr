@@ -205,6 +205,21 @@ func (d *SFTP) AtomicPut(_ context.Context, key string, r io.Reader, _ ObjectMet
 	return nil
 }
 
+// Stat returns the remote file's size; a missing key is (0, nil) per the
+// Backend contract.
+func (d *SFTP) Stat(_ context.Context, key string) (int64, error) {
+	file := d.sftpPath("stat", key)
+	fi, err := d.client.Stat(file)
+	if os.IsNotExist(err) {
+		slog.Debug("db not found", "key", file)
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("stat file %s: %w", file, err)
+	}
+	return fi.Size(), nil
+}
+
 func (d *SFTP) Rm(_ context.Context, key string) error {
 	file := d.sftpPath("delete", key)
 	return rmErr(d.client.Remove(file), file)

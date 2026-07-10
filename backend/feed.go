@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"sync/atomic"
 
 	"srr/ingest"
 	"srr/mod"
@@ -110,7 +111,21 @@ type Feed struct {
 	Expired  int `json:"xp,omitempty"`
 	TotalArt int `json:"total_art"`
 	AddIdx   int `json:"add_idx"`
-	newItems []*Item
+	// ContentBytes is the cumulative uncompressed size in bytes of the article
+	// JSONL lines this feed added to data/ packs (bumped per article by
+	// PutArticles, before gzip; idx/meta overhead not included). Never
+	// decreases — expiration is logical deletion, the pack bytes stay.
+	ContentBytes int64 `json:"cb,omitempty"`
+	// AssetBytes tracks the store footprint of this feed's self-hosted assets:
+	// bumped by the stored payload size (post-asset-process) when its items
+	// upload assets/ objects — counted once at the actual Put, so content-hash
+	// dedup hits add nothing and a shared asset is charged to the feed whose
+	// fetch uploaded it first — and reduced (clamped at 0) when expiration
+	// deletes those objects (ExpireArticles stats each key before the Rm).
+	// Approximate by design: a cross-feed shared asset can be charged to one
+	// feed and expired via another's article.
+	AssetBytes int64 `json:"ab,omitempty"`
+	newItems   []*Item
 }
 
 func (c *Feed) LogValue() slog.Value {
@@ -444,7 +459,7 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 
 	// Store-side end-of-pipeline step (kept out of processItem, which stays a
 	// pure, store-free transform): self-host each item's "#"-marked assets.
-	if err := run.uploadAssets(ctx, items); err != nil {
+	if err := run.uploadAssets(ctx, c, items); err != nil {
 		return nil, err
 	}
 
@@ -472,29 +487,39 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 // leaves feed state (watermark, dedup, etag) untouched, so a transient store
 // error self-heals next fetch while a persistent one wedges the feed until the
 // store recovers.
-func (run *fetchRun) uploadAssets(ctx context.Context, items []*Item) error {
+func (run *fetchRun) uploadAssets(ctx context.Context, c *Feed, items []*Item) error {
+	var uploaded atomic.Int64
 	g, gctx := errgroup.WithContext(ctx)
 	for _, i := range items {
 		if !mod.HasAssetMarkers(i.Content) {
 			continue
 		}
 		g.Go(func() error {
-			return run.rewriteItemAssets(gctx, i)
+			return run.rewriteItemAssets(gctx, i, &uploaded)
 		})
 	}
-	return g.Wait()
+	err := g.Wait()
+	// Charge the feed even when the batch fails: the Puts that did complete are
+	// in the store regardless, and content-addressing means the retry next fetch
+	// dedups against them and adds nothing. Written after Wait, so only this
+	// feed's worker goroutine ever touches the field.
+	c.AssetBytes += uploaded.Load()
+	return err
 }
 
 // rewriteItemAssets rewrites one item's "#"-upload markers to assets/ keys via
 // UploadCacheRef. errNotAsset references (bare #fragments, paths escaping the
 // cache dir) are declined and left untouched; any other upload failure is
-// returned (failing the feed).
-func (run *fetchRun) rewriteItemAssets(ctx context.Context, i *Item) (err error) {
+// returned (failing the feed). Bytes UploadCacheRef actually Put (nonzero only
+// when this call led the upload) accumulate into uploaded, the feed's
+// AssetBytes accounting.
+func (run *fetchRun) rewriteItemAssets(ctx context.Context, i *Item, uploaded *atomic.Int64) (err error) {
 	// On a hard upload error RewriteAttrs's returned content is unused: the error
 	// fails the feed (uploadAssets → fetchURL returns no items), so the item — and
 	// this i.Content write — is discarded and never observed.
 	i.Content, err = mod.RewriteAttrs(i.Content, func(local string) (string, bool, error) {
-		key, err := run.assets.UploadCacheRef(ctx, run.cacheDir, local)
+		key, n, err := run.assets.UploadCacheRef(ctx, run.cacheDir, local)
+		uploaded.Add(n)
 		switch {
 		case err == nil:
 			return key, true, nil
