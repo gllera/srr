@@ -31,6 +31,32 @@ func TestRecipeSetUpsertAndShow(t *testing.T) {
 	}
 }
 
+// TestRecipeSetRejectsUnknownIngestBuiltin mirrors pipe validation on the ingest
+// axis: a typo'd #-builtin must fail at `recipe set`, not silently dispatch as a
+// shell command (`/bin/sh -c '#feeds'`) at fetch time and break every feed using
+// the recipe.
+func TestRecipeSetRejectsUnknownIngestBuiltin(t *testing.T) {
+	setupEmptyDB(t)
+	if err := recipeSet(t, "foo", "#feeds", "#sanitize"); err == nil {
+		t.Fatal("recipe set with ingest '#feeds' should be rejected")
+	}
+}
+
+// TestRecipeSetTrimsIngest guards that surrounding whitespace is trimmed from
+// the ingest override (an untrimmed ' #feed ' would dispatch as a shell command).
+func TestRecipeSetTrimsIngest(t *testing.T) {
+	setupEmptyDB(t)
+	if err := recipeSet(t, "foo", "  #feed  ", "#sanitize"); err != nil {
+		t.Fatalf("recipe set: %v", err)
+	}
+	_ = withDB(false, func(_ context.Context, db *DB) error {
+		if got := db.core.Recipes["foo"].Ingest; got != "#feed" {
+			t.Errorf("ingest = %q, want %q (trimmed)", got, "#feed")
+		}
+		return nil
+	})
+}
+
 func TestRecipeSetClearIngest(t *testing.T) {
 	setupEmptyDB(t)
 	_ = recipeSet(t, "tg", "srr-telegram", "#sanitize")

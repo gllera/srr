@@ -84,23 +84,56 @@ func printJSON(v any) error {
 // (no dangling refs created via the CLI), its feed-level pipe override must
 // pass the same token check as a recipe pipe (#default allowed — it expands
 // to the recipe's effective pipe), and its tag must be OPML-safe.
-func normalizeFeed(ch *Feed, recipes map[string]Recipe) error {
-	if ch.ExpireDays < 0 {
-		return fmt.Errorf("expire days must be >= 0 (got %d)", ch.ExpireDays)
+// validateIngest trims a feed/recipe ingest override and rejects a "#"-prefixed
+// name that isn't a registered built-in — mirroring validatePipe on the pipe
+// axis. Without it a typo like "#feeds" (or an untrimmed " #feed ") is stored
+// verbatim and only fails at fetch time, dispatched as `/bin/sh -c '#feeds'`
+// (a shell comment → empty stdout → the ingest engine's hard error), breaking
+// every feed on that recipe with no signal at the `recipe set`/`feed add` that
+// introduced it. A non-"#" value is an external shell command and passes through.
+func validateIngest(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if strings.HasPrefix(name, "#") && !ingest.IsBuiltin(name) {
+		return "", fmt.Errorf("unknown built-in ingest %q (the only built-in is %q; a non-# value is a shell command)", name, ingest.Builtin)
+	}
+	return name, nil
+}
+
+// validateFeedFields runs the DB-independent field validations (expire bounds,
+// ingest/pipe tokens, tag) shared by normalizeFeed and the AddCmd/UpdCmd/serve
+// pre-flight, so bad input is rejected BEFORE the subscribe-time network probe
+// rather than after a wasted round-trip. Pure check, no mutation. The recipe-ref
+// check is separate — it needs the recipes map and already runs inside
+// resolveFeedProbe before any network I/O.
+func validateFeedFields(expireDays int, ingest string, pipe []string, tag string) error {
+	if expireDays < 0 {
+		return fmt.Errorf("expire days must be >= 0 (got %d)", expireDays)
 	}
 	// Sanity ceiling: keeps the cutoff arithmetic (now − days·86400) far from
 	// int64 overflow and rejects obviously-typo'd values.
-	if ch.ExpireDays > 36500 {
-		return fmt.Errorf("expire days must be <= 36500 (100 years) (got %d)", ch.ExpireDays)
+	if expireDays > 36500 {
+		return fmt.Errorf("expire days must be <= 36500 (100 years) (got %d)", expireDays)
+	}
+	if _, err := validateIngest(ingest); err != nil {
+		return err
+	}
+	if err := validatePipe(filterPipe(pipe), true); err != nil {
+		return err
+	}
+	return validateTag(tag)
+}
+
+func normalizeFeed(ch *Feed, recipes map[string]Recipe) error {
+	if err := validateFeedFields(ch.ExpireDays, ch.Ingest, ch.Pipe, ch.Tag); err != nil {
+		return err
 	}
 	if err := validateRecipeRef(recipes, ch.Recipe); err != nil {
 		return err
 	}
+	// Apply the normalizations the checks above validated.
+	ch.Ingest = strings.TrimSpace(ch.Ingest)
 	ch.Pipe = filterPipe(ch.Pipe)
-	if err := validatePipe(ch.Pipe, true); err != nil {
-		return err
-	}
-	return validateTag(ch.Tag)
+	return nil
 }
 
 // validateRecipeRef accepts an empty name (⇒ default) or any existing recipe;
@@ -174,6 +207,12 @@ func (o *AddCmd) Run() error {
 	v.Pipe = o.Pipe
 	if o.Expire != nil {
 		v.ExpireDays = *o.Expire
+	}
+	// Offline field checks before the store lock and the subscribe-time probe, so
+	// bad input never triggers a wasted fetch (the recipe ref is checked inside
+	// resolveFeedProbe, also before any network I/O).
+	if err := validateFeedFields(v.ExpireDays, v.Ingest, v.Pipe, v.Tag); err != nil {
+		return err
 	}
 	return withDB(true, func(ctx context.Context, db *DB) error {
 		resolved, err := resolveFeedProbe(ctx, db.core.Recipes, v.Recipe, v.Ingest, "", v.URL)
@@ -284,6 +323,11 @@ func (o *UpdCmd) Run() error {
 				return fmt.Errorf("invalid url %q", *o.URL)
 			}
 			newURL = *o.URL
+		}
+		// Offline field checks before the subscribe-time probe, so bad input
+		// never triggers a wasted fetch.
+		if err := validateFeedFields(ch.ExpireDays, ch.Ingest, ch.Pipe, ch.Tag); err != nil {
+			return err
 		}
 		resolved, err := resolveFeedProbe(ctx, db.core.Recipes, ch.Recipe, ch.Ingest, oldURL, newURL)
 		if err != nil {

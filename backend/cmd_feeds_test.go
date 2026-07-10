@@ -502,6 +502,37 @@ func TestFeedUpdRejectsUnknownPipeBuiltin(t *testing.T) {
 	}
 }
 
+// TestFeedAddValidatesBeforeProbe guards that offline field validation (here an
+// out-of-range expire) rejects the input BEFORE the subscribe-time network
+// probe runs, so a bad flag never triggers a wasted fetch.
+func TestFeedAddValidatesBeforeProbe(t *testing.T) {
+	setupEmptyDB(t)
+	called := false
+	resolveFeedURL = func(_ context.Context, u string) (string, error) {
+		called = true
+		return u, nil
+	}
+	badExpire := -5
+	cmd := &AddCmd{Title: strPtr("X"), URL: strPtr("https://x.example/feed"), Expire: &badExpire}
+	if err := cmd.Run(); err == nil {
+		t.Fatal("feed add -e -5 should be rejected")
+	}
+	if called {
+		t.Error("resolveFeedURL ran despite invalid input; offline validation must precede the probe")
+	}
+}
+
+// TestFeedUpdRejectsUnknownIngestBuiltin mirrors the pipe check on the ingest
+// axis: a typo'd #-builtin override must fail at `feed upd`, not silently run as
+// a shell command at fetch time.
+func TestFeedUpdRejectsUnknownIngestBuiltin(t *testing.T) {
+	setupFeedsTestDB(t)
+	wantErr(t, (&UpdCmd{ID: 0, Ingest: strPtr("#feeds")}).Run(), `unknown built-in ingest "#feeds"`)
+	if got := reopenDB(t).Feeds()[0].Ingest; got != "" {
+		t.Errorf("Ingest = %q, want unchanged (commit rejected)", got)
+	}
+}
+
 // feed add -i with an external command skips subscribe-time discovery — the
 // feed-level override wins over the (default) recipe's #feed, same gating as
 // an external-ingest recipe.

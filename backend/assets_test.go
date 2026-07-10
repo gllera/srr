@@ -115,6 +115,22 @@ func TestUploadCacheRefRunsProcessBeforeUpload(t *testing.T) {
 	}
 }
 
+// TestContentHashKeyExtensionAlwaysHarvestable guards that contentHashKey never
+// mints a key whose extension the expiration harvest / `srr asset heal` grammar
+// (assetKeyRe) rejects — otherwise the object leaks forever (never expired,
+// un-healable). The extension comes from an attacker-influenced marker name
+// (path.Ext) or an asset-peek report, so it can carry a hyphen, extra dot,
+// space, query fragment, or non-ASCII.
+func TestContentHashKeyExtensionAlwaysHarvestable(t *testing.T) {
+	var sum [32]byte
+	for _, ext := range []string{".jpg", ".WEBP", "", ".h264-hi", ".php?x=1", ".jp g", ".tar.gz", ".naïve"} {
+		key := contentHashKey(ext, sum)
+		if !assetKeyRe.MatchString(key) {
+			t.Errorf("contentHashKey(%q) = %q, not matched by assetKeyRe (un-harvestable / un-healable)", ext, key)
+		}
+	}
+}
+
 func TestUploadCacheRefSkipsProcessWhenSourceAlreadyUploaded(t *testing.T) {
 	be := tempStore(t)
 	// Pre-seed the store at the source-hash key with a sentinel.
@@ -800,6 +816,28 @@ func fakePeek(t *testing.T, jsonOut string) string {
 // unsupported) on a source claiming a media extension means the bytes are
 // corrupt, not merely exotic — publishing them verbatim is the chron-437 bug.
 // UploadCacheRef must refuse with errCorruptAsset and store nothing.
+// TestUploadCacheRefCorruptMediaMemoized guards that the corrupt-media verdict is
+// remembered for the run: a corrupt asset referenced by several articles re-runs
+// the (expensive) asset-peek subprocess only once, not once per reference.
+func TestUploadCacheRefCorruptMediaMemoized(t *testing.T) {
+	be := tempStore(t)
+	af := newAssetFetcher(be, 1024, "")
+	countDir := t.TempDir()
+	af.peek = strings.Fields(fakeProcess(t, "mktemp '"+countDir+"/run.XXXXXX' >/dev/null\nprintf '%s' '{\"mimetype\":\"application/octet-stream\",\"extension\":\"\",\"supported\":false}'"))
+
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "clip.mp4", "NOT-A-REAL-MP4")
+
+	for i := 0; i < 2; i++ {
+		if _, _, err := af.UploadCacheRef(context.Background(), cacheDir, "clip.mp4"); !errors.Is(err, errCorruptAsset) {
+			t.Fatalf("call %d: err = %v, want errCorruptAsset", i, err)
+		}
+	}
+	if runs, _ := os.ReadDir(countDir); len(runs) != 1 {
+		t.Errorf("asset-peek ran %d times for a corrupt asset referenced twice, want 1 (memoized)", len(runs))
+	}
+}
+
 func TestUploadCacheRefCorruptMediaDeclined(t *testing.T) {
 	be := tempStore(t)
 	af := newAssetFetcher(be, 1024, "")

@@ -89,6 +89,10 @@ func setRecipe(ctx context.Context, db *DB, name, ingest string, pipe []string) 
 	if err := validatePipe(pipe, name != defaultRecipeName); err != nil {
 		return err
 	}
+	ingest, err := validateIngest(ingest)
+	if err != nil {
+		return err
+	}
 	db.core.Recipes[name] = Recipe{Ingest: ingest, Pipe: pipe}
 	return db.Commit(ctx)
 }
