@@ -68,6 +68,54 @@ func dispatchStub(t *testing.T, ch *Feed, ingestName string) []*Item {
 	return items
 }
 
+// TestFeedFetchCancelledByShutdownDoesNotRecordError guards that a fetch failing
+// because the run context was cancelled (SIGTERM mid-cycle) is NOT persisted as a
+// feed fault: on stores that ignore ctx (local/SFTP) the cycle still commits, so
+// recording FetchError/FailStreak would flip healthy feeds to "err" on a graceful
+// stop. Only a genuine fetch error (ctx live) counts.
+func TestFeedFetchCancelledByShutdownDoesNotRecordError(t *testing.T) {
+	ingest.Register("test-fetcherr", func(_ context.Context, _ *http.Client, _ []byte, _ ingest.Request) (ingest.Result, error) {
+		return ingest.Result{}, fmt.Errorf("boom")
+	})
+	ch := &Feed{Title: "T", URL: "irrelevant://value"}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // simulate run shutdown before the fetch records its outcome
+	run := &fetchRun{
+		engine:    ingest.New(),
+		fetchedAt: 4_102_444_800,
+		recipes:   map[string]Recipe{defaultRecipeName: {Ingest: "#test-fetcherr"}},
+	}
+	ch.Fetch(ctx, run, make([]byte, 1<<20), mod.New())
+	if ch.FetchError != "" {
+		t.Errorf("FetchError = %q, want empty (shutdown is not a feed fault)", ch.FetchError)
+	}
+	if ch.FailStreak != 0 {
+		t.Errorf("FailStreak = %d, want 0", ch.FailStreak)
+	}
+}
+
+// TestFetchAllNilItemsPreservesDedupState guards that an external ingest
+// returning only null items ({"items":[null,null]}) preserves Watermark/
+// BoundaryGUIDs. len(result.Items) != 0 so the plain empty-response guard
+// doesn't cover it, yet no usable item survives the nil-skip — wiping bg would
+// re-ingest the whole remembered window as duplicates on the next real fetch.
+func TestFetchAllNilItemsPreservesDedupState(t *testing.T) {
+	ingest.Register("test-allnil", func(_ context.Context, _ *http.Client, _ []byte, _ ingest.Request) (ingest.Result, error) {
+		return ingest.Result{Items: []*mod.RawItem{nil, nil}}, nil
+	})
+	ch := &Feed{Title: "T", URL: "irrelevant://value", Watermark: 1700000000, BoundaryGUIDs: []uint32{11, 22, 33}}
+	items := dispatchStub(t, ch, "#test-allnil")
+	if len(items) != 0 {
+		t.Fatalf("got %d items, want 0", len(items))
+	}
+	if ch.Watermark != 1700000000 {
+		t.Errorf("Watermark = %d, want preserved 1700000000", ch.Watermark)
+	}
+	if !slices.Equal(ch.BoundaryGUIDs, []uint32{11, 22, 33}) {
+		t.Errorf("BoundaryGUIDs = %v, want preserved [11 22 33]", ch.BoundaryGUIDs)
+	}
+}
+
 // fetchURL dispatches through the engine's registry by the passed ingest name.
 func TestFetchURLDispatchesByIngestName(t *testing.T) {
 	ch := &Feed{Title: "T", URL: "irrelevant://value"}

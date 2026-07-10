@@ -185,6 +185,15 @@ func (c *Feed) Fetch(ctx context.Context, run *fetchRun, buf []byte, processor *
 	ingestName := ingest.Select(c.Ingest, r.Ingest, def.Ingest)
 	items, err := c.fetchURL(ctx, run, buf, processor, pipe, ingestName)
 	if err != nil {
+		if ctx.Err() != nil {
+			// Run shutdown (SIGTERM/SIGINT) cancelled this fetch mid-flight — not a
+			// feed fault. Leave FetchError/FailStreak/vitals untouched: on stores
+			// that ignore ctx (local/SFTP) the cycle still commits, so recording the
+			// error would flip healthy feeds to "err" on a graceful stop. (On S3 the
+			// commit itself aborts, so nothing persists either way.)
+			slog.Debug("feed fetch cancelled by shutdown", "feed", c, "url", c.URL)
+			return
+		}
 		c.FetchError = err.Error()
 		c.FailStreak++
 		slog.Error("feed fetch failed", "feed", c, "url", c.URL, "err", err)
@@ -317,6 +326,18 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 			continue
 		}
 		candidates = append(candidates, candidate{i, pubUnix})
+	}
+
+	// An all-nil (or otherwise emptied-after-nil-skip) response carried no usable
+	// item — e.g. an external strategy emitting {"items":[null]}. len(result.Items)
+	// was non-zero so the early empty-guard above didn't fire, but nothing
+	// survived: treat it like a 200-with-zero-items, advancing the HTTP validators
+	// while preserving Watermark/BoundaryGUIDs, so this transient malformed fetch
+	// doesn't wipe bg and re-ingest the remembered window as duplicates next time.
+	if len(boundary) == 0 {
+		c.ETag = result.ETag
+		c.LastModified = result.LastModified
+		return nil, nil
 	}
 
 	// Stale-response guard: a 200 whose newest dated item sits strictly below
