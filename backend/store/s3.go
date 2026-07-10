@@ -67,7 +67,7 @@ func newS3(ctx context.Context, u *url.URL) (Backend, error) {
 
 	cfg, err := config.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("loading AWS config: %w", err)
 	}
 
 	if s3Cfg.Endpoint != "" {
@@ -110,7 +110,7 @@ func (d *S3) Get(ctx context.Context, key string, ignoreMissing bool) (io.ReadCl
 		}
 		return nil, fmt.Errorf("key %q not found on s3", key)
 	case s3ErrUnauthorized:
-		return nil, fmt.Errorf("unauthorized access to s3")
+		return nil, fmt.Errorf("unauthorized access to s3: %w", err)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("s3 get %q: %w", key, err)
@@ -175,7 +175,7 @@ func (d *S3) put(ctx context.Context, key string, r io.Reader, ignoreExisting bo
 	case s3ErrPreconditionFailed:
 		return fmt.Errorf("key %q already exists on s3: %w", key, os.ErrExist)
 	case s3ErrUnauthorized:
-		return fmt.Errorf("unauthorized access to s3")
+		return fmt.Errorf("unauthorized access to s3: %w", err)
 	}
 	if err != nil {
 		return fmt.Errorf("s3 put %q: %w", key, err)
@@ -199,7 +199,7 @@ func (d *S3) Stat(ctx context.Context, key string) (int64, error) {
 		slog.Debug("db not found", "key", key)
 		return 0, nil
 	case s3ErrUnauthorized:
-		return 0, fmt.Errorf("unauthorized access to s3")
+		return 0, fmt.Errorf("unauthorized access to s3: %w", err)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("s3 head %q: %w", key, err)
