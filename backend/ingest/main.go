@@ -122,6 +122,15 @@ func Register(name string, fn FetchFunc) {
 // compare against to decide whether subscribe-time discovery applies.
 const Builtin = "#feed"
 
+// IsBuiltin reports whether name is a registered built-in ingest strategy
+// (currently only Builtin, "#feed"). Callers validate a "#"-prefixed ingest
+// override against this so a typo fails at config time (recipe set / feed add),
+// not at fetch time where it would silently run as a shell command.
+func IsBuiltin(name string) bool {
+	_, ok := registry[name]
+	return ok
+}
+
 // Select applies the caller's precedence rule: the first non-empty name wins
 // (feed-level override > feed's recipe > default recipe). Empty strings fall
 // through; all empty falls back to the built-in "#feed".

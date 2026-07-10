@@ -78,6 +78,13 @@ type assetFetcher struct {
 	// cross-run and cross-worker-race backstop.
 	seen sync.Map
 
+	// corruptSeen memoizes source hashes the corrupt-media guard already declined
+	// (errCorruptAsset), so a corrupt asset referenced by several articles re-runs
+	// the asset-peek subprocess only once — the verdict is deterministic for those
+	// bytes. Keyed like seen (source hash); the per-reference decline WARN still
+	// fires each time (rewriteItemAssets), only the peek is skipped.
+	corruptSeen sync.Map
+
 	// flight coalesces concurrent UploadCacheRef calls for the same source bytes
 	// into a single peek/process/upload. The parallel upload step
 	// (fetchRun.uploadAssets) can hand one asset to several item goroutines at
@@ -228,6 +235,12 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 	if cached, ok := a.seen.Load(sum); ok {
 		return cached.(string), 0, nil
 	}
+	// Same short-circuit for a source already declined as corrupt media: skip the
+	// repeat peek subprocess but still return the sentinel so the caller declines
+	// this reference (and WARNs) exactly as it would on the first.
+	if _, bad := a.corruptSeen.Load(sum); bad {
+		return "", 0, fmt.Errorf("peek previously identified nothing for media file %q: %w", localname, errCorruptAsset)
+	}
 
 	// Coalesce a concurrent wave referencing the SAME source bytes into one
 	// peek/process/upload (the parallel upload step can hand one asset to many
@@ -303,6 +316,7 @@ func (a *assetFetcher) resolveAndUpload(ctx context.Context, full, localname str
 			unidentified := pr.Mimetype == "" || pr.Mimetype == "application/octet-stream"
 			if !pr.Supported && unidentified && normalizeExt(pr.Extension) == "" && isMediaExt(storedExt) {
 				a.corrupt.Add(1)
+				a.corruptSeen.Store(sum, struct{}{})
 				return "", 0, fmt.Errorf("peek identified nothing for media file %q: %w", localname, errCorruptAsset)
 			}
 			if ext := normalizeExt(pr.Extension); ext != "" {
@@ -596,5 +610,17 @@ func normalizeExt(ext string) string {
 // the pack base).
 func contentHashKey(ext string, sum [32]byte) string {
 	h := hex.EncodeToString(sum[:])
-	return assetPrefix + h[:2] + "/" + h[:16] + ext
+	key := assetPrefix + h[:2] + "/" + h[:16] + ext
+	// The extension is attacker-influenced — it comes from the marker's cache-file
+	// name (path.Ext) or an asset-peek report — so it can carry a hyphen, extra
+	// dot, space, query fragment, or non-ASCII. Such a key stores fine but is
+	// invisible to expiration's harvest and to `srr asset heal` (both gate on
+	// assetKeyRe), leaking the object forever. Drop the extension when it makes
+	// the key un-harvestable; the frontend resolves keys literally, so the
+	// no-extension key still renders (S3 carries the peek Content-Type regardless,
+	// and the hash portion is always valid hex, so the fallback always matches).
+	if !assetKeyRe.MatchString(key) {
+		key = assetPrefix + h[:2] + "/" + h[:16]
+	}
+	return key
 }

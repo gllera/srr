@@ -63,6 +63,10 @@ func listViewOf(ch *Feed) feedListView {
 // it in a no-lock DB scope first) so the network probe never holds .locked —
 // which would 409 the fetch loop and every other GUI mutation for its duration.
 func resolveFeedViewURL(ctx context.Context, db *DB, v *feedView) error {
+	// Offline field checks before the probe, so bad input never triggers a fetch.
+	if err := validateFeedFields(v.ExpireDays, v.Ingest, v.Pipe, v.Tag); err != nil {
+		return err
+	}
 	oldURL := ""
 	if v.ID != nil {
 		existing, err := db.FeedByID(*v.ID)
