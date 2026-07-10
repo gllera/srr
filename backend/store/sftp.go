@@ -161,6 +161,16 @@ func (d *SFTP) Put(_ context.Context, key string, r io.Reader, ignoreExisting bo
 
 	fs, err := d.client.OpenFile(file, writeOpenFlags(ignoreExisting))
 	if err != nil {
+		// pkg/sftp maps EEXIST to the generic SSH_FX_FAILURE (SFTPv3 has no
+		// dedicated "already exists" status), so the raw error doesn't satisfy
+		// errors.Is(_, os.ErrExist) the way S3/HTTP/local do. On an exclusive
+		// create, re-stat: if the target now exists it was a conflict, so surface
+		// the store-lock 409 sentinel instead of a raw failure.
+		if !ignoreExisting {
+			if _, statErr := d.client.Stat(file); statErr == nil {
+				return fmt.Errorf("key %q already exists: %w", file, os.ErrExist)
+			}
+		}
 		return fmt.Errorf("opening file %s: %w", file, err)
 	}
 

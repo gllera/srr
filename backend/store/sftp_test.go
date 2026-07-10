@@ -209,6 +209,26 @@ func TestSFTPPutExclusiveCreateReturnsError(t *testing.T) {
 	}
 }
 
+// TestSFTPPutExclusiveCreateReportsErrExist pins the store-lock 409 contract for
+// the SFTP backend: an exclusive-create conflict must satisfy
+// errors.Is(err, os.ErrExist) like S3/HTTP/local, so cmd_serve's writeErr maps
+// it to the documented 409 "store is locked" instead of a raw 400. pkg/sftp
+// maps EEXIST to the generic SSH_FX_FAILURE (SFTPv3 has no "already exists"
+// status), so the raw client error does NOT — SFTP.Put must translate it.
+func TestSFTPPutExclusiveCreateReportsErrExist(t *testing.T) {
+	d, _ := setupSFTPPipe(t)
+	if err := d.Put(ctx, "lock", strings.NewReader(""), false); err != nil {
+		t.Fatalf("Put(first): %v", err)
+	}
+	err := d.Put(ctx, "lock", strings.NewReader(""), false)
+	if err == nil {
+		t.Fatal("Put(ignoreExisting=false) on existing file should fail")
+	}
+	if !errors.Is(err, os.ErrExist) {
+		t.Fatalf("err = %v; want errors.Is(err, os.ErrExist)", err)
+	}
+}
+
 func TestSFTPPutOverwrite(t *testing.T) {
 	d, _ := setupSFTPPipe(t)
 	for _, content := range []string{"first", "second"} {

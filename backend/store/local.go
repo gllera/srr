@@ -105,8 +105,13 @@ func (d *Local) AtomicPut(_ context.Context, key string, r io.Reader, _ ObjectMe
 		return fmt.Errorf("opening file %s: %w", tmpFile, err)
 	}
 
+	// Remove the staging file on every failure path (matching SFTP.AtomicPut), so
+	// a recurring failure (e.g. a full disk hit every serve --interval cycle)
+	// can't accumulate orphaned <key>.tmp.<pid>.<n> files — nothing else sweeps
+	// them (the pack GC only knows the pack-name grammar).
 	if _, err := io.Copy(fs, r); err != nil {
 		fs.Close()
+		_ = os.Remove(tmpFile)
 		return fmt.Errorf("writing file %s: %w", tmpFile, err)
 	}
 
@@ -115,13 +120,16 @@ func (d *Local) AtomicPut(_ context.Context, key string, r io.Reader, _ ObjectMe
 	// index the whole store depends on, and finalized packs are cached forever.
 	if err := fs.Sync(); err != nil {
 		fs.Close()
+		_ = os.Remove(tmpFile)
 		return fmt.Errorf("syncing file %s: %w", tmpFile, err)
 	}
 	if err := fs.Close(); err != nil {
+		_ = os.Remove(tmpFile)
 		return fmt.Errorf("closing file %s: %w", tmpFile, err)
 	}
 
 	if err := os.Rename(tmpFile, file); err != nil {
+		_ = os.Remove(tmpFile)
 		return fmt.Errorf("renaming %s to %s: %w", tmpFile, file, err)
 	}
 	// fsync the parent directory so the rename itself is durable across a crash.

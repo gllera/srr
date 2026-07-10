@@ -2,12 +2,14 @@ package store
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"testing/iotest"
 )
 
 var ctx = context.Background()
@@ -84,6 +86,26 @@ func TestLocalAtomicPutNoTempFileRemains(t *testing.T) {
 	rc, _ := b.Get(ctx, "atomic.txt", false)
 	if got := readAllClose(t, rc); got != "content" {
 		t.Errorf("content = %q, want %q", got, "content")
+	}
+}
+
+// TestLocalAtomicPutFailureRemovesTempFile mirrors the SFTP backend's cleanup
+// guarantee: a failed AtomicPut (here a failing reader) must not leave the
+// uniqueTempName(<key>) staging file behind — otherwise a recurring failure
+// (e.g. a full disk hit every serve --interval cycle) accumulates orphans.
+func TestLocalAtomicPutFailureRemovesTempFile(t *testing.T) {
+	b, dir := setupLocalStore(t)
+	wantErr := errors.New("injected read failure")
+	if err := b.AtomicPut(ctx, "atomic.txt", iotest.ErrReader(wantErr), ObjectMeta{}); err == nil {
+		t.Fatal("AtomicPut with a failing reader should return an error")
+	}
+	// uniqueTempName appends .tmp.<pid>.<counter>, so glob rather than a fixed name.
+	matches, _ := filepath.Glob(filepath.Join(dir, "atomic.txt.tmp.*"))
+	if len(matches) != 0 {
+		t.Errorf("temp file(s) leaked after failed AtomicPut: %v", matches)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "atomic.txt")); !os.IsNotExist(err) {
+		t.Error("destination file should not exist after a failed AtomicPut")
 	}
 }
 
