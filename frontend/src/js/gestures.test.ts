@@ -1,9 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
 
-// The touch state machine (one-finger swipe / two-finger cycle) needs real
-// Touch dispatch and is left to the e2e-browser layer (Puppeteer CDP). Here we
-// cover the jsdom-feasible half: the scroll-driven toolbar hide/show and the
-// resetScroll re-baseline.
+// Two halves, both driven in jsdom: the scroll-linked toolbar hide/show +
+// resetScroll, and the touch state machine (one-finger swipe = prev/next,
+// two-finger vertical = cycle filter, pinch discrimination, finger-lift re-seed,
+// touchcancel). jsdom has no real Touch dispatch, but the handlers only read
+// plain {clientX,clientY} off e.touches/e.changedTouches and never test
+// `instanceof TouchEvent`, so a synthesized Event with those props defined
+// drives the whole machine here — no browser needed.
 
 const dropdown = vi.hoisted(() => ({ closeAllDropdowns: vi.fn() }))
 vi.mock("./dropdown", () => dropdown)
@@ -21,16 +24,17 @@ const scroll = () => window.dispatchEvent(new Event("scroll"))
 
 let toolbar: HTMLElement
 let g: Gestures
+let goPrev: ReturnType<typeof vi.fn>
+let goNext: ReturnType<typeof vi.fn>
+let onCycle: ReturnType<typeof vi.fn>
 
 function mount(): void {
    document.body.innerHTML = `<nav class="srr-toolbar"></nav>`
    toolbar = document.querySelector(".srr-toolbar")!
-   g = setupGestures({
-      toolbar,
-      goPrev: vi.fn(),
-      goNext: vi.fn(),
-      onCycle: vi.fn(),
-   })
+   goPrev = vi.fn()
+   goNext = vi.fn()
+   onCycle = vi.fn()
+   g = setupGestures({ toolbar, goPrev, goNext, onCycle })
 }
 
 beforeEach(() => {
@@ -117,5 +121,161 @@ describe("resetScroll", () => {
       // The queued scroll event from the jump now reads zero delta → no re-hide.
       scroll()
       expect(toolbar.classList.contains("srr-toolbar-slide")).toBe(false)
+   })
+})
+
+// The touch handlers live on `document` (scroll is on `window`). They read only
+// `.length` and `[i].clientX/clientY` off `touches`/`changedTouches`, so a bare
+// Event with those props defined drives them; `cancelable:true` lets us read
+// preventDefault back off `defaultPrevented`.
+type Pt = { clientX: number; clientY: number }
+function dispatchTouch(type: string, touches: Pt[], changed: Pt[] = touches): Event {
+   const e = new Event(type, { bubbles: true, cancelable: true })
+   Object.defineProperty(e, "touches", { value: touches, configurable: true })
+   Object.defineProperty(e, "changedTouches", { value: changed, configurable: true })
+   document.dispatchEvent(e)
+   return e
+}
+const start = (touches: Pt[]) => dispatchTouch("touchstart", touches)
+const moveTo = (touches: Pt[]) => dispatchTouch("touchmove", touches)
+// touchend: still-down fingers in `touches`, lifted ones in `changedTouches`
+// (the swipe delta reads changedTouches[0]).
+const end = (remaining: Pt[], lifted: Pt[]) => dispatchTouch("touchend", remaining, lifted)
+
+describe("one-finger swipe", () => {
+   it("a left swipe (finger moves left) steps to the next article", () => {
+      start([{ clientX: 200, clientY: 300 }])
+      end([], [{ clientX: 100, clientY: 300 }]) // dx = -100
+      expect(goNext).toHaveBeenCalledTimes(1)
+      expect(goPrev).not.toHaveBeenCalled()
+   })
+
+   it("a right swipe steps to the previous article", () => {
+      start([{ clientX: 100, clientY: 300 }])
+      end([], [{ clientX: 200, clientY: 300 }]) // dx = +100
+      expect(goPrev).toHaveBeenCalledTimes(1)
+      expect(goNext).not.toHaveBeenCalled()
+   })
+
+   it("ignores a sub-threshold horizontal move (<50px)", () => {
+      start([{ clientX: 100, clientY: 300 }])
+      end([], [{ clientX: 135, clientY: 300 }]) // dx = 35
+      expect(goPrev).not.toHaveBeenCalled()
+      expect(goNext).not.toHaveBeenCalled()
+   })
+
+   it("ignores a vertical-dominant move even past the threshold (|dy| > |dx|)", () => {
+      start([{ clientX: 100, clientY: 300 }])
+      end([], [{ clientX: 170, clientY: 420 }]) // dx=70, dy=120
+      expect(goPrev).not.toHaveBeenCalled()
+      expect(goNext).not.toHaveBeenCalled()
+   })
+
+   it("does not fire off a stale start after a 3+-finger touch", () => {
+      // 3 fingers = not a gesture we handle (mode → none); the lift must not read
+      // a stale touchStartX and fire a spurious prev/next.
+      start([
+         { clientX: 100, clientY: 300 },
+         { clientX: 200, clientY: 300 },
+         { clientX: 300, clientY: 300 },
+      ])
+      end([], [{ clientX: 400, clientY: 300 }]) // would be a big swipe, but ignored
+      expect(goPrev).not.toHaveBeenCalled()
+      expect(goNext).not.toHaveBeenCalled()
+   })
+
+   it("resets on touchcancel so the following lift is inert", () => {
+      start([{ clientX: 100, clientY: 300 }])
+      dispatchTouch("touchcancel", [])
+      end([], [{ clientX: 220, clientY: 300 }]) // dx=+120, but cancelled
+      expect(goPrev).not.toHaveBeenCalled()
+      expect(goNext).not.toHaveBeenCalled()
+   })
+})
+
+describe("two-finger vertical cycle", () => {
+   // centroid y=300, inter-finger distance=100
+   const twoStart = () =>
+      start([
+         { clientX: 100, clientY: 300 },
+         { clientX: 200, clientY: 300 },
+      ])
+
+   it("an upward two-finger pan cycles to the previous lane and blocks native scroll", () => {
+      twoStart()
+      const m = moveTo([
+         { clientX: 100, clientY: 240 },
+         { clientX: 200, clientY: 240 },
+      ]) // centroid ↑ to 240, distance unchanged → dy = -60
+      expect(m.defaultPrevented).toBe(true) // a claimed pan preventDefaults
+      end(
+         [],
+         [
+            { clientX: 100, clientY: 240 },
+            { clientX: 200, clientY: 240 },
+         ],
+      )
+      expect(onCycle).toHaveBeenCalledTimes(1)
+      expect(onCycle).toHaveBeenCalledWith(-1)
+   })
+
+   it("a downward two-finger pan cycles to the next lane", () => {
+      twoStart()
+      moveTo([
+         { clientX: 100, clientY: 372 },
+         { clientX: 200, clientY: 372 },
+      ]) // dy = +72
+      end(
+         [],
+         [
+            { clientX: 100, clientY: 372 },
+            { clientX: 200, clientY: 372 },
+         ],
+      )
+      expect(onCycle).toHaveBeenCalledTimes(1)
+      expect(onCycle).toHaveBeenCalledWith(1)
+   })
+
+   it("ignores a sub-threshold two-finger pan (<50px)", () => {
+      twoStart()
+      moveTo([
+         { clientX: 100, clientY: 270 },
+         { clientX: 200, clientY: 270 },
+      ]) // dy = -30
+      end(
+         [],
+         [
+            { clientX: 100, clientY: 270 },
+            { clientX: 200, clientY: 270 },
+         ],
+      )
+      expect(onCycle).not.toHaveBeenCalled()
+   })
+
+   it("treats a distance change as a pinch-zoom: no cycle, native zoom left alone", () => {
+      twoStart()
+      const m = moveTo([
+         { clientX: 60, clientY: 300 },
+         { clientX: 280, clientY: 300 },
+      ]) // distance 100 → 220, Δ=120 > 25 → pinch
+      expect(m.defaultPrevented).toBe(false) // must NOT block the browser's zoom
+      end(
+         [],
+         [
+            { clientX: 60, clientY: 300 },
+            { clientX: 280, clientY: 300 },
+         ],
+      )
+      expect(onCycle).not.toHaveBeenCalled()
+   })
+
+   it("re-seeds a single swipe when one finger lifts before the other", () => {
+      twoStart()
+      // one finger lifts, one remains at x=100 → re-seed as a fresh single swipe
+      end([{ clientX: 100, clientY: 300 }], [{ clientX: 200, clientY: 300 }])
+      // the remaining finger swipes right and lifts
+      end([], [{ clientX: 200, clientY: 300 }]) // dx = +100 from the re-seeded start
+      expect(goPrev).toHaveBeenCalledTimes(1)
+      expect(onCycle).not.toHaveBeenCalled() // no stale cycle off the two-finger dy
    })
 })

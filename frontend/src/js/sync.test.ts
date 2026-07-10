@@ -25,18 +25,40 @@ const v2Blob = (ts: number, seen: Record<string, number> = { "feed:1": 50 }, sav
 let fetchMock: ReturnType<typeof vi.fn>
 let sync: Sync
 
+// init() wires visibilitychange/pagehide/online listeners on the SHARED jsdom
+// document/window with no teardown, so each test records what its module
+// instance registers and removes it in afterEach — otherwise earlier instances'
+// listeners stack up and fire alongside the current one on a dispatched event
+// (the refresh.test.ts listener-hygiene precedent).
+type Recorded = { target: EventTarget; type: string; handler: EventListenerOrEventListenerObject }
+let recorded: Recorded[] = []
+const recordListeners = (target: EventTarget) => {
+   const original = target.addEventListener.bind(target)
+   vi.spyOn(target, "addEventListener").mockImplementation((type, handler, opts) => {
+      if (handler) recorded.push({ target, type, handler })
+      original(type, handler, opts)
+   })
+}
+
 beforeEach(async () => {
    localStorage.clear()
    vi.useFakeTimers()
    fetchMock = vi.fn(async () => res(200, remoteBlob()))
    vi.stubGlobal("fetch", fetchMock)
+   recorded = []
+   recordListeners(document)
+   recordListeners(window)
    vi.resetModules()
    sync = await import("./sync")
 })
 
 afterEach(() => {
    vi.useRealTimers()
+   // Restores the addEventListener recorders and any per-test getter spy
+   // (visibilityState); the fetch stub is undone by unstubAllGlobals.
+   vi.restoreAllMocks()
    vi.unstubAllGlobals()
+   for (const { target, type, handler } of recorded) target.removeEventListener(type, handler)
 })
 
 describe("url validation / normalization", () => {
@@ -414,6 +436,20 @@ describe("flush guard (stale-tab protection)", () => {
       // even with dirty false (nothing pending locally).
       expect(fetchMock.mock.calls.filter((c) => c[1]?.method === "PUT")).toHaveLength(2)
    })
+
+   it("a failed flush PUT leaves changes pending", async () => {
+      vi.setSystemTime(100_000)
+      sync.pushSoon() // dirty=true, ts=100, timer armed (this tab never pulled)
+      fetchMock.mockRejectedValueOnce(new Error("net down")) // flush's OWN PUT fails
+      sync.flush()
+      await vi.advanceTimersByTimeAsync(0) // the rejected PUT's .catch re-arms dirty
+      expect(fetchMock.mock.calls.filter((c) => c[1]?.method === "PUT")).toHaveLength(1)
+      // A subsequent cycle whose pulled remote matches local exactly (no seen
+      // delta, ts not newer) — so ONLY the retained `dirty` can drive a push.
+      fetchMock.mockResolvedValue(res(200, v2Blob(200, {}, [7])))
+      await sync.syncNow()
+      expect(fetchMock.mock.calls.filter((c) => c[1]?.method === "PUT")).toHaveLength(2)
+   })
 })
 
 describe("push", () => {
@@ -497,5 +533,70 @@ describe("init", () => {
       fetchMock.mockResolvedValue(res(500))
       await sync.syncNow()
       expect(status).toHaveBeenCalledTimes(2)
+   })
+})
+
+describe("init triggers", () => {
+   it("re-pulls on the online event", async () => {
+      sync.setSyncUrl(URL)
+      sync.init(vi.fn())
+      await vi.advanceTimersByTimeAsync(0) // boot pull settles
+      fetchMock.mockClear()
+      window.dispatchEvent(new Event("online"))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(fetchMock).toHaveBeenCalled()
+      expect(fetchMock.mock.calls[0][1]?.method).not.toBe("PUT") // a GET pull, not a blind push
+   })
+
+   it("throttles the focus re-pull to the pull interval", async () => {
+      sync.setSyncUrl(URL)
+      sync.init(vi.fn())
+      await vi.advanceTimersByTimeAsync(0) // boot pull → lastPullAt = now
+      fetchMock.mockClear()
+      const fire = () => document.dispatchEvent(new Event("visibilitychange"))
+      fire() // visible, but inside the 60s PULL_MIN_INTERVAL_MS window → no pull
+      await vi.advanceTimersByTimeAsync(0)
+      expect(fetchMock).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(61_000) // past the window
+      fire()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(fetchMock).toHaveBeenCalled()
+   })
+
+   it("flushes on hide/pagehide", async () => {
+      sync.init(vi.fn())
+      sync.setSyncUrl(URL) // enable AFTER init, so the boot pull never fired
+      sync.pushSoon() // dirty; this tab never pulled → flush is unguarded
+      vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden")
+      document.dispatchEvent(new Event("visibilitychange"))
+      await vi.advanceTimersByTimeAsync(0)
+      let puts = fetchMock.mock.calls.filter((c) => c[1]?.method === "PUT")
+      expect(puts).toHaveLength(1)
+      expect(puts[0][1].keepalive).toBe(true)
+      // pagehide flushes too
+      sync.pushSoon() // re-arm the pending change
+      window.dispatchEvent(new Event("pagehide"))
+      await vi.advanceTimersByTimeAsync(0)
+      puts = fetchMock.mock.calls.filter((c) => c[1]?.method === "PUT")
+      expect(puts).toHaveLength(2)
+      expect(puts[1][1].keepalive).toBe(true)
+   })
+})
+
+describe("pullRemote corrupt-remote guards", () => {
+   beforeEach(() => sync.setSyncUrl(URL))
+
+   it("rejects a non-object remote profile", async () => {
+      // Valid JSON, but not an object — JSON.parse succeeds, the typeof guard
+      // rejects (the existing "not json" case fails earlier, at JSON.parse).
+      fetchMock.mockResolvedValue(res(200, "42"))
+      await sync.syncNow()
+      expect(sync.state().error).toBe("invalid profile")
+   })
+
+   it("rejects an unsupported profile version", async () => {
+      fetchMock.mockResolvedValue(res(200, JSON.stringify({ v: 3 })))
+      await sync.syncNow()
+      expect(sync.state().error).toBe("unsupported profile version: 3")
    })
 })

@@ -114,6 +114,13 @@ describe("refreshNow", () => {
       expect(await refresh.refreshNow()).toBe("")
       expect(refresh.lastRefreshError()).toBe("")
    })
+
+   it("a trigger before init is a fail-closed no-op", async () => {
+      // No refresh.init(...) here: runExclusive is still the module's fail-closed
+      // default (async () => false), so a pre-init tick acts busy and skips.
+      expect(await refresh.refreshNow()).toBe("")
+      expect(data.refresh).not.toHaveBeenCalled()
+   })
 })
 
 describe("triggers", () => {

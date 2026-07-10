@@ -340,19 +340,6 @@ describe("list", () => {
       defaultLoadMeta()
    })
 
-   it("search renders all hits via feedLeft walk (no streaming)", async () => {
-      // In the new design renderSearch calls nav.feedLeft repeatedly (through walk),
-      // not searchMore. Set up three articles at sparse chrons; feedLeft skips gaps.
-      nav.filter.search = true
-      data._arts.clear()
-      data._arts.set(9, art({ f: 1, a: 9, t: "a nine" }))
-      data._arts.set(5, art({ f: 1, a: 5, t: "a five" }))
-      data._arts.set(1, art({ f: 1, a: 1, t: "a one" }))
-      data.db.total_art = 10
-      await list.render()
-      expect($rows().map((r) => r.querySelector(".srr-row-title")!.textContent)).toEqual(["a nine", "a five", "a one"])
-   })
-
    it("search stops the initial render at one batch (BATCH=30) and pages older via loadMore", async () => {
       // 31 consecutive hits: walk collects first 30 (BATCH), leaving chron 0 for loadMore.
       nav.filter.search = true
@@ -415,6 +402,81 @@ describe("list", () => {
       defaultLoadMeta()
    })
 
+   // ── Scroll-paging error sink (reportPageError → onError) ─────────────────────
+   // setup()'s 4th arg surfaces paging failures from the fire-and-forget
+   // IntersectionObserver paths (loadMore/loadNewer hand their promise back to the
+   // caller instead). jsdom has no IO, so stub one, capture its callback, and fire a
+   // top-sentinel intersection whose fetchNewer 404s.
+   it("surfaces a paging fetch error through onError", async () => {
+      let ioCb: ((entries: { isIntersecting: boolean; target: Element }[]) => void) | null = null
+      class FakeIO {
+         constructor(cb: (entries: { isIntersecting: boolean; target: Element }[]) => void) {
+            ioCb = cb
+         }
+         observe(): void {}
+         unobserve(): void {}
+         disconnect(): void {}
+      }
+      vi.stubGlobal("IntersectionObserver", FakeIO)
+      const onErr = vi.fn()
+      try {
+         list.setup(container, (c) => opened.push(c), undefined, onErr)
+         setIndex(100)
+         nav._setAnchor(50) // mid-anchored + center → observe() runs synchronously, top not exhausted
+         await list.render(true)
+         const topSentinel = container.querySelector(".srr-list-sentinel")!
+         // The next newer-batch fill 404s.
+         data.loadMeta.mockRejectedValueOnce(new Error("meta pack 404"))
+         ioCb!([{ isIntersecting: true, target: topSentinel }])
+         await new Promise((r) => setTimeout(r, 0)) // let fetchNewer reject and reach the sink
+         expect(onErr).toHaveBeenCalledTimes(1)
+         expect(onErr.mock.calls[0][0]).toBeInstanceOf(Error)
+      } finally {
+         vi.unstubAllGlobals()
+         defaultLoadMeta()
+      }
+   })
+
+   it("a superseded paging error stays silent", async () => {
+      let ioCb: ((entries: { isIntersecting: boolean; target: Element }[]) => void) | null = null
+      class FakeIO {
+         constructor(cb: (entries: { isIntersecting: boolean; target: Element }[]) => void) {
+            ioCb = cb
+         }
+         observe(): void {}
+         unobserve(): void {}
+         disconnect(): void {}
+      }
+      vi.stubGlobal("IntersectionObserver", FakeIO)
+      const onErr = vi.fn()
+      try {
+         list.setup(container, (c) => opened.push(c), undefined, onErr)
+         setIndex(100)
+         nav._setAnchor(50)
+         await list.render(true)
+         const topSentinel = container.querySelector(".srr-list-sentinel")!
+         // Gate the newer-batch loadMeta so fetchNewer stays in flight while a fresh
+         // render bumps the freshness token out from under it.
+         let release: (() => void) | null = null
+         const gate = new Promise<void>((r) => (release = () => r()))
+         data.loadMeta.mockImplementationOnce(async () => {
+            await gate
+            throw new Error("late 404")
+         })
+         ioCb!([{ isIntersecting: true, target: topSentinel }])
+         await new Promise((r) => setTimeout(r, 0)) // fetchNewer dispatched, now awaiting the gate
+
+         await list.render() // supersede: a fresh token retires the in-flight page
+         release!() // the now-stale fetch finally rejects
+         await new Promise((r) => setTimeout(r, 0))
+         // reportPageError's my===tok guard drops the superseded failure — no popup.
+         expect(onErr).not.toHaveBeenCalled()
+      } finally {
+         vi.unstubAllGlobals()
+         defaultLoadMeta()
+      }
+   })
+
    it("search render: fills rows via loadMeta, selects newest, shows terminus", async () => {
       // renderSearch uses the skeleton→loadMeta fill pattern. After awaiting render()
       // all rows are filled (no skeletons). The newest hit becomes the current article.
@@ -439,26 +501,6 @@ describe("list", () => {
       expect(nav.select).toHaveBeenCalledWith(9, 1)
       // Hit set exhausted → terminus shown.
       expect(container.querySelector(".srr-wire-end")).not.toBeNull()
-   })
-
-   it("re-renders newest-first regardless of prior feedLeft calls (no drained-iterator regression)", async () => {
-      // In the new snapshot design there is no mutable iterator to drain — each
-      // render() starts a fresh walk from feedLeft(total_art-1). Verify that calling
-      // render() again after reader navigation still shows the full hit set top-down.
-      nav.filter.search = true
-      data._arts.clear()
-      data._arts.set(9, art({ f: 1, a: 9, t: "newest" }))
-      data._arts.set(5, art({ f: 1, a: 5, t: "middle" }))
-      data._arts.set(1, art({ f: 1, a: 1, t: "oldest" }))
-      data.db.total_art = 10
-
-      // Simulate reader navigation: call feedLeft a few times (as if stepping).
-      await nav.feedLeft(8) // → 5
-      await nav.feedLeft(4) // → 1
-
-      // Re-render: must show the full hit set from newest to oldest.
-      await list.render()
-      expect($rows().map((r) => r.querySelector(".srr-row-title")!.textContent)).toEqual(["newest", "middle", "oldest"])
    })
 
    it("relabelDividers skips skeleton rows (no data-ts)", () => {
@@ -635,6 +677,19 @@ describe("list", () => {
       // Names the query and offers recovery, instead of a vague "no matches".
       expect(empty!.textContent).toContain("No titles match")
       expect(empty!.querySelector(".srr-empty-em")!.textContent).toBe("“zzz”")
+   })
+
+   it("shows the search prompt when the query is empty", async () => {
+      // An empty search term is the invitational prompt, distinct from the "No
+      // titles match" state above (a non-empty query with no hits).
+      setIndex(4, () => 1)
+      nav._setSearch("") // search filter mode, empty term
+      data.findLeft.mockResolvedValueOnce(-1) // the hit-set walk finds nothing → empty state
+      await list.render()
+      const empty = container.querySelector(".srr-list-empty")
+      expect(empty).not.toBeNull()
+      expect(empty!.querySelector(".srr-empty-eyebrow")!.textContent).toBe("Search")
+      expect(empty!.querySelector(".srr-empty-msg")!.textContent).toBe("Find any article by its title.")
    })
 
    it("shows an 'all caught up' state when unseen-only leaves nothing unread", async () => {
@@ -993,6 +1048,22 @@ describe("list", () => {
       expect(landed).toBeGreaterThanOrEqual(0)
       expect($current()).toEqual([landed])
       expect(nav.select).toHaveBeenCalledWith(landed, expect.anything())
+   })
+
+   it("the first arrow with no cursor selects the topmost visible row", async () => {
+      // firstVisibleRow scans real geometry for the topmost row in the viewport; the
+      // test above only reaches the jsdom zero-rect fallback (the oldest row). Stub
+      // the newest row off-screen above so it's skipped and the first in-band row wins.
+      setIndex(4) // newest-default: no cursor, rows [3,2,1,0]
+      await list.render()
+      expect($current()).toEqual([])
+      $rowFor(3).getBoundingClientRect = () => rect(-100, -50) // scrolled off the top (bottom ≤ inset)
+      $rowFor(2).getBoundingClientRect = () => rect(10, 60) // first row reaching into the viewport
+      nav.select.mockClear()
+      const landed = await list.moveSelection("newer")
+      expect(landed).toBe(2) // row 3 skipped, row 2 is the topmost in-band row
+      expect($current()).toEqual([2])
+      expect(nav.select).toHaveBeenCalledWith(2, 1)
    })
 
    it("moveSelection returns -1 on an empty list (no rows rendered)", async () => {

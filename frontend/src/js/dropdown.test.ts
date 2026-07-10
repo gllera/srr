@@ -152,6 +152,16 @@ describe("image-proxy dialog", () => {
       expect(getImgProxy()).toBe("")
    })
 
+   it("editing clears the invalid marker on the proxy input", () => {
+      dropdown.showImgProxyDialog()
+      const input = $input()!
+      input.value = "ftp://evil/"
+      key(input, "Enter") // rejected → flags .srr-input-invalid
+      expect(input.classList.contains("srr-input-invalid")).toBe(true)
+      input.dispatchEvent(new Event("input", { bubbles: true }))
+      expect(input.classList.contains("srr-input-invalid")).toBe(false)
+   })
+
    it("committing the unchanged value just closes", () => {
       setImgProxy("https://old.example/?url=")
       dropdown.showImgProxyDialog()
@@ -309,6 +319,78 @@ describe("backup/restore dialog", () => {
       dropdown.showBackupDialog()
       $dialog().dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }))
       expect(document.activeElement).toBe(opener)
+   })
+
+   it("backup Copy writes the profile to the clipboard", () => {
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true })
+      try {
+         dropdown.showBackupDialog()
+         const text = $exportArea()!.value
+         $btn(".srr-backup-copy")!.click()
+         expect(writeText).toHaveBeenCalledWith(text)
+      } finally {
+         delete (navigator as { clipboard?: unknown }).clipboard
+      }
+   })
+
+   it("backup Copy falls back to execCommand when clipboard is unavailable", () => {
+      // No Clipboard API → the handler takes the select() + execCommand("copy") path.
+      Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true })
+      const execCommand = vi.fn()
+      Object.defineProperty(document, "execCommand", { value: execCommand, configurable: true, writable: true })
+      const selectSpy = vi.spyOn(HTMLTextAreaElement.prototype, "select").mockImplementation(() => {})
+      try {
+         dropdown.showBackupDialog()
+         $btn(".srr-backup-copy")!.click()
+         expect(selectSpy).toHaveBeenCalled()
+         expect(execCommand).toHaveBeenCalledWith("copy")
+      } finally {
+         selectSpy.mockRestore()
+         delete (navigator as { clipboard?: unknown }).clipboard
+         delete (document as { execCommand?: unknown }).execCommand
+      }
+   })
+
+   it("backup Download saves srr-profile.json", () => {
+      vi.useFakeTimers()
+      const createObjectURL = vi.fn(() => "blob:fake-url")
+      const revokeObjectURL = vi.fn()
+      const origCreate = Object.getOwnPropertyDescriptor(URL, "createObjectURL")
+      const origRevoke = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL")
+      Object.defineProperty(URL, "createObjectURL", { value: createObjectURL, configurable: true, writable: true })
+      Object.defineProperty(URL, "revokeObjectURL", { value: revokeObjectURL, configurable: true, writable: true })
+      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {})
+      try {
+         dropdown.showBackupDialog()
+         $btn(".srr-backup-download")!.click()
+         expect(createObjectURL).toHaveBeenCalledTimes(1)
+         // vitest records each call's `this` (the clicked anchor) in mock.instances.
+         const clicked = clickSpy.mock.instances[0] as HTMLAnchorElement
+         expect(clicked).toBeDefined()
+         expect(clicked.download).toBe("srr-profile.json")
+         // revokeObjectURL is deferred (setTimeout 10s) so the download can start.
+         expect(revokeObjectURL).not.toHaveBeenCalled()
+         vi.advanceTimersByTime(10000)
+         expect(revokeObjectURL).toHaveBeenCalledWith("blob:fake-url")
+      } finally {
+         clickSpy.mockRestore()
+         if (origCreate) Object.defineProperty(URL, "createObjectURL", origCreate)
+         else delete (URL as unknown as { createObjectURL?: unknown }).createObjectURL
+         if (origRevoke) Object.defineProperty(URL, "revokeObjectURL", origRevoke)
+         else delete (URL as unknown as { revokeObjectURL?: unknown }).revokeObjectURL
+         vi.useRealTimers()
+      }
+   })
+
+   it("editing the import box clears the error", () => {
+      dropdown.showBackupDialog()
+      $importArea()!.value = "not valid json"
+      $btn(".srr-backup-import-btn")!.click()
+      const errEl = $dialog().querySelector<HTMLElement>(".srr-backup-import-error")!
+      expect(errEl.hidden).toBe(false)
+      $importArea()!.dispatchEvent(new Event("input", { bubbles: true }))
+      expect(errEl.hidden).toBe(true)
    })
 })
 

@@ -11,28 +11,55 @@ interface Entry {
    deltaPackId?: 0 | 1
 }
 
-function packBuf(entries: Entry[], packIdBase = 1, packOffBase = 0): ArrayBuffer {
+// packBuf builds one idx pack. `feedCounts` populates the variable-length header
+// (the cumulative per-feed counts BEFORE this pack, numSlots = feedCounts.length);
+// it defaults to [] (numSlots 0, header prefix only) so the latest-only callers
+// below are unchanged. The finalized-scope test needs a populated latest-pack
+// header so packHasCandidate sees a real feed delta.
+function packBuf(entries: Entry[], packIdBase = 1, packOffBase = 0, feedCounts: number[] = []): ArrayBuffer {
+   const numSlots = feedCounts.length
+   const headerBytes = IDX_HEADER_PREFIX + numSlots * 4
    const boundaries: number[] = []
    entries.forEach((e, i) => {
       if (e.deltaPackId) boundaries.push(i)
    })
-   const buf = new ArrayBuffer(
-      IDX_HEADER_PREFIX + entries.length * IDX_ENTRY_SIZE + boundaries.length * IDX_BOUNDARY_SIZE,
-   )
+   const buf = new ArrayBuffer(headerBytes + entries.length * IDX_ENTRY_SIZE + boundaries.length * IDX_BOUNDARY_SIZE)
    const view = new DataView(buf)
    view.setUint32(0, packIdBase, true)
    view.setUint32(4, packOffBase, true)
-   view.setUint32(IDX_STATE_SIZE, 0, true) // numSlots = 0
+   view.setUint32(IDX_STATE_SIZE, numSlots, true)
+   for (let s = 0; s < numSlots; s++) view.setUint32(IDX_HEADER_PREFIX + s * 4, feedCounts[s], true)
    const bytes = new Uint8Array(buf)
    for (let i = 0; i < entries.length; i++) {
-      const off = IDX_HEADER_PREFIX + i * IDX_ENTRY_SIZE
+      const off = headerBytes + i * IDX_ENTRY_SIZE
       bytes[off] = entries[i].feedId & 0xff
       bytes[off + 1] = (entries[i].feedId >> 8) & 0xff
    }
-   let foff = IDX_HEADER_PREFIX + entries.length * IDX_ENTRY_SIZE
+   let foff = headerBytes + entries.length * IDX_ENTRY_SIZE
    for (const b of boundaries) {
       view.setUint16(foff, b, true)
       foff += IDX_BOUNDARY_SIZE
+   }
+   return buf
+}
+
+// summaryBuf builds an idx/h<N>.gz body: the verbatim concatenation of finalized
+// packs' variable-length headers (each a 12-byte prefix + numSlots u32 counts),
+// exactly what parseIdxHeaders walks by variable stride.
+function summaryBuf(headers: { packIdBase: number; packOffBase: number; feedCounts: number[] }[]): ArrayBuffer {
+   let size = 0
+   for (const h of headers) size += IDX_HEADER_PREFIX + h.feedCounts.length * 4
+   const buf = new ArrayBuffer(size)
+   const view = new DataView(buf)
+   let off = 0
+   for (const h of headers) {
+      view.setUint32(off, h.packIdBase, true)
+      view.setUint32(off + 4, h.packOffBase, true)
+      view.setUint32(off + IDX_STATE_SIZE, h.feedCounts.length, true)
+      for (let s = 0; s < h.feedCounts.length; s++) {
+         view.setUint32(off + IDX_HEADER_PREFIX + s * 4, h.feedCounts[s], true)
+      }
+      off += IDX_HEADER_PREFIX + h.feedCounts.length * 4
    }
    return buf
 }
@@ -170,6 +197,98 @@ describe("packNamesForFilter", () => {
       expect(names).toContain("idx/L1.gz")
       expect(names).toContain("data/L1.gz")
       expect(names).toContain("meta/L1.gz")
+   })
+
+   it("packNamesForFilter enumerates finalized packs for a single-feed filter", async () => {
+      // The non-[ALL] FINALIZED branch (data.ts ~517-559) had no coverage: every
+      // other feed/tag case here uses a latest-only 3-article store, so the
+      // pack-skip `continue`, the multi-boundary boundsIdx++ advance, and the
+      // asset loop's empty-content skip never ran. This mounts a MULTI-PACK store
+      // (2 finalized idx packs) where the target feed 5 is ABSENT from finalized
+      // pack 0 (→ `continue`), present in finalized pack 1 spanning two data packs
+      // (→ boundsIdx++), and present in the latest pack — then filters on feed 5.
+      const nArt = 2 * IDX_PACK_SIZE + 1 // 100001 → nfIdx=2, latest idx pack = 1 entry
+      const nfMeta = Math.floor((nArt - 1) / META_PACK_SIZE) // 20
+      const db: Partial<IDB> = {
+         total_art: nArt,
+         seq: 1,
+         next_pid: 4, // data packs 1..3 finalized; data/L1 = latest (bounds packId 4)
+         pack_off: 10,
+         hdrs: 2,
+         mp: nfMeta,
+         mt: 1,
+         feeds: {
+            0: { id: 0, title: "P0", total_art: IDX_PACK_SIZE, add_idx: 0 },
+            1: { id: 1, title: "P1", total_art: IDX_PACK_SIZE - 2, add_idx: 0 },
+            5: { id: 5, title: "T", total_art: 3, add_idx: 0 },
+         } as unknown as IDB["feeds"],
+      }
+
+      // idx summary (idx/h2.gz): one header per finalized pack.
+      //  - pack 0: cumulative-before-pack-0 = nothing → numSlots 0.
+      //  - pack 1: cumulative-before-pack-1 = pack 0's counts (feed 0: 50000); feed 5
+      //    absent here (countAt past numSlots → 0), so packHasCandidate(0) skips it.
+      const summary = summaryBuf([
+         { packIdBase: 1, packOffBase: 0, feedCounts: [] },
+         { packIdBase: 2, packOffBase: 0, feedCounts: [IDX_PACK_SIZE] },
+      ])
+
+      // Finalized idx pack 1 (chron 50000..99999): feed 5 at local 0 (data pack 2)
+      // and local 30000 (data pack 3, past the boundary at local 25000); the rest is
+      // filler feed 1. Its own header counts are unread by packNamesForFilter, so
+      // numSlots 0 keeps it minimal.
+      const pack1: Entry[] = new Array(IDX_PACK_SIZE)
+      for (let i = 0; i < IDX_PACK_SIZE; i++) pack1[i] = { feedId: 1 }
+      pack1[0] = { feedId: 5 }
+      pack1[25000] = { feedId: 1, deltaPackId: 1 } // data pack 2 → 3 boundary
+      pack1[30000] = { feedId: 5 }
+      const idx1 = packBuf(pack1, 2, 0) // packIdBase 2 (data pack 2)
+
+      // Latest idx pack (chron 100000): feed 5. Its header carries cumulative-before-
+      // latest (packs 0+1) so packHasCandidate(1) sees a positive feed-5 delta.
+      //   feed 0: 50000 (all pack 0), feed 1: 49998, feed 5: 2 (both in pack 1)
+      const latestIdx = packBuf([{ feedId: 5 }], 4, 0, [IDX_PACK_SIZE, IDX_PACK_SIZE - 2, 0, 0, 0, 2])
+
+      // Data packs — fetched only by the asset-enumeration pass. data/2.gz carries an
+      // asset-bearing article AND a c:"" article (the empty-content skip); the c:""
+      // articles (here and in data/L1.gz) must contribute no asset name.
+      const asset = "assets/ab/0123456789abcdef.webp"
+      const data2 = `{"f":5,"a":1,"c":"<img src=\\"${asset}\\">"}\n{"f":1,"a":1,"c":""}\n`
+      const data3 = '{"f":5,"a":1,"c":"plain, no asset here"}\n'
+      const dataL = '{"f":5,"a":1}\n' // no content field → skipped by the asset pass
+
+      const data = await mount(db, {
+         "idx/h2.gz": summary,
+         "idx/1.gz": idx1,
+         "idx/L1.gz": latestIdx,
+         "data/2.gz": data2,
+         "data/3.gz": data3,
+         "data/L1.gz": dataL,
+      })
+
+      const names = await data.packNamesForFilter(new Map([[5, 0]]))
+
+      // Every pack name passes the SW grammar (asset keys use RE_ASSET, not RE_PACK).
+      for (const n of names) {
+         if (!n.startsWith("assets/")) expect(checkName(n)).toBe(true)
+      }
+
+      // Finalized subset for feed 5: pack 1 is walked; pack 0 is SKIPPED (feed absent).
+      expect(names).toContain("idx/1.gz")
+      expect(names).not.toContain("idx/0.gz")
+      // feed 5's finalized data packs (spanning the boundary) + their meta shards.
+      expect(names).toContain("data/2.gz")
+      expect(names).toContain("data/3.gz")
+      expect(names).toContain("meta/10.gz") // chron 50000
+      expect(names).toContain("meta/16.gz") // chron 80000
+      // Latest-generation packs + the boot/search summaries.
+      expect(names).toContain("idx/L1.gz")
+      expect(names).toContain("data/L1.gz")
+      expect(names).toContain("meta/L1.gz")
+      expect(names).toContain("idx/h2.gz")
+      expect(names).toContain(`meta/s${nfMeta}.gz`)
+      // The asset-bearing article's key is enumerated; the c:"" articles add none.
+      expect(names.filter((n) => n.startsWith("assets/"))).toEqual([asset])
    })
 
    it("single-feed filter: only touches idx packs that have the feed, maps to data packs", async () => {
