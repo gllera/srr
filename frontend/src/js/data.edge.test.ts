@@ -149,3 +149,109 @@ describe("data.feedTitle — deleted-feed tombstone", () => {
       expect(data.feedTitle(404)).toBe("[DELETED]") // its articles survive in packs; render a tombstone
    })
 })
+
+describe("data.idxSummaryDegraded — against the real module", () => {
+   it("idxSummaryDegraded flags a partway summary", async () => {
+      // hdrs partway (0 < hdrs < numFinalizedIdx): an actively-advancing summary
+      // rebuild. total_art 100001 => nf = 2; hdrs = 1. hdrs !== nf so init takes
+      // the eager fallback and fetches both finalized packs — serve them.
+      const bigPack = () => packBuf(Array.from({ length: PACK_SIZE }, () => ({ feedId: 0 })))
+      const partway = await mount(
+         { total_art: 2 * PACK_SIZE + 1, seq: 1, hdrs: 1 },
+         { "idx/0.gz": bigPack(), "idx/1.gz": bigPack(), "idx/L1.gz": packBuf([{ feedId: 0 }]) },
+      )
+      expect(partway.numFinalizedIdx()).toBe(2)
+      expect(partway.idxSummaryDegraded()).toBe(true)
+
+      // hdrs === numFinalizedIdx: the summary fully covers the finalized packs,
+      // so the fast path is live and nothing is degraded. Summary path (no
+      // finalized pack fetch).
+      const covered = await mount(
+         { total_art: PACK_SIZE + 1, seq: 1, hdrs: 1 },
+         { "idx/h1.gz": summaryBuf(1), "idx/L1.gz": packBuf([{ feedId: 0 }]) },
+      )
+      expect(covered.numFinalizedIdx()).toBe(1)
+      expect(covered.idxSummaryDegraded()).toBe(false)
+
+      // hdrs absent (nf > 0) is a steady pre-summary store, NOT an active
+      // rebuild — the hdrs>0 guard keeps it un-degraded so no permanent banner
+      // pins. hdrs !== nf, so init eager-fetches the one finalized pack.
+      const preSummary = await mount(
+         { total_art: PACK_SIZE + 1, seq: 1 },
+         { "idx/0.gz": bigPack(), "idx/L1.gz": packBuf([{ feedId: 0 }]) },
+      )
+      expect(preSummary.numFinalizedIdx()).toBe(1)
+      expect(preSummary.idxSummaryDegraded()).toBe(false)
+   })
+})
+
+describe("data.lastFetchedAt / hasArticles — against the real module", () => {
+   it("lastFetchedAt and hasArticles read the live db", async () => {
+      const data = await mount(
+         { total_art: 1, seq: 1, fetched_at: 1700000000 },
+         { "idx/L1.gz": packBuf([{ feedId: 3 }]) },
+      )
+      expect(data.lastFetchedAt()).toBe(1700000000)
+      expect(data.lastFetchedAt()).toBe(data.db.fetched_at) // reads the live snapshot, not a copy
+      expect(data.hasArticles()).toBe(true)
+
+      const empty = await mount({ total_art: 0, feeds: {}, fetched_at: 0 })
+      expect(empty.hasArticles()).toBe(false)
+      expect(empty.lastFetchedAt()).toBe(0)
+   })
+})
+
+describe("data.parseDb — a non-OK db.gz surfaces clearly", () => {
+   it("surfaces a non-OK db.gz as a clear error", async () => {
+      // A 404 (or 5xx) db.gz must throw the status, not a cryptic gunzip
+      // "incorrect header check" from trying to decompress an HTML error body.
+      global.fetch = vi.fn(
+         async () => new Response("<html>not found</html>", { status: 404 }),
+      ) as unknown as typeof fetch
+      vi.resetModules()
+      const data = await import("./data")
+      await expect(data.init()).rejects.toThrow(/db\.gz fetch failed: 404/)
+   })
+})
+
+describe("data.assertPackOk — stale-latest-pack self-heal", () => {
+   it("reloads once on a stale latest idx pack, then the guard suppresses the loop", async () => {
+      // A 404 on the write-once latest pack means this tab's db.gz predates the
+      // backend GC grace window: assertPackOk reloads once (guarded), and always
+      // throws so callers never touch the body. jsdom forbids redefining
+      // location.reload, so swap the whole location object for one with a spy.
+      const realLoc = window.location
+      const reload = vi.fn()
+      Object.defineProperty(window, "location", {
+         value: { href: realLoc.href, reload },
+         configurable: true,
+         writable: true,
+      })
+      try {
+         const dbBytes = await gzip(JSON.stringify({ total_art: 1, seq: 1 }))
+         // Serve db.gz but 404 idx/L1.gz — the stale-tab latest-pack case.
+         const bootAgainstStaleLatest = async () => {
+            global.fetch = vi.fn(async (input: URL | string) => {
+               const url = input instanceof URL ? input : new URL(String(input))
+               return url.pathname === "/db.gz"
+                  ? new Response(dbBytes, { status: 200 })
+                  : new Response("not found", { status: 404 })
+            }) as unknown as typeof fetch
+            vi.resetModules()
+            const data = await import("./data")
+            return data.init()
+         }
+
+         // Guard clear → one reload fires and the RELOAD_GUARD key is stamped.
+         await expect(bootAgainstStaleLatest()).rejects.toThrow(/pack fetch failed: 404/)
+         expect(reload).toHaveBeenCalledTimes(1)
+         expect(sessionStorage.getItem("srr-reload-guard")).toBe("1")
+
+         // Guard already set → a second stale-pack failure must NOT reload again.
+         await expect(bootAgainstStaleLatest()).rejects.toThrow(/pack fetch failed: 404/)
+         expect(reload).toHaveBeenCalledTimes(1)
+      } finally {
+         Object.defineProperty(window, "location", { value: realLoc, configurable: true, writable: true })
+      }
+   })
+})

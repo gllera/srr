@@ -202,6 +202,15 @@ describe("importProfile", () => {
       // string "NaN" fails typeof v === "number"; nothing written
       expect(localStorage.getItem(SEEN_KEY)).toBeNull()
    })
+
+   it("rejects a javascript: image proxy on import", () => {
+      // isValidProxy's dangerous-scheme branch — an existing proxy stays put.
+      localStorage.setItem(IMG_PROXY_KEY, "https://existing/?url=")
+      const blob = JSON.stringify({ v: 1, seen: {}, saved: [], unreadOnly: false, imgProxy: "javascript:alert(1)" })
+      const r = importProfile(blob, { prefs: true })
+      expect(r.ok).toBe(true)
+      expect(localStorage.getItem(IMG_PROXY_KEY)).toBe("https://existing/?url=")
+   })
 })
 
 describe("v2 blob / ts / sync mode", () => {
@@ -287,6 +296,23 @@ describe("v2 blob / ts / sync mode", () => {
       const blob = JSON.stringify({ v: 2, ts: 500, seen: {}, saved: [], unreadOnly: false, imgProxy: "" })
       importProfile(blob, { prefs: false, mode: "sync" })
       expect(JSON.parse(localStorage.getItem(SAVED_KEY)!)).toEqual([])
+   })
+
+   it("sync-mode saved adoption filters and sorts the array", () => {
+      localStorage.setItem(SAVED_KEY, JSON.stringify([2]))
+      touchProfile(100)
+      const blob = JSON.stringify({
+         v: 2,
+         ts: 200,
+         seen: {},
+         saved: [3, "bad", -1, 1],
+         unreadOnly: false,
+         imgProxy: "",
+      })
+      const r = importProfile(blob, { prefs: false, mode: "sync" })
+      expect(r.ok).toBe(true)
+      // non-integers and negatives dropped, sorted ascending
+      expect(JSON.parse(localStorage.getItem(SAVED_KEY)!)).toEqual([1, 3])
    })
 
    it("a ts-only adoption (newer blob, identical saved, no seen raise) reports changed:false", () => {
@@ -444,5 +470,28 @@ describe("per-key seen timestamps (st) — the explicit-rewind ordering", () => 
       expect(r.changed).toBe(true)
       expect(JSON.parse(localStorage.getItem(SEEN_KEY)!)).toEqual({ "feed:1": 30 })
       expect(JSON.parse(localStorage.getItem(ST_KEY)!)).toEqual({ "feed:1": 77 }) // stamp adopted verbatim
+   })
+
+   it("adopting an unstamped higher value drops the local seen-ts stamp", () => {
+      localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 10 }))
+      localStorage.setItem(ST_KEY, JSON.stringify({ "feed:1": 300 }))
+      // An old-build blob: v2 but no `st` map at all — the raise adopts by max.
+      const blob = JSON.stringify({ v: 2, ts: 1, seen: { "feed:1": 99 }, saved: [] })
+      const r = importProfile(blob, { prefs: false, mode: "sync" })
+      expect(r.ok).toBe(true)
+      expect(JSON.parse(localStorage.getItem(SEEN_KEY)!)).toEqual({ "feed:1": 99 })
+      // the adopted value has no stamp, so the local one is dropped, not kept
+      expect(JSON.parse(localStorage.getItem(ST_KEY)!)).toEqual({})
+   })
+
+   it("a newer stamp at an equal value updates ordering but is not a change", () => {
+      localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 50 }))
+      localStorage.setItem(ST_KEY, JSON.stringify({ "feed:1": 100 }))
+      const blob = JSON.stringify({ v: 2, ts: 50, seen: { "feed:1": 50 }, st: { "feed:1": 200 }, saved: [] })
+      const r = importProfile(blob, { prefs: false, mode: "sync" })
+      expect(r.ok).toBe(true)
+      expect(r.changed).toBe(false) // the value didn't move — only its ordering stamp did
+      expect(JSON.parse(localStorage.getItem(ST_KEY)!)).toEqual({ "feed:1": 200 })
+      expect(JSON.parse(localStorage.getItem(SEEN_KEY)!)).toEqual({ "feed:1": 50 })
    })
 })

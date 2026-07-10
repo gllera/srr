@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import { srcColorIndex } from "./fmt"
+// pin.ts is NOT mocked — it's a thin localStorage registry (stateless: every
+// call reads/writes srr-pins), so the top-level instance here and the fresh one
+// app.ts imports after vi.resetModules() both see the same localStorage.
+import { isPinned, listPins, pinFilter } from "./pin"
 
 // app.ts is the DOM/async orchestrator: it has no exports, runs init() at import,
 // and wires every listener. We mock its collaborators, seed the full toolbar +
@@ -644,6 +648,18 @@ describe("error popup — focus trap + close", () => {
       await flush()
       expect(popup().classList.contains("srr-open")).toBe(true)
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))
+      expect(popup().classList.contains("srr-open")).toBe(false)
+   })
+
+   it("closes the error popup on an outside mousedown", async () => {
+      await boot()
+      nav.fromHash.mockRejectedValue(new Error("boom"))
+      hashTo("#5")
+      await flush()
+      expect(popup().classList.contains("srr-open")).toBe(true)
+      // A press anywhere outside the popup dismisses it (the window mousedown
+      // handler); body is not inside .srr-popup.
+      document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }))
       expect(popup().classList.contains("srr-open")).toBe(false)
    })
 })
@@ -1357,5 +1373,223 @@ describe("pinCurrentFilter — unread-snapshot note in the status bar", () => {
       const text = status().textContent ?? ""
       expect(text).toContain("Offline copy saved")
       expect(text).not.toContain("new unread")
+   })
+})
+
+// The SW-stub tests below (and the existing invokePinAction) leave
+// navigator.serviceWorker defined as `undefined`, which keeps
+// `"serviceWorker" in navigator` true and makes the next clean boot's
+// SW-register block throw on `.getRegistrations()`. Remove the own property so a
+// fresh boot sees the jsdom default (absent) — the state the app expects in dev.
+function clearServiceWorker() {
+   if (Object.prototype.hasOwnProperty.call(navigator, "serviceWorker"))
+      delete (navigator as unknown as { serviceWorker?: unknown }).serviceWorker
+}
+
+describe("search-bar hints (syncSearchBar)", () => {
+   beforeEach(clearServiceWorker)
+   const note = () => document.querySelector(".srr-search-note") as HTMLElement
+
+   it("shows the short-query hint", async () => {
+      await boot()
+      nav.isSearchFilter.mockReturnValue(true)
+      nav.searchQuery.mockReturnValue("ab")
+      nav.searchShort.mockReturnValue(true)
+      hashTo("#!q:ab") // route into the list under a search filter
+      await flush()
+      expect(note().textContent).toContain("Short words search only recent articles")
+      expect(note().hidden).toBe(false)
+      // Reset the leaked return values (vi.clearAllMocks keeps them — see beforeEach).
+      nav.isSearchFilter.mockReturnValue(false)
+      nav.searchQuery.mockReturnValue("")
+      nav.searchShort.mockReturnValue(false)
+   })
+
+   it("shows the truncated-results hint", async () => {
+      await boot()
+      nav.isSearchFilter.mockReturnValue(true)
+      nav.searchQuery.mockReturnValue("climate")
+      nav.searchShort.mockReturnValue(false) // not short → falls through to the truncation note
+      nav.searchTruncated.mockReturnValue(true)
+      hashTo("#!q:climate")
+      await flush()
+      expect(note().textContent).toContain("Showing the most recent matches")
+      expect(note().hidden).toBe(false)
+      nav.isSearchFilter.mockReturnValue(false)
+      nav.searchQuery.mockReturnValue("")
+      nav.searchTruncated.mockReturnValue(false)
+   })
+})
+
+describe("search input keys — leaving / applying from the pinned bar", () => {
+   beforeEach(clearServiceWorker)
+   const input = () => document.querySelector(".srr-search-input") as HTMLInputElement
+
+   it("search-input Escape exits and stops the Escape ladder", async () => {
+      await boot() // list surface
+      nav.applyFilter.mockClear()
+      nav.last.mockClear()
+      nav.goTo.mockClear()
+      input().dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }))
+      await flush()
+      // exitSearch ran (selectFilter("") → applyFilter([]))…
+      expect(nav.applyFilter).toHaveBeenCalledWith([])
+      // …and stopPropagation kept the document Escape ladder from also firing (it
+      // would have entered the reader via enterReader → nav.last / nav.goTo).
+      expect(nav.last).not.toHaveBeenCalled()
+      expect(nav.goTo).not.toHaveBeenCalled()
+      expect(document.body.classList.contains("srr-view-list")).toBe(true)
+   })
+
+   it("search-input Enter applies immediately", async () => {
+      await boot()
+      // applySearchQuery bails unless the list is in search mode.
+      nav.isSearchFilter.mockReturnValue(true)
+      input().value = "climate"
+      nav.applyFilter.mockClear()
+      // Enter applies straight through (no 200ms input debounce, which rides the
+      // "input" event, not keydown).
+      input().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }))
+      await flush()
+      expect(nav.applyFilter).toHaveBeenCalledWith(["q:climate"])
+      nav.isSearchFilter.mockReturnValue(false)
+   })
+
+   it("the clear button exits search", async () => {
+      await boot()
+      nav.applyFilter.mockClear()
+      document.querySelector(".srr-search-clear")!.dispatchEvent(new MouseEvent("click", { bubbles: true }))
+      await flush()
+      expect(nav.applyFilter).toHaveBeenCalledWith([])
+   })
+})
+
+describe("reader keymap — the f key (open in a new tab)", () => {
+   beforeEach(clearServiceWorker)
+   it("the f key opens the current article link in a new tab", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(
+         showFeed({ article: { f: 1, a: 0, p: 0, t: "T", l: "http://example.com/a", c: "<p>x</p>" } }),
+      )
+      hashTo("#2") // into the reader, article carries a link
+      await flush()
+      const link = document.querySelector(".srr-title-link") as HTMLAnchorElement
+      let modClick = false
+      link.addEventListener("click", (e) => {
+         const m = e as MouseEvent
+         modClick = m.ctrlKey && m.metaKey
+         e.preventDefault() // suppress jsdom navigation
+      })
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "f", bubbles: true }))
+      expect(modClick).toBe(true) // a ctrl/meta click = open in a new tab
+
+      // No-op when the article has no link (the linkless render removes the href).
+      nav.fromHash.mockResolvedValue(showFeed({ article: { f: 1, a: 0, p: 0, t: "T", l: "", c: "<p>x</p>" } }))
+      hashTo("#3")
+      await flush()
+      const link2 = document.querySelector(".srr-title-link") as HTMLAnchorElement
+      expect(link2.getAttribute("href")).toBeNull()
+      let fired = false
+      link2.addEventListener("click", () => (fired = true))
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "f", bubbles: true }))
+      expect(fired).toBe(false)
+   })
+})
+
+describe("offline pin — unpin subtraction & SW purge", () => {
+   it("unpin posts only names not still needed by another pinned scope", async () => {
+      // Two pinned scopes — the current [ALL] ("") and a feed ("7") — sharing the
+      // latest packs. Unpinning [ALL] must keep the shared names (the feed still
+      // needs them) and delete only [ALL]'s unique finalized pack.
+      pinFilter("", ["idx/L1.gz", "data/L1.gz", "data/3.gz"])
+      pinFilter("7", ["idx/L1.gz", "data/L1.gz", "data/9.gz"])
+      const fakeSW = { postMessage: vi.fn() }
+      Object.defineProperty(navigator, "serviceWorker", {
+         value: { controller: fakeSW, getRegistrations: () => Promise.resolve([]), addEventListener: () => {} },
+         configurable: true,
+      })
+      try {
+         await boot()
+         document
+            .querySelector<HTMLButtonElement>(".srr-settings")!
+            .dispatchEvent(new MouseEvent("click", { bubbles: true }))
+         const items = dropdown.showContextMenu.mock.calls.at(-1)?.[1] as { label: string; action: () => void }[]
+         const remove = items.find((i) => i.label === "Remove offline copy")
+         expect(remove).not.toBeUndefined()
+         remove!.action()
+         // Only the name unique to this scope is dropped; the shared latest packs stay.
+         expect(fakeSW.postMessage).toHaveBeenCalledWith(
+            expect.objectContaining({ type: "unpin", names: ["data/3.gz"] }),
+         )
+      } finally {
+         Object.defineProperty(navigator, "serviceWorker", { value: undefined, configurable: true })
+      }
+   })
+
+   it("clears the local pin registry when the SW reports pins-purged", async () => {
+      pinFilter("42", ["idx/L1.gz"])
+      expect(listPins().size).toBe(1)
+      let onMessage: ((e: MessageEvent) => void) | undefined
+      Object.defineProperty(navigator, "serviceWorker", {
+         value: {
+            addEventListener: (type: string, h: (e: MessageEvent) => void) => {
+               if (type === "message") onMessage = h
+            },
+            getRegistrations: () => Promise.resolve([]),
+         },
+         configurable: true,
+      })
+      try {
+         await boot()
+         expect(onMessage).toBeDefined() // app wired the SW message listener
+         onMessage!(new MessageEvent("message", { data: { type: "pins-purged" } }))
+         expect(listPins().size).toBe(0) // clearAllPins() emptied the registry
+      } finally {
+         Object.defineProperty(navigator, "serviceWorker", { value: undefined, configurable: true })
+      }
+   })
+})
+
+// The existing invokePinAction sends {done,total} with NO `cached`; here the SW
+// reports `cached` so the record-vs-warn completion branch is pinned.
+async function firePin(cached: number): Promise<void> {
+   nav.isUnreadOnly.mockReturnValue(false)
+   nav.filter = { feeds: new Map([[0, 0]]), saved: false, search: false, active: false, tokens: [] }
+   const fakeSW = { postMessage: vi.fn() }
+   Object.defineProperty(navigator, "serviceWorker", {
+      value: { controller: fakeSW, getRegistrations: () => Promise.resolve([]), addEventListener: () => {} },
+      configurable: true,
+   })
+   const realMC = globalThis.MessageChannel
+   const fakePort1 = { onmessage: null as ((e: MessageEvent) => void) | null }
+   vi.stubGlobal("MessageChannel", function () {
+      return { port1: fakePort1, port2: {} }
+   })
+   await boot()
+   document.querySelector<HTMLButtonElement>(".srr-settings")!.dispatchEvent(new MouseEvent("click", { bubbles: true }))
+   const items = dropdown.showContextMenu.mock.calls.at(-1)?.[1] as { label: string; action: () => void }[]
+   items.find((i) => i.label === "Download for offline")!.action()
+   await flush()
+   fakePort1.onmessage?.(new MessageEvent("message", { data: { type: "pin-progress", done: 2, total: 2, cached } }))
+   await flush()
+   vi.stubGlobal("MessageChannel", realMC)
+   Object.defineProperty(navigator, "serviceWorker", { value: undefined, configurable: true })
+}
+
+describe("offline pin — record vs warn on completion", () => {
+   const status = () => document.querySelector(".srr-pin-progress") as HTMLElement
+
+   it("a pin that cached nothing warns and records no pin", async () => {
+      await firePin(0)
+      expect(status().textContent).toContain("Couldn't save offline copy")
+      // cached === 0 → unpinFilter path, so nothing lands in the registry.
+      expect(listPins().size).toBe(0)
+   })
+
+   it("a successful pin records the scope to the registry", async () => {
+      await firePin(2)
+      expect(status().textContent).toContain("Offline copy saved")
+      expect(isPinned("")).toBe(true)
+      expect(listPins().get("")?.names).toEqual(["idx/L1.gz", "data/L1.gz"])
    })
 })

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest"
 import { IDX_BOUNDARY_SIZE, IDX_ENTRY_SIZE, IDX_HEADER_PREFIX, IDX_STATE_SIZE } from "./format.gen"
-import { IDX_PACK_SIZE, makeFeedsLookup, makeIdxPack, parseIdxHeaders } from "./idx"
+import { IDX_PACK_SIZE, lowerBound, makeFeedsLookup, makeIdxPack, parseIdxHeaders } from "./idx"
 
 // The scan methods take the prebuilt reverse lookup data.ts hoists once per nav
 // call; tests build it from the same feeds Map at SLOTS width.
@@ -252,6 +252,35 @@ describe("makeIdxPack.findRight", () => {
       const pack = buildPack()
       const feeds = new Map([[99, 0]])
       expect(pack.findRight(0, feeds, lk(feeds))).toBe(-1)
+   })
+
+   it("findRight returns -1 when scanning past the last match", () => {
+      // hasCandidate PASSES (feed 1 is present, addIdx 0 < packEnd) but chronFrom
+      // is right of the only feed-1 entry (index 0): the rightward scan finds
+      // nothing and returns -1 from the post-scan path, NOT the hasCandidate
+      // early-out the other -1 cases above hit.
+      const pack = makeIdxPack(buildBuf({ entries: [e(1), e(2), e(2)] }), 0, 3, SLOTS)
+      const feeds = new Map([[1, 0]])
+      expect(pack.findRight(2, feeds, lk(feeds))).toBe(-1)
+   })
+})
+
+describe("lowerBound", () => {
+   it("lowerBound finds the first non-below index", () => {
+      // Search a sorted array for the first element >= target via the "is
+      // strictly below target" predicate — the same shape data.ts uses on idx
+      // bounds. lowerBound returns the smallest i in [0, n) where !isBelow(i).
+      const arr = [10, 20, 20, 30, 40]
+      const firstAtLeast = (target: number) => lowerBound(arr.length, (i) => arr[i] < target)
+      expect(firstAtLeast(5)).toBe(0) // every element >= 5 → index 0
+      expect(firstAtLeast(10)).toBe(0) // exact first
+      expect(firstAtLeast(20)).toBe(1) // first of the duplicate run
+      expect(firstAtLeast(25)).toBe(3) // between 20 and 30
+      expect(firstAtLeast(40)).toBe(4) // exact last
+      expect(firstAtLeast(41)).toBe(5) // every element below → n
+      // Empty range: n = 0 short-circuits to 0 regardless of the predicate.
+      expect(lowerBound(0, () => true)).toBe(0)
+      expect(lowerBound(0, () => false)).toBe(0)
    })
 })
 

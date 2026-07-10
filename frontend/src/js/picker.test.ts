@@ -51,7 +51,9 @@ vi.mock("./sync", () => sync)
 
 // picker.ts reads refresh.lastRefreshError() in renderStatus; the live content
 // refresh itself is app.ts's wiring, so the status source is all picker needs.
-vi.mock("./refresh", () => ({ lastRefreshError: () => "" }))
+// A vi.fn so a test can surface a failure string (default empty = healthy).
+const refresh = vi.hoisted(() => ({ lastRefreshError: vi.fn(() => "") }))
+vi.mock("./refresh", () => refresh)
 
 type Picker = typeof import("./picker")
 
@@ -73,6 +75,10 @@ const feed = (over: Partial<IFeed>): IFeed =>
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector<T>(sel)!
 const $$ = <T extends HTMLElement>(sel: string) => [...document.querySelectorAll<T>(sel)]
 const flush = () => new Promise((r) => setTimeout(r, 0)) // let fillUnread's await settle
+const key = (el: EventTarget, k: string, shiftKey = false) =>
+   el.dispatchEvent(new KeyboardEvent("keydown", { key: k, shiftKey, bubbles: true, cancelable: true }))
+const md = () => new MouseEvent("mousedown", { bubbles: true, cancelable: true })
+const click = () => new MouseEvent("click", { bubbles: true, cancelable: true })
 
 const hooks = {
    onSelect: vi.fn(),
@@ -102,6 +108,7 @@ beforeEach(() => {
    data.idxSummaryDegraded.mockReturnValue(false)
    ;(isStale as ReturnType<typeof vi.fn>).mockReturnValue(false)
    sync.state.mockReturnValue({ on: false, okAt: 0, error: "" })
+   refresh.lastRefreshError.mockReturnValue("")
 })
 
 describe("open / close", () => {
@@ -267,19 +274,41 @@ describe("filter list", () => {
    })
 
    it("adds a non-color title/aria cue to a stale-by-age feed (no ferr)", async () => {
+      // last_ok in the warn window (STALE_WARN_SEC ≤ age < STALE_CRIT_SEC) and no
+      // ferr → the feed genuinely grades "warn". Title has NO "Stale" in it, so the
+      // aria assertion proves the grade's copy, not the feed name (the old bug).
+      const lastOk = Math.floor(Date.now() / 1000) - 7 * 86400
       data.groupFeedsByTag.mockReturnValue({
          tagged: new Map(),
          sortedTags: [],
-         // last_ok well past the crit staleness window, no ferr.
-         untagged: [feed({ id: 7, title: "Stale", last_ok: 1 })],
+         untagged: [feed({ id: 7, title: "Weekly digest", last_ok: lastOk })],
       })
       const picker = await mount()
       picker.open()
       const row = $<HTMLAnchorElement>('.srr-picker-filter a[data-value="7"]')
-      expect(row.dataset.grade).toBe("crit")
-      // No ferr, but the row still exposes a non-color text cue.
-      expect(row.title).not.toBe("")
-      expect(row.getAttribute("aria-label")).toMatch(/Stale/)
+      expect(row.dataset.grade).toBe("warn")
+      // No ferr, but the row still exposes a non-color text cue tied to the grade.
+      expect(row.title).toBe("feed may be stale")
+      expect(row.getAttribute("aria-label")).toMatch(/feed may be stale/)
+   })
+
+   it("grades a 7-day-stale feed as warn", async () => {
+      // The warn window (3–14 days) — the middle grade no crit/ferr test reaches.
+      const lastOk = Math.floor(Date.now() / 1000) - 7 * 86400
+      const stale = feed({ id: 3, title: "Weekly", tag: "news", last_ok: lastOk })
+      data.groupFeedsByTag.mockReturnValue({
+         tagged: new Map([["news", [stale]]]),
+         sortedTags: ["news"],
+         untagged: [],
+      })
+      const picker = await mount()
+      picker.open()
+      // The feed row grades warn (amber), not crit …
+      expect($<HTMLAnchorElement>('.srr-picker-filter a[data-value="3"]').dataset.grade).toBe("warn")
+      // … and its tag header inherits the warn grade + the stale (not unavailable) copy.
+      const header = $<HTMLAnchorElement>(".srr-picker-filter .srr-tag-header")
+      expect(header.dataset.grade).toBe("warn")
+      expect(header.title).toBe("a feed in this tag may be stale")
    })
 
    it("tints a tag header by its worst member's grade", async () => {
@@ -308,6 +337,39 @@ describe("filter list", () => {
       picker.open()
       const row = $<HTMLAnchorElement>('.srr-picker-filter a[data-value="9"]')
       expect(row.dataset.grade).toBeUndefined()
+   })
+
+   it("hides a fully-read tag group in unread-only, except the active lane's", async () => {
+      data.groupFeedsByTag.mockReturnValue({
+         tagged: new Map([["news", [feed({ id: 1, title: "A", tag: "news" })]]]),
+         sortedTags: ["news"],
+         untagged: [],
+      })
+      nav.isUnreadOnly.mockReturnValue(true)
+      nav.unreadCounts.mockResolvedValue(new Map([[1, 0]])) // whole group fully read
+      const picker = await mount()
+      picker.open()
+      await flush()
+      expect($(".srr-picker-filter .srr-tag-group").classList.contains("srr-hidden")).toBe(true)
+      // The active tag's own group stays visible even fully read.
+      nav.getCurrentFilterKey.mockReturnValue("news")
+      picker.render()
+      await flush()
+      expect($(".srr-picker-filter .srr-tag-group").classList.contains("srr-hidden")).toBe(false)
+   })
+
+   it("auto-expands the active single-feed filter's tag group", async () => {
+      const a = feed({ id: 1, title: "A", tag: "news" })
+      data.db.feeds = { 1: a } // activeTag() reads the feed's tag from here
+      data.groupFeedsByTag.mockReturnValue({
+         tagged: new Map([["news", [a]]]),
+         sortedTags: ["news"],
+         untagged: [],
+      })
+      nav.getCurrentFilterKey.mockReturnValue("1") // feed 1 active → expand its "news" group
+      const picker = await mount()
+      picker.open()
+      expect($(".srr-picker-filter .srr-tag-group").classList.contains("srr-tag-collapsed")).toBe(false)
    })
 })
 
@@ -462,6 +524,121 @@ describe("info dialog", () => {
       expect(rows.has("Stored assets")).toBe(false)
       expect(rows.get("Retention")).toBe("Forever")
    })
+
+   it("feed info card shows Status/Failed-attempts/error for an unhealthy feed", async () => {
+      data.groupFeedsByTag.mockReturnValue({
+         tagged: new Map(),
+         sortedTags: [],
+         untagged: [feed({ id: 9, title: "Broken", ferr: "boom", fail_streak: 4 })],
+      })
+      const picker = await mount()
+      picker.open()
+      $('.srr-picker-filter a[data-value="9"] .srr-info-btn').dispatchEvent(click())
+      // The Status chip reads "Error" tinted crit (ferr present).
+      const chip = $(".srr-info-health")
+      expect(chip.textContent).toBe("Error")
+      expect(chip.dataset.grade).toBe("crit")
+      // The fail-streak row and the raw error text both surface.
+      const rows = new Map($$(".srr-info-grid dt").map((dt) => [dt.textContent, dt.nextElementSibling!.textContent]))
+      expect(rows.get("Failed attempts")).toBe("4")
+      expect($(".srr-info-error").textContent).toBe("boom")
+   })
+
+   it("store info shows a Stale census row", async () => {
+      const lastOk = Math.floor(Date.now() / 1000) - 7 * 86400
+      const stale = feed({ id: 3, title: "Weekly", last_ok: lastOk }) // warn, no ferr
+      data.db.feeds = { 3: stale }
+      data.groupFeedsByTag.mockReturnValue({
+         tagged: new Map(),
+         sortedTags: [],
+         untagged: [stale],
+      })
+      const picker = await mount()
+      picker.open()
+      $('.srr-picker-filter a[data-value=""] .srr-info-btn').dispatchEvent(click())
+      const rows = new Map($$(".srr-info-grid dt").map((dt) => [dt.textContent, dt.nextElementSibling!.textContent]))
+      expect(rows.get("Healthy")).toBe("0")
+      expect(rows.get("Stale")).toBe("1") // one warn feed → census "Stale" row
+      expect(rows.has("Error")).toBe(false) // no crit feed → the Error row stays absent
+   })
+
+   it("opens the info dialog on Enter on the ⓘ button, without selecting the row", async () => {
+      data.groupFeedsByTag.mockReturnValue({
+         tagged: new Map(),
+         sortedTags: [],
+         untagged: [feed({ id: 5, title: "Feed5" })],
+      })
+      const picker = await mount()
+      picker.open()
+      $('.srr-picker-filter a[data-value="5"] .srr-info-btn').dispatchEvent(
+         new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      )
+      expect($(".srr-info-dialog").classList.contains("srr-open")).toBe(true)
+      expect(hooks.onSelect).not.toHaveBeenCalled() // ⓘ activation never selects the row
+   })
+})
+
+// The info dialog's hand-written modal shell (openInfoDialog) — parallel to the
+// dropdown modals': capture-phase Escape/Tab trap, backdrop-vs-card mousedown,
+// focus restore, and no-stacking on a second open.
+describe("info dialog modal shell", () => {
+   const openFeedInfo = async (over: Partial<IFeed> = {}) => {
+      data.groupFeedsByTag.mockReturnValue({
+         tagged: new Map(),
+         sortedTags: [],
+         untagged: [feed({ id: 5, title: "Feed5", url: "http://example.com/rss", ...over })],
+      })
+      const picker = await mount()
+      picker.open()
+      const btn = $('.srr-picker-filter a[data-value="5"] .srr-info-btn')
+      btn.focus() // so openInfoDialog captures it as the focus-restore target
+      btn.dispatchEvent(click())
+      return { picker, btn }
+   }
+
+   it("info dialog closes on Escape and restores focus", async () => {
+      const { btn } = await openFeedInfo()
+      expect($(".srr-info-dialog").classList.contains("srr-open")).toBe(true)
+      key($(".srr-info-close"), "Escape")
+      expect($(".srr-info-dialog").classList.contains("srr-open")).toBe(false)
+      expect(document.activeElement).toBe(btn)
+   })
+
+   it("info dialog traps Tab — last wraps to first, Shift+Tab first wraps to last", async () => {
+      await openFeedInfo()
+      // Focusables in DOM order: the ✕ close button, then the Source URL link.
+      const closeBtn = $(".srr-info-close")
+      const link = $(".srr-info-link")
+      link.focus()
+      key(link, "Tab") // forward from the last → wraps to the first
+      expect(document.activeElement).toBe(closeBtn)
+      closeBtn.focus()
+      key(closeBtn, "Tab", true) // Shift+Tab from the first → wraps to the last
+      expect(document.activeElement).toBe(link)
+   })
+
+   it("info dialog closes on a backdrop mousedown but not a card mousedown", async () => {
+      await openFeedInfo()
+      const dialog = $(".srr-info-dialog")
+      $(".srr-info-card").dispatchEvent(md()) // inside the card → stays open
+      expect(dialog.classList.contains("srr-open")).toBe(true)
+      dialog.dispatchEvent(md()) // on the backdrop itself → closes
+      expect(dialog.classList.contains("srr-open")).toBe(false)
+   })
+
+   it("info dialog does not stack — a second ⓘ replaces the first", async () => {
+      data.groupFeedsByTag.mockReturnValue({
+         tagged: new Map(),
+         sortedTags: [],
+         untagged: [feed({ id: 5, title: "Feed5" }), feed({ id: 6, title: "Feed6" })],
+      })
+      const picker = await mount()
+      picker.open()
+      $('.srr-picker-filter a[data-value="5"] .srr-info-btn').dispatchEvent(click())
+      $('.srr-picker-filter a[data-value="6"] .srr-info-btn').dispatchEvent(click())
+      expect($$(".srr-info-dialog.srr-open")).toHaveLength(1) // exactly one open
+      expect($(".srr-info-title").textContent).toBe("Feed6") // the second took over
+   })
 })
 
 describe("renderStatus (the settings menu's footer)", () => {
@@ -519,6 +696,13 @@ describe("renderStatus (the settings menu's footer)", () => {
       sync.state.mockReturnValue({ on: true, okAt: 200, error: "HTTP 401" })
       picker.renderStatus(box)
       expect(flagText()).toContain("Sync failed — HTTP 401")
+   })
+
+   it("renderStatus surfaces a refresh failure", async () => {
+      data.lastFetchedAt.mockReturnValue(100)
+      refresh.lastRefreshError.mockReturnValue("HTTP 500")
+      await render()
+      expect(flagText()).toContain("Refresh failed — HTTP 500")
    })
 
    it("always shows the build version, even before anything is fetched", async () => {

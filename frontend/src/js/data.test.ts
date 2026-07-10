@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest"
+import { describe, it, expect, vi } from "vitest"
 
 // data.ts has top-level side effects (fetch at module load), so we mock the
 // module and re-export the real pure functions with writable state.
@@ -124,49 +124,8 @@ describe("groupFeedsByTag", () => {
    })
 })
 
-describe("lastFetchedAt", () => {
-   beforeEach(() => {
-      state.db = { feeds: {}, total_art: 0, fetched_at: 0 } as unknown as IDB
-   })
-
-   it("returns fetched_at from db", () => {
-      state.db = { feeds: {}, total_art: 0, fetched_at: 1700000000 } as unknown as IDB
-      expect(data.lastFetchedAt()).toBe(1700000000)
-   })
-
-   it("returns 0 when fetched_at is 0", () => {
-      state.db = { feeds: {}, total_art: 0, fetched_at: 0 } as unknown as IDB
-      expect(data.lastFetchedAt()).toBe(0)
-   })
-})
-
-describe("idxSummaryDegraded", () => {
-   it("returns false when no finalized idx packs (empty store)", () => {
-      state.db = { feeds: {}, total_art: 0, fetched_at: 0 } as unknown as IDB
-      expect(data.idxSummaryDegraded()).toBe(false)
-   })
-
-   it("returns false when total_art < IDX_PACK_SIZE (only latest pack, no finalized)", () => {
-      state.db = { feeds: {}, total_art: 1000, fetched_at: 0 } as unknown as IDB
-      expect(data.idxSummaryDegraded()).toBe(false)
-   })
-
-   it("returns false when hdrs matches numFinalizedIdx", () => {
-      // total_art = 50001 => numFinalizedIdx = 1; hdrs = 1 => not degraded
-      state.db = { feeds: {}, total_art: 50001, fetched_at: 0, hdrs: 1 } as unknown as IDB
-      expect(data.idxSummaryDegraded()).toBe(false)
-   })
-
-   it("returns false when finalized idx > 0 and hdrs is absent (pre-summary store, not advancing)", () => {
-      // total_art = 50001 => numFinalizedIdx = 1; hdrs absent (legacy/old backend)
-      // is steady-state, NOT an active rebuild — no permanent "optimizing" banner.
-      state.db = { feeds: {}, total_art: 50001, fetched_at: 0 } as unknown as IDB
-      expect(data.idxSummaryDegraded()).toBe(false)
-   })
-
-   it("returns true when hdrs is partway built (actively-advancing rebuild)", () => {
-      // total_art = 100001 => numFinalizedIdx = 2; hdrs = 1 (0 < hdrs < nf) => degraded
-      state.db = { feeds: {}, total_art: 100001, fetched_at: 0, hdrs: 1 } as unknown as IDB
-      expect(data.idxSummaryDegraded()).toBe(true)
-   })
-})
+// NOTE: the lastFetchedAt / idxSummaryDegraded cases moved to data.edge.test.ts,
+// where they run against the REAL data.ts via mount(). The versions that lived
+// here asserted the reimplementations in this file's vi.mock factory — a copy of
+// the module, not the module — so they were vacuous. The factory keeps those
+// exports (groupFeedsByTag's test still needs the mock).

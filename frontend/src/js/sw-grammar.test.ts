@@ -53,6 +53,7 @@ describe("RE_ASSET / RE_DB / RE_SHELL_HASHED", () => {
    it("matches content-hash asset keys under any cdn prefix", () => {
       expect(RE_ASSET.test("/packs/assets/ab/0123456789abcdef.webp")).toBe(true)
       expect(RE_ASSET.test("/srr/assets/ab/0123456789abcdef")).toBe(true) // extension optional
+      expect(RE_ASSET.test("/srr/assets/AB/0123456789ABCDEF.WEBP")).toBe(true) // case-insensitive
       expect(RE_ASSET.test("/packs/assets/ab/0123.webp")).toBe(false) // hash too short
       expect(RE_ASSET.test("/packs/data/1.gz")).toBe(false)
    })

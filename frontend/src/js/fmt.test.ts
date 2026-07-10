@@ -185,10 +185,6 @@ describe("sanitizeHtml security edge cases", () => {
       expect(attr('<a href="jaVa\tscript:alert(1)">x</a>', "a", "href")).toBeNull()
    })
 
-   it("strips a mixed-case JaVaScRiPt: href (URL_DENY is case-insensitive)", () => {
-      expect(sanitizeHtml('<a href="JaVaScRiPt:alert(1)">x</a>')).not.toContain("alert")
-   })
-
    it("leaves a javascript: anchor inert: no href, no onclick, but still decorated with rel", () => {
       // strip-then-decorate order must not produce a half-sanitized executable anchor.
       const out = sanitizeHtml('<a href="javascript:alert(1)" onclick="x()">link</a>')

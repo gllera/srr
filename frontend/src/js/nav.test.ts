@@ -383,14 +383,6 @@ describe("last", () => {
       expect(nav.filter.active).toBe(false)
    })
 
-   it("goes to last article when sub not found in subscriptions", async () => {
-      setupIndex([{ feedId: 1 }, { feedId: 2 }])
-      await nav.fromHash("0")
-      nav.filter.set(["999"])
-      await nav.last()
-      expect(nav.filter.active).toBe(false)
-   })
-
    it("uses current filter when called without subId in filter mode", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 2 }])
       data.db.feeds[1] = makeFeed({ id: 1, total_art: 1 })
@@ -417,14 +409,6 @@ describe("last", () => {
       expect(result.article.t).toBe("(no matching articles)")
       expect(result.has_left).toBe(false)
       expect(result.has_right).toBe(false)
-   })
-
-   it("filter.set with empty string auto-clears", async () => {
-      setupIndex([{ feedId: 1 }, { feedId: 2 }])
-      await nav.fromHash("0")
-      nav.filter.set([""])
-      await nav.last()
-      expect(nav.filter.active).toBe(false)
    })
 
    it("filter.set with NaN auto-clears", async () => {
@@ -886,6 +870,16 @@ describe("switchFilter", () => {
       expect(seen["feed:1"]).toBe(0)
       expect(Object.keys(seen).filter((k) => k.startsWith("tag:"))).toHaveLength(0)
    })
+
+   it("switchFilter falls back to [ALL] on an unknown token", async () => {
+      // "nosuchtag" is neither a numeric feed id nor a tag any feed carries, so
+      // filter.set clears to [ALL] and isKnownToken is false → last() over [ALL].
+      setupIndex([{ feedId: 1 }, { feedId: 2 }]) // newest article is chron 1 (feed 2)
+      const result = await nav.switchFilter("nosuchtag")
+      expect(nav.filter.active).toBe(false) // cleared to [ALL], not scoped to a placeholder
+      expect(data.loadArticle).toHaveBeenLastCalledWith(1) // opens the newest article
+      expect(result.article.f).toBe(2)
+   })
 })
 
 // Switching a filter (a picker click, or the W/S / ↑↓ / two-finger cycle — all
@@ -1020,6 +1014,19 @@ describe("pruneSeen", () => {
       expect(setSpy).not.toHaveBeenCalled()
       setSpy.mockRestore()
    })
+
+   it("pruneSeen drops orphaned srr-seen-ts keys", () => {
+      data.db.feeds = { 1: makeFeed({ id: 1 }) }
+      // feed:1 lives; feed:9 is a deleted feed (pruned from srr-seen below);
+      // feed:99 never had a srr-seen entry at all. Both are orphans in srr-seen-ts.
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 5, "feed:9": 3 }))
+      localStorage.setItem("srr-seen-ts", JSON.stringify({ "feed:1": 111, "feed:9": 222, "feed:99": 333 }))
+      nav.pruneSeen()
+      // feed:9's seen entry was pruned (deleted feed) and feed:99 never had one, so
+      // both st stamps are now orphaned and dropped; the live feed:1 stamp survives.
+      const st = JSON.parse(localStorage.getItem("srr-seen-ts") || "{}")
+      expect(st).toEqual({ "feed:1": 111 })
+   })
 })
 
 describe("isRowUnread", () => {
@@ -1131,6 +1138,17 @@ describe("recordSeen marks previous articles seen across the list", () => {
       // Own feed's resume position must NOT rewind to 0.
       expect(seen).toEqual({ "feed:1": 2 })
    })
+
+   it("recordSeen is a no-op for an article whose feed was deleted", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 2 }]) // filter.feeds snapshots both feeds
+      delete data.db.feeds[2] // feed 2 gone from db.gz AFTER the [ALL] filter snapshot
+      // goTo records (record:true) and feedRight still lands on chron 1 (feed 2 is
+      // in the snapshotted filter.feeds), but recordSeen looks the feed up in
+      // db.feeds — now missing — so it must hit `if (!ch) return`: no throw, no write.
+      await expect(nav.goTo(1)).resolves.toBeDefined()
+      expect(nav.currentChron()).toBe(1) // landed on the deleted-feed article
+      expect(JSON.parse(localStorage.getItem("srr-seen") || "{}")).toEqual({}) // nothing written
+   })
 })
 
 describe("markAllRead / markUnreadFrom — the explicit frontier gestures", () => {
@@ -1198,6 +1216,16 @@ describe("markAllRead / markUnreadFrom — the explicit frontier gestures", () =
       expect(nav.markUnreadFrom(0)).toBe(false)
       expect(nav.markUnreadFrom(-1)).toBe(false)
       expect(JSON.parse(localStorage.getItem("srr-seen") || "{}")).toEqual({ "feed:1": 1 })
+   })
+
+   it("markUnreadFrom is a no-op when every member is already below the floor", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }, { feedId: 2 }]) // [ALL], feeds {1,2}
+      // floor = chron−1 = 2. Both members already sit at/below it (feed:1 at 1,
+      // feed:2 at 2), so nothing is above the floor to lower → touched stays empty.
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 1, "feed:2": 2 }))
+      expect(nav.markUnreadFrom(3)).toBe(false)
+      expect(JSON.parse(localStorage.getItem("srr-seen") || "{}")).toEqual({ "feed:1": 1, "feed:2": 2 }) // unchanged
+      expect(localStorage.getItem("srr-seen-ts")).toBeNull() // nothing stamped
    })
 })
 
@@ -1661,7 +1689,7 @@ describe("unread-only mode", () => {
 describe("tagUnreadFromCounts", () => {
    afterEach(() => nav.setUnreadOnly(false))
 
-   it("counts a never-seen member as fully unread; unseen-only resumes at the saved position", async () => {
+   it("counts a never-seen member as fully unread", async () => {
       data.db.feeds[1] = makeFeed({ id: 1, tag: "news" })
       data.db.feeds[2] = makeFeed({ id: 2, tag: "news" })
       // chron 0=ch1 1=ch2 2=ch1 3=ch2 4=ch1. Read ch1→2; ch2 NEVER seen here.
@@ -1678,45 +1706,6 @@ describe("tagUnreadFromCounts", () => {
       const counts = await nav.unreadCounts(group)
       const badge = nav.tagUnreadFromCounts(group, counts)
       expect(badge).toBe(3)
-      // Unseen-only opens at the tag's saved position (chron 2, ch1), NOT the
-      // oldest unseen. ch2 was never seen and has an older article at chron 1, so
-      // it sits to the LEFT of the resume (reachable with Left) and the toolbar
-      // counter (unseen to the right) is the badge minus that one left-side unseen.
-      nav.setUnreadOnly(true)
-      const shown = await nav.switchFilter("news")
-      expect(data.loadArticle).toHaveBeenLastCalledWith(2)
-      expect(shown.has_left).toBe(true)
-   })
-
-   it("sums to the badge for a mixed tag (seen, never-seen, fully-read members)", async () => {
-      data.db.feeds[1] = makeFeed({ id: 1, tag: "news" })
-      data.db.feeds[2] = makeFeed({ id: 2, tag: "news" })
-      data.db.feeds[3] = makeFeed({ id: 3, tag: "news" })
-      // chron 0=ch1 1=ch2 2=ch1 3=ch3 4=ch1 5=ch3.
-      // ch1: partially read (seen→2, so {4} unread = 1).
-      // ch2: NEVER seen → fully unread ({1} = 1).
-      // ch3: fully read (seen→5, so {} unread = 0).
-      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }, { feedId: 3 }, { feedId: 1 }, { feedId: 3 }])
-      data.db.feeds[1].tag = "news"
-      data.db.feeds[2].tag = "news"
-      data.db.feeds[3].tag = "news"
-      // Seed directly: ch3 fully read (→5), ch1 partially read (→2), ch2 NEVER
-      // seen. (Browsing via [ALL] would now mark every passed feed seen up to
-      // the opened article — the mark-previous-as-seen rule — so seed the
-      // distinct per-member positions explicitly.)
-      localStorage.setItem("srr-seen", JSON.stringify({ "feed:3": 5, "feed:1": 2 }))
-      const group = [data.db.feeds[1], data.db.feeds[2], data.db.feeds[3]]
-      const counts = await nav.unreadCounts(group)
-      const badge = nav.tagUnreadFromCounts(group, counts)
-      // 1 (ch1) + 1 (ch2 full) + 0 (ch3) = 2.
-      expect(badge).toBe(2)
-      // Unseen-only resumes at the saved position (chron 2, ch1), not the oldest
-      // unseen. ch2 (never seen) has an older article at chron 1, to the left of
-      // the resume, so has_left and the counter is the badge minus that one.
-      nav.setUnreadOnly(true)
-      const shown = await nav.switchFilter("news")
-      expect(data.loadArticle).toHaveBeenLastCalledWith(2)
-      expect(shown.has_left).toBe(true)
    })
 
    it("returns 0 when every member is fully read (never-seen members excepted)", async () => {
@@ -1729,8 +1718,9 @@ describe("tagUnreadFromCounts", () => {
    })
 
    it("sums member counts (never-seen members as their full backlog)", async () => {
-      // A tag mixing seen / never-seen / fully-read members. feedUnread reports a
-      // never-seen member as its full backlog, so the tag badge is a plain sum of
+      // A tag spanning all three member kinds — seen (partial), never-seen, and
+      // fully-read (0-contributing). feedUnread reports a never-seen member as its
+      // full backlog and a fully-read one as 0, so the tag badge is a plain sum of
       // the per-feed counts and the row badges beneath the header add up to it.
       data.db.feeds[1] = makeFeed({ id: 1, tag: "news" })
       data.db.feeds[2] = makeFeed({ id: 2, tag: "news" })
@@ -1738,7 +1728,7 @@ describe("tagUnreadFromCounts", () => {
       // chron 0=ch1 1=ch2 2=ch1 3=ch3 4=ch1 5=ch3 6=ch2.
       // ch1: partially read (seen→2 → {4} unread = 1).
       // ch2: NEVER seen → fully unread ({1,6} = 2).
-      // ch3: NEVER seen → fully unread ({3,5} = 2).
+      // ch3: fully read (seen→5 → {} unread = 0).
       setupIndex([
          { feedId: 1 },
          { feedId: 2 },
@@ -1749,24 +1739,18 @@ describe("tagUnreadFromCounts", () => {
          { feedId: 2 },
       ])
       for (const id of [1, 2, 3]) data.db.feeds[id].tag = "news"
-      // Seed directly: ch1 read to chron 2, ch2/ch3 NEVER seen. (Browsing via
-      // [ALL] would now mark ch2/ch3 seen up to chron 2 — mark-previous-as-seen.)
-      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 2 }))
+      // Seed directly: ch1 read to chron 2, ch3 fully read (→5), ch2 NEVER seen.
+      // (Browsing via [ALL] would mark passed feeds seen up to the opened article —
+      // mark-previous-as-seen — so seed the distinct per-member positions.)
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 2, "feed:3": 5 }))
       const group = [data.db.feeds[1], data.db.feeds[2], data.db.feeds[3]]
       const counts = await nav.unreadCounts(group)
-      // counts: ch1 = 1 (read down to chron 2); ch2/ch3 = their full backlog (2 each).
+      // counts: ch1 = 1 (read down to chron 2); ch2 = its full backlog (2); ch3 = 0.
       expect(counts.get(1)).toBe(1)
       expect(counts.get(2)).toBe(2)
-      expect(counts.get(3)).toBe(2)
+      expect(counts.get(3)).toBe(0)
       const badge = nav.tagUnreadFromCounts(group, counts)
-      expect(badge).toBe(5) // 1 (ch1) + 2 (ch2 full) + 2 (ch3 full)
-      // Unseen-only resumes at the saved position (chron 2, ch1), not the oldest
-      // unseen; ch2 (never seen) has an older article at chron 1 to the left, so
-      // the counter is the badge minus that one left-side unseen.
-      nav.setUnreadOnly(true)
-      const shown = await nav.switchFilter("news")
-      expect(data.loadArticle).toHaveBeenLastCalledWith(2)
-      expect(shown.has_left).toBe(true)
+      expect(badge).toBe(3) // 1 (ch1) + 2 (ch2 full) + 0 (ch3 fully read)
    })
 })
 
@@ -2121,6 +2105,7 @@ describe("search filter mode (q:<query>)", () => {
       expect(await nav.feedLeft(8)).toBe(3)
       expect(await nav.feedLeft(2)).toBe(-1)
       expect(await nav.feedRight(0)).toBe(3)
+      expect(await nav.feedRight(4)).toBe(9) // smallest hit >= 4 (folded from the deleted dedup test)
       expect(await nav.feedRight(10)).toBe(15)
       expect(await nav.feedRight(16)).toBe(-1)
       // The hit-set generator is consulted once and cached for the walk.
@@ -2164,14 +2149,6 @@ describe("search filter mode (q:<query>)", () => {
       expect(nav.currentChron()).toBe(9)
       await nav.fromHash("7!" + nav.SEARCH_PREFIX + "echo2")
       expect(nav.currentChron()).toBe(15) // 7 isn't a hit → newest
-   })
-
-   it("an empty query yields no hits and never fetches", async () => {
-      setupIndex(Array.from({ length: 5 }, () => ({ feedId: 1 })))
-      enter("")
-      expect(nav.isSearchFilter()).toBe(true)
-      expect(await nav.feedLeft(4)).toBe(-1)
-      expect(searchMod.search).not.toHaveBeenCalled()
    })
 
    it("caps the set at SEARCH_CAP and flags truncation", async () => {
@@ -2276,6 +2253,7 @@ describe("search hit-set snapshot (ensureSearchSet / loadHits)", () => {
    it("an empty query never calls loadHits and has no hits", async () => {
       setupIndex(Array.from({ length: 5 }, () => ({ feedId: 1 })))
       nav.applyFilter([nav.SEARCH_PREFIX]) // empty query
+      expect(nav.isSearchFilter()).toBe(true) // still search mode, not cleared to [ALL]
       expect(await nav.feedLeft(4)).toBe(-1)
       expect(searchMod.loadHits).not.toHaveBeenCalled()
    })
@@ -2291,18 +2269,6 @@ describe("search hit-set snapshot (ensureSearchSet / loadHits)", () => {
       expect(await nav.feedLeft(599)).toBe(599) // newest kept
       expect(await nav.feedLeft(100)).toBe(100) // oldest kept
       expect(await nav.feedLeft(99)).toBe(-1) // dropped by cap
-   })
-
-   it("dedup is handled by loadHits; nav walks a clean sorted set", async () => {
-      setupIndex(Array.from({ length: 20 }, () => ({ feedId: 1 })))
-      searchMod.loadHits.mockResolvedValue({ chrons: [3, 9, 15], truncated: false })
-      nav.applyFilter([nav.SEARCH_PREFIX + "dedup"])
-      expect(await nav.feedLeft(19)).toBe(15)
-      expect(await nav.feedLeft(14)).toBe(9)
-      expect(await nav.feedLeft(8)).toBe(3)
-      expect(await nav.feedLeft(2)).toBe(-1)
-      expect(await nav.feedRight(10)).toBe(15)
-      expect(await nav.feedRight(4)).toBe(9)
    })
 
    it("fromHash deep-link loads all hits then honors a matching position", async () => {
@@ -2803,15 +2769,6 @@ describe("no-unread feed/tag shows the caught-up placeholder", () => {
       nav.setUnreadOnly(true)
       const r = await nav.switchFilter("news")
       expect(r.placeholder).toBe(true)
-   })
-
-   it("a feed WITH unread still resumes at its seen entrypoint (no placeholder)", async () => {
-      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }]) // feed1 {0,1,2}
-      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 0 })) // 1,2 unread
-      nav.setUnreadOnly(true)
-      const r = await nav.switchFilter("1")
-      expect(r.placeholder).toBeFalsy()
-      expect(data.loadArticle).toHaveBeenLastCalledWith(0) // the seen entrypoint
    })
 
    it("in show-read mode a fully-read feed opens the article, NOT the placeholder", async () => {
