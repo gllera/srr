@@ -568,9 +568,25 @@ export async function render(center = false, onInteractive?: () => void): Promis
    // Fill rows NEAREST the anchor first (bounded concurrency), so the packs for
    // what you're looking at resolve before off-screen rows — progressive fill
    // prioritized by navigation position. Out-of-order arrival within a wave is
-   // fine: each card fills its own row. Pin the row's real height, relabel
+   // fine: each card fills its own row. Pin the rows' real heights, relabel
    // dividers (which skip still-skeleton rows), and re-assert the anchor (centered
-   // reader-return only) so a height change above the seed doesn't drift it.
+   // reader-return only) so a height change above the seed doesn't drift it —
+   // coalesced to ONE flush per animation frame, not per card: pinHeights'
+   // offsetHeight read after relabelDividers' divider churn forces a full
+   // synchronous relayout, and per-card that's O(rows) forced reflows packed into
+   // first paint (the fetchOlder/fetchNewer paths already batch per fetch). A
+   // warm cache drains every card in one task, so without the frame gate the
+   // whole batch still thrashed. No requestAnimationFrame (jsdom) → flush per
+   // card, the order the unit tests observe.
+   const pendingFill: HTMLElement[] = []
+   let fillFrame = 0
+   const flushFill = (): void => {
+      fillFrame = 0
+      if (my !== tok || !pendingFill.length) return
+      pinHeights(pendingFill.splice(0))
+      relabelDividers()
+      if (anchoredMid && center) reassertAnchor(seed, true)
+   }
    const anchorIdx = chronsDesc.indexOf(seed)
    const fillOrder = chronsDesc.map((_, k) => k).sort((a, b) => Math.abs(a - anchorIdx) - Math.abs(b - anchorIdx))
    await runPool(fillOrder, FILL_CONCURRENCY, async (k) => {
@@ -578,11 +594,16 @@ export async function render(center = false, onInteractive?: () => void): Promis
       const card = await data.loadMeta(chronsDesc[k])
       if (my !== tok) return
       fillRow(rows[k], card, seen)
-      pinHeights([rows[k]])
-      relabelDividers()
-      if (anchoredMid && center) reassertAnchor(seed, true)
+      pendingFill.push(rows[k])
+      if (typeof requestAnimationFrame !== "function") flushFill()
+      else if (!fillFrame) fillFrame = requestAnimationFrame(flushFill)
    })
    if (my !== tok) return
+   if (fillFrame) cancelAnimationFrame(fillFrame)
+   // Final authoritative pass: pin whatever a cancelled frame left pending, then
+   // the full divider/anchor sync (keeps the every-row-pinned invariant — see
+   // pinHeights — before the land-once measurement below).
+   if (pendingFill.length) pinHeights(pendingFill.splice(0))
    relabelDividers()
    if (anchoredMid && center) reassertAnchor(seed, true)
 

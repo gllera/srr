@@ -297,7 +297,11 @@ video {
    transition:
       opacity 0.25s ease-out,
       transform 0.25s ease-out;
-   will-change: opacity, transform;
+   /* No will-change here: the only animation is the one-off 0.25s navigation
+      fade, which the compositor promotes on its own for the transition's
+      duration. A permanent hint would pin the whole (arbitrarily tall) article
+      in its own GPU layer and cost tile memory + text antialiasing. contain
+      keeps the stacking context. */
    contain: layout style paint;
    overflow-wrap: anywhere;
 

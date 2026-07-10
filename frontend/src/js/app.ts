@@ -12,7 +12,7 @@ import {
    collapseBrokenMedia,
    countBadge,
    formatDate,
-   sanitizeHtml,
+   sanitizeFragment,
    srcColorIndex,
    timeAgo,
    URL_DENY,
@@ -323,7 +323,9 @@ function render(o: IShowFeed) {
    el.content.style.transition = "none"
    el.content.style.opacity = "0"
    el.content.style.transform = "translateY(6px)"
-   el.content.innerHTML = sanitizeHtml(o.article.c)
+   // Adopt the sanitized nodes directly — an innerHTML string round-trip would
+   // re-parse the whole article on every prev/next step (see sanitizeFragment).
+   el.content.replaceChildren(sanitizeFragment(o.article.c))
    // Reject javascript:/data:/vbscript:/file: in case the writer pipeline let one
    // through. Both the title link and the titleless masthead permalink point at
    // the same article URL; CSS shows whichever one this feed uses.
