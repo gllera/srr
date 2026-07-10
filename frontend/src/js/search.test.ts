@@ -207,6 +207,27 @@ describe("search", () => {
       expect(batches.flat().map((h) => h.chron)).toEqual([1])
    })
 
+   it("yields nothing and fetches nothing when metaReady() is false", async () => {
+      // A boot deep-link (#!q:…) can reach search() before availability is
+      // checked; mp lagging its finalized-shard count makes metaReady() false.
+      mockData.db = { total_art: 2 * META_PACK_SIZE + 2, seq: 7, mp: 1, mt: 2 }
+      mockData.fetchPackBytes.mockClear()
+      const batches = await collect(search.search("alpha"))
+      expect(batches).toEqual([])
+      expect(mockData.fetchPackBytes).not.toHaveBeenCalled()
+   })
+
+   it("warns (and yields no bogus hits) for a truncated finalized shard", async () => {
+      // A finalized shard shorter than its bloom header is corrupt; slicing off
+      // the bloom bytes would silently drop its hits — surface it via warn.
+      store["meta/0.gz"] = new Uint8Array(10) // < SEARCH_BLOOM_BYTES
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+      const batches = await collect(search.search("alpha"))
+      expect(batches.flat().every((h) => h.chron !== 0)).toBe(true)
+      expect(warn).toHaveBeenCalled()
+      warn.mockRestore()
+   })
+
    it("prunes shards via the summary blooms without fetching them", async () => {
       const batches = await collect(search.search("zzzqqq"))
       expect(batches).toEqual([])

@@ -730,7 +730,10 @@ describe("browser: real SPA over real packs", () => {
                   }
                }
             })
-            sw.postMessage({ type: "pin", names: ["idx/L1.gz", "data/L1.gz"] }, [port2])
+            sw.postMessage(
+               { type: "pin", names: ["idx/L1.gz", "data/L1.gz"], base: new URL("packs/", location.href).href },
+               [port2],
+            )
             await done
             const pinned = await caches.open("srr-pinned-v1")
             const keys = (await pinned.keys()).map((k) => new URL(k.url).pathname)
@@ -767,7 +770,9 @@ describe("browser: real SPA over real packs", () => {
                port1.onmessage = (e: MessageEvent<{ type: string; done: number; total: number }>) => {
                   if (e.data?.type === "pin-progress" && e.data.done >= e.data.total) resolve()
                }
-               sw.postMessage({ type: "pin", names: ["idx/L1.gz"] }, [port2])
+               sw.postMessage({ type: "pin", names: ["idx/L1.gz"], base: new URL("packs/", location.href).href }, [
+                  port2,
+               ])
             })
          })
 
@@ -833,7 +838,10 @@ describe("browser: real SPA over real packs", () => {
                port1.onmessage = (e: MessageEvent<{ type: string; done: number; total: number }>) => {
                   if (e.data?.type === "pin-progress" && e.data.done >= e.data.total) resolve()
                }
-               sw.postMessage({ type: "pin", names: ["idx/L1.gz", "data/L1.gz"] }, [port2])
+               sw.postMessage(
+                  { type: "pin", names: ["idx/L1.gz", "data/L1.gz"], base: new URL("packs/", location.href).href },
+                  [port2],
+               )
             })
          })
 
@@ -953,7 +961,9 @@ describe("browser: real SPA over real packs", () => {
                port1.onmessage = (e: MessageEvent<{ type: string; done: number; total: number }>) => {
                   if (e.data?.type === "pin-progress" && e.data.done >= e.data.total) resolve()
                }
-               sw.postMessage({ type: "pin", names: ["data/1.gz"] }, [port2])
+               sw.postMessage({ type: "pin", names: ["data/1.gz"], base: new URL("packs/", location.href).href }, [
+                  port2,
+               ])
             })
          })
 

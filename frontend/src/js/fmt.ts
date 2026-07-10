@@ -5,11 +5,36 @@ import { IMG_PROXY_KEY } from "./keys"
 // data:/vbscript:/javascript:/file: in href or src are XSS or info-leak vectors
 // (data:text/html executes script; data:image/svg+xml runs <script> in SVG).
 export const URL_DENY = /^\s*(?:javascript|data|vbscript|file)\s*:/i
+// URL_DENY guards only URL-BEARING attributes — applying it to every attribute
+// silently strips benign text (a title/alt/download that merely starts with a
+// scheme-like word). These are the URL attributes that survive on the allowed
+// element set below (dangerous elements are removed wholesale first).
+const URL_ATTRS = new Set([
+   "href",
+   "src",
+   "poster",
+   "srcset",
+   "cite",
+   "ping",
+   "background",
+   "formaction",
+   "action",
+   "data",
+   "longdesc",
+   "xlink:href",
+])
+// Absolute <a>/<area> href schemes the backend bluemonday allowlist keeps
+// (mailto/http/https); any other absolute scheme (tel:, blob:, ftp:, intent:, …)
+// is dropped to mirror the writer. javascript:/data:/… are already caught by
+// URL_DENY in the attribute loop; relative hrefs route through the pack base.
+const ANCHOR_ABS_OK = /^(?:https?|mailto):/i
 // SVG/MATH carry their own script + foreign-content surface; bluemonday strips
-// them server-side, so mirror that here. CSS selector — querySelectorAll matches
-// case-insensitively for HTML and matches SVG/MathML by their normalized names,
-// so we don't need a separate case-folding pass.
-const DANGEROUS_SELECTOR = "script,style,iframe,embed,object,form,link,meta,base,svg,math"
+// them server-side, so mirror that here. <template> is included because its
+// content lives in a DocumentFragment the sanitizer's TreeWalker never descends
+// into — removing the element removes that unwalked subtree with it. CSS
+// selector — querySelectorAll matches case-insensitively for HTML and matches
+// SVG/MathML by their normalized names, so we don't need a separate case-folding pass.
+const DANGEROUS_SELECTOR = "script,style,iframe,embed,object,form,link,meta,base,svg,math,template"
 
 const HTTP_RE = /^https?:\/\//i
 // A reference carrying a URL scheme (http:, mailto:, the URL_DENY set, …) is
@@ -85,7 +110,17 @@ function isRelative(v: string): boolean {
 // a credentialed-GET info-leak vector. Returns null when the ref escapes, so the
 // caller drops the attribute.
 function resolvePackRelative(v: string): string | null {
-   const resolved = new URL(v, PACK_BASE).href
+   // new URL() THROWS (not returns null) on a relative-shaped ref WHATWG rejects
+   // — e.g. "//[" or "//10.0.0.1:99999999" (which Go's lenient url.Parse accepts,
+   // so it can survive the backend into content). Drop the attribute on a throw;
+   // an unguarded throw here propagates out of the render path and crashes the
+   // whole article (error popup + retry loop) instead of just dropping one attr.
+   let resolved: string
+   try {
+      resolved = new URL(v, PACK_BASE).href
+   } catch {
+      return null
+   }
    return resolved.startsWith(PACK_BASE.href) ? resolved : null
 }
 
@@ -132,7 +167,12 @@ export function sanitizeFragment(html: string): DocumentFragment {
       const attrs = node.attributes
       for (let i = attrs.length - 1; i >= 0; i--) {
          const attr = attrs[i]
-         if (attr.name === "style" || attr.name === "class" || attr.name.startsWith("on") || URL_DENY.test(attr.value))
+         if (
+            attr.name === "style" ||
+            attr.name === "class" ||
+            attr.name.startsWith("on") ||
+            (URL_ATTRS.has(attr.name) && URL_DENY.test(attr.value))
+         )
             node.removeAttribute(attr.name)
       }
       const tag = node.tagName
@@ -140,11 +180,15 @@ export function sanitizeFragment(html: string): DocumentFragment {
          node.setAttribute("rel", "noopener noreferrer")
          // Relative hrefs (self-hosted "assets/…/doc.pdf", or any relative link
          // the feed carried) resolve against the pack base, bounds-checked so they
-         // can't traverse off it. Absolute hrefs (http(s), mailto:, …) stay as-is:
-         // user-initiated navigation, not an auto-loaded resource, so no
-         // proxy/IP-leak concern (proxy:false). URL_DENY-matching href was already
-         // stripped by the attribute loop above.
-         resolveMediaAttr(node, "href", proxyPrefix, false)
+         // can't traverse off it. Absolute hrefs are kept only for the writer's
+         // allowlisted schemes (mailto/http/https); any other absolute scheme
+         // (tel:, blob:, ftp:, …) is dropped to mirror the backend. URL_DENY-
+         // matching href (javascript:/data:/…) was already stripped above.
+         const href = node.getAttribute("href")
+         if (href) {
+            if (isRelative(href)) setPackRelative(node, "href", href)
+            else if (!ANCHOR_ABS_OK.test(href)) node.removeAttribute("href")
+         }
       } else if (tag === "IMG") {
          node.removeAttribute("srcset")
          // lazy+async: a long article's images must not compete with first render
@@ -202,7 +246,12 @@ export function sanitizeHtml(html: string): string {
 // fires on the <source> child, so the collapse targets its <video> host.
 export function collapseBrokenMedia(e: Event): void {
    const t = e.target as Element
-   const victim = t.tagName === "SOURCE" ? t.closest("video") : t.tagName === "IMG" || t.tagName === "VIDEO" ? t : null
+   const victim =
+      t.tagName === "SOURCE"
+         ? (t.closest("video") ?? t.closest("audio"))
+         : t.tagName === "IMG" || t.tagName === "VIDEO" || t.tagName === "AUDIO"
+           ? t
+           : null
    victim?.classList.add("srr-broken")
 }
 
@@ -295,9 +344,14 @@ export function countBadge(n: number): string {
 export function formatBytes(n: number): string {
    if (n < 1000) return `${n} B`
    const units = ["KB", "MB", "GB", "TB"]
-   let v = n
+   let v = n / 1000
    let i = 0
-   for (v /= 1000; v >= 1000 && i < units.length - 1; i++) v /= 1000
+   // Compare against the ROUNDED value: v=999.95 renders "1000.0" at one decimal,
+   // so it must roll up to the next unit rather than print "1000 KB".
+   while (Number(v.toFixed(1)) >= 1000 && i < units.length - 1) {
+      v /= 1000
+      i++
+   }
    return `${v.toFixed(1).replace(/\.0$/, "")} ${units[i]}`
 }
 

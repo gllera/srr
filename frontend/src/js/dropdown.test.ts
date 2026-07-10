@@ -447,6 +447,21 @@ describe("anchored context menu (showContextMenu)", () => {
       expect(document.activeElement).toBe($items()[1])
    })
 
+   it("traps Tab within the menu items so focus can't escape behind the open menu", () => {
+      dropdown.showContextMenu(anchor(), [
+         { label: "A", action: vi.fn() },
+         { label: "B", action: vi.fn() },
+      ])
+      key($menu()!, "Tab") // from the fresh container → first item
+      expect(document.activeElement).toBe($items()[0])
+      key($items()[0], "Tab")
+      expect(document.activeElement).toBe($items()[1])
+      key($items()[1], "Tab") // wraps forward
+      expect(document.activeElement).toBe($items()[0])
+      $items()[0].dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true }))
+      expect(document.activeElement).toBe($items()[1]) // Shift+Tab wraps backward
+   })
+
    it("Escape closes and restores focus to the anchor", () => {
       dropdown.showContextMenu(anchor(), [{ label: "A", action: vi.fn() }])
       key(document.body, "Escape")

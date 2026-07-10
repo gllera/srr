@@ -113,6 +113,7 @@ export function setup(
             a.remove()
             relabelDividers() // drop a day divider the removed row may have orphaned
             if (rowsEl && !rowsEl.querySelector("a.srr-row")) showEmptyState()
+            else syncRovingTab() // the removed row may have held the lone Tab stop
          }
          return
       }
@@ -281,6 +282,14 @@ export function emptyStateEl(opts: { notStarted?: boolean } = {}): HTMLElement {
          eyebrow("Search")
          msg.textContent = "Find any article by its title."
       }
+   } else if (nav.filter.saved) {
+      // Saved is a peek mode independent of the unread-only flag (which defaults
+      // ON), so its empty state must be checked BEFORE the caught-up reward below
+      // — otherwise an empty Saved view mis-reads as "All caught up".
+      eyebrow("Nothing saved")
+      const star = el("span", "srr-empty-star")
+      star.textContent = "★"
+      msg.append("Tap ", star, " on any article to keep it here for later.")
    } else if (nav.isUnreadOnly() && data.db.total_art > 0) {
       // The one empty state that's a reward, not an absence (unseen-only spans
       // [ALL] too): an empty list with articles present means there's nothing
@@ -297,11 +306,6 @@ export function emptyStateEl(opts: { notStarted?: boolean } = {}): HTMLElement {
       // its title), not the key — "" (all/multi) stays the unscoped line.
       if (key) msg.append("Nothing unread in ", em(nav.filterLabel(key)), ".")
       else msg.textContent = "You've read everything."
-   } else if (nav.filter.saved) {
-      eyebrow("Nothing saved")
-      const star = el("span", "srr-empty-star")
-      star.textContent = "★"
-      msg.append("Tap ", star, " on any article to keep it here for later.")
    } else if (nav.filter.active) {
       // Name the scope when it's a single feed/tag (filterLabel resolves a raw id
       // to its title) — the common case for the reader's empty-feed placeholder; a
