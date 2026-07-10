@@ -315,6 +315,54 @@ func TestSyncMetaRebuildsMissingTail(t *testing.T) {
 
 // Inconsistent coverage fields (hand-edited db.gz) reset to a full rebuild
 // instead of trusting them.
+// TestSyncMetaStaleLowCoverageDoesNotOverwriteFinalizedShard reproduces the
+// meta-shard overwrite corruption: a prior cycle finalized meta/0.gz and wrote a
+// shifted latest tail but failed (warn-only) before recording coverage, so
+// MetaPacks is left stale-low (0) while MetaTail happens to still equal the
+// on-disk tail's entry count. A later cycle whose read-back tail length matches
+// that stale MetaTail must NOT trust it at chron base MetaPacks*metaPackSize and
+// re-finalize the immutable meta/0.gz with a wrong chron range.
+func TestSyncMetaStaleLowCoverageDoesNotOverwriteFinalizedShard(t *testing.T) {
+	db, dir := setupMetaBoundaryDB(t)
+	c := &db.core
+
+	// Correct baseline: meta/0.gz = [A0..A4999], latest tail meta/L2 = [Last].
+	if err := db.SyncMeta(ctx, nil); err != nil {
+		t.Fatalf("SyncMeta baseline: %v", err)
+	}
+	if c.MetaPacks != 1 || c.MetaTail != 1 {
+		t.Fatalf("baseline coverage = (%d, %d), want (1, 1)", c.MetaPacks, c.MetaTail)
+	}
+
+	// Simulate the post-saveSummary-failure state: the finalized shard and the
+	// shifted tail are durable, but coverage never advanced past 0. MetaTail (1)
+	// still equals the on-disk tail's entry count, so a count-only trust fires.
+	c.MetaPacks = 0
+
+	// A later cycle adds one article; its read-back tail (meta/L2, 1 entry)
+	// matches the stale MetaTail.
+	ch := c.Feeds[1]
+	written, err := db.PutArticles(ctx, []*Item{
+		{Feed: ch, Title: "New", Content: "c", Published: int64(metaPackSize + 1)},
+	})
+	if err != nil {
+		t.Fatalf("PutArticles: %v", err)
+	}
+	if err := db.SyncMeta(ctx, written); err != nil {
+		t.Fatalf("SyncMeta: %v", err)
+	}
+
+	// The immutable finalized shard must still hold its original chron range.
+	entries := readMetaEntries(t, dir, "meta/0.gz", true)
+	if len(entries) != metaPackSize {
+		t.Fatalf("shard entries = %d, want %d", len(entries), metaPackSize)
+	}
+	if entries[0].Title != "A0" || entries[metaPackSize-1].Title != fmt.Sprintf("A%d", metaPackSize-1) {
+		t.Fatalf("meta/0.gz overwritten with wrong chron range: [0]=%q [last]=%q, want A0 / A%d",
+			entries[0].Title, entries[metaPackSize-1].Title, metaPackSize-1)
+	}
+}
+
 func TestSyncMetaInconsistentCoverageRebuilds(t *testing.T) {
 	db, c, dir := setupTestDB(t)
 	ch := &Feed{id: 1, URL: "https://example.com/1"}
