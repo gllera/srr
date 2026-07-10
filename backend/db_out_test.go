@@ -111,6 +111,33 @@ func TestSyncOutFeedsNopWhenCdnURLUnset(t *testing.T) {
 	}
 }
 
+// TestSyncOutFeedsReturnsErrorOnWriteFailure verifies SyncOutFeeds signals a
+// per-output write failure to its caller (so cmd_fetch leaves lastOutSig
+// unadvanced and retries next cycle) instead of silently swallowing it. A file
+// where the out/ directory belongs makes the Put fail deterministically.
+func TestSyncOutFeedsReturnsErrorOnWriteFailure(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	c.FetchedAt = 1700000000
+	ch := &Feed{id: 0, URL: "http://a", Tag: "news"}
+	c.Feeds = map[int]*Feed{ch.id: ch}
+	if _, err := db.PutArticles(ctx, []*Item{
+		{Feed: ch, Title: "Art1", Content: "<p>b</p>", Link: "http://x/1", Published: 1000},
+	}); err != nil {
+		t.Fatalf("PutArticles: %v", err)
+	}
+	globals.CdnURL = "https://cdn.example.com"
+	defer func() { globals.CdnURL = "" }()
+
+	// Occupy "out" with a regular file so writing out/good.rss can't create the dir.
+	if err := os.WriteFile(filepath.Join(dir, "out"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	db.core.Out = []OutFeed{{Name: "good", Format: "rss", Tags: []string{"news"}, Limit: 10}}
+	if err := db.SyncOutFeeds(ctx); err == nil {
+		t.Fatal("SyncOutFeeds should return an error when an out-feed write fails")
+	}
+}
+
 // TestSyncOutFeedsUnsafeNameSkipped verifies the defense-in-depth guard in
 // syncOneOutFeed: an Out entry whose Name bypasses the command gate (e.g. from
 // a hand-edited/corrupted db.gz) is skipped with a warning and no file is

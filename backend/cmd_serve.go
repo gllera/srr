@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -41,6 +42,14 @@ type ServeCmd struct {
 func (o *ServeCmd) Run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	// --force disables the .locked exclusive-create, which is the mutual exclusion
+	// the 409 contract relies on. In a long-lived serve process it lets the
+	// --interval fetch cycle and concurrent GUI mutations commit db.gz/packs at
+	// once (lost writes / torn state) — safe for a one-shot CLI op, a footgun here.
+	if globals.Force {
+		slog.Warn("serve started with --force: the store lock is disabled, so the fetch loop and GUI mutations are no longer mutually exclusive")
+	}
 
 	srv := &http.Server{Addr: o.Addr, Handler: newMux()}
 	done := make(chan struct{})
