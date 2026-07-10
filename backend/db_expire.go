@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 
 	"golang.org/x/net/html"
+	"golang.org/x/sync/errgroup"
 )
 
 // errExpireDone stops the expiration walk at the first article young enough
@@ -132,21 +134,44 @@ func (o *DB) ExpireArticles(ctx context.Context, now int64) error {
 	// expiring feed that referenced the key. A key an aborted predecessor
 	// already deleted stats as 0 (missing → (0, nil)); a mid-delete Rm failure
 	// therefore loses the decrement for the keys it did delete — accepted skew,
-	// same class as the no-liveness-check trade-off.
+	// same class as the no-liveness-check trade-off. Each phase fans out over a
+	// bounded errgroup — the per-key calls are independent WAN round-trips made
+	// while the fetch cycle holds the store lock, and the sums commute — with
+	// the Wait between the phases preserving the no-Rm-before-every-Stat
+	// boundary the all-or-nothing retry depends on.
 	freed := map[int]int64{}
 	var freedBytes int64
+	var mu sync.Mutex
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(max(1, globals.Workers)) // Workers is 0 when the CLI didn't run (tests)
 	for key, owner := range assetOwner {
-		size, err := o.Stat(ctx, key)
-		if err != nil {
-			return fmt.Errorf("stat %s: %w", key, err)
-		}
-		freed[owner] += size
-		freedBytes += size
+		g.Go(func() error {
+			size, err := o.Stat(gctx, key)
+			if err != nil {
+				return fmt.Errorf("stat %s: %w", key, err)
+			}
+			mu.Lock()
+			freed[owner] += size
+			freedBytes += size
+			mu.Unlock()
+			return nil
+		})
 	}
+	if err := g.Wait(); err != nil {
+		return err
+	}
+	g, gctx = errgroup.WithContext(ctx)
+	g.SetLimit(max(1, globals.Workers))
 	for key := range assetOwner {
-		if err := o.Rm(ctx, key); err != nil {
-			return fmt.Errorf("delete %s: %w", key, err)
-		}
+		g.Go(func() error {
+			if err := o.Rm(gctx, key); err != nil {
+				return fmt.Errorf("delete %s: %w", key, err)
+			}
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return err
 	}
 
 	expired := 0

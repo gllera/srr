@@ -316,7 +316,18 @@ func (a *assetFetcher) resolveAndUpload(ctx context.Context, full, localname str
 
 	// Already uploaded? Skip the asset-process command and the upload — the common
 	// case for an image reused across articles or feeds. (asset-peek still ran, to
-	// fix the key extension; it is the cheap probe.)
+	// fix the key extension; it is the cheap probe.) Stat proves the hit without
+	// pulling the object body, but its missing-key contract is (0, nil) — a HEAD
+	// can't tell absence from a zero-byte stored asset or an HTTP store that omits
+	// Content-Length — so only size > 0 is trusted; size == 0 falls through to the
+	// body-carrying Get probe, the authoritative check for those degenerate cases.
+	if size, err := a.be.Stat(ctx, key); err != nil {
+		return "", 0, fmt.Errorf("check asset %q: %w", key, err)
+	} else if size > 0 {
+		slog.Debug("asset already stored, skipping process+upload", "asset", localname, "key", key)
+		a.seen.Store(sum, key)
+		return key, 0, nil
+	}
 	if rc, err := a.be.Get(ctx, key, true); err != nil {
 		return "", 0, fmt.Errorf("check asset %q: %w", key, err)
 	} else if rc != nil {
