@@ -208,6 +208,28 @@ func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 		c.MetaPacks, c.MetaTail = 0, 0
 	}
 
+	// Stale-low MetaPacks guard: a prior cycle can finalize meta/<mp>.gz and write
+	// a latest tail one shard past mp*metaPackSize, then fail (SyncMeta is
+	// warn-only) before recording coverage — leaving MetaPacks understating the
+	// finalized shards on disk while MetaTail happens to still equal the shifted
+	// tail's entry count. The read-back below would then trust that tail at the
+	// wrong chron base (start = MetaPacks*metaPackSize) and the append would
+	// re-finalize the immutable meta/<mp>.gz with a wrong chron range — silent
+	// corruption, since the re-finalized shard's bloom is rebuilt from the same
+	// wrong lines and `srr inspect --validate` only cross-checks each shard
+	// against itself. Detect it physically: if the first slot the append would
+	// finalize (meta/<mp>.gz) already exists, coverage undercounts the finalized
+	// shards, so force the full rebuild from the data packs. Costs one Stat, and
+	// only on a boundary-crossing cycle (mp < nf) — meta/<mp>.gz never exists yet
+	// on the normal path, where mp accurately counts the finalized shards.
+	if c.MetaPacks < nf {
+		if size, err := o.Stat(ctx, finalizedMetaKey(c.MetaPacks)); err == nil && size > 0 {
+			slog.Warn("meta coverage undercounts finalized shards on disk, rebuilding from scratch",
+				"mp", c.MetaPacks, "nf", nf)
+			c.MetaPacks, c.MetaTail = 0, 0
+		}
+	}
+
 	start := c.MetaPacks * metaPackSize // chron of the tail's first entry
 	var rawLines [][]byte               // jsonEncode outputs, newline included
 
