@@ -188,14 +188,25 @@ func writeErr(w http.ResponseWriter, err error) {
 	// message in the body; without typed errors (repo forbids custom sentinels)
 	// validation and infra errors aren't distinguishable at this shared helper.
 	status := http.StatusBadRequest
+	// Fragile-by-necessity substring contract (no typed errors): today only
+	// FeedByID's "feed id N not found" hits this; recipe/syndicate rejections say
+	// "does not exist"/"unknown"/"invalid" and stay 400. A future validation
+	// message containing "not found" would silently become a 404 — keep that
+	// phrase out of non-404 errors.
 	if strings.Contains(err.Error(), "not found") {
 		status = http.StatusNotFound
 	}
 	writeJSON(w, status, map[string]string{"error": err.Error()})
 }
 
+// maxRequestBody caps every admin-API request body. The GUI is loopback/
+// Access-gated, but an unbounded io.ReadAll / json.Decode still lets a single
+// large body balloon memory — 8 MiB is far above any real feed-config or OPML
+// payload.
+const maxRequestBody = 8 << 20
+
 func decodeJSON(r *http.Request, v any) error {
-	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(nil, r.Body, maxRequestBody)).Decode(v); err != nil {
 		return fmt.Errorf("decode request body: %w", err)
 	}
 	return nil

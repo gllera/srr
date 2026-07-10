@@ -56,10 +56,32 @@ func listViewOf(ch *Feed) feedListView {
 	}
 }
 
-// saveFeed upserts one feedView, with the same subscribe-time discovery gating
-// as `feed add`/`feed upd -u`: probe when the effective ingest is #feed and the
-// URL is new (create) or changed (update). Shared by the POST and PUT handlers
-// so the GUI matches the CLI. Returns the stored *Feed for echo-back.
+// resolveFeedViewURL runs subscribe-time discovery on a feedView read-only,
+// folding the resolved URL back into v.URL. Same gating as `feed add`/`feed
+// upd -u`: probe when the effective ingest is #feed and the URL is new (create)
+// or changed (update). Kept OUT of the locked write path (handleFeedSave calls
+// it in a no-lock DB scope first) so the network probe never holds .locked —
+// which would 409 the fetch loop and every other GUI mutation for its duration.
+func resolveFeedViewURL(ctx context.Context, db *DB, v *feedView) error {
+	oldURL := ""
+	if v.ID != nil {
+		existing, err := db.FeedByID(*v.ID)
+		if err != nil {
+			return err
+		}
+		oldURL = existing.URL
+	}
+	resolved, err := resolveFeedProbe(ctx, db.core.Recipes, v.Recipe, v.Ingest, oldURL, v.URL)
+	if err != nil {
+		return err
+	}
+	v.URL = resolved
+	return nil
+}
+
+// saveFeed upserts one feedView (URL already resolved by resolveFeedViewURL).
+// Shared by the POST and PUT handlers so the GUI matches the CLI. Returns the
+// stored *Feed for echo-back.
 func saveFeed(ctx context.Context, db *DB, v *feedView) (*Feed, error) {
 	if v.Title == "" {
 		return nil, fmt.Errorf("title required")
@@ -78,11 +100,8 @@ func saveFeed(ctx context.Context, db *DB, v *feedView) (*Feed, error) {
 		}
 		ch = existing
 	}
-	resolved, err := resolveFeedProbe(ctx, db.core.Recipes, v.Recipe, v.Ingest, ch.URL, v.URL)
-	if err != nil {
-		return nil, err
-	}
-	v.URL = resolved // fold the resolved URL back in, then reuse the shared field-writer
+	// v.URL is already resolved by resolveFeedViewURL (run outside the lock);
+	// the field-writer just folds it in. No network probe on this locked path.
 	writeFeedView(ch, v)
 	if err := normalizeFeed(ch, db.core.Recipes); err != nil {
 		return nil, err
@@ -114,6 +133,16 @@ func handleFeedSave(w http.ResponseWriter, r *http.Request, id *int) {
 		return
 	}
 	v.ID = id
+	// Phase 1 (no lock): subscribe-time discovery hits the network — run it in a
+	// read-only DB scope BEFORE the store lock (mirrors handleImport), so a slow
+	// feed URL can't hold .locked for the probe's duration.
+	if err := withDBCtx(r.Context(), false, func(ctx context.Context, db *DB) error {
+		return resolveFeedViewURL(ctx, db, &v)
+	}); err != nil {
+		writeErr(w, err)
+		return
+	}
+	// Phase 2 (locked): apply the write with the already-resolved URL and commit.
 	var saved *Feed
 	err := withDBCtx(r.Context(), true, func(ctx context.Context, db *DB) error {
 		s, e := saveFeed(ctx, db, &v)
@@ -152,7 +181,7 @@ func createFeed(w http.ResponseWriter, r *http.Request) {
 }
 
 func applyFeedsHandler(w http.ResponseWriter, r *http.Request) {
-	data, err := io.ReadAll(r.Body)
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
 	if err != nil {
 		writeErr(w, err)
 		return
