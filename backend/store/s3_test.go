@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 // fakeS3 is an in-memory S3 lookalike behind httptest. The endpoint override
@@ -151,6 +153,13 @@ func setupFakeS3(t *testing.T) (Backend, *fakeS3) {
 		SecretAccessKey: "test",
 	}
 	t.Cleanup(func() { s3Cfg = saved })
+
+	// Drop memoized clients: an ephemeral httptest port can be reused across
+	// sequential tests, and a config-identical hit would hand this test the
+	// previous server's client (its listener already closed).
+	s3ClientsMu.Lock()
+	s3Clients = map[S3Config]*s3.Client{}
+	s3ClientsMu.Unlock()
 
 	b, err := Open(ctx, "s3://bucket/prefix")
 	if err != nil {
@@ -348,5 +357,29 @@ func TestS3Stat(t *testing.T) {
 	// the bodyless-404 "NotFound" code HeadObject really returns (not NoSuchKey).
 	if n, err := b.Stat(ctx, "missing.bin"); err != nil || n != 0 {
 		t.Errorf("Stat(missing) = (%d, %v), want (0, nil)", n, err)
+	}
+}
+
+// TestS3ClientMemoPerConfig pins the client-memo contract: two Opens under
+// one config share a single SDK client (the serve loop's per-cycle Open must
+// not rebuild transport/credentials), while a different config keys its own.
+func TestS3ClientMemoPerConfig(t *testing.T) {
+	b1, _ := setupFakeS3(t)
+	b2, err := Open(ctx, "s3://otherbucket/otherprefix")
+	if err != nil {
+		t.Fatalf("second Open: %v", err)
+	}
+	if b1.(*S3).client != b2.(*S3).client {
+		t.Fatal("same config: expected the memoized client to be shared across Opens")
+	}
+
+	other := s3Cfg
+	other.Region = "eu-west-1"
+	c2, err := s3ClientFor(ctx, other)
+	if err != nil {
+		t.Fatalf("s3ClientFor(other): %v", err)
+	}
+	if c2 == b1.(*S3).client {
+		t.Fatal("different config: expected a distinct client, got the memoized one")
 	}
 }

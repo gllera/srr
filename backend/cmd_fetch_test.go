@@ -255,3 +255,83 @@ func reflectDeepEqualInts(a, b []int) bool {
 	}
 	return true
 }
+
+// backoffTestGlobals swaps in a Globals with the given backoff cap, restoring
+// the previous value on cleanup (setupTestDB-style tests leave the field zero,
+// so the fetch-path suites all run at full rate — the production default rides
+// the kong tag, not the struct zero).
+func backoffTestGlobals(t *testing.T, maxT time.Duration) {
+	t.Helper()
+	saved := globals
+	g := Globals{FetchBackoffMax: maxT}
+	globals = &g
+	t.Cleanup(func() { globals = saved })
+}
+
+func TestTargetInterval(t *testing.T) {
+	const base, maxT = 300, 3600
+	now := int64(1700000000)
+	for _, tc := range []struct {
+		name    string
+		lastNew int64
+		want    int64
+	}{
+		{"never produced stays at base", 0, base},
+		{"produced in the future clamps to base", now + 10, base},
+		{"just produced", now, base},
+		{"quiet under 8x base stays at base", now - 2000, base}, // 2000/8 = 250 < 300
+		{"quiet 40min starts drifting", now - 2400, base},       // exactly 8*base
+		{"quiet 2h drifts to quiet/8", now - 7200, 900},
+		{"quiet 8h caps", now - 8*3600, maxT},
+		{"quiet 9 days caps", now - 9*86400, maxT},
+	} {
+		ch := &Feed{LastNew: tc.lastNew}
+		if got := targetInterval(ch, now, base, maxT); got != tc.want {
+			t.Errorf("%s: targetInterval = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestFilterDue(t *testing.T) {
+	const base, maxT = 300, 3600
+	now := int64(1700000000)
+	feeds := []*Feed{
+		// Active feed polled last cycle: due again (base elapsed).
+		{id: 0, LastNew: now - 60, LastOK: now - base},
+		// Dormant feed (quiet 2h → target 900) polled 5 min ago: skipped.
+		{id: 1, LastNew: now - 7200, LastOK: now - base},
+		// Same dormancy but 20 min since last poll: due.
+		{id: 2, LastNew: now - 7200, LastOK: now - 1200},
+		// Failing feed: LastOK frozen far in the past — never skipped.
+		{id: 3, LastNew: now - 9*86400, LastOK: now - 86400},
+		// Never-polled feed (LastOK 0): due.
+		{id: 4},
+	}
+	got := selectedIDs(filterDue(feeds, now, base, maxT))
+	want := []int{0, 2, 3, 4}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("filterDue = %v, want %v", got, want)
+	}
+}
+
+func TestBackoffActive(t *testing.T) {
+	backoffTestGlobals(t, time.Hour)
+	for _, tc := range []struct {
+		name string
+		cmd  FetchCmd
+		maxT time.Duration
+		want bool
+	}{
+		{"loop mode", FetchCmd{Interval: 5 * time.Minute}, time.Hour, true},
+		{"one-shot run", FetchCmd{}, time.Hour, false},
+		{"kill switch", FetchCmd{Interval: 5 * time.Minute}, 0, false},
+		{"explicit tag selector", FetchCmd{Interval: 5 * time.Minute, feedFilter: feedFilter{Tag: []string{"news"}}}, time.Hour, false},
+		{"explicit feed selector", FetchCmd{Interval: 5 * time.Minute, feedFilter: feedFilter{Feed: []int{3}}}, time.Hour, false},
+		{"exclude selectors alone keep backoff", FetchCmd{Interval: 5 * time.Minute, feedFilter: feedFilter{ExcludeTag: []string{"x"}}}, time.Hour, true},
+	} {
+		globals.FetchBackoffMax = tc.maxT
+		if got := tc.cmd.backoffActive(); got != tc.want {
+			t.Errorf("%s: backoffActive = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

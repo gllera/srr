@@ -163,7 +163,56 @@ func (o *FetchCmd) selectFeeds(db *DB) ([]*Feed, error) {
 	for _, w := range warnings {
 		slog.Warn("feed filter: " + w)
 	}
+	if o.backoffActive() {
+		feeds = filterDue(feeds, db.core.FetchedAt,
+			int64(o.Interval/time.Second), int64(globals.FetchBackoffMax/time.Second))
+	}
 	return feeds, nil
+}
+
+// backoffActive gates the dormancy backoff to the unattended full-set loop:
+// one-shot runs (Interval == 0), the GUI single-feed path (o.only, which
+// returns before this is consulted), and any explicit include selector are a
+// human asking for those feeds NOW, so they always poll at full rate. The
+// env kill-switch (SRR_FETCH_BACKOFF_MAX=0) disables it without a redeploy.
+func (o *FetchCmd) backoffActive() bool {
+	return o.Interval > 0 && globals.FetchBackoffMax > 0 &&
+		len(o.Tag) == 0 && len(o.Feed) == 0
+}
+
+// targetInterval is a feed's current poll interval: the loop base for an
+// active feed, drifting up as time-since-last-new-article/8 once it goes
+// quiet (≥40 min quiet at a 5-min base before the first skip), capped at
+// maxT. LastNew == 0 (never produced here) stays at the base — a fresh feed
+// must not start life backed off.
+func targetInterval(ch *Feed, now, base, maxT int64) int64 {
+	if ch.LastNew <= 0 || now <= ch.LastNew {
+		return base
+	}
+	t := (now - ch.LastNew) / 8
+	if t < base {
+		return base
+	}
+	if t > maxT {
+		return maxT
+	}
+	return t
+}
+
+// filterDue keeps the feeds whose target interval has elapsed since their
+// last successful poll (LastOK — stamped on every success incl. 304, so it is
+// the real poll clock). A feed that produces an article snaps back to the
+// base automatically: LastNew moves to ~now, so targetInterval collapses to
+// base on the next cycle. Failing feeds freeze LastOK and are never skipped —
+// backoff must not mask an outage (their retry cadence is future work).
+func filterDue(feeds []*Feed, now, base, maxT int64) []*Feed {
+	out := feeds[:0]
+	for _, ch := range feeds {
+		if now-ch.LastOK >= targetInterval(ch, now, base, maxT) {
+			out = append(out, ch)
+		}
+	}
+	return out
 }
 
 // runCycleSafe runs one fetch cycle, converting a panic anywhere in it (outside

@@ -88,5 +88,10 @@ func healAsset(ctx context.Context, be store.Backend, key, file, contentType str
 		return fmt.Errorf("store %q: %w", key, err)
 	}
 	slog.Info("asset healed", "key", key, "bytes", fi.Size(), "content_type", contentType)
+	// The heal overwrites an existing content-hash key in place — the one
+	// asset write that reuses a name. A CDN edge fronting the store caches
+	// asset keys under a year-long immutable TTL, so the heal stays invisible
+	// there (HEAD and GET cached separately) until that exact URL is purged.
+	slog.Warn("healed key overwrote published bytes: purge this URL on the CDN edge (cdn.llera.eu) or the old bytes keep serving", "key", key)
 	return nil
 }
