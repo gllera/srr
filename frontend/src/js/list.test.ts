@@ -664,6 +664,20 @@ describe("list", () => {
       expect(empty!.querySelector(".srr-empty-msg")!.textContent).toBe("Nothing unread in Feed99.")
    })
 
+   it("renders the 'not started' message for a never-opened feed (distinct from caught-up)", () => {
+      // The reader's not-started placeholder (a feed with unread you've never
+      // opened): its own directed line, NOT the "All caught up" reward — the feed
+      // HAS unread. Reachable only via emptyStateEl({notStarted}) (the reader path);
+      // the list surface itself shows the unread rows and never this state.
+      nav._setUnreadOnly(true)
+      nav.getCurrentFilterKey.mockReturnValueOnce("99")
+      const empty = list.emptyStateEl({ notStarted: true })
+      expect(empty.querySelector(".srr-empty-eyebrow")!.textContent).toBe("Not started")
+      expect(empty.querySelector(".srr-caughtup-check")).toBeNull() // not the reward state
+      expect(empty.querySelector(".srr-empty-em")!.textContent).toBe("Feed99")
+      expect(empty.querySelector(".srr-empty-msg")!.textContent).toContain("from the list")
+   })
+
    it("refresh re-derives read/unread dots from the live seen map", async () => {
       setIndex(4)
       await list.render()

@@ -37,6 +37,7 @@ vi.mock("./fmt", () => ({
    formatDate: (t: number) => `D${t}`,
    timeAgoProse: (t: number) => `ago${t}`,
    countBadge: (n: number) => (n > 999 ? "999+" : String(n)),
+   formatBytes: (n: number) => `${n}B`,
    isStale: vi.fn(() => false),
    URL_DENY: /^\s*(?:javascript|data|vbscript|file)\s*:/i,
 }))
@@ -57,6 +58,7 @@ type Picker = typeof import("./picker")
 const SKELETON =
    `<section class="srr-picker" hidden>` +
    `<header class="srr-picker-head"><h2 class="srr-picker-title">Feeds</h2>` +
+   `<button class="srr-picker-showread" aria-pressed="false"></button>` +
    `<button class="srr-picker-close"></button></header>` +
    `<div class="srr-picker-filter"></div>` +
    `</section>` +
@@ -75,6 +77,7 @@ const flush = () => new Promise((r) => setTimeout(r, 0)) // let fillUnread's awa
 const hooks = {
    onSelect: vi.fn(),
    onClose: vi.fn(),
+   onToggleShowRead: vi.fn(),
 }
 
 async function mount(): Promise<Picker> {
@@ -308,6 +311,34 @@ describe("filter list", () => {
    })
 })
 
+describe("show-read toggle (picker header)", () => {
+   it("reflects unread-only as aria-pressed — pressed means read articles are shown", async () => {
+      nav.isUnreadOnly.mockReturnValue(false) // read shown → pressed
+      const picker = await mount()
+      picker.open()
+      expect($(".srr-picker-showread").getAttribute("aria-pressed")).toBe("true")
+
+      nav.isUnreadOnly.mockReturnValue(true) // unread-only → not pressed
+      picker.render()
+      expect($(".srr-picker-showread").getAttribute("aria-pressed")).toBe("false")
+   })
+
+   it("clicking it calls onToggleShowRead and re-renders the rows for the new mode", async () => {
+      nav.isUnreadOnly.mockReturnValue(false)
+      const picker = await mount()
+      picker.open()
+      expect(data.groupFeedsByTag).toHaveBeenLastCalledWith(true) // read shown → empty feeds listed
+      // app.ts's hook flips the nav mode; simulate that flip so render() sees it.
+      hooks.onToggleShowRead.mockImplementation(() => nav.isUnreadOnly.mockReturnValue(true))
+      data.groupFeedsByTag.mockClear()
+      $(".srr-picker-showread").click()
+      expect(hooks.onToggleShowRead).toHaveBeenCalledTimes(1)
+      expect(data.groupFeedsByTag).toHaveBeenCalledWith(false) // re-rendered in unread-only mode
+      expect($(".srr-picker-showread").getAttribute("aria-pressed")).toBe("false")
+      hooks.onToggleShowRead.mockReset()
+   })
+})
+
 describe("info dialog", () => {
    it("puts an ⓘ details button on feed rows and [ALL] (not tags / ★ Saved)", async () => {
       nav.savedCount.mockReturnValue(1)
@@ -325,8 +356,8 @@ describe("info dialog", () => {
    })
 
    it("opens the store-wide card from [ALL]'s ⓘ — inventory, health census, live unread", async () => {
-      const a = feed({ id: 1, title: "A", tag: "news", total_art: 10, xp: 2 })
-      const b = feed({ id: 2, title: "B", ferr: "boom" }) // crit; total_art 1
+      const a = feed({ id: 1, title: "A", tag: "news", total_art: 10, xp: 2, cb: 1_000_000, ab: 500_000 })
+      const b = feed({ id: 2, title: "B", ferr: "boom", cb: 234_000 }) // crit; total_art 1
       data.db.feeds = { 1: a, 2: b }
       data.groupFeedsByTag.mockReturnValue({
          tagged: new Map([["news", [a]]]),
@@ -352,10 +383,16 @@ describe("info dialog", () => {
       expect(rows.get("Tags")).toBe("1")
       expect(rows.get("Articles")).toBe("9") // live: (10−2) + 1, expired excluded
       expect(rows.get("Saved")).toBe("3")
+      expect(rows.get("Stored content")).toBe("1234000B") // cb summed across feeds
+      expect(rows.get("Stored assets")).toBe("500000B") // ab summed; only a has any
       expect(rows.get("Healthy")).toBe("1")
       expect(rows.get("Error")).toBe("1")
       expect(rows.has("Stale")).toBe(false) // zero problem rows stay absent
-      expect(rows.get("Search index")).toBe("Ready")
+      // Pack internals stay off the reader-facing card (generation, latest-pack
+      // names, search-index state — the settings footer owns the last one).
+      expect(rows.has("Generation")).toBe(false)
+      expect(rows.has("Latest packs")).toBe(false)
+      expect(rows.has("Search index")).toBe(false)
       expect($(".srr-info-unread").textContent).toBe("5") // async store-wide sum
       expect(hooks.onSelect).not.toHaveBeenCalled() // ⓘ never selects the row
    })
@@ -364,7 +401,18 @@ describe("info dialog", () => {
       data.groupFeedsByTag.mockReturnValue({
          tagged: new Map(),
          sortedTags: [],
-         untagged: [feed({ id: 5, title: "Feed5", url: "http://example.com/rss", recipe: "default", total_art: 12 })],
+         untagged: [
+            feed({
+               id: 5,
+               title: "Feed5",
+               url: "http://example.com/rss",
+               recipe: "default",
+               total_art: 12,
+               cb: 1_234_567,
+               ab: 89_000_000,
+               exp: 30,
+            }),
+         ],
       })
       nav.unreadCounts.mockResolvedValue(new Map([[5, 7]]))
       const picker = await mount()
@@ -376,6 +424,17 @@ describe("info dialog", () => {
       expect($(".srr-info-dialog").classList.contains("srr-open")).toBe(true)
       expect($(".srr-info-title").textContent).toBe("Feed5")
       expect($(".srr-info-body").textContent).toContain("http://example.com/rss")
+      // Internal bookkeeping stays off the reader-facing card: no feed id,
+      // processing recipe, HTTP validators, or dedup/pack state.
+      const dts = $$(".srr-info-grid dt").map((dt) => dt.textContent)
+      for (const label of ["Feed ID", "Recipe", "ETag", "Last-Modified", "Dedup cache", "Start index"]) {
+         expect(dts).not.toContain(label)
+      }
+      // Storage + retention rows wired to cb / ab / exp (formatBytes stubbed).
+      const rows = new Map($$(".srr-info-grid dt").map((dt) => [dt.textContent, dt.nextElementSibling!.textContent]))
+      expect(rows.get("Stored content")).toBe("1234567B")
+      expect(rows.get("Stored assets")).toBe("89000000B")
+      expect(rows.get("Retention")).toBe("30 days")
       await flush()
       expect($(".srr-info-unread").textContent).toBe("7")
       $(".srr-info-close").click()
@@ -396,6 +455,12 @@ describe("info dialog", () => {
       )
       // dt "Articles" and dd "6" concatenate in textContent.
       expect($(".srr-info-body").textContent).toContain("Articles6")
+      // Counter-less feed: zero stored content, no assets row (nothing to
+      // report), retention defaults to Forever (exp absent == 0 == keep).
+      const rows = new Map($$(".srr-info-grid dt").map((dt) => [dt.textContent, dt.nextElementSibling!.textContent]))
+      expect(rows.get("Stored content")).toBe("0B")
+      expect(rows.has("Stored assets")).toBe(false)
+      expect(rows.get("Retention")).toBe("Forever")
    })
 })
 

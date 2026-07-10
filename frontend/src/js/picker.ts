@@ -5,12 +5,14 @@
 // tag groups and feeds — source-color chips, health-tinted labels, async unread
 // badges, ⓘ detail buttons) and the feed/tag/store info dialogs those ⓘ buttons
 // open. Picking a row closes the overlay and re-filters the LIST (app.ts
-// onSelect → selectFilter). The settings that used to share a surface with this
-// picker live on the gear's anchored menu now (app.ts openSettingsMenu), which
+// onSelect → selectFilter). It also owns the header "Show read" toggle (the
+// unread-only view mode — onToggleShowRead flips it via app.ts, which reconciles
+// the surface underneath, then the picker re-renders its own rows). The remaining
+// settings live on the gear's anchored menu (app.ts openSettingsMenu), which
 // borrows renderStatus() below for its status footer.
 import { VERSION } from "./base"
 import * as data from "./data"
-import { countBadge, formatDate, isStale, srcColorIndex, timeAgoProse, URL_DENY } from "./fmt"
+import { countBadge, formatBytes, formatDate, isStale, srcColorIndex, timeAgoProse, URL_DENY } from "./fmt"
 import * as nav from "./nav"
 import * as refresh from "./refresh"
 import * as sync from "./sync"
@@ -21,10 +23,17 @@ export type PickerHooks = {
    onSelect: (token: string) => void
    // Escape / ✕ → close the overlay back to the list.
    onClose: () => void
+   // Flip the unread-only ("Show read") view mode. app.ts owns the nav flip + the
+   // surface reconciliation (list rebuild / reader re-probe); the picker only
+   // re-renders its own rows afterward (their visibility tracks the mode).
+   onToggleShowRead: () => void
 }
 
 let root: HTMLElement
 let filterBox: HTMLElement
+// The header's "Show read" toggle button — aria-pressed tracks the mode (pressed
+// = read articles shown = unread-only OFF), synced on every render().
+let showReadBtn: HTMLElement
 let hooks: PickerHooks
 // Focus restore target across open/close — the readout button that opened the
 // overlay (mirrors the modals' restore discipline).
@@ -43,6 +52,14 @@ export function setup(el: HTMLElement, h: PickerHooks): void {
    hooks = h
    filterBox = el.querySelector(".srr-picker-filter") as HTMLElement
    ;(el.querySelector(".srr-picker-close") as HTMLElement).addEventListener("click", () => hooks.onClose())
+   // The "Show read" toggle: flip the mode via app.ts (which reconciles the
+   // surface underneath), then re-render our own rows for the new mode. The
+   // overlay stays open — you keep browsing feeds after flipping.
+   showReadBtn = el.querySelector(".srr-picker-showread") as HTMLElement
+   showReadBtn.addEventListener("click", () => {
+      hooks.onToggleShowRead()
+      render()
+   })
    // Delegated filter pick: every row carries data-value (feed id / tag / "" /
    // ~saved). The tag collapse toggle stops its own click, but guard anyway.
    filterBox.addEventListener("click", (e) => {
@@ -88,6 +105,9 @@ export function close(): void {
 }
 
 export function render(): void {
+   // Pressed = read articles are shown (unread-only OFF) — the button reads as
+   // "this option is active", the standard toggle-button semantic.
+   showReadBtn.setAttribute("aria-pressed", String(!nav.isUnreadOnly()))
    renderFilterList()
 }
 
@@ -410,7 +430,9 @@ export function renderStatus(box: HTMLElement): void {
 // A read-only detail card opened from a row's ⓘ button. Lays the feed/tag's
 // stored fields out in grouped definition grids; the live unread counts (idx-
 // derived, async) fill in after the card shows, guarded by infoFillToken so a
-// close / re-open orphans a stale pass.
+// close / re-open orphans a stale pass. Reader-facing on purpose: internal
+// bookkeeping (feed ids, HTTP validators, dedup/pack state, processing
+// recipes) stays off the card — the admin GUI is where operators look.
 
 function infoSection(title: string): { sec: HTMLElement; dl: HTMLDListElement } {
    const sec = document.createElement("section")
@@ -463,12 +485,21 @@ function buildFeedInfo(ch: IFeed): DocumentFragment {
    a.rel = "noreferrer"
    addRow(src.dl, "URL", a)
    addRow(src.dl, "Tag", ch.tag || "Untagged")
-   addRow(src.dl, "Feed ID", String(ch.id))
    frag.appendChild(src.sec)
 
    const content = infoSection("Content")
    addRow(content.dl, "Articles", String(ch.total_art - (ch.xp ?? 0)))
    addRow(content.dl, "Unread", "…", "srr-info-unread")
+   // The feed's store footprint, in plain units: cb = the article text it added
+   // to the data packs (cumulative — expiration is logical, the bytes stay),
+   // ab = its live self-hosted assets. Assets only show when there are any.
+   addRow(content.dl, "Stored content", formatBytes(ch.cb ?? 0))
+   const media = ch.ab ?? 0
+   if (media > 0) addRow(content.dl, "Stored assets", formatBytes(media))
+   // The retention policy (exp = ExpireDays), in plain words: how long this
+   // feed's articles are kept before they expire; 0/absent = kept forever.
+   const days = ch.exp ?? 0
+   addRow(content.dl, "Retention", days > 0 ? (days === 1 ? "1 day" : `${days} days`) : "Forever")
    frag.appendChild(content.sec)
 
    const health = infoSection("Health")
@@ -484,17 +515,6 @@ function buildFeedInfo(ch: IFeed): DocumentFragment {
       health.sec.appendChild(box)
    }
    frag.appendChild(health.sec)
-
-   const proc = infoSection("Processing")
-   addRow(proc.dl, "Recipe", ch.recipe || "default")
-   frag.appendChild(proc.sec)
-
-   const tech = infoSection("Technical")
-   addRow(tech.dl, "ETag", ch.etag || "—")
-   addRow(tech.dl, "Last-Modified", ch.last_modified || "—")
-   addRow(tech.dl, "Dedup cache", `${ch.bg?.length ?? 0} entries`)
-   addRow(tech.dl, "Start index", String(ch.add_idx))
-   frag.appendChild(tech.sec)
 
    return frag
 }
@@ -520,8 +540,9 @@ async function fillFeedUnread(ch: IFeed): Promise<void> {
 }
 
 // The [ALL] row's card: the store-wide rollup none of the per-feed cards can
-// show — inventory, a health census of every feed's grade, and pack-level
-// vitals. Freshness stays out (the settings menu's status footer owns it).
+// show — inventory and a health census of every feed's grade. Freshness and
+// the search-index state stay out (the settings menu's status footer owns
+// both), and pack internals (generation, latest-pack names) never show.
 function buildStoreInfo(): DocumentFragment {
    const frag = document.createDocumentFragment()
    const feeds = Object.values(data.db.feeds ?? {})
@@ -533,6 +554,10 @@ function buildStoreInfo(): DocumentFragment {
    addRow(content.dl, "Articles", String(feeds.reduce((sum, ch) => sum + ch.total_art - (ch.xp ?? 0), 0)))
    addRow(content.dl, "Unread", "…", "srr-info-unread")
    addRow(content.dl, "Saved", String(nav.savedCount()))
+   // Store footprint summed over every feed — same rows as the feed card.
+   addRow(content.dl, "Stored content", formatBytes(feeds.reduce((sum, ch) => sum + (ch.cb ?? 0), 0)))
+   const media = feeds.reduce((sum, ch) => sum + (ch.ab ?? 0), 0)
+   if (media > 0) addRow(content.dl, "Stored assets", formatBytes(media))
    frag.appendChild(content.sec)
 
    // The health census: feedGrade counts in the chip vocabulary (Healthy /
@@ -546,12 +571,6 @@ function buildStoreInfo(): DocumentFragment {
    if (warn > 0) addRow(health.dl, "Stale", String(warn))
    if (crit > 0) addRow(health.dl, "Error", String(crit))
    frag.appendChild(health.sec)
-
-   const tech = infoSection("Technical")
-   addRow(tech.dl, "Generation", String(data.db.gen ?? 0))
-   addRow(tech.dl, "Latest packs", `L${data.db.seq ?? 0}`)
-   addRow(tech.dl, "Search index", data.metaReady() ? "Ready" : "Rebuilding")
-   frag.appendChild(tech.sec)
 
    return frag
 }

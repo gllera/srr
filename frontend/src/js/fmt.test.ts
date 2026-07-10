@@ -6,6 +6,7 @@ import {
    timeAgo,
    timeAgoProse,
    isStale,
+   formatBytes,
    formatDate,
    imgProxy,
    getImgProxy,
@@ -622,6 +623,25 @@ describe("formatDate", () => {
       const pad = (n: number) => n.toString().padStart(2, "0")
       const expected = `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`
       expect(formatDate(0)).toBe(expected)
+   })
+})
+
+describe("formatBytes", () => {
+   it("shows raw bytes below 1000", () => {
+      expect(formatBytes(0)).toBe("0 B")
+      expect(formatBytes(999)).toBe("999 B")
+   })
+
+   it("uses decimal units with one decimal, dropped when zero", () => {
+      expect(formatBytes(1000)).toBe("1 KB")
+      expect(formatBytes(1234)).toBe("1.2 KB")
+      expect(formatBytes(1_000_000)).toBe("1 MB")
+      expect(formatBytes(12_345_678)).toBe("12.3 MB")
+      expect(formatBytes(2_500_000_000)).toBe("2.5 GB")
+   })
+
+   it("clamps at TB for absurd values", () => {
+      expect(formatBytes(25_000_000_000_000)).toBe("25 TB")
    })
 })
 

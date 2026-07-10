@@ -990,7 +990,7 @@ describe("browser: real SPA over real packs", () => {
    // above it), flipping the mode must rerender a window near the initial batch
    // (BATCH=30), never the whole 100-article archive.
    // Runs LAST: replaces the shared store with a single 100-article feed.
-   it("keeps the rerender window bounded when unread-only is toggled from the settings menu", async () => {
+   it("keeps the rerender window bounded when unread-only is toggled from the filter picker", async () => {
       for (const f of readdirSync(packsDir)) rmSync(join(packsDir, f), { recursive: true, force: true })
       feeds.set("/bulk.xml", rssFeed("Bulk", nItems(100, "bulk")))
       await srr(packsDir, "feed", "add", "-t", "Bulk", "-u", `${feeds.url}/bulk.xml`)
@@ -1005,15 +1005,14 @@ describe("browser: real SPA over real packs", () => {
          // (render's nav.select sets pos without recordSeen), so it stays the anchor
          // through the unread toggle.
          await waitCurrent(page, "bulk title 0")
-         // Open the gear's settings menu — the list stays visible beneath it.
-         await page.click(".srr-settings")
-         await page.waitForSelector(".srr-ctxmenu", { visible: true })
+         // Open the filter picker (tap the lane readout) — "Show read" lives in its
+         // header now; the list stays in the DOM beneath the overlay.
+         await page.click(".srr-feed")
+         await page.waitForSelector(".srr-picker-showread", { visible: true })
          expect(await page.$eval(".srr-list", (e) => (e as HTMLElement).hidden)).toBe(false)
-         // Flip "Show read" — the menu closes and the list rerenders in place.
-         await page.$$eval(".srr-ctxmenu-item", (items) => {
-            const row = items.find((b) => b.textContent === "Show read") as HTMLButtonElement
-            row.click()
-         })
+         // Flip "Show read" — the surface beneath rerenders in place (the overlay
+         // stays open, so the list rows are still in the DOM to count).
+         await page.click(".srr-picker-showread")
          // Give a runaway pump ample time to page the whole archive if it regressed.
          await new Promise((r) => setTimeout(r, 1500))
          const rows = await page.$$eval(".srr-list a.srr-row", (els) => els.length)

@@ -132,6 +132,9 @@
          <section class="srr-picker" aria-label="Feeds" hidden>
             <header class="srr-picker-head">
                <h2 class="srr-picker-title">Feeds</h2>
+               <!-- The unread-only view toggle (was in the settings menu). aria-pressed
+                    tracks the mode — pressed = read articles shown; picker.ts syncs it. -->
+               <button class="srr-picker-showread" aria-pressed="false" title="Show read articles">Show read</button>
                <button class="srr-picker-close" aria-label="Close" title="Close">&times;</button>
             </header>
             <div class="srr-picker-filter" aria-label="Filter"></div>
@@ -139,11 +142,12 @@
          <!-- One row of slots (styles.css: grid). DOM order interleaves the
               list + reader controls so each surface's visible controls read
               left→right correctly — list: open-article · now-viewing readout ·
-              settings gear; reader: back · prev · next · save. The gear is
-              LIST-ONLY (the reader keeps its chrome down to reading controls);
-              it opens the anchored settings menu. The now-viewing readout is a
-              button: tapping it opens the filter picker overlay, and it doubles
-              as a frontier-menu anchor (right-click / long-press). The list's
+              settings gear; reader: back · prev · next · save · filter. The
+              gear is LIST-ONLY; it opens the anchored settings menu. The
+              now-viewing readout is a button: tapping it opens the filter
+              picker overlay — the reader's filter button (right edge) opens
+              the same overlay over the article; the reader's next pill doubles
+              as the frontier-menu anchor (right-click / long-press). The list's
               open-article button (left edge) jumps to the article you were
               reading (the tap counterpart of the reader's back-to-list button).
               The other surface's controls are display:none per the view rules
@@ -162,11 +166,6 @@
             </button>
             <button class="srr-feed" aria-haspopup="dialog">
                <span class="srr-feed-name"></span>
-               <!-- The filter's unread readout: how much of this lane's backlog is
-                    still unread — the list twin of the reader's pending pill — or
-                    the caught-up checkmark at zero. app.ts fills it async
-                    (refreshFeedCount); hidden in saved/search (peek modes). -->
-               <span class="srr-feed-count" hidden></span>
             </button>
             <button
                class="srr-prev"
@@ -197,6 +196,16 @@
             >
                <svg class="srr-save-icon" viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M12 3.4l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z" />
+               </svg>
+            </button>
+            <button
+               class="srr-filter"
+               aria-haspopup="dialog"
+               aria-label="Filter by feed or tag"
+               title="Filter by feed or tag"
+            >
+               <svg class="srr-filter-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M3.5 5h17l-6.6 7.6v5.1l-3.8 2v-7.1z" />
                </svg>
             </button>
             <button class="srr-settings" aria-haspopup="menu" aria-label="Open settings" title="Settings">
