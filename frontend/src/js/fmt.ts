@@ -113,7 +113,14 @@ function resolveMediaAttr(node: Element, attr: string, proxyPrefix: string, prox
 
 // <template> parses HTML without executing scripts, unlike a div
 const tmpl = document.createElement("template")
-export function sanitizeHtml(html: string): string {
+
+// Fragment form of the sanitizer: the render path adopts the sanitized nodes
+// directly (replaceChildren moves them out of the template), skipping the
+// serialize→re-parse round-trip the string form forces — on a 300+-image
+// article that re-parse costs as much as the whole sanitize pass, on every
+// prev/next step. Moving the nodes also empties the template, so it doesn't
+// retain the previous article's tree between renders.
+export function sanitizeFragment(html: string): DocumentFragment {
    tmpl.innerHTML = html
    // Drop dangerous subtrees first so the attribute pass below never visits
    // their (now-detached) descendants — saves work on e.g. <svg><script>...
@@ -176,6 +183,14 @@ export function sanitizeHtml(html: string): string {
          resolveMediaAttr(node, "src", proxyPrefix, false)
       }
    }
+   return tmpl.content
+}
+
+// String form of sanitizeFragment (serializes the sanitized tree back out of
+// the template). The tests' round-trip surface; production rendering adopts
+// the fragment instead.
+export function sanitizeHtml(html: string): string {
+   sanitizeFragment(html)
    return tmpl.innerHTML
 }
 

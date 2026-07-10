@@ -172,7 +172,11 @@ vi.mock("./picker", () => picker)
 const pickerHooks = () => (picker.setup as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[1]
 
 vi.mock("./fmt", () => ({
-   sanitizeHtml: (s: string) => s,
+   sanitizeFragment: (s: string) => {
+      const t = document.createElement("template")
+      t.innerHTML = s
+      return t.content
+   },
    formatDate: () => "01/01/2020 00:00",
    srcColorIndex: () => 0,
    timeAgo: () => "1h",
