@@ -341,8 +341,8 @@ export const filter = {
    // reachable member of the navigable sequence ({anchor} ∪ unseen) until the
    // filter is re-applied (set/clear reset it; a reload re-establishes it from
    // the new landing). -1 = none. Set by resolve(); navigation-only — it does
-   // NOT make matches() true, so the unread counting (feedUnread/onCurrent) and
-   // badges are untouched.
+   // NOT make matches() true, so the unread counting (feedUnread) and badges are
+   // untouched.
    anchor: -1,
    // "★ Saved" mode: navigation walks the explicit srr-saved set, feed-agnostic
    // (feeds stays empty). Set by set() when the only token is SAVED_TOKEN.
@@ -503,30 +503,21 @@ function unseenActive(): boolean {
 // fetches; the never-seen branch is sync countAll — no fetch at all). Shared by
 // unreadCount/unreadCounts.
 //
-// `onCurrent`: in unseen-only mode, recordSeen marks the article you're on seen
-// the instant you arrive, so a live-seen-derived badge would tick this feed down
-// by one before you actually move off it. Count that article back for the feed
-// you're sitting on so its row badge (and its tag-header sum) stays put while you
-// read it, then drops as you step away. Scoped to unseen-only mode, the current
-// article's feed, and only while that article still matches the (raised) filter
-// — i.e. it is one of the unread you're navigating, not the seen resume position
-// you open on. And only while the catch-up walk still has a step ahead: on the
-// filter's LAST match there is no forward step left to ever drop the +1, so it
-// would stick — a fully-caught-up feed (and its tag header) read a permanent 1
-// in the picker, across reloads too (pos, seen and the unread toggle all
-// persist). Nothing ahead means caught up: the badge reads 0, agreeing with the
-// pill's explicit 0 (pendingRight is that same readout).
+// Accounted on ENTER, not on leave: the article you open is marked seen on
+// ARRIVAL (recordSeen), so it drops out of this count the instant you read it —
+// there is no "current article" pad holding it as still-unread until you step
+// away. The badge is the plain true unread, so it agrees with the reader's
+// pendingRight pill for the feed you're on (both then mean "strictly after pos")
+// and with the list's per-row read/unread dots (isRowUnread), which already
+// treat the current article as read. Switching filters lands on an already-seen
+// resume article and records nothing (switchFilter resolves record:false), so a
+// switch never moves this count — only reading forward does.
 async function feedUnread(ch: IFeed, seenMap: Record<string, number>): Promise<number> {
    const map = new Map([[ch.id, ch.add_idx ?? 0]])
-   let onCurrent =
-      unseenActive() && ch.id === currentFeed && filter.matches(ch.id, pos) && (seenMap["feed:" + ch.id] ?? -1) === pos
-         ? 1
-         : 0
-   if (onCurrent && (await pendingRight()) === 0) onCurrent = 0
    const seenIdx = seenMap["feed:" + ch.id]
-   if (seenIdx === undefined) return data.countAll(map) + onCurrent
+   if (seenIdx === undefined) return data.countAll(map)
    const upTo = Math.min(seenIdx + 1, data.db.total_art)
-   return Math.max(0, data.countAll(map) - (await data.countLeft(upTo, map))) + onCurrent
+   return Math.max(0, data.countAll(map) - (await data.countLeft(upTo, map)))
 }
 
 // The reader's pending readout: what the next pill displays — matching
@@ -575,7 +566,15 @@ async function showFeed(article: IArticle): Promise<IShowFeed> {
    }
 }
 
-async function resolve(target: number, replace = false): Promise<IShowFeed> {
+// `record` gates the seen-frontier advance (recordSeen). Reading navigation
+// (step/left/right, opening a list row, a restored #pos) records = true — the
+// default. A FILTER SWITCH passes false: clicking or cycling (W/S / ↑↓ /
+// two-finger) onto a lane is a resume, not a read, so it must never mark its
+// landing article seen — merely visiting a tag/feed can't decrement its unread
+// count. The switch still resumes at the last-seen position (a no-op raise for a
+// read feed anyway); for a never-seen feed/tag it lands on the oldest article
+// and leaves it unread until the reader actually steps forward.
+async function resolve(target: number, replace = false, record = true): Promise<IShowFeed> {
    // Load first; commit pos only on success so a Retry replays the same chron.
    const article = await data.loadArticle(target)
    pos = target
@@ -597,7 +596,7 @@ async function resolve(target: number, replace = false): Promise<IShowFeed> {
    if (currentPrefetch?.target === target) currentPrefetch = null
    else abortPrefetch()
    updateHash(replace)
-   recordSeen(article)
+   if (record) recordSeen(article)
    return showFeed(article)
 }
 
@@ -874,7 +873,10 @@ export function pruneSeen() {
    } catch {}
 }
 
-function resolveNoMatch(replace = false): IShowFeed {
+// The reader's no-article state. `notStarted` picks which unread-only message the
+// empty state shows: true = a never-opened feed/tag (has unread, no resume point →
+// "start from the list"); false = caught-up (nothing unread) or a plain no-match.
+function resolveNoMatch(replace = false, notStarted = false): IShowFeed {
    pos = -1
    currentFeed = -1
    updateHash(replace)
@@ -884,6 +886,7 @@ function resolveNoMatch(replace = false): IShowFeed {
       has_right: false,
       right_count: 0,
       placeholder: true,
+      notStarted,
    }
 }
 
@@ -910,12 +913,21 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
    // Validate the explicit #pos against the feed's TRUE add_idx, not unseen-only's
    // raised (seen+1) bounds. A restored/shared hash position is an entry anchor, like
    // switchFilter's resume position — isValidSeen is exactly that predicate (true add_idx
-   // in unseen-only mode, filter.matches otherwise). Using filter.matches() here let
-   // unseen-only reject an already-seen #pos and bounce it to last(); recordSeen then
-   // marked that seen, so each refresh drifted to a lower unseen article. From the
-   // honored position, Right still walks the unseen.
-   if (!(await isValidSeen(target))) return last(true)
-   return resolve(target, true)
+   // in unseen-only mode, filter.matches otherwise).
+   //
+   // Both landings resolve with record = false: restoring a position (a reload,
+   // back/forward, or a shared deep-link — this is the sole hash→reader path) is
+   // not reading, so it must not advance the seen frontier. Recording here marked
+   // the restored article AND (under [ALL]/a tag) raised every filter member's
+   // cross-feed frontier to it, so a reload silently consumed other feeds' unread
+   // — the same "a switch mustn't consume" rule switchFilter follows. Reading
+   // forward (Right) records normally from the restored position.
+   // Unread-only + a fully-read feed/tag (or [ALL] fully caught up): a reload
+   // onto it shows the "All caught up" placeholder, the same as switching to it —
+   // no unread to restore. (A feed/tag with unread proceeds to honor the #pos.)
+   if (await noUnreadLeft()) return resolveNoMatch(true)
+   if (!(await isValidSeen(target))) return last(true, false)
+   return resolve(target, true, false)
 }
 
 // One directional navigation step. The post-navigation neighbor lookup is
@@ -949,17 +961,17 @@ export function right(): Promise<IShowFeed> {
    return step("right")
 }
 
-export async function first(): Promise<IShowFeed> {
+export async function first(record = true): Promise<IShowFeed> {
    // No article from a feed with add_idx N exists below chronIdx N, so the
    // earliest matching article is at or after the smallest add_idx in filter.
    const start = filter.feeds.size > 0 ? Math.min(...filter.feeds.values()) : 0
-   return goTo(start)
+   return goTo(start, record)
 }
 
-export async function last(replace = false): Promise<IShowFeed> {
+export async function last(replace = false, record = true): Promise<IShowFeed> {
    const found = await feedLeft(data.db.total_art - 1)
    if (found === -1) return resolveNoMatch(replace)
-   return resolve(found, replace)
+   return resolve(found, replace, record)
 }
 
 async function isValidSeen(idx: number): Promise<boolean> {
@@ -985,6 +997,26 @@ function isKnownToken(token: string): boolean {
    return Object.values(data.db.feeds).some((ch) => ch.tag === token)
 }
 
+// True when unread-only is on and the active feed/tag filter has no unread
+// article left — every article sits below its raised (seen+1) bound, so nothing
+// matches the walk. switchFilter/fromHash surface the directed "All caught up"
+// placeholder (resolveNoMatch → the reader's empty state) in this case instead
+// of resuming onto an already-read article: in unread-only mode a caught-up lane
+// has nothing to show. Show-read mode (unseenActive false) returns false — you
+// browse the read articles there, so the resume onto one is correct.
+async function noUnreadLeft(): Promise<boolean> {
+   if (!unseenActive() || filter.feeds.size === 0) return false
+   const start = Math.min(...filter.feeds.values())
+   try {
+      return (await feedRight(start)) === -1
+   } catch {
+      // A cold finalized-pack fetch can blip. Don't strand the open on the
+      // placeholder over a transient probe failure — assume there's unread and
+      // resume normally (showFeed degrades the neighbor buttons on its own).
+      return false
+   }
+}
+
 // Opening a tag/feed resumes at its CURRENT position — the saved seen
 // position (a feed's own; a tag's oldest member, see getSeen) — in every
 // mode, including unseen-only: you land on the article you left off on, not the
@@ -992,18 +1024,24 @@ function isKnownToken(token: string): boolean {
 // the true add_idx, so unseen-only's raised bounds don't bounce you forward;
 // Right then walks the unseen. Only a never-seen tag/feed (no resume
 // position) or a stale/out-of-range one starts at first().
+//
+// Every landing resolves with record = false: a filter switch (this is the sole
+// entry for a picker click AND the W/S / ↑↓ / two-finger cycle, via cycleFilter)
+// is a resume, not a read, so it never advances the seen frontier — merely
+// visiting a lane cannot decrement its unread count. Reading forward (Right)
+// records normally from there.
 export async function switchFilter(token: string): Promise<IShowFeed> {
    if (token === "") {
       filter.clear()
       // [ALL] opens at the oldest unseen article — the start of the global
-      // unread backlog, the same anchor the list uses — NOT the newest: under
-      // [ALL] filter.feeds holds every feed, so landing on the newest would let
-      // recordSeen raise every feed's frontier to it and mark the whole store
-      // read. Landing on the oldest unseen marks nothing new (everything older
-      // is already seen). Fully caught up (or an empty store) falls back to the
-      // newest available, where that raise is a no-op for the same reason.
+      // unread backlog, the same anchor the list uses — NOT the newest. It lands
+      // there but records nothing (record = false): opening [ALL] leaves the whole
+      // backlog, the shown article included, unread until you step into it. Fully
+      // caught up falls back to the newest available — or, in unread-only mode, the
+      // "All caught up" placeholder (nothing unread anywhere to show).
       const idx = await oldestUnread()
-      return idx === -1 ? last() : resolve(idx)
+      if (idx !== -1) return resolve(idx, false, false)
+      return unseenActive() ? resolveNoMatch() : last(false, false)
    }
    filter.set([token])
    if (!filter.active) {
@@ -1013,24 +1051,34 @@ export async function switchFilter(token: string): Promise<IShowFeed> {
       // empty-state placeholder rather than teleporting into [ALL]'s newest article.
       // An unrecognised token (not reachable from the picker today) still falls
       // back to [ALL].
-      if (!isKnownToken(token)) return last()
+      if (!isKnownToken(token)) return last(false, false)
       filter.tokens = [token]
       filter.feeds = new Map<number, number>()
       return resolveNoMatch()
    }
    // Saved/search have no per-feed resume position; open at the newest member
    // (top of the list), the same place selecting them on the list shows.
-   if (filter.saved || filter.search) return last()
+   if (filter.saved || filter.search) return last(false, false)
+   // Unread-only + fully-read feed/tag: nothing unread to resume onto — show the
+   // "All caught up" placeholder rather than opening an already-read article.
+   if (await noUnreadLeft()) return resolveNoMatch()
    const seenIdx = getSeen(token)
-   if (seenIdx !== undefined && (await isValidSeen(seenIdx))) return resolve(seenIdx)
-   return first()
+   if (seenIdx !== undefined && (await isValidSeen(seenIdx))) return resolve(seenIdx, false, false)
+   // No already-read article to resume onto, but there IS unread (noUnreadLeft was
+   // false). In unread-only mode the reader is a resume surface: show the distinct
+   // "not started" placeholder and let reading begin from the list, rather than
+   // dropping onto the oldest unread — which, being unread-and-unmarked (a switch
+   // records nothing), would make the reader's pendingRight pill read one below the
+   // picker badge (badge counts the article you're sitting on, the pill doesn't).
+   // Show-read mode opens the oldest article as before (you browse there).
+   return unseenActive() ? resolveNoMatch(false, true) : first(false)
 }
 
 // Jump to chronIdx, snapping forward to next match if filter is active.
-export async function goTo(idx: number): Promise<IShowFeed> {
-   if (idx < 0 || idx >= data.db.total_art) return last()
+export async function goTo(idx: number, record = true): Promise<IShowFeed> {
+   if (idx < 0 || idx >= data.db.total_art) return last(false, record)
    const found = await feedRight(idx)
-   return found === -1 ? last() : resolve(found)
+   return found === -1 ? last(false, record) : resolve(found, false, record)
 }
 
 // Move the navigation cursor to an exact, already-known-matching chronIdx — the
@@ -1166,19 +1214,45 @@ export function cycleOriginKey(): string {
    return current
 }
 
-// The token getFilterEntries() cycling lands on when stepping `dir` from the
-// current selection (cycleOriginKey). Shared by the reader (cycleFilter) and the
-// list (app.onCycle), so both surfaces step relative to the same origin and the
-// indexOf+modulo lives in exactly one place.
-export function cycleToken(dir: number): string {
+// The lanes W/S / ↑↓ / two-finger cycling may land on, out of getFilterEntries().
+// ★ Saved is ALWAYS dropped — it's a deliberate pick from the picker, not a step
+// in the unread sweep. [ALL] always stays. With read shown, every remaining lane
+// qualifies; in unread-only mode a tag/feed lane survives only when it holds ≥1
+// unread — mirroring the picker's fillUnread hiding, so the cycle visits exactly
+// the lanes the picker lists (minus ★ Saved). Async because unread is idx-derived
+// (unreadCounts).
+async function cyclableLanes(entries: string[]): Promise<Set<string>> {
+   const keep = new Set(entries)
+   keep.delete(SAVED_TOKEN)
+   if (!unreadOnly) return keep
+   const { tagged, untagged } = data.groupFeedsByTag()
+   const counts = await unreadCounts([...untagged, ...[...tagged.values()].flat()])
+   for (const ch of untagged) if ((counts.get(ch.id) ?? 0) === 0) keep.delete(String(ch.id))
+   for (const [tag, group] of tagged) if (tagUnreadFromCounts(group, counts) === 0) keep.delete(tag)
+   return keep
+}
+
+// The token getFilterEntries() cycling lands on stepping `dir` from the current
+// selection (cycleOriginKey): the nearest cyclableLanes entry in the `dir`
+// direction, wrapping. Returns the origin (a no-op) when nothing else qualifies —
+// [ALL] always survives cyclableLanes, so in practice the walk always lands.
+// Shared by the reader (cycleFilter) and the list (app.onCycle), so both surfaces
+// step relative to the same origin and skip alike.
+export async function cycleToken(dir: number): Promise<string> {
    const entries = getFilterEntries()
+   const n = entries.length
    let idx = entries.indexOf(cycleOriginKey())
    if (idx === -1) idx = 0
-   return entries[(idx + dir + entries.length) % entries.length]
+   const keep = await cyclableLanes(entries)
+   for (let step = 1; step <= n; step++) {
+      const cand = entries[(((idx + dir * step) % n) + n) % n]
+      if (keep.has(cand)) return cand
+   }
+   return entries[idx]
 }
 
 export async function cycleFilter(dir: number): Promise<IShowFeed> {
-   return switchFilter(cycleToken(dir))
+   return switchFilter(await cycleToken(dir))
 }
 
 function updateHash(replace = false) {

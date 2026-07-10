@@ -250,7 +250,7 @@ function pinHeights(rows: HTMLElement[]): void {
 // it into the feed, and the reader (app.ts) shows it in place of the bare
 // "(no matching articles)" placeholder — keyed off the same nav state, so the two
 // can't drift.
-export function emptyStateEl(): HTMLElement {
+export function emptyStateEl(opts: { notStarted?: boolean } = {}): HTMLElement {
    const wrap = el("div", "srr-list-empty")
    const eyebrow = (text: string): void => {
       const e = el("span", "srr-empty-eyebrow")
@@ -264,7 +264,17 @@ export function emptyStateEl(): HTMLElement {
       return s
    }
 
-   if (nav.isSearchFilter()) {
+   if (opts.notStarted) {
+      // The reader's "not started" placeholder: a feed/tag you've never opened
+      // (it HAS unread, but no already-read article to resume onto — the reader is
+      // a resume surface). Deliberately NOT the "All caught up" reward, which would
+      // be false here; a cold directive that points to the list, where you begin.
+      // Reader-only — the list surface shows the unread rows and never this state.
+      eyebrow("Not started")
+      const key = nav.getCurrentFilterKey()
+      if (key) msg.append("Open ", em(nav.filterLabel(key)), " from the list to start reading.")
+      else msg.textContent = "Open a feed from the list to start reading."
+   } else if (nav.isSearchFilter()) {
       const q = nav.searchQuery()
       if (q) msg.append("No titles match ", em(`“${q}”`), ". Try fewer or different words.")
       else {

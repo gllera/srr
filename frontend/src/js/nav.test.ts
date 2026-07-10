@@ -567,15 +567,16 @@ describe("right_count", () => {
       const opened = await nav.switchFilter("news")
       expect(opened.right_count).toBe(2)
 
-      // Stepping onto an unread article: the settings badge keeps counting it
-      // (feedUnread's onCurrent) but the pill does not — one ahead, one on screen.
+      // Stepping onto an unread article marks it read on ENTER, so its badge
+      // drops the instant you open it — no pad holds it as still-unread. chron 3
+      // (ch2) becomes read, leaving only ch1's {4}: the tag reads 1 (matching the
+      // pill's "1 ahead" plus the now-read one on screen counting for nothing).
       const onFirst = await nav.right() // chron 3
       expect(onFirst.right_count).toBe(1)
-      expect(nav.tagUnreadFromCounts(group, await nav.unreadCounts(group))).toBe(2) // pill + the one on screen
+      expect(nav.tagUnreadFromCounts(group, await nav.unreadCounts(group))).toBe(1)
 
-      // The LAST unread: nothing ahead, so the pill reads an explicit 0 — and
-      // with no forward step left to ever drop the on-screen +1, the settings
-      // badge agrees: caught up reads 0, not a stuck 1.
+      // The LAST unread: reading it marks it too, nothing is unread anywhere, so
+      // both the pill and the badge read 0.
       const onLast = await nav.right() // chron 4
       expect(onLast.has_right).toBe(false)
       expect(onLast.right_count).toBe(0)
@@ -764,15 +765,17 @@ describe("switchFilter", () => {
       expect(result.article.f).toBe(2)
    })
 
-   it("selecting [ALL] does not mark the unread backlog as seen", async () => {
-      // Landing on the newest would let recordSeen raise every feed's frontier
-      // to it and wipe all unread counts. Landing on the oldest unseen (chron 2)
-      // marks only that article: chron 3 must stay unread.
+   it("selecting [ALL] marks nothing seen — a switch is a resume, not a read", async () => {
+      // Switching to [ALL] lands on the oldest unseen (chron 2) but must NOT
+      // advance any frontier: merely opening a filter cannot consume an unread.
+      // The stored feed:1 frontier is untouched and feed:2 stays absent, so both
+      // chron 2 and 3 remain unread until the reader steps forward into them.
       setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 2 }, { feedId: 2 }])
       localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 1 }))
       await nav.switchFilter("")
+      expect(data.loadArticle).toHaveBeenLastCalledWith(2) // still resumes at the oldest unseen
       const seen = JSON.parse(localStorage.getItem("srr-seen")!)
-      expect(seen["feed:2"]).toBe(2) // exact resume on the shown article, not 3
+      expect(seen).toEqual({ "feed:1": 1 }) // unchanged — no new frontier written
    })
 
    it("falls back to the newest article for [ALL] when everything is seen", async () => {
@@ -804,7 +807,7 @@ describe("switchFilter", () => {
 
    it("resumes at last seen position when sub was previously viewed", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }, { feedId: 2 }])
-      await nav.fromHash("2") // chronIdx 2 (sub 1) → seen sub:1=2
+      await nav.goTo(2) // read chronIdx 2 (sub 1) → seen sub:1=2
       await nav.switchFilter("2") // sub 2 lands on chronIdx 1 (does not touch sub:1)
       await nav.switchFilter("1")
       expect(nav.filter.active).toBe(true)
@@ -868,7 +871,7 @@ describe("switchFilter", () => {
    it("records only the feed seen position; the tag derives from it", async () => {
       data.db.feeds[5] = makeFeed({ id: 5, tag: "news" })
       setupIndex([{ feedId: 5 }, { feedId: 5 }])
-      await nav.fromHash("1") // view chronIdx 1
+      await nav.goTo(1) // read chronIdx 1
       const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
       expect(seen["feed:5"]).toBe(1)
       // No tag key is ever written — the tag's position is read back from its
@@ -878,10 +881,73 @@ describe("switchFilter", () => {
 
    it("never records a tag key", async () => {
       setupIndex([{ feedId: 1 }])
-      await nav.fromHash("0")
+      await nav.goTo(0)
       const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
       expect(seen["feed:1"]).toBe(0)
       expect(Object.keys(seen).filter((k) => k.startsWith("tag:"))).toHaveLength(0)
+   })
+})
+
+// Switching a filter (a picker click, or the W/S / ↑↓ / two-finger cycle — all
+// route through switchFilter) resumes at the tag/feed's last-seen position but
+// must NEVER advance the seen frontier: opening a lane cannot decrement its
+// unread count. Only reading forward (step/right) records. For a previously-read
+// feed the resume landing is already seen (a no-op raise); for a never-seen
+// feed/tag it lands on the oldest article WITHOUT marking it, so the badge keeps
+// its full count until the reader actually steps into the backlog.
+describe("switchFilter never advances the seen frontier (a resume, not a read)", () => {
+   it("opening a never-seen feed marks nothing seen", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }])
+      const result = await nav.switchFilter("1")
+      expect(data.loadArticle).toHaveBeenLastCalledWith(0) // oldest match, still shown
+      expect(result.article.f).toBe(1)
+      const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
+      expect(seen).toEqual({}) // the landing article stays unread
+   })
+
+   it("opening a never-seen tag marks no member seen", async () => {
+      data.db.feeds[5] = makeFeed({ id: 5, tag: "news" })
+      data.db.feeds[6] = makeFeed({ id: 6, tag: "news" })
+      setupIndex([{ feedId: 5 }, { feedId: 6 }, { feedId: 5 }])
+      await nav.switchFilter("news")
+      expect(data.loadArticle).toHaveBeenLastCalledWith(0)
+      // Previously the chron-0 landing raised BOTH members' frontiers to 0 (ch5's
+      // oldest was consumed); now neither member is touched.
+      const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
+      expect(seen).toEqual({})
+   })
+
+   it("resuming a previously-read feed leaves its frontier untouched", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 1 }))
+      const result = await nav.switchFilter("1")
+      expect(data.loadArticle).toHaveBeenLastCalledWith(1) // resumes at the high-water
+      expect(result.article.f).toBe(1)
+      const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
+      expect(seen).toEqual({ "feed:1": 1 })
+   })
+
+   it("cycling to another lane (cycleFilter) also records nothing", async () => {
+      nav.setUnreadOnly(false) // show-read: cyclableLanes keeps every lane
+      setupIndex([{ feedId: 1 }, { feedId: 2 }])
+      data.groupFeedsByTag.mockReturnValue({
+         tagged: new Map(),
+         sortedTags: [],
+         untagged: [data.db.feeds[1], data.db.feeds[2]],
+      })
+      await nav.switchFilter("1") // origin lane, feed 1 (records nothing)
+      await nav.cycleFilter(1) // → feed 2 lane (never seen)
+      expect(nav.getCurrentFilterKey()).toBe("2")
+      const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
+      expect(seen).toEqual({})
+   })
+
+   it("but reading forward after the switch still records — recordSeen is not disabled", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }])
+      await nav.switchFilter("1") // lands chron 0, nothing recorded
+      expect(JSON.parse(localStorage.getItem("srr-seen") || "{}")).toEqual({})
+      await nav.right() // step to chron 1 — a real read
+      expect(JSON.parse(localStorage.getItem("srr-seen") || "{}")).toEqual({ "feed:1": 1 })
    })
 })
 
@@ -984,7 +1050,7 @@ describe("recordSeen marks previous articles seen across the list", () => {
    it("marks OLDER articles in every other filter feed seen, leaving newer unread", async () => {
       // Three interleaved feeds in [ALL]: chron 0=ch1 1=ch2 2=ch3 3=ch1 4=ch2 5=ch3.
       setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 3 }, { feedId: 1 }, { feedId: 2 }, { feedId: 3 }])
-      await nav.fromHash("3") // open chron 3 (ch1)
+      await nav.goTo(3) // read chron 3 (ch1)
       const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
       // Every feed is caught up to chron 3 — ch1 exactly (its own resume), ch2
       // and ch3 by the one-way high-water — so all articles at-or-below 3 are seen.
@@ -1012,8 +1078,8 @@ describe("recordSeen marks previous articles seen across the list", () => {
    it("never lowers ANY frontier when scrubbing back to an older article — the own feed included", async () => {
       // chron 0=ch1 1=ch2 2=ch1 3=ch2.
       setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }, { feedId: 2 }])
-      await nav.fromHash("3") // chron 3 (ch2): all caught up to 3
-      await nav.fromHash("0") // step back to chron 0 (ch1)
+      await nav.goTo(3) // read chron 3 (ch2): all caught up to 3
+      await nav.goTo(0) // scrub back to chron 0 (ch1)
       const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
       // Re-reading an older article is not un-reading the newer ones: the seen
       // frontier is raise-only everywhere — only the explicit markUnreadFrom
@@ -1024,7 +1090,7 @@ describe("recordSeen marks previous articles seen across the list", () => {
 
    it("stamps a per-key ordering timestamp (srr-seen-ts) beside every frontier raise", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 2 }])
-      await nav.fromHash("1")
+      await nav.goTo(1)
       const st = JSON.parse(localStorage.getItem("srr-seen-ts") || "{}")
       expect(st["feed:1"]).toBeGreaterThan(0)
       expect(st["feed:2"]).toBeGreaterThan(0)
@@ -1113,7 +1179,7 @@ describe("markAllRead / markUnreadFrom — the explicit frontier gestures", () =
 
    it("markUnreadFrom(0) stores −1 (never-seen equivalent) and keeps its ordering timestamp", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 1 }])
-      await nav.fromHash("1") // raises feed:1 to 1
+      await nav.goTo(1) // read chron 1 → raises feed:1 to 1
       expect(nav.markUnreadFrom(0)).toBe(true)
       const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
       // −1 reads as never-seen everywhere, but the KEY survives so its st
@@ -1222,6 +1288,84 @@ describe("cycleFilter", () => {
       // entries = ["", "1", "2"], current = "2" (idx 2), dir = 1 → wraps to idx 0 ("")
       await nav.cycleFilter(1)
       expect(nav.filter.active).toBe(false)
+   })
+})
+
+// cycleToken is the shared W/S / ↑↓ / two-finger step. In unread-only mode it
+// skips tag/feed lanes with nothing unread (mirroring the picker's fillUnread
+// hiding); ★ Saved is ALWAYS skipped (reached deliberately via the picker); and
+// [ALL] is always reachable. With read shown, only ★ Saved is skipped — every
+// other lane is a valid step. (feedUnread is the plain live unread now, so a
+// fully-read feed counts a clean 0 with no current-article pad.)
+describe("cycleToken — lane skipping", () => {
+   afterEach(() => nav.setUnreadOnly(false))
+
+   it("skips a fully-read feed lane in unread-only mode", async () => {
+      setupIndex([{ feedId: 3 }, { feedId: 4 }]) // chron0=f3 (read), chron1=f4 (unread)
+      data.groupFeedsByTag.mockReturnValue({
+         tagged: new Map(),
+         sortedTags: [],
+         untagged: [data.db.feeds[3], data.db.feeds[4]],
+      })
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:3": 0 }))
+      nav.setUnreadOnly(true)
+      nav.select(-1, -1)
+      // entries = ["", "3", "4"], origin "" → forward hops over the read "3" to "4"
+      expect(await nav.cycleToken(1)).toBe("4")
+   })
+
+   it("skips a fully-read tag group in unread-only mode", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 5 }]) // news = f1,f2 (read); f5 unread
+      data.groupFeedsByTag.mockReturnValue({
+         tagged: new Map([["news", [data.db.feeds[1], data.db.feeds[2]]]]),
+         sortedTags: ["news"],
+         untagged: [data.db.feeds[5]],
+      })
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 0, "feed:2": 1 }))
+      nav.setUnreadOnly(true)
+      nav.select(-1, -1)
+      // entries = ["", "news", "5"], origin "" → forward hops over the read "news" to "5"
+      expect(await nav.cycleToken(1)).toBe("5")
+   })
+
+   it("always skips ★ Saved, in both modes", async () => {
+      setupIndex([{ feedId: 3 }]) // f3 unread — so only ★ Saved's own skip is under test
+      data.groupFeedsByTag.mockReturnValue({ tagged: new Map(), sortedTags: [], untagged: [data.db.feeds[3]] })
+      localStorage.setItem("srr-saved", JSON.stringify([0]))
+      nav.select(-1, -1)
+      // entries = ["", "~saved", "3"], origin "" → forward hops over ★ Saved to the feed
+      nav.setUnreadOnly(true)
+      expect(await nav.cycleToken(1)).toBe("3")
+      nav.setUnreadOnly(false)
+      expect(await nav.cycleToken(1)).toBe("3")
+   })
+
+   it("does not skip read lanes when read is shown", async () => {
+      setupIndex([{ feedId: 3 }, { feedId: 4 }]) // f3 read
+      data.groupFeedsByTag.mockReturnValue({
+         tagged: new Map(),
+         sortedTags: [],
+         untagged: [data.db.feeds[3], data.db.feeds[4]],
+      })
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:3": 0 }))
+      nav.setUnreadOnly(false)
+      nav.select(-1, -1)
+      // read shown → the read "3" is a valid step, no skipping
+      expect(await nav.cycleToken(1)).toBe("3")
+   })
+
+   it("stays on [ALL] when no other lane has unread", async () => {
+      setupIndex([{ feedId: 3 }, { feedId: 4 }]) // both read
+      data.groupFeedsByTag.mockReturnValue({
+         tagged: new Map(),
+         sortedTags: [],
+         untagged: [data.db.feeds[3], data.db.feeds[4]],
+      })
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:3": 0, "feed:4": 1 }))
+      nav.setUnreadOnly(true)
+      nav.select(-1, -1)
+      // every feed read → the walk wraps back to [ALL] (a no-op)
+      expect(await nav.cycleToken(1)).toBe("")
    })
 })
 
@@ -1409,13 +1553,13 @@ describe("unread-only mode", () => {
       expect(data.loadArticle).toHaveBeenLastCalledWith(4) // jumps 3→4, not onto a seen one
    })
 
-   it("the dropdown tag badge counts the unread you're sitting on (stable through select then step)", async () => {
+   it("the dropdown tag badge drops as you read — the article is marked read on enter", async () => {
       await readSome() // ch1 seen→2, ch2 seen→1; unseen chron 3 (ch2), 4 (ch1) → 2
       nav.setUnreadOnly(true)
       const group = [data.db.feeds[1], data.db.feeds[2]]
 
-      // On select you resume at the seen position (chron 1): the current article
-      // is seen, so the badge reads the full 2 unseen.
+      // On select you resume at the seen position (chron 1, already read): nothing
+      // new is marked, so the badge reads the full 2 unseen.
       await nav.switchFilter("news")
       expect(data.loadArticle).toHaveBeenLastCalledWith(1)
       let counts = await nav.unreadCounts(group)
@@ -1423,16 +1567,15 @@ describe("unread-only mode", () => {
       expect(counts.get(1)).toBe(1) // ch1 unseen {4}
       expect(nav.tagUnreadFromCounts(group, counts)).toBe(2)
 
-      // Regression: step onto the first unseen (chron 3, ch2). recordSeen bumps
-      // ch2's LIVE seen to 3 the instant you arrive, which would drop ch2's badge
-      // to 0. feedUnread counts the unread you're sitting on back, so the badge
-      // stays at 2.
+      // Step onto the first unseen (chron 3, ch2). recordSeen bumps ch2's seen to
+      // 3 the instant you arrive — reading is accounted on ENTER, so ch2's badge
+      // drops to 0 right away (no pad holds it up). The tag now reads 1 (ch1's {4}).
       await nav.right()
       expect(data.loadArticle).toHaveBeenLastCalledWith(3)
       counts = await nav.unreadCounts(group)
-      expect(counts.get(2)).toBe(1) // ch2: live seen now 3 → {} unread, +1 for the one you're on
-      expect(counts.get(1)).toBe(1) // ch1: its remaining unseen {4}, not inflated
-      expect(nav.tagUnreadFromCounts(group, counts)).toBe(2) // not 1
+      expect(counts.get(2)).toBe(0) // ch2: read on enter → {} unread
+      expect(counts.get(1)).toBe(1) // ch1: its remaining unseen {4}
+      expect(nav.tagUnreadFromCounts(group, counts)).toBe(1)
    })
 
    it("fromHash honors an explicit seen #pos instead of bouncing/drifting to the last unseen", async () => {
@@ -1453,7 +1596,7 @@ describe("unread-only mode", () => {
 
    it("filters a single-feed view to unread too (seen excluded)", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
-      await nav.fromHash("1") // feed:1 seen → 1 (chron 0,1 seen; chron 2 unseen)
+      await nav.goTo(1) // read chron 1 → feed:1 seen → 1 (chron 0,1 seen; chron 2 unseen)
       nav.setUnreadOnly(true)
       await nav.switchFilter("1") // resumes at the feed's seen position (chron 1)
       expect(data.loadArticle).toHaveBeenLastCalledWith(1)
@@ -1467,7 +1610,7 @@ describe("unread-only mode", () => {
 
    it("filters [ALL] to unread too (seen articles excluded)", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 2 }])
-      await nav.fromHash("0") // feed:1 seen → 0 (chron 0 seen); chron 1 (ch2) unseen
+      await nav.goTo(0) // read chron 0 → feed:1 seen → 0 (chron 0 seen); chron 1 (ch2) unseen
       nav.setUnreadOnly(true)
       nav.filter.clear() // [ALL]
       const shown = await nav.last() // unread → newest unseen (chron 1)
@@ -1580,7 +1723,7 @@ describe("tagUnreadFromCounts", () => {
       data.db.feeds[1] = makeFeed({ id: 1, tag: "news" })
       setupIndex([{ feedId: 1 }, { feedId: 1 }])
       data.db.feeds[1].tag = "news"
-      await nav.fromHash("1") // feed:1 = 1 (fully read)
+      await nav.goTo(1) // read chron 1 → feed:1 = 1 (fully read)
       const group = [data.db.feeds[1]]
       expect(nav.tagUnreadFromCounts(group, await nav.unreadCounts(group))).toBe(0)
    })
@@ -1630,11 +1773,11 @@ describe("tagUnreadFromCounts", () => {
 describe("unreadCounts", () => {
    it("batches per-feed unread counts correctly", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }, { feedId: 3 }])
-      await nav.fromHash("0") // feed:1 = 0 seen; ch2/ch3 never seen
+      await nav.goTo(0) // read chron 0 under [ALL] → every feed caught up to 0
       const chs = [data.db.feeds[1], data.db.feeds[2], data.db.feeds[3]]
       const batch = await nav.unreadCounts(chs)
-      // ch1 has chron 2 unread; ch2/ch3 never seen →
-      // their full backlog (one article each, chron 1 and 3).
+      // ch1 has chron 2 unread; ch2/ch3's only articles (chron 1, 3) are newer
+      // than the chron-0 frontier → one unread each.
       expect(batch.get(1)).toBe(1)
       expect(batch.get(2)).toBe(1)
       expect(batch.get(3)).toBe(1)
@@ -2294,13 +2437,16 @@ describe("cycleOriginKey / cycleFilter edges", () => {
       expect(nav.cycleOriginKey()).toBe("5")
    })
 
-   it("cycles [ALL] → ★ Saved when something is saved (saved joins the rotation)", async () => {
+   it("always skips ★ Saved in the rotation (reached only from the picker)", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 1 }])
       localStorage.setItem("srr-saved", JSON.stringify([0]))
+      nav.setUnreadOnly(false)
       nav.filter.clear() // [ALL]
-      data.groupFeedsByTag.mockReturnValueOnce({ tagged: new Map(), sortedTags: [], untagged: [] })
-      await nav.cycleFilter(1) // entries = ["", "~saved"] → forward from "" lands on saved
-      expect(nav.filter.saved).toBe(true)
+      data.groupFeedsByTag.mockReturnValue({ tagged: new Map(), sortedTags: [], untagged: [data.db.feeds[1]] })
+      // entries = ["", "~saved", "1"] → forward from "" hops over ★ Saved to the feed
+      await nav.cycleFilter(1)
+      expect(nav.filter.saved).toBe(false)
+      expect(nav.getCurrentFilterKey()).toBe("1")
    })
 
    it("a degenerate single-entry rotation ([ALL] only) stays on [ALL]", async () => {
@@ -2419,60 +2565,84 @@ describe("ensureSearchSet supersession guard (#3)", () => {
    })
 })
 
-// ── Bug #6: unread badge off-by-one on list cursor move ─────────────────────
-describe("feedUnread onCurrent guard: select vs recordSeen (#6)", () => {
+// ── feedUnread reflects live seen: reading marks on ENTER, no pad ───────────
+describe("feedUnread is the plain live unread (enter-based accounting)", () => {
    afterEach(() => nav.setUnreadOnly(false))
 
-   it("select() alone does NOT inflate the badge (+1 only after recordSeen)", async () => {
+   it("select() (list cursor move) does not touch the count — it records no seen", async () => {
       // Setup: feed 1 has 3 articles (chron 0,1,2); feed 1 seen through chron 0.
-      // Unread are chron 1 and 2 → raw unread count = 2.
+      // Unread are chron 1 and 2 → unread count = 2.
       setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
       nav.setUnreadOnly(true)
-      // Seed seen: ch1 seen at chron 0. Unread = 2 (chron 1, 2).
       seedSeen({ "feed:1": 0 })
-      // Apply filter with unseen-only raised bounds.
       nav.filter.set(["1"])
 
       // Move the list cursor to chron 1 (unread article) via select() — no recordSeen.
       nav.select(1, 1)
 
-      // The badge must read 2 (the true unread), NOT 3 (which would be the double-count).
+      // Still the true unread (2): the cursor move marks nothing.
       const counts = await nav.unreadCounts([data.db.feeds[1]])
       expect(counts.get(1)).toBe(2)
    })
 
-   it("recordSeen (reader open) still produces the +1 correction", async () => {
-      // Same setup, but use fromHash (resolve path) which calls recordSeen.
-      // After recordSeen: seen["feed:1"] = 1 (== pos), so the base count dropped
-      // chron 1 from unread, and +1 puts it back → still 2 total.
+   it("opening an article in the reader drops the count on enter — the read one no longer counts", async () => {
+      // goTo is the list-tap open (resolve with record:true). recordSeen sets
+      // seen["feed:1"] = 1 (== pos), so chron 1 is now read: the badge drops to 1
+      // (only chron 2 remains) the instant you open it — reading is accounted on
+      // ENTER, with no pad holding the read article as unread.
       setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
       nav.setUnreadOnly(true)
       seedSeen({ "feed:1": 0 })
       nav.filter.set(["1"])
 
-      // Open chron 1 via the reader (goes through resolve → recordSeen sets seen=1).
-      await nav.fromHash("1!1")
+      await nav.goTo(1)
 
-      // Badge must still be 2: base count excludes chron 1 (now seen), +1 adds it back.
       const counts = await nav.unreadCounts([data.db.feeds[1]])
-      expect(counts.get(1)).toBe(2)
+      expect(counts.get(1)).toBe(1)
    })
 
-   it("drops the +1 on the filter's last match — a caught-up feed reads 0, not a stuck 1", async () => {
-      // Same setup, but open the LAST article. recordSeen sets seen = 2 (== pos)
-      // and nothing matches ahead, so there is no forward step left to ever drop
-      // the on-screen +1 — counting it would leave the settings badge stuck at 1
-      // on a fully-read feed (across reloads too: pos, seen and the unread
-      // toggle all persist).
+   it("opening the last article reads 0 — a fully-read feed is caught up", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
       nav.setUnreadOnly(true)
       seedSeen({ "feed:1": 0 })
       nav.filter.set(["1"])
 
-      await nav.fromHash("2!1")
+      await nav.goTo(2)
 
       const counts = await nav.unreadCounts([data.db.feeds[1]])
       expect(counts.get(1)).toBe(0)
+   })
+
+   it("reloading the page (fromHash restore) does not consume unread — no cross-feed frontier on restore", async () => {
+      // feed1 {0,2,4}, feed2 {1,3}; feed1 read to chron 2, feed2 never read.
+      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }, { feedId: 2 }, { feedId: 1 }])
+      nav.setUnreadOnly(true)
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 2 }))
+      const group = [data.db.feeds[1], data.db.feeds[2]]
+      const before = (await nav.unreadCounts(group)).get(2)
+      // Reload restoring the reader at chron 2 (a feed1 article) under [ALL].
+      await nav.fromHash("2")
+      const after = (await nav.unreadCounts(group)).get(2)
+      // Restoring a feed1 position must not mark feed2's chron 1 read via the
+      // cross-feed frontier — a reload isn't reading.
+      expect(before).toBe(2) // feed2 {1,3}
+      expect(after).toBe(2) // unchanged by the reload
+   })
+
+   it("switching feed/tag filters does not move a feed's count (the reported bug)", async () => {
+      // chron 0=f1 1=f2 2=f1 3=f2 4=f1 → feed1 {0,2,4}, feed2 {1,3}.
+      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }, { feedId: 2 }, { feedId: 1 }])
+      nav.setUnreadOnly(true)
+      await nav.switchFilter("1") // never opened → the not-started placeholder (records nothing)
+      await nav.goTo(0) // start reading from the list (tap the oldest) — marks chron 0 on ENTER
+      await nav.right() // read forward onto chron 2 — accounted on ENTER
+      const afterRead = (await nav.unreadCounts([data.db.feeds[1], data.db.feeds[2]])).get(1)
+      await nav.switchFilter("2") // switch to feed2 (its own never-opened placeholder)
+      const afterSwitch = (await nav.unreadCounts([data.db.feeds[1], data.db.feeds[2]])).get(1)
+      // Reading marked feed1 up to chron 2 on enter ({0,2} read); the SWITCH must
+      // not drop it further — no pad to lift, no seen written on the switch landing.
+      expect(afterRead).toBe(1) // {4} left after reading chron 0 then 2
+      expect(afterSwitch).toBe(1) // unchanged by the switch
    })
 })
 
@@ -2587,5 +2757,156 @@ describe("probeCurrent", () => {
    it("returns null with no article on screen", async () => {
       nav.select(-1, -1)
       expect(await nav.probeCurrent()).toBeNull()
+   })
+})
+
+// In unread-only mode a fully-read feed/tag (or [ALL] fully caught up) has
+// nothing unread to resume onto, so switchFilter/fromHash surface the directed
+// "All caught up" placeholder (resolveNoMatch) instead of opening an already-read
+// article. Show-read mode keeps opening the article (you browse read items there).
+describe("no-unread feed/tag shows the caught-up placeholder", () => {
+   afterEach(() => nav.setUnreadOnly(false))
+
+   it("switching to a fully-read feed (unread-only) shows the placeholder, not a read article", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }]) // feed1 {0,1,2}
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 2 })) // fully read
+      nav.setUnreadOnly(true)
+      const r = await nav.switchFilter("1")
+      expect(r.placeholder).toBe(true)
+      expect(nav.currentChron()).toBe(-1) // no article resolved
+   })
+
+   it("switching to a fully-read tag (unread-only) shows the placeholder", async () => {
+      data.db.feeds[5] = makeFeed({ id: 5, tag: "news" })
+      data.db.feeds[6] = makeFeed({ id: 6, tag: "news" })
+      setupIndex([{ feedId: 5 }, { feedId: 6 }, { feedId: 5 }]) // f5 {0,2}, f6 {1}
+      data.db.feeds[5].tag = "news"
+      data.db.feeds[6].tag = "news"
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:5": 2, "feed:6": 1 })) // all read
+      nav.setUnreadOnly(true)
+      const r = await nav.switchFilter("news")
+      expect(r.placeholder).toBe(true)
+   })
+
+   it("a feed WITH unread still resumes at its seen entrypoint (no placeholder)", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }]) // feed1 {0,1,2}
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 0 })) // 1,2 unread
+      nav.setUnreadOnly(true)
+      const r = await nav.switchFilter("1")
+      expect(r.placeholder).toBeFalsy()
+      expect(data.loadArticle).toHaveBeenLastCalledWith(0) // the seen entrypoint
+   })
+
+   it("in show-read mode a fully-read feed opens the article, NOT the placeholder", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 2 }))
+      nav.setUnreadOnly(false) // browse read items
+      const r = await nav.switchFilter("1")
+      expect(r.placeholder).toBeFalsy()
+      expect(data.loadArticle).toHaveBeenLastCalledWith(2)
+   })
+
+   it("[ALL] fully caught up (unread-only) shows the placeholder instead of the newest read article", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 2 }]) // f1 {0}, f2 {1}
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 0, "feed:2": 1 })) // all read
+      nav.setUnreadOnly(true)
+      const r = await nav.switchFilter("")
+      expect(r.placeholder).toBe(true)
+   })
+
+   it("reloading (fromHash) onto a fully-read feed shows the placeholder", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 2 }))
+      nav.setUnreadOnly(true)
+      const r = await nav.fromHash("2!1")
+      expect(r.placeholder).toBe(true)
+   })
+
+   it("reloading onto a feed that still has unread honors the #pos (no placeholder)", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 0 })) // 1,2 unread
+      nav.setUnreadOnly(true)
+      const r = await nav.fromHash("2!1")
+      expect(r.placeholder).toBeFalsy()
+      expect(data.loadArticle).toHaveBeenLastCalledWith(2)
+   })
+})
+
+// A feed/tag you've NEVER opened has unread but no already-read article to resume
+// onto. In unread-only mode the reader is a resume surface, so switchFilter shows
+// a distinct "not started" placeholder (notStarted=true → its own message, NOT
+// the "All caught up" one, since the feed HAS unread) instead of dropping onto —
+// and mis-counting the pill of — the oldest unread. You begin from the list.
+// Show-read mode still opens the oldest article (you browse there).
+describe("never-opened feed/tag shows the not-started placeholder (unread-only)", () => {
+   afterEach(() => nav.setUnreadOnly(false))
+
+   it("switching to a never-opened feed (unread-only) shows the not-started placeholder", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }]) // feed1 {0,1,2}, nothing seen
+      nav.setUnreadOnly(true)
+      const r = await nav.switchFilter("1")
+      expect(r.placeholder).toBe(true)
+      expect(r.notStarted).toBe(true)
+      // No article resolved — so no reader pill to disagree with the badge (the
+      // 9-vs-10 mismatch can't arise when you never sit on the unread entry).
+      expect(nav.currentChron()).toBe(-1)
+      expect(data.loadArticle).not.toHaveBeenCalled()
+      expect(nav.getCurrentFilterKey()).toBe("1") // scoped to the feed for its message
+   })
+
+   it("switching to a never-opened tag (no member seen) shows the not-started placeholder", async () => {
+      data.db.feeds[5] = makeFeed({ id: 5, tag: "news" })
+      data.db.feeds[6] = makeFeed({ id: 6, tag: "news" })
+      setupIndex([{ feedId: 5 }, { feedId: 6 }, { feedId: 5 }]) // f5 {0,2}, f6 {1}
+      data.db.feeds[5].tag = "news"
+      data.db.feeds[6].tag = "news"
+      nav.setUnreadOnly(true)
+      const r = await nav.switchFilter("news")
+      expect(r.placeholder).toBe(true)
+      expect(r.notStarted).toBe(true)
+   })
+
+   it("in show-read mode a never-opened feed opens the oldest article, NOT the placeholder", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      nav.setUnreadOnly(false) // browse read + unread
+      const r = await nav.switchFilter("1")
+      expect(r.placeholder).toBeFalsy()
+      expect(data.loadArticle).toHaveBeenLastCalledWith(0) // oldest, shown as before
+   })
+
+   it("a fully-read feed's placeholder is caught-up (NOT flagged not-started)", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }]) // feed1 {0,1}
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 1 })) // fully read
+      nav.setUnreadOnly(true)
+      const r = await nav.switchFilter("1")
+      expect(r.placeholder).toBe(true)
+      expect(r.notStarted).toBeFalsy() // caught-up ⇒ the reward message, a different one
+   })
+
+   it("a partially-read feed resumes onto its seen article (never the not-started placeholder)", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }]) // feed1 {0,1,2}
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 0 })) // 1,2 unread
+      nav.setUnreadOnly(true)
+      const r = await nav.switchFilter("1")
+      expect(r.placeholder).toBeFalsy()
+      expect(r.notStarted).toBeFalsy()
+      expect(data.loadArticle).toHaveBeenLastCalledWith(0) // the seen entrypoint (already read ⇒ pill == badge)
+   })
+
+   it("cycling (W/S) onto a never-opened feed also shows the not-started placeholder", async () => {
+      nav.setUnreadOnly(true)
+      data.db.feeds[1] = makeFeed({ id: 1 })
+      data.db.feeds[2] = makeFeed({ id: 2 })
+      setupIndex([{ feedId: 1 }, { feedId: 2 }]) // f1 {0}, f2 {1}; nothing seen
+      data.groupFeedsByTag.mockReturnValue({
+         tagged: new Map(),
+         sortedTags: [],
+         untagged: [data.db.feeds[1], data.db.feeds[2]],
+      })
+      await nav.switchFilter("1") // origin lane (also a not-started placeholder, records nothing)
+      const r = await nav.cycleFilter(1) // → feed 2 lane, never opened
+      expect(nav.getCurrentFilterKey()).toBe("2")
+      expect(r.placeholder).toBe(true)
+      expect(r.notStarted).toBe(true)
    })
 })

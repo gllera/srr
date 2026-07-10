@@ -24,15 +24,19 @@ interface IDB extends Omit<IDBWire, "seq" | "feeds"> {
 interface IShowFeed {
    has_left: boolean
    has_right: boolean
-   // The next pill's pending readout: articles still AHEAD of this one under
-   // the active filter. Feed/tag/[ALL] modes: the filter's unread total via the
-   // picker badges' own counting (unreadCounts/tagUnreadFromCounts) with the
-   // on-screen article excluded (feedUnread's onCurrent rule off) — so the last
-   // article reads 0, not 1. Saved/search modes: the explicit set strictly
-   // after this article. -1 = unknown (a degraded count probe): the pill hides
-   // its digits but next still works off has_right.
+   // The next pill's pending readout (pendingRight): matching articles still
+   // AHEAD of this one — strictly after pos — under the active filter. Feed/tag/
+   // [ALL] count positionally over the raised filter bounds; saved/search count
+   // their explicit set after this article. The on-screen article is never
+   // included, so the last article reads 0, not 1. -1 = unknown (a degraded
+   // count probe): the pill hides its digits but next still works off has_right.
    right_count: number
    article: IArticle
    // True only for the synthetic "(no matching articles)" placeholder.
    placeholder?: boolean
+   // Distinguishes the two unread-only placeholders so the reader can pick the
+   // right empty-state message: true = a feed/tag you've never opened (it HAS
+   // unread, but no already-read article to resume onto → "start from the list");
+   // false/absent = the caught-up placeholder (nothing unread) or a plain no-match.
+   notStarted?: boolean
 }

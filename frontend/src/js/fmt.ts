@@ -287,6 +287,20 @@ export function countBadge(n: number): string {
    return n > 999 ? "999+" : String(n)
 }
 
+// Human-readable byte size for the info cards' storage rows: decimal units
+// (KB = 1000 — the consumer-storage convention), one decimal that drops when
+// zero ("1.2 MB", "12 MB"). The counters it renders are approximations by
+// design (uncompressed content bytes, cross-feed-shared assets), so binary
+// precision would be false precision.
+export function formatBytes(n: number): string {
+   if (n < 1000) return `${n} B`
+   const units = ["KB", "MB", "GB", "TB"]
+   let v = n
+   let i = 0
+   for (v /= 1000; v >= 1000 && i < units.length - 1; i++) v /= 1000
+   return `${v.toFixed(1).replace(/\.0$/, "")} ${units[i]}`
+}
+
 // The caught-up mark — a plain checkmark, the universal "done". One glyph for
 // every scale of "nothing left here": the list's reward state (list.ts) and the
 // toolbar readout's zero-unread state (app.ts) render this same string.

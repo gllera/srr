@@ -211,13 +211,11 @@ video {
 }
 
 /* Toolbar filter readout — the "now viewing" button in the wire voice (mono,
-   uppercase, tracked). Tapping it opens the filter picker overlay (it also
-   anchors the frontier menu on right-click / long-press); it fills the list
+   uppercase, tracked). Tapping it opens the filter picker overlay (its
+   right-click / long-press stays the browser's own menu); it fills the list
    toolbar's center slot with its content centered, ellipsizing a long feed/tag
    name. Single-feed filters tint it with the source color (data-src, set in
-   app.ts); [ALL]/tag/saved/search stay neutral. Two halves: the name
-   (ellipsizing) and the filter's unread readout — count digits or the caught-up
-   check (app.ts refreshFeedCount) — which never shrinks. Its chrome reset lives
+   app.ts); [ALL]/tag/saved/search stay neutral. Its chrome reset lives
    here (not in the shared icon-button rules below): it's a full-width text
    button, not a square glyph. */
 .srr-toolbar .srr-feed {
@@ -246,28 +244,6 @@ video {
    overflow: hidden;
    text-overflow: ellipsis;
    white-space: nowrap;
-}
-/* The unread half of the readout: the same tabular digits as the next pill's
-   pending count, one step dimmer than the name so the lane reads first and its
-   backlog second. [hidden] must beat the parent's flex layout. */
-.srr-feed-count {
-   flex: none;
-   font-variant-numeric: tabular-nums;
-   opacity: 0.7;
-}
-.srr-feed-count[hidden] {
-   display: none;
-}
-/* Caught up: the shared checkmark in the same warm accent as the list's reward
-   state — full strength, it's a mark, not a number. */
-.srr-feed-count.srr-feed-caughtup {
-   color: var(--accent);
-   opacity: 1;
-}
-.srr-feed-count.srr-feed-caughtup svg {
-   display: block;
-   width: 1em;
-   height: 1em;
 }
 .srr-feed.srr-filter-on {
    color: var(--fg);
@@ -473,12 +449,12 @@ video {
       toolbar — menus included. */
    z-index: var(--z-toolbar);
    /* The wire console grid. The DOM interleaves the list + reader controls
-      (back · readout · prev · next · save · settings) so each surface's visible
-      controls — the other surface's are display:none and take no cell — auto-place
-      left→right: reader = back · prev · next · save (the base is five equal
-      slots, minmax(0,1fr), so the accent "next" pill lands dead-center in the
-      thumb zone; save is placed explicitly in the fifth track so it hugs the
-      right edge — the gear is list-only now), list = open-article · readout ·
+      (back · open-article · readout · prev · next · save · filter · settings)
+      so each surface's visible controls — the other surface's are display:none
+      and take no cell — auto-place left→right: reader = back · prev · next ·
+      save · filter (five controls fill the five equal minmax(0,1fr) tracks, so
+      the accent "next" pill lands dead-center in the thumb zone and the filter
+      opener hugs the right edge — the gear is list-only now), list = open-article · readout ·
       settings (the LIST template below lets the now-viewing readout take the
       bar's free space (1fr) with the settings gear shrunk to its tap target on
       the right — a long feed/tag name ("The Go Programming Language Blog")
@@ -515,7 +491,8 @@ body.srr-view-list .srr-toolbar {
 .srr-toolbar .srr-settings,
 .srr-toolbar .srr-prev,
 .srr-toolbar .srr-next,
-.srr-toolbar .srr-save {
+.srr-toolbar .srr-save,
+.srr-toolbar .srr-filter {
    background: none;
    border: none;
    padding: 0.5rem 0.45rem;
@@ -543,8 +520,8 @@ body.srr-view-list .srr-toolbar {
 
 /* Edge slots hug the screen edges (the rest of each control centers in its slot):
    the now-viewing readout (list center slot) fills its slot with its content
-   centered, the settings gear (list) and save (reader) sit flush right, back
-   (reader slot 1) flush left. */
+   centered, the settings gear (list) and filter opener (reader) sit flush right,
+   back (reader slot 1) flush left. */
 .srr-toolbar > .srr-feed {
    justify-self: stretch;
    min-width: 0;
@@ -560,11 +537,10 @@ body.srr-view-list .srr-toolbar {
 .srr-toolbar > .srr-settings {
    justify-self: end;
 }
-/* Reader bar: with the gear gone, save takes the fifth track explicitly so it
-   keeps the right edge (auto-placement would drop it into track 4 and leave a
-   phantom fifth slot). Inert on the list, where save is display:none. */
-.srr-toolbar > .srr-save {
-   grid-column: 5;
+/* Reader bar: five controls fill the five tracks by auto-placement (back ·
+   prev · next · save · filter); the filter opener sits flush right like the
+   list's gear. Inert on the list, where every reader control is display:none. */
+.srr-toolbar > .srr-filter {
    justify-self: end;
 }
 
@@ -605,7 +581,8 @@ body.srr-view-list .srr-toolbar {
 .srr-toolbar .srr-settings,
 .srr-toolbar .srr-prev,
 .srr-toolbar .srr-next,
-.srr-toolbar .srr-save {
+.srr-toolbar .srr-save,
+.srr-toolbar .srr-filter {
    min-width: 2.75rem;
    padding: 0.55rem 0.5rem;
    display: inline-flex;
@@ -644,6 +621,18 @@ body.srr-view-list .srr-toolbar {
    stroke: currentColor;
    stroke-width: 1.6;
    stroke-linecap: round;
+   stroke-linejoin: round;
+}
+
+/* Filter (funnel) — the reader's filter-picker opener at the bar's right edge:
+   an outline funnel in the same icon-console voice. */
+.srr-filter-icon {
+   display: block;
+   width: 1.2rem;
+   height: 1.2rem;
+   fill: none;
+   stroke: currentColor;
+   stroke-width: 1.6;
    stroke-linejoin: round;
 }
 
@@ -1050,11 +1039,12 @@ body.srr-view-list.srr-searching .srr-searchbar {
    }
 }
 
-/* View mode: on the list, hide the reader-only controls (prev/next/save); the
-   back button is meaningless on the list it returns to. */
+/* View mode: on the list, hide the reader-only controls (prev/next/save/filter);
+   the back button is meaningless on the list it returns to. */
 .srr-view-list .srr-prev,
 .srr-view-list .srr-next,
 .srr-view-list .srr-save,
+.srr-view-list .srr-filter,
 .srr-view-list .srr-back {
    display: none;
 }
@@ -1098,7 +1088,9 @@ body:not(.srr-view-list) .srr-settings {
    z-index: var(--z-sticky);
    display: flex;
    align-items: center;
-   justify-content: space-between;
+   /* The title's auto right-margin pushes the Show-read toggle + ✕ close to the
+      right edge, sitting together (the gap spaces them). */
+   gap: 0.5rem;
    max-width: 680px;
    margin: 0 auto;
    padding: 0.8rem 1rem;
@@ -1107,7 +1099,39 @@ body:not(.srr-view-list) .srr-settings {
 }
 .srr-picker-title {
    margin: 0;
+   margin-right: auto;
    font-size: var(--text-md);
+}
+/* The unread-only view toggle in the picker header (was the settings menu's
+   "Show read" checkbox). A compact wire-voice pill: muted outline when off,
+   accent-filled when pressed (read articles shown) — the same active-pill
+   vocabulary as the reader's next button. */
+.srr-picker-showread {
+   flex-shrink: 0;
+   padding: 0.35rem 0.7rem;
+   min-height: 2.2rem;
+   border: 1px solid var(--faint);
+   border-radius: 999px;
+   background: none;
+   color: var(--muted);
+   font-family: var(--font-mono);
+   font-size: 0.72rem;
+   letter-spacing: 0.04em;
+   text-transform: uppercase;
+   cursor: pointer;
+   transition:
+      background 0.15s,
+      color 0.15s,
+      border-color 0.15s;
+   &:hover {
+      border-color: var(--border);
+      color: var(--fg);
+   }
+   &[aria-pressed="true"] {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: var(--bg);
+   }
 }
 .srr-picker-close {
    background: none;
@@ -2027,9 +2051,11 @@ body:not(.srr-view-list) .srr-settings {
    letter-spacing: 0.06em;
    margin-top: 0.3rem;
 }
-/* The frontier-menu anchors hold a long-press on touch (iOS has no contextmenu
-   event): suppress the text-selection callout so the hold reads as a menu
-   gesture, not a selection of the readout's text. */
+/* The next pill anchors the frontier menu on a touch hold (iOS has no
+   contextmenu event): suppress the text-selection callout so the hold reads as
+   a menu gesture, not a selection of the pill's text. The lane readout keeps
+   the same suppression — a hold there is just a tap (the picker), never a
+   selection of the feed name. */
 .srr-toolbar .srr-next,
 .srr-toolbar .srr-feed {
    -webkit-touch-callout: none;
