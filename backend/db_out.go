@@ -36,10 +36,19 @@ func (o *DB) SyncOutFeeds(ctx context.Context) error {
 		return nil
 	}
 
+	failed := 0
 	for _, of := range o.core.Out {
 		if err := o.syncOneOutFeed(ctx, of, cdn); err != nil {
 			slog.Warn("sync out feed", "name", of.Name, "error", err)
+			failed++
 		}
+	}
+	// Report partial failure so the caller can leave lastOutSig unadvanced and
+	// retry next cycle, instead of skipping the failed output until the signature
+	// next changes. Still warn-only at the call site — the durable article batch
+	// is never at risk.
+	if failed > 0 {
+		return fmt.Errorf("%d of %d syndication output(s) failed", failed, len(o.core.Out))
 	}
 	return nil
 }

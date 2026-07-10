@@ -466,9 +466,12 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 		sig := db.outFeedsSig()
 		if len(written) > 0 || sig != o.lastOutSig {
 			if err := db.SyncOutFeeds(ctx); err != nil {
+				// Leave lastOutSig unadvanced so the next cycle retries the failed
+				// output(s), rather than skipping until the signature next changes.
 				slog.Warn("sync out feeds", "error", err)
+			} else {
+				o.lastOutSig = sig
 			}
-			o.lastOutSig = sig
 		}
 		if err := db.Commit(ctx); err != nil {
 			return err
