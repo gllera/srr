@@ -6,7 +6,7 @@
 // (see parcel/transformer-define.js, resolved via parcel/resolve-cdn-url.js).
 export const PACK_BASE = new URL(SRR_CDN_URL, window.location.href)
 
-// The build's version label (the config footer + anything else that wants to
+// The build's version label (the settings-menu status footer + anything else that wants to
 // name the running build): transformer-define.js inlines SRR_VERSION from the
 // $VERSION env — the tag in release.yml's build jobs — else "dev". Exported
 // from base.ts because this is the one module the define transformer already

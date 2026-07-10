@@ -1,11 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 
-// dropdown.ts now owns only the two centered modals — the image-proxy editor and
-// the backup/restore dialog. The toolbar dropdown menus (filter picker + ⋯
-// settings) were retired when those moved into the config surface (config.ts), so
-// the feed-menu / overflow-menu / unread-badge / keyboard-roving / feed-health
-// coverage moved to config.test.ts. These tests open each dialog directly (the way
-// the config settings rows do) and exercise the modal behavior.
+// dropdown.ts now owns the centered modals — the image-proxy editor, the
+// backup/restore dialog, the sync editor — plus the anchored context menu
+// (showContextMenu, the card behind both the frontier menu and the gear's
+// settings menu: checked toggle rows, disabled rows, and an optional status
+// footer). The filter-picker rendering lives in picker.ts (covered in
+// picker.test.ts). These tests open each dialog/menu directly and exercise
+// its behavior.
 import { getImgProxy, setImgProxy } from "./fmt"
 
 type Dropdown = typeof import("./dropdown")
@@ -33,9 +34,10 @@ const SYNC_DIALOG =
    `<h2 class="srr-sync-title" id="srr-sync-title">Sync</h2>` +
    `<div class="srr-sync-body"></div>` +
    `</div></div>`
-// A stand-in opener (the config settings row, in production) so the focus-restore
-// tests have something to return focus to. dropdown.ts binds its dialog lookups at
-// module load, so the scaffold must exist before import.
+// A stand-in opener (a config quick-action / the frontier menu's toolbar anchor,
+// in production) so the focus-restore tests have something to return focus to.
+// dropdown.ts binds its dialog lookups at module load, so the scaffold must
+// exist before import.
 const OPENER = `<button class="srr-opener"></button>`
 const SKELETON = OPENER + IMG_DIALOG + BACKUP_DIALOG + SYNC_DIALOG
 
@@ -378,5 +380,143 @@ describe("sync dialog", () => {
       dropdown.showSyncDialog()
       expect(document.querySelector(".srr-imgproxy-dialog")!.classList.contains("srr-open")).toBe(false)
       expect(isOpen()).toBe(true)
+   })
+})
+
+describe("anchored context menu (showContextMenu)", () => {
+   let dropdown: Dropdown
+   const $menu = () => document.querySelector<HTMLElement>(".srr-ctxmenu")
+   const $items = () => [...document.querySelectorAll<HTMLButtonElement>(".srr-ctxmenu-item")]
+   const anchor = () => document.querySelector<HTMLButtonElement>(".srr-opener")!
+
+   beforeEach(async () => {
+      document.body.innerHTML = SKELETON
+      vi.resetModules()
+      dropdown = await import("./dropdown")
+   })
+   // The open menu holds document/window listeners; dismiss it so they can't
+   // bleed into the next test (same discipline as the modal describes above).
+   afterEach(() => {
+      if ($menu()) key(document.body, "Escape")
+   })
+
+   it("renders one menuitem row per action and no menu for an empty list", () => {
+      dropdown.showContextMenu(anchor(), [])
+      expect($menu()).toBeNull()
+      dropdown.showContextMenu(anchor(), [
+         { label: "Mark all read", action: vi.fn() },
+         { label: "Mark unread from here", action: vi.fn() },
+      ])
+      expect($menu()!.getAttribute("role")).toBe("menu")
+      expect($items().map((b) => b.textContent)).toEqual(["Mark all read", "Mark unread from here"])
+      expect($items().every((b) => b.getAttribute("role") === "menuitem")).toBe(true)
+   })
+
+   it("an item click closes first, then runs its action", () => {
+      const order: string[] = []
+      dropdown.showContextMenu(anchor(), [{ label: "A", action: () => order.push($menu() ? "open" : "closed") }])
+      $items()[0].click()
+      expect(order).toEqual(["closed"]) // no menu left behind if the action throws up a dialog
+      expect($menu()).toBeNull()
+   })
+
+   it("focuses the container; arrows enter the items and step with wrap-around", () => {
+      dropdown.showContextMenu(anchor(), [
+         { label: "A", action: vi.fn() },
+         { label: "B", action: vi.fn() },
+      ])
+      // The container holds focus on open (no item painted pre-selected); the
+      // arrows enter the items at the matching end and then step with wrap.
+      expect(document.activeElement).toBe($menu())
+      key($menu()!, "ArrowDown")
+      expect(document.activeElement).toBe($items()[0])
+      key($items()[0], "ArrowDown")
+      expect(document.activeElement).toBe($items()[1])
+      key($items()[1], "ArrowDown") // wraps
+      expect(document.activeElement).toBe($items()[0])
+      key($items()[0], "ArrowUp") // wraps back
+      expect(document.activeElement).toBe($items()[1])
+   })
+
+   it("ArrowUp from the fresh container enters at the last item", () => {
+      dropdown.showContextMenu(anchor(), [
+         { label: "A", action: vi.fn() },
+         { label: "B", action: vi.fn() },
+      ])
+      key($menu()!, "ArrowUp")
+      expect(document.activeElement).toBe($items()[1])
+   })
+
+   it("Escape closes and restores focus to the anchor", () => {
+      dropdown.showContextMenu(anchor(), [{ label: "A", action: vi.fn() }])
+      key(document.body, "Escape")
+      expect($menu()).toBeNull()
+      expect(document.activeElement).toBe(anchor())
+   })
+
+   it("a press outside dismisses without firing any action", () => {
+      const action = vi.fn()
+      dropdown.showContextMenu(anchor(), [{ label: "A", action }])
+      document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true }))
+      expect($menu()).toBeNull()
+      expect(action).not.toHaveBeenCalled()
+   })
+
+   it("shares the modals' single-closer slot: opening a modal closes the menu and vice versa", () => {
+      dropdown.showContextMenu(anchor(), [{ label: "A", action: vi.fn() }])
+      dropdown.showImgProxyDialog()
+      expect($menu()).toBeNull()
+      expect(document.querySelector(".srr-imgproxy-dialog")!.classList.contains("srr-open")).toBe(true)
+      dropdown.showContextMenu(anchor(), [{ label: "A", action: vi.fn() }])
+      expect(document.querySelector(".srr-imgproxy-dialog")!.classList.contains("srr-open")).toBe(false)
+      expect($menu()).not.toBeNull()
+   })
+
+   it("a checked item is a menuitemcheckbox with aria-checked; plain items stay menuitem", () => {
+      dropdown.showContextMenu(anchor(), [
+         { label: "Show read", checked: true, action: vi.fn() },
+         { label: "Off toggle", checked: false, action: vi.fn() },
+         { label: "Plain", action: vi.fn() },
+      ])
+      const [on, off, plain] = $items()
+      expect(on.getAttribute("role")).toBe("menuitemcheckbox")
+      expect(on.getAttribute("aria-checked")).toBe("true")
+      expect(off.getAttribute("role")).toBe("menuitemcheckbox")
+      expect(off.getAttribute("aria-checked")).toBe("false")
+      expect(plain.getAttribute("role")).toBe("menuitem")
+      expect(plain.hasAttribute("aria-checked")).toBe(false)
+   })
+
+   it("a disabled item is inert and the arrows skip it", () => {
+      const dead = vi.fn()
+      dropdown.showContextMenu(anchor(), [
+         { label: "A", action: vi.fn() },
+         { label: "Search articles…", action: dead, disabled: true },
+         { label: "B", action: vi.fn() },
+      ])
+      const disabled = $items()[1]
+      expect(disabled.disabled).toBe(true)
+      disabled.click()
+      expect(dead).not.toHaveBeenCalled()
+      expect($menu()).not.toBeNull() // a dead click doesn't dismiss the menu
+      // Arrow stepping never lands on it: A → B → wrap back to A.
+      key($menu()!, "ArrowDown")
+      expect(document.activeElement).toBe($items()[0])
+      key($items()[0], "ArrowDown")
+      expect(document.activeElement).toBe($items()[2])
+      key($items()[2], "ArrowDown")
+      expect(document.activeElement).toBe($items()[0])
+   })
+
+   it("appends an opts.footer block after the items, non-interactive to the arrows", () => {
+      const footer = document.createElement("div")
+      footer.textContent = "Updated 2 hours ago"
+      dropdown.showContextMenu(anchor(), [{ label: "A", action: vi.fn() }], { footer })
+      expect(footer.parentElement).toBe($menu())
+      expect(footer.classList.contains("srr-ctxmenu-footer")).toBe(true)
+      expect($menu()!.lastElementChild).toBe(footer) // after every item row
+      // The arrows only ever step the action rows.
+      key($menu()!, "ArrowUp")
+      expect(document.activeElement).toBe($items()[0])
    })
 })

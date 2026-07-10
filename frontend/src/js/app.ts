@@ -1,11 +1,27 @@
-import * as config from "./config"
 import * as data from "./data"
-import { setProfileImportHook, showBackupDialog, showImgProxyDialog, showSyncDialog } from "./dropdown"
-import { collapseBrokenMedia, countBadge, formatDate, sanitizeHtml, srcColorIndex, timeAgo, URL_DENY } from "./fmt"
+import {
+   setProfileImportHook,
+   showBackupDialog,
+   showContextMenu,
+   showImgProxyDialog,
+   showSyncDialog,
+   type MenuItem,
+} from "./dropdown"
+import {
+   CHECK_SVG,
+   collapseBrokenMedia,
+   countBadge,
+   formatDate,
+   sanitizeHtml,
+   srcColorIndex,
+   timeAgo,
+   URL_DENY,
+} from "./fmt"
 import { setupGestures, type Gestures } from "./gestures"
 import { UNREAD_ONLY_KEY } from "./keys"
 import * as list from "./list"
 import * as nav from "./nav"
+import * as picker from "./picker"
 import { clearAllPins, isPinned, listPins, pinFilter, unpinFilter } from "./pin"
 import * as refresh from "./refresh"
 import * as sync from "./sync"
@@ -13,7 +29,7 @@ import * as sync from "./sync"
 const el = {
    article: document.querySelector(".srr-reader") as HTMLElement,
    listView: document.querySelector(".srr-list") as HTMLElement,
-   config: document.querySelector(".srr-config") as HTMLElement,
+   picker: document.querySelector(".srr-picker") as HTMLElement,
    back: document.querySelector(".srr-back") as HTMLButtonElement,
    backLabel: document.querySelector(".srr-back-label") as HTMLElement,
    openReader: document.querySelector(".srr-open-reader") as HTMLButtonElement,
@@ -25,7 +41,9 @@ const el = {
    prev: document.querySelector(".srr-prev") as HTMLButtonElement,
    next: document.querySelector(".srr-next") as HTMLButtonElement,
    nextCount: document.querySelector(".srr-next-count") as HTMLElement,
-   feed: document.querySelector(".srr-feed") as HTMLElement,
+   feed: document.querySelector(".srr-feed") as HTMLButtonElement,
+   feedName: document.querySelector(".srr-feed-name") as HTMLElement,
+   feedCount: document.querySelector(".srr-feed-count") as HTMLElement,
    settings: document.querySelector(".srr-settings") as HTMLButtonElement,
    source: document.querySelector(".srr-source") as HTMLElement,
    date: document.querySelector(".srr-date") as HTMLElement,
@@ -41,9 +59,10 @@ const el = {
    pinProgress: document.querySelector(".srr-pin-progress") as HTMLElement,
 }
 
-// Which surface is showing. The list is home; the reader is the drill-down; the
-// config surface (ephemeral, opened from the list) is the settings + nav hub.
-let view: "list" | "reader" | "config" = "list"
+// Which surface is showing. The list is home; the reader is the drill-down.
+// (The filter picker is a fixed overlay over the list, not a view of its own —
+// while it's open, view stays "list" and picker.isOpen() gates input instead.)
+let view: "list" | "reader" = "list"
 // Set once gestures are wired; the list calls it after a programmatic scroll so
 // the toolbar-hide baseline stays in sync (declared up here so list.setup, wired
 // before setupGestures runs, can close over it).
@@ -81,10 +100,11 @@ function showPinProgress(done: number, total: number, cached?: number): void {
    } else {
       text = `Downloading ${done} / ${total}…`
    }
-   // A dedicated node (.srr-pin-progress), separate from config.ts's role=status
-   // freshness line (.srr-config-status). Per-pack ticks stay SILENT (no live
-   // role) so they don't flood screen readers or clobber that status message;
-   // only the final outcome becomes a role=status live region, so the single
+   // A dedicated node (.srr-pin-progress), separate from the settings menu's
+   // status footer (picker.renderStatus) — the menu closes when the pin row is
+   // clicked, so the toast is the only feedback surface left. Per-pack ticks
+   // stay SILENT (no live role) so they don't flood screen readers; only the
+   // final outcome becomes a role=status live region, so the single
    // success/failure message is announced once.
    if (finished) el.pinProgress.setAttribute("role", "status")
    else el.pinProgress.removeAttribute("role")
@@ -131,12 +151,12 @@ async function pinCurrentFilter(): Promise<void> {
       // Record the pin in the registry only once the SW confirms it actually
       // cached something. A fully-failed (offline) pin reports cached === 0 on
       // completion; recording it then would leave a phantom "Remove offline
-      // copy" entry over bytes that were never saved. Re-render the open config
-      // so the row reflects the true outcome.
+      // copy" entry over bytes that were never saved. (The pin row lives in the
+      // settings menu, which is rebuilt fresh on every open — nothing on screen
+      // to re-render here.)
       if (e.data.done >= e.data.total) {
          if ((e.data.cached ?? 0) > 0) pinFilter(key, names)
          else unpinFilter(key)
-         if (config.isOpen()) config.render()
       }
    }
    controller.postMessage({ type: "pin", names }, [port2])
@@ -158,9 +178,8 @@ function unpinCurrentFilter(): void {
    const toDelete = names.filter((n) => !stillNeeded.has(n))
    unpinFilter(key)
    if (controller) controller.postMessage({ type: "unpin", names: toDelete })
-   // Re-render the open config surface so the pin row flips to "Download for
-   // offline" now that the cached copy is gone.
-   if (config.isOpen()) config.render()
+   // The pin row reads its state fresh on the next settings-menu open — the
+   // menu that triggered this unpin closed when the row was clicked.
 }
 
 // Returns the pin menu row entry for the current filter, or null when pinning
@@ -180,8 +199,8 @@ function pinMenuEntry(): { label: string; action: () => void } | null {
 
 function showReader() {
    view = "reader"
-   document.body.classList.remove("srr-view-list", "srr-view-config")
-   config.close()
+   document.body.classList.remove("srr-view-list")
+   picker.close()
    el.listView.hidden = true
    el.article.hidden = false
 }
@@ -189,8 +208,7 @@ function showReader() {
 function showList() {
    view = "list"
    document.body.classList.add("srr-view-list")
-   document.body.classList.remove("srr-view-config")
-   config.close()
+   picker.close()
    el.article.hidden = true
    el.listView.hidden = false
    // Disable the reader-only nav so a one-finger swipe / arrow key is a no-op
@@ -199,32 +217,10 @@ function showList() {
    el.next.disabled = true
 }
 
-// The config surface stacks over the list (srr-view-list stays on underneath so
-// the list keeps its state); srr-view-config hides the toolbar, but the
-// pin-progress toast stays visible — the pin is triggered from here, so its
-// progress/outcome feedback must show — and config.open() reveals + (re)renders
-// the panel.
-function showConfig() {
-   view = "config"
-   document.body.classList.add("srr-view-config")
-   el.article.hidden = true
-   el.listView.hidden = true
-   config.open()
-}
-
-// Leave the config surface back to the article (reader) surface — the Escape /
-// close-button path. enterReader resolves the right article (current, else the
-// list's selected row, else the filter's oldest unseen, else newest).
-function closeConfig() {
-   document.body.classList.remove("srr-view-config")
-   config.close()
-   void enterReader()
-}
-
 // The shared "go to the article surface" resolver, reused by every → reader
-// transition (Escape from the list, Escape/close from config). Opens the reader
-// at the current reader/selected article when there is one, else the filter's
-// oldest-unseen article (start of the backlog), else its newest.
+// transition (Escape from the list, the open-article toolbar button). Opens the
+// reader at the current reader/selected article when there is one, else the
+// filter's oldest-unseen article (start of the backlog), else its newest.
 async function enterReader() {
    const chron = nav.currentChron()
    if (chron >= 0) return guard(() => nav.goTo(chron))
@@ -409,16 +405,23 @@ function renderEmptyReader() {
 
 function refreshFeedLabel() {
    // The article's source now lives in the header kicker, so the toolbar label
-   // is a pure active-filter indicator: "All", a tag name, or a single feed.
+   // is the active-filter indicator: "All", a tag name, or a single feed —
+   // plus the filter's unread readout beside it (refreshFeedCount below).
    // Search mode is orthogonal to the feed axis (the pinned search bar owns the
    // query), so show the button neutral ("All", unhighlighted) instead of the raw
    // "q:<query>" token getCurrentFilterKey returns.
    const key = nav.isSearchFilter() ? "" : nav.getCurrentFilterKey() // "" (all/multi) | tag name | numeric feed id
+   // A filter change blanks the unread readout immediately — a count from the
+   // previous lane must never sit beside the new label while the async fill for
+   // the new one is still in flight. Same-filter refreshes keep the old digits
+   // up (no flicker) until the fresh fill lands.
+   if (key !== lastFeedLabel) el.feedCount.hidden = true
+   refreshFeedCount()
    if (key === lastFeedLabel) return
    lastFeedLabel = key
 
    const label = nav.filterLabel(key)
-   el.feed.textContent = label
+   el.feedName.textContent = label
    // A single-feed filter tints the toolbar label with that feed's source
    // color (the wire-desk identity in the toolbar); [ALL]/tag/saved/search stay
    // neutral. The chip-less label still says which source you're viewing.
@@ -442,6 +445,198 @@ function refreshFeedLabel() {
    const backName = crumb === "" ? "Back to list" : `Back to list — filtered: ${crumb}`
    el.back.setAttribute("aria-label", backName)
    el.back.title = backName
+}
+
+// The readout's unread half: how much of the active filter's backlog is still
+// unread — the list twin of the reader's pending pill (.srr-next-count), summed
+// from the same per-feed counts the picker badges show, in the same countBadge
+// digits, filled async like them (hidden until known, a failed probe degrades
+// to no readout). At zero it renders the caught-up checkmark instead — the same
+// mark as the list's reward state, so "nothing left here" reads identically at
+// both scales. Saved/search are seen-neutral peek modes with no backlog of
+// their own: hidden there. Skipped in the reader (its center slot is prev/next
+// and the readout is display:none) but computed under an open picker overlay —
+// it stacks over the list, whose toolbar stays live beneath.
+let feedCountTok: object = {}
+function refreshFeedCount() {
+   const tok = (feedCountTok = {}) // freshness: only the newest fill may land
+   if (view === "reader") return
+   const box = el.feedCount
+   const members = [...nav.filter.feeds.keys()]
+      .map((id) => data.db.feeds[id])
+      .filter((f): f is IFeed => f !== undefined)
+   if (nav.isSearchFilter() || nav.filter.saved || members.length === 0) {
+      box.hidden = true
+      return
+   }
+   nav.unreadCounts(members).then(
+      (counts) => {
+         if (tok !== feedCountTok) return
+         const total = nav.tagUnreadFromCounts(members, counts)
+         if (total > 0) {
+            box.textContent = countBadge(total)
+            box.classList.remove("srr-feed-caughtup")
+            box.removeAttribute("role")
+            box.removeAttribute("aria-label")
+         } else {
+            box.innerHTML = CHECK_SVG
+            box.classList.add("srr-feed-caughtup")
+            // The visible digits are their own accessible text; the checkmark
+            // needs words.
+            box.setAttribute("role", "img")
+            box.setAttribute("aria-label", "All read")
+         }
+         box.hidden = false
+      },
+      () => {
+         if (tok === feedCountTok) box.hidden = true
+      },
+   )
+}
+
+// One reconciliation for both seen-frontier gestures (they differ only in the
+// direction the frontier moved). Under unread-only the filter membership
+// changed (each member's bound re-derives from the moved frontier): re-apply
+// the filter, then rebuild the list if it's the visible surface — or just
+// invalidate its built window when it's hidden behind the reader (rebuilding a
+// display:none list would pin zero row heights; the next show() rebuilds).
+// With read items shown the membership is untouched: re-grey the visible rows
+// in place (a hidden list re-greys on its return path — show()'s refresh()).
+// The toolbar readout recomputes, and an open reader re-probes its chrome
+// silently (prev/next + the pending pill re-derive from the re-raised bounds;
+// no content re-render, no scroll), mirroring refreshAfterStore's reader branch.
+function afterFrontierMove() {
+   if (nav.isUnreadOnly()) {
+      nav.applyFilter([...nav.filter.tokens])
+      if (view === "list") void list.rerender()
+      else list.invalidate()
+   } else if (view === "list") {
+      list.refresh()
+   }
+   refreshFeedCount()
+   if (view !== "reader") return
+   const probed = nav.currentChron()
+   void nav
+      .probeCurrent()
+      .then((o) => {
+         if (o && view === "reader" && nav.currentChron() === probed) {
+            el.prev.disabled = !o.has_left
+            el.next.disabled = !o.has_right
+            syncNextCount(o)
+         }
+      })
+      .catch(() => {})
+}
+
+// Mark the whole current feed/tag/[ALL] selection read — the frontier menu's
+// first action. A pure frontier raise in nav (sync-safe by construction).
+function markAllRead() {
+   if (nav.markAllRead()) afterFrontierMove()
+}
+
+// The explicit unread rewind — the frontier menu's second action and the
+// reader's U key: everything from the current article (inclusive) to the
+// latest becomes unread across the current selection — the one gesture allowed
+// to lower a seen frontier (nav.markUnreadFrom; plain backward navigation no
+// longer does). The reader stays on the article; only its chrome re-derives.
+function markUnreadFromHere() {
+   const chron = nav.currentChron()
+   if (chron >= 0 && nav.markUnreadFrom(chron)) afterFrontierMove()
+}
+
+// The frontier menu — both seen-frontier gestures live behind a secondary
+// gesture (right-click / long-press / the keyboard menu key), deliberately off
+// the visible chrome: occasional whole-backlog actions don't earn a button.
+// Its anchors are the two readouts of exactly the walk the gestures operate
+// on: the reader's next pill (the pending count they raise past or restore)
+// and the list's lane readout (its list twin, so the list surface keeps
+// access without opening an article). Saved/search are seen-neutral peek
+// modes — no items, and the gesture falls through to the browser's own menu.
+function frontierMenuItems(): { label: string; action: () => void }[] {
+   if (nav.filter.saved || nav.isSearchFilter()) return []
+   const items: { label: string; action: () => void }[] = []
+   if (nav.filter.feeds.size > 0) items.push({ label: "Mark all read", action: markAllRead })
+   if (nav.currentChron() >= 0) items.push({ label: "Mark unread from here", action: markUnreadFromHere })
+   return items
+}
+
+// Wire one frontier-menu anchor. Desktop right-click and Android long-press
+// both arrive as `contextmenu` (so does Shift+F10 / the menu key on a focused
+// anchor — the menu stays keyboard-reachable); iOS Safari never fires
+// contextmenu on non-links, so a touch-held timer covers it there. `held`
+// marks a timer-opened menu so the click that follows the finger lift is
+// swallowed (it would otherwise also navigate / open the filter picker) and so
+// a late native contextmenu (Android fires both) doesn't reopen the menu it
+// just opened; any new touch resets it.
+function bindFrontierMenu(anchor: HTMLElement) {
+   let hold = 0
+   let held = false
+   const open = (): boolean => {
+      const items = frontierMenuItems()
+      if (items.length > 0) showContextMenu(anchor, items)
+      return items.length > 0
+   }
+   anchor.addEventListener("contextmenu", (e) => {
+      clearTimeout(hold)
+      if (held || open()) e.preventDefault()
+   })
+   anchor.addEventListener("pointerdown", (e) => {
+      if (e.pointerType !== "touch") return
+      held = false
+      clearTimeout(hold)
+      hold = window.setTimeout(() => (held = open()), 500)
+   })
+   for (const ev of ["pointerup", "pointercancel", "pointerleave"])
+      anchor.addEventListener(ev, () => clearTimeout(hold))
+   anchor.addEventListener(
+      "click",
+      (e) => {
+         if (!held) return
+         held = false
+         e.preventDefault()
+         e.stopImmediatePropagation()
+      },
+      true,
+   )
+}
+
+// ── Filter picker & settings menu ─────────────────────────────────────────────
+
+// The gear's anchored settings menu — everything the retired config surface
+// owned minus the filter picker (which is its own overlay now, opened from the
+// now-viewing readout): search, the Show-read toggle, the contextual
+// offline-pin row, and the three dialog openers, with the freshness / status
+// readout as a quiet footer. Items derive fresh on every open (pin label,
+// search availability, toggle state), so nothing needs re-rendering in place.
+function settingsMenuItems(): MenuItem[] {
+   const items: MenuItem[] = [
+      // Search leaves the menu for the list with the search bar open; inert
+      // (listed but disabled) while the meta index is still rebuilding.
+      { label: "Search articles…", action: () => void enterSearch(), disabled: !nav.searchAvailable() },
+      // Inverted toggle, same semantics as the old config button: unread-only
+      // is the default view, so the check marks the opt-in to ALSO show read.
+      { label: "Show read", checked: !nav.isUnreadOnly(), action: toggleUnseenOnly },
+   ]
+   const pin = pinMenuEntry()
+   if (pin) items.push(pin)
+   items.push(
+      { label: "Image proxy…", action: showImgProxyDialog },
+      { label: "Backup / Restore…", action: () => showBackupDialog() },
+      { label: "Sync…", action: showSyncDialog },
+   )
+   return items
+}
+
+// The footer node of the open settings menu, kept so the sync status callback
+// can refresh the readout in place while the menu is up; stale once the menu
+// closes (isConnected gates the refill).
+let settingsStatus: HTMLElement | null = null
+
+function openSettingsMenu() {
+   const footer = document.createElement("div")
+   picker.renderStatus(footer)
+   settingsStatus = footer
+   showContextMenu(el.settings, settingsMenuItems(), { footer })
 }
 
 // The reader's save (★) toggle reflects whether the current article is in the
@@ -624,7 +819,7 @@ async function applySearchQuery(q: string) {
 // Reflect the active search state into the bar: show/hide it (CSS gates display
 // on body.srr-searching + .srr-view-list), seed the input from the query (unless
 // the user is mid-type), and surface the short-query / truncation hint. (Search is
-// entered from the config "Search articles…" row, not a toolbar button now.)
+// entered from the settings menu's "Search articles…" row, not a toolbar button.)
 function syncSearchBar() {
    const on = nav.isSearchFilter()
    document.body.classList.toggle("srr-searching", on && view === "list")
@@ -642,25 +837,28 @@ function syncSearchBar() {
    el.searchNote.hidden = !note
 }
 
-// The unread (catch-up) toggle now lives in the config surface as the inverted
-// "Read" button: unread-only is the default view, and pressing "Read" turns it
-// off to ALSO show already-read articles. config's onUnreadToggle hook flips the
-// mode and rebuilds the list. Unseen-only spans every filter ([ALL]/feed/tag).
+// The unread (catch-up) toggle lives in the settings menu as the inverted
+// "Show read" row: unread-only is the default view, and pressing it turns
+// unread-only off to ALSO show already-read articles. Unseen-only spans every
+// filter ([ALL]/feed/tag).
 function toggleUnseenOnly() {
    // setUnreadOnly re-applies the filter (raised/restored bounds) internally;
    // force a rebuild since the token set is unchanged (list.show() alone would
    // only refresh dots).
    nav.setUnreadOnly(!nav.isUnreadOnly())
    void list.rerender()
+   // The mode flip can move the count by one (unseen-only counts the article the
+   // reader sits on back in while something still matches ahead — see feedUnread).
+   refreshFeedCount()
 }
 
 // Two-finger vertical swipe = step the filter. In the reader, cycle to the next
 // filter's article; on the list, re-filter the list to the next entry.
 function onCycle(dir: number) {
-   // The two-finger cycle gesture must not drive the reader that sits hidden
-   // behind the open config surface (same input-leak class as the keyboard and
+   // The two-finger cycle gesture must not re-filter the list that sits under
+   // the open picker overlay (same input-leak class as the keyboard and
    // one-finger-swipe guards).
-   if (view === "config") return
+   if (picker.isOpen()) return
    if (nav.getFilterEntries().length <= 1) return
    // cycleToken steps relative to cycleOriginKey (a single tagged-feed filter
    // cycles by its tag), so the list and the reader share one rotation.
@@ -696,9 +894,9 @@ function bumpReaderEdge(side: "prev" | "next") {
 // (gestures' goPrev/goNext). They act only on the reader surface: gating on
 // view !== "reader" makes a swipe over the LIST (where prev/next are disabled, so
 // it would otherwise ring the hidden reader's margin bell on a forced reflow) or
-// over the open settings surface a clean no-op, instead of driving the reader
+// over the open picker overlay a clean no-op, instead of driving the reader
 // stacked behind them. The keyboard never reaches these off the reader — the list
-// branch and the config guard in the keydown handler both return first.
+// branch and the picker guard in the keydown handler both return first.
 const stepLeft = () => {
    if (view !== "reader") return
    return el.prev.disabled ? bumpReaderEdge("prev") : guard(() => nav.left())
@@ -723,6 +921,9 @@ const KEY_ACTIONS: Record<string, () => void> = {
    q: () => guard(() => nav.first()),
    e: () => guard(() => nav.last()),
    b: () => !el.save.disabled && toggleSave(),
+   // The unread rewind's direct power-user path (its pointer home is the
+   // frontier menu); markUnreadFromHere no-ops without an article / in peek modes.
+   u: () => markUnreadFromHere(),
    f: () => {
       if (!el.titleLink.getAttribute("href")) return
       el.titleLink.dispatchEvent(
@@ -758,10 +959,10 @@ async function init() {
 
    // Shared refresh after any profile merge — a backup import or a sync pull
    // that changed local state: prune stale seen keys, refresh the save button,
-   // rebuild the list under the current filter, and re-derive an open config
-   // surface (unread badges + sync status). The reader view skips the list
-   // rebuild — the return path (show() → refresh()) re-derives per-row state
-   // anyway, and rebuilding a display:none list would pin zero row heights.
+   // rebuild the list under the current filter, and re-derive an open picker
+   // overlay (unread badges). The reader view skips the list rebuild — the
+   // return path (show() → refresh()) re-derives per-row state anyway, and
+   // rebuilding a display:none list would pin zero row heights.
    const refreshAfterMerge = () => {
       nav.pruneSeen()
       refreshSaveButton(!el.save.disabled)
@@ -781,14 +982,17 @@ async function init() {
       } else if (view !== "reader") {
          void list.rerender()
       }
-      if (config.isOpen()) config.render()
+      // A merged pull moved the seen frontier — the readout's unread count is
+      // derived from it (view-gated internally, like the row re-derives above).
+      refreshFeedCount()
+      if (picker.isOpen()) picker.render()
    }
 
    // Shared reconciliation after a store refresh adopted a newer db.gz — the
    // fully-silent contract: no reload, no scroll, no content re-render. The
    // toolbar label re-derives, the reader's prev/next chrome re-probes (a cached
    // "no newer article" is exactly what new content invalidates), the list
-   // reopens its top, and an open config repaints its freshness line.
+   // reopens its top, and an open picker re-derives its rows and badges.
    const refreshAfterStore = () => {
       refreshFeedLabel()
       if (view === "reader") {
@@ -808,7 +1012,7 @@ async function init() {
       } else {
          void list.onStoreGrown()
       }
-      if (config.isOpen()) config.render()
+      if (picker.isOpen()) picker.render()
    }
 
    // After a successful profile import (backup dialog), additionally reconcile
@@ -821,37 +1025,17 @@ async function init() {
       refreshAfterMerge()
    })
 
-   // The config surface: the filter picker, the unread toggle, the settings rows
-   // (offline pin / backup / image proxy), and the freshness status. pinEntry is
-   // evaluated lazily at render so its label reflects the current filter's pin
-   // state (null when pinning is unavailable — no SW controller, saved/search).
-   config.setup(el.config, {
-      onSearch: () => {
-         // Search is a list activity: enterSearch → selectFilter → goToList
-         // switches to the list surface (closing config) with the search bar open.
-         void enterSearch()
-      },
+   // The filter picker overlay: a pick closes it and re-filters the LIST
+   // (selectFilter pushes the #!filter history entry and re-renders the list in
+   // place — you land back on the headlines under the new lane, not in the
+   // reader); ✕ / Escape just close it — the list underneath never moved. The
+   // settings that used to share this surface live in openSettingsMenu.
+   picker.setup(el.picker, {
       onSelect: (token) => {
-         // A filter pick opens the article (reader) surface at that filter's resume
-         // position — switchFilter is the reader's own "go to this filter" op (the
-         // same primitive the two-finger / arrow filter-cycle uses), so the picked
-         // feed/tag resumes where you left off (its first/newest if never read) and
-         // [ALL] opens at the oldest unseen article, not the list overview. guard()'s
-         // render() swaps to the reader (closing config) once the article resolves;
-         // an empty feed degrades to the "(no matching articles)" placeholder.
-         void guard(() => nav.switchFilter(token))
+         picker.close()
+         void selectFilter(token)
       },
-      onUnreadToggle: () => {
-         toggleUnseenOnly()
-         // Re-render the open config filter list so its unread badges / hidden
-         // fully-read rows reflect the flipped mode immediately.
-         config.render()
-      },
-      onClose: closeConfig,
-      pinEntry: pinMenuEntry,
-      openImgProxy: showImgProxyDialog,
-      openBackup: () => showBackupDialog(),
-      openSync: showSyncDialog,
+      onClose: () => picker.close(),
    })
 
    // The list opens an article in the reader through the same guard mutex as
@@ -869,6 +1053,15 @@ async function init() {
 
    el.prev.addEventListener("click", () => guard(() => nav.left()))
    el.next.addEventListener("click", () => guard(() => nav.right()))
+   // The frontier menu rides its two toolbar readouts as a secondary gesture —
+   // the next pill (reader) and the lane readout (list); see frontierMenuItems.
+   bindFrontierMenu(el.next)
+   bindFrontierMenu(el.feed)
+   // A plain tap on the lane readout opens the filter picker overlay (the
+   // secondary long-press/right-click gesture above stays the frontier menu —
+   // bindFrontierMenu's capture-phase click swallow keeps a finger lift after a
+   // long-press from also landing here).
+   el.feed.addEventListener("click", () => picker.open())
    el.back.addEventListener("click", () => void goToList(true))
    // The list's open-article button (left edge) is the tap counterpart of Escape on
    // the list: enter the reader at the article you were reading (enterReader resolves
@@ -876,13 +1069,12 @@ async function init() {
    el.openReader.addEventListener("click", () => void enterReader())
    // capture: error events don't bubble (see collapseBrokenMedia)
    el.content.addEventListener("error", collapseBrokenMedia, true)
-   // The settings gear is the config entry point (search · filter picker · unread
-   // toggle · settings · status). It lives on BOTH surfaces — its one fixed home is
-   // the bar's right edge — so config is always one tap away. The now-viewing
-   // readout (.srr-feed) is just a label now, not a second config trigger.
-   el.settings.addEventListener("click", () => showConfig())
-   // Search now lives in config (the "Search articles…" row → enterSearch); the `/`
-   // key still toggles it on the list. The pinned search bar owns the input
+   // The settings gear (list-only — hidden in the reader) opens the anchored
+   // settings menu: search · Show read · offline pin · the three dialogs, with
+   // the status readout as its footer.
+   el.settings.addEventListener("click", () => openSettingsMenu())
+   // Search lives in the settings menu (the "Search articles…" row → enterSearch);
+   // the `/` key still toggles it on the list. The pinned search bar owns the input
    // (debounced live query, Enter applies immediately, Escape / ✕ leave search).
    el.searchInput.addEventListener("input", () => {
       clearTimeout(searchDebounce)
@@ -915,9 +1107,8 @@ async function init() {
    navigator.serviceWorker?.addEventListener("message", (e: MessageEvent) => {
       if (e.data?.type === "pins-purged") {
          clearAllPins()
-         // Re-render an open config so the pin row reverts to "Download for
-         // offline" immediately, matching the now-empty PINNED bucket.
-         if (config.isOpen()) config.render()
+         // The pin row derives its label fresh on the next settings-menu open,
+         // so clearing the registry is all it takes to match the empty bucket.
       }
    })
 
@@ -937,21 +1128,27 @@ async function init() {
          return
       }
       if (e.key === "Escape") {
-         // Overlays close first (the popup here; the image-proxy / backup modals
-         // self-handle Escape via capture + stopPropagation, so this never fires
-         // while one is open). Then Escape toggles the surfaces: config → reader,
-         // reader → list, list → reader (enterReader resolves the article).
+         // Overlays close first (the popup and the picker here; the image-proxy /
+         // backup modals and the anchored menus self-handle Escape via capture +
+         // stopPropagation, so this never fires while one is open). Then Escape
+         // toggles the surfaces: reader → list, list → reader (enterReader
+         // resolves the article).
          if (el.popup.classList.contains("srr-open")) {
             closePopup()
             return
          }
          e.preventDefault()
-         if (view === "config") closeConfig()
+         if (picker.isOpen()) picker.close()
          else if (view === "reader") void goToList(true)
          else void enterReader()
          return
       }
       if (el.popup.classList.contains("srr-open")) return
+      // The picker overlay stacks over the list; without this guard the list
+      // keymap below (`/`, A/D row stepping) — and the reader keymap after it —
+      // would drive the surfaces stacked behind it. Escape is handled above;
+      // the picker keeps its own UI (rows are plain links, Tab walks them).
+      if (picker.isOpen()) return
       const tag = (e.target as HTMLElement).tagName
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return
       // On the list, vertical arrows/letters scroll and rove rows natively. The
@@ -972,11 +1169,6 @@ async function init() {
          }
          return
       }
-      // The settings (config) surface stacks over a still-mounted reader; without
-      // this guard the reader keymap (arrows/letters, cycle, save, open-link)
-      // would drive that hidden reader and even switch surfaces from behind the
-      // panel. Escape is handled above (closeConfig), so config keeps its own UI.
-      if (view === "config") return
       const action = KEY_ACTIONS[e.key]
       if (action) {
          e.preventDefault()
@@ -1012,11 +1204,11 @@ async function init() {
    // surface has rendered (local state is authoritative and paints instantly;
    // an adopt rerenders when it lands), then keep cycling on tab re-focus and
    // reconnect, flushing pending pushes on hide. No-op until a sync endpoint is
-   // configured (Settings → Sync). The status callback repaints an open config
-   // footer after each cycle — enabling sync from the dialog confirms itself
-   // ("Synced just now") without closing and re-opening settings.
+   // configured (settings menu → Sync). The status callback refills the footer
+   // of a settings menu that happens to be open when a cycle lands; a closed
+   // menu's footer is disconnected and skipped (it rebuilds on the next open).
    sync.init(refreshAfterMerge, () => {
-      if (config.isOpen()) config.refreshStatus()
+      if (settingsStatus?.isConnected) picker.renderStatus(settingsStatus)
    })
    // Live content sync: boot is already fresh (data.init just ran), so only the
    // ongoing triggers are wired — re-focus (throttled), reconnect, heartbeat.

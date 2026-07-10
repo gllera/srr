@@ -1,5 +1,5 @@
 import * as data from "./data"
-import { timeAgo, srcColorIndex, dayLabel } from "./fmt"
+import { timeAgo, srcColorIndex, dayLabel, CHECK_SVG } from "./fmt"
 import * as nav from "./nav"
 
 // The list surface — the app's home: a scannable feed of headlines under the
@@ -47,10 +47,6 @@ const ROOT_MARGIN = "800px"
 // reader; the row carries .srr-row-saved for the filled look.
 const STAR_SVG =
    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.4l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z"/></svg>'
-
-// The caught-up reward mark — a plain checkmark, the universal "done".
-const CHECK_SVG =
-   '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>'
 
 let container: HTMLElement
 let rowsEl: HTMLElement | null = null
@@ -703,6 +699,16 @@ async function renderSearch(my: object, onInteractive?: () => void): Promise<voi
    }
 }
 
+// Drop the built-window claim so the NEXT show() takes the rebuild path even
+// under an unchanged filter key. For actions that change the filter's
+// MEMBERSHIP while the list is hidden behind the reader (markUnreadFrom
+// re-raising the unseen bounds: newly-unread rows are missing from the loaded
+// window) — rebuilding the display:none list immediately would pin zero row
+// heights, so invalidate now, rebuild on return.
+export function invalidate(): void {
+   builtKey = null
+}
+
 // Re-show an already-built list (same filter). When the reader's article is
 // already a rendered row — the common return path: you stepped a few articles
 // within the loaded window — re-anchor by scrolling to it, with NO feed walk,
@@ -1008,7 +1014,7 @@ async function pump(my: object): Promise<void> {
    try {
       while (my === tok && !exhaustedBottom && rowsEl) {
          // Offscreen guard. pump exists to FILL A VIEWPORT — with no viewport it
-         // must not run. A hidden list (the config surface stacks over it with
+         // must not run. A hidden list (display:none behind the reader, via
          // el.listView.hidden = true) has no layout box, so getClientRects() is
          // empty and getBoundingClientRect() below returns all-zeros — making the
          // below-the-fold break (rect.top > …) never fire. pump would then page to

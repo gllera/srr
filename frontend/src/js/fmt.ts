@@ -272,6 +272,12 @@ export function countBadge(n: number): string {
    return n > 999 ? "999+" : String(n)
 }
 
+// The caught-up mark — a plain checkmark, the universal "done". One glyph for
+// every scale of "nothing left here": the list's reward state (list.ts) and the
+// toolbar readout's zero-unread state (app.ts) render this same string.
+export const CHECK_SVG =
+   '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+
 const pad2 = (n: number) => n.toString().padStart(2, "0")
 export function formatDate(unix: number): string {
    const d = new Date(unix * 1000)

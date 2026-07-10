@@ -358,3 +358,71 @@ describe("v2 blob / ts / sync mode", () => {
       expect(localSeen()).toEqual({ "feed:9": 42 })
    })
 })
+
+describe("per-key seen timestamps (st) — the explicit-rewind ordering", () => {
+   const ST_KEY = "srr-seen-ts"
+   beforeEach(() => {
+      localStorage.clear()
+   })
+
+   it("exportProfile includes the st map alongside seen", () => {
+      localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 5 }))
+      localStorage.setItem(ST_KEY, JSON.stringify({ "feed:1": 42 }))
+      const obj = JSON.parse(exportProfile())
+      expect(obj.st).toEqual({ "feed:1": 42 })
+   })
+
+   it("a newer per-key stamp LOWERS seen — the explicit rewind propagates (sync mode)", () => {
+      localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 90 }))
+      localStorage.setItem(ST_KEY, JSON.stringify({ "feed:1": 100 }))
+      const blob = JSON.stringify({ v: 2, ts: 200, seen: { "feed:1": 20 }, st: { "feed:1": 200 }, saved: [] })
+      const r = importProfile(blob, { prefs: false, mode: "sync" })
+      expect(r.ok).toBe(true)
+      expect(r.changed).toBe(true)
+      expect(JSON.parse(localStorage.getItem(SEEN_KEY)!)).toEqual({ "feed:1": 20 })
+      // The rewind's stamp is adopted verbatim, never re-stamped to now.
+      expect(JSON.parse(localStorage.getItem(ST_KEY)!)).toEqual({ "feed:1": 200 })
+   })
+
+   it("an older per-key stamp cannot lower seen — stale rewinds lose", () => {
+      localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 90 }))
+      localStorage.setItem(ST_KEY, JSON.stringify({ "feed:1": 300 }))
+      const blob = JSON.stringify({ v: 2, ts: 400, seen: { "feed:1": 20 }, st: { "feed:1": 200 }, saved: [] })
+      const r = importProfile(blob, { prefs: false, mode: "sync" })
+      expect(r.changed).toBe(false)
+      expect(JSON.parse(localStorage.getItem(SEEN_KEY)!)).toEqual({ "feed:1": 90 })
+   })
+
+   it("per-key ordering beats the blob-level ts — a newer-stamped local raise survives an older-stamped rewind", () => {
+      // Local raise stamped newer than the blob's rewind: the raise wins even
+      // though the blob's blob-level ts is newer — ordering is per key.
+      localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 90 }))
+      localStorage.setItem(ST_KEY, JSON.stringify({ "feed:1": 500 }))
+      const blob = JSON.stringify({ v: 2, ts: 600, seen: { "feed:1": 20 }, st: { "feed:1": 400 }, saved: [] })
+      expect(importProfile(blob, { prefs: false, mode: "sync" }).changed).toBe(false)
+      expect(JSON.parse(localStorage.getItem(SEEN_KEY)!)).toEqual({ "feed:1": 90 })
+   })
+
+   it("keys without stamps on either side keep the legacy raise-only max", () => {
+      localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 90, "feed:2": 5 }))
+      localStorage.setItem(ST_KEY, JSON.stringify({ "feed:1": 300 }))
+      // The blob carries no st at all (an old build): its lower values are
+      // ignored (no ordering info → never lower), its higher values adopted.
+      const blob = JSON.stringify({ v: 2, ts: 400, seen: { "feed:1": 20, "feed:2": 50 }, saved: [] })
+      const r = importProfile(blob, { prefs: false, mode: "sync" })
+      expect(r.changed).toBe(true)
+      const seen = JSON.parse(localStorage.getItem(SEEN_KEY)!)
+      expect(seen["feed:1"]).toBe(90) // unstamped rewind ignored — max holds
+      expect(seen["feed:2"]).toBe(50) // raise adopted
+      expect(JSON.parse(localStorage.getItem(ST_KEY)!)).toEqual({ "feed:1": 300 })
+   })
+
+   it("merge mode (file restore) honors the same per-key rule", () => {
+      localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 10 }))
+      const blob = JSON.stringify({ v: 2, ts: 0, seen: { "feed:1": 30 }, st: { "feed:1": 77 }, saved: [] })
+      const r = importProfile(blob, { prefs: false })
+      expect(r.changed).toBe(true)
+      expect(JSON.parse(localStorage.getItem(SEEN_KEY)!)).toEqual({ "feed:1": 30 })
+      expect(JSON.parse(localStorage.getItem(ST_KEY)!)).toEqual({ "feed:1": 77 }) // stamp adopted verbatim
+   })
+})

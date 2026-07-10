@@ -478,7 +478,7 @@ describe("browser: real SPA over real packs", () => {
    })
 
    // Saved articles: the reader's ★ toggle adds the current article to the
-   // device-local srr-saved set; "★ Saved" in the config filter picker is a
+   // device-local srr-saved set; "★ Saved" in the filter picker overlay is a
    // distinct filter view that shows exactly that set, and it survives a reload
    // (the set lives in localStorage, the #!~saved hash re-enters the view).
    it("saves an article, lists it under ★ Saved, and persists across reload", async () => {
@@ -495,21 +495,18 @@ describe("browser: real SPA over real packs", () => {
          })
          expect(await page.$eval(".srr-save", (e) => e.getAttribute("aria-pressed"))).toBe("true")
 
-         // Back to the list → settings (config) → pick "★ Saved". The picker now
-         // lives in the config surface; choosing a filter opens the READER at that
-         // filter's resume position, so ★ Saved lands on the saved article.
+         // Back to the list → tap the now-viewing readout → pick "★ Saved" in the
+         // picker overlay. Choosing a filter closes the overlay and shows the LIST
+         // under that filter: exactly the saved row, the saved-row marker, and the
+         // shareable #!~saved hash.
          await page.click(".srr-back")
          await waitList(page)
-         await page.click(".srr-settings")
-         await page.waitForSelector('.srr-config-filter a[data-value="~saved"]', { timeout: 20000 })
-         await page.click('.srr-config-filter a[data-value="~saved"]')
-         await waitReader(page)
-         expect(await $title(page)).toBe("sport title 1")
-
-         // Back to the list under the ★ Saved filter: exactly the saved row, the
-         // saved-row marker, and the shareable #!~saved hash.
-         await page.click(".srr-back")
+         await page.click(".srr-feed")
+         await page.waitForSelector('.srr-picker-filter a[data-value="~saved"]', { timeout: 20000 })
+         await page.click('.srr-picker-filter a[data-value="~saved"]')
          await waitList(page)
+         // The overlay closed on pick.
+         expect(await page.$eval(".srr-picker", (e) => (e as HTMLElement).hidden)).toBe(true)
          await page.waitForFunction(() => document.querySelectorAll(".srr-list a.srr-row").length === 1, {
             timeout: 20000,
          })
@@ -984,18 +981,16 @@ describe("browser: real SPA over real packs", () => {
       }
    })
 
-   // Regression: enabling "unread only" froze the tab. The toggle lives in the
-   // config surface, which stacks over the list with el.listView.hidden = true, so
-   // its list.rerender() runs while the list is display:none. When the list anchors
-   // at a LIVE position with a long older-unread tail below it — set here via the
-   // list keyboard cursor (nav.select, which moves pos WITHOUT recording it seen,
-   // unlike opening the reader) — list.ts's pump (infinite scroll) walks that tail.
-   // pump stops once the bottom sentinel sits below the fold, but a hidden element's
-   // getBoundingClientRect() is all-zeros, so pre-fix the break never fired and pump
-   // paged the WHOLE archive into the hidden list (the freeze). Assert the hidden
-   // rerender stays near its initial batch (BATCH=30), not all 100 rows.
+   // Regression heir: enabling "unread only" once froze the tab — the toggle then
+   // lived on a surface that hid the list (display:none), whose all-zero
+   // getBoundingClientRect broke the pump's below-the-fold stop and paged the
+   // WHOLE archive. The toggle now rides the gear's anchored settings menu over
+   // the VISIBLE list, but the bounded-window property is the same contract:
+   // with the list anchored at a LIVE position (chron 0, ~99 newer unread rows
+   // above it), flipping the mode must rerender a window near the initial batch
+   // (BATCH=30), never the whole 100-article archive.
    // Runs LAST: replaces the shared store with a single 100-article feed.
-   it("does not page the hidden list to exhaustion when unread-only is toggled in settings", async () => {
+   it("keeps the rerender window bounded when unread-only is toggled from the settings menu", async () => {
       for (const f of readdirSync(packsDir)) rmSync(join(packsDir, f), { recursive: true, force: true })
       feeds.set("/bulk.xml", rssFeed("Bulk", nItems(100, "bulk")))
       await srr(packsDir, "feed", "add", "-t", "Bulk", "-u", `${feeds.url}/bulk.xml`)
@@ -1008,20 +1003,22 @@ describe("browser: real SPA over real packs", () => {
          await waitList(page)
          // [ALL] boots anchored at the oldest unread row (chron 0) — a live anchor
          // (render's nav.select sets pos without recordSeen), so it stays the anchor
-         // through the unread toggle. ~99 newer unread rows sit above it; the toggle
-         // must still rerender a BOUNDED window, not page the whole archive.
+         // through the unread toggle.
          await waitCurrent(page, "bulk title 0")
-         // Open settings → the list goes display:none behind the config surface.
+         // Open the gear's settings menu — the list stays visible beneath it.
          await page.click(".srr-settings")
-         await page.waitForSelector(".srr-config-unread", { visible: true })
-         expect(await page.$eval(".srr-list", (e) => (e as HTMLElement).hidden)).toBe(true)
-         // Flip "Unread" — this rerenders the hidden list.
-         await page.click(".srr-config-unread")
+         await page.waitForSelector(".srr-ctxmenu", { visible: true })
+         expect(await page.$eval(".srr-list", (e) => (e as HTMLElement).hidden)).toBe(false)
+         // Flip "Show read" — the menu closes and the list rerenders in place.
+         await page.$$eval(".srr-ctxmenu-item", (items) => {
+            const row = items.find((b) => b.textContent === "Show read") as HTMLButtonElement
+            row.click()
+         })
          // Give a runaway pump ample time to page the whole archive if it regressed.
          await new Promise((r) => setTimeout(r, 1500))
          const rows = await page.$$eval(".srr-list a.srr-row", (els) => els.length)
          expect(rows).toBeGreaterThan(0) // it DID rerender (initial batch loaded)
-         expect(rows).toBeLessThanOrEqual(45) // ~BATCH, NOT all 100 (pre-fix: ~99)
+         expect(rows).toBeLessThanOrEqual(45) // ~BATCH, NOT all 100
       } finally {
          await ctx.close()
       }

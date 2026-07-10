@@ -18,11 +18,17 @@ const OUT = resolve(HERE, "design-store")
 const LONG_TITLE =
    "A deliberately very long headline that has to wrap and exercise the toolbar filter-label ellipsis and the reader title layout across multiple lines"
 
-function rss(title: string, items: { title: string; body: string; guid: string }[]): string {
+// Items carry a link and a pubDate (ageH hours before generation) — without
+// them the reader masthead renders bare (no dateline, no ↗ permalink, no title
+// link) and every row lands under one day divider, so design-grounding
+// screenshots misrepresent both surfaces.
+function rss(title: string, items: { title: string; body: string; guid: string; ageH: number }[]): string {
    const entries = items
       .map(
          (i) =>
             `<item><title>${i.title}</title><guid>${i.guid}</guid>` +
+            `<link>https://example.com/${i.guid}</link>` +
+            `<pubDate>${new Date(Date.now() - i.ageH * 3600_000).toUTCString()}</pubDate>` +
             `<description><![CDATA[${i.body}]]></description></item>`,
       )
       .join("")
@@ -62,12 +68,12 @@ describe("design fixture store", () => {
 
       const feeds = await feedServer({
          "/tech.xml": rss("Tech Daily", [
-            { title: "Compilers are back", body: "<p>Body one.</p>", guid: "t1" },
-            { title: LONG_TITLE, body: "<p>Long.</p>", guid: "t2" },
+            { title: "Compilers are back", body: "<p>Body one.</p>", guid: "t1", ageH: 30 },
+            { title: LONG_TITLE, body: "<p>Long.</p>", guid: "t2", ageH: 4 },
          ]),
-         "/news.xml": rss("World News", [{ title: "Election results", body: "<p>News.</p>", guid: "n1" }]),
-         "/food.xml": rss("Cooking Weekly", [{ title: "Best bread", body: "<p>Bread.</p>", guid: "f1" }]),
-         "/gone.xml": rss("Soon Deleted", [{ title: "Vanishing source", body: "<p>Gone.</p>", guid: "g1" }]),
+         "/news.xml": rss("World News", [{ title: "Election results", body: "<p>News.</p>", guid: "n1", ageH: 2 }]),
+         "/food.xml": rss("Cooking Weekly", [{ title: "Best bread", body: "<p>Bread.</p>", guid: "f1", ageH: 52 }]),
+         "/gone.xml": rss("Soon Deleted", [{ title: "Vanishing source", body: "<p>Gone.</p>", guid: "g1", ageH: 28 }]),
          // /broken.xml resolves validly (empty) at `feed add` time — the backend
          // rejects an unresolvable add — then gets removed below so `art fetch`
          // 404s and records the ferr.

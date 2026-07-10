@@ -6,10 +6,13 @@ const imgProxyDialog = document.querySelector<HTMLElement>(".srr-imgproxy-dialog
 const backupDialog = document.querySelector<HTMLElement>(".srr-backup-dialog")
 const syncDialog = document.querySelector<HTMLElement>(".srr-sync-dialog")
 
-// The toolbar dropdown menus (filter picker + ⋯ settings) were retired when those
-// moved into the config surface (config.ts). closeAllDropdowns stays as a no-op so
-// its remaining callers — gestures.ts (toolbar-hide) and the image-proxy / backup
-// modals — keep working without a dropdown to close.
+// The original toolbar dropdown menus (filter picker + ⋯ settings) were retired
+// when those moved into the config surface; that surface was itself dissolved —
+// the filter picker is now its own full-viewport overlay (picker.ts) and the
+// settings came back here as an anchored menu on the gear (showContextMenu).
+// closeAllDropdowns stays as a no-op so its remaining callers — gestures.ts
+// (toolbar-hide) and the image-proxy / backup modals — keep working without a
+// dropdown to close.
 export function closeAllDropdowns(): void {}
 
 function divEl(className: string): HTMLDivElement {
@@ -206,6 +209,109 @@ function syncBody(close: () => void): DocumentFragment {
 export function showSyncDialog(): void {
    if (!syncDialog) return
    openModal(syncDialog, syncDialog.querySelector<HTMLElement>(".srr-sync-body")!, syncBody)
+}
+
+// ── Anchored context menu ─────────────────────────────────────────────────────
+// A minimal anchored menu of action rows floated above its anchor — every
+// current anchor sits in the bottom toolbar, so "above" keeps it clear of the
+// pinned bar. Two callers: the frontier menu (a secondary gesture — right-click
+// / long-press / the keyboard menu key — on the next pill / lane readout) and
+// the list's settings menu (a plain tap on the gear). Built on the fly and
+// removed on close (no skeleton node to keep in sync). It shares the modals'
+// activeClose slot, so a menu and a modal never stack. Escape / an outside
+// press / a scroll all dismiss; focus lands on the container (arrows enter and
+// step the items, wrapping) and returns to the anchor on close.
+//
+// Item shape: `checked` makes the row a menuitemcheckbox (aria-checked; CSS
+// draws the ✓) — pass a boolean to mark a toggle row, leave undefined for a
+// plain action row. `disabled` renders the row inert (skipped by the arrows,
+// unclickable) — for an action whose precondition isn't met (e.g. search while
+// the index rebuilds), kept visible so the capability isn't hidden.
+// `opts.footer` appends a non-interactive block under the items (the settings
+// menu's status readout), set off by a rule (CSS .srr-ctxmenu-footer).
+export type MenuItem = { label: string; action: () => void; checked?: boolean; disabled?: boolean }
+
+export function showContextMenu(anchor: HTMLElement, items: MenuItem[], opts?: { footer?: HTMLElement }): void {
+   if (activeClose) activeClose() // never stack two opens
+   if (items.length === 0) return
+   const menu = divEl("srr-ctxmenu")
+   menu.setAttribute("role", "menu")
+   for (const item of items) {
+      const b = document.createElement("button")
+      b.type = "button"
+      b.className = "srr-ctxmenu-item"
+      if (item.checked !== undefined) {
+         b.setAttribute("role", "menuitemcheckbox")
+         b.setAttribute("aria-checked", String(item.checked))
+      } else {
+         b.setAttribute("role", "menuitem")
+      }
+      if (item.disabled) b.disabled = true
+      b.textContent = item.label
+      b.addEventListener("click", () => {
+         close()
+         item.action()
+      })
+      menu.appendChild(b)
+   }
+   if (opts?.footer) {
+      opts.footer.classList.add("srr-ctxmenu-footer")
+      menu.appendChild(opts.footer)
+   }
+
+   const focusables = () => [...menu.querySelectorAll<HTMLButtonElement>(".srr-ctxmenu-item:not(:disabled)")]
+   const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+         e.preventDefault()
+         e.stopPropagation() // the dialog discipline: never reach app.ts's Escape
+         close()
+      } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+         e.preventDefault()
+         e.stopPropagation() // ...nor the reader's arrow navigation
+         const f = focusables()
+         const at = f.indexOf(document.activeElement as HTMLButtonElement)
+         // From the container (no item focused yet) the arrows enter at the
+         // matching end; from an item they step with wrap-around.
+         const next =
+            at === -1
+               ? e.key === "ArrowDown"
+                  ? 0
+                  : f.length - 1
+               : (at + (e.key === "ArrowDown" ? 1 : -1) + f.length) % f.length
+         f[next]?.focus()
+      }
+   }
+   // pointerdown (not click) so the press that dismisses never also activates
+   // whatever sits under the menu; a press inside the menu proceeds to its item.
+   const onDown = (e: Event) => {
+      if (!menu.contains(e.target as Node)) close()
+   }
+   const close = () => {
+      menu.remove()
+      document.removeEventListener("keydown", onKey, true)
+      document.removeEventListener("pointerdown", onDown, true)
+      window.removeEventListener("scroll", close, true)
+      activeClose = null
+      anchor.focus()
+   }
+   activeClose = close
+
+   document.body.appendChild(menu)
+   // Anchored above the opener: bottom-pinned to the anchor's top edge,
+   // horizontally centered on it, clamped inside the viewport.
+   const r = anchor.getBoundingClientRect()
+   menu.style.bottom = `${window.innerHeight - r.top + 6}px`
+   menu.style.left = `${Math.max(8, Math.min(r.left + r.width / 2 - menu.offsetWidth / 2, window.innerWidth - menu.offsetWidth - 8))}px`
+   document.addEventListener("keydown", onKey, true)
+   document.addEventListener("pointerdown", onDown, true)
+   // A scroll under the open menu displaces its context — dismiss (capture: the
+   // list surface scrolls the window, but a scrollable article body may not bubble).
+   window.addEventListener("scroll", close, true)
+   // Focus the container, not the first item — a pointer-opened menu must not
+   // paint an item pre-selected (:focus-visible fires on programmatic focus);
+   // the arrows (above) enter the items, so Shift+F10 keyboard flows still work.
+   menu.tabIndex = -1
+   menu.focus()
 }
 
 // Hook set by app.ts so the backup dialog can trigger a list rerender +

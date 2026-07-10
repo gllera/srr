@@ -210,21 +210,64 @@ video {
    line-height: 1.22;
 }
 
-/* Toolbar filter label — the "now viewing" readout in the wire voice (mono,
-   uppercase, tracked). A plain, non-interactive label (config is reached via the
-   settings gear); it fills the list toolbar's center slot with its content
-   centered, ellipsizing a long feed/tag name. Single-feed filters tint it with the
-   source color (data-src, set in app.ts); [ALL]/tag/saved/search stay neutral. */
+/* Toolbar filter readout — the "now viewing" button in the wire voice (mono,
+   uppercase, tracked). Tapping it opens the filter picker overlay (it also
+   anchors the frontier menu on right-click / long-press); it fills the list
+   toolbar's center slot with its content centered, ellipsizing a long feed/tag
+   name. Single-feed filters tint it with the source color (data-src, set in
+   app.ts); [ALL]/tag/saved/search stay neutral. Two halves: the name
+   (ellipsizing) and the filter's unread readout — count digits or the caught-up
+   check (app.ts refreshFeedCount) — which never shrinks. Its chrome reset lives
+   here (not in the shared icon-button rules below): it's a full-width text
+   button, not a square glyph. */
 .srr-toolbar .srr-feed {
+   background: none;
+   border: none;
+   cursor: pointer;
+   min-height: 2.75rem;
+   border-radius: var(--radius);
    padding: 0 0.45rem;
    font-family: var(--font-mono);
    font-size: var(--text-sm);
    letter-spacing: 0.04em;
    text-transform: uppercase;
    color: var(--muted);
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   gap: 0.5em;
+   transition: background 0.15s;
+   &:hover {
+      background: var(--hover);
+   }
+}
+.srr-feed-name {
+   min-width: 0;
    overflow: hidden;
    text-overflow: ellipsis;
    white-space: nowrap;
+}
+/* The unread half of the readout: the same tabular digits as the next pill's
+   pending count, one step dimmer than the name so the lane reads first and its
+   backlog second. [hidden] must beat the parent's flex layout. */
+.srr-feed-count {
+   flex: none;
+   font-variant-numeric: tabular-nums;
+   opacity: 0.7;
+}
+.srr-feed-count[hidden] {
+   display: none;
+}
+/* Caught up: the shared checkmark in the same warm accent as the list's reward
+   state — full strength, it's a mark, not a number. */
+.srr-feed-count.srr-feed-caughtup {
+   color: var(--accent);
+   opacity: 1;
+}
+.srr-feed-count.srr-feed-caughtup svg {
+   display: block;
+   width: 1em;
+   height: 1em;
 }
 .srr-feed.srr-filter-on {
    color: var(--fg);
@@ -428,14 +471,16 @@ video {
    /* The wire console grid. The DOM interleaves the list + reader controls
       (back · readout · prev · next · save · settings) so each surface's visible
       controls — the other surface's are display:none and take no cell — auto-place
-      left→right: reader = back · prev · next · save · settings (the base is five
-      equal slots, minmax(0,1fr), so the accent "next" pill lands dead-center in the
-      thumb zone and the settings gear hugs the right edge), list = readout ·
-      settings (the LIST template below lets the now-viewing readout take the bar's
-      free space (1fr) with the settings gear shrunk to its tap target on the right
-      — a long feed/tag name ("The Go Programming Language Blog") stays legible).
-      Either way the flexible track is a free-space fraction, never its content, so
-      it ellipsizes within its column and never shifts the icons. */
+      left→right: reader = back · prev · next · save (the base is five equal
+      slots, minmax(0,1fr), so the accent "next" pill lands dead-center in the
+      thumb zone; save is placed explicitly in the fifth track so it hugs the
+      right edge — the gear is list-only now), list = open-article · readout ·
+      settings (the LIST template below lets the now-viewing readout take the
+      bar's free space (1fr) with the settings gear shrunk to its tap target on
+      the right — a long feed/tag name ("The Go Programming Language Blog")
+      stays legible). Either way the flexible track is a free-space fraction,
+      never its content, so it ellipsizes within its column and never shifts the
+      icons. */
    display: grid;
    grid-template-columns: repeat(5, minmax(0, 1fr));
    align-items: center;
@@ -458,9 +503,9 @@ body.srr-view-list .srr-toolbar {
    transform: translateY(100%);
 }
 
-/* Chrome-stripping reset + 44px (2.75rem) tap target for every toolbar BUTTON.
-   The now-viewing readout (.srr-feed) is a plain label, not a button, so it's
-   excluded here (see its own rule above). */
+/* Chrome-stripping reset + 44px (2.75rem) tap target for the square toolbar
+   buttons. The now-viewing readout (.srr-feed) is a full-width text button with
+   its own reset (see its rule above), so it's excluded here. */
 .srr-toolbar .srr-back,
 .srr-toolbar .srr-open-reader,
 .srr-toolbar .srr-settings,
@@ -494,9 +539,8 @@ body.srr-view-list .srr-toolbar {
 
 /* Edge slots hug the screen edges (the rest of each control centers in its slot):
    the now-viewing readout (list center slot) fills its slot with its content
-   centered, the settings gear (last slot, both surfaces) sits flush right, back
-   (reader slot 1) flush left. (save no longer hugs an edge — it centers in its slot
-   like prev/next, the gear having taken over the right edge.) */
+   centered, the settings gear (list) and save (reader) sit flush right, back
+   (reader slot 1) flush left. */
 .srr-toolbar > .srr-feed {
    justify-self: stretch;
    min-width: 0;
@@ -507,9 +551,16 @@ body.srr-view-list .srr-toolbar {
 .srr-toolbar > .srr-open-reader {
    justify-self: start;
 }
-/* Settings gear sits at the right edge on BOTH surfaces — past the readout on the
-   list, past save in the reader (one fixed home for "open config"). */
+/* Settings gear sits at the right edge of the LIST bar (it's hidden in the
+   reader — see the view rules below). */
 .srr-toolbar > .srr-settings {
+   justify-self: end;
+}
+/* Reader bar: with the gear gone, save takes the fifth track explicitly so it
+   keeps the right edge (auto-placement would drop it into track 4 and leave a
+   phantom fifth slot). Inert on the list, where save is display:none. */
+.srr-toolbar > .srr-save {
+   grid-column: 5;
    justify-self: end;
 }
 
@@ -579,8 +630,8 @@ body.srr-view-list .srr-toolbar {
    stroke-linejoin: round;
 }
 
-/* Settings (⚙) — the reader's config entry: an outline gear matching the icon
-   console (inherits the button's currentColor, so hover/active track the rest). */
+/* Settings (⚙) — the list's settings-menu trigger: an outline gear matching the
+   icon console (inherits the button's currentColor, so hover/active track the rest). */
 .srr-settings-icon {
    display: block;
    width: 1.2rem;
@@ -671,17 +722,15 @@ body.srr-view-list .srr-toolbar {
    }
 }
 
-/* Config filter list — the feed / tag / [ALL] / ★Saved picker inside the config
-   surface. Reuses the row-content styles the retired toolbar dropdown used (rows,
+/* Picker filter list — the feed / tag / [ALL] / ★Saved rows inside the picker
+   overlay. Reuses the row-content styles the retired toolbar dropdown used (rows,
    tag groups, source chips, health-tinted labels, unread badges); it's a static
-   in-flow panel, not a floating menu, so it carries no absolute positioning. */
-/* The feed / tag picker sits between the quick actions and the freshness footer;
-   a top rule + spacing set it off as its own navigation section under the actions
-   above (the status footer below carries its own top rule). */
-.srr-config-filter {
-   margin-top: 0.6rem;
-   padding: 0.5rem 0 0.3rem;
-   border-top: 1px solid var(--faint);
+   in-flow panel inside the overlay's own scroll, so it carries no absolute
+   positioning. Shares the app column with the sticky header above it. */
+.srr-picker-filter {
+   max-width: 680px;
+   margin: 0 auto;
+   padding: 0.5rem 1rem 2rem;
    & a {
       color: var(--fg);
       padding: 0.45rem 0.75rem;
@@ -794,26 +843,30 @@ body.srr-view-list .srr-toolbar {
    }
 }
 
-/* Feed rows + tag headers lay out as flex so the title ellipsizes in the middle
-   while the source chip / health dot / unread badge / ⓘ details button hold their
-   size at the right. [ALL] / ★Saved stay plain block rows (no ⓘ) and ellipsize
-   on the <a> as before — the title span's flex props are inert outside a flex row. */
-.srr-config-filter a.srr-feed-row {
+/* Feed rows + [ALL] + tag headers lay out as flex so the title ellipsizes in the
+   middle while the source chip / health dot / unread badge / ⓘ details button
+   hold their size at the right. ★Saved stays a plain block row (no ⓘ) and
+   ellipsizes on the <a> as before — the title span's flex props are inert
+   outside a flex row. */
+.srr-picker-filter a.srr-feed-row {
    display: flex;
    align-items: center;
 }
-.srr-config-filter .srr-row-title {
+.srr-picker-filter .srr-row-title {
    flex: 1 1 auto;
    min-width: 0;
    overflow: hidden;
    text-overflow: ellipsis;
    white-space: nowrap;
 }
-/* The ⓘ details button (feed rows only) — a button-semantic span (a real
-   <button> can't nest in the row's <a>). A quiet right-edge glyph; negative
-   vertical margin keeps it from growing the row, and a negative right margin hugs
-   the edge so it lines up with the tag headers' collapse chevron one row over. */
-.srr-config-filter .srr-info-btn {
+/* The ⓘ details button (feed rows + [ALL]) — a button-semantic span (a real
+   <button> can't nest in the row's <a>). A SOLID disc with a knocked-out "i":
+   fill is what separates it from the tag headers' open collapse caret sharing
+   the same right gutter (shape alone wasn't enough at this size — both read as
+   thin gray line glyphs). Negative vertical margin keeps it from growing the
+   row, and a negative right margin hugs the edge so it lines up with that
+   caret one row over. Health tints (data-grade) color the whole disc. */
+.srr-picker-filter .srr-info-btn {
    flex: 0 0 auto;
    display: inline-flex;
    align-items: center;
@@ -831,10 +884,17 @@ body.srr-view-list .srr-toolbar {
    & svg {
       width: 1.05rem;
       height: 1.05rem;
-      fill: none;
-      stroke: currentColor;
-      stroke-width: 1.6;
+   }
+   & .srr-info-disc {
+      fill: currentColor;
+   }
+   & line {
+      stroke: var(--bg);
+      stroke-width: 2.2;
       stroke-linecap: round;
+   }
+   & .srr-info-dot {
+      fill: var(--bg);
    }
    &:hover {
       color: var(--fg);
@@ -851,28 +911,27 @@ body.srr-view-list .srr-toolbar {
    (the dot used to push flagged titles rightward and misalign the list); the
    right-edge ⓘ inherits the same tint from data-grade. The active selection wins
    (rule placed last). */
-.srr-config-filter a[data-grade="warn"] .srr-row-title,
-.srr-config-filter a[data-grade="warn"] .srr-info-btn,
-.srr-config-filter a[data-grade="warn"] .srr-info-btn:hover {
+.srr-picker-filter a[data-grade="warn"] .srr-row-title,
+.srr-picker-filter a[data-grade="warn"] .srr-info-btn,
+.srr-picker-filter a[data-grade="warn"] .srr-info-btn:hover {
    color: #c98000;
 }
-.srr-config-filter a[data-grade="crit"] .srr-row-title,
-.srr-config-filter a[data-grade="crit"] .srr-info-btn,
-.srr-config-filter a[data-grade="crit"] .srr-info-btn:hover,
-.srr-config-filter a.srr-active .srr-row-title {
+.srr-picker-filter a[data-grade="crit"] .srr-row-title,
+.srr-picker-filter a[data-grade="crit"] .srr-info-btn,
+.srr-picker-filter a[data-grade="crit"] .srr-info-btn:hover,
+.srr-picker-filter a.srr-active .srr-row-title {
    color: var(--accent);
 }
 
 /* Title search bar — pinned atop the list while a "q:<query>" filter is active
    (body.srr-view-list.srr-searching); sticky so it stays in view as the matching
    articles scroll under it. Magnifier + input + ✕ on one row; a hint line below.
-   The :not(.srr-view-config) guard keeps the bar hidden when config stacks over
-   the list (which keeps srr-view-list on underneath): without it this rule's three
-   classes outrank the .srr-view-config hide rule below and the bar shows through. */
+   (The picker overlay simply covers it — --z-overlay beats --z-searchbar — so it
+   needs no hide guard while the picker is open.) */
 .srr-searchbar {
    display: none;
 }
-body.srr-view-list.srr-searching:not(.srr-view-config) .srr-searchbar {
+body.srr-view-list.srr-searching .srr-searchbar {
    display: block;
    position: sticky;
    top: 0;
@@ -996,50 +1055,57 @@ body.srr-view-list.srr-searching:not(.srr-view-config) .srr-searchbar {
    display: none;
 }
 
-/* The now-viewing readout (label) and the open-article button are list-only (the
-   reader is already the article surface, and has no filter readout). The settings
-   gear shows on BOTH surfaces — its one fixed home is the bar's right edge — so
-   config is always one tap away, list or reader. (The pinned search bar is already
-   display:none without .srr-searching.) */
+/* The now-viewing readout, the open-article button, and the settings gear are
+   list-only: the reader is already the article surface (no filter readout), and
+   its chrome stays down to reading controls — settings live one tap away behind
+   the back button. (The pinned search bar is already display:none without
+   .srr-searching.) */
 body:not(.srr-view-list) .srr-feed,
-body:not(.srr-view-list) .srr-open-reader {
+body:not(.srr-view-list) .srr-open-reader,
+body:not(.srr-view-list) .srr-settings {
    display: none;
 }
 
-/* Config surface owns the screen while open: hide the bottom toolbar (srr-view-list
-   stays on underneath, so it'd otherwise show through). The pin-progress toast is
-   NOT hidden — the offline-pin row lives in config, so its progress/outcome
-   feedback (fixed, z-index above the panel) must stay visible while config is open.
-   The pinned search bar is handled at its own show rule above — its
-   :not(.srr-view-config) guard wins the specificity battle the simple hide rule
-   here would lose. The list/reader containers are hidden via [hidden] in app.ts. */
-body.srr-view-config .srr-toolbar {
-   display: none;
+/* Filter picker overlay — a fixed full-viewport panel over everything but the
+   modals (--z-overlay beats the toolbar and the pinned search bar; the info
+   dialog a picker row opens still stacks above at --z-popup). It scrolls
+   ITSELF (overflow-y) so the list's window scroll position survives underneath
+   untouched — closing the picker without picking lands exactly where you were.
+   overscroll-behavior keeps a flicked scroll from chaining to the list. The
+   header sticks inside the overlay's own scroll context; head + rows share the
+   app column (max-width + auto margins) while the background bleeds full-width. */
+.srr-picker {
+   position: fixed;
+   inset: 0;
+   z-index: var(--z-overlay);
+   background: var(--bg);
+   overflow-y: auto;
+   overscroll-behavior: contain;
 }
-
-/* Config surface — the settings + navigation hub. A scrollable panel under a
-   sticky header; replaces the list/reader while open. */
-.srr-config {
-   max-width: 680px;
-   margin: 0 auto;
-   padding-bottom: 2rem;
+/* The overlay container takes focus on open (so Escape lands in the picker
+   without painting a row pre-selected) — suppress the global :focus-visible
+   ring, same exemption as the context menu / reader title. */
+.srr-picker:focus-visible {
+   outline: none;
 }
-.srr-config-head {
+.srr-picker-head {
    position: sticky;
    top: 0;
    z-index: var(--z-sticky);
    display: flex;
    align-items: center;
    justify-content: space-between;
+   max-width: 680px;
+   margin: 0 auto;
    padding: 0.8rem 1rem;
    background: var(--bg);
    border-bottom: 1px solid var(--faint);
 }
-.srr-config-title {
+.srr-picker-title {
    margin: 0;
    font-size: var(--text-md);
 }
-.srr-config-close {
+.srr-picker-close {
    background: none;
    border: none;
    color: var(--fg);
@@ -1049,149 +1115,6 @@ body.srr-view-config .srr-toolbar {
    min-height: 2.75rem;
    cursor: pointer;
 }
-.srr-config-body {
-   padding: 0.5rem 1rem;
-}
-/* Quick-action icon bar — search · unread · image proxy · backup as a row of
-   labeled icon buttons at the top of the config body (replacing the old stacked
-   full-width rows). Search leaves config for the list with the search bar open
-   (app.ts onSearch → enterSearch) and disables while the index rebuilds
-   (nav.searchAvailable() is false); unread is a toggle (aria-pressed); backup /
-   image-proxy open centered dialogs. The contextual offline-pin action still
-   renders as a full-width row below (.srr-config-settings .srr-config-action). */
-.srr-config-actions {
-   display: grid;
-   grid-template-columns: repeat(6, 1fr);
-   gap: 0.4rem;
-   margin: 0.5rem 0 0.7rem;
-}
-.srr-config-actions button {
-   display: flex;
-   flex-direction: column;
-   align-items: center;
-   justify-content: center;
-   gap: 0.45rem;
-   min-height: 4.25rem;
-   padding: 0.65rem 0.3rem;
-   background: var(--hover);
-   border: 1px solid var(--faint);
-   border-radius: var(--radius);
-   color: var(--fg);
-   font: inherit;
-   cursor: pointer;
-   transition:
-      background 0.15s,
-      color 0.15s,
-      border-color 0.15s,
-      transform 0.09s ease;
-   &:hover:not(:disabled) {
-      border-color: var(--border);
-   }
-   &:disabled {
-      opacity: 0.4;
-      cursor: default;
-   }
-}
-/* The action glyphs share the toolbar SVG idiom (stroked, currentColor). */
-.srr-config-action-icon {
-   display: block;
-   width: 1.35rem;
-   height: 1.35rem;
-   fill: none;
-   stroke: currentColor;
-   stroke-width: 1.6;
-   stroke-linecap: round;
-   stroke-linejoin: round;
-}
-/* The CSS magnifier is drawn small; scale it up so it carries the same visual
-   weight as the SVG glyphs alongside it. */
-.srr-config-actions .srr-search-icon {
-   width: 1rem;
-   height: 1rem;
-}
-/* The "Read" button is an inverted toggle: an outline dot that fills accent when
-   pressed. Unread-only is the default view, so the dot sits empty in that default
-   and fills only when the reader opts to ALSO show already-read articles
-   (aria-pressed = !unread-only; see config.ts render). */
-.srr-config-unread-icon {
-   display: block;
-   width: 1.25rem;
-   height: 1.25rem;
-   border: 1.7px solid currentColor;
-   border-radius: 50%;
-}
-.srr-config-unread[aria-pressed="true"] {
-   color: var(--accent);
-   border-color: color-mix(in srgb, var(--accent) 45%, var(--faint));
-   & .srr-config-unread-icon {
-      background: currentColor;
-   }
-   & .srr-config-action-label {
-      color: var(--accent);
-   }
-}
-.srr-config-action-label {
-   font-size: 0.72rem;
-   line-height: 1.15;
-   text-align: center;
-   color: var(--muted);
-}
-.srr-config-settings .srr-config-action {
-   display: block;
-   width: 100%;
-   text-align: left;
-   background: none;
-   border: none;
-   border-bottom: 1px solid var(--faint);
-   color: var(--fg);
-   font: inherit;
-   padding: 0.85rem 0.25rem;
-   cursor: pointer;
-   &:hover {
-      background: var(--hover);
-   }
-}
-/* Freshness footer — now the LAST block in the config body, below the feed / tag
-   picker (was a banner above it). A top rule + matching top spacing set it off as
-   a quiet footer under the long picker. (Never :empty anymore — the version line
-   below is always present; the :empty collapse stays as a safety net only.) */
-.srr-config-status {
-   display: flex;
-   flex-direction: column;
-   gap: 0.3rem;
-   margin-top: 0.6rem;
-   padding: 1rem 0.25rem;
-   border-top: 1px solid var(--faint);
-   font-size: 0.8rem;
-   color: var(--muted);
-   &:empty {
-      display: none;
-   }
-}
-/* A flagged status (stale store / search rebuilding): amber caution to match the
-   graded-health warn used by the feed-error dots and the feed info card. */
-.srr-status-flag {
-   display: flex;
-   align-items: center;
-   gap: 0.4rem;
-   color: #c98000;
-   font-weight: 500;
-}
-.srr-status-dot {
-   flex-shrink: 0;
-   width: 0.4rem;
-   height: 0.4rem;
-   border-radius: 50%;
-   background: currentColor;
-}
-/* The build's version label — the footer's quiet last line, wire-voice mono. */
-.srr-status-version {
-   font-family: var(--font-mono);
-   font-size: 0.7rem;
-   letter-spacing: 0.06em;
-   margin-top: 0.3rem;
-}
-
 /* List surface — a scannable feed of headline rows. The list is a bidirectional
    infinite window anchored at the reader's position: newer ("next") rows page in
    above, older below. overflow-anchor:none disables the browser's own scroll
@@ -1471,7 +1394,7 @@ body.srr-view-config .srr-toolbar {
    }
 }
 /* "★ Saved" filter row count — quiet, right-aligned like the unread badge */
-.srr-config-filter .srr-saved-num {
+.srr-picker-filter .srr-saved-num {
    float: right;
    margin-left: 0.5rem;
    font-size: 0.75rem;
@@ -1872,7 +1795,7 @@ body.srr-view-config .srr-toolbar {
 }
 
 /* Feed / tag info dialog — a read-only detail card. Same centered-modal shell as
-   the image-proxy / backup dialogs (dimmed backdrop, focus-trapped in config.ts);
+   the image-proxy / backup dialogs (dimmed backdrop, focus-trapped in picker.ts);
    the body is grouped definition grids built per feed / tag. */
 .srr-info-dialog {
    display: none;
@@ -2009,6 +1932,105 @@ body.srr-view-config .srr-toolbar {
    border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--faint));
    border-radius: var(--radius);
    overflow-wrap: anywhere;
+}
+
+/* Anchored context menu (dropdown.ts showContextMenu) — a small card of action
+   rows floated just above the bottom toolbar: the frontier menu (right-click /
+   long-press on the next pill / lane readout) and the list's settings menu (a
+   tap on the gear). Positioned by JS (bottom-pinned to the anchor's top edge,
+   viewport-clamped). */
+.srr-ctxmenu {
+   position: fixed;
+   z-index: var(--z-popup);
+   display: flex;
+   flex-direction: column;
+   min-width: 12.5rem;
+   max-width: min(20rem, calc(100vw - 16px));
+   padding: 0.3rem;
+   background: var(--bg);
+   border: 1px solid var(--border);
+   border-radius: var(--radius);
+   box-shadow: var(--shadow);
+}
+/* The container takes focus on open (so Escape/arrows work without painting an
+   item pre-selected); its card chrome is the affordance — suppress the ring the
+   global :focus-visible rule would draw (same exemption as .srr-title/.srr-content). */
+.srr-ctxmenu:focus-visible {
+   outline: none;
+}
+.srr-ctxmenu-item {
+   background: none;
+   border: none;
+   color: var(--fg);
+   font: inherit;
+   font-size: var(--text-sm);
+   text-align: left;
+   padding: 0.7rem 0.85rem;
+   border-radius: calc(var(--radius) - 2px);
+   cursor: pointer;
+   &:hover:not(:disabled),
+   &:focus-visible {
+      background: var(--hover);
+   }
+   /* An action whose precondition isn't met (e.g. search while the index
+      rebuilds) stays listed but inert — same treatment as the toolbar buttons. */
+   &:disabled {
+      opacity: 0.4;
+      cursor: default;
+   }
+}
+/* A toggle row (role=menuitemcheckbox): the checkmark trails the label when on —
+   the same neutral ✓ vocabulary as the caught-up readout. */
+.srr-ctxmenu-item[aria-checked="true"]::after {
+   content: "✓";
+   margin-left: 0.6rem;
+   color: var(--accent);
+}
+/* The settings menu's status footer — the freshness / degradation readout
+   (picker.ts renderStatus): a quiet block under the action rows, set off by a
+   hairline. Non-interactive; the arrows skip it. */
+.srr-ctxmenu-footer {
+   display: flex;
+   flex-direction: column;
+   gap: 0.3rem;
+   margin-top: 0.3rem;
+   padding: 0.6rem 0.85rem 0.4rem;
+   border-top: 1px solid var(--faint);
+   font-size: 0.75rem;
+   color: var(--muted);
+}
+/* A flagged status (stale store / search rebuilding / sync failure): amber
+   caution to match the graded-health warn used by the feed-error dots and the
+   feed info card. */
+.srr-status-flag {
+   display: flex;
+   align-items: center;
+   gap: 0.4rem;
+   color: #c98000;
+   font-weight: 500;
+}
+.srr-status-dot {
+   flex-shrink: 0;
+   width: 0.4rem;
+   height: 0.4rem;
+   border-radius: 50%;
+   background: currentColor;
+}
+/* The build's version label — the footer's quiet last line, wire-voice mono. */
+.srr-status-version {
+   font-family: var(--font-mono);
+   font-size: 0.7rem;
+   letter-spacing: 0.06em;
+   margin-top: 0.3rem;
+}
+/* The frontier-menu anchors hold a long-press on touch (iOS has no contextmenu
+   event): suppress the text-selection callout so the hold reads as a menu
+   gesture, not a selection of the readout's text. */
+.srr-toolbar .srr-next,
+.srr-toolbar .srr-feed {
+   -webkit-touch-callout: none;
+   -webkit-user-select: none;
+   user-select: none;
 }
 .srr-hidden {
    display: none !important;
