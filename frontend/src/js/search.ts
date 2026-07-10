@@ -92,6 +92,13 @@ interface Shard {
 }
 
 function parseShard(buf: ArrayBuffer, skipBloom: boolean): Shard {
+   if (skipBloom && buf.byteLength < SEARCH_BLOOM_BYTES) {
+      // A finalized shard shorter than its bloom header is truncated/corrupt;
+      // blindly slicing would silently drop its hits (or mis-parse bloom bytes
+      // as JSONL). Surface it and treat the shard as empty.
+      console.warn(`search: finalized meta shard truncated (${buf.byteLength} < ${SEARCH_BLOOM_BYTES} bytes)`)
+      return { entries: [], folded: [] }
+   }
    const sliced = skipBloom ? buf.slice(SEARCH_BLOOM_BYTES) : buf
    const entries = data.parseJsonl<IMetaWire>(sliced)
    const folded = entries.map((e) => fold(e.t ?? ""))
@@ -167,6 +174,11 @@ export async function* search(q: string, limit = Infinity): AsyncGenerator<ISear
       .split(" ")
       .filter((w) => w.length > 0)
    if (words.length === 0) return
+   // Self-gate: a boot deep-link (#!q:…) reaches search() via nav.fromHash
+   // before the interactive availability check runs. When meta bookkeeping
+   // (mp/mt) doesn't fully cover the store, scanning a partial index would give
+   // inconsistent results — yield nothing (fails safe) instead.
+   if (!data.metaReady()) return
 
    const nf = data.numFinalizedMeta()
    // wordGrams already yields nothing for words shorter than SEARCH_GRAM.

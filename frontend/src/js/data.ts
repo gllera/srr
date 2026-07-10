@@ -87,7 +87,9 @@ async function applyDb(raw: IDB): Promise<void> {
    // (min 1). All feedIds in packs and filters are store feed ids, so this
    // bounds the typed-array allocations by the actual feed count.
    const ids = Object.keys(db.feeds).map(Number)
-   slots = ids.length > 0 ? Math.max(...ids) + 1 : 1
+   // reduce, not Math.max(...ids): a store approaching FEED_ID_CEILING would
+   // overflow the JS engine's spread-argument limit and throw in init/refresh.
+   slots = ids.reduce((m, id) => (id > m ? id : m), 0) + 1
 
    // Per-feed expired totals (db.gz xp), threaded into countLeft so the
    // immutable header cumulative counts are corrected to visible articles.
@@ -97,15 +99,17 @@ async function applyDb(raw: IDB): Promise<void> {
    dataCache = makeLRU<Promise<IArticle[]>>(20)
    metaCache = makeLRU<Promise<IMetaWire[]>>(20)
    groupCache = {}
+   // Reset idxFetches with the other derived caches — BEFORE the empty-store
+   // early return — so a re-run against a total_art===0 store can never leave it
+   // undefined for a later data path (nf===0 here, so this is makeLRU(1)).
+   const nf = numFinalizedIdx()
+   idxFetches = makeLRU(nf + 1)
 
    if (db.total_art === 0) {
       idxHeaders = [] // defensive: a re-run must never leave headers from a previous snapshot
       sessionStorage.removeItem(RELOAD_GUARD)
       return
    }
-
-   const nf = numFinalizedIdx()
-   idxFetches = makeLRU(nf + 1)
 
    // The latest pack is always needed: it holds the newest articles (the
    // default landing view) and its header is the cumulative boundary after

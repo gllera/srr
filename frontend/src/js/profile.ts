@@ -252,14 +252,21 @@ export function importProfile(json: string, opts: { prefs: boolean; mode?: "merg
          // person's current intent (un-saves propagate). Identical content
          // still converges ts but is not a "change".
          try {
+            // Only a well-formed array replaces saved wholesale. A newer blob
+            // that OMITS/malforms `saved` (a truncated keepalive PUT, a
+            // hand-edited endpoint) must NOT zero the local star collection — a
+            // genuine un-save-everything still arrives as `saved:[]` (an array),
+            // so that intent propagates while a missing field is left alone.
             const incoming = obj["saved"]
-            const cleaned = Array.isArray(incoming)
-               ? incoming.filter((n) => Number.isInteger(n) && n >= 0).sort((a: number, b: number) => a - b)
-               : []
-            const next = JSON.stringify(cleaned)
-            if (next !== JSON.stringify(readSavedSorted())) {
-               lsSet(SAVED_KEY, next)
-               changed = true
+            if (Array.isArray(incoming)) {
+               const cleaned = incoming
+                  .filter((n) => Number.isInteger(n) && n >= 0)
+                  .sort((a: number, b: number) => a - b)
+               const next = JSON.stringify(cleaned)
+               if (next !== JSON.stringify(readSavedSorted())) {
+                  lsSet(SAVED_KEY, next)
+                  changed = true
+               }
             }
          } catch {}
          lsSet(PROFILE_TS_KEY, String(blobTs))

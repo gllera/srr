@@ -1,3 +1,4 @@
+import { PACK_BASE } from "./base"
 import * as data from "./data"
 import {
    setProfileImportHook,
@@ -150,7 +151,9 @@ async function pinCurrentFilter(): Promise<void> {
          else unpinFilter(key)
       }
    }
-   controller.postMessage({ type: "pin", names }, [port2])
+   // base = the URL the page resolves pack names against, so the SW pins at the
+   // exact URLs it will later fetch (self-hosted store root, hosted /packs/, …).
+   controller.postMessage({ type: "pin", names, base: PACK_BASE.href }, [port2])
    showPinProgress(0, names.length)
 }
 
@@ -168,7 +171,7 @@ function unpinCurrentFilter(): void {
    for (const [k, entry] of pins) if (k !== key) for (const n of entry.names) stillNeeded.add(n)
    const toDelete = names.filter((n) => !stillNeeded.has(n))
    unpinFilter(key)
-   if (controller) controller.postMessage({ type: "unpin", names: toDelete })
+   if (controller) controller.postMessage({ type: "unpin", names: toDelete, base: PACK_BASE.href })
    // The pin row reads its state fresh on the next settings-menu open — the
    // menu that triggered this unpin closed when the row was clicked.
 }
@@ -841,18 +844,18 @@ function bumpReaderEdge(side: "prev" | "next") {
 // point both keys at it. step toward a dead edge rings the reader margin bell;
 // cycle is a no-op when the filter rotation has a single entry.
 // stepLeft/stepRight back BOTH the reader keymap and the one-finger swipe
-// (gestures' goPrev/goNext). They act only on the reader surface: gating on
-// view !== "reader" makes a swipe over the LIST (where prev/next are disabled, so
-// it would otherwise ring the hidden reader's margin bell on a forced reflow) or
-// over the open picker overlay a clean no-op, instead of driving the reader
-// stacked behind them. The keyboard never reaches these off the reader — the list
-// branch and the picker guard in the keydown handler both return first.
+// (gestures' goPrev/goNext). They act only on the reader surface. The picker
+// overlay can be open OVER the reader (via the reader's filter button, view
+// stays "reader"), so a swipe on it must be inert too — the same guard the
+// keymap and the two-finger cycle carry (a bare view check no longer covers it
+// now that the picker isn't list-only). Gating on view !== "reader" additionally
+// makes a swipe over the LIST (where prev/next are disabled) a clean no-op.
 const stepLeft = () => {
-   if (view !== "reader") return
+   if (view !== "reader" || picker.isOpen()) return
    return el.prev.disabled ? bumpReaderEdge("prev") : guard(() => nav.left())
 }
 const stepRight = () => {
-   if (view !== "reader") return
+   if (view !== "reader" || picker.isOpen()) return
    return el.next.disabled ? bumpReaderEdge("next") : guard(() => nav.right())
 }
 const cycle = (dir: -1 | 1) => () => nav.getFilterEntries().length > 1 && guard(() => nav.cycleFilter(dir))

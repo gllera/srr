@@ -269,6 +269,26 @@ describe("v2 blob / ts / sync mode", () => {
       expect(profileTs()).toBe(300)
    })
 
+   it("sync mode does NOT wipe local saved when a newer blob omits the saved field", () => {
+      localStorage.setItem(SAVED_KEY, JSON.stringify([1, 2, 3]))
+      touchProfile(100)
+      // A truncated keepalive PUT / hand-edited endpoint: object, newer ts, but no
+      // saved array. It must not zero the local star collection; ts still converges.
+      const blob = JSON.stringify({ v: 2, ts: 500, seen: {}, unreadOnly: false, imgProxy: "" })
+      const r = importProfile(blob, { prefs: false, mode: "sync" })
+      expect(r.ok).toBe(true)
+      expect(JSON.parse(localStorage.getItem(SAVED_KEY)!)).toEqual([1, 2, 3])
+      expect(profileTs()).toBe(500)
+   })
+
+   it("sync mode still propagates a genuine un-save (newer blob with an empty saved array)", () => {
+      localStorage.setItem(SAVED_KEY, JSON.stringify([1, 2, 3]))
+      touchProfile(100)
+      const blob = JSON.stringify({ v: 2, ts: 500, seen: {}, saved: [], unreadOnly: false, imgProxy: "" })
+      importProfile(blob, { prefs: false, mode: "sync" })
+      expect(JSON.parse(localStorage.getItem(SAVED_KEY)!)).toEqual([])
+   })
+
    it("a ts-only adoption (newer blob, identical saved, no seen raise) reports changed:false", () => {
       localStorage.setItem(SAVED_KEY, JSON.stringify([4]))
       localStorage.setItem(SEEN_KEY, JSON.stringify({ "feed:1": 50 }))

@@ -37,6 +37,16 @@ describe("parsePackName", () => {
       expect(pack("nope/0.gz")).toBeNull() // unknown series
       expect(pack("db.gz")).toBeNull() // the mutable index is not a pack
    })
+
+   it("matches a pack by its store suffix regardless of the cdn/store prefix", () => {
+      // The self-hosted bundle (cdn-url=".") serves packs at the deployment root
+      // (e.g. /srr/idx/0.gz), the hosted layout under /packs/ — neither must be a
+      // requirement. The pack is recognized by its <series>/<stem>.gz suffix.
+      expect(parsePackName("/srr/idx/0.gz")).toEqual({ series: "idx", kind: "", n: 0 })
+      expect(parsePackName("/idx/0.gz")).toEqual({ series: "idx", kind: "", n: 0 })
+      expect(parsePackName("/packs/idx/L7.gz")).toEqual({ series: "idx", kind: "l", n: 7 })
+      expect(parsePackName("/deep/nest/meta/s2.gz")).toEqual({ series: "meta", kind: "s", n: 2 })
+   })
 })
 
 describe("RE_ASSET / RE_DB / RE_SHELL_HASHED", () => {
@@ -45,6 +55,12 @@ describe("RE_ASSET / RE_DB / RE_SHELL_HASHED", () => {
       expect(RE_ASSET.test("/srr/assets/ab/0123456789abcdef")).toBe(true) // extension optional
       expect(RE_ASSET.test("/packs/assets/ab/0123.webp")).toBe(false) // hash too short
       expect(RE_ASSET.test("/packs/data/1.gz")).toBe(false)
+   })
+
+   it("matches db.gz at any store root (not just /packs/)", () => {
+      expect(RE_DB.test("/srr/db.gz")).toBe(true)
+      expect(RE_DB.test("/db.gz")).toBe(true)
+      expect(RE_DB.test("/foo/adb.gz")).toBe(false) // needs a real path boundary before db.gz
    })
 
    it("matches db.gz and Parcel-hashed bundles", () => {

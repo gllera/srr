@@ -879,6 +879,10 @@ export function pruneSeen() {
 function resolveNoMatch(replace = false, notStarted = false): IShowFeed {
    pos = -1
    currentFeed = -1
+   // Same cleanup as resolve(): the cached neighbor probes and any in-flight
+   // media prefetch belong to the PREVIOUS filter's article and are now stale.
+   next.left = next.right = undefined
+   abortPrefetch()
    updateHash(replace)
    return {
       article: { f: 0, a: 0, p: 0, t: "(no matching articles)", l: "", c: "" },

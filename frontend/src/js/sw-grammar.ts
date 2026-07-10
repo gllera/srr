@@ -17,10 +17,13 @@ export const RE_ASSET = /\/assets\/[0-9a-f]{2}\/[0-9a-f]{16}(?:\.\w+)?$/i
 // The one pack-name grammar: write-once names only — finalized numeric stems,
 // L<seq> latest generations, and the idx/h<N> / meta/s<N> summaries. The regex
 // captures any kind letter on any series; parsePackName then rejects a kind
-// another series does not own.
+// another series does not own. A pack is matched by its <series>/<stem>.gz
+// SUFFIX, not a fixed /packs/ prefix (like RE_ASSET above): the self-hosted
+// bundle (cdn-url=".") serves packs at the deployment root — e.g. /srr/idx/0.gz
+// — so requiring /packs/ silently disabled all pack caching there.
 const PACK_KINDS = [...new Set(Object.values(PACK_SERIES_KINDS).join(""))].join("") // "Lhs"
-export const RE_PACK = new RegExp(`/packs/(${Object.keys(PACK_SERIES_KINDS).join("|")})/([${PACK_KINDS}]?)(\\d+)\\.gz$`)
-export const RE_DB = /\/packs\/db\.gz$/ // the store's only mutable key
+export const RE_PACK = new RegExp(`/(${Object.keys(PACK_SERIES_KINDS).join("|")})/([${PACK_KINDS}]?)(\\d+)\\.gz$`)
+export const RE_DB = /\/db\.gz$/ // the store's only mutable key (any store root, not just /packs/)
 export const RE_SHELL_HASHED = /\.[0-9a-f]{8,}\.(?:js|css)$/i // Parcel content-hashed bundles
 
 // parsePackName decodes a pack path: the series, the stem kind ("" finalized,

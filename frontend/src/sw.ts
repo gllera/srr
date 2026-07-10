@@ -90,26 +90,29 @@ sw.addEventListener("activate", (event) => {
 
 // A pinnable name is either a write-once pack name (parsePackName) or a
 // content-hash asset key (RE_ASSET): the page's packNamesForFilter enumerates
-// both so a pinned scope renders its self-hosted images offline. The /packs/
-// prefix mirrors what the fetch handler sees after the cdn-url base. Validating
-// here keeps the cache-key surface closed — no arbitrary injection.
+// both so a pinned scope renders its self-hosted images offline. Names are
+// store-relative (e.g. "idx/0.gz"); the leading "/" anchors the suffix grammar.
+// Validating here keeps the cache-key surface closed — no arbitrary injection.
 function isPinnableName(n: unknown): n is string {
    if (typeof n !== "string") return false
-   const p = `/packs/${n}`
+   const p = `/${n}`
    return parsePackName(p) !== null || RE_ASSET.test(p)
 }
 
 // Message handler — protocol between the page and the SW:
 //
-//   { type: "pin", names: string[], port?: MessagePort }
+//   { type: "pin", names: string[], base?: string, port?: MessagePort }
 //     Caches each name into the eviction-exempt PINNED bucket. Names MUST pass
 //     isPinnableName validation (a write-once pack name OR a content-hash asset
 //     key) — anything else is silently dropped (no arbitrary cache-key
-//     injection). Asset keys let a pinned scope render its self-hosted images
-//     offline; packCacheFirst/assetCacheFirst both consult PINNED first. Each
-//     name is fetched with
-//     cache:"no-cache" so fresh bytes are always written (the SW's own
-//     cache-first could serve a stale copy under a reused name before a gen
+//     injection). `base` is the page's PACK_BASE (the cdn-url each name resolves
+//     against when the page fetches); pin caches at those exact URLs so a later
+//     page fetch is a hit, and only same-origin URLs under our scope are pinned
+//     (defaults to the SW scope for the self-hosted layout, base===scope). Asset
+//     keys let a pinned scope render its self-hosted images offline;
+//     packCacheFirst/assetCacheFirst both consult PINNED first. Each name is
+//     fetched with cache:"no-cache" so fresh bytes are always written (the SW's
+//     own cache-first could serve a stale copy under a reused name before a gen
 //     bump — using no-cache here means the pinned entry is always fresh at pin
 //     time). Per-name errors (404 on GC'd latest packs, quota) are caught and
 //     skipped; progress is reported via the provided MessagePort or e.source.
@@ -119,11 +122,15 @@ function isPinnableName(n: unknown): n is string {
 //   { type: "unpin-all" }
 //     Clears the entire PINNED bucket (called when the user removes all pins).
 //
-//   { type: "unpin", names: string[] }
-//     Removes specific entries from the PINNED bucket.
+//   { type: "unpin", names: string[], base?: string }
+//     Removes specific entries from the PINNED bucket (base as in "pin").
 sw.addEventListener("message", (event) => {
-   const msg = event.data as { type: string; names?: string[] }
+   const msg = event.data as { type: string; names?: string[]; base?: string }
    if (!msg || typeof msg.type !== "string") return
+   // The page resolves pack names against PACK_BASE (the cdn-url) when it fetches;
+   // pin must cache at those SAME URLs. PACK_BASE isn't knowable in the worker, so
+   // the page sends it. Fall back to the SW scope (self-hosted layout, base===scope).
+   const packBase = typeof msg.base === "string" ? msg.base : sw.registration.scope
 
    const port: MessagePort | null = event.ports?.[0] ?? null
    const reply = (data: unknown) => {
@@ -143,13 +150,17 @@ sw.addEventListener("message", (event) => {
             let cached = 0
             for (const name of validNames) {
                try {
-                  // Build the full URL the SW's fetch handler would see.
-                  const url = new URL(`packs/${name}`, sw.registration.scope).href
-                  const req = new Request(url, { cache: "no-cache" })
-                  const res = await fetch(req)
-                  if (res.ok) {
-                     await pinned.put(new Request(url), res)
-                     cached++
+                  // The exact URL the page will later fetch (name resolved against
+                  // the page's pack base). Only pin same-origin packs under our
+                  // scope — a cross-origin CDN pack is never served by the fetch
+                  // handler anyway, and this rejects a malicious base.
+                  const url = new URL(name, packBase)
+                  if (url.origin === sw.location.origin && url.pathname.startsWith(SCOPE)) {
+                     const res = await fetch(new Request(url.href, { cache: "no-cache" }))
+                     if (res.ok) {
+                        await pinned.put(new Request(url.href), res)
+                        cached++
+                     }
                   }
                } catch (err) {
                   // 404 from GC'd latest packs, quota error, network error — skip.
@@ -188,7 +199,7 @@ sw.addEventListener("message", (event) => {
             const pinned = await caches.open(PINNED)
             await Promise.all(
                validNames.map(async (name) => {
-                  const url = new URL(`packs/${name}`, sw.registration.scope).href
+                  const url = new URL(name, packBase).href
                   await pinned.delete(new Request(url))
                }),
             )

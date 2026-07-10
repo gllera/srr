@@ -678,6 +678,17 @@ describe("list", () => {
       expect(empty.querySelector(".srr-empty-msg")!.textContent).toContain("from the list")
    })
 
+   it("shows 'Nothing saved' (not the caught-up reward) for an empty Saved view with unread-only on", () => {
+      // unread-only is a global flag orthogonal to the saved peek mode and
+      // defaults ON, so the reward branch must not shadow the saved empty state.
+      data.db.total_art = 4
+      nav.filter.saved = true
+      nav._setUnreadOnly(true)
+      const empty = list.emptyStateEl({})
+      expect(empty.querySelector(".srr-empty-eyebrow")!.textContent).toBe("Nothing saved")
+      expect(empty.querySelector(".srr-caughtup-check")).toBeNull() // not the reward state
+   })
+
    it("refresh re-derives read/unread dots from the live seen map", async () => {
       setIndex(4)
       await list.render()
@@ -1106,6 +1117,17 @@ describe("list", () => {
       expect($tabbable()).toEqual([4]) // moved with the highlight
       await list.moveSelection("newer")
       expect($tabbable()).toEqual([5])
+   })
+
+   it("re-establishes the Tab stop when un-saving removes the row that held it", async () => {
+      setIndex(6)
+      nav._setSaved([0, 2, 4])
+      nav.filter.saved = true
+      await list.render()
+      expect($tabbable()).toEqual([4]) // newest saved row is the lone Tab stop (no cursor)
+      tapStar(4) // un-save the row holding the Tab stop
+      expect($chrons()).toEqual([2, 0])
+      expect($tabbable()).toEqual([2]) // a remaining row must re-take the Tab order
    })
 
    // ── Anchor re-seed + divider integrity ─────────────────────────────────────

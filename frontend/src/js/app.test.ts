@@ -591,6 +591,25 @@ describe("reader edge — margin bell", () => {
       expect(reader.classList.contains("srr-bell-right")).toBe(true)
       expect(nav.right).not.toHaveBeenCalled()
    })
+
+   // The reader's filter button can open the picker OVER the reader (view stays
+   // "reader"), so a one-finger swipe on the overlay must not step/bell the reader
+   // underneath — same guard the keymap and two-finger cycle already have.
+   it("a one-finger swipe is inert while the picker overlay is open", async () => {
+      await boot()
+      hashTo("#2")
+      await flush()
+      const reader = document.querySelector(".srr-reader") as HTMLElement
+      reader.classList.remove("srr-bell-right")
+      nav.right.mockClear()
+      picker.isOpen.mockReturnValue(true)
+      // The gesture deps app passed to setupGestures — goNext IS the committed swipe.
+      const deps = gestures.setupGestures.mock.calls[0][0] as { goNext: () => void }
+      deps.goNext()
+      expect(nav.right).not.toHaveBeenCalled()
+      expect(reader.classList.contains("srr-bell-right")).toBe(false)
+      picker.isOpen.mockReturnValue(false)
+   })
 })
 
 describe("error popup — focus trap + close", () => {

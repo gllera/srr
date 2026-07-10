@@ -1887,6 +1887,23 @@ describe("prefetch abort", () => {
       expect(prefetched.getAttribute("src")).toBe("")
    })
 
+   it("aborts the prior prefetch when a filter switch resolves to a placeholder", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      data.db.feeds[9] = makeFeed({ id: 9, total_art: 0 }) // a pickable empty feed → placeholder
+      data.loadArticle.mockImplementation(async (idx: number) =>
+         makeArticle({ c: `<img src="http://example.com/${idx}.jpg">` }),
+      )
+      await nav.fromHash("0")
+      await nav.right()
+      await flushIdle()
+      const prefetched = images[0]
+      expect(prefetched.getAttribute("src")).not.toBe("")
+
+      const result = await nav.switchFilter("9") // empty feed → resolveNoMatch
+      expect(result.placeholder).toBe(true)
+      expect(prefetched.getAttribute("src")).toBe("") // the now-stale prefetch is aborted
+   })
+
    it("caps the image prefetch at 6 (an image-stuffed neighbor must not flood the connection)", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
       const many = Array.from({ length: 9 }, (_, i) => `<img src="http://example.com/${i}.jpg">`).join("")

@@ -87,6 +87,23 @@ describe("scroll-driven toolbar hide/show", () => {
       expect(toolbar.style.transform).toBe("")
       expect(slid()).toBe(false)
    })
+
+   it("seats the bar when the scroll settles half-sunken mid-zone (no further scroll event)", () => {
+      vi.useFakeTimers()
+      try {
+         setScrollHeight(2000)
+         Object.defineProperty(toolbar, "offsetHeight", { value: 60, configurable: true })
+         setScrollY(1170) // distFromBottom = 30 → parked half-sunken, scroll then stops
+         scroll()
+         expect(toolbar.style.transform).toBe("translateY(30px)")
+         // The gesture stops mid-zone: no further scroll fires. A settle timer must
+         // hand position back to the class-driven slide so it isn't left clipped.
+         vi.advanceTimersByTime(150)
+         expect(toolbar.style.transform).toBe("")
+      } finally {
+         vi.useRealTimers()
+      }
+   })
 })
 
 describe("resetScroll", () => {

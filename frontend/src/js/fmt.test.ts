@@ -789,3 +789,92 @@ describe("isStale", () => {
       expect(isStale(now - 4 * 86400)).toBe(true)
    })
 })
+
+// Regression coverage for the 2026-07-10 frontend audit fixes.
+describe("sanitizeHtml audit fixes", () => {
+   const attr = (html: string, sel: string, name: string): string | null => {
+      const t = document.createElement("template")
+      t.innerHTML = sanitizeHtml(html)
+      return t.content.querySelector(sel)!.getAttribute(name)
+   }
+
+   // A malformed relative reference makes `new URL()` THROW (not return); the
+   // sanitizer must drop the attribute rather than let the throw crash the whole
+   // article render.
+   it("does not throw on a malformed relative URL and drops the attribute", () => {
+      for (const bad of ["//[", "//[::bad", "//%", "//user@[", "//10.0.0.1:99999999"]) {
+         expect(() => sanitizeHtml(`<img src="${bad}">`)).not.toThrow()
+         expect(attr(`<img src="${bad}">`, "img", "src")).toBeNull()
+      }
+   })
+
+   // <template> content lives in a DocumentFragment the walker doesn't descend
+   // into, so it must be removed wholesale like the other foreign-content tags.
+   it("removes <template> and its unsanitized content", () => {
+      expect(sanitizeHtml('<template><img src=x onerror="alert(1)"><script>x()</script></template><p>ok</p>')).toBe(
+         "<p>ok</p>",
+      )
+   })
+
+   // URL_DENY must guard only URL-bearing attributes, not strip benign text
+   // attributes that merely start with a scheme-like word.
+   it("keeps a benign non-URL attribute whose value starts with a scheme word", () => {
+      expect(attr('<abbr title="data: the new oil">x</abbr>', "abbr", "title")).toBe("data: the new oil")
+      expect(attr('<img src="assets/ab/cd.jpg" alt="file: not found">', "img", "alt")).toBe("file: not found")
+   })
+
+   // …but a javascript: (etc.) URL in an actual URL attribute is still dropped.
+   it("still strips a javascript: href after narrowing URL_DENY to URL attributes", () => {
+      expect(attr('<a href="javascript:alert(1)">x</a>', "a", "href")).toBeNull()
+   })
+
+   // Mirror the backend bluemonday allowlist (mailto/http/https): other absolute
+   // anchor schemes are dropped as a defense-in-depth parity measure.
+   it("drops an absolute anchor href whose scheme is outside the mailto/http(s) allowlist", () => {
+      expect(attr('<a href="tel:+15551234">call</a>', "a", "href")).toBeNull()
+      expect(attr('<a href="ftp://host/f">f</a>', "a", "href")).toBeNull()
+   })
+
+   it("keeps allowlisted absolute anchor hrefs (mailto/http/https)", () => {
+      expect(attr('<a href="mailto:a@b.com">m</a>', "a", "href")).toBe("mailto:a@b.com")
+      expect(attr('<a href="https://example.com/x">h</a>', "a", "href")).toBe("https://example.com/x")
+   })
+})
+
+describe("collapseBrokenMedia audit fixes", () => {
+   const container = (html: string): HTMLElement => {
+      const div = document.createElement("div")
+      div.innerHTML = html
+      div.addEventListener("error", collapseBrokenMedia, true)
+      document.body.appendChild(div)
+      return div
+   }
+
+   afterEach(() => {
+      document.body.innerHTML = ""
+   })
+
+   it("collapses an audio whose load failed", () => {
+      const div = container('<audio src="https://dead.example/a.webm" controls></audio>')
+      div.querySelector("audio")!.dispatchEvent(new Event("error"))
+      expect(div.querySelector("audio")!.classList.contains("srr-broken")).toBe(true)
+   })
+
+   it("collapses the audio hosting a failed source child", () => {
+      const div = container('<audio controls><source src="https://dead.example/a.webm"></audio>')
+      div.querySelector("source")!.dispatchEvent(new Event("error"))
+      expect(div.querySelector("audio")!.classList.contains("srr-broken")).toBe(true)
+   })
+})
+
+describe("formatBytes unit-boundary rounding", () => {
+   it("rolls to the next unit when rounding would render 1000 of the lower unit", () => {
+      expect(formatBytes(999_999)).toBe("1 MB")
+      expect(formatBytes(999_950)).toBe("1 MB")
+      expect(formatBytes(999_950_000)).toBe("1 GB")
+   })
+
+   it("does not roll below the rounding boundary", () => {
+      expect(formatBytes(999_499)).toBe("999.5 KB")
+   })
+})

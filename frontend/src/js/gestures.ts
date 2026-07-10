@@ -124,6 +124,7 @@ export function setupGestures(deps: GestureDeps): Gestures {
 
    let lastScrollY = 0
    let toolbarHidden = false
+   let bottomSettleTimer: ReturnType<typeof setTimeout> | undefined
    const setHidden = (hide: boolean) => {
       if (hide !== toolbarHidden) {
          deps.toolbar.classList.toggle("srr-toolbar-slide", hide)
@@ -133,6 +134,7 @@ export function setupGestures(deps: GestureDeps): Gestures {
    // Drop the scroll-linked bottom-reveal override, handing position back to the
    // class-driven slide (+ its transition).
    const clearBottomReveal = () => {
+      clearTimeout(bottomSettleTimer)
       if (deps.toolbar.style.transform) {
          deps.toolbar.style.transform = ""
          deps.toolbar.style.transition = ""
@@ -156,6 +158,12 @@ export function setupGestures(deps: GestureDeps): Gestures {
             setHidden(false)
             deps.toolbar.style.transition = "none"
             deps.toolbar.style.transform = `translateY(${Math.max(0, distFromBottom)}px)`
+            // A scroll that STOPS mid-zone fires no further event, leaving the bar
+            // parked half-sunken below the screen edge. Arm a settle timer (re-armed
+            // by each in-zone scroll) that seats it under the normal transition once
+            // the gesture stops.
+            clearTimeout(bottomSettleTimer)
+            bottomSettleTimer = setTimeout(clearBottomReveal, 150)
             return
          }
          clearBottomReveal()

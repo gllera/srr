@@ -279,6 +279,16 @@ export function showContextMenu(anchor: HTMLElement, items: MenuItem[], opts?: {
                   : f.length - 1
                : (at + (e.key === "ArrowDown" ? 1 : -1) + f.length) % f.length
          f[next]?.focus()
+      } else if (e.key === "Tab") {
+         // Trap Tab within the items (wrapping), like the modal shell — otherwise
+         // focus tabs out to the page behind the still-open floating menu.
+         e.preventDefault()
+         e.stopPropagation()
+         const f = focusables()
+         if (f.length === 0) return
+         const at = f.indexOf(document.activeElement as HTMLButtonElement)
+         const next = at === -1 ? (e.shiftKey ? f.length - 1 : 0) : (at + (e.shiftKey ? -1 : 1) + f.length) % f.length
+         f[next]?.focus()
       }
    }
    // pointerdown (not click) so the press that dismisses never also activates
