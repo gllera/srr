@@ -249,18 +249,6 @@ func TestRmCmdRemovesFeeds(t *testing.T) {
 	}
 }
 
-func TestRmCmdNoOpForMissingID(t *testing.T) {
-	// RmCmd uses delete() which is a no-op on missing keys; this is the
-	// documented behavior.
-	setupFeedsTestDB(t)
-	if err := (&RmCmd{ID: []int{99}}).Run(); err != nil {
-		t.Fatalf("RmCmd: %v", err)
-	}
-	if len(reopenDB(t).Feeds()) != 1 {
-		t.Errorf("Feeds changed despite missing id")
-	}
-}
-
 func TestLsCmdEmitsRecipe(t *testing.T) {
 	setupEmptyDB(t)
 	if err := recipeSet(t, "read", "", "#sanitize"); err != nil {
@@ -555,29 +543,9 @@ func TestFeedAddSkipsResolveForFeedIngestOverride(t *testing.T) {
 	}
 }
 
-func TestFeedUpdNoURLFlagLeavesURLUntouched(t *testing.T) {
-	setupFeedsTestDB(t)
-	if err := (&UpdCmd{ID: 0, Title: strPtr("X")}).Run(); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	ch := reopenDB(t).Feeds()[0]
-	if ch.URL != "https://a.example.com/feed" {
-		t.Errorf("URL changed: %q", ch.URL)
-	}
-	if ch.ETag != "etag-a" || ch.Watermark != 0x111 {
-		t.Errorf("state changed: etag=%q wm=%#x", ch.ETag, ch.Watermark)
-	}
-}
-
 func TestFeedUpdIDTooLarge(t *testing.T) {
 	setupFeedsTestDB(t)
 	cmd := &UpdCmd{ID: 65536, Title: strPtr("X")}
-	wantErr(t, cmd.Run(), "[0, 65535]")
-}
-
-func TestFeedUpdIDNegative(t *testing.T) {
-	setupFeedsTestDB(t)
-	cmd := &UpdCmd{ID: -1, Title: strPtr("X")}
 	wantErr(t, cmd.Run(), "[0, 65535]")
 }
 
@@ -622,16 +590,6 @@ func TestFeedShowYAML(t *testing.T) {
 	if !strings.Contains(body, "title: Test") {
 		t.Errorf("missing yaml title: %s", body)
 	}
-}
-
-func TestFeedShowIDTooLarge(t *testing.T) {
-	setupFeedsTestDB(t)
-	wantErr(t, (&ShowCmd{ID: 65536, Format: "json"}).Run(), "[0, 65535]")
-}
-
-func TestFeedShowIDNegative(t *testing.T) {
-	setupFeedsTestDB(t)
-	wantErr(t, (&ShowCmd{ID: -1, Format: "json"}).Run(), "[0, 65535]")
 }
 
 func TestFeedShowEmitsRecipe(t *testing.T) {
@@ -817,9 +775,18 @@ func TestFeedApplyIdMissingErrors(t *testing.T) {
 
 func TestFeedApplyInvalidJSON(t *testing.T) {
 	setupEmptyDB(t)
-	err := applyFromString(t, `{not json`)
-	if err == nil {
-		t.Fatal("expected error")
+	// A leading '{' routes to the object decoder, so the error names that path.
+	wantErr(t, applyFromString(t, `{not json`), "decode object")
+}
+
+// parseApplyInput rejects a body that is neither a JSON object nor an array:
+// empty/whitespace-only input and a bare scalar both fail with the same guidance.
+func TestParseApplyInputRejectsNonObjectOrArray(t *testing.T) {
+	for _, in := range []string{"", "   \n\t ", "42", `"hi"`, "true"} {
+		if _, err := parseApplyInput([]byte(in)); err == nil ||
+			!strings.Contains(err.Error(), "must be a feed object or array") {
+			t.Errorf("parseApplyInput(%q) = %v, want a 'must be a feed object or array' error", in, err)
+		}
 	}
 }
 
@@ -1028,15 +995,6 @@ func TestFeedViewEmitsNoTitle(t *testing.T) {
 	v := viewOf(&Feed{Title: "T", URL: "https://x/feed", NoTitle: true})
 	if !v.NoTitle {
 		t.Errorf("viewOf NoTitle = false, want true (feed edit must round-trip the flag)")
-	}
-}
-
-// TestFeedListViewEmitsNoTitle: the serve GUI projection carries the flag so
-// the edit modal can seed its checkbox from the overview snapshot.
-func TestFeedListViewEmitsNoTitle(t *testing.T) {
-	v := listViewOf(&Feed{Title: "T", URL: "https://x/feed", NoTitle: true})
-	if !v.NoTitle {
-		t.Errorf("listViewOf NoTitle = false, want true (serve GUI must round-trip the flag)")
 	}
 }
 

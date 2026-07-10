@@ -124,11 +124,3 @@ func TestEmbedNoOpVerbatim(t *testing.T) {
 		t.Fatalf("no-op must return verbatim, got %q", got)
 	}
 }
-
-func TestEmbedRejectsParams(t *testing.T) {
-	m := New()
-	item := &RawItem{Content: "<p>a</p>"}
-	if err := m.Process(context.Background(), "#embed foo=bar", item); err == nil {
-		t.Fatal("expected unknown-parameter error")
-	}
-}

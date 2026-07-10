@@ -75,6 +75,28 @@ func TestHealAssetRejectsNonAssetKey(t *testing.T) {
 	}
 }
 
+// A zero-byte source is refused: heal must never republish an empty object over
+// a (possibly still-serviceable) existing one. The stored bytes stay untouched
+// and AtomicPut is never reached.
+func TestHealAssetRejectsZeroByteSource(t *testing.T) {
+	be := &metaCaptureBackend{Backend: tempStore(t)}
+	const key = "assets/5a/5ab110f6bbe86ae8.mp4"
+	if err := be.Put(context.Background(), key, strings.NewReader("ORIGINAL"), true); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	err := healAsset(context.Background(), be, key, healSourceFile(t, ""), "", false)
+	if err == nil || !strings.Contains(err.Error(), "zero-byte") {
+		t.Fatalf("err = %v, want a zero-byte refusal", err)
+	}
+	if got := string(readKey(t, be, key)); got != "ORIGINAL" {
+		t.Errorf("stored body = %q, want unchanged ORIGINAL", got)
+	}
+	if be.gotKey != "" {
+		t.Errorf("AtomicPut ran (gotKey=%q); a zero-byte heal must not publish", be.gotKey)
+	}
+}
+
 // --create re-creates a referenced-but-deleted key (e.g. an operator removed a
 // broken object before the repair): the explicit flag keeps the default
 // typo-guard while allowing the legitimate case.

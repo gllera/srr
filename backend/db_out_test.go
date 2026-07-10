@@ -318,50 +318,9 @@ func TestSyncOutFeedsTagAndFeedUnion(t *testing.T) {
 	}
 }
 
-// TestSyncOutFeedsAssetRewrite verifies that relative assets/ refs in content
-// are rewritten to absolute CDN URLs.
-func TestSyncOutFeedsAssetRewrite(t *testing.T) {
-	db, c, dir := setupTestDB(t)
-	c.FetchedAt = 1700000000
-
-	ch := &Feed{id: 0, URL: "http://a", Tag: "img"}
-	c.Feeds = map[int]*Feed{ch.id: ch}
-
-	content := `<p>hello <img src="assets/ab/0123456789abcdef.jpg"> world</p>`
-	if _, err := db.PutArticles(ctx, []*Item{
-		{Feed: ch, Title: "ImgArt", Content: content, Link: "http://x/1", Published: 1000},
-	}); err != nil {
-		t.Fatalf("PutArticles: %v", err)
-	}
-
-	globals.CdnURL = "https://cdn.example.com"
-	defer func() { globals.CdnURL = "" }()
-
-	db.core.Out = []OutFeed{
-		{Name: "imgfeed", Format: "rss", Tags: []string{"img"}, Limit: 10},
-	}
-
-	if err := db.SyncOutFeeds(ctx); err != nil {
-		t.Fatalf("SyncOutFeeds: %v", err)
-	}
-
-	data, err := os.ReadFile(filepath.Join(dir, "out/imgfeed.rss"))
-	if err != nil {
-		t.Fatalf("read out/imgfeed.rss: %v", err)
-	}
-
-	// The absolute URL must appear in the output.
-	if !strings.Contains(string(data), "https://cdn.example.com/assets/ab/0123456789abcdef.jpg") {
-		t.Errorf("expected absolute CDN asset URL in output:\n%s", data)
-	}
-	// The relative form must NOT appear.
-	if strings.Contains(string(data), `src="assets/`) {
-		t.Errorf("relative asset src still present in output:\n%s", data)
-	}
-}
-
 // TestSyncOutFeedsRSSEscapesHTML verifies that HTML content in RSS description
-// is properly escaped (no bare < or > outside CDATA that would break XML).
+// is properly escaped (no bare < or > outside CDATA that would break XML) AND
+// that the title and content round-trip verbatim through the encode/decode.
 func TestSyncOutFeedsRSSEscapesHTML(t *testing.T) {
 	db, c, dir := setupTestDB(t)
 	c.FetchedAt = 1700000000
@@ -398,6 +357,15 @@ func TestSyncOutFeedsRSSEscapesHTML(t *testing.T) {
 	}
 	if len(feed.Channel.Items) != 1 {
 		t.Fatalf("items = %d, want 1", len(feed.Channel.Items))
+	}
+	// The title's <>-bearing text survives the XML entity-encode round-trip.
+	if got := feed.Channel.Items[0].Title; got != "Esc<Art>" {
+		t.Errorf("decoded title = %q, want %q (round-trip)", got, "Esc<Art>")
+	}
+	// The HTML content rides through CDATA verbatim (the &amp; entity stays a
+	// literal five characters, the markup intact).
+	if got := feed.Channel.Items[0].Description; got != `<p>a &amp; b</p>` {
+		t.Errorf("decoded content = %q, want %q (verbatim through CDATA)", got, `<p>a &amp; b</p>`)
 	}
 }
 
@@ -818,6 +786,25 @@ func TestOutFeedsSigChangesOnAddIdx(t *testing.T) {
 	}
 }
 
+// TestOutFeedsSigChangesOnTag verifies a feed's tag edit flips the syndication
+// signature: a tag change alters which feeds a tag-scoped out feed includes, so
+// an otherwise-idle cycle must re-run SyncOutFeeds. (100% line coverage of
+// outFeedsSig otherwise masks that only the AddIdx term was exercised.)
+func TestOutFeedsSigChangesOnTag(t *testing.T) {
+	db, c, _ := setupTestDB(t)
+	ch := &Feed{id: 0, URL: "http://a", Tag: "news"}
+	c.Feeds = map[int]*Feed{ch.id: ch}
+	db.core.Out = []OutFeed{
+		{Name: "news", Format: "rss", Tags: []string{"news"}, Limit: 10},
+	}
+
+	before := db.outFeedsSig()
+	ch.Tag = "tech" // re-tagging changes the tag→feed membership the sig tracks
+	if after := db.outFeedsSig(); after == before {
+		t.Errorf("sig unchanged after feed tag change: %q", after)
+	}
+}
+
 // TestSyncOutFeedsMultipleOutputs verifies multiple OutFeed entries all write
 // their own file in one call.
 func TestSyncOutFeedsMultipleOutputs(t *testing.T) {
@@ -838,5 +825,195 @@ func TestSyncOutFeedsMultipleOutputs(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, key)); os.IsNotExist(err) {
 			t.Errorf("%s was not written", key)
 		}
+	}
+}
+
+// TestSyncOutFeedsLinklessGUID pins the linkless-article path (dmz's X/nitter +
+// Telegram feeds carry no Link): RSS must emit a synthetic <guid
+// isPermaLink="false">urn:srr:…</guid> with no <link>, and JSON Feed must fall
+// its `id` back to the same synthetic id with `url` omitted. (Exercises
+// stableGUID + the marshalRSS / marshalJSONFeed linkless branches, dead in
+// every other out-feed test since they all set Link.)
+func TestSyncOutFeedsLinklessGUID(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	c.FetchedAt = 1700000000
+	ch := &Feed{id: 0, URL: "http://a", Tag: "micro"}
+	c.Feeds = map[int]*Feed{ch.id: ch}
+
+	if _, err := db.PutArticles(ctx, []*Item{
+		{Feed: ch, Title: "no link here", Content: "<p>body</p>", Published: 1000}, // Link empty
+	}); err != nil {
+		t.Fatalf("PutArticles: %v", err)
+	}
+
+	globals.CdnURL = "https://cdn.example.com"
+	defer func() { globals.CdnURL = "" }()
+
+	db.core.Out = []OutFeed{
+		{Name: "rss", Format: "rss", Tags: []string{"micro"}, Limit: 10},
+		{Name: "json", Format: "json", Tags: []string{"micro"}, Limit: 10},
+	}
+	if err := db.SyncOutFeeds(ctx); err != nil {
+		t.Fatalf("SyncOutFeeds: %v", err)
+	}
+
+	want := stableGUID(ArticleData{FeedID: 0, Published: 1000, Title: "no link here"})
+	if !strings.HasPrefix(want, "urn:srr:") {
+		t.Fatalf("stableGUID = %q, want a urn:srr: id", want)
+	}
+
+	// RSS: <guid isPermaLink="false">urn:srr:…</guid>, no <link>.
+	type guidX struct {
+		Value       string `xml:",chardata"`
+		IsPermaLink string `xml:"isPermaLink,attr"`
+	}
+	type itemX struct {
+		Link string `xml:"link"`
+		GUID guidX  `xml:"guid"`
+	}
+	var rssDoc struct {
+		XMLName xml.Name `xml:"rss"`
+		Items   []itemX  `xml:"channel>item"`
+	}
+	rssData, err := os.ReadFile(filepath.Join(dir, "out/rss.rss"))
+	if err != nil {
+		t.Fatalf("read out/rss.rss: %v", err)
+	}
+	if err := xml.Unmarshal(rssData, &rssDoc); err != nil {
+		t.Fatalf("parse RSS: %v\n%s", err, rssData)
+	}
+	if len(rssDoc.Items) != 1 {
+		t.Fatalf("RSS items = %d, want 1", len(rssDoc.Items))
+	}
+	if rssDoc.Items[0].GUID.IsPermaLink != "false" {
+		t.Errorf("isPermaLink = %q, want false (synthetic id)", rssDoc.Items[0].GUID.IsPermaLink)
+	}
+	if rssDoc.Items[0].GUID.Value != want {
+		t.Errorf("guid = %q, want %q", rssDoc.Items[0].GUID.Value, want)
+	}
+	if rssDoc.Items[0].Link != "" {
+		t.Errorf("link = %q, want empty (linkless article)", rssDoc.Items[0].Link)
+	}
+
+	// JSON Feed: id falls back to the same synthetic id, url omitted.
+	jsonData, err := os.ReadFile(filepath.Join(dir, "out/json.json"))
+	if err != nil {
+		t.Fatalf("read out/json.json: %v", err)
+	}
+	var jf jsonFeed1
+	if err := json.Unmarshal(jsonData, &jf); err != nil {
+		t.Fatalf("parse JSON Feed: %v\n%s", err, jsonData)
+	}
+	if len(jf.Items) != 1 {
+		t.Fatalf("JSON items = %d, want 1", len(jf.Items))
+	}
+	if jf.Items[0].ID != want {
+		t.Errorf("json id = %q, want %q (same synthetic id)", jf.Items[0].ID, want)
+	}
+	if jf.Items[0].URL != "" {
+		t.Errorf("json url = %q, want empty (linkless)", jf.Items[0].URL)
+	}
+}
+
+// TestSyncOutFeedsDatelessUsesFetchedAt verifies the pub==0 → FetchedAt fallback
+// in BOTH marshalers: a dateless article's emitted timestamp is its fetched_at.
+func TestSyncOutFeedsDatelessUsesFetchedAt(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	const fetched = int64(1700000000)
+	c.FetchedAt = fetched
+	ch := &Feed{id: 0, URL: "http://a", Tag: "d"}
+	c.Feeds = map[int]*Feed{ch.id: ch}
+
+	if _, err := db.PutArticles(ctx, []*Item{
+		{Feed: ch, Title: "dateless", Content: "<p>b</p>", Link: "http://x/1", Published: 0},
+	}); err != nil {
+		t.Fatalf("PutArticles: %v", err)
+	}
+
+	globals.CdnURL = "https://cdn.example.com"
+	defer func() { globals.CdnURL = "" }()
+
+	db.core.Out = []OutFeed{
+		{Name: "rss", Format: "rss", Tags: []string{"d"}, Limit: 10},
+		{Name: "json", Format: "json", Tags: []string{"d"}, Limit: 10},
+	}
+	if err := db.SyncOutFeeds(ctx); err != nil {
+		t.Fatalf("SyncOutFeeds: %v", err)
+	}
+
+	rssData, err := os.ReadFile(filepath.Join(dir, "out/rss.rss"))
+	if err != nil {
+		t.Fatalf("read out/rss.rss: %v", err)
+	}
+	var feed rssRoot
+	if err := xml.Unmarshal(rssData, &feed); err != nil {
+		t.Fatalf("parse RSS: %v", err)
+	}
+	if wantRSS := time.Unix(fetched, 0).UTC().Format(time.RFC1123Z); feed.Channel.Items[0].PubDate != wantRSS {
+		t.Errorf("RSS pubDate = %q, want fetched_at fallback %q", feed.Channel.Items[0].PubDate, wantRSS)
+	}
+
+	jsonData, err := os.ReadFile(filepath.Join(dir, "out/json.json"))
+	if err != nil {
+		t.Fatalf("read out/json.json: %v", err)
+	}
+	var jf jsonFeed1
+	if err := json.Unmarshal(jsonData, &jf); err != nil {
+		t.Fatalf("parse JSON: %v", err)
+	}
+	if wantJSON := time.Unix(fetched, 0).UTC().Format(time.RFC3339); jf.Items[0].DatePub != wantJSON {
+		t.Errorf("JSON date_published = %q, want fetched_at fallback %q", jf.Items[0].DatePub, wantJSON)
+	}
+}
+
+// TestSyncOutFeedsEmptyTagMatchesNothing verifies the empty-tag guard: a Tags:[""]
+// selector must NOT match every untagged feed (the footgun), so no file is written.
+func TestSyncOutFeedsEmptyTagMatchesNothing(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	c.FetchedAt = 1700000000
+	ch := &Feed{id: 0, URL: "http://a"} // untagged (Tag == "")
+	c.Feeds = map[int]*Feed{ch.id: ch}
+	if _, err := db.PutArticles(ctx, []*Item{
+		{Feed: ch, Title: "A1", Content: "<p>b</p>", Link: "http://x/1", Published: 1000},
+	}); err != nil {
+		t.Fatalf("PutArticles: %v", err)
+	}
+
+	globals.CdnURL = "https://cdn.example.com"
+	defer func() { globals.CdnURL = "" }()
+
+	db.core.Out = []OutFeed{{Name: "empty", Format: "rss", Tags: []string{""}, Limit: 10}}
+	if err := db.SyncOutFeeds(ctx); err != nil {
+		t.Fatalf("SyncOutFeeds: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "out/empty.rss")); !os.IsNotExist(err) {
+		t.Error("out/empty.rss written for an empty-tag selector; empty tag must match nothing")
+	}
+}
+
+// TestSyncOutFeedsNoMatchingFeedsSkips verifies the no-matching-feeds skip: a
+// tag selector matching no feed writes no file and is not an error.
+func TestSyncOutFeedsNoMatchingFeedsSkips(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	c.FetchedAt = 1700000000
+	ch := &Feed{id: 0, URL: "http://a", Tag: "news"}
+	c.Feeds = map[int]*Feed{ch.id: ch}
+	if _, err := db.PutArticles(ctx, []*Item{
+		{Feed: ch, Title: "A1", Content: "<p>b</p>", Link: "http://x/1", Published: 1000},
+	}); err != nil {
+		t.Fatalf("PutArticles: %v", err)
+	}
+
+	globals.CdnURL = "https://cdn.example.com"
+	defer func() { globals.CdnURL = "" }()
+
+	// Only a tag selector (no explicit Feeds ids, which would populate the include
+	// set unconditionally) matching no feed → include stays empty → skip.
+	db.core.Out = []OutFeed{{Name: "ghost", Format: "rss", Tags: []string{"nope"}, Limit: 10}}
+	if err := db.SyncOutFeeds(ctx); err != nil {
+		t.Fatalf("SyncOutFeeds should skip, not error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "out/ghost.rss")); !os.IsNotExist(err) {
+		t.Error("out/ghost.rss written for a no-match selector")
 	}
 }

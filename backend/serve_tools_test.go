@@ -36,6 +36,55 @@ func TestPreview(t *testing.T) {
 	}
 }
 
+// TestRenderPreviewDropsFilteredItem exercises renderPreview's i.Drop skip: a
+// #filter drop_title pipe override fetches, processes, then DROPS the matching
+// item instead of returning it.
+func TestRenderPreviewDropsFilteredItem(t *testing.T) {
+	setupTestDB(t)
+	allowLoopback(t)
+	url := rssServer(t)
+
+	recipes := map[string]Recipe{"default": {Pipe: []string{"#sanitize", "#minify"}}}
+	items, err := renderPreview(ctx, recipes, "default", []string{"#filter drop_title=/Hello/"}, "", url)
+	if err != nil {
+		t.Fatalf("renderPreview: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("got %d items, want 0 (Hello dropped by #filter)", len(items))
+	}
+}
+
+// TestRenderPreviewDefaultOverrideResolvesRecipe pins the feed-level override
+// semantics of a ["#default"] pipe override: it expands to the *recipe's*
+// effective pipe, not the global default's. Proven by pointing the same
+// override at a filtering recipe (item dropped) vs the plain default (item
+// kept).
+func TestRenderPreviewDefaultOverrideResolvesRecipe(t *testing.T) {
+	setupTestDB(t)
+	allowLoopback(t)
+	url := rssServer(t)
+
+	recipes := map[string]Recipe{
+		"default": {Pipe: []string{"#sanitize", "#minify"}},
+		"dropper": {Pipe: []string{"#filter drop_title=/Hello/"}},
+	}
+	dropped, err := renderPreview(ctx, recipes, "dropper", []string{"#default"}, "", url)
+	if err != nil {
+		t.Fatalf("renderPreview dropper: %v", err)
+	}
+	if len(dropped) != 0 {
+		t.Fatalf("got %d items, want 0 (#default expanded to dropper's filtering pipe)", len(dropped))
+	}
+
+	kept, err := renderPreview(ctx, recipes, "default", []string{"#default"}, "", url)
+	if err != nil {
+		t.Fatalf("renderPreview default: %v", err)
+	}
+	if len(kept) != 1 {
+		t.Fatalf("got %d items, want 1 (#default expanded to the default recipe, keeps Hello)", len(kept))
+	}
+}
+
 func TestPreviewRequiresURL(t *testing.T) {
 	setupTestDB(t)
 	rec := doReq(t, newMux(), "GET", "/api/preview", "")
@@ -129,6 +178,7 @@ func TestServeExportImportRoundTrip(t *testing.T) {
 
 func TestHandleImportTagOverrideSkipsGroupResolution(t *testing.T) {
 	setupTestDB(t)
+	stubPassthroughResolve() // keep the feed (else it lands in skipped, tagless)
 	// A numeric-only folder name ("2024") makes resolveTag/normalizeGroupName error;
 	// a ?tag= override must skip that resolution (the CLI -g does).
 	opml := `<opml version="2.0"><body><outline text="2024">` +
@@ -136,6 +186,95 @@ func TestHandleImportTagOverrideSkipsGroupResolution(t *testing.T) {
 	rec := doReq(t, newMux(), "POST", "/api/import?tag=mytag&dry_run=1", opml)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("import status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	// The override tag reached the resolved feed (numeric-folder resolution skipped).
+	var got struct {
+		Feeds []struct {
+			Tag string `json:"tag"`
+		} `json:"feeds"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Feeds) != 1 || got.Feeds[0].Tag != "mytag" {
+		t.Fatalf("feeds = %+v, want one feed tagged \"mytag\"", got.Feeds)
+	}
+}
+
+// A malformed OPML upload is a 400 from ParseOPMLBytes, before any walk or probe.
+func TestHandleImportMalformedOPML(t *testing.T) {
+	setupTestDB(t)
+	rec := doReq(t, newMux(), "POST", "/api/import", "not-xml")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (%s)", rec.Code, rec.Body)
+	}
+}
+
+// handleResolve, past the validFeedURL guard, 400s when the fetch itself fails.
+// A valid-form loopback URL is blocked by the SSRF guard (allowLoopback NOT
+// enabled), so previewFetch errors — exercising handleResolve's previewFetch
+// error branch (only the validFeedURL guard was previously covered).
+func TestResolveFetchFails(t *testing.T) {
+	setupTestDB(t)
+	rec := doReq(t, newMux(), "GET", "/api/resolve?url=http://127.0.0.1:9/feed", "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (fetch failure)", rec.Code)
+	}
+}
+
+// mode=from-hash with a REAL hash on a seeded, committed store runs InspectCmd
+// end-to-end: 200 with ok=true and a non-empty report.
+func TestInspectFromHashSeededStore(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	f := &Feed{Title: "News", URL: "https://n.example/f", Tag: "news"}
+	if err := db.AddFeed(f); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.PutArticles(ctx, []*Item{{Feed: f, Title: "a0", Content: "c0", Link: "l0", Published: 100}}); err != nil {
+		t.Fatalf("PutArticles: %v", err)
+	}
+	if err := db.Commit(ctx); err != nil { // inspect reads the committed db.gz
+		t.Fatal(err)
+	}
+
+	rec := doReq(t, newMux(), "GET", "/api/inspect?mode=from-hash&hash=%230", "") // #0
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
+	}
+	var got struct {
+		Report string `json:"report"`
+		OK     bool   `json:"ok"`
+		Error  string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.OK {
+		t.Fatalf("ok = false, want true; error=%q report:\n%s", got.Error, got.Report)
+	}
+	if got.Report == "" {
+		t.Fatal("report is empty, want the captured from-hash output")
+	}
+}
+
+// from-hash on a store with no committed db.gz is the ok=false path: InspectCmd
+// fails to open, so the handler still 200s but reports ok=false with the error
+// (inspect must not create db.gz as a side effect).
+func TestInspectFromHashUncommittedStoreNotOK(t *testing.T) {
+	setupTestDB(t) // never commits db.gz
+	rec := doReq(t, newMux(), "GET", "/api/inspect?mode=from-hash&hash=%230", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (errors ride the body, not the status)", rec.Code)
+	}
+	var got struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.OK || got.Error == "" {
+		t.Fatalf("ok=%v error=%q, want ok=false with a non-empty error", got.OK, got.Error)
 	}
 }
 

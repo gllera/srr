@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -57,6 +58,33 @@ func TestOverview(t *testing.T) {
 	// label itself ("development" here; release ldflags set the real tag).
 	if got.Version != "development" {
 		t.Fatalf("version = %q, want %q", got.Version, "development")
+	}
+}
+
+// TestOverviewTagCountsAreLive pins the overview tag buckets to LIVE article
+// counts (TotalArt − Expired), the display math the frontend mirrors. (Moved
+// here from serve_feeds_test.go — it belongs with the overview tests.)
+func TestOverviewTagCountsAreLive(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	a := &Feed{Title: "A", URL: "https://a.example/f", Tag: "news", TotalArt: 10}
+	seedFeed(t, db, a)
+	// Expired is server-owned state (AddFeed zeroes it on create), so the
+	// fixture sets it post-add and re-commits.
+	a.Expired = 4
+	if err := db.Commit(context.Background()); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	rec := doReq(t, newMux(), "GET", "/api/overview", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
+	}
+	var ov overviewView
+	if err := json.Unmarshal(rec.Body.Bytes(), &ov); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(ov.Tags) != 1 || ov.Tags[0].Articles != 6 {
+		t.Fatalf("tags = %+v, want one bucket with 6 live articles", ov.Tags)
 	}
 }
 

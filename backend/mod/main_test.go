@@ -2,6 +2,7 @@ package mod
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -122,9 +123,10 @@ func TestModuleBuiltinMinify(t *testing.T) {
 		t.Fatalf("Process: %v", err)
 	}
 
-	// Minified HTML should have reduced whitespace
-	if item.Content == "<p>  Hello   World  </p>" {
-		t.Error("content should have been minified")
+	// Concrete minified output: runs of whitespace collapse, leading/trailing
+	// whitespace inside <p> drops, and the optional </p> close tag is omitted.
+	if want := "<p>Hello World"; item.Content != want {
+		t.Errorf("content = %q, want %q", item.Content, want)
 	}
 }
 
@@ -217,28 +219,65 @@ func TestModuleBuiltinRejectsUnexpectedParam(t *testing.T) {
 	}
 }
 
-// A name-with-params token must dispatch to the built-in, while a shell command
-// whose first word is not a built-in still runs verbatim through /bin/sh.
+// A shell command containing '=' must run verbatim through /bin/sh, not be
+// mistaken for a built-in "#name key=value" token and fed to the param parser.
 func TestModuleProcessSplitsNameFromParams(t *testing.T) {
 	m := New()
 	now := time.Now()
 
-	// "#sanitize" with no params behaves exactly as before.
-	item := &RawItem{GUID: 1, Title: "T", Content: `<p>ok</p><script>x</script>`, Link: "http://e.com", Published: &now}
-	if err := m.Process(context.Background(), "#sanitize", item); err != nil {
-		t.Fatalf("Process: %v", err)
-	}
-	if item.Content != "<p>ok</p>" {
-		t.Errorf("sanitize without params: got %q", item.Content)
-	}
-
-	// A shell command containing '=' is not mistaken for a built-in param token.
-	item = &RawItem{GUID: 2, Title: "Orig", Content: "c", Link: "http://e.com", Published: &now}
+	item := &RawItem{GUID: 2, Title: "Orig", Content: "c", Link: "http://e.com", Published: &now}
 	if err := m.Process(context.Background(), `jq -c '.title = "Shell"'`, item); err != nil {
 		t.Fatalf("shell Process: %v", err)
 	}
 	if item.Title != "Shell" {
 		t.Errorf("shell command should run verbatim, got title %q", item.Title)
+	}
+}
+
+// TestRawFeedItemText pins the multi-name first-non-empty fallback ingest relies
+// on for title/content/guid (feed.go rawToFeedItem): the first non-empty value
+// across the named children wins, empty candidates are skipped (both within a
+// name and across names), and all-empty yields "".
+func TestRawFeedItemText(t *testing.T) {
+	r := RawFeedItem{
+		"content":     {{Txt: ""}, {Txt: "body"}}, // skip-empty WITHIN a name
+		"encoded":     {{Txt: "enc"}},
+		"description": {{Txt: "desc"}},
+		"empty":       {{Txt: ""}},
+	}
+	cases := []struct {
+		names []string
+		want  string
+	}{
+		{[]string{"content", "encoded", "description"}, "body"},
+		{[]string{"encoded", "description"}, "enc"},
+		{[]string{"empty", "description"}, "desc"}, // all-empty name skipped, next name wins
+		{[]string{"empty"}, ""},                    // only empties → ""
+		{[]string{"absent"}, ""},                   // no such name → ""
+		{nil, ""},
+	}
+	for _, c := range cases {
+		if got := r.Text(c.names...); got != c.want {
+			t.Errorf("Text(%v) = %q, want %q", c.names, got, c.want)
+		}
+	}
+}
+
+// TestModuleProcessPreservesTypedRaw pins that a shell mod's JSON round-trip
+// keeps RawItem.Raw as its concrete RawFeedItem type. Without the save/restore
+// in Process, json.Unmarshal would decode Raw into map[string]any and break the
+// type-assert in built-ins (#enclosure/#embed) that run after a shell module.
+func TestModuleProcessPreservesTypedRaw(t *testing.T) {
+	m := New()
+	now := time.Now()
+	raw := RawFeedItem{"enclosure": {{Attr: map[string]string{"url": "https://x/a.jpg"}}}}
+	item := &RawItem{GUID: 1, Title: "T", Content: "c", Link: "http://e.com", Published: &now, Raw: raw}
+	// A `jq -c .` passthrough is a genuine JSON round-trip through /bin/sh.
+	if err := m.Process(context.Background(), "jq -c .", item); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if _, ok := item.Raw.(RawFeedItem); !ok {
+		t.Fatalf("Raw is %T after the shell round-trip, want RawFeedItem", item.Raw)
 	}
 }
 
@@ -387,6 +426,26 @@ func TestTailBufferKeepsRecentBytes(t *testing.T) {
 	}
 }
 
+// TestTailBufferKeepsLastEightLines pins the stderrTailLines cap: writing more
+// than 8 non-blank lines keeps only the last 8, in order (error text clusters at
+// the end; earlier lines are usually progress spam).
+func TestTailBufferKeepsLastEightLines(t *testing.T) {
+	b := &tailBuffer{limit: stderrTailBytes}
+	for i := 1; i <= 12; i++ {
+		fmt.Fprintf(b, "L%02d\n", i)
+	}
+	got := strings.Split(b.Tail(), "; ")
+	if len(got) != stderrTailLines {
+		t.Fatalf("Tail() has %d lines %q; want %d", len(got), got, stderrTailLines)
+	}
+	// Only the last 8 (L05..L12) survive, in order.
+	for i, seg := range got {
+		if want := fmt.Sprintf("L%02d", i+5); seg != want {
+			t.Errorf("Tail() line %d = %q, want %q", i, seg, want)
+		}
+	}
+}
+
 // TestTailBufferTailRendering pins the error-message rendering: CR progress
 // rewrites break lines, blanks drop, and only the trailing lines survive.
 func TestTailBufferTailRendering(t *testing.T) {
@@ -462,5 +521,18 @@ func TestRunSubprocessStderrStillPassesThrough(t *testing.T) {
 	r.Close()
 	if !strings.Contains(string(got), "mod log") {
 		t.Errorf("stderr passthrough broken: captured %q", got)
+	}
+}
+
+// TestRunCommandTimeoutUnlimited exercises the timeout<=0 branch: no deadline is
+// added (the asset-process default), so the command runs to completion under the
+// caller's context alone.
+func TestRunCommandTimeoutUnlimited(t *testing.T) {
+	out, err := RunCommandTimeout(context.Background(), 0, "printf", "x")
+	if err != nil {
+		t.Fatalf("RunCommandTimeout(timeout=0): %v", err)
+	}
+	if string(out) != "x" {
+		t.Errorf("stdout = %q, want %q", out, "x")
 	}
 }

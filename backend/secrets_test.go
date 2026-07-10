@@ -23,6 +23,17 @@ func TestParseSecretsAbsent(t *testing.T) {
 	}
 }
 
+func TestParseSecretsNilAndMalformed(t *testing.T) {
+	// Empty input takes the early return: nil map, no error.
+	if got, err := parseSecrets(nil); err != nil || got != nil {
+		t.Errorf("parseSecrets(nil) = (%v, %v), want (nil, nil)", got, err)
+	}
+	// Malformed YAML surfaces the unmarshal error.
+	if _, err := parseSecrets([]byte("secrets: [oops")); err == nil {
+		t.Error("parseSecrets(malformed) = nil err, want a parse error")
+	}
+}
+
 func TestParseSecretsRejectsBadName(t *testing.T) {
 	cases := map[string][]byte{
 		"empty name":    []byte("secrets:\n  \"\": v\n"),

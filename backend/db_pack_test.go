@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
+	"strings"
 	"testing"
+
+	"github.com/foobaz/go-zopfli/zopfli"
 )
 
 func TestDataKeyForFinalized(t *testing.T) {
@@ -149,5 +152,75 @@ func TestGzipBestSmallerAndRoundTrips(t *testing.T) {
 func TestGzipBestErrorsOnBadInput(t *testing.T) {
 	if out, err := gzipBest("data/0.gz", []byte("not a gzip stream")); err == nil {
 		t.Errorf("gzipBest(non-gzip) = %d bytes, want error", len(out))
+	}
+}
+
+// The no-gain branch: gzipBest returns the input unchanged when zopfli can't
+// beat the bytes already stored. zopfli out-compresses stdlib on every input
+// (measured), so the only way to reach this branch is to feed a stream that is
+// ALREADY zopfli-optimal — re-compressing it is idempotent, so best.Len() can
+// never fall below the input and the original slice is returned verbatim.
+func TestGzipBestNoGainReturnsInput(t *testing.T) {
+	raw := []byte("srr no-gain probe")
+	var zbuf bytes.Buffer
+	opts := zopfli.DefaultOptions()
+	if err := zopfli.GzipCompress(&opts, raw, &zbuf); err != nil {
+		t.Fatalf("zopfli seed: %v", err)
+	}
+	in := zbuf.Bytes()
+
+	out, err := gzipBest("data/0.gz", in)
+	if err != nil {
+		t.Fatalf("gzipBest: %v", err)
+	}
+	if !bytes.Equal(out, in) {
+		t.Errorf("gzipBest re-shrank an already-zopfli stream (in=%d out=%d); want the input returned unchanged",
+			len(in), len(out))
+	}
+	// Slice identity is the discriminating check. Zopfli is deterministic, so a
+	// recompression of an already-zopfli stream is byte-identical to the input —
+	// byte equality alone would still pass even if the no-gain branch (return gz)
+	// were deleted and best.Bytes() returned instead. The no-gain branch returns
+	// the exact input slice; the fall-through returns a fresh buffer.
+	if len(out) == 0 || &out[0] != &in[0] {
+		t.Error("gzipBest returned a recompressed buffer, not the input slice; the no-gain branch was not exercised")
+	}
+}
+
+// checkLatestIdx (db_pack.go) rejects a latest idx pack that disagrees with
+// db.gz. Its guard branches — empty-store-vs-nonempty-pack, short header,
+// ragged footer — had no direct coverage (only parseIdxPack's read-side twins
+// did); hand-built bytes via buildIdxRaw exercise each without a 50k-entry store.
+func TestCheckLatestIdxGuards(t *testing.T) {
+	// Happy path: a well-formed 2-entry latest pack returns the offset where the
+	// boundary footer begins (header + entries).
+	valid := buildIdxRaw(0, 0, []uint32{0}, []uint16{1, 2}, nil)
+	end, err := checkLatestIdx("idx/L1.gz", valid, 2)
+	if err != nil {
+		t.Fatalf("valid pack: %v", err)
+	}
+	if want := idxHeaderPrefix + 1*4 + 2*idxEntrySize; end != want {
+		t.Errorf("entriesEnd = %d, want %d", end, want)
+	}
+
+	// db.gz says empty store (want == 0) but a non-empty pack is on disk.
+	if _, err := checkLatestIdx("idx/L1.gz", []byte{0x01}, 0); err == nil || !strings.Contains(err.Error(), "empty store") {
+		t.Errorf("nonempty-pack/empty-store err = %v, want 'empty store'", err)
+	}
+
+	// want > 0 but fewer than idxHeaderPrefix header bytes present.
+	if _, err := checkLatestIdx("idx/L1.gz", make([]byte, idxHeaderPrefix-1), 5); err == nil || !strings.Contains(err.Error(), "short idx header") {
+		t.Errorf("short-header err = %v, want 'short idx header'", err)
+	}
+
+	// header + entries present, but the trailing footer isn't a whole u16 count.
+	ragged := append(buildIdxRaw(0, 0, []uint32{0}, []uint16{1, 2}, nil), 0x00)
+	if _, err := checkLatestIdx("idx/L1.gz", ragged, 2); err == nil || !strings.Contains(err.Error(), "whole number of u16 boundaries") {
+		t.Errorf("ragged-footer err = %v, want 'whole number of u16 boundaries'", err)
+	}
+
+	// header present but the promised entries are truncated (short body).
+	if _, err := checkLatestIdx("idx/L1.gz", valid, 10); err == nil || !strings.Contains(err.Error(), "expects at least") {
+		t.Errorf("short-body err = %v, want 'expects at least'", err)
 	}
 }

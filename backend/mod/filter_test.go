@@ -192,6 +192,23 @@ func TestFilterBadRegexIsHardError(t *testing.T) {
 	}
 }
 
+// TestParseRegexParamMalformed pins the four config-error shapes parseRegexParam
+// rejects: no leading '/', a missing closing '/', an empty pattern, and an
+// unsupported flag. Each is a hard configuration error (loud, not silently
+// ignored).
+func TestParseRegexParamMalformed(t *testing.T) {
+	for _, val := range []string{
+		"foo",  // no leading '/'
+		"/foo", // missing closing '/'
+		"//",   // empty pattern (matches everything)
+		"/x/g", // unsupported flag 'g' (only 'i' is allowed)
+	} {
+		if _, err := parseRegexParam("drop_title", val); err == nil {
+			t.Errorf("parseRegexParam(drop_title=%q): expected a hard error", val)
+		}
+	}
+}
+
 // TestFilterUnknownParamIsHardError: an unknown param key is rejected.
 func TestFilterUnknownParamIsHardError(t *testing.T) {
 	item := makeFilterItem("T", "c")

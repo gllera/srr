@@ -159,7 +159,7 @@ func TestParseBytes(t *testing.T) {
 		}
 	}
 
-	bad := []string{"", "abc", "MiB", "16XB", "12 34", "9999999999GiB"}
+	bad := []string{"", "abc", "MiB", "16XB", "12 34", "9999999999GiB", "99999999999999999999"}
 	for _, in := range bad {
 		if _, err := parseBytes(in); err == nil {
 			t.Errorf("parseBytes(%q) expected error", in)

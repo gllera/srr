@@ -171,19 +171,6 @@ func TestParseDescriptionFallback(t *testing.T) {
 	}
 }
 
-func TestParseGUIDFallbackToLink(t *testing.T) {
-	items := collectFeed(t, `<rss version="2.0"><feed>
-    <item>
-      <title>No GUID</title>
-      <link>http://example.com/fallback</link>
-    </item>
-  </feed></rss>`)
-
-	if items[0].GUID != hash("http://example.com/fallback") {
-		t.Errorf("guid should fall back to link hash")
-	}
-}
-
 func TestParseDateUnparseableIsUnixZero(t *testing.T) {
 	items := collectFeed(t, `<rss version="2.0"><feed>
     <item><title>No Date</title></item>
@@ -210,34 +197,16 @@ func TestParseCDATA(t *testing.T) {
 	}
 }
 
-func TestParseUnsupportedFormat(t *testing.T) {
-	_, err := ParseFeed([]byte(`<html><body>Not a feed</body></html>`), func(*mod.RawItem) error {
-		t.Fatal("callback should not be called")
-		return nil
-	})
-	if err == nil {
-		t.Error("expected error for unsupported format")
-	}
-}
-
-func TestParseInvalidXML(t *testing.T) {
-	_, err := ParseFeed([]byte(`not xml at all`), func(*mod.RawItem) error {
-		return nil
-	})
-	if err == nil {
-		t.Error("expected error for invalid XML")
-	}
-}
-
 // A document that isn't a recognized feed (HTML page, unknown XML root, or
-// non-XML) must be classified as errNotFeed so the caller can branch into
-// auto-discovery rather than treating it as a generic parse fault.
+// non-XML, incl. empty input) must be classified as errNotFeed so the caller can
+// branch into auto-discovery rather than treating it as a generic parse fault.
 func TestParseFeedNotFeedClassification(t *testing.T) {
 	cases := []struct{ name, data string }{
 		{"html-doctype", `<!doctype html><html><head></head><body>hi</body></html>`},
 		{"html-bare", `<html><body>Not a feed</body></html>`},
 		{"unknown-root", `<?xml version="1.0"?><foo><bar/></foo>`},
 		{"plain-text", `not xml at all`},
+		{"empty", ``},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -319,29 +288,23 @@ func TestResolveNoFeedErrors(t *testing.T) {
 	}
 }
 
-func TestHashDeterministic(t *testing.T) {
-	h1 := hash("test-guid-12345")
-	h2 := hash("test-guid-12345")
-	if h1 != h2 {
-		t.Errorf("hash not deterministic: %d != %d", h1, h2)
+// TestHash pins the FNV-32a GUID hash: deterministic, distinct for distinct
+// inputs, and non-zero for the empty string (the FNV offset basis).
+func TestHash(t *testing.T) {
+	// Deterministic.
+	if hash("test-guid-12345") != hash("test-guid-12345") {
+		t.Error("hash is not deterministic")
 	}
-}
-
-func TestHashDistinct(t *testing.T) {
-	h1 := hash("guid-a")
-	h2 := hash("guid-b")
-	if h1 == h2 {
-		t.Errorf("different inputs produced same hash: %d", h1)
+	// Distinct inputs → distinct hashes.
+	if hash("guid-a") == hash("guid-b") {
+		t.Error("distinct inputs produced the same hash")
 	}
-}
-
-func TestHashEmptyString(t *testing.T) {
-	h := hash("")
-	if h == 0 {
-		t.Error("hash of empty string should not be 0 (FNV offset basis)")
+	// Empty string is non-zero (the FNV offset basis) and deterministic.
+	if hash("") == 0 {
+		t.Error("hash(\"\") should not be 0 (FNV offset basis)")
 	}
-	if h != hash("") {
-		t.Error("hash of empty string not deterministic")
+	if hash("") != hash("") {
+		t.Error("hash(\"\") is not deterministic")
 	}
 }
 
@@ -419,19 +382,6 @@ func TestParseLinkAtomNoRel(t *testing.T) {
 
 	if items[0].Link != "http://example.com/norel" {
 		t.Errorf("link = %q, want href without rel", items[0].Link)
-	}
-}
-
-func TestParseLinkRSSText(t *testing.T) {
-	items := collectFeed(t, `<rss version="2.0"><feed>
-    <item>
-      <title>Text Link</title>
-      <link>http://example.com/text</link>
-    </item>
-  </feed></rss>`)
-
-	if items[0].Link != "http://example.com/text" {
-		t.Errorf("link = %q", items[0].Link)
 	}
 }
 
@@ -524,15 +474,9 @@ func TestParseRSSWithAttributes(t *testing.T) {
 	}
 }
 
-func TestParseEmptyXML(t *testing.T) {
-	_, err := ParseFeed([]byte(""), func(*mod.RawItem) error {
-		return nil
-	})
-	if err == nil {
-		t.Error("expected error for empty input")
-	}
-}
-
+// TestParseRawFieldPreserved pins the typed-access contract #enclosure/#embed
+// rely on: Raw is the parsed entry as mod.RawFeedItem, so a child element is
+// reachable by name with its text intact.
 func TestParseRawFieldPreserved(t *testing.T) {
 	items := collectFeed(t, `<rss version="2.0"><feed>
     <item>
@@ -541,8 +485,12 @@ func TestParseRawFieldPreserved(t *testing.T) {
     </item>
   </feed></rss>`)
 
-	if items[0].Raw == nil {
-		t.Error("Raw field should be preserved")
+	raw, ok := items[0].Raw.(mod.RawFeedItem)
+	if !ok {
+		t.Fatalf("Raw = %T, want mod.RawFeedItem", items[0].Raw)
+	}
+	if got := raw["customField"]; len(got) == 0 || got[0].Txt != "custom value" {
+		t.Errorf("raw[customField] = %+v, want a single field with Txt=%q", got, "custom value")
 	}
 }
 
@@ -647,17 +595,20 @@ func TestParseNamespacePrefixStripping(t *testing.T) {
 	}
 }
 
+// The GUID falls back to the link hash whether guid is absent entirely or
+// present-but-empty.
 func TestParseRSSItemGUIDFallbackChain(t *testing.T) {
-	items := collectFeed(t, `<rss version="2.0"><feed>
-    <item>
-      <title>Only Link</title>
-      <guid></guid>
-      <link>http://example.com/linkonly</link>
-    </item>
-  </feed></rss>`)
-
-	if items[0].GUID != hash("http://example.com/linkonly") {
-		t.Errorf("GUID should fall back to link hash when guid is empty")
+	cases := []struct{ name, item string }{
+		{"no guid element", `<title>No GUID</title><link>http://example.com/fallback</link>`},
+		{"empty guid element", `<title>Only Link</title><guid></guid><link>http://example.com/fallback</link>`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			items := collectFeed(t, `<rss version="2.0"><feed><item>`+c.item+`</item></feed></rss>`)
+			if items[0].GUID != hash("http://example.com/fallback") {
+				t.Errorf("GUID should fall back to the link hash")
+			}
+		})
 	}
 }
 
@@ -920,5 +871,125 @@ func TestRSSDiscoveryNormalFeedUnchanged(t *testing.T) {
 	}
 	if result.ResolvedURL != "" {
 		t.Errorf("ResolvedURL should be empty for a normal feed, got %q", result.ResolvedURL)
+	}
+}
+
+// A #feed fetch whose body fills the buffer (MaxSize) is a hard error, and an
+// empty 200 is reported as an empty response — the two readBody outcomes.
+func TestFeedFetchBodySizeErrors(t *testing.T) {
+	fn := feedFunc(t)
+
+	// Oversize: a body >= len(buf) fills the buffer → "bigger than".
+	big := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, strings.Repeat("x", 64))
+	}))
+	defer big.Close()
+	buf := make([]byte, 8)
+	if _, err := fn(context.Background(), big.Client(), buf, Request{URL: big.URL, MaxSize: cap(buf) - 1}); err == nil ||
+		!strings.Contains(err.Error(), "bigger than") {
+		t.Errorf("oversize body err = %v, want a 'bigger than' error", err)
+	}
+
+	// Empty 200: no body → "empty response".
+	empty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer empty.Close()
+	buf2 := make([]byte, 1024)
+	if _, err := fn(context.Background(), empty.Client(), buf2, Request{URL: empty.URL, MaxSize: cap(buf2) - 1}); err == nil ||
+		!strings.Contains(err.Error(), "empty response") {
+		t.Errorf("empty body err = %v, want an 'empty response' error", err)
+	}
+}
+
+// feedFetch sends conditional-GET validators from req.ETag/LastModified, maps a
+// 304 to NotModified, and treats a non-200/304 status as a hard error.
+func TestFeedFetchConditionalGET(t *testing.T) {
+	fn := feedFunc(t)
+	buf := make([]byte, 1<<16)
+
+	var gotINM, gotIMS string
+	notmod := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotINM = r.Header.Get("If-None-Match")
+		gotIMS = r.Header.Get("If-Modified-Since")
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer notmod.Close()
+	res, err := fn(context.Background(), notmod.Client(), buf, Request{
+		URL:          notmod.URL,
+		ETag:         `"abc"`,
+		LastModified: "Wed, 21 Oct 2015 07:28:00 GMT",
+		MaxSize:      cap(buf) - 1,
+	})
+	if err != nil {
+		t.Fatalf("304 fetch: %v", err)
+	}
+	if !res.NotModified {
+		t.Error("res.NotModified = false, want true on a 304")
+	}
+	if gotINM != `"abc"` {
+		t.Errorf("If-None-Match = %q, want %q (from req.ETag)", gotINM, `"abc"`)
+	}
+	if gotIMS != "Wed, 21 Oct 2015 07:28:00 GMT" {
+		t.Errorf("If-Modified-Since = %q, want it from req.LastModified", gotIMS)
+	}
+
+	srv500 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv500.Close()
+	if _, err := fn(context.Background(), srv500.Client(), buf, Request{URL: srv500.URL, MaxSize: cap(buf) - 1}); err == nil {
+		t.Error("a non-200 status should be an error")
+	}
+}
+
+// looksLikeHTML classifies by the text/html header, else by sniffing the body:
+// a leading BOM + <!doctype html> (or <html>) still reads as HTML, while XML and
+// plain text do not.
+func TestLooksLikeHTML(t *testing.T) {
+	cases := []struct {
+		name        string
+		contentType string
+		body        string
+		want        bool
+	}{
+		{"header text/html", "text/html; charset=utf-8", "whatever", true},
+		{"bom+doctype no header", "", "\ufeff<!DOCTYPE html><html></html>", true},
+		{"bare html no header", "", "  <html><head></head></html>", true},
+		{"xml is not html", "", `<?xml version="1.0"?><rss></rss>`, false},
+		{"plain text", "text/plain", "hello world", false},
+	}
+	for _, c := range cases {
+		if got := looksLikeHTML(c.contentType, []byte(c.body)); got != c.want {
+			t.Errorf("%s: looksLikeHTML(%q, %q) = %v, want %v", c.name, c.contentType, c.body, got, c.want)
+		}
+	}
+}
+
+// Discovery still fires when the HTML page carries NO text/html Content-Type:
+// looksLikeHTML falls back to sniffing the body.
+func TestFeedFetchDiscoveryByBodySniff(t *testing.T) {
+	feedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		fmt.Fprint(w, rssFixture)
+	}))
+	defer feedSrv.Close()
+	// The HTML page declares application/octet-stream, NOT text/html.
+	htmlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		fmt.Fprintf(w, `<!doctype html><html><head>
+<link rel="alternate" type="application/rss+xml" href="%s">
+</head><body>hi</body></html>`, feedSrv.URL)
+	}))
+	defer htmlSrv.Close()
+
+	fn := feedFunc(t)
+	buf := make([]byte, 1<<20)
+	res, err := fn(context.Background(), feedSrv.Client(), buf, Request{URL: htmlSrv.URL, MaxSize: cap(buf) - 1})
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if res.ResolvedURL != feedSrv.URL {
+		t.Errorf("ResolvedURL = %q, want discovered %q (body-sniff HTML detection)", res.ResolvedURL, feedSrv.URL)
 	}
 }

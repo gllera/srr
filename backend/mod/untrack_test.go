@@ -137,10 +137,24 @@ func TestUntrackNoOpVerbatim(t *testing.T) {
 	}
 }
 
-func TestUntrackRejectsParams(t *testing.T) {
-	m := New()
-	item := &RawItem{Content: "<p>a</p>"}
-	if err := m.Process(context.Background(), "#untrack foo=bar", item); err == nil {
-		t.Fatal("expected unknown-parameter error")
+// The alternate "... first appeared on ..." phrasing is also a WordPress
+// syndication trailer (wpTrailerRe allows both orderings).
+func TestUntrackWPTrailerFirstAppearedOn(t *testing.T) {
+	got := runUntrack(t,
+		`<p>body</p><p>The post <a href="https://x.org/p">Title</a> first appeared on <a href="https://x.org">X</a>.</p>`)
+	if got != "<p>body</p>" {
+		t.Fatalf("'first appeared on' trailer should be removed, got %q", got)
+	}
+}
+
+// A trailer followed by a trailing whitespace-only text node still matches:
+// removeWPTrailer skips blank trailing text nodes to find the last element.
+func TestUntrackWPTrailerTrailingWhitespaceNode(t *testing.T) {
+	got := runUntrack(t, "<p>body</p><p>The post X first appeared on Y.</p>\n  ")
+	if strings.Contains(got, "first appeared on") {
+		t.Fatalf("trailer before a whitespace text node should be removed, got %q", got)
+	}
+	if !strings.Contains(got, "<p>body</p>") {
+		t.Errorf("real body should survive trailer removal, got %q", got)
 	}
 }

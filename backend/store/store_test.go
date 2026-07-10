@@ -425,3 +425,70 @@ func TestLoadEnvUnsupportedKindErrors(t *testing.T) {
 		t.Fatal("loadEnv: want error for unsupported field kind, got nil")
 	}
 }
+
+// snapshotConfigs saves and restores the package-global backend config structs
+// LoadConfigs decodes into (it operates on the shared registry, so a test that
+// calls it mutates s3Cfg/httpCfg for real).
+func snapshotConfigs(t *testing.T) {
+	t.Helper()
+	s3Orig, httpOrig := s3Cfg, httpCfg
+	t.Cleanup(func() { s3Cfg, httpCfg = s3Orig, httpOrig })
+}
+
+// LoadConfigs is the single YAML decoder for every backend section: a valid s3/
+// http section decodes into its registered struct.
+func TestLoadConfigsDecodesSections(t *testing.T) {
+	snapshotConfigs(t)
+	s3Cfg, httpCfg = S3Config{}, HTTPConfig{}
+	yaml := "s3:\n  region: eu-central-1\n  endpoint: https://s3.example.com\n" +
+		"http:\n  token: sekrit\n  insecure: true\n"
+	if err := LoadConfigs([]byte(yaml)); err != nil {
+		t.Fatalf("LoadConfigs: %v", err)
+	}
+	if s3Cfg.Region != "eu-central-1" || s3Cfg.Endpoint != "https://s3.example.com" {
+		t.Errorf("s3Cfg = %+v, want region/endpoint decoded", s3Cfg)
+	}
+	if httpCfg.Token != "sekrit" || !httpCfg.Insecure {
+		t.Errorf("httpCfg = %+v, want token/insecure decoded", httpCfg)
+	}
+}
+
+// A misspelled/unknown key is a hard error (the strict KnownFields contract),
+// not silently dropped.
+func TestLoadConfigsUnknownKeyErrors(t *testing.T) {
+	snapshotConfigs(t)
+	if err := LoadConfigs([]byte("s3:\n  endpont: https://x\n")); err == nil {
+		t.Error("LoadConfigs: want error for an unknown key, got nil")
+	}
+}
+
+func TestLoadConfigsMalformedYAMLErrors(t *testing.T) {
+	snapshotConfigs(t)
+	// An unterminated flow mapping is a YAML syntax error.
+	if err := LoadConfigs([]byte("s3: {region: eu\n")); err == nil {
+		t.Error("LoadConfigs: want error for malformed YAML, got nil")
+	}
+}
+
+func TestLoadConfigsEmptyAllowed(t *testing.T) {
+	snapshotConfigs(t)
+	for _, data := range [][]byte{nil, []byte(""), []byte("   \n")} {
+		if err := LoadConfigs(data); err != nil {
+			t.Errorf("LoadConfigs(%q) = %v, want nil (empty input allowed)", data, err)
+		}
+	}
+}
+
+// An env override applies through LoadConfigs end-to-end, even with the YAML
+// section absent (env beats YAML).
+func TestLoadConfigsEnvOverride(t *testing.T) {
+	snapshotConfigs(t)
+	s3Cfg = S3Config{}
+	t.Setenv("SRR_S3_REGION", "us-west-2")
+	if err := LoadConfigs([]byte("http:\n  token: t\n")); err != nil {
+		t.Fatalf("LoadConfigs: %v", err)
+	}
+	if s3Cfg.Region != "us-west-2" {
+		t.Errorf("s3Cfg.Region = %q, want us-west-2 (env override through LoadConfigs)", s3Cfg.Region)
+	}
+}

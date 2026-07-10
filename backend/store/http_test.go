@@ -368,6 +368,79 @@ func TestHTTPBasicAuthFromURL(t *testing.T) {
 	}
 }
 
+// A HEAD response with no Content-Length reports size 0 — accounting is
+// best-effort on plain HTTP stores (resp.ContentLength -1 clamps to 0).
+func TestHTTPStatNoContentLength(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK) // no Content-Length, empty body
+	}))
+	t.Cleanup(srv.Close)
+	b, err := Open(ctx, srv.URL)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { b.Close() })
+	if n, err := b.Stat(ctx, "obj"); err != nil || n != 0 {
+		t.Errorf("Stat(no Content-Length) = (%d, %v), want (0, nil)", n, err)
+	}
+}
+
+// A non-2xx GET (500) is a wrapped error carrying the status.
+func TestHTTPGetServerErrorWrapped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	b, err := Open(ctx, srv.URL)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { b.Close() })
+	rc, err := b.Get(ctx, "obj", false)
+	if rc != nil {
+		rc.Close()
+	}
+	if err == nil {
+		t.Fatal("Get on a 500 should return an error")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("error should carry the status, got %v", err)
+	}
+}
+
+// HTTPConfig.Insecure skips TLS certificate verification: a write to a
+// self-signed TLS server fails by default and succeeds with Insecure=true.
+func TestHTTPInsecureSkipsTLSVerify(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	}))
+	t.Cleanup(srv.Close)
+	orig := httpCfg
+	t.Cleanup(func() { httpCfg = orig })
+
+	// Default (verify on): the self-signed cert is rejected.
+	httpCfg = HTTPConfig{}
+	strict, err := Open(ctx, srv.URL)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { strict.Close() })
+	if err := strict.Put(ctx, "obj", strings.NewReader("x"), true); err == nil {
+		t.Error("Put to a self-signed TLS server should fail verification by default")
+	}
+
+	// Insecure: verification skipped, the write succeeds.
+	httpCfg = HTTPConfig{Insecure: true}
+	insecure, err := Open(ctx, srv.URL)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { insecure.Close() })
+	if err := insecure.Put(ctx, "obj", strings.NewReader("x"), true); err != nil {
+		t.Fatalf("Put with Insecure=true should succeed against a self-signed TLS server: %v", err)
+	}
+}
+
 // HEAD (Stat) may follow redirects like GET — both are bodiless reads; the
 // guard still refuses redirected writes (TestHTTPWriteRedirectFailsLoudly).
 func TestHTTPStatFollowsRedirect(t *testing.T) {

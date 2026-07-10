@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -87,6 +88,23 @@ func TestLocalPutNoDoubleCloseOnCopyError(t *testing.T) {
 type errorReader struct{ err error }
 
 func (r *errorReader) Read(_ []byte) (int, error) { return 0, r.err }
+
+// newLocal rejects a store path that is a regular file ("is not a directory")
+// or that does not exist ("checking path") — distinct errors so an operator can
+// tell a typo'd path from a wrong target.
+func TestNewLocalRejects(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "file.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(ctx, file); err == nil || !strings.Contains(err.Error(), "is not a directory") {
+		t.Errorf("Open(regular file) err = %v, want 'is not a directory'", err)
+	}
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	if _, err := Open(ctx, missing); err == nil || !strings.Contains(err.Error(), "checking path") {
+		t.Errorf("Open(missing path) err = %v, want 'checking path'", err)
+	}
+}
 
 func TestLocalStat(t *testing.T) {
 	b, _ := setupLocalStore(t)

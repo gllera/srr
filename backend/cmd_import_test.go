@@ -95,6 +95,94 @@ func TestImportRunPartialSuccess(t *testing.T) {
 	}
 }
 
+// A typo'd --recipe must be rejected up front — before any URL is probed over
+// the network (resolveImportBatch validates the stamped recipe before
+// resolveImportFeeds). The resolver is rigged to fail the test if it ever runs.
+func TestImportRejectsUnknownRecipeBeforeProbe(t *testing.T) {
+	setupEmptyDB(t)
+	prevResolve := resolveFeedURL
+	t.Cleanup(func() { resolveFeedURL = prevResolve })
+	resolveFeedURL = func(_ context.Context, _ string) (string, error) {
+		t.Error("resolveFeedURL must not run when the --recipe ref is invalid")
+		return "", fmt.Errorf("network probe should not have happened")
+	}
+	opml := `<?xml version="1.0"?><opml version="2.0"><body>
+<outline title="A" text="A" xmlUrl="https://a.example.com/feed"/>
+</body></opml>`
+	path := filepath.Join(t.TempDir(), "feeds.opml")
+	if err := os.WriteFile(path, []byte(opml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := (&ImportCmd{Path: path, All: true, Recipe: strPtr("nope")}).Run()
+	wantErr(t, err, `recipe "nope" does not exist`)
+	if n := len(reopenDB(t).Feeds()); n != 0 {
+		t.Errorf("Feeds = %d, want 0 (import rejected before any commit)", n)
+	}
+}
+
+// --dry-run probes and prints the resolved feed URLs but writes nothing to the
+// store (the withDB commit path is skipped entirely).
+func TestImportDryRunPrintsResolvedNoDBWrite(t *testing.T) {
+	setupEmptyDB(t)
+	resolveFeedURL = func(_ context.Context, url string) (string, error) {
+		return url + "/feed.xml", nil // homepage → discovered feed URL
+	}
+	opml := `<?xml version="1.0"?><opml version="2.0"><body>
+<outline title="Good" text="Good" xmlUrl="https://good.example.com/home"/>
+</body></opml>`
+	path := filepath.Join(t.TempDir(), "feeds.opml")
+	if err := os.WriteFile(path, []byte(opml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The dry-run table prints via os.Stdout directly, so capture it there.
+	out := captureStdout(t, func() {
+		if err := (&ImportCmd{Path: path, All: true, DryRun: true}).Run(); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	})
+	if !strings.Contains(out, "https://good.example.com/home/feed.xml") {
+		t.Errorf("dry-run output missing the resolved feed URL:\n%s", out)
+	}
+	if n := len(reopenDB(t).Feeds()); n != 0 {
+		t.Errorf("Feeds = %d, want 0 (dry-run must not write)", n)
+	}
+}
+
+// walk's "group that is also a feed" branch: an OPML node carrying BOTH a Feed
+// and Children emits the group's own feed too, tagged with the group's own name
+// (childPath) — the same tag its children get, not the parent path.
+func TestImportWalkerGroupThatIsAlsoAFeed(t *testing.T) {
+	nodes := []*OPMLNode{
+		{
+			Name: "Tech",
+			Feed: &Feed{Title: "Tech Home", URL: "http://example.com/tech"},
+			Children: []*OPMLNode{
+				{Name: "Blog", Feed: &Feed{Title: "Blog", URL: "http://example.com/blog"}},
+			},
+		},
+	}
+	iw := newImportWalker(nil)
+	feeds, err := iw.walk(nodes, "", "", nil, true)
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+
+	var groupFeed *Feed
+	for _, c := range feeds {
+		if c.URL == "http://example.com/tech" {
+			groupFeed = c
+		}
+	}
+	if groupFeed == nil {
+		t.Fatalf("the group's own feed is missing from the %d walked feeds", len(feeds))
+	}
+	if groupFeed.Tag != "tech" {
+		t.Errorf("group feed tag = %q, want %q (the group's own name)", groupFeed.Tag, "tech")
+	}
+}
+
 func TestIsSelected(t *testing.T) {
 	tests := []struct {
 		id          string

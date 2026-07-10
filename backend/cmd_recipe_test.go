@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -103,6 +105,40 @@ func TestRecipeSetDefaultRejectsDefaultToken(t *testing.T) {
 	// but allowed in any other recipe
 	if err := recipeSet(t, "x", "", "#default"); err != nil {
 		t.Errorf("recipe set x with #default rejected: %v", err)
+	}
+}
+
+// RecipeLsCmd prints every recipe; RecipeShowCmd prints one and errors with a
+// "not found" message on an unknown name.
+func TestRecipeLsAndShow(t *testing.T) {
+	setupEmptyDB(t)
+	if err := recipeSet(t, "read", "", "#sanitize"); err != nil {
+		t.Fatalf("recipe set: %v", err)
+	}
+
+	var out bytes.Buffer
+	saved := stdout
+	stdout = &out
+	t.Cleanup(func() { stdout = saved })
+
+	if err := (&RecipeLsCmd{Format: "json"}).Run(); err != nil {
+		t.Fatalf("RecipeLsCmd: %v", err)
+	}
+	if !strings.Contains(out.String(), "read") || !strings.Contains(out.String(), defaultRecipeName) {
+		t.Errorf("ls output missing recipes (read + default): %s", out.String())
+	}
+
+	out.Reset()
+	if err := (&RecipeShowCmd{Name: "read", Format: "json"}).Run(); err != nil {
+		t.Fatalf("RecipeShowCmd: %v", err)
+	}
+	if !strings.Contains(out.String(), "#sanitize") {
+		t.Errorf("show output missing the recipe pipe: %s", out.String())
+	}
+
+	err := (&RecipeShowCmd{Name: "nope", Format: "json"}).Run()
+	if err == nil || !strings.Contains(err.Error(), `recipe "nope" not found`) {
+		t.Errorf("RecipeShowCmd(nope) = %v, want a 'recipe \"nope\" not found' error", err)
 	}
 }
 

@@ -54,3 +54,24 @@ func TestGuardDialControlOptOut(t *testing.T) {
 		t.Errorf("AllowPrivateFetch should allow loopback, got %v", err)
 	}
 }
+
+// A resolved address that is not an IP is refused: guardDialControl runs after
+// DNS with the concrete dial address, so a non-IP there means something is
+// wrong — never dial it.
+func TestGuardDialControlRefusesNonIP(t *testing.T) {
+	if err := guardDialControl("tcp", "not-an-ip", nil); err == nil {
+		t.Error("guardDialControl(non-IP) = nil, want refused")
+	}
+}
+
+// When SplitHostPort fails (no ':port'), the whole address is treated as the
+// host and still guarded: a bare private/loopback IP with no port is blocked,
+// a bare public IP allowed.
+func TestGuardDialControlBareHostFallback(t *testing.T) {
+	if err := guardDialControl("tcp", "127.0.0.1", nil); err == nil {
+		t.Error("guardDialControl(bare loopback IP, no port) = nil, want blocked")
+	}
+	if err := guardDialControl("tcp", "8.8.8.8", nil); err != nil {
+		t.Errorf("guardDialControl(bare public IP, no port) = %v, want allowed", err)
+	}
+}

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"strings"
 	"testing"
 )
@@ -34,29 +33,26 @@ func TestSyndicateLsEmpty(t *testing.T) {
 	}
 }
 
-func TestSyndicateSetPersists(t *testing.T) {
+// TestSyndicateSetPersistsAndLists sets one output feed, then asserts it is
+// visible via BOTH read paths — a fresh DB reopen (db.core.Out) and `syndicate
+// ls` (the JSON printer) — folding the former set-then-reopen and set-then-ls
+// tests that differed only in the read path.
+func TestSyndicateSetPersistsAndLists(t *testing.T) {
 	_, c, _ := setupTestDB(t)
 	c.Feeds = map[int]*Feed{
 		1: {id: 1, URL: "http://a", Tag: "news"},
 	}
 
-	cmd := &SyndicateSetCmd{
-		Name:   "foo",
-		Format: "rss",
-		Tags:   []string{"news"},
-		Limit:  20,
-	}
-	if err := cmd.Run(); err != nil {
+	if err := (&SyndicateSetCmd{Name: "foo", Format: "rss", Tags: []string{"news"}, Limit: 20}).Run(); err != nil {
 		t.Fatalf("syndicate set: %v", err)
 	}
 
-	// Re-open and verify persisted
+	// Read path 1: reopen the DB and inspect the persisted entry.
 	db2, err := NewDB(context.Background(), false)
 	if err != nil {
 		t.Fatalf("NewDB: %v", err)
 	}
 	defer db2.Close(context.Background())
-
 	if len(db2.core.Out) != 1 {
 		t.Fatalf("Out len = %d, want 1", len(db2.core.Out))
 	}
@@ -64,30 +60,19 @@ func TestSyndicateSetPersists(t *testing.T) {
 	if o.Name != "foo" || o.Format != "rss" || len(o.Tags) != 1 || o.Tags[0] != "news" || o.Limit != 20 {
 		t.Errorf("Out[0] = %+v, want {Name:foo Format:rss Tags:[news] Limit:20}", o)
 	}
-}
 
-func TestSyndicateLsShowsEntry(t *testing.T) {
-	_, c, _ := setupTestDB(t)
-	c.Feeds = map[int]*Feed{
-		2: {id: 2, URL: "http://b", Tag: "tech"},
-	}
-
-	if err := (&SyndicateSetCmd{Name: "bar", Format: "json", Tags: []string{"tech"}, Limit: 10}).Run(); err != nil {
-		t.Fatalf("syndicate set: %v", err)
-	}
-
+	// Read path 2: `syndicate ls` prints the same entry.
 	out := captureOutput(t, func() {
 		if err := (&SyndicateLsCmd{}).Run(); err != nil {
 			t.Fatalf("syndicate ls: %v", err)
 		}
 	})
-
 	var entries []OutFeed
 	if err := json.Unmarshal([]byte(out), &entries); err != nil {
 		t.Fatalf("unmarshal ls output: %v (raw: %q)", err, out)
 	}
-	if len(entries) != 1 || entries[0].Name != "bar" || entries[0].Format != "json" {
-		t.Errorf("ls = %+v, want [{Name:bar Format:json}]", entries)
+	if len(entries) != 1 || entries[0].Name != "foo" || entries[0].Format != "rss" {
+		t.Errorf("ls = %+v, want [{Name:foo Format:rss}]", entries)
 	}
 }
 
@@ -204,10 +189,11 @@ func TestSyndicateSetDefaultLimit(t *testing.T) {
 	}
 }
 
-// TestSyndicateRmCleansOutFile verifies that rm attempts to delete the out/ key
-// even when the store is empty (silent-on-missing).
+// TestSyndicateRmCleansOutFile verifies that rm deletes the entry's on-store
+// out/ file, not just the db.gz entry: a real out/myfeed.rss is seeded, then rm
+// must remove it.
 func TestSyndicateRmCleansOutFile(t *testing.T) {
-	_, c, _ := setupTestDB(t)
+	db, c, _ := setupTestDB(t)
 	c.Feeds = map[int]*Feed{
 		1: {id: 1, URL: "http://a", Tag: "news"},
 	}
@@ -215,9 +201,61 @@ func TestSyndicateRmCleansOutFile(t *testing.T) {
 	if err := (&SyndicateSetCmd{Name: "myfeed", Format: "rss", Tags: []string{"news"}}).Run(); err != nil {
 		t.Fatalf("syndicate set: %v", err)
 	}
-	// rm should succeed even if no out/ file exists in store (silent-on-missing)
+	// Seed the rolling output file SyncOutFeeds would have written.
+	const outKey = "out/myfeed.rss"
+	if err := db.Put(ctx, outKey, strings.NewReader("<rss/>"), true); err != nil {
+		t.Fatalf("seed out file: %v", err)
+	}
+	if n, _ := db.Stat(ctx, outKey); n == 0 {
+		t.Fatalf("seed did not create %s", outKey)
+	}
+
 	if err := (&SyndicateRmCmd{Name: "myfeed"}).Run(); err != nil {
 		t.Fatalf("syndicate rm: %v", err)
+	}
+	if n, _ := db.Stat(ctx, outKey); n != 0 {
+		t.Errorf("%s still present (size %d) after rm; the out/ file was not reaped", outKey, n)
+	}
+}
+
+// TestSyndicateSetReapsOldFormatFile pins the format-change orphan reap: an
+// entry switched rss→json deletes the stale out/<name>.rss while leaving the
+// new-format out/<name>.json untouched (setOutFeed only reaps the OLD extension).
+func TestSyndicateSetReapsOldFormatFile(t *testing.T) {
+	db, c, _ := setupTestDB(t)
+	c.Feeds = map[int]*Feed{
+		1: {id: 1, URL: "http://a", Tag: "news"},
+	}
+
+	if err := (&SyndicateSetCmd{Name: "foo", Format: "rss", Tags: []string{"news"}}).Run(); err != nil {
+		t.Fatalf("syndicate set rss: %v", err)
+	}
+	// Both the current (rss) file and a future (json) file exist on the store.
+	if err := db.Put(ctx, "out/foo.rss", strings.NewReader("<rss/>"), true); err != nil {
+		t.Fatalf("seed rss: %v", err)
+	}
+	if err := db.Put(ctx, "out/foo.json", strings.NewReader("{}"), true); err != nil {
+		t.Fatalf("seed json: %v", err)
+	}
+
+	if err := (&SyndicateSetCmd{Name: "foo", Format: "json", Tags: []string{"news"}}).Run(); err != nil {
+		t.Fatalf("syndicate set json: %v", err)
+	}
+
+	if n, _ := db.Stat(ctx, "out/foo.rss"); n != 0 {
+		t.Errorf("out/foo.rss still present (size %d); the stale-format file was not reaped", n)
+	}
+	if n, _ := db.Stat(ctx, "out/foo.json"); n == 0 {
+		t.Error("out/foo.json was deleted; the reap must only remove the OLD extension")
+	}
+
+	db2, err := NewDB(context.Background(), false)
+	if err != nil {
+		t.Fatalf("NewDB: %v", err)
+	}
+	defer db2.Close(context.Background())
+	if len(db2.core.Out) != 1 || db2.core.Out[0].Format != "json" {
+		t.Errorf("Out = %+v, want a single json entry", db2.core.Out)
 	}
 }
 
@@ -279,6 +317,3 @@ func TestOutContentType(t *testing.T) {
 		}
 	}
 }
-
-// Verify io.Reader is io.ReadCloser compliant when used in tests via strings.NewReader.
-var _ io.Reader = strings.NewReader("")

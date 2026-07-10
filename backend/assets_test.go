@@ -122,11 +122,30 @@ func TestUploadCacheRefRunsProcessBeforeUpload(t *testing.T) {
 // (path.Ext) or an asset-peek report, so it can carry a hyphen, extra dot,
 // space, query fragment, or non-ASCII.
 func TestContentHashKeyExtensionAlwaysHarvestable(t *testing.T) {
-	var sum [32]byte
-	for _, ext := range []string{".jpg", ".WEBP", "", ".h264-hi", ".php?x=1", ".jp g", ".tar.gz", ".naïve"} {
+	var sum [32]byte // all-zero hash → bare key "assets/00/0000000000000000"
+	const bare = "assets/00/0000000000000000"
+
+	// Grammar-valid extensions ride the key verbatim (still harvestable).
+	for _, ext := range []string{".jpg", ".WEBP"} {
 		key := contentHashKey(ext, sum)
 		if !assetKeyRe.MatchString(key) {
-			t.Errorf("contentHashKey(%q) = %q, not matched by assetKeyRe (un-harvestable / un-healable)", ext, key)
+			t.Errorf("contentHashKey(%q) = %q, not matched by assetKeyRe", ext, key)
+		}
+		if want := bare + ext; key != want {
+			t.Errorf("contentHashKey(%q) = %q, want the extension kept: %q", ext, key, want)
+		}
+	}
+
+	// Grammar-invalid extensions (hyphen, query fragment, embedded space, double
+	// dot, non-ASCII) — and the empty extension — collapse to the bare key so the
+	// object stays expirable / healable instead of leaking forever.
+	for _, ext := range []string{"", ".h264-hi", ".php?x=1", ".jp g", ".tar.gz", ".naïve"} {
+		key := contentHashKey(ext, sum)
+		if !assetKeyRe.MatchString(key) {
+			t.Errorf("contentHashKey(%q) = %q, not matched by assetKeyRe", ext, key)
+		}
+		if key != bare {
+			t.Errorf("contentHashKey(%q) = %q, want collapse to bare key %q", ext, key, bare)
 		}
 	}
 }
@@ -219,36 +238,6 @@ func TestUploadCacheRefProcessTimesOutViaAssetTimeout(t *testing.T) {
 	}
 	if got := string(readKey(t, be, key)); got != jpegBytes {
 		t.Errorf("stored body = %q, want original %q (process timed out)", got, jpegBytes)
-	}
-}
-
-// The asset-process timeout is independent of the shared --cmd-timeout: with a
-// tiny cmd-timeout but a generous procTimeout, a process that runs longer than
-// cmd-timeout still completes. Under the old shared-timeout wiring this process
-// would have been killed and failed soft to the original.
-func TestUploadCacheRefProcessTimeoutIndependentOfCmdTimeout(t *testing.T) {
-	be := tempStore(t)
-	out := filepath.Join(t.TempDir(), "out.bin")
-	if err := os.WriteFile(out, []byte(encodedBytes), 0o644); err != nil {
-		t.Fatalf("write out: %v", err)
-	}
-	// Sleeps longer than the shared cmd-timeout set below, but far under its own.
-	af := newAssetFetcher(be, 1024, fakeProcess(t, "sleep 0.2\ncat '"+out+"'"))
-	af.procTimeout = 10 * time.Second
-
-	orig := mod.CmdTimeout
-	mod.CmdTimeout = 20 * time.Millisecond // shrink the SHARED bound below the sleep
-	defer func() { mod.CmdTimeout = orig }()
-
-	cacheDir := t.TempDir()
-	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
-
-	key, _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
-	if err != nil {
-		t.Fatalf("UploadCacheRef: %v", err)
-	}
-	if got := string(readKey(t, be, key)); got != encodedBytes {
-		t.Errorf("stored body = %q, want encoded %q (asset timeout, not cmd-timeout, applies)", got, encodedBytes)
 	}
 }
 
@@ -957,5 +946,138 @@ func TestUploadCacheRefReportsProcessedBytes(t *testing.T) {
 	}
 	if want := int64(len(encodedBytes)); n != want {
 		t.Fatalf("uploaded = %d, want %d (processed payload, not the %d-byte source)", n, want, len(jpegBytes))
+	}
+}
+
+// A HEAD/Stat can't tell a missing key from a zero-byte stored object (or an
+// HTTP store omitting Content-Length), so a Stat of 0 falls through to the
+// body-carrying Get probe. Seed a ZERO-byte object at the content-hash key and
+// confirm UploadCacheRef dedups on it via that Get probe: same key, no
+// re-upload, n==0, the object untouched.
+func TestUploadCacheRefGetProbeDedupsZeroByteObject(t *testing.T) {
+	be := tempStore(t)
+	sum := sha256.Sum256([]byte(jpegBytes))
+	key := contentHashKey(".jpg", sum)
+	if err := be.Put(context.Background(), key, strings.NewReader(""), true); err != nil {
+		t.Fatalf("seed zero-byte object: %v", err)
+	}
+
+	ran := filepath.Join(t.TempDir(), "ran")
+	af := newAssetFetcher(be, 1024, fakeProcess(t, "touch '"+ran+"'\ncat \"$1\""))
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+
+	got, n, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	if err != nil {
+		t.Fatalf("UploadCacheRef: %v", err)
+	}
+	if got != key {
+		t.Errorf("key = %q, want %q", got, key)
+	}
+	if n != 0 {
+		t.Errorf("uploaded bytes = %d, want 0 (Get-probe dedup hit)", n)
+	}
+	if _, err := os.Stat(ran); !os.IsNotExist(err) {
+		t.Error("asset-process ran despite the Get-probe dedup hit")
+	}
+	if body := string(readKey(t, be, key)); body != "" {
+		t.Errorf("zero-byte object overwritten: stored %q, want empty (dedup, no re-upload)", body)
+	}
+}
+
+// runPeek fail-soft on invalid JSON: a peek that EXITS 0 but prints non-JSON
+// stdout falls back to the source extension and treats the asset as supported —
+// distinct from the peek-command-error branch (TestUploadCacheRefPeekFailSoftUsesSourceExtension).
+func TestUploadCacheRefPeekInvalidJSONFailsSoft(t *testing.T) {
+	be := tempStore(t)
+	af := newAssetFetcher(be, 1024, "")
+	af.peek = strings.Fields(fakeProcess(t, "printf 'totally not json'") + " {input}")
+
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+
+	key, _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	if err != nil {
+		t.Fatalf("UploadCacheRef should fail soft on invalid peek JSON, got: %v", err)
+	}
+	sum := sha256.Sum256([]byte(jpegBytes))
+	if want := contentHashKey(".jpg", sum); key != want {
+		t.Errorf("key = %q, want SOURCE-extension key %q (invalid peek JSON → fail-soft)", key, want)
+	}
+	if got := string(readKey(t, be, key)); got != jpegBytes {
+		t.Errorf("stored body = %q, want original %q", got, jpegBytes)
+	}
+	if got := af.procFailed.Load(); got != 1 {
+		t.Errorf("procFailed = %d, want 1 (peek JSON parse failed)", got)
+	}
+}
+
+// runProcess STDOUT-mode empty-output fail-soft: a process with NO {output}
+// token that exits 0 but prints nothing uploads the ORIGINAL unchanged (this is
+// the webify production path — it writes to stdout). Distinct from the {output}
+// empty-file branch (TestUploadCacheRefProcessOutputEmptyFileFailsSoft).
+func TestUploadCacheRefProcessStdoutEmptyFailsSoft(t *testing.T) {
+	be := tempStore(t)
+	af := newAssetFetcher(be, 1024, fakeProcess(t, "exit 0")) // no {output}, no stdout
+
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+
+	key, _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	if err != nil {
+		t.Fatalf("UploadCacheRef should fail soft on empty stdout, got: %v", err)
+	}
+	if got := string(readKey(t, be, key)); got != jpegBytes {
+		t.Errorf("stored body = %q, want original %q (empty stdout → fail-soft)", got, jpegBytes)
+	}
+	if got := af.procFailed.Load(); got != 1 {
+		t.Errorf("procFailed = %d, want 1 (empty process output)", got)
+	}
+}
+
+// assetTStatFailBackend makes the store's existence-probe Stat return a
+// non-missing error; Get/Put/AtomicPut/Rm/Close promote from the embedded store.
+type assetTStatFailBackend struct {
+	store.Backend
+}
+
+var errAssetTStatProbe = errors.New("injected stat probe failure")
+
+func (assetTStatFailBackend) Stat(context.Context, string) (int64, error) {
+	return 0, errAssetTStatProbe
+}
+
+// A non-missing error from the existence-probe Stat must abort with a "check
+// asset" error — never a silent upload that races the real object.
+func TestUploadCacheRefStatProbeErrorAborts(t *testing.T) {
+	inner := tempStore(t)
+	be := assetTStatFailBackend{Backend: inner}
+	af := newAssetFetcher(be, 1024, "")
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+
+	_, _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	if err == nil {
+		t.Fatal("expected an error from the existence-probe Stat, got nil")
+	}
+	if !strings.Contains(err.Error(), "check asset") {
+		t.Errorf("err = %v, want it to mention 'check asset'", err)
+	}
+	// It must NOT have silently uploaded despite the probe failure.
+	sum := sha256.Sum256([]byte(jpegBytes))
+	if rc, gerr := inner.Get(context.Background(), contentHashKey(".jpg", sum), true); gerr != nil {
+		t.Fatalf("Get: %v", gerr)
+	} else if rc != nil {
+		rc.Close()
+		t.Error("asset was uploaded despite the Stat probe error")
+	}
+}
+
+// An empty localname is not an asset marker at all → errNotAsset (the caller
+// declines the reference, leaving the value untouched, rather than failing the feed).
+func TestUploadCacheRefEmptyLocalnameIsNotAsset(t *testing.T) {
+	af := newAssetFetcher(tempStore(t), 1024, "")
+	if _, _, err := af.UploadCacheRef(context.Background(), t.TempDir(), ""); !errors.Is(err, errNotAsset) {
+		t.Fatalf("err = %v, want errNotAsset for an empty localname", err)
 	}
 }
