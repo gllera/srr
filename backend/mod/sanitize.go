@@ -60,7 +60,11 @@ func init() {
 
 		policy.RequireParseableURLs(true)
 		policy.AllowRelativeURLs(true)
-		policy.AllowURLSchemes("mailto", "http", "https")
+		// Kept in lockstep with the frontend's ANCHOR_ABS_OK allowlist
+		// (fmt.ts) — the reader mirrors this set as defense-in-depth, so any
+		// scheme added/removed here must move there too. tel/geo/magnet are
+		// user-actionable navigation schemes (click-to-call, map, torrent).
+		policy.AllowURLSchemes("mailto", "http", "https", "tel", "geo", "magnet")
 
 		policy.AllowElements("article", "aside", "figure", "section", "summary", "hgroup")
 		policy.AllowElements("h1", "h2", "h3", "h4", "h5", "h6")

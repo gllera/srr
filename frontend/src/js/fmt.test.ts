@@ -824,16 +824,19 @@ describe("sanitizeHtml audit fixes", () => {
       expect(attr('<a href="javascript:alert(1)">x</a>', "a", "href")).toBeNull()
    })
 
-   // Mirror the backend bluemonday allowlist (mailto/http/https): other absolute
-   // anchor schemes are dropped as a defense-in-depth parity measure.
-   it("drops an absolute anchor href whose scheme is outside the mailto/http(s) allowlist", () => {
-      expect(attr('<a href="tel:+15551234">call</a>', "a", "href")).toBeNull()
+   // Mirror the backend bluemonday allowlist: an absolute anchor scheme outside
+   // it is dropped as a defense-in-depth parity measure.
+   it("drops an absolute anchor href whose scheme is outside the allowlist", () => {
       expect(attr('<a href="ftp://host/f">f</a>', "a", "href")).toBeNull()
+      expect(attr('<a href="blob:https://x/abc">b</a>', "a", "href")).toBeNull()
    })
 
-   it("keeps allowlisted absolute anchor hrefs (mailto/http/https)", () => {
+   it("keeps allowlisted absolute anchor hrefs (mailto/http/https/tel/geo/magnet)", () => {
       expect(attr('<a href="mailto:a@b.com">m</a>', "a", "href")).toBe("mailto:a@b.com")
       expect(attr('<a href="https://example.com/x">h</a>', "a", "href")).toBe("https://example.com/x")
+      expect(attr('<a href="tel:+15551234">call</a>', "a", "href")).toBe("tel:+15551234")
+      expect(attr('<a href="geo:37.78,-122.39">map</a>', "a", "href")).toBe("geo:37.78,-122.39")
+      expect(attr('<a href="magnet:?xt=urn:btih:abc">t</a>', "a", "href")).toBe("magnet:?xt=urn:btih:abc")
    })
 })
 

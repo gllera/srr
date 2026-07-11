@@ -24,10 +24,12 @@ const URL_ATTRS = new Set([
    "xlink:href",
 ])
 // Absolute <a>/<area> href schemes the backend bluemonday allowlist keeps
-// (mailto/http/https); any other absolute scheme (tel:, blob:, ftp:, intent:, …)
-// is dropped to mirror the writer. javascript:/data:/… are already caught by
-// URL_DENY in the attribute loop; relative hrefs route through the pack base.
-const ANCHOR_ABS_OK = /^(?:https?|mailto):/i
+// (mailto/http/https + the user-actionable tel/geo/magnet — click-to-call, map,
+// torrent); any other absolute scheme (blob:, ftp:, intent:, …) is dropped to
+// mirror the writer. Kept in lockstep with sanitize.go's AllowURLSchemes — a
+// scheme added/removed here must move there too. javascript:/data:/… are already
+// caught by URL_DENY in the attribute loop; relative hrefs route via the pack base.
+const ANCHOR_ABS_OK = /^(?:https?|mailto|tel|geo|magnet):/i
 // SVG/MATH carry their own script + foreign-content surface; bluemonday strips
 // them server-side, so mirror that here. <template> is included because its
 // content lives in a DocumentFragment the sanitizer's TreeWalker never descends
@@ -181,9 +183,10 @@ export function sanitizeFragment(html: string): DocumentFragment {
          // Relative hrefs (self-hosted "assets/…/doc.pdf", or any relative link
          // the feed carried) resolve against the pack base, bounds-checked so they
          // can't traverse off it. Absolute hrefs are kept only for the writer's
-         // allowlisted schemes (mailto/http/https); any other absolute scheme
-         // (tel:, blob:, ftp:, …) is dropped to mirror the backend. URL_DENY-
-         // matching href (javascript:/data:/…) was already stripped above.
+         // allowlisted schemes (mailto/http/https/tel/geo/magnet — see
+         // ANCHOR_ABS_OK); any other absolute scheme (blob:, ftp:, …) is dropped
+         // to mirror the backend. URL_DENY href (javascript:/data:/…) was
+         // already stripped above.
          const href = node.getAttribute("href")
          if (href) {
             if (isRelative(href)) setPackRelative(node, "href", href)
