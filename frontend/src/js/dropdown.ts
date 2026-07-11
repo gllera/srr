@@ -9,7 +9,8 @@ const syncDialog = document.querySelector<HTMLElement>(".srr-sync-dialog")
 // The original toolbar dropdown menus (filter picker + ⋯ settings) were retired
 // when those moved into the config surface; that surface was itself dissolved —
 // the filter picker is now its own full-viewport overlay (picker.ts) and the
-// settings came back here as an anchored menu on the gear (showContextMenu).
+// settings came back here as an anchored menu on the list's now-viewing
+// readout (showContextMenu).
 // closeAllDropdowns stays as a no-op so its remaining callers — gestures.ts
 // (toolbar-hide) and the image-proxy / backup modals — keep working without a
 // dropdown to close.

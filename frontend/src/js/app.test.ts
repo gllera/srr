@@ -214,7 +214,6 @@ const SKELETON = `
          <button class="srr-next" disabled><span class="srr-next-count"></span></button>
          <button class="srr-save" disabled></button>
          <button class="srr-filter"></button>
-         <button class="srr-settings"></button>
       </nav>
       <section class="srr-picker" hidden></section>
       <div class="srr-pin-progress" hidden></div>
@@ -733,11 +732,11 @@ describe("list → reader — open-article button", () => {
 // the list in place (selectFilter → applyFilter + goToList); picking from the
 // READER stays in the reader on the picked lane's resume article (switchFilter,
 // the same semantics as the W/S / two-finger filter cycle).
-describe("filter picker — the now-viewing readout & the reader's filter button", () => {
-   it("tapping the readout opens the picker overlay", async () => {
+describe("filter picker — the toolbar's filter button (both surfaces)", () => {
+   it("tapping the filter button on the LIST opens the picker overlay", async () => {
       await boot() // boots into the list (hash "" → list surface)
       picker.open.mockClear()
-      document.querySelector(".srr-feed")!.dispatchEvent(new MouseEvent("click", { bubbles: true }))
+      document.querySelector(".srr-filter")!.dispatchEvent(new MouseEvent("click", { bubbles: true }))
       expect(picker.open).toHaveBeenCalledTimes(1)
       // The overlay is not a view of its own — the list stays the surface under it.
       expect(document.body.classList.contains("srr-view-list")).toBe(true)
@@ -767,7 +766,7 @@ describe("filter picker — the now-viewing readout & the reader's filter button
       expect(nav.applyFilter).toHaveBeenCalledWith([])
    })
 
-   it("the reader's filter button opens the picker overlay over the reader", async () => {
+   it("the same filter button opens the picker overlay over the reader", async () => {
       await boot()
       hashTo("#2")
       await flush()
@@ -874,7 +873,7 @@ describe("filter picker — the now-viewing readout & the reader's filter button
    })
 })
 
-describe("settings menu — the gear", () => {
+describe("settings menu — the now-viewing readout", () => {
    // The items + opts app.ts handed to the (mocked) showContextMenu on its last open.
    type Item = { label: string; action: () => void; checked?: boolean; disabled?: boolean }
    const menuCall = () => {
@@ -882,15 +881,13 @@ describe("settings menu — the gear", () => {
       return { items: call?.[1] as Item[], opts: call?.[2] as { footer?: HTMLElement } | undefined }
    }
    const openMenu = () =>
-      document
-         .querySelector<HTMLButtonElement>(".srr-settings")!
-         .dispatchEvent(new MouseEvent("click", { bubbles: true }))
+      document.querySelector<HTMLButtonElement>(".srr-feed")!.dispatchEvent(new MouseEvent("click", { bubbles: true }))
 
    it("opens an anchored menu with search and the three dialogs (Show read lives in the filter picker now)", async () => {
       await boot()
       openMenu()
       expect(dropdown.showContextMenu).toHaveBeenCalledWith(
-         document.querySelector(".srr-settings"),
+         document.querySelector(".srr-feed"),
          expect.anything(),
          expect.anything(),
       )
@@ -1076,8 +1073,8 @@ describe("the frontier menu — right-click / long-press on the reader's next pi
       }
    })
 
-   it("a touch hold on the lane readout opens no menu; its lift's click stays the plain picker tap", async () => {
-      await boot() // list surface — the readout is a tap-to-open-picker button only
+   it("a touch hold on the lane readout opens no frontier menu; its lift's click stays the plain settings tap", async () => {
+      await boot() // list surface — the readout is a tap-to-open-settings button only
       nav.isSearchFilter.mockReturnValue(false)
       nav.filter.feeds = new Map([[1, 0]])
       nav.currentChron.mockReturnValue(7)
@@ -1088,10 +1085,11 @@ describe("the frontier menu — right-click / long-press on the reader's next pi
          Object.defineProperty(down, "pointerType", { value: "touch" })
          readout.dispatchEvent(down)
          vi.advanceTimersByTime(500)
-         expect(dropdown.showContextMenu).not.toHaveBeenCalled() // no frontier menu here
-         picker.open.mockClear()
+         expect(dropdown.showContextMenu).not.toHaveBeenCalled() // no frontier menu on the hold
          readout.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }))
-         expect(picker.open).toHaveBeenCalledTimes(1) // the hold was just a tap
+         // The hold was just a tap: the lift's click opens the settings menu.
+         expect(dropdown.showContextMenu).toHaveBeenCalledTimes(1)
+         expect(dropdown.showContextMenu).toHaveBeenCalledWith(readout, expect.anything(), expect.anything())
       } finally {
          vi.useRealTimers()
       }
@@ -1135,9 +1133,7 @@ describe("cross-device sync wiring", () => {
       dropdown.showContextMenu.mockImplementation((_a: HTMLElement, _i: unknown, opts?: { footer?: HTMLElement }) => {
          if (opts?.footer) document.body.appendChild(opts.footer)
       })
-      document
-         .querySelector<HTMLButtonElement>(".srr-settings")!
-         .dispatchEvent(new MouseEvent("click", { bubbles: true }))
+      document.querySelector<HTMLButtonElement>(".srr-feed")!.dispatchEvent(new MouseEvent("click", { bubbles: true }))
       const footer = (dropdown.showContextMenu.mock.calls.at(-1)?.[2] as { footer: HTMLElement }).footer
       picker.renderStatus.mockClear()
       onStatus()
@@ -1407,7 +1403,7 @@ async function invokePinAction(isUnreadOnly: boolean): Promise<void> {
 
    await boot()
    // Open the settings menu and find the contextual pin row among its items.
-   document.querySelector<HTMLButtonElement>(".srr-settings")!.dispatchEvent(new MouseEvent("click", { bubbles: true }))
+   document.querySelector<HTMLButtonElement>(".srr-feed")!.dispatchEvent(new MouseEvent("click", { bubbles: true }))
    const items = dropdown.showContextMenu.mock.calls.at(-1)?.[1] as { label: string; action: () => void }[]
    const entry = items.find((i) => i.label === "Download for offline")
    expect(entry).not.toBeUndefined()
@@ -1583,7 +1579,7 @@ describe("offline pin — unpin subtraction & SW purge", () => {
       try {
          await boot()
          document
-            .querySelector<HTMLButtonElement>(".srr-settings")!
+            .querySelector<HTMLButtonElement>(".srr-feed")!
             .dispatchEvent(new MouseEvent("click", { bubbles: true }))
          const items = dropdown.showContextMenu.mock.calls.at(-1)?.[1] as { label: string; action: () => void }[]
          const remove = items.find((i) => i.label === "Remove offline copy")
@@ -1638,7 +1634,7 @@ async function firePin(cached: number): Promise<void> {
       return { port1: fakePort1, port2: {} }
    })
    await boot()
-   document.querySelector<HTMLButtonElement>(".srr-settings")!.dispatchEvent(new MouseEvent("click", { bubbles: true }))
+   document.querySelector<HTMLButtonElement>(".srr-feed")!.dispatchEvent(new MouseEvent("click", { bubbles: true }))
    const items = dropdown.showContextMenu.mock.calls.at(-1)?.[1] as { label: string; action: () => void }[]
    items.find((i) => i.label === "Download for offline")!.action()
    await flush()

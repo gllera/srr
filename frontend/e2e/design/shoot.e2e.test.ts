@@ -96,8 +96,8 @@ describe("design-state screenshots", () => {
             }
 
             // The filter-picker overlay and the settings menu aren't hash-routed —
-            // open them the way a user does (tap the now-viewing readout / the
-            // settings gear over the list), then capture. Pin unread-only OFF for
+            // open them the way a user does (tap the filter button / the
+            // now-viewing readout over the list), then capture. Pin unread-only OFF for
             // the grounding shots (the app now defaults it on for first run, which
             // hides fully-read feed rows in this fixture) so the full filter list —
             // and every row's ⓘ — is shown and clickable. Hide the harness panel
@@ -106,7 +106,7 @@ describe("design-state screenshots", () => {
             await page.evaluate(() => localStorage.setItem("srr-unread-only", "0"))
             await page.reload({ waitUntil: "networkidle0" })
             await waitReady(page)
-            await page.click(".srr-feed")
+            await page.click(".srr-filter")
             await page.evaluate(() => {
                const panel = document.getElementById("srr-design-panel")
                if (panel) panel.style.display = "none"
@@ -123,9 +123,9 @@ describe("design-state screenshots", () => {
             await page.evaluate(() => (document.querySelector(".srr-info-close") as HTMLElement | null)?.click())
             await page.keyboard.press("Escape")
 
-            // Settings menu — the gear's anchored card (search · Show read · the
-            // dialogs) with the status footer under the action rows.
-            await page.click(".srr-settings")
+            // Settings menu — the now-viewing readout's anchored card (search ·
+            // the dialogs) with the status footer under the action rows.
+            await page.click(".srr-feed")
             await page.waitForSelector(".srr-ctxmenu")
             await page.screenshot({ path: join(SHOTS, `settings-menu.${scheme}.png`) })
             await page.keyboard.press("Escape")

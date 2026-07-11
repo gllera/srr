@@ -34,7 +34,6 @@ const el = {
    nextCount: document.querySelector(".srr-next-count") as HTMLElement,
    feed: document.querySelector(".srr-feed") as HTMLButtonElement,
    feedName: document.querySelector(".srr-feed-name") as HTMLElement,
-   settings: document.querySelector(".srr-settings") as HTMLButtonElement,
    source: document.querySelector(".srr-source") as HTMLElement,
    date: document.querySelector(".srr-date") as HTMLElement,
    desk: document.querySelector(".srr-desk") as HTMLElement,
@@ -426,9 +425,12 @@ function refreshFeedLabel() {
    if (isFeed) el.feed.dataset.src = String(srcColorIndex(Number(key)))
    else delete el.feed.dataset.src
    el.feed.classList.toggle("srr-filter-on", key !== "")
-   // Tooltip shows the full filter name when a long one ellipsizes; the label is
-   // non-interactive, so its visible text is its accessible name (no aria-label).
-   el.feed.title = key === "" ? "All feeds" : `Filtered: ${label}`
+   // The readout is the settings-menu opener: its tooltip / accessible name says
+   // so, while still carrying the full filter name (the visible text ellipsizes
+   // when long, and an aria-label would otherwise mask it from AT).
+   const readoutName = key === "" ? "Settings" : `Settings — viewing: ${label}`
+   el.feed.title = readoutName
+   el.feed.setAttribute("aria-label", readoutName)
 
    // Reader breadcrumb: the back button names the filtered list it returns to
    // (#tag / feed name in its source color / ★ Saved) so the reader says which
@@ -581,9 +583,9 @@ function bindFrontierMenu(anchor: HTMLElement) {
 
 // ── Filter picker & settings menu ─────────────────────────────────────────────
 
-// The gear's anchored settings menu — everything the retired config surface
-// owned minus the filter picker (its own overlay now, opened from the
-// now-viewing readout) and the Show-read toggle (moved to the picker's header):
+// The now-viewing readout's anchored settings menu — everything the retired
+// config surface owned minus the filter picker (its own overlay now, opened
+// from the filter button) and the Show-read toggle (moved to the picker's header):
 // search, the contextual offline-pin row, and the three dialog openers, with the
 // freshness / status readout as a quiet footer. Items derive fresh on every open
 // (pin label, search availability), so nothing needs re-rendering in place.
@@ -612,7 +614,7 @@ function openSettingsMenu() {
    const footer = document.createElement("div")
    picker.renderStatus(footer)
    settingsStatus = footer
-   showContextMenu(el.settings, settingsMenuItems(), { footer })
+   showContextMenu(el.feed, settingsMenuItems(), { footer })
 }
 
 // The reader's save (★) toggle reflects whether the current article is in the
@@ -1054,13 +1056,15 @@ async function init() {
    // The frontier menu rides the reader's next pill as a secondary gesture —
    // its only anchor; see frontierMenuItems.
    bindFrontierMenu(el.next)
-   // A plain tap on the lane readout opens the filter picker overlay; its
-   // right-click / long-press stays the browser's own menu (deliberately not
-   // a frontier-menu anchor — see frontierMenuItems).
-   el.feed.addEventListener("click", () => picker.open())
-   // The reader's counterpart: the filter button at the toolbar's right edge
-   // opens the same picker overlay over the article (the surface-aware onSelect
-   // above keeps a pick in the reader).
+   // A plain tap on the lane readout (list-only — hidden in the reader) opens
+   // the anchored settings menu: search · offline pin · the three dialogs, with
+   // the status readout as its footer. Its right-click / long-press stays the
+   // browser's own menu (deliberately not a frontier-menu anchor — see
+   // frontierMenuItems).
+   el.feed.addEventListener("click", () => openSettingsMenu())
+   // The filter button at the toolbar's right edge (both surfaces) opens the
+   // picker overlay; the surface-aware onSelect above re-filters the list from
+   // the list and keeps a reader pick in the reader.
    el.filter.addEventListener("click", () => picker.open())
    el.back.addEventListener("click", () => void goToList(true))
    // The list's open-article button (left edge) is the tap counterpart of Escape on
@@ -1069,10 +1073,6 @@ async function init() {
    el.openReader.addEventListener("click", () => void enterReader())
    // capture: error events don't bubble (see collapseBrokenMedia)
    el.content.addEventListener("error", collapseBrokenMedia, true)
-   // The settings gear (list-only — hidden in the reader) opens the anchored
-   // settings menu: search · offline pin · the three dialogs, with the status
-   // readout as its footer (Show read moved to the filter picker's header).
-   el.settings.addEventListener("click", () => openSettingsMenu())
    // Search lives in the settings menu (the "Search articles…" row → enterSearch);
    // the `/` key still toggles it on the list. The pinned search bar owns the input
    // (debounced live query, Enter applies immediately, Escape / ✕ leave search).

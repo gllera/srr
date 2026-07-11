@@ -1,5 +1,5 @@
 // picker.ts — the feed / tag filter picker: a full-viewport overlay opened by
-// tapping the list toolbar's now-viewing readout (.srr-feed). Ephemeral (not
+// the toolbar's filter button (.srr-filter, both surfaces). Ephemeral (not
 // hash-routed) and fixed-position, so the list underneath keeps its scroll
 // position untouched while it's open. It owns the filter rows ([ALL], ★ Saved,
 // tag groups and feeds — source-color chips, health-tinted labels, async unread
@@ -8,8 +8,8 @@
 // onSelect → selectFilter). It also owns the header "Show read" toggle (the
 // unread-only view mode — onToggleShowRead flips it via app.ts, which reconciles
 // the surface underneath, then the picker re-renders its own rows). The remaining
-// settings live on the gear's anchored menu (app.ts openSettingsMenu), which
-// borrows renderStatus() below for its status footer.
+// settings live on the now-viewing readout's anchored menu (app.ts
+// openSettingsMenu), which borrows renderStatus() below for its status footer.
 import { VERSION } from "./base"
 import * as data from "./data"
 import { countBadge, formatBytes, formatDate, isStale, srcColorIndex, timeAgoProse, URL_DENY } from "./fmt"
