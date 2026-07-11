@@ -745,14 +745,8 @@ function recordSeen(article: IArticle) {
       // above, so this only fires for feed/tag/[ALL] navigation — the
       // contiguous read-throughs where a "previous = seen" frontier across
       // feeds is meaningful.
-      const raise = (feedId: number) => {
-         const key = "feed:" + feedId
-         const prev = seen[key]
-         if (prev === undefined || prev < pos) {
-            seen[key] = pos
-            touched.push(key)
-         }
-      }
+      const raise = (feedId: number) =>
+         writeFrontier(seen, touched, feedId, (prev) => prev === undefined || prev < pos, pos)
       raise(article.f)
       for (const feedId of filter.feeds.keys()) if (feedId !== article.f) raise(feedId)
       if (touched.length > 0) {
@@ -760,6 +754,44 @@ function recordSeen(article: IArticle) {
          sync.pushSoon()
       }
    } catch {}
+}
+
+// One feed's seen-frontier write: set seen[key]=value and record the key in
+// `touched` when shouldMove(prev) holds. The shared primitive behind BOTH
+// recordSeen's per-feed raise and the two explicit frontier gestures below, so
+// the seen-write discipline (key shape, touched bookkeeping) lives in one place.
+function writeFrontier(
+   seen: Record<string, number>,
+   touched: string[],
+   feedId: number,
+   shouldMove: (prev: number | undefined) => boolean,
+   value: number,
+): void {
+   const key = "feed:" + feedId
+   const prev = seen[key]
+   if (shouldMove(prev)) {
+      seen[key] = value
+      touched.push(key)
+   }
+}
+
+// The loop-and-commit body shared by markAllRead/markUnreadFrom: move every
+// filter member's frontier to `value` where shouldMove(prev) holds, then persist
+// + push. Peek modes (saved/search) have no frontier to move. Returns whether
+// anything actually changed (the caller only rebuilds / re-counts when it did).
+function moveFrontier(shouldMove: (prev: number | undefined) => boolean, value: number): boolean {
+   if (filter.search || filter.saved) return false
+   try {
+      const seen = readSeen()
+      const touched: string[] = []
+      for (const feedId of filter.feeds.keys()) writeFrontier(seen, touched, feedId, shouldMove, value)
+      if (touched.length === 0) return false
+      writeSeen(seen, touched)
+      sync.pushSoon()
+      return true
+   } catch {
+      return false
+   }
 }
 
 // Mark the whole current feed/tag/[ALL] selection read: raise every filter
@@ -770,26 +802,9 @@ function recordSeen(article: IArticle) {
 // untouched. Returns whether anything actually changed (the caller only
 // rebuilds the list / re-counts when it did).
 export function markAllRead(): boolean {
-   if (filter.search || filter.saved || data.db.total_art === 0) return false
+   if (data.db.total_art === 0) return false
    const top = data.db.total_art - 1
-   try {
-      const seen = readSeen()
-      const touched: string[] = []
-      for (const feedId of filter.feeds.keys()) {
-         const key = "feed:" + feedId
-         const prev = seen[key]
-         if (prev === undefined || prev < top) {
-            seen[key] = top
-            touched.push(key)
-         }
-      }
-      if (touched.length === 0) return false
-      writeSeen(seen, touched)
-      sync.pushSoon()
-      return true
-   } catch {
-      return false
-   }
+   return moveFrontier((prev) => prev === undefined || prev < top, top)
 }
 
 // The explicit unread rewind — the ONLY path that lowers a seen frontier:
@@ -802,26 +817,9 @@ export function markAllRead(): boolean {
 // stamps it; profile.ts's per-key LWW propagates it). Peek modes are exempt,
 // mirroring recordSeen. Returns whether anything changed.
 export function markUnreadFrom(chron: number): boolean {
-   if (filter.search || filter.saved || chron < 0) return false
+   if (chron < 0) return false
    const floor = chron - 1
-   try {
-      const seen = readSeen()
-      const touched: string[] = []
-      for (const feedId of filter.feeds.keys()) {
-         const key = "feed:" + feedId
-         const prev = seen[key]
-         if (prev !== undefined && prev > floor) {
-            seen[key] = floor
-            touched.push(key)
-         }
-      }
-      if (touched.length === 0) return false
-      writeSeen(seen, touched)
-      sync.pushSoon()
-      return true
-   } catch {
-      return false
-   }
+   return moveFrontier((prev) => prev !== undefined && prev > floor, floor)
 }
 
 // Batched per-feed unread: reads the seen map once and tallies EVERY feed in
@@ -976,10 +974,21 @@ export function right(): Promise<IShowFeed> {
    return step("right")
 }
 
+// The smallest bound across the active filter's feeds, computed WITHOUT a spread:
+// Math.min(...filter.feeds.values()) overflows the JS engine's spread-argument
+// limit and throws on a store approaching FEED_ID_CEILING (~65k feeds) — the same
+// reason data.ts reduces instead of Math.max(...ids). Returns 0 for an empty
+// filter (no lower bound to start a walk from).
+function minFilterBound(): number {
+   let m = Infinity
+   for (const v of filter.feeds.values()) if (v < m) m = v
+   return m === Infinity ? 0 : m
+}
+
 export async function first(record = true): Promise<IShowFeed> {
    // No article from a feed with add_idx N exists below chronIdx N, so the
    // earliest matching article is at or after the smallest add_idx in filter.
-   const start = filter.feeds.size > 0 ? Math.min(...filter.feeds.values()) : 0
+   const start = minFilterBound()
    return goTo(start, record)
 }
 
@@ -1021,7 +1030,7 @@ function isKnownToken(token: string): boolean {
 // browse the read articles there, so the resume onto one is correct.
 async function noUnreadLeft(): Promise<boolean> {
    if (!unseenActive() || filter.feeds.size === 0) return false
-   const start = Math.min(...filter.feeds.values())
+   const start = minFilterBound()
    try {
       return (await feedRight(start)) === -1
    } catch {
@@ -1099,7 +1108,7 @@ export async function switchFilter(token: string): Promise<IShowFeed> {
    // new one. The walk re-treads what noUnreadLeft just probed, so the idx pack
    // is warm; a blip leaves startFeed unset and the message falls back to the
    // lane label.
-   const start = Math.min(...filter.feeds.values())
+   const start = minFilterBound()
    o.startFeed = await feedRight(start)
       .then((c) => (c === -1 ? undefined : data.getFeedId(c)))
       .catch(() => undefined)

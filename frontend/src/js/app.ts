@@ -60,6 +60,10 @@ let view: "list" | "reader" = "list"
 // before setupGestures runs, can close over it).
 let gestures: Gestures | null = null
 let busy = false
+// Held across the list's async cycle (cycleToken → selectFilter) so a rapid
+// second W/S press is dropped instead of computing from the same stale
+// cycleOriginKey — the list twin of the reader cycle's guard()/busy drop.
+let listCycling = false
 let retryFn: (() => void) | null = null
 let lastFeedLabel: string | null = null
 let previousFocus: HTMLElement | null = null
@@ -811,7 +815,12 @@ function toggleUnseenOnly() {
    if (view === "list") void list.rerender()
    else {
       list.invalidate()
-      reprobeReaderChrome()
+      // On a reader placeholder (pos < 0) reprobeReaderChrome no-ops
+      // (probeCurrent returns null for pos < 0), so it would leave a stale
+      // "Not started"/"caught up" placeholder after the flip. Re-run the switch
+      // so the surface re-derives for the new mode — mirroring afterFrontierMove.
+      if (nav.currentChron() < 0) void guard(() => nav.switchFilter(nav.getCurrentFilterKey()))
+      else reprobeReaderChrome()
    }
 }
 
@@ -827,8 +836,20 @@ function onCycle(dir: number) {
    // cycles by its tag) and skips ★ Saved / empty-of-unread lanes, so the list and
    // the reader share one rotation. Async (unread is idx-derived): the list resolves
    // the token then re-filters in place; the reader's cycleFilter awaits it inside.
-   if (view === "list") void nav.cycleToken(dir).then((tok) => selectFilter(tok))
-   else guard(() => nav.cycleFilter(dir))
+   if (view === "list") {
+      // Guard the whole async cycle so a second press during cycleToken's await
+      // is dropped rather than resolving the same lane off a stale origin key
+      // (which collapses two steps into one or lands out of order) — matching the
+      // reader branch, where guard()'s busy flag drops the concurrent press.
+      if (listCycling || busy) return
+      listCycling = true
+      void nav
+         .cycleToken(dir)
+         .then((tok) => selectFilter(tok))
+         .finally(() => {
+            listCycling = false
+         })
+   } else guard(() => nav.cycleFilter(dir))
 }
 
 // Margin bell — a step toward an edge with no neighbor (prev/next disabled) kicks

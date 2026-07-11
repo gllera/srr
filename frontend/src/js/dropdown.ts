@@ -308,10 +308,15 @@ export function showContextMenu(anchor: HTMLElement, items: MenuItem[], opts?: {
 
    document.body.appendChild(menu)
    // Anchored above the opener: bottom-pinned to the anchor's top edge,
-   // horizontally centered on it, clamped inside the viewport.
+   // horizontally centered on it, clamped inside the viewport. A menu taller
+   // than the space above the anchor (a tall settings menu on a short landscape
+   // viewport) is capped to that space and scrolls (overflow-y:auto in CSS) so
+   // its top rows can't clip above the viewport top out of reach.
+   const margin = 8
    const r = anchor.getBoundingClientRect()
    menu.style.bottom = `${window.innerHeight - r.top + 6}px`
-   menu.style.left = `${Math.max(8, Math.min(r.left + r.width / 2 - menu.offsetWidth / 2, window.innerWidth - menu.offsetWidth - 8))}px`
+   menu.style.left = `${Math.max(margin, Math.min(r.left + r.width / 2 - menu.offsetWidth / 2, window.innerWidth - menu.offsetWidth - margin))}px`
+   menu.style.maxHeight = `${Math.max(0, r.top - 6 - margin)}px`
    document.addEventListener("keydown", onKey, true)
    document.addEventListener("pointerdown", onDown, true)
    // A scroll under the open menu displaces its context — dismiss (capture: the
