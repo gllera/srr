@@ -60,10 +60,11 @@ let view: "list" | "reader" = "list"
 // before setupGestures runs, can close over it).
 let gestures: Gestures | null = null
 let busy = false
-// Held across the list's async cycle (cycleToken → selectFilter) so a rapid
-// second W/S press is dropped instead of computing from the same stale
-// cycleOriginKey — the list twin of the reader cycle's guard()/busy drop.
-let listCycling = false
+// Freshness token for the list's async cycle: each W/S press bumps it, and only
+// the LATEST press applies its resolved token, so rapid presses can't land out
+// of order off a stale cycleOriginKey. A token, not a held flag — a cycleToken()
+// that never settles must not permanently latch cycling off.
+let listCycleGen = 0
 let retryFn: (() => void) | null = null
 let lastFeedLabel: string | null = null
 let previousFocus: HTMLElement | null = null
@@ -464,14 +465,11 @@ function afterFrontierMove() {
    } else if (view === "list") {
       list.refresh()
    }
-   if (view !== "reader") return
-   // A frontier move from the ARMED "not started" placeholder — the only reader
-   // placeholder whose Next (the frontier-menu anchor) is live, and it's always a
-   // single-token filter (that's the only way nav.switchFilter produces it). No
-   // article to re-probe (pos is -1): re-run the switch so the surface re-derives
-   // — mark-all-read turns it into the caught-up placeholder, Next disarmed.
-   if (nav.currentChron() < 0) void guard(() => nav.switchFilter(nav.getCurrentFilterKey()))
-   else reprobeReaderChrome()
+   // A frontier move from the ARMED "not started" placeholder (pos is -1, always a
+   // single-token filter — the only way nav.switchFilter produces it) re-runs the
+   // switch so the surface re-derives — mark-all-read turns it into the caught-up
+   // placeholder, Next disarmed. A real article just re-probes its chrome.
+   reReadReader()
 }
 
 // Silently re-derive the reader's prev/next + pending pill for the article
@@ -491,6 +489,23 @@ function reprobeReaderChrome() {
          }
       })
       .catch(() => {})
+}
+
+// Re-derive the reader after its filter bounds/mode shifted (a frontier gesture
+// or a Show-read flip). On a real article, silently re-probe the chrome. On a
+// placeholder (pos < 0) reprobeReaderChrome no-ops, so re-run the switch to
+// re-resolve the surface — but ONLY for a single-token/[ALL] filter:
+// switchFilter is single-token and getCurrentFilterKey() collapses a multi-token
+// (URL-only, e.g. #!5+9) filter to "", which switchFilter("") would misread as
+// [ALL] and teleport the reader off its lane, so leave that rare placeholder be.
+function reReadReader() {
+   if (view !== "reader") return
+   if (nav.currentChron() >= 0) {
+      reprobeReaderChrome()
+      return
+   }
+   if (nav.filter.active && nav.filter.tokens.length > 1) return
+   void guard(() => nav.switchFilter(nav.getCurrentFilterKey()))
 }
 
 // Mark the whole current feed/tag/[ALL] selection read — the frontier menu's
@@ -815,12 +830,10 @@ function toggleUnseenOnly() {
    if (view === "list") void list.rerender()
    else {
       list.invalidate()
-      // On a reader placeholder (pos < 0) reprobeReaderChrome no-ops
-      // (probeCurrent returns null for pos < 0), so it would leave a stale
-      // "Not started"/"caught up" placeholder after the flip. Re-run the switch
-      // so the surface re-derives for the new mode — mirroring afterFrontierMove.
-      if (nav.currentChron() < 0) void guard(() => nav.switchFilter(nav.getCurrentFilterKey()))
-      else reprobeReaderChrome()
+      // The reader re-derives for the new mode: a real article re-probes its
+      // chrome; a placeholder (pos < 0) re-runs the switch (reprobeReaderChrome
+      // would no-op and leave it stale). Shared with afterFrontierMove.
+      reReadReader()
    }
 }
 
@@ -837,18 +850,15 @@ function onCycle(dir: number) {
    // the reader share one rotation. Async (unread is idx-derived): the list resolves
    // the token then re-filters in place; the reader's cycleFilter awaits it inside.
    if (view === "list") {
-      // Guard the whole async cycle so a second press during cycleToken's await
-      // is dropped rather than resolving the same lane off a stale origin key
-      // (which collapses two steps into one or lands out of order) — matching the
-      // reader branch, where guard()'s busy flag drops the concurrent press.
-      if (listCycling || busy) return
-      listCycling = true
-      void nav
-         .cycleToken(dir)
-         .then((tok) => selectFilter(tok))
-         .finally(() => {
-            listCycling = false
-         })
+      // Only the latest press applies its resolved token (a stale one — from a
+      // press superseded before its cycleToken resolved — is discarded), so
+      // rapid presses can't land out of order; selectFilter's own busy guard
+      // serializes the apply. A freshness token rather than a held flag: a
+      // never-settling cycleToken() then can't latch cycling off for the session.
+      const gen = ++listCycleGen
+      void nav.cycleToken(dir).then((tok) => {
+         if (gen === listCycleGen) void selectFilter(tok)
+      })
    } else guard(() => nav.cycleFilter(dir))
 }
 
