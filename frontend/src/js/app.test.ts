@@ -854,6 +854,23 @@ describe("filter picker — the now-viewing readout & the reader's filter button
       expect(nav.switchFilter).toHaveBeenCalledWith("7")
       expect(nav.probeCurrent).not.toHaveBeenCalled()
    })
+
+   it("onToggleShowRead over a MULTI-token reader placeholder does not teleport to [ALL]", async () => {
+      await boot()
+      hashTo("#2")
+      await flush()
+      nav.currentChron.mockReturnValue(-1) // placeholder
+      nav.filter.active = true
+      nav.filter.tokens = ["5", "9"] // multi-token (URL-only) filter, e.g. #!5+9
+      nav.getCurrentFilterKey.mockReturnValue("") // getCurrentFilterKey collapses multi-token to ""
+      nav.isUnreadOnly.mockReturnValue(true)
+      nav.switchFilter.mockClear()
+      pickerHooks()!.onToggleShowRead()
+      await flush()
+      // switchFilter("") would re-filter to [ALL] and teleport the reader off
+      // feeds 5+9 — the multi-token placeholder must be left untouched instead.
+      expect(nav.switchFilter).not.toHaveBeenCalled()
+   })
 })
 
 describe("settings menu — the gear", () => {

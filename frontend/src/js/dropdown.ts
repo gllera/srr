@@ -307,16 +307,25 @@ export function showContextMenu(anchor: HTMLElement, items: MenuItem[], opts?: {
    activeClose = close
 
    document.body.appendChild(menu)
-   // Anchored above the opener: bottom-pinned to the anchor's top edge,
-   // horizontally centered on it, clamped inside the viewport. A menu taller
-   // than the space above the anchor (a tall settings menu on a short landscape
-   // viewport) is capped to that space and scrolls (overflow-y:auto in CSS) so
-   // its top rows can't clip above the viewport top out of reach.
+   // Horizontally centered on the opener, clamped inside the viewport. Pinned
+   // ABOVE the anchor by default (menus open off the bottom-fixed toolbar); but if
+   // the space above can't hold the menu AND there's more room below, flip to a
+   // top-pin under the anchor. Either way cap max-height to the chosen side and
+   // scroll (overflow-y:auto in CSS) so no row clips off-screen — and a near-top
+   // anchor flips down instead of collapsing to a ~0-height empty box.
    const margin = 8
+   const gap = 6
    const r = anchor.getBoundingClientRect()
-   menu.style.bottom = `${window.innerHeight - r.top + 6}px`
    menu.style.left = `${Math.max(margin, Math.min(r.left + r.width / 2 - menu.offsetWidth / 2, window.innerWidth - menu.offsetWidth - margin))}px`
-   menu.style.maxHeight = `${Math.max(0, r.top - 6 - margin)}px`
+   const above = r.top - gap - margin
+   const below = window.innerHeight - r.bottom - gap - margin
+   if (above >= menu.offsetHeight || above >= below) {
+      menu.style.bottom = `${window.innerHeight - r.top + gap}px`
+      menu.style.maxHeight = `${Math.max(0, above)}px`
+   } else {
+      menu.style.top = `${r.bottom + gap}px`
+      menu.style.maxHeight = `${Math.max(0, below)}px`
+   }
    document.addEventListener("keydown", onKey, true)
    document.addEventListener("pointerdown", onDown, true)
    // A scroll under the open menu displaces its context — dismiss (capture: the

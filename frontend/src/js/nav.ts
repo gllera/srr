@@ -158,8 +158,8 @@ export async function listAnchor(): Promise<number> {
 // counts as unread) and take the OLDEST match under those bounds — the same
 // unread set unseen-only navigation walks, evaluated transiently without
 // touching filter.feeds. -1 when nothing is unread, or on an empty store (no
-// member feeds, which would also make Math.min below Infinity). Shared by
-// listAnchor (the list's fresh-filter anchor) and switchFilter's [ALL] entry.
+// member feeds, which the size guard below returns before the minOf scan). Shared
+// by listAnchor (the list's fresh-filter anchor) and switchFilter's [ALL] entry.
 async function oldestUnread(): Promise<number> {
    if (filter.feeds.size === 0) return -1
    const seen = readSeen()
@@ -169,8 +169,9 @@ async function oldestUnread(): Promise<number> {
       unread.set(id, s === undefined ? bound : Math.max(bound, s + 1))
    }
    // Oldest unread: the smallest matching chron under the raised bounds (scan up
-   // from the smallest bound — nothing matches below it).
-   const start = Math.min(...unread.values())
+   // from the smallest bound — nothing matches below it). minOf, not
+   // Math.min(...), so [ALL]'s ~65k-feed map can't overflow the spread limit.
+   const start = minOf(unread.values())
    return data.findRight(start, unread)
 }
 
@@ -974,21 +975,20 @@ export function right(): Promise<IShowFeed> {
    return step("right")
 }
 
-// The smallest bound across the active filter's feeds, computed WITHOUT a spread:
-// Math.min(...filter.feeds.values()) overflows the JS engine's spread-argument
-// limit and throws on a store approaching FEED_ID_CEILING (~65k feeds) — the same
-// reason data.ts reduces instead of Math.max(...ids). Returns 0 for an empty
-// filter (no lower bound to start a walk from).
-function minFilterBound(): number {
+// The smallest value in an iterable, computed WITHOUT a spread: Math.min(...it)
+// overflows the JS engine's spread-argument limit and throws on a store
+// approaching FEED_ID_CEILING (~65k feeds) — the same reason data.ts reduces
+// instead of Math.max(...ids). Returns `fallback` for an empty iterable.
+function minOf(values: Iterable<number>, fallback = 0): number {
    let m = Infinity
-   for (const v of filter.feeds.values()) if (v < m) m = v
-   return m === Infinity ? 0 : m
+   for (const v of values) if (v < m) m = v
+   return m === Infinity ? fallback : m
 }
 
 export async function first(record = true): Promise<IShowFeed> {
    // No article from a feed with add_idx N exists below chronIdx N, so the
    // earliest matching article is at or after the smallest add_idx in filter.
-   const start = minFilterBound()
+   const start = minOf(filter.feeds.values())
    return goTo(start, record)
 }
 
@@ -1030,7 +1030,7 @@ function isKnownToken(token: string): boolean {
 // browse the read articles there, so the resume onto one is correct.
 async function noUnreadLeft(): Promise<boolean> {
    if (!unseenActive() || filter.feeds.size === 0) return false
-   const start = minFilterBound()
+   const start = minOf(filter.feeds.values())
    try {
       return (await feedRight(start)) === -1
    } catch {
@@ -1108,7 +1108,7 @@ export async function switchFilter(token: string): Promise<IShowFeed> {
    // new one. The walk re-treads what noUnreadLeft just probed, so the idx pack
    // is warm; a blip leaves startFeed unset and the message falls back to the
    // lane label.
-   const start = minFilterBound()
+   const start = minOf(filter.feeds.values())
    o.startFeed = await feedRight(start)
       .then((c) => (c === -1 ? undefined : data.getFeedId(c)))
       .catch(() => undefined)
