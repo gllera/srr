@@ -1468,6 +1468,11 @@ body:not(.srr-view-list) .srr-settings {
 .srr-empty-em {
    font-weight: 650;
 }
+/* The not-started placeholder names the never-read feed in its source color —
+   the same [data-src] ramp identity the list rails and reader masthead carry. */
+.srr-empty-em[data-src] {
+   color: var(--src);
+}
 .srr-empty-star {
    color: var(--accent);
 }

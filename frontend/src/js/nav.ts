@@ -1081,12 +1081,29 @@ export async function switchFilter(token: string): Promise<IShowFeed> {
    if (seenIdx !== undefined && (await isValidSeen(seenIdx))) return resolve(seenIdx, false, false)
    // No already-read article to resume onto, but there IS unread (noUnreadLeft was
    // false). In unread-only mode the reader is a resume surface: show the distinct
-   // "not started" placeholder and let reading begin from the list, rather than
-   // dropping onto the oldest unread — which, being unread-and-unmarked (a switch
-   // records nothing), would make the reader's pendingRight pill read one below the
-   // picker badge (badge counts the article you're sitting on, the pill doesn't).
+   // "not started" placeholder rather than dropping onto the oldest unread — which,
+   // being unread-and-unmarked (a switch records nothing), would make the reader's
+   // pendingRight pill read one below the picker badge (badge counts the article
+   // you're sitting on, the pill doesn't). The placeholder itself keeps Next ARMED:
+   // reading begins right here with a →-step onto the oldest unread (recorded, as
+   // any read step is), no detour through the list. With pos at -1 the pill counts
+   // the whole backlog — exactly the picker badge, so the two agree on this
+   // placeholder in a way no resolved-article landing could.
    // Show-read mode opens the oldest article as before (you browse there).
-   return unseenActive() ? resolveNoMatch(false, true) : first(false)
+   if (!unseenActive()) return first(false)
+   const o = resolveNoMatch(false, true)
+   o.has_right = true // noUnreadLeft() above proved a right-match exists
+   o.right_count = await pendingRight().catch(() => -1)
+   // Name WHICH feed the never-read backlog starts with: the oldest unread's own
+   // feed — under a tag lane the label alone can't say which member feed is the
+   // new one. The walk re-treads what noUnreadLeft just probed, so the idx pack
+   // is warm; a blip leaves startFeed unset and the message falls back to the
+   // lane label.
+   const start = Math.min(...filter.feeds.values())
+   o.startFeed = await feedRight(start)
+      .then((c) => (c === -1 ? undefined : data.getFeedId(c)))
+      .catch(() => undefined)
+   return o
 }
 
 // Jump to chronIdx, snapping forward to next match if filter is active.

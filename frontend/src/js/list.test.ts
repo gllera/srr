@@ -726,15 +726,32 @@ describe("list", () => {
    it("renders the 'not started' message for a never-opened feed (distinct from caught-up)", () => {
       // The reader's not-started placeholder (a feed with unread you've never
       // opened): its own directed line, NOT the "All caught up" reward — the feed
-      // HAS unread. Reachable only via emptyStateEl({notStarted}) (the reader path);
+      // HAS unread. The directive points at the armed Next button (reading starts
+      // in place — nav.switchFilter arms it), no detour through the list.
+      // Reachable only via emptyStateEl({notStarted}) (the reader path);
       // the list surface itself shows the unread rows and never this state.
+      // No startFeed here (the probe-blip fallback): the lane label names it.
       nav._setUnreadOnly(true)
       nav.getCurrentFilterKey.mockReturnValueOnce("99")
       const empty = list.emptyStateEl({ notStarted: true })
-      expect(empty.querySelector(".srr-empty-eyebrow")!.textContent).toBe("Not started")
+      expect(empty.querySelector(".srr-empty-eyebrow")!.textContent).toBe("Not started feed")
       expect(empty.querySelector(".srr-caughtup-check")).toBeNull() // not the reward state
       expect(empty.querySelector(".srr-empty-em")!.textContent).toBe("Feed99")
-      expect(empty.querySelector(".srr-empty-msg")!.textContent).toContain("from the list")
+      expect(empty.querySelector(".srr-empty-msg")!.textContent).toBe("Tap Next to start reading Feed99.")
+   })
+
+   it("names the never-read feed itself (source-tinted) on the not-started placeholder", () => {
+      // A tag lane's label alone can't say WHICH member feed is the new one —
+      // startFeed (the feed of the oldest unread, threaded from nav.switchFilter)
+      // names it, tinted with its source color like every other feed identity.
+      nav._setUnreadOnly(true)
+      nav.getCurrentFilterKey.mockReturnValueOnce("news") // a tag lane
+      const empty = list.emptyStateEl({ notStarted: true, startFeed: 7 })
+      expect(empty.querySelector(".srr-empty-eyebrow")!.textContent).toBe("Not started feed")
+      const em = empty.querySelector(".srr-empty-em") as HTMLElement
+      expect(em.textContent).toBe("Feed7") // the member feed, not the tag
+      expect(em.dataset.src).toBe(String(7 % 8)) // srcColorIndex — the feed's ramp color
+      expect(empty.querySelector(".srr-empty-msg")!.textContent).toBe("Tap Next to start reading Feed7.")
    })
 
    it("shows 'Nothing saved' (not the caught-up reward) for an empty Saved view with unread-only on", () => {

@@ -39,4 +39,9 @@ interface IShowFeed {
    // unread, but no already-read article to resume onto → "start from the list");
    // false/absent = the caught-up placeholder (nothing unread) or a plain no-match.
    notStarted?: boolean
+   // Set only alongside notStarted: the feed of the oldest unread article — the
+   // one the armed Next opens — so the placeholder can name WHICH feed is the
+   // never-read one (a tag lane's label alone can't). Absent on a probe blip;
+   // the message then falls back to the lane label.
+   startFeed?: number
 }

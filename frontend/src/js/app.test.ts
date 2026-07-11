@@ -18,6 +18,8 @@ interface ShowFeed {
    right_count: number
    feed?: { id: number; tag: string }
    placeholder?: boolean
+   notStarted?: boolean
+   startFeed?: number
    filtered?: boolean
 }
 const showFeed = (o: Partial<ShowFeed> = {}): ShowFeed => ({
@@ -398,6 +400,39 @@ describe("reader placeholder — directed empty state (no matching articles)", (
       expect((document.querySelector(".srr-prev") as HTMLButtonElement).disabled).toBe(true)
       expect((document.querySelector(".srr-next") as HTMLButtonElement).disabled).toBe(true)
       expect((document.querySelector(".srr-save") as HTMLButtonElement).disabled).toBe(true)
+   })
+
+   it("keeps Next armed (enabled + full-backlog pill) on the not-started placeholder", async () => {
+      // nav.switchFilter arms the "not started" placeholder (has_right + the
+      // backlog count): reading starts with a →/D/click/swipe from right here —
+      // the placeholder must NOT force a detour through the list.
+      await boot()
+      nav.fromHash.mockResolvedValue(
+         showFeed({
+            placeholder: true,
+            notStarted: true,
+            startFeed: 3,
+            has_right: true,
+            right_count: 7,
+            article: { f: 0, a: 0, p: 0, t: "(no matching articles)", l: "", c: "" },
+         }),
+      )
+      hashTo("#5")
+      await flush()
+
+      // The empty state names the feed the armed Next opens (startFeed threads through).
+      expect(list.emptyStateEl).toHaveBeenCalledWith({ notStarted: true, startFeed: 3 })
+      const next = document.querySelector(".srr-next") as HTMLButtonElement
+      expect(next.disabled).toBe(false)
+      expect((document.querySelector(".srr-next-count") as HTMLElement).textContent).toBe("7")
+      // Prev/save stay dead — nothing behind, nothing to save.
+      expect((document.querySelector(".srr-prev") as HTMLButtonElement).disabled).toBe(true)
+      expect((document.querySelector(".srr-save") as HTMLButtonElement).disabled).toBe(true)
+      // The armed button really steps: a click routes to nav.right().
+      nav.right.mockResolvedValue(showFeed({ article: { f: 1, a: 0, p: 0, t: "First", l: "", c: "<p>hi</p>" } }))
+      next.click()
+      await flush()
+      expect(nav.right).toHaveBeenCalled()
    })
 
    it("clears the empty-state marker when a real article renders next", async () => {

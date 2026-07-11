@@ -2815,7 +2815,9 @@ describe("no-unread feed/tag shows the caught-up placeholder", () => {
 // onto. In unread-only mode the reader is a resume surface, so switchFilter shows
 // a distinct "not started" placeholder (notStarted=true → its own message, NOT
 // the "All caught up" one, since the feed HAS unread) instead of dropping onto —
-// and mis-counting the pill of — the oldest unread. You begin from the list.
+// and mis-counting the pill of — the oldest unread. The placeholder arrives with
+// Next ARMED (has_right + the full-backlog pill, which with no article on screen
+// equals the picker badge): reading starts with a →-step from right here.
 // Show-read mode still opens the oldest article (you browse there).
 describe("never-opened feed/tag shows the not-started placeholder (unread-only)", () => {
    afterEach(() => nav.setUnreadOnly(false))
@@ -2831,6 +2833,24 @@ describe("never-opened feed/tag shows the not-started placeholder (unread-only)"
       expect(nav.currentChron()).toBe(-1)
       expect(data.loadArticle).not.toHaveBeenCalled()
       expect(nav.getCurrentFilterKey()).toBe("1") // scoped to the feed for its message
+      // Next is armed with the full backlog — the pill equals the badge here.
+      expect(r.has_right).toBe(true)
+      expect(r.right_count).toBe(3)
+      expect(r.has_left).toBe(false)
+      expect(r.startFeed).toBe(1) // the feed the armed Next opens, named by the message
+   })
+
+   it("→ from the not-started placeholder opens the oldest unread and records it", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }]) // feed1 {0,1,2}, nothing seen
+      nav.setUnreadOnly(true)
+      await nav.switchFilter("1") // → the armed placeholder (asserted above)
+      const r = await nav.right() // reading starts here, not from the list
+      expect(r.placeholder).toBeFalsy()
+      expect(data.loadArticle).toHaveBeenLastCalledWith(0) // oldest unread
+      // A →-step is a READ, not a resume: the landing records the seen frontier,
+      // so the badge/pill tick down exactly as any forward step does.
+      expect(JSON.parse(localStorage.getItem("srr-seen")!)["feed:1"]).toBe(0)
+      expect(r.right_count).toBe(2)
    })
 
    it("switching to a never-opened tag (no member seen) shows the not-started placeholder", async () => {
@@ -2843,6 +2863,9 @@ describe("never-opened feed/tag shows the not-started placeholder (unread-only)"
       const r = await nav.switchFilter("news")
       expect(r.placeholder).toBe(true)
       expect(r.notStarted).toBe(true)
+      // The lane label alone says "news" — startFeed pins WHICH member feed the
+      // unread backlog starts with: the oldest unread (chron 0) belongs to feed 5.
+      expect(r.startFeed).toBe(5)
    })
 
    it("in show-read mode a never-opened feed opens the oldest article, NOT the placeholder", async () => {

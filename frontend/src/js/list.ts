@@ -254,7 +254,7 @@ function pinHeights(rows: HTMLElement[]): void {
 // it into the feed, and the reader (app.ts) shows it in place of the bare
 // "(no matching articles)" placeholder — keyed off the same nav state, so the two
 // can't drift.
-export function emptyStateEl(opts: { notStarted?: boolean } = {}): HTMLElement {
+export function emptyStateEl(opts: { notStarted?: boolean; startFeed?: number } = {}): HTMLElement {
    const wrap = el("div", "srr-list-empty")
    const eyebrow = (text: string): void => {
       const e = el("span", "srr-empty-eyebrow")
@@ -272,12 +272,25 @@ export function emptyStateEl(opts: { notStarted?: boolean } = {}): HTMLElement {
       // The reader's "not started" placeholder: a feed/tag you've never opened
       // (it HAS unread, but no already-read article to resume onto — the reader is
       // a resume surface). Deliberately NOT the "All caught up" reward, which would
-      // be false here; a cold directive that points to the list, where you begin.
+      // be false here; a cold directive that points at Next — the placeholder
+      // arrives with Next armed (nav.switchFilter), so one step starts reading
+      // from the oldest unread right here, no detour through the list.
       // Reader-only — the list surface shows the unread rows and never this state.
-      eyebrow("Not started")
-      const key = nav.getCurrentFilterKey()
-      if (key) msg.append("Open ", em(nav.filterLabel(key)), " from the list to start reading.")
-      else msg.textContent = "Open a feed from the list to start reading."
+      eyebrow("Not started feed")
+      // Name WHICH feed the unread backlog starts with — startFeed (the oldest
+      // unread's own feed, threaded from nav.switchFilter), tinted with its
+      // source color like every other feed identity: under a tag lane the label
+      // alone couldn't say which member feed is the never-read one. Fallback
+      // (probe blip): the lane label.
+      if (opts.startFeed !== undefined) {
+         const name = em(data.feedTitle(opts.startFeed))
+         name.dataset.src = String(srcColorIndex(opts.startFeed))
+         msg.append("Tap Next to start reading ", name, ".")
+      } else {
+         const key = nav.getCurrentFilterKey()
+         if (key) msg.append("Tap Next to start reading ", em(nav.filterLabel(key)), ".")
+         else msg.textContent = "Tap Next to start reading."
+      }
    } else if (nav.isSearchFilter()) {
       const q = nav.searchQuery()
       if (q) msg.append("No titles match ", em(`“${q}”`), ". Try fewer or different words.")

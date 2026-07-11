@@ -281,8 +281,9 @@ function clearContentTransition() {
 // through it) minus the article on screen, so it ticks 3, 2, 1 and reads an
 // explicit "0" on the last article (greyed on the disabled pill: nothing ahead,
 // said out loud). Digits show whenever the count is known (o present and ≥ 0);
-// hidden only on a degraded (-1) probe and the no-article states (placeholder /
-// empty reader, the null calls) — never a spinner, never a ghost. The count
+// hidden only on a degraded (-1) probe and the dead-end no-article states (the
+// null calls — the armed "not started" placeholder keeps its full-backlog
+// digits) — never a spinner, never a ghost. The count
 // rides the accessible name rather than a separate live region — it changes on
 // navigation, when the button is re-announced anyway.
 function syncNextCount(o: IShowFeed | null) {
@@ -300,7 +301,7 @@ function render(o: IShowFeed) {
    // timer fires applySearchQuery under the now-hidden list and rewrites the
    // reader's hash to the positionless #!q:<query>, losing the resume position.
    clearTimeout(searchDebounce)
-   if (o.placeholder) return renderEmptyReader(o.notStarted)
+   if (o.placeholder) return renderEmptyReader(o)
    el.article.classList.remove("srr-reader-empty")
    const feed = data.db.feeds[o.article.f]
    // Titleless feeds (Telegram-style: the title is just the content's first
@@ -369,9 +370,13 @@ function render(o: IShowFeed) {
 // show the SAME directed empty state the list uses (list.emptyStateEl) so both
 // surfaces speak one wire voice — search / caught-up / saved / filtered wording,
 // keyed off the same nav state. The article chrome (source · date · h1) is hidden
-// via .srr-reader-empty; prev/next/save are disabled — a placeholder has no
-// neighbors to step to and nothing to save.
-function renderEmptyReader(notStarted = false) {
+// via .srr-reader-empty; prev/save are disabled — a placeholder has nothing to
+// save and no left neighbor. Next follows o.has_right: the dead-end placeholders
+// (caught-up / no-match) disable it, but the "not started" one arrives ARMED
+// (nav.switchFilter) — a →/D/swipe/click steps onto the first unread, so reading
+// starts from the reader without a detour through the list; its pill carries the
+// full-backlog count (== the picker badge).
+function renderEmptyReader(o: IShowFeed) {
    el.article.classList.add("srr-reader-empty")
    el.article.classList.remove("srr-reader-titleless")
    delete el.article.dataset.src
@@ -380,14 +385,14 @@ function renderEmptyReader(notStarted = false) {
    el.titleLink.removeAttribute("href")
    el.kickerLink.removeAttribute("href")
    el.prev.disabled = true
-   el.next.disabled = true
-   syncNextCount(null)
+   el.next.disabled = !o.has_right
+   syncNextCount(o.has_right ? o : null)
    refreshSaveButton(false)
 
    // Static panel: no fade-in (clear any inline opacity/transform a prior article
    // render left behind), and swap the body for the shared empty-state element.
    clearContentTransition()
-   el.content.replaceChildren(list.emptyStateEl({ notStarted }))
+   el.content.replaceChildren(list.emptyStateEl({ notStarted: o.notStarted, startFeed: o.startFeed }))
 
    refreshFeedLabel()
    document.title = "SRR"
@@ -455,7 +460,14 @@ function afterFrontierMove() {
    } else if (view === "list") {
       list.refresh()
    }
-   if (view === "reader") reprobeReaderChrome()
+   if (view !== "reader") return
+   // A frontier move from the ARMED "not started" placeholder — the only reader
+   // placeholder whose Next (the frontier-menu anchor) is live, and it's always a
+   // single-token filter (that's the only way nav.switchFilter produces it). No
+   // article to re-probe (pos is -1): re-run the switch so the surface re-derives
+   // — mark-all-read turns it into the caught-up placeholder, Next disarmed.
+   if (nav.currentChron() < 0) void guard(() => nav.switchFilter(nav.getCurrentFilterKey()))
+   else reprobeReaderChrome()
 }
 
 // Silently re-derive the reader's prev/next + pending pill for the article
