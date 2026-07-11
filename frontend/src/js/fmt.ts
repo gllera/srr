@@ -370,6 +370,23 @@ export function formatDate(unix: number): string {
    return `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}/${d.getFullYear()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`
 }
 
+// Within a week counts as "close to now".
+const RELATIVE_DATELINE_SEC = 7 * 86400
+
+// The reader masthead's dateline. A recent article (fetched/published within the
+// last week) leads with its compact relative age — "5h ago", "6d ago", "just now"
+// — the way you read something that just arrived; an older one leads with the
+// absolute date, since for an archived dispatch the real date matters more than
+// "how long ago". Whichever form isn't shown becomes the hover `title`, so both
+// are always one glance apart. Compact shares the list eyebrow's age vocabulary.
+export function readerDateline(unix: number): { text: string; title: string } {
+   const sec = Math.max(0, Math.floor(Date.now() / 1000) - unix)
+   if (sec < RELATIVE_DATELINE_SEC) {
+      return { text: sec < 60 ? "just now" : `${timeAgo(unix)} ago`, title: formatDate(unix) }
+   }
+   return { text: formatDate(unix), title: timeAgo(unix) }
+}
+
 // Number of source-color slots. MUST match the `.srr-row[data-src="N"]` rules in
 // styles.css (light + dark). The list gives every feed a stable color from
 // this ramp so the feed can be triaged by origin at a glance.

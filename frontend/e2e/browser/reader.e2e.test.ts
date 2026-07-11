@@ -29,7 +29,7 @@ const storeSeq = (dir: string): number => {
 
 const $title = (p: Page) => p.$eval(".srr-title", (e) => e.textContent)
 const $content = (p: Page) => p.$eval(".srr-content", (e) => e.textContent ?? "")
-const $link = (p: Page) => p.$eval(".srr-title-link", (e) => e.getAttribute("href"))
+const $link = (p: Page) => p.$eval(".srr-title-row", (e) => e.getAttribute("href"))
 const $nextDisabled = (p: Page) => p.$eval(".srr-next", (e) => (e as HTMLButtonElement).disabled)
 const $popupOpen = (p: Page) => p.$eval(".srr-popup", (e) => e.classList.contains("srr-open"))
 const $rowTitles = (p: Page) => p.$$eval(".srr-list a.srr-row .srr-row-title", (els) => els.map((e) => e.textContent))

@@ -92,27 +92,21 @@
             <div class="srr-search-note" role="status" hidden></div>
          </div>
          <article class="srr-reader" hidden>
-            <div class="srr-title-row">
+            <!-- The whole masthead row is the article's "open original" permalink
+                 (source · date · title) — one link, so the title's former inner <a>
+                 is unwrapped (no <a> nesting). A titleless feed hides just the <h1>
+                 and the source · date kicker stands in as the permalink; the reader
+                 empty-state hides the whole row. app.ts sets/removes its href. -->
+            <a class="srr-title-row" rel="noreferrer">
                <div class="srr-kicker">
                   <span class="srr-source"></span>
                   <!-- Desk/section the dispatch is filed under (the feed's tag), a
                        wire slug after the source name. Empty (hidden) when untagged. -->
                   <span class="srr-desk"></span>
                   <time class="srr-date"></time>
-                  <!-- "Open original" permalink: present on every article (the only
-                       link for titleless feeds, a companion to the title link
-                       otherwise). Hidden only when the article carries no link. -->
-                  <a class="srr-kicker-link" rel="noreferrer" aria-label="Open original" title="Open original">
-                     <svg class="srr-kicker-link-icon" viewBox="0 0 24 24" aria-hidden="true">
-                        <path d="M7 7h10v10" />
-                        <path d="M7 17 17 7" />
-                     </svg>
-                  </a>
                </div>
-               <a class="srr-title-link">
-                  <h1 class="srr-title" tabindex="-1"></h1>
-               </a>
-            </div>
+               <h1 class="srr-title" tabindex="-1"></h1>
+            </a>
             <div class="srr-content"></div>
          </article>
          <div class="srr-list" aria-label="Article list" hidden></div>

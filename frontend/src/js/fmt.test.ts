@@ -8,6 +8,7 @@ import {
    isStale,
    formatBytes,
    formatDate,
+   readerDateline,
    imgProxy,
    getImgProxy,
    setImgProxy,
@@ -619,6 +620,49 @@ describe("formatDate", () => {
       const pad = (n: number) => n.toString().padStart(2, "0")
       const expected = `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`
       expect(formatDate(0)).toBe(expected)
+   })
+})
+
+describe("readerDateline", () => {
+   beforeEach(() => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date("2025-01-15T12:00:00Z"))
+   })
+
+   afterEach(() => {
+      vi.useRealTimers()
+   })
+
+   const now = Math.floor(new Date("2025-01-15T12:00:00Z").getTime() / 1000)
+
+   it("recent article leads with compact relative age", () => {
+      const unix = now - 5 * 3600 // 5 hours ago
+      expect(readerDateline(unix)).toEqual({ text: "5h ago", title: formatDate(unix) })
+   })
+
+   it("under a minute reads 'just now'", () => {
+      const unix = now - 30
+      expect(readerDateline(unix)).toEqual({ text: "just now", title: formatDate(unix) })
+   })
+
+   it("just under 7 days is still relative", () => {
+      const unix = now - 6 * 86400 // 6 days ago
+      expect(readerDateline(unix)).toEqual({ text: "6d ago", title: formatDate(unix) })
+   })
+
+   it("boundary: exactly 7 days flips to the absolute date", () => {
+      const unix = now - 7 * 86400
+      expect(readerDateline(unix)).toEqual({ text: formatDate(unix), title: timeAgo(unix) })
+   })
+
+   it("old article leads with the absolute date, relative age on hover", () => {
+      const unix = now - 30 * 86400 // ~1 month ago
+      expect(readerDateline(unix)).toEqual({ text: formatDate(unix), title: timeAgo(unix) })
+   })
+
+   it("future timestamp clamps to 'just now'", () => {
+      const unix = now + 3600
+      expect(readerDateline(unix)).toEqual({ text: "just now", title: formatDate(unix) })
    })
 })
 

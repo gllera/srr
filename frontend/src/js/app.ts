@@ -8,7 +8,7 @@ import {
    showSyncDialog,
    type MenuItem,
 } from "./dropdown"
-import { collapseBrokenMedia, countBadge, formatDate, sanitizeFragment, srcColorIndex, timeAgo, URL_DENY } from "./fmt"
+import { collapseBrokenMedia, countBadge, readerDateline, sanitizeFragment, srcColorIndex, URL_DENY } from "./fmt"
 import { setupGestures, type Gestures } from "./gestures"
 import { UNREAD_ONLY_KEY } from "./keys"
 import * as list from "./list"
@@ -27,8 +27,7 @@ const el = {
    openReader: document.querySelector(".srr-open-reader") as HTMLButtonElement,
    title: document.querySelector(".srr-title") as HTMLElement,
    content: document.querySelector(".srr-content") as HTMLElement,
-   titleLink: document.querySelector(".srr-title-link") as HTMLAnchorElement,
-   kickerLink: document.querySelector(".srr-kicker-link") as HTMLAnchorElement,
+   titleRow: document.querySelector(".srr-title-row") as HTMLAnchorElement,
    toolbar: document.querySelector(".srr-toolbar") as HTMLElement,
    prev: document.querySelector(".srr-prev") as HTMLButtonElement,
    next: document.querySelector(".srr-next") as HTMLButtonElement,
@@ -327,24 +326,24 @@ function render(o: IShowFeed) {
    // re-parse the whole article on every prev/next step (see sanitizeFragment).
    el.content.replaceChildren(sanitizeFragment(o.article.c))
    // Reject javascript:/data:/vbscript:/file: in case the writer pipeline let one
-   // through. Both the title link and the titleless masthead permalink point at
-   // the same article URL; CSS shows whichever one this feed uses.
+   // through. The whole masthead row (source · date · title) is the one permalink;
+   // an href makes it a link, its absence leaves it inert chrome (titleless feeds
+   // hide the <h1> but the source · date kicker still carries the link).
    const safeLink = o.article.l && !URL_DENY.test(o.article.l) ? o.article.l : ""
-   for (const a of [el.titleLink, el.kickerLink]) {
-      if (safeLink) a.href = safeLink
-      else a.removeAttribute("href")
-   }
+   if (safeLink) el.titleRow.href = safeLink
+   else el.titleRow.removeAttribute("href")
    el.prev.disabled = !o.has_left
    el.next.disabled = !o.has_right
    syncNextCount(o)
 
    // p is omitted (=> undefined) when the writer couldn't parse a date
    const currentPublished = o.article.p ?? 0
-   // The reader carries an absolute dateline (you're reading an archived
-   // dispatch, so the real date matters more than "5h ago"); the relative age
-   // moves to the hover title.
-   el.date.textContent = currentPublished ? formatDate(currentPublished) : ""
-   el.date.title = currentPublished ? timeAgo(currentPublished) : ""
+   // A recent article leads with its relative age ("5h ago"); an older one leads
+   // with the absolute date (an archived dispatch's real date matters more than
+   // "5h ago"). Either way the other form is on the hover title — see readerDateline.
+   const dateline = currentPublished ? readerDateline(currentPublished) : null
+   el.date.textContent = dateline ? dateline.text : ""
+   el.date.title = dateline ? dateline.title : ""
    // Hide the date (and its leading "·" separator) in the kicker when undated,
    // so the source name doesn't trail a dangling middot.
    el.date.hidden = !currentPublished
@@ -387,8 +386,7 @@ function renderEmptyReader(o: IShowFeed) {
    delete el.article.dataset.src
    el.desk.textContent = ""
    el.title.textContent = ""
-   el.titleLink.removeAttribute("href")
-   el.kickerLink.removeAttribute("href")
+   el.titleRow.removeAttribute("href")
    el.prev.disabled = true
    el.next.disabled = !o.has_right
    syncNextCount(o.has_right ? o : null)
@@ -921,8 +919,8 @@ const KEY_ACTIONS: Record<string, () => void> = {
    // frontier menu); markUnreadFromHere no-ops without an article / in peek modes.
    u: () => markUnreadFromHere(),
    f: () => {
-      if (!el.titleLink.getAttribute("href")) return
-      el.titleLink.dispatchEvent(
+      if (!el.titleRow.getAttribute("href")) return
+      el.titleRow.dispatchEvent(
          new MouseEvent("click", { bubbles: true, cancelable: true, ctrlKey: true, metaKey: true }),
       )
    },

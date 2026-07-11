@@ -8,9 +8,10 @@ import { feedServer, srr, type FeedServer } from "../harness"
 import { nItems, rssFeed } from "../fixtures"
 
 // Titleless feeds (Telegram-style: the title duplicates the content lead). A
-// feed flagged `nt` in db.gz makes the reader HIDE the <h1> and expose a
-// masthead permalink icon instead; the list still uses the title as its row
-// label. Own beforeAll clears + rebuilds the shared packsDir (browser files run
+// feed flagged `nt` in db.gz makes the reader HIDE the <h1>; the whole masthead
+// row is the permalink, so its source · date kicker stands in. The list still
+// uses the title as its row label. Own beforeAll clears + rebuilds the shared
+// packsDir (browser files run
 // serially — vitest.browser.config fileParallelism:false — so each owns it).
 
 const baseUrl = inject("baseUrl")
@@ -23,9 +24,11 @@ const news = nItems(1, "news", 0, 0)
 
 const $hasTitleless = (p: Page) => p.$eval(".srr-reader", (e) => e.classList.contains("srr-reader-titleless"))
 // offsetParent is null for a display:none element → a robust "is it visible".
-const $titleVisible = (p: Page) => p.$eval(".srr-title-link", (e) => (e as HTMLElement).offsetParent !== null)
-const $kickerVisible = (p: Page) => p.$eval(".srr-kicker-link", (e) => (e as HTMLElement).offsetParent !== null)
-const $kickerHref = (p: Page) => p.$eval(".srr-kicker-link", (e) => e.getAttribute("href"))
+const $titleVisible = (p: Page) => p.$eval(".srr-title", (e) => (e as HTMLElement).offsetParent !== null)
+// The whole masthead row is the permalink now (no separate icon). For a titleless
+// feed the <h1> hides but the row (its source · date kicker) stays visible.
+const $rowVisible = (p: Page) => p.$eval(".srr-title-row", (e) => (e as HTMLElement).offsetParent !== null)
+const $rowHref = (p: Page) => p.$eval(".srr-title-row", (e) => e.getAttribute("href"))
 const $titleText = (p: Page) => p.$eval(".srr-title", (e) => e.textContent)
 const $deskVisible = (p: Page) => p.$eval(".srr-desk", (e) => (e as HTMLElement).offsetParent !== null)
 const $deskText = (p: Page) => p.$eval(".srr-desk", (e) => e.textContent)
@@ -107,12 +110,13 @@ describe("browser: titleless feeds (reader hides the duplicate heading)", () => 
       try {
          await clickRow(page, "micro title 0")
          await waitReader(page)
-         // The reader is flagged titleless: the <h1> permalink block is hidden…
+         // The reader is flagged titleless: the <h1> heading is hidden…
          expect(await $hasTitleless(page)).toBe(true)
          expect(await $titleVisible(page)).toBe(false)
-         // …and the masthead permalink stands in, pointing at the article link.
-         expect(await $kickerVisible(page)).toBe(true)
-         expect(await $kickerHref(page)).toBe("http://example.com/micro/0")
+         // …and the masthead row (its source · date kicker) stands in as the
+         // permalink, pointing at the article link.
+         expect(await $rowVisible(page)).toBe(true)
+         expect(await $rowHref(page)).toBe("http://example.com/micro/0")
          // The desk shows the feed's tag (as a hashtag) above the byline.
          expect(await $deskVisible(page)).toBe(true)
          expect(await $deskText(page)).toBe("#updates")
@@ -129,9 +133,8 @@ describe("browser: titleless feeds (reader hides the duplicate heading)", () => 
          expect(await $hasTitleless(page)).toBe(false)
          expect(await $titleVisible(page)).toBe(true)
          expect(await $titleText(page)).toBe("news title 0")
-         // The permalink is available on ordinary feeds too, pointing at the article.
-         expect(await $kickerVisible(page)).toBe(true)
-         expect(await $kickerHref(page)).toBe("http://example.com/news/0")
+         // The row permalink is available on ordinary feeds too, pointing at the article.
+         expect(await $rowHref(page)).toBe("http://example.com/news/0")
          // News is untagged → the desk stays hidden.
          expect(await $deskVisible(page)).toBe(false)
       } finally {
