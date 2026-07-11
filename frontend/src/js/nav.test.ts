@@ -575,10 +575,10 @@ describe("right_count", () => {
    it("counts the saved set to the right in ★ Saved mode", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }, { feedId: 2 }])
       localStorage.setItem("srr-saved", JSON.stringify([0, 2, 3]))
-      // Saved opens at the newest saved article — nothing further right.
-      expect((await nav.switchFilter(nav.SAVED_TOKEN)).right_count).toBe(0)
-      expect((await nav.left()).right_count).toBe(1) // on chron 2 → {3} remains
-      expect((await nav.left()).right_count).toBe(2) // on chron 0 → {2, 3}
+      // Saved opens at the OLDEST saved article — the rest of the queue is ahead.
+      expect((await nav.switchFilter(nav.SAVED_TOKEN)).right_count).toBe(2)
+      expect((await nav.right()).right_count).toBe(1) // on chron 2 → {3} remains
+      expect((await nav.right()).right_count).toBe(0) // on chron 3 → nothing ahead
    })
 
    it("counts the hit set to the right in search mode", async () => {
@@ -1125,7 +1125,7 @@ describe("recordSeen marks previous articles seen across the list", () => {
       // chron 0=ch1 1=ch2 2=ch1; saved set spans both feeds.
       setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }])
       localStorage.setItem("srr-saved", JSON.stringify([0, 1, 2]))
-      await nav.switchFilter(nav.SAVED_TOKEN) // opens at the newest saved (chron 2, ch1)
+      await nav.switchFilter(nav.SAVED_TOKEN) // opens at the oldest saved (chron 0, ch1)
       const seen = JSON.parse(localStorage.getItem("srr-seen") || "{}")
       // recordSeen now exempts saved mode entirely, the same carve-out as
       // search — opening a saved article never touches the seen frontier.
@@ -2011,26 +2011,26 @@ describe("saved articles", () => {
       expect(nav.filter.saved).toBe(false)
    })
 
-   it("traverses only saved articles, newest-first", async () => {
+   it("traverses only saved articles, opening at the oldest (front of the queue)", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }]) // chrons 0..4
       nav.toggleSaved(1)
       nav.toggleSaved(3)
       nav.toggleSaved(4)
-      // switchFilter resumes at the newest saved (4).
-      const r4 = await nav.switchFilter(nav.SAVED_TOKEN)
-      expect(data.loadArticle).toHaveBeenCalledWith(4)
+      // switchFilter opens at the oldest saved (1) — read the queue forward from there.
+      const r1 = await nav.switchFilter(nav.SAVED_TOKEN)
+      expect(data.loadArticle).toHaveBeenCalledWith(1)
       expect(nav.filter.active).toBe(true)
-      expect(r4.has_right).toBe(false)
-      expect(r4.has_left).toBe(true)
+      expect(r1.has_left).toBe(false)
+      expect(r1.has_right).toBe(true)
 
-      const r3 = await nav.left()
-      expect(data.loadArticle).toHaveBeenCalledWith(3)
-      expect(r3.has_left).toBe(true)
+      const r3 = await nav.right()
+      expect(data.loadArticle).toHaveBeenCalledWith(3) // skips unsaved 2
+      expect(r3.has_right).toBe(true)
 
-      const r1 = await nav.left()
-      expect(data.loadArticle).toHaveBeenCalledWith(1) // skips unsaved 2
-      expect(r1.has_left).toBe(false) // oldest saved
-      await expect(nav.left()).rejects.toThrow("no left match")
+      const r4 = await nav.right()
+      expect(data.loadArticle).toHaveBeenCalledWith(4)
+      expect(r4.has_right).toBe(false) // newest saved
+      await expect(nav.right()).rejects.toThrow("no right match")
    })
 
    it("getFilterEntries surfaces the saved token only when something is saved", () => {
@@ -2334,9 +2334,16 @@ describe("listAnchor", () => {
       expect(await nav.listAnchor()).toBe(-1)
    })
 
-   it("returns -1 for ★ Saved (newest-first), never a resume", async () => {
+   it("anchors ★ Saved at its OLDEST saved article (front of the read-later queue)", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
-      localStorage.setItem("srr-saved", JSON.stringify([1]))
+      localStorage.setItem("srr-saved", JSON.stringify([1, 2]))
+      nav.select(-1, -1)
+      nav.filter.set([nav.SAVED_TOKEN])
+      expect(await nav.listAnchor()).toBe(1) // oldest saved, not the newest (2)
+   })
+
+   it("returns -1 for ★ Saved with an empty saved set", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }])
       nav.select(-1, -1)
       nav.filter.set([nav.SAVED_TOKEN])
       expect(await nav.listAnchor()).toBe(-1)

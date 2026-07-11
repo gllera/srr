@@ -137,18 +137,24 @@ export function anchorChron(): number {
 //     identical scan across every feed (filter.clear populates filter.feeds with
 //     all of them); on a fresh device with nothing read it lands at the oldest
 //     article overall, exactly as a never-opened tag does.
-//   • ★ Saved and search keep the newest-first default (-1): the latest
-//     available article. A query in particular always shows its newest hit,
-//     regardless of seen state. An empty store (no feeds) also stays at -1.
+//   • ★ Saved opens at its OLDEST saved article: the saved set is a read-later
+//     queue consumed front-to-back, so you land at the front and read forward
+//     (newer) through it — the saved cousin of the oldest-unread anchor. -1
+//     only when nothing is saved.
+//   • search keeps the newest-first default (-1): a query always shows its
+//     newest hit, regardless of seen state. An empty store (no feeds) also
+//     stays at -1.
 // Async because findRight may touch an idx pack; anchorChron stays synchronous
 // for the live-position callers.
 export async function listAnchor(): Promise<number> {
    const live = anchorChron()
    if (live >= 0) return live
+   // ★ Saved (feed-agnostic, filter.feeds empty): the front of the queue.
+   if (filter.saved) return savedSorted()[0] ?? -1
    // [ALL] (filter.clear) populates filter.feeds with every feed, so it runs the
-   // same oldest-unread scan as a feed/tag — just spanning all feeds. Only saved/
-   // search (feed-agnostic, filter.feeds empty) keep the newest-first default.
-   if (filter.saved || filter.search) return -1
+   // same oldest-unread scan as a feed/tag — just spanning all feeds. Only
+   // search (feed-agnostic, filter.feeds empty) keeps the newest-first default.
+   if (filter.search) return -1
    return oldestUnread()
 }
 
@@ -1080,9 +1086,13 @@ export async function switchFilter(token: string): Promise<IShowFeed> {
       filter.feeds = new Map<number, number>()
       return resolveNoMatch()
    }
-   // Saved/search have no per-feed resume position; open at the newest member
-   // (top of the list), the same place selecting them on the list shows.
-   if (filter.saved || filter.search) return last(false, false)
+   // Search has no per-feed resume position; open at the newest hit (top of
+   // the list), the same place selecting it on the list shows.
+   if (filter.search) return last(false, false)
+   // ★ Saved is a read-later queue consumed front-to-back: open at the OLDEST
+   // saved article — the same landing the list anchors on — and read forward.
+   // first() with an empty filter.feeds walks the saved set from chron 0.
+   if (filter.saved) return first(false)
    // Unread-only + fully-read feed/tag: nothing unread to resume onto — show the
    // "All caught up" placeholder rather than opening an already-read article.
    if (await noUnreadLeft()) return resolveNoMatch()

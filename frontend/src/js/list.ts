@@ -14,7 +14,8 @@ import * as nav from "./nav"
 // open the list anchors at nav.listAnchor() — the article the reader last sat on
 // when it still matches the filter, else a tag/feed's remembered resume
 // position, else (a tag/feed with no navigation information) its OLDEST
-// article, else the newest match ([ALL]/saved/search). Returning FROM THE READER
+// article, else ★ Saved's OLDEST saved article (the read-later queue is consumed
+// front-to-back), else the newest match ([ALL]/search). Returning FROM THE READER
 // centers that article in the viewport and highlights its row (.srr-row-current)
 // so you land back on what you were reading; a resume/oldest anchor (filter
 // switch, date scrub, never-opened tag) is top-aligned instead — the
@@ -534,12 +535,13 @@ export async function render(center = false, onInteractive?: () => void): Promis
    const anchoredMid = anchor !== -1 && seed === anchor
 
    // When the filter resolves to a SPECIFIC article — the anchoredMid seed, i.e.
-   // a fresh feed/tag's oldest-unread position — make it the current selection so
-   // the list highlight tracks the article the reader would open under that
-   // filter. Returning from the reader already holds it as pos (guard no-ops). The
-   // newest-default anchor (-1: [ALL]/saved/search, or a caught-up feed/tag) is
-   // deliberately left unselected, so the first arrow still establishes the cursor
-   // on the row in view (moveSelection) and a fresh [ALL] boot shows no selection.
+   // a fresh feed/tag's oldest-unread position or ★ Saved's oldest saved — make
+   // it the current selection so the list highlight tracks the article the reader
+   // would open under that filter. Returning from the reader already holds it as
+   // pos (guard no-ops). The newest-default anchor (-1: [ALL]/search, or a
+   // caught-up feed/tag) is deliberately left unselected, so the first arrow
+   // still establishes the cursor on the row in view (moveSelection) and a fresh
+   // [ALL] boot shows no selection.
    // getFeedId is resident — feedLeft just walked the seed's idx pack — no fetch.
    if (anchoredMid && seed !== nav.currentChron()) {
       nav.select(seed, await data.getFeedId(seed))
