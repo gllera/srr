@@ -19,6 +19,29 @@ func TestSanitizeAllowsAudio(t *testing.T) {
 	}
 }
 
+func TestSanitizeURLSchemes(t *testing.T) {
+	m := New()
+	item := &RawItem{Content: `<a href="tel:+15551234">c</a><a href="geo:37.78,-122.39">m</a>` +
+		`<a href="magnet:?xt=urn:btih:abc">t</a><a href="mailto:a@b.com">e</a>` +
+		`<a href="https://example.com/x">h</a><a href="ftp://host/f">f</a>` +
+		`<a href="javascript:alert(1)">j</a>`}
+	if err := m.Process(context.Background(), "#sanitize", item); err != nil {
+		t.Fatalf("sanitize: %v", err)
+	}
+	// Kept in lockstep with fmt.ts ANCHOR_ABS_OK: allowlisted schemes survive.
+	for _, want := range []string{`href="tel:+15551234"`, `href="geo:37.78,-122.39"`, `href="magnet:?xt=urn:btih:abc"`, `href="mailto:a@b.com"`, `href="https://example.com/x"`} {
+		if !strings.Contains(item.Content, want) {
+			t.Errorf("allowlisted scheme dropped: missing %q in %q", want, item.Content)
+		}
+	}
+	// Schemes outside the allowlist lose their href.
+	for _, bad := range []string{"ftp://host/f", "javascript:alert"} {
+		if strings.Contains(item.Content, bad) {
+			t.Errorf("non-allowlisted scheme survived: %q in %q", bad, item.Content)
+		}
+	}
+}
+
 func TestSanitizeStripsAudioBadAttrsAndSource(t *testing.T) {
 	m := New()
 	item := &RawItem{Content: `<audio src="https://cdn.example/a.mp3" onplay="x()" preload="evil">` +
