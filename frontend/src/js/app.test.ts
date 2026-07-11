@@ -179,6 +179,7 @@ vi.mock("./fmt", () => ({
       return t.content
    },
    formatDate: () => "01/01/2020 00:00",
+   readerDateline: () => ({ text: "1h ago", title: "01/01/2020 00:00" }),
    srcColorIndex: () => 0,
    timeAgo: () => "1h",
    timeAgoProse: (unix: number) => (unix === 0 ? "just now" : "4 minutes ago"),
@@ -202,8 +203,7 @@ const SKELETON = `
       <div class="srr-searchbar"><input class="srr-search-input" /><button class="srr-search-clear"></button>
          <div class="srr-search-note"></div></div>
       <article class="srr-reader" hidden>
-         <div class="srr-kicker"><span class="srr-source"></span><span class="srr-desk"></span><time class="srr-date"></time><a class="srr-kicker-link"></a></div>
-         <a class="srr-title-link"><h1 class="srr-title" tabindex="-1"></h1></a>
+         <a class="srr-title-row"><div class="srr-kicker"><span class="srr-source"></span><span class="srr-desk"></span><time class="srr-date"></time></div><h1 class="srr-title" tabindex="-1"></h1></a>
          <div class="srr-content"></div></article>
       <div class="srr-list" hidden></div>
       <nav class="srr-toolbar">
@@ -477,8 +477,9 @@ describe("reader titleless feeds (Telegram-style: title duplicates the body)", (
       await flush()
       const reader = document.querySelector(".srr-reader") as HTMLElement
       expect(reader.classList.contains("srr-reader-titleless")).toBe(true)
-      // The masthead permalink stands in for the hidden title's link.
-      expect((document.querySelector(".srr-kicker-link") as HTMLAnchorElement).getAttribute("href")).toBe(
+      // The whole masthead row is the permalink; on a titleless feed the visible
+      // source · date row stands in for the hidden title.
+      expect((document.querySelector(".srr-title-row") as HTMLAnchorElement).getAttribute("href")).toBe(
          "http://example.com/p/7",
       )
    })
@@ -493,9 +494,9 @@ describe("reader titleless feeds (Telegram-style: title duplicates the body)", (
       await flush()
       const reader = document.querySelector(".srr-reader") as HTMLElement
       expect(reader.classList.contains("srr-reader-titleless")).toBe(false)
-      // The permalink is available regardless of titleless (CSS reveals it when
-      // the link has an href; app.ts sets the href on every linked article).
-      expect((document.querySelector(".srr-kicker-link") as HTMLAnchorElement).getAttribute("href")).toBe(
+      // The masthead row is the permalink regardless of titleless; app.ts sets
+      // its href on every linked article.
+      expect((document.querySelector(".srr-title-row") as HTMLAnchorElement).getAttribute("href")).toBe(
          "http://example.com/p/1",
       )
    })
@@ -1544,7 +1545,7 @@ describe("reader keymap — the f key (open in a new tab)", () => {
       )
       hashTo("#2") // into the reader, article carries a link
       await flush()
-      const link = document.querySelector(".srr-title-link") as HTMLAnchorElement
+      const link = document.querySelector(".srr-title-row") as HTMLAnchorElement
       let modClick = false
       link.addEventListener("click", (e) => {
          const m = e as MouseEvent
@@ -1558,7 +1559,7 @@ describe("reader keymap — the f key (open in a new tab)", () => {
       nav.fromHash.mockResolvedValue(showFeed({ article: { f: 1, a: 0, p: 0, t: "T", l: "", c: "<p>x</p>" } }))
       hashTo("#3")
       await flush()
-      const link2 = document.querySelector(".srr-title-link") as HTMLAnchorElement
+      const link2 = document.querySelector(".srr-title-row") as HTMLAnchorElement
       expect(link2.getAttribute("href")).toBeNull()
       let fired = false
       link2.addEventListener("click", () => (fired = true))
