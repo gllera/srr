@@ -88,7 +88,11 @@ video {
 }
 /* A tinted source spine beside the reader's kicker + title — a masthead accent
    carrying the feed's color into the reader (NOT a full-height bar down the prose).
-   data-src is stamped on .srr-reader (app.ts), so key off that, not .srr-container. */
+   data-src is stamped on .srr-reader (app.ts), so key off that, not .srr-container.
+   The outdent (margin == −padding, so the text stays on the content column) must
+   never exceed the page's side padding: a spine that crosses the viewport edge
+   gives phones a small whole-page pan (the ≤500px block re-pairs it with the
+   narrower mobile padding). */
 .srr-reader[data-src] .srr-title-row {
    border-left: 3px solid var(--src);
    padding-left: 0.85rem;
@@ -2033,6 +2037,16 @@ body:not(.srr-view-list) .srr-open-reader {
 @media (max-width: 500px) {
    html {
       padding: max(1.25rem, env(safe-area-inset-top)) 0.75rem 0.5rem;
+   }
+   /* The reader's source spine outdents by its own padding (rule near the top of
+      this file); the desktop 0.85rem outdent overruns the 0.75rem mobile page
+      padding by 1.6px, poking past the viewport edge — which is enough to give
+      phones a small whole-page horizontal pan (rubber-banding amplifies it).
+      Re-pair the outdent with the mobile padding: spine flush with the screen
+      edge, title text still on the content column. */
+   .srr-reader[data-src] .srr-title-row {
+      padding-left: 0.75rem;
+      margin-left: -0.75rem;
    }
 }
 

@@ -3,7 +3,9 @@
    <head>
       <title>SRR · Design Harness</title>
       <meta charset="utf-8" />
-      <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover" />
+      <!-- minimum-scale=1: same guard as index.html (the fixed toolbar floats above
+           the screen bottom when a phone rests below scale 1). -->
+      <meta name="viewport" content="width=device-width,initial-scale=1.0,minimum-scale=1.0,viewport-fit=cover" />
       <!-- Mirrors index.html's referrer policy so the harness renders media
            exactly like the shipped reader (see index.html for the rationale). -->
       <meta name="referrer" content="no-referrer" />
