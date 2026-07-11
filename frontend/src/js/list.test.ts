@@ -843,10 +843,10 @@ describe("list", () => {
       expect(nav.select).not.toHaveBeenCalled() // no redundant cursor move
    })
 
-   it("leaves the newest-default view ([ALL]/saved/search) unselected so the first arrow establishes the cursor", async () => {
-      // listAnchor returns -1 (newest) for [ALL]/saved/search; there's no specific
-      // resolved article, so the list stays cursor-less — a fresh [ALL] boot shows
-      // nothing selected, and the first arrow drops the cursor on the visible row.
+   it("leaves the newest-default view ([ALL]/search) unselected so the first arrow establishes the cursor", async () => {
+      // listAnchor returns -1 (newest) for a caught-up [ALL] and search; there's no
+      // specific resolved article, so the list stays cursor-less — a fresh [ALL] boot
+      // shows nothing selected, and the first arrow drops the cursor on the visible row.
       const current = () =>
          $rows()
             .filter((a) => a.classList.contains("srr-row-current"))
