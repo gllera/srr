@@ -524,19 +524,13 @@ function openFeedInfo(ch: IFeed): void {
    void fillFeedUnread(ch)
 }
 
-// Fill the feed's live (idx-derived, async) unread count after the card shows;
-// token-guarded so a close / re-open orphans a stale pass.
-async function fillFeedUnread(ch: IFeed): Promise<void> {
-   const my = {}
-   infoFillToken = my
-   try {
-      const counts = await nav.unreadCounts([ch])
-      if (my !== infoFillToken) return
-      const el = infoBodyEl.querySelector(".srr-info-unread")
-      if (el) el.textContent = String(counts.get(ch.id) ?? 0)
-   } catch {
-      // Best-effort: the card stands on its stored fields; the count stays "…".
-   }
+// Fill the feed's live (idx-derived, async) unread count after the card shows.
+// A single feed's card is the store-wide fill scoped to one feed:
+// tagUnreadFromCounts([ch], counts) reduces to counts.get(ch.id) ?? 0 (clamped
+// ≥ 0), so this is a strict special case of fillStoreUnread — share its
+// token-guarded body rather than duplicate it.
+function fillFeedUnread(ch: IFeed): Promise<void> {
+   return fillStoreUnread([ch])
 }
 
 // The [ALL] row's card: the store-wide rollup none of the per-feed cards can

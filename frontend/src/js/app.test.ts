@@ -819,10 +819,11 @@ describe("filter picker — the now-viewing readout & the reader's filter button
       expect(nav.probeCurrent).not.toHaveBeenCalled() // no reader on screen
    })
 
-   it("onToggleShowRead over the reader flips it, defers the hidden list, and re-probes the reader", async () => {
+   it("onToggleShowRead over the reader (a real article) flips it, defers the hidden list, and re-probes the reader", async () => {
       await boot()
       hashTo("#2")
       await flush()
+      nav.currentChron.mockReturnValue(2) // a real article on screen (not a placeholder)
       nav.isUnreadOnly.mockReturnValue(true) // unread-only → toggle turns it off
       nav.setUnreadOnly.mockClear()
       list.rerender.mockClear()
@@ -834,6 +835,24 @@ describe("filter picker — the now-viewing readout & the reader's filter button
       expect(list.invalidate).toHaveBeenCalledTimes(1) // hidden list: deferred rebuild
       expect(list.rerender).not.toHaveBeenCalled() // never rebuild a display:none list
       expect(nav.probeCurrent).toHaveBeenCalledTimes(1) // reader chrome re-derives
+   })
+
+   it("onToggleShowRead over a reader PLACEHOLDER (currentChron < 0) re-runs the switch, not a no-op reprobe", async () => {
+      await boot()
+      hashTo("#2")
+      await flush()
+      nav.currentChron.mockReturnValue(-1) // reader shows a "Not started"/"caught up" placeholder
+      nav.getCurrentFilterKey.mockReturnValue("7")
+      nav.isUnreadOnly.mockReturnValue(true)
+      nav.setUnreadOnly.mockClear()
+      nav.switchFilter.mockClear()
+      nav.probeCurrent.mockClear()
+      pickerHooks()!.onToggleShowRead()
+      await flush()
+      expect(nav.setUnreadOnly).toHaveBeenCalledWith(false)
+      // probeCurrent no-ops for pos < 0, so the surface must re-resolve via switchFilter
+      expect(nav.switchFilter).toHaveBeenCalledWith("7")
+      expect(nav.probeCurrent).not.toHaveBeenCalled()
    })
 })
 
