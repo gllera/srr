@@ -413,15 +413,15 @@ video {
       toolbar — menus included. */
    z-index: var(--z-toolbar);
    /* The wire console grid. The DOM interleaves the list + reader controls
-      (back · open-article · readout · prev · next · save · filter · settings)
+      (back · open-article · readout · prev · next · save · filter)
       so each surface's visible controls — the other surface's are display:none
       and take no cell — auto-place left→right: reader = back · prev · next ·
       save · filter (five controls fill the five equal minmax(0,1fr) tracks, so
       the accent "next" pill lands dead-center in the thumb zone and the filter
-      opener hugs the right edge — the gear is list-only now), list = open-article · readout ·
-      settings (the LIST template below lets the now-viewing readout take the
-      bar's free space (1fr) with the settings gear shrunk to its tap target on
-      the right — a long feed/tag name ("The Go Programming Language Blog")
+      opener hugs the right edge), list = open-article · readout · filter (the
+      LIST template below lets the now-viewing readout take the bar's free
+      space (1fr) with the filter opener shrunk to its tap target on the
+      right — a long feed/tag name ("The Go Programming Language Blog")
       stays legible). Either way the flexible track is a free-space fraction,
       never its content, so it ellipsizes within its column and never shifts the
       icons. */
@@ -437,7 +437,7 @@ video {
    will-change: transform;
 }
 /* List toolbar: the open-article button hugs the left, the now-viewing readout
-   earns the free space (1fr) in the middle, and the settings gear sits at the
+   earns the free space (1fr) in the middle, and the filter opener sits at the
    right — both icons shrink to their 44px tap target (auto). */
 body.srr-view-list .srr-toolbar {
    grid-template-columns: auto 1fr auto;
@@ -452,7 +452,6 @@ body.srr-view-list .srr-toolbar {
    its own reset (see its rule above), so it's excluded here. */
 .srr-toolbar .srr-back,
 .srr-toolbar .srr-open-reader,
-.srr-toolbar .srr-settings,
 .srr-toolbar .srr-prev,
 .srr-toolbar .srr-next,
 .srr-toolbar .srr-save,
@@ -484,8 +483,8 @@ body.srr-view-list .srr-toolbar {
 
 /* Edge slots hug the screen edges (the rest of each control centers in its slot):
    the now-viewing readout (list center slot) fills its slot with its content
-   centered, the settings gear (list) and filter opener (reader) sit flush right,
-   back (reader slot 1) flush left. */
+   centered, the filter opener (both bars) sits flush right, back (reader
+   slot 1) flush left. */
 .srr-toolbar > .srr-feed {
    justify-self: stretch;
    min-width: 0;
@@ -496,53 +495,17 @@ body.srr-view-list .srr-toolbar {
 .srr-toolbar > .srr-open-reader {
    justify-self: start;
 }
-/* Settings gear sits at the right edge of the LIST bar (it's hidden in the
-   reader — see the view rules below). */
-.srr-toolbar > .srr-settings {
-   justify-self: end;
-}
-/* Reader bar: five controls fill the five tracks by auto-placement (back ·
-   prev · next · save · filter); the filter opener sits flush right like the
-   list's gear. Inert on the list, where every reader control is display:none. */
+/* The filter opener sits at the right edge of BOTH bars — the list's third
+   (auto) track and the reader's fifth of five auto-placed tracks (back · prev ·
+   next · save · filter). */
 .srr-toolbar > .srr-filter {
    justify-self: end;
-}
-
-/* Reader breadcrumb — the active-filter token riding the back button (#tag /
-   feed name / ★ Saved), in the same wire voice as the list's now-viewing
-   readout: it names the filtered lane prev/next walk AND the list this button
-   returns to. app.ts fills it (refreshFeedLabel); empty (hidden) on the
-   unfiltered wire — silence means [ALL]. Single-feed filters tint it with the
-   feed's source color (data-src, same ramp as everywhere); a long name
-   ellipsizes inside the button's grid slot (max-width caps the button at its
-   minmax(0,1fr) track so it never shoves the centered prev/next pair). */
-.srr-toolbar .srr-back {
-   gap: 0.4rem;
-   max-width: 100%;
-}
-.srr-back-label {
-   min-width: 0;
-   font-family: var(--font-mono);
-   font-size: 0.62rem;
-   font-weight: 600;
-   letter-spacing: 0.05em;
-   text-transform: uppercase;
-   overflow: hidden;
-   text-overflow: ellipsis;
-   white-space: nowrap;
-}
-.srr-back-label:empty {
-   display: none;
-}
-.srr-back-label[data-src] {
-   color: var(--src);
 }
 
 /* Icon toolbar buttons — square 44px tap targets with a subtle hover fill.
    flex-shrink:0 keeps every glyph its size next to the flexible readout button. */
 .srr-toolbar .srr-back,
 .srr-toolbar .srr-open-reader,
-.srr-toolbar .srr-settings,
 .srr-toolbar .srr-prev,
 .srr-toolbar .srr-next,
 .srr-toolbar .srr-save,
@@ -564,6 +527,48 @@ body.srr-view-list .srr-toolbar {
    }
 }
 
+/* Reader breadcrumb — the active-filter token riding the back button (#tag /
+   feed name / ★ Saved): it names the filtered lane prev/next walk AND the list
+   this button returns to. It speaks the filter picker rows' reading voice —
+   sans at --text-sm, natural case, both inherited from the toolbar button
+   reset — NOT the readout's mono/uppercase wire voice, so the token looks the
+   same here as on the picker row that set it. app.ts fills it
+   (refreshFeedLabel); empty (hidden) on the unfiltered wire — silence means
+   [ALL]. Single-feed filters tint it with the feed's source color (data-src,
+   same ramp as everywhere). A long name still ellipsizes, but the button is
+   allowed to grow past its own minmax(0,1fr) track into the empty shoulder
+   left of the centered prev button — overflow never resizes grid tracks, so
+   prev/next/save/filter stay put. The cap is prev's tap edge: prev (2.75rem
+   wide) centers in track 2, putting that edge at calc(150% - 1.075rem) of a
+   track (one 0.3rem gap over), so stopping at calc(150% - 1.4rem) leaves a
+   gap-sized clearance at any bar width. This rule must sit AFTER the shared
+   icon-button rule above — the justify-content / padding-left specializations
+   override it at equal specificity, cascade-order only. */
+.srr-toolbar .srr-back {
+   gap: 0.4rem;
+   width: max-content;
+   max-width: calc(150% - 1.4rem);
+   /* Pin the glyph so it doesn't hop when the label empties: left-anchor the
+      content and pad-left to exactly where the empty state (min-width square,
+      centered icon) puts it — (2.75rem min-width − 1.05rem icon) / 2. Labeled
+      or not, the icon sits on the same pixel (which is also where the list's
+      paired open-article glyph sits, one surface over). */
+   justify-content: flex-start;
+   padding-left: calc((2.75rem - 1.05rem) / 2);
+}
+.srr-back-label {
+   min-width: 0;
+   overflow: hidden;
+   text-overflow: ellipsis;
+   white-space: nowrap;
+}
+.srr-back-label:empty {
+   display: none;
+}
+.srr-back-label[data-src] {
+   color: var(--src);
+}
+
 /* Save (★) toggle — outline star, filled + accent when the article is saved */
 .srr-save-icon {
    display: block;
@@ -575,20 +580,7 @@ body.srr-view-list .srr-toolbar {
    stroke-linejoin: round;
 }
 
-/* Settings (⚙) — the list's settings-menu trigger: an outline gear matching the
-   icon console (inherits the button's currentColor, so hover/active track the rest). */
-.srr-settings-icon {
-   display: block;
-   width: 1.2rem;
-   height: 1.2rem;
-   fill: none;
-   stroke: currentColor;
-   stroke-width: 1.6;
-   stroke-linecap: round;
-   stroke-linejoin: round;
-}
-
-/* Filter (funnel) — the reader's filter-picker opener at the bar's right edge:
+/* Filter (funnel) — the filter-picker opener at both bars' right edge:
    an outline funnel in the same icon-console voice. */
 .srr-filter-icon {
    display: block;
@@ -1003,24 +995,23 @@ body.srr-view-list.srr-searching .srr-searchbar {
    }
 }
 
-/* View mode: on the list, hide the reader-only controls (prev/next/save/filter);
-   the back button is meaningless on the list it returns to. */
+/* View mode: on the list, hide the reader-only controls (prev/next/save);
+   the back button is meaningless on the list it returns to. The filter opener
+   is NOT here — it shows on both surfaces. */
 .srr-view-list .srr-prev,
 .srr-view-list .srr-next,
 .srr-view-list .srr-save,
-.srr-view-list .srr-filter,
 .srr-view-list .srr-back {
    display: none;
 }
 
-/* The now-viewing readout, the open-article button, and the settings gear are
-   list-only: the reader is already the article surface (no filter readout), and
-   its chrome stays down to reading controls — settings live one tap away behind
-   the back button. (The pinned search bar is already display:none without
-   .srr-searching.) */
+/* The now-viewing readout (the settings-menu opener) and the open-article
+   button are list-only: the reader is already the article surface (no filter
+   readout), and its chrome stays down to reading controls — settings live one
+   tap away behind the back button. (The pinned search bar is already
+   display:none without .srr-searching.) */
 body:not(.srr-view-list) .srr-feed,
-body:not(.srr-view-list) .srr-open-reader,
-body:not(.srr-view-list) .srr-settings {
+body:not(.srr-view-list) .srr-open-reader {
    display: none;
 }
 
@@ -1933,9 +1924,9 @@ body:not(.srr-view-list) .srr-settings {
 
 /* Anchored context menu (dropdown.ts showContextMenu) — a small card of action
    rows floated just above the bottom toolbar: the frontier menu (right-click /
-   long-press on the next pill / lane readout) and the list's settings menu (a
-   tap on the gear). Positioned by JS (bottom-pinned to the anchor's top edge,
-   viewport-clamped). */
+   long-press on the next pill) and the list's settings menu (a tap on the
+   now-viewing readout). Positioned by JS (bottom-pinned to the anchor's top
+   edge, viewport-clamped). */
 .srr-ctxmenu {
    position: fixed;
    z-index: var(--z-popup);

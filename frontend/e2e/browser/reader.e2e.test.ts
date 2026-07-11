@@ -503,13 +503,13 @@ describe("browser: real SPA over real packs", () => {
          })
          expect(await page.$eval(".srr-save", (e) => e.getAttribute("aria-pressed"))).toBe("true")
 
-         // Back to the list → tap the now-viewing readout → pick "★ Saved" in the
+         // Back to the list → tap the filter button → pick "★ Saved" in the
          // picker overlay. Choosing a filter closes the overlay and shows the LIST
          // under that filter: exactly the saved row, the saved-row marker, and the
          // shareable #!~saved hash.
          await page.click(".srr-back")
          await waitList(page)
-         await page.click(".srr-feed")
+         await page.click(".srr-filter")
          await page.waitForSelector('.srr-picker-filter a[data-value="~saved"]', { timeout: 20000 })
          await page.click('.srr-picker-filter a[data-value="~saved"]')
          await waitList(page)
@@ -1226,9 +1226,9 @@ describe("browser: real SPA over real packs", () => {
          // (render's nav.select sets pos without recordSeen), so it stays the anchor
          // through the unread toggle.
          await waitCurrent(page, "bulk title 0")
-         // Open the filter picker (tap the lane readout) — "Show read" lives in its
+         // Open the filter picker (tap the filter button) — "Show read" lives in its
          // header now; the list stays in the DOM beneath the overlay.
-         await page.click(".srr-feed")
+         await page.click(".srr-filter")
          await page.waitForSelector(".srr-picker-showread", { visible: true })
          expect(await page.$eval(".srr-list", (e) => (e as HTMLElement).hidden)).toBe(false)
          // Flip "Show read" — the surface beneath rerenders in place (the overlay
