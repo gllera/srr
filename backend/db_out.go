@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -68,12 +70,7 @@ func (o *DB) outFeedsSig() string {
 	}
 	var b strings.Builder
 	_ = json.NewEncoder(&b).Encode(o.core.Out)
-	ids := make([]int, 0, len(o.core.Feeds))
-	for id := range o.core.Feeds {
-		ids = append(ids, id)
-	}
-	sort.Ints(ids)
-	for _, id := range ids {
+	for _, id := range slices.Sorted(maps.Keys(o.core.Feeds)) {
 		fmt.Fprintf(&b, "%d=%s@%d;", id, o.core.Feeds[id].Tag, o.core.Feeds[id].AddIdx)
 	}
 	return b.String()
@@ -122,10 +119,7 @@ func (o *DB) syncOneOutFeed(ctx context.Context, of OutFeed, cdn string) error {
 	// filling the window even if only a fraction of articles match the filter.
 	const scanMultiple = 10
 	total := o.core.TotalArticles
-	k := limit * scanMultiple
-	if k > total {
-		k = total
-	}
+	k := min(limit*scanMultiple, total)
 	from := total - k
 
 	// Collect all matches in the tail (oldest→newest via walkArticles), then
@@ -172,9 +166,7 @@ func (o *DB) syncOneOutFeed(ctx context.Context, of OutFeed, cdn string) error {
 		matches = matches[len(matches)-limit:]
 	}
 	// Reverse to newest-first.
-	for i, j := 0, len(matches)-1; i < j; i, j = i+1, j-1 {
-		matches[i], matches[j] = matches[j], matches[i]
-	}
+	slices.Reverse(matches)
 
 	// Rewrite relative asset refs → absolute CDN URLs in each item's content.
 	for i := range matches {
@@ -267,11 +259,7 @@ func marshalRSS(buf *bytes.Buffer, of OutFeed, items []ArticleData, cdn string) 
 		Desc:     outTitle(of),
 	}
 	for _, ad := range items {
-		pub := ad.Published
-		if pub == 0 {
-			pub = ad.FetchedAt
-		}
-		ts := time.Unix(pub, 0).UTC().Format(time.RFC1123Z)
+		ts := time.Unix(ad.displayTime(), 0).UTC().Format(time.RFC1123Z)
 
 		guid := rssGUID{Value: ad.Link, IsPermaLink: "true"}
 		if ad.Link == "" {
@@ -332,11 +320,7 @@ func marshalJSONFeed(buf *bytes.Buffer, of OutFeed, items []ArticleData, cdn str
 		Items:       []jsonFeedItem{},
 	}
 	for _, ad := range items {
-		pub := ad.Published
-		if pub == 0 {
-			pub = ad.FetchedAt
-		}
-		ts := time.Unix(pub, 0).UTC().Format(time.RFC3339)
+		ts := time.Unix(ad.displayTime(), 0).UTC().Format(time.RFC3339)
 
 		id := ad.Link
 		if id == "" {
@@ -359,23 +343,12 @@ func marshalJSONFeed(buf *bytes.Buffer, of OutFeed, items []ArticleData, cdn str
 }
 
 // stableGUID derives a stable string identifier for an article that has no
-// Link, combining FeedID and Published via FNV-32a.
+// Link: FNV-32a over "feedID:published:title".
 func stableGUID(ad ArticleData) string {
-	// FNV-32a over "feedID:published:title" for stability.
-	const offset32, prime32 = 2166136261, 16777619
-	h := uint32(offset32)
-	for _, b := range []byte(fmt.Sprintf("%d:%d:%s", ad.FeedID, ad.Published, ad.Title)) {
-		h ^= uint32(b)
-		h *= prime32
-	}
-	return fmt.Sprintf("urn:srr:%08x", h)
+	h := fnv.New32a()
+	fmt.Fprintf(h, "%d:%d:%s", ad.FeedID, ad.Published, ad.Title)
+	return fmt.Sprintf("urn:srr:%08x", h.Sum32())
 }
-
-// assetKeyPrefix is the reserved store prefix of self-hosted asset keys
-// (assets/<2-hex>/<16-hex><ext>). Shared by rewriteAssetURLs (CDN-prefixing)
-// and collectAssetRefs (expiration harvesting) so the two predicates can't
-// drift.
-const assetKeyPrefix = "assets/"
 
 // outAssetAttrs mirrors mod.assetAttrs: the element/attribute pairs whose
 // values may contain relative asset references we need to CDN-prefix.
@@ -434,7 +407,7 @@ func rewriteAssetURLs(content, cdn string) (string, error) {
 		return content, nil
 	}
 	// Fast path: no relative asset refs. We check for common relative prefixes.
-	if !strings.Contains(content, assetKeyPrefix) {
+	if !strings.Contains(content, assetPrefix) {
 		return content, nil
 	}
 	nodes, err := parseBodyFragment(content)
@@ -447,7 +420,7 @@ func rewriteAssetURLs(content, cdn string) (string, error) {
 		// Only CDN-prefix self-hosted asset keys (flat
 		// assets/<hex>/<hex>.ext) — never arbitrary relative URLs, or a
 		// real relative <a href> would be repointed to the CDN host.
-		if strings.HasPrefix(a.Val, assetKeyPrefix) {
+		if strings.HasPrefix(a.Val, assetPrefix) {
 			a.Val = joinURL(cdn, a.Val)
 			changed = true
 		}

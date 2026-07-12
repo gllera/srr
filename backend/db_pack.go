@@ -23,6 +23,16 @@ type ArticleData struct {
 	Content   string `json:"c"`
 }
 
+// displayTime is the display-timestamp rule shared by meta cards
+// (MetaEntry.When) and syndication outputs: Published, falling back to
+// FetchedAt for dateless articles.
+func (ad ArticleData) displayTime() int64 {
+	if ad.Published != 0 {
+		return ad.Published
+	}
+	return ad.FetchedAt
+}
+
 // Item is the in-memory representation of an article during fetch.
 // PutArticles converts these into ArticleData before persistence.
 type Item struct {

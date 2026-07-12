@@ -10,10 +10,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"mime"
 	"net/http"
 	"path"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -316,12 +317,7 @@ func writeSitemap(ctx context.Context, backend store.Backend, keys []string) err
 }
 
 func sortedKeys(m map[string][]byte) []string {
-	ks := make([]string, 0, len(m))
-	for k := range m {
-		ks = append(ks, k)
-	}
-	sort.Strings(ks)
-	return ks
+	return slices.Sorted(maps.Keys(m))
 }
 
 func toSet(keys []string) map[string]bool {
@@ -338,12 +334,7 @@ func union(a, b []string) []string {
 	for _, k := range b {
 		s[k] = true
 	}
-	out := make([]string, 0, len(s))
-	for k := range s {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
+	return slices.Sorted(maps.Keys(s))
 }
 
 // uploadOrder keeps the (already sorted) keys but moves index.html to the end.
