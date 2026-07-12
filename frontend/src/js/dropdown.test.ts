@@ -559,6 +559,21 @@ describe("anchored context menu (showContextMenu)", () => {
       expect(action).not.toHaveBeenCalled()
    })
 
+   it("ignores its OWN overflow scroll but dismisses on a scroll of the surface under it", () => {
+      dropdown.showContextMenu(anchor(), [{ label: "A", action: vi.fn() }])
+      const menu = $menu()!
+      // The menu is height-capped + overflow-y:auto; scrolling it to reach clipped
+      // rows fires a non-bubbling scroll AT the menu that the capture-phase window
+      // dismiss listener still catches (capture fires for a descendant target). It
+      // must be ignored, or the max-height cap self-closes the instant you scroll.
+      menu.dispatchEvent(new Event("scroll", { bubbles: false }))
+      expect($menu()).not.toBeNull()
+      // A scroll of the list/article surface underneath (target: the document)
+      // still displaces the menu's anchor — dismiss.
+      document.dispatchEvent(new Event("scroll", { bubbles: false }))
+      expect($menu()).toBeNull()
+   })
+
    it("shares the modals' single-closer slot: opening a modal closes the menu and vice versa", () => {
       dropdown.showContextMenu(anchor(), [{ label: "A", action: vi.fn() }])
       dropdown.showImgProxyDialog()
@@ -615,5 +630,57 @@ describe("anchored context menu (showContextMenu)", () => {
       // The arrows only ever step the action rows.
       key($menu()!, "ArrowUp")
       expect(document.activeElement).toBe($items()[0])
+   })
+
+   // jsdom reports zero rects and zero offsets, so the above/below pin choice runs
+   // on degenerate geometry and was never asserted — yet it was the subject of two
+   // consecutive review rounds (a near-top anchor must flip BELOW the anchor, not
+   // bottom-pin and collapse to a ~0-height box). Drive the math with controlled
+   // geometry; restore the stubbed descriptors in the finally.
+   const rect = (top: number, bottom: number) =>
+      ({ top, bottom, height: bottom - top, left: 0, right: 0, width: 0, x: 0, y: top, toJSON: () => ({}) }) as DOMRect
+   const withGeometry = (menuHeight: number, innerHeight: number, fn: () => void) => {
+      const proto = HTMLElement.prototype
+      const offH = Object.getOwnPropertyDescriptor(proto, "offsetHeight")!
+      const offW = Object.getOwnPropertyDescriptor(proto, "offsetWidth")!
+      const inH = Object.getOwnPropertyDescriptor(window, "innerHeight")!
+      Object.defineProperty(proto, "offsetHeight", { configurable: true, get: () => menuHeight })
+      Object.defineProperty(proto, "offsetWidth", { configurable: true, get: () => 200 })
+      Object.defineProperty(window, "innerHeight", { configurable: true, value: innerHeight })
+      try {
+         fn()
+      } finally {
+         Object.defineProperty(proto, "offsetHeight", offH)
+         Object.defineProperty(proto, "offsetWidth", offW)
+         Object.defineProperty(window, "innerHeight", inH)
+      }
+   }
+
+   it("pins the menu above a mid-viewport anchor, capping its height to the room above", () => {
+      const a = anchor()
+      a.getBoundingClientRect = () => rect(400, 424)
+      withGeometry(100, 800, () => {
+         dropdown.showContextMenu(a, [{ label: "A", action: vi.fn() }])
+         const m = $menu()!
+         // above = 400 − 6 − 8 = 386 ≥ menu height 100 → bottom-pinned above the anchor.
+         expect(m.style.bottom).toBe("406px") // innerHeight 800 − r.top 400 + gap 6
+         expect(m.style.maxHeight).toBe("386px")
+         expect(m.style.top).toBe("")
+      })
+   })
+
+   it("flips a near-top anchor's menu BELOW (top-pin) instead of collapsing it to ~0", () => {
+      const a = anchor()
+      a.getBoundingClientRect = () => rect(20, 44) // hugging the top edge
+      withGeometry(300, 800, () => {
+         dropdown.showContextMenu(a, [{ label: "A", action: vi.fn() }])
+         const m = $menu()!
+         // above = 20 − 6 − 8 = 6 < menu height 300, and below = 800 − 44 − 6 − 8 = 742 > above,
+         // so the menu opens DOWNWARD and scrolls in the 742px below — NOT a bottom-pin with a
+         // 6px cap (the round-1 collapse this guards against).
+         expect(m.style.top).toBe("50px") // r.bottom 44 + gap 6
+         expect(m.style.maxHeight).toBe("742px")
+         expect(m.style.bottom).toBe("")
+      })
    })
 })
