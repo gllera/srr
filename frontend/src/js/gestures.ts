@@ -1,5 +1,3 @@
-import { closeAllDropdowns } from "./dropdown"
-
 export interface GestureDeps {
    toolbar: HTMLElement
    // A committed one-finger swipe steps the reader: toward a live neighbor it
@@ -167,9 +165,7 @@ export function setupGestures(deps: GestureDeps): Gestures {
             return
          }
          clearBottomReveal()
-         const hide = y > 50 && goingDown
-         setHidden(hide)
-         if (hide) closeAllDropdowns()
+         setHidden(y > 50 && goingDown)
       },
       { passive: true },
    )

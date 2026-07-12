@@ -110,7 +110,7 @@ function isPinnableName(n: unknown): n is string {
 //     page fetch is a hit, and only same-origin URLs under our scope are pinned
 //     (defaults to the SW scope for the self-hosted layout, base===scope). Asset
 //     keys let a pinned scope render its self-hosted images offline;
-//     packCacheFirst/assetCacheFirst both consult PINNED first. Each name is
+//     pinnedCacheFirst consults PINNED first for both. Each name is
 //     fetched with cache:"no-cache" so fresh bytes are always written (the SW's
 //     own cache-first could serve a stale copy under a reused name before a gen
 //     bump — using no-cache here means the pinned entry is always fresh at pin
@@ -226,26 +226,17 @@ async function cacheFirst(req: Request, name: string, revalidate = false): Promi
    return res
 }
 
-// Pack-specific cache-first: check the eviction-exempt PINNED bucket first,
-// then fall through to the rolling PACKS bucket. A hit in PINNED means the
-// pack is part of a pinned filter scope and must survive PACKS eviction.
-async function packCacheFirst(req: Request): Promise<Response> {
+// Pack/asset cache-first: check the eviction-exempt PINNED bucket first — a
+// pinned filter scope caches its packs AND the assets/ images its articles
+// reference there (via the "pin" message) — then fall through to the rolling
+// bucket. A PINNED hit survives PACKS/ASSETS eviction and stays readable
+// offline. Packs pass revalidate (write-once names can outlive a rebuild —
+// see cacheFirst); assets are content-hashed, so a hit can never be stale.
+async function pinnedCacheFirst(req: Request, name: string, revalidate = false): Promise<Response> {
    const pinned = await caches.open(PINNED)
    const pinnedHit = await pinned.match(req)
    if (pinnedHit) return pinnedHit
-   return cacheFirst(req, PACKS, true)
-}
-
-// Asset-specific cache-first: check the eviction-exempt PINNED bucket first — a
-// pinned filter scope caches the assets/ images its articles reference there
-// (via the "pin" message) — then fall through to the rolling ASSETS bucket.
-// Mirrors packCacheFirst so a pinned image survives ASSETS eviction and stays
-// readable offline. assets are content-hashed, so a hit can never be stale.
-async function assetCacheFirst(req: Request): Promise<Response> {
-   const pinned = await caches.open(PINNED)
-   const pinnedHit = await pinned.match(req)
-   if (pinnedHit) return pinnedHit
-   return cacheFirst(req, ASSETS)
+   return cacheFirst(req, name, revalidate)
 }
 
 // Prefer the network (refreshing the cache); fall back to cache only when the
@@ -444,9 +435,9 @@ sw.addEventListener("fetch", (event) => {
    }
 
    const path = url.pathname
-   if (RE_ASSET.test(path)) event.respondWith(assetCacheFirst(req))
+   if (RE_ASSET.test(path)) event.respondWith(pinnedCacheFirst(req, ASSETS))
    else if (RE_DB.test(path)) event.respondWith(dbNetworkFirst(req, event))
-   else if (parsePackName(path)) event.respondWith(packCacheFirst(req))
+   else if (parsePackName(path)) event.respondWith(pinnedCacheFirst(req, PACKS, true))
    else if (RE_SHELL_HASHED.test(path)) event.respondWith(cacheFirst(req, SHELL))
    // everything else (sw.js, favicon, sourcemaps) → default network passthrough
 })

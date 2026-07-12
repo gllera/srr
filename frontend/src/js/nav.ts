@@ -270,13 +270,11 @@ function setRight(sorted: number[], from: number): number {
 async function ensureSearchSet(): Promise<void> {
    const term = activeQuery()
    if (searchLoadedFor === term) return // snapshot already up to date
-   // An empty query has no hits — mark it loaded without calling loadHits
-   // (parity with search.loadHits's own `if (query)` guard; tests assert it).
+   // An empty query has no hits — reset to the empty snapshot and mark it
+   // loaded without calling loadHits (parity with search.loadHits's own
+   // `if (query)` guard; tests assert it).
    if (!term) {
-      searchSorted = []
-      searchSet = new Set()
-      searchCards = new Map()
-      searchTruncatedFlag = false
+      resetSearchStream()
       searchLoadedFor = term
       return
    }
@@ -965,8 +963,7 @@ function resolveNoMatch(replace = false, notStarted = false): IShowFeed {
 }
 
 export async function fromHash(hash: string): Promise<IShowFeed> {
-   const bangIdx = hash.indexOf("!")
-   const posStr = bangIdx === -1 ? hash : hash.substring(0, bangIdx)
+   const posStr = hashPos(hash)
 
    const tokens = parseHashTokens(hash)
    if (tokens.length > 0) filter.set(tokens)
@@ -1261,6 +1258,15 @@ export function filterKey(): string {
 // the split on the read side (route/fromHash).
 export function tokensSuffix(): string {
    return filter.active ? "!" + filter.tokens.map((t) => encodeURIComponent(t).replaceAll("+", "%2B")).join("+") : ""
+}
+
+// The position part of a `#pos[!tokens]` hash — everything before the first
+// `!` (the whole hash when there is none). "" means no position (a list hash);
+// an integer routes to the reader; anything else is a foreign hash (app.ts's
+// boot guard drops those). parseHashTokens below is the suffix half.
+export function hashPos(hash: string): string {
+   const bang = hash.indexOf("!")
+   return bang === -1 ? hash : hash.substring(0, bang)
 }
 
 // Parse the `!tokens` segment of a hash into an array of decoded token strings.

@@ -1,10 +1,10 @@
 import { PACK_BASE } from "./base"
 import { IMG_PROXY_KEY } from "./keys"
+import { HTTP_RE, isValidHttpish, normalizeHttpish, URL_DENY } from "./urlish"
 
-// Mirror the backend bluemonday allowlist (mailto, http, https) for defense-in-depth.
-// data:/vbscript:/javascript:/file: in href or src are XSS or info-leak vectors
-// (data:text/html executes script; data:image/svg+xml runs <script> in SVG).
-export const URL_DENY = /^\s*(?:javascript|data|vbscript|file)\s*:/i
+// URL_DENY (urlish.ts) mirrors the backend bluemonday allowlist for
+// defense-in-depth; re-exported here because fmt.ts is the sanitizer's home.
+export { URL_DENY }
 // URL_DENY guards only URL-BEARING attributes — applying it to every attribute
 // silently strips benign text (a title/alt/download that merely starts with a
 // scheme-like word). These are the URL attributes that survive on the allowed
@@ -38,7 +38,6 @@ const ANCHOR_ABS_OK = /^(?:https?|mailto|tel|geo|magnet):/i
 // SVG/MathML by their normalized names, so we don't need a separate case-folding pass.
 const DANGEROUS_SELECTOR = "script,style,iframe,embed,object,form,link,meta,base,svg,math,template"
 
-const HTTP_RE = /^https?:\/\//i
 // A reference carrying a URL scheme (http:, mailto:, the URL_DENY set, …) is
 // absolute; everything else is a relative reference. ABS_SCHEME detects the
 // scheme so isRelative can route relative refs to the pack base below.
@@ -65,32 +64,16 @@ export function setImgProxy(value: string): void {
 }
 
 // A proxy prefix is concatenated straight before the URL-encoded image URL, so
-// the stored value must be an absolute http(s) URL. The scheme is OPTIONAL in the
-// UI: normalizeProxy supplies https:// when none is typed. isValidProxy therefore
-// accepts the empty string (disables proxying), an explicit http(s):// prefix, or
-// a schemeless host/path — and rejects only an explicit non-http(s) scheme
-// (ftp://, javascript:, data:, …) that we must not silently rewrite to https.
+// the stored value must be an absolute http(s) URL — the shared urlish rules
+// (scheme optional, https default; see urlish.ts), with the trailing "/"
+// appended because the value is a prefix imgProxy() joins the encoded URL onto.
 // setImgProxy stays a dumb setter; the UI validates + normalizes before storing.
 export function isValidProxy(v: string): boolean {
-   const s = v.trim()
-   if (s === "") return true
-   if (HTTP_RE.test(s)) return true
-   if (URL_DENY.test(s)) return false
-   return !/^[a-z][a-z0-9+.-]*:\/\//i.test(s)
+   return isValidHttpish(v)
 }
 
-// normalizeProxy canonicalises a user-entered prefix for storage: trim it, supply
-// the default https:// scheme when absent (folding a leading "//host" in too), and
-// append "/" when it ends in an alphanumeric char — a bare host or path segment
-// needs that boundary before imgProxy() appends the encoded URL, while a value
-// already ending in "=", "?", "/", … is a ready join point. Empty → empty
-// (disabled). Idempotent: normalizeProxy(normalizeProxy(x)) === normalizeProxy(x).
 export function normalizeProxy(v: string): string {
-   let s = v.trim()
-   if (s === "") return ""
-   if (!HTTP_RE.test(s)) s = "https://" + s.replace(/^\/+/, "")
-   if (/[a-z0-9]$/i.test(s)) s += "/"
-   return s
+   return normalizeHttpish(v, true)
 }
 
 export function imgProxy(url: string, prefix: string): string {

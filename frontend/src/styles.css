@@ -1596,12 +1596,15 @@ body:not(.srr-view-list) .srr-open-reader {
    }
 }
 
-/* Image-proxy + sync dialogs — true centered modals sharing one editor shape
-   (URL input + Disable/Cancel/Save row). Unlike the toast-style .srr-popup they
-   take input, so they dim the page behind a full-viewport backdrop and trap
-   focus (dropdown.ts openModal). */
+/* Modal shell shared by the image-proxy / sync / backup / info dialogs — true
+   centered modals: unlike the toast-style .srr-popup they dim the page behind a
+   full-viewport backdrop and trap focus (dropdown.ts openModal / picker.ts
+   openInfoDialog). Per-dialog differences (card width, the info card's tighter
+   head) live as small overrides in each dialog's own section below. */
 .srr-imgproxy-dialog,
-.srr-sync-dialog {
+.srr-sync-dialog,
+.srr-backup-dialog,
+.srr-info-dialog {
    display: none;
    position: fixed;
    inset: 0;
@@ -1615,8 +1618,9 @@ body:not(.srr-view-list) .srr-open-reader {
    }
 }
 .srr-imgproxy-card,
-.srr-sync-card {
-   width: min(26rem, 100%);
+.srr-sync-card,
+.srr-backup-card,
+.srr-info-card {
    max-height: calc(100dvh - 2.5rem);
    overflow-y: auto;
    background: var(--surface-raised);
@@ -1626,9 +1630,11 @@ body:not(.srr-view-list) .srr-open-reader {
    box-shadow: var(--shadow);
    padding: 1.25rem 1.4rem 1.4rem;
 }
-/* The dialog's title speaks in the wire voice (tracked mono caps). */
+/* The dialogs' titles speak in the wire voice (tracked mono caps). */
 .srr-imgproxy-title,
-.srr-sync-title {
+.srr-sync-title,
+.srr-backup-title,
+.srr-info-title {
    margin: 0 0 0.6rem;
    font-family: var(--font-mono);
    font-size: 0.82rem;
@@ -1636,6 +1642,13 @@ body:not(.srr-view-list) .srr-open-reader {
    letter-spacing: 0.14em;
    text-transform: uppercase;
    color: var(--fg);
+}
+
+/* Image-proxy + sync dialogs share one editor shape (URL input +
+   Disable/Cancel/Save row — dropdown.ts urlEditorBody). */
+.srr-imgproxy-card,
+.srr-sync-card {
+   width: min(26rem, 100%);
 }
 .srr-imgproxy-desc,
 .srr-sync-desc {
@@ -1707,39 +1720,9 @@ body:not(.srr-view-list) .srr-open-reader {
    }
 }
 
-/* Backup / Restore dialog — same modal pattern as .srr-imgproxy-dialog. */
-.srr-backup-dialog {
-   display: none;
-   position: fixed;
-   inset: 0;
-   z-index: var(--z-popup);
-   align-items: center;
-   justify-content: center;
-   padding: 1.25rem;
-   background: var(--scrim);
-   &.srr-open {
-      display: flex;
-   }
-}
+/* Backup / Restore dialog — the shared modal shell (above), a wider card. */
 .srr-backup-card {
    width: min(32rem, 100%);
-   max-height: calc(100dvh - 2.5rem);
-   overflow-y: auto;
-   background: var(--surface-raised);
-   color: var(--fg);
-   border: 1px solid var(--border);
-   border-radius: var(--radius);
-   box-shadow: var(--shadow);
-   padding: 1.25rem 1.4rem 1.4rem;
-}
-.srr-backup-title {
-   margin: 0 0 0.6rem;
-   font-family: var(--font-mono);
-   font-size: 0.82rem;
-   font-weight: 700;
-   letter-spacing: 0.14em;
-   text-transform: uppercase;
-   color: var(--fg);
 }
 .srr-backup-desc {
    margin: 0 0 1rem;
@@ -1796,32 +1779,13 @@ body:not(.srr-view-list) .srr-open-reader {
    color: var(--accent);
 }
 
-/* Feed / tag info dialog — a read-only detail card. Same centered-modal shell as
-   the image-proxy / backup dialogs (dimmed backdrop, focus-trapped in picker.ts);
-   the body is grouped definition grids built per feed / tag. */
-.srr-info-dialog {
-   display: none;
-   position: fixed;
-   inset: 0;
-   z-index: var(--z-popup);
-   align-items: center;
-   justify-content: center;
-   padding: 1.25rem;
-   background: var(--scrim);
-   &.srr-open {
-      display: flex;
-   }
-}
+/* Feed / tag info dialog — a read-only detail card on the shared modal shell
+   (above); the body is grouped definition grids built per feed / tag. The
+   .srr-info-head row owns the title↔body spacing, hence the tighter
+   padding-top and the title's dropped bottom margin. */
 .srr-info-card {
    width: min(30rem, 100%);
-   max-height: calc(100dvh - 2.5rem);
-   overflow-y: auto;
-   background: var(--surface-raised);
-   color: var(--fg);
-   border: 1px solid var(--border);
-   border-radius: var(--radius);
-   box-shadow: var(--shadow);
-   padding: 1.1rem 1.4rem 1.4rem;
+   padding-top: 1.1rem;
 }
 .srr-info-head {
    display: flex;
@@ -1830,15 +1794,8 @@ body:not(.srr-view-list) .srr-open-reader {
    gap: 0.75rem;
    margin-bottom: 0.5rem;
 }
-/* Title in the wire voice (tracked mono caps), matching the other dialogs. */
 .srr-info-title {
-   margin: 0;
-   font-family: var(--font-mono);
-   font-size: 0.82rem;
-   font-weight: 700;
-   letter-spacing: 0.14em;
-   text-transform: uppercase;
-   color: var(--fg);
+   margin-bottom: 0;
    overflow-wrap: anywhere;
 }
 .srr-info-close {

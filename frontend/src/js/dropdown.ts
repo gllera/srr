@@ -6,16 +6,6 @@ const imgProxyDialog = document.querySelector<HTMLElement>(".srr-imgproxy-dialog
 const backupDialog = document.querySelector<HTMLElement>(".srr-backup-dialog")
 const syncDialog = document.querySelector<HTMLElement>(".srr-sync-dialog")
 
-// The original toolbar dropdown menus (filter picker + ⋯ settings) were retired
-// when those moved into the config surface; that surface was itself dissolved —
-// the filter picker is now its own full-viewport overlay (picker.ts) and the
-// settings came back here as an anchored menu on the list's now-viewing
-// readout (showContextMenu).
-// closeAllDropdowns stays as a no-op so its remaining callers — gestures.ts
-// (toolbar-hide) and the image-proxy / backup modals — keep working without a
-// dropdown to close.
-export function closeAllDropdowns(): void {}
-
 function divEl(className: string): HTMLDivElement {
    const d = document.createElement("div")
    d.className = className
@@ -60,46 +50,76 @@ function btn(className: string, label: string, text: string, onClick: () => void
    return b
 }
 
-// imgProxyBody is the editable content of the image-proxy dialog: a URL-prefix
-// input plus the action row — Save commits after isValidProxy, Disable commits
-// "" to turn the proxy off (shown only when one is currently set), Cancel
-// discards. Enter commits from the input, Escape cancels — both via `close`,
-// which the caller wires to tear the dialog down. Returns a fragment dropped into
-// the dialog's stable .srr-imgproxy-body host (replaceChildren, so re-opens don't
-// stack). The proxy only affects reader images, so a commit just persists the
-// prefix for the next reader open; there's nothing on screen to re-render.
-function imgProxyBody(close: () => void): DocumentFragment {
+// The one URL-editor dialog body shared by the image-proxy and sync modals: a
+// URL input plus the action row — Save commits after `valid`, Disable commits
+// "" to turn the feature off (shown only when a value is currently set —
+// destructive-ish, sits apart far left via CSS margin; otherwise Save-of-empty
+// already covers it), Cancel discards. Enter commits from the input, Escape
+// cancels — both via `close`, which the caller wires to tear the dialog down.
+// Returns a fragment dropped into the dialog's stable body host
+// (replaceChildren, so re-opens don't stack). Class names derive from `cls`
+// (srr-<cls>-input/-actions/-clear/-cancel/-save) — tests select on them.
+interface UrlEditor {
+   cls: string // class-name infix: "imgproxy" | "sync"
+   placeholder: string
+   ariaLabel: string // the input's aria-label
+   disableLabel: string // the Disable button's aria-label
+   saveLabel: string // the Save button's aria-label
+   get: () => string
+   valid: (v: string) => boolean
+   normalize: (v: string) => string
+   set: (v: string) => void
+   onSet?: (v: string) => void // runs after a CHANGED value is stored
+}
+
+function urlEditorBody(close: () => void, ed: UrlEditor): DocumentFragment {
    const frag = document.createDocumentFragment()
-   const input = editorInput("url", "srr-imgproxy-input", "Image proxy URL prefix (empty disables)")
-   input.placeholder = "proxy.example/?url="
-   input.value = getImgProxy()
+   const input = editorInput("url", `srr-${ed.cls}-input`, ed.ariaLabel)
+   input.placeholder = ed.placeholder
+   input.value = ed.get()
 
    const commit = (raw: string) => {
       const next = raw.trim()
-      if (!isValidProxy(next)) {
+      if (!ed.valid(next)) {
          input.classList.add("srr-input-invalid")
          input.focus()
          return
       }
-      // Scheme is optional (https default) and a host/path gets a trailing "/".
-      const value = normalizeProxy(next)
-      if (value !== getImgProxy()) setImgProxy(value)
+      // Scheme is optional (https default) — see urlish.ts for the shape rules.
+      const value = ed.normalize(next)
+      if (value !== ed.get()) {
+         ed.set(value)
+         ed.onSet?.(value)
+      }
       close()
    }
    editorKeys(input, () => commit(input.value), close)
 
-   const actions = divEl("srr-imgproxy-actions")
-   // Disable sits apart (far left, CSS margin) — a destructive-ish "turn it off"
-   // only worth offering when a proxy is actually set; otherwise Save-of-empty
-   // already covers it.
-   if (getImgProxy())
-      actions.append(btn("srr-dialog-btn srr-imgproxy-clear", "disable image proxy", "Disable", () => commit("")))
+   const actions = divEl(`srr-${ed.cls}-actions`)
+   if (ed.get()) actions.append(btn(`srr-dialog-btn srr-${ed.cls}-clear`, ed.disableLabel, "Disable", () => commit("")))
    actions.append(
-      btn("srr-dialog-btn srr-imgproxy-cancel", "cancel", "Cancel", close),
-      btn("srr-dialog-btn srr-dialog-primary srr-imgproxy-save", "save image proxy", "Save", () => commit(input.value)),
+      btn(`srr-dialog-btn srr-${ed.cls}-cancel`, "cancel", "Cancel", close),
+      btn(`srr-dialog-btn srr-dialog-primary srr-${ed.cls}-save`, ed.saveLabel, "Save", () => commit(input.value)),
    )
    frag.append(input, actions)
    return frag
+}
+
+// imgProxyBody is the image-proxy flavor of the URL editor. The proxy only
+// affects reader images, so a commit just persists the prefix for the next
+// reader open; there's nothing on screen to re-render.
+function imgProxyBody(close: () => void): DocumentFragment {
+   return urlEditorBody(close, {
+      cls: "imgproxy",
+      placeholder: "proxy.example/?url=",
+      ariaLabel: "Image proxy URL prefix (empty disables)",
+      disableLabel: "disable image proxy",
+      saveLabel: "save image proxy",
+      get: getImgProxy,
+      valid: isValidProxy,
+      normalize: normalizeProxy,
+      set: setImgProxy,
+   })
 }
 
 // ── Modal shell ──────────────────────────────────────────────────────────────
@@ -113,6 +133,25 @@ function imgProxyBody(close: () => void): DocumentFragment {
 // module-level closer also means opening any modal closes whichever was open.
 let activeClose: (() => void) | null = null
 
+// wrapTabFocus is the boundary half of a modal Tab trap, shared by the modal
+// shell here, the error popup (app.ts), and the info dialog (picker.ts): on the
+// container's first/last focusable (per the caller's selector), Tab/Shift+Tab
+// wrap to the other end instead of escaping to the page behind; mid-list Tabs
+// fall through to the browser's own order.
+export function wrapTabFocus(e: KeyboardEvent, container: ParentNode, selector: string): void {
+   const f = container.querySelectorAll<HTMLElement>(selector)
+   if (f.length === 0) return
+   const first = f[0]
+   const last = f[f.length - 1]
+   if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault()
+      last.focus()
+   } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault()
+      first.focus()
+   }
+}
+
 function openModal(dialog: HTMLElement, body: HTMLElement, build: (close: () => void) => Node): void {
    if (activeClose) activeClose() // never stack two opens
    const restore = document.activeElement as HTMLElement | null
@@ -123,17 +162,7 @@ function openModal(dialog: HTMLElement, body: HTMLElement, build: (close: () => 
          e.stopPropagation()
          close()
       } else if (e.key === "Tab") {
-         const f = dialog.querySelectorAll<HTMLElement>("input, button, textarea")
-         if (f.length === 0) return
-         const first = f[0]
-         const last = f[f.length - 1]
-         if (e.shiftKey && document.activeElement === first) {
-            e.preventDefault()
-            last.focus()
-         } else if (!e.shiftKey && document.activeElement === last) {
-            e.preventDefault()
-            first.focus()
-         }
+         wrapTabFocus(e, dialog, "input, button, textarea")
       }
    }
    // mousedown (like the popup's outside-close) only on the backdrop itself —
@@ -164,47 +193,28 @@ export function showImgProxyDialog(): void {
    openModal(imgProxyDialog, imgProxyDialog.querySelector<HTMLElement>(".srr-imgproxy-body")!, imgProxyBody)
 }
 
-// syncBody is the editable content of the sync dialog: the endpoint-URL input
-// plus the action row, the same editor shape as imgProxyBody. Saving a NEW url
-// kicks a MANUAL cycle immediately (the one-reader merge: raise seen from the
+// syncBody is the sync flavor of the URL editor. Saving a NEW url kicks a
+// MANUAL cycle immediately (the one-reader merge: raise seen from the
 // endpoint's blob, adopt its saved set when newer, then push) so enabling sync
 // seeds the endpoint / takes over its stored progress without waiting for the
 // next reading session — a fresh device's empty seen map takes the endpoint's
 // progress wholesale, every value being a raise from absent. The config status
 // footer reports how it went.
 function syncBody(close: () => void): DocumentFragment {
-   const frag = document.createDocumentFragment()
-   const input = editorInput("url", "srr-sync-input", "Sync endpoint URL (empty disables)")
-   input.placeholder = "sync.example.com/profile"
-   input.value = getSyncUrl()
-
-   const commit = (raw: string) => {
-      const next = raw.trim()
-      if (!isValidSyncUrl(next)) {
-         input.classList.add("srr-input-invalid")
-         input.focus()
-         return
-      }
-      // Scheme is optional (https default); unlike the image proxy, no trailing
-      // "/" is appended — the value is a full endpoint, not a prefix.
-      const value = normalizeSyncUrl(next)
-      if (value !== getSyncUrl()) {
-         setSyncUrl(value)
+   return urlEditorBody(close, {
+      cls: "sync",
+      placeholder: "sync.example.com/profile",
+      ariaLabel: "Sync endpoint URL (empty disables)",
+      disableLabel: "disable sync",
+      saveLabel: "save sync endpoint",
+      get: getSyncUrl,
+      valid: isValidSyncUrl,
+      normalize: normalizeSyncUrl,
+      set: setSyncUrl,
+      onSet: (value) => {
          if (value) void syncNow({ manual: true })
-      }
-      close()
-   }
-   editorKeys(input, () => commit(input.value), close)
-
-   const actions = divEl("srr-sync-actions")
-   // Disable sits apart (far left, CSS margin), same as the image-proxy dialog.
-   if (getSyncUrl()) actions.append(btn("srr-dialog-btn srr-sync-clear", "disable sync", "Disable", () => commit("")))
-   actions.append(
-      btn("srr-dialog-btn srr-sync-cancel", "cancel", "Cancel", close),
-      btn("srr-dialog-btn srr-dialog-primary srr-sync-save", "save sync endpoint", "Save", () => commit(input.value)),
-   )
-   frag.append(input, actions)
-   return frag
+      },
+   })
 }
 
 export function showSyncDialog(): void {

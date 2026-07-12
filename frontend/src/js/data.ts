@@ -589,7 +589,7 @@ export async function packNamesForFilter(feeds: Map<number, number>): Promise<st
    }
 
    // Enumerate the self-hosted assets/ images the pinned data packs reference, so
-   // a pinned scope renders images offline (the SW's assetCacheFirst serves them
+   // a pinned scope renders images offline (the SW's pinnedCacheFirst serves them
    // from the eviction-exempt PINNED bucket). Parse each needed data pack once
    // and scrape its articles' content for asset keys. For a narrow feed/tag
    // filter this may include a few co-located non-matching articles' assets —

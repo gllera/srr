@@ -14,6 +14,7 @@
 // openSettingsMenu), which borrows renderStatus() below for its status footer.
 import { VERSION } from "./base"
 import * as data from "./data"
+import { wrapTabFocus } from "./dropdown"
 import { countBadge, formatBytes, formatDate, isStale, srcColorIndex, timeAgoProse, URL_DENY } from "./fmt"
 import * as nav from "./nav"
 import * as refresh from "./refresh"
@@ -617,17 +618,7 @@ function openInfoDialog(title: string, body: Node): void {
          e.stopPropagation()
          close()
       } else if (e.key === "Tab") {
-         const f = dialog.querySelectorAll<HTMLElement>("a[href], button, [tabindex]")
-         if (f.length === 0) return
-         const first = f[0]
-         const last = f[f.length - 1]
-         if (e.shiftKey && document.activeElement === first) {
-            e.preventDefault()
-            last.focus()
-         } else if (!e.shiftKey && document.activeElement === last) {
-            e.preventDefault()
-            first.focus()
-         }
+         wrapTabFocus(e, dialog, "a[href], button, [tabindex]")
       }
    }
    const onDown = (e: MouseEvent) => {
