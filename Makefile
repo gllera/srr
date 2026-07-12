@@ -24,20 +24,18 @@ generate:
 generate-check:
 	cd backend && go run . gen-ts --check
 
-# End-to-end (writer<->reader contract). Both layers run the real srr binary
+# End-to-end (writer<->reader contract). All layers run the real srr binary
 # ($SRR_BIN, built by build-be) and read its packs with the real frontend code.
-test-contract test-browser: build-be frontend/node_modules/.package-lock.json
+# test-stress is the opt-in stress/performance layer (NOT in verify): it
+# generates or reuses a large (>50k-article) synthetic store via the gated Go
+# generator (genbig_test.go) and measures navigation/filtering/query cost at
+# scale. Tunable:
+#   SRR_STRESS_N=<articles>      store size to generate (default 60000)
+#   SRR_STRESS_STORE=<dir>       use an existing store instead of generating
+test-contract test-browser test-stress: build-be frontend/node_modules/.package-lock.json
 	cd frontend && SRR_BIN=../dist/srr npm run $@
 
 test-e2e: test-contract test-browser
-
-# Stress/performance layer (opt-in, NOT in verify). Generates or reuses a large
-# (>50k-article) synthetic store via the gated Go generator (genbig_test.go) and
-# measures navigation/filtering/query cost at scale. Tunable:
-#   SRR_STRESS_N=<articles>      store size to generate (default 60000)
-#   SRR_STRESS_STORE=<dir>       use an existing store instead of generating
-test-stress: build-be frontend/node_modules/.package-lock.json
-	cd frontend && SRR_BIN=../dist/srr npm run test-stress
 
 # Build the curated design-harness fixture store (real srr), then run the dev
 # servers against it so /design.html shows every curated state. design-fixture
@@ -54,7 +52,7 @@ design: frontend/node_modules/.package-lock.json
 # `make design-fixture` to force a rebuild).
 design-shots: frontend/node_modules/.package-lock.json
 	@test -f frontend/e2e/fixtures/design-store/db.gz || $(MAKE) design-fixture
-	cd frontend && SRR_BIN=../dist/srr npm run shoot-design
+	cd frontend && npm run shoot-design
 
 frontend/node_modules/.package-lock.json: frontend/package-lock.json
 	cd frontend && npm ci
