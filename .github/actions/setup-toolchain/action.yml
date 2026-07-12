@@ -9,6 +9,11 @@ inputs:
   node:
     description: Set up Node (frontend toolchain).
     default: "true"
+  lint:
+    description: >
+      Install golangci-lint (needed by any job running make verify /
+      verify-be / release). Off for jobs that build but never lint.
+    default: "true"
 runs:
   using: composite
   steps:
@@ -17,13 +22,15 @@ runs:
       with:
         go-version-file: backend/go.mod
         cache-dependency-path: backend/go.sum
-    # make verify runs golangci-lint (lint-be gates verify-be). Pinned to the
-    # major the backend/.golangci.yml schema targets (version: "2").
-    - if: inputs.go == 'true'
+    # make verify runs golangci-lint (lint-be gates verify-be). Both the script
+    # ref and the binary version are pinned to the release backend/.golangci.yml
+    # targets (version: "2" schema) — an unpinned HEAD script is a moving
+    # curl-pipe-sh target.
+    - if: inputs.go == 'true' && inputs.lint == 'true'
       name: Install golangci-lint
       shell: bash
       run: |
-        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/v2.12.2/install.sh \
           | sh -s -- -b "$HOME/.local/bin" v2.12.2
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
     - if: inputs.node == 'true'

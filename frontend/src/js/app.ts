@@ -9,7 +9,7 @@ import {
    wrapTabFocus,
    type MenuItem,
 } from "./dropdown"
-import { collapseBrokenMedia, countBadge, readerDateline, sanitizeFragment, srcColorIndex, URL_DENY } from "./fmt"
+import { collapseBrokenMedia, countBadge, readerDateline, sanitizeFragment, srcColorIndex } from "./fmt"
 import { setupGestures, type Gestures } from "./gestures"
 import { UNREAD_ONLY_KEY } from "./keys"
 import * as list from "./list"
@@ -18,6 +18,7 @@ import * as picker from "./picker"
 import { clearAllPins, isPinned, listPins, pinFilter, unpinFilter } from "./pin"
 import * as refresh from "./refresh"
 import * as sync from "./sync"
+import { URL_DENY } from "./urlish"
 
 const el = {
    article: document.querySelector(".srr-reader") as HTMLElement,

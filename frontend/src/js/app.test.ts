@@ -194,7 +194,6 @@ vi.mock("./fmt", () => ({
    countBadge: (n: number) => (n > 999 ? "999+" : String(n)),
    CHECK_SVG: '<svg class="check"></svg>',
    collapseBrokenMedia: () => {},
-   URL_DENY: /^\s*(?:javascript|data|vbscript|file)\s*:/i,
 }))
 
 const gestures = vi.hoisted(() => ({

@@ -15,10 +15,11 @@
 import { VERSION } from "./base"
 import * as data from "./data"
 import { wrapTabFocus } from "./dropdown"
-import { countBadge, formatBytes, formatDate, isStale, srcColorIndex, timeAgoProse, URL_DENY } from "./fmt"
+import { countBadge, formatBytes, formatDate, isStale, srcColorIndex, timeAgoProse } from "./fmt"
 import * as nav from "./nav"
 import * as refresh from "./refresh"
 import * as sync from "./sync"
+import { URL_DENY } from "./urlish"
 
 export type PickerHooks = {
    // Pick a filter (feed id / tag / "" for [ALL] / ~saved). The caller closes the

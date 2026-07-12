@@ -26,7 +26,10 @@ jobs:
     timeout-minutes: 15
     steps:
     - uses: actions/checkout@v6
+    # Needs Go (test-browser builds the srr binary) but never lints.
     - uses: ./.github/actions/setup-toolchain
+      with:
+        lint: "false"
     # Chrome is downloaded by puppeteer's postinstall during npm ci; restoring
     # the cache first lets it skip the download on a hit.
     - name: Cache Puppeteer Chrome
