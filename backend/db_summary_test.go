@@ -10,10 +10,11 @@ import (
 	"testing"
 )
 
-// setupBoundaryDB builds a store whose first idx pack just finalized:
-// idxPackSize+1 articles written in two batches (mirrors
-// TestPutArticlesIdxPackSplitAtBoundary).
-func setupBoundaryDB(t *testing.T) (*DB, string) {
+// setupSplitBoundaryDB builds a store whose first pack at the given split
+// size just finalized: size+1 articles written in two batches (mirrors
+// TestPutArticlesIdxPackSplitAtBoundary). Shared by the idx (idxPackSize) and
+// meta (metaPackSize) boundary suites via the wrappers below.
+func setupSplitBoundaryDB(t *testing.T, size int) (*DB, string) {
 	t.Helper()
 	db, c, dir := setupTestDB(t)
 	globals.PackSize = 1024 // data packs never split (read lazily at write time)
@@ -22,7 +23,7 @@ func setupBoundaryDB(t *testing.T) (*DB, string) {
 	c.Feeds = map[int]*Feed{ch.id: ch}
 	c.FetchedAt = 1700000000
 
-	articles := make([]*Item, idxPackSize)
+	articles := make([]*Item, size)
 	for i := range articles {
 		articles[i] = &Item{Feed: ch, Title: fmt.Sprintf("A%d", i), Content: "c", Published: int64(i)}
 	}
@@ -30,11 +31,18 @@ func setupBoundaryDB(t *testing.T) (*DB, string) {
 		t.Fatalf("PutArticles: %v", err)
 	}
 	if _, err := db.PutArticles(ctx, []*Item{
-		{Feed: ch, Title: "Last", Content: "c", Published: int64(idxPackSize)},
+		{Feed: ch, Title: "Last", Content: "c", Published: int64(size)},
 	}); err != nil {
 		t.Fatalf("PutArticles: %v", err)
 	}
 	return db, dir
+}
+
+// setupBoundaryDB builds a store whose first idx pack just finalized:
+// idxPackSize+1 articles written in two batches.
+func setupBoundaryDB(t *testing.T) (*DB, string) {
+	t.Helper()
+	return setupSplitBoundaryDB(t, idxPackSize)
 }
 
 // The HdrPacks=0-with-finalized-packs state synced here is also exactly what

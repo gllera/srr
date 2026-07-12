@@ -1,10 +1,9 @@
-import { readdirSync, rmSync } from "node:fs"
-import { join } from "node:path"
 import { afterAll, beforeAll, describe, expect, inject, it } from "vitest"
-import puppeteer, { type Browser, type Page } from "puppeteer"
+import type { Browser, Page } from "puppeteer"
 
 import { feedServer, srr, type FeedServer } from "../harness"
 import { nItems, rssFeed } from "../fixtures"
+import { $rowTitles, $rowTop, clearDir, launchBrowser, waitList, waitTitle } from "./helpers"
 
 // Live content sync in the real SPA: publish a second fetch cycle to the pack
 // dir while a page is open, fire one of refresh.ts's real background triggers
@@ -27,35 +26,6 @@ const packsDir = inject("packsDir")
 
 const items = nItems(3, "live")
 
-const $rowTitles = (p: Page) => p.$$eval(".srr-list a.srr-row .srr-row-title", (els) => els.map((e) => e.textContent))
-// Viewport-relative top of the row whose title matches (null if absent) — used
-// to prove the prepend-compensated list doesn't visually jump.
-const $rowTop = (p: Page, title: string) =>
-   p.$$eval(
-      ".srr-list a.srr-row",
-      (els, t) => {
-         const row = els.find((e) => e.querySelector(".srr-row-title")?.textContent === t)
-         return row ? row.getBoundingClientRect().top : null
-      },
-      title,
-   )
-
-const waitList = (p: Page) =>
-   p.waitForFunction(
-      () => {
-         const l = document.querySelector(".srr-list") as HTMLElement | null
-         return (
-            !!l &&
-            !l.hidden &&
-            l.querySelector("a.srr-row") != null &&
-            l.querySelector("a.srr-row.srr-row-skeleton") == null
-         )
-      },
-      { timeout: 20000 },
-   )
-const waitTitle = (p: Page, t: string) =>
-   p.waitForFunction((want) => document.querySelector(".srr-title")?.textContent === want, { timeout: 20000 }, t)
-
 describe("browser: in-place refresh via a background trigger", () => {
    let browser: Browser
    let page: Page
@@ -63,10 +33,10 @@ describe("browser: in-place refresh via a background trigger", () => {
 
    beforeAll(async () => {
       feeds = await feedServer({ "/live.xml": rssFeed("Live", items.slice(0, 2)) })
-      for (const f of readdirSync(packsDir)) rmSync(join(packsDir, f), { recursive: true, force: true })
+      clearDir(packsDir)
       await srr(packsDir, "feed", "add", "-t", "Live", "-u", `${feeds.url}/live.xml`)
       await srr(packsDir, "art", "fetch")
-      browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox", "--disable-dev-shm-usage"] })
+      browser = await launchBrowser()
       page = await browser.newPage()
       // Short viewport: a 2-3 row store is shorter than a default-size viewport,
       // which leaves the document with no scrollable "reserve" — the prepend's

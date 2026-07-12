@@ -1,11 +1,18 @@
-import { readFileSync, readdirSync, rmSync } from "node:fs"
-import { join } from "node:path"
-import { gunzipSync } from "node:zlib"
 import { afterAll, beforeAll, describe, expect, inject, it } from "vitest"
-import puppeteer, { type Browser, type Page } from "puppeteer"
+import type { Browser, Page } from "puppeteer"
 
-import { feedServer, srr, type FeedServer } from "../harness"
+import { feedServer, readDb, srr, type FeedServer } from "../harness"
 import { nItems, rssFeed } from "../fixtures"
+import {
+   $rowTitles,
+   $rowTop,
+   clearDir,
+   launchBrowser,
+   open as openCtx,
+   waitList,
+   waitReader,
+   waitTitle,
+} from "./helpers"
 
 // Drives the REAL built SPA in headless Chrome against real srr packs: proves
 // the Parcel build, app.ts render, hash routing (list home + reader drill-down),
@@ -22,29 +29,13 @@ const sport = nItems(2, "sport", 0, 20)
 
 // db.gz `seq` (latest-pack generation) read straight from a store — used to
 // drive the SW seq-only-prune scenario to a high enough generation.
-const storeSeq = (dir: string): number => {
-   const db = JSON.parse(gunzipSync(readFileSync(join(dir, "db.gz"))).toString("utf8")) as { seq?: number }
-   return db.seq ?? 0
-}
+const storeSeq = (dir: string): number => readDb<{ seq?: number }>(dir).seq ?? 0
 
 const $title = (p: Page) => p.$eval(".srr-title", (e) => e.textContent)
 const $content = (p: Page) => p.$eval(".srr-content", (e) => e.textContent ?? "")
 const $link = (p: Page) => p.$eval(".srr-title-row", (e) => e.getAttribute("href"))
 const $nextDisabled = (p: Page) => p.$eval(".srr-next", (e) => (e as HTMLButtonElement).disabled)
 const $popupOpen = (p: Page) => p.$eval(".srr-popup", (e) => e.classList.contains("srr-open"))
-const $rowTitles = (p: Page) => p.$$eval(".srr-list a.srr-row .srr-row-title", (els) => els.map((e) => e.textContent))
-// Viewport-relative top of the row whose title matches (null if absent) — used to
-// assert where the list anchored a given article (top-aligned, centered, or
-// relative to another row).
-const $rowTop = (p: Page, title: string) =>
-   p.$$eval(
-      ".srr-list a.srr-row",
-      (els, t) => {
-         const row = els.find((e) => e.querySelector(".srr-row-title")?.textContent === t)
-         return row ? row.getBoundingClientRect().top : null
-      },
-      title,
-   )
 
 // Title of the list's currently selected (highlighted) row, or null if none.
 const $currentTitle = (p: Page) =>
@@ -65,33 +56,6 @@ const waitCurrent = (p: Page, t: string) =>
       t,
    )
 
-const waitTitle = (p: Page, t: string) =>
-   p.waitForFunction((want) => document.querySelector(".srr-title")?.textContent === want, { timeout: 20000 }, t)
-// The reader surface is shown with a non-empty title.
-const waitReader = (p: Page) =>
-   p.waitForFunction(
-      () => {
-         const a = document.querySelector(".srr-reader") as HTMLElement | null
-         return !!a && !a.hidden && (document.querySelector(".srr-title")?.textContent?.length ?? 0) > 0
-      },
-      { timeout: 20000 },
-   )
-// The list surface is shown with at least one rendered row AND every row filled
-// (no skeletons left) — rows now paint as skeletons first, so gating on row
-// presence alone would let a bulk title read race the progressive fill.
-const waitList = (p: Page) =>
-   p.waitForFunction(
-      () => {
-         const l = document.querySelector(".srr-list") as HTMLElement | null
-         return (
-            !!l &&
-            !l.hidden &&
-            l.querySelector("a.srr-row") != null &&
-            l.querySelector("a.srr-row.srr-row-skeleton") == null
-         )
-      },
-      { timeout: 20000 },
-   )
 // The app has booted into EITHER surface (used where the surface is irrelevant).
 const waitBoot = (p: Page) =>
    p.waitForFunction(
@@ -113,13 +77,13 @@ describe("browser: real SPA over real packs", () => {
          "/sport.xml": rssFeed("Sport", sport),
       })
       // Write packs straight into the served pack dir (cleared first).
-      for (const f of readdirSync(packsDir)) rmSync(join(packsDir, f), { recursive: true, force: true })
+      clearDir(packsDir)
       await srr(packsDir, "feed", "add", "-t", "News", "-g", "world", "-u", `${feeds.url}/news.xml`)
       await srr(packsDir, "feed", "add", "-t", "Tech", "-g", "world", "-u", `${feeds.url}/tech.xml`)
       await srr(packsDir, "feed", "add", "-t", "Sport", "-g", "play", "-u", `${feeds.url}/sport.xml`)
       await srr(packsDir, "art", "fetch")
 
-      browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox", "--disable-dev-shm-usage"] })
+      browser = await launchBrowser()
    })
 
    afterAll(async () => {
@@ -128,13 +92,7 @@ describe("browser: real SPA over real packs", () => {
    })
 
    // Fresh incognito context per scenario → isolated localStorage/cache.
-   async function open(hash = ""): Promise<[Page, () => Promise<void>]> {
-      const ctx = await browser.createBrowserContext()
-      const page = await ctx.newPage()
-      await page.goto(baseUrl + hash, { waitUntil: "load" })
-      await waitBoot(page)
-      return [page, async () => ctx.close()]
-   }
+   const open = (hash = "") => openCtx(browser, baseUrl + hash, waitBoot)
 
    it("boots into the list, newest-first", async () => {
       const [page, close] = await open()
@@ -1036,7 +994,7 @@ describe("browser: real SPA over real packs", () => {
       // feed, same item count/order → chron 0 is always data pack 1, offset 0)
       // but different content. -s 1 + incompressible filler → finalized packs.
       const rebuild = async (prefix: string) => {
-         for (const f of readdirSync(packsDir)) rmSync(join(packsDir, f), { recursive: true, force: true })
+         clearDir(packsDir)
          feeds.set("/bulk.xml", rssFeed("Bulk", nItems(30, prefix, 8000)))
          await srr(packsDir, "feed", "add", "-t", "Bulk", "-u", `${feeds.url}/bulk.xml`)
          await srr(packsDir, "-s", "1", "art", "fetch")
@@ -1074,7 +1032,7 @@ describe("browser: real SPA over real packs", () => {
    it("gen change purges srr-pinned-v1 alongside srr-packs-v3", async () => {
       // Re-use the same rebuild helper and pattern as the gen-purge test above.
       const rebuild = async (prefix: string) => {
-         for (const f of readdirSync(packsDir)) rmSync(join(packsDir, f), { recursive: true, force: true })
+         clearDir(packsDir)
          feeds.set("/pintest.xml", rssFeed("PinTest", nItems(30, prefix, 8000)))
          await srr(packsDir, "feed", "add", "-t", "PinTest", "-u", `${feeds.url}/pintest.xml`)
          await srr(packsDir, "-s", "1", "art", "fetch")
@@ -1138,7 +1096,7 @@ describe("browser: real SPA over real packs", () => {
    // store-replacing tests, after everything that reads the 6-article store.
    it("prunes superseded latest generations on a seq-only advance (no gen bump)", async () => {
       // Fresh single-feed store at seq=1 (own rebuild).
-      for (const f of readdirSync(packsDir)) rmSync(join(packsDir, f), { recursive: true, force: true })
+      clearDir(packsDir)
       feeds.set("/seq.xml", rssFeed("Seq", nItems(2, "seq")))
       await srr(packsDir, "feed", "add", "-t", "Seq", "-u", `${feeds.url}/seq.xml`)
       await srr(packsDir, "art", "fetch")
@@ -1218,7 +1176,7 @@ describe("browser: real SPA over real packs", () => {
    // (BATCH=30), never the whole 100-article archive.
    // Runs LAST: replaces the shared store with a single 100-article feed.
    it("keeps the rerender window bounded when unread-only is toggled from the filter picker", async () => {
-      for (const f of readdirSync(packsDir)) rmSync(join(packsDir, f), { recursive: true, force: true })
+      clearDir(packsDir)
       feeds.set("/bulk.xml", rssFeed("Bulk", nItems(100, "bulk")))
       await srr(packsDir, "feed", "add", "-t", "Bulk", "-u", `${feeds.url}/bulk.xml`)
       await srr(packsDir, "art", "fetch")

@@ -13,6 +13,8 @@ import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 import { gunzipSync } from "node:zlib"
 
+import type { IDBWire } from "../src/js/format.gen"
+
 const execFileAsync = promisify(execFile)
 
 const HERE = dirname(fileURLToPath(import.meta.url)) // frontend/e2e
@@ -67,14 +69,18 @@ export function makeStore(): string {
    return mkdtempSync(join(tmpdir(), "srr-e2e-"))
 }
 
+// Parse a store's db.gz. The type param narrows the wire shape to just the
+// fields the caller picks (defaults to the full generated IDBWire).
+export function readDb<T = IDBWire>(dir: string): T {
+   return JSON.parse(gunzipSync(readFileSync(join(dir, "db.gz"))).toString("utf8")) as T
+}
+
 // total_art read straight from a store's db.gz, or -1 if it isn't a readable
 // store. Used to decide whether a cached stress store can be reused.
 function storeTotalArt(dir: string): number {
-   const f = join(dir, "db.gz")
-   if (!existsSync(f)) return -1
+   if (!existsSync(join(dir, "db.gz"))) return -1
    try {
-      const db = JSON.parse(gunzipSync(readFileSync(f)).toString("utf8")) as { total_art?: number }
-      return db.total_art ?? 0
+      return readDb<{ total_art?: number }>(dir).total_art ?? 0
    } catch {
       return -1
    }

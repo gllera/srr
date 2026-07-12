@@ -12,10 +12,11 @@ import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 
-import puppeteer, { type Page } from "puppeteer"
+import type { Page } from "puppeteer"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
 import { stateHash, TRANSIENTS, type DesignState, type DesignTargets } from "../../src/js/design"
+import { launchBrowser } from "../browser/helpers"
 import { startStaticServer, stopStaticServer, type StaticServer } from "../static-serve"
 
 declare global {
@@ -74,7 +75,7 @@ describe("design-state screenshots", () => {
 
    it("captures every panel + transient state in light + dark", async () => {
       const targets = JSON.parse(readFileSync(join(PACKS_DIR, "design.json"), "utf8")) as DesignTargets
-      const browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox", "--disable-dev-shm-usage"] })
+      const browser = await launchBrowser()
       try {
          for (const scheme of ["light", "dark"] as const) {
             const page = await browser.newPage()

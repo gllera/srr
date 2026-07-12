@@ -1,9 +1,8 @@
-import { readFileSync, renameSync, rmSync } from "node:fs"
+import { renameSync, rmSync } from "node:fs"
 import { join } from "node:path"
-import { gunzipSync } from "node:zlib"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
-import { feedServer, inspectValidate, makeStore, srr, type FeedServer } from "../harness"
+import { feedServer, inspectValidate, makeStore, readDb, srr, type FeedServer } from "../harness"
 import { nItems, rssFeed } from "../fixtures"
 import { mountReader } from "./mount"
 
@@ -78,7 +77,7 @@ describe("contract: in-place refresh across a fetch cycle", () => {
 
       // Read the real new generation off disk rather than assuming a seq value —
       // this cycle bumps seq again (the prior "gen --bump" test did not).
-      const newDb = JSON.parse(gunzipSync(readFileSync(join(store, "db.gz"))).toString("utf8")) as { seq: number }
+      const newDb = readDb<{ seq: number }>(store)
       const idxPath = join(store, "idx", `L${newDb.seq}.gz`)
       const idxBak = `${idxPath}.bak`
       renameSync(idxPath, idxBak)

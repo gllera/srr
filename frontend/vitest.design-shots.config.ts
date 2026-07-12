@@ -2,7 +2,7 @@ import { defineConfig } from "vitest/config"
 
 // Opt-in config for the design-state screenshotter (puppeteer). Node env, only
 // this file, long timeout (it builds the bundle + drives headless Chrome).
-// Excluded from `npm test` because vitest.config.ts only scans src/**.
+// Excluded from `npm test` because vitest.config.ts excludes e2e/**.
 export default defineConfig({
    test: {
       include: ["e2e/design/shoot.e2e.test.ts"],
