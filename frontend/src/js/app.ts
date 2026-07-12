@@ -279,16 +279,21 @@ function clearContentTransition() {
    el.content.style.transform = ""
 }
 
-// The next pill's pending readout: how many articles are still AHEAD under the
-// active filter — the settings badges' own counting (nav.pendingRight routes
-// through it) minus the article on screen, so it ticks 3, 2, 1 and reads an
-// explicit "0" on the last article (greyed on the disabled pill: nothing ahead,
-// said out loud). Digits show whenever the count is known (o present and ≥ 0);
-// hidden only on a degraded (-1) probe and the dead-end no-article states (the
-// null calls — the armed "not started" placeholder keeps its full-backlog
-// digits) — never a spinner, never a ghost. The count
-// rides the accessible name rather than a separate live region — it changes on
-// navigation, when the button is re-announced anyway.
+// The next pill's pending readout: how much is UNREAD AND AHEAD under the
+// active filter — the picker badges' own count with each frontier floored at
+// the cursor (nav.pendingRight), so it matches the picker on every recorded
+// landing and ticks 3, 2, 1 — by exactly one per forward step, the first step
+// included (an unrecorded entry reads one below the badge: the badge counts
+// the not-yet-consumed article on screen, the pill counts what → still has).
+// It reads an explicit "0" on the last article (greyed on the disabled pill:
+// nothing left, said out loud) — and an honest "0" mid-history in show-read
+// mode when only read articles remain ahead (Next stays armed off has_right).
+// Digits show whenever the count is known (o present and ≥ 0); hidden only on
+// a degraded (-1) probe and the dead-end no-article states (the null calls —
+// the armed "not started" placeholder keeps its full-backlog digits) — never
+// a spinner, never a ghost. The count rides the accessible name rather than a
+// separate live region — it changes on navigation, when the button is
+// re-announced anyway.
 function syncNextCount(o: IShowFeed | null) {
    const n = o ? o.right_count : -1
    el.nextCount.textContent = n >= 0 ? countBadge(n) : ""
@@ -664,11 +669,13 @@ function listTitle(): string {
 async function renderListSurface() {
    if (busy) return
    busy = true
-   // Returning FROM THE READER (back button, browser-back) centers + highlights
-   // the article you were reading; arriving via a filter change / boot (view was
-   // already "list") keeps the top-aligned anchor. Captured before showList()
-   // flips view to "list".
-   const center = view === "reader"
+   // The list centers + highlights its anchor (the article you were reading /
+   // the lane's resume position) on every arrival. Returning FROM THE READER
+   // (back button, browser-back) commits that scroll immediately — the seed's
+   // pack is warm from the article on screen; a filter change / boot arrival
+   // (view was already "list") takes the settle-then-land-once path instead.
+   // Captured before showList() flips view to "list".
+   const anchorNow = view === "reader"
    showList()
    refreshFeedLabel()
    document.title = listTitle()
@@ -686,7 +693,7 @@ async function renderListSurface() {
       busy = false
    }
    try {
-      await list.show(center, onInteractive)
+      await list.show(anchorNow, onInteractive)
    } catch (e) {
       showError(e, () => void renderListSurface())
    } finally {
@@ -723,7 +730,7 @@ async function route(hash: string) {
 
 // Return to the list from the reader (back button / two-finger cycle / filter
 // pick). pushState so browser-back from the reader still works; the list
-// restores its saved scroll for the active filter.
+// re-centers on the article you were reading (see renderListSurface).
 async function goToList(push: boolean) {
    // Bail BEFORE mutating history/localStorage: renderListSurface also checks
    // busy, but the pushState/persistHash below would already have rewritten the

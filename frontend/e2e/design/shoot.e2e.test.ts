@@ -99,9 +99,9 @@ describe("design-state screenshots", () => {
             // open them the way a user does (tap the filter button / the
             // now-viewing readout over the list), then capture. Pin unread-only OFF for
             // the grounding shots (the app now defaults it on for first run, which
-            // hides fully-read feed rows in this fixture) so the full filter list —
-            // and every row's ⓘ — is shown and clickable. Hide the harness panel
-            // first: it floats at the top-left, over the picker's header.
+            // hides fully-read feed rows in this fixture) so the full filter list
+            // is shown and clickable. Hide the harness panel first: it floats at
+            // the top-left, over the picker's header.
             await page.goto(`${srv.baseUrl}/design.html#`, { waitUntil: "networkidle0" })
             await page.evaluate(() => localStorage.setItem("srr-unread-only", "0"))
             await page.reload({ waitUntil: "networkidle0" })
@@ -113,10 +113,13 @@ describe("design-state screenshots", () => {
             })
             await page.screenshot({ path: join(SHOTS, `picker.${scheme}.png`) })
 
-            // Feed info dialog — open it from a (visible, untagged) feed row's ⓘ
-            // button, let the async unread count fill, capture, then close both
-            // the dialog and the picker underneath.
-            await page.click(".srr-feed-row:not(.srr-tag-item) .srr-info-btn")
+            // Feed info dialog — press the header Info (stats) toggle, then tap a
+            // (visible, untagged) feed row: in stats mode the tap opens the row's
+            // detail card instead of filtering. Let the async unread count fill,
+            // capture, then close the dialog and the picker underneath (the
+            // second Escape also drops the picker's stats mode with it).
+            await page.click(".srr-picker-info")
+            await page.click(".srr-feed-row:not(.srr-tag-item)")
             await page.waitForSelector(".srr-info-dialog.srr-open")
             await new Promise((r) => setTimeout(r, 250))
             await page.screenshot({ path: join(SHOTS, `picker-info-feed.${scheme}.png`) })

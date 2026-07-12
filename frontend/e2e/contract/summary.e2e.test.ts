@@ -84,7 +84,7 @@ const FIRST_FETCHED = 1700000000
 // Layout: pack 0 = 50k × feed 0 (data pack 1) · pack 1 = 50k × feed 1 (data
 // pack 2) · latest = 2 × feed 2 (data pack 3 = data/L1.gz). hdrs=2 covers packs
 // 0 and 1. Each pack's first entry is flagged a boundary (deltaPack=1).
-function buildStore(opts: { hdrs: boolean; summaryFile: boolean }): string {
+function buildStore(opts: { hdrs: boolean; summaryFile: boolean; dataPacks?: boolean }): string {
    const dir = makeStore()
    mkdirSync(join(dir, "idx"))
    mkdirSync(join(dir, "data"))
@@ -121,6 +121,21 @@ function buildStore(opts: { hdrs: boolean; summaryFile: boolean }): string {
 
    const latestArticles = [0, 1].map((i) => JSON.stringify({ f: 2, a: FIRST_FETCHED, t: `latest-${i}`, l: "", c: "x" }))
    writeFileSync(join(dir, "data/L1.gz"), gzipSync(latestArticles.join("\n") + "\n"))
+
+   if (opts.dataPacks) {
+      // Finalized data packs matching the idx boundaries (pack 0 → data/1.gz,
+      // pack 1 → data/2.gz), so nav can actually LAND on finalized articles —
+      // the badge↔pill parity suite below reads them.
+      for (const [pid, feedId] of [
+         [1, 0],
+         [2, 1],
+      ]) {
+         const lines: string[] = []
+         for (let i = 0; i < IDX_PACK_SIZE; i++)
+            lines.push(JSON.stringify({ f: feedId, a: FIRST_FETCHED, t: `p${pid}-${i}`, l: "", c: "x" }))
+         writeFileSync(join(dir, `data/${pid}.gz`), gzipSync(lines.join("\n") + "\n"))
+      }
+   }
 
    const db = {
       seq: 1,
@@ -228,5 +243,54 @@ describe("contract: eager fallback when the summary is unavailable", () => {
       expect(paths.some((p) => p.endsWith("idx/h2.gz"))).toBe(true) // attempted
       expect(paths.some((p) => p.endsWith("idx/0.gz"))).toBe(true) // then eager
       expect(await reader.data.findLeft(100001, new Map([[0, 0]]))).toBe(49999)
+   })
+})
+
+// Badge↔pill parity at >50k scale — the counting-primitive trap the unit
+// mocks cannot reach: a frontier that sits BELOW a finalized pack's base
+// takes the rare per-feed oracle path (unreadTally → feedUnread), and the
+// idx header shortcut assumes each per-feed bound in a countLeft map is that
+// feed's add_idx (raised bounds over-count across finalized headers). Any
+// future pill/badge edit that trips either mis-counts HERE, over two real
+// 50,000-entry packs, where the small contract stores stay accidentally
+// correct. Hand-computed expectations, cross-checked pill vs badge.
+describe("contract: badge↔pill parity across finalized packs (>50k)", () => {
+   let store: string
+   let reader: MountedReader
+
+   const badge = async () => {
+      const members = [...reader.nav.filter.feeds.keys()].map((id) => reader.data.db.feeds[id])
+      return reader.nav.tagUnreadFromCounts(members, await reader.nav.unreadCounts(members))
+   }
+
+   beforeAll(async () => {
+      store = buildStore({ hdrs: true, summaryFile: true, dataPacks: true })
+      localStorage.clear()
+      reader = await mountReader(store)
+   })
+
+   afterAll(() => {
+      if (store) rmSync(store, { recursive: true, force: true })
+   })
+
+   it("recorded landing mid pack 1 with a frontier deep in pack 0: pill ≡ badge via the rare path", async () => {
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:0": 9 }))
+      reader.nav.filter.clear() // [ALL]
+      const shown = await reader.nav.goTo(50009) // feed 1, recorded: every member's frontier → 50009
+      // unread = feed1 50010..99999 (49990) + feed2's 2 latest; feed0 all read.
+      expect(shown.right_count).toBe(49992)
+      expect(await badge()).toBe(49992)
+   })
+
+   it("read-ahead lanes spanning packs: unrecorded landing reads badge−1, then ticks −1", async () => {
+      // feed1 + feed2 read to their ends (read-ahead), feed0 read to chron 9.
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:0": 9, "feed:1": 99999, "feed:2": 100001 }))
+      const shown = await reader.nav.fromHash("10") // feed0's oldest unread, unrecorded
+      // Badge: feed0 10..49999 (49990); the read-ahead packs contribute 0.
+      expect(await badge()).toBe(49990)
+      expect(shown.right_count).toBe(49989) // one below: the on-screen chron 10
+      const stepped = await reader.nav.right() // chron 11, recorded
+      expect(stepped.right_count).toBe(49988) // the first → ticks by exactly 1
+      expect(await badge()).toBe(49988)
    })
 })

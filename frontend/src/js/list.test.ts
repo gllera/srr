@@ -426,7 +426,7 @@ describe("list", () => {
       try {
          list.setup(container, (c) => opened.push(c), undefined, onErr)
          setIndex(100)
-         nav._setAnchor(50) // mid-anchored + center → observe() runs synchronously, top not exhausted
+         nav._setAnchor(50) // mid-anchored + anchorNow → observe() runs synchronously, top not exhausted
          await list.render(true)
          const topSentinel = container.querySelector(".srr-list-sentinel")!
          // The next newer-batch fill 404s.
@@ -734,10 +734,14 @@ describe("list", () => {
       nav._setUnreadOnly(true)
       nav.getCurrentFilterKey.mockReturnValueOnce("99")
       const empty = list.emptyStateEl({ notStarted: true })
-      expect(empty.querySelector(".srr-empty-eyebrow")!.textContent).toBe("Not started feed")
+      expect(empty.querySelector(".srr-empty-eyebrow")!.textContent).toBe("Not started")
       expect(empty.querySelector(".srr-caughtup-check")).toBeNull() // not the reward state
-      expect(empty.querySelector(".srr-empty-em")!.textContent).toBe("Feed99")
-      expect(empty.querySelector(".srr-empty-msg")!.textContent).toBe("Tap Next to start reading Feed99.")
+      expect(empty.querySelector(".srr-empty-msg")!.textContent).toBe("Tap Next to start reading.")
+      // The wire-head (dashed-rule flanked masthead-voice label) OPENS the
+      // station — masthead-first like the article that replaces it.
+      const head = empty.querySelector(".srr-empty-wirehead")!
+      expect(empty.firstElementChild).toBe(head)
+      expect(head.querySelector(".srr-empty-name")!.textContent).toBe("Feed99")
    })
 
    it("names the never-read feed itself (source-tinted) on the not-started placeholder", () => {
@@ -747,11 +751,15 @@ describe("list", () => {
       nav._setUnreadOnly(true)
       nav.getCurrentFilterKey.mockReturnValueOnce("news") // a tag lane
       const empty = list.emptyStateEl({ notStarted: true, startFeed: 7 })
-      expect(empty.querySelector(".srr-empty-eyebrow")!.textContent).toBe("Not started feed")
-      const em = empty.querySelector(".srr-empty-em") as HTMLElement
-      expect(em.textContent).toBe("Feed7") // the member feed, not the tag
-      expect(em.dataset.src).toBe(String(7 % 8)) // srcColorIndex — the feed's ramp color
-      expect(empty.querySelector(".srr-empty-msg")!.textContent).toBe("Tap Next to start reading Feed7.")
+      expect(empty.querySelector(".srr-empty-eyebrow")!.textContent).toBe("Not started")
+      expect(empty.querySelector(".srr-empty-msg")!.textContent).toBe("Tap Next to start reading.")
+      // The wire-head names the member feed (not the tag), source-tinted, as the
+      // station's opening line above the state + directive.
+      const head = empty.querySelector(".srr-empty-wirehead")!
+      expect(empty.firstElementChild).toBe(head)
+      const name = head.querySelector(".srr-empty-name") as HTMLElement
+      expect(name.textContent).toBe("Feed7") // the member feed, not the tag
+      expect(name.dataset.src).toBe(String(7 % 8)) // srcColorIndex — the feed's ramp color
    })
 
    it("shows 'Nothing saved' (not the caught-up reward) for an empty Saved view with unread-only on", () => {
