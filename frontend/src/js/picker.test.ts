@@ -374,6 +374,31 @@ describe("filter list", () => {
       picker.open()
       expect($(".srr-picker-filter .srr-tag-group").classList.contains("srr-tag-collapsed")).toBe(false)
    })
+
+   it("tints exactly the active filter row with srr-active, following the current key", async () => {
+      nav.savedCount.mockReturnValue(3) // so the ★ Saved scope chip renders alongside [ALL]
+      data.groupFeedsByTag.mockReturnValue({
+         tagged: new Map(),
+         sortedTags: [],
+         untagged: [feed({ id: 5, title: "Five" })],
+      })
+      const picker = await mount()
+      picker.open()
+      await flush()
+      const active = () => $$(".srr-picker-filter .srr-active").map((e) => e.getAttribute("data-value"))
+      // Default current key "" → [ALL] wears the tint alone.
+      expect(active()).toEqual([""])
+      // Feed 5 active → the tint moves to its row (and off [ALL]).
+      nav.getCurrentFilterKey.mockReturnValue("5")
+      picker.render()
+      await flush()
+      expect(active()).toEqual(["5"])
+      // ★ Saved active → the scope chip wears it.
+      nav.getCurrentFilterKey.mockReturnValue(nav.SAVED_TOKEN)
+      picker.render()
+      await flush()
+      expect(active()).toEqual([nav.SAVED_TOKEN])
+   })
 })
 
 describe("show-read toggle (picker header)", () => {

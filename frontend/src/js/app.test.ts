@@ -513,6 +513,52 @@ describe("reader titleless feeds (Telegram-style: title duplicates the body)", (
    })
 })
 
+describe("reader dateline + permalink structure", () => {
+   // readerDateline is mocked to a constant {text,title}; these assert app.ts's
+   // render actually WIRES it into the masthead date element and shapes the permalink
+   // — the integration the unit tests of readerDateline itself can't cover.
+   it("wires the relative dateline into the masthead date text + hover title", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(
+         showFeed({ article: { f: 1, a: 0, p: 1700000000, t: "Real", l: "http://example.com/p/1", c: "<p>x</p>" } }),
+      )
+      hashTo("#9")
+      await flush()
+      const date = document.querySelector(".srr-date") as HTMLElement
+      // The mock's text and title are DISTINCT strings, so a text↔title transposition
+      // in the render path (el.date.textContent vs el.date.title) is caught here.
+      expect(date.textContent).toBe("1h ago")
+      expect(date.title).toBe("01/01/2020 00:00")
+      expect(date.hidden).toBe(false)
+   })
+
+   it("hides the masthead date on an undated (p=0) article", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(
+         showFeed({ article: { f: 1, a: 0, p: 0, t: "Real", l: "http://example.com/p/1", c: "<p>x</p>" } }),
+      )
+      hashTo("#10")
+      await flush()
+      const date = document.querySelector(".srr-date") as HTMLElement
+      expect(date.hidden).toBe(true)
+      expect(date.textContent).toBe("")
+   })
+
+   it("the masthead permalink is one anchor with no nested <a> inside it", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(
+         showFeed({ article: { f: 1, a: 0, p: 1700000000, t: "Real", l: "http://example.com/p/1", c: "<p>x</p>" } }),
+      )
+      hashTo("#11")
+      await flush()
+      const row = document.querySelector(".srr-title-row") as HTMLAnchorElement
+      expect(row.tagName).toBe("A")
+      // The inner title <a> was unwrapped (globe icon removed) so the whole row is the
+      // single "open original" link — there must be no invalid nested anchor.
+      expect(row.querySelectorAll("a").length).toBe(0)
+   })
+})
+
 describe("reader desk (the article's tag, shown above the byline)", () => {
    it("fills the desk with the feed's tag", async () => {
       await boot()
@@ -1345,6 +1391,35 @@ describe("list cycle keys — W/S and ↑/↓ step the filter on the list too", 
          expect(nav.applyFilter).toHaveBeenCalledWith([token])
          expect(document.body.classList.contains("srr-view-list")).toBe(true)
       }
+   })
+
+   it("only the latest rapid press applies its token; a superseded press's late resolution is dropped", async () => {
+      // The round-1 fix used a held boolean that could LATCH cycling off if a
+      // cycleToken never settled; round-2 replaced it with a freshness token. Drive
+      // two overlapping presses whose cycleToken resolutions settle OUT OF ORDER.
+      await boot()
+      picker.isOpen.mockReturnValue(false)
+      nav.getFilterEntries.mockReturnValue(["", "news", "7"])
+      nav.applyFilter.mockClear()
+      let resolveFirst!: (t: string) => void
+      let resolveSecond!: (t: string) => void
+      nav.cycleToken
+         .mockClear()
+         .mockImplementationOnce(() => new Promise<string>((r) => (resolveFirst = r)))
+         .mockImplementationOnce(() => new Promise<string>((r) => (resolveSecond = r)))
+      key("w") // press A → cycleToken call #1
+      key("s") // press B (the latest) → call #2, bumps the freshness gen
+      // The latest press resolves first and applies — a never-settling press A can't
+      // latch cycling off (the round-1 bug).
+      resolveSecond("latest")
+      await flush()
+      expect(nav.applyFilter).toHaveBeenCalledTimes(1)
+      expect(nav.applyFilter).toHaveBeenCalledWith(["latest"])
+      // Press A resolves LATE with a stale token → discarded (its gen was superseded).
+      resolveFirst("stale")
+      await flush()
+      expect(nav.applyFilter).toHaveBeenCalledTimes(1)
+      expect(nav.applyFilter).not.toHaveBeenCalledWith(["stale"])
    })
 
    it("a single-lane rotation leaves the vertical keys to native scrolling", async () => {
