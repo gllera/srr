@@ -762,9 +762,9 @@ func TestStripControl(t *testing.T) {
 		{"nocontrol", "nocontrol"},       // no changes needed
 		{"\t\n\r ", ""},                  // all control/whitespace
 		{"a\x1fb", "ab"},                 // unit separator removed
-		{"ab", "ab"},                    // C1 PAD removed
-		{"ab", "ab"},                    // C1 CSI removed
-		{"ab", "ab"},                    // C1 APC removed
+		{"a\u0080b", "ab"},               // C1 PAD removed
+		{"a\u009bb", "ab"},               // C1 CSI removed
+		{"a\u009fb", "ab"},               // C1 APC removed
 		{"a b", "a b"},                   // NBSP (just above C1) preserved
 	}
 
@@ -793,9 +793,9 @@ func TestStripControlKeepWS(t *testing.T) {
 		{"a\x0bb", "ab"},                 // vertical tab removed
 		{"hello world", "hello world"},   // space preserved (>= ' ')
 		{"a\x7fb", "ab"},                 // DEL removed (kept-WS variant must drop it too)
-		{"ab", "ab"},                    // C1 PAD removed
-		{"ab", "ab"},                    // C1 CSI removed
-		{"ab", "ab"},                    // C1 APC removed
+		{"a\u0080b", "ab"},               // C1 PAD removed
+		{"a\u009bb", "ab"},               // C1 CSI removed
+		{"a\u009fb", "ab"},               // C1 APC removed
 		{"a b", "a b"},                   // NBSP (just above C1) preserved
 	}
 

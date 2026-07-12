@@ -1,0 +1,19 @@
+version: "2"
+
+linters:
+  exclusions:
+    # Idiomatic ignore-on-cleanup calls (deferred Close, Flush, os.Remove,
+    # fmt.Fprint* to buffered/terminal sinks) — the stdlib error-handling set.
+    presets:
+      - std-error-handling
+    rules:
+      # Tests fail loudly on their own; unchecked cleanup returns are noise.
+      - path: _test\.go
+        linters:
+          - errcheck
+      # False positive: every flagged deref is guarded by a t.Fatal'd nil
+      # check, which staticcheck fails to model as no-return here.
+      - path: _test\.go
+        text: "SA5011"
+        linters:
+          - staticcheck

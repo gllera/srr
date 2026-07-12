@@ -203,7 +203,7 @@ func (o *DB) syncOneOutFeed(ctx context.Context, of OutFeed, cdn string) error {
 	key := outFileKey(of)
 	// AtomicPut (temp-then-rename) so a CDN reader never sees a truncated/half-
 	// written feed — out/* is a mutable served object, like db.gz.
-	if err := o.Backend.AtomicPut(ctx, key, &buf, store.ObjectMeta{ContentType: outContentType(of)}); err != nil {
+	if err := o.AtomicPut(ctx, key, &buf, store.ObjectMeta{ContentType: outContentType(of)}); err != nil {
 		return fmt.Errorf("put %s: %w", key, err)
 	}
 	return nil

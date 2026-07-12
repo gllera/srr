@@ -288,23 +288,19 @@ func TestResolveNoFeedErrors(t *testing.T) {
 	}
 }
 
-// TestHash pins the FNV-32a GUID hash: deterministic, distinct for distinct
-// inputs, and non-zero for the empty string (the FNV offset basis).
+// TestHash pins the FNV-32a GUID hash to exact values — the contract external
+// fetchers replicate — plus distinctness for distinct inputs.
 func TestHash(t *testing.T) {
-	// Deterministic.
-	if hash("test-guid-12345") != hash("test-guid-12345") {
-		t.Error("hash is not deterministic")
+	if got := hash("test-guid-12345"); got != 0x7bafce13 {
+		t.Errorf(`hash("test-guid-12345") = %#x, want 0x7bafce13`, got)
+	}
+	// Empty string hashes to the (non-zero) FNV offset basis.
+	if got := hash(""); got != 0x811c9dc5 {
+		t.Errorf(`hash("") = %#x, want 0x811c9dc5 (the FNV offset basis)`, got)
 	}
 	// Distinct inputs → distinct hashes.
 	if hash("guid-a") == hash("guid-b") {
 		t.Error("distinct inputs produced the same hash")
-	}
-	// Empty string is non-zero (the FNV offset basis) and deterministic.
-	if hash("") == 0 {
-		t.Error("hash(\"\") should not be 0 (FNV offset basis)")
-	}
-	if hash("") != hash("") {
-		t.Error("hash(\"\") is not deterministic")
 	}
 }
 

@@ -74,7 +74,7 @@ func (s *statusLine) Write(p []byte) (int, error) {
 	s.erase()
 	n, err := s.out.Write(p)
 	if redraw != "" {
-		s.out.WriteString(redraw)
+		_, _ = s.out.WriteString(redraw) // best-effort redraw; the contract reports the record write
 		s.text = redraw
 	}
 	return n, err
