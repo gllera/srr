@@ -1,11 +1,10 @@
 import { execFileSync } from "node:child_process"
-import { existsSync, readFileSync, rmSync } from "node:fs"
+import { existsSync, rmSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
-import { gunzipSync } from "node:zlib"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
-import { inspectValidate, makeStore, srr } from "../harness"
+import { inspectValidate, makeStore, readDb, srr } from "../harness"
 import { mountReader } from "./mount"
 
 // Per-feed article expiration end-to-end: the gated Go generator
@@ -75,7 +74,7 @@ describe("contract: article expiration", () => {
    })
 
    it("db.gz carries the add_idx/xp bumps for the expiring feed only", () => {
-      const db = JSON.parse(gunzipSync(readFileSync(join(dir, "db.gz"))).toString("utf8")) as DBJSON
+      const db = readDb<DBJSON>(dir)
       expect(db.total_art).toBe(3) // all-time: packs are immutable
       expect(db.feeds[0].add_idx).toBe(1) // bumped past the expired article
       expect(db.feeds[0].xp).toBe(1)

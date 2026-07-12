@@ -111,29 +111,11 @@ func readMetaEntries(t *testing.T, dir, key string, skipBloom bool) []MetaEntry 
 }
 
 // setupMetaBoundaryDB builds a store whose first meta shard just finalized:
-// metaPackSize+1 articles written in two batches.
+// metaPackSize+1 articles written in two batches (setupSplitBoundaryDB in
+// db_summary_test.go, at the meta split size).
 func setupMetaBoundaryDB(t *testing.T) (*DB, string) {
 	t.Helper()
-	db, c, dir := setupTestDB(t)
-	globals.PackSize = 1024 // data packs never split
-
-	ch := &Feed{id: 1, URL: "https://example.com/1"}
-	c.Feeds = map[int]*Feed{ch.id: ch}
-	c.FetchedAt = 1700000000
-
-	articles := make([]*Item, metaPackSize)
-	for i := range articles {
-		articles[i] = &Item{Feed: ch, Title: fmt.Sprintf("A%d", i), Content: "c", Published: int64(i)}
-	}
-	if _, err := db.PutArticles(ctx, articles); err != nil {
-		t.Fatalf("PutArticles: %v", err)
-	}
-	if _, err := db.PutArticles(ctx, []*Item{
-		{Feed: ch, Title: "Last", Content: "c", Published: int64(metaPackSize)},
-	}); err != nil {
-		t.Fatalf("PutArticles: %v", err)
-	}
-	return db, dir
+	return setupSplitBoundaryDB(t, metaPackSize)
 }
 
 func TestSyncMetaFresh(t *testing.T) {

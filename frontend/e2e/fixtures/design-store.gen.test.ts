@@ -10,7 +10,7 @@ import { gunzipSync } from "node:zlib"
 
 import { describe, expect, it } from "vitest"
 
-import { srr, feedServer, inspectValidate } from "../harness"
+import { srr, feedServer, inspectValidate, readDb } from "../harness"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const OUT = resolve(HERE, "design-store")
@@ -39,10 +39,6 @@ interface DbCore {
    seq?: number
    total_art: number
    feeds: Record<string, { title?: string; ferr?: string }>
-}
-
-function readDb(dir: string): DbCore {
-   return JSON.parse(gunzipSync(readFileSync(join(dir, "db.gz"))).toString("utf8")) as DbCore
 }
 
 // Decode the latest data pack (the only one for a tiny store) into ordered
@@ -95,7 +91,7 @@ describe("design fixture store", () => {
          // edits db.gz; the immutable packs are unchanged after it).
          expect(await inspectValidate(OUT)).toContain("OK: all checks passed")
 
-         const db = readDb(OUT)
+         const db = readDb<DbCore>(OUT)
          const seq = db.seq ?? 1
          const idByTitle = (t: string) => Object.entries(db.feeds).find(([, f]) => f.title === t)?.[0]
          const ferrToken = Object.entries(db.feeds).find(([, f]) => f.ferr)?.[0]
