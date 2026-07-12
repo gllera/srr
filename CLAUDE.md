@@ -32,7 +32,7 @@ All commands run from the repo root via `make`:
 | `make vet-be` | Go vet |
 | `make format-be` | `gofmt -w` the backend |
 | `make format-check-be` | gofmt check only (fails on unformatted Go; runs inside `verify-be`) |
-| `make lint-be` | golangci-lint (opt-in; not in `verify-be` — pre-existing findings) |
+| `make lint-be` | golangci-lint (gate-clean; runs inside `verify-be`, config in `backend/.golangci.yml`) |
 | `make generate` | Regenerate `frontend/src/js/format.gen.ts` from the backend Go declarations (`srr gen-ts`) |
 | `make generate-check` | Fail if `format.gen.ts` is stale (runs inside `verify-be`) |
 | `make release` | Cross-compile backend for all platforms (requires `VERSION=`) |

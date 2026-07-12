@@ -17,6 +17,15 @@ runs:
       with:
         go-version-file: backend/go.mod
         cache-dependency-path: backend/go.sum
+    # make verify runs golangci-lint (lint-be gates verify-be). Pinned to the
+    # major the backend/.golangci.yml schema targets (version: "2").
+    - if: inputs.go == 'true'
+      name: Install golangci-lint
+      shell: bash
+      run: |
+        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+          | sh -s -- -b "$HOME/.local/bin" v2.12.2
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
     - if: inputs.node == 'true'
       uses: actions/setup-node@v6
       with:

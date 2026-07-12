@@ -11,10 +11,9 @@ verify: verify-fe verify-be test-contract
 # fails if Parcel dropped a build-time define, the regression that shipped a
 # bundle which threw on boot while every other gate stayed green.
 verify-fe: lint-fe format-check-fe test-fe build-fe smoke-fe
-# verify-be mirrors verify-fe's gates: vet + gofmt check + build + test +
-# contract freshness. lint-be (golangci-lint) is a separate opt-in target (not
-# yet gate-clean), like nothing in verify-fe blocks on it either.
-verify-be: vet-be format-check-be build-be test-be generate-check
+# verify-be mirrors verify-fe's gates: vet + gofmt check + lint + build +
+# test + contract freshness.
+verify-be: vet-be format-check-be lint-be build-be test-be generate-check
 
 # frontend/src/js/format.gen.ts is generated from the backend's Go
 # data-contract declarations (srr gen-ts). generate rewrites it;
@@ -70,8 +69,8 @@ smoke-fe: build-fe
 vet-be test-be:
 	cd backend && go $(@:-be=) ./...
 
-# Go format gate + linter, mirroring lint-fe/format-fe/format-check-fe. gofmt is
-# part of verify-be (format-check-be); golangci-lint is opt-in (`make lint-be`).
+# Go format gate + linter, mirroring lint-fe/format-fe/format-check-fe. Both
+# gate verify-be (format-check-be + lint-be; config in backend/.golangci.yml).
 format-be:
 	cd backend && gofmt -w .
 

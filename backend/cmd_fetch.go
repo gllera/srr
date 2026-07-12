@@ -159,7 +159,7 @@ func (o *FetchCmd) selectFeeds(db *DB) ([]*Feed, error) {
 		}
 		return feeds, nil
 	}
-	feeds, warnings := o.feedFilter.apply(db.Feeds())
+	feeds, warnings := o.apply(db.Feeds())
 	for _, w := range warnings {
 		slog.Warn("feed filter: " + w)
 	}
@@ -369,8 +369,11 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 		assets.baseCtx = ctx
 		assets.sem = make(chan struct{}, max(1, globals.AssetWorkers))
 		bufPool := sync.Pool{
+			// Pointer-like pool payload (SA6002): a bare slice header would be
+			// boxed into a fresh interface allocation on every Put.
 			New: func() any {
-				return make([]byte, globals.MaxFeedSize*(1<<10)+1)
+				buf := make([]byte, globals.MaxFeedSize*(1<<10)+1)
+				return &buf
 			},
 		}
 		// Per-worker module processors: built-in processors hold mutable state
@@ -439,11 +442,11 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 				break
 			}
 			g.Go(func() error {
-				buf := bufPool.Get().([]byte)
+				buf := bufPool.Get().(*[]byte)
 				defer bufPool.Put(buf)
 				processor := procPool.Get().(*mod.Module)
 				defer procPool.Put(processor)
-				runFeedFetch(ch, func() { ch.Fetch(gctx, run, buf, processor) })
+				runFeedFetch(ch, func() { ch.Fetch(gctx, run, *buf, processor) })
 				progress.feedDone(ch.FetchError != "", len(ch.newItems))
 				if onFeed != nil {
 					onFeed(feedProgress{ID: ch.id, Title: ch.Title, Error: ch.FetchError, New: len(ch.newItems)})
@@ -451,7 +454,7 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 				return nil
 			})
 		}
-		g.Wait()
+		_ = g.Wait() // workers never return an error — per-feed failures ride ch.FetchError
 		// Feed fan-out done; the rest of the cycle writes packs/summaries
 		// (zopfli-grade finalization can take a while on a big batch).
 		progress.setSaving()
