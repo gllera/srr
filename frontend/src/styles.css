@@ -720,6 +720,24 @@ body.srr-view-list .srr-toolbar {
          background: color-mix(in srgb, var(--accent) 22%, transparent);
       }
    }
+   /* Scope chips — the [ALL] / ★ Saved meta filters side by side above the
+      feed rows. They aren't feeds (no source chip to align with), so they
+      read as a borderless segmented pair split by one hairline separator;
+      the active one wears the same srr-active tint as any picked row. */
+   & .srr-picker-scope {
+      display: flex;
+      margin-bottom: 0.4rem;
+   }
+   & a.srr-scope-chip {
+      flex: 1 1 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: var(--radius);
+   }
+   & a.srr-scope-chip + a.srr-scope-chip {
+      border-left: 1px solid var(--faint);
+   }
    /* Source-color chip on feed rows — the same per-feed color (data-src →
       --src) as the row's list rail and the reader spine, so a source is picked
       here by the color it wears everywhere else. */
@@ -733,29 +751,17 @@ body.srr-view-list .srr-toolbar {
       margin-right: 0.5rem;
       vertical-align: middle;
    }
-   /* Unread badge. Feed rows are block + nowrap/ellipsis: the badge is
-      prepended and floated right so it pins to the right edge and a long
-      title ellipsizes before reaching it instead of clipping it away. */
+   /* Unread count — inline right after the name, reading as one phrase
+      ("Source ×12"): italic + smaller keeps it subordinate to the name, and
+      a word-space gap separates it from the (shrink-to-fit) title. In tag
+      headers the collapse toggle's own auto left margin still pins the
+      chevron to the right edge past it. */
    & .srr-unread {
-      float: right;
       flex-shrink: 0;
-      /* Gap from the (ellipsized) feed title so the count never touches it. */
-      margin-left: 0.75rem;
+      margin-left: 0.4rem;
       font-size: 0.75rem;
+      font-style: italic;
       color: var(--muted);
-      font-variant-numeric: tabular-nums;
-   }
-   /* Tag headers are flex (floats don't apply): the badge sits before the
-      toggle and takes the free space, parking next to the chevron. padding-left
-      guarantees a gap from the tag name even when the name is long enough to
-      collapse the auto margin to zero. */
-   & .srr-tag-header .srr-unread {
-      float: none;
-      margin-left: auto;
-      padding-left: 0.75rem;
-   }
-   & .srr-tag-header .srr-unread + .srr-tag-toggle {
-      margin-left: 0;
    }
    & .srr-tag-sep {
       border-top: 1px solid var(--faint);
@@ -796,84 +802,39 @@ body.srr-view-list .srr-toolbar {
    }
 }
 
-/* Feed rows + [ALL] + tag headers lay out as flex so the title ellipsizes in the
-   middle while the source chip / health dot / unread badge / ⓘ details button
-   hold their size at the right. ★Saved stays a plain block row (no ⓘ) and
-   ellipsizes on the <a> as before — the title span's flex props are inert
-   outside a flex row. */
+/* Feed rows + tag headers lay out as flex (the scope chips above carry their
+   own flex) so the title shrinks and ellipsizes while the source chip /
+   unread count hold their size. The title is shrink-only (no grow), so the
+   count sits right after the name instead of at the row's far edge. */
 .srr-picker-filter a.srr-feed-row {
    display: flex;
    align-items: center;
 }
 .srr-picker-filter .srr-row-title {
-   flex: 1 1 auto;
+   flex: 0 1 auto;
    min-width: 0;
    overflow: hidden;
    text-overflow: ellipsis;
    white-space: nowrap;
 }
-/* The ⓘ details button (feed rows + [ALL]) — a button-semantic span (a real
-   <button> can't nest in the row's <a>). A SOLID disc with a knocked-out "i":
-   fill is what separates it from the tag headers' open collapse caret sharing
-   the same right gutter (shape alone wasn't enough at this size — both read as
-   thin gray line glyphs). Negative vertical margin keeps it from growing the
-   row, and a negative right margin hugs the edge so it lines up with that
-   caret one row over. Health tints (data-grade) color the whole disc. */
-.srr-picker-filter .srr-info-btn {
-   flex: 0 0 auto;
-   display: inline-flex;
-   align-items: center;
-   justify-content: center;
-   min-width: 2.4rem;
-   min-height: 2.4rem;
-   margin: -0.45rem -0.5rem -0.45rem 0.15rem;
-   color: var(--muted);
-   border-radius: var(--radius);
-   cursor: pointer;
-   transition:
-      color 0.15s,
-      background 0.15s,
-      transform 0.09s ease;
-   & svg {
-      width: 1.05rem;
-      height: 1.05rem;
-   }
-   & .srr-info-disc {
-      fill: currentColor;
-   }
-   & line {
-      stroke: var(--bg);
-      stroke-width: 2.2;
-      stroke-linecap: round;
-   }
-   & .srr-info-dot {
-      fill: var(--bg);
-   }
-   &:hover {
-      color: var(--fg);
-      background: var(--hover);
-   }
-   &:active {
-      transform: scale(0.92);
-   }
-}
 
 /* Feed / tag health, replacing the old leading error dot: an unhealthy feed (or a
    tag group containing one) tints its LABEL by grade — warn amber, crit accent —
    via data-grade on the row. Color only, so every label keeps the same left edge
-   (the dot used to push flagged titles rightward and misalign the list); the
-   right-edge ⓘ inherits the same tint from data-grade. The active selection wins
-   (rule placed last). */
-.srr-picker-filter a[data-grade="warn"] .srr-row-title,
-.srr-picker-filter a[data-grade="warn"] .srr-info-btn,
-.srr-picker-filter a[data-grade="warn"] .srr-info-btn:hover {
+   (the dot used to push flagged titles rightward and misalign the list). The
+   active selection wins (rule placed last). */
+.srr-picker-filter a[data-grade="warn"] .srr-row-title {
    color: #c98000;
 }
 .srr-picker-filter a[data-grade="crit"] .srr-row-title,
-.srr-picker-filter a[data-grade="crit"] .srr-info-btn,
-.srr-picker-filter a[data-grade="crit"] .srr-info-btn:hover,
 .srr-picker-filter a.srr-active .srr-row-title {
    color: var(--accent);
+}
+
+/* Stats mode (the header Info toggle pressed): a row tap opens its detail card
+   instead of filtering — hint the changed meaning on pointer devices. */
+.srr-picker-statsmode .srr-picker-filter a {
+   cursor: help;
 }
 
 /* Title search bar — pinned atop the list while a "q:<query>" filter is active
@@ -1047,8 +1008,8 @@ body:not(.srr-view-list) .srr-open-reader {
    z-index: var(--z-sticky);
    display: flex;
    align-items: center;
-   /* The title's auto right-margin pushes the Show-read toggle + ✕ close to the
-      right edge, sitting together (the gap spaces them). */
+   /* The title's auto right-margin pushes the Info + Show-read toggles + ✕
+      close to the right edge, sitting together (the gap spaces them). */
    gap: 0.5rem;
    max-width: 680px;
    margin: 0 auto;
@@ -1061,10 +1022,11 @@ body:not(.srr-view-list) .srr-open-reader {
    margin-right: auto;
    font-size: var(--text-md);
 }
-/* The unread-only view toggle in the picker header (was the settings menu's
-   "Show read" checkbox). A compact wire-voice pill: muted outline when off,
-   accent-filled when pressed (read articles shown) — the same active-pill
-   vocabulary as the reader's next button. */
+/* The picker header's toggle pills — the Info stats mode and the unread-only
+   view ("Show read", was the settings menu's checkbox). A compact wire-voice
+   pill: muted outline when off, accent-filled when pressed — the same
+   active-pill vocabulary as the reader's next button. */
+.srr-picker-info,
 .srr-picker-showread {
    flex-shrink: 0;
    padding: 0.35rem 0.7rem;
@@ -1091,6 +1053,26 @@ body:not(.srr-view-list) .srr-open-reader {
       border-color: var(--accent);
       color: var(--bg);
    }
+}
+/* The Info toggle is icon-only (an ⓘ glyph in the toolbar icons' outline
+   voice; its label lives in aria-label/title), so its pill rounds up to a
+   circle: equal padding, icon centered. */
+.srr-picker-info {
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   padding: 0.35rem;
+   min-width: 2.2rem;
+}
+.srr-picker-info-icon {
+   display: block;
+   width: 1.2rem;
+   height: 1.2rem;
+   fill: none;
+   stroke: currentColor;
+   stroke-width: 1.6;
+   stroke-linecap: round;
+   stroke-linejoin: round;
 }
 .srr-picker-close {
    background: none;
@@ -1380,13 +1362,13 @@ body:not(.srr-view-list) .srr-open-reader {
       fill: currentColor;
    }
 }
-/* "★ Saved" filter row count — quiet, right-aligned like the unread badge */
+/* "★ Saved" scope chip count — the same inline italic "×N" phrase as the
+   unread counts. */
 .srr-picker-filter .srr-saved-num {
-   float: right;
-   margin-left: 0.5rem;
+   margin-left: 0.4rem;
    font-size: 0.75rem;
+   font-style: italic;
    color: var(--muted);
-   font-variant-numeric: tabular-nums;
 }
 /* In-between states (empty / caught-up / no-match / cold) — a quiet centered
    station, not a top-floating void: mono eyebrow (the wire voice) over one plain
@@ -1427,9 +1409,37 @@ body:not(.srr-view-list) .srr-open-reader {
 .srr-empty-em {
    font-weight: 650;
 }
-/* The not-started placeholder names the never-read feed in its source color —
-   the same [data-src] ramp identity the list rails and reader masthead carry. */
-.srr-empty-em[data-src] {
+/* The not-started wire-head: the never-read feed's name set as the head of the
+   unplayed wire — the reader-masthead voice (mono, uppercase, source-tinted:
+   the same identity the real masthead shows once Next is tapped) between the
+   same dashed hairlines that cap the list at LATEST/OLDEST. It OPENS the
+   station, masthead-first like the article that replaces it; the state +
+   directive read under it. */
+.srr-empty-wirehead {
+   display: flex;
+   align-items: center;
+   gap: 0.7rem;
+   width: 100%;
+   max-width: 21rem;
+   margin-bottom: var(--space-2);
+}
+.srr-empty-wirehead::before,
+.srr-empty-wirehead::after {
+   content: "";
+   flex: 1;
+   border-top: 1px dashed var(--faint);
+}
+.srr-empty-name {
+   min-width: 0;
+   font-family: var(--font-mono);
+   font-size: var(--text-lg);
+   font-weight: 600;
+   letter-spacing: 0.07em;
+   text-transform: uppercase;
+   text-align: center;
+   color: var(--fg);
+}
+.srr-empty-name[data-src] {
    color: var(--src);
 }
 .srr-empty-star {

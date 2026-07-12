@@ -3,11 +3,13 @@
 // hash-routed) and fixed-position, so the list underneath keeps its scroll
 // position untouched while it's open. It owns the filter rows ([ALL], ★ Saved,
 // tag groups and feeds — source-color chips, health-tinted labels, async unread
-// badges, ⓘ detail buttons) and the feed/tag/store info dialogs those ⓘ buttons
-// open. Picking a row closes the overlay and re-filters the LIST (app.ts
-// onSelect → selectFilter). It also owns the header "Show read" toggle (the
-// unread-only view mode — onToggleShowRead flips it via app.ts, which reconciles
-// the surface underneath, then the picker re-renders its own rows). The remaining
+// badges) and the feed/tag/store info dialogs, opened via the header "Info"
+// stats toggle: while it's pressed, tapping a row shows that row's detail card
+// instead of filtering (the per-row ⓘ buttons this replaces are gone). Picking
+// a row normally closes the overlay and re-filters the LIST (app.ts onSelect →
+// selectFilter). It also owns the header "Show read" toggle (the unread-only
+// view mode — onToggleShowRead flips it via app.ts, which reconciles the
+// surface underneath, then the picker re-renders its own rows). The remaining
 // settings live on the now-viewing readout's anchored menu (app.ts
 // openSettingsMenu), which borrows renderStatus() below for its status footer.
 import { VERSION } from "./base"
@@ -34,6 +36,11 @@ let filterBox: HTMLElement
 // The header's "Show read" toggle button — aria-pressed tracks the mode (pressed
 // = read articles shown = unread-only OFF), synced on every render().
 let showReadBtn: HTMLElement
+// The header's "Info" stats toggle — while pressed (statsMode), tapping a filter
+// row opens its detail card instead of filtering. Ephemeral: reset on every
+// open(), so the overlay always comes up in its primary picking mode.
+let statsBtn: HTMLElement
+let statsMode = false
 let hooks: PickerHooks
 // Focus restore target across open/close — the readout button that opened the
 // overlay (mirrors the modals' restore discipline).
@@ -60,16 +67,19 @@ export function setup(el: HTMLElement, h: PickerHooks): void {
       hooks.onToggleShowRead()
       render()
    })
+   statsBtn = el.querySelector(".srr-picker-info") as HTMLElement
+   statsBtn.addEventListener("click", () => setStatsMode(!statsMode))
    // Delegated filter pick: every row carries data-value (feed id / tag / "" /
    // ~saved). The tag collapse toggle stops its own click, but guard anyway.
+   // In stats mode the same tap routes to the row's detail card instead.
    filterBox.addEventListener("click", (e) => {
       const t = e.target as HTMLElement
       if (t.closest(".srr-tag-toggle")) return
-      if (t.closest(".srr-info-btn")) return
       const a = t.closest("[data-value]") as HTMLElement | null
       if (!a) return
       e.preventDefault()
-      hooks.onSelect(a.dataset.value!)
+      if (statsMode) openRowInfo(a.dataset.value!)
+      else hooks.onSelect(a.dataset.value!)
    })
    infoDialog = document.querySelector(".srr-info-dialog")
    if (infoDialog) {
@@ -85,6 +95,7 @@ export function isOpen(): boolean {
 
 export function open(): void {
    if (root.hidden) restoreFocus = document.activeElement as HTMLElement | null
+   setStatsMode(false)
    render()
    root.hidden = false
    // The overlay owns its own scroll (the list's window scroll is untouched
@@ -111,15 +122,24 @@ export function render(): void {
    renderFilterList()
 }
 
+// The Info stats toggle: flips what a row tap means (pick the filter vs open the
+// row's detail card). The rows themselves don't change — the root class is a
+// styling hook for the mode's cursor/affordance.
+function setStatsMode(on: boolean): void {
+   statsMode = on
+   statsBtn.setAttribute("aria-pressed", String(on))
+   root.classList.toggle("srr-picker-statsmode", on)
+}
+
 // ── Filter list ──────────────────────────────────────────────────────────────
 
 function link(value: string, text: string, className?: string): HTMLAnchorElement {
    const a = document.createElement("a")
    a.href = "#"
    a.dataset.value = value
-   // Title rides in its own span so a flex row (feed / tag header) ellipsizes it
-   // in the middle while chips / badges / the ⓘ button keep their size; plain
-   // block rows ([ALL] / ★Saved) ignore the flex props and ellipsize as before.
+   // Title rides in its own span so a flex row (scope chip / feed / tag
+   // header — every row is one) ellipsizes it while chips / counts keep
+   // their size.
    const title = document.createElement("span")
    title.className = "srr-row-title"
    title.textContent = text
@@ -132,46 +152,6 @@ function div(className: string): HTMLDivElement {
    const d = document.createElement("div")
    d.className = className
    return d
-}
-
-const SVG_NS = "http://www.w3.org/2000/svg"
-function svgEl(tag: string, attrs: Record<string, string>): SVGElement {
-   const e = document.createElementNS(SVG_NS, tag)
-   for (const k in attrs) e.setAttribute(k, attrs[k])
-   return e
-}
-
-// The ⓘ details button on a feed / [ALL] row. A button-semantic span — a real
-// <button> can't nest inside the row's <a> — so it carries role/tabindex and an
-// Enter/Space keymap. Its click stops short of the row's filter-select.
-function infoBtn(label: string, onOpen: () => void): HTMLSpanElement {
-   const s = document.createElement("span")
-   s.className = "srr-info-btn"
-   s.setAttribute("role", "button")
-   s.setAttribute("tabindex", "0")
-   s.setAttribute("aria-label", label)
-   s.title = "Details"
-   // A solid disc with a knocked-out "i" — a filled badge, so it can't be
-   // confused with the tag headers' open caret one row over (the two share the
-   // same right gutter; fill vs line is what tells them apart at a glance).
-   const svg = svgEl("svg", { viewBox: "0 0 24 24" })
-   svg.setAttribute("aria-hidden", "true")
-   svg.append(
-      svgEl("circle", { class: "srr-info-disc", cx: "12", cy: "12", r: "9" }),
-      svgEl("line", { x1: "12", y1: "11", x2: "12", y2: "16.5" }),
-      svgEl("circle", { class: "srr-info-dot", cx: "12", cy: "7.75", r: "1.3" }),
-   )
-   s.appendChild(svg)
-   const act = (e: Event) => {
-      e.preventDefault()
-      e.stopPropagation()
-      onOpen()
-   }
-   s.addEventListener("click", act)
-   s.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") act(e)
-   })
-   return s
 }
 
 // Feed-health grade for the row's health tint (ported from dropdown.ts). "" healthy,
@@ -215,21 +195,21 @@ function feedLink(ch: IFeed, className: string): HTMLAnchorElement {
          a.title = note
          a.setAttribute("aria-label", `${ch.title} — ${note}`)
       }
-      // Health shows as a label tint (data-grade → CSS colors the title); the ⓘ
-      // is tinted by grade too. No leading dot, so the label's left edge is
-      // unchanged. The title/aria-label (above) carries the state non-visually.
+      // Health shows as a label tint (data-grade → CSS colors the title). No
+      // leading dot, so the label's left edge is unchanged. The title/aria-label
+      // (above) carries the state non-visually.
       a.dataset.grade = grade
    }
    a.prepend(srcChip(ch.id))
-   const info = infoBtn(`Details for ${ch.title}`, () => openFeedInfo(ch))
-   a.appendChild(info)
    return a
 }
 
+// The inline unread count, reading as one phrase with the name it follows:
+// "Source ×12" (italic, slightly smaller — CSS).
 function unreadBadge(n: number): HTMLSpanElement {
    const s = document.createElement("span")
    s.className = "srr-unread"
-   s.textContent = countBadge(n)
+   s.textContent = `×${countBadge(n)}`
    return s
 }
 
@@ -257,21 +237,25 @@ function renderFilterList(): void {
    const unreadRows: [HTMLAnchorElement, IFeed][] = []
    const headerRows: [HTMLAnchorElement, IFeed[]][] = []
 
-   // [ALL] is a flex feed-row like the per-feed rows, so its unread badge and ⓘ
-   // share their exact right-edge geometry (numeric column + gutter glyph).
-   const allRow = link("", "[ALL]", cls("srr-feed-row", ""))
-   allRow.appendChild(infoBtn("Details for all feeds", () => openStoreInfo()))
-   frag.appendChild(allRow)
-
+   // The two meta filters ride side by side as a scope-chip pair above the
+   // feed rows — they aren't feeds (no source chip, no health), so they read
+   // as scope pills rather than list members. [ALL]'s unread count (the
+   // whole-store total) fills in async like every row's; ★ Saved only shows
+   // when something is saved, and [ALL] goes full-width alone until then.
+   const scope = div("srr-picker-scope")
+   const allRow = link("", "[ALL]", cls("srr-scope-chip", ""))
+   scope.appendChild(allRow)
    const savedN = nav.savedCount()
    if (savedN > 0) {
-      const savedRow = link(nav.SAVED_TOKEN, "★ Saved", cls("", nav.SAVED_TOKEN))
+      const savedRow = link(nav.SAVED_TOKEN, "★ Saved", cls("srr-scope-chip", nav.SAVED_TOKEN))
       const num = document.createElement("span")
       num.className = "srr-saved-num"
-      num.textContent = String(savedN)
+      // Same inline "×N" phrase as the unread counts, so the two chips read alike.
+      num.textContent = `×${savedN}`
       savedRow.appendChild(num)
-      frag.appendChild(savedRow)
+      scope.appendChild(savedRow)
    }
+   frag.appendChild(scope)
 
    for (const tag of sortedTags) {
       const group = tagged.get(tag)!
@@ -330,19 +314,19 @@ async function fillUnread(
       if (my !== fillToken) return
       // [ALL]'s number is the whole backlog — the sum over every listed feed
       // (rows the mode hides as fully-read contribute 0). Absent at zero, like
-      // every row's badge; before the ⓘ, like every feed row's.
+      // every row's badge.
       const total = nav.tagUnreadFromCounts(
          rows.map(([, ch]) => ch),
          counts,
       )
-      if (total > 0) allRow.insertBefore(unreadBadge(total), allRow.querySelector(".srr-info-btn"))
+      if (total > 0) allRow.appendChild(unreadBadge(total))
       const hideRead = nav.isUnreadOnly()
       const activeKey = nav.getCurrentFilterKey()
       for (const [a, ch] of rows) {
          const n = counts.get(ch.id)!
-         // Flex rows: the badge sits just before the ⓘ button (after the title),
-         // not floated — so the title ellipsizes ahead of it.
-         if (n > 0) a.insertBefore(unreadBadge(n), a.querySelector(".srr-info-btn"))
+         // Flex rows: the count sits inline right after the (shrink-to-fit)
+         // title — "Source ×12" — so the title ellipsizes ahead of it.
+         if (n > 0) a.appendChild(unreadBadge(n))
          if (hideRead && n === 0 && String(ch.id) !== activeKey) a.classList.add("srr-hidden")
       }
       headers.forEach(([h, group]) => {
@@ -427,12 +411,27 @@ export function renderStatus(box: HTMLElement): void {
 
 // ── Feed / tag info dialog ─────────────────────────────────────────────────────
 
-// A read-only detail card opened from a row's ⓘ button. Lays the feed/tag's
-// stored fields out in grouped definition grids; the live unread counts (idx-
-// derived, async) fill in after the card shows, guarded by infoFillToken so a
-// close / re-open orphans a stale pass. Reader-facing on purpose: internal
-// bookkeeping (feed ids, HTTP validators, dedup/pack state, processing
-// recipes) stays off the card — the admin GUI is where operators look.
+// A read-only detail card opened by tapping a row in stats mode (the header
+// Info toggle). Lays the feed/tag's stored fields out in grouped definition
+// grids; the live unread counts (idx-derived, async) fill in after the card
+// shows, guarded by infoFillToken so a close / re-open orphans a stale pass.
+// Reader-facing on purpose: internal bookkeeping (feed ids, HTTP validators,
+// dedup/pack state, processing recipes) stays off the card — the admin GUI is
+// where operators look.
+
+// Stats-mode row routing: each row token opens its own card flavor — [ALL] the
+// store rollup, a feed its detail card, a tag its member rollup. ★ Saved has no
+// stored stats of its own (its count is already on the row), so it's inert.
+function openRowInfo(value: string): void {
+   if (value === "") return openStoreInfo()
+   if (value === nav.SAVED_TOKEN) return
+   if (/^\d+$/.test(value)) {
+      const ch = data.db.feeds[Number(value)]
+      if (ch) openFeedInfo(ch)
+      return
+   }
+   openTagInfo(value)
+}
 
 function infoSection(title: string): { sec: HTMLElement; dl: HTMLDListElement } {
    const sec = document.createElement("section")
@@ -533,29 +532,30 @@ function fillFeedUnread(ch: IFeed): Promise<void> {
    return fillStoreUnread([ch])
 }
 
-// The [ALL] row's card: the store-wide rollup none of the per-feed cards can
-// show — inventory and a health census of every feed's grade. Freshness and
-// the search-index state stay out (the settings menu's status footer owns
-// both), and pack internals (generation, latest-pack names) never show.
-function buildStoreInfo(): DocumentFragment {
+// A feed-group rollup card body — the store ([ALL]) and a tag share the shape:
+// inventory, storage footprint, and a health census of every member's grade.
+// storeWide adds the rows only the whole store can answer (Tags, Saved).
+// Freshness and the search-index state stay out (the settings menu's status
+// footer owns both), and pack internals (generation, latest-pack names) never
+// show.
+function buildGroupInfo(feeds: IFeed[], storeWide: boolean): DocumentFragment {
    const frag = document.createDocumentFragment()
-   const feeds = Object.values(data.db.feeds ?? {})
 
    const content = infoSection("Content")
    addRow(content.dl, "Feeds", String(feeds.length))
-   addRow(content.dl, "Tags", String(new Set(feeds.map((ch) => ch.tag).filter(Boolean)).size))
+   if (storeWide) addRow(content.dl, "Tags", String(new Set(feeds.map((ch) => ch.tag).filter(Boolean)).size))
    // Live count, expired excluded — the same semantics as the feed card's row.
    addRow(content.dl, "Articles", String(feeds.reduce((sum, ch) => sum + ch.total_art - (ch.xp ?? 0), 0)))
    addRow(content.dl, "Unread", "…", "srr-info-unread")
-   addRow(content.dl, "Saved", String(nav.savedCount()))
-   // Store footprint summed over every feed — same rows as the feed card.
+   if (storeWide) addRow(content.dl, "Saved", String(nav.savedCount()))
+   // Group footprint summed over every member — same rows as the feed card.
    addRow(content.dl, "Stored content", formatBytes(feeds.reduce((sum, ch) => sum + (ch.cb ?? 0), 0)))
    const media = feeds.reduce((sum, ch) => sum + (ch.ab ?? 0), 0)
    if (media > 0) addRow(content.dl, "Stored assets", formatBytes(media))
    frag.appendChild(content.sec)
 
    // The health census: feedGrade counts in the chip vocabulary (Healthy /
-   // Stale / Error). Problem rows appear only when nonzero, so a healthy store
+   // Stale / Error). Problem rows appear only when nonzero, so a healthy group
    // reads as one quiet line.
    const health = infoSection("Health")
    const grades = feeds.map(feedGrade)
@@ -570,8 +570,19 @@ function buildStoreInfo(): DocumentFragment {
 }
 
 function openStoreInfo(): void {
-   openInfoDialog("All feeds", buildStoreInfo())
-   void fillStoreUnread(Object.values(data.db.feeds ?? {}))
+   const feeds = Object.values(data.db.feeds ?? {})
+   openInfoDialog("All feeds", buildGroupInfo(feeds, true))
+   void fillStoreUnread(feeds)
+}
+
+// A tag row's card: the store rollup scoped to the tag's member feeds. The
+// members come from the same grouping the rendered rows do, so the card always
+// describes exactly the feeds listed under the header it was opened from.
+function openTagInfo(tag: string): void {
+   const group = data.groupFeedsByTag(!nav.isUnreadOnly()).tagged.get(tag)
+   if (!group?.length) return
+   openInfoDialog(tag, buildGroupInfo(group, false))
+   void fillStoreUnread(group)
 }
 
 // The feed card's async live-unread fill, summed store-wide.
@@ -590,7 +601,8 @@ async function fillStoreUnread(feeds: IFeed[]): Promise<void> {
 
 // Centered modal shell, mirroring the image-proxy / backup dialogs: dimmed
 // backdrop, capture-phase Escape + Tab focus trap, backdrop-click close, focus
-// restored to the opener (the ⓘ button). Body is rebuilt per open.
+// restored to the opener (the filter row tapped in stats mode). Body is
+// rebuilt per open.
 function openInfoDialog(title: string, body: Node): void {
    const dialog = infoDialog
    if (!dialog) return

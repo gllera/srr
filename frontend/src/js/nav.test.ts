@@ -508,40 +508,99 @@ describe("showFeed", () => {
    })
 })
 
-// right_count — the reader's pending readout: matching articles strictly
-// AFTER pos under the active filter (positional, so it ticks down on every
-// →-step even when re-reading seen articles). Feed/tag/[ALL] count over
-// filter.feeds — whose bounds are raised in unseen-only mode, so "ahead"
-// means unseen-ahead there; saved/search count their explicit sets. The last
-// article reads 0.
+// right_count — the reader's pending readout. Feed/tag/[ALL]: the filter's
+// live unread with each member's frontier floored at the cursor — what is
+// UNREAD AND AHEAD. Equal to the picker badges on every recorded landing
+// (recordSeen already raised the members to pos) and ticking down by exactly
+// 1 per forward step; an unrecorded landing reads one below the badge (the
+// badge counts the not-yet-consumed article on screen, the pill counts what
+// → still has). Saved/search count their explicit sets strictly after pos
+// (queue/hit countdowns — peek modes have no badge to agree with). The last
+// article reads 0, recorded or not.
 describe("right_count", () => {
    afterEach(() => nav.setUnreadOnly(false))
 
-   it("matches the unread total in normal mode, ticking down as you read forward", async () => {
+   it("ticks down by exactly 1 per forward step, meeting the badge at every recorded landing", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 3 }])
+      // A restored hash records nothing: 2 articles sit ahead of the entry
+      // (the picker's ×3 also counts the not-yet-consumed one on screen).
       expect((await nav.fromHash("0")).right_count).toBe(2)
-      expect((await nav.fromHash("1")).right_count).toBe(1)
-      expect((await nav.fromHash("2")).right_count).toBe(0)
-   })
-
-   it("ticks down positionally when re-reading already-seen articles", async () => {
-      // Live-store regression (#2810→#2813 frozen at 161): every member feed's
-      // seen frontier sits AHEAD of the walk, so a frontier-based pill never
-      // moves. The pill is a countdown of remaining →-steps — it must count
-      // matching articles after pos, read or not.
-      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }, { feedId: 2 }])
-      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 3, "feed:2": 3 }))
-      expect((await nav.fromHash("0")).right_count).toBe(3)
-      expect((await nav.right()).right_count).toBe(2)
+      // Each recorded step marks on ENTER and ticks the pill by exactly 1 —
+      // the floor at the cursor absorbs the entry article's own consumption
+      // (an unfloored badge pill dropped 2 on the first step: 3 → 1).
       expect((await nav.right()).right_count).toBe(1)
       expect((await nav.right()).right_count).toBe(0)
    })
 
+   it("holds at the badge count while re-reading already-seen articles (never above it)", async () => {
+      // The positional pill this replaces counted READ articles ahead of pos,
+      // so it sat visibly above the picker's [ALL] badge whenever any feed was
+      // read ahead of the walk — the recurring badge↔pill mismatch. Floored
+      // frontiers exclude them: re-reading a caught-up store reads an honest,
+      // steady 0 (Next stays armed off has_right), never a phantom backlog.
+      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }, { feedId: 2 }])
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 3, "feed:2": 3 }))
+      const opened = await nav.fromHash("0")
+      expect(opened.has_right).toBe(true) // read articles ahead — steps still work
+      expect(opened.right_count).toBe(0) // …but nothing is unread, matching the badge
+      expect((await nav.right()).right_count).toBe(0)
+      expect((await nav.right()).right_count).toBe(0)
+   })
+
+   it("excludes read-ahead articles in show-read mode — never above the [ALL] badge", async () => {
+      // The originally-reported mismatch: read one lane to its end, then land
+      // on [ALL]'s oldest unread — the read lane's articles sit AHEAD of pos.
+      // They are still →-steps (has_right) but not unread: the old positional
+      // pill said 3 here. The badge says ×1 — the on-screen article, not yet
+      // consumed by this unrecorded landing — and the pill 0: nothing unread
+      // is ahead.
+      setupIndex([{ feedId: 2 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 3 })) // feed 1 read to its end
+      const opened = await nav.fromHash("0") // [ALL], on feed 2's still-unread article
+      expect(opened.has_right).toBe(true)
+      expect(opened.right_count).toBe(0)
+      const members = Object.values(data.db.feeds)
+      expect(nav.tagUnreadFromCounts(members, await nav.unreadCounts(members))).toBe(1)
+      // Reading it (a recorded landing) consumes it: pill and badge agree at 0.
+      expect((await nav.goTo(0)).right_count).toBe(0)
+      expect(nav.tagUnreadFromCounts(members, await nav.unreadCounts(members))).toBe(0)
+   })
+
    it("counts only the filtered feed's unread in filtered mode", async () => {
       setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }, { feedId: 2 }, { feedId: 1 }])
-      expect((await nav.fromHash("0!1")).right_count).toBe(2) // chron 2, 4
-      expect((await nav.fromHash("2!1")).right_count).toBe(1)
-      expect((await nav.fromHash("4!1")).right_count).toBe(0)
+      // Restored landing (nothing recorded): feed 1's {2,4} ahead of the entry.
+      expect((await nav.fromHash("0!1")).right_count).toBe(2)
+      expect((await nav.right()).right_count).toBe(1) // on chron 2 (recorded): {4} left
+      expect((await nav.right()).right_count).toBe(0) // on chron 4: caught up
+   })
+
+   it("first → from [ALL]'s unrecorded resume ticks by exactly 1 (the −2 double-drop bug)", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 3 }]) // nothing seen anywhere
+      nav.setUnreadOnly(true)
+      // [ALL] opens at the oldest unseen and records nothing (a switch must
+      // not consume unread): the pill reads what → still has — 2 — one below
+      // the ×3 badge, whose extra article is the one on screen.
+      const r = await nav.switchFilter("")
+      expect(data.loadArticle).toHaveBeenLastCalledWith(0)
+      expect(r.right_count).toBe(2)
+      // The first step marks the entry AND the landing on ENTER. An unfloored
+      // badge pill dropped 2 at once here (3 → 1); floored at the cursor it
+      // ticks −1 per step from the very first one.
+      expect((await nav.right()).right_count).toBe(1)
+      expect((await nav.right()).right_count).toBe(0)
+   })
+
+   it("re-counts after markUnreadFrom — the unread ahead, ticking by 1 from there", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      await nav.goTo(1) // recorded: read up to chron 1
+      expect((await nav.probeCurrent())!.right_count).toBe(2) // {2,3}
+      nav.markUnreadFrom(1) // rewind: {1,2,3} unread — the on-screen 1 included
+      // The badge counts all three; the pill counts the two AHEAD of the
+      // cursor (→ cannot reach the rewound on-screen article).
+      const members = Object.values(data.db.feeds)
+      expect(nav.tagUnreadFromCounts(members, await nav.unreadCounts(members))).toBe(3)
+      expect((await nav.probeCurrent())!.right_count).toBe(2)
+      expect((await nav.right()).right_count).toBe(1) // −1: on 2 (recorded), {3} left
    })
 
    it("counts what's ahead in unseen-only mode — the raised bounds keep seen articles out", async () => {
@@ -601,11 +660,149 @@ describe("right_count", () => {
       expect(shown.right_count).toBe(-1)
    })
 
-   it("is 0 on the last article in normal mode (read on landing, like its badge)", async () => {
+   it("reads 0 on the last article — nothing is ahead, recorded or not", async () => {
       setupIndex([{ feedId: 1 }])
-      const shown = await nav.fromHash("0")
-      expect(shown.has_right).toBe(false)
-      expect(shown.right_count).toBe(0)
+      // Never recorded (a fresh device restoring a hash): the on-screen
+      // article is still unread — the picker says ×1 — but nothing is AHEAD,
+      // so the pill's 0 agrees with the disabled →.
+      const fresh = await nav.fromHash("0")
+      expect(fresh.has_right).toBe(false)
+      expect(fresh.right_count).toBe(0)
+      const members = Object.values(data.db.feeds)
+      expect(nav.tagUnreadFromCounts(members, await nav.unreadCounts(members))).toBe(1)
+      // Reading it (a recorded landing) consumes it: the badge drops to 0 too.
+      const read = await nav.goTo(0)
+      expect(read.right_count).toBe(0)
+      expect(nav.tagUnreadFromCounts(members, await nav.unreadCounts(members))).toBe(0)
+   })
+})
+
+// Badge↔pill differential oracle — the regression net for the whole class of
+// counting bugs behind the 2026-07 reports (pill above the [ALL] badge from
+// read-ahead articles; the −2 double-drop on the first step from an
+// unrecorded resume; the entry off-by-one). Instead of more hand-picked
+// scenarios, every action of scripted walks across modes × filters ×
+// seen-states is checked against BRUTE-FORCE reference counts — the dumbest
+// possible loops over the entries + seen map, independent of every production
+// counting path (tallyWith / unreadTally / countAll / countLeft):
+//   badge(members)     = # entries of a member feed with chron > its frontier
+//   pill(members, pos) = # of those also with chron > pos  (pos −1 = badge)
+// plus the per-step tick law: a →-step moves the pill by EXACTLY the landing
+// article's own unread status — 1 when it was unread, 0 when re-reading — and
+// both numbers are mode-independent for the same (seen, pos). Any future edit
+// to pendingRight, recordSeen, unreadCounts, or the frontier gestures that
+// re-breaks any of the reported behaviors fails here, whatever the scenario.
+describe("badge↔pill differential oracle", () => {
+   afterEach(() => nav.setUnreadOnly(false))
+
+   // Three interleaved feeds, feeds 1+2 tagged "duo" — every filter shape
+   // ([ALL] / tag / single feed) has members with articles between the others'.
+   const ENTRIES = [1, 2, 1, 3, 2, 1, 3, 1, 2, 1].map((feedId) => ({ feedId }))
+
+   // Seen-state seeds: a fresh device; one lane read to its end (the
+   // read-ahead shape of the original mismatch report); a mixed mid-history.
+   const SEEDS: Record<string, Record<string, number>> = {
+      "fresh device": {},
+      "read-ahead lane": { "feed:1": 9 },
+      "mixed mid-history": { "feed:1": 2, "feed:2": 4 },
+   }
+
+   const seenOf = (feedId: number): number => {
+      const seen = JSON.parse(localStorage.getItem("srr-seen") ?? "{}") as Record<string, number>
+      return seen["feed:" + feedId] ?? -1
+   }
+   const refBadge = (members: number[]): number =>
+      ENTRIES.filter((e, chron) => members.includes(e.feedId) && chron > seenOf(e.feedId)).length
+   const refPill = (members: number[], pos: number): number =>
+      ENTRIES.filter((e, chron) => members.includes(e.feedId) && chron > seenOf(e.feedId) && chron > pos).length
+
+   // Assert both published numbers against the oracles for the CURRENT state.
+   async function checkInvariants(shown: IShowFeed | null) {
+      const members = [...nav.filter.feeds.keys()]
+      const feeds = members.map((id) => data.db.feeds[id])
+      expect(nav.tagUnreadFromCounts(feeds, await nav.unreadCounts(feeds))).toBe(refBadge(members))
+      if (shown) expect(shown.right_count).toBe(refPill(members, nav.currentChron()))
+   }
+
+   // One recorded →-step with the tick law asserted: the pill moves by
+   // exactly the landing article's own PRE-arrival unread status — 1 when it
+   // was unread (consumed on ENTER), 0 when re-reading a seen one. The −2
+   // double-drop and a frozen nonzero countdown both violate this law before
+   // the oracle even looks. Returns null at the walk's end.
+   async function stepChecked(prev: IShowFeed): Promise<IShowFeed | null> {
+      const seenBefore = JSON.parse(localStorage.getItem("srr-seen") ?? "{}") as Record<string, number>
+      let shown: IShowFeed
+      try {
+         shown = await nav.right()
+      } catch {
+         return null
+      }
+      const wasUnread = nav.currentChron() > (seenBefore["feed:" + shown.article.f] ?? -1)
+      expect(prev.right_count - shown.right_count).toBe(wasUnread ? 1 : 0)
+      await checkInvariants(shown)
+      return shown
+   }
+
+   for (const unseenOnly of [false, true]) {
+      for (const [seedName, seed] of Object.entries(SEEDS)) {
+         it(`holds through a full walk — ${unseenOnly ? "unseen-only" : "show-read"}, ${seedName}`, async () => {
+            setupIndex(ENTRIES)
+            data.db.feeds[1].tag = "duo"
+            data.db.feeds[2].tag = "duo"
+            localStorage.setItem("srr-seen", JSON.stringify(seed))
+            nav.setUnreadOnly(unseenOnly)
+
+            // [ALL]: unrecorded resume, then read forward to the end.
+            let shown: IShowFeed | null = await nav.switchFilter("")
+            await checkInvariants(shown)
+            while (shown) shown = await stepChecked(shown)
+
+            // Step back and re-read — the pill must hold at the oracle count,
+            // not tick through read articles (the phantom-backlog shape).
+            try {
+               shown = await nav.left()
+               await checkInvariants(shown)
+               if (shown) shown = await stepChecked(shown)
+            } catch {
+               // A single-article walk has no left neighbor; the oracle pass
+               // above already covered the state.
+            }
+
+            // Tag lane: resume, rewind at the cursor (the u-key gesture, with
+            // app.ts's unseen-only re-apply), read one forward.
+            shown = await nav.switchFilter("duo")
+            await checkInvariants(shown)
+            if (!shown.placeholder && nav.markUnreadFrom(nav.currentChron())) {
+               if (unseenOnly) nav.applyFilter([...nav.filter.tokens])
+               await checkInvariants(await nav.probeCurrent())
+               const cur = await nav.probeCurrent()
+               if (cur) await stepChecked(cur)
+            }
+
+            // Single-feed lane, then catch up wholesale and verify the zeros.
+            shown = await nav.switchFilter("3")
+            await checkInvariants(shown)
+            if (nav.markAllRead()) {
+               if (unseenOnly) nav.applyFilter([...nav.filter.tokens])
+               await checkInvariants(await nav.probeCurrent())
+            }
+         })
+      }
+   }
+
+   it("pill and badge are mode-independent for the same (seen, pos)", async () => {
+      setupIndex(ENTRIES)
+      data.db.feeds[1].tag = "duo"
+      data.db.feeds[2].tag = "duo"
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 2, "feed:2": 4 }))
+      const before = await nav.goTo(5) // recorded landing, mid-history
+      // Flipping the view mode re-applies the filter bounds but must not move
+      // either published number — they derive from (seen, pos, members) only.
+      nav.setUnreadOnly(true)
+      const after = await nav.probeCurrent()
+      expect(after!.right_count).toBe(before.right_count)
+      const members = [...nav.filter.feeds.keys()].map((id) => data.db.feeds[id])
+      expect(nav.tagUnreadFromCounts(members, await nav.unreadCounts(members))).toBe(before.right_count)
    })
 })
 
@@ -2821,11 +3018,12 @@ describe("no-unread feed/tag shows the caught-up placeholder", () => {
 // A feed/tag you've NEVER opened has unread but no already-read article to resume
 // onto. In unread-only mode the reader is a resume surface, so switchFilter shows
 // a distinct "not started" placeholder (notStarted=true → its own message, NOT
-// the "All caught up" one, since the feed HAS unread) instead of dropping onto —
-// and mis-counting the pill of — the oldest unread. The placeholder arrives with
-// Next ARMED (has_right + the full-backlog pill, which with no article on screen
-// equals the picker badge): reading starts with a →-step from right here.
-// Show-read mode still opens the oldest article (you browse there).
+// the "All caught up" one, since the feed HAS unread) instead of dropping the
+// reader onto an unread article a mere switch must not consume. The placeholder
+// arrives with Next ARMED (has_right + the pill, which — being the badge count
+// by construction — reads the feed's full backlog here): reading starts with a
+// →-step from right here. Show-read mode still opens the oldest article (you
+// browse there).
 describe("never-opened feed/tag shows the not-started placeholder (unread-only)", () => {
    afterEach(() => nav.setUnreadOnly(false))
 
@@ -2835,8 +3033,8 @@ describe("never-opened feed/tag shows the not-started placeholder (unread-only)"
       const r = await nav.switchFilter("1")
       expect(r.placeholder).toBe(true)
       expect(r.notStarted).toBe(true)
-      // No article resolved — so no reader pill to disagree with the badge (the
-      // 9-vs-10 mismatch can't arise when you never sit on the unread entry).
+      // No article resolved — the reader stays a resume surface; the pill (the
+      // badge count by construction) reads the full backlog either way.
       expect(nav.currentChron()).toBe(-1)
       expect(data.loadArticle).not.toHaveBeenCalled()
       expect(nav.getCurrentFilterKey()).toBe("1") // scoped to the feed for its message

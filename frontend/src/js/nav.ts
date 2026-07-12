@@ -5,9 +5,9 @@ import * as search from "./search"
 import * as sync from "./sync"
 
 let pos = -1
-// Feed id of the article currently on screen (-1 = none). feedUnread counts
-// this feed's current article as still-unread while you sit on it, but only
-// in unseen-only mode (any filter — see feedUnread / unseenActive).
+// Feed id of the article currently on screen (-1 = none). app.ts reads it via
+// currentFeedId; anchorChron pairs it with pos for the list anchor. Unread
+// counting never consults it — reading is accounted on ENTER (recordSeen).
 let currentFeed = -1
 const next: { left?: Promise<number>; right?: Promise<number> } = {}
 
@@ -504,52 +504,88 @@ function unseenActive(): boolean {
    return unreadOnly && !filter.saved && !filter.search
 }
 
-// One member's unread given an already-parsed seen map: its articles strictly
-// after the feed's seen position, or — when the feed was NEVER seen on
-// this device — its full backlog (countAll). A never-seen feed counts as
-// fully unread so its row badge matches its tag header (tagUnreadFromCounts) and
-// the unseen-only nav that would walk its whole history; a fresh device thus
+// One member's unread given its seen index: its articles strictly after that
+// position, or — when the feed was NEVER seen on this device (undefined) —
+// its full backlog (countAll). A never-seen feed counts as fully unread so
+// its row badge matches its tag header (tagUnreadFromCounts) and the
+// unseen-only nav that would walk its whole history; a fresh device thus
 // shows a count on every feed, not a blank. Both terms come from the same idx
 // counting (countAll − countLeft) so db.gz total_art drift can't skew it, and
 // the boundary pack is the resident latest pack whenever seen is recent (zero
-// fetches; the never-seen branch is sync countAll — no fetch at all). Shared by
-// unreadCount/unreadCounts.
+// fetches; the never-seen branch is sync countAll — no fetch at all). Shared
+// by unreadCounts and (through tallyWith's rare fallback) pendingRight.
 //
 // Accounted on ENTER, not on leave: the article you open is marked seen on
 // ARRIVAL (recordSeen), so it drops out of this count the instant you read it —
 // there is no "current article" pad holding it as still-unread until you step
-// away. The badge is the plain true unread, so it agrees with the reader's
-// pendingRight pill for the feed you're on (both then mean "strictly after pos")
-// and with the list's per-row read/unread dots (isRowUnread), which already
-// treat the current article as read. Switching filters lands on an already-seen
-// resume article and records nothing (switchFilter resolves record:false), so a
-// switch never moves this count — only reading forward does.
-async function feedUnread(ch: IFeed, seenMap: Record<string, number>): Promise<number> {
+// away. The badge is the plain true unread — and the reader's pending pill is
+// these same counts with each frontier floored at the cursor (pendingRight),
+// identical on every recorded landing. It also agrees with the list's
+// per-row read/unread dots (isRowUnread), which already treat the current
+// article as read. Switching filters lands on an already-seen resume article
+// and records nothing (switchFilter resolves record:false), so a switch never
+// moves this count — only reading forward does.
+async function feedUnread(ch: IFeed, seenIdx: number | undefined): Promise<number> {
    const map = new Map([[ch.id, ch.add_idx ?? 0]])
-   const seenIdx = seenMap["feed:" + ch.id]
    if (seenIdx === undefined) return data.countAll(map)
    const upTo = Math.min(seenIdx + 1, data.db.total_art)
    return Math.max(0, data.countAll(map) - (await data.countLeft(upTo, map)))
 }
 
-// The reader's pending readout: what the next pill displays — matching
-// articles strictly AFTER pos under the active filter. Saved/search count
-// their explicit sets; feed/tag/[ALL] count positionally over filter.feeds
-// (whose bounds are already raised in unseen-only mode, so "ahead" means
-// unseen-ahead there). Positional on purpose: the pill is a countdown of the
-// remaining →-steps, so re-reading below the seen frontier still ticks it
-// down step by step — a frontier-based count froze there (matching articles
-// between pos and the frontier are all seen, so the number never moved while
-// stepping through them). Unread-with-the-frontier is the picker badges' job
-// (feedUnread), not this readout's. In the forward-reading flow the two agree.
-// The last article reads 0.
+// The one tally body shared by the badges and the pill: the batched latest-tail
+// pass (data.unreadTally) with the per-feed feedUnread oracle as the `rare`
+// fallback, parameterized on the seen accessor so pendingRight can floor each
+// frontier at the cursor while unreadCounts reads the map verbatim. Keeping
+// both callers on one body is what makes badge↔pill drift structurally
+// impossible — they can only differ by the seenOf they pass.
+async function tallyWith(chs: IFeed[], seenOf: (id: number) => number | undefined): Promise<Map<number, number>> {
+   const { counts, rare } = data.unreadTally(chs, seenOf)
+   await Promise.all(rare.map(async (ch) => counts.set(ch.id, await feedUnread(ch, seenOf(ch.id)))))
+   return counts
+}
+
+// The reader's pending readout: what the next pill displays. Saved/search
+// count their explicit sets positionally (strictly after pos — a queue/hit
+// countdown; there is no unread badge to agree with, peek modes never touch
+// the frontier). Feed/tag/[ALL] count what is UNREAD AND AHEAD: the members'
+// live unread through the same tally the picker rows use (tallyWith →
+// tagUnreadFromCounts), with each member's frontier floored at the cursor so
+// everything at or below pos — the article on screen included — is excluded.
+//
+// The floor is what reconciles the two properties that used to fight:
+//  - Badge parity: on every RECORDED landing recordSeen has already raised
+//    every member's frontier to pos, so the floor is a no-op and the pill is
+//    exactly the picker badge — the read-ahead articles a positional
+//    (countAll − countLeft(pos+1)) count wrongly included stay excluded, and
+//    re-reading a caught-up lane reads an honest steady 0 (Next stays armed
+//    off has_right), never a phantom backlog (#2810).
+//  - Steady −1 ticks: on an UNRECORDED landing (a switch resume, a restored
+//    #pos — landings that must not consume unread) the pill reads one below
+//    the badge: the badge counts the not-yet-consumed article on screen, the
+//    pill counts what → still has. Without the floor the first recorded step
+//    dropped the pill by 2 at once (the entry article AND the landing are
+//    both marked on ENTER); with it, the first step ticks −1 like every other.
+// The last article reads 0 — nothing is ahead, recorded or not. pos −1 (the
+// armed not-started placeholder) floors nothing: the pill is the members'
+// whole backlog, the badge itself.
 async function pendingRight(): Promise<number> {
    if (filter.saved) return savedSorted().filter((c) => c > pos).length
    if (filter.search) {
       await ensureSearchSet()
       return searchSorted.filter((c) => c > pos).length
    }
-   return Math.max(0, data.countAll(filter.feeds) - (await data.countLeft(pos + 1, filter.feeds)))
+   const members: IFeed[] = []
+   for (const id of filter.feeds.keys()) {
+      const ch = data.db.feeds[id]
+      if (ch) members.push(ch)
+   }
+   const seenMap = readSeen()
+   const eff = (id: number): number | undefined => {
+      const s = seenMap["feed:" + id]
+      if (pos < 0) return s
+      return Math.max(s ?? -1, pos)
+   }
+   return tagUnreadFromCounts(members, await tallyWith(members, eff))
 }
 
 async function showFeed(article: IArticle): Promise<IShowFeed> {
@@ -562,11 +598,13 @@ async function showFeed(article: IArticle): Promise<IShowFeed> {
    // very lookup the neighbor prefetch makes next anyway. A cold-pack fetch for a
    // boundary neighbor can blip (offline/evicted); .catch degrades to "no
    // neighbor" (button disabled, retried on the next render) rather than failing
-   // the already-loaded article into the error popup. right_count rides the same
-   // packs the probes touch, and degrades the same way (-1 = digits hidden).
+   // the already-loaded article into the error popup. right_count rides the
+   // resident latest tail (unreadCounts) plus at most the warm packs a rare
+   // long-behind frontier needs, and degrades the same way (-1 = digits hidden).
    // Computed even when has_right is false: on the LAST article the pill shows
-   // an explicit "0" — the readout answers "how many ahead", and at the end the
-   // honest answer is zero, not silence.
+   // an explicit "0" — the readout answers "how much is unread", and at the end
+   // the honest answer is zero, not silence. (In show-read mode "0" with Next
+   // still armed is likewise normal: read articles remain ahead, nothing unread.)
    const has_left = (await feedLeft(pos - 1).catch(() => -1)) !== -1
    const has_right = (await feedRight(pos + 1).catch(() => -1)) !== -1
    const right_count = await pendingRight().catch(() => -1)
@@ -838,11 +876,9 @@ export function markUnreadFrom(chron: number): boolean {
 // the in-code source of truth (and the differential test's anchor) so the
 // badge↔pill agreement can't drift. Maps feed id → unread (a never-seen feed
 // maps to its full backlog).
-export async function unreadCounts(chs: IFeed[]): Promise<Map<number, number>> {
+export function unreadCounts(chs: IFeed[]): Promise<Map<number, number>> {
    const seenMap = readSeen()
-   const { counts, rare } = data.unreadTally(chs, (id) => seenMap["feed:" + id])
-   await Promise.all(rare.map(async (ch) => counts.set(ch.id, await feedUnread(ch, seenMap))))
-   return counts
+   return tallyWith(chs, (id) => seenMap["feed:" + id])
 }
 
 // The tag-header aggregate the dropdown displays as the tag badge: the sum of
@@ -1100,14 +1136,12 @@ export async function switchFilter(token: string): Promise<IShowFeed> {
    if (seenIdx !== undefined && (await isValidSeen(seenIdx))) return resolve(seenIdx, false, false)
    // No already-read article to resume onto, but there IS unread (noUnreadLeft was
    // false). In unread-only mode the reader is a resume surface: show the distinct
-   // "not started" placeholder rather than dropping onto the oldest unread — which,
-   // being unread-and-unmarked (a switch records nothing), would make the reader's
-   // pendingRight pill read one below the picker badge (badge counts the article
-   // you're sitting on, the pill doesn't). The placeholder itself keeps Next ARMED:
-   // reading begins right here with a →-step onto the oldest unread (recorded, as
-   // any read step is), no detour through the list. With pos at -1 the pill counts
-   // the whole backlog — exactly the picker badge, so the two agree on this
-   // placeholder in a way no resolved-article landing could.
+   // "not started" placeholder rather than dropping the reader onto an unread
+   // article that a mere switch must not consume (a switch records nothing).
+   // The placeholder itself keeps Next ARMED: reading begins right here with a
+   // →-step onto the oldest unread (recorded, as any read step is), no detour
+   // through the list. With pos at -1 the pill has no cursor to floor at, so
+   // it reads the feed's whole unread backlog — exactly the picker badge.
    // Show-read mode opens the oldest article as before (you browse there).
    if (!unseenActive()) return first(false)
    const o = resolveNoMatch(false, true)

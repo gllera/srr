@@ -15,13 +15,13 @@ import * as nav from "./nav"
 // when it still matches the filter, else a tag/feed's remembered resume
 // position, else (a tag/feed with no navigation information) its OLDEST
 // article, else ★ Saved's OLDEST saved article (the read-later queue is consumed
-// front-to-back), else the newest match ([ALL]/search). Returning FROM THE READER
-// centers that article in the viewport and highlights its row (.srr-row-current)
-// so you land back on what you were reading; a resume/oldest anchor (filter
-// switch, date scrub, never-opened tag) is top-aligned instead — the
-// start-of-backlog framing. NEWER ("next") articles load ABOVE the anchor (scroll
-// up) and older ones below (scroll down), both paged lazily off
-// IntersectionObserver sentinels.
+// front-to-back), else the newest match ([ALL]/search). The anchored article is
+// CENTERED in the viewport and highlighted (.srr-row-current) on every arrival —
+// reader return, filter switch, boot — so you land back on it with context above
+// and below; returning from the reader commits that scroll immediately (warm
+// pack), a cold build lands it once after layout settles. NEWER ("next")
+// articles load ABOVE the anchor (scroll up) and older ones below (scroll
+// down), both paged lazily off IntersectionObserver sentinels.
 //
 // The rendered rows ARE a persisted, expandable navigation list: returning from
 // the reader to an article that's already a rendered row (the common case — you
@@ -277,21 +277,30 @@ export function emptyStateEl(opts: { notStarted?: boolean; startFeed?: number } 
       // arrives with Next armed (nav.switchFilter), so one step starts reading
       // from the oldest unread right here, no detour through the list.
       // Reader-only — the list surface shows the unread rows and never this state.
-      eyebrow("Not started feed")
-      // Name WHICH feed the unread backlog starts with — startFeed (the oldest
-      // unread's own feed, threaded from nav.switchFilter), tinted with its
-      // source color like every other feed identity: under a tag lane the label
-      // alone couldn't say which member feed is the never-read one. Fallback
-      // (probe blip): the lane label.
-      if (opts.startFeed !== undefined) {
-         const name = em(data.feedTitle(opts.startFeed))
-         name.dataset.src = String(srcColorIndex(opts.startFeed))
-         msg.append("Tap Next to start reading ", name, ".")
-      } else {
+      // The station OPENS with the wire-head — the never-read feed's name in the
+      // reader-masthead voice (mono, upper, source-tinted) between the same
+      // dashed hairlines that cap the list at LATEST/OLDEST — mirroring the
+      // article anatomy (masthead first) that replaces it once Next is tapped;
+      // the state + directive read under it. startFeed (the oldest unread's own
+      // feed, threaded from nav.switchFilter) names WHICH feed the backlog
+      // starts with: under a tag lane the label alone couldn't say which member
+      // feed is the never-read one. Fallback (probe blip): the lane label.
+      let label = ""
+      if (opts.startFeed !== undefined) label = data.feedTitle(opts.startFeed)
+      else {
          const key = nav.getCurrentFilterKey()
-         if (key) msg.append("Tap Next to start reading ", em(nav.filterLabel(key)), ".")
-         else msg.textContent = "Tap Next to start reading."
+         if (key) label = nav.filterLabel(key)
       }
+      if (label) {
+         const head = el("div", "srr-empty-wirehead")
+         const name = el("strong", "srr-empty-name")
+         name.textContent = label
+         if (opts.startFeed !== undefined) name.dataset.src = String(srcColorIndex(opts.startFeed))
+         head.appendChild(name)
+         wrap.appendChild(head)
+      }
+      eyebrow("Not started")
+      msg.textContent = "Tap Next to start reading."
    } else if (nav.isSearchFilter()) {
       const q = nav.searchQuery()
       if (q) msg.append("No titles match ", em(`“${q}”`), ". Try fewer or different words.")
@@ -363,9 +372,9 @@ function showEmptyState(): void {
 // user has scrolled (then their position wins). Only meaningful for an
 // anchoredMid seed (rows above it can grow/shrink); a newest-top anchor is at
 // scroll 0 and grows downward, so it never needs this.
-function reassertAnchor(seed: number, center: boolean): void {
+function reassertAnchor(seed: number): void {
    if (userScrolled) return
-   scrollChronToView(seed, center)
+   scrollChronToView(seed)
 }
 
 function relabelDividers(): void {
@@ -488,16 +497,17 @@ async function runPool<T>(items: T[], limit: number, worker: (item: T) => Promis
 
 // Full (re)build: clears the list, resolves the anchor (the reader's article when
 // it matches, else newest), loads a batch older (incl. the anchor) and — when
-// anchored mid-feed — a batch newer above it, then positions the anchor. `center`
-// (set when returning from the reader) centers the anchor in the viewport instead
-// of top-aligning it — but only the live reader article (seed === anchorChron),
-// never an oldest-unread anchor. When the filter resolves to a SPECIFIC article
+// anchored mid-feed — a batch newer above it, then positions the anchor,
+// CENTERED in the viewport (context above and below, the same mid-screen
+// framing on every arrival). `anchorNow` (set when returning from the reader)
+// commits that scroll immediately — the seed's pack is warm — instead of the
+// cold-build land-once below. When the filter resolves to a SPECIFIC article
 // (anchoredMid — a fresh feed/tag's oldest-unread position), that article also
 // becomes the current selection (nav.select), so the highlighted row tracks what
 // the reader would open; the newest-default anchor (-1: [ALL]/saved/search) is
 // left unselected. `renderSearch` selects the newest hit for a query. Sets
 // builtKey so show() can later refresh-vs-rebuild.
-export async function render(center = false, onInteractive?: () => void): Promise<void> {
+export async function render(anchorNow = false, onInteractive?: () => void): Promise<void> {
    const my = (tok = {})
    teardownObserver()
    newest = oldest = -1
@@ -582,14 +592,15 @@ export async function render(center = false, onInteractive?: () => void): Promis
    syncRovingTab() // the seed row (or, with no selection, the first row) is the lone Tab stop
 
    // Position the surface, then hand it over (interactive) before the fills land.
-   // Returning from the reader (center) lands on the live article immediately — its
-   // pack is warm, so it anchors before the fill and re-asserts as neighbors grow.
-   // A FRESH anchor (boot/filter change — landOnceMode) instead stays at the top
-   // during load and lands ONCE after layout settles (below): scrolling onto
-   // still-skeleton, pre-font rows and then correcting as they paint/reflow taller
-   // is exactly the visible "bump". The newest-default (-1) is plain top.
-   const landOnceMode = anchoredMid && !center
-   if (anchoredMid && center) scrollChronToView(seed, true)
+   // Returning from the reader (anchorNow) centers the live article immediately —
+   // its pack is warm, so it anchors before the fill and re-asserts as neighbors
+   // grow. A FRESH anchor (boot/filter change — landOnceMode) instead stays at the
+   // top during load and lands ONCE, centered the same way, after layout settles
+   // (below): scrolling onto still-skeleton, pre-font rows and then correcting as
+   // they paint/reflow taller is exactly the visible "bump". The newest-default
+   // (-1) is plain top.
+   const landOnceMode = anchoredMid && !anchorNow
+   if (anchoredMid && anchorNow) scrollChronToView(seed)
    else window.scrollTo(0, 0)
    notifyScroll()
    userScrolled = false
@@ -603,8 +614,9 @@ export async function render(center = false, onInteractive?: () => void): Promis
    // what you're looking at resolve before off-screen rows — progressive fill
    // prioritized by navigation position. Out-of-order arrival within a wave is
    // fine: each card fills its own row. Pin the rows' real heights, relabel
-   // dividers (which skip still-skeleton rows), and re-assert the anchor (centered
-   // reader-return only) so a height change above the seed doesn't drift it —
+   // dividers (which skip still-skeleton rows), and re-assert the anchor
+   // (immediate-anchor reader return only) so a height change above the seed
+   // doesn't drift it —
    // coalesced to ONE flush per animation frame, not per card: pinHeights'
    // offsetHeight read after relabelDividers' divider churn forces a full
    // synchronous relayout, and per-card that's O(rows) forced reflows packed into
@@ -619,7 +631,7 @@ export async function render(center = false, onInteractive?: () => void): Promis
       if (my !== tok || !pendingFill.length) return
       pinHeights(pendingFill.splice(0))
       relabelDividers()
-      if (anchoredMid && center) reassertAnchor(seed, true)
+      if (anchoredMid && anchorNow) reassertAnchor(seed)
    }
    const anchorIdx = chronsDesc.indexOf(seed)
    const fillOrder = chronsDesc.map((_, k) => k).sort((a, b) => Math.abs(a - anchorIdx) - Math.abs(b - anchorIdx))
@@ -639,22 +651,23 @@ export async function render(center = false, onInteractive?: () => void): Promis
    // pinHeights — before the land-once measurement below).
    if (pendingFill.length) pinHeights(pendingFill.splice(0))
    relabelDividers()
-   if (anchoredMid && center) reassertAnchor(seed, true)
+   if (anchoredMid && anchorNow) reassertAnchor(seed)
 
    // Land-once for a fresh anchor: content-visibility rows paint taller and web
    // fonts reflow AFTER the fill, so scrolling now would land short and then bump as
    // the rows grow. Instead CONVERGE THE MEASUREMENT without moving: each frame
    // re-pin every row's current true height (so even off-screen rows reserve their
-   // real size) and compute where the seed WOULD scroll to; once that target stops
-   // changing for two frames, the layout has settled — scroll there a single time
-   // and only now start the observer. Bounded so a never-settling layout can't spin;
-   // abandoned if the user scrolls first. No requestAnimationFrame (jsdom) → land
+   // real size) and compute where the seed WOULD scroll to (centered — the same
+   // mid-screen anchor as the reader return); once that target stops changing for
+   // two frames, the layout has settled — scroll there a single time and only now
+   // start the observer. Bounded so a never-settling layout can't spin; abandoned
+   // if the user scrolls first. No requestAnimationFrame (jsdom) → land
    // synchronously.
    if (landOnceMode) {
       const allRows = (): HTMLElement[] => (rowsEl ? [...rowsEl.querySelectorAll<HTMLElement>("a.srr-row")] : [])
       const commit = (): void => {
          if (!userScrolled) {
-            scrollChronToView(seed, false)
+            scrollChronToView(seed)
             notifyScroll()
             userScrolled = false
          }
@@ -668,7 +681,7 @@ export async function render(center = false, onInteractive?: () => void): Promis
             if (my !== tok) return
             if (userScrolled || !rowsEl) return commit()
             pinHeights(allRows()) // re-measure true (post-paint/post-font) heights
-            const target = chronScrollTarget(seed, false) ?? -1
+            const target = chronScrollTarget(seed) ?? -1
             if (target === lastTarget) stable++
             else {
                stable = 0
@@ -767,21 +780,22 @@ export function invalidate(): void {
 
 // Re-show an already-built list (same filter). When the reader's article is
 // already a rendered row — the common return path: you stepped a few articles
-// within the loaded window — re-anchor by scrolling to it, with NO feed walk,
-// fetch or rebuild. Filter change, or an article outside the window (you jumped,
-// or navigated past the loaded batch), falls through to a bounded rebuild.
-// `center` (returning from the reader) centers the article instead of
-// top-aligning it; the rebuild path forwards it to render().
-export async function show(center = false, onInteractive?: () => void): Promise<void> {
+// within the loaded window — re-anchor by scrolling to it (centered, like every
+// list anchor), with NO feed walk, fetch or rebuild. Filter change, or an
+// article outside the window (you jumped, or navigated past the loaded batch),
+// falls through to a bounded rebuild. `anchorNow` (returning from the reader)
+// only matters on that rebuild path: it makes render() commit the centered
+// anchor immediately instead of land-once.
+export async function show(anchorNow = false, onInteractive?: () => void): Promise<void> {
    const pos = nav.currentChron()
    if (builtKey === nav.filterKey() && rowsEl && pos >= 0 && findRow(pos)) {
       refresh()
-      scrollChronToView(pos, center)
+      scrollChronToView(pos)
       notifyScroll()
       onInteractive?.() // reuse path is already interactive
       return
    }
-   await render(center, onInteractive)
+   await render(anchorNow, onInteractive)
 }
 
 // Re-derive read/unread dots + saved stars + the current-article highlight from
@@ -875,32 +889,30 @@ function findRow(chron: number): HTMLElement | null {
    return rowsEl ? rowsEl.querySelector<HTMLElement>(`a.srr-row[data-chron="${chron}"]`) : null
 }
 
-// Scroll the row for `chron` into view: `center` puts its vertical midpoint at
-// the center of the area below the sticky search bar (returning from the reader —
-// keep what you were reading in the middle, with context above and below); else
-// it's aligned to the top of that area (the start-of-backlog / date-scrub
-// framing). window.scrollTo clamps to [0, maxScroll], so an anchor near the top
-// or bottom of the feed lands as close to centered as the content allows. A no-op
-// if the row isn't rendered (e.g. saved view dropped it on return) — the caller
-// then keeps the current scroll.
-function scrollChronToView(chron: number, center: boolean): void {
-   const target = chronScrollTarget(chron, center)
+// Scroll the row for `chron` into view: its vertical midpoint lands at the
+// center of the area below the sticky search bar — keep the anchored article in
+// the middle, with context above and below, on every list arrival (reader
+// return, filter change, boot). window.scrollTo clamps to [0, maxScroll], so an
+// anchor near the top or bottom of the feed lands as close to centered as the
+// content allows. A no-op if the row isn't rendered (e.g. saved view dropped it
+// on return) — the caller then keeps the current scroll.
+function scrollChronToView(chron: number): void {
+   const target = chronScrollTarget(chron)
    if (target !== null) window.scrollTo(0, target)
 }
 
-// The clamped scrollY that would bring `chron`'s row into view — the pure
-// computation behind scrollChronToView, also used by the land-once loop to detect
-// when the target has stopped moving (layout settled) BEFORE committing a single
-// scroll. null if the row isn't rendered. Top-align clears the whole top chrome
-// (topInset = sticky bar + day divider), the same inset scrollRowIntoView uses;
-// centering parks the row mid-band, away from the divider, reserving only the bar.
-function chronScrollTarget(chron: number, center: boolean): number | null {
+// The clamped scrollY that would center `chron`'s row — the pure computation
+// behind scrollChronToView, also used by the land-once loop to detect when the
+// target has stopped moving (layout settled) BEFORE committing a single scroll.
+// null if the row isn't rendered. Centering parks the row mid-band, away from
+// the sticky day divider, reserving only the bar (topInset stays the
+// top-alignment inset for scrollRowIntoView / the cursor seed).
+function chronScrollTarget(chron: number): number | null {
    const row = findRow(chron)
    if (!row) return null
    const rect = row.getBoundingClientRect()
    const top = rect.top + window.scrollY
-   const target = center ? top + rect.height / 2 - (window.innerHeight + stickyOffset()) / 2 : top - topInset()
-   return Math.max(0, target)
+   return Math.max(0, top + rect.height / 2 - (window.innerHeight + stickyOffset()) / 2)
 }
 
 function stickyOffset(): number {

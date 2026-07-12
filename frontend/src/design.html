@@ -68,9 +68,10 @@
             <div class="srr-sync-body"></div>
          </div>
       </div>
-      <!-- Feed / tag info dialog — opened from the ⓘ button on a picker filter
-           row. A read-only detail card; picker.ts builds the per-feed / per-tag
-           body into .srr-info-body on open. Same centered-modal pattern as the
+      <!-- Feed / tag info dialog — opened by tapping a picker filter row while
+           the header Info (stats) toggle is pressed. A read-only detail card;
+           picker.ts builds the per-feed / per-tag / store body into
+           .srr-info-body on open. Same centered-modal pattern as the
            image-proxy / backup dialogs (dimmed backdrop, focus trap, Escape /
            backdrop close). -->
       <div class="srr-info-dialog" role="dialog" aria-modal="true" aria-labelledby="srr-info-title">
@@ -120,15 +121,32 @@
          <!-- Filter picker overlay (ephemeral; not hash-routed). Opened by the
               toolbar's filter button (.srr-filter, both surfaces); a fixed
               full-viewport panel with its own scroll, so the list keeps its scroll
-              position untouched underneath. picker.ts renders the feed / tag rows
-              ([ALL], ★ Saved, tag groups, feeds — chips, health tints, unread
-              badges, ⓘ) into .srr-picker-filter; picking one closes the overlay
-              and re-filters the list. The settings that used to share this surface
-              live on the now-viewing readout's anchored menu (app.ts
-              openSettingsMenu). -->
+              position untouched underneath. picker.ts renders the [ALL] / ★ Saved
+              scope-chip pair and the feed / tag rows (tag groups, feeds — chips,
+              health tints, inline ×N unread counts) into .srr-picker-filter;
+              picking one closes the overlay and
+              re-filters the list — unless the header Info (stats) toggle is
+              pressed, in which case a tap opens the row's detail card instead.
+              The settings that used to share this surface live on the
+              now-viewing readout's anchored menu (app.ts openSettingsMenu). -->
          <section class="srr-picker" aria-label="Feeds" hidden>
             <header class="srr-picker-head">
                <h2 class="srr-picker-title">Feeds</h2>
+               <!-- The stats-mode toggle: while pressed, tapping a filter row opens
+                    its detail card (the info dialog) instead of filtering.
+                    picker.ts owns the state and resets it on every open. -->
+               <button
+                  class="srr-picker-info"
+                  aria-pressed="false"
+                  aria-label="Show feed details"
+                  title="Show feed details"
+               >
+                  <svg class="srr-picker-info-icon" viewBox="0 0 24 24" aria-hidden="true">
+                     <circle cx="12" cy="12" r="8.6" />
+                     <path d="M12 11v5" />
+                     <path d="M12 7.6h.01" />
+                  </svg>
+               </button>
                <!-- The unread-only view toggle (was in the settings menu). aria-pressed
                     tracks the mode — pressed = read articles shown; picker.ts syncs it. -->
                <button class="srr-picker-showread" aria-pressed="false" title="Show read articles">Show read</button>

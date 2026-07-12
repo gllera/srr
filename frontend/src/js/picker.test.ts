@@ -60,6 +60,7 @@ type Picker = typeof import("./picker")
 const SKELETON =
    `<section class="srr-picker" hidden>` +
    `<header class="srr-picker-head"><h2 class="srr-picker-title">Feeds</h2>` +
+   `<button class="srr-picker-info" aria-pressed="false"></button>` +
    `<button class="srr-picker-showread" aria-pressed="false"></button>` +
    `<button class="srr-picker-close"></button></header>` +
    `<div class="srr-picker-filter"></div>` +
@@ -184,6 +185,8 @@ describe("filter list", () => {
       picker.render()
       const saved = $<HTMLAnchorElement>('.srr-picker-filter a[data-value="~saved"]')
       expect(saved.textContent).toContain("★ Saved")
+      // The saved count reads as the same inline "×N" phrase as the unread counts.
+      expect(saved.querySelector(".srr-saved-num")!.textContent).toBe("×4")
    })
 
    it("groups tagged feeds and a tag-toggle click expands/collapses without selecting", async () => {
@@ -221,7 +224,7 @@ describe("filter list", () => {
       await flush()
       const has = $<HTMLAnchorElement>('.srr-picker-filter a[data-value="1"]')
       const none = $<HTMLAnchorElement>('.srr-picker-filter a[data-value="2"]')
-      expect(has.querySelector(".srr-unread")!.textContent).toBe("3")
+      expect(has.querySelector(".srr-unread")!.textContent).toBe("×3")
       expect(none.classList.contains("srr-hidden")).toBe(true) // 0 unread, hidden in unread-only
    })
 
@@ -241,7 +244,7 @@ describe("filter list", () => {
       picker.open()
       await flush()
       const all = $<HTMLAnchorElement>('.srr-picker-filter a[data-value=""]')
-      expect(all.querySelector(".srr-unread")!.textContent).toBe("7")
+      expect(all.querySelector(".srr-unread")!.textContent).toBe("×7")
    })
 
    it("leaves [ALL] unnumbered when everything is read (badge only above zero)", async () => {
@@ -401,8 +404,13 @@ describe("show-read toggle (picker header)", () => {
    })
 })
 
+// The stats-mode dialogs: while the header Info toggle is pressed, tapping a
+// row opens its detail card instead of filtering (the per-row ⓘ buttons this
+// replaced are gone).
 describe("info dialog", () => {
-   it("puts an ⓘ details button on feed rows and [ALL] (not tags / ★ Saved)", async () => {
+   const statsOn = () => $(".srr-picker-info").click()
+
+   it("renders no per-row ⓘ buttons — stats mode replaced them", async () => {
       nav.savedCount.mockReturnValue(1)
       data.groupFeedsByTag.mockReturnValue({
          tagged: new Map([["news", [feed({ id: 1, title: "A", tag: "news" })]]]),
@@ -411,13 +419,94 @@ describe("info dialog", () => {
       })
       const picker = await mount()
       picker.open()
-      expect($('.srr-picker-filter a[data-value="5"] .srr-info-btn')).not.toBeNull()
-      expect($('.srr-picker-filter a[data-value=""]').querySelector(".srr-info-btn")).not.toBeNull()
-      expect($(".srr-picker-filter .srr-tag-header").querySelector(".srr-info-btn")).toBeNull()
-      expect($('.srr-picker-filter a[data-value="~saved"]').querySelector(".srr-info-btn")).toBeNull()
+      expect($$(".srr-picker-filter .srr-info-btn")).toHaveLength(0)
    })
 
-   it("opens the store-wide card from [ALL]'s ⓘ — inventory, health census, live unread", async () => {
+   it("the Info toggle tracks aria-pressed and open() resets it off", async () => {
+      const picker = await mount()
+      picker.open()
+      expect($(".srr-picker-info").getAttribute("aria-pressed")).toBe("false")
+      statsOn()
+      expect($(".srr-picker-info").getAttribute("aria-pressed")).toBe("true")
+      expect($(".srr-picker").classList.contains("srr-picker-statsmode")).toBe(true)
+      statsOn() // second click toggles back off
+      expect($(".srr-picker-info").getAttribute("aria-pressed")).toBe("false")
+      statsOn()
+      picker.close()
+      picker.open() // a fresh open always starts in picking mode
+      expect($(".srr-picker-info").getAttribute("aria-pressed")).toBe("false")
+      expect($(".srr-picker").classList.contains("srr-picker-statsmode")).toBe(false)
+   })
+
+   it("without stats mode a row click selects; with it the same click opens the card", async () => {
+      const f = feed({ id: 5, title: "Feed5" })
+      data.db.feeds = { 5: f } // openRowInfo resolves the tapped feed from here
+      data.groupFeedsByTag.mockReturnValue({
+         tagged: new Map(),
+         sortedTags: [],
+         untagged: [f],
+      })
+      const picker = await mount()
+      picker.open()
+      const row = $<HTMLAnchorElement>('.srr-picker-filter a[data-value="5"]')
+      row.dispatchEvent(click())
+      expect(hooks.onSelect).toHaveBeenCalledWith("5")
+      expect($(".srr-info-dialog").classList.contains("srr-open")).toBe(false)
+      hooks.onSelect.mockClear()
+      statsOn()
+      row.dispatchEvent(click())
+      expect(hooks.onSelect).not.toHaveBeenCalled() // stats mode never selects
+      expect($(".srr-info-dialog").classList.contains("srr-open")).toBe(true)
+      expect($(".srr-info-title").textContent).toBe("Feed5")
+   })
+
+   it("in stats mode ★ Saved is inert — no card of its own, no selection", async () => {
+      nav.savedCount.mockReturnValue(3)
+      const picker = await mount()
+      picker.open()
+      statsOn()
+      $('.srr-picker-filter a[data-value="~saved"]').dispatchEvent(click())
+      expect(hooks.onSelect).not.toHaveBeenCalled()
+      expect($(".srr-info-dialog").classList.contains("srr-open")).toBe(false)
+   })
+
+   it("opens a tag rollup card from a tag header — members only, no store-wide rows", async () => {
+      const a = feed({ id: 1, title: "A", tag: "news", total_art: 10, xp: 2, cb: 1_000, ab: 500 })
+      const b = feed({ id: 2, title: "B", tag: "news", ferr: "boom", cb: 234 })
+      const other = feed({ id: 3, title: "C" })
+      data.db.feeds = { 1: a, 2: b, 3: other }
+      data.groupFeedsByTag.mockReturnValue({
+         tagged: new Map([["news", [a, b]]]),
+         sortedTags: ["news"],
+         untagged: [other],
+      })
+      nav.unreadCounts.mockResolvedValue(
+         new Map([
+            [1, 4],
+            [2, 1],
+         ]),
+      )
+      const picker = await mount()
+      picker.open()
+      statsOn()
+      $(".srr-picker-filter .srr-tag-header").dispatchEvent(click())
+      await flush()
+      expect(hooks.onSelect).not.toHaveBeenCalled()
+      expect($(".srr-info-title").textContent).toBe("news")
+      const rows = new Map($$(".srr-info-grid dt").map((dt) => [dt.textContent, dt.nextElementSibling!.textContent]))
+      expect(rows.get("Feeds")).toBe("2") // the tag's members, not the whole store
+      expect(rows.get("Articles")).toBe("9") // live: (10−2) + 1, expired excluded
+      expect(rows.get("Stored content")).toBe("1234B")
+      expect(rows.get("Stored assets")).toBe("500B")
+      expect(rows.get("Healthy")).toBe("1")
+      expect(rows.get("Error")).toBe("1")
+      // Store-wide-only rows stay off the tag card.
+      expect(rows.has("Tags")).toBe(false)
+      expect(rows.has("Saved")).toBe(false)
+      expect($(".srr-info-unread").textContent).toBe("5") // async sum over members
+   })
+
+   it("opens the store-wide card from [ALL] — inventory, health census, live unread", async () => {
       const a = feed({ id: 1, title: "A", tag: "news", total_art: 10, xp: 2, cb: 1_000_000, ab: 500_000 })
       const b = feed({ id: 2, title: "B", ferr: "boom", cb: 234_000 }) // crit; total_art 1
       data.db.feeds = { 1: a, 2: b }
@@ -435,9 +524,8 @@ describe("info dialog", () => {
       )
       const picker = await mount()
       picker.open()
-      $('.srr-picker-filter a[data-value=""] .srr-info-btn').dispatchEvent(
-         new MouseEvent("click", { bubbles: true, cancelable: true }),
-      )
+      statsOn()
+      $('.srr-picker-filter a[data-value=""]').dispatchEvent(click())
       await flush()
       expect($(".srr-info-title").textContent).toBe("All feeds")
       const rows = new Map($$(".srr-info-grid dt").map((dt) => [dt.textContent, dt.nextElementSibling!.textContent]))
@@ -456,33 +544,32 @@ describe("info dialog", () => {
       expect(rows.has("Latest packs")).toBe(false)
       expect(rows.has("Search index")).toBe(false)
       expect($(".srr-info-unread").textContent).toBe("5") // async store-wide sum
-      expect(hooks.onSelect).not.toHaveBeenCalled() // ⓘ never selects the row
+      expect(hooks.onSelect).not.toHaveBeenCalled() // a stats-mode tap never selects
    })
 
    it("opens a feed detail card with its fields and live unread, without selecting the row", async () => {
+      const f = feed({
+         id: 5,
+         title: "Feed5",
+         url: "http://example.com/rss",
+         recipe: "default",
+         total_art: 12,
+         cb: 1_234_567,
+         ab: 89_000_000,
+         exp: 30,
+      })
+      data.db.feeds = { 5: f }
       data.groupFeedsByTag.mockReturnValue({
          tagged: new Map(),
          sortedTags: [],
-         untagged: [
-            feed({
-               id: 5,
-               title: "Feed5",
-               url: "http://example.com/rss",
-               recipe: "default",
-               total_art: 12,
-               cb: 1_234_567,
-               ab: 89_000_000,
-               exp: 30,
-            }),
-         ],
+         untagged: [f],
       })
       nav.unreadCounts.mockResolvedValue(new Map([[5, 7]]))
       const picker = await mount()
       picker.open()
-      $('.srr-picker-filter a[data-value="5"] .srr-info-btn').dispatchEvent(
-         new MouseEvent("click", { bubbles: true, cancelable: true }),
-      )
-      expect(hooks.onSelect).not.toHaveBeenCalled() // ⓘ is not a row selection
+      statsOn()
+      $('.srr-picker-filter a[data-value="5"]').dispatchEvent(click())
+      expect(hooks.onSelect).not.toHaveBeenCalled() // a stats-mode tap is not a selection
       expect($(".srr-info-dialog").classList.contains("srr-open")).toBe(true)
       expect($(".srr-info-title").textContent).toBe("Feed5")
       expect($(".srr-info-body").textContent).toContain("http://example.com/rss")
@@ -504,17 +591,18 @@ describe("info dialog", () => {
    })
 
    it("shows the live article count (total_art − xp) in the detail card", async () => {
+      const f = feed({ id: 5, title: "Feed5", url: "http://example.com/rss", total_art: 10, xp: 4 })
+      data.db.feeds = { 5: f }
       data.groupFeedsByTag.mockReturnValue({
          tagged: new Map(),
          sortedTags: [],
-         untagged: [feed({ id: 5, title: "Feed5", url: "http://example.com/rss", total_art: 10, xp: 4 })],
+         untagged: [f],
       })
       nav.unreadCounts.mockResolvedValue(new Map([[5, 0]]))
       const picker = await mount()
       picker.open()
-      $('.srr-picker-filter a[data-value="5"] .srr-info-btn').dispatchEvent(
-         new MouseEvent("click", { bubbles: true, cancelable: true }),
-      )
+      statsOn()
+      $('.srr-picker-filter a[data-value="5"]').dispatchEvent(click())
       // dt "Articles" and dd "6" concatenate in textContent.
       expect($(".srr-info-body").textContent).toContain("Articles6")
       // Counter-less feed: zero stored content, no assets row (nothing to
@@ -526,14 +614,17 @@ describe("info dialog", () => {
    })
 
    it("feed info card shows Status/Failed-attempts/error for an unhealthy feed", async () => {
+      const f = feed({ id: 9, title: "Broken", ferr: "boom", fail_streak: 4 })
+      data.db.feeds = { 9: f }
       data.groupFeedsByTag.mockReturnValue({
          tagged: new Map(),
          sortedTags: [],
-         untagged: [feed({ id: 9, title: "Broken", ferr: "boom", fail_streak: 4 })],
+         untagged: [f],
       })
       const picker = await mount()
       picker.open()
-      $('.srr-picker-filter a[data-value="9"] .srr-info-btn').dispatchEvent(click())
+      statsOn()
+      $('.srr-picker-filter a[data-value="9"]').dispatchEvent(click())
       // The Status chip reads "Error" tinted crit (ferr present).
       const chip = $(".srr-info-health")
       expect(chip.textContent).toBe("Error")
@@ -555,26 +646,28 @@ describe("info dialog", () => {
       })
       const picker = await mount()
       picker.open()
-      $('.srr-picker-filter a[data-value=""] .srr-info-btn').dispatchEvent(click())
+      statsOn()
+      $('.srr-picker-filter a[data-value=""]').dispatchEvent(click())
       const rows = new Map($$(".srr-info-grid dt").map((dt) => [dt.textContent, dt.nextElementSibling!.textContent]))
       expect(rows.get("Healthy")).toBe("0")
       expect(rows.get("Stale")).toBe("1") // one warn feed → census "Stale" row
       expect(rows.has("Error")).toBe(false) // no crit feed → the Error row stays absent
    })
 
-   it("opens the info dialog on Enter on the ⓘ button, without selecting the row", async () => {
+   it("the tag collapse toggle still expands/collapses in stats mode, opening no card", async () => {
       data.groupFeedsByTag.mockReturnValue({
-         tagged: new Map(),
-         sortedTags: [],
-         untagged: [feed({ id: 5, title: "Feed5" })],
+         tagged: new Map([["news", [feed({ id: 1, title: "A", tag: "news" })]]]),
+         sortedTags: ["news"],
+         untagged: [],
       })
       const picker = await mount()
       picker.open()
-      $('.srr-picker-filter a[data-value="5"] .srr-info-btn').dispatchEvent(
-         new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
-      )
-      expect($(".srr-info-dialog").classList.contains("srr-open")).toBe(true)
-      expect(hooks.onSelect).not.toHaveBeenCalled() // ⓘ activation never selects the row
+      statsOn()
+      const group = $(".srr-picker-filter .srr-tag-group")
+      $(".srr-picker-filter .srr-tag-toggle").dispatchEvent(click())
+      expect(group.classList.contains("srr-tag-collapsed")).toBe(false)
+      expect($(".srr-info-dialog").classList.contains("srr-open")).toBe(false)
+      expect(hooks.onSelect).not.toHaveBeenCalled()
    })
 })
 
@@ -583,14 +676,17 @@ describe("info dialog", () => {
 // focus restore, and no-stacking on a second open.
 describe("info dialog modal shell", () => {
    const openFeedInfo = async (over: Partial<IFeed> = {}) => {
+      const f = feed({ id: 5, title: "Feed5", url: "http://example.com/rss", ...over })
+      data.db.feeds = { 5: f }
       data.groupFeedsByTag.mockReturnValue({
          tagged: new Map(),
          sortedTags: [],
-         untagged: [feed({ id: 5, title: "Feed5", url: "http://example.com/rss", ...over })],
+         untagged: [f],
       })
       const picker = await mount()
       picker.open()
-      const btn = $('.srr-picker-filter a[data-value="5"] .srr-info-btn')
+      $(".srr-picker-info").click() // stats mode: a row tap opens the card
+      const btn = $('.srr-picker-filter a[data-value="5"]')
       btn.focus() // so openInfoDialog captures it as the focus-restore target
       btn.dispatchEvent(click())
       return { picker, btn }
@@ -626,16 +722,20 @@ describe("info dialog modal shell", () => {
       expect(dialog.classList.contains("srr-open")).toBe(false)
    })
 
-   it("info dialog does not stack — a second ⓘ replaces the first", async () => {
+   it("info dialog does not stack — a second stats-mode tap replaces the first", async () => {
+      const f5 = feed({ id: 5, title: "Feed5" })
+      const f6 = feed({ id: 6, title: "Feed6" })
+      data.db.feeds = { 5: f5, 6: f6 }
       data.groupFeedsByTag.mockReturnValue({
          tagged: new Map(),
          sortedTags: [],
-         untagged: [feed({ id: 5, title: "Feed5" }), feed({ id: 6, title: "Feed6" })],
+         untagged: [f5, f6],
       })
       const picker = await mount()
       picker.open()
-      $('.srr-picker-filter a[data-value="5"] .srr-info-btn').dispatchEvent(click())
-      $('.srr-picker-filter a[data-value="6"] .srr-info-btn').dispatchEvent(click())
+      $(".srr-picker-info").click()
+      $('.srr-picker-filter a[data-value="5"]').dispatchEvent(click())
+      $('.srr-picker-filter a[data-value="6"]').dispatchEvent(click())
       expect($$(".srr-info-dialog.srr-open")).toHaveLength(1) // exactly one open
       expect($(".srr-info-title").textContent).toBe("Feed6") // the second took over
    })
