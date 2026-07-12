@@ -451,11 +451,16 @@ describe("browser: real SPA over real packs", () => {
       }
    })
 
-   // The home list reads thin meta/ cards (the derived projection) to populate
-   // its rows — NOT full data/ records — so the list launch is O(1) data pack
-   // fetches. Opening a row then fetches the data/ pack for that article.
-   // This test captures the core read-amplification win of the meta/ design.
-   it("list boot fetches meta/ packs and NOT data/ until a row is opened", async () => {
+   // The home list renders thin meta cards — NOT full data/ records — so the
+   // list launch never fetches a data/ pack. The newest window rides inside
+   // db.gz itself (the head-in-db.gz fast path, DBCore.Head), so a store whose
+   // whole content fits the head (headMax=40 ≥ this 6-article store) renders
+   // with ZERO meta/ AND ZERO data/ pack fetches — served straight from the
+   // db.gz snapshot. Opening a row then fetches the data/ pack for that article.
+   // This captures the read-amplification win of the meta/ design plus its
+   // head-in-db.gz refinement. (The meta/ fetch path for windows beyond the head
+   // is covered at the contract layer: summary/metafallback e2e.)
+   it("list boot renders rows from db.gz head with no data/ fetch until a row is opened", async () => {
       const ctx = await browser.createBrowserContext()
       const page = await ctx.newPage()
       try {
@@ -468,10 +473,11 @@ describe("browser: real SPA over real packs", () => {
          await page.goto(baseUrl, { waitUntil: "load" })
          await waitList(page)
 
-         // After list boot: meta/ pack fetched (the list reads it for card data).
-         expect(requested.some((p) => /\/packs\/meta\//.test(p))).toBe(true)
-         // No data/ pack fetched yet — the list uses meta/ projections only.
+         // After list boot: no data/ pack fetched — and, because the whole store
+         // fits db.gz's inlined head window, not even a meta/ pack is needed to
+         // render the rows. The list is served entirely from the db.gz snapshot.
          expect(requested.some((p) => /\/packs\/data\//.test(p))).toBe(false)
+         expect(requested.some((p) => /\/packs\/meta\//.test(p))).toBe(false)
 
          // Tap the top row → reader opens and fetches the data/ pack.
          await page.click(".srr-list a.srr-row")

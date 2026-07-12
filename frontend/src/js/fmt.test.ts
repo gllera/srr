@@ -645,8 +645,22 @@ describe("readerDateline", () => {
       expect(readerDateline(unix)).toEqual({ text: "just now", title: formatDate(unix) })
    })
 
+   it("boundary: 59s is still 'just now', 60s ticks to the first relative unit", () => {
+      // Pins the sec < 60 edge from both sides (a < → <= mutation would slip past
+      // the 30s/5h cases either side of it).
+      expect(readerDateline(now - 59)).toEqual({ text: "just now", title: formatDate(now - 59) })
+      expect(readerDateline(now - 60)).toEqual({ text: "1m ago", title: formatDate(now - 60) })
+   })
+
    it("just under 7 days is still relative", () => {
       const unix = now - 6 * 86400 // 6 days ago
+      expect(readerDateline(unix)).toEqual({ text: "6d ago", title: formatDate(unix) })
+   })
+
+   it("boundary: one second under 7 days is still relative (pins the cutover's near side)", () => {
+      // The adjacent value below RELATIVE_DATELINE_SEC (604800): a shrink of the
+      // window would flip this to absolute while the 6-day case above stays green.
+      const unix = now - (7 * 86400 - 1)
       expect(readerDateline(unix)).toEqual({ text: "6d ago", title: formatDate(unix) })
    })
 
