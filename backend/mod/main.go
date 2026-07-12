@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"slices"
@@ -324,12 +325,7 @@ func (o *Module) Process(ctx context.Context, args string, i *RawItem) error {
 // Builtins returns the registered built-in module names (e.g. "#sanitize"),
 // sorted, for help and validation error messages.
 func Builtins() []string {
-	out := make([]string, 0, len(registry))
-	for name := range registry {
-		out = append(out, name)
-	}
-	slices.Sort(out)
-	return out
+	return slices.Sorted(maps.Keys(registry))
 }
 
 // Validate checks an already-resolved pipeline before the per-item fetch loop,

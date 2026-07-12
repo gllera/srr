@@ -306,11 +306,7 @@ func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 			rawLines = rawLines[:0]
 			start += metaPackSize
 		}
-		when := ad.Published
-		if when == 0 {
-			when = ad.FetchedAt
-		}
-		line, err := jsonEncode(&MetaEntry{FeedID: ad.FeedID, When: when, Title: ad.Title})
+		line, err := jsonEncode(&MetaEntry{FeedID: ad.FeedID, When: ad.displayTime(), Title: ad.Title})
 		if err != nil {
 			return err
 		}

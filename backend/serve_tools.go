@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/xml"
 	"fmt"
 	"io"
 	"net/http"
@@ -101,13 +100,9 @@ func handleExport(w http.ResponseWriter, r *http.Request) {
 		for _, ch := range db.Feeds() {
 			feeds = append(feeds, ch)
 		}
-		out, e := xml.MarshalIndent(buildOPML(feeds), "", "  ")
-		if e != nil {
-			return fmt.Errorf("encoding opml: %w", e)
-		}
-		data = append([]byte(xml.Header), out...)
-		data = append(data, '\n')
-		return nil
+		var e error
+		data, e = opmlBytes(feeds)
+		return e
 	})
 	if err != nil {
 		writeErr(w, err)

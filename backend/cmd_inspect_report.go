@@ -2,8 +2,9 @@ package main
 
 import (
 	"fmt"
+	"maps"
 	"net/url"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -51,34 +52,40 @@ func inspectOne(fetch keyGetter, core *DBCore, packs []*idxPack, chron int) erro
 	return nil
 }
 
+// addFilterToken resolves one filter token — a numeric feed_id, else a tag
+// name — into feeds (feed_id → add_idx), skipping feeds without articles.
+// Mirrors the frontend's filter resolution; shared by filterReport and
+// fromHashReport so the two inspect modes can't drift.
+func addFilterToken(core *DBCore, token string, feeds map[int]int) {
+	if id, err := strconv.Atoi(token); err == nil {
+		if ch := core.Feeds[id]; ch != nil && ch.TotalArt > 0 {
+			feeds[id] = ch.AddIdx
+		}
+		return
+	}
+	for id, ch := range core.Feeds {
+		if ch.Tag == token && ch.TotalArt > 0 {
+			feeds[id] = ch.AddIdx
+		}
+	}
+}
+
 // filterReport mirrors frontend filter logic: a filter token is a
 // numeric feed_id or a tag name. Reports total count, chron range, and
 // count above the optional floor — same numbers the frontend computes
 // for filteredTotal / filteredLeft.
 func filterReport(core *DBCore, packs []*idxPack, token string, floor int) error {
 	feeds := map[int]int{} // feed_id -> add_idx
-	if n, err := strconv.Atoi(token); err == nil {
-		if ch := core.Feeds[n]; ch != nil && ch.TotalArt > 0 {
-			feeds[n] = ch.AddIdx
-		}
-	} else {
-		for id, ch := range core.Feeds {
-			if ch.Tag == token && ch.TotalArt > 0 {
-				feeds[id] = ch.AddIdx
-			}
-		}
-	}
+	addFilterToken(core, token, feeds)
 	if len(feeds) == 0 {
 		return fmt.Errorf("filter %q resolved to 0 feeds with articles", token)
 	}
 
+	feedIDs := slices.Sorted(maps.Keys(feeds))
 	feedTotal := 0
-	feedIDs := make([]int, 0, len(feeds))
-	for id := range feeds {
-		feedIDs = append(feedIDs, id)
+	for _, id := range feedIDs {
 		feedTotal += core.Feeds[id].TotalArt - core.Feeds[id].Expired
 	}
-	sort.Ints(feedIDs)
 
 	count, aboveFloor, firstChron, lastChron := 0, 0, -1, -1
 	for chron := range core.TotalArticles {
@@ -147,11 +154,7 @@ func listTagsReport(core *DBCore) error {
 		t.feeds++
 		t.articles += ch.TotalArt - ch.Expired
 	}
-	names := make([]string, 0, len(tags))
-	for n := range tags {
-		names = append(names, n)
-	}
-	sort.Strings(names)
+	names := slices.Sorted(maps.Keys(tags))
 	fmt.Printf("\ntags (%d):\n", len(names))
 	for _, n := range names {
 		t := tags[n]
@@ -198,28 +201,14 @@ func fromHashReport(fetch keyGetter, core *DBCore, packs []*idxPack, hash string
 
 	feeds := map[int]int{}
 	for _, token := range tokens {
-		if id, err := strconv.Atoi(token); err == nil {
-			if ch := core.Feeds[id]; ch != nil && ch.TotalArt > 0 {
-				feeds[id] = ch.AddIdx
-			}
-		} else {
-			for id, ch := range core.Feeds {
-				if ch.Tag == token && ch.TotalArt > 0 {
-					feeds[id] = ch.AddIdx
-				}
-			}
-		}
+		addFilterToken(core, token, feeds)
 	}
 	activeFilter := len(tokens) > 0 && len(feeds) > 0
 	if len(tokens) > 0 && !activeFilter {
 		fmt.Printf("  filter tokens %v resolved to 0 feeds -> falls back to no filter\n", tokens)
 	}
 	if activeFilter {
-		ids := make([]int, 0, len(feeds))
-		for id := range feeds {
-			ids = append(ids, id)
-		}
-		sort.Ints(ids)
+		ids := slices.Sorted(maps.Keys(feeds))
 		fmt.Printf("  filter active: %d feed(s) %v\n", len(feeds), ids)
 	} else {
 		fmt.Println("  filter inactive")

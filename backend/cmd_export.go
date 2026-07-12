@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -27,13 +29,25 @@ func (o *ExportCmd) Run() error {
 			}
 			feeds = append(feeds, ch)
 		}
-		out, err := xml.MarshalIndent(buildOPML(feeds), "", "  ")
+		out, err := opmlBytes(feeds)
 		if err != nil {
-			return fmt.Errorf("encoding opml: %w", err)
+			return err
 		}
-		_, err = fmt.Fprintf(stdout, "%s%s\n", xml.Header, out)
+		_, err = stdout.Write(out)
 		return err
 	})
+}
+
+// opmlBytes serializes feeds as a complete OPML 2.0 document (XML header +
+// indented body + trailing newline). Shared by `feed export` and serve's
+// GET /api/export so the two outputs can't drift.
+func opmlBytes(feeds []*Feed) ([]byte, error) {
+	out, err := xml.MarshalIndent(buildOPML(feeds), "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("encoding opml: %w", err)
+	}
+	doc := append([]byte(xml.Header), out...)
+	return append(doc, '\n'), nil
 }
 
 // exportNode is one tag segment's group. Children are keyed by segment so
@@ -78,11 +92,7 @@ func buildOPML(feeds []*Feed) OPML {
 // feed leaves (already title-sorted by buildOPML) — one leaf per feed,
 // carrying its single xmlUrl.
 func outlinesOf(n *exportNode) []Outline {
-	names := make([]string, 0, len(n.children))
-	for name := range n.children {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := slices.Sorted(maps.Keys(n.children))
 	outs := make([]Outline, 0, len(names)+len(n.feeds))
 	for _, name := range names {
 		outs = append(outs, Outline{Title: name, Text: name, Outlines: outlinesOf(n.children[name])})

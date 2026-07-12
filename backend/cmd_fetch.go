@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"os/signal"
@@ -76,11 +77,7 @@ func matchTag(feedTag, sel string) bool {
 func (f feedFilter) apply(all map[int]*Feed) (selected []*Feed, warnings []string) {
 	hasInclude := len(f.Tag) > 0 || len(f.Feed) > 0
 
-	ids := make([]int, 0, len(all))
-	for id := range all {
-		ids = append(ids, id)
-	}
-	sort.Ints(ids)
+	ids := slices.Sorted(maps.Keys(all))
 
 	for _, id := range ids {
 		ch := all[id]
@@ -575,13 +572,13 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 			slog.Warn("corrupt media assets declined this cycle (published without media)", "count", c)
 		}
 
-		var failed, totalFeeds int
+		failed := 0
 		for _, ch := range feeds {
-			totalFeeds++
 			if ch.FetchError != "" {
 				failed++
 			}
 		}
+		totalFeeds := len(feeds)
 		progress.finish()
 		slog.Info("fetch complete",
 			"new_articles", len(articles),

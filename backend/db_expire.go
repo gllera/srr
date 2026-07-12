@@ -198,7 +198,7 @@ func (o *DB) ExpireArticles(ctx context.Context, now int64) error {
 // rewriteAssetURLs; unparseable HTML contributes nothing — the content
 // already published as-is, and an error here would wedge retention forever.
 func collectAssetRefs(content string, keys map[string]struct{}) {
-	if content == "" || !strings.Contains(content, assetKeyPrefix) {
+	if content == "" || !strings.Contains(content, assetPrefix) {
 		return
 	}
 	nodes, err := parseBodyFragment(content)

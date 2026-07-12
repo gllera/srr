@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
+	"slices"
 	"sort"
 	"strings"
 
@@ -145,11 +147,7 @@ func validateRecipeRef(recipes map[string]Recipe, name string) error {
 	if _, ok := recipes[name]; ok {
 		return nil
 	}
-	avail := make([]string, 0, len(recipes))
-	for n := range recipes {
-		avail = append(avail, n)
-	}
-	sort.Strings(avail)
+	avail := slices.Sorted(maps.Keys(recipes))
 	return fmt.Errorf("recipe %q does not exist (available: %s)", name, strings.Join(avail, ", "))
 }
 

@@ -4,7 +4,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 )
 
 func validateAll(fetch keyGetter, core *DBCore, packs []*idxPack) error {
@@ -130,11 +131,7 @@ func checkDBMeta(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 	}
 
 	idxCount, idxLive := feedIDStats(packs, core.Feeds)
-	feedIDs := make([]int, 0, len(core.Feeds))
-	for id := range core.Feeds {
-		feedIDs = append(feedIDs, id)
-	}
-	sort.Ints(feedIDs)
+	feedIDs := slices.Sorted(maps.Keys(core.Feeds))
 	for _, id := range feedIDs {
 		sub := core.Feeds[id]
 		actual := idxCount[id]

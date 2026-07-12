@@ -124,7 +124,8 @@ type assetFetcher struct {
 
 // assetPrefix is the reserved store prefix for self-hosted media, analogous to
 // idx/ and data/. The frontend resolves keys under this prefix against the
-// pack base.
+// pack base. Also shared by rewriteAssetURLs (CDN-prefixing) and
+// collectAssetRefs (expiration harvesting) so the two predicates can't drift.
 const assetPrefix = "assets/"
 
 // newAssetFetcher builds the run's asset uploader. maxKB caps a single stored
