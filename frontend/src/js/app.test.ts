@@ -44,8 +44,12 @@ const nav = vi.hoisted(() => {
       fromHash: vi.fn(async () => sf()),
       applyFilter: vi.fn(),
       tokensSuffix: vi.fn(() => ""),
-      // The real implementation: a pure decode with no nav state, so a faithful
-      // inline copy (not a stub) keeps the routing tests accurate.
+      // The real implementations: pure grammar helpers with no nav state, so
+      // faithful inline copies (not stubs) keep the routing tests accurate.
+      hashPos: (hash: string) => {
+         const bang = hash.indexOf("!")
+         return bang === -1 ? hash : hash.substring(0, bang)
+      },
       parseHashTokens: (hash: string) => {
          const bang = hash.indexOf("!")
          if (bang === -1) return []
@@ -135,7 +139,10 @@ const dropdown = vi.hoisted(() => ({
    showSyncDialog: vi.fn(),
    showContextMenu: vi.fn(),
 }))
-vi.mock("./dropdown", () => dropdown)
+// The dialog openers are stubbed (their modals are dropdown.test.ts's business),
+// but the real wrapTabFocus passes through — the error-popup focus-trap test
+// below exercises it against app.ts's own popup markup.
+vi.mock("./dropdown", async (importOriginal) => ({ ...(await importOriginal<object>()), ...dropdown }))
 
 // Cross-device sync: app.ts only wires it (sync.init with the shared
 // after-merge refresh, after the first route); the cycles themselves are

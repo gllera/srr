@@ -8,9 +8,6 @@ import { describe, it, expect, vi, beforeEach } from "vitest"
 // `instanceof TouchEvent`, so a synthesized Event with those props defined
 // drives the whole machine here — no browser needed.
 
-const dropdown = vi.hoisted(() => ({ closeAllDropdowns: vi.fn() }))
-vi.mock("./dropdown", () => dropdown)
-
 import { setupGestures, type Gestures } from "./gestures"
 
 const setScrollY = (y: number) => Object.defineProperty(window, "scrollY", { value: y, configurable: true })
@@ -38,7 +35,6 @@ function mount(): void {
 }
 
 beforeEach(() => {
-   dropdown.closeAllDropdowns.mockClear()
    setScrollY(0)
    setInnerHeight(800)
    setScrollHeight(4000) // a tall page: the hide/show tests are far from the bottom
@@ -48,11 +44,10 @@ beforeEach(() => {
 describe("scroll-driven toolbar hide/show", () => {
    const slid = () => toolbar.classList.contains("srr-toolbar-slide")
 
-   it("hides the toolbar on a downward scroll past 50px and closes any open dropdown", () => {
+   it("hides the toolbar on a downward scroll past 50px", () => {
       setScrollY(120)
       scroll()
       expect(slid()).toBe(true)
-      expect(dropdown.closeAllDropdowns).toHaveBeenCalled()
    })
 
    it("does not hide within the top 50px (the toolbar stays put near the top)", () => {

@@ -43,6 +43,7 @@
 // of what they read anywhere plus their latest explicit rewinds.
 
 import { IMG_PROXY_KEY, PROFILE_TS_KEY, SAVED_KEY, SEEN_KEY, SEEN_TS_KEY, UNREAD_ONLY_KEY } from "./keys"
+import { isValidHttpish, normalizeHttpish } from "./urlish"
 
 function lsGet(key: string): string {
    try {
@@ -124,25 +125,17 @@ export function localSeenTs(): Record<string, number> {
    return readSeenTs()
 }
 
-// isValidProxy / normalizeProxy mirror fmt.ts's behaviour exactly. profile.ts
-// deliberately does not import fmt.ts (which pulls base.ts's module-load
-// `new URL(SRR_CDN_URL, …)` side effect and would break this module's
-// unit-testability), so the small proxy helpers are duplicated here — keep them in
-// sync. Scheme is optional (https default); a host/path gets a trailing "/".
+// isValidProxy / normalizeProxy match fmt.ts's exports exactly — both are thin
+// wrappers over the shared urlish.ts helpers (scheme optional, https default, a
+// host/path gets a trailing "/"). profile.ts deliberately does not import fmt.ts,
+// which pulls base.ts's module-load `new URL(SRR_CDN_URL, …)` side effect and
+// would break this module's unit-testability; urlish.ts is side-effect-free.
 function isValidProxy(v: string): boolean {
-   const s = v.trim()
-   if (s === "") return true
-   if (/^https?:\/\//i.test(s)) return true
-   if (/^\s*(?:javascript|data|vbscript|file)\s*:/i.test(s)) return false
-   return !/^[a-z][a-z0-9+.-]*:\/\//i.test(s)
+   return isValidHttpish(v)
 }
 
 function normalizeProxy(v: string): string {
-   let s = v.trim()
-   if (s === "") return ""
-   if (!/^https?:\/\//i.test(s)) s = "https://" + s.replace(/^\/+/, "")
-   if (/[a-z0-9]$/i.test(s)) s += "/"
-   return s
+   return normalizeHttpish(v, true)
 }
 
 export interface ImportResult {

@@ -6,6 +6,7 @@ import {
    showContextMenu,
    showImgProxyDialog,
    showSyncDialog,
+   wrapTabFocus,
    type MenuItem,
 } from "./dropdown"
 import { collapseBrokenMedia, countBadge, readerDateline, sanitizeFragment, srcColorIndex, URL_DENY } from "./fmt"
@@ -705,6 +706,10 @@ async function renderListSurface() {
    }
 }
 
+// A well-formed reader position: the hash's position part (nav.hashPos) is a
+// bare integer. Shared by route() below and the boot foreign-hash guard.
+const INT_POS = /^-?\d+$/
+
 // Hash → surface. A numeric position routes to the reader (deep-link or restored
 // reading position); anything else (empty, or just `!tokens`) is the list at
 // that filter.
@@ -712,9 +717,8 @@ async function route(hash: string) {
    // A URL-driven filter change (hashchange / back-forward) also supersedes any
    // pending debounced query — see selectFilter.
    clearTimeout(searchDebounce)
-   const bang = hash.indexOf("!")
-   const posStr = bang === -1 ? hash : hash.substring(0, bang)
-   if (posStr !== "" && /^-?\d+$/.test(posStr)) {
+   const posStr = nav.hashPos(hash)
+   if (posStr !== "" && INT_POS.test(posStr)) {
       await guard(() => nav.fromHash(hash))
       return
    }
@@ -995,23 +999,8 @@ async function init() {
    // reopens its top, and an open picker re-derives its rows and badges.
    const refreshAfterStore = () => {
       refreshFeedLabel()
-      if (view === "reader") {
-         // A prev/next step during the probe window supersedes it: re-check the
-         // probed position so stale chrome is never stamped over the new article.
-         const probed = nav.currentChron()
-         void nav
-            .probeCurrent()
-            .then((o) => {
-               if (o && view === "reader" && nav.currentChron() === probed) {
-                  el.prev.disabled = !o.has_left
-                  el.next.disabled = !o.has_right
-                  syncNextCount(o)
-               }
-            })
-            .catch(() => {})
-      } else {
-         void list.onStoreGrown()
-      }
+      if (view === "reader") reprobeReaderChrome()
+      else void list.onStoreGrown()
       if (picker.isOpen()) picker.render()
    }
 
@@ -1122,16 +1111,7 @@ async function init() {
    window.addEventListener("hashchange", () => void route(location.hash.substring(1)))
    document.addEventListener("keydown", (e) => {
       if (e.key === "Tab" && el.popup.classList.contains("srr-open")) {
-         const focusable = el.popup.querySelectorAll<HTMLElement>("button:not(.srr-hidden)")
-         const first = focusable[0]
-         const last = focusable[focusable.length - 1]
-         if (e.shiftKey && document.activeElement === first) {
-            e.preventDefault()
-            last.focus()
-         } else if (!e.shiftKey && document.activeElement === last) {
-            e.preventDefault()
-            first.focus()
-         }
+         wrapTabFocus(e, el.popup, "button:not(.srr-hidden)")
          return
       }
       if (e.key === "Escape") {
@@ -1203,9 +1183,8 @@ async function init() {
    // auth provider in front of the app — Cloudflare Access JWT-in-fragment,
    // OIDC, etc.) so the page lands on the user's last position instead of
    // the latest article. SRR hashes are `[integer][!tokens]` or `!tokens`.
-   const bang = hash.indexOf("!")
-   const posPart = bang === -1 ? hash : hash.substring(0, bang)
-   if (posPart && !/^-?\d+$/.test(posPart)) {
+   const posPart = nav.hashPos(hash)
+   if (posPart && !INT_POS.test(posPart)) {
       history.replaceState(null, "", location.pathname + location.search)
       hash = ""
    }

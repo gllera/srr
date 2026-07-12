@@ -782,7 +782,7 @@ describe("browser: real SPA over real packs", () => {
 
    // An offline-pinned pack is served from srr-pinned-v1 even when it has been
    // evicted from (or was never in) the rolling srr-packs-v3 bucket. This proves
-   // packCacheFirst's PINNED-first path keeps a pinned filter fully readable after
+   // pinnedCacheFirst's PINNED-first path keeps a pinned filter fully readable after
    // PACKS eviction — the core offline-pin correctness guarantee.
    //
    // NOTE: requires navigator.serviceWorker.controller (same sandbox limit as the
@@ -843,7 +843,7 @@ describe("browser: real SPA over real packs", () => {
 
          // Go offline and reload. The reader must boot and render purely from the
          // PINNED bucket (db.gz is still in PACKS as it's exempt from eviction;
-         // the idx and data packs come from PINNED via packCacheFirst).
+         // the idx and data packs come from PINNED via pinnedCacheFirst).
          await page.setOfflineMode(true)
          await page.reload({ waitUntil: "load" })
          await waitReader(page)

@@ -45,6 +45,7 @@
 
 import { SYNC_URL_KEY } from "./keys"
 import { exportProfile, importProfile, localSeen, localSeenTs, profileTs, touchProfile } from "./profile"
+import { isValidHttpish, normalizeHttpish } from "./urlish"
 
 // Push settles PUSH_DEBOUNCE_MS after the last seen/saved change (a reading
 // burst is one PUT); background pulls (tab re-focus) are at most one per
@@ -92,24 +93,17 @@ export function enabled(): boolean {
    return getSyncUrl() !== ""
 }
 
-// isValidSyncUrl / normalizeSyncUrl follow profile.ts's proxy-URL helpers
-// (scheme optional, https default, dangerous schemes rejected) with one
-// difference: no trailing "/" is appended — the sync URL is a full endpoint
-// (".../profile"), not a prefix, and "/profile" vs "/profile/" can be two
-// different routes to the server.
+// isValidSyncUrl / normalizeSyncUrl are the shared urlish.ts helpers (scheme
+// optional, https default, dangerous schemes rejected) with one difference from
+// the image-proxy pair: no trailing "/" is appended — the sync URL is a full
+// endpoint (".../profile"), not a prefix, and "/profile" vs "/profile/" can be
+// two different routes to the server.
 export function isValidSyncUrl(v: string): boolean {
-   const s = v.trim()
-   if (s === "") return true
-   if (/^https?:\/\//i.test(s)) return true
-   if (/^\s*(?:javascript|data|vbscript|file)\s*:/i.test(s)) return false
-   return !/^[a-z][a-z0-9+.-]*:\/\//i.test(s)
+   return isValidHttpish(v)
 }
 
 export function normalizeSyncUrl(v: string): string {
-   let s = v.trim()
-   if (s === "") return ""
-   if (!/^https?:\/\//i.test(s)) s = "https://" + s.replace(/^\/+/, "")
-   return s
+   return normalizeHttpish(v, false)
 }
 
 // The status readout consumed by the settings menu's status footer.
