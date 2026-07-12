@@ -568,7 +568,7 @@ async function tallyWith(chs: IFeed[], seenOf: (id: number) => number | undefine
 // The last article reads 0 — nothing is ahead, recorded or not. pos −1 (the
 // armed not-started placeholder) floors nothing: the pill is the members'
 // whole backlog, the badge itself.
-async function pendingRight(): Promise<number> {
+async function pendingRight(seenMap?: Record<string, number>): Promise<number> {
    if (filter.saved) return savedSorted().filter((c) => c > pos).length
    if (filter.search) {
       await ensureSearchSet()
@@ -579,16 +579,20 @@ async function pendingRight(): Promise<number> {
       const ch = data.db.feeds[id]
       if (ch) members.push(ch)
    }
-   const seenMap = readSeen()
+   // Reuse the seen map the caller already parsed (recordSeen's, on a recorded
+   // landing — the map it just persisted, so it equals a fresh read) instead of
+   // re-parsing srr-seen in the same navigation tick; else read it fresh (an
+   // unrecorded landing, probeCurrent, the not-started placeholder).
+   const seen = seenMap ?? readSeen()
    const eff = (id: number): number | undefined => {
-      const s = seenMap["feed:" + id]
+      const s = seen["feed:" + id]
       if (pos < 0) return s
       return Math.max(s ?? -1, pos)
    }
    return tagUnreadFromCounts(members, await tallyWith(members, eff))
 }
 
-async function showFeed(article: IArticle): Promise<IShowFeed> {
+async function showFeed(article: IArticle, seenMap?: Record<string, number>): Promise<IShowFeed> {
    // has_left/has_right only need to know whether a neighbor exists under the
    // active filter, which is exactly what feedLeft/feedRight answer — the same
    // seam navigation steps through (raised bounds in unseen-only, the explicit
@@ -605,13 +609,22 @@ async function showFeed(article: IArticle): Promise<IShowFeed> {
    // an explicit "0" — the readout answers "how much is unread", and at the end
    // the honest answer is zero, not silence. (In show-read mode "0" with Next
    // still armed is likewise normal: read articles remain ahead, nothing unread.)
-   const has_left = (await feedLeft(pos - 1).catch(() => -1)) !== -1
-   const has_right = (await feedRight(pos + 1).catch(() => -1)) !== -1
-   const right_count = await pendingRight().catch(() => -1)
+   // The three probes are independent reads of the already-committed pos/filter/
+   // seen state — none mutates nav state and each keeps its own .catch(()=>-1), so
+   // Promise.all yields a byte-identical IShowFeed. Running them concurrently
+   // overlaps the up-to-three cold idx-pack fetches (feedLeft/feedRight neighbors +
+   // pendingRight's rare long-behind frontiers, disjoint packs on a >50k store)
+   // into one round-trip window instead of chaining them; same-pack fetches still
+   // join via cachedPromise. pendingRight reuses recordSeen's seen map (seenMap).
+   const [left, right, right_count] = await Promise.all([
+      feedLeft(pos - 1).catch(() => -1),
+      feedRight(pos + 1).catch(() => -1),
+      pendingRight(seenMap).catch(() => -1),
+   ])
    return {
       article,
-      has_left,
-      has_right,
+      has_left: left !== -1,
+      has_right: right !== -1,
       right_count,
    }
 }
@@ -646,8 +659,8 @@ async function resolve(target: number, replace = false, record = true): Promise<
    if (currentPrefetch?.target === target) currentPrefetch = null
    else abortPrefetch()
    updateHash(replace)
-   if (record) recordSeen(article)
-   return showFeed(article)
+   const seen = record ? recordSeen(article) : undefined
+   return showFeed(article, seen)
 }
 
 // Caps on the neighbor prefetch. Uncapped, an image-stuffed neighbor (live
@@ -765,7 +778,11 @@ function getSeen(token: string): number | undefined {
    return min
 }
 
-function recordSeen(article: IArticle) {
+// Returns the parsed (and, when anything moved, persisted) seen map so the caller
+// (resolve → showFeed → pendingRight) can reuse it without re-reading srr-seen in
+// the same tick; undefined when nothing was read (a peek mode or an unknown feed)
+// or the read threw, in which case pendingRight falls back to a fresh read.
+function recordSeen(article: IArticle): Record<string, number> | undefined {
    // Peek modes never touch the seen frontier. Search (q:) jumps to hits, not a
    // contiguous read-through — advancing here would mark everything up to the
    // hit as seen. ★ Saved is the same shape: re-reading an archived item is not
@@ -798,6 +815,7 @@ function recordSeen(article: IArticle) {
          writeSeen(seen, touched)
          sync.pushSoon()
       }
+      return seen
    } catch {}
 }
 
@@ -1129,13 +1147,30 @@ export async function switchFilter(token: string): Promise<IShowFeed> {
    // saved article — the same landing the list anchors on — and read forward.
    // first() with an empty filter.feeds walks the saved set from chron 0.
    if (filter.saved) return first(false)
+   // Oldest unread under the raised bounds — the ONE feedRight scan, reused for
+   // both the caught-up test here and the not-started startFeed name below (was
+   // two identical scans: noUnreadLeft's probe, then a re-tread for startFeed).
+   // Guarded exactly like noUnreadLeft (fromHash still uses that — it has no probe
+   // to reuse); unreadKnown tells a genuine -1 (caught up) from a cold-pack blip.
+   let firstUnread = -1
+   let unreadKnown = false
+   if (unseenActive() && filter.feeds.size > 0) {
+      try {
+         firstUnread = await feedRight(minOf(filter.feeds.values()))
+         unreadKnown = true
+      } catch {
+         // A cold finalized-pack fetch can blip. Don't strand the open on the
+         // "All caught up" placeholder over a transient probe failure — assume
+         // there's unread and resume normally (showFeed degrades on its own).
+      }
+   }
    // Unread-only + fully-read feed/tag: nothing unread to resume onto — show the
    // "All caught up" placeholder rather than opening an already-read article.
-   if (await noUnreadLeft()) return resolveNoMatch()
+   if (unreadKnown && firstUnread === -1) return resolveNoMatch()
    const seenIdx = getSeen(token)
    if (seenIdx !== undefined && (await isValidSeen(seenIdx))) return resolve(seenIdx, false, false)
-   // No already-read article to resume onto, but there IS unread (noUnreadLeft was
-   // false). In unread-only mode the reader is a resume surface: show the distinct
+   // No already-read article to resume onto, but there IS unread (not caught up
+   // above). In unread-only mode the reader is a resume surface: show the distinct
    // "not started" placeholder rather than dropping the reader onto an unread
    // article that a mere switch must not consume (a switch records nothing).
    // The placeholder itself keeps Next ARMED: reading begins right here with a
@@ -1145,17 +1180,14 @@ export async function switchFilter(token: string): Promise<IShowFeed> {
    // Show-read mode opens the oldest article as before (you browse there).
    if (!unseenActive()) return first(false)
    const o = resolveNoMatch(false, true)
-   o.has_right = true // noUnreadLeft() above proved a right-match exists
+   o.has_right = true // the unread probe above found a right-match (a blip assumes one)
    o.right_count = await pendingRight().catch(() => -1)
    // Name WHICH feed the never-read backlog starts with: the oldest unread's own
    // feed — under a tag lane the label alone can't say which member feed is the
-   // new one. The walk re-treads what noUnreadLeft just probed, so the idx pack
-   // is warm; a blip leaves startFeed unset and the message falls back to the
+   // new one. Reuse the firstUnread chron already probed above (warm idx pack); a
+   // blip left it -1, so startFeed stays unset and the message falls back to the
    // lane label.
-   const start = minOf(filter.feeds.values())
-   o.startFeed = await feedRight(start)
-      .then((c) => (c === -1 ? undefined : data.getFeedId(c)))
-      .catch(() => undefined)
+   o.startFeed = firstUnread < 0 ? undefined : await Promise.resolve(data.getFeedId(firstUnread)).catch(() => undefined)
    return o
 }
 
