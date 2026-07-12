@@ -297,11 +297,20 @@ export function showContextMenu(anchor: HTMLElement, items: MenuItem[], opts?: {
    const onDown = (e: Event) => {
       if (!menu.contains(e.target as Node)) close()
    }
+   // Capture phase (scroll doesn't bubble). A scroll of the surface UNDER the menu
+   // displaces its anchor — dismiss. But the menu is height-capped + overflow-y:auto
+   // (below), and its OWN overflow scroll reaches this same capture listener
+   // (capture fires for a non-bubbling scroll targeted at a descendant), so ignore
+   // scrolls that originate inside it — otherwise scrolling to the clipped rows
+   // self-closes the menu, defeating the max-height cap.
+   const onScroll = (e: Event) => {
+      if (!menu.contains(e.target as Node)) close()
+   }
    const close = () => {
       menu.remove()
       document.removeEventListener("keydown", onKey, true)
       document.removeEventListener("pointerdown", onDown, true)
-      window.removeEventListener("scroll", close, true)
+      window.removeEventListener("scroll", onScroll, true)
       activeClose = null
       anchor.focus()
    }
@@ -330,8 +339,9 @@ export function showContextMenu(anchor: HTMLElement, items: MenuItem[], opts?: {
    document.addEventListener("keydown", onKey, true)
    document.addEventListener("pointerdown", onDown, true)
    // A scroll under the open menu displaces its context — dismiss (capture: the
-   // list surface scrolls the window, but a scrollable article body may not bubble).
-   window.addEventListener("scroll", close, true)
+   // list surface scrolls the window, but a scrollable article body may not bubble;
+   // onScroll ignores the menu's own overflow scroll so the height cap stays usable).
+   window.addEventListener("scroll", onScroll, true)
    // Focus the container, not the first item — a pointer-opened menu must not
    // paint an item pre-selected (:focus-visible fires on programmatic focus);
    // the arrows (above) enter the items, so Shift+F10 keyboard flows still work.
