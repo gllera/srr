@@ -125,19 +125,6 @@ export function localSeenTs(): Record<string, number> {
    return readSeenTs()
 }
 
-// isValidProxy / normalizeProxy match fmt.ts's exports exactly — both are thin
-// wrappers over the shared urlish.ts helpers (scheme optional, https default, a
-// host/path gets a trailing "/"). profile.ts deliberately does not import fmt.ts,
-// which pulls base.ts's module-load `new URL(SRR_CDN_URL, …)` side effect and
-// would break this module's unit-testability; urlish.ts is side-effect-free.
-function isValidProxy(v: string): boolean {
-   return isValidHttpish(v)
-}
-
-function normalizeProxy(v: string): string {
-   return normalizeHttpish(v, true)
-}
-
 export interface ImportResult {
    ok: boolean
    error?: string
@@ -305,9 +292,13 @@ export function importProfile(json: string, opts: { prefs: boolean; mode?: "merg
          }
       } catch {}
       try {
+         // The urlish helpers, not fmt.ts's proxy wrappers: importing fmt.ts
+         // pulls base.ts's module-load `new URL(SRR_CDN_URL, …)` side effect
+         // and would break this module's unit-testability. trailingSlash=true —
+         // an imported proxy value is a prefix, same rule as the settings UI.
          const proxy = obj["imgProxy"]
-         if (typeof proxy === "string" && isValidProxy(proxy)) {
-            lsSet(IMG_PROXY_KEY, normalizeProxy(proxy))
+         if (typeof proxy === "string" && isValidHttpish(proxy)) {
+            lsSet(IMG_PROXY_KEY, normalizeHttpish(proxy, true))
          }
       } catch {}
    }

@@ -39,7 +39,6 @@ vi.mock("./fmt", () => ({
    countBadge: (n: number) => (n > 999 ? "999+" : String(n)),
    formatBytes: (n: number) => `${n}B`,
    isStale: vi.fn(() => false),
-   URL_DENY: /^\s*(?:javascript|data|vbscript|file)\s*:/i,
 }))
 import { isStale } from "./fmt"
 

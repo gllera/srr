@@ -2,13 +2,11 @@ import { PACK_BASE } from "./base"
 import { IMG_PROXY_KEY } from "./keys"
 import { HTTP_RE, isValidHttpish, normalizeHttpish, URL_DENY } from "./urlish"
 
-// URL_DENY (urlish.ts) mirrors the backend bluemonday allowlist for
-// defense-in-depth; re-exported here because fmt.ts is the sanitizer's home.
-export { URL_DENY }
-// URL_DENY guards only URL-BEARING attributes — applying it to every attribute
-// silently strips benign text (a title/alt/download that merely starts with a
-// scheme-like word). These are the URL attributes that survive on the allowed
-// element set below (dangerous elements are removed wholesale first).
+// URL_DENY (imported from its side-effect-free home, urlish.ts) guards only
+// URL-BEARING attributes — applying it to every attribute silently strips
+// benign text (a title/alt/download that merely starts with a scheme-like
+// word). These are the URL attributes that survive on the allowed element set
+// below (dangerous elements are removed wholesale first).
 const URL_ATTRS = new Set([
    "href",
    "src",

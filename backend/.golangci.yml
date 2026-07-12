@@ -11,8 +11,10 @@ linters:
       - path: _test\.go
         linters:
           - errcheck
-      # False positive: every flagged deref is guarded by a t.Fatal'd nil
-      # check, which staticcheck fails to model as no-return here.
+      # SA5011 false positive on the `if x == nil { t.Fatal } → deref` pattern
+      # (staticcheck fails to model t.Fatal as no-return here). Config-level
+      # because a site //nolint can't cover it: golangci also emits the
+      # "related information" diagnostic at the nil-CHECK line as its own issue.
       - path: _test\.go
         text: "SA5011"
         linters:
