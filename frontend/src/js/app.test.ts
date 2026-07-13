@@ -196,9 +196,12 @@ vi.mock("./fmt", () => ({
    collapseBrokenMedia: () => {},
 }))
 
-const gestures = vi.hoisted(() => ({
-   setupGestures: vi.fn(() => ({ resetScroll: vi.fn() })),
-}))
+const gestures = vi.hoisted(() => {
+   // One stable resetScroll instance the setupGestures() result closes over, so
+   // tests can assert the reader render path reveals the toolbar through it.
+   const resetScroll = vi.fn()
+   return { resetScroll, setupGestures: vi.fn(() => ({ resetScroll })) }
+})
 vi.mock("./gestures", () => gestures)
 
 const SKELETON = `
@@ -320,6 +323,42 @@ describe("route() — surface selection from the hash", () => {
       hashTo("#!a%2Bb+%E0%A4%A") // "a+b" (escaped +) then a lone malformed %-escape
       await flush()
       expect(nav.applyFilter).toHaveBeenCalledWith(["a+b", "%E0%A4%A"])
+   })
+})
+
+// The reader's programmatic scroll-to-top on every render must ALSO resync the
+// toolbar auto-hide baseline (gestures.resetScroll), so the bottom bar is
+// revealed on arrival instead of leaking the hidden state from the previous
+// article — the reader can't rely on the scrollTo(0,0) scroll event firing
+// (it doesn't when already at y=0, and mobile coalesces / mis-reads it).
+describe("reader render — toolbar auto-hide reset (resetScroll)", () => {
+   it("reveals the toolbar when an article is rendered", async () => {
+      await boot()
+      gestures.resetScroll.mockClear()
+      hashTo("#2")
+      await flush()
+      expect(document.querySelector(".srr-reader")!.hasAttribute("hidden")).toBe(false) // reader shown
+      expect(gestures.resetScroll).toHaveBeenCalled()
+   })
+
+   it("reveals the toolbar again on each subsequent navigation", async () => {
+      await boot()
+      hashTo("#2")
+      await flush()
+      gestures.resetScroll.mockClear()
+      hashTo("#3") // step to the next article
+      await flush()
+      expect(gestures.resetScroll).toHaveBeenCalled()
+   })
+
+   it("reveals the toolbar on the directed empty-state (placeholder) render too", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ placeholder: true, has_right: false }))
+      gestures.resetScroll.mockClear()
+      hashTo("#5")
+      await flush()
+      // Placeholder path (renderEmptyReader) — still must reveal the bar.
+      expect(gestures.resetScroll).toHaveBeenCalled()
    })
 })
 
