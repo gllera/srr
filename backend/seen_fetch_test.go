@@ -232,6 +232,34 @@ func TestFetchSeenPoolTitleDedupSkippedForNoTitle(t *testing.T) {
 	}
 }
 
+// The title axis must NOT fire on an EMPTY title. foldSearchText("") is "" and
+// titleHash("") is a single fixed value, so without a guard every titleless item
+// on a DedupTitle feed collides on that one hash — a deterministic, silent,
+// indefinite drop of all-but-one titleless item. A titled feed (not NoTitle) can
+// still carry occasional titleless posts (photo/link-only), so this is real. The
+// guid axis must still ingest each distinct titleless item.
+func TestFetchSeenPoolEmptyTitleNotDeduped(t *testing.T) {
+	build := func(guid string) string { // no <title> ⇒ empty title
+		return fmt.Sprintf(`<rss version="2.0"><feed><item><guid>%s</guid><link>https://e/%s</link><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item></feed></rss>`, guid, guid)
+	}
+	var current string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, current)
+	}))
+	defer srv.Close()
+	pool := newSeenPool()
+	ch := &Feed{Title: "T", DedupTitle: true} // title axis ON, but NOT NoTitle
+
+	current = build("g1") // first titleless item
+	if got := fetchWithPool(t, ch, srv, pool, 30, 100); len(got) != 1 {
+		t.Fatalf("fetch1: got %d, want 1", len(got))
+	}
+	current = build("g2") // distinct titleless item; g1 gone from the window
+	if got := fetchWithPool(t, ch, srv, pool, 30, 100); len(got) != 1 {
+		t.Errorf("fetch2 ingested %d, want 1 (empty titles must not collide on the title axis)", len(got))
+	}
+}
+
 // T4 — a feed that legitimately recurs a headline with a fresh GUID each time
 // (e.g. a weekly column), dt OFF (the default), must NOT over-suppress: every
 // new GUID ingests. Guards against accidental blanket title-dedup.
@@ -380,5 +408,60 @@ func TestFetchSeenPoolOverCapDroppedItemNotSuppressed(t *testing.T) {
 	current = bItem // window shrinks to just B; the A-items aged out, so B now has room
 	if got := fetchWithPool(t, ch, srv, pool, 30, 100); len(got) != 1 {
 		t.Errorf("fetch3: got %d, want 1 (B was never ingested nor stamped, so it must ingest now)", len(got))
+	}
+}
+
+// The dual of the case above: an over-cap `dropped` item that the pool ALREADY
+// remembers (a re-promotion whose GUID aged out of bg but not the pool) must
+// keep its clock refreshed. The pool only ever holds stored GUIDs, so a dropped
+// pool-hit is genuinely stored — un-stamping it would let its entry age out and
+// re-ingest as a duplicate later. So the rule is "skip a dropped item ONLY when
+// the pool doesn't already know it". Construction: R is stored+pooled, falls out
+// of bg while staying pooled, then re-promotes into a >cap `must` window where
+// the bg-resident W items are `prior` and R is the sole dropped one — yet a
+// pool-hit, so its stamp day must advance to the latest fetch.
+func TestFetchSeenPoolOverCapPoolHitStaysRemembered(t *testing.T) {
+	item := func(guid string) string { // dateless ⇒ always `must`
+		return fmt.Sprintf(`<item><title>%s</title><guid>%s</guid><link>https://e/%s</link></item>`, guid, guid, guid)
+	}
+	var sb strings.Builder
+	for i := range maxBoundaryGUIDs {
+		sb.WriteString(item(fmt.Sprintf("w%d", i)))
+	}
+	itemsW := sb.String()
+	rItem := item("r")
+
+	var current string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `<rss version="2.0"><feed>%s</feed></rss>`, current)
+	}))
+	defer srv.Close()
+
+	pool := newSeenPool()
+	ch := &Feed{Title: "T"}
+
+	current = rItem // R alone: stored + pooled at day 100
+	if got := fetchWithPool(t, ch, srv, pool, 30, 100); len(got) != 1 {
+		t.Fatalf("fetch1: got %d, want 1 (R new)", len(got))
+	}
+	if len(pool.m) != 1 {
+		t.Fatalf("after fetch1: pool has %d entries, want 1 (R only)", len(pool.m))
+	}
+	var rKey uint64
+	for k := range pool.m {
+		rKey = k // R's pool key, captured while it's the only entry
+	}
+
+	current = itemsW // R falls out of the window; bg rebuilds to the W items only
+	if got := fetchWithPool(t, ch, srv, pool, 30, 110); len(got) != maxBoundaryGUIDs {
+		t.Fatalf("fetch2: got %d, want %d (all W new; R absent)", len(got), maxBoundaryGUIDs)
+	}
+
+	current = itemsW + rItem // R re-promoted into a >cap must window: W are `prior`, R the sole dropped
+	if got := fetchWithPool(t, ch, srv, pool, 30, 130); len(got) != 0 {
+		t.Fatalf("fetch3: got %d, want 0 (W dedup; R is a pool-hit, suppressed)", len(got))
+	}
+	if got := pool.m[rKey]; got != 130 {
+		t.Errorf("R's pool clock = %d, want 130 (a pooled over-cap item must stay remembered, not age out)", got)
 	}
 }
