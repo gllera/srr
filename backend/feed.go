@@ -337,7 +337,7 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 	// resolves during the lock-free fan-out); the title axis additionally needs
 	// DedupTitle and a titled feed. seenBefore is the pool half of the
 	// already-seen test — the other half is priorBoundary (bg) below — and, like
-	// it, it never raises the watermark. stamps buffers this feed's pool updates.
+	// it, it never raises the watermark. window buffers this feed's pool updates.
 	poolOn := c.dedupDays(run.dedupDays) > 0
 	dtOn := poolOn && c.DedupTitle && !c.NoTitle
 	seenBefore := func(i *mod.RawItem) bool {
@@ -347,7 +347,11 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 		if run.seen.has(c.id, i.GUID) {
 			return true
 		}
-		return dtOn && run.seen.has(c.id, titleHash(i.Title))
+		// Empty titles are excluded from the title axis: foldSearchText("") is ""
+		// and titleHash("") is one fixed value, so every titleless item would
+		// collide on it and all but one would be silently dropped forever. A
+		// titled feed (not NoTitle) can still carry occasional titleless posts.
+		return dtOn && i.Title != "" && run.seen.has(c.id, titleHash(i.Title))
 	}
 	// stampSrc buffers the (guid, title) of every current-window item; the flat
 	// stamps are built at the successful tail, AFTER the over-cap `dropped` set is
@@ -591,19 +595,23 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 	// Commit the pool stamps only here — past the all-nil and stale-response
 	// guards' early returns — so a transient stale/empty copy never refreshes
 	// the pool (its clock must not tick on a response that carried no fresh
-	// window). Skip the over-cap `dropped` items: each was skipped from ingestion
-	// AND left out of bg, so stamping it would let seenBefore suppress it forever
-	// instead of letting it retry once the window shrinks below the cap. Every
-	// non-dropped item is either ingested or already remembered (bg/pool hit), so
-	// its clock is refreshed. The single-threaded merge runs after g.Wait().
+	// window). An over-cap `dropped` item is skipped from ingestion AND left out
+	// of bg; stamping a NEVER-stored one would let seenBefore suppress it forever
+	// instead of letting it retry once the window shrinks below the cap. But a
+	// dropped item the pool ALREADY knows (has) is genuinely stored — a
+	// re-promotion whose GUID aged out of bg but not the pool — so un-stamping it
+	// would age it out and re-ingest it as a duplicate; keep refreshing it. Hence
+	// skip only when dropped AND unknown. (The pool holds only stored GUIDs, so a
+	// hit is safe to keep; has is nil-safe, so a pool-less run drops all dropped.)
+	// The single-threaded merge into run.seen runs after g.Wait().
 	if poolOn {
 		stamps := make([]uint32, 0, len(window))
 		for _, s := range window {
-			if _, skip := dropped[s.guid]; skip {
+			if _, dropped := dropped[s.guid]; dropped && !run.seen.has(c.id, s.guid) {
 				continue
 			}
 			stamps = append(stamps, s.guid)
-			if dtOn {
+			if dtOn && s.title != "" { // empty titles never enter the title axis (see seenBefore)
 				stamps = append(stamps, titleHash(s.title))
 			}
 		}
