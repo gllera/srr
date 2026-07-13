@@ -63,9 +63,21 @@ function readSavedSet(): Set<number> {
       return new Set()
    }
 }
-// Ascending chronIdx, for the neighbor walks and the showFeed left/right tally.
-function savedSorted(): number[] {
-   return [...readSavedSet()].sort((a, b) => a - b)
+// Save order (Set iteration == insertion order): the ★ Saved queue read
+// front-to-back. NOT sorted by chronIdx — new saves append to the end.
+function savedOrder(): number[] {
+   return [...readSavedSet()]
+}
+// Save-order neighbor of member `chron`: "older" = the earlier save (toward the
+// front of the queue, lower index), "newer" = the later save (higher index,
+// toward the newest save). -1 at the ends or if `chron` isn't saved. Steps by
+// save-INDEX, so — unlike the chronIdx ±1 trick the value seam uses — it never
+// aliases two numerically-adjacent saved articles.
+function savedNeighbor(chron: number, dir: "older" | "newer"): number {
+   const order = savedOrder()
+   const i = order.indexOf(chron)
+   if (i < 0) return -1
+   return dir === "older" ? (order[i - 1] ?? -1) : (order[i + 1] ?? -1)
 }
 
 export function isSaved(chron: number): boolean {
@@ -79,15 +91,17 @@ export function getSavedSet(): Set<number> {
 export function savedCount(): number {
    return readSavedSet().size
 }
-// Toggle one article's saved state; returns the new state. Clears the
-// neighbor-prefetch slots since the saved feed's neighbors may have shifted.
+// Toggle one article's saved state; returns the new state. A save APPENDS to the
+// queue (Set.add keeps insertion order — written unsorted), so the ★ Saved view
+// reads in save order. Clears the neighbor-prefetch slots since the saved
+// queue's neighbors may have shifted.
 export function toggleSaved(chron: number): boolean {
    const set = readSavedSet()
    const nowSaved = !set.has(chron)
    if (nowSaved) set.add(chron)
    else set.delete(chron)
    try {
-      localStorage.setItem(SAVED_KEY, JSON.stringify([...set].sort((a, b) => a - b)))
+      localStorage.setItem(SAVED_KEY, JSON.stringify([...set]))
    } catch {}
    sync.pushSoon()
    next.left = next.right = undefined
@@ -149,8 +163,9 @@ export function anchorChron(): number {
 export async function listAnchor(): Promise<number> {
    const live = anchorChron()
    if (live >= 0) return live
-   // ★ Saved (feed-agnostic, filter.feeds empty): the front of the queue.
-   if (filter.saved) return savedSorted()[0] ?? -1
+   // ★ Saved (feed-agnostic, filter.feeds empty): the front of the queue — the
+   // earliest save (save-index 0), not the lowest chronIdx.
+   if (filter.saved) return savedOrder()[0] ?? -1
    // [ALL] (filter.clear) populates filter.feeds with every feed, so it runs the
    // same oldest-unread scan as a feed/tag — just spanning all feeds. Only
    // search (feed-agnostic, filter.feeds empty) keeps the newest-first default.
@@ -246,8 +261,10 @@ export function searchShort(q: string): boolean {
 }
 
 // Largest entry <= from / smallest entry >= from in an ascending array (-1 =
-// none) — the pure neighbor scan the saved and search sets walk. Both modes
-// pass their sorted set; the walk never fetches an idx pack.
+// none) — the pure value scan the SEARCH hit set walks (its order is chronIdx
+// order, so a value threshold gives the strict neighbor). Never fetches an idx
+// pack. (★ Saved does not use this — its order isn't chronIdx order, see
+// savedNeighbor.)
 function setLeft(sorted: number[], from: number): number {
    let res = -1
    for (const c of sorted) {
@@ -287,12 +304,14 @@ async function ensureSearchSet(): Promise<void> {
    searchLoadedFor = term
 }
 
-// The current feed's neighbor walk — the ONE seam saved mode branches at. Every
-// navigation primitive (step, first/last, goTo) and the list surface route
-// their findLeft/findRight through these instead of data.* directly, so saved
-// mode (the explicit set) vs feed mode (the idx packs) is decided in one
-// place. Async to match data.findLeft/findRight; the saved branch is synchronous,
-// wrapped in a resolved promise.
+// The value-addressed neighbor primitive: the nearest matching member ≤ `from`
+// (feedLeft) / ≥ `from` (feedRight). Feed mode walks the idx packs; search walks
+// its explicit chronIdx-sorted hit set (order == value order, so the value seam
+// is sound). ★ Saved does NOT come through here — its display order isn't
+// chronIdx order, so it steps by save-index through neighborOlder/neighborNewer
+// and the boundary branches (first/last/goTo/listAnchor/pendingRight) instead.
+// Async to match data.findLeft/findRight; the search branch resolves once its
+// snapshot loads.
 // The feed-membership walks fold in filter.anchor — the unseen-only entry
 // article (a SEEN article the reader landed on, which the raised bounds
 // exclude). Slotting it into both directional walks keeps it a member of the
@@ -300,7 +319,6 @@ async function ensureSearchSet(): Promise<void> {
 // into the unseen, and every consumer of this seam (prev/next enablement,
 // step(), the list's rows, prefetch) agrees it exists.
 export function feedLeft(from: number): Promise<number> {
-   if (filter.saved) return Promise.resolve(setLeft(savedSorted(), from))
    if (filter.search) return ensureSearchSet().then(() => setLeft(searchSorted, from))
    const a = filter.anchor
    // No anchor (the usual case): return the walk's promise untouched — an
@@ -309,11 +327,25 @@ export function feedLeft(from: number): Promise<number> {
    return data.findLeft(from, filter.feeds).then((found) => (a <= from && a > found ? a : found))
 }
 export function feedRight(from: number): Promise<number> {
-   if (filter.saved) return Promise.resolve(setRight(savedSorted(), from))
    if (filter.search) return ensureSearchSet().then(() => setRight(searchSorted, from))
    const a = filter.anchor
    if (a < 0) return data.findRight(from, filter.feeds)
    return data.findRight(from, filter.feeds).then((found) => (a >= from && (found === -1 || a < found) ? a : found))
+}
+
+// Strict neighbor of MEMBER `chron` under the active mode — the ONE seam the
+// reader's prev/next step and the list's row walk both route through, so "what's
+// the next/prev article" is decided in one place. Feed/search stay on the value
+// seam (member ∓ 1); ★ Saved steps by save-index (savedNeighbor), the one mode
+// whose display order isn't chronIdx order. "older" = the previous article
+// (feed: lower chronIdx; saved: the earlier save), "newer" = the next.
+export function neighborOlder(chron: number): Promise<number> {
+   if (filter.saved) return Promise.resolve(savedNeighbor(chron, "older"))
+   return feedLeft(chron - 1)
+}
+export function neighborNewer(chron: number): Promise<number> {
+   if (filter.saved) return Promise.resolve(savedNeighbor(chron, "newer"))
+   return feedRight(chron + 1)
 }
 
 // Resolve a token list to its feed membership at natural add_idx bounds —
@@ -542,10 +574,11 @@ async function tallyWith(chs: IFeed[], seenOf: (id: number) => number | undefine
    return counts
 }
 
-// The reader's pending readout: what the next pill displays. Saved/search
-// count their explicit sets positionally (strictly after pos — a queue/hit
-// countdown; there is no unread badge to agree with, peek modes never touch
-// the frontier). Feed/tag/[ALL] count what is UNREAD AND AHEAD: the members'
+// The reader's pending readout: what the next pill displays. ★ Saved counts its
+// queue by save-index (the saves still AHEAD of pos — a front-to-back countdown);
+// search counts hits strictly after pos (its set is chronIdx-ordered). Both are
+// peek modes with no unread badge to agree with (they never touch the frontier).
+// Feed/tag/[ALL] count what is UNREAD AND AHEAD: the members'
 // live unread through the same tally the picker rows use (tallyWith →
 // tagUnreadFromCounts), with each member's frontier floored at the cursor so
 // everything at or below pos — the article on screen included — is excluded.
@@ -567,7 +600,11 @@ async function tallyWith(chs: IFeed[], seenOf: (id: number) => number | undefine
 // armed not-started placeholder) floors nothing: the pill is the members'
 // whole backlog, the badge itself.
 async function pendingRight(seenMap?: Record<string, number>): Promise<number> {
-   if (filter.saved) return savedSorted().filter((c) => c > pos).length
+   if (filter.saved) {
+      const order = savedOrder()
+      const i = order.indexOf(pos)
+      return i < 0 ? 0 : order.length - 1 - i
+   }
    if (filter.search) {
       await ensureSearchSet()
       return searchSorted.filter((c) => c > pos).length
@@ -592,10 +629,10 @@ async function pendingRight(seenMap?: Record<string, number>): Promise<number> {
 
 async function showFeed(article: IArticle, seenMap?: Record<string, number>): Promise<IShowFeed> {
    // has_left/has_right only need to know whether a neighbor exists under the
-   // active filter, which is exactly what feedLeft/feedRight answer — the same
-   // seam navigation steps through (raised bounds in unseen-only, the explicit
-   // set in saved/search). So the prev/next buttons enable precisely when a step
-   // would move. resolve() awaited loadArticle(pos), so the pos idx pack is
+   // active filter, which is exactly what neighborOlder/neighborNewer answer —
+   // the same seam navigation steps through (raised bounds in unseen-only, the
+   // explicit set in saved/search). So the prev/next buttons enable precisely
+   // when a step would move. resolve() awaited loadArticle(pos), so the pos idx pack is
    // resident; a same-pack neighbor costs no fetch, and a cross-pack one is the
    // very lookup the neighbor prefetch makes next anyway. A cold-pack fetch for a
    // boundary neighbor can blip (offline/evicted); .catch degrades to "no
@@ -615,8 +652,8 @@ async function showFeed(article: IArticle, seenMap?: Record<string, number>): Pr
    // into one round-trip window instead of chaining them; same-pack fetches still
    // join via cachedPromise. pendingRight reuses recordSeen's seen map (seenMap).
    const [left, right, right_count] = await Promise.all([
-      feedLeft(pos - 1).catch(() => -1),
-      feedRight(pos + 1).catch(() => -1),
+      neighborOlder(pos).catch(() => -1),
+      neighborNewer(pos).catch(() => -1),
       pendingRight(seenMap).catch(() => -1),
    ])
    return {
@@ -1009,7 +1046,7 @@ export async function fromHash(hash: string): Promise<IShowFeed> {
 // The slot-identity checks keep a lookup superseded by a newer navigation
 // from prefetching or clearing on its behalf.
 async function step(dir: "left" | "right"): Promise<IShowFeed> {
-   const lookup = () => (dir === "left" ? feedLeft(pos - 1) : feedRight(pos + 1))
+   const lookup = () => (dir === "left" ? neighborOlder(pos) : neighborNewer(pos))
    const target = await (next[dir] ?? lookup())
    if (target === -1) throw new Error(`no ${dir} match`)
    const result = await resolve(target)
@@ -1043,6 +1080,12 @@ function minOf(values: Iterable<number>, fallback = 0): number {
 }
 
 export async function first(record = true): Promise<IShowFeed> {
+   // ★ Saved is a queue read front-to-back: "first" is the FRONT — the earliest
+   // save (save-index 0), not the lowest chronIdx.
+   if (filter.saved) {
+      const front = savedOrder()[0]
+      return front === undefined ? resolveNoMatch() : resolve(front, false, record)
+   }
    // No article from a feed with add_idx N exists below chronIdx N, so the
    // earliest matching article is at or after the smallest add_idx in filter.
    const start = minOf(filter.feeds.values())
@@ -1050,7 +1093,14 @@ export async function first(record = true): Promise<IShowFeed> {
 }
 
 export async function last(replace = false, record = true): Promise<IShowFeed> {
-   const found = await feedLeft(data.db.total_art - 1)
+   // ★ Saved: the BACK of the queue is the newest save (highest save-index).
+   let found: number
+   if (filter.saved) {
+      const order = savedOrder()
+      found = order.length ? order[order.length - 1] : -1
+   } else {
+      found = await feedLeft(data.db.total_art - 1)
+   }
    if (found === -1) return resolveNoMatch(replace)
    return resolve(found, replace, record)
 }
@@ -1191,6 +1241,10 @@ export async function switchFilter(token: string): Promise<IShowFeed> {
 // Jump to chronIdx, snapping forward to next match if filter is active.
 export async function goTo(idx: number, record = true): Promise<IShowFeed> {
    if (idx < 0 || idx >= data.db.total_art) return last(false, record)
+   // ★ Saved has no value order to snap through: land on the exact saved article
+   // (a list-row tap / deep-link always names a member), else fall back to the
+   // front of the queue for a stale ~saved deep-link.
+   if (filter.saved) return isSaved(idx) ? resolve(idx, false, record) : first(false)
    const found = await feedRight(idx)
    return found === -1 ? last(false, record) : resolve(found, false, record)
 }

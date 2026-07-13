@@ -27,7 +27,7 @@ describe("exportProfile", () => {
       const obj = JSON.parse(exportProfile())
       expect(obj.v).toBe(2)
       expect(obj.seen).toEqual({ "feed:1": 42, "feed:2": 7 })
-      expect(obj.saved).toEqual([3, 5, 10]) // sorted ascending
+      expect(obj.saved).toEqual([5, 10, 3]) // save order preserved, NOT sorted
       expect(obj.unreadOnly).toBe(true)
       expect(obj.imgProxy).toBe("https://proxy.example/?url=")
    })
@@ -97,13 +97,15 @@ describe("importProfile", () => {
       expect(seen["feed:3"]).toBe(15)
    })
 
-   it("union-merges saved and sorts ascending", () => {
+   it("union-merges saved, preserving local order and appending new incoming saves", () => {
       localStorage.setItem(SAVED_KEY, JSON.stringify([1, 5, 10]))
       const incoming = { v: 1, seen: {}, saved: [3, 5, 20], unreadOnly: false, imgProxy: "" }
       const r = importProfile(JSON.stringify(incoming), { prefs: false })
       expect(r.ok).toBe(true)
       const saved = JSON.parse(localStorage.getItem(SAVED_KEY)!)
-      expect(saved).toEqual([1, 3, 5, 10, 20])
+      // Local order [1,5,10] kept; the new incoming saves (3, 20 — 5 already
+      // present) appended in the blob's order. NOT re-sorted.
+      expect(saved).toEqual([1, 5, 10, 3, 20])
    })
 
    it("import is idempotent — importing the same blob twice produces the same result", () => {
@@ -298,7 +300,7 @@ describe("v2 blob / ts / sync mode", () => {
       expect(JSON.parse(localStorage.getItem(SAVED_KEY)!)).toEqual([])
    })
 
-   it("sync-mode saved adoption filters and sorts the array", () => {
+   it("sync-mode saved adoption filters invalid entries and preserves the blob's save order", () => {
       localStorage.setItem(SAVED_KEY, JSON.stringify([2]))
       touchProfile(100)
       const blob = JSON.stringify({
@@ -311,8 +313,9 @@ describe("v2 blob / ts / sync mode", () => {
       })
       const r = importProfile(blob, { prefs: false, mode: "sync" })
       expect(r.ok).toBe(true)
-      // non-integers and negatives dropped, sorted ascending
-      expect(JSON.parse(localStorage.getItem(SAVED_KEY)!)).toEqual([1, 3])
+      // non-integers and negatives dropped; the newer blob's save ORDER adopted
+      // verbatim (LWW), NOT sorted
+      expect(JSON.parse(localStorage.getItem(SAVED_KEY)!)).toEqual([3, 1])
    })
 
    it("a ts-only adoption (newer blob, identical saved, no seen raise) reports changed:false", () => {

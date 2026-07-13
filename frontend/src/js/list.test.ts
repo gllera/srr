@@ -92,8 +92,10 @@ const nav = vi.hoisted(() => {
       anchorChron: vi.fn(() => anchor),
       // The real listAnchor resolves resume/oldest per filter; the list only
       // consumes the resolved chronIdx, so the mock hands back the test's anchor
-      // (that resolution is exercised in nav.test.ts against the real nav).
-      listAnchor: vi.fn(async () => anchor),
+      // (that resolution is exercised in nav.test.ts against the real nav). ★ Saved
+      // has no chronIdx value order to seed from, so — matching real nav — with no
+      // explicit anchor it resolves to the FRONT of the queue (save-index 0).
+      listAnchor: vi.fn(async () => (filter.saved && anchor === -1 ? ([...saved][0] ?? -1) : anchor)),
       getSeenMap: vi.fn(() => seen),
       isRowUnread: vi.fn((chron: number, feed: number, s: Record<string, number>) => {
          const v = s["feed:" + feed]
@@ -125,6 +127,20 @@ const nav = vi.hoisted(() => {
          if (!filter.saved) return data.findRight(from)
          for (const c of [...saved].sort((a, b) => a - b)) if (c >= from) return c
          return -1
+      }),
+      // Strict neighbor of MEMBER `chron`: feed mode = the value seam (member ∓ 1);
+      // saved mode = save-index step over the insertion-ordered saved set.
+      neighborOlder: vi.fn(async (chron: number) => {
+         if (!filter.saved) return data.findLeft(chron - 1)
+         const order = [...saved]
+         const i = order.indexOf(chron)
+         return i < 0 ? -1 : (order[i - 1] ?? -1)
+      }),
+      neighborNewer: vi.fn(async (chron: number) => {
+         if (!filter.saved) return data.findRight(chron + 1)
+         const order = [...saved]
+         const i = order.indexOf(chron)
+         return i < 0 ? -1 : (order[i + 1] ?? -1)
       }),
    }
 })
@@ -964,12 +980,39 @@ describe("list", () => {
       expect($star(2).getAttribute("aria-pressed")).toBe("true")
    })
 
-   it("the saved view renders only saved chrons, newest-first", async () => {
+   it("the saved view renders only saved chrons, in save order (newest save on top)", async () => {
       setIndex(6)
-      nav._setSaved([0, 2, 4])
+      nav._setSaved([0, 2, 4]) // saved in that order → same as chronIdx order here
       nav.filter.saved = true
       await list.render()
-      expect($chrons()).toEqual([4, 2, 0])
+      expect($chrons()).toEqual([4, 2, 0]) // newest save (4) at the top, front (0) at the bottom
+   })
+
+   it("the saved view is ordered by SAVE time, not chronIdx (appended, not sorted)", async () => {
+      setIndex(6)
+      nav._setSaved([4, 0, 2]) // saved 4 first, then 0, then 2
+      nav.filter.saved = true
+      await list.render()
+      // Newest save (2) on top → front of the queue (4, saved first) at the bottom.
+      // A chronIdx sort would be [4,2,0]; save order is not that.
+      expect($chrons()).toEqual([2, 0, 4])
+   })
+
+   it("saved paging is not cut short by a mid-queue chron 0 (save-order exhaustion)", async () => {
+      // A saved article with chronIdx 0 can sit MID-queue in save order. The
+      // chronIdx==0 "global oldest" exhaustion shortcut must not fire there, or the
+      // earlier-saved (front-ward) rows below it would never page in.
+      setIndex(200)
+      const order = Array.from({ length: 35 }, (_, i) => 100 + i) // 35 distinct nonzero chrons
+      order[5] = 0 // chron 0 saved mid-queue (save-index 5, with 5 more saves in front)
+      nav._setSaved(order)
+      nav.filter.saved = true
+      nav._setListAnchor(order[order.length - 1]) // anchor at the newest save
+      await list.render() // older batch = save-indices 34..5; its bottom edge (oldest) is chron 0
+      await list.loadMore() // must page the front-ward saves (indices 4..0) past the chron-0 boundary
+      const chrons = $chrons()
+      expect(chrons).toContain(order[0]) // front-ward rows reached
+      expect(chrons[chrons.length - 1]).toBe(order[0]) // the very front (first save) sits at the bottom
    })
 
    it("the saved view drops a row when its star is un-saved", async () => {
@@ -1224,10 +1267,12 @@ describe("list", () => {
       nav._setSaved([0, 2, 4])
       nav.filter.saved = true
       await list.render()
-      expect($tabbable()).toEqual([4]) // newest saved row is the lone Tab stop (no cursor)
-      tapStar(4) // un-save the row holding the Tab stop
-      expect($chrons()).toEqual([2, 0])
-      expect($tabbable()).toEqual([2]) // a remaining row must re-take the Tab order
+      // Opens at the FRONT of the queue (save-index 0 = chron 0), selected as the
+      // current row and so the lone Tab stop.
+      expect($tabbable()).toEqual([0])
+      tapStar(0) // un-save the row holding the Tab stop
+      expect($chrons()).toEqual([4, 2])
+      expect($tabbable()).toEqual([4]) // a remaining row must re-take the Tab order
    })
 
    // ── Anchor re-seed + divider integrity ─────────────────────────────────────
@@ -1244,33 +1289,28 @@ describe("list", () => {
       expect($chrons()).toEqual([3, 2]) // ch1 only, newest-first; never anchored on ch2's 0/1
    })
 
-   it("re-labels day dividers when un-saving removes the last row of a day stratum", async () => {
-      // dayLabel buckets 2 chrons/day: saved [0,2,4] → rows 4(D2), 2(D1), 0(D0),
-      // one per day → three dividers. Un-saving 2 must drop its orphaned D1.
+   it("omits day dividers in the saved view (save order is cross-time)", async () => {
+      // Save order isn't date-monotonic, so day strata would repeat chaotically —
+      // suppressed like search mode.
       setIndex(6)
       nav._setSaved([0, 2, 4])
       nav.filter.saved = true
       await list.render()
-      const labels = () => Array.from(document.querySelectorAll(".srr-day-divider")).map((d) => d.textContent)
-      expect(labels()).toEqual(["D2", "D1", "D0"])
-      tapStar(2)
-      expect($chrons()).toEqual([4, 0])
-      expect(labels()).toEqual(["D2", "D0"]) // D1 dropped with its only row
+      expect($chrons()).toEqual([4, 2, 0])
+      expect(document.querySelectorAll(".srr-day-divider").length).toBe(0)
    })
 
-   // ── Bug #1+#11 — refresh() saved-view empty state + orphaned dividers ────────
-   // dayLabel buckets 2 chrons/day.  saved=[0,2,4] → three rows, one per day →
-   // three dividers D0/D1/D2.  refresh() after removing all three must:
-   //   (#1)  show the "Nothing saved" empty state even though rowsEl still holds
-   //         non-row children (day dividers, terminus blocks)
-   //   (#11) call relabelDividers so every orphaned .srr-day-divider is gone
-   it("refresh() shows empty state and drops orphaned dividers when all saved rows are removed", async () => {
+   // ── Bug #1 — refresh() saved-view empty state despite non-row children ───────
+   // saved=[0,2,4] → three rows; the view is fully exhausted both ways, so rowsEl
+   // holds non-row children (the wire terminus blocks — dividers are suppressed in
+   // saved mode). refresh() after un-saving all three must show the empty state
+   // even though childElementCount > 0 (the skip bug), and leave no dividers.
+   it("refresh() shows the empty state when all saved rows are removed", async () => {
       setIndex(6)
       nav._setSaved([0, 2, 4])
       nav.filter.saved = true
       await list.render()
-      const labels = () => Array.from(document.querySelectorAll(".srr-day-divider")).map((d) => d.textContent)
-      expect(labels()).toEqual(["D2", "D1", "D0"])
+      expect(document.querySelectorAll(".srr-day-divider").length).toBe(0)
 
       // Un-save all three articles (simulating reader action) then call refresh()
       nav._setSaved([])
@@ -1278,7 +1318,6 @@ describe("list", () => {
 
       // #1: empty state must appear (previously skipped because childElementCount > 0)
       expect(container.querySelector(".srr-list-empty")).not.toBeNull()
-      // #11: no orphaned day dividers left
       expect(document.querySelectorAll(".srr-day-divider").length).toBe(0)
    })
 
@@ -1294,6 +1333,7 @@ describe("list", () => {
       const chronList = Array.from({ length: n }, (_, i) => i)
       nav._setSaved(chronList)
       nav.filter.saved = true
+      nav._setListAnchor(chronList[n - 1]) // anchor at the newest save so older-paging is exercised
       await list.render() // lays the first 30 rows
 
       // Gate the next loadMeta batch so we can null rowsEl in flight
@@ -1489,9 +1529,9 @@ describe("list", () => {
 
          let release: (() => void) | null = null
          const gate = new Promise<void>((r) => (release = () => r()))
-         nav.feedRight.mockImplementationOnce(async (from: number) => {
+         nav.neighborNewer.mockImplementationOnce(async (chron: number) => {
             await gate
-            return data.findRight(from)
+            return data.findRight(chron + 1)
          })
 
          const p = list.onStoreGrown() // probe dispatched, gated
