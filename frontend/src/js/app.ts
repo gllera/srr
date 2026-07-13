@@ -304,6 +304,19 @@ function syncNextCount(o: IShowFeed | null) {
    el.next.title = n >= 0 ? `${base} — ${n} remaining (→/D)` : `${base} (→/D)`
 }
 
+// Land a freshly rendered article at the top AND resync the toolbar auto-hide
+// baseline (reveal it, drop any parked bottom-reveal transform, re-zero the
+// scroll baseline — see gestures.resetScroll). The list does this after its own
+// programmatic scrolls; the reader must too. Relying on the scrollTo(0,0) scroll
+// event alone to reveal the bar is unsound: that event doesn't fire when we're
+// already at y=0, and on mobile it can be coalesced or read a stale downward
+// delta (URL-bar dynamics) — leaving the toolbar stuck hidden on arrival, with
+// no way to scroll up past the top to bring it back.
+function scrollReaderTop() {
+   window.scrollTo(0, 0)
+   gestures?.resetScroll()
+}
+
 function render(o: IShowFeed) {
    showReader()
    // Showing the reader supersedes any pending debounced search query. A row-tap
@@ -362,7 +375,7 @@ function render(o: IShowFeed) {
    refreshSaveButton(!o.placeholder)
 
    document.title = "SRR - " + (o.article.t ?? "")
-   window.scrollTo(0, 0)
+   scrollReaderTop()
    // A titleless feed hides the <h1>; focusing a display:none element is a no-op,
    // so move focus to the visible body instead to keep the reader region focused.
    el.content.tabIndex = -1
@@ -405,7 +418,7 @@ function renderEmptyReader(o: IShowFeed) {
 
    refreshFeedLabel()
    document.title = "SRR"
-   window.scrollTo(0, 0)
+   scrollReaderTop()
    // The empty state hides the whole title row; focus the (visible) content host,
    // which carries the directed empty-state element.
    el.content.tabIndex = -1
