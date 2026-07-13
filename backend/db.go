@@ -116,7 +116,11 @@ func gunzip(r io.Reader) ([]byte, error) {
 
 type DB struct {
 	store.Backend
-	core   DBCore
+	core DBCore
+	// seen is the persistent dedup pool (seen.gz), loaded by NewDB (empty when
+	// absent/corrupt) and written by SyncSeen after Commit. Backend-only; the
+	// reader never sees it. Always non-nil after NewDB.
+	seen   *seenPool
 	locked bool
 }
 
@@ -166,7 +170,14 @@ type DBCore struct {
 	// by NewDB). Backend-only config: the frontend/service-worker ignores it,
 	// like Out. omitempty is harmless — NewDB re-seeds an absent map.
 	Recipes map[string]Recipe `json:"recipes,omitempty"`
-	Feeds   map[int]*Feed     `json:"feeds"`
+	// DedupDays is the store-wide default seen.gz horizon in days, the fallback
+	// for a feed whose own Feed.DedupDays is 0. Absent/0 ⇒ defaultDedupDays (30).
+	// A negative store default is invalid config (there is no store-wide off
+	// switch — a per-feed -1 is that lever); (*Feed).dedupDays treats <= 0 as
+	// unset. Backend-only, like Recipes/Out — the frontend/service-worker ignore
+	// it. omitempty; managed via `srr dedup --days N`.
+	DedupDays int           `json:"dd,omitempty"`
+	Feeds     map[int]*Feed `json:"feeds"`
 	// Out is the list of named syndication output feeds written by SyncOutFeeds
 	// during each fetch cycle. Each OutFeed maps chosen tags/feed ids to one
 	// RSS 2.0 or JSON Feed 1.1 file at out/<name>.<ext> on the CDN. Off by
@@ -292,6 +303,13 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 		}
 		ch.id = id
 	}
+
+	// The persistent dedup pool rides alongside db.gz. Missing/short/corrupt ⇒
+	// empty pool + WARN (loadSeen), so a bad sidecar degrades dedup to bg-only,
+	// never fails an open or loses an article. Hydrate each feed's seen.gz-backed
+	// HTTP validators (ETag/LastModified) onto the in-memory feeds.
+	db.seen = db.loadSeen(ctx)
+	db.seen.hydrateFeeds(db.core.Feeds)
 	return db, nil
 }
 
@@ -360,6 +378,9 @@ func (o *DB) AddFeed(c *Feed) error {
 
 func (o *DB) RemoveFeed(id int) {
 	delete(o.core.Feeds, id)
+	// Purge the feed's seen.gz state now (dedup entries + HTTP validators), so a
+	// reused id can't inherit it. Callers persist via commitState. See dropFeed.
+	o.seen.dropFeed(id)
 }
 
 func (o *DB) FeedByID(id int) (*Feed, error) {

@@ -50,11 +50,18 @@ func resolvePipe(base, override []string) []string {
 }
 
 type Feed struct {
-	id           int
-	Title        string `json:"title"`
-	URL          string `json:"url"`
-	ETag         string `json:"etag,omitempty"`
-	LastModified string `json:"last_modified,omitempty"`
+	id    int
+	Title string `json:"title"`
+	URL   string `json:"url"`
+	// ETag / LastModified are the HTTP conditional-fetch validators. They are
+	// backend-only fetch state the reader ignores, so they live in the seen.gz
+	// sidecar (json:"-": in-memory here, never written to the hot db.gz).
+	// Hydrated onto the feed by seenPool.hydrateFeeds in NewDB and pulled back by
+	// seenPool.snapshotHTTP in SyncSeen. A lagging validator only costs a
+	// redundant full fetch (dedup then suppresses), so sidecar persistence is
+	// safe. See backend/SEEN-POOL-PLAN.md.
+	ETag         string `json:"-"`
+	LastModified string `json:"-"`
 	// Watermark is the max published unix-second ever seen across fetches.
 	Watermark int64 `json:"wm,omitempty"`
 	// BoundaryGUIDs is the GUIDs from the most recent non-empty fetch whose
@@ -103,6 +110,18 @@ type Feed struct {
 	// their assets/ objects are deleted and AddIdx is bumped past them (see
 	// db_expire.go). 0 = keep forever (the default).
 	ExpireDays int `json:"exp,omitempty"`
+	// DedupDays is the per-feed seen.gz horizon in days: how long the pool
+	// remembers this feed's item GUIDs (and folded titles, when DedupTitle) after
+	// they leave the feed window, suppressing re-promotion duplicates. 0 inherits
+	// the store default (DBCore.DedupDays, else defaultDedupDays); >0 overrides
+	// it; -1 disables the pool for this feed (exact bg-only dedup). Resolved by
+	// (*Feed).dedupDays. Backend-only, like recipe/ingest/pipe.
+	DedupDays int `json:"dd,omitempty"`
+	// DedupTitle opts this feed into the title dedup axis: the pool also
+	// remembers each item's folded-title hash, catching a re-promotion that mints
+	// a fresh GUID for the same headline. Off by default (titles are far less
+	// unique than GUIDs) and gated by !NoTitle. Backend-only.
+	DedupTitle bool `json:"dt,omitempty"`
 	// Expired is the cumulative count of this feed's expired idx entries (the
 	// entries in [incarnation start, AddIdx)). Finalized idx headers are
 	// immutable all-time cumulative counts (writeIdxHeader sources them from
@@ -126,6 +145,13 @@ type Feed struct {
 	// feed and expired via another's article.
 	AssetBytes int64 `json:"ab,omitempty"`
 	newItems   []*Item
+	// seenStamps is the per-run scratch of pool stamps this feed collected in its
+	// first pass — the GUID hash of every current-window item, plus each item's
+	// folded-title hash when the title axis is on. Assigned only at fetchURL's
+	// successful tail (past the stale/empty guards) and merged into the pool
+	// single-threaded after the fan-out. Lowercase so it never serializes to
+	// db.gz (mirrors newItems).
+	seenStamps []uint32
 }
 
 func (c *Feed) LogValue() slog.Value {
@@ -133,6 +159,25 @@ func (c *Feed) LogValue() slog.Value {
 		slog.Int("id", c.id),
 		slog.String("title", c.Title),
 	)
+}
+
+// dedupDays resolves this feed's effective seen.gz horizon from its own
+// DedupDays and the store default (DBCore.DedupDays, passed in): a positive day
+// count when the pool is active, or dedupDisabled (a non-positive sentinel) when
+// the feed opts out. Only the per-feed value may disable (-1); a store default
+// <= 0 is treated as unset and falls through to defaultDedupDays (there is no
+// store-wide off switch — per-feed -1 is that lever).
+func (c *Feed) dedupDays(store int) int {
+	switch {
+	case c.DedupDays == dedupDisabled:
+		return dedupDisabled
+	case c.DedupDays > 0:
+		return c.DedupDays
+	case store > 0:
+		return store
+	default:
+		return defaultDedupDays
+	}
 }
 
 // fetchRun bundles the run-scoped dependencies shared by every feed in a
@@ -159,6 +204,16 @@ type fetchRun struct {
 	// recipes is the full db.gz recipes map, read-only during a fetch run;
 	// each feed resolves its recipe (and the default) from it.
 	recipes map[string]Recipe
+	// seen is the persistent dedup pool, read-only during the concurrent
+	// fan-out (the cycle-start snapshot, like each feed's priorBoundary). May be
+	// nil (pool never loaded / disabled) — seenPool's methods are nil-safe.
+	// Stamps are buffered per feed (Feed.seenStamps) and merged into it
+	// single-threaded after g.Wait().
+	seen *seenPool
+	// dedupDays is the store-default horizon (DBCore.DedupDays), threaded onto
+	// the run so each feed's fetchURL can resolve its effective horizon (and the
+	// disabled gate) during the lock-free fan-out, before the pool is written.
+	dedupDays int
 }
 
 func (c *Feed) Fetch(ctx context.Context, run *fetchRun, buf []byte, processor *mod.Module) {
@@ -211,6 +266,12 @@ func (c *Feed) Fetch(ctx context.Context, run *fetchRun, buf []byte, processor *
 // Feed.Fetch before this is called.
 func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processor *mod.Module, pipeline []string, ingestName string) ([]*Item, error) {
 	slog.Debug("downloading feed", "url", c.URL, "feed", c)
+
+	// Reset the per-fetch stamp scratch up front, so every early return below
+	// (ingest error, 304, empty/all-nil, stale) leaves it empty and stamps
+	// nothing into the pool. It is populated only at the successful tail, past
+	// the stale/empty guards.
+	c.seenStamps = nil
 
 	// Every fetcher gets the run's shared cache dir as its working directory
 	// (Request.AssetDir, always non-empty here — created in FetchCmd.fetch) and
@@ -271,6 +332,32 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 	var maxSeen int64
 	var hasDateless bool
 
+	// Persistent-dedup gate for this feed: a positive effective horizon means
+	// the seen.gz pool is active (the store default rides run.dedupDays so this
+	// resolves during the lock-free fan-out); the title axis additionally needs
+	// DedupTitle and a titled feed. seenBefore is the pool half of the
+	// already-seen test — the other half is priorBoundary (bg) below — and, like
+	// it, it never raises the watermark. stamps buffers this feed's pool updates.
+	poolOn := c.dedupDays(run.dedupDays) > 0
+	dtOn := poolOn && c.DedupTitle && !c.NoTitle
+	seenBefore := func(i *mod.RawItem) bool {
+		if !poolOn {
+			return false // disabled feed: exact bg-only behavior
+		}
+		if run.seen.has(c.id, i.GUID) {
+			return true
+		}
+		return dtOn && run.seen.has(c.id, titleHash(i.Title))
+	}
+	// stampSrc buffers the (guid, title) of every current-window item; the flat
+	// stamps are built at the successful tail, AFTER the over-cap `dropped` set is
+	// known, so a dropped item is never remembered (see the tail).
+	type stampSrc struct {
+		guid  uint32
+		title string
+	}
+	var window []stampSrc
+
 	// First pass: cheap dedup/watermark classification over the whole
 	// response, no pipeline work yet. The boundary cap below must see the
 	// complete fetch before any item is committed to ingestion.
@@ -305,17 +392,29 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 
 		boundary[i.GUID] = pubUnix
 
+		// Buffer every current-window item (ingested or already-seen), not only
+		// new ones, so a long-lived window item's clock stays fresh in the pool
+		// until it disappears. Which of these are actually stamped is decided at
+		// the successful tail, once the over-cap `dropped` set is known. A
+		// disabled feed (poolOn == false) buffers nothing.
+		if poolOn {
+			window = append(window, stampSrc{i.GUID, i.Title})
+		}
+
 		if pubUnix == 0 {
 			hasDateless = true
 		} else if pubUnix > maxSeen {
 			maxSeen = pubUnix
 		}
 
-		if _, prev := priorBoundary[i.GUID]; prev {
-			// A GUID we have already seen: keep deduping it, but do NOT let a
-			// publisher re-dating an existing post raise Watermark. Otherwise a
-			// genuinely-new article later dated between the old and the bumped
-			// value is permanently and silently dropped by the watermark check.
+		if _, prev := priorBoundary[i.GUID]; prev || seenBefore(i) {
+			// A GUID we have already seen — in the current bg snapshot
+			// (priorBoundary) or the persistent pool (seenBefore): keep deduping
+			// it, but do NOT let a publisher re-dating an existing post raise
+			// Watermark. Otherwise a genuinely-new article later dated between the
+			// old and the bumped value is permanently and silently dropped by the
+			// watermark check. This is exactly what fixes re-promotion: the pool
+			// remembers the GUID long after it fell out of the small bg snapshot.
 			continue
 		}
 		// Only newly-seen items advance the watermark.
@@ -489,6 +588,27 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 	}
 	c.Watermark = maxPub
 	c.BoundaryGUIDs = bg
+	// Commit the pool stamps only here — past the all-nil and stale-response
+	// guards' early returns — so a transient stale/empty copy never refreshes
+	// the pool (its clock must not tick on a response that carried no fresh
+	// window). Skip the over-cap `dropped` items: each was skipped from ingestion
+	// AND left out of bg, so stamping it would let seenBefore suppress it forever
+	// instead of letting it retry once the window shrinks below the cap. Every
+	// non-dropped item is either ingested or already remembered (bg/pool hit), so
+	// its clock is refreshed. The single-threaded merge runs after g.Wait().
+	if poolOn {
+		stamps := make([]uint32, 0, len(window))
+		for _, s := range window {
+			if _, skip := dropped[s.guid]; skip {
+				continue
+			}
+			stamps = append(stamps, s.guid)
+			if dtOn {
+				stamps = append(stamps, titleHash(s.title))
+			}
+		}
+		c.seenStamps = stamps
+	}
 	c.ETag = result.ETag
 	c.LastModified = result.LastModified
 	return items, nil
