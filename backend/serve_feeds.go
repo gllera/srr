@@ -9,9 +9,10 @@ import (
 
 // feedListView is the read-only feed shape the GUI table consumes: the writable
 // feedView fields plus server-owned health fields. Writes (POST/PUT) accept
-// title/url/tag/recipe/ingest/pipe/no_title/expire_days — full-replace
-// semantics, like `feed apply` (the edit modal always sends the no_title
-// checkbox, expire_days, and the ingest/pipe override values).
+// title/url/tag/recipe/ingest/pipe/no_title/expire_days/dedup_days/dedup_title —
+// full-replace semantics, like `feed apply` (the edit modal always sends the
+// no_title checkbox, expire_days, the dedup pool overrides, and the ingest/pipe
+// override values).
 type feedListView struct {
 	ID         int      `json:"id"`
 	Title      string   `json:"title"`
@@ -27,7 +28,12 @@ type feedListView struct {
 	LastNew    int64    `json:"last_new"`
 	TotalArt   int      `json:"total_art"`
 	ExpireDays int      `json:"expire_days,omitempty"`
-	Expired    int      `json:"expired,omitempty"`
+	// DedupDays / DedupTitle are the per-feed seen.gz pool overrides (0 inherits
+	// the store default; -1 disables; DedupTitle adds the folded-title axis). They
+	// must round-trip so the GUI's full-replace save doesn't silently wipe them.
+	DedupDays  int  `json:"dedup_days,omitempty"`
+	DedupTitle bool `json:"dedup_title,omitempty"`
+	Expired    int  `json:"expired,omitempty"`
 	// ContentBytes/AssetBytes are server-owned counters (see Feed): uncompressed
 	// data-pack bytes added by the feed, and its live assets/ footprint.
 	ContentBytes int64 `json:"content_bytes,omitempty"`
@@ -50,6 +56,8 @@ func listViewOf(ch *Feed) feedListView {
 		LastNew:      ch.LastNew,
 		TotalArt:     ch.TotalArt,
 		ExpireDays:   ch.ExpireDays,
+		DedupDays:    ch.DedupDays,
+		DedupTitle:   ch.DedupTitle,
 		Expired:      ch.Expired,
 		ContentBytes: ch.ContentBytes,
 		AssetBytes:   ch.AssetBytes,

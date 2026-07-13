@@ -79,6 +79,34 @@ func handleResolve(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// handleDedup sets the store-wide default seen.gz dedup horizon (db.gz
+// DBCore.DedupDays), backing the Tools-tab control — the GUI twin of
+// `srr dedup --days N`. Days in [0, 36500]; 0 resets to the built-in default.
+// The store default has no off switch — a per-feed -1 disables the pool. Echoes
+// the *effective* default so the UI re-displays the built-in after a 0 reset.
+func handleDedup(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Days int `json:"days"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := validateStoreDedupDays(body.Days); err != nil {
+		writeErr(w, err)
+		return
+	}
+	err := withDBCtx(r.Context(), true, func(ctx context.Context, db *DB) error {
+		db.core.DedupDays = body.Days
+		return db.Commit(ctx)
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"dedup_days": effectiveStoreDedup(body.Days)})
+}
+
 func bumpGen(w http.ResponseWriter, r *http.Request) {
 	var gen int
 	err := withDBCtx(r.Context(), true, func(ctx context.Context, db *DB) error {

@@ -186,7 +186,7 @@ function dialogRow(dlg, saveBtn, onDelete) {
 // renders from it, so switching tabs never hits the store. The store is re-read
 // only on boot (a browser reload re-runs it) and after a mutation, via refresh().
 const renderers = {}; // tab name -> sync render fn, drawing from `snapshot`
-let snapshot = { feeds: [], tags: [], recipes: {}, out: [], gen: 0, total_art: 0, fetched_at: 0 };
+let snapshot = { feeds: [], tags: [], recipes: {}, out: [], gen: 0, total_art: 0, fetched_at: 0, dedup_days: 30 };
 let currentTab = "feeds";
 
 // drawTab (re)renders the current tab from the cached snapshot — no fetch.
@@ -737,7 +737,7 @@ let feedDialog;
 function openFeedModal(f) {
   feedDialog ||= makeDialog({ id: "feedModal" });
   const isEdit = !!f;
-  const v = f || { title: "", url: "", tag: "", recipe: "", ingest: "", pipe: [], no_title: false, expire_days: 0 };
+  const v = f || { title: "", url: "", tag: "", recipe: "", ingest: "", pipe: [], no_title: false, expire_days: 0, dedup_days: 0, dedup_title: false };
   const title = el("input", { id: "f_title", value: v.title,
     placeholder: isEdit ? null : "auto-filled from the feed" });
   const url = el("input", { id: "f_url", value: v.url,
@@ -802,6 +802,18 @@ function openFeedModal(f) {
   noTitle.checked = !!v.no_title;
   const expire = el("input", { id: "f_expire", type: "number", min: "0", max: "36500", step: "1",
     value: v.expire_days ? String(v.expire_days) : "", placeholder: "0" });
+  // Seen.gz dedup pool overrides. dedup_days: 0 inherits the store default, a
+  // positive N sets this feed's horizon, -1 disables the pool for it — so the
+  // input allows -1 (empty shows the inherit-default placeholder). dedup_title
+  // adds the folded-title axis. Both round-trip so a full-replace save never
+  // silently wipes a CLI-set value.
+  const dedupDays = el("input", { id: "f_dedup", type: "number", min: "-1", max: "36500", step: "1",
+    value: v.dedup_days ? String(v.dedup_days) : "", placeholder: "0" });
+  const dedupTitle = el("input", { id: "f_deduptitle", type: "checkbox" });
+  dedupTitle.checked = !!v.dedup_title;
+  // Clamp to [-1, 36500]; empty/NaN → 0 (inherit). Shared by the save body and
+  // the advanced-summary chip so they can't diverge.
+  const dedupVal = () => Math.max(-1, Math.min(36500, Math.floor(Number(dedupDays.value) || 0)));
   const err = el("div", { class: "formerr" });
   const status = el("div", { class: "resolve-status" });
 
@@ -854,6 +866,8 @@ function openFeedModal(f) {
       pipe: pipeSteps.map((s) => s.trim()).filter(Boolean),
       no_title: noTitle.checked,
       expire_days: Math.max(0, Math.floor(Number(expire.value) || 0)),
+      dedup_days: dedupVal(),
+      dedup_title: dedupTitle.checked,
     };
     save.disabled = true; // save re-resolves the URL server-side — it can take a moment
     try {
@@ -872,10 +886,13 @@ function openFeedModal(f) {
   // set (recomputed on every toggle, so edits made before collapsing show up).
   const advValues = () => {
     const days = Math.max(0, Math.floor(Number(expire.value) || 0));
+    const dd = dedupVal();
     return [
       ingestIn.value.trim() && "ingest",
       pipeSteps.some((s) => s.trim()) && "pipe",
       days > 0 && `expire ${days}d`,
+      dd === -1 ? "dedup off" : dd > 0 && `dedup ${dd}d`,
+      dedupTitle.checked && "dedup title",
       noTitle.checked && "no titles",
     ].filter(Boolean);
   };
@@ -888,11 +905,24 @@ function openFeedModal(f) {
     el("label", {}, "Ingest"), ingestIn,
     el("p", { class: "hint" }, "Only this feed. #feed or a shell command."),
     el("label", {}, "Pipe"), pipeBox,
-    el("label", {}, "Expire after"),
-    el("div", { class: "inline-field" }, expire, el("span", { class: "unit" }, "days")),
-    el("p", { class: "hint" }, "0 keeps articles forever."),
-    el("label", { class: "check" }, noTitle, "Hide article titles"),
-    el("p", { class: "hint" }, "For microblog feeds whose entries have no real titles."));
+    // Retention + dedup are both small "N days" knobs — pair them so each fills
+    // its column instead of stranding a full row. Their booleans pair likewise.
+    el("div", { class: "field-duo" },
+      el("div", { class: "field" },
+        el("label", {}, "Expire after"),
+        el("div", { class: "inline-field" }, expire, el("span", { class: "unit" }, "days")),
+        el("p", { class: "hint" }, "0 keeps articles forever.")),
+      el("div", { class: "field" },
+        el("label", {}, "Dedup pool"),
+        el("div", { class: "inline-field" }, dedupDays, el("span", { class: "unit" }, "days")),
+        el("p", { class: "hint" }, "0 = store default; -1 disables it here."))),
+    el("div", { class: "field-duo" },
+      el("div", { class: "field" },
+        el("label", { class: "check" }, noTitle, "Hide article titles"),
+        el("p", { class: "hint" }, "For microblog feeds without real titles.")),
+      el("div", { class: "field" },
+        el("label", { class: "check" }, dedupTitle, "Also dedup by title"),
+        el("p", { class: "hint" }, "A re-post with a new guid but the same headline."))));
   if (advValues().length) adv.open = true;
 
   const urlField = [el("label", {}, "URL"), url, status];
@@ -1218,6 +1248,30 @@ function renderTools() {
       importInput,
       el("button", { class: "btn", onclick: () => { window.location = "/api/export"; } }, "Export OPML")),
     el("p", { class: "hint" }, "Import opens a review sheet — pick and edit each feed before anything is written. Export downloads every feed as OPML 2.0.")));
+
+  // Dedup pool — the store-wide default seen.gz horizon (db.gz DedupDays), the
+  // fallback for feeds whose own dedup-days is 0. No off switch here (min 0, 0
+  // resets to the built-in default); a per-feed -1 disables the pool for a feed.
+  const dedupIn = el("input", { type: "number", min: "0", max: "36500", step: "1",
+    value: String(snapshot.dedup_days || ""), style: "width:6em" });
+  const dedupSave = el("button", { class: "btn", onclick: async () => {
+    const days = Math.max(0, Math.min(36500, Math.floor(Number(dedupIn.value) || 0)));
+    dedupSave.disabled = true;
+    try {
+      const r = await api("PUT", "/api/dedup", { days });
+      snapshot.dedup_days = r.dedup_days;
+      dedupIn.value = String(r.dedup_days); // re-show the effective default after a 0 reset
+      banner("Dedup default set to " + r.dedup_days + " days", true);
+    } catch (e) { banner(e.message); }
+    finally { dedupSave.disabled = false; }
+  } }, "Save");
+  root.append(el("section", { class: "panel" },
+    el("h3", {}, "Dedup pool"),
+    el("div", { class: "toolbar" },
+      el("span", {}, "Store default horizon"),
+      el("div", { class: "inline-field" }, dedupIn, el("span", { class: "unit" }, "days")),
+      dedupSave),
+    el("p", { class: "hint" }, "Fallback for feeds whose own dedup-days is 0. Set a feed's to -1 to disable the pool for it, or a positive horizon to override. 0 here resets to the built-in default.")));
 
   // Gen (from the cached snapshot)
   const genLabel = el("span", { class: "gen-readout" });

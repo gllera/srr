@@ -22,6 +22,11 @@ type overviewView struct {
 	Gen       int               `json:"gen"`
 	FetchedAt int64             `json:"fetched_at"`
 	TotalArt  int               `json:"total_art"`
+	// DedupDays is the *effective* store-wide default seen.gz horizon (the
+	// stored DBCore.DedupDays, or the built-in default when unset/≤0) — the
+	// Tools tab renders and edits it. Always present so the webui needn't know
+	// the built-in default.
+	DedupDays int `json:"dedup_days"`
 	// CdnURL lets the syndicate tab link the produced out/<name> files;
 	// omitted when SRR_CDN_URL is unset (syndication writes are skipped then).
 	CdnURL string `json:"cdn_url,omitempty"`
@@ -69,6 +74,7 @@ func getOverview(w http.ResponseWriter, r *http.Request) {
 			Gen:       db.core.Gen,
 			FetchedAt: db.core.FetchedAt,
 			TotalArt:  db.core.TotalArticles,
+			DedupDays: effectiveStoreDedup(db.core.DedupDays),
 			CdnURL:    globals.CdnURL,
 			Version:   version,
 		}

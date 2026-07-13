@@ -88,6 +88,35 @@ func TestOverviewTagCountsAreLive(t *testing.T) {
 	}
 }
 
+// TestOverviewCarriesStoreDedupDefault pins the overview to the *effective*
+// store-wide dedup default (the built-in when unset, else the stored value) so
+// the Tools tab can render and edit it without knowing the built-in constant.
+func TestOverviewCarriesStoreDedupDefault(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+
+	rec := doReq(t, newMux(), "GET", "/api/overview", "")
+	var got overviewView
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.DedupDays != defaultDedupDays {
+		t.Fatalf("dedup_days = %d, want built-in default %d when unset", got.DedupDays, defaultDedupDays)
+	}
+
+	db.core.DedupDays = 7
+	if err := db.Commit(context.Background()); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	rec = doReq(t, newMux(), "GET", "/api/overview", "")
+	got = overviewView{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.DedupDays != 7 {
+		t.Fatalf("dedup_days = %d, want the stored 7", got.DedupDays)
+	}
+}
+
 // TestOverviewCdnURL asserts the overview carries the configured CDN URL (so
 // the syndicate tab can link the produced out/<name> files), omitted when unset.
 func TestOverviewCdnURL(t *testing.T) {
