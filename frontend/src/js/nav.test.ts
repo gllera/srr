@@ -2254,6 +2254,64 @@ describe("saved articles", () => {
       await nav.fromHash("1!~saved")
       expect(data.loadArticle).toHaveBeenCalledWith(2)
    })
+
+   // ── Save ORDER (appended, not sorted) ──────────────────────────────────────
+   it("toggleSaved appends to the queue in save order, not sorted by chronIdx", () => {
+      nav.toggleSaved(4)
+      nav.toggleSaved(1)
+      nav.toggleSaved(3)
+      // Stored in the order saved — a chronIdx sort would be [1,3,4].
+      expect(JSON.parse(localStorage.getItem("srr-saved")!)).toEqual([4, 1, 3])
+      // un-saving removes in place without reordering the survivors.
+      nav.toggleSaved(1)
+      expect(JSON.parse(localStorage.getItem("srr-saved")!)).toEqual([4, 3])
+   })
+
+   it("traverses in SAVE order (front-to-back), independent of chronIdx", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }]) // 0..4
+      nav.toggleSaved(4) // saved first → front of the queue
+      nav.toggleSaved(1)
+      nav.toggleSaved(3) // saved last → back of the queue
+
+      // Opens at the FRONT (first save = 4), NOT the lowest chronIdx.
+      const r1 = await nav.switchFilter(nav.SAVED_TOKEN)
+      expect(nav.currentChron()).toBe(4)
+      expect(r1.has_left).toBe(false)
+      expect(r1.has_right).toBe(true)
+      expect(r1.right_count).toBe(2) // two saves ahead in the queue
+
+      // Forward walks save order 4 → 1 → 3 (a chronIdx walk could never go 4→1).
+      const r2 = await nav.right()
+      expect(nav.currentChron()).toBe(1)
+      expect(r2.has_left).toBe(true)
+      expect(r2.right_count).toBe(1)
+
+      const r3 = await nav.right()
+      expect(nav.currentChron()).toBe(3) // newest save = back of the queue
+      expect(r3.has_right).toBe(false)
+      expect(r3.right_count).toBe(0)
+      await expect(nav.right()).rejects.toThrow("no right match")
+
+      // Back walks the queue in reverse save order: 3 → 1 → 4.
+      const b2 = await nav.left()
+      expect(nav.currentChron()).toBe(1)
+      expect(b2.has_left).toBe(true)
+      const b1 = await nav.left()
+      expect(nav.currentChron()).toBe(4)
+      expect(b1.has_left).toBe(false)
+   })
+
+   it("first()/last() open the front/back of the save-ordered queue", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      nav.toggleSaved(4)
+      nav.toggleSaved(1)
+      nav.toggleSaved(3)
+      nav.filter.set([nav.SAVED_TOKEN])
+      await nav.last()
+      expect(nav.currentChron()).toBe(3) // newest save
+      await nav.first()
+      expect(nav.currentChron()).toBe(4) // earliest save (front)
+   })
 })
 
 describe("search filter mode (q:<query>)", () => {

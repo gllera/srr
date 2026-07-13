@@ -364,8 +364,8 @@ function showEmptyState(): void {
 // the currently rendered rows (idempotent — drop the old ones, walk the rows
 // newest-first, and insert a divider before the first row of each new day).
 // Cheap: the window is bounded, and dayLabel is unique per calendar day so a
-// label change IS a day boundary. Suppressed in search mode (title hits are
-// cross-time, and the pinned search bar owns the sticky top slot). Callers run
+// label change IS a day boundary. Suppressed in search and ★ Saved (both are
+// cross-time explicit sets, not a date-ordered walk). Callers run
 // it inside any scroll-compensation bracket so the divider heights ride the same
 // scrollHeight delta as the rows.
 // Re-assert the anchor after a progressive fill changed row heights, unless the
@@ -380,7 +380,11 @@ function reassertAnchor(seed: number): void {
 function relabelDividers(): void {
    if (!rowsEl) return
    rowsEl.querySelectorAll(".srr-day-divider").forEach((d) => d.remove())
-   if (nav.isSearchFilter()) return
+   // Suppressed in search AND ★ Saved: both are cross-time explicit sets whose
+   // rows aren't in date order (search hits span time; saved reads in save
+   // order), so day strata would repeat chaotically instead of marking a walk
+   // down through the days.
+   if (nav.isSearchFilter() || nav.filter.saved) return
    let prev: string | null = null
    const ctx = dayLabelCtx() // hoisted: the pass walks every loaded row
    for (const row of rowsEl.querySelectorAll<HTMLElement>("a.srr-row")) {
@@ -445,29 +449,29 @@ function syncTopTerminus(compensate = false): void {
    }
 }
 
-// Walk the filtered feed from `from` (inclusive) collecting up to `max` matching
-// chronIdxs. "older" walks feedLeft downward (returns DESCENDING chrons, so the
-// caller can append them newest-first); "newer" walks feedRight upward (returns
-// ASCENDING chrons). `exhausted` is true when the walk ran off the end of the
-// feed (a -1 lookup or out-of-range index), as opposed to merely filling `max`.
+// Walk the filtered feed from MEMBER `start` (inclusive) collecting up to `max`
+// matching chronIdxs, stepping the strict neighbor each iteration through nav's
+// mode-aware seam (feed/search: the chronIdx value scan; ★ Saved: save-index
+// order). "older" walks toward the front (feed: DESCENDING chrons, so the caller
+// can append them newest-first); "newer" walks toward the back (feed: ASCENDING).
+// `exhausted` is true when the walk ran off the end (a -1 neighbor) rather than
+// merely filling `max`. A `start` of -1 yields an empty, exhausted result.
 async function walk(
    my: object,
-   from: number,
+   start: number,
    max: number,
    dir: "older" | "newer",
 ): Promise<{ chrons: number[]; exhausted: boolean }> {
    const chrons: number[] = []
-   const n = data.db.total_art
-   let i = from
+   let cur = start
    while (chrons.length < max) {
-      if (dir === "older" ? i < 0 : i >= n) return { chrons, exhausted: true }
-      const found = await (dir === "older" ? nav.feedLeft(i) : nav.feedRight(i))
+      if (cur === -1) return { chrons, exhausted: true }
+      chrons.push(cur)
+      const found = await (dir === "older" ? nav.neighborOlder(cur) : nav.neighborNewer(cur))
       if (my !== tok) return { chrons, exhausted: false }
-      if (found === -1) return { chrons, exhausted: true }
-      chrons.push(found)
-      i = dir === "older" ? found - 1 : found + 1
+      cur = found
    }
-   return { chrons, exhausted: false }
+   return { chrons, exhausted: cur === -1 }
 }
 
 // Run `items` through `worker` with at most `limit` in flight, pulling them in
@@ -532,10 +536,12 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    const anchor = await nav.listAnchor()
    // The seed is the topmost row of the older batch: the anchor itself when it's
    // a real match, the newest match when anchored at -1, and (defensively) the
-   // nearest match below a non-matching anchor.
-   let seed = await nav.feedLeft(anchor === -1 ? data.db.total_art - 1 : anchor)
+   // nearest match below a non-matching anchor. ★ Saved's listAnchor already
+   // returns a member (the front of the queue, or the live reader article), and
+   // has no chronIdx value order to scan, so it seeds directly.
+   let seed = nav.filter.saved ? anchor : await nav.feedLeft(anchor === -1 ? data.db.total_art - 1 : anchor)
    if (my !== tok) return
-   if (seed === -1 && anchor !== -1) seed = await nav.feedLeft(data.db.total_art - 1)
+   if (seed === -1 && anchor !== -1 && !nav.filter.saved) seed = await nav.feedLeft(data.db.total_art - 1)
    if (my !== tok) return
    if (seed === -1) {
       emptyState()
@@ -560,10 +566,15 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
 
    const older = await walk(my, seed, BATCH, "older") // [seed, ...older], descending
    if (my !== tok) return
-   const newer = anchoredMid
-      ? await walk(my, seed + 1, BATCH, "newer") // matches above the seed, ascending
-      : { chrons: [], exhausted: true }
-   if (my !== tok) return
+   // The newer batch starts at the seed's strict newer neighbor (walk includes
+   // its start member, and the seed already belongs to the older batch).
+   let newer: { chrons: number[]; exhausted: boolean } = { chrons: [], exhausted: true }
+   if (anchoredMid) {
+      const firstNewer = await nav.neighborNewer(seed)
+      if (my !== tok) return
+      if (firstNewer !== -1) newer = await walk(my, firstNewer, BATCH, "newer") // above the seed, ascending
+      if (my !== tok) return
+   }
    if (older.chrons.length === 0) {
       emptyState()
       onInteractive?.()
@@ -572,8 +583,12 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
 
    oldest = older.chrons[older.chrons.length - 1]
    newest = newer.chrons.length ? newer.chrons[newer.chrons.length - 1] : older.chrons[0]
-   exhaustedBottom = older.exhausted || oldest === 0
-   exhaustedTop = newer.exhausted || newest === data.db.total_art - 1
+   // The chronIdx==0 / ==total_art-1 shortcuts (global first/last article) only
+   // hold when display order IS chronIdx order (feed/search). ★ Saved walks by
+   // save-index, so a saved chron 0 can sit mid-queue — its own walk exhaustion
+   // (a -1 neighbor) is the only reliable end signal there.
+   exhaustedBottom = older.exhausted || (!nav.filter.saved && oldest === 0)
+   exhaustedTop = newer.exhausted || (!nav.filter.saved && newest === data.db.total_art - 1)
 
    const chronsDesc = newer.chrons.slice().reverse().concat(older.chrons) // newest-first
    const seen = nav.getSeenMap()
@@ -863,7 +878,7 @@ export async function onStoreGrown(): Promise<void> {
       if (!rowsEl) return
       if (!exhaustedTop || newest < 0) return
       const my = tok
-      const found = await nav.feedRight(newest + 1).catch(() => -1)
+      const found = await nav.neighborNewer(newest).catch(() => -1)
       if (my !== tok || found === -1) return // superseded by a rebuild, or nothing newer
       exhaustedTop = false
       syncTopTerminus(true)
@@ -944,7 +959,9 @@ async function fetchOlder(my: object): Promise<void> {
    if (my !== tok || exhaustedBottom || loadingBottom || !rowsEl) return
    loadingBottom = true
    try {
-      const { chrons, exhausted } = await walk(my, oldest - 1, BATCH, "older")
+      const start = await nav.neighborOlder(oldest) // strict older neighbor of the current bottom edge
+      if (my !== tok) return
+      const { chrons, exhausted } = await walk(my, start, BATCH, "older")
       if (my !== tok) return
       if (chrons.length === 0) {
          exhaustedBottom = true
@@ -958,7 +975,7 @@ async function fetchOlder(my: object): Promise<void> {
       // rejection must not advance oldest/exhaustedBottom past a batch that never
       // rendered, which would permanently skip those rows on the next page.
       oldest = chrons[chrons.length - 1]
-      if (exhausted || oldest === 0) exhaustedBottom = true
+      if (exhausted || (!nav.filter.saved && oldest === 0)) exhaustedBottom = true // see render's note on the saved gate
       const frag = document.createDocumentFragment()
       const older: HTMLElement[] = []
       chrons.forEach((c, k) => {
@@ -986,7 +1003,9 @@ async function fetchNewer(my: object): Promise<void> {
    if (my !== tok || exhaustedTop || loadingTop || newest === -1 || !rowsEl) return
    loadingTop = true
    try {
-      const { chrons, exhausted } = await walk(my, newest + 1, BATCH, "newer") // ascending
+      const start = await nav.neighborNewer(newest) // strict newer neighbor of the current top edge
+      if (my !== tok) return
+      const { chrons, exhausted } = await walk(my, start, BATCH, "newer") // ascending
       if (my !== tok) return
       if (chrons.length === 0) {
          exhaustedTop = true
@@ -998,7 +1017,7 @@ async function fetchNewer(my: object): Promise<void> {
       if (my !== tok) return
       // Commit the cursor only after loadMeta resolves (see fetchOlder).
       newest = chrons[chrons.length - 1]
-      if (exhausted || newest === data.db.total_art - 1) exhaustedTop = true
+      if (exhausted || (!nav.filter.saved && newest === data.db.total_art - 1)) exhaustedTop = true // see render's note on the saved gate
       const frag = document.createDocumentFragment()
       // chrons is ascending; prepend newest-first so the block reads top-down.
       const fresh: HTMLElement[] = []

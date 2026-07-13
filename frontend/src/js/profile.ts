@@ -23,7 +23,7 @@
 //      belongs to the device where the person acted).
 //   merge (default; always for v1 — file restores) —
 //      seen  — the per-key rule above
-//      saved — set union, re-sorted ascending
+//      saved — union preserving local save order, appending new incoming saves
 //      prefs — last-writer-wins, gated by opts.prefs (opt-in checkbox)
 //   sync (mode:"sync" + v2 — a sync.ts pull) — the one-reader hybrid:
 //      seen  — the per-key rule above, but WITHOUT stamping `ts`: the change
@@ -91,11 +91,15 @@ function cleanTsMap(incoming: unknown): Record<string, number> {
    return out
 }
 
-function readSavedSorted(): number[] {
+// Save order (insertion order as stored), NOT sorted: the ★ Saved queue is read
+// front-to-back and new saves append, so the order is meaningful and travels in
+// the blob. Deduped (first occurrence wins) to survive a hand-edited endpoint.
+function readSavedOrder(): number[] {
    try {
       const raw = lsGet(SAVED_KEY)
       const arr = raw ? JSON.parse(raw) : []
-      return (Array.isArray(arr) ? arr.filter((n) => Number.isInteger(n)) : []).sort((a: number, b: number) => a - b)
+      const ints = Array.isArray(arr) ? arr.filter((n) => Number.isInteger(n)) : []
+      return [...new Set(ints)]
    } catch {
       return []
    }
@@ -183,7 +187,7 @@ function mergeSeen(incoming: unknown, incomingTs: Record<string, number>): boole
 // srr-hash is never included.
 export function exportProfile(): string {
    const seen = readSeen()
-   const saved = readSavedSorted()
+   const saved = readSavedOrder()
    const unreadOnly = lsGet(UNREAD_ONLY_KEY) === "1"
    const imgProxy = lsGet(IMG_PROXY_KEY)
    return JSON.stringify({ v: 2, ts: profileTs(), seen, st: readSeenTs(), saved, unreadOnly, imgProxy })
@@ -194,7 +198,7 @@ export function exportProfile(): string {
 // Two modes (see the "Import strategy" note above):
 //   merge (default; always for v1) —
 //      seen   — for each incoming key, take Math.max(existing ?? -1, incoming)
-//      saved  — union of existing + incoming integers, sorted ascending
+//      saved  — union preserving local save order, appending new incoming saves
 //      a merge that actually changed seen/saved stamps `ts` to now (it's a
 //      local mutation like any other seen/save)
 //   sync (opts.mode === "sync" && v2) — raise-only seen (same max-merge, but
@@ -239,11 +243,11 @@ export function importProfile(json: string, opts: { prefs: boolean; mode?: "merg
             // so that intent propagates while a missing field is left alone.
             const incoming = obj["saved"]
             if (Array.isArray(incoming)) {
-               const cleaned = incoming
-                  .filter((n) => Number.isInteger(n) && n >= 0)
-                  .sort((a: number, b: number) => a - b)
+               // Adopt the blob's save ORDER verbatim (deduped, not sorted) — the
+               // sender's queue order is the intent that propagates under LWW.
+               const cleaned = [...new Set(incoming.filter((n) => Number.isInteger(n) && n >= 0))]
                const next = JSON.stringify(cleaned)
-               if (next !== JSON.stringify(readSavedSorted())) {
+               if (next !== JSON.stringify(readSavedOrder())) {
                   lsSet(SAVED_KEY, next)
                   changed = true
                }
@@ -259,20 +263,24 @@ export function importProfile(json: string, opts: { prefs: boolean; mode?: "merg
       // nothing must not stamp `ts` (see below).
       if (mergeSeen(obj["seen"], incomingSt)) changed = true
 
-      // saved — union, sorted
+      // saved — union that PRESERVES local save order and APPENDS restored saves
+      // not already present (in the blob's order), keeping the queue's
+      // front-to-back meaning instead of re-sorting by chronIdx.
       try {
          const incomingRaw = obj["saved"]
          if (Array.isArray(incomingRaw)) {
-            const existingSet = new Set(readSavedSorted())
+            const order = readSavedOrder()
+            const existingSet = new Set(order)
             let savedChanged = false
             for (const n of incomingRaw) {
                if (Number.isInteger(n) && n >= 0 && !existingSet.has(n as number)) {
                   existingSet.add(n as number)
+                  order.push(n as number)
                   savedChanged = true
                }
             }
             if (savedChanged) {
-               lsSet(SAVED_KEY, JSON.stringify([...existingSet].sort((a, b) => a - b)))
+               lsSet(SAVED_KEY, JSON.stringify(order))
                changed = true
             }
          }

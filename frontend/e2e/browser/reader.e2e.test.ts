@@ -498,6 +498,51 @@ describe("browser: real SPA over real packs", () => {
       }
    })
 
+   // ★ Saved is a save-ordered queue: new saves append to the end, so the list
+   // reads in SAVE order, not by article date. Save the NEWEST article first, then
+   // the OLDEST: a chronIdx sort would list them [sport title 1, news title 0], but
+   // save order (newest save on top) lists them [news title 0, sport title 1].
+   it("orders the ★ Saved view by save time (appended), not by chronIdx", async () => {
+      const [page, close] = await open()
+      try {
+         await waitList(page)
+         // Save the newest article (top row = "sport title 1") first.
+         await page.click(".srr-list a.srr-row")
+         await waitReader(page)
+         expect(await $title(page)).toBe("sport title 1")
+         await page.keyboard.press("b")
+         await page.waitForFunction(() => document.querySelector(".srr-save")?.classList.contains("srr-saved"), {
+            timeout: 20000,
+         })
+         await page.click(".srr-back")
+         await waitList(page)
+
+         // Save the OLDEST article (bottom row = "news title 0") second.
+         const rows = await page.$$(".srr-list a.srr-row")
+         await rows[rows.length - 1].click()
+         await waitReader(page)
+         expect(await $title(page)).toBe("news title 0")
+         await page.keyboard.press("b")
+         await page.waitForFunction(() => document.querySelector(".srr-save")?.classList.contains("srr-saved"), {
+            timeout: 20000,
+         })
+
+         // Enter ★ Saved and assert the SAVE order (newest save on top), not chronIdx.
+         await page.click(".srr-back")
+         await waitList(page)
+         await page.click(".srr-filter")
+         await page.waitForSelector('.srr-picker-filter a[data-value="~saved"]', { timeout: 20000 })
+         await page.click('.srr-picker-filter a[data-value="~saved"]')
+         await waitList(page)
+         await page.waitForFunction(() => document.querySelectorAll(".srr-list a.srr-row").length === 2, {
+            timeout: 20000,
+         })
+         expect(await $rowTitles(page)).toEqual(["news title 0", "sport title 1"])
+      } finally {
+         await close()
+      }
+   })
+
    // The service worker (src/sw.ts) makes the reader work fully offline: the shell
    // (navigation + hashed JS/CSS) and the packs (db.gz + latest idx/data, here a
    // single pack) are runtime-cached on the first online visit, then served from
