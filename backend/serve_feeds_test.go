@@ -432,3 +432,78 @@ func TestFeedListViewEmitsNoTitle(t *testing.T) {
 		t.Errorf("listViewOf NoTitle = false, want true (serve GUI must round-trip the flag)")
 	}
 }
+
+// The GUI projection must carry the per-feed seen.gz pool config so the edit
+// modal can seed its inputs from the overview snapshot — without it the webui
+// can't display the dedup settings and its full-replace save silently wipes them.
+func TestFeedListViewEmitsDedup(t *testing.T) {
+	v := listViewOf(&Feed{Title: "T", URL: "https://x/feed", DedupDays: -1, DedupTitle: true})
+	if v.DedupDays != -1 || !v.DedupTitle {
+		t.Errorf("listViewOf dedup = %d/%v, want -1/true (serve GUI must round-trip the pool config)", v.DedupDays, v.DedupTitle)
+	}
+}
+
+// The dedup pool overrides round-trip through the API, and a full-replace body
+// that omits them resets both — the reason the webui modal must always send
+// them (mirrors TestServeFeedSaveRoundTripsIngestPipe / …OmittedExpireDaysZeroes).
+func TestServeFeedSaveRoundTripsDedup(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	stubPassthroughResolve()
+	seedFeed(t, db, &Feed{Title: "Chan", URL: "https://t.example.com/feed"})
+
+	rec := doReq(t, newMux(), "PUT", "/api/feeds/0",
+		`{"title":"Chan","url":"https://t.example.com/feed","dedup_days":-1,"dedup_title":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	var got feedListView
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.DedupDays != -1 || !got.DedupTitle {
+		t.Fatalf("echo dedup_days=%d dedup_title=%v, want -1/true", got.DedupDays, got.DedupTitle)
+	}
+	if err := withDB(false, func(_ context.Context, d *DB) error {
+		ch, e := d.FeedByID(0)
+		if e != nil {
+			return e
+		}
+		if ch.DedupDays != -1 || !ch.DedupTitle {
+			t.Fatalf("stored dedup_days=%d dedup_title=%v", ch.DedupDays, ch.DedupTitle)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Full replace: a body without the fields resets both to defaults.
+	rec = doReq(t, newMux(), "PUT", "/api/feeds/0",
+		`{"title":"Chan","url":"https://t.example.com/feed"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	if err := withDB(false, func(_ context.Context, d *DB) error {
+		ch, e := d.FeedByID(0)
+		if e != nil {
+			return e
+		}
+		if ch.DedupDays != 0 || ch.DedupTitle {
+			t.Fatalf("dedup not reset: dedup_days=%d dedup_title=%v", ch.DedupDays, ch.DedupTitle)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A dedup_days below the -1 disable sentinel is rejected offline (400) before
+// the URL probe, like a bad pipe token.
+func TestServeFeedSaveRejectsBadDedupDays(t *testing.T) {
+	setupTestDB(t)
+	stubPassthroughResolve()
+	body := `{"title":"X","url":"https://x.example/feed","dedup_days":-2}`
+	rec := doReq(t, newMux(), "POST", "/api/feeds", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (%s)", rec.Code, rec.Body)
+	}
+}

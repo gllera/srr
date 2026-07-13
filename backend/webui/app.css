@@ -899,6 +899,25 @@ dialog .inline-field .unit {
    color: var(--fg-2);
    font-size: 0.9em;
 }
+/* Paired small controls: two shape-alike fields (the retention/dedup numbers,
+   the boolean flags) share a row instead of each stretching full width — the
+   number boxes and checkboxes are narrow, so a single column left most of the
+   row empty. Each .field keeps its own label + control + hint stack; the pair
+   collapses to one column on a narrow dialog. */
+dialog .field-duo {
+   display: grid;
+   grid-template-columns: 1fr 1fr;
+   column-gap: 1.4em;
+   align-items: start;
+}
+dialog .field-duo > .field {
+   min-width: 0;
+}
+@media (max-width: 480px) {
+   dialog .field-duo {
+      grid-template-columns: 1fr;
+   }
+}
 /* The feed dialog's advanced fold: overrides / retention / display flags live
    behind a native <details> under a hairline, keeping the primary add flow
    (URL → title → tag → recipe) short. The summary speaks in the label voice

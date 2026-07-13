@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -319,5 +320,55 @@ func TestInspectFromHashMissingParam(t *testing.T) {
 	rec := doReq(t, newMux(), "GET", "/api/inspect?mode=from-hash", "")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (missing hash)", rec.Code)
+	}
+}
+
+// TestSetStoreDedupDefault drives PUT /api/dedup — the GUI twin of `srr dedup
+// --days N`: it persists the store-wide default and echoes the effective value,
+// with 0 resetting to the built-in default.
+func TestSetStoreDedupDefault(t *testing.T) {
+	setupTestDB(t)
+
+	rec := doReq(t, newMux(), "PUT", "/api/dedup", `{"days":14}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
+	}
+	var got map[string]int
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got["dedup_days"] != 14 {
+		t.Fatalf("echo dedup_days = %d, want 14", got["dedup_days"])
+	}
+	if err := withDB(false, func(_ context.Context, d *DB) error {
+		if d.core.DedupDays != 14 {
+			t.Fatalf("stored DedupDays = %d, want 14", d.core.DedupDays)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 0 stores 0 but the echo reports the effective built-in default.
+	rec = doReq(t, newMux(), "PUT", "/api/dedup", `{"days":0}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reset status = %d (%s)", rec.Code, rec.Body)
+	}
+	got = map[string]int{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got["dedup_days"] != defaultDedupDays {
+		t.Fatalf("echo after reset = %d, want built-in default %d", got["dedup_days"], defaultDedupDays)
+	}
+}
+
+// The store default has no off switch: a negative value is a 400 (a per-feed -1
+// is the disable lever, not this).
+func TestSetStoreDedupRejectsNegative(t *testing.T) {
+	setupTestDB(t)
+	rec := doReq(t, newMux(), "PUT", "/api/dedup", `{"days":-1}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (%s)", rec.Code, rec.Body)
 	}
 }
