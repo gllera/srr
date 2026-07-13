@@ -72,7 +72,11 @@ var feHashedRe = regexp.MustCompile(`^[^/]+\.[0-9a-f]{8,}\.[a-z0-9]+$`)
 // place.
 func cacheControlForKey(key string) string {
 	switch {
-	case key == "db.gz":
+	case key == "db.gz" || key == "seen.gz":
+		// seen.gz is the backend-only persistent-dedup sidecar (a third mutable
+		// class besides db.gz and out/), rewritten every non-idle fetch cycle.
+		// The reader never fetches it, but if a CDN ever serves it, never cache
+		// a stale copy.
 		return cacheRevalidate
 	case strings.HasPrefix(key, "out/"):
 		// out/* is the one mutable object class besides db.gz: an output
@@ -109,7 +113,7 @@ const contentTypeGzip = "application/gzip"
 // construction. Centralised next to cacheControlForKey so the writer↔CDN
 // contract stays in one place.
 func contentTypeForKey(key string) string {
-	if key == "db.gz" || packKeyRe.MatchString(key) {
+	if key == "db.gz" || key == "seen.gz" || packKeyRe.MatchString(key) {
 		return contentTypeGzip
 	}
 	return ""

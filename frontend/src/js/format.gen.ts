@@ -73,8 +73,6 @@ export interface IMetaWire {
 export interface IFeedWire {
    title: string // Title
    url: string // URL
-   etag?: string // ETag
-   last_modified?: string // LastModified
    wm?: number // Watermark
    bg?: number[] // BoundaryGUIDs
    ferr?: string // FetchError
@@ -87,6 +85,8 @@ export interface IFeedWire {
    pipe?: string[] // Pipe
    nt?: boolean // NoTitle
    exp?: number // ExpireDays
+   dd?: number // DedupDays
+   dt?: boolean // DedupTitle
    xp?: number // Expired
    total_art: number // TotalArt
    add_idx: number // AddIdx
@@ -122,6 +122,7 @@ export interface IDBWire {
    mp?: number // MetaPacks
    mt?: number // MetaTail
    recipes?: Record<string, IRecipeWire> // Recipes
+   dd?: number // DedupDays
    feeds: Record<number, IFeedWire> | null // Feeds
    out?: IOutFeedWire[] // Out
    head?: IMetaWire[] // Head

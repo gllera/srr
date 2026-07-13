@@ -179,6 +179,9 @@ func TestCacheControlForKey(t *testing.T) {
 		{"out/nested/feed.rss", cacheRevalidate},
 		// out/ must NOT match packKeyRe (not immutable).
 		{"out/0.gz", cacheRevalidate},
+		// seen.gz is the backend-only dedup sidecar: a third mutable class, rewritten
+		// every non-idle fetch cycle — revalidate if a CDN ever fronts it.
+		{"seen.gz", cacheRevalidate},
 	}
 	for _, c := range cases {
 		if got := cacheControlForKey(c.key); got != c.want {
@@ -228,6 +231,7 @@ func TestCacheControlForKeyFrontend(t *testing.T) {
 func TestContentTypeForKey(t *testing.T) {
 	cases := []struct{ key, want string }{
 		{"db.gz", contentTypeGzip},
+		{"seen.gz", contentTypeGzip}, // the dedup sidecar is one of SRR's own gzip objects
 		{"idx/0.gz", contentTypeGzip},
 		{"idx/L1.gz", contentTypeGzip},
 		{"idx/h2.gz", contentTypeGzip},

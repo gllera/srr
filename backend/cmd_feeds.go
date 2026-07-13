@@ -107,7 +107,7 @@ func validateIngest(name string) (string, error) {
 // rather than after a wasted round-trip. Pure check, no mutation. The recipe-ref
 // check is separate — it needs the recipes map and already runs inside
 // resolveFeedProbe before any network I/O.
-func validateFeedFields(expireDays int, ingest string, pipe []string, tag string) error {
+func validateFeedFields(expireDays, dedupDays int, ingest string, pipe []string, tag string) error {
 	if expireDays < 0 {
 		return fmt.Errorf("expire days must be >= 0 (got %d)", expireDays)
 	}
@@ -115,6 +115,15 @@ func validateFeedFields(expireDays int, ingest string, pipe []string, tag string
 	// int64 overflow and rejects obviously-typo'd values.
 	if expireDays > 36500 {
 		return fmt.Errorf("expire days must be <= 36500 (100 years) (got %d)", expireDays)
+	}
+	// dedup days: 0 inherits the store default, >0 sets the horizon, -1 disables
+	// the pool for this feed. -1 is the ONLY valid negative (the disable
+	// sentinel); anything lower is a typo.
+	if dedupDays < dedupDisabled {
+		return fmt.Errorf("dedup days must be >= -1 (-1 disables the pool; got %d)", dedupDays)
+	}
+	if dedupDays > 36500 {
+		return fmt.Errorf("dedup days must be <= 36500 (got %d)", dedupDays)
 	}
 	if _, err := validateIngest(ingest); err != nil {
 		return err
@@ -126,7 +135,7 @@ func validateFeedFields(expireDays int, ingest string, pipe []string, tag string
 }
 
 func normalizeFeed(ch *Feed, recipes map[string]Recipe) error {
-	if err := validateFeedFields(ch.ExpireDays, ch.Ingest, ch.Pipe, ch.Tag); err != nil {
+	if err := validateFeedFields(ch.ExpireDays, ch.DedupDays, ch.Ingest, ch.Pipe, ch.Tag); err != nil {
 		return err
 	}
 	if err := validateRecipeRef(recipes, ch.Recipe); err != nil {
@@ -180,6 +189,9 @@ type AddCmd struct {
 	Ingest *string  `short:"i" optional:"" help:"Feed-level ingest override: built-in ('#feed') or shell command. Empty inherits the recipe's."`
 	Pipe   []string `short:"p" sep:"none" optional:"" help:"Feed-level pipeline step; repeat -p per step. Overrides the recipe's pipe; #default expands to the recipe's effective pipe."`
 	Expire *int     `short:"e" name:"expire-days" optional:"" help:"Expire articles after N days (0 = keep forever)."`
+	// DedupDays / DedupTitle tune the persistent seen.gz dedup pool per feed.
+	DedupDays  *int  `name:"dedup-days" optional:"" help:"Dedup horizon in days for this feed (0 = store default, -1 = disable the pool)."`
+	DedupTitle *bool `name:"dedup-title" optional:"" help:"Also dedup by folded title (catches a re-promotion with a fresh guid but the same headline)."`
 }
 
 func (o *AddCmd) Run() error {
@@ -206,10 +218,16 @@ func (o *AddCmd) Run() error {
 	if o.Expire != nil {
 		v.ExpireDays = *o.Expire
 	}
+	if o.DedupDays != nil {
+		v.DedupDays = *o.DedupDays
+	}
+	if o.DedupTitle != nil {
+		v.DedupTitle = *o.DedupTitle
+	}
 	// Offline field checks before the store lock and the subscribe-time probe, so
 	// bad input never triggers a wasted fetch (the recipe ref is checked inside
 	// resolveFeedProbe, also before any network I/O).
-	if err := validateFeedFields(v.ExpireDays, v.Ingest, v.Pipe, v.Tag); err != nil {
+	if err := validateFeedFields(v.ExpireDays, v.DedupDays, v.Ingest, v.Pipe, v.Tag); err != nil {
 		return err
 	}
 	return withDB(true, func(ctx context.Context, db *DB) error {
@@ -238,6 +256,10 @@ type feedView struct {
 	Pipe       []string `json:"pipe,omitempty" yaml:"pipe,omitempty"`
 	NoTitle    bool     `json:"no_title,omitempty" yaml:"no_title,omitempty"`
 	ExpireDays int      `json:"expire_days,omitempty" yaml:"expire_days,omitempty"`
+	// DedupDays / DedupTitle are the per-feed seen.gz pool overrides (0 inherits
+	// the store default; -1 disables; DedupTitle adds the folded-title axis).
+	DedupDays  int  `json:"dedup_days,omitempty" yaml:"dedup_days,omitempty"`
+	DedupTitle bool `json:"dedup_title,omitempty" yaml:"dedup_title,omitempty"`
 	// Expired is read-only (server-owned, like Error): reported by ls/show/
 	// edit, never applied back by writeFeedView.
 	Expired int `json:"expired,omitempty" yaml:"expired,omitempty"`
@@ -262,6 +284,8 @@ func viewOf(ch *Feed) *feedView {
 		Pipe:         ch.Pipe,
 		NoTitle:      ch.NoTitle,
 		ExpireDays:   ch.ExpireDays,
+		DedupDays:    ch.DedupDays,
+		DedupTitle:   ch.DedupTitle,
 		Expired:      ch.Expired,
 		ContentBytes: ch.ContentBytes,
 		AssetBytes:   ch.AssetBytes,
@@ -277,10 +301,13 @@ type UpdCmd struct {
 	Ingest *string  `short:"i" optional:"" help:"Feed-level ingest override. Empty (\"\") to clear (⇒ recipe's)."`
 	Pipe   []string `short:"p" sep:"none" optional:"" help:"Feed-level pipeline step; repeat -p per step (#default expands to the recipe's effective pipe). A single -p \"\" clears (⇒ recipe's)."`
 	Expire *int     `short:"e" name:"expire-days" optional:"" help:"Expire articles after N days (0 = keep forever)."`
+	// DedupDays / DedupTitle tune the persistent seen.gz dedup pool per feed.
+	DedupDays  *int  `name:"dedup-days" optional:"" help:"Dedup horizon in days for this feed (0 = store default, -1 = disable the pool)."`
+	DedupTitle *bool `name:"dedup-title" optional:"" help:"Also dedup by folded title (catches a re-promotion with a fresh guid but the same headline)."`
 }
 
 func (o *UpdCmd) Run() error {
-	if o.Title == nil && o.Tag == nil && o.Recipe == nil && o.Ingest == nil && o.Pipe == nil && o.URL == nil && o.Expire == nil {
+	if o.Title == nil && o.Tag == nil && o.Recipe == nil && o.Ingest == nil && o.Pipe == nil && o.URL == nil && o.Expire == nil && o.DedupDays == nil && o.DedupTitle == nil {
 		return fmt.Errorf("nothing to update")
 	}
 
@@ -311,6 +338,12 @@ func (o *UpdCmd) Run() error {
 		if o.Expire != nil {
 			ch.ExpireDays = *o.Expire
 		}
+		if o.DedupDays != nil {
+			ch.DedupDays = *o.DedupDays
+		}
+		if o.DedupTitle != nil {
+			ch.DedupTitle = *o.DedupTitle
+		}
 		// Determine the candidate URL (unchanged when -u is absent). resolveFeedProbe
 		// validates the recipe reference and probes for discovery only when the URL
 		// is actually changing and the effective ingest is #feed.
@@ -324,7 +357,7 @@ func (o *UpdCmd) Run() error {
 		}
 		// Offline field checks before the subscribe-time probe, so bad input
 		// never triggers a wasted fetch.
-		if err := validateFeedFields(ch.ExpireDays, ch.Ingest, ch.Pipe, ch.Tag); err != nil {
+		if err := validateFeedFields(ch.ExpireDays, ch.DedupDays, ch.Ingest, ch.Pipe, ch.Tag); err != nil {
 			return err
 		}
 		resolved, err := resolveFeedProbe(ctx, db.core.Recipes, ch.Recipe, ch.Ingest, oldURL, newURL)
@@ -338,7 +371,9 @@ func (o *UpdCmd) Run() error {
 		if err := normalizeFeed(ch, db.core.Recipes); err != nil {
 			return err
 		}
-		return db.Commit(ctx)
+		// commitState (not Commit) so a setFeedURL fetch-state reset — which clears
+		// the seen.gz-backed ETag/LastModified — is persisted to the sidecar too.
+		return db.commitState(ctx)
 	})
 }
 
@@ -370,7 +405,9 @@ func (o *RmCmd) Run() error {
 		for _, id := range o.ID {
 			db.RemoveFeed(id)
 		}
-		return db.Commit(ctx)
+		// commitState so RemoveFeed's seen.gz purge (dropFeed) is persisted before
+		// the id can be reused by a later feed add.
+		return db.commitState(ctx)
 	})
 }
 
@@ -495,7 +532,9 @@ func applyViews(ctx context.Context, db *DB, views []*feedView) error {
 			}
 		}
 	}
-	return db.Commit(ctx)
+	// commitState so a setFeedURL reset (URL change) persists the cleared
+	// seen.gz-backed ETag/LastModified alongside the db.gz mutations.
+	return db.commitState(ctx)
 }
 
 // writeFeedView applies a feedView onto ch. The URL goes through
@@ -510,6 +549,8 @@ func writeFeedView(ch *Feed, v *feedView) {
 	ch.Pipe = v.Pipe
 	ch.NoTitle = v.NoTitle
 	ch.ExpireDays = v.ExpireDays
+	ch.DedupDays = v.DedupDays
+	ch.DedupTitle = v.DedupTitle
 }
 
 // parseApplyInput accepts either a single feedView or an array.

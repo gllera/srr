@@ -64,7 +64,7 @@ func listViewOf(ch *Feed) feedListView {
 // which would 409 the fetch loop and every other GUI mutation for its duration.
 func resolveFeedViewURL(ctx context.Context, db *DB, v *feedView) error {
 	// Offline field checks before the probe, so bad input never triggers a fetch.
-	if err := validateFeedFields(v.ExpireDays, v.Ingest, v.Pipe, v.Tag); err != nil {
+	if err := validateFeedFields(v.ExpireDays, v.DedupDays, v.Ingest, v.Pipe, v.Tag); err != nil {
 		return err
 	}
 	oldURL := ""
@@ -115,7 +115,9 @@ func saveFeed(ctx context.Context, db *DB, v *feedView) (*Feed, error) {
 			return nil, err
 		}
 	}
-	return ch, db.Commit(ctx)
+	// commitState so a setFeedURL reset persists the cleared seen.gz-backed
+	// ETag/LastModified alongside the db.gz mutations.
+	return ch, db.commitState(ctx)
 }
 
 func updateFeed(w http.ResponseWriter, r *http.Request) {
@@ -171,7 +173,8 @@ func deleteFeed(w http.ResponseWriter, r *http.Request) {
 			return e // 404 when absent
 		}
 		db.RemoveFeed(id)
-		return db.Commit(ctx)
+		// commitState so RemoveFeed's seen.gz purge persists before id reuse.
+		return db.commitState(ctx)
 	})
 	if err != nil {
 		writeErr(w, err)

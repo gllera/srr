@@ -28,8 +28,10 @@ func setupFeedsTestDB(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("AddFeed: %v", err)
 	}
-	if err := db.Commit(ctx); err != nil {
-		t.Fatalf("Commit: %v", err)
+	// commitState (not Commit) so the seeded ETag — now seen.gz-backed — is
+	// persisted to the sidecar and hydrates back on reopen.
+	if err := db.commitState(ctx); err != nil {
+		t.Fatalf("commitState: %v", err)
 	}
 	db.Close(ctx)
 }

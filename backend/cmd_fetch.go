@@ -414,6 +414,10 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 			fetchedAt:    db.core.FetchedAt,
 			recipes:      db.core.Recipes,
 			maxAssetSize: int(assets.maxBytes),
+			// Persistent dedup pool + its store-default horizon, read-only during
+			// the fan-out; the collected stamps are merged into it after g.Wait().
+			seen:      db.seen,
+			dedupDays: db.core.DedupDays,
 		}
 
 		// The cycle's feed set: the GUI single-feed fetch (o.only), the
@@ -463,6 +467,25 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 		sort.SliceStable(articles, func(i, j int) bool {
 			return articles[i].Published < articles[j].Published
 		})
+
+		// Merge the persistent-dedup stamps each fetched feed buffered during the
+		// (lock-free) fan-out into the pool, single-threaded like the articles
+		// aggregation above, then apply the age/cap/dead-feed eviction. Runs every
+		// cycle including the GUI single-feed fetch (o.only) — evict is global
+		// maintenance, like ExpireArticles: it uses the full live feeds map so an
+		// unfetched feed's entries are retained (they age out over the horizon),
+		// while stamps come only from feeds fetched this cycle. SyncSeen (after
+		// Commit) persists it; the pool's dirty flag skips the write on an idle
+		// cycle that changed nothing.
+		today := uint16(db.core.FetchedAt / 86400)
+		for _, ch := range feeds {
+			for _, h := range ch.seenStamps {
+				db.seen.stamp(ch.id, h, today)
+			}
+		}
+		db.seen.evict(today, func(fid int) int {
+			return db.core.Feeds[fid].dedupDays(db.core.DedupDays)
+		}, seenFeedCap, db.core.Feeds)
 
 		// Snapshot the GC-relevant counters: each sweep below runs only when
 		// its counter advanced this run. Most cycles fetch nothing new, and an
@@ -524,6 +547,14 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 		}
 		if err := db.Commit(ctx); err != nil {
 			return err
+		}
+		// Persist the dedup pool AFTER the commit publishes the article batch, so
+		// a pool write that lags a failed commit never marks unpublished GUIDs as
+		// seen (it would drop those articles forever). Warn-only and write-if-dirty
+		// (SyncSeen), like SyncMeta: a failed or skipped write degrades dedup to
+		// bg-only next cycle, never loses an article.
+		if err := db.SyncSeen(ctx); err != nil {
+			slog.Warn("sync seen pool", "error", err)
 		}
 		// Drop latest-pack generations older than the grace window, but only
 		// when the counter advanced this run — a crash-leaked name is still
