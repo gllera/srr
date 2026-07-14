@@ -551,8 +551,9 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 		// Persist the dedup pool AFTER the commit publishes the article batch, so
 		// a pool write that lags a failed commit never marks unpublished GUIDs as
 		// seen (it would drop those articles forever). Warn-only and write-if-dirty
-		// (SyncSeen), like SyncMeta: a failed or skipped write degrades dedup to
-		// bg-only next cycle, never loses an article.
+		// (SyncSeen), like SyncMeta: a failed or skipped write loses this cycle's
+		// fresh bg too, so next cycle dateless/at-watermark items may re-ingest
+		// once (Watermark still floors dated ones), never loses an article.
 		if err := db.SyncSeen(ctx); err != nil {
 			slog.Warn("sync seen pool", "error", err)
 		}

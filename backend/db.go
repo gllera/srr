@@ -312,9 +312,12 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 	}
 
 	// The persistent dedup pool rides alongside db.gz. Missing/short/corrupt ⇒
-	// empty pool + WARN (loadSeen), so a bad sidecar degrades dedup to bg-only,
-	// never fails an open or loses an article. Hydrate each feed's seen.gz-backed
-	// HTTP validators (ETag/LastModified) onto the in-memory feeds.
+	// empty pool + WARN (loadSeen), never fails an open or loses an article —
+	// but since bg now lives in the sidecar too (see BoundaryGUIDs), a store
+	// that has already dropped its legacy inline "bg" degrades all the way to
+	// watermark-only dedup until the sidecar recovers, not bg-only as before
+	// the relocation. Hydrate each feed's seen.gz-backed HTTP validators
+	// (ETag/LastModified) and BoundaryGUIDs onto the in-memory feeds.
 	db.seen = db.loadSeen(ctx)
 	db.seen.hydrateFeeds(db.core.Feeds)
 	return db, nil

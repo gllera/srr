@@ -18,10 +18,10 @@ import (
 // remembering, per feed, the last day each item GUID (and optionally folded
 // title) was present in the feed window. It catches re-promotion duplicates —
 // a feed re-publishing an old item with a fresh pubDate but a stable GUID that
-// has fallen out of the small db.gz BoundaryGUIDs snapshot — which neither the
+// has fallen out of the small per-feed BoundaryGUIDs snapshot — which neither the
 // watermark (the re-dated pub sits above it) nor bg (the GUID aged out) can.
-// The reader never fetches it; a missing/corrupt pool degrades to exact
-// bg-only dedup, never an article loss. See backend/SEEN-POOL-PLAN.md.
+// The reader never fetches it; a missing/corrupt pool degrades to watermark-only
+// dedup (bg rides here too now), never an article loss. See backend/SEEN-POOL-PLAN.md.
 
 const (
 	// seenLegacyKey is the pre-ping-pong single-object name. Read once as a
@@ -218,10 +218,12 @@ func (p *seenPool) dropFeed(feedID int) {
 	}
 }
 
-// hydrateFeeds copies the pool's persisted HTTP validators onto the in-memory
-// feeds (ETag/LastModified are seen.gz-backed now, json:"-" in db.gz). A feed
-// with no entry keeps its zero values — a fresh source with no cache history.
-// Called by NewDB after the pool loads.
+// hydrateFeeds copies the pool's persisted HTTP validators AND BoundaryGUIDs
+// onto the in-memory feeds (all three are seen.gz-backed now, json:"-" in
+// db.gz). A feed with no entry keeps its zero values — a fresh source with no
+// cache/dedup history (also the state after an upgrade drops a pre-relocation
+// db.gz's inline "bg", which json:"-" ignores: the sidecar refills it next
+// fetch). Called by NewDB after the pool loads.
 func (p *seenPool) hydrateFeeds(live map[int]*Feed) {
 	if p == nil {
 		return
@@ -230,30 +232,34 @@ func (p *seenPool) hydrateFeeds(live map[int]*Feed) {
 		if ch := live[id]; ch != nil {
 			ch.ETag = fs.etag
 			ch.LastModified = fs.lastMod
+			ch.BoundaryGUIDs = fs.bg
 		}
 	}
 }
 
-// snapshotHTTP pulls each live feed's current ETag/LastModified back into the
-// pool (dirtying it when any changed) and drops entries for feeds that are no
-// longer live (id reuse / removal). A feed with neither validator holds no
-// entry. Called by SyncSeen, so every persist of feed state carries the current
-// validators — a fetch that refreshed an ETag, or a setFeedURL reset that
-// cleared one.
+// snapshotHTTP pulls each live feed's current ETag/LastModified AND
+// BoundaryGUIDs back into the pool (dirtying it when any changed) and drops
+// entries for feeds that are no longer live (id reuse / removal). A feed with
+// neither a validator nor a bg window holds no entry — in particular a
+// validator-less, bg-only feed (e.g. right after AddFeed with a seeded bg, or
+// an external-ingest feed with no HTTP caching) still gets/keeps an entry, so
+// its bg survives the round-trip. Called by SyncSeen, so every persist of feed
+// state carries the current validators and dedup window — a fetch that
+// refreshed an ETag or repopulated bg, or a setFeedURL reset that cleared them.
 func (p *seenPool) snapshotHTTP(live map[int]*Feed) {
 	if p == nil {
 		return
 	}
 	for id, ch := range live {
-		if ch.ETag == "" && ch.LastModified == "" {
+		want := feedState{etag: ch.ETag, lastMod: ch.LastModified, bg: ch.BoundaryGUIDs}
+		if want.etag == "" && want.lastMod == "" && len(want.bg) == 0 {
 			if _, ok := p.feed[id]; ok {
 				delete(p.feed, id)
 				p.dirty = true
 			}
 			continue
 		}
-		want := feedState{etag: ch.ETag, lastMod: ch.LastModified}
-		if cur := p.feed[id]; cur.etag != want.etag || cur.lastMod != want.lastMod {
+		if cur, ok := p.feed[id]; !ok || cur.etag != want.etag || cur.lastMod != want.lastMod || !slices.Equal(cur.bg, want.bg) {
 			p.feed[id] = want
 			p.dirty = true
 		}
@@ -431,7 +437,8 @@ func readLenPrefixed(data []byte, pos int) (string, int, error) {
 
 // loadSeen reads and parses seen.gz into a pool. A missing object, a read error,
 // a bad gzip stream, or a corrupt body all degrade to an empty pool with a WARN
-// — dedup falls back to bg-only, never a failed open or an article loss. The
+// — dedup falls back to watermark-only (bg rides here too now), never a failed
+// open or an article loss. The
 // returned pool is always non-nil and clean.
 func (o *DB) loadSeen(ctx context.Context) *seenPool {
 	rc, err := o.Get(ctx, seenLegacyKey, true)
