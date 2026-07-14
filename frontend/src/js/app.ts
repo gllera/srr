@@ -59,7 +59,35 @@ let view: "list" | "reader" = "list"
 // the toolbar-hide baseline stays in sync (declared up here so list.setup, wired
 // before setupGestures runs, can close over it).
 let gestures: Gestures | null = null
+// The single navigation mutex. Every reader action runs through guard()/guardBg()
+// so a store swap can't interleave with a render. It self-heals: a mutex held far
+// past any bounded operation (every store fetch is abort-timed at 30s in data.ts)
+// means a wedged await that never settled, so it is treated as free rather than
+// no-opping every swipe/arrow/button until the page is reloaded — the reported
+// "swipe stops working until refresh". busyToken makes release() ownership-guarded
+// so a stale owner that finally settles after being reclaimed can't clear the lock
+// a newer holder now owns.
 let busy = false
+let busyToken = 0
+let busyAt = 0
+const BUSY_STUCK_MS = 60_000
+// Held by a LIVE owner? A stale hold (past BUSY_STUCK_MS) reads as free so the
+// next caller reclaims it. Shared by acquire() and the pre-mutation bail-outs
+// (goToList/selectFilter) so every busy check agrees on staleness.
+function held(): boolean {
+   return busy && Date.now() - busyAt < BUSY_STUCK_MS
+}
+// Take the mutex (reclaiming a stale one), returning an ownership token — or null
+// when a live owner holds it and the caller must skip.
+function acquire(): number | null {
+   if (held()) return null
+   busy = true
+   busyAt = Date.now()
+   return ++busyToken
+}
+function release(token: number): void {
+   if (token === busyToken) busy = false
+}
 // Freshness token for the list's async cycle: each W/S press bumps it, and only
 // the LATEST press applies its resolved token, so rapid presses can't land out
 // of order off a stale cycleOriginKey. A token, not a held flag — a cycleToken()
@@ -248,16 +276,19 @@ function closePopup() {
 }
 
 async function guard(fn: () => Promise<IShowFeed>) {
-   if (busy) return
-   busy = true
+   const token = acquire()
+   if (token === null) return
    document.body.classList.add("srr-loading")
    try {
-      render(await fn())
+      const o = await fn()
+      // If this op was reclaimed as stale mid-flight (see acquire), a newer holder
+      // now owns the surface — don't paint our stale result / error over it.
+      if (token === busyToken) render(o)
    } catch (e) {
-      showError(e, () => guard(fn))
+      if (token === busyToken) showError(e, () => guard(fn))
    } finally {
-      document.body.classList.remove("srr-loading")
-      busy = false
+      if (token === busyToken) document.body.classList.remove("srr-loading")
+      release(token)
    }
 }
 
@@ -265,13 +296,13 @@ async function guard(fn: () => Promise<IShowFeed>) {
 // caller that loses the race is skipped, not queued (its next trigger retries).
 // Used by the store refresh so a state swap can't interleave with navigation.
 async function guardBg(fn: () => Promise<void>): Promise<boolean> {
-   if (busy) return false
-   busy = true
+   const token = acquire()
+   if (token === null) return false
    try {
       await fn()
       return true
    } finally {
-      busy = false
+      release(token)
    }
 }
 
@@ -682,8 +713,8 @@ function listTitle(): string {
 // guard() busy flag so it can't overlap an in-flight article load; on error,
 // the popup's Retry re-runs it.
 async function renderListSurface() {
-   if (busy) return
-   busy = true
+   const token = acquire()
+   if (token === null) return
    // The list centers + highlights its anchor (the article you were reading /
    // the lane's resume position) on every arrival. Returning FROM THE READER
    // (back button, browser-back) commits that scroll immediately — the seed's
@@ -704,8 +735,8 @@ async function renderListSurface() {
    const onInteractive = () => {
       if (interactive) return
       interactive = true
-      document.body.classList.remove("srr-loading")
-      busy = false
+      if (token === busyToken) document.body.classList.remove("srr-loading")
+      release(token)
    }
    try {
       await list.show(anchorNow, onInteractive)
@@ -713,8 +744,8 @@ async function renderListSurface() {
       showError(e, () => void renderListSurface())
    } finally {
       if (!interactive) {
-         document.body.classList.remove("srr-loading")
-         busy = false
+         if (token === busyToken) document.body.classList.remove("srr-loading")
+         release(token)
       }
       syncSearchBar()
    }
@@ -751,9 +782,9 @@ async function route(hash: string) {
 // re-centers on the article you were reading (see renderListSurface).
 async function goToList(push: boolean) {
    // Bail BEFORE mutating history/localStorage: renderListSurface also checks
-   // busy, but the pushState/persistHash below would already have rewritten the
-   // URL to a filter the dropped render never painted, desyncing URL from view.
-   if (busy) return
+   // the mutex, but the pushState/persistHash below would already have rewritten
+   // the URL to a filter the dropped render never painted, desyncing URL from view.
+   if (held()) return
    const h = "#" + nav.tokensSuffix()
    history[push ? "pushState" : "replaceState"](null, "", h)
    persistHash(h)
@@ -761,11 +792,11 @@ async function goToList(push: boolean) {
 }
 
 async function selectFilter(token: string) {
-   // Bail BEFORE applyFilter/goToList: goToList drops on busy, but applyFilter
-   // would already have mutated nav.filter (and goToList's pushState the URL) for
-   // a render that never ran. Dropping the whole handler keeps filter+URL+view
-   // consistent — same mutex discipline as guard() for reader actions.
-   if (busy) return
+   // Bail BEFORE applyFilter/goToList: goToList drops on a held mutex, but
+   // applyFilter would already have mutated nav.filter (and goToList's pushState
+   // the URL) for a render that never ran. Dropping the whole handler keeps
+   // filter+URL+view consistent — same mutex discipline as guard() for reader actions.
+   if (held()) return
    // Any explicit filter change cancels a still-pending debounced search query;
    // otherwise typing then leaving search (✕ / Escape / the magnifier, but also a
    // feed-menu pick or a two-finger/arrow cycle, which all land here) within
