@@ -117,9 +117,10 @@ func gunzip(r io.Reader) ([]byte, error) {
 type DB struct {
 	store.Backend
 	core DBCore
-	// seen is the persistent dedup pool (seen.gz), loaded by NewDB (empty when
-	// absent/corrupt) and written by SyncSeen after Commit. Backend-only; the
-	// reader never sees it. Always non-nil after NewDB.
+	// seen is the persistent dedup pool (seen.gz ping/pong slots), loaded by
+	// NewDB (empty when absent/corrupt) and written by SyncSeen BEFORE Commit
+	// (see DBCore.SeenFlag). Backend-only; the reader never sees it. Always
+	// non-nil after NewDB.
 	seen   *seenPool
 	locked bool
 }

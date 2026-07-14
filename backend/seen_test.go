@@ -302,17 +302,22 @@ func TestParseSeenCorruptionGuard(t *testing.T) {
 	}
 }
 
-// SyncSeen writes the pool to the store; a fresh NewDB on the same store loads
-// it back — the persistence half of the round-trip (parse symmetry is
-// TestSeenPoolRoundTrip). NewDB must always leave a non-nil pool.
+// SyncSeen + Commit persists the pool to the store; a fresh NewDB on the same
+// store loads it back — the persistence half of the round-trip (parse symmetry
+// is TestSeenPoolRoundTrip). NewDB must always leave a non-nil pool. Adapted for
+// ping/pong: SyncSeen alone only flips core.SeenFlag in memory (see
+// TestSeenInactiveSlotIgnoredWithoutCommit) — a Commit is required for the flip
+// to be durable and for a reopen to name the slot SyncSeen just wrote via the
+// direct (non-fallback) path, so this test now goes through commitState like the
+// other persistence tests.
 func TestSyncSeenPersistsAcrossReopen(t *testing.T) {
 	db, _, _ := setupTestDB(t)
 	if db.seen == nil {
 		t.Fatal("NewDB left db.seen nil, want an (empty) pool")
 	}
 	db.seen.stamp(1, 0xabc123, 100)
-	if err := db.SyncSeen(ctx); err != nil {
-		t.Fatalf("SyncSeen: %v", err)
+	if err := db.commitState(ctx); err != nil { // SyncSeen (flip) + Commit (publish)
+		t.Fatalf("commitState: %v", err)
 	}
 
 	// A second DB on the same store (local reads need no lock) reloads seen.gz.
@@ -327,14 +332,19 @@ func TestSyncSeenPersistsAcrossReopen(t *testing.T) {
 }
 
 // SyncSeen skips the store write when the pool is clean (write-if-dirty): a
-// freshly-loaded, unmutated pool leaves no seen.gz behind.
+// freshly-loaded, unmutated pool leaves neither ping/pong slot (nor the legacy
+// name, never written by SyncSeen at all now) behind. Adapted for ping/pong:
+// the write target is a flag-named slot, not the single legacy filename, so the
+// meaningful assertion is that NEITHER seen.0.gz NOR seen.1.gz appears.
 func TestSyncSeenSkipsWhenClean(t *testing.T) {
 	db, _, dir := setupTestDB(t)
 	if err := db.SyncSeen(ctx); err != nil {
 		t.Fatalf("SyncSeen: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, seenLegacyKey)); !os.IsNotExist(err) {
-		t.Errorf("clean pool wrote %s (err=%v), want skipped", seenLegacyKey, err)
+	for _, key := range []string{seenSlotKey(false), seenSlotKey(true), seenLegacyKey} {
+		if _, err := os.Stat(filepath.Join(dir, key)); !os.IsNotExist(err) {
+			t.Errorf("clean pool wrote %s (err=%v), want skipped", key, err)
+		}
 	}
 }
 
@@ -489,5 +499,86 @@ func TestSnapshotHTTPKeepsValidatorlessBG(t *testing.T) {
 	db.seen.snapshotHTTP(db.core.Feeds)
 	if got := db.seen.feed[f.id].bg; len(got) != 3 || got[2] != 7 {
 		t.Fatalf("validator-less bg dropped by snapshotHTTP: %v", got)
+	}
+}
+
+// A dirty SyncSeen writes the INACTIVE slot and flips SeenFlag; a clean (idle)
+// SyncSeen writes nothing and does not flip.
+func TestSyncSeenPingPongFlipsFlag(t *testing.T) {
+	db, _, dir := setupTestDB(t)
+	if db.core.SeenFlag {
+		t.Fatal("fresh store should start flag=false")
+	}
+	db.seen.stamp(0, 1, 10) // dirty
+	if err := db.SyncSeen(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !db.core.SeenFlag {
+		t.Fatal("dirty write must flip flag to true")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "seen.1.gz")); err != nil {
+		t.Fatalf("inactive slot seen.1.gz not written: %v", err)
+	}
+	if err := db.SyncSeen(ctx); err != nil { // clean now
+		t.Fatal(err)
+	}
+	if !db.core.SeenFlag {
+		t.Fatal("clean sync must NOT flip flag")
+	}
+}
+
+// A corrupt ACTIVE slot falls back to the sibling slot (previous generation),
+// recovering a usable pool instead of degrading to empty.
+func TestLoadSeenSiblingFallbackOnCorruptActive(t *testing.T) {
+	db, _, dir := setupTestDB(t)
+	db.seen.stamp(0, 0xAA, 5)
+	if err := db.SyncSeen(ctx); err != nil { // writes seen.1, flag→true
+		t.Fatal(err)
+	}
+	db.seen.stamp(0, 0xBB, 6)
+	if err := db.SyncSeen(ctx); err != nil { // writes seen.0, flag→false (active=seen.0)
+		t.Fatal(err)
+	}
+	// Corrupt the ACTIVE slot (seen.0); sibling seen.1 still holds {0xAA}.
+	if err := os.WriteFile(filepath.Join(dir, seenSlotKey(db.core.SeenFlag)), []byte("garbage"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := db.loadSeen(ctx)
+	if !got.has(0, 0xAA) {
+		t.Fatal("expected sibling-slot fallback to recover the prior pool, got empty/other")
+	}
+	// Pin that it read the SIBLING (seen.1, the older generation holding only
+	// {0xAA}), not some other path: 0xBB lives only in the corrupt active slot.
+	if got.has(0, 0xBB) {
+		t.Fatal("recovered 0xBB — read the corrupt active slot, not the sibling")
+	}
+}
+
+// Crash consistency: SyncSeen writes the inactive slot + flips the in-memory flag,
+// but until Commit persists that flag, a reopen must read the still-committed slot
+// — the uncommitted slot's content must not be visible.
+func TestSeenInactiveSlotIgnoredWithoutCommit(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	db.seen.stamp(0, 0x01, 3)
+	if err := db.SyncSeen(ctx); err != nil { // seen.1 written, flag→true (in mem)
+		t.Fatal(err)
+	}
+	if err := db.Commit(ctx); err != nil { // db.gz persists flag=true
+		t.Fatal(err)
+	}
+	db.seen.stamp(0, 0x02, 4)
+	if err := db.SyncSeen(ctx); err != nil { // seen.0 written, flag→false in mem, NOT committed
+		t.Fatal(err)
+	}
+	db2, err := NewDB(ctx, false) // reopen: reads committed db.gz (flag=true → seen.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db2.Close(ctx)
+	if !db2.seen.has(0, 0x01) {
+		t.Fatal("committed slot content lost")
+	}
+	if db2.seen.has(0, 0x02) {
+		t.Fatal("uncommitted slot content must not be visible")
 	}
 }
