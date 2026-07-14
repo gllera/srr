@@ -16,15 +16,37 @@ import {
 
 export { IDX_PACK_SIZE, META_PACK_SIZE }
 
+// Every store object is fetched with an abort timeout armed across BOTH the
+// request AND the body read: a connection that delivers headers then stalls
+// mid-body (a mobile network handoff, sleep/wake, or a dead-but-open socket)
+// leaves an un-timed-out fetch pending forever. Under app.ts's busy mutex that
+// wedges ALL navigation until the page is reloaded — the reported "swipe stops
+// working until refresh". On timeout abort() errors res.body, so the pending
+// read rejects; cachedPromise then drops the slot so a retry refetches.
+const FETCH_TIMEOUT_MS = 30_000
+
+async function fetchTimed<T>(url: URL, cache: RequestCache, read: (res: Response) => Promise<T>): Promise<T> {
+   const ctrl = new AbortController()
+   const timer = setTimeout(
+      () => ctrl.abort(new DOMException(`fetch timed out: ${url}`, "TimeoutError")),
+      FETCH_TIMEOUT_MS,
+   )
+   try {
+      return await read(await fetch(url, { cache, signal: ctrl.signal }))
+   } finally {
+      clearTimeout(timer)
+   }
+}
+
 // no-cache forces a conditional revalidation on every load so a stale db.gz on
 // the client (mobile browsers cache aggressively) can't make chronIdx URLs like
 // `#14099` silently fall back to the last article via the `>= total_art` clamp
 // in nav.fromHash. 304 keeps the hot path cheap when the CDN sends ETag /
 // Last-Modified; the <link rel="preload"> in built HTML still warms the entry.
-function fetchDb(): Promise<Response> {
-   return fetch(new URL("db.gz", PACK_BASE), { cache: "no-cache" })
+function loadDb(): Promise<IDB> {
+   return fetchTimed(new URL("db.gz", PACK_BASE), "no-cache", parseDb)
 }
-const dbFetch = fetchDb()
+const dbLoad = loadDb()
 
 export let db: IDB
 
@@ -144,7 +166,7 @@ async function applyDb(raw: IDB): Promise<void> {
 }
 
 export async function init() {
-   await applyDb(await parseDb(await dbFetch))
+   await applyDb(await dbLoad)
 }
 
 // refresh() re-fetches db.gz and re-runs the boot path when the store moved.
@@ -156,7 +178,7 @@ export async function init() {
 // checkManifest rides this same response, purging its buckets before our
 // subsequent pack refetches.
 export async function refresh(): Promise<"unchanged" | "updated"> {
-   const raw = await parseDb(await fetchDb())
+   const raw = await loadDb()
    if (
       raw.fetched_at === db.fetched_at &&
       raw.total_art === db.total_art &&
@@ -227,9 +249,10 @@ export function idxSummaryDegraded(): boolean {
 // pass false (write-once, never GC'd). The "meta lagged" case is handled
 // upstream by metaReady() (loadMeta skips meta entirely), not here.
 export async function fetchPackBytes(path: string, isLatest: boolean): Promise<ArrayBuffer> {
-   const res = await fetch(new URL(path, PACK_BASE), { cache: "force-cache" })
-   assertPackOk(res, isLatest)
-   return new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer()
+   return fetchTimed(new URL(path, PACK_BASE), "force-cache", (res) => {
+      assertPackOk(res, isLatest)
+      return new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer()
+   })
 }
 
 // Starts (or joins) the fetch of one idx pack.
@@ -336,34 +359,35 @@ let dataCache = makeLRU<Promise<IArticle[]>>(20)
 async function fetchDataPack(packId: number): Promise<IArticle[]> {
    const isFinalized = packId < db.next_pid
    const name = isFinalized ? packId.toString() : `L${db.seq}`
-   const res = await fetch(new URL(`data/${name}.gz`, PACK_BASE), { cache: "force-cache" })
-   assertPackOk(res, !isFinalized)
-   const reader = res
-      .body!.pipeThrough(new DecompressionStream("gzip"))
-      .pipeThrough(new TextDecoderStream())
-      .getReader()
-   try {
-      const entries: IArticle[] = []
-      let remainder = ""
-      while (true) {
-         const { done, value } = await reader.read()
-         if (done) break
-         const chunk = remainder ? remainder + value : value
-         remainder = ""
-         let start = 0
-         let idx: number
-         while ((idx = chunk.indexOf("\n", start)) !== -1) {
-            const seg = chunk.substring(start, idx)
-            start = idx + 1
-            if (seg) entries.push(JSON.parse(seg) as IArticle)
+   return fetchTimed(new URL(`data/${name}.gz`, PACK_BASE), "force-cache", async (res) => {
+      assertPackOk(res, !isFinalized)
+      const reader = res
+         .body!.pipeThrough(new DecompressionStream("gzip"))
+         .pipeThrough(new TextDecoderStream())
+         .getReader()
+      try {
+         const entries: IArticle[] = []
+         let remainder = ""
+         while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            const chunk = remainder ? remainder + value : value
+            remainder = ""
+            let start = 0
+            let idx: number
+            while ((idx = chunk.indexOf("\n", start)) !== -1) {
+               const seg = chunk.substring(start, idx)
+               start = idx + 1
+               if (seg) entries.push(JSON.parse(seg) as IArticle)
+            }
+            if (start < chunk.length) remainder = chunk.substring(start)
          }
-         if (start < chunk.length) remainder = chunk.substring(start)
+         if (remainder.length > 0) entries.push(JSON.parse(remainder) as IArticle)
+         return entries
+      } finally {
+         reader.cancel().catch(() => {})
       }
-      if (remainder.length > 0) entries.push(JSON.parse(remainder) as IArticle)
-      return entries
-   } finally {
-      reader.cancel().catch(() => {})
-   }
+   })
 }
 
 export async function loadArticle(chronIdx: number): Promise<IArticle> {

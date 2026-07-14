@@ -255,3 +255,30 @@ describe("data.assertPackOk — stale-latest-pack self-heal", () => {
       }
    })
 })
+
+describe("fetch timeout — a stalled connection rejects instead of hanging forever", () => {
+   afterEach(() => vi.useRealTimers())
+
+   // A connection that opens but never delivers the body (mobile network handoff,
+   // sleep/wake) leaves an un-timed-out fetch pending forever. Under the busy
+   // mutex that wedges all navigation until reload — the reported swipe death.
+   // Every store fetch must carry an abort signal that fires on a timeout.
+   it("aborts a db.gz refresh that never delivers, so refresh() rejects", async () => {
+      const data = await mount({ total_art: 0, feeds: {} })
+      vi.useFakeTimers()
+      let signal: AbortSignal | undefined
+      global.fetch = vi.fn((_url: URL | string, opts?: RequestInit) => {
+         signal = opts?.signal ?? undefined
+         return new Promise<Response>((_resolve, reject) => {
+            opts?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")))
+         })
+      }) as unknown as typeof fetch
+      const outcome = data.refresh().then(
+         () => "resolved",
+         () => "rejected",
+      )
+      await vi.advanceTimersByTimeAsync(10 * 60_000)
+      expect(signal).toBeInstanceOf(AbortSignal)
+      expect(await outcome).toBe("rejected")
+   })
+})

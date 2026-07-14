@@ -693,6 +693,30 @@ describe("guard() — busy mutex", () => {
       release()
       await flush()
    })
+
+   it("self-heals a wedged mutex so a stalled navigation stops dropping later navs forever", async () => {
+      await boot()
+      // A navigation whose promise never settles — a fetch with no timeout that
+      // stalls mid-body — leaves busy stuck true. This is the reported bug: from
+      // then on every guard()-routed action (swipe/arrows/buttons) silently
+      // no-ops until the page is reloaded.
+      nav.fromHash.mockImplementationOnce(() => new Promise<never>(() => {}))
+      hashTo("#2")
+      await flush()
+      expect(nav.fromHash).toHaveBeenCalledTimes(1)
+      nav.fromHash.mockResolvedValue(showFeed())
+      // Far past any bounded operation the held mutex is treated as stale, so a
+      // fresh navigation reclaims it instead of being dropped (swipe works again).
+      try {
+         vi.useFakeTimers()
+         vi.setSystemTime(Date.now() + 10 * 60_000)
+         hashTo("#3")
+         await vi.advanceTimersByTimeAsync(0)
+      } finally {
+         vi.useRealTimers()
+      }
+      expect(nav.fromHash).toHaveBeenLastCalledWith("3")
+   })
 })
 
 describe("reader edge — margin bell", () => {
