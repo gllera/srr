@@ -435,45 +435,65 @@ func readLenPrefixed(data []byte, pos int) (string, int, error) {
 	return string(data[pos : pos+n]), pos + n, nil
 }
 
-// loadSeen reads and parses seen.gz into a pool. A missing object, a read error,
-// a bad gzip stream, or a corrupt body all degrade to an empty pool with a WARN
-// — dedup falls back to watermark-only (bg rides here too now), never a failed
-// open or an article loss. The
-// returned pool is always non-nil and clean.
+// loadSeen reads the active seen slot named by core.SeenFlag. A missing/corrupt
+// active slot falls back to the sibling slot (the previous ping/pong generation,
+// at most one cycle stale — a bounded re-fetch/re-dup, never a mass duplicate),
+// then to the pre-ping-pong legacy seen.gz (upgrade bridge), then to an empty
+// pool. gzip's trailer CRC32 + parseSeen's structural checks are the corruption
+// detector; the sibling slot is the recovery. Always returns a non-nil clean pool.
 func (o *DB) loadSeen(ctx context.Context) *seenPool {
-	rc, err := o.Get(ctx, seenLegacyKey, true)
-	if err != nil {
-		slog.Warn("read seen pool; using empty", "error", err)
-		return newSeenPool()
+	active := seenSlotKey(o.core.SeenFlag)
+	sibling := seenSlotKey(!o.core.SeenFlag)
+	if p, ok := o.tryLoadSeen(ctx, active); ok {
+		return p
 	}
-	if rc == nil {
-		return newSeenPool() // absent: first run / never written
+	// The active slot is missing or corrupt: fall back to the previous
+	// generation (sibling) — a real recovery, so WARN — then to the pre-ping-pong
+	// single seen.gz as a one-time upgrade bridge — expected once, so INFO.
+	if p, ok := o.tryLoadSeen(ctx, sibling); ok {
+		slog.Warn("active seen slot unreadable; recovered from sibling slot", "active", active, "sibling", sibling)
+		return p
+	}
+	if p, ok := o.tryLoadSeen(ctx, seenLegacyKey); ok {
+		slog.Info("migrating legacy seen.gz into ping/pong slots", "legacy", seenLegacyKey)
+		return p
+	}
+	if o.core.Seq > 0 { // a store that has committed a batch should have a slot
+		slog.Warn("no readable seen slot; using empty pool (watermark-only dedup until the sidecar refills)")
+	}
+	return newSeenPool()
+}
+
+// tryLoadSeen reads+parses one seen key. ok=false on missing/read/gzip/parse
+// error so the caller falls through to the next slot. A genuinely-absent object
+// (rc == nil) returns (nil, false) so load falls through rather than treating
+// "absent" as a successful empty pool (which would mask the sibling).
+func (o *DB) tryLoadSeen(ctx context.Context, key string) (*seenPool, bool) {
+	rc, err := o.Get(ctx, key, true)
+	if err != nil || rc == nil {
+		return nil, false
 	}
 	data, err := gunzip(rc)
 	rc.Close()
 	if err != nil {
-		slog.Warn("decompress seen pool; using empty", "error", err)
-		return newSeenPool()
+		return nil, false
 	}
 	p, err := parseSeen(data)
 	if err != nil {
-		slog.Warn("parse seen pool; using empty", "error", err)
-		return newSeenPool()
+		return nil, false
 	}
-	return p
+	return p, true
 }
 
-// SyncSeen persists the pool to seen.gz when it changed (dirty). It first pulls
-// every live feed's current HTTP validators into the pool (snapshotHTTP), so a
-// fetch that refreshed an ETag or a setFeedURL reset that cleared one is
-// captured. It is called AFTER Commit (the reverse of hdrs/mp, which must
-// precede their db.gz publish): the article batch is already durable in
-// L<Seq+1>, so a pool write that lags a cycle risks at most one duplicate next
-// cycle — today's behavior — whereas a pre-Commit write whose commit then failed
-// would mark never-published GUIDs as seen and drop them forever. A lagging
-// HTTP validator is likewise harmless — the server returns a full 200 and dedup
-// suppresses the repeats. Warn-only at the call site, like SyncMeta. On an idle
-// (all-304) cycle the pool is clean and this is a no-op.
+// SyncSeen persists the pool to the INACTIVE seen slot, then flips
+// core.SeenFlag so the caller's Commit publishes the pointer to it — making the
+// dedup state (pool + bg) atomic with the article batch. It first pulls every
+// live feed's validators + bg into the pool (snapshotHTTP). Write-if-dirty: an
+// idle cycle writes nothing and does NOT flip, so db.gz keeps naming the still-
+// valid active slot. Runs BEFORE Commit; its failure is fatal to the cycle
+// (returned, not warned) — bg is load-bearing now, so a committed article batch
+// must never outrun the slot that dedups its GUIDs. On failure the flag is NOT
+// flipped (nothing to point at) and the caller aborts the commit.
 func (o *DB) SyncSeen(ctx context.Context) error {
 	if o.seen == nil {
 		return nil
@@ -482,6 +502,7 @@ func (o *DB) SyncSeen(ctx context.Context) error {
 	if !o.seen.dirty {
 		return nil
 	}
+	inactive := seenSlotKey(!o.core.SeenFlag)
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	if _, err := gz.Write(o.seen.marshal()); err != nil {
@@ -490,24 +511,22 @@ func (o *DB) SyncSeen(ctx context.Context) error {
 	if err := gz.Close(); err != nil {
 		return err
 	}
-	if err := o.AtomicPut(ctx, seenLegacyKey, &buf, store.ObjectMeta{}); err != nil {
+	if err := o.AtomicPut(ctx, inactive, &buf, store.ObjectMeta{}); err != nil {
 		return err
 	}
+	o.core.SeenFlag = !o.core.SeenFlag // now names the slot we just wrote
 	o.seen.dirty = false
 	return nil
 }
 
-// commitState publishes db.gz (Commit) and then the seen.gz sidecar (SyncSeen),
-// used by the feed-mutation commands so a setFeedURL fetch-state reset — which
-// clears the seen.gz-backed ETag/LastModified — reaches the sidecar too. The
-// SyncSeen is warn-only, like in the fetch path: a failed sidecar write degrades
-// to a redundant fetch next cycle, it never blocks the db.gz commit.
+// commitState persists the seen sidecar (inactive slot + flag flip via SyncSeen)
+// and THEN publishes db.gz (Commit), used by the feed-mutation commands. The seen
+// write is fatal and precedes Commit, so db.gz never commits a SeenFlag naming a
+// slot we failed to write. A setFeedURL reset (cleared validators + bg) thus
+// reaches the sidecar atomically with the config change.
 func (o *DB) commitState(ctx context.Context) error {
-	if err := o.Commit(ctx); err != nil {
-		return err
-	}
 	if err := o.SyncSeen(ctx); err != nil {
-		slog.Warn("sync seen pool", "error", err)
+		return fmt.Errorf("sync seen pool: %w", err)
 	}
-	return nil
+	return o.Commit(ctx)
 }

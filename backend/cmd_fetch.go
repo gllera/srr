@@ -474,9 +474,9 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 		// cycle including the GUI single-feed fetch (o.only) — evict is global
 		// maintenance, like ExpireArticles: it uses the full live feeds map so an
 		// unfetched feed's entries are retained (they age out over the horizon),
-		// while stamps come only from feeds fetched this cycle. SyncSeen (after
-		// Commit) persists it; the pool's dirty flag skips the write on an idle
-		// cycle that changed nothing.
+		// while stamps come only from feeds fetched this cycle. SyncSeen (before
+		// Commit, below) persists it; the pool's dirty flag skips the write on an
+		// idle cycle that changed nothing.
 		today := uint16(db.core.FetchedAt / 86400)
 		for _, ch := range feeds {
 			for _, h := range ch.seenStamps {
@@ -545,17 +545,16 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 				o.lastOutSig = sig
 			}
 		}
+		// Persist the dedup pool (pool + bg) to the inactive seen slot and flip
+		// SeenFlag BEFORE the commit, so db.gz publishes the article batch and the
+		// pointer to its matching dedup state atomically. Fatal to the cycle on
+		// failure: bg is load-bearing, so a committed batch must never outrun the
+		// slot that dedups its GUIDs. Idle cycles write nothing (write-if-dirty).
+		if err := db.SyncSeen(ctx); err != nil {
+			return fmt.Errorf("sync seen pool: %w", err)
+		}
 		if err := db.Commit(ctx); err != nil {
 			return err
-		}
-		// Persist the dedup pool AFTER the commit publishes the article batch, so
-		// a pool write that lags a failed commit never marks unpublished GUIDs as
-		// seen (it would drop those articles forever). Warn-only and write-if-dirty
-		// (SyncSeen), like SyncMeta: a failed or skipped write loses this cycle's
-		// fresh bg too, so next cycle dateless/at-watermark items may re-ingest
-		// once (Watermark still floors dated ones), never loses an article.
-		if err := db.SyncSeen(ctx); err != nil {
-			slog.Warn("sync seen pool", "error", err)
 		}
 		// Drop latest-pack generations older than the grace window, but only
 		// when the counter advanced this run — a crash-leaked name is still

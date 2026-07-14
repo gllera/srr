@@ -78,7 +78,7 @@ func TestFetchSeenPoolSuppressesRepromotion(t *testing.T) {
 
 // End-to-end through the real runFetch cycle. Each fetchLoop call opens a fresh
 // DB, so dedup state survives ONLY via db.gz + seen.gz on the store — this
-// exercises the full load → fan-out → merge → evict → Commit → SyncSeen → reload
+// exercises the full load → fan-out → merge → evict → SyncSeen → Commit → reload
 // chain, not just fetchURL. The re-promotion that duplicates today (cycle 3) is
 // suppressed once the pool has persisted the GUID.
 func TestFetchCycleSeenPoolSuppressesRepromotionEndToEnd(t *testing.T) {
