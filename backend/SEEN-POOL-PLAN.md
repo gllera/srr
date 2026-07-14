@@ -9,10 +9,69 @@ Status: **implemented** (`backend/seen.go` + wiring in `feed.go` / `cmd_fetch.go
 `store/main.go`). This pass also pulled the §10 follow-up forward: the HTTP
 conditional-fetch validators **`etag`/`last_modified` moved out of db.gz into
 `seen.gz`** (a per-feed HTTP-validator section alongside the dedup pool),
-hydrated onto the in-memory feed at load and written back after each fetch. Note
-the crash-safety line that kept `wm`/`bg` in db.gz: their atomicity with the
-article `Commit` is what prevents duplicate ingestion, so they were **not**
-moved. Build order (tests first) is in §7.
+hydrated onto the in-memory feed at load and written back after each fetch. At
+the time of this pass, the crash-safety line kept `wm`/`bg` in db.gz: their
+atomicity with the article `Commit` was what prevented duplicate ingestion, so
+they were **not** moved. Build order (tests first) is in §7.
+
+**Superseded (2026-07, `feat/seen-pingpong-bg`): `bg` has since relocated too.**
+The line above is now only half true — see "Ping/pong slots + bg relocation
+(v2)" immediately below for what changed and why the atomicity argument still
+holds without `bg` living in db.gz. `wm` is unaffected: it stays in db.gz.
+
+---
+
+## Ping/pong slots + bg relocation (v2)
+
+A later pass (`feat/seen-pingpong-bg`, full plan in
+`backend/SEEN-PINGPONG-PLAN.md`) relocated each feed's `BoundaryGUIDs` (`bg`)
+out of db.gz into this same sidecar, and changed `seen.gz` from one mutable
+object into **two fixed ping/pong slots**:
+
+- **Two slots, one pointer.** `seen.gz` is now `seen.0.gz` / `seen.1.gz`. A new
+  `DBCore.SeenFlag bool json:"sf,omitempty"` in db.gz names the active slot
+  (`false` ⇒ slot 0, `true` ⇒ slot 1; `seenSlotKey`).
+- **`bg` moved in, alongside the HTTP validators.** The per-feed record
+  (`httpState` → renamed `feedState`) now carries `bg []uint32` after `etag`/
+  `lastMod` (format version bumped 1→2; a v1 body still parses, bg-less).
+  `seenPool.http` was renamed `seenPool.feed` to match.
+- **Write ordering reversed and made fatal.** `SyncSeen` now runs **BEFORE**
+  `Commit` in both the fetch cycle (`cmd_fetch.go`) and `commitState` (the
+  feed-mutation command path), not after, and its error is **fatal** (returned,
+  aborting the cycle/command), not warn-only. It writes the *inactive* slot,
+  then flips `SeenFlag` in memory; the same `Commit` that publishes the article
+  batch (or feed-mutation change) publishes the flipped flag — so the batch and
+  the pointer to the dedup state (pool + `bg`) that covers it become durable
+  atomically, in one `db.gz` write. This replaces the old
+  "`wm`/`bg` stay in db.gz for atomicity" argument: atomicity is now the
+  ping/pong flag flip, not co-location.
+- **Guarded load, not just a corruption check.** `loadSeen` reads the active
+  slot; gzip's trailer CRC32 + `parseSeen`'s structural checks still detect
+  corruption (unchanged), but the *response* to a bad active slot is now
+  recovery, not just an empty pool: fall back to the sibling slot (the previous
+  ping/pong generation — at most one cycle stale), then to the pre-ping-pong
+  single `seen.gz` (read once as a one-time upgrade bridge, `seenLegacyKey`,
+  logged INFO — old stores keep working through the slot cutover), and only
+  then to an empty pool (WARN, and only once the store has committed at least
+  one batch, to avoid a noisy warning on a brand-new store).
+- **`wm` is unaffected — it stays in db.gz.** It is reader-displayed (the
+  "Latest published" info card, `frontend/src/js/picker.ts`) and remains a
+  partial dedup floor (dated re-promotions ≤ watermark stay suppressed) if the
+  sidecar is ever completely lost — the residual risk in that case is limited
+  to dateless/at-watermark re-ingestion for one cycle.
+- **No db.gz migration.** A pre-relocation db.gz's inline `bg` is simply
+  ignored on load (`BoundaryGUIDs` is `json:"-"`, so the JSON decoder skips the
+  key); the sidecar refills `bg` from the feed's next non-empty fetch, and `wm`
+  floors dated duplicates in the meantime. There is no `LegacyBoundaryGUIDs`
+  bridge field — an early draft of the branch plan had one; it was removed
+  before implementation (see `backend/SEEN-PINGPONG-PLAN.md`).
+
+Net effect on the rest of this document: §2 decision 1's "`db.gz` and its `bg`
+snapshot stay byte-for-byte unchanged" and §7 decision "Write `seen.gz` AFTER
+`Commit`" (and the matching §6 crash-safety paragraph) describe the *pre-v2*
+design and are **no longer current** — `bg` no longer rides in db.gz, and the
+write now precedes `Commit` and is fatal. They are left below for history;
+this section is the correction.
 
 ---
 
@@ -45,12 +104,18 @@ guid history** — the `seen.gz` pool below.
 Arrived at by working through the alternatives; each rejected option is recorded
 so we don't re-litigate.
 
-1. **Backend-only sidecar, not a bigger `bg`.** `bg` rides in `db.gz` — the one
+1. **Backend-only sidecar, not a bigger `bg`.** *(Historical — at the time of this
+   decision `bg` still rode in `db.gz`; it has since been relocated into this
+   same sidecar too, see "Ping/pong slots + bg relocation (v2)" above. The
+   "stays byte-for-byte unchanged" claim below no longer holds for `bg`
+   specifically — it was true, and remains true, for `wm` and the rest of the
+   feed's config fields.)* `bg` rode in `db.gz` — the one
    `no-cache` object every reader re-downloads every load. Growing it to hold
    history is 8–18× the hot object for data readers ignore. Instead: a new
    store-root object **`seen.gz`**, a *third* backend-only mutable class after
    `db.gz` and `out/` (frontend + service worker already ignore `out/`). `db.gz`
-   and its `bg` snapshot stay **byte-for-byte unchanged** as the fallback. No
+   and its `bg` snapshot stayed **byte-for-byte unchanged** as the fallback (at
+   the time). No
    pack-format change and **no reader *behavior* change** — but the new `dd`/`dt`
    json tags on `Feed`/`DBCore` DO regenerate `format.gen.ts` (`cmd_gents.go`
    reflects both structs into `IFeedWire`/`IDBWire`), so `make generate` is part
@@ -99,7 +164,10 @@ so we don't re-litigate.
    blanket title-dedup silently eats legitimately-recurring headlines.
 
 7. **Write `seen.gz` AFTER `Commit`** (opposite of `hdrs`/`mp`). Warn-only, like
-   `SyncMeta`. Rationale in §6.
+   `SyncMeta`. Rationale in §6. *(Superseded by the v2 ping/pong relocation
+   above: now that `bg` lives here too and is load-bearing, `SyncSeen` runs
+   BEFORE `Commit` and is fatal on failure — the same ordering as `hdrs`/`mp`,
+   no longer their reverse.)*
 
 Rejected outright: dedup against stored guids (packs have none); truncated-hash
 sets in `db.gz` (lossy + still in the hot object); bloom/cuckoo/Golomb (false
@@ -274,16 +342,26 @@ scratch field — lowercase so it never serializes to `db.gz`) and the merge is
   entries whose `feed_id` is not a live feed** (see Feed lifecycle).
 
 **Save** — new method `func (o *DB) SyncSeen(ctx) error` in `seen.go`, modeled on
-`SyncMeta` (`db_meta.go:239`): serialize (§4), gzip, `Put("seen.gz")`. Call it in
-`cmd_fetch.go` **after** `db.Commit(ctx)` (`cmd_fetch.go:525-527`), warn-only:
+`SyncMeta` (`db_meta.go:239`): serialize (§4), gzip, `Put("seen.gz")`. At the
+time of this pass it was called in `cmd_fetch.go` **after** `db.Commit(ctx)`
+(`cmd_fetch.go:525-527`), warn-only:
 
 ```go
 if err := db.Commit(ctx); err != nil { return err }
 if err := db.SyncSeen(ctx); err != nil { slog.Warn("sync seen pool", "error", err) }
 ```
 
-Write-if-changed: skip the `Put` when no stamp/evict mutated the pool this cycle
-(most `--interval` cycles are all-304 no-ops) — track a dirty flag.
+**Superseded (v2, see above):** now that `bg` also lives in this pool, the
+order and severity are reversed — `SyncSeen` runs BEFORE `Commit` and is
+FATAL on error (aborts the cycle/command instead of warning):
+
+```go
+if err := db.SyncSeen(ctx); err != nil { return fmt.Errorf("sync seen pool: %w", err) }
+if err := db.Commit(ctx); err != nil { return err }
+```
+
+Write-if-changed: skip the `Put` when no stamp/evict/snapshot mutated the pool
+this cycle (most `--interval` cycles are all-304 no-ops) — track a dirty flag.
 
 **Feed lifecycle (id reuse is the hazard)** — `AddFeed` (`db.go:345`) assigns the
 first free id, so `feed rm` + a later `feed add` **reuses** an id; the reused feed
@@ -329,15 +407,27 @@ for any firehose feed.
   stamp isn't visible until the post-`g.Wait()` merge. The re-promotion case this
   feature targets is cross-fetch (a new permalink minted later), so T2/T3 pass;
   same-fetch title collisions are an accepted gap, not covered by `dt`.
-- **Save after Commit** (not before): the durable articles are already in
+- **Save after Commit** (not before): *(historical — this ordering was replaced
+  by the v2 ping/pong relocation; see below)* the durable articles are already in
   `L<Seq+1>` and published by `Commit`. If we wrote `seen.gz` *first* and the
   commit then failed, we'd have marked never-published guids as seen and *lost*
   those articles forever. Written after, a crash only leaves `seen.gz` **lagging**
   one cycle ⇒ at worst one duplicate next cycle = today's behavior. Never an
-  article loss. This is the reverse of `hdrs`/`mp` (which must precede their
-  `db.gz` publish) and it is deliberate.
-- **Warn-only**: a failed load/parse/save degrades to `bg`-only dedup; it never
-  corrupts or drops articles (same philosophy as `SyncMeta`/`SyncIdxSummary`).
+  article loss. This was the reverse of `hdrs`/`mp` (which must precede their
+  `db.gz` publish) and was deliberate **at the time `seen.gz` held no
+  load-bearing state of its own** (only a cache of dedup history the in-memory
+  `bg` snapshot already covered for the current cycle). Once `bg` itself moved
+  into the sidecar (v2), that argument flips: now `SyncSeen` runs BEFORE
+  `Commit`, fatal on failure — a committed article batch must never outrun the
+  slot that dedups its GUIDs, the same ordering `hdrs`/`mp` always used. A
+  ping/pong write also means a failed commit no longer risks marking
+  never-published guids as seen "for good": the inactive slot it wrote is
+  simply never pointed at (`SeenFlag` isn't flipped in the published db.gz), so
+  a retried cycle starts from the same active slot as before.
+- **Warn-only**: *(historical — see above; the seen write is now fatal, not
+  warn-only, because `bg` is load-bearing)* a failed load/parse/save degrades to
+  `bg`-only dedup; it never corrupts or drops articles (same philosophy as
+  `SyncMeta`/`SyncIdxSummary`).
 - **`gen --bump` interaction**: none — `seen.gz` is dedup state, orthogonal to
   pack rebuilds. Leave it untouched on bump. (A rebuild that physically dropped
   articles doesn't affect guid identity.)
@@ -444,6 +534,9 @@ audit, though at 48 KB it is far smaller than the meta tail.
 - Retroactively purging the ~53% existing feed-42 duplicates (needs a store
   rebuild + `gen --bump` + CDN purge).
 - `srr inspect` per-feed pool-usage reporting (nice-to-have).
-- Migrating other backend-only fetch state (`etag`, `wm`, `ferr`, …) out of
-  `db.gz` into a sidecar to *shrink* the hot object — the sidecar precedent this
-  establishes makes it possible later; not part of this change.
+- Migrating other backend-only fetch state (`ferr`, …) out of `db.gz` into a
+  sidecar to *shrink* the hot object further — the sidecar precedent this
+  establishes makes it possible later; not part of this change. (`etag`/
+  `last_modified` were already moved by this pass; `bg` moved too, later, by the
+  v2 ping/pong relocation above. `wm` is deliberately excluded from this list —
+  it's reader-displayed and stays in db.gz by design, not an oversight.)
