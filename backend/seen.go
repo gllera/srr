@@ -42,7 +42,7 @@ const (
 	dedupDisabled = -1
 
 	seenMagic   = "SEEN"
-	seenVersion = 1
+	seenVersion = 2
 	// seenHeaderLen is magic(4) + version(1) + count u32(4).
 	seenHeaderLen = 9
 	// seenRowLen is the per-entry on-disk size across the three columns:
@@ -72,24 +72,28 @@ type seenPool struct {
 	// cycles are all-304 no-ops), and clears it after a successful write.
 	dirty bool
 	m     map[uint64]uint16
-	// http holds each feed's HTTP conditional-fetch validators (ETag /
-	// Last-Modified). These are backend-only fetch state that used to ride in the
+	// feed holds each feed's persisted backend-only fetch/dedup state: the HTTP
+	// conditional-fetch validators (ETag / Last-Modified) plus (from format
+	// version 2) the BoundaryGUIDs dedup window (bg). These used to ride in the
 	// hot db.gz; they live here now so the one no-cache object every reader
-	// re-downloads stays lean. Keyed by feed_id; a feed with neither validator
-	// holds no entry. Loaded onto the in-memory feeds by hydrateFeeds and pulled
-	// back by snapshotHTTP.
-	http map[int]httpState
+	// re-downloads stays lean. Keyed by feed_id; a feed with none of these holds
+	// no entry. The HTTP validators are loaded onto the in-memory feeds by
+	// hydrateFeeds and pulled back by snapshotHTTP.
+	feed map[int]feedState
 }
 
-// httpState is a feed's HTTP conditional-fetch validators as persisted in
-// seen.gz.
-type httpState struct {
+// feedState is a feed's persisted backend-only fetch/dedup state in seen.gz:
+// the HTTP conditional-fetch validators (ETag / Last-Modified) plus the
+// BoundaryGUIDs dedup window (bg), relocated here from the hot db.gz. Keyed by
+// feed_id; a feed with none of these holds no entry.
+type feedState struct {
 	etag    string
 	lastMod string
+	bg      []uint32
 }
 
 func newSeenPool() *seenPool {
-	return &seenPool{m: map[uint64]uint16{}, http: map[int]httpState{}}
+	return &seenPool{m: map[uint64]uint16{}, feed: map[int]feedState{}}
 }
 
 // seenKey packs a feed id and a u32 hash into the pool's map key. feed_id is a
@@ -208,8 +212,8 @@ func (p *seenPool) dropFeed(feedID int) {
 			p.dirty = true
 		}
 	}
-	if _, ok := p.http[feedID]; ok {
-		delete(p.http, feedID)
+	if _, ok := p.feed[feedID]; ok {
+		delete(p.feed, feedID)
 		p.dirty = true
 	}
 }
@@ -222,10 +226,10 @@ func (p *seenPool) hydrateFeeds(live map[int]*Feed) {
 	if p == nil {
 		return
 	}
-	for id, hs := range p.http {
+	for id, fs := range p.feed {
 		if ch := live[id]; ch != nil {
-			ch.ETag = hs.etag
-			ch.LastModified = hs.lastMod
+			ch.ETag = fs.etag
+			ch.LastModified = fs.lastMod
 		}
 	}
 }
@@ -241,22 +245,22 @@ func (p *seenPool) snapshotHTTP(live map[int]*Feed) {
 		return
 	}
 	for id, ch := range live {
-		want := httpState{etag: ch.ETag, lastMod: ch.LastModified}
-		if want == (httpState{}) {
-			if _, ok := p.http[id]; ok {
-				delete(p.http, id)
+		if ch.ETag == "" && ch.LastModified == "" {
+			if _, ok := p.feed[id]; ok {
+				delete(p.feed, id)
 				p.dirty = true
 			}
 			continue
 		}
-		if p.http[id] != want {
-			p.http[id] = want
+		want := feedState{etag: ch.ETag, lastMod: ch.LastModified}
+		if cur := p.feed[id]; cur.etag != want.etag || cur.lastMod != want.lastMod {
+			p.feed[id] = want
 			p.dirty = true
 		}
 	}
-	for id := range p.http {
+	for id := range p.feed {
 		if _, ok := live[id]; !ok {
-			delete(p.http, id)
+			delete(p.feed, id)
 			p.dirty = true
 		}
 	}
@@ -265,8 +269,8 @@ func (p *seenPool) snapshotHTTP(live map[int]*Feed) {
 // marshal serializes the pool to the on-disk body (pre-gzip): a fixed header,
 // then the dedup section as three separate columns (feed_id, when, hash) sorted
 // by (feed_id, when, hash) so the two non-hash columns gzip-RLE well while the
-// random hashes stay at their ~4 B/entry entropy floor, then the HTTP-validator
-// section (a length-prefixed per-feed record). See §4 of the plan.
+// random hashes stay at their ~4 B/entry entropy floor, then the per-feed
+// section (a length-prefixed per-feed record: validators + the bg tail, v2). See §4 of the plan.
 func (p *seenPool) marshal() []byte {
 	type row struct {
 		fid  uint16
@@ -302,20 +306,25 @@ func (p *seenPool) marshal() []byte {
 		buf = binary.LittleEndian.AppendUint32(buf, r.h)
 	}
 
-	// HTTP-validator section: count, then per feed (sorted by id for a
-	// deterministic file) feed_id + length-prefixed etag + length-prefixed
-	// last_modified.
-	ids := make([]int, 0, len(p.http))
-	for id := range p.http {
+	// Per-feed section: count, then per feed (sorted by id for a deterministic
+	// file) feed_id + len-prefixed etag + len-prefixed last_modified + a u16
+	// bg count + that many u32 boundary GUIDs. bg is incompressible random
+	// hashes, so it sits at the file tail after the gzip-friendly columns.
+	ids := make([]int, 0, len(p.feed))
+	for id := range p.feed {
 		ids = append(ids, id)
 	}
 	slices.Sort(ids)
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(ids)))
 	for _, id := range ids {
-		hs := p.http[id]
+		fs := p.feed[id]
 		buf = binary.LittleEndian.AppendUint16(buf, uint16(id))
-		buf = appendLenPrefixed(buf, hs.etag)
-		buf = appendLenPrefixed(buf, hs.lastMod)
+		buf = appendLenPrefixed(buf, fs.etag)
+		buf = appendLenPrefixed(buf, fs.lastMod)
+		buf = binary.LittleEndian.AppendUint16(buf, uint16(len(fs.bg)))
+		for _, g := range fs.bg {
+			buf = binary.LittleEndian.AppendUint32(buf, g)
+		}
 	}
 	return buf
 }
@@ -337,8 +346,9 @@ func parseSeen(data []byte) (*seenPool, error) {
 	if string(data[:4]) != seenMagic {
 		return nil, fmt.Errorf("seen: bad magic %q", data[:4])
 	}
-	if data[4] != seenVersion {
-		return nil, fmt.Errorf("seen: unsupported version %d", data[4])
+	version := data[4]
+	if version != 1 && version != 2 {
+		return nil, fmt.Errorf("seen: unsupported version %d", version)
 	}
 	n := int(binary.LittleEndian.Uint32(data[5:seenHeaderLen]))
 
@@ -359,15 +369,15 @@ func parseSeen(data []byte) (*seenPool, error) {
 	}
 	pos = hashOff + n*4
 
-	// HTTP-validator section: count, then per-feed length-prefixed records.
+	// Per-feed section: count, then per-feed length-prefixed records (+ v2 bg).
 	if len(data)-pos < 4 {
-		return nil, fmt.Errorf("seen: missing http section")
+		return nil, fmt.Errorf("seen: missing feed section")
 	}
 	m := int(binary.LittleEndian.Uint32(data[pos:]))
 	pos += 4
 	for range m {
 		if len(data)-pos < 2 {
-			return nil, fmt.Errorf("seen: truncated http record")
+			return nil, fmt.Errorf("seen: truncated feed record")
 		}
 		fid := int(binary.LittleEndian.Uint16(data[pos:]))
 		pos += 2
@@ -380,7 +390,24 @@ func parseSeen(data []byte) (*seenPool, error) {
 			return nil, err
 		}
 		pos = np2
-		p.http[fid] = httpState{etag: etag, lastMod: lastMod}
+		fs := feedState{etag: etag, lastMod: lastMod}
+		if version >= 2 {
+			if len(data)-pos < 2 {
+				return nil, fmt.Errorf("seen: truncated bg count")
+			}
+			bn := int(binary.LittleEndian.Uint16(data[pos:]))
+			pos += 2
+			if len(data)-pos < bn*4 {
+				return nil, fmt.Errorf("seen: bg overruns body (%d entries, %d left)", bn, len(data)-pos)
+			}
+			bg := make([]uint32, bn)
+			for j := range bn {
+				bg[j] = binary.LittleEndian.Uint32(data[pos:])
+				pos += 4
+			}
+			fs.bg = bg
+		}
+		p.feed[fid] = fs
 	}
 	if pos != len(data) {
 		return nil, fmt.Errorf("seen: %d trailing bytes", len(data)-pos)

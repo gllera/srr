@@ -2,10 +2,34 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+// A version-1 seen.gz body (pre-bg-relocation) must still parse: the bg tail is
+// version-gated, so a v1 per-feed record (etag/lastMod only, no bg bytes) loads
+// with bg == nil and no error. Pins the read-compat Task 4's legacy bridge relies on.
+func TestParseSeenV1ReadCompat(t *testing.T) {
+	var b []byte
+	b = append(b, seenMagic...)
+	b = append(b, 1)                            // version 1
+	b = binary.LittleEndian.AppendUint32(b, 0)  // 0 dedup entries
+	b = binary.LittleEndian.AppendUint32(b, 1)  // 1 feed record
+	b = binary.LittleEndian.AppendUint16(b, 42) // feed_id
+	b = appendLenPrefixed(b, `"etag-v1"`)
+	b = appendLenPrefixed(b, "") // empty lastMod, and NO bg bytes (v1)
+
+	p, err := parseSeen(b)
+	if err != nil {
+		t.Fatalf("parseSeen(v1 body): %v", err)
+	}
+	fs, ok := p.feed[42]
+	if !ok || fs.etag != `"etag-v1"` || fs.lastMod != "" || fs.bg != nil {
+		t.Fatalf("v1 feed decoded wrong: %+v ok=%v", fs, ok)
+	}
+}
 
 // fnv32 must be byte-for-byte the FNV-32a used by ingest.hash (ingest/feed.go),
 // so a title/guid hashed here lands in the same u32 keyspace the ingest layer
@@ -86,9 +110,9 @@ func TestSeenPoolRoundTrip(t *testing.T) {
 	p.stamp(2, 0x33333333, 100)
 	p.stamp(65535, 0xffffffff, 200) // max feed id, max hash, high day
 	// HTTP conditional-fetch validators (etag/last_modified) ride in the same file.
-	p.http[1] = httpState{etag: `W/"abc-123"`, lastMod: "Mon, 01 Jan 2024 00:00:00 GMT"}
-	p.http[2] = httpState{etag: `"only-etag"`}
-	p.http[9] = httpState{lastMod: "only-lastmod"}
+	p.feed[1] = feedState{etag: `W/"abc-123"`, lastMod: "Mon, 01 Jan 2024 00:00:00 GMT"}
+	p.feed[2] = feedState{etag: `"only-etag"`}
+	p.feed[9] = feedState{lastMod: "only-lastmod"}
 
 	got, err := parseSeen(p.marshal())
 	if err != nil {
@@ -105,12 +129,12 @@ func TestSeenPoolRoundTrip(t *testing.T) {
 			t.Errorf("entry %#x when = %d, want %d", k, got.m[k], when)
 		}
 	}
-	if len(got.http) != len(p.http) {
-		t.Fatalf("reloaded %d http entries, want %d", len(got.http), len(p.http))
+	if len(got.feed) != len(p.feed) {
+		t.Fatalf("reloaded %d feed entries, want %d", len(got.feed), len(p.feed))
 	}
-	for id, hs := range p.http {
-		if got.http[id] != hs {
-			t.Errorf("http[%d] = %+v, want %+v", id, got.http[id], hs)
+	for id, fs := range p.feed {
+		if g := got.feed[id]; g.etag != fs.etag || g.lastMod != fs.lastMod {
+			t.Errorf("feed[%d] = %+v, want %+v", id, g, fs)
 		}
 	}
 }
@@ -256,7 +280,7 @@ func TestSeenPoolDisabledFeedPurge(t *testing.T) {
 func TestParseSeenCorruptionGuard(t *testing.T) {
 	valid := newSeenPool()
 	valid.stamp(1, 0x1234, 50)
-	valid.http[1] = httpState{etag: `"e"`, lastMod: "lm"} // exercise the http section too
+	valid.feed[1] = feedState{etag: `"e"`, lastMod: "lm"} // exercise the per-feed section too
 	good := valid.marshal()
 
 	cases := map[string][]byte{
@@ -396,5 +420,33 @@ func TestSeenSlotKey(t *testing.T) {
 	}
 	if got := seenSlotKey(true); got != "seen.1.gz" {
 		t.Fatalf("seenSlotKey(true) = %q, want seen.1.gz", got)
+	}
+}
+
+// seen.gz v2 carries each feed's BoundaryGUIDs (bg) alongside its HTTP
+// validators; the round-trip must preserve both, including a feed with bg but
+// no validators.
+func TestSeenMarshalRoundTripV2WithBG(t *testing.T) {
+	p := newSeenPool()
+	p.stamp(3, 0xDEADBEEF, 100)
+	p.feed[3] = feedState{etag: `"abc"`, lastMod: "Mon, 01", bg: []uint32{1, 2, 0xFFFFFFFF}}
+	p.feed[7] = feedState{bg: []uint32{42}} // bg without validators
+
+	body := p.marshal()
+	if body[4] != seenVersion || seenVersion != 2 {
+		t.Fatalf("expected version 2, got %d", body[4])
+	}
+	got, err := parseSeen(body)
+	if err != nil {
+		t.Fatalf("parseSeen: %v", err)
+	}
+	if w, ok := got.m[seenKey(3, 0xDEADBEEF)]; !ok || w != 100 {
+		t.Fatalf("dedup entry lost: %v %v", w, ok)
+	}
+	if fs := got.feed[3]; fs.etag != `"abc"` || fs.lastMod != "Mon, 01" || len(fs.bg) != 3 || fs.bg[2] != 0xFFFFFFFF {
+		t.Fatalf("feed 3 state wrong: %+v", fs)
+	}
+	if fs := got.feed[7]; len(fs.bg) != 1 || fs.bg[0] != 42 {
+		t.Fatalf("feed 7 bg wrong: %+v", fs)
 	}
 }
