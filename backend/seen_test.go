@@ -582,3 +582,26 @@ func TestSeenInactiveSlotIgnoredWithoutCommit(t *testing.T) {
 		t.Fatal("uncommitted slot content must not be visible")
 	}
 }
+
+// RemoveFeed must purge the feed's relocated bg (its seen.gz feedState), not
+// just its dedup entries — an id immediately reused by a new feed must inherit
+// no dedup window. dropFeed purges the whole feedState (validators + bg).
+func TestRemoveFeedPurgesBG(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	f := &Feed{Title: "T", URL: "http://x", BoundaryGUIDs: []uint32{5, 6}}
+	if err := db.AddFeed(f); err != nil {
+		t.Fatal(err)
+	}
+	id := f.id
+	// commitState → snapshotHTTP pulls bg into the pool's feedState, SyncSeen persists.
+	if err := db.commitState(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := db.seen.feed[id]; !ok {
+		t.Fatal("precondition: a bg-carrying feedState should exist after commitState")
+	}
+	db.RemoveFeed(id)
+	if _, ok := db.seen.feed[id]; ok {
+		t.Fatal("RemoveFeed did not purge the feed's bg/feedState from the pool")
+	}
+}
