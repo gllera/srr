@@ -309,8 +309,8 @@ func TestSyncSeenSkipsWhenClean(t *testing.T) {
 	if err := db.SyncSeen(ctx); err != nil {
 		t.Fatalf("SyncSeen: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, seenFileKey)); !os.IsNotExist(err) {
-		t.Errorf("clean pool wrote %s (err=%v), want skipped", seenFileKey, err)
+	if _, err := os.Stat(filepath.Join(dir, seenLegacyKey)); !os.IsNotExist(err) {
+		t.Errorf("clean pool wrote %s (err=%v), want skipped", seenLegacyKey, err)
 	}
 }
 
@@ -363,16 +363,16 @@ func TestETagLastModifiedAbsentFromDbGz(t *testing.T) {
 // dedup degrades to bg-only, never an article loss (T9 at the DB level).
 func TestNewDBCorruptSeenFallsBackToEmpty(t *testing.T) {
 	_, _, dir := setupTestDB(t)
-	if err := os.WriteFile(filepath.Join(dir, seenFileKey), []byte("not gzip"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, seenLegacyKey), []byte("not gzip"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	db2, err := NewDB(ctx, false)
 	if err != nil {
-		t.Fatalf("NewDB with corrupt %s errored: %v, want empty-pool fallback", seenFileKey, err)
+		t.Fatalf("NewDB with corrupt %s errored: %v, want empty-pool fallback", seenLegacyKey, err)
 	}
 	defer db2.Close(ctx)
 	if db2.seen == nil || len(db2.seen.m) != 0 {
-		t.Errorf("corrupt %s: pool not empty, want empty fallback", seenFileKey)
+		t.Errorf("corrupt %s: pool not empty, want empty fallback", seenLegacyKey)
 	}
 }
 
@@ -385,5 +385,16 @@ func TestTitleHashFolds(t *testing.T) {
 	}
 	if titleHash("Hello World") == titleHash("Goodbye World") {
 		t.Error("titleHash collided two distinct titles")
+	}
+}
+
+// seenSlotKey must map false/true to the fixed ping/pong slot names the plan
+// commits to (seen.0.gz / seen.1.gz) — db.gz's SeenFlag names the active one.
+func TestSeenSlotKey(t *testing.T) {
+	if got := seenSlotKey(false); got != "seen.0.gz" {
+		t.Fatalf("seenSlotKey(false) = %q, want seen.0.gz", got)
+	}
+	if got := seenSlotKey(true); got != "seen.1.gz" {
+		t.Fatalf("seenSlotKey(true) = %q, want seen.1.gz", got)
 	}
 }
