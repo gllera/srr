@@ -131,7 +131,14 @@ type DBCore struct {
 	// bumps it in memory only after both L<Seq+1> saves succeed, and Commit
 	// publishes it — so a generation name is never visible to readers
 	// before its content is complete, and never rewritten afterwards.
-	Seq           int   `json:"seq,omitempty"`
+	Seq int `json:"seq,omitempty"`
+	// SeenFlag names the active seen.gz slot: false ⇒ seen.0.gz, true ⇒
+	// seen.1.gz (seenSlotKey). Each dirty fetch writes the INACTIVE slot then
+	// flips this in the same Commit that publishes the article batch, so the
+	// batch and the pointer to its matching dedup state (bg + pool) become
+	// durable atomically — the same "db.gz names the current generation"
+	// contract as Seq/HdrPacks/MetaPacks. Backend-only; the frontend ignores it.
+	SeenFlag      bool  `json:"sf,omitempty"`
 	FetchedAt     int64 `json:"fetched_at"`
 	TotalArticles int   `json:"total_art"`
 	NextPackID    int   `json:"next_pid"`

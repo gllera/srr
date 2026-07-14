@@ -113,6 +113,7 @@ export interface IRecipeWire {
 // Wire shape of db.gz itself (backend DBCore).
 export interface IDBWire {
    seq?: number // Seq
+   sf?: boolean // SeenFlag
    fetched_at: number // FetchedAt
    total_art: number // TotalArticles
    next_pid: number // NextPackID

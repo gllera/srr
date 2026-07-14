@@ -24,8 +24,9 @@ import (
 // bg-only dedup, never an article loss. See backend/SEEN-POOL-PLAN.md.
 
 const (
-	// seenFileKey is the store-root object holding the pool.
-	seenFileKey = "seen.gz"
+	// seenLegacyKey is the pre-ping-pong single-object name. Read once as a
+	// migration bridge when neither slot exists; never written.
+	seenLegacyKey = "seen.gz"
 	// defaultDedupDays is the horizon used when neither the feed nor the store
 	// sets one. The reported re-promotion gaps are days wide, so 30 is generous.
 	defaultDedupDays = 30
@@ -48,6 +49,16 @@ const (
 	// feed_id u16 + when u16 + hash u32.
 	seenRowLen = 2 + 2 + 4
 )
+
+// seenSlotKey returns the store key of the seen slot named by flag: false ⇒
+// seen.0.gz, true ⇒ seen.1.gz. The active slot is seenSlotKey(core.SeenFlag);
+// a dirty cycle writes seenSlotKey(!core.SeenFlag) then flips the flag.
+func seenSlotKey(flag bool) string {
+	if flag {
+		return "seen.1.gz"
+	}
+	return "seen.0.gz"
+}
 
 // seenPool is the in-memory pool: one flat map keyed feed_id<<32 | hash →
 // when_seen (absolute unix-day). Reads (has) are lock-free — the pool is the
@@ -396,7 +407,7 @@ func readLenPrefixed(data []byte, pos int) (string, int, error) {
 // — dedup falls back to bg-only, never a failed open or an article loss. The
 // returned pool is always non-nil and clean.
 func (o *DB) loadSeen(ctx context.Context) *seenPool {
-	rc, err := o.Get(ctx, seenFileKey, true)
+	rc, err := o.Get(ctx, seenLegacyKey, true)
 	if err != nil {
 		slog.Warn("read seen pool; using empty", "error", err)
 		return newSeenPool()
@@ -445,7 +456,7 @@ func (o *DB) SyncSeen(ctx context.Context) error {
 	if err := gz.Close(); err != nil {
 		return err
 	}
-	if err := o.AtomicPut(ctx, seenFileKey, &buf, store.ObjectMeta{}); err != nil {
+	if err := o.AtomicPut(ctx, seenLegacyKey, &buf, store.ObjectMeta{}); err != nil {
 		return err
 	}
 	o.seen.dirty = false
