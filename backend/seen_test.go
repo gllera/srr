@@ -384,7 +384,8 @@ func TestETagLastModifiedAbsentFromDbGz(t *testing.T) {
 }
 
 // A corrupt seen.gz makes NewDB fall back to an empty pool without erroring —
-// dedup degrades to bg-only, never an article loss (T9 at the DB level).
+// dedup degrades to watermark-only (bg rides here too now), never an article
+// loss (T9 at the DB level).
 func TestNewDBCorruptSeenFallsBackToEmpty(t *testing.T) {
 	_, _, dir := setupTestDB(t)
 	if err := os.WriteFile(filepath.Join(dir, seenLegacyKey), []byte("not gzip"), 0o644); err != nil {
@@ -448,5 +449,45 @@ func TestSeenMarshalRoundTripV2WithBG(t *testing.T) {
 	}
 	if fs := got.feed[7]; len(fs.bg) != 1 || fs.bg[0] != 42 {
 		t.Fatalf("feed 7 bg wrong: %+v", fs)
+	}
+}
+
+// bg is relocated out of db.gz into seen.gz: after a commitState, db.gz must not
+// carry a "bg" key, and a reopen must hydrate bg back onto the feed from seen.gz.
+func TestBGRoundTripsSeenNotDBGZ(t *testing.T) {
+	db, _, dir := setupTestDB(t)
+	f := &Feed{Title: "T", URL: "http://x", BoundaryGUIDs: []uint32{11, 22}}
+	if err := db.AddFeed(f); err != nil {
+		t.Fatal(err)
+	}
+	id := f.id
+	if err := db.commitState(ctx); err != nil { // SyncSeen + Commit
+		t.Fatal(err)
+	}
+	if raw := decompressGz(t, filepath.Join(dir, "db.gz")); bytes.Contains(raw, []byte(`"bg"`)) {
+		t.Fatalf("db.gz still carries bg: %s", raw)
+	}
+	db2, err := NewDB(ctx, false) // reopen same store (globals.Store == dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db2.Close(ctx)
+	if got := db2.core.Feeds[id].BoundaryGUIDs; len(got) != 2 || got[0] != 11 {
+		t.Fatalf("bg not hydrated from seen: %v", got)
+	}
+}
+
+// A feed carrying bg but NO HTTP validators must keep its bg through a
+// snapshotHTTP/SyncSeen round-trip (regression for the Task-2 forward-note:
+// snapshotHTTP must not delete/clobber a validator-less bg-only record).
+func TestSnapshotHTTPKeepsValidatorlessBG(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	f := &Feed{Title: "T", URL: "http://x", BoundaryGUIDs: []uint32{9, 8, 7}} // no ETag/LastModified
+	if err := db.AddFeed(f); err != nil {
+		t.Fatal(err)
+	}
+	db.seen.snapshotHTTP(db.core.Feeds)
+	if got := db.seen.feed[f.id].bg; len(got) != 3 || got[2] != 7 {
+		t.Fatalf("validator-less bg dropped by snapshotHTTP: %v", got)
 	}
 }

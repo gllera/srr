@@ -74,7 +74,6 @@ export interface IFeedWire {
    title: string // Title
    url: string // URL
    wm?: number // Watermark
-   bg?: number[] // BoundaryGUIDs
    ferr?: string // FetchError
    last_ok?: number // LastOK
    fail_streak?: number // FailStreak

@@ -64,15 +64,19 @@ type Feed struct {
 	LastModified string `json:"-"`
 	// Watermark is the max published unix-second ever seen across fetches.
 	Watermark int64 `json:"wm,omitempty"`
-	// BoundaryGUIDs is the GUIDs from the most recent non-empty fetch whose
-	// pub is >= Watermark (the dated boundary, incl. re-dated items bumped above
-	// the unraised watermark) or == 0 (dateless).
-	// Repopulated each non-empty fetch from the current response so its size
-	// stays bounded by what the publisher currently exposes, and hard-capped
-	// at maxBoundaryGUIDs (over-cap items are skipped, not ingested); a 200 OK
-	// with zero items leaves the field untouched so a transient empty feed
-	// doesn't drop dedup state.
-	BoundaryGUIDs []uint32 `json:"bg,omitempty"`
+	// BoundaryGUIDs is the dedup window: the GUIDs from the most recent
+	// non-empty fetch whose pub >= Watermark or == 0 (dateless). Backend-only
+	// and reader-ignored, so — like ETag/LastModified — it lives in the seen.gz
+	// sidecar (json:"-": in-memory here). Hydrated by seenPool.hydrateFeeds,
+	// pulled back by seenPool.snapshotHTTP. Relocated out of the hot db.gz
+	// (2026-07: it was ~56% of the compressed db.gz every reader re-downloads);
+	// this branch's ping/pong seen slots make that relocation atomic with the
+	// article commit (see SEEN-PINGPONG-PLAN.md). No migration: a pre-relocation
+	// db.gz's inline "bg" is simply ignored (json:"-" skips it) — the sidecar
+	// rebuilds bg on the next fetch, and Watermark (which STAYS in db.gz, also
+	// reader-displayed) floors dated duplicates meanwhile, so at most one cycle
+	// of dateless/at-watermark items could re-ingest once.
+	BoundaryGUIDs []uint32 `json:"-"`
 	FetchError    string   `json:"ferr,omitempty"`
 	// LastOK is the unix-second of the last successful fetch (including 304
 	// Not-Modified). Zero when the feed has never been fetched successfully.
