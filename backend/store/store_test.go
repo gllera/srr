@@ -179,8 +179,11 @@ func TestCacheControlForKey(t *testing.T) {
 		{"out/nested/feed.rss", cacheRevalidate},
 		// out/ must NOT match packKeyRe (not immutable).
 		{"out/0.gz", cacheRevalidate},
-		// seen.gz is the backend-only dedup sidecar: a third mutable class, rewritten
-		// every non-idle fetch cycle — revalidate if a CDN ever fronts it.
+		// The seen.gz dedup sidecar is a third mutable class, rewritten every
+		// non-idle fetch cycle — revalidate if a CDN ever fronts it. SyncSeen
+		// writes the two ping/pong slots; the bare name is the legacy fallback.
+		{"seen.0.gz", cacheRevalidate},
+		{"seen.1.gz", cacheRevalidate},
 		{"seen.gz", cacheRevalidate},
 	}
 	for _, c := range cases {
@@ -231,7 +234,9 @@ func TestCacheControlForKeyFrontend(t *testing.T) {
 func TestContentTypeForKey(t *testing.T) {
 	cases := []struct{ key, want string }{
 		{"db.gz", contentTypeGzip},
-		{"seen.gz", contentTypeGzip}, // the dedup sidecar is one of SRR's own gzip objects
+		{"seen.0.gz", contentTypeGzip}, // ping/pong dedup slot — one of SRR's own gzip objects
+		{"seen.1.gz", contentTypeGzip},
+		{"seen.gz", contentTypeGzip}, // legacy fallback name
 		{"idx/0.gz", contentTypeGzip},
 		{"idx/L1.gz", contentTypeGzip},
 		{"idx/h2.gz", contentTypeGzip},
