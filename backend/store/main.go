@@ -65,6 +65,15 @@ var packKeyRe = func() *regexp.Regexp {
 // Anchored and slash-free so it never matches a pack key (idx/0.gz) or db.gz.
 var feHashedRe = regexp.MustCompile(`^[^/]+\.[0-9a-f]{8,}\.[a-z0-9]+$`)
 
+// isSeenObject reports whether key is one of the seen.gz sidecar objects: the
+// two ping/pong slots (seen.0.gz / seen.1.gz) that SyncSeen actually writes, or
+// the pre-ping-pong legacy name (seen.gz, still read as an upgrade fallback).
+// All are mutable, are SRR's own gzip, and must carry the same
+// Cache-Control/Content-Type as db.gz.
+func isSeenObject(key string) bool {
+	return key == "seen.gz" || key == "seen.0.gz" || key == "seen.1.gz"
+}
+
 // cacheControlForKey returns the HTTP Cache-Control directive a backend should
 // attach when writing key, or "" for keys with no caching policy (e.g. the
 // lock marker). Backends that carry HTTP metadata (S3) emit it; filesystem
@@ -72,11 +81,12 @@ var feHashedRe = regexp.MustCompile(`^[^/]+\.[0-9a-f]{8,}\.[a-z0-9]+$`)
 // place.
 func cacheControlForKey(key string) string {
 	switch {
-	case key == "db.gz" || key == "seen.gz":
-		// seen.gz is the backend-only persistent-dedup sidecar (a third mutable
-		// class besides db.gz and out/), rewritten every non-idle fetch cycle.
-		// The reader never fetches it, but if a CDN ever serves it, never cache
-		// a stale copy.
+	case key == "db.gz" || isSeenObject(key):
+		// The seen.gz sidecar (backend-only persistent dedup + validators + bg) is
+		// a third mutable class besides db.gz and out/, written as two ping/pong
+		// slots (seen.0.gz/seen.1.gz; bare seen.gz is the legacy upgrade name),
+		// rewritten every non-idle fetch cycle. The reader never fetches it, but
+		// if a CDN ever serves it, never cache a stale copy.
 		return cacheRevalidate
 	case strings.HasPrefix(key, "out/"):
 		// out/* is the one mutable object class besides db.gz: an output
@@ -113,7 +123,7 @@ const contentTypeGzip = "application/gzip"
 // construction. Centralised next to cacheControlForKey so the writer↔CDN
 // contract stays in one place.
 func contentTypeForKey(key string) string {
-	if key == "db.gz" || key == "seen.gz" || packKeyRe.MatchString(key) {
+	if key == "db.gz" || isSeenObject(key) || packKeyRe.MatchString(key) {
 		return contentTypeGzip
 	}
 	return ""
