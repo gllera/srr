@@ -681,7 +681,15 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    if (landOnceMode) {
       const allRows = (): HTMLElement[] => (rowsEl ? [...rowsEl.querySelectorAll<HTMLElement>("a.srr-row")] : [])
       const commit = (): void => {
-         if (!userScrolled) {
+         // The list and the reader share the window scroll. This scroll is DEFERRED
+         // (fonts.ready + a settle loop), so a row opened meanwhile — app.ts
+         // showReader() sets container.hidden (el.listView.hidden) — makes the reader
+         // the visible surface before we land. Centering the list's seed row now
+         // would yank the article view off the top it just scrolled to. Skip the
+         // scroll when we're no longer the visible surface; still start the observer
+         // so infinite scroll is live when the list returns (its offscreen guard
+         // no-ops paging while hidden).
+         if (!container.hidden && !userScrolled) {
             scrollChronToView(seed)
             notifyScroll()
             userScrolled = false
@@ -694,7 +702,9 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
          let tries = 0
          const tick = (): void => {
             if (my !== tok) return
-            if (userScrolled || !rowsEl) return commit()
+            // Stop the settle loop early once the reader has opened over us (commit
+            // then skips the scroll but still starts the observer).
+            if (container.hidden || userScrolled || !rowsEl) return commit()
             pinHeights(allRows()) // re-measure true (post-paint/post-font) heights
             const target = chronScrollTarget(seed) ?? -1
             if (target === lastTarget) stable++
