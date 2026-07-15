@@ -411,6 +411,47 @@ describe("list", () => {
       defaultLoadMeta()
    })
 
+   it("suppresses the deferred land-once scroll once the reader is showing over the list", async () => {
+      // A fresh mid-anchor render arms land-once: it holds at the top during load,
+      // then commits a centered scroll after layout settles (a deferred rAF loop
+      // gated on document.fonts.ready). The list and the reader SHARE the window
+      // scroll, so if a row is opened (app.ts showReader → el.listView.hidden) before
+      // that deferred commit fires, the commit would yank the now-showing article
+      // view off its top — the reported "article view isn't scrolled up" bug. Take
+      // deterministic control of the rAF queue so we can open the reader between the
+      // arm and the commit (jsdom's real rAF is timer-based).
+      setIndex(10)
+      nav._setAnchor(5) // anchoredMid + default anchorNow=false → deferred land-once
+      const rafCbs: FrameRequestCallback[] = []
+      vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => rafCbs.push(cb))
+      vi.stubGlobal("cancelAnimationFrame", () => {})
+      // Run the armed convergence to its single commit: first flush the microtask
+      // that fontsReady.then queues the initial tick, then drain the rAF queue (each
+      // unsettled tick reschedules by pushing another).
+      const drain = async (): Promise<void> => {
+         for (let i = 0; i < 6; i++) await Promise.resolve()
+         while (rafCbs.length) rafCbs.shift()!(0)
+      }
+      const scrollSpy = window.scrollTo as unknown as ReturnType<typeof vi.fn>
+      try {
+         // Control: with the list the visible surface, the land-once DOES scroll.
+         await list.render()
+         const beforeVisible = scrollSpy.mock.calls.length
+         await drain()
+         expect(scrollSpy.mock.calls.length).toBeGreaterThan(beforeVisible)
+
+         // Regression: re-arm, then open the reader (hide the list) before the commit.
+         await list.render()
+         const beforeHidden = scrollSpy.mock.calls.length
+         container.hidden = true // el.listView.hidden — the reader owns the window now
+         await drain()
+         expect(scrollSpy.mock.calls.length).toBe(beforeHidden)
+      } finally {
+         vi.unstubAllGlobals()
+         container.hidden = false
+      }
+   })
+
    it("propagates a fill failure so the app can surface it (no silent permanent skeleton)", async () => {
       setIndex(3)
       data.loadMeta.mockImplementation(async (chron: number) => {
