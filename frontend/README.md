@@ -54,19 +54,20 @@ Entry point: `src/index.html` -> `src/js/app.ts`. Bundled with Parcel 2.
 
 | Module | Role |
 |--------|------|
-| `app.ts` | UI orchestrator: rendering, events, keyboard shortcuts, error popup, surface switching (list / reader / config). All async actions go through a `guard()` mutex. |
+| `app.ts` | UI orchestrator: rendering, events, keyboard shortcuts, error popup, surface switching (list / reader; the filter picker and settings menu are popups). All async actions go through a `guard()` mutex. |
 | `list.ts` | List surface (home): bidirectional infinite headline window anchored at the filter's reading position, virtualized via `content-visibility`. |
-| `config.ts` | Config surface: quick actions (search, unread-only, image proxy, backup), offline-pin row, filter picker, freshness status line. |
+| `picker.ts` | Filter-picker overlay ([ALL] / ★ Saved / tags / feeds with unread counts, Show-read + Info toggles), the feed/tag/store info dialogs, and the freshness status footer (`renderStatus`). |
 | `nav.ts` | Navigation state machine: hash routing, traversal, filtering (feed/tag, ★ saved, title-search modes), seen tracking. Returns `IShowFeed`. |
 | `data.ts` | CDN data layer: boots from `db.gz` + the idx header summary + the latest idx pack; finalized idx packs, JSONL data packs and meta cards load lazily on demand (LRU-cached). |
 | `idx.ts` | Binary idx pack parser: lazy `parse()` into a `feedIds` typed array + data-pack `bounds`; per-pack `findLeft`/`findRight`/`countLeft`. |
 | `search.ts` | Title search over the derived `meta/` shards, bloom-pruned. |
-| `dropdown.ts` | Centered modal dialogs (image proxy, backup/restore). |
+| `dropdown.ts` | Centered modal dialogs (image proxy, backup/restore, sync) + anchored context-menu cards (`showContextMenu` — the settings and frontier menus). |
+| `refresh.ts` / `sync.ts` | Live content sync (an open tab silently adopts a newer store snapshot via conditional `db.gz` GETs) / cross-device sync engine over the portable profile. |
 | `gestures.ts` | Touch swipes (prev/next, cycle filter) + scroll-based toolbar hide. |
 | `cache.ts` | Generic LRU cache factory (`makeLRU`) + promise-caching helpers. |
 | `fmt.ts` | Pure utilities: HTML sanitization (image-proxy rewrite, relative URLs resolved against the pack base), relative time, date formatting. |
 | `pin.ts` / `profile.ts` | Offline-pin registry / portable backup-restore of reader state. |
-| `base.ts` / `keys.ts` | `PACK_BASE` (the URL packs resolve against) / localStorage key constants. |
+| `base.ts` / `keys.ts` / `urlish.ts` | `PACK_BASE` (the URL packs resolve against) / localStorage key constants / shared http(s)-URL validation rules. |
 | `sw-grammar.ts` + `../sw.ts` | Service worker: cache-first pack/asset/shell caching + offline pinning; the pack-name grammar is extracted for unit testing. |
 | `format.gen.ts` | **Generated** (`make generate`) from the backend Go declarations: format constants + wire types. Do not edit. |
 | `types.d.ts` | Ambient types: `IDB`, `IFeed`, `IArticle`, `IShowFeed`. |
@@ -74,10 +75,10 @@ Entry point: `src/index.html` -> `src/js/app.ts`. Bundled with Parcel 2.
 ### Data Flow
 
 ```
-app  -->  {list, config}  -->  {nav, data, fmt}
+app  -->  {list, picker}  -->  {nav, data, fmt}
 app  -->  nav  -->  {data, search}
 nav  -->  data  -->  {idx, cache, base}
-app  -->  {gestures, dropdown, pin, fmt}
+app  -->  {gestures, dropdown, pin, refresh, sync, fmt}
 ```
 
 ## Features
