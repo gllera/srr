@@ -86,8 +86,14 @@ needs the Chromium under `~/.cache/puppeteer/` (installed with `puppeteer`).
 ## Shared pieces
 
 - `harness.ts` — `srr()` (run the binary; async so the in-process feed server can
-  answer the child's fetch), `feedServer()` (canned RSS over HTTP), `makeStore()`,
-  `inspectValidate()`.
+  answer the child's fetch — and hermetic: every invocation runs under
+  `SRR_CONFIG_INLINE={}` so the host's `~/.config/srr/srr.yaml` can't leak knobs
+  like `asset-process` into the store under test), `feedServer()` (canned RSS
+  over HTTP; pass a `FeedRoute` `{body, type}` for non-XML routes, e.g. an image
+  for `#selfhost`), `makeStore()`, `inspectValidate()`.
+- `static-serve.ts` (browser layer) — the same-origin app+packs server, plus an
+  in-memory `/sync/<name>` endpoint (GET = stored blob or 404, PUT = store) for
+  the cross-device sync scenario.
 - `fixtures.ts` — RSS builders; `nItems(count, prefix, pad?, startIdx?)` builds
   deterministic items — pass a distinct `startIdx` per feed so their published
   ranges are disjoint (keeping global chronIdx order total and assertable; a
