@@ -6,6 +6,13 @@ import { feedServer, inspectValidate, makeStore, srr, type FeedServer } from "..
 import { nItems, rssFeed } from "../fixtures"
 import { mountReader } from "./mount"
 
+// This suite pins LEGACY tail mechanics (per-cycle consolidated L<seq> packs,
+// meta-series coverage, GC grace windows): run the writer with the delta kill
+// switch so every dirty cycle consolidates, as the pre-delta writer did.
+// Delta-chain behavior has its own suite (delta.e2e.test.ts) and rides every
+// OTHER suite through the default --max-deltas.
+process.env.SRR_MAX_DELTAS = "0"
+
 // Reader-robustness edges over one real store: an out-of-range deep link
 // clamps to the LAST article (not the first, not an error), a multi-token
 // hash (tag + feed id — the URL-only mixed filter) resolves through the one

@@ -544,7 +544,9 @@ func TestAddRemoveFeed(t *testing.T) {
 		t.Fatalf("len(Subscriptions) = %d, want 2", len(db.Feeds()))
 	}
 
-	db.RemoveFeed(0)
+	if err := db.RemoveFeed(ctx, 0); err != nil {
+		t.Fatalf("RemoveFeed: %v", err)
+	}
 	if len(db.Feeds()) != 1 {
 		t.Fatalf("len(Subscriptions) after remove = %d, want 1", len(db.Feeds()))
 	}
@@ -583,7 +585,9 @@ func TestRemoveNonExistentFeed(t *testing.T) {
 	}
 
 	// Should not panic or error
-	db.RemoveFeed(999)
+	if err := db.RemoveFeed(ctx, 999); err != nil {
+		t.Fatalf("RemoveFeed: %v", err)
+	}
 	if len(db.Feeds()) != 1 {
 		t.Errorf("len(Subscriptions) = %d, want 1", len(db.Feeds()))
 	}

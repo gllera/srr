@@ -249,7 +249,7 @@ func TestExpireDormantAdvanceKeepsInvariant(t *testing.T) {
 		t.Fatalf("AddIdx=%d xp=%d, want 1/1", dormant.AddIdx, dormant.Expired)
 	}
 	fetch := func(key string) ([]byte, error) { return db.readGz(ctx, key) }
-	packs, err := loadIdxPacks(fetch, core)
+	packs, _, err := loadIdxPacks(fetch, core)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +266,7 @@ func TestExpireDormantAdvanceKeepsInvariant(t *testing.T) {
 	if dormant.AddIdx != 3 || dormant.Expired != 1 {
 		t.Fatalf("dormant frontier: AddIdx=%d xp=%d, want 3/1", dormant.AddIdx, dormant.Expired)
 	}
-	packs, err = loadIdxPacks(fetch, core)
+	packs, _, err = loadIdxPacks(fetch, core)
 	if err != nil {
 		t.Fatal(err)
 	}

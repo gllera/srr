@@ -36,6 +36,9 @@ export const FEED_ID_CEILING = 65536
 // superseded L<seq> generations the backend GC keeps as a grace window for stale-db.gz readers
 export const LATEST_KEEP = 2
 
+// default --max-deltas: delta segments (data/d<g>, one dirty cycle's batch each) that may accumulate before a cycle consolidates them into the tail packs
+export const MAX_DELTAS = 12
+
 // rune length of the sliding windows the search blooms index, per folded word
 export const SEARCH_GRAM = 3
 
@@ -50,7 +53,7 @@ export const SEARCH_BLOOM_K = 7
 // — "L" latest generations, "h" idx header summaries, "s" search bloom
 // summaries. sw.ts builds its route regex from this table and enforces
 // kind-per-series in parsePackName, mirroring the store's strict packKeyRe.
-export const PACK_SERIES_KINDS: Record<string, string> = { idx: "Lh", data: "L", meta: "Ls" }
+export const PACK_SERIES_KINDS: Record<string, string> = { idx: "Lh", data: "Ld", meta: "Ls" }
 
 // Wire shape of one JSONL line in data/*.gz (backend ArticleData).
 export interface IArticleWire {
@@ -121,6 +124,10 @@ export interface IDBWire {
    hdrs?: number // HdrPacks
    mp?: number // MetaPacks
    mt?: number // MetaTail
+   nd?: number // NumDeltas
+   na?: number // DeltaArticles
+   dby?: number // DeltaBytes
+   gcs?: number // GCLatestSwept
    recipes?: Record<string, IRecipeWire> // Recipes
    dd?: number // DedupDays
    feeds: Record<number, IFeedWire> | null // Feeds

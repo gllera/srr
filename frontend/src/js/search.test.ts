@@ -18,8 +18,18 @@ const mockData = vi.hoisted(() => {
          const total = (data.db.total_art as number) ?? 0
          if (total === 0) return false
          const mp = (data.db.mp as number) ?? 0
-         return mp === data.numFinalizedMeta() && mp * META_PACK_SIZE + ((data.db.mt as number) ?? 0) === total
+         return (
+            mp === data.numFinalizedMeta() &&
+            mp * META_PACK_SIZE + ((data.db.mt as number) ?? 0) + ((data.db.na as number) ?? 0) === total
+         )
       },
+      // Delta-chain accessors (same formulas as the real exports, driven by
+      // the mock db; the resident chain itself defaults empty — the delta
+      // overlay tests seed deltaArts).
+      deltaArts: [] as { f: number; a: number; p?: number; t?: string }[],
+      tailGen: () => ((data.db.seq as number) ?? 0) - ((data.db.nd as number) ?? 0),
+      tailCovered: () => ((data.db.total_art as number) ?? 0) - ((data.db.na as number) ?? 0),
+      deltaArticles: () => data.deltaArts,
       parseJsonl: <T>(buf: ArrayBuffer): T[] => {
          const text = new TextDecoder().decode(buf)
          const out: T[] = []

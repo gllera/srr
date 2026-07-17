@@ -34,16 +34,17 @@ const (
 // the directory plus the kind letters a stem may carry in front of the digit
 // run — none (finalized "idx/12.gz"), "L"<seq> latest generations
 // ("data/L3.gz", all series), "h"<N> idx header summaries ("idx/h2.gz"),
-// "s"<N> meta bloom summaries ("meta/s4.gz"). Single source of truth for
-// both sides of the contract: packKeyRe below and the service worker's
-// RE_PACK/parsePackName (via `srr gen-ts` → format.gen.ts PACK_SERIES_KINDS)
-// are built from it.
+// "s"<N> meta bloom summaries ("meta/s4.gz"), "d"<seq> delta segments
+// ("data/d7.gz" — one dirty cycle's article batch as data-pack JSONL, data
+// series only). Single source of truth for both sides of the contract:
+// packKeyRe below and the service worker's RE_PACK/parsePackName (via
+// `srr gen-ts` → format.gen.ts PACK_SERIES_KINDS) are built from it.
 var PackSeries = []struct {
 	Name  string // series directory
 	Kinds string // kind letters valid besides the finalized bare stem
 }{
 	{"idx", "Lh"},
-	{"data", "L"},
+	{"data", "Ld"},
 	{"meta", "Ls"},
 }
 

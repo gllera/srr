@@ -180,7 +180,9 @@ func deleteFeed(w http.ResponseWriter, r *http.Request) {
 		if _, e := db.FeedByID(id); e != nil {
 			return e // 404 when absent
 		}
-		db.RemoveFeed(id)
+		if e := db.RemoveFeed(ctx, id); e != nil {
+			return e
+		}
 		// commitState so RemoveFeed's seen.gz purge persists before id reuse.
 		return db.commitState(ctx)
 	})

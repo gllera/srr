@@ -403,7 +403,9 @@ type RmCmd struct {
 func (o *RmCmd) Run() error {
 	return withDB(true, func(ctx context.Context, db *DB) error {
 		for _, id := range o.ID {
-			db.RemoveFeed(id)
+			if err := db.RemoveFeed(ctx, id); err != nil {
+				return err
+			}
 		}
 		// commitState so RemoveFeed's seen.gz purge (dropFeed) is persisted before
 		// the id can be reused by a later feed add.

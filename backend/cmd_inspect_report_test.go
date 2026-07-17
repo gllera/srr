@@ -53,7 +53,7 @@ func TestFilterReportLiveCountsAfterExpiration(t *testing.T) {
 		t.Fatal(err)
 	}
 	fetch := func(key string) ([]byte, error) { return db.readGz(ctx, key) }
-	packs, err := loadIdxPacks(fetch, core)
+	packs, _, err := loadIdxPacks(fetch, core)
 	if err != nil {
 		t.Fatalf("loadIdxPacks: %v", err)
 	}
@@ -70,12 +70,12 @@ func TestFilterReportLiveCountsAfterExpiration(t *testing.T) {
 // fetched_at, and the feed lookup line all agree, and the call returns nil.
 func TestInspectOneHealthy(t *testing.T) {
 	fetch, core, _ := inspReportStore(t)
-	packs, err := loadIdxPacks(fetch, core)
+	packs, _, err := loadIdxPacks(fetch, core)
 	if err != nil {
 		t.Fatalf("loadIdxPacks: %v", err)
 	}
 	out := captureStdout(t, func() {
-		if err := inspectOne(fetch, core, packs, 2); err != nil { // chron 2 = feed 0
+		if err := inspectOne(fetch, core, packs, nil, 2); err != nil { // chron 2 = feed 0
 			t.Fatalf("inspectOne(2): %v", err)
 		}
 	})
@@ -94,13 +94,13 @@ func TestInspectOneHealthy(t *testing.T) {
 // feed_id-mismatch error (the drift that skews reader feed attribution).
 func TestInspectOneSubIDMismatch(t *testing.T) {
 	fetch, core, _ := inspReportStore(t)
-	packs, err := loadIdxPacks(fetch, core)
+	packs, _, err := loadIdxPacks(fetch, core)
 	if err != nil {
 		t.Fatalf("loadIdxPacks: %v", err)
 	}
 	packs[0].feedIDs[2] = 7 // idx now claims feed 7; data pack still says feed 0
 	out := captureStdout(t, func() {
-		if err := inspectOne(fetch, core, packs, 2); err == nil {
+		if err := inspectOne(fetch, core, packs, nil, 2); err == nil {
 			t.Fatal("inspectOne returned nil on a feed_id mismatch")
 		} else if !strings.Contains(err.Error(), "feed_id mismatch") {
 			t.Fatalf("err = %v, want feed_id mismatch", err)
@@ -116,7 +116,7 @@ func TestInspectOneSubIDMismatch(t *testing.T) {
 // frontend's `reading 'f'` crash class) and returns the offset error.
 func TestInspectOneOffsetOutOfRange(t *testing.T) {
 	fetch, core, _ := inspReportStore(t)
-	packs, err := loadIdxPacks(fetch, core)
+	packs, _, err := loadIdxPacks(fetch, core)
 	if err != nil {
 		t.Fatalf("loadIdxPacks: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestInspectOneOffsetOutOfRange(t *testing.T) {
 		return fetch(key)
 	}
 	out := captureStdout(t, func() {
-		if err := inspectOne(short, core, packs, 4); err == nil {
+		if err := inspectOne(short, core, packs, nil, 4); err == nil {
 			t.Fatal("inspectOne returned nil on an out-of-range offset")
 		} else if !strings.Contains(err.Error(), "offset") {
 			t.Fatalf("err = %v, want an offset-out-of-range error", err)
@@ -147,13 +147,13 @@ func TestInspectOneOffsetOutOfRange(t *testing.T) {
 // [DELETED]) but — with data and idx still agreeing — returns nil.
 func TestInspectOneFeedNotRegistered(t *testing.T) {
 	fetch, core, _ := inspReportStore(t)
-	packs, err := loadIdxPacks(fetch, core)
+	packs, _, err := loadIdxPacks(fetch, core)
 	if err != nil {
 		t.Fatalf("loadIdxPacks: %v", err)
 	}
 	delete(core.Feeds, 0) // feed 0 owns chron 2, but is no longer registered
 	out := captureStdout(t, func() {
-		if err := inspectOne(fetch, core, packs, 2); err != nil {
+		if err := inspectOne(fetch, core, packs, nil, 2); err != nil {
 			t.Fatalf("inspectOne(2): %v (idx/data still agree, want nil)", err)
 		}
 	})
@@ -168,7 +168,7 @@ func TestInspectOneFeedNotRegistered(t *testing.T) {
 // the printed report.
 func TestFromHashReport(t *testing.T) {
 	fetch, core, _ := inspReportStore(t)
-	packs, err := loadIdxPacks(fetch, core)
+	packs, _, err := loadIdxPacks(fetch, core)
 	if err != nil {
 		t.Fatalf("loadIdxPacks: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestFromHashReport(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			out := captureStdout(t, func() {
-				if err := fromHashReport(fetch, core, packs, c.hash); err != nil {
+				if err := fromHashReport(fetch, core, packs, nil, c.hash); err != nil {
 					t.Fatalf("fromHashReport(%q): %v", c.hash, err)
 				}
 			})

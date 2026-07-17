@@ -248,7 +248,9 @@ func TestSeenPoolPurgedOnFeedRemove(t *testing.T) {
 		t.Fatalf("commitState: %v", err)
 	}
 
-	db.RemoveFeed(id)
+	if err := db.RemoveFeed(ctx, id); err != nil {
+		t.Fatalf("RemoveFeed: %v", err)
+	}
 	if err := db.commitState(ctx); err != nil { // the RmCmd / deleteFeed path
 		t.Fatalf("commitState after remove: %v", err)
 	}
@@ -600,7 +602,9 @@ func TestRemoveFeedPurgesBG(t *testing.T) {
 	if _, ok := db.seen.feed[id]; !ok {
 		t.Fatal("precondition: a bg-carrying feedState should exist after commitState")
 	}
-	db.RemoveFeed(id)
+	if err := db.RemoveFeed(ctx, id); err != nil {
+		t.Fatalf("RemoveFeed: %v", err)
+	}
 	if _, ok := db.seen.feed[id]; ok {
 		t.Fatal("RemoveFeed did not purge the feed's bg/feedState from the pool")
 	}

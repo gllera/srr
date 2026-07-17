@@ -491,7 +491,10 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 		// its counter advanced this run. Most cycles fetch nothing new, and an
 		// unconditional sweep would re-delete the same already-gone window
 		// every interval (≈20 no-op store round trips + warn lines per cycle).
-		prevSeq, prevHdrs, prevMeta := db.core.Seq, db.core.HdrPacks, db.core.MetaPacks
+		// GCLatest keys on the TAIL generation, not Seq: a delta cycle bumps
+		// Seq but supersedes nothing (deltas only die at consolidation), so
+		// sweeping there would re-delete the same empty window every cycle.
+		prevTail, prevHdrs, prevMeta := tailGen(&db.core), db.core.HdrPacks, db.core.MetaPacks
 
 		written, err := db.PutArticles(ctx, articles)
 		if err != nil {
@@ -563,20 +566,36 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 		// later run" guarantee. Articles are already durable, so failure here
 		// is log-only; WithoutCancel keeps a shutdown signal from widening
 		// the leak window.
+		gcCtx := context.WithoutCancel(ctx)
+		prevGCSwept := db.core.GCLatestSwept
 		for _, gc := range []struct {
 			advanced bool
 			msg      string
 			fn       func(context.Context, int) error
 		}{
-			{db.core.Seq != prevSeq, "gc latest packs", db.GCLatest},
+			{tailGen(&db.core) != prevTail, "gc latest packs", db.GCLatest},
 			{db.core.HdrPacks != prevHdrs, "gc idx summaries", db.GCSummaries},
 			{db.core.MetaPacks != prevMeta, "gc meta summaries", db.GCMetaSummaries},
 		} {
 			if !gc.advanced {
 				continue
 			}
-			if err := gc.fn(context.WithoutCancel(ctx), latestKeep); err != nil {
+			if err := gc.fn(gcCtx, latestKeep); err != nil {
 				slog.Warn(gc.msg, "error", err)
+			}
+		}
+		// GCLatest advances the persisted GCLatestSwept low-water AFTER the
+		// Commit above (it can only advance it over generations it actually
+		// cleared, so the advance must follow the Rm's). Persist it with a
+		// second best-effort Commit when it moved: an --interval loop would
+		// otherwise carry the advance into the next cycle's Commit, but a
+		// one-shot `srr art fetch` (no next cycle) would lose it — re-sweeping
+		// the same window forever and, past gcMaxSweep, never draining a large
+		// backlog. Warn-only: a miss just re-sweeps next run (idempotent, Rm is
+		// silent on missing).
+		if db.core.GCLatestSwept != prevGCSwept {
+			if err := db.Commit(gcCtx); err != nil {
+				slog.Warn("commit gc low-water", "error", err)
 			}
 		}
 

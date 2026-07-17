@@ -327,11 +327,20 @@ async function readMetaNumber(key: string): Promise<number> {
 async function checkManifest(dbRes: Response): Promise<void> {
    try {
       const body = dbRes.clone().body!.pipeThrough(new DecompressionStream("gzip"))
-      const db = (await new Response(body).json()) as Pick<IDBWire, "gen" | "seq" | "hdrs" | "mp">
+      const db = (await new Response(body).json()) as Pick<IDBWire, "gen" | "seq" | "hdrs" | "mp" | "gcs">
       const gen = db.gen ?? 0
       const seq = db.seq ?? 0
       const hdrs = db.hdrs ?? 0
       const mp = db.mp ?? 0
+      // The backend GC's own low-water mark: it has deleted every tail generation
+      // L<g>/d<g> with g <= gcs and still serves everything above it (see the
+      // delta-tail spec §8). Mirroring it is what keeps the SW cache aligned with
+      // the store — and correct for offline reads at ANY runtime --max-deltas
+      // without the reader knowing that value: a stale open tab needs names only
+      // down to its own tailGen, which the backend's grace window guarantees sits
+      // above gcs, so a name it needs is never evicted (a bare tailGen-based
+      // cutoff would evict the just-consolidated chain across a tailGen jump).
+      const gcs = db.gcs ?? 0
       const meta = await caches.open(META)
       const packs = await caches.open(PACKS)
       if (gen !== (await readMetaNumber(GEN_KEY))) {
@@ -362,12 +371,22 @@ async function checkManifest(dbRes: Response): Promise<void> {
          // counters CAN advance without a seq bump (a zero-article migration
          // or sync-retry cycle), but such a cycle strands at most one stale
          // name each, pruned on the next article-producing fetch — and a
-         // store rebuild purges the whole bucket via gen above.
-         const cutoff: Record<string, number> = { l: seq, h: hdrs, s: mp }
+         // store rebuild purges the whole bucket via gen above. Tail packs
+         // (L<g>) and delta segments (d<g>) prune against gcs — the backend
+         // GC's own low-water — so the cache evicts exactly what the store has
+         // deleted and keeps exactly what it still serves (see gcs above); gcs
+         // in db.gz lags the live sweep by one cycle (GC runs post-Commit), a
+         // safe direction (the cache keeps a just-swept name one cycle longer).
+         const cutoff: Record<string, number> = {
+            l: gcs + 1,
+            d: gcs + 1,
+            h: hdrs - LATEST_KEEP,
+            s: mp - LATEST_KEEP,
+         }
          await Promise.all(
             keys.map((k) => {
                const p = parsePackName(new URL(k.url).pathname)
-               return p && p.kind !== "" && p.n < cutoff[p.kind] - LATEST_KEEP ? packs.delete(k) : undefined
+               return p && p.kind !== "" && p.n < cutoff[p.kind] ? packs.delete(k) : undefined
             }),
          )
          await meta.put(SEQ_KEY, new Response(String(seq)))

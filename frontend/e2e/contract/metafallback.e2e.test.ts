@@ -5,6 +5,13 @@ import { feedServer, makeStore, srr, type FeedServer } from "../harness"
 import { pubDate, pubUnix, rssFeed } from "../fixtures"
 import { mountReader } from "./mount"
 
+// This suite pins LEGACY tail mechanics (per-cycle consolidated L<seq> packs,
+// meta-series coverage, GC grace windows): run the writer with the delta kill
+// switch so every dirty cycle consolidates, as the pre-delta writer did.
+// Delta-chain behavior has its own suite (delta.e2e.test.ts) and rides every
+// OTHER suite through the default --max-deltas.
+process.env.SRR_MAX_DELTAS = "0"
+
 // Contract: when the meta/ projection lags (metaReady() is false), loadMeta()
 // must still return the correct card by falling back to the data/ source of
 // truth. This is the safety guarantee of the warn-only derived design — a

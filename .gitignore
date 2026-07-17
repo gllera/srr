@@ -1,7 +1,12 @@
 /packs/
 /.vscode/
 /.claude/
-/docs/
+# ignore /docs/ contents, but keep the delta-tail spec — it is mandatory
+# pre-reading (see CLAUDE.md, backend/CLAUDE.md, delta_test.go). Note: git can
+# only re-include a file when the parent dir itself is not excluded, hence
+# /docs/* rather than /docs/.
+/docs/*
+!/docs/DELTA-TAIL-SPEC.md
 /.wrangler/
 
 # Frontend
