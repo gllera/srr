@@ -1,6 +1,6 @@
 import { PACK_BASE } from "./base"
 import { cachedPromise, makeLRU, type LRU } from "./cache"
-import { META_PACK_SIZE, SEARCH_BLOOM_BYTES, type IMetaWire } from "./format.gen"
+import { IDX_ENTRY_SIZE, IDX_HEADER_PREFIX, META_PACK_SIZE, SEARCH_BLOOM_BYTES, type IMetaWire } from "./format.gen"
 import {
    countAt,
    IDX_PACK_SIZE,
@@ -60,6 +60,15 @@ export let db: IDB
 let idxFetches: LRU<Promise<IdxPack>>
 let idxHeaders: IdxHeader[] = []
 let latestIdx: IdxPack
+// The live delta chain (data/d<g>.gz for tailGen < g <= seq), fetched at boot
+// and RESIDENT: each segment is one dirty cycle's whole batch as data-pack
+// JSONL — the superset record the tail region derives everything from. Chrons
+// at/above tailCovered() resolve idx entries (via the extended latest pack),
+// meta cards, and article content from this slice and never touch a pack.
+let deltaArts: IArticle[] = []
+// In-flight delta-chain fetch for the current snapshot; the latest idx pack's
+// builder awaits it so the tail bytes and the chain download in parallel.
+let deltaLoad: Promise<IArticle[]> = Promise.resolve([])
 // Store high-water + 1: the size of the per-pack feed lookup arrays
 // (feedIds/ownFeedCounts and the filter lookup). Sized to the actual feed
 // count, not the format ceiling. Computed once at init from db.feeds.
@@ -128,6 +137,8 @@ async function applyDb(raw: IDB): Promise<void> {
    // undefined for a later data path (nf===0 here, so this is makeLRU(1)).
    const nf = numFinalizedIdx()
    idxFetches = makeLRU(nf + 1)
+   deltaArts = []
+   deltaLoad = Promise.resolve([])
 
    if (db.total_art === 0) {
       idxHeaders = [] // defensive: a re-run must never leave headers from a previous snapshot
@@ -137,7 +148,10 @@ async function applyDb(raw: IDB): Promise<void> {
 
    // The latest pack is always needed: it holds the newest articles (the
    // default landing view) and its header is the cumulative boundary after
-   // the last finalized pack.
+   // the last finalized pack. Its builder awaits deltaLoad, so kicking the
+   // chain fetch first downloads deltas, tail bytes, and the summary in
+   // parallel; refetches of unchanged segments ride the SW/HTTP cache.
+   deltaLoad = fetchDeltas()
    const latest = fetchIdxPack(nf)
 
    let headers: IdxHeader[] | null = null
@@ -160,6 +174,7 @@ async function applyDb(raw: IDB): Promise<void> {
       headers = packs.map((p) => p.header)
    }
    latestIdx = await latest
+   deltaArts = await deltaLoad // resolved: the latest pack's builder awaited it
    headers.push(latestIdx.header)
    idxHeaders = headers
    sessionStorage.removeItem(RELOAD_GUARD)
@@ -167,6 +182,46 @@ async function applyDb(raw: IDB): Promise<void> {
 
 export async function init() {
    await applyDb(await dbLoad)
+}
+
+// tailGen names the consolidated tail packs (idx|data|meta/L<tailGen>): seq
+// minus the live delta count. nd absent (a pre-delta store, or right after a
+// consolidation) makes it seq — the historical latest-pack layout, so old
+// stores read identically.
+export function tailGen(): number {
+   return db.seq - (db.nd ?? 0)
+}
+
+// tailCovered is the pack↔delta seam: chrons below it are served by the pack
+// series, chrons at/above it by the resident delta articles.
+export function tailCovered(): number {
+   return db.total_art - (db.na ?? 0)
+}
+
+// deltaArticles exposes the resident chain (search.ts overlays it).
+export function deltaArticles(): IArticle[] {
+   return deltaArts
+}
+
+// fetchDeltas downloads + parses the live chain, oldest first. Write-once
+// names → force-cache; every segment passes isLatest=true so a stale-db.gz
+// tab whose deltas were GC'd self-heals with the guarded reload. The na
+// cross-check mirrors the backend's loadDeltas (invariant I1): a mismatched
+// chain must fail loudly, not misaddress every tail chron.
+async function fetchDeltas(): Promise<IArticle[]> {
+   const nd = db.nd ?? 0
+   if (nd === 0) return []
+   const base = tailGen() + 1
+   const parts = await Promise.all(
+      Array.from({ length: nd }, (_, i) =>
+         fetchPackBytes(`data/d${base + i}.gz`, true).then((buf) => parseJsonl<IArticle>(buf)),
+      ),
+   )
+   const all = parts.flat()
+   if (all.length !== (db.na ?? 0)) {
+      throw new Error(`delta chain holds ${all.length} articles but db.gz says ${db.na ?? 0}`)
+   }
+   return all
 }
 
 // refresh() re-fetches db.gz and re-runs the boot path when the store moved.
@@ -194,11 +249,40 @@ export async function refresh(): Promise<"unchanged" | "updated"> {
    // failure: nothing mutates the old structures (applyDb replaces, never
    // edits), so they are still valid, and the next refresh() retries from the
    // old fetched_at like the failure never happened.
-   const prev = { db, slots, expiredCounts, idxFetches, latestIdx, idxHeaders, dataCache, metaCache, groupCache }
+   // deltaArts/deltaLoad are in the set: applyDb reassigns deltaLoad to the new
+   // chain fetch BEFORE it awaits, so a mid-apply reject must restore the old
+   // deltaLoad too — delta-region loadArticle/loadMeta resolve against it, so a
+   // stranded rejecting/half-loaded chain under the rolled-back (na>0) db would
+   // otherwise fail every tail read until a full reload.
+   const prev = {
+      db,
+      slots,
+      expiredCounts,
+      idxFetches,
+      latestIdx,
+      idxHeaders,
+      dataCache,
+      metaCache,
+      groupCache,
+      deltaArts,
+      deltaLoad,
+   }
    try {
       await applyDb(raw)
    } catch (e) {
-      ;({ db, slots, expiredCounts, idxFetches, latestIdx, idxHeaders, dataCache, metaCache, groupCache } = prev)
+      ;({
+         db,
+         slots,
+         expiredCounts,
+         idxFetches,
+         latestIdx,
+         idxHeaders,
+         dataCache,
+         metaCache,
+         groupCache,
+         deltaArts,
+         deltaLoad,
+      } = prev)
       throw e
    }
    return "updated"
@@ -255,13 +339,63 @@ export async function fetchPackBytes(path: string, isLatest: boolean): Promise<A
    })
 }
 
+// buildLatestIdx synthesizes the ONE logical latest idx pack spanning the
+// whole tail [nf·50k, total_art): the physical idx/L<tailGen> bytes (header ‖
+// tcEntries entries ‖ footer) with the delta articles' feed ids spliced in
+// between entries and footer. Every consumer — counting, find*, tallyUnread,
+// header math — then sees a uniform pack and needs no seam awareness. The
+// footer's boundary indices all reference pre-splice entries, so the parse is
+// undisturbed; delta-region chrons must never resolve content through
+// getPackRef (loadArticle short-circuits them to the resident chain).
+// Splice the delta articles' feed ids into out as 2-byte LE idx entries,
+// starting at off; returns the offset past the last one. The single writer of
+// the delta-entry layout, shared by both buildLatestIdx branches so a format
+// tweak (e.g. IDX_ENTRY_SIZE) is edited once.
+function writeFeedIds(out: Uint8Array, off: number, deltas: IArticle[]): number {
+   for (const a of deltas) {
+      out[off++] = a.f & 0xff
+      out[off++] = (a.f >> 8) & 0xff
+   }
+   return off
+}
+
+function buildLatestIdx(tailBuf: ArrayBuffer | null, deltas: IArticle[], nf: number): IdxPack {
+   const tcEntries = tailCovered() - nf * IDX_PACK_SIZE
+   let buf: ArrayBuffer
+   if (tailBuf) {
+      const numSlots = new Uint32Array(tailBuf, 0, 3)[2]
+      const entriesEnd = IDX_HEADER_PREFIX + numSlots * 4 + tcEntries * IDX_ENTRY_SIZE
+      if (tailBuf.byteLength < entriesEnd) {
+         throw new Error(`idx tail: ${tailBuf.byteLength}B but db.gz expects >= ${entriesEnd}B`)
+      }
+      const src = new Uint8Array(tailBuf)
+      const out = new Uint8Array(tailBuf.byteLength + deltas.length * IDX_ENTRY_SIZE)
+      out.set(src.subarray(0, entriesEnd), 0)
+      const off = writeFeedIds(out, entriesEnd, deltas)
+      out.set(src.subarray(entriesEnd), off) // the boundary footer, verbatim
+      buf = out.buffer
+   } else {
+      // All-delta store (tailCovered 0): no tail pack was ever written —
+      // synthesize the minimal zero header (bases 0, numSlots 0) + entries.
+      const out = new Uint8Array(IDX_HEADER_PREFIX + deltas.length * IDX_ENTRY_SIZE)
+      writeFeedIds(out, IDX_HEADER_PREFIX, deltas)
+      buf = out.buffer
+   }
+   return makeIdxPack(buf, nf, tcEntries + deltas.length, slots)
+}
+
 // Starts (or joins) the fetch of one idx pack.
 function fetchIdxPack(p: number): Promise<IdxPack> {
-   return cachedPromise(idxFetches, p, () => {
-      const isFinalized = p < numFinalizedIdx()
-      const path = `idx/${isFinalized ? p.toString() : `L${db.seq}`}.gz`
-      const size = isFinalized ? IDX_PACK_SIZE : db.total_art - p * IDX_PACK_SIZE
-      return fetchPackBytes(path, !isFinalized).then((buf) => makeIdxPack(buf, p, size, slots))
+   return cachedPromise(idxFetches, p, async () => {
+      if (p < numFinalizedIdx()) {
+         return makeIdxPack(await fetchPackBytes(`idx/${p}.gz`, false), p, IDX_PACK_SIZE, slots)
+      }
+      const tcEntries = tailCovered() - p * IDX_PACK_SIZE
+      const [tailBuf, deltas] = await Promise.all([
+         tcEntries > 0 ? fetchPackBytes(`idx/L${tailGen()}.gz`, true) : Promise.resolve(null),
+         deltaLoad,
+      ])
+      return buildLatestIdx(tailBuf, deltas, p)
    })
 }
 
@@ -347,6 +481,14 @@ export async function findRight(from: number, feeds: Map<number, number>): Promi
 }
 
 async function getPackRef(chronIdx: number): Promise<{ packId: number; offset: number }> {
+   // Structural seam guard (mirrors the Go mirror's deltaPackID sentinel): the
+   // extended latest pack's bounds end at the last REAL data pack, so a
+   // delta-region chron reaching here would silently misroute into it. Every
+   // legitimate caller short-circuits at tailCovered() first — fail loudly if
+   // a future one forgets.
+   if (chronIdx >= tailCovered()) {
+      throw new Error(`getPackRef(${chronIdx}): delta-region chron has no data pack (seam at ${tailCovered()})`)
+   }
    const n = packIdx(chronIdx)
    const bounds = (await fetchIdxPack(n)).parse().bounds
    // The last bound whose startChron <= chronIdx.
@@ -358,7 +500,7 @@ let dataCache = makeLRU<Promise<IArticle[]>>(20)
 
 async function fetchDataPack(packId: number): Promise<IArticle[]> {
    const isFinalized = packId < db.next_pid
-   const name = isFinalized ? packId.toString() : `L${db.seq}`
+   const name = isFinalized ? packId.toString() : `L${tailGen()}`
    return fetchTimed(new URL(`data/${name}.gz`, PACK_BASE), "force-cache", async (res) => {
       assertPackOk(res, !isFinalized)
       const reader = res
@@ -391,6 +533,23 @@ async function fetchDataPack(packId: number): Promise<IArticle[]> {
 }
 
 export async function loadArticle(chronIdx: number): Promise<IArticle> {
+   // Delta-region chrons are resident — no pack holds them (and the extended
+   // latest pack's bounds would misroute them to the last data pack). Resolve
+   // from deltaLoad, NOT the deltaArts array: applyDb installs the new db
+   // (na>0) and wipes deltaArts to [] several awaits before it repopulates it,
+   // so an unguarded caller (list IntersectionObserver paging, the idle-callback
+   // neighbor prefetch) reading a delta-region chron in that window would hit an
+   // empty array and throw. deltaLoad is set synchronously with db (before any
+   // await), so it is always the in-flight/resolved chain for the installed
+   // snapshot; tc and the deltaLoad reference are captured in the same
+   // synchronous run, so they can't disagree. After boot it is already resolved,
+   // so the await is a free microtask.
+   const tc = tailCovered()
+   if (chronIdx >= tc) {
+      const a = (await deltaLoad)[chronIdx - tc]
+      if (!a) throw new Error(`delta chain out of sync at chron ${chronIdx}; retry to refresh`)
+      return a
+   }
    const ref = await getPackRef(chronIdx)
    const entries = await cachedPromise(dataCache, ref.packId, () => fetchDataPack(ref.packId))
    if (ref.offset >= entries.length) {
@@ -427,7 +586,10 @@ export function hasArticles(): boolean {
 export function metaReady(): boolean {
    if (db.total_art === 0) return false
    const mp = db.mp ?? 0
-   return mp === numFinalizedMeta() && mp * META_PACK_SIZE + (db.mt ?? 0) === db.total_art
+   // The meta series covers the consolidated region only; the resident delta
+   // chain carries the rest (na) — coverage is complete when the three parts
+   // sum to the store.
+   return mp === numFinalizedMeta() && mp * META_PACK_SIZE + (db.mt ?? 0) + (db.na ?? 0) === db.total_art
 }
 
 let metaCache = makeLRU<Promise<IMetaWire[]>>(20)
@@ -439,7 +601,7 @@ function metaPackId(chronIdx: number): number {
 function loadMetaPack(n: number): Promise<IMetaWire[]> {
    return cachedPromise(metaCache, n, async () => {
       const isFinalized = n < numFinalizedMeta()
-      const path = `meta/${isFinalized ? n.toString() : `L${db.seq}`}.gz`
+      const path = `meta/${isFinalized ? n.toString() : `L${tailGen()}`}.gz`
       const buf = await fetchPackBytes(path, !isFinalized)
       // Finalized shards carry a SEARCH_BLOOM_BYTES bloom prefix; the latest tail does not.
       return parseJsonl<IMetaWire>(isFinalized ? buf.slice(SEARCH_BLOOM_BYTES) : buf)
@@ -459,6 +621,15 @@ function loadMetaPack(n: number): Promise<IMetaWire[]> {
 // stale-tab 404 on the latest meta pack is NOT handled here — it self-heals
 // via the guarded reload in fetchPackBytes (same as the reader's data/ path).
 export async function loadMeta(chronIdx: number): Promise<IMetaWire> {
+   // Delta-region cards project straight off the resident chain — zero
+   // fetches, and the meta series deliberately does not cover these chrons.
+   // Via deltaLoad, not the deltaArts array, for the applyDb-window reason in
+   // loadArticle.
+   const tc = tailCovered()
+   if (chronIdx >= tc) {
+      const a = (await deltaLoad)[chronIdx - tc]
+      if (a) return { f: a.f, w: a.p || a.a, t: a.t }
+   }
    const head = db.head
    if (head?.length) {
       const base = db.hb ?? 0
@@ -539,14 +710,24 @@ export async function packNamesForFilter(feeds: Map<number, number>): Promise<st
 
    const nfIdx = numFinalizedIdx()
    const nfMeta = numFinalizedMeta()
-   const seq = db.seq
+   const tg = tailGen()
+   const tc = tailCovered()
    const names = new Set<string>()
 
-   // Always include the latest generation packs — they hold the newest articles
-   // of every filter and are the only packs in an empty/fresh store.
-   names.add(`idx/L${seq}.gz`)
-   names.add(`data/L${seq}.gz`)
-   names.add(`meta/L${seq}.gz`)
+   // Always include the tail generation packs and the live delta segments —
+   // they hold the newest articles of every filter. An all-delta store
+   // (tailCovered 0) never wrote a tail generation, so those names are
+   // skipped rather than pinned as guaranteed 404s.
+   if (tc > 0) {
+      names.add(`idx/L${tg}.gz`)
+      names.add(`data/L${tg}.gz`)
+      names.add(`meta/L${tg}.gz`)
+   }
+   const deltaNames = new Set<string>()
+   for (let g = tg + 1; g <= db.seq; g++) {
+      names.add(`data/d${g}.gz`)
+      deltaNames.add(`data/d${g}.gz`)
+   }
 
    // The boot/search fast-path summaries, when the reader will actually use them
    // — distinct write-once files the online reader fetches but the pin used to
@@ -576,9 +757,10 @@ export async function packNamesForFilter(feeds: Map<number, number>): Promise<st
       for (let p = 0; p <= nfIdx; p++) {
          if (!packHasCandidate(p, feeds)) continue
 
-         // This idx pack is needed (it has at least one matching article).
-         const idxName = p < nfIdx ? `idx/${p}.gz` : `idx/L${seq}.gz`
-         names.add(idxName)
+         // This idx pack is needed (it has at least one matching article). The
+         // latest pack's physical name exists only when a tail was consolidated.
+         if (p < nfIdx) names.add(`idx/${p}.gz`)
+         else if (tc > 0) names.add(`idx/L${tg}.gz`)
 
          const pack = (await fetchIdxPack(p)).parse()
          const baseChron = p * IDX_PACK_SIZE
@@ -594,18 +776,21 @@ export async function packNamesForFilter(feeds: Map<number, number>): Promise<st
             const addIdx = feedId < lookup.length ? lookup[feedId] : -1
             const chron = baseChron + i
             if (addIdx !== -1 && chron >= addIdx) {
+               // Delta-region matches are covered by the unconditionally-added
+               // delta segments — no data pack or meta shard holds them.
+               if (chron >= tc) continue
                // This chronIdx matches the filter.
                // Advance bounds pointer to find the data pack for this chron.
                while (boundsIdx + 1 < bounds.length && bounds[boundsIdx + 1].startChron <= chron) {
                   boundsIdx++
                }
                const dataPackId = bounds[boundsIdx].packId
-               const dataName = dataPackId < db.next_pid ? `data/${dataPackId}.gz` : `data/L${seq}.gz`
+               const dataName = dataPackId < db.next_pid ? `data/${dataPackId}.gz` : `data/L${tg}.gz`
                names.add(dataName)
 
                // Meta shard for this chron.
                const shardId = Math.floor(chron / META_PACK_SIZE)
-               const metaName = shardId < nfMeta ? `meta/${shardId}.gz` : `meta/L${seq}.gz`
+               const metaName = shardId < nfMeta ? `meta/${shardId}.gz` : `meta/L${tg}.gz`
                names.add(metaName)
             }
          }
@@ -620,13 +805,18 @@ export async function packNamesForFilter(feeds: Map<number, number>): Promise<st
    // harmless, since that data pack is pinned anyway and asset keys are
    // content-addressed. Pinning is an explicit "download for offline" action, so
    // the extra reads are acceptable.
-   const dataNames = [...names].filter((n) => n.startsWith("data/"))
+   const dataNames = [...names].filter((n) => n.startsWith("data/") && !deltaNames.has(n))
    for (const dn of dataNames) {
-      const arts = parseJsonl<IArticle>(await fetchPackBytes(dn, dn === `data/L${seq}.gz`))
+      const arts = parseJsonl<IArticle>(await fetchPackBytes(dn, dn === `data/L${tg}.gz`))
       for (const a of arts) {
          if (!a.c) continue
          for (const m of a.c.matchAll(ASSET_REF_RE)) names.add(m[0])
       }
+   }
+   // Delta-region articles are resident — scrape their asset refs without a fetch.
+   for (const a of deltaArts) {
+      if (!a.c) continue
+      for (const m of a.c.matchAll(ASSET_REF_RE)) names.add(m[0])
    }
 
    return Array.from(names)

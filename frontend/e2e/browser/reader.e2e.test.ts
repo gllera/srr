@@ -3,6 +3,14 @@ import type { Browser, Page } from "puppeteer"
 
 import { feedServer, readDb, srr, type FeedServer } from "../harness"
 import { nItems, rssFeed } from "../fixtures"
+
+// This suite pins LEGACY tail mechanics at the browser layer — L<seq> pack
+// names in the SW's pin/prune/cache-bound machinery and the head-only boot
+// budget — so the writer runs with the delta kill switch (every dirty cycle
+// consolidates, as pre-delta). Delta-chain behavior is covered by
+// contract/delta.e2e.test.ts and rides the OTHER browser suites (incl. the
+// live refresh flow) through the default --max-deltas.
+process.env.SRR_MAX_DELTAS = "0"
 import {
    $rowTitles,
    $rowTop,
@@ -27,9 +35,12 @@ const news = nItems(2, "news", 0, 0)
 const tech = nItems(2, "tech", 0, 10)
 const sport = nItems(2, "sport", 0, 20)
 
-// db.gz `seq` (latest-pack generation) read straight from a store — used to
-// drive the SW seq-only-prune scenario to a high enough generation.
+// db.gz `seq` (latest-pack generation) and `gcs` (the backend GC low-water —
+// the highest tail generation it has deleted) read straight from a store, used
+// to drive the SW seq-only-prune scenario to where the backend has GC'd a
+// generation the SW should then mirror-evict.
 const storeSeq = (dir: string): number => readDb<{ seq?: number }>(dir).seq ?? 0
+const storeGcs = (dir: string): number => readDb<{ gcs?: number }>(dir).gcs ?? 0
 
 const $title = (p: Page) => p.$eval(".srr-title", (e) => e.textContent)
 const $content = (p: Page) => p.$eval(".srr-content", (e) => e.textContent ?? "")
@@ -1133,13 +1144,14 @@ describe("browser: real SPA over real packs", () => {
 
    // A normal fetch-cron advance bumps db.gz `seq` (a new latest-pack generation)
    // WITHOUT touching `gen`. checkManifest's seq-only branch (distinct from the
-   // gen purge above) prunes cached `L<g>` generations the backend GC has already
-   // dropped — those with g < seq - LATEST_KEEP — while keeping the current
-   // generation and the exempt db.gz. Unlike the two gen tests, this drives the
-   // *seq* branch: it advances seq via real article-producing fetches and never
-   // calls `srr gen --bump`. Rebuilds the shared store, so it runs among the
-   // store-replacing tests, after everything that reads the 6-article store.
-   it("prunes superseded latest generations on a seq-only advance (no gen bump)", async () => {
+   // gen purge above) prunes cached `L<g>`/`d<g>` generations the backend GC has
+   // already dropped — those with g <= db.gz `gcs`, the backend's own GC
+   // low-water — while keeping the current generation and the exempt db.gz.
+   // Unlike the two gen tests, this drives the *seq* branch: it advances seq via
+   // real article-producing fetches until the backend has GC'd generation 1, and
+   // never calls `srr gen --bump`. Rebuilds the shared store, so it runs among
+   // the store-replacing tests, after everything that reads the 6-article store.
+   it("prunes generations the backend GC dropped on a seq-only advance (no gen bump)", async () => {
       // Fresh single-feed store at seq=1 (own rebuild).
       clearDir(packsDir)
       feeds.set("/seq.xml", rssFeed("Seq", nItems(2, "seq")))
@@ -1169,22 +1181,26 @@ describe("browser: real SPA over real packs", () => {
          expect(before.some((k) => k.endsWith("/packs/data/L1.gz"))).toBe(true)
 
          // Advance seq WITHOUT a gen bump: each fetch that ingests new items
-         // writes generation seq+1. Grow the feed until seq >= 4 so the cached L1
-         // (g=1) falls below the prune cutoff (seq - LATEST_KEEP, LATEST_KEEP=2).
-         // The loop keys off the real seq and throws on a stall — never a false
-         // pass. gen stays 0 throughout (no `srr gen --bump`).
+         // writes generation seq+1 and, once the GC cutoff reaches back that far,
+         // deletes generation 1 and records it in db.gz `gcs`. Grow the feed until
+         // gcs >= 1 (the backend has GC'd L1), so the SW's mirror-prune should
+         // then evict the cached L1. The loop keys off the real gcs and throws on
+         // a stall — never a false pass. gen stays 0 throughout.
          let n = 2
-         while (storeSeq(packsDir) < 4) {
+         while (storeGcs(packsDir) < 1) {
             n += 3
-            if (n > 40) throw new Error(`seq stalled at ${storeSeq(packsDir)} (feed grown to ${n} items)`)
+            if (n > 60)
+               throw new Error(
+                  `gcs stalled at ${storeGcs(packsDir)} (seq ${storeSeq(packsDir)}, feed grown to ${n} items)`,
+               )
             feeds.set("/seq.xml", rssFeed("Seq", nItems(n, "seq")))
             await srr(packsDir, "art", "fetch")
          }
          const seq = storeSeq(packsDir)
-         expect(seq).toBeGreaterThanOrEqual(4)
+         expect(storeGcs(packsDir)).toBeGreaterThanOrEqual(1)
 
          // Reload → the new seq (gen unchanged) drives checkManifest's seq-only
-         // prune BEFORE db.gz resolves. Poll until the superseded L1 idx pack goes.
+         // prune BEFORE db.gz resolves. Poll until the backend-GC'd L1 idx pack goes.
          await page.reload({ waitUntil: "load" })
          await waitTitle(page, "seq title 0")
          await page.waitForFunction(
@@ -1199,7 +1215,7 @@ describe("browser: real SPA over real packs", () => {
             const packs = await caches.open("srr-packs-v3")
             return (await packs.keys()).map((k) => new URL(k.url).pathname)
          })
-         // The superseded L1 generation (g < seq - LATEST_KEEP) was pruned...
+         // The backend-GC'd L1 generation (g <= gcs) was mirror-pruned...
          expect(after.some((k) => k.endsWith("/packs/idx/L1.gz"))).toBe(false)
          expect(after.some((k) => k.endsWith("/packs/data/L1.gz"))).toBe(false)
          // ...while the current generation and the exempt db.gz survive.

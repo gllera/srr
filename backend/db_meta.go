@@ -124,15 +124,18 @@ func bloomHas(bloom []byte, gram string) bool {
 	return true
 }
 
-// walkArticles streams the articles at chron [from, to) in order, resolving
-// (packId, offset) through the idx packs and fetching each idx and data pack
-// at most once (chron order keeps data-pack visits monotonic).
+// walkArticles streams the articles at chron [from, to) in order: the
+// consolidated region ([from, tailCovered)) resolves (packId, offset) through
+// the idx packs, fetching each idx and data pack at most once (chron order
+// keeps data-pack visits monotonic); the delta region (>= tailCovered) serves
+// straight from the parsed chain — no pack ever holds those articles.
 func (o *DB) walkArticles(ctx context.Context, from, to int, fn func(ad *ArticleData) error) error {
 	c := &o.core
+	tc := tailCovered(c)
 	slots := feedSlots(c)
 	var data []ArticleData
 	dataPackID := -1
-	for from < to {
+	for pto := min(to, tc); from < pto; {
 		p := from / idxPackSize
 		key, size := idxKeyAndSize(c, p)
 		buf, err := o.readGz(ctx, key)
@@ -143,7 +146,7 @@ func (o *DB) walkArticles(ctx context.Context, from, to int, fn func(ad *Article
 		if err != nil {
 			return fmt.Errorf("parse %s: %w", key, err)
 		}
-		for end := min(to, p*idxPackSize+size); from < end; from++ {
+		for end := min(pto, p*idxPackSize+size); from < end; from++ {
 			packID, off := pack.getPackRef(from)
 			if packID != dataPackID {
 				dataKey := dataKeyFor(c, packID)
@@ -160,6 +163,17 @@ func (o *DB) walkArticles(ctx context.Context, from, to int, fn func(ad *Article
 				return fmt.Errorf("chron %d: offset %d beyond data pack %d (%d entries)", from, off, packID, len(data))
 			}
 			if err := fn(&data[off]); err != nil {
+				return err
+			}
+		}
+	}
+	if to > tc {
+		deltas, err := o.loadDeltaArticles(ctx)
+		if err != nil {
+			return err
+		}
+		for i := max(from, tc); i < to; i++ {
+			if err := fn(&deltas[i-tc]); err != nil {
 				return err
 			}
 		}
@@ -238,17 +252,23 @@ func (m *metaTailCache) reset() {
 
 func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 	c := &o.core
-	if c.TotalArticles == 0 {
+	// The meta series covers the consolidated region only ([0, tailCovered)):
+	// delta-region cards are derived from the resident chain by every reader,
+	// accounted by the `na` term of the coverage gate (mp·5000 + mt + na ==
+	// total_art). A delta cycle leaves tailCovered unmoved and no-ops here —
+	// the delta path maintains the head projection itself (extendHead).
+	target := tailCovered(c)
+	if target == 0 {
 		return nil
 	}
-	nf := numFinalizedMeta(c.TotalArticles)
-	if c.MetaPacks == nf && c.MetaPacks*metaPackSize+c.MetaTail == c.TotalArticles {
+	nf := numFinalizedMeta(target)
+	if c.MetaPacks == nf && c.MetaPacks*metaPackSize+c.MetaTail == target {
 		return nil
 	}
 	if c.MetaPacks < 0 || c.MetaPacks > nf || c.MetaTail < 0 || c.MetaTail > metaPackSize ||
-		c.MetaPacks*metaPackSize+c.MetaTail > c.TotalArticles {
+		c.MetaPacks*metaPackSize+c.MetaTail > target {
 		slog.Warn("inconsistent meta coverage, rebuilding from scratch",
-			"mp", c.MetaPacks, "mt", c.MetaTail, "total_art", c.TotalArticles)
+			"mp", c.MetaPacks, "mt", c.MetaTail, "target", target)
 		c.MetaPacks, c.MetaTail = 0, 0
 	}
 
@@ -277,20 +297,33 @@ func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 	start := c.MetaPacks * metaPackSize // chron of the tail's first entry
 	var rawLines [][]byte               // jsonEncode outputs, newline included
 
-	// Read back the previous generation's tail. The last successful sync
-	// wrote meta/L<Seq-1> in the common paths (this run's PutArticles
-	// bumped Seq past it, or a previous run's sync failed without articles
-	// since); after consecutive failed syncs the name is gone and the tail
-	// rebuilds from data packs instead — heavier, still correct.
+	// Read back the previous generation's tail. On a consolidation cycle the
+	// superseded tail generation (o.prevTailGen) named it; on a catch-up cycle
+	// (warn-only failure retry, migration, post-bump) the last success could
+	// sit at the current tail generation or one below it. After consecutive
+	// failed syncs no candidate survives and the tail rebuilds from the packs
+	// instead — heavier, still correct (the entry-count trust check gates
+	// every candidate).
 	if c.MetaTail > 0 {
-		if lines, ok := metaTailMemo.memoized(c.Seq-1, c.MetaTail); ok {
-			rawLines = lines
-		} else {
-			prevKey := genKey("meta", c.Seq-1)
+		candidates := []int{tailGen(c), tailGen(c) - 1}
+		if o.consolidated != nil {
+			candidates = []int{o.prevTailGen}
+		}
+		for _, g := range candidates {
+			if lines, ok := metaTailMemo.memoized(g, c.MetaTail); ok {
+				rawLines = lines
+				break
+			}
+		}
+		for _, g := range candidates {
+			if rawLines != nil {
+				break
+			}
+			prevKey := genKey("meta", g)
 			if lines, err := o.readMetaLines(ctx, prevKey); err != nil {
-				slog.Warn("meta tail read-back failed, rebuilding tail", "key", prevKey, "error", err)
+				slog.Warn("meta tail read-back failed, trying next candidate or rebuilding", "key", prevKey, "error", err)
 			} else if len(lines) != c.MetaTail {
-				slog.Warn("meta tail read-back mismatch, rebuilding tail",
+				slog.Warn("meta tail read-back mismatch, trying next candidate or rebuilding",
 					"key", prevKey, "entries", len(lines), "mt", c.MetaTail)
 			} else {
 				rawLines = lines
@@ -314,7 +347,20 @@ func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 		return nil
 	}
 
-	if from := start + len(rawLines); from+len(written) == c.TotalArticles {
+	// The missing range in memory, when it lines up exactly: on a
+	// consolidation cycle o.consolidated (deltas ++ batch) covers [tc0,
+	// target); with no deltas in play, `written` covers the end of the store.
+	// The DeltaArticles==0 guard on the written path is load-bearing: on a
+	// catch-up cycle with a live chain, this cycle's batch is DELTA-region
+	// content — its length coinciding with the missing pack-region range must
+	// not feed the wrong cards. Any other gap reads back from the packs.
+	if from := start + len(rawLines); o.consolidated != nil && from+len(o.consolidated) == target {
+		for i := range o.consolidated {
+			if err := add(&o.consolidated[i]); err != nil {
+				return err
+			}
+		}
+	} else if c.DeltaArticles == 0 && from+len(written) == target {
 		// The missing range is exactly this run's batch: written is what
 		// PutArticles reported persisting, so the entries derive from the
 		// very values the packs hold and no pack is re-read seconds after
@@ -324,7 +370,7 @@ func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 				return err
 			}
 		}
-	} else if err := o.walkArticles(ctx, from, c.TotalArticles, add); err != nil {
+	} else if err := o.walkArticles(ctx, from, target, add); err != nil {
 		return err
 	}
 
@@ -334,7 +380,7 @@ func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 			return err
 		}
 	}
-	if err := o.savePack(ctx, genKey("meta", c.Seq), latest); err != nil {
+	if err := o.savePack(ctx, genKey("meta", tailGen(c)), latest); err != nil {
 		return err
 	}
 
@@ -348,22 +394,29 @@ func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 
 	c.MetaPacks, c.MetaTail = nf, len(rawLines)
 	// Every save succeeded and the coverage counters now describe the tail we
-	// wrote as meta/L<Seq>, so it is safe to remember. rawLines is not touched
-	// again after this point; the next cycle's memoized() hands out a copy.
-	metaTailMemo.store(c.Seq, rawLines)
+	// wrote as meta/L<tailGen>, so it is safe to remember. rawLines is not
+	// touched again after this point; the next cycle's memoized() hands out a
+	// copy.
+	metaTailMemo.store(tailGen(c), rawLines)
 
 	// Refresh the newest-glance head projection from the tail we just wrote:
 	// the newest min(headMax, tail) cards, parsed back from the very lines the
 	// pack holds so the projection can't drift from it, anchored to their
 	// explicit base chron (see DBCore.HeadBase — a later failed sync must not
-	// shift the addressing). Commit publishes it alongside mp/mt.
-	headLines := rawLines[max(0, len(rawLines)-headMax):]
-	head, err := parseMetaEntries(bytes.Join(headLines, nil))
-	if err != nil {
-		return fmt.Errorf("head projection: %w", err)
+	// shift the addressing). Commit publishes it alongside mp/mt. Guarded
+	// against regression: on a catch-up cycle with a live delta chain the
+	// delta path already carried the head past `target` (newer resident
+	// cards) — rebuilding it from the pack-region tail would move the newest
+	// window backwards.
+	if c.HeadBase+len(c.Head) <= target {
+		headLines := rawLines[max(0, len(rawLines)-headMax):]
+		head, err := parseMetaEntries(bytes.Join(headLines, nil))
+		if err != nil {
+			return fmt.Errorf("head projection: %w", err)
+		}
+		c.Head = head
+		c.HeadBase = target - len(head)
 	}
-	c.Head = head
-	c.HeadBase = c.TotalArticles - len(head)
 	return nil
 }
 
@@ -432,7 +485,7 @@ func (o *DB) saveMetaShard(ctx context.Context, n int, rawLines [][]byte) error 
 // (meta/s<g>.gz) with the same grace window and stranded-name caveat as
 // GCSummaries.
 func (o *DB) GCMetaSummaries(ctx context.Context, keep int) error {
-	return o.gcSweep(ctx, o.core.MetaPacks-keep-1, "meta summary", func(g int) []string {
+	return o.gcSweep(ctx, o.core.MetaPacks-keep-1, gcSweepWindow, "meta summary", func(g int) []string {
 		return []string{metaSummaryKey(g)}
 	})
 }

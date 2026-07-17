@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-func inspectOne(fetch keyGetter, core *DBCore, packs []*idxPack, chron int) error {
+func inspectOne(fetch keyGetter, core *DBCore, packs []*idxPack, deltas []ArticleData, chron int) error {
 	if chron >= core.TotalArticles {
 		return fmt.Errorf("chron %d out of range (total_art=%d)", chron, core.TotalArticles)
 	}
@@ -17,15 +17,23 @@ func inspectOne(fetch keyGetter, core *DBCore, packs []*idxPack, chron int) erro
 	pack := packs[n]
 	idxSub := int(pack.feedIDs[chron-n*idxPackSize])
 	pid, offset := pack.getPackRef(chron)
-	key := dataKeyFor(core, pid)
 
 	fmt.Printf("\nchron %d:\n", chron)
 	fmt.Printf("  idx pack %d  entry feed_id=%d\n", n, idxSub)
-	fmt.Printf("  resolved -> %s  packId=%d  offset=%d\n", key, pid, offset)
 
-	entries, err := loadDataPack(fetch, key)
-	if err != nil {
-		return err
+	var entries []ArticleData
+	if pid == deltaPackID {
+		// Delta-region chron: content lives in the parsed chain, not a pack.
+		fmt.Printf("  resolved -> delta chain  offset=%d\n", offset)
+		entries = deltas
+	} else {
+		key := dataKeyFor(core, pid)
+		fmt.Printf("  resolved -> %s  packId=%d  offset=%d\n", key, pid, offset)
+		var err error
+		entries, err = loadDataPack(fetch, key)
+		if err != nil {
+			return err
+		}
 	}
 	fmt.Printf("  data pack entries: %d\n", len(entries))
 
@@ -169,7 +177,7 @@ func listTagsReport(core *DBCore) error {
 // fromHashReport replays nav.fromHash on a frontend URL hash like
 // "0,2485!big_info": parses floor/pos/tokens, resolves filter, decides
 // whether resolve(true) or last() runs, prints the resulting article.
-func fromHashReport(fetch keyGetter, core *DBCore, packs []*idxPack, hash string) error {
+func fromHashReport(fetch keyGetter, core *DBCore, packs []*idxPack, deltas []ArticleData, hash string) error {
 	hash = strings.TrimPrefix(hash, "#")
 	main, tokensPart, _ := strings.Cut(hash, "!")
 	floorStr, posStr, hasComma := strings.Cut(main, ",")
@@ -255,5 +263,5 @@ func fromHashReport(fetch keyGetter, core *DBCore, packs []*idxPack, hash string
 	} else {
 		fmt.Printf("  pos matches -> resolve(true), stays at chron %d\n", finalPos)
 	}
-	return inspectOne(fetch, core, packs, finalPos)
+	return inspectOne(fetch, core, packs, deltas, finalPos)
 }

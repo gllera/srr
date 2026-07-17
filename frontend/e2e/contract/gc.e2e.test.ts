@@ -6,6 +6,13 @@ import { feedServer, inspectValidate, makeStore, srr, type FeedServer } from "..
 import { nItems, rssFeed } from "../fixtures"
 import { mountReader } from "./mount"
 
+// This suite pins LEGACY tail mechanics (per-cycle consolidated L<seq> packs,
+// meta-series coverage, GC grace windows): run the writer with the delta kill
+// switch so every dirty cycle consolidates, as the pre-delta writer did.
+// Delta-chain behavior has its own suite (delta.e2e.test.ts) and rides every
+// OTHER suite through the default --max-deltas.
+process.env.SRR_MAX_DELTAS = "0"
+
 // Four article-producing fetches advance the latest-pack generation to L4.
 // The backend GC (keep=2, run after every fetch commit) must have dropped
 // generation 1 while keeping the grace window 2..4, and the reader must still

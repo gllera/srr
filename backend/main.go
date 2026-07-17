@@ -47,6 +47,8 @@ type Globals struct {
 	// os.Getenv in mod/); promoted to real flags so they show in --help and
 	// `srr config`. main applies them into the mod package after parse.
 	FetchBackoffMax   time.Duration `default:"1h" env:"SRR_FETCH_BACKOFF_MAX" help:"Loop-only: cap the adaptive per-feed poll interval a dormant feed drifts to (grows as time-since-last-new/8 from --interval). 0 disables backoff (poll every feed every cycle)."`
+	MaxDeltas         int           `default:"${maxDeltas}" env:"SRR_MAX_DELTAS" help:"Max delta segments (data/d<g>.gz, one per article-producing cycle) before a cycle consolidates them into the tail packs. Bounds a cold reader's extra requests. 0 disables deltas: every dirty cycle rewrites the tail packs (the pre-delta behavior)."`
+	MaxDeltaBytes     int           `default:"${maxDeltaBytes}" env:"SRR_MAX_DELTA_BYTES" help:"Consolidate the tail once the live delta segments hold more than this many KB of uncompressed article JSONL (bounds a cold reader's delta payload)."`
 	CmdTimeout        time.Duration `default:"5m" env:"SRR_CMD_TIMEOUT" help:"Timeout for a single external ingest/mod command (Go duration)."`
 	AllowPrivateFetch bool          `env:"SRR_ALLOW_PRIVATE_FETCH" help:"Disable the SSRF guard, allowing fetches from private/loopback addresses. Security override — leave off unless you fetch LAN/localhost feeds."`
 	CdnURL            string        `hidden:"" env:"SRR_CDN_URL" help:"CDN URL for frontend builds."`
@@ -182,11 +184,13 @@ func main() {
 
 	ctx := kong.Parse(&cli,
 		kong.Vars{
-			"nproc":        fmt.Sprint(runtime.NumCPU()),
-			"packSize":     fmt.Sprint(defaultPackSize),
-			"maxFeedSize":  fmt.Sprint(defaultMaxFeedSize),
-			"maxAssetSize": fmt.Sprint(defaultMaxAssetSize),
-			"cacheDir":     defaultCacheDir(),
+			"nproc":         fmt.Sprint(runtime.NumCPU()),
+			"packSize":      fmt.Sprint(defaultPackSize),
+			"maxFeedSize":   fmt.Sprint(defaultMaxFeedSize),
+			"maxAssetSize":  fmt.Sprint(defaultMaxAssetSize),
+			"maxDeltas":     fmt.Sprint(maxDeltasDefault),
+			"maxDeltaBytes": fmt.Sprint(maxDeltaBytesDefault),
+			"cacheDir":      defaultCacheDir(),
 		},
 		kong.Name("srr"),
 		kong.Description("Static RSS Reader backend."),

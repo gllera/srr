@@ -41,7 +41,7 @@ func inspCloneCore(c *DBCore) *DBCore {
 
 func inspFreshPacks(t *testing.T, fetch keyGetter, core *DBCore) []*idxPack {
 	t.Helper()
-	packs, err := loadIdxPacks(fetch, core)
+	packs, _, err := loadIdxPacks(fetch, core)
 	if err != nil {
 		t.Fatalf("loadIdxPacks: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestDBMetaCleanAfterExpiration(t *testing.T) {
 		t.Fatal(err)
 	}
 	fetch := func(key string) ([]byte, error) { return db.readGz(ctx, key) }
-	packs, err := loadIdxPacks(fetch, core)
+	packs, _, err := loadIdxPacks(fetch, core)
 	if err != nil {
 		t.Fatalf("loadIdxPacks: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestDBMetaFlagsOutOfRangeExpired(t *testing.T) {
 	putExpireBatch(t, db, fresh1d, []*Item{{Feed: ch, Title: "f1"}})
 	ch.Expired = 5 // > TotalArt(1)
 	fetch := func(key string) ([]byte, error) { return db.readGz(ctx, key) }
-	packs, err := loadIdxPacks(fetch, core)
+	packs, _, err := loadIdxPacks(fetch, core)
 	if err != nil {
 		t.Fatalf("loadIdxPacks: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestDBMetaFlagsOutOfRangeAddIdx(t *testing.T) {
 	putExpireBatch(t, db, fresh1d, []*Item{{Feed: ch, Title: "f1"}})
 	ch.AddIdx = core.TotalArticles + 1 // out of range [0, 1]
 	fetch := func(key string) ([]byte, error) { return db.readGz(ctx, key) }
-	packs, err := loadIdxPacks(fetch, core)
+	packs, _, err := loadIdxPacks(fetch, core)
 	if err != nil {
 		t.Fatalf("loadIdxPacks: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestDBMetaFlagsLiveCountMismatch(t *testing.T) {
 	putExpireBatch(t, db, fresh1d, []*Item{{Feed: ch, Title: "f1"}, {Feed: ch, Title: "f2"}})
 	ch.Expired = 1 // in range [0, TotalArt=2] but AddIdx stays 0 → live=2 != 2-1
 	fetch := func(key string) ([]byte, error) { return db.readGz(ctx, key) }
-	packs, err := loadIdxPacks(fetch, core)
+	packs, _, err := loadIdxPacks(fetch, core)
 	if err != nil {
 		t.Fatalf("loadIdxPacks: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestCheckBoundsVsDataDetectsMismatch(t *testing.T) {
 	fetch, core := inspBoundaryStore(t)
 	packs := inspFreshPacks(t, fetch, core)
 	packs[0].feedIDs[5] = 2 // idx claims feed 2 at chron 5; data still says feed 1
-	if issues := checkBoundsVsData(fetch, core, packs); issues == 0 {
+	if issues := checkBoundsVsData(fetch, core, packs, nil); issues == 0 {
 		t.Error("checkBoundsVsData: 0 issues on a feed_id mismatch, want > 0")
 	}
 }
@@ -225,7 +225,7 @@ func TestCheckBoundsVsDataDetectsOOB(t *testing.T) {
 		}
 		return fetch(key)
 	}
-	if issues := checkBoundsVsData(trunc, core, packs); issues == 0 {
+	if issues := checkBoundsVsData(trunc, core, packs, nil); issues == 0 {
 		t.Error("checkBoundsVsData: 0 issues on out-of-range offsets, want > 0")
 	}
 }

@@ -41,6 +41,7 @@ var tsConsts = []struct {
 	{"IDX_BOUNDARY_SIZE", idxBoundarySize, "bytes per idx footer boundary: a uint16 LE local entry index where the data packId advances"},
 	{"FEED_ID_CEILING", feedIDCeiling, "feed-id ceiling: feed_id is a uint16, ids run [0, this)"},
 	{"LATEST_KEEP", latestKeep, "superseded L<seq> generations the backend GC keeps as a grace window for stale-db.gz readers"},
+	{"MAX_DELTAS", maxDeltasDefault, "default --max-deltas: delta segments (data/d<g>, one dirty cycle's batch each) that may accumulate before a cycle consolidates them into the tail packs"},
 	{"SEARCH_GRAM", searchGram, "rune length of the sliding windows the search blooms index, per folded word"},
 	{"SEARCH_BLOOM_BYTES", searchBloomBytes, "bytes: fixed-size trigram bloom heading each finalized meta shard (and per shard in meta/s<N>.gz)"},
 	{"SEARCH_BLOOM_K", searchBloomK, "bloom bits set/tested per gram"},

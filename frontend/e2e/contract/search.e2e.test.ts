@@ -5,6 +5,13 @@ import { feedServer, inspectValidate, makeStore, srr, type FeedServer } from "..
 import { pubDate, rssFeed, type FeedItem } from "../fixtures"
 import { mountReader } from "./mount"
 
+// This suite pins LEGACY tail mechanics (per-cycle consolidated L<seq> packs,
+// meta-series coverage, GC grace windows): run the writer with the delta kill
+// switch so every dirty cycle consolidates, as the pre-delta writer did.
+// Delta-chain behavior has its own suite (delta.e2e.test.ts) and rides every
+// OTHER suite through the default --max-deltas.
+process.env.SRR_MAX_DELTAS = "0"
+
 // The meta/ series end-to-end: real srr writes the latest meta tail
 // (SyncMeta) from real pipeline-processed titles; the real search.ts reads
 // it back. Pins the write-side JSONL contract, the available() gate, TS

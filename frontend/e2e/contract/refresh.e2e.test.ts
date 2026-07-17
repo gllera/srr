@@ -6,6 +6,13 @@ import { feedServer, inspectValidate, makeStore, readDb, srr, type FeedServer } 
 import { nItems, rssFeed } from "../fixtures"
 import { mountReader } from "./mount"
 
+// This suite pins LEGACY tail mechanics (per-cycle consolidated L<seq> packs,
+// meta-series coverage, GC grace windows): run the writer with the delta kill
+// switch so every dirty cycle consolidates, as the pre-delta writer did.
+// Delta-chain behavior has its own suite (delta.e2e.test.ts) and rides every
+// OTHER suite through the default --max-deltas.
+process.env.SRR_MAX_DELTAS = "0"
+
 // The live content-sync contract: ONE mounted reader instance adopts a second
 // backend fetch cycle in place via data.refresh() — no remount, no reload —
 // and navigates to the new articles.

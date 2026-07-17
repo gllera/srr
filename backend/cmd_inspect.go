@@ -36,15 +36,15 @@ func (o *InspectCmd) Run() error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("db: total_art=%d  next_pid=%d  seq=%d  pack_off=%d\n",
-		core.TotalArticles, core.NextPackID, core.Seq, core.PackOffset)
+	fmt.Printf("db: total_art=%d  next_pid=%d  seq=%d  pack_off=%d  nd=%d  na=%d\n",
+		core.TotalArticles, core.NextPackID, core.Seq, core.PackOffset, core.NumDeltas, core.DeltaArticles)
 
 	if core.TotalArticles == 0 {
 		fmt.Println("no articles")
 		return nil
 	}
 
-	packs, err := loadIdxPacks(fetch, core)
+	packs, deltas, err := loadIdxPacks(fetch, core)
 	if err != nil {
 		return err
 	}
@@ -54,13 +54,13 @@ func (o *InspectCmd) Run() error {
 	}
 
 	if o.Validate {
-		return validateAll(fetch, core, packs)
+		return validateAll(fetch, core, packs, deltas)
 	}
 	if o.ListTags {
 		return listTagsReport(core)
 	}
 	if o.FromHash != "" {
-		return fromHashReport(fetch, core, packs, o.FromHash)
+		return fromHashReport(fetch, core, packs, deltas, o.FromHash)
 	}
 	if o.Filter != "" {
 		return filterReport(core, packs, o.Filter, o.Floor)
@@ -69,7 +69,7 @@ func (o *InspectCmd) Run() error {
 		fmt.Println("(use --chron, --validate, --filter, --from-hash, or --list-tags)")
 		return nil
 	}
-	return inspectOne(fetch, core, packs, o.Chron)
+	return inspectOne(fetch, core, packs, deltas, o.Chron)
 }
 
 func (o *InspectCmd) openFetcher(ctx context.Context) (keyGetter, func(), error) {
@@ -130,6 +130,15 @@ func loadCore(fetch keyGetter) (*DBCore, error) {
 	}
 	if c.Seq < 0 {
 		return nil, fmt.Errorf("decode %s: seq %d is negative", dbFileKey, c.Seq)
+	}
+	// A negative/oversized delta chain would reach loadDeltas/loadLatestIdx
+	// with nonsense bounds; loadDeltas re-checks, but fail here with the same
+	// clear decode framing as the fields above.
+	if c.NumDeltas < 0 || c.NumDeltas > c.Seq {
+		return nil, fmt.Errorf("decode %s: nd %d out of range [0, seq=%d]", dbFileKey, c.NumDeltas, c.Seq)
+	}
+	if c.DeltaArticles < 0 || c.DeltaArticles > c.TotalArticles {
+		return nil, fmt.Errorf("decode %s: na %d out of range [0, total_art=%d]", dbFileKey, c.DeltaArticles, c.TotalArticles)
 	}
 	// Validate feed ids: feed_id is a u16 in each idx entry, so ids must be
 	// in [0, feedIDCeiling). A hostile id >= feedIDCeiling reaches feedSlots

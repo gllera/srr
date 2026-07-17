@@ -23,11 +23,13 @@ func TestCacheDirDefaultResolved(t *testing.T) {
 
 	var cli CLI
 	parser, err := kong.New(&cli, kong.Vars{
-		"nproc":        "1",
-		"packSize":     "1",
-		"maxFeedSize":  "1",
-		"maxAssetSize": "1",
-		"cacheDir":     defaultCacheDir(),
+		"nproc":         "1",
+		"packSize":      "1",
+		"maxFeedSize":   "1",
+		"maxAssetSize":  "1",
+		"maxDeltas":     "1",
+		"maxDeltaBytes": "1",
+		"cacheDir":      defaultCacheDir(),
 	})
 	if err != nil {
 		t.Fatalf("kong.New: %v", err)

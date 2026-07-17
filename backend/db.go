@@ -57,6 +57,16 @@ const (
 	// near-optimal probe count for ~3,500 trigrams in 2^15 bits ((m/n)·ln2 ≈
 	// 6.5); it minimizes the per-(shard,gram) false-positive rate (~1.1%).
 	searchBloomK = 7
+	// maxDeltasDefault is the --max-deltas default: how many delta segments
+	// (data/d<g>.gz, one per article-producing cycle) may accumulate before a
+	// cycle consolidates them into the tail packs (~1h at a 5-min loop).
+	// Exported to TS as MAX_DELTAS (a contract atom, like LATEST_KEEP).
+	// 0 (the kill switch) consolidates every cycle: the pre-delta behavior.
+	maxDeltasDefault = 12
+	// maxDeltaBytesDefault is the --max-delta-bytes default in KB: consolidate
+	// once the live deltas exceed this much uncompressed article JSONL, so a
+	// cold reader's delta payload stays bounded even under huge batches.
+	maxDeltaBytesDefault = 256
 )
 
 // defaultRootPipe returns a fresh copy of the pipeline seeded into the
@@ -123,6 +133,34 @@ type DB struct {
 	// non-nil after NewDB.
 	seen   *seenPool
 	locked bool
+	// consolidated is the full replay slice (parsed deltas ++ this cycle's
+	// batch) when PutArticles consolidated the tail this cycle, else nil
+	// (cleared at every PutArticles entry). SyncMeta's fast path consumes it so
+	// a consolidation cycle builds its meta entries from memory instead of
+	// re-reading the packs just written; prevTailGen is the tail generation the
+	// consolidation superseded — SyncMeta's read-back candidate for the
+	// previous meta tail name.
+	consolidated []ArticleData
+	prevTailGen  int
+	// deltaMemo caches the parsed live delta chain (plus each entry's verbatim
+	// JSONL line bytes) for the duration of one cycle, keyed on (Seq, NumDeltas)
+	// — the write-once delta names make that pair pin the chain content exactly,
+	// and the key changes the instant emitDelta/consolidateTail mutate the
+	// chain, so a stale entry is never served. One fetch+parse per cycle then
+	// feeds every seam-crossing walkArticles (ExpireArticles/SyncOutFeeds/
+	// SyncMeta) plus consolidateTail/DrainDeltas, instead of each re-fetching the
+	// whole chain from the store. nil until first load. See loadDeltaChain.
+	deltaMemo    *deltaChain
+	deltaMemoKey [2]int
+}
+
+// deltaChain is the parsed live delta chain plus each entry's verbatim JSONL
+// line bytes (as read off the segment, so consolidation replays pre-encoded
+// data-pack bytes instead of re-encoding every ArticleData — jsonEncode is
+// deterministic, so the bytes are identical). Arts and Lines are parallel.
+type deltaChain struct {
+	Arts  []ArticleData
+	Lines [][]byte
 }
 
 type DBCore struct {
@@ -169,10 +207,42 @@ type DBCore struct {
 	// falls back to the data/ source of truth).
 	MetaPacks int `json:"mp,omitempty"`
 	// MetaTail is the entry count of the published latest meta shard
-	// (meta/L<Seq>.gz). SyncMeta trusts a read-back tail only when its count
-	// matches, so a stale shard from a crash or a pre-`gen --bump` store is
-	// rebuilt from data packs instead of extended.
+	// (meta/L<tailGen>.gz). SyncMeta trusts a read-back tail only when its
+	// count matches, so a stale shard from a crash or a pre-`gen --bump` store
+	// is rebuilt from data packs instead of extended.
 	MetaTail int `json:"mt,omitempty"`
+	// NumDeltas is the live delta-segment count: data/d<g>.gz exists for every
+	// g in (tailGen, Seq], where tailGen = Seq − NumDeltas names the
+	// consolidated tail packs (idx|data|meta/L<tailGen>). Each delta holds one
+	// dirty cycle's whole batch as data-pack JSONL — the superset record every
+	// reader derives idx entries, meta cards, AND content from, so tail-region
+	// chrons never touch a pack. Consolidation (consolidateTail) folds the
+	// chain into the tail packs and resets this to 0 — which doubles as the
+	// upgrade bridge: absent == 0 == exactly the pre-delta "latest packs live
+	// at L<Seq>" layout, so old stores need no migration. omitempty.
+	NumDeltas int `json:"nd,omitempty"`
+	// DeltaArticles is the total article count across the live deltas.
+	// tailCovered = TotalArticles − DeltaArticles is the seam: chrons below it
+	// are served by packs, chrons at/above it by the resident delta articles.
+	// Deliberately redundant with the parsed chain's line count — loadDeltas
+	// cross-validates and fails loudly on drift. omitempty.
+	DeltaArticles int `json:"na,omitempty"`
+	// DeltaBytes is writer-only trigger state: cumulative uncompressed JSONL
+	// bytes across the live deltas (reset at consolidation), driving the
+	// --max-delta-bytes consolidation trigger without re-reading the chain. On
+	// the wire like Recipes/Out but ignored by the frontend/service-worker.
+	DeltaBytes int64 `json:"dby,omitempty"`
+	// GCLatestSwept is the low-water mark for GCLatest: the highest tail
+	// generation whose L<g>/d<g> names have been swept (deleted, or confirmed
+	// absent since Rm is silent on missing). GCLatest clears (GCLatestSwept,
+	// cutoff] and advances this ONLY over generations it actually cleared, so a
+	// missed/failed sweep or a lowered --max-deltas can never permanently strand
+	// a name below a fixed trailing window — the next advancing run resumes from
+	// exactly where the last one stopped. Writer-only trigger state like
+	// DeltaBytes (frontend/service-worker ignore it); BumpGen leaves it untouched
+	// (a rebuild reuses finalized names but the tail-generation names are
+	// unchanged, so the low-water stays valid). omitempty.
+	GCLatestSwept int `json:"gcs,omitempty"`
 	// Recipes is the map of named {ingest, pipe} bundles feeds reference by
 	// name (Feed.Recipe). Always contains the reserved "default" entry (seeded
 	// by NewDB). Backend-only config: the frontend/service-worker ignores it,
@@ -347,6 +417,12 @@ func (o *DB) BumpGen() {
 	o.core.MetaTail = 0
 	o.core.Head = nil
 	o.core.HeadBase = 0
+	// The delta chain fields (nd/na/dby) are deliberately NOT touched: the
+	// bump is a cache-invalidation signal, not a layout change, and zeroing nd
+	// would relocate the expected tail name from L<seq−nd> to L<seq> — a name
+	// that was never written, bricking every reader with a reload loop. A
+	// rebuild that consolidates the chain must update the chain fields itself,
+	// the same operator discipline as recomputing add_idx/xp.
 	// A rebuild reuses finalized pack names with new bytes, and the CDN edge
 	// caches those names under a year-long immutable TTL — the store-side
 	// reset above cannot reach that cache, only an operator purge can.
@@ -387,11 +463,49 @@ func (o *DB) AddFeed(c *Feed) error {
 	return fmt.Errorf("maximum number of feeds reached (%d)", feedIDCeiling)
 }
 
-func (o *DB) RemoveFeed(id int) {
+// RemoveFeed unsubscribes id. The id-reuse hazard it must guard: the
+// consolidation replay derives its as-of-chron header counts from the LIVE feed
+// set, so if this id's articles sit in an unconsolidated delta chain when a
+// later add REUSES the freed id, the dead incarnation's in-chain entries become
+// indistinguishable from the new feed's during the replay, permanently
+// corrupting the finalized headers it writes.
+//
+// The guard only bites when THIS feed actually has an entry in the live chain,
+// so removal drains the chain ONLY then; a feed with no chain entry (a dormant
+// feed that hasn't posted within the chain window — the common case) is removed
+// with no consolidation at all, because a reused id can never confuse a chain
+// that holds none of the old incarnation's articles. That means most removals
+// need only to READ+parse the chain (to check membership), not write it, so a
+// dormant feed stays removable even when a consolidation would fail. Only a
+// chain that can't be parsed at all (a corrupt segment, an unreachable store)
+// blocks removal — the store genuinely needs repair first (there is no safe
+// automatic recovery: dropping the unconsolidated articles can't fix the
+// per-feed counts an unparseable chain can't be read for).
+func (o *DB) RemoveFeed(ctx context.Context, id int) error {
+	if o.core.NumDeltas > 0 {
+		chain, err := o.loadDeltaChain(ctx)
+		if err != nil {
+			return fmt.Errorf("cannot remove feed %d: its delta chain must be verified first and reading it failed — repair the store, then retry: %w", id, err)
+		}
+		inChain := false
+		for i := range chain.Arts {
+			if chain.Arts[i].FeedID == id {
+				inChain = true
+				break
+			}
+		}
+		if inChain {
+			if err := o.DrainDeltas(ctx); err != nil {
+				return fmt.Errorf("cannot remove feed %d: its articles are in the live delta chain, which must consolidate first, and that failed — repair the store, then retry: %w", id, err)
+			}
+		}
+	}
 	delete(o.core.Feeds, id)
 	// Purge the feed's seen.gz state now (dedup entries + HTTP validators), so a
-	// reused id can't inherit it. Callers persist via commitState. See dropFeed.
+	// reused id can't inherit it. Callers persist via commitState (which also
+	// publishes any drain's generation bump). See dropFeed.
 	o.seen.dropFeed(id)
+	return nil
 }
 
 func (o *DB) FeedByID(id int) (*Feed, error) {

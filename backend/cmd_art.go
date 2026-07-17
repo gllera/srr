@@ -55,7 +55,7 @@ func (o *ArtCmd) Run() error {
 			}
 		}
 
-		entries, err := readAllIdx(ctx, db)
+		entries, deltas, err := readAllIdx(ctx, db)
 		if err != nil {
 			return err
 		}
@@ -94,7 +94,7 @@ func (o *ArtCmd) Run() error {
 		}
 
 		if len(results) > 0 {
-			if err := loadContent(ctx, db, results); err != nil {
+			if err := loadContent(ctx, db, results, deltas); err != nil {
 				return err
 			}
 		}
@@ -111,12 +111,12 @@ func (o *ArtCmd) Run() error {
 	})
 }
 
-func readAllIdx(ctx context.Context, db *DB) ([]idxEntry, error) {
-	packs, err := loadIdxPacks(func(key string) ([]byte, error) {
+func readAllIdx(ctx context.Context, db *DB) ([]idxEntry, []ArticleData, error) {
+	packs, deltas, err := loadIdxPacks(func(key string) ([]byte, error) {
 		return db.readGz(ctx, key)
 	}, &db.core)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	entries := make([]idxEntry, 0, db.core.TotalArticles)
@@ -139,13 +139,21 @@ func readAllIdx(ctx context.Context, db *DB) ([]idxEntry, error) {
 		}
 	}
 
-	return entries, nil
+	return entries, deltas, nil
 }
 
-func loadContent(ctx context.Context, db *DB, results []articleResult) error {
+func loadContent(ctx context.Context, db *DB, results []articleResult, deltas []ArticleData) error {
 	dataCache := map[int][]ArticleData{}
 	for i := range results {
 		ref := &results[i]
+		// Delta-region articles (packID == deltaPackID) resolve from the
+		// already-parsed chain — there is no data pack to read for them.
+		if ref.packID == deltaPackID {
+			if ref.packOffset < len(deltas) {
+				ref.ArticleData = deltas[ref.packOffset]
+			}
+			continue
+		}
 		articles, ok := dataCache[ref.packID]
 		if !ok {
 			data, err := db.readGz(ctx, dataKeyFor(&db.core, ref.packID))

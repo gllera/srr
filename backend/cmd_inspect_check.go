@@ -8,11 +8,12 @@ import (
 	"slices"
 )
 
-func validateAll(fetch keyGetter, core *DBCore, packs []*idxPack) error {
+func validateAll(fetch keyGetter, core *DBCore, packs []*idxPack, deltas []ArticleData) error {
 	fmt.Println()
 	issues := 0
 
-	issues += checkBoundsVsData(fetch, core, packs)
+	issues += checkDeltaChain(fetch, core, packs, deltas)
+	issues += checkBoundsVsData(fetch, core, packs, deltas)
 	issues += checkDBMeta(fetch, core, packs)
 	issues += checkFeedCountsContinuity(packs)
 	issues += checkUnknownFeedIDs(core, packs)
@@ -28,16 +29,72 @@ func validateAll(fetch keyGetter, core *DBCore, packs []*idxPack) error {
 	return fmt.Errorf("%d issue(s) found", issues)
 }
 
+// checkDeltaChain validates the delta-region invariants against db.gz. The
+// hard structural half of I1 (chain contiguity, per-segment parse, Σ lines ==
+// na) already gated loadIdxPacks — reaching here means it held; what remains
+// are the db.gz-level consistency claims: the I2 stratum invariant (no 5k
+// meta stratum — and hence no 50k idx boundary — strictly inside the delta
+// region, which is what lets every reader run its numFinalized* formulas on
+// total_art verbatim) and fetched_at monotonicity across the pack↔delta seam
+// (expiration's early-stop and the chron-order contract both assume it).
+func checkDeltaChain(fetch keyGetter, core *DBCore, packs []*idxPack, deltas []ArticleData) int {
+	if core.NumDeltas == 0 {
+		fmt.Println("[delta-chain] no live deltas (nd=0)")
+		return 0
+	}
+	issues := 0
+	tc := tailCovered(core)
+	if numFinalizedMeta(core.TotalArticles) != numFinalizedMeta(tc) {
+		fmt.Printf("[delta-chain] I2 violated: a meta stratum lies inside the delta region (tc=%d total_art=%d)\n",
+			tc, core.TotalArticles)
+		issues++
+	}
+	for i := 1; i < len(deltas); i++ {
+		if deltas[i].FetchedAt < deltas[i-1].FetchedAt {
+			fmt.Printf("[delta-chain] fetched_at not monotone inside the chain at delta offset %d\n", i)
+			issues++
+			break
+		}
+	}
+	// The other monotonicity half: the seam itself. The last consolidated
+	// article (chron tc-1) must not be newer than the first delta — the packs
+	// hold every older article, so a seam inversion breaks the global
+	// fetched_at order ExpireArticles' early-stop and the chron-order contract
+	// assume. (tc==0 is the all-delta store: no packed article to compare.)
+	if tc > 0 && len(deltas) > 0 {
+		n := (tc - 1) / idxPackSize
+		pid, off := packs[n].getPackRef(tc - 1)
+		last, err := loadDataPack(fetch, dataKeyFor(core, pid))
+		if err != nil {
+			fmt.Printf("[delta-chain] seam check: fetch last consolidated article (chron %d): %v\n", tc-1, err)
+			issues++
+		} else if off < len(last) && last[off].FetchedAt > deltas[0].FetchedAt {
+			fmt.Printf("[delta-chain] fetched_at not monotone across the pack↔delta seam (chron %d=%d > chron %d=%d)\n",
+				tc-1, last[off].FetchedAt, tc, deltas[0].FetchedAt)
+			issues++
+		}
+	}
+	if issues == 0 {
+		fmt.Printf("[delta-chain] %d segment(s), %d article(s), seam at chron %d consistent\n",
+			core.NumDeltas, core.DeltaArticles, tc)
+	}
+	return issues
+}
+
 // checkBoundsVsData walks every chronIdx and verifies the resolved
 // (packId, offset) lands inside an existing data-pack entry whose
 // feed_id matches the idx pack's feed_id.
-func checkBoundsVsData(fetch keyGetter, core *DBCore, packs []*idxPack) int {
+func checkBoundsVsData(fetch keyGetter, core *DBCore, packs []*idxPack, deltas []ArticleData) int {
 	// Chron order keeps (packId, offset) monotonic, so one resident pack
 	// suffices (the walkArticles pattern) — caching every decoded pack would
-	// hold the whole store's article content at peak.
+	// hold the whole store's article content at peak. Delta-region chrons
+	// (pid == deltaPackID) resolve against the parsed chain instead.
 	var entries []ArticleData
 	loadedPid, loaded := -1, 0
 	load := func(pid int) []ArticleData {
+		if pid == deltaPackID {
+			return deltas
+		}
 		if pid == loadedPid {
 			return entries
 		}
@@ -113,21 +170,39 @@ func checkDBMeta(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 		issues++
 	}
 
+	// next_pid describes the consolidated data series only, so skip the
+	// delta-region sentinel bound when reading the newest real packId; a store
+	// whose whole content is deltas (tailCovered == 0) has no real bound and
+	// no latest data pack — its consolidated state must still be pristine.
 	last := packs[len(packs)-1]
-	maxPackID := last.bounds[len(last.bounds)-1].packID
-	if maxPackID != core.NextPackID {
-		fmt.Printf("[db-meta] next_pid=%d but latest idx bound's packId=%d\n", core.NextPackID, maxPackID)
-		issues++
+	maxPackID := deltaPackID
+	for i := len(last.bounds) - 1; i >= 0; i-- {
+		if last.bounds[i].packID != deltaPackID {
+			maxPackID = last.bounds[i].packID
+			break
+		}
 	}
+	if tailCovered(core) == 0 {
+		if core.NextPackID != 0 || core.PackOffset != 0 {
+			fmt.Printf("[db-meta] all-delta store but next_pid=%d pack_off=%d (want 0/0)\n",
+				core.NextPackID, core.PackOffset)
+			issues++
+		}
+	} else {
+		if maxPackID != core.NextPackID {
+			fmt.Printf("[db-meta] next_pid=%d but latest idx bound's packId=%d\n", core.NextPackID, maxPackID)
+			issues++
+		}
 
-	latestData := latestKey(core, "data")
-	latest, err := loadDataPack(fetch, latestData)
-	if err != nil {
-		fmt.Printf("[db-meta] fetch %s: %v\n", latestData, err)
-		issues++
-	} else if len(latest) != core.PackOffset {
-		fmt.Printf("[db-meta] pack_off=%d but %s has %d entries\n", core.PackOffset, latestData, len(latest))
-		issues++
+		latestData := latestKey(core, "data")
+		latest, err := loadDataPack(fetch, latestData)
+		if err != nil {
+			fmt.Printf("[db-meta] fetch %s: %v\n", latestData, err)
+			issues++
+		} else if len(latest) != core.PackOffset {
+			fmt.Printf("[db-meta] pack_off=%d but %s has %d entries\n", core.PackOffset, latestData, len(latest))
+			issues++
+		}
 	}
 
 	idxCount, idxLive := feedIDStats(packs, core.Feeds)
@@ -339,10 +414,13 @@ func checkMeta(fetch keyGetter, core *DBCore) int {
 		fmt.Printf("[meta] mp=%d but only %d finalized meta shards exist\n", core.MetaPacks, nf)
 		return 1
 	}
+	// The meta series covers the consolidated region only — overclaiming past
+	// tailCovered (not just TotalArticles) is corruption: delta-region cards
+	// are the resident chain's, never a shard's.
 	if core.MetaTail < 0 || core.MetaTail > metaPackSize ||
-		core.MetaPacks*metaPackSize+core.MetaTail > core.TotalArticles {
-		fmt.Printf("[meta] inconsistent coverage: mp=%d mt=%d total_art=%d\n",
-			core.MetaPacks, core.MetaTail, core.TotalArticles)
+		core.MetaPacks*metaPackSize+core.MetaTail > tailCovered(core) {
+		fmt.Printf("[meta] inconsistent coverage: mp=%d mt=%d tc=%d total_art=%d\n",
+			core.MetaPacks, core.MetaTail, tailCovered(core), core.TotalArticles)
 		return 1
 	}
 	if core.MetaPacks == 0 && core.MetaTail == 0 {
@@ -437,9 +515,15 @@ func checkMeta(fetch keyGetter, core *DBCore) int {
 	return issues
 }
 
-// checkLatestFiles confirms the latest idx and data pack files
-// (the current L<seq> generation) actually exist and decompress.
+// checkLatestFiles confirms the tail idx and data pack files (the current
+// L<tailGen> generation) actually exist and decompress. A store whose whole
+// content is deltas never wrote a tail generation — nothing to check (the
+// delta segments themselves already gated loadIdxPacks).
 func checkLatestFiles(fetch keyGetter, core *DBCore) int {
+	if tailCovered(core) == 0 {
+		fmt.Println("[latest-files] all-delta store: no tail generation expected")
+		return 0
+	}
 	issues := 0
 	for _, prefix := range []string{"idx", "data"} {
 		key := latestKey(core, prefix)

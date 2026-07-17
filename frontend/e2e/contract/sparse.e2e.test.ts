@@ -79,7 +79,11 @@ describe("contract: sparse articles (omitempty wire fields)", () => {
    })
 
    const line = (content: string): string => {
-      const jsonl = gunzipSync(readFileSync(join(store, "data/L1.gz"))).toString("utf8")
+      // One fetch on an empty store publishes the batch as delta segment
+      // data/d1.gz (the default --max-deltas path) — the raw JSONL wire under
+      // test is byte-identical to a data pack's, which is the point of the
+      // delta design.
+      const jsonl = gunzipSync(readFileSync(join(store, "data/d1.gz"))).toString("utf8")
       const hit = jsonl.split("\n").find((l) => l.includes(`"c":"${content}"`))
       expect(hit, `JSONL line with content ${content}`).toBeDefined()
       return hit!

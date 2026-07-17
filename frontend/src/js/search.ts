@@ -121,8 +121,10 @@ const makeSummarySlot = () =>
 let loadSummary = makeSummarySlot()
 
 // Factory so invalidate() below can reissue a fresh slot — lazySlot has no reset of its own.
+// The tail shard lives at the TAIL generation (meta/L<tailGen>), not seq: with
+// a live delta chain seq runs ahead of the last consolidated tail.
 const makeLatestSlot = () =>
-   lazySlot(() => data.fetchPackBytes(`meta/L${data.db.seq}.gz`, true).then((buf) => parseShard(buf, false)))
+   lazySlot(() => data.fetchPackBytes(`meta/L${data.tailGen()}.gz`, true).then((buf) => parseShard(buf, false)))
 let loadLatest = makeLatestSlot()
 
 let shardCache = makeLRU<Promise<Shard>>(8)
@@ -130,6 +132,27 @@ function loadShard(n: number): Promise<Shard> {
    return cachedPromise(shardCache, n, () =>
       data.fetchPackBytes(`meta/${n}.gz`, false).then((buf) => parseShard(buf, true)),
    )
+}
+
+// The resident delta chain projected as a synthetic Shard so the newest chrons
+// (which no meta shard covers) run through matchShard like any other shard —
+// one home for the fold-match / expiry-skip / hit-shaping semantics, and the
+// titles fold once per snapshot rather than once per keystroke. Memoized on the
+// chain array's identity (data.ts reassigns it wholesale on refresh; invalidate
+// also clears it).
+let deltaShardCache: { arts: IArticle[]; shard: Shard } | null = null
+function deltaShard(): Shard {
+   const arts = data.deltaArticles()
+   if (deltaShardCache?.arts !== arts) {
+      deltaShardCache = {
+         arts,
+         shard: {
+            entries: arts.map((a) => ({ f: a.f, w: a.p || a.a, t: a.t })),
+            folded: arts.map((a) => fold(a.t ?? "")),
+         },
+      }
+   }
+   return deltaShardCache.shard
 }
 
 function matchShard(shard: Shard, baseChron: number, words: string[], max: number): ISearchHit[] {
@@ -190,13 +213,28 @@ export async function* search(q: string, limit = Infinity): AsyncGenerator<ISear
    const summary = nf > 0 && gramBits.length > 0 ? loadSummary() : null
    let remaining = limit
 
-   try {
-      const latest = await loadLatest()
-      const hits = matchShard(latest, nf * META_PACK_SIZE, words, remaining)
+   // Delta overlay: the newest chrons live in the resident chain, which no
+   // meta shard covers — scan it first (newest-first, in memory, no bloom
+   // needed at ≤ MAX_DELTAS small batches), via matchShard over the synthetic
+   // delta shard so expiry/tombstone handling stays single-sourced.
+   if (data.deltaArticles().length > 0 && remaining > 0) {
+      const hits = matchShard(deltaShard(), data.tailCovered(), words, remaining)
       remaining -= hits.length
       if (hits.length > 0) yield hits
-   } catch (e) {
-      console.warn("search: latest tail unavailable, scanning finalized shards only", e)
+   }
+
+   // The meta tail exists only once something was consolidated (mt > 0): an
+   // all-delta store must not fetch a name that was never written — the
+   // isLatest 404 path would trigger the guarded reload for a healthy store.
+   if ((data.db.mt ?? 0) > 0 && remaining > 0) {
+      try {
+         const latest = await loadLatest()
+         const hits = matchShard(latest, nf * META_PACK_SIZE, words, remaining)
+         remaining -= hits.length
+         if (hits.length > 0) yield hits
+      } catch (e) {
+         console.warn("search: latest tail unavailable, scanning finalized shards only", e)
+      }
    }
 
    if (!summary || remaining <= 0) return
@@ -266,4 +304,5 @@ export function invalidate(): void {
    loadLatest = makeLatestSlot()
    shardCache = makeLRU<Promise<Shard>>(8)
    hitCache = makeLRU<Promise<HitSet>, string>(8)
+   deltaShardCache = null
 }

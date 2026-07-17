@@ -5,6 +5,13 @@ import { feedServer, inspectValidate, makeStore, srr, type FeedServer } from "..
 import { nItems, rssFeed } from "../fixtures"
 import { mountReader } from "./mount"
 
+// This suite pins LEGACY tail mechanics (per-cycle consolidated L<seq> packs,
+// meta-series coverage, GC grace windows): run the writer with the delta kill
+// switch so every dirty cycle consolidates, as the pre-delta writer did.
+// Delta-chain behavior has its own suite (delta.e2e.test.ts) and rides every
+// OTHER suite through the default --max-deltas.
+process.env.SRR_MAX_DELTAS = "0"
+
 // Force the data series to split into multiple packs (tiny --pack-size + bulky
 // content). This is the core getPackRef test: every chronIdx must resolve to the
 // right (packId, offset) across finalized packs (data/1.gz, data/2.gz, …) AND
