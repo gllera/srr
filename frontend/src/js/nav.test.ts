@@ -2312,6 +2312,64 @@ describe("saved articles", () => {
       await nav.first()
       expect(nav.currentChron()).toBe(4) // earliest save (front)
    })
+
+   // ── Un-saving the article ON SCREEN (the "no right match" regression) ────────
+   // Un-saving the current article drops it from the queue but leaves it in the
+   // reader (toggleSave is a state flip, not a navigation). Its save-index
+   // neighbors then vanish, so prev/next must still resolve to where it sat — the
+   // saved cousin of filter.anchor — instead of dead-ending on "no right match".
+   it("→ still steps to the former newer neighbor after un-saving the current article", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }]) // 0..4
+      nav.toggleSaved(4) // queue: 4 → 1 → 3
+      nav.toggleSaved(1)
+      nav.toggleSaved(3)
+      await nav.switchFilter(nav.SAVED_TOKEN) // opens at the front (4)
+      await nav.right() // now on the middle save (1)
+      expect(nav.currentChron()).toBe(1)
+
+      nav.toggleSaved(1) // un-save the article on screen
+      expect(nav.isSaved(1)).toBe(false)
+      expect(JSON.parse(localStorage.getItem("srr-saved")!)).toEqual([4, 3])
+
+      const r = await nav.right() // must reach 1's former newer neighbor (3), not throw
+      expect(nav.currentChron()).toBe(3)
+      expect(r.has_right).toBe(false) // 3 is the back of the queue now
+   })
+
+   it("← still steps to the former older neighbor after un-saving the current article", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }]) // 0..4
+      nav.toggleSaved(4) // queue: 4 → 1 → 3
+      nav.toggleSaved(1)
+      nav.toggleSaved(3)
+      await nav.switchFilter(nav.SAVED_TOKEN)
+      await nav.right() // on the middle save (1)
+      expect(nav.currentChron()).toBe(1)
+
+      nav.toggleSaved(1) // un-save the article on screen
+
+      const b = await nav.left() // must reach 1's former older neighbor (4), not throw
+      expect(nav.currentChron()).toBe(4)
+      expect(b.has_left).toBe(false) // 4 is the front of the queue
+   })
+
+   it("keeps the reader chrome consistent on a re-probe while sitting on the un-saved article", async () => {
+      // A background store refresh (probeCurrent) can re-derive prev/next + the
+      // pending pill between the un-save and the next step. The ghost must keep
+      // that probe answering for the on-screen article instead of dead-ending it.
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }]) // 0..4
+      nav.toggleSaved(4) // queue: 4 → 1 → 3
+      nav.toggleSaved(1)
+      nav.toggleSaved(3)
+      await nav.switchFilter(nav.SAVED_TOKEN)
+      await nav.right() // on the middle save (1): former older 4, newer 3, one ahead
+      nav.toggleSaved(1) // un-save the article on screen
+
+      const p = await nav.probeCurrent()
+      expect(p).not.toBeNull()
+      expect(p!.has_left).toBe(true) // former older neighbor (4)
+      expect(p!.has_right).toBe(true) // former newer neighbor (3)
+      expect(p!.right_count).toBe(1) // one save still ahead of where it sat
+   })
 })
 
 describe("search filter mode (q:<query>)", () => {

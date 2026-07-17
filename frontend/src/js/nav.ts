@@ -68,15 +68,25 @@ function readSavedSet(): Set<number> {
 function savedOrder(): number[] {
    return [...readSavedSet()]
 }
+// ★ Saved unsave-of-current anchor (the saved cousin of filter.anchor). Un-saving
+// the article on screen drops it from the queue but leaves it in the reader
+// (toggleSave is a state flip, not a navigation). Its save-index neighbors then
+// vanish — savedNeighbor(pos) can't find a chron that left the set — so prev/next
+// would dead-end on "no right match". Remember the just-unsaved chron plus the
+// queue neighbors and ahead-count it held, so savedNeighbor/pendingRight still
+// answer for it until the reader steps off (resolve) or the filter changes
+// (resolveNoMatch). Set by toggleSaved, cleared on any landing. null = none.
+let savedGhost: { chron: number; older: number; newer: number; ahead: number } | null = null
 // Save-order neighbor of member `chron`: "older" = the earlier save (toward the
 // front of the queue, lower index), "newer" = the later save (higher index,
 // toward the newest save). -1 at the ends or if `chron` isn't saved. Steps by
 // save-INDEX, so — unlike the chronIdx ±1 trick the value seam uses — it never
-// aliases two numerically-adjacent saved articles.
+// aliases two numerically-adjacent saved articles. A `chron` no longer in the set
+// falls back to savedGhost (the article was just un-saved on screen).
 function savedNeighbor(chron: number, dir: "older" | "newer"): number {
    const order = savedOrder()
    const i = order.indexOf(chron)
-   if (i < 0) return -1
+   if (i < 0) return savedGhost?.chron === chron ? savedGhost[dir] : -1
    return dir === "older" ? (order[i - 1] ?? -1) : (order[i + 1] ?? -1)
 }
 
@@ -98,6 +108,18 @@ export function savedCount(): number {
 export function toggleSaved(chron: number): boolean {
    const set = readSavedSet()
    const nowSaved = !set.has(chron)
+   // Un-saving the article currently on screen in ★ Saved mode: capture its queue
+   // neighbors + ahead-count from the pre-removal order so the reader can still
+   // step off it (savedGhost, consulted by savedNeighbor/pendingRight while pos is
+   // a non-member). Re-saving that same article — or any state flip that returns
+   // it to the set — drops the ghost.
+   if (!nowSaved && filter.saved && chron === pos) {
+      const order = [...set]
+      const i = order.indexOf(chron)
+      savedGhost = { chron, older: order[i - 1] ?? -1, newer: order[i + 1] ?? -1, ahead: order.length - 1 - i }
+   } else if (savedGhost?.chron === chron) {
+      savedGhost = null
+   }
    if (nowSaved) set.add(chron)
    else set.delete(chron)
    try {
@@ -603,7 +625,8 @@ async function pendingRight(seenMap?: Record<string, number>): Promise<number> {
    if (filter.saved) {
       const order = savedOrder()
       const i = order.indexOf(pos)
-      return i < 0 ? 0 : order.length - 1 - i
+      if (i < 0) return savedGhost?.chron === pos ? savedGhost.ahead : 0
+      return order.length - 1 - i
    }
    if (filter.search) {
       await ensureSearchSet()
@@ -684,6 +707,9 @@ async function resolve(target: number, replace = false, record = true): Promise<
    // after → steps into the unseen. A matching landing leaves the anchor alone:
    // stepping forward must not orphan the entry it came from.
    if (unseenActive() && !filter.matches(article.f, target)) filter.anchor = target
+   // Any real landing moves off the just-unsaved ghost article onto a genuine
+   // member (or another article entirely), so the saved ghost is spent.
+   savedGhost = null
    next.left = next.right = undefined
    // Arriving at the article being prefetched must NOT abort it: its in-flight
    // loads are exactly what the rendered content is about to attach to (same-URL
@@ -984,8 +1010,10 @@ export function pruneSeen() {
 function resolveNoMatch(replace = false, notStarted = false): IShowFeed {
    pos = -1
    currentFeed = -1
-   // Same cleanup as resolve(): the cached neighbor probes and any in-flight
-   // media prefetch belong to the PREVIOUS filter's article and are now stale.
+   // Same cleanup as resolve(): the cached neighbor probes, the saved ghost, and
+   // any in-flight media prefetch belong to the PREVIOUS filter's article and are
+   // now stale.
+   savedGhost = null
    next.left = next.right = undefined
    abortPrefetch()
    updateHash(replace)
