@@ -37,17 +37,49 @@ export interface StaticServer {
    baseUrl: string // no trailing slash
 }
 
-// Serve appDir at / (defaulting `/` to indexFile) and packsDir at /packs/.
+// Serve appDir at / (defaulting `/` to indexFile) and packsDir at /packs/,
+// plus an in-memory same-origin sync endpoint under /sync/<name> (GET = stored
+// blob or 404, PUT = store the body) — the minimal contract sync.ts asks of a
+// user-supplied endpoint, keyed by path so scenarios isolate per name.
 export async function startStaticServer(opts: {
    appDir: string
    packsDir: string
    indexFile?: string
 }): Promise<StaticServer> {
    const indexFile = opts.indexFile ?? "index.html"
+   const syncBlobs = new Map<string, Buffer>()
    const server = createServer((req, res) => {
       res.setHeader("Connection", "close") // avoid keep-alive sockets that stall server.close()
       let p = decodeURIComponent((req.url || "/").split("?")[0])
       if (p === "/") p = "/" + indexFile
+      if (p.startsWith("/sync/")) {
+         // Failure injection: names under /sync/fail… always 500, so scenarios
+         // can pin how the reader surfaces and survives a broken endpoint.
+         if (p.startsWith("/sync/fail")) {
+            res.statusCode = 500
+            res.end("injected failure")
+            return
+         }
+         if (req.method === "PUT") {
+            const chunks: Buffer[] = []
+            req.on("data", (c: Buffer) => chunks.push(c))
+            req.on("end", () => {
+               syncBlobs.set(p, Buffer.concat(chunks))
+               res.statusCode = 204
+               res.end()
+            })
+            return
+         }
+         const blob = syncBlobs.get(p)
+         if (!blob) {
+            res.statusCode = 404
+            res.end("not found")
+            return
+         }
+         res.setHeader("Content-Type", "application/json")
+         res.end(blob)
+         return
+      }
       if (p.startsWith("/packs/")) serveFile(res, opts.packsDir, p.slice("/packs/".length))
       else serveFile(res, opts.appDir, p.slice(1))
    })

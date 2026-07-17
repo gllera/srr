@@ -46,8 +46,13 @@ export async function srr(storeDir: string, ...args: string[]): Promise<string> 
       // refuses by default; opt out via the documented flag, exactly as a real
       // localhost/LAN-feed deployment would (feed add's discovery probe and the
       // fetch loop both dial the test server).
+      //
+      // SRR_CONFIG_INLINE={} keeps the run hermetic: without it the binary reads
+      // the HOST's ~/.config/srr/srr.yaml, whose knobs leak into the store under
+      // test (a configured asset-process, e.g., transcodes every self-hosted
+      // asset — .png in, .avif out — so byte/key assertions diverge from CI).
       const { stdout } = await execFileAsync(srrBin(), ["-o", storeDir, ...args], {
-         env: { ...process.env, SRR_ALLOW_PRIVATE_FETCH: "1" },
+         env: { ...process.env, SRR_ALLOW_PRIVATE_FETCH: "1", SRR_CONFIG_INLINE: "{}" },
       })
       return stdout
    } catch (e) {
@@ -133,38 +138,49 @@ export function stressStore(): StressStore {
    return { dir, total, generated: true }
 }
 
+// A non-XML route (e.g. an image #selfhost downloads): explicit body + type.
+export interface FeedRoute {
+   body: string | Buffer
+   type: string
+}
+
 export interface FeedServer {
    url: string
    // Replace/add a route's body so a second `srr art fetch` sees new content.
-   set(path: string, xml: string): void
+   set(path: string, body: string | FeedRoute): void
    // Drop a route so subsequent fetches 404 (e.g. to provoke a ferr on a feed
    // that had to resolve validly at `feed add` time).
    remove(path: string): void
    close(): Promise<void>
 }
 
-// Ephemeral HTTP server (port 0) serving canned RSS XML keyed by path. No
-// ETag/Last-Modified, so every fetch is a 200 with the current body — re-fetch
-// dedup is exercised purely through the backend's GUID/watermark logic.
-export async function feedServer(routes: Record<string, string>): Promise<FeedServer> {
-   const table: Record<string, string> = { ...routes }
+// Ephemeral HTTP server (port 0) serving canned RSS XML keyed by path (a bare
+// string body defaults to the RSS content type; pass a FeedRoute for anything
+// else, e.g. media bytes for #selfhost). No ETag/Last-Modified, so every fetch
+// is a 200 with the current body — re-fetch dedup is exercised purely through
+// the backend's GUID/watermark logic.
+export async function feedServer(routes: Record<string, string | FeedRoute>): Promise<FeedServer> {
+   const norm = (b: string | FeedRoute): FeedRoute =>
+      typeof b === "string" ? { body: b, type: "application/rss+xml; charset=utf-8" } : b
+   const table: Record<string, FeedRoute> = {}
+   for (const [path, body] of Object.entries(routes)) table[path] = norm(body)
    const server: Server = createServer((req, res) => {
       const path = (req.url || "/").split("?")[0]
-      const body = table[path]
-      if (body === undefined) {
+      const route = table[path]
+      if (route === undefined) {
          res.statusCode = 404
          res.end("not found")
          return
       }
-      res.setHeader("Content-Type", "application/rss+xml; charset=utf-8")
-      res.end(body)
+      res.setHeader("Content-Type", route.type)
+      res.end(route.body)
    })
    await new Promise<void>((rs) => server.listen(0, "127.0.0.1", () => rs()))
    const addr = server.address() as AddressInfo
    return {
       url: `http://127.0.0.1:${addr.port}`,
-      set(path, xml) {
-         table[path] = xml
+      set(path, body) {
+         table[path] = norm(body)
       },
       remove(path) {
          delete table[path]
