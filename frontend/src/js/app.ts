@@ -409,8 +409,11 @@ function render(o: IShowFeed) {
    scrollReaderTop()
    // A titleless feed hides the <h1>; focusing a display:none element is a no-op,
    // so move focus to the visible body instead to keep the reader region focused.
+   // preventScroll: scrollReaderTop() owns the landing position — a bare focus()
+   // on a taller-than-viewport body aligns its top with the viewport (CSSOM
+   // "nearest"), scrolling the masthead off and auto-hiding the toolbar.
    el.content.tabIndex = -1
-   ;(feed?.nt ? el.content : el.title).focus()
+   ;(feed?.nt ? el.content : el.title).focus({ preventScroll: true })
 
    // Double rAF: first ensures the browser has painted with opacity:0, second
    // re-enables transitions so the fade-in animates.
@@ -453,7 +456,8 @@ function renderEmptyReader(o: IShowFeed) {
    // The empty state hides the whole title row; focus the (visible) content host,
    // which carries the directed empty-state element.
    el.content.tabIndex = -1
-   el.content.focus() // keep keyboard focus inside the reader region
+   // keep keyboard focus inside the reader region; preventScroll as in render()
+   el.content.focus({ preventScroll: true })
    persistHash(location.hash)
 }
 
