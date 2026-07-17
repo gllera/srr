@@ -6,7 +6,7 @@ Static RSS Reader -- a self-hosted RSS reader designed for static file hosting. 
 
 ```
 srr art fetch  --->  pack files (idx/ + data/ + db.gz)  --->  static SPA reader
-   (CLI)             stored on S3 / SFTP / local              served via CDN
+   (CLI)             stored on S3 / HTTP / SFTP / local       served via CDN
 ```
 
 1. **Backend CLI** fetches RSS/Atom/RDF feeds and writes articles into gzip-compressed pack series optimized for incremental sync and HTTP caching.
@@ -63,7 +63,7 @@ frontend/   TypeScript SPA -- static feed reader
 
 | Component | Stack | Details |
 |-----------|-------|---------|
-| [Backend](backend/) | Go | CLI via kong, storage backends (local, S3, SFTP), module pipeline |
+| [Backend](backend/) | Go | CLI via kong, storage backends (local, S3, SFTP, HTTP), module pipeline |
 | [Frontend](frontend/) | TypeScript, Parcel, plain CSS | Zero runtime deps, streaming decompression, LRU caching |
 
 ## Development
@@ -84,6 +84,7 @@ See [backend/README.md](backend/README.md) and [frontend/README.md](frontend/REA
 | Local filesystem | `-o ./packs` | Default |
 | S3 | `-o s3://bucket/prefix` | AWS SDK credentials |
 | SFTP | `-o sftp://user@host/path` | SSH keys or agent |
+| HTTP | `-o https://host/path` | WebDAV-style PUT/DELETE endpoint; basic auth, bearer token, or custom headers |
 
 ## CI/CD
 
