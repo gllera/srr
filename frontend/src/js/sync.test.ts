@@ -479,11 +479,11 @@ describe("push", () => {
    it("pushSoon debounces a reading burst into one cycle", async () => {
       sync.setSyncUrl(URL)
       sync.pushSoon()
-      await vi.advanceTimersByTimeAsync(3000)
+      await vi.advanceTimersByTimeAsync(500) // still within the 1s debounce window
       sync.pushSoon()
       sync.pushSoon()
       expect(fetchMock).not.toHaveBeenCalled()
-      await vi.advanceTimersByTimeAsync(5000)
+      await vi.advanceTimersByTimeAsync(1000)
       expect(fetchMock).toHaveBeenCalledTimes(2) // one GET + one PUT
       expect(fetchMock.mock.calls[1][1].method).toBe("PUT")
    })
