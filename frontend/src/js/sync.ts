@@ -50,7 +50,7 @@ import { isValidHttpish, normalizeHttpish } from "./urlish"
 // Push settles PUSH_DEBOUNCE_MS after the last seen/saved change (a reading
 // burst is one PUT); background pulls (tab re-focus) are at most one per
 // PULL_MIN_INTERVAL_MS so tab-switching doesn't hammer the endpoint.
-const PUSH_DEBOUNCE_MS = 5000
+const PUSH_DEBOUNCE_MS = 1000
 const PULL_MIN_INTERVAL_MS = 60_000
 
 let onMerged: (() => void) | null = null
