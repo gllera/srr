@@ -97,33 +97,51 @@ func setOutFeed(ctx context.Context, db *DB, in OutFeed) error {
 		in.Limit = outDefaultLimit
 	}
 
-	found := false
+	idx := -1
 	oldFormat := ""
 	for i, e := range db.core.Out {
 		if e.Name == in.Name {
-			oldFormat = e.Format
-			db.core.Out[i] = in
-			found = true
+			idx, oldFormat = i, e.Format
 			break
 		}
 	}
-	if !found {
+	// Reap the old-extension file BEFORE the Commit that changes the format:
+	// once the config no longer names it, nothing can ever delete it (the
+	// store has no List), so a crash — or a swallowed Rm failure — after the
+	// Commit would strand it forever. This order fails the upsert on a Rm
+	// error (config intact, retry works), and a crash between the Rm and the
+	// Commit leaves the old config live with its file missing — rewritten by
+	// the next fetch process's first cycle (lastOutSig starts empty).
+	if idx >= 0 && oldFormat != in.Format {
+		if err := db.Rm(ctx, outFileKey(OutFeed{Name: in.Name, Format: oldFormat})); err != nil {
+			return fmt.Errorf("remove old-format output file: %w", err)
+		}
+	}
+	if idx >= 0 {
+		db.core.Out[idx] = in
+	} else {
 		db.core.Out = append(db.core.Out, in)
 	}
-	if err := db.Commit(ctx); err != nil {
-		return err
-	}
-	if found && oldFormat != "" && oldFormat != in.Format {
-		_ = db.Rm(ctx, outFileKey(OutFeed{Name: in.Name, Format: oldFormat}))
-	}
-	return nil
+	return db.Commit(ctx)
 }
 
-// removeOutFeed deletes a syndication entry by name and best-effort removes its
-// out/* files. Shared by `srr syndicate rm` and the DELETE handler.
+// removeOutFeed removes a syndication entry's out/* files, then deletes the
+// entry by name. Shared by `srr syndicate rm` and the DELETE handler.
 func removeOutFeed(ctx context.Context, db *DB, name string) error {
 	if !validOutName(name) {
 		return fmt.Errorf("syndication name %q must match [A-Za-z0-9._-] and not be '.' or '..'", name)
+	}
+	// Delete the output files BEFORE the Commit that forgets the entry: once
+	// the config no longer names them, nothing can ever delete them (the store
+	// has no List), so a crash — or a swallowed Rm failure — after the Commit
+	// would strand out/<name>.* forever. This order fails the command on a Rm
+	// error (config intact, retry works), and a crash between the Rm and the
+	// Commit leaves a still-configured entry whose file the next fetch process
+	// rewrites on its first cycle (lastOutSig starts empty).
+	for _, ext := range []string{".rss", ".json"} {
+		if err := db.Rm(ctx, "out/"+name+ext); err != nil {
+			return fmt.Errorf("remove output file out/%s%s: %w", name, ext, err)
+		}
 	}
 	out := db.core.Out[:0]
 	for _, e := range db.core.Out {
@@ -133,13 +151,7 @@ func removeOutFeed(ctx context.Context, db *DB, name string) error {
 		out = append(out, e)
 	}
 	db.core.Out = out
-	if err := db.Commit(ctx); err != nil {
-		return err
-	}
-	for _, ext := range []string{".rss", ".json"} {
-		_ = db.Rm(ctx, "out/"+name+ext)
-	}
-	return nil
+	return db.Commit(ctx)
 }
 
 // outFileKey returns the store key for an OutFeed's output file.

@@ -71,7 +71,14 @@ type seenPool struct {
 	// pool; SyncSeen skips the store write when it is false (most --interval
 	// cycles are all-304 no-ops), and clears it after a successful write.
 	dirty bool
-	m     map[uint64]uint16
+	// fromLegacy marks a pool loaded off the pre-ping-pong single seen.gz
+	// (the upgrade bridge): once SyncSeen has made it durable in a slot, it
+	// reaps the legacy object — otherwise the superseded file sits in the
+	// store forever (and would even resurface as a very stale fallback if
+	// both slots ever corrupted). loadSeen sets dirty alongside it so the
+	// first locked cycle completes the migration even when all-304 idle.
+	fromLegacy bool
+	m          map[uint64]uint16
 	// feed holds each feed's persisted backend-only fetch/dedup state: the HTTP
 	// conditional-fetch validators (ETag / Last-Modified) plus (from format
 	// version 2) the BoundaryGUIDs dedup window (bg). These used to ride in the
@@ -456,6 +463,13 @@ func (o *DB) loadSeen(ctx context.Context) *seenPool {
 	}
 	if p, ok := o.tryLoadSeen(ctx, seenLegacyKey); ok {
 		slog.Info("migrating legacy seen.gz into ping/pong slots", "legacy", seenLegacyKey)
+		// Force the first locked cycle to finish the migration even when it is
+		// an all-304 no-op: dirty makes SyncSeen write a slot, and fromLegacy
+		// makes it reap the superseded legacy object once the slot is durable.
+		// Without this an idle store re-reads (and re-logs) the legacy forever
+		// and the stale file is stranded in the store.
+		p.dirty = true
+		p.fromLegacy = true
 		return p
 	}
 	if o.core.Seq > 0 { // a store that has committed a batch should have a slot
@@ -516,6 +530,19 @@ func (o *DB) SyncSeen(ctx context.Context) error {
 	}
 	o.core.SeenFlag = !o.core.SeenFlag // now names the slot we just wrote
 	o.seen.dirty = false
+	// Complete a legacy migration: the pool is durable in a slot now — even if
+	// the caller's Commit never publishes the flag flip, loadSeen's sibling
+	// fallback finds the slot just written — so the pre-ping-pong object is
+	// superseded and reaped here, on the one path that knows a migration
+	// happened. Warn-only: a miss leaves exactly the pre-reap state (a stale
+	// legacy file) and the flag is cleared regardless, since the next dirty
+	// cycle's pool no longer derives from the legacy object.
+	if o.seen.fromLegacy {
+		o.seen.fromLegacy = false
+		if err := o.Rm(ctx, seenLegacyKey); err != nil {
+			slog.Warn("remove migrated legacy seen.gz", "error", err)
+		}
+	}
 	return nil
 }
 

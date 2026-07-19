@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"testing/iotest"
+	"time"
 )
 
 var ctx = context.Background()
@@ -106,6 +107,59 @@ func TestLocalAtomicPutFailureRemovesTempFile(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "atomic.txt")); !os.IsNotExist(err) {
 		t.Error("destination file should not exist after a failed AtomicPut")
+	}
+}
+
+// AtomicPut sweeps uniqueTempName leftovers a hard-killed predecessor stranded
+// in the target's directory (its rename never ran, and the per-process unique
+// name means nothing would ever overwrite or GC them): stale ones (older than
+// tempSweepMaxAge) are removed, while a fresh one — potentially another live
+// writer's in-flight staging file — is kept by the age gate.
+func TestLocalAtomicPutSweepsStaleTempLeftovers(t *testing.T) {
+	b, dir := setupLocalStore(t)
+	stale := filepath.Join(dir, "db.gz.tmp.99999.1")
+	fresh := filepath.Join(dir, "db.gz.tmp.99999.2")
+	for _, f := range []string{stale, fresh} {
+		if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-tempSweepMaxAge - time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	// A write to a DIFFERENT key in the same directory triggers the sweep —
+	// leftovers heal on any sibling write, not only a rewrite of their own key.
+	if err := b.AtomicPut(ctx, "other.txt", strings.NewReader("content"), ObjectMeta{}); err != nil {
+		t.Fatalf("AtomicPut: %v", err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("stale temp leftover survived the sweep (err=%v), want removed", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("fresh temp file swept (err=%v), want kept by the age gate", err)
+	}
+}
+
+// isTempLeftover must match exactly the uniqueTempName grammar
+// (<base>.tmp.<pid>.<n>) so the sweep can never touch a user file that merely
+// contains ".tmp.".
+func TestIsTempLeftover(t *testing.T) {
+	for name, want := range map[string]bool{
+		"db.gz.tmp.123.4":       true,
+		"frontend.js.tmp.1.999": true,
+		"db.gz.tmp":             false,
+		"db.gz.tmp.123":         false,
+		"db.gz.tmp.12a.3":       false,
+		"db.gz.tmp..3":          false,
+		"db.gz.tmp.3.":          false,
+		"notes.tmp.backup":      false,
+		"db.gz":                 false,
+	} {
+		if got := isTempLeftover(name); got != want {
+			t.Errorf("isTempLeftover(%q) = %v, want %v", name, got, want)
+		}
 	}
 }
 
