@@ -335,6 +335,24 @@ func uniqueTempName(file string) string {
 // anywhere near this long.
 const tempSweepMaxAge = 24 * time.Hour
 
+// staleTemp reports whether a staging file stamped mod is old enough to sweep.
+//
+// What makes this safe is the CALLER's discipline, not anything here: both mod
+// and now come from the same directory listing, now being the caller's own
+// just-created staging file (see sweepTempLeftovers). One clock, one call. An
+// SFTP server or an NFS mount whose clock runs behind this host's would
+// otherwise make every in-flight staging file look ancient — and asset uploads
+// run concurrently within a single process, so two live temps in one directory
+// need no second writer at all. Do not reintroduce a separately-obtained now.
+//
+// The IsZero arm is belt-and-braces only, and deliberately not load-bearing:
+// a server that omits mtime in its READDIR attrs reports the Unix epoch, whose
+// IsZero() is false (Go's zero time is year 1). Such a server also stamps the
+// reference file with the epoch, so now.Sub(mod) is 0 and nothing is swept.
+func staleTemp(mod, now time.Time) bool {
+	return !mod.IsZero() && now.Sub(mod) >= tempSweepMaxAge
+}
+
 // isTempLeftover reports whether a directory entry name is a uniqueTempName
 // staging file (<base>.tmp.<pid>.<n>). The strict digits-suffix match keeps
 // the sweep from ever touching a user file that merely contains ".tmp.".

@@ -99,13 +99,19 @@ func (d *Local) AtomicPut(_ context.Context, key string, r io.Reader, _ ObjectMe
 	if err := d.ensureDir(file); err != nil {
 		return err
 	}
-	sweepTempLeftovers(filepath.Dir(file))
 	tmpFile := uniqueTempName(file)
 
 	fs, err := os.OpenFile(tmpFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		return fmt.Errorf("opening file %s: %w", tmpFile, err)
 	}
+	// Sweep AFTER creating our own staging file, so the sweep can read the
+	// store's clock off it (see sweepTempLeftovers). Trade-off of that
+	// ordering: a directory where the temp create ITSELF keeps failing (gone
+	// read-only, disk full) is never swept, so self-healing is gated on the
+	// operation that is failing. Acceptable — a store that cannot be written
+	// to has a louder problem than a stale staging file.
+	sweepTempLeftovers(filepath.Dir(file), filepath.Base(tmpFile))
 
 	// Remove the staging file on every failure path (matching SFTP.AtomicPut), so
 	// a recurring failure (e.g. a full disk hit every serve --interval cycle)
@@ -146,19 +152,40 @@ func (d *Local) AtomicPut(_ context.Context, key string, r io.Reader, _ ObjectMe
 // predecessor stranded in dir (its rename never ran; the per-process unique
 // name means nothing ever overwrites them and no GC speaks them — see
 // tempSweepMaxAge, which also age-gates the sweep off any live writer's
-// in-flight staging file). Best-effort and silent on errors: janitor work
-// must never fail or noise up the AtomicPut that triggered it.
-func sweepTempLeftovers(dir string) {
+// in-flight staging file).
+//
+// ownTemp names the caller's OWN staging file, just created in dir: its mtime
+// in this very listing is the reference "now". Both sides of the age
+// comparison then come from one clock and one call — the store's, which on an
+// NFS/SMB mount is the server's, not this host's. A skewed clock would
+// otherwise make every in-flight staging file look ancient, and concurrent
+// asset uploads inside ONE process already put several in a shard. If our own
+// entry is missing from the listing the sweep is skipped: no reference, no
+// judgement. Best-effort and silent on errors — janitor work must never fail
+// or noise up the AtomicPut that triggered it.
+func sweepTempLeftovers(dir, ownTemp string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
+	var now time.Time
 	for _, e := range entries {
-		if !e.Type().IsRegular() || !isTempLeftover(e.Name()) {
+		if e.Name() == ownTemp {
+			if fi, err := e.Info(); err == nil {
+				now = fi.ModTime()
+			}
+			break
+		}
+	}
+	if now.IsZero() {
+		return
+	}
+	for _, e := range entries {
+		if e.Name() == ownTemp || !e.Type().IsRegular() || !isTempLeftover(e.Name()) {
 			continue
 		}
 		fi, err := e.Info()
-		if err != nil || time.Since(fi.ModTime()) < tempSweepMaxAge {
+		if err != nil || !staleTemp(fi.ModTime(), now) {
 			continue
 		}
 		file := filepath.Join(dir, e.Name())

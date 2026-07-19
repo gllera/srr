@@ -142,6 +142,41 @@ func TestLocalAtomicPutSweepsStaleTempLeftovers(t *testing.T) {
 	}
 }
 
+// The sweep's age gate must compare two readings of ONE clock. staleTemp takes
+// the store's own "now" — the caller's just-created staging file's mtime, read
+// from the same directory listing — precisely because an NFS-mounted local
+// store or an SFTP server can stamp mtimes from a clock that differs
+// arbitrarily from this host's, and asset uploads run concurrently inside a
+// single process, so two live staging files in one directory need no second
+// writer at all. A store clock running >24h behind us would otherwise make
+// every in-flight temp look ancient and get it deleted mid-write.
+func TestStaleTempUsesOneClock(t *testing.T) {
+	now := time.Now()
+	if staleTemp(now.Add(-time.Minute), now) {
+		t.Error("a fresh temp is stale; want kept")
+	}
+	if !staleTemp(now.Add(-tempSweepMaxAge-time.Minute), now) {
+		t.Error("an aged temp is not stale; want swept")
+	}
+	// The store's clock reads 48h behind this host's: a temp created "now" by
+	// the store's reckoning must not look 48h old.
+	skewed := now.Add(-48 * time.Hour)
+	if staleTemp(skewed, skewed) {
+		t.Error("clock skew made an in-flight temp look stale; want kept")
+	}
+	// Unknown age must never mean "delete". Note pkg/sftp reports a missing
+	// mtime as the Unix EPOCH, not Go's zero time, so IsZero does not catch it
+	// — what saves us is that such a server stamps the reference file the same
+	// way, making the difference 0. Both encodings are pinned here.
+	if staleTemp(time.Time{}, now) {
+		t.Error("a zero mtime was swept; want kept")
+	}
+	epoch := time.Unix(0, 0)
+	if staleTemp(epoch, epoch) {
+		t.Error("an epoch mtime measured against an epoch reference was swept; want kept")
+	}
+}
+
 // isTempLeftover must match exactly the uniqueTempName grammar
 // (<base>.tmp.<pid>.<n>) so the sweep can never touch a user file that merely
 // contains ".tmp.".
