@@ -518,6 +518,47 @@ For example, with `default` pipe `[#sanitize, #minify]` and a recipe `[#default,
 
 **Default recipe.** The `default` recipe is always present (seeded `["#sanitize","#minify"]` on a fresh or pre-recipes store). Update it via `srr recipe set default -p "#sanitize" -p "#minify"`. To extend it, create a named recipe that uses `#default`: `srr recipe set heavy -p "#readability" -p "#default"`. To opt a feed into a completely different pipeline without touching `default`, assign a recipe with the desired pipe and no `#default`.
 
+## Syndication
+
+`srr syndicate` manages named output feeds published to `out/<name>.rss` (RSS 2.0) or `out/<name>.json` (JSON Feed 1.1) — a rolling newest-N window over chosen tags/feed ids, rewritten every fetch cycle. Requires `--cdn-url` / `SRR_CDN_URL`; skipped with a warning when unset (see [Global Flags](#global-flags)).
+
+| Command | Description |
+|---|---|
+| `syndicate ls` | List syndication output feeds (prints the current `out[]` config as JSON) |
+| `syndicate set <name>` | Add or update an output feed (`-f rss\|json` required, `-t` title, `-g` tag filter, `-i` feed-id filter, `-l` limit — default 50, `-x`/`--external` declares an externally-updated slot instead of a generated one, see below) |
+| `syndicate rm <name>` | Remove an output feed and delete its `out/*` file(s) |
+
+```bash
+# Publish the newest 30 articles tagged "news" as an RSS feed
+srr syndicate set headlines -f rss -g news -l 30
+
+# List configured outputs
+srr syndicate ls
+
+# Remove one
+srr syndicate rm headlines
+```
+
+### External outputs
+
+`srr syndicate set digest -f rss --external` declares a slot SRR never generates:
+the fetch cycle skips it, and its file is published by an external tool on its own
+schedule. `--external` takes no `-g`/`-i`/`-l` (there is nothing to generate).
+
+    gen-digest | srr syndicate push digest      # publish (stdin is the default)
+    srr syndicate push digest feed.rss          # publish from a file
+    srr syndicate fetch digest                  # print the published file to stdout
+    srr syndicate fetch digest | merge | srr syndicate push digest   # read-modify-write
+
+`push` validates well-formedness before writing (rss ⇒ XML with an `<rss>` root;
+json ⇒ a JSON Feed `version` marker), caps the payload at 64 MiB, stamps the same
+Content-Type/Cache-Control as generated outputs, and is lock-free — it never
+contends with a running fetch cycle. `fetch` streams exactly the published bytes
+to stdout (works for managed outputs too); a slot that has never been published
+is a hard error, so a first-run read-modify-write pipeline bootstraps with
+`srr syndicate fetch digest || true`. `rm` deletes an external slot's file like
+any other.
+
 ## Pack Format
 
 Articles are stored in two gzip-compressed series under each feed directory, alongside a `db.gz` metadata file:
