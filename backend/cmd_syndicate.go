@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 )
@@ -97,11 +98,10 @@ func setOutFeed(ctx context.Context, db *DB, in OutFeed) error {
 		in.Limit = outDefaultLimit
 	}
 
-	idx := -1
-	oldFormat := ""
+	idx, oldKey := -1, ""
 	for i, e := range db.core.Out {
 		if e.Name == in.Name {
-			idx, oldFormat = i, e.Format
+			idx, oldKey = i, outFileKey(e)
 			break
 		}
 	}
@@ -112,9 +112,18 @@ func setOutFeed(ctx context.Context, db *DB, in OutFeed) error {
 	// error (config intact, retry works), and a crash between the Rm and the
 	// Commit leaves the old config live with its file missing — rewritten by
 	// the next fetch process's first cycle (lastOutSig starts empty).
-	if idx >= 0 && oldFormat != in.Format {
-		if err := db.Rm(ctx, outFileKey(OutFeed{Name: in.Name, Format: oldFormat})); err != nil {
-			return fmt.Errorf("remove old-format output file: %w", err)
+	//
+	// Compare resolved KEYS, not raw formats: outFileKey defaults anything that
+	// is not "json" to .rss, so a stored entry with an empty format would
+	// otherwise read as "changed" against format=rss and delete the very file
+	// the new config names.
+	// rmIfPresent, not a bare Rm: the old-format file often does not exist
+	// (SyncOutFeeds no-ops entirely when SRR_CDN_URL is unset), and a store
+	// that errors on deleting a missing key would otherwise make the entry
+	// permanently un-editable — the same wedge removeOutFeed guards against.
+	if idx >= 0 && oldKey != outFileKey(in) {
+		if err := rmIfPresent(ctx, db, oldKey); err != nil {
+			return err
 		}
 	}
 	if idx >= 0 {
@@ -138,9 +147,19 @@ func removeOutFeed(ctx context.Context, db *DB, name string) error {
 	// error (config intact, retry works), and a crash between the Rm and the
 	// Commit leaves a still-configured entry whose file the next fetch process
 	// rewrites on its first cycle (lastOutSig starts empty).
+	//
+	// Both extensions are swept (a format change may have left a stray
+	// sibling). A Rm failure is tolerated ONLY when the object is provably not
+	// there — a store that answers DELETE with 405/403 rather than 404 on a key
+	// that never existed would otherwise make the entry permanently
+	// undeletable, by `srr syndicate rm` and the API alike. Tolerating by
+	// "was it the configured extension?" is not good enough: a real stray
+	// whose delete fails would then be dropped from the config and stranded
+	// forever, which is precisely what the files-before-Commit order exists to
+	// prevent. rmMissingOK asks the store instead of guessing.
 	for _, ext := range []string{".rss", ".json"} {
-		if err := db.Rm(ctx, "out/"+name+ext); err != nil {
-			return fmt.Errorf("remove output file out/%s%s: %w", name, ext, err)
+		if err := rmIfPresent(ctx, db, "out/"+name+ext); err != nil {
+			return err
 		}
 	}
 	out := db.core.Out[:0]
@@ -152,6 +171,27 @@ func removeOutFeed(ctx context.Context, db *DB, name string) error {
 	}
 	db.core.Out = out
 	return db.Commit(ctx)
+}
+
+// rmIfPresent deletes a syndication output file, tolerating a Rm failure only
+// when the store can prove the object is not there. Rm is contractually silent
+// on a missing key, but a backend may still error on one — an http:// store
+// whose server answers DELETE with 405/403 instead of 404 — and a hard failure
+// there would wedge the command forever on a file that never existed. Stat is
+// silent on missing, so a 0 size means "nothing to strand" and the error is
+// downgraded to a warning; anything else stays fatal, because a file that IS
+// present and could not be deleted must keep its config entry (nothing can
+// delete it once the config forgets it — the store has no List).
+func rmIfPresent(ctx context.Context, db *DB, key string) error {
+	rmErr := db.Rm(ctx, key)
+	if rmErr == nil {
+		return nil
+	}
+	if n, statErr := db.Stat(ctx, key); statErr == nil && n == 0 {
+		slog.Warn("ignoring delete failure for absent syndication output file", "key", key, "error", rmErr)
+		return nil
+	}
+	return fmt.Errorf("remove output file %s: %w", key, rmErr)
 }
 
 // outFileKey returns the store key for an OutFeed's output file.
