@@ -23,11 +23,11 @@ type ArticleData struct {
 	Link      string `json:"l,omitempty"`
 	Content   string `json:"c"`
 	// Lang is the article's ISO 639-1 language code, carried from the fetch
-	// pipeline (RawItem.Lang) for same-cycle backend use only. NEVER written
-	// to the data packs (json:"-") — the read side (parseDataPack, readers)
-	// always sees it empty, and gen-ts skips it, so the wire format is
-	// untouched.
-	Lang string `json:"-"`
+	// pipeline (RawItem.Lang). Packed under "g" (omitempty — the fail-open
+	// detection leaves it empty on uncertain articles, which then carry no
+	// field at all); articles written before 2026-07-19 predate it, so an
+	// absent/empty value always means "unknown", never "not applicable".
+	Lang string `json:"g,omitempty"`
 }
 
 // displayTime is the display-timestamp rule shared by meta cards

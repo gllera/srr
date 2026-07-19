@@ -63,6 +63,7 @@ export interface IArticleWire {
    t?: string // Title
    l?: string // Link
    c: string // Content
+   g?: string // Lang
 }
 
 // Wire shape of one JSONL line in meta/*.gz (backend MetaEntry).
