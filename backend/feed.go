@@ -582,6 +582,7 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 			Content:   i.Content,
 			Link:      i.Link,
 			Published: cand.pub,
+			Lang:      i.Lang,
 		})
 	}
 

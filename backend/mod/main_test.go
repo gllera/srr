@@ -2,6 +2,7 @@ package mod
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -611,5 +612,33 @@ func TestModuleExternalRelativePathRuns(t *testing.T) {
 	}
 	if item.Title != "ran" {
 		t.Errorf("Title = %q, want %q", item.Title, "ran")
+	}
+}
+
+// TestRawItemLangWire: lang rides the external-mod JSON wire like drop —
+// readable and settable by shell mods/ingest strategies — and is omitted
+// when empty. It is backend-internal only: ArticleData excludes it from the
+// data packs (json:"-", pinned in the srr package).
+func TestRawItemLangWire(t *testing.T) {
+	b, err := json.Marshal(&RawItem{GUID: 1, Lang: "en"})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(b), `"lang":"en"`) {
+		t.Errorf("marshal = %s, want a \"lang\":\"en\" field", b)
+	}
+	empty, err := json.Marshal(&RawItem{GUID: 1})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(empty), "lang") {
+		t.Errorf("marshal of empty Lang = %s, want lang omitted", empty)
+	}
+	var i RawItem
+	if err := json.Unmarshal([]byte(`{"lang":"de"}`), &i); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if i.Lang != "de" {
+		t.Errorf("unmarshal Lang = %q, want \"de\"", i.Lang)
 	}
 }
