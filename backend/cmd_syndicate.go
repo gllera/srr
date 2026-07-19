@@ -1,11 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"encoding/xml"
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
 	"regexp"
 	"strings"
+
+	"srr/store"
 )
 
 // outNameRe is the allowlist for syndication output feed names: one or more
@@ -26,9 +33,10 @@ const outDefaultLimit = 50
 
 // SyndicateGroup holds the `srr syndicate` sub-commands.
 type SyndicateGroup struct {
-	Ls  SyndicateLsCmd  `cmd:"" help:"List syndication output feeds."`
-	Set SyndicateSetCmd `cmd:"" help:"Add or update a syndication output feed."`
-	Rm  SyndicateRmCmd  `cmd:"" help:"Remove a syndication output feed and delete its out/* files."`
+	Ls   SyndicateLsCmd   `cmd:"" help:"List syndication output feeds."`
+	Set  SyndicateSetCmd  `cmd:"" help:"Add or update a syndication output feed."`
+	Rm   SyndicateRmCmd   `cmd:"" help:"Remove a syndication output feed and delete its out/* files."`
+	Push SyndicatePushCmd `cmd:"" help:"Publish an external syndication output from a file or stdin."`
 }
 
 // SyndicateLsCmd prints the current Out list as JSON.
@@ -75,6 +83,123 @@ func (o *SyndicateRmCmd) Run() error {
 	return withDB(true, func(ctx context.Context, db *DB) error {
 		return removeOutFeed(ctx, db, o.Name)
 	})
+}
+
+// maxOutPayload caps a pushed syndication payload (64 MiB, consistent with
+// the subprocess-stdout and frontend-download caps). A var, not a const:
+// tests shrink it to exercise the rejection without a 64 MiB buffer.
+var maxOutPayload int64 = 64 << 20
+
+// SyndicatePushCmd publishes an external syndication output: payload from a
+// file (or stdin), validated for well-formedness, written with the exact
+// header discipline SyncOutFeeds uses. Lock-free: db.gz is read, never
+// written, so a push never contends with a running fetch cycle.
+type SyndicatePushCmd struct {
+	Name string `arg:"" help:"Output feed name (must be declared with --external)."`
+	Path string `arg:"" optional:"" default:"-" help:"Payload file; '-' (the default) reads stdin."`
+
+	in io.Reader // test seam; defaults to os.Stdin
+}
+
+func (o *SyndicatePushCmd) Run() error {
+	return withDB(false, func(ctx context.Context, db *DB) error {
+		entry, err := findOutFeed(db, o.Name)
+		if err != nil {
+			return err
+		}
+		if !entry.External {
+			return fmt.Errorf("syndication output %q is managed (generated from selectors each fetch cycle); a pushed file would be overwritten — recreate it with --external", o.Name)
+		}
+
+		src := o.in
+		if src == nil {
+			src = os.Stdin
+		}
+		if o.Path != "" && o.Path != "-" {
+			f, err := os.Open(o.Path)
+			if err != nil {
+				return fmt.Errorf("open %s: %w", o.Path, err)
+			}
+			defer f.Close()
+			src = f
+		}
+		payload, err := io.ReadAll(io.LimitReader(src, maxOutPayload+1))
+		if err != nil {
+			return fmt.Errorf("read payload: %w", err)
+		}
+		if int64(len(payload)) > maxOutPayload {
+			return fmt.Errorf("payload exceeds %d bytes", maxOutPayload)
+		}
+		if len(payload) == 0 {
+			return fmt.Errorf("empty payload — a generator with nothing to publish should not push")
+		}
+		if err := validateOutPayload(entry.Format, payload); err != nil {
+			return err
+		}
+
+		key := outFileKey(*entry)
+		if err := db.AtomicPut(ctx, key, bytes.NewReader(payload), store.ObjectMeta{ContentType: outContentType(*entry)}); err != nil {
+			return fmt.Errorf("publish %s: %w", key, err)
+		}
+		if globals.CdnURL != "" {
+			slog.Info("published syndication output", "key", key, "bytes", len(payload), "url", joinURL(globals.CdnURL, key))
+		} else {
+			slog.Info("published syndication output", "key", key, "bytes", len(payload))
+		}
+		return nil
+	})
+}
+
+// findOutFeed resolves a syndication entry by name (pointer into core.Out).
+// Defense-in-depth like syncOneOutFeed's validOutName re-check: a stored name
+// is deserialized straight from db.gz, and push/fetch resolve outFileKey from
+// it — a hand-edited "../../db" must not traverse out of out/ on local/SFTP.
+func findOutFeed(db *DB, name string) (*OutFeed, error) {
+	for i := range db.core.Out {
+		if db.core.Out[i].Name == name {
+			if !validOutName(name) {
+				return nil, fmt.Errorf("syndication output %q has an unsafe name", name)
+			}
+			return &db.core.Out[i], nil
+		}
+	}
+	return nil, fmt.Errorf("unknown syndication output %q — declare it first: srr syndicate set %s -f rss|json --external", name, name)
+}
+
+// validateOutPayload is the push-time well-formedness gate: a broken
+// generator must not blank the published feed. rss ⇒ well-formed XML with an
+// <rss> root; json ⇒ a JSON object carrying the JSON Feed version marker.
+func validateOutPayload(format string, data []byte) error {
+	if format == "json" {
+		var probe struct {
+			Version string `json:"version"`
+		}
+		if err := json.Unmarshal(data, &probe); err != nil {
+			return fmt.Errorf("payload is not valid JSON: %w", err)
+		}
+		if !strings.HasPrefix(probe.Version, "https://jsonfeed.org/version/") {
+			return fmt.Errorf("payload is not a JSON Feed (missing the jsonfeed.org version marker)")
+		}
+		return nil
+	}
+	dec := xml.NewDecoder(bytes.NewReader(data))
+	root := ""
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("payload is not well-formed XML: %w", err)
+		}
+		if se, ok := tok.(xml.StartElement); ok && root == "" {
+			root = se.Name.Local
+		}
+	}
+	if root != "rss" {
+		return fmt.Errorf("payload root element is %q, want <rss> (the entry's declared format is rss)", root)
+	}
+	return nil
 }
 
 // setOutFeed validates and upserts one syndication output entry, reaping the

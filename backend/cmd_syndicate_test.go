@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -482,5 +485,153 @@ func TestSyndicateSetTransitions(t *testing.T) {
 	o := db2.core.Out[0]
 	if o.External || o.Limit != outDefaultLimit {
 		t.Errorf("Out[0] = %+v, want managed with default limit", o)
+	}
+}
+
+const testRSSDoc = `<rss version="2.0"><channel><title>t</title></channel></rss>`
+const testJSONFeedDoc = `{"version":"https://jsonfeed.org/version/1.1","title":"t","items":[]}`
+
+// readStoreKey reads a raw store object for assertions.
+func readStoreKey(t *testing.T, db *DB, key string) string {
+	t.Helper()
+	rc, err := db.Get(ctx, key, false)
+	if err != nil {
+		t.Fatalf("read %s: %v", key, err)
+	}
+	defer rc.Close()
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read %s: %v", key, err)
+	}
+	return string(data)
+}
+
+func seedExternalOut(t *testing.T, format string) (*DB, *DBCore) {
+	t.Helper()
+	db, c, _ := setupTestDB(t)
+	c.Out = []OutFeed{{Name: "x", Format: format, External: true}}
+	if err := db.Commit(ctx); err != nil {
+		t.Fatalf("seed commit: %v", err)
+	}
+	return db, c
+}
+
+func TestSyndicatePushRSSFromStdin(t *testing.T) {
+	db, _ := seedExternalOut(t, "rss")
+	if err := (&SyndicatePushCmd{Name: "x", in: strings.NewReader(testRSSDoc)}).Run(); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	if got := readStoreKey(t, db, "out/x.rss"); got != testRSSDoc {
+		t.Errorf("out/x.rss = %q, want the pushed payload verbatim", got)
+	}
+}
+
+func TestSyndicatePushJSONFromFile(t *testing.T) {
+	db, _ := seedExternalOut(t, "json")
+	path := filepath.Join(t.TempDir(), "feed.json")
+	if err := os.WriteFile(path, []byte(testJSONFeedDoc), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := (&SyndicatePushCmd{Name: "x", Path: path}).Run(); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	if got := readStoreKey(t, db, "out/x.json"); got != testJSONFeedDoc {
+		t.Errorf("out/x.json = %q, want the pushed payload verbatim", got)
+	}
+}
+
+// Push is lock-free: it must succeed while another process holds .locked,
+// and it must not modify db.gz.
+func TestSyndicatePushLockFreeAndDBUntouched(t *testing.T) {
+	db, _ := seedExternalOut(t, "rss")
+	before := readStoreKey(t, db, "db.gz")
+
+	locker, err := NewDB(ctx, true)
+	if err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+	defer locker.Close(ctx)
+
+	if err := (&SyndicatePushCmd{Name: "x", in: strings.NewReader(testRSSDoc)}).Run(); err != nil {
+		t.Fatalf("push under a held lock: %v", err)
+	}
+	if after := readStoreKey(t, db, "db.gz"); after != before {
+		t.Error("push modified db.gz")
+	}
+}
+
+func TestSyndicatePushRejections(t *testing.T) {
+	cases := []struct {
+		name    string
+		format  string
+		payload string
+		errPart string
+	}{
+		{"malformed xml", "rss", "<rss><unclosed>", "XML"},
+		{"wrong root", "rss", "<feed/>", "root element"},
+		{"non-json", "json", "not json", "JSON"},
+		{"json without version marker", "json", `{"title":"t"}`, "JSON Feed"},
+		{"empty payload", "rss", "", "empty"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, _ := seedExternalOut(t, tc.format)
+			err := (&SyndicatePushCmd{Name: "x", in: strings.NewReader(tc.payload)}).Run()
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tc.errPart) {
+				t.Errorf("error = %v, want mention of %q", err, tc.errPart)
+			}
+			key := outFileKey(db.core.Out[0])
+			if n, _ := db.Stat(ctx, key); n != 0 {
+				t.Errorf("%s was written despite the rejected payload", key)
+			}
+		})
+	}
+}
+
+func TestSyndicatePushOverCap(t *testing.T) {
+	old := maxOutPayload
+	maxOutPayload = 8
+	defer func() { maxOutPayload = old }()
+
+	_, _ = seedExternalOut(t, "rss")
+	err := (&SyndicatePushCmd{Name: "x", in: strings.NewReader(testRSSDoc)}).Run()
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("err = %v, want over-cap rejection", err)
+	}
+}
+
+func TestSyndicatePushUnknownAndManaged(t *testing.T) {
+	db, c, _ := setupTestDB(t)
+	c.Feeds = map[int]*Feed{1: {id: 1, URL: "http://a", Tag: "news"}}
+	c.Out = []OutFeed{{Name: "m", Format: "rss", Tags: []string{"news"}, Limit: 50}}
+	if err := db.Commit(ctx); err != nil {
+		t.Fatalf("seed commit: %v", err)
+	}
+
+	err := (&SyndicatePushCmd{Name: "nope", in: strings.NewReader(testRSSDoc)}).Run()
+	if err == nil || !strings.Contains(err.Error(), "unknown syndication output") {
+		t.Fatalf("err = %v, want unknown-name error", err)
+	}
+	err = (&SyndicatePushCmd{Name: "m", in: strings.NewReader(testRSSDoc)}).Run()
+	if err == nil || !strings.Contains(err.Error(), "managed") {
+		t.Fatalf("err = %v, want managed-entry rejection", err)
+	}
+}
+
+// A stored entry with an unsafe name (hand-edited db.gz) must not resolve to
+// a write outside out/ — findOutFeed re-checks validOutName, the same
+// defense-in-depth syncOneOutFeed runs on the generate path.
+func TestSyndicatePushUnsafeStoredName(t *testing.T) {
+	db, c, _ := setupTestDB(t)
+	c.Out = []OutFeed{{Name: "../../evil", Format: "rss", External: true}}
+	if err := db.Commit(ctx); err != nil {
+		t.Fatalf("seed commit: %v", err)
+	}
+	err := (&SyndicatePushCmd{Name: "../../evil", in: strings.NewReader(testRSSDoc)}).Run()
+	if err == nil || !strings.Contains(err.Error(), "unsafe name") {
+		t.Fatalf("err = %v, want unsafe-name rejection", err)
 	}
 }
