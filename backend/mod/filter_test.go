@@ -288,6 +288,45 @@ func TestParseKeepLangs(t *testing.T) {
 			t.Errorf("parseKeepLangs(%q): expected a hard error", bad)
 		}
 	}
+	// Region subtags fold to the bare 639-1 code, so a config copied from an
+	// RSS <language> ("en-US") means the same as "en".
+	set, err = parseKeepLangs("en-US,pt_BR")
+	if err != nil {
+		t.Fatalf("parseKeepLangs(\"en-US,pt_BR\"): %v", err)
+	}
+	if len(set) != 2 || !set["en"] || !set["pt"] {
+		t.Errorf("parseKeepLangs(\"en-US,pt_BR\") = %v, want {en, pt}", set)
+	}
+}
+
+// TestFilterKeepLangNormalizesDeclaredLang: a Lang DECLARED over the external
+// wire is folded the same way the allowlist was. An ingest strategy copying an
+// RSS <language> verbatim emits "ES" or "es-ES"; comparing those raw against a
+// lowercased bare-subtag set dropped every item in the feed — silently, and
+// permanently, since the GUID is already in the dedup boundary by then.
+func TestFilterKeepLangNormalizesDeclaredLang(t *testing.T) {
+	for _, lang := range []string{"es", "ES", "Es", "es-ES", "es_MX", " es "} {
+		item := makeFilterItem("Title", "content")
+		item.Lang = lang
+		if err := runFilter(t, "#filter keep_lang=en,es", item); err != nil {
+			t.Fatalf("Process(Lang=%q): %v", lang, err)
+		}
+		if item.Drop {
+			t.Errorf("Lang=%q dropped, want kept — it is Spanish however it is spelled", lang)
+		}
+		if item.Lang != lang {
+			t.Errorf("Lang = %q, want %q untouched — keep_lang never writes it", item.Lang, lang)
+		}
+	}
+	// Normalization must not turn a genuinely foreign code into a match.
+	item := makeFilterItem("Title", "content")
+	item.Lang = "DE-de"
+	if err := runFilter(t, "#filter keep_lang=en,es", item); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if !item.Drop {
+		t.Error("Lang=\"DE-de\" kept, want dropped")
+	}
 }
 
 // TestFilterKeepLangUnknownCodeIsHardError: the error surfaces through the
@@ -330,6 +369,31 @@ func TestFilterKeepLang(t *testing.T) {
 				t.Errorf("Lang = %q, want %q untouched — keep_lang never writes it", item.Lang, tt.lang)
 			}
 		})
+	}
+}
+
+// TestFilterValidateParsesEveryParam is the regression guard for the
+// validate-by-execution gap: Validate runs the filter against an EMPTY
+// sentinel item, so a condition that fires (keep_title against an empty
+// title, min_words against empty content) used to return before later params
+// were ever parsed. A typo'd code or malformed regex then passed config
+// validation and only surfaced per-item at fetch, where a pipeline error just
+// drops the article with a warning — the feed silently ingested nothing.
+func TestFilterValidateParsesEveryParam(t *testing.T) {
+	m := New()
+	for _, tok := range []string{
+		"#filter keep_lang=xx",
+		"#filter keep_title=/x/ keep_lang=xx",
+		"#filter min_words=1 keep_lang=xx",
+		"#filter keep_content=/x/ keep_lang=xx",
+		"#filter drop_title=/x/ keep_lang=xx",
+		"#filter keep_title=/x/ drop_content=/[unclosed/",
+		"#filter min_words=1 keep_content=/[unclosed/",
+		"#filter keep_title=/x/ min_words=notanumber",
+	} {
+		if err := m.Validate(context.Background(), []string{tok}); err == nil {
+			t.Errorf("Validate(%q) = nil, want a hard config error", tok)
+		}
 	}
 }
 
