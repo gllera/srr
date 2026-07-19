@@ -19,17 +19,23 @@ import (
 	"golang.org/x/net/html/atom"
 )
 
-// SyncOutFeeds writes out/<name>.<ext> for every OutFeed entry, collecting the
-// newest-Limit articles whose feed id is in the union of tag-matched and
-// explicitly-listed feed ids. Called after SyncMeta and before Commit in the
+// SyncOutFeeds writes out/<name>.<ext> for every managed (non-External)
+// OutFeed entry, collecting the newest-Limit articles whose feed id is in the
+// union of tag-matched and explicitly-listed feed ids. External entries are
+// push-updated slots this cycle must never write (see `srr syndicate push`) —
+// they are skipped entirely. Called after SyncMeta and before Commit in the
 // fetch cycle; warn-only — a syndication failure must NOT discard the article
 // batch.
 //
 // Prerequisites: SRR_CDN_URL must be set (globals.CdnURL); without it the step
-// is skipped with a warning (never a hard error). Off by default: an empty
-// core.Out slice is a no-op.
+// is skipped with a warning (never a hard error) — unless there is nothing to
+// generate, in which case the CDN check is skipped too (an all-external store
+// needs no SRR_CDN_URL). Off by default: no managed out entries is a no-op.
 func (o *DB) SyncOutFeeds(ctx context.Context) error {
-	if len(o.core.Out) == 0 {
+	managed := o.managedOut()
+	if len(managed) == 0 {
+		// Nothing to generate. Deliberately BEFORE the CDN check: a store with
+		// only external slots needs no SRR_CDN_URL and must not warn about it.
 		return nil
 	}
 	cdn := globals.CdnURL
@@ -39,7 +45,7 @@ func (o *DB) SyncOutFeeds(ctx context.Context) error {
 	}
 
 	failed := 0
-	for _, of := range o.core.Out {
+	for _, of := range managed {
 		if err := o.syncOneOutFeed(ctx, of, cdn); err != nil {
 			slog.Warn("sync out feed", "name", of.Name, "error", err)
 			failed++
@@ -50,30 +56,47 @@ func (o *DB) SyncOutFeeds(ctx context.Context) error {
 	// next changes. Still warn-only at the call site — the durable article batch
 	// is never at risk.
 	if failed > 0 {
-		return fmt.Errorf("%d of %d syndication output(s) failed", failed, len(o.core.Out))
+		return fmt.Errorf("%d of %d syndication output(s) failed", failed, len(managed))
 	}
 	return nil
 }
 
 // outFeedsSig is a cheap, deterministic signature of the inputs that determine
-// syndication output: the out-feed config plus every feed's tag (a feed's tag
-// change can alter which feeds a tag-scoped out feed includes) and AddIdx (an
-// expiration-driven bump removes articles from the output, so it must un-gate
-// the rewrite — a quiet store would otherwise serve expired items, pointing at
-// deleted assets, forever). cmd_fetch uses it to skip the SyncOutFeeds walk on
+// syndication output: the managed (non-External) out-feed config plus every
+// feed's tag (a feed's tag change can alter which feeds a tag-scoped out feed
+// includes) and AddIdx (an expiration-driven bump removes articles from the
+// output, so it must un-gate the rewrite — a quiet store would otherwise serve
+// expired items, pointing at deleted assets, forever). External entries are
+// excluded — SyncOutFeeds never writes them, so their config edits must never
+// un-gate a managed rewrite. cmd_fetch uses it to skip the SyncOutFeeds walk on
 // a truly-idle cycle — no new articles AND an unchanged signature — without
 // skipping config/tag edits made during the lock-free --interval sleep. Empty
-// when no out feeds are configured.
+// when no managed out feeds are configured.
 func (o *DB) outFeedsSig() string {
-	if len(o.core.Out) == 0 {
+	managed := o.managedOut()
+	if len(managed) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	_ = json.NewEncoder(&b).Encode(o.core.Out)
+	_ = json.NewEncoder(&b).Encode(managed)
 	for _, id := range slices.Sorted(maps.Keys(o.core.Feeds)) {
 		fmt.Fprintf(&b, "%d=%s@%d;", id, o.core.Feeds[id].Tag, o.core.Feeds[id].AddIdx)
 	}
 	return b.String()
+}
+
+// managedOut returns the entries SyncOutFeeds generates — every non-External
+// one. External entries are push-updated slots the fetch cycle must never
+// write (see `srr syndicate push`); they are also excluded from outFeedsSig,
+// so their config edits never un-gate a managed rewrite.
+func (o *DB) managedOut() []OutFeed {
+	var m []OutFeed
+	for _, of := range o.core.Out {
+		if !of.External {
+			m = append(m, of)
+		}
+	}
+	return m
 }
 
 // syncOneOutFeed collects and writes one syndication output file.

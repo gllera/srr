@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1015,5 +1016,79 @@ func TestSyncOutFeedsNoMatchingFeedsSkips(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "out/ghost.rss")); !os.IsNotExist(err) {
 		t.Error("out/ghost.rss written for a no-match selector")
+	}
+}
+
+// SyncOutFeeds must never write an external entry's file — it is externally
+// owned. The managed sibling proves the cycle still ran.
+func TestSyncOutFeedsSkipsExternalEntries(t *testing.T) {
+	db, c, _ := setupTestDB(t)
+	globals.CdnURL = "https://cdn.example.com"
+	defer func() { globals.CdnURL = "" }()
+	c.Feeds = map[int]*Feed{1: {id: 1, URL: "http://a", Tag: "news"}}
+	c.Out = []OutFeed{
+		{Name: "x", Format: "rss", External: true},
+		{Name: "m", Format: "rss", Tags: []string{"news"}, Limit: 50},
+	}
+	if err := db.Put(ctx, "out/x.rss", strings.NewReader("EXTERNAL"), true); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if err := db.SyncOutFeeds(ctx); err != nil {
+		t.Fatalf("SyncOutFeeds: %v", err)
+	}
+
+	rc, err := db.Get(ctx, "out/x.rss", false)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	defer rc.Close()
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(data) != "EXTERNAL" {
+		t.Errorf("out/x.rss = %q; SyncOutFeeds overwrote an external slot", data)
+	}
+}
+
+// A store with ONLY external entries is a silent no-op even without a CDN URL
+// (external slots don't need one), and its signature is empty like the no-out
+// case — an idle cycle never rewrites anything.
+func TestSyncOutFeedsAllExternalIsNop(t *testing.T) {
+	db, c, _ := setupTestDB(t)
+	globals.CdnURL = "" // deliberately unset: must not matter
+	c.Out = []OutFeed{{Name: "x", Format: "rss", External: true}}
+
+	if err := db.SyncOutFeeds(ctx); err != nil {
+		t.Fatalf("SyncOutFeeds: %v", err)
+	}
+	if n, _ := db.Stat(ctx, "out/x.rss"); n != 0 {
+		t.Error("SyncOutFeeds wrote an external slot")
+	}
+	if sig := db.outFeedsSig(); sig != "" {
+		t.Errorf("outFeedsSig = %q, want empty for an all-external store", sig)
+	}
+}
+
+// External-entry config edits must not un-gate managed rewrites; a
+// managed↔external transition must.
+func TestOutFeedsSigIgnoresExternalEntries(t *testing.T) {
+	db, c, _ := setupTestDB(t)
+	c.Feeds = map[int]*Feed{1: {id: 1, URL: "http://a", Tag: "news"}}
+	c.Out = []OutFeed{
+		{Name: "m", Format: "rss", Tags: []string{"news"}, Limit: 50},
+		{Name: "x", Format: "rss", External: true},
+	}
+	sig1 := db.outFeedsSig()
+
+	c.Out[1].Title = "renamed"
+	if sig2 := db.outFeedsSig(); sig2 != sig1 {
+		t.Error("editing an external entry changed the signature")
+	}
+
+	c.Out[1] = OutFeed{Name: "x", Format: "rss", Tags: []string{"news"}, Limit: 50}
+	if sig3 := db.outFeedsSig(); sig3 == sig1 {
+		t.Error("external→managed transition did not change the signature")
 	}
 }
