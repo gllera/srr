@@ -174,3 +174,32 @@ func TestLoopbackHost(t *testing.T) {
 		}
 	}
 }
+
+// The PUT handler shares setOutFeed, so external entries round-trip through
+// the API with the same validation matrix as the CLI.
+func TestServeSyndicatePutExternal(t *testing.T) {
+	setupTestDB(t)
+
+	rec := doReq(t, newMux(), "PUT", "/api/syndicate/x", `{"format":"rss","ext":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT external = %d (%s), want 200", rec.Code, rec.Body)
+	}
+	db2, err := NewDB(ctx, false)
+	if err != nil {
+		t.Fatalf("NewDB: %v", err)
+	}
+	defer db2.Close(ctx)
+	if len(db2.core.Out) != 1 || !db2.core.Out[0].External {
+		t.Errorf("Out = %+v, want one external entry", db2.core.Out)
+	}
+
+	rec = doReq(t, newMux(), "PUT", "/api/syndicate/y", `{"format":"rss","ext":true,"tags":["a"]}`)
+	if rec.Code == http.StatusOK {
+		t.Error("external entry with selectors was accepted; setOutFeed matrix not enforced")
+	}
+
+	rec = doReq(t, newMux(), "GET", "/api/overview", "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ext":true`) {
+		t.Errorf("overview = %d %q, want 200 carrying \"ext\":true", rec.Code, rec.Body)
+	}
+}

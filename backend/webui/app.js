@@ -1098,7 +1098,8 @@ function renderSyndicate() {
       : el("span", { class: "chip" }, o.name);
     tb.append(el("tr", {},
       el("td", {}, name),
-      el("td", {}, el("span", { class: "chip" }, o.format)),
+      el("td", {}, el("span", { class: "chip" }, o.format),
+        ...(o.ext ? [" ", el("span", { class: "chip" }, "external")] : [])),
       el("td", {}, (o.tags || []).join(", ")),
       el("td", {}, feedRefs(o.feeds)),
       el("td", {}, String(o.limit || "")),
@@ -1143,11 +1144,16 @@ let outDialog;
 function openOutModal(o) {
   outDialog ||= makeDialog({});
   const isEdit = !!o;
-  const v = o || { name: "", title: "", format: "rss", tags: [], feeds: [], limit: 50 };
+  const v = o || { name: "", title: "", format: "rss", tags: [], feeds: [], limit: 50, ext: false };
   const name = el("input", { value: v.name, disabled: isEdit ? "" : null });
   const fmt = el("select", {}, el("option", { value: "rss" }, "rss"), el("option", { value: "json" }, "json"));
   fmt.value = v.format;
   const title = el("input", { value: v.title || "" });
+  // External outputs are hands-off slots (updated via `srr syndicate push`):
+  // the selector/limit rows make no sense there and the server rejects them,
+  // so the whole block hides while the box is checked.
+  const ext = el("input", { type: "checkbox", onchange: () => (selWrap.hidden = ext.checked) });
+  ext.checked = !!v.ext;
   // Selectors are picked from the snapshot (union of tags ∪ feeds), not typed
   // as raw names/ids — the operator shouldn't need to know feed numbers.
   const [tagsBox, tagSel] = checkList(
@@ -1158,15 +1164,18 @@ function openOutModal(o) {
     snapshot.feeds.map((f) => ({ value: f.id, label: f.title })),
     v.feeds || []);
   const limit = el("input", { type: "number", value: v.limit || 50 });
+  const selWrap = el("div", {},
+    el("label", {}, "Tags"), tagsBox,
+    el("label", {}, "Feeds"), feedsBox,
+    el("label", {}, "Limit"), limit);
+  selWrap.hidden = ext.checked;
   const err = el("div", { class: "formerr" });
   const save = el("button", { class: "btn primary", onclick: async () => {
     const nm = (v.name || name.value).trim();
-    const body = {
-      title: title.value.trim(), format: fmt.value,
-      tags: [...tagSel],
-      feeds: [...feedSel],
-      limit: Number(limit.value) || 0,
-    };
+    const body = ext.checked
+      ? { title: title.value.trim(), format: fmt.value, ext: true }
+      : { title: title.value.trim(), format: fmt.value,
+          tags: [...tagSel], feeds: [...feedSel], limit: Number(limit.value) || 0 };
     await saveModal(outDialog, err,
       () => api("PUT", "/api/syndicate/" + encodeURIComponent(nm), body),
       "Saved output " + nm);
@@ -1176,9 +1185,8 @@ function openOutModal(o) {
     el("label", {}, "Name"), name,
     el("label", {}, "Format"), fmt,
     el("label", {}, "Title"), title,
-    el("label", {}, "Tags"), tagsBox,
-    el("label", {}, "Feeds"), feedsBox,
-    el("label", {}, "Limit"), limit,
+    el("label", { class: "check" }, ext, "External — updated via srr syndicate push"),
+    selWrap,
     err,
     dialogRow(outDialog, save, isEdit ? () => deleteOut(o.name) : null));
   outDialog.showModal();
