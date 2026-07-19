@@ -19,6 +19,22 @@ func TestSanitizeAllowsAudio(t *testing.T) {
 	}
 }
 
+// A pipe step that self-hosts audio (srr-tts's TTS narration) writes a
+// "#"-upload marker into <audio src> and relies on #sanitize keeping it until
+// the end-of-pipeline upload rewrites it. The marker is a relative URL with an
+// empty scheme, so it survives only because the policy allows relative URLs —
+// a regression there leaves a player element with no source, silently.
+func TestSanitizeKeepsAudioUploadMarker(t *testing.T) {
+	m := New()
+	item := &RawItem{Content: `<audio controls preload="none" src="#/tts/abc123.wav"></audio>`}
+	if err := m.Process(context.Background(), "#sanitize", item); err != nil {
+		t.Fatalf("sanitize: %v", err)
+	}
+	if !strings.Contains(item.Content, `src="#/tts/abc123.wav"`) {
+		t.Errorf("upload marker stripped from audio src: %q", item.Content)
+	}
+}
+
 func TestSanitizeURLSchemes(t *testing.T) {
 	m := New()
 	item := &RawItem{Content: `<a href="tel:+15551234">c</a><a href="geo:37.78,-122.39">m</a>` +
