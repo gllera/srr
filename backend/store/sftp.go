@@ -191,13 +191,15 @@ func (d *SFTP) AtomicPut(_ context.Context, key string, r io.Reader, _ ObjectMet
 	if err := d.ensureDir(file); err != nil {
 		return err
 	}
-	d.sweepTempLeftovers(path.Dir(file))
 	tmpFile := uniqueTempName(file)
 
 	fs, err := d.client.OpenFile(tmpFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 	if err != nil {
 		return fmt.Errorf("opening file %s: %w", tmpFile, err)
 	}
+	// Sweep AFTER creating our own staging file, so the sweep can read the
+	// server's clock off it. See sweepTempLeftovers.
+	d.sweepTempLeftovers(path.Dir(file), path.Base(tmpFile))
 
 	if _, err := io.Copy(fs, r); err != nil {
 		fs.Close()
@@ -219,16 +221,29 @@ func (d *SFTP) AtomicPut(_ context.Context, key string, r io.Reader, _ ObjectMet
 // sweepTempLeftovers is the Local backend's sweep over SFTP: it removes
 // uniqueTempName staging files a hard-killed predecessor stranded in dir
 // (rename never ran; the unique names mean nothing overwrites them and no GC
-// speaks them), age-gated by tempSweepMaxAge off any live writer's in-flight
-// staging file. Best-effort and silent on errors — janitor work must never
-// fail the AtomicPut that triggered it.
-func (d *SFTP) sweepTempLeftovers(dir string) {
+// speaks them), age-gated by staleTemp. ownTemp names the caller's own staging
+// file, just created in dir, and its mtime in THIS listing is the reference
+// "now" — the server's clock, read without an extra round-trip, so the gate
+// never compares a remote mtime against this host's clock. Best-effort and
+// silent on errors — janitor work must never fail the AtomicPut that
+// triggered it.
+func (d *SFTP) sweepTempLeftovers(dir, ownTemp string) {
 	entries, err := d.client.ReadDir(dir)
 	if err != nil {
 		return
 	}
+	var now time.Time
 	for _, fi := range entries {
-		if !fi.Mode().IsRegular() || !isTempLeftover(fi.Name()) || time.Since(fi.ModTime()) < tempSweepMaxAge {
+		if fi.Name() == ownTemp {
+			now = fi.ModTime()
+			break
+		}
+	}
+	if now.IsZero() {
+		return
+	}
+	for _, fi := range entries {
+		if fi.Name() == ownTemp || !fi.Mode().IsRegular() || !isTempLeftover(fi.Name()) || !staleTemp(fi.ModTime(), now) {
 			continue
 		}
 		file := path.Join(dir, fi.Name())

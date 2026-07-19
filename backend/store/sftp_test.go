@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"testing/iotest"
+	"time"
 
 	"github.com/pkg/sftp"
 )
@@ -313,5 +314,42 @@ func TestSFTPStat(t *testing.T) {
 	// A missing key is (0, nil) per the Backend contract (silent like Rm).
 	if n, err := d.Stat(ctx, "missing.bin"); err != nil || n != 0 {
 		t.Errorf("Stat(missing) = (%d, %v), want (0, nil)", n, err)
+	}
+}
+
+// The SFTP AtomicPut sweeps stale staging leftovers exactly as the Local one
+// does — the two implementations are separate code, so the contract is pinned
+// on both. A leftover older than tempSweepMaxAge goes; a fresh one (which may
+// be another live writer's in-flight staging file) stays.
+func TestSFTPAtomicPutSweepsStaleTempLeftovers(t *testing.T) {
+	d, base := setupSFTPPipe(t)
+	stale := filepath.Join(base, "db.gz.tmp.99999.1")
+	fresh := filepath.Join(base, "db.gz.tmp.99999.2")
+	for _, f := range []string{stale, fresh} {
+		if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-tempSweepMaxAge - time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := d.AtomicPut(ctx, "other.txt", strings.NewReader("content"), ObjectMeta{}); err != nil {
+		t.Fatalf("AtomicPut: %v", err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("stale temp leftover survived the sweep (err=%v), want removed", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("fresh temp file swept (err=%v), want kept by the age gate", err)
+	}
+	// The write itself must be unaffected by the janitor work.
+	rc, err := d.Get(ctx, "other.txt", false)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := readAllClose(t, rc); got != "content" {
+		t.Errorf("content = %q, want %q", got, "content")
 	}
 }
