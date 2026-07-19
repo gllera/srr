@@ -30,8 +30,9 @@ func processItem(ctx context.Context, processor *mod.Module, pipeline []string, 
 	// declared one; the fail-open path (short text, low confidence) leaves it
 	// empty. extractText strips markup, so raw pre-sanitize content detects
 	// the same as clean text.
+	preTitle, preContent := i.Title, i.Content
 	if i.Lang == "" {
-		i.Lang = mod.DetectLang(i.Title, i.Content)
+		i.Lang = mod.DetectLang(preTitle, preContent)
 	}
 	if len(pipeline) > 0 {
 		GUID := i.GUID
@@ -63,10 +64,19 @@ func processItem(ctx context.Context, processor *mod.Module, pipeline []string, 
 	i.Title = strings.Join(strings.Fields(strings.Map(stripControlKeepWS, i.Title)), " ")
 	i.Link = strings.Map(stripControl, i.Link)
 	i.Content = strings.Map(stripControlKeepWS, i.Content)
-	// Second detection attempt, only when the pre-pipe pass came up empty: a
-	// step may have grown the content past the gate (#readability replacing a
-	// short teaser with the full article body). Already-stamped items skip it.
-	if i.Lang == "" {
+	// Second detection attempt, only when the pre-pipe pass came up empty and
+	// the text it judged is no longer the text we hold — a step may have grown
+	// the content past the gate (#readability replacing a short teaser with the
+	// full article body).
+	//
+	// The guard compares DetectLang's exact INPUTS, not their sizes. Skipping
+	// is then provably safe: DetectLang is a pure function of (title, content),
+	// so unchanged inputs give the identical answer. A size comparison is not
+	// safe in either direction — the gate is a rune count of EXTRACTED TEXT,
+	// while bytes are mostly markup, so a byte-heavy text-poor teaser replaced
+	// by a byte-light text-rich body is a genuine growth that shrinks, and the
+	// retry that case exists for would be skipped.
+	if i.Lang == "" && (i.Title != preTitle || i.Content != preContent) {
 		i.Lang = mod.DetectLang(i.Title, i.Content)
 	}
 	return nil

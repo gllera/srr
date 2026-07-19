@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -215,6 +216,51 @@ func TestProcessItemStampsLang(t *testing.T) {
 	}
 	if item.Lang != "es" {
 		t.Errorf("Lang = %q on a dropped item, want %q (stamp runs before the pipe)", item.Lang, "es")
+	}
+}
+
+// The post-pipe detection retry fires whenever the text DetectLang judged is
+// no longer the text we hold. The guard compares the inputs themselves, never
+// their sizes: the detection gate is a rune count of extracted TEXT while bytes
+// are mostly markup, so "grew" and "got longer" are different questions.
+func TestProcessItemPostPipeDetection(t *testing.T) {
+	const spanish = "El rápido zorro marrón salta sobre el perro perezoso mientras el sol de la mañana se eleva lentamente sobre el tranquilo campo español."
+	ctx := context.Background()
+	grow := fmt.Sprintf("jq -c '.content = %q'", spanish)
+
+	// Too short to detect up front; a step replaces it past the gate → stamped.
+	item := &mod.RawItem{Content: "corto", Link: "http://example.com"}
+	if err := processItem(ctx, mod.New(), []string{grow}, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if item.Lang != "es" {
+		t.Errorf("Lang = %q, want %q — replaced content must be re-detected", item.Lang, "es")
+	}
+
+	// The regression: a byte-HEAVY, text-POOR teaser replaced by a byte-light,
+	// text-rich body. This is exactly what #readability does to a feed whose
+	// teaser is an inline data: image, and a `len(content) > len(pre)` guard
+	// skipped it — silently disabling the retry for the case it exists for.
+	teaser := `<a href="x"><img src="data:image/png;base64,` + strings.Repeat("A", 3000) + `"></a><p>Leer</p>`
+	item = &mod.RawItem{Content: teaser, Link: "http://example.com"}
+	if err := processItem(ctx, mod.New(), []string{grow}, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if len(item.Content) >= len(teaser) {
+		t.Fatalf("precondition: content should have SHRUNK in bytes (%d -> %d)", len(teaser), len(item.Content))
+	}
+	if item.Lang != "es" {
+		t.Errorf("Lang = %q, want %q — a text-rich body that is byte-smaller must still re-detect", item.Lang, "es")
+	}
+
+	// Unchanged inputs skip the retry: DetectLang is pure, so the answer cannot
+	// differ. Observable only as the same fail-open empty.
+	item = &mod.RawItem{Content: "corto pero no detectable", Link: "http://example.com"}
+	if err := processItem(ctx, mod.New(), nil, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if item.Lang != "" {
+		t.Errorf("Lang = %q, want empty", item.Lang)
 	}
 }
 
