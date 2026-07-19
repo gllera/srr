@@ -167,11 +167,12 @@ func TestProcessItemDropByExternalMod(t *testing.T) {
 	}
 }
 
-// Every article that survives the pipeline gets its language detected: the
-// end-of-processItem stamp fills Lang from a confident detection, runs on any
-// pipe (including none), never clobbers a declared value, and stays empty on
-// the fail-open path. Fixture texts mirror mod/filter_test.go's probe-verified
-// confidences (Spanish → spa 1.0, short text → below the 24-rune gate).
+// Every article gets its language detected BEFORE the pipeline runs (so pipe
+// steps like #filter keep_lang can read i.Lang): the stamp fills Lang from a
+// confident detection, runs on any pipe (including none), never clobbers a
+// declared value, and stays empty on the fail-open path. Fixture texts mirror
+// mod/helper_lang_test.go's probe-verified confidences (Spanish → spa 1.0,
+// short text → below the 24-rune gate).
 func TestProcessItemStampsLang(t *testing.T) {
 	const spanish = "El rápido zorro marrón salta sobre el perro perezoso mientras el sol de la mañana se eleva lentamente sobre el tranquilo campo español."
 	ctx := context.Background()
@@ -203,7 +204,8 @@ func TestProcessItemStampsLang(t *testing.T) {
 		t.Errorf("Lang = %q, want empty below the detection gate", item.Lang)
 	}
 
-	// A dropped item is never detected — the short-circuit skips the stamp.
+	// The stamp precedes the pipeline, so even an item a later step drops
+	// carries its detection — the order keep_lang depends on.
 	item = &mod.RawItem{Title: "drop me", Content: spanish, Link: "http://example.com"}
 	if err := processItem(ctx, mod.New(), []string{"#filter drop_title=/drop/"}, item); err != nil {
 		t.Fatalf("processItem: %v", err)
@@ -211,8 +213,54 @@ func TestProcessItemStampsLang(t *testing.T) {
 	if !item.Drop {
 		t.Fatal("expected i.Drop=true")
 	}
-	if item.Lang != "" {
-		t.Errorf("Lang = %q on a dropped item, want empty (stamp skipped)", item.Lang)
+	if item.Lang != "es" {
+		t.Errorf("Lang = %q on a dropped item, want %q (stamp runs before the pipe)", item.Lang, "es")
+	}
+}
+
+// TestProcessItemKeepLangUsesStampedLang is the integration pin for the
+// restored #filter keep_lang: it consumes the i.Lang the pre-pipe stamp set —
+// no detection of its own — dropping a confidently-foreign article, keeping an
+// in-list one, and keeping anything the detector was unsure about (fail-open).
+func TestProcessItemKeepLangUsesStampedLang(t *testing.T) {
+	const spanish = "El rápido zorro marrón salta sobre el perro perezoso mientras el sol de la mañana se eleva lentamente sobre el tranquilo campo español."
+	ctx := context.Background()
+
+	// Auto-detected es ∉ {en} → dropped.
+	item := &mod.RawItem{Content: spanish, Link: "http://example.com"}
+	if err := processItem(ctx, mod.New(), []string{"#filter keep_lang=en"}, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if !item.Drop {
+		t.Error("expected Drop=true: stamped es is outside keep_lang=en")
+	}
+
+	// Auto-detected es ∈ {en,es} → kept, stamp intact.
+	item = &mod.RawItem{Content: spanish, Link: "http://example.com"}
+	if err := processItem(ctx, mod.New(), []string{"#filter keep_lang=en,es"}, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if item.Drop || item.Lang != "es" {
+		t.Errorf("Drop=%v Lang=%q, want kept with Lang=\"es\"", item.Drop, item.Lang)
+	}
+
+	// Below the detection gate → Lang empty → fail-open keep.
+	item = &mod.RawItem{Title: "Hi", Content: "Too short", Link: "http://example.com"}
+	if err := processItem(ctx, mod.New(), []string{"#filter keep_lang=en"}, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if item.Drop {
+		t.Error("expected Drop=false: empty Lang fails open")
+	}
+
+	// A declared value drives the decision — Spanish text declared fr is
+	// dropped by keep_lang=es (the declaration is authoritative, not the text).
+	item = &mod.RawItem{Content: spanish, Link: "http://example.com", Lang: "fr"}
+	if err := processItem(ctx, mod.New(), []string{"#filter keep_lang=es"}, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if !item.Drop || item.Lang != "fr" {
+		t.Errorf("Drop=%v Lang=%q, want dropped with declared \"fr\" intact", item.Drop, item.Lang)
 	}
 }
 

@@ -6,8 +6,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/abadojack/whatlanggo"
 )
 
 // makeFilterItem returns a RawItem suitable for filter tests.
@@ -274,24 +272,6 @@ func TestFilterValidateAcceptsKnownParams(t *testing.T) {
 	}
 }
 
-// Language fixtures, probe-verified against whatlanggo v1.0.1:
-//
-//	langTextEN → eng 0.714 (below the 0.8 gate — kept via the in-set check
-//	             on keep_lang=en,es, and via fail-open otherwise)
-//	langTextES → spa 1.000
-//	langTextDE → deu 1.000 (the Latin-script drop path)
-//	langTextRU → rus 1.000 (distinct script)
-//	langTextJA → jpn 1.000 (distinct script)
-//	langTextPT → por 0.412 (Latin-script sibling — under the gate, kept)
-const (
-	langTextEN = "The quick brown fox jumps over the lazy dog while the morning sun rises slowly over the quiet English countryside."
-	langTextES = "El rápido zorro marrón salta sobre el perro perezoso mientras el sol de la mañana se eleva lentamente sobre el tranquilo campo español."
-	langTextDE = "Der schnelle braune Fuchs springt über den faulen Hund, während die Morgensonne langsam über der ruhigen deutschen Landschaft aufgeht."
-	langTextRU = "Быстрая коричневая лиса перепрыгивает через ленивую собаку, пока утреннее солнце медленно поднимается над тихой русской деревней."
-	langTextJA = "素早い茶色の狐が怠け者の犬を飛び越え、朝日が静かな田園風景の上にゆっくりと昇っていきます。"
-	langTextPT = "A rápida raposa marrom salta sobre o cão preguiçoso enquanto o sol da manhã nasce lentamente sobre o campo português tranquilo."
-)
-
 // TestParseKeepLangs pins the happy path (case-insensitive, whitespace-
 // tolerant) and the hard config errors: empty value, empty element, unknown
 // code — the malformed-regex contract.
@@ -300,8 +280,8 @@ func TestParseKeepLangs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseKeepLangs(\"EN, es\"): %v", err)
 	}
-	if len(set) != 2 || !set[whatlanggo.CodeToLang("eng")] || !set[whatlanggo.CodeToLang("spa")] {
-		t.Errorf("parseKeepLangs(\"EN, es\") = %v, want {eng, spa}", set)
+	if len(set) != 2 || !set["en"] || !set["es"] {
+		t.Errorf("parseKeepLangs(\"EN, es\") = %v, want {en, es}", set)
 	}
 	for _, bad := range []string{"", "xx", "en,,es", "en,xx", "english"} {
 		if _, err := parseKeepLangs(bad); err == nil {
@@ -321,87 +301,35 @@ func TestFilterKeepLangUnknownCodeIsHardError(t *testing.T) {
 	}
 }
 
-// TestFilterKeepLangKeepsAllowed: confidently-classified English and Spanish
-// articles pass a keep_lang=en,es gate.
-func TestFilterKeepLangKeepsAllowed(t *testing.T) {
-	for name, text := range map[string]string{"english": langTextEN, "spanish": langTextES} {
-		item := makeFilterItem("", "<p>"+text+"</p>")
-		if err := runFilter(t, "#filter keep_lang=en,es", item); err != nil {
-			t.Fatalf("%s: Process: %v", name, err)
-		}
-		if item.Drop {
-			t.Errorf("%s: expected Drop=false for allowed language", name)
-		}
+// TestFilterKeepLang: the condition consumes i.Lang — stamped by the pre-pipe
+// detection or declared by an earlier step — and does no detection of its own.
+// Set → allowlist decides; empty → fail-open keep.
+func TestFilterKeepLang(t *testing.T) {
+	tests := []struct {
+		name string
+		lang string
+		drop bool
+	}{
+		{"in-list language kept", "es", false},
+		{"other in-list language kept", "en", false},
+		{"foreign language dropped", "de", true},
+		{"declared no-detection code dropped", "fr", true},
+		{"empty Lang fails open", "", false},
 	}
-}
-
-// TestFilterKeepLangDropsForeign: confident foreign classifications drop —
-// German is the Latin-script path, Russian/Japanese the distinct-script path.
-func TestFilterKeepLangDropsForeign(t *testing.T) {
-	for name, text := range map[string]string{"german": langTextDE, "russian": langTextRU, "japanese": langTextJA} {
-		item := makeFilterItem("", "<p>"+text+"</p>")
-		if err := runFilter(t, "#filter keep_lang=en,es", item); err != nil {
-			t.Fatalf("%s: Process: %v", name, err)
-		}
-		if !item.Drop {
-			t.Errorf("%s: expected Drop=true for foreign language", name)
-		}
-	}
-}
-
-// TestFilterKeepLangFailOpenShortText: below the 24-rune floor nothing is
-// judged — a 22-rune German greeting is kept.
-func TestFilterKeepLangFailOpenShortText(t *testing.T) {
-	item := makeFilterItem("", "Guten Morgen zusammen!")
-	if err := runFilter(t, "#filter keep_lang=en,es", item); err != nil {
-		t.Fatalf("Process: %v", err)
-	}
-	if item.Drop {
-		t.Error("expected Drop=false for sub-floor text length")
-	}
-}
-
-// TestFilterKeepLangFailOpenLowConfidence: Portuguese prose scores ~0.41 —
-// well under the 0.8 gate — so the Latin-script sibling is kept, the
-// documented fail-open leak direction (never a wanted article lost).
-func TestFilterKeepLangFailOpenLowConfidence(t *testing.T) {
-	item := makeFilterItem("", "<p>"+langTextPT+"</p>")
-	if err := runFilter(t, "#filter keep_lang=en,es", item); err != nil {
-		t.Fatalf("Process: %v", err)
-	}
-	if item.Drop {
-		t.Error("expected Drop=false for a low-confidence detection")
-	}
-}
-
-// TestFilterKeepLangEmptyItemKept: no title, no content → nothing to judge.
-func TestFilterKeepLangEmptyItemKept(t *testing.T) {
-	item := makeFilterItem("", "")
-	if err := runFilter(t, "#filter keep_lang=en,es", item); err != nil {
-		t.Fatalf("Process: %v", err)
-	}
-	if item.Drop {
-		t.Error("expected Drop=false for an empty item")
-	}
-}
-
-// TestFilterKeepLangStripsMarkup: heavy markup around foreign prose does not
-// dilute detection (drops), and tag soup around English does not flip it to a
-// confident foreign classification (kept).
-func TestFilterKeepLangStripsMarkup(t *testing.T) {
-	de := makeFilterItem("", `<div class="entry-content post"><p>`+langTextDE+`</p><img src="https://example.com/x.jpg" alt=""></div>`)
-	if err := runFilter(t, "#filter keep_lang=en,es", de); err != nil {
-		t.Fatalf("Process: %v", err)
-	}
-	if !de.Drop {
-		t.Error("expected Drop=true for German prose in heavy markup")
-	}
-	en := makeFilterItem("", `<div data-x="qqzz"><p style="color:red">`+langTextEN+`</p></div>`)
-	if err := runFilter(t, "#filter keep_lang=en,es", en); err != nil {
-		t.Fatalf("Process: %v", err)
-	}
-	if en.Drop {
-		t.Error("expected Drop=false for English prose in tag soup")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			item := makeFilterItem("Title", "content")
+			item.Lang = tt.lang
+			if err := runFilter(t, "#filter keep_lang=en,es", item); err != nil {
+				t.Fatalf("Process: %v", err)
+			}
+			if item.Drop != tt.drop {
+				t.Errorf("Drop = %v, want %v (Lang=%q)", item.Drop, tt.drop, tt.lang)
+			}
+			if item.Lang != tt.lang {
+				t.Errorf("Lang = %q, want %q untouched — keep_lang never writes it", item.Lang, tt.lang)
+			}
+		})
 	}
 }
 
@@ -409,62 +337,21 @@ func TestFilterKeepLangStripsMarkup(t *testing.T) {
 // token; any condition firing drops.
 func TestFilterKeepLangComposes(t *testing.T) {
 	// Passes min_words, fails the language gate → dropped.
-	item := makeFilterItem("", "<p>"+langTextDE+"</p>")
-	if err := runFilter(t, "#filter keep_lang=en,es min_words=5", item); err != nil {
+	item := makeFilterItem("", "some words beyond the minimum")
+	item.Lang = "de"
+	if err := runFilter(t, "#filter keep_lang=en,es min_words=3", item); err != nil {
 		t.Fatalf("Process: %v", err)
 	}
 	if !item.Drop {
 		t.Error("expected Drop=true (language gate) with min_words also present")
 	}
 	// Passes the language gate, fails min_words → dropped.
-	item2 := makeFilterItem("", "<p>"+langTextEN+"</p>")
+	item2 := makeFilterItem("", "too short")
+	item2.Lang = "en"
 	if err := runFilter(t, "#filter keep_lang=en,es min_words=100", item2); err != nil {
 		t.Fatalf("Process: %v", err)
 	}
 	if !item2.Drop {
 		t.Error("expected Drop=true (min_words) with keep_lang also present")
-	}
-}
-
-// TestFilterKeepLangStampsLang: a confident detection is recorded on
-// RawItem.Lang (ISO 639-1) whether the item is dropped or kept; a
-// below-threshold detection stamps nothing; a pre-set Lang (declared by an
-// ingest strategy or an earlier mod) is never clobbered.
-func TestFilterKeepLangStampsLang(t *testing.T) {
-	// Confident foreign → dropped AND stamped.
-	de := makeFilterItem("", "<p>"+langTextDE+"</p>")
-	if err := runFilter(t, "#filter keep_lang=en,es", de); err != nil {
-		t.Fatalf("Process: %v", err)
-	}
-	if !de.Drop || de.Lang != "de" {
-		t.Errorf("german: Drop=%v Lang=%q, want Drop=true Lang=\"de\"", de.Drop, de.Lang)
-	}
-
-	// Confident allowed → kept AND stamped.
-	es := makeFilterItem("", "<p>"+langTextES+"</p>")
-	if err := runFilter(t, "#filter keep_lang=en,es", es); err != nil {
-		t.Fatalf("Process: %v", err)
-	}
-	if es.Drop || es.Lang != "es" {
-		t.Errorf("spanish: Drop=%v Lang=%q, want Drop=false Lang=\"es\"", es.Drop, es.Lang)
-	}
-
-	// Below the confidence gate (langTextEN scores ~0.71) → kept, NOT stamped.
-	en := makeFilterItem("", "<p>"+langTextEN+"</p>")
-	if err := runFilter(t, "#filter keep_lang=en,es", en); err != nil {
-		t.Fatalf("Process: %v", err)
-	}
-	if en.Drop || en.Lang != "" {
-		t.Errorf("english: Drop=%v Lang=%q, want Drop=false Lang=\"\"", en.Drop, en.Lang)
-	}
-
-	// A declared Lang survives; the gate still judges by its own detection.
-	declared := makeFilterItem("", "<p>"+langTextDE+"</p>")
-	declared.Lang = "fr"
-	if err := runFilter(t, "#filter keep_lang=en,es", declared); err != nil {
-		t.Fatalf("Process: %v", err)
-	}
-	if !declared.Drop || declared.Lang != "fr" {
-		t.Errorf("declared: Drop=%v Lang=%q, want Drop=true Lang=\"fr\"", declared.Drop, declared.Lang)
 	}
 }
