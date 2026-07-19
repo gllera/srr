@@ -635,3 +635,54 @@ func TestSyndicatePushUnsafeStoredName(t *testing.T) {
 		t.Fatalf("err = %v, want unsafe-name rejection", err)
 	}
 }
+
+// push→fetch round-trips the exact bytes to stdout (pipe-clean).
+func TestSyndicateFetchRoundTrip(t *testing.T) {
+	_, _ = seedExternalOut(t, "rss")
+	if err := (&SyndicatePushCmd{Name: "x", in: strings.NewReader(testRSSDoc)}).Run(); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	got := captureOutput(t, func() {
+		if err := (&SyndicateFetchCmd{Name: "x"}).Run(); err != nil {
+			t.Fatalf("fetch: %v", err)
+		}
+	})
+	if got != testRSSDoc {
+		t.Errorf("fetch = %q, want the pushed payload verbatim", got)
+	}
+}
+
+// fetch is read-only and therefore works on managed entries too — reading
+// what SyncOutFeeds last generated is legitimate inspection.
+func TestSyndicateFetchManagedEntry(t *testing.T) {
+	db, c, _ := setupTestDB(t)
+	c.Feeds = map[int]*Feed{1: {id: 1, URL: "http://a", Tag: "news"}}
+	c.Out = []OutFeed{{Name: "m", Format: "rss", Tags: []string{"news"}, Limit: 50}}
+	if err := db.Commit(ctx); err != nil {
+		t.Fatalf("seed commit: %v", err)
+	}
+	if err := db.Put(ctx, "out/m.rss", strings.NewReader("<rss/>"), true); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	got := captureOutput(t, func() {
+		if err := (&SyndicateFetchCmd{Name: "m"}).Run(); err != nil {
+			t.Fatalf("fetch: %v", err)
+		}
+	})
+	if got != "<rss/>" {
+		t.Errorf("fetch = %q, want the synced file", got)
+	}
+}
+
+func TestSyndicateFetchMissingAndUnknown(t *testing.T) {
+	_, _ = seedExternalOut(t, "rss") // declared but never pushed
+
+	err := (&SyndicateFetchCmd{Name: "x"}).Run()
+	if err == nil || !strings.Contains(err.Error(), "out/x.rss") {
+		t.Fatalf("err = %v, want missing-object error naming the key", err)
+	}
+	err = (&SyndicateFetchCmd{Name: "nope"}).Run()
+	if err == nil || !strings.Contains(err.Error(), "unknown syndication output") {
+		t.Fatalf("err = %v, want unknown-name error", err)
+	}
+}
