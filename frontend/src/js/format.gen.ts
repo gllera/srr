@@ -104,6 +104,7 @@ export interface IOutFeedWire {
    tags?: string[] // Tags
    feeds?: number[] // Feeds
    limit?: number // Limit
+   ext?: boolean // External
 }
 
 // Wire shape of a db.gz recipes{} value (backend Recipe).

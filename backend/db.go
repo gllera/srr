@@ -302,6 +302,10 @@ type OutFeed struct {
 	// Limit is the maximum number of items to include (newest first).
 	// Defaults to outDefaultLimit when 0.
 	Limit int `json:"limit,omitempty"`
+	// External marks an externally-updated output: SRR reserves the slot
+	// (name, key, listing, rm cleanup) but never generates its bytes —
+	// SyncOutFeeds skips it; `srr syndicate push`/`fetch` are the only writers.
+	External bool `json:"ext,omitempty"`
 }
 
 // withDB opens the DB, runs fn, and ensures Close. Use for commands that
