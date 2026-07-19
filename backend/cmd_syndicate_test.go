@@ -406,3 +406,81 @@ func TestOutContentType(t *testing.T) {
 		}
 	}
 }
+
+// External entries are hands-off slots: no selectors, no limit — the fields
+// that would imply generation are hard errors, so config never lies.
+func TestSyndicateSetExternalValidation(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  SyndicateSetCmd
+		ok   bool
+	}{
+		{"plain external", SyndicateSetCmd{Name: "x", Format: "rss", External: true}, true},
+		{"external with title", SyndicateSetCmd{Name: "x", Format: "json", Title: "T", External: true}, true},
+		{"external with tags", SyndicateSetCmd{Name: "x", Format: "rss", External: true, Tags: []string{"a"}}, false},
+		{"external with feeds", SyndicateSetCmd{Name: "x", Format: "rss", External: true, FeedIDs: []int{1}}, false},
+		{"external with limit", SyndicateSetCmd{Name: "x", Format: "rss", External: true, Limit: 10}, false},
+		{"external bad format", SyndicateSetCmd{Name: "x", Format: "xml", External: true}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, c, _ := setupTestDB(t)
+			c.Feeds = map[int]*Feed{1: {id: 1, URL: "http://a", Tag: "a"}}
+			err := tc.cmd.Run()
+			if tc.ok && err != nil {
+				t.Fatalf("set: %v", err)
+			}
+			if !tc.ok && err == nil {
+				t.Fatal("expected error")
+			}
+		})
+	}
+}
+
+// An external entry persists Limit 0 (no default-50 stamp) and empty selectors.
+func TestSyndicateSetExternalPersistsZeroLimit(t *testing.T) {
+	_, _, _ = setupTestDB(t)
+	if err := (&SyndicateSetCmd{Name: "x", Format: "rss", External: true}).Run(); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	db2, err := NewDB(ctx, false)
+	if err != nil {
+		t.Fatalf("NewDB: %v", err)
+	}
+	defer db2.Close(ctx)
+	o := db2.core.Out[0]
+	if !o.External || o.Limit != 0 || len(o.Tags) != 0 || len(o.Feeds) != 0 {
+		t.Errorf("Out[0] = %+v, want external with zero limit/selectors", o)
+	}
+}
+
+// managed→external keeps the same-key file (now externally owned);
+// external→managed re-applies normal validation and the default limit.
+func TestSyndicateSetTransitions(t *testing.T) {
+	db, c, _ := setupTestDB(t)
+	c.Feeds = map[int]*Feed{1: {id: 1, URL: "http://a", Tag: "news"}}
+	if err := (&SyndicateSetCmd{Name: "foo", Format: "rss", Tags: []string{"news"}}).Run(); err != nil {
+		t.Fatalf("set managed: %v", err)
+	}
+	if err := db.Put(ctx, "out/foo.rss", strings.NewReader("<rss/>"), true); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := (&SyndicateSetCmd{Name: "foo", Format: "rss", External: true}).Run(); err != nil {
+		t.Fatalf("set external: %v", err)
+	}
+	if n, _ := db.Stat(ctx, "out/foo.rss"); n == 0 {
+		t.Error("same-key managed→external transition must keep the file")
+	}
+	if err := (&SyndicateSetCmd{Name: "foo", Format: "rss", Tags: []string{"news"}}).Run(); err != nil {
+		t.Fatalf("set managed again: %v", err)
+	}
+	db2, err := NewDB(ctx, false)
+	if err != nil {
+		t.Fatalf("NewDB: %v", err)
+	}
+	defer db2.Close(ctx)
+	o := db2.core.Out[0]
+	if o.External || o.Limit != outDefaultLimit {
+		t.Errorf("Out[0] = %+v, want managed with default limit", o)
+	}
+}

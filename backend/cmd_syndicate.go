@@ -42,23 +42,25 @@ func (o *SyndicateLsCmd) Run() error {
 
 // SyndicateSetCmd adds or updates a named syndication output feed.
 type SyndicateSetCmd struct {
-	Name    string   `arg:"" help:"Output feed name (used as the file stem: out/<name>.rss or out/<name>.json)."`
-	Format  string   `short:"f" required:"" help:"Output format: rss (RSS 2.0) or json (JSON Feed 1.1)."`
-	Title   string   `short:"t" help:"Channel/feed title (defaults to name when empty)."`
-	Tags    []string `short:"g" sep:"," help:"Tag filter: include articles from feeds whose tag is in this list (comma-separated)."`
-	FeedIDs []int    `short:"i" sep:"," help:"Feed id filter: include articles from these specific feed ids (comma-separated)."`
-	Limit   int      `short:"l" default:"0" help:"Maximum number of items to include (newest first; default 50)."`
+	Name     string   `arg:"" help:"Output feed name (used as the file stem: out/<name>.rss or out/<name>.json)."`
+	Format   string   `short:"f" required:"" help:"Output format: rss (RSS 2.0) or json (JSON Feed 1.1)."`
+	Title    string   `short:"t" help:"Channel/feed title (defaults to name when empty)."`
+	Tags     []string `short:"g" sep:"," help:"Tag filter: include articles from feeds whose tag is in this list (comma-separated)."`
+	FeedIDs  []int    `short:"i" sep:"," help:"Feed id filter: include articles from these specific feed ids (comma-separated)."`
+	Limit    int      `short:"l" default:"0" help:"Maximum number of items to include (newest first; default 50)."`
+	External bool     `short:"x" help:"Externally-updated output: SRR reserves the slot but never generates its bytes. Publish with 'srr syndicate push', read back with 'srr syndicate fetch'. Takes no tags/feeds/limit."`
 }
 
 func (o *SyndicateSetCmd) Run() error {
 	return withDB(true, func(ctx context.Context, db *DB) error {
 		return setOutFeed(ctx, db, OutFeed{
-			Name:   o.Name,
-			Title:  o.Title,
-			Format: o.Format,
-			Tags:   o.Tags,
-			Feeds:  o.FeedIDs,
-			Limit:  o.Limit,
+			Name:     o.Name,
+			Title:    o.Title,
+			Format:   o.Format,
+			Tags:     o.Tags,
+			Feeds:    o.FeedIDs,
+			Limit:    o.Limit,
+			External: o.External,
 		})
 	})
 }
@@ -86,16 +88,27 @@ func setOutFeed(ctx context.Context, db *DB, in OutFeed) error {
 	if in.Format != "rss" && in.Format != "json" {
 		return fmt.Errorf("format %q is invalid; must be rss or json", in.Format)
 	}
-	if len(in.Tags) == 0 && len(in.Feeds) == 0 {
-		return fmt.Errorf("at least one of tags or feeds must be non-empty")
-	}
-	for _, id := range in.Feeds {
-		if _, err := db.FeedByID(id); err != nil {
-			return fmt.Errorf("feed id %d: unknown", id)
+	if in.External {
+		// A hands-off slot: the fields that would imply generation are hard
+		// errors, so a stored entry never lies about how its file is produced.
+		if len(in.Tags) > 0 || len(in.Feeds) > 0 {
+			return fmt.Errorf("external syndicate takes no selectors (tags/feeds)")
 		}
-	}
-	if in.Limit <= 0 {
-		in.Limit = outDefaultLimit
+		if in.Limit > 0 {
+			return fmt.Errorf("external syndicate takes no limit")
+		}
+	} else {
+		if len(in.Tags) == 0 && len(in.Feeds) == 0 {
+			return fmt.Errorf("at least one of tags or feeds must be non-empty")
+		}
+		for _, id := range in.Feeds {
+			if _, err := db.FeedByID(id); err != nil {
+				return fmt.Errorf("feed id %d: unknown", id)
+			}
+		}
+		if in.Limit <= 0 {
+			in.Limit = outDefaultLimit
+		}
 	}
 
 	idx, oldKey := -1, ""
