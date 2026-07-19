@@ -33,10 +33,11 @@ const outDefaultLimit = 50
 
 // SyndicateGroup holds the `srr syndicate` sub-commands.
 type SyndicateGroup struct {
-	Ls   SyndicateLsCmd   `cmd:"" help:"List syndication output feeds."`
-	Set  SyndicateSetCmd  `cmd:"" help:"Add or update a syndication output feed."`
-	Rm   SyndicateRmCmd   `cmd:"" help:"Remove a syndication output feed and delete its out/* files."`
-	Push SyndicatePushCmd `cmd:"" help:"Publish an external syndication output from a file or stdin."`
+	Ls    SyndicateLsCmd    `cmd:"" help:"List syndication output feeds."`
+	Set   SyndicateSetCmd   `cmd:"" help:"Add or update a syndication output feed."`
+	Rm    SyndicateRmCmd    `cmd:"" help:"Remove a syndication output feed and delete its out/* files."`
+	Push  SyndicatePushCmd  `cmd:"" help:"Publish an external syndication output from a file or stdin."`
+	Fetch SyndicateFetchCmd `cmd:"" help:"Print a syndication output's currently published file to stdout."`
 }
 
 // SyndicateLsCmd prints the current Out list as JSON.
@@ -145,6 +146,38 @@ func (o *SyndicatePushCmd) Run() error {
 			slog.Info("published syndication output", "key", key, "bytes", len(payload), "url", joinURL(globals.CdnURL, key))
 		} else {
 			slog.Info("published syndication output", "key", key, "bytes", len(payload))
+		}
+		return nil
+	})
+}
+
+// SyndicateFetchCmd streams the currently published out/<name>.<ext> to
+// stdout — the read counterpart of push, enabling stateless read-modify-write
+// generators (`srr syndicate fetch x | merge | srr syndicate push x`).
+// Read-only, so it works on managed entries too; lock-free like push. The
+// payload goes to stdout alone (diagnostics ride stderr), no cap, no
+// validation — it returns exactly what is published.
+type SyndicateFetchCmd struct {
+	Name string `arg:"" help:"Output feed name."`
+}
+
+func (o *SyndicateFetchCmd) Run() error {
+	return withDB(false, func(ctx context.Context, db *DB) error {
+		entry, err := findOutFeed(db, o.Name)
+		if err != nil {
+			return err
+		}
+		key := outFileKey(*entry)
+		rc, err := db.Get(ctx, key, true)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", key, err)
+		}
+		if rc == nil {
+			return fmt.Errorf("no published file at %s (nothing pushed or synced yet)", key)
+		}
+		defer rc.Close()
+		if _, err := io.Copy(stdout, rc); err != nil {
+			return fmt.Errorf("write payload: %w", err)
 		}
 		return nil
 	})
