@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -534,5 +535,81 @@ func TestRunCommandTimeoutUnlimited(t *testing.T) {
 	}
 	if string(out) != "x" {
 		t.Errorf("stdout = %q, want %q", out, "x")
+	}
+}
+
+// TestModuleExternalAssetDir pins the asset-dir contract for external pipe
+// steps: with a cache dir stamped on the context (the fetch path) the
+// subprocess gets SRR_ASSET_DIR pointing at it; without one (preview) the
+// variable is absent. The working directory is INHERITED either way — moving
+// it would break any mod invoked by a relative path, and since a mod exec
+// failure only drops the item with a warning (feed.go) whose GUID is already
+// in the dedup boundary, that break would silently lose articles for good.
+func TestModuleExternalAssetDir(t *testing.T) {
+	m := New()
+	dir := t.TempDir()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	step := `jq -c --arg p "$(pwd)" '.title = (env.SRR_ASSET_DIR // "unset") + "|" + $p'`
+
+	assertPwdInherited := func(t *testing.T, got string) {
+		t.Helper()
+		want, err := filepath.EvalSymlinks(cwd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if real, _ := filepath.EvalSymlinks(got); real != want {
+			t.Errorf("cwd = %q, want the inherited %q", got, cwd)
+		}
+	}
+
+	item := &RawItem{GUID: 7, Title: "x"}
+	if err := m.Process(WithCacheDir(context.Background(), dir), step, item); err != nil {
+		t.Fatalf("Process with cache dir: %v", err)
+	}
+	gotDir, gotPwd, ok := strings.Cut(item.Title, "|")
+	if !ok {
+		t.Fatalf("unexpected title %q", item.Title)
+	}
+	if gotDir != dir {
+		t.Errorf("SRR_ASSET_DIR = %q, want %q", gotDir, dir)
+	}
+	assertPwdInherited(t, gotPwd)
+
+	item = &RawItem{GUID: 7, Title: "x"}
+	if err := m.Process(context.Background(), step, item); err != nil {
+		t.Fatalf("Process without cache dir: %v", err)
+	}
+	gotDir, gotPwd, ok = strings.Cut(item.Title, "|")
+	if !ok {
+		t.Fatalf("unexpected title %q", item.Title)
+	}
+	if gotDir != "unset" {
+		t.Errorf("SRR_ASSET_DIR without cache dir = %q, want unset", gotDir)
+	}
+	assertPwdInherited(t, gotPwd)
+}
+
+// TestModuleExternalRelativePathRuns is the regression guard for the cwd
+// contract above: a mod invoked by a path relative to SRR's own working
+// directory must still execute on the fetch path (cache dir present).
+func TestModuleExternalRelativePathRuns(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "mod.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\njq -c '.title = \"ran\"'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Run from a directory the script is relative to, exactly as a service
+	// unit's WorkingDirectory would be.
+	t.Chdir(dir)
+
+	item := &RawItem{GUID: 1, Title: "x"}
+	if err := New().Process(WithCacheDir(context.Background(), t.TempDir()), "./mod.sh", item); err != nil {
+		t.Fatalf("relative-path mod failed on the fetch path: %v", err)
+	}
+	if item.Title != "ran" {
+		t.Errorf("Title = %q, want %q", item.Title, "ran")
 	}
 }

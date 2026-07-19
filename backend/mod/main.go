@@ -297,7 +297,27 @@ func (o *Module) Process(ctx context.Context, args string, i *RawItem) error {
 		return err
 	}
 
-	out, err := RunSubprocess(ctx, args, o.env, "", &buf)
+	// External pipe steps get SRR_ASSET_DIR pointing at the run's shared cache
+	// dir, so a step can place self-hosted files there and reference them with
+	// "#"-markers — the same asset contract external ingest strategies have.
+	// Preview never stamps the dir (mod.WithCacheDir is fetch-only), so its
+	// absence tells a step "no store: transform only". o.env is shared across
+	// workers — clone before appending.
+	//
+	// The working directory is deliberately left INHERITED (unlike external
+	// ingest, which does get cwd = the cache dir). Markers are resolved by
+	// UploadCacheRef against the cache dir by name, not against cwd, so the
+	// env var alone is the whole contract — while moving cwd would silently
+	// break any existing mod invoked by a relative path ("./mods/x.sh" → exit
+	// 127 → processItem error → feed.go drops the item with a WARN, and its
+	// GUID is already in the dedup boundary, so the article is lost for good).
+	// Validate never executes external steps and preview would keep the old
+	// cwd, so that breakage would be invisible until articles went missing.
+	env := o.env
+	if dir := cacheDirFromContext(ctx); dir != "" {
+		env = append(slices.Clone(o.env), "SRR_ASSET_DIR="+dir)
+	}
+	out, err := RunSubprocess(ctx, args, env, "", &buf)
 	if err != nil {
 		return err
 	}
