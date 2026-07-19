@@ -14,3 +14,7 @@ Run all project checks — equivalent to `make verify` (`verify-fe verify-be tes
 If any step in any track fails, stop and report the failure clearly with the relevant output.
 
 If all steps pass — including `test-contract` — confirm that everything is clean in a single summary line.
+
+## Known gap
+
+`make verify` does NOT include the browser e2e layer (`make test-browser`, Puppeteer) — but CI runs it as a required job on every push (`ci.yml`). So "verify green" does not guarantee "CI green". When the change touched the reader UI, the service worker, or anything the browser layer covers, say so in the summary and suggest `make test-browser` (or `gh run list --workflow ci.yml` after pushing).
