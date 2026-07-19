@@ -177,6 +177,61 @@ func TestStaleTempUsesOneClock(t *testing.T) {
 	}
 }
 
+// staleTemp comparing one clock is only half the fix: the sweep must actually
+// SUPPLY the store's clock, i.e. its own just-created staging file's mtime,
+// rather than time.Now(). Both readings are host-now in the AtomicPut tests
+// above, so those pass either way. Here the store's clock reads 48h AHEAD of
+// this host's: a leftover stamped at host-now is then 48h old by the store's
+// reckoning and must be swept — which only happens if the reference came from
+// the own-temp entry.
+func TestSweepTempLeftoversTakesNowFromOwnTemp(t *testing.T) {
+	dir := t.TempDir()
+	own := "db.gz.tmp.99999.1"
+	leftover := filepath.Join(dir, "db.gz.tmp.11111.7")
+	for _, f := range []string{filepath.Join(dir, own), leftover} {
+		if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ahead := time.Now().Add(48 * time.Hour)
+	if err := os.Chtimes(filepath.Join(dir, own), ahead, ahead); err != nil {
+		t.Fatal(err)
+	}
+
+	sweepTempLeftovers(dir, own)
+
+	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+		t.Errorf("leftover survived (err=%v); the sweep measured age against this host's clock, not the store's own-temp mtime", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, own)); err != nil {
+		t.Errorf("the caller's own staging file was swept (err=%v); it must always be skipped", err)
+	}
+}
+
+// No reference, no judgement: if our own staging file is missing from the
+// listing there is no store-clock reading to age anything against, so the sweep
+// must delete nothing — never fall back to this host's clock.
+func TestSweepTempLeftoversWithoutOwnTempDeletesNothing(t *testing.T) {
+	dir := t.TempDir()
+	leftover := filepath.Join(dir, "db.gz.tmp.11111.7")
+	if err := os.WriteFile(leftover, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-tempSweepMaxAge - time.Hour)
+	if err := os.Chtimes(leftover, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	sweepTempLeftovers(dir, "db.gz.tmp.99999.1") // never created
+
+	if _, err := os.Stat(leftover); err != nil {
+		t.Errorf("an ancient leftover was swept with no reference mtime (err=%v); want no judgement", err)
+	}
+	// An unreadable directory is janitor work that must stay silent, never panic
+	// or fail the AtomicPut that triggered it.
+	sweepTempLeftovers(filepath.Join(dir, "no-such-dir"), "db.gz.tmp.99999.1")
+}
+
 // isTempLeftover must match exactly the uniqueTempName grammar
 // (<base>.tmp.<pid>.<n>) so the sweep can never touch a user file that merely
 // contains ".tmp.".

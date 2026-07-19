@@ -353,3 +353,49 @@ func TestSFTPAtomicPutSweepsStaleTempLeftovers(t *testing.T) {
 		t.Errorf("content = %q, want %q", got, "content")
 	}
 }
+
+// Same clock-source pin as the Local backend's, and it matters more here: the
+// server's mtimes are the ones that count, and an SFTP server's clock is not
+// this host's. The own staging file is stamped 48h ahead, so a leftover written
+// at host-now is only swept if the reference "now" came from that listing entry
+// rather than from time.Now(). The missing-reference half is pinned too — no
+// reference, no judgement.
+func TestSFTPSweepTempLeftoversTakesNowFromOwnTemp(t *testing.T) {
+	d, base := setupSFTPPipe(t)
+	own := "db.gz.tmp.99999.1"
+	leftover := filepath.Join(base, "db.gz.tmp.11111.7")
+	for _, f := range []string{filepath.Join(base, own), leftover} {
+		if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ahead := time.Now().Add(48 * time.Hour)
+	if err := os.Chtimes(filepath.Join(base, own), ahead, ahead); err != nil {
+		t.Fatal(err)
+	}
+
+	d.sweepTempLeftovers(base, own)
+
+	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+		t.Errorf("leftover survived (err=%v); the sweep aged it against this host's clock, not the server's own-temp mtime", err)
+	}
+	if _, err := os.Stat(filepath.Join(base, own)); err != nil {
+		t.Errorf("the caller's own staging file was swept (err=%v); it must always be skipped", err)
+	}
+
+	// With no own-temp entry in the listing there is no server-clock reading, so
+	// nothing may be judged stale — and an unreadable directory stays silent.
+	aged := filepath.Join(base, "db.gz.tmp.22222.8")
+	if err := os.WriteFile(aged, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-tempSweepMaxAge - time.Hour)
+	if err := os.Chtimes(aged, old, old); err != nil {
+		t.Fatal(err)
+	}
+	d.sweepTempLeftovers(base, "db.gz.tmp.98765.4") // never created
+	if _, err := os.Stat(aged); err != nil {
+		t.Errorf("an ancient leftover was swept with no reference mtime (err=%v); want no judgement", err)
+	}
+	d.sweepTempLeftovers(filepath.Join(base, "no-such-dir"), own)
+}

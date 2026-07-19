@@ -264,6 +264,14 @@ func TestFilterValidateAcceptsKnownParams(t *testing.T) {
 		"#filter drop_title=/x/ min_words=5",
 		"#filter keep_lang=en,es",
 		"#filter keep_lang=en,es min_words=5",
+		// The codes whatlanggo's table maps to "" — iso6391Extra corrects them.
+		// This is the exact config that once failed Validate and, since
+		// Feed.Fetch sets ferr and skips the feed, took a whole feed down.
+		"#filter keep_lang=fa",
+		"#filter keep_lang=yi",
+		// The macrolanguage alias: valid config even though detection only ever
+		// reports the nb/nn varieties.
+		"#filter keep_lang=no",
 	}
 	for _, tok := range valid {
 		if err := m.Validate(context.Background(), []string{tok}); err != nil {
@@ -318,6 +326,28 @@ func TestFilterKeepLangNormalizesDeclaredLang(t *testing.T) {
 			t.Errorf("Lang = %q, want %q untouched — keep_lang never writes it", item.Lang, lang)
 		}
 	}
+	// A macrolanguage in the config admits every variety detection can report
+	// under it, region tags included — whatlanggo never says "no", so folding it
+	// to one variety would silently discard a Norwegian feed's other half.
+	for _, lang := range []string{"nb", "nn", "nb-NO", "no"} {
+		item := makeFilterItem("Title", "content")
+		item.Lang = lang
+		if err := runFilter(t, "#filter keep_lang=no", item); err != nil {
+			t.Fatalf("Process(Lang=%q): %v", lang, err)
+		}
+		if item.Drop {
+			t.Errorf("Lang=%q dropped under keep_lang=no, want kept", lang)
+		}
+	}
+	swede := makeFilterItem("Title", "content")
+	swede.Lang = "sv"
+	if err := runFilter(t, "#filter keep_lang=no", swede); err != nil {
+		t.Fatalf("Process(Lang=sv): %v", err)
+	}
+	if !swede.Drop {
+		t.Error("Lang=\"sv\" kept under keep_lang=no, want dropped — the expansion is not a Scandinavian free-for-all")
+	}
+
 	// Normalization must not turn a genuinely foreign code into a match.
 	item := makeFilterItem("Title", "content")
 	item.Lang = "DE-de"
