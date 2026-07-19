@@ -259,6 +259,95 @@ func TestSyndicateSetReapsOldFormatFile(t *testing.T) {
 	}
 }
 
+// An entry stored with an EMPTY format (a hand-edited or pre-validation
+// db.gz) must not delete its own live output. setOutFeed reaps by comparing
+// resolved KEYS, not raw formats: outFileKey defaults anything that is not
+// "json" to .rss, so ""→"rss" resolves to the same out/<name>.rss the new
+// config names — comparing the format strings saw a change and deleted it.
+func TestSyndicateSetEmptyOldFormatKeepsOutFile(t *testing.T) {
+	db, c, _ := setupTestDB(t)
+	c.Feeds = map[int]*Feed{1: {id: 1, URL: "http://a", Tag: "news"}}
+	c.Out = []OutFeed{{Name: "foo", Format: "", Tags: []string{"news"}, Limit: 50}}
+	if err := db.Commit(ctx); err != nil {
+		t.Fatalf("seed commit: %v", err)
+	}
+	if err := db.Put(ctx, "out/foo.rss", strings.NewReader("<rss/>"), true); err != nil {
+		t.Fatalf("seed rss: %v", err)
+	}
+
+	if err := (&SyndicateSetCmd{Name: "foo", Format: "rss", Tags: []string{"news"}}).Run(); err != nil {
+		t.Fatalf("syndicate set rss: %v", err)
+	}
+	if n, _ := db.Stat(ctx, "out/foo.rss"); n == 0 {
+		t.Error("out/foo.rss was deleted; the reap removed the very file the new config names")
+	}
+	// The upsert must still have happened — otherwise this passes for a no-op.
+	db2, err := NewDB(ctx, false)
+	if err != nil {
+		t.Fatalf("NewDB: %v", err)
+	}
+	defer db2.Close(ctx)
+	if len(db2.core.Out) != 1 || db2.core.Out[0].Format != "rss" {
+		t.Errorf("Out = %+v, want a single entry with format rss", db2.core.Out)
+	}
+}
+
+// A Rm failure on a file that IS present is fatal, and must leave the config
+// intact so a retry still names the file — the whole reason the Rm precedes
+// Commit. This holds for a stray sibling too, not just the configured
+// extension: dropping the entry would strand a real file that no config names
+// and nothing can ever delete (the store has no List).
+func TestSyndicateRmFailsWhenPresentFileCannotBeRemoved(t *testing.T) {
+	for _, tc := range []struct{ name, format, failKey string }{
+		{"configured extension", "rss", "out/foo.rss"},
+		{"stray sibling", "json", "out/foo.rss"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, c, _ := setupTestDB(t)
+			c.Feeds = map[int]*Feed{1: {id: 1, URL: "http://a", Tag: "news"}}
+			c.Out = []OutFeed{{Name: "foo", Format: tc.format, Tags: []string{"news"}, Limit: 50}}
+			// Both files genuinely exist on the store.
+			for _, k := range []string{"out/foo.rss", "out/foo.json"} {
+				if err := db.Put(ctx, k, strings.NewReader("x"), true); err != nil {
+					t.Fatalf("seed %s: %v", k, err)
+				}
+			}
+
+			db.Backend = &rmFailBackend{Backend: db.Backend, key: tc.failKey}
+			if err := removeOutFeed(ctx, db, "foo"); err == nil {
+				t.Fatalf("removeOutFeed returned nil though present %s could not be deleted", tc.failKey)
+			}
+			if len(db.core.Out) != 1 {
+				t.Errorf("Out = %+v, want the entry still configured so a retry can reap the file", db.core.Out)
+			}
+		})
+	}
+}
+
+// The tolerated case is narrow and provable: the object is NOT there. A store
+// that answers DELETE with 405/403 rather than 404 on a key that never existed
+// must not make the entry undeletable.
+func TestSyndicateRmToleratesRmErrorOnAbsentFile(t *testing.T) {
+	db, c, _ := setupTestDB(t)
+	c.Feeds = map[int]*Feed{1: {id: 1, URL: "http://a", Tag: "news"}}
+	c.Out = []OutFeed{{Name: "foo", Format: "rss", Tags: []string{"news"}, Limit: 50}}
+	if err := db.Put(ctx, "out/foo.rss", strings.NewReader("<rss/>"), true); err != nil {
+		t.Fatalf("seed rss: %v", err)
+	}
+
+	// The sibling .json was never written; make its delete error anyway.
+	db.Backend = &rmFailBackend{Backend: db.Backend, key: "out/foo.json"}
+	if err := removeOutFeed(ctx, db, "foo"); err != nil {
+		t.Fatalf("removeOutFeed wedged on an absent sibling: %v", err)
+	}
+	if len(db.core.Out) != 0 {
+		t.Errorf("Out = %+v, want the entry removed", db.core.Out)
+	}
+	if n, _ := db.Stat(ctx, "out/foo.rss"); n != 0 {
+		t.Errorf("out/foo.rss still present (size %d); the configured file was not reaped", n)
+	}
+}
+
 // TestSyndicateSetNameValidation verifies that unsafe names (path traversal,
 // empty, ".", "..") are rejected and that a valid name still works.
 func TestSyndicateSetNameValidation(t *testing.T) {

@@ -3,10 +3,14 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"srr/store"
 )
 
 // A version-1 seen.gz body (pre-bg-relocation) must still parse: the bg tail is
@@ -414,16 +418,10 @@ func TestNewDBCorruptSeenFallsBackToEmpty(t *testing.T) {
 	}
 }
 
-// A store carrying only the pre-ping-pong single seen.gz completes its
-// migration on the first committed cycle: loadSeen bridges the legacy pool in
-// (marked dirty, so even an all-304 idle cycle writes), SyncSeen makes it
-// durable in a slot, and the superseded legacy object is reaped — instead of
-// being stranded in the store forever. A crash at any point either leaves the
-// legacy file (the retry re-migrates) or the slot (migration done); the pool
-// is never lost.
-func TestSyncSeenMigratesAndReapsLegacy(t *testing.T) {
-	_, _, dir := setupTestDB(t)
-
+// writeLegacySeen plants a valid pre-ping-pong single seen.gz in the store,
+// carrying one stamped entry (feed 1, guid 0xabc123).
+func writeLegacySeen(t *testing.T, dir string) {
+	t.Helper()
 	legacy := newSeenPool()
 	legacy.stamp(1, 0xabc123, 100)
 	var buf bytes.Buffer
@@ -437,6 +435,94 @@ func TestSyncSeenMigratesAndReapsLegacy(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, seenLegacyKey), buf.Bytes(), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// rmFailBackend fails Rm for one key, leaving every other operation intact.
+type rmFailBackend struct {
+	store.Backend
+	key string
+}
+
+func (f *rmFailBackend) Rm(ctx context.Context, key string) error {
+	if key == f.key {
+		return errors.New("injected rm failure")
+	}
+	return f.Backend.Rm(ctx, key)
+}
+
+// A failed legacy reap must stay PENDING, and must actually retry on a later
+// cycle — including an IDLE one, which is the common case: SyncSeen returns
+// early when the pool is not dirty, so a retry placed after that gate would
+// never run at all.
+//
+// Scope, deliberately pinned by the second half of this test: the retry is
+// per-process. loadSeen takes its legacy branch only when neither slot is
+// readable, which cannot happen once a slot is durable, so a re-opened DB does
+// NOT carry the pending reap. See reapLegacySeen's comment — the residue is
+// accepted, not eventually cleaned.
+func TestSyncSeenLegacyReapRetriesAfterFailure(t *testing.T) {
+	_, _, dir := setupTestDB(t)
+	writeLegacySeen(t, dir)
+
+	db, err := NewDB(ctx, false)
+	if err != nil {
+		t.Fatalf("NewDB: %v", err)
+	}
+	defer db.Close(ctx)
+
+	// First cycle: the slot write succeeds, the legacy Rm fails (warn-only).
+	real := db.Backend
+	db.Backend = &rmFailBackend{Backend: real, key: seenLegacyKey}
+	if err := db.commitState(ctx); err != nil {
+		t.Fatalf("commitState with failing Rm: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, seenLegacyKey)); err != nil {
+		t.Fatalf("legacy object gone despite the injected Rm failure: %v", err)
+	}
+	if !db.seen.fromLegacy {
+		t.Fatal("fromLegacy cleared after a FAILED reap: the object is stranded forever")
+	}
+
+	// The next cycle retries — and it is an IDLE one (dirty is already false
+	// after the successful slot write above), which is exactly the case a retry
+	// placed after SyncSeen's not-dirty gate would miss.
+	db.Backend = real
+	if db.seen.dirty {
+		t.Fatal("precondition: pool should be clean after the slot write")
+	}
+	if err := db.commitState(ctx); err != nil {
+		t.Fatalf("commitState retry: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, seenLegacyKey)); !os.IsNotExist(err) {
+		t.Errorf("legacy %s still present after the idle-cycle retry (err=%v), want reaped", seenLegacyKey, err)
+	}
+	if db.seen.fromLegacy {
+		t.Error("fromLegacy still set after a successful reap")
+	}
+
+	// Scope pin: a re-opened DB does not carry a pending reap, because
+	// loadSeen now finds a durable slot and never revisits the legacy branch.
+	writeLegacySeen(t, dir) // stand in for a reap that failed and outlived the process
+	db2, err := NewDB(ctx, false)
+	if err != nil {
+		t.Fatalf("NewDB: %v", err)
+	}
+	defer db2.Close(ctx)
+	if db2.seen.fromLegacy {
+		t.Error("a re-opened DB claims a pending reap; reapLegacySeen's documented scope is wrong")
+	}
+}
+
+// A store carrying only the pre-ping-pong single seen.gz completes its
+// migration on the first committed cycle: loadSeen bridges the legacy pool in
+// (marked dirty, so even an all-304 idle cycle writes), SyncSeen makes it
+// durable in a slot, and the superseded legacy object is reaped — instead of
+// being stranded in the store forever. A crash at any point either leaves the
+// legacy file (the retry re-migrates) or the slot (migration done); the pool
+// is never lost.
+func TestSyncSeenMigratesAndReapsLegacy(t *testing.T) {
+	_, _, dir := setupTestDB(t)
+	writeLegacySeen(t, dir)
 
 	db, err := NewDB(ctx, false)
 	if err != nil {

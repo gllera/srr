@@ -514,6 +514,12 @@ func (o *DB) SyncSeen(ctx context.Context) error {
 	}
 	o.seen.snapshotHTTP(o.core.Feeds)
 	if !o.seen.dirty {
+		// A pending reap still retries on an idle cycle: the slot that
+		// superseded the legacy object went durable on an EARLIER call in this
+		// process (that is what cleared dirty), so deleting it now is safe.
+		// Without this the retry was unreachable — every later SyncSeen returns
+		// here.
+		o.reapLegacySeen(ctx)
 		return nil
 	}
 	inactive := seenSlotKey(!o.core.SeenFlag)
@@ -530,20 +536,32 @@ func (o *DB) SyncSeen(ctx context.Context) error {
 	}
 	o.core.SeenFlag = !o.core.SeenFlag // now names the slot we just wrote
 	o.seen.dirty = false
-	// Complete a legacy migration: the pool is durable in a slot now — even if
-	// the caller's Commit never publishes the flag flip, loadSeen's sibling
-	// fallback finds the slot just written — so the pre-ping-pong object is
-	// superseded and reaped here, on the one path that knows a migration
-	// happened. Warn-only: a miss leaves exactly the pre-reap state (a stale
-	// legacy file) and the flag is cleared regardless, since the next dirty
-	// cycle's pool no longer derives from the legacy object.
-	if o.seen.fromLegacy {
-		o.seen.fromLegacy = false
-		if err := o.Rm(ctx, seenLegacyKey); err != nil {
-			slog.Warn("remove migrated legacy seen.gz", "error", err)
-		}
-	}
+	o.reapLegacySeen(ctx)
 	return nil
+}
+
+// reapLegacySeen deletes the pre-ping-pong single seen.gz once the pool that
+// was bridged out of it is durable in a slot — even if the caller's Commit
+// never publishes the flag flip, loadSeen's sibling fallback finds the slot
+// just written, so the legacy object is superseded either way. No-op unless a
+// migration actually happened on this handle.
+//
+// Warn-only, and the flag is cleared only on success so a transient error
+// retries on a later cycle of THIS process. Be aware of the limit: `loadSeen`
+// takes its legacy branch only when neither slot is readable, which cannot
+// happen once a slot is durable, so a failure that outlives the process leaves
+// the object behind for good. That is an accepted residue — it is one small
+// object, no code path reads it again, and the store has no List for anything
+// to trip over it — not a guarantee of eventual cleanup.
+func (o *DB) reapLegacySeen(ctx context.Context) {
+	if o.seen == nil || !o.seen.fromLegacy {
+		return
+	}
+	if err := o.Rm(ctx, seenLegacyKey); err != nil {
+		slog.Warn("remove migrated legacy seen.gz", "error", err)
+		return
+	}
+	o.seen.fromLegacy = false
 }
 
 // commitState persists the seen sidecar (inactive slot + flag flip via SyncSeen)
