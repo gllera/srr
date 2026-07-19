@@ -487,8 +487,11 @@ srr feed add -t "Feed" -u https://example.com/rss -r lower
 | `drop_content` | `/regex/[i]` | Drop when content matches the regex |
 | `keep_content` | `/regex/[i]` | Drop when content does **not** match the regex |
 | `min_words` | integer | Drop when plain-text word count of content is below N |
+| `keep_lang` | ISO 639-1 codes | Drop when the language is confidently detected as one **not** in the list |
 
 Regex syntax: `/pattern/` or `/pattern/i` (flag `i` = case-insensitive). A malformed regex or unknown parameter is a hard configuration error. The word-count check (`min_words`) runs against the raw content string including any HTML tags. A regex param value **cannot contain a literal space** — the pipeline token is split on whitespace before its parameters are parsed — so use a whitespace metacharacter instead: `drop_title=/breaking\s+news/` or `drop_title=/breaking[ ]news/`, not `drop_title=/breaking news/`.
+
+Language detection (`keep_lang`) is offline (trigram-based, via whatlanggo) and **fail-open**: an item is dropped only when at least 24 runes of plain text (title + HTML-stripped content) are detected at ≥ 0.8 confidence as a language outside the list. Short posts, uncertain detections, and empty items always pass — the failure mode is a stray foreign article surviving, never a wanted article lost. Codes are case-insensitive ISO 639-1 (`en,es`); an unknown code is a hard configuration error.
 
 ```bash
 # Create a recipe that filters sponsored posts and low-word articles
@@ -498,6 +501,10 @@ srr feed upd 3 -r filtered
 # Create a recipe that keeps only golang articles
 srr recipe set golang -p "#filter keep_title=/golang/i" -p "#default"
 srr feed upd 5 -r golang
+
+# Keep only English and Spanish articles
+srr recipe set eng-es -p "#default" -p "#filter keep_lang=en,es"
+srr feed upd 7 -r eng-es
 ```
 
 **Recipe model.** Processing config lives in named `{ingest, pipe}` recipes (`srr recipe set/ls/show/rm`). Feeds reference one by name (`-r/--recipe`); empty or absent ⇒ `default`. Each axis (ingest, pipe) falls back to the `default` recipe independently. The `#default` token in a recipe's pipe expands inline to the `default` recipe's pipe (forbidden inside `default` itself).
