@@ -416,7 +416,9 @@ srr feed add -t "Feed" -u https://example.com/rss -r lower
 
 ### External mod protocol
 
-A pipeline step whose first word is not a built-in `#`-token is run as an external mod: `/bin/sh -c <step>` is invoked **once per item**, in SRR's process working directory, with the process environment inherited (plus the `srr.yaml` [`secrets:`](#secrets) section, which overrides any ambient value of the same name) and `stderr` passed through to the terminal (use it for logging). Unlike an external ingest command, an external mod is **not** handed an `asset_dir`, so it cannot self-host files — it only transforms the item it is given.
+A pipeline step whose first word is not a built-in `#`-token is run as an external mod: `/bin/sh -c <step>` is invoked **once per item**, with the process environment inherited (plus the `srr.yaml` [`secrets:`](#secrets) section, which overrides any ambient value of the same name) and `stderr` passed through to the terminal (use it for logging).
+
+On the fetch path, an external mod runs under the same asset-dir contract as an external ingest command ([above](#self-hosting-files)): its working directory is the run's shared asset cache dir, and `SRR_ASSET_DIR` is set to that same path — so a mod may download or place a file there and reference it in `content` with a `#`-prefixed relative path, exactly like an ingest strategy; the automatic end-of-pipeline upload step then ships it to the store. `srr preview` sets neither (the working directory is inherited and `SRR_ASSET_DIR` is absent) — a mod that places assets must detect that and pass items through untouched rather than writing markers nothing will ever upload.
 
 **stdin** is the full item as a single JSON object (HTML-escaping disabled, so `<`/`>`/`&` are emitted verbatim):
 
@@ -428,6 +430,7 @@ A pipeline step whose first word is not a built-in `#`-token is run as an extern
 | `link` | string | Canonical article URL. |
 | `published` | string \| null | RFC 3339 timestamp, or `null` for dateless items. **Immutable.** |
 | `raw` | object | The parsed feed entry, keyed by element name; each value carries the short keys `@` (text), `$` (attributes), `+` (children). Restored by SRR after the round-trip, so a mod need not preserve it. |
+| `lang` | string | Optional ISO 639-1 language hint (see below) — present only when an earlier step (an ingest strategy, or a prior `#filter keep_lang`) already declared it. The end-of-pipeline detection stamp runs *after* every pipeline step, so a mod must not rely on `lang` being set for a plain feed. |
 
 **stdout** is either the same JSON object back (with `title`/`content`/`link` optionally changed) **or** empty/whitespace — an empty result is a **no-op** that leaves the item unchanged (the opposite of an external ingest command, where empty stdout is an error). `guid` and `published` must be returned unchanged, and `raw` is restored by SRR regardless of what the mod emits.
 
