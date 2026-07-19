@@ -52,3 +52,48 @@ func setNodeAttr(n *html.Node, key, val string) {
 	}
 	n.Attr = append(n.Attr, html.Attribute{Key: key, Val: val})
 }
+
+// extractText returns the plain text of title + content for language
+// detection: content is parsed as HTML and only its text nodes contribute
+// (script/style subtrees excluded — a mod may run before #sanitize), all
+// whitespace collapsed to single spaces. Collection stops once max bytes are
+// gathered, bounding the per-article cost on huge content.
+func extractText(title, content string, max int) string {
+	var b strings.Builder
+	appendWords := func(s string) bool {
+		for _, f := range strings.Fields(s) {
+			if b.Len() >= max {
+				return false
+			}
+			if b.Len() > 0 {
+				b.WriteByte(' ')
+			}
+			b.WriteString(f)
+		}
+		return b.Len() < max
+	}
+	if !appendWords(title) {
+		return b.String()
+	}
+	body := parseBodyHTML(content)
+	if body == nil {
+		return b.String()
+	}
+	var walk func(*html.Node) bool
+	walk = func(n *html.Node) bool {
+		if n.Type == html.ElementNode && (n.DataAtom == atom.Script || n.DataAtom == atom.Style) {
+			return true // skip subtree, keep walking siblings
+		}
+		if n.Type == html.TextNode && !appendWords(n.Data) {
+			return false
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			if !walk(c) {
+				return false
+			}
+		}
+		return true
+	}
+	walk(body)
+	return b.String()
+}
