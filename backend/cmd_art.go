@@ -58,13 +58,14 @@ type ArtCmd struct {
 	Before *int     `short:"b" optional:"" help:"Return articles before this artID (exclusive). Omit for newest."`
 	// No short flags: kong flattens the globals into every command, and -s/-u
 	// are already spoken for there.
-	Since string `optional:"" help:"Only articles fetched at or after this time: a duration before now (24h, 7d, 2w), a date (2026-07-15), or an RFC3339 instant."`
-	Until string `optional:"" help:"Only articles fetched at or before this time (same forms as --since)."`
+	Since string `optional:"" help:"Only articles fetched at or after this time (inclusive): a duration before now (24h, 7d, 2w), a date (2026-07-15), or an RFC3339 instant."`
+	Until string `optional:"" help:"Only articles fetched before this time (exclusive; same forms as --since)."`
 }
 
-// window resolves --since/--until into inclusive unix-second bounds; a nil
-// bound is open-ended. The clock is fetched_at (ingest time), not published:
-// it is chron-monotone, so a window is a contiguous chron range.
+// window resolves --since/--until into the half-open [since, until) window's
+// unix-second bounds; a nil bound is open-ended. The clock is fetched_at
+// (ingest time), not published: it is chron-monotone, so a window is a
+// contiguous chron range.
 func (o *ArtCmd) window(now time.Time) (since, until *int64, err error) {
 	if o.Since != "" {
 		t, err := parseTimeBound(o.Since, now)
@@ -80,8 +81,8 @@ func (o *ArtCmd) window(now time.Time) (since, until *int64, err error) {
 		}
 		until = &t
 	}
-	if since != nil && until != nil && *since > *until {
-		return nil, nil, fmt.Errorf("--since %q is after --until %q: the window is empty", o.Since, o.Until)
+	if since != nil && until != nil && *since >= *until {
+		return nil, nil, fmt.Errorf("--since %q is not before --until %q: the window is empty", o.Since, o.Until)
 	}
 	return since, until, nil
 }
@@ -277,8 +278,9 @@ func (r *packReader) at(packID, packOffset int) (ArticleData, bool, error) {
 	return articles[packOffset], true, nil
 }
 
-// findWindow maps the inclusive fetched_at bounds to the inclusive entry-index
-// range [lo, hi]; a nil bound is open-ended. fetched_at is chron-monotone (one
+// findWindow maps the half-open fetched_at window [since, until) to the
+// inclusive entry-index range [lo, hi]; a nil bound is open-ended. fetched_at
+// is chron-monotone (one
 // stamp per fetch cycle, applied to the whole batch — the same property
 // ExpireArticles relies on), so the window is contiguous and two binary
 // searches locate it, reading O(log n) data packs instead of the whole series.
@@ -306,7 +308,7 @@ func (r *packReader) findWindow(entries []idxEntry, since, until *int64) (int, i
 		lo = sort.Search(len(entries), func(i int) bool { return fetchedAt(i) >= *since })
 	}
 	if until != nil {
-		hi = sort.Search(len(entries), func(i int) bool { return fetchedAt(i) > *until }) - 1
+		hi = sort.Search(len(entries), func(i int) bool { return fetchedAt(i) >= *until }) - 1
 	}
 	if probeErr != nil {
 		return 0, 0, probeErr
