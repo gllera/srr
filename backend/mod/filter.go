@@ -6,7 +6,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/abadojack/whatlanggo"
 )
@@ -43,14 +42,6 @@ import (
 // as a malformed parameter.
 //
 // #filter does not touch GUID, Published, Title, Content, or Link.
-
-// Fail-open language gate for keep_lang: only a confident classification
-// outside the keep set drops an item.
-const (
-	langMinTextLen    = 24   // runes of extracted text below which we never judge
-	langConfidenceMin = 0.8  // whatlanggo's own ReliableConfidenceThreshold
-	langMaxTextLen    = 4096 // byte cap on the text fed to the detector
-)
 
 // iso6391ToLang maps lowercase ISO 639-1 codes to whatlanggo languages, built
 // once from the library's table. 78 of its 84 languages expose a 639-1 code;
@@ -246,20 +237,4 @@ func parseKeepLangs(val string) (map[whatlanggo.Lang]bool, error) {
 		set[lang] = true
 	}
 	return set, nil
-}
-
-// detectLang returns the article's confidently-detected language: at least
-// langMinTextLen runes of extracted text classified at ≥ langConfidenceMin
-// confidence. ok=false is the fail-open path (short text, low confidence) —
-// keep_lang neither drops nor stamps then.
-func detectLang(title, content string) (whatlanggo.Lang, bool) {
-	text := extractText(title, content, langMaxTextLen)
-	if utf8.RuneCountInString(text) < langMinTextLen {
-		return 0, false
-	}
-	info := whatlanggo.Detect(text)
-	if info.Confidence < langConfidenceMin {
-		return 0, false
-	}
-	return info.Lang, true
 }
