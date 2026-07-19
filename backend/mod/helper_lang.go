@@ -6,39 +6,41 @@ import (
 	"github.com/abadojack/whatlanggo"
 )
 
-// Language detection shared by #filter keep_lang and the always-on stamp the
-// caller applies after the pipeline (processItem). Fail-open gate: only a
-// confident classification outside these bounds is ever reported.
+// Fail-open gate for the always-on language stamp the caller applies before
+// the pipeline (processItem): only a confident classification is ever
+// reported.
 const (
 	langMinTextLen    = 24   // runes of extracted text below which we never judge
 	langConfidenceMin = 0.8  // whatlanggo's own ReliableConfidenceThreshold
 	langMaxTextLen    = 4096 // byte cap on the text fed to the detector
 )
 
-// detectLang returns the article's confidently-detected language: at least
-// langMinTextLen runes of extracted text classified at ≥ langConfidenceMin
-// confidence. ok=false is the fail-open path (short text, low confidence) —
-// callers neither drop nor stamp then.
-func detectLang(title, content string) (whatlanggo.Lang, bool) {
+// DetectLang returns the article's confidently-detected ISO 639-1 code — at
+// least langMinTextLen runes of extracted text classified at ≥
+// langConfidenceMin confidence — or "" on the fail-open path (short text, low
+// confidence, or a detected language with no 639-1 code). The store-ready
+// form processItem stamps onto RawItem.Lang.
+func DetectLang(title, content string) string {
 	text := extractText(title, content, langMaxTextLen)
 	if utf8.RuneCountInString(text) < langMinTextLen {
-		return 0, false
+		return ""
 	}
 	info := whatlanggo.Detect(text)
 	if info.Confidence < langConfidenceMin {
-		return 0, false
+		return ""
 	}
-	return info.Lang, true
+	return info.Lang.Iso6391()
 }
 
-// DetectLang returns the article's confidently-detected ISO 639-1 code, or ""
-// when detection is uncertain (the fail-open path) or the detected language
-// has no 639-1 code — the store-ready form for RawItem.Lang. Callers that
-// need to distinguish "uncertain" from "confident but code-less" (keep_lang's
-// allowlist does) use detectLang directly.
-func DetectLang(title, content string) string {
-	if lang, ok := detectLang(title, content); ok {
-		return lang.Iso6391()
+// iso6391Codes is the set of ISO 639-1 codes whatlanggo can produce (78 of
+// its 84 languages carry one) — the validation table for #filter keep_lang's
+// allowlist, so a typo'd code is a hard configuration error.
+var iso6391Codes = func() map[string]bool {
+	m := make(map[string]bool, len(whatlanggo.Langs))
+	for lang := range whatlanggo.Langs {
+		if c := lang.Iso6391(); c != "" {
+			m[c] = true
+		}
 	}
-	return ""
-}
+	return m
+}()

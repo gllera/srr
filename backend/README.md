@@ -430,13 +430,13 @@ On the fetch path, an external mod runs under the same asset-dir contract as an 
 | `link` | string | Canonical article URL. |
 | `published` | string \| null | RFC 3339 timestamp, or `null` for dateless items. **Immutable.** |
 | `raw` | object | The parsed feed entry, keyed by element name; each value carries the short keys `@` (text), `$` (attributes), `+` (children). Restored by SRR after the round-trip, so a mod need not preserve it. |
-| `lang` | string | Optional ISO 639-1 language hint (see below) — present only when an earlier step (an ingest strategy, or a prior `#filter keep_lang`) already declared it. The end-of-pipeline detection stamp runs *after* every pipeline step, so a mod must not rely on `lang` being set for a plain feed. |
+| `lang` | string | Optional ISO 639-1 language hint (see below) — auto-detected **before** the pipeline runs (or declared by the ingest strategy), so a mod sees it filled for any article whose language was confidently detected. Absent when detection was uncertain (short text, low confidence). |
 
 **stdout** is either the same JSON object back (with `title`/`content`/`link` optionally changed) **or** empty/whitespace — an empty result is a **no-op** that leaves the item unchanged (the opposite of an external ingest command, where empty stdout is an error). `guid` and `published` must be returned unchanged, and `raw` is restored by SRR regardless of what the mod emits.
 
 To **drop** an item (prevent it from being stored), emit `{"drop":true}` — or include it alongside other fields, e.g. `{"drop":true,"guid":…}`. A dropped item is silently discarded and its GUID is retained in the feed's dedup boundary so it is not re-evaluated on the next fetch. Dropping is not an error; subsequent pipeline steps are skipped for a dropped item.
 
-A mod (or ingest strategy) may also declare the article's language by emitting `lang` with an ISO 639-1 code, e.g. `{"lang":"es"}`. The field is **backend-internal**: it rides the pipeline (readable by later mods; a declared value is never overwritten) but is never written to the data packs, so readers never see it. When no step declares a language, SRR detects it automatically at the end of the pipeline — every stored article carries a confident detection (or empty when detection is uncertain).
+A mod (or ingest strategy) may also override the article's language by emitting `lang` with an ISO 639-1 code, e.g. `{"lang":"es"}`. The field is **backend-internal**: it rides the pipeline (readable by later mods — `#filter keep_lang` decides from it) but is never written to the data packs, so readers never see it. SRR detects it automatically **before** the pipeline runs (unless the ingest strategy declared one — a declared value is never overwritten), with one re-attempt after the pipeline for items whose content a step like `#readability` grew past the detection gate — so every stored article carries a confident detection (or empty when detection stayed uncertain).
 
 **Example.** For one item from a `#feed` source, SRR writes this object to the mod's stdin (pretty-printed). `raw` mirrors the parsed feed entry — element name → list of occurrences, each `{@: text, $: attributes, +: children}`; it is `null` for items from an external ingest command, which don't populate it:
 
@@ -492,11 +492,11 @@ srr feed add -t "Feed" -u https://example.com/rss -r lower
 | `drop_content` | `/regex/[i]` | Drop when content matches the regex |
 | `keep_content` | `/regex/[i]` | Drop when content does **not** match the regex |
 | `min_words` | integer | Drop when plain-text word count of content is below N |
-| `keep_lang` | ISO 639-1 codes | Drop when the language is confidently detected as one **not** in the list |
+| `keep_lang` | ISO 639-1 codes | Drop when the item's `lang` is set and **not** in the list |
 
 Regex syntax: `/pattern/` or `/pattern/i` (flag `i` = case-insensitive). A malformed regex or unknown parameter is a hard configuration error. The word-count check (`min_words`) runs against the raw content string including any HTML tags. A regex param value **cannot contain a literal space** — the pipeline token is split on whitespace before its parameters are parsed — so use a whitespace metacharacter instead: `drop_title=/breaking\s+news/` or `drop_title=/breaking[ ]news/`, not `drop_title=/breaking news/`.
 
-Language detection (`keep_lang`) is offline (trigram-based, via whatlanggo) and **fail-open**: an item is dropped only when at least 24 runes of plain text (title + HTML-stripped content) are detected at ≥ 0.8 confidence as a language outside the list. Short posts, uncertain detections, and empty items always pass — the failure mode is a stray foreign article surviving, never a wanted article lost. Codes are case-insensitive ISO 639-1 (`en,es`); an unknown code is a hard configuration error. A confident detection is also stamped onto the item's backend-internal `lang` field (drop or keep, and only when no earlier step declared one) for later pipeline steps to read — and independently of `keep_lang`, every article is language-detected at the end of the pipeline, so `lang` is populated even on feeds with no filter configured.
+`keep_lang` does no detection of its own: it reads the item's backend-internal `lang` field — auto-detected before the pipeline runs, or declared by the ingest strategy or an earlier mod (see the external mod protocol above). **Fail-open**: an item whose `lang` is empty (short post, uncertain detection) always passes — the failure mode is a stray foreign article surviving, never a wanted article lost. Because the decision reads `lang`, a declared value is authoritative even when it contradicts the text, and content fetched mid-pipe (`#readability`) does not influence it. Codes are case-insensitive ISO 639-1 (`en,es`); an unknown code is a hard configuration error.
 
 ```bash
 # Create a recipe that filters sponsored posts and low-word articles
@@ -508,7 +508,7 @@ srr recipe set golang -p "#filter keep_title=/golang/i" -p "#default"
 srr feed upd 5 -r golang
 
 # Keep only English and Spanish articles
-srr recipe set eng-es -p "#default" -p "#filter keep_lang=en,es"
+srr recipe set eng-es -p "#filter keep_lang=en,es" -p "#default"
 srr feed upd 7 -r eng-es
 ```
 

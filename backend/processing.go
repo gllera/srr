@@ -24,6 +24,15 @@ var titlePolicy = bluemonday.StrictPolicy()
 // so feed.fetch runs it after this returns. Callers without a store (preview,
 // tests) get the finished content directly.
 func processItem(ctx context.Context, processor *mod.Module, pipeline []string, i *mod.RawItem) error {
+	// Always-on language stamp, BEFORE the pipeline so every step can read
+	// i.Lang — #filter keep_lang consumes it instead of detecting on its own.
+	// A confident detection fills Lang unless the ingest strategy already
+	// declared one; the fail-open path (short text, low confidence) leaves it
+	// empty. extractText strips markup, so raw pre-sanitize content detects
+	// the same as clean text.
+	if i.Lang == "" {
+		i.Lang = mod.DetectLang(i.Title, i.Content)
+	}
 	if len(pipeline) > 0 {
 		GUID := i.GUID
 		hadPub := i.Published != nil
@@ -54,11 +63,9 @@ func processItem(ctx context.Context, processor *mod.Module, pipeline []string, 
 	i.Title = strings.Join(strings.Fields(strings.Map(stripControlKeepWS, i.Title)), " ")
 	i.Link = strings.Map(stripControl, i.Link)
 	i.Content = strings.Map(stripControlKeepWS, i.Content)
-	// Always-on language stamp: a confident detection fills Lang unless an
-	// earlier step (ingest strategy, external mod, #filter keep_lang) already
-	// declared one. After normalization so the detector sees final text; a
-	// dropped item never reaches here (short-circuit above), so detection is
-	// never spent on discarded items.
+	// Second detection attempt, only when the pre-pipe pass came up empty: a
+	// step may have grown the content past the gate (#readability replacing a
+	// short teaser with the full article body). Already-stamped items skip it.
 	if i.Lang == "" {
 		i.Lang = mod.DetectLang(i.Title, i.Content)
 	}

@@ -209,12 +209,13 @@ type RawItem struct {
 	// re-evaluated on subsequent fetches. Drop is NOT a pipeline error.
 	Drop bool `json:"drop,omitempty"`
 	// Lang is the article's ISO 639-1 language code — backend-internal only
-	// (never written to the data packs; readers never see it). Declared by an
-	// ingest strategy or an external mod via this wire field, stamped by
-	// #filter keep_lang mid-pipe, and finally by the caller's end-of-pipeline
-	// stamp (DetectLang in processItem) — every surviving article carries a
-	// confident detection. A declared value is never clobbered. Mutable,
-	// unlike GUID/Published.
+	// (never written to the data packs; readers never see it). Stamped by the
+	// caller's PRE-pipeline detection (DetectLang in processItem) unless the
+	// ingest strategy declared one, so every pipeline step can read it —
+	// #filter keep_lang decides from it — and a mod can override it via this
+	// wire field. A post-pipe re-attempt covers content grown past the
+	// detection gate mid-pipe. A declared value is never clobbered by
+	// detection. Mutable, unlike GUID/Published.
 	Lang string `json:"lang,omitempty"`
 }
 
