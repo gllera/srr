@@ -364,26 +364,27 @@ func TestArtListSince(t *testing.T) {
 	}
 }
 
-// TestArtListUntil pins the --until half: inclusive too, so the cycle stamped
-// exactly at the bound is kept.
+// TestArtListUntil pins the --until half: exclusive, so the cycle stamped
+// exactly at the bound is dropped.
 func TestArtListUntil(t *testing.T) {
 	artTimeStore(t)
 
 	out := artRun(t, &ArtCmd{Limit: 50, Until: artStamp(1)})
-	if want := []string{"b1", "b0", "a1", "a0"}; !artEqualStrs(artTitles(out), want) {
-		t.Errorf("titles = %v, want %v (cycles 0-1, newest first)", artTitles(out), want)
+	if want := []string{"a1", "a0"}; !artEqualStrs(artTitles(out), want) {
+		t.Errorf("titles = %v, want %v (cycle 0 only, newest first)", artTitles(out), want)
 	}
-	if out.Total != 4 {
-		t.Errorf("Total = %d, want 4", out.Total)
+	if out.Total != 2 {
+		t.Errorf("Total = %d, want 2", out.Total)
 	}
 }
 
-// TestArtListWindow pins both bounds together, including the degenerate
-// single-cycle window where since == until.
+// TestArtListWindow pins both bounds together: the half-open [since, until)
+// window keeps the cycle at --since and drops the one at --until, so
+// consecutive windows compose without overlap.
 func TestArtListWindow(t *testing.T) {
 	artTimeStore(t)
 
-	out := artRun(t, &ArtCmd{Limit: 50, Since: artStamp(1), Until: artStamp(1)})
+	out := artRun(t, &ArtCmd{Limit: 50, Since: artStamp(1), Until: artStamp(2)})
 	if want := []string{"b1", "b0"}; !artEqualStrs(artTitles(out), want) {
 		t.Errorf("titles = %v, want %v (single cycle)", artTitles(out), want)
 	}
@@ -451,14 +452,19 @@ func TestArtListWindowPaging(t *testing.T) {
 	}
 }
 
-// TestArtListWindowInverted pins since > until as a hard error rather than a
-// silently empty result.
+// TestArtListWindowInverted pins since >= until as a hard error rather than a
+// silently empty result — with an exclusive --until, equality is a provably
+// empty window too.
 func TestArtListWindowInverted(t *testing.T) {
 	artTimeStore(t)
 
 	err := artRunErr(t, &ArtCmd{Limit: 50, Since: artStamp(2), Until: artStamp(0)})
 	if !strings.Contains(err.Error(), "since") {
 		t.Errorf("error = %v, want it to name --since/--until", err)
+	}
+	err = artRunErr(t, &ArtCmd{Limit: 50, Since: artStamp(1), Until: artStamp(1)})
+	if !strings.Contains(err.Error(), "since") {
+		t.Errorf("error = %v, want since == until to be the same hard error", err)
 	}
 }
 
@@ -485,7 +491,7 @@ func TestArtListWindowBeforeAboveCeiling(t *testing.T) {
 	artTimeStore(t)
 
 	above := 6 // one past the newest chron in the store
-	out := artRun(t, &ArtCmd{Limit: 50, Until: artStamp(1), Before: &above})
+	out := artRun(t, &ArtCmd{Limit: 50, Until: artStamp(2), Before: &above})
 	if want := []string{"b1", "b0", "a1", "a0"}; !artEqualStrs(artTitles(out), want) {
 		t.Errorf("titles = %v, want %v (cursor clamped to the --until ceiling)", artTitles(out), want)
 	}
@@ -614,8 +620,9 @@ func TestArtListWindowAcrossDeltaSeam(t *testing.T) {
 		t.Fatal("fixture built no delta chain — the seam is not exercised")
 	}
 
-	// Window spanning the seam: cycle 0 (packs) + cycle 1 (delta).
-	out := artRun(t, &ArtCmd{Limit: 50, Until: artStamp(1)})
+	// Window spanning the seam: cycle 0 (packs) + cycle 1 (delta), with the
+	// exclusive --until sitting on cycle 2's stamp.
+	out := artRun(t, &ArtCmd{Limit: 50, Until: artStamp(2)})
 	if want := []string{"b1", "b0", "a1", "a0"}; !artEqualStrs(artTitles(out), want) {
 		t.Errorf("titles = %v, want %v (across the pack/delta seam)", artTitles(out), want)
 	}
