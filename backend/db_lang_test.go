@@ -8,11 +8,11 @@ import (
 	"testing"
 )
 
-// TestArticleDataLangNotPacked pins the lang contract on the pack writer
-// side: Item.articleData carries Lang through for same-cycle backend use,
-// and jsonEncode — the one data-pack line encoder — never serializes it
-// (json:"-"), so the data/ JSONL format is byte-identical with or without it.
-func TestArticleDataLangNotPacked(t *testing.T) {
+// TestArticleDataLangPacked pins the lang contract on the pack writer side:
+// jsonEncode — the one data-pack line encoder — serializes Lang under the
+// short key "g", and omits the field entirely when detection came up empty
+// (omitempty), so undetected articles cost no pack bytes.
+func TestArticleDataLangPacked(t *testing.T) {
 	it := &Item{Feed: &Feed{}, Title: "T", Content: "c", Lang: "en"}
 	ad := it.articleData(42)
 	if ad.Lang != "en" {
@@ -22,8 +22,8 @@ func TestArticleDataLangNotPacked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("jsonEncode: %v", err)
 	}
-	if strings.Contains(string(line), "lang") {
-		t.Errorf("pack line = %s, want no lang field", line)
+	if !strings.Contains(string(line), `"g":"en"`) {
+		t.Errorf("pack line = %s, want a \"g\":\"en\" field", line)
 	}
 	bare := ad
 	bare.Lang = ""
@@ -31,16 +31,14 @@ func TestArticleDataLangNotPacked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("jsonEncode: %v", err)
 	}
-	if string(line) != string(bareLine) {
-		t.Errorf("pack line differs with Lang set:\n  with: %s\n  without: %s", line, bareLine)
+	if strings.Contains(string(bareLine), `"g"`) {
+		t.Errorf("pack line = %s, want no g field for empty Lang", bareLine)
 	}
 }
 
 // The reader half of the same contract: a stamped article survives a real
-// PutArticles → data pack → parseDataPack round trip with everything else
-// intact and Lang empty, so nothing downstream can come to depend on a value
-// the packs do not carry.
-func TestPutArticlesDropsLangOnReadBack(t *testing.T) {
+// PutArticles → data pack → parseDataPack round trip with Lang intact.
+func TestPutArticlesLangRoundTrip(t *testing.T) {
 	db, c, dir := setupTestDB(t)
 	f := &Feed{Title: "F", URL: "https://e.example/f"}
 	if err := db.AddFeed(f); err != nil {
@@ -73,7 +71,7 @@ func TestPutArticlesDropsLangOnReadBack(t *testing.T) {
 	if arts[0].Title != "T" || arts[0].Content != "c" {
 		t.Errorf("read back %+v, want the article intact", arts[0])
 	}
-	if arts[0].Lang != "" {
-		t.Errorf("read-back Lang = %q, want empty — the packs never carried it", arts[0].Lang)
+	if arts[0].Lang != "es" {
+		t.Errorf("read-back Lang = %q, want \"es\"", arts[0].Lang)
 	}
 }

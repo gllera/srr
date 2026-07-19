@@ -110,7 +110,7 @@ func artTestStore(t *testing.T) (*DB, *Feed, *Feed) {
 		{Feed: f1, Title: "a1", Content: pad, Link: "l1", Published: 101},
 		{Feed: f0, Title: "a2", Content: pad, Link: "l2", Published: 102},
 		{Feed: f1, Title: "a3", Content: pad, Link: "l3", Published: 103},
-		{Feed: f0, Title: "a4", Content: pad, Link: "l4", Published: 104},
+		{Feed: f0, Title: "a4", Content: pad, Link: "l4", Published: 104, Lang: "es"},
 	}
 	if _, err := db.PutArticles(ctx, items); err != nil {
 		t.Fatalf("PutArticles: %v", err)
@@ -181,6 +181,14 @@ func TestArtListNewestFirst(t *testing.T) {
 	}
 	if out.Articles[0].Link != "l4" {
 		t.Errorf("newest link = %q, want l4", out.Articles[0].Link)
+	}
+	// Lang rides the embedded ArticleData ("g") through pack write, read-back,
+	// and the printed JSON — present when stamped, absent otherwise.
+	if out.Articles[0].Lang != "es" {
+		t.Errorf("newest Lang = %q, want es", out.Articles[0].Lang)
+	}
+	if out.Articles[1].Lang != "" {
+		t.Errorf("a3 Lang = %q, want empty (never stamped)", out.Articles[1].Lang)
 	}
 	if out.NextCursor != nil {
 		t.Errorf("NextCursor = %v, want nil (page not full)", *out.NextCursor)

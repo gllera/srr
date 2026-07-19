@@ -87,12 +87,15 @@ func driveDeltaStore(t *testing.T, maxDeltas int) (string, *DBCore, int) {
 		db.core.FetchedAt = 1_700_000_000 + int64(bi)*300
 		batch := make([]*Item, 0, n)
 		for range n {
+			// Lang on a deterministic subset: "g"-bearing lines and g-less
+			// lines both cross the delta→consolidation seam byte-identically.
 			batch = append(batch, &Item{
 				Feed:      feeds[art%len(feeds)],
 				Title:     fmt.Sprintf("title %d %s", art, rng.content(8)),
 				Content:   rng.content(300),
 				Link:      fmt.Sprintf("https://example.com/a/%d", art),
 				Published: 1_600_000_000 + int64(art)*60,
+				Lang:      []string{"", "es", "en"}[art%3],
 			})
 			art++
 		}
