@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -458,10 +462,119 @@ func TestArtListWindowInverted(t *testing.T) {
 	}
 }
 
-// TestArtListWindowBadValue pins an unparseable bound failing the command.
+// TestArtListWindowBadValue pins an unparseable bound failing the command —
+// on both flags, each error naming the flag it came from.
 func TestArtListWindowBadValue(t *testing.T) {
 	artTimeStore(t)
-	artRunErr(t, &ArtCmd{Limit: 50, Since: "last tuesday"})
+
+	err := artRunErr(t, &ArtCmd{Limit: 50, Since: "last tuesday"})
+	if !strings.Contains(err.Error(), "--since") {
+		t.Errorf("error = %v, want it to name --since", err)
+	}
+	err = artRunErr(t, &ArtCmd{Limit: 50, Until: "last tuesday"})
+	if !strings.Contains(err.Error(), "--until") {
+		t.Errorf("error = %v, want it to name --until", err)
+	}
+}
+
+// TestArtListWindowBeforeAboveCeiling pins --before being clamped DOWN to the
+// window ceiling: a cursor taken from an unwindowed page sits above --until, and
+// paging from it must still start at the newest in-window article rather than
+// leaking the ones above the bound.
+func TestArtListWindowBeforeAboveCeiling(t *testing.T) {
+	artTimeStore(t)
+
+	above := 6 // one past the newest chron in the store
+	out := artRun(t, &ArtCmd{Limit: 50, Until: artStamp(1), Before: &above})
+	if want := []string{"b1", "b0", "a1", "a0"}; !artEqualStrs(artTitles(out), want) {
+		t.Errorf("titles = %v, want %v (cursor clamped to the --until ceiling)", artTitles(out), want)
+	}
+	if out.Total != 4 {
+		t.Errorf("Total = %d, want 4", out.Total)
+	}
+}
+
+// artDropLastRecord rewrites the latest data pack without its final JSONL
+// record, so the newest chron's idx entry addresses an offset past the end of
+// its pack — the corrupt store the window search and the content fill are
+// documented to treat differently.
+func artDropLastRecord(t *testing.T, db *DB) {
+	t.Helper()
+	path := filepath.Join(globals.Store, latestKey(&db.core, "data"))
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read latest data pack: %v", err)
+	}
+	plain, err := gunzip(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("gunzip latest data pack: %v", err)
+	}
+	lines := bytes.SplitAfter(bytes.TrimRight(plain, "\n"), []byte("\n"))
+	if len(lines) < 2 {
+		t.Fatalf("latest data pack holds %d record(s); the fixture must keep the newest article here", len(lines))
+	}
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	for _, l := range lines[:len(lines)-1] {
+		if _, err := gz.Write(l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatalf("rewrite latest data pack: %v", err)
+	}
+}
+
+// TestArtListMissingRecord pins the deliberate asymmetry between the two
+// consumers of packReader.at when an idx entry addresses no data-pack record:
+// the content fill tolerates it and leaves the row blank, while the window
+// search refuses — a probe reading a zero fetched_at would silently relocate
+// the whole window instead of reporting the corrupt store.
+func TestArtListMissingRecord(t *testing.T) {
+	db, _, _ := artTimeStore(t)
+	artDropLastRecord(t, db)
+
+	// Unwindowed: the missing record is a blank row, not an error, and every
+	// other row still resolves.
+	out := artRun(t, &ArtCmd{Limit: 50})
+	if len(out.Articles) != 6 {
+		t.Fatalf("got %d articles, want 6 (idx entries are unchanged)", len(out.Articles))
+	}
+	if newest := out.Articles[0]; newest.Title != "" || newest.Content != "" {
+		t.Errorf("newest row = %+v, want it left blank for the missing record", newest)
+	}
+	if out.Articles[1].Title != "c0" {
+		t.Errorf("second row title = %q, want %q (neighbours still resolve)", out.Articles[1].Title, "c0")
+	}
+
+	// Windowed: the same store is a hard error naming the offending chron.
+	err := artRunErr(t, &ArtCmd{Limit: 50, Until: artStamp(2)})
+	if !strings.Contains(err.Error(), "no data-pack record") {
+		t.Errorf("error = %v, want the window search to refuse the corrupt store", err)
+	}
+	if !strings.Contains(err.Error(), "chron 5") {
+		t.Errorf("error = %v, want it to name the offending chron", err)
+	}
+}
+
+// TestArtListWindowUnreadablePack pins a data-pack read failure surfacing from
+// the window search. The search reads packs the result page never touches, so a
+// store with one unreadable pack fails a windowed query that would otherwise
+// have returned a plausible-looking window.
+func TestArtListWindowUnreadablePack(t *testing.T) {
+	db, _, _ := artTimeStore(t)
+	path := filepath.Join(globals.Store, latestKey(&db.core, "data"))
+	if err := os.WriteFile(path, []byte("not gzip"), 0o644); err != nil {
+		t.Fatalf("corrupt latest data pack: %v", err)
+	}
+
+	artRunErr(t, &ArtCmd{Limit: 50, Until: artStamp(2)})
+	// The content fill propagates the same failure — nothing here is tolerated
+	// into a silently short page.
+	artRunErr(t, &ArtCmd{Limit: 50})
 }
 
 // TestArtListWindowAcrossDeltaSeam pins the window resolving across the
@@ -513,6 +626,16 @@ func TestArtListWindowAcrossDeltaSeam(t *testing.T) {
 		if a.Content == "" {
 			t.Errorf("article %q has empty content", a.Title)
 		}
+	}
+
+	// The --since search walks different indices than the --until one, so pin
+	// the lower bound landing inside the delta region too.
+	out = artRun(t, &ArtCmd{Limit: 50, Since: artStamp(2)})
+	if want := []string{"c1", "c0"}; !artEqualStrs(artTitles(out), want) {
+		t.Errorf("titles = %v, want %v (--since inside the delta chain)", artTitles(out), want)
+	}
+	if out.Total != 2 {
+		t.Errorf("Total = %d, want 2", out.Total)
 	}
 }
 

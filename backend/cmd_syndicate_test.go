@@ -327,6 +327,32 @@ func TestSyndicateRmFailsWhenPresentFileCannotBeRemoved(t *testing.T) {
 	}
 }
 
+// setOutFeed's old-format reap runs BEFORE the Commit for the same reason
+// removeOutFeed's does: once the config names the new extension, nothing can
+// ever delete the old file (the store has no List). So a Rm failure on a file
+// that IS present must fail the upsert with the config — and therefore the only
+// name that file has — left intact.
+func TestSyndicateSetFailsWhenOldFormatFileCannotBeReaped(t *testing.T) {
+	db, c, _ := setupTestDB(t)
+	c.Feeds = map[int]*Feed{1: {id: 1, URL: "http://a", Tag: "news"}}
+	c.Out = []OutFeed{{Name: "foo", Format: "rss", Tags: []string{"news"}, Limit: 50}}
+	if err := db.Commit(ctx); err != nil {
+		t.Fatalf("seed commit: %v", err)
+	}
+	if err := db.Put(ctx, "out/foo.rss", strings.NewReader("<rss/>"), true); err != nil {
+		t.Fatalf("seed rss: %v", err)
+	}
+
+	db.Backend = &rmFailBackend{Backend: db.Backend, key: "out/foo.rss"}
+	in := OutFeed{Name: "foo", Format: "json", Tags: []string{"news"}, Limit: 50}
+	if err := setOutFeed(ctx, db, in); err == nil {
+		t.Fatal("setOutFeed returned nil though the present out/foo.rss could not be reaped")
+	}
+	if len(db.core.Out) != 1 || db.core.Out[0].Format != "rss" {
+		t.Errorf("Out = %+v, want the old rss entry intact so a retry still names out/foo.rss", db.core.Out)
+	}
+}
+
 // The tolerated case is narrow and provable: the object is NOT there. A store
 // that answers DELETE with 405/403 rather than 404 on a key that never existed
 // must not make the entry undeletable.
@@ -601,6 +627,37 @@ func TestSyndicatePushOverCap(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("err = %v, want over-cap rejection", err)
 	}
+}
+
+// The cap reads one byte past it (io.LimitReader(src, max+1)) and compares with
+// >, so exactly-at-cap must pass and one byte over must not — the boundary the
+// far-over test above cannot distinguish.
+func TestSyndicatePushCapBoundary(t *testing.T) {
+	old := maxOutPayload
+	defer func() { maxOutPayload = old }()
+
+	t.Run("exactly at cap", func(t *testing.T) {
+		maxOutPayload = int64(len(testRSSDoc))
+		db, _ := seedExternalOut(t, "rss")
+		if err := (&SyndicatePushCmd{Name: "x", in: strings.NewReader(testRSSDoc)}).Run(); err != nil {
+			t.Fatalf("push at exactly the cap was rejected: %v", err)
+		}
+		if n, _ := db.Stat(ctx, "out/x.rss"); n != int64(len(testRSSDoc)) {
+			t.Errorf("stored size = %d, want the whole %d-byte payload", n, len(testRSSDoc))
+		}
+	})
+
+	t.Run("one byte over cap", func(t *testing.T) {
+		maxOutPayload = int64(len(testRSSDoc)) - 1
+		db, _ := seedExternalOut(t, "rss")
+		err := (&SyndicatePushCmd{Name: "x", in: strings.NewReader(testRSSDoc)}).Run()
+		if err == nil || !strings.Contains(err.Error(), "exceeds") {
+			t.Fatalf("err = %v, want over-cap rejection one byte past the cap", err)
+		}
+		if n, _ := db.Stat(ctx, "out/x.rss"); n != 0 {
+			t.Errorf("out/x.rss written (size %d) despite the over-cap payload", n)
+		}
+	})
 }
 
 func TestSyndicatePushUnknownAndManaged(t *testing.T) {

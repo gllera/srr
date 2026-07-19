@@ -11,6 +11,8 @@ import "testing"
 //	langTextRU → rus 1.000 (distinct script)
 //	langTextJA → jpn 1.000 (distinct script)
 //	langTextPT → por 0.412 (Latin-script sibling — under the gate)
+//	langTextFA → pes 1.000 (whatlanggo maps it to "" — iso6391Extra corrects it)
+//	langTextYI → ydd 1.000 (same correction)
 const (
 	langTextEN = "The quick brown fox jumps over the lazy dog while the morning sun rises slowly over the quiet English countryside."
 	langTextES = "El rápido zorro marrón salta sobre el perro perezoso mientras el sol de la mañana se eleva lentamente sobre el tranquilo campo español."
@@ -18,6 +20,8 @@ const (
 	langTextRU = "Быстрая коричневая лиса перепрыгивает через ленивую собаку, пока утреннее солнце медленно поднимается над тихой русской деревней."
 	langTextJA = "素早い茶色の狐が怠け者の犬を飛び越え、朝日が静かな田園風景の上にゆっくりと昇っていきます。"
 	langTextPT = "A rápida raposa marrom salta sobre o cão preguiçoso enquanto o sol da manhã nasce lentamente sobre o campo português tranquilo."
+	langTextFA = "روباه قهوه\u200cای سریع از روی سگ تنبل می\u200cپرد در حالی که خورشید صبحگاهی به آرامی بر فراز روستای آرام ایرانی طلوع می\u200cکند."
+	langTextYI = "דער שנעלער ברוינער פוקס שפּרינגט איבער דעם פוילן הונט בשעת די מאָרגן זון גייט לאַנגזאַם אויף איבער דעם רויקן דאָרף."
 )
 
 // DetectLang is the always-on stamp processItem applies: the ISO 639-1 code
@@ -37,6 +41,11 @@ func TestDetectLang(t *testing.T) {
 		{"short text fails open", "Hi", "Too short", ""},
 		{"low confidence fails open", "", langTextPT, ""},
 		{"empty item fails open", "", "", ""},
+		// The stamping half of the iso6391Extra correction: whatlanggo's own
+		// table maps both of these to "", so uncorrected they would be detected
+		// confidently and then thrown away, leaving the article unstampable.
+		{"Western Persian carries fa", "", langTextFA, "fa"},
+		{"Eastern Yiddish carries yi", "", langTextYI, "yi"},
 		{"HTML is stripped before detection", "", "<p>" + langTextES + "</p><script>var x = 1;</script>", "es"},
 	}
 	for _, tt := range tests {
