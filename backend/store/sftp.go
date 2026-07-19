@@ -191,6 +191,7 @@ func (d *SFTP) AtomicPut(_ context.Context, key string, r io.Reader, _ ObjectMet
 	if err := d.ensureDir(file); err != nil {
 		return err
 	}
+	d.sweepTempLeftovers(path.Dir(file))
 	tmpFile := uniqueTempName(file)
 
 	fs, err := d.client.OpenFile(tmpFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
@@ -213,6 +214,28 @@ func (d *SFTP) AtomicPut(_ context.Context, key string, r io.Reader, _ ObjectMet
 		return fmt.Errorf("renaming %s to %s: %w", tmpFile, file, err)
 	}
 	return nil
+}
+
+// sweepTempLeftovers is the Local backend's sweep over SFTP: it removes
+// uniqueTempName staging files a hard-killed predecessor stranded in dir
+// (rename never ran; the unique names mean nothing overwrites them and no GC
+// speaks them), age-gated by tempSweepMaxAge off any live writer's in-flight
+// staging file. Best-effort and silent on errors — janitor work must never
+// fail the AtomicPut that triggered it.
+func (d *SFTP) sweepTempLeftovers(dir string) {
+	entries, err := d.client.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, fi := range entries {
+		if !fi.Mode().IsRegular() || !isTempLeftover(fi.Name()) || time.Since(fi.ModTime()) < tempSweepMaxAge {
+			continue
+		}
+		file := path.Join(dir, fi.Name())
+		if err := d.client.Remove(file); err == nil {
+			slog.Info("removed stale atomic-write leftover", "file", file)
+		}
+	}
 }
 
 // Stat returns the remote file's size; a missing key is (0, nil) per the

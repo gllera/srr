@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/binary"
 	"os"
 	"path/filepath"
@@ -410,6 +411,60 @@ func TestNewDBCorruptSeenFallsBackToEmpty(t *testing.T) {
 	defer db2.Close(ctx)
 	if db2.seen == nil || len(db2.seen.m) != 0 {
 		t.Errorf("corrupt %s: pool not empty, want empty fallback", seenLegacyKey)
+	}
+}
+
+// A store carrying only the pre-ping-pong single seen.gz completes its
+// migration on the first committed cycle: loadSeen bridges the legacy pool in
+// (marked dirty, so even an all-304 idle cycle writes), SyncSeen makes it
+// durable in a slot, and the superseded legacy object is reaped — instead of
+// being stranded in the store forever. A crash at any point either leaves the
+// legacy file (the retry re-migrates) or the slot (migration done); the pool
+// is never lost.
+func TestSyncSeenMigratesAndReapsLegacy(t *testing.T) {
+	_, _, dir := setupTestDB(t)
+
+	legacy := newSeenPool()
+	legacy.stamp(1, 0xabc123, 100)
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write(legacy.marshal()); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, seenLegacyKey), buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := NewDB(ctx, false)
+	if err != nil {
+		t.Fatalf("NewDB: %v", err)
+	}
+	defer db.Close(ctx)
+	if !db.seen.has(1, 0xabc123) {
+		t.Fatal("legacy pool not bridged in on load")
+	}
+	if err := db.commitState(ctx); err != nil { // SyncSeen (slot + reap) + Commit
+		t.Fatalf("commitState: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, seenLegacyKey)); !os.IsNotExist(err) {
+		t.Errorf("legacy %s still present after migration (err=%v), want reaped", seenLegacyKey, err)
+	}
+	slot := filepath.Join(dir, seenSlotKey(db.core.SeenFlag))
+	if _, err := os.Stat(slot); err != nil {
+		t.Errorf("migrated slot %s missing: %v", slot, err)
+	}
+
+	db2, err := NewDB(ctx, false)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer db2.Close(ctx)
+	if !db2.seen.has(1, 0xabc123) {
+		t.Error("migrated pool lost the stamp after the legacy reap")
 	}
 }
 

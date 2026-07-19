@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 func init() {
@@ -98,6 +99,7 @@ func (d *Local) AtomicPut(_ context.Context, key string, r io.Reader, _ ObjectMe
 	if err := d.ensureDir(file); err != nil {
 		return err
 	}
+	sweepTempLeftovers(filepath.Dir(file))
 	tmpFile := uniqueTempName(file)
 
 	fs, err := os.OpenFile(tmpFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
@@ -138,6 +140,32 @@ func (d *Local) AtomicPut(_ context.Context, key string, r io.Reader, _ ObjectMe
 		dir.Close()
 	}
 	return nil
+}
+
+// sweepTempLeftovers removes uniqueTempName staging files a hard-killed
+// predecessor stranded in dir (its rename never ran; the per-process unique
+// name means nothing ever overwrites them and no GC speaks them — see
+// tempSweepMaxAge, which also age-gates the sweep off any live writer's
+// in-flight staging file). Best-effort and silent on errors: janitor work
+// must never fail or noise up the AtomicPut that triggered it.
+func sweepTempLeftovers(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.Type().IsRegular() || !isTempLeftover(e.Name()) {
+			continue
+		}
+		fi, err := e.Info()
+		if err != nil || time.Since(fi.ModTime()) < tempSweepMaxAge {
+			continue
+		}
+		file := filepath.Join(dir, e.Name())
+		if err := os.Remove(file); err == nil {
+			slog.Info("removed stale atomic-write leftover", "file", file)
+		}
+	}
 }
 
 // Stat returns the file's size; a missing key is (0, nil) per the Backend

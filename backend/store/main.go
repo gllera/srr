@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -320,6 +321,42 @@ var tmpWriteCounter atomic.Uint64
 // (temp-then-rename), unique per call even for concurrent writers of the same key.
 func uniqueTempName(file string) string {
 	return fmt.Sprintf("%s.tmp.%d.%d", file, os.Getpid(), tmpWriteCounter.Add(1))
+}
+
+// tempSweepMaxAge is how old a uniqueTempName staging leftover must be before
+// AtomicPut's pre-write sweep (local/SFTP) deletes it. Every failure path
+// removes its own staging file, so a leftover only exists when a hard kill
+// (SIGKILL, power loss, OOM) landed between the temp create and the rename —
+// and its name is unique per process+write, so nothing ever overwrites it and
+// no GC knows it (the pack sweeps only speak the pack-name grammar): without
+// the sweep each such crash strands one file in the store forever. The age
+// gate keeps the sweep from racing a live writer's in-flight staging file
+// (another process mid-AtomicPut under --force); no single atomic write runs
+// anywhere near this long.
+const tempSweepMaxAge = 24 * time.Hour
+
+// isTempLeftover reports whether a directory entry name is a uniqueTempName
+// staging file (<base>.tmp.<pid>.<n>). The strict digits-suffix match keeps
+// the sweep from ever touching a user file that merely contains ".tmp.".
+func isTempLeftover(name string) bool {
+	i := strings.LastIndex(name, ".tmp.")
+	if i < 0 {
+		return false
+	}
+	pid, n, ok := strings.Cut(name[i+len(".tmp."):], ".")
+	return ok && isDigits(pid) && isDigits(n)
+}
+
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // rmErr maps a remove error to the store's missing-key Rm contract, shared by
