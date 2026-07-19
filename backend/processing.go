@@ -54,6 +54,14 @@ func processItem(ctx context.Context, processor *mod.Module, pipeline []string, 
 	i.Title = strings.Join(strings.Fields(strings.Map(stripControlKeepWS, i.Title)), " ")
 	i.Link = strings.Map(stripControl, i.Link)
 	i.Content = strings.Map(stripControlKeepWS, i.Content)
+	// Always-on language stamp: a confident detection fills Lang unless an
+	// earlier step (ingest strategy, external mod, #filter keep_lang) already
+	// declared one. After normalization so the detector sees final text; a
+	// dropped item never reaches here (short-circuit above), so detection is
+	// never spent on discarded items.
+	if i.Lang == "" {
+		i.Lang = mod.DetectLang(i.Title, i.Content)
+	}
 	return nil
 }
 

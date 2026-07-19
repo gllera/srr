@@ -167,6 +167,55 @@ func TestProcessItemDropByExternalMod(t *testing.T) {
 	}
 }
 
+// Every article that survives the pipeline gets its language detected: the
+// end-of-processItem stamp fills Lang from a confident detection, runs on any
+// pipe (including none), never clobbers a declared value, and stays empty on
+// the fail-open path. Fixture texts mirror mod/filter_test.go's probe-verified
+// confidences (Spanish → spa 1.0, short text → below the 24-rune gate).
+func TestProcessItemStampsLang(t *testing.T) {
+	const spanish = "El rápido zorro marrón salta sobre el perro perezoso mientras el sol de la mañana se eleva lentamente sobre el tranquilo campo español."
+	ctx := context.Background()
+
+	// Confident detection, no pipe at all → stamped.
+	item := &mod.RawItem{Content: spanish, Link: "http://example.com"}
+	if err := processItem(ctx, mod.New(), nil, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if item.Lang != "es" {
+		t.Errorf("Lang = %q, want %q (always-on stamp with empty pipe)", item.Lang, "es")
+	}
+
+	// A declared value survives — the stamp never clobbers.
+	item = &mod.RawItem{Content: spanish, Link: "http://example.com", Lang: "fr"}
+	if err := processItem(ctx, mod.New(), []string{"#minify"}, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if item.Lang != "fr" {
+		t.Errorf("Lang = %q, want declared %q preserved", item.Lang, "fr")
+	}
+
+	// Below the detection gate → Lang stays empty (fail-open).
+	item = &mod.RawItem{Title: "Hi", Content: "Too short", Link: "http://example.com"}
+	if err := processItem(ctx, mod.New(), nil, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if item.Lang != "" {
+		t.Errorf("Lang = %q, want empty below the detection gate", item.Lang)
+	}
+
+	// A dropped item is never detected — the short-circuit skips the stamp.
+	item = &mod.RawItem{Title: "drop me", Content: spanish, Link: "http://example.com"}
+	if err := processItem(ctx, mod.New(), []string{"#filter drop_title=/drop/"}, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if !item.Drop {
+		t.Fatal("expected i.Drop=true")
+	}
+	if item.Lang != "" {
+		t.Errorf("Lang = %q on a dropped item, want empty (stamp skipped)", item.Lang)
+	}
+}
+
 // A content-mutating mod placed AFTER #sanitize can reintroduce dangerous
 // markup, because processItem does not re-sanitize at the end. This documents
 // and guards the ordering invariant: #sanitize must be the LAST content-

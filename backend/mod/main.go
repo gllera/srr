@@ -210,10 +210,11 @@ type RawItem struct {
 	Drop bool `json:"drop,omitempty"`
 	// Lang is the article's ISO 639-1 language code — backend-internal only
 	// (never written to the data packs; readers never see it). Declared by an
-	// ingest strategy or an external mod via this wire field, or stamped by
-	// #filter keep_lang when its detection is confident and Lang is still
-	// empty (a declared value is never clobbered). Mutable, unlike
-	// GUID/Published.
+	// ingest strategy or an external mod via this wire field, stamped by
+	// #filter keep_lang mid-pipe, and finally by the caller's end-of-pipeline
+	// stamp (DetectLang in processItem) — every surviving article carries a
+	// confident detection. A declared value is never clobbered. Mutable,
+	// unlike GUID/Published.
 	Lang string `json:"lang,omitempty"`
 }
 
