@@ -80,78 +80,59 @@ func init() {
 				return err
 			}
 
-			// --- drop_title ---
-			if v, ok := p["drop_title"]; ok {
-				re, err := compiled("drop_title", v)
-				if err != nil {
-					return err
-				}
-				if re.MatchString(i.Title) {
-					i.Drop = true
-					return nil
-				}
-			}
-
-			// --- keep_title ---
-			if v, ok := p["keep_title"]; ok {
-				re, err := compiled("keep_title", v)
-				if err != nil {
-					return err
-				}
-				if !re.MatchString(i.Title) {
-					i.Drop = true
-					return nil
-				}
-			}
-
-			// --- drop_content ---
-			if v, ok := p["drop_content"]; ok {
-				re, err := compiled("drop_content", v)
-				if err != nil {
-					return err
-				}
-				if re.MatchString(i.Content) {
-					i.Drop = true
-					return nil
+			// Parse EVERY present parameter before evaluating ANY condition.
+			// Module.Validate validates by running this processor against an
+			// empty sentinel item, and a firing condition returns immediately —
+			// so parsing lazily inside each condition let a malformed LATER
+			// param slip past config validation entirely (`#filter
+			// keep_title=/x/ keep_lang=xx` validated clean, because the empty
+			// sentinel fails keep_title and returns first). It then surfaced
+			// per-item at fetch time, where a pipeline error only drops the
+			// article with a warning — so the feed silently ingested nothing,
+			// forever. Config errors have to be loud and up front.
+			var dropTitle, keepTitle, dropContent, keepContent *regexp.Regexp
+			var err error
+			for _, spec := range []struct {
+				key string
+				dst **regexp.Regexp
+			}{
+				{"drop_title", &dropTitle},
+				{"keep_title", &keepTitle},
+				{"drop_content", &dropContent},
+				{"keep_content", &keepContent},
+			} {
+				if v, ok := p[spec.key]; ok {
+					if *spec.dst, err = compiled(spec.key, v); err != nil {
+						return err
+					}
 				}
 			}
-
-			// --- keep_content ---
-			if v, ok := p["keep_content"]; ok {
-				re, err := compiled("keep_content", v)
-				if err != nil {
-					return err
-				}
-				if !re.MatchString(i.Content) {
-					i.Drop = true
-					return nil
-				}
-			}
-
-			// --- min_words ---
+			minWords := -1 // -1 = param absent
 			if v, ok := p["min_words"]; ok {
-				n, err := strconv.Atoi(v)
-				if err != nil || n < 0 {
+				if minWords, err = strconv.Atoi(v); err != nil || minWords < 0 {
 					return fmt.Errorf("parameter min_words=%q: must be a non-negative integer", v)
 				}
-				if wordCount(i.Content) < n {
-					i.Drop = true
-					return nil
-				}
 			}
-
-			// --- keep_lang ---
+			var langs map[string]bool
 			if v, ok := p["keep_lang"]; ok {
-				set, err := keepSet(v)
-				if err != nil {
+				if langs, err = keepSet(v); err != nil {
 					return err
 				}
-				if i.Lang != "" && !set[i.Lang] {
-					i.Drop = true
-					return nil
-				}
 			}
 
+			// Any condition firing drops the item. keep_lang is fail-open on an
+			// empty Lang; see langAllowed.
+			switch {
+			case dropTitle != nil && dropTitle.MatchString(i.Title):
+			case keepTitle != nil && !keepTitle.MatchString(i.Title):
+			case dropContent != nil && dropContent.MatchString(i.Content):
+			case keepContent != nil && !keepContent.MatchString(i.Content):
+			case minWords >= 0 && wordCount(i.Content) < minWords:
+			case langs != nil && !langAllowed(langs, i.Lang):
+			default:
+				return nil
+			}
+			i.Drop = true
 			return nil
 		}
 	})
@@ -201,19 +182,45 @@ func wordCount(s string) int {
 
 // parseKeepLangs parses a comma-separated ISO 639-1 code list ("en,es") into
 // a code set. Unknown codes, empty elements, and an empty list are hard
-// configuration errors, matching the malformed-regex contract. Validated
-// against iso6391Codes (helper_lang.go) — the codes detection can produce.
+// configuration errors, matching the malformed-regex contract. Each code is
+// folded through normalizeLang (so "EN", "en-US" and "en" are one entry) and
+// validated against iso6391Codes (helper_lang.go) — the codes detection can
+// produce.
 func parseKeepLangs(val string) (map[string]bool, error) {
 	set := map[string]bool{}
 	for _, code := range strings.Split(val, ",") {
-		code = strings.ToLower(strings.TrimSpace(code))
+		code = normalizeLang(code)
 		if code == "" {
 			return nil, fmt.Errorf("parameter keep_lang=%q: empty language code", val)
 		}
-		if !iso6391Codes[code] {
+		if !validLangCode(code) {
 			return nil, fmt.Errorf("parameter keep_lang=%q: unknown ISO 639-1 code %q", val, code)
+		}
+		// A macrolanguage admits every variety detection can report under it
+		// (see langMacro); anything else stands for itself.
+		if varieties := langMacro[code]; varieties != nil {
+			for _, v := range varieties {
+				set[v] = true
+			}
+			continue
 		}
 		set[code] = true
 	}
 	return set, nil
+}
+
+// langAllowed reports whether an item passes a keep_lang allowlist.
+// Fail-open: an empty Lang (detection was uncertain) always passes — the
+// failure mode is a stray foreign article surviving, never a wanted article
+// silently lost. The item's Lang is normalized the same way the allowlist
+// was, so a value DECLARED over the external-mod wire matches: an ingest
+// strategy copying an RSS <language> verbatim emits "ES" or "es-ES", and
+// comparing those raw against a lowercased bare-subtag set would drop every
+// item in the feed — silently and permanently, since the GUID is already in
+// the dedup boundary by then.
+func langAllowed(set map[string]bool, lang string) bool {
+	if lang == "" {
+		return true
+	}
+	return set[normalizeLang(lang)]
 }

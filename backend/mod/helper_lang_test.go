@@ -47,3 +47,74 @@ func TestDetectLang(t *testing.T) {
 		})
 	}
 }
+
+// TestISO6391CodesAcceptsRealCodes: whatlanggo's own Lang→639-1 table maps
+// Western Persian and Eastern Yiddish to "" ("No iso639-1"), but those
+// languages DO carry fa/yi. Uncorrected, `#filter keep_lang=fa` was rejected
+// as an unknown code — which fails Module.Validate and takes the whole feed
+// down (Feed.Fetch sets ferr and skips it), and a Persian article could never
+// be stamped in the first place. Norwegian is the alias case: whatlanggo only
+// ever classifies the nb/nn varieties, never the "no" macrolanguage.
+func TestISO6391CodesAcceptsRealCodes(t *testing.T) {
+	for _, code := range []string{"fa", "yi", "en", "es", "de", "ru", "ja", "nb", "nn"} {
+		if !iso6391Codes[code] {
+			t.Errorf("iso6391Codes[%q] = false, want a valid ISO 639-1 code accepted", code)
+		}
+	}
+	// Languages that genuinely have no 639-1 code stay rejected — the
+	// allowlist's job is still catching typos.
+	for _, code := range []string{"ceb", "ilo", "mai", "skr", "xx", "english"} {
+		if iso6391Codes[code] {
+			t.Errorf("iso6391Codes[%q] = true, want rejected (no ISO 639-1 code)", code)
+		}
+	}
+	// "no" is a valid config code: the Norwegian macrolanguage.
+	if !validLangCode("no") {
+		t.Error("validLangCode(\"no\") = false, want the macrolanguage accepted")
+	}
+}
+
+// A macrolanguage in the allowlist must admit every variety detection can
+// report under it. whatlanggo only ever classifies nb (Bokmål) and nn
+// (Nynorsk), never "no" — so folding "no" to a single variety made a Norwegian
+// feed configured the obvious way silently discard its Nynorsk half, forever.
+func TestKeepLangMacrolanguageAdmitsBothVarieties(t *testing.T) {
+	set, err := parseKeepLangs("no")
+	if err != nil {
+		t.Fatalf("parseKeepLangs(\"no\"): %v", err)
+	}
+	for _, code := range []string{"no", "nb", "nn"} {
+		if !set[code] {
+			t.Errorf("keep_lang=no does not admit %q", code)
+		}
+	}
+	if set["de"] {
+		t.Error("keep_lang=no admits an unrelated language")
+	}
+	// Naming a specific variety still means only that variety.
+	set, err = parseKeepLangs("nb")
+	if err != nil {
+		t.Fatalf("parseKeepLangs(\"nb\"): %v", err)
+	}
+	if set["nn"] || !set["nb"] {
+		t.Errorf("keep_lang=nb = %v, want only nb", set)
+	}
+}
+
+// TestNormalizeLang pins the folding applied to both the keep_lang allowlist
+// and an item's declared Lang.
+func TestNormalizeLang(t *testing.T) {
+	// normalizeLang folds case and region subtags only — it never rewrites one
+	// language to another. Macrolanguage expansion is a config-side concern
+	// (langMacro), so "no" stays "no" here.
+	for in, want := range map[string]string{
+		"en": "en", "EN": "en", " En ": "en",
+		"en-US": "en", "en_us": "en", "pt-BR": "pt",
+		"no": "no", "NO-nb": "no", "nn": "nn",
+		"": "", "english": "english", "xx": "xx",
+	} {
+		if got := normalizeLang(in); got != want {
+			t.Errorf("normalizeLang(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
