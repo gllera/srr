@@ -4,6 +4,10 @@ SHELL := /bin/bash -e
 
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
 
+# release stamps main.version. CI passes VERSION= (the tag); locally it defaults
+# to a git description so an ad-hoc build is still traceable to a commit.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo development)
+
 # verify includes the fast jsdom e2e contract layer; the heavier headless-browser
 # layer (test-browser) is opt-in via test-e2e.
 verify: verify-fe verify-be test-contract
@@ -86,7 +90,7 @@ build-be: | dist
 	cd backend && go build -o ../dist/srr .
 
 release: verify-be | dist
-	@[ -n "$(VERSION)" ] || { echo 'VERSION= is required for release (e.g. make release VERSION=v1.2.3)' >&2; exit 1; }
+	@echo "release version: $(VERSION)"
 	@cd backend; for p in $(PLATFORMS); do \
 	  os=$${p%/*}; arch=$${p#*/}; ext=; \
 	  [ $$os = windows ] && ext=.exe; \
