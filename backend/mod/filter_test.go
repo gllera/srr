@@ -425,3 +425,46 @@ func TestFilterKeepLangComposes(t *testing.T) {
 		t.Error("expected Drop=true (min_words) with keep_lang also present")
 	}
 }
+
+// TestFilterKeepLangStampsLang: a confident detection is recorded on
+// RawItem.Lang (ISO 639-1) whether the item is dropped or kept; a
+// below-threshold detection stamps nothing; a pre-set Lang (declared by an
+// ingest strategy or an earlier mod) is never clobbered.
+func TestFilterKeepLangStampsLang(t *testing.T) {
+	// Confident foreign → dropped AND stamped.
+	de := makeFilterItem("", "<p>"+langTextDE+"</p>")
+	if err := runFilter(t, "#filter keep_lang=en,es", de); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if !de.Drop || de.Lang != "de" {
+		t.Errorf("german: Drop=%v Lang=%q, want Drop=true Lang=\"de\"", de.Drop, de.Lang)
+	}
+
+	// Confident allowed → kept AND stamped.
+	es := makeFilterItem("", "<p>"+langTextES+"</p>")
+	if err := runFilter(t, "#filter keep_lang=en,es", es); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if es.Drop || es.Lang != "es" {
+		t.Errorf("spanish: Drop=%v Lang=%q, want Drop=false Lang=\"es\"", es.Drop, es.Lang)
+	}
+
+	// Below the confidence gate (langTextEN scores ~0.71) → kept, NOT stamped.
+	en := makeFilterItem("", "<p>"+langTextEN+"</p>")
+	if err := runFilter(t, "#filter keep_lang=en,es", en); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if en.Drop || en.Lang != "" {
+		t.Errorf("english: Drop=%v Lang=%q, want Drop=false Lang=\"\"", en.Drop, en.Lang)
+	}
+
+	// A declared Lang survives; the gate still judges by its own detection.
+	declared := makeFilterItem("", "<p>"+langTextDE+"</p>")
+	declared.Lang = "fr"
+	if err := runFilter(t, "#filter keep_lang=en,es", declared); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if !declared.Drop || declared.Lang != "fr" {
+		t.Errorf("declared: Drop=%v Lang=%q, want Drop=true Lang=\"fr\"", declared.Drop, declared.Lang)
+	}
+}

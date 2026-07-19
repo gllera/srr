@@ -433,6 +433,8 @@ A pipeline step whose first word is not a built-in `#`-token is run as an extern
 
 To **drop** an item (prevent it from being stored), emit `{"drop":true}` — or include it alongside other fields, e.g. `{"drop":true,"guid":…}`. A dropped item is silently discarded and its GUID is retained in the feed's dedup boundary so it is not re-evaluated on the next fetch. Dropping is not an error; subsequent pipeline steps are skipped for a dropped item.
 
+A mod (or ingest strategy) may also declare the article's language by emitting `lang` with an ISO 639-1 code, e.g. `{"lang":"es"}`. The field is **backend-internal**: it rides the pipeline (readable by later mods; `#filter keep_lang` respects a declared value and never overwrites it) but is never written to the data packs, so readers never see it.
+
 **Example.** For one item from a `#feed` source, SRR writes this object to the mod's stdin (pretty-printed). `raw` mirrors the parsed feed entry — element name → list of occurrences, each `{@: text, $: attributes, +: children}`; it is `null` for items from an external ingest command, which don't populate it:
 
 ```json
@@ -491,7 +493,7 @@ srr feed add -t "Feed" -u https://example.com/rss -r lower
 
 Regex syntax: `/pattern/` or `/pattern/i` (flag `i` = case-insensitive). A malformed regex or unknown parameter is a hard configuration error. The word-count check (`min_words`) runs against the raw content string including any HTML tags. A regex param value **cannot contain a literal space** — the pipeline token is split on whitespace before its parameters are parsed — so use a whitespace metacharacter instead: `drop_title=/breaking\s+news/` or `drop_title=/breaking[ ]news/`, not `drop_title=/breaking news/`.
 
-Language detection (`keep_lang`) is offline (trigram-based, via whatlanggo) and **fail-open**: an item is dropped only when at least 24 runes of plain text (title + HTML-stripped content) are detected at ≥ 0.8 confidence as a language outside the list. Short posts, uncertain detections, and empty items always pass — the failure mode is a stray foreign article surviving, never a wanted article lost. Codes are case-insensitive ISO 639-1 (`en,es`); an unknown code is a hard configuration error.
+Language detection (`keep_lang`) is offline (trigram-based, via whatlanggo) and **fail-open**: an item is dropped only when at least 24 runes of plain text (title + HTML-stripped content) are detected at ≥ 0.8 confidence as a language outside the list. Short posts, uncertain detections, and empty items always pass — the failure mode is a stray foreign article surviving, never a wanted article lost. Codes are case-insensitive ISO 639-1 (`en,es`); an unknown code is a hard configuration error. A confident detection is also stamped onto the item's backend-internal `lang` field (drop or keep, and only when no earlier step declared one) for later pipeline steps to read.
 
 ```bash
 # Create a recipe that filters sponsored posts and low-word articles

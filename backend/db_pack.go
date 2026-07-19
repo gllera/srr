@@ -22,6 +22,12 @@ type ArticleData struct {
 	Title     string `json:"t,omitempty"`
 	Link      string `json:"l,omitempty"`
 	Content   string `json:"c"`
+	// Lang is the article's ISO 639-1 language code, carried from the fetch
+	// pipeline (RawItem.Lang) for same-cycle backend use only. NEVER written
+	// to the data packs (json:"-") — the read side (parseDataPack, readers)
+	// always sees it empty, and gen-ts skips it, so the wire format is
+	// untouched.
+	Lang string `json:"-"`
 }
 
 // displayTime is the display-timestamp rule shared by meta cards
@@ -42,6 +48,7 @@ type Item struct {
 	Content   string
 	Link      string
 	Published int64
+	Lang      string
 }
 
 // articleData is the one Item→ArticleData mapping. PutArticles applies it
@@ -55,6 +62,7 @@ func (it *Item) articleData(fetchedAt int64) ArticleData {
 		Title:     it.Title,
 		Link:      it.Link,
 		Content:   it.Content,
+		Lang:      it.Lang,
 	}
 }
 

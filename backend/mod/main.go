@@ -208,6 +208,13 @@ type RawItem struct {
 	// GUID is retained in the feed's dedup boundary so they are not
 	// re-evaluated on subsequent fetches. Drop is NOT a pipeline error.
 	Drop bool `json:"drop,omitempty"`
+	// Lang is the article's ISO 639-1 language code — backend-internal only
+	// (never written to the data packs; readers never see it). Declared by an
+	// ingest strategy or an external mod via this wire field, or stamped by
+	// #filter keep_lang when its detection is confident and Lang is still
+	// empty (a declared value is never clobbered). Mutable, unlike
+	// GUID/Published.
+	Lang string `json:"lang,omitempty"`
 }
 
 // RawField is one element of a parsed feed entry: text content, attributes,

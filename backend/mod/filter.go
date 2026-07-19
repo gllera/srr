@@ -171,9 +171,14 @@ func init() {
 				if err != nil {
 					return err
 				}
-				if langOutsideSet(i.Title, i.Content, set) {
-					i.Drop = true
-					return nil
+				if lang, ok := detectLang(i.Title, i.Content); ok {
+					if i.Lang == "" {
+						i.Lang = lang.Iso6391()
+					}
+					if !set[lang] {
+						i.Drop = true
+						return nil
+					}
 				}
 			}
 
@@ -243,17 +248,18 @@ func parseKeepLangs(val string) (map[whatlanggo.Lang]bool, error) {
 	return set, nil
 }
 
-// langOutsideSet reports whether the article's language is confidently
-// detected as one NOT in set. Fail-open: short text, low confidence, or a
-// detected language in the set all return false (keep).
-func langOutsideSet(title, content string, set map[whatlanggo.Lang]bool) bool {
+// detectLang returns the article's confidently-detected language: at least
+// langMinTextLen runes of extracted text classified at ≥ langConfidenceMin
+// confidence. ok=false is the fail-open path (short text, low confidence) —
+// keep_lang neither drops nor stamps then.
+func detectLang(title, content string) (whatlanggo.Lang, bool) {
 	text := extractText(title, content, langMaxTextLen)
 	if utf8.RuneCountInString(text) < langMinTextLen {
-		return false
+		return 0, false
 	}
 	info := whatlanggo.Detect(text)
 	if info.Confidence < langConfidenceMin {
-		return false
+		return 0, false
 	}
-	return !set[info.Lang]
+	return info.Lang, true
 }
