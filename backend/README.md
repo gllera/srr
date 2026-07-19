@@ -42,7 +42,7 @@ Commands are grouped under `feed` (feed management), `art` (articles), `preview`
 | `feed apply`       | Upsert feed(s) from JSON (`--file` or stdin)    |
 | `feed import`      | Import feeds from an OPML file                  |
 | `art fetch`        | Fetch new articles from all feeds               |
-| `art ls`           | List stored articles                               |
+| `art ls`           | List stored articles (filter by feed, tag, or time window) |
 | `recipe`           | Manage processing recipes (named `{ingest, pipe}` bundles) |
 | `preview`          | Preview processed feed articles in a browser       |
 | `inspect`          | Validate pack consistency / debug chronIdx lookups |

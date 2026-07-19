@@ -4,7 +4,85 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
+
+// TestParseTimeBound covers the --since/--until value grammar: relative
+// durations (Go units plus the d/w extensions) resolved against the caller's
+// `now`, bare local dates, and RFC3339 instants — plus the forms deliberately
+// rejected, bare unix seconds among them.
+func TestParseTimeBound(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+
+	t.Run("relative", func(t *testing.T) {
+		cases := []struct {
+			in   string
+			back time.Duration
+		}{
+			{"24h", 24 * time.Hour},
+			{"90m", 90 * time.Minute},
+			{"7d", 7 * 24 * time.Hour},
+			{"2w", 14 * 24 * time.Hour},
+			{"1.5d", 36 * time.Hour},
+			{"1d12h", 36 * time.Hour}, // d/w compose with Go's own units
+		}
+		for _, c := range cases {
+			got, err := parseTimeBound(c.in, now)
+			if err != nil {
+				t.Errorf("parseTimeBound(%q): %v", c.in, err)
+				continue
+			}
+			if want := now.Add(-c.back).Unix(); got != want {
+				t.Errorf("parseTimeBound(%q) = %d, want %d (%v before now)", c.in, got, want, c.back)
+			}
+		}
+	})
+
+	t.Run("date is local midnight", func(t *testing.T) {
+		got, err := parseTimeBound("2026-07-15", now)
+		if err != nil {
+			t.Fatalf("parseTimeBound: %v", err)
+		}
+		want := time.Date(2026, 7, 15, 0, 0, 0, 0, time.Local).Unix()
+		if got != want {
+			t.Errorf("parseTimeBound(date) = %d, want %d (local midnight)", got, want)
+		}
+	})
+
+	t.Run("rfc3339", func(t *testing.T) {
+		got, err := parseTimeBound("2026-07-15T10:00:00Z", now)
+		if err != nil {
+			t.Fatalf("parseTimeBound: %v", err)
+		}
+		if want := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC).Unix(); got != want {
+			t.Errorf("parseTimeBound(Z) = %d, want %d", got, want)
+		}
+		// An explicit offset is honoured as given, not reinterpreted locally.
+		got, err = parseTimeBound("2026-07-15T12:00:00+02:00", now)
+		if err != nil {
+			t.Fatalf("parseTimeBound(offset): %v", err)
+		}
+		if want := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC).Unix(); got != want {
+			t.Errorf("parseTimeBound(offset) = %d, want %d", got, want)
+		}
+	})
+
+	t.Run("rejects", func(t *testing.T) {
+		for _, in := range []string{
+			"",
+			"1719792000", // bare unix seconds: deliberately not a form
+			"-24h",       // a negative window bound is meaningless
+			"7x",
+			"garbage",
+			"2026-13-45",
+			"2026-07-15T10:00:00", // RFC3339 requires a zone
+		} {
+			if got, err := parseTimeBound(in, now); err == nil {
+				t.Errorf("parseTimeBound(%q) = %d, want error", in, got)
+			}
+		}
+	})
+}
 
 // artTestStore builds and commits a small multi-data-pack store used by the
 // `srr art ls` tests: two feeds (news/tech), five interleaved articles at
@@ -211,6 +289,230 @@ func TestArtListFilteredTotalVsLimit(t *testing.T) {
 	}
 	if out.NextCursor == nil || *out.NextCursor != 2 {
 		t.Fatalf("NextCursor = %v, want 2 (last returned match, skipping feed-1 chron 3)", out.NextCursor)
+	}
+}
+
+// artCycleTimes are the fetch-cycle stamps artTimeStore commits, one per
+// cycle. fetched_at is chron-monotone (one stamp per cycle, applied to the
+// whole batch), which is what makes a --since/--until window a contiguous
+// chron range.
+var artCycleTimes = []time.Time{
+	time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+	time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC),
+	time.Date(2026, 7, 3, 0, 0, 0, 0, time.UTC),
+}
+
+// artTimeStore commits three fetch cycles of two articles each (one per feed),
+// so chron 0..5 carries three distinct fetched_at stamps: a0,a1 | b0,b1 |
+// c0,c1. Index 0 is the news feed, 1 the tech feed.
+func artTimeStore(t *testing.T) (*DB, *Feed, *Feed) {
+	t.Helper()
+	db, _, _ := setupTestDB(t)
+	f0 := &Feed{Title: "News feed", URL: "https://n.example/f", Tag: "news"}
+	f1 := &Feed{Title: "Tech feed", URL: "https://t.example/f", Tag: "tech"}
+	if err := db.AddFeed(f0); err != nil {
+		t.Fatalf("AddFeed f0: %v", err)
+	}
+	if err := db.AddFeed(f1); err != nil {
+		t.Fatalf("AddFeed f1: %v", err)
+	}
+	for i, name := range []string{"a", "b", "c"} {
+		db.core.FetchedAt = artCycleTimes[i].Unix()
+		items := []*Item{
+			{Feed: f0, Title: name + "0", Content: "body", Link: "l"},
+			{Feed: f1, Title: name + "1", Content: "body", Link: "l"},
+		}
+		if _, err := db.PutArticles(ctx, items); err != nil {
+			t.Fatalf("PutArticles cycle %d: %v", i, err)
+		}
+	}
+	if err := db.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	return db, f0, f1
+}
+
+// artStamp renders a cycle time as an RFC3339 --since/--until value.
+func artStamp(i int) string { return artCycleTimes[i].Format(time.RFC3339) }
+
+// artRunErr runs an ArtCmd expecting a hard error, and returns it.
+func artRunErr(t *testing.T, cmd *ArtCmd) error {
+	t.Helper()
+	err := cmd.Run()
+	if err == nil {
+		t.Fatal("ArtCmd.Run: want error, got nil")
+	}
+	return err
+}
+
+// TestArtListSince pins the --since half of the window: the bound is
+// inclusive, so the cycle stamped exactly at it is kept, and Total counts the
+// window rather than the whole store.
+func TestArtListSince(t *testing.T) {
+	artTimeStore(t)
+
+	out := artRun(t, &ArtCmd{Limit: 50, Since: artStamp(1)})
+	if want := []string{"c1", "c0", "b1", "b0"}; !artEqualStrs(artTitles(out), want) {
+		t.Errorf("titles = %v, want %v (cycles 1-2, newest first)", artTitles(out), want)
+	}
+	if out.Total != 4 {
+		t.Errorf("Total = %d, want 4 (window only, not the 6-article store)", out.Total)
+	}
+}
+
+// TestArtListUntil pins the --until half: inclusive too, so the cycle stamped
+// exactly at the bound is kept.
+func TestArtListUntil(t *testing.T) {
+	artTimeStore(t)
+
+	out := artRun(t, &ArtCmd{Limit: 50, Until: artStamp(1)})
+	if want := []string{"b1", "b0", "a1", "a0"}; !artEqualStrs(artTitles(out), want) {
+		t.Errorf("titles = %v, want %v (cycles 0-1, newest first)", artTitles(out), want)
+	}
+	if out.Total != 4 {
+		t.Errorf("Total = %d, want 4", out.Total)
+	}
+}
+
+// TestArtListWindow pins both bounds together, including the degenerate
+// single-cycle window where since == until.
+func TestArtListWindow(t *testing.T) {
+	artTimeStore(t)
+
+	out := artRun(t, &ArtCmd{Limit: 50, Since: artStamp(1), Until: artStamp(1)})
+	if want := []string{"b1", "b0"}; !artEqualStrs(artTitles(out), want) {
+		t.Errorf("titles = %v, want %v (single cycle)", artTitles(out), want)
+	}
+	if out.Total != 2 {
+		t.Errorf("Total = %d, want 2", out.Total)
+	}
+}
+
+// TestArtListWindowEmpty covers a valid window no article falls in: an empty
+// page, not an error.
+func TestArtListWindowEmpty(t *testing.T) {
+	artTimeStore(t)
+
+	out := artRun(t, &ArtCmd{Limit: 50, Since: "2026-08-01T00:00:00Z"})
+	if len(out.Articles) != 0 || out.Total != 0 {
+		t.Errorf("out = %+v, want an empty page with Total 0", out)
+	}
+	if out.NextCursor != nil {
+		t.Errorf("NextCursor = %v, want nil", *out.NextCursor)
+	}
+}
+
+// TestArtListWindowWithFilter pins the window composing with -g: both narrow
+// the same result set and the same Total.
+func TestArtListWindowWithFilter(t *testing.T) {
+	artTimeStore(t)
+
+	out := artRun(t, &ArtCmd{Limit: 50, Tag: []string{"news"}, Since: artStamp(1)})
+	if want := []string{"c0", "b0"}; !artEqualStrs(artTitles(out), want) {
+		t.Errorf("titles = %v, want %v (news feed within the window)", artTitles(out), want)
+	}
+	if out.Total != 2 {
+		t.Errorf("Total = %d, want 2", out.Total)
+	}
+}
+
+// TestArtListWindowPaging pins --before paging staying inside the window: the
+// cursor never walks below the --since bound.
+func TestArtListWindowPaging(t *testing.T) {
+	artTimeStore(t)
+
+	p1 := artRun(t, &ArtCmd{Limit: 2, Since: artStamp(1)})
+	if want := []string{"c1", "c0"}; !artEqualStrs(artTitles(p1), want) {
+		t.Fatalf("page1 titles = %v, want %v", artTitles(p1), want)
+	}
+	if p1.Total != 4 {
+		t.Errorf("page1 Total = %d, want 4 (whole window)", p1.Total)
+	}
+	if p1.NextCursor == nil {
+		t.Fatal("page1 NextCursor = nil, want a cursor (full page)")
+	}
+
+	p2 := artRun(t, &ArtCmd{Limit: 2, Since: artStamp(1), Before: p1.NextCursor})
+	if want := []string{"b1", "b0"}; !artEqualStrs(artTitles(p2), want) {
+		t.Fatalf("page2 titles = %v, want %v", artTitles(p2), want)
+	}
+
+	// Page 3 would cross below the window: it must come back empty, never
+	// leaking cycle-0 articles.
+	if p2.NextCursor != nil {
+		p3 := artRun(t, &ArtCmd{Limit: 2, Since: artStamp(1), Before: p2.NextCursor})
+		if len(p3.Articles) != 0 {
+			t.Errorf("page3 titles = %v, want none (window exhausted)", artTitles(p3))
+		}
+	}
+}
+
+// TestArtListWindowInverted pins since > until as a hard error rather than a
+// silently empty result.
+func TestArtListWindowInverted(t *testing.T) {
+	artTimeStore(t)
+
+	err := artRunErr(t, &ArtCmd{Limit: 50, Since: artStamp(2), Until: artStamp(0)})
+	if !strings.Contains(err.Error(), "since") {
+		t.Errorf("error = %v, want it to name --since/--until", err)
+	}
+}
+
+// TestArtListWindowBadValue pins an unparseable bound failing the command.
+func TestArtListWindowBadValue(t *testing.T) {
+	artTimeStore(t)
+	artRunErr(t, &ArtCmd{Limit: 50, Since: "last tuesday"})
+}
+
+// TestArtListWindowAcrossDeltaSeam pins the window resolving across the
+// pack↔delta seam: cycle 0 is consolidated into packs while cycles 1-2 stay in
+// the live delta chain, so the binary search must probe both regions.
+func TestArtListWindowAcrossDeltaSeam(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	f0 := &Feed{Title: "News feed", URL: "https://n.example/f", Tag: "news"}
+	f1 := &Feed{Title: "Tech feed", URL: "https://t.example/f", Tag: "tech"}
+	if err := db.AddFeed(f0); err != nil {
+		t.Fatalf("AddFeed f0: %v", err)
+	}
+	if err := db.AddFeed(f1); err != nil {
+		t.Fatalf("AddFeed f1: %v", err)
+	}
+	for i, name := range []string{"a", "b", "c"} {
+		if i == 1 {
+			// Cycle 0 consolidated into packs; 1-2 stay in the chain. The byte
+			// cap is lifted out of the way so only the chain cap decides.
+			globals.MaxDeltas = 4
+			globals.MaxDeltaBytes = 1 << 20
+		}
+		db.core.FetchedAt = artCycleTimes[i].Unix()
+		items := []*Item{
+			{Feed: f0, Title: name + "0", Content: "body", Link: "l"},
+			{Feed: f1, Title: name + "1", Content: "body", Link: "l"},
+		}
+		if _, err := db.PutArticles(ctx, items); err != nil {
+			t.Fatalf("PutArticles cycle %d: %v", i, err)
+		}
+	}
+	if err := db.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	if db.core.NumDeltas == 0 {
+		t.Fatal("fixture built no delta chain — the seam is not exercised")
+	}
+
+	// Window spanning the seam: cycle 0 (packs) + cycle 1 (delta).
+	out := artRun(t, &ArtCmd{Limit: 50, Until: artStamp(1)})
+	if want := []string{"b1", "b0", "a1", "a0"}; !artEqualStrs(artTitles(out), want) {
+		t.Errorf("titles = %v, want %v (across the pack/delta seam)", artTitles(out), want)
+	}
+	if out.Total != 4 {
+		t.Errorf("Total = %d, want 4", out.Total)
+	}
+	for _, a := range out.Articles {
+		if a.Content == "" {
+			t.Errorf("article %q has empty content", a.Title)
+		}
 	}
 }
 
