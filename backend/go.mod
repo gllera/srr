@@ -3,6 +3,7 @@ module srr
 go 1.26.0
 
 require (
+	github.com/abadojack/whatlanggo v1.0.1
 	github.com/alecthomas/kong v1.14.0
 	github.com/alecthomas/kong-yaml v0.2.0
 	github.com/andybalholm/cascadia v1.3.3
@@ -24,7 +25,6 @@ require (
 )
 
 require (
-	github.com/abadojack/whatlanggo v1.0.1 // indirect
 	github.com/araddon/dateparse v0.0.0-20210429162001-6b43995a97de // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.8 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.21 // indirect
