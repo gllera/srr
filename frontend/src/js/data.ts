@@ -20,6 +20,7 @@ import {
    type IdxPack,
    type TallyFeed,
 } from "./idx"
+import { keyAt, legacyNames, manifestNames, MANIFEST_ROOT_VERSION, type IManifestWire, type StoreNames } from "./names"
 
 export { IDX_PACK_SIZE, META_PACK_SIZE }
 
@@ -45,17 +46,34 @@ async function fetchTimed<T>(url: URL, cache: RequestCache, read: (res: Response
    }
 }
 
+// One coherent view of the store: the normalized db state plus the resolved
+// object names it addresses through. They travel together — every rollback,
+// swap and cross-check below is on the PAIR, never on one half (see refresh()).
+interface Snapshot {
+   db: IDB
+   names: StoreNames
+}
+
 // no-cache forces a conditional revalidation on every load so a stale db.gz on
 // the client (mobile browsers cache aggressively) can't make chronIdx URLs like
 // `#14099` silently fall back to the last article via the `>= total_art` clamp
 // in nav.fromHash. 304 keeps the hot path cheap when the CDN sends ETag /
 // Last-Modified; the <link rel="preload"> in built HTML still warms the entry.
-function loadDb(): Promise<IDB> {
+function loadDb(): Promise<Snapshot> {
    return fetchTimed(new URL("db.gz", PACK_BASE), "no-cache", parseDb)
 }
 const dbLoad = loadDb()
 
 export let db: IDB
+// The resolved store names for the installed db (docs/MANIFEST-SPEC.md §4.5).
+// The ONLY source of a pack key in this module — nothing below formats one.
+let names: StoreNames
+
+// storeNames exposes the installed snapshot's names to search.ts, the other
+// module that fetches store objects (the meta shards, tail and bloom summary).
+export function storeNames(): StoreNames {
+   return names
+}
 
 // One in-flight-or-resolved fetch per idx pack (finalized 0..nf-1, latest at
 // nf; capacity covers every pack, so nothing ever evicts) — packs are fetched
@@ -115,33 +133,173 @@ function assertPackOk(res: Response, isLatest: boolean): void {
    throw new Error(`pack fetch failed: ${res.status} ${res.url}`)
 }
 
-async function parseDb(res: Response): Promise<IDB> {
+// The root object as it arrives on the wire, before the dual-path resolution
+// below: either today's full legacy db.gz (IDBWire) or the v2 pointer
+// {v, m, t} the S34 cutover shrinks it to.
+type IRootWire = Partial<IDBWire> & { t?: number }
+
+// The highest root version this reader understands. It is deliberately ABOVE
+// DB_FORMAT_VERSION: that generated constant is what the current WRITER
+// stamps (1 until S34 bumps dbFormatVersion), while this build already parses
+// the v2 manifest-indirection root that cutover will emit. Reader-first deploy
+// discipline (docs/MANIFEST-SPEC.md §11 step 2) is exactly that asymmetry —
+// ship and deploy the reader that can read v2, THEN flip the writer.
+const MAX_ROOT_VERSION = Math.max(DB_FORMAT_VERSION, MANIFEST_ROOT_VERSION)
+
+// One in-flight-or-resolved manifest, keyed by its generation number. Manifest
+// names are write-once, so this can never go stale; it exists so an unchanged
+// poll (refresh() re-parses the root every 5 minutes) costs no second fetch.
+let manifestMemo: { m: number; man: Promise<IManifestWire> } | null = null
+
+function loadManifest(m: number): Promise<IManifestWire> {
+   if (manifestMemo?.m === m) return manifestMemo.man
+   const man = fetchTimed(new URL(`manifest/${m}.gz`, PACK_BASE), "force-cache", async (res) => {
+      // NOT assertPackOk: a 404 here is not the stale-tab tail-GC case that
+      // reload self-heals. The root we just fetched no-cache is by definition
+      // current, so it names a manifest the store should still serve; if it
+      // doesn't, reloading would fetch the same pair again. Surface it.
+      if (!res.ok) throw new Error(`manifest/${m}.gz fetch failed: ${res.status} ${res.url}`)
+      return (await new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).json()) as IManifestWire
+   }).then((parsed) => {
+      // manifest/<m>.gz is write-once, so its body can only ever describe
+      // generation m. A disagreement means the store served something else
+      // entirely — refuse it rather than address every pack through the wrong
+      // generation's name list.
+      if (parsed.m !== m) throw new Error(`manifest/${m}.gz declares generation ${parsed.m}`)
+      if ((parsed.v ?? 0) > MANIFEST_ROOT_VERSION)
+         throw new Error(
+            `This reader is older than the store (manifest v${parsed.v}, supported v${MANIFEST_ROOT_VERSION}) — reload to update.`,
+         )
+      return parsed
+   })
+   manifestMemo = { m, man }
+   // A rejected memo must not poison the next attempt (the cachedPromise
+   // discipline, applied by hand since this is a single slot).
+   man.catch(() => {
+      if (manifestMemo?.man === man) manifestMemo = null
+   })
+   return man
+}
+
+// The S33 selection rule — THE ROOT IS AUTHORITATIVE FOR WHAT IT CARRIES; the
+// manifest supplies only what the root omits (docs/MANIFEST-SPEC.md §8.1).
+//
+//   • A legacy-complete root takes today's path verbatim and never fetches a
+//     manifest. `total_art` is the probe: it is a non-omitempty key every
+//     legacy db.gz carries (even at 0), and the v2 root carries none of the
+//     manifest-sourced fields at all. So the S32 stores deployed right now —
+//     which DO carry `m` alongside every legacy field — behave byte-for-byte
+//     as they do today, and an operator who clears manifest/* (S32's rollback
+//     story) loses nothing.
+//   • A root carrying `m` and no legacy state follows the indirection.
+//
+// Two consequences the plan asks for, both structural rather than defensive:
+// S34's flip needs no reader redeploy (the predicate switches branch on the
+// bytes), and "a missing manifest on a store that still has the legacy fields
+// must fall back, not hard-error" holds by construction — such a store never
+// reaches the manifest fetch at all.
+function rootIsLegacy(raw: IRootWire): boolean {
+   return raw.total_art !== undefined
+}
+
+async function parseDb(res: Response): Promise<Snapshot> {
    // A missing/erroring store (404 on a fresh/empty store or a misconfigured CDN
    // URL, or a 5xx) would otherwise try to gunzip an HTML error body and reject
    // with a cryptic "incorrect header check"; surface the real status instead
    // (mirrors assertPackOk for the pack fetches).
    if (!res.ok) throw new Error(`db.gz fetch failed: ${res.status} ${res.url}`)
-   const raw: IDB = await new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).json()
+   const raw: IRootWire = await new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).json()
    // A store stamped newer than this build understands: its layout may have
    // changed in ways this reader would misread, so say so plainly through the
    // error popup instead of rendering wrong (or crashing on a shifted field).
    // Absent v (0) is a store written before the field existed — readable.
-   if ((raw.v ?? 0) > DB_FORMAT_VERSION)
+   if ((raw.v ?? 0) > MAX_ROOT_VERSION)
       throw new Error(
-         `This reader is older than the store (format v${raw.v}, supported v${DB_FORMAT_VERSION}) — reload to update.`,
+         `This reader is older than the store (format v${raw.v}, supported v${MAX_ROOT_VERSION}) — reload to update.`,
       )
-   raw.feeds ??= {}
-   raw.seq ??= 0 // backend omitempty: absent for an empty store
-   for (const [k, ch] of Object.entries(raw.feeds)) ch.id = Number(k)
-   return raw
+   const snap = rootIsLegacy(raw) ? fromLegacyRoot(raw) : await fromManifestRoot(raw)
+   snap.db.feeds ??= {}
+   snap.db.seq ??= 0 // backend omitempty: absent for an empty store
+   for (const [k, ch] of Object.entries(snap.db.feeds)) ch.id = Number(k)
+   return snap
+}
+
+function fromLegacyRoot(raw: IRootWire): Snapshot {
+   const legacy = raw as IDB
+   return {
+      db: legacy,
+      names: legacyNames({
+         total_art: legacy.total_art,
+         seq: legacy.seq ?? 0,
+         nd: legacy.nd,
+         na: legacy.na,
+         next_pid: legacy.next_pid,
+         hdrs: legacy.hdrs,
+         mp: legacy.mp,
+      }),
+   }
+}
+
+// fromManifestRoot follows the root's indirection and normalizes the manifest
+// into the same in-memory IDB shape the rest of the module consumes, so
+// everything downstream of parseDb is root-shape-blind.
+async function fromManifestRoot(raw: IRootWire): Promise<Snapshot> {
+   const m = raw.m ?? 0
+   if (m <= 0)
+      throw new Error(
+         `db.gz carries no store state and names no manifest (m=${m}) — this store cannot be read by this reader.`,
+      )
+   const man = await loadManifest(m)
+   const resolved = manifestNames(man)
+   const finalizedMeta = resolved.meta.keys.length - (resolved.meta.tail >= 0 ? 1 : 0)
+   const normalized: IDB = {
+      v: raw.v,
+      m,
+      // `t` on the root is the same fetched_at the manifest carries; the root
+      // copy is what lets an idle cycle rewrite 60 bytes and leave `m` — and
+      // therefore every reader's cached manifest — untouched (§4.1).
+      fetched_at: raw.t ?? man.fetched_at,
+      total_art: man.total_art,
+      mt: man.mt,
+      na: man.na,
+      head: man.head,
+      hb: man.hb,
+      pack_off: man.pack_off ?? 0,
+      feeds: (man.feeds ?? {}) as Record<number, IFeed>,
+      // The name-derivation counters the manifest RETIRES (§5.1). They are
+      // synthesized from the LISTED names purely so the reader's coverage
+      // gates (metaReady, idxSummaryDegraded, numFinalized*) keep exactly one
+      // implementation across both root shapes. NOTHING builds a key from them
+      // any more — `names` above is the only source of a pack name.
+      seq: 0,
+      nd: resolved.deltas.length,
+      next_pid: resolved.data.tail >= 0 ? resolved.data.tail : resolved.data.keys.length,
+      hdrs: resolved.hsum?.covers ?? 0,
+      mp: finalizedMeta,
+      gen: 0,
+   }
+   // The pack↔delta seam, cross-checked on the NAMING side before a single
+   // pack is addressed: a store whose delta chain holds articles must name the
+   // segments holding them, and one with no live chain must name none.
+   // fetchDeltas below then cross-checks the same seam on the CONTENT side
+   // (parsed article count vs `na`) — both directions fail loudly, neither
+   // misaddresses.
+   const na = normalized.na ?? 0
+   if (na > 0 !== resolved.deltas.length > 0)
+      throw new Error(`manifest ${m}: ${resolved.deltas.length} delta segment(s) named for ${na} delta article(s)`)
+   return { db: normalized, names: resolved }
 }
 
 // The (re-runnable) boot body: swap the snapshot in and rebuild everything
 // derived from it. Also the refresh() path — the caches are recreated
 // wholesale (one code path, no diff logic); refetches ride the SW/HTTP cache,
 // and on a gen change the stale bytes MUST go anyway.
-async function applyDb(raw: IDB): Promise<void> {
-   db = raw
+async function applyDb(snap: Snapshot): Promise<void> {
+   // db and names are installed TOGETHER and synchronously, before any await:
+   // every name the rest of this function resolves must belong to the snapshot
+   // it is applying, and deltaLoad below is set in the same synchronous run.
+   db = snap.db
+   names = snap.names
 
    // Size the per-pack feed lookup arrays to the store's high-water id + 1
    // (min 1). All feedIds in packs and filters are store feed ids, so this
@@ -182,9 +340,9 @@ async function applyDb(raw: IDB): Promise<void> {
    const latest = fetchIdxPack(nf)
 
    let headers: IdxHeader[] | null = null
-   if (nf > 0 && db.hdrs === nf) {
+   if (nf > 0 && names.hsum?.covers === nf) {
       try {
-         headers = parseIdxHeaders(await fetchPackBytes(`idx/h${db.hdrs}.gz`, false), nf)
+         headers = parseIdxHeaders(await fetchPackBytes(names.hsum.key, false), nf)
       } catch {
          // A stale db.gz past the summary GC window, or a half-written
          // store: fall through to the eager path instead of reloading —
@@ -211,14 +369,6 @@ export async function init() {
    await applyDb(await dbLoad)
 }
 
-// tailGen names the consolidated tail packs (idx|data|meta/L<tailGen>): seq
-// minus the live delta count. nd absent (a pre-delta store, or right after a
-// consolidation) makes it seq — the historical latest-pack layout, so old
-// stores read identically.
-export function tailGen(): number {
-   return db.seq - (db.nd ?? 0)
-}
-
 // tailCovered is the pack↔delta seam: chrons below it are served by the pack
 // series, chrons at/above it by the resident delta articles.
 export function tailCovered(): number {
@@ -230,23 +380,20 @@ export function deltaArticles(): IArticle[] {
    return deltaArts
 }
 
-// fetchDeltas downloads + parses the live chain, oldest first. Write-once
-// names → force-cache; every segment passes isLatest=true so a stale-db.gz
-// tab whose deltas were GC'd self-heals with the guarded reload. The na
-// cross-check mirrors the backend's loadDeltas (invariant I1): a mismatched
-// chain must fail loudly, not misaddress every tail chron.
+// fetchDeltas downloads + parses the live chain, oldest first, from the names
+// the snapshot resolved (derived from seq/nd under a legacy root, LISTED under
+// a manifest one). Write-once names → force-cache; every segment passes
+// isLatest=true so a stale-db.gz tab whose deltas were GC'd self-heals with
+// the guarded reload. The na cross-check mirrors the backend's loadDeltas
+// (invariant I1) and is the CONTENT half of the seam check: a mismatched chain
+// must fail loudly, not misaddress every tail chron.
 async function fetchDeltas(): Promise<IArticle[]> {
-   const nd = db.nd ?? 0
-   if (nd === 0) return []
-   const base = tailGen() + 1
-   const parts = await Promise.all(
-      Array.from({ length: nd }, (_, i) =>
-         fetchPackBytes(`data/d${base + i}.gz`, true).then((buf) => parseJsonl<IArticle>(buf)),
-      ),
-   )
+   const keys = names.deltas
+   if (keys.length === 0) return []
+   const parts = await Promise.all(keys.map((k) => fetchPackBytes(k, true).then((buf) => parseJsonl<IArticle>(buf))))
    const all = parts.flat()
    if (all.length !== (db.na ?? 0)) {
-      throw new Error(`delta chain holds ${all.length} articles but db.gz says ${db.na ?? 0}`)
+      throw new Error(`delta chain holds ${all.length} articles but the store says ${db.na ?? 0}`)
    }
    return all
 }
@@ -260,8 +407,10 @@ async function fetchDeltas(): Promise<IArticle[]> {
 // checkManifest rides this same response, purging its buckets before our
 // subsequent pack refetches.
 export async function refresh(): Promise<"unchanged" | "updated"> {
-   const raw = await loadDb()
+   const snap = await loadDb()
+   const raw = snap.db
    if (
+      (raw.m ?? 0) === (db.m ?? 0) &&
       raw.fetched_at === db.fetched_at &&
       raw.total_art === db.total_art &&
       raw.seq === db.seq &&
@@ -281,8 +430,15 @@ export async function refresh(): Promise<"unchanged" | "updated"> {
    // deltaLoad too — delta-region loadArticle/loadMeta resolve against it, so a
    // stranded rejecting/half-loaded chain under the rolled-back (na>0) db would
    // otherwise fail every tail read until a full reload.
+   // `names` is in the set for the same reason `db` is, and it is the half the
+   // manifest indirection adds: applyDb installs the two together, so a
+   // mid-apply reject must restore BOTH or the module would address the old
+   // db's chrons through the new store's name lists — the exact "consistent
+   // set, not a mix of old legacy fields and new manifest fields" the
+   // Appendix-D rollback rule forbids.
    const prev = {
       db,
+      names,
       slots,
       expiredCounts,
       idxFetches,
@@ -296,10 +452,11 @@ export async function refresh(): Promise<"unchanged" | "updated"> {
    }
    bgRefresh = true
    try {
-      await applyDb(raw)
+      await applyDb(snap)
    } catch (e) {
       ;({
          db,
+         names,
          slots,
          expiredCounts,
          idxFetches,
@@ -418,11 +575,16 @@ function buildLatestIdx(tailBuf: ArrayBuffer | null, deltas: IArticle[], nf: num
 function fetchIdxPack(p: number): Promise<IdxPack> {
    return cachedPromise(idxFetches, p, async () => {
       if (p < numFinalizedIdx()) {
-         return makeIdxPack(await fetchPackBytes(`idx/${p}.gz`, false), p, IDX_PACK_SIZE, slots)
+         return makeIdxPack(await fetchPackBytes(keyAt(names.idx, p, `idx pack ${p}`), false), p, IDX_PACK_SIZE, slots)
       }
       const tcEntries = tailCovered() - p * IDX_PACK_SIZE
+      // tcEntries > 0 means the store consolidated a tail, so it MUST name one
+      // — keyAt fails loudly instead of synthesizing a name that would 404
+      // (§4.5: no computed-name fallback). deltaLoad is awaited alongside the
+      // tail bytes so the chain and the pack download in parallel; the splice
+      // in buildLatestIdx depends on both.
       const [tailBuf, deltas] = await Promise.all([
-         tcEntries > 0 ? fetchPackBytes(`idx/L${tailGen()}.gz`, true) : Promise.resolve(null),
+         tcEntries > 0 ? fetchPackBytes(keyAt(names.idx, p, "idx tail"), true) : Promise.resolve(null),
          deltaLoad,
       ])
       return buildLatestIdx(tailBuf, deltas, p)
@@ -529,10 +691,13 @@ async function getPackRef(chronIdx: number): Promise<{ packId: number; offset: n
 let dataCache = makeLRU<Promise<IArticle[]>>(20)
 
 async function fetchDataPack(packId: number): Promise<IArticle[]> {
-   const isFinalized = packId < db.next_pid
-   const name = isFinalized ? packId.toString() : `L${tailGen()}`
-   return fetchTimed(new URL(`data/${name}.gz`, PACK_BASE), "force-cache", async (res) => {
-      assertPackOk(res, !isFinalized)
+   // The idx footer's packId IS the positional index into the data series'
+   // name list — exactly what it has always been, whether the list is derived
+   // (legacy) or listed (manifest).
+   const key = keyAt(names.data, packId, `data pack ${packId}`)
+   const isLatest = packId === names.data.tail
+   return fetchTimed(new URL(key, PACK_BASE), "force-cache", async (res) => {
+      assertPackOk(res, isLatest)
       const reader = res
          .body!.pipeThrough(new DecompressionStream("gzip"))
          .pipeThrough(new TextDecoderStream())
@@ -630,11 +795,10 @@ function metaPackId(chronIdx: number): number {
 
 function loadMetaPack(n: number): Promise<IMetaWire[]> {
    return cachedPromise(metaCache, n, async () => {
-      const isFinalized = n < numFinalizedMeta()
-      const path = `meta/${isFinalized ? n.toString() : `L${tailGen()}`}.gz`
-      const buf = await fetchPackBytes(path, !isFinalized)
+      const isLatest = n === names.meta.tail
+      const buf = await fetchPackBytes(keyAt(names.meta, n, `meta shard ${n}`), isLatest)
       // Finalized shards carry a SEARCH_BLOOM_BYTES bloom prefix; the latest tail does not.
-      return parseJsonl<IMetaWire>(isFinalized ? buf.slice(SEARCH_BLOOM_BYTES) : buf)
+      return parseJsonl<IMetaWire>(isLatest ? buf : buf.slice(SEARCH_BLOOM_BYTES))
    })
 }
 
@@ -739,25 +903,27 @@ export async function packNamesForFilter(feeds: Map<number, number>): Promise<st
    if (db.total_art === 0) return []
 
    const nfIdx = numFinalizedIdx()
-   const nfMeta = numFinalizedMeta()
-   const tg = tailGen()
    const tc = tailCovered()
-   const names = new Set<string>()
+   // The enumerator reads the SAME resolved name lists every fetch site uses,
+   // so a pinned scope caches exactly the keys the online reader would request
+   // under either root shape (§8.3: "it already enumerates names, and now it
+   // reads them from a list instead of reconstructing them").
+   const out = new Set<string>()
+   const dataWanted = new Set<string>()
+   const addData = (key: string | undefined) => {
+      if (!key) return
+      out.add(key)
+      dataWanted.add(key)
+   }
 
-   // Always include the tail generation packs and the live delta segments —
-   // they hold the newest articles of every filter. An all-delta store
-   // (tailCovered 0) never wrote a tail generation, so those names are
-   // skipped rather than pinned as guaranteed 404s.
-   if (tc > 0) {
-      names.add(`idx/L${tg}.gz`)
-      names.add(`data/L${tg}.gz`)
-      names.add(`meta/L${tg}.gz`)
-   }
-   const deltaNames = new Set<string>()
-   for (let g = tg + 1; g <= db.seq; g++) {
-      names.add(`data/d${g}.gz`)
-      deltaNames.add(`data/d${g}.gz`)
-   }
+   // Always include the tail of every series and the live delta segments —
+   // they hold the newest articles of every filter. A series with no tail (an
+   // all-delta store never consolidated one) contributes nothing rather than a
+   // guaranteed 404.
+   if (names.idx.tail >= 0) out.add(names.idx.keys[names.idx.tail])
+   if (names.meta.tail >= 0) out.add(names.meta.keys[names.meta.tail])
+   if (names.data.tail >= 0) addData(names.data.keys[names.data.tail])
+   for (const k of names.deltas) out.add(k)
 
    // The boot/search fast-path summaries, when the reader will actually use them
    // — distinct write-once files the online reader fetches but the pin used to
@@ -765,19 +931,17 @@ export async function packNamesForFilter(feeds: Map<number, number>): Promise<st
    // path and falls back to eager-fetch-all (idx packs a feed/tag pin never
    // cached); without meta/s<N> search can't prune shards, so it's unavailable
    // offline even for a fully-pinned scope.
-   const hdrs = db.hdrs ?? 0
-   const mp = db.mp ?? 0
-   if (nfIdx > 0 && hdrs === nfIdx) names.add(`idx/h${hdrs}.gz`) // offline reader boot
-   if (mp > 0) names.add(`meta/s${mp}.gz`) // offline search
+   if (nfIdx > 0 && names.hsum?.covers === nfIdx) out.add(names.hsum.key) // offline reader boot
+   if (names.ssum) out.add(names.ssum.key) // offline search
 
    const isAll = feeds.size === 0
 
    if (isAll) {
-      // [ALL]: include every finalized pack of every series.
-      for (let p = 0; p < nfIdx; p++) names.add(`idx/${p}.gz`)
-      // data packs start at id 1; ids < next_pid are finalized.
-      for (let id = 1; id < db.next_pid; id++) names.add(`data/${id}.gz`)
-      for (let s = 0; s < nfMeta; s++) names.add(`meta/${s}.gz`)
+      // [ALL]: include every listed object of every series (the tails above
+      // included — a Set, so re-adding is free).
+      for (const k of names.idx.keys) if (k) out.add(k)
+      for (const k of names.data.keys) addData(k)
+      for (const k of names.meta.keys) if (k) out.add(k)
    } else {
       // Feed/tag/unread scope: walk only the idx packs that have candidates.
       // For each matching chronIdx, derive the data pack id (from idx bounds)
@@ -788,9 +952,9 @@ export async function packNamesForFilter(feeds: Map<number, number>): Promise<st
          if (!packHasCandidate(p, feeds)) continue
 
          // This idx pack is needed (it has at least one matching article). The
-         // latest pack's physical name exists only when a tail was consolidated.
-         if (p < nfIdx) names.add(`idx/${p}.gz`)
-         else if (tc > 0) names.add(`idx/L${tg}.gz`)
+         // tail position is listed only when a tail was consolidated.
+         const idxKey = names.idx.keys[p]
+         if (idxKey) out.add(idxKey)
 
          const pack = (await fetchIdxPack(p)).parse()
          const baseChron = p * IDX_PACK_SIZE
@@ -814,14 +978,11 @@ export async function packNamesForFilter(feeds: Map<number, number>): Promise<st
                while (boundsIdx + 1 < bounds.length && bounds[boundsIdx + 1].startChron <= chron) {
                   boundsIdx++
                }
-               const dataPackId = bounds[boundsIdx].packId
-               const dataName = dataPackId < db.next_pid ? `data/${dataPackId}.gz` : `data/L${tg}.gz`
-               names.add(dataName)
+               addData(names.data.keys[bounds[boundsIdx].packId])
 
                // Meta shard for this chron.
-               const shardId = Math.floor(chron / META_PACK_SIZE)
-               const metaName = shardId < nfMeta ? `meta/${shardId}.gz` : `meta/L${tg}.gz`
-               names.add(metaName)
+               const metaKey = names.meta.keys[Math.floor(chron / META_PACK_SIZE)]
+               if (metaKey) out.add(metaKey)
             }
          }
       }
@@ -835,19 +996,19 @@ export async function packNamesForFilter(feeds: Map<number, number>): Promise<st
    // harmless, since that data pack is pinned anyway and asset keys are
    // content-addressed. Pinning is an explicit "download for offline" action, so
    // the extra reads are acceptable.
-   const dataNames = [...names].filter((n) => n.startsWith("data/") && !deltaNames.has(n))
-   for (const dn of dataNames) {
-      const arts = parseJsonl<IArticle>(await fetchPackBytes(dn, dn === `data/L${tg}.gz`))
+   const dataTailKey = names.data.tail >= 0 ? names.data.keys[names.data.tail] : null
+   for (const dn of dataWanted) {
+      const arts = parseJsonl<IArticle>(await fetchPackBytes(dn, dn === dataTailKey))
       for (const a of arts) {
          if (!a.c) continue
-         for (const m of a.c.matchAll(ASSET_REF_RE)) names.add(m[0])
+         for (const m of a.c.matchAll(ASSET_REF_RE)) out.add(m[0])
       }
    }
    // Delta-region articles are resident — scrape their asset refs without a fetch.
    for (const a of deltaArts) {
       if (!a.c) continue
-      for (const m of a.c.matchAll(ASSET_REF_RE)) names.add(m[0])
+      for (const m of a.c.matchAll(ASSET_REF_RE)) out.add(m[0])
    }
 
-   return Array.from(names)
+   return Array.from(out)
 }

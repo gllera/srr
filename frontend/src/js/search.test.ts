@@ -27,8 +27,24 @@ const mockData = vi.hoisted(() => {
       // the mock db; the resident chain itself defaults empty — the delta
       // overlay tests seed deltaArts).
       deltaArts: [] as { f: number; a: number; p?: number; t?: string }[],
-      tailGen: () => ((data.db.seq as number) ?? 0) - ((data.db.nd as number) ?? 0),
       tailCovered: () => ((data.db.total_art as number) ?? 0) - ((data.db.na as number) ?? 0),
+      // The resolved store names search.ts fetches through (data.ts's real
+      // export). Driven by the mock db with the LEGACY derivation, which is
+      // exactly what legacyNames() produces for these synthetic stores.
+      storeNames: () => {
+         const total = (data.db.total_art as number) ?? 0
+         const tg = ((data.db.seq as number) ?? 0) - ((data.db.nd as number) ?? 0)
+         const tc = total - ((data.db.na as number) ?? 0)
+         const mp = (data.db.mp as number) ?? 0
+         const keys: string[] = []
+         for (let n = 0; n < mp; n++) keys.push(`meta/${n}.gz`)
+         let tail = -1
+         if (tc > 0) {
+            tail = keys.length
+            keys.push(`meta/L${tg}.gz`)
+         }
+         return { meta: { keys, tail }, ssum: mp > 0 ? { key: `meta/s${mp}.gz`, covers: mp } : null }
+      },
       deltaArticles: () => data.deltaArts,
       parseJsonl: <T>(buf: ArrayBuffer): T[] => {
          const text = new TextDecoder().decode(buf)

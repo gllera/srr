@@ -10,22 +10,25 @@
 //   packs  (srr-packs-vN)   the CDN store under `packs/`: every pack name is
 //      write-once — finalized `idx|data|meta/<n>.gz` (numeric), the latest
 //      generation `idx|data|meta/L<seq>.gz` (a generation is never rewritten
-//      after the db.gz commit that publishes it), and the `idx/h<N>` /
-//      `meta/s<N>` summaries → cache-first. Only `db.gz` is mutable →
-//      network-first (offline → last cached). Finalized series are bounded
-//      per series (enforceCacheBounds), lowest-numbered (oldest) evicted
-//      first.
+//      after the db.gz commit that publishes it), the `idx/h<N>` /
+//      `meta/s<N>` summaries, and the generation manifests `manifest/<m>.gz`
+//      (docs/MANIFEST-SPEC.md — immutable like any other listed object) →
+//      cache-first. Only `db.gz` is mutable → network-first (offline → last
+//      cached). The article series are bounded per series
+//      (enforceCacheBounds), lowest-numbered (oldest) evicted first;
+//      manifests instead mirror the store's own GC (checkManifest).
 //   shell  (srr-shell-vN)   the app itself: the `/…/` navigation + content-hashed
 //                           JS/CSS. Runtime-cached (no build-time manifest — keeps
 //                           this SW hand-written and zero-dep). Hashed JS/CSS are
 //                           immutable → cache-first; the navigation/index.html is the
 //                           version pointer → network-first so a fresh deploy wins
 //                           online and the cached shell serves offline.
-//   meta   (srr-meta-vN)    two synthetic entries: the last-seen db.gz `gen` (store
-//                           generation) and `seq` (latest-pack generation). A gen
-//                           change purges the packs bucket (in-place store rebuild,
-//                           see checkManifest); a seq change prunes cached L<g>
-//                           generations the backend GC has already dropped.
+//   meta   (srr-meta-vN)    three synthetic entries: the last-seen db.gz `gen` (store
+//                           generation), `seq` (latest-pack generation) and `m` (the
+//                           generation-manifest counter). A gen change purges the
+//                           packs bucket (in-place store rebuild, see checkManifest);
+//                           a seq or m change prunes the cached L<g>/d<g>/h<N>/s<N>
+//                           names and the manifests the backend GC has already dropped.
 //
 // Offline correctness is structural: a cached db.gz of generation N can only ever
 // pair with `L<N>` — the name is write-once, so the pair can never disagree on
@@ -270,17 +273,23 @@ const PACK_KEEP = 100 // per finalized series: ~20 MB of data packs + ~5 MB of i
 const META_KEEP = 80 // meta shards run ~200 KB each — a tighter bound for the same idea
 const ASSET_KEEP = 500 // self-hosted images/files: order of ~100 MB at typical sizes
 
+// Only the ARTICLE series are rolling-window bounded. A series absent from this
+// table is owned by checkManifest instead: `manifest` prunes on the store's own
+// gcm low-water (mirroring GCManifests exactly — see below), and `db` (the
+// writer's db.gz snapshot series) is never fetched by the reader at all.
 const SERIES_KEEP: Record<string, number> = { idx: PACK_KEEP, data: PACK_KEEP, meta: META_KEEP }
 
 async function enforceCacheBounds(): Promise<void> {
    try {
       const packs = await caches.open(PACKS)
       const series: Record<string, { req: Request; n: number }[]> = Object.fromEntries(
-         Object.keys(PACK_SERIES_KINDS).map((name) => [name, []]),
+         Object.keys(PACK_SERIES_KINDS)
+            .filter((name) => SERIES_KEEP[name] !== undefined)
+            .map((name) => [name, []]),
       )
       for (const req of await packs.keys()) {
          const p = parsePackName(new URL(req.url).pathname)
-         if (p && p.kind === "") series[p.series].push({ req, n: p.n })
+         if (p && p.kind === "" && series[p.series]) series[p.series].push({ req, n: p.n })
       }
       const assets = await caches.open(ASSETS)
       const assetKeys = await assets.keys()
@@ -288,7 +297,7 @@ async function enforceCacheBounds(): Promise<void> {
          ...Object.entries(series).flatMap(([name, list]) =>
             list
                .sort((a, b) => b.n - a.n)
-               .slice(SERIES_KEEP[name] ?? PACK_KEEP)
+               .slice(SERIES_KEEP[name])
                .map((e) => packs.delete(e.req)),
          ),
          ...assetKeys.slice(0, Math.max(0, assetKeys.length - ASSET_KEEP)).map((req) => assets.delete(req)),
@@ -302,6 +311,11 @@ async function enforceCacheBounds(): Promise<void> {
 // never fetched — they're just cache keys).
 const GEN_KEY = "https://srr.invalid/gen"
 const SEQ_KEY = "https://srr.invalid/seq"
+// The last-seen generation-manifest counter (db.gz `m`). It is the ONE field a
+// v2 root carries that moves on every publishing Commit, so it is the change
+// signal that survives the S34 cutover (where seq/gen/hdrs/mp stop existing).
+// Under today's dual-write root it simply rides alongside seq.
+const MAN_KEY = "https://srr.invalid/manifest"
 
 // LATEST_KEEP (imported from the generated contract) is the backend GC's
 // grace window: the SW never prunes a generation the store itself still
@@ -327,11 +341,20 @@ async function readMetaNumber(key: string): Promise<number> {
 async function checkManifest(dbRes: Response): Promise<void> {
    try {
       const body = dbRes.clone().body!.pipeThrough(new DecompressionStream("gzip"))
-      const db = (await new Response(body).json()) as Pick<IDBWire, "gen" | "seq" | "hdrs" | "mp" | "gcs">
+      const db = (await new Response(body).json()) as Pick<IDBWire, "gen" | "seq" | "hdrs" | "mp" | "gcs" | "m" | "gcm">
       const gen = db.gen ?? 0
       const seq = db.seq ?? 0
       const hdrs = db.hdrs ?? 0
       const mp = db.mp ?? 0
+      const man = db.m ?? 0
+      // The manifest series' own GC low-water: GCManifests deletes every
+      // manifest/<g> with g <= gcm and still serves everything above it. The
+      // SW mirrors that exactly — no wider (it would evict names an open tab's
+      // root still points at) and no narrower (it would keep bytes the store
+      // has already dropped). Same low-water argument as gcs below: a missed
+      // or failed warn-only sweep leaves gcm where it was, so the mirror never
+      // runs ahead of the store.
+      const gcm = db.gcm ?? 0
       // The backend GC's own low-water mark: it has deleted every tail generation
       // L<g>/d<g> with g <= gcs and still serves everything above it (see the
       // delta-tail spec §8). Mirroring it is what keeps the SW cache aligned with
@@ -357,6 +380,7 @@ async function checkManifest(dbRes: Response): Promise<void> {
          ])
          await meta.put(GEN_KEY, new Response(String(gen)))
          await meta.put(SEQ_KEY, new Response(String(seq)))
+         await meta.put(MAN_KEY, new Response(String(man)))
          // The PINNED bucket was just purged — tell open pages to clear their
          // srr-pins registry so the menu doesn't claim "Remove offline copy" over
          // evicted bytes.
@@ -364,7 +388,12 @@ async function checkManifest(dbRes: Response): Promise<void> {
          for (const c of purgedClients) c.postMessage({ type: "pins-purged" })
          return
       }
-      if (seq !== (await readMetaNumber(SEQ_KEY))) {
+      // The prune rides EITHER counter moving. `m` is the signal that survives
+      // the S34 root cutover (a v2 root carries no seq) and it also moves on
+      // publishing cycles that leave seq alone, so the manifest sweep below is
+      // mirrored promptly; `seq` keeps driving the pack sweep exactly as before
+      // on a legacy root that predates manifests (m absent == 0, never moves).
+      if (seq !== (await readMetaNumber(SEQ_KEY)) || man !== (await readMetaNumber(MAN_KEY))) {
          const keys = await packs.keys()
          // Superseded summaries (idx h<N> headers, meta s<N> blooms) ride
          // the seq prune instead of tracking meta keys of their own. Their
@@ -386,10 +415,19 @@ async function checkManifest(dbRes: Response): Promise<void> {
          await Promise.all(
             keys.map((k) => {
                const p = parsePackName(new URL(k.url).pathname)
-               return p && p.kind !== "" && p.n < cutoff[p.kind] ? packs.delete(k) : undefined
+               if (!p) return undefined
+               // Manifests are bare-stem names in their own series, so they
+               // carry no kind letter and are NOT part of the cutoff table
+               // above (nor of enforceCacheBounds' rolling window). They prune
+               // on gcm alone — delete exactly what GCManifests deleted
+               // (g <= gcm), keep every generation the store still serves so a
+               // stale tab can still follow its own root's indirection.
+               if (p.series === "manifest") return p.kind === "" && p.n <= gcm ? packs.delete(k) : undefined
+               return p.kind !== "" && p.n < cutoff[p.kind] ? packs.delete(k) : undefined
             }),
          )
          await meta.put(SEQ_KEY, new Response(String(seq)))
+         await meta.put(MAN_KEY, new Response(String(man)))
       }
    } catch {
       // best-effort — leave caches as-is
