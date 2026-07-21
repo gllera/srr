@@ -104,25 +104,32 @@ is the producer's and is preserved verbatim.
 
 ## Crash safety
 
-Articles and the drained watermark become durable in **one** `Commit`:
+Articles and the drained watermark become durable in **one atomic act**. Since
+the generation-manifest cutover (`docs/MANIFEST-SPEC.md`) that act is the ROOT
+FLIP rather than a db.gz rewrite, and `Inbox` rides the manifest — §4.4 of that
+spec calls this the non-negotiable placement, for exactly the argument below.
+Word for word intact otherwise:
 
-- **Crash before Commit** — the watermark is unmoved and the slot still exists,
-  so the next cycle re-drains the same envelope cleanly.
-- **Crash after Commit, before Rm** — the watermark has advanced, so the next
+- **Crash before the flip** — the watermark is unmoved and the slot still
+  exists, so the next cycle re-drains the same envelope cleanly.
+- **Crash after the flip, before Rm** — the watermark has advanced, so the next
   cycle's `cycle_id <= Inbox[name]` check skips the stale envelope, and the Rm
   is retried (and eventually succeeds) then.
 
 There is no multi-writer tail and no new locking. This is the same property
 delta segments already proved: one cycle's batch published as a single
-write-once object.
+write-once object — now stated once, for the whole store, as the universal
+crash argument.
 
 ## Store handling
 
 `inbox/` is backend-only and **transient** — deliberately NOT added to
 `store.PackSeries`. It is never immutable and never reader-fetched.
 `cacheControlForKey` / `contentTypeForKey` stamp `inbox/` keys `no-cache,
-must-revalidate` + `application/gzip`, the same treatment the seen.gz sidecar
-gets.
+must-revalidate` + `application/gzip`, the same treatment `db.gz` and the config
+sidecar get. (The dedup sidecar moved the other way at the manifest cutover: it
+is a manifest-named immutable object in its own `seen/` series now, so it is no
+longer the comparison this paragraph used to draw.)
 
 ## Known v1 gaps
 
@@ -131,7 +138,11 @@ gets.
   with `dt` (folded-title dedup) has its title hashes collected by the producer
   under the producer's own view of that config; if the operator changes `dt`
   between the spool and the drain, one cycle of title-axis dedup is missed.
-  The re-promotion window is the accepted gap.
+  The re-promotion window is the accepted gap. **Slightly widened, stated:**
+  `dd`/`dt` now live in `config.gz`, which a producer reads at open and an
+  editor may rewrite under its own lock, so the producer's view can be one
+  config edit stale. The window is the same one cycle it always was — only the
+  mechanism changed.
 - **Partition disjointness is config discipline.** Nothing enforces that the
   consolidator excludes the spooled tag. Overlap does not corrupt anything — the
   duplicate is absorbed by `wm`/`bg` — but it wastes both boxes' fetches.

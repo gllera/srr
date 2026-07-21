@@ -31,36 +31,35 @@ const (
 	cacheRevalidate = "no-cache, must-revalidate"
 )
 
-// PackSeries is the write-once pack-name grammar, one row per pack series:
-// the directory plus the kind letters a stem may carry in front of the digit
-// run — none (finalized "idx/12.gz"), "L"<seq> latest generations
-// ("data/L3.gz", all series), "h"<N> idx header summaries ("idx/h2.gz"),
-// "s"<N> meta bloom summaries ("meta/s4.gz"), "d"<seq> delta segments
-// ("data/d7.gz" — one dirty cycle's article batch as data-pack JSONL, data
-// series only). Single source of truth for both sides of the contract:
-// packKeyRe below and the service worker's RE_PACK/parsePackName (via
-// `srr gen-ts` → format.gen.ts PACK_SERIES_KINDS) are built from it.
-// The "db" series carries only bare stems: db/<tailGen>.gz, the write-once
-// db.gz snapshot each consolidation cycle publishes (the pointer-state backup —
-// the packs survive anything, db.gz is the one object whose loss costs manual
-// reconstruction). Listing it here is what stamps those snapshots immutable and
-// application/gzip. The frontend/service-worker never fetch them; the SW's
-// route regex simply gains an inert series.
-// The "manifest" series likewise carries only bare stems: manifest/<m>.gz, the
-// immutable generation manifest every Commit publishes (docs/MANIFEST-SPEC.md
-// §4.2). Bare stems only — the manifest counter IS the name. As of S32 the
-// reader does not fetch manifests either (S33 teaches it to), so this too is an
-// inert series for the SW; listing it here is what stamps a manifest immutable
-// and application/gzip.
+// PackSeries is the write-once object-name grammar, one row per series: the
+// directory plus the kind letters a stem may carry in front of the digit run.
+// Every row is now bare-stem-only — the kind letters ("L" latest generations,
+// "h"/"s" summaries, "d" delta segments) were retired at the generation-manifest
+// cutover (docs/MANIFEST-SPEC.md §4.5): a stem is drawn from a per-series
+// monotone counter that is never reused, and the manifest's ordered name list
+// says what each object holds. `idx/812.gz` means "idx-series object #812" and
+// nothing more, which is exactly what makes a rebuild write NEW names beside
+// the old ones instead of over them.
+//
+// Single source of truth for both sides of the contract: packKeyRe below and
+// the service worker's RE_PACK/parsePackName (via `srr gen-ts` →
+// format.gen.ts PACK_SERIES_KINDS) are built from it.
+//
+//   - "manifest" holds manifest/<m>.gz, the immutable generation manifest every
+//     Commit publishes (§4.2). The manifest counter IS the name.
+//   - "seen" holds the backend-only persistent-dedup sidecar, now a manifest-
+//     named immutable object rather than a mutable ping/pong pair (§10.2).
+//     The frontend/service-worker never fetch it; the SW's route regex simply
+//     gains an inert series.
 var PackSeries = []struct {
 	Name  string // series directory
 	Kinds string // kind letters valid besides the finalized bare stem ("" = bare only)
 }{
-	{"idx", "Lh"},
-	{"data", "Ld"},
-	{"meta", "Ls"},
-	{"db", ""},
+	{"idx", ""},
+	{"data", ""},
+	{"meta", ""},
 	{"manifest", ""},
+	{"seen", ""},
 }
 
 // packKeyRe matches the write-once pack names, built from PackSeries.
@@ -88,15 +87,6 @@ var packKeyRe = func() *regexp.Regexp {
 // Anchored and slash-free so it never matches a pack key (idx/0.gz) or db.gz.
 var feHashedRe = regexp.MustCompile(`^[^/]+\.[0-9a-f]{8,}\.[a-z0-9]+$`)
 
-// isSeenObject reports whether key is one of the seen.gz sidecar objects: the
-// two ping/pong slots (seen.0.gz / seen.1.gz) that SyncSeen actually writes, or
-// the pre-ping-pong legacy name (seen.gz, still read as an upgrade fallback).
-// All are mutable, are SRR's own gzip, and must carry the same
-// Cache-Control/Content-Type as db.gz.
-func isSeenObject(key string) bool {
-	return key == "seen.gz" || key == "seen.0.gz" || key == "seen.1.gz"
-}
-
 // cacheControlForKey returns the HTTP Cache-Control directive a backend should
 // attach when writing key, or "" for keys with no caching policy (e.g. the
 // lock marker). Backends that carry HTTP metadata (S3) emit it; filesystem
@@ -104,17 +94,14 @@ func isSeenObject(key string) bool {
 // place.
 func cacheControlForKey(key string) string {
 	switch {
-	case key == "db.gz" || key == "config.gz" || isSeenObject(key):
-		// The seen.gz sidecar (backend-only persistent dedup + validators + bg) is
-		// a third mutable class besides db.gz and out/, written as two ping/pong
-		// slots (seen.0.gz/seen.1.gz; bare seen.gz is the legacy upgrade name),
-		// rewritten every non-idle fetch cycle. The reader never fetches it, but
-		// if a CDN ever serves it, never cache a stale copy.
+	case key == "db.gz" || key == "config.gz":
+		// db.gz is the ~60-byte commit root {v, m, t} — the store's ONE mutable
+		// key on the reader path, rewritten every cycle.
 		//
 		// config.gz is the backend-only configuration sidecar
 		// (docs/MANIFEST-SPEC.md §4.3): mutable like db.gz, rewritten only when
-		// the operator changes configuration, and — like seen.gz — never fetched
-		// by the frontend or the service worker. Deliberately NOT in PackSeries.
+		// the operator changes configuration, and never fetched by the frontend
+		// or the service worker. Deliberately NOT in PackSeries.
 		return cacheRevalidate
 	case strings.HasPrefix(key, "inbox/"):
 		// A producer's fetch spool (docs/INBOX-SPEC.md): transient and rewritten
@@ -157,7 +144,7 @@ const contentTypeGzip = "application/gzip"
 // construction. Centralised next to cacheControlForKey so the writer↔CDN
 // contract stays in one place.
 func contentTypeForKey(key string) string {
-	if key == "db.gz" || key == "config.gz" || isSeenObject(key) || strings.HasPrefix(key, "inbox/") || packKeyRe.MatchString(key) {
+	if key == "db.gz" || key == "config.gz" || strings.HasPrefix(key, "inbox/") || packKeyRe.MatchString(key) {
 		return contentTypeGzip
 	}
 	return ""

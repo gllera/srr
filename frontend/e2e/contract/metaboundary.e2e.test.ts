@@ -2,7 +2,7 @@ import { existsSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
-import { feedServer, inspectValidate, makeStore, readDb, srr, type FeedServer } from "../harness"
+import { feedServer, inspectValidate, makeStore, readDb, srr, storeNames, type FeedServer } from "../harness"
 import { nItems, pubUnix, rssFeed } from "../fixtures"
 import { mountReader } from "./mount"
 
@@ -44,14 +44,17 @@ describe("contract: meta shard boundary (5,001 articles)", () => {
    })
 
    it("publishes the boundary layout: finalized shard + bloom summary + 1-entry tail", () => {
-      const raw = readDb<{ total_art: number; mp?: number; mt?: number; hdrs?: number }>(store)
+      const raw = readDb<{ total_art: number; mt?: number }>(store)
       expect(raw.total_art).toBe(N)
-      expect(raw.mp).toBe(1) // meta/0.gz finalized, covered by the summary
       expect(raw.mt).toBe(1) // the single article past the boundary
-      expect(raw.hdrs).toBeUndefined() // still zero finalized IDX packs (5,001 < 50,000)
-      expect(existsSync(join(store, "meta/0.gz"))).toBe(true)
-      expect(existsSync(join(store, "meta/s1.gz"))).toBe(true)
-      expect(existsSync(join(store, "meta/L1.gz"))).toBe(true)
+      const names = storeNames(store)
+      expect(names.meta.keys).toHaveLength(2) // one finalized shard + the tail
+      expect(names.meta.tail).toBe(1)
+      expect(names.ssum?.covers).toBe(1) // the bloom summary covers that shard
+      expect(names.hsum).toBeNull() // still zero finalized IDX packs (5,001 < 50,000)
+      for (const key of [...names.meta.keys, names.ssum!.key]) {
+         expect(existsSync(join(store, key)), key).toBe(true)
+      }
    })
 
    it("the reader sees full coverage and counts through the boundary", () => {

@@ -69,7 +69,7 @@ func (o *DB) buildConfigSidecar() configSidecar {
 		}
 	}
 	return configSidecar{
-		Version:     manifestVersion,
+		Version:     dbFormatVersion,
 		StoreConfig: o.core.StoreConfig,
 		Feeds:       feeds,
 	}
@@ -141,17 +141,6 @@ func (o *DB) configChanged(ctx context.Context) (changed, removals bool) {
 	return false, removals
 }
 
-// configEqual compares two sidecar documents by their canonical encoding. Going
-// through JSON rather than reflect.DeepEqual makes the comparison agree exactly
-// with what gets written — a nil vs empty slice that serializes identically is
-// not a change worth a store write, and `srr inspect --validate` must not
-// report one as a divergence either.
-func configEqual(a, b configSidecar) bool {
-	ab, aerr := jsonEncode(canonicalConfig(a))
-	bb, berr := jsonEncode(canonicalConfig(b))
-	return aerr == nil && berr == nil && bytes.Equal(ab, bb)
-}
-
 // canonicalConfig renders a sidecar into a map-order-independent form. Go's
 // encoder already sorts map keys, so this only has to sort the one slice whose
 // order is incidental (Out is operator-ordered and IS significant, so it is
@@ -188,9 +177,8 @@ func (o *DB) syncConfig(ctx context.Context) error {
 	return nil
 }
 
-// loadConfigSidecar reads config.gz for cross-checking only — NOTHING in S32
-// derives behavior from it (db.gz is still authoritative). Returns nil when the
-// object is absent, which is legal.
+// loadConfigSidecar reads config.gz through an arbitrary fetcher (the checkers'
+// path, local or HTTP).
 func loadConfigSidecar(fetch keyGetter) (*configSidecar, error) {
 	data, err := fetch(configFileKey)
 	if err != nil {
@@ -201,4 +189,43 @@ func loadConfigSidecar(fetch keyGetter) (*configSidecar, error) {
 		return nil, fmt.Errorf("decode %s: %w", configFileKey, err)
 	}
 	return &c, nil
+}
+
+// loadConfig reads the sidecar into the open store's core. ABSENCE IS LEGAL
+// (§4.3): a store with no config.gz behaves exactly as one whose configuration
+// is all defaults, which is what makes the cutover's first commit — and any
+// rollback — trivial. A PRESENT-but-corrupt object is a hard error: silently
+// running a fetch cycle with the default recipe when the operator configured
+// something else would rewrite every article through the wrong pipeline.
+func (o *DB) loadConfig(ctx context.Context) error {
+	rc, err := o.Get(ctx, configFileKey, true)
+	if err != nil {
+		return err
+	}
+	if rc == nil {
+		return nil
+	}
+	data, err := gunzip(rc)
+	rc.Close()
+	if err != nil {
+		return fmt.Errorf("decompress %s: %w", configFileKey, err)
+	}
+	var c configSidecar
+	if err := json.Unmarshal(data, &c); err != nil {
+		return fmt.Errorf("decode %s: %w", configFileKey, err)
+	}
+	if c.Version > dbFormatVersion {
+		return fmt.Errorf("%s was written by a newer srr (format v%d, this binary supports v%d)", configFileKey, c.Version, dbFormatVersion)
+	}
+	o.core.StoreConfig = c.StoreConfig
+	for id, cfg := range c.Feeds {
+		if f := o.core.Feeds[id]; f != nil {
+			applyFeedConfig(f, cfg)
+		}
+		// An entry for a feed the store does not have is INERT and ignored
+		// (§4.3) — that is what makes the two-object mutations of §6.4 safe
+		// without a distributed commit. The next config write sweeps it.
+	}
+	o.configConfirmed = true
+	return nil
 }

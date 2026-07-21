@@ -12,6 +12,16 @@ byte-identity claim carries a feed-membership carve-out — see §12.1.
 
 ---
 
+> **Superseded in part by `docs/MANIFEST-SPEC.md` (cut over 2026-07-21).**
+> The delta-segment *design* — accounting split from materialization, one
+> immutable segment per dirty cycle, lazy consolidation, the pack↔delta seam —
+> is live and this document remains its reference. What the manifest cutover
+> replaced is everything about NAMING and RECLAMATION: segments are no longer
+> `data/d<seq>.gz` derived from counters but opaque stems the manifest LISTS
+> (§5's `seq`/`nd` are retired), and §8's two GC horizons are replaced by one
+> rule — delete what the last K manifests do not name. Each affected section
+> below carries an inline note; nothing else here changed.
+
 ## 1. Problem
 
 Every article-producing fetch cycle rewrites the **entire hot tail** under new
@@ -112,6 +122,13 @@ itself keeps bumping once per dirty cycle (it now names the newest tail
 db.gz, seen.gz, out/, assets/ are all untouched.
 
 ## 5. db.gz schema changes (`DBCore`)
+
+> **Retired by the manifest cutover.** `seq` and `nd` are gone: the chain is the
+> manifest's `names.deltas` list, and `nd` is its length. `na` survives verbatim
+> (the seam `tc = total_art − na`, cross-checked against the parsed chain on both
+> sides), as do `dby` and the head projection. The section below describes the
+> pre-cutover encoding; read `docs/MANIFEST-SPEC.md` §4.5 for what replaced it.
+
 
 | Field | Key | Type | Meaning |
 |---|---|---|---|
@@ -263,20 +280,27 @@ defense-in-depth only.
 
 ### 6.5 Invariants (writer-enforced, reader-assumed, inspect-checked)
 
-- **I1 — Chain contiguity:** `data/d<g>.gz` exists for every `g` in
-  `(tailGen, seq]`, holding ≥ 1 article each, chron-contiguous, jointly
-  covering `[tc, total_art)`.
+- **I1 — Chain contiguity:** ⚠ **RETIRED AS ARITHMETIC, PRESERVED AS CONTENT**
+  (manifest spec §13). Contiguity was only ever a way to derive the segment
+  names from a generation range; the manifest's `names.deltas` list IS the
+  chain, in order. What survives verbatim is the per-segment content check —
+  each segment holds ≥ 1 article, and the segments jointly cover
+  `[tc, total_art)` — enforced on both sides as part of I4.
 - **I2 — No finalization stratum inside the delta region:**
   `floor((total_art−1)/5000) == floor((tc−1)/5000)` whenever `nd > 0`.
   Consequence: `numFinalizedIdx(total_art)` and `numFinalizedMeta(total_art)`
   keep working **verbatim** on the reader — every finalized pack those formulas
   name exists, because the batch that would have crossed the stratum was forced
   to consolidate in the same Commit.
-- **I3 — Tail pack coverage:** `idx/L<tailGen>` holds exactly
-  `tc − numFinalizedIdx·50000` entries; `next_pid`/`pack_off` describe
-  consolidated state only (chrons `< tc`).
-- **I4 — Accounting equivalence:** `tc = total_art − na` and
-  `Σ lines(d<g>) == na`.
+- **I3 — Tail pack coverage:** re-anchored on the LAST ENTRY of the idx name
+  list rather than on a generation name: the idx tail holds exactly
+  `tc − numFinalizedIdx·50000` entries. `pack_off` and `next_pid` still describe
+  consolidated state only (chrons `< tc`) — `next_pid` is now the data series'
+  tail POSITION, which `srr inspect --validate` cross-checks against the list
+  (manifest invariant M5).
+- **I4 — Accounting equivalence:** `tc = total_art − na` and `Σ lines == na`
+  over the LISTED segments. Unchanged in substance, and now the whole of the
+  chain's structural validation (manifest invariant M6).
 
 ## 7. Reader specification
 
@@ -352,60 +376,34 @@ adopts the new `L<seq>` names exactly as today (the amortized cost that
 remains). `applyDb`'s wholesale-rebuild strategy is unchanged — old deltas
 re-resolve from the SW/HTTP cache for free.
 
-## 8. GC and the grace window — ⚠ two silent breakages to respec
+## 8. GC and the grace window
 
-Both the backend GC and the SW prune currently derive horizons from `seq`
-assuming `L<seq>` is the live tail. Under lazy consolidation `seq` runs ahead
-of `tailGen`, and **both would delete the live tail packs** if left unchanged.
-This section is normative:
+> **RETIRED WHOLESALE by the manifest cutover** (`docs/MANIFEST-SPEC.md` §7,
+> §10.6). This section respecified two horizons — the backend's
+> `tailGen − keep − 1 − 2·maxDeltas` cutoff and the service worker's mirror of
+> it — because both derived names from `seq` and would otherwise have deleted
+> the live tail. Neither exists any more:
+>
+> - The backend GC is ONE rule: delete what the last K manifests do not name
+>   (`--keep-manifests`, default 32). A live delta segment is named by the
+>   manifest this cycle publishes, so it is reachable BY CONSTRUCTION — no
+>   horizon can be wrong about it, at any `--max-deltas`.
+> - The low-water mechanism SURVIVES, as `gcm` over manifest numbers, for
+>   exactly the reason it was introduced here: the sweep is warn-only and
+>   post-flip, so a missed run must never permanently strand a name.
+> - The service worker no longer mirrors an arithmetic cutoff at all. On
+>   adopting a generation it evicts every cached object named by neither it nor
+>   the previously-adopted one — exact, and needing no knowledge of the writer's
+>   runtime `--max-deltas`, which was this section's hardest constraint.
+>
+> The window-sizing rationale is kept below, because it is the derivation K
+> inherits.
 
 - Rationale for the protected window: a tab holds a db.gz at most
   `latestKeep = 2` commits stale; between two consecutive consolidations at
   most `maxDeltas + 1` commits pass, so the stalest tab's
   `tailGen_old ≥ tailGen − 2·(maxDeltas+1)`, and its needed deltas satisfy
   `g > tailGen_old`.
-- **Backend `GCLatest` (as implemented, low-water):** cutoff
-  `tailGen − keep − 1 − 2·maxDeltas` (one generation more conservative than
-  the derivation needs, keeping the codebase's `−keep−1` idiom; reduces to the
-  exact pre-delta cutoff at the `maxDeltas = 0` kill switch) marks the grace
-  boundary — nothing above it is ever swept. The sweep is a **low-water drain**,
-  NOT a fixed trailing window: it clears `(GCLatestSwept, cutoff]` and advances
-  the persisted low-water mark `GCLatestSwept` (db.gz `gcs`) ONLY over
-  generations it actually cleared. This is normative because `tailGen` JUMPS at
-  consolidation (by up to `maxDeltas+1`) and the cutoff jumps with it — further
-  still when an operator lowers `--max-deltas` — so any fixed trailing window
-  strands every name inside a jump larger than it, and a single missed/failed
-  sweep (GC is warn-only, post-Commit) strands them **forever**, since no later
-  run's window reaches back that far (the pre-delta "a crash-leaked name is
-  still swept by the next advancing run" guarantee, which a fixed window broke
-  for `maxDeltas > 2`). The low-water closes the gap: the next advancing run
-  resumes exactly where the last stopped, so nothing is ever permanently
-  stranded regardless of jump size or config change. Per-run work is bounded by
-  `gcMaxSweep` (a large one-time backlog — a long-missed sweep, a big
-  `--max-deltas` reduction, or the first run on a store predating `gcs` — drains
-  over several runs). Sweeps `idx/L<g>`, `data/L<g>`, `meta/L<g>`, `data/d<g>`,
-  gated on tail-generation advance (delta cycles supersede nothing). `gcs` is
-  writer-only (frontend/SW ignore it) and left untouched by `BumpGen` (a rebuild
-  reuses finalized names but the tail-generation names are unchanged).
-- **SW `checkManifest` (respecified, mirrors the backend GC):** reads `gcs`
-  alongside `gen`/`seq`/`hdrs`/`mp`; prunes cached `L<g>` and `d<g>` with
-  `g ≤ gcs` — the backend GC's OWN low-water. This keeps the cache aligned with
-  the store (evict exactly what the store deleted, keep exactly what it still
-  serves) and is correct for offline reads at ANY runtime `--max-deltas` without
-  the reader knowing that value: a stale open tab needs names only down to its
-  own `tailGen_old`, and the grace derivation above gives
-  `tailGen_old > cutoff ≥ gcs`, so a name it needs is never evicted. A bare
-  `tailGen − LATEST_KEEP` cutoff (this spec's first draft) instead evicts the
-  whole just-consolidated chain across a `tailGen` JUMP — losing a still-open
-  tab's offline delta read; and a `tailGen − LATEST_KEEP − 2·maxDeltas` cutoff
-  can't be computed reader-side without coupling to the build-time `MAX_DELTAS`
-  constant (wrong for a non-default runtime). `gcs` in db.gz lags the live sweep
-  by one cycle (GC runs post-Commit), a safe direction — the cache keeps a
-  just-swept name one cycle longer. Gen-change purge and the `h<g>`/`s<g>`
-  prunes (`− LATEST_KEEP`; those counters don't jump) are unchanged; the pinned
-  bucket keeps its existing rules (gen-purged, seq-prune-exempt).
-- `GCSummaries`/`GCMetaSummaries`: unchanged (keyed on `hdrs`/`mp`, which only
-  advance at consolidation).
 
 ## 9. Backend read side and ops tooling
 
@@ -500,16 +498,18 @@ Real `srr` with `maxDeltas > 0` → real reader:
    coordinated break, taken deliberately per the project's single-operator
    "clean break" precedent.
 3. Rollback at any time: set `--max-deltas 0`; the next dirty cycle
-   consolidates and the store is structurally pre-delta again (`nd == 0`).
-   No rebuild, no `gen --bump`, no purge.
+   consolidates and the store is structurally pre-delta again (an empty
+   `names.deltas`). No rebuild, no purge — and after the manifest cutover there
+   is no `gen --bump` to leave out either.
 
 ## 14. Interactions and future work
 
-- **Proposal #1 (snapshot/HEAD-pointer commits):** composes cleanly — the
-  snapshot manifest would list the live delta names explicitly instead of the
-  reader deriving them from `nd`/`seq`, and `tc` validation moves into the
-  manifest. Nothing in this spec pre-empts it; `nd`-arithmetic is the only
-  part #1 would later subsume.
+- **Proposal #1 (snapshot/HEAD-pointer commits): SHIPPED**, as
+  `docs/MANIFEST-SPEC.md`, and it landed exactly as predicted here — the
+  manifest lists the live delta names explicitly instead of the reader deriving
+  them from `nd`/`seq`, and `tc` validation moved into it. The `nd`-arithmetic
+  this bullet named as the only part it would subsume is precisely what it
+  subsumed.
 - **Meta stride shrink / head growth:** deltas reduce the pressure that
   motivated both; re-evaluate after this ships.
 - Deliberately not included: per-delta search blooms (resident scan is

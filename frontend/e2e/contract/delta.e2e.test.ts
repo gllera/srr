@@ -1,8 +1,8 @@
-import { existsSync, readFileSync, rmSync } from "node:fs"
+import { existsSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
-import { feedServer, inspectValidate, makeStore, srr, type FeedServer } from "../harness"
+import { feedServer, inspectValidate, makeStore, srr, storeNames, type FeedServer } from "../harness"
 import { nItems, rssFeed } from "../fixtures"
 import { mountReader, type FetchIntercept } from "./mount"
 
@@ -47,18 +47,20 @@ describe("contract: delta-segment tail", () => {
    })
 
    it("publishes the first batch as a delta segment, not tail packs", () => {
-      expect(reader.data.db.seq).toBe(1)
       expect(reader.data.db.nd).toBe(1)
       expect(reader.data.db.na).toBe(2)
-      expect(existsSync(join(store, "data/d1.gz"))).toBe(true)
-      expect(existsSync(join(store, "idx/L1.gz"))).toBe(false)
-      expect(existsSync(join(store, "data/L1.gz"))).toBe(false)
-      expect(existsSync(join(store, "meta/L1.gz"))).toBe(false)
+      const names = storeNames(store)
+      expect(names.deltas).toHaveLength(1)
+      expect(existsSync(join(store, names.deltas[0]))).toBe(true)
+      // An all-delta store consolidated nothing, so no series names a tail.
+      expect(names.idx.tail).toBe(-1)
+      expect(names.data.tail).toBe(-1)
+      expect(names.meta.tail).toBe(-1)
    })
 
    it("boots from db.gz + the chain alone and serves everything resident", async () => {
       const boot = new Set(calledPaths(reader.fetchMock))
-      expect(boot).toEqual(new Set(["db.gz", "data/d1.gz"]))
+      expect(boot).toEqual(new Set(["db.gz", `manifest/${reader.data.db.m}.gz`, ...storeNames(store).deltas]))
 
       const before = reader.fetchMock.mock.calls.length
       for (let chron = 0; chron < 2; chron++) {
@@ -93,7 +95,9 @@ describe("contract: delta-segment tail", () => {
       // The wholesale applyDb re-fetches the chain (d1 rides the SW/HTTP
       // cache in production — write-once names); the contract here is that NO
       // tail/idx/meta pack is touched.
-      expect(new Set(calledPaths(reader.fetchMock))).toEqual(new Set(["db.gz", "data/d1.gz", "data/d2.gz"]))
+      expect(new Set(calledPaths(reader.fetchMock))).toEqual(
+         new Set(["db.gz", `manifest/${reader.data.db.m}.gz`, ...storeNames(store).deltas]),
+      )
       expect(reader.data.db.nd).toBe(2)
 
       const before = reader.fetchMock.mock.calls.length
@@ -102,25 +106,24 @@ describe("contract: delta-segment tail", () => {
       expect(reader.fetchMock.mock.calls.length).toBe(before)
    })
 
-   it("the chain-cap cycle consolidates into L<seq> and the tab adopts it", async () => {
+   it("the chain-cap cycle consolidates into fresh tail packs and the tab adopts it", async () => {
+      const before = storeNames(store)
       feeds.set("/a.xml", rssFeed("Delta", all))
       await srr(store, "art", "fetch") // cycle 3: nd == MAX_DELTAS → consolidation
 
       expect(await reader.data.refresh()).toBe("updated")
-      expect(reader.data.db.seq).toBe(3)
       expect(reader.data.db.nd ?? 0).toBe(0)
       expect(reader.data.db.na ?? 0).toBe(0)
       expect(reader.data.db.mt).toBe(6)
-      for (const name of ["idx/L3.gz", "data/L3.gz", "meta/L3.gz"]) {
-         expect(existsSync(join(store, name)), `${name} after consolidation`).toBe(true)
+      const after = storeNames(store)
+      for (const list of [after.idx, after.data, after.meta]) {
+         expect(list.tail).toBeGreaterThanOrEqual(0)
+         expect(existsSync(join(store, list.keys[list.tail]))).toBe(true)
       }
-      // The consolidated deltas survive as the stale-tab grace window.
-      expect(existsSync(join(store, "data/d1.gz"))).toBe(true)
-      expect(existsSync(join(store, "data/d2.gz"))).toBe(true)
-      // A consolidation cycle also publishes the write-once db.gz snapshot —
-      // the pointer-state backup — byte-identical to the db.gz it committed.
-      expect(existsSync(join(store, "db/3.gz")), "db/3.gz snapshot").toBe(true)
-      expect(readFileSync(join(store, "db/3.gz")).equals(readFileSync(join(store, "db.gz")))).toBe(true)
+      // The consolidated deltas survive as the stale-tab grace window: the
+      // manifest no longer names them, and the GC keeps them for K generations.
+      expect(after.deltas).toEqual([])
+      for (const seg of before.deltas) expect(existsSync(join(store, seg))).toBe(true)
 
       for (let chron = 0; chron < 6; chron++) {
          const a = await reader.data.loadArticle(chron)
@@ -133,7 +136,7 @@ describe("contract: delta-segment tail", () => {
       const fresh = await mountReader(store)
       const paths = calledPaths(fresh.fetchMock)
       expect(paths.some((p) => /^data\/d\d+\.gz$/.test(p))).toBe(false)
-      expect(paths).toContain("idx/L3.gz")
+      expect(paths).toContain(storeNames(store).idx.keys[storeNames(store).idx.tail])
       const a = await fresh.data.loadArticle(5)
       expect(a.t).toBe(all[5].title)
    })
@@ -147,7 +150,7 @@ describe("contract: delta-segment tail", () => {
       try {
          await srr(store2, "feed", "add", "-t", "Gone", "-u", `${feeds2.url}/a.xml`)
          await srr(store2, "art", "fetch")
-         rmSync(join(store2, "data/d1.gz"))
+         rmSync(join(store2, storeNames(store2).deltas[0]))
          await expect(mountReader(store2)).rejects.toThrow(/pack fetch failed: 404/)
       } finally {
          await feeds2.close()
@@ -168,7 +171,7 @@ describe("contract: delta chain survives a failed refresh", () => {
    let store: string
    let failDeltas = false
    const intercept: FetchIntercept = async (pathname, serve) => {
-      if (failDeltas && /^data\/d\d+\.gz$/.test(pathname)) {
+      if (failDeltas && /^data\/\d+\.gz$/.test(pathname)) {
          throw new Error(`simulated network failure fetching ${pathname}`)
       }
       return serve()

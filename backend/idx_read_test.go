@@ -9,11 +9,11 @@ import (
 	"testing"
 )
 
-// buildCoreGz encodes a DBCore as a gzip-compressed JSON blob, suitable for
-// use as a fake db.gz keyGetter in loadCore tests.
-func buildCoreGz(t *testing.T, core DBCore) []byte {
+// buildCoreGz encodes a hostile store state as a gzip-compressed manifest
+// blob, suitable for use as a fake keyGetter in loadCore tests.
+func buildCoreGz(t *testing.T, man Manifest) []byte {
 	t.Helper()
-	raw, err := json.Marshal(core)
+	raw, err := json.Marshal(man)
 	if err != nil {
 		t.Fatalf("json.Marshal: %v", err)
 	}
@@ -28,18 +28,18 @@ func buildCoreGz(t *testing.T, core DBCore) []byte {
 	return buf.Bytes()
 }
 
-// fakeFetcher returns a keyGetter that serves a fixed db.gz blob and reports
-// "not found" for any other key, so loadCore tests never reach loadIdxPacks.
-func fakeFetcher(dbGz []byte) keyGetter {
+// fakeFetcher returns a keyGetter serving a minimal v3 root plus the manifest
+// it names, and "not found" for any other key, so loadCore tests never reach
+// loadIdxPacks.
+func fakeFetcher(manGz []byte) keyGetter {
 	return func(key string) ([]byte, error) {
-		if key != dbFileKey {
-			return nil, nil
+		switch key {
+		case dbFileKey:
+			return []byte(`{"v":3,"m":1}`), nil
+		case manifestKey(1):
+			return gunzip(bytes.NewReader(manGz))
 		}
-		data, err := gunzip(bytes.NewReader(dbGz))
-		if err != nil {
-			return nil, err
-		}
-		return data, nil
+		return nil, nil
 	}
 }
 
@@ -48,8 +48,14 @@ func fakeFetcher(dbGz []byte) keyGetter {
 // the corrupt core reaches loadIdxPacks → parseIdxPack with a negative
 // packSize → makeslice panic. After the fix, loadCore itself returns an error.
 func TestLoadCoreRejectsNegativeTotalArticles(t *testing.T) {
-	core := DBCore{ManifestState: ManifestState{TotalArticles: -5}, WriterState: WriterState{NextPackID: 1, Seq: 1}}
-	gz := buildCoreGz(t, core)
+	man := Manifest{
+		Version:             dbFormatVersion,
+		Num:                 1,
+		ManifestState:       ManifestState{TotalArticles: -5},
+		ManifestWriterState: ManifestWriterState{NextPackID: 1},
+		Names:               newManifestNames(),
+	}
+	gz := buildCoreGz(t, man)
 	_, err := loadCore(fakeFetcher(gz))
 	if err == nil {
 		t.Fatal("expected error for negative total_art, got nil")
@@ -66,12 +72,15 @@ func TestLoadCoreRejectsNegativeTotalArticles(t *testing.T) {
 // fix, loadCore rejects the id before any pack loading.
 func TestLoadCoreRejectsOversizedFeedID(t *testing.T) {
 	oversized := feedIDCeiling + 1 // e.g. 65537 — beyond the u16 ceiling
-	core := DBCore{
-		ManifestState: ManifestState{TotalArticles: 1},
-		WriterState:   WriterState{NextPackID: 1, Seq: 1},
-		Feeds:         map[int]*Feed{oversized: {URL: "https://example.com/x"}},
+	man := Manifest{
+		Version:             dbFormatVersion,
+		Num:                 1,
+		ManifestState:       ManifestState{TotalArticles: 1},
+		ManifestWriterState: ManifestWriterState{NextPackID: 1},
+		Names:               newManifestNames(),
+		Feeds:               map[int]FeedPublic{oversized: {URL: "https://example.com/x"}},
 	}
-	gz := buildCoreGz(t, core)
+	gz := buildCoreGz(t, man)
 	_, err := loadCore(fakeFetcher(gz))
 	if err == nil {
 		t.Fatal("expected error for feed id >= feedIDCeiling, got nil")
@@ -234,7 +243,7 @@ func TestOwnFeedCountForFeedAddedMidPack(t *testing.T) {
 		t.Fatalf("PutArticles batch 2: %v", err)
 	}
 
-	raw, err := db.loadPack(ctx, latestKey(c, "idx"))
+	raw, err := db.loadPack(ctx, tailK(c, idxSeries))
 	if err != nil {
 		t.Fatalf("loadPack: %v", err)
 	}

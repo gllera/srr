@@ -44,7 +44,7 @@ func TestFeedWidthBeyond255(t *testing.T) {
 
 	// Round-trip the latest idx pack: every entry's feed_id must survive,
 	// including the ids ≥ 256 that a u8 entry could not hold.
-	raw, err := db.loadPack(ctx, latestKey(c, "idx"))
+	raw, err := db.loadPack(ctx, tailK(c, idxSeries))
 	if err != nil {
 		t.Fatalf("loadPack: %v", err)
 	}

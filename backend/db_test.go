@@ -111,13 +111,7 @@ func readAllArticles(t *testing.T, dir string, c *DBCore) []*Item {
 	var refs []idxRef
 
 	for p := 0; p <= numFinalized; p++ {
-		var name string
-		if p < numFinalized {
-			name = fmt.Sprintf("idx/%d.gz", p)
-		} else {
-			name = latestKey(c, "idx")
-		}
-		metaBytes := decompressGz(t, filepath.Join(dir, name))
+		metaBytes := decompressGz(t, filepath.Join(dir, posK(c, idxSeries, p)))
 		// idx pack = header (prefix + numSlots×4 counts) ‖ 2-byte entries ‖
 		// u16-LE boundary footer (local indices where the data packId advances).
 		numSlots := int(binary.LittleEndian.Uint32(metaBytes[idxStateSize:]))
@@ -148,20 +142,13 @@ func readAllArticles(t *testing.T, dir string, c *DBCore) []*Item {
 	var articles []*Item
 	for _, ref := range refs {
 		if _, ok := dataCache[ref.packID]; !ok {
-			var dataBytes []byte
-			for _, name := range []string{
-				fmt.Sprintf("data/%d.gz", ref.packID),
-				latestKey(c, "data"),
-			} {
-				path := filepath.Join(dir, name)
-				if _, err := os.Stat(path); err == nil {
-					dataBytes = decompressGz(t, path)
-					break
-				}
+			// The idx footer's packId IS the positional index into the data
+			// series' name list — resolve it the way every reader does.
+			key := posK(c, dataSeries, ref.packID)
+			if key == "" {
+				t.Fatalf("the store names no data pack at position %d", ref.packID)
 			}
-			if dataBytes == nil {
-				t.Fatalf("data pack %d not found", ref.packID)
-			}
+			dataBytes := decompressGz(t, filepath.Join(dir, key))
 			var ads []ArticleData
 			dec := json.NewDecoder(bytes.NewReader(dataBytes))
 			for dec.More() {
@@ -242,7 +229,7 @@ func TestPutArticlesCrossBatchFooter(t *testing.T) {
 
 	// Precondition: batch 1 must leave a NON-EMPTY footer, else the cross-batch
 	// strip/re-emit path under test is never exercised.
-	raw1, err := db.loadPack(ctx, latestKey(c, "idx"))
+	raw1, err := db.loadPack(ctx, tailK(c, idxSeries))
 	if err != nil {
 		t.Fatalf("loadPack idx after batch1: %v", err)
 	}
@@ -301,8 +288,8 @@ func TestPutArticlesEmpty(t *testing.T) {
 		t.Fatalf("PutArticles([]): %v", err)
 	}
 	// An empty batch must not publish a new latest-pack generation.
-	if c.Seq != 0 {
-		t.Errorf("Seq after empty batches = %d, want 0", c.Seq)
+	if tailK(c, idxSeries) != "" {
+		t.Errorf("an empty batch published a tail: %q", tailK(c, idxSeries))
 	}
 }
 
@@ -371,26 +358,32 @@ func TestPutArticlesDataPackSplitting(t *testing.T) {
 func TestCommitAndReadDB(t *testing.T) {
 	db, c, dir := setupTestDB(t)
 	c.Feeds = map[int]*Feed{
-		1: {id: 1, Title: "Test Feed", URL: "http://example.com/feed"},
+		1: {id: 1, Title: "Test Feed", URL: "http://example.com/feed", Recipe: "read"},
 	}
 
 	if err := db.Commit(ctx); err != nil {
 		t.Fatalf("CommitDB: %v", err)
 	}
 
-	// Read it back
-	data := decompressGz(t, filepath.Join(dir, "db.gz"))
-
-	var core DBCore
-	if err := json.Unmarshal(data, &core); err != nil {
-		t.Fatalf("Unmarshal: %v", err)
+	// Read it back the way a reader does: root -> manifest.
+	man := readManifest(t, dir, 1)
+	if len(man.Feeds) != 1 {
+		t.Fatalf("manifest feeds len = %d, want 1", len(man.Feeds))
+	}
+	if man.Feeds[1].Title != "Test Feed" {
+		t.Errorf("feed title = %q, want %q", man.Feeds[1].Title, "Test Feed")
 	}
 
-	if len(core.Feeds) != 1 {
-		t.Fatalf("Subscriptions len = %d, want 1", len(core.Feeds))
+	// ...and the writer's own reopen recomposes the feed from BOTH halves:
+	// public fields from the manifest, config from the sidecar.
+	reopened, err := NewDB(ctx, false)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
 	}
-	if core.Feeds[1].Title != "Test Feed" {
-		t.Errorf("Sub title = %q, want %q", core.Feeds[1].Title, "Test Feed")
+	defer reopened.Close(ctx)
+	f := reopened.core.Feeds[1]
+	if f == nil || f.Title != "Test Feed" || f.URL != "http://example.com/feed" || f.Recipe != "read" {
+		t.Errorf("recomposed feed = %+v", f)
 	}
 }
 
@@ -702,25 +695,32 @@ func TestAddFeedResetsExpired(t *testing.T) {
 	}
 }
 
-func TestPutArticlesSeqIncrements(t *testing.T) {
+func TestPutArticlesPublishesFreshTailNames(t *testing.T) {
 	db, c, _ := setupTestDB(t)
 	ch := &Feed{id: 1}
 	c.Feeds = map[int]*Feed{ch.id: ch}
 
-	if c.Seq != 0 {
-		t.Fatalf("fresh store Seq = %d, want 0", c.Seq)
+	if tailK(c, idxSeries) != "" || tailK(c, dataSeries) != "" {
+		t.Fatalf("fresh store already names a tail: idx=%q data=%q", tailK(c, idxSeries), tailK(c, dataSeries))
 	}
 
-	// First article batch publishes generation 1, the next one generation 2.
-	for want := 1; want <= 2; want++ {
-		articles := []*Item{
-			{Feed: ch, Title: "A", Content: "C", Published: int64(1000 * want)},
-		}
+	// Every consolidation writes the tail under a FRESH stem and never reuses
+	// one, which is the whole point of opaque names.
+	seen := map[string]bool{}
+	for n := 1; n <= 3; n++ {
+		articles := []*Item{{Feed: ch, Title: "A", Content: "C", Published: int64(1000 * n)}}
 		if _, err := db.PutArticles(ctx, articles); err != nil {
-			t.Fatalf("PutArticles #%d: %v", want, err)
+			t.Fatalf("PutArticles #%d: %v", n, err)
 		}
-		if c.Seq != want {
-			t.Errorf("Seq after batch %d = %d, want %d", want, c.Seq, want)
+		for _, series := range []string{idxSeries, dataSeries} {
+			key := tailK(c, series)
+			if key == "" {
+				t.Fatalf("batch %d published no %s tail", n, series)
+			}
+			if seen[key] {
+				t.Errorf("batch %d reused the name %q", n, key)
+			}
+			seen[key] = true
 		}
 	}
 }
@@ -746,69 +746,6 @@ func assertKey(t *testing.T, dir, key string, present bool) {
 	}
 	if !present && err == nil {
 		t.Errorf("%s should have been GC'd", key)
-	}
-}
-
-// assertGen asserts presence/absence of both series' files for a generation.
-func assertGen(t *testing.T, dir string, g int, present bool) {
-	t.Helper()
-	for _, prefix := range []string{"idx", "data"} {
-		assertKey(t, dir, genKey(prefix, g), present)
-	}
-}
-
-func TestGCLatestGraceWindow(t *testing.T) {
-	db, c, dir := setupTestDB(t)
-	ch := &Feed{id: 1}
-	c.Feeds = map[int]*Feed{ch.id: ch}
-
-	// Five fetch cycles, each running GC like cmd_fetch does.
-	for i := 1; i <= 5; i++ {
-		putOneArticle(t, db, ch, i)
-		if err := db.GCLatest(ctx, 2); err != nil {
-			t.Fatalf("GCLatest #%d: %v", i, err)
-		}
-	}
-
-	// Seq is 5, keep=2: generations 3..5 stay, 1..2 are gone.
-	for g := 1; g <= 2; g++ {
-		assertGen(t, dir, g, false)
-	}
-	for g := 3; g <= 5; g++ {
-		assertGen(t, dir, g, true)
-	}
-}
-
-func TestGCLatestSweepsCrashGaps(t *testing.T) {
-	db, c, dir := setupTestDB(t)
-	ch := &Feed{id: 1}
-	c.Feeds = map[int]*Feed{ch.id: ch}
-
-	// Five batches with no GC in between (as if every prior run died after
-	// Commit): a single sweep must still clear the whole expired backlog.
-	for i := 1; i <= 5; i++ {
-		putOneArticle(t, db, ch, i)
-	}
-	if err := db.GCLatest(ctx, 2); err != nil {
-		t.Fatalf("GCLatest: %v", err)
-	}
-	for g := 1; g <= 2; g++ {
-		assertGen(t, dir, g, false)
-	}
-	for g := 3; g <= 5; g++ {
-		assertGen(t, dir, g, true)
-	}
-
-	// A second sweep on the same state is a no-op (Rm silent-on-missing).
-	if err := db.GCLatest(ctx, 2); err != nil {
-		t.Fatalf("GCLatest (idempotent): %v", err)
-	}
-}
-
-func TestGCLatestEmptyStoreNoop(t *testing.T) {
-	db, _, _ := setupTestDB(t)
-	if err := db.GCLatest(ctx, 2); err != nil {
-		t.Fatalf("GCLatest on empty store: %v", err)
 	}
 }
 
@@ -896,8 +833,11 @@ func TestPutArticlesIdxPackSplitAtBoundary(t *testing.T) {
 		t.Fatalf("TotalArticles = %d, want %d", db.core.TotalArticles, idxPackSize)
 	}
 
-	if _, err := os.Stat(filepath.Join(dir, "idx/0.gz")); !os.IsNotExist(err) {
-		t.Errorf("idx/0.gz should not exist yet at exactly %d articles", idxPackSize)
+	// At exactly idxPackSize articles nothing is finalized yet: the idx series
+	// lists ONE object, the tail. (Positionally — a stem is opaque, so the
+	// tail's name is not distinguishable from a finalized pack's by shape.)
+	if n := len(db.core.Names.series(idxSeries).Stems); n != 1 {
+		t.Errorf("idx series lists %d object(s) at exactly %d articles, want 1 (the tail)", n, idxPackSize)
 	}
 
 	if _, err := db.PutArticles(ctx, []*Item{
@@ -910,9 +850,12 @@ func TestPutArticlesIdxPackSplitAtBoundary(t *testing.T) {
 		t.Fatalf("TotalArticles = %d, want %d", db.core.TotalArticles, idxPackSize+1)
 	}
 
-	idxPath := filepath.Join(dir, "idx/0.gz")
+	idxPath := filepath.Join(dir, posK(&db.core, idxSeries, 0))
 	if _, err := os.Stat(idxPath); os.IsNotExist(err) {
-		t.Fatal("idx/0.gz should exist after 1001 articles")
+		t.Fatalf("finalized idx pack 0 (%s) should exist after %d articles", idxPath, idxPackSize+1)
+	}
+	if n := len(db.core.Names.series(idxSeries).Stems); n != 2 {
+		t.Errorf("idx series lists %d object(s), want 2 (one finalized + the tail)", n)
 	}
 
 	allArticles := readAllArticles(t, dir, &db.core)
@@ -958,27 +901,28 @@ func TestPutArticlesEmptyTitleAndLink(t *testing.T) {
 // normalizes against (data.ts `raw.seq ??= 0`): "seq" is present once a
 // generation exists, omitted (omitempty) for an empty store, and the
 // retired "data_tog" key is never emitted.
-func TestCommitSeqGolden(t *testing.T) {
+func TestCommitRootIsAPointer(t *testing.T) {
 	db, c, dir := setupTestDB(t)
-
+	ch := &Feed{id: 1}
+	c.Feeds = map[int]*Feed{ch.id: ch}
+	c.FetchedAt = 1_700_000_000
+	if _, err := db.PutArticles(ctx, []*Item{{Feed: ch, Title: "A", Content: "C"}}); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.Commit(ctx); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	raw := string(decompressGz(t, filepath.Join(dir, "db.gz")))
-	if strings.Contains(raw, `"seq"`) {
-		t.Errorf("empty-store db.gz should omit %q: %s", "seq", raw)
+	want := `{"v":3,"m":1,"t":1700000000}` + "\n"
+	if raw != want {
+		t.Errorf("root db.gz = %s, want %s", raw, want)
 	}
-
-	c.Seq = 3
-	if err := db.Commit(ctx); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
-	raw = string(decompressGz(t, filepath.Join(dir, "db.gz")))
-	if !strings.Contains(raw, `"seq":3`) {
-		t.Errorf("db.gz missing %q: %s", `"seq":3`, raw)
-	}
-	if strings.Contains(raw, "data_tog") {
-		t.Errorf("db.gz still emits retired %q: %s", "data_tog", raw)
+	// Nothing the manifest owns may appear in the root — a second source of
+	// truth for a name or a count is exactly what the model retires.
+	for _, forbidden := range []string{"seq", "total_art", "gen", "next_pid", "hdrs", "mp", "nd", "gcs", "sf", "feeds", "recipes"} {
+		if strings.Contains(raw, `"`+forbidden+`"`) {
+			t.Errorf("root db.gz still carries %q: %s", forbidden, raw)
+		}
 	}
 }
 
@@ -1306,63 +1250,5 @@ func TestNewDBFormatVersionGate(t *testing.T) {
 	defer db3.Close(ctx)
 	if db3.core.Version != dbFormatVersion {
 		t.Errorf("round-tripped Version = %d, want %d", db3.core.Version, dbFormatVersion)
-	}
-}
-
-// The pointer-state backup: a consolidation cycle publishes db/<tailGen>.gz
-// byte-identical to the db.gz it just committed, under a write-once name, and
-// GCLatest sweeps old snapshots on the same low-water cursor as the tail packs
-// they describe.
-func TestSnapshotDBPublishesAndSweeps(t *testing.T) {
-	db, c, dir := setupTestDB(t)
-	ch := &Feed{Title: "feed", URL: "https://example.com/f"}
-	if err := db.AddFeed(ch); err != nil {
-		t.Fatal(err)
-	}
-	c.FetchedAt = 1_700_000_000
-	if _, err := db.PutArticles(ctx, []*Item{{Feed: ch, Title: "t", Content: "x", Published: 1}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.SnapshotDB(ctx); err != nil {
-		t.Fatalf("SnapshotDB: %v", err)
-	}
-
-	snap := filepath.Join(dir, dbSnapshotKey(tailGen(c)))
-	got, err := os.ReadFile(snap)
-	if err != nil {
-		t.Fatalf("snapshot not published: %v", err)
-	}
-	live, err := os.ReadFile(filepath.Join(dir, dbFileKey))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, live) {
-		t.Error("snapshot bytes differ from the committed db.gz")
-	}
-	// It must be readable as a db.gz — that IS the restore path.
-	var restored DBCore
-	raw, err := gunzip(bytes.NewReader(got))
-	if err != nil {
-		t.Fatalf("snapshot is not gzip: %v", err)
-	}
-	if err := json.Unmarshal(raw, &restored); err != nil {
-		t.Fatalf("snapshot is not a db.gz: %v", err)
-	}
-	if restored.TotalArticles != c.TotalArticles || restored.Seq != c.Seq {
-		t.Errorf("restored core = {total:%d seq:%d}, want {%d %d}",
-			restored.TotalArticles, restored.Seq, c.TotalArticles, c.Seq)
-	}
-
-	// Snapshots age out with their generation: push the tail far past the grace
-	// window and sweep.
-	c.Seq = 60
-	if err := db.GCLatest(ctx, latestKeep); err != nil {
-		t.Fatalf("GCLatest: %v", err)
-	}
-	if _, err := os.Stat(snap); err == nil {
-		t.Error("stale snapshot survived the sweep")
 	}
 }

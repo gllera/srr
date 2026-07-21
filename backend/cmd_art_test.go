@@ -514,7 +514,7 @@ func TestArtListWindowBeforeAboveCeiling(t *testing.T) {
 // documented to treat differently.
 func artDropLastRecord(t *testing.T, db *DB) {
 	t.Helper()
-	path := filepath.Join(globals.Store, latestKey(&db.core, "data"))
+	path := filepath.Join(globals.Store, tailK(&db.core, dataSeries))
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read latest data pack: %v", err)
@@ -580,7 +580,7 @@ func TestArtListMissingRecord(t *testing.T) {
 // have returned a plausible-looking window.
 func TestArtListWindowUnreadablePack(t *testing.T) {
 	db, _, _ := artTimeStore(t)
-	path := filepath.Join(globals.Store, latestKey(&db.core, "data"))
+	path := filepath.Join(globals.Store, tailK(&db.core, dataSeries))
 	if err := os.WriteFile(path, []byte("not gzip"), 0o644); err != nil {
 		t.Fatalf("corrupt latest data pack: %v", err)
 	}
@@ -624,7 +624,7 @@ func TestArtListWindowAcrossDeltaSeam(t *testing.T) {
 		t.Fatalf("Commit: %v", err)
 	}
 
-	if db.core.NumDeltas == 0 {
+	if db.core.numDeltas() == 0 {
 		t.Fatal("fixture built no delta chain — the seam is not exercised")
 	}
 

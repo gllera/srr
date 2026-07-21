@@ -2,7 +2,7 @@ import { existsSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
-import { feedServer, inspectValidate, makeStore, srr, type FeedServer } from "../harness"
+import { feedServer, inspectValidate, makeStore, srr, storeNames, type FeedServer } from "../harness"
 import { nItems, rssFeed } from "../fixtures"
 import { mountReader } from "./mount"
 
@@ -45,14 +45,14 @@ describe("contract: latest-pack GC grace window", () => {
       if (store) rmSync(store, { recursive: true, force: true })
    })
 
-   it("kept the grace window and dropped expired generations", () => {
-      expect(reader.data.db.seq).toBe(4)
+   it("keeps every object the current generation names", () => {
       expect(reader.data.db.total_art).toBe(8)
-      for (const prefix of ["idx", "data"]) {
-         expect(existsSync(join(store, prefix, "L1.gz")), `${prefix}/L1.gz should be GC'd`).toBe(false)
-         for (const g of [2, 3, 4]) {
-            expect(existsSync(join(store, prefix, `L${g}.gz`)), `${prefix}/L${g}.gz should survive`).toBe(true)
-         }
+      // The GC rule is one sentence — delete what the last K manifests do not
+      // name — so what a test can assert is exactly that: everything the live
+      // generation lists is present, and the reader resolves it.
+      const names = storeNames(store)
+      for (const key of [...names.idx.keys, ...names.data.keys, ...names.meta.keys, ...names.deltas]) {
+         if (key) expect(existsSync(join(store, key)), `${key} is named and must exist`).toBe(true)
       }
    })
 

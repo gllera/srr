@@ -8,35 +8,35 @@ import (
 	"slices"
 )
 
-// checkManifest is the safety net that makes the S32 dual-write trustworthy:
-// it cross-checks the published manifest/<m>.gz and config.gz against the
-// legacy db.gz they were derived from, and fails loudly on any divergence.
+// checkManifest validates the store's commit model: the root, the manifest it
+// names, the object-name table inside it, and the config sidecar beside it.
 //
-// Nothing reads either object yet, so a silent drift between them and db.gz
-// would surface for the first time at S34 — on a store whose root has already
-// flipped, i.e. exactly when it is unfixable. This check is what turns that
-// class of bug into a `srr inspect --validate` failure today.
+// The reader now boots THROUGH the manifest, so this is not a dual-write safety
+// net any more — it is the structural check on the object every reader reads
+// first. Four layers, deliberately not one deep-equal:
 //
-// Three independent layers, deliberately not one deep-equal:
-//
-//  1. STATE — every manifest field against the db.gz field it mirrors. Since
-//     Manifest embeds the very same ManifestState/ManifestWriterState structs
-//     DBCore embeds, this compares whole values: a field added to either group
-//     is covered without anyone extending this function.
-//  2. NAMES — every name against the LEGACY DERIVATION that computes it today
-//     (finalizedIdxKey/dataKeyFor/latestKey/deltaKey/summaryKey/…). This is the
-//     load-bearing half: it states, checkably, that "the manifest names exactly
-//     what a legacy reader would compute", which is the entire premise of S33's
-//     reader swap. It is written against those functions, not against
-//     buildManifest, so a bug in the builder cannot hide behind itself.
-//  3. EXISTENCE + DENSITY — every singleton name resolves to a real object
-//     (invariant M4), and manifests exist across the grace window (M2). The
-//     finalized packs are not re-probed: checkBoundsVsData / checkIdxSummary /
-//     checkMeta already fetch and parse every one of them, and the name lists'
-//     LENGTHS are checked in layer 2.
+//  1. STATE — the manifest against the core loaded from it. Since Manifest
+//     embeds the very same ManifestState/ManifestWriterState structs DBCore
+//     embeds, this compares whole values: a field added to either group is
+//     covered without anyone extending this function.
+//  2. NAMES — the name table's own invariants: positional density from the
+//     base (M5), name uniqueness / counter monotonicity (M3), and agreement
+//     between the listed lengths and the chron arithmetic that indexes them.
+//  3. EXISTENCE — every name resolves to a real object (M4). The finalized
+//     packs are not re-probed: checkBoundsVsData / checkIdxSummary / checkMeta
+//     already fetch and parse every one of them.
+//  4. DENSITY — manifests exist for every generation in (gcm, m] (M2). A hole
+//     is a HARD issue: a reader whose root is up to K generations stale
+//     resolves its own snapshot through exactly those objects, so a missing one
+//     is a reader that cannot boot.
 func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
+	if core.legacyRoot != nil {
+		fmt.Fprintf(o.w(), "[manifest] store is still on the pre-cutover root (v%d): the next locked session migrates it to v%d\n",
+			core.legacyRoot.Version, dbFormatVersion)
+		return o.checkConfigSidecar(fetch, core, false)
+	}
 	if core.ManifestNum == 0 {
-		fmt.Fprintln(o.w(), "[manifest] no manifest published (m=0: a store no manifest-writing srr has committed)")
+		fmt.Fprintln(o.w(), "[manifest] empty store: no manifest published yet")
 		return o.checkConfigSidecar(fetch, core, false)
 	}
 
@@ -58,19 +58,19 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 		issues++
 	}
 
-	if man.Version != manifestVersion {
-		bad("%s: v=%d, want %d", key, man.Version, manifestVersion)
+	if man.Version != dbFormatVersion {
+		bad("%s: v=%d, want %d", key, man.Version, dbFormatVersion)
 	}
 	if man.Num != core.ManifestNum {
-		bad("%s: m=%d but db.gz names %d", key, man.Num, core.ManifestNum)
+		bad("%s: m=%d but the root names %d", key, man.Num, core.ManifestNum)
 	}
 
 	// (1) State. Whole-group comparison — see the doc comment.
 	if !reflect.DeepEqual(man.ManifestState, core.ManifestState) {
-		bad("manifest state diverges from db.gz: %s", diffJSON(man.ManifestState, core.ManifestState))
+		bad("manifest state diverges from the loaded core: %s", diffJSON(man.ManifestState, core.ManifestState))
 	}
 	if !reflect.DeepEqual(man.ManifestWriterState, core.ManifestWriterState) {
-		bad("manifest writer state diverges from db.gz: %s", diffJSON(man.ManifestWriterState, core.ManifestWriterState))
+		bad("manifest writer state diverges from the loaded core: %s", diffJSON(man.ManifestWriterState, core.ManifestWriterState))
 	}
 	wantFeeds := map[int]FeedPublic{}
 	for id, ch := range core.Feeds {
@@ -79,7 +79,7 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 	for _, id := range slices.Sorted(maps.Keys(wantFeeds)) {
 		got, ok := man.Feeds[id]
 		if !ok {
-			bad("feed %d (%q) is in db.gz but not in the manifest", id, wantFeeds[id].Title)
+			bad("feed %d (%q) is in the store but not in the manifest", id, wantFeeds[id].Title)
 			continue
 		}
 		if !reflect.DeepEqual(got, wantFeeds[id]) {
@@ -88,105 +88,84 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 	}
 	for _, id := range slices.Sorted(maps.Keys(man.Feeds)) {
 		if _, ok := wantFeeds[id]; !ok {
-			bad("feed %d is in the manifest but not in db.gz", id)
+			bad("feed %d is in the manifest but not in the store", id)
 		}
 	}
 
-	// (2) Names vs the legacy derivations.
-	tc := tailCovered(core)
-	nf := numFinalizedIdx(core.TotalArticles)
-
-	wantIdx := make([]string, 0, nf+1)
-	for n := range nf {
-		wantIdx = append(wantIdx, finalizedIdxKey(n))
+	// (2) Names.
+	names := man.Names
+	if names == nil {
+		bad("%s carries no names object", key)
+		return issues + o.checkConfigSidecar(fetch, core, true)
 	}
-	wantData := make([]string, 0, core.NextPackID+1)
-	for range 1 { // position 0 is never produced — the writer skips data/0
-		wantData = append(wantData, "")
-	}
-	for n := 1; n < core.NextPackID; n++ {
-		wantData = append(wantData, finalizedDataKey(n))
-	}
-	wantMeta := make([]string, 0, core.MetaPacks+1)
-	for n := range core.MetaPacks {
-		wantMeta = append(wantMeta, finalizedMetaKey(n))
-	}
-	if tc > 0 {
-		wantIdx = append(wantIdx, latestKey(core, "idx"))
-		wantData = append(wantData, latestKey(core, "data"))
-		if core.MetaPacks*metaPackSize+core.MetaTail == tc {
-			wantMeta = append(wantMeta, latestKey(core, "meta"))
+	seen := map[string]bool{}
+	for _, series := range slices.Sorted(maps.Keys(names.Series)) {
+		s := names.Series[series]
+		if s.Tail >= 0 && (s.Tail < s.Base || s.Tail >= s.Base+len(s.Stems)) {
+			bad("%s tail position %d is outside the listed range [%d, %d)", series, s.Tail, s.Base, s.Base+len(s.Stems))
 		}
-	}
-	for _, s := range []struct {
-		series string
-		want   []string
-	}{{"idx", wantIdx}, {"data", wantData}, {"meta", wantMeta}} {
-		got, ok := man.Names.Series[s.series]
-		if !ok {
-			bad("names has no %q series", s.series)
-			continue
-		}
-		if keys := got.Keys(s.series); !slices.Equal(keys, s.want) {
-			bad("%s series names diverge from the legacy derivation:\n    manifest: %v\n    derived:  %v",
-				s.series, keys, s.want)
-		}
-	}
-	// The manifest must not invent series the store does not have.
-	for _, name := range slices.Sorted(maps.Keys(man.Names.Series)) {
-		if name != "idx" && name != "data" && name != "meta" {
-			bad("names carries an unknown series %q", name)
-		}
-	}
-
-	wantDeltas := []string{}
-	for g := tailGen(core) + 1; g <= core.Seq; g++ {
-		wantDeltas = append(wantDeltas, deltaKey(g))
-	}
-	if got := man.Names.Deltas; !slices.Equal(nonNil(got), wantDeltas) {
-		bad("delta chain names diverge: manifest %v, derived %v", got, wantDeltas)
-	}
-	checkSummary := func(what string, got *SummaryName, covers int, key string) {
-		if covers == 0 {
-			if got != nil {
-				bad("%s named %q but db.gz publishes no summary", what, got.Key)
+		next := names.Next[series]
+		for _, stem := range s.Stems {
+			k := fmt.Sprintf("%s/%d.gz", series, stem)
+			if seen[k] {
+				bad("M3 violated: %s is listed twice", k)
 			}
-			return
-		}
-		switch {
-		case got == nil:
-			bad("%s absent but db.gz publishes %s (covering %d)", what, key, covers)
-		case got.Key != key || got.Covers != covers:
-			bad("%s is {%s, %d} but db.gz derives {%s, %d}", what, got.Key, got.Covers, key, covers)
+			seen[k] = true
+			if stem >= next {
+				bad("M3 violated: %s is at or above the series' next stem %d", k, next)
+			}
 		}
 	}
-	checkSummary("hsum", man.Names.HSum, core.HdrPacks, summaryKey(core.HdrPacks))
-	checkSummary("ssum", man.Names.SSum, core.MetaPacks, metaSummaryKey(core.MetaPacks))
+	tc := tailCovered(core)
+	// M5/M6: the listed lengths must be exactly what chron arithmetic indexes.
+	wantIdx := numFinalizedIdx(core.TotalArticles)
+	if tc > 0 {
+		wantIdx++
+	}
+	if got := len(names.series(idxSeries).Stems); got != wantIdx {
+		bad("M5 violated: the idx series lists %d object(s) but total_art=%d (tc=%d) needs %d", got, core.TotalArticles, tc, wantIdx)
+	}
+	if got := names.series(dataSeries).Base + len(names.series(dataSeries).Stems); tc > 0 && got != core.NextPackID+1 {
+		bad("M5 violated: the data series lists positions up to %d but next_pid=%d", got-1, core.NextPackID)
+	}
+	if tc > 0 && names.series(idxSeries).Tail != numFinalizedIdx(core.TotalArticles) {
+		bad("M5 violated: the idx tail sits at position %d, not the finalized count %d",
+			names.series(idxSeries).Tail, numFinalizedIdx(core.TotalArticles))
+	}
+	if tc > 0 && names.series(dataSeries).Tail != core.NextPackID {
+		bad("M5 violated: the data tail sits at position %d but next_pid=%d", names.series(dataSeries).Tail, core.NextPackID)
+	}
+	if core.metaPacks()*metaPackSize+core.MetaTail > tc {
+		bad("meta coverage %d overclaims the consolidated region (tc=%d)", core.metaPacks()*metaPackSize+core.MetaTail, tc)
+	}
+	if (len(names.Deltas.Stems) == 0) != (core.DeltaArticles == 0) {
+		bad("M6 violated: %d delta segment(s) named for %d delta article(s)", len(names.Deltas.Stems), core.DeltaArticles)
+	}
+	if names.HSum != nil && names.HSum.Covers > numFinalizedIdx(core.TotalArticles) {
+		bad("the idx header summary claims to cover %d finalized pack(s), more than the %d that exist",
+			names.HSum.Covers, numFinalizedIdx(core.TotalArticles))
+	}
+	if names.SSum != nil && names.SSum.Covers != core.metaPacks() {
+		bad("the meta bloom summary covers %d shard(s) but %d are listed", names.SSum.Covers, core.metaPacks())
+	}
 
-	// The seen slot may legitimately be unnamed (a store whose active slot is
-	// unreadable, or that has never written one) — but a NAMED slot must be the
-	// one core.SeenFlag points at, since that pointer is the whole atomicity
-	// contract between the article batch and its dedup state.
-	if man.Names.Seen != "" && man.Names.Seen != seenSlotKey(core.SeenFlag) {
-		bad("seen slot named %q but sf=%v names %q", man.Names.Seen, core.SeenFlag, seenSlotKey(core.SeenFlag))
-	}
-
-	// (3) Existence of every singleton, and manifest density across the window.
-	probe := []string{}
-	probe = append(probe, man.Names.Deltas...)
-	for _, s := range man.Names.Series {
-		if s.Tail != "" {
-			probe = append(probe, s.Tail)
+	// (3) Existence of every singleton and every tail. Rm is silent on missing
+	// keys, so a name the manifest lists and the store does not hold is exactly
+	// the failure M4 exists to catch.
+	probe := names.Deltas.keys()
+	for _, series := range slices.Sorted(maps.Keys(names.Series)) {
+		if k := names.tailKey(series); k != "" {
+			probe = append(probe, k)
 		}
 	}
-	if man.Names.Seen != "" {
-		probe = append(probe, man.Names.Seen)
+	if names.Seen != nil {
+		probe = append(probe, names.Seen.key())
 	}
-	if man.Names.HSum != nil {
-		probe = append(probe, man.Names.HSum.Key)
+	if names.HSum != nil {
+		probe = append(probe, names.HSum.key())
 	}
-	if man.Names.SSum != nil {
-		probe = append(probe, man.Names.SSum.Key)
+	if names.SSum != nil {
+		probe = append(probe, names.SSum.key())
 	}
 	slices.Sort(probe)
 	for _, k := range probe {
@@ -195,17 +174,12 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 		}
 	}
 
-	// M2: manifests exist for every m in (gcm, root.m]. Bounded to the grace
-	// window — anything below it is GC's to have removed.
-	//
-	// WARN-only, deliberately, and only while S32 holds: the window exists so a
-	// reader whose root is up to K generations stale can still resolve its own
-	// snapshot, and under S32 no reader fetches a manifest at all. A hole is
-	// therefore a future risk, not a present defect — and the one way to get
-	// one today is an operator clearing manifest/* (a rollback the additive
-	// dual-write is explicitly meant to survive), which would otherwise hard-fail
-	// validation for K generations after a completely safe act. It must become
-	// an issue at S34, when a stale root really can point into the window.
+	// (4) M2: manifests exist for every m in (gcm, root.m], bounded to the
+	// grace window. HARD, not a warning: a reader whose root is up to K
+	// generations stale resolves its whole snapshot through the manifest that
+	// root names, so a hole inside the window is a reader that cannot boot —
+	// and, because the GC's reachable set is read from the oldest in-window
+	// manifest, a hole also blinds the sweep.
 	from := max(core.GCManifest+1, core.ManifestNum-keepManifests+1, 1)
 	holes := 0
 	for g := from; g < core.ManifestNum; g++ {
@@ -214,27 +188,32 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 		}
 	}
 	if holes > 0 {
-		fmt.Fprintf(o.w(), "[manifest] warning: %d of the %d manifest(s) in the grace window (%d, %d] are missing "+
-			"(harmless until readers follow the indirection; the GC low-water gcm=%d closes the gap as it advances)\n",
-			holes, core.ManifestNum-from, from-1, core.ManifestNum, core.GCManifest)
+		bad("M2 violated: %d of the %d manifest(s) in the grace window (%d, %d] are missing — a reader whose root points inside the hole cannot resolve its snapshot",
+			holes, core.ManifestNum-from, from-1, core.ManifestNum)
 	}
 
 	issues += o.checkConfigSidecar(fetch, core, true)
 	if issues == 0 {
-		fmt.Fprintf(o.w(), "[manifest] %s matches db.gz: %d feed(s), %d name(s) probed\n",
-			key, len(man.Feeds), len(probe))
+		fmt.Fprintf(o.w(), "[manifest] %s consistent: %d feed(s), %d object name(s) probed, %d generation(s) in the grace window\n",
+			key, len(man.Feeds), len(probe), core.ManifestNum-from+1)
 	}
 	return issues
 }
 
-// checkConfigSidecar compares config.gz against the configuration db.gz still
-// owns. `expected` is whether the store should have published one at all: a
-// store that has committed under an S32+ binary always has, and its absence is
-// then a real gap; a pre-S32 store legitimately has none (§4.3 — absence means
-// "all defaults", which is exactly how the store behaves without it).
+// checkConfigSidecar validates config.gz. It is the ONLY source of the
+// operator's configuration now, so there is nothing to cross-check it against —
+// what is checkable is that it parses, that this binary can represent it, and
+// that every per-feed entry names a feed the store actually has. A stale entry
+// is INERT by §4.3 (it is what makes the two-object mutations of §6.4 safe
+// without a distributed commit), so it is reported and not counted as an issue.
+//
+// `expected` is whether the store should have published one at all: a store on
+// the v2 root always has, and its absence is then a real gap; a store still on
+// the pre-cutover root legitimately has none (absence means "all defaults",
+// which is exactly how the store behaves without it).
 func (o *InspectCmd) checkConfigSidecar(fetch keyGetter, core *DBCore, expected bool) int {
 	got, err := loadConfigSidecar(fetch)
-	if err != nil {
+	if err != nil || got == nil {
 		if !expected {
 			fmt.Fprintln(o.w(), "[manifest] no config.gz (legal: absence means all-default configuration)")
 			return 0
@@ -242,23 +221,23 @@ func (o *InspectCmd) checkConfigSidecar(fetch keyGetter, core *DBCore, expected 
 		fmt.Fprintf(o.w(), "[manifest] %s missing or corrupt: %v\n", configFileKey, err)
 		return 1
 	}
-	want := configSidecar{Version: manifestVersion, StoreConfig: core.StoreConfig, Feeds: map[int]FeedConfig{}}
-	for id, ch := range core.Feeds {
-		if cfg := feedConfigOf(ch); !cfg.isZero() {
-			want.Feeds[id] = cfg
+	if got.Version > dbFormatVersion {
+		fmt.Fprintf(o.w(), "[manifest] %s: v=%d, newer than this binary understands (v%d)\n",
+			configFileKey, got.Version, dbFormatVersion)
+		return 1
+	}
+	stale := 0
+	for _, id := range slices.Sorted(maps.Keys(got.Feeds)) {
+		if core.Feeds[id] == nil {
+			stale++
 		}
 	}
-	if got.Version != manifestVersion {
-		fmt.Fprintf(o.w(), "[manifest] %s: v=%d, want %d\n", configFileKey, got.Version, manifestVersion)
-		return 1
+	fmt.Fprintf(o.w(), "[manifest] %s parses: %d recipe(s), %d out slot(s), %d feed override(s)",
+		configFileKey, len(got.Recipes), len(got.Out), len(got.Feeds))
+	if stale > 0 {
+		fmt.Fprintf(o.w(), " (%d for feeds the store no longer has — inert, swept by the next config write)", stale)
 	}
-	if !configEqual(*got, want) {
-		fmt.Fprintf(o.w(), "[manifest] %s diverges from the configuration in db.gz: %s\n",
-			configFileKey, diffJSON(*got, want))
-		return 1
-	}
-	fmt.Fprintf(o.w(), "[manifest] %s matches the configuration in db.gz (%d recipe(s), %d out slot(s), %d feed override(s))\n",
-		configFileKey, len(want.Recipes), len(want.Out), len(want.Feeds))
+	fmt.Fprintln(o.w())
 	return 0
 }
 
@@ -267,14 +246,5 @@ func (o *InspectCmd) checkConfigSidecar(fetch keyGetter, core *DBCore, expected 
 func diffJSON(got, want any) string {
 	g, _ := json.Marshal(got)
 	w, _ := json.Marshal(want)
-	return fmt.Sprintf("\n    published: %s\n    db.gz:     %s", g, w)
-}
-
-// nonNil normalizes a nil slice to an empty one so slices.Equal treats "absent"
-// and "empty" as the same thing — which on the wire they are (omitempty).
-func nonNil(s []string) []string {
-	if s == nil {
-		return []string{}
-	}
-	return s
+	return fmt.Sprintf("\n    published: %s\n    resolved:  %s", g, w)
 }

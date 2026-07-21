@@ -129,11 +129,11 @@ func TestSyncMetaFresh(t *testing.T) {
 	if err := db.SyncMeta(ctx, nil); err != nil {
 		t.Fatalf("SyncMeta: %v", err)
 	}
-	if c.MetaPacks != 0 || c.MetaTail != 2 {
-		t.Fatalf("coverage = (%d, %d), want (0, 2)", c.MetaPacks, c.MetaTail)
+	if c.metaPacks() != 0 || c.MetaTail != 2 {
+		t.Fatalf("coverage = (%d, %d), want (0, 2)", c.metaPacks(), c.MetaTail)
 	}
 
-	entries := readMetaEntries(t, dir, "meta/L2.gz", false)
+	entries := readMetaEntries(t, dir, tailK(c, metaSeries), false)
 	if len(entries) != 2 {
 		t.Fatalf("latest entries = %d, want 2", len(entries))
 	}
@@ -159,8 +159,8 @@ func TestSyncMetaAtBoundary(t *testing.T) {
 	if err := db.SyncMeta(ctx, nil); err != nil {
 		t.Fatalf("SyncMeta: %v", err)
 	}
-	if c.MetaPacks != 1 || c.MetaTail != 1 {
-		t.Fatalf("coverage = (%d, %d), want (1, 1)", c.MetaPacks, c.MetaTail)
+	if c.metaPacks() != 1 || c.MetaTail != 1 {
+		t.Fatalf("coverage = (%d, %d), want (1, 1)", c.metaPacks(), c.MetaTail)
 	}
 
 	shard := decompressGz(t, filepath.Join(dir, "meta/0.gz"))
@@ -182,12 +182,12 @@ func TestSyncMetaAtBoundary(t *testing.T) {
 		t.Errorf("entry 0 When = %d, want fetched_at fallback 1700000000", entries[0].When)
 	}
 
-	latest := readMetaEntries(t, dir, "meta/L2.gz", false)
+	latest := readMetaEntries(t, dir, tailK(c, metaSeries), false)
 	if len(latest) != 1 || latest[0].Title != "Last" {
 		t.Fatalf("latest = %+v, want the single post-boundary article", latest)
 	}
 
-	sum := decompressGz(t, filepath.Join(dir, "meta/s1.gz"))
+	sum := decompressGz(t, filepath.Join(dir, c.Names.ssumKey()))
 	if !bytes.Equal(sum, bloom) {
 		t.Error("summary bytes != meta/0.gz bloom header")
 	}
@@ -230,7 +230,7 @@ func TestSyncMetaIncremental(t *testing.T) {
 	if c.MetaTail != 2 {
 		t.Fatalf("MetaTail = %d, want 2", c.MetaTail)
 	}
-	entries := readMetaEntries(t, dir, "meta/L2.gz", false)
+	entries := readMetaEntries(t, dir, tailK(c, metaSeries), false)
 	if len(entries) != 2 || entries[0].Title != "A1" || entries[1].Title != "A2" {
 		t.Fatalf("latest = %+v, want A1+A2", entries)
 	}
@@ -252,7 +252,7 @@ func TestSyncMetaBatchFastPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PutArticles: %v", err)
 	}
-	for _, key := range []string{genKey("idx", 1), genKey("data", 1)} {
+	for _, key := range []string{tailK(c, idxSeries), tailK(c, dataSeries)} {
 		if err := os.Remove(filepath.Join(dir, key)); err != nil {
 			t.Fatalf("Remove %s: %v", key, err)
 		}
@@ -261,10 +261,10 @@ func TestSyncMetaBatchFastPath(t *testing.T) {
 	if err := db.SyncMeta(ctx, written); err != nil {
 		t.Fatalf("SyncMeta: %v", err)
 	}
-	if c.MetaPacks != 0 || c.MetaTail != 2 {
-		t.Fatalf("coverage = (%d, %d), want (0, 2)", c.MetaPacks, c.MetaTail)
+	if c.metaPacks() != 0 || c.MetaTail != 2 {
+		t.Fatalf("coverage = (%d, %d), want (0, 2)", c.metaPacks(), c.MetaTail)
 	}
-	entries := readMetaEntries(t, dir, "meta/L1.gz", false)
+	entries := readMetaEntries(t, dir, tailK(c, metaSeries), false)
 	want := []MetaEntry{
 		{FeedID: 3, When: 1000, Title: "A1"},
 		{FeedID: 3, When: 1700000000, Title: "A2"}, // dateless → fetched_at
@@ -288,8 +288,8 @@ func TestSyncMetaRebuildsMissingTail(t *testing.T) {
 		t.Fatalf("SyncMeta: %v", err)
 	}
 	putOneArticle(t, db, ch, 3)
-	os.Remove(filepath.Join(dir, "meta/L2.gz")) // the read-back candidate
-	metaTailMemo.reset()                        // force the GET path — this test covers the missing-tail rebuild
+	os.Remove(filepath.Join(dir, tailK(c, metaSeries))) // the read-back candidate
+	metaTailMemo.reset()                                // force the GET path — this test covers the missing-tail rebuild
 
 	if err := db.SyncMeta(ctx, nil); err != nil {
 		t.Fatalf("SyncMeta (rebuild): %v", err)
@@ -297,7 +297,7 @@ func TestSyncMetaRebuildsMissingTail(t *testing.T) {
 	if c.MetaTail != 3 {
 		t.Fatalf("MetaTail = %d, want 3", c.MetaTail)
 	}
-	entries := readMetaEntries(t, dir, "meta/L3.gz", false)
+	entries := readMetaEntries(t, dir, tailK(c, metaSeries), false)
 	if len(entries) != 3 || entries[2].Title != "A3" {
 		t.Fatalf("latest = %+v, want A1..A3", entries)
 	}
@@ -320,14 +320,14 @@ func TestSyncMetaStaleLowCoverageDoesNotOverwriteFinalizedShard(t *testing.T) {
 	if err := db.SyncMeta(ctx, nil); err != nil {
 		t.Fatalf("SyncMeta baseline: %v", err)
 	}
-	if c.MetaPacks != 1 || c.MetaTail != 1 {
-		t.Fatalf("baseline coverage = (%d, %d), want (1, 1)", c.MetaPacks, c.MetaTail)
+	if c.metaPacks() != 1 || c.MetaTail != 1 {
+		t.Fatalf("baseline coverage = (%d, %d), want (1, 1)", c.metaPacks(), c.MetaTail)
 	}
 
 	// Simulate the post-saveSummary-failure state: the finalized shard and the
 	// shifted tail are durable, but coverage never advanced past 0. MetaTail (1)
 	// still equals the on-disk tail's entry count, so a count-only trust fires.
-	c.MetaPacks = 0
+	c.Names.truncate(metaSeries, 0)
 
 	// A later cycle adds one article; its read-back tail (meta/L2, 1 entry)
 	// matches the stale MetaTail.
@@ -366,10 +366,10 @@ func TestSyncMetaInconsistentCoverageRebuilds(t *testing.T) {
 	if err := db.SyncMeta(ctx, nil); err != nil {
 		t.Fatalf("SyncMeta: %v", err)
 	}
-	if c.MetaPacks != 0 || c.MetaTail != 2 {
-		t.Fatalf("coverage = (%d, %d), want rebuilt (0, 2)", c.MetaPacks, c.MetaTail)
+	if c.metaPacks() != 0 || c.MetaTail != 2 {
+		t.Fatalf("coverage = (%d, %d), want rebuilt (0, 2)", c.metaPacks(), c.MetaTail)
 	}
-	entries := readMetaEntries(t, dir, "meta/L2.gz", false)
+	entries := readMetaEntries(t, dir, tailK(c, metaSeries), false)
 	if len(entries) != 2 {
 		t.Fatalf("latest entries = %d, want 2", len(entries))
 	}
@@ -409,8 +409,8 @@ func TestSyncMetaSaveFailureLeavesCoverageUnchanged(t *testing.T) {
 	if err := db.SyncMeta(ctx, nil); err == nil {
 		t.Fatal("SyncMeta should surface the injected Put failure")
 	}
-	if c.MetaPacks != 0 || c.MetaTail != 0 {
-		t.Fatalf("coverage advanced despite save failure: mp=%d mt=%d, want 0/0", c.MetaPacks, c.MetaTail)
+	if c.metaPacks() != 0 || c.MetaTail != 0 {
+		t.Fatalf("coverage advanced despite save failure: mp=%d mt=%d, want 0/0", c.metaPacks(), c.MetaTail)
 	}
 }
 
@@ -446,7 +446,7 @@ func TestSyncMetaTailCountMismatchRebuilds(t *testing.T) {
 	if err := gz.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, genKey("meta", 2)), buf.Bytes(), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, tailK(c, metaSeries)), buf.Bytes(), 0o644); err != nil {
 		t.Fatalf("corrupt tail: %v", err)
 	}
 	metaTailMemo.reset() // force the GET path — this test covers the count-mismatch rebuild
@@ -457,7 +457,7 @@ func TestSyncMetaTailCountMismatchRebuilds(t *testing.T) {
 	if c.MetaTail != 3 {
 		t.Fatalf("MetaTail = %d, want 3 (rebuilt)", c.MetaTail)
 	}
-	entries := readMetaEntries(t, dir, "meta/L3.gz", false)
+	entries := readMetaEntries(t, dir, tailK(c, metaSeries), false)
 	if len(entries) != 3 || entries[0].Title != "A1" || entries[2].Title != "A3" {
 		t.Fatalf("latest = %+v, want A1..A3 (tail rebuilt from data packs)", entries)
 	}
@@ -492,62 +492,13 @@ func TestWalkArticlesRejectsTruncatedDataPack(t *testing.T) {
 	if err := gz.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, latestKey(c, "data")), buf.Bytes(), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, tailK(c, dataSeries)), buf.Bytes(), 0o644); err != nil {
 		t.Fatalf("corrupt data pack: %v", err)
 	}
 
 	err = db.walkArticles(ctx, 0, c.TotalArticles, func(*ArticleData) error { return nil })
 	if err == nil || !strings.Contains(err.Error(), "beyond data pack") {
 		t.Fatalf("walkArticles err = %v, want the 'beyond data pack' corruption guard", err)
-	}
-}
-
-func TestGCMetaSummariesGraceWindow(t *testing.T) {
-	db, c, dir := setupTestDB(t)
-
-	if err := os.MkdirAll(filepath.Join(dir, "meta"), 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	for g := 1; g <= 5; g++ {
-		if err := os.WriteFile(filepath.Join(dir, metaSummaryKey(g)), []byte("x"), 0o644); err != nil {
-			t.Fatalf("WriteFile: %v", err)
-		}
-	}
-	c.MetaPacks = 5
-
-	if err := db.GCMetaSummaries(ctx, 2); err != nil {
-		t.Fatalf("GCMetaSummaries: %v", err)
-	}
-	for g := 1; g <= 2; g++ {
-		assertKey(t, dir, metaSummaryKey(g), false)
-	}
-	for g := 3; g <= 5; g++ {
-		assertKey(t, dir, metaSummaryKey(g), true)
-	}
-}
-
-// GCLatest sweeps the meta series' L<g> names alongside idx/data.
-func TestGCLatestSweepsMeta(t *testing.T) {
-	db, c, dir := setupTestDB(t)
-
-	if err := os.MkdirAll(filepath.Join(dir, "meta"), 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	for g := 1; g <= 5; g++ {
-		if err := os.WriteFile(filepath.Join(dir, genKey("meta", g)), []byte("x"), 0o644); err != nil {
-			t.Fatalf("WriteFile: %v", err)
-		}
-	}
-	c.Seq = 5
-
-	if err := db.GCLatest(ctx, 2); err != nil {
-		t.Fatalf("GCLatest: %v", err)
-	}
-	for g := 1; g <= 2; g++ {
-		assertKey(t, dir, genKey("meta", g), false)
-	}
-	for g := 3; g <= 5; g++ {
-		assertKey(t, dir, genKey("meta", g), true)
 	}
 }
 
@@ -582,39 +533,13 @@ func TestInspectValidateMetaOverclaim(t *testing.T) {
 	if err := db.SyncMeta(ctx, nil); err != nil {
 		t.Fatalf("SyncMeta: %v", err)
 	}
-	db.core.MetaPacks = 2
+	db.core.Names.SSum.Covers = 2
 	if err := db.Commit(ctx); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 
 	if err := (&InspectCmd{Chron: -1, Validate: true}).Run(); err == nil {
 		t.Fatal("inspect --validate passed with mp > finalized meta shard count")
-	}
-}
-
-// mp/mt are omitempty: absent from db.gz at 0 (readers treat absent as 0).
-func TestCommitMetaFieldsOmitemptyWhenZero(t *testing.T) {
-	db, c, dir := setupTestDB(t)
-
-	if err := db.Commit(ctx); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
-	raw := string(decompressGz(t, filepath.Join(dir, "db.gz")))
-	for _, key := range []string{`"mp"`, `"mt"`} {
-		if strings.Contains(raw, key) {
-			t.Errorf("fresh db.gz should omit %s: %s", key, raw)
-		}
-	}
-
-	c.MetaPacks, c.MetaTail = 2, 7
-	if err := db.Commit(ctx); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
-	raw = string(decompressGz(t, filepath.Join(dir, "db.gz")))
-	for _, want := range []string{`"mp":2`, `"mt":7`} {
-		if !strings.Contains(raw, want) {
-			t.Errorf("db.gz missing %s: %s", want, raw)
-		}
 	}
 }
 
@@ -634,12 +559,12 @@ func TestSyncMetaTailMemoHit(t *testing.T) {
 	if err := db.SyncMeta(ctx, nil); err != nil {
 		t.Fatalf("SyncMeta #1: %v", err)
 	}
-	if lines, ok := metaTailMemo.memoized(c.Seq, c.MetaTail); !ok || len(lines) != 2 {
+	if lines, ok := metaTailMemo.memoized(tailK(c, metaSeries), c.MetaTail); !ok || len(lines) != 2 {
 		t.Fatalf("memo after sync = (%d lines, %v), want (2, true)", len(lines), ok)
 	}
 
 	putOneArticle(t, db, ch, 3)
-	os.Remove(filepath.Join(dir, "meta/L2.gz")) // memo must make this GET unnecessary
+	os.Remove(filepath.Join(dir, tailK(c, metaSeries))) // memo must make this GET unnecessary
 
 	var logbuf bytes.Buffer
 	old := slog.Default()
@@ -655,7 +580,7 @@ func TestSyncMetaTailMemoHit(t *testing.T) {
 	if c.MetaTail != 3 {
 		t.Fatalf("MetaTail = %d, want 3", c.MetaTail)
 	}
-	entries := readMetaEntries(t, dir, "meta/L3.gz", false)
+	entries := readMetaEntries(t, dir, tailK(c, metaSeries), false)
 	if len(entries) != 3 || entries[0].Title != "A1" || entries[2].Title != "A3" {
 		t.Fatalf("latest = %+v, want A1..A3", entries)
 	}
@@ -667,9 +592,9 @@ func TestSyncMetaTailMemoHit(t *testing.T) {
 // or a reset must miss.
 func TestMetaTailMemoCopyIsolation(t *testing.T) {
 	m := &metaTailCache{}
-	m.store(5, [][]byte{[]byte("a\n"), []byte("b\n")})
+	m.store("meta/5.gz", [][]byte{[]byte("a\n"), []byte("b\n")})
 
-	got, ok := m.memoized(5, 2)
+	got, ok := m.memoized("meta/5.gz", 2)
 	if !ok || len(got) != 2 {
 		t.Fatalf("memoized(5,2) = (%d, %v), want (2, true)", len(got), ok)
 	}
@@ -677,19 +602,19 @@ func TestMetaTailMemoCopyIsolation(t *testing.T) {
 	got = append(got, []byte("scribble\n"), []byte("scribble\n"))
 	_ = got
 
-	again, ok := m.memoized(5, 2)
+	again, ok := m.memoized("meta/5.gz", 2)
 	if !ok || string(again[0]) != "a\n" || string(again[1]) != "b\n" {
 		t.Fatalf("memo scribbled by caller mutation: %q", again)
 	}
 
-	if _, ok := m.memoized(4, 2); ok {
-		t.Fatal("memoized(wrong seq) must miss")
+	if _, ok := m.memoized("meta/4.gz", 2); ok {
+		t.Fatal("memoized(wrong key) must miss")
 	}
-	if _, ok := m.memoized(5, 1); ok {
+	if _, ok := m.memoized("meta/5.gz", 1); ok {
 		t.Fatal("memoized(wrong count) must miss")
 	}
 	m.reset()
-	if _, ok := m.memoized(5, 2); ok {
+	if _, ok := m.memoized("meta/5.gz", 2); ok {
 		t.Fatal("memoized after reset must miss")
 	}
 }
@@ -728,7 +653,7 @@ func TestSyncMetaHeadProjection(t *testing.T) {
 	}
 
 	// The head must agree with the published tail's newest lines.
-	tail := readMetaEntries(t, dir, genKey("meta", c.Seq), false)
+	tail := readMetaEntries(t, dir, tailK(c, metaSeries), false)
 	if tail[len(tail)-1] != c.Head[len(c.Head)-1] {
 		t.Fatalf("Head newest %+v != tail newest %+v", c.Head[len(c.Head)-1], tail[len(tail)-1])
 	}
@@ -748,18 +673,5 @@ func TestSyncMetaHeadShrinksAtBoundary(t *testing.T) {
 	}
 	if c.HeadBase != metaPackSize {
 		t.Fatalf("HeadBase = %d, want %d (the tail starts at the finalized boundary)", c.HeadBase, metaPackSize)
-	}
-}
-
-// TestBumpGenClearsHead: the bump-implies-reset invariant covers the head
-// projection too — a rebuilt store must not serve pre-rebuild cards from
-// db.gz while its meta series regenerates.
-func TestBumpGenClearsHead(t *testing.T) {
-	db, c, _ := setupTestDB(t)
-	c.Head = []MetaEntry{{FeedID: 1, When: 1, Title: "stale"}}
-	c.HeadBase = 7
-	db.BumpGen()
-	if c.Head != nil || c.HeadBase != 0 {
-		t.Fatalf("Head/HeadBase = %+v/%d, want nil/0 after BumpGen", c.Head, c.HeadBase)
 	}
 }

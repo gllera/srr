@@ -53,7 +53,7 @@ func TestPutArticlesLangRoundTrip(t *testing.T) {
 		t.Fatalf("Commit: %v", err)
 	}
 
-	raw, err := os.ReadFile(filepath.Join(dir, latestKey(c, "data")))
+	raw, err := os.ReadFile(filepath.Join(dir, tailK(c, dataSeries)))
 	if err != nil {
 		t.Fatalf("read data pack: %v", err)
 	}

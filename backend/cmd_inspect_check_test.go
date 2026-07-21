@@ -41,6 +41,7 @@ func inspCloneCore(c *DBCore) *DBCore {
 		f := *v
 		cp.Feeds[k] = &f
 	}
+	cp.Names = c.Names.clone()
 	return &cp
 }
 
@@ -283,7 +284,7 @@ func TestCheckFeedCountsContinuityDetectsBreak(t *testing.T) {
 // that tampers the decompressed summary buffer).
 func TestCheckIdxSummaryDetectsCorruption(t *testing.T) {
 	fetch, core := inspBoundaryStore(t)
-	sumKey := summaryKey(core.HdrPacks)
+	sumKey := core.Names.HSum.key()
 
 	t.Run("base mismatch", func(t *testing.T) {
 		packs := inspFreshPacks(t, fetch, core)
@@ -350,8 +351,8 @@ func TestCheckIdxSummaryDetectsCorruption(t *testing.T) {
 // mismatch, absent grams, and an mp overclaim.
 func TestCheckMetaDetectsCorruption(t *testing.T) {
 	fetch, core := inspBoundaryStore(t)
-	sumKey := metaSummaryKey(core.MetaPacks)
-	shard0 := finalizedMetaKey(0)
+	sumKey := core.Names.SSum.key()
+	shard0 := posK(core, metaSeries, 0)
 
 	t.Run("latest tail count", func(t *testing.T) {
 		c2 := inspCloneCore(core)
@@ -363,7 +364,12 @@ func TestCheckMetaDetectsCorruption(t *testing.T) {
 
 	t.Run("mp overclaim", func(t *testing.T) {
 		c2 := inspCloneCore(core)
-		c2.MetaPacks += 5 // claims more finalized shards than exist
+		// Claim more finalized shards than exist by listing five phantom ones.
+		ms := c2.Names.series(metaSeries)
+		for range 5 {
+			ms.Stems = append(ms.Stems, c2.Names.alloc(metaSeries))
+		}
+		ms.Tail += 5
 		// An overclaim also fails the coverage-range check (mp*5000 >= total_art
 		// by construction), so issues>0 alone wouldn't prove the overclaim
 		// early-return fired. Assert its distinctive message.
