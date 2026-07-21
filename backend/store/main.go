@@ -46,6 +46,12 @@ const (
 // reconstruction). Listing it here is what stamps those snapshots immutable and
 // application/gzip. The frontend/service-worker never fetch them; the SW's
 // route regex simply gains an inert series.
+// The "manifest" series likewise carries only bare stems: manifest/<m>.gz, the
+// immutable generation manifest every Commit publishes (docs/MANIFEST-SPEC.md
+// §4.2). Bare stems only — the manifest counter IS the name. As of S32 the
+// reader does not fetch manifests either (S33 teaches it to), so this too is an
+// inert series for the SW; listing it here is what stamps a manifest immutable
+// and application/gzip.
 var PackSeries = []struct {
 	Name  string // series directory
 	Kinds string // kind letters valid besides the finalized bare stem ("" = bare only)
@@ -54,6 +60,7 @@ var PackSeries = []struct {
 	{"data", "Ld"},
 	{"meta", "Ls"},
 	{"db", ""},
+	{"manifest", ""},
 }
 
 // packKeyRe matches the write-once pack names, built from PackSeries.
@@ -97,12 +104,17 @@ func isSeenObject(key string) bool {
 // place.
 func cacheControlForKey(key string) string {
 	switch {
-	case key == "db.gz" || isSeenObject(key):
+	case key == "db.gz" || key == "config.gz" || isSeenObject(key):
 		// The seen.gz sidecar (backend-only persistent dedup + validators + bg) is
 		// a third mutable class besides db.gz and out/, written as two ping/pong
 		// slots (seen.0.gz/seen.1.gz; bare seen.gz is the legacy upgrade name),
 		// rewritten every non-idle fetch cycle. The reader never fetches it, but
 		// if a CDN ever serves it, never cache a stale copy.
+		//
+		// config.gz is the backend-only configuration sidecar
+		// (docs/MANIFEST-SPEC.md §4.3): mutable like db.gz, rewritten only when
+		// the operator changes configuration, and — like seen.gz — never fetched
+		// by the frontend or the service worker. Deliberately NOT in PackSeries.
 		return cacheRevalidate
 	case strings.HasPrefix(key, "inbox/"):
 		// A producer's fetch spool (docs/INBOX-SPEC.md): transient and rewritten
@@ -145,7 +157,7 @@ const contentTypeGzip = "application/gzip"
 // construction. Centralised next to cacheControlForKey so the writer↔CDN
 // contract stays in one place.
 func contentTypeForKey(key string) string {
-	if key == "db.gz" || isSeenObject(key) || strings.HasPrefix(key, "inbox/") || packKeyRe.MatchString(key) {
+	if key == "db.gz" || key == "config.gz" || isSeenObject(key) || strings.HasPrefix(key, "inbox/") || packKeyRe.MatchString(key) {
 		return contentTypeGzip
 	}
 	return ""
