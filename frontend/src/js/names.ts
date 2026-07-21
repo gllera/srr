@@ -1,86 +1,40 @@
 // The store's object names — the ONE place a pack key is built.
 //
-// docs/MANIFEST-SPEC.md §4.5 ("names are listed, never derived") splits the
-// reader in two:
+// docs/MANIFEST-SPEC.md §4.5 ("names are listed, never derived"): the root
+// db.gz is a ~60-byte pointer `{v, m, t}` and `manifest/<m>.gz` LISTS every
+// live object explicitly, per series, positionally. Stems are OPAQUE — drawn
+// from a per-series counter that is never reused — so `idx/812.gz` means
+// "idx-series object #812" and nothing else; the ordered list says which chron
+// region it holds. Nothing here reconstructs a name from a count.
 //
-//   • a LEGACY root (today's full db.gz) DERIVES every key from counters —
-//     seq/nd (the tail generation), next_pid (finalized data packs), hdrs, mp;
-//   • a MANIFEST root ({v, m, t}) reads them from `manifest/<m>.gz`, which
-//     LISTS every live object explicitly, per series, positionally.
-//
-// Both shapes are resolved into the same StoreNames here, so every fetch site
-// in data.ts/search.ts indexes one array and neither knows nor cares which
-// root it came from. That is what makes S34's root cutover a no-op for an
-// already-deployed S33 reader.
+// A LEGACY root (a store no post-cutover writer has committed yet — its first
+// locked session migrates it) still carries the old counters, so `legacyNames`
+// keeps deriving today's keys from them. That branch is the graceful
+// degradation half of the version handshake, not a second naming model: it
+// resolves into the same StoreNames every fetch site indexes.
 //
 // §4.6 constraint, honored: nothing below assumes there are exactly three
 // series, that idx and meta are distinct, or that a stride is a particular
 // number. The manifest's `names` object is parsed as a flat map and series are
 // looked up BY NAME, so a future merged idx+meta series (ARC6) is a
 // manifest-shape change and nothing else.
-import { IDX_PACK_SIZE, type IFeedWire, type IMetaWire } from "./format.gen"
+import {
+   IDX_PACK_SIZE,
+   type IDeltaNamesWire,
+   type ISeriesNamesWire,
+   type IStemRefWire,
+   type ISummaryNameWire,
+   type IManifestWire,
+} from "./format.gen"
 
-// The manifest root's version — the value a v2 root and a manifest body both
-// stamp in `v` (docs/MANIFEST-SPEC.md §4.1/§4.2, backend `manifestVersion`).
-//
-// Deliberately NOT generated: `gen-ts` emits DB_FORMAT_VERSION, which is what
-// the current WRITER stamps on db.gz (1 until the S34 cutover). This reader
-// already parses the v2 root that cutover will emit — reader-first deploy
-// discipline (§11 step 2) requires exactly that asymmetry, so the two numbers
-// cannot be one constant until S34 bumps dbFormatVersion to 2.
-export const MANIFEST_ROOT_VERSION = 2
-
-// --- manifest wire shapes -------------------------------------------------
-//
-// Hand-mirrored from backend/manifest.go (Manifest, ManifestNames,
-// SeriesNames, SummaryName). `srr gen-ts` does not emit them yet — the
-// manifest is not part of the writer↔reader contract until S34 makes it the
-// only root — so keep these in sync with backend/manifest.go by hand until it
-// does.
-
-// One pack series' positional name list. Runs are RLE'd over BARE stems:
-// `[[firstStem, count], …]`, resolved as `<series>/<stem>.gz`. `b` is the
-// positional index of the first run's first entry (0 for idx/meta, 1 for data
-// — the writer has always skipped data/0). `t` is the S32 deviation: the
-// current tail pack still carries its legacy kind-lettered name
-// (idx|data|meta/L<tailGen>.gz), which has no bare-stem form, and occupies the
-// one position immediately after the last run. It disappears at S34 with the
-// kind letters it exists to express.
-export interface ISeriesNamesWire {
-   b?: number
-   r?: [number, number][]
-   t?: string
-}
-
-// A derived summary object: its key plus the count of finalized packs it
-// covers. `covers` rides next to the name so S34 can drop the count from the
-// name without a redesign.
-export interface ISummaryNameWire {
-   key: string
-   covers: number
-}
-
-export interface IManifestWire {
-   v: number
-   m: number
-   fetched_at: number
-   total_art: number
-   mt?: number
-   na?: number
-   head?: IMetaWire[]
-   hb?: number
-   pack_off?: number
-   // Series rows keyed by series name, flattened next to the singletons
-   // ("deltas", "seen", "hsum", "ssum") — parsed generically, see above.
-   names: Record<string, unknown>
-   feeds: Record<number, IFeedWire> | null
-}
+export type { IManifestWire }
 
 // --- resolved names -------------------------------------------------------
 
 export interface SeriesList {
    // keys[i] names the object holding this series' i-th stride region. Slots
-   // below the series' base (data/0, which the writer never produced) are "".
+   // below the series' base (data position 0, which the writer never produced)
+   // are "".
    keys: string[]
    // Positional index of the write-once TAIL entry, -1 when the series has
    // none (an all-delta store never consolidated one; a meta projection whose
@@ -99,7 +53,7 @@ export interface StoreNames {
    idx: SeriesList
    data: SeriesList
    meta: SeriesList
-   // The live delta chain, oldest first (the data series' `d` kind today).
+   // The live delta chain, oldest first.
    deltas: string[]
    // The idx header summary and the meta bloom summary; null when the store
    // publishes none.
@@ -110,8 +64,8 @@ export interface StoreNames {
 const EMPTY_SERIES = (): SeriesList => ({ keys: [], tail: -1 })
 
 // Resolve one positional slot, failing loudly rather than misaddressing: under
-// the manifest model a name is LISTED, so an absent slot means the counters
-// the reader navigates by and the names the store published disagree. There is
+// this model a name is LISTED, so an absent slot means the counters the reader
+// navigates by and the names the store published disagree. There is
 // deliberately no computed-name fallback (§4.5) — two ways to learn a name
 // means two truths that can disagree, and every disagreement is a 404 storm.
 export function keyAt(list: SeriesList, i: number, what: string): string {
@@ -120,7 +74,7 @@ export function keyAt(list: SeriesList, i: number, what: string): string {
    return key
 }
 
-// expandSeries turns one RLE'd positional list into index→key.
+// expandSeries turns one RLE'd positional list of opaque stems into index→key.
 export function expandSeries(s: ISeriesNamesWire, series: string): SeriesList {
    const keys: string[] = []
    for (let i = 0; i < (s.b ?? 0); i++) keys.push("") // positions below the base are not part of this series
@@ -128,18 +82,17 @@ export function expandSeries(s: ISeriesNamesWire, series: string): SeriesList {
       const [first, count] = run
       for (let i = 0; i < count; i++) keys.push(`${series}/${first + i}.gz`)
    }
-   let tail = -1
-   if (s.t) {
-      tail = keys.length
-      keys.push(s.t)
-   }
+   const tail = s.l ?? -1
+   if (tail >= 0 && !keys[tail]) throw new Error(`${series}: tail position ${tail} is not listed`)
    return { keys, tail }
 }
 
 // manifestNames reads the names a manifest LISTS. Series are looked up by name
 // out of the flat `names` map (§4.6): a series the manifest does not carry
 // resolves to an empty list rather than throwing, so the reader's own coverage
-// gates (metaReady, the tcEntries>0 test) decide what that means.
+// gates (metaReady, the tcEntries>0 test) decide what that means. Every
+// singleton carries its OWN series, so nothing here hard-codes which directory
+// a summary or a delta segment lives in.
 export function manifestNames(man: IManifestWire): StoreNames {
    const raw = man.names
    if (!raw || typeof raw !== "object") throw new Error(`manifest ${man.m}: no names object`)
@@ -150,19 +103,25 @@ export function manifestNames(man: IManifestWire): StoreNames {
    }
    const summary = (name: string): SummaryRef | null => {
       const row = raw[name] as ISummaryNameWire | undefined
-      return row && typeof row.key === "string" ? { key: row.key, covers: row.covers ?? 0 } : null
+      if (!row || typeof row.s !== "string" || typeof row.stem !== "number") return null
+      return { key: stemKey(row), covers: row.covers ?? 0 }
    }
+   const chain = raw.deltas as IDeltaNamesWire | undefined
    return {
       idx: series("idx"),
       data: series("data"),
       meta: series("meta"),
-      deltas: Array.isArray(raw.deltas) ? (raw.deltas as string[]) : [],
+      deltas: (chain?.r ?? []).map((stem) => `${chain!.s}/${stem}.gz`),
       hsum: summary("hsum"),
       ssum: summary("ssum"),
    }
 }
 
-// The counters a legacy root derives its names from.
+function stemKey(r: IStemRefWire | ISummaryNameWire): string {
+   return `${r.s}/${r.stem}.gz`
+}
+
+// The counters a legacy (pre-cutover) root derives its names from.
 export interface LegacyRoot {
    total_art: number
    seq: number
@@ -173,11 +132,10 @@ export interface LegacyRoot {
    mp?: number
 }
 
-// legacyNames rebuilds today's derived names verbatim — the same strings this
-// reader has always fetched, so a legacy-complete root behaves byte-for-byte
-// as it did before the dual path existed.
+// legacyNames rebuilds the pre-cutover derived names verbatim, so a store whose
+// writer has not migrated it yet still reads correctly.
 //
-// Tail placement mirrors the writer exactly: with a consolidated tail
+// Tail placement mirrors that writer exactly: with a consolidated tail
 // (tailCovered > 0) each series' tail sits at the position immediately after
 // its finalized region — idx at numFinalizedIdx (invariant I2 keeps the delta
 // region inside one idx pack, so the seam never lands below that base), data
@@ -192,15 +150,15 @@ export function legacyNames(r: LegacyRoot): StoreNames {
 
    const idx = EMPTY_SERIES()
    for (let p = 0; p < nfIdx; p++) idx.keys.push(`idx/${p}.gz`)
-   const data: SeriesList = { keys: [""], tail: -1 } // data/0 was never written
+   const data: SeriesList = { keys: [""], tail: -1 } // data position 0 was never written
    for (let id = 1; id < r.next_pid; id++) data.keys.push(`data/${id}.gz`)
    const meta = EMPTY_SERIES()
    for (let n = 0; n < mp; n++) meta.keys.push(`meta/${n}.gz`)
 
    if (tc > 0) {
       // The meta tail is named on tc alone — NOT on the exact-coverage test the
-      // manifest writer applies — because that is what this reader has always
-      // done: every meta read is gated upstream by metaReady(), which is false
+      // writer applied — because that is what this reader has always done:
+      // every meta read is gated upstream by metaReady(), which is false
       // whenever the coverage is inexact, so the name is unreachable then and
       // the offline pin keeps pinning exactly the set it always pinned.
       for (const [list, prefix] of [

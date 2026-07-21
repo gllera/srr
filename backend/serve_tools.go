@@ -106,20 +106,6 @@ func handleDedup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]int{"dedup_days": effectiveStoreDedup(body.Days)})
 }
 
-func bumpGen(w http.ResponseWriter, r *http.Request) {
-	var gen int
-	err := withDBCtx(r.Context(), true, func(ctx context.Context, db *DB) error {
-		db.BumpGen()
-		gen = db.core.Gen
-		return db.Commit(ctx)
-	})
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]int{"gen": gen})
-}
-
 // handleExport serves the feed list as OPML (default, the interop format) or —
 // with ?format=json — the LOSSLESS whole-configuration document `srr export`
 // writes: OPML's leaf carries only title+url, so it is a backup that silently

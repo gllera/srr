@@ -47,12 +47,14 @@ func TestOverview(t *testing.T) {
 		t.Fatalf("recipes missing %q: %+v", defaultRecipeName, got.Recipes)
 	}
 	// Out: empty store ⇒ a non-nil empty slice (serialized as [], the syndicate
-	// tab reads .length). gen/scalars start at 0.
+	// tab reads .length).
 	if got.Out == nil || len(got.Out) != 0 {
 		t.Fatalf("out = %+v, want []", got.Out)
 	}
-	if got.Gen != 0 || got.TotalArt != 0 {
-		t.Fatalf("gen=%d total_art=%d, want 0,0", got.Gen, got.TotalArt)
+	// The manifest counter reports whatever generation the seeded commits
+	// reached; the article total is what matters here.
+	if got.Manifest <= 0 || got.TotalArt != 0 {
+		t.Fatalf("m=%d total_art=%d, want m>0, total_art 0", got.Manifest, got.TotalArt)
 	}
 	// Version: the running binary's version rides the snapshot so the webui can
 	// label itself ("development" here; release ldflags set the real tag).

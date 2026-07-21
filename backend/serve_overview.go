@@ -19,7 +19,7 @@ type overviewView struct {
 	Tags      []tagCount        `json:"tags"`
 	Recipes   map[string]Recipe `json:"recipes"`
 	Out       []OutFeed         `json:"out"`
-	Gen       int               `json:"gen"`
+	Manifest  int               `json:"m"`
 	FetchedAt int64             `json:"fetched_at"`
 	TotalArt  int               `json:"total_art"`
 	// DedupDays is the *effective* store-wide default seen.gz horizon (the
@@ -74,7 +74,7 @@ func buildOverview(db *DB) overviewView {
 		// Non-nil empty so an empty store serializes Out as [] (the
 		// syndicate tab reads .length), mirroring the old listSyndicate.
 		Out:       append([]OutFeed{}, db.core.Out...),
-		Gen:       db.core.Gen,
+		Manifest:  db.core.ManifestNum,
 		FetchedAt: db.core.FetchedAt,
 		TotalArt:  db.core.TotalArticles,
 		DedupDays: effectiveStoreDedup(db.core.DedupDays),

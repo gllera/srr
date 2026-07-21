@@ -102,15 +102,13 @@ func TestFeedProjectionsRoundTripValues(t *testing.T) {
 	}
 }
 
-// TestDBCoreGroupsCoverEveryWireField is the DBCore counterpart. DBCore IS
-// structurally split (it embeds its four groups), so encoding/json guarantees
-// coverage by construction — what this pins is the other direction: that the
-// grouping never leaks into the wire shape. db.gz must keep exactly the flat
-// key set every deployed reader parses, plus only the deliberately additive
-// `m`/`gcm`.
-func TestDBCoreGroupsCoverEveryWireField(t *testing.T) {
-	var core DBCore
-	b, err := json.Marshal(&core)
+// TestManifestGroupsCoverEveryWireField is the DBCore counterpart, aimed at the
+// object DBCore now projects onto: the manifest IS structurally split (it embeds
+// the very same ManifestState/ManifestWriterState groups the core does), so
+// encoding/json guarantees coverage by construction — what this pins is the
+// other direction, that the grouping never leaks into the wire shape.
+func TestManifestGroupsCoverEveryWireField(t *testing.T) {
+	b, err := json.Marshal(&Manifest{Names: newManifestNames()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,15 +116,30 @@ func TestDBCoreGroupsCoverEveryWireField(t *testing.T) {
 	if err := json.Unmarshal(b, &m); err != nil {
 		t.Fatal(err)
 	}
-	// Zero value: only the non-omitempty keys appear. They are exactly today's.
-	want := map[string]bool{"fetched_at": true, "total_art": true, "next_pid": true, "pack_off": true, "feeds": true}
+	// Zero value: only the non-omitempty keys appear, flat.
+	want := map[string]bool{
+		"v": true, "m": true, "fetched_at": true, "total_art": true,
+		"pack_off": true, "next_pid": true, "names": true, "feeds": true,
+	}
 	for k := range m {
 		if !want[k] {
-			t.Errorf("db.gz zero value carries unexpected key %q", k)
+			t.Errorf("manifest zero value carries unexpected key %q", k)
 		}
 		delete(want, k)
 	}
 	for k := range want {
-		t.Errorf("db.gz zero value lost key %q — a deployed reader expects it", k)
+		t.Errorf("manifest zero value lost key %q", k)
+	}
+}
+
+// The ROOT is a pointer and nothing else (§4.1): any state here would be a
+// second source of truth for something the manifest owns.
+func TestRootStateIsAPointer(t *testing.T) {
+	b, err := json.Marshal(&RootState{Version: dbFormatVersion, ManifestNum: 7, FetchedAt: 99})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != `{"v":3,"m":7,"t":99}` {
+		t.Errorf("root wire shape = %s", b)
 	}
 }

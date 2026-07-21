@@ -1,7 +1,7 @@
 import { rmSync } from "node:fs"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
-import { feedServer, inspectValidate, makeStore, srr, type FeedServer } from "../harness"
+import { feedServer, inspectValidate, makeStore, srr, storeNames, type FeedServer } from "../harness"
 import { nItems, rssFeed } from "../fixtures"
 import { mountReader, type FetchIntercept } from "./mount"
 
@@ -58,7 +58,9 @@ describe("contract: navigation under transient pack failures", () => {
    })
 
    it("a failed navigation never moves the position; the retry replays the same target", async () => {
-      const reader = await mountReader(store, failOnce(/^data\/L/)) // only the LATEST pack flakes
+      // Only the tail data pack flakes — the one the store's manifest names.
+      const tail = storeNames(store).data
+      const reader = await mountReader(store, failOnce(new RegExp(`^${tail.keys[tail.tail]}$`)))
       // Land on chron 0 (finalized pack — serves fine). fromHash takes the hash
       // WITHOUT the "#" (route() strips it).
       const o = await reader.nav.fromHash("0")

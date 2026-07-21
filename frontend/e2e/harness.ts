@@ -13,7 +13,8 @@ import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 import { gunzipSync } from "node:zlib"
 
-import type { IDBWire } from "../src/js/format.gen"
+import type { IDBWire, IManifestWire } from "../src/js/format.gen"
+import { manifestNames, type StoreNames } from "../src/js/names"
 
 const execFileAsync = promisify(execFile)
 
@@ -74,10 +75,30 @@ export function makeStore(): string {
    return mkdtempSync(join(tmpdir(), "srr-e2e-"))
 }
 
-// Parse a store's db.gz. The type param narrows the wire shape to just the
-// fields the caller picks (defaults to the full generated IDBWire).
-export function readDb<T = IDBWire>(dir: string): T {
-   return JSON.parse(gunzipSync(readFileSync(join(dir, "db.gz"))).toString("utf8")) as T
+// Parse a store's ROOT — the ~60-byte {v, m, t} pointer at db.gz.
+export function readRoot(dir: string): IDBWire {
+   return JSON.parse(gunzipSync(readFileSync(join(dir, "db.gz"))).toString("utf8")) as IDBWire
+}
+
+// Parse a store's published STATE: the root's manifest, which is where
+// total_art / feeds / mt / na / head all live now (docs/MANIFEST-SPEC.md §4.2).
+// The type param narrows the wire shape to just the fields the caller picks.
+// Doing the indirection here keeps every assertion below reading "the store
+// says X" rather than "this object says X".
+export function readDb<T = IManifestWire>(dir: string): T {
+   const root = readRoot(dir)
+   const m = root.m ?? 0
+   const man = JSON.parse(gunzipSync(readFileSync(join(dir, `manifest/${m}.gz`))).toString("utf8")) as IManifestWire
+   // The root's own `t` is authoritative for freshness: an idle cycle rewrites
+   // it and leaves the manifest untouched.
+   return { ...man, fetched_at: root.t ?? man.fetched_at } as T
+}
+
+// The store's resolved object names, exactly as the reader resolves them —
+// there is no computed-name fallback anywhere, so a test that wants "the tail
+// data pack" asks the manifest like everything else.
+export function storeNames(dir: string): StoreNames {
+   return manifestNames(readDb<IManifestWire>(dir))
 }
 
 // total_art read straight from a store's db.gz, or -1 if it isn't a readable

@@ -34,17 +34,6 @@ type MetaEntry struct {
 	Title string `json:"t,omitempty"`
 }
 
-// finalizedMetaKey resolves the key of finalized meta shard n.
-func finalizedMetaKey(n int) string {
-	return fmt.Sprintf("meta/%d.gz", n)
-}
-
-// metaSummaryKey resolves the meta bloom-summary key covering n
-// finalized shards.
-func metaSummaryKey(n int) string {
-	return fmt.Sprintf("meta/s%d.gz", n)
-}
-
 // foldSearchText is the search folding contract, mirrored byte-for-byte by
 // frontend/src/js/search.ts fold() and enforced by the e2e contract test:
 // NFD → drop nonspacing marks → lowercase per rune → ς→σ → non-letter/number
@@ -137,7 +126,10 @@ func (o *DB) walkArticles(ctx context.Context, from, to int, fn func(ad *Article
 	dataPackID := -1
 	for pto := min(to, tc); from < pto; {
 		p := from / idxPackSize
-		key, size := idxKeyAndSize(c, p)
+		key, size, err := idxKeyAndSize(c, p)
+		if err != nil {
+			return err
+		}
 		buf, err := o.readGz(ctx, key)
 		if err != nil {
 			return err
@@ -149,7 +141,10 @@ func (o *DB) walkArticles(ctx context.Context, from, to int, fn func(ad *Article
 		for end := min(pto, p*idxPackSize+size); from < end; from++ {
 			packID, off := pack.getPackRef(from)
 			if packID != dataPackID {
-				dataKey := dataKeyFor(c, packID)
+				dataKey, err := dataKeyFor(c, packID)
+				if err != nil {
+					return err
+				}
 				raw, err := o.readGz(ctx, dataKey)
 				if err != nil {
 					return err
@@ -219,7 +214,7 @@ func numFinalizedMeta(totalArticles int) int {
 // rebuild path, which stays the correctness backstop.
 type metaTailCache struct {
 	mu    sync.Mutex
-	seq   int
+	key   string
 	lines [][]byte
 }
 
@@ -229,25 +224,25 @@ var metaTailMemo = &metaTailCache{}
 // the read-back target (see metaTailCache). The copy is mandatory: the caller
 // truncates-and-reuses its slice on a shard flush, which must not scribble
 // the memo's backing array.
-func (m *metaTailCache) memoized(seq, tail int) ([][]byte, bool) {
+func (m *metaTailCache) memoized(key string, tail int) ([][]byte, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.seq != seq || len(m.lines) != tail {
+	if key == "" || m.key != key || len(m.lines) != tail {
 		return nil, false
 	}
 	return append([][]byte(nil), m.lines...), true
 }
 
-func (m *metaTailCache) store(seq int, lines [][]byte) {
+func (m *metaTailCache) store(key string, lines [][]byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.seq, m.lines = seq, lines
+	m.key, m.lines = key, lines
 }
 
 func (m *metaTailCache) reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.seq, m.lines = 0, nil
+	m.key, m.lines = "", nil
 }
 
 func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
@@ -262,78 +257,65 @@ func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 		return nil
 	}
 	nf := numFinalizedMeta(target)
-	if c.MetaPacks == nf && c.MetaPacks*metaPackSize+c.MetaTail == target {
+	mp := c.metaPacks()
+	if mp == nf && mp*metaPackSize+c.MetaTail == target {
 		return nil
 	}
-	if c.MetaPacks < 0 || c.MetaPacks > nf || c.MetaTail < 0 || c.MetaTail > metaPackSize ||
-		c.MetaPacks*metaPackSize+c.MetaTail > target {
+	if mp > nf || c.MetaTail < 0 || c.MetaTail > metaPackSize || mp*metaPackSize+c.MetaTail > target {
 		slog.Warn("inconsistent meta coverage, rebuilding from scratch",
-			"mp", c.MetaPacks, "mt", c.MetaTail, "target", target)
-		c.MetaPacks, c.MetaTail = 0, 0
+			"mp", mp, "mt", c.MetaTail, "target", target)
+		c.Names.truncate(metaSeries, 0)
+		c.MetaTail, mp = 0, 0
+	}
+	// The retired "stale-low MetaPacks" guard lived here. It existed because a
+	// warn-only failure could leave the store holding a finalized meta/<mp>.gz
+	// that db.gz did not account for, and the next append would then OVERWRITE
+	// that immutable name with a wrong chron range. Under explicit naming that
+	// cannot happen: a shard the manifest never named is unreferenced garbage,
+	// and a rebuild writes a FRESH stem beside it rather than over it. One more
+	// hazard the commit model dissolves rather than manages.
+
+	// The tail the store currently names — the read-back candidate — captured
+	// BEFORE this run replaces it. On a consolidation cycle the tail moved, so
+	// the superseded key comes from consolidateTail.
+	prevKey := c.Names.tailKey(metaSeries)
+	if o.consolidated != nil {
+		prevKey = o.prevMetaTail
 	}
 
-	// Stale-low MetaPacks guard: a prior cycle can finalize meta/<mp>.gz and write
-	// a latest tail one shard past mp*metaPackSize, then fail (SyncMeta is
-	// warn-only) before recording coverage — leaving MetaPacks understating the
-	// finalized shards on disk while MetaTail happens to still equal the shifted
-	// tail's entry count. The read-back below would then trust that tail at the
-	// wrong chron base (start = MetaPacks*metaPackSize) and the append would
-	// re-finalize the immutable meta/<mp>.gz with a wrong chron range — silent
-	// corruption, since the re-finalized shard's bloom is rebuilt from the same
-	// wrong lines and `srr inspect --validate` only cross-checks each shard
-	// against itself. Detect it physically: if the first slot the append would
-	// finalize (meta/<mp>.gz) already exists, coverage undercounts the finalized
-	// shards, so force the full rebuild from the data packs. Costs one Stat, and
-	// only on a boundary-crossing cycle (mp < nf) — meta/<mp>.gz never exists yet
-	// on the normal path, where mp accurately counts the finalized shards.
-	if c.MetaPacks < nf {
-		if size, err := o.Stat(ctx, finalizedMetaKey(c.MetaPacks)); err == nil && size > 0 {
-			slog.Warn("meta coverage undercounts finalized shards on disk, rebuilding from scratch",
-				"mp", c.MetaPacks, "nf", nf)
-			c.MetaPacks, c.MetaTail = 0, 0
+	start := mp * metaPackSize // chron of the tail's first entry
+	var rawLines [][]byte      // jsonEncode outputs, newline included
+
+	// Read back the previous tail, trusted only when its entry count matches
+	// the published MetaTail. After consecutive failed syncs no candidate
+	// survives and the tail rebuilds from the packs instead — heavier, still
+	// correct.
+	if c.MetaTail > 0 && prevKey != "" {
+		if lines, ok := metaTailMemo.memoized(prevKey, c.MetaTail); ok {
+			rawLines = lines
+		} else if lines, err := o.readMetaLines(ctx, prevKey); err != nil {
+			slog.Warn("meta tail read-back failed, rebuilding from the packs", "key", prevKey, "error", err)
+		} else if len(lines) != c.MetaTail {
+			slog.Warn("meta tail read-back mismatch, rebuilding from the packs",
+				"key", prevKey, "entries", len(lines), "mt", c.MetaTail)
+		} else {
+			rawLines = lines
 		}
 	}
 
-	start := c.MetaPacks * metaPackSize // chron of the tail's first entry
-	var rawLines [][]byte               // jsonEncode outputs, newline included
-
-	// Read back the previous generation's tail. On a consolidation cycle the
-	// superseded tail generation (o.prevTailGen) named it; on a catch-up cycle
-	// (warn-only failure retry, migration, post-bump) the last success could
-	// sit at the current tail generation or one below it. After consecutive
-	// failed syncs no candidate survives and the tail rebuilds from the packs
-	// instead — heavier, still correct (the entry-count trust check gates
-	// every candidate).
-	if c.MetaTail > 0 {
-		candidates := []int{tailGen(c), tailGen(c) - 1}
-		if o.consolidated != nil {
-			candidates = []int{o.prevTailGen}
-		}
-		for _, g := range candidates {
-			if lines, ok := metaTailMemo.memoized(g, c.MetaTail); ok {
-				rawLines = lines
-				break
-			}
-		}
-		for _, g := range candidates {
-			if rawLines != nil {
-				break
-			}
-			prevKey := genKey("meta", g)
-			if lines, err := o.readMetaLines(ctx, prevKey); err != nil {
-				slog.Warn("meta tail read-back failed, trying next candidate or rebuilding", "key", prevKey, "error", err)
-			} else if len(lines) != c.MetaTail {
-				slog.Warn("meta tail read-back mismatch, trying next candidate or rebuilding",
-					"key", prevKey, "entries", len(lines), "mt", c.MetaTail)
-			} else {
-				rawLines = lines
-			}
-		}
-	}
+	// Name changes are STAGED and adopted only once every object below is
+	// durable: a mid-flight failure must not leave the manifest this cycle
+	// publishes naming a shard that was never written (M4).
+	names := c.Names.clone()
 
 	add := func(ad *ArticleData) error {
 		if len(rawLines) == metaPackSize {
-			if err := o.saveMetaShard(ctx, start/metaPackSize, rawLines); err != nil {
+			pos := start / metaPackSize
+			stem := names.alloc(metaSeries)
+			if err := o.saveMetaShard(ctx, fmt.Sprintf("%s/%d.gz", metaSeries, stem), rawLines); err != nil {
+				return err
+			}
+			if err := names.putAt(metaSeries, pos, stem); err != nil {
 				return err
 			}
 			rawLines = rawLines[:0]
@@ -380,24 +362,37 @@ func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 			return err
 		}
 	}
-	if err := o.savePack(ctx, genKey("meta", tailGen(c)), latest); err != nil {
+	tailStem := names.alloc(metaSeries)
+	tailKey := fmt.Sprintf("%s/%d.gz", metaSeries, tailStem)
+	if err := o.savePack(ctx, tailKey, latest); err != nil {
+		return err
+	}
+	if err := names.setTail(metaSeries, nf, tailStem); err != nil {
 		return err
 	}
 
-	if c.MetaPacks != nf {
+	if mp != nf {
+		stem := names.alloc(metaSeries)
+		sum := SummaryName{Series: metaSeries, Stem: stem, Covers: nf}
 		if err := o.saveSummary(ctx, nf, func(k int) ([]byte, error) {
-			return o.readPackHeader(ctx, finalizedMetaKey(k), searchBloomBytes)
-		}, metaSummaryKey(nf)); err != nil {
+			key, err := names.key(metaSeries, k)
+			if err != nil {
+				return nil, err
+			}
+			return o.readPackHeader(ctx, key, searchBloomBytes)
+		}, sum.key()); err != nil {
 			return err
 		}
+		names.SSum = &sum
 	}
 
-	c.MetaPacks, c.MetaTail = nf, len(rawLines)
-	// Every save succeeded and the coverage counters now describe the tail we
-	// wrote as meta/L<tailGen>, so it is safe to remember. rawLines is not
-	// touched again after this point; the next cycle's memoized() hands out a
-	// copy.
-	metaTailMemo.store(tailGen(c), rawLines)
+	// Every save succeeded: adopt the staged names and the coverage they
+	// describe together.
+	c.Names = names
+	c.MetaTail = len(rawLines)
+	// rawLines is not touched again after this point; the next cycle's
+	// memoized() hands out a copy.
+	metaTailMemo.store(tailKey, rawLines)
 
 	// Refresh the newest-glance head projection from the tail we just wrote:
 	// the newest min(headMax, tail) cards, parsed back from the very lines the
@@ -460,12 +455,12 @@ func (o *DB) readMetaLines(ctx context.Context, key string) ([][]byte, error) {
 // saveMetaShard writes finalized shard n: the bloom over every gram of
 // every folded title, then the JSONL lines. Titles are decoded here, once
 // per finalized shard, so the sync loop never carries a parallel array.
-func (o *DB) saveMetaShard(ctx context.Context, n int, rawLines [][]byte) error {
+func (o *DB) saveMetaShard(ctx context.Context, key string, rawLines [][]byte) error {
 	bloom := make([]byte, searchBloomBytes)
 	for i, line := range rawLines {
 		var e MetaEntry
 		if err := json.Unmarshal(line, &e); err != nil {
-			return fmt.Errorf("shard %d line %d: %w", n, i, err)
+			return fmt.Errorf("shard %s line %d: %w", key, i, err)
 		}
 		eachSearchGram(foldSearchText(e.Title), func(gram string) { bloomAdd(bloom, gram) })
 	}
@@ -478,14 +473,5 @@ func (o *DB) saveMetaShard(ctx context.Context, n int, rawLines [][]byte) error 
 			return err
 		}
 	}
-	return o.savePackFinal(ctx, finalizedMetaKey(n), p)
-}
-
-// GCMetaSummaries deletes superseded meta bloom summaries
-// (meta/s<g>.gz) with the same grace window and stranded-name caveat as
-// GCSummaries.
-func (o *DB) GCMetaSummaries(ctx context.Context, keep int) error {
-	return o.gcSweep(ctx, o.core.MetaPacks-keep-1, gcSweepWindow, "meta summary", func(g int) []string {
-		return []string{metaSummaryKey(g)}
-	})
+	return o.savePackFinal(ctx, key, p)
 }

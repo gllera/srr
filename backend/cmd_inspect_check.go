@@ -91,7 +91,7 @@ func (o *InspectCmd) validateAll(fetch keyGetter, core *DBCore, packs []*idxPack
 // total_art verbatim) and fetched_at monotonicity across the pack↔delta seam
 // (expiration's early-stop and the chron-order contract both assume it).
 func (o *InspectCmd) checkDeltaChain(fetch keyGetter, core *DBCore, packs []*idxPack, deltas []ArticleData) int {
-	if core.NumDeltas == 0 {
+	if core.numDeltas() == 0 {
 		fmt.Fprintln(o.w(), "[delta-chain] no live deltas (nd=0)")
 		return 0
 	}
@@ -117,7 +117,7 @@ func (o *InspectCmd) checkDeltaChain(fetch keyGetter, core *DBCore, packs []*idx
 	if tc > 0 && len(deltas) > 0 {
 		n := (tc - 1) / idxPackSize
 		pid, off := packs[n].getPackRef(tc - 1)
-		last, err := loadDataPack(fetch, dataKeyFor(core, pid))
+		last, err := loadDataPack(fetch, dataKeyReport(core, pid))
 		if err != nil {
 			fmt.Fprintf(o.w(), "[delta-chain] seam check: fetch last consolidated article (chron %d): %v\n", tc-1, err)
 			issues++
@@ -129,7 +129,7 @@ func (o *InspectCmd) checkDeltaChain(fetch keyGetter, core *DBCore, packs []*idx
 	}
 	if issues == 0 {
 		fmt.Fprintf(o.w(), "[delta-chain] %d segment(s), %d article(s), seam at chron %d consistent\n",
-			core.NumDeltas, core.DeltaArticles, tc)
+			core.numDeltas(), core.DeltaArticles, tc)
 	}
 	return issues
 }
@@ -151,9 +151,9 @@ func (o *InspectCmd) checkBoundsVsData(fetch keyGetter, core *DBCore, packs []*i
 		if pid == loadedPid {
 			return entries
 		}
-		e, err := loadDataPack(fetch, dataKeyFor(core, pid))
+		e, err := loadDataPack(fetch, dataKeyReport(core, pid))
 		if err != nil {
-			fmt.Fprintf(o.w(), "[bounds-vs-data] fetch %s: %v\n", dataKeyFor(core, pid), err)
+			fmt.Fprintf(o.w(), "[bounds-vs-data] fetch %s: %v\n", dataKeyReport(core, pid), err)
 			e = nil
 		}
 		entries, loadedPid = e, pid
@@ -247,7 +247,7 @@ func (o *InspectCmd) checkDBMeta(fetch keyGetter, core *DBCore, packs []*idxPack
 			issues++
 		}
 
-		latestData := latestKey(core, "data")
+		latestData := core.Names.tailKey(dataSeries)
 		latest, err := loadDataPack(fetch, latestData)
 		if err != nil {
 			fmt.Fprintf(o.w(), "[db-meta] fetch %s: %v\n", latestData, err)
@@ -379,19 +379,19 @@ func (o *InspectCmd) checkUnknownFeedIDs(core *DBCore, packs []*idxPack) int {
 // only) so the summary is read by the same parser as the packs themselves.
 func (o *InspectCmd) checkIdxSummary(fetch keyGetter, core *DBCore, packs []*idxPack) int {
 	numFinalized := numFinalizedIdx(core.TotalArticles)
-	if core.HdrPacks > numFinalized {
-		fmt.Fprintf(o.w(), "[idx-summary] hdrs=%d but only %d finalized idx packs exist\n", core.HdrPacks, numFinalized)
+	if core.hdrPacks() > numFinalized {
+		fmt.Fprintf(o.w(), "[idx-summary] hdrs=%d but only %d finalized idx packs exist\n", core.hdrPacks(), numFinalized)
 		return 1
 	}
-	if core.HdrPacks < numFinalized {
+	if core.hdrPacks() < numFinalized {
 		fmt.Fprintf(o.w(), "[idx-summary] warning: hdrs=%d lags %d finalized packs (readers fall back to eager idx loading; next fetch rebuilds)\n",
-			core.HdrPacks, numFinalized)
+			core.hdrPacks(), numFinalized)
 	}
-	if core.HdrPacks == 0 {
+	if core.hdrPacks() == 0 {
 		fmt.Fprintln(o.w(), "[idx-summary] no summary expected (hdrs=0)")
 		return 0
 	}
-	key := summaryKey(core.HdrPacks)
+	key := core.Names.hsumKey()
 	buf, err := fetch(key)
 	if err != nil {
 		fmt.Fprintf(o.w(), "[idx-summary] %s missing or corrupt: %v\n", key, err)
@@ -399,10 +399,10 @@ func (o *InspectCmd) checkIdxSummary(fetch keyGetter, core *DBCore, packs []*idx
 	}
 	issues := 0
 	off := 0
-	for k := range core.HdrPacks {
+	for k := range core.hdrPacks() {
 		if off+idxHeaderPrefix > len(buf) {
 			fmt.Fprintf(o.w(), "[idx-summary] %s: truncated at chunk %d/%d (offset %d of %d)\n",
-				key, k, core.HdrPacks, off, len(buf))
+				key, k, core.hdrPacks(), off, len(buf))
 			return issues + 1
 		}
 		numSlots := int(binary.LittleEndian.Uint32(buf[off+idxStateSize:]))
@@ -448,7 +448,7 @@ func (o *InspectCmd) checkIdxSummary(fetch keyGetter, core *DBCore, packs []*idx
 		issues++
 	}
 	if issues == 0 {
-		fmt.Fprintf(o.w(), "[idx-summary] %s matches %d finalized pack header(s)\n", key, core.HdrPacks)
+		fmt.Fprintf(o.w(), "[idx-summary] %s matches %d finalized pack header(s)\n", key, core.hdrPacks())
 	}
 	return issues
 }
@@ -463,30 +463,30 @@ func (o *InspectCmd) checkIdxSummary(fetch keyGetter, core *DBCore, packs []*idx
 // equal the concatenated shard blooms byte-for-byte.
 func (o *InspectCmd) checkMeta(fetch keyGetter, core *DBCore) int {
 	nf := numFinalizedMeta(core.TotalArticles)
-	if core.MetaPacks > nf {
-		fmt.Fprintf(o.w(), "[meta] mp=%d but only %d finalized meta shards exist\n", core.MetaPacks, nf)
+	if core.metaPacks() > nf {
+		fmt.Fprintf(o.w(), "[meta] mp=%d but only %d finalized meta shards exist\n", core.metaPacks(), nf)
 		return 1
 	}
 	// The meta series covers the consolidated region only — overclaiming past
 	// tailCovered (not just TotalArticles) is corruption: delta-region cards
 	// are the resident chain's, never a shard's.
 	if core.MetaTail < 0 || core.MetaTail > metaPackSize ||
-		core.MetaPacks*metaPackSize+core.MetaTail > tailCovered(core) {
+		core.metaPacks()*metaPackSize+core.MetaTail > tailCovered(core) {
 		fmt.Fprintf(o.w(), "[meta] inconsistent coverage: mp=%d mt=%d tc=%d total_art=%d\n",
-			core.MetaPacks, core.MetaTail, tailCovered(core), core.TotalArticles)
+			core.metaPacks(), core.MetaTail, tailCovered(core), core.TotalArticles)
 		return 1
 	}
-	if core.MetaPacks == 0 && core.MetaTail == 0 {
+	if core.metaPacks() == 0 && core.MetaTail == 0 {
 		fmt.Fprintln(o.w(), "[meta] no meta coverage published (mp=0, mt=0)")
 		return 0
 	}
-	if core.MetaPacks < nf {
+	if core.metaPacks() < nf {
 		fmt.Fprintf(o.w(), "[meta] warning: mp=%d lags %d finalized shards (readers keep search disabled; next fetch rebuilds)\n",
-			core.MetaPacks, nf)
+			core.metaPacks(), nf)
 	}
 	issues := 0
 
-	latestMeta := latestKey(core, "meta")
+	latestMeta := core.Names.tailKey(metaSeries)
 	if buf, err := fetch(latestMeta); err != nil {
 		fmt.Fprintf(o.w(), "[meta] %s missing or corrupt: %v\n", latestMeta, err)
 		issues++
@@ -498,28 +498,28 @@ func (o *InspectCmd) checkMeta(fetch keyGetter, core *DBCore) int {
 		issues++
 	}
 
-	if core.MetaPacks == 0 {
+	if core.metaPacks() == 0 {
 		if issues == 0 {
 			fmt.Fprintf(o.w(), "[meta] %s holds the %d-entry tail (no finalized shards)\n", latestMeta, core.MetaTail)
 		}
 		return issues
 	}
 
-	sumKey := metaSummaryKey(core.MetaPacks)
+	sumKey := core.Names.ssumKey()
 	sum, err := fetch(sumKey)
 	if err != nil {
 		fmt.Fprintf(o.w(), "[meta] %s missing or corrupt: %v\n", sumKey, err)
 		sum = nil
 		issues++
-	} else if len(sum) != core.MetaPacks*searchBloomBytes {
+	} else if len(sum) != core.metaPacks()*searchBloomBytes {
 		fmt.Fprintf(o.w(), "[meta] %s has %d bytes but mp=%d expects %d\n",
-			sumKey, len(sum), core.MetaPacks, core.MetaPacks*searchBloomBytes)
+			sumKey, len(sum), core.metaPacks(), core.metaPacks()*searchBloomBytes)
 		sum = nil
 		issues++
 	}
 
-	for k := range core.MetaPacks {
-		key := finalizedMetaKey(k)
+	for k := range core.metaPacks() {
+		key := metaKeyReport(core, k)
 		buf, err := fetch(key)
 		if err != nil {
 			fmt.Fprintf(o.w(), "[meta] %s missing or corrupt: %v\n", key, err)
@@ -563,7 +563,7 @@ func (o *InspectCmd) checkMeta(fetch keyGetter, core *DBCore) int {
 
 	if issues == 0 {
 		fmt.Fprintf(o.w(), "[meta] %d shard(s), %s, and the %d-entry tail consistent\n",
-			core.MetaPacks, sumKey, core.MetaTail)
+			core.metaPacks(), sumKey, core.MetaTail)
 	}
 	return issues
 }
@@ -578,15 +578,30 @@ func (o *InspectCmd) checkLatestFiles(fetch keyGetter, core *DBCore) int {
 		return 0
 	}
 	issues := 0
-	for _, prefix := range []string{"idx", "data"} {
-		key := latestKey(core, prefix)
+	for _, prefix := range []string{idxSeries, dataSeries} {
+		key := core.Names.tailKey(prefix)
 		if _, err := fetch(key); err != nil {
 			fmt.Fprintf(o.w(), "[latest-files] %s missing or corrupt: %v\n", key, err)
 			issues++
 		}
 	}
 	if issues == 0 {
-		fmt.Fprintf(o.w(), "[latest-files] %s and %s present\n", latestKey(core, "idx"), latestKey(core, "data"))
+		fmt.Fprintf(o.w(), "[latest-files] %s and %s present\n", core.Names.tailKey(idxSeries), core.Names.tailKey(dataSeries))
 	}
 	return issues
+}
+
+// dataKeyReport / metaKeyReport resolve a positional key for the checker's own
+// error framing. A position the store names nothing at is itself the finding,
+// so they render a legible placeholder instead of fabricating a key — there is
+// no computed-name fallback anywhere (docs/MANIFEST-SPEC.md §4.5).
+func dataKeyReport(core *DBCore, pos int) string { return posKeyReport(core, dataSeries, pos) }
+func metaKeyReport(core *DBCore, pos int) string { return posKeyReport(core, metaSeries, pos) }
+
+func posKeyReport(core *DBCore, series string, pos int) string {
+	key, err := core.Names.key(series, pos)
+	if err != nil {
+		return fmt.Sprintf("<%s position %d: unnamed>", series, pos)
+	}
+	return key
 }

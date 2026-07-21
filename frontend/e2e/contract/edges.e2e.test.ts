@@ -3,7 +3,7 @@ import { join } from "node:path"
 import { gunzipSync, gzipSync } from "node:zlib"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
-import { feedServer, inspectValidate, makeStore, srr, type FeedServer } from "../harness"
+import { feedServer, inspectValidate, makeStore, srr, storeNames, type FeedServer } from "../harness"
 import { nItems, rssFeed } from "../fixtures"
 import { mountReader } from "./mount"
 
@@ -83,8 +83,9 @@ describe("contract: robustness edges", () => {
    })
 
    it("a corrupt pack rejects cleanly and recovers once the bytes are good again", async () => {
-      const pack = join(store, "data/L1.gz")
-      const backup = join(store, "data-L1.bak")
+      const names = storeNames(store)
+      const pack = join(store, names.data.keys[names.data.tail])
+      const backup = join(store, "data-tail.bak")
       copyFileSync(pack, backup)
       try {
          writeFileSync(pack, "these are not gzip bytes")

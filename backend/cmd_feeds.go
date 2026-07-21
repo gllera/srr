@@ -454,7 +454,7 @@ func (o *RmCmd) report(ctx context.Context, db *DB, id int) error {
 
 	// Delta-chain membership decides whether removal must first consolidate the
 	// live chain (RemoveFeed's id-reuse guard) — the expensive, surprising half.
-	if db.core.NumDeltas > 0 {
+	if db.core.numDeltas() > 0 {
 		chain, err := db.loadDeltaChain(ctx)
 		if err != nil {
 			return fmt.Errorf("reading the delta chain: %w", err)
@@ -466,7 +466,7 @@ func (o *RmCmd) report(ctx context.Context, db *DB, id int) error {
 			}
 		}
 		if n > 0 {
-			fmt.Fprintf(stdout, "  delta chain: %d article(s) — removal would consolidate the %d live segment(s) first\n", n, db.core.NumDeltas)
+			fmt.Fprintf(stdout, "  delta chain: %d article(s) — removal would consolidate the %d live segment(s) first\n", n, db.core.numDeltas())
 		} else {
 			fmt.Fprintf(stdout, "  delta chain: not present (no consolidation needed)\n")
 		}

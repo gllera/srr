@@ -52,6 +52,7 @@ type Globals struct {
 	FetchBackoffMax   time.Duration `default:"1h" env:"SRR_FETCH_BACKOFF_MAX" help:"Loop-only: cap the adaptive per-feed poll interval a dormant feed drifts to (grows as time-since-last-new/8 from --interval). 0 disables backoff (poll every feed every cycle)."`
 	MaxDeltas         int           `default:"${maxDeltas}" env:"SRR_MAX_DELTAS" help:"Max delta segments (data/d<g>.gz, one per article-producing cycle) before a cycle consolidates them into the tail packs. Bounds a cold reader's extra requests. 0 disables deltas: every dirty cycle rewrites the tail packs (the pre-delta behavior)."`
 	MaxDeltaBytes     int           `default:"${maxDeltaBytes}" env:"SRR_MAX_DELTA_BYTES" help:"Consolidate the tail once the live delta segments hold more than this many KB of uncompressed article JSONL (bounds a cold reader's delta payload)."`
+	KeepManifests     int           `default:"${keepManifests}" env:"SRR_KEEP_MANIFESTS" help:"GC grace window K: generation manifests kept alongside the current one, and with them every object they name. A reader whose root is up to K generations stale still resolves its own snapshot; anything older is reclaimed and the reader self-heals with one guarded reload."`
 	CmdTimeout        time.Duration `default:"5m" env:"SRR_CMD_TIMEOUT" help:"Timeout for a single external ingest/mod command (Go duration)."`
 	AllowPrivateFetch bool          `env:"SRR_ALLOW_PRIVATE_FETCH" help:"Disable the SSRF guard, allowing fetches from private/loopback addresses. Security override — leave off unless you fetch LAN/localhost feeds."`
 	CdnURL            string        `hidden:"" env:"SRR_CDN_URL" help:"CDN URL for frontend builds."`
@@ -89,7 +90,6 @@ type CLI struct {
 	Recipe    RecipeGroup    `cmd:"" help:"Manage processing recipes (named {ingest, pipe} bundles)."`
 	Export    ExportAllCmd   `cmd:"" help:"Write the whole store configuration (feeds, recipes, syndication, dedup default) as JSON."`
 	Import    ImportAllCmd   `cmd:"" help:"Restore a configuration written by 'srr export' (feeds matched by url; fetch state untouched)."`
-	Gen       GenCmd         `cmd:"" help:"Print or bump the store generation (db.gz 'gen'; frontend SW cache key)."`
 	Dedup     DedupCmd       `cmd:"" help:"Print or set the store-wide default dedup horizon (db.gz 'dd', in days)."`
 	Preview   PreviewCmd     `cmd:"" aliases:"p" help:"Preview processed feed articles in a browser."`
 	Serve     ServeCmd       `cmd:"" help:"Serve a local web admin GUI for managing feeds, recipes, syndication."`
@@ -202,6 +202,7 @@ func main() {
 			"maxAssetSize":  fmt.Sprint(defaultMaxAssetSize),
 			"maxDeltas":     fmt.Sprint(maxDeltasDefault),
 			"maxDeltaBytes": fmt.Sprint(maxDeltaBytesDefault),
+			"keepManifests": fmt.Sprint(keepManifests),
 			"cacheDir":      defaultCacheDir(),
 		},
 		kong.Name("srr"),

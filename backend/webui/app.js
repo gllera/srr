@@ -1281,19 +1281,11 @@ function renderTools() {
       dedupSave),
     el("p", { class: "hint" }, "Fallback for feeds whose own dedup-days is 0. Set a feed's to -1 to disable the pool for it, or a positive horizon to override. 0 here resets to the built-in default.")));
 
-  // Gen (from the cached snapshot)
-  const genLabel = el("span", { class: "gen-readout" });
-  const setGen = (n) => genLabel.replaceChildren("generation ", el("b", {}, String(n)));
-  setGen(snapshot.gen);
-  const bumpBtn = el("button", { class: "btn", onclick: async () => {
-    if (!confirm("Bump the store generation? This forces every reader's service worker to purge its pack cache.")) return;
-    try { const r = await api("POST", "/api/gen/bump"); snapshot.gen = r.gen; setGen(r.gen); banner("Bumped to " + r.gen, true); }
-    catch (e) { banner(e.message); }
-  } }, "Bump generation");
+  // Store generation (read-only: the manifest counter the root points at)
   root.append(el("section", { class: "panel" },
     el("h3", {}, "Generation"),
-    el("div", { class: "toolbar" }, genLabel, bumpBtn),
-    el("p", { class: "hint" }, "Bump after an in-place store rebuild so every reader purges its cached packs.")));
+    el("div", { class: "toolbar" }, el("span", { class: "gen-readout" }, "manifest ", el("b", {}, String(snapshot.m ?? 0)))),
+    el("p", { class: "hint" }, "Every commit publishes one immutable generation manifest and repoints db.gz at it. Names are never reused, so there is nothing to invalidate and no cache to purge.")));
 
   // Inspect
   const out = el("pre", { class: "log", "data-placeholder": "No report yet — validate the store or look up a hash." });

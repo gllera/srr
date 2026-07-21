@@ -68,84 +68,34 @@ func (it *Item) articleData(fetchedAt int64) ArticleData {
 	}
 }
 
-// genKey resolves the latest-pack key of a series ("idx" or "data") for a
-// specific generation.
-func genKey(prefix string, gen int) string {
-	return fmt.Sprintf("%s/L%d.gz", prefix, gen)
-}
-
-// tailGen is the generation of the consolidated tail packs
-// (idx|data|meta/L<tailGen>): Seq minus the live delta count. With no deltas
-// (NumDeltas 0 — every pre-delta store, and every store right after a
-// consolidation) it equals Seq, the historical "latest packs live at L<Seq>"
-// layout.
-func tailGen(core *DBCore) int {
-	return core.Seq - core.NumDeltas
-}
-
 // tailCovered is the chron seam between packs and deltas: chrons below it are
 // served by the pack series, chrons at/above it by the live delta segments.
 func tailCovered(core *DBCore) int {
 	return core.TotalArticles - core.DeltaArticles
 }
 
-// deltaKey resolves the delta-segment key of generation g. Deltas live in the
-// data/ series on purpose: they ARE article data (one cycle's batch as
-// data-pack JSONL), they inherit the CDN edge-cache rule's /data/ prefix, and
-// "d" slots into the PackSeries grammar as one more write-once kind letter.
-func deltaKey(g int) string {
-	return fmt.Sprintf("data/d%d.gz", g)
-}
-
-// dbSnapshotKey resolves the write-once db.gz snapshot key of tail generation
-// g (see DB.SnapshotDB). Its own "db" series in the PackSeries grammar, with no
-// kind letters — bare stems only, like a finalized pack.
-func dbSnapshotKey(g int) string {
-	return fmt.Sprintf("db/%d.gz", g)
-}
-
-// latestKey resolves the current tail-pack key of a series ("idx", "data",
-// "meta"): the L<tailGen> generation (see tailGen).
-func latestKey(core *DBCore, prefix string) string {
-	return genKey(prefix, tailGen(core))
-}
-
-// summaryKey resolves the idx header-summary key covering n finalized idx
-// packs.
-func summaryKey(n int) string {
-	return fmt.Sprintf("idx/h%d.gz", n)
-}
-
-// finalizedIdxKey resolves the key of finalized idx pack n.
-func finalizedIdxKey(n int) string {
-	return fmt.Sprintf("idx/%d.gz", n)
-}
-
-// idxKeyAndSize resolves the store key and PHYSICAL entry count of idx pack p:
-// finalized packs use the numeric name and are always full; the latest pack
-// uses the L<tailGen> generation name and holds the consolidated tail only —
-// entries at chron >= tailCovered live in the delta segments, not in any idx
-// pack (callers extend the parsed latest pack with them; see loadLatestIdx).
-func idxKeyAndSize(core *DBCore, p int) (string, int) {
+// idxKeyAndSize resolves the store key and PHYSICAL entry count of idx pack p.
+// The key comes from the manifest's name list like every other key; the size is
+// pure chron arithmetic: a finalized pack is always full, and the tail holds
+// the consolidated region only — entries at chron >= tailCovered live in the
+// delta segments, not in any idx pack (callers extend the parsed tail with
+// them; see loadLatestIdx).
+func idxKeyAndSize(core *DBCore, p int) (string, int, error) {
+	key, err := core.Names.key(idxSeries, p)
+	if err != nil {
+		return "", 0, err
+	}
 	if p < numFinalizedIdx(core.TotalArticles) {
-		return finalizedIdxKey(p), idxPackSize
+		return key, idxPackSize, nil
 	}
-	return latestKey(core, "idx"), tailCovered(core) - p*idxPackSize
+	return key, tailCovered(core) - p*idxPackSize, nil
 }
 
-// finalizedDataKey resolves the key of finalized data pack n.
-func finalizedDataKey(n int) string {
-	return fmt.Sprintf("data/%d.gz", n)
-}
-
-// dataKeyFor resolves a data pack key from a packID: finalized packs
-// (id < NextPackID) use the numeric filename; otherwise the current
-// latest-generation name.
-func dataKeyFor(core *DBCore, packID int) string {
-	if packID < core.NextPackID {
-		return finalizedDataKey(packID)
-	}
-	return latestKey(core, "data")
+// dataKeyFor resolves a data pack key from a packID. The idx footer's stored
+// packId IS the positional index into the data series' name list — exactly what
+// it has always been — so this is one lookup with no finalized-vs-tail branch.
+func dataKeyFor(core *DBCore, packID int) (string, error) {
+	return core.Names.key(dataSeries, packID)
 }
 
 // parseDataPack decodes a JSONL data pack (one ArticleData per line)
@@ -273,6 +223,12 @@ func liveCounts(feeds map[int]*Feed) []uint32 {
 // when the key is absent (Get with ignoreMissing). Callers that need to append
 // wrap the bytes with packFromBytes.
 func (o *DB) loadPack(ctx context.Context, key string) ([]byte, error) {
+	// An unnamed object (the store lists no tail for this series yet) is the
+	// empty-store case, not an error: a name is LISTED, so "no name" is a fact
+	// about the store rather than a missing file.
+	if key == "" {
+		return nil, nil
+	}
 	rc, err := o.Get(ctx, key, true)
 	if err != nil {
 		return nil, err
@@ -374,106 +330,6 @@ func gzipBest(key string, gz []byte) ([]byte, error) {
 	return best.Bytes(), nil
 }
 
-// latestKeep is the GC grace window: how many superseded latest-pack
-// generations stay in the store alongside the current one. A reader whose
-// db.gz is up to latestKeep fetch cycles old still resolves its own L<seq>
-// snapshot; anything older gets a clean 404 (the frontend self-heals with a
-// guarded reload). Mirrored by the frontend service worker's LATEST_KEEP.
-const latestKeep = 2
-
-// gcSweepWindow is how far below the GC cutoff each sweep reaches. Deleting
-// only the newest expired name would let names leaked by a crash between
-// Commit and GC live forever (the store interface has no List — only
-// computed names can be deleted); a small trailing window self-heals them on
-// later runs. Rm is silent on missing keys, so the extra calls are free.
-const gcSweepWindow = 4
-
-// gcSweep deletes the computed names of every generation in the trailing
-// `window` below cutoff (the newest expired generation), never touching g < 1.
-// Best-effort: callers treat errors as non-fatal.
-func (o *DB) gcSweep(ctx context.Context, cutoff, window int, what string, keys func(g int) []string) error {
-	for g := cutoff; g > cutoff-window && g >= 1; g-- {
-		for _, key := range keys(g) {
-			if err := o.Rm(ctx, key); err != nil {
-				return fmt.Errorf("gc %s %d: %w", what, g, err)
-			}
-		}
-	}
-	return nil
-}
-
-// gcMaxSweep bounds how many tail generations one GCLatest run clears, so a
-// large one-time backlog (a long-missed sweep, a big --max-deltas reduction, or
-// the first run on a store that predates the GCLatestSwept low-water) drains
-// over several runs instead of issuing thousands of sequential store deletes in
-// a single fetch cycle. It comfortably covers every normal single-run jump — a
-// consolidation advance plus one missed sweep plus a --max-deltas reset — so
-// steady state and the common recovery cases clear in one run.
-const gcMaxSweep = 64
-
-// GCLatest deletes superseded tail generations — the L<g> packs of all three
-// series AND the d<g> delta segments — keeping a grace window for readers
-// holding a stale db.gz. The cutoff is tailGen-based, NOT Seq-based: with a
-// live delta chain Seq runs ahead of the tail generation, and a Seq-based
-// cutoff would delete the CURRENT tail packs. Beyond the classic `keep` commits
-// of staleness the cutoff also backs off by 2·maxDeltas: a tab `keep` commits
-// stale can hold a tailGen up to 2·(maxDeltas+1) generations behind (each of
-// its ≤ keep missed commits may be a consolidation jumping tailGen by up to
-// maxDeltas+1), so anything above the cutoff must be kept — sufficient for
-// keep >= 1, and exactly the pre-delta cutoff at the MaxDeltas=0 kill switch.
-//
-// The sweep is a LOW-WATER drain, not a fixed trailing window: it clears
-// (GCLatestSwept, cutoff] and advances GCLatestSwept only over generations it
-// actually cleared. tailGen JUMPS at consolidation (by up to maxDeltas+1) and
-// the cutoff jumps with it (and can jump further when --max-deltas is lowered),
-// so a fixed trailing window would strand every name inside a jump larger than
-// the window — and a single missed/failed sweep (GC is warn-only, post-Commit)
-// would strand them permanently, since no later run's window would reach back
-// that far. The low-water mark closes that gap: the next advancing run resumes
-// from exactly where the last stopped, so nothing is ever permanently stranded,
-// regardless of jump size or a --max-deltas change. Per-run work is capped at
-// gcMaxSweep generations; a larger backlog drains across runs. Rm is silent on
-// missing keys, so sweeping names a generation never wrote (d<g> at a
-// consolidation g, L<g> at a delta g) costs nothing.
-func (o *DB) GCLatest(ctx context.Context, keep int) error {
-	c := &o.core
-	cutoff := tailGen(c) - keep - 1 - 2*globals.MaxDeltas
-	from := max(c.GCLatestSwept+1, 1)
-	to := min(cutoff, from+gcMaxSweep-1)
-	// Advance the low-water only over generations fully cleared, so a mid-sweep
-	// Rm error (or a to < from no-op when a raised --max-deltas dropped the
-	// cutoff below what's already swept) never marks an un-deleted name as
-	// reclaimed.
-	swept := c.GCLatestSwept
-	for g := from; g <= to; g++ {
-		// Pre-meta generations never wrote a meta/L name; a delta generation
-		// wrote no L<g> and a consolidation generation wrote no d<g>, and only
-		// consolidation generations wrote a db/<g> snapshot — Rm is silent on
-		// missing keys, so sweeping every name unconditionally costs nothing.
-		for _, key := range []string{genKey("idx", g), genKey("data", g), genKey("meta", g), deltaKey(g), dbSnapshotKey(g)} {
-			if err := o.Rm(ctx, key); err != nil {
-				c.GCLatestSwept = swept
-				return fmt.Errorf("gc latest generation %d: %w", g, err)
-			}
-		}
-		swept = g
-	}
-	c.GCLatestSwept = swept
-	return nil
-}
-
-// GCSummaries deletes superseded idx header summaries (idx/h<g>.gz) with the
-// same grace window. Unlike Seq, HdrPacks advances by the number of packs
-// finalized in a batch, so a >1 jump can strand an old summary outside every
-// future window — a harmless ~1KB-per-50k-articles leak; the reader treats a
-// missing summary by falling back to eager idx loading, so nothing
-// user-visible depends on this sweep.
-func (o *DB) GCSummaries(ctx context.Context, keep int) error {
-	return o.gcSweep(ctx, o.core.HdrPacks-keep-1, gcSweepWindow, "idx summary", func(g int) []string {
-		return []string{summaryKey(g)}
-	})
-}
-
 // numFinalizedIdx is the number of finalized idx packs for a given article
 // count. Mirrors the frontend's numFinalizedIdx (data.ts).
 func numFinalizedIdx(totalArticles int) int {
@@ -570,13 +426,12 @@ func (o *DB) readIdxHeader(ctx context.Context, key string) ([]byte, error) {
 	return append(prefix, rest...), nil
 }
 
-// saveSummary publishes a count-named summary pack: the gzip concatenation
-// of the headers of finalized packs 0..n-1, each produced by the `header`
-// callback. The crash-safety contract is the caller's: it advances its
-// coverage counter only after this save succeeds, so no reader can learn the
-// summary name before its content is durable. Shared by SyncIdxSummary
-// (idx/h<N>, variable-length header) and SyncMeta (meta/s<N>, fixed bloom
-// header).
+// saveSummary publishes a summary pack: the gzip concatenation of the headers
+// of finalized packs 0..n-1, each produced by the `header` callback. Shared by
+// SyncIdxSummary (the idx header summary, variable-length header) and SyncMeta
+// (the meta bloom summary, fixed bloom header). Coverage now rides NEXT TO the
+// name in the manifest instead of inside it (§10.3), so the caller allocates a
+// fresh stem and records {stem, covers} only once this save succeeds.
 func (o *DB) saveSummary(ctx context.Context, n int, header func(k int) ([]byte, error), sumKey string) error {
 	sum := newPack()
 	for k := range n {
@@ -591,31 +446,35 @@ func (o *DB) saveSummary(ctx context.Context, n int, header func(k int) ([]byte,
 	return o.savePack(ctx, sumKey, sum)
 }
 
-// SyncIdxSummary publishes idx/h<N>.gz — the gzip concatenation of the
-// variable-length headers of the N finalized idx packs — whenever db.gz's
-// HdrPacks lags the store: a pack finalized this run, a pre-summary store's
-// first run after upgrade, or a post-`srr gen --bump` reset. It always rebuilds from
-// scratch by re-reading each finalized pack's header, keeping one code path
-// that self-heals any prior state (the rebuild costs N small reads and runs
-// once per 50k articles). HdrPacks is set only after the save succeeds and
-// the caller's Commit publishes it — so, like L<Seq+1>, no reader can learn
-// the h<N> name before its content is durable, and a crash-retry overwrite
-// is invisible.
+// SyncIdxSummary publishes the idx header summary — the gzip concatenation of
+// the variable-length headers of the N finalized idx packs — whenever the
+// published coverage lags the store: a pack finalized this run, or a store
+// whose summary was never built. It always rebuilds from scratch by re-reading
+// each finalized pack's header, keeping one code path that self-heals any prior
+// state (the rebuild costs N small reads and runs once per 50k articles). The
+// name is recorded in the table only after the save succeeds, so the manifest
+// this cycle publishes cannot name an object that is not there (M4).
 func (o *DB) SyncIdxSummary(ctx context.Context) error {
 	c := &o.core
 	n := numFinalizedIdx(c.TotalArticles)
-	// HdrPacks > 0 with n == 0 is unreachable (HdrPacks only ever records a
-	// past numFinalizedIdx, and TotalArticles never decreases), so n == 0
-	// simply means there is nothing to publish yet.
-	if c.HdrPacks == n || n == 0 {
+	// A published coverage > 0 with n == 0 is unreachable (coverage only ever
+	// records a past numFinalizedIdx, and TotalArticles never decreases), so
+	// n == 0 simply means there is nothing to publish yet.
+	if c.hdrPacks() == n || n == 0 {
 		return nil
 	}
+	stem := c.Names.alloc(idxSeries)
+	sum := SummaryName{Series: idxSeries, Stem: stem, Covers: n}
 	if err := o.saveSummary(ctx, n, func(k int) ([]byte, error) {
-		return o.readIdxHeader(ctx, finalizedIdxKey(k))
-	}, summaryKey(n)); err != nil {
+		key, err := c.Names.key(idxSeries, k)
+		if err != nil {
+			return nil, err
+		}
+		return o.readIdxHeader(ctx, key)
+	}, sum.key()); err != nil {
 		return err
 	}
-	c.HdrPacks = n
+	c.Names.HSum = &sum
 	return nil
 }
 
@@ -691,7 +550,10 @@ func (o *DB) checkTailIntact(ctx context.Context, tc int) error {
 	if latestIdxEntryCount(tc) == 0 {
 		return nil
 	}
-	idxKey := latestKey(&o.core, "idx")
+	idxKey := o.core.Names.tailKey(idxSeries)
+	if idxKey == "" {
+		return nil
+	}
 	raw, err := o.loadPack(ctx, idxKey)
 	if err != nil {
 		slog.Warn("delta cycle: could not read tail idx to validate; skipping check", "key", idxKey, "error", err)
@@ -715,17 +577,15 @@ func (o *DB) checkTailIntact(ctx context.Context, tc int) error {
 func (o *DB) shouldConsolidate(prevTotal, newTotal int, batchBytes int64) bool {
 	c := &o.core
 	return globals.MaxDeltas <= 0 ||
-		c.NumDeltas >= globals.MaxDeltas ||
+		c.numDeltas() >= globals.MaxDeltas ||
 		c.DeltaBytes+batchBytes > int64(globals.MaxDeltaBytes)<<10 ||
 		numFinalizedMeta(newTotal) > numFinalizedMeta(prevTotal)
 }
 
-// emitDelta publishes the batch as one immutable delta segment
-// (data/d<Seq+1>.gz, fast gzip like the tail packs) and bumps the chain
-// counters. Seq advances only after the save succeeds and Commit publishes it
-// — the same "no reader can learn a name before Commit" argument as L<Seq+1>:
-// a crash leaves an orphan the retry overwrites, safe under immutable cache
-// headers because nothing may speculatively prefetch d<Seq+1>.
+// emitDelta publishes the batch as one immutable delta segment (a fresh stem in
+// the data series, fast gzip like the tail packs) and appends it to the chain.
+// The chain is recorded only after the save succeeds and the caller's Commit
+// publishes the manifest that names it.
 func (o *DB) emitDelta(ctx context.Context, lines [][]byte, n int, size int64) error {
 	c := &o.core
 	p := newPack()
@@ -734,11 +594,11 @@ func (o *DB) emitDelta(ctx context.Context, lines [][]byte, n int, size int64) e
 			return err
 		}
 	}
-	if err := o.savePack(ctx, deltaKey(c.Seq+1), p); err != nil {
+	stem := c.Names.alloc(dataSeries)
+	if err := o.savePack(ctx, fmt.Sprintf("%s/%d.gz", dataSeries, stem), p); err != nil {
 		return err
 	}
-	c.Seq++
-	c.NumDeltas++
+	c.Names.Deltas.Stems = append(c.Names.Deltas.Stems, stem)
 	c.DeltaArticles += n
 	c.DeltaBytes += size
 	return nil
@@ -770,7 +630,7 @@ func (c *DBCore) extendHead(written []ArticleData) {
 // slice is in memory — warn-only, exactly as in the fetch cycle (a failed
 // sync heals on the next one).
 func (o *DB) DrainDeltas(ctx context.Context) error {
-	if o.core.NumDeltas == 0 {
+	if o.core.numDeltas() == 0 {
 		return nil
 	}
 	if err := o.consolidateTail(ctx, nil, nil, o.core.TotalArticles); err != nil {
@@ -783,27 +643,31 @@ func (o *DB) DrainDeltas(ctx context.Context) error {
 }
 
 // loadDeltaChain loads the live delta chain once per cycle and memoizes it on
-// (Seq, NumDeltas) — see DB.deltaMemo. It enforces the same chain invariants as
-// the read-side loadDeltas (idx_read.go; still the parser inspect/art ls use),
-// but additionally captures each entry's verbatim JSONL line bytes so
-// consolidateTail can write pre-encoded data-pack bytes.
+// the chain's own identity — the segment stems are write-once, so their count
+// and their newest stem pin the content exactly, and the key changes the
+// instant emitDelta/consolidateTail mutate the chain. It enforces the same
+// accounting invariant as the read-side loadDeltas (idx_read.go; still the
+// parser inspect/art ls use), but additionally captures each entry's verbatim
+// JSONL line bytes so consolidateTail can write pre-encoded data-pack bytes.
 func (o *DB) loadDeltaChain(ctx context.Context) (*deltaChain, error) {
 	c := &o.core
-	key := [2]int{c.Seq, c.NumDeltas}
-	if o.deltaMemo != nil && o.deltaMemoKey == key {
+	stems := c.Names.Deltas.Stems
+	memoKey := [2]int{len(stems), 0}
+	if len(stems) > 0 {
+		memoKey[1] = stems[len(stems)-1]
+	}
+	if o.deltaMemo != nil && o.deltaMemoKey == memoKey {
 		return o.deltaMemo, nil
 	}
-	if c.NumDeltas < 0 || c.DeltaArticles < 0 || c.NumDeltas > c.Seq ||
-		c.DeltaArticles > c.TotalArticles || (c.NumDeltas == 0) != (c.DeltaArticles == 0) {
-		return nil, fmt.Errorf("inconsistent delta chain: nd=%d na=%d seq=%d total_art=%d",
-			c.NumDeltas, c.DeltaArticles, c.Seq, c.TotalArticles)
+	if c.DeltaArticles < 0 || c.DeltaArticles > c.TotalArticles || (len(stems) == 0) != (c.DeltaArticles == 0) {
+		return nil, fmt.Errorf("inconsistent delta chain: %d segment(s), na=%d, total_art=%d",
+			len(stems), c.DeltaArticles, c.TotalArticles)
 	}
 	chain := &deltaChain{
 		Arts:  make([]ArticleData, 0, c.DeltaArticles),
 		Lines: make([][]byte, 0, c.DeltaArticles),
 	}
-	for g := tailGen(c) + 1; g <= c.Seq; g++ {
-		key := deltaKey(g)
+	for _, key := range c.Names.deltaKeys() {
 		buf, err := o.readGz(ctx, key)
 		if err != nil {
 			return nil, fmt.Errorf("fetch %s: %w", key, err)
@@ -819,9 +683,9 @@ func (o *DB) loadDeltaChain(ctx context.Context) (*deltaChain, error) {
 		chain.Lines = append(chain.Lines, lines...)
 	}
 	if len(chain.Arts) != c.DeltaArticles {
-		return nil, fmt.Errorf("delta chain holds %d articles but db.gz na=%d", len(chain.Arts), c.DeltaArticles)
+		return nil, fmt.Errorf("delta chain holds %d articles but the store says na=%d", len(chain.Arts), c.DeltaArticles)
 	}
-	o.deltaMemo, o.deltaMemoKey = chain, key
+	o.deltaMemo, o.deltaMemoKey = chain, memoKey
 	return chain, nil
 }
 
@@ -867,7 +731,7 @@ func (o *DB) consolidateTail(ctx context.Context, batch []ArticleData, batchLine
 	entryLines := make([][]byte, 0, len(chain.Lines)+len(batchLines))
 	entryLines = append(append(entryLines, chain.Lines...), batchLines...)
 
-	idxKey := latestKey(c, "idx")
+	idxKey := c.Names.tailKey(idxSeries)
 	metaRaw, err := o.loadPack(ctx, idxKey)
 	if err != nil {
 		return err
@@ -876,7 +740,7 @@ func (o *DB) consolidateTail(ctx context.Context, batch []ArticleData, batchLine
 	if err != nil {
 		return err
 	}
-	dataRaw, err := o.loadPack(ctx, latestKey(c, "data"))
+	dataRaw, err := o.loadPack(ctx, c.Names.tailKey(dataSeries))
 	if err != nil {
 		return err
 	}
@@ -933,7 +797,12 @@ func (o *DB) consolidateTail(ctx context.Context, batch []ArticleData, batchLine
 			if err := writeIdxFooter(meta, boundaries); err != nil {
 				return err
 			}
-			if err := o.savePackFinal(ctx, finalizedIdxKey(mTotal/idxPackSize-1), meta); err != nil {
+			pos := mTotal/idxPackSize - 1
+			stem := c.Names.alloc(idxSeries)
+			if err := o.savePackFinal(ctx, fmt.Sprintf("%s/%d.gz", idxSeries, stem), meta); err != nil {
+				return err
+			}
+			if err := c.Names.putAt(idxSeries, pos, stem); err != nil {
 				return err
 			}
 			// savePackFinal resets meta; the next entry starts a fresh idx pack.
@@ -948,7 +817,12 @@ func (o *DB) consolidateTail(ctx context.Context, batch []ArticleData, batchLine
 		}
 
 		if data.Len() > 0 && data.Len() >= globals.PackSize<<10 {
-			if err := o.savePackFinal(ctx, finalizedDataKey(c.NextPackID), data); err != nil {
+			pos := c.NextPackID
+			stem := c.Names.alloc(dataSeries)
+			if err := o.savePackFinal(ctx, fmt.Sprintf("%s/%d.gz", dataSeries, stem), data); err != nil {
+				return err
+			}
+			if err := c.Names.putAt(dataSeries, pos, stem); err != nil {
 				return err
 			}
 		}
@@ -991,24 +865,31 @@ func (o *DB) consolidateTail(ctx context.Context, batch []ArticleData, batchLine
 		return err
 	}
 
-	// Write the next generation, and bump Seq only after both saves succeed
-	// — otherwise a mid-flight data-pack failure leaves the in-memory Seq
-	// ahead of db.gz, and the idx pack we just wrote becomes an orphan under
-	// the new generation name. A crash here (before Commit publishes Seq)
-	// leaves an orphan L<Seq+1> that the retry overwrites — safe even under
-	// immutable cache headers because no client can learn a generation name
-	// before Commit publishes it, so nothing has ever requested the orphan.
-	// Any future feature that speculatively prefetches L<seq+1> would break
-	// that invariant.
-	if err := o.savePack(ctx, genKey("idx", c.Seq+1), meta); err != nil {
+	// Write the new tail packs under fresh stems, and record them in the name
+	// table only after BOTH saves succeed: a mid-flight data-pack failure would
+	// otherwise leave the table naming an idx tail whose data sibling was never
+	// written. A crash anywhere here leaves unreferenced objects the GC
+	// reclaims, and changes nothing a reader can observe (§6.1).
+	idxTailPos := numFinalizedIdx(c.TotalArticles)
+	idxStem := c.Names.alloc(idxSeries)
+	dataStem := c.Names.alloc(dataSeries)
+	if err := o.savePack(ctx, fmt.Sprintf("%s/%d.gz", idxSeries, idxStem), meta); err != nil {
 		return err
 	}
-	if err := o.savePack(ctx, genKey("data", c.Seq+1), data); err != nil {
+	if err := o.savePack(ctx, fmt.Sprintf("%s/%d.gz", dataSeries, dataStem), data); err != nil {
 		return err
 	}
-	o.prevTailGen = tailGen(c)
+	if err := c.Names.setTail(idxSeries, idxTailPos, idxStem); err != nil {
+		return err
+	}
+	if err := c.Names.setTail(dataSeries, c.NextPackID, dataStem); err != nil {
+		return err
+	}
+	// The meta tail this consolidation supersedes — SyncMeta's read-back
+	// candidate, now a name rather than a generation number.
+	o.prevMetaTail = c.Names.tailKey(metaSeries)
 	o.consolidated = entries
-	c.Seq++
-	c.NumDeltas, c.DeltaArticles, c.DeltaBytes = 0, 0, 0
+	c.Names.Deltas.Stems = nil
+	c.DeltaArticles, c.DeltaBytes = 0, 0
 	return nil
 }

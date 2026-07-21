@@ -450,7 +450,7 @@ func TestGenBigStore(t *testing.T) {
 		produced = batchEnd
 		batchCount++
 		if batchCount%5 == 0 || produced == endTotal {
-			t.Logf("… %d/%d articles, %d feeds, seq=%d", produced, endTotal, feedCount, db.core.Seq)
+			t.Logf("… %d/%d articles, %d feeds, m=%d", produced, endTotal, feedCount, db.core.ManifestNum)
 		}
 	}
 
@@ -476,11 +476,11 @@ func TestGenBigStore(t *testing.T) {
 	t.Logf("  store dir        : %s", out)
 	t.Logf("  total_art        : %d (added %d this run)", c.TotalArticles, c.TotalArticles-startTotal)
 	t.Logf("  feeds            : %d (%d with articles; busiest has %d, avg %d)", totalFeeds, activeFeeds, maxFeedArt, c.TotalArticles/max(activeFeeds, 1))
-	t.Logf("  seq (latest gen) : %d", c.Seq)
-	t.Logf("  finalized idx    : %d + latest idx/L%d.gz", numFinalizedIdx, c.Seq)
+	t.Logf("  manifest         : %d", c.ManifestNum)
+	t.Logf("  finalized idx    : %d + tail %s", numFinalizedIdx, tailK(c, idxSeries))
 	t.Logf("  finalized data   : next_pid=%d, pack_off=%d", c.NextPackID, c.PackOffset)
-	t.Logf("  finalized meta   : %d shards + latest meta/L%d.gz (mp=%d mt=%d)", numFinalizedMeta, c.Seq, c.MetaPacks, c.MetaTail)
-	t.Logf("  idx summary hdrs : %d", c.HdrPacks)
+	t.Logf("  finalized meta   : %d shards + tail %s (mp=%d mt=%d)", numFinalizedMeta, tailK(c, metaSeries), c.metaPacks(), c.MetaTail)
+	t.Logf("  idx summary hdrs : %d", c.hdrPacks())
 
 	if err := db.Close(ctx); err != nil {
 		t.Fatalf("Close: %v", err)

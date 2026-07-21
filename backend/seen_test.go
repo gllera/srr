@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -339,19 +338,18 @@ func TestSyncSeenPersistsAcrossReopen(t *testing.T) {
 }
 
 // SyncSeen skips the store write when the pool is clean (write-if-dirty): a
-// freshly-loaded, unmutated pool leaves neither ping/pong slot (nor the legacy
-// name, never written by SyncSeen at all now) behind. Adapted for ping/pong:
-// the write target is a flag-named slot, not the single legacy filename, so the
-// meaningful assertion is that NEITHER seen.0.gz NOR seen.1.gz appears.
+// freshly-loaded, unmutated pool names — and writes — nothing.
 func TestSyncSeenSkipsWhenClean(t *testing.T) {
-	db, _, dir := setupTestDB(t)
+	db, c, dir := setupTestDB(t)
 	if err := db.SyncSeen(ctx); err != nil {
 		t.Fatalf("SyncSeen: %v", err)
 	}
-	for _, key := range []string{seenSlotKey(false), seenSlotKey(true), seenLegacyKey} {
-		if _, err := os.Stat(filepath.Join(dir, key)); !os.IsNotExist(err) {
-			t.Errorf("clean pool wrote %s (err=%v), want skipped", key, err)
-		}
+	if c.Names.Seen != nil {
+		t.Errorf("clean pool named a sidecar object: %s", c.Names.Seen.key())
+	}
+	entries, _ := os.ReadDir(filepath.Join(dir, "seen"))
+	if len(entries) != 0 {
+		t.Errorf("clean pool wrote %d seen object(s), want 0", len(entries))
 	}
 }
 
@@ -418,25 +416,6 @@ func TestNewDBCorruptSeenFallsBackToEmpty(t *testing.T) {
 	}
 }
 
-// writeLegacySeen plants a valid pre-ping-pong single seen.gz in the store,
-// carrying one stamped entry (feed 1, guid 0xabc123).
-func writeLegacySeen(t *testing.T, dir string) {
-	t.Helper()
-	legacy := newSeenPool()
-	legacy.stamp(1, 0xabc123, 100)
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	if _, err := gz.Write(legacy.marshal()); err != nil {
-		t.Fatal(err)
-	}
-	if err := gz.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, seenLegacyKey), buf.Bytes(), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // rmFailBackend fails Rm for one key, leaving every other operation intact.
 type rmFailBackend struct {
 	store.Backend
@@ -450,110 +429,6 @@ func (f *rmFailBackend) Rm(ctx context.Context, key string) error {
 	return f.Backend.Rm(ctx, key)
 }
 
-// A failed legacy reap must stay PENDING, and must actually retry on a later
-// cycle — including an IDLE one, which is the common case: SyncSeen returns
-// early when the pool is not dirty, so a retry placed after that gate would
-// never run at all.
-//
-// Scope, deliberately pinned by the second half of this test: the retry is
-// per-process. loadSeen takes its legacy branch only when neither slot is
-// readable, which cannot happen once a slot is durable, so a re-opened DB does
-// NOT carry the pending reap. See reapLegacySeen's comment — the residue is
-// accepted, not eventually cleaned.
-func TestSyncSeenLegacyReapRetriesAfterFailure(t *testing.T) {
-	_, _, dir := setupTestDB(t)
-	writeLegacySeen(t, dir)
-
-	db, err := NewDB(ctx, false)
-	if err != nil {
-		t.Fatalf("NewDB: %v", err)
-	}
-	defer db.Close(ctx)
-
-	// First cycle: the slot write succeeds, the legacy Rm fails (warn-only).
-	real := db.Backend
-	db.Backend = &rmFailBackend{Backend: real, key: seenLegacyKey}
-	if err := db.commitState(ctx); err != nil {
-		t.Fatalf("commitState with failing Rm: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, seenLegacyKey)); err != nil {
-		t.Fatalf("legacy object gone despite the injected Rm failure: %v", err)
-	}
-	if !db.seen.fromLegacy {
-		t.Fatal("fromLegacy cleared after a FAILED reap: the object is stranded forever")
-	}
-
-	// The next cycle retries — and it is an IDLE one (dirty is already false
-	// after the successful slot write above), which is exactly the case a retry
-	// placed after SyncSeen's not-dirty gate would miss.
-	db.Backend = real
-	if db.seen.dirty {
-		t.Fatal("precondition: pool should be clean after the slot write")
-	}
-	if err := db.commitState(ctx); err != nil {
-		t.Fatalf("commitState retry: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, seenLegacyKey)); !os.IsNotExist(err) {
-		t.Errorf("legacy %s still present after the idle-cycle retry (err=%v), want reaped", seenLegacyKey, err)
-	}
-	if db.seen.fromLegacy {
-		t.Error("fromLegacy still set after a successful reap")
-	}
-
-	// Scope pin: a re-opened DB does not carry a pending reap, because
-	// loadSeen now finds a durable slot and never revisits the legacy branch.
-	writeLegacySeen(t, dir) // stand in for a reap that failed and outlived the process
-	db2, err := NewDB(ctx, false)
-	if err != nil {
-		t.Fatalf("NewDB: %v", err)
-	}
-	defer db2.Close(ctx)
-	if db2.seen.fromLegacy {
-		t.Error("a re-opened DB claims a pending reap; reapLegacySeen's documented scope is wrong")
-	}
-}
-
-// A store carrying only the pre-ping-pong single seen.gz completes its
-// migration on the first committed cycle: loadSeen bridges the legacy pool in
-// (marked dirty, so even an all-304 idle cycle writes), SyncSeen makes it
-// durable in a slot, and the superseded legacy object is reaped — instead of
-// being stranded in the store forever. A crash at any point either leaves the
-// legacy file (the retry re-migrates) or the slot (migration done); the pool
-// is never lost.
-func TestSyncSeenMigratesAndReapsLegacy(t *testing.T) {
-	_, _, dir := setupTestDB(t)
-	writeLegacySeen(t, dir)
-
-	db, err := NewDB(ctx, false)
-	if err != nil {
-		t.Fatalf("NewDB: %v", err)
-	}
-	defer db.Close(ctx)
-	if !db.seen.has(1, 0xabc123) {
-		t.Fatal("legacy pool not bridged in on load")
-	}
-	if err := db.commitState(ctx); err != nil { // SyncSeen (slot + reap) + Commit
-		t.Fatalf("commitState: %v", err)
-	}
-
-	if _, err := os.Stat(filepath.Join(dir, seenLegacyKey)); !os.IsNotExist(err) {
-		t.Errorf("legacy %s still present after migration (err=%v), want reaped", seenLegacyKey, err)
-	}
-	slot := filepath.Join(dir, seenSlotKey(db.core.SeenFlag))
-	if _, err := os.Stat(slot); err != nil {
-		t.Errorf("migrated slot %s missing: %v", slot, err)
-	}
-
-	db2, err := NewDB(ctx, false)
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
-	defer db2.Close(ctx)
-	if !db2.seen.has(1, 0xabc123) {
-		t.Error("migrated pool lost the stamp after the legacy reap")
-	}
-}
-
 // titleHash folds the title (foldSearchText) before hashing, so titles that
 // fold to the same tokens collide (the intended title-dedup behavior) while
 // distinct titles do not.
@@ -563,17 +438,6 @@ func TestTitleHashFolds(t *testing.T) {
 	}
 	if titleHash("Hello World") == titleHash("Goodbye World") {
 		t.Error("titleHash collided two distinct titles")
-	}
-}
-
-// seenSlotKey must map false/true to the fixed ping/pong slot names the plan
-// commits to (seen.0.gz / seen.1.gz) — db.gz's SeenFlag names the active one.
-func TestSeenSlotKey(t *testing.T) {
-	if got := seenSlotKey(false); got != "seen.0.gz" {
-		t.Fatalf("seenSlotKey(false) = %q, want seen.0.gz", got)
-	}
-	if got := seenSlotKey(true); got != "seen.1.gz" {
-		t.Fatalf("seenSlotKey(true) = %q, want seen.1.gz", got)
 	}
 }
 
@@ -645,84 +509,70 @@ func TestSnapshotHTTPKeepsValidatorlessBG(t *testing.T) {
 	}
 }
 
-// A dirty SyncSeen writes the INACTIVE slot and flips SeenFlag; a clean (idle)
-// SyncSeen writes nothing and does not flip.
-func TestSyncSeenPingPongFlipsFlag(t *testing.T) {
-	db, _, dir := setupTestDB(t)
-	if db.core.SeenFlag {
-		t.Fatal("fresh store should start flag=false")
+// A dirty SyncSeen publishes the pool under a FRESH stem and names it; a clean
+// (idle) one writes nothing and leaves the name alone. That is the whole
+// atomicity story now — the batch and the dedup state that produced it become
+// durable together because ONE root flip publishes the manifest naming both.
+func TestSyncSeenPublishesFreshStem(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	if c.Names.Seen != nil {
+		t.Fatal("fresh store already names a seen sidecar")
 	}
 	db.seen.stamp(0, 1, 10) // dirty
 	if err := db.SyncSeen(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if !db.core.SeenFlag {
-		t.Fatal("dirty write must flip flag to true")
+	first := c.Names.Seen
+	if first == nil {
+		t.Fatal("a dirty pool published no sidecar")
 	}
-	if _, err := os.Stat(filepath.Join(dir, "seen.1.gz")); err != nil {
-		t.Fatalf("inactive slot seen.1.gz not written: %v", err)
+	if _, err := os.Stat(filepath.Join(dir, first.key())); err != nil {
+		t.Fatalf("named sidecar %s is missing: %v", first.key(), err)
 	}
+
 	if err := db.SyncSeen(ctx); err != nil { // clean now
 		t.Fatal(err)
 	}
-	if !db.core.SeenFlag {
-		t.Fatal("clean sync must NOT flip flag")
+	if c.Names.Seen.key() != first.key() {
+		t.Errorf("an idle SyncSeen renamed the sidecar: %s -> %s", first.key(), c.Names.Seen.key())
+	}
+
+	db.seen.stamp(0, 2, 11) // dirty again
+	if err := db.SyncSeen(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if c.Names.Seen.key() == first.key() {
+		t.Error("a second dirty cycle reused the stem — names are write-once")
 	}
 }
 
-// A corrupt ACTIVE slot falls back to the sibling slot (previous generation),
-// recovering a usable pool instead of degrading to empty.
-func TestLoadSeenSiblingFallbackOnCorruptActive(t *testing.T) {
-	db, _, dir := setupTestDB(t)
-	db.seen.stamp(0, 0xAA, 5)
-	if err := db.SyncSeen(ctx); err != nil { // writes seen.1, flag→true
-		t.Fatal(err)
-	}
-	db.seen.stamp(0, 0xBB, 6)
-	if err := db.SyncSeen(ctx); err != nil { // writes seen.0, flag→false (active=seen.0)
-		t.Fatal(err)
-	}
-	// Corrupt the ACTIVE slot (seen.0); sibling seen.1 still holds {0xAA}.
-	if err := os.WriteFile(filepath.Join(dir, seenSlotKey(db.core.SeenFlag)), []byte("garbage"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	got := db.loadSeen(ctx)
-	if !got.has(0, 0xAA) {
-		t.Fatal("expected sibling-slot fallback to recover the prior pool, got empty/other")
-	}
-	// Pin that it read the SIBLING (seen.1, the older generation holding only
-	// {0xAA}), not some other path: 0xBB lives only in the corrupt active slot.
-	if got.has(0, 0xBB) {
-		t.Fatal("recovered 0xBB — read the corrupt active slot, not the sibling")
-	}
-}
-
-// Crash consistency: SyncSeen writes the inactive slot + flips the in-memory flag,
-// but until Commit persists that flag, a reopen must read the still-committed slot
-// — the uncommitted slot's content must not be visible.
-func TestSeenInactiveSlotIgnoredWithoutCommit(t *testing.T) {
+// A crash between publishing the sidecar and flipping the root leaves the new
+// object unreferenced: a reopen reads the one the COMMITTED root's manifest
+// names, and the orphan is invisible.
+func TestSeenUncommittedObjectIgnored(t *testing.T) {
 	db, _, _ := setupTestDB(t)
 	db.seen.stamp(0, 0x01, 3)
-	if err := db.SyncSeen(ctx); err != nil { // seen.1 written, flag→true (in mem)
+	if err := db.SyncSeen(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Commit(ctx); err != nil { // db.gz persists flag=true
+	if err := db.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
 	db.seen.stamp(0, 0x02, 4)
-	if err := db.SyncSeen(ctx); err != nil { // seen.0 written, flag→false in mem, NOT committed
+	if err := db.SyncSeen(ctx); err != nil { // published, but never committed
 		t.Fatal(err)
 	}
-	db2, err := NewDB(ctx, false) // reopen: reads committed db.gz (flag=true → seen.1)
+
+	db2, err := NewDB(ctx, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db2.Close(ctx)
 	if !db2.seen.has(0, 0x01) {
-		t.Fatal("committed slot content lost")
+		t.Fatal("committed sidecar content lost")
 	}
 	if db2.seen.has(0, 0x02) {
-		t.Fatal("uncommitted slot content must not be visible")
+		t.Fatal("uncommitted sidecar content must not be visible")
 	}
 }
 

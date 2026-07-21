@@ -76,9 +76,44 @@ async function gzip(input: ArrayBuffer | string): Promise<Uint8Array> {
 // grammar only). Tests that exercise asset enumeration pass their own content.
 const DATA_NOASSET = '{"f":0,"a":1,"c":"plain text, no assets here"}\n'
 
+// manifestFor turns the store description below into the `names` table the
+// writer publishes. Stems are opaque, so these tests pick ones that coincide
+// with each object's POSITION — the tail of each series therefore lands at
+// <series>/<finalized count>.gz — plus two out-of-band stems for the summaries.
+// Nothing under test depends on that choice; it just keeps the fixtures legible.
+const HSUM_STEM = 900
+const SSUM_STEM = 901
+function manifestFor(db: Partial<IDB>) {
+   const total = db.total_art ?? 0
+   const tc = total - (db.na ?? 0)
+   const nfIdx = total > 0 ? Math.floor((total - 1) / IDX_PACK_SIZE) : 0
+   const mp = db.mp ?? 0
+   const nextPid = db.next_pid ?? 0
+   const run = (count: number) => (count > 0 ? [[0, count]] : [])
+   const names: Record<string, unknown> = {
+      idx: { r: run(nfIdx + (tc > 0 ? 1 : 0)), ...(tc > 0 ? { l: nfIdx } : {}) },
+      data: { b: 1, r: nextPid > 0 ? [[1, nextPid - 1 + (tc > 0 ? 1 : 0)]] : [], ...(tc > 0 ? { l: nextPid } : {}) },
+      meta: { r: run(mp + (tc > 0 ? 1 : 0)), ...(tc > 0 ? { l: mp } : {}) },
+   }
+   if (db.hdrs) names.hsum = { s: "idx", stem: HSUM_STEM, covers: db.hdrs }
+   if (mp) names.ssum = { s: "meta", stem: SSUM_STEM, covers: mp }
+   return {
+      v: 2,
+      m: 1,
+      fetched_at: 1,
+      total_art: total,
+      mt: db.mt,
+      na: db.na,
+      pack_off: db.pack_off ?? 0,
+      names,
+      feeds: db.feeds ?? {},
+   }
+}
+
 async function mount(db: Partial<IDB>, packs: Record<string, ArrayBuffer | string> = {}) {
    const files = new Map<string, Uint8Array>()
-   files.set("/db.gz", await gzip(JSON.stringify(db)))
+   files.set("/db.gz", await gzip(JSON.stringify({ v: 2, m: 1, t: 1 })))
+   files.set("/manifest/1.gz", await gzip(JSON.stringify(manifestFor(db))))
    for (const [path, buf] of Object.entries(packs)) files.set("/" + path, await gzip(buf))
    global.fetch = vi.fn(async (input: URL | string) => {
       const url = input instanceof URL ? input : new URL(String(input))
@@ -92,8 +127,9 @@ async function mount(db: Partial<IDB>, packs: Record<string, ArrayBuffer | strin
 }
 
 // Validates that all returned names pass the SW's parsePackName grammar.
-const PACK_KINDS = [...new Set(Object.values(PACK_SERIES_KINDS).join(""))].join("") // "Lhs"
-const RE_PACK = new RegExp(`/packs/(${Object.keys(PACK_SERIES_KINDS).join("|")})/([${PACK_KINDS}]?)(\\d+)\\.gz$`)
+const PACK_KINDS = [...new Set(Object.values(PACK_SERIES_KINDS).join(""))].join("")
+const KIND_CLASS = PACK_KINDS ? `[${PACK_KINDS}]?` : ""
+const RE_PACK = new RegExp(`/packs/(${Object.keys(PACK_SERIES_KINDS).join("|")})/(${KIND_CLASS})(\\d+)\\.gz$`)
 function checkName(name: string): boolean {
    // Simulate the SW's parsePackName: prefix with "/packs/" for RE_PACK test
    const path = `/packs/${name}`
@@ -133,7 +169,7 @@ describe("packNamesForFilter", () => {
          } as unknown as IDB["feeds"],
       }
       const latestIdx = packBuf([{ feedId: 0 }, { feedId: 0 }, { feedId: 0 }], 1, 0)
-      const data = await mount(db, { "idx/L1.gz": latestIdx, "data/L1.gz": DATA_NOASSET })
+      const data = await mount(db, { "idx/0.gz": latestIdx, "data/1.gz": DATA_NOASSET })
 
       // all feeds = empty Map means [ALL]
       const names = await data.packNamesForFilter(new Map())
@@ -143,10 +179,10 @@ describe("packNamesForFilter", () => {
          expect(checkName(n)).toBe(true)
       }
       // Latest idx and data should be included
-      expect(names).toContain("idx/L1.gz")
-      expect(names).toContain("data/L1.gz")
+      expect(names).toContain("idx/0.gz")
+      expect(names).toContain("data/1.gz")
       // Latest meta should be included
-      expect(names).toContain("meta/L1.gz")
+      expect(names).toContain("meta/0.gz")
    })
 
    it("[ALL] with finalized packs: returns all finalized names + latest", async () => {
@@ -171,10 +207,10 @@ describe("packNamesForFilter", () => {
       const summary = new ArrayBuffer(IDX_HEADER_PREFIX)
       const latestIdx = packBuf([{ feedId: 0 }], 2, 0)
       const data = await mount(db, {
-         "idx/h1.gz": summary,
-         "idx/L1.gz": latestIdx,
+         [`idx/${HSUM_STEM}.gz`]: summary,
+         "idx/1.gz": latestIdx,
          "data/1.gz": DATA_NOASSET,
-         "data/L1.gz": DATA_NOASSET,
+         "data/2.gz": DATA_NOASSET,
       })
 
       const names = await data.packNamesForFilter(new Map())
@@ -193,10 +229,10 @@ describe("packNamesForFilter", () => {
       for (let i = 0; i < nMetaFinalized; i++) {
          expect(names).toContain(`meta/${i}.gz`)
       }
-      // Should include latest packs
-      expect(names).toContain("idx/L1.gz")
-      expect(names).toContain("data/L1.gz")
-      expect(names).toContain("meta/L1.gz")
+      // Should include the tail packs
+      expect(names).toContain("idx/1.gz")
+      expect(names).toContain("data/2.gz")
+      expect(names).toContain(`meta/${nMetaFinalized}.gz`)
    })
 
    it("packNamesForFilter enumerates finalized packs for a single-feed filter", async () => {
@@ -258,12 +294,12 @@ describe("packNamesForFilter", () => {
       const dataL = '{"f":5,"a":1}\n' // no content field → skipped by the asset pass
 
       const data = await mount(db, {
-         "idx/h2.gz": summary,
+         [`idx/${HSUM_STEM}.gz`]: summary,
          "idx/1.gz": idx1,
-         "idx/L1.gz": latestIdx,
+         "idx/2.gz": latestIdx,
          "data/2.gz": data2,
          "data/3.gz": data3,
-         "data/L1.gz": dataL,
+         "data/4.gz": dataL,
       })
 
       const names = await data.packNamesForFilter(new Map([[5, 0]]))
@@ -281,12 +317,12 @@ describe("packNamesForFilter", () => {
       expect(names).toContain("data/3.gz")
       expect(names).toContain("meta/10.gz") // chron 50000
       expect(names).toContain("meta/16.gz") // chron 80000
-      // Latest-generation packs + the boot/search summaries.
-      expect(names).toContain("idx/L1.gz")
-      expect(names).toContain("data/L1.gz")
-      expect(names).toContain("meta/L1.gz")
-      expect(names).toContain("idx/h2.gz")
-      expect(names).toContain(`meta/s${nfMeta}.gz`)
+      // Tail packs + the boot/search summaries.
+      expect(names).toContain("idx/2.gz")
+      expect(names).toContain("data/4.gz")
+      expect(names).toContain(`meta/${nfMeta}.gz`)
+      expect(names).toContain(`idx/${HSUM_STEM}.gz`)
+      expect(names).toContain(`meta/${SSUM_STEM}.gz`)
       // The asset-bearing article's key is enumerated; the c:"" articles add none.
       expect(names.filter((n) => n.startsWith("assets/"))).toEqual([asset])
    })
@@ -308,7 +344,7 @@ describe("packNamesForFilter", () => {
          } as unknown as IDB["feeds"],
       }
       const latestIdx = packBuf([{ feedId: 0 }, { feedId: 1 }, { feedId: 0 }], 1, 0)
-      const data = await mount(db, { "idx/L1.gz": latestIdx, "data/L1.gz": DATA_NOASSET })
+      const data = await mount(db, { "idx/0.gz": latestIdx, "data/1.gz": DATA_NOASSET })
 
       // Filter for feed 0 only
       const feedsMap = new Map([[0, 0]])
@@ -318,12 +354,12 @@ describe("packNamesForFilter", () => {
       for (const n of names) {
          expect(checkName(n)).toBe(true)
       }
-      // Should include the latest idx (since feed 0 is there)
-      expect(names).toContain("idx/L1.gz")
+      // Should include the tail idx (since feed 0 is there)
+      expect(names).toContain("idx/0.gz")
       // Should include the data pack that holds feed 0's articles
-      expect(names).toContain("data/L1.gz")
+      expect(names).toContain("data/1.gz")
       // Should include meta for those chronIdxs
-      expect(names).toContain("meta/L1.gz")
+      expect(names).toContain("meta/0.gz")
    })
 
    it("no includeLatest flag: still includes latest pack by default", async () => {
@@ -339,14 +375,14 @@ describe("packNamesForFilter", () => {
          } as unknown as IDB["feeds"],
       }
       const latestIdx = packBuf([{ feedId: 0 }, { feedId: 0 }], 1, 0)
-      const data = await mount(db, { "idx/L2.gz": latestIdx, "data/L2.gz": DATA_NOASSET })
+      const data = await mount(db, { "idx/0.gz": latestIdx, "data/1.gz": DATA_NOASSET })
 
       const names = await data.packNamesForFilter(new Map())
       for (const n of names) {
          expect(checkName(n)).toBe(true)
       }
-      expect(names).toContain("idx/L2.gz")
-      expect(names).toContain("data/L2.gz")
+      expect(names).toContain("idx/0.gz")
+      expect(names).toContain("data/1.gz")
    })
 
    it("includes self-hosted assets/ keys referenced by the pinned data packs", async () => {
@@ -368,13 +404,13 @@ describe("packNamesForFilter", () => {
       const withAsset =
          '{"f":0,"a":1,"c":"<p>see <img src=\\"assets/ab/0123456789abcdef.webp\\"> and ' +
          '<a href=\\"assets/cd/fedcba9876543210.pdf\\">doc</a></p>"}\n'
-      const data = await mount(db, { "idx/L1.gz": latestIdx, "data/L1.gz": withAsset })
+      const data = await mount(db, { "idx/0.gz": latestIdx, "data/1.gz": withAsset })
 
       const names = await data.packNamesForFilter(new Map())
       expect(names).toContain("assets/ab/0123456789abcdef.webp")
       expect(names).toContain("assets/cd/fedcba9876543210.pdf")
       // The pack names themselves still pass the SW grammar; assets are validated
       // separately (RE_ASSET) on the SW side.
-      expect(names).toContain("data/L1.gz")
+      expect(names).toContain("data/1.gz")
    })
 })

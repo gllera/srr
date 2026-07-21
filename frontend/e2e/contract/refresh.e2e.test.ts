@@ -2,7 +2,7 @@ import { renameSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
-import { feedServer, inspectValidate, makeStore, readDb, srr, type FeedServer } from "../harness"
+import { feedServer, inspectValidate, makeStore, srr, storeNames, type FeedServer } from "../harness"
 import { nItems, rssFeed } from "../fixtures"
 import { mountReader } from "./mount"
 
@@ -47,12 +47,13 @@ describe("contract: in-place refresh across a fetch cycle", () => {
       expect(reader.data.db.total_art).toBe(3)
    })
 
-   it("adopts a new fetch cycle in place: totals, seq, and new-article navigation", async () => {
+   it("adopts a new fetch cycle in place: totals, generation, and new-article navigation", async () => {
+      const before = reader.data.db.m ?? 0
       feeds.set("/a.xml", rssFeed("Alpha", all))
       await srr(store, "art", "fetch")
       expect(await reader.data.refresh()).toBe("updated")
       expect(reader.data.db.total_art).toBe(all.length)
-      expect(reader.data.db.seq).toBe(2)
+      expect(reader.data.db.m ?? 0).toBeGreaterThan(before)
       // The SAME instance reads the new articles (fresh latest pack, cleared caches).
       for (let i = 0; i < all.length; i++) expect((await reader.data.loadArticle(i)).t).toBe(all[i].title)
       // countAll over the full store reflects the growth without a remount.
@@ -69,12 +70,6 @@ describe("contract: in-place refresh across a fetch cycle", () => {
       expect(await reader.data.refresh()).toBe("unchanged")
    })
 
-   it("adopts a gen bump (in-place rebuild signal) through the same path", async () => {
-      await srr(store, "gen", "--bump")
-      expect(await reader.data.refresh()).toBe("updated")
-      expect((await reader.data.loadArticle(4)).t).toBe(all[4].title) // still readable
-   })
-
    it("a failed apply restores the previous snapshot and stays retryable", async () => {
       // Publish a 6th article. nItems is deterministic/seeded by (prefix, index),
       // so items 0..4 of this call are byte-identical to `all` — only index 5 is new.
@@ -82,15 +77,15 @@ describe("contract: in-place refresh across a fetch cycle", () => {
       feeds.set("/a.xml", rssFeed("Alpha", extra))
       await srr(store, "art", "fetch")
 
-      // Read the real new generation off disk rather than assuming a seq value —
-      // this cycle bumps seq again (the prior "gen --bump" test did not).
-      const newDb = readDb<{ seq: number }>(store)
-      const idxPath = join(store, "idx", `L${newDb.seq}.gz`)
+      // Take the tail idx pack the NEW generation names away, so applyDb's
+      // fetch of it 404s. The name is listed, so read it from the manifest.
+      const names = storeNames(store)
+      const idxPath = join(store, names.idx.keys[names.idx.tail])
       const idxBak = `${idxPath}.bak`
       renameSync(idxPath, idxBak)
 
-      // db.gz has already advanced (fetched_at/total_art/seq all moved) by the time
-      // applyDb awaits the latest idx pack fetch, which 404s on the renamed-away file.
+      // The root has already advanced by the time applyDb awaits the tail idx
+      // pack fetch, which 404s on the renamed-away file.
       await expect(reader.data.refresh()).rejects.toThrow()
 
       // The reader must still be coherent on the OLD snapshot — not half-swapped

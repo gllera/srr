@@ -338,7 +338,11 @@ func (r *packReader) at(packID, packOffset int) (ArticleData, bool, error) {
 	}
 	articles, cached := r.cache[packID]
 	if !cached {
-		data, err := r.db.readGz(r.ctx, dataKeyFor(&r.db.core, packID))
+		key, err := dataKeyFor(&r.db.core, packID)
+		if err != nil {
+			return ArticleData{}, false, err
+		}
+		data, err := r.db.readGz(r.ctx, key)
 		if err != nil {
 			return ArticleData{}, false, err
 		}

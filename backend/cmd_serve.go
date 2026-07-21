@@ -307,7 +307,6 @@ func registerAPI(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/recipes/{name}", deleteRecipe)
 	mux.HandleFunc("GET /api/preview", handlePreview)
 	mux.HandleFunc("GET /api/resolve", handleResolve)
-	mux.HandleFunc("POST /api/gen/bump", bumpGen)
 	mux.HandleFunc("PUT /api/dedup", handleDedup)
 	mux.HandleFunc("GET /api/export", handleExport)
 	mux.HandleFunc("POST /api/import", handleImport)

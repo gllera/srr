@@ -294,23 +294,20 @@ func TestCacheControlForKey(t *testing.T) {
 		{"idx/12.gz", cacheImmutable},
 		{"data/1.gz", cacheImmutable},
 		{"data/250.gz", cacheImmutable},
-		{"idx/L1.gz", cacheImmutable},
-		{"idx/L0.gz", cacheImmutable},
-		{"data/L7.gz", cacheImmutable},
 		{"meta/0.gz", cacheImmutable},
-		{"meta/L3.gz", cacheImmutable},
-		{"idx/h2.gz", cacheImmutable},
-		{"meta/s4.gz", cacheImmutable},
+		{"seen/441.gz", cacheImmutable},
 		{"assets/ab/0123456789abcdef.jpg", cacheImmutable},
+		// Every stem is now an OPAQUE digit run: the kind letters were retired
+		// with the derived names, so an L/h/s/d form is not a name any series
+		// can produce and must not be stamped immutable.
+		{"idx/L1.gz", ""},
+		{"data/L7.gz", ""},
+		{"meta/s4.gz", ""},
+		{"idx/h2.gz", ""},
+		{"data/d7.gz", ""},
 		{"idx/L.gz", ""},
 		{"data/Lx7.gz", ""},
-		{"data/LL3.gz", ""},
-		{"data/h3.gz", ""},
-		{"idx/s3.gz", ""},
-		{"meta/h3.gz", ""},
 		{"search/0.gz", ""},
-		{"search/L3.gz", ""},
-		{"search/s4.gz", ""},
 		{"L1.gz", ""},
 		{"idx/true.gz", ""},
 		{"data/false.gz", ""},
@@ -323,21 +320,14 @@ func TestCacheControlForKey(t *testing.T) {
 		{"out/nested/feed.rss", cacheRevalidate},
 		// out/ must NOT match packKeyRe (not immutable).
 		{"out/0.gz", cacheRevalidate},
-		// The seen.gz dedup sidecar is a third mutable class, rewritten every
-		// non-idle fetch cycle — revalidate if a CDN ever fronts it. SyncSeen
-		// writes the two ping/pong slots; the bare name is the legacy fallback.
-		{"seen.0.gz", cacheRevalidate},
-		{"seen.1.gz", cacheRevalidate},
-		{"seen.gz", cacheRevalidate},
-		// db/<tailGen>.gz — the write-once db.gz snapshots (DB.SnapshotDB). Bare
-		// stems only: the series carries no kind letters, so an L/h/s/d form is
-		// not a name it can produce and must not be stamped immutable.
-		{"db/0.gz", cacheImmutable},
-		{"db/12.gz", cacheImmutable},
-		{"db/L3.gz", ""},
-		{"db/h2.gz", ""},
-		{"db/d1.gz", ""},
-		// The live db.gz is NOT in the db/ series — it stays mutable.
+		// The pre-cutover seen ping/pong slots are retired: the dedup sidecar
+		// is a manifest-named immutable object in its own series now.
+		{"seen.0.gz", ""},
+		{"seen.gz", ""},
+		// The db/ snapshot series is retired — a manifest IS the snapshot.
+		{"db/0.gz", ""},
+		{"db/12.gz", ""},
+		// The live db.gz stays mutable.
 		{"db.gz", cacheRevalidate},
 		// manifest/<m>.gz — the immutable generation manifests every Commit
 		// publishes (docs/MANIFEST-SPEC.md §4.2). Bare stems only, like db/.
@@ -397,22 +387,16 @@ func TestCacheControlForKeyFrontend(t *testing.T) {
 func TestContentTypeForKey(t *testing.T) {
 	cases := []struct{ key, want string }{
 		{"db.gz", contentTypeGzip},
-		{"seen.0.gz", contentTypeGzip}, // ping/pong dedup slot — one of SRR's own gzip objects
-		{"seen.1.gz", contentTypeGzip},
-		{"seen.gz", contentTypeGzip}, // legacy fallback name
+		{"seen/441.gz", contentTypeGzip}, // the dedup sidecar — one of SRR's own gzip objects
 		{"idx/0.gz", contentTypeGzip},
-		{"idx/L1.gz", contentTypeGzip},
-		{"idx/h2.gz", contentTypeGzip},
 		{"data/250.gz", contentTypeGzip},
-		{"data/L7.gz", contentTypeGzip},
 		{"meta/0.gz", contentTypeGzip},
-		{"meta/L3.gz", contentTypeGzip},
-		{"meta/s4.gz", contentTypeGzip},
 		{"manifest/1743.gz", contentTypeGzip},
 		{"config.gz", contentTypeGzip},
-		// Not pack names: kind letter owned by another series / malformed stems.
-		{"data/h3.gz", ""},
-		{"idx/s3.gz", ""},
+		// Not object names: the retired kind letters / malformed stems.
+		{"idx/L1.gz", ""},
+		{"idx/h2.gz", ""},
+		{"meta/s4.gz", ""},
 		{"idx/L.gz", ""},
 		{"L1.gz", ""},
 		{"idx/sub/3.gz", ""},

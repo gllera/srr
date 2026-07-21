@@ -183,11 +183,11 @@ func TestHTTPPutPackContentType(t *testing.T) {
 	f := newHTTPFixture(t)
 	b := openHTTPStore(t, f)
 
-	if err := b.Put(ctx, "data/L3.gz", strings.NewReader("x"), true); err != nil {
+	if err := b.Put(ctx, "data/3.gz", strings.NewReader("x"), true); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	f.mu.Lock()
-	ct := f.contentTypes["/base/data/L3.gz"]
+	ct := f.contentTypes["/base/data/3.gz"]
 	enc := f.lastHeaders.Get("Content-Encoding")
 	f.mu.Unlock()
 	if ct != "application/gzip" {

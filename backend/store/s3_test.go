@@ -277,8 +277,8 @@ func TestS3PutCacheControlAndContentType(t *testing.T) {
 	}{
 		{"db.gz", cacheRevalidate, "application/gzip"},
 		{"idx/0.gz", cacheImmutable, "application/gzip"},
-		{"data/L3.gz", cacheImmutable, "application/gzip"},
-		{"meta/s4.gz", cacheImmutable, "application/gzip"},
+		{"data/3.gz", cacheImmutable, "application/gzip"},
+		{"seen/4.gz", cacheImmutable, "application/gzip"},
 		{"assets/ab/0123456789abcdef.jpg", cacheImmutable, "application/octet-stream"},
 		{".locked", "", "application/octet-stream"}, // no cache policy, no key-derived type
 	}

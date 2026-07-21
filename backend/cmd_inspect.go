@@ -60,8 +60,9 @@ func (o *InspectCmd) Run() error {
 	// The human preamble is noise in JSON mode: the document must be the whole
 	// output so a caller can pipe it straight into a parser.
 	if !o.JSON {
-		fmt.Fprintf(o.w(), "db: total_art=%d  next_pid=%d  seq=%d  pack_off=%d  nd=%d  na=%d\n",
-			core.TotalArticles, core.NextPackID, core.Seq, core.PackOffset, core.NumDeltas, core.DeltaArticles)
+		fmt.Fprintf(o.w(), "db: v=%d  m=%d  total_art=%d  next_pid=%d  pack_off=%d  deltas=%d  na=%d\n",
+			core.Version, core.ManifestNum, core.TotalArticles, core.NextPackID, core.PackOffset,
+			core.numDeltas(), core.DeltaArticles)
 	}
 
 	if core.TotalArticles == 0 {
@@ -139,58 +140,12 @@ func httpFetcher(base string) keyGetter {
 	}
 }
 
+// loadCore resolves the store root exactly as the writer does — one resolver
+// (root.go loadStore), so the checker can never disagree with the writer about
+// what a store's objects are called. It range-checks the addressing integers on
+// the way through (validateCore).
 func loadCore(fetch keyGetter) (*DBCore, error) {
-	data, err := fetch(dbFileKey)
-	if err != nil {
-		return nil, fmt.Errorf("fetch %s: %w", dbFileKey, err)
-	}
-	var c DBCore
-	if err := json.Unmarshal(data, &c); err != nil {
-		return nil, fmt.Errorf("decode %s: %w", dbFileKey, err)
-	}
-	// Validate integer fields that must be non-negative. A negative total_art
-	// would reach idxKeyAndSize/parseIdxPack with a negative packSize and
-	// panic with "makeslice: len out of range" (B8).
-	if c.TotalArticles < 0 {
-		return nil, fmt.Errorf("decode %s: total_art %d is negative", dbFileKey, c.TotalArticles)
-	}
-	if c.NextPackID < 0 {
-		return nil, fmt.Errorf("decode %s: next_pid %d is negative", dbFileKey, c.NextPackID)
-	}
-	if c.PackOffset < 0 {
-		return nil, fmt.Errorf("decode %s: pack_off %d is negative", dbFileKey, c.PackOffset)
-	}
-	if c.Seq < 0 {
-		return nil, fmt.Errorf("decode %s: seq %d is negative", dbFileKey, c.Seq)
-	}
-	// The manifest counter and its GC low-water name objects (manifest/<m>.gz)
-	// and bound the density probe, so a negative value would fabricate keys and
-	// an out-of-order pair would make the window nonsense. Same clear decode
-	// framing as the fields above.
-	if c.ManifestNum < 0 {
-		return nil, fmt.Errorf("decode %s: m %d is negative", dbFileKey, c.ManifestNum)
-	}
-	if c.GCManifest < 0 || c.GCManifest > c.ManifestNum {
-		return nil, fmt.Errorf("decode %s: gcm %d out of range [0, m=%d]", dbFileKey, c.GCManifest, c.ManifestNum)
-	}
-	// A negative/oversized delta chain would reach loadDeltas/loadLatestIdx
-	// with nonsense bounds; loadDeltas re-checks, but fail here with the same
-	// clear decode framing as the fields above.
-	if c.NumDeltas < 0 || c.NumDeltas > c.Seq {
-		return nil, fmt.Errorf("decode %s: nd %d out of range [0, seq=%d]", dbFileKey, c.NumDeltas, c.Seq)
-	}
-	if c.DeltaArticles < 0 || c.DeltaArticles > c.TotalArticles {
-		return nil, fmt.Errorf("decode %s: na %d out of range [0, total_art=%d]", dbFileKey, c.DeltaArticles, c.TotalArticles)
-	}
-	// Validate feed ids: feed_id is a u16 in each idx entry, so ids must be
-	// in [0, feedIDCeiling). A hostile id >= feedIDCeiling reaches feedSlots
-	// and parseIdxPack with slots = id+1, allocating ~4 GB per pack (B11).
-	for id := range c.Feeds {
-		if id < 0 || id >= feedIDCeiling {
-			return nil, fmt.Errorf("decode %s: feed id %d out of range [0, %d]", dbFileKey, id, feedIDCeiling-1)
-		}
-	}
-	return &c, nil
+	return loadStore(fetch)
 }
 
 func loadDataPack(fetch keyGetter, key string) ([]ArticleData, error) {

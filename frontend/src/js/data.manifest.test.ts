@@ -1,18 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-// The S33 root dual-path (docs/MANIFEST-SPEC.md §8.1): data.ts must read BOTH
-// root shapes — today's full legacy db.gz and the v2 {v, m, t} pointer the S34
-// cutover shrinks it to — and pick between them at runtime on the bytes alone.
+// The root path (docs/MANIFEST-SPEC.md §8.1): data.ts boots through the v2
+// {v, m, t} pointer and the manifest it names, and still reads a PRE-CUTOVER
+// root — one whose writer has not migrated it yet — picking between them at
+// runtime on the bytes alone.
 //
 // Selection rule under test: THE ROOT IS AUTHORITATIVE FOR WHAT IT CARRIES.
-// A legacy-complete root never fetches a manifest (so an S32 store, which
-// carries `m` AND every legacy field, behaves exactly as it does today and an
-// operator who clears manifest/* loses nothing); a root with `m` and no legacy
-// state follows the indirection.
+// A legacy-complete root answers every question itself and never fetches a
+// manifest; a root with `m` and no legacy state follows the indirection.
 //
 // The store below is the smallest real layout: one all-delta cycle (two
-// articles in data/d1.gz, no consolidated tail packs) — byte-shaped after real
-// `srr` output.
+// articles in one delta segment, no consolidated tail packs) — byte-shaped
+// after real `srr` output.
 
 async function gzip(input: string): Promise<Uint8Array> {
    const stream = new Response(new TextEncoder().encode(input)).body!.pipeThrough(new CompressionStream("gzip"))
@@ -36,19 +35,24 @@ const legacyRoot = {
    feeds: FEEDS,
 }
 
-// The v2 root the S34 cutover emits. SYNTHESIZED: the writer does not produce
-// this shape yet (that is S34), so this is the reader-side half of the contract
-// standing in for it.
-const manifestRoot = { v: 2, m: 2, t: 100 }
+// The v2 root the writer emits.
+const manifestRoot = { v: 3, m: 2, t: 100 }
 
 const manifestBody = {
-   v: 2,
+   v: 3,
    m: 2,
    fetched_at: 100,
    total_art: 2,
    na: 2,
    pack_off: 0,
-   names: { data: { b: 1 }, idx: {}, meta: {}, deltas: ["data/d1.gz"], seen: "seen.1.gz" },
+   names: {
+      data: { b: 1 },
+      idx: {},
+      meta: {},
+      deltas: { s: "data", r: [1] },
+      seen: { s: "seen", stem: 1 },
+      next: { data: 2, seen: 2 },
+   },
    feeds: FEEDS,
 }
 
@@ -57,6 +61,9 @@ type Files = Record<string, string>
 const baseFiles = (root: unknown, manifest: unknown = manifestBody): Files => ({
    "/db.gz": JSON.stringify(root),
    ...(manifest === null ? {} : { "/manifest/2.gz": JSON.stringify(manifest) }),
+   // The listed name (opaque stem) and the pre-cutover derived name (kind
+   // letter) address the same bytes, so one fixture serves both roots.
+   "/data/1.gz": DELTA_JSONL,
    "/data/d1.gz": DELTA_JSONL,
 })
 
@@ -111,7 +118,7 @@ describe("root selection", () => {
    it("a v2 root follows the indirection and resolves to the same reader state", async () => {
       const data = await mount(baseFiles(manifestRoot))
       await data.init()
-      expect(fetched).toEqual(["db.gz", "manifest/2.gz", "data/d1.gz"])
+      expect(fetched).toEqual(["db.gz", "manifest/2.gz", "data/1.gz"])
       expect(data.db.total_art).toBe(2)
       expect(data.db.fetched_at).toBe(100) // the root's own `t`
       expect(data.db.m).toBe(2)
@@ -124,13 +131,19 @@ describe("root selection", () => {
       expect(data.countAll(new Map([[0, 0]]))).toBe(2)
    })
 
-   it("resolves the same names both ways", async () => {
+   it("resolves the listed names positionally, exactly like the derived ones", async () => {
       const viaLegacy = await mount(baseFiles(legacyRoot))
       await viaLegacy.init()
-      const legacyNames = viaLegacy.storeNames()
+      const derived = viaLegacy.storeNames()
       const viaManifest = await mount(baseFiles(manifestRoot))
       await viaManifest.init()
-      expect(viaManifest.storeNames()).toEqual(legacyNames)
+      const listed = viaManifest.storeNames()
+      // Same SHAPE at every position — the keys themselves differ, because a
+      // listed name is an opaque stem and a derived one carries a kind letter.
+      expect(listed.idx.tail).toBe(derived.idx.tail)
+      expect(listed.data.keys.length).toBe(derived.data.keys.length)
+      expect(listed.deltas).toEqual(["data/1.gz"])
+      expect(derived.deltas).toEqual(["data/d1.gz"])
    })
 
    it("synthesizes the retired counters from the LISTED names", async () => {
@@ -156,18 +169,18 @@ describe("root selection", () => {
    })
 
    it("rejects a manifest newer than this reader through the version popup", async () => {
-      const data = await mount(baseFiles(manifestRoot, { ...manifestBody, v: 3 }))
-      await expect(data.init()).rejects.toThrow(/older than the store \(manifest v3/)
+      const data = await mount(baseFiles(manifestRoot, { ...manifestBody, v: 4 }))
+      await expect(data.init()).rejects.toThrow(/older than the store \(manifest v4/)
    })
 
    it("rejects a root with neither legacy state nor a manifest pointer", async () => {
-      const data = await mount(baseFiles({ v: 2, t: 100 }))
+      const data = await mount(baseFiles({ v: 3, t: 100 }))
       await expect(data.init()).rejects.toThrow(/names no manifest/)
    })
 
    it("still rejects a root version above what this reader understands", async () => {
-      const data = await mount(baseFiles({ ...legacyRoot, v: 3 }))
-      await expect(data.init()).rejects.toThrow(/older than the store \(format v3, supported v2\)/)
+      const data = await mount(baseFiles({ ...legacyRoot, v: 4 }))
+      await expect(data.init()).rejects.toThrow(/older than the store \(format v4, supported v3\)/)
    })
 
    it("fails loudly when the named delta chain disagrees with na", async () => {
@@ -183,7 +196,7 @@ describe("root selection", () => {
       const data = await mount(
          baseFiles(manifestRoot, {
             ...manifestBody,
-            names: { ...manifestBody.names, deltas: [] },
+            names: { ...manifestBody.names, deltas: { s: "data", r: [] } },
          }),
       )
       await expect(data.init()).rejects.toThrow(/0 delta segment\(s\) named for 2 delta article\(s\)/)
@@ -198,7 +211,7 @@ describe("refresh across the dual path", () => {
       const put = async (p: string, body: string) => bytes.set(p, await gzip(body))
       await put("/db.gz", JSON.stringify(manifestRoot))
       await put("/manifest/2.gz", JSON.stringify(manifestBody))
-      await put("/data/d1.gz", DELTA_JSONL)
+      await put("/data/1.gz", DELTA_JSONL)
       vi.stubGlobal(
          "fetch",
          vi.fn(async (input: URL | string) => {
@@ -211,7 +224,7 @@ describe("refresh across the dual path", () => {
       const data = await import("./data")
       await data.init()
       const before = data.storeNames()
-      expect(before.deltas).toEqual(["data/d1.gz"])
+      expect(before.deltas).toEqual(["data/1.gz"])
 
       // Publish a NEWER generation whose delta segment is missing from the store.
       const nextManifest = {
@@ -220,9 +233,9 @@ describe("refresh across the dual path", () => {
          fetched_at: 200,
          total_art: 4,
          na: 4,
-         names: { ...manifestBody.names, deltas: ["data/d1.gz", "data/d2.gz"] },
+         names: { ...manifestBody.names, deltas: { s: "data", r: [1, 2] } },
       }
-      await put("/db.gz", JSON.stringify({ v: 2, m: 3, t: 200 }))
+      await put("/db.gz", JSON.stringify({ v: 3, m: 3, t: 200 }))
       await put("/manifest/3.gz", JSON.stringify(nextManifest))
 
       await expect(data.refresh()).rejects.toThrow()
@@ -238,7 +251,7 @@ describe("refresh across the dual path", () => {
       const put = async (p: string, body: string) => bytes.set(p, await gzip(body))
       await put("/db.gz", JSON.stringify(manifestRoot))
       await put("/manifest/2.gz", JSON.stringify(manifestBody))
-      await put("/data/d1.gz", DELTA_JSONL)
+      await put("/data/1.gz", DELTA_JSONL)
       vi.stubGlobal(
          "fetch",
          vi.fn(async (input: URL | string) => {
@@ -253,7 +266,7 @@ describe("refresh across the dual path", () => {
 
       expect(await data.refresh()).toBe("unchanged")
 
-      await put("/data/d2.gz", '{"f":0,"a":200,"p":92,"t":"Three","c":"three"}\n')
+      await put("/data/2.gz", '{"f":0,"a":200,"p":92,"t":"Three","c":"three"}\n')
       await put(
          "/manifest/3.gz",
          JSON.stringify({
@@ -262,15 +275,15 @@ describe("refresh across the dual path", () => {
             fetched_at: 200,
             total_art: 3,
             na: 3,
-            names: { ...manifestBody.names, deltas: ["data/d1.gz", "data/d2.gz"] },
+            names: { ...manifestBody.names, deltas: { s: "data", r: [1, 2] } },
             feeds: { 0: { ...FEEDS[0], total_art: 3 } },
          }),
       )
-      await put("/db.gz", JSON.stringify({ v: 2, m: 3, t: 200 }))
+      await put("/db.gz", JSON.stringify({ v: 3, m: 3, t: 200 }))
 
       expect(await data.refresh()).toBe("updated")
       expect(data.db.total_art).toBe(3)
-      expect(data.storeNames().deltas).toEqual(["data/d1.gz", "data/d2.gz"])
+      expect(data.storeNames().deltas).toEqual(["data/1.gz", "data/2.gz"])
       expect((await data.loadArticle(2)).t).toBe("Three")
    })
 })

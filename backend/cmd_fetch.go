@@ -710,15 +710,6 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 			return db.core.Feeds[fid].dedupDays(db.core.DedupDays)
 		}, seenFeedCap, db.core.Feeds)
 
-		// Snapshot the GC-relevant counters: each sweep below runs only when
-		// its counter advanced this run. Most cycles fetch nothing new, and an
-		// unconditional sweep would re-delete the same already-gone window
-		// every interval (≈20 no-op store round trips + warn lines per cycle).
-		// GCLatest keys on the TAIL generation, not Seq: a delta cycle bumps
-		// Seq but supersedes nothing (deltas only die at consolidation), so
-		// sweeping there would re-delete the same empty window every cycle.
-		prevTail, prevHdrs, prevMeta := tailGen(&db.core), db.core.HdrPacks, db.core.MetaPacks
-
 		written, err := db.PutArticles(ctx, articles)
 		if err != nil {
 			return err
@@ -779,73 +770,25 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 		if err := db.SyncSeen(ctx); err != nil {
 			return fmt.Errorf("sync seen pool: %w", err)
 		}
-		// Reclaim generation manifests older than the K-generation grace window
-		// (docs/MANIFEST-SPEC.md §7). Runs BEFORE the Commit — unlike the pack
-		// sweeps below — because the names it deletes are already superseded and
-		// referenced by nothing, so the low-water advance can ride this cycle's
-		// own Commit instead of forcing a second one every single cycle. Every
-		// other property is the pack sweeps': warn-only, idempotent (Rm is
-		// silent on missing), and a missed run resumes from the low-water rather
-		// than stranding anything.
-		if err := db.GCManifests(ctx, keepManifests); err != nil {
-			slog.Warn("gc manifests", "error", err)
+		// ONE GC rule (docs/MANIFEST-SPEC.md §7): delete what the last K
+		// manifests do not name. It replaces the four per-feature sweeps and
+		// their window formulas the cutover retired. Runs BEFORE the Commit, so
+		// the low-water advance rides this cycle's own root flip instead of
+		// forcing a second commit; everything it deletes is already superseded
+		// and referenced by nothing. Warn-only, idempotent (Rm is silent on
+		// missing), and a missed run resumes from the low-water rather than
+		// stranding anything.
+		if err := db.GC(ctx, globals.KeepManifests); err != nil {
+			slog.Warn("gc", "error", err)
 		}
 		if err := db.Commit(ctx); err != nil {
 			return err
 		}
-		// Drop latest-pack generations older than the grace window, but only
-		// when the counter advanced this run — a crash-leaked name is still
-		// swept by the next advancing run (the sweep window is wider than a
-		// single advance), which is the same "anything missed is swept by a
-		// later run" guarantee. Articles are already durable, so failure here
-		// is log-only; WithoutCancel keeps a shutdown signal from widening
-		// the leak window.
 		gcCtx := context.WithoutCancel(ctx)
 		// The drained watermark is durable now, so the slots can go. Warn-only
 		// and idempotent: a slot that survives is SKIPPED (never re-applied) next
 		// cycle by the watermark check, and reaped then.
 		reapInbox(gcCtx, db.Backend, drainedSlots)
-		// Publish the pointer-state backup on the same signal GCLatest uses (the
-		// tail generation advanced ⇒ this was a consolidation cycle), BEFORE the
-		// sweeps below mutate GCLatestSwept — so the snapshot is byte-identical
-		// to the db.gz just committed. Warn-only: the batch is already durable,
-		// and a failed backup must never fail the cycle that produced it.
-		if tailGen(&db.core) != prevTail {
-			if err := db.SnapshotDB(gcCtx); err != nil {
-				slog.Warn("db.gz snapshot", "error", err)
-			}
-		}
-		prevGCSwept := db.core.GCLatestSwept
-		for _, gc := range []struct {
-			advanced bool
-			msg      string
-			fn       func(context.Context, int) error
-		}{
-			{tailGen(&db.core) != prevTail, "gc latest packs", db.GCLatest},
-			{db.core.HdrPacks != prevHdrs, "gc idx summaries", db.GCSummaries},
-			{db.core.MetaPacks != prevMeta, "gc meta summaries", db.GCMetaSummaries},
-		} {
-			if !gc.advanced {
-				continue
-			}
-			if err := gc.fn(gcCtx, latestKeep); err != nil {
-				slog.Warn(gc.msg, "error", err)
-			}
-		}
-		// GCLatest advances the persisted GCLatestSwept low-water AFTER the
-		// Commit above (it can only advance it over generations it actually
-		// cleared, so the advance must follow the Rm's). Persist it with a
-		// second best-effort Commit when it moved: an --interval loop would
-		// otherwise carry the advance into the next cycle's Commit, but a
-		// one-shot `srr art fetch` (no next cycle) would lose it — re-sweeping
-		// the same window forever and, past gcMaxSweep, never draining a large
-		// backlog. Warn-only: a miss just re-sweeps next run (idempotent, Rm is
-		// silent on missing).
-		if db.core.GCLatestSwept != prevGCSwept {
-			if err := db.Commit(gcCtx); err != nil {
-				slog.Warn("commit gc low-water", "error", err)
-			}
-		}
 
 		// The ingest cache is self-maintaining: a download is consumed (uploaded
 		// to the store under its content-hash key) within the cycle that fetched

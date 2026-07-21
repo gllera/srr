@@ -32,10 +32,14 @@ describe("expandSeries", () => {
       })
    })
 
-   it("places the tail at the position after the last run", () => {
-      const list = expandSeries({ b: 1, r: [[1, 2]], t: "data/L4.gz" }, "data")
+   it("places the tail at the position the manifest states", () => {
+      const list = expandSeries({ b: 1, r: [[1, 3]], l: 3 }, "data")
       expect(list.tail).toBe(3)
-      expect(list.keys[list.tail]).toBe("data/L4.gz")
+      expect(list.keys[list.tail]).toBe("data/3.gz")
+   })
+
+   it("rejects a tail position the list does not name", () => {
+      expect(() => expandSeries({ b: 1, r: [[1, 2]], l: 9 }, "data")).toThrow(/tail position 9/)
    })
 
    it("expands several runs in order (a rebuilt position keeps its slot)", () => {
@@ -75,21 +79,23 @@ describe("manifestNames", () => {
    it("reads series by name out of the flat map, plus the singletons", () => {
       const n = manifestNames(
          manifest({
-            idx: { r: [[0, 2]], t: "idx/L9.gz" },
-            data: { b: 1, r: [[1, 1]], t: "data/L9.gz" },
-            meta: { r: [[0, 4]], t: "meta/L9.gz" },
-            deltas: ["data/d10.gz", "data/d11.gz"],
-            seen: "seen.1.gz",
-            hsum: { key: "idx/h2.gz", covers: 2 },
-            ssum: { key: "meta/s4.gz", covers: 4 },
+            idx: { r: [[0, 3]], l: 2 },
+            data: { b: 1, r: [[1, 2]], l: 2 },
+            meta: { r: [[0, 5]], l: 4 },
+            deltas: { s: "data", r: [10, 11] },
+            seen: { s: "seen", stem: 1 },
+            hsum: { s: "idx", stem: 8, covers: 2 },
+            ssum: { s: "meta", stem: 9, covers: 4 },
          }),
       )
-      expect(n.idx).toEqual({ keys: ["idx/0.gz", "idx/1.gz", "idx/L9.gz"], tail: 2 })
-      expect(n.data).toEqual({ keys: ["", "data/1.gz", "data/L9.gz"], tail: 2 })
+      expect(n.idx).toEqual({ keys: ["idx/0.gz", "idx/1.gz", "idx/2.gz"], tail: 2 })
+      expect(n.data).toEqual({ keys: ["", "data/1.gz", "data/2.gz"], tail: 2 })
       expect(n.meta.tail).toBe(4)
-      expect(n.deltas).toEqual(["data/d10.gz", "data/d11.gz"])
-      expect(n.hsum).toEqual({ key: "idx/h2.gz", covers: 2 })
-      expect(n.ssum).toEqual({ key: "meta/s4.gz", covers: 4 })
+      // Each singleton carries its OWN series, so nothing here hard-codes
+      // which directory a summary or a delta segment lives in (§4.6).
+      expect(n.deltas).toEqual(["data/10.gz", "data/11.gz"])
+      expect(n.hsum).toEqual({ key: "idx/8.gz", covers: 2 })
+      expect(n.ssum).toEqual({ key: "meta/9.gz", covers: 4 })
    })
 
    it("tolerates a series the manifest does not carry (ARC6: nothing assumes three)", () => {
@@ -103,8 +109,8 @@ describe("manifestNames", () => {
    })
 
    it("never mistakes a singleton key for a series", () => {
-      const n = manifestNames(manifest({ deltas: ["data/d3.gz"], seen: "seen.0.gz" }))
-      expect(n.deltas).toEqual(["data/d3.gz"])
+      const n = manifestNames(manifest({ deltas: { s: "data", r: [3] }, seen: { s: "seen", stem: 0 } }))
+      expect(n.deltas).toEqual(["data/3.gz"])
       // "seen" and "deltas" must not have leaked into a series list.
       expect(n.idx.keys).toEqual([])
    })
@@ -116,38 +122,25 @@ describe("manifestNames", () => {
    })
 })
 
-describe("legacyNames ↔ manifestNames parity", () => {
-   // The S32 writer publishes BOTH shapes for the same store state. These are
-   // the manifests it produced for the two layouts that matter, verified
-   // against real `srr` output.
+describe("legacyNames — the pre-cutover derivation", () => {
+   // A store whose writer has not migrated it yet still carries the counters
+   // its names were derived from. The reader keeps deriving them, and resolves
+   // into the same StoreNames shape every fetch site indexes.
 
-   it("an all-delta store (no consolidated tail) resolves identically", () => {
+   it("an all-delta store names no tail", () => {
       const legacy = legacyNames({ total_art: 2, seq: 1, nd: 1, na: 2, next_pid: 0 })
-      const fromManifest = manifestNames(
-         manifest({ data: { b: 1 }, idx: {}, meta: {}, deltas: ["data/d1.gz"], seen: "seen.1.gz" }),
-      )
-      expect(fromManifest).toEqual(legacy)
-      // No tail was ever consolidated, so no series names one.
       expect(legacy.idx.tail).toBe(-1)
       expect(legacy.data.tail).toBe(-1)
       expect(legacy.meta.tail).toBe(-1)
       expect(legacy.deltas).toEqual(["data/d1.gz"])
    })
 
-   it("a consolidated store resolves identically", () => {
+   it("a consolidated store names one tail per series", () => {
       const legacy = legacyNames({ total_art: 2, seq: 1, nd: 0, na: 0, next_pid: 1 })
-      const fromManifest = manifestNames(
-         manifest({
-            data: { b: 1, t: "data/L1.gz" },
-            idx: { t: "idx/L1.gz" },
-            meta: { t: "meta/L1.gz" },
-            seen: "seen.1.gz",
-         }),
-      )
-      expect(fromManifest).toEqual(legacy)
       expect(legacy.data.tail).toBe(1) // == next_pid
       expect(legacy.idx.tail).toBe(0) // == numFinalizedIdx
       expect(legacy.meta.tail).toBe(0) // == mp
+      expect(legacy.idx.keys[legacy.idx.tail]).toBe("idx/L1.gz")
    })
 
    it("legacy tails sit at numFinalizedIdx / next_pid / mp", () => {

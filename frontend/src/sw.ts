@@ -7,63 +7,61 @@
 //                           (the hash is the sha256 of the bytes). Cache-first;
 //                           a hit can never be stale. Bounded to ASSET_KEEP
 //                           entries, oldest-cached evicted first.
-//   packs  (srr-packs-vN)   the CDN store under `packs/`: every pack name is
-//      write-once — finalized `idx|data|meta/<n>.gz` (numeric), the latest
-//      generation `idx|data|meta/L<seq>.gz` (a generation is never rewritten
-//      after the db.gz commit that publishes it), the `idx/h<N>` /
-//      `meta/s<N>` summaries, and the generation manifests `manifest/<m>.gz`
-//      (docs/MANIFEST-SPEC.md — immutable like any other listed object) →
-//      cache-first. Only `db.gz` is mutable → network-first (offline → last
-//      cached). The article series are bounded per series
-//      (enforceCacheBounds), lowest-numbered (oldest) evicted first;
-//      manifests instead mirror the store's own GC (checkManifest).
+//   packs  (srr-packs-vN)   the CDN store: every object name is write-once —
+//      a stem is drawn from a per-series counter that is NEVER reused
+//      (docs/MANIFEST-SPEC.md §4.5), so a cached name can never hold different
+//      bytes later → cache-first, unconditionally. Only `db.gz` is mutable →
+//      network-first (offline → last cached). The article series are bounded
+//      per series (enforceCacheBounds), lowest-stem (oldest) evicted first;
+//      everything else is reconciled against the manifest (checkManifest).
 //   shell  (srr-shell-vN)   the app itself: the `/…/` navigation + content-hashed
 //                           JS/CSS. Runtime-cached (no build-time manifest — keeps
 //                           this SW hand-written and zero-dep). Hashed JS/CSS are
 //                           immutable → cache-first; the navigation/index.html is the
 //                           version pointer → network-first so a fresh deploy wins
 //                           online and the cached shell serves offline.
-//   meta   (srr-meta-vN)    three synthetic entries: the last-seen db.gz `gen` (store
-//                           generation), `seq` (latest-pack generation) and `m` (the
-//                           generation-manifest counter). A gen change purges the
-//                           packs bucket (in-place store rebuild, see checkManifest);
-//                           a seq or m change prunes the cached L<g>/d<g>/h<N>/s<N>
-//                           names and the manifests the backend GC has already dropped.
+//   meta   (srr-meta-vN)    two synthetic entries: the last-adopted generation
+//                           counter `m` (db.gz's only moving field) and the SET of
+//                           object names that generation listed. On adopting a new
+//                           manifest the SW evicts every cached object named by
+//                           neither it nor the previous one — exact, rather than the
+//                           four approximate window formulas the cutover retired.
 //
-// Offline correctness is structural: a cached db.gz of generation N can only ever
-// pair with `L<N>` — the name is write-once, so the pair can never disagree on
-// next_pid/offsets, even across a mid-load network blip. Both were cached on the
-// last online visit; offline serves that consistent snapshot.
+// Offline correctness is structural: a cached db.gz names one manifest, that
+// manifest names one set of objects, and every one of those names is write-once.
+// The snapshot can never disagree with itself, even across a mid-load network
+// blip. All of it was cached on the last online visit; offline serves it.
 //
 // Best-effort throughout: every miss/failure falls through to the network, so a
 // browser without SW support (or an insecure-context LAN deploy) just runs straight
 // off the network, exactly as before. Self-contained: no SRR_CDN_URL, so it works
 // under any cdn-url prefix.
-import { LATEST_KEEP, PACK_SERIES_KINDS, type IDBWire } from "./js/format.gen"
+import { PACK_SERIES_KINDS, type IDBWire, type IManifestWire } from "./js/format.gen"
+import { manifestNames } from "./js/names"
 import { parsePackName, RE_ASSET, RE_DB, RE_SHELL_HASHED } from "./js/sw-grammar"
 
 const sw = self as unknown as ServiceWorkerGlobalScope
 
 // Bump a suffix to invalidate that bucket on the next activate.
 const ASSETS = "srr-assets-v1"
-// vN now only marks format changes of the cache itself. Store rebuilds are
-// handled by the db.gz `gen` field (checkManifest below): an in-place wipe+rebuild
-// reuses finalized pack ids (data/N.gz) with new bytes — cache-first would
-// serve the stale cached packs — so the operator bumps `srr gen --bump` and
-// every client purges PACKS on its next db.gz fetch, no redeploy needed.
-// (History: v2→v3 was the 2026-06-08 AVIF→WebP rebuild, hand-bumped before
-// gen existed; cron only appends, so prod never rebuilds.)
-const PACKS = "srr-packs-v3"
+// vN marks format changes of the cache itself. v3→v4 is the generation-manifest
+// cutover: names became opaque stems, so entries cached under the retired
+// kind-lettered names (idx/L7.gz, data/d9.gz, idx/h2.gz) can never be requested
+// again and would sit in the bucket forever — this bucket rename drops them in
+// one go. There is no store-rebuild invalidation any more: a rebuild writes NEW
+// names, which is exactly what retired `gen` and its purge.
+const PACKS = "srr-packs-v4"
 const SHELL = "srr-shell-v1"
 // Tiny bucket holding the last-seen store generation + latest-pack
 // generation (a Cache is the only storage a SW shares across restarts
 // without IndexedDB).
 const META = "srr-meta-v1"
 // Eviction-exempt offline-pin bucket. Populated via the "pin" message from the
-// page (per packNamesForFilter), consulted before PACKS in the pack fetch
-// branch, and purged only on store gen change (same invalidation as PACKS).
-// Unlike PACKS it is never touched by enforceCacheBounds — pinned packs survive
-// the rolling-window eviction so an offline-pinned filter stays fully readable.
+// page (per packNamesForFilter) and consulted before PACKS in the pack fetch
+// branch. Unlike PACKS it is never touched by enforceCacheBounds — pinned packs
+// survive the rolling-window eviction so an offline-pinned filter stays fully
+// readable — and never by the manifest reconciliation either: a pin is a
+// snapshot of write-once names, valid until the page unpins it.
 const PINNED = "srr-pinned-v1"
 const KEEP = new Set([ASSETS, PACKS, SHELL, META, PINNED])
 
@@ -213,18 +211,16 @@ sw.addEventListener("message", (event) => {
 })
 
 // Serve the cached copy if present, else fetch and cache a genuine success.
-// `revalidate` (write-once packs, numeric and L<seq>): a miss must bypass the
-// HTTP cache underneath — the page fetches packs with force-cache and they're
-// served immutable/1y, so a stale post-rebuild copy (same name, new bytes) can
-// outlive checkManifest's purge of this bucket; no-cache forces origin
-// revalidation exactly once, then this cache is the hit path again.
-// Content-hashed assets/bundles can't go stale → they keep re-filling from
-// the HTTP cache for free.
-async function cacheFirst(req: Request, name: string, revalidate = false): Promise<Response> {
+//
+// Unconditionally cache-first: the `revalidate` flag this used to carry existed
+// solely because an in-place rebuild could reuse a finalized pack name with new
+// bytes. It cannot any more — a stem is never reused (§4.5) — so a hit can
+// never be stale, for packs exactly as for content-hashed assets and bundles.
+async function cacheFirst(req: Request, name: string): Promise<Response> {
    const cache = await caches.open(name)
    const hit = await cache.match(req)
    if (hit) return hit
-   const res = await fetch(revalidate ? new Request(req, { cache: "no-cache" }) : req)
+   const res = await fetch(req)
    if (res.ok) cache.put(req, res.clone())
    return res
 }
@@ -233,13 +229,12 @@ async function cacheFirst(req: Request, name: string, revalidate = false): Promi
 // pinned filter scope caches its packs AND the assets/ images its articles
 // reference there (via the "pin" message) — then fall through to the rolling
 // bucket. A PINNED hit survives PACKS/ASSETS eviction and stays readable
-// offline. Packs pass revalidate (write-once names can outlive a rebuild —
-// see cacheFirst); assets are content-hashed, so a hit can never be stale.
-async function pinnedCacheFirst(req: Request, name: string, revalidate = false): Promise<Response> {
+// offline.
+async function pinnedCacheFirst(req: Request, name: string): Promise<Response> {
    const pinned = await caches.open(PINNED)
    const pinnedHit = await pinned.match(req)
    if (pinnedHit) return pinnedHit
-   return cacheFirst(req, name, revalidate)
+   return cacheFirst(req, name)
 }
 
 // Prefer the network (refreshing the cache); fall back to cache only when the
@@ -258,25 +253,24 @@ async function networkFirst(req: Request, name: string): Promise<Response> {
    }
 }
 
-// Cache-size backstop: the store grows forever, a device shouldn't. Finalized
-// pack names are numbered in chron order and reading skews to the tail, so each
-// series (idx/, data/) keeps its PACK_KEEP highest-numbered entries and evicts
-// the rest — the names themselves encode age, no access-time bookkeeping.
+// Cache-size backstop: the store grows forever, a device shouldn't. Stems are
+// handed out in write order, so a series' higher stems are its newer objects
+// and reading skews to the tail: each article series keeps its PACK_KEEP
+// highest-stem entries and evicts the rest — no access-time bookkeeping.
 // Evicting a pack someone is still reading just costs one CDN refetch on the
-// next miss. db.gz and the L<seq>/h<N> names are exempt (checkManifest owns
-// those, and offline consistency depends on them). Assets are content-hashed
-// (no age in the name), so that bucket prunes oldest-cached-first: Cache.keys()
-// returns insertion order and cacheFirst never re-puts on a hit. Runs only
-// after a successful ONLINE db.gz fetch — an offline reader must never lose a
-// cached pack it cannot refetch.
+// next miss. Assets are content-hashed (no order in the name), so that bucket
+// prunes oldest-cached-first: Cache.keys() returns insertion order and
+// cacheFirst never re-puts on a hit. Runs only after a successful ONLINE db.gz
+// fetch — an offline reader must never lose a cached object it cannot refetch.
 const PACK_KEEP = 100 // per finalized series: ~20 MB of data packs + ~5 MB of idx packs
 const META_KEEP = 80 // meta shards run ~200 KB each — a tighter bound for the same idea
 const ASSET_KEEP = 500 // self-hosted images/files: order of ~100 MB at typical sizes
 
 // Only the ARTICLE series are rolling-window bounded. A series absent from this
-// table is owned by checkManifest instead: `manifest` prunes on the store's own
-// gcm low-water (mirroring GCManifests exactly — see below), and `db` (the
-// writer's db.gz snapshot series) is never fetched by the reader at all.
+// table is owned by checkManifest instead: `manifest` and `seen` are reconciled
+// against what the adopted generation names (the `seen` sidecar is never
+// fetched by the reader at all — its series exists here only so the route
+// grammar knows it).
 const SERIES_KEEP: Record<string, number> = { idx: PACK_KEEP, data: PACK_KEEP, meta: META_KEEP }
 
 async function enforceCacheBounds(): Promise<void> {
@@ -289,7 +283,7 @@ async function enforceCacheBounds(): Promise<void> {
       )
       for (const req of await packs.keys()) {
          const p = parsePackName(new URL(req.url).pathname)
-         if (p && p.kind === "" && series[p.series]) series[p.series].push({ req, n: p.n })
+         if (p && series[p.series]) series[p.series].push({ req, n: p.n })
       }
       const assets = await caches.open(ASSETS)
       const assetKeys = await assets.keys()
@@ -307,19 +301,11 @@ async function enforceCacheBounds(): Promise<void> {
    }
 }
 
-// The last-seen gen/seq persist as synthetic entries in META (the URLs are
-// never fetched — they're just cache keys).
-const GEN_KEY = "https://srr.invalid/gen"
-const SEQ_KEY = "https://srr.invalid/seq"
-// The last-seen generation-manifest counter (db.gz `m`). It is the ONE field a
-// v2 root carries that moves on every publishing Commit, so it is the change
-// signal that survives the S34 cutover (where seq/gen/hdrs/mp stop existing).
-// Under today's dual-write root it simply rides alongside seq.
+// The last-adopted generation and the object-name set it listed persist as
+// synthetic entries in META (the URLs are never fetched — they're just cache
+// keys).
 const MAN_KEY = "https://srr.invalid/manifest"
-
-// LATEST_KEEP (imported from the generated contract) is the backend GC's
-// grace window: the SW never prunes a generation the store itself still
-// serves (an offline device may be reading from it).
+const NAMES_KEY = "https://srr.invalid/names"
 
 async function readMetaNumber(key: string): Promise<number> {
    const cache = await caches.open(META)
@@ -327,108 +313,78 @@ async function readMetaNumber(key: string): Promise<number> {
    return hit ? Number(await hit.text()) || 0 : 0
 }
 
-// Best-effort manifest tracking: gunzip the db.gz body (raw gzip bytes, no
-// Content-Encoding — same manual decompression as data.ts) and read `gen`
-// and `seq` (absent == 0).
-//   gen differs → in-place store rebuild: every cached pack may hold stale
-//   bytes under a reused name, purge the whole PACKS bucket. Inequality, not
-//   greater-than: a wipe+rebuild may reset gen.
-//   seq differs (gen same) → normal fetch-cron advance: prune only cached
-//   L<g> generations older than the store's GC grace window; newer cached
-//   generations stay usable offline.
-// ASSETS stays (content-hashed — a hit can never be stale); SHELL is
-// unrelated. Any failure is swallowed: a malformed db.gz must still be served.
+async function readMetaNames(): Promise<string[]> {
+   const cache = await caches.open(META)
+   const hit = await cache.match(NAMES_KEY)
+   if (!hit) return []
+   try {
+      return (await hit.json()) as string[]
+   } catch {
+      return []
+   }
+}
+
+// Best-effort cache reconciliation, and the whole of it (docs/MANIFEST-SPEC.md
+// §8.3): gunzip the db.gz body (raw gzip bytes, no Content-Encoding — the same
+// manual decompression as data.ts), read the ONE field a v2 root carries that
+// moves, and if it moved, adopt the manifest it names:
+//
+//   evict every cached pack object named by NEITHER the new manifest NOR the
+//   previously-adopted one.
+//
+// One generation of overlap covers a tab mid-swap. This is EXACT — it evicts
+// what the store no longer serves and keeps what it does — where the retired
+// scheme needed four separate window formulas (a gen purge, a gcs mirror for
+// L/d, and LATEST_KEEP cutoffs for h/s) and still had to know the writer's
+// runtime --max-deltas. Any failure is swallowed: a malformed root or an
+// unreachable manifest must still let db.gz be served.
 async function checkManifest(dbRes: Response): Promise<void> {
    try {
       const body = dbRes.clone().body!.pipeThrough(new DecompressionStream("gzip"))
-      const db = (await new Response(body).json()) as Pick<IDBWire, "gen" | "seq" | "hdrs" | "mp" | "gcs" | "m" | "gcm">
-      const gen = db.gen ?? 0
-      const seq = db.seq ?? 0
-      const hdrs = db.hdrs ?? 0
-      const mp = db.mp ?? 0
-      const man = db.m ?? 0
-      // The manifest series' own GC low-water: GCManifests deletes every
-      // manifest/<g> with g <= gcm and still serves everything above it. The
-      // SW mirrors that exactly — no wider (it would evict names an open tab's
-      // root still points at) and no narrower (it would keep bytes the store
-      // has already dropped). Same low-water argument as gcs below: a missed
-      // or failed warn-only sweep leaves gcm where it was, so the mirror never
-      // runs ahead of the store.
-      const gcm = db.gcm ?? 0
-      // The backend GC's own low-water mark: it has deleted every tail generation
-      // L<g>/d<g> with g <= gcs and still serves everything above it (see the
-      // delta-tail spec §8). Mirroring it is what keeps the SW cache aligned with
-      // the store — and correct for offline reads at ANY runtime --max-deltas
-      // without the reader knowing that value: a stale open tab needs names only
-      // down to its own tailGen, which the backend's grace window guarantees sits
-      // above gcs, so a name it needs is never evicted (a bare tailGen-based
-      // cutoff would evict the just-consolidated chain across a tailGen jump).
-      const gcs = db.gcs ?? 0
-      const meta = await caches.open(META)
+      const root = (await new Response(body).json()) as Pick<IDBWire, "m">
+      const m = root.m ?? 0
+      if (m === 0 || m === (await readMetaNumber(MAN_KEY))) return
+
+      // The page is about to fetch this very manifest, so caching it here is
+      // work it would do anyway.
+      const url = new URL(`manifest/${m}.gz`, dbRes.url)
+      const res = await cacheFirst(new Request(url.href), PACKS)
+      if (!res.ok) return
+      const man = (await new Response(
+         res.clone().body!.pipeThrough(new DecompressionStream("gzip")),
+      ).json()) as IManifestWire
+      if (man.m !== m) return
+
+      const names = manifestNames(man)
+      const listed = [
+         ...names.idx.keys,
+         ...names.data.keys,
+         ...names.meta.keys,
+         ...names.deltas,
+         ...(names.hsum ? [names.hsum.key] : []),
+         ...(names.ssum ? [names.ssum.key] : []),
+         `manifest/${m}.gz`,
+      ].filter(Boolean)
+      // Keep = this generation ∪ the PREVIOUSLY-ADOPTED one. Exactly one
+      // generation of overlap, which is what covers a tab mid-swap; the stored
+      // set is this generation's alone, or the kept set would only ever grow.
+      const keep = new Set<string>([...listed, ...(await readMetaNames())])
+
       const packs = await caches.open(PACKS)
-      if (gen !== (await readMetaNumber(GEN_KEY))) {
-         // An in-place store rebuild reuses pack names with new bytes. Purge
-         // both the rolling PACKS bucket and the eviction-exempt PINNED bucket —
-         // pinned packs are keyed by name, so stale bytes under a reused name
-         // must be evicted just like PACKS. On seq-only changes PINNED is left
-         // untouched: latest packs are write-once (generation-named), so a
-         // cached L<g> pack in PINNED is still valid for its seq.
-         const pinned = await caches.open(PINNED)
-         await Promise.all([
-            ...(await packs.keys()).map((k) => packs.delete(k)),
-            ...(await pinned.keys()).map((k) => pinned.delete(k)),
-         ])
-         await meta.put(GEN_KEY, new Response(String(gen)))
-         await meta.put(SEQ_KEY, new Response(String(seq)))
-         await meta.put(MAN_KEY, new Response(String(man)))
-         // The PINNED bucket was just purged — tell open pages to clear their
-         // srr-pins registry so the menu doesn't claim "Remove offline copy" over
-         // evicted bytes.
-         const purgedClients = await sw.clients.matchAll()
-         for (const c of purgedClients) c.postMessage({ type: "pins-purged" })
-         return
-      }
-      // The prune rides EITHER counter moving. `m` is the signal that survives
-      // the S34 root cutover (a v2 root carries no seq) and it also moves on
-      // publishing cycles that leave seq alone, so the manifest sweep below is
-      // mirrored promptly; `seq` keeps driving the pack sweep exactly as before
-      // on a legacy root that predates manifests (m absent == 0, never moves).
-      if (seq !== (await readMetaNumber(SEQ_KEY)) || man !== (await readMetaNumber(MAN_KEY))) {
-         const keys = await packs.keys()
-         // Superseded summaries (idx h<N> headers, meta s<N> blooms) ride
-         // the seq prune instead of tracking meta keys of their own. Their
-         // counters CAN advance without a seq bump (a zero-article migration
-         // or sync-retry cycle), but such a cycle strands at most one stale
-         // name each, pruned on the next article-producing fetch — and a
-         // store rebuild purges the whole bucket via gen above. Tail packs
-         // (L<g>) and delta segments (d<g>) prune against gcs — the backend
-         // GC's own low-water — so the cache evicts exactly what the store has
-         // deleted and keeps exactly what it still serves (see gcs above); gcs
-         // in db.gz lags the live sweep by one cycle (GC runs post-Commit), a
-         // safe direction (the cache keeps a just-swept name one cycle longer).
-         const cutoff: Record<string, number> = {
-            l: gcs + 1,
-            d: gcs + 1,
-            h: hdrs - LATEST_KEEP,
-            s: mp - LATEST_KEEP,
-         }
-         await Promise.all(
-            keys.map((k) => {
-               const p = parsePackName(new URL(k.url).pathname)
-               if (!p) return undefined
-               // Manifests are bare-stem names in their own series, so they
-               // carry no kind letter and are NOT part of the cutoff table
-               // above (nor of enforceCacheBounds' rolling window). They prune
-               // on gcm alone — delete exactly what GCManifests deleted
-               // (g <= gcm), keep every generation the store still serves so a
-               // stale tab can still follow its own root's indirection.
-               if (p.series === "manifest") return p.kind === "" && p.n <= gcm ? packs.delete(k) : undefined
-               return p.kind !== "" && p.n < cutoff[p.kind] ? packs.delete(k) : undefined
-            }),
-         )
-         await meta.put(SEQ_KEY, new Response(String(seq)))
-         await meta.put(MAN_KEY, new Response(String(man)))
-      }
+      await Promise.all(
+         (await packs.keys()).map((req) => {
+            const path = new URL(req.url).pathname
+            if (!parsePackName(path)) return undefined
+            // Names are store-relative; a cached URL carries whatever prefix
+            // the cdn-url adds, so match on the suffix.
+            for (const name of keep) if (path.endsWith("/" + name)) return undefined
+            return packs.delete(req)
+         }),
+      )
+
+      const meta = await caches.open(META)
+      await meta.put(MAN_KEY, new Response(String(m)))
+      await meta.put(NAMES_KEY, new Response(JSON.stringify(listed)))
    } catch {
       // best-effort — leave caches as-is
    }
@@ -494,7 +450,7 @@ sw.addEventListener("fetch", (event) => {
    const path = url.pathname
    if (RE_ASSET.test(path)) event.respondWith(pinnedCacheFirst(req, ASSETS))
    else if (RE_DB.test(path)) event.respondWith(dbNetworkFirst(req, event))
-   else if (parsePackName(path)) event.respondWith(pinnedCacheFirst(req, PACKS, true))
+   else if (parsePackName(path)) event.respondWith(pinnedCacheFirst(req, PACKS))
    else if (RE_SHELL_HASHED.test(path)) event.respondWith(cacheFirst(req, SHELL))
    // everything else (sw.js, favicon, sourcemaps) → default network passthrough
 })

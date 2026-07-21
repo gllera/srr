@@ -1120,36 +1120,3 @@ func TestFeedRmEmptyFeedNeedsNoForce(t *testing.T) {
 		t.Fatalf("removing an article-less feed: %v", err)
 	}
 }
-
-// gen --bump --dry-run previews the new generation and the CDN-purge duty
-// without committing.
-func TestGenBumpDryRun(t *testing.T) {
-	setupEmptyDB(t)
-	db, err := NewDB(ctx, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
-	db.Close(ctx)
-
-	out := captureCmdStdout(t)
-	if err := (&GenCmd{Bump: true, DryRun: true}).Run(); err != nil {
-		t.Fatalf("dry run: %v", err)
-	}
-	body := out.String()
-	for _, want := range []string{"gen 0 -> 1", "purge the CDN", "dry run"} {
-		if !strings.Contains(body, want) {
-			t.Errorf("dry-run report missing %q:\n%s", want, body)
-		}
-	}
-	d2, err := NewDB(ctx, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer d2.Close(ctx)
-	if d2.core.Gen != 0 {
-		t.Errorf("gen committed by a dry run: %d, want 0", d2.core.Gen)
-	}
-}

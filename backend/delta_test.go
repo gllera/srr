@@ -112,41 +112,51 @@ func driveDeltaStore(t *testing.T, maxDeltas int) (string, *DBCore, int) {
 		if err := db.Commit(ctx); err != nil {
 			t.Fatalf("batch %d: Commit: %v", bi, err)
 		}
-		if db.core.NumDeltas > maxNd {
-			maxNd = db.core.NumDeltas
+		if db.core.numDeltas() > maxNd {
+			maxNd = db.core.numDeltas()
 		}
 	}
 	core := db.core // copy
 	return dir, &core, maxNd
 }
 
-// storeFingerprint reads the raw bytes of every pack name the final core
-// claims: finalized idx/data/meta, the L<tailGen> tails, and the summaries.
+// storeFingerprint reads the raw bytes of every object the final core claims,
+// keyed by its POSITION rather than its name: finalized idx/data/meta by
+// position, each series' tail, and the two summaries.
+//
+// Positional, deliberately. Names are opaque stems drawn from a monotone
+// counter, so two runs that reach the same store through a different number of
+// consolidations legitimately land on different names — what must be identical
+// is the byte content at each position. (docs/MANIFEST-SPEC.md §13: the
+// consolidation-equivalence test survives, comparing per positional index
+// instead of per name.)
 func storeFingerprint(t *testing.T, dir string, c *DBCore) map[string][]byte {
 	t.Helper()
-	names := []string{latestKey(c, "idx"), latestKey(c, "data"), genKey("meta", tailGen(c))}
-	for p := range numFinalizedIdx(c.TotalArticles) {
-		names = append(names, finalizedIdxKey(p))
+	slots := map[string]string{} // logical slot -> store key
+	for _, series := range []string{idxSeries, dataSeries, metaSeries} {
+		s := c.Names.series(series)
+		for i, stem := range s.Stems {
+			pos := s.Base + i
+			label := fmt.Sprintf("%s@%d", series, pos)
+			if pos == s.Tail {
+				label = series + "@tail"
+			}
+			slots[label] = fmt.Sprintf("%s/%d.gz", series, stem)
+		}
 	}
-	for id := 1; id < c.NextPackID; id++ {
-		names = append(names, finalizedDataKey(id))
+	if c.Names.HSum != nil {
+		slots["hsum"] = c.Names.HSum.key()
 	}
-	for s := range c.MetaPacks {
-		names = append(names, finalizedMetaKey(s))
-	}
-	if c.HdrPacks > 0 {
-		names = append(names, summaryKey(c.HdrPacks))
-	}
-	if c.MetaPacks > 0 {
-		names = append(names, metaSummaryKey(c.MetaPacks))
+	if c.Names.SSum != nil {
+		slots["ssum"] = c.Names.SSum.key()
 	}
 	out := map[string][]byte{}
-	for _, name := range names {
+	for label, name := range slots {
 		b, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
-			t.Fatalf("fingerprint %s: %v", name, err)
+			t.Fatalf("fingerprint %s (%s): %v", label, name, err)
 		}
-		out[name] = b
+		out[label] = b
 	}
 	return out
 }
@@ -163,16 +173,20 @@ func TestConsolidationEquivalence(t *testing.T) {
 	}
 	dirB, coreB, _ := driveDeltaStore(t, 0)
 
-	jsonA, err := jsonEncode(coreA)
-	if err != nil {
-		t.Fatal(err)
+	// The published STATE must match. Deliberately not the name table: stems
+	// come from a monotone counter, so a store that reached this point through
+	// more consolidations legitimately holds different stems for the same
+	// positions — which is exactly what the positional fingerprint below
+	// compares.
+	state := func(c *DBCore) []byte {
+		b, err := jsonEncode([]any{c.ManifestState, c.ManifestWriterState, c.Feeds})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
 	}
-	jsonB, err := jsonEncode(coreB)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(jsonA, jsonB) {
-		t.Errorf("db.gz cores differ:\nA: %s\nB: %s", jsonA, jsonB)
+	if jsonA, jsonB := state(coreA), state(coreB); !bytes.Equal(jsonA, jsonB) {
+		t.Errorf("published state differs:\nA: %s\nB: %s", jsonA, jsonB)
 	}
 
 	fpA := storeFingerprint(t, dirA, coreA)
@@ -218,8 +232,8 @@ func TestDeltaCycleWritesOnlyDelta(t *testing.T) {
 	if err := db.SyncMeta(ctx, w1); err != nil {
 		t.Fatal(err)
 	}
-	tailIdx := latestKey(c, "idx")
-	tailData := latestKey(c, "data")
+	tailIdx := tailK(c, idxSeries)
+	tailData := tailK(c, dataSeries)
 	idxBefore, err := os.ReadFile(filepath.Join(dir, tailIdx))
 	if err != nil {
 		t.Fatal(err)
@@ -228,7 +242,7 @@ func TestDeltaCycleWritesOnlyDelta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mp, mt := c.MetaPacks, c.MetaTail
+	mp, mt := c.metaPacks(), c.MetaTail
 
 	// Batch 2: delta cycle.
 	globals.MaxDeltas = 4
@@ -241,10 +255,10 @@ func TestDeltaCycleWritesOnlyDelta(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if c.NumDeltas != 1 || c.DeltaArticles != 1 || c.DeltaBytes == 0 {
-		t.Errorf("chain counters: nd=%d na=%d dby=%d, want 1/1/>0", c.NumDeltas, c.DeltaArticles, c.DeltaBytes)
+	if c.numDeltas() != 1 || c.DeltaArticles != 1 || c.DeltaBytes == 0 {
+		t.Errorf("chain counters: nd=%d na=%d dby=%d, want 1/1/>0", c.numDeltas(), c.DeltaArticles, c.DeltaBytes)
 	}
-	if got := latestKey(c, "idx"); got != tailIdx {
+	if got := tailK(c, idxSeries); got != tailIdx {
 		t.Errorf("tail generation moved on a delta cycle: %s -> %s", tailIdx, got)
 	}
 	idxAfter, err := os.ReadFile(filepath.Join(dir, tailIdx))
@@ -258,7 +272,7 @@ func TestDeltaCycleWritesOnlyDelta(t *testing.T) {
 	if !bytes.Equal(idxBefore, idxAfter) || !bytes.Equal(dataBefore, dataAfter) {
 		t.Error("a delta cycle rewrote the tail packs")
 	}
-	raw := decompressGz(t, filepath.Join(dir, deltaKey(c.Seq)))
+	raw := decompressGz(t, filepath.Join(dir, lastDeltaK(c)))
 	entries, err := parseDataPack(raw)
 	if err != nil {
 		t.Fatal(err)
@@ -266,8 +280,8 @@ func TestDeltaCycleWritesOnlyDelta(t *testing.T) {
 	if len(entries) != 1 || entries[0].Title != "delta 1" {
 		t.Errorf("delta segment holds %v", entries)
 	}
-	if c.MetaPacks != mp || c.MetaTail != mt {
-		t.Errorf("SyncMeta advanced coverage on a delta cycle: mp %d->%d mt %d->%d", mp, c.MetaPacks, mt, c.MetaTail)
+	if c.metaPacks() != mp || c.MetaTail != mt {
+		t.Errorf("SyncMeta advanced coverage on a delta cycle: mp %d->%d mt %d->%d", mp, c.metaPacks(), mt, c.MetaTail)
 	}
 	if end := c.HeadBase + len(c.Head); end != c.TotalArticles {
 		t.Errorf("head end %d, want %d (extendHead must track delta cycles)", end, c.TotalArticles)
@@ -305,8 +319,8 @@ func TestDeltaWalkAndReadMirror(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if c.NumDeltas != 3 || tailCovered(c) != 2 {
-		t.Fatalf("setup: nd=%d tc=%d, want 3/2", c.NumDeltas, tailCovered(c))
+	if c.numDeltas() != 3 || tailCovered(c) != 2 {
+		t.Fatalf("setup: nd=%d tc=%d, want 3/2", c.numDeltas(), tailCovered(c))
 	}
 
 	var got []string
@@ -378,8 +392,8 @@ func TestDeltaChainSeamMonotonicity(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if tailCovered(c) != 2 || c.NumDeltas != 3 {
-		t.Fatalf("setup: tc=%d nd=%d, want 2/3", tailCovered(c), c.NumDeltas)
+	if tailCovered(c) != 2 || c.numDeltas() != 3 {
+		t.Fatalf("setup: tc=%d nd=%d, want 2/3", tailCovered(c), c.numDeltas())
 	}
 
 	fetch := func(key string) ([]byte, error) { return db.readGz(ctx, key) }
@@ -427,22 +441,22 @@ func TestDeltaBoundaryForcesConsolidation(t *testing.T) {
 	if _, err := db.PutArticles(ctx, mkBatch(4998, 0)); err != nil {
 		t.Fatal(err)
 	}
-	if c.NumDeltas != 1 {
-		t.Fatalf("first batch should be a delta cycle (nd=%d)", c.NumDeltas)
+	if c.numDeltas() != 1 {
+		t.Fatalf("first batch should be a delta cycle (nd=%d)", c.numDeltas())
 	}
 	c.FetchedAt += 300
 	w, err := db.PutArticles(ctx, mkBatch(10, 5000))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.NumDeltas != 0 {
-		t.Errorf("stratum-crossing batch did not consolidate (nd=%d)", c.NumDeltas)
+	if c.numDeltas() != 0 {
+		t.Errorf("stratum-crossing batch did not consolidate (nd=%d)", c.numDeltas())
 	}
 	if err := db.SyncMeta(ctx, w); err != nil {
 		t.Fatal(err)
 	}
-	if c.MetaPacks != 1 || c.MetaTail != c.TotalArticles-metaPackSize {
-		t.Errorf("meta coverage after boundary consolidation: mp=%d mt=%d total=%d", c.MetaPacks, c.MetaTail, c.TotalArticles)
+	if c.metaPacks() != 1 || c.MetaTail != c.TotalArticles-metaPackSize {
+		t.Errorf("meta coverage after boundary consolidation: mp=%d mt=%d total=%d", c.metaPacks(), c.MetaTail, c.TotalArticles)
 	}
 }
 
@@ -481,9 +495,9 @@ func TestDeltaByteCapForcesConsolidation(t *testing.T) {
 	capBytes := int64(globals.MaxDeltaBytes) << 10
 	consolidatedAt := -1
 	for i := range 50 {
-		ndBefore, dbyBefore := c.NumDeltas, c.DeltaBytes
+		ndBefore, dbyBefore := c.numDeltas(), c.DeltaBytes
 		put(i)
-		if ndBefore > 0 && c.NumDeltas == 0 {
+		if ndBefore > 0 && c.numDeltas() == 0 {
 			consolidatedAt = i
 			// The chain must have been UNDER the cap before this cycle (else a
 			// prior cycle would already have consolidated) and this batch is
@@ -497,8 +511,8 @@ func TestDeltaByteCapForcesConsolidation(t *testing.T) {
 	if consolidatedAt < 2 {
 		t.Fatalf("byte cap never forced a consolidation after a real delta chain (consolidatedAt=%d)", consolidatedAt)
 	}
-	if c.NumDeltas != 0 || c.DeltaArticles != 0 || c.DeltaBytes != 0 {
-		t.Errorf("consolidation did not reset the chain: nd=%d na=%d dby=%d", c.NumDeltas, c.DeltaArticles, c.DeltaBytes)
+	if c.numDeltas() != 0 || c.DeltaArticles != 0 || c.DeltaBytes != 0 {
+		t.Errorf("consolidation did not reset the chain: nd=%d na=%d dby=%d", c.numDeltas(), c.DeltaArticles, c.DeltaBytes)
 	}
 	// The consolidated tail round-trips every article across the pack↔delta seam.
 	var got int
@@ -564,7 +578,7 @@ func TestDeltaCheckTailIntactFatalOnCorruptTail(t *testing.T) {
 	// Corrupt the consolidated tail idx: strip everything after the fixed
 	// header so db.gz's entry count no longer fits, then re-gzip in place.
 	// checkLatestIdx reports a structural mismatch ("expects at least N bytes").
-	tailIdx := latestKey(c, "idx")
+	tailIdx := tailK(c, idxSeries)
 	raw := decompressGz(t, filepath.Join(dir, tailIdx))
 	rewriteGz(t, filepath.Join(dir, tailIdx), raw[:idxHeaderPrefix])
 
@@ -580,142 +594,50 @@ func TestDeltaCheckTailIntactFatalOnCorruptTail(t *testing.T) {
 	}
 }
 
-// TestGCLatestKeepsLiveChain pins the §8 respec: the GC horizon keys on the
-// tail generation and spans the chain, so the current tail, the grace-window
-// tail, and the just-consolidated deltas all survive while generations beyond
-// the window are swept.
-func TestGCLatestKeepsLiveChain(t *testing.T) {
+// The three per-series GC sweeps and their window formulas are retired
+// (docs/MANIFEST-SPEC.md §10.6). What replaces them is ONE rule — delete what
+// the last K manifests do not name — whose behaviour is pinned in
+// manifest_test.go. The delta-specific property that used to need its own GC
+// test (a live chain must survive the sweep) now holds by construction: the
+// chain is NAMED by the manifest this cycle publishes, so it is in the
+// reachable set, and no arithmetic horizon can be wrong about it.
+func TestGCKeepsTheLiveChain(t *testing.T) {
 	db, c, dir := setupTestDB(t)
-	globals.MaxDeltas = 2
+	globals.MaxDeltas = 8
 	globals.MaxDeltaBytes = 1 << 20
 	ch := &Feed{Title: "feed", URL: "https://example.com/f"}
 	if err := db.AddFeed(ch); err != nil {
 		t.Fatal(err)
 	}
+	// One consolidated base, then a live chain of three delta cycles.
+	globals.MaxDeltas = 0
+	putOneArticle(t, db, ch, 1)
+	globals.MaxDeltas = 8
+	for n := 2; n <= 4; n++ {
+		putOneArticle(t, db, ch, n)
+		if err := db.Commit(ctx); err != nil {
+			t.Fatalf("Commit #%d: %v", n, err)
+		}
+	}
+	if c.numDeltas() != 3 {
+		t.Fatalf("setup: %d delta segment(s), want 3", c.numDeltas())
+	}
+	live := append(c.Names.Deltas.keys(), tailK(c, idxSeries), tailK(c, dataSeries))
 
-	// 12 dirty cycles at MaxDeltas=2: deltas at g=1,2,4,5,7,8,10,11 and
-	// consolidations at g=3,6,9,12 (nd cap trips every third cycle).
-	for i := range 12 {
-		c.FetchedAt = 1_700_000_000 + int64(i)*300
-		if _, err := db.PutArticles(ctx, []*Item{{Feed: ch, Title: fmt.Sprintf("t%d", i), Content: "x", Published: int64(i + 1)}}); err != nil {
-			t.Fatal(err)
-		}
+	// Sweep with a window of zero: everything the CURRENT generation does not
+	// name is fair game, which is the harshest the rule can be.
+	if err := db.GC(ctx, 0); err != nil {
+		t.Fatalf("GC: %v", err)
 	}
-	if c.Seq != 12 || tailGen(c) != 12 || c.NumDeltas != 0 {
-		t.Fatalf("setup: seq=%d tailGen=%d nd=%d", c.Seq, tailGen(c), c.NumDeltas)
+	for _, key := range live {
+		assertKey(t, dir, key, true)
 	}
-
-	if err := db.GCLatest(ctx, latestKeep); err != nil {
-		t.Fatalf("GCLatest: %v", err)
+	// ...and the superseded tail packs from before the chain started are gone.
+	if err := db.Commit(ctx); err != nil {
+		t.Fatalf("Commit after GC: %v", err)
 	}
-	exists := func(name string) bool {
-		_, err := os.Stat(filepath.Join(dir, name))
-		return err == nil
-	}
-	// cutoff = 12 − 2 − 1 − 2·2 = 5, window 4+2=6 → swept g ∈ [1,5].
-	for _, name := range []string{genKey("idx", 12), genKey("data", 12), genKey("idx", 6), deltaKey(10), deltaKey(11), deltaKey(7)} {
-		if !exists(name) {
-			t.Errorf("%s swept but inside the grace window", name)
-		}
-	}
-	for _, name := range []string{genKey("idx", 3), genKey("data", 3), deltaKey(1), deltaKey(2), deltaKey(4), deltaKey(5)} {
-		if exists(name) {
-			t.Errorf("%s survived beyond the GC horizon", name)
-		}
-	}
-}
-
-// TestGCLatestLowWaterHealsBigJump pins the GC-stranding fix: GCLatest advances
-// a persisted low-water mark (GCLatestSwept) and clears (GCLatestSwept, cutoff],
-// so a jump larger than any fixed trailing window — a long-missed sweep (GC is
-// warn-only, post-Commit) or a lowered --max-deltas — never permanently strands
-// a tail generation. The pre-fix fixed window (gcSweepWindow+MaxDeltas) would
-// leave every generation below it orphaned forever once tailGen raced ahead.
-func TestGCLatestLowWaterHealsBigJump(t *testing.T) {
-	db, c, dir := setupTestDB(t)
-	globals.MaxDeltas = 2
-	globals.MaxDeltaBytes = 1 << 20
-	ch := &Feed{Title: "feed", URL: "https://example.com/f"}
-	if err := db.AddFeed(ch); err != nil {
-		t.Fatal(err)
-	}
-
-	// 24 dirty cycles with NO interleaved GCLatest — every sweep "missed", so
-	// tailGen races far ahead of the low-water (which starts at 0).
-	for i := range 24 {
-		c.FetchedAt = 1_700_000_000 + int64(i)*300
-		if _, err := db.PutArticles(ctx, []*Item{{Feed: ch, Title: fmt.Sprintf("t%d", i), Content: "x", Published: int64(i + 1)}}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if c.Seq != 24 || tailGen(c) != 24 || c.GCLatestSwept != 0 {
-		t.Fatalf("setup: seq=%d tailGen=%d swept=%d", c.Seq, tailGen(c), c.GCLatestSwept)
-	}
-
-	if err := db.GCLatest(ctx, latestKeep); err != nil {
-		t.Fatalf("GCLatest: %v", err)
-	}
-	exists := func(name string) bool {
-		_, err := os.Stat(filepath.Join(dir, name))
-		return err == nil
-	}
-	// cutoff = 24 − 2 − 1 − 2·2 = 17; one low-water run clears all of (0, 17].
-	if c.GCLatestSwept != 17 {
-		t.Fatalf("GCLatestSwept=%d, want 17", c.GCLatestSwept)
-	}
-	// The pre-fix fixed window (only g ∈ [12,17]) would have stranded these
-	// forever; the low-water sweep reaches all the way back to generation 1.
-	for _, name := range []string{genKey("idx", 3), genKey("data", 3), genKey("meta", 3), genKey("idx", 9), deltaKey(1), deltaKey(2), deltaKey(16)} {
-		if exists(name) {
-			t.Errorf("%s survived — low-water sweep failed to reach back past the old fixed window", name)
-		}
-	}
-	// The grace window (g > cutoff) still survives untouched.
-	for _, name := range []string{genKey("idx", 24), genKey("idx", 21), genKey("idx", 18), deltaKey(19), deltaKey(20)} {
-		if !exists(name) {
-			t.Errorf("%s swept but inside the grace window", name)
-		}
-	}
-	// A second call with nothing advanced is a no-op (from > to), leaving the
-	// low-water put.
-	if err := db.GCLatest(ctx, latestKeep); err != nil {
-		t.Fatalf("GCLatest (second): %v", err)
-	}
-	if c.GCLatestSwept != 17 {
-		t.Fatalf("GCLatestSwept=%d after no-op second call, want 17", c.GCLatestSwept)
-	}
-}
-
-// TestGCLatestPerRunCap pins the per-run bound: a backlog larger than gcMaxSweep
-// drains across runs (advancing the low-water by at most gcMaxSweep each), so a
-// single fetch cycle never issues an unbounded burst of store deletes, while
-// still never stranding a generation.
-func TestGCLatestPerRunCap(t *testing.T) {
-	db, c, _ := setupTestDB(t)
-	globals.MaxDeltas = 0 // kill switch: every cycle consolidates, tailGen == Seq
-	ch := &Feed{Title: "feed", URL: "https://example.com/f"}
-	if err := db.AddFeed(ch); err != nil {
-		t.Fatal(err)
-	}
-	// Push tailGen well past a single cap window without any GCLatest.
-	for i := range gcMaxSweep + 30 {
-		c.FetchedAt = 1_700_000_000 + int64(i)*300
-		if _, err := db.PutArticles(ctx, []*Item{{Feed: ch, Title: fmt.Sprintf("t%d", i), Content: "x", Published: int64(i + 1)}}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	cutoff := tailGen(c) - latestKeep - 1 // MaxDeltas==0
-	if err := db.GCLatest(ctx, latestKeep); err != nil {
-		t.Fatalf("GCLatest: %v", err)
-	}
-	if c.GCLatestSwept != gcMaxSweep {
-		t.Fatalf("first run swept to %d, want the cap %d", c.GCLatestSwept, gcMaxSweep)
-	}
-	if err := db.GCLatest(ctx, latestKeep); err != nil {
-		t.Fatalf("GCLatest (second): %v", err)
-	}
-	if c.GCLatestSwept != cutoff {
-		t.Fatalf("second run swept to %d, want cutoff %d", c.GCLatestSwept, cutoff)
+	if c.GCManifest == 0 {
+		t.Error("GC did not advance the low-water mark")
 	}
 }
 
@@ -749,17 +671,17 @@ func TestRemoveFeedDrainsLiveChain(t *testing.T) {
 	if _, err := db.PutArticles(ctx, []*Item{{Feed: old, Title: "old 2", Content: "x", Published: 3}}); err != nil {
 		t.Fatal(err)
 	}
-	if c.NumDeltas != 2 {
-		t.Fatalf("setup: nd=%d, want 2", c.NumDeltas)
+	if c.numDeltas() != 2 {
+		t.Fatalf("setup: nd=%d, want 2", c.numDeltas())
 	}
 
 	if err := db.RemoveFeed(ctx, old.id); err != nil {
 		t.Fatalf("RemoveFeed: %v", err)
 	}
-	if c.NumDeltas != 0 || c.DeltaArticles != 0 {
-		t.Fatalf("removal did not drain the chain: nd=%d na=%d", c.NumDeltas, c.DeltaArticles)
+	if c.numDeltas() != 0 || c.DeltaArticles != 0 {
+		t.Fatalf("removal did not drain the chain: nd=%d na=%d", c.numDeltas(), c.DeltaArticles)
 	}
-	if _, err := os.Stat(filepath.Join(dir, latestKey(c, "idx"))); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, tailK(c, idxSeries))); err != nil {
 		t.Fatalf("drain published no tail pack: %v", err)
 	}
 
@@ -838,16 +760,16 @@ func TestRemoveDormantFeedSkipsDrain(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if c.NumDeltas != 2 {
-		t.Fatalf("setup: nd=%d, want 2 (active's two cycles)", c.NumDeltas)
+	if c.numDeltas() != 2 {
+		t.Fatalf("setup: nd=%d, want 2 (active's two cycles)", c.numDeltas())
 	}
 
 	// Removing dormant must NOT drain the chain (it isn't in it).
 	if err := db.RemoveFeed(ctx, dormant.id); err != nil {
 		t.Fatalf("RemoveFeed: %v", err)
 	}
-	if c.NumDeltas != 2 || c.DeltaArticles != 2 {
-		t.Fatalf("dormant removal drained the chain: nd=%d na=%d, want 2/2", c.NumDeltas, c.DeltaArticles)
+	if c.numDeltas() != 2 || c.DeltaArticles != 2 {
+		t.Fatalf("dormant removal drained the chain: nd=%d na=%d, want 2/2", c.numDeltas(), c.DeltaArticles)
 	}
 	if _, ok := c.Feeds[dormant.id]; ok {
 		t.Fatalf("dormant feed still present after removal")
@@ -912,10 +834,10 @@ func TestSyncMetaCatchUpWithLiveChain(t *testing.T) {
 	if err := db.SyncMeta(ctx, w); err != nil {
 		t.Fatalf("catch-up SyncMeta: %v", err)
 	}
-	if c.MetaTail != 2 || c.MetaPacks != 0 {
-		t.Errorf("coverage: mp=%d mt=%d, want 0/2 (tailCovered)", c.MetaPacks, c.MetaTail)
+	if c.MetaTail != 2 || c.metaPacks() != 0 {
+		t.Errorf("coverage: mp=%d mt=%d, want 0/2 (tailCovered)", c.metaPacks(), c.MetaTail)
 	}
-	if _, err := os.Stat(filepath.Join(dir, genKey("meta", tailGen(c)))); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, tailK(c, metaSeries))); err != nil {
 		t.Errorf("meta tail not at the current tail generation: %v", err)
 	}
 	if end := c.HeadBase + len(c.Head); end != c.TotalArticles {

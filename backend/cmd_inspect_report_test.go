@@ -122,7 +122,7 @@ func TestInspectOneOffsetOutOfRange(t *testing.T) {
 	}
 	n := packIdxFor(4, len(packs))
 	pid, _ := packs[n].getPackRef(4)
-	dataKey := dataKeyFor(core, pid)
+	dataKey := posK(core, dataSeries, pid)
 	// Serve an empty data pack for chron 4's data key so any offset is OOB.
 	short := func(key string) ([]byte, error) {
 		if key == dataKey {
