@@ -113,7 +113,9 @@ function parseShard(buf: ArrayBuffer, skipBloom: boolean): Shard {
 const makeSummarySlot = () =>
    lazySlot(async () => {
       const nf = data.numFinalizedMeta()
-      const blooms = new Uint8Array(await data.fetchPackBytes(`meta/s${data.db.mp}.gz`, false))
+      const ssum = data.storeNames().ssum
+      if (!ssum) throw new Error("meta summary: the store names none")
+      const blooms = new Uint8Array(await data.fetchPackBytes(ssum.key, false))
       if (blooms.length !== nf * SEARCH_BLOOM_BYTES)
          throw new Error(`meta summary: ${blooms.length} bytes for ${nf} shards`)
       return blooms
@@ -121,17 +123,25 @@ const makeSummarySlot = () =>
 let loadSummary = makeSummarySlot()
 
 // Factory so invalidate() below can reissue a fresh slot — lazySlot has no reset of its own.
-// The tail shard lives at the TAIL generation (meta/L<tailGen>), not seq: with
-// a live delta chain seq runs ahead of the last consolidated tail.
+// Every meta key comes from the snapshot's resolved name list (data.storeNames,
+// docs/MANIFEST-SPEC.md §4.5): the tail is the series' tail POSITION — under a
+// legacy root that is the L<tailGen> generation, not L<seq>, since a live delta
+// chain runs seq ahead of the last consolidated tail.
 const makeLatestSlot = () =>
-   lazySlot(() => data.fetchPackBytes(`meta/L${data.tailGen()}.gz`, true).then((buf) => parseShard(buf, false)))
+   lazySlot(() => {
+      const meta = data.storeNames().meta
+      if (meta.tail < 0) throw new Error("meta tail: the store names none")
+      return data.fetchPackBytes(meta.keys[meta.tail], true).then((buf) => parseShard(buf, false))
+   })
 let loadLatest = makeLatestSlot()
 
 let shardCache = makeLRU<Promise<Shard>>(8)
 function loadShard(n: number): Promise<Shard> {
-   return cachedPromise(shardCache, n, () =>
-      data.fetchPackBytes(`meta/${n}.gz`, false).then((buf) => parseShard(buf, true)),
-   )
+   return cachedPromise(shardCache, n, () => {
+      const key = data.storeNames().meta.keys[n]
+      if (!key) throw new Error(`meta shard ${n}: the store names no object at that position`)
+      return data.fetchPackBytes(key, false).then((buf) => parseShard(buf, true))
+   })
 }
 
 // The resident delta chain projected as a synthetic Shard so the newest chrons

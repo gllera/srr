@@ -22,6 +22,19 @@ describe("parsePackName", () => {
       // Summaries: idx header (h) and meta bloom (s).
       expect(pack("idx/h2.gz")).toEqual({ series: "idx", kind: "h", n: 2 })
       expect(pack("meta/s4.gz")).toEqual({ series: "meta", kind: "s", n: 4 })
+      // The generation manifests and the db.gz snapshot series: bare stems,
+      // no kind letters (docs/MANIFEST-SPEC.md §4.5/§10.1). The manifest is the
+      // one the reader actually fetches, so the SW must route and cache it;
+      // `db` is inert (backend-only) but must still parse rather than fall
+      // through to the network as an unknown path.
+      expect(pack("manifest/1743.gz")).toEqual({ series: "manifest", kind: "", n: 1743 })
+      expect(pack("db/12.gz")).toEqual({ series: "db", kind: "", n: 12 })
+   })
+
+   it("rejects a kind letter on the bare-stem series", () => {
+      expect(pack("manifest/L3.gz")).toBeNull()
+      expect(pack("manifest/h3.gz")).toBeNull()
+      expect(pack("db/L3.gz")).toBeNull()
    })
 
    it("rejects a kind letter another series owns", () => {
