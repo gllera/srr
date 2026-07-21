@@ -48,7 +48,7 @@ func fakeFetcher(dbGz []byte) keyGetter {
 // the corrupt core reaches loadIdxPacks → parseIdxPack with a negative
 // packSize → makeslice panic. After the fix, loadCore itself returns an error.
 func TestLoadCoreRejectsNegativeTotalArticles(t *testing.T) {
-	core := DBCore{TotalArticles: -5, NextPackID: 1, Seq: 1}
+	core := DBCore{ManifestState: ManifestState{TotalArticles: -5}, WriterState: WriterState{NextPackID: 1, Seq: 1}}
 	gz := buildCoreGz(t, core)
 	_, err := loadCore(fakeFetcher(gz))
 	if err == nil {
@@ -67,9 +67,8 @@ func TestLoadCoreRejectsNegativeTotalArticles(t *testing.T) {
 func TestLoadCoreRejectsOversizedFeedID(t *testing.T) {
 	oversized := feedIDCeiling + 1 // e.g. 65537 — beyond the u16 ceiling
 	core := DBCore{
-		TotalArticles: 1,
-		NextPackID:    1,
-		Seq:           1,
+		ManifestState: ManifestState{TotalArticles: 1},
+		WriterState:   WriterState{NextPackID: 1, Seq: 1},
 		Feeds:         map[int]*Feed{oversized: {URL: "https://example.com/x"}},
 	}
 	gz := buildCoreGz(t, core)

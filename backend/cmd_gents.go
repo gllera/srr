@@ -124,37 +124,67 @@ export const PACK_SERIES_KINDS: Record<string, string> = {`)
 
 	for _, t := range tsTypes {
 		fmt.Fprintf(&b, "\n// Wire shape of %s.\nexport interface %s {\n", t.doc, t.name)
-		for i := range t.typ.NumField() {
-			f := t.typ.Field(i)
-			if f.PkgPath != "" { // unexported: never serialized
-				continue
-			}
-			if f.Anonymous {
-				return nil, fmt.Errorf("%s.%s: embedded fields are not supported", t.typ.Name(), f.Name)
-			}
-			name, opts, _ := strings.Cut(f.Tag.Get("json"), ",")
-			if name == "-" {
-				continue
-			}
-			if name == "" {
-				name = f.Name // encoding/json falls back to the Go field name
-			}
-			tsT, nilable, err := tsType(f.Type, wireNames)
-			if err != nil {
-				return nil, fmt.Errorf("%s.%s: %w", t.typ.Name(), f.Name, err)
-			}
-			switch {
-			case strings.Contains(","+opts+",", ",omitempty,"):
-				fmt.Fprintf(&b, "   %s?: %s // %s\n", name, tsT, f.Name)
-			case nilable:
-				fmt.Fprintf(&b, "   %s: %s | null // %s\n", name, tsT, f.Name)
-			default:
-				fmt.Fprintf(&b, "   %s: %s // %s\n", name, tsT, f.Name)
-			}
+		if err := emitFields(&b, t.typ, t.typ, wireNames); err != nil {
+			return nil, err
 		}
 		b.WriteString("}\n")
 	}
 	return []byte(b.String()), nil
+}
+
+// emitFields writes one struct's TS members, recursing through EMBEDDED
+// (anonymous, untagged) struct fields the way encoding/json does — their
+// exported fields are promoted into the outer object, so the wire shape is flat
+// even though the Go declaration is grouped. DBCore is grouped exactly that way
+// (docs/MANIFEST-SPEC.md §5.1: root / manifest / config / writer state), and the
+// grouping must not leak into the contract the reader parses. `owner` is only
+// used for error framing so a bad field names the type it was declared on.
+func emitFields(b *strings.Builder, owner, typ reflect.Type, wireNames map[reflect.Type]string) error {
+	for i := range typ.NumField() {
+		f := typ.Field(i)
+		if f.PkgPath != "" { // unexported: never serialized
+			continue
+		}
+		name, opts, _ := strings.Cut(f.Tag.Get("json"), ",")
+		if f.Anonymous {
+			if name != "" {
+				// A tagged embedded field is a NAMED object to encoding/json,
+				// not a promotion. Nothing in the contract does that today, and
+				// silently flattening one would emit a wrong shape.
+				return fmt.Errorf("%s.%s: a json-tagged embedded field is not supported", owner.Name(), f.Name)
+			}
+			et := f.Type
+			for et.Kind() == reflect.Pointer {
+				et = et.Elem()
+			}
+			if et.Kind() != reflect.Struct {
+				return fmt.Errorf("%s.%s: embedded non-struct fields are not supported", owner.Name(), f.Name)
+			}
+			if err := emitFields(b, et, et, wireNames); err != nil {
+				return err
+			}
+			continue
+		}
+		if name == "-" {
+			continue
+		}
+		if name == "" {
+			name = f.Name // encoding/json falls back to the Go field name
+		}
+		tsT, nilable, err := tsType(f.Type, wireNames)
+		if err != nil {
+			return fmt.Errorf("%s.%s: %w", owner.Name(), f.Name, err)
+		}
+		switch {
+		case strings.Contains(","+opts+",", ",omitempty,"):
+			fmt.Fprintf(b, "   %s?: %s // %s\n", name, tsT, f.Name)
+		case nilable:
+			fmt.Fprintf(b, "   %s: %s | null // %s\n", name, tsT, f.Name)
+		default:
+			fmt.Fprintf(b, "   %s: %s // %s\n", name, tsT, f.Name)
+		}
+	}
+	return nil
 }
 
 // tsType maps a Go type to its TypeScript wire type. nilable reports

@@ -779,6 +779,17 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 		if err := db.SyncSeen(ctx); err != nil {
 			return fmt.Errorf("sync seen pool: %w", err)
 		}
+		// Reclaim generation manifests older than the K-generation grace window
+		// (docs/MANIFEST-SPEC.md §7). Runs BEFORE the Commit — unlike the pack
+		// sweeps below — because the names it deletes are already superseded and
+		// referenced by nothing, so the low-water advance can ride this cycle's
+		// own Commit instead of forcing a second one every single cycle. Every
+		// other property is the pack sweeps': warn-only, idempotent (Rm is
+		// silent on missing), and a missed run resumes from the low-water rather
+		// than stranding anything.
+		if err := db.GCManifests(ctx, keepManifests); err != nil {
+			slog.Warn("gc manifests", "error", err)
+		}
 		if err := db.Commit(ctx); err != nil {
 			return err
 		}
