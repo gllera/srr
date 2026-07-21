@@ -7,6 +7,8 @@
 - **`backend/`** — Backend. Go CLI that fetches RSS/Atom/RDF feeds into gzip-compressed pack series. Backends: local filesystem, S3, SFTP, HTTP.
 - **`frontend/`** — Frontend. Single-page reader. Zero runtime deps. Parcel + TypeScript + plain CSS.
 
+The backend additionally exposes an **MCP tool interface** — seven tools (`srr_overview`, `srr_list_articles`, `srr_preview_feed`, `srr_resolve_feed`, `srr_add_feed`, `srr_update_feed`, `srr_fetch`) served over two transports: the `/mcp` endpoint `srr serve` mounts next to `/api/*` (inside the same loopback `hostGuard`), and stdio via `srr mcp`. Each tool wraps the function the CLI and admin GUI already call, so the three surfaces can't drift; `srr_update_feed` alone deviates, using merge-on-absent rather than the GUI's full replace. Backend-only — it is not part of the writer↔reader data contract below, and the reader never speaks it. Setup and caveats: root `README.md` → MCP; implementation: `backend/CLAUDE.md` → the `mcp.go` bullet.
+
 ## Commands
 
 All commands run from the repo root via `make`:
