@@ -1,7 +1,9 @@
 # Move the admin webui into the reader; `srr serve` becomes API-only
 
+> **Superseded (2026-07-21) by [`2026-07-21-admin-console-same-origin-design.md`](2026-07-21-admin-console-same-origin-design.md)** — this spec assumes a loopback-bound, unauthenticated `srr serve` on the operator's own machine; serve now runs on dmz behind Cloudflare Access, and the CORS / API-base-URL / Private-Network-Access decisions below were reversed. Kept for history; do not implement.
+
 - **Date:** 2026-06-29
-- **Status:** Design — awaiting review
+- **Status:** Superseded — see above
 - **Branch context:** `feat/cdn-auth`
 
 ## Motivation
