@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -56,6 +57,7 @@ type ArtCmd struct {
 	Tag    []string `short:"g" optional:"" help:"Filter by tag(s)."`
 	Limit  int      `short:"l" default:"50" help:"Max articles to return."`
 	Before *int     `short:"b" optional:"" help:"Return articles before this artID (exclusive). Omit for newest."`
+	Query  string   `short:"q" optional:"" help:"Only articles whose title contains this text (accent- and case-insensitive)."`
 	// No short flags: kong flattens the globals into every command, and -s/-u
 	// are already spoken for there.
 	Since string `optional:"" help:"Only articles fetched at or after this time (inclusive): a duration before now (24h, 7d, 2w), a date (2026-07-15), or an RFC3339 instant."`
@@ -107,6 +109,153 @@ type articlesOutput struct {
 	NextCursor *int            `json:"next_cursor,omitempty"`
 }
 
+// artQuery is one resolved article listing — the filters `listArticles`
+// answers, already parsed by whichever front end asked (CLI flags today, the
+// MCP tool layer next). The time window arrives as absolute unix-second
+// bounds rather than as the raw strings, so each caller keeps its own bound
+// grammar and its own error wording (ArtCmd.window's is test-pinned).
+type artQuery struct {
+	ids    []int
+	tags   []string
+	limit  int
+	before *int
+	since  *int64
+	until  *int64
+	query  string
+}
+
+// listArticles is the whole `srr art ls` collection body, factored out so
+// other consumers (the MCP tool layer) wrap it instead of forking it. The
+// caller owns the DB scope — this acquires no lock.
+func listArticles(ctx context.Context, db *DB, q artQuery) (*articlesOutput, error) {
+	// The title query is folded through the shared search contract
+	// (foldSearchText, mirrored by the frontend), so it matches
+	// accent- and case-insensitively. A query that folds to nothing — all
+	// punctuation — is rejected rather than silently matching everything:
+	// the empty string is a substring of every title.
+	var needle string
+	if q.query != "" {
+		if needle = foldSearchText(q.query); needle == "" {
+			return nil, fmt.Errorf("query %q holds no letters or numbers: there is nothing to search for", q.query)
+		}
+	}
+
+	total := db.core.TotalArticles
+	if total == 0 {
+		return &articlesOutput{Articles: []articleResult{}, Total: 0}, nil
+	}
+
+	// Build filter set (nil = accept all)
+	var filter map[int]bool
+	if len(q.ids) > 0 || len(q.tags) > 0 {
+		filter = map[int]bool{}
+		for _, id := range q.ids {
+			filter[id] = true
+		}
+		for _, tag := range q.tags {
+			for _, ch := range db.Feeds() {
+				if ch.Tag == tag {
+					filter[ch.id] = true
+				}
+			}
+		}
+	}
+
+	entries, deltas, err := readAllIdx(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+
+	reader := newPackReader(ctx, db, deltas)
+	lo, hi, err := reader.findWindow(entries, q.since, q.until)
+	if err != nil {
+		return nil, err
+	}
+
+	// matches decides one entry: the feed filter first (free), then the title
+	// query (which costs a data-pack read, served from the shared reader's
+	// cache). Both the Total count and the page collection run it, so Total
+	// stays "how many articles match", not "how many articles there are". A
+	// dangling entry — one addressing past the end of its pack — is a
+	// non-match: the content fill already tolerates that row by leaving it
+	// blank, and a query cannot confirm a title it can't read.
+	matches := func(e *idxEntry) (bool, error) {
+		if filter != nil && !filter[e.FeedID] {
+			return false, nil
+		}
+		if needle == "" {
+			return true, nil
+		}
+		ad, ok, err := reader.at(e.PackID, e.PackOffset)
+		if err != nil || !ok {
+			return false, err
+		}
+		return strings.Contains(foldSearchText(ad.Title), needle), nil
+	}
+
+	// Total counts the window, not the store: it answers "how many
+	// articles does this query match", which is what the returned page is
+	// drawn from.
+	filteredTotal := 0
+	for i := lo; i <= hi; i++ {
+		ok, err := matches(&entries[i])
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			filteredTotal++
+		}
+	}
+
+	startIdx := hi
+	if q.before != nil {
+		b := sort.Search(len(entries), func(i int) bool {
+			return entries[i].ChronIdx >= *q.before
+		}) - 1
+		if b < startIdx {
+			startIdx = b
+		}
+	}
+	if startIdx < lo {
+		return &articlesOutput{Articles: []articleResult{}, Total: filteredTotal}, nil
+	}
+
+	var results []articleResult
+	lastID := -1
+
+	for i := startIdx; i >= lo && len(results) < q.limit; i-- {
+		e := &entries[i]
+		ok, err := matches(e)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		results = append(results, articleResult{
+			Idx:        e.ChronIdx,
+			packID:     e.PackID,
+			packOffset: e.PackOffset,
+		})
+		lastID = e.ChronIdx
+	}
+
+	if len(results) > 0 {
+		if err := reader.loadContent(results); err != nil {
+			return nil, err
+		}
+	}
+
+	out := &articlesOutput{
+		Articles: results,
+		Total:    filteredTotal,
+	}
+	if lastID > 0 && len(results) == q.limit {
+		out.NextCursor = &lastID
+	}
+	return out, nil
+}
+
 func (o *ArtCmd) Run() error {
 	// Both bounds resolve against one `now`, so a relative window can't
 	// straddle a clock tick mid-command.
@@ -115,91 +264,18 @@ func (o *ArtCmd) Run() error {
 		return err
 	}
 	return withDB(false, func(ctx context.Context, db *DB) error {
-		total := db.core.TotalArticles
-		if total == 0 {
-			return printJSON(&articlesOutput{Articles: []articleResult{}, Total: 0})
-		}
-
-		// Build filter set (nil = accept all)
-		var filter map[int]bool
-		if len(o.ID) > 0 || len(o.Tag) > 0 {
-			filter = map[int]bool{}
-			for _, id := range o.ID {
-				filter[id] = true
-			}
-			for _, tag := range o.Tag {
-				for _, ch := range db.Feeds() {
-					if ch.Tag == tag {
-						filter[ch.id] = true
-					}
-				}
-			}
-		}
-
-		entries, deltas, err := readAllIdx(ctx, db)
+		out, err := listArticles(ctx, db, artQuery{
+			ids:    o.ID,
+			tags:   o.Tag,
+			limit:  o.Limit,
+			before: o.Before,
+			since:  since,
+			until:  until,
+			query:  o.Query,
+		})
 		if err != nil {
 			return err
 		}
-
-		reader := newPackReader(ctx, db, deltas)
-		lo, hi, err := reader.findWindow(entries, since, until)
-		if err != nil {
-			return err
-		}
-
-		// Total counts the window, not the store: it answers "how many
-		// articles does this query match", which is what the returned page is
-		// drawn from.
-		filteredTotal := 0
-		for i := lo; i <= hi; i++ {
-			if filter == nil || filter[entries[i].FeedID] {
-				filteredTotal++
-			}
-		}
-
-		startIdx := hi
-		if o.Before != nil {
-			b := sort.Search(len(entries), func(i int) bool {
-				return entries[i].ChronIdx >= *o.Before
-			}) - 1
-			if b < startIdx {
-				startIdx = b
-			}
-		}
-		if startIdx < lo {
-			return printJSON(&articlesOutput{Articles: []articleResult{}, Total: filteredTotal})
-		}
-
-		var results []articleResult
-		lastID := -1
-
-		for i := startIdx; i >= lo && len(results) < o.Limit; i-- {
-			e := &entries[i]
-			if filter != nil && !filter[e.FeedID] {
-				continue
-			}
-			results = append(results, articleResult{
-				Idx:        e.ChronIdx,
-				packID:     e.PackID,
-				packOffset: e.PackOffset,
-			})
-			lastID = e.ChronIdx
-		}
-
-		if len(results) > 0 {
-			if err := reader.loadContent(results); err != nil {
-				return err
-			}
-		}
-
-		out := &articlesOutput{
-			Articles: results,
-			Total:    filteredTotal,
-		}
-		if lastID > 0 && len(results) == o.Limit {
-			out.NextCursor = &lastID
-		}
-
 		return printJSON(out)
 	})
 }

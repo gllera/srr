@@ -654,6 +654,182 @@ func TestArtListWindowAcrossDeltaSeam(t *testing.T) {
 	}
 }
 
+// artQueryStore commits three fetch cycles of two articles each, titled so the
+// -q needle exercises the folding contract: accents, case, and a substring that
+// is not a whole word. Index 0 is the news feed, 1 the tech feed; the "Café"
+// family spans all three cycles so a query composes with a window and paging.
+func artQueryStore(t *testing.T) *DB {
+	t.Helper()
+	db, _, _ := setupTestDB(t)
+	f0 := &Feed{Title: "News feed", URL: "https://n.example/f", Tag: "news"}
+	f1 := &Feed{Title: "Tech feed", URL: "https://t.example/f", Tag: "tech"}
+	if err := db.AddFeed(f0); err != nil {
+		t.Fatalf("AddFeed f0: %v", err)
+	}
+	if err := db.AddFeed(f1); err != nil {
+		t.Fatalf("AddFeed f1: %v", err)
+	}
+	titles := [][2]string{
+		{"Café society", "unrelated one"},   // cycle 0: chron 0,1
+		{"CAFETERIA hours", "Le Café noir"}, // cycle 1: chron 2,3
+		{"unrelated two", "cafe latte"},     // cycle 2: chron 4,5
+	}
+	for i, pair := range titles {
+		db.core.FetchedAt = artCycleTimes[i].Unix()
+		items := []*Item{
+			{Feed: f0, Title: pair[0], Content: "body", Link: "l"},
+			{Feed: f1, Title: pair[1], Content: "body", Link: "l"},
+		}
+		if _, err := db.PutArticles(ctx, items); err != nil {
+			t.Fatalf("PutArticles cycle %d: %v", i, err)
+		}
+	}
+	if err := db.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	return db
+}
+
+// TestArtListQueryFold covers the -q title filter: the needle and every title
+// fold through foldSearchText (the shared search contract), so the match is
+// accent- and case-insensitive and lands on substrings, not just whole words;
+// Total counts the matches inside the window rather than the articles in it;
+// and the filter composes with -g, --since/--until and --before paging. A
+// query that folds to nothing is a hard error, never a match-everything.
+func TestArtListQueryFold(t *testing.T) {
+	artQueryStore(t)
+
+	t.Run("accent and case insensitive", func(t *testing.T) {
+		out := artRun(t, &ArtCmd{Limit: 50, Query: "cafe"})
+		want := []string{"cafe latte", "Le Café noir", "CAFETERIA hours", "Café society"}
+		if !artEqualStrs(artTitles(out), want) {
+			t.Errorf("titles = %v, want %v", artTitles(out), want)
+		}
+		if out.Total != 4 {
+			t.Errorf("Total = %d, want 4 (matches, not the 6-article store)", out.Total)
+		}
+		// The needle folds too: an accented, upper-cased query is the same query.
+		if alt := artRun(t, &ArtCmd{Limit: 50, Query: "CAFÉ"}); !artEqualStrs(artTitles(alt), want) {
+			t.Errorf("titles for %q = %v, want %v (the needle folds as well)", "CAFÉ", artTitles(alt), want)
+		}
+	})
+
+	t.Run("no match", func(t *testing.T) {
+		out := artRun(t, &ArtCmd{Limit: 50, Query: "zzz"})
+		if len(out.Articles) != 0 || out.Total != 0 {
+			t.Errorf("out = %+v, want an empty page with Total 0", out)
+		}
+	})
+
+	t.Run("composes with the feed filter", func(t *testing.T) {
+		out := artRun(t, &ArtCmd{Limit: 50, Query: "cafe", Tag: []string{"news"}})
+		if want := []string{"CAFETERIA hours", "Café society"}; !artEqualStrs(artTitles(out), want) {
+			t.Errorf("titles = %v, want %v (news feed only)", artTitles(out), want)
+		}
+		if out.Total != 2 {
+			t.Errorf("Total = %d, want 2", out.Total)
+		}
+	})
+
+	t.Run("Total counts matches inside the window", func(t *testing.T) {
+		// Cycles 1-2 only: three of the store's four "cafe" articles.
+		out := artRun(t, &ArtCmd{Limit: 50, Query: "cafe", Since: artStamp(1)})
+		want := []string{"cafe latte", "Le Café noir", "CAFETERIA hours"}
+		if !artEqualStrs(artTitles(out), want) {
+			t.Errorf("titles = %v, want %v", artTitles(out), want)
+		}
+		if out.Total != 3 {
+			t.Errorf("Total = %d, want 3 (window matches, excluding chron 0)", out.Total)
+		}
+		// The exclusive --until half narrows it to a single cycle.
+		out = artRun(t, &ArtCmd{Limit: 50, Query: "cafe", Since: artStamp(1), Until: artStamp(2)})
+		if want := []string{"Le Café noir", "CAFETERIA hours"}; !artEqualStrs(artTitles(out), want) {
+			t.Errorf("titles = %v, want %v (single cycle)", artTitles(out), want)
+		}
+		if out.Total != 2 {
+			t.Errorf("Total = %d, want 2", out.Total)
+		}
+	})
+
+	t.Run("paging with --before", func(t *testing.T) {
+		// Total stays the full match count on every page, while the cursor
+		// skips the non-matching entries between two matches.
+		p1 := artRun(t, &ArtCmd{Limit: 2, Query: "cafe"})
+		if want := []string{"cafe latte", "Le Café noir"}; !artEqualStrs(artTitles(p1), want) {
+			t.Fatalf("page1 titles = %v, want %v", artTitles(p1), want)
+		}
+		if p1.Total != 4 {
+			t.Errorf("page1 Total = %d, want 4 (all matches, not the page)", p1.Total)
+		}
+		if p1.NextCursor == nil || *p1.NextCursor != 3 {
+			t.Fatalf("page1 NextCursor = %v, want 3 (last returned match)", p1.NextCursor)
+		}
+
+		p2 := artRun(t, &ArtCmd{Limit: 2, Query: "cafe", Before: p1.NextCursor})
+		if want := []string{"CAFETERIA hours", "Café society"}; !artEqualStrs(artTitles(p2), want) {
+			t.Fatalf("page2 titles = %v, want %v", artTitles(p2), want)
+		}
+		if p2.Total != 4 {
+			t.Errorf("page2 Total = %d, want 4 (the match count is page-independent)", p2.Total)
+		}
+		// Page 2 ends on chron 0, which the pre-existing `lastID > 0` cursor
+		// guard suppresses — the query doesn't change that contract.
+		if p2.NextCursor != nil {
+			t.Errorf("page2 NextCursor = %v, want nil (last match is chron 0)", *p2.NextCursor)
+		}
+	})
+
+	t.Run("query composed with the window and paging", func(t *testing.T) {
+		p1 := artRun(t, &ArtCmd{Limit: 1, Query: "cafe", Since: artStamp(1)})
+		if want := []string{"cafe latte"}; !artEqualStrs(artTitles(p1), want) {
+			t.Fatalf("page1 titles = %v, want %v", artTitles(p1), want)
+		}
+		if p1.Total != 3 {
+			t.Errorf("page1 Total = %d, want 3 (window matches)", p1.Total)
+		}
+		p2 := artRun(t, &ArtCmd{Limit: 1, Query: "cafe", Since: artStamp(1), Before: p1.NextCursor})
+		if want := []string{"Le Café noir"}; !artEqualStrs(artTitles(p2), want) {
+			t.Fatalf("page2 titles = %v, want %v", artTitles(p2), want)
+		}
+		p3 := artRun(t, &ArtCmd{Limit: 1, Query: "cafe", Since: artStamp(1), Before: p2.NextCursor})
+		if want := []string{"CAFETERIA hours"}; !artEqualStrs(artTitles(p3), want) {
+			t.Fatalf("page3 titles = %v, want %v", artTitles(p3), want)
+		}
+		// Paging never walks below the --since bound to reach "Café society".
+		if p3.NextCursor != nil {
+			p4 := artRun(t, &ArtCmd{Limit: 1, Query: "cafe", Since: artStamp(1), Before: p3.NextCursor})
+			if len(p4.Articles) != 0 {
+				t.Errorf("page4 titles = %v, want none (window exhausted)", artTitles(p4))
+			}
+		}
+	})
+
+	t.Run("unsearchable query is a hard error", func(t *testing.T) {
+		err := artRunErr(t, &ArtCmd{Limit: 50, Query: "!!!"})
+		if !strings.Contains(err.Error(), "nothing to search") {
+			t.Errorf("error = %v, want a punctuation-only query refused", err)
+		}
+	})
+}
+
+// TestArtListQueryDanglingEntry pins a dangling idx entry — one addressing past
+// the end of its data pack — counting as a NON-match for -q rather than
+// erroring or slipping into the page with a blank title. The unqueried listing
+// still tolerates it as a blank row, so the two paths differ only in the query.
+func TestArtListQueryDanglingEntry(t *testing.T) {
+	db := artQueryStore(t)
+	artDropLastRecord(t, db) // chron 5 = "cafe latte", the newest match
+
+	out := artRun(t, &ArtCmd{Limit: 50, Query: "cafe"})
+	want := []string{"Le Café noir", "CAFETERIA hours", "Café society"}
+	if !artEqualStrs(artTitles(out), want) {
+		t.Errorf("titles = %v, want %v (the unreadable entry is a non-match)", artTitles(out), want)
+	}
+	if out.Total != 3 {
+		t.Errorf("Total = %d, want 3 (dangling entry excluded from the count too)", out.Total)
+	}
+}
+
 // TestArtListEmptyStore covers the total==0 short-circuit.
 func TestArtListEmptyStore(t *testing.T) {
 	db, _, _ := setupTestDB(t)
