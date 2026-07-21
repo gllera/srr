@@ -54,6 +54,54 @@ Or self-host the reader from the same store as the packs — one origin serves b
 
 The included GitHub Actions workflow (`cron.yml`) runs `srr art fetch` on manual dispatch, and the `cf-pages` job in `release.yml` deploys the hosted reader to Cloudflare Pages on version tags.
 
+## MCP
+
+`srr` exposes its store to MCP clients (Claude Code, Claude Desktop, …) as a small tool set, so an assistant can read the store and manage subscriptions without shelling out to the CLI. The tools wrap the very same functions the CLI and the admin GUI call, so the three surfaces cannot drift.
+
+### Tools
+
+| Tool | What it does | Network | Store |
+|---|---|---|---|
+| `srr_overview` | Whole-store snapshot in one read: every feed with its config and fetch-health vitals, tag buckets, recipes, syndication slots, store counters, running version. Start here to learn feed ids, tags and recipe names. | no | read |
+| `srr_list_articles` | Stored articles, newest first, with feed/tag, title-query and `since`/`until` filters plus cursor pagination. Content omitted unless `include_content` is set. | no | read |
+| `srr_preview_feed` | Dry-run a URL through the ingest + processing pipeline and return the articles it *would* store. Nothing is written. | yes | read |
+| `srr_resolve_feed` | Probe a URL for the canonical feed URL, its title and item count — the look-before-you-subscribe check. | yes | none |
+| `srr_add_feed` | Subscribe to a new feed (subscribe-time discovery folds a homepage to the feed it advertises). | yes | write |
+| `srr_update_feed` | Change an existing feed's settings. **Merge semantics**: only the fields you supply change; omitted fields keep their stored value, and an explicit empty value clears where clearing is allowed. | on `url` change | write |
+| `srr_fetch` | Run one full fetch cycle now (optionally restricted to feed ids), including retention, derived summaries and syndication outputs. | yes | write |
+
+### Registering it
+
+Over the HTTP endpoint `srr serve` mounts at `/mcp` (loopback):
+
+```bash
+srr -o ./packs serve                                    # admin GUI + /mcp on :8088
+claude mcp add --transport http srr http://localhost:8088/mcp
+```
+
+Over stdio, where the client spawns the process itself:
+
+```bash
+claude mcp add srr -- srr mcp
+```
+
+Remotely, when `srr serve` sits behind a Cloudflare tunnel + Access (the deployment `admin-srr.llera.eu` uses). **Operator step, not part of srr**: create an Access *Service Auth* policy for the hostname and issue a service token, then pass its two headers:
+
+```bash
+claude mcp add --transport http srr https://admin-srr.llera.eu/mcp \
+  --header "CF-Access-Client-Id: <id>" \
+  --header "CF-Access-Client-Secret: <secret>"
+```
+
+Use a `headersHelper` in `.mcp.json` instead of literal `--header` values to keep the secret out of a checked-in config.
+
+### Caveats
+
+- **`srr_fetch` can run for minutes** with no intermediate progress — the endpoint is stateless with plain JSON replies, so there are no progress notifications. Raise the client's tool timeout when a whole-store fetch is expected: `MCP_TOOL_TIMEOUT=600000` (ms).
+- **Writes contend with the fetch loop.** `srr_add_feed`, `srr_update_feed` and `srr_fetch` take the store lock; while a `srr serve --interval` cycle holds it they return `store busy: fetch cycle in progress; retry shortly` — the same 409 contract the admin GUI reports. Retry, don't change the arguments.
+- **`srr_list_articles`' exact `Total` with `query` reads every data pack inside the window.** Pair `query` with `since` (e.g. `"7d"`) on a large store.
+- The endpoint inherits serve's loopback Host guard, and `/mcp` exposes a strict subset of what `/api/*` already offers the same caller — there is no separate on/off flag.
+
 ## Project Structure
 
 ```
