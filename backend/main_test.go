@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -126,4 +129,28 @@ func TestEnvFirstResolver(t *testing.T) {
 			t.Errorf("Store = %q, want fromyaml (empty env falls through)", got)
 		}
 	})
+}
+
+// A cron health check must be able to tell the failure CLASSES apart without
+// scraping the message. kong owns 1 for usage errors, so the classes start
+// above it.
+func TestExitCodeForClassifiesFailures(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"lock contention", fmt.Errorf("create lock file: %w", os.ErrExist), exitLocked},
+		{"validation", fmt.Errorf("3 issue(s) found: %w", errValidation), exitValidation},
+		{"store missing", fmt.Errorf("fetch db.gz: %w", fs.ErrNotExist), exitStoreIO},
+		{"store permission", fmt.Errorf("open store: %w", fs.ErrPermission), exitStoreIO},
+		{"anything else", errors.New("bad recipe reference"), exitGeneric},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := exitCodeFor(c.err); got != c.want {
+				t.Errorf("exitCodeFor(%v) = %d, want %d", c.err, got, c.want)
+			}
+		})
+	}
 }

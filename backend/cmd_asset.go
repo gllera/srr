@@ -37,6 +37,7 @@ type AssetHealCmd struct {
 	File        string `arg:"" type:"existingfile" help:"File whose bytes replace the object."`
 	ContentType string `help:"Content-Type to store (default: derived from the key extension)."`
 	Create      bool   `help:"Also allow writing a key that does not exist — for re-creating a referenced-but-deleted object. Off by default so a typo'd key can't create an orphan."`
+	DryRun      bool   `short:"n" name:"dry-run" help:"Report what would be written (key, whether it exists, old/new size, content-type) and exit without touching the store."`
 }
 
 func (o *AssetHealCmd) Run() error {
@@ -46,7 +47,7 @@ func (o *AssetHealCmd) Run() error {
 		return err
 	}
 	defer be.Close()
-	return healAsset(ctx, be, o.Key, o.File, o.ContentType, o.Create)
+	return healAsset(ctx, be, o.Key, o.File, o.ContentType, o.Create, o.DryRun)
 }
 
 // healAsset validates the key, requires the object to already exist unless
@@ -54,7 +55,7 @@ func (o *AssetHealCmd) Run() error {
 // an object nothing references — but a referenced-but-deleted key is
 // legitimately re-created), and overwrites it with the file's bytes and the
 // given or derived Content-Type.
-func healAsset(ctx context.Context, be store.Backend, key, file, contentType string, create bool) error {
+func healAsset(ctx context.Context, be store.Backend, key, file, contentType string, create, dryRun bool) error {
 	if !assetKeyRe.MatchString(key) {
 		return fmt.Errorf("key %q is not an assets/<2-hex>/<16-hex><ext> key", key)
 	}
@@ -65,8 +66,18 @@ func healAsset(ctx context.Context, be store.Backend, key, file, contentType str
 	if rc == nil && !create {
 		return fmt.Errorf("key %q does not exist — pass --create if an article really references it", key)
 	}
+	exists := rc != nil
 	if rc != nil {
 		rc.Close()
+	}
+	// The size the object had before this heal. A heal that CHANGES the size
+	// skews the owning feed's AssetBytes counter (see the accepted-skew note
+	// below), so both numbers belong in the log line and in the preview.
+	var oldSize int64
+	if exists {
+		if n, err := be.Stat(ctx, key); err == nil {
+			oldSize = n
+		}
 	}
 
 	if contentType == "" {
@@ -84,10 +95,24 @@ func healAsset(ctx context.Context, be store.Backend, key, file, contentType str
 	if fi.Size() == 0 {
 		return fmt.Errorf("%q is empty — refusing to publish a zero-byte asset", file)
 	}
+	if dryRun {
+		fmt.Fprintf(stdout, "key: %s\n", key)
+		fmt.Fprintf(stdout, "  exists: %t%s\n", exists, map[bool]string{true: "", false: " (would be CREATED)"}[exists])
+		fmt.Fprintf(stdout, "  bytes: %d -> %d (delta %+d)\n", oldSize, fi.Size(), fi.Size()-oldSize)
+		fmt.Fprintf(stdout, "  content-type: %s\n", contentType)
+		fmt.Fprintf(stdout, "  after writing you MUST purge this exact URL on the CDN edge, or the old bytes keep serving\n")
+		fmt.Fprintln(stdout, "(dry run — nothing was written)")
+		return nil
+	}
 	if err := be.AtomicPut(ctx, key, f, store.ObjectMeta{ContentType: contentType}); err != nil {
 		return fmt.Errorf("store %q: %w", key, err)
 	}
-	slog.Info("asset healed", "key", key, "bytes", fi.Size(), "content_type", contentType)
+	// old_bytes/new_bytes make the AssetBytes skew auditable: the counter is
+	// per-feed and a heal does not know the owning feed, so it is NOT adjusted
+	// here (a documented, accepted skew — see backend/CLAUDE.md asset
+	// accounting). Logging the delta is what lets an operator reconcile it.
+	slog.Info("asset healed", "key", key, "old_bytes", oldSize, "new_bytes", fi.Size(),
+		"delta_bytes", fi.Size()-oldSize, "content_type", contentType)
 	// The heal overwrites an existing content-hash key in place — the one
 	// asset write that reuses a name. A CDN edge fronting the store caches
 	// asset keys under a year-long immutable TTL, so the heal stays invisible

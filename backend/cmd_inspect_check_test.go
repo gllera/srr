@@ -7,6 +7,11 @@ import (
 	"testing"
 )
 
+// ins is the InspectCmd receiver the report/check methods hang off. Its `out`
+// stays nil, so they write to os.Stdout — which is exactly what the
+// captureStdout-based assertions below read.
+var ins = &InspectCmd{}
+
 // inspBoundaryStore builds the boundary-crossing store (one finalized idx pack +
 // latest, one finalized-meta-shard series) used by the corruption-detection
 // tests, with the idx summary and meta shards published. The corruption tests
@@ -103,7 +108,7 @@ func TestFeedCountsFalsePositiveAfterHighestIDDelete(t *testing.T) {
 
 	// The continuity check must report 0 issues on a mathematically intact store.
 	packs := []*idxPack{pack0, pack1}
-	issues := checkFeedCountsContinuity(packs)
+	issues := ins.checkFeedCountsContinuity(packs)
 	if issues != 0 {
 		t.Errorf("checkFeedCountsContinuity: got %d issue(s), want 0 (false positive after highest-id feed delete)", issues)
 	}
@@ -128,7 +133,7 @@ func TestDBMetaCleanAfterExpiration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadIdxPacks: %v", err)
 	}
-	if issues := checkDBMeta(fetch, core, packs); issues != 0 {
+	if issues := ins.checkDBMeta(fetch, core, packs); issues != 0 {
 		t.Fatalf("checkDBMeta reported %d issues on an expired store", issues)
 	}
 }
@@ -149,7 +154,7 @@ func TestDBMetaFlagsOutOfRangeExpired(t *testing.T) {
 	}
 	// Exactly two checks fire: the xp range check (5 > total_art=1) and the
 	// live-count cross-check (live=1 but total_art-expired=-4).
-	if issues := checkDBMeta(fetch, core, packs); issues != 2 {
+	if issues := ins.checkDBMeta(fetch, core, packs); issues != 2 {
 		t.Fatalf("checkDBMeta reported %d issues, want exactly 2 (xp range + live count)", issues)
 	}
 }
@@ -172,7 +177,7 @@ func TestDBMetaFlagsOutOfRangeAddIdx(t *testing.T) {
 	// Exactly two checks fire: the add_idx range check (2 > TotalArticles=1)
 	// and the live-count cross-check (no entry sits at chron >= 2, so live=0
 	// but total_art-expired=1).
-	if issues := checkDBMeta(fetch, core, packs); issues != 2 {
+	if issues := ins.checkDBMeta(fetch, core, packs); issues != 2 {
 		t.Fatalf("checkDBMeta reported %d issues, want exactly 2 (add_idx range + live count)", issues)
 	}
 }
@@ -195,7 +200,7 @@ func TestDBMetaFlagsLiveCountMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadIdxPacks: %v", err)
 	}
-	if issues := checkDBMeta(fetch, core, packs); issues != 1 {
+	if issues := ins.checkDBMeta(fetch, core, packs); issues != 1 {
 		t.Fatalf("checkDBMeta reported %d issues, want exactly 1 (live-count mismatch)", issues)
 	}
 }
@@ -207,7 +212,7 @@ func TestCheckBoundsVsDataDetectsMismatch(t *testing.T) {
 	fetch, core := inspBoundaryStore(t)
 	packs := inspFreshPacks(t, fetch, core)
 	packs[0].feedIDs[5] = 2 // idx claims feed 2 at chron 5; data still says feed 1
-	if issues := checkBoundsVsData(fetch, core, packs, nil); issues == 0 {
+	if issues := ins.checkBoundsVsData(fetch, core, packs, nil); issues == 0 {
 		t.Error("checkBoundsVsData: 0 issues on a feed_id mismatch, want > 0")
 	}
 }
@@ -225,7 +230,7 @@ func TestCheckBoundsVsDataDetectsOOB(t *testing.T) {
 		}
 		return fetch(key)
 	}
-	if issues := checkBoundsVsData(trunc, core, packs, nil); issues == 0 {
+	if issues := ins.checkBoundsVsData(trunc, core, packs, nil); issues == 0 {
 		t.Error("checkBoundsVsData: 0 issues on out-of-range offsets, want > 0")
 	}
 }
@@ -237,7 +242,7 @@ func TestCheckUnknownFeedIDsDetectsUnregistered(t *testing.T) {
 	packs := inspFreshPacks(t, fetch, core)
 	c2 := inspCloneCore(core)
 	delete(c2.Feeds, 1) // every entry now references an unregistered feed
-	if issues := checkUnknownFeedIDs(c2, packs); issues == 0 {
+	if issues := ins.checkUnknownFeedIDs(c2, packs); issues == 0 {
 		t.Error("checkUnknownFeedIDs: 0 issues with an unregistered feed_id, want > 0")
 	}
 }
@@ -250,7 +255,7 @@ func TestCheckFeedCountsContinuityDetectsBreak(t *testing.T) {
 	t.Run("continuity break", func(t *testing.T) {
 		packs := inspFreshPacks(t, fetch, core)
 		packs[1].feedCounts[1] = 99999 // header disagrees with pack 0's cumulative
-		if issues := checkFeedCountsContinuity(packs); issues == 0 {
+		if issues := ins.checkFeedCountsContinuity(packs); issues == 0 {
 			t.Error("checkFeedCountsContinuity: 0 issues on a broken transition, want > 0")
 		}
 	})
@@ -262,7 +267,7 @@ func TestCheckFeedCountsContinuityDetectsBreak(t *testing.T) {
 		// transition, so issues>0 alone wouldn't prove the dedicated pack-0 check
 		// fired. Assert its distinctive message so removing that check fails here.
 		var issues int
-		out := captureStdout(t, func() { issues = checkFeedCountsContinuity(packs) })
+		out := captureStdout(t, func() { issues = ins.checkFeedCountsContinuity(packs) })
 		if issues == 0 {
 			t.Error("checkFeedCountsContinuity: 0 issues on a nonzero pack-0 header, want > 0")
 		}
@@ -283,7 +288,7 @@ func TestCheckIdxSummaryDetectsCorruption(t *testing.T) {
 	t.Run("base mismatch", func(t *testing.T) {
 		packs := inspFreshPacks(t, fetch, core)
 		packs[0].packIDBase += 100 // summary bases (on disk) no longer match
-		if issues := checkIdxSummary(fetch, core, packs); issues == 0 {
+		if issues := ins.checkIdxSummary(fetch, core, packs); issues == 0 {
 			t.Error("checkIdxSummary: 0 issues on a base mismatch, want > 0")
 		}
 	})
@@ -291,7 +296,7 @@ func TestCheckIdxSummaryDetectsCorruption(t *testing.T) {
 	t.Run("per-slot feedCount mismatch", func(t *testing.T) {
 		packs := inspFreshPacks(t, fetch, core)
 		packs[0].feedCounts[1] = 12345 // summary feedCount disagrees
-		if issues := checkIdxSummary(fetch, core, packs); issues == 0 {
+		if issues := ins.checkIdxSummary(fetch, core, packs); issues == 0 {
 			t.Error("checkIdxSummary: 0 issues on a feedCount mismatch, want > 0")
 		}
 	})
@@ -304,7 +309,7 @@ func TestCheckIdxSummaryDetectsCorruption(t *testing.T) {
 			}
 			return fetch(key)
 		}
-		if issues := checkIdxSummary(w, core, packs); issues == 0 {
+		if issues := ins.checkIdxSummary(w, core, packs); issues == 0 {
 			t.Error("checkIdxSummary: 0 issues on a truncated summary, want > 0")
 		}
 	})
@@ -319,7 +324,7 @@ func TestCheckIdxSummaryDetectsCorruption(t *testing.T) {
 			}
 			return b, err
 		}
-		if issues := checkIdxSummary(w, core, packs); issues == 0 {
+		if issues := ins.checkIdxSummary(w, core, packs); issues == 0 {
 			t.Error("checkIdxSummary: 0 issues on an over-slots chunk, want > 0")
 		}
 	})
@@ -333,7 +338,7 @@ func TestCheckIdxSummaryDetectsCorruption(t *testing.T) {
 			}
 			return b, err
 		}
-		if issues := checkIdxSummary(w, core, packs); issues == 0 {
+		if issues := ins.checkIdxSummary(w, core, packs); issues == 0 {
 			t.Error("checkIdxSummary: 0 issues on trailing summary data, want > 0")
 		}
 	})
@@ -351,7 +356,7 @@ func TestCheckMetaDetectsCorruption(t *testing.T) {
 	t.Run("latest tail count", func(t *testing.T) {
 		c2 := inspCloneCore(core)
 		c2.MetaTail = 0 // in range, but the latest shard really holds MetaTail entries
-		if issues := checkMeta(fetch, c2); issues == 0 {
+		if issues := ins.checkMeta(fetch, c2); issues == 0 {
 			t.Error("checkMeta: 0 issues on a wrong mt, want > 0")
 		}
 	})
@@ -363,7 +368,7 @@ func TestCheckMetaDetectsCorruption(t *testing.T) {
 		// by construction), so issues>0 alone wouldn't prove the overclaim
 		// early-return fired. Assert its distinctive message.
 		var issues int
-		out := captureStdout(t, func() { issues = checkMeta(fetch, c2) })
+		out := captureStdout(t, func() { issues = ins.checkMeta(fetch, c2) })
 		if issues == 0 {
 			t.Error("checkMeta: 0 issues on an mp overclaim, want > 0")
 		}
@@ -379,7 +384,7 @@ func TestCheckMetaDetectsCorruption(t *testing.T) {
 			}
 			return fetch(key)
 		}
-		if issues := checkMeta(w, core); issues == 0 {
+		if issues := ins.checkMeta(w, core); issues == 0 {
 			t.Error("checkMeta: 0 issues on a wrong-size summary, want > 0")
 		}
 	})
@@ -391,7 +396,7 @@ func TestCheckMetaDetectsCorruption(t *testing.T) {
 			}
 			return fetch(key)
 		}
-		if issues := checkMeta(w, core); issues == 0 {
+		if issues := ins.checkMeta(w, core); issues == 0 {
 			t.Error("checkMeta: 0 issues on a too-short shard, want > 0")
 		}
 	})
@@ -407,7 +412,7 @@ func TestCheckMetaDetectsCorruption(t *testing.T) {
 			}
 			return b, err
 		}
-		if issues := checkMeta(w, core); issues == 0 {
+		if issues := ins.checkMeta(w, core); issues == 0 {
 			t.Error("checkMeta: 0 issues on a wrong shard entry count, want > 0")
 		}
 	})
@@ -421,7 +426,7 @@ func TestCheckMetaDetectsCorruption(t *testing.T) {
 			}
 			return b, err
 		}
-		if issues := checkMeta(w, core); issues == 0 {
+		if issues := ins.checkMeta(w, core); issues == 0 {
 			t.Error("checkMeta: 0 issues on a summary/shard bloom mismatch, want > 0")
 		}
 	})
@@ -448,7 +453,7 @@ func TestCheckMetaDetectsCorruption(t *testing.T) {
 			}
 			return b, err
 		}
-		if issues := checkMeta(w, core); issues == 0 {
+		if issues := ins.checkMeta(w, core); issues == 0 {
 			t.Error("checkMeta: 0 issues when a shard's grams are absent from its bloom, want > 0")
 		}
 	})

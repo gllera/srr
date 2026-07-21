@@ -337,7 +337,7 @@ func parseFeedTitle(t *testing.T, rssTitle string) string {
 		`<item><title>` + rssTitle + `</title><link>http://example.com</link></item>` +
 		`</channel></rss>`)
 	var got string
-	_, err := ingest.ParseFeed(feed, func(i *mod.RawItem) error {
+	_, _, err := ingest.ParseFeed(feed, func(i *mod.RawItem) error {
 		if err := processItem(context.Background(), mod.New(), nil, i); err != nil {
 			return err
 		}
@@ -403,5 +403,58 @@ func TestProcessItemTitleStripsC1Controls(t *testing.T) {
 				t.Errorf("title = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// The reader resolves a relative reference against the PACK BASE, so plain
+// #feed content carrying site-relative URLs must be absolutized against the
+// item's own link before it reaches immutable packs. Ingest "#"-markers,
+// in-page fragment anchors, self-hosted assets/ keys, and anything already
+// absolute must survive untouched.
+func TestProcessItemAbsolutizesRelativeURLs(t *testing.T) {
+	i := &mod.RawItem{
+		Link: "https://ex.com/post/1",
+		Content: `<img src="/i.jpg"><img src="i.jpg"><a href="//cdn.ex.com/f">f</a>` +
+			`<a href="#fn1">fn</a><img src="#/photo.jpg"><img src="assets/ab/cdef.webp">` +
+			`<video src="https://other.org/v.mp4" poster="../p.jpg"></video>`,
+	}
+	if err := processItem(context.Background(), mod.New(), nil, i); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	for _, want := range []string{
+		`src="https://ex.com/i.jpg"`,      // rooted
+		`src="https://ex.com/post/i.jpg"`, // path-relative
+		`href="https://cdn.ex.com/f"`,     // protocol-relative
+		`poster="https://ex.com/p.jpg"`,   // dot-segment relative
+		`href="#fn1"`,                     // in-page anchor
+		`src="#/photo.jpg"`,               // ingest upload marker
+		`src="assets/ab/cdef.webp"`,       // self-hosted key (pack-base relative)
+		`src="https://other.org/v.mp4"`,   // already absolute
+	} {
+		if !strings.Contains(i.Content, want) {
+			t.Errorf("missing %s in %q", want, i.Content)
+		}
+	}
+}
+
+// A link that cannot serve as a base leaves content byte-identical, as does
+// content with nothing relative to resolve (no re-render).
+func TestProcessItemAbsolutizeNoOp(t *testing.T) {
+	const content = `<p ><img src='/i.jpg'>text &amp; more</p >`
+	for _, link := range []string{"", "not a url", "mailto:x@ex.com", "/relative/only"} {
+		i := &mod.RawItem{Link: link, Content: content}
+		if err := processItem(context.Background(), mod.New(), nil, i); err != nil {
+			t.Fatalf("processItem: %v", err)
+		}
+		if i.Content != content {
+			t.Errorf("link %q: content changed to %q, want verbatim", link, i.Content)
+		}
+	}
+	i := &mod.RawItem{Link: "https://ex.com/p/1", Content: `<p ><img src='https://x.org/a.jpg'></p >`}
+	if err := processItem(context.Background(), mod.New(), nil, i); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if i.Content != `<p ><img src='https://x.org/a.jpg'></p >` {
+		t.Errorf("absolute-only content re-rendered: %q", i.Content)
 	}
 }

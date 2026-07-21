@@ -15,7 +15,7 @@ import (
 func collectFeed(t *testing.T, data string) []*mod.RawItem {
 	t.Helper()
 	var items []*mod.RawItem
-	_, err := ParseFeed([]byte(data), func(item *mod.RawItem) error {
+	_, _, err := ParseFeed([]byte(data), func(item *mod.RawItem) error {
 		items = append(items, item)
 		return nil
 	})
@@ -44,7 +44,7 @@ func TestParseFeedTitle(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			title, err := ParseFeed([]byte(c.data), func(*mod.RawItem) error { return nil })
+			title, _, err := ParseFeed([]byte(c.data), func(*mod.RawItem) error { return nil })
 			if err != nil {
 				t.Fatalf("ParseFeed: %v", err)
 			}
@@ -210,7 +210,7 @@ func TestParseFeedNotFeedClassification(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := ParseFeed([]byte(c.data), func(*mod.RawItem) error { return nil })
+			_, _, err := ParseFeed([]byte(c.data), func(*mod.RawItem) error { return nil })
 			if err == nil {
 				t.Fatalf("expected an error for a non-feed document")
 			}
@@ -225,7 +225,7 @@ func TestParseFeedNotFeedClassification(t *testing.T) {
 // recognized-but-broken feed must surface a real error that is NOT errNotFeed
 // (so a mid-stream fault never spuriously triggers discovery).
 func TestParseFeedValidNotClassifiedNotFeed(t *testing.T) {
-	_, err := ParseFeed([]byte(`<rss version="2.0"><feed><item><title>A</title></item></feed></rss>`),
+	_, _, err := ParseFeed([]byte(`<rss version="2.0"><feed><item><title>A</title></item></feed></rss>`),
 		func(*mod.RawItem) error { return nil })
 	if err != nil {
 		t.Fatalf("valid feed returned error: %v", err)
@@ -318,7 +318,7 @@ func TestParseEmptyFeed(t *testing.T) {
 
 func TestParseCallbackError(t *testing.T) {
 	testErr := fmt.Errorf("custom callback error")
-	_, err := ParseFeed([]byte(`<rss version="2.0"><feed>
+	_, _, err := ParseFeed([]byte(`<rss version="2.0"><feed>
     <item><title>A</title></item>
   </feed></rss>`), func(*mod.RawItem) error {
 		return testErr
@@ -987,5 +987,112 @@ func TestFeedFetchDiscoveryByBodySniff(t *testing.T) {
 	}
 	if res.ResolvedURL != feedSrv.URL {
 		t.Errorf("ResolvedURL = %q, want discovered %q (body-sniff HTML detection)", res.ResolvedURL, feedSrv.URL)
+	}
+}
+
+// A malformed mid-feed element must stop the parse (the decoder is wedged) but
+// report the response as PARTIAL — non-error, prefix items kept — and a clean
+// parse must not carry the flag. The flag is what lets the caller withhold
+// validators/watermark so the remainder is refetched instead of stranded.
+func TestParseFeedPartialOnMalformedElement(t *testing.T) {
+	var items []*mod.RawItem
+	_, partial, err := ParseFeed([]byte(`<rss version="2.0"><channel>
+    <item><guid>a</guid><title>A</title></item>
+    <item><guid>b</guid><title>bad ]]> bytes</title></item>
+    <item><guid>c</guid><title>C</title></item>
+  </channel></rss>`), func(i *mod.RawItem) error {
+		items = append(items, i)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ParseFeed: %v", err)
+	}
+	if !partial {
+		t.Error("partial = false, want true for a malformed mid-feed element")
+	}
+	if len(items) != 1 || items[0].Title != "A" {
+		t.Fatalf("items = %d, want exactly the good prefix [A]", len(items))
+	}
+
+	_, partial, err = ParseFeed([]byte(`<rss version="2.0"><channel>
+    <item><guid>a</guid><title>A</title></item>
+  </channel></rss>`), func(*mod.RawItem) error { return nil })
+	if err != nil || partial {
+		t.Fatalf("clean parse: partial = %v, err = %v; want false, nil", partial, err)
+	}
+}
+
+// A partial parse must not populate the HTTP validators: storing them would let
+// the next cycle 304 on the same broken bytes and strand the unparsed remainder.
+func TestFeedFetchPartialWithholdsValidators(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("ETag", `"v1"`)
+		w.Header().Set("Last-Modified", "Mon, 01 Jan 2024 00:00:00 GMT")
+		fmt.Fprint(w, `<rss version="2.0"><channel>
+    <item><guid>a</guid><title>A</title></item>
+    <item><guid>b</guid><title>bad ]]> bytes</title></item>
+  </channel></rss>`)
+	}))
+	defer srv.Close()
+
+	fn := feedFunc(t)
+	buf := make([]byte, 1<<20)
+	res, err := fn(context.Background(), srv.Client(), buf, Request{URL: srv.URL, MaxSize: cap(buf) - 1})
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if !res.Partial {
+		t.Error("Result.Partial = false, want true")
+	}
+	if res.ETag != "" || res.LastModified != "" {
+		t.Errorf("validators = (%q, %q), want empty on a partial parse", res.ETag, res.LastModified)
+	}
+	if len(res.Items) != 1 {
+		t.Fatalf("items = %d, want the 1-item good prefix", len(res.Items))
+	}
+}
+
+// Every #feed request identifies the reader by version with a contact URL, and
+// declares feed types in Accept so a content-negotiating endpoint serves the
+// feed rather than HTML (which would cost a discovery double-fetch). Short
+// unknown User-Agents are also exactly what the WAF class blocking datacenter
+// egress scores against.
+func TestFeedFetchSendsIdentifyingHeaders(t *testing.T) {
+	fn := feedFunc(t)
+	buf := make([]byte, 1<<16)
+
+	var gotUA, gotAccept string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		gotAccept = r.Header.Get("Accept")
+		fmt.Fprint(w, rssFixture)
+	}))
+	defer srv.Close()
+
+	old := userAgent
+	defer func() { userAgent = old }()
+	SetUserAgent("SRR/9.9.9 (+https://github.com/gllera/srr)")
+
+	if _, err := fn(context.Background(), srv.Client(), buf, Request{URL: srv.URL, MaxSize: cap(buf) - 1}); err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if gotUA != "SRR/9.9.9 (+https://github.com/gllera/srr)" {
+		t.Errorf("User-Agent = %q, want the version+contact form set by SetUserAgent", gotUA)
+	}
+	for _, want := range []string{"application/rss+xml", "application/atom+xml", "application/rdf+xml;q=0.9", "text/html;q=0.4"} {
+		if !strings.Contains(gotAccept, want) {
+			t.Errorf("Accept = %q, missing %q", gotAccept, want)
+		}
+	}
+}
+
+// SetUserAgent("") is a no-op: the zero value must stay a well-formed header
+// rather than degrade to an empty User-Agent.
+func TestSetUserAgentIgnoresEmpty(t *testing.T) {
+	old := userAgent
+	defer func() { userAgent = old }()
+	SetUserAgent("")
+	if userAgent != old {
+		t.Errorf("userAgent = %q after SetUserAgent(\"\"), want it unchanged", userAgent)
 	}
 }

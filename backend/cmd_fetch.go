@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -39,8 +40,24 @@ type feedFilter struct {
 	ExcludeFeed []int    `sep:"," env:"SRR_FETCH_EXCLUDE_FEED" help:"Skip these feed ids; comma-separated or repeated."`
 }
 
+// shutdownGrace bounds how long an in-flight --interval cycle may keep running
+// after SIGTERM/SIGINT. The loop stops starting new cycles at once, but letting
+// the current one finish is what keeps a fetched-but-uncommitted batch (and the
+// packs it is mid-write on) from being thrown away by every graceful restart.
+// A second signal still hard-kills.
+const shutdownGrace = 30 * time.Second
+
 type FetchCmd struct {
 	Interval time.Duration `help:"Run fetch in a loop with this interval." default:"0" env:"SRR_FETCH_INTERVAL"`
+
+	// Spool / InboxProducers are the two halves of the inbox pattern, which
+	// splits fetch EGRESS from the single writer so a box with better network
+	// reach can fetch feeds the lock-holder cannot. See docs/INBOX-SPEC.md.
+	// Kong has no optional-value flags, so producer mode is a bool plus a name
+	// that defaults to this host's.
+	Spool          bool     `help:"Producer mode: fetch the selected feeds WITHOUT the store lock and spool the cycle to inbox/<name>.gz for a consolidator to drain, instead of writing packs. Requires an explicit --tag/--feed selector." env:"SRR_SPOOL"`
+	SpoolName      string   `name:"spool-name" help:"Producer slot name for --spool (default: this host's name)." env:"SRR_SPOOL_NAME"`
+	InboxProducers []string `name:"inbox-producers" sep:"," help:"Consolidator mode: drain these producers' inbox/<name>.gz spools into each cycle's batch." env:"SRR_INBOX_PRODUCERS"`
 
 	feedFilter
 
@@ -48,6 +65,14 @@ type FetchCmd struct {
 	// SyncOutFeeds call, carried across --interval cycles so an idle cycle whose
 	// out config + feed tags are unchanged can skip the redundant store walk.
 	lastOutSig string
+
+	// lastAttempt records, per feed id, the cycle time at which this process
+	// last selected that feed — the clock the failure backoff below counts
+	// from, since a failing feed's LastOK is frozen by definition. In-memory
+	// only: it matters solely in the long-running --interval loop (the one path
+	// where backoffActive() is true), and a restart deliberately clears it so a
+	// human restarting the loop gets one full poll before backoff resumes.
+	lastAttempt map[int]int64
 
 	// only restricts the cycle to these feed ids (empty = every feed). Set by
 	// the serve SSE handler for the GUI's single-feed fetch; an unknown id
@@ -161,10 +186,59 @@ func (o *FetchCmd) selectFeeds(db *DB) ([]*Feed, error) {
 		slog.Warn("feed filter: " + w)
 	}
 	if o.backoffActive() {
-		feeds = filterDue(feeds, db.core.FetchedAt,
+		now := db.core.FetchedAt
+		feeds = filterDue(feeds, o.lastAttempt, now,
 			int64(o.Interval/time.Second), int64(globals.FetchBackoffMax/time.Second))
+		// Stamp the attempt clock for everything this cycle selected, so the
+		// failure backoff has something to count from next cycle.
+		if o.lastAttempt == nil {
+			o.lastAttempt = make(map[int]int64, len(feeds))
+		}
+		for _, ch := range feeds {
+			o.lastAttempt[ch.id] = now
+		}
 	}
 	return feeds, nil
+}
+
+// spoolSlot resolves this producer's slot name: --spool-name, else the host's
+// name. It also enforces the deliberate-partition rule — a producer must carry
+// an explicit include selector, or it would spool the whole store and duplicate
+// the consolidator's own fetching.
+func (o *FetchCmd) spoolSlot() (string, error) {
+	if len(o.Tag) == 0 && len(o.Feed) == 0 {
+		return "", fmt.Errorf("--spool requires an explicit --tag or --feed selector (a spooled partition must be deliberate)")
+	}
+	name := o.SpoolName
+	if name == "" {
+		h, err := os.Hostname()
+		if err != nil {
+			return "", fmt.Errorf("resolve spool name: %w", err)
+		}
+		name = h
+	}
+	if !validSpoolName(name) {
+		return "", fmt.Errorf("invalid spool name %q: use letters, digits, '-', '_' or '.'", name)
+	}
+	return name, nil
+}
+
+// validSpoolName keeps a producer name inside one store key segment — the name
+// is operator-supplied and lands in a store key, so it must not be able to
+// escape the inbox/ prefix.
+func validSpoolName(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // backoffActive gates the dormancy backoff to the unattended full-set loop:
@@ -196,16 +270,50 @@ func targetInterval(ch *Feed, now, base, maxT int64) int64 {
 	return t
 }
 
-// filterDue keeps the feeds whose target interval has elapsed since their
-// last successful poll (LastOK — stamped on every success incl. 304, so it is
-// the real poll clock). A feed that produces an article snaps back to the
-// base automatically: LastNew moves to ~now, so targetInterval collapses to
-// base on the next cycle. Failing feeds freeze LastOK and are never skipped —
-// backoff must not mask an outage (their retry cadence is future work).
-func filterDue(feeds []*Feed, now, base, maxT int64) []*Feed {
+// retryInterval is a failing feed's retry cadence: the loop base doubled once
+// per consecutive failure and capped at maxT (the streak is clamped first so
+// the shift can't run away). Never below base — a failing feed must not be
+// polled more eagerly than a healthy one.
+func retryInterval(streak int, base, maxT int64) int64 {
+	if streak > 10 {
+		streak = 10
+	}
+	t := base << streak
+	if t <= 0 || t > maxT { // t <= 0 == shift overflow
+		t = maxT
+	}
+	if t < base {
+		return base
+	}
+	return t
+}
+
+// filterDue keeps the feeds whose target interval has elapsed since their last
+// poll. The clock differs by health, because the two states have different
+// evidence available:
+//
+//   - Healthy (FailStreak == 0): dormancy backoff off LastOK — stamped on every
+//     success incl. 304, so it is the real poll clock. A feed that produces an
+//     article snaps back to the base automatically: LastNew moves to ~now, so
+//     targetInterval collapses to base on the next cycle.
+//   - Failing: LastOK is frozen by definition, so `now - LastOK` is always past
+//     due and a dead feed would be retried every single cycle forever (16 dead
+//     feeds at a 5-min cadence = ~4,600 doomed requests/day). Count from this
+//     process's own lastAttempt clock instead, on an exponential cadence.
+//
+// Backoff only delays retries — it never hides the outage: ferr/fail_streak
+// keep reporting it, and the first success resets the streak so the feed snaps
+// straight back to the healthy path.
+func filterDue(feeds []*Feed, lastAttempt map[int]int64, now, base, maxT int64) []*Feed {
 	out := feeds[:0]
 	for _, ch := range feeds {
-		if now-ch.LastOK >= targetInterval(ch, now, base, maxT) {
+		var due bool
+		if ch.FailStreak > 0 {
+			due = now-lastAttempt[ch.id] >= retryInterval(ch.FailStreak, base, maxT)
+		} else {
+			due = now-ch.LastOK >= targetInterval(ch, now, base, maxT)
+		}
+		if due {
 			out = append(out, ch)
 		}
 	}
@@ -245,6 +353,51 @@ func runFeedFetch(ch *Feed, fetch func()) {
 	fetch()
 }
 
+// perHostConns caps how many feeds of one hostname are fetched at the same
+// time. Feed sets cluster hard on a few hosts (16 nitter feeds here, every
+// YouTube feed on one host), so an unbounded fan-out opens `--workers`
+// simultaneous connections to a single origin at a fixed 5-minute phase —
+// exactly the burst shape a datacenter-IP WAF scores as a bot. 2 keeps a
+// single-host cluster politely serialized; against a 5-minute interval the
+// extra wall-time is irrelevant.
+const perHostConns = 2
+
+// hostGate hands out per-hostname concurrency slots for the feed fan-out.
+// Scope is the feed-level fetch only: the per-item second pass (#readability,
+// #selfhost) targets article hosts and is deliberately left ungated.
+//
+// This bounds request *initiation*; the transport's MaxConnsPerHost only pools
+// the resulting connections, which is why both exist.
+type hostGate struct {
+	mu    sync.Mutex
+	slots map[string]chan struct{}
+}
+
+// acquire blocks until a slot for u's host is free and returns its release
+// func. A URL that does not parse (or carries no host) is not gated — the
+// fetch will fail on its own terms rather than be silently held up here.
+func (g *hostGate) acquire(u string) func() {
+	p, err := url.Parse(u)
+	if err != nil || p.Hostname() == "" {
+		return func() {}
+	}
+	host := p.Hostname()
+
+	g.mu.Lock()
+	if g.slots == nil {
+		g.slots = map[string]chan struct{}{}
+	}
+	ch, ok := g.slots[host]
+	if !ok {
+		ch = make(chan struct{}, perHostConns)
+		g.slots[host] = ch
+	}
+	g.mu.Unlock()
+
+	ch <- struct{}{}
+	return func() { <-ch }
+}
+
 // feedProgress reports one feed's outcome to a runFetch caller (the SSE handler).
 type feedProgress struct {
 	ID    int    `json:"id"`
@@ -277,7 +430,17 @@ func (o *FetchCmd) fetchLoop(ctx context.Context, client *http.Client) error {
 		return runCycleSafe(func() error { return o.runFetch(ctx, client, nil) })
 	}
 	for {
-		if err := runCycleSafe(func() error { return o.runFetch(ctx, client, nil) }); err != nil {
+		// The cycle runs under a DETACHED, bounded context: on SIGTERM the loop
+		// must stop starting new cycles immediately (the ctx.Done() check below)
+		// but must not cancel the cycle already in flight — that discards a batch
+		// already fetched but not yet committed, on every graceful restart. The
+		// grace bound keeps a wedged cycle from blocking shutdown forever, and a
+		// second signal still hard-kills (NotifyContext restores default handling
+		// after the first).
+		cycleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownGrace)
+		err := runCycleSafe(func() error { return o.runFetch(cycleCtx, client, nil) })
+		cancel()
+		if err != nil {
 			slog.Error("fetch iteration failed", "err", err)
 		}
 		select {
@@ -349,8 +512,31 @@ func newFetchClient(workers int) *http.Client {
 // once per feed as it finishes; onFeed may run from worker goroutines, so
 // callers must guard it.
 func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed func(feedProgress)) error {
-	return withDBCtx(ctx, true, func(ctx context.Context, db *DB) error {
+	// A producer opens the store read-only and takes NO lock: it writes exactly
+	// one object (its own spool slot) plus content-hash assets, both safe from
+	// any box. Only the consolidator writes packs.
+	return withDBCtx(ctx, !o.Spool, func(ctx context.Context, db *DB) error {
 		db.core.FetchedAt = time.Now().UTC().Unix()
+
+		var spoolName string
+		if o.Spool {
+			var err error
+			if spoolName, err = o.spoolSlot(); err != nil {
+				return err
+			}
+			// Single-slot backpressure: an undrained previous spool means this
+			// producer's read-only view of the dedup state is already one cycle
+			// ahead of the store, so fetching again would re-ingest against stale
+			// state. Skip the cycle entirely instead.
+			size, err := db.Stat(ctx, inboxKey(spoolName))
+			if err != nil {
+				return fmt.Errorf("probe spool slot: %w", err)
+			}
+			if size > 0 {
+				slog.Info("previous spool not yet drained; skipping cycle", "producer", spoolName)
+				return nil
+			}
+		}
 		// Asset uploader for the end-of-pipeline self-hosting step, shared across
 		// workers (the store backend is concurrent-safe). It reads files an ingest
 		// strategy left in the run's cache dir and uploads them under a
@@ -429,6 +615,11 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 			return err
 		}
 
+		// Pre-fetch failure streaks, so the summary phase can spot the
+		// threshold crossings and recoveries this cycle produced. nil (and inert)
+		// unless a notify command is configured.
+		notify := snapshotNotify(feeds)
+
 		// Live stats on the terminal status line while the cycle runs (feeds
 		// done/total, new articles, failures, asset jobs). No-op when stderr
 		// isn't a tty (service/cron runs), so logs stay clean.
@@ -438,11 +629,18 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 		g, gctx := errgroup.WithContext(ctx)
 		g.SetLimit(globals.Workers)
 
+		// Politeness: at most perHostConns feeds of one hostname in flight,
+		// whatever --workers allows overall.
+		gate := &hostGate{}
+
 		for _, ch := range feeds {
 			if ctx.Err() != nil {
 				break
 			}
 			g.Go(func() error {
+				release := gate.acquire(ch.URL)
+				defer release()
+
 				buf := bufPool.Get().(*[]byte)
 				defer bufPool.Put(buf)
 				processor := procPool.Get().(*mod.Module)
@@ -460,7 +658,33 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 		// (zopfli-grade finalization can take a while on a big batch).
 		progress.setSaving()
 
-		var articles []*Item
+		// Producer mode ends here: publish the cycle as one write-once envelope
+		// and touch nothing else. No packs, no summaries, no expiration, no GC —
+		// all of that belongs to the lock-holding consolidator.
+		if o.Spool {
+			env := spoolEnvelope(spoolName, db.core.FetchedAt, feeds)
+			if err := writeInbox(ctx, db.Backend, spoolName, env); err != nil {
+				return err
+			}
+			spooled := 0
+			for _, rec := range env.Feeds {
+				spooled += len(rec.Items)
+			}
+			slog.Info("spooled fetch cycle", "producer", spoolName,
+				"cycle_id", env.CycleID, "feeds", len(env.Feeds), "articles", spooled)
+			return nil
+		}
+
+		// The seen-pool day stamp, shared by the inbox drain below and this
+		// cycle's own stamp merge further down.
+		today := uint16(db.core.FetchedAt / 86400)
+
+		// Fold in any producer spools BEFORE the batch is assembled, so drained
+		// articles ride this cycle's published-sort and — crucially — its
+		// fetched_at stamp, keeping fetched_at chron-monotone (see
+		// docs/INBOX-SPEC.md).
+		articles, drainedSlots := db.drainInbox(ctx, o.InboxProducers, today)
+
 		for _, ch := range feeds {
 			articles = append(articles, ch.newItems...)
 		}
@@ -477,7 +701,6 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 		// while stamps come only from feeds fetched this cycle. SyncSeen (before
 		// Commit, below) persists it; the pool's dirty flag skips the write on an
 		// idle cycle that changed nothing.
-		today := uint16(db.core.FetchedAt / 86400)
 		for _, ch := range feeds {
 			for _, h := range ch.seenStamps {
 				db.seen.stamp(ch.id, h, today)
@@ -567,6 +790,20 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 		// is log-only; WithoutCancel keeps a shutdown signal from widening
 		// the leak window.
 		gcCtx := context.WithoutCancel(ctx)
+		// The drained watermark is durable now, so the slots can go. Warn-only
+		// and idempotent: a slot that survives is SKIPPED (never re-applied) next
+		// cycle by the watermark check, and reaped then.
+		reapInbox(gcCtx, db.Backend, drainedSlots)
+		// Publish the pointer-state backup on the same signal GCLatest uses (the
+		// tail generation advanced ⇒ this was a consolidation cycle), BEFORE the
+		// sweeps below mutate GCLatestSwept — so the snapshot is byte-identical
+		// to the db.gz just committed. Warn-only: the batch is already durable,
+		// and a failed backup must never fail the cycle that produced it.
+		if tailGen(&db.core) != prevTail {
+			if err := db.SnapshotDB(gcCtx); err != nil {
+				slog.Warn("db.gz snapshot", "error", err)
+			}
+		}
 		prevGCSwept := db.core.GCLatestSwept
 		for _, gc := range []struct {
 			advanced bool
@@ -635,6 +872,11 @@ func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed fun
 			"fetched", totalFeeds-failed,
 			"failed", failed,
 		)
+		// Alert on the outages/recoveries this cycle produced. Last, after the
+		// batch is durable: an operator's notify command must never be able to
+		// affect what got stored. WithoutCancel so a shutdown mid-summary still
+		// delivers the alert the cycle already decided to send.
+		notify.fire(context.WithoutCancel(ctx), feeds)
 		return nil
 	})
 }

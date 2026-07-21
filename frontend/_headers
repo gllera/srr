@@ -1,0 +1,9 @@
+# Cloudflare Pages header rules, copied into dist/srrf/ by `make build-fe`.
+# The CSP is the reader's script-injection backstop: article HTML is untrusted
+# and lives in the main DOM — even a sanitizer bypass must not execute script.
+# Deliberately NO img-src/media-src/connect-src: the user-configured image
+# proxy, sync endpoint, and arbitrary feed media make those unviable.
+# index.html carries the same policy as a <meta> fallback for store-root
+# deployments (srrf.tar.gz), where no header layer exists.
+/*
+  Content-Security-Policy: script-src 'self'; object-src 'none'; base-uri 'none'

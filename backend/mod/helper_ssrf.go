@@ -16,14 +16,24 @@ var AllowPrivateFetch bool
 
 // extraBlockedCIDRs are ranges the stdlib IP predicates don't cover but an SSRF
 // probe can still reach into infrastructure:
+//   - 0.0.0.0/8 — "this network"; on Linux connect() to 0.x.y.z reaches
+//     127.0.0.x, the classic loopback bypass (only 0.0.0.0 itself is
+//     IsUnspecified).
 //   - 100.64.0.0/10 — CGNAT / carrier-grade NAT; some providers put internal
 //     services here (Alibaba Cloud's metadata endpoint is 100.100.100.200).
-//   - 64:ff9b::/96 — the NAT64 well-known prefix; it embeds an IPv4 address, so
-//     64:ff9b::a9fe:a9fe reaches 169.254.169.254 where a NAT64 gateway exists.
+//   - 192.0.0.0/24 — IETF protocol assignments (DS-Lite gateways et al).
 //   - 198.18.0.0/15 — IETF benchmarking assignment (RFC 2544).
+//   - 240.0.0.0/4 — reserved/experimental space, no legitimate feed host.
+//   - 64:ff9b::/96 — the NAT64 well-known prefix. Blocked WHOLESALE (not just
+//     via embeddedIPv4): a NAT64 gateway is itself infrastructure, so even a
+//     public embedded v4 has no business being dialed through one.
 var extraBlockedCIDRs = func() []*net.IPNet {
-	nets := make([]*net.IPNet, 0, 3)
-	for _, c := range []string{"100.64.0.0/10", "64:ff9b::/96", "198.18.0.0/15"} {
+	cidrs := []string{
+		"0.0.0.0/8", "100.64.0.0/10", "192.0.0.0/24",
+		"198.18.0.0/15", "240.0.0.0/4", "64:ff9b::/96",
+	}
+	nets := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
 		if _, n, err := net.ParseCIDR(c); err == nil {
 			nets = append(nets, n)
 		}
@@ -31,21 +41,53 @@ var extraBlockedCIDRs = func() []*net.IPNet {
 	return nets
 }()
 
-// blockedIP reports whether ip is a private, loopback, link-local, unique-local
-// (covered by IsPrivate for fc00::/7), unspecified, or multicast address — plus
-// the extraBlockedCIDRs — i.e. the ranges an SSRF probe would target (internal
-// services, cloud metadata at 169.254.169.254 or 100.100.100.200, NAT64,
-// localhost-bound admin ports).
+// embeddedIPv4 returns the IPv4 address embedded in the v6 transition formats
+// that carry one, else nil. Dialing one of these really reaches that v4
+// endpoint, so blockedIP recurses on the extraction — otherwise a loopback or
+// RFC-1918 v4 walks past every check wearing a v6 costume (2002:7f00:0001:: is
+// 127.0.0.1). Never recurses twice: the result is a v4, which yields nil here.
+func embeddedIPv4(ip net.IP) net.IP {
+	ip = ip.To16()
+	if ip == nil || ip.To4() != nil {
+		return nil // not v6 (To4 also covers the ::ffff: v4-mapped form)
+	}
+	switch {
+	case ip[0] == 0x20 && ip[1] == 0x02: // 6to4, 2002::/16 — v4 in bytes 2-5
+		return net.IPv4(ip[2], ip[3], ip[4], ip[5])
+	case ip[0] == 0x20 && ip[1] == 0x01 && ip[2] == 0x00 && ip[3] == 0x00: // Teredo, 2001::/32
+		// The client v4 is the last 4 bytes, obfuscated by XOR with 0xff.
+		return net.IPv4(ip[12]^0xff, ip[13]^0xff, ip[14]^0xff, ip[15]^0xff)
+	case ip[0] == 0x00 && ip[1] == 0x64 && ip[2] == 0xff && ip[3] == 0x9b: // NAT64, 64:ff9b::/96
+		return net.IPv4(ip[12], ip[13], ip[14], ip[15])
+	}
+	return nil
+}
+
+// blockedIP reports whether ip is one an SSRF probe would target: internal
+// services, cloud metadata (169.254.169.254, 100.100.100.200), NAT64 gateways,
+// localhost-bound admin ports — including a v4 smuggled inside a v6 transition
+// address.
+//
+// The gate is deny-unless-global-unicast: one predicate covers unspecified,
+// loopback, link-local (unicast and multicast), every multicast address,
+// 255.255.255.255, AND a malformed/wrong-length IP, so the guard fails closed
+// and cannot be outlived by a range nobody enumerated. IsGlobalUnicast is true
+// for the private/CGNAT ranges, so the specific checks still have to run after
+// it.
 func blockedIP(ip net.IP) bool {
-	if ip.IsLoopback() || ip.IsPrivate() ||
-		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-		ip.IsUnspecified() || ip.IsMulticast() {
+	if !ip.IsGlobalUnicast() {
+		return true
+	}
+	if ip.IsPrivate() { // RFC 1918 + unique-local fc00::/7
 		return true
 	}
 	for _, n := range extraBlockedCIDRs {
 		if n.Contains(ip) {
 			return true
 		}
+	}
+	if v4 := embeddedIPv4(ip); v4 != nil {
+		return blockedIP(v4)
 	}
 	return false
 }

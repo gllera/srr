@@ -1045,3 +1045,111 @@ func TestNormalizeFeedRejectsHugeExpireDays(t *testing.T) {
 		t.Fatalf("ExpireDays == ceiling rejected: %v", err)
 	}
 }
+
+// feed rm is irreversible — the removed feed's idx entries stay in the
+// immutable packs as orphans forever. --dry-run must report the consequences
+// and change nothing; without --force, removing a feed that HAS stored
+// articles must be refused outright.
+func TestFeedRmDryRunAndForceGuard(t *testing.T) {
+	setupEmptyDB(t)
+	if err := (&AddCmd{Title: strPtr("News"), URL: strPtr("https://n.example.com/rss"), Tag: strPtr("world")}).Run(); err != nil {
+		t.Fatal(err)
+	}
+	// Give it stored articles (the irreversible case) via the db directly.
+	db, err := NewDB(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Feeds()[0].TotalArt = 7
+	if err := db.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	db.Close(ctx)
+
+	out := captureCmdStdout(t)
+	if err := (&RmCmd{ID: []int{0}, DryRun: true}).Run(); err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	body := out.String()
+	for _, want := range []string{`feed 0: "News"`, "live articles: 7", "dry run"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dry-run report missing %q:\n%s", want, body)
+		}
+	}
+	assertFeedCount := func(want int) {
+		t.Helper()
+		d, err := NewDB(ctx, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer d.Close(ctx)
+		if got := len(d.Feeds()); got != want {
+			t.Fatalf("feed count = %d, want %d", got, want)
+		}
+	}
+	assertFeedCount(1)
+
+	// Unforced removal of a feed with articles is refused.
+	err = (&RmCmd{ID: []int{0}}).Run()
+	if err == nil {
+		t.Fatal("removal of a feed with stored articles was allowed without --force")
+	}
+	if !strings.Contains(err.Error(), "--force") {
+		t.Errorf("error = %v, want it to point at --force", err)
+	}
+	assertFeedCount(1)
+
+	// --force goes through.
+	saved := globals.Force
+	globals.Force = true
+	t.Cleanup(func() { globals.Force = saved })
+	if err := (&RmCmd{ID: []int{0}}).Run(); err != nil {
+		t.Fatalf("forced removal: %v", err)
+	}
+	assertFeedCount(0)
+}
+
+// An empty feed (nothing stored yet) stays removable without ceremony — the
+// guard exists for the irreversible case only.
+func TestFeedRmEmptyFeedNeedsNoForce(t *testing.T) {
+	setupEmptyDB(t)
+	if err := (&AddCmd{Title: strPtr("Fresh"), URL: strPtr("https://f.example.com/rss")}).Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&RmCmd{ID: []int{0}}).Run(); err != nil {
+		t.Fatalf("removing an article-less feed: %v", err)
+	}
+}
+
+// gen --bump --dry-run previews the new generation and the CDN-purge duty
+// without committing.
+func TestGenBumpDryRun(t *testing.T) {
+	setupEmptyDB(t)
+	db, err := NewDB(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	db.Close(ctx)
+
+	out := captureCmdStdout(t)
+	if err := (&GenCmd{Bump: true, DryRun: true}).Run(); err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	body := out.String()
+	for _, want := range []string{"gen 0 -> 1", "purge the CDN", "dry run"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dry-run report missing %q:\n%s", want, body)
+		}
+	}
+	d2, err := NewDB(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d2.Close(ctx)
+	if d2.core.Gen != 0 {
+		t.Errorf("gen committed by a dry run: %d, want 0", d2.core.Gen)
+	}
+}

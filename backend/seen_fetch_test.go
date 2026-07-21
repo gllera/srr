@@ -161,9 +161,14 @@ func TestFetchCycleReusedFeedIdStartsClean(t *testing.T) {
 	}
 
 	// Remove feed 0, then add a new feed for the same source — it reuses id 0.
+	// The feed has stored articles, so removal is the irreversible case that
+	// now requires --force (what a real operator would pass here).
+	savedForce := globals.Force
+	globals.Force = true
 	if err := (&RmCmd{ID: []int{0}}).Run(); err != nil {
 		t.Fatalf("rm: %v", err)
 	}
+	globals.Force = savedForce
 	stubPassthroughResolve()
 	if err := (&AddCmd{Title: strPtr("B"), URL: strPtr(srv.URL)}).Run(); err != nil {
 		t.Fatalf("add: %v", err)

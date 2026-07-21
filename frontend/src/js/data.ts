@@ -1,6 +1,13 @@
 import { PACK_BASE } from "./base"
 import { cachedPromise, makeLRU, type LRU } from "./cache"
-import { IDX_ENTRY_SIZE, IDX_HEADER_PREFIX, META_PACK_SIZE, SEARCH_BLOOM_BYTES, type IMetaWire } from "./format.gen"
+import {
+   DB_FORMAT_VERSION,
+   IDX_ENTRY_SIZE,
+   IDX_HEADER_PREFIX,
+   META_PACK_SIZE,
+   SEARCH_BLOOM_BYTES,
+   type IMetaWire,
+} from "./format.gen"
 import {
    countAt,
    IDX_PACK_SIZE,
@@ -84,9 +91,21 @@ let expiredCounts = new Uint32Array(0)
 // self-healing for the tab.
 const RELOAD_GUARD = "srr-reload-guard"
 
+// bgRefresh marks the window in which refresh() re-applies a new db.gz from the
+// background heartbeat. In that window a transient tail 404 must NOT reload the
+// app out from under a reading user: refresh() has its own recovery story (it
+// restores the previous coherent snapshot wholesale and surfaces the failure via
+// lastRefreshError), so the worst case is "stale until the next cycle".
+//
+// Boot and user navigation keep the reload — that is the designed stale-tab
+// self-heal, and it is pinned by delta.e2e.test.ts's guarded-reload case.
+// refresh() runs under app.ts's guardBg mutex, so no user navigation can
+// observe this flag set.
+let bgRefresh = false
+
 function assertPackOk(res: Response, isLatest: boolean): void {
    if (res.ok) return
-   if (isLatest && !sessionStorage.getItem(RELOAD_GUARD)) {
+   if (isLatest && !bgRefresh && !sessionStorage.getItem(RELOAD_GUARD)) {
       sessionStorage.setItem(RELOAD_GUARD, "1")
       location.reload()
    }
@@ -103,6 +122,14 @@ async function parseDb(res: Response): Promise<IDB> {
    // (mirrors assertPackOk for the pack fetches).
    if (!res.ok) throw new Error(`db.gz fetch failed: ${res.status} ${res.url}`)
    const raw: IDB = await new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).json()
+   // A store stamped newer than this build understands: its layout may have
+   // changed in ways this reader would misread, so say so plainly through the
+   // error popup instead of rendering wrong (or crashing on a shifted field).
+   // Absent v (0) is a store written before the field existed — readable.
+   if ((raw.v ?? 0) > DB_FORMAT_VERSION)
+      throw new Error(
+         `This reader is older than the store (format v${raw.v}, supported v${DB_FORMAT_VERSION}) — reload to update.`,
+      )
    raw.feeds ??= {}
    raw.seq ??= 0 // backend omitempty: absent for an empty store
    for (const [k, ch] of Object.entries(raw.feeds)) ch.id = Number(k)
@@ -267,6 +294,7 @@ export async function refresh(): Promise<"unchanged" | "updated"> {
       deltaArts,
       deltaLoad,
    }
+   bgRefresh = true
    try {
       await applyDb(raw)
    } catch (e) {
@@ -284,6 +312,8 @@ export async function refresh(): Promise<"unchanged" | "updated"> {
          deltaLoad,
       } = prev)
       throw e
+   } finally {
+      bgRefresh = false
    }
    return "updated"
 }

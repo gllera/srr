@@ -3,6 +3,14 @@
    <head>
       <title>SRR</title>
       <meta charset="utf-8" />
+      <!-- Script-injection backstop: article HTML is untrusted and lives in the
+           main DOM two sanitizers deep — even a bypass must not execute script.
+           base-uri 'none' restricts <base href> only (our <base> sets target).
+           No img-src/media-src/connect-src on purpose: the user-configured
+           image proxy + sync endpoint + arbitrary feed media make them
+           unviable. Duplicated as a real header in _headers for the Pages
+           deploy; this meta is the store-root shell's only layer. -->
+      <meta http-equiv="Content-Security-Policy" content="script-src 'self'; object-src 'none'; base-uri 'none'" />
       <!-- minimum-scale=1 forbids the zoomed-out-below-1 rest state phones reach
            when any content pokes past the viewport edge — there the fixed toolbar
            anchors to the (now smaller) layout viewport and floats above the screen

@@ -253,7 +253,7 @@ func TestExpireDormantAdvanceKeepsInvariant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if issues := checkDBMeta(fetch, core, packs); issues != 0 {
+	if issues := ins.checkDBMeta(fetch, core, packs); issues != 0 {
 		t.Fatalf("checkDBMeta: %d issues after dormant expiry", issues)
 	}
 	// A much later cycle: filler's articles (no policy, fetched below dormant's
@@ -270,7 +270,7 @@ func TestExpireDormantAdvanceKeepsInvariant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if issues := checkDBMeta(fetch, core, packs); issues != 0 {
+	if issues := ins.checkDBMeta(fetch, core, packs); issues != 0 {
 		t.Fatalf("checkDBMeta: %d issues after dormant advance", issues)
 	}
 }

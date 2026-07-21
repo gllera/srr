@@ -41,11 +41,15 @@ type SyndicateGroup struct {
 }
 
 // SyndicateLsCmd prints the current Out list as JSON.
-type SyndicateLsCmd struct{}
+type SyndicateLsCmd struct {
+	// Same -f contract as `feed ls` / `feed show`, so every record-listing verb
+	// answers to one flag.
+	Format string `short:"f" default:"json" enum:"yaml,json" help:"Output format."`
+}
 
 func (o *SyndicateLsCmd) Run() error {
 	return withDB(false, func(_ context.Context, db *DB) error {
-		return printJSON(db.core.Out)
+		return printFormatted(o.Format, db.core.Out)
 	})
 }
 
@@ -239,7 +243,12 @@ func validateOutPayload(format string, data []byte) error {
 // orphaned old-extension file on a format change. Shared by `srr syndicate set`
 // and the PUT handler. The caller supplies a fully-built OutFeed (Limit 0 ⇒
 // default applied here).
-func setOutFeed(ctx context.Context, db *DB, in OutFeed) error {
+// validateOutShape checks everything about an OutFeed that does NOT depend on
+// the store's feed ids: the name grammar, the format, and the external-slot
+// constraints. Split out so `srr import` can validate a document's out[] before
+// the feeds it references have been created (ids are store-local) without
+// duplicating — and drifting from — these rules.
+func validateOutShape(in OutFeed) error {
 	if !validOutName(in.Name) {
 		return fmt.Errorf("syndication name %q must match [A-Za-z0-9._-] and not be '.' or '..'", in.Name)
 	}
@@ -255,7 +264,15 @@ func setOutFeed(ctx context.Context, db *DB, in OutFeed) error {
 		if in.Limit > 0 {
 			return fmt.Errorf("external syndicate takes no limit")
 		}
-	} else {
+	}
+	return nil
+}
+
+func setOutFeed(ctx context.Context, db *DB, in OutFeed) error {
+	if err := validateOutShape(in); err != nil {
+		return err
+	}
+	if !in.External {
 		if len(in.Tags) == 0 && len(in.Feeds) == 0 {
 			return fmt.Errorf("at least one of tags or feeds must be non-empty")
 		}

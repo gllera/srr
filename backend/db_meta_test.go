@@ -388,6 +388,12 @@ func (metaTPutFailBackend) Put(context.Context, string, io.Reader, bool) error {
 	return errMetaTPutFail
 }
 
+// Pack saves route through AtomicPut (the fsync path), so the injection has to
+// cover it too or a save failure never reaches the code under test.
+func (metaTPutFailBackend) AtomicPut(context.Context, string, io.Reader, store.ObjectMeta) error {
+	return errMetaTPutFail
+}
+
 // SyncMeta is warn-only, but it must set the mp/mt coverage fields ONLY after
 // every save succeeds — a mid-sync save failure must leave coverage untouched so
 // the next cycle recomputes the same window. Inject a Put failure at the shard

@@ -329,6 +329,16 @@ func TestCacheControlForKey(t *testing.T) {
 		{"seen.0.gz", cacheRevalidate},
 		{"seen.1.gz", cacheRevalidate},
 		{"seen.gz", cacheRevalidate},
+		// db/<tailGen>.gz — the write-once db.gz snapshots (DB.SnapshotDB). Bare
+		// stems only: the series carries no kind letters, so an L/h/s/d form is
+		// not a name it can produce and must not be stamped immutable.
+		{"db/0.gz", cacheImmutable},
+		{"db/12.gz", cacheImmutable},
+		{"db/L3.gz", ""},
+		{"db/h2.gz", ""},
+		{"db/d1.gz", ""},
+		// The live db.gz is NOT in the db/ series — it stays mutable.
+		{"db.gz", cacheRevalidate},
 	}
 	for _, c := range cases {
 		if got := cacheControlForKey(c.key); got != c.want {

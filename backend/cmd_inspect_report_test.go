@@ -57,10 +57,10 @@ func TestFilterReportLiveCountsAfterExpiration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadIdxPacks: %v", err)
 	}
-	if err := filterReport(core, packs, "0", 0); err != nil {
+	if err := ins.filterReport(core, packs, "0", 0); err != nil {
 		t.Fatalf("filterReport by feed id on an expired store: %v", err)
 	}
-	if err := filterReport(core, packs, "news", 0); err != nil {
+	if err := ins.filterReport(core, packs, "news", 0); err != nil {
 		t.Fatalf("filterReport by tag on an expired store: %v", err)
 	}
 }
@@ -75,8 +75,8 @@ func TestInspectOneHealthy(t *testing.T) {
 		t.Fatalf("loadIdxPacks: %v", err)
 	}
 	out := captureStdout(t, func() {
-		if err := inspectOne(fetch, core, packs, nil, 2); err != nil { // chron 2 = feed 0
-			t.Fatalf("inspectOne(2): %v", err)
+		if err := ins.inspectOne(fetch, core, packs, nil, 2); err != nil { // chron 2 = feed 0
+			t.Fatalf("ins.inspectOne(2): %v", err)
 		}
 	})
 	for _, want := range []string{"entry feed_id=0", "data feed_id: 0", "fetched_at: 1700000000", "feed: News"} {
@@ -100,7 +100,7 @@ func TestInspectOneSubIDMismatch(t *testing.T) {
 	}
 	packs[0].feedIDs[2] = 7 // idx now claims feed 7; data pack still says feed 0
 	out := captureStdout(t, func() {
-		if err := inspectOne(fetch, core, packs, nil, 2); err == nil {
+		if err := ins.inspectOne(fetch, core, packs, nil, 2); err == nil {
 			t.Fatal("inspectOne returned nil on a feed_id mismatch")
 		} else if !strings.Contains(err.Error(), "feed_id mismatch") {
 			t.Fatalf("err = %v, want feed_id mismatch", err)
@@ -131,7 +131,7 @@ func TestInspectOneOffsetOutOfRange(t *testing.T) {
 		return fetch(key)
 	}
 	out := captureStdout(t, func() {
-		if err := inspectOne(short, core, packs, nil, 4); err == nil {
+		if err := ins.inspectOne(short, core, packs, nil, 4); err == nil {
 			t.Fatal("inspectOne returned nil on an out-of-range offset")
 		} else if !strings.Contains(err.Error(), "offset") {
 			t.Fatalf("err = %v, want an offset-out-of-range error", err)
@@ -153,8 +153,8 @@ func TestInspectOneFeedNotRegistered(t *testing.T) {
 	}
 	delete(core.Feeds, 0) // feed 0 owns chron 2, but is no longer registered
 	out := captureStdout(t, func() {
-		if err := inspectOne(fetch, core, packs, nil, 2); err != nil {
-			t.Fatalf("inspectOne(2): %v (idx/data still agree, want nil)", err)
+		if err := ins.inspectOne(fetch, core, packs, nil, 2); err != nil {
+			t.Fatalf("ins.inspectOne(2): %v (idx/data still agree, want nil)", err)
 		}
 	})
 	if !strings.Contains(out, "feed 0 not in feeds") {
@@ -185,12 +185,12 @@ func TestFromHashReport(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			out := captureStdout(t, func() {
-				if err := fromHashReport(fetch, core, packs, nil, c.hash); err != nil {
-					t.Fatalf("fromHashReport(%q): %v", c.hash, err)
+				if err := ins.fromHashReport(fetch, core, packs, nil, c.hash); err != nil {
+					t.Fatalf("ins.fromHashReport(%q): %v", c.hash, err)
 				}
 			})
 			if !strings.Contains(out, c.want) {
-				t.Errorf("fromHashReport(%q) missing %q:\n%s", c.hash, c.want, out)
+				t.Errorf("ins.fromHashReport(%q) missing %q:\n%s", c.hash, c.want, out)
 			}
 		})
 	}
@@ -209,7 +209,7 @@ func TestListTagsReport(t *testing.T) {
 		4: {id: 4, Tag: "empty", TotalArt: 0},            // dropped (no articles)
 	}
 	out := captureStdout(t, func() {
-		if err := listTagsReport(core); err != nil {
+		if err := ins.listTagsReport(core); err != nil {
 			t.Fatalf("listTagsReport: %v", err)
 		}
 	})

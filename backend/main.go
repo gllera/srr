@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"log/slog"
 	"os"
@@ -10,6 +12,7 @@ import (
 	"runtime"
 	"time"
 
+	"srr/ingest"
 	"srr/mod"
 	"srr/store"
 
@@ -52,6 +55,12 @@ type Globals struct {
 	CmdTimeout        time.Duration `default:"5m" env:"SRR_CMD_TIMEOUT" help:"Timeout for a single external ingest/mod command (Go duration)."`
 	AllowPrivateFetch bool          `env:"SRR_ALLOW_PRIVATE_FETCH" help:"Disable the SSRF guard, allowing fetches from private/loopback addresses. Security override — leave off unless you fetch LAN/localhost feeds."`
 	CdnURL            string        `hidden:"" env:"SRR_CDN_URL" help:"CDN URL for frontend builds."`
+	// Notify / NotifyAfter are the feed-health alerting hook: fail_streak has
+	// always been recorded but nothing watched it. Context reaches the command
+	// through SRR_NOTIFY_* env vars, never string interpolation (feed titles and
+	// error text are attacker-influenced).
+	Notify      string `env:"SRR_NOTIFY" help:"Shell command run when a feed crosses --notify-after consecutive failures, and again when it recovers. Context arrives as SRR_NOTIFY_EVENT (fail|recover), _FEED, _FEED_ID, _URL, _ERROR, _STREAK. Empty (default) disables alerting."`
+	NotifyAfter int    `default:"5" env:"SRR_NOTIFY_AFTER" help:"Consecutive failures before --notify fires (the crossing alerts once per outage)."`
 }
 
 type FeedGroup struct {
@@ -78,6 +87,8 @@ type CLI struct {
 	Asset     AssetGroup     `cmd:"" help:"Self-hosted asset tooling (repair a published object)."`
 	Syndicate SyndicateGroup `cmd:"" help:"Manage syndication output feeds (out/*)."`
 	Recipe    RecipeGroup    `cmd:"" help:"Manage processing recipes (named {ingest, pipe} bundles)."`
+	Export    ExportAllCmd   `cmd:"" help:"Write the whole store configuration (feeds, recipes, syndication, dedup default) as JSON."`
+	Import    ImportAllCmd   `cmd:"" help:"Restore a configuration written by 'srr export' (feeds matched by url; fetch state untouched)."`
 	Gen       GenCmd         `cmd:"" help:"Print or bump the store generation (db.gz 'gen'; frontend SW cache key)."`
 	Dedup     DedupCmd       `cmd:"" help:"Print or set the store-wide default dedup horizon (db.gz 'dd', in days)."`
 	Preview   PreviewCmd     `cmd:"" aliases:"p" help:"Preview processed feed articles in a browser."`
@@ -249,6 +260,11 @@ func main() {
 		globals.AssetWorkers = runtime.NumCPU()
 	}
 
+	// Identify this build to feed publishers: "SRR/<version> (+repo)" is the
+	// shape feed readers are expected to send, and the version is the same one
+	// `srr version` prints.
+	ingest.SetUserAgent("SRR/" + version + " (+https://github.com/gllera/srr)")
+
 	// Apply the resolved config into the mod package (its external-command
 	// timeout + SSRF opt-out were formerly read straight from the environment).
 	mod.CmdTimeout = globals.CmdTimeout
@@ -259,6 +275,30 @@ func main() {
 	mod.SetSecrets(secrets)
 
 	if err := ctx.Run(); err != nil {
-		fatal(err.Error())
+		slog.Error(err.Error())
+		os.Exit(exitCodeFor(err))
 	}
+}
+
+// Exit codes. A cron health check must be able to tell "the store is broken"
+// from "someone else holds the lock" from "I could not read the store" without
+// scraping the message — kong already owns 1 for usage errors, so the classes
+// start above it.
+const (
+	exitGeneric    = 1 // anything unclassified (also kong's usage-error code)
+	exitLocked     = 3 // another process (or in-process writer) holds the store
+	exitValidation = 4 // srr inspect --validate found store inconsistencies
+	exitStoreIO    = 5 // the store could not be read/written
+)
+
+func exitCodeFor(err error) int {
+	switch {
+	case errors.Is(err, os.ErrExist):
+		return exitLocked
+	case errors.Is(err, errValidation):
+		return exitValidation
+	case errors.Is(err, fs.ErrNotExist), errors.Is(err, fs.ErrPermission):
+		return exitStoreIO
+	}
+	return exitGeneric
 }

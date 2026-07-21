@@ -3,8 +3,10 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -302,12 +304,13 @@ func TestFilterDue(t *testing.T) {
 		{id: 1, LastNew: now - 7200, LastOK: now - base},
 		// Same dormancy but 20 min since last poll: due.
 		{id: 2, LastNew: now - 7200, LastOK: now - 1200},
-		// Failing feed: LastOK frozen far in the past — never skipped.
+		// Long-dormant but still healthy (streak 0), a day since the last poll:
+		// past even the capped dormancy interval, so due.
 		{id: 3, LastNew: now - 9*86400, LastOK: now - 86400},
 		// Never-polled feed (LastOK 0): due.
 		{id: 4},
 	}
-	got := selectedIDs(filterDue(feeds, now, base, maxT))
+	got := selectedIDs(filterDue(feeds, nil, now, base, maxT))
 	want := []int{0, 2, 3, 4}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Errorf("filterDue = %v, want %v", got, want)
@@ -333,5 +336,164 @@ func TestBackoffActive(t *testing.T) {
 		if got := tc.cmd.backoffActive(); got != tc.want {
 			t.Errorf("%s: backoffActive = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// A failing feed backs off exponentially from the loop base, capped at maxT.
+// The streak is clamped before the shift so a long outage can't overflow it.
+func TestRetryInterval(t *testing.T) {
+	const base, maxT = 300, 3600
+	for _, tc := range []struct {
+		name   string
+		streak int
+		want   int64
+	}{
+		{"first failure doubles", 1, 600},
+		{"second failure", 2, 1200},
+		{"third failure", 3, 2400},
+		{"fourth failure hits the cap", 4, maxT},
+		{"long outage stays at the cap", 50, maxT},
+	} {
+		if got := retryInterval(tc.streak, base, maxT); got != tc.want {
+			t.Errorf("%s: retryInterval(%d) = %d, want %d", tc.name, tc.streak, got, tc.want)
+		}
+	}
+
+	// A cap below the base must not make a failing feed poll MORE often than a
+	// healthy one.
+	if got := retryInterval(3, 300, 60); got != 300 {
+		t.Errorf("retryInterval with maxT < base = %d, want the base 300", got)
+	}
+}
+
+// The failure path counts from this process's own attempt clock (LastOK is
+// frozen while a feed fails), so a dead feed is retried on the exponential
+// cadence instead of every single cycle.
+func TestFilterDueFailureBackoff(t *testing.T) {
+	const base, maxT = 300, 3600
+	now := int64(1700000000)
+
+	// Streak 2 → retry every 1200s.
+	failing := func(id int, sinceAttempt int64) ([]*Feed, map[int]int64) {
+		return []*Feed{{id: id, FailStreak: 2, LastOK: now - 86400}},
+			map[int]int64{id: now - sinceAttempt}
+	}
+
+	feeds, last := failing(7, 600)
+	if got := selectedIDs(filterDue(feeds, last, now, base, maxT)); len(got) != 0 {
+		t.Errorf("feeds = %v, want the failing feed skipped 600s into a 1200s backoff", got)
+	}
+
+	feeds, last = failing(7, 1200)
+	if got := selectedIDs(filterDue(feeds, last, now, base, maxT)); fmt.Sprint(got) != "[7]" {
+		t.Errorf("feeds = %v, want [7] once the backoff elapsed", got)
+	}
+
+	// No recorded attempt (fresh process) → one full poll, then backoff.
+	feeds, _ = failing(7, 0)
+	if got := selectedIDs(filterDue(feeds, nil, now, base, maxT)); fmt.Sprint(got) != "[7]" {
+		t.Errorf("feeds = %v, want [7]: a restart polls everything once", got)
+	}
+
+	// A success resets the streak, so the feed leaves the failure path entirely
+	// and is governed by dormancy again — here: polled base ago, due.
+	healthy := []*Feed{{id: 7, LastNew: now - 60, LastOK: now - base}}
+	if got := selectedIDs(filterDue(healthy, map[int]int64{7: now}, now, base, maxT)); fmt.Sprint(got) != "[7]" {
+		t.Errorf("feeds = %v, want [7]: streak 0 ignores lastAttempt", got)
+	}
+}
+
+// The feed fan-out must not open more than perHostConns connections to one
+// host, however wide --workers is: feed sets cluster hard on a few hosts, and a
+// synchronized burst from one IP is what datacenter WAFs score as a bot.
+func TestHostGateCapsPerHostConcurrency(t *testing.T) {
+	var mu sync.Mutex
+	inFlight := map[string]int{}
+	peak := map[string]int{}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := r.URL.Query().Get("h")
+		mu.Lock()
+		inFlight[host]++
+		if inFlight[host] > peak[host] {
+			peak[host] = inFlight[host]
+		}
+		mu.Unlock()
+
+		time.Sleep(20 * time.Millisecond) // hold the slot so overlap is observable
+
+		mu.Lock()
+		inFlight[host]--
+		mu.Unlock()
+	}))
+	defer srv.Close()
+
+	// 8 feeds sharing one hostname, plus 4 on distinct hostnames. The gate keys
+	// on the URL's hostname, so distinct hostnames must not gate each other —
+	// they all point at the same test server, and the `h` query param is what
+	// the handler counts by.
+	type feed struct{ host, url string }
+	var feeds []feed
+	for i := 0; i < 8; i++ {
+		feeds = append(feeds, feed{"shared", srv.URL + "?h=shared"})
+	}
+	for i := 0; i < 4; i++ {
+		h := fmt.Sprintf("solo%d", i)
+		feeds = append(feeds, feed{h, srv.URL + "?h=" + h})
+	}
+
+	// The gate keys on url.Hostname(), and every URL above shares the httptest
+	// host — so rewrite each feed's gate key to its logical host by gating on a
+	// synthetic URL, which is exactly what the fan-out does with ch.URL.
+	gate := &hostGate{}
+	var wg sync.WaitGroup
+	for _, f := range feeds {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			release := gate.acquire("https://" + f.host + "/feed.xml")
+			defer release()
+			res, err := srv.Client().Get(f.url)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			res.Body.Close()
+		}()
+	}
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if peak["shared"] > perHostConns {
+		t.Errorf("peak concurrency on the shared host = %d, want <= %d", peak["shared"], perHostConns)
+	}
+	if peak["shared"] < 2 {
+		t.Errorf("peak concurrency on the shared host = %d; the gate serialized more than it should", peak["shared"])
+	}
+	for i := 0; i < 4; i++ {
+		h := fmt.Sprintf("solo%d", i)
+		if peak[h] != 1 {
+			t.Errorf("peak on %s = %d, want 1 (one feed, one request)", h, peak[h])
+		}
+	}
+}
+
+// A feed URL the gate cannot key on must not block the fan-out: it falls
+// through ungated and the fetch fails on its own terms.
+func TestHostGateIgnoresUnparseableURL(t *testing.T) {
+	gate := &hostGate{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < perHostConns+3; i++ {
+			gate.acquire("not a url")() // acquire and immediately release
+			gate.acquire("")()
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("hostGate blocked on a URL with no host")
 	}
 }

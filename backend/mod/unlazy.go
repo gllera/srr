@@ -18,11 +18,15 @@ import (
 // only src on <img> — so without this step those articles publish with
 // blank or 1-px images and there is no recovery downstream.
 //
-// Three fixes, applied in order:
+// Four fixes, applied in order:
 //   - a data-src-style attribute (lazySrcAttrs, URL-shaped values only)
 //     replaces src on <img>/<video>/<audio>;
 //   - an <img> whose src is still missing or a placeholder takes the best
 //     srcset/data-srcset candidate (largest width, else density, else first);
+//   - a <video>/<audio> still without a usable src takes the best <source src>
+//     child — #sanitize keeps src only on the media element and drops <source>
+//     entirely, so the standard WordPress/Gutenberg video block would otherwise
+//     publish as an empty element;
 //   - a <noscript> whose markup contributes an image the document doesn't
 //     already show is unwrapped in place; a redundant one (same file as the
 //     promoted sibling) is dropped.
@@ -65,7 +69,7 @@ var (
 func unlazyContent(content string) string {
 	lower := strings.ToLower(content)
 	if !strings.Contains(lower, "data-") && !strings.Contains(lower, "srcset") &&
-		!strings.Contains(lower, "<noscript") {
+		!strings.Contains(lower, "<noscript") && !strings.Contains(lower, "<source") {
 		return content
 	}
 	body := parseBodyHTML(content)
@@ -89,6 +93,9 @@ func unlazyContent(content string) string {
 				}
 			case "video", "audio":
 				if c, _ := promoteLazyDataSrc(n); c {
+					changed = true
+				}
+				if hoistSourceSrc(n) {
 					changed = true
 				}
 			case "noscript":
@@ -151,6 +158,90 @@ func promoteLazyImg(n *html.Node) bool {
 		}
 	}
 	return false
+}
+
+// hoistPreferred names the containers a browser is most likely to play,
+// matched against a <source type> subtype and against the URL extension. An
+// unpreferred candidate is still hoisted when it is the only one: any src beats
+// an element the sanitizer will publish empty.
+var hoistPreferred = map[string]bool{
+	"mp4": true, "webm": true, "m4v": true, "ogv": true,
+	"mpeg": true, "mp3": true, "m4a": true, "aac": true,
+	"ogg": true, "oga": true, "wav": true, "flac": true,
+}
+
+// hoistSchemeRe matches an explicit URL scheme; a relative reference (including
+// "//host" and "/rooted") never matches.
+var hoistSchemeRe = regexp.MustCompile(`(?i)^[a-z][a-z0-9+.\-]*:`)
+
+// hoistSourceSrc promotes a <source src> child onto a <video>/<audio> that has
+// no usable src of its own. #sanitize allows src only on the media element and
+// drops <source> wholesale, so the standard WordPress/Gutenberg video block —
+// <video controls> wrapping <source> children — publishes as an empty element
+// into immutable packs with no repair downstream. The best preferred-container
+// candidate wins (a declared type= outranks the URL extension); ties keep
+// document order.
+func hoistSourceSrc(n *html.Node) bool {
+	if src := strings.TrimSpace(mediaAttr(n, "src")); src != "" && !lazyPlaceholderRe.MatchString(src) {
+		return false
+	}
+	best, bestRank := "", -1
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type != html.ElementNode || c.Data != "source" {
+			continue
+		}
+		v := strings.TrimSpace(mediaAttr(c, "src"))
+		if !hoistableSrc(v) {
+			continue
+		}
+		if r := sourceRank(c, v); r > bestRank {
+			best, bestRank = v, r
+		}
+	}
+	if best == "" {
+		return false
+	}
+	setNodeAttr(n, "src", best)
+	return true
+}
+
+// hoistableSrc accepts a <source src> worth promoting: a relative reference
+// (the reader resolves it against the pack base) or an absolute http(s) URL. A
+// data:/blob:/javascript: value is never promoted — bluemonday would strip it
+// downstream, and #unlazy may run in a pipe without #sanitize.
+func hoistableSrc(v string) bool {
+	if v == "" || lazyPlaceholderRe.MatchString(v) {
+		return false
+	}
+	if !hoistSchemeRe.MatchString(v) {
+		return true
+	}
+	return mediaSchemeRe.MatchString(v)
+}
+
+// sourceRank scores a <source> candidate: 2 = a preferred container declared in
+// type=, 1 = a preferred container by URL extension, 0 = usable but unknown.
+func sourceRank(c *html.Node, src string) int {
+	if t := strings.ToLower(strings.TrimSpace(mediaAttr(c, "type"))); t != "" {
+		sub := t
+		if i := strings.Index(sub, "/"); i >= 0 {
+			sub = sub[i+1:]
+		}
+		if i := strings.IndexAny(sub, "; "); i >= 0 { // "video/mp4; codecs=avc1"
+			sub = sub[:i]
+		}
+		if hoistPreferred[sub] {
+			return 2
+		}
+	}
+	u := src
+	if i := strings.IndexAny(u, "?#"); i >= 0 {
+		u = u[:i]
+	}
+	if ext := cleanExt(u); ext != "" && hoistPreferred[ext[1:]] {
+		return 1
+	}
+	return 0
 }
 
 // bestSrcsetURL picks the richest candidate from a srcset value: highest

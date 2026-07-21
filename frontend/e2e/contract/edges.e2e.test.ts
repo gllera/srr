@@ -1,5 +1,6 @@
-import { copyFileSync, rmSync, writeFileSync } from "node:fs"
+import { copyFileSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { gunzipSync, gzipSync } from "node:zlib"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
 import { feedServer, inspectValidate, makeStore, srr, type FeedServer } from "../harness"
@@ -98,6 +99,27 @@ describe("contract: robustness edges", () => {
          copyFileSync(backup, pack)
          rmSync(backup, { force: true })
       }
+   })
+
+   // Version skew is the one case the reader must NOT try to muddle through:
+   // a db.gz stamped past DB_FORMAT_VERSION may have moved fields this build
+   // would misread, so init rejects with a legible message (the error-popup
+   // path) instead of rendering something wrong.
+   it("refuses a db.gz written by a newer srr", async () => {
+      const future = gzipSync(
+         Buffer.from(
+            JSON.stringify({ ...JSON.parse(gunzipSync(readFileSync(join(store, "db.gz"))).toString()), v: 99 }),
+         ),
+      )
+      await expect(
+         mountReader(store, async (path, serve) =>
+            path === "db.gz" ? new Response(new Uint8Array(future), { status: 200 }) : serve(),
+         ),
+      ).rejects.toThrow(/older than the store/)
+      // The store's own (current-version) db.gz still mounts — the gate is the
+      // version, not the presence of the field.
+      const reader = await mountReader(store)
+      expect(reader.data.db.total_art).toBe(6)
    })
 
    it("backend inspect --validate agrees", async () => {

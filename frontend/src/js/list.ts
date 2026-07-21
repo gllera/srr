@@ -234,6 +234,83 @@ export function fillRow(a: HTMLElement, art: import("./format.gen").IMetaWire, s
 // skipped row reserve offsetHeight + padding + border — ~19px too tall per row,
 // which over-scrolls the prepend compensation. Subtract the row chrome (identical
 // for every .srr-row) so the reserved border-box equals the real rendered height.
+// The list's DOM window: how many screens' worth of rows stay materialized,
+// centered on the viewport (~3 above, ~3 below the visible one).
+//
+// Rows used to be kept forever, so a deep walk through a 50k+ [ALL] lane
+// accumulated tens of thousands of nodes (content-visibility:auto caps PAINT,
+// not memory) and every page-in walked ALL of them in pinHeights and
+// relabelDividers — so paging got slower the further you scrolled. The data
+// layer is O(1)-boot and lazy; the DOM was the reader's only unbounded axis.
+const WINDOW_VIEWPORTS = 7
+
+// Fallback budget where row heights aren't measurable (jsdom). Generous enough
+// that no realistic viewport pages past it before the height-derived budget
+// takes over in a real browser.
+const MIN_WINDOW_ROWS = BATCH * 3
+
+// The live row-count budget, derived from the MEASURED row height rather than
+// fixed, so a dense phone list and a roomy desktop one keep the same SCROLL
+// distance of buffer. That distance is the load-bearing part: it must comfortably
+// exceed the IntersectionObserver's ROOT_MARGIN, or trimming an edge would put
+// its sentinel straight back in range and re-trigger the paging that refills it.
+function rowBudget(rows: HTMLElement[]): number {
+   const sample = Math.min(rows.length, 10)
+   let total = 0
+   for (let i = 0; i < sample; i++) total += rows[i].offsetHeight
+   const mean = sample ? total / sample : 0
+   if (!mean) return MIN_WINDOW_ROWS // no layout (jsdom): fall back to a count
+   return Math.max(MIN_WINDOW_ROWS, Math.ceil((WINDOW_VIEWPORTS * (window.innerHeight || 900)) / mean))
+}
+
+// Drop rows past the budget from the FAR side of the direction just paged.
+//
+// A trimmed edge is RE-PAGEABLE, never exhausted: the matching exhausted flag is
+// cleared and its terminus removed, so scrolling back re-materializes those rows
+// through the existing fetch paths (rowEl/fillRow), which is the whole point —
+// nothing here knows how to build a row.
+//
+// Removing rows above the viewport shifts the content up, so the scroll is
+// compensated the same way fetchNewer's prepend is: by how far a row that is
+// actually IN the viewport moves, never by a scrollHeight delta (which folds in
+// changes that aren't directly above the viewport and lurches it).
+function trimWindow(side: "top" | "bottom"): void {
+   if (!rowsEl) return
+   const rows = [...rowsEl.querySelectorAll<HTMLElement>("a.srr-row")]
+   const excess = rows.length - rowBudget(rows)
+   if (excess <= 0) return
+
+   const victims = side === "top" ? rows.slice(0, excess) : rows.slice(rows.length - excess)
+   const kept = side === "top" ? rows.slice(excess) : rows.slice(0, rows.length - excess)
+   if (!kept.length) return // never trim the window away entirely
+
+   // Anchor among the SURVIVORS, so a trim that reaches into the viewport still
+   // measures against a row that is still in the document afterwards.
+   const anchor = kept.find((r) => r.getBoundingClientRect().bottom > 0) ?? kept[0]
+   const anchorBefore = anchor.getBoundingClientRect().top
+
+   for (const r of victims) r.remove()
+
+   // The window edge moved, so the paging cursor moves with it — and the edge is
+   // open again by construction.
+   if (side === "top") {
+      newest = Number(kept[0].dataset.chron)
+      exhaustedTop = false
+      syncTopTerminus() // no compensate: the bracket below covers this removal too
+   } else {
+      oldest = Number(kept[kept.length - 1].dataset.chron)
+      exhaustedBottom = false
+      syncBottomTerminus()
+   }
+   relabelDividers()
+
+   const shift = anchor.getBoundingClientRect().top - anchorBefore
+   if (shift) {
+      window.scrollTo(0, window.scrollY + shift)
+      notifyScroll()
+   }
+}
+
 function pinHeights(rows: HTMLElement[]): void {
    if (!rows.length) return
    for (const r of rows) r.style.setProperty("content-visibility", "visible")
@@ -996,6 +1073,7 @@ async function fetchOlder(my: object): Promise<void> {
       rowsEl.appendChild(frag)
       relabelDividers()
       pinHeights(older) // keep the every-row-pinned invariant (see pinHeights)
+      trimWindow("top") // paged down: recycle the far end above
    } finally {
       if (my === tok) {
          loadingBottom = false
@@ -1061,6 +1139,7 @@ async function fetchNewer(my: object): Promise<void> {
          window.scrollTo(0, window.scrollY + shift)
          notifyScroll()
       }
+      trimWindow("bottom") // paged up: recycle the far end below
    } finally {
       if (my === tok) {
          loadingTop = false

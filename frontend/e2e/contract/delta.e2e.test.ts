@@ -1,4 +1,4 @@
-import { existsSync, rmSync } from "node:fs"
+import { existsSync, readFileSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
@@ -117,6 +117,10 @@ describe("contract: delta-segment tail", () => {
       // The consolidated deltas survive as the stale-tab grace window.
       expect(existsSync(join(store, "data/d1.gz"))).toBe(true)
       expect(existsSync(join(store, "data/d2.gz"))).toBe(true)
+      // A consolidation cycle also publishes the write-once db.gz snapshot —
+      // the pointer-state backup — byte-identical to the db.gz it committed.
+      expect(existsSync(join(store, "db/3.gz")), "db/3.gz snapshot").toBe(true)
+      expect(readFileSync(join(store, "db/3.gz")).equals(readFileSync(join(store, "db.gz")))).toBe(true)
 
       for (let chron = 0; chron < 6; chron++) {
          const a = await reader.data.loadArticle(chron)

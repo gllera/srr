@@ -206,6 +206,14 @@ func (d *SFTP) AtomicPut(_ context.Context, key string, r io.Reader, _ ObjectMet
 		_ = d.client.Remove(tmpFile)
 		return fmt.Errorf("writing file %s: %w", tmpFile, err)
 	}
+	// fsync before the rename, like the Local backend: a crash must not publish
+	// truncated bytes under a name that is immutable and cached forever. Sync
+	// needs the fsync@openssh.com extension, so a server without it fails here —
+	// best-effort by design, since making it fatal would break every write to
+	// such a server for a durability guarantee it simply cannot offer.
+	if err := fs.Sync(); err != nil {
+		slog.Debug("sftp fsync unavailable, writing without it", "file", tmpFile, "err", err)
+	}
 	if err := fs.Close(); err != nil {
 		_ = d.client.Remove(tmpFile)
 		return fmt.Errorf("closing file %s: %w", tmpFile, err)

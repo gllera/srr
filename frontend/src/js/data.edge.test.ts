@@ -256,6 +256,45 @@ describe("data.assertPackOk — stale-latest-pack self-heal", () => {
    })
 })
 
+// A transient tail 404 during the BACKGROUND refresh heartbeat must not
+// location.reload() the app out from under a reading user. The self-heal was
+// designed for boot and user navigation, where a stale-tab 404 has no other
+// recovery; refresh() has its own — it rolls the snapshot back wholesale and
+// surfaces the failure — so there it degrades to "stale until the next cycle".
+describe("pack-404 self-heal is scoped away from the background refresh", () => {
+   it("refresh() against a 404ing latest pack rejects without reloading", async () => {
+      const data = await mount({ total_art: 1, seq: 1, fetched_at: 1 }, { "idx/L1.gz": packBuf([{ feedId: 3 }]) })
+
+      const reload = vi.fn()
+      const realLoc = window.location
+      Object.defineProperty(window, "location", {
+         value: { href: realLoc.href, reload },
+         configurable: true,
+         writable: true,
+      })
+      try {
+         // A newer db.gz lands, but its latest pack is already gone.
+         const newer = await gzip(JSON.stringify({ total_art: 2, seq: 2, fetched_at: 2 }))
+         global.fetch = vi.fn(async (input: URL | string) => {
+            const url = input instanceof URL ? input : new URL(String(input))
+            return url.pathname === "/db.gz"
+               ? new Response(newer, { status: 200 })
+               : new Response("not found", { status: 404 })
+         }) as unknown as typeof fetch
+
+         await expect(data.refresh()).rejects.toThrow(/pack fetch failed: 404/)
+         expect(reload).not.toHaveBeenCalled()
+         expect(sessionStorage.getItem("srr-reload-guard")).toBe(null)
+         // Rolled back to the coherent previous snapshot, so the tab keeps
+         // working on the articles it already had.
+         expect(data.db.total_art).toBe(1)
+         expect(await data.getFeedId(0)).toBe(3)
+      } finally {
+         Object.defineProperty(window, "location", { value: realLoc, configurable: true, writable: true })
+      }
+   })
+})
+
 describe("fetch timeout — a stalled connection rejects instead of hanging forever", () => {
    afterEach(() => vi.useRealTimers())
 

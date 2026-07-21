@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -90,8 +91,54 @@ func (o *ServeCmd) Run() error {
 func newMux() http.Handler {
 	mux := http.NewServeMux()
 	registerAPI(mux)
-	mux.Handle("GET /", http.FileServerFS(minifiedWebUI()))
+	ui := minifiedWebUI()
+	mux.Handle("GET /", webUICacheHeaders(ui, http.FileServerFS(ui)))
 	return hostGuard(mux)
+}
+
+// webUICacheHeaders gives the embedded admin UI cache VALIDATORS it otherwise
+// has none of: the assets are served from an fstest.MapFS whose entries have a
+// zero ModTime, so net/http emits no Last-Modified and no ETag, while the names
+// are static (app.js) — a caching layer in front of the GUI therefore has
+// nothing to revalidate against and serves the previous release's bytes after
+// every update. (That is the trap already worked around with a Cloudflare
+// cache-bypass rule for admin-srr.llera.eu; this fixes the cause, and the rule
+// can stay as belt-and-braces.)
+//
+// A content ETag per file, computed once at startup, plus no-cache: the client
+// keeps the bytes but must revalidate, and an unchanged file answers 304.
+func webUICacheHeaders(fsys fs.FS, next http.Handler) http.Handler {
+	etags := map[string]string{}
+	_ = fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil //nolint:nilerr // a missing UI file is a build bug, not a request-time error
+		}
+		b, err := fs.ReadFile(fsys, p)
+		if err != nil {
+			return nil
+		}
+		etags["/"+p] = fmt.Sprintf(`"%x"`, sha256.Sum256(b))
+		return nil
+	})
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		if p == "/" {
+			p = "/index.html" // what FileServerFS will serve for the directory
+		}
+		if tag, ok := etags[p]; ok {
+			w.Header().Set("ETag", tag)
+			w.Header().Set("Cache-Control", "no-cache")
+			// Compare against every candidate in If-None-Match; the GUI is served
+			// as-is (no transforms), so a strong-tag equality check is enough.
+			for _, cand := range strings.Split(r.Header.Get("If-None-Match"), ",") {
+				if strings.TrimSpace(cand) == tag {
+					w.WriteHeader(http.StatusNotModified)
+					return
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // minifiedWebUI minifies the embedded webui assets once at startup and serves
@@ -191,21 +238,20 @@ func writeErr(w http.ResponseWriter, err error) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": msgLockContention})
 		return
 	}
+	// 404 is decided STRUCTURALLY: the true not-found producers (FeedByID) wrap
+	// the stdlib fs.ErrNotExist sentinel, so classification no longer depends on
+	// error wording — a validation message that happens to contain "not found"
+	// can't silently become a 404, and a renamed message can't stop being one.
+	if errors.Is(err, fs.ErrNotExist) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
 	// Default 400: handler errors here are overwhelmingly validation rejections
 	// (bad recipe/url/format, dangling refs) which downstream tests assert as 400.
 	// The rarer store-IO/open failure also surfaces as 400 but always carries its
 	// message in the body; without typed errors (repo forbids custom sentinels)
 	// validation and infra errors aren't distinguishable at this shared helper.
-	status := http.StatusBadRequest
-	// Fragile-by-necessity substring contract (no typed errors): today only
-	// FeedByID's "feed id N not found" hits this; recipe/syndicate rejections say
-	// "does not exist"/"unknown"/"invalid" and stay 400. A future validation
-	// message containing "not found" would silently become a 404 — keep that
-	// phrase out of non-404 errors.
-	if strings.Contains(err.Error(), "not found") {
-		status = http.StatusNotFound
-	}
-	writeJSON(w, status, map[string]string{"error": err.Error()})
+	writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 }
 
 // maxRequestBody caps every admin-API request body. The GUI is loopback/

@@ -372,3 +372,39 @@ func TestSetStoreDedupRejectsNegative(t *testing.T) {
 		t.Fatalf("status = %d, want 400 (%s)", rec.Code, rec.Body)
 	}
 }
+
+// GET /api/export?format=json serves the lossless configuration document
+// (OPML, the default, drops every processing field).
+func TestServeExportJSONFormat(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	stubPassthroughResolve()
+	seedFeed(t, db, &Feed{Title: "Alpha", URL: "https://a.example/feed", Tag: "news", ExpireDays: 30, DedupTitle: true})
+
+	res := doReq(t, newMux(), "GET", "/api/export?format=json", "")
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.Code)
+	}
+	if ct := res.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+	var doc configDoc
+	if err := json.Unmarshal(res.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("body is not a config document: %v\n%s", err, res.Body)
+	}
+	if doc.Version != configExportVersion {
+		t.Errorf("version = %d, want %d", doc.Version, configExportVersion)
+	}
+	// The fields OPML would have dropped must be present.
+	if len(doc.Feeds) != 1 || doc.Feeds[0].ExpireDays != 30 || !doc.Feeds[0].DedupTitle {
+		t.Errorf("json export is lossy: %+v", doc.Feeds)
+	}
+
+	// No format param ⇒ OPML, unchanged.
+	opml := doReq(t, newMux(), "GET", "/api/export", "")
+	if ct := opml.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/x-opml") {
+		t.Errorf("default Content-Type = %q, want text/x-opml", ct)
+	}
+	if !strings.Contains(opml.Body.String(), "<opml") {
+		t.Errorf("default export is not OPML: %s", opml.Body)
+	}
+}

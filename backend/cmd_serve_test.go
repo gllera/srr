@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -201,5 +204,71 @@ func TestServeSyndicatePutExternal(t *testing.T) {
 	rec = doReq(t, newMux(), "GET", "/api/overview", "")
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ext":true`) {
 		t.Errorf("overview = %d %q, want 200 carrying \"ext\":true", rec.Code, rec.Body)
+	}
+}
+
+// The embedded admin UI is served from a MapFS whose entries have a zero
+// ModTime, so net/http emits no validators and the static names (app.js) let a
+// caching layer serve the previous release forever. Every file must carry a
+// content ETag + no-cache, and a conditional GET must answer 304.
+func TestServeWebUICacheValidators(t *testing.T) {
+	setupTestDB(t)
+	mux := newMux()
+
+	res := doReq(t, mux, "GET", "/app.js", "")
+	if res.Code != http.StatusOK {
+		t.Fatalf("GET /app.js = %d", res.Code)
+	}
+	tag := res.Header().Get("ETag")
+	if tag == "" {
+		t.Fatal("no ETag on /app.js")
+	}
+	if cc := res.Header().Get("Cache-Control"); cc != "no-cache" {
+		t.Errorf("Cache-Control = %q, want no-cache", cc)
+	}
+
+	req := httptest.NewRequest("GET", "/app.js", nil)
+	req.Host = "localhost" // hostGuard: loopback only (see doReq)
+	req.Header.Set("If-None-Match", tag)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotModified {
+		t.Errorf("conditional GET = %d, want 304", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("304 carried a body of %d bytes", rec.Body.Len())
+	}
+
+	// A stale validator must still serve the fresh bytes.
+	req2 := httptest.NewRequest("GET", "/app.js", nil)
+	req2.Host = "localhost"
+	req2.Header.Set("If-None-Match", `"stale"`)
+	rec2 := httptest.NewRecorder()
+	mux.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK || rec2.Body.Len() == 0 {
+		t.Errorf("stale validator: code=%d len=%d, want 200 with a body", rec2.Code, rec2.Body.Len())
+	}
+}
+
+// 404 must be decided by the wrapped fs.ErrNotExist sentinel, not by the words
+// in the message — and a validation rejection whose text happens to contain
+// "not found" must stay a 400.
+func TestServeWriteErrStatusIsStructural(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeErr(rec, fmt.Errorf("feed id 7 not found: %w", fs.ErrNotExist))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("sentinel-wrapped error = %d, want 404", rec.Code)
+	}
+
+	rec2 := httptest.NewRecorder()
+	writeErr(rec2, fmt.Errorf("recipe %q not found in the pipeline", "x"))
+	if rec2.Code != http.StatusBadRequest {
+		t.Errorf("plain validation error mentioning 'not found' = %d, want 400", rec2.Code)
+	}
+
+	rec3 := httptest.NewRecorder()
+	writeErr(rec3, fmt.Errorf("busy: %w", os.ErrExist))
+	if rec3.Code != http.StatusConflict {
+		t.Errorf("lock contention = %d, want 409", rec3.Code)
 	}
 }

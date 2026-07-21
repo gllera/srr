@@ -7,7 +7,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
+	"os"
+	"time"
+
 	"srr/store"
 )
 
@@ -17,6 +21,15 @@ import (
 const (
 	dbFileKey = "db.gz"
 	dbLockKey = ".locked"
+	// dbFormatVersion is the db.gz schema version this binary writes and can
+	// read. Commit stamps it; NewDB REFUSES a store whose stored version is
+	// higher, because forward compatibility is not achievable by omitempty
+	// fallback alone: an older binary silently drops every field it does not
+	// know on its next Commit, which is data loss that looks like success.
+	// Bump ONLY for a genuinely breaking format change (a field whose meaning
+	// changes, or one an old reader would misinterpret) — a purely additive
+	// field stays on this version, since the fallbacks do handle that case.
+	dbFormatVersion = 1
 	// idxPackSize is the idx split threshold: entries per finalized pack.
 	idxPackSize = 50000
 	// metaPackSize is the meta/ split threshold: entries per finalized meta
@@ -164,6 +177,11 @@ type deltaChain struct {
 }
 
 type DBCore struct {
+	// Version is the db.gz schema version (dbFormatVersion). Stamped by every
+	// Commit; NewDB refuses to open a store written by a newer srr rather than
+	// silently dropping the fields it cannot represent. omitempty: absent == 0
+	// == a store written before the field existed, which is readable as-is.
+	Version int `json:"v,omitempty"`
 	// Seq is the latest-pack generation: the current latest packs are
 	// idx/L<Seq>.gz and data/L<Seq>.gz. 0 = empty store (no latest packs
 	// yet); the first article batch publishes generation 1. PutArticles
@@ -243,6 +261,14 @@ type DBCore struct {
 	// (a rebuild reuses finalized names but the tail-generation names are
 	// unchanged, so the low-water stays valid). omitempty.
 	GCLatestSwept int `json:"gcs,omitempty"`
+	// Inbox is the per-producer drained watermark of the spool pattern
+	// (docs/INBOX-SPEC.md): the highest cycle_id of `inbox/<name>.gz` this store
+	// has folded in. Published atomically with the batch it describes by the
+	// existing Commit — the same crash argument as Seq/SeenFlag — so a crash
+	// before Commit re-drains cleanly and a crash after it skips the stale
+	// envelope. Writer-only, like GCLatestSwept/DeltaBytes: the
+	// frontend/service-worker ignore it. omitempty; absent == nothing drained.
+	Inbox map[string]int64 `json:"inbox,omitempty"`
 	// Recipes is the map of named {ingest, pipe} bundles feeds reference by
 	// name (Feed.Recipe). Always contains the reserved "default" entry (seeded
 	// by NewDB). Backend-only config: the frontend/service-worker ignores it,
@@ -317,12 +343,49 @@ func withDB(locked bool, fn func(ctx context.Context, db *DB) error) error {
 // withDBCtx is the variant for callers that already have a context
 // (e.g. signal-aware contexts in long-running commands).
 func withDBCtx(ctx context.Context, locked bool, fn func(ctx context.Context, db *DB) error) error {
+	if locked {
+		release, err := acquireStoreWriter(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
 	db, err := NewDB(ctx, locked)
 	if err != nil {
 		return err
 	}
 	defer db.Close(ctx)
 	return fn(ctx, db)
+}
+
+// storeWriter serializes store WRITERS inside this process. `.locked` is the
+// cross-process lock and stays exactly as it was; this sits in front of it so
+// two writers in ONE process (srr serve's background fetch cycle and a GUI
+// mutation) queue briefly instead of racing to create `.locked` and handing the
+// operator a retry-me 409 for what is really just self-contention. In a
+// one-shot CLI process there is a single writer, so it is always uncontended.
+//
+// A buffered channel rather than sync.Mutex: acquisition must be selectable
+// against ctx and a timeout, which Mutex.Lock cannot express.
+var storeWriter = make(chan struct{}, 1)
+
+// storeWriterWait bounds that queueing. Past it the caller gets the SAME
+// os.ErrExist contract cross-process contention produces (writeErr → 409
+// "retry"), so a genuinely long-running cycle still yields a prompt, honest
+// answer instead of an unbounded hang.
+const storeWriterWait = 30 * time.Second
+
+func acquireStoreWriter(ctx context.Context) (func(), error) {
+	t := time.NewTimer(storeWriterWait)
+	defer t.Stop()
+	select {
+	case storeWriter <- struct{}{}:
+		return func() { <-storeWriter }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-t.C:
+		return nil, fmt.Errorf("another operation in this process is holding the store: %w", os.ErrExist)
+	}
 }
 
 func NewDB(ctx context.Context, locked bool) (*DB, error) {
@@ -358,6 +421,14 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 		if err := json.Unmarshal(data, &db.core); err != nil {
 			db.Close(ctx)
 			return nil, fmt.Errorf("decode %s: %w", dbFileKey, err)
+		}
+		// Refuse a store from the future: this binary cannot represent fields it
+		// does not know, so opening it — even read-only, since any later Commit
+		// would write back the truncated core — is how skew silently loses data.
+		if db.core.Version > dbFormatVersion {
+			v := db.core.Version
+			db.Close(ctx)
+			return nil, fmt.Errorf("%s was written by a newer srr (format v%d, this binary supports v%d) — refusing to open; update srr", dbFileKey, v, dbFormatVersion)
 		}
 	}
 
@@ -434,17 +505,52 @@ func (o *DB) BumpGen() {
 }
 
 func (o *DB) Commit(ctx context.Context) error {
+	o.core.Version = dbFormatVersion
+	buf, err := o.encodeCore()
+	if err != nil {
+		return err
+	}
+	return o.AtomicPut(ctx, dbFileKey, buf, store.ObjectMeta{})
+}
+
+// encodeCore serialises the in-memory core exactly as Commit publishes it.
+// Shared with SnapshotDB so a snapshot is byte-identical to the db.gz it
+// copies (jsonEncode + gzip are deterministic for an unchanged core).
+func (o *DB) encodeCore() (*bytes.Buffer, error) {
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	enc := json.NewEncoder(gz)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(&o.core); err != nil {
-		return err
+		return nil, err
 	}
 	if err := gz.Close(); err != nil {
+		return nil, err
+	}
+	return &buf, nil
+}
+
+// SnapshotDB publishes a write-once copy of the just-committed db.gz at
+// db/<tailGen>.gz. Commit always overwrites the one fixed key, so the store
+// keeps no history of it: the immutable packs survive any accident, but db.gz
+// carries the ~10 pointer fields (seq/nd/na/hdrs/mp/mt/gcs/next_pid/pack_off
+// plus every feed's add_idx/xp) that would otherwise have to be reconstructed
+// by hand after a botched rebuild, a bad `gen --bump`, or a fat-fingered
+// `feed rm`.
+//
+// RESTORE: copy the chosen snapshot over db.gz — e.g. for a local store,
+// `cp db/12.gz db.gz`; for S3, an `aws s3 cp` between the two keys. There is
+// deliberately no `srr restore` verb yet (see FINDINGS REL1 shape (b)).
+//
+// Called once per CONSOLIDATION cycle (~1 per --max-deltas dirty cycles), so
+// the write amplification is negligible; GCLatest sweeps old snapshots on the
+// same low-water cursor as the tail packs they describe.
+func (o *DB) SnapshotDB(ctx context.Context) error {
+	buf, err := o.encodeCore()
+	if err != nil {
 		return err
 	}
-	return o.AtomicPut(ctx, dbFileKey, &buf, store.ObjectMeta{})
+	return o.AtomicPut(ctx, dbSnapshotKey(tailGen(&o.core)), buf, store.ObjectMeta{})
 }
 
 func (o *DB) Feeds() map[int]*Feed {
@@ -518,7 +624,12 @@ func (o *DB) FeedByID(id int) (*Feed, error) {
 	}
 	ch := o.core.Feeds[id]
 	if ch == nil {
-		return nil, fmt.Errorf("feed id %d not found", id)
+		// Wrap the stdlib not-exist sentinel so callers can classify this
+		// STRUCTURALLY (serve's writeErr maps it to 404) instead of matching the
+		// message text — which silently 404s any future error whose wording
+		// happens to contain "not found". fs.ErrNotExist keeps the repo's
+		// "no new custom sentinels" convention.
+		return nil, fmt.Errorf("feed id %d not found: %w", id, fs.ErrNotExist)
 	}
 	return ch, nil
 }

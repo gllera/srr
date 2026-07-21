@@ -12,6 +12,12 @@ import { describe, expect, it } from "vitest"
 
 import { srr, feedServer, inspectValidate, readDb } from "../harness"
 
+// Pin the pre-delta tail: readLatestData below reads data/L<seq>.gz directly,
+// which an all-delta store (the writer's default since v4.5.0) never writes —
+// the fixture generator ENOENT'd on every run from that release until this.
+// The six contract suites that pin legacy tail mechanics set the same knob.
+process.env.SRR_MAX_DELTAS = "0"
+
 const HERE = dirname(fileURLToPath(import.meta.url))
 const OUT = resolve(HERE, "design-store")
 
@@ -117,7 +123,8 @@ describe("design fixture store", () => {
 
          // Remove the "gone" feed: its articles stay in the immutable pack (chronIdx
          // is permanent) but feedTitle now tombstones to [DELETED].
-         await srr(OUT, "feed", "rm", goneId!)
+         // --force: the feed has stored articles, the guarded irreversible case.
+         await srr(OUT, "feed", "rm", goneId!, "--force")
 
          const targets = { sampleTag: "topics", ferrToken, longTitlePos, savedDeletedChron }
          writeFileSync(join(OUT, "design.json"), JSON.stringify(targets, null, 2))

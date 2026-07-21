@@ -71,12 +71,39 @@ type Result struct {
 	// Consumed by serve's GET /api/resolve to pre-fill the add-feed dialog;
 	// the fetch loop ignores it (a stored feed's title is operator-owned).
 	Title string `json:"title,omitempty"`
+	// Partial marks a response whose Items are only a prefix of the source (the
+	// #feed parser stopped at a malformed mid-feed element). The caller ingests
+	// the items normally but must neither store HTTP validators (ETag /
+	// LastModified stay empty here) nor advance the feed watermark, so the next
+	// cycle refetches the full document and ingests the missed remainder —
+	// otherwise everything after the malformed element is silently skipped until
+	// the publisher's bytes change. An external strategy MAY set it with the
+	// same meaning; omitempty keeps the wire protocol backward-compatible.
+	Partial bool `json:"partial,omitempty"`
 }
 
 // userAgent is the User-Agent header value sent by built-in HTTP-based
-// fetchers. Kept generic — feed publishers expect a fixed identifier per
-// reader, not a per-version string.
-const userAgent = "SRR"
+// fetchers. A bare "SRR" scores badly with the WAF class that already blocks
+// datacenter egress, so it carries the version and a contact URL — the
+// convention every established feed reader follows. The zero value is a valid
+// header, so tests and any caller that never calls SetUserAgent still send a
+// well-formed identifier rather than an empty one.
+var userAgent = "SRR/dev (+https://github.com/gllera/srr)"
+
+// SetUserAgent overrides the identifier sent by the built-in fetchers. main
+// calls it once at startup with the binary's version; mod/readability keeps
+// its own deliberately keyword-free default and is unaffected.
+func SetUserAgent(ua string) {
+	if ua != "" {
+		userAgent = ua
+	}
+}
+
+// acceptFeed is the Accept header sent with every #feed request. Without it a
+// content-negotiating endpoint serves HTML and the fetch pays for the discovery
+// double-fetch below; text/html stays at a low q so it remains the last resort
+// rather than the default.
+const acceptFeed = "application/rss+xml, application/atom+xml, application/rdf+xml;q=0.9, application/xml;q=0.8, text/xml;q=0.7, text/html;q=0.4"
 
 // readBody streams body into the caller's per-worker buf via io.ReadFull
 // and maps the three meaningful outcomes: oversize (entire buf filled),

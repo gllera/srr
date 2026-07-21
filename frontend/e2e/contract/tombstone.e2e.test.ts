@@ -30,7 +30,10 @@ describe("contract: deleted feed tombstone", () => {
       await srr(store, "feed", "add", "-t", "Doomed", "-u", `${feeds.url}/doomed.xml`)
       await srr(store, "feed", "add", "-t", "Keeper", "-u", `${feeds.url}/keeper.xml`)
       await srr(store, "art", "fetch")
-      await srr(store, "feed", "rm", "0")
+      // --force: removing a feed that already has stored articles is the
+      // irreversible case the CLI now guards (its idx entries stay in the
+      // immutable packs as orphans) — which is exactly what this suite pins.
+      await srr(store, "feed", "rm", "0", "--force")
       reader = await mountReader(store)
    })
 
