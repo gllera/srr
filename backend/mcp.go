@@ -14,8 +14,9 @@ import (
 // handlers themselves live in mcp_tools.go.
 //
 // STDOUT DISCIPLINE: nothing under the MCP surface may write to os.Stdout.
-// The stdio transport (S43) speaks JSON-RPC on stdout, so a stray printJSON /
-// fmt.Print* from a tool handler would corrupt the protocol stream mid-session.
+// The stdio transport (`srr mcp`, cmd_mcp.go) speaks JSON-RPC on stdout, so a
+// stray printJSON / fmt.Print* from a tool handler would corrupt the protocol
+// stream mid-session.
 // Enforced by construction: every handler returns a typed value the SDK
 // marshals, and every wrapped helper (listArticles, buildOverview,
 // renderPreview, previewFetch, saveFeed, runFetch) is a value-returning
@@ -77,12 +78,6 @@ func mcpHTTPHandler() http.Handler {
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true},
 	)
 }
-
-// The MCP endpoint is not mounted yet — S43 wires mcpHTTPHandler into serve's
-// newMux. Until then nothing in the binary reaches it, and the whole tool graph
-// below it would read as dead code to the `unused` linter. This blank reference
-// is the placeholder root; drop it when the route lands.
-var _ = mcpHTTPHandler
 
 // msgMCPStoreBusy mirrors the admin API's 409 contract (msgLockContention) in
 // the vocabulary a tool caller can act on: the store lock is held by another

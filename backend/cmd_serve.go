@@ -91,6 +91,27 @@ func (o *ServeCmd) Run() error {
 func newMux() http.Handler {
 	mux := http.NewServeMux()
 	registerAPI(mux)
+	// The MCP endpoint. Streamable HTTP uses three methods on the one path —
+	// POST (requests), GET (a server→client stream) and DELETE (session
+	// teardown) — so all three are registered; anything else on /mcp gets the
+	// mux's own 405, matching what the SDK handler would answer.
+	//
+	// They are registered method-BY-method rather than as a bare "/mcp" because
+	// Go 1.22+ ServeMux treats a bare "/mcp" and the "GET /" wildcard below as
+	// CONFLICTING (neither is more specific in both dimensions: "/mcp" has the
+	// more specific path, "GET /" the more specific method) and PANICS at
+	// registration. With the method stated, "GET /mcp" beats "GET /" on path
+	// specificity and the POST/DELETE patterns overlap nothing, so the admin
+	// UI's file server never sees an MCP request.
+	//
+	// The endpoint stays inside hostGuard: a non-browser MCP client sends no
+	// Origin (so only the unconditional loopback-Host check applies, which the
+	// tunnel's httpHostHeader rewrite satisfies), and /mcp exposes a strict
+	// subset of what /api/* already offers the same caller.
+	mcpHandler := mcpHTTPHandler()
+	for _, m := range []string{http.MethodPost, http.MethodGet, http.MethodDelete} {
+		mux.Handle(m+" /mcp", mcpHandler)
+	}
 	ui := minifiedWebUI()
 	mux.Handle("GET /", webUICacheHeaders(ui, http.FileServerFS(ui)))
 	return hostGuard(mux)
