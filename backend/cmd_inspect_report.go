@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-func inspectOne(fetch keyGetter, core *DBCore, packs []*idxPack, deltas []ArticleData, chron int) error {
+func (o *InspectCmd) inspectOne(fetch keyGetter, core *DBCore, packs []*idxPack, deltas []ArticleData, chron int) error {
 	if chron >= core.TotalArticles {
 		return fmt.Errorf("chron %d out of range (total_art=%d)", chron, core.TotalArticles)
 	}
@@ -18,41 +18,41 @@ func inspectOne(fetch keyGetter, core *DBCore, packs []*idxPack, deltas []Articl
 	idxSub := int(pack.feedIDs[chron-n*idxPackSize])
 	pid, offset := pack.getPackRef(chron)
 
-	fmt.Printf("\nchron %d:\n", chron)
-	fmt.Printf("  idx pack %d  entry feed_id=%d\n", n, idxSub)
+	fmt.Fprintf(o.w(), "\nchron %d:\n", chron)
+	fmt.Fprintf(o.w(), "  idx pack %d  entry feed_id=%d\n", n, idxSub)
 
 	var entries []ArticleData
 	if pid == deltaPackID {
 		// Delta-region chron: content lives in the parsed chain, not a pack.
-		fmt.Printf("  resolved -> delta chain  offset=%d\n", offset)
+		fmt.Fprintf(o.w(), "  resolved -> delta chain  offset=%d\n", offset)
 		entries = deltas
 	} else {
 		key := dataKeyFor(core, pid)
-		fmt.Printf("  resolved -> %s  packId=%d  offset=%d\n", key, pid, offset)
+		fmt.Fprintf(o.w(), "  resolved -> %s  packId=%d  offset=%d\n", key, pid, offset)
 		var err error
 		entries, err = loadDataPack(fetch, key)
 		if err != nil {
 			return err
 		}
 	}
-	fmt.Printf("  data pack entries: %d\n", len(entries))
+	fmt.Fprintf(o.w(), "  data pack entries: %d\n", len(entries))
 
 	if offset >= len(entries) {
-		fmt.Printf("  *** OUT OF RANGE: frontend will throw 'Cannot read properties of undefined (reading 'f')' ***\n")
+		fmt.Fprintf(o.w(), "  *** OUT OF RANGE: frontend will throw 'Cannot read properties of undefined (reading 'f')' ***\n")
 		return fmt.Errorf("offset %d >= entries %d", offset, len(entries))
 	}
 	a := entries[offset]
 	if a.FeedID != idxSub {
-		fmt.Printf("  *** SUB_ID MISMATCH: idx=%d data=%d ***\n", idxSub, a.FeedID)
+		fmt.Fprintf(o.w(), "  *** SUB_ID MISMATCH: idx=%d data=%d ***\n", idxSub, a.FeedID)
 	}
-	fmt.Printf("  data feed_id: %d\n", a.FeedID)
-	fmt.Printf("  fetched_at: %d\n", a.FetchedAt)
-	fmt.Printf("  title: %s\n", truncStr(a.Title, 100))
-	fmt.Printf("  link: %s\n", a.Link)
+	fmt.Fprintf(o.w(), "  data feed_id: %d\n", a.FeedID)
+	fmt.Fprintf(o.w(), "  fetched_at: %d\n", a.FetchedAt)
+	fmt.Fprintf(o.w(), "  title: %s\n", truncStr(a.Title, 100))
+	fmt.Fprintf(o.w(), "  link: %s\n", a.Link)
 	if ch := core.Feeds[idxSub]; ch != nil {
-		fmt.Printf("  feed: %s (tag=%q)\n", ch.Title, ch.Tag)
+		fmt.Fprintf(o.w(), "  feed: %s (tag=%q)\n", ch.Title, ch.Tag)
 	} else {
-		fmt.Printf("  *** feed %d not in feeds ***\n", idxSub)
+		fmt.Fprintf(o.w(), "  *** feed %d not in feeds ***\n", idxSub)
 	}
 	if a.FeedID != idxSub {
 		return fmt.Errorf("feed_id mismatch")
@@ -82,7 +82,7 @@ func addFilterToken(core *DBCore, token string, feeds map[int]int) {
 // numeric feed_id or a tag name. Reports total count, chron range, and
 // count above the optional floor — same numbers the frontend computes
 // for filteredTotal / filteredLeft.
-func filterReport(core *DBCore, packs []*idxPack, token string, floor int) error {
+func (o *InspectCmd) filterReport(core *DBCore, packs []*idxPack, token string, floor int) error {
 	feeds := map[int]int{} // feed_id -> add_idx
 	addFilterToken(core, token, feeds)
 	if len(feeds) == 0 {
@@ -114,21 +114,21 @@ func filterReport(core *DBCore, packs []*idxPack, token string, floor int) error
 		lastChron = chron
 	}
 
-	fmt.Printf("\nfilter %q -> %d feed(s): %v\n", token, len(feeds), feedIDs)
+	fmt.Fprintf(o.w(), "\nfilter %q -> %d feed(s): %v\n", token, len(feeds), feedIDs)
 	for _, id := range feedIDs {
 		ch := core.Feeds[id]
-		fmt.Printf("  feed %d: %q tag=%q total_art=%d add_idx=%d expired=%d\n",
+		fmt.Fprintf(o.w(), "  feed %d: %q tag=%q total_art=%d add_idx=%d expired=%d\n",
 			id, ch.Title, ch.Tag, ch.TotalArt, ch.AddIdx, ch.Expired)
 	}
-	fmt.Printf("\nfilter.feedTotal (sum of feed.total_art - expired) = %d\n", feedTotal)
-	fmt.Printf("matches in idx                              = %d\n", count)
+	fmt.Fprintf(o.w(), "\nfilter.feedTotal (sum of feed.total_art - expired) = %d\n", feedTotal)
+	fmt.Fprintf(o.w(), "matches in idx                              = %d\n", count)
 	if count != feedTotal {
-		fmt.Printf("  *** mismatch: filter would show wrong counter in UI ***\n")
+		fmt.Fprintf(o.w(), "  *** mismatch: filter would show wrong counter in UI ***\n")
 	}
 	if count > 0 {
-		fmt.Printf("first matching chron                        = %d\n", firstChron)
-		fmt.Printf("last matching chron                         = %d\n", lastChron)
-		fmt.Printf("matches with chron >= floor(%d)              = %d\n", floor, aboveFloor)
+		fmt.Fprintf(o.w(), "first matching chron                        = %d\n", firstChron)
+		fmt.Fprintf(o.w(), "last matching chron                         = %d\n", lastChron)
+		fmt.Fprintf(o.w(), "matches with chron >= floor(%d)              = %d\n", floor, aboveFloor)
 	}
 	if count != feedTotal {
 		return fmt.Errorf("filter count %d != feed_total %d", count, feedTotal)
@@ -138,7 +138,7 @@ func filterReport(core *DBCore, packs []*idxPack, token string, floor int) error
 
 // listTagsReport mirrors frontend groupFeedsByTag: one line per tag
 // with feed count and total article count.
-func listTagsReport(core *DBCore) error {
+func (o *InspectCmd) listTagsReport(core *DBCore) error {
 	type tagInfo struct {
 		feeds    int
 		articles int
@@ -163,13 +163,13 @@ func listTagsReport(core *DBCore) error {
 		t.articles += ch.TotalArt - ch.Expired
 	}
 	names := slices.Sorted(maps.Keys(tags))
-	fmt.Printf("\ntags (%d):\n", len(names))
+	fmt.Fprintf(o.w(), "\ntags (%d):\n", len(names))
 	for _, n := range names {
 		t := tags[n]
-		fmt.Printf("  %-20s  %3d feeds  %5d articles\n", n, t.feeds, t.articles)
+		fmt.Fprintf(o.w(), "  %-20s  %3d feeds  %5d articles\n", n, t.feeds, t.articles)
 	}
 	if untagged.feeds > 0 {
-		fmt.Printf("  %-20s  %3d feeds  %5d articles\n", "(untagged)", untagged.feeds, untagged.articles)
+		fmt.Fprintf(o.w(), "  %-20s  %3d feeds  %5d articles\n", "(untagged)", untagged.feeds, untagged.articles)
 	}
 	return nil
 }
@@ -177,7 +177,7 @@ func listTagsReport(core *DBCore) error {
 // fromHashReport replays nav.fromHash on a frontend URL hash like
 // "0,2485!big_info": parses floor/pos/tokens, resolves filter, decides
 // whether resolve(true) or last() runs, prints the resulting article.
-func fromHashReport(fetch keyGetter, core *DBCore, packs []*idxPack, deltas []ArticleData, hash string) error {
+func (o *InspectCmd) fromHashReport(fetch keyGetter, core *DBCore, packs []*idxPack, deltas []ArticleData, hash string) error {
 	hash = strings.TrimPrefix(hash, "#")
 	main, tokensPart, _ := strings.Cut(hash, "!")
 	floorStr, posStr, hasComma := strings.Cut(main, ",")
@@ -205,7 +205,7 @@ func fromHashReport(fetch keyGetter, core *DBCore, packs []*idxPack, deltas []Ar
 		}
 	}
 
-	fmt.Printf("\nhash %q -> floor=%d pos_str=%q tokens=%v\n", hash, floor, posStr, tokens)
+	fmt.Fprintf(o.w(), "\nhash %q -> floor=%d pos_str=%q tokens=%v\n", hash, floor, posStr, tokens)
 
 	feeds := map[int]int{}
 	for _, token := range tokens {
@@ -213,21 +213,21 @@ func fromHashReport(fetch keyGetter, core *DBCore, packs []*idxPack, deltas []Ar
 	}
 	activeFilter := len(tokens) > 0 && len(feeds) > 0
 	if len(tokens) > 0 && !activeFilter {
-		fmt.Printf("  filter tokens %v resolved to 0 feeds -> falls back to no filter\n", tokens)
+		fmt.Fprintf(o.w(), "  filter tokens %v resolved to 0 feeds -> falls back to no filter\n", tokens)
 	}
 	if activeFilter {
 		ids := slices.Sorted(maps.Keys(feeds))
-		fmt.Printf("  filter active: %d feed(s) %v\n", len(feeds), ids)
+		fmt.Fprintf(o.w(), "  filter active: %d feed(s) %v\n", len(feeds), ids)
 	} else {
-		fmt.Println("  filter inactive")
+		fmt.Fprintln(o.w(), "  filter inactive")
 	}
 
 	pos, err := strconv.Atoi(posStr)
 	if err != nil || pos < 0 || pos >= core.TotalArticles {
 		pos = core.TotalArticles - 1
-		fmt.Printf("  pos clamped to %d\n", pos)
+		fmt.Fprintf(o.w(), "  pos clamped to %d\n", pos)
 	} else {
-		fmt.Printf("  pos=%d\n", pos)
+		fmt.Fprintf(o.w(), "  pos=%d\n", pos)
 	}
 
 	n := packIdxFor(pos, len(packs))
@@ -237,7 +237,7 @@ func fromHashReport(fetch keyGetter, core *DBCore, packs []*idxPack, deltas []Ar
 		addIdx, ok := feeds[posFeedID]
 		matches = ok && pos >= addIdx
 	}
-	fmt.Printf("  pos feed_id=%d matches filter=%v\n", posFeedID, matches)
+	fmt.Fprintf(o.w(), "  pos feed_id=%d matches filter=%v\n", posFeedID, matches)
 
 	finalPos := pos
 	if !matches {
@@ -256,12 +256,12 @@ func fromHashReport(fetch keyGetter, core *DBCore, packs []*idxPack, deltas []Ar
 			}
 		}
 		if finalPos < 0 {
-			fmt.Println("  no matching article above floor — frontend would show '(no matching articles)'")
+			fmt.Fprintln(o.w(), "  no matching article above floor — frontend would show '(no matching articles)'")
 			return nil
 		}
-		fmt.Printf("  pos doesn't match -> last() jumps to chron %d\n", finalPos)
+		fmt.Fprintf(o.w(), "  pos doesn't match -> last() jumps to chron %d\n", finalPos)
 	} else {
-		fmt.Printf("  pos matches -> resolve(true), stays at chron %d\n", finalPos)
+		fmt.Fprintf(o.w(), "  pos matches -> resolve(true), stays at chron %d\n", finalPos)
 	}
-	return inspectOne(fetch, core, packs, deltas, finalPos)
+	return o.inspectOne(fetch, core, packs, deltas, finalPos)
 }

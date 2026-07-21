@@ -9,6 +9,9 @@
 // Wire-type conventions: `?` = json omitempty (key absent at the Go zero
 // value); `| null` = a Go nil map/slice serialized while the key is present.
 
+// db.gz schema version this build understands; a store stamped higher (db.v) was written by a newer srr and this reader cannot be trusted with it
+export const DB_FORMAT_VERSION = 1
+
 // entries per finalized idx pack (split threshold)
 export const IDX_PACK_SIZE = 50000
 
@@ -53,7 +56,7 @@ export const SEARCH_BLOOM_K = 7
 // — "L" latest generations, "h" idx header summaries, "s" search bloom
 // summaries. sw.ts builds its route regex from this table and enforces
 // kind-per-series in parsePackName, mirroring the store's strict packKeyRe.
-export const PACK_SERIES_KINDS: Record<string, string> = { idx: "Lh", data: "Ld", meta: "Ls" }
+export const PACK_SERIES_KINDS: Record<string, string> = { idx: "Lh", data: "Ld", meta: "Ls", db: "" }
 
 // Wire shape of one JSONL line in data/*.gz (backend ArticleData).
 export interface IArticleWire {
@@ -116,6 +119,7 @@ export interface IRecipeWire {
 
 // Wire shape of db.gz itself (backend DBCore).
 export interface IDBWire {
+   v?: number // Version
    seq?: number // Seq
    sf?: boolean // SeenFlag
    fetched_at: number // FetchedAt
@@ -130,6 +134,7 @@ export interface IDBWire {
    na?: number // DeltaArticles
    dby?: number // DeltaBytes
    gcs?: number // GCLatestSwept
+   inbox?: Record<string, number> // Inbox
    recipes?: Record<string, IRecipeWire> // Recipes
    dd?: number // DedupDays
    feeds: Record<number, IFeedWire> | null // Feeds

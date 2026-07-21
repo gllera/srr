@@ -595,7 +595,17 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 	if len(items) > 0 {
 		c.LastNew = run.fetchedAt
 	}
-	c.Watermark = maxPub
+	// A partial response (parse stopped at a malformed mid-feed element) keeps
+	// the prior Watermark — the same preservation NotModified and the
+	// stale-response guard apply. Advancing it would let a first-subscribe
+	// truncation raise wm past the never-ingested older backlog, so the refetch
+	// (forced by the withheld validators — result.ETag/LastModified are empty
+	// here, clearing the stored ones below) would watermark-skip it anyway. The
+	// prefix items ingested above sit in bg/the seen pool, so the refetch dedups
+	// them and ingests only the remainder.
+	if !result.Partial {
+		c.Watermark = maxPub
+	}
 	c.BoundaryGUIDs = bg
 	// Commit the pool stamps only here — past the all-nil and stale-response
 	// guards' early returns — so a transient stale/empty copy never refreshes

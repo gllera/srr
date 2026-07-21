@@ -1259,3 +1259,110 @@ func TestFeedByteCountersPersistAcrossReload(t *testing.T) {
 		t.Fatalf("feedListView counters = %d/%d, want 12345/678", lv.ContentBytes, lv.AssetBytes)
 	}
 }
+
+// A db.gz stamped with a HIGHER format version than this binary understands
+// must be refused outright: an old binary silently drops every field it does
+// not know on its next Commit, which is data loss wearing a success exit code.
+// Its own version and anything below it open normally, and Commit stamps the
+// current version so a fresh store carries it.
+func TestNewDBFormatVersionGate(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	globals = &Globals{PackSize: 1, Store: dir}
+	writeLegacyDB(t, dir, `{"v":99,"fetched_at":0,"total_art":0,"next_pid":0,"pack_off":0,"feeds":{}}`)
+
+	db, err := NewDB(ctx, false)
+	if err == nil {
+		db.Close(ctx)
+		t.Fatal("NewDB opened a store written by a newer srr; want a hard error")
+	}
+	if !strings.Contains(err.Error(), "newer srr") {
+		t.Errorf("error = %v, want it to name the version skew", err)
+	}
+
+	// A store at this binary's own version opens, and Commit stamps the version
+	// on a store that had none (the pre-field case).
+	dir2 := t.TempDir()
+	globals = &Globals{PackSize: 1, Store: dir2}
+	writeLegacyDB(t, dir2, `{"fetched_at":0,"total_art":0,"next_pid":0,"pack_off":0,"feeds":{}}`)
+	db2, err := NewDB(ctx, false)
+	if err != nil {
+		t.Fatalf("NewDB on an unversioned store: %v", err)
+	}
+	defer db2.Close(ctx)
+	if db2.core.Version != 0 {
+		t.Errorf("loaded Version = %d, want 0 (absent on the wire)", db2.core.Version)
+	}
+	if err := db2.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if db2.core.Version != dbFormatVersion {
+		t.Errorf("Version after Commit = %d, want %d", db2.core.Version, dbFormatVersion)
+	}
+	db3, err := NewDB(ctx, false)
+	if err != nil {
+		t.Fatalf("NewDB on the freshly committed store: %v", err)
+	}
+	defer db3.Close(ctx)
+	if db3.core.Version != dbFormatVersion {
+		t.Errorf("round-tripped Version = %d, want %d", db3.core.Version, dbFormatVersion)
+	}
+}
+
+// The pointer-state backup: a consolidation cycle publishes db/<tailGen>.gz
+// byte-identical to the db.gz it just committed, under a write-once name, and
+// GCLatest sweeps old snapshots on the same low-water cursor as the tail packs
+// they describe.
+func TestSnapshotDBPublishesAndSweeps(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	ch := &Feed{Title: "feed", URL: "https://example.com/f"}
+	if err := db.AddFeed(ch); err != nil {
+		t.Fatal(err)
+	}
+	c.FetchedAt = 1_700_000_000
+	if _, err := db.PutArticles(ctx, []*Item{{Feed: ch, Title: "t", Content: "x", Published: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SnapshotDB(ctx); err != nil {
+		t.Fatalf("SnapshotDB: %v", err)
+	}
+
+	snap := filepath.Join(dir, dbSnapshotKey(tailGen(c)))
+	got, err := os.ReadFile(snap)
+	if err != nil {
+		t.Fatalf("snapshot not published: %v", err)
+	}
+	live, err := os.ReadFile(filepath.Join(dir, dbFileKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, live) {
+		t.Error("snapshot bytes differ from the committed db.gz")
+	}
+	// It must be readable as a db.gz — that IS the restore path.
+	var restored DBCore
+	raw, err := gunzip(bytes.NewReader(got))
+	if err != nil {
+		t.Fatalf("snapshot is not gzip: %v", err)
+	}
+	if err := json.Unmarshal(raw, &restored); err != nil {
+		t.Fatalf("snapshot is not a db.gz: %v", err)
+	}
+	if restored.TotalArticles != c.TotalArticles || restored.Seq != c.Seq {
+		t.Errorf("restored core = {total:%d seq:%d}, want {%d %d}",
+			restored.TotalArticles, restored.Seq, c.TotalArticles, c.Seq)
+	}
+
+	// Snapshots age out with their generation: push the tail far past the grace
+	// window and sweep.
+	c.Seq = 60
+	if err := db.GCLatest(ctx, latestKeep); err != nil {
+		t.Fatalf("GCLatest: %v", err)
+	}
+	if _, err := os.Stat(snap); err == nil {
+		t.Error("stale snapshot survived the sweep")
+	}
+}

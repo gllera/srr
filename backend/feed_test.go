@@ -30,7 +30,18 @@ func init() {
 		{GUID: 2, Title: "stub-2", Link: "https://stub/2", Published: &pub},
 	}
 	ingest.Register("test-stub", func(_ context.Context, _ *http.Client, _ []byte, _ ingest.Request) (ingest.Result, error) {
-		return ingest.Result{Items: items}, nil
+		// Fresh copies per call, like a real fetcher parsing a fresh response:
+		// processItem MUTATES items (Title/Lang normalization, and #filter sets
+		// Drop), so handing out the shared pointers leaks one test's pipeline
+		// result into every later test dispatching this stub — a filter test
+		// left stub-1/stub-2 permanently dropped, which -shuffle exposed.
+		// Published stays shared: it is immutable by pipeline contract.
+		out := make([]*mod.RawItem, len(items))
+		for n, it := range items {
+			cp := *it
+			out[n] = &cp
+		}
+		return ingest.Result{Items: out}, nil
 	})
 }
 
@@ -1690,5 +1701,62 @@ func TestUploadAssetsPartialFailureChargesCompletedPuts(t *testing.T) {
 	}
 	if ch.AssetBytes != 4 {
 		t.Fatalf("AssetBytes = %d, want 4 (the completed a.jpg Put)", ch.AssetBytes)
+	}
+}
+
+// A partial parse (malformed mid-feed element) must not advance the watermark
+// or store validators: a first-subscribe truncation would otherwise raise wm
+// past the never-ingested older backlog and 304/watermark-skip it forever. The
+// prefix items still ingest and enter bg, so the forced refetch dedups them
+// and ingests exactly the remainder once.
+func TestPartialFetchPreservesWatermarkAndRefetchesRemainder(t *testing.T) {
+	const malformed = `<rss version="2.0"><channel>
+    <item><guid>a</guid><title>A</title><pubDate>Wed, 01 May 2024 00:00:00 GMT</pubDate></item>
+    <item><guid>b</guid><title>bad ]]> bytes</title><pubDate>Fri, 01 Mar 2024 00:00:00 GMT</pubDate></item>
+    <item><guid>c</guid><title>C</title><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
+  </channel></rss>`
+	const fixed = `<rss version="2.0"><channel>
+    <item><guid>a</guid><title>A</title><pubDate>Wed, 01 May 2024 00:00:00 GMT</pubDate></item>
+    <item><guid>b</guid><title>B</title><pubDate>Fri, 01 Mar 2024 00:00:00 GMT</pubDate></item>
+    <item><guid>c</guid><title>C</title><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
+  </channel></rss>`
+	var body atomic.Value
+	body.Store(malformed)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("ETag", `"v1"`)
+		fmt.Fprint(w, body.Load().(string))
+	}))
+	defer srv.Close()
+
+	ch := &Feed{Title: "T"}
+	items := fetchOnce(t, ch, srv)
+	if len(items) != 1 || items[0].Title != "A" {
+		t.Fatalf("partial fetch: got %d items, want the 1-item prefix [A]", len(items))
+	}
+	if ch.Watermark != 0 {
+		t.Errorf("Watermark = %d, want 0 (preserved on a partial parse)", ch.Watermark)
+	}
+	if ch.ETag != "" || ch.LastModified != "" {
+		t.Errorf("validators = (%q, %q), want empty after a partial parse", ch.ETag, ch.LastModified)
+	}
+
+	body.Store(fixed)
+	items = fetchOnce(t, ch, srv)
+	var titles []string
+	for _, it := range items {
+		titles = append(titles, it.Title)
+	}
+	if !slices.Equal(titles, []string{"B", "C"}) {
+		t.Fatalf("refetch ingested %v, want exactly the remainder [B C] (A deduped)", titles)
+	}
+	if ch.Watermark == 0 {
+		t.Error("Watermark still 0 after a complete fetch, want advanced")
+	}
+	if ch.ETag != `"v1"` {
+		t.Errorf("ETag = %q, want stored after a complete parse", ch.ETag)
+	}
+
+	if items = fetchOnce(t, ch, srv); len(items) != 0 {
+		t.Fatalf("third fetch ingested %d items, want 0 (all deduped)", len(items))
 	}
 }

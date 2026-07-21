@@ -178,9 +178,11 @@ func RunCommandTimeout(ctx context.Context, timeout time.Duration, name string, 
 
 // runBounded is the shared hardened exec core: stdout captured into a
 // maxSubprocessOutput-capped buffer, stderr passed through unless the caller
-// already set one (RunCommandTimeout captures it), and WaitDelay set so a
-// backgrounded grandchild can't hold the pipe open past the deadline. The
-// caller builds cmd from a SubprocessTimeout-bounded context and sets any
+// already set one (RunCommandTimeout captures it), WaitDelay set so a
+// backgrounded grandchild can't hold the pipe open past the deadline, and the
+// command's whole process GROUP killed on cancellation (setProcessGroup) so no
+// child outlives it. The caller MUST build cmd via exec.CommandContext —
+// os/exec rejects a Cancel hook on a context-less Cmd at Start — and sets any
 // stdin/env/dir.
 func runBounded(cmd *exec.Cmd) ([]byte, error) {
 	out := &cappedBuffer{limit: maxSubprocessOutput}
@@ -189,6 +191,7 @@ func runBounded(cmd *exec.Cmd) ([]byte, error) {
 		cmd.Stderr = os.Stderr
 	}
 	cmd.WaitDelay = subprocessWaitDelay
+	setProcessGroup(cmd)
 	if err := cmd.Run(); err != nil {
 		return nil, err
 	}

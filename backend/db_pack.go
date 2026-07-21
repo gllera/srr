@@ -11,6 +11,8 @@ import (
 	"log/slog"
 
 	"github.com/foobaz/go-zopfli/zopfli"
+
+	"srr/store"
 )
 
 // ArticleData is the on-disk JSONL representation of an article (one
@@ -93,6 +95,13 @@ func tailCovered(core *DBCore) int {
 // "d" slots into the PackSeries grammar as one more write-once kind letter.
 func deltaKey(g int) string {
 	return fmt.Sprintf("data/d%d.gz", g)
+}
+
+// dbSnapshotKey resolves the write-once db.gz snapshot key of tail generation
+// g (see DB.SnapshotDB). Its own "db" series in the PackSeries grammar, with no
+// kind letters — bare stems only, like a finalized pack.
+func dbSnapshotKey(g int) string {
+	return fmt.Sprintf("db/%d.gz", g)
 }
 
 // latestKey resolves the current tail-pack key of a series ("idx", "data",
@@ -318,7 +327,15 @@ func (o *DB) flushPack(ctx context.Context, key string, p *pack, final bool) err
 			return err
 		}
 	}
-	if err := o.Put(ctx, key, bytes.NewReader(out), true); err != nil {
+	// AtomicPut, not Put: local/SFTP then write to a temp file, fsync it, and
+	// rename (plus the parent-dir fsync). A plain Put leaves pack bytes in page
+	// cache while Commit's own AtomicPut makes db.gz durable — so a power loss
+	// can publish a committed db.gz addressing truncated packs, under immutable
+	// names cached forever. S3/HTTP are unchanged overwrites either way, and
+	// the empty ObjectMeta keeps Content-Type falling through to
+	// contentTypeForKey exactly as before. Put's ignoreExisting=true matched
+	// AtomicPut's overwrite semantics already.
+	if err := o.AtomicPut(ctx, key, bytes.NewReader(out), store.ObjectMeta{}); err != nil {
 		return err
 	}
 	p.buf.Reset()
@@ -430,10 +447,10 @@ func (o *DB) GCLatest(ctx context.Context, keep int) error {
 	swept := c.GCLatestSwept
 	for g := from; g <= to; g++ {
 		// Pre-meta generations never wrote a meta/L name; a delta generation
-		// wrote no L<g> and a consolidation generation wrote no d<g> — Rm is
-		// silent on missing keys, so sweeping every name unconditionally costs
-		// nothing.
-		for _, key := range []string{genKey("idx", g), genKey("data", g), genKey("meta", g), deltaKey(g)} {
+		// wrote no L<g> and a consolidation generation wrote no d<g>, and only
+		// consolidation generations wrote a db/<g> snapshot — Rm is silent on
+		// missing keys, so sweeping every name unconditionally costs nothing.
+		for _, key := range []string{genKey("idx", g), genKey("data", g), genKey("meta", g), deltaKey(g), dbSnapshotKey(g)} {
 			if err := o.Rm(ctx, key); err != nil {
 				c.GCLatestSwept = swept
 				return fmt.Errorf("gc latest generation %d: %w", g, err)

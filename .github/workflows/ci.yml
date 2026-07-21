@@ -40,3 +40,19 @@ jobs:
         restore-keys: |
           puppeteer-${{ runner.os }}-
     - run: make test-browser
+
+  # The concurrency gate, its own job because -race is ~2-5x slower than the
+  # plain suite and verify must stay fast. -shuffle=on is half the value: it
+  # catches tests that only pass in declaration order (it found a shared-fixture
+  # leak in the ingest stub the first time it ran).
+  race:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+    - uses: actions/checkout@v6
+    # Go only — test-race-be has no frontend prerequisite and never lints.
+    - uses: ./.github/actions/setup-toolchain
+      with:
+        node: "false"
+        lint: "false"
+    - run: make test-race-be

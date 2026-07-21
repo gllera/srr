@@ -32,6 +32,7 @@ var tsConsts = []struct {
 	value int
 	doc   string
 }{
+	{"DB_FORMAT_VERSION", dbFormatVersion, "db.gz schema version this build understands; a store stamped higher (db.v) was written by a newer srr and this reader cannot be trusted with it"},
 	{"IDX_PACK_SIZE", idxPackSize, "entries per finalized idx pack (split threshold)"},
 	{"META_PACK_SIZE", metaPackSize, "entries per finalized meta shard (the meta/ split stride; a divisor of IDX_PACK_SIZE)"},
 	{"HEAD_MAX", headMax, "cap on the newest-glance head projection in db.gz (db.head: the newest cards, chron order)"},

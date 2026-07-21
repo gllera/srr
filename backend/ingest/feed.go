@@ -43,6 +43,7 @@ func feedFetch(ctx context.Context, client *http.Client, buf []byte, req Request
 		return Result{}, err
 	}
 	httpReq.Header.Set("User-Agent", userAgent)
+	httpReq.Header.Set("Accept", acceptFeed)
 	if req.ETag != "" {
 		httpReq.Header.Set("If-None-Match", req.ETag)
 	}
@@ -70,7 +71,7 @@ func feedFetch(ctx context.Context, client *http.Client, buf []byte, req Request
 	}
 
 	var items []*mod.RawItem
-	feedTitle, parseErr := ParseFeed(data, func(i *mod.RawItem) error {
+	feedTitle, partial, parseErr := ParseFeed(data, func(i *mod.RawItem) error {
 		items = append(items, i)
 		return nil
 	})
@@ -102,12 +103,15 @@ func feedFetch(ctx context.Context, client *http.Client, buf []byte, req Request
 		return Result{}, parseErr
 	}
 
-	return Result{
-		ETag:         res.Header.Get("ETag"),
-		LastModified: res.Header.Get("Last-Modified"),
-		Items:        items,
-		Title:        feedTitle,
-	}, nil
+	result := Result{Items: items, Title: feedTitle, Partial: partial}
+	if !partial {
+		// A partial parse deliberately withholds the validators: storing them
+		// would let the next cycle 304 on the same broken bytes, stranding every
+		// item after the malformed element until the publisher changes the feed.
+		result.ETag = res.Header.Get("ETag")
+		result.LastModified = res.Header.Get("Last-Modified")
+	}
+	return result, nil
 }
 
 // looksLikeHTML returns true when the Content-Type header is text/html or
@@ -302,8 +306,10 @@ var errNotFeed = errors.New("not a recognized feed")
 // Atom <feed> root — never an <item>/<image> title; "" when absent). An error
 // from the callback is propagated. A document that is not a recognized feed is
 // reported wrapped in errNotFeed; a fault while parsing a recognized feed is a
-// plain error.
-func ParseFeed(data []byte, fn func(*mod.RawItem) error) (string, error) {
+// plain error. partial is true when the parse stopped at a malformed mid-feed
+// element (still non-error — the items streamed so far are the good prefix):
+// the caller must treat the response as incomplete (see Result.Partial).
+func ParseFeed(data []byte, fn func(*mod.RawItem) error) (title string, partial bool, err error) {
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	// Transcode declared non-UTF-8 encodings (ISO-8859-1, windows-1252, …) to
 	// UTF-8: Go's encoding/xml is UTF-8 only and otherwise errors on the first
@@ -319,7 +325,7 @@ func ParseFeed(data []byte, fn func(*mod.RawItem) error) (string, error) {
 	for {
 		tok, err := dec.Token()
 		if err != nil {
-			return "", fmt.Errorf("%w: detecting feed format: %w", errNotFeed, err)
+			return "", false, fmt.Errorf("%w: detecting feed format: %w", errNotFeed, err)
 		}
 		if se, ok := tok.(xml.StartElement); ok {
 			switch se.Name.Local {
@@ -328,7 +334,7 @@ func ParseFeed(data []byte, fn func(*mod.RawItem) error) (string, error) {
 			case "feed":
 				itemTag = "entry"
 			default:
-				return "", fmt.Errorf("%w: unexpected root <%s>", errNotFeed, se.Name.Local)
+				return "", false, fmt.Errorf("%w: unexpected root <%s>", errNotFeed, se.Name.Local)
 			}
 			break
 		}
@@ -340,10 +346,10 @@ func ParseFeed(data []byte, fn func(*mod.RawItem) error) (string, error) {
 	for {
 		tok, err := dec.Token()
 		if errors.Is(err, io.EOF) {
-			return feedTitle, nil
+			return feedTitle, false, nil
 		}
 		if err != nil {
-			return feedTitle, fmt.Errorf("parsing feed: %w", err)
+			return feedTitle, false, fmt.Errorf("parsing feed: %w", err)
 		}
 		switch se := tok.(type) {
 		case xml.EndElement:
@@ -357,14 +363,14 @@ func ParseFeed(data []byte, fn func(*mod.RawItem) error) (string, error) {
 					// A malformed element wedges the decoder (Go's xml decoder rejects a
 					// bare "]]>" even in non-strict mode, and keeps erroring after).
 					// Stop here but keep the items parsed so far rather than dropping the
-					// whole feed: the caller then advances its cache headers and commits
-					// the good items, so one bad element can't blank a feed and leave it
-					// re-failing every fetch forever.
+					// whole feed — reported as partial, so the caller withholds the
+					// validators and the watermark advance and the next cycle refetches
+					// the remainder instead of 304ing past it forever.
 					slog.Warn("feed parse stopped at malformed element", "err", err)
-					return feedTitle, nil
+					return feedTitle, true, nil
 				}
 				if err := fn(rawToFeedItem(raw.Chld, &dateHint)); err != nil {
-					return feedTitle, err
+					return feedTitle, false, err
 				}
 				continue
 			}

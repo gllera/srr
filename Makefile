@@ -1,4 +1,4 @@
-.PHONY: verify verify-fe verify-be lint-fe format-check-fe format-fe test-fe build-fe smoke-fe dev-fe vet-be lint-be format-check-be format-be build-be test-be test-contract test-browser test-stress test-e2e generate generate-check release clean design-fixture design design-shots
+.PHONY: verify verify-fe verify-be lint-fe format-check-fe format-fe test-fe build-fe smoke-fe dev-fe vet-be lint-be format-check-be format-be build-be test-be test-race-be test-contract test-browser test-stress test-e2e generate generate-check release clean design-fixture design design-shots
 
 SHELL := /bin/bash -e
 
@@ -61,8 +61,15 @@ design-shots: frontend/node_modules/.package-lock.json
 frontend/node_modules/.package-lock.json: frontend/package-lock.json
 	cd frontend && npm ci
 
-lint-fe format-check-fe format-fe test-fe build-fe smoke-fe dev-fe: frontend/node_modules/.package-lock.json
+lint-fe format-check-fe format-fe test-fe smoke-fe dev-fe: frontend/node_modules/.package-lock.json
 	cd frontend && npm run $(@:-fe=)
+
+# build-fe also copies frontend/_headers into the bundle (Parcel has no
+# public-dir copy) — the reader CSP header layer for the cf-pages deploy;
+# rides srrf.tar.gz too, where it is inert at a store root.
+build-fe: frontend/node_modules/.package-lock.json
+	cd frontend && npm run build
+	cp frontend/_headers dist/srrf/_headers
 
 # The boot smoke reads the build output, so it must run after build-fe (the
 # order-only prereq holds even under parallel make).
@@ -70,6 +77,13 @@ smoke-fe: build-fe
 
 vet-be test-be:
 	cd backend && go $(@:-be=) ./...
+
+# The concurrency gate, kept OUT of verify (it is ~2-5x slower): the fetch loop,
+# asset pool and serve handlers are all concurrent, while the suite swaps
+# package-level globals wholesale — so -race catches the data races and -shuffle
+# catches tests that only pass in declaration order. CI runs it as its own job.
+test-race-be:
+	cd backend && go test -race -shuffle=on ./...
 
 # Go format gate + linter, mirroring lint-fe/format-fe/format-check-fe. Both
 # gate verify-be (format-check-be + lint-be; config in backend/.golangci.yml).

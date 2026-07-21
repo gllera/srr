@@ -30,9 +30,33 @@ jobs:
     - uses: ./.github/actions/setup-toolchain
     - run: make verify
 
+  # The browser e2e layer is NOT part of `make verify` (see the Makefile), and
+  # ci.yml has no `tags:` trigger — so without this job a tag push deploys the
+  # production reader with the browser layer red or never run. Mirrors ci.yml's
+  # `browser` job.
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+    - uses: actions/checkout@v6
+    # Needs Go (test-browser builds the srr binary) but never lints.
+    - uses: ./.github/actions/setup-toolchain
+      with:
+        lint: "false"
+    # Chrome is downloaded by puppeteer's postinstall during npm ci; restoring
+    # the cache first lets it skip the download on a hit.
+    - name: Cache Puppeteer Chrome
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/puppeteer
+        key: puppeteer-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
+        restore-keys: |
+          puppeteer-${{ runner.os }}-
+    - run: make test-browser
+
   release:
     if: github.event_name == 'push'
-    needs: verify
+    needs: [verify, browser]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -57,7 +81,7 @@ jobs:
           srrf.tar.gz
 
   cf-pages:
-    needs: verify
+    needs: [verify, browser]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: ci

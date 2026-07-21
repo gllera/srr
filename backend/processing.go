@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/microcosm-cc/bluemonday"
+	// xhtml: the stdlib "html" above owns the unqualified name here.
+	xhtml "golang.org/x/net/html"
 
 	"srr/mod"
 )
@@ -24,6 +26,10 @@ var titlePolicy = bluemonday.StrictPolicy()
 // so feed.fetch runs it after this returns. Callers without a store (preview,
 // tests) get the finished content directly.
 func processItem(ctx context.Context, processor *mod.Module, pipeline []string, i *mod.RawItem) error {
+	// Always-on URL normalization, BEFORE the pipeline: relative refs in the
+	// feed's own markup resolve against the item's link, not the pack base the
+	// reader would use (see absolutizeContent).
+	i.Content = absolutizeContent(i.Content, i.Link)
 	// Always-on language stamp, BEFORE the pipeline so every step can read
 	// i.Lang — #filter keep_lang consumes it instead of detecting on its own.
 	// A confident detection fills Lang unless the ingest strategy already
@@ -80,6 +86,54 @@ func processItem(ctx context.Context, processor *mod.Module, pipeline []string, 
 		i.Lang = mod.DetectLang(i.Title, i.Content)
 	}
 	return nil
+}
+
+// absolutizeContent resolves relative URL references in content against the
+// item's own link. The reader resolves a relative reference against the PACK
+// BASE, so a feed shipping src="/images/x.jpg" would otherwise publish a URL
+// that 404s against the CDN forever — packs are immutable, there is no repair.
+// Runs pre-pipeline (beside the lang stamp) so every step, #selfhost included,
+// sees resolvable URLs; #readability replacing the content afterwards is fine,
+// it absolutizes its own output. Unusable link, unparseable content, and a
+// no-op pass all return content verbatim.
+func absolutizeContent(content, link string) string {
+	if content == "" {
+		return content
+	}
+	base, err := url.Parse(strings.TrimSpace(link))
+	if err != nil || base.Host == "" || (base.Scheme != "http" && base.Scheme != "https") {
+		return content
+	}
+	nodes, err := parseBodyFragment(content)
+	if err != nil {
+		return content
+	}
+	changed := false
+	visitAssetAttrs(nodes, func(a *xhtml.Attribute) {
+		v := strings.TrimSpace(a.Val)
+		// "#" is both the ingest upload marker and an in-page fragment anchor;
+		// "assets/" is a self-hosted key the reader resolves against the pack
+		// base. Neither is a reference into the publisher's site.
+		if v == "" || strings.HasPrefix(v, "#") || strings.HasPrefix(v, assetPrefix) {
+			return
+		}
+		ref, err := url.Parse(v)
+		if err != nil || ref.Scheme != "" {
+			return // absolute (or unparseable) — leave it exactly as published
+		}
+		a.Val = base.ResolveReference(ref).String()
+		changed = true
+	})
+	if !changed {
+		return content
+	}
+	var b strings.Builder
+	for _, n := range nodes {
+		if err := xhtml.Render(&b, n); err != nil {
+			return content
+		}
+	}
+	return b.String()
 }
 
 // isC1 reports whether r is a C1 control (U+0080–U+009F). C1 controls have no

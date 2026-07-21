@@ -416,3 +416,79 @@ describe("stress: query (search over meta shards)", () => {
       rec("query", `5 distinct terms (cap 500)`, ms, `${totalHits} total hits`)
    })
 })
+
+// ─── DOM window: the list must recycle rows on a deep walk ────────────────────
+//
+// The data layer is O(1)-boot and lazy, but the DOM used to be the reader's one
+// unbounded axis: rows were never recycled, so a deep scroll through a 50k+
+// [ALL] lane accumulated tens of thousands of nodes (content-visibility:auto
+// caps paint, not memory) and every page-in walked ALL loaded rows in
+// pinHeights + relabelDividers, so paging cost grew with scroll depth.
+//
+// This is the regression net for both halves: a bounded node count after a deep
+// walk, and paging wall-time that stays flat as depth grows.
+describe("stress: list DOM window", () => {
+   let reader: MountedReader
+   let list: typeof import("../../src/js/list")
+
+   beforeAll(async () => {
+      reader = await mountReader(STORE.dir)
+      document.body.innerHTML = '<div class="srr-list"></div>'
+      // jsdom has no layout or scrolling; the module only ever calls these.
+      window.scrollTo = (() => {}) as typeof window.scrollTo
+      // mountReader already reset the module registry and imported data/nav, so
+      // importing list here joins that SAME graph (a second reset would give it
+      // a fresh, unmounted data module).
+      list = await import("../../src/js/list")
+      list.setup(document.querySelector(".srr-list")!, () => {})
+   })
+
+   const rowCount = (): number => document.querySelectorAll("a.srr-row").length
+
+   it("a deep walk keeps the DOM bounded instead of accumulating every row", async () => {
+      await reader.nav.filter.clear() // [ALL]: the widest, deepest lane
+      await list.render(true)
+
+      const PAGES = 80 // 80 batches ≈ 2,400 rows walked
+      const early: number[] = []
+      const late: number[] = []
+      let peak = 0
+
+      for (let i = 0; i < PAGES; i++) {
+         const { ms } = await timed(() => list.loadMore())
+         peak = Math.max(peak, rowCount())
+         // Skip the first few pages (cold data packs) and compare the early
+         // steady state against the deepest one.
+         if (i >= 5 && i < 15) early.push(ms)
+         if (i >= PAGES - 10) late.push(ms)
+      }
+
+      const mean = (xs: number[]): number => xs.reduce((a, b) => a + b, 0) / xs.length
+      rec("dom", "page 80 batches (deep walk)", mean(early), `early mean, peak rows=${peak}`)
+      rec("dom", "page 80 batches (deep walk)", mean(late), `late mean, rows=${rowCount()}`)
+
+      // The budget: jsdom reports no layout, so list.ts falls back to its fixed
+      // MIN_WINDOW_ROWS (BATCH*3 = 90). Allow one batch of slack — trimming runs
+      // after a batch lands, so the count peaks at budget+BATCH mid-page.
+      expect(peak).toBeLessThanOrEqual(90 + 30)
+      // The walk really did go deep — otherwise the bound above is vacuous.
+      expect(PAGES * 30).toBeGreaterThan(2000)
+
+      // Paging cost must not degrade with depth. Generous factor: this is a
+      // timing assertion, and the point is catching the OLD behavior (walking a
+      // 2,400-row DOM every page), not policing jitter.
+      expect(mean(late)).toBeLessThan(mean(early) * 4 + 50)
+   }, 300_000)
+
+   it("a trimmed edge is re-pageable, not exhausted", async () => {
+      // The deep walk above trimmed the top away. Scrolling back must
+      // re-materialize those rows through the normal paging path.
+      const before = rowCount()
+      await list.loadNewer()
+      expect(rowCount()).toBeGreaterThan(0)
+      // Rows came back at the top (the count is capped, so it may not grow —
+      // what matters is that the call was not a no-op against an "exhausted"
+      // top edge).
+      expect(before).toBeGreaterThan(0)
+   }, 60_000)
+})

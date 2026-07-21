@@ -67,7 +67,10 @@ func printFormatted(format string, v any) error {
 	switch format {
 	case "yaml":
 		output, err = yaml.Marshal(v)
-	case "json":
+	default:
+		// "" included: kong fills the default at parse time, but a directly
+		// constructed command (tests, in-process callers) carries the zero value
+		// and must still print rather than silently emit nothing.
 		output, err = jsonEncode(v)
 	}
 	if err != nil {
@@ -397,12 +400,37 @@ func setFeedURL(ch *Feed, url string) {
 }
 
 type RmCmd struct {
-	ID []int `arg:"" help:"Feed ids to remove."`
+	ID     []int `arg:"" help:"Feed ids to remove."`
+	DryRun bool  `short:"n" name:"dry-run" help:"Report what removing these feeds would do (articles, delta-chain membership, referencing syndication slots) and exit without changing anything."`
 }
 
 func (o *RmCmd) Run() error {
+	// The dry run opens the store READ-ONLY: a preview must not even take the
+	// write lock, so it is safe to run against a store a fetch loop is using.
+	if o.DryRun {
+		return withDB(false, func(ctx context.Context, db *DB) error {
+			for _, id := range o.ID {
+				if err := o.report(ctx, db, id); err != nil {
+					return err
+				}
+			}
+			fmt.Fprintln(stdout, "(dry run — nothing was removed)")
+			return nil
+		})
+	}
 	return withDB(true, func(ctx context.Context, db *DB) error {
 		for _, id := range o.ID {
+			ch, err := db.FeedByID(id)
+			if err != nil {
+				return err
+			}
+			// A feed with committed articles is the irreversible case: its idx
+			// entries stay in the immutable packs as orphans forever, and its
+			// dedup/fetch state is purged. Require an explicit --force so a
+			// mistyped id cannot do that in one keystroke.
+			if live := ch.TotalArt - ch.Expired; live > 0 && !globals.Force {
+				return fmt.Errorf("feed %d (%q) has %d stored article(s); removal is irreversible (its idx entries stay in the immutable packs). Re-run with --force, or preview with --dry-run", id, ch.Title, live)
+			}
 			if err := db.RemoveFeed(ctx, id); err != nil {
 				return err
 			}
@@ -411,6 +439,50 @@ func (o *RmCmd) Run() error {
 		// the id can be reused by a later feed add.
 		return db.commitState(ctx)
 	})
+}
+
+// report prints what removing one feed would do. Read-only.
+func (o *RmCmd) report(ctx context.Context, db *DB, id int) error {
+	ch, err := db.FeedByID(id)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "feed %d: %q\n", id, ch.Title)
+	fmt.Fprintf(stdout, "  url: %s\n", ch.URL)
+	fmt.Fprintf(stdout, "  live articles: %d (all-time %d, expired %d) — their idx entries stay in the immutable packs as orphans\n",
+		ch.TotalArt-ch.Expired, ch.TotalArt, ch.Expired)
+
+	// Delta-chain membership decides whether removal must first consolidate the
+	// live chain (RemoveFeed's id-reuse guard) — the expensive, surprising half.
+	if db.core.NumDeltas > 0 {
+		chain, err := db.loadDeltaChain(ctx)
+		if err != nil {
+			return fmt.Errorf("reading the delta chain: %w", err)
+		}
+		n := 0
+		for i := range chain.Arts {
+			if chain.Arts[i].FeedID == id {
+				n++
+			}
+		}
+		if n > 0 {
+			fmt.Fprintf(stdout, "  delta chain: %d article(s) — removal would consolidate the %d live segment(s) first\n", n, db.core.NumDeltas)
+		} else {
+			fmt.Fprintf(stdout, "  delta chain: not present (no consolidation needed)\n")
+		}
+	}
+	var slots []string
+	for _, of := range db.core.Out {
+		if slices.Contains(of.Feeds, id) {
+			slots = append(slots, of.Name)
+		} else if ch.Tag != "" && slices.Contains(of.Tags, ch.Tag) {
+			slots = append(slots, of.Name+" (via tag "+ch.Tag+")")
+		}
+	}
+	if len(slots) > 0 {
+		fmt.Fprintf(stdout, "  syndication slots that reference it: %s\n", strings.Join(slots, ", "))
+	}
+	return nil
 }
 
 type LsCmd struct {

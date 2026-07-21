@@ -344,7 +344,7 @@ func TestDeltaWalkAndReadMirror(t *testing.T) {
 	}
 
 	// The full validate sweep must hold on a mid-chain store.
-	if err := validateAll(fetch, c, packs, deltas); err != nil {
+	if err := ins.validateAll(fetch, c, packs, deltas); err != nil {
 		t.Errorf("validateAll on a mid-chain store: %v", err)
 	}
 }
@@ -390,7 +390,7 @@ func TestDeltaChainSeamMonotonicity(t *testing.T) {
 
 	// Healthy store: the seam is monotone (last consolidated fetched_at
 	// 1_700_000_000 <= first delta 1_700_000_300).
-	if got := checkDeltaChain(fetch, c, packs, deltas); got != 0 {
+	if got := ins.checkDeltaChain(fetch, c, packs, deltas); got != 0 {
 		t.Errorf("healthy mid-chain store: checkDeltaChain reported %d issue(s), want 0", got)
 	}
 
@@ -398,7 +398,7 @@ func TestDeltaChainSeamMonotonicity(t *testing.T) {
 	// article. The within-chain order stays monotone (deltas[1:] are still
 	// later), so ONLY the seam check should fire.
 	deltas[0].FetchedAt = 1
-	if got := checkDeltaChain(fetch, c, packs, deltas); got == 0 {
+	if got := ins.checkDeltaChain(fetch, c, packs, deltas); got == 0 {
 		t.Error("seam inversion (first delta older than the last consolidated article) went unflagged")
 	}
 }

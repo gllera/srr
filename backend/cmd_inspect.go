@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"os"
 )
 
 // InspectCmd mirrors the frontend's bounds-based pack lookup so a pass
@@ -20,6 +22,22 @@ type InspectCmd struct {
 	Floor    int    `default:"0" help:"Optional floor chronIdx for --filter."`
 	FromHash string `help:"Replay nav.fromHash on a frontend URL hash like '0,2485!big_info': resolves filter, decides resolve()/last(), prints final article."`
 	ListTags bool   `help:"List tags and their feed/article counts (mirrors frontend groupFeedsByTag)."`
+	JSON     bool   `name:"json" help:"With --validate: emit {ok, issues:[{check, issues, detail}]} instead of the human report, for scripted health checks."`
+
+	// out is where the report is written. The CLI leaves it nil (⇒ os.Stdout);
+	// serve's /api/inspect passes a buffer. It exists so the handler never has
+	// to swap the PROCESS-global os.Stdout — which was only safe while every
+	// log happened to go to stderr, and forced a mutex to keep concurrent
+	// requests from interleaving into each other's pipe.
+	out io.Writer
+}
+
+// w resolves the report sink, defaulting to os.Stdout for the CLI.
+func (o *InspectCmd) w() io.Writer {
+	if o.out == nil {
+		return os.Stdout
+	}
+	return o.out
 }
 
 func (o *InspectCmd) Run() error {
@@ -36,11 +54,23 @@ func (o *InspectCmd) Run() error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("db: total_art=%d  next_pid=%d  seq=%d  pack_off=%d  nd=%d  na=%d\n",
-		core.TotalArticles, core.NextPackID, core.Seq, core.PackOffset, core.NumDeltas, core.DeltaArticles)
+	if o.JSON && !o.Validate {
+		return fmt.Errorf("--json is only supported with --validate")
+	}
+	// The human preamble is noise in JSON mode: the document must be the whole
+	// output so a caller can pipe it straight into a parser.
+	if !o.JSON {
+		fmt.Fprintf(o.w(), "db: total_art=%d  next_pid=%d  seq=%d  pack_off=%d  nd=%d  na=%d\n",
+			core.TotalArticles, core.NextPackID, core.Seq, core.PackOffset, core.NumDeltas, core.DeltaArticles)
+	}
 
 	if core.TotalArticles == 0 {
-		fmt.Println("no articles")
+		if o.JSON {
+			enc := json.NewEncoder(o.w())
+			enc.SetIndent("", "  ")
+			return enc.Encode(map[string]any{"ok": true, "issues": []inspectIssue{}})
+		}
+		fmt.Fprintln(o.w(), "no articles")
 		return nil
 	}
 
@@ -48,28 +78,30 @@ func (o *InspectCmd) Run() error {
 	if err != nil {
 		return err
 	}
-	for _, p := range packs {
-		fmt.Printf("idx pack %d: %d entries, %d bounds (first=%+v last=%+v)\n",
-			p.packIndex, p.packSize, len(p.bounds), p.bounds[0], p.bounds[len(p.bounds)-1])
+	if !o.JSON {
+		for _, p := range packs {
+			fmt.Fprintf(o.w(), "idx pack %d: %d entries, %d bounds (first=%+v last=%+v)\n",
+				p.packIndex, p.packSize, len(p.bounds), p.bounds[0], p.bounds[len(p.bounds)-1])
+		}
 	}
 
 	if o.Validate {
-		return validateAll(fetch, core, packs, deltas)
+		return o.validateAll(fetch, core, packs, deltas)
 	}
 	if o.ListTags {
-		return listTagsReport(core)
+		return o.listTagsReport(core)
 	}
 	if o.FromHash != "" {
-		return fromHashReport(fetch, core, packs, deltas, o.FromHash)
+		return o.fromHashReport(fetch, core, packs, deltas, o.FromHash)
 	}
 	if o.Filter != "" {
-		return filterReport(core, packs, o.Filter, o.Floor)
+		return o.filterReport(core, packs, o.Filter, o.Floor)
 	}
 	if o.Chron < 0 {
-		fmt.Println("(use --chron, --validate, --filter, --from-hash, or --list-tags)")
+		fmt.Fprintln(o.w(), "(use --chron, --validate, --filter, --from-hash, or --list-tags)")
 		return nil
 	}
-	return inspectOne(fetch, core, packs, deltas, o.Chron)
+	return o.inspectOne(fetch, core, packs, deltas, o.Chron)
 }
 
 func (o *InspectCmd) openFetcher(ctx context.Context) (keyGetter, func(), error) {

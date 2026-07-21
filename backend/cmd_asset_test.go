@@ -27,7 +27,7 @@ func TestHealAssetOverwritesExisting(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	if err := healAsset(context.Background(), be, key, healSourceFile(t, "FIXED"), "", false); err != nil {
+	if err := healAsset(context.Background(), be, key, healSourceFile(t, "FIXED"), "", false, false); err != nil {
 		t.Fatalf("healAsset: %v", err)
 	}
 	if got := string(readKey(t, be, key)); got != "FIXED" {
@@ -46,7 +46,7 @@ func TestHealAssetContentTypeOverride(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	if err := healAsset(context.Background(), be, key, healSourceFile(t, "FIXED"), "video/webm", false); err != nil {
+	if err := healAsset(context.Background(), be, key, healSourceFile(t, "FIXED"), "video/webm", false, false); err != nil {
 		t.Fatalf("healAsset: %v", err)
 	}
 	if be.gotMeta.ContentType != "video/webm" {
@@ -58,7 +58,7 @@ func TestHealAssetContentTypeOverride(t *testing.T) {
 // than create an orphan object nothing references.
 func TestHealAssetMissingKeyRefused(t *testing.T) {
 	be := tempStore(t)
-	err := healAsset(context.Background(), be, "assets/ab/0123456789abcdef.mp4", healSourceFile(t, "FIXED"), "", false)
+	err := healAsset(context.Background(), be, "assets/ab/0123456789abcdef.mp4", healSourceFile(t, "FIXED"), "", false, false)
 	if err == nil || !strings.Contains(err.Error(), "does not exist") {
 		t.Fatalf("err = %v, want missing-key refusal", err)
 	}
@@ -69,7 +69,7 @@ func TestHealAssetMissingKeyRefused(t *testing.T) {
 func TestHealAssetRejectsNonAssetKey(t *testing.T) {
 	be := tempStore(t)
 	for _, key := range []string{"db.gz", "data/1.gz", "assets/../db.gz", "assets/zz/nothex.mp4"} {
-		if err := healAsset(context.Background(), be, key, healSourceFile(t, "X"), "", true); err == nil {
+		if err := healAsset(context.Background(), be, key, healSourceFile(t, "X"), "", true, false); err == nil {
 			t.Errorf("key %q accepted, want rejection", key)
 		}
 	}
@@ -85,7 +85,7 @@ func TestHealAssetRejectsZeroByteSource(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	err := healAsset(context.Background(), be, key, healSourceFile(t, ""), "", false)
+	err := healAsset(context.Background(), be, key, healSourceFile(t, ""), "", false, false)
 	if err == nil || !strings.Contains(err.Error(), "zero-byte") {
 		t.Fatalf("err = %v, want a zero-byte refusal", err)
 	}
@@ -103,10 +103,56 @@ func TestHealAssetRejectsZeroByteSource(t *testing.T) {
 func TestHealAssetCreateFlagAllowsMissingKey(t *testing.T) {
 	be := &metaCaptureBackend{Backend: tempStore(t)}
 	const key = "assets/ab/0123456789abcdef.mp4"
-	if err := healAsset(context.Background(), be, key, healSourceFile(t, "FIXED"), "", true); err != nil {
+	if err := healAsset(context.Background(), be, key, healSourceFile(t, "FIXED"), "", true, false); err != nil {
 		t.Fatalf("healAsset --create: %v", err)
 	}
 	if got := string(readKey(t, be, key)); got != "FIXED" {
 		t.Errorf("stored body = %q, want FIXED", got)
+	}
+}
+
+// --dry-run must report the write and touch nothing. The old/new sizes are the
+// point: a size-changing heal skews the owning feed's AssetBytes counter, so an
+// operator has to be able to see the delta before committing to it.
+func TestAssetHealDryRunWritesNothing(t *testing.T) {
+	be := tempStore(t)
+	const key = "assets/5a/5ab110f6bbe86ae8.mp4"
+	if err := be.Put(context.Background(), key, strings.NewReader("BROKEN"), true); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	out := captureCmdStdout(t)
+	if err := healAsset(context.Background(), be, key, healSourceFile(t, "FIXEDBYTES"), "", false, true); err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	body := out.String()
+	for _, want := range []string{key, "exists: true", "6 -> 10", "dry run"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dry-run report missing %q:\n%s", want, body)
+		}
+	}
+	if got := string(readKey(t, be, key)); got != "BROKEN" {
+		t.Errorf("dry run overwrote the object: %q, want the original BROKEN", got)
+	}
+}
+
+// The --create dry run must say so, and still write nothing.
+func TestAssetHealDryRunCreate(t *testing.T) {
+	be := tempStore(t)
+	out := captureCmdStdout(t)
+	const key = "assets/cd/fedcba9876543210.webp"
+	if err := healAsset(context.Background(), be, key, healSourceFile(t, "NEW"), "", true, true); err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	if !strings.Contains(out.String(), "would be CREATED") {
+		t.Errorf("missing the create notice:\n%s", out.String())
+	}
+	rc, err := be.Get(context.Background(), key, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rc != nil {
+		rc.Close()
+		t.Error("dry run created the object")
 	}
 }

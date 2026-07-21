@@ -123,3 +123,57 @@ func TestUnlazyNoOpVerbatim(t *testing.T) {
 		t.Fatalf("no-op must return verbatim, got %q", got)
 	}
 }
+
+// #sanitize keeps src only on <video>/<audio> and drops <source> wholesale, so
+// a src-less media element wrapping <source> children must be rescued here or
+// it publishes empty into immutable packs. The best preferred container wins:
+// a declared type= outranks a URL extension, and ties keep document order.
+func TestUnlazyHoistsSourceOntoMedia(t *testing.T) {
+	cases := []struct {
+		name, in, want string
+	}{
+		{"first-source", `<video controls><source src="https://x.org/v.mp4"><source src="https://x.org/v.webm"></video>`,
+			"https://x.org/v.mp4"},
+		{"type-outranks-extension", `<video controls><source src="https://x.org/v.bin"><source src="https://x.org/v2.bin" type="video/mp4"></video>`,
+			"https://x.org/v2.bin"},
+		{"type-with-codecs", `<video controls><source src="https://x.org/v.bin"><source src="https://x.org/v2.bin" type='video/webm; codecs="vp9"'></video>`,
+			"https://x.org/v2.bin"},
+		{"extension-beats-unknown", `<video controls><source src="https://x.org/v.bin"><source src="https://x.org/v.webm"></video>`,
+			"https://x.org/v.webm"},
+		{"unknown-still-hoisted", `<video controls><source src="https://x.org/stream"></video>`,
+			"https://x.org/stream"},
+		{"audio", `<audio controls><source src="https://x.org/a.mp3" type="audio/mpeg"></audio>`,
+			"https://x.org/a.mp3"},
+		{"relative-source", `<video controls><source src="media/v.mp4"></video>`, "media/v.mp4"},
+		{"placeholder-src-replaced", `<video src="https://x.org/loading.gif" controls><source src="https://x.org/v.mp4"></video>`,
+			"https://x.org/v.mp4"},
+		{"query-extension", `<video controls><source src="https://x.org/v.mp4?token=1"></video>`,
+			"https://x.org/v.mp4?token=1"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := runUnlazy(t, c.in)
+			if !strings.Contains(got, `src="`+c.want+`"`) {
+				t.Fatalf("hoisted src not %q, got %q", c.want, got)
+			}
+		})
+	}
+}
+
+// A genuine src is never overridden, and an unsafe or absent <source> src
+// leaves the element alone (verbatim — no re-render).
+func TestUnlazyHoistSourceLeavesAlone(t *testing.T) {
+	cases := []struct{ name, in string }{
+		{"real-src-wins", `<video src="https://x.org/real.mp4" controls><source src="https://x.org/other.mp4"></video>`},
+		{"data-uri-source", `<video controls><source src="data:video/mp4;base64,AAAA"></video>`},
+		{"javascript-source", `<video controls><source src="javascript:alert(1)"></video>`},
+		{"srcless-source", `<video controls><source type="video/mp4"></video>`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := runUnlazy(t, c.in); got != c.in {
+				t.Fatalf("must return verbatim, got %q", got)
+			}
+		})
+	}
+}

@@ -40,13 +40,20 @@ const (
 // series only). Single source of truth for both sides of the contract:
 // packKeyRe below and the service worker's RE_PACK/parsePackName (via
 // `srr gen-ts` → format.gen.ts PACK_SERIES_KINDS) are built from it.
+// The "db" series carries only bare stems: db/<tailGen>.gz, the write-once
+// db.gz snapshot each consolidation cycle publishes (the pointer-state backup —
+// the packs survive anything, db.gz is the one object whose loss costs manual
+// reconstruction). Listing it here is what stamps those snapshots immutable and
+// application/gzip. The frontend/service-worker never fetch them; the SW's
+// route regex simply gains an inert series.
 var PackSeries = []struct {
 	Name  string // series directory
-	Kinds string // kind letters valid besides the finalized bare stem
+	Kinds string // kind letters valid besides the finalized bare stem ("" = bare only)
 }{
 	{"idx", "Lh"},
 	{"data", "Ld"},
 	{"meta", "Ls"},
+	{"db", ""},
 }
 
 // packKeyRe matches the write-once pack names, built from PackSeries.
@@ -55,6 +62,13 @@ var PackSeries = []struct {
 var packKeyRe = func() *regexp.Regexp {
 	alts := make([]string, len(PackSeries))
 	for i, s := range PackSeries {
+		// A kind-less series takes no character class at all: "[]?" is not a
+		// valid empty class, it would swallow the following "]" and mangle the
+		// alternation.
+		if s.Kinds == "" {
+			alts[i] = s.Name + "/"
+			continue
+		}
 		alts[i] = s.Name + "/[" + s.Kinds + "]?"
 	}
 	return regexp.MustCompile(`^(?:` + strings.Join(alts, "|") + `)[0-9]+\.gz$`)
@@ -89,6 +103,12 @@ func cacheControlForKey(key string) string {
 		// slots (seen.0.gz/seen.1.gz; bare seen.gz is the legacy upgrade name),
 		// rewritten every non-idle fetch cycle. The reader never fetches it, but
 		// if a CDN ever serves it, never cache a stale copy.
+		return cacheRevalidate
+	case strings.HasPrefix(key, "inbox/"):
+		// A producer's fetch spool (docs/INBOX-SPEC.md): transient and rewritten
+		// each producer cycle, deliberately NOT in PackSeries — never immutable,
+		// never reader-fetched. A cached copy would let the consolidator drain a
+		// spool the producer has already replaced.
 		return cacheRevalidate
 	case strings.HasPrefix(key, "out/"):
 		// out/* is the one mutable object class besides db.gz: an output
@@ -125,7 +145,7 @@ const contentTypeGzip = "application/gzip"
 // construction. Centralised next to cacheControlForKey so the writer↔CDN
 // contract stays in one place.
 func contentTypeForKey(key string) string {
-	if key == "db.gz" || isSeenObject(key) || packKeyRe.MatchString(key) {
+	if key == "db.gz" || isSeenObject(key) || strings.HasPrefix(key, "inbox/") || packKeyRe.MatchString(key) {
 		return contentTypeGzip
 	}
 	return ""

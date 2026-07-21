@@ -3,12 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
-	"sync"
 )
 
 // previewArticle is the JSON shape GET /api/preview returns (decoupled from the
@@ -121,9 +120,22 @@ func bumpGen(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]int{"gen": gen})
 }
 
+// handleExport serves the feed list as OPML (default, the interop format) or —
+// with ?format=json — the LOSSLESS whole-configuration document `srr export`
+// writes: OPML's leaf carries only title+url, so it is a backup that silently
+// restores the wrong processing config.
 func handleExport(w http.ResponseWriter, r *http.Request) {
+	asJSON := r.URL.Query().Get("format") == "json"
 	var data []byte
 	err := withDBCtx(r.Context(), false, func(_ context.Context, db *DB) error {
+		if asJSON {
+			out, e := json.MarshalIndent(buildConfigDoc(db), "", "  ")
+			if e != nil {
+				return fmt.Errorf("encoding config: %w", e)
+			}
+			data = append(out, '\n')
+			return nil
+		}
 		feeds := make([]*Feed, 0, len(db.Feeds()))
 		for _, ch := range db.Feeds() {
 			feeds = append(feeds, ch)
@@ -136,8 +148,13 @@ func handleExport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	w.Header().Set("Content-Type", "text/x-opml; charset=utf-8")
-	w.Header().Set("Content-Disposition", `attachment; filename="srr-feeds.opml"`)
+	if asJSON {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="srr-config.json"`)
+	} else {
+		w.Header().Set("Content-Type", "text/x-opml; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="srr-feeds.opml"`)
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
 }
@@ -206,8 +223,8 @@ func handleImport(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleInspect runs `srr inspect` in-process for the supported GUI modes
-// (validate, from-hash) and returns its textual report. It reuses InspectCmd by
-// capturing os.Stdout for the call — the report functions print via fmt.Printf.
+// (validate, from-hash) and returns its textual report, collected through
+// InspectCmd.out (a per-request buffer).
 func handleInspect(w http.ResponseWriter, r *http.Request) {
 	mode := r.URL.Query().Get("mode")
 	cmd := &InspectCmd{}
@@ -231,9 +248,14 @@ func handleInspect(w http.ResponseWriter, r *http.Request) {
 	// contract). A store with no committed db.gz (a fresh, never-fetched dir)
 	// surfaces as ok=false with the read error in the report — inspect must not
 	// create db.gz as a side effect.
-	report, runErr := captureInspectStdout(func() error { return cmd.Run() })
+	// The report goes to a per-request buffer via InspectCmd.out — no swapping of
+	// the process-global os.Stdout, so concurrent requests need no mutex and a
+	// stray log line can never land in a caller's report.
+	var report bytes.Buffer
+	cmd.out = &report
+	runErr := cmd.Run()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"report": report,
+		"report": strings.TrimRight(report.String(), "\n"),
 		"ok":     runErr == nil,
 		"error":  errString(runErr),
 	})
@@ -244,42 +266,4 @@ func errString(err error) string {
 		return ""
 	}
 	return err.Error()
-}
-
-// captureInspectStdout redirects os.Stdout to a pipe for the duration of fn and
-// returns what was written. Serialized by serveStdoutMu so concurrent inspect
-// calls do not interleave (inspect is a rare, operator-driven action).
-var serveStdoutMu sync.Mutex
-
-func captureInspectStdout(fn func() error) (string, error) {
-	serveStdoutMu.Lock()
-	defer serveStdoutMu.Unlock()
-
-	orig := os.Stdout
-	rd, wr, err := os.Pipe()
-	if err != nil {
-		return "", err
-	}
-	os.Stdout = wr
-	out := make(chan string, 1)
-	go func() {
-		var buf bytes.Buffer
-		_, _ = buf.ReadFrom(rd)
-		out <- buf.String()
-	}()
-
-	// Restore os.Stdout and close the pipe writer even if fn panics — otherwise a
-	// panic in InspectCmd.Run would leave the whole process's stdout redirected to
-	// a closed pipe and leak the reader goroutine. Closing wr here (before the
-	// receive on out) signals EOF so the reader completes; an inner closure keeps
-	// the close ordered before <-out on the normal path (a top-level defer would
-	// deadlock, since <-out needs EOF first).
-	runErr := func() error {
-		defer func() {
-			wr.Close()
-			os.Stdout = orig
-		}()
-		return fn()
-	}()
-	return strings.TrimRight(<-out, "\n"), runErr
 }

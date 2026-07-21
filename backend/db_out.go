@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -151,9 +152,8 @@ func (o *DB) syncOneOutFeed(ctx context.Context, of OutFeed, cdn string) error {
 	// selector it skips expired articles — chron < the feed's AddIdx
 	// (retention bumped past them and deleted their assets, so emitting one
 	// would syndicate 404s). Chron rides a counter beside the walk, like
-	// ExpireArticles; both walk passes share this one filtered collector. The
-	// Feeds lookup is nil-safe for a deleted feed (already excluded by the
-	// selector anyway).
+	// ExpireArticles. The Feeds lookup is nil-safe for a deleted feed (already
+	// excluded by the selector anyway).
 	var matches []ArticleData
 	collect := func(start int) func(*ArticleData) error {
 		cur := start
@@ -175,11 +175,15 @@ func (o *DB) syncOneOutFeed(ctx context.Context, of OutFeed, cdn string) error {
 		return fmt.Errorf("walk articles for %q: %w", of.Name, err)
 	}
 
-	// If the scan window didn't fill the limit, widen to the full store.
+	// The tail window didn't fill the limit — a sparse output. Resolve the rest
+	// from the IDX series rather than re-scanning the whole data series: a
+	// sparse output would otherwise re-read every data pack in the store on
+	// essentially every dirty cycle, forever (the largest unbounded read
+	// amplification left in the writer).
 	if len(matches) < limit && from > 0 {
-		matches = nil
-		if err := o.walkArticles(ctx, 0, total, collect(0)); err != nil {
-			return fmt.Errorf("walk all articles for %q: %w", of.Name, err)
+		var err error
+		if matches, err = o.resolveOutWindow(ctx, include, limit); err != nil {
+			return fmt.Errorf("resolve window for %q: %w", of.Name, err)
 		}
 	}
 
@@ -458,4 +462,180 @@ func rewriteAssetURLs(content, cdn string) (string, error) {
 		}
 	}
 	return b.String(), nil
+}
+
+// resolveOutWindow returns the newest `limit` articles matching include, in
+// oldest→newest order (the shape the caller's newest-first reverse expects).
+//
+// It resolves the window from the idx series instead of scanning data/: idx
+// entries are 2 bytes each (~2 MB at 1M articles) while the data series is
+// hundreds of MB, and the old widen-to-full-store branch re-read ALL of it —
+// fetch, gunzip and JSON-decode every pack — on essentially every dirty cycle,
+// forever, for any output matching fewer than `limit` articles in the newest
+// 500. Only the data packs actually holding a match are read here.
+func (o *DB) resolveOutWindow(ctx context.Context, include map[int]bool, limit int) ([]ArticleData, error) {
+	c := &o.core
+	total := c.TotalArticles
+	if total == 0 || limit <= 0 {
+		return nil, nil
+	}
+	tc := tailCovered(c)
+	slots := feedSlots(c)
+
+	// An article counts when it belongs to the selection AND has not expired —
+	// chron < the feed's AddIdx means retention bumped past it and deleted its
+	// assets, so syndicating it would serve 404s. Nil-safe for a deleted feed
+	// (already excluded by the selector anyway).
+	live := func(chron, feedID int) bool {
+		if !include[feedID] {
+			return false
+		}
+		ch := c.Feeds[feedID]
+		return ch == nil || chron >= ch.AddIdx
+	}
+
+	var out []ArticleData // newest→oldest while collecting
+
+	// The delta region is resident (the chain is parsed once per cycle and
+	// memoized), so it costs no extra store round-trip.
+	if total > tc {
+		deltas, err := o.loadDeltaArticles(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for i := total - 1; i >= tc && len(out) < limit; i-- {
+			if ad := deltas[i-tc]; live(i, ad.FeedID) {
+				out = append(out, ad)
+			}
+		}
+	}
+
+	skip := o.outPackSkipper(ctx, include)
+
+	// One data pack held open at a time. The walk descends through chrons, so
+	// data pack ids descend monotonically and a single-slot cache hits nearly
+	// always.
+	var data []ArticleData
+	dataPackID := -1
+	article := func(pack *idxPack, chron int) (ArticleData, error) {
+		packID, off := pack.getPackRef(chron)
+		if packID != dataPackID {
+			key := dataKeyFor(c, packID)
+			raw, err := o.readGz(ctx, key)
+			if err != nil {
+				return ArticleData{}, err
+			}
+			if data, err = parseDataPack(raw); err != nil {
+				return ArticleData{}, fmt.Errorf("parse %s: %w", key, err)
+			}
+			dataPackID = packID
+		}
+		if off >= len(data) {
+			return ArticleData{}, fmt.Errorf("chron %d: offset %d beyond data pack %d (%d entries)", chron, off, packID, len(data))
+		}
+		return data[off], nil
+	}
+
+	for p := (tc - 1) / idxPackSize; p >= 0 && len(out) < limit; p-- {
+		if tc == 0 {
+			break
+		}
+		if skip(p) {
+			continue
+		}
+		key, size := idxKeyAndSize(c, p)
+		buf, err := o.readGz(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+		pack, err := parseIdxPack(buf, p, size, slots)
+		if err != nil {
+			return nil, fmt.Errorf("parse %s: %w", key, err)
+		}
+		base := p * idxPackSize
+		for i := min(size, tc-base) - 1; i >= 0 && len(out) < limit; i-- {
+			chron := base + i
+			if !live(chron, int(pack.feedIDs[i])) {
+				continue
+			}
+			ad, err := article(pack, chron)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, ad)
+		}
+	}
+
+	slices.Reverse(out) // → oldest→newest
+	return out, nil
+}
+
+// outPackSkipper reports which finalized idx packs hold ZERO entries of the
+// selected feeds and so need no fetch at all. It reads the header summary
+// (idx/h<N>.gz) — the same per-pack cumulative counts the reader uses to skip
+// packs during filtered navigation — plus the latest pack's header to close the
+// last delta.
+//
+// The counts are all-time (writeIdxHeader sources them from the immutable
+// per-feed totals), so a nonzero count does not prove an entry is still live —
+// which is exactly why the skip is only ever taken on ZERO. Any problem reading
+// the summary degrades to "never skip", never to a wrong answer.
+func (o *DB) outPackSkipper(ctx context.Context, include map[int]bool) func(p int) bool {
+	never := func(int) bool { return false }
+	c := &o.core
+	n := c.HdrPacks
+	if n == 0 || n != numFinalizedIdx(c.TotalArticles) {
+		return never // no summary, or it lags the finalized packs
+	}
+
+	cums := make([]*idxPack, n+1)
+	buf, err := o.readGz(ctx, summaryKey(n))
+	if err != nil {
+		slog.Debug("out-feed pack skip unavailable", "error", err)
+		return never
+	}
+	off := 0
+	for k := range n {
+		if off+idxHeaderPrefix > len(buf) {
+			return never
+		}
+		numSlots := int(binary.LittleEndian.Uint32(buf[off+idxStateSize:]))
+		end := off + idxHeaderPrefix + numSlots*4
+		if end > len(buf) {
+			return never
+		}
+		// Header-only decode (packSize 0 ⇒ no entries), so the ownFeedCounts
+		// slot width is irrelevant.
+		hdr, err := parseIdxPack(buf[off:end], k, 0, 0)
+		if err != nil {
+			return never
+		}
+		cums[k] = hdr
+		off = end
+	}
+	// The cumulative counts AFTER the last finalized pack live in the latest
+	// pack's header, which the summary (finalized packs only) does not carry.
+	latestKey, _ := idxKeyAndSize(c, n)
+	hbuf, err := o.readIdxHeader(ctx, latestKey)
+	if err != nil {
+		slog.Debug("out-feed pack skip unavailable", "error", err)
+		return never
+	}
+	latest, err := parseIdxPack(hbuf, n, 0, 0)
+	if err != nil {
+		return never
+	}
+	cums[n] = latest
+
+	return func(p int) bool {
+		if p < 0 || p >= n {
+			return false // the latest pack is always walked
+		}
+		for id := range include {
+			if cums[p+1].feedCount(id) != cums[p].feedCount(id) {
+				return false
+			}
+		}
+		return true
+	}
 }
