@@ -144,8 +144,25 @@ type DB struct {
 	// NewDB (empty when absent/corrupt) and written by SyncSeen BEFORE Commit
 	// (see DBCore.SeenFlag). Backend-only; the reader never sees it. Always
 	// non-nil after NewDB.
-	seen   *seenPool
-	locked bool
+	seen *seenPool
+	// seenSlot is the store key of the dedup sidecar slot the manifest should
+	// name: the slot loadSeen actually read, or the one SyncSeen just wrote.
+	// Empty when no slot exists yet (a fresh store, or one whose active slot
+	// was unreadable and fell back to a sibling/legacy object) — the manifest
+	// then names none, so every name it lists exists (invariant M4).
+	seenSlot string
+	// configAtOpen is the config-sidecar projection of the db.gz this handle
+	// loaded. Commit compares against it to decide whether this session changed
+	// configuration, so config.gz is rewritten only on a real config mutation
+	// and at no extra store round-trip. nil for a store that has never
+	// published a manifest, which is what bootstraps the sidecar on the first
+	// S32 commit.
+	configAtOpen *configSnapshot
+	// configConfirmed records that this handle has established config.gz is
+	// actually present (it wrote one, or a Stat found one), so the presence
+	// probe in configChanged runs at most once per handle.
+	configConfirmed bool
+	locked          bool
 	// consolidated is the full replay slice (parsed deltas ++ this cycle's
 	// batch) when PutArticles consolidated the tail this cycle, else nil
 	// (cleared at every PutArticles entry). SyncMeta's fast path consumes it so
@@ -176,12 +193,160 @@ type deltaChain struct {
 	Lines [][]byte
 }
 
+// DBCore is the legacy db.gz object — the store's whole committed state, one
+// JSON document. It is deliberately assembled by EMBEDDING the four groups the
+// generation-manifest model (docs/MANIFEST-SPEC.md §5.1) splits it into, so the
+// split is structural in Go while the wire shape stays exactly what every
+// deployed reader parses today: encoding/json flattens anonymous struct fields,
+// so db.gz carries the identical key set with the identical tags.
+//
+// The groups, and where each goes at the S34 cutover:
+//
+//   - RootState     → the v2 root db.gz (§4.1), the ~60-byte pointer.
+//   - ManifestState → the immutable manifest body (§4.2).
+//   - StoreConfig   → the backend-only config.gz sidecar (§4.3).
+//   - WriterState   → part rides the manifest as writer state (§4.4,
+//     ManifestWriterState), part is retired outright (§5.1: seq, sf, next_pid,
+//     gen, hdrs, mp, nd — the counters whose only job is to let a reader DERIVE
+//     names the manifest will list explicitly).
+//
+// Feeds hangs off DBCore rather than off a group because a feed itself splits
+// (§5.2): its reader-facing half projects to the manifest (feedPublicOf) and
+// its config half to the sidecar (feedConfigOf).
+//
+// S32 writes this object unchanged — the manifest and the sidecar are written
+// IN ADDITION — so deleting every manifest/* and config.gz from a store leaves
+// it fully functional under the legacy paths.
 type DBCore struct {
+	RootState
+	ManifestState
+	StoreConfig
+	WriterState
+	Feeds map[int]*Feed `json:"feeds"`
+}
+
+// RootState is what db.gz shrinks to at S34: {v, m, t}. Under S32 `v` and `m`
+// ride the full legacy object (`t` is ManifestState.FetchedAt, which the v2
+// root will carry as `t`).
+type RootState struct {
 	// Version is the db.gz schema version (dbFormatVersion). Stamped by every
 	// Commit; NewDB refuses to open a store written by a newer srr rather than
 	// silently dropping the fields it cannot represent. omitempty: absent == 0
 	// == a store written before the field existed, which is readable as-is.
 	Version int `json:"v,omitempty"`
+	// ManifestNum is the store-wide manifest counter: the current generation
+	// manifest is manifest/<ManifestNum>.gz (docs/MANIFEST-SPEC.md §4.1). Bumped
+	// by exactly 1 per publishing Commit and never reused (invariant M2/M3).
+	// Purely additive to db.gz — an older reader ignores it, which is what keeps
+	// this release readable by every deployed reader — and it is already the
+	// field the v2 root is built around, so S34 is a deletion of everything
+	// else, not a rename. omitempty; absent == 0 == a store no S32+ binary has
+	// committed yet (no manifest published).
+	ManifestNum int `json:"m,omitempty"`
+}
+
+// ManifestState is the reader-visible half of the committed state: exactly what
+// the immutable manifest publishes besides the object names (§4.2). Manifest
+// embeds this same struct, so a field added here lands in the manifest without
+// anyone remembering to copy it.
+type ManifestState struct {
+	FetchedAt     int64 `json:"fetched_at"`
+	TotalArticles int   `json:"total_art"`
+	// MetaTail is the entry count of the published latest meta shard
+	// (meta/L<tailGen>.gz). SyncMeta trusts a read-back tail only when its
+	// count matches, so a stale shard from a crash or a pre-`gen --bump` store
+	// is rebuilt from data packs instead of extended.
+	MetaTail int `json:"mt,omitempty"`
+	// DeltaArticles is the total article count across the live deltas.
+	// tailCovered = TotalArticles − DeltaArticles is the seam: chrons below it
+	// are served by packs, chrons at/above it by the resident delta articles.
+	// Deliberately redundant with the parsed chain's line count — loadDeltas
+	// cross-validates and fails loudly on drift. omitempty.
+	DeltaArticles int `json:"na,omitempty"`
+	// Head is the newest-glance projection: the newest min(headMax, MetaTail)
+	// meta cards, in chron order — Head[i] is the card at chron HeadBase+i.
+	// Maintained by SyncMeta from the tail lines it just wrote (never a
+	// separate store read). The reader's loadMeta serves that chron window
+	// straight from it (db.gz is fetched no-cache every load), skipping the
+	// ~200KB generation-named meta tail no edge cache can hold. Right after a
+	// shard finalization the tail — and so Head — can run shorter than
+	// headMax; the reader falls back to meta/data packs outside the window.
+	// omitempty; absent (old writer) simply disables the fast path.
+	Head []MetaEntry `json:"head,omitempty"`
+	// HeadBase is the chron of Head[0], written by the same successful
+	// SyncMeta. The base is explicit — NOT derived from TotalArticles by the
+	// reader — because SyncMeta is warn-only: a failed sync commits a db.gz
+	// with a grown TotalArticles and the previous cycle's Head, and a derived
+	// base would misaddress every card by the batch size. Anchored to its own
+	// base, a stale Head still serves correct (immutable) cards for its own
+	// range while the new chrons fall through to the meta/data path.
+	// omitempty; 0 is the natural base for a store under headMax articles.
+	HeadBase int `json:"hb,omitempty"`
+}
+
+// StoreConfig is the store-wide operator configuration: everything that moves
+// out of the reader-hot object into the backend-only config.gz sidecar (§4.3,
+// §5.1). configSidecar embeds this struct, so the sidecar carries exactly this
+// field set with these tags.
+type StoreConfig struct {
+	// Recipes is the map of named {ingest, pipe} bundles feeds reference by
+	// name (Feed.Recipe). Always contains the reserved "default" entry (seeded
+	// by NewDB). Backend-only config: the frontend/service-worker ignores it,
+	// like Out. omitempty is harmless — NewDB re-seeds an absent map.
+	Recipes map[string]Recipe `json:"recipes,omitempty"`
+	// DedupDays is the store-wide default seen.gz horizon in days, the fallback
+	// for a feed whose own Feed.DedupDays is 0. Absent/0 ⇒ defaultDedupDays (30).
+	// A negative store default is invalid config (there is no store-wide off
+	// switch — a per-feed -1 is that lever); (*Feed).dedupDays treats <= 0 as
+	// unset. Backend-only, like Recipes/Out — the frontend/service-worker ignore
+	// it. omitempty; managed via `srr dedup --days N`.
+	DedupDays int `json:"dd,omitempty"`
+	// Out is the list of named syndication output feeds written by SyncOutFeeds
+	// during each fetch cycle. Each OutFeed maps chosen tags/feed ids to one
+	// RSS 2.0 or JSON Feed 1.1 file at out/<name>.<ext> on the CDN. Off by
+	// default (nil → SyncOutFeeds no-op). Managed by `srr syndicate`.
+	// NOTE: out/* objects are the ONE documented mutable class besides db.gz;
+	// the frontend/service-worker ignores the `out` field entirely (backend-only
+	// config and output key space).
+	Out []OutFeed `json:"out,omitempty"`
+}
+
+// ManifestWriterState is the writer-private bookkeeping that rides the manifest
+// (§4.4): one object describes one store state, completely. Manifest embeds it,
+// so these four fields reach the manifest by construction.
+type ManifestWriterState struct {
+	PackOffset int `json:"pack_off"`
+	// DeltaBytes is writer-only trigger state: cumulative uncompressed JSONL
+	// bytes across the live deltas (reset at consolidation), driving the
+	// --max-delta-bytes consolidation trigger without re-reading the chain. On
+	// the wire like Recipes/Out but ignored by the frontend/service-worker.
+	DeltaBytes int64 `json:"dby,omitempty"`
+	// GCManifest is the manifest-GC low-water mark (§7): the highest manifest
+	// number GCManifests has cleared. The sweep clears (GCManifest, m−K] and
+	// advances this ONLY over generations it actually deleted, so a missed or
+	// failed warn-only sweep can never permanently strand a manifest below a
+	// fixed trailing window — the direct heir of GCLatestSwept's argument.
+	// Writer-only; the frontend/service-worker ignore it. omitempty.
+	GCManifest int `json:"gcm,omitempty"`
+	// Inbox is the per-producer drained watermark of the spool pattern
+	// (docs/INBOX-SPEC.md): the highest cycle_id of `inbox/<name>.gz` this store
+	// has folded in. Published atomically with the batch it describes by the
+	// existing Commit — the same crash argument as Seq/SeenFlag — so a crash
+	// before Commit re-drains cleanly and a crash after it skips the stale
+	// envelope. Writer-only, like GCLatestSwept/DeltaBytes: the
+	// frontend/service-worker ignore it. omitempty; absent == nothing drained.
+	// It rides the MANIFEST rather than any other object because that atomicity
+	// is the whole crash argument of INBOX-SPEC (§4.4 — non-negotiable).
+	Inbox map[string]int64 `json:"inbox,omitempty"`
+}
+
+// WriterState is the writer-private half of db.gz. ManifestWriterState (nested,
+// so it flattens into the same JSON) rides the manifest; everything declared
+// directly on WriterState is a NAME-DERIVATION counter that the manifest's
+// explicit name lists retire outright at S34 (§5.1). Nothing here is read by
+// the frontend or the service worker except through names it derives today.
+type WriterState struct {
+	ManifestWriterState
 	// Seq is the latest-pack generation: the current latest packs are
 	// idx/L<Seq>.gz and data/L<Seq>.gz. 0 = empty store (no latest packs
 	// yet); the first article batch publishes generation 1. PutArticles
@@ -195,11 +360,8 @@ type DBCore struct {
 	// batch and the pointer to its matching dedup state (bg + pool) become
 	// durable atomically — the same "db.gz names the current generation"
 	// contract as Seq/HdrPacks/MetaPacks. Backend-only; the frontend ignores it.
-	SeenFlag      bool  `json:"sf,omitempty"`
-	FetchedAt     int64 `json:"fetched_at"`
-	TotalArticles int   `json:"total_art"`
-	NextPackID    int   `json:"next_pid"`
-	PackOffset    int   `json:"pack_off"`
+	SeenFlag   bool `json:"sf,omitempty"`
+	NextPackID int  `json:"next_pid"`
 	// Gen is the store generation: bumped (srr gen --bump) after an in-place
 	// store rebuild reuses finalized pack ids with new bytes, so the frontend
 	// service worker can self-invalidate its cache-first pack cache. omitempty
@@ -224,11 +386,6 @@ type DBCore struct {
 	// meta packs only when MetaPacks+MetaTail fully cover the store (else it
 	// falls back to the data/ source of truth).
 	MetaPacks int `json:"mp,omitempty"`
-	// MetaTail is the entry count of the published latest meta shard
-	// (meta/L<tailGen>.gz). SyncMeta trusts a read-back tail only when its
-	// count matches, so a stale shard from a crash or a pre-`gen --bump` store
-	// is rebuilt from data packs instead of extended.
-	MetaTail int `json:"mt,omitempty"`
 	// NumDeltas is the live delta-segment count: data/d<g>.gz exists for every
 	// g in (tailGen, Seq], where tailGen = Seq − NumDeltas names the
 	// consolidated tail packs (idx|data|meta/L<tailGen>). Each delta holds one
@@ -239,17 +396,6 @@ type DBCore struct {
 	// upgrade bridge: absent == 0 == exactly the pre-delta "latest packs live
 	// at L<Seq>" layout, so old stores need no migration. omitempty.
 	NumDeltas int `json:"nd,omitempty"`
-	// DeltaArticles is the total article count across the live deltas.
-	// tailCovered = TotalArticles − DeltaArticles is the seam: chrons below it
-	// are served by packs, chrons at/above it by the resident delta articles.
-	// Deliberately redundant with the parsed chain's line count — loadDeltas
-	// cross-validates and fails loudly on drift. omitempty.
-	DeltaArticles int `json:"na,omitempty"`
-	// DeltaBytes is writer-only trigger state: cumulative uncompressed JSONL
-	// bytes across the live deltas (reset at consolidation), driving the
-	// --max-delta-bytes consolidation trigger without re-reading the chain. On
-	// the wire like Recipes/Out but ignored by the frontend/service-worker.
-	DeltaBytes int64 `json:"dby,omitempty"`
 	// GCLatestSwept is the low-water mark for GCLatest: the highest tail
 	// generation whose L<g>/d<g> names have been swept (deleted, or confirmed
 	// absent since Rm is silent on missing). GCLatest clears (GCLatestSwept,
@@ -261,54 +407,6 @@ type DBCore struct {
 	// (a rebuild reuses finalized names but the tail-generation names are
 	// unchanged, so the low-water stays valid). omitempty.
 	GCLatestSwept int `json:"gcs,omitempty"`
-	// Inbox is the per-producer drained watermark of the spool pattern
-	// (docs/INBOX-SPEC.md): the highest cycle_id of `inbox/<name>.gz` this store
-	// has folded in. Published atomically with the batch it describes by the
-	// existing Commit — the same crash argument as Seq/SeenFlag — so a crash
-	// before Commit re-drains cleanly and a crash after it skips the stale
-	// envelope. Writer-only, like GCLatestSwept/DeltaBytes: the
-	// frontend/service-worker ignore it. omitempty; absent == nothing drained.
-	Inbox map[string]int64 `json:"inbox,omitempty"`
-	// Recipes is the map of named {ingest, pipe} bundles feeds reference by
-	// name (Feed.Recipe). Always contains the reserved "default" entry (seeded
-	// by NewDB). Backend-only config: the frontend/service-worker ignores it,
-	// like Out. omitempty is harmless — NewDB re-seeds an absent map.
-	Recipes map[string]Recipe `json:"recipes,omitempty"`
-	// DedupDays is the store-wide default seen.gz horizon in days, the fallback
-	// for a feed whose own Feed.DedupDays is 0. Absent/0 ⇒ defaultDedupDays (30).
-	// A negative store default is invalid config (there is no store-wide off
-	// switch — a per-feed -1 is that lever); (*Feed).dedupDays treats <= 0 as
-	// unset. Backend-only, like Recipes/Out — the frontend/service-worker ignore
-	// it. omitempty; managed via `srr dedup --days N`.
-	DedupDays int           `json:"dd,omitempty"`
-	Feeds     map[int]*Feed `json:"feeds"`
-	// Out is the list of named syndication output feeds written by SyncOutFeeds
-	// during each fetch cycle. Each OutFeed maps chosen tags/feed ids to one
-	// RSS 2.0 or JSON Feed 1.1 file at out/<name>.<ext> on the CDN. Off by
-	// default (nil → SyncOutFeeds no-op). Managed by `srr syndicate`.
-	// NOTE: out/* objects are the ONE documented mutable class besides db.gz;
-	// the frontend/service-worker ignores the `out` field entirely (backend-only
-	// config and output key space).
-	Out []OutFeed `json:"out,omitempty"`
-	// Head is the newest-glance projection: the newest min(headMax, MetaTail)
-	// meta cards, in chron order — Head[i] is the card at chron HeadBase+i.
-	// Maintained by SyncMeta from the tail lines it just wrote (never a
-	// separate store read). The reader's loadMeta serves that chron window
-	// straight from it (db.gz is fetched no-cache every load), skipping the
-	// ~200KB generation-named meta tail no edge cache can hold. Right after a
-	// shard finalization the tail — and so Head — can run shorter than
-	// headMax; the reader falls back to meta/data packs outside the window.
-	// omitempty; absent (old writer) simply disables the fast path.
-	Head []MetaEntry `json:"head,omitempty"`
-	// HeadBase is the chron of Head[0], written by the same successful
-	// SyncMeta. The base is explicit — NOT derived from TotalArticles by the
-	// reader — because SyncMeta is warn-only: a failed sync commits a db.gz
-	// with a grown TotalArticles and the previous cycle's Head, and a derived
-	// base would misaddress every card by the batch size. Anchored to its own
-	// base, a stale Head still serves correct (immutable) cards for its own
-	// range while the new chrons fall through to the meta/data path.
-	// omitempty; 0 is the natural base for a store under headMax articles.
-	HeadBase int `json:"hb,omitempty"`
 }
 
 // OutFeed declares one named syndication output: a rolling newest-N window of
@@ -466,6 +564,15 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 	// (ETag/LastModified) and BoundaryGUIDs onto the in-memory feeds.
 	db.seen = db.loadSeen(ctx)
 	db.seen.hydrateFeeds(db.core.Feeds)
+
+	// Snapshot the config projection of the db.gz just loaded, so Commit can
+	// tell a config mutation from an ordinary fetch cycle without re-reading
+	// anything (docs/MANIFEST-SPEC.md §4.3 / configChanged). Left nil on a store
+	// that has never published a manifest: the first S32 commit then bootstraps
+	// config.gz unconditionally.
+	if db.core.ManifestNum > 0 {
+		db.configAtOpen = db.snapshotConfig()
+	}
 	return db, nil
 }
 
@@ -504,13 +611,62 @@ func (o *DB) BumpGen() {
 	slog.Warn("gen bumped: if a CDN edge cache fronts this store (cdn.llera.eu), purge it now — cached packs under reused names serve stale bytes until then")
 }
 
+// Commit publishes the store state. Under the generation-manifest model
+// (docs/MANIFEST-SPEC.md §6.1) it is three steps in a fixed order:
+//
+//  1. the config sidecar, when this session changed configuration and the
+//     change is not a removal (§6.4 — see below);
+//  2. the immutable manifest naming everything this generation holds,
+//     exclusive-create so a racing writer aborts before it can flip the root
+//     (§6.2);
+//  3. the root flip — today's AtomicPut of the full legacy db.gz.
+//
+// A crash anywhere before step 3 leaves unreferenced objects and changes
+// nothing a reader can observe. Steps 1 and 2 are FATAL: the manifest is the
+// object the whole model is built on, and its exclusive-create is worth nothing
+// if a failure is shrugged off. What stays true regardless is that no deployed
+// reader looks at either object — deleting every manifest/* and config.gz from
+// a store leaves it fully functional on the legacy path, which is the property
+// S32 is not allowed to break.
+//
+// §6.4 ordering for the two-object mutations, both windows inert by §4.3:
+//
+//   - create / edit: config first, then manifest + root. The window holds
+//     config for a feed that does not exist yet.
+//   - removal: root first, then config. The window holds config for a feed that
+//     no longer exists — writing config first would instead leave a LIVE feed
+//     with no config, silently resolving it to the default recipe.
+//
+// The post-flip config write is warn-only for the same reason every other
+// post-commit step is: the state it describes is already durable, and a stale
+// entry for a removed feed is inert and swept by the next config write.
 func (o *DB) Commit(ctx context.Context) error {
 	o.core.Version = dbFormatVersion
+
+	cfgChanged, cfgRemovals := o.configChanged(ctx)
+	if cfgChanged && !cfgRemovals {
+		if err := o.syncConfig(ctx); err != nil {
+			return err
+		}
+	}
+	if err := o.publishManifest(ctx); err != nil {
+		return err
+	}
+
 	buf, err := o.encodeCore()
 	if err != nil {
 		return err
 	}
-	return o.AtomicPut(ctx, dbFileKey, buf, store.ObjectMeta{})
+	if err := o.AtomicPut(ctx, dbFileKey, buf, store.ObjectMeta{}); err != nil {
+		return err
+	}
+
+	if cfgChanged && cfgRemovals {
+		if err := o.syncConfig(context.WithoutCancel(ctx)); err != nil {
+			slog.Warn("write config sidecar after removal", "error", err)
+		}
+	}
+	return nil
 }
 
 // encodeCore serialises the in-memory core exactly as Commit publishes it.

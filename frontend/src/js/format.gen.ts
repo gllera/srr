@@ -56,7 +56,7 @@ export const SEARCH_BLOOM_K = 7
 // — "L" latest generations, "h" idx header summaries, "s" search bloom
 // summaries. sw.ts builds its route regex from this table and enforces
 // kind-per-series in parsePackName, mirroring the store's strict packKeyRe.
-export const PACK_SERIES_KINDS: Record<string, string> = { idx: "Lh", data: "Ld", meta: "Ls", db: "" }
+export const PACK_SERIES_KINDS: Record<string, string> = { idx: "Lh", data: "Ld", meta: "Ls", db: "", manifest: "" }
 
 // Wire shape of one JSONL line in data/*.gz (backend ArticleData).
 export interface IArticleWire {
@@ -120,25 +120,27 @@ export interface IRecipeWire {
 // Wire shape of db.gz itself (backend DBCore).
 export interface IDBWire {
    v?: number // Version
-   seq?: number // Seq
-   sf?: boolean // SeenFlag
+   m?: number // ManifestNum
    fetched_at: number // FetchedAt
    total_art: number // TotalArticles
-   next_pid: number // NextPackID
+   mt?: number // MetaTail
+   na?: number // DeltaArticles
+   head?: IMetaWire[] // Head
+   hb?: number // HeadBase
+   recipes?: Record<string, IRecipeWire> // Recipes
+   dd?: number // DedupDays
+   out?: IOutFeedWire[] // Out
    pack_off: number // PackOffset
+   dby?: number // DeltaBytes
+   gcm?: number // GCManifest
+   inbox?: Record<string, number> // Inbox
+   seq?: number // Seq
+   sf?: boolean // SeenFlag
+   next_pid: number // NextPackID
    gen?: number // Gen
    hdrs?: number // HdrPacks
    mp?: number // MetaPacks
-   mt?: number // MetaTail
    nd?: number // NumDeltas
-   na?: number // DeltaArticles
-   dby?: number // DeltaBytes
    gcs?: number // GCLatestSwept
-   inbox?: Record<string, number> // Inbox
-   recipes?: Record<string, IRecipeWire> // Recipes
-   dd?: number // DedupDays
    feeds: Record<number, IFeedWire> | null // Feeds
-   out?: IOutFeedWire[] // Out
-   head?: IMetaWire[] // Head
-   hb?: number // HeadBase
 }

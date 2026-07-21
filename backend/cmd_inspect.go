@@ -163,6 +163,16 @@ func loadCore(fetch keyGetter) (*DBCore, error) {
 	if c.Seq < 0 {
 		return nil, fmt.Errorf("decode %s: seq %d is negative", dbFileKey, c.Seq)
 	}
+	// The manifest counter and its GC low-water name objects (manifest/<m>.gz)
+	// and bound the density probe, so a negative value would fabricate keys and
+	// an out-of-order pair would make the window nonsense. Same clear decode
+	// framing as the fields above.
+	if c.ManifestNum < 0 {
+		return nil, fmt.Errorf("decode %s: m %d is negative", dbFileKey, c.ManifestNum)
+	}
+	if c.GCManifest < 0 || c.GCManifest > c.ManifestNum {
+		return nil, fmt.Errorf("decode %s: gcm %d out of range [0, m=%d]", dbFileKey, c.GCManifest, c.ManifestNum)
+	}
 	// A negative/oversized delta chain would reach loadDeltas/loadLatestIdx
 	// with nonsense bounds; loadDeltas re-checks, but fail here with the same
 	// clear decode framing as the fields above.

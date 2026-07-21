@@ -339,6 +339,15 @@ func TestCacheControlForKey(t *testing.T) {
 		{"db/d1.gz", ""},
 		// The live db.gz is NOT in the db/ series — it stays mutable.
 		{"db.gz", cacheRevalidate},
+		// manifest/<m>.gz — the immutable generation manifests every Commit
+		// publishes (docs/MANIFEST-SPEC.md §4.2). Bare stems only, like db/.
+		{"manifest/1.gz", cacheImmutable},
+		{"manifest/1743.gz", cacheImmutable},
+		{"manifest/L3.gz", ""},
+		{"manifest/d1.gz", ""},
+		// config.gz — the backend-only config sidecar (§4.3). Mutable like
+		// db.gz/seen.gz, and deliberately NOT in PackSeries.
+		{"config.gz", cacheRevalidate},
 	}
 	for _, c := range cases {
 		if got := cacheControlForKey(c.key); got != c.want {
@@ -399,6 +408,8 @@ func TestContentTypeForKey(t *testing.T) {
 		{"meta/0.gz", contentTypeGzip},
 		{"meta/L3.gz", contentTypeGzip},
 		{"meta/s4.gz", contentTypeGzip},
+		{"manifest/1743.gz", contentTypeGzip},
+		{"config.gz", contentTypeGzip},
 		// Not pack names: kind letter owned by another series / malformed stems.
 		{"data/h3.gz", ""},
 		{"idx/s3.gz", ""},

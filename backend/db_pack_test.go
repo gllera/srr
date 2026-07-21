@@ -10,7 +10,7 @@ import (
 )
 
 func TestDataKeyForFinalized(t *testing.T) {
-	core := &DBCore{NextPackID: 5, Seq: 7}
+	core := &DBCore{WriterState: WriterState{NextPackID: 5, Seq: 7}}
 	cases := []struct {
 		packID int
 		want   string
@@ -54,7 +54,7 @@ func TestLatestKeyFollowsSeq(t *testing.T) {
 		{42, "data/L42.gz"},
 	}
 	for _, c := range cases {
-		core := &DBCore{Seq: c.seq}
+		core := &DBCore{WriterState: WriterState{Seq: c.seq}}
 		if got := latestKey(core, "data"); got != c.want {
 			t.Errorf("latestKey(seq=%d, data) = %q, want %q", c.seq, got, c.want)
 		}

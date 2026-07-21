@@ -452,6 +452,12 @@ func (o *DB) loadSeen(ctx context.Context) *seenPool {
 	active := seenSlotKey(o.core.SeenFlag)
 	sibling := seenSlotKey(!o.core.SeenFlag)
 	if p, ok := o.tryLoadSeen(ctx, active); ok {
+		// The active slot exists and parses, so the manifest may name it
+		// (docs/MANIFEST-SPEC.md M4: every listed name exists). Any fallback
+		// below leaves seenSlot empty — the sibling/legacy object is not what
+		// core.SeenFlag names, and naming a key we could not read would be a
+		// claim we cannot back.
+		o.seenSlot = active
 		return p
 	}
 	// The active slot is missing or corrupt: fall back to the previous
@@ -535,6 +541,7 @@ func (o *DB) SyncSeen(ctx context.Context) error {
 		return err
 	}
 	o.core.SeenFlag = !o.core.SeenFlag // now names the slot we just wrote
+	o.seenSlot = inactive              // ...and so may the manifest this cycle publishes
 	o.seen.dirty = false
 	o.reapLegacySeen(ctx)
 	return nil
