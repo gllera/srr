@@ -27,9 +27,11 @@ func (o *InspectCmd) inspectOne(fetch keyGetter, core *DBCore, packs []*idxPack,
 		fmt.Fprintf(o.w(), "  resolved -> delta chain  offset=%d\n", offset)
 		entries = deltas
 	} else {
-		key := dataKeyFor(core, pid)
+		key, err := dataKeyFor(core, pid)
+		if err != nil {
+			return err
+		}
 		fmt.Fprintf(o.w(), "  resolved -> %s  packId=%d  offset=%d\n", key, pid, offset)
-		var err error
 		entries, err = loadDataPack(fetch, key)
 		if err != nil {
 			return err

@@ -1,7 +1,7 @@
 import { rmSync } from "node:fs"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
-import { feedServer, inspectValidate, makeStore, readDb, srr, type FeedServer } from "../harness"
+import { feedServer, inspectValidate, makeStore, readDb, srr, storeNames, type FeedServer } from "../harness"
 import { nItems, pubUnix, rssFeed } from "../fixtures"
 import { mountReader } from "./mount"
 
@@ -46,22 +46,25 @@ describe("contract: empty store boot + first-batch transition", () => {
       if (store) rmSync(store, { recursive: true, force: true })
    })
 
-   it("db.gz omits the omitempty generation fields while empty", () => {
+   it("an empty store names nothing", () => {
       const raw = readDb<RawDb>(store)
       expect(raw.total_art ?? 0).toBe(0)
-      expect(raw.seq).toBeUndefined() // absent == 0 == empty store
-      expect(raw.hdrs).toBeUndefined()
-      expect(raw.mp).toBeUndefined()
       expect(raw.mt).toBeUndefined()
-      expect(raw.gen).toBeUndefined()
+      const names = storeNames(store)
+      expect(names.idx.keys).toEqual([])
+      expect(names.meta.keys).toEqual([])
+      expect(names.deltas).toEqual([])
+      expect(names.hsum).toBeNull()
+      expect(names.ssum).toBeNull()
    })
 
-   it("the reader boots on db.gz alone: no pack, summary, or meta fetch", () => {
+   it("the reader boots on the root + its manifest alone: no pack fetch", () => {
       expect(reader.data.db.total_art).toBe(0)
-      expect(reader.data.db.seq).toBe(0) // normalized ??= 0
       const urls = reader.fetchMock.mock.calls.map((c) => String((c[0] as { href?: string }).href ?? c[0]))
       expect(urls.length).toBeGreaterThan(0)
-      for (const u of urls) expect(u, "empty-store boot must only touch db.gz").toContain("db.gz")
+      for (const u of urls) {
+         expect(u.includes("db.gz") || /manifest\/\d+\.gz/.test(u), `empty-store boot touched ${u}`).toBe(true)
+      }
    })
 
    it("zero everywhere: counts, meta, search", () => {
@@ -79,7 +82,8 @@ describe("contract: empty store boot + first-batch transition", () => {
       feeds.set("/empty.xml", rssFeed("Empty", nItems(2, "first")))
       await srr(store, "art", "fetch")
 
-      expect(readDb<RawDb>(store).seq).toBe(1) // first batch publishes generation 1
+      // The first article-producing cycle publishes one delta segment.
+      expect(storeNames(store).deltas).toHaveLength(1)
       expect(await reader.data.refresh()).toBe("updated")
       expect(reader.data.db.total_art).toBe(2)
       expect(reader.data.countAll(new Map([[0, reader.data.db.feeds[0].add_idx]]))).toBe(2)

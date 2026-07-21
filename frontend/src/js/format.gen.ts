@@ -3,14 +3,14 @@
 // The Go declarations in backend/ are the single source of truth for the
 // writer↔reader data contract: the format constants in db.go, the pack-name
 // grammar in store/main.go (PackSeries), and the JSON struct tags of
-// ArticleData/Feed/DBCore. Regenerate with
+// ArticleData/MetaEntry/FeedPublic/Manifest/RootState. Regenerate with
 // `make generate`; `make verify` fails when this file is stale.
 //
 // Wire-type conventions: `?` = json omitempty (key absent at the Go zero
 // value); `| null` = a Go nil map/slice serialized while the key is present.
 
-// db.gz schema version this build understands; a store stamped higher (db.v) was written by a newer srr and this reader cannot be trusted with it
-export const DB_FORMAT_VERSION = 1
+// store format version this build understands — the `v` of the root db.gz AND of every manifest it names; a store stamped higher was written by a newer srr and this reader cannot be trusted with it
+export const DB_FORMAT_VERSION = 3
 
 // entries per finalized idx pack (split threshold)
 export const IDX_PACK_SIZE = 50000
@@ -36,11 +36,8 @@ export const IDX_BOUNDARY_SIZE = 2
 // feed-id ceiling: feed_id is a uint16, ids run [0, this)
 export const FEED_ID_CEILING = 65536
 
-// superseded L<seq> generations the backend GC keeps as a grace window for stale-db.gz readers
-export const LATEST_KEEP = 2
-
-// default --max-deltas: delta segments (data/d<g>, one dirty cycle's batch each) that may accumulate before a cycle consolidates them into the tail packs
-export const MAX_DELTAS = 12
+// default GC grace window K: generation manifests the backend keeps alongside the current one, and with them every object they name (docs/MANIFEST-SPEC.md §7)
+export const KEEP_MANIFESTS = 32
 
 // rune length of the sliding windows the search blooms index, per folded word
 export const SEARCH_GRAM = 3
@@ -51,12 +48,13 @@ export const SEARCH_BLOOM_BYTES = 4096
 // bloom bits set/tested per gram
 export const SEARCH_BLOOM_K = 7
 
-// The write-once pack-name grammar (backend store.PackSeries): per pack-series
-// directory, the kind letters a stem may carry besides the finalized digit run
-// — "L" latest generations, "h" idx header summaries, "s" search bloom
-// summaries. sw.ts builds its route regex from this table and enforces
-// kind-per-series in parsePackName, mirroring the store's strict packKeyRe.
-export const PACK_SERIES_KINDS: Record<string, string> = { idx: "Lh", data: "Ld", meta: "Ls", db: "", manifest: "" }
+// The write-once pack-name grammar (backend store.PackSeries): one entry per
+// pack-series directory. Every stem is an OPAQUE bare digit run — the kind
+// letters ("L" latest generations, "h"/"s" summaries, "d" delta segments) were
+// retired at the manifest cutover, because a name is now LISTED rather than
+// derived and carries no meaning of its own. sw.ts builds its route regex from
+// this table, mirroring the store's strict packKeyRe.
+export const PACK_SERIES_KINDS: Record<string, string> = { idx: "", data: "", meta: "", manifest: "", seen: "" }
 
 // Wire shape of one JSONL line in data/*.gz (backend ArticleData).
 export interface IArticleWire {
@@ -76,7 +74,7 @@ export interface IMetaWire {
    t?: string // Title
 }
 
-// Wire shape of a db.gz feeds{} value (backend Feed).
+// Wire shape of a manifest feeds{} value — the reader-facing half of a feed (backend FeedPublic).
 export interface IFeedWire {
    title: string // Title
    url: string // URL
@@ -86,13 +84,8 @@ export interface IFeedWire {
    fail_streak?: number // FailStreak
    last_new?: number // LastNew
    tag?: string // Tag
-   recipe?: string // Recipe
-   ingest?: string // Ingest
-   pipe?: string[] // Pipe
    nt?: boolean // NoTitle
    exp?: number // ExpireDays
-   dd?: number // DedupDays
-   dt?: boolean // DedupTitle
    xp?: number // Expired
    total_art: number // TotalArt
    add_idx: number // AddIdx
@@ -100,47 +93,54 @@ export interface IFeedWire {
    ab?: number // AssetBytes
 }
 
-// Wire shape of a db.gz out[] entry (backend OutFeed).
-export interface IOutFeedWire {
-   name: string // Name
-   title?: string // Title
-   format: string // Format
-   tags?: string[] // Tags
-   feeds?: number[] // Feeds
-   limit?: number // Limit
-   ext?: boolean // External
+// Wire shape of one pack series' positional name list inside a manifest's `names` (backend seriesNamesWire): `b` base position, `r` run-length-encoded bare stems, `l` the tail's position.
+export interface ISeriesNamesWire {
+   b?: number // Base
+   r?: [number, number][] // Runs
+   l?: number // Tail
 }
 
-// Wire shape of a db.gz recipes{} value (backend Recipe).
-export interface IRecipeWire {
-   ingest?: string // Ingest
-   pipe?: string[] // Pipe
+// Wire shape of a singleton object named by series + stem (backend StemRef).
+export interface IStemRefWire {
+   s: string // Series
+   stem: number // Stem
 }
 
-// Wire shape of db.gz itself (backend DBCore).
-export interface IDBWire {
-   v?: number // Version
-   m?: number // ManifestNum
+// Wire shape of a derived summary object: series + stem + the finalized-pack count it covers (backend SummaryName).
+export interface ISummaryNameWire {
+   s: string // Series
+   stem: number // Stem
+   covers: number // Covers
+}
+
+// Wire shape of the live delta chain, oldest first (backend DeltaNames).
+export interface IDeltaNamesWire {
+   s: string // Series
+   r: number[] | null // Stems
+}
+
+// Wire shape of manifest/<m>.gz — the immutable generation manifest (backend Manifest).
+export interface IManifestWire {
+   v: number // Version
+   m: number // Num
    fetched_at: number // FetchedAt
    total_art: number // TotalArticles
    mt?: number // MetaTail
    na?: number // DeltaArticles
    head?: IMetaWire[] // Head
    hb?: number // HeadBase
-   recipes?: Record<string, IRecipeWire> // Recipes
-   dd?: number // DedupDays
-   out?: IOutFeedWire[] // Out
    pack_off: number // PackOffset
+   next_pid: number // NextPackID
    dby?: number // DeltaBytes
    gcm?: number // GCManifest
    inbox?: Record<string, number> // Inbox
-   seq?: number // Seq
-   sf?: boolean // SeenFlag
-   next_pid: number // NextPackID
-   gen?: number // Gen
-   hdrs?: number // HdrPacks
-   mp?: number // MetaPacks
-   nd?: number // NumDeltas
-   gcs?: number // GCLatestSwept
+   names: Record<string, unknown> | null // Names
    feeds: Record<number, IFeedWire> | null // Feeds
+}
+
+// Wire shape of db.gz itself — the mutable root pointer (backend RootState).
+export interface IDBWire {
+   v: number // Version
+   m: number // ManifestNum
+   t?: number // FetchedAt
 }

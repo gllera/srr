@@ -74,24 +74,27 @@ func feedSlots(core *DBCore) int {
 // tailCovered), not in any data pack.
 const deltaPackID = -1
 
-// loadDeltas fetches and parses the live delta chain (data/d<g>.gz for
-// tailGen < g <= Seq, oldest first) into one chron-ordered slice — the
-// authority for every chron at/above tailCovered. It enforces invariant I1:
-// the chain is contiguous (every name present), each segment non-empty, and
-// the total line count equals DeltaArticles. The one delta loader shared by
-// the writer (consolidateTail/walkArticles), inspect, and art ls.
+// loadDeltas fetches and parses the live delta chain — the segments the
+// manifest lists, oldest first — into one chron-ordered slice, the authority
+// for every chron at/above tailCovered. Chain CONTIGUITY was an arithmetic
+// invariant only while the names were derived from a generation range; the
+// listed chain IS the chain now (docs/MANIFEST-SPEC.md §13, DELTA-TAIL I1
+// retired as arithmetic, preserved as content). What survives verbatim is the
+// accounting cross-check: each segment non-empty, and the total line count
+// equals DeltaArticles (M6). The one delta loader shared by the writer
+// (walkArticles), inspect, and art ls.
 func loadDeltas(fetch keyGetter, core *DBCore) ([]ArticleData, error) {
-	if core.NumDeltas < 0 || core.DeltaArticles < 0 || core.NumDeltas > core.Seq ||
-		core.DeltaArticles > core.TotalArticles || (core.NumDeltas == 0) != (core.DeltaArticles == 0) {
-		return nil, fmt.Errorf("inconsistent delta chain: nd=%d na=%d seq=%d total_art=%d",
-			core.NumDeltas, core.DeltaArticles, core.Seq, core.TotalArticles)
+	keys := core.Names.deltaKeys()
+	if core.DeltaArticles < 0 || core.DeltaArticles > core.TotalArticles ||
+		(len(keys) == 0) != (core.DeltaArticles == 0) {
+		return nil, fmt.Errorf("inconsistent delta chain: %d segment(s), na=%d, total_art=%d",
+			len(keys), core.DeltaArticles, core.TotalArticles)
 	}
-	if core.NumDeltas == 0 {
+	if len(keys) == 0 {
 		return nil, nil
 	}
 	out := make([]ArticleData, 0, core.DeltaArticles)
-	for g := tailGen(core) + 1; g <= core.Seq; g++ {
-		key := deltaKey(g)
+	for _, key := range keys {
 		buf, err := fetch(key)
 		if err != nil {
 			return nil, fmt.Errorf("fetch %s: %w", key, err)
@@ -106,7 +109,7 @@ func loadDeltas(fetch keyGetter, core *DBCore) ([]ArticleData, error) {
 		out = append(out, entries...)
 	}
 	if len(out) != core.DeltaArticles {
-		return nil, fmt.Errorf("delta chain holds %d articles but db.gz na=%d", len(out), core.DeltaArticles)
+		return nil, fmt.Errorf("delta chain holds %d articles but the store says na=%d", len(out), core.DeltaArticles)
 	}
 	return out, nil
 }
@@ -124,7 +127,10 @@ func loadLatestIdx(fetch keyGetter, core *DBCore, deltas []ArticleData, slots in
 	tc := tailCovered(core)
 	var pack *idxPack
 	if tc > 0 {
-		key := latestKey(core, "idx")
+		key := core.Names.tailKey(idxSeries)
+		if key == "" {
+			return nil, fmt.Errorf("the store consolidated %d article(s) but names no idx tail", tc)
+		}
 		buf, err := fetch(key)
 		if err != nil {
 			return nil, fmt.Errorf("fetch %s: %w", key, err)
@@ -167,7 +173,10 @@ func loadIdxPacks(fetch keyGetter, core *DBCore) ([]*idxPack, []ArticleData, err
 	slots := feedSlots(core)
 	out := make([]*idxPack, numFinalized+1)
 	for p := 0; p < numFinalized; p++ {
-		key, size := idxKeyAndSize(core, p)
+		key, size, err := idxKeyAndSize(core, p)
+		if err != nil {
+			return nil, nil, err
+		}
 		buf, err := fetch(key)
 		if err != nil {
 			return nil, nil, fmt.Errorf("fetch %s: %w", key, err)

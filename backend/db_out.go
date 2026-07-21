@@ -520,7 +520,10 @@ func (o *DB) resolveOutWindow(ctx context.Context, include map[int]bool, limit i
 	article := func(pack *idxPack, chron int) (ArticleData, error) {
 		packID, off := pack.getPackRef(chron)
 		if packID != dataPackID {
-			key := dataKeyFor(c, packID)
+			key, err := dataKeyFor(c, packID)
+			if err != nil {
+				return ArticleData{}, err
+			}
 			raw, err := o.readGz(ctx, key)
 			if err != nil {
 				return ArticleData{}, err
@@ -543,7 +546,10 @@ func (o *DB) resolveOutWindow(ctx context.Context, include map[int]bool, limit i
 		if skip(p) {
 			continue
 		}
-		key, size := idxKeyAndSize(c, p)
+		key, size, err := idxKeyAndSize(c, p)
+		if err != nil {
+			return nil, err
+		}
 		buf, err := o.readGz(ctx, key)
 		if err != nil {
 			return nil, err
@@ -583,13 +589,13 @@ func (o *DB) resolveOutWindow(ctx context.Context, include map[int]bool, limit i
 func (o *DB) outPackSkipper(ctx context.Context, include map[int]bool) func(p int) bool {
 	never := func(int) bool { return false }
 	c := &o.core
-	n := c.HdrPacks
+	n := c.hdrPacks()
 	if n == 0 || n != numFinalizedIdx(c.TotalArticles) {
 		return never // no summary, or it lags the finalized packs
 	}
 
 	cums := make([]*idxPack, n+1)
-	buf, err := o.readGz(ctx, summaryKey(n))
+	buf, err := o.readGz(ctx, c.Names.hsumKey())
 	if err != nil {
 		slog.Debug("out-feed pack skip unavailable", "error", err)
 		return never
@@ -615,8 +621,12 @@ func (o *DB) outPackSkipper(ctx context.Context, include map[int]bool) func(p in
 	}
 	// The cumulative counts AFTER the last finalized pack live in the latest
 	// pack's header, which the summary (finalized packs only) does not carry.
-	latestKey, _ := idxKeyAndSize(c, n)
-	hbuf, err := o.readIdxHeader(ctx, latestKey)
+	tailKey, _, err := idxKeyAndSize(c, n)
+	if err != nil {
+		slog.Debug("out-feed pack skip unavailable", "error", err)
+		return never
+	}
+	hbuf, err := o.readIdxHeader(ctx, tailKey)
 	if err != nil {
 		slog.Debug("out-feed pack skip unavailable", "error", err)
 		return never

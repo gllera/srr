@@ -127,26 +127,24 @@ func TestResolveInvalidURL(t *testing.T) {
 	}
 }
 
-func TestGenShowAndBump(t *testing.T) {
-	setupTestDB(t)
+// The overview reports the manifest counter (read-only): the store generation
+// and its bump endpoint are retired — names are never reused, so there is
+// nothing for a reader to invalidate.
+func TestOverviewReportsManifestCounter(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	if err := db.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
 	ov := doReq(t, newMux(), "GET", "/api/overview", "")
 	var got overviewView
 	if err := json.Unmarshal(ov.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode overview: %v", err)
 	}
-	if got.Gen != 0 {
-		t.Fatalf("initial gen = %d, want 0", got.Gen)
+	if got.Manifest != 1 {
+		t.Fatalf("m = %d, want 1", got.Manifest)
 	}
-	bump := doReq(t, newMux(), "POST", "/api/gen/bump", "")
-	if bump.Code != http.StatusOK {
-		t.Fatalf("bump = %d (%s)", bump.Code, bump.Body)
-	}
-	var g struct {
-		Gen int `json:"gen"`
-	}
-	json.Unmarshal(bump.Body.Bytes(), &g)
-	if g.Gen != 1 {
-		t.Fatalf("after bump gen = %d, want 1", g.Gen)
+	if bump := doReq(t, newMux(), "POST", "/api/gen/bump", ""); bump.Code < 400 {
+		t.Fatalf("the retired bump endpoint answered %d, want a 4xx", bump.Code)
 	}
 }
 

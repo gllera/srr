@@ -48,19 +48,43 @@ The reader fetches packs with plain `fetch`, so a cookie-based gate (Cloudflare
 Access and similar) is the least invasive option: the browser attaches the
 session automatically once the user has authenticated to the origin.
 
+## The leak-shrinker was taken (2026-07-21)
+
+The step this document called "the natural first step" landed with the
+generation-manifest cutover (`docs/MANIFEST-SPEC.md`): the backend-only
+configuration — `recipes`, `out`, per-feed `ingest`/`pipe`, and the dedup and
+retention knobs — moved out of the one object every reader must fetch and into
+`config.gz`, a mutable sidecar the frontend and the service worker never
+request. Retention (`exp`) stayed public, deliberately: it is operator config
+that the reader nonetheless renders ("Retention" in the feed info card), and the
+split is on *does the reader consume it*, not on authorship.
+
+What a public store still exposes, and what the operator is accepting:
+
+- the subscription list (feed titles and source URLs), per-feed health vitals,
+  the newest article titles (`head`), and the counters — all of it in
+  `manifest/<m>.gz`, which `db.gz` names;
+- article content, because the manifest lists every object name explicitly, so
+  anyone who can read the root can enumerate and fetch the packs.
+
+What it no longer exposes: how the articles are processed, how dedup and
+retention are tuned, and which syndication slots exist.
+
 ## Why the current store stays public
 
-The subscription list and the article titles are not sensitive for this
-deployment, and a public origin keeps the CDN path simple (no auth round-trip on
-every immutable pack, which is where SRR's cache-forever design pays off). This
-is a deliberate acceptance, revisited if the content of the feed list ever
-changes character.
+Unchanged by the above. The subscription list and the article titles are not
+sensitive for this deployment, and a public origin keeps the CDN path simple (no
+auth round-trip on every immutable pack, which is where SRR's cache-forever
+design pays off). This is a deliberate acceptance, revisited if the content of
+the feed list ever changes character.
 
-## If the stance ever tightens
+## If the stance tightens further
 
-The leak is dominated by *configuration* riding in the one object every reader
-must fetch. Moving the backend-only fields (`recipes`, `out`, `ingest`/`pipe`,
-dedup and retention settings) out of `db.gz` into a separate operator-only
-object would shrink the public surface to what the reader genuinely needs
-(feeds, counts, pointers) without any auth layer at all. That is a strictly
-smaller change than going private, and the natural first step.
+The remaining lever is the one this document already named: front the origin
+with an auth layer. The HTTP store backend already carries credential headers
+and the reader's sync layer already demonstrates credentialed fetches, so
+"private" is a deployment decision rather than a code change. A smaller
+intermediate step also exists now that the manifest owns the reader-visible
+state: splitting the per-feed vitals out of it (§8.1 of the manifest spec notes
+that as permitted future work) would shrink what a public store publishes
+further, at the cost of one more object.

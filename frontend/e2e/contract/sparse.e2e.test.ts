@@ -3,7 +3,7 @@ import { readFileSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
-import { feedServer, inspectValidate, makeStore, srr, type FeedServer } from "../harness"
+import { feedServer, inspectValidate, makeStore, srr, storeNames, type FeedServer } from "../harness"
 import { pubDate, rssFeed, type FeedItem } from "../fixtures"
 import { mountReader } from "./mount"
 
@@ -79,11 +79,11 @@ describe("contract: sparse articles (omitempty wire fields)", () => {
    })
 
    const line = (content: string): string => {
-      // One fetch on an empty store publishes the batch as delta segment
-      // data/d1.gz (the default --max-deltas path) — the raw JSONL wire under
+      // One fetch on an empty store publishes the batch as a single delta
+      // segment (the default --max-deltas path) — the raw JSONL wire under
       // test is byte-identical to a data pack's, which is the point of the
       // delta design.
-      const jsonl = gunzipSync(readFileSync(join(store, "data/d1.gz"))).toString("utf8")
+      const jsonl = gunzipSync(readFileSync(join(store, storeNames(store).deltas[0]))).toString("utf8")
       const hit = jsonl.split("\n").find((l) => l.includes(`"c":"${content}"`))
       expect(hit, `JSONL line with content ${content}`).toBeDefined()
       return hit!

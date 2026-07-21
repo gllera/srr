@@ -1,15 +1,14 @@
 import { afterAll, beforeAll, describe, expect, inject, it } from "vitest"
 import type { Browser, Page } from "puppeteer"
 
-import { feedServer, readDb, srr, type FeedServer } from "../harness"
+import { feedServer, readRoot, srr, storeNames, type FeedServer } from "../harness"
 import { nItems, rssFeed } from "../fixtures"
 
-// This suite pins LEGACY tail mechanics at the browser layer — L<seq> pack
-// names in the SW's pin/prune/cache-bound machinery and the head-only boot
-// budget — so the writer runs with the delta kill switch (every dirty cycle
-// consolidates, as pre-delta). Delta-chain behavior is covered by
-// contract/delta.e2e.test.ts and rides the OTHER browser suites (incl. the
-// live refresh flow) through the default --max-deltas.
+// This suite pins the CONSOLIDATED-tail layout at the browser layer — the SW's
+// pin/prune/cache-bound machinery and the head-only boot budget — so the writer
+// runs with the delta kill switch (every dirty cycle consolidates). Delta-chain
+// behavior is covered by contract/delta.e2e.test.ts and rides the OTHER browser
+// suites (incl. the live refresh flow) through the default --max-deltas.
 process.env.SRR_MAX_DELTAS = "0"
 import {
    $rowTitles,
@@ -35,12 +34,15 @@ const news = nItems(2, "news", 0, 0)
 const tech = nItems(2, "tech", 0, 10)
 const sport = nItems(2, "sport", 0, 20)
 
-// db.gz `seq` (latest-pack generation) and `gcs` (the backend GC low-water —
-// the highest tail generation it has deleted) read straight from a store, used
-// to drive the SW seq-only-prune scenario to where the backend has GC'd a
-// generation the SW should then mirror-evict.
-const storeSeq = (dir: string): number => readDb<{ seq?: number }>(dir).seq ?? 0
-const storeGcs = (dir: string): number => readDb<{ gcs?: number }>(dir).gcs ?? 0
+// The store's generation counter (db.gz `m`) — the ONE field a root carries
+// that moves, and the signal the SW reconciles its cache on.
+const storeM = (dir: string): number => readRoot(dir).m ?? 0
+// The tail object of a series, as the store names it (there is no derived form).
+const tailKey = (dir: string, series: "idx" | "data" | "meta"): string => {
+   const list = storeNames(dir)[series]
+   if (list.tail < 0) throw new Error(`${series} names no tail in ${dir}`)
+   return list.keys[list.tail]
+}
 
 const $title = (p: Page) => p.$eval(".srr-title", (e) => e.textContent)
 const $content = (p: Page) => p.$eval(".srr-content", (e) => e.textContent ?? "")
@@ -80,6 +82,12 @@ const waitBoot = (p: Page) =>
 describe("browser: real SPA over real packs", () => {
    let feeds: FeedServer
    let browser: Browser
+   // The shared store's tail object names, LISTED by its manifest. Every stem
+   // is opaque, so the pin/unpin scenarios below read them from the store
+   // rather than spelling a derived name.
+   let idxKey = ""
+   let dataKey = ""
+   let metaKey = ""
 
    beforeAll(async () => {
       feeds = await feedServer({
@@ -93,6 +101,7 @@ describe("browser: real SPA over real packs", () => {
       await srr(packsDir, "feed", "add", "-t", "Tech", "-g", "world", "-u", `${feeds.url}/tech.xml`)
       await srr(packsDir, "feed", "add", "-t", "Sport", "-g", "play", "-u", `${feeds.url}/sport.xml`)
       await srr(packsDir, "art", "fetch")
+      ;[idxKey, dataKey, metaKey] = [tailKey(packsDir, "idx"), tailKey(packsDir, "data"), tailKey(packsDir, "meta")]
 
       browser = await launchBrowser()
    })
@@ -587,7 +596,7 @@ describe("browser: real SPA over real packs", () => {
          // The pack and shell buckets are populated (asset bucket only fills when a
          // store actually self-hosts images, which these plain-text fixtures don't).
          const cacheNames = await page.evaluate(() => caches.keys())
-         expect(cacheNames).toEqual(expect.arrayContaining(["srr-packs-v3", "srr-shell-v1"]))
+         expect(cacheNames).toEqual(expect.arrayContaining(["srr-packs-v4", "srr-shell-v1"]))
 
          // Cut the network and reload — the reader must still boot and render purely
          // from cache. A clean render with no error popup proves db.gz + idx + data
@@ -644,15 +653,13 @@ describe("browser: real SPA over real packs", () => {
       }
    })
 
-   // The SW bounds client storage: each finalized pack series keeps its
-   // PACK_KEEP highest-numbered entries (the names encode chron age) and the
-   // assets bucket keeps the ASSET_KEEP most recently cached. Everything
-   // offline correctness depends on (db.gz, L<seq>, h<N>) is exempt. Stuffs
-   // the caches with synthetic over-cap entries, reloads (a successful online
-   // db.gz fetch triggers enforceCacheBounds), and checks the eviction order.
-   // Uses the shared 6-article store, where every real pack is L-named — so
-   // the synthetic entries are the only finalized-numeric keys in the bucket
-   // and the assertions can be exact.
+   // The SW bounds client storage: each article series keeps its PACK_KEEP
+   // highest-stem entries (stems are handed out in write order, so higher is
+   // newer) and the assets bucket keeps the ASSET_KEEP most recently cached.
+   // Stuffs the caches with synthetic over-cap entries, reloads (a successful
+   // online db.gz fetch triggers enforceCacheBounds), and checks the eviction
+   // order. The manifest reconciliation does not interfere: it only runs when
+   // the generation MOVES, and this test never advances the store.
    it("bounds the pack and asset caches, evicting oldest entries first", async () => {
       const ctx = await browser.createBrowserContext()
       const page = await ctx.newPage()
@@ -660,15 +667,23 @@ describe("browser: real SPA over real packs", () => {
          await page.goto(baseUrl, { waitUntil: "load" })
          await waitBoot(page)
          await page.waitForFunction(() => navigator.serviceWorker?.controller != null, { timeout: 20000 })
+         // One reload through the controlling SW FIRST, so it adopts the current
+         // generation. The reconciliation only runs when the generation moves, so
+         // once adopted it stays out of this test's way — otherwise it would
+         // (correctly) evict the synthetic names as unnamed by any manifest.
+         await page.reload({ waitUntil: "load" })
+         await waitBoot(page)
 
-         // 130 finalized data packs (30 over PACK_KEEP=100), 10 finalized idx
-         // packs (under the cap), 510 assets (10 over ASSET_KEEP=500) — puts
-         // awaited sequentially so the assets' insertion order is exact.
+         // 130 synthetic data objects (30 over PACK_KEEP=100), 10 synthetic idx
+         // objects (under the cap), 510 assets (10 over ASSET_KEEP=500) — puts
+         // awaited sequentially so the assets' insertion order is exact. The
+         // stems start well above anything the store has handed out, so they
+         // never collide with a real object's name.
          await page.evaluate(async () => {
-            const packs = await caches.open("srr-packs-v3")
-            for (let n = 1; n <= 130; n++)
+            const packs = await caches.open("srr-packs-v4")
+            for (let n = 1000; n <= 1129; n++)
                await packs.put(new URL(`packs/data/${n}.gz`, location.href).href, new Response("x"))
-            for (let n = 0; n < 10; n++)
+            for (let n = 900; n < 910; n++)
                await packs.put(new URL(`packs/idx/${n}.gz`, location.href).href, new Response("x"))
             const assets = await caches.open("srr-assets-v1")
             for (let n = 0; n < 510; n++) {
@@ -683,15 +698,15 @@ describe("browser: real SPA over real packs", () => {
          await waitBoot(page)
          await page.waitForFunction(
             async () => {
-               const packs = await caches.open("srr-packs-v3")
+               const packs = await caches.open("srr-packs-v4")
                const keys = await packs.keys()
-               return keys.filter((k) => /\/packs\/data\/\d+\.gz$/.test(new URL(k.url).pathname)).length === 100
+               return keys.filter((k) => /\/packs\/data\/\d{4}\.gz$/.test(new URL(k.url).pathname)).length === 100
             },
             { timeout: 20000 },
          )
 
          const state = await page.evaluate(async () => {
-            const packs = await caches.open("srr-packs-v3")
+            const packs = await caches.open("srr-packs-v4")
             const packPaths = (await packs.keys()).map((k) => new URL(k.url).pathname)
             const assets = await caches.open("srr-assets-v1")
             const assetPaths = (await assets.keys()).map((k) => new URL(k.url).pathname)
@@ -704,13 +719,16 @@ describe("browser: real SPA over real packs", () => {
                .map(Number)
                .sort((a, b) => a - b)
 
-         // Data series: the 30 lowest-numbered (oldest) evicted, newest 100 kept.
-         expect(nums("data")).toEqual(Array.from({ length: 100 }, (_, i) => i + 31))
-         // The under-cap idx series is untouched.
-         expect(nums("idx")).toEqual(Array.from({ length: 10 }, (_, i) => i))
-         // Exempt names survive the prune.
+         // Data series: the lowest-stem (oldest) entries evicted, newest 100 kept.
+         // Stems are handed out in write order, so the store's own low-stem data
+         // objects go with the synthetic ones below the cut.
+         expect(nums("data")).toEqual(Array.from({ length: 100 }, (_, i) => i + 1030))
+         // The under-cap idx series is untouched — the store's real idx objects
+         // ride along with the synthetic ones, all of them under the cap.
+         expect(nums("idx")).toEqual(expect.arrayContaining(Array.from({ length: 10 }, (_, i) => i + 900)))
+         expect(nums("idx").length).toBeLessThanOrEqual(100)
+         // db.gz is exempt: enforceCacheBounds only touches the article series.
          expect(state.packPaths.some((p) => p.endsWith("/packs/db.gz"))).toBe(true)
-         expect(state.packPaths.some((p) => /\/packs\/idx\/L\d+\.gz$/.test(p))).toBe(true)
          // Assets: exactly ASSET_KEEP remain, the 10 oldest-cached gone —
          // the first surviving key is #10 (0xa), the last is #509 (0x1fd).
          expect(state.assetPaths).toHaveLength(500)
@@ -743,34 +761,36 @@ describe("browser: real SPA over real packs", () => {
          await page.reload({ waitUntil: "load" })
          await waitBoot(page)
 
-         // Send a pin message with two valid pack names. The SW should fetch them
-         // into srr-pinned-v1. Use real pack names that exist in the test store
-         // (the store has total_art=6, seq=1, so idx/L1.gz and data/L1.gz exist).
-         const result = await page.evaluate(async () => {
-            const sw = navigator.serviceWorker.controller!
-            const { port1, port2 } = new MessageChannel()
-            const progress: { done: number; total: number }[] = []
-            const done = new Promise<void>((resolve) => {
-               port1.onmessage = (e: MessageEvent<{ type: string; done: number; total: number }>) => {
-                  if (e.data?.type === "pin-progress") {
-                     progress.push({ done: e.data.done, total: e.data.total })
-                     if (e.data.done >= e.data.total) resolve()
+         // Send a pin message with two valid object names. The SW should fetch
+         // them into srr-pinned-v1. The names are LISTED by the store's manifest
+         // — there is no derived form to hardcode.
+         const result = await page.evaluate(
+            async ([idxKey, dataKey]: string[]) => {
+               const sw = navigator.serviceWorker.controller!
+               const { port1, port2 } = new MessageChannel()
+               const progress: { done: number; total: number }[] = []
+               const done = new Promise<void>((resolve) => {
+                  port1.onmessage = (e: MessageEvent<{ type: string; done: number; total: number }>) => {
+                     if (e.data?.type === "pin-progress") {
+                        progress.push({ done: e.data.done, total: e.data.total })
+                        if (e.data.done >= e.data.total) resolve()
+                     }
                   }
-               }
-            })
-            sw.postMessage(
-               { type: "pin", names: ["idx/L1.gz", "data/L1.gz"], base: new URL("packs/", location.href).href },
-               [port2],
-            )
-            await done
-            const pinned = await caches.open("srr-pinned-v1")
-            const keys = (await pinned.keys()).map((k) => new URL(k.url).pathname)
-            return { keys, progress }
-         })
+               })
+               sw.postMessage({ type: "pin", names: [idxKey, dataKey], base: new URL("packs/", location.href).href }, [
+                  port2,
+               ])
+               await done
+               const pinned = await caches.open("srr-pinned-v1")
+               const keys = (await pinned.keys()).map((k) => new URL(k.url).pathname)
+               return { keys, progress }
+            },
+            [idxKey, dataKey],
+         )
 
          // Both packs should be in srr-pinned-v1.
-         expect(result.keys.some((k) => k.endsWith("/packs/idx/L1.gz"))).toBe(true)
-         expect(result.keys.some((k) => k.endsWith("/packs/data/L1.gz"))).toBe(true)
+         expect(result.keys.some((k) => k.endsWith(`/packs/${idxKey}`))).toBe(true)
+         expect(result.keys.some((k) => k.endsWith(`/packs/${dataKey}`))).toBe(true)
          // Progress messages: [0 done, 1 done, 2 done] (initial + one per pack).
          expect(result.progress.length).toBeGreaterThanOrEqual(2)
          expect(result.progress[result.progress.length - 1].done).toBe(2)
@@ -790,24 +810,22 @@ describe("browser: real SPA over real packs", () => {
          await page.reload({ waitUntil: "load" })
          await waitBoot(page)
 
-         // Pin one real pack name.
-         await page.evaluate(async () => {
+         // Pin one real object name.
+         await page.evaluate(async (key: string) => {
             const sw = navigator.serviceWorker.controller!
             const { port1, port2 } = new MessageChannel()
             await new Promise<void>((resolve) => {
                port1.onmessage = (e: MessageEvent<{ type: string; done: number; total: number }>) => {
                   if (e.data?.type === "pin-progress" && e.data.done >= e.data.total) resolve()
                }
-               sw.postMessage({ type: "pin", names: ["idx/L1.gz"], base: new URL("packs/", location.href).href }, [
-                  port2,
-               ])
+               sw.postMessage({ type: "pin", names: [key], base: new URL("packs/", location.href).href }, [port2])
             })
-         })
+         }, idxKey)
 
          // Stuff 130 finalized data packs into PACKS (30 over PACK_KEEP=100) to
          // trigger enforceCacheBounds on the next db.gz reload.
          await page.evaluate(async () => {
-            const packs = await caches.open("srr-packs-v3")
+            const packs = await caches.open("srr-packs-v4")
             for (let n = 1; n <= 130; n++)
                await packs.put(new URL(`packs/data/${n}.gz`, location.href).href, new Response("x"))
          })
@@ -818,7 +836,7 @@ describe("browser: real SPA over real packs", () => {
          // Wait for the prune to complete (data series back to 100).
          await page.waitForFunction(
             async () => {
-               const packs = await caches.open("srr-packs-v3")
+               const packs = await caches.open("srr-packs-v4")
                const keys = await packs.keys()
                return keys.filter((k) => /\/packs\/data\/\d+\.gz$/.test(new URL(k.url).pathname)).length === 100
             },
@@ -830,20 +848,20 @@ describe("browser: real SPA over real packs", () => {
             const pinned = await caches.open("srr-pinned-v1")
             return (await pinned.keys()).map((k) => new URL(k.url).pathname)
          })
-         expect(pinnedKeys.some((k) => k.endsWith("/packs/idx/L1.gz"))).toBe(true)
+         expect(pinnedKeys.some((k) => k.endsWith(`/packs/${idxKey}`))).toBe(true)
       } finally {
          await ctx.close()
       }
    })
 
    // An offline-pinned pack is served from srr-pinned-v1 even when it has been
-   // evicted from (or was never in) the rolling srr-packs-v3 bucket. This proves
+   // evicted from (or was never in) the rolling srr-packs-v4 bucket. This proves
    // pinnedCacheFirst's PINNED-first path keeps a pinned filter fully readable after
    // PACKS eviction — the core offline-pin correctness guarantee.
    //
    // NOTE: requires navigator.serviceWorker.controller (same sandbox limit as the
    // other pinned-bucket tests above — see the block comment above this suite).
-   it("reads a pinned pack from srr-pinned-v1 after it is absent from srr-packs-v3 (offline)", async () => {
+   it("reads a pinned pack from srr-pinned-v1 after it is absent from srr-packs-v4 (offline)", async () => {
       const ctx = await browser.createBrowserContext()
       const page = await ctx.newPage()
       try {
@@ -859,24 +877,24 @@ describe("browser: real SPA over real packs", () => {
          // Pin the latest idx and data packs directly into PINNED (bypassing the SW
          // message path so we don't need app.ts wired — same as the other pinned
          // tests that post directly to the SW controller).
-         await page.evaluate(async () => {
-            const sw = navigator.serviceWorker.controller!
-            const { port1, port2 } = new MessageChannel()
-            await new Promise<void>((resolve) => {
-               port1.onmessage = (e: MessageEvent<{ type: string; done: number; total: number }>) => {
-                  if (e.data?.type === "pin-progress" && e.data.done >= e.data.total) resolve()
-               }
-               sw.postMessage(
-                  { type: "pin", names: ["idx/L1.gz", "data/L1.gz"], base: new URL("packs/", location.href).href },
-                  [port2],
-               )
-            })
-         })
+         await page.evaluate(
+            async ([a, b]: string[]) => {
+               const sw = navigator.serviceWorker.controller!
+               const { port1, port2 } = new MessageChannel()
+               await new Promise<void>((resolve) => {
+                  port1.onmessage = (e: MessageEvent<{ type: string; done: number; total: number }>) => {
+                     if (e.data?.type === "pin-progress" && e.data.done >= e.data.total) resolve()
+                  }
+                  sw.postMessage({ type: "pin", names: [a, b], base: new URL("packs/", location.href).href }, [port2])
+               })
+            },
+            [idxKey, dataKey],
+         )
 
          // Delete both packs from the rolling PACKS bucket so the only copy is in
          // PINNED — simulates what enforceCacheBounds does to evicted packs.
          await page.evaluate(async () => {
-            const packs = await caches.open("srr-packs-v3")
+            const packs = await caches.open("srr-packs-v4")
             const keys = await packs.keys()
             await Promise.all(
                keys
@@ -887,15 +905,15 @@ describe("browser: real SPA over real packs", () => {
 
          // Confirm the packs are gone from PACKS but present in PINNED.
          const state = await page.evaluate(async () => {
-            const packs = await caches.open("srr-packs-v3")
+            const packs = await caches.open("srr-packs-v4")
             const packKeys = (await packs.keys()).map((k) => new URL(k.url).pathname)
             const pinned = await caches.open("srr-pinned-v1")
             const pinnedKeys = (await pinned.keys()).map((k) => new URL(k.url).pathname)
             return { packKeys, pinnedKeys }
          })
          expect(state.packKeys.some((k) => /\/packs\/(idx|data)\/L\d+\.gz$/.test(k))).toBe(false)
-         expect(state.pinnedKeys.some((k) => k.endsWith("/packs/idx/L1.gz"))).toBe(true)
-         expect(state.pinnedKeys.some((k) => k.endsWith("/packs/data/L1.gz"))).toBe(true)
+         expect(state.pinnedKeys.some((k) => k.endsWith(`/packs/${idxKey}`))).toBe(true)
+         expect(state.pinnedKeys.some((k) => k.endsWith(`/packs/${dataKey}`))).toBe(true)
 
          // Go offline and reload. The reader must boot and render purely from the
          // PINNED bucket (db.gz is still in PACKS as it's exempt from eviction;
@@ -929,49 +947,51 @@ describe("browser: real SPA over real packs", () => {
          await page.reload({ waitUntil: "load" })
          await waitBoot(page)
 
-         // Pin three real latest-pack names (seq=1 → the L1 generation of every
-         // series exists in the 6-article store). idx/L1.gz + data/L1.gz are the
-         // pair the pin test above proves cache successfully.
-         const pinnedAfter = await page.evaluate(async () => {
-            const sw = navigator.serviceWorker.controller!
-            const base = new URL("packs/", location.href).href
-            const { port1, port2 } = new MessageChannel()
-            await new Promise<void>((resolve) => {
-               port1.onmessage = (e: MessageEvent<{ type: string; done: number; total: number }>) => {
-                  if (e.data?.type === "pin-progress" && e.data.done >= e.data.total) resolve()
-               }
-               sw.postMessage({ type: "pin", names: ["idx/L1.gz", "data/L1.gz", "meta/L1.gz"], base }, [port2])
-            })
-            const pinned = await caches.open("srr-pinned-v1")
-            return (await pinned.keys()).map((k) => new URL(k.url).pathname)
-         })
+         // Pin all three tail objects the 6-article store names.
+         const pinnedAfter = await page.evaluate(
+            async (names: string[]) => {
+               const sw = navigator.serviceWorker.controller!
+               const base = new URL("packs/", location.href).href
+               const { port1, port2 } = new MessageChannel()
+               await new Promise<void>((resolve) => {
+                  port1.onmessage = (e: MessageEvent<{ type: string; done: number; total: number }>) => {
+                     if (e.data?.type === "pin-progress" && e.data.done >= e.data.total) resolve()
+                  }
+                  sw.postMessage({ type: "pin", names, base }, [port2])
+               })
+               const pinned = await caches.open("srr-pinned-v1")
+               return (await pinned.keys()).map((k) => new URL(k.url).pathname)
+            },
+            [idxKey, dataKey, metaKey],
+         )
          // Both known-cacheable packs landed in the eviction-exempt bucket.
-         expect(pinnedAfter.some((k) => k.endsWith("/packs/idx/L1.gz"))).toBe(true)
-         expect(pinnedAfter.some((k) => k.endsWith("/packs/data/L1.gz"))).toBe(true)
+         expect(pinnedAfter.some((k) => k.endsWith(`/packs/${idxKey}`))).toBe(true)
+         expect(pinnedAfter.some((k) => k.endsWith(`/packs/${dataKey}`))).toBe(true)
 
-         // (a) unpin ONLY data/L1.gz — the SW deletes that exact entry. base MUST
+         // (a) unpin ONLY the data tail — the SW deletes that exact entry. base MUST
          // match the pin's so the resolved URL (the cache key) is identical.
-         await page.evaluate(async () => {
+         await page.evaluate(async (key: string) => {
             const sw = navigator.serviceWorker.controller!
             const base = new URL("packs/", location.href).href
-            sw.postMessage({ type: "unpin", names: ["data/L1.gz"], base })
-         })
+            sw.postMessage({ type: "unpin", names: [key], base })
+         }, dataKey)
          // No progress reply — poll until the named entry is gone.
          await page.waitForFunction(
-            async () => {
+            async (gone: string) => {
                const pinned = await caches.open("srr-pinned-v1")
                const paths = (await pinned.keys()).map((k) => new URL(k.url).pathname)
-               return !paths.some((p) => p.endsWith("/packs/data/L1.gz"))
+               return !paths.some((p) => p.endsWith(`/packs/${gone}`))
             },
             { timeout: 20000 },
+            dataKey,
          )
          const afterUnpin = await page.evaluate(async () => {
             const pinned = await caches.open("srr-pinned-v1")
             return (await pinned.keys()).map((k) => new URL(k.url).pathname)
          })
          // Only the named entry was removed — the sibling pin survives.
-         expect(afterUnpin.some((k) => k.endsWith("/packs/data/L1.gz"))).toBe(false)
-         expect(afterUnpin.some((k) => k.endsWith("/packs/idx/L1.gz"))).toBe(true)
+         expect(afterUnpin.some((k) => k.endsWith(`/packs/${dataKey}`))).toBe(false)
+         expect(afterUnpin.some((k) => k.endsWith(`/packs/${idxKey}`))).toBe(true)
 
          // (b) unpin-all — the whole srr-pinned-v1 bucket is emptied.
          await page.evaluate(async () => {
@@ -1036,190 +1056,75 @@ describe("browser: real SPA over real packs", () => {
       }
    })
 
-   // An in-place store rebuild reuses finalized pack ids (data/N.gz) with new
-   // bytes — the SW's cache-first would serve the stale packs forever. The db.gz
-   // `gen` field is the invalidation signal: when it changes, the SW purges the
-   // packs bucket BEFORE db.gz resolves to the page (which only then requests
-   // idx/data packs). Proves both directions with a real srr rebuild: without a
-   // gen bump the stale cache wins (that's cache-first working as designed); with
-   // `srr gen --bump` the fresh bytes win. Replaces the shared store, so it is
-   // ordered AFTER every test that reads the original 6-article store (the pinned
-   // tests above); the two store-rebuilding tests below seed their own stores.
-   it("purges stale finalized packs when db.gz gen changes", async () => {
-      // Wipe the served store and write a fresh one with the same shape (one
-      // feed, same item count/order → chron 0 is always data pack 1, offset 0)
-      // but different content. -s 1 + incompressible filler → finalized packs.
-      const rebuild = async (prefix: string) => {
-         clearDir(packsDir)
-         feeds.set("/bulk.xml", rssFeed("Bulk", nItems(30, prefix, 8000)))
-         await srr(packsDir, "feed", "add", "-t", "Bulk", "-u", `${feeds.url}/bulk.xml`)
-         await srr(packsDir, "-s", "1", "art", "fetch")
-      }
-
-      await rebuild("alpha")
-      const ctx = await browser.createBrowserContext()
-      const page = await ctx.newPage()
-      try {
-         // Cold load at chron 0 (lives in finalized, cache-first data/1.gz), wait
-         // for the SW to claim, then reload so the pack is cached through it.
-         await page.goto(baseUrl + "#0", { waitUntil: "load" })
-         await waitTitle(page, "alpha title 0")
-         await page.waitForFunction(() => navigator.serviceWorker?.controller != null, { timeout: 20000 })
-         await page.reload({ waitUntil: "load" })
-         await waitTitle(page, "alpha title 0")
-
-         // Rebuild with new content but unchanged gen (absent == 0): the stale
-         // cached pack must still be served — the purge is gen-driven, not a side
-         // effect of the rebuild itself.
-         await rebuild("beta")
-         await page.reload({ waitUntil: "load" })
-         await waitTitle(page, "alpha title 0")
-
-         // Bump gen → next db.gz fetch purges the packs bucket → fresh bytes.
-         await srr(packsDir, "gen", "--bump")
-         await page.reload({ waitUntil: "load" })
-         await waitTitle(page, "beta title 0")
-         expect(await $popupOpen(page)).toBe(false)
-      } finally {
-         await ctx.close()
-      }
-   })
-
-   it("gen change purges srr-pinned-v1 alongside srr-packs-v3", async () => {
-      // Re-use the same rebuild helper and pattern as the gen-purge test above.
-      const rebuild = async (prefix: string) => {
-         clearDir(packsDir)
-         feeds.set("/pintest.xml", rssFeed("PinTest", nItems(30, prefix, 8000)))
-         await srr(packsDir, "feed", "add", "-t", "PinTest", "-u", `${feeds.url}/pintest.xml`)
-         await srr(packsDir, "-s", "1", "art", "fetch")
-      }
-
-      await rebuild("pinpre")
-      const ctx = await browser.createBrowserContext()
-      const page = await ctx.newPage()
-      try {
-         await page.goto(baseUrl + "#0", { waitUntil: "load" })
-         await waitTitle(page, "pinpre title 0")
-         await page.waitForFunction(() => navigator.serviceWorker?.controller != null, { timeout: 20000 })
-         await page.reload({ waitUntil: "load" })
-         await waitTitle(page, "pinpre title 0")
-
-         // Pin a finalized pack into PINNED.
-         await page.evaluate(async () => {
-            const sw = navigator.serviceWorker.controller!
-            const { port1, port2 } = new MessageChannel()
-            await new Promise<void>((resolve) => {
-               port1.onmessage = (e: MessageEvent<{ type: string; done: number; total: number }>) => {
-                  if (e.data?.type === "pin-progress" && e.data.done >= e.data.total) resolve()
-               }
-               sw.postMessage({ type: "pin", names: ["data/1.gz"], base: new URL("packs/", location.href).href }, [
-                  port2,
-               ])
-            })
-         })
-
-         const pinnedBefore = await page.evaluate(async () => {
-            const pinned = await caches.open("srr-pinned-v1")
-            return (await pinned.keys()).length
-         })
-         expect(pinnedBefore).toBeGreaterThan(0)
-
-         // Bump gen → PINNED must be purged alongside PACKS on the next db.gz fetch.
-         await rebuild("pinpost")
-         await srr(packsDir, "gen", "--bump")
-         await page.reload({ waitUntil: "load" })
-         // Wait for the gen-purge: PINNED should now be empty.
-         await page.waitForFunction(
-            async () => {
-               const pinned = await caches.open("srr-pinned-v1")
-               return (await pinned.keys()).length === 0
-            },
-            { timeout: 20000 },
-         )
-         expect(await $popupOpen(page)).toBe(false)
-      } finally {
-         await ctx.close()
-      }
-   })
-
-   // A normal fetch-cron advance bumps db.gz `seq` (a new latest-pack generation)
-   // WITHOUT touching `gen`. checkManifest's seq-only branch (distinct from the
-   // gen purge above) prunes cached `L<g>`/`d<g>` generations the backend GC has
-   // already dropped — those with g <= db.gz `gcs`, the backend's own GC
-   // low-water — while keeping the current generation and the exempt db.gz.
-   // Unlike the two gen tests, this drives the *seq* branch: it advances seq via
-   // real article-producing fetches until the backend has GC'd generation 1, and
-   // never calls `srr gen --bump`. Rebuilds the shared store, so it runs among
-   // the store-replacing tests, after everything that reads the 6-article store.
-   it("prunes generations the backend GC dropped on a seq-only advance (no gen bump)", async () => {
-      // Fresh single-feed store at seq=1 (own rebuild).
+   // A store rebuild used to need an invalidation signal: it reused finalized
+   // pack names with new bytes, so the SW's cache-first would serve the stale
+   // packs forever, and `srr gen --bump` existed to purge them. It cannot happen
+   // any more — a stem is drawn from a counter that is never reused, so a
+   // rebuild writes NEW names beside the old ones. What replaces the purge is
+   // the manifest reconciliation (docs/MANIFEST-SPEC.md §8.3): on adopting a new
+   // generation the SW evicts every cached object named by neither it nor the
+   // previously-adopted one. This drives that: cache a generation's tail packs,
+   // advance the store until the reconciliation must drop them, and check the
+   // eviction happened while the live generation and db.gz survive.
+   // Rebuilds the shared store, so it runs after everything that reads it.
+   it("evicts cached objects the adopted manifest no longer names", async () => {
       clearDir(packsDir)
       feeds.set("/seq.xml", rssFeed("Seq", nItems(2, "seq")))
       await srr(packsDir, "feed", "add", "-t", "Seq", "-u", `${feeds.url}/seq.xml`)
       await srr(packsDir, "art", "fetch")
-      expect(storeSeq(packsDir)).toBe(1)
+      const firstIdx = tailKey(packsDir, "idx")
+      const firstData = tailKey(packsDir, "data")
+      const firstM = storeM(packsDir)
 
       const ctx = await browser.createBrowserContext()
       const page = await ctx.newPage()
       try {
-         // Cold load the reader at chron 0 (its data pack is the latest data/L1),
-         // wait for the SW to claim, then reload so db.gz + idx/L1 + data/L1 are
-         // cached through the controlling SW.
+         // Cold load at chron 0, wait for the SW to claim, then reload so db.gz
+         // and this generation's tail packs are cached through it.
          await page.goto(baseUrl + "#0", { waitUntil: "load" })
          await waitTitle(page, "seq title 0")
          await page.waitForFunction(() => navigator.serviceWorker?.controller != null, { timeout: 20000 })
          await page.reload({ waitUntil: "load" })
          await waitTitle(page, "seq title 0")
 
-         // Baseline: the L1 generation IS cached, so a later absence proves a
-         // prune rather than a never-cache.
          const before = await page.evaluate(async () => {
-            const packs = await caches.open("srr-packs-v3")
+            const packs = await caches.open("srr-packs-v4")
             return (await packs.keys()).map((k) => new URL(k.url).pathname)
          })
-         expect(before.some((k) => k.endsWith("/packs/idx/L1.gz"))).toBe(true)
-         expect(before.some((k) => k.endsWith("/packs/data/L1.gz"))).toBe(true)
+         expect(before.some((k) => k.endsWith(`/packs/${firstIdx}`))).toBe(true)
+         expect(before.some((k) => k.endsWith(`/packs/${firstData}`))).toBe(true)
 
-         // Advance seq WITHOUT a gen bump: each fetch that ingests new items
-         // writes generation seq+1 and, once the GC cutoff reaches back that far,
-         // deletes generation 1 and records it in db.gz `gcs`. Grow the feed until
-         // gcs >= 1 (the backend has GC'd L1), so the SW's mirror-prune should
-         // then evict the cached L1. The loop keys off the real gcs and throws on
-         // a stall — never a false pass. gen stays 0 throughout.
-         let n = 2
-         while (storeGcs(packsDir) < 1) {
-            n += 3
-            if (n > 60)
-               throw new Error(
-                  `gcs stalled at ${storeGcs(packsDir)} (seq ${storeSeq(packsDir)}, feed grown to ${n} items)`,
-               )
+         // Advance the store TWICE: the reconciliation keeps one generation of
+         // overlap (covering a tab mid-swap), so two consolidations are what put
+         // the first generation's tail packs outside the kept set.
+         for (const n of [5, 8]) {
             feeds.set("/seq.xml", rssFeed("Seq", nItems(n, "seq")))
             await srr(packsDir, "art", "fetch")
+            await page.reload({ waitUntil: "load" })
+            await waitTitle(page, "seq title 0")
          }
-         const seq = storeSeq(packsDir)
-         expect(storeGcs(packsDir)).toBeGreaterThanOrEqual(1)
+         expect(storeM(packsDir)).toBeGreaterThan(firstM)
+         const liveIdx = tailKey(packsDir, "idx")
+         expect(liveIdx).not.toBe(firstIdx)
 
-         // Reload → the new seq (gen unchanged) drives checkManifest's seq-only
-         // prune BEFORE db.gz resolves. Poll until the backend-GC'd L1 idx pack goes.
-         await page.reload({ waitUntil: "load" })
-         await waitTitle(page, "seq title 0")
          await page.waitForFunction(
-            async () => {
-               const packs = await caches.open("srr-packs-v3")
+            async (gone: string) => {
+               const packs = await caches.open("srr-packs-v4")
                const paths = (await packs.keys()).map((k) => new URL(k.url).pathname)
-               return !paths.some((p) => p.endsWith("/packs/idx/L1.gz"))
+               return !paths.some((p) => p.endsWith(`/packs/${gone}`))
             },
             { timeout: 20000 },
+            firstIdx,
          )
          const after = await page.evaluate(async () => {
-            const packs = await caches.open("srr-packs-v3")
+            const packs = await caches.open("srr-packs-v4")
             return (await packs.keys()).map((k) => new URL(k.url).pathname)
          })
-         // The backend-GC'd L1 generation (g <= gcs) was mirror-pruned...
-         expect(after.some((k) => k.endsWith("/packs/idx/L1.gz"))).toBe(false)
-         expect(after.some((k) => k.endsWith("/packs/data/L1.gz"))).toBe(false)
-         // ...while the current generation and the exempt db.gz survive.
-         expect(after.some((k) => k.endsWith(`/packs/idx/L${seq}.gz`))).toBe(true)
+         // The superseded generation's objects are gone...
+         expect(after.some((k) => k.endsWith(`/packs/${firstIdx}`))).toBe(false)
+         expect(after.some((k) => k.endsWith(`/packs/${firstData}`))).toBe(false)
+         // ...while the live generation and the exempt db.gz survive.
+         expect(after.some((k) => k.endsWith(`/packs/${liveIdx}`))).toBe(true)
          expect(after.some((k) => k.endsWith("/packs/db.gz"))).toBe(true)
          expect(await $popupOpen(page)).toBe(false)
       } finally {

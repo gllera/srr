@@ -29,6 +29,7 @@ func TestCacheDirDefaultResolved(t *testing.T) {
 		"maxAssetSize":  "1",
 		"maxDeltas":     "1",
 		"maxDeltaBytes": "1",
+		"keepManifests": "1",
 		"cacheDir":      defaultCacheDir(),
 	})
 	if err != nil {

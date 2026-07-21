@@ -21,15 +21,35 @@ import (
 const (
 	dbFileKey = "db.gz"
 	dbLockKey = ".locked"
-	// dbFormatVersion is the db.gz schema version this binary writes and can
-	// read. Commit stamps it; NewDB REFUSES a store whose stored version is
+	// dbFormatVersion is the store format version this binary writes and can
+	// read: the `v` of the root db.gz AND of every manifest it names (they are
+	// one format — a root is a pointer into the manifest chain and neither is
+	// meaningful without the other, which is why there is one constant and not
+	// two). Commit stamps it; NewDB REFUSES a store whose stored version is
 	// higher, because forward compatibility is not achievable by omitempty
 	// fallback alone: an older binary silently drops every field it does not
 	// know on its next Commit, which is data loss that looks like success.
-	// Bump ONLY for a genuinely breaking format change (a field whose meaning
-	// changes, or one an old reader would misinterpret) — a purely additive
-	// field stays on this version, since the fallbacks do handle that case.
-	dbFormatVersion = 1
+	//
+	// v3 is the generation-manifest model (docs/MANIFEST-SPEC.md): the root
+	// shrank to {v, m, t}, object names are listed rather than derived, and the
+	// operator's configuration moved to config.gz. A v1 store is READ (so the
+	// tools work on one that no locked session has touched yet) and MIGRATED by
+	// the first locked session — see root.go.
+	//
+	// ⚠ THREE, not the two the spec's §4.1 example prints, and the reason is the
+	// one thing about this cutover worth remembering. The dual-write release
+	// (S32/S33) shipped manifests stamped `v:2` whose `names` used a
+	// TRANSITIONAL encoding — kind-lettered tail strings, a string array of
+	// delta keys, `hsum.key`. The cutover replaced that encoding with opaque
+	// stems. A reader from that release parses a v2 root happily and then reads
+	// the new `names` as "no delta segments, no tails, no summaries", which on
+	// any store with a live delta chain is a hard error with an internal
+	// message — NOT the clean version-reject the rollout plan is built on.
+	// Stamping 3 makes that reader stop at the ROOT, before it fetches anything,
+	// with "This reader is older than the store — reload to update." A version
+	// number that says "the bytes changed incompatibly" is the whole point of
+	// having one; two incompatible changes need two numbers.
+	dbFormatVersion = 3
 	// idxPackSize is the idx split threshold: entries per finalized pack.
 	idxPackSize = 50000
 	// metaPackSize is the meta/ split threshold: entries per finalized meta
@@ -140,17 +160,15 @@ func gunzip(r io.Reader) ([]byte, error) {
 type DB struct {
 	store.Backend
 	core DBCore
-	// seen is the persistent dedup pool (seen.gz ping/pong slots), loaded by
-	// NewDB (empty when absent/corrupt) and written by SyncSeen BEFORE Commit
-	// (see DBCore.SeenFlag). Backend-only; the reader never sees it. Always
+	// seen is the persistent dedup pool, loaded by NewDB from the seen object
+	// the manifest names (empty when absent/corrupt) and written by SyncSeen
+	// under a fresh stem. Backend-only; the reader never sees it. Always
 	// non-nil after NewDB.
 	seen *seenPool
-	// seenSlot is the store key of the dedup sidecar slot the manifest should
-	// name: the slot loadSeen actually read, or the one SyncSeen just wrote.
-	// Empty when no slot exists yet (a fresh store, or one whose active slot
-	// was unreadable and fell back to a sibling/legacy object) — the manifest
-	// then names none, so every name it lists exists (invariant M4).
-	seenSlot string
+	// legacyReap holds the pre-cutover objects migrateRoot superseded and that
+	// no manifest will ever name (the db/ snapshot series, the retired seen
+	// ping/pong slots). Removed after the root flip, warn-only — see reapLegacy.
+	legacyReap []string
 	// configAtOpen is the config-sidecar projection of the db.gz this handle
 	// loaded. Commit compares against it to decide whether this session changed
 	// configuration, so config.gz is rewritten only on a real config mutation
@@ -167,11 +185,11 @@ type DB struct {
 	// batch) when PutArticles consolidated the tail this cycle, else nil
 	// (cleared at every PutArticles entry). SyncMeta's fast path consumes it so
 	// a consolidation cycle builds its meta entries from memory instead of
-	// re-reading the packs just written; prevTailGen is the tail generation the
+	// re-reading the packs just written; prevMetaTail is the meta tail key the
 	// consolidation superseded — SyncMeta's read-back candidate for the
-	// previous meta tail name.
+	// previous meta tail.
 	consolidated []ArticleData
-	prevTailGen  int
+	prevMetaTail string
 	// deltaMemo caches the parsed live delta chain (plus each entry's verbatim
 	// JSONL line bytes) for the duration of one cycle, keyed on (Seq, NumDeltas)
 	// — the write-once delta names make that pair pin the chain content exactly,
@@ -193,56 +211,39 @@ type deltaChain struct {
 	Lines [][]byte
 }
 
-// DBCore is the legacy db.gz object — the store's whole committed state, one
-// JSON document. It is deliberately assembled by EMBEDDING the four groups the
-// generation-manifest model (docs/MANIFEST-SPEC.md §5.1) splits it into, so the
-// split is structural in Go while the wire shape stays exactly what every
-// deployed reader parses today: encoding/json flattens anonymous struct fields,
-// so db.gz carries the identical key set with the identical tags.
+// DBCore is the store's in-memory state. It is NOT a wire type: nothing
+// serializes it. The generation-manifest model (docs/MANIFEST-SPEC.md §5.1)
+// splits what used to be one db.gz object across three published objects, and
+// DBCore is assembled by EMBEDDING exactly those groups so a field cannot drift
+// from the object that carries it:
 //
-// The groups, and where each goes at the S34 cutover:
-//
-//   - RootState     → the v2 root db.gz (§4.1), the ~60-byte pointer.
-//   - ManifestState → the immutable manifest body (§4.2).
-//   - StoreConfig   → the backend-only config.gz sidecar (§4.3).
-//   - WriterState   → part rides the manifest as writer state (§4.4,
-//     ManifestWriterState), part is retired outright (§5.1: seq, sf, next_pid,
-//     gen, hdrs, mp, nd — the counters whose only job is to let a reader DERIVE
-//     names the manifest will list explicitly).
+//   - Version / ManifestNum → the root db.gz (§4.1), the ~60-byte pointer.
+//   - ManifestState         → the immutable manifest body (§4.2).
+//   - ManifestWriterState   → writer-private state, also on the manifest (§4.4).
+//   - Names                 → the manifest's explicit object-name table (§4.5).
+//   - StoreConfig           → the backend-only config.gz sidecar (§4.3).
 //
 // Feeds hangs off DBCore rather than off a group because a feed itself splits
 // (§5.2): its reader-facing half projects to the manifest (feedPublicOf) and
 // its config half to the sidecar (feedConfigOf).
-//
-// S32 writes this object unchanged — the manifest and the sidecar are written
-// IN ADDITION — so deleting every manifest/* and config.gz from a store leaves
-// it fully functional under the legacy paths.
 type DBCore struct {
-	RootState
+	// Version is the store format version this state was loaded at
+	// (dbFormatVersion once Commit has stamped it).
+	Version int
+	// ManifestNum names the current generation manifest, manifest/<m>.gz.
+	ManifestNum int
 	ManifestState
 	StoreConfig
-	WriterState
-	Feeds map[int]*Feed `json:"feeds"`
-}
+	ManifestWriterState
+	// Names is the explicit object-name table (names.go): the reason `seq`,
+	// `nd`, `hdrs`, `mp` and `gen` no longer exist.
+	Names *ManifestNames
+	Feeds map[int]*Feed
 
-// RootState is what db.gz shrinks to at S34: {v, m, t}. Under S32 `v` and `m`
-// ride the full legacy object (`t` is ManifestState.FetchedAt, which the v2
-// root will carry as `t`).
-type RootState struct {
-	// Version is the db.gz schema version (dbFormatVersion). Stamped by every
-	// Commit; NewDB refuses to open a store written by a newer srr rather than
-	// silently dropping the fields it cannot represent. omitempty: absent == 0
-	// == a store written before the field existed, which is readable as-is.
-	Version int `json:"v,omitempty"`
-	// ManifestNum is the store-wide manifest counter: the current generation
-	// manifest is manifest/<ManifestNum>.gz (docs/MANIFEST-SPEC.md §4.1). Bumped
-	// by exactly 1 per publishing Commit and never reused (invariant M2/M3).
-	// Purely additive to db.gz — an older reader ignores it, which is what keeps
-	// this release readable by every deployed reader — and it is already the
-	// field the v2 root is built around, so S34 is a deletion of everything
-	// else, not a rename. omitempty; absent == 0 == a store no S32+ binary has
-	// committed yet (no manifest published).
-	ManifestNum int `json:"m,omitempty"`
+	// legacyRoot / legacyKeys are set only while a pre-cutover store is open
+	// and the first locked session has not migrated it yet (root.go).
+	legacyRoot *legacyCore
+	legacyKeys []legacyObject
 }
 
 // ManifestState is the reader-visible half of the committed state: exactly what
@@ -313,9 +314,17 @@ type StoreConfig struct {
 
 // ManifestWriterState is the writer-private bookkeeping that rides the manifest
 // (§4.4): one object describes one store state, completely. Manifest embeds it,
-// so these four fields reach the manifest by construction.
+// so these fields reach the manifest by construction.
 type ManifestWriterState struct {
 	PackOffset int `json:"pack_off"`
+	// NextPackID is the POSITION the data series' tail occupies — the value
+	// every idx header's packId_base and every idx footer boundary is stated
+	// in, and the writer's cursor while a consolidation rolls data packs. It is
+	// deliberately kept even though the name list also implies it (the tail's
+	// position), for the same reason `na` and `mt` are kept: it is redundant
+	// state that `srr inspect --validate` cross-checks (M5), and a positional
+	// cursor is not a name — nothing derives a key from it.
+	NextPackID int `json:"next_pid"`
 	// DeltaBytes is writer-only trigger state: cumulative uncompressed JSONL
 	// bytes across the live deltas (reset at consolidation), driving the
 	// --max-delta-bytes consolidation trigger without re-reading the chain. On
@@ -340,74 +349,13 @@ type ManifestWriterState struct {
 	Inbox map[string]int64 `json:"inbox,omitempty"`
 }
 
-// WriterState is the writer-private half of db.gz. ManifestWriterState (nested,
-// so it flattens into the same JSON) rides the manifest; everything declared
-// directly on WriterState is a NAME-DERIVATION counter that the manifest's
-// explicit name lists retire outright at S34 (§5.1). Nothing here is read by
-// the frontend or the service worker except through names it derives today.
-type WriterState struct {
-	ManifestWriterState
-	// Seq is the latest-pack generation: the current latest packs are
-	// idx/L<Seq>.gz and data/L<Seq>.gz. 0 = empty store (no latest packs
-	// yet); the first article batch publishes generation 1. PutArticles
-	// bumps it in memory only after both L<Seq+1> saves succeed, and Commit
-	// publishes it — so a generation name is never visible to readers
-	// before its content is complete, and never rewritten afterwards.
-	Seq int `json:"seq,omitempty"`
-	// SeenFlag names the active seen.gz slot: false ⇒ seen.0.gz, true ⇒
-	// seen.1.gz (seenSlotKey). Each dirty fetch writes the INACTIVE slot then
-	// flips this in the same Commit that publishes the article batch, so the
-	// batch and the pointer to its matching dedup state (bg + pool) become
-	// durable atomically — the same "db.gz names the current generation"
-	// contract as Seq/HdrPacks/MetaPacks. Backend-only; the frontend ignores it.
-	SeenFlag   bool `json:"sf,omitempty"`
-	NextPackID int  `json:"next_pid"`
-	// Gen is the store generation: bumped (srr gen --bump) after an in-place
-	// store rebuild reuses finalized pack ids with new bytes, so the frontend
-	// service worker can self-invalidate its cache-first pack cache. omitempty
-	// is safe: the reader treats an absent key as 0. Known hazard: an old
-	// binary (without this field) silently drops it on its next Commit (plain
-	// json.Unmarshal) — accepted for a single-operator deployment.
-	Gen int `json:"gen,omitempty"`
-	// HdrPacks is the idx header-summary coverage: idx/h<HdrPacks>.gz holds
-	// the verbatim variable-length headers of finalized idx packs 0..HdrPacks-1
-	// (each idxHeaderPrefix + numSlots*4 bytes).
-	// SyncIdxSummary sets it only after the summary save succeeds and Commit
-	// publishes it (write-once name, same crash argument as Seq). Same
-	// old-binary hazard as Gen: a binary without this field drops it on its
-	// next Commit — readers then fall back to eager idx loading until the
-	// next fetch with a new binary rebuilds the summary.
-	HdrPacks int `json:"hdrs,omitempty"`
-	// MetaPacks is the derived meta-shard coverage: meta/<n>.gz exists for n in
-	// [0, MetaPacks) and meta/s<MetaPacks>.gz concatenates their bloom prefixes.
-	// SyncMeta sets it only after every save succeeds and Commit publishes it
-	// (write-once names, same crash argument as Seq / HdrPacks). The reader
-	// offers search only when it equals numFinalizedMeta, and the list reads
-	// meta packs only when MetaPacks+MetaTail fully cover the store (else it
-	// falls back to the data/ source of truth).
-	MetaPacks int `json:"mp,omitempty"`
-	// NumDeltas is the live delta-segment count: data/d<g>.gz exists for every
-	// g in (tailGen, Seq], where tailGen = Seq − NumDeltas names the
-	// consolidated tail packs (idx|data|meta/L<tailGen>). Each delta holds one
-	// dirty cycle's whole batch as data-pack JSONL — the superset record every
-	// reader derives idx entries, meta cards, AND content from, so tail-region
-	// chrons never touch a pack. Consolidation (consolidateTail) folds the
-	// chain into the tail packs and resets this to 0 — which doubles as the
-	// upgrade bridge: absent == 0 == exactly the pre-delta "latest packs live
-	// at L<Seq>" layout, so old stores need no migration. omitempty.
-	NumDeltas int `json:"nd,omitempty"`
-	// GCLatestSwept is the low-water mark for GCLatest: the highest tail
-	// generation whose L<g>/d<g> names have been swept (deleted, or confirmed
-	// absent since Rm is silent on missing). GCLatest clears (GCLatestSwept,
-	// cutoff] and advances this ONLY over generations it actually cleared, so a
-	// missed/failed sweep or a lowered --max-deltas can never permanently strand
-	// a name below a fixed trailing window — the next advancing run resumes from
-	// exactly where the last one stopped. Writer-only trigger state like
-	// DeltaBytes (frontend/service-worker ignore it); BumpGen leaves it untouched
-	// (a rebuild reuses finalized names but the tail-generation names are
-	// unchanged, so the low-water stays valid). omitempty.
-	GCLatestSwept int `json:"gcs,omitempty"`
-}
+// The retired name-derivation counters (§5.1) used to live here: `seq`, `sf`,
+// `gen`, `hdrs`, `mp`, `nd` and `gcs`. Every one of them existed so a reader
+// could RECONSTRUCT the name of an object the writer already knew — which is
+// exactly what the manifest's explicit name lists (names.go) publish instead.
+// They are gone, along with the four GC window formulas and the eight
+// per-feature publish-order proofs they anchored. The one crash argument now
+// lives once, in manifest.go.
 
 // OutFeed declares one named syndication output: a rolling newest-N window of
 // articles from the union of matching tags and explicit feed ids, serialised as
@@ -495,6 +443,9 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 	db := &DB{
 		Backend: backend,
 		locked:  locked,
+		// A store with no db.gz at all is a fresh v2 store: an empty name table
+		// and no feeds. parseStoreRoot replaces both when a root is present.
+		core: DBCore{Names: newManifestNames(), Feeds: map[int]*Feed{}},
 	}
 
 	if locked {
@@ -504,6 +455,10 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 		}
 	}
 
+	// The root resolves through parseStoreRoot — the SINGLE root resolver,
+	// shared with the read-only tools, so the writer and the checkers can never
+	// disagree about what a store's objects are called. No db.gz at all is a
+	// fresh v2 store.
 	rc, err := db.Get(ctx, dbFileKey, true)
 	if err != nil {
 		db.Close(ctx)
@@ -516,17 +471,21 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 			db.Close(ctx)
 			return nil, fmt.Errorf("decompress %s: %w", dbFileKey, err)
 		}
-		if err := json.Unmarshal(data, &db.core); err != nil {
+		core, err := parseStoreRoot(data, func(key string) ([]byte, error) { return db.readGz(ctx, key) })
+		if err != nil {
 			db.Close(ctx)
-			return nil, fmt.Errorf("decode %s: %w", dbFileKey, err)
+			return nil, err
 		}
-		// Refuse a store from the future: this binary cannot represent fields it
-		// does not know, so opening it — even read-only, since any later Commit
-		// would write back the truncated core — is how skew silently loses data.
-		if db.core.Version > dbFormatVersion {
-			v := db.core.Version
+		db.core = *core
+	}
+
+	// The operator's configuration lives in the backend-only sidecar (§4.3);
+	// absence is legal and means all-defaults. A pre-cutover store carries it
+	// inline instead, and legacyCore.state() has already lifted it out.
+	if db.core.legacyRoot == nil {
+		if err := db.loadConfig(ctx); err != nil {
 			db.Close(ctx)
-			return nil, fmt.Errorf("%s was written by a newer srr (format v%d, this binary supports v%d) — refusing to open; update srr", dbFileKey, v, dbFormatVersion)
+			return nil, err
 		}
 	}
 
@@ -538,13 +497,6 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 	}
 
 	for id, ch := range db.core.Feeds {
-		// feed_id is a uint16 in each idx entry, so ids run [0, feedIDCeiling).
-		// An out-of-range id (hand-edited / migrated db.gz) would overflow the
-		// entry encoding mid-fetch. Reject it here with a clear message instead.
-		if id < 0 || id >= feedIDCeiling {
-			db.Close(ctx)
-			return nil, fmt.Errorf("feed id %d in %s out of range [0, %d]", id, dbFileKey, feedIDCeiling-1)
-		}
 		// An old feeds[]-only db.gz unmarshals to a feed with no top-level
 		// url (the legacy feeds key is ignored). Reject it clearly rather than
 		// silently fetch nothing.
@@ -555,22 +507,33 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 		ch.id = id
 	}
 
-	// The persistent dedup pool rides alongside db.gz. Missing/short/corrupt ⇒
-	// empty pool + WARN (loadSeen), never fails an open or loses an article —
-	// but since bg now lives in the sidecar too (see BoundaryGUIDs), a store
-	// that has already dropped its legacy inline "bg" degrades all the way to
-	// watermark-only dedup until the sidecar recovers, not bg-only as before
-	// the relocation. Hydrate each feed's seen.gz-backed HTTP validators
-	// (ETag/LastModified) and BoundaryGUIDs onto the in-memory feeds.
+	// The persistent dedup pool rides in the object the manifest names.
+	// Missing/short/corrupt ⇒ empty pool + WARN (loadSeen), never fails an open
+	// or loses an article — but since bg lives in the sidecar too (see
+	// BoundaryGUIDs), a store that lost it degrades all the way to
+	// watermark-only dedup until the sidecar refills. Hydrate each feed's
+	// sidecar-backed HTTP validators (ETag/LastModified) and BoundaryGUIDs onto
+	// the in-memory feeds.
 	db.seen = db.loadSeen(ctx)
 	db.seen.hydrateFeeds(db.core.Feeds)
 
-	// Snapshot the config projection of the db.gz just loaded, so Commit can
-	// tell a config mutation from an ordinary fetch cycle without re-reading
-	// anything (docs/MANIFEST-SPEC.md §4.3 / configChanged). Left nil on a store
-	// that has never published a manifest: the first S32 commit then bootstraps
-	// config.gz unconditionally.
-	if db.core.ManifestNum > 0 {
+	// The one-way cutover (docs/MANIFEST-SPEC.md §11 step 3): a pre-cutover
+	// store is migrated by the first LOCKED session that opens it, so everything
+	// downstream of this point speaks one layout. Read-only sessions resolve the
+	// derived name table in memory and publish nothing.
+	if locked && db.core.legacyRoot != nil {
+		if err := db.migrateRoot(ctx); err != nil {
+			db.Close(ctx)
+			return nil, fmt.Errorf("migrate store to format v%d: %w", dbFormatVersion, err)
+		}
+	}
+
+	// Snapshot the config projection this handle loaded, so Commit can tell a
+	// config mutation from an ordinary fetch cycle without re-reading anything
+	// (docs/MANIFEST-SPEC.md §4.3 / configChanged). Left nil for a store still on
+	// the pre-cutover root: its first commit then bootstraps config.gz
+	// unconditionally.
+	if db.core.legacyRoot == nil {
 		db.configAtOpen = db.snapshotConfig()
 	}
 	return db, nil
@@ -585,49 +548,20 @@ func (o *DB) Close(ctx context.Context) error {
 	return o.Backend.Close()
 }
 
-// BumpGen increments the store generation and resets every derived-series
-// coverage counter, keeping the bump-implies-reset invariant in one place:
-// an in-place rebuild reuses finalized pack names with new bytes, so the
-// published idx header summary and meta shards / bloom summary may hold
-// stale content. Zeroed coverage makes the next fetch rebuild them (a zero
-// MetaTail also marks the read-back tail untrusted); readers fall back to
-// eager idx loading and keep search disabled in the gap.
-func (o *DB) BumpGen() {
-	o.core.Gen++
-	o.core.HdrPacks = 0
-	o.core.MetaPacks = 0
-	o.core.MetaTail = 0
-	o.core.Head = nil
-	o.core.HeadBase = 0
-	// The delta chain fields (nd/na/dby) are deliberately NOT touched: the
-	// bump is a cache-invalidation signal, not a layout change, and zeroing nd
-	// would relocate the expected tail name from L<seq−nd> to L<seq> — a name
-	// that was never written, bricking every reader with a reload loop. A
-	// rebuild that consolidates the chain must update the chain fields itself,
-	// the same operator discipline as recomputing add_idx/xp.
-	// A rebuild reuses finalized pack names with new bytes, and the CDN edge
-	// caches those names under a year-long immutable TTL — the store-side
-	// reset above cannot reach that cache, only an operator purge can.
-	slog.Warn("gen bumped: if a CDN edge cache fronts this store (cdn.llera.eu), purge it now — cached packs under reused names serve stale bytes until then")
-}
-
-// Commit publishes the store state. Under the generation-manifest model
-// (docs/MANIFEST-SPEC.md §6.1) it is three steps in a fixed order:
+// Commit publishes the store state (docs/MANIFEST-SPEC.md §6.1): three steps in
+// a fixed order.
 //
 //  1. the config sidecar, when this session changed configuration and the
 //     change is not a removal (§6.4 — see below);
-//  2. the immutable manifest naming everything this generation holds,
+//  2. the immutable manifest naming every object this generation holds,
 //     exclusive-create so a racing writer aborts before it can flip the root
 //     (§6.2);
-//  3. the root flip — today's AtomicPut of the full legacy db.gz.
+//  3. the root flip — an AtomicPut of the ~60-byte {v, m, t} pointer.
 //
 // A crash anywhere before step 3 leaves unreferenced objects and changes
-// nothing a reader can observe. Steps 1 and 2 are FATAL: the manifest is the
-// object the whole model is built on, and its exclusive-create is worth nothing
-// if a failure is shrugged off. What stays true regardless is that no deployed
-// reader looks at either object — deleting every manifest/* and config.gz from
-// a store leaves it fully functional on the legacy path, which is the property
-// S32 is not allowed to break.
+// nothing a reader can observe. That is THE crash argument, for the whole
+// store, stated once in manifest.go; nothing else in this backend carries a
+// publish-order proof of its own any more.
 //
 // §6.4 ordering for the two-object mutations, both windows inert by §4.3:
 //
@@ -653,11 +587,15 @@ func (o *DB) Commit(ctx context.Context) error {
 		return err
 	}
 
-	buf, err := o.encodeCore()
+	body, err := gzipJSON(RootState{
+		Version:     dbFormatVersion,
+		ManifestNum: o.core.ManifestNum,
+		FetchedAt:   o.core.FetchedAt,
+	})
 	if err != nil {
 		return err
 	}
-	if err := o.AtomicPut(ctx, dbFileKey, buf, store.ObjectMeta{}); err != nil {
+	if err := o.AtomicPut(ctx, dbFileKey, bytes.NewReader(body), store.ObjectMeta{}); err != nil {
 		return err
 	}
 
@@ -666,47 +604,12 @@ func (o *DB) Commit(ctx context.Context) error {
 			slog.Warn("write config sidecar after removal", "error", err)
 		}
 	}
+	// Everything the cutover superseded and no manifest will ever name (the db/
+	// snapshot series, the retired seen ping/pong slots) goes now that its
+	// replacement is durable. Post-flip and warn-only, like every other
+	// reclamation step.
+	o.reapLegacy(context.WithoutCancel(ctx))
 	return nil
-}
-
-// encodeCore serialises the in-memory core exactly as Commit publishes it.
-// Shared with SnapshotDB so a snapshot is byte-identical to the db.gz it
-// copies (jsonEncode + gzip are deterministic for an unchanged core).
-func (o *DB) encodeCore() (*bytes.Buffer, error) {
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	enc := json.NewEncoder(gz)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(&o.core); err != nil {
-		return nil, err
-	}
-	if err := gz.Close(); err != nil {
-		return nil, err
-	}
-	return &buf, nil
-}
-
-// SnapshotDB publishes a write-once copy of the just-committed db.gz at
-// db/<tailGen>.gz. Commit always overwrites the one fixed key, so the store
-// keeps no history of it: the immutable packs survive any accident, but db.gz
-// carries the ~10 pointer fields (seq/nd/na/hdrs/mp/mt/gcs/next_pid/pack_off
-// plus every feed's add_idx/xp) that would otherwise have to be reconstructed
-// by hand after a botched rebuild, a bad `gen --bump`, or a fat-fingered
-// `feed rm`.
-//
-// RESTORE: copy the chosen snapshot over db.gz — e.g. for a local store,
-// `cp db/12.gz db.gz`; for S3, an `aws s3 cp` between the two keys. There is
-// deliberately no `srr restore` verb yet (see FINDINGS REL1 shape (b)).
-//
-// Called once per CONSOLIDATION cycle (~1 per --max-deltas dirty cycles), so
-// the write amplification is negligible; GCLatest sweeps old snapshots on the
-// same low-water cursor as the tail packs they describe.
-func (o *DB) SnapshotDB(ctx context.Context) error {
-	buf, err := o.encodeCore()
-	if err != nil {
-		return err
-	}
-	return o.AtomicPut(ctx, dbSnapshotKey(tailGen(&o.core)), buf, store.ObjectMeta{})
 }
 
 func (o *DB) Feeds() map[int]*Feed {
@@ -748,7 +651,7 @@ func (o *DB) AddFeed(c *Feed) error {
 // automatic recovery: dropping the unconsolidated articles can't fix the
 // per-feed counts an unparseable chain can't be read for).
 func (o *DB) RemoveFeed(ctx context.Context, id int) error {
-	if o.core.NumDeltas > 0 {
+	if o.core.numDeltas() > 0 {
 		chain, err := o.loadDeltaChain(ctx)
 		if err != nil {
 			return fmt.Errorf("cannot remove feed %d: its delta chain must be verified first and reading it failed — repair the store, then retry: %w", id, err)

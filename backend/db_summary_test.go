@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -54,11 +53,11 @@ func TestSyncIdxSummaryAtBoundary(t *testing.T) {
 	if err := db.SyncIdxSummary(ctx); err != nil {
 		t.Fatalf("SyncIdxSummary: %v", err)
 	}
-	if db.core.HdrPacks != 1 {
-		t.Fatalf("HdrPacks = %d, want 1", db.core.HdrPacks)
+	if db.core.hdrPacks() != 1 {
+		t.Fatalf("HdrPacks = %d, want 1", db.core.hdrPacks())
 	}
 
-	sum := decompressGz(t, filepath.Join(dir, "idx/h1.gz"))
+	sum := decompressGz(t, filepath.Join(dir, db.core.Names.hsumKey()))
 	pack0 := decompressGz(t, filepath.Join(dir, "idx/0.gz"))
 	// The idx header is variable-length: the fixed prefix plus numSlots×4
 	// cumulative counts, dense up to the high-water feed id.
@@ -79,17 +78,17 @@ func TestSyncIdxSummaryNoopWhenCurrent(t *testing.T) {
 		t.Fatalf("SyncIdxSummary: %v", err)
 	}
 	// Remove the file; a no-op second call must not recreate it.
-	os.Remove(filepath.Join(dir, "idx/h1.gz"))
+	os.Remove(filepath.Join(dir, db.core.Names.hsumKey()))
 	if err := db.SyncIdxSummary(ctx); err != nil {
 		t.Fatalf("SyncIdxSummary (noop): %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "idx/h1.gz")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, db.core.Names.hsumKey())); !os.IsNotExist(err) {
 		t.Error("no-op SyncIdxSummary recreated the summary")
 	}
 }
 
 func TestSyncIdxSummaryBelowBoundaryNoop(t *testing.T) {
-	db, c, dir := setupTestDB(t)
+	db, c, _ := setupTestDB(t)
 	ch := &Feed{id: 1, URL: "https://example.com/1"}
 	c.Feeds = map[int]*Feed{ch.id: ch}
 	putOneArticle(t, db, ch, 1)
@@ -97,71 +96,11 @@ func TestSyncIdxSummaryBelowBoundaryNoop(t *testing.T) {
 	if err := db.SyncIdxSummary(ctx); err != nil {
 		t.Fatalf("SyncIdxSummary: %v", err)
 	}
-	if c.HdrPacks != 0 {
-		t.Errorf("HdrPacks = %d, want 0 below the boundary", c.HdrPacks)
+	if c.hdrPacks() != 0 {
+		t.Errorf("HdrPacks = %d, want 0 below the boundary", c.hdrPacks())
 	}
-	matches, _ := filepath.Glob(filepath.Join(dir, "idx/h*.gz"))
-	if len(matches) != 0 {
-		t.Errorf("unexpected summary files: %v", matches)
-	}
-}
-
-func TestGCSummariesGraceWindow(t *testing.T) {
-	db, c, dir := setupTestDB(t)
-
-	// Plant summary names directly; the sweep works on computed names only.
-	if err := os.MkdirAll(filepath.Join(dir, "idx"), 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	for g := 1; g <= 5; g++ {
-		if err := os.WriteFile(filepath.Join(dir, summaryKey(g)), []byte("x"), 0o644); err != nil {
-			t.Fatalf("WriteFile: %v", err)
-		}
-	}
-	c.HdrPacks = 5
-
-	if err := db.GCSummaries(ctx, 2); err != nil {
-		t.Fatalf("GCSummaries: %v", err)
-	}
-	for g := 1; g <= 2; g++ {
-		assertKey(t, dir, summaryKey(g), false)
-	}
-	for g := 3; g <= 5; g++ {
-		assertKey(t, dir, summaryKey(g), true)
-	}
-
-	// A second sweep on the same state is a no-op (Rm silent-on-missing).
-	if err := db.GCSummaries(ctx, 2); err != nil {
-		t.Fatalf("GCSummaries (idempotent): %v", err)
-	}
-}
-
-func TestGCSummariesEmptyStoreNoop(t *testing.T) {
-	db, _, _ := setupTestDB(t)
-	if err := db.GCSummaries(ctx, 2); err != nil {
-		t.Fatalf("GCSummaries on empty store: %v", err)
-	}
-}
-
-// hdrs is omitempty: absent from db.gz at 0 (readers treat absent as 0).
-func TestCommitHdrsOmitemptyWhenZero(t *testing.T) {
-	db, c, dir := setupTestDB(t)
-
-	if err := db.Commit(ctx); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
-	raw := string(decompressGz(t, filepath.Join(dir, "db.gz")))
-	if strings.Contains(raw, `"hdrs"`) {
-		t.Errorf("fresh db.gz should omit %q: %s", "hdrs", raw)
-	}
-
-	c.HdrPacks = 2
-	if err := db.Commit(ctx); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
-	raw = string(decompressGz(t, filepath.Join(dir, "db.gz")))
-	if !strings.Contains(raw, `"hdrs":2`) {
-		t.Errorf("db.gz missing %q: %s", `"hdrs":2`, raw)
+	if c.Names.HSum != nil {
+		t.Errorf("unexpected summary published: %s", c.Names.hsumKey())
 	}
 }
 
@@ -191,7 +130,7 @@ func TestInspectValidateSummaryOverclaim(t *testing.T) {
 	if err := db.SyncIdxSummary(ctx); err != nil {
 		t.Fatalf("SyncIdxSummary: %v", err)
 	}
-	db.core.HdrPacks = 2
+	db.core.Names.HSum.Covers = 2
 	if err := db.Commit(ctx); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}

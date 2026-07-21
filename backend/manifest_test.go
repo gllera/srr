@@ -43,8 +43,8 @@ func TestCommitPublishesManifestAndAdvancesCounter(t *testing.T) {
 			t.Fatalf("after commit %d: m=%d, want %d", want, core.ManifestNum, want)
 		}
 		man := readManifest(t, dir, want)
-		if man.Num != want || man.Version != manifestVersion {
-			t.Errorf("manifest %d: got {m:%d v:%d}, want {m:%d v:%d}", want, man.Num, man.Version, want, manifestVersion)
+		if man.Num != want || man.Version != dbFormatVersion {
+			t.Errorf("manifest %d: got {m:%d v:%d}, want {m:%d v:%d}", want, man.Num, man.Version, want, dbFormatVersion)
 		}
 	}
 }
@@ -94,23 +94,22 @@ func TestManifestMirrorsDBCoreState(t *testing.T) {
 	}
 }
 
-// TestManifestNamesRoundTrip pins the §4.5 encoding: RLE'd positional runs plus
-// the S32 legacy tail name, expanding back to the exact key list, and a series
-// map that survives (Un)MarshalJSON without hard-coding the three series.
+// TestManifestNamesRoundTrip pins the §4.5 encoding: RLE'd positional runs of
+// OPAQUE stems, an explicit tail position, and a series map that survives
+// (Un)MarshalJSON without hard-coding the three series.
 func TestManifestNamesRoundTrip(t *testing.T) {
-	in := ManifestNames{
-		Series: map[string]SeriesNames{
-			"idx":  {Runs: [][2]int{{0, 3}}, Tail: "idx/L9.gz"},
-			"data": {Base: 1, Runs: [][2]int{{1, 2}}, Tail: "data/L9.gz"},
-			// A series the code has never heard of must survive the round trip:
-			// ARC6 (merging idx/ and meta/) has to be a manifest-shape change
-			// and nothing else (§4.6).
-			"future": {Runs: [][2]int{{7, 1}}},
-		},
-		Deltas: []string{"data/d10.gz", "data/d11.gz"},
-		Seen:   "seen.1.gz",
-		HSum:   &SummaryName{Key: "idx/h3.gz", Covers: 3},
-	}
+	in := newManifestNames()
+	in.Series["idx"] = &SeriesNames{Stems: []int{0, 1, 2, 9}, Tail: 3}
+	in.Series["data"] = &SeriesNames{Base: 1, Stems: []int{1, 2, 9}, Tail: 3}
+	// A series the code has never heard of must survive the round trip: ARC6
+	// (merging idx/ and meta/) has to be a manifest-shape change and nothing
+	// else (§4.6).
+	in.Series["future"] = &SeriesNames{Stems: []int{7}, Tail: -1}
+	in.Deltas = DeltaNames{Series: dataSeries, Stems: []int{10, 11}}
+	in.Seen = &StemRef{Series: seenSeries, Stem: 4}
+	in.HSum = &SummaryName{Series: idxSeries, Stem: 12, Covers: 3}
+	in.Next = map[string]int{"idx": 13, "data": 12, "seen": 5}
+
 	b, err := json.Marshal(in)
 	if err != nil {
 		t.Fatal(err)
@@ -120,7 +119,7 @@ func TestManifestNamesRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(b, &flat); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"idx", "data", "future", "deltas", "seen", "hsum"} {
+	for _, k := range []string{"idx", "data", "future", "deltas", "seen", "hsum", "next"} {
 		if _, ok := flat[k]; !ok {
 			t.Errorf("names is missing key %q: %s", k, b)
 		}
@@ -128,33 +127,72 @@ func TestManifestNamesRoundTrip(t *testing.T) {
 	if _, ok := flat["ssum"]; ok {
 		t.Errorf("names carries an ssum it was never given: %s", b)
 	}
+	// Runs, not one integer per object: a pristine store's list is one run.
+	if !strings.Contains(string(b), `"r":[[0,3],[9,1]]`) {
+		t.Errorf("idx stems were not run-length encoded: %s", b)
+	}
 
 	var out ManifestNames
 	if err := json.Unmarshal(b, &out); err != nil {
 		t.Fatal(err)
 	}
-	if got := out.Series["idx"].Keys("idx"); !slices.Equal(got, []string{"idx/0.gz", "idx/1.gz", "idx/2.gz", "idx/L9.gz"}) {
+	keys := func(series string) []string {
+		s := out.Series[series]
+		got := make([]string, 0, len(s.Stems))
+		for i := range s.Stems {
+			k, err := out.key(series, s.Base+i)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, k)
+		}
+		return got
+	}
+	if got := keys("idx"); !slices.Equal(got, []string{"idx/0.gz", "idx/1.gz", "idx/2.gz", "idx/9.gz"}) {
 		t.Errorf("idx expansion = %v", got)
 	}
-	// data is based at 1 — the writer has never produced data/0 — so position 0
-	// is empty and the tail lands at position 3 (== NextPackID).
-	if got := out.Series["data"].Keys("data"); !slices.Equal(got, []string{"", "data/1.gz", "data/2.gz", "data/L9.gz"}) {
+	// data is based at 1 — the writer has never produced position 0 — so the
+	// tail lands at position 3 (== NextPackID).
+	if got := keys("data"); !slices.Equal(got, []string{"data/1.gz", "data/2.gz", "data/9.gz"}) {
 		t.Errorf("data expansion = %v", got)
 	}
-	if got := out.Series["future"].Keys("future"); !slices.Equal(got, []string{"future/7.gz"}) {
+	if out.tailKey("data") != "data/9.gz" {
+		t.Errorf("data tail = %q", out.tailKey("data"))
+	}
+	if got := keys("future"); !slices.Equal(got, []string{"future/7.gz"}) {
 		t.Errorf("unknown series did not survive: %v", got)
 	}
-	if out.Seen != "seen.1.gz" || out.HSum == nil || out.HSum.Covers != 3 || out.SSum != nil {
+	if out.Seen == nil || out.Seen.key() != "seen/4.gz" || out.HSum == nil || out.HSum.Covers != 3 || out.SSum != nil {
 		t.Errorf("singletons did not round-trip: %+v", out)
+	}
+	if out.Next["idx"] != 13 {
+		t.Errorf("stem counters did not round-trip: %v", out.Next)
 	}
 }
 
 // TestManifestNamesRejectsSeriesNameCollision pins the one ambiguity the flat
-// encoding could have: a pack series called "deltas"/"seen"/"hsum"/"ssum".
+// encoding could have: a pack series called "deltas"/"seen"/"hsum"/"ssum"/"next".
 func TestManifestNamesRejectsSeriesNameCollision(t *testing.T) {
-	_, err := json.Marshal(ManifestNames{Series: map[string]SeriesNames{"seen": {}}})
-	if err == nil {
+	n := newManifestNames()
+	n.Series["seen"] = &SeriesNames{}
+	if _, err := json.Marshal(n); err == nil {
 		t.Fatal("expected an error marshalling a series named after a reserved singleton key")
+	}
+}
+
+// TestManifestNamesRefusesHoles pins M5: positional density from the base is
+// what lets floor(chron/stride) index the list, so a gap must be refused rather
+// than silently listed.
+func TestManifestNamesRefusesHoles(t *testing.T) {
+	n := newManifestNames()
+	if err := n.putAt(idxSeries, 0, n.alloc(idxSeries)); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.putAt(idxSeries, 2, n.alloc(idxSeries)); err == nil {
+		t.Fatal("a hole at position 1 must be refused")
+	}
+	if _, err := n.key(idxSeries, 5); err == nil {
+		t.Fatal("an unlisted position must fail loudly, not fabricate a name")
 	}
 }
 
@@ -215,18 +253,18 @@ func TestPublishManifestOverwritesOrphan(t *testing.T) {
 	}
 }
 
-// TestGCManifestsLowWaterDrain pins §7's sweep: it clears (gcm, m−K] and
-// advances the low-water only over what it cleared, so nothing is ever
-// permanently stranded.
-func TestGCManifestsLowWaterDrain(t *testing.T) {
+// TestGCLowWaterDrain pins §7's ONE rule: delete what the last K manifests do
+// not name, as a low-water drain that advances only over what it cleared, so
+// nothing is ever permanently stranded.
+func TestGCLowWaterDrain(t *testing.T) {
 	db, core, dir := setupTestDB(t)
 	for range 6 {
 		if err := db.Commit(ctx); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// K=2 ⇒ cutoff 4: manifests 1..4 go, 5 and 6 stay.
-	if err := db.GCManifests(ctx, 2); err != nil {
+	// K=2 => cutoff 4: manifests 1..4 go, 5 and 6 stay.
+	if err := db.GC(ctx, 2); err != nil {
 		t.Fatal(err)
 	}
 	if core.GCManifest != 4 {
@@ -239,12 +277,45 @@ func TestGCManifestsLowWaterDrain(t *testing.T) {
 		}
 	}
 	// A second run with nothing new to do must not move the low-water.
-	if err := db.GCManifests(ctx, 2); err != nil {
+	if err := db.GC(ctx, 2); err != nil {
 		t.Fatal(err)
 	}
 	if core.GCManifest != 4 {
 		t.Errorf("idle sweep moved gcm to %d", core.GCManifest)
 	}
+}
+
+// TestGCReclaimsSupersededObjects is the other half of the one rule: an object
+// a superseded generation named and the window no longer does is deleted, and
+// one the window still names survives. Under opaque stems that is decidable by
+// name alone — no window arithmetic, no per-series formula.
+func TestGCReclaimsSupersededObjects(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	ch := &Feed{Title: "feed", URL: "https://example.com/f"}
+	if err := db.AddFeed(ch); err != nil {
+		t.Fatal(err)
+	}
+	putOneArticle(t, db, ch, 1)
+	if err := db.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	superseded := tailK(c, idxSeries)
+
+	putOneArticle(t, db, ch, 2)
+	if err := db.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	live := tailK(c, idxSeries)
+	if live == superseded {
+		t.Fatal("the tail name was reused — stems must never repeat")
+	}
+	assertKey(t, dir, superseded, true) // still inside the grace window
+
+	if err := db.GC(ctx, 0); err != nil { // K=0: only the current generation is reachable
+		t.Fatalf("GC: %v", err)
+	}
+	assertKey(t, dir, superseded, false)
+	assertKey(t, dir, live, true)
 }
 
 // TestConfigSidecarWrittenOnConfigChangeOnly pins the write gate: config.gz is
@@ -327,92 +398,160 @@ func TestConfigSidecarSelfHealsWhenDeleted(t *testing.T) {
 	}
 }
 
-// TestManifestAndConfigAreDeletable is the non-negotiable property of S32: the
-// two new objects are ADDITIVE. A store stripped of both must still open, read
-// and commit through the legacy path exactly as before.
-func TestManifestAndConfigAreDeletable(t *testing.T) {
-	db, core, dir := setupTestDB(t)
-	if err := db.AddFeed(&Feed{Title: "Alpha", URL: "https://a.example/feed", Recipe: "read"}); err != nil {
+// TestMigrationFromLegacyRoot is the one-way door, exercised: a store written
+// under the pre-cutover root must open, migrate on the first LOCKED session,
+// and come out the other side addressable purely through listed names — with
+// the retired db/ snapshots and seen ping/pong slots reaped.
+func TestMigrationFromLegacyRoot(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	ch := &Feed{Title: "Alpha", URL: "https://a.example/feed", Recipe: "read"}
+	if err := db.AddFeed(ch); err != nil {
 		t.Fatal(err)
 	}
-	core.FetchedAt = 1700000000
+	putOneArticle(t, db, ch, 1)
+	putOneArticle(t, db, ch, 2)
+	if err := db.SyncMeta(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
+	total, tail := c.TotalArticles, tailK(c, idxSeries)
 	db.Close(ctx)
 
+	// Rewrite the store into the pre-cutover shape: a v1 root carrying every
+	// legacy field, with the tail packs under their L<gen> names.
+	writeLegacyStore(t, dir, total)
+
+	// A READ-ONLY session must resolve the derived names in memory and publish
+	// nothing.
+	ro, err := NewDB(ctx, false)
+	if err != nil {
+		t.Fatalf("read-only open of a pre-cutover store: %v", err)
+	}
+	if ro.core.legacyRoot == nil {
+		t.Error("read-only open did not classify the store as pre-cutover")
+	}
+	if ro.core.TotalArticles != total {
+		t.Errorf("total_art = %d, want %d", ro.core.TotalArticles, total)
+	}
+	if got := tailK(&ro.core, idxSeries); got != "idx/L1.gz" {
+		t.Errorf("derived idx tail = %q, want the legacy name", got)
+	}
+	ro.Close(ctx)
+
+	// The first LOCKED session migrates.
+	mig, err := NewDB(ctx, true)
+	if err != nil {
+		t.Fatalf("locked open of a pre-cutover store: %v", err)
+	}
+	if mig.core.legacyRoot != nil {
+		t.Error("the locked open did not migrate")
+	}
+	if err := mig.Commit(ctx); err != nil {
+		t.Fatalf("commit after migration: %v", err)
+	}
+	mig.Close(ctx)
+
+	raw := string(decompressGz(t, filepath.Join(dir, dbFileKey)))
+	if !strings.HasPrefix(raw, `{"v":3,"m":`) {
+		t.Errorf("root was not flipped to v2: %s", raw)
+	}
+	for _, gone := range []string{"db/1.gz", "seen.0.gz", "seen.1.gz"} {
+		if _, err := os.Stat(filepath.Join(dir, gone)); err == nil {
+			t.Errorf("%s survived the migration", gone)
+		}
+	}
+
+	// And the migrated store reads back through listed names only.
+	final, err := NewDB(ctx, false)
+	if err != nil {
+		t.Fatalf("reopen after migration: %v", err)
+	}
+	defer final.Close(ctx)
+	if final.core.TotalArticles != total {
+		t.Errorf("total_art after migration = %d, want %d", final.core.TotalArticles, total)
+	}
+	if final.core.Feeds[0].Recipe != "read" {
+		t.Error("the config sidecar did not adopt the legacy per-feed configuration")
+	}
+	newTail := tailK(&final.core, idxSeries)
+	if newTail == tail || strings.Contains(newTail, "/L") {
+		t.Errorf("idx tail = %q: the migration must republish it under an opaque stem", newTail)
+	}
+	if _, err := os.Stat(filepath.Join(dir, newTail)); err != nil {
+		t.Errorf("migrated idx tail %s is missing: %v", newTail, err)
+	}
+	fetch := func(key string) ([]byte, error) { return final.readGz(ctx, key) }
+	if issues := (&InspectCmd{}).checkManifest(fetch, &final.core); issues != 0 {
+		t.Errorf("migrated store: checkManifest reported %d issue(s)", issues)
+	}
+}
+
+// writeLegacyStore rewrites an already-built v2 store into the pre-cutover
+// shape: a v1 db.gz carrying every retired field, the tail packs renamed to
+// their L<gen> spellings, a db/ snapshot, and a seen ping/pong slot.
+func writeLegacyStore(t *testing.T, dir string, total int) {
+	t.Helper()
+	db, err := NewDB(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &db.core
+	l := legacyCore{
+		Version:       1,
+		FetchedAt:     c.FetchedAt,
+		TotalArticles: c.TotalArticles,
+		MetaTail:      c.MetaTail,
+		Head:          c.Head,
+		HeadBase:      c.HeadBase,
+		Recipes:       c.Recipes,
+		DedupDays:     c.DedupDays,
+		Out:           c.Out,
+		PackOffset:    c.PackOffset,
+		NextPackID:    c.NextPackID,
+		Seq:           1,
+		MetaPacks:     c.metaPacks(),
+		Feeds:         c.Feeds,
+	}
+	renames := [][2]string{
+		{tailK(c, idxSeries), "idx/L1.gz"},
+		{tailK(c, dataSeries), "data/L1.gz"},
+	}
+	if k := tailK(c, metaSeries); k != "" {
+		renames = append(renames, [2]string{k, "meta/L1.gz"})
+	}
+	if c.Names.Seen != nil {
+		renames = append(renames, [2]string{c.Names.Seen.key(), "seen.0.gz"})
+	}
+	db.Close(ctx)
+
+	for _, r := range renames {
+		if err := os.Rename(filepath.Join(dir, r[0]), filepath.Join(dir, r[1])); err != nil {
+			t.Fatalf("rename %s -> %s: %v", r[0], r[1], err)
+		}
+	}
 	if err := os.RemoveAll(filepath.Join(dir, "manifest")); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(filepath.Join(dir, configFileKey)); err != nil {
 		t.Fatal(err)
 	}
-
-	reopened, err := NewDB(ctx, false)
-	if err != nil {
-		t.Fatalf("a store without manifest/ or config.gz must still open: %v", err)
-	}
-	defer reopened.Close(ctx)
-	if reopened.core.FetchedAt != 1700000000 || len(reopened.core.Feeds) != 1 {
-		t.Errorf("legacy db.gz did not survive the deletion: %+v", reopened.core)
-	}
-	if reopened.core.Feeds[0].Recipe != "read" {
-		t.Error("configuration is still owned by db.gz in S32 and must survive config.gz deletion")
-	}
-	if err := reopened.Commit(ctx); err != nil {
-		t.Fatalf("commit on a stripped store: %v", err)
-	}
-}
-
-// TestLegacyDBGzShapeUnchanged is the deployed-reader guarantee, stated as a
-// key-set assertion: db.gz still carries exactly the fields it did before the
-// DBCore split, plus only the deliberately additive `m`. Anything else here is
-// a change a deployed reader could notice.
-func TestLegacyDBGzShapeUnchanged(t *testing.T) {
-	db, core, dir := setupTestDB(t)
-	core.Seq, core.SeenFlag, core.HdrPacks, core.MetaPacks, core.MetaTail = 3, true, 1, 2, 4
-	core.NumDeltas, core.DeltaArticles, core.DeltaBytes, core.GCLatestSwept = 1, 5, 6, 7
-	core.Gen, core.TotalArticles, core.NextPackID, core.PackOffset, core.FetchedAt = 8, 9, 10, 11, 12
-	core.HeadBase, core.Head = 13, []MetaEntry{{FeedID: 0, When: 1}}
-	core.DedupDays, core.Inbox = 14, map[string]int64{"p": 15}
-	core.Out = []OutFeed{{Name: "n", Format: "rss"}}
-	if err := db.Commit(ctx); err != nil {
+	// A db/ snapshot the cutover must reap by name (§10.1).
+	if err := os.MkdirAll(filepath.Join(dir, "db"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-
-	raw, err := os.ReadFile(filepath.Join(dir, dbFileKey))
+	if err := os.WriteFile(filepath.Join(dir, "db/1.gz"), []byte("stale snapshot"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	body, err := gzipJSON(l)
 	if err != nil {
 		t.Fatal(err)
 	}
-	gz, err := gzip.NewReader(bytes.NewReader(raw))
-	if err != nil {
+	if err := os.WriteFile(filepath.Join(dir, dbFileKey), body, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	body, err := readAllString(gz)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var got map[string]any
-	if err := json.Unmarshal([]byte(body), &got); err != nil {
-		t.Fatal(err)
-	}
-	want := []string{
-		"v", "m", "seq", "sf", "fetched_at", "total_art", "next_pid", "pack_off", "gen",
-		"hdrs", "mp", "mt", "nd", "na", "dby", "gcs", "inbox", "recipes", "dd", "feeds",
-		"out", "head", "hb",
-	}
-	for _, k := range want {
-		if _, ok := got[k]; !ok {
-			t.Errorf("db.gz lost key %q — deployed readers parse it", k)
-		}
-		delete(got, k)
-	}
-	for k := range got {
-		// gcm is the one other addition, and like m it is omitempty writer state.
-		if k != "gcm" {
-			t.Errorf("db.gz carries unexpected key %q", k)
-		}
-	}
+	_ = total
 }
 
 func readAllString(r interface{ Read([]byte) (int, error) }) (string, error) {

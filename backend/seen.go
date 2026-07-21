@@ -50,16 +50,6 @@ const (
 	seenRowLen = 2 + 2 + 4
 )
 
-// seenSlotKey returns the store key of the seen slot named by flag: false ⇒
-// seen.0.gz, true ⇒ seen.1.gz. The active slot is seenSlotKey(core.SeenFlag);
-// a dirty cycle writes seenSlotKey(!core.SeenFlag) then flips the flag.
-func seenSlotKey(flag bool) string {
-	if flag {
-		return "seen.1.gz"
-	}
-	return "seen.0.gz"
-}
-
 // seenPool is the in-memory pool: one flat map keyed feed_id<<32 | hash →
 // when_seen (absolute unix-day). Reads (has) are lock-free — the pool is the
 // cycle-start snapshot, immutable during the concurrent feed fan-out; stamps
@@ -71,14 +61,7 @@ type seenPool struct {
 	// pool; SyncSeen skips the store write when it is false (most --interval
 	// cycles are all-304 no-ops), and clears it after a successful write.
 	dirty bool
-	// fromLegacy marks a pool loaded off the pre-ping-pong single seen.gz
-	// (the upgrade bridge): once SyncSeen has made it durable in a slot, it
-	// reaps the legacy object — otherwise the superseded file sits in the
-	// store forever (and would even resurface as a very stale fallback if
-	// both slots ever corrupted). loadSeen sets dirty alongside it so the
-	// first locked cycle completes the migration even when all-304 idle.
-	fromLegacy bool
-	m          map[uint64]uint16
+	m     map[uint64]uint16
 	// feed holds each feed's persisted backend-only fetch/dedup state: the HTTP
 	// conditional-fetch validators (ETag / Last-Modified) plus (from format
 	// version 2) the BoundaryGUIDs dedup window (bg). These used to ride in the
@@ -442,44 +425,39 @@ func readLenPrefixed(data []byte, pos int) (string, int, error) {
 	return string(data[pos : pos+n]), pos + n, nil
 }
 
-// loadSeen reads the active seen slot named by core.SeenFlag. A missing/corrupt
-// active slot falls back to the sibling slot (the previous ping/pong generation,
-// at most one cycle stale — a bounded re-fetch/re-dup, never a mass duplicate),
-// then to the pre-ping-pong legacy seen.gz (upgrade bridge), then to an empty
-// pool. gzip's trailer CRC32 + parseSeen's structural checks are the corruption
-// detector; the sibling slot is the recovery. Always returns a non-nil clean pool.
+// loadSeen reads the dedup sidecar the manifest names. The two-slot ping/pong
+// and its `sf` flag are retired (docs/MANIFEST-SPEC.md §10.2): the sidecar is a
+// manifest-named immutable object like everything else, so "the article batch
+// and the dedup state that produced it become durable together" falls out of
+// the one root flip with no flag and no slot arithmetic. The guarded-load
+// ladder collapses to "read the name the manifest gives"; a corrupt object
+// degrades to an empty pool, i.e. watermark-only dedup for one cycle, never an
+// article loss. Always returns a non-nil clean pool.
 func (o *DB) loadSeen(ctx context.Context) *seenPool {
-	active := seenSlotKey(o.core.SeenFlag)
-	sibling := seenSlotKey(!o.core.SeenFlag)
-	if p, ok := o.tryLoadSeen(ctx, active); ok {
-		// The active slot exists and parses, so the manifest may name it
-		// (docs/MANIFEST-SPEC.md M4: every listed name exists). Any fallback
-		// below leaves seenSlot empty — the sibling/legacy object is not what
-		// core.SeenFlag names, and naming a key we could not read would be a
-		// claim we cannot back.
-		o.seenSlot = active
-		return p
+	key := ""
+	if o.core.Names != nil && o.core.Names.Seen != nil {
+		key = o.core.Names.seenKey()
+	} else if o.core.legacyRoot != nil {
+		// A pre-cutover store still carries its active ping/pong slot; the
+		// migration rewrites the pool under a fresh stem and reaps both.
+		key = legacySeenSlotKey(o.core.legacyRoot.SeenFlag)
 	}
-	// The active slot is missing or corrupt: fall back to the previous
-	// generation (sibling) — a real recovery, so WARN — then to the pre-ping-pong
-	// single seen.gz as a one-time upgrade bridge — expected once, so INFO.
-	if p, ok := o.tryLoadSeen(ctx, sibling); ok {
-		slog.Warn("active seen slot unreadable; recovered from sibling slot", "active", active, "sibling", sibling)
-		return p
+	if key != "" {
+		if p, ok := o.tryLoadSeen(ctx, key); ok {
+			return p
+		}
 	}
-	if p, ok := o.tryLoadSeen(ctx, seenLegacyKey); ok {
-		slog.Info("migrating legacy seen.gz into ping/pong slots", "legacy", seenLegacyKey)
-		// Force the first locked cycle to finish the migration even when it is
-		// an all-304 no-op: dirty makes SyncSeen write a slot, and fromLegacy
-		// makes it reap the superseded legacy object once the slot is durable.
-		// Without this an idle store re-reads (and re-logs) the legacy forever
-		// and the stale file is stranded in the store.
-		p.dirty = true
-		p.fromLegacy = true
-		return p
+	if o.core.legacyRoot != nil {
+		for _, fallback := range []string{legacySeenSlotKey(!o.core.legacyRoot.SeenFlag), seenLegacyKey} {
+			if p, ok := o.tryLoadSeen(ctx, fallback); ok {
+				slog.Warn("pre-cutover seen slot unreadable; recovered from a sibling object", "key", key, "recovered", fallback)
+				p.dirty = true
+				return p
+			}
+		}
 	}
-	if o.core.Seq > 0 { // a store that has committed a batch should have a slot
-		slog.Warn("no readable seen slot; using empty pool (watermark-only dedup until the sidecar refills)")
+	if o.core.TotalArticles > 0 { // a store that has committed a batch should have one
+		slog.Warn("no readable seen sidecar; using empty pool (watermark-only dedup until it refills)", "key", key)
 	}
 	return newSeenPool()
 }
@@ -505,30 +483,26 @@ func (o *DB) tryLoadSeen(ctx context.Context, key string) (*seenPool, bool) {
 	return p, true
 }
 
-// SyncSeen persists the pool to the INACTIVE seen slot, then flips
-// core.SeenFlag so the caller's Commit publishes the pointer to it — making the
-// dedup state (pool + bg) atomic with the article batch. It first pulls every
-// live feed's validators + bg into the pool (snapshotHTTP). Write-if-dirty: an
-// idle cycle writes nothing and does NOT flip, so db.gz keeps naming the still-
-// valid active slot. Runs BEFORE Commit; its failure is fatal to the cycle
-// (returned, not warned) — bg is load-bearing now, so a committed article batch
-// must never outrun the slot that dedups its GUIDs. On failure the flag is NOT
-// flipped (nothing to point at) and the caller aborts the commit.
+// SyncSeen persists the pool under a FRESH stem in the seen series and records
+// the name, so the manifest the caller's Commit publishes points at exactly the
+// dedup state that produced this cycle's batch. It first pulls every live
+// feed's validators + bg into the pool (snapshotHTTP). Write-if-dirty: an idle
+// cycle writes nothing and leaves the name alone.
+//
+// It runs before Commit and its failure is fatal to the cycle (returned, not
+// warned) — bg is load-bearing, so a committed batch must never outrun the
+// object that dedups its GUIDs. There is no ordering proof here beyond the
+// universal one (§6.1): a new immutable object, then the manifest naming it,
+// then the root flip.
 func (o *DB) SyncSeen(ctx context.Context) error {
 	if o.seen == nil {
 		return nil
 	}
 	o.seen.snapshotHTTP(o.core.Feeds)
 	if !o.seen.dirty {
-		// A pending reap still retries on an idle cycle: the slot that
-		// superseded the legacy object went durable on an EARLIER call in this
-		// process (that is what cleared dirty), so deleting it now is safe.
-		// Without this the retry was unreachable — every later SyncSeen returns
-		// here.
-		o.reapLegacySeen(ctx)
 		return nil
 	}
-	inactive := seenSlotKey(!o.core.SeenFlag)
+	ref := StemRef{Series: seenSeries, Stem: o.core.Names.alloc(seenSeries)}
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	if _, err := gz.Write(o.seen.marshal()); err != nil {
@@ -537,45 +511,17 @@ func (o *DB) SyncSeen(ctx context.Context) error {
 	if err := gz.Close(); err != nil {
 		return err
 	}
-	if err := o.AtomicPut(ctx, inactive, &buf, store.ObjectMeta{}); err != nil {
+	if err := o.AtomicPut(ctx, ref.key(), &buf, store.ObjectMeta{}); err != nil {
 		return err
 	}
-	o.core.SeenFlag = !o.core.SeenFlag // now names the slot we just wrote
-	o.seenSlot = inactive              // ...and so may the manifest this cycle publishes
+	o.core.Names.Seen = &ref
 	o.seen.dirty = false
-	o.reapLegacySeen(ctx)
 	return nil
 }
 
-// reapLegacySeen deletes the pre-ping-pong single seen.gz once the pool that
-// was bridged out of it is durable in a slot — even if the caller's Commit
-// never publishes the flag flip, loadSeen's sibling fallback finds the slot
-// just written, so the legacy object is superseded either way. No-op unless a
-// migration actually happened on this handle.
-//
-// Warn-only, and the flag is cleared only on success so a transient error
-// retries on a later cycle of THIS process. Be aware of the limit: `loadSeen`
-// takes its legacy branch only when neither slot is readable, which cannot
-// happen once a slot is durable, so a failure that outlives the process leaves
-// the object behind for good. That is an accepted residue — it is one small
-// object, no code path reads it again, and the store has no List for anything
-// to trip over it — not a guarantee of eventual cleanup.
-func (o *DB) reapLegacySeen(ctx context.Context) {
-	if o.seen == nil || !o.seen.fromLegacy {
-		return
-	}
-	if err := o.Rm(ctx, seenLegacyKey); err != nil {
-		slog.Warn("remove migrated legacy seen.gz", "error", err)
-		return
-	}
-	o.seen.fromLegacy = false
-}
-
-// commitState persists the seen sidecar (inactive slot + flag flip via SyncSeen)
-// and THEN publishes db.gz (Commit), used by the feed-mutation commands. The seen
-// write is fatal and precedes Commit, so db.gz never commits a SeenFlag naming a
-// slot we failed to write. A setFeedURL reset (cleared validators + bg) thus
-// reaches the sidecar atomically with the config change.
+// commitState persists the seen sidecar and THEN publishes the store state,
+// used by the feed-mutation commands. A setFeedURL reset (cleared validators +
+// bg) thus reaches the sidecar atomically with the config change.
 func (o *DB) commitState(ctx context.Context) error {
 	if err := o.SyncSeen(ctx); err != nil {
 		return fmt.Errorf("sync seen pool: %w", err)

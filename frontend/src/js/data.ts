@@ -20,7 +20,7 @@ import {
    type IdxPack,
    type TallyFeed,
 } from "./idx"
-import { keyAt, legacyNames, manifestNames, MANIFEST_ROOT_VERSION, type IManifestWire, type StoreNames } from "./names"
+import { keyAt, legacyNames, manifestNames, type IManifestWire, type StoreNames } from "./names"
 
 export { IDX_PACK_SIZE, META_PACK_SIZE }
 
@@ -138,14 +138,6 @@ function assertPackOk(res: Response, isLatest: boolean): void {
 // {v, m, t} the S34 cutover shrinks it to.
 type IRootWire = Partial<IDBWire> & { t?: number }
 
-// The highest root version this reader understands. It is deliberately ABOVE
-// DB_FORMAT_VERSION: that generated constant is what the current WRITER
-// stamps (1 until S34 bumps dbFormatVersion), while this build already parses
-// the v2 manifest-indirection root that cutover will emit. Reader-first deploy
-// discipline (docs/MANIFEST-SPEC.md §11 step 2) is exactly that asymmetry —
-// ship and deploy the reader that can read v2, THEN flip the writer.
-const MAX_ROOT_VERSION = Math.max(DB_FORMAT_VERSION, MANIFEST_ROOT_VERSION)
-
 // One in-flight-or-resolved manifest, keyed by its generation number. Manifest
 // names are write-once, so this can never go stale; it exists so an unchanged
 // poll (refresh() re-parses the root every 5 minutes) costs no second fetch.
@@ -166,9 +158,13 @@ function loadManifest(m: number): Promise<IManifestWire> {
       // entirely — refuse it rather than address every pack through the wrong
       // generation's name list.
       if (parsed.m !== m) throw new Error(`manifest/${m}.gz declares generation ${parsed.m}`)
-      if ((parsed.v ?? 0) > MANIFEST_ROOT_VERSION)
+      // One constant for the whole store format: the root and every manifest
+      // it names carry the same `v` (backend dbFormatVersion), because a root
+      // is a pointer into the manifest chain and neither is meaningful without
+      // the other.
+      if ((parsed.v ?? 0) > DB_FORMAT_VERSION)
          throw new Error(
-            `This reader is older than the store (manifest v${parsed.v}, supported v${MANIFEST_ROOT_VERSION}) — reload to update.`,
+            `This reader is older than the store (manifest v${parsed.v}, supported v${DB_FORMAT_VERSION}) — reload to update.`,
          )
       return parsed
    })
@@ -181,23 +177,19 @@ function loadManifest(m: number): Promise<IManifestWire> {
    return man
 }
 
-// The S33 selection rule — THE ROOT IS AUTHORITATIVE FOR WHAT IT CARRIES; the
+// The root selection rule — THE ROOT IS AUTHORITATIVE FOR WHAT IT CARRIES; the
 // manifest supplies only what the root omits (docs/MANIFEST-SPEC.md §8.1).
 //
-//   • A legacy-complete root takes today's path verbatim and never fetches a
-//     manifest. `total_art` is the probe: it is a non-omitempty key every
-//     legacy db.gz carries (even at 0), and the v2 root carries none of the
-//     manifest-sourced fields at all. So the S32 stores deployed right now —
-//     which DO carry `m` alongside every legacy field — behave byte-for-byte
-//     as they do today, and an operator who clears manifest/* (S32's rollback
-//     story) loses nothing.
-//   • A root carrying `m` and no legacy state follows the indirection.
+//   • A v2 root ({v, m, t}) follows the indirection.
+//   • A PRE-CUTOVER root — one whose writer has not migrated it yet — carries
+//     the full legacy document, and `total_art` is the probe: it is a
+//     non-omitempty key every such db.gz carries (even at 0), and a v2 root
+//     carries none of the manifest-sourced fields at all. Such a store is read
+//     through the derived names it was written with, never hard-errored.
 //
-// Two consequences the plan asks for, both structural rather than defensive:
-// S34's flip needs no reader redeploy (the predicate switches branch on the
-// bytes), and "a missing manifest on a store that still has the legacy fields
-// must fall back, not hard-error" holds by construction — such a store never
-// reaches the manifest fetch at all.
+// The predicate switches branch on the BYTES, not on a build flag, which is
+// what let this reader ship before the writer flipped and what lets it keep
+// reading a store the writer has not reached yet.
 function rootIsLegacy(raw: IRootWire): boolean {
    return raw.total_art !== undefined
 }
@@ -213,9 +205,9 @@ async function parseDb(res: Response): Promise<Snapshot> {
    // changed in ways this reader would misread, so say so plainly through the
    // error popup instead of rendering wrong (or crashing on a shifted field).
    // Absent v (0) is a store written before the field existed — readable.
-   if ((raw.v ?? 0) > MAX_ROOT_VERSION)
+   if ((raw.v ?? 0) > DB_FORMAT_VERSION)
       throw new Error(
-         `This reader is older than the store (format v${raw.v}, supported v${MAX_ROOT_VERSION}) — reload to update.`,
+         `This reader is older than the store (format v${raw.v}, supported v${DB_FORMAT_VERSION}) — reload to update.`,
       )
    const snap = rootIsLegacy(raw) ? fromLegacyRoot(raw) : await fromManifestRoot(raw)
    snap.db.feeds ??= {}
@@ -276,7 +268,6 @@ async function fromManifestRoot(raw: IRootWire): Promise<Snapshot> {
       next_pid: resolved.data.tail >= 0 ? resolved.data.tail : resolved.data.keys.length,
       hdrs: resolved.hsum?.covers ?? 0,
       mp: finalizedMeta,
-      gen: 0,
    }
    // The pack↔delta seam, cross-checked on the NAMING side before a single
    // pack is addressed: a store whose delta chain holds articles must name the
@@ -399,13 +390,13 @@ async function fetchDeltas(): Promise<IArticle[]> {
 }
 
 // refresh() re-fetches db.gz and re-runs the boot path when the store moved.
-// "unchanged" when the snapshot is byte-equivalent on the fields that matter:
-// fetched_at catches every fetch-cycle commit; gen independently catches an
-// in-place rebuild published by `srr gen --bump` (no fetch, so fetched_at
-// doesn't move); total_art/seq are cheap belt-and-braces. A gen change takes
-// the same path — everything derived is discarded anyway, and the SW's
-// checkManifest rides this same response, purging its buckets before our
-// subsequent pack refetches.
+// "unchanged" when the root names the same generation and reports the same
+// freshness: `m` moves on every publishing Commit and is the whole change
+// signal under a v2 root, while fetched_at/total_art/seq keep covering a
+// pre-cutover store. An in-place rebuild no longer needs a signal of its own —
+// it writes NEW names, so it moves `m` like everything else, which is exactly
+// what retired `gen`. The SW's checkManifest rides this same response,
+// reconciling its cache before our subsequent pack refetches.
 export async function refresh(): Promise<"unchanged" | "updated"> {
    const snap = await loadDb()
    const raw = snap.db
@@ -413,8 +404,7 @@ export async function refresh(): Promise<"unchanged" | "updated"> {
       (raw.m ?? 0) === (db.m ?? 0) &&
       raw.fetched_at === db.fetched_at &&
       raw.total_art === db.total_art &&
-      raw.seq === db.seq &&
-      (raw.gen ?? 0) === (db.gen ?? 0)
+      raw.seq === db.seq
    )
       return "unchanged"
    // applyDb swaps db first (fetchIdxPack and the finalized-count math read the
@@ -511,10 +501,9 @@ export function idxSummaryDegraded(): boolean {
    return nf > 0 && (db.hdrs ?? 0) > 0 && (db.hdrs ?? 0) < nf
 }
 
-// Fetches + gunzips one pack key. Every pack name is write-once (finalized
-// numeric, the L<seq> generation or h<N>/s<N> summary a db.gz commit
-// published), so the HTTP cache may serve them all without revalidation
-// (force-cache). Also used by the meta/ loaders (list + search): like the idx
+// Fetches + gunzips one pack key. Every pack name is write-once — a stem is
+// drawn from a counter that is never reused — so the HTTP cache may serve them
+// all without revalidation (force-cache). Also used by the meta/ loaders (list + search): like the idx
 // and data loaders, the latest meta pack passes isLatest=true so a 404 on a
 // stale-db.gz tab self-heals with one guarded reload; finalized meta shards
 // pass false (write-once, never GC'd). The "meta lagged" case is handled
