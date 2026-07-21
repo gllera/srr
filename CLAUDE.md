@@ -65,7 +65,7 @@ Nothing else. In particular **not** `total_art`, `seq` or `gen`: any of them her
 
 ### `manifest/<m>.gz` — the generation manifest
 
-Immutable, write-once, `cacheImmutable`, gzip JSON. One complete, self-contained description of one store state — which is why there is no separate snapshot series: restoring a store is writing `{"v":2,"m":<older>}` over `db.gz`.
+Immutable, write-once, `cacheImmutable`, gzip JSON. One complete, self-contained description of one store state — which is why there is no separate snapshot series: restoring a store is writing `{"v":3,"m":<older>}` over `db.gz`.
 
 ```
 { v, m, fetched_at, total_art, mt?, na?, head?, hb?, pack_off, next_pid, dby?, gcm?, inbox?, names, feeds }
@@ -233,7 +233,7 @@ A SIGKILL leaves the marker behind and the next run needs `--force` (an open fin
    `aws s3 cp s3://srr/db.gz ./rollback/db.gz` (plus `config.gz`, `seen.0.gz`, `seen.1.gz` if present). A local store: `cp db.gz config.gz seen.*.gz ./rollback/`.
    That legacy `db.gz` names the pre-cutover objects — the `L<g>` tails, the `d<g>` segments, the `h<N>`/`s<N>` summaries — and the migration does not delete any of them (it COPIES them to fresh stems), so it stays a complete description of a working store for as long as the GC's K-generation window keeps them.
 3. Note the current `m` (`python3 -c "import gzip,json;print(json.load(gzip.open('db.gz'))['m'])"`). Manifests at or below it are the pre-cutover chain.
-4. Deploy the reader FIRST (CF Pages + `srr frontend update` — the operator runs that, never an agent). A reader older than this release stops at the root with "This reader is older than the store (format v3, supported v2) — reload to update." That is the designed failure and it is legible, but it IS user-visible until every client reloads.
+4. Deploy the reader FIRST. In the current deployment that is **only** Cloudflare Pages (`srr.32b.io`), which `release.yml`'s `cf-pages` job does automatically on a tag — verified 2026-07-21 that the store root hosts no reader shell (`cdn.llera.eu/index.html` and `/sitemap.txt` both 404), so `srr frontend update` is NOT part of this rollout. If a store-root shell is ever installed, it becomes a second reader that must be updated first too, and **the operator runs that command, never an agent**. A reader older than this release stops at the root with "This reader is older than the store (format v3, supported v2) — reload to update." That is the designed failure and it is legible, but it IS user-visible until every client reloads.
 
 **Rolling back:**
 
