@@ -1,4 +1,4 @@
-.PHONY: verify verify-fe verify-be lint-fe format-check-fe format-fe test-fe build-fe smoke-fe dev-fe vet-be lint-be format-check-be format-be build-be test-be test-race-be test-contract test-browser test-stress test-e2e generate generate-check release clean design-fixture design design-shots
+.PHONY: verify verify-fe verify-be lint-fe format-check-fe format-fe test-fe build-fe build-admin smoke-fe dev-fe vet-be lint-be format-check-be format-be build-be test-be test-race-be test-contract test-browser test-stress test-e2e generate generate-check release clean design-fixture design design-shots
 
 SHELL := /bin/bash -e
 
@@ -100,7 +100,18 @@ lint-be:
 dist:
 	@mkdir -p $@
 
-build-be: | dist
+# build-admin is its OWN parcel build into backend/webui/dist — a SEPARATE dist
+# from the reader (../dist/srrf), NOT a shared multi-entry build: a shared build
+# could hoist common chunks and rewrite the reader's content-hashed filenames,
+# which must stay byte-identical. `srr serve` embeds this dir via //go:embed.
+build-admin: frontend/node_modules/.package-lock.json
+	cd frontend && npm run build-admin
+
+# build-be depends on build-admin so the embedded admin console is fresh before
+# `go build` reads it (mirrors CI, which builds the frontend anyway). A bare
+# `go build`/`go test` without this target still compiles against the committed
+# placeholder backend/webui/dist/index.html.
+build-be: build-admin | dist
 	cd backend && go build -o ../dist/srr .
 
 release: verify-be | dist
@@ -114,3 +125,4 @@ release: verify-be | dist
 
 clean:
 	rm -rf frontend/.parcel-cache dist
+	rm -f backend/webui/dist/*.js backend/webui/dist/*.css

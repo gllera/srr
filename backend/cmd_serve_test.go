@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 func doReq(t *testing.T, h http.Handler, method, target, body string) *httptest.ResponseRecorder {
@@ -53,6 +54,10 @@ func TestServeMalformedJSONBodyRejected(t *testing.T) {
 	}
 }
 
+// GET / serves the embedded admin bundle (the committed placeholder in a bare
+// checkout, the real Parcel index.html after `make build-admin`). Assert only
+// what both share — HTML, non-empty, naming the admin console — so the test is
+// independent of whether the frontend was built.
 func TestServeUIIndex(t *testing.T) {
 	h := newMux()
 	rec := doReq(t, h, "GET", "/", "")
@@ -62,12 +67,14 @@ func TestServeUIIndex(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
 		t.Fatalf("content-type = %q, want text/html", ct)
 	}
-	if !strings.Contains(rec.Body.String(), "<title>SRRB</title>") {
-		body := rec.Body.String()
+	if body := rec.Body.String(); !strings.Contains(body, "<!doctype html") && !strings.Contains(body, "<!DOCTYPE html") {
 		if len(body) > 200 {
 			body = body[:200]
 		}
-		t.Fatalf("index body missing title; got:\n%s", body)
+		t.Fatalf("index body is not HTML; got:\n%s", body)
+	}
+	if !strings.Contains(strings.ToLower(rec.Body.String()), "srr") {
+		t.Fatal("index body does not name the SRR admin console")
 	}
 }
 
@@ -139,18 +146,56 @@ func TestServeHostGuardRebindingDespiteSameOrigin(t *testing.T) {
 	}
 }
 
-func TestServeStaticAssets(t *testing.T) {
+// secHeaders (SEC3) stamps the static security headers on EVERY response —
+// wrapped outside hostGuard so even a 403 carries them.
+func TestServeSecHeaders(t *testing.T) {
+	setupTestDB(t)
 	h := newMux()
-	for _, tc := range []struct{ path, needle string }{
-		{"/app.js", "drawFeeds"},
-		{"/app.css", "--signal"},
-	} {
-		rec := doReq(t, h, "GET", tc.path, "")
-		if rec.Code != http.StatusOK {
-			t.Fatalf("GET %s = %d, want 200", tc.path, rec.Code)
+	want := map[string]string{
+		"Content-Security-Policy": webUICSP,
+		"X-Content-Type-Options":  "nosniff",
+		"Referrer-Policy":         "no-referrer",
+		"X-Frame-Options":         "DENY",
+	}
+	check := func(name string, rec *httptest.ResponseRecorder) {
+		for k, v := range want {
+			if got := rec.Header().Get(k); got != v {
+				t.Errorf("%s: %s = %q, want %q", name, k, got, v)
+			}
 		}
-		if !strings.Contains(rec.Body.String(), tc.needle) {
-			t.Fatalf("GET %s missing %q", tc.path, tc.needle)
+	}
+	check("GET / (bundle)", doReq(t, h, "GET", "/", ""))
+	check("GET /api/overview (200)", doReq(t, h, "GET", "/api/overview", ""))
+	check("DELETE missing feed (4xx)", doReq(t, h, "DELETE", "/api/feeds/99999", ""))
+
+	// hostGuard 403 — secHeaders is the outer wrapper, so a rejected request
+	// still carries the headers.
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Host = "evil.example.com"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("precondition: non-loopback Host = %d, want 403", rec.Code)
+	}
+	check("hostGuard 403", rec)
+}
+
+// The same-origin design has NO CORS layer — a negative test so nobody
+// re-introduces Access-Control-* (Candidate A's tax) without noticing.
+func TestServeNoCORSHeaders(t *testing.T) {
+	setupTestDB(t)
+	h := newMux()
+	for _, target := range []string{"/", "/api/overview"} {
+		rec := doReq(t, h, "GET", target, "")
+		for _, k := range []string{
+			"Access-Control-Allow-Origin",
+			"Access-Control-Allow-Credentials",
+			"Access-Control-Allow-Methods",
+			"Access-Control-Allow-Headers",
+		} {
+			if got := rec.Header().Get(k); got != "" {
+				t.Errorf("GET %s emitted %s: %q, want none", target, k, got)
+			}
 		}
 	}
 }
@@ -207,46 +252,64 @@ func TestServeSyndicatePutExternal(t *testing.T) {
 	}
 }
 
-// The embedded admin UI is served from a MapFS whose entries have a zero
-// ModTime, so net/http emits no validators and the static names (app.js) let a
-// caching layer serve the previous release forever. Every file must carry a
-// content ETag + no-cache, and a conditional GET must answer 304.
+// The Parcel bundle is content-hashed, so webUICacheHeaders splits its
+// Cache-Control like store.cacheControlForKey: a hashed asset name is immutable
+// (cached a year, no revalidation), while index.html (and any unhashed root
+// file) is no-cache + a startup content ETag that answers 304. Tested against a
+// synthetic FS so it is independent of whether the real bundle was built.
 func TestServeWebUICacheValidators(t *testing.T) {
-	setupTestDB(t)
-	mux := newMux()
+	fsys := fstest.MapFS{
+		"index.html":           {Data: []byte("<!doctype html><title>SRR admin</title>")},
+		"frontend.abcdef01.js": {Data: []byte("console.log(1)")},
+	}
+	h := webUICacheHeaders(fsys, http.FileServerFS(fsys))
 
-	res := doReq(t, mux, "GET", "/app.js", "")
-	if res.Code != http.StatusOK {
-		t.Fatalf("GET /app.js = %d", res.Code)
-	}
-	tag := res.Header().Get("ETag")
-	if tag == "" {
-		t.Fatal("no ETag on /app.js")
-	}
-	if cc := res.Header().Get("Cache-Control"); cc != "no-cache" {
-		t.Errorf("Cache-Control = %q, want no-cache", cc)
-	}
-
-	req := httptest.NewRequest("GET", "/app.js", nil)
-	req.Host = "localhost" // hostGuard: loopback only (see doReq)
-	req.Header.Set("If-None-Match", tag)
+	// A hashed asset name → immutable.
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/frontend.abcdef01.js", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET hashed asset = %d, want 200", rec.Code)
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "public, max-age=31536000, immutable" {
+		t.Errorf("hashed Cache-Control = %q, want immutable", cc)
+	}
+	if tag := rec.Header().Get("ETag"); tag != "" {
+		t.Errorf("hashed asset carried an ETag %q; immutable names need none", tag)
+	}
+
+	// index.html (served for /) → no-cache + a content ETag.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET / = %d, want 200", rec.Code)
+	}
+	tag := rec.Header().Get("ETag")
+	if tag == "" {
+		t.Fatal("no ETag on index.html")
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
+		t.Errorf("index Cache-Control = %q, want no-cache", cc)
+	}
+
+	// A matching If-None-Match answers 304 with no body.
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("If-None-Match", tag)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotModified {
 		t.Errorf("conditional GET = %d, want 304", rec.Code)
 	}
 	if rec.Body.Len() != 0 {
-		t.Errorf("304 carried a body of %d bytes", rec.Body.Len())
+		t.Errorf("304 carried a %d-byte body", rec.Body.Len())
 	}
 
-	// A stale validator must still serve the fresh bytes.
-	req2 := httptest.NewRequest("GET", "/app.js", nil)
-	req2.Host = "localhost"
-	req2.Header.Set("If-None-Match", `"stale"`)
-	rec2 := httptest.NewRecorder()
-	mux.ServeHTTP(rec2, req2)
-	if rec2.Code != http.StatusOK || rec2.Body.Len() == 0 {
-		t.Errorf("stale validator: code=%d len=%d, want 200 with a body", rec2.Code, rec2.Body.Len())
+	// A stale validator still serves the fresh bytes.
+	req = httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("If-None-Match", `"stale"`)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || rec.Body.Len() == 0 {
+		t.Errorf("stale validator: code=%d len=%d, want 200 with a body", rec.Code, rec.Body.Len())
 	}
 }
 
