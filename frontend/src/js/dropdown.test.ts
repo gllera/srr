@@ -684,3 +684,71 @@ describe("anchored context menu (showContextMenu)", () => {
       })
    })
 })
+
+// docs/MULTI-STORE-SPEC.md §3, §6.3 — the Stores dialog. Built dynamically (no
+// index.html skeleton), so it needs only the app-provided hooks.
+describe("mounts (stores) dialog", () => {
+   let dropdown: Dropdown
+   const $dialog = () => document.querySelector<HTMLElement>(".srr-mounts-dialog")
+   const rows = () => [...($dialog()?.querySelectorAll(".srr-mount-item") ?? [])] as HTMLElement[]
+
+   beforeEach(async () => {
+      document.body.innerHTML = OPENER
+      localStorage.clear()
+      vi.resetModules()
+      dropdown = await import("./dropdown")
+   })
+   afterEach(() => {
+      if ($dialog()?.classList.contains("srr-open")) key(document.body, "Escape")
+   })
+
+   const hooks = () => ({
+      list: vi.fn(() => [
+         { id: "0", url: "http://localhost/", label: "Home", role: "home", chip: "" },
+         { id: "s3f9a1c22", url: "https://peer/", label: "Alice", role: "peer", chip: "Offline" },
+      ]),
+      add: vi.fn(() => null),
+      remove: vi.fn(),
+      forget: vi.fn(),
+   })
+
+   it("lists mounts; home has no unmount, a peer does, and shows its state chip", () => {
+      dropdown.showMountsDialog(hooks())
+      expect(rows()).toHaveLength(2)
+      // Home row has no action buttons; the peer row does.
+      expect(rows()[0].querySelector(".srr-mount-remove")).toBeNull()
+      expect(rows()[1].querySelector(".srr-mount-remove")).not.toBeNull()
+      expect(rows()[1].querySelector(".srr-mount-item-chip")?.textContent).toBe("Offline")
+   })
+
+   it("Add calls hooks.add with the entered URL and clears on success", () => {
+      const h = hooks()
+      dropdown.showMountsDialog(h)
+      const input = $dialog()!.querySelector<HTMLInputElement>(".srr-mount-input")!
+      input.value = "https://new.example/store/"
+      $dialog()!.querySelector<HTMLButtonElement>(".srr-mount-add-btn")!.click()
+      expect(h.add).toHaveBeenCalledWith("https://new.example/store/")
+      // doAdd clears the input before the re-render, so the (now detached) node is empty.
+      expect(input.value).toBe("")
+   })
+
+   it("a rejected Add keeps the dialog open and shows the error", () => {
+      const h = hooks()
+      h.add.mockReturnValue("Enter a full https:// store URL" as unknown as null)
+      dropdown.showMountsDialog(h)
+      const input = $dialog()!.querySelector<HTMLInputElement>(".srr-mount-input")!
+      input.value = "garbage"
+      $dialog()!.querySelector<HTMLButtonElement>(".srr-mount-add-btn")!.click()
+      expect($dialog()!.querySelector(".srr-mount-err")?.textContent).toBe("Enter a full https:// store URL")
+      expect($dialog()!.classList.contains("srr-open")).toBe(true)
+   })
+
+   it("Unmount + Forget call their hooks with the mount id", () => {
+      const h = hooks()
+      dropdown.showMountsDialog(h)
+      rows()[1].querySelector<HTMLButtonElement>(".srr-mount-remove")!.click()
+      expect(h.remove).toHaveBeenCalledWith("s3f9a1c22")
+      rows()[1].querySelector<HTMLButtonElement>(".srr-mount-forget")!.click()
+      expect(h.forget).toHaveBeenCalledWith("s3f9a1c22")
+   })
+})

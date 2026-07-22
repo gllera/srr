@@ -6,6 +6,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest"
 // per-instance state (fill tokens, focus restore), so each test gets a fresh
 // instance via vi.resetModules() + dynamic import.
 const data = vi.hoisted(() => {
+   const home = { mid: "0", base: new URL("http://localhost/"), cred: "same-origin", role: "home", db: { feeds: {} } }
    const mock = {
       db: { feeds: {} } as IDB,
       groupFeedsByTag: vi.fn(() => ({ tagged: new Map(), sortedTags: [] as string[], untagged: [] as IFeed[] })),
@@ -13,6 +14,13 @@ const data = vi.hoisted(() => {
       hasArticles: vi.fn(() => true),
       metaReady: vi.fn(() => true),
       idxSummaryDegraded: vi.fn(() => false),
+      // Multi-store (single home mount by default → the switcher stays hidden,
+      // so the picker is byte-identical to single-store here).
+      activeStore: vi.fn(() => home),
+      mountedStores: vi.fn(() => [home]),
+      mountRecords: vi.fn(() => [{ id: "0", url: "http://localhost/", label: "", ord: 0, role: "home", cred: false }]),
+      mountStatus: vi.fn(() => ({ state: "ok", kind: "", error: "" })),
+      unreadTally: vi.fn(() => ({ counts: new Map<number, number>(), rare: [] as IFeed[] })),
    }
    return mock
 })
@@ -84,6 +92,7 @@ const hooks = {
    onSelect: vi.fn(),
    onClose: vi.fn(),
    onToggleShowRead: vi.fn(),
+   onSwitchMount: vi.fn(),
 }
 
 async function mount(): Promise<Picker> {
@@ -836,5 +845,61 @@ describe("renderStatus (the settings menu's footer)", () => {
       expect(box.querySelector(".srr-status-version")!.textContent).toBe("srr test")
       // …and it is the ONLY status content on an empty store.
       expect(box.textContent).toBe("srr test")
+   })
+})
+
+// docs/MULTI-STORE-SPEC.md §6.3 — the mount switcher (the store axis above
+// tags/feeds), rendered ONLY when >1 store is mounted so a single-store picker
+// is unchanged.
+describe("mount switcher (§6.3)", () => {
+   const home = { mid: "0", base: new URL("http://localhost/"), cred: "same-origin", role: "home", db: { feeds: {} } }
+   const peer = {
+      mid: "s3f9a1c22",
+      base: new URL("https://peer/"),
+      cred: "same-origin",
+      role: "peer",
+      db: { feeds: {} },
+   }
+
+   it("is hidden with a single mount (picker byte-identical to single-store)", async () => {
+      const picker = await mount()
+      picker.render()
+      expect($(".srr-picker").querySelector(".srr-picker-mounts")).toBeNull()
+   })
+
+   it("renders a row per mount when >1 is mounted, active one marked", async () => {
+      data.mountedStores.mockReturnValue([home, peer])
+      data.mountRecords.mockReturnValue([
+         { id: "0", url: "http://localhost/", label: "Home", ord: 0, role: "home", cred: false },
+         { id: "s3f9a1c22", url: "https://peer/", label: "Alice", ord: 10, role: "peer", cred: false },
+      ])
+      const picker = await mount()
+      picker.render()
+      const rows = [...$(".srr-picker").querySelectorAll(".srr-mount-row")]
+      expect(rows.map((r) => (r as HTMLElement).dataset.mount)).toEqual(["0", "s3f9a1c22"])
+      // Active (home) is marked; the peer is not.
+      expect(rows[0].classList.contains("srr-active")).toBe(true)
+      expect(rows[1].classList.contains("srr-active")).toBe(false)
+   })
+
+   it("shows a state chip for an errored mount instead of a rollup", async () => {
+      data.mountedStores.mockReturnValue([home, peer])
+      data.mountStatus.mockImplementation((mid: string) =>
+         mid === "s3f9a1c22"
+            ? { state: "error", kind: "offline", error: "Unreachable" }
+            : { state: "ok", kind: "", error: "" },
+      )
+      const picker = await mount()
+      picker.render()
+      const peerRow = $(".srr-picker").querySelector('[data-mount="s3f9a1c22"]') as HTMLElement
+      expect(peerRow.querySelector(".srr-mount-chip")?.textContent).toBe("Unreachable")
+   })
+
+   it("clicking a mount row calls onSwitchMount with its mid", async () => {
+      data.mountedStores.mockReturnValue([home, peer])
+      const picker = await mount()
+      picker.render()
+      ;($(".srr-picker").querySelector('[data-mount="s3f9a1c22"]') as HTMLElement).dispatchEvent(click())
+      expect(hooks.onSwitchMount).toHaveBeenCalledWith("s3f9a1c22")
    })
 })

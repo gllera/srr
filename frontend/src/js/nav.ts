@@ -1,6 +1,6 @@
 import * as data from "./data"
 import { extractPrefetchMedia } from "./fmt"
-import { savedKey, seenKey, seenTsKey, UNREAD_ONLY_KEY } from "./keys"
+import { HOME_MID, savedKey, seenKey, seenTsKey, UNREAD_ONLY_KEY } from "./keys"
 import * as search from "./search"
 import * as sync from "./sync"
 
@@ -1038,7 +1038,13 @@ function resolveNoMatch(replace = false, notStarted = false): IShowFeed {
 export async function fromHash(hash: string): Promise<IShowFeed> {
    const posStr = hashPos(hash)
 
-   const tokens = parseHashTokens(hash)
+   // The hash carries the mount (§6.3): switch the active lane to it BEFORE
+   // resolving the filter/position, so every data.* call below (which defaults
+   // to the active store) targets the right store. setActive fails softly when
+   // the named mount is unmounted/errored — the link then resolves against the
+   // current lane rather than blanking (MS4).
+   const { mid, tokens } = parseHashMount(parseHashTokens(hash))
+   if (mid !== data.activeStore().mid) data.setActive(mid)
    if (tokens.length > 0) filter.set(tokens)
    else filter.clear()
 
@@ -1198,6 +1204,14 @@ async function noUnreadLeft(): Promise<boolean> {
 // visiting a lane cannot decrement its unread count. Reading forward (Right)
 // records normally from there.
 export async function switchFilter(token: string): Promise<IShowFeed> {
+   // A mount-qualified token (a peer lane picked from the picker): `@<mid>` or
+   // `@<mid>:<tok>`. Switch the active lane first, then resolve the bare token
+   // in that store's context (§6.3). A bare token leaves the active mount as-is.
+   if (token.startsWith("@")) {
+      const { mid, tokens } = parseHashMount([token])
+      data.setActive(mid)
+      token = tokens[0] ?? ""
+   }
    if (token === "") {
       filter.clear()
       // [ALL] opens at the oldest unseen article — the start of the global
@@ -1341,13 +1355,52 @@ export function filterKey(): string {
    return filter.tokens.join(" ")
 }
 
+const encTok = (t: string): string => encodeURIComponent(t).replaceAll("+", "%2B")
+
 // The `!tokens` hash suffix for the active filter ("" when inactive) — shared by
 // updateHash (reader `#pos!tokens`) and the list surface (`#!tokens`, no pos).
 // `+` joins tokens, so a literal `+` inside one (e.g. a search query "c++") is
 // escaped to %2B — encodeURIComponent leaves `+` alone — and decoded back after
 // the split on the read side (route/fromHash).
+//
+// Multi-store (docs/MULTI-STORE-SPEC.md §6.3): the active mount rides IN the
+// token grammar. The HOME mount emits BARE tokens exactly as before, so every
+// existing deep link and stored srr-hash keeps working untouched; a PEER mount
+// prefixes each token with `@<mid>:`, and a peer [ALL] (no tokens) emits a bare
+// `@<mid>` marker so the mount survives.
 export function tokensSuffix(): string {
-   return filter.active ? "!" + filter.tokens.map((t) => encodeURIComponent(t).replaceAll("+", "%2B")).join("+") : ""
+   const mid = data.activeStore().mid
+   if (mid === HOME_MID) {
+      return filter.active ? "!" + filter.tokens.map(encTok).join("+") : ""
+   }
+   if (!filter.active) return "!@" + mid
+   return "!" + filter.tokens.map((t) => "@" + mid + ":" + encTok(t)).join("+")
+}
+
+// Extract the mount + the bare filter tokens from a hash's decoded token list
+// (§6.3). All-bare tokens ⇒ the home mount. A peer token is `@<mid>` ([ALL]) or
+// `@<mid>:<token>`. All tokens must share ONE mount prefix; a MIXED hash keeps
+// the first mount's tokens and drops the rest (the same forgiving posture as a
+// malformed escape). The `@`/`:` are literal in the fragment; the token VALUE
+// after the first `:` is already decoded, so a token containing `:` (a search
+// `q:…`, a tag with a colon) survives — only the FIRST colon splits.
+export function parseHashMount(rawTokens: string[]): { mid: string; tokens: string[] } {
+   if (rawTokens.length === 0 || !rawTokens[0].startsWith("@")) {
+      return { mid: HOME_MID, tokens: rawTokens }
+   }
+   const parseTok = (t: string): { mid: string; tok: string } => {
+      const colon = t.indexOf(":")
+      return colon === -1 ? { mid: t.slice(1), tok: "" } : { mid: t.slice(1, colon), tok: t.slice(colon + 1) }
+   }
+   const mid = parseTok(rawTokens[0]).mid
+   const tokens: string[] = []
+   for (const raw of rawTokens) {
+      if (!raw.startsWith("@")) break // a bare token after a peer prefix — mixed, stop
+      const p = parseTok(raw)
+      if (p.mid !== mid) break // a different mount — first mount wins, drop the rest
+      if (p.tok) tokens.push(p.tok)
+   }
+   return { mid, tokens }
 }
 
 // The position part of a `#pos[!tokens]` hash — everything before the first
