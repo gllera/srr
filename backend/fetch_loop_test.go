@@ -74,6 +74,104 @@ func TestFetchLoopRepeatsUntilCancel(t *testing.T) {
 	}
 }
 
+// TestFetchLoopCycleNotCappedByShutdownGrace pins the fix for the 30s cap bug:
+// in normal operation (no shutdown pending) an --interval cycle runs UNCAPPED,
+// so a legitimately slow cycle still reaches its commit instead of being
+// guillotined at shutdownGrace and rolled back. The grace is shrunk far below
+// the cycle's own duration; the pre-fix code applied it to every cycle and this
+// feed would never store.
+func TestFetchLoopCycleNotCappedByShutdownGrace(t *testing.T) {
+	allowLoopback(t)
+	orig := shutdownGrace
+	shutdownGrace = 20 * time.Millisecond
+	t.Cleanup(func() { shutdownGrace = orig })
+
+	// A cycle that takes far longer than the grace but never a shutdown signal.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(150 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/rss+xml")
+		w.Write([]byte(sampleRSS))
+	}))
+	t.Cleanup(srv.Close)
+
+	db, _, _ := setupTestDB(t)
+	seedFeed(t, db, &Feed{Title: "Slow", URL: srv.URL})
+
+	cctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- (&FetchCmd{Interval: time.Hour}).fetchLoop(cctx, newFetchClient(1)) }()
+
+	deadline := time.After(3 * time.Second)
+	for {
+		var n int
+		withDB(false, func(_ context.Context, d *DB) error { n = d.core.TotalArticles; return nil })
+		if n == 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("article never stored (TotalArticles=%d): cycle was capped by shutdownGrace", n)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fetchLoop did not return within 2s of cancel")
+	}
+}
+
+// TestFetchLoopShutdownGraceBoundsWedgedCycle pins the RETAINED half of the
+// contract: once a shutdown signal arrives, an in-flight cycle is still cut
+// after shutdownGrace so it cannot block shutdown forever. The handler blocks
+// until teardown; without the grace the loop would hang on it, so a prompt
+// return proves the bound fired.
+func TestFetchLoopShutdownGraceBoundsWedgedCycle(t *testing.T) {
+	allowLoopback(t)
+	orig := shutdownGrace
+	shutdownGrace = 50 * time.Millisecond
+	t.Cleanup(func() { shutdownGrace = orig })
+
+	release := make(chan struct{})
+	started := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release // wedge the cycle until the test releases it at teardown
+		w.Header().Set("Content-Type", "application/rss+xml")
+		w.Write([]byte(sampleRSS))
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) }) // runs before srv.Close (LIFO) so Close doesn't hang
+
+	db, _, _ := setupTestDB(t)
+	seedFeed(t, db, &Feed{Title: "Wedged", URL: srv.URL})
+
+	cctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- (&FetchCmd{Interval: time.Hour}).fetchLoop(cctx, newFetchClient(1)) }()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fetch never reached the server")
+	}
+	cancel() // shutdown while the cycle is wedged in-flight
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("fetchLoop returned %v, want nil on cancel", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("fetchLoop did not honor shutdownGrace: still running 2s after shutdown")
+	}
+}
+
 // TestFetchCycleExpiresArticles verifies the cycle wiring: a feed with
 // expire-days set sheds its over-age backlog (AddIdx/Expired bumped, asset
 // deleted) during a normal fetch cycle, before Commit publishes it.

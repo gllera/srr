@@ -41,11 +41,15 @@ type feedFilter struct {
 }
 
 // shutdownGrace bounds how long an in-flight --interval cycle may keep running
-// after SIGTERM/SIGINT. The loop stops starting new cycles at once, but letting
-// the current one finish is what keeps a fetched-but-uncommitted batch (and the
-// packs it is mid-write on) from being thrown away by every graceful restart.
-// A second signal still hard-kills.
-const shutdownGrace = 30 * time.Second
+// AFTER SIGTERM/SIGINT — and only then. The loop stops starting new cycles at
+// once, but letting the current one finish is what keeps a fetched-but-uncommitted
+// batch (and the packs it is mid-write on) from being thrown away by every
+// graceful restart; the bound only stops a cycle that is already wedged from
+// blocking shutdown forever, and a second signal still hard-kills. A cycle in
+// NORMAL operation (no shutdown pending) runs uncapped — a legitimately long
+// cycle (a big consolidation, slow asset transcodes) must not be guillotined
+// mid-commit and rolled back. A var, not a const, so tests can shrink it.
+var shutdownGrace = 30 * time.Second
 
 type FetchCmd struct {
 	Interval time.Duration `help:"Run fetch in a loop with this interval." default:"0" env:"SRR_FETCH_INTERVAL"`
@@ -430,15 +434,20 @@ func (o *FetchCmd) fetchLoop(ctx context.Context, client *http.Client) error {
 		return runCycleSafe(func() error { return o.runFetch(ctx, client, nil) })
 	}
 	for {
-		// The cycle runs under a DETACHED, bounded context: on SIGTERM the loop
-		// must stop starting new cycles immediately (the ctx.Done() check below)
-		// but must not cancel the cycle already in flight — that discards a batch
-		// already fetched but not yet committed, on every graceful restart. The
-		// grace bound keeps a wedged cycle from blocking shutdown forever, and a
-		// second signal still hard-kills (NotifyContext restores default handling
-		// after the first).
-		cycleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownGrace)
+		// The cycle runs under a DETACHED context: on SIGTERM the loop must stop
+		// starting new cycles immediately (the ctx.Done() check below) but must
+		// not cancel the cycle already in flight — that discards a batch already
+		// fetched but not yet committed, on every graceful restart. In normal
+		// operation the cycle is UNCAPPED: a legitimately long cycle (a big
+		// consolidation, slow asset transcodes) must run to its commit, not be
+		// guillotined at a fixed deadline and rolled back. The shutdownGrace bound
+		// arms ONLY once ctx is cancelled (shutdown), so a wedged cycle can't block
+		// shutdown forever; a second signal still hard-kills (NotifyContext restores
+		// default handling after the first).
+		cycleCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		stopGrace := context.AfterFunc(ctx, func() { time.AfterFunc(shutdownGrace, cancel) })
 		err := runCycleSafe(func() error { return o.runFetch(cycleCtx, client, nil) })
+		stopGrace()
 		cancel()
 		if err != nil {
 			slog.Error("fetch iteration failed", "err", err)
