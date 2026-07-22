@@ -498,3 +498,56 @@ describe("per-key seen timestamps (st) — the explicit-rewind ordering", () => 
       expect(JSON.parse(localStorage.getItem(SEEN_KEY)!)).toEqual({ "feed:1": 50 })
    })
 })
+
+// docs/MULTI-STORE-SPEC.md §4.4 — the additive mnt (mount table) + ms (per-peer
+// substate). The HOME store rides the top-level fields unchanged; peers ride ms.
+describe("multi-store mnt/ms (§4.4)", () => {
+   beforeEach(() => localStorage.clear())
+
+   it("exportProfile includes the mount table + peer substate, home stays top-level", () => {
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 9 })) // home (bare)
+      localStorage.setItem(
+         "srr-mounts",
+         JSON.stringify([{ id: "sP", url: "https://peer/", label: "P", ord: 10, role: "peer", cred: false, ts: 5 }]),
+      )
+      localStorage.setItem("srr-seen@sP", JSON.stringify({ "feed:3": 4 }))
+      localStorage.setItem("srr-saved@sP", JSON.stringify([2]))
+      const blob = JSON.parse(exportProfile())
+      expect(blob.seen).toEqual({ "feed:1": 9 }) // home top-level, unchanged
+      expect(blob.mnt.some((m: { id: string }) => m.id === "sP")).toBe(true)
+      expect(blob.ms.sP.seen).toEqual({ "feed:3": 4 })
+      expect(blob.ms.sP.saved).toEqual([2])
+   })
+
+   it("importProfile merges an incoming peer mount + its substate", () => {
+      const incoming = JSON.stringify({
+         v: 2,
+         ts: 0,
+         seen: {},
+         saved: [],
+         mnt: [{ id: "sP", url: "https://peer/", label: "Peer", ord: 10, role: "peer", cred: false, ts: 9 }],
+         ms: { sP: { ts: 100, seen: { "feed:3": 8 }, st: {}, saved: [7] } },
+      })
+      const r = importProfile(incoming, { prefs: false, mode: "sync" })
+      expect(r.ok).toBe(true)
+      expect(r.changed).toBe(true)
+      const mounts = JSON.parse(localStorage.getItem("srr-mounts")!)
+      expect(mounts.some((m: { id: string }) => m.id === "sP")).toBe(true)
+      expect(JSON.parse(localStorage.getItem("srr-seen@sP")!)).toEqual({ "feed:3": 8 })
+      expect(JSON.parse(localStorage.getItem("srr-saved@sP")!)).toEqual([7])
+   })
+
+   it("a peer substate change does NOT stamp the home ts", () => {
+      touchProfile(500) // home ts
+      const incoming = JSON.stringify({
+         v: 2,
+         ts: 0,
+         seen: {},
+         saved: [],
+         mnt: [{ id: "sP", url: "https://peer/", label: "P", ord: 10, role: "peer", cred: false, ts: 9 }],
+         ms: { sP: { ts: 100, seen: { "feed:3": 8 }, st: {}, saved: [] } },
+      })
+      importProfile(incoming, { prefs: false, mode: "sync" })
+      expect(profileTs()).toBe(500) // untouched — the peer change is on @sP's ts
+   })
+})

@@ -43,6 +43,14 @@
 // of what they read anywhere plus their latest explicit rewinds.
 
 import { HOME_MID, IMG_PROXY_KEY, profileTsKey, savedKey, seenKey, seenTsKey, UNREAD_ONLY_KEY } from "./keys"
+import {
+   loadMounts,
+   mergeMountRecords,
+   reconcileMounts,
+   renameStoreState,
+   saveMounts,
+   type MountRecord,
+} from "./mounts"
 import { isValidHttpish, normalizeHttpish } from "./urlish"
 
 // The portable profile is the HOME store's device state (the blob's top-level
@@ -190,16 +198,219 @@ function mergeSeen(incoming: unknown, incomingTs: Record<string, number>): boole
    }
 }
 
+// ── Multi-store: the mount table (`mnt`) + per-peer substate (`ms`), §4.4 ──────
+// Both additive: an old build pulls the blob, ignores mnt/ms, and merges the
+// HOME store exactly as today. The home store's wire shape (top-level
+// seen/st/saved/ts) does NOT move — it stays mount 0's, so a single-store user's
+// blob is byte-identical. `ms` carries the PEER stores' substate (mid != "0"),
+// each merged by the SAME rules applied per store.
+
+interface StoreSubstate {
+   ts: number
+   seen: Record<string, number>
+   st: Record<string, number>
+   saved: number[]
+}
+
+// Read one mount's substate from its namespaced keys (seen@mid / st@mid /
+// saved@mid / profile-ts@mid). Returns null when the store holds nothing local.
+function readSubstate(mid: string): StoreSubstate | null {
+   const seen = parseMap(lsGet(seenKey(mid)))
+   const st = cleanTsMap(parseAny(lsGet(seenTsKey(mid))))
+   const saved = parseIntArray(lsGet(savedKey(mid)))
+   const tsN = Number(lsGet(profileTsKey(mid)))
+   const ts = Number.isFinite(tsN) && tsN > 0 ? Math.floor(tsN) : 0
+   if (Object.keys(seen).length === 0 && saved.length === 0 && ts === 0) return null
+   return { ts, seen, st, saved }
+}
+
+function parseMap(raw: string): Record<string, number> {
+   try {
+      const o = raw ? (JSON.parse(raw) as unknown) : {}
+      if (o === null || typeof o !== "object" || Array.isArray(o)) return {}
+      const out: Record<string, number> = {}
+      for (const [k, v] of Object.entries(o as Record<string, unknown>))
+         if (typeof v === "number" && Number.isFinite(v)) out[k] = v
+      return out
+   } catch {
+      return {}
+   }
+}
+function parseAny(raw: string): unknown {
+   try {
+      return raw ? JSON.parse(raw) : {}
+   } catch {
+      return {}
+   }
+}
+function parseIntArray(raw: string): number[] {
+   try {
+      const a = raw ? (JSON.parse(raw) as unknown) : []
+      return Array.isArray(a)
+         ? [...new Set(a.filter((n) => Number.isInteger(n) && (n as number) >= 0) as number[])]
+         : []
+   } catch {
+      return []
+   }
+}
+
+// Merge one incoming peer substate into a mount's namespaced keys, by the SAME
+// rules as the home store: seen+st per-key LWW (mergeSeenMid), saved+ts LWW in
+// sync mode / union in merge mode. `mid` is never HOME_MID here (home rides the
+// top-level fields). Returns whether anything actually changed.
+function mergeSubstate(mid: string, sub: unknown, mode: "merge" | "sync"): boolean {
+   if (!sub || typeof sub !== "object" || Array.isArray(sub)) return false
+   const o = sub as Record<string, unknown>
+   const incomingSt = cleanTsMap(o["st"])
+   let changed = mergeSeenMid(mid, o["seen"], incomingSt)
+   const tsRaw = o["ts"]
+   const blobTs = typeof tsRaw === "number" && Number.isFinite(tsRaw) && tsRaw > 0 ? Math.floor(tsRaw) : 0
+   const localTs = readSubstate(mid)?.ts ?? 0
+   const incoming = Array.isArray(o["saved"])
+      ? [...new Set((o["saved"] as unknown[]).filter((n) => Number.isInteger(n) && (n as number) >= 0) as number[])]
+      : null
+   if (mode === "sync") {
+      if (blobTs > localTs) {
+         if (incoming && JSON.stringify(incoming) !== JSON.stringify(parseIntArray(lsGet(savedKey(mid))))) {
+            lsSet(savedKey(mid), JSON.stringify(incoming))
+            changed = true
+         }
+         lsSet(profileTsKey(mid), String(blobTs))
+      }
+   } else if (incoming) {
+      // merge (file restore): union, preserving local save order.
+      const order = parseIntArray(lsGet(savedKey(mid)))
+      const seen = new Set(order)
+      let savedChanged = false
+      for (const n of incoming)
+         if (!seen.has(n)) {
+            seen.add(n)
+            order.push(n)
+            savedChanged = true
+         }
+      if (savedChanged) {
+         lsSet(savedKey(mid), JSON.stringify(order))
+         changed = true
+      }
+   }
+   return changed
+}
+
+// mergeSeenMid is mergeSeen for a mount id's namespaced keys — the same per-key
+// LWW rule (strictly-newer st wins in either direction, else raise-only max).
+function mergeSeenMid(mid: string, incoming: unknown, incomingTs: Record<string, number>): boolean {
+   try {
+      if (incoming === null || typeof incoming !== "object" || Array.isArray(incoming)) return false
+      const existing = parseMap(lsGet(seenKey(mid)))
+      const existingTs = cleanTsMap(parseAny(lsGet(seenTsKey(mid))))
+      let changed = false
+      let tsChanged = false
+      for (const [k, v] of Object.entries(incoming as Record<string, unknown>)) {
+         if (typeof v !== "number" || !Number.isFinite(v)) continue
+         const localV = existing[k]
+         const localTs = existingTs[k] ?? 0
+         const remoteTs = incomingTs[k] ?? 0
+         const adopt = localTs > 0 && remoteTs > 0 && remoteTs !== localTs ? remoteTs > localTs : v > (localV ?? -1)
+         if (!adopt) continue
+         if (v !== localV) {
+            existing[k] = v
+            changed = true
+         }
+         if (remoteTs !== localTs) {
+            if (remoteTs > 0) existingTs[k] = remoteTs
+            else delete existingTs[k]
+            tsChanged = true
+         }
+      }
+      if (changed) lsSet(seenKey(mid), JSON.stringify(existing))
+      if (tsChanged) lsSet(seenTsKey(mid), JSON.stringify(existingTs))
+      return changed
+   } catch {
+      return false
+   }
+}
+
+// The peer substate map for export: every non-home mount (tombstones included,
+// so unmounted-not-forgotten state still propagates — §3.4) that holds any local
+// state. `mnt` is the whole mount table (records + tombstones).
+function exportMountState(): { mnt: MountRecord[]; ms: Record<string, StoreSubstate> } {
+   const mnt = loadMounts()
+   const ms: Record<string, StoreSubstate> = {}
+   for (const m of mnt) {
+      if (m.id === HOME_MID) continue
+      const sub = readSubstate(m.id)
+      if (sub) ms[m.id] = sub
+   }
+   return { mnt, ms }
+}
+
+// True when this device holds any MULTI-STORE state to propagate — a live peer
+// mount or peer substate. sync.ts uses it to decide the one-time upgrade push
+// against an mnt-less (old-build) endpoint: a pure single-store device has
+// nothing to add and stays quiet (§4.4).
+export function hasPeerState(): boolean {
+   const { mnt, ms } = exportMountState()
+   return mnt.some((m) => m.id !== HOME_MID && !m.del) || Object.keys(ms).length > 0
+}
+
 // exportProfile serialises all four portable keys plus the LWW `ts` and the
 // per-key seen timestamps `st` into a v:2 blob (st is additive — old builds
-// ignore it and keep their raise-only max, so the version needs no bump).
-// srr-hash is never included.
+// ignore it and keep their raise-only max, so the version needs no bump). The
+// multi-store `mnt`/`ms` (§4.4) ride along, also additive. srr-hash is never
+// included.
 export function exportProfile(): string {
    const seen = readSeen()
    const saved = readSavedOrder()
    const unreadOnly = lsGet(UNREAD_ONLY_KEY) === "1"
    const imgProxy = lsGet(IMG_PROXY_KEY)
-   return JSON.stringify({ v: 2, ts: profileTs(), seen, st: readSeenTs(), saved, unreadOnly, imgProxy })
+   const { mnt, ms } = exportMountState()
+   return JSON.stringify({ v: 2, ts: profileTs(), seen, st: readSeenTs(), saved, unreadOnly, imgProxy, mnt, ms })
+}
+
+// Merge the incoming blob's mount table + peer substate (§4.4). Applied by
+// importProfile after the HOME store merge. Returns whether anything changed
+// (so the caller re-adopts the mount table + repaints). mnt merges FIRST (per
+// §3.4) so a rename tombstone renames the peer's `…@mid` state before its `ms`
+// is merged onto the new id.
+function mergeMountState(obj: Record<string, unknown>, mode: "merge" | "sync"): boolean {
+   let changed = false
+   if (Array.isArray(obj["mnt"])) {
+      const incoming = (obj["mnt"] as unknown[]).map(coerceMountRecord).filter((r): r is MountRecord => r !== null)
+      const merged = mergeMountRecords(loadMounts(), incoming)
+      const { records, renames } = reconcileMounts(merged)
+      for (const r of renames) renameStoreState(r.from, r.to)
+      saveMounts(records)
+      changed = true
+   }
+   const ms = obj["ms"]
+   if (ms && typeof ms === "object" && !Array.isArray(ms)) {
+      for (const [mid, sub] of Object.entries(ms as Record<string, unknown>)) {
+         if (mid === HOME_MID) continue
+         if (mergeSubstate(mid, sub, mode)) changed = true
+      }
+   }
+   return changed
+}
+
+// A lenient coercion of one untrusted mnt record (mirrors mounts.ts's internal
+// one, which is not exported). Strict on id/url; tolerant elsewhere.
+function coerceMountRecord(r: unknown): MountRecord | null {
+   if (typeof r !== "object" || r === null || Array.isArray(r)) return null
+   const o = r as Record<string, unknown>
+   if (typeof o["id"] !== "string" || !o["id"] || typeof o["url"] !== "string" || !o["url"]) return null
+   const rec: MountRecord = {
+      id: o["id"],
+      url: o["url"],
+      label: typeof o["label"] === "string" ? o["label"] : "",
+      ord: typeof o["ord"] === "number" && Number.isFinite(o["ord"]) ? o["ord"] : 0,
+      role: o["role"] === "home" ? "home" : "peer",
+      cred: o["cred"] === true,
+      added: typeof o["added"] === "number" && Number.isFinite(o["added"]) ? Math.floor(o["added"] as number) : 0,
+      ts: typeof o["ts"] === "number" && Number.isFinite(o["ts"]) ? Math.floor(o["ts"] as number) : 0,
+      del: o["del"] === true,
+   }
+   if (typeof o["moved_to"] === "string" && o["moved_to"]) rec.moved_to = o["moved_to"]
+   return rec
 }
 
 // importProfile parses `json` and applies it to the current device's state.
@@ -297,6 +508,13 @@ export function importProfile(json: string, opts: { prefs: boolean; mode?: "merg
 
       if (changed) touchProfile()
    }
+
+   // ── multi-store: the mount table + peer substate (§4.4) ────────────────────
+   // Kept OUT of the home `changed`/touchProfile above — a peer store's change
+   // must never stamp the HOME store's ts. Merged for both modes; folded into
+   // the RETURNED changed so the caller re-adopts the mount table + repaints.
+   const storeMode = opts.mode === "sync" && obj["v"] === 2 ? "sync" : "merge"
+   if (mergeMountState(obj, storeMode)) changed = true
 
    // ── prefs (opt-in) ────────────────────────────────────────────────────────
    if (opts.prefs) {
