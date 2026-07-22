@@ -21,6 +21,7 @@ import {
    type TallyFeed,
 } from "./idx"
 import { RELOAD_GUARD_KEY } from "./keys"
+import { activeMounts, loadMounts, reconcileMounts, renameStoreState, saveMounts, type MountRecord } from "./mounts"
 import { keyAt, legacyNames, manifestNames, type IManifestWire, type StoreNames } from "./names"
 
 export { IDX_PACK_SIZE, META_PACK_SIZE }
@@ -141,14 +142,40 @@ function makeStore(ctx: StoreContext): Store {
    return s
 }
 
-// The home store — the one the build points at (base.ts HOME) — and the active
-// lane the UI is currently reading. For S37 there is exactly one and active is
-// always home; S38 mounts peers and re-points `active` as the lane changes.
+// The home store — the one the build points at (base.ts HOME) — always mounted,
+// its eager db.gz fetch kicked at module load (the boot-latency property).
 const home = makeStore(HOME)
-// The mutable active-lane pointer S38 re-points as the reader switches mounts;
-// S37 has one lane (home) and never reassigns it (hence the lint suppression).
-// eslint-disable-next-line prefer-const
+
+// The store registry, keyed by mount id (docs/MULTI-STORE-SPEC.md §4/§8). Home
+// is always present; peers are created from the mount table at init and when the
+// user mounts one. `active` is the lane the UI is currently reading.
+const stores = new Map<string, Store>([[home.mid, home]])
 let active: Store = home
+
+// Per-mount boot/refresh status for the UI's mount card + error chip (§8.3).
+// A failed mount degrades to a per-mount error state — it never blanks the
+// reader (MS4). The chip variant is derived from `kind` + navigator.onLine.
+export type MountKind = "" | "offline" | "toonew" | "error"
+export interface MountStatus {
+   state: "ok" | "error"
+   kind: MountKind
+   error: string // human chip text ("" when ok)
+}
+const statuses = new Map<string, MountStatus>()
+// Per-mount backoff for the background peer poll (§8.3): 1min → 5min → 30min
+// cap, reset on any success or an `online` event. A dead peer must not cost a
+// request every cycle forever.
+interface Backoff {
+   ms: number
+   nextAt: number
+}
+const backoffs = new Map<string, Backoff>()
+const BACKOFF_MIN = 60_000
+const BACKOFF_MAX = 1_800_000
+
+// The reconciled mount table (mounts.ts records). The UI reads it for the picker
+// sections + the SW `mounts` post; init() and applyMountTable() keep it current.
+let mountTable: MountRecord[] = []
 
 // activeStore is the nav/UI layer's one notion of "the lane I am in"
 // (docs/MULTI-STORE-SPEC.md §11.2). The data/search hot functions take a store
@@ -160,13 +187,93 @@ export function activeStore(): Store {
 // The active lane's normalized db state, mirrored for the read-mostly consumers
 // (nav/list/picker/search/app read `data.db.feeds` etc.). The source of truth is
 // active.db on the Store record above; this is kept === active.db by applyDb and
-// the refresh() rollback. S38 re-points it when the active lane changes.
+// the refresh() rollback, and by setActive when the lane changes.
 export let db: IDB
 
 // storeNames exposes the active snapshot's names to search.ts, the other module
 // that fetches store objects (the meta shards, tail and bloom summary).
 export function storeNames(store: Store = active): StoreNames {
    return store.names
+}
+
+// A StoreContext from a mount record: the home mount is the build's HOME context
+// verbatim (bare keys, no migration); a peer resolves its base + credentials
+// from the record.
+function ctxFromMount(m: MountRecord): StoreContext {
+   if (m.id === HOME.mid) return HOME
+   return {
+      mid: m.id,
+      base: new URL(m.url),
+      cred: m.cred ? "include" : "same-origin",
+      role: m.role,
+   }
+}
+
+// mountedStores: the Store for every ACTIVE (non-deleted) mount, in picker order
+// (home first, then peers by ord). Includes stores whose boot failed — the
+// picker shows those as an error chip, not a lane (§8.3). One entry per record;
+// a record with no created store yet (should not happen post-init) is skipped.
+export function mountedStores(): Store[] {
+   const out: Store[] = []
+   for (const m of activeMounts(mountTable)) {
+      const s = stores.get(m.id)
+      if (s) out.push(s)
+   }
+   return out
+}
+
+export function mountStore(mid: string): Store | undefined {
+   return stores.get(mid)
+}
+
+export function mountStatus(mid: string): MountStatus {
+   return statuses.get(mid) ?? { state: "ok", kind: "", error: "" }
+}
+
+// The reconciled mount table — the UI's picker sections + app.ts's SW `mounts`
+// post read it. A copy so callers can't mutate the module's state.
+export function mountRecords(): MountRecord[] {
+   return mountTable
+}
+
+// Re-point the active lane. Keeps the `db` mirror coherent (nav/list/picker read
+// data.db). Returns false when the mid names no mounted, successfully-booted
+// store (the caller stays on the current lane). A peer in an error state has no
+// usable db, so it cannot become active.
+export function setActive(mid: string): boolean {
+   const s = stores.get(mid)
+   if (!s || !s.db || mountStatus(mid).state !== "ok") return false
+   active = s
+   db = s.db
+   return true
+}
+
+// Classify a boot/refresh failure into a chip kind (§8.3). A CORS rejection and
+// a network outage are indistinguishable to fetch (both a TypeError) — the chip
+// is honest about that ("Unreachable…") rather than claiming a cause.
+function classifyError(e: unknown): { kind: MountKind; error: string } {
+   const msg = e instanceof Error ? e.message : String(e)
+   if (/older than the store/.test(msg)) return { kind: "toonew", error: msg }
+   // fetch threw (no Response) — network, CORS, or a timeout/abort.
+   if (e instanceof TypeError || (e instanceof DOMException && (e.name === "TimeoutError" || e.name === "AbortError")))
+      return { kind: "offline", error: "Unreachable" }
+   return { kind: "error", error: msg }
+}
+
+// Boot ONE store: run its per-mount handshake (its eager db.gz fetch → parseDb →
+// applyDb). On success record "ok"; on failure record the per-mount error state
+// and rethrow so the caller's Promise.allSettled sees the rejection (init uses
+// that only to decide the all-failed global-popup case). A store that is not
+// `active` never touches the `db` mirror (applyDb guards on `store === active`).
+async function bootStore(s: Store): Promise<void> {
+   try {
+      await applyDb(s, await s.dbLoad)
+      statuses.set(s.mid, { state: "ok", kind: "", error: "" })
+      backoffs.delete(s.mid)
+   } catch (e) {
+      statuses.set(s.mid, { state: "error", ...classifyError(e) })
+      throw e
+   }
 }
 
 function loadDb(store: Store): Promise<Snapshot> {
@@ -415,8 +522,82 @@ async function applyDb(store: Store, snap: Snapshot): Promise<void> {
    sessionStorage.removeItem(RELOAD_GUARD_KEY)
 }
 
+// Boot all mounted stores in parallel (docs/MULTI-STORE-SPEC.md §8.2). Each
+// mount's handshake is independent (Promise.allSettled): one bad mount records a
+// per-mount error state and never blanks the reader (MS4). Only when EVERY mount
+// fails does init throw — reaching app.ts's global error popup (today's
+// single-store behavior). The active lane lands on home when it booted, else the
+// first healthy mount (§8.3 "the reader still opens on the first healthy mount").
 export async function init() {
-   await applyDb(home, await home.dbLoad)
+   // Load + reconcile the mount table (home-collision collapse, rename replay —
+   // §3.2/§3.5); persist any reconciliation so it doesn't recompute every boot.
+   const loaded = loadMounts()
+   const { records, renames } = reconcileMounts(loaded)
+   for (const r of renames) renameStoreState(r.from, r.to)
+   if (renames.length) saveMounts(records)
+   mountTable = records
+
+   // Create a Store per active mount (home already exists; creating a peer kicks
+   // its eager db.gz fetch). A record for the home url other than mount 0 was
+   // collapsed by reconcileMounts, so every active peer here is a real peer.
+   for (const m of activeMounts(mountTable)) {
+      if (!stores.has(m.id)) stores.set(m.id, makeStore(ctxFromMount(m)))
+   }
+
+   const booting = mountedStores()
+   const results = await Promise.allSettled(booting.map((s) => bootStore(s)))
+
+   // Pick the active lane: home if it booted, else the first healthy mount.
+   if (mountStatus(home.mid).state === "ok") setActive(home.mid)
+   else {
+      const firstOk = booting.find((s) => mountStatus(s.mid).state === "ok")
+      if (firstOk) setActive(firstOk.mid)
+   }
+
+   // Every mount failed → surface the global error popup (today's behavior). Use
+   // home's rejection reason so the message matches the single-store case.
+   if (!booting.some((s) => mountStatus(s.mid).state === "ok")) {
+      const homeIdx = booting.findIndex((s) => s.mid === home.mid)
+      const r = results[homeIdx] ?? results[0]
+      throw r && r.status === "rejected" ? r.reason : new Error("no store could be loaded")
+   }
+}
+
+// Adopt a changed mount table at runtime (the user mounted/unmounted a store, or
+// a sync pull merged the table). Boots newly-added mounts, records the reconciled
+// table, and drops the runtime state of unmounted stores (their device state
+// survives per §3.4 — only the Store cache is released). Returns the mids of
+// mounts that newly booted OK, so the caller can repaint the picker. Does NOT
+// change the active lane unless it was unmounted (then it falls back to home).
+export async function applyMountTable(recs: MountRecord[]): Promise<string[]> {
+   const { records, renames } = reconcileMounts(recs)
+   for (const r of renames) renameStoreState(r.from, r.to)
+   mountTable = records
+   saveMounts(records)
+
+   const wanted = new Set(activeMounts(mountTable).map((m) => m.id))
+   // Drop stores for mounts that are gone (never home).
+   for (const mid of [...stores.keys()]) {
+      if (mid !== home.mid && !wanted.has(mid)) {
+         stores.delete(mid)
+         statuses.delete(mid)
+         backoffs.delete(mid)
+      }
+   }
+   // If the active lane was unmounted, fall back to home.
+   if (!stores.has(active.mid)) setActive(home.mid)
+
+   // Create + boot newly-added mounts.
+   const fresh: Store[] = []
+   for (const m of activeMounts(mountTable)) {
+      if (!stores.has(m.id)) {
+         const s = makeStore(ctxFromMount(m))
+         stores.set(m.id, s)
+         fresh.push(s)
+      }
+   }
+   await Promise.allSettled(fresh.map((s) => bootStore(s)))
+   return fresh.filter((s) => mountStatus(s.mid).state === "ok").map((s) => s.mid)
 }
 
 // tailCovered is the pack↔delta seam: chrons below it are served by the pack
@@ -513,6 +694,70 @@ export async function refresh(store: Store = active): Promise<"unchanged" | "upd
       store.bgRefresh = false
    }
    return "updated"
+}
+
+// Refresh every mounted store EXCEPT the active one (the active lane is refreshed
+// by refresh.ts's existing path, which also reconciles nav/search/UI). This is
+// the background peer poll (§6.3 "refresh.ts polls every enabled mount"). Each
+// peer respects its backoff window (§8.3) and a failed OR not-yet-booted peer is
+// retried here — a booted peer that recovers becomes a usable lane. Returns
+// whether ANY peer changed shape, so the caller can repaint the picker (peer
+// unread rollups). A peer refresh never touches the active lane's nav state.
+export async function refreshPeers(): Promise<boolean> {
+   const now = Date.now()
+   let anyUpdated = false
+   await Promise.all(
+      mountedStores()
+         .filter((s) => s !== active)
+         .map(async (s) => {
+            const b = backoffs.get(s.mid)
+            if (b && now < b.nextAt) return // still in backoff
+            try {
+               const needsBoot = !s.db || mountStatus(s.mid).state === "error"
+               if (needsBoot) {
+                  // A never-booted or errored peer: (re)fetch db.gz from scratch.
+                  s.dbLoad = loadDb(s)
+                  await applyDb(s, await s.dbLoad)
+                  statuses.set(s.mid, { state: "ok", kind: "", error: "" })
+                  anyUpdated = true
+               } else if ((await refresh(s)) === "updated") {
+                  anyUpdated = true
+               }
+               backoffs.delete(s.mid)
+            } catch (e) {
+               statuses.set(s.mid, { state: "error", ...classifyError(e) })
+               const prev = backoffs.get(s.mid)?.ms ?? 0
+               const ms = prev ? Math.min(prev * 5, BACKOFF_MAX) : BACKOFF_MIN
+               backoffs.set(s.mid, { ms, nextAt: now + ms })
+            }
+         }),
+   )
+   return anyUpdated
+}
+
+// Reset every mount's backoff (an `online` event, or the user's retry action) so
+// the next poll retries immediately (§8.3 "reset on any success or an `online`
+// event").
+export function resetMountBackoff(mid?: string): void {
+   if (mid) backoffs.delete(mid)
+   else backoffs.clear()
+}
+
+// Retry ONE mount now: clear its backoff and (re)boot it. Used by the mount
+// card's per-mount retry action (§8.3). Returns true if it booted OK.
+export async function retryMount(mid: string): Promise<boolean> {
+   const s = stores.get(mid)
+   if (!s) return false
+   backoffs.delete(mid)
+   try {
+      s.dbLoad = loadDb(s)
+      await applyDb(s, await s.dbLoad)
+      statuses.set(mid, { state: "ok", kind: "", error: "" })
+      return true
+   } catch (e) {
+      statuses.set(mid, { state: "error", ...classifyError(e) })
+      return false
+   }
 }
 
 // Finalized idx-pack count for the current store (the latest pack holds the
