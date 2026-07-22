@@ -3237,3 +3237,62 @@ describe("never-opened feed/tag shows the not-started placeholder (unread-only)"
       expect(r.notStarted).toBe(true)
    })
 })
+
+// docs/MULTI-STORE-SPEC.md §6.3 — the @<mid> token grammar. Bare tokens keep
+// meaning the home mount, so every existing deep link + stored srr-hash still
+// works; a peer mount rides IN the token as @<mid> ([ALL]) or @<mid>:<token>.
+describe("§6.3 mount token grammar", () => {
+   const realActive = data.activeStore
+   afterEach(() => {
+      data.activeStore = realActive
+   })
+   const asMid = (mid: string) => {
+      data.activeStore = () => ({ mid, base: new URL("http://localhost/") }) as ReturnType<typeof realActive>
+   }
+
+   describe("parseHashMount (pure extractor)", () => {
+      it("all-bare tokens ⇒ the home mount, tokens verbatim", () => {
+         expect(nav.parseHashMount([])).toEqual({ mid: "0", tokens: [] })
+         expect(nav.parseHashMount(["5"])).toEqual({ mid: "0", tokens: ["5"] })
+         expect(nav.parseHashMount(["news", "5"])).toEqual({ mid: "0", tokens: ["news", "5"] })
+      })
+      it("a bare @<mid> is a peer [ALL] (no filter tokens)", () => {
+         expect(nav.parseHashMount(["@s3f9a1c22"])).toEqual({ mid: "s3f9a1c22", tokens: [] })
+      })
+      it("@<mid>:<token> is a peer feed/tag; internal colons (q:) survive", () => {
+         expect(nav.parseHashMount(["@s3f9a1c22:5"])).toEqual({ mid: "s3f9a1c22", tokens: ["5"] })
+         expect(nav.parseHashMount(["@s3f9a1c22:q:climate"])).toEqual({ mid: "s3f9a1c22", tokens: ["q:climate"] })
+      })
+      it("a mixed hash keeps the first mount's tokens and drops the rest", () => {
+         expect(nav.parseHashMount(["@sAAA:5", "@sBBB:9"])).toEqual({ mid: "sAAA", tokens: ["5"] })
+         expect(nav.parseHashMount(["@sAAA:5", "9"])).toEqual({ mid: "sAAA", tokens: ["5"] })
+      })
+   })
+
+   describe("tokensSuffix reflects the active mount", () => {
+      it("home mount emits BARE tokens (byte-identical to single-store)", () => {
+         asMid("0")
+         setupIndex([{ feedId: 1 }, { feedId: 2 }])
+         nav.filter.clear()
+         expect(nav.tokensSuffix()).toBe("")
+         nav.filter.set(["2"])
+         expect(nav.tokensSuffix()).toBe("!2")
+      })
+      it("peer mount [ALL] emits a bare @<mid>; a peer lane prefixes each token", () => {
+         asMid("s3f9a1c22")
+         setupIndex([{ feedId: 1 }, { feedId: 2 }])
+         nav.filter.clear()
+         expect(nav.tokensSuffix()).toBe("!@s3f9a1c22")
+         nav.filter.set(["2"])
+         expect(nav.tokensSuffix()).toBe("!@s3f9a1c22:2")
+      })
+      it("round-trips: a peer suffix parses back to the same mount + tokens", () => {
+         asMid("s3f9a1c22")
+         setupIndex([{ feedId: 1 }, { feedId: 2 }])
+         nav.filter.set(["2"])
+         const suffix = nav.tokensSuffix() // "!@s3f9a1c22:2"
+         const tokens = nav.parseHashTokens("#12" + suffix)
+         expect(nav.parseHashMount(tokens)).toEqual({ mid: "s3f9a1c22", tokens: ["2"] })
+      })
+   })
+})

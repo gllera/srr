@@ -4,6 +4,7 @@ import {
    showBackupDialog,
    showContextMenu,
    showImgProxyDialog,
+   showMountsDialog,
    showSyncDialog,
    wrapTabFocus,
    type MenuItem,
@@ -12,6 +13,7 @@ import { collapseBrokenMedia, countBadge, readerDateline, sanitizeFragment, srcC
 import { setupGestures, type Gestures } from "./gestures"
 import { HASH_KEY, UNREAD_ONLY_KEY } from "./keys"
 import * as list from "./list"
+import { addMount, forgetStoreState, mountLabel, removeMount, type MountRecord } from "./mounts"
 import * as nav from "./nav"
 import * as picker from "./picker"
 import { clearAllPins, isPinned, listPins, pinFilter, unpinFilter } from "./pin"
@@ -209,6 +211,30 @@ function unpinCurrentFilter(): void {
    // menu that triggered this unpin closed when the row was clicked.
 }
 
+// Tell the service worker which store roots are mounted (docs/MULTI-STORE-SPEC.md
+// §5.1) — the FIX for PWA0: the deployed reader's home base (cdn.llera.eu) is
+// cross-origin to its shell origin, so the SW's old origin-equality gate never
+// cached a production pack. Posting the mounted roots lets it route + cache them.
+// Called on boot, on every mount-table change, and whenever a new SW takes
+// control (a fresh worker starts with no roots and falls back to own-origin).
+function postMounts(): void {
+   const controller = navigator.serviceWorker?.controller
+   if (!controller) return // dev / harness / insecure context — the SW is inert anyway
+   // Built from the mount TABLE, not the booted stores, so it is valid BEFORE
+   // data.init() (which is what lets the SW route a peer's boot fetches). A root
+   // that never boots is harmless — the SW just knows it may cache under it.
+   const roots = data
+      .mountRecords()
+      .filter((r) => !r.del)
+      .map((r) => ({
+         mid: r.id,
+         base: r.url,
+         cred: r.cred ? "include" : "same-origin",
+         role: r.role,
+      }))
+   controller.postMessage({ type: "mounts", roots })
+}
+
 // Returns the pin menu row entry for the current filter, or null when pinning
 // is not available (no SW controller, or a saved/search scope).
 function pinMenuEntry(): { label: string; action: () => void } | null {
@@ -348,6 +374,16 @@ function scrollReaderTop() {
    gestures?.resetScroll()
 }
 
+// The §9.3 compaction tombstone body: an expired article whose payload `srr
+// compact` reclaimed. A sibling of the "[DELETED]" feed tombstone (feedTitle) —
+// the source · date masthead still renders correctly, only the content is gone.
+function expiredTombstone(): HTMLElement {
+   const p = document.createElement("p")
+   p.className = "srr-expired-note"
+   p.textContent = "This article is no longer stored"
+   return p
+}
+
 function render(o: IShowFeed) {
    showReader()
    // Showing the reader supersedes any pending debounced search query. A row-tap
@@ -372,9 +408,19 @@ function render(o: IShowFeed) {
    el.content.style.transition = "none"
    el.content.style.opacity = "0"
    el.content.style.transform = "translateY(6px)"
+   // §9.3 (docs/MANIFEST-SPEC.md): `srr compact` replaces an expired article's
+   // payload with a tombstone that keeps f/a/p and DROPS c/t/l — so `c` is
+   // absent on the wire (`c` is typed string, but omitempty means undefined at
+   // runtime for a compacted line). Reachable only via a ★-Saved / deep-linked
+   // expired chron (normal nav filters chron < add_idx). Render an explicit
+   // "no longer stored" state — source · date intact, a sibling of feedTitle's
+   // "[DELETED]" feed tombstone — instead of the literal "undefined"
+   // sanitizeFragment(undefined) would produce.
+   const body = o.article.c as string | undefined
    // Adopt the sanitized nodes directly — an innerHTML string round-trip would
    // re-parse the whole article on every prev/next step (see sanitizeFragment).
-   el.content.replaceChildren(sanitizeFragment(o.article.c, data.activeStore().base))
+   if (body == null) el.content.replaceChildren(expiredTombstone())
+   else el.content.replaceChildren(sanitizeFragment(body, data.activeStore().base))
    // Reject javascript:/data:/vbscript:/file: in case the writer pipeline let one
    // through. The whole masthead row (source · date · title) is the one permalink;
    // an href makes it a link, its absence leaves it inert chrome (titleless feeds
@@ -461,6 +507,15 @@ function renderEmptyReader(o: IShowFeed) {
    persistHash(location.hash)
 }
 
+// The active mount's display label, or "" when only one store is mounted (the
+// single-store case shows no mount prefix — §6.3).
+function activeMountName(): string {
+   if (data.mountedStores().length <= 1) return ""
+   const mid = data.activeStore().mid
+   const rec = data.mountRecords().find((r) => r.id === mid)
+   return rec ? mountLabel(rec) : mid
+}
+
 function refreshFeedLabel() {
    // The article's source now lives in the header kicker, so the toolbar label
    // is the active-filter indicator: "All", a tag name, or a single feed.
@@ -468,11 +523,17 @@ function refreshFeedLabel() {
    // query), so show the button neutral ("All", unhighlighted) instead of the raw
    // "q:<query>" token getCurrentFilterKey returns.
    const key = nav.isSearchFilter() ? "" : nav.getCurrentFilterKey() // "" (all/multi) | tag name | numeric feed id
-   if (key === lastFeedLabel) return
-   lastFeedLabel = key
+   // Multi-store breadcrumb (docs/MULTI-STORE-SPEC.md §6.3): prefix the readout
+   // with the active mount "MOUNT · LANE" ONLY when more than one store is
+   // mounted — a single-store user sees byte-identical chrome. The mount rides in
+   // the early-return cache key so a mount switch repaints even at the same lane.
+   const mountName = activeMountName()
+   const cacheKey = mountName + " " + key
+   if (cacheKey === lastFeedLabel) return
+   lastFeedLabel = cacheKey
 
    const label = nav.filterLabel(key)
-   el.feedName.textContent = label
+   el.feedName.textContent = mountName ? mountName + " · " + label : label
    // A single-feed filter tints the toolbar label with that feed's source
    // color (the wire-desk identity in the toolbar); [ALL]/tag/saved/search stay
    // neutral. The chip-less label still says which source you're viewing.
@@ -653,11 +714,56 @@ function settingsMenuItems(): MenuItem[] {
    const pin = pinMenuEntry()
    if (pin) items.push(pin)
    items.push(
+      { label: "Stores…", action: openMountsDialog },
       { label: "Image proxy…", action: showImgProxyDialog },
       { label: "Backup / Restore…", action: () => showBackupDialog() },
       { label: "Sync…", action: showSyncDialog },
    )
    return items
+}
+
+// The per-mount state chip for the Stores dialog (docs/MULTI-STORE-SPEC.md §8.3),
+// same wording as the picker switcher's mountChip.
+function mountChipText(mid: string): string {
+   const s = data.mountStatus(mid)
+   if (s.state === "ok") return ""
+   if (s.kind === "toonew") return "Too new"
+   if (s.kind === "offline") return navigator.onLine === false ? "Offline" : "Unreachable"
+   return "Error"
+}
+
+// Apply a changed mount table: adopt it in data (boots new mounts, drops gone
+// ones), re-post the roots to the SW (§5.1), and repaint an open picker. The
+// list/reader keep their current lane unless it was unmounted (data falls back
+// to home), so no forced re-render here.
+function afterMountChange(recs: MountRecord[]): void {
+   void data.applyMountTable(recs).then(() => {
+      postMounts()
+      if (picker.isOpen()) picker.render()
+   })
+}
+
+// Open the Stores dialog (§3): mount by URL, unmount a peer, or forget its
+// history. The dialog is pure UI; app.ts owns the mounts.ts mutations here.
+function openMountsDialog(): void {
+   showMountsDialog({
+      list: () =>
+         data
+            .mountRecords()
+            .filter((r) => !r.del)
+            .map((r) => ({ id: r.id, url: r.url, label: r.label, role: r.role, chip: mountChipText(r.id) })),
+      add: (url) => {
+         const res = addMount(data.mountRecords(), url)
+         if (!res) return "Enter a full https:// store URL"
+         afterMountChange(res.records)
+         return null
+      },
+      remove: (mid) => afterMountChange(removeMount(data.mountRecords(), mid)),
+      forget: (mid) => {
+         forgetStoreState(mid)
+         afterMountChange(removeMount(data.mountRecords(), mid))
+      },
+   })
 }
 
 // The footer node of the open settings menu, kept so the sync status callback
@@ -771,7 +877,12 @@ async function route(hash: string) {
       await guard(() => nav.fromHash(hash))
       return
    }
-   const tokens = nav.parseHashTokens(hash)
+   // The list hash carries the mount too (§6.3) — extract it and switch the
+   // active lane before applying the (bare) filter tokens, mirroring
+   // nav.fromHash's reader path. setActive fails softly for an unmounted/errored
+   // mount, resolving against the current lane rather than blanking (MS4).
+   const { mid, tokens } = nav.parseHashMount(nav.parseHashTokens(hash))
+   if (mid !== data.activeStore().mid) data.setActive(mid)
    nav.applyFilter(tokens)
    // Canonicalize the URL (boot may restore an empty location.hash from
    // localStorage) without growing history.
@@ -807,8 +918,32 @@ async function selectFilter(token: string) {
    // the debounce window lets the stale applySearchQuery fire ~200ms later and
    // bounce the list back into search. Typing itself never routes through here.
    clearTimeout(searchDebounce)
+   // A mount-qualified token (a peer lane/section picked from the picker):
+   // switch the active lane first, then apply the bare token in that store's
+   // context (§6.3). A bare token leaves the active mount as-is.
+   if (token.startsWith("@")) {
+      const { mid, tokens } = nav.parseHashMount([token])
+      data.setActive(mid)
+      token = tokens[0] ?? ""
+   }
    nav.applyFilter(token === "" ? [] : [token])
    await goToList(true)
+}
+
+// Switch the active mount from the picker's mount switcher WITHOUT closing the
+// overlay (§6.3): re-point the active lane to that store's [ALL], rebuild the
+// list underneath, and re-render the picker's lanes in place for the new store.
+// A failed/unmounted mount (setActive returns false) is a no-op.
+async function switchMount(mid: string) {
+   if (held()) return
+   if (mid === data.activeStore().mid) return
+   if (!data.setActive(mid)) return
+   nav.applyFilter([])
+   const h = "#" + nav.tokensSuffix()
+   history.pushState(null, "", h)
+   persistHash(h)
+   await renderListSurface()
+   if (picker.isOpen()) picker.render()
 }
 
 // ── Title search (list filter mode) ──────────────────────────────────────────
@@ -989,6 +1124,12 @@ const KEY_ACTIONS: Record<string, () => void> = {
 }
 
 async function init() {
+   // Tell the SW its mounted roots BEFORE data.init() (the PWA0 fix, §5.1): the
+   // roots come from the mount TABLE (valid pre-init), so a peer store's boot
+   // fetches — kicked inside data.init() — are already routed + cached by the SW
+   // instead of passing through uncached. Re-posted after init (reconcile may
+   // change the table) and on controllerchange.
+   postMounts()
    try {
       await data.init()
    } catch (e) {
@@ -1081,6 +1222,10 @@ async function init() {
       // under the overlay (the picker re-renders its own rows). The overlay stays
       // open so you keep browsing feeds in the new mode.
       onToggleShowRead: toggleUnseenOnly,
+      // The mount switcher: switch the active store in place (§6.3). switchMount
+      // re-points the lane, rebuilds the list underneath, and re-renders the
+      // picker's rows for the new store.
+      onSwitchMount: (mid) => void switchMount(mid),
    })
 
    // The list opens an article in the reader through the same guard mutex as
@@ -1255,7 +1400,16 @@ async function init() {
    })
    // Live content sync: boot is already fresh (data.init just ran), so only the
    // ongoing triggers are wired — re-focus (throttled), reconnect, heartbeat.
-   refresh.init(guardBg, refreshAfterStore)
+   // The third callback repaints the picker when a background PEER poll changed
+   // shape (its unread rollups), without touching the active lane.
+   refresh.init(guardBg, refreshAfterStore, () => {
+      if (picker.isOpen()) picker.render()
+   })
+
+   // Tell the SW its mounted roots (the PWA0 fix, §5.1). A controller may not be
+   // active yet on a first visit, so also post whenever a worker takes control.
+   postMounts()
+   navigator.serviceWorker?.addEventListener("controllerchange", postMounts)
    // Signal to the dev design harness (design.ts) that the real app has booted
    // and the first surface is rendered. Inert in production — nothing else
    // listens. Only fires on the success path (init returns early on db.gz error).

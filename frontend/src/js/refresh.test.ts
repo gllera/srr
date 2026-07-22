@@ -3,7 +3,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 // refresh.ts holds throttle state and wires document/window listeners at
 // init(), so each test gets a fresh instance via vi.resetModules() + dynamic
 // import (the sync.test.ts pattern). data/nav/search are mocked.
-const data = vi.hoisted(() => ({ refresh: vi.fn(async () => "updated" as const) }))
+const data = vi.hoisted(() => ({
+   refresh: vi.fn(async () => "updated" as const),
+   refreshPeers: vi.fn(async () => false),
+   resetMountBackoff: vi.fn(),
+}))
 const nav = vi.hoisted(() => ({ onStoreRefreshed: vi.fn(async () => {}) }))
 const search = vi.hoisted(() => ({ invalidate: vi.fn() }))
 vi.mock("./data", () => data)

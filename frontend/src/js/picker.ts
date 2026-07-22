@@ -16,6 +16,8 @@ import { VERSION } from "./base"
 import * as data from "./data"
 import { wrapTabFocus } from "./dropdown"
 import { countBadge, formatBytes, formatDate, isStale, srcColorIndex, timeAgoProse } from "./fmt"
+import { seenKey } from "./keys"
+import { mountLabel } from "./mounts"
 import * as nav from "./nav"
 import * as refresh from "./refresh"
 import * as sync from "./sync"
@@ -31,6 +33,10 @@ export type PickerHooks = {
    // surface reconciliation (list rebuild / reader re-probe); the picker only
    // re-renders its own rows afterward (their visibility tracks the mode).
    onToggleShowRead: () => void
+   // Switch the active mount from the mount switcher (docs/MULTI-STORE-SPEC.md
+   // §6.3). app.ts re-points the active lane + rebuilds the list; the picker
+   // re-renders its own rows (now the new store's feeds/tags) in place.
+   onSwitchMount: (mid: string) => void
 }
 
 let root: HTMLElement
@@ -77,6 +83,14 @@ export function setup(el: HTMLElement, h: PickerHooks): void {
    filterBox.addEventListener("click", (e) => {
       const t = e.target as HTMLElement
       if (t.closest(".srr-tag-toggle")) return
+      // A mount switcher row (§6.3): switch the active store in place (the picker
+      // stays open; app.ts re-renders our rows for the new store).
+      const m = t.closest("[data-mount]") as HTMLElement | null
+      if (m) {
+         e.preventDefault()
+         hooks.onSwitchMount(m.dataset.mount!)
+         return
+      }
       const a = t.closest("[data-value]") as HTMLElement | null
       if (!a) return
       e.preventDefault()
@@ -239,6 +253,13 @@ function renderFilterList(): void {
    const unreadRows: [HTMLAnchorElement, IFeed][] = []
    const headerRows: [HTMLAnchorElement, IFeed[]][] = []
 
+   // The mount switcher (docs/MULTI-STORE-SPEC.md §6.3) — the store axis ABOVE
+   // tags and feeds. Shown ONLY when more than one store is mounted, so a
+   // single-store user's picker is byte-identical. The active store's lanes
+   // render below; tapping another mount switches the active store in place.
+   const mounted = data.mountedStores()
+   if (mounted.length > 1) frag.appendChild(renderMounts(mounted))
+
    // The two meta filters ride side by side as a scope-chip pair above the
    // feed rows — they aren't feeds (no source chip, no health), so they read
    // as scope pills rather than list members. [ALL]'s unread count (the
@@ -299,6 +320,79 @@ function renderFilterList(): void {
 
    filterBox.replaceChildren(frag)
    void fillUnread(unreadRows, headerRows, allRow)
+}
+
+// The per-mount status chip (docs/MULTI-STORE-SPEC.md §8.3). A CORS rejection and
+// a network outage are indistinguishable to fetch, so the chip is honest about
+// that when online rather than claiming a cause.
+function mountChip(status: data.MountStatus): string {
+   if (status.state === "ok") return ""
+   if (status.kind === "toonew") return "Too new"
+   if (status.kind === "offline") return navigator.onLine === false ? "Offline" : "Unreachable"
+   return "Error"
+}
+
+// A mounted store's approximate total unread — the latest-pack tally summed
+// (exact for a small store, a hint for one with frontiers deep in finalized
+// packs). Read against the store's OWN namespaced seen map.
+function storeUnread(store: data.Store): number {
+   try {
+      if (!store.db || store.db.total_art === 0) return 0
+      let seen: Record<string, number> = {}
+      try {
+         seen = JSON.parse(localStorage.getItem(seenKey(store.mid)) || "{}") as Record<string, number>
+      } catch {
+         seen = {}
+      }
+      const feeds = Object.values(store.db.feeds) as IFeed[]
+      if (feeds.length === 0) return 0
+      const { counts } = data.unreadTally(feeds, (id: number) => seen["feed:" + id], store)
+      let sum = 0
+      for (const v of counts.values()) sum += v
+      return sum
+   } catch {
+      return 0
+   }
+}
+
+// The mount switcher: the store axis above tags/feeds (§6.3). Home first, then
+// peers by ord (data.mountedStores order). The active store wears srr-active; an
+// errored store shows a state chip instead of an unread rollup and is inert
+// (setActive refuses it — no usable db). Rows carry data-mount for the delegated
+// click handler in setup().
+function renderMounts(stores: data.Store[]): HTMLElement {
+   const activeMid = data.activeStore().mid
+   const labels = new Map(data.mountRecords().map((r) => [r.id, mountLabel(r)]))
+   const box = div("srr-picker-mounts")
+   for (const s of stores) {
+      const status = data.mountStatus(s.mid)
+      const row = document.createElement("a")
+      row.href = "#"
+      row.dataset.mount = s.mid
+      row.className = "srr-mount-row" + (s.mid === activeMid ? " srr-active" : "")
+      const title = document.createElement("span")
+      title.className = "srr-row-title"
+      title.textContent = labels.get(s.mid) ?? s.mid
+      row.appendChild(title)
+      const chip = mountChip(status)
+      if (chip) {
+         const c = document.createElement("span")
+         c.className = "srr-mount-chip"
+         c.dataset.kind = status.kind
+         c.textContent = chip
+         row.appendChild(c)
+      } else {
+         const n = storeUnread(s)
+         if (n > 0) {
+            const num = document.createElement("span")
+            num.className = "srr-unread"
+            num.textContent = `×${countBadge(n)}`
+            row.appendChild(num)
+         }
+      }
+      box.appendChild(row)
+   }
+   return box
 }
 
 // Unread badges fill in after the list renders so a cold seen position never

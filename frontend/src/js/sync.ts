@@ -44,7 +44,7 @@
 // fmt.ts) so it unit-tests without a pack server or the base.ts URL side effect.
 
 import { SYNC_URL_KEY } from "./keys"
-import { exportProfile, importProfile, localSeen, localSeenTs, profileTs, touchProfile } from "./profile"
+import { exportProfile, hasPeerState, importProfile, localSeen, localSeenTs, profileTs, touchProfile } from "./profile"
 import { isValidHttpish, normalizeHttpish } from "./urlish"
 
 // Push settles PUSH_DEBOUNCE_MS after the last seen/saved change (a reading
@@ -151,6 +151,11 @@ interface RemoteBlob {
    ts: number
    seen: Record<string, number>
    st: Record<string, number>
+   // Whether the remote carried the multi-store mount table (§4.4). A new build
+   // always writes `mnt` (exportProfile includes it unconditionally), so its
+   // ABSENCE means an old build wrote this blob — force one upgrade push, the
+   // same self-healing shape as the v1→v2 upgrade.
+   hasMnt: boolean
    raw: string
 }
 
@@ -188,7 +193,7 @@ async function pullRemote(url: string): Promise<RemoteBlob | null> {
    if (stRaw !== null && typeof stRaw === "object" && !Array.isArray(stRaw))
       for (const [k, val] of Object.entries(stRaw as Record<string, unknown>))
          if (typeof val === "number" && Number.isFinite(val) && val > 0) st[k] = Math.floor(val)
-   return { v: v as 1 | 2, ts, seen, st, raw }
+   return { v: v as 1 | 2, ts, seen, st, hasMnt: Array.isArray(obj["mnt"]), raw }
 }
 
 async function put(url: string, keepalive = false): Promise<void> {
@@ -226,8 +231,12 @@ export async function syncNow(opts: { manual?: boolean } = {}): Promise<boolean>
          const r = importProfile(remote.raw, { prefs: false, mode: remote.v === 1 ? "merge" : "sync" })
          if (!r.ok) throw new Error(r.error ?? "invalid profile")
          changed = r.changed === true
-         // A v1 remote always upgrade-pushes so the endpoint moves to v2.
-         if (remote.v === 1) dirty = true
+         // A v1 remote always upgrade-pushes so the endpoint moves to v2; a v2
+         // remote that PREDATES multi-store (no `mnt`) gets the same one-time
+         // upgrade push ONLY when this device actually has multi-store state to
+         // add (a live peer mount / peer substate), so a pure single-store
+         // device stays quiet (§4.4 — the old-build regression self-heal).
+         if (remote.v === 1 || (!remote.hasMnt && hasPeerState())) dirty = true
       } else {
          // 404 — the endpoint holds nothing NOW (wiped or reset since any
          // earlier pull), so forget flush()'s guard snapshot; the seeding push

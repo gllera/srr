@@ -738,6 +738,39 @@ body.srr-view-list .srr-toolbar {
    & a.srr-scope-chip + a.srr-scope-chip {
       border-left: 1px solid var(--faint);
    }
+   /* The mount switcher (docs/MULTI-STORE-SPEC.md §6.3) — the store axis above
+      tags/feeds. Only rendered when >1 store is mounted, so a single-store
+      picker is byte-identical. Each row is the store's label + an unread rollup
+      or a state chip; the active store wears the shared srr-active tint. */
+   & .srr-picker-mounts {
+      display: flex;
+      flex-direction: column;
+      gap: 0.15rem;
+      margin-bottom: 0.5rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 1px solid var(--faint);
+   }
+   & a.srr-mount-row {
+      display: flex;
+      align-items: center;
+      font-weight: 600;
+   }
+   & a.srr-mount-row .srr-row-title {
+      flex: 0 1 auto;
+   }
+   & .srr-mount-chip {
+      flex-shrink: 0;
+      margin-left: 0.4rem;
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+   }
+   & .srr-mount-chip[data-kind="toonew"],
+   & .srr-mount-chip[data-kind="error"] {
+      color: var(--accent);
+   }
    /* Source-color chip on feed rows — the same per-feed color (data-src →
       --src) as the row's list rail and the reader spine, so a source is picked
       here by the color it wears everywhere else. */
@@ -1396,6 +1429,18 @@ body:not(.srr-view-list) .srr-open-reader {
    text-transform: uppercase;
    color: var(--muted);
 }
+/* The §9.3 compaction tombstone body: an expired article `srr compact` emptied.
+   Rendered inside .srr-content in place of prose, so it reads as muted chrome
+   (a sibling of the "[DELETED]" feed tombstone) rather than an article. */
+.srr-expired-note {
+   margin: 2rem 0;
+   font-family: var(--font-mono);
+   font-size: 0.85rem;
+   letter-spacing: 0.04em;
+   color: var(--muted);
+   text-align: center;
+   font-style: italic;
+}
 /* Scoped under .srr-list-empty so the margin reset (0,2,0) outranks the reader's
    prose rule .srr-content p (0,1,1, a 1em bottom margin) — otherwise the message
    gains a margin in the reader only, growing the centered block and nudging it up
@@ -1604,6 +1649,7 @@ body:not(.srr-view-list) .srr-open-reader {
 .srr-imgproxy-dialog,
 .srr-sync-dialog,
 .srr-backup-dialog,
+.srr-mounts-dialog,
 .srr-info-dialog {
    display: none;
    position: fixed;
@@ -1620,6 +1666,7 @@ body:not(.srr-view-list) .srr-open-reader {
 .srr-imgproxy-card,
 .srr-sync-card,
 .srr-backup-card,
+.srr-mounts-card,
 .srr-info-card {
    max-height: calc(100dvh - 2.5rem);
    overflow-y: auto;
@@ -1634,6 +1681,7 @@ body:not(.srr-view-list) .srr-open-reader {
 .srr-imgproxy-title,
 .srr-sync-title,
 .srr-backup-title,
+.srr-mounts-title,
 .srr-info-title {
    margin: 0 0 0.6rem;
    font-family: var(--font-mono);
@@ -1649,6 +1697,63 @@ body:not(.srr-view-list) .srr-open-reader {
 .srr-imgproxy-card,
 .srr-sync-card {
    width: min(26rem, 100%);
+}
+
+/* The Mounts dialog (§3, §6.3): a store list + an add-a-store input. */
+.srr-mounts-card {
+   width: min(30rem, 100%);
+}
+.srr-mounts-list {
+   display: flex;
+   flex-direction: column;
+   gap: 0.5rem;
+   margin-bottom: 1rem;
+}
+.srr-mount-item {
+   border: 1px solid var(--border);
+   border-radius: var(--radius);
+   padding: 0.6rem 0.75rem;
+}
+.srr-mount-item-label {
+   font-weight: 600;
+   display: flex;
+   align-items: center;
+   gap: 0.4rem;
+}
+.srr-mount-item-url {
+   font-size: var(--text-sm);
+   color: var(--muted);
+   word-break: break-all;
+}
+.srr-mount-item-chip {
+   font-family: var(--font-mono);
+   font-size: 0.65rem;
+   text-transform: uppercase;
+   letter-spacing: 0.05em;
+   color: var(--accent);
+}
+.srr-mount-item-actions {
+   display: flex;
+   gap: 0.4rem;
+   margin-top: 0.5rem;
+}
+.srr-mount-add {
+   display: flex;
+   gap: 0.5rem;
+}
+.srr-mount-add .srr-mount-input {
+   flex: 1 1 auto;
+}
+.srr-mount-err {
+   margin-top: 0.4rem;
+   font-size: var(--text-sm);
+   color: var(--accent);
+   min-height: 1em;
+}
+.srr-mounts-actions {
+   display: flex;
+   justify-content: flex-end;
+   margin-top: 1rem;
 }
 .srr-imgproxy-desc,
 .srr-sync-desc {

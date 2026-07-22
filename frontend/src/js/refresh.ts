@@ -24,6 +24,9 @@ let lastError = ""
 // busy and skips, mirroring sync.ts's inert-before-init posture.
 let runExclusive: (fn: () => Promise<void>) => Promise<boolean> = async () => false
 let onUpdated: () => void = () => {}
+// A peer store (non-active mount) changed shape this cycle — repaint the picker's
+// per-mount rollups. Lighter than onUpdated (no active-lane nav reconciliation).
+let onPeersUpdated: () => void = () => {}
 
 // The last cycle's failure ("" = healthy) — the config status line reads it.
 export function lastRefreshError(): string {
@@ -62,6 +65,17 @@ export async function refreshNow(): Promise<string> {
             result = lastError
          }
       }
+      // Background poll of every OTHER mounted store (docs/MULTI-STORE-SPEC.md
+      // §6.3). Independent of the active lane: a peer failure never sets
+      // lastError (peers surface their own per-mount chip via data.mountStatus)
+      // and never reconciles the active nav state. Only a peer that CHANGED
+      // shape repaints the picker's rollups. Single-store (home only) makes this
+      // a no-op — there are no peers.
+      try {
+         if (await data.refreshPeers()) onPeersUpdated()
+      } catch {
+         // peer errors are per-mount, already recorded in data.mountStatus
+      }
    })
    return result
 }
@@ -73,13 +87,23 @@ function due(): boolean {
 // Wire the lifecycle: throttled re-check on tab re-focus, immediate on regained
 // connectivity, a slow heartbeat while visible. `exclusive` = app's background
 // guard (false = busy, skip); `updated` = app's after-refresh UI routine.
-export function init(exclusive: (fn: () => Promise<void>) => Promise<boolean>, updated: () => void): void {
+export function init(
+   exclusive: (fn: () => Promise<void>) => Promise<boolean>,
+   updated: () => void,
+   peersUpdated: () => void = () => {},
+): void {
    runExclusive = exclusive
    onUpdated = updated
+   onPeersUpdated = peersUpdated
    document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible" && due()) void refreshNow()
    })
-   window.addEventListener("online", () => void refreshNow())
+   window.addEventListener("online", () => {
+      // Regained connectivity resets every mount's backoff so a dead peer is
+      // retried immediately (§8.3), then runs a cycle.
+      data.resetMountBackoff()
+      void refreshNow()
+   })
    setInterval(() => {
       if (document.visibilityState === "visible" && due()) void refreshNow()
    }, POLL_INTERVAL_MS)

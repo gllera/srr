@@ -65,6 +65,23 @@ const nav = vi.hoisted(() => {
                }
             })
       },
+      // Faithful inline copy of the real §6.3 mount extractor (pure grammar).
+      parseHashMount: (raw: string[]) => {
+         if (raw.length === 0 || !raw[0].startsWith("@")) return { mid: "0", tokens: raw }
+         const parseTok = (t: string) => {
+            const c = t.indexOf(":")
+            return c === -1 ? { mid: t.slice(1), tok: "" } : { mid: t.slice(1, c), tok: t.slice(c + 1) }
+         }
+         const mid = parseTok(raw[0]).mid
+         const tokens: string[] = []
+         for (const r of raw) {
+            if (!r.startsWith("@")) break
+            const p = parseTok(r)
+            if (p.mid !== mid) break
+            if (p.tok) tokens.push(p.tok)
+         }
+         return { mid, tokens }
+      },
       SAVED_TOKEN: "~saved",
       getCurrentFilterKey: vi.fn(() => ""),
       filterLabel: vi.fn((key: string) =>
@@ -113,6 +130,10 @@ const data = vi.hoisted(() => ({
    // The active store context app reads for the pin message base/mid and the
    // article base it hands the fmt sanitizer (home mid "0", loopback base).
    activeStore: () => ({ mid: "0", base: new URL("http://localhost/") }),
+   setActive: vi.fn(() => true),
+   mountedStores: vi.fn(() => [{ mid: "0", base: new URL("http://localhost/"), cred: "same-origin", role: "home" }]),
+   mountRecords: vi.fn(() => [{ id: "0", url: "http://localhost/", label: "", ord: 0, role: "home", cred: false }]),
+   mountStatus: vi.fn(() => ({ state: "ok", kind: "", error: "" })),
 }))
 vi.mock("./data", () => data)
 
@@ -558,6 +579,34 @@ describe("reader titleless feeds (Telegram-style: title duplicates the body)", (
       hashTo("#7")
       await flush()
       expect(document.activeElement).toBe(document.querySelector(".srr-content"))
+   })
+})
+
+describe("reader compaction tombstone (§9.3 — expired article, no stored content)", () => {
+   it("renders 'no longer stored' when the article payload is absent, keeping source + date", async () => {
+      await boot()
+      // `srr compact` drops c/t/l and keeps f/a/p — the wire line has no `c`.
+      nav.fromHash.mockResolvedValue(showFeed({ article: { f: 1, a: 0, p: 1700000000 } as unknown as IArticle }))
+      hashTo("#42")
+      await flush()
+      const content = document.querySelector(".srr-content") as HTMLElement
+      expect(content.querySelector(".srr-expired-note")?.textContent).toBe("This article is no longer stored")
+      // It is NOT the "(no matching articles)" empty state — the reader chrome stays.
+      expect(content.querySelector(".srr-list-empty")).toBeNull()
+      const reader = document.querySelector(".srr-reader") as HTMLElement
+      expect(reader.classList.contains("srr-reader-empty")).toBe(false)
+      // Source · date still render (the masthead is intact — a sibling of [DELETED]).
+      expect((document.querySelector(".srr-date") as HTMLElement).hidden).toBe(false)
+   })
+
+   it("renders normal content when the payload is present (no false tombstone)", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ article: { f: 1, a: 0, p: 0, c: "<p>alive</p>" } as IArticle }))
+      hashTo("#43")
+      await flush()
+      const content = document.querySelector(".srr-content") as HTMLElement
+      expect(content.querySelector(".srr-expired-note")).toBeNull()
+      expect(content.textContent).toContain("alive")
    })
 })
 
@@ -1012,7 +1061,13 @@ describe("settings menu — the now-viewing readout", () => {
       const { items } = menuCall()
       // No SW controller in jsdom → the contextual pin row is absent. "Show read"
       // moved to the filter picker's header (see the picker toggle tests).
-      expect(items.map((i) => i.label)).toEqual(["Search articles…", "Image proxy…", "Backup / Restore…", "Sync…"])
+      expect(items.map((i) => i.label)).toEqual([
+         "Search articles…",
+         "Stores…",
+         "Image proxy…",
+         "Backup / Restore…",
+         "Sync…",
+      ])
    })
 
    it("'Search articles…' leaves the menu for the list with search applied", async () => {
