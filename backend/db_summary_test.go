@@ -45,8 +45,8 @@ func setupBoundaryDB(t *testing.T) (*DB, string) {
 }
 
 // The HdrPacks=0-with-finalized-packs state synced here is also exactly what
-// a pre-summary store (first run after upgrade) or a post-`srr gen --bump`
-// reset presents, so this covers all three rebuild triggers.
+// a pre-summary store (first run after upgrade) presents, so this covers the
+// rebuild trigger as well.
 func TestSyncIdxSummaryAtBoundary(t *testing.T) {
 	db, dir := setupBoundaryDB(t)
 

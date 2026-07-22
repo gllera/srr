@@ -241,6 +241,99 @@ func (o *InspectCmd) checkConfigSidecar(fetch keyGetter, core *DBCore, expected 
 	return 0
 }
 
+// chronState is the chron-addressing state of one generation: the scalars and
+// per-feed counters device-local state (read frontiers, ★-Saved chrons, shared
+// #pos links) is anchored to. A renumbering (a physical drop that shifted
+// addresses down, the one thing M8 forbids and the gate on S35's compaction)
+// shows up as one of these DECREASING between generations.
+type chronState struct {
+	totalArt int
+	nextPID  int
+	feeds    map[int]FeedPublic
+}
+
+// checkChronPermanence enforces invariant M8 (docs/MANIFEST-SPEC.md §6.5, §9.6)
+// across the last K manifests: no generation may renumber a chron. It is the
+// loud check S35's physical compaction is gated on — compaction empties expired
+// payloads in place (tombstones) and never moves an article, so every scalar
+// below stays flat or grows across a compaction; a hypothetical renumbering
+// would drop one and fail here.
+//
+// Comparisons that survive id reuse: total_art and next_pid are store-wide and
+// only ever grow; per-feed total_art/add_idx/xp only ever grow FOR A GIVEN
+// SOURCE, so a feed whose url changed between two generations (an id freed and
+// reused for a different source, whose counters legitimately reset) is skipped.
+func (o *InspectCmd) checkChronPermanence(fetch keyGetter, core *DBCore) int {
+	if core.legacyRoot != nil {
+		fmt.Fprintln(o.w(), "[chron-permanence] pre-cutover store: no manifest chain to check")
+		return 0
+	}
+	if core.ManifestNum == 0 {
+		fmt.Fprintln(o.w(), "[chron-permanence] empty store: nothing to check")
+		return 0
+	}
+
+	from := max(core.GCManifest+1, core.ManifestNum-keepManifests+1, 1)
+	states := make([]chronState, 0, core.ManifestNum-from+1)
+	gens := make([]int, 0, core.ManifestNum-from+1)
+	for g := from; g < core.ManifestNum; g++ {
+		buf, err := fetch(manifestKey(g))
+		if err != nil {
+			// A hole is already M2's to report (checkManifest); a missing
+			// generation can't be compared, so skip it here rather than
+			// double-report.
+			continue
+		}
+		var man Manifest
+		if err := json.Unmarshal(buf, &man); err != nil {
+			continue
+		}
+		states = append(states, chronState{totalArt: man.TotalArticles, nextPID: man.NextPackID, feeds: man.Feeds})
+		gens = append(gens, g)
+	}
+	// The current generation (root.m) is the loaded core itself, not a re-read.
+	cur := chronState{totalArt: core.TotalArticles, nextPID: core.NextPackID, feeds: map[int]FeedPublic{}}
+	for id, ch := range core.Feeds {
+		cur.feeds[id] = feedPublicOf(ch)
+	}
+	states = append(states, cur)
+	gens = append(gens, core.ManifestNum)
+
+	issues := 0
+	bad := func(format string, args ...any) {
+		fmt.Fprintf(o.w(), "[chron-permanence] "+format+"\n", args...)
+		issues++
+	}
+	for i := 1; i < len(states); i++ {
+		older, newer, og, ng := states[i-1], states[i], gens[i-1], gens[i]
+		if newer.totalArt < older.totalArt {
+			bad("M8 violated: total_art fell %d→%d between manifest %d and %d — a chron was renumbered", older.totalArt, newer.totalArt, og, ng)
+		}
+		if newer.nextPID < older.nextPID {
+			bad("M8 violated: next_pid fell %d→%d between manifest %d and %d — a data position was renumbered", older.nextPID, newer.nextPID, og, ng)
+		}
+		for id, of := range older.feeds {
+			nf, ok := newer.feeds[id]
+			if !ok || nf.URL != of.URL {
+				continue // feed removed, or id reused for a different source
+			}
+			if nf.TotalArt < of.TotalArt {
+				bad("M8 violated: feed %d (%q) total_art fell %d→%d (manifest %d→%d)", id, of.Title, of.TotalArt, nf.TotalArt, og, ng)
+			}
+			if nf.AddIdx < of.AddIdx {
+				bad("M8 violated: feed %d (%q) add_idx fell %d→%d (manifest %d→%d) — the read frontier it anchors would misaddress", id, of.Title, of.AddIdx, nf.AddIdx, og, ng)
+			}
+			if nf.Expired < of.Expired {
+				bad("M8 violated: feed %d (%q) xp fell %d→%d (manifest %d→%d)", id, of.Title, of.Expired, nf.Expired, og, ng)
+			}
+		}
+	}
+	if issues == 0 {
+		fmt.Fprintf(o.w(), "[chron-permanence] chron addresses stable across %d generation(s) in (%d, %d]\n", len(states), from-1, core.ManifestNum)
+	}
+	return issues
+}
+
 // diffJSON renders two values as compact JSON for a divergence message. The
 // point is to name the actual differing bytes rather than dump Go structs.
 func diffJSON(got, want any) string {

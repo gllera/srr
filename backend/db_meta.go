@@ -186,12 +186,13 @@ func numFinalizedMeta(totalArticles int) int {
 	return (totalArticles - 1) / metaPackSize
 }
 
-// SyncMeta reconciles the meta/ series with the store whenever db.gz's
+// SyncMeta reconciles the meta/ series with the store whenever its
 // MetaPacks/MetaTail coverage lags TotalArticles: a normal append, a
-// pre-meta store's first run after upgrade, a post-`srr gen --bump` reset,
-// or a retry after a failed sync — one self-healing code path for all of
-// them (the SyncIdxSummary philosophy). It extends the previous run's tail
-// (meta/L<Seq-1>, trusted only when its entry count matches MetaTail)
+// pre-meta store's first run after upgrade, a coverage-inconsistency rebuild
+// (the truncate-and-rebuild branch below), or a retry after a failed sync —
+// one self-healing code path for all of them (the SyncIdxSummary philosophy).
+// It extends the previous run's tail (the meta tail the name table lists,
+// trusted only when its entry count matches MetaTail)
 // with the missing chron range, finalizing bloom-headed shards at each
 // metaPackSize boundary, then writes the new latest shard and, when shards
 // were finalized, rebuilds the bloom summary from cheap streaming header
@@ -208,10 +209,10 @@ func numFinalizedMeta(totalArticles int) int {
 // Trust is structural: latest names are write-once, so memo.seq == Seq-1
 // plus the entry count matching MetaTail guarantees the memo holds exactly
 // the bytes the GET would return (jsonEncode lines, trailing \n included —
-// the same form readMetaLines yields). Any other state — failed commit,
-// external writer, gen --bump (zeroes MetaTail, skipping the read-back
-// entirely), a fresh process — misses and falls through to today's GET +
-// rebuild path, which stays the correctness backstop.
+// the same form readMetaLines yields). Any other state — a failed commit, an
+// external writer, a coverage-inconsistency rebuild (which zeroes MetaTail,
+// skipping the read-back entirely), a fresh process — misses and falls through
+// to the GET + rebuild path, which stays the correctness backstop.
 type metaTailCache struct {
 	mu    sync.Mutex
 	key   string

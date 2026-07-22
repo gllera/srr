@@ -253,10 +253,10 @@ type DBCore struct {
 type ManifestState struct {
 	FetchedAt     int64 `json:"fetched_at"`
 	TotalArticles int   `json:"total_art"`
-	// MetaTail is the entry count of the published latest meta shard
-	// (meta/L<tailGen>.gz). SyncMeta trusts a read-back tail only when its
-	// count matches, so a stale shard from a crash or a pre-`gen --bump` store
-	// is rebuilt from data packs instead of extended.
+	// MetaTail is the entry count of the published latest meta shard (the meta
+	// series' tail object the name table lists). SyncMeta trusts a read-back
+	// tail only when its count matches, so a stale shard from a crash is rebuilt
+	// from data packs instead of extended.
 	MetaTail int `json:"mt,omitempty"`
 	// DeltaArticles is the total article count across the live deltas.
 	// tailCovered = TotalArticles − DeltaArticles is the seam: chrons below it
