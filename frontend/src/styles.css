@@ -1649,6 +1649,7 @@ body:not(.srr-view-list) .srr-open-reader {
 .srr-imgproxy-dialog,
 .srr-sync-dialog,
 .srr-backup-dialog,
+.srr-mounts-dialog,
 .srr-info-dialog {
    display: none;
    position: fixed;
@@ -1665,6 +1666,7 @@ body:not(.srr-view-list) .srr-open-reader {
 .srr-imgproxy-card,
 .srr-sync-card,
 .srr-backup-card,
+.srr-mounts-card,
 .srr-info-card {
    max-height: calc(100dvh - 2.5rem);
    overflow-y: auto;
@@ -1679,6 +1681,7 @@ body:not(.srr-view-list) .srr-open-reader {
 .srr-imgproxy-title,
 .srr-sync-title,
 .srr-backup-title,
+.srr-mounts-title,
 .srr-info-title {
    margin: 0 0 0.6rem;
    font-family: var(--font-mono);
@@ -1694,6 +1697,63 @@ body:not(.srr-view-list) .srr-open-reader {
 .srr-imgproxy-card,
 .srr-sync-card {
    width: min(26rem, 100%);
+}
+
+/* The Mounts dialog (§3, §6.3): a store list + an add-a-store input. */
+.srr-mounts-card {
+   width: min(30rem, 100%);
+}
+.srr-mounts-list {
+   display: flex;
+   flex-direction: column;
+   gap: 0.5rem;
+   margin-bottom: 1rem;
+}
+.srr-mount-item {
+   border: 1px solid var(--border);
+   border-radius: var(--radius);
+   padding: 0.6rem 0.75rem;
+}
+.srr-mount-item-label {
+   font-weight: 600;
+   display: flex;
+   align-items: center;
+   gap: 0.4rem;
+}
+.srr-mount-item-url {
+   font-size: var(--text-sm);
+   color: var(--muted);
+   word-break: break-all;
+}
+.srr-mount-item-chip {
+   font-family: var(--font-mono);
+   font-size: 0.65rem;
+   text-transform: uppercase;
+   letter-spacing: 0.05em;
+   color: var(--accent);
+}
+.srr-mount-item-actions {
+   display: flex;
+   gap: 0.4rem;
+   margin-top: 0.5rem;
+}
+.srr-mount-add {
+   display: flex;
+   gap: 0.5rem;
+}
+.srr-mount-add .srr-mount-input {
+   flex: 1 1 auto;
+}
+.srr-mount-err {
+   margin-top: 0.4rem;
+   font-size: var(--text-sm);
+   color: var(--accent);
+   min-height: 1em;
+}
+.srr-mounts-actions {
+   display: flex;
+   justify-content: flex-end;
+   margin-top: 1rem;
 }
 .srr-imgproxy-desc,
 .srr-sync-desc {

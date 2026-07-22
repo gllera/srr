@@ -1061,7 +1061,13 @@ describe("settings menu — the now-viewing readout", () => {
       const { items } = menuCall()
       // No SW controller in jsdom → the contextual pin row is absent. "Show read"
       // moved to the filter picker's header (see the picker toggle tests).
-      expect(items.map((i) => i.label)).toEqual(["Search articles…", "Image proxy…", "Backup / Restore…", "Sync…"])
+      expect(items.map((i) => i.label)).toEqual([
+         "Search articles…",
+         "Stores…",
+         "Image proxy…",
+         "Backup / Restore…",
+         "Sync…",
+      ])
    })
 
    it("'Search articles…' leaves the menu for the list with search applied", async () => {

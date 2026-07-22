@@ -222,6 +222,121 @@ export function showSyncDialog(): void {
    openModal(syncDialog, syncDialog.querySelector<HTMLElement>(".srr-sync-body")!, syncBody)
 }
 
+// ── Mounts dialog (docs/MULTI-STORE-SPEC.md §3, §6.3) ─────────────────────────
+// Manage the mounted store table: mount a new store by URL, unmount a peer, or
+// remove-and-forget its reading history. Built DYNAMICALLY (not from an
+// index.html skeleton) so it needs no design.html drift-guard change; it reuses
+// the shared modal CSS (.srr-mounts-dialog joins the grouped backdrop/card
+// selectors). app.ts owns the mount mutations (mounts.ts + data.applyMountTable
+// + the SW mounts post) and passes them as hooks; the dialog is pure UI and
+// re-renders itself after each action.
+export interface MountRow {
+   id: string
+   url: string
+   label: string
+   role: string
+   chip: string // "" when healthy, else the state chip ("Offline" / "Too new" / …)
+}
+export interface MountsDialogHooks {
+   list: () => MountRow[]
+   add: (url: string) => string | null // returns an error message, or null on success
+   remove: (mid: string) => void
+   forget: (mid: string) => void
+}
+
+let mountsDialog: HTMLElement | null = null
+
+function ensureMountsDialog(): HTMLElement {
+   if (mountsDialog) return mountsDialog
+   const d = divEl("srr-mounts-dialog")
+   d.setAttribute("role", "dialog")
+   d.setAttribute("aria-modal", "true")
+   const card = divEl("srr-mounts-card")
+   const h = document.createElement("h2")
+   h.className = "srr-mounts-title"
+   h.textContent = "Stores"
+   card.append(h, divEl("srr-mounts-body"))
+   d.append(card)
+   document.body.appendChild(d)
+   mountsDialog = d
+   return d
+}
+
+function mountsContent(close: () => void, hooks: MountsDialogHooks, rerender: () => void): DocumentFragment {
+   const frag = document.createDocumentFragment()
+   const listBox = divEl("srr-mounts-list")
+   for (const m of hooks.list()) {
+      const row = divEl("srr-mount-item")
+      const label = document.createElement("div")
+      label.className = "srr-mount-item-label"
+      label.textContent = m.label || m.url
+      const url = document.createElement("div")
+      url.className = "srr-mount-item-url"
+      url.textContent = m.url
+      row.append(label, url)
+      if (m.chip) {
+         const chip = document.createElement("span")
+         chip.className = "srr-mount-item-chip"
+         chip.textContent = m.chip
+         label.appendChild(chip)
+      }
+      if (m.role !== "home") {
+         const actions = divEl("srr-mount-item-actions")
+         actions.append(
+            btn("srr-dialog-btn srr-mount-remove", "unmount store", "Unmount", () => {
+               hooks.remove(m.id)
+               rerender()
+            }),
+            btn("srr-dialog-btn srr-mount-forget", "remove and forget reading history", "Forget", () => {
+               hooks.forget(m.id)
+               rerender()
+            }),
+         )
+         row.appendChild(actions)
+      }
+      listBox.appendChild(row)
+   }
+   frag.appendChild(listBox)
+
+   // Add-a-store row: a URL input + Add button. Invalid / unmountable URLs mark
+   // the input and show the error, keeping the dialog open.
+   const input = editorInput("url", "srr-mount-input", "Store URL to mount")
+   input.placeholder = "cdn.example.org/store/"
+   const err = document.createElement("div")
+   err.className = "srr-mount-err"
+   const doAdd = () => {
+      const e = hooks.add(input.value.trim())
+      if (e) {
+         input.classList.add("srr-input-invalid")
+         err.textContent = e
+         input.focus()
+         return
+      }
+      err.textContent = ""
+      input.value = ""
+      rerender()
+   }
+   editorKeys(input, doAdd, close)
+   const addRow = divEl("srr-mount-add")
+   addRow.append(input, btn("srr-dialog-btn srr-dialog-primary srr-mount-add-btn", "mount store", "Add", doAdd))
+   frag.append(addRow, err)
+
+   const actions = divEl("srr-mounts-actions")
+   actions.append(btn("srr-dialog-btn srr-mounts-close", "close", "Close", close))
+   frag.appendChild(actions)
+   return frag
+}
+
+export function showMountsDialog(hooks: MountsDialogHooks): void {
+   const dialog = ensureMountsDialog()
+   const body = dialog.querySelector<HTMLElement>(".srr-mounts-body")!
+   const build = (close: () => void): Node => {
+      const rerender = () => body.replaceChildren(mountsContent(close, hooks, rerender))
+      return mountsContent(close, hooks, rerender)
+   }
+   openModal(dialog, body, build)
+}
+
 // ── Anchored context menu ─────────────────────────────────────────────────────
 // A minimal anchored menu of action rows floated above its anchor — every
 // current anchor sits in the bottom toolbar, so "above" keeps it clear of the

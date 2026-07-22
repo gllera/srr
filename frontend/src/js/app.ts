@@ -4,6 +4,7 @@ import {
    showBackupDialog,
    showContextMenu,
    showImgProxyDialog,
+   showMountsDialog,
    showSyncDialog,
    wrapTabFocus,
    type MenuItem,
@@ -12,6 +13,7 @@ import { collapseBrokenMedia, countBadge, readerDateline, sanitizeFragment, srcC
 import { setupGestures, type Gestures } from "./gestures"
 import { HASH_KEY, UNREAD_ONLY_KEY } from "./keys"
 import * as list from "./list"
+import { addMount, forgetStoreState, removeMount, type MountRecord } from "./mounts"
 import * as nav from "./nav"
 import * as picker from "./picker"
 import { clearAllPins, isPinned, listPins, pinFilter, unpinFilter } from "./pin"
@@ -691,11 +693,56 @@ function settingsMenuItems(): MenuItem[] {
    const pin = pinMenuEntry()
    if (pin) items.push(pin)
    items.push(
+      { label: "Stores…", action: openMountsDialog },
       { label: "Image proxy…", action: showImgProxyDialog },
       { label: "Backup / Restore…", action: () => showBackupDialog() },
       { label: "Sync…", action: showSyncDialog },
    )
    return items
+}
+
+// The per-mount state chip for the Stores dialog (docs/MULTI-STORE-SPEC.md §8.3),
+// same wording as the picker switcher's mountChip.
+function mountChipText(mid: string): string {
+   const s = data.mountStatus(mid)
+   if (s.state === "ok") return ""
+   if (s.kind === "toonew") return "Too new"
+   if (s.kind === "offline") return navigator.onLine === false ? "Offline" : "Unreachable"
+   return "Error"
+}
+
+// Apply a changed mount table: adopt it in data (boots new mounts, drops gone
+// ones), re-post the roots to the SW (§5.1), and repaint an open picker. The
+// list/reader keep their current lane unless it was unmounted (data falls back
+// to home), so no forced re-render here.
+function afterMountChange(recs: MountRecord[]): void {
+   void data.applyMountTable(recs).then(() => {
+      postMounts()
+      if (picker.isOpen()) picker.render()
+   })
+}
+
+// Open the Stores dialog (§3): mount by URL, unmount a peer, or forget its
+// history. The dialog is pure UI; app.ts owns the mounts.ts mutations here.
+function openMountsDialog(): void {
+   showMountsDialog({
+      list: () =>
+         data
+            .mountRecords()
+            .filter((r) => !r.del)
+            .map((r) => ({ id: r.id, url: r.url, label: r.label, role: r.role, chip: mountChipText(r.id) })),
+      add: (url) => {
+         const res = addMount(data.mountRecords(), url)
+         if (!res) return "Enter a full https:// store URL"
+         afterMountChange(res.records)
+         return null
+      },
+      remove: (mid) => afterMountChange(removeMount(data.mountRecords(), mid)),
+      forget: (mid) => {
+         forgetStoreState(mid)
+         afterMountChange(removeMount(data.mountRecords(), mid))
+      },
+   })
 }
 
 // The footer node of the open settings menu, kept so the sync status callback
