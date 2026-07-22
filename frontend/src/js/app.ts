@@ -348,6 +348,16 @@ function scrollReaderTop() {
    gestures?.resetScroll()
 }
 
+// The §9.3 compaction tombstone body: an expired article whose payload `srr
+// compact` reclaimed. A sibling of the "[DELETED]" feed tombstone (feedTitle) —
+// the source · date masthead still renders correctly, only the content is gone.
+function expiredTombstone(): HTMLElement {
+   const p = document.createElement("p")
+   p.className = "srr-expired-note"
+   p.textContent = "This article is no longer stored"
+   return p
+}
+
 function render(o: IShowFeed) {
    showReader()
    // Showing the reader supersedes any pending debounced search query. A row-tap
@@ -372,9 +382,19 @@ function render(o: IShowFeed) {
    el.content.style.transition = "none"
    el.content.style.opacity = "0"
    el.content.style.transform = "translateY(6px)"
+   // §9.3 (docs/MANIFEST-SPEC.md): `srr compact` replaces an expired article's
+   // payload with a tombstone that keeps f/a/p and DROPS c/t/l — so `c` is
+   // absent on the wire (`c` is typed string, but omitempty means undefined at
+   // runtime for a compacted line). Reachable only via a ★-Saved / deep-linked
+   // expired chron (normal nav filters chron < add_idx). Render an explicit
+   // "no longer stored" state — source · date intact, a sibling of feedTitle's
+   // "[DELETED]" feed tombstone — instead of the literal "undefined"
+   // sanitizeFragment(undefined) would produce.
+   const body = o.article.c as string | undefined
    // Adopt the sanitized nodes directly — an innerHTML string round-trip would
    // re-parse the whole article on every prev/next step (see sanitizeFragment).
-   el.content.replaceChildren(sanitizeFragment(o.article.c, data.activeStore().base))
+   if (body == null) el.content.replaceChildren(expiredTombstone())
+   else el.content.replaceChildren(sanitizeFragment(body, data.activeStore().base))
    // Reject javascript:/data:/vbscript:/file: in case the writer pipeline let one
    // through. The whole masthead row (source · date · title) is the one permalink;
    // an href makes it a link, its absence leaves it inert chrome (titleless feeds

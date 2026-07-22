@@ -1396,6 +1396,18 @@ body:not(.srr-view-list) .srr-open-reader {
    text-transform: uppercase;
    color: var(--muted);
 }
+/* The §9.3 compaction tombstone body: an expired article `srr compact` emptied.
+   Rendered inside .srr-content in place of prose, so it reads as muted chrome
+   (a sibling of the "[DELETED]" feed tombstone) rather than an article. */
+.srr-expired-note {
+   margin: 2rem 0;
+   font-family: var(--font-mono);
+   font-size: 0.85rem;
+   letter-spacing: 0.04em;
+   color: var(--muted);
+   text-align: center;
+   font-style: italic;
+}
 /* Scoped under .srr-list-empty so the margin reset (0,2,0) outranks the reader's
    prose rule .srr-content p (0,1,1, a 1em bottom margin) — otherwise the message
    gains a margin in the reader only, growing the centered block and nudging it up

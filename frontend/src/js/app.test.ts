@@ -561,6 +561,34 @@ describe("reader titleless feeds (Telegram-style: title duplicates the body)", (
    })
 })
 
+describe("reader compaction tombstone (§9.3 — expired article, no stored content)", () => {
+   it("renders 'no longer stored' when the article payload is absent, keeping source + date", async () => {
+      await boot()
+      // `srr compact` drops c/t/l and keeps f/a/p — the wire line has no `c`.
+      nav.fromHash.mockResolvedValue(showFeed({ article: { f: 1, a: 0, p: 1700000000 } as unknown as IArticle }))
+      hashTo("#42")
+      await flush()
+      const content = document.querySelector(".srr-content") as HTMLElement
+      expect(content.querySelector(".srr-expired-note")?.textContent).toBe("This article is no longer stored")
+      // It is NOT the "(no matching articles)" empty state — the reader chrome stays.
+      expect(content.querySelector(".srr-list-empty")).toBeNull()
+      const reader = document.querySelector(".srr-reader") as HTMLElement
+      expect(reader.classList.contains("srr-reader-empty")).toBe(false)
+      // Source · date still render (the masthead is intact — a sibling of [DELETED]).
+      expect((document.querySelector(".srr-date") as HTMLElement).hidden).toBe(false)
+   })
+
+   it("renders normal content when the payload is present (no false tombstone)", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ article: { f: 1, a: 0, p: 0, c: "<p>alive</p>" } as IArticle }))
+      hashTo("#43")
+      await flush()
+      const content = document.querySelector(".srr-content") as HTMLElement
+      expect(content.querySelector(".srr-expired-note")).toBeNull()
+      expect(content.textContent).toContain("alive")
+   })
+})
+
 describe("reader dateline + permalink structure", () => {
    // readerDateline is mocked to a constant {text,title}; these assert app.ts's
    // render actually WIRES it into the masthead date element and shapes the permalink
