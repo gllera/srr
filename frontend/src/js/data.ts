@@ -1,4 +1,4 @@
-import { PACK_BASE } from "./base"
+import { HOME, type StoreContext } from "./base"
 import { cachedPromise, makeLRU, type LRU } from "./cache"
 import {
    DB_FORMAT_VERSION,
@@ -20,6 +20,7 @@ import {
    type IdxPack,
    type TallyFeed,
 } from "./idx"
+import { RELOAD_GUARD_KEY } from "./keys"
 import { keyAt, legacyNames, manifestNames, type IManifestWire, type StoreNames } from "./names"
 
 export { IDX_PACK_SIZE, META_PACK_SIZE }
@@ -33,14 +34,19 @@ export { IDX_PACK_SIZE, META_PACK_SIZE }
 // read rejects; cachedPromise then drops the slot so a retry refetches.
 const FETCH_TIMEOUT_MS = 30_000
 
-async function fetchTimed<T>(url: URL, cache: RequestCache, read: (res: Response) => Promise<T>): Promise<T> {
+async function fetchTimed<T>(
+   url: URL,
+   cache: RequestCache,
+   cred: RequestCredentials,
+   read: (res: Response) => Promise<T>,
+): Promise<T> {
    const ctrl = new AbortController()
    const timer = setTimeout(
       () => ctrl.abort(new DOMException(`fetch timed out: ${url}`, "TimeoutError")),
       FETCH_TIMEOUT_MS,
    )
    try {
-      return await read(await fetch(url, { cache, signal: ctrl.signal }))
+      return await read(await fetch(url, { cache, credentials: cred, signal: ctrl.signal }))
    } finally {
       clearTimeout(timer)
    }
@@ -54,77 +60,134 @@ interface Snapshot {
    names: StoreNames
 }
 
-// no-cache forces a conditional revalidation on every load so a stale db.gz on
-// the client (mobile browsers cache aggressively) can't make chronIdx URLs like
-// `#14099` silently fall back to the last article via the `>= total_art` clamp
-// in nav.fromHash. 304 keeps the hot path cheap when the CDN sends ETag /
-// Last-Modified; the <link rel="preload"> in built HTML still warms the entry.
-function loadDb(): Promise<Snapshot> {
-   return fetchTimed(new URL("db.gz", PACK_BASE), "no-cache", parseDb)
+// The per-store runtime record: the StoreContext identity/config (mid, base,
+// cred, role — base.ts) PLUS every piece of state that WAS a module-level `let`.
+// One of these exists per mounted store; S38 has N, S37 has just the home store.
+// Every fetch/compute function below takes one explicitly (defaulting to the
+// active store), so nothing reaches for a hidden global mid-operation: the store
+// is bound at call entry and used throughout, which is what lets a background
+// refresh of one store never race the lane a reader is navigating.
+export interface Store extends StoreContext {
+   // The eager db.gz fetch this store kicked at construction (init/refresh await it).
+   dbLoad: Promise<Snapshot>
+   // The normalized db state and the resolved object names it addresses through.
+   db: IDB
+   // The ONLY source of a pack key in this module — nothing below formats one.
+   names: StoreNames
+   // One in-flight-or-resolved fetch per idx pack (finalized 0..nf-1, latest at
+   // nf; capacity covers every pack, so nothing ever evicts) — packs are fetched
+   // once and stay resident. Only the latest pack is fetched eagerly — latestIdx
+   // keeps it reachable synchronously for countAll. idxHeaders always holds every
+   // pack's header (from idx/h<N>.gz on the summary path, or peeled off each pack
+   // on the eager fallback), so counting, pack-skipping, and timestamp search
+   // never force a pack fetch.
+   idxFetches: LRU<Promise<IdxPack>>
+   idxHeaders: IdxHeader[]
+   latestIdx: IdxPack
+   // The live delta chain (data/d<g>.gz for tailGen < g <= seq), fetched at boot
+   // and RESIDENT: each segment is one dirty cycle's whole batch as data-pack
+   // JSONL — the superset record the tail region derives everything from. Chrons
+   // at/above tailCovered() resolve idx entries (via the extended latest pack),
+   // meta cards, and article content from this slice and never touch a pack.
+   deltaArts: IArticle[]
+   // In-flight delta-chain fetch for the current snapshot; the latest idx pack's
+   // builder awaits it so the tail bytes and the chain download in parallel.
+   deltaLoad: Promise<IArticle[]>
+   // Store high-water + 1: the size of the per-pack feed lookup arrays
+   // (feedIds/ownFeedCounts and the filter lookup). Sized to the actual feed
+   // count, not the format ceiling. Computed once at applyDb from db.feeds.
+   slots: number
+   expiredCounts: Uint32Array
+   dataCache: LRU<Promise<IArticle[]>>
+   metaCache: LRU<Promise<IMetaWire[]>>
+   groupCache: Partial<Record<"active" | "all", GroupResult>>
+   // One in-flight-or-resolved manifest, keyed by its generation number.
+   // Manifest names are write-once, so this can never go stale; it exists so an
+   // unchanged poll (refresh() re-parses the root every 5 minutes) costs no
+   // second fetch.
+   manifestMemo: { m: number; man: Promise<IManifestWire> } | null
+   // Marks the window in which refresh() re-applies a new db.gz from the
+   // background heartbeat (see assertPackOk).
+   bgRefresh: boolean
 }
-const dbLoad = loadDb()
 
+function makeStore(ctx: StoreContext): Store {
+   const s = {
+      ...ctx,
+      dbLoad: undefined as unknown as Promise<Snapshot>,
+      db: undefined as unknown as IDB,
+      names: undefined as unknown as StoreNames,
+      idxFetches: makeLRU<Promise<IdxPack>>(1),
+      idxHeaders: [] as IdxHeader[],
+      latestIdx: undefined as unknown as IdxPack,
+      deltaArts: [] as IArticle[],
+      deltaLoad: Promise.resolve([] as IArticle[]),
+      slots: 1,
+      expiredCounts: new Uint32Array(0),
+      dataCache: makeLRU<Promise<IArticle[]>>(20),
+      metaCache: makeLRU<Promise<IMetaWire[]>>(20),
+      groupCache: {} as Partial<Record<"active" | "all", GroupResult>>,
+      manifestMemo: null as Store["manifestMemo"],
+      bgRefresh: false,
+   }
+   // Kick the eager db.gz fetch at construction — for the home store this fires
+   // at module load (the boot-latency property the reader has always had),
+   // BEFORE init() is called. A no-cache load forces a conditional revalidation
+   // so a stale db.gz on the client can't make chronIdx URLs like `#14099`
+   // silently fall back to the last article via the `>= total_art` clamp in
+   // nav.fromHash; 304 keeps the hot path cheap; the <link rel="preload"> in
+   // built HTML still warms the entry.
+   s.dbLoad = loadDb(s)
+   return s
+}
+
+// The home store — the one the build points at (base.ts HOME) — and the active
+// lane the UI is currently reading. For S37 there is exactly one and active is
+// always home; S38 mounts peers and re-points `active` as the lane changes.
+const home = makeStore(HOME)
+// The mutable active-lane pointer S38 re-points as the reader switches mounts;
+// S37 has one lane (home) and never reassigns it (hence the lint suppression).
+// eslint-disable-next-line prefer-const
+let active: Store = home
+
+// activeStore is the nav/UI layer's one notion of "the lane I am in"
+// (docs/MULTI-STORE-SPEC.md §11.2). The data/search hot functions take a store
+// explicitly (defaulting to this) rather than reading `active` internally.
+export function activeStore(): Store {
+   return active
+}
+
+// The active lane's normalized db state, mirrored for the read-mostly consumers
+// (nav/list/picker/search/app read `data.db.feeds` etc.). The source of truth is
+// active.db on the Store record above; this is kept === active.db by applyDb and
+// the refresh() rollback. S38 re-points it when the active lane changes.
 export let db: IDB
-// The resolved store names for the installed db (docs/MANIFEST-SPEC.md §4.5).
-// The ONLY source of a pack key in this module — nothing below formats one.
-let names: StoreNames
 
-// storeNames exposes the installed snapshot's names to search.ts, the other
-// module that fetches store objects (the meta shards, tail and bloom summary).
-export function storeNames(): StoreNames {
-   return names
+// storeNames exposes the active snapshot's names to search.ts, the other module
+// that fetches store objects (the meta shards, tail and bloom summary).
+export function storeNames(store: Store = active): StoreNames {
+   return store.names
 }
 
-// One in-flight-or-resolved fetch per idx pack (finalized 0..nf-1, latest at
-// nf; capacity covers every pack, so nothing ever evicts) — packs are fetched
-// once and stay resident. Only the latest pack is fetched eagerly — latestIdx
-// keeps it reachable synchronously for countAll. idxHeaders always holds
-// every pack's header (from idx/h<N>.gz on the summary path, or peeled off
-// each pack on the eager fallback), so counting, pack-skipping, and timestamp
-// search never force a pack fetch.
-let idxFetches: LRU<Promise<IdxPack>>
-let idxHeaders: IdxHeader[] = []
-let latestIdx: IdxPack
-// The live delta chain (data/d<g>.gz for tailGen < g <= seq), fetched at boot
-// and RESIDENT: each segment is one dirty cycle's whole batch as data-pack
-// JSONL — the superset record the tail region derives everything from. Chrons
-// at/above tailCovered() resolve idx entries (via the extended latest pack),
-// meta cards, and article content from this slice and never touch a pack.
-let deltaArts: IArticle[] = []
-// In-flight delta-chain fetch for the current snapshot; the latest idx pack's
-// builder awaits it so the tail bytes and the chain download in parallel.
-let deltaLoad: Promise<IArticle[]> = Promise.resolve([])
-// Store high-water + 1: the size of the per-pack feed lookup arrays
-// (feedIds/ownFeedCounts and the filter lookup). Sized to the actual feed
-// count, not the format ceiling. Computed once at init from db.feeds.
-let slots = 1
-let expiredCounts = new Uint32Array(0)
+function loadDb(store: Store): Promise<Snapshot> {
+   return fetchTimed(new URL("db.gz", store.base), "no-cache", store.cred, (res) => parseDb(store, res))
+}
 
-// A pack name is write-once, so a non-OK response means the name itself no
-// longer matches the store. For a latest pack (L<seq>) that means this tab's
-// db.gz predates the backend's GC grace window — only a fresh db.gz (fetched
-// no-cache) can name the current generation, so reload once. The
-// sessionStorage guard prevents reload loops; it is cleared only after a
-// successful init() so a transient failure can't permanently disable
-// self-healing for the tab.
-const RELOAD_GUARD = "srr-reload-guard"
-
-// bgRefresh marks the window in which refresh() re-applies a new db.gz from the
-// background heartbeat. In that window a transient tail 404 must NOT reload the
-// app out from under a reading user: refresh() has its own recovery story (it
-// restores the previous coherent snapshot wholesale and surfaces the failure via
-// lastRefreshError), so the worst case is "stale until the next cycle".
-//
-// Boot and user navigation keep the reload — that is the designed stale-tab
-// self-heal, and it is pinned by delta.e2e.test.ts's guarded-reload case.
-// refresh() runs under app.ts's guardBg mutex, so no user navigation can
-// observe this flag set.
-let bgRefresh = false
-
-function assertPackOk(res: Response, isLatest: boolean): void {
+function assertPackOk(store: Store, res: Response, isLatest: boolean): void {
    if (res.ok) return
-   if (isLatest && !bgRefresh && !sessionStorage.getItem(RELOAD_GUARD)) {
-      sessionStorage.setItem(RELOAD_GUARD, "1")
+   // A pack name is write-once, so a non-OK response means the name itself no
+   // longer matches the store. For a latest pack (L<seq>) that means this tab's
+   // db.gz predates the backend's GC grace window — only a fresh db.gz (fetched
+   // no-cache) can name the current generation, so reload once. The
+   // sessionStorage guard prevents reload loops; it is cleared only after a
+   // successful applyDb so a transient failure can't permanently disable
+   // self-healing for the tab. During a background refresh (store.bgRefresh) the
+   // reload is suppressed — refresh() has its own recovery (restore the previous
+   // coherent snapshot, surface via lastRefreshError), so a transient tail 404
+   // must not yank a reading user out; refresh() runs under app.ts's guardBg
+   // mutex, so no user navigation can observe the flag set.
+   if (isLatest && !store.bgRefresh && !sessionStorage.getItem(RELOAD_GUARD_KEY)) {
+      sessionStorage.setItem(RELOAD_GUARD_KEY, "1")
       location.reload()
    }
    // reload() doesn't halt execution — always throw so callers never touch
@@ -138,14 +201,9 @@ function assertPackOk(res: Response, isLatest: boolean): void {
 // {v, m, t} the S34 cutover shrinks it to.
 type IRootWire = Partial<IDBWire> & { t?: number }
 
-// One in-flight-or-resolved manifest, keyed by its generation number. Manifest
-// names are write-once, so this can never go stale; it exists so an unchanged
-// poll (refresh() re-parses the root every 5 minutes) costs no second fetch.
-let manifestMemo: { m: number; man: Promise<IManifestWire> } | null = null
-
-function loadManifest(m: number): Promise<IManifestWire> {
-   if (manifestMemo?.m === m) return manifestMemo.man
-   const man = fetchTimed(new URL(`manifest/${m}.gz`, PACK_BASE), "force-cache", async (res) => {
+function loadManifest(store: Store, m: number): Promise<IManifestWire> {
+   if (store.manifestMemo?.m === m) return store.manifestMemo.man
+   const man = fetchTimed(new URL(`manifest/${m}.gz`, store.base), "force-cache", store.cred, async (res) => {
       // NOT assertPackOk: a 404 here is not the stale-tab tail-GC case that
       // reload self-heals. The root we just fetched no-cache is by definition
       // current, so it names a manifest the store should still serve; if it
@@ -168,11 +226,11 @@ function loadManifest(m: number): Promise<IManifestWire> {
          )
       return parsed
    })
-   manifestMemo = { m, man }
+   store.manifestMemo = { m, man }
    // A rejected memo must not poison the next attempt (the cachedPromise
    // discipline, applied by hand since this is a single slot).
    man.catch(() => {
-      if (manifestMemo?.man === man) manifestMemo = null
+      if (store.manifestMemo?.man === man) store.manifestMemo = null
    })
    return man
 }
@@ -194,7 +252,7 @@ function rootIsLegacy(raw: IRootWire): boolean {
    return raw.total_art !== undefined
 }
 
-async function parseDb(res: Response): Promise<Snapshot> {
+async function parseDb(store: Store, res: Response): Promise<Snapshot> {
    // A missing/erroring store (404 on a fresh/empty store or a misconfigured CDN
    // URL, or a 5xx) would otherwise try to gunzip an HTML error body and reject
    // with a cryptic "incorrect header check"; surface the real status instead
@@ -209,7 +267,7 @@ async function parseDb(res: Response): Promise<Snapshot> {
       throw new Error(
          `This reader is older than the store (format v${raw.v}, supported v${DB_FORMAT_VERSION}) — reload to update.`,
       )
-   const snap = rootIsLegacy(raw) ? fromLegacyRoot(raw) : await fromManifestRoot(raw)
+   const snap = rootIsLegacy(raw) ? fromLegacyRoot(raw) : await fromManifestRoot(store, raw)
    snap.db.feeds ??= {}
    snap.db.seq ??= 0 // backend omitempty: absent for an empty store
    for (const [k, ch] of Object.entries(snap.db.feeds)) ch.id = Number(k)
@@ -235,13 +293,13 @@ function fromLegacyRoot(raw: IRootWire): Snapshot {
 // fromManifestRoot follows the root's indirection and normalizes the manifest
 // into the same in-memory IDB shape the rest of the module consumes, so
 // everything downstream of parseDb is root-shape-blind.
-async function fromManifestRoot(raw: IRootWire): Promise<Snapshot> {
+async function fromManifestRoot(store: Store, raw: IRootWire): Promise<Snapshot> {
    const m = raw.m ?? 0
    if (m <= 0)
       throw new Error(
          `db.gz carries no store state and names no manifest (m=${m}) — this store cannot be read by this reader.`,
       )
-   const man = await loadManifest(m)
+   const man = await loadManifest(store, m)
    const resolved = manifestNames(man)
    const finalizedMeta = resolved.meta.keys.length - (resolved.meta.tail >= 0 ? 1 : 0)
    const normalized: IDB = {
@@ -281,44 +339,45 @@ async function fromManifestRoot(raw: IRootWire): Promise<Snapshot> {
    return { db: normalized, names: resolved }
 }
 
-// The (re-runnable) boot body: swap the snapshot in and rebuild everything
-// derived from it. Also the refresh() path — the caches are recreated
+// The (re-runnable) boot body: swap the snapshot into `store` and rebuild
+// everything derived from it. Also the refresh() path — the caches are recreated
 // wholesale (one code path, no diff logic); refetches ride the SW/HTTP cache,
 // and on a gen change the stale bytes MUST go anyway.
-async function applyDb(snap: Snapshot): Promise<void> {
+async function applyDb(store: Store, snap: Snapshot): Promise<void> {
    // db and names are installed TOGETHER and synchronously, before any await:
    // every name the rest of this function resolves must belong to the snapshot
    // it is applying, and deltaLoad below is set in the same synchronous run.
-   db = snap.db
-   names = snap.names
+   store.db = snap.db
+   store.names = snap.names
+   if (store === active) db = snap.db // keep the active-lane mirror coherent
 
    // Size the per-pack feed lookup arrays to the store's high-water id + 1
    // (min 1). All feedIds in packs and filters are store feed ids, so this
    // bounds the typed-array allocations by the actual feed count.
-   const ids = Object.keys(db.feeds).map(Number)
+   const ids = Object.keys(store.db.feeds).map(Number)
    // reduce, not Math.max(...ids): a store approaching FEED_ID_CEILING would
    // overflow the JS engine's spread-argument limit and throw in init/refresh.
-   slots = ids.reduce((m, id) => (id > m ? id : m), 0) + 1
+   store.slots = ids.reduce((m, id) => (id > m ? id : m), 0) + 1
 
    // Per-feed expired totals (db.gz xp), threaded into countLeft so the
    // immutable header cumulative counts are corrected to visible articles.
-   expiredCounts = new Uint32Array(slots)
-   for (const ch of Object.values(db.feeds)) expiredCounts[ch.id] = ch.xp ?? 0
+   store.expiredCounts = new Uint32Array(store.slots)
+   for (const ch of Object.values(store.db.feeds)) store.expiredCounts[ch.id] = ch.xp ?? 0
 
-   dataCache = makeLRU<Promise<IArticle[]>>(20)
-   metaCache = makeLRU<Promise<IMetaWire[]>>(20)
-   groupCache = {}
+   store.dataCache = makeLRU<Promise<IArticle[]>>(20)
+   store.metaCache = makeLRU<Promise<IMetaWire[]>>(20)
+   store.groupCache = {}
    // Reset idxFetches with the other derived caches — BEFORE the empty-store
    // early return — so a re-run against a total_art===0 store can never leave it
    // undefined for a later data path (nf===0 here, so this is makeLRU(1)).
-   const nf = numFinalizedIdx()
-   idxFetches = makeLRU(nf + 1)
-   deltaArts = []
-   deltaLoad = Promise.resolve([])
+   const nf = numFinalizedIdx(store)
+   store.idxFetches = makeLRU(nf + 1)
+   store.deltaArts = []
+   store.deltaLoad = Promise.resolve([])
 
-   if (db.total_art === 0) {
-      idxHeaders = [] // defensive: a re-run must never leave headers from a previous snapshot
-      sessionStorage.removeItem(RELOAD_GUARD)
+   if (store.db.total_art === 0) {
+      store.idxHeaders = [] // defensive: a re-run must never leave headers from a previous snapshot
+      sessionStorage.removeItem(RELOAD_GUARD_KEY)
       return
    }
 
@@ -327,13 +386,13 @@ async function applyDb(snap: Snapshot): Promise<void> {
    // the last finalized pack. Its builder awaits deltaLoad, so kicking the
    // chain fetch first downloads deltas, tail bytes, and the summary in
    // parallel; refetches of unchanged segments ride the SW/HTTP cache.
-   deltaLoad = fetchDeltas()
-   const latest = fetchIdxPack(nf)
+   store.deltaLoad = fetchDeltas(store)
+   const latest = fetchIdxPack(store, nf)
 
    let headers: IdxHeader[] | null = null
-   if (nf > 0 && names.hsum?.covers === nf) {
+   if (nf > 0 && store.names.hsum?.covers === nf) {
       try {
-         headers = parseIdxHeaders(await fetchPackBytes(names.hsum.key, false), nf)
+         headers = parseIdxHeaders(await fetchPackBytes(store.names.hsum.key, false, store), nf)
       } catch {
          // A stale db.gz past the summary GC window, or a half-written
          // store: fall through to the eager path instead of reloading —
@@ -346,29 +405,29 @@ async function applyDb(snap: Snapshot): Promise<void> {
       // backend, warn-only summary failure, post-rebuild gap) or a failed
       // summary fetch. Fetch everything like the pre-summary reader did and
       // peel each pack's own header.
-      const packs = await Promise.all(Array.from({ length: nf }, (_, p) => fetchIdxPack(p)))
+      const packs = await Promise.all(Array.from({ length: nf }, (_, p) => fetchIdxPack(store, p)))
       headers = packs.map((p) => p.header)
    }
-   latestIdx = await latest
-   deltaArts = await deltaLoad // resolved: the latest pack's builder awaited it
-   headers.push(latestIdx.header)
-   idxHeaders = headers
-   sessionStorage.removeItem(RELOAD_GUARD)
+   store.latestIdx = await latest
+   store.deltaArts = await store.deltaLoad // resolved: the latest pack's builder awaited it
+   headers.push(store.latestIdx.header)
+   store.idxHeaders = headers
+   sessionStorage.removeItem(RELOAD_GUARD_KEY)
 }
 
 export async function init() {
-   await applyDb(await dbLoad)
+   await applyDb(home, await home.dbLoad)
 }
 
 // tailCovered is the pack↔delta seam: chrons below it are served by the pack
 // series, chrons at/above it by the resident delta articles.
-export function tailCovered(): number {
-   return db.total_art - (db.na ?? 0)
+export function tailCovered(store: Store = active): number {
+   return store.db.total_art - (store.db.na ?? 0)
 }
 
 // deltaArticles exposes the resident chain (search.ts overlays it).
-export function deltaArticles(): IArticle[] {
-   return deltaArts
+export function deltaArticles(store: Store = active): IArticle[] {
+   return store.deltaArts
 }
 
 // fetchDeltas downloads + parses the live chain, oldest first, from the names
@@ -378,13 +437,15 @@ export function deltaArticles(): IArticle[] {
 // the guarded reload. The na cross-check mirrors the backend's loadDeltas
 // (invariant I1) and is the CONTENT half of the seam check: a mismatched chain
 // must fail loudly, not misaddress every tail chron.
-async function fetchDeltas(): Promise<IArticle[]> {
-   const keys = names.deltas
+async function fetchDeltas(store: Store): Promise<IArticle[]> {
+   const keys = store.names.deltas
    if (keys.length === 0) return []
-   const parts = await Promise.all(keys.map((k) => fetchPackBytes(k, true).then((buf) => parseJsonl<IArticle>(buf))))
+   const parts = await Promise.all(
+      keys.map((k) => fetchPackBytes(k, true, store).then((buf) => parseJsonl<IArticle>(buf))),
+   )
    const all = parts.flat()
-   if (all.length !== (db.na ?? 0)) {
-      throw new Error(`delta chain holds ${all.length} articles but the store says ${db.na ?? 0}`)
+   if (all.length !== (store.db.na ?? 0)) {
+      throw new Error(`delta chain holds ${all.length} articles but the store says ${store.db.na ?? 0}`)
    }
    return all
 }
@@ -397,18 +458,18 @@ async function fetchDeltas(): Promise<IArticle[]> {
 // it writes NEW names, so it moves `m` like everything else, which is exactly
 // what retired `gen`. The SW's checkManifest rides this same response,
 // reconciling its cache before our subsequent pack refetches.
-export async function refresh(): Promise<"unchanged" | "updated"> {
-   const snap = await loadDb()
+export async function refresh(store: Store = active): Promise<"unchanged" | "updated"> {
+   const snap = await loadDb(store)
    const raw = snap.db
    if (
-      (raw.m ?? 0) === (db.m ?? 0) &&
-      raw.fetched_at === db.fetched_at &&
-      raw.total_art === db.total_art &&
-      raw.seq === db.seq
+      (raw.m ?? 0) === (store.db.m ?? 0) &&
+      raw.fetched_at === store.db.fetched_at &&
+      raw.total_art === store.db.total_art &&
+      raw.seq === store.db.seq
    )
       return "unchanged"
    // applyDb swaps db first (fetchIdxPack and the finalized-count math read the
-   // module state), so a rejected pack fetch mid-apply would otherwise strand a
+   // store state), so a rejected pack fetch mid-apply would otherwise strand a
    // half-swapped snapshot — new db, stale idx structures — that the NEXT
    // refresh() can't repair (its compare above sees the new fetched_at and
    // reports "unchanged"). Restore the previous coherent snapshot wholesale on
@@ -425,80 +486,69 @@ export async function refresh(): Promise<"unchanged" | "updated"> {
    // mid-apply reject must restore BOTH or the module would address the old
    // db's chrons through the new store's name lists — the exact "consistent
    // set, not a mix of old legacy fields and new manifest fields" the
-   // Appendix-D rollback rule forbids.
+   // Appendix-D rollback rule forbids. All of it lives on the ONE Store record,
+   // so the snapshot is that record's fields captured before the swap.
    const prev = {
-      db,
-      names,
-      slots,
-      expiredCounts,
-      idxFetches,
-      latestIdx,
-      idxHeaders,
-      dataCache,
-      metaCache,
-      groupCache,
-      deltaArts,
-      deltaLoad,
+      db: store.db,
+      names: store.names,
+      slots: store.slots,
+      expiredCounts: store.expiredCounts,
+      idxFetches: store.idxFetches,
+      latestIdx: store.latestIdx,
+      idxHeaders: store.idxHeaders,
+      dataCache: store.dataCache,
+      metaCache: store.metaCache,
+      groupCache: store.groupCache,
+      deltaArts: store.deltaArts,
+      deltaLoad: store.deltaLoad,
    }
-   bgRefresh = true
+   store.bgRefresh = true
    try {
-      await applyDb(snap)
+      await applyDb(store, snap)
    } catch (e) {
-      ;({
-         db,
-         names,
-         slots,
-         expiredCounts,
-         idxFetches,
-         latestIdx,
-         idxHeaders,
-         dataCache,
-         metaCache,
-         groupCache,
-         deltaArts,
-         deltaLoad,
-      } = prev)
+      Object.assign(store, prev)
+      if (store === active) db = store.db // re-point the active-lane mirror to the restored snapshot
       throw e
    } finally {
-      bgRefresh = false
+      store.bgRefresh = false
    }
    return "updated"
 }
 
 // Finalized idx-pack count for the current store (the latest pack holds the
 // rest). Used throughout for idx addressing and the header summary.
-export function numFinalizedIdx(): number {
-   return db.total_art > 0 ? Math.floor((db.total_art - 1) / IDX_PACK_SIZE) : 0
+export function numFinalizedIdx(store: Store = active): number {
+   return store.db.total_art > 0 ? Math.floor((store.db.total_art - 1) / IDX_PACK_SIZE) : 0
 }
 
 // Finalized meta-shard count. The meta/ series strides at META_PACK_SIZE (a
 // divisor of IDX_PACK_SIZE), so this differs from numFinalizedIdx. Used by the
 // list and search to address meta shards and gate coverage (see metaReady).
-export function numFinalizedMeta(): number {
-   return db.total_art > 0 ? Math.floor((db.total_art - 1) / META_PACK_SIZE) : 0
+export function numFinalizedMeta(store: Store = active): number {
+   return store.db.total_art > 0 ? Math.floor((store.db.total_art - 1) / META_PACK_SIZE) : 0
 }
 
 // feedTitle resolves a feed_id for display: a deleted feed's articles
 // stay in the packs, so render a tombstone instead of crashing (the rendering
 // contract `srr inspect`'s unknown-feeds diagnostic references).
-export function feedTitle(feedId: number): string {
-   return db.feeds[feedId]?.title ?? "[DELETED]"
+export function feedTitle(feedId: number, store: Store = active): string {
+   return store.db.feeds[feedId]?.title ?? "[DELETED]"
 }
 
 // Unix timestamp of the last successful backend fetch (0 when never fetched).
-export function lastFetchedAt(): number {
-   return db.fetched_at
+export function lastFetchedAt(store: Store = active): number {
+   return store.db.fetched_at
 }
 
 // True when the idx header summary lags the store (old backend, warn-only summary
 // failure, or a post-rebuild gap). The reader is still correct but fetches all
 // idx packs on boot instead of using the fast summary path.
-export function idxSummaryDegraded(): boolean {
-   const nf = numFinalizedIdx()
+export function idxSummaryDegraded(store: Store = active): boolean {
+   const nf = numFinalizedIdx(store)
    // Only an actively-advancing summary rebuild (hdrs partway) — NOT a steady
    // pre-summary store (hdrs===0/absent, e.g. an old backend), which would pin a
    // permanent, misleading "(optimizing index…)" banner the user can't act on.
-   return nf > 0 && (db.hdrs ?? 0) > 0 && (db.hdrs ?? 0) < nf
+   return nf > 0 && (store.db.hdrs ?? 0) > 0 && (store.db.hdrs ?? 0) < nf
 }
 
 // Fetches + gunzips one pack key. Every pack name is write-once — a stem is
@@ -508,9 +558,9 @@ export function idxSummaryDegraded(): boolean {
 // stale-db.gz tab self-heals with one guarded reload; finalized meta shards
 // pass false (write-once, never GC'd). The "meta lagged" case is handled
 // upstream by metaReady() (loadMeta skips meta entirely), not here.
-export async function fetchPackBytes(path: string, isLatest: boolean): Promise<ArrayBuffer> {
-   return fetchTimed(new URL(path, PACK_BASE), "force-cache", (res) => {
-      assertPackOk(res, isLatest)
+export async function fetchPackBytes(path: string, isLatest: boolean, store: Store = active): Promise<ArrayBuffer> {
+   return fetchTimed(new URL(path, store.base), "force-cache", store.cred, (res) => {
+      assertPackOk(store, res, isLatest)
       return new Response(res.body!.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer()
    })
 }
@@ -535,8 +585,8 @@ function writeFeedIds(out: Uint8Array, off: number, deltas: IArticle[]): number 
    return off
 }
 
-function buildLatestIdx(tailBuf: ArrayBuffer | null, deltas: IArticle[], nf: number): IdxPack {
-   const tcEntries = tailCovered() - nf * IDX_PACK_SIZE
+function buildLatestIdx(store: Store, tailBuf: ArrayBuffer | null, deltas: IArticle[], nf: number): IdxPack {
+   const tcEntries = tailCovered(store) - nf * IDX_PACK_SIZE
    let buf: ArrayBuffer
    if (tailBuf) {
       const numSlots = new Uint32Array(tailBuf, 0, 3)[2]
@@ -557,36 +607,41 @@ function buildLatestIdx(tailBuf: ArrayBuffer | null, deltas: IArticle[], nf: num
       writeFeedIds(out, IDX_HEADER_PREFIX, deltas)
       buf = out.buffer
    }
-   return makeIdxPack(buf, nf, tcEntries + deltas.length, slots)
+   return makeIdxPack(buf, nf, tcEntries + deltas.length, store.slots)
 }
 
 // Starts (or joins) the fetch of one idx pack.
-function fetchIdxPack(p: number): Promise<IdxPack> {
-   return cachedPromise(idxFetches, p, async () => {
-      if (p < numFinalizedIdx()) {
-         return makeIdxPack(await fetchPackBytes(keyAt(names.idx, p, `idx pack ${p}`), false), p, IDX_PACK_SIZE, slots)
+function fetchIdxPack(store: Store, p: number): Promise<IdxPack> {
+   return cachedPromise(store.idxFetches, p, async () => {
+      if (p < numFinalizedIdx(store)) {
+         return makeIdxPack(
+            await fetchPackBytes(keyAt(store.names.idx, p, `idx pack ${p}`), false, store),
+            p,
+            IDX_PACK_SIZE,
+            store.slots,
+         )
       }
-      const tcEntries = tailCovered() - p * IDX_PACK_SIZE
+      const tcEntries = tailCovered(store) - p * IDX_PACK_SIZE
       // tcEntries > 0 means the store consolidated a tail, so it MUST name one
       // — keyAt fails loudly instead of synthesizing a name that would 404
       // (§4.5: no computed-name fallback). deltaLoad is awaited alongside the
       // tail bytes so the chain and the pack download in parallel; the splice
       // in buildLatestIdx depends on both.
       const [tailBuf, deltas] = await Promise.all([
-         tcEntries > 0 ? fetchPackBytes(keyAt(names.idx, p, "idx tail"), true) : Promise.resolve(null),
-         deltaLoad,
+         tcEntries > 0 ? fetchPackBytes(keyAt(store.names.idx, p, "idx tail"), true, store) : Promise.resolve(null),
+         store.deltaLoad,
       ])
-      return buildLatestIdx(tailBuf, deltas, p)
+      return buildLatestIdx(store, tailBuf, deltas, p)
    })
 }
 
-function packIdx(chronIdx: number): number {
-   return Math.min(Math.floor(chronIdx / IDX_PACK_SIZE), numFinalizedIdx())
+function packIdx(store: Store, chronIdx: number): number {
+   return Math.min(Math.floor(chronIdx / IDX_PACK_SIZE), numFinalizedIdx(store))
 }
 
-export async function getFeedId(chronIdx: number): Promise<number> {
-   const n = packIdx(chronIdx)
-   const feedIds = (await fetchIdxPack(n)).parse().feedIds
+export async function getFeedId(chronIdx: number, store: Store = active): Promise<number> {
+   const n = packIdx(store, chronIdx)
+   const feedIds = (await fetchIdxPack(store, n)).parse().feedIds
    return feedIds[chronIdx - n * IDX_PACK_SIZE]
 }
 
@@ -594,15 +649,20 @@ export async function getFeedId(chronIdx: number): Promise<number> {
 // chronIdx=total_art always lands in the latest pack (resident since init),
 // whose header carries the cumulative counts of every finalized pack — so
 // nav's filter bookkeeping never waits on a fetch.
-export function countAll(feeds: Map<number, number>): number {
-   if (db.total_art === 0) return 0
-   return latestIdx.countLeft(db.total_art, feeds, makeFeedsLookup(feeds, slots), expiredCounts)
+export function countAll(feeds: Map<number, number>, store: Store = active): number {
+   if (store.db.total_art === 0) return 0
+   return store.latestIdx.countLeft(store.db.total_art, feeds, makeFeedsLookup(feeds, store.slots), store.expiredCounts)
 }
 
-export async function countLeft(chronIdx: number, feeds: Map<number, number>): Promise<number> {
-   if (db.total_art === 0) return 0
-   const n = packIdx(chronIdx)
-   return (await fetchIdxPack(n)).countLeft(chronIdx, feeds, makeFeedsLookup(feeds, slots), expiredCounts)
+export async function countLeft(chronIdx: number, feeds: Map<number, number>, store: Store = active): Promise<number> {
+   if (store.db.total_art === 0) return 0
+   const n = packIdx(store, chronIdx)
+   return (await fetchIdxPack(store, n)).countLeft(
+      chronIdx,
+      feeds,
+      makeFeedsLookup(feeds, store.slots),
+      store.expiredCounts,
+   )
 }
 
 // Batched per-feed unread counting: ONE latest-tail pass for every feed at
@@ -615,19 +675,28 @@ export async function countLeft(chronIdx: number, feeds: Map<number, number>): P
 export function unreadTally<T extends TallyFeed>(
    chs: T[],
    seenOf: (id: number) => number | undefined,
+   store: Store = active,
 ): { counts: Map<number, number>; rare: T[] } {
-   if (db.total_art === 0) return { counts: new Map(chs.map((c) => [c.id, 0])), rare: [] }
-   return tallyUnread(latestIdx, numFinalizedIdx() * IDX_PACK_SIZE, db.total_art, slots, chs, seenOf, expiredCounts)
+   if (store.db.total_art === 0) return { counts: new Map(chs.map((c) => [c.id, 0])), rare: [] }
+   return tallyUnread(
+      store.latestIdx,
+      numFinalizedIdx(store) * IDX_PACK_SIZE,
+      store.db.total_art,
+      store.slots,
+      chs,
+      seenOf,
+      store.expiredCounts,
+   )
 }
 
 // A finalized pack can be skipped without fetching it: its per-feed
 // counts are the deltas between consecutive cumulative headers. The latest
 // pack has no next boundary — it is resident anyway and scans cheaply.
-function packHasCandidate(p: number, feeds: Map<number, number>): boolean {
-   if (p >= numFinalizedIdx()) return true
+function packHasCandidate(store: Store, p: number, feeds: Map<number, number>): boolean {
+   if (p >= numFinalizedIdx(store)) return true
    // Mid-refresh header swap can briefly outrun this array — treat unknown as candidate.
-   const cur = idxHeaders[p]
-   const next = idxHeaders[p + 1]
+   const cur = store.idxHeaders[p]
+   const next = store.idxHeaders[p + 1]
    if (!cur || !next) return true
    const packEnd = (p + 1) * IDX_PACK_SIZE
    for (const [feedId, addIdx] of feeds) {
@@ -637,56 +706,54 @@ function packHasCandidate(p: number, feeds: Map<number, number>): boolean {
    return false
 }
 
-export async function findLeft(from: number, feeds: Map<number, number>): Promise<number> {
-   if (from < 0 || db.total_art === 0) return -1
-   const lookup = makeFeedsLookup(feeds, slots)
-   for (let p = packIdx(from); p >= 0; p--) {
-      if (!packHasCandidate(p, feeds)) continue
-      const found = (await fetchIdxPack(p)).findLeft(from, feeds, lookup)
+export async function findLeft(from: number, feeds: Map<number, number>, store: Store = active): Promise<number> {
+   if (from < 0 || store.db.total_art === 0) return -1
+   const lookup = makeFeedsLookup(feeds, store.slots)
+   for (let p = packIdx(store, from); p >= 0; p--) {
+      if (!packHasCandidate(store, p, feeds)) continue
+      const found = (await fetchIdxPack(store, p)).findLeft(from, feeds, lookup)
       if (found !== -1) return found
    }
    return -1
 }
 
-export async function findRight(from: number, feeds: Map<number, number>): Promise<number> {
+export async function findRight(from: number, feeds: Map<number, number>, store: Store = active): Promise<number> {
    if (from < 0) from = 0
-   if (from >= db.total_art) return -1
-   const lookup = makeFeedsLookup(feeds, slots)
-   const nf = numFinalizedIdx()
-   for (let p = packIdx(from); p <= nf; p++) {
-      if (!packHasCandidate(p, feeds)) continue
-      const found = (await fetchIdxPack(p)).findRight(from, feeds, lookup)
+   if (from >= store.db.total_art) return -1
+   const lookup = makeFeedsLookup(feeds, store.slots)
+   const nf = numFinalizedIdx(store)
+   for (let p = packIdx(store, from); p <= nf; p++) {
+      if (!packHasCandidate(store, p, feeds)) continue
+      const found = (await fetchIdxPack(store, p)).findRight(from, feeds, lookup)
       if (found !== -1) return found
    }
    return -1
 }
 
-async function getPackRef(chronIdx: number): Promise<{ packId: number; offset: number }> {
+async function getPackRef(store: Store, chronIdx: number): Promise<{ packId: number; offset: number }> {
    // Structural seam guard (mirrors the Go mirror's deltaPackID sentinel): the
    // extended latest pack's bounds end at the last REAL data pack, so a
    // delta-region chron reaching here would silently misroute into it. Every
    // legitimate caller short-circuits at tailCovered() first — fail loudly if
    // a future one forgets.
-   if (chronIdx >= tailCovered()) {
-      throw new Error(`getPackRef(${chronIdx}): delta-region chron has no data pack (seam at ${tailCovered()})`)
+   if (chronIdx >= tailCovered(store)) {
+      throw new Error(`getPackRef(${chronIdx}): delta-region chron has no data pack (seam at ${tailCovered(store)})`)
    }
-   const n = packIdx(chronIdx)
-   const bounds = (await fetchIdxPack(n)).parse().bounds
+   const n = packIdx(store, chronIdx)
+   const bounds = (await fetchIdxPack(store, n)).parse().bounds
    // The last bound whose startChron <= chronIdx.
    const bound = bounds[lowerBound(bounds.length, (i) => bounds[i].startChron <= chronIdx) - 1]
    return { packId: bound.packId, offset: chronIdx - bound.startChron }
 }
 
-let dataCache = makeLRU<Promise<IArticle[]>>(20)
-
-async function fetchDataPack(packId: number): Promise<IArticle[]> {
+async function fetchDataPack(store: Store, packId: number): Promise<IArticle[]> {
    // The idx footer's packId IS the positional index into the data series'
    // name list — exactly what it has always been, whether the list is derived
    // (legacy) or listed (manifest).
-   const key = keyAt(names.data, packId, `data pack ${packId}`)
-   const isLatest = packId === names.data.tail
-   return fetchTimed(new URL(key, PACK_BASE), "force-cache", async (res) => {
-      assertPackOk(res, isLatest)
+   const key = keyAt(store.names.data, packId, `data pack ${packId}`)
+   const isLatest = packId === store.names.data.tail
+   return fetchTimed(new URL(key, store.base), "force-cache", store.cred, async (res) => {
+      assertPackOk(store, res, isLatest)
       const reader = res
          .body!.pipeThrough(new DecompressionStream("gzip"))
          .pipeThrough(new TextDecoderStream())
@@ -716,7 +783,7 @@ async function fetchDataPack(packId: number): Promise<IArticle[]> {
    })
 }
 
-export async function loadArticle(chronIdx: number): Promise<IArticle> {
+export async function loadArticle(chronIdx: number, store: Store = active): Promise<IArticle> {
    // Delta-region chrons are resident — no pack holds them (and the extended
    // latest pack's bounds would misroute them to the last data pack). Resolve
    // from deltaLoad, NOT the deltaArts array: applyDb installs the new db
@@ -728,20 +795,20 @@ export async function loadArticle(chronIdx: number): Promise<IArticle> {
    // snapshot; tc and the deltaLoad reference are captured in the same
    // synchronous run, so they can't disagree. After boot it is already resolved,
    // so the await is a free microtask.
-   const tc = tailCovered()
+   const tc = tailCovered(store)
    if (chronIdx >= tc) {
-      const a = (await deltaLoad)[chronIdx - tc]
+      const a = (await store.deltaLoad)[chronIdx - tc]
       if (!a) throw new Error(`delta chain out of sync at chron ${chronIdx}; retry to refresh`)
       return a
    }
-   const ref = await getPackRef(chronIdx)
-   const entries = await cachedPromise(dataCache, ref.packId, () => fetchDataPack(ref.packId))
+   const ref = await getPackRef(store, chronIdx)
+   const entries = await cachedPromise(store.dataCache, ref.packId, () => fetchDataPack(store, ref.packId))
    if (ref.offset >= entries.length) {
       // Pack names are write-once, so this is unreachable in normal operation;
       // it survives as defense-in-depth for a store rebuilt in place (same
       // names, new bytes) before its `gen` bump propagates. Drop the cache so
       // a retry refetches.
-      dataCache.drop(ref.packId)
+      store.dataCache.drop(ref.packId)
       throw new Error(`pack ${ref.packId} out of sync (offset ${ref.offset} of ${entries.length}); retry to refresh`)
    }
    return entries[ref.offset]
@@ -759,33 +826,34 @@ export function parseJsonl<T>(buf: ArrayBuffer): T[] {
 }
 
 // True when the store has at least one article.
-export function hasArticles(): boolean {
-   return db.total_art > 0
+export function hasArticles(store: Store = active): boolean {
+   return store.db.total_art > 0
 }
 
 // meta/ is a warn-only derived projection, so after a failed SyncMeta it can
 // lag db.gz for one fetch cycle. metaReady() reports whether mp+mt fully cover
 // the store — only then is every meta shard (finalized + tail) present and
 // consistent. The list and search both gate on it; the list falls back to data/.
-export function metaReady(): boolean {
-   if (db.total_art === 0) return false
-   const mp = db.mp ?? 0
+export function metaReady(store: Store = active): boolean {
+   if (store.db.total_art === 0) return false
+   const mp = store.db.mp ?? 0
    // The meta series covers the consolidated region only; the resident delta
    // chain carries the rest (na) — coverage is complete when the three parts
    // sum to the store.
-   return mp === numFinalizedMeta() && mp * META_PACK_SIZE + (db.mt ?? 0) + (db.na ?? 0) === db.total_art
+   return (
+      mp === numFinalizedMeta(store) &&
+      mp * META_PACK_SIZE + (store.db.mt ?? 0) + (store.db.na ?? 0) === store.db.total_art
+   )
 }
 
-let metaCache = makeLRU<Promise<IMetaWire[]>>(20)
-
-function metaPackId(chronIdx: number): number {
-   return Math.min(Math.floor(chronIdx / META_PACK_SIZE), numFinalizedMeta())
+function metaPackId(store: Store, chronIdx: number): number {
+   return Math.min(Math.floor(chronIdx / META_PACK_SIZE), numFinalizedMeta(store))
 }
 
-function loadMetaPack(n: number): Promise<IMetaWire[]> {
-   return cachedPromise(metaCache, n, async () => {
-      const isLatest = n === names.meta.tail
-      const buf = await fetchPackBytes(keyAt(names.meta, n, `meta shard ${n}`), isLatest)
+function loadMetaPack(store: Store, n: number): Promise<IMetaWire[]> {
+   return cachedPromise(store.metaCache, n, async () => {
+      const isLatest = n === store.names.meta.tail
+      const buf = await fetchPackBytes(keyAt(store.names.meta, n, `meta shard ${n}`), isLatest, store)
       // Finalized shards carry a SEARCH_BLOOM_BYTES bloom prefix; the latest tail does not.
       return parseJsonl<IMetaWire>(isLatest ? buf : buf.slice(SEARCH_BLOOM_BYTES))
    })
@@ -803,47 +871,41 @@ function loadMetaPack(n: number): Promise<IMetaWire[]> {
 // range and the new chrons fall through. head needs no metaReady gate. A
 // stale-tab 404 on the latest meta pack is NOT handled here — it self-heals
 // via the guarded reload in fetchPackBytes (same as the reader's data/ path).
-export async function loadMeta(chronIdx: number): Promise<IMetaWire> {
+export async function loadMeta(chronIdx: number, store: Store = active): Promise<IMetaWire> {
    // Delta-region cards project straight off the resident chain — zero
    // fetches, and the meta series deliberately does not cover these chrons.
    // Via deltaLoad, not the deltaArts array, for the applyDb-window reason in
    // loadArticle.
-   const tc = tailCovered()
+   const tc = tailCovered(store)
    if (chronIdx >= tc) {
-      const a = (await deltaLoad)[chronIdx - tc]
+      const a = (await store.deltaLoad)[chronIdx - tc]
       if (a) return { f: a.f, w: a.p || a.a, t: a.t }
    }
-   const head = db.head
+   const head = store.db.head
    if (head?.length) {
-      const base = db.hb ?? 0
+      const base = store.db.hb ?? 0
       if (chronIdx >= base && chronIdx < base + head.length) return head[chronIdx - base]
    }
-   if (metaReady()) {
-      const n = metaPackId(chronIdx)
-      const entries = await loadMetaPack(n)
+   if (metaReady(store)) {
+      const n = metaPackId(store, chronIdx)
+      const entries = await loadMetaPack(store, n)
       const e = entries[chronIdx - n * META_PACK_SIZE]
       if (e) return e
       // Defensive: an undefined slot (coverage race) — fall through to data/.
    }
-   const a = await loadArticle(chronIdx)
+   const a = await loadArticle(chronIdx, store)
    return { f: a.f, w: a.p || a.a, t: a.t }
 }
 
 type GroupResult = { tagged: Map<string, IFeed[]>; sortedTags: string[]; untagged: IFeed[] }
-// Cached per includeEmpty flag (feeds are fixed for the session): the active-only
-// grouping (total_art > 0 — the default, used by nav's cycle rotation, which must
-// never land on a feed with nothing to read) and the include-empty grouping (the
-// config picker when read items are shown — it also surfaces never-fetched / empty
-// feeds so they can be inspected or selected).
-let groupCache: Partial<Record<"active" | "all", GroupResult>> = {}
 
-export function groupFeedsByTag(includeEmpty = false): GroupResult {
+export function groupFeedsByTag(includeEmpty = false, store: Store = active): GroupResult {
    const key = includeEmpty ? "all" : "active"
-   const cached = groupCache[key]
+   const cached = store.groupCache[key]
    if (cached) return cached
    const tagged = new Map<string, IFeed[]>()
    const untagged: IFeed[] = []
-   const feeds = Object.values(db.feeds)
+   const feeds = Object.values(store.db.feeds)
       .filter((ch) => includeEmpty || ch.total_art > 0)
       .sort((a, b) => (a.title < b.title ? -1 : 1))
    for (const ch of feeds) {
@@ -859,7 +921,7 @@ export function groupFeedsByTag(includeEmpty = false): GroupResult {
       }
    }
    const result = { tagged, sortedTags: Array.from(tagged.keys()).sort(), untagged }
-   groupCache[key] = result
+   store.groupCache[key] = result
    return result
 }
 
@@ -867,8 +929,8 @@ export function groupFeedsByTag(includeEmpty = false): GroupResult {
 // given filter scope end-to-end offline. The names are relative pack paths
 // (e.g. "meta/0.gz", "data/1.gz", "idx/L1.gz") — the same strings the fetch
 // handler sees after the "/packs/" prefix, and the same form data.ts resolves
-// against PACK_BASE when fetching. The SW message handler prefixes them with
-// "packs/" to build the full request URL.
+// against the store base when fetching. The SW message handler prefixes them
+// with "packs/" to build the full request URL.
 //
 // feeds: the filter's feeds Map (feed_id → addIdx), exactly as in filter.feeds.
 //   - Empty Map  →  [ALL] scope: all finalized + latest packs.
@@ -888,15 +950,16 @@ export function groupFeedsByTag(includeEmpty = false): GroupResult {
 // matchAll finds every reference in a data pack's articles.
 const ASSET_REF_RE = /assets\/[0-9a-f]{2}\/[0-9a-f]{16}(?:\.\w+)?/gi
 
-export async function packNamesForFilter(feeds: Map<number, number>): Promise<string[]> {
-   if (db.total_art === 0) return []
+export async function packNamesForFilter(feeds: Map<number, number>, store: Store = active): Promise<string[]> {
+   if (store.db.total_art === 0) return []
 
-   const nfIdx = numFinalizedIdx()
-   const tc = tailCovered()
+   const nfIdx = numFinalizedIdx(store)
+   const tc = tailCovered(store)
    // The enumerator reads the SAME resolved name lists every fetch site uses,
    // so a pinned scope caches exactly the keys the online reader would request
    // under either root shape (§8.3: "it already enumerates names, and now it
    // reads them from a list instead of reconstructing them").
+   const names = store.names
    const out = new Set<string>()
    const dataWanted = new Set<string>()
    const addData = (key: string | undefined) => {
@@ -935,19 +998,19 @@ export async function packNamesForFilter(feeds: Map<number, number>): Promise<st
       // Feed/tag/unread scope: walk only the idx packs that have candidates.
       // For each matching chronIdx, derive the data pack id (from idx bounds)
       // and the meta shard id (floor(chron / META_PACK_SIZE)).
-      const lookup = makeFeedsLookup(feeds, slots)
+      const lookup = makeFeedsLookup(feeds, store.slots)
 
       for (let p = 0; p <= nfIdx; p++) {
-         if (!packHasCandidate(p, feeds)) continue
+         if (!packHasCandidate(store, p, feeds)) continue
 
          // This idx pack is needed (it has at least one matching article). The
          // tail position is listed only when a tail was consolidated.
          const idxKey = names.idx.keys[p]
          if (idxKey) out.add(idxKey)
 
-         const pack = (await fetchIdxPack(p)).parse()
+         const pack = (await fetchIdxPack(store, p)).parse()
          const baseChron = p * IDX_PACK_SIZE
-         const packSize = p < nfIdx ? IDX_PACK_SIZE : db.total_art - p * IDX_PACK_SIZE
+         const packSize = p < nfIdx ? IDX_PACK_SIZE : store.db.total_art - p * IDX_PACK_SIZE
 
          // Walk this idx pack's entries to find matching chronIdxs.
          // Use the bounds list to efficiently map chron → data pack id.
@@ -987,14 +1050,14 @@ export async function packNamesForFilter(feeds: Map<number, number>): Promise<st
    // the extra reads are acceptable.
    const dataTailKey = names.data.tail >= 0 ? names.data.keys[names.data.tail] : null
    for (const dn of dataWanted) {
-      const arts = parseJsonl<IArticle>(await fetchPackBytes(dn, dn === dataTailKey))
+      const arts = parseJsonl<IArticle>(await fetchPackBytes(dn, dn === dataTailKey, store))
       for (const a of arts) {
          if (!a.c) continue
          for (const m of a.c.matchAll(ASSET_REF_RE)) out.add(m[0])
       }
    }
    // Delta-region articles are resident — scrape their asset refs without a fetch.
-   for (const a of deltaArts) {
+   for (const a of store.deltaArts) {
       if (!a.c) continue
       for (const m of a.c.matchAll(ASSET_REF_RE)) out.add(m[0])
    }

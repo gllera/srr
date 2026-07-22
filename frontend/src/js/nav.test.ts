@@ -42,6 +42,10 @@ const data = vi.hoisted(() => ({
       }
       return -1
    }),
+   // The active store context nav reads for its per-store keys (mid) and the
+   // article-base it hands fmt.extractPrefetchMedia. Home mid "0" ⇒ nav uses the
+   // bare srr-seen/srr-saved keys the tests below assert on directly.
+   activeStore: () => ({ mid: "0", base: new URL("http://localhost/") }),
 }))
 
 vi.mock("./data", () => data)

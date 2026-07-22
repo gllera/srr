@@ -110,6 +110,9 @@ const data = vi.hoisted(() => ({
    metaReady: vi.fn(() => true),
    idxSummaryDegraded: vi.fn(() => false),
    packNamesForFilter: vi.fn(async () => ["idx/L1.gz", "data/L1.gz"]),
+   // The active store context app reads for the pin message base/mid and the
+   // article base it hands the fmt sanitizer (home mid "0", loopback base).
+   activeStore: () => ({ mid: "0", base: new URL("http://localhost/") }),
 }))
 vi.mock("./data", () => data)
 

@@ -86,13 +86,17 @@ function isRelative(v: string): boolean {
    return !ABS_SCHEME.test(v)
 }
 
-// resolvePackRelative resolves a relative reference against the pack base, but
-// only if the result stays inside that base. Without the bounds check, a crafted
-// ref like "../../x" (or "assets/../../x") would traverse off the pack subtree
-// onto an arbitrary path on the CDN origin — and "//host/x" onto a foreign one —
-// a credentialed-GET info-leak vector. Returns null when the ref escapes, so the
-// caller drops the attribute.
-function resolvePackRelative(v: string): string | null {
+// resolvePackRelative resolves a relative reference against the article's store
+// base, but only if the result stays inside that base. Without the bounds check,
+// a crafted ref like "../../x" (or "assets/../../x") would traverse off the pack
+// subtree onto an arbitrary path on the CDN origin — and "//host/x" onto a
+// foreign one — a credentialed-GET info-leak vector. Returns null when the ref
+// escapes, so the caller drops the attribute. The base is the ARTICLE'S OWN
+// store base (threaded from the caller): under multi-store a peer article must
+// resolve against its own store, never the home base (docs/MULTI-STORE-SPEC.md
+// MS7) — resolving a peer ref against home would let a peer address the home
+// origin.
+function resolvePackRelative(v: string, base: URL): string | null {
    // new URL() THROWS (not returns null) on a relative-shaped ref WHATWG rejects
    // — e.g. "//[" or "//10.0.0.1:99999999" (which Go's lenient url.Parse accepts,
    // so it can survive the backend into content). Drop the attribute on a throw;
@@ -100,18 +104,18 @@ function resolvePackRelative(v: string): string | null {
    // whole article (error popup + retry loop) instead of just dropping one attr.
    let resolved: string
    try {
-      resolved = new URL(v, PACK_BASE).href
+      resolved = new URL(v, base).href
    } catch {
       return null
    }
-   return resolved.startsWith(PACK_BASE.href) ? resolved : null
+   return resolved.startsWith(base.href) ? resolved : null
 }
 
 // setPackRelative resolves a relative reference and sets it on node[attr],
 // dropping the attribute when the ref escapes the pack base (see
 // resolvePackRelative).
-function setPackRelative(node: Element, attr: string, v: string): void {
-   const resolved = resolvePackRelative(v)
+function setPackRelative(node: Element, attr: string, base: URL, v: string): void {
+   const resolved = resolvePackRelative(v, base)
    if (resolved) node.setAttribute(attr, resolved)
    else node.removeAttribute(attr)
 }
@@ -122,10 +126,10 @@ function setPackRelative(node: Element, attr: string, v: string): void {
 // through the image proxy. Other values (absolute non-http, or already stripped
 // by the attribute loop) are left untouched. Centralizes the branch shared by
 // <img src>, <video src>, <video poster> and <a href>.
-function resolveMediaAttr(node: Element, attr: string, proxyPrefix: string, proxy: boolean): void {
+function resolveMediaAttr(node: Element, attr: string, base: URL, proxyPrefix: string, proxy: boolean): void {
    const v = node.getAttribute(attr)
    if (!v) return
-   if (isRelative(v)) setPackRelative(node, attr, v)
+   if (isRelative(v)) setPackRelative(node, attr, base, v)
    else if (proxy && HTTP_RE.test(v)) node.setAttribute(attr, imgProxy(v, proxyPrefix))
 }
 
@@ -138,7 +142,7 @@ const tmpl = document.createElement("template")
 // article that re-parse costs as much as the whole sanitize pass, on every
 // prev/next step. Moving the nodes also empties the template, so it doesn't
 // retain the previous article's tree between renders.
-export function sanitizeFragment(html: string): DocumentFragment {
+export function sanitizeFragment(html: string, base: URL = PACK_BASE): DocumentFragment {
    tmpl.innerHTML = html
    // Drop dangerous subtrees first so the attribute pass below never visits
    // their (now-detached) descendants — saves work on e.g. <svg><script>...
@@ -170,7 +174,7 @@ export function sanitizeFragment(html: string): DocumentFragment {
          // already stripped above.
          const href = node.getAttribute("href")
          if (href) {
-            if (isRelative(href)) setPackRelative(node, "href", href)
+            if (isRelative(href)) setPackRelative(node, "href", base, href)
             else if (!ANCHOR_ABS_OK.test(href)) node.removeAttribute("href")
          }
       } else if (tag === "IMG") {
@@ -186,13 +190,13 @@ export function sanitizeFragment(html: string): DocumentFragment {
          node.setAttribute("referrerpolicy", "no-referrer")
          // Relative src resolves against the pack base; external http(s) keeps the
          // proxy path (proxy:true) so the user's IP isn't leaked to feed hosts.
-         resolveMediaAttr(node, "src", proxyPrefix, true)
+         resolveMediaAttr(node, "src", base, proxyPrefix, true)
       } else if (tag === "VIDEO") {
          // src passes external URLs through (proxy:false — image proxies don't
          // handle video); poster IS an image, so external posters take the proxy
          // path like img.src (leaving them direct would leak the user's IP).
-         resolveMediaAttr(node, "src", proxyPrefix, false)
-         resolveMediaAttr(node, "poster", proxyPrefix, true)
+         resolveMediaAttr(node, "src", base, proxyPrefix, false)
+         resolveMediaAttr(node, "poster", base, proxyPrefix, true)
       } else if (tag === "AUDIO") {
          // A feed <audio> often omits `controls`, which renders the element with
          // no player UI (invisible). Force it — like <img> gets forced lazy/async
@@ -201,14 +205,14 @@ export function sanitizeFragment(html: string): DocumentFragment {
          // http(s) src passes through (proxy:false — image proxies don't handle
          // audio), exactly like <video src>.
          node.setAttribute("controls", "")
-         resolveMediaAttr(node, "src", proxyPrefix, false)
+         resolveMediaAttr(node, "src", base, proxyPrefix, false)
       } else if (tag === "SOURCE") {
          // srcset is stripped unconditionally: a multi-value descriptor bypasses
          // URL_DENY and the single-src bounds check (same reason <img srcset> is
          // stripped). src gets the same relative/protocol-relative bounds-check
          // as <video src> (proxy:false — image proxies don't handle video).
          node.removeAttribute("srcset")
-         resolveMediaAttr(node, "src", proxyPrefix, false)
+         resolveMediaAttr(node, "src", base, proxyPrefix, false)
       }
    }
    return tmpl.content
@@ -217,8 +221,8 @@ export function sanitizeFragment(html: string): DocumentFragment {
 // String form of sanitizeFragment (serializes the sanitized tree back out of
 // the template). The tests' round-trip surface; production rendering adopts
 // the fragment instead.
-export function sanitizeHtml(html: string): string {
-   sanitizeFragment(html)
+export function sanitizeHtml(html: string, base: URL = PACK_BASE): string {
+   sanitizeFragment(html, base)
    return tmpl.innerHTML
 }
 
@@ -255,7 +259,7 @@ export interface IPrefetchMedia {
    images: string[]
    videos: string[]
 }
-export function extractPrefetchMedia(html: string): IPrefetchMedia {
+export function extractPrefetchMedia(html: string, base: URL = PACK_BASE): IPrefetchMedia {
    const images = new Set<string>()
    const videos = new Set<string>()
    if (html) {
@@ -264,7 +268,7 @@ export function extractPrefetchMedia(html: string): IPrefetchMedia {
       const add = (set: Set<string>, v: string | null, proxy: boolean) => {
          if (!v) return
          if (isRelative(v)) {
-            const resolved = resolvePackRelative(v)
+            const resolved = resolvePackRelative(v, base)
             if (resolved) set.add(resolved)
          } else if (HTTP_RE.test(v)) set.add(proxy ? imgProxy(v, proxyPrefix) : v)
       }

@@ -54,6 +54,10 @@ const mockData = vi.hoisted(() => {
          }
          return out
       },
+      // search.ts keys its per-store lazy state (summary/latest/shard/hit slots)
+      // in a WeakMap by the Store activeStore() returns; the mock namespace has a
+      // stable identity, so it is a fine stand-in for that single store.
+      activeStore: () => data,
    }
    return data
 })

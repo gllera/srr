@@ -1,4 +1,3 @@
-import { PACK_BASE } from "./base"
 import * as data from "./data"
 import {
    setProfileImportHook,
@@ -11,7 +10,7 @@ import {
 } from "./dropdown"
 import { collapseBrokenMedia, countBadge, readerDateline, sanitizeFragment, srcColorIndex } from "./fmt"
 import { setupGestures, type Gestures } from "./gestures"
-import { UNREAD_ONLY_KEY } from "./keys"
+import { HASH_KEY, UNREAD_ONLY_KEY } from "./keys"
 import * as list from "./list"
 import * as nav from "./nav"
 import * as picker from "./picker"
@@ -180,13 +179,14 @@ async function pinCurrentFilter(): Promise<void> {
       // settings menu, which is rebuilt fresh on every open — nothing on screen
       // to re-render here.)
       if (e.data.done >= e.data.total) {
-         if ((e.data.cached ?? 0) > 0) pinFilter(key, names)
-         else unpinFilter(key)
+         if ((e.data.cached ?? 0) > 0) pinFilter(key, names, data.activeStore().mid)
+         else unpinFilter(key, data.activeStore().mid)
       }
    }
-   // base = the URL the page resolves pack names against, so the SW pins at the
-   // exact URLs it will later fetch (self-hosted store root, hosted /packs/, …).
-   controller.postMessage({ type: "pin", names, base: PACK_BASE.href }, [port2])
+   // base = the URL the page resolves pack names against (the active store's
+   // root), so the SW pins at the exact URLs it will later fetch (self-hosted
+   // store root, hosted /packs/, a mounted peer, …).
+   controller.postMessage({ type: "pin", names, base: data.activeStore().base.href }, [port2])
    showPinProgress(0, names.length)
 }
 
@@ -198,13 +198,13 @@ function unpinCurrentFilter(): void {
    // (idx/L, data/L, meta/L) and any overlapping finalized packs/assets must NOT
    // be deleted while a different active pin still needs them. Only the names
    // unique to this scope are dropped from the SW cache.
-   const pins = listPins()
+   const pins = listPins(data.activeStore().mid)
    const names = pins.get(key)?.names ?? []
    const stillNeeded = new Set<string>()
    for (const [k, entry] of pins) if (k !== key) for (const n of entry.names) stillNeeded.add(n)
    const toDelete = names.filter((n) => !stillNeeded.has(n))
-   unpinFilter(key)
-   if (controller) controller.postMessage({ type: "unpin", names: toDelete, base: PACK_BASE.href })
+   unpinFilter(key, data.activeStore().mid)
+   if (controller) controller.postMessage({ type: "unpin", names: toDelete, base: data.activeStore().base.href })
    // The pin row reads its state fresh on the next settings-menu open — the
    // menu that triggered this unpin closed when the row was clicked.
 }
@@ -215,7 +215,7 @@ function pinMenuEntry(): { label: string; action: () => void } | null {
    if (!navigator.serviceWorker?.controller) return null
    if (nav.filter.saved || nav.filter.search) return null
    const key = pinKey()
-   if (isPinned(key)) {
+   if (isPinned(key, data.activeStore().mid)) {
       return { label: "Remove offline copy", action: unpinCurrentFilter }
    }
    return {
@@ -257,7 +257,7 @@ async function enterReader() {
 
 function persistHash(hash: string) {
    try {
-      localStorage.setItem("srr-hash", hash)
+      localStorage.setItem(HASH_KEY, hash)
    } catch {}
 }
 
@@ -374,7 +374,7 @@ function render(o: IShowFeed) {
    el.content.style.transform = "translateY(6px)"
    // Adopt the sanitized nodes directly — an innerHTML string round-trip would
    // re-parse the whole article on every prev/next step (see sanitizeFragment).
-   el.content.replaceChildren(sanitizeFragment(o.article.c))
+   el.content.replaceChildren(sanitizeFragment(o.article.c, data.activeStore().base))
    // Reject javascript:/data:/vbscript:/file: in case the writer pipeline let one
    // through. The whole masthead row (source · date · title) is the one permalink;
    // an href makes it a link, its absence leaves it inert chrome (titleless feeds
@@ -1151,7 +1151,7 @@ async function init() {
    // reset the local pin registry so menu labels match the (now empty) cache.
    navigator.serviceWorker?.addEventListener("message", (e: MessageEvent) => {
       if (e.data?.type === "pins-purged") {
-         clearAllPins()
+         clearAllPins(data.activeStore().mid)
          // The pin row derives its label fresh on the next settings-menu open,
          // so clearing the registry is all it takes to match the empty bucket.
       }
@@ -1239,7 +1239,7 @@ async function init() {
    }
    if (!hash)
       try {
-         hash = localStorage.getItem("srr-hash")?.substring(1) || ""
+         hash = localStorage.getItem(HASH_KEY)?.substring(1) || ""
       } catch {}
    await route(hash)
    // Cross-device sync: run the LWW profile cycle (pull-adopt when the remote is

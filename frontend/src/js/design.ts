@@ -5,6 +5,14 @@
 // transient/interaction-only states by toggling the SAME CSS classes
 // app.ts/list.ts use. So what the harness shows is the real rendering — no mock
 // components, nothing to drift.
+//
+// keys.ts is side-effect-free (like the app modules this harness avoids, it
+// pulls in no db.gz fetch), so importing the key helper is safe here.
+import { HOME_MID, savedKey } from "./keys"
+
+// The harness is single-store by construction, so its seed writes the HOME
+// store's saved key (bare `srr-saved`) — finding ENG5's dev-harness bypasser.
+const SAVED_KEY = savedKey(HOME_MID)
 
 // ---- State jumps -----------------------------------------------------------
 
@@ -195,10 +203,10 @@ function disabledNote(text: string): HTMLElement {
 // Seed the device-local saved set so the ★ Saved view shows a tombstoned row.
 function seedSaved(chron: number): void {
    try {
-      const raw = localStorage.getItem("srr-saved")
+      const raw = localStorage.getItem(SAVED_KEY)
       const set = new Set<number>(raw ? (JSON.parse(raw) as number[]) : [])
       set.add(chron)
-      localStorage.setItem("srr-saved", JSON.stringify([...set]))
+      localStorage.setItem(SAVED_KEY, JSON.stringify([...set]))
    } catch {}
 }
 
