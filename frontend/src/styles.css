@@ -738,6 +738,39 @@ body.srr-view-list .srr-toolbar {
    & a.srr-scope-chip + a.srr-scope-chip {
       border-left: 1px solid var(--faint);
    }
+   /* The mount switcher (docs/MULTI-STORE-SPEC.md §6.3) — the store axis above
+      tags/feeds. Only rendered when >1 store is mounted, so a single-store
+      picker is byte-identical. Each row is the store's label + an unread rollup
+      or a state chip; the active store wears the shared srr-active tint. */
+   & .srr-picker-mounts {
+      display: flex;
+      flex-direction: column;
+      gap: 0.15rem;
+      margin-bottom: 0.5rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 1px solid var(--faint);
+   }
+   & a.srr-mount-row {
+      display: flex;
+      align-items: center;
+      font-weight: 600;
+   }
+   & a.srr-mount-row .srr-row-title {
+      flex: 0 1 auto;
+   }
+   & .srr-mount-chip {
+      flex-shrink: 0;
+      margin-left: 0.4rem;
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+   }
+   & .srr-mount-chip[data-kind="toonew"],
+   & .srr-mount-chip[data-kind="error"] {
+      color: var(--accent);
+   }
    /* Source-color chip on feed rows — the same per-feed color (data-src →
       --src) as the row's list rail and the reader spine, so a source is picked
       here by the color it wears everywhere else. */

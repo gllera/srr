@@ -209,6 +209,24 @@ function unpinCurrentFilter(): void {
    // menu that triggered this unpin closed when the row was clicked.
 }
 
+// Tell the service worker which store roots are mounted (docs/MULTI-STORE-SPEC.md
+// §5.1) — the FIX for PWA0: the deployed reader's home base (cdn.llera.eu) is
+// cross-origin to its shell origin, so the SW's old origin-equality gate never
+// cached a production pack. Posting the mounted roots lets it route + cache them.
+// Called on boot, on every mount-table change, and whenever a new SW takes
+// control (a fresh worker starts with no roots and falls back to own-origin).
+function postMounts(): void {
+   const controller = navigator.serviceWorker?.controller
+   if (!controller) return // dev / harness / insecure context — the SW is inert anyway
+   const roots = data.mountedStores().map((s) => ({
+      mid: s.mid,
+      base: s.base.href,
+      cred: s.cred,
+      role: s.role,
+   }))
+   controller.postMessage({ type: "mounts", roots })
+}
+
 // Returns the pin menu row entry for the current filter, or null when pinning
 // is not available (no SW controller, or a saved/search scope).
 function pinMenuEntry(): { label: string; action: () => void } | null {
@@ -832,8 +850,32 @@ async function selectFilter(token: string) {
    // the debounce window lets the stale applySearchQuery fire ~200ms later and
    // bounce the list back into search. Typing itself never routes through here.
    clearTimeout(searchDebounce)
+   // A mount-qualified token (a peer lane/section picked from the picker):
+   // switch the active lane first, then apply the bare token in that store's
+   // context (§6.3). A bare token leaves the active mount as-is.
+   if (token.startsWith("@")) {
+      const { mid, tokens } = nav.parseHashMount([token])
+      data.setActive(mid)
+      token = tokens[0] ?? ""
+   }
    nav.applyFilter(token === "" ? [] : [token])
    await goToList(true)
+}
+
+// Switch the active mount from the picker's mount switcher WITHOUT closing the
+// overlay (§6.3): re-point the active lane to that store's [ALL], rebuild the
+// list underneath, and re-render the picker's lanes in place for the new store.
+// A failed/unmounted mount (setActive returns false) is a no-op.
+async function switchMount(mid: string) {
+   if (held()) return
+   if (mid === data.activeStore().mid) return
+   if (!data.setActive(mid)) return
+   nav.applyFilter([])
+   const h = "#" + nav.tokensSuffix()
+   history.pushState(null, "", h)
+   persistHash(h)
+   await renderListSurface()
+   if (picker.isOpen()) picker.render()
 }
 
 // ── Title search (list filter mode) ──────────────────────────────────────────
@@ -1106,6 +1148,10 @@ async function init() {
       // under the overlay (the picker re-renders its own rows). The overlay stays
       // open so you keep browsing feeds in the new mode.
       onToggleShowRead: toggleUnseenOnly,
+      // The mount switcher: switch the active store in place (§6.3). switchMount
+      // re-points the lane, rebuilds the list underneath, and re-renders the
+      // picker's rows for the new store.
+      onSwitchMount: (mid) => void switchMount(mid),
    })
 
    // The list opens an article in the reader through the same guard mutex as
@@ -1280,7 +1326,16 @@ async function init() {
    })
    // Live content sync: boot is already fresh (data.init just ran), so only the
    // ongoing triggers are wired — re-focus (throttled), reconnect, heartbeat.
-   refresh.init(guardBg, refreshAfterStore)
+   // The third callback repaints the picker when a background PEER poll changed
+   // shape (its unread rollups), without touching the active lane.
+   refresh.init(guardBg, refreshAfterStore, () => {
+      if (picker.isOpen()) picker.render()
+   })
+
+   // Tell the SW its mounted roots (the PWA0 fix, §5.1). A controller may not be
+   // active yet on a first visit, so also post whenever a worker takes control.
+   postMounts()
+   navigator.serviceWorker?.addEventListener("controllerchange", postMounts)
    // Signal to the dev design harness (design.ts) that the real app has booted
    // and the first surface is rendered. Inert in production — nothing else
    // listens. Only fires on the success path (init returns early on db.gz error).
