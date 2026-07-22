@@ -1,28 +1,18 @@
-/* SRRB — the operator's console for the writer side.
+/* SRR admin console — the operator's console for the writer side.
 
-   Visual identity is lifted from the SRR reader ("wire chrome wraps human
-   prose"): the same warm-paper palette, the mono "wire voice" for all chrome
-   (tabs, headers, ids, counts, pipe tokens, logs), the per-feed source-color
-   rail, and the RSS broadcast mark — here as the station ident that pulses
-   while a fetch streams. Tokens mirror frontend/src/tokens.css so the console
-   and the reader read as one product. Re-theme in :root; components below only
-   reference var(--*). */
+   The visual system is the SRR reader's ("wire chrome wraps human prose"): the
+   same warm-paper palette, the mono "wire voice" for chrome, the per-feed
+   source-color rail, and the RSS broadcast mark as the station ident that pulses
+   while a fetch streams. The shared primitives (palette, fonts, the [data-src]
+   ramp, radii, shadows) come from the reader's tokens.css — imported here rather
+   than duplicated, so the console and the reader stay one product. This file adds
+   only the console-specific tokens (the signal accent, the health grades, the
+   wire-log well) and the component rules on top of the tokens. */
+
+@import "./tokens.css";
 
 :root {
    color-scheme: light dark;
-
-   /* Palette (light) — mirrors the reader's tokens. */
-   --bg: #fafaf7;
-   --surface-raised: #ffffff;
-   --fg: #1c1c1a;
-   --fg-2: #5e5c56;
-   --muted: #8a8780;
-   --faint: #d5d2cb;
-   --border: #cbc7be;
-   --hover: rgba(0, 0, 0, 0.04);
-   --radius: 4px;
-   --shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 12px 28px rgba(0, 0, 0, 0.08);
-   --scrim: rgba(0, 0, 0, 0.5);
 
    /* Signal accent — the RSS amber. The writer side literally broadcasts the
       feed, so the brand mark color is the operator's "live" accent (the reader
@@ -30,8 +20,7 @@
    --signal: #f26522;
    --signal-ink: #ffffff; /* text over a filled signal surface */
 
-   /* Status grades — the wire's health (same buckets as the reader's feed
-      health: live / warn / fault / idle). */
+   /* Status grades — the wire's health (live / warn / fault / idle). */
    --ok: #2e9e44;
    --warn: #d98b00;
    --err: #d33;
@@ -41,53 +30,10 @@
       surface, darker than the page in both themes. */
    --well: #1d2127;
    --well-ink: #cdd3da;
-
-   /* Fonts — system stacks only (no webfonts, like the reader). --font-sans is
-      human content (titles, values); --font-mono is the wire voice (chrome). */
-   --font-sans:
-      system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
-   --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-}
-
-/* Source-color ramp — copied from the reader so a feed's rail color here is the
-   same color it carries in the reader (data-src = feed_id % 8). */
-[data-src="0"] {
-   --src: oklch(0.55 0.13 25);
-}
-[data-src="1"] {
-   --src: oklch(0.55 0.13 250);
-}
-[data-src="2"] {
-   --src: oklch(0.55 0.13 160);
-}
-[data-src="3"] {
-   --src: oklch(0.55 0.13 295);
-}
-[data-src="4"] {
-   --src: oklch(0.55 0.13 70);
-}
-[data-src="5"] {
-   --src: oklch(0.55 0.13 205);
-}
-[data-src="6"] {
-   --src: oklch(0.55 0.13 340);
-}
-[data-src="7"] {
-   --src: oklch(0.55 0.13 115);
 }
 
 @media (prefers-color-scheme: dark) {
    :root {
-      --bg: #111110;
-      --surface-raised: #1c1c1a;
-      --fg: #ccc9c2;
-      --fg-2: #8a877f;
-      --muted: #6e6c66;
-      --faint: #2a2928;
-      --border: #383734;
-      --hover: rgba(255, 255, 255, 0.05);
-      --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 28px rgba(0, 0, 0, 0.55);
-      --scrim: rgba(0, 0, 0, 0.6);
       --signal: #ff7a3c;
       --signal-ink: #1a1410;
       --ok: #45b85f;
@@ -97,51 +43,26 @@
       --well: #0c0e11;
       --well-ink: #c4cad1;
    }
-   [data-src="0"] {
-      --src: oklch(0.74 0.125 25);
-   }
-   [data-src="1"] {
-      --src: oklch(0.74 0.125 250);
-   }
-   [data-src="2"] {
-      --src: oklch(0.74 0.125 160);
-   }
-   [data-src="3"] {
-      --src: oklch(0.74 0.125 295);
-   }
-   [data-src="4"] {
-      --src: oklch(0.74 0.125 70);
-   }
-   [data-src="5"] {
-      --src: oklch(0.74 0.125 205);
-   }
-   [data-src="6"] {
-      --src: oklch(0.74 0.125 340);
-   }
-   [data-src="7"] {
-      --src: oklch(0.74 0.125 115);
-   }
    /* Dropdown chevron in dark --muted (SVG data URIs can't read CSS vars). */
    select {
       background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236e6c66' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
    }
 }
 
-@media (prefers-contrast: more) {
-   :root {
-      --fg-2: #333;
-      --muted: #555;
-      --faint: #999;
-      --border: #777;
-   }
-}
-
 * {
    box-sizing: border-box;
 }
+/* The icon sprite carries only <defs>/<symbol>s — never rendered, but a bare
+   <svg> reserves a default box; hide it (symbols stay referenceable). */
+.sprite {
+   display: none;
+}
+.hidden {
+   display: none;
+}
 /* Reserve the scrollbar gutter so tall tabs (Feeds) don't shift the centered
-   column left vs short ones (Recipes/Syndicate/Tools) when their scrollbar
-   appears. No-op under overlay scrollbars. */
+   column left vs short ones when their scrollbar appears. No-op under overlay
+   scrollbars. */
 html {
    scrollbar-gutter: stable;
 }
@@ -195,8 +116,8 @@ header {
    letter-spacing: 0.06em;
    color: var(--muted);
 }
-/* The mark goes "on the air" while a fetch streams (body.fetching, toggled in
-   app.js) — the one signature motion, gated to a real live operation. */
+/* The mark goes "on the air" while a fetch streams (body.fetching) — the one
+   signature motion, gated to a real live operation. */
 @media (prefers-reduced-motion: no-preference) {
    body.fetching .signal {
       animation: broadcast 1.1s ease-out infinite;
@@ -273,7 +194,7 @@ header {
    white-space: pre-wrap;
    font-size: 0.92em;
    box-shadow: 0 2px 10px rgb(0 0 0 / 0.2);
-   cursor: pointer; /* click dismisses (see app.js) */
+   cursor: pointer; /* click dismisses */
 }
 #banner.ok {
    border-color: var(--ok);
@@ -281,9 +202,6 @@ header {
 }
 
 /* --- store-pulse alarm ---------------------------------------------------- */
-/* The store-level heartbeat raised to an alarm: when fetched_at ages past the
-   pulse thresholds (app.js storePulse) this strip surfaces the silence, with
-   the remedy inline. Amber = hours quiet; red = a day or more, or never ran. */
 .pulse-alert {
    display: flex;
    align-items: center;
@@ -339,8 +257,6 @@ header {
    color: var(--fg);
    font-weight: 700;
 }
-/* Board stats double as grade filters: plain-text buttons in the board voice,
-   the active one underlined in signal amber. The total resets the filter. */
 .board button {
    background: none;
    border: 0;
@@ -364,8 +280,6 @@ header {
    outline-offset: 3px;
    border-radius: 2px;
 }
-/* Store meta readout (articles · last fetch), pushed to the board's right.
-   The fetch-age span tints by the store pulse so freshness reads at a glance. */
 .board .meta {
    margin-left: auto;
 }
@@ -399,6 +313,15 @@ textarea {
 }
 .toolbar input[type="search"] {
    min-width: 14em;
+}
+.toolbar .preview-url {
+   min-width: 24em;
+}
+.dedup-in {
+   width: 6em;
+}
+.hash-in {
+   min-width: 18em;
 }
 /* Every <select> wears the console's Feather chevron instead of the native
    widget arrow. SVG data URIs can't reference CSS vars, so the stroke is the
@@ -473,6 +396,10 @@ button.btn.danger:hover {
    background: color-mix(in srgb, var(--err) 12%, var(--surface-raised));
    border-color: var(--err);
 }
+/* The optional Delete button pinned to the modal footer's left edge. */
+button.btn.delete-left {
+   margin-right: auto;
+}
 
 /* --- tables -------------------------------------------------------------- */
 table {
@@ -487,12 +414,10 @@ thead th {
    text-transform: uppercase;
    color: var(--muted);
    text-align: left;
-   white-space: nowrap; /* "last new" must not wrap — the title column absorbs width */
+   white-space: nowrap;
    padding: 0 0.55em 0.5em;
    border-bottom: 1px solid var(--border);
 }
-/* Sortable headers: the th text doubles as a toggle in the same voice; the
-   active column keeps ink color and carries a signal-amber caret. */
 thead th button.th-sort {
    background: none;
    border: 0;
@@ -524,16 +449,13 @@ tbody tr:hover td {
    background: var(--hover);
 }
 /* Source-color rail on the leading cell — origin at a glance, keyed to the
-   reader. The status cell carries both the rail (left edge) and the health dot. */
+   reader. The status cell carries both the rail and the health dot. */
 td.status {
    width: 1px;
    white-space: nowrap;
    box-shadow: inset 3px 0 0 var(--src, var(--border));
    padding-left: 0.85em;
 }
-/* A failing feed's dot is a tooltip trigger: hover or keyboard-focus it to reveal
-   the fetch error. Padding (offset by a negative margin so the dot stays put)
-   enlarges the hover/focus target; cursor:help marks it as inspectable. */
 .dotwrap {
    position: relative;
    display: inline-flex;
@@ -547,9 +469,6 @@ td.status {
    outline: 2px solid var(--signal);
    outline-offset: 1px;
 }
-/* Title is the human value (sans); its url opens in a new tab. The cell absorbs
-   leftover width (max-width:0 + width:100%); truncation lives on the link, which
-   ellipsizes a too-long title to one line. */
 td.title {
    max-width: 0;
    width: 100%;
@@ -568,22 +487,13 @@ a.feed-title:hover {
    text-decoration: underline;
    text-underline-offset: 2px;
 }
-/* The fetch-error tooltip — a wire-log bubble shown on the dot's hover/focus.
-   It sits below the dot and grows rightward (the dot is at the row's left edge,
-   so it never clips off-screen). The streak badge carries the grade color (warn
-   amber / fault red); the message is the verbatim error, wrapping long URLs. */
 .tip {
    position: absolute;
    top: calc(100% + 0.5em);
    left: -0.2em;
    z-index: 50;
-   /* A fixed wrap width (capped to the viewport on small screens) so the long
-      error reliably wraps to multiple lines instead of overflowing — block flow,
-      not flex, and not max-content (which clamps the box but lays the text out at
-      full width and spills past it). */
    width: 30em;
    max-width: calc(100vw - 3em);
-   /* reset the nowrap inherited from td.status — else the message can't wrap. */
    white-space: normal;
    padding: 0.5em 0.65em;
    border-radius: var(--radius);
@@ -623,11 +533,6 @@ a.feed-title:hover {
    color: var(--well-ink);
    overflow-wrap: anywhere;
 }
-/* Inline fetch error — the tooltip's content riding the failing row itself, so
-   triage never needs a hover. The streak badge carries the grade color; the
-   message is the verbatim error, wrapping inside the title column. (Same class
-   names as .tip, deliberately separate colors: the tip sits on the dark well,
-   this sits on paper.) */
 .rowerr {
    display: flex;
    align-items: baseline;
@@ -657,7 +562,6 @@ td.actions {
    white-space: nowrap;
    text-align: right;
 }
-/* Time/count readouts (last new, articles) — wire voice, quiet. */
 td.when {
    white-space: nowrap;
    font-family: var(--font-mono);
@@ -672,7 +576,7 @@ td.when {
    font-family: var(--font-mono);
    font-size: 0.72rem;
    letter-spacing: 0.02em;
-   text-transform: none; /* keep chip names verbatim inside uppercased chrome */
+   text-transform: none;
    padding: 0.12em 0.5em;
    border: 1px solid var(--border);
    border-radius: 999px;
@@ -682,11 +586,6 @@ td.when {
 .chip.recipe {
    border-style: dashed;
 }
-/* One-click pickers (feed dialog tag + recipe): the vocabulary laid out as
-   toggle chips instead of hiding behind a dropdown. The active choice wears
-   the signal accent; recipe chips keep their dashed identity. Unlike the
-   table's metadata chips these are tap targets, so they grow to finger size —
-   and to the reader's 44px tap standard on touch hardware. */
 .tag-chips {
    display: flex;
    flex-wrap: wrap;
@@ -768,8 +667,6 @@ td.when {
    background: transparent;
    box-shadow: inset 0 0 0 1.5px var(--idle);
 }
-/* Stale: fetching fine, but no new article for weeks — filled idle gray, as
-   opposed to the hollow gray of never-fetched. */
 .dot.dim {
    background: var(--idle);
 }
@@ -877,16 +774,11 @@ dialog .row {
    justify-content: flex-end;
    margin-top: 1.2em;
 }
-/* Dialog field hints — one quiet sentence under a field, in the human voice
-   (the label above it already speaks wire). Each hint explains exactly one
-   thing: what blank means, what a flag is for. */
 dialog p.hint {
    margin: 0.3em 0 0;
    color: var(--muted);
    font-size: 0.8em;
 }
-/* Inline unit fields (expire: [n] days) — the input shrinks to its magnitude
-   and the unit rides beside it instead of stretching a number box full-width. */
 dialog .inline-field {
    display: flex;
    align-items: center;
@@ -899,11 +791,6 @@ dialog .inline-field .unit {
    color: var(--fg-2);
    font-size: 0.9em;
 }
-/* Paired small controls: two shape-alike fields (the retention/dedup numbers,
-   the boolean flags) share a row instead of each stretching full width — the
-   number boxes and checkboxes are narrow, so a single column left most of the
-   row empty. Each .field keeps its own label + control + hint stack; the pair
-   collapses to one column on a narrow dialog. */
 dialog .field-duo {
    display: grid;
    grid-template-columns: 1fr 1fr;
@@ -918,12 +805,12 @@ dialog .field-duo > .field {
       grid-template-columns: 1fr;
    }
 }
-/* The feed dialog's advanced fold: overrides / retention / display flags live
-   behind a native <details> under a hairline, keeping the primary add flow
-   (URL → title → tag → recipe) short. The summary speaks in the label voice
-   with a hand-drawn chevron; while the fold is closed, one chip per value set
-   inside rides the summary (app.js), so saved config never hides silently —
-   open, the fields themselves show and the chips would be noise. */
+/* The confirm dialog (replaces window.confirm — SEC3). */
+dialog.confirm-dialog .confirm-msg {
+   margin: 0.2em 0 0;
+   font-size: 0.95em;
+}
+/* The feed dialog's advanced fold. */
 details.adv {
    margin-top: 1.2em;
    border-top: 1px solid var(--faint);
@@ -953,11 +840,11 @@ details.adv > summary::before {
    margin-top: -0.15em;
    border-right: 1.5px solid currentColor;
    border-bottom: 1.5px solid currentColor;
-   transform: rotate(-45deg); /* points right (closed) */
+   transform: rotate(-45deg);
    transition: transform 0.15s ease;
 }
 details.adv[open] > summary::before {
-   transform: rotate(45deg); /* points down (open) */
+   transform: rotate(45deg);
    margin-top: -0.3em;
 }
 @media (prefers-reduced-motion: reduce) {
@@ -982,8 +869,7 @@ details.adv[open] .adv-chips {
    display: none;
 }
 
-/* Pipeline-step editor (recipe modal + feed dialog's pipe override): compact
-   rows of mono step inputs, "+ step" with the empty-pipe meaning beside it. */
+/* Pipeline-step editor (recipe modal + feed dialog's pipe override). */
 .steps {
    display: flex;
    flex-direction: column;
@@ -1013,9 +899,6 @@ details.adv[open] .adv-chips {
    white-space: pre-wrap;
    overflow-wrap: anywhere;
 }
-/* The add-feed wire check: a one-line readout under the URL field ("reading
-   feed…" → green dot + items · the feed's own title, or the fetch error).
-   min-height pins the dialog's layout across the three states. */
 .resolve-status {
    display: flex;
    align-items: center;
@@ -1030,13 +913,9 @@ details.adv[open] .adv-chips {
    color: var(--err);
    overflow-wrap: anywhere;
 }
-/* One width across probe states — a long fetch error wraps instead of
-   stretching the dialog (and the URL field earns real paste room). */
 dialog#feedModal {
    width: min(36em, 92vw);
 }
-/* Scrollable checkbox pickers (syndicate tag/feed selectors). Rows are human
-   values — undo the dialog label's mono-uppercase voice. */
 .picker {
    max-height: 11em;
    overflow: auto;
@@ -1053,12 +932,7 @@ dialog .picker label.check {
    text-transform: none;
    color: var(--fg);
 }
-/* Import review sheet: one editable row per OPML feed — include checkbox,
-   title, tag, recipe — with its resolved URL beneath. A URL already subscribed
-   wears the warn note and starts unchecked (importing it again would mint a
-   duplicate feed); a URL the dry run could not resolve wears the err note with
-   the error inline and starts unchecked too — but stays pickable, because the
-   probe ran the default ingest and a different recipe may be what resolves it. */
+/* Import review sheet. */
 dialog.import-dialog {
    width: min(56em, 94vw);
 }
@@ -1108,7 +982,6 @@ dialog.import-dialog {
 .import-url .unres {
    color: var(--err);
 }
-/* An excluded row stays legible but visibly out of the batch. */
 .import-row.off input:not([type="checkbox"]),
 .import-row.off select,
 .import-row.off .import-url {
@@ -1130,7 +1003,9 @@ dialog.import-dialog {
 }
 
 /* --- preview ------------------------------------------------------------- */
-/* The Feeds-row preview dialog: wide, with its own scrolling article list. */
+.preview-panel {
+   margin-top: 1.6em;
+}
 dialog.preview-dialog {
    width: min(70em, 92vw);
 }
@@ -1155,10 +1030,6 @@ article.preview h4 {
 }
 article.preview h4 a {
    color: var(--fg);
-}
-article.preview .content img {
-   max-width: 100%;
-   height: auto;
 }
 
 /* --- directed empty states (the reader's voice) -------------------------- */
@@ -1198,17 +1069,13 @@ a {
 }
 
 /* --- narrow screens: the feeds table stacks to two-line rows -------------- */
-/* Below 720px each row reflows: dot + title + actions on the first line, the
-   meta (tag, recipe, last-new, count) on the second. The title keeps priority —
-   it wraps instead of ellipsizing to "9t…" — and the source rail moves from the
-   status cell to the row's own left edge. */
 @media (max-width: 719px) {
    #feedTableWrap table,
    #feedTableWrap tbody {
       display: block;
    }
    #feedTableWrap thead {
-      display: none; /* sort toggles are desktop-only; search/tag filters stay above */
+      display: none;
    }
    #feedTableWrap tbody tr {
       display: flex;
@@ -1225,7 +1092,7 @@ a {
       padding: 0;
    }
    #feedTableWrap tbody tr:hover td {
-      background: none; /* flex cells no longer tile the row — skip the patchy wash */
+      background: none;
    }
    #feedTableWrap td.status {
       box-shadow: none;
@@ -1248,7 +1115,6 @@ a {
       order: 2;
       margin-left: auto;
    }
-   /* Forced line break between the title line and the meta line. */
    #feedTableWrap tbody tr::after {
       content: "";
       order: 3;
@@ -1263,7 +1129,7 @@ a {
       order: 5;
    }
    #feedTableWrap td:empty {
-      display: none; /* untagged / default-recipe rows: no ghost gaps */
+      display: none;
    }
    #feedTableWrap td.artcount::before {
       content: "arts ";

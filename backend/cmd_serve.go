@@ -15,20 +15,22 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
-	"testing/fstest"
 	"time"
-
-	"github.com/tdewolff/minify"
-	"github.com/tdewolff/minify/css"
-	"github.com/tdewolff/minify/html"
-	"github.com/tdewolff/minify/js"
 )
 
-//go:embed webui
+// webui/dist is the Parcel-built admin console (a separate `parcel build` into
+// its own dist dir — see the frontend project). It is generated and gitignored
+// except for a committed placeholder index.html, so a bare `go build`/`go vet`/
+// `go test` still compiles without Node; `all:` embeds Parcel's hashed asset
+// names as-is. The sources are no longer hand-written and no longer minified at
+// startup (Parcel minifies): `minifiedWebUI` + the tdewolff/minify pass are gone.
+//
+//go:embed all:webui/dist
 var webuiFS embed.FS
 
 type ServeCmd struct {
@@ -112,27 +114,81 @@ func newMux() http.Handler {
 	for _, m := range []string{http.MethodPost, http.MethodGet, http.MethodDelete} {
 		mux.Handle(m+" /mcp", mcpHandler)
 	}
-	ui := minifiedWebUI()
+	// The static file server stays (this is NOT "serve becomes API-only"): it now
+	// serves the Parcel-built bundle embedded above instead of hand-written
+	// sources. "GET /mcp" still beats this "GET /" wildcard on path specificity.
+	ui := embeddedWebUI()
 	mux.Handle("GET /", webUICacheHeaders(ui, http.FileServerFS(ui)))
-	return hostGuard(mux)
+	// secHeaders wraps OUTSIDE hostGuard so even a 403 carries the CSP/nosniff/
+	// Referrer-Policy/X-Frame-Options headers (SEC3).
+	return secHeaders(hostGuard(mux))
 }
 
-// webUICacheHeaders gives the embedded admin UI cache VALIDATORS it otherwise
-// has none of: the assets are served from an fstest.MapFS whose entries have a
-// zero ModTime, so net/http emits no Last-Modified and no ETag, while the names
-// are static (app.js) — a caching layer in front of the GUI therefore has
-// nothing to revalidate against and serves the previous release's bytes after
-// every update. (That is the trap already worked around with a Cloudflare
-// cache-bypass rule for admin-srr.llera.eu; this fixes the cause, and the rule
-// can stay as belt-and-braces.)
+// embeddedWebUI exposes the Parcel dist as the file server's root FS. Embed
+// reads cannot fail at runtime, so a failure here is a build bug.
+func embeddedWebUI() fs.FS {
+	sub, err := fs.Sub(webuiFS, "webui/dist")
+	if err != nil {
+		panic(err) // embed is compile-time; a failure here is a build bug
+	}
+	return sub
+}
+
+// webUICSP is the admin console's Content-Security-Policy (SEC3). The bundle is
+// generated, so it has no inline scripts/styles to grandfather — script-src and
+// style-src stay 'self'. img-src/media-src CANNOT be 'self': the preview dialog
+// renders real article HTML in a sandbox="" srcdoc iframe, and a srcdoc document
+// inherits the embedder's CSP, so a strict img-src would blank every preview —
+// the empty sandbox (no allow-scripts) is what stops execution, CSP is the
+// backstop. frame-src 'self' covers srcdoc. This is the console's OWN policy;
+// the reader keeps its different one (frontend/_headers + its index.html meta).
+const webUICSP = "default-src 'self'; img-src * data: blob:; media-src * data: blob:; " +
+	"style-src 'self'; script-src 'self'; object-src 'none'; frame-src 'self'; " +
+	"base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+
+// secHeaders stamps the static security headers on every response — the API
+// (200 and error), the served bundle, and a hostGuard 403 alike (it wraps
+// outside the guard). SEC3: header middleware, strict static CSP, nosniff,
+// Referrer-Policy, plus X-Frame-Options as the belt-and-braces clickjacking
+// legacy of frame-ancestors 'none'.
+func secHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Content-Security-Policy", webUICSP)
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("X-Frame-Options", "DENY")
+		next.ServeHTTP(w, r)
+	})
+}
+
+// webUIHashedRe matches a Parcel content-hashed asset name (frontend.<hash>.js,
+// styles.<hash>.css, …): a slash-free basename of <stem>.<8+ hex>.<ext>. The
+// name changes whenever the bytes do, so such a file is safe to cache forever.
+// Mirrors store.feHashedRe (the frontend-shell classifier).
+var webUIHashedRe = regexp.MustCompile(`^[^/]+\.[0-9a-f]{8,}\.[a-z0-9]+$`)
+
+// webUICacheHeaders gives the embedded admin UI the right Cache-Control for a
+// content-hashed Parcel bundle, mirroring store.cacheControlForKey:
 //
-// A content ETag per file, computed once at startup, plus no-cache: the client
-// keeps the bytes but must revalidate, and an unchanged file answers 304.
+//   - a hashed asset name (frontend.<hash>.js) → immutable, cached for a year
+//     with no revalidation (the hash IS the version);
+//   - index.html and any other unhashed root file → no-cache + a startup-computed
+//     content ETag, so a caching layer keeps the bytes but must revalidate and an
+//     unchanged file answers 304.
+//
+// This structurally fixes the trap the old MapFS scheme worked around (zero
+// ModTime ⇒ no validators ⇒ a static app.js name went stale after every release,
+// the reason for the admin-srr.llera.eu cache-bypass rule): Parcel hashes the
+// asset names, so only the small mutable HTML shell needs a validator now.
 func webUICacheHeaders(fsys fs.FS, next http.Handler) http.Handler {
 	etags := map[string]string{}
 	_ = fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil //nolint:nilerr // a missing UI file is a build bug, not a request-time error
+		}
+		if webUIHashedRe.MatchString(path.Base(p)) {
+			return nil // hashed assets are immutable — no validator needed
 		}
 		b, err := fs.ReadFile(fsys, p)
 		if err != nil {
@@ -146,10 +202,15 @@ func webUICacheHeaders(fsys fs.FS, next http.Handler) http.Handler {
 		if p == "/" {
 			p = "/index.html" // what FileServerFS will serve for the directory
 		}
+		if webUIHashedRe.MatchString(path.Base(p)) {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			next.ServeHTTP(w, r)
+			return
+		}
 		if tag, ok := etags[p]; ok {
 			w.Header().Set("ETag", tag)
 			w.Header().Set("Cache-Control", "no-cache")
-			// Compare against every candidate in If-None-Match; the GUI is served
+			// Compare against every candidate in If-None-Match; the shell is served
 			// as-is (no transforms), so a strong-tag equality check is enough.
 			for _, cand := range strings.Split(r.Header.Get("If-None-Match"), ",") {
 				if strings.TrimSpace(cand) == tag {
@@ -160,47 +221,6 @@ func webUICacheHeaders(fsys fs.FS, next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
-}
-
-// minifiedWebUI minifies the embedded webui assets once at startup and serves
-// them from an in-memory FS. It reuses the tdewolff/minify the #minify mod
-// already vendors, so the build stays pure-Go with no JS toolchain. Embed reads
-// cannot fail at runtime, so a failure here is a build bug.
-func minifiedWebUI() fs.FS {
-	sub, err := fs.Sub(webuiFS, "webui")
-	if err != nil {
-		panic(err) // embed is compile-time; a failure here is a build bug
-	}
-	m := minify.New()
-	m.AddFunc("text/css", css.Minify)
-	m.AddFunc("text/html", html.Minify)
-	m.AddFunc("application/javascript", js.Minify)
-	mediaType := map[string]string{
-		".css":  "text/css",
-		".html": "text/html",
-		".js":   "application/javascript",
-	}
-	out := fstest.MapFS{}
-	err = fs.WalkDir(sub, ".", func(p string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil || d.IsDir() {
-			return walkErr
-		}
-		b, err := fs.ReadFile(sub, p)
-		if err != nil {
-			return err
-		}
-		if mt, ok := mediaType[path.Ext(p)]; ok {
-			if mb, err := m.Bytes(mt, b); err == nil {
-				b = mb // fall back to the original bytes if minify chokes
-			}
-		}
-		out[p] = &fstest.MapFile{Data: b}
-		return nil
-	})
-	if err != nil {
-		panic(err) // reading the embedded FS cannot fail at runtime
-	}
-	return out
 }
 
 // hostGuard rejects requests whose Host (or cross-origin Origin) is not a
