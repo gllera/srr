@@ -65,6 +65,23 @@ const nav = vi.hoisted(() => {
                }
             })
       },
+      // Faithful inline copy of the real §6.3 mount extractor (pure grammar).
+      parseHashMount: (raw: string[]) => {
+         if (raw.length === 0 || !raw[0].startsWith("@")) return { mid: "0", tokens: raw }
+         const parseTok = (t: string) => {
+            const c = t.indexOf(":")
+            return c === -1 ? { mid: t.slice(1), tok: "" } : { mid: t.slice(1, c), tok: t.slice(c + 1) }
+         }
+         const mid = parseTok(raw[0]).mid
+         const tokens: string[] = []
+         for (const r of raw) {
+            if (!r.startsWith("@")) break
+            const p = parseTok(r)
+            if (p.mid !== mid) break
+            if (p.tok) tokens.push(p.tok)
+         }
+         return { mid, tokens }
+      },
       SAVED_TOKEN: "~saved",
       getCurrentFilterKey: vi.fn(() => ""),
       filterLabel: vi.fn((key: string) =>
@@ -113,6 +130,10 @@ const data = vi.hoisted(() => ({
    // The active store context app reads for the pin message base/mid and the
    // article base it hands the fmt sanitizer (home mid "0", loopback base).
    activeStore: () => ({ mid: "0", base: new URL("http://localhost/") }),
+   setActive: vi.fn(() => true),
+   mountedStores: vi.fn(() => [{ mid: "0", base: new URL("http://localhost/"), cred: "same-origin", role: "home" }]),
+   mountRecords: vi.fn(() => [{ id: "0", url: "http://localhost/", label: "", ord: 0, role: "home", cred: false }]),
+   mountStatus: vi.fn(() => ({ state: "ok", kind: "", error: "" })),
 }))
 vi.mock("./data", () => data)
 

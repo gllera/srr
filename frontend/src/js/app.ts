@@ -791,7 +791,12 @@ async function route(hash: string) {
       await guard(() => nav.fromHash(hash))
       return
    }
-   const tokens = nav.parseHashTokens(hash)
+   // The list hash carries the mount too (§6.3) — extract it and switch the
+   // active lane before applying the (bare) filter tokens, mirroring
+   // nav.fromHash's reader path. setActive fails softly for an unmounted/errored
+   // mount, resolving against the current lane rather than blanking (MS4).
+   const { mid, tokens } = nav.parseHashMount(nav.parseHashTokens(hash))
+   if (mid !== data.activeStore().mid) data.setActive(mid)
    nav.applyFilter(tokens)
    // Canonicalize the URL (boot may restore an empty location.hash from
    // localStorage) without growing history.
