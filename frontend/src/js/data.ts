@@ -297,7 +297,14 @@ function assertPackOk(store: Store, res: Response, isLatest: boolean): void {
    // coherent snapshot, surface via lastRefreshError), so a transient tail 404
    // must not yank a reading user out; refresh() runs under app.ts's guardBg
    // mutex, so no user navigation can observe the flag set.
-   if (isLatest && !store.bgRefresh && !sessionStorage.getItem(RELOAD_GUARD_KEY)) {
+   //
+   // §8.5: the guarded reload is a WHOLE-PAGE action, so it is HOME-ONLY. Firing
+   // it because a PEER's tail 404'd would yank a reading user out of an unrelated
+   // store; a peer instead just throws here, and its own refreshPeers/retryMount
+   // re-boots that mount in place (the scoped recovery). The single global
+   // reload guard stays correct — it guards the global action, cleared once the
+   // home mount completes a successful applyDb.
+   if (store.role === "home" && isLatest && !store.bgRefresh && !sessionStorage.getItem(RELOAD_GUARD_KEY)) {
       sessionStorage.setItem(RELOAD_GUARD_KEY, "1")
       location.reload()
    }
