@@ -13,7 +13,7 @@ import { collapseBrokenMedia, countBadge, readerDateline, sanitizeFragment, srcC
 import { setupGestures, type Gestures } from "./gestures"
 import { HASH_KEY, UNREAD_ONLY_KEY } from "./keys"
 import * as list from "./list"
-import { addMount, forgetStoreState, removeMount, type MountRecord } from "./mounts"
+import { addMount, forgetStoreState, mountLabel, removeMount, type MountRecord } from "./mounts"
 import * as nav from "./nav"
 import * as picker from "./picker"
 import { clearAllPins, isPinned, listPins, pinFilter, unpinFilter } from "./pin"
@@ -507,6 +507,15 @@ function renderEmptyReader(o: IShowFeed) {
    persistHash(location.hash)
 }
 
+// The active mount's display label, or "" when only one store is mounted (the
+// single-store case shows no mount prefix — §6.3).
+function activeMountName(): string {
+   if (data.mountedStores().length <= 1) return ""
+   const mid = data.activeStore().mid
+   const rec = data.mountRecords().find((r) => r.id === mid)
+   return rec ? mountLabel(rec) : mid
+}
+
 function refreshFeedLabel() {
    // The article's source now lives in the header kicker, so the toolbar label
    // is the active-filter indicator: "All", a tag name, or a single feed.
@@ -514,11 +523,17 @@ function refreshFeedLabel() {
    // query), so show the button neutral ("All", unhighlighted) instead of the raw
    // "q:<query>" token getCurrentFilterKey returns.
    const key = nav.isSearchFilter() ? "" : nav.getCurrentFilterKey() // "" (all/multi) | tag name | numeric feed id
-   if (key === lastFeedLabel) return
-   lastFeedLabel = key
+   // Multi-store breadcrumb (docs/MULTI-STORE-SPEC.md §6.3): prefix the readout
+   // with the active mount "MOUNT · LANE" ONLY when more than one store is
+   // mounted — a single-store user sees byte-identical chrome. The mount rides in
+   // the early-return cache key so a mount switch repaints even at the same lane.
+   const mountName = activeMountName()
+   const cacheKey = mountName + " " + key
+   if (cacheKey === lastFeedLabel) return
+   lastFeedLabel = cacheKey
 
    const label = nav.filterLabel(key)
-   el.feedName.textContent = label
+   el.feedName.textContent = mountName ? mountName + " · " + label : label
    // A single-feed filter tints the toolbar label with that feed's source
    // color (the wire-desk identity in the toolbar); [ALL]/tag/saved/search stay
    // neutral. The chip-less label still says which source you're viewing.
