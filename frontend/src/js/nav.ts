@@ -1,8 +1,16 @@
 import * as data from "./data"
 import { extractPrefetchMedia } from "./fmt"
-import { SAVED_KEY, SEEN_KEY, SEEN_TS_KEY, UNREAD_ONLY_KEY } from "./keys"
+import { savedKey, seenKey, seenTsKey, UNREAD_ONLY_KEY } from "./keys"
 import * as search from "./search"
 import * as sync from "./sync"
+
+// The seen/saved keys are per-store (docs/MULTI-STORE-SPEC.md §4.2): they are
+// namespaced by the ACTIVE store's mid, the lane nav is reading. For the home
+// store (mid "0") these resolve to the bare legacy names (srr-seen / srr-seen-ts
+// / srr-saved), so a single-store user's state is unchanged.
+const seenK = () => seenKey(data.activeStore().mid)
+const seenTsK = () => seenTsKey(data.activeStore().mid)
+const savedK = () => savedKey(data.activeStore().mid)
 
 let pos = -1
 // Feed id of the article currently on screen (-1 = none). app.ts reads it via
@@ -56,7 +64,7 @@ export const SAVED_TOKEN = "~saved"
 // correct across tabs and keeps tests/`vi.resetModules` free of stale state.
 function readSavedSet(): Set<number> {
    try {
-      const raw = localStorage.getItem(SAVED_KEY)
+      const raw = localStorage.getItem(savedK())
       const arr = raw ? JSON.parse(raw) : []
       return new Set(Array.isArray(arr) ? arr.filter((n) => Number.isInteger(n)) : [])
    } catch {
@@ -123,7 +131,7 @@ export function toggleSaved(chron: number): boolean {
    if (nowSaved) set.add(chron)
    else set.delete(chron)
    try {
-      localStorage.setItem(SAVED_KEY, JSON.stringify([...set]))
+      localStorage.setItem(savedK(), JSON.stringify([...set]))
    } catch {}
    sync.pushSoon()
    next.left = next.right = undefined
@@ -766,7 +774,7 @@ function schedulePrefetch(target: number) {
       try {
          const art = await data.loadArticle(target)
          if (my !== currentPrefetch) return
-         const media = extractPrefetchMedia(art.c)
+         const media = extractPrefetchMedia(art.c, data.activeStore().base)
          for (const url of media.images.slice(0, PREFETCH_IMAGES)) {
             const img = new Image()
             img.fetchPriority = "low"
@@ -794,7 +802,7 @@ function schedulePrefetch(target: number) {
 
 function readSeen(): Record<string, number> {
    try {
-      const raw = localStorage.getItem(SEEN_KEY)
+      const raw = localStorage.getItem(seenK())
       return raw ? JSON.parse(raw) : {}
    } catch {
       return {}
@@ -807,13 +815,13 @@ function readSeen(): Record<string, number> {
 // explicit rewind) against other devices. Every seen write goes through here
 // so no mutation ships unordered.
 function writeSeen(seen: Record<string, number>, touched: string[]): void {
-   localStorage.setItem(SEEN_KEY, JSON.stringify(seen))
+   localStorage.setItem(seenK(), JSON.stringify(seen))
    try {
-      const raw = localStorage.getItem(SEEN_TS_KEY)
+      const raw = localStorage.getItem(seenTsK())
       const st: Record<string, number> = raw ? JSON.parse(raw) : {}
       const now = Math.floor(Date.now() / 1000)
       for (const k of touched) st[k] = now
-      localStorage.setItem(SEEN_TS_KEY, JSON.stringify(st))
+      localStorage.setItem(seenTsK(), JSON.stringify(st))
    } catch {}
 }
 
@@ -989,10 +997,10 @@ export function pruneSeen() {
             changed = true
          }
       }
-      if (changed) localStorage.setItem(SEEN_KEY, JSON.stringify(seen))
+      if (changed) localStorage.setItem(seenK(), JSON.stringify(seen))
       // The per-key ordering timestamps shadow the seen map — any st key whose
       // seen entry is gone (pruned above, or never existed) is dead weight too.
-      const rawSt = localStorage.getItem(SEEN_TS_KEY)
+      const rawSt = localStorage.getItem(seenTsK())
       const st: Record<string, number> = rawSt ? JSON.parse(rawSt) : {}
       let stChanged = false
       for (const key of Object.keys(st))
@@ -1000,7 +1008,7 @@ export function pruneSeen() {
             delete st[key]
             stChanged = true
          }
-      if (stChanged) localStorage.setItem(SEEN_TS_KEY, JSON.stringify(st))
+      if (stChanged) localStorage.setItem(seenTsK(), JSON.stringify(st))
    } catch {}
 }
 

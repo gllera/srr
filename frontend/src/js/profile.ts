@@ -42,8 +42,17 @@
 // raise-only: all devices belong to one reader, whose read state is the union
 // of what they read anywhere plus their latest explicit rewinds.
 
-import { IMG_PROXY_KEY, PROFILE_TS_KEY, SAVED_KEY, SEEN_KEY, SEEN_TS_KEY, UNREAD_ONLY_KEY } from "./keys"
+import { HOME_MID, IMG_PROXY_KEY, profileTsKey, savedKey, seenKey, seenTsKey, UNREAD_ONLY_KEY } from "./keys"
 import { isValidHttpish, normalizeHttpish } from "./urlish"
+
+// The portable profile is the HOME store's device state (the blob's top-level
+// fields are mount 0's, per docs/MULTI-STORE-SPEC.md §4.4; peer-store substate
+// rides the additive `ms` map that S38 adds). So the keys here resolve to the
+// bare legacy names via HOME_MID — a single-store user's blob is unchanged.
+const SEEN_KEY = seenKey(HOME_MID)
+const SEEN_TS_KEY = seenTsKey(HOME_MID)
+const SAVED_KEY = savedKey(HOME_MID)
+const PROFILE_TS_KEY = profileTsKey(HOME_MID)
 
 function lsGet(key: string): string {
    try {

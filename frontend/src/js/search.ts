@@ -7,8 +7,9 @@
 // only prune (false positives cost one shard fetch; false negatives are
 // impossible), so the Go/TS folding parity below is a recall optimization,
 // not a correctness gate, except for the query side which only ever folds in TS.
-import { cachedPromise, lazySlot, makeLRU } from "./cache"
+import { cachedPromise, lazySlot, makeLRU, type LRU } from "./cache"
 import * as data from "./data"
+import { activeStore, type Store } from "./data"
 import { META_PACK_SIZE, SEARCH_BLOOM_BYTES, SEARCH_BLOOM_K, SEARCH_GRAM, type IMetaWire } from "./format.gen"
 
 // One search result: the shard entry plus its global position (chron =
@@ -108,36 +109,61 @@ function parseShard(buf: ArrayBuffer, skipBloom: boolean): Shard {
 // Everything below is lazy: nothing is fetched until the first query, so
 // boot stays O(1). All three loaders follow data.ts's retry discipline —
 // a rejected promise clears its slot so the next query refetches.
+//
+// Per-store (docs/MULTI-STORE-SPEC.md §11.1): the lazy fetch slots, LRUs and the
+// delta-fold memo are what search.ts accumulated as module-level state; they now
+// hang off a per-Store record, keyed in a WeakMap by the Store the query runs
+// against. S37 has one store (the active one) so this is byte-identical, but the
+// state is already partitioned for S38's N stores. The data reads (storeNames,
+// metaReady, fetchPackBytes, deltaArticles) still go through the active store's
+// data.* exports — threading the searched store into THOSE is S38's step.
+interface SearchState {
+   loadSummary: () => Promise<Uint8Array>
+   loadLatest: () => Promise<Shard>
+   shardCache: LRU<Promise<Shard>>
+   hitCache: LRU<Promise<HitSet>, string>
+   deltaShardCache: { arts: IArticle[]; shard: Shard } | null
+}
 
-// Factory so invalidate() below can reissue a fresh slot — lazySlot has no reset of its own.
-const makeSummarySlot = () =>
-   lazySlot(async () => {
-      const nf = data.numFinalizedMeta()
-      const ssum = data.storeNames().ssum
-      if (!ssum) throw new Error("meta summary: the store names none")
-      const blooms = new Uint8Array(await data.fetchPackBytes(ssum.key, false))
-      if (blooms.length !== nf * SEARCH_BLOOM_BYTES)
-         throw new Error(`meta summary: ${blooms.length} bytes for ${nf} shards`)
-      return blooms
-   })
-let loadSummary = makeSummarySlot()
+function makeState(): SearchState {
+   return {
+      // The meta summary: every meta key comes from the snapshot's resolved name
+      // list (data.storeNames, docs/MANIFEST-SPEC.md §4.5).
+      loadSummary: lazySlot(async () => {
+         const nf = data.numFinalizedMeta()
+         const ssum = data.storeNames().ssum
+         if (!ssum) throw new Error("meta summary: the store names none")
+         const blooms = new Uint8Array(await data.fetchPackBytes(ssum.key, false))
+         if (blooms.length !== nf * SEARCH_BLOOM_BYTES)
+            throw new Error(`meta summary: ${blooms.length} bytes for ${nf} shards`)
+         return blooms
+      }),
+      // The latest tail: the series' tail POSITION — under a legacy root that is
+      // the L<tailGen> generation, not L<seq>, since a live delta chain runs seq
+      // ahead of the last consolidated tail.
+      loadLatest: lazySlot(() => {
+         const meta = data.storeNames().meta
+         if (meta.tail < 0) throw new Error("meta tail: the store names none")
+         return data.fetchPackBytes(meta.keys[meta.tail], true).then((buf) => parseShard(buf, false))
+      }),
+      shardCache: makeLRU<Promise<Shard>>(8),
+      hitCache: makeLRU<Promise<HitSet>, string>(8),
+      deltaShardCache: null,
+   }
+}
 
-// Factory so invalidate() below can reissue a fresh slot — lazySlot has no reset of its own.
-// Every meta key comes from the snapshot's resolved name list (data.storeNames,
-// docs/MANIFEST-SPEC.md §4.5): the tail is the series' tail POSITION — under a
-// legacy root that is the L<tailGen> generation, not L<seq>, since a live delta
-// chain runs seq ahead of the last consolidated tail.
-const makeLatestSlot = () =>
-   lazySlot(() => {
-      const meta = data.storeNames().meta
-      if (meta.tail < 0) throw new Error("meta tail: the store names none")
-      return data.fetchPackBytes(meta.keys[meta.tail], true).then((buf) => parseShard(buf, false))
-   })
-let loadLatest = makeLatestSlot()
+const stateBy = new WeakMap<Store, SearchState>()
+function stateOf(store: Store): SearchState {
+   let s = stateBy.get(store)
+   if (!s) {
+      s = makeState()
+      stateBy.set(store, s)
+   }
+   return s
+}
 
-let shardCache = makeLRU<Promise<Shard>>(8)
-function loadShard(n: number): Promise<Shard> {
-   return cachedPromise(shardCache, n, () => {
+function loadShard(st: SearchState, n: number): Promise<Shard> {
+   return cachedPromise(st.shardCache, n, () => {
       const key = data.storeNames().meta.keys[n]
       if (!key) throw new Error(`meta shard ${n}: the store names no object at that position`)
       return data.fetchPackBytes(key, false).then((buf) => parseShard(buf, true))
@@ -150,11 +176,10 @@ function loadShard(n: number): Promise<Shard> {
 // titles fold once per snapshot rather than once per keystroke. Memoized on the
 // chain array's identity (data.ts reassigns it wholesale on refresh; invalidate
 // also clears it).
-let deltaShardCache: { arts: IArticle[]; shard: Shard } | null = null
-function deltaShard(): Shard {
+function deltaShard(st: SearchState): Shard {
    const arts = data.deltaArticles()
-   if (deltaShardCache?.arts !== arts) {
-      deltaShardCache = {
+   if (st.deltaShardCache?.arts !== arts) {
+      st.deltaShardCache = {
          arts,
          shard: {
             entries: arts.map((a) => ({ f: a.f, w: a.p || a.a, t: a.t })),
@@ -162,7 +187,7 @@ function deltaShard(): Shard {
          },
       }
    }
-   return deltaShardCache.shard
+   return st.deltaShardCache.shard
 }
 
 function matchShard(shard: Shard, baseChron: number, words: string[], max: number): ISearchHit[] {
@@ -202,7 +227,11 @@ export function shortQuery(q: string): boolean {
 // word; candidate shards must hold every gram of every bloom-sized word. A
 // missing/broken latest tail degrades to finalized-only (warn); a missing
 // summary rejects — the caller decides how to surface that.
-export async function* search(q: string, limit = Infinity): AsyncGenerator<ISearchHit[], void, void> {
+export async function* search(
+   q: string,
+   limit = Infinity,
+   store: Store = activeStore(),
+): AsyncGenerator<ISearchHit[], void, void> {
    const words = fold(q)
       .split(" ")
       .filter((w) => w.length > 0)
@@ -213,6 +242,7 @@ export async function* search(q: string, limit = Infinity): AsyncGenerator<ISear
    // inconsistent results — yield nothing (fails safe) instead.
    if (!data.metaReady()) return
 
+   const st = stateOf(store)
    const nf = data.numFinalizedMeta()
    // wordGrams already yields nothing for words shorter than SEARCH_GRAM.
    const gramBits = words.flatMap(wordGrams).map(bloomBits)
@@ -220,7 +250,7 @@ export async function* search(q: string, limit = Infinity): AsyncGenerator<ISear
    // are independent, so the first query of a session overlaps their round
    // trips (lazySlot caches both afterwards; its catch keeps an early return
    // from leaving the rejection unhandled).
-   const summary = nf > 0 && gramBits.length > 0 ? loadSummary() : null
+   const summary = nf > 0 && gramBits.length > 0 ? st.loadSummary() : null
    let remaining = limit
 
    // Delta overlay: the newest chrons live in the resident chain, which no
@@ -228,7 +258,7 @@ export async function* search(q: string, limit = Infinity): AsyncGenerator<ISear
    // needed at ≤ MAX_DELTAS small batches), via matchShard over the synthetic
    // delta shard so expiry/tombstone handling stays single-sourced.
    if (data.deltaArticles().length > 0 && remaining > 0) {
-      const hits = matchShard(deltaShard(), data.tailCovered(), words, remaining)
+      const hits = matchShard(deltaShard(st), data.tailCovered(), words, remaining)
       remaining -= hits.length
       if (hits.length > 0) yield hits
    }
@@ -238,7 +268,7 @@ export async function* search(q: string, limit = Infinity): AsyncGenerator<ISear
    // isLatest 404 path would trigger the guarded reload for a healthy store.
    if ((data.db.mt ?? 0) > 0 && remaining > 0) {
       try {
-         const latest = await loadLatest()
+         const latest = await st.loadLatest()
          const hits = matchShard(latest, nf * META_PACK_SIZE, words, remaining)
          remaining -= hits.length
          if (hits.length > 0) yield hits
@@ -251,7 +281,7 @@ export async function* search(q: string, limit = Infinity): AsyncGenerator<ISear
    const blooms = await summary
    for (let p = nf - 1; p >= 0 && remaining > 0; p--) {
       if (!gramBits.every((bits) => bloomHas(blooms, p * SEARCH_BLOOM_BYTES, bits))) continue
-      const hits = matchShard(await loadShard(p), p * META_PACK_SIZE, words, remaining)
+      const hits = matchShard(await loadShard(st, p), p * META_PACK_SIZE, words, remaining)
       remaining -= hits.length
       if (hits.length > 0) yield hits
    }
@@ -268,19 +298,17 @@ export interface HitSet {
    cards: Map<number, import("./format.gen").IMetaWire>
 }
 
-let hitCache = makeLRU<Promise<HitSet>, string>(8)
-
 // `cap` must be constant per query key: the cache is keyed on `query` alone and
 // ignores `cap` on a hit, so a varying cap for the same query would silently
 // return the first cap's result. nav always passes the fixed SEARCH_CAP.
-export function loadHits(query: string, cap: number): Promise<HitSet> {
-   return cachedPromise(hitCache, query, async () => {
+export function loadHits(query: string, cap: number, store: Store = activeStore()): Promise<HitSet> {
+   return cachedPromise(stateOf(store).hitCache, query, async () => {
       const seen = new Set<number>()
       const chrons: number[] = []
       const cards = new Map<number, import("./format.gen").IMetaWire>()
       let truncated = false
       if (query) {
-         outer: for await (const batch of search(query, cap + 1)) {
+         outer: for await (const batch of search(query, cap + 1, store)) {
             for (const h of batch) {
                if (chrons.length >= cap) {
                   truncated = true
@@ -309,10 +337,9 @@ export function loadHits(query: string, cap: number): Promise<HitSet> {
 // a q: filter is active this alone is not enough — nav.ts keeps its own snapshot
 // (searchSorted/searchLoadedFor), so pair with nav's resetSearchStream() + an
 // ensureSearchSet re-run.
-export function invalidate(): void {
-   loadSummary = makeSummarySlot()
-   loadLatest = makeLatestSlot()
-   shardCache = makeLRU<Promise<Shard>>(8)
-   hitCache = makeLRU<Promise<HitSet>, string>(8)
-   deltaShardCache = null
+export function invalidate(store: Store = activeStore()): void {
+   // Replace the store's whole SearchState — a fresh set of lazy slots/LRUs, the
+   // delta memo dropped — so stale generation-named summary/tail bytes from a
+   // refresh can't leak into a search.
+   stateBy.set(store, makeState())
 }

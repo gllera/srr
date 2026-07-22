@@ -4,7 +4,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 // remembered remote), so each test gets a fresh instance via vi.resetModules()
 // + dynamic import — the same pattern as dropdown.test.ts. fetch is a plain
 // vi.fn stub (jsdom ships no fetch); responses are minimal object literals.
-import { SEEN_KEY, SAVED_KEY, SYNC_URL_KEY, UNREAD_ONLY_KEY, PROFILE_TS_KEY } from "./keys"
+import { HOME_MID, profileTsKey, savedKey, seenKey, SYNC_URL_KEY, UNREAD_ONLY_KEY } from "./keys"
+
+// The per-store keys became (mid) ⇒ key functions; sync operates on the home
+// store, whose keys are the bare legacy names (HOME_MID "0"). Reconstruct the
+// same constants the rest of this suite already asserts on.
+const SEEN_KEY = seenKey(HOME_MID)
+const SAVED_KEY = savedKey(HOME_MID)
+const PROFILE_TS_KEY = profileTsKey(HOME_MID)
 
 type Sync = typeof import("./sync")
 
