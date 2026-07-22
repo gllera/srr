@@ -376,11 +376,19 @@ function mergeMountState(obj: Record<string, unknown>, mode: "merge" | "sync"): 
    let changed = false
    if (Array.isArray(obj["mnt"])) {
       const incoming = (obj["mnt"] as unknown[]).map(coerceMountRecord).filter((r): r is MountRecord => r !== null)
-      const merged = mergeMountRecords(loadMounts(), incoming)
+      // A modern build ALWAYS writes `mnt` (exportProfile → ensureHome ⇒ never
+      // empty), so this branch runs on essentially every pull. Only report a
+      // change when the table actually MOVED — an identical mnt round-trip must
+      // report changed:false, or every sync cycle would spuriously re-anchor the
+      // list (the ImportResult.changed contract: seen/saved actually mutated).
+      const before = loadMounts()
+      const merged = mergeMountRecords(before, incoming)
       const { records, renames } = reconcileMounts(merged)
       for (const r of renames) renameStoreState(r.from, r.to)
-      saveMounts(records)
-      changed = true
+      if (renames.length > 0 || JSON.stringify(records) !== JSON.stringify(before)) {
+         saveMounts(records)
+         changed = true
+      }
    }
    const ms = obj["ms"]
    if (ms && typeof ms === "object" && !Array.isArray(ms)) {

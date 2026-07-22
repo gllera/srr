@@ -537,6 +537,26 @@ describe("multi-store mnt/ms (§4.4)", () => {
       expect(JSON.parse(localStorage.getItem("srr-saved@sP")!)).toEqual([7])
    })
 
+   it("an identical mnt round-trip reports changed:false (no spurious re-anchor)", () => {
+      // The device already knows exactly this mount; pulling its own blob back
+      // must NOT report a change — the bug that re-anchored the list every cycle.
+      localStorage.setItem(
+         "srr-mounts",
+         JSON.stringify([{ id: "sP", url: "https://peer/", label: "P", ord: 10, role: "peer", cred: false, ts: 9 }]),
+      )
+      // exportProfile now emits the current mnt (incl. the synthesized home).
+      const blob = exportProfile()
+      const r = importProfile(blob, { prefs: false, mode: "sync" })
+      expect(r.ok).toBe(true)
+      expect(r.changed).toBe(false)
+   })
+
+   it("a home-only device (default single-store) reports changed:false on its own blob", () => {
+      const r = importProfile(exportProfile(), { prefs: false, mode: "sync" })
+      expect(r.ok).toBe(true)
+      expect(r.changed).toBe(false)
+   })
+
    it("a peer substate change does NOT stamp the home ts", () => {
       touchProfile(500) // home ts
       const incoming = JSON.stringify({
