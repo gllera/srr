@@ -220,12 +220,18 @@ function unpinCurrentFilter(): void {
 function postMounts(): void {
    const controller = navigator.serviceWorker?.controller
    if (!controller) return // dev / harness / insecure context — the SW is inert anyway
-   const roots = data.mountedStores().map((s) => ({
-      mid: s.mid,
-      base: s.base.href,
-      cred: s.cred,
-      role: s.role,
-   }))
+   // Built from the mount TABLE, not the booted stores, so it is valid BEFORE
+   // data.init() (which is what lets the SW route a peer's boot fetches). A root
+   // that never boots is harmless — the SW just knows it may cache under it.
+   const roots = data
+      .mountRecords()
+      .filter((r) => !r.del)
+      .map((r) => ({
+         mid: r.id,
+         base: r.url,
+         cred: r.cred ? "include" : "same-origin",
+         role: r.role,
+      }))
    controller.postMessage({ type: "mounts", roots })
 }
 
@@ -1103,6 +1109,12 @@ const KEY_ACTIONS: Record<string, () => void> = {
 }
 
 async function init() {
+   // Tell the SW its mounted roots BEFORE data.init() (the PWA0 fix, §5.1): the
+   // roots come from the mount TABLE (valid pre-init), so a peer store's boot
+   // fetches — kicked inside data.init() — are already routed + cached by the SW
+   // instead of passing through uncached. Re-posted after init (reconcile may
+   // change the table) and on controllerchange.
+   postMounts()
    try {
       await data.init()
    } catch (e) {

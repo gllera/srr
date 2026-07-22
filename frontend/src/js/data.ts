@@ -173,9 +173,13 @@ const backoffs = new Map<string, Backoff>()
 const BACKOFF_MIN = 60_000
 const BACKOFF_MAX = 1_800_000
 
-// The reconciled mount table (mounts.ts records). The UI reads it for the picker
-// sections + the SW `mounts` post; init() and applyMountTable() keep it current.
-let mountTable: MountRecord[] = []
+// The mount table (mounts.ts records). The UI reads it for the picker sections +
+// the SW `mounts` post. Loaded at MODULE LOAD (not just init) so app.ts can post
+// the roots to the SW BEFORE data.init() kicks the peer stores' fetches — the SW
+// must already know a cross-origin root to route + cache its packs (PWA0).
+// init() reconciles it (home-collision/rename) and applyMountTable() keeps it
+// current; both reassign this.
+let mountTable: MountRecord[] = loadMounts()
 
 // activeStore is the nav/UI layer's one notion of "the lane I am in"
 // (docs/MULTI-STORE-SPEC.md §11.2). The data/search hot functions take a store
