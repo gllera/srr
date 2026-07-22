@@ -726,9 +726,17 @@ export async function refreshPeers(): Promise<boolean> {
             try {
                const needsBoot = !s.db || mountStatus(s.mid).state === "error"
                if (needsBoot) {
-                  // A never-booted or errored peer: (re)fetch db.gz from scratch.
+                  // A never-booted or errored mount: (re)fetch db.gz from scratch.
+                  // bgRefresh suppresses assertPackOk's guarded reload — this is a
+                  // BACKGROUND poll, so even the home store (in here only when it
+                  // failed to boot and a peer is active) must never reload the page.
                   s.dbLoad = loadDb(s)
-                  await applyDb(s, await s.dbLoad)
+                  s.bgRefresh = true
+                  try {
+                     await applyDb(s, await s.dbLoad)
+                  } finally {
+                     s.bgRefresh = false
+                  }
                   statuses.set(s.mid, { state: "ok", kind: "", error: "" })
                   anyUpdated = true
                } else if ((await refresh(s)) === "updated") {
