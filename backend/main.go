@@ -91,6 +91,7 @@ type CLI struct {
 	Export    ExportAllCmd   `cmd:"" help:"Write the whole store configuration (feeds, recipes, syndication, dedup default) as JSON."`
 	Import    ImportAllCmd   `cmd:"" help:"Restore a configuration written by 'srr export' (feeds matched by url; fetch state untouched)."`
 	Dedup     DedupCmd       `cmd:"" help:"Print or set the store-wide default dedup horizon (db.gz 'dd', in days)."`
+	Compact   CompactCmd     `cmd:"" help:"Physically reclaim the payload bytes of already-expired articles (opt-in; the one op that removes bytes)."`
 	Preview   PreviewCmd     `cmd:"" aliases:"p" help:"Preview processed feed articles in a browser."`
 	Serve     ServeCmd       `cmd:"" help:"Serve a local web admin GUI for managing feeds, recipes, syndication."`
 	Mcp       McpCmd         `cmd:"" help:"Serve the SRR MCP tool interface over stdio."`

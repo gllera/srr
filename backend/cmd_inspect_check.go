@@ -39,6 +39,7 @@ func (o *InspectCmd) validateAll(fetch keyGetter, core *DBCore, packs []*idxPack
 		{"idx-summary", func() int { return o.checkIdxSummary(fetch, core, packs) }},
 		{"meta", func() int { return o.checkMeta(fetch, core) }},
 		{"manifest", func() int { return o.checkManifest(fetch, core) }},
+		{"chron-permanence", func() int { return o.checkChronPermanence(fetch, core) }},
 	}
 
 	if o.JSON {
