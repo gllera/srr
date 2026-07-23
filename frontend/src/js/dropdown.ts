@@ -477,15 +477,17 @@ export function showContextMenu(anchor: HTMLElement, items: MenuItem[], opts?: {
 // Hook set by app.ts so the backup dialog can trigger a list rerender +
 // toolbar refresh after a successful import — without dropdown.ts importing app.ts.
 // Tests can pass their own callback directly to showBackupDialog(cb).
-let profileImportHook: (() => void) | undefined
+let profileImportHook: ((mountsChanged: boolean) => void) | undefined
 
-export function setProfileImportHook(fn: () => void): void {
+export function setProfileImportHook(fn: (mountsChanged: boolean) => void): void {
    profileImportHook = fn
 }
 
 // showBackupDialog opens the backup/restore modal. An optional `onImported`
-// callback overrides the module-level hook (used by tests).
-export function showBackupDialog(onImported?: () => void): void {
+// callback overrides the module-level hook (used by tests). Its `mountsChanged`
+// argument lets the caller re-adopt the mount table at runtime when a RESTORE
+// merged a differing `mnt` — the same re-adoption the sync-pull path does.
+export function showBackupDialog(onImported?: (mountsChanged: boolean) => void): void {
    if (!backupDialog) return
    openModal(backupDialog, backupDialog.querySelector<HTMLElement>(".srr-backup-body")!, (close) =>
       backupBody(close, onImported),
@@ -495,7 +497,7 @@ export function showBackupDialog(onImported?: () => void): void {
 // backupBody builds the backup/restore modal's content: the export textarea
 // (+ copy / download), a divider, and the import textarea + prefs checkbox +
 // Import button.
-function backupBody(close: () => void, onImported?: () => void): DocumentFragment {
+function backupBody(close: () => void, onImported?: (mountsChanged: boolean) => void): DocumentFragment {
    const frag = document.createDocumentFragment()
 
    // Export section: read-only textarea pre-filled with the current profile.
@@ -584,7 +586,10 @@ function backupBody(close: () => void, onImported?: () => void): DocumentFragmen
          return
       }
       close()
-      ;(onImported ?? profileImportHook)?.()
+      // A restore runs mergeMountState (both modes), which may have moved the
+      // `mnt` table; forward that so app.ts re-adopts it at runtime instead of
+      // leaving the runtime mounts/SW routes/picker stale until a reload.
+      ;(onImported ?? profileImportHook)?.(result.mountsChanged === true)
    })
 
    frag.append(importLabel, prefsRow, errEl, importBtn)

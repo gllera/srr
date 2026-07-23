@@ -594,6 +594,49 @@ func TestDeltaCheckTailIntactFatalOnCorruptTail(t *testing.T) {
 	}
 }
 
+// checkTailIntact must fail LOUDLY when the store has consolidated articles
+// (tc>0, so latestIdxEntryCount(tc)>0 and an idx tail is structurally required)
+// but the manifest names no idx tail — the exact name-table inconsistency it
+// exists to catch, and which the read side (loadLatestIdx) already hard-errors
+// on. Silently skipping it would let the writer sail past a store every reader
+// is already failing to parse. The all-delta case (tc==0) legitimately has no
+// tail and must stay a no-op.
+func TestCheckTailIntactErrorsOnMissingIdxTail(t *testing.T) {
+	db, c, _ := setupTestDB(t)
+	globals.MaxDeltas = 0 // consolidate, so na==0 and tc==total_art
+	globals.MaxDeltaBytes = 1 << 20
+	ch := &Feed{Title: "feed", URL: "https://example.com/f"}
+	if err := db.AddFeed(ch); err != nil {
+		t.Fatal(err)
+	}
+	c.FetchedAt = 1_700_000_000
+	if _, err := db.PutArticles(ctx, []*Item{
+		{Feed: ch, Title: "a0", Content: "x", Published: 1},
+		{Feed: ch, Title: "a1", Content: "x", Published: 2},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tc := c.TotalArticles // na==0 under MaxDeltas=0
+	if tc <= 0 {
+		t.Fatalf("precondition: want tc>0, got %d", tc)
+	}
+
+	// Drop the idx series names: the store now claims tc consolidated articles
+	// but names no idx tail.
+	c.Names.truncate(idxSeries, 0)
+	if got := c.Names.tailKey(idxSeries); got != "" {
+		t.Fatalf("precondition: idx tail should be gone, got %q", got)
+	}
+	if err := db.checkTailIntact(ctx, tc); err == nil {
+		t.Fatal("checkTailIntact silently accepted a consolidated store with no idx tail")
+	}
+
+	// tc==0 (all-delta store): no tail is expected, so no error.
+	if err := db.checkTailIntact(ctx, 0); err != nil {
+		t.Errorf("checkTailIntact(tc=0) should be a no-op, got %v", err)
+	}
+}
+
 // The three per-series GC sweeps and their window formulas are retired
 // (docs/MANIFEST-SPEC.md §10.6). What replaces them is ONE rule — delete what
 // the last K manifests do not name — whose behaviour is pinned in

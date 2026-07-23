@@ -697,3 +697,49 @@ func TestStaleConfigEntrySweptBeforeIDReuse(t *testing.T) {
 		t.Fatalf("feed 0 inherited the removed feed's recipe %q; the stale config.gz entry was not swept", got)
 	}
 }
+
+// configChanged's `removals` bit selects §6.4's flip-FIRST-then-warn-only-config
+// ordering, which is crash-safe ONLY because a removed feed's leftover config
+// entry is inert. Clearing a LIVE feed's overrides back to defaults also drops
+// it from the built sidecar, but that feed is NOT inert — so it must take the
+// config-FIRST ordering. Gate on the feed actually being GONE from core.Feeds,
+// not on its config being zeroed, or a crash between the flip and the deferred
+// write silently reverts the operator's edit.
+func TestConfigClearOnLiveFeedIsNotARemoval(t *testing.T) {
+	db, core, _ := setupTestDB(t)
+	core.Recipes["x"] = Recipe{Pipe: []string{"#minify"}}
+	if err := db.AddFeed(&Feed{Title: "F0", URL: "https://f0.example/feed", Recipe: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	db.Close(ctx)
+
+	// Scenario A — clear the override, the feed stays live: changed, NOT a removal.
+	dbA, err := NewDB(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dbA.core.Feeds[0] == nil || dbA.core.Feeds[0].Recipe != "x" {
+		t.Fatalf("precondition: feed 0 should reopen with recipe %q", "x")
+	}
+	dbA.core.Feeds[0].Recipe = ""
+	changed, removals := dbA.configChanged(ctx)
+	if !changed || removals {
+		t.Fatalf("clearing a live feed's config: got changed=%v removals=%v, want changed=true removals=false", changed, removals)
+	}
+	dbA.Close(ctx)
+
+	// Scenario B — the feed is actually removed: changed AND a removal.
+	dbB, err := NewDB(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delete(dbB.core.Feeds, 0)
+	changed, removals = dbB.configChanged(ctx)
+	if !changed || !removals {
+		t.Fatalf("removing the feed: got changed=%v removals=%v, want changed=true removals=true", changed, removals)
+	}
+	dbB.Close(ctx)
+}

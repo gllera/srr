@@ -543,16 +543,21 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) ([]ArticleData, 
 // READ failure only warns — the delta itself doesn't depend on the tail, so a
 // blip must not discard a durable batch — but a structural MISMATCH is fatal, as
 // it was for the pre-delta writer's per-cycle checkLatestIdx. Skipped when the
-// tail idx holds no entries (an all-delta store, or tc exactly on a 50k
-// boundary): there is nothing the consolidation's own check didn't already
-// cover.
+// tail idx holds no entries — latestIdxEntryCount(tc)==0 iff tc==0 (an all-delta
+// store, where na==total_art so tailCovered is 0): there is no tail to check.
 func (o *DB) checkTailIntact(ctx context.Context, tc int) error {
 	if latestIdxEntryCount(tc) == 0 {
 		return nil
 	}
+	// Past the guard tc>0, so the tail past the finalized packs holds 1..50000
+	// entries and the manifest is REQUIRED to name an idx tail. An empty key is
+	// therefore the exact name-table corruption this check exists to catch — and
+	// the read side (loadLatestIdx) already hard-errors on it, so warning-only or
+	// silently skipping here would let the writer sail past a store every reader
+	// is already failing to parse. Fail loudly, symmetric with the reader.
 	idxKey := o.core.Names.tailKey(idxSeries)
 	if idxKey == "" {
-		return nil
+		return fmt.Errorf("the store consolidated %d article(s) but names no idx tail", tc)
 	}
 	raw, err := o.loadPack(ctx, idxKey)
 	if err != nil {

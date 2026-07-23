@@ -760,6 +760,19 @@ function openMountsDialog(): void {
       },
       remove: (mid) => afterMountChange(removeMount(data.mountRecords(), mid)),
       forget: (mid) => {
+         // Drop this mount's pinned SW-cache entries BEFORE forgetStoreState
+         // clears pinsKey(mid) — that registry is the only record of those
+         // cached URLs, and the PINNED bucket is eviction-exempt, so a
+         // pinned-then-forgotten peer would otherwise leak its bytes forever.
+         // The mount's own url gives the same base the pin used (Store.base is
+         // new URL(url)), so the SW resolves the identical absolute URLs; unpin
+         // needs no live root (it deletes unconditionally, unlike pin).
+         const controller = navigator.serviceWorker?.controller
+         const rec = data.mountRecords().find((r) => r.id === mid)
+         if (controller && rec) {
+            const names = [...new Set([...listPins(mid).values()].flatMap((e) => e.names))]
+            if (names.length) controller.postMessage({ type: "unpin", names, base: new URL(rec.url).href })
+         }
          forgetStoreState(mid)
          afterMountChange(removeMount(data.mountRecords(), mid))
       },
@@ -1210,9 +1223,9 @@ async function init() {
    // holds unreadOnly in a module var only mutated via setUnreadOnly (this also
    // re-applies the filter so the raised unseen bounds take hold). Sync pulls
    // never touch prefs (prefs:false), so they skip this.
-   setProfileImportHook(() => {
+   setProfileImportHook((mountsChanged) => {
       nav.setUnreadOnly(localStorage.getItem(UNREAD_ONLY_KEY) === "1")
-      refreshAfterMerge()
+      refreshAfterMerge(mountsChanged)
    })
 
    // The filter picker overlay: a pick closes it and routes per surface — from
