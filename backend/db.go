@@ -180,7 +180,21 @@ type DB struct {
 	// actually present (it wrote one, or a Stat found one), so the presence
 	// probe in configChanged runs at most once per handle.
 	configConfirmed bool
-	locked          bool
+	// configStale is set by loadConfig when config.gz carried an entry for a
+	// feed the store no longer has (a removal whose post-flip config write was
+	// lost — §6.4). Such an entry is inert UNTIL the id is reused, when load
+	// would silently apply the removed feed's recipe/pipe/dedup to the new
+	// feed; the flag forces one config rewrite so buildConfigSidecar (live
+	// feeds only) sweeps it before that can happen.
+	configStale bool
+	// manifestSigAtOpen is the signature of the manifest content this handle
+	// loaded (everything except the generation number and fetched_at). Commit
+	// compares against it so a cycle that only advanced the clock keeps the
+	// same generation instead of republishing an identical manifest under a
+	// fresh m (goal G2). nil for a fresh or just-migrated store, forcing the
+	// first publish.
+	manifestSigAtOpen []byte
+	locked            bool
 	// consolidated is the full replay slice (parsed deltas ++ this cycle's
 	// batch) when PutArticles consolidated the tail this cycle, else nil
 	// (cleared at every PutArticles entry). SyncMeta's fast path consumes it so
@@ -443,7 +457,7 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 	db := &DB{
 		Backend: backend,
 		locked:  locked,
-		// A store with no db.gz at all is a fresh v2 store: an empty name table
+		// A store with no db.gz at all is a fresh v3 store: an empty name table
 		// and no feeds. parseStoreRoot replaces both when a root is present.
 		core: DBCore{Names: newManifestNames(), Feeds: map[int]*Feed{}},
 	}
@@ -458,7 +472,7 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 	// The root resolves through parseStoreRoot — the SINGLE root resolver,
 	// shared with the read-only tools, so the writer and the checkers can never
 	// disagree about what a store's objects are called. No db.gz at all is a
-	// fresh v2 store.
+	// fresh v3 store.
 	rc, err := db.Get(ctx, dbFileKey, true)
 	if err != nil {
 		db.Close(ctx)
@@ -517,6 +531,21 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 	db.seen = db.loadSeen(ctx)
 	db.seen.hydrateFeeds(db.core.Feeds)
 
+	// Baseline for Commit's idle-cycle fast path — captured BEFORE migration, so
+	// it is set ONLY for a store already loaded from a published manifest. A
+	// legacy store (migrated below) and a fresh store (m==0) both keep it nil,
+	// which forces their first commit to publish. Sidecar/seen hydration above
+	// touches only json:"-" and config-half fields, none of which the manifest
+	// carries, so the loaded public projection is intact here.
+	if db.core.legacyRoot == nil && db.core.ManifestNum > 0 {
+		sig, err := db.manifestSig()
+		if err != nil {
+			db.Close(ctx)
+			return nil, err
+		}
+		db.manifestSigAtOpen = sig
+	}
+
 	// The one-way cutover (docs/MANIFEST-SPEC.md §11 step 3): a pre-cutover
 	// store is migrated by the first LOCKED session that opens it, so everything
 	// downstream of this point speaks one layout. Read-only sessions resolve the
@@ -530,9 +559,12 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 
 	// Snapshot the config projection this handle loaded, so Commit can tell a
 	// config mutation from an ordinary fetch cycle without re-reading anything
-	// (docs/MANIFEST-SPEC.md §4.3 / configChanged). Left nil for a store still on
-	// the pre-cutover root: its first commit then bootstraps config.gz
-	// unconditionally.
+	// (docs/MANIFEST-SPEC.md §4.3 / configChanged). A just-migrated store had its
+	// legacyRoot cleared by migrateRoot above, so it reaches here and gets a
+	// snapshot too; config.gz is then bootstrapped NOT by a nil snapshot but by
+	// configChanged's configConfirmed+Stat backstop, which finds no sidecar and
+	// forces the first write. Only a read-only session still on a pre-cutover
+	// root leaves it nil — and such a session never commits.
 	if db.core.legacyRoot == nil {
 		db.configAtOpen = db.snapshotConfig()
 	}
@@ -577,14 +609,40 @@ func (o *DB) Close(ctx context.Context) error {
 func (o *DB) Commit(ctx context.Context) error {
 	o.core.Version = dbFormatVersion
 
+	// A store opened read-only on a pre-cutover root resolves its name table
+	// through the override map without copying anything (root.go), so its bare
+	// stems name objects that do NOT exist. Only a LOCKED session migrates, and
+	// only after migration are legacyRoot/overrides nil. Committing before then
+	// would publish a manifest naming phantom objects — an M4 404 storm — so
+	// refuse loudly. Unreachable in production (read-only sessions never
+	// Commit); a cheap guard turning a latent footgun into an impossible state.
+	if o.core.legacyRoot != nil || o.core.Names.overrides != nil {
+		return fmt.Errorf("commit refused: a store opened on a pre-cutover root was not migrated (migration runs only in a locked session)")
+	}
+
 	cfgChanged, cfgRemovals := o.configChanged(ctx)
 	if cfgChanged && !cfgRemovals {
 		if err := o.syncConfig(ctx); err != nil {
 			return err
 		}
 	}
-	if err := o.publishManifest(ctx); err != nil {
+
+	// Mint a new generation only when the manifest's content actually changed.
+	// An idle cycle that merely advanced the clock keeps the same m — so every
+	// reader's cached manifest and the edge cache in front of it stay valid, and
+	// only the ~60-byte root is rewritten with the new t (§4.1/§8.1, goal G2).
+	// manifestSigAtOpen is nil for a fresh or just-migrated store, forcing that
+	// first publish. A feed removal or an expiration advance changes the feed
+	// projection, so those still publish; a config-only edit does not (readers
+	// never fetch config.gz).
+	sig, err := o.manifestSig()
+	if err != nil {
 		return err
+	}
+	if o.manifestSigAtOpen == nil || !bytes.Equal(o.manifestSigAtOpen, sig) {
+		if err := o.publishManifest(ctx); err != nil {
+			return err
+		}
 	}
 
 	body, err := gzipJSON(RootState{
@@ -598,6 +656,11 @@ func (o *DB) Commit(ctx context.Context) error {
 	if err := o.AtomicPut(ctx, dbFileKey, bytes.NewReader(body), store.ObjectMeta{}); err != nil {
 		return err
 	}
+	// Advance this handle's baseline to what is now published, so a second
+	// commit on the same handle compares correctly (a no-op when nothing was
+	// published — sig already equals the baseline; per-cycle handles recompute
+	// it at open regardless).
+	o.manifestSigAtOpen = sig
 
 	if cfgChanged && cfgRemovals {
 		if err := o.syncConfig(context.WithoutCancel(ctx)); err != nil {

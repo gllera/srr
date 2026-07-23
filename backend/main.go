@@ -263,6 +263,22 @@ func main() {
 		globals.AssetWorkers = runtime.NumCPU()
 	}
 
+	// The GC grace window K is the reader/SW/inspect contract (the compile-time
+	// keepManifests, exported as KEEP_MANIFESTS): a reader up to K generations
+	// stale must still resolve its snapshot. Two floors, one guard: a K < 1
+	// makes GC's cutoff reach the CURRENT manifest and delete it (m - 0 = m),
+	// which bricks the store on a crash between the sweep and the Commit that
+	// republishes it; and any K below the compile-time contract lets GC reclaim
+	// faster than the reader was built to tolerate, so within-window tabs 404
+	// (they self-heal, but needlessly) and `srr inspect`'s fixed-K window false-
+	// alarms. Raise a too-small value to the contract floor rather than honor an
+	// unsafe one.
+	if globals.KeepManifests < keepManifests {
+		slog.Warn("--keep-manifests below the reader grace-window contract; raising to the floor",
+			"requested", globals.KeepManifests, "floor", keepManifests)
+		globals.KeepManifests = keepManifests
+	}
+
 	// Identify this build to feed publishers: "SRR/<version> (+repo)" is the
 	// shape feed readers are expected to send, and the version is the same one
 	// `srr version` prints.

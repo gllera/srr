@@ -518,6 +518,23 @@ func readOnlyTool(openWorld bool) *mcp.ToolAnnotations {
 	}
 }
 
+// previewTool annotates srr_preview_feed / srr_resolve_feed. They read NOTHING
+// from the store, but they are NOT read-only and NOT idempotent: they make
+// outbound requests and run the feed's ingest/pipe, which — exactly as `srr
+// preview` allows — may be arbitrary SHELL commands supplied in the tool's
+// `ingest`/`pipe` params (no #-builtin gate on this path). A client must not
+// treat them as side-effect-free and auto-approve them; ReadOnlyHint:true
+// (which readOnlyTool sets) is what invites that. DestructiveHint is left at the
+// SDK's pointer default (true) because a pipe step can have host side effects,
+// and OpenWorldHint is true (outbound).
+func previewTool() *mcp.ToolAnnotations {
+	return &mcp.ToolAnnotations{
+		ReadOnlyHint:   false,
+		IdempotentHint: false,
+		OpenWorldHint:  hintPtr(true),
+	}
+}
+
 // addMCPTools registers every srr tool on s. Names carry the `srr_` prefix so
 // they stay unambiguous in a client session that has other servers loaded.
 func addMCPTools(s *mcp.Server) {
@@ -539,14 +556,14 @@ func addMCPTools(s *mcp.Server) {
 		Name:        "srr_preview_feed",
 		Title:       "Preview a feed through a recipe",
 		Description: "Dry-run a URL through SRR's ingest and processing pipeline and return the articles it WOULD store, without storing anything. Use it to check how a candidate subscription renders, or to test a recipe/pipe change before applying it. PERFORMS OUTBOUND REQUESTS: it fetches the given URL, and pipeline steps such as #readability or #selfhost fetch the linked article pages and their media.",
-		Annotations: readOnlyTool(true),
+		Annotations: previewTool(),
 	}, mcpPreviewFeed)
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "srr_resolve_feed",
 		Title:       "Resolve a feed URL",
 		Description: "Probe a URL and report the canonical feed URL, the feed's own title and its current item count — the cheap look-before-you-subscribe check. A homepage that advertises a feed folds to that feed's URL. PERFORMS AN OUTBOUND REQUEST to the given URL. Reads nothing from and writes nothing to the store; advisory only, since srr_add_feed re-resolves server-side.",
-		Annotations: readOnlyTool(true),
+		Annotations: previewTool(),
 	}, mcpResolveFeed)
 
 	mcp.AddTool(s, &mcp.Tool{

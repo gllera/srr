@@ -1069,8 +1069,8 @@ func TestFeedFetchSendsIdentifyingHeaders(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	old := userAgent
-	defer func() { userAgent = old }()
+	old := getUserAgent()
+	defer SetUserAgent(old)
 	SetUserAgent("SRR/9.9.9 (+https://github.com/gllera/srr)")
 
 	if _, err := fn(context.Background(), srv.Client(), buf, Request{URL: srv.URL, MaxSize: cap(buf) - 1}); err != nil {
@@ -1089,10 +1089,10 @@ func TestFeedFetchSendsIdentifyingHeaders(t *testing.T) {
 // SetUserAgent("") is a no-op: the zero value must stay a well-formed header
 // rather than degrade to an empty User-Agent.
 func TestSetUserAgentIgnoresEmpty(t *testing.T) {
-	old := userAgent
-	defer func() { userAgent = old }()
+	old := getUserAgent()
+	defer SetUserAgent(old)
 	SetUserAgent("")
-	if userAgent != old {
-		t.Errorf("userAgent = %q after SetUserAgent(\"\"), want it unchanged", userAgent)
+	if got := getUserAgent(); got != old {
+		t.Errorf("userAgent = %q after SetUserAgent(\"\"), want it unchanged", got)
 	}
 }

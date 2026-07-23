@@ -531,10 +531,29 @@ describe("multi-store mnt/ms (§4.4)", () => {
       const r = importProfile(incoming, { prefs: false, mode: "sync" })
       expect(r.ok).toBe(true)
       expect(r.changed).toBe(true)
+      expect(r.mountsChanged).toBe(true) // app.ts re-adopts the table on this
       const mounts = JSON.parse(localStorage.getItem("srr-mounts")!)
       expect(mounts.some((m: { id: string }) => m.id === "sP")).toBe(true)
       expect(JSON.parse(localStorage.getItem("srr-seen@sP")!)).toEqual({ "feed:3": 8 })
       expect(JSON.parse(localStorage.getItem("srr-saved@sP")!)).toEqual([7])
+   })
+
+   it("reports mountsChanged when ONLY the mnt table moved (drives the runtime re-adopt)", () => {
+      // A pull that adds a peer to the mount table with no home seen/saved change
+      // must still report mountsChanged, so app.ts's refreshAfterMerge re-adopts
+      // it into data.ts (boots the new root, SW-routes it, repaints the picker)
+      // instead of leaving it dormant until a full page reload — FIX 2.
+      const incoming = JSON.stringify({
+         v: 2,
+         ts: 0,
+         seen: {},
+         saved: [],
+         mnt: [{ id: "sP", url: "https://peer/", label: "Peer", ord: 10, role: "peer", cred: false, ts: 9 }],
+      })
+      const r = importProfile(incoming, { prefs: false, mode: "sync" })
+      expect(r.ok).toBe(true)
+      expect(r.mountsChanged).toBe(true)
+      expect(r.changed).toBe(true) // folded in, so refreshAfterMerge still fires
    })
 
    it("an identical mnt round-trip reports changed:false (no spurious re-anchor)", () => {
@@ -549,12 +568,14 @@ describe("multi-store mnt/ms (§4.4)", () => {
       const r = importProfile(blob, { prefs: false, mode: "sync" })
       expect(r.ok).toBe(true)
       expect(r.changed).toBe(false)
+      expect(r.mountsChanged).toBe(false) // no re-adopt on an unchanged table
    })
 
    it("a home-only device (default single-store) reports changed:false on its own blob", () => {
       const r = importProfile(exportProfile(), { prefs: false, mode: "sync" })
       expect(r.ok).toBe(true)
       expect(r.changed).toBe(false)
+      expect(r.mountsChanged).toBe(false)
    })
 
    it("a peer substate change does NOT stamp the home ts", () => {

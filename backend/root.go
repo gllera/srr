@@ -16,7 +16,7 @@ import (
 // db.gz keeps its key, its `no-cache, must-revalidate` treatment and its gzip
 // framing, and carries nothing but a pointer:
 //
-//	{"v":2,"m":1743,"t":1753027200}
+//	{"v":3,"m":1743,"t":1753027200}
 //
 // Everything a reader needs lives in the immutable manifest/<m>.gz that pointer
 // names; everything only the operator's tooling needs lives in the backend-only
@@ -100,7 +100,7 @@ func legacySeenSlotKey(flag bool) string {
 // pre-cutover store.
 func (l *legacyCore) tailGen() int { return l.Seq - l.NumDeltas }
 
-// legacyState projects the pre-cutover document onto the v2 in-memory core.
+// legacyState projects the pre-cutover document onto the v3 in-memory core.
 // The name-derivation counters do not survive the projection — namesFromLegacy
 // turns them into an explicit name table instead.
 func (l *legacyCore) state() *DBCore {
@@ -223,7 +223,7 @@ type legacyObject struct{ from, to string }
 // both go through it, so the writer and the checkers can never disagree about
 // what a store's objects are called.
 //
-// The returned core carries no configuration for a v2 store — that lives in
+// The returned core carries no configuration for a v3 store — that lives in
 // config.gz, which only the callers that need it read (NewDB always; inspect
 // for its cross-check).
 func loadStore(fetch keyGetter) (*DBCore, error) {
@@ -373,7 +373,7 @@ func applyFeedConfig(f *Feed, c FeedConfig) {
 	f.DedupTitle = c.DedupTitle
 }
 
-// migrateRoot converts a pre-cutover store to the v2 layout, in the first
+// migrateRoot converts a pre-cutover store to the v3 layout, in the first
 // LOCKED session that opens it (§11 step 3). It is additive and idempotent in
 // the only sense that matters: it writes new objects and mutates nothing that
 // exists, so a crash before Commit leaves unreferenced garbage and a store

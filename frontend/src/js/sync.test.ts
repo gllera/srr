@@ -132,9 +132,36 @@ describe("pull-merge (legacy v1 remote)", () => {
 
       await sync.syncNow()
       expect(merged).toHaveBeenCalledTimes(1) // remote seen/saved were new here
+      expect(merged).toHaveBeenLastCalledWith(false) // no mnt in the blob → no re-adopt
 
       await sync.syncNow()
       expect(merged).toHaveBeenCalledTimes(1) // second pull merges nothing new
+   })
+
+   it("passes mountsChanged=true to onMerged when the pull adds a peer mount (FIX 2)", async () => {
+      // A sync-pulled `mnt` must reach app.ts so the new root boots at runtime;
+      // sync threads mergeMountState's changed bit through onMerged, and
+      // refreshAfterMerge re-adopts the table when it's true.
+      const merged = vi.fn()
+      sync.init(merged)
+      sync.setSyncUrl(URL)
+      fetchMock.mockResolvedValue(
+         res(
+            200,
+            JSON.stringify({
+               v: 2,
+               ts: 0,
+               seen: {},
+               saved: [],
+               mnt: [{ id: "sP", url: "https://peer/", label: "Peer", ord: 10, role: "peer", cred: false, ts: 9 }],
+            }),
+         ),
+      )
+
+      await sync.syncNow()
+
+      expect(merged).toHaveBeenCalledTimes(1)
+      expect(merged).toHaveBeenLastCalledWith(true)
    })
 
    it("treats 404 as 'nothing stored yet', not an error", async () => {

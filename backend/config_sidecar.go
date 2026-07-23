@@ -138,7 +138,9 @@ func (o *DB) configChanged(ctx context.Context) (changed, removals bool) {
 			return true, removals
 		}
 	}
-	return false, removals
+	// The signature matches what was loaded, but a stale entry the load flagged
+	// still has to be swept (buildConfigSidecar drops it) — force the rewrite.
+	return o.configStale, removals
 }
 
 // canonicalConfig renders a sidecar into a map-order-independent form. Go's
@@ -174,6 +176,7 @@ func (o *DB) syncConfig(ctx context.Context) error {
 	}
 	o.configAtOpen = o.snapshotConfig()
 	o.configConfirmed = true
+	o.configStale = false // the freshly-written sidecar lists only live feeds
 	return nil
 }
 
@@ -221,10 +224,15 @@ func (o *DB) loadConfig(ctx context.Context) error {
 	for id, cfg := range c.Feeds {
 		if f := o.core.Feeds[id]; f != nil {
 			applyFeedConfig(f, cfg)
+			continue
 		}
-		// An entry for a feed the store does not have is INERT and ignored
-		// (§4.3) — that is what makes the two-object mutations of §6.4 safe
-		// without a distributed commit. The next config write sweeps it.
+		// An entry for a feed the store does not have is INERT for now (§4.3) —
+		// that is what makes the two-object mutations of §6.4 safe without a
+		// distributed commit. But it is a latent hazard: reuse that id and the
+		// next load would apply the removed feed's config to the NEW feed. Flag
+		// it so the next config write sweeps it (buildConfigSidecar lists live
+		// feeds only), closing the window before an id reuse can hit it.
+		o.configStale = true
 	}
 	o.configConfirmed = true
 	return nil

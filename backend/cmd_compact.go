@@ -172,7 +172,13 @@ func (o *DB) Compact(ctx context.Context, dryRun bool) error {
 	// can re-find those keys. All-or-nothing — a delete failure aborts with the
 	// old (committed) packs still naming the keys, so a retry re-collects and
 	// re-deletes idempotently. (Rm is silent on missing, which is the common
-	// case: expiration deleted most of these already.) AssetBytes is left
+	// case: expiration deleted most of these already.) Like expiration, there is
+	// NO liveness check: a content-hash key an expired article shares with a
+	// still-LIVE one is deleted anyway, collapsing that media in the live article
+	// until `srr asset heal --create`. Compaction reaches this slightly more
+	// often than expiration does, because it also reclaims id-reuse orphans whose
+	// assets RemoveFeed never deleted — an accepted trade-off inherited from
+	// expiration's, not a no-op. AssetBytes is left
 	// untouched — expiration owns that counter; re-deleting an already-counted
 	// key must not double-decrement, and the id-reuse orphans that remain are the
 	// same approximate-skew class as expiration's cross-feed shared assets.

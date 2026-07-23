@@ -151,8 +151,15 @@ export interface ImportResult {
    error?: string
    // seen or saved actually mutated. A ts-only convergence (newer blob with
    // identical saved and no seen raise) is NOT a change — nothing the UI shows
-   // moved, so callers must not re-render or re-anchor on it.
+   // moved, so callers must not re-render or re-anchor on it. Also true when the
+   // mount table moved (mountsChanged below folds in), so a merge that ONLY
+   // changed `mnt` still fires the caller's after-merge refresh.
    changed?: boolean
+   // The `mnt` mount table actually moved (a peer mounted/unmounted/renamed on
+   // another device). Reported SEPARATELY from `changed` so the caller can
+   // re-adopt the table into data.ts (boot the new root, SW-route it, repaint
+   // the picker) only when it really changed — see app.ts's refreshAfterMerge.
+   mountsChanged?: boolean
 }
 
 // seen — the per-key rule shared verbatim by both import modes: a key whose
@@ -522,7 +529,8 @@ export function importProfile(json: string, opts: { prefs: boolean; mode?: "merg
    // must never stamp the HOME store's ts. Merged for both modes; folded into
    // the RETURNED changed so the caller re-adopts the mount table + repaints.
    const storeMode = opts.mode === "sync" && obj["v"] === 2 ? "sync" : "merge"
-   if (mergeMountState(obj, storeMode)) changed = true
+   const mountsChanged = mergeMountState(obj, storeMode)
+   if (mountsChanged) changed = true
 
    // ── prefs (opt-in) ────────────────────────────────────────────────────────
    if (opts.prefs) {
@@ -546,5 +554,5 @@ export function importProfile(json: string, opts: { prefs: boolean; mode?: "merg
       } catch {}
    }
 
-   return { ok: true, changed }
+   return { ok: true, changed, mountsChanged }
 }
