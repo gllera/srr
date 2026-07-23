@@ -134,6 +134,7 @@ const data = vi.hoisted(() => ({
    mountedStores: vi.fn(() => [{ mid: "0", base: new URL("http://localhost/"), cred: "same-origin", role: "home" }]),
    mountRecords: vi.fn(() => [{ id: "0", url: "http://localhost/", label: "", ord: 0, role: "home", cred: false }]),
    mountStatus: vi.fn(() => ({ state: "ok", kind: "", error: "" })),
+   applyMountTable: vi.fn(async () => {}),
 }))
 vi.mock("./data", () => data)
 
@@ -162,6 +163,7 @@ const dropdown = vi.hoisted(() => ({
    showBackupDialog: vi.fn(),
    showSyncDialog: vi.fn(),
    showContextMenu: vi.fn(),
+   showMountsDialog: vi.fn(),
 }))
 // The dialog openers are stubbed (their modals are dropdown.test.ts's business),
 // but the real wrapTabFocus passes through — the error-popup focus-trap test
@@ -1791,6 +1793,39 @@ describe("offline pin — unpin subtraction & SW purge", () => {
          expect(fakeSW.postMessage).toHaveBeenCalledWith(
             expect.objectContaining({ type: "unpin", names: ["data/3.gz"] }),
          )
+      } finally {
+         Object.defineProperty(navigator, "serviceWorker", { value: undefined, configurable: true })
+      }
+   })
+
+   it("forget drops a peer mount's pinned SW-cache entries before wiping its registry", async () => {
+      // The PINNED bucket is eviction-exempt, and pinsKey(mid) is the only record
+      // of those cached URLs — so forgetting a pinned peer must tell the SW to
+      // delete them first, resolved against the mount's OWN base (== the pin-time
+      // base), or the bytes leak forever.
+      data.mountRecords.mockReturnValue([
+         { id: "0", url: "http://localhost/", label: "", ord: 0, role: "home", cred: false },
+         { id: "sP", url: "https://peer/", label: "Peer", ord: 10, role: "peer", cred: false },
+      ])
+      pinFilter("all", ["idx/L1.gz", "data/3.gz"], "sP")
+      const fakeSW = { postMessage: vi.fn() }
+      Object.defineProperty(navigator, "serviceWorker", {
+         value: { controller: fakeSW, getRegistrations: () => Promise.resolve([]), addEventListener: () => {} },
+         configurable: true,
+      })
+      try {
+         await boot()
+         document
+            .querySelector<HTMLButtonElement>(".srr-feed")!
+            .dispatchEvent(new MouseEvent("click", { bubbles: true }))
+         const items = dropdown.showContextMenu.mock.calls.at(-1)?.[1] as { label: string; action: () => void }[]
+         items.find((i) => i.label === "Stores…")!.action()
+         const cfg = dropdown.showMountsDialog.mock.calls.at(-1)?.[0] as { forget: (mid: string) => void }
+         cfg.forget("sP")
+         expect(fakeSW.postMessage).toHaveBeenCalledWith(
+            expect.objectContaining({ type: "unpin", names: ["idx/L1.gz", "data/3.gz"], base: "https://peer/" }),
+         )
+         expect(listPins("sP").size).toBe(0) // the local registry for the forgotten mid is gone
       } finally {
          Object.defineProperty(navigator, "serviceWorker", { value: undefined, configurable: true })
       }

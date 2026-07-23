@@ -257,6 +257,39 @@ describe("backup/restore dialog", () => {
       expect(seen["feed:2"]).toBe(10)
    })
 
+   it("forwards mountsChanged to the import hook when the restore moves the mount table", () => {
+      // A restored backup can carry a mount table differing from this device's;
+      // the handler must forward result.mountsChanged so app.ts re-adopts it at
+      // runtime (boot the new root, SW-route it, repaint the picker) instead of
+      // leaving the runtime mounts/SW routes/picker stale until a reload — the
+      // sibling of the sync-pull re-adopt, previously wired only on that path.
+      const blob = JSON.stringify({
+         v: 2,
+         ts: 0,
+         seen: {},
+         saved: [],
+         mnt: [{ id: "sP", url: "https://peer/", label: "Peer", ord: 10, role: "peer", cred: false, ts: 9 }],
+      })
+      const onImport = vi.fn()
+      dropdown.showBackupDialog(onImport)
+      $importArea()!.value = blob
+      $btn(".srr-backup-import-btn")!.click()
+      expect(onImport).toHaveBeenCalledTimes(1)
+      expect(onImport).toHaveBeenCalledWith(true)
+   })
+
+   it("passes mountsChanged=false to the import hook on a plain seen/saved restore", () => {
+      // The common case: a backup with no differing mount table must NOT trigger
+      // the re-adopt, so the hook is called with false (the gate that keeps an
+      // ordinary restore cheap).
+      const blob = JSON.stringify({ v: 1, seen: { "feed:2": 10 }, saved: [1], unreadOnly: false, imgProxy: "" })
+      const onImport = vi.fn()
+      dropdown.showBackupDialog(onImport)
+      $importArea()!.value = blob
+      $btn(".srr-backup-import-btn")!.click()
+      expect(onImport).toHaveBeenCalledWith(false)
+   })
+
    it("invalid JSON in the import area shows an error message and keeps the dialog open", () => {
       dropdown.showBackupDialog()
       $importArea()!.value = "not valid json"

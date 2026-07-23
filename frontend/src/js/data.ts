@@ -687,7 +687,18 @@ export async function refresh(store: Store = active): Promise<"unchanged" | "upd
         raw.fetched_at === store.db.fetched_at &&
         raw.total_art === store.db.total_art &&
         raw.seq === store.db.seq
-   if (unchanged) return "unchanged"
+   if (unchanged) {
+      // Keep the "Updated X ago" freshness readout live even when we skip the
+      // re-process: under a manifest root an idle cycle (a fully backoff-thinned
+      // poll, a zero-feed maintenance cycle) advances the root's `t` without
+      // moving `m`, and picker.renderStatus reads it via lastFetchedAt(). The
+      // m-only compare above ignores fetched_at, so refreshing it in place can't
+      // perturb the next comparison; for a legacy root the compare already
+      // required equality, so this is a no-op there. Nothing else is derived
+      // from fetched_at, so no applyDb work is owed.
+      store.db.fetched_at = raw.fetched_at ?? store.db.fetched_at
+      return "unchanged"
+   }
    // applyDb swaps db first (fetchIdxPack and the finalized-count math read the
    // store state), so a rejected pack fetch mid-apply would otherwise strand a
    // half-swapped snapshot — new db, stale idx structures — that the NEXT

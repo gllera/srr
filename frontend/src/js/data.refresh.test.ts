@@ -63,6 +63,21 @@ describe("data.refresh — manifest root keys change-detection on m, not fetched
       expect(await data.refresh()).toBe("unchanged")
    })
 
+   it("(d) idle cycle still advances the freshness readout (lastFetchedAt) though unchanged", async () => {
+      await put("/db.gz", { v: 3, m: 1, t: 100 })
+      await put("/manifest/1.gz", emptyManifest(1, 100))
+      const data = await mountInit()
+      expect(data.lastFetchedAt()).toBe(100)
+
+      // Same m, newer t: refresh() returns "unchanged" (no re-process) but the
+      // "Updated X ago" line must still move — picker.renderStatus reads it via
+      // lastFetchedAt(). Before the fix the unchanged branch returned before
+      // ever touching store.db, freezing the readout on idle cycles.
+      await put("/db.gz", { v: 3, m: 1, t: 777 })
+      expect(await data.refresh()).toBe("unchanged")
+      expect(data.lastFetchedAt()).toBe(777)
+   })
+
    it("(b) changed m → updated (a publishing Commit)", async () => {
       await put("/db.gz", { v: 3, m: 1, t: 100 })
       await put("/manifest/1.gz", emptyManifest(1, 100))

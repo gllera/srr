@@ -119,7 +119,17 @@ func (o *DB) configChanged(ctx context.Context) (changed, removals bool) {
 	}
 	cur := o.snapshotConfig()
 	for id := range o.configAtOpen.feedIDs {
-		if !cur.feedIDs[id] {
+		// removals selects §6.4's flip-FIRST-then-warn-only-config ordering,
+		// which is crash-safe ONLY because a removed feed's leftover config
+		// entry is inert (loadConfig skips it; configStale sweeps it). A feed
+		// whose per-feed override was merely cleared back to defaults is ALSO
+		// dropped from cur.feedIDs (buildConfigSidecar omits isZero entries),
+		// but it is NOT inert — the feed is still live, so a stale config.gz
+		// left by a crash between the root flip and the deferred write would
+		// re-apply the old override to it on the next open, silently reverting
+		// the edit. Gate on the feed actually being GONE from core.Feeds, so a
+		// cleared-but-live edit takes the config-FIRST ordering instead.
+		if _, live := o.core.Feeds[id]; !live {
 			removals = true
 			break
 		}
