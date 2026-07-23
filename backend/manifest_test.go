@@ -36,6 +36,9 @@ func TestCommitPublishesManifestAndAdvancesCounter(t *testing.T) {
 	db, core, dir := setupTestDB(t)
 
 	for want := 1; want <= 3; want++ {
+		// A distinct manifest-state change each cycle so every Commit is a
+		// PUBLISHING one — an idle cycle that changed nothing keeps its m (G2).
+		core.TotalArticles = want
 		if err := db.Commit(ctx); err != nil {
 			t.Fatalf("commit %d: %v", want, err)
 		}
@@ -45,6 +48,74 @@ func TestCommitPublishesManifestAndAdvancesCounter(t *testing.T) {
 		man := readManifest(t, dir, want)
 		if man.Num != want || man.Version != dbFormatVersion {
 			t.Errorf("manifest %d: got {m:%d v:%d}, want {m:%d v:%d}", want, man.Num, man.Version, want, dbFormatVersion)
+		}
+	}
+}
+
+// TestCommitSkipsIdenticalManifest pins goal G2 (§4.1/§8.1): a cycle that
+// changed nothing the manifest describes — only the clock — keeps its
+// generation. m stays put, no new manifest object is written, and only the
+// ~60-byte root is rewritten with the new t, so every reader's cached manifest
+// (and the edge cache in front of it) stays valid. A real change publishes.
+func TestCommitSkipsIdenticalManifest(t *testing.T) {
+	db, core, dir := setupTestDB(t)
+	core.TotalArticles = 5
+	core.FetchedAt = 1700000000
+	if err := db.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if core.ManifestNum != 1 {
+		t.Fatalf("first commit m=%d, want 1", core.ManifestNum)
+	}
+
+	// A second cycle that only advances the clock: m must NOT move.
+	core.FetchedAt = 1700000300
+	if err := db.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if core.ManifestNum != 1 {
+		t.Fatalf("idle cycle bumped m to %d; want it to stay 1", core.ManifestNum)
+	}
+	if _, err := os.Stat(filepath.Join(dir, manifestKey(2))); err == nil {
+		t.Fatal("idle cycle wrote manifest/2.gz; want no new generation")
+	}
+	// The root still resolves at m=1 and carries the fresh t.
+	var root RootState
+	if err := json.Unmarshal(decompressGz(t, filepath.Join(dir, "db.gz")), &root); err != nil {
+		t.Fatal(err)
+	}
+	if root.ManifestNum != 1 || root.FetchedAt != 1700000300 {
+		t.Fatalf("root = {m:%d t:%d}, want {m:1 t:1700000300}", root.ManifestNum, root.FetchedAt)
+	}
+
+	// A real manifest-state change publishes again.
+	core.TotalArticles = 6
+	if err := db.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if core.ManifestNum != 2 {
+		t.Fatalf("a real change did not publish: m=%d, want 2", core.ManifestNum)
+	}
+}
+
+// TestGCNeverSweepsCurrentManifest pins the brick guard: even keep<=0 (the flag
+// is floored in main, but GC stays self-safe for any caller) must not delete the
+// manifest the root names — a crash before the republishing Commit would
+// otherwise leave the store unopenable, with no older manifest to fall back to.
+func TestGCNeverSweepsCurrentManifest(t *testing.T) {
+	db, core, dir := setupTestDB(t)
+	for i := range 4 {
+		core.TotalArticles = i + 1
+		if err := db.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, keep := range []int{0, -5} {
+		if err := db.GC(ctx, keep); err != nil {
+			t.Fatalf("GC(keep=%d): %v", keep, err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, manifestKey(core.ManifestNum))); err != nil {
+			t.Fatalf("GC(keep=%d) deleted the current manifest %d: %v (store brick)", keep, core.ManifestNum, err)
 		}
 	}
 }
@@ -210,6 +281,7 @@ func TestPublishManifestRejectsRacingWriter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	peer.core.TotalArticles = 99 // a real change, so the peer actually publishes generation 2
 	if err := peer.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +330,8 @@ func TestPublishManifestOverwritesOrphan(t *testing.T) {
 // nothing is ever permanently stranded.
 func TestGCLowWaterDrain(t *testing.T) {
 	db, core, dir := setupTestDB(t)
-	for range 6 {
+	for i := range 6 {
+		core.TotalArticles = i + 1 // distinct state each cycle so each Commit publishes
 		if err := db.Commit(ctx); err != nil {
 			t.Fatal(err)
 		}
@@ -567,3 +640,60 @@ type readerFunc func([]byte) (int, error)
 func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
 
 var _ = context.Background
+
+// TestStaleConfigEntrySweptBeforeIDReuse pins the §6.4 fix: a config.gz entry
+// for a feed the manifest no longer has (what a removal's lost post-flip config
+// write leaves behind) is swept on the next commit, so reusing that id can NOT
+// silently apply the removed feed's recipe/pipe/dedup to the new feed.
+func TestStaleConfigEntrySweptBeforeIDReuse(t *testing.T) {
+	db, core, dir := setupTestDB(t)
+	core.Recipes["x"] = Recipe{Pipe: []string{"#minify"}}
+	if err := db.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	db.Close(ctx)
+
+	// Simulate the crash: config.gz names feed 0 (recipe "x") though the manifest
+	// (an empty store) never had it.
+	stale := configSidecar{
+		Version: dbFormatVersion,
+		StoreConfig: StoreConfig{Recipes: map[string]Recipe{
+			defaultRecipeName: {Pipe: defaultRootPipe()},
+			"x":               {Pipe: []string{"#minify"}},
+		}},
+		Feeds: map[int]FeedConfig{0: {Recipe: "x"}},
+	}
+	body, err := gzipJSON(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, configFileKey), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reuse id 0 with an all-default feed and commit.
+	db2, err := NewDB(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db2.AddFeed(&Feed{Title: "New", URL: "https://new.example/feed"}); err != nil {
+		t.Fatal(err)
+	}
+	if db2.core.Feeds[0] == nil {
+		t.Fatal("AddFeed did not take id 0")
+	}
+	if err := db2.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	db2.Close(ctx)
+
+	// Reopen: the stale recipe must be gone — the new feed 0 keeps its default.
+	db3, err := NewDB(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db3.Close(ctx)
+	if got := db3.core.Feeds[0].Recipe; got != "" {
+		t.Fatalf("feed 0 inherited the removed feed's recipe %q; the stale config.gz entry was not swept", got)
+	}
+}

@@ -17,6 +17,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 
 	"srr/mod"
 )
@@ -88,14 +89,27 @@ type Result struct {
 // convention every established feed reader follows. The zero value is a valid
 // header, so tests and any caller that never calls SetUserAgent still send a
 // well-formed identifier rather than an empty one.
-var userAgent = "SRR/dev (+https://github.com/gllera/srr)"
+// Held atomically: SetUserAgent runs once at startup, but the fetch workers
+// read it concurrently, so an atomic keeps the store/load race-free (it is
+// benign in production — the write lands before any worker spawns — but a test
+// that reconfigures it alongside a fetch would otherwise trip -race).
+var userAgent atomic.Pointer[string]
+
+func init() {
+	def := "SRR/dev (+https://github.com/gllera/srr)"
+	userAgent.Store(&def)
+}
+
+// getUserAgent returns the current identifier (always non-empty: init seeds a
+// well-formed default, and SetUserAgent rejects "").
+func getUserAgent() string { return *userAgent.Load() }
 
 // SetUserAgent overrides the identifier sent by the built-in fetchers. main
 // calls it once at startup with the binary's version; mod/readability keeps
 // its own deliberately keyword-free default and is unaffected.
 func SetUserAgent(ua string) {
 	if ua != "" {
-		userAgent = ua
+		userAgent.Store(&ua)
 	}
 }
 

@@ -116,6 +116,33 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 			}
 		}
 	}
+	// Singletons (seen/hsum/ssum and each live delta) draw from the SAME
+	// per-series counters, so M3 governs them too: a summary or delta stem must
+	// be unique within its series and below that series' next. alloc keeps this
+	// true at runtime; this catches a hand-edited or corrupt manifest that reused
+	// a finalized-pack stem for a summary, or placed one at/above the counter.
+	checkStem := func(series string, stem int) {
+		k := fmt.Sprintf("%s/%d.gz", series, stem)
+		if seen[k] {
+			bad("M3 violated: %s is listed twice", k)
+		}
+		seen[k] = true
+		if next, ok := names.Next[series]; ok && stem >= next {
+			bad("M3 violated: %s is at or above the series' next stem %d", k, next)
+		}
+	}
+	if names.Seen != nil {
+		checkStem(names.Seen.Series, names.Seen.Stem)
+	}
+	if names.HSum != nil {
+		checkStem(names.HSum.Series, names.HSum.Stem)
+	}
+	if names.SSum != nil {
+		checkStem(names.SSum.Series, names.SSum.Stem)
+	}
+	for _, stem := range names.Deltas.Stems {
+		checkStem(names.Deltas.Series, stem)
+	}
 	tc := tailCovered(core)
 	// M5/M6: the listed lengths must be exactly what chron arithmetic indexes.
 	wantIdx := numFinalizedIdx(core.TotalArticles)

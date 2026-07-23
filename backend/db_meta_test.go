@@ -414,6 +414,46 @@ func TestSyncMetaSaveFailureLeavesCoverageUnchanged(t *testing.T) {
 	}
 }
 
+// Regression: SyncMeta's inconsistent-coverage self-heal must STAGE its
+// truncate on the name-table clone, not mutate the live c.Names before the
+// rebuild. Because the caller is warn-only, a rebuild that fails AFTER a live
+// truncate would let Commit publish a manifest naming ZERO meta shards while the
+// finalized ones still sit on disk — a store-wide search outage plus orphaned
+// shards the GC later reclaims. Establish a finalized shard, trip the self-heal,
+// fail the rebuild's first write, and assert the meta names are untouched.
+func TestSyncMetaInconsistentCoverageFailureKeepsNames(t *testing.T) {
+	db, _ := setupMetaBoundaryDB(t)
+	c := &db.core
+
+	if err := db.SyncMeta(ctx, nil); err != nil {
+		t.Fatalf("SyncMeta (setup): %v", err)
+	}
+	before := c.metaPacks()
+	if before == 0 {
+		t.Fatalf("setup needs a finalized meta shard; metaPacks=0")
+	}
+	beforeTail := c.Names.tailKey(metaSeries)
+	if beforeTail == "" {
+		t.Fatal("setup needs a named meta tail")
+	}
+
+	// MetaTail out of range trips the inconsistent-coverage rebuild; the failing
+	// backend makes that rebuild error on its first shard save.
+	c.MetaTail = metaPackSize + 5
+	metaTailMemo.reset()
+	db.Backend = metaTPutFailBackend{Backend: db.Backend}
+
+	if err := db.SyncMeta(ctx, nil); err == nil {
+		t.Fatal("SyncMeta should surface the injected rebuild failure")
+	}
+	if got := c.metaPacks(); got != before {
+		t.Fatalf("failed rebuild wiped the meta name table: metaPacks=%d, want %d (staging regression)", got, before)
+	}
+	if got := c.Names.tailKey(metaSeries); got != beforeTail {
+		t.Fatalf("failed rebuild changed the meta tail name: %q, want %q", got, beforeTail)
+	}
+}
+
 // SyncMeta trusts a read-back tail only when its line count matches MetaTail.
 // This exercises the count-MISMATCH branch (an existing but wrong-length tail),
 // distinct from the missing-tail read-ERROR branch (TestSyncMetaRebuildsMissingTail):

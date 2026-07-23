@@ -60,7 +60,7 @@ func manifestKey(m int) string {
 // rides here and its config half rides config.gz.
 //
 // A manifest is therefore also the point-in-time snapshot the retired db/
-// series existed to be (§10.1): restoring a store is writing {"v":2,"m":<older>}
+// series existed to be (§10.1): restoring a store is writing {"v":3,"m":<older>}
 // over db.gz.
 type Manifest struct {
 	Version int `json:"v"`
@@ -89,6 +89,22 @@ func (o *DB) buildManifest(m int) Manifest {
 		Names:               c.Names,
 		Feeds:               feeds,
 	}
+}
+
+// manifestSig is the byte signature of everything a published manifest carries
+// EXCEPT its generation number and fetched_at — the two fields that move on a
+// cycle that changed nothing a reader observes. Commit compares it against the
+// signature captured at open (manifestSigAtOpen) to decide whether a new
+// generation is warranted: a cycle that only advanced the clock flips the
+// ~60-byte root with the SAME m and leaves the manifest — and every reader's
+// cached copy and the edge cache in front of it — untouched (§4.1/§8.1, G2).
+//
+// The encoding is deterministic (Go sorts map keys; the names table's runs and
+// the feed projection are order-free), so equal content yields equal bytes.
+func (o *DB) manifestSig() ([]byte, error) {
+	m := o.buildManifest(0)
+	m.FetchedAt = 0
+	return json.Marshal(m)
 }
 
 // publishManifest writes manifest/<ManifestNum+1>.gz and, on success, advances
@@ -175,7 +191,12 @@ func (o *DB) readRootManifestNum(ctx context.Context) (int, error) {
 // work is capped at gcMaxSweep. Rm is silent on missing keys.
 func (o *DB) GC(ctx context.Context, keep int) error {
 	c := &o.core
-	cutoff := c.ManifestNum - keep
+	// Never sweep the current generation: clamp the cutoff to m-1. The flag is
+	// already floored at the compile-time K in main, but GC stays self-safe for
+	// any caller — a keep <= 0 would otherwise make the cutoff reach m and delete
+	// the manifest the root names, bricking the store on a crash before the
+	// republishing Commit.
+	cutoff := min(c.ManifestNum-keep, c.ManifestNum-1)
 	from := max(c.GCManifest+1, 1)
 	to := min(cutoff, from+gcMaxSweep-1)
 	if to < from {

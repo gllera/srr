@@ -1224,12 +1224,15 @@ func TestNewDBFormatVersionGate(t *testing.T) {
 		t.Errorf("error = %v, want it to name the version skew", err)
 	}
 
-	// A store at this binary's own version opens, and Commit stamps the version
-	// on a store that had none (the pre-field case).
+	// A store at this binary's own version opens, and the first LOCKED session's
+	// Commit stamps the version on a store that had none (the pre-field case).
+	// It must be locked: only a locked session migrates the pre-cutover root, and
+	// Commit refuses to publish an unmigrated core (a read-only session never
+	// commits).
 	dir2 := t.TempDir()
 	globals = &Globals{PackSize: 1, Store: dir2}
 	writeLegacyDB(t, dir2, `{"fetched_at":0,"total_art":0,"next_pid":0,"pack_off":0,"feeds":{}}`)
-	db2, err := NewDB(ctx, false)
+	db2, err := NewDB(ctx, true)
 	if err != nil {
 		t.Fatalf("NewDB on an unversioned store: %v", err)
 	}

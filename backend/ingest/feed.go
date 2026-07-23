@@ -42,7 +42,7 @@ func feedFetch(ctx context.Context, client *http.Client, buf []byte, req Request
 	if err != nil {
 		return Result{}, err
 	}
-	httpReq.Header.Set("User-Agent", userAgent)
+	httpReq.Header.Set("User-Agent", getUserAgent())
 	httpReq.Header.Set("Accept", acceptFeed)
 	if req.ETag != "" {
 		httpReq.Header.Set("If-None-Match", req.ETag)

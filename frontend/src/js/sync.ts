@@ -53,7 +53,7 @@ import { isValidHttpish, normalizeHttpish } from "./urlish"
 const PUSH_DEBOUNCE_MS = 1000
 const PULL_MIN_INTERVAL_MS = 60_000
 
-let onMerged: (() => void) | null = null
+let onMerged: ((mountsChanged: boolean) => void) | null = null
 let onStatus: (() => void) | null = null
 let pushTimer: ReturnType<typeof setTimeout> | undefined
 let dirty = false // local seen/saved changes not yet pushed
@@ -222,6 +222,7 @@ export async function syncNow(opts: { manual?: boolean } = {}): Promise<boolean>
    inflight = true
    lastPullAt = Date.now()
    let changed = false
+   let mountsChanged = false
    try {
       const remote = await pullRemote(url)
       if (remote) {
@@ -231,6 +232,7 @@ export async function syncNow(opts: { manual?: boolean } = {}): Promise<boolean>
          const r = importProfile(remote.raw, { prefs: false, mode: remote.v === 1 ? "merge" : "sync" })
          if (!r.ok) throw new Error(r.error ?? "invalid profile")
          changed = r.changed === true
+         mountsChanged = r.mountsChanged === true
          // A v1 remote always upgrade-pushes so the endpoint moves to v2; a v2
          // remote that PREDATES multi-store (no `mnt`) gets the same one-time
          // upgrade push ONLY when this device actually has multi-store state to
@@ -245,7 +247,7 @@ export async function syncNow(opts: { manual?: boolean } = {}): Promise<boolean>
          lastRemoteSeen = null
          lastRemoteSt = {}
       }
-      if (changed) onMerged?.()
+      if (changed) onMerged?.(mountsChanged)
       // Push whenever the endpoint is behind, derived from the pulled blob
       // itself (see the module docblock): `dirty` alone is an in-memory flag a
       // reload loses, and a transiently-regressed endpoint must heal on any
@@ -340,10 +342,12 @@ export function flush(): void {
 
 // Wire the lifecycle: boot pull (when enabled), re-pull on tab re-focus
 // (throttled) and on regaining connectivity, flush on hide/pagehide. `merged`
-// is app.ts's refresh routine — rerender the list / badges after a pull
-// changed local state; `status` refills an open settings-menu footer after every
-// cycle (so enabling sync from the dialog confirms itself without a re-open).
-export function init(merged: () => void, status?: () => void): void {
+// is app.ts's refresh routine — rerender the list / badges after a pull changed
+// local state, and (its `mountsChanged` argument) re-adopt the mount table when
+// the pull merged a new `mnt`; `status` refills an open settings-menu footer
+// after every cycle (so enabling sync from the dialog confirms itself without a
+// re-open).
+export function init(merged: (mountsChanged: boolean) => void, status?: () => void): void {
    onMerged = merged
    onStatus = status ?? null
    document.addEventListener("visibilitychange", () => {

@@ -13,7 +13,7 @@ import { collapseBrokenMedia, countBadge, readerDateline, sanitizeFragment, srcC
 import { setupGestures, type Gestures } from "./gestures"
 import { HASH_KEY, UNREAD_ONLY_KEY } from "./keys"
 import * as list from "./list"
-import { addMount, forgetStoreState, mountLabel, removeMount, type MountRecord } from "./mounts"
+import { addMount, forgetStoreState, loadMounts, mountLabel, removeMount, type MountRecord } from "./mounts"
 import * as nav from "./nav"
 import * as picker from "./picker"
 import { clearAllPins, isPinned, listPins, pinFilter, unpinFilter } from "./pin"
@@ -1160,7 +1160,18 @@ async function init() {
    // overlay (unread badges). The reader view skips the list rebuild — the
    // return path (show() → refresh()) re-derives per-row state anyway, and
    // rebuilding a display:none list would pin zero row heights.
-   const refreshAfterMerge = () => {
+   //
+   // When the merge also moved the `mnt` mount table (a peer mounted on another
+   // device, pulled in by sync — profile.ts mergeMountState), re-adopt it into
+   // data.ts FIRST via afterMountChange, exactly as the Stores dialog does
+   // (applyMountTable boots the new root, postMounts SW-routes it, the picker
+   // repaints once it booted). Without this a sync-pulled mount never boots,
+   // never appears in the picker and isn't SW-routed until a full page reload.
+   // Gated on mountsChanged so an ordinary seen/saved-only pull doesn't re-run
+   // applyMountTable every cycle (both it and postMounts are idempotent, but the
+   // gate keeps the common pull cheap).
+   const refreshAfterMerge = (mountsChanged = false) => {
+      if (mountsChanged) afterMountChange(loadMounts())
       nav.pruneSeen()
       refreshSaveButton(!el.save.disabled)
       if (view === "list" && !hasInteracted && !nav.filter.saved && !nav.filter.search) {

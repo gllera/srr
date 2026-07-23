@@ -370,6 +370,19 @@ function rootIsLegacy(raw: IRootWire): boolean {
    return raw.total_art !== undefined
 }
 
+// The read-side twin of rootIsLegacy for an ALREADY-NORMALIZED snapshot.
+// rootIsLegacy switches the PARSE branch on the wire's `total_art` probe, but a
+// normalized db always carries total_art, so change-detection (refresh()) keys
+// on the store-format version instead — retained verbatim through both root
+// paths (fromManifestRoot copies `raw.v`, fromLegacyRoot keeps the wire's). The
+// manifest era begins at v2 — the {v, m, t} pointer the cutover shrank db.gz to
+// (v2 was the retired dual-write encoding, v3 the current one); a pre-cutover
+// legacy root is v1, or an absent v (0). This is what lets refresh() compare
+// ONLY `m` under a manifest root (docs/MANIFEST-SPEC.md §8.1 G2).
+function isManifestRoot(db: IDB): boolean {
+   return (db.v ?? 0) >= 2
+}
+
 async function parseDb(store: Store, res: Response): Promise<Snapshot> {
    // A missing/erroring store (404 on a fresh/empty store or a misconfigured CDN
    // URL, or a 5xx) would otherwise try to gunzip an HTML error body and reject
@@ -643,23 +656,38 @@ async function fetchDeltas(store: Store): Promise<IArticle[]> {
 }
 
 // refresh() re-fetches db.gz and re-runs the boot path when the store moved.
-// "unchanged" when the root names the same generation and reports the same
-// freshness: `m` moves on every publishing Commit and is the whole change
-// signal under a v2 root, while fetched_at/total_art/seq keep covering a
-// pre-cutover store. An in-place rebuild no longer needs a signal of its own —
-// it writes NEW names, so it moves `m` like everything else, which is exactly
-// what retired `gen`. The SW's checkManifest rides this same response,
-// reconciling its cache before our subsequent pack refetches.
+// The swap decision keys on the STORE's own change signal, which depends on the
+// RESIDENT root shape (docs/MANIFEST-SPEC.md §8.1 G2):
+//
+//   • Under a MANIFEST root (v3) `m` is that signal and `m` ALONE — every
+//     publishing Commit bumps it (invariants M2/M3), so total_art/seq cannot
+//     move without it, while the root's `t` (→ fetched_at) DOES move on an idle
+//     cycle (a fully backoff-thinned poll, a zero-feed maintenance cycle) that
+//     leaves `m` untouched. Comparing fetched_at there would misclassify that
+//     ~60-byte rewrite as "updated" and needlessly re-run applyDb +
+//     search.invalidate() + nav.onStoreRefreshed() every poll. fetched_at is
+//     still read for the "Updated X ago" freshness line; it just no longer
+//     triggers a re-process.
+//   • A pre-cutover LEGACY root keeps the four-field compare — its idle cycles
+//     rewrote the whole document, so m/fetched_at/total_art/seq together are the
+//     signal. Branching on the RESIDENT shape also keeps a legacy→manifest
+//     migration adoptable: the resident is still legacy, so the four-field
+//     compare sees m/total_art/fetched_at all move and reports "updated".
+//
+// An in-place rebuild needs no signal of its own — it writes NEW names, so it
+// moves `m` like everything else, which is exactly what retired `gen`. The SW's
+// checkManifest rides this same response, reconciling its cache before our
+// subsequent pack refetches.
 export async function refresh(store: Store = active): Promise<"unchanged" | "updated"> {
    const snap = await loadDb(store)
    const raw = snap.db
-   if (
-      (raw.m ?? 0) === (store.db.m ?? 0) &&
-      raw.fetched_at === store.db.fetched_at &&
-      raw.total_art === store.db.total_art &&
-      raw.seq === store.db.seq
-   )
-      return "unchanged"
+   const unchanged = isManifestRoot(store.db)
+      ? (raw.m ?? 0) === (store.db.m ?? 0)
+      : (raw.m ?? 0) === (store.db.m ?? 0) &&
+        raw.fetched_at === store.db.fetched_at &&
+        raw.total_art === store.db.total_art &&
+        raw.seq === store.db.seq
+   if (unchanged) return "unchanged"
    // applyDb swaps db first (fetchIdxPack and the finalized-count math read the
    // store state), so a rejected pack fetch mid-apply would otherwise strand a
    // half-swapped snapshot — new db, stale idx structures — that the NEXT

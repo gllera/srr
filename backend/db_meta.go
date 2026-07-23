@@ -262,11 +262,21 @@ func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 	if mp == nf && mp*metaPackSize+c.MetaTail == target {
 		return nil
 	}
-	if mp > nf || c.MetaTail < 0 || c.MetaTail > metaPackSize || mp*metaPackSize+c.MetaTail > target {
+	// Every name + coverage change from here on is STAGED on this clone and
+	// adopted (c.Names = names, below) only once every shard it names is
+	// durable — the inconsistent-coverage self-heal INCLUDED. Truncating the
+	// live c.Names here instead would let a warn-only rebuild that then fails
+	// (a transient store read) commit a manifest naming ZERO meta shards while
+	// valid ones still sit on disk: a store-wide search outage plus orphaned
+	// shards the GC later reclaims. metaTail mirrors mp as staged local state
+	// for the same reason (c.MetaTail is adopted at the end).
+	names := c.Names.clone()
+	metaTail := c.MetaTail
+	if mp > nf || metaTail < 0 || metaTail > metaPackSize || mp*metaPackSize+metaTail > target {
 		slog.Warn("inconsistent meta coverage, rebuilding from scratch",
-			"mp", mp, "mt", c.MetaTail, "target", target)
-		c.Names.truncate(metaSeries, 0)
-		c.MetaTail, mp = 0, 0
+			"mp", mp, "mt", metaTail, "target", target)
+		names.truncate(metaSeries, 0)
+		metaTail, mp = 0, 0
 	}
 	// The retired "stale-low MetaPacks" guard lived here. It existed because a
 	// warn-only failure could leave the store holding a finalized meta/<mp>.gz
@@ -279,7 +289,7 @@ func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 	// The tail the store currently names — the read-back candidate — captured
 	// BEFORE this run replaces it. On a consolidation cycle the tail moved, so
 	// the superseded key comes from consolidateTail.
-	prevKey := c.Names.tailKey(metaSeries)
+	prevKey := names.tailKey(metaSeries)
 	if o.consolidated != nil {
 		prevKey = o.prevMetaTail
 	}
@@ -291,23 +301,18 @@ func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 	// the published MetaTail. After consecutive failed syncs no candidate
 	// survives and the tail rebuilds from the packs instead — heavier, still
 	// correct.
-	if c.MetaTail > 0 && prevKey != "" {
-		if lines, ok := metaTailMemo.memoized(prevKey, c.MetaTail); ok {
+	if metaTail > 0 && prevKey != "" {
+		if lines, ok := metaTailMemo.memoized(prevKey, metaTail); ok {
 			rawLines = lines
 		} else if lines, err := o.readMetaLines(ctx, prevKey); err != nil {
 			slog.Warn("meta tail read-back failed, rebuilding from the packs", "key", prevKey, "error", err)
-		} else if len(lines) != c.MetaTail {
+		} else if len(lines) != metaTail {
 			slog.Warn("meta tail read-back mismatch, rebuilding from the packs",
-				"key", prevKey, "entries", len(lines), "mt", c.MetaTail)
+				"key", prevKey, "entries", len(lines), "mt", metaTail)
 		} else {
 			rawLines = lines
 		}
 	}
-
-	// Name changes are STAGED and adopted only once every object below is
-	// durable: a mid-flight failure must not leave the manifest this cycle
-	// publishes naming a shard that was never written (M4).
-	names := c.Names.clone()
 
 	add := func(ad *ArticleData) error {
 		if len(rawLines) == metaPackSize {
