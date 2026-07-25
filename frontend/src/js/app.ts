@@ -639,11 +639,19 @@ function render(o: IShowFeed) {
    // The article's own language (`g` on the wire, from the backend's always-on
    // detection). Without it the whole reader inherits <html lang="en">: a
    // screen reader pronounces a Spanish body in an English voice, hyphenation
-   // applies English patterns, and an undeclared-RTL body renders LTR. Absent
-   // for anything the detector wasn't confident about and for every article
-   // written before 2026-07-19, where "" correctly falls back to the page
-   // default. dir=auto lets the browser infer direction from the first strong
-   // character, which is the only honest answer when the feed declares none.
+   // applies English patterns, and an undeclared-RTL body renders LTR.
+   //
+   // `g` is absent for anything the detector wasn't confident about and for
+   // every article written before 2026-07-19, and the fallback is `lang=""` —
+   // which declares the language UNKNOWN, not "inherit". That distinction is
+   // the point, and it is deliberate: unknown is what stops `hyphens: auto`
+   // (styles.css) from breaking possibly-non-English prose on English patterns,
+   // where REMOVING the attribute would inherit <html lang="en"> and do exactly
+   // that. renderEmptyReader removes it instead, because reader chrome IS ours
+   // to declare.
+   //
+   // dir=auto lets the browser infer direction from the first strong character,
+   // which is the only honest answer when the feed declares none.
    el.content.lang = o.article.g ?? ""
    el.content.dir = "auto"
    // Adopt the sanitized nodes directly — an innerHTML string round-trip would
@@ -731,9 +739,15 @@ function renderEmptyReader(o: IShowFeed) {
    // render left behind), and swap the body for the shared empty-state element.
    clearContentTransition()
    harvestMediaState()
-   // Reader chrome, not article prose: it speaks the UI's language, so hand the
-   // host back to the page default rather than leaving the last article's.
-   el.content.lang = ""
+   // Reader chrome, not article prose: the empty state is OUR copy, in the UI's
+   // language, so the host goes back to INHERITING <html lang> rather than
+   // keeping the last article's. Removing the attribute is what inherits;
+   // `lang=""` would declare the language unknown, which is the right answer for
+   // an article of uncertain origin (see render) and the wrong one for our own
+   // words — it would leave assistive tech picking a fallback voice to read
+   // "All caught up" in. `dir` goes with it for the same reason.
+   el.content.removeAttribute("lang")
+   el.content.removeAttribute("dir")
    el.content.replaceChildren(list.emptyStateEl({ notStarted: o.notStarted, startFeed: o.startFeed }))
 
    refreshFeedLabel()

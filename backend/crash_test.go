@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"srr/store"
@@ -49,6 +50,13 @@ var errCrashHalt = errors.New("simulated halt: process killed mid-cycle")
 // that follows it must see everything the writer managed to publish.
 type stopAfterN struct {
 	store.Backend
+	// Guards the two counters. Not every store write in the cycle is sequential
+	// — ExpireArticles fans its per-key asset Stat/Rm calls out over an errgroup
+	// — so an unlocked counter would make the halt point itself racy, i.e. a
+	// flaky harness whose k loop no longer means what it says. Today the script
+	// carries no assets and that fan-out iterates an empty set, which is exactly
+	// why this has to be here BEFORE someone adds one.
+	mu sync.Mutex
 	// left is the remaining mutation budget; attempts counts every mutation
 	// tried, budget or not, which is how the harness sizes its k loop.
 	left     int
@@ -56,6 +64,8 @@ type stopAfterN struct {
 }
 
 func (s *stopAfterN) mutate() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.attempts++
 	if s.left <= 0 {
 		return errCrashHalt
