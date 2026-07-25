@@ -36,6 +36,9 @@ func FuzzParseFeed(f *testing.F) {
 			t.Skip()
 		}
 		n := 0
+		// `partial` is the parser's own "I streamed some items and then hit
+		// malformed bytes" signal; either answer is legal for arbitrary input, so
+		// the target judges the items instead.
 		_, _, err := ParseFeed([]byte(doc), func(i *mod.RawItem) error {
 			if i == nil {
 				t.Fatal("ParseFeed streamed a nil item")
@@ -54,8 +57,10 @@ func FuzzParseFeed(f *testing.F) {
 			}
 			return nil
 		})
-		if err != nil && n == 0 {
-			return // rejected outright: the common, correct answer for junk
-		}
+		// An error with nothing streamed is the common, correct answer for junk;
+		// an error AFTER some items is a truncated feed, and those items were
+		// already judged above. Either way there is nothing left to assert —
+		// returning normally is the pass.
+		_ = err
 	})
 }

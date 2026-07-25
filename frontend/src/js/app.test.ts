@@ -707,25 +707,37 @@ describe("reader language stamping (the article's `g`)", () => {
       expect(content().dir).toBe("auto")
    })
 
-   it("falls back to the page default when the writer was not confident (absent `g`)", async () => {
+   // An article the writer wasn't confident about is marked language-UNKNOWN
+   // (lang=""), NOT handed back to <html lang="en">. The difference is the whole
+   // point: unknown suppresses `hyphens: auto`, where inheriting would hyphenate
+   // possibly-non-English prose on English patterns. So assert the attribute is
+   // PRESENT and empty — `.lang` alone reads "" either way and would pass if the
+   // stamp regressed to removing it.
+   it("marks an article of unknown language as such, rather than inheriting", async () => {
       await boot()
       nav.fromHash.mockResolvedValue(showFeed({ article: { f: 1, a: 0, p: 0, c: "<p>x</p>" } as IArticle }))
       hashTo("#6")
       await flush()
-      expect(content().lang).toBe("")
+      expect(content().hasAttribute("lang")).toBe(true)
+      expect(content().getAttribute("lang")).toBe("")
    })
 
-   it("clears a previous article's language when the empty state renders", async () => {
+   // The empty state is the reader's OWN copy, so here inheriting is right and
+   // "unknown" is wrong — assistive tech would pick a fallback voice to read
+   // "All caught up". Removing the attribute is what inherits.
+   it("hands the host back to <html lang> when the empty state renders", async () => {
       await boot()
       nav.fromHash.mockResolvedValue(showFeed({ article: { f: 1, a: 0, p: 0, c: "<p>x</p>", g: "ar" } as IArticle }))
       hashTo("#7")
       await flush()
       expect(content().lang).toBe("ar")
+      expect(content().dir).toBe("auto")
 
       nav.fromHash.mockResolvedValue(showFeed({ placeholder: true }))
       hashTo("#8")
       await flush()
-      expect(content().lang).toBe("")
+      expect(content().hasAttribute("lang")).toBe(false)
+      expect(content().hasAttribute("dir")).toBe(false)
    })
 })
 

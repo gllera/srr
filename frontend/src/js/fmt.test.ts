@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import {
    collapseBrokenMedia,
+   extractAssetKeys,
    extractPrefetchMedia,
    handleFragmentClick,
    sanitizeHtml,
@@ -602,6 +603,69 @@ describe("timeAgo", () => {
    it("handles future timestamp (negative elapsed)", () => {
       const result = timeAgo(now + 60)
       expect(result).toBeDefined()
+   })
+})
+
+// FMT2a: the ★-Saved pin path's input. The whole function IS its regex — the
+// gate deciding which of an article's references are store objects worth
+// pinning — and app.test.ts mocks ./fmt wholesale, so this is the only place it
+// actually runs.
+describe("extractAssetKeys", () => {
+   const KEY = "assets/ab/0123456789abcdef.jpg"
+
+   it("collects self-hosted keys across the backend's whole asset attribute set", () => {
+      const keys = extractAssetKeys(
+         `<img src="assets/00/00112233445566aa.png">` +
+            `<video src="assets/11/1122334455667788.webm" poster="assets/22/2233445566778899.jpg"></video>` +
+            `<audio src="assets/33/33445566778899aa.opus"></audio>` +
+            `<source src="assets/44/445566778899aabb.webm">` +
+            // A self-hosted PDF is as much part of a saved article as its images.
+            `<a href="assets/55/5566778899aabbcc.pdf">paper</a>`,
+      )
+      expect(keys.sort()).toEqual(
+         [
+            "assets/00/00112233445566aa.png",
+            "assets/11/1122334455667788.webm",
+            "assets/22/2233445566778899.jpg",
+            "assets/33/33445566778899aa.opus",
+            "assets/44/445566778899aabb.webm",
+            "assets/55/5566778899aabbcc.pdf",
+         ].sort(),
+      )
+   })
+
+   it("takes an extension-less key and dedups repeats", () => {
+      expect(extractAssetKeys(`<img src="assets/ab/0123456789abcdef">`)).toEqual(["assets/ab/0123456789abcdef"])
+      expect(extractAssetKeys(`<img src="${KEY}"><img src="${KEY}">`)).toEqual([KEY])
+   })
+
+   it("ignores everything that is not a key of THIS store", () => {
+      for (const html of [
+         `<img src="https://cdn.example/photo.jpg">`, // external
+         `<img src="images/photo.jpg">`, // relative, but not an asset key
+         // Anchored at both ends: an external URL that merely CONTAINS a
+         // key-shaped path is not a key of this store.
+         `<img src="https://evil.example/${KEY}">`,
+         `<img src="assets/ab/0123456789abcde.jpg">`, // 15 hex, not 16
+         `<img src="assets/ab/0123456789abcdefff.jpg">`, // 17 hex
+         `<img src="assets/abc/0123456789abcdef.jpg">`, // 3-hex shard
+         `<img src="assets/zz/0123456789abcdef.jpg">`, // non-hex shard
+         `<img src="assets/ab/0123456789abcdeg.jpg">`, // non-hex stem
+         `<a href="#fn1">note</a>`,
+         "",
+      ]) {
+         expect(extractAssetKeys(html)).toEqual([])
+      }
+   })
+
+   it("does not leak the parse into sanitizeFragment's shared template", () => {
+      extractAssetKeys(`<img src="${KEY}">`)
+      // Both use one module-level <template>; a left-behind parse would surface
+      // as extra nodes in the next sanitize.
+      const t = document.createElement("template")
+      t.innerHTML = sanitizeHtml("<p>after</p>")
+      expect(t.content.querySelectorAll("img").length).toBe(0)
+      expect(t.content.textContent).toBe("after")
    })
 })
 
