@@ -135,7 +135,22 @@ export function toggleSaved(chron: number): boolean {
    } catch {}
    sync.pushSoon()
    next.left = next.right = undefined
+   savedHook?.(chron, nowSaved)
    return nowSaved
+}
+
+// The saved-set transition hook (FMT2a). ★ Saved keeps an article's TEXT forever
+// — packs are immutable — but its self-hosted images and media are deleted when
+// the feed's retention window passes, so a read-later queue quietly rots into
+// text with broken pictures. The backend cannot help: the saved set is
+// device-local, so only this device knows which assets to keep, and only the
+// service worker can keep them. Both save paths (the reader's star and the
+// list row's) come through toggleSaved, so this is the one seam; app.ts owns
+// what actually happens, since talking to the SW is not nav's job.
+let savedHook: ((chron: number, saved: boolean) => void) | null = null
+
+export function setSavedHook(fn: (chron: number, saved: boolean) => void): void {
+   savedHook = fn
 }
 // The chronIdx of the article currently in the reader (-1 = none), so app.ts can
 // reflect its saved state on the star toggle without threading pos into IShowFeed.
@@ -876,16 +891,113 @@ function recordSeen(article: IArticle): Record<string, number> | undefined {
       // above, so this only fires for feed/tag/[ALL] navigation — the
       // contiguous read-throughs where a "previous = seen" frontier across
       // feeds is meaningful.
-      const raise = (feedId: number) =>
+      const before: Record<string, number | undefined> = {}
+      const raise = (feedId: number) => {
+         const key = "feed:" + feedId
+         if (!(key in before)) before[key] = seen[key]
          writeFrontier(seen, touched, feedId, (prev) => prev === undefined || prev < pos, pos)
+      }
       raise(article.f)
       for (const feedId of filter.feeds.keys()) if (feedId !== article.f) raise(feedId)
       if (touched.length > 0) {
          writeSeen(seen, touched)
+         snapshotRaise(before, touched, pos)
          sync.pushSoon()
       }
       return seen
    } catch {}
+}
+
+// RDR1/RDR2 — reversibility for the frontier RAISES.
+//
+// The frontier model is deliberate and stays: opening an article marks
+// everything older across the filter as read, because that is what "I'm caught
+// up to here" means. What erodes trust in the unread numbers is that the big
+// version of it — tapping the newest headline on [ALL], or Mark all read —
+// is silent AND irreversible: a backlog you meant to keep is gone with no
+// signal that anything happened and no way back.
+//
+// So a raise snapshots the frontiers it moved. Nothing else changes: no
+// per-article read set, no confirm dialog in the way of the common case. The
+// caller (app.ts) asks how many articles the move actually consumed and, past a
+// threshold, offers one Undo.
+export interface FrontierUndo {
+   // Previous value per touched key; undefined = the key did not exist. Only
+   // touched keys are here — an untouched member's unread is identical before
+   // and after, so it cannot contribute to the size of the move.
+   prev: Record<string, number | undefined>
+   // Where those frontiers were moved TO, so the size can be measured after the
+   // fact without having counted anything on the hot path.
+   to: number
+}
+
+let lastRaise: FrontierUndo | null = null
+
+// The pending undoable raise, if any. Reading it does not consume it.
+export function pendingFrontierUndo(): FrontierUndo | null {
+   return lastRaise
+}
+
+// How many articles a raise actually consumed: the filter's unread before the
+// move minus its unread after. Both sides go through the same tally the badges
+// use, so the number the snackbar reports is the number the badges just lost.
+// Async and deliberately OFF the navigation path — recordSeen stays a couple of
+// localStorage writes.
+export async function frontierUndoSize(u: FrontierUndo): Promise<number> {
+   const chs = Object.keys(u.prev)
+      .map((k) => data.db.feeds[Number(k.slice("feed:".length))])
+      .filter(Boolean)
+   if (chs.length === 0) return 0
+   const before = await tallyWith(chs, (id) => u.prev["feed:" + id])
+   const after = await tallyWith(chs, () => u.to)
+   let n = 0
+   for (const ch of chs) n += Math.max(0, (before.get(ch.id) ?? 0) - (after.get(ch.id) ?? 0))
+   return n
+}
+
+// Put the snapshotted frontiers back. It writes through writeSeen like every
+// other mutation, so the per-key `st` stamps are refreshed to NOW — an undo is
+// itself the newest thing that happened to those keys, and only a newer stamp
+// makes profile.ts's per-key LWW propagate a lowering instead of letting another
+// device's stale raise win. (That is also why a key that did not exist is
+// restored as -1 rather than deleted: markUnreadFrom's precedent — -1 reads as
+// never-seen everywhere, and keeping the key keeps its stamp.)
+export function undoFrontierMove(): boolean {
+   const u = lastRaise
+   lastRaise = null
+   if (!u) return false
+   try {
+      const seen = readSeen()
+      const touched: string[] = []
+      for (const [key, prev] of Object.entries(u.prev)) {
+         const want = prev ?? -1
+         if (seen[key] === want) continue
+         seen[key] = want
+         touched.push(key)
+      }
+      if (touched.length === 0) return false
+      writeSeen(seen, touched)
+      sync.pushSoon()
+      return true
+   } catch {
+      return false
+   }
+}
+
+// Discard the pending offer — the caller decided not to offer it, or offered it
+// and the user let it lapse. Any newer raise replaces it anyway.
+export function clearFrontierUndo(): void {
+   lastRaise = null
+}
+
+// Record a raise as undoable, keeping only the keys it actually moved. Called
+// after the write lands, so a failed write leaves no offer behind. A newer raise
+// always replaces an older pending one: the offer is for the last thing that
+// happened, and stacking them would let one Undo skip a step.
+function snapshotRaise(before: Record<string, number | undefined>, touched: string[], to: number): void {
+   const prev: Record<string, number | undefined> = {}
+   for (const key of touched) prev[key] = before[key]
+   lastRaise = { prev, to }
 }
 
 // One feed's seen-frontier write: set seen[key]=value and record the key in
@@ -911,14 +1023,23 @@ function writeFrontier(
 // filter member's frontier to `value` where shouldMove(prev) holds, then persist
 // + push. Peek modes (saved/search) have no frontier to move. Returns whether
 // anything actually changed (the caller only rebuilds / re-counts when it did).
-function moveFrontier(shouldMove: (prev: number | undefined) => boolean, value: number): boolean {
+// `undoable` is set for the RAISES only. The rewind (markUnreadFrom) is already
+// the explicit, deliberate gesture — it is what an undo would be — so offering
+// to undo it would just be a second way to spend the same intent, and it would
+// overwrite the raise snapshot the user actually wants back.
+function moveFrontier(shouldMove: (prev: number | undefined) => boolean, value: number, undoable: boolean): boolean {
    if (filter.search || filter.saved) return false
    try {
       const seen = readSeen()
       const touched: string[] = []
-      for (const feedId of filter.feeds.keys()) writeFrontier(seen, touched, feedId, shouldMove, value)
+      const before: Record<string, number | undefined> = {}
+      for (const feedId of filter.feeds.keys()) {
+         before["feed:" + feedId] = seen["feed:" + feedId]
+         writeFrontier(seen, touched, feedId, shouldMove, value)
+      }
       if (touched.length === 0) return false
       writeSeen(seen, touched)
+      if (undoable) snapshotRaise(before, touched, value)
       sync.pushSoon()
       return true
    } catch {
@@ -936,7 +1057,7 @@ function moveFrontier(shouldMove: (prev: number | undefined) => boolean, value: 
 export function markAllRead(): boolean {
    if (data.db.total_art === 0) return false
    const top = data.db.total_art - 1
-   return moveFrontier((prev) => prev === undefined || prev < top, top)
+   return moveFrontier((prev) => prev === undefined || prev < top, top, true)
 }
 
 // The explicit unread rewind — the ONLY path that lowers a seen frontier:
@@ -951,7 +1072,7 @@ export function markAllRead(): boolean {
 export function markUnreadFrom(chron: number): boolean {
    if (chron < 0) return false
    const floor = chron - 1
-   return moveFrontier((prev) => prev !== undefined && prev > floor, floor)
+   return moveFrontier((prev) => prev !== undefined && prev > floor, floor, false)
 }
 
 // Batched per-feed unread: reads the seen map once and tallies EVERY feed in

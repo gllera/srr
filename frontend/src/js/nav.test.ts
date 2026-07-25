@@ -2878,6 +2878,112 @@ describe("ensureSearchSet supersession guard (#3)", () => {
 })
 
 // ── feedUnread reflects live seen: reading marks on ENTER, no pad ───────────
+// RDR1/RDR2 — the frontier model stays one-way; what this adds is one step of
+// reversibility for the RAISES, so a jump that swallows a backlog is neither
+// silent nor final.
+describe("frontier undo", () => {
+   afterEach(() => {
+      nav.setUnreadOnly(false)
+      nav.clearFrontierUndo()
+   })
+
+   // feed1 {0,2,4}, feed2 {1,3} — a two-feed [ALL] lane.
+   const setupTwo = () => {
+      setupIndex([{ feedId: 1 }, { feedId: 2 }, { feedId: 1 }, { feedId: 2 }, { feedId: 1 }])
+      nav.filter.clear()
+   }
+
+   it("snapshots a landing's raise across every filter member", async () => {
+      setupTwo()
+      seedSeen({ "feed:1": 0 })
+      await nav.goTo(4)
+      const u = nav.pendingFrontierUndo()!
+      expect(u).not.toBeNull()
+      expect(u.to).toBe(4)
+      // feed1 moved 0 → 4; feed2 had no key at all (never seen).
+      expect(u.prev["feed:1"]).toBe(0)
+      expect("feed:2" in u.prev).toBe(true)
+      expect(u.prev["feed:2"]).toBeUndefined()
+   })
+
+   it("reports how many articles the raise actually consumed", async () => {
+      setupTwo()
+      seedSeen({ "feed:1": 0 })
+      // Before: feed1 has 2 unread (chron 2,4), feed2 has 2 (chron 1,3) = 4.
+      await nav.goTo(4)
+      expect(await nav.frontierUndoSize(nav.pendingFrontierUndo()!)).toBe(4)
+   })
+
+   it("puts every frontier back, including keys that did not exist", async () => {
+      setupTwo()
+      seedSeen({ "feed:1": 0 })
+      await nav.goTo(4)
+      expect(nav.undoFrontierMove()).toBe(true)
+
+      const seen = JSON.parse(localStorage.getItem("srr-seen")!)
+      expect(seen["feed:1"]).toBe(0)
+      // A never-seen key comes back as -1, not deleted: -1 reads as never-seen
+      // everywhere, and keeping the key keeps the per-key stamp that makes the
+      // rewind outrank another device's older raise.
+      expect(seen["feed:2"]).toBe(-1)
+      const group = [data.db.feeds[1], data.db.feeds[2]]
+      const counts = await nav.unreadCounts(group)
+      expect(counts.get(1)! + counts.get(2)!).toBe(4)
+   })
+
+   it("stamps the undo as the newest thing to happen to those keys (so sync propagates it)", async () => {
+      setupTwo()
+      seedSeen({ "feed:1": 0 })
+      localStorage.setItem("srr-seen-ts", JSON.stringify({ "feed:1": 1, "feed:2": 1 }))
+      await nav.goTo(4)
+      nav.undoFrontierMove()
+      const st = JSON.parse(localStorage.getItem("srr-seen-ts")!)
+      expect(st["feed:1"]).toBeGreaterThan(1)
+      expect(st["feed:2"]).toBeGreaterThan(1)
+   })
+
+   it("is one-shot, and a newer raise supersedes an older pending one", async () => {
+      setupTwo()
+      seedSeen({ "feed:1": 0 })
+      await nav.goTo(2)
+      const first = nav.pendingFrontierUndo()
+      await nav.goTo(4)
+      expect(nav.pendingFrontierUndo()).not.toBe(first)
+      expect(nav.undoFrontierMove()).toBe(true)
+      expect(nav.pendingFrontierUndo()).toBeNull()
+      expect(nav.undoFrontierMove()).toBe(false)
+   })
+
+   it("covers Mark all read (RDR2) — the same snapshot, the same way back", async () => {
+      setupTwo()
+      seedSeen({ "feed:1": 0 })
+      expect(nav.markAllRead()).toBe(true)
+      expect(await nav.frontierUndoSize(nav.pendingFrontierUndo()!)).toBe(4)
+      nav.undoFrontierMove()
+      const group = [data.db.feeds[1], data.db.feeds[2]]
+      const counts = await nav.unreadCounts(group)
+      expect(counts.get(1)! + counts.get(2)!).toBe(4)
+   })
+
+   it("does not offer to undo the explicit rewind — that gesture IS the undo", async () => {
+      setupTwo()
+      seedSeen({ "feed:1": 4, "feed:2": 3 })
+      nav.clearFrontierUndo()
+      expect(nav.markUnreadFrom(2)).toBe(true)
+      expect(nav.pendingFrontierUndo()).toBeNull()
+   })
+
+   it("records nothing in the peek modes (they never move a frontier)", async () => {
+      setupTwo()
+      seedSeen({ "feed:1": 0 })
+      localStorage.setItem("srr-saved", JSON.stringify([0, 2]))
+      await nav.switchFilter(nav.SAVED_TOKEN)
+      nav.clearFrontierUndo()
+      await nav.goTo(2)
+      expect(nav.pendingFrontierUndo()).toBeNull()
+   })
+})
+
 describe("feedUnread is the plain live unread (enter-based accounting)", () => {
    afterEach(() => nav.setUnreadOnly(false))
 

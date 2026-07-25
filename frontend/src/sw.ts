@@ -183,12 +183,19 @@ sw.addEventListener("install", () => {
 
 sw.addEventListener("activate", (event) => {
    // Drop caches left by older versions, upgrade the pre-multi-store META keys,
-   // then control open clients right away.
+   // enable navigation preload, then control open clients right away.
    event.waitUntil(
       caches
          .keys()
          .then((keys) => Promise.all(keys.filter((k) => !KEEP.has(k)).map((k) => caches.delete(k))))
          .then(() => upgradeMetaKeys())
+         // Navigation preload: without it, a cold start pays for BOOTING this
+         // worker before the shell request even leaves — the worker is on the
+         // critical path of the navigation it exists to speed up. With it the
+         // browser issues that request in parallel and hands us the response
+         // (see navigationResponse). Feature-detected: Safari only shipped it in
+         // 17, and its absence just restores today's serial behaviour.
+         .then(() => sw.registration.navigationPreload?.enable().catch(() => {}))
          .then(() => sw.clients.claim()),
    )
 })
@@ -379,13 +386,20 @@ async function pinnedCacheFirst(req: Request, name: string): Promise<Response> {
    return cacheFirst(req, name)
 }
 
-// Prefer the network (refreshing the cache); fall back to cache only when the
-// network is unreachable. A 4xx/5xx is a real answer, not an outage — returned
-// as-is, never masked by a stale hit.
-async function networkFirst(req: Request, name: string): Promise<Response> {
-   const cache = await caches.open(name)
+// The app shell: prefer the network (refreshing the cache), fall back to cache
+// only when the network is unreachable — a 4xx/5xx is a real answer, not an
+// outage, and is returned as-is rather than masked by a stale hit.
+//
+// It takes the browser's PRELOADED navigation response when there is one.
+// Preload is not an optimization we can decline to consume: once enabled, the
+// browser issues that request for every navigation, so ignoring it would waste a
+// full round-trip rather than save one. A preload that rejects (offline) falls
+// through to the same cache path as a failed fetch.
+async function navigationResponse(req: Request, event: FetchEvent): Promise<Response> {
+   const cache = await caches.open(SHELL)
    try {
-      const res = await fetch(req)
+      const preloaded = (await event.preloadResponse) as Response | undefined
+      const res = preloaded ?? (await fetch(req))
       if (res.ok && res.type !== "opaque") cache.put(req, res.clone())
       return res
    } catch (err) {
@@ -607,7 +621,7 @@ sw.addEventListener("fetch", (event) => {
    if (req.mode === "navigate") {
       // A navigation is only ours when it is same-origin under our scope; a
       // cross-origin navigation (opening a peer store's root in a tab) is not.
-      if (ownScope) event.respondWith(networkFirst(req, SHELL))
+      if (ownScope) event.respondWith(navigationResponse(req, event))
       return
    }
    if (ownScope && RE_SHELL_HASHED.test(url.pathname)) {

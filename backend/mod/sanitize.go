@@ -80,6 +80,19 @@ func init() {
 
 		policy.AllowAttrs("dir").Matching(bluemonday.Direction).Globally()
 		policy.AllowAttrs("lang").Matching(regexp.MustCompile(`[a-zA-Z]{2,20}`)).Globally()
+		// `id` is the LANDING half of an in-page fragment link. Stripping it made
+		// every footnote, endnote and table-of-contents link in a longform article
+		// a dead reference — the anchor survived, its target did not. The reader
+		// resolves such links inside the article and scrolls to them (fmt.ts
+		// FRAGMENT_HREF / handleFragmentClick).
+		//
+		// Conservative on purpose: a leading letter then word characters, colon,
+		// dot or dash, bounded — that covers every footnote convention feeds
+		// actually emit (fn1, fnref:3, footnote-12) and refuses the exotic values
+		// HTML5 technically permits. Content ids are scoped inside .srr-content, so
+		// they cannot collide with reader chrome; the reader additionally refuses
+		// the "srr-" prefix, which is the one thing this side cannot know about.
+		policy.AllowAttrs("id").Matching(regexp.MustCompile(`^[A-Za-z][\w:.-]{0,63}$`)).Globally()
 		policy.AllowAttrs("open").Matching(regexp.MustCompile(`(?i)^(|open)$`)).OnElements("details")
 		policy.AllowAttrs("cite").OnElements("blockquote")
 		policy.AllowAttrs("href").OnElements("a")

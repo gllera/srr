@@ -201,6 +201,16 @@
             </button>
          </nav>
          <div class="srr-pin-progress" hidden></div>
+         <!-- Transient snackbar: a report of something that already happened,
+              with at most one way to answer it (Undo a frontier jump, reload
+              after a worker update). Deliberately NOT the .srr-popup dialog —
+              that one is modal and takes focus, which is right for an error you
+              must acknowledge and wrong for a notice you may ignore. role=status
+              announces it once without stealing the reading position. -->
+         <div class="srr-snackbar" role="status" hidden>
+            <span class="srr-snackbar-text"></span>
+            <button class="srr-snackbar-action srr-hidden"></button>
+         </div>
       </main>
       <!-- srr:skeleton:end -->
       <noscript><p style="text-align: center; margin: 2rem">JavaScript is required to load feeds.</p></noscript>
