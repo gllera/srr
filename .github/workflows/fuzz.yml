@@ -1,0 +1,47 @@
+name: Fuzz
+
+# Nightly, not per-push: a fuzz run is only worth its wall-clock when it gets a
+# real budget, and a 5-minute-per-target sweep would dominate every PR. The
+# checked-in seed corpora already run on every push as ordinary unit tests
+# (`go test` executes each f.Add seed), so a target that BREAKS is caught by CI
+# immediately; this job is what finds the inputs nobody thought of.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: "Budget per target (Go duration)"
+        required: false
+        default: "5m"
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      # Go only — the fuzz targets have no frontend prerequisite and never lint.
+      - uses: ./.github/actions/setup-toolchain
+        with:
+          node: "false"
+          lint: "false"
+      - run: make fuzz-be FUZZTIME=${{ inputs.fuzztime || '5m' }}
+      # A crasher is written to backend/**/testdata/fuzz/<Target>/<hash>. Keep it:
+      # it is the reproducer, and dropping it would mean re-finding the input by
+      # luck. `go test` replays anything committed under testdata as a unit test,
+      # so the file itself is the regression test once a human adds it.
+      - name: Upload crashers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashers
+          path: backend/**/testdata/fuzz/**
+          if-no-files-found: ignore

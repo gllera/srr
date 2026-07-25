@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"srr/store"
 )
@@ -486,10 +488,16 @@ func TestDBLocking(t *testing.T) {
 		t.Error("lock file not created")
 	}
 
-	// Second locked open should fail (file already exists with ignoreExisting=false via Force=false)
-	_, err = NewDB(ctx, true)
-	if err == nil {
-		t.Error("expected error for second locked open")
+	// A second locked open against a LIVE PEER's lease fails: that is the
+	// cross-process contention the marker exists for. (A second open in this
+	// same process would instead RECLAIM the marker — see lock.go's owner rule
+	// and TestLeaseReclaimsOwnMarker; storeWriter is what keeps two live
+	// in-process writers from ever reaching here.)
+	writeMarker(t, db.Backend, dbLockKey, marshalLease(t, storeLease{
+		Owner: "otherhost/999/deadbeef", Expires: time.Now().Add(time.Hour).Unix(),
+	}))
+	if _, err = NewDB(ctx, true); !errors.Is(err, os.ErrExist) {
+		t.Errorf("second locked open = %v, want os.ErrExist", err)
 	}
 
 	db.Close(ctx)

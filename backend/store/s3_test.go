@@ -3,6 +3,7 @@ package store
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/pem"
@@ -25,14 +26,22 @@ import (
 // (s3Cfg.Endpoint → cfg.BaseEndpoint) plus an IP-literal host force the SDK
 // into path-style addressing (/bucket/<key>), so the handler routes on the
 // URL path and ignores SigV4 entirely. It honors the two protocol features
-// the production code relies on: `If-None-Match: *` exclusive creates (412 +
-// PreconditionFailed) and aws-chunked PUT bodies (the SDK's wire format for
-// non-seekable bodies with a trailing CRC32 — production streams exactly
-// those).
+// the production code relies on: `If-None-Match: *` exclusive creates and
+// `If-Match: <etag>` conditional writes (both 412 + PreconditionFailed),
+// ETags on PUT and HEAD (the token S3.Version hands back), and aws-chunked PUT
+// bodies (the SDK's wire format for non-seekable bodies with a trailing CRC32 —
+// production streams exactly those).
 type fakeS3 struct {
 	mu      sync.Mutex
 	objects map[string][]byte
 	headers map[string]http.Header // last successful PUT's request headers per key
+}
+
+// s3ETag mints the fake's entity tag. Real S3 uses the content MD5 for
+// single-part uploads; only the QUOTING and the "changes with the bytes"
+// property matter to the code under test, both of which this reproduces.
+func s3ETag(body []byte) string {
+	return fmt.Sprintf(`"%x"`, sha256.Sum256(body))
 }
 
 func s3Error(w http.ResponseWriter, status int, code string) {
@@ -94,11 +103,14 @@ func (f *fakeS3) handler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("x-amz-checksum-crc32", base64.StdEncoding.EncodeToString(sum))
 		w.Write(body) //nolint:errcheck
 	case http.MethodPut:
-		if r.Header.Get("If-None-Match") == "*" {
-			if _, exists := f.objects[key]; exists {
-				s3Error(w, http.StatusPreconditionFailed, "PreconditionFailed")
-				return
-			}
+		existing, exists := f.objects[key]
+		if r.Header.Get("If-None-Match") == "*" && exists {
+			s3Error(w, http.StatusPreconditionFailed, "PreconditionFailed")
+			return
+		}
+		if want := r.Header.Get("If-Match"); want != "" && (!exists || want != s3ETag(existing)) {
+			s3Error(w, http.StatusPreconditionFailed, "PreconditionFailed")
+			return
 		}
 		body, err := readPutBody(r)
 		if err != nil {
@@ -107,6 +119,7 @@ func (f *fakeS3) handler(w http.ResponseWriter, r *http.Request) {
 		}
 		f.objects[key] = body
 		f.headers[key] = r.Header.Clone()
+		w.Header().Set("ETag", s3ETag(body))
 	case http.MethodHead:
 		body, ok := f.objects[key]
 		if !ok {
@@ -117,6 +130,7 @@ func (f *fakeS3) handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.Header().Set("ETag", s3ETag(body))
 		w.WriteHeader(http.StatusOK)
 	case http.MethodDelete:
 		delete(f.objects, key)

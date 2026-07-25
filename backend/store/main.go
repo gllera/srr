@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -165,9 +166,32 @@ type Backend interface {
 	// by backends that store it (S3); ignored by backends whose headers come from
 	// a static server at request time (local/SFTP).
 	AtomicPut(ctx context.Context, key string, r io.Reader, meta ObjectMeta) error
+	// Version returns an OPAQUE token for key's current content, or "" when the
+	// key is absent. It is meaningful only as an argument to PutIfVersion, and
+	// each backend picks whatever its store can make a write conditional on (an
+	// ETag on S3, a content digest on a filesystem) — nothing may parse it or
+	// compare tokens across backends. errors.ErrUnsupported when the backend
+	// cannot express one; callers then fall back to an unconditional AtomicPut.
+	//
+	// Intended for small MUTABLE roots (db.gz). A backend is free to read the
+	// object to answer, so do not call it on packs.
+	Version(ctx context.Context, key string) (string, error)
+	// PutIfVersion is AtomicPut with a precondition: the write lands only while
+	// key's version still equals want, where "" means "the key must not exist".
+	// It returns the stored object's NEW version, so a caller holding the token
+	// across several writes never needs a re-read.
+	//
+	// A lost race is ErrPreconditionFailed and the stored object is untouched.
+	// errors.ErrUnsupported when the backend cannot express the condition.
+	PutIfVersion(ctx context.Context, key string, r io.Reader, meta ObjectMeta, want string) (string, error)
 	Rm(ctx context.Context, key string) error
 	Close() error
 }
+
+// ErrPreconditionFailed reports that a conditional write did not land because
+// the object changed under it — another writer got there first. It is the
+// signal that turns a silent last-write-wins into a loud, retryable abort.
+var ErrPreconditionFailed = errors.New("store: object changed under a conditional write")
 
 // ObjectMeta is optional response metadata for a stored object. Backends that
 // persist it (S3) stamp these headers; backends whose headers are the static

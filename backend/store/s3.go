@@ -148,11 +148,52 @@ func (d *S3) Get(ctx context.Context, key string, ignoreMissing bool) (io.ReadCl
 }
 
 func (d *S3) Put(ctx context.Context, key string, r io.Reader, ignoreExisting bool) error {
-	return d.put(ctx, key, r, ignoreExisting, ObjectMeta{})
+	_, err := d.put(ctx, key, r, ignoreExisting, ObjectMeta{}, nil)
+	return err
 }
 
 func (d *S3) AtomicPut(ctx context.Context, key string, r io.Reader, meta ObjectMeta) error {
-	return d.put(ctx, key, r, true, meta)
+	_, err := d.put(ctx, key, r, true, meta, nil)
+	return err
+}
+
+// Version is the object's ETag, which is exactly what PutIfVersion's If-Match
+// takes — so the token is native here and the compare-and-swap is REAL, not the
+// best-effort check-then-write a filesystem is limited to. This is the backend
+// the production store runs on (R2), and the one the root flip needed it for.
+func (d *S3) Version(ctx context.Context, key string) (string, error) {
+	key = d.s3path("version", key)
+
+	res, err := d.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(d.bucket),
+		Key:    aws.String(key),
+	})
+	switch apiErrorCode(err) {
+	case s3ErrNotFound, s3ErrNoSuchKey:
+		return "", nil
+	case s3ErrUnauthorized:
+		return "", fmt.Errorf("unauthorized access to s3: %w", err)
+	}
+	if err != nil {
+		return "", fmt.Errorf("s3 head %q: %w", key, err)
+	}
+	return aws.ToString(res.ETag), nil
+}
+
+// PutIfVersion conditions the write on the object's current ETag — If-Match for
+// "still this version", If-None-Match: * for "must not exist yet", which is the
+// same primitive the exclusive-create Put already uses. Both fail with 412,
+// which put maps to os.ErrExist; here that means the caller lost the race.
+func (d *S3) PutIfVersion(ctx context.Context, key string, r io.Reader, meta ObjectMeta, want string) (string, error) {
+	var ifMatch *string
+	if want != "" {
+		ifMatch = aws.String(want)
+	}
+	etag, err := d.put(ctx, key, r, want != "", meta, ifMatch)
+	if errors.Is(err, os.ErrExist) {
+		return "", fmt.Errorf("s3 conditional write %q: %w", key, ErrPreconditionFailed)
+	}
+	return etag, err
 }
 
 // put is the shared write core. Content-Type comes from meta (the asset-peek /
@@ -163,7 +204,11 @@ func (d *S3) AtomicPut(ctx context.Context, key string, r io.Reader, meta Object
 // single source of truth there. Content-Encoding is stamped only when meta
 // sets it; pack writes never set it (the reader gunzips manually — see
 // contentTypeGzip).
-func (d *S3) put(ctx context.Context, key string, r io.Reader, ignoreExisting bool, meta ObjectMeta) error {
+//
+// ifMatch, when set, conditions the write on the object's current ETag (the
+// PutIfVersion path); it is nil for every unconditional write. It returns the
+// stored object's new ETag, which only PutIfVersion consumes.
+func (d *S3) put(ctx context.Context, key string, r io.Reader, ignoreExisting bool, meta ObjectMeta, ifMatch *string) (string, error) {
 	// Resolve the cache class and key-derived type from the logical key before
 	// it gets the path prefix, so the CDN serves finalized packs immutable and
 	// db.gz/latest always-revalidate.
@@ -188,6 +233,7 @@ func (d *S3) put(ctx context.Context, key string, r io.Reader, ignoreExisting bo
 		Body:              r,
 		ContentType:       aws.String(contentType),
 		IfNoneMatch:       condition,
+		IfMatch:           ifMatch,
 		ChecksumAlgorithm: types.ChecksumAlgorithmCrc32,
 	}
 	if meta.ContentEncoding != "" {
@@ -197,19 +243,19 @@ func (d *S3) put(ctx context.Context, key string, r io.Reader, ignoreExisting bo
 		input.CacheControl = aws.String(cacheControl)
 	}
 
-	_, err := d.client.PutObject(ctx, input)
+	res, err := d.client.PutObject(ctx, input)
 
 	switch apiErrorCode(err) {
 	case s3ErrPreconditionFailed:
-		return fmt.Errorf("key %q already exists on s3: %w", key, os.ErrExist)
+		return "", fmt.Errorf("key %q already exists on s3: %w", key, os.ErrExist)
 	case s3ErrUnauthorized:
-		return fmt.Errorf("unauthorized access to s3: %w", err)
+		return "", fmt.Errorf("unauthorized access to s3: %w", err)
 	}
 	if err != nil {
-		return fmt.Errorf("s3 put %q: %w", key, err)
+		return "", fmt.Errorf("s3 put %q: %w", key, err)
 	}
 
-	return nil
+	return aws.ToString(res.ETag), nil
 }
 
 // Stat returns the object's size via HeadObject (no body transfer); a missing

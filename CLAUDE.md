@@ -217,12 +217,14 @@ Store root: `db.gz` + `config.gz` + `manifest/` + `idx/` + `data/` + `meta/` + `
 
 ### File-Based Locking
 
-Two independent advisory markers, both nil-payload files, both overridable with `--force`, both removed under `context.WithoutCancel` so a cancellation still releases them.
+Two independent advisory markers, both **LEASES** (`backend/lock.go`), both overridable with `--force`, both removed under `context.WithoutCancel` so a cancellation still releases them.
 
-- `.locked` — the store writer. Held for a whole mutation (fetch cycle, feed/recipe/syndicate command, GUI save). Contention answers `os.ErrExist`, which serve maps to a 409.
+- `.locked` — the store writer. Held for a whole mutation (fetch cycle, feed/recipe/syndicate command, GUI save). Contention answers `os.ErrExist`, which serve maps to a 409 and the MCP layer to "store busy".
 - `.config.locked` — `config.gz` alone. Separate on purpose: a fetch cycle READS config and never writes it, so writer↔editor exclusion is not needed for correctness and config edits stop 409ing a running cycle. It serializes editor↔editor only. **Deadlock discipline: a mutation touching both takes `.locked` FIRST and `.config.locked` SECOND, never the reverse.**
 
-A SIGKILL leaves the marker behind and the next run needs `--force` (an open finding, unchanged by the cutover).
+**The lease** is a tiny JSON payload `{owner, expires}` written on acquire (and so re-stamped every cycle, since every cycle opens the store afresh). It exists because a nil-payload marker cannot answer the only question that matters when one is found — *is its writer still alive?* — so the answer used to be "assume yes, forever", and a SIGKILL (OOM kill, host reboot, `docker stop` past its grace) wedged the 5-minute loop until a human passed `--force`. A found marker is now reclaimed when its `owner` is **this process instance** (the in-process `storeWriter` gate proves nothing here holds it), stolen when its `expires` has passed (`leaseTTL`, 15 min — comfortably above the longest single cycle), and otherwise still refused. A payload-less marker (an older srr, a corrupt write) is refused as before: its liveness is genuinely unknowable, and `--force` is the documented escape. A wrong steal is survivable by construction — `publishManifest` is an exclusive create, so the loser aborts before the root flip.
+
+**The root flip is a compare-and-swap.** `Backend` carries `Version(key)` / `PutIfVersion(key, …, want)` (`store/main.go`): S3/R2 implement it for real over ETag + `If-Match`/`If-None-Match` — the production store — local and SFTP best-effort (check-then-rename, narrowing the window to the rename itself on a store that is one filesystem on one host anyway), and plain HTTP declines with `errors.ErrUnsupported` rather than pretend, since a server may return an ETag and ignore `If-Match` with no way to tell. `Commit` conditions `db.gz` on the root it read, so a peer that advanced the store mid-cycle makes the flip fail LOUDLY (`store.ErrPreconditionFailed`) instead of silently publishing over their generation and adopting their manifest as its own; the retry is the next cycle, which re-reads and redoes the work. A backend that cannot version keeps the unconditional flip it always had.
 
 ### Operating the format cutover (2026-07-21)
 
