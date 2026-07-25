@@ -932,10 +932,30 @@ export interface FrontierUndo {
 }
 
 let lastRaise: FrontierUndo | null = null
+// Whether the caller has already had its chance to offer lastRaise. The
+// snapshot OUTLIVES the offer — the snackbar's Undo fires seconds later, and
+// undoFrontierMove still has to work then — so "offered" is a second bit rather
+// than just clearing the snapshot.
+let raiseOffered = false
 
-// The pending undoable raise, if any. Reading it does not consume it.
+// The raise still WAITING to be offered, if any — asked once per raise.
+//
+// It has to be once, because the caller asks on every render: a render that
+// moved no frontier of its own (stepping BACKWARDS, a filter switch, any read
+// in the peek modes, which never raise at all) leaves the previous snapshot in
+// place, and without this bit each of those would re-measure and re-announce a
+// jump that happened long ago. Reading still does not CONSUME the snapshot —
+// markFrontierUndoOffered does — so the offer's own Undo can act on it after.
 export function pendingFrontierUndo(): FrontierUndo | null {
-   return lastRaise
+   return raiseOffered ? null : lastRaise
+}
+
+// The caller has now had its chance at the pending raise: don't offer it again.
+// Called whether or not the offer was actually shown — a move too small to
+// mention is still a move already considered, and re-measuring it on every
+// subsequent render is the same waste for none of the value.
+export function markFrontierUndoOffered(): void {
+   raiseOffered = true
 }
 
 // How many articles a raise actually consumed: the filter's unread before the
@@ -962,9 +982,18 @@ export async function frontierUndoSize(u: FrontierUndo): Promise<number> {
 // device's stale raise win. (That is also why a key that did not exist is
 // restored as -1 rather than deleted: markUnreadFrom's precedent — -1 reads as
 // never-seen everywhere, and keeping the key keeps its stamp.)
-export function undoFrontierMove(): boolean {
-   const u = lastRaise
+//
+// The snapshot is the CALLER'S, passed in rather than read from lastRaise: the
+// offer is shown at one moment and answered at another, and a raise landing in
+// between must not silently re-point the button. "Undo" undoes the move whose
+// size it announced, or nothing.
+//
+// Either way it clears the pending state: those frontiers have just been
+// rewritten, so any snapshot still waiting describes a store state that no
+// longer exists, and replaying it would only raise them back.
+export function undoFrontierMove(u: FrontierUndo): boolean {
    lastRaise = null
+   raiseOffered = false
    if (!u) return false
    try {
       const seen = readSeen()
@@ -984,10 +1013,14 @@ export function undoFrontierMove(): boolean {
    }
 }
 
-// Discard the pending offer — the caller decided not to offer it, or offered it
-// and the user let it lapse. Any newer raise replaces it anyway.
+// Drop the pending offer outright. Any newer raise replaces it anyway, so this
+// exists for the callers that need a known-empty slot rather than for the normal
+// lifecycle: the tests' per-case isolation, and any future caller that wants to
+// abandon a raise instead of offering it (markFrontierUndoOffered is the
+// "offered, don't repeat" half).
 export function clearFrontierUndo(): void {
    lastRaise = null
+   raiseOffered = false
 }
 
 // Record a raise as undoable, keeping only the keys it actually moved. Called
@@ -998,6 +1031,7 @@ function snapshotRaise(before: Record<string, number | undefined>, touched: stri
    const prev: Record<string, number | undefined> = {}
    for (const key of touched) prev[key] = before[key]
    lastRaise = { prev, to }
+   raiseOffered = false
 }
 
 // One feed's seen-frontier write: set seen[key]=value and record the key in

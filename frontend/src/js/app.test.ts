@@ -102,6 +102,7 @@ const nav = vi.hoisted(() => {
       pendingFrontierUndo: vi.fn(() => null as { prev: Record<string, number | undefined>; to: number } | null),
       frontierUndoSize: vi.fn(async () => 0),
       undoFrontierMove: vi.fn(() => true),
+      markFrontierUndoOffered: vi.fn(),
       clearFrontierUndo: vi.fn(),
       setSavedHook: vi.fn(),
       unreadCounts: vi.fn(async () => new Map<number, number>()),
@@ -773,7 +774,32 @@ describe("frontier undo snackbar", () => {
       nav.frontierUndoSize.mockResolvedValue(42)
       await land(43)
       action().click()
-      expect(nav.undoFrontierMove).toHaveBeenCalled()
+      // The snapshot it ANNOUNCED, not whatever is pending by the time the
+      // button is pressed — a raise can land while the snackbar is up.
+      expect(nav.undoFrontierMove).toHaveBeenCalledWith(pending)
+      expect(bar().hidden).toBe(true)
+   })
+
+   // Every render asks, so the offer has to close itself — otherwise a render
+   // that raised no frontier of its own (a step back, a filter switch, a peek
+   // mode) re-measures and re-announces a jump from minutes ago.
+   it("closes the offer after announcing it", async () => {
+      await boot()
+      nav.pendingFrontierUndo.mockReturnValue(pending)
+      nav.frontierUndoSize.mockResolvedValue(42)
+      await land(45)
+      expect(nav.markFrontierUndoOffered).toHaveBeenCalled()
+   })
+
+   // Equally for a move too small to mention: it was still CONSIDERED, and
+   // leaving it pending would re-measure the same snapshot on every later render
+   // (and re-show it the moment a bigger threshold ever applied).
+   it("closes the offer even when it stays silent", async () => {
+      await boot()
+      nav.pendingFrontierUndo.mockReturnValue(pending)
+      nav.frontierUndoSize.mockResolvedValue(1)
+      await land(46)
+      expect(nav.markFrontierUndoOffered).toHaveBeenCalled()
       expect(bar().hidden).toBe(true)
    })
 
@@ -2186,6 +2212,20 @@ describe("unread badge + title readout", () => {
          document.querySelector(".srr-next")!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }))
          const items = dropdown.showContextMenu.mock.calls.at(-1)?.[1] as { label: string; action: () => void }[]
          items.find((i) => i.label === "Mark all read")!.action()
+         await flush()
+         expect(calls.cleared).toBeGreaterThan(0)
+         expect(document.title.startsWith("(")).toBe(false)
+      })
+   })
+
+   // An app badge outlives the session that set it — it sits on the installed
+   // icon until something clears it. So a launch that finds everything already
+   // read is exactly when clearAppBadge has to run: leaving last session's
+   // number up is a notification for mail that was read on another device.
+   it("clears a previous session's badge on a launch with nothing unread", async () => {
+      await withBadging(async (calls) => {
+         nav.tagUnreadFromCounts.mockReturnValue(0)
+         await boot()
          await flush()
          expect(calls.cleared).toBeGreaterThan(0)
          expect(document.title.startsWith("(")).toBe(false)

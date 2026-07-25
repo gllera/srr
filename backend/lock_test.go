@@ -115,7 +115,13 @@ func TestLeaseForceSteals(t *testing.T) {
 	writeMarker(t, db.Backend, dbLockKey, marshalLease(t, storeLease{
 		Owner: "otherhost/999/deadbeef", Expires: time.Now().Add(time.Hour).Unix(),
 	}))
+	// Restored, because -shuffle=on means the next test is not the one written
+	// below this: setupTestDB reassigns globals wholesale, so only a test that
+	// does NOT call it would inherit a leaked --force — and that is exactly the
+	// test whose failure would look unrelated.
+	saved := globals.Force
 	globals.Force = true
+	t.Cleanup(func() { globals.Force = saved })
 
 	if err := acquireMarker(ctx, db.Backend, dbLockKey); err != nil {
 		t.Fatalf("forced acquire: %v", err)

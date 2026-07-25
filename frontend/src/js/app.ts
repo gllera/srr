@@ -415,15 +415,25 @@ async function offerFrontierUndo() {
    } catch {
       return // a count blip is not worth an error popup for an optional offer
    }
-   if (consumed < UNDO_MIN_ARTICLES || nav.pendingFrontierUndo() !== pending) {
-      // Either not worth mentioning, or a newer move has already superseded it.
-      return
-   }
+   // A newer move superseded it mid-measurement: leave that one to its own
+   // render rather than announcing a number we just recomputed against a
+   // snapshot nobody is holding.
+   if (nav.pendingFrontierUndo() !== pending) return
+   // Asked and answered, whether or not it clears the bar below. This runs on
+   // EVERY render, and a render that raised no frontier of its own (a step
+   // backwards, a filter switch, any read under ★ Saved / search) leaves the
+   // previous snapshot pending — so without marking it, one big landing would
+   // re-announce itself for the rest of the session.
+   nav.markFrontierUndoOffered()
+   if (consumed < UNDO_MIN_ARTICLES) return
    showSnackbar(`Marked ${consumed} read`, {
       label: "Undo",
       run: () => {
          hideSnackbar()
-         if (nav.undoFrontierMove()) afterFrontierMove()
+         // `pending`, not "whatever is pending now": the button undoes the move
+         // whose size it is showing, even if reading has moved a frontier again
+         // in the seconds it has been up.
+         if (nav.undoFrontierMove(pending)) afterFrontierMove()
       },
    })
 }
@@ -1064,9 +1074,17 @@ function toggleSave() {
 // reading it outside the app's own chrome, so an installed SRR gave no sign that
 // anything had arrived until you opened it. Scope is the ACTIVE store's [ALL] —
 // the same thing the picker's [ALL] row counts, so the two can never disagree.
-let unreadTotal = 0
+// -1, not 0, so the FIRST sync always writes through. An app badge outlives the
+// session that set it — it is on the installed icon until something clears it —
+// so a launch that finds everything already read is exactly when clearAppBadge
+// has to run, and seeding 0 would make that the one case skipped as "no change".
+let unreadTotal = -1
 let titleBase = "SRR"
 let badgeRunning = false
+// Set when a sync is asked for while one is in flight. The count it would have
+// read is already stale by then, so the answer is to re-run once at the end, not
+// to queue one run per request.
+let badgeAgain = false
 
 // The single writer of document.title, so the count and the surface's own name
 // can never get out of step. The count LEADS: a tab title is truncated from the
@@ -1077,8 +1095,29 @@ function setTitle(base: string): void {
 }
 
 async function syncUnreadBadge(): Promise<void> {
-   if (badgeRunning) return // coalesce: navigation can fire these back to back
+   // Navigation fires these back to back, so collapse a burst into "one running,
+   // one more after" — dropping the later call outright would leave the badge on
+   // whatever count the in-flight run happened to read, stale until the next
+   // landing. The loop (rather than a recursive tail call) is what keeps the
+   // re-run inside the guard: writeUnreadBadge returns early when nothing moved,
+   // and an early return past the guard would skip the pending re-run entirely.
+   if (badgeRunning) {
+      badgeAgain = true
+      return
+   }
    badgeRunning = true
+   try {
+      do {
+         badgeAgain = false
+         await writeUnreadBadge()
+      } while (badgeAgain)
+   } finally {
+      badgeRunning = false
+      badgeAgain = false
+   }
+}
+
+async function writeUnreadBadge(): Promise<void> {
    try {
       const feeds = Object.values(data.db?.feeds ?? {})
       const total = feeds.length ? nav.tagUnreadFromCounts(feeds, await nav.unreadCounts(feeds)) : 0
@@ -1096,8 +1135,6 @@ async function syncUnreadBadge(): Promise<void> {
       else await badging.clearAppBadge?.()
    } catch {
       // A count blip or an unsupported badge call must never surface as an error.
-   } finally {
-      badgeRunning = false
    }
 }
 
@@ -1729,9 +1766,14 @@ async function init() {
    // ONE controllerchange listener, in this order: the mount roots first (a
    // fresh worker starts with none and would otherwise route nothing), then the
    // update notice. A second listener would race this one for that ordering.
-   const hadController = !!navigator.serviceWorker?.controller
+   // A `let`, re-read after every takeover: a session long enough to see TWO
+   // worker activations must be told about the second one too, and a value
+   // captured once at boot would suppress every change after the first.
+   let hadController = !!navigator.serviceWorker?.controller
    navigator.serviceWorker?.addEventListener("controllerchange", () => {
       postMounts()
+      const first = !hadController
+      hadController = !!navigator.serviceWorker?.controller
       // PWA1 — a new worker takes over MID-SESSION with, until now, zero signal.
       // Harmless while only the cache changes; not harmless the day a pack-grammar
       // or contract change ships, because the page still running is the old build
@@ -1740,7 +1782,7 @@ async function init() {
       // Suppressed on FIRST INSTALL (there was no controller before): that
       // controllerchange is the worker arriving, not the reader changing under
       // you, and telling a first-time visitor to reload would be nonsense.
-      if (!hadController) return
+      if (first) return
       showSnackbar("Reader updated", { label: "Reload", run: () => location.reload() })
    })
    // First badge + title readout, after the first surface is up so it never
