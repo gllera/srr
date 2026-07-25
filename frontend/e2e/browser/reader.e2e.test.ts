@@ -639,6 +639,22 @@ describe("browser: real SPA over real packs", () => {
          expect(icons.some((i) => i.sizes.includes("512") && (i.purpose ?? "any").includes("any"))).toBe(true)
          expect(icons.some((i) => (i.purpose ?? "").includes("maskable"))).toBe(true)
 
+         // Shortcut urls resolve against the MANIFEST's url — the same rule the
+         // icon srcs below follow, and the one the first cut of these got wrong:
+         // a bare "#!~saved" resolves to /manifest.webmanifest#!~saved, which is
+         // still inside `scope` (so nothing errors or fails to install) and just
+         // opens the raw manifest JSON instead of the reader. Pin that every
+         // shortcut lands on the same document `start_url` does.
+         const appUrl = new URL(manifest.start_url as string, href)
+         const shortcuts = manifest.shortcuts as { name: string; url: string }[]
+         expect(shortcuts.length).toBeGreaterThan(0)
+         for (const s of shortcuts) {
+            expect(new URL(s.url, href).pathname).toBe(appUrl.pathname)
+         }
+         // ...and that the Saved one actually carries its filter token, so a
+         // path-only regression can't pass by pointing every shortcut at home.
+         expect(shortcuts.some((s) => new URL(s.url, href).hash.includes("~saved"))).toBe(true)
+
          // Every icon src (resolved against the manifest URL) must actually load,
          // plus the iOS apple-touch-icon.
          const appleHref = await page.$eval("link[rel=apple-touch-icon]", (l) => (l as HTMLLinkElement).href)

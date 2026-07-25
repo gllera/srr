@@ -9,8 +9,8 @@
    "background_color": "#fafaf7",
    "theme_color": "#fafaf7",
    "shortcuts": [
-      { "name": "Unread", "short_name": "Unread", "url": "#" },
-      { "name": "Saved articles", "short_name": "Saved", "url": "#!~saved" }
+      { "name": "Unread", "short_name": "Unread", "url": "./#" },
+      { "name": "Saved articles", "short_name": "Saved", "url": "./#!~saved" }
    ],
    "icons": [
       { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },

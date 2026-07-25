@@ -457,13 +457,13 @@ video {
    left: 0;
    right: 0;
    bottom: 4.6rem;
-   max-width: 680px;
    margin: 0 auto;
    z-index: var(--z-toolbar);
    display: flex;
    align-items: center;
    justify-content: center;
    gap: 0.75rem;
+   /* Shrink-to-fit, but never wider than the reading column or the viewport. */
    width: fit-content;
    max-width: min(680px, calc(100% - 1.5rem));
    padding: 0.5rem 0.9rem;
@@ -2248,7 +2248,30 @@ body:not(.srr-view-list) .srr-open-reader {
    background: var(--faint);
 }
 
-/* Print */
+/* Dark mode — component-level overrides only; token reassignments and the dark
+   source ramp live in tokens.css. */
+@media (prefers-color-scheme: dark) {
+   a {
+      color: #c4a882;
+   }
+   /* Feed images are authored for white pages, so at night a full-brightness
+      photo is a lamp in the middle of dim prose — the one element that ignores
+      the theme. A small, uniform knock-down keeps them recognisable while
+      letting the eye stay adapted; it is deliberately gentle (nothing near the
+      "invert everything" treatments that wreck photographs). */
+   .srr-content img {
+      filter: brightness(0.85);
+   }
+}
+
+/* Print — and it MUST stay after the dark block, because a browser printing from
+   a dark-mode session matches BOTH queries at once. Every rule here that answers
+   a dark rule (the <a> color, the image dimming) does it at equal specificity, so
+   source order is the entire tiebreaker: above the dark block these silently lost
+   and a dark-mode print kept tan links and dimmed photos. Anything added here
+   that overrides a dark rule inherits that requirement. (The token block below is
+   the one part that would win either way — tokens.css is @imported first — but it
+   lives here with the rest for one readable print story.) */
 @media print {
    .srr-toolbar,
    .srr-popup,
@@ -2288,26 +2311,10 @@ body:not(.srr-view-list) .srr-open-reader {
    a {
       color: var(--fg);
    }
-   /* And undo the dark-mode image dimming below — it exists to stop a bright
+   /* And undo the dark-mode image dimming above — it exists to stop a bright
       photo glaring out of a dark screen, which is not a thing paper does. */
    .srr-content img {
       filter: none;
-   }
-}
-
-/* Dark mode — component-level overrides only; token reassignments and the dark
-   source ramp live in tokens.css. */
-@media (prefers-color-scheme: dark) {
-   a {
-      color: #c4a882;
-   }
-   /* Feed images are authored for white pages, so at night a full-brightness
-      photo is a lamp in the middle of dim prose — the one element that ignores
-      the theme. A small, uniform knock-down keeps them recognisable while
-      letting the eye stay adapted; it is deliberately gentle (nothing near the
-      "invert everything" treatments that wreck photographs). */
-   .srr-content img {
-      filter: brightness(0.85);
    }
 }
 

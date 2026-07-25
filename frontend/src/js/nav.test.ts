@@ -2918,7 +2918,7 @@ describe("frontier undo", () => {
       setupTwo()
       seedSeen({ "feed:1": 0 })
       await nav.goTo(4)
-      expect(nav.undoFrontierMove()).toBe(true)
+      expect(nav.undoFrontierMove(nav.pendingFrontierUndo()!)).toBe(true)
 
       const seen = JSON.parse(localStorage.getItem("srr-seen")!)
       expect(seen["feed:1"]).toBe(0)
@@ -2936,7 +2936,7 @@ describe("frontier undo", () => {
       seedSeen({ "feed:1": 0 })
       localStorage.setItem("srr-seen-ts", JSON.stringify({ "feed:1": 1, "feed:2": 1 }))
       await nav.goTo(4)
-      nav.undoFrontierMove()
+      nav.undoFrontierMove(nav.pendingFrontierUndo()!)
       const st = JSON.parse(localStorage.getItem("srr-seen-ts")!)
       expect(st["feed:1"]).toBeGreaterThan(1)
       expect(st["feed:2"]).toBeGreaterThan(1)
@@ -2948,10 +2948,52 @@ describe("frontier undo", () => {
       await nav.goTo(2)
       const first = nav.pendingFrontierUndo()
       await nav.goTo(4)
-      expect(nav.pendingFrontierUndo()).not.toBe(first)
-      expect(nav.undoFrontierMove()).toBe(true)
+      const second = nav.pendingFrontierUndo()
+      expect(second).not.toBe(first)
+      expect(nav.undoFrontierMove(second!)).toBe(true)
       expect(nav.pendingFrontierUndo()).toBeNull()
-      expect(nav.undoFrontierMove()).toBe(false)
+   })
+
+   // The offer is asked for on EVERY render, but a raise is only worth
+   // announcing once: a render that moves no frontier of its own (a step
+   // backwards, a filter switch, a read in a peek mode) leaves the snapshot in
+   // place, and re-offering it would re-announce a jump from minutes ago.
+   it("offers a raise once — markFrontierUndoOffered closes it, the snapshot outlives it", async () => {
+      setupTwo()
+      seedSeen({ "feed:1": 0 })
+      await nav.goTo(4)
+      const u = nav.pendingFrontierUndo()
+      expect(u).not.toBeNull()
+
+      nav.markFrontierUndoOffered()
+      expect(nav.pendingFrontierUndo()).toBeNull()
+      // Stepping BACK raises nothing (the frontier is already ahead of pos), so
+      // without the offered bit the same snapshot would come back around here.
+      await nav.goTo(2)
+      expect(nav.pendingFrontierUndo()).toBeNull()
+
+      // ...and the snapshot itself still works: the snackbar's Undo fires long
+      // after the offer was made.
+      expect(nav.undoFrontierMove(u!)).toBe(true)
+      expect(JSON.parse(localStorage.getItem("srr-seen")!)["feed:1"]).toBe(0)
+   })
+
+   // The button undoes the move whose size it announced. A raise landing while
+   // the snackbar is still up must not re-point it at a different, smaller move.
+   it("undoes the snapshot it was given, not whatever is pending now", async () => {
+      setupTwo()
+      seedSeen({ "feed:1": 0 })
+      await nav.goTo(4) // the big jump the offer describes
+      const announced = nav.pendingFrontierUndo()!
+      nav.markFrontierUndoOffered()
+
+      seedSeen({ "feed:1": 4, "feed:2": 4 })
+      await nav.goTo(0) // a later, unrelated raise (no-op here, but it re-snapshots)
+
+      expect(nav.undoFrontierMove(announced)).toBe(true)
+      const seen = JSON.parse(localStorage.getItem("srr-seen")!)
+      expect(seen["feed:1"]).toBe(0)
+      expect(seen["feed:2"]).toBe(-1)
    })
 
    it("covers Mark all read (RDR2) — the same snapshot, the same way back", async () => {
@@ -2959,7 +3001,7 @@ describe("frontier undo", () => {
       seedSeen({ "feed:1": 0 })
       expect(nav.markAllRead()).toBe(true)
       expect(await nav.frontierUndoSize(nav.pendingFrontierUndo()!)).toBe(4)
-      nav.undoFrontierMove()
+      nav.undoFrontierMove(nav.pendingFrontierUndo()!)
       const group = [data.db.feeds[1], data.db.feeds[2]]
       const counts = await nav.unreadCounts(group)
       expect(counts.get(1)! + counts.get(2)!).toBe(4)
