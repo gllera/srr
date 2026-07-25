@@ -1,4 +1,4 @@
-.PHONY: verify verify-fe verify-be lint-fe format-check-fe format-fe test-fe build-fe build-admin smoke-fe dev-fe vet-be lint-be format-check-be format-be build-be test-be test-race-be test-contract test-browser test-stress test-e2e generate generate-check release clean design-fixture design design-shots
+.PHONY: verify verify-fe verify-be fuzz-be lint-fe format-check-fe format-fe test-fe build-fe build-admin smoke-fe dev-fe vet-be lint-be format-check-be format-be build-be test-be test-race-be test-contract test-browser test-stress test-e2e generate generate-check release clean design-fixture design design-shots
 
 SHELL := /bin/bash -e
 
@@ -84,6 +84,23 @@ vet-be test-be:
 # catches tests that only pass in declaration order. CI runs it as its own job.
 test-race-be:
 	cd backend && go test -race -shuffle=on ./...
+
+# The fuzz gate, also kept OUT of verify: a SMOKE pass over every target (the
+# store's two byte-level parsers, the feed parser and the sanitizer), long enough
+# to catch a target that no longer compiles or that the checked-in seed corpus
+# already breaks, short enough to run on demand. Real fuzzing is the nightly CI
+# job, which runs the same targets with a much larger FUZZTIME and reports any
+# crasher it writes to testdata/. Override the budget per target with
+# `make fuzz-be FUZZTIME=5m`.
+FUZZTIME ?= 20s
+FUZZ_TARGETS = .:FuzzParseIdxPack .:FuzzIdxWriteParse .:FuzzParseSeen ./ingest:FuzzParseFeed ./mod:FuzzSanitize
+
+fuzz-be:
+	@cd backend && for t in $(FUZZ_TARGETS); do \
+	  pkg=$${t%%:*}; fn=$${t##*:}; \
+	  echo "==> $$fn ($$pkg, $(FUZZTIME))"; \
+	  go test $$pkg -run '^$$' -fuzz "^$$fn$$" -fuzztime=$(FUZZTIME) || exit 1; \
+	done
 
 # Go format gate + linter, mirroring lint-fe/format-fe/format-check-fe. Both
 # gate verify-be (format-check-be + lint-be; config in backend/.golangci.yml).

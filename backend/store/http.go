@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -147,6 +148,22 @@ func (d *HTTP) Put(ctx context.Context, key string, r io.Reader, ignoreExisting 
 // object visible atomically on completion.
 func (d *HTTP) AtomicPut(ctx context.Context, key string, r io.Reader, meta ObjectMeta) error {
 	return d.put(ctx, key, r, true, meta)
+}
+
+// Version and PutIfVersion are UNSUPPORTED on a plain HTTP store, and that is a
+// judgement, not an omission. A WebDAV-ish endpoint may well return an ETag and
+// may well honour If-Match — but it may equally return one and ignore the other,
+// and there is no in-band way to tell the two apart. A conditional write that
+// silently degrades to an unconditional one is worse than none at all: the
+// caller believes it holds a guarantee it does not. Reporting
+// errors.ErrUnsupported makes the caller fall back to a plain AtomicPut, which
+// is exactly what this backend did before and what it can honestly promise.
+func (d *HTTP) Version(context.Context, string) (string, error) {
+	return "", errors.ErrUnsupported
+}
+
+func (d *HTTP) PutIfVersion(context.Context, string, io.Reader, ObjectMeta, string) (string, error) {
+	return "", errors.ErrUnsupported
 }
 
 // put is the shared write core, mirroring S3's: Content-Type from meta, then

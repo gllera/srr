@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -335,19 +336,18 @@ func TestMCPUnknownFeedID(t *testing.T) {
 // not as a raw os.ErrExist / "create lock file" leak. This is the tool-layer
 // mirror of the admin API's 409 contract.
 func TestMCPFetchStoreBusy(t *testing.T) {
-	setupTestDB(t)
+	db, _, _ := setupTestDB(t)
 	stubPassthroughResolve()
 
-	// A second, LOCKED handle: NewDB creates `.locked` directly (it does not
-	// go through the in-process storeWriter gate), so the tool call below hits
-	// the same cross-process contention a real fetch loop produces.
-	holder, err := NewDB(ctx, true)
-	if err != nil {
-		t.Fatalf("NewDB(locked): %v", err)
-	}
-	defer holder.Close(ctx)
+	// Hold the lock the way another srr PROCESS would: a live lease owned by
+	// somebody else. A second locked handle in THIS process no longer stands in
+	// for that — lock.go reclaims a marker bearing our own instance id, which is
+	// precisely what unwedges a loop whose predecessor was SIGKILLed.
+	writeMarker(t, db.Backend, dbLockKey, marshalLease(t, storeLease{
+		Owner: "otherhost/999/deadbeef", Expires: time.Now().Add(time.Hour).Unix(),
+	}))
 
-	_, _, err = mcpFetch(ctx, nil, fetchIn{})
+	_, _, err := mcpFetch(ctx, nil, fetchIn{})
 	wantErr(t, err, msgMCPStoreBusy)
 
 	// A feed write takes the same lock and reports the same thing.

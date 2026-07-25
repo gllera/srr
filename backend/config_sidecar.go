@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"maps"
 	"slices"
 
@@ -173,14 +172,12 @@ func (o *DB) syncConfig(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("encode %s: %w", configFileKey, err)
 	}
-	if err := o.Put(ctx, configLockKey, bytes.NewReader(nil), globals.Force); err != nil {
+	// Leased like dbLockKey (lock.go), for the same reason and with the same
+	// os.ErrExist contract on refusal.
+	if err := acquireMarker(ctx, o.Backend, configLockKey); err != nil {
 		return fmt.Errorf("create config lock file: %w", err)
 	}
-	defer func() {
-		if err := o.Rm(context.WithoutCancel(ctx), configLockKey); err != nil {
-			slog.Warn("remove config lock file", "error", err)
-		}
-	}()
+	defer releaseMarker(ctx, o.Backend, configLockKey)
 	if err := o.AtomicPut(ctx, configFileKey, bytes.NewReader(body), store.ObjectMeta{}); err != nil {
 		return fmt.Errorf("write %s: %w", configFileKey, err)
 	}

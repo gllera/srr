@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -194,7 +195,14 @@ type DB struct {
 	// fresh m (goal G2). nil for a fresh or just-migrated store, forcing the
 	// first publish.
 	manifestSigAtOpen []byte
-	locked            bool
+	// rootVersion is the backend's opaque token for the db.gz this handle read,
+	// and rootVersioned records that the backend could produce one at all.
+	// Commit conditions the root flip on it (§6.2's poor-man's CAS, made a real
+	// one on object storage): a peer that flipped the root under us fails the
+	// write loudly instead of having its generation silently overwritten.
+	rootVersion   string
+	rootVersioned bool
+	locked        bool
 	// consolidated is the full replay slice (parsed deltas ++ this cycle's
 	// batch) when PutArticles consolidated the tail this cycle, else nil
 	// (cleared at every PutArticles entry). SyncMeta's fast path consumes it so
@@ -463,9 +471,28 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 	}
 
 	if locked {
-		if err := db.Put(ctx, dbLockKey, bytes.NewReader(nil), globals.Force); err != nil {
+		// A LEASE, not a bare marker (lock.go): a store whose writer was
+		// SIGKILLed unwedges itself instead of waiting for a human --force.
+		if err := acquireMarker(ctx, db.Backend, dbLockKey); err != nil {
 			db.Backend.Close()
 			return nil, fmt.Errorf("create lock file: %w", err)
+		}
+	}
+
+	// Snapshot the root's version BEFORE reading it, so the token can only ever
+	// describe an OLDER root than the one parsed below — a peer writing in that
+	// gap then makes Commit's CAS fail loudly, which is the safe direction.
+	// Only a locked session ever commits, so only a locked session pays the probe.
+	if locked {
+		switch v, verr := db.Version(ctx, dbFileKey); {
+		case verr == nil:
+			db.rootVersion, db.rootVersioned = v, true
+		case errors.Is(verr, errors.ErrUnsupported):
+			slog.Debug("store cannot version objects; the root flip stays unconditional", "key", dbFileKey)
+		default:
+			// A backend that CAN version but could not right now: degrade to the
+			// unconditional flip rather than refuse to open the store at all.
+			slog.Warn("could not read the root version; the root flip will be unconditional", "error", verr)
 		}
 	}
 
@@ -573,9 +600,7 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 
 func (o *DB) Close(ctx context.Context) error {
 	if o.locked {
-		if err := o.Rm(context.WithoutCancel(ctx), dbLockKey); err != nil {
-			slog.Warn("remove lock file", "error", err)
-		}
+		releaseMarker(ctx, o.Backend, dbLockKey)
 	}
 	return o.Backend.Close()
 }
@@ -653,7 +678,7 @@ func (o *DB) Commit(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := o.AtomicPut(ctx, dbFileKey, bytes.NewReader(body), store.ObjectMeta{}); err != nil {
+	if err := o.flipRoot(ctx, body); err != nil {
 		return err
 	}
 	// Advance this handle's baseline to what is now published, so a second
@@ -673,6 +698,42 @@ func (o *DB) Commit(ctx context.Context) error {
 	// reclamation step.
 	o.reapLegacy(context.WithoutCancel(ctx))
 	return nil
+}
+
+// flipRoot publishes the ~60-byte root pointer — the single act that makes a
+// generation observable — as a COMPARE-AND-SWAP against the root this handle
+// read.
+//
+// The exclusive-create manifest publish (§6.2) is already a poor-man's CAS on
+// the commit, but it has one hole: a writer that publishes manifest/<m+1> and
+// then stalls can be judged an "orphan left by a crashed cycle" by a peer, which
+// overwrites it and flips the root — and the stalled writer's own flip would
+// then land on top, quietly adopting the peer's manifest as its own generation.
+// Conditioning the flip closes it: the losing writer's root is no longer the one
+// it read, so the write is refused instead of silently winning.
+//
+// A refusal ABORTS the cycle rather than retrying inside Commit, and that is the
+// honest thing to do: this handle's whole in-memory generation was derived from
+// a root that no longer exists, and nothing here can rebase it. The retry is the
+// next cycle, which re-reads the store from the peer's root and redoes the work
+// — the same recovery a crashed cycle gets.
+func (o *DB) flipRoot(ctx context.Context, body []byte) error {
+	if o.rootVersioned {
+		next, err := o.PutIfVersion(ctx, dbFileKey, bytes.NewReader(body), store.ObjectMeta{}, o.rootVersion)
+		switch {
+		case err == nil:
+			o.rootVersion = next
+			return nil
+		case errors.Is(err, store.ErrPreconditionFailed):
+			return fmt.Errorf("root flip refused: %s changed while this cycle ran, so another writer holds this store; abandoning this generation rather than publishing over theirs: %w", dbFileKey, err)
+		case !errors.Is(err, errors.ErrUnsupported):
+			return err
+		}
+		// ErrUnsupported here means the backend was wrapped by something that
+		// does not carry the capability. Fall through to the plain write, which
+		// is what the store did before conditional writes existed.
+	}
+	return o.AtomicPut(ctx, dbFileKey, bytes.NewReader(body), store.ObjectMeta{})
 }
 
 func (o *DB) Feeds() map[int]*Feed {

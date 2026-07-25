@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -182,6 +184,42 @@ func (d *SFTP) Put(_ context.Context, key string, r io.Reader, ignoreExisting bo
 		return fmt.Errorf("closing file %s: %w", file, err)
 	}
 	return nil
+}
+
+// Version digests the file's bytes, for the reasons Local.Version states — an
+// SFTP server exposes no entity tag either, and its clock is not this host's.
+func (d *SFTP) Version(_ context.Context, key string) (string, error) {
+	file := d.sftpPath("version", key)
+	fs, err := d.client.Open(file)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("opening file %s: %w", file, err)
+	}
+	defer fs.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, fs); err != nil {
+		return "", fmt.Errorf("reading file %s: %w", file, err)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// PutIfVersion is best-effort, exactly as Local.PutIfVersion is and with the
+// same justification: check, then rename.
+func (d *SFTP) PutIfVersion(ctx context.Context, key string, r io.Reader, meta ObjectMeta, want string) (string, error) {
+	cur, err := d.Version(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	if cur != want {
+		return "", fmt.Errorf("%s: %w", d.sftpPath("conditional write", key), ErrPreconditionFailed)
+	}
+	h := sha256.New()
+	if err := d.AtomicPut(ctx, key, io.TeeReader(r, h), meta); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // AtomicPut ignores meta: SFTP files have no stored Content-Type/-Encoding —

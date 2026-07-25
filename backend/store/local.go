@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -146,6 +148,52 @@ func (d *Local) AtomicPut(_ context.Context, key string, r io.Reader, _ ObjectMe
 		dir.Close()
 	}
 	return nil
+}
+
+// Version digests the file's bytes. A filesystem exposes no entity tag, and the
+// cheap surrogates (size, mtime, inode) all lie on some filesystem or other —
+// coarse mtimes, inode reuse, a rename that carries the temp file's stamp — so
+// the token is simply what is stored. Content-addressing has no ABA hazard here
+// because the only key that uses it is the root, whose generation counter is
+// monotone: it can never come back to bytes it already had.
+func (d *Local) Version(_ context.Context, key string) (string, error) {
+	file := d.localPath("version", key)
+	f, err := os.Open(file)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("opening file %s: %w", file, err)
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", fmt.Errorf("reading file %s: %w", file, err)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// PutIfVersion is a BEST-EFFORT compare-and-swap: a local store has no atomic
+// conditional write, so this checks and then renames. What it buys is real but
+// bounded — the window shrinks from "the whole cycle" to the instant between the
+// check and the rename — and it is bounded further by the two things that
+// already serialize local writers: the leased `.locked` marker and the
+// exclusive-create manifest publish, which no peer can pass concurrently. A
+// local store is one filesystem on one host; the multi-writer race this guards
+// belongs to object storage, where s3.go implements it for real.
+func (d *Local) PutIfVersion(ctx context.Context, key string, r io.Reader, meta ObjectMeta, want string) (string, error) {
+	cur, err := d.Version(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	if cur != want {
+		return "", fmt.Errorf("%s: %w", d.localPath("conditional write", key), ErrPreconditionFailed)
+	}
+	h := sha256.New()
+	if err := d.AtomicPut(ctx, key, io.TeeReader(r, h), meta); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // sweepTempLeftovers removes uniqueTempName staging files a hard-killed
