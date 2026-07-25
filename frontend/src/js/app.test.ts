@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
-import { srcColorIndex } from "./fmt"
+import { extractAssetKeys, srcColorIndex } from "./fmt"
 // pin.ts is NOT mocked — it's a thin localStorage registry (stateless: every
 // call reads/writes srr-pins), so the top-level instance here and the fresh one
 // app.ts imports after vi.resetModules() both see the same localStorage.
@@ -99,6 +99,13 @@ const nav = vi.hoisted(() => {
       setUnreadOnly: vi.fn(),
       markAllRead: vi.fn(() => true),
       markUnreadFrom: vi.fn(() => true),
+      pendingFrontierUndo: vi.fn(() => null as { prev: Record<string, number | undefined>; to: number } | null),
+      frontierUndoSize: vi.fn(async () => 0),
+      undoFrontierMove: vi.fn(() => true),
+      clearFrontierUndo: vi.fn(),
+      setSavedHook: vi.fn(),
+      unreadCounts: vi.fn(async () => new Map<number, number>()),
+      tagUnreadFromCounts: vi.fn(() => 0),
       probeCurrent: vi.fn(async () => null),
       currentChron: vi.fn(() => -1),
       currentFeedId: vi.fn(() => -1),
@@ -127,6 +134,7 @@ const data = vi.hoisted(() => ({
    metaReady: vi.fn(() => true),
    idxSummaryDegraded: vi.fn(() => false),
    packNamesForFilter: vi.fn(async () => ["idx/L1.gz", "data/L1.gz"]),
+   loadArticle: vi.fn(async () => ({ f: 1, a: 0, p: 0, c: "<p>x</p>" })),
    // The active store context app reads for the pin message base/mid and the
    // article base it hands the fmt sanitizer (home mid "0", loopback base).
    activeStore: () => ({ mid: "0", base: new URL("http://localhost/") }),
@@ -220,6 +228,8 @@ vi.mock("./fmt", () => ({
    countBadge: (n: number) => (n > 999 ? "999+" : String(n)),
    CHECK_SVG: '<svg class="check"></svg>',
    collapseBrokenMedia: () => {},
+   handleFragmentClick: () => {},
+   extractAssetKeys: vi.fn((): string[] => []),
 }))
 
 const gestures = vi.hoisted(() => {
@@ -252,6 +262,8 @@ const SKELETON = `
       </nav>
       <section class="srr-picker" hidden></section>
       <div class="srr-pin-progress" hidden></div>
+      <div class="srr-snackbar" hidden><span class="srr-snackbar-text"></span>
+         <button class="srr-snackbar-action srr-hidden"></button></div>
    </main>`
 
 const flush = () => new Promise((r) => setTimeout(r))
@@ -609,6 +621,194 @@ describe("reader compaction tombstone (§9.3 — expired article, no stored cont
       const content = document.querySelector(".srr-content") as HTMLElement
       expect(content.querySelector(".srr-expired-note")).toBeNull()
       expect(content.textContent).toContain("alive")
+   })
+})
+
+// FEB2 — the backend's #enclosure injects podcast <audio controls>, so this
+// path is live: before it, one swipe destroyed the element mid-episode and
+// returning restarted from zero.
+describe("reader media state survives prev/next", () => {
+   const content = () => document.querySelector(".srr-content") as HTMLElement
+   const showAt = async (chron: number, body: string) => {
+      nav.currentChron.mockReturnValue(chron)
+      nav.fromHash.mockResolvedValue(showFeed({ article: { f: 1, a: 0, p: 0, c: body } as IArticle }))
+      hashTo("#" + chron)
+      await flush()
+   }
+   const PODCAST = '<audio src="assets/aa/1.mp3" controls></audio>'
+
+   it("restores the position of a played <audio> when you step back to the article", async () => {
+      await boot()
+      await showAt(1, PODCAST)
+      const played = content().querySelector("audio") as HTMLMediaElement
+      played.currentTime = 12.5
+      played.playbackRate = 1.5
+
+      await showAt(2, "<p>next article</p>")
+      await showAt(1, PODCAST)
+
+      const restored = content().querySelector("audio") as HTMLMediaElement
+      expect(restored).not.toBe(played) // genuinely a fresh element
+      // currentTime is only settable once duration is known, so the restore
+      // rides loadedmetadata (jsdom's readyState stays 0, like a cold element).
+      restored.dispatchEvent(new Event("loadedmetadata"))
+      expect(restored.currentTime).toBe(12.5)
+      expect(restored.playbackRate).toBe(1.5)
+   })
+
+   it("does not resume playback on its own — position only", async () => {
+      await boot()
+      await showAt(1, PODCAST)
+      const played = content().querySelector("audio") as HTMLMediaElement
+      played.currentTime = 30
+      const play = vi.fn()
+      await showAt(2, "<p>x</p>")
+      await showAt(1, PODCAST)
+      const restored = content().querySelector("audio") as HTMLMediaElement
+      restored.play = play
+      restored.dispatchEvent(new Event("loadedmetadata"))
+      expect(play).not.toHaveBeenCalled()
+   })
+
+   it("remembers nothing for an untouched element (no stale seek on return)", async () => {
+      await boot()
+      await showAt(1, PODCAST) // never played
+      await showAt(2, "<p>x</p>")
+      await showAt(1, PODCAST)
+      const restored = content().querySelector("audio") as HTMLMediaElement
+      restored.dispatchEvent(new Event("loadedmetadata"))
+      expect(restored.currentTime).toBe(0)
+   })
+
+   it("keeps each article's media separate", async () => {
+      await boot()
+      await showAt(1, PODCAST)
+      ;(content().querySelector("audio") as HTMLMediaElement).currentTime = 5
+      await showAt(2, PODCAST)
+      const second = content().querySelector("audio") as HTMLMediaElement
+      second.dispatchEvent(new Event("loadedmetadata"))
+      expect(second.currentTime).toBe(0) // article 1's position must not leak here
+   })
+})
+
+// RDR4 — `g` ships in every pack line and nothing read it, so a Spanish body
+// inherited <html lang="en">: wrong screen-reader voice, wrong hyphenation, and
+// an undeclared-RTL body rendered LTR.
+describe("reader language stamping (the article's `g`)", () => {
+   const content = () => document.querySelector(".srr-content") as HTMLElement
+
+   it("stamps the article's language and dir=auto on the content host", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ article: { f: 1, a: 0, p: 0, c: "<p>hola</p>", g: "es" } as IArticle }))
+      hashTo("#5")
+      await flush()
+      expect(content().lang).toBe("es")
+      expect(content().dir).toBe("auto")
+   })
+
+   it("falls back to the page default when the writer was not confident (absent `g`)", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ article: { f: 1, a: 0, p: 0, c: "<p>x</p>" } as IArticle }))
+      hashTo("#6")
+      await flush()
+      expect(content().lang).toBe("")
+   })
+
+   it("clears a previous article's language when the empty state renders", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ article: { f: 1, a: 0, p: 0, c: "<p>x</p>", g: "ar" } as IArticle }))
+      hashTo("#7")
+      await flush()
+      expect(content().lang).toBe("ar")
+
+      nav.fromHash.mockResolvedValue(showFeed({ placeholder: true }))
+      hashTo("#8")
+      await flush()
+      expect(content().lang).toBe("")
+   })
+})
+
+// RDR1/RDR2 — the offer is deliberately quiet: ordinary reading (one article)
+// says nothing, a backlog-swallowing jump says what it took and hands back one
+// way to undo it.
+describe("frontier undo snackbar", () => {
+   const bar = () => document.querySelector(".srr-snackbar") as HTMLElement
+   const action = () => document.querySelector(".srr-snackbar-action") as HTMLButtonElement
+   const pending = { prev: { "feed:1": 0 }, to: 40 }
+
+   const land = async (chron: number) => {
+      nav.fromHash.mockResolvedValue(showFeed({ article: { f: 1, a: 0, p: 0, c: "<p>x</p>" } as IArticle }))
+      hashTo("#" + chron)
+      await flush()
+   }
+
+   it("offers Undo after a landing that consumed a backlog", async () => {
+      await boot()
+      nav.pendingFrontierUndo.mockReturnValue(pending)
+      nav.frontierUndoSize.mockResolvedValue(42)
+      await land(40)
+      expect(bar().hidden).toBe(false)
+      expect(bar().textContent).toContain("42")
+      expect(action().textContent).toBe("Undo")
+   })
+
+   it("stays silent for ordinary reading", async () => {
+      await boot()
+      nav.pendingFrontierUndo.mockReturnValue(pending)
+      nav.frontierUndoSize.mockResolvedValue(1)
+      await land(41)
+      expect(bar().hidden).toBe(true)
+   })
+
+   it("stays silent when the landing moved no frontier at all", async () => {
+      await boot()
+      nav.pendingFrontierUndo.mockReturnValue(null)
+      await land(42)
+      expect(bar().hidden).toBe(true)
+   })
+
+   it("Undo restores the frontier and reconciles the surface", async () => {
+      await boot()
+      nav.pendingFrontierUndo.mockReturnValue(pending)
+      nav.frontierUndoSize.mockResolvedValue(42)
+      await land(43)
+      action().click()
+      expect(nav.undoFrontierMove).toHaveBeenCalled()
+      expect(bar().hidden).toBe(true)
+   })
+
+   it("'Mark all read' offers the same way back (RDR2)", async () => {
+      await boot()
+      hashTo("#2")
+      await flush()
+      nav.isSearchFilter.mockReturnValue(false)
+      nav.filter.feeds = new Map([[1, 0]])
+      nav.pendingFrontierUndo.mockReturnValue(pending)
+      nav.frontierUndoSize.mockResolvedValue(99)
+      // The frontier menu is dropdown.showContextMenu, which the suite mocks —
+      // reach the action the same way its own tests do.
+      document.querySelector(".srr-next")!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }))
+      const items = (dropdown.showContextMenu as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[1] as {
+         label: string
+         action: () => void
+      }[]
+      items.find((i) => i.label === "Mark all read")!.action()
+      await flush()
+      expect(nav.markAllRead).toHaveBeenCalled()
+      expect(bar().hidden).toBe(false)
+      expect(bar().textContent).toContain("99")
+   })
+
+   it("drops a stale offer superseded by a newer move mid-measurement", async () => {
+      await boot()
+      nav.pendingFrontierUndo.mockReturnValue(pending)
+      // The measurement resolves after a newer raise replaced the snapshot.
+      nav.frontierUndoSize.mockImplementation(async () => {
+         nav.pendingFrontierUndo.mockReturnValue({ prev: { "feed:2": 1 }, to: 50 })
+         return 42
+      })
+      await land(44)
+      expect(bar().hidden).toBe(true)
    })
 })
 
@@ -1896,5 +2096,235 @@ describe("offline pin — record vs warn on completion", () => {
       expect(status().textContent).toContain("Offline copy saved")
       expect(isPinned("")).toBe(true)
       expect(listPins().get("")?.names).toEqual(["idx/L1.gz", "data/L1.gz"])
+   })
+
+   // PWA2: the PINNED bucket is exempt from SRR's own eviction, which is all the
+   // eviction SRR controls — the browser can still drop the whole origin. Asking
+   // at the moment the user says "keep this" is what makes the feature durable.
+   it("asks for persistent storage when a pin is taken — exactly once per page life", async () => {
+      const persist = vi.fn(async () => true)
+      Object.defineProperty(navigator, "storage", { value: { persist }, configurable: true })
+      try {
+         await firePin(2)
+         expect(persist).toHaveBeenCalledTimes(1)
+      } finally {
+         Object.defineProperty(navigator, "storage", { value: undefined, configurable: true })
+      }
+   })
+
+   it("never asks on boot alone — the pin is what earns the request", async () => {
+      const persist = vi.fn(async () => true)
+      Object.defineProperty(navigator, "storage", { value: { persist }, configurable: true })
+      // A booted page WITH a worker but no pin taken: the prompt belongs to the
+      // moment the user says "keep this", not to page load.
+      Object.defineProperty(navigator, "serviceWorker", {
+         value: { controller: null, getRegistrations: () => Promise.resolve([]), addEventListener: () => {} },
+         configurable: true,
+      })
+      try {
+         await boot()
+         expect(persist).not.toHaveBeenCalled()
+      } finally {
+         Object.defineProperty(navigator, "storage", { value: undefined, configurable: true })
+         Object.defineProperty(navigator, "serviceWorker", { value: undefined, configurable: true })
+      }
+   })
+})
+
+// FMT2a — a ★-saved article keeps its text forever (immutable packs) but loses
+// its self-hosted media when the feed's retention window passes. The saved set
+// is device-local, so only this device can keep those bytes.
+// RDR12 — the tally already existed; nothing outside the app's own chrome read
+// it, so an installed SRR gave no sign anything had arrived until you opened it.
+describe("unread badge + title readout", () => {
+   const withBadging = async (run: (calls: { set: number[]; cleared: number }) => Promise<void>) => {
+      const calls = { set: [] as number[], cleared: 0 }
+      Object.defineProperty(navigator, "setAppBadge", {
+         value: async (n: number) => void calls.set.push(n),
+         configurable: true,
+      })
+      Object.defineProperty(navigator, "clearAppBadge", {
+         value: async () => void calls.cleared++,
+         configurable: true,
+      })
+      try {
+         await run(calls)
+      } finally {
+         Object.defineProperty(navigator, "setAppBadge", { value: undefined, configurable: true })
+         Object.defineProperty(navigator, "clearAppBadge", { value: undefined, configurable: true })
+      }
+   }
+
+   beforeEach(() => {
+      data.db.feeds = { 1: { id: 1, title: "F", total_art: 9 } } as unknown as IDB["feeds"]
+      nav.tagUnreadFromCounts.mockReturnValue(0)
+   })
+   afterEach(() => {
+      data.db.feeds = {} as unknown as IDB["feeds"]
+   })
+
+   it("badges the store-wide unread and leads the title with it", async () => {
+      await withBadging(async (calls) => {
+         nav.tagUnreadFromCounts.mockReturnValue(7)
+         await boot()
+         await flush()
+         expect(calls.set).toContain(7)
+         // The count LEADS: a tab title truncates from the right, so a trailing
+         // number is a notification nobody can see.
+         expect(document.title.startsWith("(7) ")).toBe(true)
+      })
+   })
+
+   it("clears the badge at zero — caught up is not 'no news'", async () => {
+      await withBadging(async (calls) => {
+         nav.tagUnreadFromCounts.mockReturnValue(3)
+         await boot()
+         await flush()
+         nav.tagUnreadFromCounts.mockReturnValue(0)
+         // A frontier gesture is one of the things that can zero it.
+         nav.filter.feeds = new Map([[1, 0]])
+         document.querySelector(".srr-next")!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }))
+         const items = dropdown.showContextMenu.mock.calls.at(-1)?.[1] as { label: string; action: () => void }[]
+         items.find((i) => i.label === "Mark all read")!.action()
+         await flush()
+         expect(calls.cleared).toBeGreaterThan(0)
+         expect(document.title.startsWith("(")).toBe(false)
+      })
+   })
+
+   it("runs without the Badging API at all (Firefox / iOS Safari keep the title)", async () => {
+      nav.tagUnreadFromCounts.mockReturnValue(5)
+      await boot()
+      await flush()
+      expect(document.title.startsWith("(5) ")).toBe(true)
+   })
+
+   it("says nothing on an empty store", async () => {
+      await withBadging(async (calls) => {
+         data.db.feeds = {} as unknown as IDB["feeds"]
+         await boot()
+         await flush()
+         expect(calls.set).toEqual([])
+         expect(document.title.startsWith("(")).toBe(false)
+      })
+   })
+})
+
+// PWA1 — a new worker taking over mid-session used to be completely silent.
+describe("service-worker update notice", () => {
+   const bar = () => document.querySelector(".srr-snackbar") as HTMLElement
+
+   const bootWithSW = async (controller: object | null) => {
+      const listeners: Record<string, (() => void)[]> = {}
+      Object.defineProperty(navigator, "serviceWorker", {
+         value: {
+            controller,
+            getRegistrations: () => Promise.resolve([]),
+            addEventListener: (t: string, fn: () => void) => (listeners[t] ??= []).push(fn),
+         },
+         configurable: true,
+      })
+      await boot()
+      return () => listeners.controllerchange?.forEach((fn) => fn())
+   }
+   afterEach(() => Object.defineProperty(navigator, "serviceWorker", { value: undefined, configurable: true }))
+
+   it("tells you the reader changed under you, and offers the fix", async () => {
+      const fire = await bootWithSW({ postMessage: vi.fn() })
+      fire()
+      expect(bar().hidden).toBe(false)
+      expect(bar().textContent).toContain("Reader updated")
+      expect((document.querySelector(".srr-snackbar-action") as HTMLElement).textContent).toBe("Reload")
+   })
+
+   it("says nothing on first install — that is the worker arriving, not a change", async () => {
+      const fire = await bootWithSW(null)
+      fire()
+      expect(bar().hidden).toBe(true)
+   })
+
+   it("still re-posts the mounted roots first (the PWA0 fix must not regress)", async () => {
+      const controller = { postMessage: vi.fn() }
+      const fire = await bootWithSW(controller)
+      controller.postMessage.mockClear()
+      fire()
+      expect(controller.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "mounts" }))
+   })
+})
+
+describe("saved-article asset pinning", () => {
+   const withSW = async (run: (sw: { postMessage: ReturnType<typeof vi.fn> }) => Promise<void>) => {
+      const fakeSW = { postMessage: vi.fn() }
+      Object.defineProperty(navigator, "serviceWorker", {
+         value: { controller: fakeSW, getRegistrations: () => Promise.resolve([]), addEventListener: () => {} },
+         configurable: true,
+      })
+      try {
+         await run(fakeSW)
+      } finally {
+         Object.defineProperty(navigator, "serviceWorker", { value: undefined, configurable: true })
+      }
+   }
+   // The hook app.ts installs on nav.toggleSaved — both save paths (the reader
+   // star and the list row) come through it.
+   const savedHook = () => nav.setSavedHook.mock.calls.at(-1)?.[0] as (chron: number, saved: boolean) => void
+
+   const KEYS = ["assets/ab/0123456789abcdef.jpg", "assets/cd/fedcba9876543210.mp4"]
+
+   it("pins the article's assets on save and records the scope", async () => {
+      await withSW(async (sw) => {
+         data.loadArticle.mockResolvedValue({ f: 1, a: 0, p: 0, c: "<p>x</p>" })
+         vi.mocked(extractAssetKeys).mockReturnValue(KEYS)
+         await boot()
+         savedHook()(77, true)
+         await flush()
+         expect(sw.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "pin", names: KEYS }))
+         expect(listPins().get("~saved:77")?.names).toEqual(KEYS)
+      })
+   })
+
+   it("releases them on un-save — but only what nothing else still shows", async () => {
+      await withSW(async (sw) => {
+         // Another saved article shares the image; only the video is unique.
+         pinFilter("~saved:77", KEYS)
+         pinFilter("~saved:88", [KEYS[0]])
+         await boot()
+         savedHook()(77, false)
+         await flush()
+         expect(sw.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "unpin", names: [KEYS[1]] }))
+         expect(listPins().has("~saved:77")).toBe(false)
+      })
+   })
+
+   it("says nothing for an article with no self-hosted media", async () => {
+      await withSW(async (sw) => {
+         data.loadArticle.mockResolvedValue({ f: 1, a: 0, p: 0, c: "<p>text only</p>" })
+         vi.mocked(extractAssetKeys).mockReturnValue([])
+         await boot()
+         savedHook()(77, true)
+         await flush()
+         expect(sw.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "pin" }))
+         expect(listPins().size).toBe(0)
+      })
+   })
+
+   it("is a silent no-op with no SW controller (dev / insecure context)", async () => {
+      Object.defineProperty(navigator, "serviceWorker", {
+         value: { controller: null, getRegistrations: () => Promise.resolve([]), addEventListener: () => {} },
+         configurable: true,
+      })
+      try {
+         data.loadArticle.mockResolvedValue({ f: 1, a: 0, p: 0, c: "<p>x</p>" })
+         vi.mocked(extractAssetKeys).mockReturnValue(KEYS)
+         await boot()
+         savedHook()(77, true)
+         await flush()
+         // Nothing to pin into, so nothing is claimed in the registry either —
+         // a phantom entry would show "Remove offline copy" over bytes that
+         // were never saved.
+         expect(listPins().size).toBe(0)
+      } finally {
+         Object.defineProperty(navigator, "serviceWorker", { value: undefined, configurable: true })
+      }
    })
 })

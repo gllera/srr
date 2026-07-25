@@ -1,3 +1,4 @@
+import { makeLRU } from "./cache"
 import * as data from "./data"
 import {
    setProfileImportHook,
@@ -9,7 +10,15 @@ import {
    wrapTabFocus,
    type MenuItem,
 } from "./dropdown"
-import { collapseBrokenMedia, countBadge, readerDateline, sanitizeFragment, srcColorIndex } from "./fmt"
+import {
+   collapseBrokenMedia,
+   countBadge,
+   extractAssetKeys,
+   handleFragmentClick,
+   readerDateline,
+   sanitizeFragment,
+   srcColorIndex,
+} from "./fmt"
 import { setupGestures, type Gestures } from "./gestures"
 import { HASH_KEY, UNREAD_ONLY_KEY } from "./keys"
 import * as list from "./list"
@@ -50,6 +59,9 @@ const el = {
    popupClose: document.querySelector(".srr-popup-close") as HTMLElement,
    popup: document.querySelector(".srr-popup") as HTMLElement,
    pinProgress: document.querySelector(".srr-pin-progress") as HTMLElement,
+   snackbar: document.querySelector(".srr-snackbar") as HTMLElement,
+   snackbarText: document.querySelector(".srr-snackbar-text") as HTMLElement,
+   snackbarAction: document.querySelector(".srr-snackbar-action") as HTMLButtonElement,
 }
 
 // Which surface is showing. The list is home; the reader is the drill-down.
@@ -190,25 +202,83 @@ async function pinCurrentFilter(): Promise<void> {
    // store root, hosted /packs/, a mounted peer, …).
    controller.postMessage({ type: "pin", names, base: data.activeStore().base.href }, [port2])
    showPinProgress(0, names.length)
+   requestPersistentStorage()
+}
+
+// Drop one pin scope from the registry and return the names that are now
+// genuinely unreferenced. The subtraction is the point: shared latest packs
+// (idx/L, data/L, meta/L), overlapping finalized packs, and an asset two saved
+// articles both show must NOT be deleted while another pin still needs them.
+// Shared by the filter-scope unpin and the ★-Saved asset release.
+function dropPinScope(key: string): string[] {
+   const mid = data.activeStore().mid
+   const pins = listPins(mid)
+   const names = pins.get(key)?.names ?? []
+   const stillNeeded = new Set<string>()
+   for (const [k, entry] of pins) if (k !== key) for (const n of entry.names) stillNeeded.add(n)
+   unpinFilter(key, mid)
+   return names.filter((n) => !stillNeeded.has(n))
 }
 
 function unpinCurrentFilter(): void {
    const controller = navigator.serviceWorker?.controller
-   const key = pinKey()
-   // Read the stored names before removing the registry entry, then subtract any
-   // name still referenced by another pinned scope: the shared latest packs
-   // (idx/L, data/L, meta/L) and any overlapping finalized packs/assets must NOT
-   // be deleted while a different active pin still needs them. Only the names
-   // unique to this scope are dropped from the SW cache.
-   const pins = listPins(data.activeStore().mid)
-   const names = pins.get(key)?.names ?? []
-   const stillNeeded = new Set<string>()
-   for (const [k, entry] of pins) if (k !== key) for (const n of entry.names) stillNeeded.add(n)
-   const toDelete = names.filter((n) => !stillNeeded.has(n))
-   unpinFilter(key, data.activeStore().mid)
+   const toDelete = dropPinScope(pinKey())
    if (controller) controller.postMessage({ type: "unpin", names: toDelete, base: data.activeStore().base.href })
    // The pin row reads its state fresh on the next settings-menu open — the
    // menu that triggered this unpin closed when the row was clicked.
+}
+
+// PWA2 — ask the browser to make this origin's storage persistent, the first
+// time the user does something that means "keep these bytes".
+//
+// The SW's PINNED bucket is exempt from SRR's OWN eviction, which is all the
+// eviction SRR controls: under storage pressure the browser can still evict the
+// whole origin, taking the pinned packs and every saved article's media with it.
+// One call converts the offline-pin feature from best-effort to durable, and it
+// is the pin that earns it — asking on boot would be a prompt for something the
+// user has not asked for yet. Fire-and-forget: a refusal (or a browser with no
+// such API) leaves today's behaviour exactly as it was.
+let persistenceAsked = false
+
+function requestPersistentStorage(): void {
+   if (persistenceAsked) return
+   persistenceAsked = true
+   void navigator.storage
+      ?.persist?.()
+      .then((granted) => console.info(granted ? "storage: persistent" : "storage: best-effort (not granted)"))
+      .catch(() => {})
+}
+
+// FMT2a — a ★-saved article's self-hosted media, pinned for as long as it is
+// saved. Its TEXT already survives forever (immutable packs); its images and
+// video do not, because expiration deletes the assets/ objects once the feed's
+// retention window passes. Nothing server-side can help — the saved set is
+// device-local — so the device that saved it is the one that has to keep them.
+//
+// One registry scope per saved article, so releasing one never touches an asset
+// another saved article (or a pinned filter) still shows.
+function savedPinKey(chron: number): string {
+   return nav.SAVED_TOKEN + ":" + chron
+}
+
+async function syncSavedAssets(chron: number, saved: boolean): Promise<void> {
+   const controller = navigator.serviceWorker?.controller
+   if (!controller) return // dev / harness / insecure context — the SW is inert
+   const store = data.activeStore()
+   const key = savedPinKey(chron)
+   if (!saved) {
+      const toDelete = dropPinScope(key)
+      if (toDelete.length) controller.postMessage({ type: "unpin", names: toDelete, base: store.base.href })
+      return
+   }
+   // Warm for the article on screen; one data-pack read when the save came from
+   // a list row instead.
+   const article = await data.loadArticle(chron)
+   const names = extractAssetKeys(article?.c ?? "")
+   if (names.length === 0) return
+   pinFilter(key, names, store.mid)
+   controller.postMessage({ type: "pin", names, base: store.base.href })
+   requestPersistentStorage()
 }
 
 // Tell the service worker which store roots are mounted (docs/MULTI-STORE-SPEC.md
@@ -301,6 +371,63 @@ function closePopup() {
    previousFocus?.focus()
 }
 
+// The transient snackbar: one line about something that already happened, with
+// at most one way to answer it. Unlike showError's dialog it takes no focus and
+// blocks nothing — a notice you may ignore must not interrupt reading.
+// Auto-dismissing, because an offer that outlives its moment is just clutter;
+// the action is a shortcut, never the only way to get somewhere.
+const SNACKBAR_MS = 8000
+let snackbarTimer: ReturnType<typeof setTimeout> | undefined
+let snackbarAction: (() => void) | null = null
+
+function showSnackbar(text: string, action?: { label: string; run: () => void }) {
+   clearTimeout(snackbarTimer)
+   el.snackbarText.textContent = text
+   snackbarAction = action?.run ?? null
+   el.snackbarAction.textContent = action?.label ?? ""
+   el.snackbarAction.classList.toggle("srr-hidden", !action)
+   el.snackbar.hidden = false
+   snackbarTimer = setTimeout(hideSnackbar, SNACKBAR_MS)
+}
+
+function hideSnackbar() {
+   clearTimeout(snackbarTimer)
+   el.snackbar.hidden = true
+   snackbarAction = null
+}
+
+// RDR1/RDR2 — after a landing (or a Mark all read) has raised the frontier,
+// report a LARGE consumption and offer to take it back. Ordinary reading moves
+// the frontier by one article and says nothing; what needs a signal is the jump
+// that swallows a backlog, which until now happened silently and for good.
+//
+// Deliberately after the fact and off the navigation path: the size is measured
+// with the same tally the badges use (nav.frontierUndoSize), so the number shown
+// is the number the badges just lost.
+const UNDO_MIN_ARTICLES = 10
+
+async function offerFrontierUndo() {
+   const pending = nav.pendingFrontierUndo()
+   if (!pending) return
+   let consumed: number
+   try {
+      consumed = await nav.frontierUndoSize(pending)
+   } catch {
+      return // a count blip is not worth an error popup for an optional offer
+   }
+   if (consumed < UNDO_MIN_ARTICLES || nav.pendingFrontierUndo() !== pending) {
+      // Either not worth mentioning, or a newer move has already superseded it.
+      return
+   }
+   showSnackbar(`Marked ${consumed} read`, {
+      label: "Undo",
+      run: () => {
+         hideSnackbar()
+         if (nav.undoFrontierMove()) afterFrontierMove()
+      },
+   })
+}
+
 async function guard(fn: () => Promise<IShowFeed>) {
    const token = acquire()
    if (token === null) return
@@ -384,6 +511,85 @@ function expiredTombstone(): HTMLElement {
    return p
 }
 
+// FEB2 — playing media survives prev/next.
+//
+// Rendering an article REPLACES the content host's children, which destroys any
+// <audio>/<video> in it: the backend's #enclosure injects podcast <audio
+// controls>, so a single swipe used to kill a playing episode dead with no way
+// back to where you were. Harvesting the outgoing elements' positions and
+// restoring them on return makes stepping away non-destructive.
+//
+// It restores POSITION, not playback. Resuming automatically would mean audio
+// starting on its own whenever navigation happens to land back on the article —
+// including a restored deep link or a two-finger filter cycle — which is the
+// behaviour people disable autoplay to avoid. Press play and you continue where
+// you were. (Media that keeps playing ACROSS articles is the mini-player,
+// RDR16, deliberately a separate piece of work.)
+interface MediaState {
+   time: number
+   rate: number
+}
+// Keyed by chronIdx, bounded: a long session must not accumulate one entry per
+// article ever opened, and the value is only interesting for the handful you
+// might step back to.
+const mediaStates = makeLRU<MediaState[]>(20)
+// The chron whose content is currently mounted, so the harvest knows whose
+// positions it is taking. -1 = nothing to harvest (boot, or an empty state).
+let mountedChron = -1
+// State a restore has QUEUED but not yet applied (currentTime is only settable
+// once duration is known). Without this a second render of the same article
+// before the metadata lands — a re-route, a post-refresh re-probe — would
+// harvest the element's still-untouched values and throw the real ones away.
+const pendingRestore = new WeakMap<HTMLMediaElement, MediaState>()
+
+function harvestMediaState(): void {
+   if (mountedChron < 0) return
+   const chron = mountedChron
+   mountedChron = -1
+   const media = el.content.querySelectorAll<HTMLMediaElement>("audio,video")
+   if (!media.length) return
+   const out: MediaState[] = []
+   let worthKeeping = false
+   media.forEach((m, i) => {
+      // A live element speaks for itself; one still waiting on its metadata
+      // reports the state that restore queued for it.
+      out[i] = m.currentTime
+         ? { time: m.currentTime, rate: m.playbackRate }
+         : (pendingRestore.get(m) ?? { time: 0, rate: m.playbackRate })
+      // An untouched element sits at 0 and has nothing to restore; keeping it
+      // would only pin a stale entry in the LRU.
+      if (out[i].time > 0) worthKeeping = true
+   })
+   if (worthKeeping) mediaStates.put(chron, out)
+   else mediaStates.drop(chron)
+}
+
+function restoreMediaState(chron: number): void {
+   const saved = mediaStates.get(chron)
+   if (!saved) return
+   // Positional pairing: the same immutable article renders the same media in
+   // the same order, so index IS the identity (src would break on a re-proxied
+   // or re-resolved URL).
+   el.content.querySelectorAll<HTMLMediaElement>("audio,video").forEach((m, i) => {
+      const s = saved[i]
+      if (!s || s.time <= 0) return
+      // currentTime is only settable once the element knows its duration;
+      // before that the assignment is dropped (or throws in some engines).
+      const apply = () => {
+         pendingRestore.delete(m)
+         try {
+            m.currentTime = s.time
+            m.playbackRate = s.rate
+         } catch {}
+      }
+      if (m.readyState >= HTMLMediaElement.HAVE_METADATA) apply()
+      else {
+         pendingRestore.set(m, s)
+         m.addEventListener("loadedmetadata", apply, { once: true })
+      }
+   })
+}
+
 function render(o: IShowFeed) {
    showReader()
    // Showing the reader supersedes any pending debounced search query. A row-tap
@@ -417,10 +623,25 @@ function render(o: IShowFeed) {
    // "[DELETED]" feed tombstone — instead of the literal "undefined"
    // sanitizeFragment(undefined) would produce.
    const body = o.article.c as string | undefined
+   // The outgoing article's media positions, taken BEFORE replaceChildren
+   // destroys the elements holding them (see harvestMediaState).
+   harvestMediaState()
+   // The article's own language (`g` on the wire, from the backend's always-on
+   // detection). Without it the whole reader inherits <html lang="en">: a
+   // screen reader pronounces a Spanish body in an English voice, hyphenation
+   // applies English patterns, and an undeclared-RTL body renders LTR. Absent
+   // for anything the detector wasn't confident about and for every article
+   // written before 2026-07-19, where "" correctly falls back to the page
+   // default. dir=auto lets the browser infer direction from the first strong
+   // character, which is the only honest answer when the feed declares none.
+   el.content.lang = o.article.g ?? ""
+   el.content.dir = "auto"
    // Adopt the sanitized nodes directly — an innerHTML string round-trip would
    // re-parse the whole article on every prev/next step (see sanitizeFragment).
    if (body == null) el.content.replaceChildren(expiredTombstone())
    else el.content.replaceChildren(sanitizeFragment(body, data.activeStore().base))
+   mountedChron = nav.currentChron()
+   if (mountedChron >= 0) restoreMediaState(mountedChron)
    // Reject javascript:/data:/vbscript:/file: in case the writer pipeline let one
    // through. The whole masthead row (source · date · title) is the one permalink;
    // an href makes it a link, its absence leaves it inert chrome (titleless feeds
@@ -451,7 +672,7 @@ function render(o: IShowFeed) {
    refreshFeedLabel()
    refreshSaveButton(!o.placeholder)
 
-   document.title = "SRR - " + (o.article.t ?? "")
+   setTitle("SRR - " + (o.article.t ?? ""))
    scrollReaderTop()
    // A titleless feed hides the <h1>; focusing a display:none element is a no-op,
    // so move focus to the visible body instead to keep the reader region focused.
@@ -466,6 +687,11 @@ function render(o: IShowFeed) {
    requestAnimationFrame(() => requestAnimationFrame(clearContentTransition))
 
    persistHash(location.hash)
+   // If this landing consumed a backlog, say so and offer one way back (RDR1).
+   // Un-awaited: it measures the move against the idx and must not hold up paint.
+   void offerFrontierUndo()
+   // Reading is what moves the unread total; the badge follows it (RDR12).
+   void syncUnreadBadge()
 }
 
 // The reader's no-match state. Instead of a bare "(no matching articles)" title
@@ -494,10 +720,14 @@ function renderEmptyReader(o: IShowFeed) {
    // Static panel: no fade-in (clear any inline opacity/transform a prior article
    // render left behind), and swap the body for the shared empty-state element.
    clearContentTransition()
+   harvestMediaState()
+   // Reader chrome, not article prose: it speaks the UI's language, so hand the
+   // host back to the page default rather than leaving the last article's.
+   el.content.lang = ""
    el.content.replaceChildren(list.emptyStateEl({ notStarted: o.notStarted, startFeed: o.startFeed }))
 
    refreshFeedLabel()
-   document.title = "SRR"
+   setTitle("SRR")
    scrollReaderTop()
    // The empty state hides the whole title row; focus the (visible) content host,
    // which carries the directed empty-state element.
@@ -581,6 +811,7 @@ function afterFrontierMove() {
    } else if (view === "list") {
       list.refresh()
    }
+   void syncUnreadBadge()
    // A frontier move from the ARMED "not started" placeholder (pos is -1, always a
    // single-token filter — the only way nav.switchFilter produces it) re-runs the
    // switch so the surface re-derives — mark-all-read turns it into the caught-up
@@ -627,7 +858,11 @@ function reReadReader() {
 // Mark the whole current feed/tag/[ALL] selection read — the frontier menu's
 // first action. A pure frontier raise in nav (sync-safe by construction).
 function markAllRead() {
-   if (nav.markAllRead()) afterFrontierMove()
+   if (!nav.markAllRead()) return
+   afterFrontierMove()
+   // Rides the same undo as a large landing (RDR2): one gesture, one way back,
+   // and no confirm dialog standing in front of the common case.
+   void offerFrontierUndo()
 }
 
 // The explicit unread rewind — the frontier menu's second action and the
@@ -822,6 +1057,50 @@ function toggleSave() {
    paintSaveButton(saved)
 }
 
+// RDR12 — the unread total, surfaced where an installed app is actually looked
+// at: the launcher badge and the tab title.
+//
+// The tally already exists (it is what fills every picker badge); nothing was
+// reading it outside the app's own chrome, so an installed SRR gave no sign that
+// anything had arrived until you opened it. Scope is the ACTIVE store's [ALL] —
+// the same thing the picker's [ALL] row counts, so the two can never disagree.
+let unreadTotal = 0
+let titleBase = "SRR"
+let badgeRunning = false
+
+// The single writer of document.title, so the count and the surface's own name
+// can never get out of step. The count LEADS: a tab title is truncated from the
+// right, and a number nobody can see is not a notification.
+function setTitle(base: string): void {
+   titleBase = base
+   document.title = unreadTotal > 0 ? `(${countBadge(unreadTotal)}) ${base}` : base
+}
+
+async function syncUnreadBadge(): Promise<void> {
+   if (badgeRunning) return // coalesce: navigation can fire these back to back
+   badgeRunning = true
+   try {
+      const feeds = Object.values(data.db?.feeds ?? {})
+      const total = feeds.length ? nav.tagUnreadFromCounts(feeds, await nav.unreadCounts(feeds)) : 0
+      if (total === unreadTotal) return
+      unreadTotal = total
+      setTitle(titleBase)
+      // Feature-detected on both sides: no Badging API (Firefox, iOS Safari) just
+      // leaves the title readout, and a rejection (permission, unsupported
+      // context) is not worth telling anyone about.
+      const badging = navigator as Navigator & {
+         setAppBadge?: (n?: number) => Promise<void>
+         clearAppBadge?: () => Promise<void>
+      }
+      if (total > 0) await badging.setAppBadge?.(total)
+      else await badging.clearAppBadge?.()
+   } catch {
+      // A count blip or an unsupported badge call must never surface as an error.
+   } finally {
+      badgeRunning = false
+   }
+}
+
 function listTitle(): string {
    if (nav.isSearchFilter()) {
       const q = nav.searchQuery()
@@ -847,7 +1126,7 @@ async function renderListSurface() {
    const anchorNow = view === "reader"
    showList()
    refreshFeedLabel()
-   document.title = listTitle()
+   setTitle(listTitle())
    document.body.classList.add("srr-loading")
    // Release busy + the loading veil at FIRST PAINT (skeletons / first matches),
    // not when the whole list finishes streaming — so rows are tappable while the
@@ -992,7 +1271,7 @@ async function applySearchQuery(q: string) {
    const h = "#" + nav.tokensSuffix()
    history.replaceState(null, "", h)
    persistHash(h)
-   document.title = listTitle()
+   setTitle(listTitle())
    try {
       await list.rerender()
    } catch (e) {
@@ -1204,6 +1483,7 @@ async function init() {
          void list.rerender()
       }
       if (picker.isOpen()) picker.render()
+      void syncUnreadBadge() // another device's reading changes this device's count
    }
 
    // Shared reconciliation after a store refresh adopted a newer db.gz — the
@@ -1216,6 +1496,9 @@ async function init() {
       if (view === "reader") reprobeReaderChrome()
       else void list.onStoreGrown()
       if (picker.isOpen()) picker.render()
+      // New articles landed: the launcher badge is the one readout that is
+      // supposed to notice without anyone opening the app (RDR12).
+      void syncUnreadBadge()
    }
 
    // After a successful profile import (backup dialog), additionally reconcile
@@ -1227,6 +1510,12 @@ async function init() {
       nav.setUnreadOnly(localStorage.getItem(UNREAD_ONLY_KEY) === "1")
       refreshAfterMerge(mountsChanged)
    })
+
+   // ★-Saved keeps its article's media too (FMT2a). Both save paths — the
+   // reader's star and the list row's — go through nav.toggleSaved, so one hook
+   // covers them; failures are silent because a save must never fail on account
+   // of an optional cache write.
+   nav.setSavedHook((chron, saved) => void syncSavedAssets(chron, saved).catch(() => {}))
 
    // The filter picker overlay: a pick closes it and routes per surface — from
    // the list, selectFilter re-filters the LIST in place (pushes the #!filter
@@ -1287,6 +1576,10 @@ async function init() {
    el.openReader.addEventListener("click", () => void enterReader())
    // capture: error events don't bubble (see collapseBrokenMedia)
    el.content.addEventListener("error", collapseBrokenMedia, true)
+   // In-page fragment links (footnotes, ToC entries) scroll instead of
+   // navigating — location.hash is the reader's router, not the article's.
+   el.content.addEventListener("click", handleFragmentClick)
+   el.snackbarAction.addEventListener("click", () => snackbarAction?.())
    // Search lives in the settings menu (the "Search articles…" row → enterSearch);
    // the `/` key still toggles it on the list. The pinned search bar owns the input
    // (debounced live query, Enter applies immediately, Escape / ✕ leave search).
@@ -1433,7 +1726,27 @@ async function init() {
    // Tell the SW its mounted roots (the PWA0 fix, §5.1). A controller may not be
    // active yet on a first visit, so also post whenever a worker takes control.
    postMounts()
-   navigator.serviceWorker?.addEventListener("controllerchange", postMounts)
+   // ONE controllerchange listener, in this order: the mount roots first (a
+   // fresh worker starts with none and would otherwise route nothing), then the
+   // update notice. A second listener would race this one for that ordering.
+   const hadController = !!navigator.serviceWorker?.controller
+   navigator.serviceWorker?.addEventListener("controllerchange", () => {
+      postMounts()
+      // PWA1 — a new worker takes over MID-SESSION with, until now, zero signal.
+      // Harmless while only the cache changes; not harmless the day a pack-grammar
+      // or contract change ships, because the page still running is the old build
+      // reading through the new worker. Say so, and offer the one fix.
+      //
+      // Suppressed on FIRST INSTALL (there was no controller before): that
+      // controllerchange is the worker arriving, not the reader changing under
+      // you, and telling a first-time visitor to reload would be nonsense.
+      if (!hadController) return
+      showSnackbar("Reader updated", { label: "Reload", run: () => location.reload() })
+   })
+   // First badge + title readout, after the first surface is up so it never
+   // delays paint (RDR12).
+   void syncUnreadBadge()
+
    // Signal to the dev design harness (design.ts) that the real app has booted
    // and the first surface is rendered. Inert in production — nothing else
    // listens. Only fires on the success path (init returns early on db.gz error).
@@ -1457,6 +1770,9 @@ init().catch(showError)
 // developer who already has a dev SW recovers on the next load without manually
 // clearing site data). `parcel build` (e2e + real prod) sets NODE_ENV=production,
 // so the offline/PWA behavior and its e2e coverage are unaffected.
+// `serviceWorker` can be PRESENT-but-undefined (a locked-down browser profile, a
+// test double), so every use below is optional-chained: "in navigator" answers
+// whether the name exists, not whether there is an object behind it.
 if ("serviceWorker" in navigator && !document.documentElement.hasAttribute("data-srr-harness")) {
    if (process.env.NODE_ENV === "production") {
       // sw.ts lives at src/ root (not src/js/) so Parcel emits it at the deployment
@@ -1464,10 +1780,10 @@ if ("serviceWorker" in navigator && !document.documentElement.hasAttribute("data
       // type:module lets sw.ts import the generated contract (format.gen.ts); the
       // SW already requires DecompressionStream, which is the newer feature, so
       // module-worker support is never the limiting factor.
-      navigator.serviceWorker.register(new URL("../sw.ts", import.meta.url), { type: "module" }).catch(() => {})
+      navigator.serviceWorker?.register(new URL("../sw.ts", import.meta.url), { type: "module" }).catch(() => {})
    } else {
       navigator.serviceWorker
-         .getRegistrations()
+         ?.getRegistrations()
          .then((regs) => regs.forEach((r) => r.unregister()))
          .catch(() => {})
       if (typeof caches !== "undefined")

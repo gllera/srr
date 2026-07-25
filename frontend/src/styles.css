@@ -248,6 +248,13 @@ video {
       the stacking context with no hit-test semantics. */
    isolation: isolate;
    overflow-wrap: anywhere;
+   /* Hyphenation is only correct once the language is declared — app.ts stamps
+      the article's own `lang` (and dir=auto) on this element from the wire's
+      `g`. Without that stamp the browser would hyphenate everything with
+      English patterns; with it, a Spanish or German body breaks by its own
+      rules. An article whose language the writer wasn't sure about carries no
+      lang, so the browser simply doesn't hyphenate it — the safe direction. */
+   hyphens: auto;
 
    & * {
       max-width: 100%;
@@ -309,11 +316,49 @@ video {
    }
    & img {
       border-radius: 8px;
+      /* Same clamp <video> gets: a tall portrait or an infographic must not
+         push the whole article off screen before the reader can see a line of
+         it. width stays auto (unlike video, an image's intrinsic size is right
+         at load), so this only ever bites on the too-tall ones. */
+      max-height: 85vh;
+      /* With a max-height in play the box can no longer be the image's natural
+         one, so letterbox rather than stretch. */
+      object-fit: contain;
    }
    /* media whose resource failed to load (collapseBrokenMedia) — old
       articles outlive their external images; hide the corpses */
    & .srr-broken {
       display: none;
+   }
+   /* …but keep what the picture SAID: a dead <img alt> leaves this caption in
+      its place (fmt.ts collapseBrokenMedia). Reads as a figcaption sibling —
+      quieter than prose, clearly not part of it. */
+   & .srr-broken-alt {
+      font-size: 0.875em;
+      color: var(--muted);
+      font-style: italic;
+      text-align: center;
+      margin: 0.5em 0 1em;
+   }
+   & .srr-broken-alt::before {
+      content: "🖼 ";
+      font-style: normal;
+   }
+   /* Definition lists get the same rhythm ul/ol do — glossaries, FAQ bodies and
+      spec-style prose ship them, and unstyled they collapsed into an
+      indistinguishable block. */
+   & dl {
+      margin: 0.75em 0 1em;
+   }
+   & dt {
+      font-weight: 650;
+      margin-top: 0.75em;
+   }
+   & dt:first-child {
+      margin-top: 0;
+   }
+   & dd {
+      margin: 0.25em 0 0 1.4em;
    }
    & figure {
       margin: 1.5em 0;
@@ -400,6 +445,54 @@ video {
    text-align: center;
    padding: 0.35rem 0.5rem;
    background: var(--bg);
+}
+
+/* Transient snackbar — a report with at most one answer (Undo a frontier jump,
+   reload after a worker update). Sits in the same fixed-above-the-toolbar lane
+   as .srr-pin-progress, one step higher so the two never overlap, and it is
+   NOT the modal .srr-popup: nothing here is worth taking focus or blocking the
+   page for. Hidden via the [hidden] attribute. */
+.srr-snackbar {
+   position: fixed;
+   left: 0;
+   right: 0;
+   bottom: 4.6rem;
+   max-width: 680px;
+   margin: 0 auto;
+   z-index: var(--z-toolbar);
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   gap: 0.75rem;
+   width: fit-content;
+   max-width: min(680px, calc(100% - 1.5rem));
+   padding: 0.5rem 0.9rem;
+   font-size: var(--text-sm);
+   color: var(--fg);
+   background: var(--surface-raised);
+   border: 1px solid var(--border);
+   border-radius: var(--radius);
+   box-shadow: var(--shadow);
+}
+.srr-snackbar[hidden] {
+   display: none;
+}
+.srr-snackbar-action {
+   font: inherit;
+   /* The wire voice, like every other action label in the chrome. */
+   font-family: var(--font-mono);
+   text-transform: uppercase;
+   letter-spacing: 0.04em;
+   font-size: 0.8em;
+   padding: 0.15rem 0.4rem;
+   border: none;
+   background: none;
+   color: var(--accent);
+   cursor: pointer;
+   border-radius: var(--radius);
+}
+.srr-snackbar-action:hover {
+   background: var(--hover);
 }
 
 /* Toolbar */
@@ -2172,6 +2265,34 @@ body:not(.srr-view-list) .srr-open-reader {
    html {
       padding: 0;
    }
+   /* Paper is white. A reader printing from a dark-mode session otherwise sent
+      the DARK token set to the printer: either a page of ink, or — once the
+      browser's own "don't print backgrounds" default drops the dark bg — pale
+      grey text on white, effectively blank. Force the light palette back, which
+      is the one these colors were chosen against.
+
+      Only the tokens the ARTICLE uses are restored; chrome tokens don't matter
+      because every piece of chrome above is display:none. The dark <a> override
+      is undone the same way, since it is a literal, not a token. */
+   :root {
+      --bg: #fafaf7;
+      --surface-raised: #ffffff;
+      --fg: #1c1c1a;
+      --fg-2: #5e5c56;
+      --muted: #8a8780;
+      --faint: #d5d2cb;
+      --border: #cbc7be;
+      --hover: rgba(0, 0, 0, 0.04);
+      --accent: #b35650;
+   }
+   a {
+      color: var(--fg);
+   }
+   /* And undo the dark-mode image dimming below — it exists to stop a bright
+      photo glaring out of a dark screen, which is not a thing paper does. */
+   .srr-content img {
+      filter: none;
+   }
 }
 
 /* Dark mode — component-level overrides only; token reassignments and the dark
@@ -2179,6 +2300,14 @@ body:not(.srr-view-list) .srr-open-reader {
 @media (prefers-color-scheme: dark) {
    a {
       color: #c4a882;
+   }
+   /* Feed images are authored for white pages, so at night a full-brightness
+      photo is a lamp in the middle of dim prose — the one element that ignores
+      the theme. A small, uniform knock-down keeps them recognisable while
+      letting the eye stay adapted; it is deliberately gentle (nothing near the
+      "invert everything" treatments that wreck photographs). */
+   .srr-content img {
+      filter: brightness(0.85);
    }
 }
 

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import {
    collapseBrokenMedia,
    extractPrefetchMedia,
+   handleFragmentClick,
    sanitizeHtml,
    timeAgo,
    timeAgoProse,
@@ -278,6 +279,85 @@ describe("collapseBrokenMedia", () => {
       div.querySelector("p")!.dispatchEvent(new Event("error"))
       expect(div.querySelector(".srr-broken")).toBeNull()
    })
+
+   // FEB3: alt text is what the picture SAID. Collapsing a dead <img> discarded
+   // the only surviving description — worst on exactly the old articles whose
+   // chart or diagram carried the point.
+   it("keeps a dead image's alt text as a caption", () => {
+      const div = container('<img src="https://dead.example/chart.png" alt="Revenue by quarter">')
+      div.querySelector("img")!.dispatchEvent(new Event("error"))
+      const note = div.querySelector(".srr-broken-alt")
+      expect(note?.textContent).toBe("Revenue by quarter")
+      // The element itself is still collapsed — the caption replaces it visually.
+      expect(div.querySelector("img")!.classList.contains("srr-broken")).toBe(true)
+   })
+
+   it("leaves alt-less and decorative images to the plain collapse", () => {
+      for (const html of ['<img src="x">', '<img src="x" alt="">', '<img src="x" alt="   ">']) {
+         const div = container(html)
+         div.querySelector("img")!.dispatchEvent(new Event("error"))
+         expect(div.querySelector(".srr-broken-alt")).toBeNull()
+         document.body.innerHTML = ""
+      }
+   })
+
+   it("does not stack captions when the same image errors twice", () => {
+      const div = container('<img src="x" alt="Diagram">')
+      const img = div.querySelector("img")!
+      img.dispatchEvent(new Event("error"))
+      img.dispatchEvent(new Event("error"))
+      expect(div.querySelectorAll(".srr-broken-alt").length).toBe(1)
+   })
+
+   it("has no alt to keep for video/audio", () => {
+      const div = container('<video src="https://dead.example/x.mp4"></video>')
+      div.querySelector("video")!.dispatchEvent(new Event("error"))
+      expect(div.querySelector(".srr-broken-alt")).toBeNull()
+   })
+})
+
+// FEB4 / POL5: two small content-mechanics rules the reader owns because the
+// feed cannot be relied on for either.
+describe("sanitizeHtml content mechanics", () => {
+   const frag = (html: string) => {
+      const t = document.createElement("template")
+      t.innerHTML = sanitizeHtml(html)
+      return t.content
+   }
+
+   it("forces controls + playsinline on a plain feed video (a dead frame otherwise)", () => {
+      const v = frag('<video src="https://cdn.example/v.mp4"></video>').querySelector("video")!
+      expect(v.hasAttribute("controls")).toBe(true)
+      expect(v.hasAttribute("playsinline")).toBe(true)
+   })
+
+   it("leaves the GIF idiom chrome-less (autoplay video is a moving image, not a player)", () => {
+      const v = frag('<video src="https://cdn.example/v.mp4" autoplay muted loop></video>').querySelector("video")!
+      expect(v.hasAttribute("controls")).toBe(false)
+   })
+
+   it("keeps an explicit controls attribute as-is", () => {
+      const v = frag('<video src="https://cdn.example/v.mp4" controls></video>').querySelector("video")!
+      expect(v.hasAttribute("controls")).toBe(true)
+   })
+
+   it("demotes an in-content h1 to h2 so the masthead stays the only h1", () => {
+      const c = frag('<h1 id="lede">Body heading</h1><h2>Sub</h2>')
+      expect(c.querySelector("h1")).toBeNull()
+      const h2s = c.querySelectorAll("h2")
+      expect(h2s[0].textContent).toBe("Body heading")
+      // Attributes and children ride across; the id still survives the walk.
+      expect(h2s[0].getAttribute("id")).toBe("lede")
+      expect(h2s.length).toBe(2)
+   })
+
+   it("still sanitizes the demoted heading's attributes", () => {
+      const c = frag('<h1 onclick="x()" class="big" id="srr-info-title">t</h1>')
+      const h2 = c.querySelector("h2")!
+      expect(h2.hasAttribute("onclick")).toBe(false)
+      expect(h2.hasAttribute("class")).toBe(false)
+      expect(h2.hasAttribute("id")).toBe(false)
+   })
 })
 
 // SRR_CDN_URL is defined as "http://localhost:3000" in vitest.config.ts, so the
@@ -343,6 +423,106 @@ describe("sanitizeHtml relative URL resolution", () => {
       )
       // src stays direct — image proxies don't handle video.
       expect(attr(html, "video", "src")).toBe("https://cdn.example.com/v.mp4")
+   })
+})
+
+// FEB1: a footnote round-trip needs BOTH halves — the marker link must stay
+// same-document, and its target's id must survive. Before this, the anchor was
+// pack-base-resolved into an absolute CDN URL that <base target="_blank"> opened
+// in a dead new tab, which broke every longform/academic/newsletter article.
+describe("in-page fragment anchors", () => {
+   const frag = (html: string) => {
+      const t = document.createElement("template")
+      t.innerHTML = sanitizeHtml(html)
+      return t.content
+   }
+
+   it("keeps a bare-# href verbatim instead of resolving it against the pack base", () => {
+      const a = frag('<a href="#fn1">1</a>').querySelector("a")!
+      expect(a.getAttribute("href")).toBe("#fn1")
+   })
+
+   it("overrides <base target=_blank> so a footnote does not open a new tab", () => {
+      const a = frag('<a href="#fn1">1</a>').querySelector("a")!
+      expect(a.getAttribute("target")).toBe("_self")
+   })
+
+   it('keeps the bare "#" scroll-to-top idiom', () => {
+      expect(frag('<a href="#">top</a>').querySelector("a")!.getAttribute("href")).toBe("#")
+   })
+
+   it("still pack-resolves a non-fragment relative href", () => {
+      const a = frag('<a href="notes.html#fn1">1</a>').querySelector("a")!
+      expect(a.getAttribute("href")).toBe("http://localhost:3000/notes.html#fn1")
+      expect(a.getAttribute("target")).toBeNull()
+   })
+
+   it("keeps a conservative id so the fragment has something to land on", () => {
+      const c = frag('<li id="fn1">note</li><p id="fnref:3">x</p><span id="footnote-12">y</span>')
+      expect(c.querySelector("li")!.getAttribute("id")).toBe("fn1")
+      expect(c.querySelector("p")!.getAttribute("id")).toBe("fnref:3")
+      expect(c.querySelector("span")!.getAttribute("id")).toBe("footnote-12")
+   })
+
+   it("drops an id that could shadow the reader's own chrome or is not a token", () => {
+      // "srr-" is the reader's chrome prefix (the dialogs' aria-labelledby
+      // targets); an article must never be able to claim one.
+      expect(frag('<p id="srr-info-title">x</p>').querySelector("p")!.getAttribute("id")).toBeNull()
+      expect(frag('<p id="has space">x</p>').querySelector("p")!.getAttribute("id")).toBeNull()
+      expect(frag('<p id="9leading">x</p>').querySelector("p")!.getAttribute("id")).toBeNull()
+      expect(
+         frag(`<p id="${"x".repeat(80)}">y</p>`)
+            .querySelector("p")!
+            .getAttribute("id"),
+      ).toBeNull()
+   })
+})
+
+describe("handleFragmentClick", () => {
+   const mount = (html: string) => {
+      const host = document.createElement("div")
+      host.innerHTML = sanitizeHtml(html)
+      host.addEventListener("click", handleFragmentClick as EventListener)
+      document.body.appendChild(host)
+      return host
+   }
+   afterEach(() => {
+      document.body.replaceChildren()
+   })
+
+   it("scrolls to the target and swallows the navigation (location.hash is the router)", () => {
+      const host = mount('<a href="#fn1">1</a><li id="fn1">note</li>')
+      const target = host.querySelector("#fn1") as HTMLElement
+      const scrolled = vi.fn()
+      target.scrollIntoView = scrolled
+      const ev = new MouseEvent("click", { bubbles: true, cancelable: true })
+      host.querySelector("a")!.dispatchEvent(ev)
+      expect(scrolled).toHaveBeenCalled()
+      expect(ev.defaultPrevented).toBe(true)
+      // Focus moves too, so a keyboard/AT user actually arrives at the note.
+      expect(target.getAttribute("tabindex")).toBe("-1")
+   })
+
+   it("leaves a fragment naming nothing in this article alone", () => {
+      const host = mount('<a href="#nowhere">x</a>')
+      const ev = new MouseEvent("click", { bubbles: true, cancelable: true })
+      host.querySelector("a")!.dispatchEvent(ev)
+      expect(ev.defaultPrevented).toBe(false)
+   })
+
+   it("leaves modified clicks to the browser", () => {
+      const host = mount('<a href="#fn1">1</a><li id="fn1">note</li>')
+      ;(host.querySelector("#fn1") as HTMLElement).scrollIntoView = vi.fn()
+      const ev = new MouseEvent("click", { bubbles: true, cancelable: true, ctrlKey: true })
+      host.querySelector("a")!.dispatchEvent(ev)
+      expect(ev.defaultPrevented).toBe(false)
+   })
+
+   it("ignores a non-fragment link", () => {
+      const host = mount('<a href="https://example.com/">x</a>')
+      const ev = new MouseEvent("click", { bubbles: true, cancelable: true })
+      host.querySelector("a")!.dispatchEvent(ev)
+      expect(ev.defaultPrevented).toBe(false)
    })
 })
 

@@ -28,6 +28,21 @@ const URL_ATTRS = new Set([
 // scheme added/removed here must move there too. javascript:/data:/… are already
 // caught by URL_DENY in the attribute loop; relative hrefs route via the pack base.
 const ANCHOR_ABS_OK = /^(?:https?|mailto|tel|geo|magnet):/i
+// A bare-"#" href is an IN-PAGE fragment — a footnote marker, a "back to text"
+// return link, a table-of-contents entry. It is the one relative href that must
+// NOT resolve against the pack base: doing so turns it into an absolute CDN URL
+// that <base target="_blank"> then opens in a dead new tab, which is how every
+// longform/academic/newsletter article's footnotes have been broken. Empty "#"
+// counts (the "scroll to top" idiom) — it is still same-document.
+const FRAGMENT_HREF = /^#/
+// The conservative `id` token the reader honours on content elements. Content
+// ids exist so fragment links have something to land on, and the writer's
+// allowlist (backend/mod/sanitize.go) is kept to the same shape — but the
+// reader adds ONE rule the writer cannot: an id may not start with "srr-",
+// because that prefix names the reader's own chrome (the dialogs' aria-labelledby
+// targets), and a feed that shipped `id="srr-info-title"` would silently
+// re-point a dialog's accessible name at article text.
+const ID_TOKEN = /^(?!srr-)[A-Za-z][\w:.-]{0,63}$/
 // SVG/MATH carry their own script + foreign-content surface; bluemonday strips
 // them server-side, so mirror that here. <template> is included because its
 // content lives in a DocumentFragment the sanitizer's TreeWalker never descends
@@ -147,6 +162,19 @@ export function sanitizeFragment(html: string, base: URL = PACK_BASE): DocumentF
    // Drop dangerous subtrees first so the attribute pass below never visits
    // their (now-detached) descendants — saves work on e.g. <svg><script>...
    for (const n of tmpl.content.querySelectorAll(DANGEROUS_SELECTOR)) n.remove()
+   // Demote in-content <h1> to <h2>. The reader's masthead <h1 class="srr-title">
+   // is the article's heading; a feed that also opens its body with an <h1>
+   // gives assistive tech two competing document titles and a heading outline
+   // that starts over mid-page. Visual scale is CSS's job either way, so nothing
+   // moves on screen. Done BEFORE the attribute walk (a static NodeList, so
+   // replacing as we go is safe) — the copied attributes then get sanitized with
+   // everything else, and the TreeWalker never has its current node yanked.
+   for (const h1 of tmpl.content.querySelectorAll("h1")) {
+      const h2 = document.createElement("h2")
+      for (const a of h1.attributes) h2.setAttribute(a.name, a.value)
+      h2.replaceChildren(...h1.childNodes)
+      h1.replaceWith(h2)
+   }
    const walker = document.createTreeWalker(tmpl.content, NodeFilter.SHOW_ELEMENT)
    const proxyPrefix = getImgProxy()
    let node: Element | null
@@ -158,6 +186,7 @@ export function sanitizeFragment(html: string, base: URL = PACK_BASE): DocumentF
             attr.name === "style" ||
             attr.name === "class" ||
             attr.name.startsWith("on") ||
+            (attr.name === "id" && !ID_TOKEN.test(attr.value)) ||
             (URL_ATTRS.has(attr.name) && URL_DENY.test(attr.value))
          )
             node.removeAttribute(attr.name)
@@ -174,7 +203,15 @@ export function sanitizeFragment(html: string, base: URL = PACK_BASE): DocumentF
          // already stripped above.
          const href = node.getAttribute("href")
          if (href) {
-            if (isRelative(href)) setPackRelative(node, "href", base, href)
+            if (FRAGMENT_HREF.test(href)) {
+               // Same-document: leave the href verbatim so it keeps meaning
+               // "this article", and override <base target="_blank"> — a
+               // footnote must not open a new tab. handleFragmentClick does the
+               // actual scrolling; this pair is what makes the link honest even
+               // before it is clicked (hover URL, middle-click, "open in new
+               // tab" all now describe an in-page jump).
+               node.setAttribute("target", "_self")
+            } else if (isRelative(href)) setPackRelative(node, "href", base, href)
             else if (!ANCHOR_ABS_OK.test(href)) node.removeAttribute("href")
          }
       } else if (tag === "IMG") {
@@ -197,6 +234,17 @@ export function sanitizeFragment(html: string, base: URL = PACK_BASE): DocumentF
          // path like img.src (leaving them direct would leak the user's IP).
          resolveMediaAttr(node, "src", base, proxyPrefix, false)
          resolveMediaAttr(node, "poster", base, proxyPrefix, true)
+         // A feed <video> that omits `controls` renders as a dead frame with no
+         // way to play it — the same failure <audio> gets forced controls for.
+         // The exception is the GIF idiom (#embed/srr-x emit muted+loop+autoplay
+         // video for what used to be a GIF): those are meant to be chrome-less
+         // moving images, and bolting a control bar on them would be wrong.
+         // playsinline rides along so iOS plays in place instead of taking over
+         // the screen the moment the user taps.
+         if (!node.hasAttribute("autoplay")) {
+            node.setAttribute("controls", "")
+            node.setAttribute("playsinline", "")
+         }
       } else if (tag === "AUDIO") {
          // A feed <audio> often omits `controls`, which renders the element with
          // no player UI (invisible). Force it — like <img> gets forced lazy/async
@@ -240,7 +288,63 @@ export function collapseBrokenMedia(e: Event): void {
          : t.tagName === "IMG" || t.tagName === "VIDEO" || t.tagName === "AUDIO"
            ? t
            : null
-   victim?.classList.add("srr-broken")
+   if (!victim) return
+   victim.classList.add("srr-broken")
+   // An <img alt="…"> whose bytes are gone still carries what the picture SAID.
+   // Collapsing it discards the only surviving description — worst exactly where
+   // it matters most, an old article whose chart or diagram carried the point.
+   // Swap in a small caption so the article reads as "a picture was here, of
+   // this" instead of silently skipping a paragraph. Media with no alt (and
+   // <video>/<audio>, which have no alt at all) keep the plain collapse: an
+   // empty alt is the author's own "decorative, ignore me".
+   const alt = victim.tagName === "IMG" ? victim.getAttribute("alt")?.trim() : ""
+   if (!alt || victim.nextElementSibling?.classList.contains("srr-broken-alt")) return
+   const note = document.createElement("p")
+   note.className = "srr-broken-alt"
+   note.textContent = alt
+   victim.after(note)
+}
+
+// The in-page half of FRAGMENT_HREF: a delegated click handler the render host
+// registers (app.ts, beside collapseBrokenMedia) so footnote round-trips work.
+//
+// It scrolls rather than navigates, and that is the whole design. The reader
+// OWNS location.hash — it is the router (`#pos!tokens`) and the resume-position
+// store — so letting a footnote link write "#fn1" into it would fire a
+// hashchange that route() reads as a nonsense position. Intercepting keeps the
+// jump purely visual: the URL never moves, so back/forward still walk articles
+// and a reload still lands where the reader was.
+//
+// Modified clicks (new tab/window, download) are left to the browser, as is a
+// fragment naming nothing in this article — a "#top"-style link on an article
+// that has no such target should do nothing rather than silently swallow.
+export function handleFragmentClick(e: MouseEvent): void {
+   if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
+   const a = (e.target as Element | null)?.closest?.("a[href^='#']") as HTMLAnchorElement | null
+   if (!a) return
+   const host = e.currentTarget as Element
+   if (!host.contains(a)) return
+   const raw = a.getAttribute("href")!.slice(1)
+   // Browsers match a fragment against the DECODED id; a malformed escape is
+   // just taken literally rather than throwing out of a click handler.
+   let id = raw
+   try {
+      id = decodeURIComponent(raw)
+   } catch {}
+   // A bare "#" is the scroll-to-top idiom; an id is looked up INSIDE the
+   // article, never document-wide, so content can't aim at reader chrome. The
+   // scan avoids building a selector out of attacker-supplied text entirely (no
+   // escaping to get wrong, and an article carries a handful of ids at most).
+   const target = id ? ([...host.querySelectorAll("[id]")].find((n) => n.id === id) ?? null) : host
+   if (!target) return
+   e.preventDefault()
+   target.scrollIntoView({ block: "start", behavior: "auto" })
+   // Move focus too, so a keyboard/screen-reader user actually arrives at the
+   // footnote instead of just seeing the page move. tabindex=-1 makes a plain
+   // <li>/<p> focusable without entering the tab order.
+   const el = target as HTMLElement
+   if (!el.hasAttribute("tabindex")) el.setAttribute("tabindex", "-1")
+   el.focus({ preventScroll: true })
 }
 
 // The neighbor-prefetch's media lists (nav.ts schedulePrefetch). Every URL is
@@ -279,6 +383,42 @@ export function extractPrefetchMedia(html: string, base: URL = PACK_BASE): IPref
       }
    }
    return { images: [...images], videos: [...videos] }
+}
+
+// The store-relative content-hash asset key, exactly as the writer emits it into
+// article content (backend assets.go contentHashKey). Anchored at both ends: an
+// external URL that merely CONTAINS such a path is not a key of this store, and
+// only a key can be pinned.
+const ASSET_KEY = /^assets\/[0-9a-f]{2}\/[0-9a-f]{16}(?:\.\w+)?$/i
+
+// The self-hosted asset keys an article references, for the ★-Saved pin path
+// (app.ts). Mirrors the backend's own asset attribute set (mod/helper_assets.go
+// assetAttrs): media sources, the video poster, and <a href> — a self-hosted PDF
+// is as much part of a saved article as its images.
+//
+// Deliberately the RAW relative values, not extractPrefetchMedia's resolved (and
+// possibly proxied) URLs: the service worker resolves names against the store
+// base itself, and an image-proxy URL is not a store object at all.
+export function extractAssetKeys(html: string): string[] {
+   const keys = new Set<string>()
+   if (html) {
+      tmpl.innerHTML = html
+      for (const [sel, attr] of [
+         ["img[src]", "src"],
+         ["video[src]", "src"],
+         ["video[poster]", "poster"],
+         ["audio[src]", "src"],
+         ["source[src]", "src"],
+         ["a[href]", "href"],
+      ] as const) {
+         for (const n of tmpl.content.querySelectorAll(sel)) {
+            const v = n.getAttribute(attr)
+            if (v && ASSET_KEY.test(v)) keys.add(v)
+         }
+      }
+      tmpl.innerHTML = ""
+   }
+   return [...keys]
 }
 
 export function timeAgo(unix: number): string {
