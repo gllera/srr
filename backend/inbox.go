@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 
 	"srr/store"
 )
@@ -78,23 +79,43 @@ type inboxItem struct {
 	Lang      string `json:"g,omitempty"`
 }
 
+// fetchState projects the per-feed fetch state Feed.Fetch mutates — the
+// inboxState set. Shared by the spool envelope and the locked write phase's
+// fold (applyFetched), so the two "carry a fetch's result" paths can't drift.
+func fetchState(ch *Feed) inboxState {
+	return inboxState{
+		Watermark:     ch.Watermark,
+		BoundaryGUIDs: ch.BoundaryGUIDs,
+		ETag:          ch.ETag,
+		LastModified:  ch.LastModified,
+		FetchError:    ch.FetchError,
+		LastOK:        ch.LastOK,
+		FailStreak:    ch.FailStreak,
+		LastNew:       ch.LastNew,
+	}
+}
+
+// equal reports whether two fetch states are identical — the "did anything
+// advance this feed underneath the fan-out" guard of applyFetched.
+func (s inboxState) equal(o inboxState) bool {
+	return s.Watermark == o.Watermark &&
+		slices.Equal(s.BoundaryGUIDs, o.BoundaryGUIDs) &&
+		s.ETag == o.ETag &&
+		s.LastModified == o.LastModified &&
+		s.FetchError == o.FetchError &&
+		s.LastOK == o.LastOK &&
+		s.FailStreak == o.FailStreak &&
+		s.LastNew == o.LastNew
+}
+
 // spoolEnvelope builds the envelope for the feeds this producer cycle fetched.
 func spoolEnvelope(name string, cycleID int64, feeds []*Feed) inboxEnvelope {
 	env := inboxEnvelope{Producer: name, CycleID: cycleID}
 	for _, ch := range feeds {
 		rec := inboxFeed{
-			ID:  ch.id,
-			URL: ch.URL,
-			State: inboxState{
-				Watermark:     ch.Watermark,
-				BoundaryGUIDs: ch.BoundaryGUIDs,
-				ETag:          ch.ETag,
-				LastModified:  ch.LastModified,
-				FetchError:    ch.FetchError,
-				LastOK:        ch.LastOK,
-				FailStreak:    ch.FailStreak,
-				LastNew:       ch.LastNew,
-			},
+			ID:     ch.id,
+			URL:    ch.URL,
+			State:  fetchState(ch),
 			Stamps: ch.seenStamps,
 		}
 		for _, it := range ch.newItems {
