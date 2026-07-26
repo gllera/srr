@@ -18,6 +18,7 @@ import (
 
 	"github.com/alecthomas/kong"
 	kongyaml "github.com/alecthomas/kong-yaml"
+	"gopkg.in/yaml.v3"
 )
 
 var version = "development"
@@ -157,14 +158,30 @@ func defaultCacheDir() string {
 	return filepath.Join(os.TempDir(), "srr")
 }
 
-// envFirstResolver wraps the YAML config resolver so an explicitly-set
-// environment variable wins over the config file, restoring the documented
-// precedence (CLI flag > env var > config file > default). kong applies a
-// flag's env: tag during Reset but does not record the value as "already set",
-// so a later-running config resolver would otherwise silently override an
-// SRR_*-provided value — e.g. a stale `store:` in srr.yaml beating SRR_STORE.
-// CLI flags are unaffected: kong records those before resolvers run.
-func envFirstResolver(inner kong.Resolver) kong.Resolver {
+// scopedYAMLFlags routes the flags whose kong declarations moved off Globals
+// (flags.go) to their bare TOP-LEVEL srr.yaml key. kong-yaml resolves a flag
+// at its command path ("fetch-pack-size"), which would orphan the top-level
+// keys existing config files use; this set restores those — and ONLY those,
+// so a stray top-level "interval:" or "tag:" can never be captured by a
+// per-command flag.
+var scopedYAMLFlags = func() map[string]bool {
+	m := map[string]bool{}
+	for _, n := range scopedFlagNamesList {
+		m[n] = true
+	}
+	return m
+}()
+
+// configResolver wraps the kong-yaml resolver with the two SRR-specific rules:
+// (1) an explicitly-set, non-empty SRR_* env var wins over the config file,
+// restoring the documented precedence (CLI flag > env var > config file >
+// default) — kong applies a flag's env: tag during Reset but does not record
+// the value as "already set", so a later-running config resolver would
+// otherwise silently override an SRR_*-provided value, e.g. a stale `store:`
+// in srr.yaml beating SRR_STORE (CLI flags are unaffected: kong records those
+// before resolvers run); (2) the scoped flags resolve from their bare
+// top-level yaml key at any command depth.
+func configResolver(inner kong.Resolver, root map[string]any) kong.Resolver {
 	return kong.ResolverFunc(func(ctx *kong.Context, parent *kong.Path, flag *kong.Flag) (any, error) {
 		for _, env := range flag.Tag.Envs {
 			// A set-but-empty env var is treated as unset (matching the
@@ -173,6 +190,9 @@ func envFirstResolver(inner kong.Resolver) kong.Resolver {
 			if v, ok := os.LookupEnv(env); ok && v != "" {
 				return nil, nil
 			}
+		}
+		if scopedYAMLFlags[flag.Name] {
+			return root[flag.Name], nil // nil when absent → the kong default applies
 		}
 		return inner.Resolve(ctx, parent, flag)
 	})
@@ -234,7 +254,14 @@ func main() {
 		fatal("parsing config", "err", err)
 	}
 
-	ctx := kong.Parse(&cli, kongOptions(envFirstResolver(resolver))...)
+	// The raw top-level document, for the scoped-flag clause in configResolver
+	// and the `stores:` alias map.
+	var rootCfg map[string]any
+	if err := yaml.Unmarshal(configData, &rootCfg); err != nil {
+		fatal("parsing config", "err", err)
+	}
+
+	ctx := kong.Parse(&cli, kongOptions(configResolver(resolver, rootCfg))...)
 
 	if err := store.LoadConfigs(configData); err != nil {
 		fatal("loading backend configs", "err", err)

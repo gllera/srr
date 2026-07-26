@@ -11,6 +11,7 @@ import (
 
 	"github.com/alecthomas/kong"
 	kongyaml "github.com/alecthomas/kong-yaml"
+	"gopkg.in/yaml.v3"
 )
 
 // readConfig resolves the YAML config source in precedence order: the inline
@@ -90,43 +91,79 @@ func TestReadConfig(t *testing.T) {
 	})
 }
 
-// envFirstResolver restores the documented precedence env > config file: an
-// explicitly-set SRR_* env var wins over a stale value in srr.yaml, while an
-// empty env var falls through to the YAML/default.
-func TestEnvFirstResolver(t *testing.T) {
-	type resolverCLI struct {
-		Store string `env:"SRR_STORE"`
+// configResolver: env > yaml, and the scoped (moved) flags resolve from their
+// TOP-LEVEL srr.yaml key regardless of command depth — the boxes' existing
+// config files keep working with zero edits — while per-command flags can
+// never be captured by a stray top-level key.
+func TestConfigResolver(t *testing.T) {
+	type fetchCmd struct {
+		PackSize int    `env:"SRR_PACK_SIZE"` // scoped: in scopedYAMLFlags
+		Interval string ``                    // per-command: NOT in the set
 	}
-	yaml := []byte("store: fromyaml\n")
+	type resolverCLI struct {
+		Store string   `env:"SRR_STORE"`
+		Fetch fetchCmd `cmd:""`
+	}
+	yamlSrc := []byte("store: fromyaml\npack-size: 42\ninterval: fromtoplevel\n")
 
-	resolveStore := func() string {
+	parse := func(t *testing.T, args []string) *resolverCLI {
 		t.Helper()
-		inner, err := kongyaml.Loader(bytes.NewReader(yaml))
+		inner, err := kongyaml.Loader(bytes.NewReader(yamlSrc))
 		if err != nil {
 			t.Fatalf("kongyaml.Loader: %v", err)
 		}
+		var root map[string]any
+		if err := yaml.Unmarshal(yamlSrc, &root); err != nil {
+			t.Fatalf("yaml.Unmarshal: %v", err)
+		}
 		var c resolverCLI
-		parser, err := kong.New(&c, kong.Name("test"), kong.Resolvers(envFirstResolver(inner)))
+		parser, err := kong.New(&c, kong.Name("test"), kong.Resolvers(configResolver(inner, root)))
 		if err != nil {
 			t.Fatalf("kong.New: %v", err)
 		}
-		if _, err := parser.Parse(nil); err != nil {
+		if _, err := parser.Parse(args); err != nil {
 			t.Fatalf("parse: %v", err)
 		}
-		return c.Store
+		return &c
 	}
 
 	t.Run("env_wins_over_yaml", func(t *testing.T) {
 		t.Setenv("SRR_STORE", "fromenv")
-		if got := resolveStore(); got != "fromenv" {
+		if got := parse(t, []string{"fetch"}).Store; got != "fromenv" {
 			t.Errorf("Store = %q, want fromenv (env beats the config file)", got)
 		}
 	})
 
 	t.Run("empty_env_falls_through_to_yaml", func(t *testing.T) {
 		t.Setenv("SRR_STORE", "")
-		if got := resolveStore(); got != "fromyaml" {
+		if got := parse(t, []string{"fetch"}).Store; got != "fromyaml" {
 			t.Errorf("Store = %q, want fromyaml (empty env falls through)", got)
+		}
+	})
+
+	t.Run("scoped_flag_reads_top_level_key_at_depth", func(t *testing.T) {
+		// UNSET, not empty: kong's native env handling parses a set-but-empty
+		// int env var and hard-errors before any resolver runs (pre-existing
+		// kong behavior, unchanged by the move — only string flags fall through).
+		if orig, ok := os.LookupEnv("SRR_PACK_SIZE"); ok {
+			os.Unsetenv("SRR_PACK_SIZE")
+			t.Cleanup(func() { os.Setenv("SRR_PACK_SIZE", orig) })
+		}
+		if got := parse(t, []string{"fetch"}).Fetch.PackSize; got != 42 {
+			t.Errorf("PackSize = %d, want 42 (top-level yaml key must reach the scoped flag)", got)
+		}
+	})
+
+	t.Run("env_beats_top_level_key_for_scoped_flag", func(t *testing.T) {
+		t.Setenv("SRR_PACK_SIZE", "9")
+		if got := parse(t, []string{"fetch"}).Fetch.PackSize; got != 9 {
+			t.Errorf("PackSize = %d, want 9 (env beats yaml through the clause)", got)
+		}
+	})
+
+	t.Run("per_command_flag_never_captured_by_top_level_key", func(t *testing.T) {
+		if got := parse(t, []string{"fetch"}).Fetch.Interval; got != "" {
+			t.Errorf("Interval = %q, want empty (a stray top-level key must not leak into per-command flags)", got)
 		}
 	})
 }
