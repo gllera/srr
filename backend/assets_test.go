@@ -703,7 +703,7 @@ var errMidWrite = io.ErrUnexpectedEOF
 func (f *failMidWriteBackend) AtomicPut(_ context.Context, _ string, r io.Reader, _ store.ObjectMeta) error {
 	// Drain exactly writeOK bytes then return an error, simulating a mid-write failure.
 	buf := make([]byte, f.writeOK)
-	io.ReadFull(r, buf) //nolint:errcheck — we intentionally discard the partial read
+	io.ReadFull(r, buf) //nolint:errcheck // we intentionally discard the partial read
 	return errMidWrite
 }
 
