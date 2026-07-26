@@ -33,36 +33,37 @@ const (
 )
 
 type Globals struct {
-	Workers             int           `short:"w" default:"${nproc}" env:"SRR_WORKERS"       help:"Number of concurrent downloads."`
-	PackSize            int           `short:"s" default:"${packSize}"      env:"SRR_PACK_SIZE"     help:"Target pack size in KB."`
-	MaxFeedSize         int           `short:"m" default:"${maxFeedSize}"     env:"SRR_MAX_FEED_SIZE" help:"Max feed download size in KB."`
-	MaxAssetSize        int           `          default:"${maxAssetSize}"    env:"SRR_MAX_ASSET_SIZE" help:"Max self-hosted asset object size in KB."`
-	AssetProcess        string        `                             env:"SRR_ASSET_PROCESS" help:"Command run on every self-hosted asset just before upload to process its bytes, e.g. transcode media. The cache file path is substituted for each {input} token, or appended as the final arg when absent. With a {output} token the command writes its result to that file and prints a {mimetype,extension,encoding} JSON to stdout (setting the stored Content-Type/-Encoding); without {output}, processed bytes are read from stdout. Non-zero exit or empty output keeps the original. Skipped when the source is already uploaded. Empty disables. E.g. \"webify -m 720\" or \"conv -i {input} -o {output}\"."`
-	AssetPeek           string        `                             env:"SRR_ASSET_PEEK" help:"Command run on every self-hosted asset (before the dedup check) to identify it: it receives the cache file path (substituted for each {input} token, or appended) and prints a {mimetype,extension,supported} JSON to stdout. The extension sets the stored object's key/extension (so a transcoded asset carries its true output extension) and mimetype its Content-Type; supported=false hosts the original bytes and skips asset-process. A non-zero exit or invalid JSON falls back to the source extension. Empty disables. E.g. \"identify-asset {input}\"."`
-	AssetWorkers        int           `                             env:"SRR_ASSET_WORKERS" default:"${nproc}" help:"Max assets processed concurrently across all feeds (peek/transcode/upload). Independent of --workers."`
-	AssetProcessTimeout time.Duration `        env:"SRR_ASSET_PROCESS_TIMEOUT" default:"0" help:"Timeout for a single asset-process or asset-peek command invocation (Go duration). 0 (the default) means unlimited — no deadline, since media transcoding can run arbitrarily long; the command is still bounded by run cancellation (SIGINT/SIGTERM). The shared --cmd-timeout governs ingest/mod commands only and never affects asset processing."`
-	CacheDir            string        `default:"${cacheDir}"        env:"SRR_CACHE_DIR"     help:"Local download cache for external ingest media."`
-	CacheMaxAge         time.Duration `                             env:"SRR_CACHE_MAX_AGE" default:"72h" help:"Delete ingest-cache files unused for longer than this, swept after each fetch cycle. Downloads are consumed (uploaded to the store) within their cycle, and cache reuse refreshes a file's mtime, so old files are garbage. 0 disables the sweep."`
-	Store               string        `short:"o" default:"packs"    env:"SRR_STORE"         help:"Storage destination path."`
-	Force               bool          `                             env:"SRR_FORCE"         help:"Override DB write lock if needed."`
-	Debug               bool          `short:"d"                    env:"SRR_DEBUG"         help:"Enable debug mode."`
-	// CmdTimeout / AllowPrivateFetch were previously env-only (read straight from
-	// os.Getenv in mod/); promoted to real flags so they show in --help and
-	// `srr config`. main applies them into the mod package after parse.
-	FetchBackoffMax   time.Duration `default:"1h" env:"SRR_FETCH_BACKOFF_MAX" help:"Loop-only: cap the adaptive per-feed poll interval a dormant feed drifts to (grows as time-since-last-new/8 from --interval). 0 disables backoff (poll every feed every cycle)."`
-	MaxDeltas         int           `default:"${maxDeltas}" env:"SRR_MAX_DELTAS" help:"Max delta segments (data/d<g>.gz, one per article-producing cycle) before a cycle consolidates them into the tail packs. Bounds a cold reader's extra requests. 0 disables deltas: every dirty cycle rewrites the tail packs (the pre-delta behavior)."`
-	MaxDeltaBytes     int           `default:"${maxDeltaBytes}" env:"SRR_MAX_DELTA_BYTES" help:"Consolidate the tail once the live delta segments hold more than this many KB of uncompressed article JSONL (bounds a cold reader's delta payload)."`
-	MaxBatchBytes     int           `default:"${maxBatchBytes}" env:"SRR_MAX_BATCH_BYTES" help:"Drive one cycle's article batch through pack materialization in sub-batches of at most this many KB of uncompressed article JSONL, so a large backfill's transient memory is bounded by the cap rather than by the batch. Chunking is byte-invisible in the store. 0 disables it: the whole batch materializes in one pass."`
-	KeepManifests     int           `default:"${keepManifests}" env:"SRR_KEEP_MANIFESTS" help:"GC grace window K: generation manifests kept alongside the current one, and with them every object they name. A reader whose root is up to K generations stale still resolves its own snapshot; anything older is reclaimed and the reader self-heals with one guarded reload."`
-	CmdTimeout        time.Duration `default:"5m" env:"SRR_CMD_TIMEOUT" help:"Timeout for a single external ingest/mod command (Go duration)."`
-	AllowPrivateFetch bool          `env:"SRR_ALLOW_PRIVATE_FETCH" help:"Disable the SSRF guard, allowing fetches from private/loopback addresses. Security override — leave off unless you fetch LAN/localhost feeds."`
-	CdnURL            string        `hidden:"" env:"SRR_CDN_URL" help:"CDN URL for frontend builds."`
-	// Notify / NotifyAfter are the feed-health alerting hook: fail_streak has
-	// always been recorded but nothing watched it. Context reaches the command
-	// through SRR_NOTIFY_* env vars, never string interpolation (feed titles and
-	// error text are attacker-influenced).
-	Notify      string `env:"SRR_NOTIFY" help:"Shell command run when a feed crosses --notify-after consecutive failures, and again when it recovers. Context arrives as SRR_NOTIFY_EVENT (fail|recover), _FEED, _FEED_ID, _URL, _ERROR, _STREAK. Empty (default) disables alerting."`
-	NotifyAfter int    `default:"5" env:"SRR_NOTIFY_AFTER" help:"Consecutive failures before --notify fires (the crossing alerts once per outage)."`
+	Workers int    `short:"w" default:"${nproc}" env:"SRR_WORKERS" help:"Number of concurrent downloads."`
+	Store   string `short:"o" default:"packs" env:"SRR_STORE" help:"Storage destination path, or a name from srr.yaml's 'stores:' alias map."`
+	Force   bool   `env:"SRR_FORCE" help:"Override DB write lock if needed."`
+	Debug   bool   `short:"d" env:"SRR_DEBUG" help:"Enable debug mode."`
+	CdnURL  string `hidden:"" env:"SRR_CDN_URL" help:"CDN URL for frontend builds."`
+
+	// Scoped knobs — no longer global flags (kong:"-"). Their kong
+	// declarations live on the shared structs in flags.go, embedded by the
+	// commands that read them (fetch, serve, mcp, store compact, preview,
+	// feed add/upd/import, config); every other command runs on
+	// seedScopedDefaults' default+env seeds. This struct stays the single
+	// runtime carrier so db_pack.go / notify.go / the mod applies are
+	// untouched, and `srr config` keeps printing every knob.
+	PackSize            int           `kong:"-"`
+	MaxFeedSize         int           `kong:"-"`
+	MaxAssetSize        int           `kong:"-"`
+	AssetProcess        string        `kong:"-"`
+	AssetPeek           string        `kong:"-"`
+	AssetWorkers        int           `kong:"-"`
+	AssetProcessTimeout time.Duration `kong:"-"`
+	CacheDir            string        `kong:"-"`
+	CacheMaxAge         time.Duration `kong:"-"`
+	FetchBackoffMax     time.Duration `kong:"-"`
+	MaxDeltas           int           `kong:"-"`
+	MaxDeltaBytes       int           `kong:"-"`
+	MaxBatchBytes       int           `kong:"-"`
+	KeepManifests       int           `kong:"-"`
+	CmdTimeout          time.Duration `kong:"-"`
+	AllowPrivateFetch   bool          `kong:"-"`
+	Notify              string        `kong:"-"`
+	NotifyAfter         int           `kong:"-"`
 }
 
 type FeedGroup struct {
@@ -177,27 +178,11 @@ func envFirstResolver(inner kong.Resolver) kong.Resolver {
 	})
 }
 
-func main() {
-	// Route all slog output (the default handler writes via the log package)
-	// through the terminal status line, so a log record and the in-place fetch
-	// stats line never garble each other. Pure passthrough when stderr isn't a
-	// tty or no status is drawn.
-	log.SetOutput(status)
-
-	var cli CLI
-	globals = &cli.Globals
-
-	configData, err := readConfig()
-	if err != nil {
-		fatal(err.Error())
-	}
-
-	resolver, err := kongyaml.Loader(bytes.NewReader(configData))
-	if err != nil {
-		fatal("parsing config", "err", err)
-	}
-
-	ctx := kong.Parse(&cli,
+// kongOptions is the single source of the CLI's kong configuration; the
+// parser-model tests build the same tree main() parses. resolver may be nil
+// (tests that don't exercise config resolution).
+func kongOptions(resolver kong.Resolver) []kong.Option {
+	opts := []kong.Option{
 		kong.Vars{
 			"nproc":         fmt.Sprint(runtime.NumCPU()),
 			"packSize":      fmt.Sprint(defaultPackSize),
@@ -212,14 +197,44 @@ func main() {
 		},
 		kong.Name("srr"),
 		kong.Description("Static RSS Reader backend."),
-		kong.Resolvers(envFirstResolver(resolver)),
 		kong.ShortUsageOnError(),
 		kong.ConfigureHelp(kong.HelpOptions{
 			Compact:             true,
 			FlagsLast:           true,
 			NoExpandSubcommands: true,
 		}),
-	)
+	}
+	if resolver != nil {
+		opts = append(opts, kong.Resolvers(resolver))
+	}
+	return opts
+}
+
+func main() {
+	// Route all slog output (the default handler writes via the log package)
+	// through the terminal status line, so a log record and the in-place fetch
+	// stats line never garble each other. Pure passthrough when stderr isn't a
+	// tty or no status is drawn.
+	log.SetOutput(status)
+
+	var cli CLI
+	globals = &cli.Globals
+	// Seed the scoped knobs (compiled default + SRR_* env) BEFORE Parse:
+	// commands embedding the flag structs overwrite these via AfterApply with
+	// fully-resolved values; the rest never run on Go zero values (flags.go).
+	seedScopedDefaults(globals)
+
+	configData, err := readConfig()
+	if err != nil {
+		fatal(err.Error())
+	}
+
+	resolver, err := kongyaml.Loader(bytes.NewReader(configData))
+	if err != nil {
+		fatal("parsing config", "err", err)
+	}
+
+	ctx := kong.Parse(&cli, kongOptions(envFirstResolver(resolver))...)
 
 	if err := store.LoadConfigs(configData); err != nil {
 		fatal("loading backend configs", "err", err)
@@ -237,51 +252,12 @@ func main() {
 		fatal("store path is required")
 	}
 
-	if globals.PackSize < 1 {
-		globals.PackSize = defaultPackSize
-	}
-
-	if globals.MaxFeedSize < 1 {
-		globals.MaxFeedSize = defaultMaxFeedSize
-	}
-
-	// Floor like the other size globals: a value <= 0 would make the asset
-	// fetcher's maxBytes <= 0, which disables every size-cap guard and lets an
-	// attacker-controlled response stream unbounded into memory/the store.
-	if globals.MaxAssetSize < 1 {
-		globals.MaxAssetSize = defaultMaxAssetSize
-	}
-
 	if globals.Workers < 1 {
 		globals.Workers = runtime.NumCPU()
 	}
-
-	// CacheDir is guaranteed non-empty from here on (the fetch path uses it
-	// directly, no per-site fallback): the kong ${cacheDir} default covers the
-	// unset case, this floor the explicitly-empty one (`cache-dir: ""` in YAML).
-	if globals.CacheDir == "" {
-		globals.CacheDir = defaultCacheDir()
-	}
-
-	if globals.AssetWorkers < 1 {
-		globals.AssetWorkers = runtime.NumCPU()
-	}
-
-	// The GC grace window K is the reader/SW/inspect contract (the compile-time
-	// keepManifests, exported as KEEP_MANIFESTS): a reader up to K generations
-	// stale must still resolve its snapshot. Two floors, one guard: a K < 1
-	// makes GC's cutoff reach the CURRENT manifest and delete it (m - 0 = m),
-	// which bricks the store on a crash between the sweep and the Commit that
-	// republishes it; and any K below the compile-time contract lets GC reclaim
-	// faster than the reader was built to tolerate, so within-window tabs 404
-	// (they self-heal, but needlessly) and `srr inspect`'s fixed-K window false-
-	// alarms. Raise a too-small value to the contract floor rather than honor an
-	// unsafe one.
-	if globals.KeepManifests < keepManifests {
-		slog.Warn("--keep-manifests below the reader grace-window contract; raising to the floor",
-			"requested", globals.KeepManifests, "floor", keepManifests)
-		globals.KeepManifests = keepManifests
-	}
+	// The scoped-knob floors (PackSize/MaxAssetSize/CacheDir/KeepManifests/…)
+	// live in Globals.floorScoped (flags.go), run by the seed and by every
+	// flag struct's AfterApply.
 
 	// Identify this build to feed publishers: "SRR/<version> (+repo)" is the
 	// shape feed readers are expected to send, and the version is the same one

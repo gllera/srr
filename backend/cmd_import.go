@@ -13,6 +13,8 @@ import (
 )
 
 type ImportCmd struct {
+	Net netFlags `embed:"" group:"Network flags:"`
+
 	Path   string   `arg:""                help:"Feeds opml file."`
 	ID     []string `short:"i"             help:"Ids to import."`
 	All    bool     `short:"a"             help:"Import all."`

@@ -196,6 +196,8 @@ func validateTag(tag string) error {
 }
 
 type AddCmd struct {
+	Net netFlags `embed:"" group:"Network flags:"`
+
 	Title   *string  `short:"t" required:"" help:"Feed title."`
 	URL     *string  `short:"u" required:"" help:"Feed RSS url."`
 	Tag     *string  `short:"g" optional:"" help:"Feed tag."`
@@ -313,6 +315,8 @@ func viewOf(ch *Feed) *feedView {
 }
 
 type UpdCmd struct {
+	Net netFlags `embed:"" group:"Network flags:"`
+
 	ID      int      `arg:""                help:"Feed id to update."`
 	Title   *string  `short:"t" optional:"" help:"Feed title (empty rejected)."`
 	URL     *string  `short:"u" optional:"" help:"Feed RSS url. Changing it resets the feed's fetch state (etag/watermark/dedup)."`

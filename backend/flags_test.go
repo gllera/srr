@@ -4,6 +4,8 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/alecthomas/kong"
 )
 
 // resetGlobals swaps in a fresh runtime carrier and restores the old one.
@@ -152,4 +154,81 @@ func TestFlagStructsApply(t *testing.T) {
 			t.Errorf("copy failed: %+v", *g)
 		}
 	})
+}
+
+// --- parser-model pins -------------------------------------------------------
+
+func newTestParser(t *testing.T) *kong.Kong {
+	t.Helper()
+	// The parser writes AfterApply values into the package globals; isolate.
+	resetGlobals(t)
+	var cli CLI
+	parser, err := kong.New(&cli, kongOptions(nil)...)
+	if err != nil {
+		t.Fatalf("kong.New: %v", err)
+	}
+	return parser
+}
+
+func nodeFlags(n *kong.Node) map[string]bool {
+	names := map[string]bool{}
+	for _, f := range n.Flags {
+		names[f.Name] = true
+	}
+	return names
+}
+
+func findCmd(t *testing.T, n *kong.Node, path ...string) *kong.Node {
+	t.Helper()
+	for _, name := range path {
+		var next *kong.Node
+		for _, c := range n.Children {
+			if c.Name == name {
+				next = c
+				break
+			}
+		}
+		if next == nil {
+			t.Fatalf("command %q not found under %q", name, n.Name)
+		}
+		n = next
+	}
+	return n
+}
+
+// The help-noise regression pin: no cycle/gc/net flag may sit at the root
+// (flattened into every command), each must appear where embedded, and a
+// plain command must carry none of them. scopedFlagNamesList doubles as the
+// yaml-resolution allowlist, so this test is also the struct<->list drift net.
+func TestScopedFlagsAreNotGlobal(t *testing.T) {
+	parser := newTestParser(t)
+	root := nodeFlags(parser.Model.Node)
+	for _, name := range scopedFlagNamesList {
+		if root[name] {
+			t.Errorf("--%s is a root (global) flag; it must live on its embedding commands only", name)
+		}
+	}
+	fetch := nodeFlags(findCmd(t, parser.Model.Node, "art", "fetch"))
+	for _, name := range scopedFlagNamesList {
+		if !fetch[name] {
+			t.Errorf("the fetch command is missing --%s", name)
+		}
+	}
+	feedRm := nodeFlags(findCmd(t, parser.Model.Node, "feed", "rm"))
+	for _, name := range scopedFlagNamesList {
+		if feedRm[name] {
+			t.Errorf("srr feed rm --help still carries --%s", name)
+		}
+	}
+	compact := nodeFlags(findCmd(t, parser.Model.Node, "compact"))
+	if !compact["keep-manifests"] {
+		t.Error("compact is missing --keep-manifests")
+	}
+	if compact["asset-process"] {
+		t.Error("compact must not carry cycleFlags")
+	}
+	preview := nodeFlags(findCmd(t, parser.Model.Node, "preview"))
+	if !preview["max-feed-size"] || preview["pack-size"] {
+		t.Error("srr preview must carry netFlags and not cycleFlags")
+	}
 }

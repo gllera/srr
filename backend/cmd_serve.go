@@ -34,6 +34,10 @@ import (
 var webuiFS embed.FS
 
 type ServeCmd struct {
+	Cycle cycleFlags `embed:"" group:"Fetch-cycle flags:"`
+	GC    gcFlags    `embed:"" group:"Fetch-cycle flags:"`
+	Net   netFlags   `embed:"" group:"Network flags:"`
+
 	Addr     string        `short:"a" default:"localhost:8088" env:"SRR_SERVE_ADDR" help:"Address to listen on (loopback only by default)."`
 	Interval time.Duration `help:"Also run a background fetch loop at this interval (e.g. 30m); 0 disables." default:"0" env:"SRR_SERVE_INTERVAL"`
 	SyncDir  string        `default:"${syncDir}" env:"SRR_SYNC_DIR" help:"Directory holding the cross-device reader-profile blobs served at /sync/<name> (GET the last-stored profile or 404, PUT to store it). Device state, kept out of the pack store on purpose. Empty disables the endpoint."`

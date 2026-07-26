@@ -53,6 +53,10 @@ type feedFilter struct {
 var shutdownGrace = 30 * time.Second
 
 type FetchCmd struct {
+	Cycle cycleFlags `embed:"" group:"Fetch-cycle flags:"`
+	GC    gcFlags    `embed:"" group:"Fetch-cycle flags:"`
+	Net   netFlags   `embed:"" group:"Network flags:"`
+
 	Interval time.Duration `help:"Run fetch in a loop with this interval." default:"0" env:"SRR_FETCH_INTERVAL"`
 
 	// Spool / InboxProducers are the two halves of the inbox pattern, which

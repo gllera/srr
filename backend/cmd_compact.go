@@ -48,6 +48,8 @@ import (
 
 // CompactCmd is `srr compact`.
 type CompactCmd struct {
+	GC gcFlags `embed:"" group:"GC flags:"`
+
 	DryRun bool `short:"n" name:"dry-run" help:"Report what compaction would reclaim (expired articles, packs/shards rewritten, assets deleted) and exit without touching the store."`
 }
 

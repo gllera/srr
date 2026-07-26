@@ -10,9 +10,10 @@ import (
 )
 
 // The CacheDir flag has no static default (its value is computed at runtime), so
-// it must carry a default:"${cacheDir}" tag wired to the kong var; otherwise the
-// field parses empty and `srr config` / --help print a blank cache-dir line. Parse
-// the real CLI with no args and assert the resolved default lands in the field.
+// its cycleFlags field must carry a default:"${cacheDir}" tag wired to the kong
+// var, and the AfterApply hook must land the resolved value in the runtime
+// globals; otherwise `srr config` / --help print a blank cache-dir line. Parse
+// the real CLI like main() does and assert the default reaches globals.
 func TestCacheDirDefaultResolved(t *testing.T) {
 	// Ensure no ambient env var masks the default (kong's native env: handling
 	// treats even an empty SRR_CACHE_DIR as a value that overrides the default).
@@ -22,26 +23,21 @@ func TestCacheDirDefaultResolved(t *testing.T) {
 	}
 
 	var cli CLI
-	parser, err := kong.New(&cli, kong.Vars{
-		"nproc":         "1",
-		"packSize":      "1",
-		"maxFeedSize":   "1",
-		"maxAssetSize":  "1",
-		"maxDeltas":     "1",
-		"maxDeltaBytes": "1",
-		"maxBatchBytes": "1",
-		"keepManifests": "1",
-		"cacheDir":      defaultCacheDir(),
-		"syncDir":       defaultSyncDir(),
-	})
+	saved := globals
+	globals = &cli.Globals // mirror main(): AfterApply writes into the parsed CLI
+	t.Cleanup(func() { globals = saved })
+
+	parser, err := kong.New(&cli, kongOptions(nil)...)
 	if err != nil {
 		t.Fatalf("kong.New: %v", err)
 	}
+	// Deliberately NOT seeded: the kong default + AfterApply chain alone must
+	// fill the field for the embedding command.
 	if _, err := parser.Parse([]string{"config"}); err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if want := defaultCacheDir(); cli.CacheDir != want {
-		t.Errorf("CacheDir default = %q, want %q (config/--help would print blank)", cli.CacheDir, want)
+	if want := defaultCacheDir(); globals.CacheDir != want {
+		t.Errorf("CacheDir default = %q, want %q (config/--help would print blank)", globals.CacheDir, want)
 	}
 }
 

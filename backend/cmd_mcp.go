@@ -30,7 +30,11 @@ import (
 //   - the MCP SDK's own logger defaults to slog.DiscardHandler.
 //
 // A tool handler must therefore never call printJSON or fmt.Print*.
-type McpCmd struct{}
+type McpCmd struct {
+	Cycle cycleFlags `embed:"" group:"Fetch-cycle flags:"`
+	GC    gcFlags    `embed:"" group:"Fetch-cycle flags:"`
+	Net   netFlags   `embed:"" group:"Network flags:"`
+}
 
 func (o *McpCmd) Run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

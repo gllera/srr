@@ -11,6 +11,10 @@ import (
 )
 
 type ConfigCmd struct {
+	Cycle cycleFlags `embed:"" group:"Fetch-cycle flags:"`
+	GC    gcFlags    `embed:"" group:"Fetch-cycle flags:"`
+	Net   netFlags   `embed:"" group:"Network flags:"`
+
 	Key string `arg:"" optional:"" help:"Config key to print (omit for all)."`
 }
 

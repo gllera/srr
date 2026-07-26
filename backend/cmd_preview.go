@@ -14,6 +14,8 @@ import (
 )
 
 type PreviewCmd struct {
+	Net netFlags `embed:"" group:"Network flags:"`
+
 	URL     *url.URL `arg:"" help:"URL to preview."`
 	Recipe  string   `short:"r" default:"default" help:"Preview as if the feed used this recipe."`
 	Pipe    []string `short:"p" sep:"none" help:"Ad-hoc pipeline override (repeat -p per step), like a feed-level pipe: overrides the recipe's pipe; #default expands to the recipe's effective pipe."`
