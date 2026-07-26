@@ -128,7 +128,7 @@ func renderPreview(ctx context.Context, recipes map[string]Recipe, recipeName st
 		if i == nil {
 			continue
 		}
-		if err := processItem(ctx, processor, pipe, i); err != nil {
+		if err := processItem(ctx, processor, pipe, i, result.Lang); err != nil {
 			return nil, err
 		}
 		if i.Drop {

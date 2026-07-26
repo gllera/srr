@@ -91,6 +91,22 @@ func validLangCode(code string) bool {
 	return iso6391Codes[code] || langMacro[code] != nil
 }
 
+// NormalizeLangCode folds a DECLARED language tag ("en-US", "ES", "pt_BR") to
+// the bare lowercase ISO 639-1 subtag SRR stores, returning "" when the result
+// is not a code this package recognizes ("zz", "english", ""). Declared tags
+// come from outside — a feed's own <language> element, an external strategy's
+// wire value — so junk must stamp NOTHING: the always-on detection is
+// deliberately fail-open, and a confidently wrong stamp is the one outcome
+// that costs more than an empty one (`#filter keep_lang` decides on it, and
+// the value rides into an immutable data pack).
+func NormalizeLangCode(s string) string {
+	code := normalizeLang(s)
+	if !validLangCode(code) {
+		return ""
+	}
+	return code
+}
+
 // iso6391Codes is the set of ISO 639-1 codes detection can produce — the
 // validation table for #filter keep_lang's allowlist, so a typo'd code is a
 // hard configuration error.

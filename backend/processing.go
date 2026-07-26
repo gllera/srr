@@ -25,7 +25,11 @@ var titlePolicy = bluemonday.StrictPolicy()
 // deliberately NOT here — it performs I/O and applies only on the fetch path,
 // so feed.fetch runs it after this returns. Callers without a store (preview,
 // tests) get the finished content directly.
-func processItem(ctx context.Context, processor *mod.Module, pipeline []string, i *mod.RawItem) error {
+//
+// feedLang is the language the SOURCE declares for the whole feed
+// (ingest.Result.Lang), the last resort of the language stamp below; "" when
+// the source declares none, which is the common case.
+func processItem(ctx context.Context, processor *mod.Module, pipeline []string, i *mod.RawItem, feedLang string) error {
 	// One content session for the whole item: the always-on steps below and
 	// every DOM-capable pipeline step share ONE parse of the content, and the
 	// string is materialized only at a boundary (a string-form step, or the
@@ -39,13 +43,27 @@ func processItem(ctx context.Context, processor *mod.Module, pipeline []string, 
 	absolutizeContent(sess, i.Link)
 	// Always-on language stamp, BEFORE the pipeline so every step can read
 	// i.Lang — #filter keep_lang consumes it instead of detecting on its own.
-	// A confident detection fills Lang unless the ingest strategy already
-	// declared one; the fail-open path (short text, low confidence) leaves it
-	// empty. Detection reads the session's DOM (markup stripped), so raw
-	// pre-sanitize content detects the same as clean text.
+	// Precedence, strictly: a per-item declared Lang (the ingest strategy said
+	// so about THIS item) > a confident detection > the feed's own declared
+	// language. Detection reads the session's DOM (markup stripped), so raw
+	// pre-sanitize content detects the same as clean text; its fail-open path
+	// (short text, low confidence) leaves Lang empty.
 	preTitle, preRev := i.Title, sess.Rev()
 	if i.Lang == "" {
 		i.Lang = mod.DetectLangNode(preTitle, sess.DOM())
+	}
+	// Last resort: what the feed declares about itself. Detection's gate is
+	// deliberately conservative, so short microblog-style items — exactly the
+	// ones a keep_lang pipe most needs a value for — routinely reach here
+	// unstamped. Normalized through mod.NormalizeLangCode, which answers "" for
+	// a tag that is not a code we recognize: a publisher's junk <language> must
+	// stamp nothing rather than something confidently wrong. Remembered in
+	// declaredLang so the post-pipe retry below can tell its own fallback from
+	// a value a pipeline step chose.
+	declaredLang := ""
+	if i.Lang == "" {
+		declaredLang = mod.NormalizeLangCode(feedLang)
+		i.Lang = declaredLang
 	}
 	if len(pipeline) > 0 {
 		GUID := i.GUID
@@ -85,6 +103,15 @@ func processItem(ctx context.Context, processor *mod.Module, pipeline []string, 
 	// the content past the gate (#readability replacing a short teaser with the
 	// full article body).
 	//
+	// "Came up empty" includes an item still carrying the feed-declared
+	// fallback: detection outranks it, so a step that grew the content must be
+	// allowed to replace it. The value being ours is what the comparison
+	// against declaredLang establishes — once a pipeline step has overridden
+	// Lang, the item no longer holds a fallback and is left alone. And the
+	// retry only overwrites on a real code: assigning unconditionally was safe
+	// while the field could only be empty here, but it would now clear a good
+	// fallback whenever the re-detection abstains too.
+	//
 	// The guard tracks whether DetectLang's exact INPUTS changed, not their
 	// sizes. Skipping is then provably safe: DetectLang is a pure function of
 	// (title, content), so unchanged inputs give the identical answer. A size
@@ -99,8 +126,10 @@ func processItem(ctx context.Context, processor *mod.Module, pipeline []string, 
 	// it answers the same question — with one deliberate exclusion, the
 	// control-character strip just above, which cannot change a classification
 	// (control characters are not letters, and the detector folds whitespace).
-	if i.Lang == "" && (i.Title != preTitle || sess.Rev() != preRev) {
-		i.Lang = mod.DetectLang(i.Title, i.Content)
+	if (i.Lang == "" || i.Lang == declaredLang) && (i.Title != preTitle || sess.Rev() != preRev) {
+		if code := mod.DetectLang(i.Title, i.Content); code != "" {
+			i.Lang = code
+		}
 	}
 	return nil
 }

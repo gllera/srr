@@ -130,3 +130,23 @@ func TestNormalizeLang(t *testing.T) {
 		}
 	}
 }
+
+// NormalizeLangCode is normalizeLang plus the validation gate, for tags SRR
+// did not detect but was told: a feed's own <language>, an external strategy's
+// wire value. Junk must answer "" — the caller stamps whatever comes back, and
+// the whole detection design refuses to be confidently wrong.
+func TestNormalizeLangCode(t *testing.T) {
+	for in, want := range map[string]string{
+		// The padding is the test case (trim before folding), same as above.
+		//nolint:gocritic // mapKey: the whitespace is deliberate input
+		"en": "en", "ES": "es", "en-US": "en", "pt_BR": "pt", " fr ": "fr",
+		// A macrolanguage is a legal thing for a publisher to declare.
+		"no": "no", "nb": "nb",
+		// Not codes detection could ever produce — stamp nothing.
+		"zz": "", "english": "", "": "", "ceb": "", "-": "",
+	} {
+		if got := NormalizeLangCode(in); got != want {
+			t.Errorf("NormalizeLangCode(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

@@ -53,7 +53,7 @@ func TestProcessItemRejectsImmutableFieldChange(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			item := &mod.RawItem{GUID: 42, Title: "t", Content: "c", Link: "http://example.com", Published: &now}
-			err := processItem(context.Background(), mod.New(), []string{tt.module}, item)
+			err := processItem(context.Background(), mod.New(), []string{tt.module}, item, "")
 			wantErr(t, err, tt.want)
 		})
 	}
@@ -65,7 +65,7 @@ func TestProcessItemRejectsImmutableFieldChange(t *testing.T) {
 // fire on a step that returns nil but mutates a frozen field.
 func TestProcessItemWrapsModuleError(t *testing.T) {
 	item := &mod.RawItem{GUID: 1, Title: "t", Content: "c", Link: "http://example.com"}
-	err := processItem(context.Background(), mod.New(), []string{"exit 1"}, item)
+	err := processItem(context.Background(), mod.New(), []string{"exit 1"}, item, "")
 	if err == nil {
 		t.Fatal("expected an error from a failing module step, got nil")
 	}
@@ -87,7 +87,7 @@ func TestProcessItemSanitizeIsExplicit(t *testing.T) {
 	// No #sanitize → hostile nodes survive verbatim.
 	for _, pipe := range [][]string{nil, {"#minify"}} {
 		item := &mod.RawItem{Content: hostileHTML, Link: "http://example.com"}
-		if err := processItem(ctx, mod.New(), pipe, item); err != nil {
+		if err := processItem(ctx, mod.New(), pipe, item, ""); err != nil {
 			t.Fatalf("processItem(pipe=%v): %v", pipe, err)
 		}
 		if !strings.Contains(item.Content, "<script") || !strings.Contains(item.Content, "onerror") {
@@ -97,7 +97,7 @@ func TestProcessItemSanitizeIsExplicit(t *testing.T) {
 
 	// With #sanitize → script element and event handler are gone, safe text stays.
 	item := &mod.RawItem{Content: hostileHTML, Link: "http://example.com"}
-	if err := processItem(ctx, mod.New(), []string{"#sanitize"}, item); err != nil {
+	if err := processItem(ctx, mod.New(), []string{"#sanitize"}, item, ""); err != nil {
 		t.Fatalf("processItem(#sanitize): %v", err)
 	}
 	if strings.Contains(item.Content, "<script") || strings.Contains(item.Content, "onerror") {
@@ -123,7 +123,7 @@ func TestProcessItemDropShortCircuit(t *testing.T) {
 	}
 	// Pipeline: #filter drops on title match → sentinel step must NOT run.
 	pipe := []string{"#filter drop_title=/amp/", "#test-sentinel-later"}
-	err := processItem(context.Background(), mod.New(), pipe, item)
+	err := processItem(context.Background(), mod.New(), pipe, item, "")
 	if err != nil {
 		t.Fatalf("processItem returned error on drop: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestProcessItemDropByExternalMod(t *testing.T) {
 		Published: &now,
 	}
 	pipe := []string{`echo '{"drop":true}'`, "#test-sentinel-later"}
-	err := processItem(context.Background(), mod.New(), pipe, item)
+	err := processItem(context.Background(), mod.New(), pipe, item, "")
 	if err != nil {
 		t.Fatalf("processItem returned error on drop: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestProcessItemStampsLang(t *testing.T) {
 
 	// Confident detection, no pipe at all → stamped.
 	item := &mod.RawItem{Content: spanish, Link: "http://example.com"}
-	if err := processItem(ctx, mod.New(), nil, item); err != nil {
+	if err := processItem(ctx, mod.New(), nil, item, ""); err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
 	if item.Lang != "es" {
@@ -189,7 +189,7 @@ func TestProcessItemStampsLang(t *testing.T) {
 
 	// A declared value survives — the stamp never clobbers.
 	item = &mod.RawItem{Content: spanish, Link: "http://example.com", Lang: "fr"}
-	if err := processItem(ctx, mod.New(), []string{"#minify"}, item); err != nil {
+	if err := processItem(ctx, mod.New(), []string{"#minify"}, item, ""); err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
 	if item.Lang != "fr" {
@@ -198,7 +198,7 @@ func TestProcessItemStampsLang(t *testing.T) {
 
 	// Below the detection gate → Lang stays empty (fail-open).
 	item = &mod.RawItem{Title: "Hi", Content: "Too short", Link: "http://example.com"}
-	if err := processItem(ctx, mod.New(), nil, item); err != nil {
+	if err := processItem(ctx, mod.New(), nil, item, ""); err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
 	if item.Lang != "" {
@@ -208,7 +208,7 @@ func TestProcessItemStampsLang(t *testing.T) {
 	// The stamp precedes the pipeline, so even an item a later step drops
 	// carries its detection — the order keep_lang depends on.
 	item = &mod.RawItem{Title: "drop me", Content: spanish, Link: "http://example.com"}
-	if err := processItem(ctx, mod.New(), []string{"#filter drop_title=/drop/"}, item); err != nil {
+	if err := processItem(ctx, mod.New(), []string{"#filter drop_title=/drop/"}, item, ""); err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
 	if !item.Drop {
@@ -230,7 +230,7 @@ func TestProcessItemPostPipeDetection(t *testing.T) {
 
 	// Too short to detect up front; a step replaces it past the gate → stamped.
 	item := &mod.RawItem{Content: "corto", Link: "http://example.com"}
-	if err := processItem(ctx, mod.New(), []string{grow}, item); err != nil {
+	if err := processItem(ctx, mod.New(), []string{grow}, item, ""); err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
 	if item.Lang != "es" {
@@ -243,7 +243,7 @@ func TestProcessItemPostPipeDetection(t *testing.T) {
 	// skipped it — silently disabling the retry for the case it exists for.
 	teaser := `<a href="x"><img src="data:image/png;base64,` + strings.Repeat("A", 3000) + `"></a><p>Leer</p>`
 	item = &mod.RawItem{Content: teaser, Link: "http://example.com"}
-	if err := processItem(ctx, mod.New(), []string{grow}, item); err != nil {
+	if err := processItem(ctx, mod.New(), []string{grow}, item, ""); err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
 	if len(item.Content) >= len(teaser) {
@@ -256,7 +256,7 @@ func TestProcessItemPostPipeDetection(t *testing.T) {
 	// Unchanged inputs skip the retry: DetectLang is pure, so the answer cannot
 	// differ. Observable only as the same fail-open empty.
 	item = &mod.RawItem{Content: "corto pero no detectable", Link: "http://example.com"}
-	if err := processItem(ctx, mod.New(), nil, item); err != nil {
+	if err := processItem(ctx, mod.New(), nil, item, ""); err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
 	if item.Lang != "" {
@@ -274,7 +274,7 @@ func TestProcessItemKeepLangUsesStampedLang(t *testing.T) {
 
 	// Auto-detected es ∉ {en} → dropped.
 	item := &mod.RawItem{Content: spanish, Link: "http://example.com"}
-	if err := processItem(ctx, mod.New(), []string{"#filter keep_lang=en"}, item); err != nil {
+	if err := processItem(ctx, mod.New(), []string{"#filter keep_lang=en"}, item, ""); err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
 	if !item.Drop {
@@ -283,7 +283,7 @@ func TestProcessItemKeepLangUsesStampedLang(t *testing.T) {
 
 	// Auto-detected es ∈ {en,es} → kept, stamp intact.
 	item = &mod.RawItem{Content: spanish, Link: "http://example.com"}
-	if err := processItem(ctx, mod.New(), []string{"#filter keep_lang=en,es"}, item); err != nil {
+	if err := processItem(ctx, mod.New(), []string{"#filter keep_lang=en,es"}, item, ""); err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
 	if item.Drop || item.Lang != "es" {
@@ -292,7 +292,7 @@ func TestProcessItemKeepLangUsesStampedLang(t *testing.T) {
 
 	// Below the detection gate → Lang empty → fail-open keep.
 	item = &mod.RawItem{Title: "Hi", Content: "Too short", Link: "http://example.com"}
-	if err := processItem(ctx, mod.New(), []string{"#filter keep_lang=en"}, item); err != nil {
+	if err := processItem(ctx, mod.New(), []string{"#filter keep_lang=en"}, item, ""); err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
 	if item.Drop {
@@ -302,11 +302,130 @@ func TestProcessItemKeepLangUsesStampedLang(t *testing.T) {
 	// A declared value drives the decision — Spanish text declared fr is
 	// dropped by keep_lang=es (the declaration is authoritative, not the text).
 	item = &mod.RawItem{Content: spanish, Link: "http://example.com", Lang: "fr"}
-	if err := processItem(ctx, mod.New(), []string{"#filter keep_lang=es"}, item); err != nil {
+	if err := processItem(ctx, mod.New(), []string{"#filter keep_lang=es"}, item, ""); err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
 	if !item.Drop || item.Lang != "fr" {
 		t.Errorf("Drop=%v Lang=%q, want dropped with declared \"fr\" intact", item.Drop, item.Lang)
+	}
+}
+
+// The feed's own declared language (RSS <language> / Atom xml:lang) is the
+// LAST resort of the stamp: declared-per-item > confident detection >
+// feed-declared. It exists for the short microblog-style items the detection
+// gate deliberately abstains on — which are exactly the items a keep_lang pipe
+// would otherwise never be able to judge.
+func TestProcessItemFeedLangFallback(t *testing.T) {
+	const spanish = "El rápido zorro marrón salta sobre el perro perezoso mientras el sol de la mañana se eleva lentamente sobre el tranquilo campo español."
+	ctx := context.Background()
+
+	// (a) Below the detection gate, so detection abstains → the feed's tag fills
+	// it, folded to the bare subtag SRR stores.
+	item := &mod.RawItem{Title: "Hi", Content: "Too short", Link: "http://example.com"}
+	if err := processItem(ctx, mod.New(), nil, item, "en-US"); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if item.Lang != "en" {
+		t.Errorf("Lang = %q, want %q from the feed declaration", item.Lang, "en")
+	}
+
+	// (b) A confident detection outranks the feed's declaration: the feed says
+	// what it usually publishes, the article says what it IS.
+	item = &mod.RawItem{Content: spanish, Link: "http://example.com"}
+	if err := processItem(ctx, mod.New(), nil, item, "en"); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if item.Lang != "es" {
+		t.Errorf("Lang = %q, want detected %q to beat the feed's \"en\"", item.Lang, "es")
+	}
+
+	// (c) A per-item declared value outranks both.
+	item = &mod.RawItem{Content: spanish, Link: "http://example.com", Lang: "fr"}
+	if err := processItem(ctx, mod.New(), nil, item, "en"); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if item.Lang != "fr" {
+		t.Errorf("Lang = %q, want declared %q to beat detection and the feed", item.Lang, "fr")
+	}
+
+	// (d) A junk declaration stamps NOTHING — the no-wrong-confident-stamp
+	// property. An unstamped article fails open everywhere downstream; a
+	// wrongly stamped one rides into an immutable pack.
+	item = &mod.RawItem{Title: "Hi", Content: "Too short", Link: "http://example.com"}
+	if err := processItem(ctx, mod.New(), nil, item, "zz"); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if item.Lang != "" {
+		t.Errorf("Lang = %q, want empty for an invalid feed language", item.Lang)
+	}
+}
+
+// (e) The finding's motivating case: a short item only the feed-level fallback
+// can stamp must survive a keep_lang naming that language. Before the fallback
+// it reached #filter with an empty Lang — kept by fail-open, but equally kept
+// had the feed been in any other language, so the filter did nothing at all on
+// the microblog feeds it was configured for.
+func TestProcessItemKeepLangUsesFeedLang(t *testing.T) {
+	ctx := context.Background()
+
+	item := &mod.RawItem{Title: "Hi", Content: "Too short", Link: "http://example.com"}
+	if err := processItem(ctx, mod.New(), []string{"#filter keep_lang=en"}, item, "en-US"); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if item.Drop || item.Lang != "en" {
+		t.Errorf("Drop=%v Lang=%q, want kept with the feed's \"en\"", item.Drop, item.Lang)
+	}
+
+	// The other side of the same coin: the fallback now makes such an item
+	// judgeable, so a feed declaring a language outside the allowlist drops it.
+	item = &mod.RawItem{Title: "Hi", Content: "Too short", Link: "http://example.com"}
+	if err := processItem(ctx, mod.New(), []string{"#filter keep_lang=en"}, item, "de"); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if !item.Drop {
+		t.Error("expected Drop=true: the feed declares de, outside keep_lang=en")
+	}
+}
+
+// (f) The post-pipe retry must still fire on an item carrying only the feed's
+// declaration — detection outranks it, so a step that grew a teaser into a full
+// body gets to replace it. The interaction is the subtle half of the fallback:
+// stamping pre-pipe would otherwise permanently disable the retry, whose gate
+// used to be "Lang is empty".
+func TestProcessItemPostPipeDetectionOverridesFeedLang(t *testing.T) {
+	const spanish = "El rápido zorro marrón salta sobre el perro perezoso mientras el sol de la mañana se eleva lentamente sobre el tranquilo campo español."
+	ctx := context.Background()
+	grow := fmt.Sprintf("jq -c '.content = %q'", spanish)
+
+	// Too short to detect up front → stamped "en" by the feed; the step grows it
+	// past the gate → the detected "es" wins.
+	item := &mod.RawItem{Content: "corto", Link: "http://example.com"}
+	if err := processItem(ctx, mod.New(), []string{grow}, item, "en"); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if item.Lang != "es" {
+		t.Errorf("Lang = %q, want %q — a grown body must re-detect over the feed fallback", item.Lang, "es")
+	}
+
+	// A value a pipeline step chose is NOT ours to replace: the retry leaves it
+	// alone even though the content grew and detection would disagree.
+	setLang := fmt.Sprintf("jq -c '.lang = \"de\" | .content = %q'", spanish)
+	item = &mod.RawItem{Content: "corto", Link: "http://example.com"}
+	if err := processItem(ctx, mod.New(), []string{setLang}, item, "en"); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if item.Lang != "de" {
+		t.Errorf("Lang = %q, want the step's %q preserved", item.Lang, "de")
+	}
+
+	// And the fallback survives a retry that abstains: the re-detection returns
+	// "" on a still-short body, which must not clear a good declaration.
+	item = &mod.RawItem{Content: "corto", Link: "http://example.com"}
+	if err := processItem(ctx, mod.New(), []string{`jq -c '.content = "aun corto"'`}, item, "en"); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if item.Lang != "en" {
+		t.Errorf("Lang = %q, want the feed's %q kept when the retry abstains", item.Lang, "en")
 	}
 }
 
@@ -318,7 +437,7 @@ func TestProcessItemKeepLangUsesStampedLang(t *testing.T) {
 func TestProcessItemSanitizeOrderingHazard(t *testing.T) {
 	item := &mod.RawItem{Content: "<p>safe</p>", Link: "http://example.com"}
 	pipe := []string{"#sanitize", `jq -c '.content="<script>evil</script>"'`}
-	if err := processItem(context.Background(), mod.New(), pipe, item); err != nil {
+	if err := processItem(context.Background(), mod.New(), pipe, item, ""); err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
 	if !strings.Contains(item.Content, "<script>evil</script>") {
@@ -337,8 +456,8 @@ func parseFeedTitle(t *testing.T, rssTitle string) string {
 		`<item><title>` + rssTitle + `</title><link>http://example.com</link></item>` +
 		`</channel></rss>`)
 	var got string
-	_, _, err := ingest.ParseFeed(feed, func(i *mod.RawItem) error {
-		if err := processItem(context.Background(), mod.New(), nil, i); err != nil {
+	_, _, _, err := ingest.ParseFeed(feed, func(i *mod.RawItem) error {
+		if err := processItem(context.Background(), mod.New(), nil, i, ""); err != nil {
 			return err
 		}
 		got = i.Title
@@ -418,7 +537,7 @@ func TestProcessItemAbsolutizesRelativeURLs(t *testing.T) {
 			`<a href="#fn1">fn</a><img src="#/photo.jpg"><img src="assets/ab/cdef.webp">` +
 			`<video src="https://other.org/v.mp4" poster="../p.jpg"></video>`,
 	}
-	if err := processItem(context.Background(), mod.New(), nil, i); err != nil {
+	if err := processItem(context.Background(), mod.New(), nil, i, ""); err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
 	for _, want := range []string{
@@ -443,7 +562,7 @@ func TestProcessItemAbsolutizeNoOp(t *testing.T) {
 	const content = `<p ><img src='/i.jpg'>text &amp; more</p >`
 	for _, link := range []string{"", "not a url", "mailto:x@ex.com", "/relative/only"} {
 		i := &mod.RawItem{Link: link, Content: content}
-		if err := processItem(context.Background(), mod.New(), nil, i); err != nil {
+		if err := processItem(context.Background(), mod.New(), nil, i, ""); err != nil {
 			t.Fatalf("processItem: %v", err)
 		}
 		if i.Content != content {
@@ -451,7 +570,7 @@ func TestProcessItemAbsolutizeNoOp(t *testing.T) {
 		}
 	}
 	i := &mod.RawItem{Link: "https://ex.com/p/1", Content: `<p ><img src='https://x.org/a.jpg'></p >`}
-	if err := processItem(context.Background(), mod.New(), nil, i); err != nil {
+	if err := processItem(context.Background(), mod.New(), nil, i, ""); err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
 	if i.Content != `<p ><img src='https://x.org/a.jpg'></p >` {

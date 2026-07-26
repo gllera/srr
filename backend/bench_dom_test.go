@@ -59,7 +59,7 @@ func benchProcessItem(b *testing.B, pipe []string) {
 	for b.Loop() {
 		item := &mod.RawItem{GUID: 1, Title: "A realistic article title",
 			Content: content, Link: "https://ex.com/post/1", Raw: raw}
-		if err := processItem(ctx, m, pipe, item); err != nil {
+		if err := processItem(ctx, m, pipe, item, ""); err != nil {
 			b.Fatal(err)
 		}
 	}

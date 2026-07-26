@@ -71,7 +71,7 @@ func feedFetch(ctx context.Context, client *http.Client, buf []byte, req Request
 	}
 
 	var items []*mod.RawItem
-	feedTitle, partial, parseErr := ParseFeed(data, func(i *mod.RawItem) error {
+	feedTitle, feedLang, partial, parseErr := ParseFeed(data, func(i *mod.RawItem) error {
 		items = append(items, i)
 		return nil
 	})
@@ -103,7 +103,7 @@ func feedFetch(ctx context.Context, client *http.Client, buf []byte, req Request
 		return Result{}, parseErr
 	}
 
-	result := Result{Items: items, Title: feedTitle, Partial: partial}
+	result := Result{Items: items, Title: feedTitle, Lang: feedLang, Partial: partial}
 	if !partial {
 		// A partial parse deliberately withholds the validators: storing them
 		// would let the next cycle 304 on the same broken bytes, stranding every
@@ -296,6 +296,22 @@ func rawToFeedItem(r mod.RawFeedItem, dateHint *string) *mod.RawItem {
 	}
 }
 
+// xmlNamespace is what encoding/xml expands the reserved "xml:" prefix to. The
+// prefix is bound implicitly, so a declared or undeclared document both land
+// here; the bare "xml" spelling is accepted alongside it because a non-strict
+// parse of an oddly-declared document can surface the raw prefix instead.
+const xmlNamespace = "http://www.w3.org/XML/1998/namespace"
+
+// rootLang returns the root element's xml:lang, "" when it carries none.
+func rootLang(se xml.StartElement) string {
+	for _, a := range se.Attr {
+		if a.Name.Local == "lang" && (a.Name.Space == xmlNamespace || a.Name.Space == "xml") {
+			return strings.TrimSpace(a.Value)
+		}
+	}
+	return ""
+}
+
 // errNotFeed classifies a document that is simply not a recognized feed — an
 // HTML page, an unknown XML root, or non-XML bytes — as opposed to a genuine
 // I/O or decoder fault while parsing something that *was* a feed. The caller
@@ -304,13 +320,24 @@ var errNotFeed = errors.New("not a recognized feed")
 
 // ParseFeed streams feed items to the callback and returns the feed's own
 // channel/feed-level title (the first <title> directly under <channel> or the
-// Atom <feed> root — never an <item>/<image> title; "" when absent). An error
-// from the callback is propagated. A document that is not a recognized feed is
-// reported wrapped in errNotFeed; a fault while parsing a recognized feed is a
-// plain error. partial is true when the parse stopped at a malformed mid-feed
-// element (still non-error — the items streamed so far are the good prefix):
-// the caller must treat the response as incomplete (see Result.Partial).
-func ParseFeed(data []byte, fn func(*mod.RawItem) error) (title string, partial bool, err error) {
+// Atom <feed> root — never an <item>/<image> title; "" when absent) and its
+// own declared language, "" when absent. Two sources, first non-empty winning:
+// the ROOT element's xml:lang (Atom's spelling — <feed xml:lang="en"> — and
+// legal on <rss>/<rdf:RDF> too), then a <language>/<dc:language> element
+// directly under <channel> (RSS 2.0 / RDF). The root attribute is preferred
+// because it declares the whole document while the element is a channel-scoped
+// RSS convention; a feed carrying both agrees in practice, so the order only
+// has to be decided once. The value comes back verbatim (whitespace-trimmed) —
+// validating a language tag is the consumer's job, not the parser's (see
+// mod.NormalizeLangCode).
+//
+// An error from the callback is propagated. A document that is not a
+// recognized feed is reported wrapped in errNotFeed; a fault while parsing a
+// recognized feed is a plain error. partial is true when the parse stopped at
+// a malformed mid-feed element (still non-error — the items streamed so far
+// are the good prefix): the caller must treat the response as incomplete (see
+// Result.Partial).
+func ParseFeed(data []byte, fn func(*mod.RawItem) error) (title, lang string, partial bool, err error) {
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	// Transcode declared non-UTF-8 encodings (ISO-8859-1, windows-1252, …) to
 	// UTF-8: Go's encoding/xml is UTF-8 only and otherwise errors on the first
@@ -323,10 +350,11 @@ func ParseFeed(data []byte, fn func(*mod.RawItem) error) (title string, partial 
 	dec.Entity = xml.HTMLEntity
 
 	var itemTag string
+	var feedLang string
 	for {
 		tok, err := dec.Token()
 		if err != nil {
-			return "", false, fmt.Errorf("%w: detecting feed format: %w", errNotFeed, err)
+			return "", "", false, fmt.Errorf("%w: detecting feed format: %w", errNotFeed, err)
 		}
 		if se, ok := tok.(xml.StartElement); ok {
 			switch se.Name.Local {
@@ -335,8 +363,9 @@ func ParseFeed(data []byte, fn func(*mod.RawItem) error) (title string, partial 
 			case "feed":
 				itemTag = "entry"
 			default:
-				return "", false, fmt.Errorf("%w: unexpected root <%s>", errNotFeed, se.Name.Local)
+				return "", "", false, fmt.Errorf("%w: unexpected root <%s>", errNotFeed, se.Name.Local)
 			}
+			feedLang = rootLang(se)
 			break
 		}
 	}
@@ -347,10 +376,10 @@ func ParseFeed(data []byte, fn func(*mod.RawItem) error) (title string, partial 
 	for {
 		tok, err := dec.Token()
 		if errors.Is(err, io.EOF) {
-			return feedTitle, false, nil
+			return feedTitle, feedLang, false, nil
 		}
 		if err != nil {
-			return feedTitle, false, fmt.Errorf("parsing feed: %w", err)
+			return feedTitle, feedLang, false, fmt.Errorf("parsing feed: %w", err)
 		}
 		switch se := tok.(type) {
 		case xml.EndElement:
@@ -368,10 +397,10 @@ func ParseFeed(data []byte, fn func(*mod.RawItem) error) (title string, partial 
 					// validators and the watermark advance and the next cycle refetches
 					// the remainder instead of 304ing past it forever.
 					slog.Warn("feed parse stopped at malformed element", "err", err)
-					return feedTitle, true, nil
+					return feedTitle, feedLang, true, nil
 				}
 				if err := fn(rawToFeedItem(raw.Chld, &dateHint)); err != nil {
-					return feedTitle, false, err
+					return feedTitle, feedLang, false, err
 				}
 				continue
 			}
@@ -385,6 +414,23 @@ func ParseFeed(data []byte, fn func(*mod.RawItem) error) (title string, partial 
 				var s string
 				if err := dec.DecodeElement(&s, &se); err == nil {
 					feedTitle = strings.TrimSpace(s)
+				}
+				continue // DecodeElement consumed the whole element — nothing to push
+			}
+			// The feed's own declared language: <language> (RSS 2.0) or
+			// <dc:language> (RDF — Name.Local is "language" for both) directly
+			// under <channel>. The same parent check the title branch uses, for
+			// the same reason: an <item>-level <language> would otherwise
+			// masquerade as the channel's (item subtrees are consumed wholly
+			// above and never reach here — keep it that way), and an
+			// <image>/<textinput> child fails the check. The root's xml:lang
+			// (Atom's spelling, also legal on <rss>/<rdf:RDF>) was already read
+			// above and wins, so this only fills a root that declared none.
+			if feedLang == "" && se.Name.Local == "language" &&
+				len(stack) > 0 && stack[len(stack)-1] == "channel" {
+				var s string
+				if err := dec.DecodeElement(&s, &se); err == nil {
+					feedLang = strings.TrimSpace(s)
 				}
 				continue // DecodeElement consumed the whole element — nothing to push
 			}
