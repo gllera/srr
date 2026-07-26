@@ -18,6 +18,7 @@ import {
    showContextMenu,
    showImgProxyDialog,
    showMountsDialog,
+   showShortcutsDialog,
    showSyncDialog,
    type MenuItem,
 } from "./dropdown"
@@ -216,6 +217,9 @@ function settingsMenuItems(): MenuItem[] {
    const pin = pinMenuEntry(d.showError)
    if (pin) items.push(pin)
    items.push(
+      // The shortcuts card's pointer home (RDR10). `?` opens the same card, but a
+      // shortcut is the one place a keymap must not be the ONLY way in.
+      { label: "Keyboard shortcuts…", action: showShortcutsDialog },
       { label: "Stores…", action: openMountsDialog },
       { label: "Image proxy…", action: showImgProxyDialog },
       { label: "Backup / Restore…", action: () => showBackupDialog() },

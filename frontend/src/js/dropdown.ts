@@ -337,6 +337,126 @@ export function showMountsDialog(hooks: MountsDialogHooks): void {
    openModal(dialog, body, build)
 }
 
+// ── Keyboard shortcuts card (RDR10) ───────────────────────────────────────────
+// The app has two keymaps — app.ts's KEY_ACTIONS (reader) and the list branch of
+// the same keydown listener — and until now the only thing that ever named a key
+// was a per-control `aria-keyshortcuts`, which nothing surfaces visually. This is
+// the listing: static content, one row per binding, grouped by the surface the
+// binding acts on.
+//
+// It lives HERE rather than in app.ts because two callers need it (the `?` key
+// and the settings menu, and menus.ts must not import the orchestrator) and
+// because every dialog in the app shares one shell. Built dynamically like the
+// Stores dialog, so index.html/design.html need no matching skeleton.
+//
+// ⚠ This table is a hand-kept mirror of app.ts's keydown listener. A binding
+// added, removed or re-lettered there belongs here in the same commit.
+const SHORTCUT_GROUPS: ReadonlyArray<{ title: string; rows: ReadonlyArray<[string[], string]> }> = [
+   {
+      title: "Anywhere",
+      rows: [
+         [["/"], "Search titles"],
+         [["?"], "This list"],
+         [["Esc"], "Close an overlay, or switch list ⇄ reader"],
+      ],
+   },
+   {
+      title: "List",
+      rows: [
+         [["A", "←"], "Select the older article"],
+         [["D", "→"], "Select the newer article"],
+         [["W", "↑"], "Previous filter"],
+         [["S", "↓"], "Next filter"],
+         [["Enter"], "Open the selected article"],
+      ],
+   },
+   {
+      title: "Reader",
+      rows: [
+         [["A", "←"], "Previous article"],
+         [["D", "→"], "Next article"],
+         [["W", "↑"], "Previous filter"],
+         [["S", "↓"], "Next filter"],
+         [["Q"], "Oldest article in this filter"],
+         [["E"], "Newest article in this filter"],
+         [["B"], "Save / unsave (★)"],
+         [["U"], "Mark unread from here"],
+         [["F"], "Open the original in a new tab"],
+      ],
+   },
+]
+
+let shortcutsDialog: HTMLElement | null = null
+
+function ensureShortcutsDialog(): HTMLElement {
+   if (shortcutsDialog) return shortcutsDialog
+   const d = divEl("srr-keys-dialog")
+   d.setAttribute("role", "dialog")
+   d.setAttribute("aria-modal", "true")
+   // The <h2> is the card's visible title AND its accessible name — a role=dialog
+   // without one announces as an unnamed group.
+   d.setAttribute("aria-label", "Keyboard shortcuts")
+   const card = divEl("srr-keys-card")
+   const h = document.createElement("h2")
+   h.className = "srr-keys-title"
+   h.textContent = "Keyboard shortcuts"
+   card.append(h, divEl("srr-keys-body"))
+   d.append(card)
+   document.body.appendChild(d)
+   shortcutsDialog = d
+   return d
+}
+
+function shortcutsContent(close: () => void): DocumentFragment {
+   const frag = document.createDocumentFragment()
+   for (const group of SHORTCUT_GROUPS) {
+      const section = divEl("srr-keys-group")
+      const title = divEl("srr-keys-group-title")
+      title.textContent = group.title
+      section.appendChild(title)
+      // A definition list is what a keymap IS — term (the keys) and description
+      // (what they do) — so AT reads the pairing instead of two loose columns.
+      const dl = document.createElement("dl")
+      dl.className = "srr-keys-rows"
+      for (const [keys, what] of group.rows) {
+         const dt = document.createElement("dt")
+         dt.className = "srr-keys-keys"
+         keys.forEach((k, i) => {
+            if (i > 0) {
+               const or = document.createElement("span")
+               or.className = "srr-keys-or"
+               or.textContent = "or"
+               dt.appendChild(or)
+            }
+            const kbd = document.createElement("kbd")
+            kbd.textContent = k
+            dt.appendChild(kbd)
+         })
+         const dd = document.createElement("dd")
+         dd.className = "srr-keys-what"
+         dd.textContent = what
+         dl.append(dt, dd)
+      }
+      section.appendChild(dl)
+      frag.appendChild(section)
+   }
+   const actions = divEl("srr-keys-actions")
+   // The card is pure reading, so this button is also the modal shell's Tab-trap
+   // anchor: openModal traps focus among "input, button, textarea", and a card
+   // with none of those would have nothing to hold it.
+   actions.append(btn("srr-dialog-btn srr-dialog-primary srr-keys-close", "close", "Close", close))
+   frag.appendChild(actions)
+   return frag
+}
+
+// Open the shortcuts card. Shares the modal shell with every other dialog —
+// dimmed backdrop, Escape, backdrop press, the Tab trap and focus restored to
+// whatever opened it (the `?` key's focus, or the settings-menu row).
+export function showShortcutsDialog(): void {
+   const dialog = ensureShortcutsDialog()
+   openModal(dialog, dialog.querySelector<HTMLElement>(".srr-keys-body")!, shortcutsContent)
+}
+
 // ── Anchored context menu ─────────────────────────────────────────────────────
 // A minimal anchored menu of action rows floated above its anchor — every
 // current anchor sits in the bottom toolbar, so "above" keeps it clear of the

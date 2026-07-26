@@ -207,4 +207,17 @@ describe("browser: a11y (axe-core)", () => {
          await close()
       }
    })
+
+   // RDR10 — the shortcuts card is a modal built entirely in JS (no index.html
+   // skeleton to eyeball), so its roles/name have no other reviewer.
+   it("the keyboard-shortcuts card has no serious/critical violations", async () => {
+      const [page, close] = await open()
+      try {
+         await page.keyboard.press("?")
+         await page.waitForSelector(".srr-keys-dialog.srr-open")
+         await audit(page, "shortcuts card")
+      } finally {
+         await close()
+      }
+   })
 })
