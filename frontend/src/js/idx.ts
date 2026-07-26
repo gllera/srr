@@ -1,4 +1,13 @@
-import { IDX_BOUNDARY_SIZE, IDX_ENTRY_SIZE, IDX_HEADER_PREFIX, IDX_PACK_SIZE } from "./format.gen"
+import {
+   IDX_HEADER_PREFIX,
+   IDX_PACK_SIZE,
+   idxDecodeEntries,
+   idxDecodeFooter,
+   idxDecodeHeader,
+   idxHeaderEnd,
+   idxValidate,
+   type IIdxHeader,
+} from "./format.gen"
 
 export { IDX_PACK_SIZE }
 
@@ -8,12 +17,11 @@ export { IDX_PACK_SIZE }
 // written (numSlots entries). Available for every pack without entry parsing —
 // from the pack's own bytes at construction, or from the idx/h<N>.gz summary
 // for packs not yet fetched.
-export interface IdxHeader {
-   packIdBase: number
-   packOffBase: number
-   numSlots: number
-   feedCounts: Uint32Array
-}
+//
+// The SHAPE is generated (backend/idx_layout.go → format.gen.ts), together with
+// the decoders below; this alias keeps the reader's own name for it, which is
+// what data.ts and the tests import.
+export type IdxHeader = IIdxHeader
 
 // feedCounts/ownFeedCounts are sized to the pack's numSlots (dense up to the
 // high-water id when the pack was written). A feed added later is absent
@@ -33,24 +41,12 @@ export interface IdxPack {
    findRight(chronFrom: number, feeds: Map<number, number>, lookup: Int32Array): number
 }
 
-function parseIdxHeader(buf: ArrayBuffer, byteOff: number): IdxHeader {
-   // The on-wire prefix is 3 LE u32s: [packId_base, packOff_base, numSlots].
-   const h = new Uint32Array(buf, byteOff, 3)
-   const numSlots = h[2]
-   return {
-      packIdBase: h[0],
-      packOffBase: h[1],
-      numSlots,
-      // Copy out so the source buffer can be GC'd independently. The count
-      // array is variable-length (numSlots entries).
-      feedCounts: new Uint32Array(new Uint32Array(buf, byteOff + IDX_HEADER_PREFIX, numSlots)),
-   }
-}
-
 // Decodes idx/h<N>.gz: the verbatim concatenation of the finalized packs'
 // variable-length headers. Each header's stride depends on its own numSlots,
 // so the walk reads numSlots from each prefix to advance; it must consume the
 // buffer exactly so a truncated body can't silently zero the tail packs' counts.
+// The per-header decode and the stride are generated (idxDecodeHeader /
+// idxHeaderEnd); what is the reader's own is the walk and its two guards.
 export function parseIdxHeaders(buf: ArrayBuffer, count: number): IdxHeader[] {
    const out: IdxHeader[] = []
    let off = 0
@@ -58,9 +54,9 @@ export function parseIdxHeaders(buf: ArrayBuffer, count: number): IdxHeader[] {
       if (off + IDX_HEADER_PREFIX > buf.byteLength) {
          throw new Error(`idx summary: truncated header ${k}/${count}`)
       }
-      const h = parseIdxHeader(buf, off)
+      const h = idxDecodeHeader(buf, off)
       out.push(h)
-      off += IDX_HEADER_PREFIX + h.numSlots * 4
+      off += idxHeaderEnd(h.numSlots)
    }
    if (off !== buf.byteLength) {
       throw new Error(`idx summary: ${buf.byteLength}B, consumed ${off}B for ${count} headers`)
@@ -166,23 +162,16 @@ export function tallyUnread<T extends TallyFeed>(
 
 export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: number, slots: number): IdxPack {
    // header is decoded eagerly below so its numSlots is available before the
-   // short-body guard (the header itself is variable-length).
-   const header = parseIdxHeader(buf, 0)
-   const headerEnd = IDX_HEADER_PREFIX + header.numSlots * 4
-   // Refuse a short body so the caller can evict + retry. Silently parsing
+   // shape check (the header itself is variable-length).
+   const header = idxDecodeHeader(buf, 0)
+   // Refuse a short body so the caller can evict + retry — silently parsing
    // fewer bytes than packSize claims leaves the feedIds tail at default 0,
-   // which findRight skips while showFeed still counts those slots.
-   const expected = headerEnd + packSize * IDX_ENTRY_SIZE
-   if (buf.byteLength < expected) {
-      throw new Error(`idx pack ${packIndex}: short body, got ${buf.byteLength}B, want ${expected}B`)
-   }
-   // The trailing footer is a whole number of u16 boundaries (mirrors the Go
-   // reader's parseIdxPack guard); a ragged tail means a corrupt pack.
-   if ((buf.byteLength - expected) % IDX_BOUNDARY_SIZE !== 0) {
-      throw new Error(
-         `idx pack ${packIndex}: footer not whole u16 boundaries (${buf.byteLength - expected} trailing B)`,
-      )
-   }
+   // which findRight skips while showFeed still counts those slots — and a
+   // ragged trailing footer, which means a corrupt pack. Both conditions and
+   // their wording are generated (idxValidate), so the Go reader rejects the
+   // very same bytes for the very same stated reason.
+   const bad = idxValidate(buf.byteLength, header.numSlots, packSize)
+   if (bad) throw new Error(`idx pack ${packIndex}: ${bad}`)
    let rawBuf: ArrayBuffer | null = buf
    const baseChron = packIndex * IDX_PACK_SIZE
    function hasCandidate(feeds: Map<number, number>, packEnd: number): boolean {
@@ -215,25 +204,24 @@ export function makeIdxPack(buf: ArrayBuffer, packIndex: number, packSize: numbe
             lastPackId = -1
          }
 
-         const feedIds = new Uint16Array(packSize)
+         // The entry array and the boundary footer are decoded by the generated
+         // readers (backend/idx_layout.go → format.gen.ts), the same
+         // declaration the Go writer and Go reader run on; the entry decode is
+         // capped at packSize, so an oversized body (e.g. a stale SW cache)
+         // can't push ghost rows into ownFeedCounts/bounds. What is the
+         // READER's own is this walk: the ownFeedCounts tally and the bounds
+         // rebuild, which advances the packId at each footer boundary with the
+         // same push condition the old per-entry delta_pack_id decode used.
+         const feedIds = idxDecodeEntries(rawBuf, header.numSlots, packSize)
          pack.feedIds = feedIds
-         const bytes = new Uint8Array(rawBuf)
-         // Each entry is feed_id:u16 LE. The data-pack boundaries (the u16 LE
-         // local indices where packId advances by 1) live in the footer after
-         // the packSize entries; the bounds are rebuilt from them with the same
-         // push condition the old per-entry delta_pack_id decode used. Reading
-         // entries is capped at packSize so an oversized body (e.g. stale SW
-         // cache) can't push ghost rows into ownFeedCounts/bounds.
-         const entriesEnd = headerEnd + packSize * IDX_ENTRY_SIZE
-         let bi = entriesEnd
+         const boundaries = idxDecodeFooter(rawBuf, header.numSlots, packSize)
+         let bi = 0
          for (let i = 0; i < packSize; i++) {
-            const off = headerEnd + i * IDX_ENTRY_SIZE
-            const feedId = bytes[off] | (bytes[off + 1] << 8)
-            feedIds[i] = feedId
+            const feedId = feedIds[i]
             if (feedId < slots) ownFeedCounts[feedId]++
-            if (bi + IDX_BOUNDARY_SIZE <= bytes.length && (bytes[bi] | (bytes[bi + 1] << 8)) === i) {
+            if (bi < boundaries.length && boundaries[bi] === i) {
                packId++
-               bi += IDX_BOUNDARY_SIZE
+               bi++
             }
             if (packId !== lastPackId) {
                pack.bounds.push({ packId, startChron: baseChron + i })

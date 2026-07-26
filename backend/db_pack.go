@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -152,6 +151,10 @@ func splitDataPack(data []byte) (lines [][]byte, entries []ArticleData, err erro
 type pack struct {
 	buf bytes.Buffer
 	gz  *gzip.Writer
+	// scratch is the per-entry encode buffer, reused across writeIdx calls: an
+	// idx pack takes up to idxPackSize of them, and a fresh 2-byte slice per
+	// entry is pure garbage.
+	scratch []byte
 }
 
 func newPack() *pack {
@@ -163,8 +166,15 @@ func newPack() *pack {
 func (p *pack) Len() int                    { return p.buf.Len() }
 func (p *pack) Write(b []byte) (int, error) { return p.gz.Write(b) }
 
+// The three idx writers below own the SEQUENCING of an idx pack (which bytes,
+// in which order, at which points in the materialization loop); the bytes
+// themselves come from the generated encoders in idx_layout.gen.go, emitted
+// from the one layout declaration idx_read.go and frontend/src/js/idx.ts also
+// read through. See idx_layout.go.
+
 func (p *pack) writeIdx(feedID int) error {
-	_, err := p.Write([]byte{byte(feedID), byte(feedID >> 8)})
+	p.scratch = idxAppendEntry(p.scratch[:0], uint16(feedID))
+	_, err := p.Write(p.scratch)
 	return err
 }
 
@@ -172,24 +182,16 @@ func (p *pack) writeIdx(feedID int) error {
 // indices at which the data packId advances by 1 — to a finished idx pack.
 // It carries what the old per-entry delta_pack_id bit did, out of the entries.
 func writeIdxFooter(p *pack, boundaries []int) error {
-	buf := make([]byte, len(boundaries)*idxBoundarySize)
-	for i, b := range boundaries {
-		binary.LittleEndian.PutUint16(buf[i*idxBoundarySize:], uint16(b))
-	}
+	buf := idxAppendFooter(make([]byte, 0, len(boundaries)*idxBoundarySize), boundaries)
 	_, err := p.Write(buf)
 	return err
 }
 
 // parseIdxFooter reads a u16 LE boundary list (the bytes after header+entries
 // of an already-saved latest idx pack) back into local-index form, so an
-// append can re-emit the full footer.
-func parseIdxFooter(footer []byte) []int {
-	out := make([]int, len(footer)/idxBoundarySize)
-	for i := range out {
-		out[i] = int(binary.LittleEndian.Uint16(footer[i*idxBoundarySize:]))
-	}
-	return out
-}
+// append can re-emit the full footer. The named seam the append path and the
+// tests speak through; the decode itself is generated.
+func parseIdxFooter(footer []byte) []int { return idxDecodeFooter(footer) }
 
 // writeIdxHeader emits the variable-length idx header: the 2 state u32s, the
 // numSlots u32, then `counts` verbatim — the per-feed cumulative totals AS OF
@@ -199,14 +201,7 @@ func parseIdxFooter(footer []byte) []int {
 // accounting already ran and must thread its own rewound count vector (see
 // consolidateTail — the deferred-replay subtlety the equivalence test pins).
 func writeIdxHeader(p *pack, packID, packOff int, counts []uint32) error {
-	numSlots := len(counts)
-	buf := make([]byte, idxHeaderPrefix+numSlots*4)
-	binary.LittleEndian.PutUint32(buf[0:], uint32(packID))
-	binary.LittleEndian.PutUint32(buf[4:], uint32(packOff))
-	binary.LittleEndian.PutUint32(buf[idxStateSize:], uint32(numSlots))
-	for id, n := range counts {
-		binary.LittleEndian.PutUint32(buf[idxHeaderPrefix+id*4:], n)
-	}
+	buf := idxAppendHeader(make([]byte, 0, idxHeaderEnd(len(counts))), uint32(packID), uint32(packOff), counts)
 	_, err := p.Write(buf)
 	return err
 }
@@ -398,11 +393,11 @@ func checkLatestIdx(key string, raw []byte, totalArticles int) (entriesEnd int, 
 		}
 		return 0, nil
 	}
-	if len(raw) < idxHeaderPrefix {
+	numSlots, err := idxNumSlots(raw)
+	if err != nil {
 		return 0, fmt.Errorf("%s: short idx header (%d bytes)", key, len(raw))
 	}
-	numSlots := int(binary.LittleEndian.Uint32(raw[idxStateSize:]))
-	entriesEnd = idxHeaderPrefix + numSlots*4 + want*idxEntrySize
+	entriesEnd = idxEntriesEnd(numSlots, want)
 	if len(raw) < entriesEnd {
 		return 0, fmt.Errorf("%s has %d bytes but db.gz expects at least %d", key, len(raw), entriesEnd)
 	}
@@ -452,8 +447,11 @@ func (o *DB) readIdxHeader(ctx context.Context, key string) ([]byte, error) {
 	if _, err := io.ReadFull(gz, prefix); err != nil {
 		return nil, fmt.Errorf("read %s header prefix: %w", key, err)
 	}
-	numSlots := int(binary.LittleEndian.Uint32(prefix[idxStateSize:]))
-	rest := make([]byte, numSlots*4)
+	numSlots, err := idxNumSlots(prefix)
+	if err != nil {
+		return nil, fmt.Errorf("read %s header prefix: %w", key, err)
+	}
+	rest := make([]byte, idxHeaderEnd(numSlots)-idxHeaderPrefix)
 	if _, err := io.ReadFull(gz, rest); err != nil {
 		return nil, fmt.Errorf("read %s header counts: %w", key, err)
 	}
@@ -735,10 +733,12 @@ func (o *DB) DrainDeltas(ctx context.Context) error {
 // loadDeltaChain loads the live delta chain once per cycle and memoizes it on
 // the chain's own identity — the segment stems are write-once, so their count
 // and their newest stem pin the content exactly, and the key changes the
-// instant emitDelta/consolidateTail mutate the chain. It enforces the same
-// accounting invariant as the read-side loadDeltas (idx_read.go; still the
-// parser inspect/art ls use), but additionally captures each entry's verbatim
-// JSONL line bytes so consolidateTail can write pre-encoded data-pack bytes.
+// instant emitDelta/consolidateTail mutate the chain.
+//
+// The fetch, the parse and the accounting invariant are parseDeltaChain's
+// (idx_read.go), shared verbatim with the read-side loadDeltas that inspect and
+// art ls go through; what is the WRITER's alone — and all that lives here — is
+// the memo.
 func (o *DB) loadDeltaChain(ctx context.Context) (*deltaChain, error) {
 	c := &o.core
 	stems := c.Names.Deltas.Stems
@@ -749,31 +749,9 @@ func (o *DB) loadDeltaChain(ctx context.Context) (*deltaChain, error) {
 	if o.deltaMemo != nil && o.deltaMemoKey == memoKey {
 		return o.deltaMemo, nil
 	}
-	if c.DeltaArticles < 0 || c.DeltaArticles > c.TotalArticles || (len(stems) == 0) != (c.DeltaArticles == 0) {
-		return nil, fmt.Errorf("inconsistent delta chain: %d segment(s), na=%d, total_art=%d",
-			len(stems), c.DeltaArticles, c.TotalArticles)
-	}
-	chain := &deltaChain{
-		Arts:  make([]ArticleData, 0, c.DeltaArticles),
-		Lines: make([][]byte, 0, c.DeltaArticles),
-	}
-	for _, key := range c.Names.deltaKeys() {
-		buf, err := o.readGz(ctx, key)
-		if err != nil {
-			return nil, fmt.Errorf("fetch %s: %w", key, err)
-		}
-		lines, arts, err := splitDataPack(buf)
-		if err != nil {
-			return nil, fmt.Errorf("parse %s: %w", key, err)
-		}
-		if len(arts) == 0 {
-			return nil, fmt.Errorf("%s: empty delta segment", key)
-		}
-		chain.Arts = append(chain.Arts, arts...)
-		chain.Lines = append(chain.Lines, lines...)
-	}
-	if len(chain.Arts) != c.DeltaArticles {
-		return nil, fmt.Errorf("delta chain holds %d articles but the store says na=%d", len(chain.Arts), c.DeltaArticles)
+	chain, err := parseDeltaChain(func(key string) ([]byte, error) { return o.readGz(ctx, key) }, c)
+	if err != nil {
+		return nil, err
 	}
 	o.deltaMemo, o.deltaMemoKey = chain, memoKey
 	return chain, nil

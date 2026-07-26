@@ -144,3 +144,79 @@ export interface IDBWire {
    m: number // ManifestNum
    t?: number // FetchedAt
 }
+
+// ---------------------------------------------------------------------------
+// Binary layouts (backend/idx_layout.go). The JSON half of this contract above
+// is reflected from struct tags; this half is emitted from an explicit layout
+// table — field, width, byte order, count source — and the SAME table emits the
+// Go encoder/decoder in backend/idx_layout.gen.go. The reader's semantics (the
+// bounds walk, the ownFeedCounts tally, the count guards) stay hand-written in
+// idx.ts; only the byte arithmetic lives here.
+// ---------------------------------------------------------------------------
+
+// Idx — one idx pack — variable-length header ‖ 2-byte entries ‖ boundary footer, little-endian throughout.
+
+// The decoded header of one Idx object.
+export interface IIdxHeader {
+   packIdBase: number // the data packId the pack's first entry lives in
+   packOffBase: number // that entry's offset inside the data pack
+   numSlots: number // how many cumulative per-feed counts follow — dense up to the high-water feed id when the pack was written
+   feedCounts: Uint32Array // cumulative articles per feed BEFORE this pack, as of its first chron
+}
+
+// Byte offset at which the header ends and the entry array begins.
+export function idxHeaderEnd(numSlots: number): number {
+   return 12 + numSlots * 4
+}
+
+// Byte offset at which the entry array ends and the footer begins.
+export function idxEntriesEnd(numSlots: number, packSize: number): number {
+   return idxHeaderEnd(numSlots) + packSize * 2
+}
+
+// What is wrong with a buffer of size bytes claiming the given counts —
+// null when the shape is well-formed. The Go reader states it identically.
+export function idxValidate(size: number, numSlots: number, packSize: number): string | null {
+   const end = idxEntriesEnd(numSlots, packSize)
+   if (size < end) return `short body: have ${size}, want >= ${end} (header+${packSize} entries)`
+   if ((size - end) % 2 !== 0) return `footer not whole u16 boundaries: ${size - end} trailing bytes`
+   return null
+}
+
+// Decodes the header at byteOff. Counts are copied out, so the source
+// buffer can be released independently.
+export function idxDecodeHeader(buf: ArrayBuffer, byteOff: number): IIdxHeader {
+   const v = new DataView(buf, byteOff)
+   const packIdBase = v.getUint32(0, true)
+   const packOffBase = v.getUint32(4, true)
+   const numSlots = v.getUint32(8, true)
+   const feedCounts = new Uint32Array(numSlots)
+   for (let i = 0; i < numSlots; i++) feedCounts[i] = v.getUint32(12 + i * 4, true)
+   return { packIdBase, packOffBase, numSlots, feedCounts }
+}
+
+// Decodes exactly packSize entries — never more, so an oversized body (a stale
+// cache, a truncated write) cannot push ghost rows into the caller's tallies.
+export function idxDecodeEntries(buf: ArrayBuffer, numSlots: number, packSize: number): Uint16Array {
+   const bytes = new Uint8Array(buf)
+   const out = new Uint16Array(packSize)
+   let off = idxHeaderEnd(numSlots)
+   for (let i = 0; i < packSize; i++) {
+      out[i] = bytes[off] | (bytes[off + 1] << 8)
+      off += 2
+   }
+   return out
+}
+
+// Decodes the footer: every byte after the entry array, whose element
+// count is implicit in their length.
+export function idxDecodeFooter(buf: ArrayBuffer, numSlots: number, packSize: number): Uint16Array {
+   const bytes = new Uint8Array(buf)
+   const start = idxEntriesEnd(numSlots, packSize)
+   const out = new Uint16Array(Math.max(0, Math.floor((bytes.length - start) / 2)))
+   for (let i = 0; i < out.length; i++) {
+      const off = start + i * 2
+      out[i] = bytes[off] | (bytes[off + 1] << 8)
+   }
+   return out
+}
