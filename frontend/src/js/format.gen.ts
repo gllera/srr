@@ -18,6 +18,9 @@ export const IDX_PACK_SIZE = 50000
 // entries per finalized meta shard (the meta/ split stride; a divisor of IDX_PACK_SIZE)
 export const META_PACK_SIZE = 5000
 
+// chrons per watch/ bitmap object: bit i of the object at position p describes chron p*this + i, LSB-first within each byte (docs/MANIFEST-SPEC.md §4.8)
+export const WATCH_PACK_SIZE = 50000
+
 // cap on the newest-glance head projection in db.gz (db.head: the newest cards, chron order)
 export const HEAD_MAX = 40
 
@@ -54,7 +57,19 @@ export const SEARCH_BLOOM_K = 7
 // retired at the manifest cutover, because a name is now LISTED rather than
 // derived and carries no meaning of its own. sw.ts builds its route regex from
 // this table, mirroring the store's strict packKeyRe.
-export const PACK_SERIES_KINDS: Record<string, string> = { idx: "", data: "", meta: "", manifest: "", seen: "" }
+//
+// Emitted one entry per line, unconditionally: Prettier keeps an object literal
+// expanded when the source has a newline after its brace, so the generated file
+// stays format-check clean however many series the table grows to — a one-line
+// form silently outgrew the print width the day a sixth series landed.
+export const PACK_SERIES_KINDS: Record<string, string> = {
+   idx: "",
+   data: "",
+   meta: "",
+   manifest: "",
+   seen: "",
+   watch: "",
+}
 
 // Wire shape of one JSONL line in data/*.gz (backend ArticleData).
 export interface IArticleWire {
@@ -129,6 +144,8 @@ export interface IManifestWire {
    na?: number // DeltaArticles
    head?: IMetaWire[] // Head
    hb?: number // HeadBase
+   wf?: Record<string, number> // WatchFrom
+   wc?: number // WatchCovered
    pack_off: number // PackOffset
    next_pid: number // NextPackID
    dby?: number // DeltaBytes

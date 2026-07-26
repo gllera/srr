@@ -181,6 +181,7 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 	if names.SSum != nil && names.SSum.Covers != core.metaPacks() {
 		bad("the meta bloom summary covers %d shard(s) but %d are listed", names.SSum.Covers, core.metaPacks())
 	}
+	o.checkWatchNames(bad, names, core)
 
 	// (3) Existence of every singleton and every tail. Rm is silent on missing
 	// keys, so a name the manifest lists and the store does not hold is exactly
@@ -207,6 +208,33 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 	for _, k := range probe {
 		if _, err := fetch(k); err != nil {
 			bad("M4 violated: %s names %q, which is missing or corrupt: %v", key, k, err)
+		}
+	}
+
+	// (3b) The watch bitmaps' bodies. One object per named position, each of
+	// which the probe above already fetched for the tail only — so this walks
+	// the whole (short) list: a bitmap that cannot say which chrons it describes
+	// is the one failure that would misattribute a lane, and the series is at
+	// most total_art/watchPackSize objects long.
+	if s := names.Series[watchSeries]; s != nil {
+		for i := range s.Stems {
+			p := s.Base + i
+			k, kerr := names.key(watchSeries, p)
+			if kerr != nil {
+				bad("watch bitmap position %d: %v", p, kerr)
+				continue
+			}
+			buf, ferr := fetch(k)
+			if ferr != nil {
+				if p != s.Tail { // the tail's absence is already an M4 issue above
+					bad("M4 violated: %s names %q, which is missing or corrupt: %v", key, k, ferr)
+				}
+				continue
+			}
+			base := p * watchPackSize
+			if _, perr := parseWatchDoc(buf, base, min(core.TotalArticles-base, watchPackSize)); perr != nil {
+				bad("watch bitmap %s does not describe chrons [%d, +%d): %v", k, base, watchPackSize, perr)
+			}
 		}
 	}
 
@@ -262,6 +290,68 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 //
 // `expected` is whether the store should have published one at all: a store on
 // the v2 root always has, and its absence is then a real gap; a store still on
+// checkWatchNames validates the keyword-watchlist axis's structure: the roster,
+// its coverage window, and the positional list that has to line up with it
+// (watch.go, docs/MANIFEST-SPEC.md §4.8).
+//
+// The single property everything else rests on is the one worth checking here:
+// bit i of the object at position p describes chron p*watchPackSize + i, and
+// the store must NAME an object for every position the coverage window claims.
+// A roster that claims coverage the name list cannot address is a lane that
+// reads as empty — silently, since a missing bit and a missing object both look
+// like "no match" to a consumer that does not check.
+func (o *InspectCmd) checkWatchNames(bad func(string, ...any), names *ManifestNames, core *DBCore) {
+	s := names.Series[watchSeries]
+	if len(core.WatchFrom) == 0 {
+		// No rules ⇒ no roster, no coverage, no series row (resetWatch). A row
+		// left behind is not corruption — its objects are still valid bitmaps —
+		// but it is state nothing can ever read again, so say so.
+		switch {
+		case core.WatchCovered != 0:
+			bad("the watch roster is empty but coverage claims chrons up to %d", core.WatchCovered)
+		case s != nil && len(s.Stems) > 0:
+			bad("the watch roster is empty but the watch series still lists %d object(s)", len(s.Stems))
+		}
+		return
+	}
+	if core.WatchCovered > core.TotalArticles {
+		bad("watch coverage reaches chron %d, past the store's %d article(s)", core.WatchCovered, core.TotalArticles)
+	}
+	lowest := core.TotalArticles
+	for _, name := range slices.Sorted(maps.Keys(core.WatchFrom)) {
+		f := core.WatchFrom[name]
+		if f < 0 || f > core.TotalArticles {
+			bad("watch rule %q starts at chron %d, outside [0, %d]", name, f, core.TotalArticles)
+			continue
+		}
+		if _, ok := core.Watch[name]; !ok {
+			// The roster and the patterns are two objects written by one Commit
+			// (§6.4), so a crash between them can leave a lane with no rule. It
+			// self-heals at the next SyncWatch; until then the lane is published
+			// with nothing maintaining it.
+			bad("watch rule %q is in the manifest roster but config.gz carries no pattern for it", name)
+		}
+		lowest = min(lowest, f)
+	}
+	if lowest >= core.WatchCovered {
+		return // every lane's range is empty; no object is required
+	}
+	if s == nil {
+		bad("watch coverage spans chrons [%d, %d) but the manifest lists no watch series", lowest, core.WatchCovered)
+		return
+	}
+	wantBase, wantLast := lowest/watchPackSize, (core.WatchCovered-1)/watchPackSize
+	if s.Base > wantBase {
+		bad("the watch series starts at position %d but coverage begins at chron %d (position %d)", s.Base, lowest, wantBase)
+	}
+	if got := s.Base + len(s.Stems) - 1; got != wantLast {
+		bad("the watch series lists positions up to %d but coverage reaches chron %d (position %d)", got, core.WatchCovered-1, wantLast)
+	}
+	if s.Tail != wantLast {
+		bad("the watch tail sits at position %d, not the region holding chron %d (%d)", s.Tail, core.WatchCovered-1, wantLast)
+	}
+}
+
 // the pre-cutover root legitimately has none (absence means "all defaults",
 // which is exactly how the store behaves without it).
 func (o *InspectCmd) checkConfigSidecar(fetch keyGetter, core *DBCore, expected bool) int {

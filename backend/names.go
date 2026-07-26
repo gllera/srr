@@ -398,6 +398,17 @@ func (n *ManifestNames) truncate(series string, pos int) {
 	s.Tail = -1
 }
 
+// dropSeries forgets a series entirely: every position, its tail and its base.
+// For an OPTIONAL derived series that can stop existing — watch/ when the last
+// keyword rule is removed — so the manifest carries no row at all rather than
+// an empty one, and §7's one GC rule reclaims the objects because no in-window
+// generation names them any more.
+//
+// The series' Next counter is deliberately NOT reset: stems are monotone and
+// never reused (M3), so a series that comes back must come back on FRESH names,
+// beside whatever a stale reader still holds.
+func (n *ManifestNames) dropSeries(name string) { delete(n.Series, name) }
+
 // finalizedCount is how many positions a series lists BELOW its tail — the
 // meaning the retired `hdrs`/`mp` counters carried.
 func (n *ManifestNames) finalizedCount(series string) int {

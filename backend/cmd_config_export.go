@@ -8,6 +8,8 @@ import (
 	"maps"
 	"os"
 	"slices"
+
+	"srr/mod"
 )
 
 // Whole-configuration export/import. OPML (`srr feed export`) stays the
@@ -35,6 +37,11 @@ type configDoc struct {
 	// Out is the syndication configuration (managed and external slots alike;
 	// an external slot's published bytes are not config and are not carried).
 	Out []OutFeed `json:"out,omitempty"`
+	// Watch is the keyword-watchlist rule set: name → match specification. The
+	// PATTERNS are config and travel; the per-rule coverage floor is derived
+	// state that belongs to the store the rules land in, so an import stamps it
+	// apply-forward there, exactly as `srr watch set` does.
+	Watch map[string]string `json:"watch,omitempty"`
 	// Feeds carries every writable per-feed field, keyed by URL on import.
 	Feeds []configFeed `json:"feeds"`
 }
@@ -104,6 +111,7 @@ func buildConfigDoc(db *DB) configDoc {
 		DedupDays: db.core.DedupDays,
 		Recipes:   db.core.Recipes,
 		Out:       db.core.Out,
+		Watch:     db.core.Watch,
 		Feeds:     feeds,
 	}
 }
@@ -214,10 +222,35 @@ func applyConfigDoc(ctx context.Context, db *DB, doc *configDoc) error {
 			return err
 		}
 	}
+	// Watch rules validate up front like everything else: a spec that will not
+	// compile must fail the import, not land in config.gz and warn on every
+	// fetch cycle from then on.
+	for _, name := range slices.Sorted(maps.Keys(doc.Watch)) {
+		if err := validateWatchName(name); err != nil {
+			return err
+		}
+		if _, err := mod.ParseMatch(doc.Watch[name]); err != nil {
+			return fmt.Errorf("watch rule %q: %w", name, err)
+		}
+	}
 
 	// --- apply (validation passed) ---
 	db.core.DedupDays = doc.DedupDays
 	db.core.Recipes = recipes
+	for _, name := range slices.Sorted(maps.Keys(doc.Watch)) {
+		// setWatchRule without its Commit: same no-op-on-unchanged rule, same
+		// apply-forward stamp at THIS store's head — an imported rule cannot
+		// claim a lane over articles it was never evaluated against, and the
+		// source store's floor means nothing here anyway.
+		if db.core.Watch[name] == doc.Watch[name] {
+			continue
+		}
+		if db.core.Watch == nil {
+			db.core.Watch, db.core.WatchFrom = map[string]string{}, map[string]int{}
+		}
+		db.core.Watch[name] = doc.Watch[name]
+		db.core.WatchFrom[name] = db.core.TotalArticles
+	}
 
 	byURL := map[string]*Feed{}
 	for _, ch := range db.Feeds() {

@@ -967,6 +967,15 @@ func (o *FetchCmd) commitPhase(ctx context.Context, db *DB, res *fetchResults) e
 	if err := db.SyncMeta(ctx, written); err != nil {
 		slog.Warn("sync meta", "error", err)
 	}
+	// The keyword-watchlist bitmaps (watch.go) are a derived projection over the
+	// same chrons and take the same warn-only contract for the same reason. Its
+	// self-heal is exact rather than approximate: WatchCovered advances only on
+	// success, so a failed run leaves a gap the next run re-evaluates precisely
+	// — from this batch when it still covers it, from the packs when it does
+	// not. A store with no watch rules returns immediately and writes nothing.
+	if err := db.SyncWatch(ctx, written); err != nil {
+		slog.Warn("sync watch bitmaps", "error", err)
+	}
 	// Warn-only: retention is maintenance — a failed walk or asset delete
 	// must not block committing the durable article batch. ExpireArticles
 	// applies nothing on failure, so the next cycle recomputes the same

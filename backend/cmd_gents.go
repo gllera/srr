@@ -42,6 +42,7 @@ var tsConsts = []struct {
 	{"DB_FORMAT_VERSION", dbFormatVersion, "store format version this build understands — the `v` of the root db.gz AND of every manifest it names; a store stamped higher was written by a newer srr and this reader cannot be trusted with it"},
 	{"IDX_PACK_SIZE", idxPackSize, "entries per finalized idx pack (split threshold)"},
 	{"META_PACK_SIZE", metaPackSize, "entries per finalized meta shard (the meta/ split stride; a divisor of IDX_PACK_SIZE)"},
+	{"WATCH_PACK_SIZE", watchPackSize, "chrons per watch/ bitmap object: bit i of the object at position p describes chron p*this + i, LSB-first within each byte (docs/MANIFEST-SPEC.md §4.8)"},
 	{"HEAD_MAX", headMax, "cap on the newest-glance head projection in db.gz (db.head: the newest cards, chron order)"},
 	{"IDX_STATE_SIZE", idxStateSize, "bytes: the 2 leading uint32 LE idx-header state fields (packId/packOff bases)"},
 	{"IDX_HEADER_PREFIX", idxHeaderPrefix, "bytes: idx-header fixed prefix (2 state uint32s + numSlots uint32); the variable count array follows"},
@@ -178,14 +179,17 @@ func generateTS() ([]byte, error) {
 // retired at the manifest cutover, because a name is now LISTED rather than
 // derived and carries no meaning of its own. sw.ts builds its route regex from
 // this table, mirroring the store's strict packKeyRe.
-export const PACK_SERIES_KINDS: Record<string, string> = {`)
-	for i, s := range store.PackSeries {
-		if i > 0 {
-			b.WriteString(",")
-		}
-		fmt.Fprintf(&b, " %s: %q", s.Name, s.Kinds)
+//
+// Emitted one entry per line, unconditionally: Prettier keeps an object literal
+// expanded when the source has a newline after its brace, so the generated file
+// stays format-check clean however many series the table grows to — a one-line
+// form silently outgrew the print width the day a sixth series landed.
+export const PACK_SERIES_KINDS: Record<string, string> = {
+`)
+	for _, s := range store.PackSeries {
+		fmt.Fprintf(&b, "   %s: %q,\n", s.Name, s.Kinds)
 	}
-	b.WriteString(" }\n")
+	b.WriteString("}\n")
 
 	wireNames := map[reflect.Type]string{}
 	for _, t := range tsTypes {
