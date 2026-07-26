@@ -1706,6 +1706,99 @@ body:not(.srr-view-list) .srr-open-reader {
    }
 }
 
+/* Pull to refresh (gestures.ts setPullRefresh, wired by list.setup — RDR11).
+   refresh.ts owns the background triggers and there is deliberately no refresh
+   BUTTON, so an overscroll pull on the list is the whole manual path short of
+   reloading the page.
+
+   The overscroll rule is not decoration: without it Chrome Android runs its own
+   pull-to-reload on the same finger and the page reloads out from under the
+   silent in-place refresh — the gesture would fire twice, once destructively.
+   It has to sit on the ROOT, because html is the scroll container here
+   (html{overflow-y:scroll}) and .srr-list is not a scroller at all, so the
+   property would be inert on it. :has() scopes it to the LIST surface so the
+   READER keeps the browser's native reload gesture — in an installed PWA that
+   is the only reload affordance there is. `contain` leaves the local
+   rubber-band alone; it stops the chain and the browser-level action only. */
+html:has(body.srr-view-list) {
+   overscroll-behavior-y: contain;
+}
+
+/* The affordance: a small badge that rides in from above the viewport with the
+   finger, flips and takes the accent once the pull is past the threshold, and
+   parks as a spinner while the cycle runs. Built lazily in JS (the lightbox's
+   precedent) so index.html and its design.html drift guard stay untouched. */
+.srr-pull {
+   position: fixed;
+   /* Parked just above the viewport — the pull's inline translateY is what
+      brings it in, so at rest it needs no display toggling. */
+   top: calc(env(safe-area-inset-top) - 3rem);
+   left: 50%;
+   z-index: var(--z-toolbar);
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   width: 2.25rem;
+   height: 2.25rem;
+   border: 1px solid var(--faint);
+   border-radius: 999px;
+   background: var(--surface-raised);
+   box-shadow: var(--shadow);
+   /* It reports a gesture; it must never intercept one. */
+   pointer-events: none;
+   opacity: 0;
+   transform: translate(-50%, 0);
+   transition:
+      transform 0.2s ease,
+      opacity 0.2s ease;
+}
+/* While the finger drives it, position is written inline per touchmove — the
+   easing has to step aside or the badge lags the thumb (the same override the
+   toolbar's scroll-linked bottom reveal makes). */
+.srr-pull-live {
+   transition: none;
+}
+.srr-pull-icon {
+   font-size: 1rem;
+   line-height: 1;
+   color: var(--muted);
+   transition:
+      transform 0.18s ease,
+      color 0.18s ease;
+}
+/* Past the threshold: the arrow flips and takes the accent — release now and it
+   refreshes. */
+.srr-pull-armed .srr-pull-icon {
+   transform: rotate(180deg);
+   color: var(--accent);
+}
+/* Running: the glyph steps aside (font-size 0) and the same box becomes the
+   spinner ring. It is the ICON that spins, never the container, whose transform
+   is the inline pull offset an animation would clobber. */
+.srr-pull-busy .srr-pull-icon {
+   width: 1.1rem;
+   height: 1.1rem;
+   font-size: 0;
+   border: 2px solid var(--faint);
+   border-top-color: var(--accent);
+   border-radius: 999px;
+   transform: none;
+   animation: srr-pull-spin 0.7s linear infinite;
+}
+@keyframes srr-pull-spin {
+   to {
+      transform: rotate(360deg);
+   }
+}
+@media (prefers-reduced-motion: reduce) {
+   /* The global reduce block only squeezes durations, which on an INFINITE spin
+      is a strobe rather than a stop. Kill it outright and leave the
+      accent-topped ring standing as a static busy mark. */
+   .srr-pull-busy .srr-pull-icon {
+      animation: none;
+   }
+}
+
 /* The list's end termini (list.ts syncBottomTerminus / syncTopTerminus): an
    "OLDEST" label at the bottom and a "LATEST" label at the top, each a dashed
    rule flanking the label, so scrolling to either end reads as a definite stop. */
@@ -2442,6 +2535,7 @@ body:not(.srr-view-list) .srr-open-reader {
    .srr-popup,
    .srr-snackbar,
    .srr-new-pill,
+   .srr-pull,
    .srr-pin-progress,
    .srr-picker,
    .srr-ctxmenu,

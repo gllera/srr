@@ -3,14 +3,16 @@ import type { Browser, Page } from "puppeteer"
 
 import { feedServer, srr, type FeedServer } from "../harness"
 import { nItems, rssFeed } from "../fixtures"
-import { $rowTitles, $rowTop, clearDir, launchBrowser, waitList, waitTitle } from "./helpers"
+import { $rowTitles, $rowTop, clearDir, launchBrowser, waitList, waitReader, waitTitle } from "./helpers"
 
 // Live content sync in the real SPA: publish a second fetch cycle to the pack
 // dir while a page is open, fire one of refresh.ts's real background triggers
 // (the `online` event — unthrottled, unlike re-focus), and the new article is
 // reachable WITHOUT a page reload — the silent contract
-// list.onStoreGrown()/refresh.ts implement. There is no manual refresh button
-// (a page reload is the manual gesture), so the trigger is dispatched directly.
+// list.onStoreGrown()/refresh.ts implement. There is still no refresh BUTTON,
+// so the background trigger is dispatched directly; the second case below
+// drives the one manual trigger there is — the list's pull-to-refresh gesture
+// (RDR11) — through real Chrome touch input.
 // Own beforeAll clears + rebuilds the shared packsDir (browser files run
 // serially — vitest.browser.config fileParallelism:false — so each owns it in
 // turn).
@@ -142,5 +144,72 @@ describe("browser: in-place refresh via a background trigger", () => {
       // new article in the reader.
       await page.evaluate(() => (location.hash = "#2"))
       await waitTitle(page, items[2].title)
+   })
+
+   // The manual trigger (RDR11). Real touch input, because the gesture is the
+   // point: a one-finger drag DOWN that starts inside the list while the
+   // document is at its top. What headless still cannot reproduce is the
+   // browser's own overscroll — Chrome Android's pull-to-reload, which this
+   // gesture must not double-fire with — so the CSS guard that suppresses it is
+   // asserted through the computed style instead, and the feel of the drag
+   // (resistance, the affordance following the thumb) needs a device.
+   it("the list's pull-to-refresh gesture adopts a new cycle, and the reader keeps native overscroll", async () => {
+      const ctx = await browser.createBrowserContext()
+      try {
+         const p = await ctx.newPage()
+         // Tall enough that a 3-row store never scrolls: the pull only engages
+         // at the top, and a page with no scroll reserve can't drift off it
+         // while the list's land-once anchor settles.
+         await p.setViewport({ width: 500, height: 900, hasTouch: true })
+         await p.goto(`${baseUrl}#`, { waitUntil: "load" })
+         await waitList(p)
+         await p.evaluate(() => (window.__srrStamp = 1))
+
+         // The CSS half of the no-double-fire guard, scoped with :has() so it
+         // covers the list surface only — jsdom can't evaluate that, real Chrome
+         // can. `contain` here is what stops the browser running its own
+         // pull-to-reload on the same finger.
+         const listOverscroll = await p.evaluate(() => getComputedStyle(document.documentElement).overscrollBehaviorY)
+         expect(listOverscroll).toBe("contain")
+
+         // A fourth article lands in the store while the tab sits on the list.
+         const grown = nItems(4, "live")
+         feeds.set("/live.xml", rssFeed("Live", grown))
+         await srr(packsDir, "art", "fetch")
+
+         // Pull: start inside the list container, drag down past the 72px
+         // trigger in steps (Chrome coalesces touchmoves, so one big jump is not
+         // guaranteed to be delivered), release.
+         const from = await p.evaluate(() => {
+            const r = document.querySelector(".srr-list")!.getBoundingClientRect()
+            return { x: r.x + r.width / 2, y: r.y + 8, top: window.scrollY }
+         })
+         expect(from.top).toBe(0)
+         const touch = await p.touchscreen.touchStart(from.x, from.y)
+         for (const dy of [30, 60, 90, 120]) await touch.move(from.x, from.y + dy)
+         await touch.end()
+         // The affordance says the gesture committed (it parks as a spinner for
+         // the length of the cycle) — the one piece of the drag headless proves.
+         await p.waitForSelector(".srr-pull.srr-pull-busy", { timeout: 20_000 })
+
+         // The same silent adoption the background trigger gets — no reload.
+         await p.waitForFunction(
+            () =>
+               [...document.querySelectorAll(".srr-list a.srr-row .srr-row-title")].some(
+                  (e) => e.textContent === "live title 3",
+               ),
+            { timeout: 20_000 },
+         )
+         expect(await p.evaluate(() => window.__srrStamp)).toBe(1)
+
+         // The reader is NOT the pull's surface, so it keeps the browser's own
+         // overscroll gesture — in an installed PWA that is its only reload.
+         await p.evaluate(() => (location.hash = "#0"))
+         await waitReader(p)
+         const readerOverscroll = await p.evaluate(() => getComputedStyle(document.documentElement).overscrollBehaviorY)
+         expect(readerOverscroll).toBe("auto")
+      } finally {
+         await ctx.close()
+      }
    })
 })

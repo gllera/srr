@@ -1,6 +1,11 @@
 import * as data from "./data"
 import { timeAgo, srcColorIndex, dayLabelCtx, dayLabelWith, countBadge, CHECK_SVG } from "./fmt"
+import { setPullRefresh } from "./gestures"
 import * as nav from "./nav"
+// Named, NOT `import * as refresh`: this module exports its own refresh(), and a
+// namespace binding of that name is shadowed by the local function declaration —
+// silently, since the collision only shows up when the callback below runs.
+import { refreshNow } from "./refresh"
 
 // The list surface — the app's home: a scannable feed of headlines under the
 // current filter, newest-first, source-keyed with read/unread weighting. Tapping a row
@@ -156,6 +161,15 @@ export function setup(
    container.ownerDocument.addEventListener("wheel", markScrolled, { passive: true })
    container.ownerDocument.addEventListener("touchstart", markScrolled, { passive: true })
    container.ownerDocument.addEventListener("keydown", markScrolled)
+   // Pull to refresh (RDR11): an overscroll pull that STARTS on this container
+   // runs one refresh cycle. The touch machine is gestures.ts's — one state
+   // machine, so the pull axis-locks against the horizontal swipe and the
+   // two-finger cycle instead of racing them — but the surface and the action
+   // are the list's, so the registration lives here rather than in app.ts's
+   // setupGestures call. refreshNow() is the SAME entry point the background
+   // triggers use and carries app.ts's guardBg mutex inside it, so this adds a
+   // trigger, never a second concurrency path.
+   setPullRefresh(container, () => refreshNow())
 }
 
 function el(tag: string, className: string): HTMLElement {
