@@ -158,7 +158,7 @@ func (o *DB) publishManifest(ctx context.Context) error {
 // counter. Used only on the exclusive-create collision path, so the extra GET
 // costs nothing in steady state. A store with no db.gz yet reads as 0.
 func (o *DB) readRootManifestNum(ctx context.Context) (int, error) {
-	rc, err := o.Get(ctx, dbFileKey, true)
+	rc, err := getOptional(ctx, o.Backend, dbFileKey)
 	if err != nil {
 		return 0, err
 	}

@@ -143,7 +143,7 @@ func putKey(t *testing.T, be store.Backend, key, content string) {
 
 func exists(t *testing.T, be store.Backend, key string) bool {
 	t.Helper()
-	rc, err := be.Get(context.Background(), key, true)
+	rc, err := getOptional(context.Background(), be, key)
 	if err != nil {
 		t.Fatalf("get %q: %v", key, err)
 	}

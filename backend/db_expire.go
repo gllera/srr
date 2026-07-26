@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"strings"
 	"sync"
@@ -132,7 +133,9 @@ func (o *DB) ExpireArticles(ctx context.Context, now int64) error {
 	// nothing deleted (a clean all-or-nothing retry). freed is the per-feed
 	// AssetBytes reduction — what actually leaves the store, attributed to the
 	// expiring feed that referenced the key. A key an aborted predecessor
-	// already deleted stats as 0 (missing → (0, nil)); a mid-delete Rm failure
+	// already deleted counts as 0 (absent → fs.ErrNotExist, tolerated HERE and
+	// only here — retry idempotence needs it, and a real error still aborts
+	// with nothing deleted); a mid-delete Rm failure
 	// therefore loses the decrement for the keys it did delete — accepted skew,
 	// same class as the no-liveness-check trade-off. Each phase fans out over a
 	// bounded errgroup — the per-key calls are independent WAN round-trips made
@@ -147,7 +150,9 @@ func (o *DB) ExpireArticles(ctx context.Context, now int64) error {
 	for key, owner := range assetOwner {
 		g.Go(func() error {
 			size, err := o.Stat(gctx, key)
-			if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				size = 0
+			} else if err != nil {
 				return fmt.Errorf("stat %s: %w", key, err)
 			}
 			mu.Lock()

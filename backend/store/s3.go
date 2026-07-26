@@ -122,7 +122,7 @@ func apiErrorCode(err error) string {
 	return ""
 }
 
-func (d *S3) Get(ctx context.Context, key string, ignoreMissing bool) (io.ReadCloser, error) {
+func (d *S3) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	key = d.s3path("read", key)
 
 	res, err := d.client.GetObject(ctx, &s3.GetObjectInput{
@@ -132,11 +132,12 @@ func (d *S3) Get(ctx context.Context, key string, ignoreMissing bool) (io.ReadCl
 	})
 
 	switch apiErrorCode(err) {
-	case s3ErrNoSuchKey:
-		if ignoreMissing {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("key %q not found on s3", key)
+	// NotFound rides alongside NoSuchKey: a bucket reached through some
+	// S3-compatible gateways answers a bodyless miss with the HeadObject code
+	// even on GET, and a missing key that does not read as missing is exactly
+	// the lie this contract exists to prevent.
+	case s3ErrNoSuchKey, s3ErrNotFound:
+		return nil, errMissing("key not found on s3:", key)
 	case s3ErrUnauthorized:
 		return nil, fmt.Errorf("unauthorized access to s3: %w", err)
 	}
@@ -271,7 +272,7 @@ func (d *S3) Stat(ctx context.Context, key string) (int64, error) {
 	switch apiErrorCode(err) {
 	case s3ErrNotFound, s3ErrNoSuchKey:
 		slog.Debug("db not found", "key", key)
-		return 0, nil
+		return 0, errMissing("s3 head", key)
 	case s3ErrUnauthorized:
 		return 0, fmt.Errorf("unauthorized access to s3: %w", err)
 	}

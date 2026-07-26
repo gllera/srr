@@ -467,7 +467,7 @@ func (o *DB) loadSeen(ctx context.Context) *seenPool {
 // (rc == nil) returns (nil, false) so load falls through rather than treating
 // "absent" as a successful empty pool (which would mask the sibling).
 func (o *DB) tryLoadSeen(ctx context.Context, key string) (*seenPool, bool) {
-	rc, err := o.Get(ctx, key, true)
+	rc, err := getOptional(ctx, o.Backend, key)
 	if err != nil || rc == nil {
 		return nil, false
 	}

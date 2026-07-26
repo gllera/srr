@@ -153,6 +153,25 @@ func jsonEncode(v any) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// getOptional reads key, returning (nil, nil) when the store genuinely does
+// not have it. For the objects whose ABSENCE IS A LEGAL STATE — no root yet on
+// a fresh store, no config sidecar, no lock marker, an unwritten seen slot.
+//
+// This is NOT the retired Get(ignoreMissing) flag wearing a hat. That flag
+// lived inside the backends, so each of four implementations decided for itself
+// what counted as absence and answered (nil, nil) — a shape in which a timeout
+// and a 404 are the same value and no caller can tell them apart. Absence is
+// now one fact the backend states truthfully (fs.ErrNotExist) and exactly one
+// place converts it to a nil reader; every other error still propagates.
+// Callers wanting the fact rather than the reader ask errors.Is directly.
+func getOptional(ctx context.Context, b store.Backend, key string) (io.ReadCloser, error) {
+	rc, err := b.Get(ctx, key)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	return rc, err
+}
+
 // gunzip decompresses a gzip stream into a single byte slice.
 func gunzip(r io.Reader) ([]byte, error) {
 	gz, err := gzip.NewReader(r)
@@ -505,7 +524,7 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 	// shared with the read-only tools, so the writer and the checkers can never
 	// disagree about what a store's objects are called. No db.gz at all is a
 	// fresh v3 store.
-	rc, err := db.Get(ctx, dbFileKey, true)
+	rc, err := getOptional(ctx, db.Backend, dbFileKey)
 	if err != nil {
 		db.Close(ctx)
 		return nil, err
@@ -823,7 +842,7 @@ func (o *DB) FeedByID(id int) (*Feed, error) {
 }
 
 func (o *DB) readGz(ctx context.Context, key string) ([]byte, error) {
-	rc, err := o.Get(ctx, key, false)
+	rc, err := o.Get(ctx, key)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", key, err)
 	}

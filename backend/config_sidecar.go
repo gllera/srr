@@ -141,9 +141,13 @@ func (o *DB) configChanged(ctx context.Context) (changed, removals bool) {
 	// clearing the S32 objects) would otherwise never publish one again, since
 	// nothing about its configuration ever changes on a fetch cycle. One Stat
 	// per DB handle closes that, and only until the first confirmation.
+	// Fails SAFE in both directions: a nil error proves the sidecar is there and
+	// nothing is rewritten, while absence — or a transient error we cannot tell
+	// apart from it — merely forces one harmless rewrite of a config that
+	// already matches.
 	if !o.configConfirmed {
 		o.configConfirmed = true
-		if size, err := o.Stat(ctx, configFileKey); err != nil || size == 0 {
+		if _, err := o.Stat(ctx, configFileKey); err != nil {
 			return true, removals
 		}
 	}
@@ -208,7 +212,7 @@ func loadConfigSidecar(fetch keyGetter) (*configSidecar, error) {
 // running a fetch cycle with the default recipe when the operator configured
 // something else would rewrite every article through the wrong pipeline.
 func (o *DB) loadConfig(ctx context.Context) error {
-	rc, err := o.Get(ctx, configFileKey, true)
+	rc, err := getOptional(ctx, o.Backend, configFileKey)
 	if err != nil {
 		return err
 	}

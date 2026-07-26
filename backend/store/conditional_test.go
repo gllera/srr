@@ -55,7 +55,7 @@ func conditionalConformance(t *testing.T, b Backend) {
 	if _, err := b.PutIfVersion(ctx, "root", strings.NewReader("gen3"), ObjectMeta{}, v1); !errors.Is(err, ErrPreconditionFailed) {
 		t.Fatalf("PutIfVersion(stale version) = %v, want ErrPreconditionFailed", err)
 	}
-	rc, err := b.Get(ctx, "root", false)
+	rc, err := b.Get(ctx, "root")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}

@@ -434,7 +434,7 @@ func (o *DB) migrateRoot(ctx context.Context) error {
 
 // copyObject streams one store object to a new key. Used only by migrateRoot.
 func (o *DB) copyObject(ctx context.Context, from, to string) error {
-	rc, err := o.Get(ctx, from, false)
+	rc, err := o.Get(ctx, from)
 	if err != nil {
 		return err
 	}

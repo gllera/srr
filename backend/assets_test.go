@@ -28,7 +28,7 @@ func tempStore(t *testing.T) store.Backend {
 
 func readKey(t *testing.T, be store.Backend, key string) []byte {
 	t.Helper()
-	rc, err := be.Get(context.Background(), key, false)
+	rc, err := be.Get(context.Background(), key)
 	if err != nil {
 		t.Fatalf("get %q: %v", key, err)
 	}
@@ -723,7 +723,7 @@ func TestUploadCacheRefNoPartialFileOnAtomicPutFailure(t *testing.T) {
 	// The immutable key must NOT exist — not even partially.
 	sum := sha256.Sum256([]byte(jpegBytes))
 	key := contentHashKey(".jpg", sum)
-	rc, getErr := inner.Get(context.Background(), key, true)
+	rc, getErr := getOptional(context.Background(), inner, key)
 	if getErr != nil {
 		t.Fatalf("Get after failed upload: %v", getErr)
 	}
@@ -840,7 +840,7 @@ func TestUploadCacheRefCorruptMediaDeclined(t *testing.T) {
 		t.Fatalf("err = %v, want errCorruptAsset", err)
 	}
 	sum := sha256.Sum256([]byte("NOT-A-REAL-MP4"))
-	if rc, err := be.Get(context.Background(), contentHashKey(".mp4", sum), true); err != nil {
+	if rc, err := getOptional(context.Background(), be, contentHashKey(".mp4", sum)); err != nil {
 		t.Fatalf("Get: %v", err)
 	} else if rc != nil {
 		rc.Close()
@@ -1065,7 +1065,7 @@ func TestUploadCacheRefStatProbeErrorAborts(t *testing.T) {
 	}
 	// It must NOT have silently uploaded despite the probe failure.
 	sum := sha256.Sum256([]byte(jpegBytes))
-	if rc, gerr := inner.Get(context.Background(), contentHashKey(".jpg", sum), true); gerr != nil {
+	if rc, gerr := getOptional(context.Background(), inner, contentHashKey(".jpg", sum)); gerr != nil {
 		t.Fatalf("Get: %v", gerr)
 	} else if rc != nil {
 		rc.Close()

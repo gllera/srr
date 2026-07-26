@@ -520,7 +520,7 @@ const testJSONFeedDoc = `{"version":"https://jsonfeed.org/version/1.1","title":"
 // readStoreKey reads a raw store object for assertions.
 func readStoreKey(t *testing.T, db *DB, key string) string {
 	t.Helper()
-	rc, err := db.Get(ctx, key, false)
+	rc, err := db.Get(ctx, key)
 	if err != nil {
 		t.Fatalf("read %s: %v", key, err)
 	}

@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -174,7 +175,7 @@ func TestSFTPPutGetRoundTrip(t *testing.T) {
 	if err := d.Put(ctx, "a.txt", strings.NewReader("data"), true); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	rc, err := d.Get(ctx, "a.txt", false)
+	rc, err := d.Get(ctx, "a.txt")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -191,7 +192,7 @@ func TestSFTPPutCreatesSubdirectories(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(base, "sub", "deep")); err != nil {
 		t.Errorf("subdirectories should have been auto-created: %v", err)
 	}
-	rc, err := d.Get(ctx, "sub/deep/x.txt", false)
+	rc, err := d.Get(ctx, "sub/deep/x.txt")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -227,7 +228,7 @@ func TestSFTPPutOverwrite(t *testing.T) {
 			t.Fatalf("Put(%q): %v", content, err)
 		}
 	}
-	rc, _ := d.Get(ctx, "f.txt", false)
+	rc, _ := d.Get(ctx, "f.txt")
 	if got := readAllClose(t, rc); got != "second" {
 		t.Errorf("content = %q, want last write %q", got, "second")
 	}
@@ -241,7 +242,7 @@ func TestSFTPAtomicPutNoTempFileRemains(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(base, "atomic.txt.tmp")); !os.IsNotExist(err) {
 		t.Error("temp file should not remain after AtomicPut")
 	}
-	rc, _ := d.Get(ctx, "atomic.txt", false)
+	rc, _ := d.Get(ctx, "atomic.txt")
 	if got := readAllClose(t, rc); got != "content" {
 		t.Errorf("content = %q, want %q", got, "content")
 	}
@@ -263,25 +264,6 @@ func TestSFTPAtomicPutFailureRemovesTempFile(t *testing.T) {
 	}
 }
 
-func TestSFTPGetMissingIgnored(t *testing.T) {
-	d, _ := setupSFTPPipe(t)
-	rc, err := d.Get(ctx, "missing.txt", true)
-	if err != nil || rc != nil {
-		t.Errorf("Get(missing, ignoreMissing=true) = (%v, %v), want (nil, nil)", rc, err)
-	}
-}
-
-func TestSFTPGetMissingErrors(t *testing.T) {
-	d, _ := setupSFTPPipe(t)
-	rc, err := d.Get(ctx, "missing.txt", false)
-	if rc != nil {
-		rc.Close()
-	}
-	if err == nil {
-		t.Error("Get(missing, ignoreMissing=false) should return error")
-	}
-}
-
 func TestSFTPRmSilentOnMissing(t *testing.T) {
 	d, _ := setupSFTPPipe(t)
 	if err := d.Rm(ctx, "missing.txt"); err != nil {
@@ -297,9 +279,12 @@ func TestSFTPRmExisting(t *testing.T) {
 	if err := d.Rm(ctx, "f.txt"); err != nil {
 		t.Fatalf("Rm: %v", err)
 	}
-	rc, err := d.Get(ctx, "f.txt", true)
-	if err != nil || rc != nil {
-		t.Errorf("Get after Rm = (%v, %v), want (nil, nil)", rc, err)
+	rc, err := d.Get(ctx, "f.txt")
+	if rc != nil {
+		rc.Close()
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Get after Rm err = %v, want errors.Is(err, fs.ErrNotExist)", err)
 	}
 }
 
@@ -311,9 +296,12 @@ func TestSFTPStat(t *testing.T) {
 	if n, err := d.Stat(ctx, "sub/obj.bin"); err != nil || n != 5 {
 		t.Errorf("Stat = (%d, %v), want (5, nil)", n, err)
 	}
-	// A missing key is (0, nil) per the Backend contract (silent like Rm).
-	if n, err := d.Stat(ctx, "missing.bin"); err != nil || n != 0 {
-		t.Errorf("Stat(missing) = (%d, %v), want (0, nil)", n, err)
+	// A missing key is an fs.ErrNotExist-wrapped error, never a silent
+	// zero — a nil error from Stat has to PROVE presence. Pinned for all
+	// four backends at once in TestBackendMissingKeyConformance; kept here
+	// so a single-backend edit trips its own test too.
+	if _, err := d.Stat(ctx, "missing.bin"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Stat(missing) err = %v, want errors.Is(err, fs.ErrNotExist)", err)
 	}
 }
 
@@ -345,7 +333,7 @@ func TestSFTPAtomicPutSweepsStaleTempLeftovers(t *testing.T) {
 		t.Errorf("fresh temp file swept (err=%v), want kept by the age gate", err)
 	}
 	// The write itself must be unaffected by the janitor work.
-	rc, err := d.Get(ctx, "other.txt", false)
+	rc, err := d.Get(ctx, "other.txt")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"strings"
 	"testing"
 )
@@ -174,12 +176,10 @@ func TestReapInboxRemovesSlots(t *testing.T) {
 		t.Fatalf("writeInbox: %v", err)
 	}
 	reapInbox(context.Background(), db.Backend, []string{"p1"})
-	size, err := db.Stat(ctx, inboxKey("p1"))
-	if err != nil {
-		t.Fatalf("Stat: %v", err)
-	}
-	if size != 0 {
-		t.Errorf("slot still %d bytes after reap", size)
+	// Absence, not a zero size: a slot that is still THERE but reports 0 bytes
+	// was never reaped, and the producer would treat it as drained.
+	if _, err := db.Stat(ctx, inboxKey("p1")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Stat after reap err = %v, want errors.Is(err, fs.ErrNotExist)", err)
 	}
 }
 

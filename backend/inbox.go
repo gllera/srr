@@ -154,7 +154,7 @@ func writeInbox(ctx context.Context, be store.Backend, name string, env inboxEnv
 // state between spools.
 func readInbox(ctx context.Context, be store.Backend, name string) (*inboxEnvelope, error) {
 	key := inboxKey(name)
-	rc, err := be.Get(ctx, key, true)
+	rc, err := getOptional(ctx, be, key)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", key, err)
 	}

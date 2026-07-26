@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -729,14 +730,16 @@ func (o *FetchCmd) fetchPhase(ctx context.Context, db *DB, client *http.Client, 
 		// Single-slot backpressure: an undrained previous spool means this
 		// producer's read-only view of the dedup state is already one cycle
 		// ahead of the store, so fetching again would re-ingest against stale
-		// state. Skip the cycle entirely instead.
-		size, err := db.Stat(ctx, inboxKey(spoolName))
-		if err != nil {
-			return fmt.Errorf("probe spool slot: %w", err)
-		}
-		if size > 0 {
+		// state. Skip the cycle entirely instead. PRESENCE is the signal, not
+		// size: a spool that is present but reports 0 bytes (a store whose HEAD
+		// omits Content-Length) is still undrained, and treating it as drained
+		// would overwrite a cycle the consolidator has not folded in yet.
+		switch _, err := db.Stat(ctx, inboxKey(spoolName)); {
+		case err == nil:
 			slog.Info("previous spool not yet drained; skipping cycle", "producer", spoolName)
 			return nil
+		case !errors.Is(err, fs.ErrNotExist):
+			return fmt.Errorf("probe spool slot: %w", err)
 		}
 	} else if err := checkStoreBusy(ctx, db); err != nil {
 		return err

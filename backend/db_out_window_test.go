@@ -19,7 +19,7 @@ type getCountingBackend struct {
 	gets map[string]int
 }
 
-func (b *getCountingBackend) Get(ctx context.Context, key string, ignoreMissing bool) (io.ReadCloser, error) {
+func (b *getCountingBackend) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	b.mu.Lock()
 	if b.gets == nil {
 		b.gets = map[string]int{}
@@ -33,7 +33,7 @@ func (b *getCountingBackend) Get(ctx context.Context, key string, ignoreMissing 
 		b.gets["idx"]++
 	}
 	b.mu.Unlock()
-	return b.Backend.Get(ctx, key, ignoreMissing)
+	return b.Backend.Get(ctx, key)
 }
 
 // sparseOutStore builds a multi-data-pack store where feed `dense` owns almost
