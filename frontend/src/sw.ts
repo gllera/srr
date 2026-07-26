@@ -31,13 +31,17 @@
 // manifest names one set of objects, and every one of those names is write-once.
 // The snapshot can never disagree with itself, even across a mid-load network
 // blip. All of it was cached on the last online visit; offline serves it.
+// That invariant is a CONSTRAINT on everything below, not just a description:
+// anything that advances the cached root must first cache the objects the new
+// root's generation needs (see the periodic warm), or the next offline launch
+// boots a root whose packs were never fetched.
 //
 // Best-effort throughout: every miss/failure falls through to the network, so a
 // browser without SW support (or an insecure-context LAN deploy) just runs straight
 // off the network, exactly as before. Self-contained: no SRR_CDN_URL, so it works
 // under any cdn-url prefix.
 import { type IDBWire, type IManifestWire } from "./js/format.gen"
-import { manifestNames } from "./js/names"
+import { bootWarmNames, manifestNames, type StoreNames } from "./js/names"
 import { parsePackName, RE_ASSET, RE_DB, RE_SHELL_HASHED } from "./js/sw-grammar"
 
 const sw = self as unknown as ServiceWorkerGlobalScope
@@ -196,6 +200,10 @@ sw.addEventListener("activate", (event) => {
          // (see navigationResponse). Feature-detected: Safari only shipped it in
          // 17, and its absence just restores today's serial behaviour.
          .then(() => sw.registration.navigationPreload?.enable().catch(() => {}))
+         // Periodic background sync (PWA5): ask once here, and again on the
+         // page's "mounts" post — activation happens long before an install,
+         // which is when the permission this needs can first be granted.
+         .then(() => ensurePeriodicSync())
          .then(() => sw.clients.claim()),
    )
 })
@@ -237,6 +245,8 @@ function isPinnableName(n: unknown): n is string {
 //   { type: "mounts", roots: [{mid, base, cred, role}] }
 //     The mounted store table (§5.1). Refreshes the in-memory routing set and
 //     persists it (a synthetic META entry) so a restarted worker re-learns it.
+//     It doubles as the periodic-sync registration retry (PWA5) — a page boot
+//     is the cheapest recurring "the app may be installed now" signal there is.
 //
 //   { type: "pin", names: string[], base?: string, port?: MessagePort }
 //     Caches each name into the eviction-exempt PINNED bucket. Names MUST pass
@@ -268,6 +278,10 @@ sw.addEventListener("message", (event) => {
    if (msg.type === "mounts") {
       roots = coerceRoots(msg.roots)
       event.waitUntil(persistRoots(roots))
+      // A page just booted — the cheapest recurring signal that the app may
+      // have been INSTALLED since this worker started, which is what makes the
+      // periodic-sync permission grantable. Idempotent and once per lifetime.
+      event.waitUntil(ensurePeriodicSync())
       return
    }
 
@@ -507,60 +521,89 @@ async function readMetaNames(key: string): Promise<string[]> {
 // L/d, and LATEST_KEEP cutoffs for h/s) and still had to know the writer's
 // runtime --max-deltas. Any failure is swallowed: a malformed root or an
 // unreachable manifest must still let db.gz be served.
+
+// The two halves of that reconciliation, split so the periodic warm can put
+// work BETWEEN them (cache the new generation's objects before adopting it).
+// The fetch path composes them back together immediately below, unchanged.
+interface Adoptable {
+   m: number
+   names: StoreNames
+   listed: string[]
+}
+
+// Read half: what this root would adopt, or null when there is genuinely
+// NOTHING to adopt (an empty store, or a generation this root already adopted).
+// Anything else — an unreachable manifest, one that disagrees with the root
+// that named it — THROWS: "nothing to do" and "could not find out" are the same
+// non-event to the fetch path (whose catch swallows both), but they are
+// opposites to the periodic warm, which must not flip the cached root onto a
+// generation it could not read. Caches the manifest as a side effect — work the
+// page is about to do anyway.
+async function readAdoptable(dbRes: Response, root: Root): Promise<Adoptable | null> {
+   const body = dbRes.clone().body!.pipeThrough(new DecompressionStream("gzip"))
+   const rootDoc = (await new Response(body).json()) as Pick<IDBWire, "m">
+   const m = rootDoc.m ?? 0
+   // Per-root record (§5.4): a peer's generation change must not touch the
+   // home store's adopted-generation number or its cached packs.
+   if (m === 0 || m === (await readMetaNumber(metaManKey(root.mid)))) return null
+
+   // Resolve against the ROOT's base (dbRes.url is the db.gz URL, so a
+   // same-directory resolve works either way).
+   const url = new URL(`manifest/${m}.gz`, dbRes.url)
+   const res = await cacheFirst(new Request(url.href, { credentials: root.cred }), PACKS)
+   if (!res.ok) throw new Error(`manifest ${m}: ${res.status}`)
+   const man = (await new Response(
+      res.clone().body!.pipeThrough(new DecompressionStream("gzip")),
+   ).json()) as IManifestWire
+   if (man.m !== m) throw new Error(`manifest ${m}: names itself ${man.m}`)
+
+   const names = manifestNames(man)
+   const listed = [
+      ...names.idx.keys,
+      ...names.data.keys,
+      ...names.meta.keys,
+      ...names.deltas,
+      ...(names.hsum ? [names.hsum.key] : []),
+      ...(names.ssum ? [names.ssum.key] : []),
+      `manifest/${m}.gz`,
+   ].filter(Boolean)
+   return { m, names, listed }
+}
+
+// Write half: evict what the generation does not name, then record it as
+// adopted. Both caches move together — the eviction is what the recorded name
+// set describes, so nothing between them may fail.
+async function adoptManifest(root: Root, a: Adoptable): Promise<void> {
+   // Keep = this generation ∪ the PREVIOUSLY-ADOPTED one. Exactly one
+   // generation of overlap, which is what covers a tab mid-swap; the stored
+   // set is this generation's alone, or the kept set would only ever grow.
+   const keep = new Set<string>([...a.listed, ...(await readMetaNames(metaNamesKey(root.mid)))])
+
+   const packs = await caches.open(PACKS)
+   await Promise.all(
+      (await packs.keys()).map((req) => {
+         const reqUrl = new URL(req.url)
+         const path = reqUrl.pathname
+         if (!parsePackName(path)) return undefined
+         // Evict only THIS root's objects: a cached pack under a different
+         // mounted root must survive this root's generation change (§5.4).
+         if (!reqUrl.href.startsWith(root.base)) return undefined
+         // Names are store-relative; a cached URL carries whatever prefix
+         // the cdn-url adds, so match on the suffix.
+         for (const name of keep) if (path.endsWith("/" + name)) return undefined
+         return packs.delete(req)
+      }),
+   )
+
+   const meta = await caches.open(META)
+   await meta.put(metaManKey(root.mid), new Response(String(a.m)))
+   await meta.put(metaNamesKey(root.mid), new Response(JSON.stringify(a.listed)))
+}
+
 async function checkManifest(dbRes: Response, root: Root): Promise<void> {
    try {
-      const body = dbRes.clone().body!.pipeThrough(new DecompressionStream("gzip"))
-      const rootDoc = (await new Response(body).json()) as Pick<IDBWire, "m">
-      const m = rootDoc.m ?? 0
-      // Per-root record (§5.4): a peer's generation change must not touch the
-      // home store's adopted-generation number or its cached packs.
-      if (m === 0 || m === (await readMetaNumber(metaManKey(root.mid)))) return
-
-      // The page is about to fetch this very manifest, so caching it here is
-      // work it would do anyway. Resolve against the ROOT's base (dbRes.url is
-      // the db.gz URL, so a same-directory resolve works either way).
-      const url = new URL(`manifest/${m}.gz`, dbRes.url)
-      const res = await cacheFirst(new Request(url.href, { credentials: root.cred }), PACKS)
-      if (!res.ok) return
-      const man = (await new Response(
-         res.clone().body!.pipeThrough(new DecompressionStream("gzip")),
-      ).json()) as IManifestWire
-      if (man.m !== m) return
-
-      const names = manifestNames(man)
-      const listed = [
-         ...names.idx.keys,
-         ...names.data.keys,
-         ...names.meta.keys,
-         ...names.deltas,
-         ...(names.hsum ? [names.hsum.key] : []),
-         ...(names.ssum ? [names.ssum.key] : []),
-         `manifest/${m}.gz`,
-      ].filter(Boolean)
-      // Keep = this generation ∪ the PREVIOUSLY-ADOPTED one. Exactly one
-      // generation of overlap, which is what covers a tab mid-swap; the stored
-      // set is this generation's alone, or the kept set would only ever grow.
-      const keep = new Set<string>([...listed, ...(await readMetaNames(metaNamesKey(root.mid)))])
-
-      const packs = await caches.open(PACKS)
-      await Promise.all(
-         (await packs.keys()).map((req) => {
-            const reqUrl = new URL(req.url)
-            const path = reqUrl.pathname
-            if (!parsePackName(path)) return undefined
-            // Evict only THIS root's objects: a cached pack under a different
-            // mounted root must survive this root's generation change (§5.4).
-            if (!reqUrl.href.startsWith(root.base)) return undefined
-            // Names are store-relative; a cached URL carries whatever prefix
-            // the cdn-url adds, so match on the suffix.
-            for (const name of keep) if (path.endsWith("/" + name)) return undefined
-            return packs.delete(req)
-         }),
-      )
-
-      const meta = await caches.open(META)
-      await meta.put(metaManKey(root.mid), new Response(String(m)))
-      await meta.put(metaNamesKey(root.mid), new Response(JSON.stringify(listed)))
+      const a = await readAdoptable(dbRes, root)
+      if (a) await adoptManifest(root, a)
    } catch {
       // best-effort — leave caches as-is
    }
@@ -608,6 +651,156 @@ async function dbNetworkFirst(req: Request, event: FetchEvent, root: Root): Prom
       throw err
    }
 }
+
+// --- periodic background sync (PWA5) --------------------------------------
+//
+// Everything above only runs while a page is running. An installed PWA is
+// launched cold — often offline, often hours after the last session — and until
+// its first successful online fetch it shows whatever the last session cached.
+// `periodicsync` is the one hook a browser offers a CLOSED app: it wakes the
+// worker on the browser's own schedule, which is exactly enough to run the
+// db.gz path the boot already runs, so the next launch opens on the newest
+// generation instead of yesterday's.
+//
+// Progressive enhancement, end to end. The API is Chromium-only and its
+// `periodic-background-sync` permission is granted only to installed apps, so
+// an absent API, an absent permission and a rejected registration are all
+// silent no-ops — nothing here can fail a boot, and every other engine keeps
+// exactly today's behaviour.
+
+// TypeScript ships no lib types for the draft Periodic Background Sync API.
+// Declare the two shapes actually touched, narrowly, rather than widening the
+// registration to `any` and losing every other check on it.
+interface PeriodicSyncManager {
+   getTags(): Promise<string[]>
+   register(tag: string, options?: { minInterval?: number }): Promise<void>
+}
+interface PeriodicSyncRegistration extends ServiceWorkerRegistration {
+   readonly periodicSync?: PeriodicSyncManager
+}
+interface PeriodicSyncEvent extends ExtendableEvent {
+   readonly tag: string
+}
+
+const PERIODIC_TAG = "srr-db-warm"
+
+// 12 hours — a FLOOR, not a schedule. The browser fires these entirely at its
+// own discretion (Chromium weighs site engagement and lands a small number of
+// wakes a day at best); a minInterval is only a promise not to ask for more.
+//
+// It is tempting to chase the store's 5-minute commit loop, but this is not
+// chasing the store, it is chasing the next LAUNCH: what the warm buys is that
+// a cold offline open finds a generation from hours rather than days ago, and
+// 1 h would not buy more of that than 12 h does. What it would cost is real —
+// a radio wake on a device that may be on battery or a metered link, with no
+// user present to want it. A VISIBLE tab already refreshes on focus, on
+// reconnect and on a 5-minute heartbeat (refresh.ts); this covers only the
+// window where none of those can run, and it should be as cheap as that window
+// is long.
+const PERIODIC_MIN_INTERVAL = 12 * 60 * 60 * 1000
+
+// Registered from the WORKER, not the page: `periodicSync` hangs off the same
+// ServiceWorkerRegistration in both scopes, and registering here keeps the
+// whole feature inside the module that implements it. Once per worker lifetime
+// — the flag is set before the awaits, so a denied attempt does not repeat
+// within this lifetime, while the next worker start retries it. That cadence is
+// the point: the permission is granted at INSTALL time, which usually happens
+// long after the worker that first activated, and a worker start is the
+// cheapest recurring moment at which to notice.
+let periodicChecked = false
+
+async function ensurePeriodicSync(): Promise<void> {
+   if (periodicChecked) return
+   periodicChecked = true
+   try {
+      const mgr = (sw.registration as PeriodicSyncRegistration).periodicSync
+      if (!mgr) return // not Chromium — the feature simply does not exist here
+      // Registrations persist across worker restarts, so re-registering an
+      // existing tag would only rewrite what is already there.
+      if ((await mgr.getTags()).includes(PERIODIC_TAG)) return
+      await mgr.register(PERIODIC_TAG, { minInterval: PERIODIC_MIN_INTERVAL })
+   } catch {
+      // Not installed, permission denied, disabled by policy, storage gone:
+      // every one of them means "no background wakes", which is the state this
+      // worker was in before. Never a boot error.
+   }
+}
+
+// One warm of one root, and the ONE place that advances a cached root outside a
+// fetch event — so it is the one place that has to honor the header's structural
+// invariant by hand. It does that by running the store's own commit discipline
+// (docs/MANIFEST-SPEC.md §6.1) on the client: publish the OBJECTS first, flip
+// the ROOT last. Concretely:
+//
+//   fetch db.gz → resolve what it would adopt → cache that generation's
+//   boot objects → adopt (evict + record) → cache db.gz → bound the caches
+//
+// Any failure before the last two steps leaves the cached root exactly where it
+// was, pointing at a generation whose objects are still cached and still named
+// by the recorded set — i.e. an offline launch is never worse for having tried.
+// That is also why the warm must never be "just fetch db.gz": caching a newer
+// root alone would leave the next offline launch booting a generation whose idx
+// tail it has never seen.
+//
+// An offline wake (the common case for a device that woke on a timer with no
+// connectivity) throws at the first fetch, before anything is written — which is
+// what keeps `adoptManifest`'s eviction and `enforceCacheBounds` on their
+// documented "successful ONLINE db.gz fetch" trigger.
+async function warmRoot(root: Root): Promise<void> {
+   const req = new Request(new URL("db.gz", root.base).href, { cache: "no-cache", credentials: root.cred })
+   const res = await fetch(req)
+   // Same guard the fetch path applies: an opaque (no-CORS) response is
+   // unreadable bytes, and caching one would serve a broken hit forever.
+   if (!res.ok || res.type === "opaque") return
+
+   const a = await readAdoptable(res, root)
+   if (a) {
+      // Sequential on purpose: a background wake has no latency budget, and one
+      // request at a time is the politest shape for someone else's radio. The
+      // set is a handful of objects (bootWarmNames), and a name already cached
+      // costs nothing at all — cacheFirst answers from the bucket.
+      for (const name of bootWarmNames(a.names)) {
+         const hit = await cacheFirst(new Request(new URL(name, root.base).href, { credentials: root.cred }), PACKS)
+         // A 404 mid-warm means this generation is already being swept, or the
+         // manifest and the store disagree. Either way: abandon the warm with
+         // the root un-flipped rather than adopt a generation we cannot serve.
+         if (!hit.ok) throw new Error(`warm: ${name} is not servable`)
+      }
+      await adoptManifest(root, a)
+   }
+   // The root flip, last. `a === null` reaches here too — an empty store, or a
+   // generation already adopted, both of which have nothing to publish first.
+   const cache = await caches.open(PACKS)
+   await cache.put(req, res)
+   await enforceCacheBounds()
+}
+
+// Warming is HOME-ONLY, deliberately. The mount table the page posts carries
+// roles, not which store is active (§5.1), and a cold launch resolves to the
+// home root — so home is the one store a wake can know the next open will want.
+// Warming every mount would multiply an unattended wake's cost by N for stores
+// the user only reaches by an explicit foreground act; if that ever proves
+// wrong, the fix is one more field on the "mounts" message, not a different
+// design here. A worker that has never heard from a page falls back to its own
+// scope (effectiveRoots), which is the home root of a self-hosted deployment.
+async function warmHome(): Promise<void> {
+   try {
+      await hydrateRoots()
+      const home = effectiveRoots().find((r) => r.role === "home")
+      if (home) await warmRoot(home)
+   } catch {
+      // best-effort, like every other cache path here: offline, a 404 mid-warm,
+      // a quota error. The store is left as it was and the next wake retries.
+   }
+}
+
+sw.addEventListener("periodicsync", (event) => {
+   const e = event as PeriodicSyncEvent
+   if (e.tag !== PERIODIC_TAG) return
+   // waitUntil keeps the worker alive for the warm — without it the browser is
+   // free to kill it the moment this handler returns.
+   e.waitUntil(warmHome())
+})
 
 sw.addEventListener("fetch", (event) => {
    const req = event.request
