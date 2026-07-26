@@ -116,6 +116,24 @@ format-check-be:
 lint-be:
 	cd backend && golangci-lint run ./...
 
+.PHONY: bench-be
+
+# bench-be: the store hot paths (backend/bench_test.go, TST5) — gzipBest per
+# series, the delta-chain consolidation fold, the meta bloom build, the search
+# fold. Not in verify because a benchmark has no pass/fail: it produces numbers
+# a human (or benchstat) compares against another run, and the zopfli rows alone
+# cost seconds per iteration. It is what GRO5 has to be decided on — read
+# gzipBest's bytes-out/%-saved metrics against its ns/op, not the ns/op alone.
+# Tunables: `make bench-be BENCHTIME=10x` (or 5s) for a tighter measurement,
+# `make bench-be BENCH=GzipBest/data` to run one subset. The default 1s is Go's
+# own, which self-adapts: the microbenchmarks get thousands of iterations while
+# the multi-second zopfli rows get one.
+BENCHTIME ?= 1s
+BENCH ?= .
+
+bench-be:
+	cd backend && go test ./... -run '^$$' -bench '$(BENCH)' -benchtime=$(BENCHTIME) -benchmem
+
 dist:
 	@mkdir -p $@
 
