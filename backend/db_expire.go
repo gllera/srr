@@ -228,11 +228,22 @@ func (o *DB) ExpireArticles(ctx context.Context, now int64) error {
 		ch := c.Feeds[id]
 		ch.AddIdx = idx
 		ch.Expired += newlyExpired[id] // advanced-only feeds add the map default 0
-		// Clamped: the owner recorded at upload can be a feed that has since
-		// been removed and its id reused, and the uncovered region still
-		// attributes to the expiring feed rather than the uploader.
-		ch.AssetBytes = max(0, ch.AssetBytes-freed[id])
 		expired += newlyExpired[id]
+	}
+	// The release is applied over freed's OWN keys, NOT the frontier loop's: the
+	// owner the sidecar recorded need not have moved its own frontier this cycle,
+	// and on the exact flow this feature exists for — "a shared object survives
+	// its first expiring referrer" — it typically has not (it is still sawLive,
+	// or below its cutoff, or keeps its articles forever and is not in cutoffs at
+	// all). Iterating newAddIdx dropped those releases on the floor, so `ab`
+	// ratcheted up forever for objects that had left the store.
+	// Clamped: the owner recorded at upload can be a feed that has since been
+	// removed and its id reused, and the uncovered region still attributes to the
+	// expiring feed rather than the uploader.
+	for id, n := range freed {
+		if ch := c.Feeds[id]; ch != nil {
+			ch.AssetBytes = max(0, ch.AssetBytes-n)
+		}
 	}
 	slog.Info("expired articles", "articles", expired, "assets", len(dead), "asset_bytes", freedBytes, "feeds", len(newlyExpired), "advanced", advanced,
 		"assets_still_referenced", kept, "assets_unaccounted", unknown)

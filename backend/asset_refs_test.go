@@ -383,6 +383,80 @@ func TestExpireReleasesAssetBytesFromTheOwner(t *testing.T) {
 	}
 }
 
+// The release must reach an owner that did NOT move its own frontier this
+// cycle — which is the NORMAL shape of the feature, not an edge: "a shared
+// object survives its first expiring referrer" means the last referrer is
+// usually someone else, and by then the owner is typically still `sawLive`
+// (so no dormant-frontier advance sweeps it into newAddIdx either). Applying
+// `freed` over the frontier loop's keys silently dropped those releases, and
+// `ab` ratcheted up forever for objects that had left the store.
+func TestExpireReleasesAssetBytesFromAnOwnerThatDidNotExpire(t *testing.T) {
+	db, _, dir := setupTestDB(t)
+	// Getting the owner OUT of newAddIdx takes both halves: it must expire
+	// nothing this cycle AND stay `sawLive`, or the dormant-frontier advance
+	// sweeps it back in (which is exactly why the sibling tests above pass
+	// against the buggy code). sawLive needs a live own article strictly BELOW
+	// the walk's early stop — so the owner's window has to be wider than
+	// whichever feed sets max(cutoff) in that cycle.
+	owner := &Feed{Title: "owner", URL: "https://a.example/f", ExpireDays: 10}
+	other := &Feed{Title: "other", URL: "https://b.example/f", ExpireDays: 3650}
+	for _, f := range []*Feed{owner, other} {
+		if err := db.AddFeed(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	shared := mustWriteAsset(t, dir, refKeyA) // 11 bytes, charged to `owner`
+	owner.AssetBytes = 11
+
+	// chron 0/1: the owner's referencing article (first, so the sidecar records
+	// it as the owner) and the other feed's.
+	putExpireBatch(t, db, old20d, []*Item{
+		{Feed: owner, Title: "o-old", Content: img(refKeyA)},
+		{Feed: other, Title: "x-old", Content: img(refKeyA)},
+	})
+	// chron 2: an own article the owner keeps — inside its 10-day window, and
+	// (in cycle 2) below the early stop, which is what makes it sawLive.
+	mid5d := expNow - 5*86400
+	putExpireBatch(t, db, mid5d, []*Item{{Feed: owner, Title: "o-live", Content: "<p>live</p>"}})
+
+	// Cycle 1: the owner's referrer expires, the other feed's outlives it.
+	if err := db.ExpireArticles(ctx, expNow); err != nil {
+		t.Fatalf("ExpireArticles (cycle 1): %v", err)
+	}
+	if assetGone(t, shared) {
+		t.Fatal("shared asset deleted by its first expiring referrer")
+	}
+	if owner.AssetBytes != 11 {
+		t.Fatalf("AssetBytes = %d, want 11 — nothing left the store yet", owner.AssetBytes)
+	}
+
+	// Cycle 2: the LAST reference dies, on a feed that is not the owner. The
+	// other feed takes the NARROWER window, so it sets max(cutoff), the walk
+	// runs past the owner's live chron 2, and the owner ends the cycle sawLive
+	// with nothing expired — absent from newAddIdx.
+	other.ExpireDays = 1
+	ownerAddIdx := owner.AddIdx
+	if err := db.ExpireArticles(ctx, expNow); err != nil {
+		t.Fatalf("ExpireArticles (cycle 2): %v", err)
+	}
+	if !assetGone(t, shared) {
+		t.Fatal("asset survived its LAST referrer")
+	}
+	// The premise of the test: the owner's frontier did not move this cycle, so
+	// a release keyed on newAddIdx could not have found it.
+	if owner.AddIdx != ownerAddIdx {
+		t.Fatalf("owner AddIdx moved %d -> %d; the test no longer exercises the bug",
+			ownerAddIdx, owner.AddIdx)
+	}
+	if owner.AssetBytes != 0 {
+		t.Errorf("AssetBytes = %d, want 0 — the object left the store and its owner was never credited",
+			owner.AssetBytes)
+	}
+	if other.AssetBytes != 0 {
+		t.Errorf("the expiring feed was charged %d bytes it never uploaded", other.AssetBytes)
+	}
+}
+
 // The counts and the batch become durable by ONE root flip: SyncRefs writes a
 // fresh stem, Commit's manifest names it, and a reopened store reads it back.
 func TestSyncRefsIsPublishedWithTheGeneration(t *testing.T) {
