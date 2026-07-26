@@ -19,6 +19,7 @@ import { countBadge, readerDateline, sanitizeFragment, srcColorIndex } from "./f
 import * as list from "./list"
 import { mountLabel } from "./mounts"
 import * as nav from "./nav"
+import * as player from "./player"
 import { URL_DENY } from "./urlish"
 
 export interface ReaderDeps {
@@ -133,19 +134,31 @@ function expiredTombstone(): HTMLElement {
 // starting on its own whenever navigation happens to land back on the article —
 // including a restored deep link or a two-finger filter cycle — which is the
 // behaviour people disable autoplay to avoid. Press play and you continue where
-// you were. (Media that keeps playing ACROSS articles is the mini-player,
-// RDR16, deliberately a separate piece of work.)
-interface MediaState {
+// you were.
+//
+// Media that keeps PLAYING across articles is the mini-player (RDR16,
+// player.ts), which is layered on top of this rather than replacing it: the
+// player relocates the one live element, and everything else on the page — every
+// other <audio>/<video>, and the live one once you close the player — still
+// relies on the position memory here.
+export interface MediaState {
    time: number
    rate: number
 }
-// Keyed by chronIdx, bounded: a long session must not accumulate one entry per
-// article ever opened, and the value is only interesting for the handful you
+// Keyed `<mid>:<chron>`, bounded: a long session must not accumulate one entry
+// per article ever opened, and the value is only interesting for the handful you
 // might step back to.
-const mediaStates = makeLRU<MediaState[]>(20)
-// The chron whose content is currently mounted, so the harvest knows whose
-// positions it is taking. -1 = nothing to harvest (boot, or an empty state).
+//
+// The mid is part of the key because chronIdx is only unique WITHIN a mount
+// (S38 multi-store): two mounted stores both have a chron 42, so a bare-chron
+// key would restore one store's playback position onto a different store's
+// article the first time you stepped between them.
+const mediaStates = makeLRU<MediaState[], string>(20)
+const stateKey = (mid: string, chron: number): string => `${mid}:${chron}`
+// The article whose content is currently mounted, so the harvest knows whose
+// positions it is taking. chron -1 = nothing to harvest (boot, or an empty state).
 let mountedChron = -1
+let mountedMid = ""
 // State a restore has QUEUED but not yet applied (currentTime is only settable
 // once duration is known). Without this a second render of the same article
 // before the metadata lands — a re-route, a post-refresh re-probe — would
@@ -154,7 +167,7 @@ const pendingRestore = new WeakMap<HTMLMediaElement, MediaState>()
 
 function harvestMediaState(): void {
    if (mountedChron < 0) return
-   const chron = mountedChron
+   const key = stateKey(mountedMid, mountedChron)
    mountedChron = -1
    const media = el.content.querySelectorAll<HTMLMediaElement>("audio,video")
    if (!media.length) return
@@ -170,12 +183,24 @@ function harvestMediaState(): void {
       // would only pin a stale entry in the LRU.
       if (out[i].time > 0) worthKeeping = true
    })
-   if (worthKeeping) mediaStates.put(chron, out)
-   else mediaStates.drop(chron)
+   if (worthKeeping) mediaStates.put(key, out)
+   else mediaStates.drop(key)
 }
 
-function restoreMediaState(chron: number): void {
-   const saved = mediaStates.get(chron)
+// player.ts's release path hands a live episode's position back here, so closing
+// the mini-player leaves the article exactly as resumable as if the player had
+// never been opened. Injected as a PlayerDeps callback rather than imported,
+// because player.ts must not depend on reader.ts (reader imports player).
+export function rememberPosition(mid: string, chron: number, index: number, s: MediaState): void {
+   if (chron < 0 || s.time <= 0) return
+   const key = stateKey(mid, chron)
+   const out = mediaStates.get(key)?.slice() ?? []
+   out[index] = s
+   mediaStates.put(key, out)
+}
+
+function restoreMediaState(mid: string, chron: number): void {
+   const saved = mediaStates.get(stateKey(mid, chron))
    if (!saved) return
    // Positional pairing: the same immutable article renders the same media in
    // the same order, so index IS the identity (src would break on a re-proxied
@@ -233,9 +258,22 @@ export function render(o: IShowFeed) {
    // "[DELETED]" feed tombstone — instead of the literal "undefined"
    // sanitizeFragment(undefined) would produce.
    const body = o.article.c as string | undefined
-   // The outgoing article's media positions, taken BEFORE replaceChildren
-   // destroys the elements holding them (see harvestMediaState).
+   // RDR16 — the five steps below run in a FIXED order, and the order is not
+   // recoverable by reading any one of them alone:
+   //
+   //   1. harvest  — read every outgoing element's position, the playing one
+   //                 included, while they are all still in the content host.
+   //   2. adopt    — MOVE the playing element into the mini-player, so the
+   //                 replaceChildren immediately after cannot destroy it.
+   //   3. replace  — install the new article.
+   //   4. restore  — apply saved positions to the fresh elements.
+   //   5. rehome   — if this article owns the live element, swap it back in.
+   //
+   // harvest MUST precede adopt: both pair state to elements BY INDEX over
+   // querySelectorAll("audio,video"), so moving the live element out first would
+   // shift every index after it and misalign the whole article's saved positions.
    harvestMediaState()
+   player.adoptFromContent()
    // The article's own language (`g` on the wire, from the backend's always-on
    // detection). Without it the whole reader inherits <html lang="en">: a
    // screen reader pronounces a Spanish body in an English voice, hyphenation
@@ -259,7 +297,20 @@ export function render(o: IShowFeed) {
    if (body == null) el.content.replaceChildren(expiredTombstone())
    else el.content.replaceChildren(sanitizeFragment(body, data.activeStore().base))
    mountedChron = nav.currentChron()
-   if (mountedChron >= 0) restoreMediaState(mountedChron)
+   mountedMid = data.activeStore().mid
+   if (mountedChron >= 0) {
+      restoreMediaState(mountedMid, mountedChron)
+      // Tell the player what is on screen: a `play` in this article needs an
+      // identity, and the bar needs a title/feed it can label itself with
+      // without a pack fetch.
+      player.noteMounted({
+         mid: mountedMid,
+         chron: mountedChron,
+         title: o.article.t ?? "",
+         feedId: o.article.f,
+      })
+      player.rehomeInto(mountedMid, mountedChron)
+   } else player.noteMounted(null)
    // Reject javascript:/data:/vbscript:/file: in case the writer pipeline let one
    // through. The whole masthead row (source · date · title) is the one permalink;
    // an href makes it a link, its absence leaves it inert chrome (titleless feeds
@@ -338,7 +389,12 @@ function renderEmptyReader(o: IShowFeed) {
    // Static panel: no fade-in (clear any inline opacity/transform a prior article
    // render left behind), and swap the body for the shared empty-state element.
    clearContentTransition()
+   // Same fixed order as render()'s: harvest before adopt, both before the
+   // replaceChildren below. An empty state mounts no article, so there is
+   // nothing to rehome into and nothing for a `play` to claim.
    harvestMediaState()
+   player.adoptFromContent()
+   player.noteMounted(null)
    // Reader chrome, not article prose: the empty state is OUR copy, in the UI's
    // language, so the host goes back to INHERITING <html lang> rather than
    // keeping the last article's. Removing the attribute is what inherits;

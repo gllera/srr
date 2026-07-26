@@ -495,6 +495,331 @@ video {
    background: var(--hover);
 }
 
+/* Podcast mini-player (player.ts) — a second console row parked on the
+   toolbar's top edge, so player + toolbar read as ONE piece of bottom chrome
+   (same 680px column, same --bg fill, same hairline) rather than a card
+   hovering over it. It hosts the article's RELOCATED media element (see the
+   index.html comment), so the transport survives prev/next and follows you
+   down the show notes.
+
+   The 3.35rem in the offsets below is the toolbar's own box — its 0.3rem
+   padding either side of a 2.75rem tap target — plus the 1px hairline it draws
+   and the safe-area inset it pads. Written out rather than tokenised because
+   every fixed-bottom lane in this file (.srr-snackbar 4.6rem,
+   .srr-pin-progress 5.5rem) already positions itself by that arithmetic. */
+.srr-player {
+   position: fixed;
+   left: 0;
+   right: 0;
+   bottom: calc(3.35rem + 1px + env(safe-area-inset-bottom));
+   max-width: 680px;
+   margin: 0 auto;
+   /* The toolbar's layer: above the list's sticky day dividers (1) and the
+      pinned search bar (5), below the picker overlay (10) and the
+      lightbox/popups (1000). */
+   z-index: var(--z-toolbar);
+   /* media · body · controls on one row. The body track is the only flexible
+      one (minmax(0,1fr) — a free-space fraction, never its content), so a long
+      episode title ellipsizes inside its column instead of pushing the
+      transport off the bar. */
+   display: grid;
+   grid-template-columns: auto minmax(0, 1fr) auto;
+   align-items: center;
+   gap: 0.5rem;
+   /* A floor, not a fixed height: the lane offsets under body.srr-playing
+      below (and the container's 7.5rem clearance) are stated against ~4rem, and
+      min-height keeps the bar from ever clipping its two-line body if the
+      reader's text scales up. */
+   min-height: 4rem;
+   padding: 0.35rem 0.5rem;
+   background: var(--bg);
+   border-top: 1px solid var(--faint);
+   /* It is chrome: a long-press belongs to the scrub gesture (player.ts stops
+      touchstart propagation so gestures.ts can't read it as prev/next), never
+      to a text selection of the title. */
+   -webkit-touch-callout: none;
+   -webkit-user-select: none;
+   user-select: none;
+   transition: transform 0.25s ease;
+   will-change: transform;
+   /* Rises with the episode it announces. The global reduced-motion block only
+      squeezes durations, so the explicit `animation: none` below is what makes
+      this a hard cut rather than a fast slide. */
+   animation: srr-player-in 0.22s ease;
+}
+/* The visibility mechanism is the `hidden` attribute (player.ts toggles it).
+   Restated as an author rule on purpose: author origin beats the UA's
+   [hidden]{display:none}, so the `display:grid` above would otherwise paint an
+   empty bar on every page that has never played anything. */
+.srr-player[hidden] {
+   display: none;
+}
+@keyframes srr-player-in {
+   from {
+      opacity: 0;
+      transform: translateY(0.5rem);
+   }
+   to {
+      opacity: 1;
+      transform: translateY(0);
+   }
+}
+@media (prefers-reduced-motion: reduce) {
+   .srr-player {
+      animation: none;
+   }
+}
+/* gestures.ts's setHidden slides the toolbar out (translateY(100%)) and stamps
+   body.srr-toolbar-hidden alongside it; the player rides DOWN into the vacated
+   strip instead of hovering over a gap. It travels the toolbar's whole box, and
+   picks up that safe-area inset itself on arrival — the bar's `bottom` is
+   fixed, so the extra padding grows the box UPWARD and the controls still clear
+   a home indicator once this is the bottom-most chrome. */
+body.srr-toolbar-hidden .srr-player {
+   transform: translateY(calc(3.35rem + 1px + env(safe-area-inset-bottom)));
+   padding-bottom: calc(0.35rem + env(safe-area-inset-bottom));
+}
+
+/* Chrome coexistence, part 1: the reading surface. body.srr-playing is set for
+   exactly as long as the bar is up (player.ts syncBar), and it buys the last
+   paragraph — and any scroll-into-view landing — clearance over BOTH rows of
+   chrome: the 3.35rem toolbar plus this 4rem bar, measured at 118.6px against
+   the 120px below. The base 4rem rules near the top of this file are untouched,
+   so a store nobody has played anything from pays nothing. */
+body.srr-playing .srr-container {
+   padding-bottom: 7.5rem;
+}
+html:has(body.srr-playing) {
+   scroll-padding-bottom: 7.5rem;
+}
+/* Part 2: the two transient lanes above the toolbar. Both are positioned by
+   arithmetic off the bottom chrome, so both step up by the bar's height while
+   it occupies that space — otherwise a pin's progress line or an UNDO snackbar
+   lands on top of the transport. */
+body.srr-playing .srr-snackbar {
+   bottom: calc(4.6rem + 4rem);
+}
+body.srr-playing .srr-pin-progress {
+   bottom: calc(5.5rem + 4rem);
+}
+
+/* The media host. The live element lands in here with its `controls` stripped
+   (rehomeInto puts them back — fmt.ts force-sets controls on in-content audio),
+   so the custom transport to its right is the only chrome.
+
+   Collapsed by default, which covers data-kind="audio" (an <audio> has no
+   useful visual — the transport drives it) AND an unset kind, which must not
+   reserve a frame either. Zero-width rather than display:none: the element has
+   to stay RENDERED where the transport can reach it, and a collapsed box costs
+   nothing. */
+.srr-player-media {
+   width: 0;
+   overflow: hidden;
+}
+/* Video keeps a thumbnail-sized frame: 4rem on a 16/9 box, cover-cropped, so
+   any source ratio fills it without letterbox bars in a 4rem bar. */
+.srr-player[data-kind="video"] .srr-player-media {
+   width: 4rem;
+   aspect-ratio: 16 / 9;
+   border-radius: var(--radius);
+}
+.srr-player[data-kind="video"] .srr-player-media video {
+   /* Undo the in-content video rule near the top of this file: its attr()
+      aspect-ratio and 85vh cap belong to a full-column player, not to a frame
+      whose box the bar dictates. */
+   width: 100%;
+   height: 100%;
+   max-height: none;
+   aspect-ratio: auto;
+   object-fit: cover;
+}
+
+/* Body — the episode identity over its seek rail. */
+.srr-player-body {
+   display: flex;
+   flex-direction: column;
+   gap: 0.15rem;
+   min-width: 0;
+}
+/* The title is a button (it jumps to the article that owns the playing media),
+   so it needs the same chrome-stripping reset the toolbar's text button gets. */
+.srr-player-title {
+   display: flex;
+   flex-direction: column;
+   align-items: flex-start;
+   min-width: 0;
+   padding: 0;
+   border: none;
+   background: none;
+   font: inherit;
+   color: inherit;
+   text-align: left;
+   cursor: pointer;
+   transition:
+      opacity 0.15s,
+      transform 0.09s ease;
+   &:hover {
+      opacity: 0.7;
+   }
+}
+/* The source eyebrow — the wire voice (mono, uppercase, tracked) in the feed's
+   own color, the same eyebrow the list rows and the reader masthead wear, so an
+   episode is placed by origin at a glance. data-src is stamped on .srr-player,
+   so --src inherits down here; the accent is the fallback for a source the ramp
+   has no slot for. */
+.srr-player-source {
+   max-width: 100%;
+   font-family: var(--font-mono);
+   font-size: 0.62rem;
+   font-weight: 600;
+   letter-spacing: 0.07em;
+   text-transform: uppercase;
+   color: var(--src, var(--accent));
+   overflow: hidden;
+   text-overflow: ellipsis;
+   white-space: nowrap;
+}
+.srr-player-name {
+   max-width: 100%;
+   font-size: 0.85rem;
+   font-weight: 600;
+   line-height: 1.25;
+   color: var(--fg);
+   overflow: hidden;
+   text-overflow: ellipsis;
+   white-space: nowrap;
+}
+
+/* The seek rail — a 4px line with a thumb-sized hit area. content-box sizing is
+   what keeps those two independent: the padding grows the touch target while
+   the painted rail stays clipped to the 4px content strip, so the line never
+   thickens with the target. touch-action:none because a scrub is a drag the
+   page must not read as a scroll (player.ts also takes pointer capture, so the
+   drag survives leaving the rail). */
+.srr-player-seek {
+   box-sizing: content-box;
+   height: 4px;
+   padding: 0.35rem 0;
+   background: var(--faint);
+   background-clip: content-box;
+   cursor: pointer;
+   touch-action: none;
+   /* role="slider" tabindex="0" — a real keyboard control (player.ts binds
+      arrows / PageUp / PageDown to it). The global :focus-visible ring would
+      trace the 4px rail itself; push it out so it reads as a ring around the
+      whole (padded) target. */
+   &:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 1px;
+   }
+}
+.srr-player-seek-fill {
+   width: 0;
+   height: 100%;
+   background: var(--accent);
+}
+
+/* Controls — the transport, in the toolbar's icon-console voice: square-ish tap
+   targets, mono labels, the play/pause toggle emphasized as the accent pill
+   (the same "primary action" language the toolbar's next button speaks). */
+.srr-player-controls {
+   display: flex;
+   align-items: center;
+   gap: 0.15rem;
+}
+.srr-player-controls button {
+   display: inline-flex;
+   align-items: center;
+   justify-content: center;
+   flex-shrink: 0;
+   min-width: 2.2rem;
+   min-height: 2.2rem;
+   padding: 0 0.2rem;
+   border: none;
+   border-radius: var(--radius);
+   background: none;
+   font-family: var(--font-mono);
+   font-size: 0.72rem;
+   font-weight: 600;
+   font-variant-numeric: tabular-nums;
+   letter-spacing: 0.02em;
+   line-height: 1;
+   color: var(--fg);
+   cursor: pointer;
+   transition:
+      opacity 0.15s,
+      background 0.15s,
+      transform 0.09s ease;
+   &:hover:not(:disabled) {
+      background: var(--hover);
+   }
+   &:disabled {
+      opacity: 0.15;
+      cursor: default;
+   }
+}
+/* Play / pause is drawn in CSS off the state player.ts already publishes for
+   assistive tech, so the button's content stays empty and one attribute serves
+   both the eye and the screen reader. Paused = the classic border-trick
+   triangle; playing = two bars from a box with only left/right borders. The
+   .srr-player-playing class player.ts sets alongside aria-pressed selects the
+   same glyph, so the two can never disagree. */
+.srr-player-controls .srr-player-toggle {
+   min-width: 2.2rem;
+   border-radius: 999px;
+   background: var(--accent);
+   color: var(--bg);
+   &:hover:not(:disabled) {
+      background: var(--accent);
+      opacity: 0.85;
+   }
+   &::before {
+      content: "";
+      display: block;
+      width: 0;
+      height: 0;
+      /* Optically centered: the triangle's own mass sits right of its box. */
+      margin-left: 0.1rem;
+      border-style: solid;
+      border-width: 0.38rem 0 0.38rem 0.62rem;
+      border-color: transparent transparent transparent currentColor;
+   }
+}
+.srr-player-toggle[aria-pressed="true"]::before,
+.srr-player-toggle.srr-player-playing::before {
+   width: 0.6rem;
+   height: 0.78rem;
+   margin-left: 0;
+   border-width: 0 0.2rem;
+   border-color: currentColor;
+}
+/* Elapsed / duration — metadata, so it stays muted and NOT a tap target; it
+   collapses entirely until the element has reported a duration. */
+.srr-player-time {
+   flex-shrink: 0;
+   padding: 0 0.15rem;
+   font-family: var(--font-mono);
+   font-size: 0.68rem;
+   font-variant-numeric: tabular-nums;
+   letter-spacing: 0.02em;
+   /* line-height 1.1, not the inherited 1.6: it is a one-line readout, and on a
+      phone it wraps under the transport keys where every px is the bar's
+      height. */
+   line-height: 1.1;
+   color: var(--muted);
+   white-space: nowrap;
+   &:empty {
+      display: none;
+   }
+}
+.srr-player-controls .srr-player-close {
+   font-size: 1.05rem;
+   color: var(--muted);
+   &:hover:not(:disabled) {
+      color: var(--fg);
+   }
+}
+
 /* Toolbar */
 .srr-toolbar {
    position: fixed;
@@ -2391,6 +2716,46 @@ html:has(body.srr-view-list) {
       padding-left: 0.75rem;
       margin-left: -0.75rem;
    }
+   /* The mini-player on a phone. Six controls, a clock and an episode title do
+      not fit one 360px line: measured, the transport eats ~250px and leaves the
+      title ~80px, about nine characters. It must stay ONE ROW of chrome though
+      — a second row would push the reading surface's clearance past the 7.5rem
+      body.srr-playing buys it, and 160px of dead padding on a phone is worse
+      than a short title.
+      So the CLOCK wraps instead of the bar: the controls column keeps its five
+      buttons on one line and drops the readout underneath them, right-aligned
+      under the ✕. That costs the column nothing in width (the buttons already
+      set it), costs the bar nothing in height (the two-line body next to it is
+      taller either way), and hands the title back ~170px. Nothing is hidden —
+      every control the desktop bar has is still on screen, on a 2rem × 2.2rem
+      target rather than the 44px square the toolbar's own glyphs get: these are
+      secondary transport keys inside a bar whose primary action is the accent
+      toggle, and shrinking them is what pays for the title.
+      The transport track is stated OUTRIGHT (10.5rem — five 2rem buttons plus
+      slack) rather than left `auto`: a wrapping flex container's max-content
+      width is the sum of its items as if they never wrapped, so an auto track
+      would have kept its full one-line width AND wrapped the clock inside it,
+      which is the worst of both. */
+   .srr-player {
+      grid-template-columns: auto minmax(0, 1fr) 10.5rem;
+      padding-left: 0.35rem;
+      padding-right: 0.35rem;
+   }
+   .srr-player-controls {
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 0;
+   }
+   .srr-player-controls button {
+      min-width: 2rem;
+      padding: 0 0.1rem;
+   }
+   .srr-player-time {
+      order: 1;
+      flex-basis: 100%;
+      padding-right: 0.2rem;
+      text-align: right;
+   }
 }
 
 /* Image lightbox (lightbox.ts) — the enlargement path content images never had.
@@ -2532,6 +2897,7 @@ html:has(body.srr-view-list) {
       belongs here as much as the toolbar does: it is on screen for seconds, and
       those are exactly the seconds someone hits print. Add new chrome here. */
    .srr-toolbar,
+   .srr-player,
    .srr-popup,
    .srr-snackbar,
    .srr-new-pill,
@@ -2545,7 +2911,13 @@ html:has(body.srr-view-list) {
    .srr-info-dialog {
       display: none !important;
    }
-   .srr-container {
+   /* The second selector is not redundant: body.srr-playing raises this same
+      padding to 7.5rem at higher specificity, and the mini-player above is one
+      of the pieces of chrome this block hides — so without it a print taken
+      while an episode was up carried 120px of blank for a bar that isn't
+      there. */
+   .srr-container,
+   body.srr-playing .srr-container {
       max-width: none;
       padding-bottom: 0;
    }
@@ -2629,4 +3001,34 @@ html:has(body.srr-view-list) {
 }
 .srr-design-note {
    color: var(--muted);
+}
+
+/* Forced "player visible" state (design.ts's `player` transient). The harness's
+   forcing vocabulary is class-only — the design-shots screenshotter replays the
+   same TRANSIENTS recipe inside the page, so a state that needed an attribute
+   written would show in the panel and be blank in every shot. This class is
+   therefore the stand-in for "player.ts un-hid the bar and filled it": it wins
+   over .srr-player[hidden] on source order alone (equal specificity, and this
+   block is last in the file) and supplies the two readouts the real bar sets
+   through textContent. The episode title is NOT faked here — it rides the
+   transient's real text channel, so its ellipsis is real text overflow — and
+   data-src cannot be, so the source eyebrow shows its var(--src, var(--accent))
+   fallback rather than a feed color. Inert on index.html: nothing in the app
+   ever adds this class. */
+.srr-player.srr-player-demo {
+   display: grid;
+   /* The shutter would otherwise catch the entrance fade mid-flight. */
+   animation: none;
+}
+.srr-player-demo .srr-player-source::after {
+   content: "podcast feed";
+}
+.srr-player-demo .srr-player-time {
+   display: inline;
+}
+.srr-player-demo .srr-player-time::after {
+   content: "12:04 / 41:37";
+}
+.srr-player-demo .srr-player-seek-fill {
+   width: 38%;
 }

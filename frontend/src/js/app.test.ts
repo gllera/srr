@@ -276,6 +276,21 @@ const SKELETON = `
          <button class="srr-filter"></button>
       </nav>
       <section class="srr-picker" hidden></section>
+      <div class="srr-player" hidden>
+         <div class="srr-player-media"></div>
+         <div class="srr-player-body">
+            <button class="srr-player-title"><span class="srr-player-source"></span><span class="srr-player-name"></span></button>
+            <div class="srr-player-seek" role="slider" tabindex="0"><div class="srr-player-seek-fill"></div></div>
+         </div>
+         <div class="srr-player-controls">
+            <button class="srr-player-back15"></button>
+            <button class="srr-player-toggle"></button>
+            <button class="srr-player-fwd15"></button>
+            <button class="srr-player-rate"></button>
+            <span class="srr-player-time"></span>
+            <button class="srr-player-close"></button>
+         </div>
+      </div>
       <div class="srr-pin-progress" hidden></div>
       <div class="srr-snackbar" hidden><span class="srr-snackbar-text"></span>
          <button class="srr-snackbar-action srr-hidden"></button></div>
@@ -703,6 +718,54 @@ describe("reader media state survives prev/next", () => {
       const second = content().querySelector("audio") as HTMLMediaElement
       second.dispatchEvent(new Event("loadedmetadata"))
       expect(second.currentTime).toBe(0) // article 1's position must not leak here
+   })
+
+   // RDR16 — the step past position memory: a PLAYING episode is not re-created
+   // on return, it is the same live element the whole way through. This is the
+   // wiring test for the render path's fixed harvest → adopt → replace → restore
+   // → rehome order; the player's own behaviour lives in player.test.ts.
+   it("a PLAYING episode survives prev/next as the same live element", async () => {
+      await boot()
+      await showAt(1, PODCAST)
+      const episode = content().querySelector("audio") as HTMLMediaElement
+      Object.defineProperty(episode, "paused", { value: false, configurable: true })
+      episode.currentTime = 30
+      episode.dispatchEvent(new Event("play"))
+
+      // Step away: the element must be MOVED to the player, not destroyed.
+      await showAt(2, "<p>next article</p>")
+      expect(episode.parentElement).toBe(document.querySelector(".srr-player-media"))
+      expect(document.querySelector(".srr-player")?.hasAttribute("hidden")).toBe(false)
+      expect(episode.currentTime).toBe(30) // never reloaded, so never rewound
+
+      // Step back: the very same node returns to its slot in the article.
+      await showAt(1, PODCAST)
+      expect(content().querySelector("audio")).toBe(episode)
+      expect(episode.currentTime).toBe(30)
+      // Back in content, it needs its controls again (fmt.ts forces them there).
+      expect(episode.hasAttribute("controls")).toBe(true)
+   })
+
+   it("harvests BEFORE adopting, so the adopted element does not shift saved indices", async () => {
+      await boot()
+      // Two elements: play the FIRST, leave a position on the SECOND. If adoption
+      // ran before the harvest, the second's position would be saved at index 0
+      // and come back on the wrong element.
+      const TWO = PODCAST + '<audio src="assets/aa/2.mp3" controls></audio>'
+      await showAt(1, TWO)
+      const [first, second] = [...content().querySelectorAll("audio")] as HTMLMediaElement[]
+      Object.defineProperty(first, "paused", { value: false, configurable: true })
+      first.dispatchEvent(new Event("play"))
+      first.currentTime = 10
+      second.currentTime = 99
+
+      await showAt(2, "<p>x</p>")
+      await showAt(1, TWO)
+
+      const back = [...content().querySelectorAll("audio")] as HTMLMediaElement[]
+      expect(back[0]).toBe(first) // the live one rehomed at its own index
+      back[1].dispatchEvent(new Event("loadedmetadata"))
+      expect(back[1].currentTime).toBe(99) // and index 1 kept index 1's position
    })
 })
 

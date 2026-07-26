@@ -28,7 +28,11 @@ let onCycle: ReturnType<typeof vi.fn>
 let pullRun: ReturnType<typeof vi.fn>
 
 function mount(): void {
-   document.body.innerHTML = `<nav class="srr-toolbar"></nav><div class="srr-list"></div>`
+   // body's own class list survives an innerHTML reset (only its children are
+   // replaced), so it's cleared explicitly to keep srr-toolbar-hidden from
+   // leaking a stale value across tests.
+   document.body.className = ""
+   document.body.innerHTML = `<nav class="srr-toolbar"></nav><div class="srr-list"></div><div class="srr-player"></div>`
    toolbar = document.querySelector(".srr-toolbar")!
    listEl = document.querySelector(".srr-list")!
    goPrev = vi.fn()
@@ -93,6 +97,19 @@ describe("scroll-driven toolbar hide/show", () => {
       scroll()
       expect(toolbar.style.transform).toBe("")
       expect(slid()).toBe(false)
+   })
+
+   it("toggles body.srr-toolbar-hidden in lockstep with the toolbar's own slide class (RDR16)", () => {
+      const bodyHidden = () => document.body.classList.contains("srr-toolbar-hidden")
+      expect(bodyHidden()).toBe(false)
+      setScrollY(120)
+      scroll()
+      expect(slid()).toBe(true)
+      expect(bodyHidden()).toBe(true)
+      setScrollY(20) // scrolling back up reveals both
+      scroll()
+      expect(slid()).toBe(false)
+      expect(bodyHidden()).toBe(false)
    })
 
    it("seats the bar when the scroll settles half-sunken mid-zone (no further scroll event)", () => {
@@ -196,6 +213,27 @@ describe("one-finger swipe", () => {
       end([], [{ clientX: 220, clientY: 300 }]) // dx=+120, but cancelled
       expect(goPrev).not.toHaveBeenCalled()
       expect(goNext).not.toHaveBeenCalled()
+   })
+})
+
+// RDR16: the player bar's seek control is a horizontal drag identical in
+// shape to a swipe, and the document handlers above have no target
+// filtering — without the guard, scrubbing would fire prev/next instead of
+// seeking. `.srr-player` stops the touchstart from ever reaching them.
+describe("player gesture guard (RDR16)", () => {
+   it("a touchstart inside .srr-player stops an otherwise-qualifying swipe from firing", () => {
+      const player = document.querySelector(".srr-player")!
+      dispatchTouch("touchstart", [{ clientX: 200, clientY: 300 }], undefined, player)
+      end([], [{ clientX: 100, clientY: 300 }]) // dx = -100, would be goNext anywhere else
+      expect(goNext).not.toHaveBeenCalled()
+      expect(goPrev).not.toHaveBeenCalled()
+   })
+
+   it("an identical swipe starting outside .srr-player still navigates", () => {
+      start([{ clientX: 200, clientY: 300 }])
+      end([], [{ clientX: 100, clientY: 300 }]) // dx = -100
+      expect(goNext).toHaveBeenCalledTimes(1)
+      expect(goPrev).not.toHaveBeenCalled()
    })
 })
 

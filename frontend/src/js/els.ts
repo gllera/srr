@@ -39,4 +39,20 @@ export const el = {
    snackbar: document.querySelector(".srr-snackbar") as HTMLElement,
    snackbarText: document.querySelector(".srr-snackbar-text") as HTMLElement,
    snackbarAction: document.querySelector(".srr-snackbar-action") as HTMLButtonElement,
+   // RDR16 — the mini-player bar. `playerMedia` is the host the live <audio>/
+   // <video> is MOVED into when its article stops being rendered, so it is the
+   // one ref here that owns a node rather than just reading one.
+   player: document.querySelector(".srr-player") as HTMLElement,
+   playerMedia: document.querySelector(".srr-player-media") as HTMLElement,
+   playerTitle: document.querySelector(".srr-player-title") as HTMLButtonElement,
+   playerSource: document.querySelector(".srr-player-source") as HTMLElement,
+   playerName: document.querySelector(".srr-player-name") as HTMLElement,
+   playerSeek: document.querySelector(".srr-player-seek") as HTMLElement,
+   playerSeekFill: document.querySelector(".srr-player-seek-fill") as HTMLElement,
+   playerToggle: document.querySelector(".srr-player-toggle") as HTMLButtonElement,
+   playerBack15: document.querySelector(".srr-player-back15") as HTMLButtonElement,
+   playerFwd15: document.querySelector(".srr-player-fwd15") as HTMLButtonElement,
+   playerRate: document.querySelector(".srr-player-rate") as HTMLButtonElement,
+   playerTime: document.querySelector(".srr-player-time") as HTMLElement,
+   playerClose: document.querySelector(".srr-player-close") as HTMLButtonElement,
 }

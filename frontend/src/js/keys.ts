@@ -24,6 +24,11 @@ export const seenTsKey = (mid: string): string => q("srr-seen-ts", mid)
 export const savedKey = (mid: string): string => q("srr-saved", mid)
 export const pinsKey = (mid: string): string => q("srr-pins", mid)
 export const profileTsKey = (mid: string): string => q("srr-profile-ts", mid)
+// RDR16 podcast mini-player: the persisted episode (chron, index, playback
+// position, …). Per-store because chronIdx is only unique WITHIN a mount
+// (S38 multi-store) — a playback position keyed on chron alone would be
+// ambiguous across two mounts that both have a chron 42.
+export const playerStateKey = (mid: string): string => q("srr-player", mid)
 
 // Global keys (one per device, not a property of a store).
 export const UNREAD_ONLY_KEY = "srr-unread-only"
@@ -40,6 +45,9 @@ export const RELOAD_GUARD_KEY = "srr-reload-guard"
 // The mount table (JSON array of mount records). New for the multi-store work;
 // consumed by S38's mounts module (§3.3).
 export const MOUNTS_KEY = "srr-mounts"
+// RDR16 podcast mini-player: the device's preferred playback rate. Global —
+// a preferred speed is a device preference, not a property of any one store.
+export const PLAYER_RATE_KEY = "srr-player-rate"
 // The version of the SHAPE of this device's stored state (finding ENG6) — the
 // boot gate and its migration ladder live in schema.ts. Global for the same
 // reason as `srr-hash` and `srr-reload-guard` above: it is not a property of any
