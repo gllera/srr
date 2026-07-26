@@ -167,7 +167,7 @@ reproduce touch/overscroll behavior.
 
 ### backend writer (Track B — parallel with everything)
 
-- [ ] **S68** — GRO6: adopt meta-sync progress per saved shard  ·  **P3 · S**  ·  from GRO6 (BE-G6)
+- [x] **S68** — GRO6: adopt meta-sync progress per saved shard  ·  **P3 · S**  ·  from GRO6 (BE-G6)
   - **Edit:** `db_meta.go SyncMeta` — on a mid-sync failure after ≥1 newly finalized
     shard saved, adopt the staged `names` clone and its coverage for the shards that DID
     save (`c.Names = names`, `c.MetaTail = 0`) before returning the error, so the
@@ -232,7 +232,7 @@ reproduce touch/overscroll behavior.
 
 ### frontend reader (Track D — one step per batch, parallel with the backend)
 
-- [ ] **S71** — RDR3: "N new" pill + pending-pill pulse  ·  **P2 · M**  ·  from RDR3 (FE-M3)
+- [x] **S71** — RDR3: "N new" pill + pending-pill pulse  ·  **P2 · M**  ·  from RDR3 (FE-M3)
   - **Edit:** list surface — a tappable "N new" pill overlaid at the list top, shown
     when `onStoreGrown` (`list.ts:954`, called silently from `app.ts:1555`) prepends
     rows above the fold while the user is scrolled down (the scroll-pinned prepend
