@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -139,12 +140,13 @@ type pipeRWC struct {
 	io.WriteCloser
 }
 
-// setupSFTPPipe wires an in-process sftp server (serving the real filesystem,
-// rooted nowhere — keys resolve under the returned t.TempDir() base) to the
-// production SFTP struct via NewClientPipe, skipping the ssh transport that
-// newSFTP would dial. NOTE: never call d.Close() here — sshClient is nil; the
-// cleanup closes the sftp client and server directly.
-func setupSFTPPipe(t *testing.T) (*SFTP, string) {
+// newPipeSFTPClient wires an in-process sftp server (serving the real
+// filesystem, rooted nowhere — keys resolve under the returned t.TempDir() base)
+// to a real *sftp.Client via NewClientPipe, skipping the ssh transport that
+// dialSFTPSession would dial. kill drops the SERVER, which is the only way to
+// simulate a peer going away: closing the client alone deadlocks on its own recv
+// loop, which lives until the server's write pipe closes.
+func newPipeSFTPClient(t *testing.T) (client *sftp.Client, base string, kill func()) {
 	t.Helper()
 	cr, sw := io.Pipe() // client reads ← server writes
 	sr, cw := io.Pipe() // server reads ← client writes
@@ -155,7 +157,7 @@ func setupSFTPPipe(t *testing.T) (*SFTP, string) {
 	}
 	go srv.Serve() //nolint:errcheck // exits when the pipes close
 
-	client, err := sftp.NewClientPipe(cr, cw)
+	client, err = sftp.NewClientPipe(cr, cw)
 	if err != nil {
 		t.Fatalf("sftp.NewClientPipe: %v", err)
 	}
@@ -166,7 +168,22 @@ func setupSFTPPipe(t *testing.T) (*SFTP, string) {
 		client.Close()
 	})
 
-	base := t.TempDir()
+	// Wait() returns once the client's recv loop has seen the server go, so a
+	// killed session is observably dead the moment kill returns.
+	kill = func() {
+		srv.Close()
+		client.Wait() // returns the shutdown error; the wait is what we want
+	}
+	return client, t.TempDir(), kill
+}
+
+// setupSFTPPipe puts the production SFTP struct on top of that client. The
+// session is NOT in the sftpSessions memo, so this cleanup owns its teardown —
+// d.Close() would be a harmless no-op either way (see SFTP.Close), but nothing
+// here should rely on a handle closing anything.
+func setupSFTPPipe(t *testing.T) (*SFTP, string) {
+	t.Helper()
+	client, base, _ := newPipeSFTPClient(t)
 	return &SFTP{path: base, host: "test", client: client}, base
 }
 
@@ -386,4 +403,186 @@ func TestSFTPSweepTempLeftoversTakesNowFromOwnTemp(t *testing.T) {
 		t.Errorf("an ancient leftover was swept with no reference mtime (err=%v); want no judgement", err)
 	}
 	d.sweepTempLeftovers(filepath.Join(base, "no-such-dir"), own)
+}
+
+// --- session memo ----------------------------------------------------------
+
+// sftpDialCounter records what the substituted dialer did.
+type sftpDialCounter struct {
+	dials int
+	base  string // temp-dir root the most recently dialed session serves
+	kill  func() // drops that session's server, i.e. its peer
+}
+
+// withSFTPSessionMemo isolates the package session memo for one test and swaps
+// in a dialer handing out in-process pipe sessions, so a test can count dials
+// without standing up an ssh server. The counter is written inside
+// sftpSessionFor's critical section, so the concurrent test reads it race-free
+// once its goroutines have joined.
+func withSFTPSessionMemo(t *testing.T) *sftpDialCounter {
+	t.Helper()
+	savedSessions, savedDial := sftpSessions, sftpDialSession
+	sftpSessions = map[sftpSessionKey]*sftpSession{}
+	c := &sftpDialCounter{}
+	sftpDialSession = func(sftpSessionKey, *url.URL) (*sftpSession, error) {
+		client, base, kill := newPipeSFTPClient(t)
+		c.dials++
+		c.base, c.kill = base, kill
+		// sshClient stays nil: the pipe IS the established transport.
+		return &sftpSession{client: client}, nil
+	}
+	t.Cleanup(func() {
+		sftpSessions, sftpDialSession = savedSessions, savedDial
+	})
+	return c
+}
+
+// The whole point of the memo: a store.Open — one per serve API request, one per
+// fetch cycle — stops paying a TCP connect + SSH handshake + subsystem open.
+// Anything that changes WHO WE ARE TO WHOM keys a separate session; two stores
+// under different credentials must never share one.
+func TestSFTPSessionMemoizedPerIdentity(t *testing.T) {
+	c := withSFTPSessionMemo(t)
+	key := sftpSessionKey{addr: "h:22", user: "alice"}
+	u := mustURL(t, "sftp://alice@h/p")
+
+	first, err := sftpSessionFor(key, u)
+	if err != nil {
+		t.Fatalf("sftpSessionFor: %v", err)
+	}
+	second, err := sftpSessionFor(key, u)
+	if err != nil {
+		t.Fatalf("sftpSessionFor(again): %v", err)
+	}
+	if first != second {
+		t.Error("a second lookup under one identity got a different session")
+	}
+	if c.dials != 1 {
+		t.Errorf("dials = %d, want 1 — the second lookup redialed", c.dials)
+	}
+
+	others := map[string]sftpSessionKey{
+		"user":         {addr: "h:22", user: "bob"},
+		"addr":         {addr: "other:22", user: "alice"},
+		"config":       {addr: "h:22", user: "alice", cfg: SFTPConfig{Password: "pw"}},
+		"url password": {addr: "h:22", user: "alice", urlPassword: "pw"},
+	}
+	for name, other := range others {
+		s, err := sftpSessionFor(other, u)
+		if err != nil {
+			t.Fatalf("sftpSessionFor(%s): %v", name, err)
+		}
+		if s == first {
+			t.Errorf("a different %s shared the first identity's session", name)
+		}
+	}
+	if want := 1 + len(others); c.dials != want {
+		t.Errorf("dials = %d, want %d — one per distinct identity", c.dials, want)
+	}
+}
+
+// A memoized session outlives the handle that dialed it, so a server restart or
+// an idle disconnect leaves a corpse in the map. The liveness probe is what
+// keeps it from being handed out.
+func TestSFTPSessionRedialedWhenDead(t *testing.T) {
+	c := withSFTPSessionMemo(t)
+	key := sftpSessionKey{addr: "h:22", user: "alice"}
+	u := mustURL(t, "sftp://alice@h/p")
+
+	dead, err := sftpSessionFor(key, u)
+	if err != nil {
+		t.Fatalf("sftpSessionFor: %v", err)
+	}
+	c.kill() // the peer went away between two Opens
+	if dead.alive() {
+		t.Fatal("the probe still calls a session with no peer alive")
+	}
+
+	live, err := sftpSessionFor(key, u)
+	if err != nil {
+		t.Fatalf("sftpSessionFor(after death): %v", err)
+	}
+	if live == dead {
+		t.Fatal("a dead session was handed out again")
+	}
+	if c.dials != 2 {
+		t.Errorf("dials = %d, want 2 (the redial)", c.dials)
+	}
+	if !live.alive() {
+		t.Error("the replacement session does not answer")
+	}
+}
+
+// The lock spans the dial so a burst of concurrent Opens performs ONE handshake
+// and shares it. This is also the shape -race is here for: one *sftp.Client
+// serving several handles at once.
+func TestSFTPSessionConcurrentLookupsDialOnce(t *testing.T) {
+	c := withSFTPSessionMemo(t)
+	key := sftpSessionKey{addr: "h:22", user: "alice"}
+	u := mustURL(t, "sftp://alice@h/p")
+
+	var wg sync.WaitGroup
+	got := make([]*sftpSession, 8)
+	errs := make([]error, len(got))
+	for i := range got {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got[i], errs[i] = sftpSessionFor(key, u)
+		}()
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("lookup %d: %v", i, err)
+		}
+		if got[i] != got[0] {
+			t.Fatalf("lookup %d got a different session", i)
+		}
+	}
+	if c.dials != 1 {
+		t.Errorf("dials = %d, want 1 — concurrent Opens must share one handshake", c.dials)
+	}
+}
+
+// Close is a ref-release, not a teardown: the session belongs to the memo, so a
+// handle that closes must leave every other handle — and the next Open — with a
+// working connection. Closing it here is exactly what made every store.Open pay
+// a fresh handshake.
+func TestSFTPCloseLeavesTheSharedSessionUp(t *testing.T) {
+	c := withSFTPSessionMemo(t)
+	key := sftpSessionKey{addr: "h:22", user: "alice"}
+	u := mustURL(t, "sftp://alice@h/p")
+
+	sess, err := sftpSessionFor(key, u)
+	if err != nil {
+		t.Fatalf("sftpSessionFor: %v", err)
+	}
+	first := &SFTP{path: c.base, host: "test", client: sess.client}
+	if err := first.Put(ctx, "a.txt", strings.NewReader("data"), true); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	again, err := sftpSessionFor(key, u)
+	if err != nil {
+		t.Fatalf("sftpSessionFor(after Close): %v", err)
+	}
+	if again != sess {
+		t.Error("the closed handle's session was torn down or replaced")
+	}
+	if c.dials != 1 {
+		t.Errorf("dials = %d, want 1 — Close must not force a redial", c.dials)
+	}
+	second := &SFTP{path: c.base, host: "test", client: again.client}
+	rc, err := second.Get(ctx, "a.txt")
+	if err != nil {
+		t.Fatalf("Get on the shared session after a peer handle closed: %v", err)
+	}
+	if got := readAllClose(t, rc); got != "data" {
+		t.Errorf("content = %q, want %q", got, "data")
+	}
 }
