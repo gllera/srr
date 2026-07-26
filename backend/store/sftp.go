@@ -542,6 +542,14 @@ func sftpAuthMethods(u *url.URL) ([]ssh.AuthMethod, func(), error) {
 	}
 
 	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
+		// A connect to a local AF_UNIX socket completes or fails immediately —
+		// there is no blocking phase for a context to cancel. The dial that CAN
+		// hang is ssh.Dial in newSFTP, a remote TCP handshake bounded by its own
+		// 30s Timeout, and noctx does not recognise it; honouring the linter here
+		// while the real network call next door stays context-less would be
+		// ceremony, and it would mean threading a ctx through sftpAuthMethods that
+		// newSFTP deliberately discards.
+		//nolint:noctx // local unix socket; nothing to cancel
 		if agentConn, err := net.Dial("unix", sock); err == nil {
 			methods = append(methods, ssh.PublicKeysCallback(agent.NewClient(agentConn).Signers))
 			cleanup = func() { agentConn.Close() }

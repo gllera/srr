@@ -707,6 +707,13 @@ func (o *EditCmd) Run() error {
 	tmp.Close()
 
 	// 2. Spawn editor.
+	// Not CommandContext, and not for want of a context: this is an interactive
+	// foreground editor holding the user's terminal. The tty already delivers
+	// SIGINT to the whole foreground process group, so Ctrl-C reaches the editor
+	// directly; binding it to a context would add a second path that can kill it
+	// mid-edit — losing the buffer and leaving the terminal in raw mode — to
+	// solve a cancellation problem the shell has already solved.
+	//nolint:noctx // interactive editor; the tty owns its lifetime
 	cmd := exec.Command(editor, tmpPath)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout

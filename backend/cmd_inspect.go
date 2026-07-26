@@ -118,7 +118,7 @@ func (o *InspectCmd) Run() error {
 
 func (o *InspectCmd) openFetcher(ctx context.Context) (keyGetter, func(), error) {
 	if o.URL != "" {
-		return httpFetcher(o.URL), nil, nil
+		return httpFetcher(ctx, o.URL), nil, nil
 	}
 	db, err := NewDB(ctx, false)
 	if err != nil {
@@ -132,13 +132,23 @@ func (o *InspectCmd) openFetcher(ctx context.Context) (keyGetter, func(), error)
 	}, func() { db.Close(ctx) }, nil
 }
 
-func httpFetcher(base string) keyGetter {
+// httpFetcher reads store objects straight off a CDN for `srr inspect --url`.
+// It carries the caller's context for the same reason the local-store branch of
+// openFetcher threads it through db.readGz: --validate fetches every pack in
+// the store, and half a fetcher honouring cancellation is not a property worth
+// having. Today that context is Run's Background, so this is exactly the
+// request net/http.Get built anyway.
+func httpFetcher(ctx context.Context, base string) keyGetter {
 	return func(key string) ([]byte, error) {
 		u, err := url.JoinPath(base, key)
 		if err != nil {
 			return nil, err
 		}
-		res, err := http.Get(u)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		if err != nil {
+			return nil, err
+		}
+		res, err := http.DefaultClient.Do(req)
 		if err != nil {
 			return nil, err
 		}

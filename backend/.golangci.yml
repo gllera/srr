@@ -30,6 +30,11 @@ linters:
     # error propagates by IDENTITY, suppressed at the site — errors.Is there
     # would accept exactly the wrapping the test exists to rule out.
     - errorlint
+    # The fetch loop must die on SIGTERM mid-cycle, so a request that cannot be
+    # cancelled is a hung deploy. The two production sites left context-less are
+    # a local unix-socket dial and an interactive editor, both suppressed at the
+    # site; tests are excluded wholesale below.
+    - noctx
 
   exclusions:
     # Idiomatic ignore-on-cleanup calls (deferred Close, Flush, os.Remove,
@@ -41,6 +46,15 @@ linters:
       - path: _test\.go
         linters:
           - errcheck
+      # httptest.NewRequest against an in-process handler, and http.Post/Get
+      # against an httptest.Server, are the shape of every serve/mcp handler
+      # test here (17 sites across 4 files, and every new handler adds more).
+      # None of them talks to a network that can hang, and a test that wedges
+      # anyway is bounded by `go test`'s own timeout. Config-level rather than
+      # per-site because the pattern is the test suite's, not one call's.
+      - path: _test\.go
+        linters:
+          - noctx
       # SA5011 false positive on the `if x == nil { t.Fatal } → deref` pattern
       # (staticcheck fails to model t.Fatal as no-return here). Config-level
       # because a site //nolint can't cover it: golangci also emits the
