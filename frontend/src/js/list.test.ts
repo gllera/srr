@@ -50,6 +50,7 @@ const nav = vi.hoisted(() => {
    let seen: Record<string, number> = {}
    let saved = new Set<number>()
    let searchTerm = ""
+   let searchScopeTok = ""
    let unreadOnly = false
    // Reader position + list anchor (settable per test). Default -1 == "newest"
    // (no valid reader article), so render() lays a newest-first feed like before.
@@ -81,6 +82,9 @@ const nav = vi.hoisted(() => {
       isSavedFilter: vi.fn(() => filter.saved),
       isFilterActive: vi.fn(() => filter.active),
       searchQuery: vi.fn(() => searchTerm),
+      // RDR8 — the lane an active query is scoped to; "" unless a test sets one.
+      searchScope: vi.fn(() => searchScopeTok),
+      _setSearchScope: (t: string) => (searchScopeTok = t),
       // Search snapshot cards (fe-opt#F1): default undefined so renderSearch takes
       // its defensive loadMeta fallback, matching the existing search-render tests.
       searchCard: vi.fn(() => undefined),
@@ -252,6 +256,7 @@ describe("list", () => {
       nav._setSaved([])
       nav._setPos(-1)
       nav._setAnchor(-1)
+      nav._setSearchScope("")
       vi.resetModules()
       list = await import("./list")
       list.setup(container, (chron) => opened.push(chron))
@@ -786,6 +791,70 @@ describe("list", () => {
       expect(empty!.querySelector(".srr-empty-msg")!.textContent).toBe("Nothing in Feed99 yet.")
    })
 
+   // RDR8 — term highlighting. The match runs through search.ts's own fold (the
+   // real module: a highlight computed on a different fold than the hit would
+   // disagree with the row it is drawn on), and the marks are built as elements,
+   // never from an HTML string — a title is untrusted feed content.
+   describe("search term highlighting (<mark>)", () => {
+      const titleEl = () => $rows()[0].querySelector(".srr-row-title")!
+      const marks = () => [...titleEl().querySelectorAll("mark")].map((m) => m.textContent)
+
+      async function renderTitle(title: string, query: string) {
+         data._arts.clear()
+         data._arts.set(0, art({ f: 1, a: 0, t: title }))
+         data.db.total_art = 1
+         nav._setSearch(query)
+         await list.render()
+      }
+
+      it("marks each matched term, keeping the row's full text intact", async () => {
+         await renderTitle("Climate talks open in Berlin", "climate berlin")
+         expect(marks()).toEqual(["Climate", "Berlin"])
+         expect(titleEl().textContent).toBe("Climate talks open in Berlin")
+      })
+
+      it("marks every occurrence, and merges overlapping ones into a single mark", async () => {
+         await renderTitle("banana bandana", "ban ana")
+         // In "banana" the three matches (ban@0, ana@1, ana@3) chain into one
+         // stretch — nested <mark>s would be the alternative. In "bandana" the
+         // 'd' keeps them apart, so they stay two.
+         expect(marks()).toEqual(["banana", "ban", "ana"])
+      })
+
+      it("maps a fold-only match back onto the RAW characters (accents, case)", async () => {
+         // The hit matched on the folded title ("cafe cerrado"); the mark has to
+         // land on the accented source text, not on folded offsets.
+         await renderTitle("Café Cerrado", "cafe")
+         expect(marks()).toEqual(["Café"])
+         expect(titleEl().textContent).toBe("Café Cerrado")
+      })
+
+      it("does not mark anything outside search mode", async () => {
+         data._arts.clear()
+         data._arts.set(0, art({ f: 1, a: 0, t: "Climate talks" }))
+         data.db.total_art = 1
+         await list.render()
+         expect(marks()).toEqual([])
+         expect(titleEl().textContent).toBe("Climate talks")
+      })
+
+      it("never routes the title through innerHTML — markup in a title stays text", async () => {
+         const evil = "<img src=x onerror=alert(1)> climate <b>bold</b>"
+         await renderTitle(evil, "climate")
+         expect(marks()).toEqual(["climate"])
+         // The title is verbatim text; the ONLY elements under it are the marks.
+         expect(titleEl().textContent).toBe(evil)
+         expect(titleEl().querySelector("img")).toBeNull()
+         expect([...titleEl().querySelectorAll("*")].map((e) => e.tagName)).toEqual(["MARK"])
+      })
+
+      it("marks nothing when the query matches no word of the title", async () => {
+         await renderTitle("Climate talks", "zzz")
+         expect(marks()).toEqual([])
+         expect(titleEl().textContent).toBe("Climate talks")
+      })
+   })
+
    it("search mode shows a 'no matching articles' state when the query has no hits", async () => {
       setIndex(4, () => 1)
       nav._setSearch("zzz")
@@ -811,6 +880,26 @@ describe("list", () => {
       expect(empty).not.toBeNull()
       expect(empty!.querySelector(".srr-empty-eyebrow")!.textContent).toBe("Search")
       expect(empty!.querySelector(".srr-empty-msg")!.textContent).toBe("Find any article by its title.")
+   })
+
+   // RDR8 — a scoped query only ever looked inside one lane, so "no match" has to
+   // say so; the pinned bar shows the words but never the scope.
+   it("names the scope in both search empty states", async () => {
+      setIndex(4, () => 1)
+      nav._setSearch("zzz")
+      nav._setSearchScope("tech")
+      data.findLeft.mockResolvedValueOnce(-1)
+      await list.render()
+      let empty = container.querySelector(".srr-list-empty")!
+      expect(empty.textContent).toContain("No titles match")
+      expect([...empty.querySelectorAll(".srr-empty-em")].map((e) => e.textContent)).toEqual(["“zzz”", "tech"])
+
+      nav._setSearch("") // the invitational prompt, still scoped
+      data.findLeft.mockResolvedValueOnce(-1)
+      await list.render()
+      empty = container.querySelector(".srr-list-empty")!
+      expect(empty.querySelector(".srr-empty-msg")!.textContent).toBe("Find an article in tech by its title.")
+      nav._setSearchScope("")
    })
 
    it("shows an 'all caught up' state when unseen-only leaves nothing unread", async () => {

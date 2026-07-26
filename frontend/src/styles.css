@@ -1858,6 +1858,17 @@ body:not(.srr-view-list) .srr-open-reader {
    color: var(--fg);
    font-weight: 600;
 }
+/* Matched search terms (RDR8, list.ts paintTitle). The UA's default <mark> is a
+   flat yellow the palette has no room for, so it becomes a tinted underlay in the
+   accent — enough to find the words by, not enough to outshout the headline. It
+   must not change the row's metrics: a weight or size change here would reflow
+   the row and break the pinned intrinsic heights (see pinHeights). */
+.srr-row-title mark {
+   background: color-mix(in srgb, var(--accent) 22%, transparent);
+   color: inherit;
+   border-radius: 2px;
+   padding: 0 0.08em;
+}
 /* Unread rows carry more presence so scanning by source is effortless: a thicker
    source rail and a hair more tracking on the source name (the triage key). */
 .srr-row-unread {
@@ -2471,6 +2482,7 @@ html:has(body.srr-view-list) {
 .srr-mounts-card {
    width: min(30rem, 100%);
 }
+
 .srr-mounts-list {
    display: flex;
    flex-direction: column;

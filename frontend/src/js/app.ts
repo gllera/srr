@@ -315,7 +315,11 @@ async function writeUnreadBadge(): Promise<void> {
 function listTitle(): string {
    if (nav.isSearchFilter()) {
       const q = nav.searchQuery()
-      return q ? `SRR · Search: ${q}` : "SRR · Search"
+      // A scoped query (RDR8) names its lane here too — the tab title is the one
+      // readout that survives the tab being in the background.
+      const scope = nav.searchScope()
+      const lane = scope ? " in " + nav.filterLabel(scope) : ""
+      return (q ? `SRR · Search: ${q}` : "SRR · Search") + lane
    }
    const key = nav.getCurrentFilterKey()
    if (key === "") return "SRR"
@@ -415,7 +419,13 @@ async function goToList(push: boolean) {
    await renderListSurface()
 }
 
-async function selectFilter(token: string) {
+// Apply an explicit token LIST and land on the list. The multi-token front door,
+// which search-ui needs for a scoped query (RDR8: `q:<query>` + one lane token);
+// selectFilter below is the single-token one every picker row and cycle uses,
+// and it resolves a mount-qualified token before coming through here. Tokens
+// arriving this way are already in the active store's context (nav hands them
+// back bare — the mount rides in tokensSuffix), so there is no `@mid:` to strip.
+async function selectTokens(tokens: string[]) {
    // Bail BEFORE applyFilter/goToList: goToList drops on a held mutex, but
    // applyFilter would already have mutated nav.filter (and goToList's pushState
    // the URL) for a render that never ran. Dropping the whole handler keeps
@@ -427,6 +437,13 @@ async function selectFilter(token: string) {
    // the debounce window lets the stale applySearchQuery fire ~200ms later and
    // bounce the list back into search. Typing itself never routes through here.
    searchUI.clearSearchDebounce()
+   nav.applyFilter(tokens)
+   await goToList(true)
+}
+
+async function selectFilter(token: string) {
+   if (held()) return
+   searchUI.clearSearchDebounce()
    // A mount-qualified token (a peer lane/section picked from the picker):
    // switch the active lane first, then apply the bare token in that store's
    // context (§6.3). A bare token leaves the active mount as-is.
@@ -435,8 +452,7 @@ async function selectFilter(token: string) {
       data.setActive(mid)
       token = tokens[0] ?? ""
    }
-   nav.applyFilter(token === "" ? [] : [token])
-   await goToList(true)
+   await selectTokens(token === "" ? [] : [token])
 }
 
 // Switch the active mount from the picker's mount switcher WITHOUT closing the
@@ -794,7 +810,7 @@ async function init() {
    // Escape / ✕ leave search) and owns the debounce timer.
    searchUI.setup({
       view: () => view,
-      selectFilter,
+      selectTokens,
       persistHash,
       setTitle,
       listTitle,
@@ -848,21 +864,31 @@ async function init() {
       // would drive the surfaces stacked behind it. Escape is handled above;
       // the picker keeps its own UI (rows are plain links, Tab walks them).
       if (picker.isOpen()) return
-      const tag = (e.target as HTMLElement).tagName
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return
+      // Typing beats every shortcut below: a bare-letter keymap over a focused
+      // field would eat the text. isContentEditable joins the tag test because a
+      // rich-text host is a text field that happens not to be an <input>.
+      const target = e.target as HTMLElement
+      const tag = target.tagName
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable) return
+      // SURFACE-AGNOSTIC, ahead of the per-surface maps below: `/` is search
+      // (RDR8) — on the list it toggles the bar, and from the reader it switches
+      // to the list in search mode, since search is a list filter mode and
+      // reaching it from an article used to mean going back by hand first.
+      if (e.key === "/") {
+         e.preventDefault()
+         searchUI.toggleSearch()
+         return
+      }
       // On the list, the horizontal step keys move the selected (highlighted) row
       // through the feed — A/← to the older neighbor, D/→ to the newer — mirroring
       // the reader's prev/next so the same key reaches the same article on both
       // surfaces; the vertical cycle keys (W/S, ↑/↓) step the filter in place,
       // sharing onCycle with the two-finger swipe so every cycle input works on
       // both surfaces — except with a single lane to rotate, where they fall
-      // through to native scrolling instead of going dead; `/` toggles search.
+      // through to native scrolling instead of going dead.
       // The rest of the reader keymap stays reader-only.
       if (view === "list") {
-         if (e.key === "/") {
-            e.preventDefault()
-            searchUI.toggleSearch()
-         } else if (e.key === "a" || e.key === "ArrowLeft") {
+         if (e.key === "a" || e.key === "ArrowLeft") {
             e.preventDefault()
             void list.moveSelection("older")
          } else if (e.key === "d" || e.key === "ArrowRight") {

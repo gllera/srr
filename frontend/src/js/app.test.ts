@@ -93,6 +93,8 @@ const nav = vi.hoisted(() => {
       isSearchFilter: vi.fn(() => false),
       searchAvailable: vi.fn(() => true),
       searchQuery: vi.fn(() => ""),
+      // RDR8 — the lane an active query is scoped to ("" = search everything).
+      searchScope: vi.fn(() => ""),
       searchShort: vi.fn(() => false),
       searchTruncated: vi.fn(() => false),
       isUnreadOnly: vi.fn(() => false),
@@ -1452,7 +1454,7 @@ describe("settings menu — the now-viewing readout", () => {
    const openMenu = () =>
       document.querySelector<HTMLButtonElement>(".srr-feed")!.dispatchEvent(new MouseEvent("click", { bubbles: true }))
 
-   it("opens an anchored menu with search and the three dialogs (Show read lives in the filter picker now)", async () => {
+   it("opens an anchored menu with search and the dialogs (Show read lives in the filter picker now)", async () => {
       await boot()
       openMenu()
       expect(dropdown.showContextMenu).toHaveBeenCalledWith(
@@ -2199,6 +2201,83 @@ describe("search input keys — leaving / applying from the pinned bar", () => {
       document.querySelector(".srr-search-clear")!.dispatchEvent(new MouseEvent("click", { bubbles: true }))
       await flush()
       expect(nav.applyFilter).toHaveBeenCalledWith([])
+   })
+})
+
+// RDR8 (c) — `/` works on BOTH surfaces now, and the guard that keeps it out of
+// a text field.
+describe("surface-agnostic keys — /", () => {
+   beforeEach(clearServiceWorker)
+   const key = (k: string, target: EventTarget = document) => {
+      const e = new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true })
+      target.dispatchEvent(e)
+      return e
+   }
+
+   it("/ from the READER switches to the list in search mode", async () => {
+      await boot()
+      hashTo("#3")
+      await flush()
+      expect(document.body.classList.contains("srr-view-list")).toBe(false)
+      nav.applyFilter.mockClear()
+      const e = key("/")
+      await flush()
+      expect(e.defaultPrevented).toBe(true)
+      expect(nav.applyFilter).toHaveBeenCalledWith(["q:"])
+      expect(document.body.classList.contains("srr-view-list")).toBe(true)
+   })
+
+   it("/ from the reader keeps the lane as the query's SCOPE", async () => {
+      await boot()
+      nav.getCurrentFilterKey.mockReturnValue("tech")
+      hashTo("#3")
+      await flush()
+      nav.applyFilter.mockClear()
+      key("/")
+      await flush()
+      expect(nav.applyFilter).toHaveBeenCalledWith(["q:", "tech"])
+      nav.getCurrentFilterKey.mockReturnValue("")
+   })
+
+   it("/ from the reader while ALREADY searching returns to the results, query intact", async () => {
+      // The reader can be walking a query's hits; `/` there means "back to the
+      // results", not "start over" — the query would otherwise be wiped to "q:".
+      await boot()
+      nav.isSearchFilter.mockReturnValue(true)
+      nav.searchQuery.mockReturnValue("climate")
+      nav.searchScope.mockReturnValue("tech")
+      hashTo("#3")
+      await flush()
+      nav.applyFilter.mockClear()
+      key("/")
+      await flush()
+      expect(nav.applyFilter).toHaveBeenCalledWith(["q:climate", "tech"])
+      expect(document.body.classList.contains("srr-view-list")).toBe(true)
+      nav.isSearchFilter.mockReturnValue(false)
+      nav.searchQuery.mockReturnValue("")
+      nav.searchScope.mockReturnValue("")
+   })
+
+   it("/ on the list toggles search off again, returning to the scoped lane", async () => {
+      await boot()
+      nav.isSearchFilter.mockReturnValue(true)
+      nav.searchScope.mockReturnValue("tech")
+      nav.applyFilter.mockClear()
+      key("/")
+      await flush()
+      expect(nav.applyFilter).toHaveBeenCalledWith(["tech"])
+      nav.isSearchFilter.mockReturnValue(false)
+      nav.searchScope.mockReturnValue("")
+   })
+
+   it("/ is inert while typing in a text field", async () => {
+      await boot()
+      const input = document.querySelector(".srr-search-input") as HTMLInputElement
+      nav.applyFilter.mockClear()
+      const slash = key("/", input)
+      expect(nav.applyFilter).not.toHaveBeenCalled()
+      // Not merely ignored — not swallowed either, so the character still types.
+      expect(slash.defaultPrevented).toBe(false)
    })
 })
 

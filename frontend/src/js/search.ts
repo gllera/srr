@@ -49,6 +49,107 @@ export function fold(s: string): string {
       .join(" ")
 }
 
+// ── Term highlighting (RDR8) ─────────────────────────────────────────────────
+// The list marks the matched terms inside a search row's title, and the match
+// has to be computed on the SAME fold the hit was — matching the raw title
+// would miss every case/accent difference the fold exists to erase, so the
+// highlight would disagree with the hit that put the row on screen.
+//
+// Folding is NOT length-preserving: NFD expands, combining marks vanish,
+// separator runs collapse to a single space, and a few code points lowercase to
+// a different width. A folded offset therefore says nothing about a raw one.
+// foldTrace re-folds the title ONE CODE POINT AT A TIME, recording the raw
+// range each folded code UNIT came from, and then verifies its output against
+// fold() itself: identical strings mean the per-character walk took the same
+// path as the whole-string one, so the mapping is sound. Anything else (a
+// normalization or case corner where the two passes legitimately differ —
+// canonical reordering across a non-Mn mark is the realistic one) returns null
+// and the caller renders the title unmarked. Highlighting is a hint; being
+// silently wrong about WHICH characters matched is worse than not marking.
+const SEP_ONE = /[^\p{L}\p{N}]/u
+
+interface FoldTrace {
+   folded: string
+   from: number[] // raw index where the code point behind folded[k] starts
+   to: number[] // ...and where it ends (exclusive)
+}
+
+function foldTrace(raw: string): FoldTrace | null {
+   const out: string[] = []
+   const from: number[] = []
+   const to: number[] = []
+   let pendingGap = false // a separator run seen since the last emitted character
+   let i = 0
+   for (const cp of raw) {
+      const start = i
+      i += cp.length
+      const f = cp.normalize("NFD").replace(MARKS, "").toLowerCase().replaceAll("ς", "σ")
+      for (const c of f) {
+         if (SEP_ONE.test(c)) {
+            pendingGap = true
+            continue
+         }
+         // The split/filter/join in fold() collapses a separator run to one
+         // space and drops it at either end — hence the "something emitted
+         // already" guard, and no trailing flush.
+         if (pendingGap && out.length > 0) {
+            out.push(" ")
+            from.push(start)
+            to.push(start)
+         }
+         pendingGap = false
+         out.push(c)
+         // One from/to entry per code UNIT, because the offsets indexOf hands
+         // back below are code-unit offsets into the joined string.
+         for (let k = 0; k < c.length; k++) {
+            from.push(start)
+            to.push(i)
+         }
+      }
+   }
+   const folded = out.join("")
+   return folded === fold(raw) ? { folded, from, to } : null
+}
+
+// One-slot memo: the list folds the SAME query once per rendered row, and the
+// row fill also re-runs on every refresh().
+let wordsMemo: { q: string; words: string[] } | null = null
+function queryWords(query: string): string[] {
+   if (wordsMemo?.q !== query) {
+      wordsMemo = {
+         q: query,
+         words: fold(query)
+            .split(" ")
+            .filter((w) => w.length > 0),
+      }
+   }
+   return wordsMemo.words
+}
+
+// The RAW-string ranges a search row should <mark> for `query` — every
+// occurrence of every query word, merged where they overlap so a stretch gets
+// one mark rather than nested ones. Empty when the query is empty, when nothing
+// matches, or when the fold mapping could not be verified (above).
+export function matchSpans(title: string, query: string): Array<[number, number]> {
+   if (!title || !query) return []
+   const words = queryWords(query)
+   if (words.length === 0) return []
+   const tr = foldTrace(title)
+   if (!tr) return []
+   const hits: Array<[number, number]> = []
+   for (const w of words)
+      for (let at = tr.folded.indexOf(w); at !== -1; at = tr.folded.indexOf(w, at + 1))
+         hits.push([tr.from[at], tr.to[at + w.length - 1]])
+   hits.sort((a, b) => a[0] - b[0] || a[1] - b[1])
+   const merged: Array<[number, number]> = []
+   for (const [s, e] of hits) {
+      const last = merged[merged.length - 1]
+      if (last && s <= last[1]) last[1] = Math.max(last[1], e)
+      else merged.push([s, e])
+   }
+   return merged
+}
+
 // wordGrams mirrors eachSearchGram for a single folded word: SEARCH_GRAM-rune
 // sliding windows, never spanning word gaps.
 function wordGrams(word: string): string[] {
@@ -190,7 +291,20 @@ function deltaShard(st: SearchState): Shard {
    return st.deltaShardCache.shard
 }
 
-function matchShard(shard: Shard, baseChron: number, words: string[], max: number): ISearchHit[] {
+// A SCOPED query (RDR8, "search within this tag"): the hits must ALSO belong to
+// this feed membership — nav's own `filter.feeds` map (feed id → lower bound),
+// handed over as plain data so the membership rule stays nav's. `key` identifies
+// the scope inside the hit cache: one query under two scopes is two hit sets.
+//
+// The scope is applied DURING the scan rather than to the finished hit list,
+// because the scan stops at `cap`: intersecting afterwards would let a common
+// word fill the cap from other lanes and hand a narrow scope nothing at all.
+export interface SearchScope {
+   key: string
+   feeds: ReadonlyMap<number, number>
+}
+
+function matchShard(shard: Shard, baseChron: number, words: string[], max: number, scope?: SearchScope): ISearchHit[] {
    const hits: ISearchHit[] = []
    // Newest-first within the shard, like the shard order of the outer scan —
    // the first `max` collected are exactly the `max` the consumer keeps (a
@@ -207,6 +321,13 @@ function matchShard(shard: Shard, baseChron: number, words: string[], max: numbe
       // chain is load-bearing: search.test.ts's mock db omits `feeds`
       // (production data.init always normalizes it).
       if (feed && baseChron + i < feed.add_idx) continue
+      // The scope test mirrors nav's filter.matches feed branch — a member id
+      // whose lower bound this chron clears — so a scoped query walks exactly
+      // the lane the reader would.
+      if (scope) {
+         const bound = scope.feeds.get(e.f)
+         if (bound === undefined || baseChron + i < bound) continue
+      }
       hits.push({ chron: baseChron + i, f: e.f, w: e.w, t: e.t ?? "" })
    }
    return hits
@@ -230,6 +351,7 @@ export function shortQuery(q: string): boolean {
 export async function* search(
    q: string,
    limit = Infinity,
+   scope?: SearchScope,
    store: Store = activeStore(),
 ): AsyncGenerator<ISearchHit[], void, void> {
    const words = fold(q)
@@ -258,7 +380,7 @@ export async function* search(
    // needed at ≤ MAX_DELTAS small batches), via matchShard over the synthetic
    // delta shard so expiry/tombstone handling stays single-sourced.
    if (data.deltaArticles().length > 0 && remaining > 0) {
-      const hits = matchShard(deltaShard(st), data.tailCovered(), words, remaining)
+      const hits = matchShard(deltaShard(st), data.tailCovered(), words, remaining, scope)
       remaining -= hits.length
       if (hits.length > 0) yield hits
    }
@@ -269,7 +391,7 @@ export async function* search(
    if ((data.db.mt ?? 0) > 0 && remaining > 0) {
       try {
          const latest = await st.loadLatest()
-         const hits = matchShard(latest, nf * META_PACK_SIZE, words, remaining)
+         const hits = matchShard(latest, nf * META_PACK_SIZE, words, remaining, scope)
          remaining -= hits.length
          if (hits.length > 0) yield hits
       } catch (e) {
@@ -281,7 +403,7 @@ export async function* search(
    const blooms = await summary
    for (let p = nf - 1; p >= 0 && remaining > 0; p--) {
       if (!gramBits.every((bits) => bloomHas(blooms, p * SEARCH_BLOOM_BYTES, bits))) continue
-      const hits = matchShard(await loadShard(st, p), p * META_PACK_SIZE, words, remaining)
+      const hits = matchShard(await loadShard(st, p), p * META_PACK_SIZE, words, remaining, scope)
       remaining -= hits.length
       if (hits.length > 0) yield hits
    }
@@ -298,17 +420,27 @@ export interface HitSet {
    cards: Map<number, import("./format.gen").IMetaWire>
 }
 
-// `cap` must be constant per query key: the cache is keyed on `query` alone and
-// ignores `cap` on a hit, so a varying cap for the same query would silently
-// return the first cap's result. nav always passes the fixed SEARCH_CAP.
-export function loadHits(query: string, cap: number, store: Store = activeStore()): Promise<HitSet> {
-   return cachedPromise(stateOf(store).hitCache, query, async () => {
+// `cap` must be constant per query key: the cache is keyed on the query (plus
+// the scope key, RDR8) and ignores `cap` on a hit, so a varying cap for the same
+// query would silently return the first cap's result. nav always passes the
+// fixed SEARCH_CAP.
+export function loadHits(
+   query: string,
+   cap: number,
+   scope?: SearchScope,
+   store: Store = activeStore(),
+): Promise<HitSet> {
+   // Two scopes over one query are two hit sets, so the scope key joins the
+   // cache key. An unscoped query keeps the bare query as its key — byte-identical
+   // caching for the case that existed before scoping did.
+   const key = scope ? JSON.stringify([query, scope.key]) : query
+   return cachedPromise(stateOf(store).hitCache, key, async () => {
       const seen = new Set<number>()
       const chrons: number[] = []
       const cards = new Map<number, import("./format.gen").IMetaWire>()
       let truncated = false
       if (query) {
-         outer: for await (const batch of search(query, cap + 1, store)) {
+         outer: for await (const batch of search(query, cap + 1, scope, store)) {
             for (const h of batch) {
                if (chrons.length >= cap) {
                   truncated = true

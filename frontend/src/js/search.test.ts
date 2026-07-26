@@ -147,6 +147,59 @@ describe("fold", () => {
    })
 })
 
+// RDR8 — the fold→raw offset mapping behind the list's <mark>s. The fold is not
+// length-preserving, so these cases pin that a match found in folded space comes
+// back as the RAW characters it came from, and that a query word can never mark
+// text it did not match.
+describe("matchSpans", () => {
+   const marked = (title: string, query: string) => search.matchSpans(title, query).map(([s, e]) => title.slice(s, e))
+
+   it("returns the raw slices the folded match came from", () => {
+      expect(marked("Climate talks in Berlin", "climate berlin")).toEqual(["Climate", "Berlin"])
+   })
+
+   it("maps back across characters the fold changed length on", () => {
+      // NFD expands é into e+U+0301 and the mark is then stripped, so the folded
+      // offsets run ahead of the raw ones from that point on.
+      expect(marked("Café Éclair au chocolat", "eclair chocolat")).toEqual(["Éclair", "chocolat"])
+      expect(marked("İstanbul today", "istanbul")).toEqual(["İstanbul"])
+      expect(marked("STRAẞE map", "straße")).toEqual(["STRAẞE"])
+      // Final sigma: the query folds ς→σ, so it must still find the raw word.
+      expect(marked("γλώσσας today", "γλωσσας")).toEqual(["γλώσσας"])
+   })
+
+   it("maps back across astral code points (surrogate pairs)", () => {
+      // The emoji folds to a separator, so the words either side stay separate
+      // and the offsets after it are 2 code units ahead of the folded ones.
+      expect(marked("𝐀lpha 😀 beta", "beta")).toEqual(["beta"])
+   })
+
+   it("matches inside a word, not just at its start (the scan's own substring rule)", () => {
+      expect(marked("Unclimatic weather", "climat")).toEqual(["climat"])
+   })
+
+   it("merges overlapping matches instead of nesting them", () => {
+      expect(marked("banana", "ban ana")).toEqual(["banana"])
+   })
+
+   it("returns nothing for an empty query, an empty title, or no match", () => {
+      expect(search.matchSpans("Climate", "")).toEqual([])
+      expect(search.matchSpans("", "climate")).toEqual([])
+      expect(search.matchSpans("Climate", "zzz")).toEqual([])
+      // A query of pure separators folds to no words at all.
+      expect(search.matchSpans("Climate", "  --  ")).toEqual([])
+   })
+
+   it("never marks across a word gap — the separator collapse is not a match site", () => {
+      // "a b" folds to "a b"; the single folded space stands for "  --  " in the
+      // raw text, and no query word contains a space, so nothing can match it.
+      expect(search.matchSpans("a  --  b", "a b")).toEqual([
+         [0, 1],
+         [7, 8],
+      ])
+   })
+})
+
 describe("bloomBits", () => {
    it("matches the backend's probe vectors (cross-language parity pin)", () => {
       // The same literals are asserted against the Go bloomBits in
@@ -337,6 +390,44 @@ describe("search", () => {
       // the status quo and still render with the tombstone title.
       const batches = await collect(search.search("alpha"))
       expect(batches.flat()).toHaveLength(3)
+   })
+
+   // RDR8 — a scope narrows the scan itself, so the cap is spent inside the lane
+   // instead of being filled from other lanes and leaving it empty.
+   describe("scoped scan", () => {
+      const scope = (feeds: [number, number][]) => ({ key: JSON.stringify(feeds), feeds: new Map(feeds) })
+
+      beforeEach(() => {
+         // Re-lay shard 1 so its "Alpha middle" belongs to feed 2 — the whole
+         // point of a scope is that hits differ by feed. Same titles, so the
+         // bloom (title-only) is unchanged.
+         store["meta/1.gz"] = concat(bloomOf(shard1), entryBytes([shard1[0]], 2), entryBytes(shard1.slice(1), 1))
+      })
+
+      it("keeps only hits whose feed is in the scope", async () => {
+         const inTwo = await collect(search.search("alpha", Infinity, scope([[2, 0]])))
+         expect(inTwo.flat().map((h) => h.chron)).toEqual([META_PACK_SIZE])
+         const inOne = await collect(search.search("alpha", Infinity, scope([[1, 0]])))
+         expect(inOne.flat().map((h) => h.chron)).toEqual([2 * META_PACK_SIZE, 0])
+      })
+
+      it("honors the scope member's lower bound, like filter.matches does", async () => {
+         const hits = await collect(search.search("alpha", Infinity, scope([[1, META_PACK_SIZE]])))
+         expect(hits.flat().map((h) => h.chron)).toEqual([2 * META_PACK_SIZE]) // chron 0 is below the bound
+      })
+
+      it("an empty scope map finds nothing (a lane that resolved to no feeds)", async () => {
+         expect((await collect(search.search("alpha", Infinity, scope([])))).flat()).toEqual([])
+      })
+
+      it("loadHits caches per (query, scope) — one query under two scopes is two hit sets", async () => {
+         const one = await search.loadHits("alpha", 500, scope([[1, 0]]))
+         const two = await search.loadHits("alpha", 500, scope([[2, 0]]))
+         expect(one.chrons).toEqual([0, 2 * META_PACK_SIZE])
+         expect(two.chrons).toEqual([META_PACK_SIZE])
+         // The unscoped key is still the bare query — untouched by scoping.
+         expect((await search.loadHits("alpha", 500)).chrons).toEqual([0, META_PACK_SIZE, 2 * META_PACK_SIZE])
+      })
    })
 
    it("invalidate() drops the cached tail/summary/shards/hits so the next query re-reads", async () => {

@@ -6,6 +6,12 @@ import * as nav from "./nav"
 // namespace binding of that name is shadowed by the local function declaration —
 // silently, since the collision only shows up when the callback below runs.
 import { refreshNow } from "./refresh"
+// The fold-aware term matcher (RDR8). Taken from ./search rather than
+// reimplemented here for the same reason the hit set is: a highlight computed on
+// anything but search.ts's own fold would disagree with the hit that put the row
+// on screen. search.ts stays DOM-free — it hands back raw-string ranges and the
+// element building lives below.
+import { matchSpans } from "./search"
 // The two frontier-write primitives, taken from ./seen rather than through nav's
 // facade — the one place in the reader that does so, and deliberately:
 // nav.markAllRead/markUnreadFrom bake in the ACTIVE FILTER's scope (that is what
@@ -541,6 +547,33 @@ export function rowEl(
    return a
 }
 
+// Write a row title, marking the matched terms while a query is what put the row
+// on screen (RDR8). Outside search mode this is exactly the textContent write it
+// replaces — and INSIDE it, it is still element building plus text nodes: a
+// title is untrusted feed content, so it never touches innerHTML, and the
+// <mark>s are real elements the browser exposes to AT as emphasis.
+//
+// matchSpans returns RAW-string ranges (it owns the fold→raw mapping and returns
+// nothing at all when that mapping can't be verified), so all that is left here
+// is to walk them: text, mark, text, …
+function paintTitle(host: Element, text: string): void {
+   const spans = nav.isSearchFilter() ? matchSpans(text, nav.searchQuery()) : []
+   if (spans.length === 0) {
+      host.textContent = text
+      return
+   }
+   host.replaceChildren()
+   let at = 0
+   for (const [s, e] of spans) {
+      if (s > at) host.append(text.slice(at, s))
+      const m = document.createElement("mark")
+      m.textContent = text.slice(s, e)
+      host.append(m)
+      at = e
+   }
+   if (at < text.length) host.append(text.slice(at))
+}
+
 // Populate a skeleton row's feed-derived content in place once its meta card
 // lands. Idempotent: also used as rowEl's content path when a card is present.
 export function fillRow(a: HTMLElement, art: import("./format.gen").IMetaWire, seen: Record<string, number>): void {
@@ -555,7 +588,7 @@ export function fillRow(a: HTMLElement, art: import("./format.gen").IMetaWire, s
    a.classList.toggle("srr-row-unread", nav.isRowUnread(chron, art.f, seen))
    a.querySelector(".srr-row-source")!.textContent = data.feedTitle(art.f)
    a.querySelector(".srr-row-age")!.textContent = timeAgo(art.w)
-   a.querySelector(".srr-row-title")!.textContent = art.t || "(untitled)"
+   paintTitle(a.querySelector(".srr-row-title")!, art.t || "(untitled)")
    a.classList.remove("srr-row-skeleton")
    // If selectRow placed the cursor on this row while it was still a skeleton
    // (feed unknown → nav.select was deferred via data-select-pending), sync now —
@@ -738,10 +771,19 @@ export function emptyStateEl(opts: { notStarted?: boolean; startFeed?: number } 
       msg.textContent = "Tap Next to start reading."
    } else if (nav.isSearchFilter()) {
       const q = nav.searchQuery()
-      if (q) msg.append("No titles match ", em(`“${q}”`), ". Try fewer or different words.")
-      else {
+      // A scoped query (RDR8) names its lane: "no match" means something quite
+      // different when the search only ever looked inside one feed or tag, and
+      // the pinned bar shows the words but never the scope.
+      const scope = nav.searchScope()
+      if (q) {
+         msg.append("No titles match ", em(`“${q}”`))
+         if (scope) msg.append(" in ", em(nav.filterLabel(scope)))
+         msg.append(". Try fewer or different words.")
+      } else {
          eyebrow("Search")
-         msg.textContent = "Find any article by its title."
+         msg.textContent = scope
+            ? `Find an article in ${nav.filterLabel(scope)} by its title.`
+            : "Find any article by its title."
       }
    } else if (nav.isSavedFilter()) {
       // Saved is a peek mode independent of the unread-only flag (which defaults
