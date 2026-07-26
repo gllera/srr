@@ -40,6 +40,13 @@ linters:
     # Five rules are switched off below — not as risk acceptance, but because
     # each is answering a question this codebase answers somewhere else.
     - gosec
+    # Expected to be the noisy one and was not: 3 findings on the default check
+    # set, none of them a defect, and no check needed disabling. Two were
+    # `x = append(y, …)` — the shape that hides a backing-array aliasing bug,
+    # benign at both sites and rewritten to say so — and one was a test's
+    # deliberately padded map key. Left at the default groups (style +
+    # diagnostics); the opinionated/performance tags are a separate decision.
+    - gocritic
 
   settings:
     gosec:

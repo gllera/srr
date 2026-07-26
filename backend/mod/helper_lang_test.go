@@ -117,6 +117,9 @@ func TestNormalizeLang(t *testing.T) {
 	// language to another. Macrolanguage expansion is a config-side concern
 	// (langMacro), so "no" stays "no" here.
 	for in, want := range map[string]string{
+		// The padding in " En " is the test case — normalizeLang must trim before
+		// folding — so gocritic's "suspicious whitespace in key" is the assertion.
+		//nolint:gocritic // mapKey: the whitespace is deliberate input
 		"en": "en", "EN": "en", " En ": "en",
 		"en-US": "en", "en_us": "en", "pt-BR": "pt",
 		"no": "no", "NO-nb": "no", "nn": "nn",

@@ -122,7 +122,8 @@ func handleExport(w http.ResponseWriter, r *http.Request) {
 			if e != nil {
 				return fmt.Errorf("encoding config: %w", e)
 			}
-			data = append(out, '\n')
+			out = append(out, '\n')
+			data = out
 			return nil
 		}
 		feeds := make([]*Feed, 0, len(db.Feeds()))
