@@ -49,6 +49,7 @@ type configFeed struct {
 	Recipe     string   `json:"recipe,omitempty"`
 	Ingest     string   `json:"ingest,omitempty"`
 	Pipe       []string `json:"pipe,omitempty"`
+	Secrets    []string `json:"secrets,omitempty"`
 	NoTitle    bool     `json:"no_title,omitempty"`
 	ExpireDays int      `json:"expire_days,omitempty"`
 	DedupDays  int      `json:"dedup_days,omitempty"`
@@ -85,6 +86,7 @@ func buildConfigDoc(db *DB) configDoc {
 			Recipe:     ch.Recipe,
 			Ingest:     ch.Ingest,
 			Pipe:       ch.Pipe,
+			Secrets:    ch.Secrets,
 			NoTitle:    ch.NoTitle,
 			ExpireDays: ch.ExpireDays,
 			DedupDays:  ch.DedupDays,
@@ -172,7 +174,11 @@ func applyConfigDoc(ctx context.Context, db *DB, doc *configDoc) error {
 		if err := validatePipe(pipe, name != defaultRecipeName); err != nil {
 			return fmt.Errorf("recipe %q: %w", name, err)
 		}
-		recipes[name] = Recipe{Ingest: r.Ingest, Pipe: pipe}
+		secrets := filterPipe(r.Secrets)
+		if err := validateSecretScopes(secrets); err != nil {
+			return fmt.Errorf("recipe %q: %w", name, err)
+		}
+		recipes[name] = Recipe{Ingest: r.Ingest, Pipe: pipe, Secrets: secrets}
 	}
 	// Feeds: validate every entry (URL shape, recipe reference, pipe tokens,
 	// bounded expire/dedup) before the first write.
@@ -192,7 +198,7 @@ func applyConfigDoc(ctx context.Context, db *DB, doc *configDoc) error {
 		seen[f.URL] = true
 		ch := &Feed{
 			Title: f.Title, URL: f.URL, Tag: f.Tag, Recipe: f.Recipe,
-			Ingest: f.Ingest, Pipe: f.Pipe, NoTitle: f.NoTitle,
+			Ingest: f.Ingest, Pipe: f.Pipe, Secrets: f.Secrets, NoTitle: f.NoTitle,
 			ExpireDays: f.ExpireDays, DedupDays: f.DedupDays, DedupTitle: f.DedupTitle,
 		}
 		if err := normalizeFeed(ch, recipes); err != nil {
@@ -224,7 +230,7 @@ func applyConfigDoc(ctx context.Context, db *DB, doc *configDoc) error {
 			// (setFeedURL no-ops on an unchanged URL).
 			writeFeedView(ch, &feedView{
 				Title: want.Title, URL: want.URL, Tag: want.Tag, Recipe: want.Recipe,
-				Ingest: want.Ingest, Pipe: want.Pipe, NoTitle: want.NoTitle,
+				Ingest: want.Ingest, Pipe: want.Pipe, Secrets: want.Secrets, NoTitle: want.NoTitle,
 				ExpireDays: want.ExpireDays, DedupDays: want.DedupDays, DedupTitle: want.DedupTitle,
 			})
 			updated++

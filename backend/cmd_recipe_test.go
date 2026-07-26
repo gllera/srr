@@ -155,3 +155,35 @@ func TestRecipeRmRefusesReferenced(t *testing.T) {
 		t.Error("recipe rm of a referenced recipe accepted, want error listing feed ids")
 	}
 }
+
+// The secret-scope grant is a first-class recipe axis: `recipe set --secrets`
+// stores it (trimmed, empties dropped), a dotted scope is rejected at config
+// time (parseSecrets forbids '.' in scope names, so it could never match), and
+// a set without --secrets clears it — full-replace like the other axes.
+func TestRecipeSetSecrets(t *testing.T) {
+	setupEmptyDB(t)
+	if err := (&RecipeSetCmd{Name: "tg", Pipe: []string{"#sanitize"}, Secrets: []string{" telegram ", ""}}).Run(); err != nil {
+		t.Fatalf("recipe set: %v", err)
+	}
+	_ = withDB(false, func(_ context.Context, db *DB) error {
+		if got := db.core.Recipes["tg"].Secrets; !slices.Equal(got, []string{"telegram"}) {
+			t.Errorf("secrets = %v, want [telegram] (trimmed, empty dropped)", got)
+		}
+		return nil
+	})
+
+	if err := (&RecipeSetCmd{Name: "tg", Secrets: []string{"a.b"}}).Run(); err == nil {
+		t.Error("dotted secret scope accepted, want config-time rejection")
+	}
+
+	// Full replace: re-set without --secrets clears the grant.
+	if err := (&RecipeSetCmd{Name: "tg", Pipe: []string{"#sanitize"}}).Run(); err != nil {
+		t.Fatalf("recipe set (clear): %v", err)
+	}
+	_ = withDB(false, func(_ context.Context, db *DB) error {
+		if got := db.core.Recipes["tg"].Secrets; got != nil {
+			t.Errorf("secrets = %v, want nil after a set without --secrets", got)
+		}
+		return nil
+	})
+}

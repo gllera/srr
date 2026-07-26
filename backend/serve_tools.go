@@ -29,7 +29,7 @@ func handlePreview(w http.ResponseWriter, r *http.Request) {
 	var items []*Item
 	err := withDBCtx(r.Context(), false, func(ctx context.Context, db *DB) error {
 		var e error
-		items, e = renderPreview(ctx, db.core.Recipes, q.Get("recipe"), q["pipe"], q.Get("ingest"), rawURL)
+		items, e = renderPreview(ctx, db.core.Recipes, q.Get("recipe"), q["pipe"], q.Get("ingest"), q["secrets"], rawURL)
 		return e
 	})
 	if err != nil {
@@ -60,6 +60,9 @@ func handleResolve(w http.ResponseWriter, r *http.Request) {
 	}
 	var out map[string]any
 	err := withDBCtx(r.Context(), false, func(ctx context.Context, db *DB) error {
+		// The probe simulates the feed's fetch, secret grant included — an
+		// external ingest needing its credentials must resolve here too.
+		ctx = grantSecrets(ctx, db.core.Recipes, q.Get("recipe"), q["secrets"])
 		res, e := previewFetch(ctx, db.core.Recipes, q.Get("recipe"), q.Get("ingest"), rawURL)
 		if e != nil {
 			return e

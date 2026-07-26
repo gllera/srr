@@ -163,15 +163,22 @@ The command-scoped keys that carry an env var (all take a CLI flag, env var, or 
 
 ### Secrets
 
-A top-level `secrets:` section in `srr.yaml` defines extra environment variables that are merged into the environment of **external ingest strategies and external (shell) mods** — handy for passing credentials to an external command without exporting them into your shell or service unit. It does **not** affect the `asset-process` / `asset-peek` commands.
+A top-level `secrets:` section in `srr.yaml` defines **named scopes** of extra environment variables for **external ingest strategies and external (shell) mods** — handy for passing credentials to an external command without exporting them into your shell or service unit. It does **not** affect the `asset-process` / `asset-peek` commands.
 
 ```yaml
 secrets:
-  TG_API_ID: "12345"
-  TG_API_HASH: "abcdef0123..."
+  telegram:
+    TG_API_ID: "12345"
+    TG_API_HASH: "abcdef0123..."
+  github:
+    GH_PAT: "ghp_..."
 ```
 
-A secret **overrides** any ambient process-env variable of the same name (config wins). Values are stored in **plaintext** in `srr.yaml`, so restrict the file (`chmod 600`). `srr config` lists the keys but masks the values (`TG_API_ID: ********`), and supports `srr config secrets` / `srr config secrets.TG_API_ID`. Secrets are read once at startup, so restart a running `art fetch --interval` loop after editing them.
+A scope's variables reach a command's environment only when the feed **grants** the scope — via its recipe (`srr recipe set telegram --secrets telegram …`) or a feed-level override (`srr feed upd 3 --secrets telegram`), resolved like the ingest/pipe axes (feed wins over recipe over the `default` recipe; no grant anywhere = no secrets). That containment is the point: the blast radius of one misbehaving script is the scopes it was granted, never the whole credential set. Granting a scope srr.yaml doesn't define is a fetch-time warning (recipes live in the store, secrets per box); the scope just contributes nothing. The one exception is the operator-global `--notify` hook, which gets every scope.
+
+A granted secret **overrides** any ambient process-env variable of the same name (config wins; when two granted scopes define the same name, the later grant in the list wins). Values are stored in **plaintext** in `srr.yaml`, so restrict the file (`chmod 600`). `srr config` lists the scopes and keys but masks the values (`TG_API_ID: ********`), and supports `srr config secrets` / `srr config secrets.telegram` / `srr config secrets.telegram.TG_API_ID`. Secrets are read once at startup, so restart a running `art fetch --interval` loop after editing them.
+
+> **Migrating from the flat pre-scope layout** (`secrets: {NAME: value}`): wrap the entries under a scope name and grant that scope to the recipes/feeds whose commands need it. A flat section is rejected at startup with a migration hint — nothing silently runs without its credentials.
 
 ## Storage Backends
 
@@ -263,7 +270,7 @@ srr preview "https://example.com/x" -i "myfetch --token=$TOK"
 
 ### External command protocol
 
-The command receives a JSON **request** on `stdin` and must print a JSON **response** on `stdout`. `stderr` is passed through to the terminal — use it for logging. The process environment is inherited, so `SRR_*` and any credentials already in the environment are available to the command; the `srr.yaml` [`secrets:`](#secrets) section is merged in too (overriding any ambient value of the same name).
+The command receives a JSON **request** on `stdin` and must print a JSON **response** on `stdout`. `stderr` is passed through to the terminal — use it for logging. The process environment is inherited, so `SRR_*` and any credentials already in the environment are available to the command; the `srr.yaml` [`secrets:`](#secrets) scopes the feed's recipe/override **grants** are merged in too (overriding any ambient value of the same name).
 
 **Request** (stdin):
 
@@ -416,7 +423,7 @@ srr feed add -t "Feed" -u https://example.com/rss -r lower
 
 ### External mod protocol
 
-A pipeline step whose first word is not a built-in `#`-token is run as an external mod: `/bin/sh -c <step>` is invoked **once per item**, with the process environment inherited (plus the `srr.yaml` [`secrets:`](#secrets) section, which overrides any ambient value of the same name) and `stderr` passed through to the terminal (use it for logging).
+A pipeline step whose first word is not a built-in `#`-token is run as an external mod: `/bin/sh -c <step>` is invoked **once per item**, with the process environment inherited (plus the `srr.yaml` [`secrets:`](#secrets) scopes the feed's recipe/override grants, which override any ambient value of the same name) and `stderr` passed through to the terminal (use it for logging).
 
 On the fetch path, an external mod gets `SRR_ASSET_DIR` pointing at the run's shared asset cache dir — so a mod may download or place a file there and reference it in `content` with a `#`-prefixed relative path, exactly like an external ingest command ([above](#self-hosting-files)); the automatic end-of-pipeline upload step then ships it to the store. Markers are resolved by name against that directory, so the environment variable is the whole contract: unlike external *ingest*, a mod's **working directory is always inherited** from SRR's own process, on every path — a mod invoked by a relative path (`./mods/x.sh`) keeps working. `srr preview` leaves `SRR_ASSET_DIR` unset — a mod that places assets must detect that and pass items through untouched rather than writing markers nothing will ever upload.
 

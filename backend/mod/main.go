@@ -266,7 +266,6 @@ func Register(name string, init func() Processor) {
 type Module struct {
 	processors    map[string]Processor
 	domProcessors map[string]DOMProcessor
-	env           []string
 }
 
 // New builds a Module with every registered built-in instantiated once.
@@ -274,7 +273,6 @@ func New() *Module {
 	m := &Module{
 		processors:    make(map[string]Processor, len(registry)),
 		domProcessors: make(map[string]DOMProcessor, len(domRegistry)),
-		env:           SubprocessEnv(),
 	}
 	for name, init := range registry {
 		m.processors[name] = init()
@@ -322,8 +320,9 @@ func (o *Module) runExternal(ctx context.Context, args string, i *RawItem) error
 	// dir, so a step can place self-hosted files there and reference them with
 	// "#"-markers — the same asset contract external ingest strategies have.
 	// Preview never stamps the dir (mod.WithCacheDir is fetch-only), so its
-	// absence tells a step "no store: transform only". o.env is shared across
-	// workers — clone before appending.
+	// absence tells a step "no store: transform only". The environment is
+	// computed per exec from the ctx-carried secret-scope grant (SubprocessEnv):
+	// only the scopes this feed's recipe/override granted reach the command.
 	//
 	// The working directory is deliberately left INHERITED (unlike external
 	// ingest, which does get cwd = the cache dir). Markers are resolved by
@@ -334,9 +333,9 @@ func (o *Module) runExternal(ctx context.Context, args string, i *RawItem) error
 	// GUID is already in the dedup boundary, so the article is lost for good).
 	// Validate never executes external steps and preview would keep the old
 	// cwd, so that breakage would be invisible until articles went missing.
-	env := o.env
+	env := SubprocessEnv(ctx)
 	if dir := cacheDirFromContext(ctx); dir != "" {
-		env = append(slices.Clone(o.env), "SRR_ASSET_DIR="+dir)
+		env = append(env, "SRR_ASSET_DIR="+dir)
 	}
 	out, err := RunSubprocess(ctx, args, env, "", &buf)
 	if err != nil {

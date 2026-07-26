@@ -112,10 +112,10 @@ Immutable, write-once, `cacheImmutable`, gzip JSON. One complete, self-contained
 Mutable, `no-cache`, at the store root next to `db.gz`. **The frontend and the service worker never fetch it**, exactly like the seen sidecar, and it is deliberately NOT in `PackSeries`.
 
 ```json
-{"v":2,"recipes":{…},"out":[…],"dd":30,"feeds":{"42":{"recipe":"x","pipe":[…],"dd":7,"dt":true}}}
+{"v":2,"recipes":{…},"out":[…],"dd":30,"feeds":{"42":{"recipe":"x","pipe":[…],"secrets":["tg"],"dd":7,"dt":true}}}
 ```
 
-- `recipes` — the named `{ingest, pipe}` bundles (below). Always contains the reserved `default` entry; `NewDB` re-seeds it if absent.
+- `recipes` — the named `{ingest, pipe, secrets}` bundles (below). Always contains the reserved `default` entry; `NewDB` re-seeds it if absent.
 - `dd` — the store-wide default dedup horizon in days (fallback for a feed whose own `dd` is 0; absent/0 ⇒ `defaultDedupDays` 30). A negative store default is invalid config — a per-feed `dd = -1` is the off switch. Managed via `srr dedup --days N`.
 - `out` — the syndication slots (see CDN Layout → `out/`). Managed via `srr syndicate`.
 - `feeds` — the per-feed config half (`FeedConfig`: `recipe`, `ingest`, `pipe`, `dd`, `dt`).
@@ -134,7 +134,7 @@ Mutable, `no-cache`, at the store root next to `db.gz`. **The frontend and the s
 
 `cb` (ContentBytes) and `ab` (AssetBytes) are server-owned byte counters (the service worker ignores them; the reader only displays them): `cb` is the cumulative uncompressed JSONL bytes the feed's articles added to `data/` packs (bumped per article by `PutArticles`; never decreases — expiration is logical deletion, the pack bytes stay), `ab` is the live store footprint of the feed's self-hosted `assets/` objects — bumped by the stored payload size at the actual upload (content-hash dedup hits add nothing; a shared asset is charged to the feed whose fetch uploaded it first) and reduced, clamped at 0, when expiration deletes those objects (approximate for cross-feed shared assets). Surfaced read-only as `content_bytes`/`asset_bytes` in `feed ls/show/edit` and `GET /api/overview`, and as the reader info cards' "Stored content" / "Stored assets" rows.
 
-**Config half (`FeedConfig`, in `config.gz`)**: `{ recipe?, ingest?, pipe?, dd?, dt? }` — never reader-read. `recipe` is the name of the `{ingest, pipe}` recipe this feed uses (empty or absent ⇒ `default`); `ingest`/`pipe` are the optional feed-level overrides on top of it (each axis wins over the recipe when set — see Recipes). `dd` (DedupDays) / `dt` (DedupTitle) tune the persistent dedup pool per feed (`dd`: 0 inherits the store default, >0 sets the horizon in days, -1 disables the pool for this feed; `dt` adds a folded-title dedup axis, gated by `!nt`).
+**Config half (`FeedConfig`, in `config.gz`)**: `{ recipe?, ingest?, pipe?, secrets?, dd?, dt? }` — never reader-read. `recipe` is the name of the `{ingest, pipe, secrets}` recipe this feed uses (empty or absent ⇒ `default`); `ingest`/`pipe`/`secrets` are the optional feed-level overrides on top of it (each axis wins over the recipe when set — see Recipes; `secrets` lists the srr.yaml secret SCOPES whose env vars the feed's external commands may see — scope names only, values never leave srr.yaml, and publishing even the names would map what credentials exist). `dd` (DedupDays) / `dt` (DedupTitle) tune the persistent dedup pool per feed (`dd`: 0 inherits the store default, >0 sets the horizon in days, -1 disables the pool for this feed; `dt` adds a folded-title dedup axis, gated by `!nt`).
 
 **Neither half (`json:"-"`)**: `etag`/`last_modified` (the incremental-fetch HTTP validators) and `bg` (BoundaryGUIDs, the FNV-32a hash array used for dedup, capped at 1024 entries — `maxBoundaryGUIDs` in `backend/feed.go` — so one misbehaving feed can't bloat the sidecar). All three live in the backend-only **seen sidecar** (CDN Layout below), hydrated onto the in-memory feed at load and written back after each fetch.
 
@@ -142,15 +142,22 @@ That split is what `docs/STORE-VISIBILITY.md` called the "leak-shrinker", and th
 
 ### Recipes
 
-Processing config lives in named `{ingest, pipe}` recipes in db.gz (`recipes` map),
+Processing config lives in named `{ingest, pipe, secrets}` recipes in db.gz (`recipes` map),
 referenced by feeds via the `recipe` field. The reserved `default` recipe (always
 present, seeded `["#sanitize","#minify"]`) is the fallback.
 
 - A feed with empty/absent `recipe` resolves to `default`.
 - Each axis falls back to `default` independently: a recipe that sets only `ingest`
   uses its own ingest and `default`'s pipe; only `pipe` ⇒ its pipe and `default`'s ingest.
-- A feed may additionally carry its own `ingest`/`pipe` overrides on top of its
+- A feed may additionally carry its own `ingest`/`pipe`/`secrets` overrides on top of its
   recipe, again per axis: set, the feed's value wins; empty, it inherits the recipe's.
+- `secrets` is the **secret-scope grant** (SEC5): srr.yaml's `secrets:` section is
+  scoped (`secrets → <scope> → <NAME> → <value>`), and only the scopes a feed's
+  resolved grant names (`resolveSecrets`: feed > recipe > default, first non-empty)
+  reach its external ingest/pipe commands' environment (`mod.SubprocessEnv`, ctx-carried).
+  No grant anywhere ⇒ NO secrets — fail-closed; the operator-global `--notify` hook
+  alone gets every scope. A granted scope srr.yaml does not define is a fetch-time
+  warn (recipes live in the store, secrets per box) and contributes nothing.
 - `#default` expands inline to the next pipe down the chain: inside a recipe's pipe,
   the `default` recipe's pipe; inside a feed's pipe, the feed's effective recipe pipe.
   The `default` recipe forbids `#default` (it is the default); a feed pipe always allows it.
@@ -159,8 +166,8 @@ present, seeded `["#sanitize","#minify"]`) is the fallback.
   command. Ingest: built-in `#feed`, or a shell command.
 - Resolution: `pipe = resolvePipe(resolvePipe(default.Pipe, recipe.Pipe), feed.Pipe)`,
   `ingest = ingest.Select(feed.Ingest, recipe.Ingest, default.Ingest)` (first non-empty wins).
-- Managed via `srr recipe set/ls/show/rm`; feed-level overrides via
-  `srr feed add/upd -i/-p`. Clean break, amended: a pre-recipes db.gz still drops its
+- Managed via `srr recipe set/ls/show/rm` (`--secrets` per scope); feed-level overrides via
+  `srr feed add/upd -i/-p/--secrets`. Clean break, amended: a pre-recipes db.gz still drops its
   legacy root `pipe`/`ingest` on load, but the legacy feed-level keys are the same keys
   the overrides use today and revive as such (deliberate — same per-feed meaning).
 

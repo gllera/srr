@@ -44,7 +44,7 @@ func TestDeleteRecipeDefaultRefused(t *testing.T) {
 func TestDeleteRecipeReferencedRefused(t *testing.T) {
 	setupTestDB(t)
 	if err := withDB(true, func(ctx context.Context, d *DB) error {
-		return setRecipe(ctx, d, "x", "", []string{"#minify"})
+		return setRecipe(ctx, d, "x", "", []string{"#minify"}, nil)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestDeleteRecipeReferencedRefused(t *testing.T) {
 func TestDeleteRecipe(t *testing.T) {
 	setupTestDB(t)
 	if err := withDB(true, func(ctx context.Context, d *DB) error {
-		return setRecipe(ctx, d, "tmp", "", []string{"#minify"})
+		return setRecipe(ctx, d, "tmp", "", []string{"#minify"}, nil)
 	}); err != nil {
 		t.Fatal(err)
 	}

@@ -14,11 +14,12 @@ import (
 )
 
 type PreviewCmd struct {
-	URL    *url.URL `arg:"" help:"URL to preview."`
-	Recipe string   `short:"r" default:"default" help:"Preview as if the feed used this recipe."`
-	Pipe   []string `short:"p" sep:"none" help:"Ad-hoc pipeline override (repeat -p per step), like a feed-level pipe: overrides the recipe's pipe; #default expands to the recipe's effective pipe."`
-	Ingest string   `short:"i" help:"Ad-hoc ingest override, like a feed-level ingest: built-in ('#feed') or shell command. Overrides the recipe's ingest."`
-	Addr   string   `short:"a" default:"localhost:8080" env:"SRR_PREVIEW_ADDR" help:"Address to listen on."`
+	URL     *url.URL `arg:"" help:"URL to preview."`
+	Recipe  string   `short:"r" default:"default" help:"Preview as if the feed used this recipe."`
+	Pipe    []string `short:"p" sep:"none" help:"Ad-hoc pipeline override (repeat -p per step), like a feed-level pipe: overrides the recipe's pipe; #default expands to the recipe's effective pipe."`
+	Ingest  string   `short:"i" help:"Ad-hoc ingest override, like a feed-level ingest: built-in ('#feed') or shell command. Overrides the recipe's ingest."`
+	Secrets []string `name:"secrets" sep:"none" help:"Ad-hoc secret-scope grant override (repeat per scope), like a feed-level grant: overrides the recipe's."`
+	Addr    string   `short:"a" default:"localhost:8080" env:"SRR_PREVIEW_ADDR" help:"Address to listen on."`
 }
 
 var previewTmpl = template.Must(template.New("preview").Funcs(template.FuncMap{
@@ -94,11 +95,14 @@ func previewFetch(ctx context.Context, recipes map[string]Recipe, recipeName, in
 // module pipeline, and returns the processed articles. Shared by PreviewCmd
 // (HTML page) and GET /api/preview (JSON). Optional ad-hoc overrides with
 // feed-level semantics (the same resolution Feed.Fetch applies to a feed's
-// own Ingest/Pipe): a non-empty pipeOverride replaces the recipe's effective
-// pipe, #default inside it expanding to that pipe; a non-empty ingestOverride
-// wins over the recipe's ingest.
-func renderPreview(ctx context.Context, recipes map[string]Recipe, recipeName string, pipeOverride []string, ingestOverride, rawURL string) ([]*Item, error) {
+// own Ingest/Pipe/Secrets): a non-empty pipeOverride replaces the recipe's
+// effective pipe, #default inside it expanding to that pipe; a non-empty
+// ingestOverride wins over the recipe's ingest; a non-empty secretsOverride
+// wins over the recipe's secret-scope grant (stamped onto ctx up front, so
+// both the ingest probe and the pipe see it — exactly what a real fetch does).
+func renderPreview(ctx context.Context, recipes map[string]Recipe, recipeName string, pipeOverride []string, ingestOverride string, secretsOverride []string, rawURL string) ([]*Item, error) {
 	processor := mod.New()
+	ctx = grantSecrets(ctx, recipes, recipeName, secretsOverride)
 
 	r := recipeFor(recipes, recipeName)
 	def := recipeFor(recipes, defaultRecipeName)
@@ -142,7 +146,7 @@ func (o *PreviewCmd) Run() error {
 	}
 
 	ctx := context.Background()
-	articles, err := renderPreview(ctx, recipes, o.Recipe, o.Pipe, o.Ingest, o.URL.String())
+	articles, err := renderPreview(ctx, recipes, o.Recipe, o.Pipe, o.Ingest, o.Secrets, o.URL.String())
 	if err != nil {
 		return err
 	}

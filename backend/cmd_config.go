@@ -52,11 +52,20 @@ func backendEnvNameFor(scheme string) func(reflect.StructField) string {
 	}
 }
 
-// printSecretEntries prints the srr.yaml secrets, sorted by name, with values
+// printSecretScope prints one scope's secrets, sorted by name, with values
 // masked by the shared maskSecret placeholder so `srr config` never reveals them.
+func printSecretScope(indent string, vars map[string]string) {
+	for _, name := range slices.Sorted(maps.Keys(vars)) {
+		fmt.Printf("%s%s: %v\n", indent, name, maskSecret(vars[name]))
+	}
+}
+
+// printSecretEntries prints every secret scope with its masked entries nested
+// under it, scopes sorted by name.
 func printSecretEntries(indent string) {
-	for _, name := range slices.Sorted(maps.Keys(secrets)) {
-		fmt.Printf("%s%s: %v\n", indent, name, maskSecret(secrets[name]))
+	for _, scope := range slices.Sorted(maps.Keys(secrets)) {
+		fmt.Printf("%s%s:\n", indent, scope)
+		printSecretScope(indent+"  ", secrets[scope])
 	}
 }
 
@@ -83,17 +92,26 @@ func (o *ConfigCmd) Run() error {
 		return nil
 	}
 
-	// The srr.yaml secrets section, always masked: the whole section ("secrets")
-	// or one entry ("secrets.TOKEN"). Resolved before the backend-section lookup
-	// since "secrets" is not a store scheme.
+	// The srr.yaml secrets section, always masked: the whole section ("secrets"),
+	// one scope ("secrets.telegram"), or one entry ("secrets.telegram.TOKEN").
+	// Resolved before the backend-section lookup since "secrets" is not a store
+	// scheme. Scope names may not contain '.' (parseSecrets rejects them), so the
+	// first Cut is unambiguous.
 	if o.Key == "secrets" {
 		printSecretEntries("")
 		return nil
 	}
-	if name, ok := strings.CutPrefix(o.Key, "secrets."); ok {
-		if val, exists := secrets[name]; exists {
-			fmt.Println(maskSecret(val))
-			return nil
+	if rest, ok := strings.CutPrefix(o.Key, "secrets."); ok {
+		scope, name, hasName := strings.Cut(rest, ".")
+		if vars, exists := secrets[scope]; exists {
+			if !hasName {
+				printSecretScope("", vars)
+				return nil
+			}
+			if val, exists := vars[name]; exists {
+				fmt.Println(maskSecret(val))
+				return nil
+			}
 		}
 	}
 

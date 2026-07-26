@@ -1,15 +1,21 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
-func TestParseSecrets(t *testing.T) {
-	data := []byte("store: packs\nsecrets:\n  TOKEN: abc\n  API_HASH: \"def123\"\n")
+func TestParseSecretsScoped(t *testing.T) {
+	data := []byte("store: packs\nsecrets:\n  telegram:\n    TOKEN: abc\n    API_HASH: \"def123\"\n  github:\n    GH_PAT: xyz\n")
 	got, err := parseSecrets(data)
 	if err != nil {
 		t.Fatalf("parseSecrets: %v", err)
 	}
-	if got["TOKEN"] != "abc" || got["API_HASH"] != "def123" {
-		t.Errorf("parsed secrets = %v, want TOKEN=abc API_HASH=def123", got)
+	if got["telegram"]["TOKEN"] != "abc" || got["telegram"]["API_HASH"] != "def123" {
+		t.Errorf("telegram scope = %v, want TOKEN=abc API_HASH=def123", got["telegram"])
+	}
+	if got["github"]["GH_PAT"] != "xyz" {
+		t.Errorf("github scope = %v, want GH_PAT=xyz", got["github"])
 	}
 }
 
@@ -34,10 +40,24 @@ func TestParseSecretsNilAndMalformed(t *testing.T) {
 	}
 }
 
-func TestParseSecretsRejectsBadName(t *testing.T) {
+// A pre-scope flat map (name → value directly under secrets:) must fail with a
+// migration hint naming the scoped layout, not a bare yaml type error.
+func TestParseSecretsLegacyFlatMapHint(t *testing.T) {
+	_, err := parseSecrets([]byte("secrets:\n  TOKEN: abc\n"))
+	if err == nil {
+		t.Fatal("legacy flat secrets map: expected an error, got nil")
+	}
+	if !strings.Contains(err.Error(), "scope") {
+		t.Errorf("legacy flat map error should mention scopes, got: %v", err)
+	}
+}
+
+func TestParseSecretsRejectsBadNames(t *testing.T) {
 	cases := map[string][]byte{
-		"empty name":    []byte("secrets:\n  \"\": v\n"),
-		"name with '='": []byte("secrets:\n  \"A=B\": v\n"),
+		"empty scope name":     []byte("secrets:\n  \"\":\n    A: v\n"),
+		"scope name with '.'":  []byte("secrets:\n  \"a.b\":\n    A: v\n"),
+		"empty secret name":    []byte("secrets:\n  tg:\n    \"\": v\n"),
+		"secret name with '='": []byte("secrets:\n  tg:\n    \"A=B\": v\n"),
 	}
 	for name, data := range cases {
 		if _, err := parseSecrets(data); err == nil {

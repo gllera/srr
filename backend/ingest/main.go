@@ -214,7 +214,6 @@ func Select(names ...string) string {
 // Fetch routes per-call by name.
 type Fetcher struct {
 	fetchers map[string]FetchFunc
-	env      []string
 }
 
 // New builds a Fetcher backed by the registered built-ins. The built-in
@@ -222,7 +221,6 @@ type Fetcher struct {
 func New() *Fetcher {
 	return &Fetcher{
 		fetchers: registry,
-		env:      mod.SubprocessEnv(),
 	}
 }
 
@@ -253,8 +251,10 @@ func (f *Fetcher) Fetch(ctx context.Context, args string, client *http.Client, b
 	// Bound the command so a hang can't wedge the worker forever — the fetch
 	// context has no deadline of its own (see mod.SubprocessTimeout). The
 	// caller's shared download cache (Request.AssetDir) doubles as the command's
-	// working directory, so it can stash and reference files with relative paths.
-	raw, err := mod.RunSubprocess(ctx, args, f.env, req.AssetDir, &body)
+	// working directory, so it can stash and reference files with relative
+	// paths. The environment is computed per call from the ctx-carried
+	// secret-scope grant (mod.SubprocessEnv) — only granted scopes reach it.
+	raw, err := mod.RunSubprocess(ctx, args, mod.SubprocessEnv(ctx), req.AssetDir, &body)
 	if err != nil {
 		return Result{}, fmt.Errorf("fetcher command %q: %w", args, err)
 	}

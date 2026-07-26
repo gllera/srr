@@ -8,7 +8,7 @@ import { banner } from "./banner"
 import { el, icon, relTime, srcColorIndex } from "./dom"
 import { renderers, refresh, state } from "./store"
 import { renderPreviewInto } from "./preview"
-import { confirmDelete, dialogRow, makeDialog, overrideChip, saveModal, stepsEditor } from "./ui"
+import { confirmDelete, dialogRow, makeDialog, overrideChip, saveModal, splitScopes, stepsEditor } from "./ui"
 import type { FeedListView, FeedProgress, ResolveResult } from "./types"
 
 const feedsState = { search: "", tag: "", grade: "", sort: "title", dir: 1 }
@@ -455,6 +455,7 @@ function openFeedModal(f: FeedListView | null): void {
       recipe: "",
       ingest: "",
       pipe: [] as string[],
+      secrets: [] as string[],
       no_title: false,
       expire_days: 0,
       dedup_days: 0,
@@ -537,6 +538,14 @@ function openFeedModal(f: FeedListView | null): void {
       placeholder: "#sanitize or a shell command",
       emptyNote: "using the recipe's pipe",
       hint: "Replaces the recipe's pipe. #default expands to it.",
+   })
+   // Feed-level secret-scope grant override (scope names from srr.yaml's
+   // secrets section, comma-separated). Round-trips like ingest/pipe — the
+   // save body is full-replace, so omitting it would wipe the grant.
+   const secretsIn = el("input", {
+      id: "f_secrets",
+      value: (v.secrets || []).join(", "),
+      placeholder: "inherits the recipe's grant",
    })
    const noTitle = el("input", { id: "f_notitle", type: "checkbox" })
    noTitle.checked = !!v.no_title
@@ -626,6 +635,7 @@ function openFeedModal(f: FeedListView | null): void {
                recipe: recipeVal,
                ingest: ingestIn.value.trim(),
                pipe: pipeSteps.map((s) => s.trim()).filter(Boolean),
+               secrets: splitScopes(secretsIn.value),
                no_title: noTitle.checked,
                expire_days: Math.max(0, Math.floor(Number(expire.value) || 0)),
                dedup_days: dedupVal(),
@@ -656,6 +666,7 @@ function openFeedModal(f: FeedListView | null): void {
       return [
          ingestIn.value.trim() && "ingest",
          pipeSteps.some((s) => s.trim()) && "pipe",
+         splitScopes(secretsIn.value).length > 0 && "secrets",
          days > 0 && `expire ${days}d`,
          dd === -1 ? "dedup off" : dd > 0 && `dedup ${dd}d`,
          dedupTitle.checked && "dedup title",
@@ -674,6 +685,9 @@ function openFeedModal(f: FeedListView | null): void {
       el("p", { class: "hint" }, "Only this feed. #feed or a shell command."),
       el("label", {}, "Pipe"),
       pipeBox,
+      el("label", {}, "Secret scopes"),
+      secretsIn,
+      el("p", { class: "hint" }, "Only this feed. srr.yaml scopes its external commands may see."),
       el(
          "div",
          { class: "field-duo" },

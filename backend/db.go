@@ -116,12 +116,17 @@ func defaultRootPipe() []string {
 // (enforced by the CLI: `recipe set default` rejects `#default`).
 const defaultRecipeName = "default"
 
-// Recipe is a named {ingest, pipe} bundle referenced by feeds (Feed.Recipe).
-// An empty field means "inherit the default recipe's value for that axis":
-// each axis falls back independently (see recipeFor + Feed.Fetch).
+// Recipe is a named {ingest, pipe, secrets} bundle referenced by feeds
+// (Feed.Recipe). An empty field means "inherit the default recipe's value for
+// that axis": each axis falls back independently (see recipeFor + Feed.Fetch).
 type Recipe struct {
 	Ingest string   `json:"ingest,omitempty"`
 	Pipe   []string `json:"pipe,omitempty"`
+	// Secrets grants srr.yaml secret scopes to this recipe's external
+	// ingest/pipe commands (resolveSecrets: feed > recipe > default, first
+	// non-empty wins). No grant anywhere ⇒ no secrets — fail-closed, so the
+	// blast radius of one script is the scopes it was granted (SEC5).
+	Secrets []string `json:"secrets,omitempty"`
 }
 
 // recipeFor resolves a recipe name against the map. An empty or unknown name

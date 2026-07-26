@@ -82,7 +82,7 @@ unreferenced garbage, never corruption.
                                     all immutable, write-once, never reused
 
         config.gz        mutable, no-cache, BACKEND-ONLY (never reader-fetched)
-        └─ recipes, out[], dd, per-feed {recipe, ingest, pipe, dd, dt}
+        └─ recipes, out[], dd, per-feed {recipe, ingest, pipe, secrets, dd, dt}
 ```
 
 ## 3. Goals / non-goals
@@ -167,7 +167,7 @@ next to `db.gz`. **Backend-only**: the frontend and the service worker never
 fetch it, exactly like `seen.gz` today. Deliberately *not* in `PackSeries`.
 
 ```json
-{"v":2,"recipes":{…},"out":[…],"dd":30,"feeds":{"42":{"recipe":"x","pipe":[…],"dd":7,"dt":true}}}
+{"v":2,"recipes":{…},"out":[…],"dd":30,"feeds":{"42":{"recipe":"x","pipe":[…],"secrets":["tg"],"dd":7,"dt":true}}}
 ```
 
 `config.gz` is not referenced by any manifest and is never read by a reader, so
@@ -330,7 +330,7 @@ reader for no gain.
 | `total_art`, `add_idx`, `xp` | manifest | counting/filter math |
 | `cb`, `ab`, `exp` | manifest | rendered as Stored content / Stored assets / Retention |
 | `wm`, `ferr`, `last_ok`, `fail_streak`, `last_new` | manifest | the health grade + "Latest published" card |
-| `recipe`, `ingest`, `pipe` | **config sidecar** | never reader-read |
+| `recipe`, `ingest`, `pipe`, `secrets` | **config sidecar** | never reader-read (the secret-scope grant would map what credentials exist) |
 | `dd`, `dt` | **config sidecar** | never reader-read |
 | `etag`, `last_modified`, `bg` | unchanged (`seen` slot) | already `json:"-"` |
 

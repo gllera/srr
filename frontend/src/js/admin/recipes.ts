@@ -6,7 +6,16 @@ import { api } from "./api"
 import { el, icon } from "./dom"
 import { renderers, state } from "./store"
 import { previewState, renderPreviewInto } from "./preview"
-import { appendRecipeOptions, confirmDelete, dialogRow, makeDialog, pipeTokens, saveModal, stepsEditor } from "./ui"
+import {
+   appendRecipeOptions,
+   confirmDelete,
+   dialogRow,
+   makeDialog,
+   pipeTokens,
+   saveModal,
+   splitScopes,
+   stepsEditor,
+} from "./ui"
 import type { Recipe } from "./types"
 
 function renderRecipes(): void {
@@ -27,7 +36,15 @@ function renderRecipes(): void {
       el(
          "thead",
          {},
-         el("tr", {}, el("th", {}, "name"), el("th", {}, "ingest"), el("th", {}, "pipe"), el("th", {}, "")),
+         el(
+            "tr",
+            {},
+            el("th", {}, "name"),
+            el("th", {}, "ingest"),
+            el("th", {}, "pipe"),
+            el("th", {}, "secrets"),
+            el("th", {}, ""),
+         ),
       ),
    )
    const tb = el("tbody", {})
@@ -53,6 +70,7 @@ function renderRecipes(): void {
                rcp.ingest ? el("span", { class: "chip" }, rcp.ingest) : el("span", { class: "muted" }, "#feed"),
             ),
             el("td", {}, pipeTokens(rcp.pipe)),
+            el("td", {}, ...(rcp.secrets || []).map((s) => el("span", { class: "chip" }, s))),
             actions,
          ),
       )
@@ -83,6 +101,13 @@ function openRecipeModal(name: string | null, rcp: Recipe | null): void {
       emptyNote:
          name === "default" ? "no steps — articles pass through unchanged" : "inherits the default recipe's pipe",
    })
+   // Secret scopes granted to the recipe's external commands: names from
+   // srr.yaml's secrets section, comma-separated. Must round-trip — the PUT
+   // body is full-replace, so omitting it would wipe the grant on every save.
+   const secretsIn = el("input", {
+      value: ((rcp && rcp.secrets) || []).join(", "),
+      placeholder: "no secrets (scope names, comma-separated)",
+   })
    const err = el("div", { class: "formerr" })
 
    const save = el(
@@ -96,7 +121,11 @@ function openRecipeModal(name: string | null, rcp: Recipe | null): void {
                err.textContent = "name required"
                return
             }
-            const body = { ingest: ingestIn.value.trim(), pipe: steps.map((s) => s.trim()).filter(Boolean) }
+            const body = {
+               ingest: ingestIn.value.trim(),
+               pipe: steps.map((s) => s.trim()).filter(Boolean),
+               secrets: splitScopes(secretsIn.value),
+            }
             await saveModal(
                dlg,
                err,
@@ -116,6 +145,13 @@ function openRecipeModal(name: string | null, rcp: Recipe | null): void {
       ingestIn,
       el("label", {}, "Pipe steps"),
       stepsBox,
+      el("label", {}, "Secret scopes"),
+      secretsIn,
+      el(
+         "p",
+         { class: "hint" },
+         "srr.yaml secret scopes granted to this recipe's external commands. Blank = no secrets.",
+      ),
       err,
       dialogRow(dlg, save, isEdit && name !== "default" ? () => deleteRecipe(name!) : null),
    )

@@ -49,20 +49,22 @@ func (o *RecipeShowCmd) Run() error {
 }
 
 // RecipeSetCmd upserts a recipe (full replace, like `srr syndicate set`): the
-// stored recipe is exactly {Ingest from -i, Pipe from -p}. Pass both axes to
-// set both. -i "" / no -p clear that axis (inherit default).
+// stored recipe is exactly {Ingest from -i, Pipe from -p, Secrets from
+// --secrets}. Pass every axis to set them all. -i "" / no -p / no --secrets
+// clear that axis (inherit default).
 // Note: for "default" specifically, omitting -p clears the pipeline entirely —
 // there is no fallback to inherit, so feeds using the default recipe will run
 // with no pipeline until -p is set.
 type RecipeSetCmd struct {
-	Name   string   `arg:"" help:"Recipe name. 'default' is the reserved fallback recipe."`
-	Ingest string   `short:"i" help:"Ingest strategy: built-in ('#feed') or shell command. Empty inherits the default recipe (⇒ #feed)."`
-	Pipe   []string `short:"p" sep:"none" help:"Pipeline step; repeat -p per step (not comma-separated). #default expands to the default recipe's pipe (not allowed in 'default')."`
+	Name    string   `arg:"" help:"Recipe name. 'default' is the reserved fallback recipe."`
+	Ingest  string   `short:"i" help:"Ingest strategy: built-in ('#feed') or shell command. Empty inherits the default recipe (⇒ #feed)."`
+	Pipe    []string `short:"p" sep:"none" help:"Pipeline step; repeat -p per step (not comma-separated). #default expands to the default recipe's pipe (not allowed in 'default')."`
+	Secrets []string `name:"secrets" sep:"none" help:"Secret scope (srr.yaml secrets section) granted to this recipe's external commands; repeat per scope. No grant ⇒ no secrets."`
 }
 
 func (o *RecipeSetCmd) Run() error {
 	return withDB(true, func(ctx context.Context, db *DB) error {
-		return setRecipe(ctx, db, o.Name, o.Ingest, o.Pipe)
+		return setRecipe(ctx, db, o.Name, o.Ingest, o.Pipe, o.Secrets)
 	})
 }
 
@@ -81,7 +83,7 @@ func (o *RecipeRmCmd) Run() error {
 
 // setRecipe upserts a recipe (full-replace), shared by `srr recipe set` and the
 // PUT /api/recipes handler. filterPipe + validatePipe enforce the #default rules.
-func setRecipe(ctx context.Context, db *DB, name, ingest string, pipe []string) error {
+func setRecipe(ctx context.Context, db *DB, name, ingest string, pipe, secrets []string) error {
 	if name == "" {
 		return fmt.Errorf("recipe name is required")
 	}
@@ -89,11 +91,15 @@ func setRecipe(ctx context.Context, db *DB, name, ingest string, pipe []string) 
 	if err := validatePipe(pipe, name != defaultRecipeName); err != nil {
 		return err
 	}
+	secrets = filterPipe(secrets)
+	if err := validateSecretScopes(secrets); err != nil {
+		return err
+	}
 	ingest, err := validateIngest(ingest)
 	if err != nil {
 		return err
 	}
-	db.core.Recipes[name] = Recipe{Ingest: ingest, Pipe: pipe}
+	db.core.Recipes[name] = Recipe{Ingest: ingest, Pipe: pipe, Secrets: secrets}
 	return db.Commit(ctx)
 }
 
@@ -139,6 +145,23 @@ func filterPipe(in []string) []string {
 		return nil
 	}
 	return out
+}
+
+// validateSecretScopes rejects grant entries that could never match a srr.yaml
+// scope: parseSecrets forbids '.' in scope names (it is the `srr config
+// secrets.<scope>.<NAME>` lookup separator), so a '.'-carrying grant is a typo
+// caught here rather than silently contributing nothing at fetch time. Scope
+// EXISTENCE is deliberately not checked: recipes live in the (possibly shared)
+// store while secrets are per-box srr.yaml config, so another box may define a
+// scope this one lacks — that case is a fetch-time warn (mod.MissingScopes).
+// Run after filterPipe (which trims and drops empty entries).
+func validateSecretScopes(scopes []string) error {
+	for _, s := range scopes {
+		if strings.Contains(s, ".") {
+			return fmt.Errorf("invalid secret scope %q: must not contain '.'", s)
+		}
+	}
+	return nil
 }
 
 // validatePipe rejects pipeline steps that would silently break a fetch: an

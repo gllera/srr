@@ -29,6 +29,35 @@ const maxBoundaryGUIDs = 1024
 // recipe pipe.
 const pipeDefault = "#default"
 
+// resolveSecrets composes the effective secret-scope grant with the ingest
+// axis's precedence rule: the first non-empty list wins (feed > recipe >
+// default). All empty resolves to nil — NO secrets, the fail-closed default
+// that makes SEC5's containment hold for unconfigured feeds.
+func resolveSecrets(lists ...[]string) []string {
+	for _, l := range lists {
+		if len(l) > 0 {
+			return l
+		}
+	}
+	return nil
+}
+
+// grantSecrets resolves the effective secret-scope grant for a recipe (+ an
+// optional feed-level-style override), warns once on scopes srr.yaml does not
+// define, and stamps the grant onto ctx for mod.SubprocessEnv. Used by the
+// preview/resolve paths, which simulate a feed carrying the overrides;
+// Feed.Fetch inlines the same steps (it already holds the resolved recipes and
+// wants the feed in its warn line).
+func grantSecrets(ctx context.Context, recipes map[string]Recipe, recipeName string, override []string) context.Context {
+	r := recipeFor(recipes, recipeName)
+	def := recipeFor(recipes, defaultRecipeName)
+	scopes := resolveSecrets(override, r.Secrets, def.Secrets)
+	if missing := mod.MissingScopes(scopes); len(missing) > 0 {
+		slog.Warn("granted secret scopes srr.yaml does not define", "scopes", missing)
+	}
+	return mod.WithSecretScopes(ctx, scopes)
+}
+
 // resolvePipe composes the effective pipeline by expanding "#default"
 // tokens in override to base (the next pipe down the fallback chain). An
 // empty override (nil or []) inherits base; a non-empty override replaces it.
@@ -103,6 +132,11 @@ type Feed struct {
 	// inline to that recipe pipe (resolvePipe, chained per level). Same
 	// pre-recipes key-revival note as Ingest.
 	Pipe []string `json:"pipe,omitempty"`
+	// Secrets is the feed-level secret-scope grant override: the srr.yaml
+	// secret scopes whose vars reach this feed's external ingest/pipe commands.
+	// Set it wins over the recipe's grant; empty inherits it (resolveSecrets).
+	// Backend-only, like recipe/ingest/pipe (config.gz half).
+	Secrets []string `json:"secrets,omitempty"`
 	// NoTitle marks a feed whose article titles duplicate the content lead
 	// (microblog sources like Telegram, where the title is the first line of the
 	// body). The reader hides the heading for these; the home list still uses the
@@ -230,6 +264,17 @@ func (c *Feed) Fetch(ctx context.Context, run *fetchRun, buf []byte, processor *
 	r := recipeFor(run.recipes, c.Recipe)
 	def := recipeFor(run.recipes, defaultRecipeName)
 	pipe := resolvePipe(resolvePipe(def.Pipe, r.Pipe), c.Pipe)
+	// Stamp the resolved secret-scope grant onto the fetch ctx: only these
+	// scopes' vars reach this feed's external ingest/pipe commands
+	// (mod.SubprocessEnv). A scope srr.yaml does not define is warn-only —
+	// recipes live in the (possibly shared) store while secrets are per-box
+	// config, so another box's grant must not fail this one's fetch; the scope
+	// simply contributes nothing (fail-closed).
+	scopes := resolveSecrets(c.Secrets, r.Secrets, def.Secrets)
+	if missing := mod.MissingScopes(scopes); len(missing) > 0 {
+		slog.Warn("feed grants secret scopes srr.yaml does not define", "feed", c, "scopes", missing)
+	}
+	ctx = mod.WithSecretScopes(ctx, scopes)
 	// Validate the resolved pipeline once, before the item loop. A bad token
 	// (unknown built-in, stray #default, malformed params) is a config error that
 	// would fail identically for every item; surface it loudly here instead of

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -1758,5 +1759,66 @@ func TestPartialFetchPreservesWatermarkAndRefetchesRemainder(t *testing.T) {
 
 	if items = fetchOnce(t, ch, srv); len(items) != 0 {
 		t.Fatalf("third fetch ingested %d items, want 0 (all deduped)", len(items))
+	}
+}
+
+// The secret-scope grant composes like the ingest axis: the first non-empty
+// list wins (feed > recipe > default); all empty resolves to nil — no secrets,
+// the fail-closed default.
+func TestResolveSecretsFirstNonEmptyWins(t *testing.T) {
+	if got := resolveSecrets(nil, nil, nil); got != nil {
+		t.Errorf("all empty = %v, want nil", got)
+	}
+	if got := resolveSecrets(nil, []string{"r"}, []string{"d"}); !slices.Equal(got, []string{"r"}) {
+		t.Errorf("recipe level = %v, want [r]", got)
+	}
+	if got := resolveSecrets([]string{"f"}, []string{"r"}, []string{"d"}); !slices.Equal(got, []string{"f"}) {
+		t.Errorf("feed level = %v, want [f]", got)
+	}
+	if got := resolveSecrets(nil, nil, []string{"d"}); !slices.Equal(got, []string{"d"}) {
+		t.Errorf("default level = %v, want [d]", got)
+	}
+}
+
+// SEC5 end-to-end: an external pipe step sees a secret var only when its feed's
+// resolved grant (feed > recipe > default) names the scope; an ungranted feed
+// running the very same command sees only the ambient value.
+func TestFeedFetchSecretScopeGrant(t *testing.T) {
+	t.Setenv("SRR_TEST_SCOPED", "ambient")
+	t.Cleanup(func() { mod.SetSecrets(nil) })
+	mod.SetSecrets(map[string]map[string]string{"tg": {"SRR_TEST_SCOPED": "granted"}})
+
+	run := func(recipe Recipe, feedSecrets []string) string {
+		t.Helper()
+		out := t.TempDir() + "/v.txt"
+		recipe.Pipe = []string{fmt.Sprintf(`printf '%%s' "$SRR_TEST_SCOPED" > %s; cat`, out)}
+		r := &fetchRun{
+			engine:    ingest.New(),
+			fetchedAt: 4_102_444_800,
+			recipes: map[string]Recipe{
+				defaultRecipeName: {Ingest: "#test-stub"},
+				"r":               recipe,
+			},
+		}
+		ch := &Feed{Title: "T", URL: "irrelevant://value", Recipe: "r", Secrets: feedSecrets}
+		ch.Fetch(context.Background(), r, make([]byte, 1<<20), mod.New())
+		if ch.FetchError != "" {
+			t.Fatalf("FetchError = %q, want empty", ch.FetchError)
+		}
+		data, err := os.ReadFile(out)
+		if err != nil {
+			t.Fatalf("read scoped var: %v", err)
+		}
+		return string(data)
+	}
+
+	if got := run(Recipe{Secrets: []string{"tg"}}, nil); got != "granted" {
+		t.Errorf("recipe-granted scope: pipe saw %q, want %q", got, "granted")
+	}
+	if got := run(Recipe{}, []string{"tg"}); got != "granted" {
+		t.Errorf("feed-granted scope: pipe saw %q, want %q", got, "granted")
+	}
+	if got := run(Recipe{}, nil); got != "ambient" {
+		t.Errorf("ungranted feed: pipe saw %q, want ambient %q", got, "ambient")
 	}
 }
