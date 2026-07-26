@@ -23,6 +23,7 @@ import * as nav from "./nav"
 import * as picker from "./picker"
 import { clearAllPins } from "./pin"
 import * as pinUI from "./pin-ui"
+import * as player from "./player"
 import * as reader from "./reader"
 import * as refresh from "./refresh"
 import { ensureSchema } from "./schema"
@@ -684,6 +685,26 @@ async function init() {
       offerFrontierUndo: menus.offerFrontierUndo,
       syncUnreadBadge,
    })
+   // RDR16 — the mini-player. reader.ts drives the relocation seam directly
+   // (it owns the render path); what the player needs from the orchestrator is
+   // the ability to route back to an episode's article, and a way to hand a
+   // position to FEB2's store without importing reader.ts.
+   player.setup({
+      openArticle: (mid, chron) => {
+         void (async () => {
+            // chron is per-mount, so an episode can belong to a store that is not
+            // the active one — switch first, then open. switchMount no-ops when
+            // the mutex is held or the mid is unknown, so re-check before routing
+            // rather than navigating into the wrong store.
+            if (mid !== data.activeStore().mid) {
+               await switchMount(mid)
+               if (mid !== data.activeStore().mid) return
+            }
+            await guard(() => nav.goTo(chron))
+         })()
+      },
+      rememberPosition: reader.rememberPosition,
+   })
    menus.setup({
       view: () => view,
       showError,
@@ -879,6 +900,11 @@ async function init() {
          hash = localStorage.getItem(HASH_KEY)?.substring(1) || ""
       } catch {}
    await route(hash)
+   // RDR16 — offer back an episode a reload interrupted. After route() so the
+   // active store is settled and the first surface has painted; PAUSED, never
+   // auto-resumed (browsers block it, and audio starting by itself on a cold
+   // boot is what people disable autoplay to avoid).
+   player.restorePersisted()
    // Cross-device sync: run the LWW profile cycle (pull-adopt when the remote is
    // newer, guarded push when local changes are pending) only after the first
    // surface has rendered (local state is authoritative and paints instantly;

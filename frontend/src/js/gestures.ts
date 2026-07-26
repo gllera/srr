@@ -278,6 +278,22 @@ export function setupGestures(deps: GestureDeps): Gestures {
       pullStart(target, t.clientX, t.clientY)
    }
 
+   // Gesture guard (RDR16): the player bar's seek control is a horizontal
+   // drag, and the touchstart/touchmove/touchend listeners below are bound to
+   // `document` with no target filtering — any 50px horizontal drag reads as
+   // a swipe and fires prev/next, so scrubbing the seek bar would navigate
+   // away instead of seeking. Stopping propagation at `.srr-player` keeps the
+   // touch from ever reaching the document-level handlers below. This also
+   // fixes the same latent problem for today's in-content `<audio controls>`
+   // scrubber — a horizontal drag inside its native seek control is exactly
+   // as indistinguishable from a swipe to these handlers. Queried
+   // defensively: `.srr-player` ships in index.html so this always finds it,
+   // but a null query here must not throw at setup — nothing below depends
+   // on the player module having run first.
+   document.querySelector(".srr-player")?.addEventListener("touchstart", (e) => e.stopPropagation(), {
+      passive: true,
+   })
+
    document.addEventListener(
       "touchstart",
       (e) => {
@@ -377,6 +393,12 @@ export function setupGestures(deps: GestureDeps): Gestures {
    const setHidden = (hide: boolean) => {
       if (hide !== toolbarHidden) {
          deps.toolbar.classList.toggle("srr-toolbar-slide", hide)
+         // Mirrored onto <body> (RDR16): the player bar is a fixed sibling of
+         // the toolbar, not a descendant, so a stylesheet rule that slides it
+         // down into the toolbar's vacated place on auto-hide needs the state
+         // observable somewhere both elements' CSS can see — a class living
+         // only on the toolbar itself isn't reachable from a sibling's rule.
+         document.body.classList.toggle("srr-toolbar-hidden", hide)
          toolbarHidden = hide
       }
    }

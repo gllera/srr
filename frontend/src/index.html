@@ -200,6 +200,45 @@
                </svg>
             </button>
          </nav>
+         <!-- Podcast mini-player (player.ts) — the transport for whatever is
+              playing right now, a sibling of the toolbar it stacks on top of.
+              The bar owns NO media element of its own: the article's live
+              <audio>/<video> is MOVED in here — one atomic appendChild, which
+              the HTML spec's "removed from a Document" pause steps let through
+              — before reader.ts's replaceChildren destroys the content that
+              held it, and moved back into its slot when you return to the
+              owning article. That relocation is why prev/next and
+              back-to-list stop killing playback: same node, same buffer, no
+              second element, no currentTime handoff, no re-buffer gap; video
+              rides the identical path, CSS-constrained to a compact frame.
+              Relocation is about SURVIVAL; this bar is about CONTROL, so it
+              shows whenever media is active and you cannot see it — its
+              article isn't rendered, or is rendered but scrolled away — which
+              is what makes the transport follow you down the show notes
+              instead of the element leaping out of the prose as you scroll.
+              data-kind ("audio"/"video") selects the media-host treatment and
+              data-src carries the feed's source color, the same ramp the list
+              rails and the reader masthead wear. -->
+         <div class="srr-player" role="region" aria-label="Now playing" hidden>
+            <div class="srr-player-media"></div>
+            <div class="srr-player-body">
+               <button class="srr-player-title" aria-label="Go to this article">
+                  <span class="srr-player-source"></span>
+                  <span class="srr-player-name"></span>
+               </button>
+               <div class="srr-player-seek" role="slider" tabindex="0" aria-label="Seek" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0">
+                  <div class="srr-player-seek-fill"></div>
+               </div>
+            </div>
+            <div class="srr-player-controls">
+               <button class="srr-player-back15" aria-label="Back 15 seconds">−15</button>
+               <button class="srr-player-toggle" aria-label="Play" aria-pressed="false"></button>
+               <button class="srr-player-fwd15" aria-label="Forward 15 seconds">+15</button>
+               <button class="srr-player-rate" aria-label="Playback speed">1×</button>
+               <span class="srr-player-time"></span>
+               <button class="srr-player-close" aria-label="Close player">&times;</button>
+            </div>
+         </div>
          <div class="srr-pin-progress" hidden></div>
          <!-- Transient snackbar: a report of something that already happened,
               with at most one way to answer it (Undo a frontier jump, reload

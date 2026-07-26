@@ -80,6 +80,28 @@ export const TRANSIENTS: Transient[] = [
       label: "Collapsed broken media",
       apply: [{ sel: ".srr-content img, .srr-content video", cls: "srr-broken" }],
    },
+   {
+      // The podcast mini-player up over the toolbar (RDR16). Its real
+      // visibility switch is the `hidden` attribute player.ts toggles, which
+      // this table cannot express — the design-shots screenshotter replays the
+      // same apply/text recipe inside the page, so anything beyond a class
+      // toggle plus one text fill would show in the panel and be blank in every
+      // shot. So the pair below: `srr-playing` is the REAL app class (it is
+      // what lifts the reading surface's bottom clearance over the second row
+      // of chrome, so the shot shows the true coexistence), and
+      // `srr-player-demo` is the harness stand-in for "player.ts un-hid the bar
+      // and filled it" — styles.css's design-harness section gives it
+      // visibility, the source eyebrow, a time readout and a part-played seek
+      // fill. The episode title rides the real text channel below, so what the
+      // shot shows ellipsizing is real text overflow.
+      id: "player",
+      label: "Podcast player",
+      apply: [
+         { sel: ".srr-player", cls: "srr-player-demo" },
+         { sel: "body", cls: "srr-playing" },
+      ],
+      text: { sel: ".srr-player-name", value: "Episode 214 — What a static store actually buys you" },
+   },
 ]
 
 export function forceTransient(id: string, root: Document): void {
