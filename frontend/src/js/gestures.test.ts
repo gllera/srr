@@ -8,7 +8,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest"
 // `instanceof TouchEvent`, so a synthesized Event with those props defined
 // drives the whole machine here — no browser needed.
 
-import { setupGestures, type Gestures } from "./gestures"
+import { setPullRefresh, setupGestures, type Gestures } from "./gestures"
 
 const setScrollY = (y: number) => Object.defineProperty(window, "scrollY", { value: y, configurable: true })
 // jsdom has no layout, so the scroll handler's at-bottom check needs explicit
@@ -20,17 +20,25 @@ const setScrollHeight = (h: number) =>
 const scroll = () => window.dispatchEvent(new Event("scroll"))
 
 let toolbar: HTMLElement
+let listEl: HTMLElement
 let g: Gestures
 let goPrev: ReturnType<typeof vi.fn>
 let goNext: ReturnType<typeof vi.fn>
 let onCycle: ReturnType<typeof vi.fn>
+let pullRun: ReturnType<typeof vi.fn>
 
 function mount(): void {
-   document.body.innerHTML = `<nav class="srr-toolbar"></nav>`
+   document.body.innerHTML = `<nav class="srr-toolbar"></nav><div class="srr-list"></div>`
    toolbar = document.querySelector(".srr-toolbar")!
+   listEl = document.querySelector(".srr-list")!
    goPrev = vi.fn()
    goNext = vi.fn()
    onCycle = vi.fn()
+   pullRun = vi.fn(async () => "")
+   // What list.setup does at boot: hand gestures the list container + the
+   // refresh cycle a committed overscroll pull runs. Re-registering also resets
+   // the module-level pull state, so tests don't leak into each other.
+   setPullRefresh(listEl, pullRun)
    g = setupGestures({ toolbar, goPrev, goNext, onCycle })
 }
 
@@ -124,11 +132,14 @@ describe("resetScroll", () => {
 // Event with those props defined drives them; `cancelable:true` lets us read
 // preventDefault back off `defaultPrevented`.
 type Pt = { clientX: number; clientY: number }
-function dispatchTouch(type: string, touches: Pt[], changed: Pt[] = touches): Event {
+// `target` matters only to the pull, whose eligibility test is "did this touch
+// start inside the list container?"; the swipe/cycle cases dispatch on document
+// as before (and are therefore never eligible).
+function dispatchTouch(type: string, touches: Pt[], changed: Pt[] = touches, target: EventTarget = document): Event {
    const e = new Event(type, { bubbles: true, cancelable: true })
    Object.defineProperty(e, "touches", { value: touches, configurable: true })
    Object.defineProperty(e, "changedTouches", { value: changed, configurable: true })
-   document.dispatchEvent(e)
+   target.dispatchEvent(e)
    return e
 }
 const start = (touches: Pt[]) => dispatchTouch("touchstart", touches)
@@ -272,5 +283,171 @@ describe("two-finger vertical cycle", () => {
       end([], [{ clientX: 200, clientY: 300 }]) // dx = +100 from the re-seeded start
       expect(goPrev).toHaveBeenCalledTimes(1)
       expect(onCycle).not.toHaveBeenCalled() // no stale cycle off the two-finger dy
+   })
+})
+
+// Pull to refresh: a one-finger downward drag that STARTS inside the list
+// container while the document is at the top. Everything here is the same
+// synthesized-Event machinery as above, with the touch dispatched on the list
+// element so `e.target` is inside the registered surface.
+describe("pull to refresh", () => {
+   const badge = () => document.querySelector<HTMLElement>(".srr-pull")
+   const on = (el: EventTarget) => ({
+      start: (y: number, x = 150) => dispatchTouch("touchstart", [{ clientX: x, clientY: y }], undefined, el),
+      move: (y: number, x = 150) => dispatchTouch("touchmove", [{ clientX: x, clientY: y }], undefined, el),
+      end: (y: number, x = 150) => dispatchTouch("touchend", [], [{ clientX: x, clientY: y }], el),
+   })
+   // The gesture as the finger performs it: down past the 72px trigger, release.
+   const fullPull = (el: EventTarget = listEl) => {
+      const t = on(el)
+      t.start(100)
+      t.move(120) // engages (past the 8px slop), still short of the trigger
+      t.move(200) // 100px of travel → armed
+      t.end(200)
+   }
+
+   it("runs one refresh cycle when the pull passes the threshold", () => {
+      fullPull()
+      expect(pullRun).toHaveBeenCalledTimes(1)
+   })
+
+   it("does nothing when the pull stops short of the threshold", () => {
+      const t = on(listEl)
+      t.start(100)
+      t.move(140) // 40px — engaged, but never armed
+      t.end(140)
+      expect(pullRun).not.toHaveBeenCalled()
+   })
+
+   it("claims the gesture from the browser once engaged (no native pull-to-reload)", () => {
+      const t = on(listEl)
+      t.start(100)
+      const m = t.move(200)
+      expect(m.defaultPrevented).toBe(true)
+   })
+
+   it("stays out of an ordinary scroll: no preventDefault before it engages", () => {
+      const t = on(listEl)
+      t.start(100)
+      const m = t.move(96) // 4px, inside the slop
+      expect(m.defaultPrevented).toBe(false)
+   })
+
+   it("is inert away from the top of the list (that drag is a scroll)", () => {
+      setScrollY(300)
+      fullPull()
+      expect(pullRun).not.toHaveBeenCalled()
+      expect(badge()).toBeNull() // the affordance never even builds
+   })
+
+   it("is inert while the reader is up (the list container is hidden)", () => {
+      listEl.hidden = true
+      fullPull()
+      expect(pullRun).not.toHaveBeenCalled()
+   })
+
+   it("is inert under an overlay — a touch starting outside the list surface", () => {
+      // The filter picker and the image lightbox are separate elements laid OVER
+      // the list; a touch inside one is not inside the registered surface, which
+      // is how the pull honours the same exclusion as picker/lightbox.isOpen().
+      const overlay = document.createElement("div")
+      overlay.className = "srr-picker"
+      document.body.appendChild(overlay)
+      fullPull(overlay)
+      expect(pullRun).not.toHaveBeenCalled()
+   })
+
+   it("axis lock: an engaged pull never also fires the horizontal swipe", () => {
+      const t = on(listEl)
+      t.start(100)
+      t.move(200) // vertical: the pull takes the gesture
+      t.end(200, 280) // dx=+130 > |dy|=100 — a committed right swipe, but for the lock
+      expect(pullRun).toHaveBeenCalledTimes(1)
+      expect(goPrev).not.toHaveBeenCalled()
+      expect(goNext).not.toHaveBeenCalled()
+   })
+
+   it("axis lock: a horizontal swipe keeps the gesture even if it later drifts down", () => {
+      const t = on(listEl)
+      t.start(100)
+      t.move(104, 230) // dx=80 dominates → the swipe owns it from here
+      t.move(220, 230) // a later downward drift must not start a pull
+      t.end(110, 240) // dx=+90, |dy|=10 → the swipe still lands
+      expect(pullRun).not.toHaveBeenCalled()
+      expect(goPrev).toHaveBeenCalledTimes(1)
+   })
+
+   it("a second finger hands the gesture to the two-finger machine", () => {
+      const t = on(listEl)
+      t.start(100)
+      t.move(200) // armed
+      start([
+         { clientX: 100, clientY: 300 },
+         { clientX: 200, clientY: 300 },
+      ])
+      end(
+         [],
+         [
+            { clientX: 100, clientY: 300 },
+            { clientX: 200, clientY: 300 },
+         ],
+      )
+      expect(pullRun).not.toHaveBeenCalled()
+   })
+
+   it("touchcancel drops an engaged pull", () => {
+      const t = on(listEl)
+      t.start(100)
+      t.move(200)
+      dispatchTouch("touchcancel", [])
+      t.end(200)
+      expect(pullRun).not.toHaveBeenCalled()
+   })
+
+   it("re-anchors so a long scroll up doesn't arrive at the top pre-armed", () => {
+      const t = on(listEl)
+      setScrollY(400)
+      t.start(600)
+      t.move(400) // still scrolled: re-anchors, no pull
+      setScrollY(0) // the list has reached its top mid-gesture
+      t.move(420) // only 20px of travel counts from here
+      t.end(420)
+      expect(pullRun).not.toHaveBeenCalled()
+   })
+
+   it("arms, spins, then clears the affordance across the cycle", async () => {
+      vi.useFakeTimers()
+      try {
+         let finish!: () => void
+         pullRun.mockImplementation(() => new Promise<void>((r) => (finish = r)))
+         const t = on(listEl)
+         t.start(100)
+         t.move(140)
+         expect(badge()!.classList.contains("srr-pull-armed")).toBe(false)
+         t.move(200)
+         expect(badge()!.classList.contains("srr-pull-armed")).toBe(true)
+         t.end(200)
+         expect(badge()!.classList.contains("srr-pull-busy")).toBe(true)
+         finish()
+         // The cycle answers instantly here; the affordance still holds for its
+         // minimum visible beat, then parks back off-screen.
+         await vi.advanceTimersByTimeAsync(500)
+         expect(badge()!.classList.contains("srr-pull-busy")).toBe(false)
+         expect(badge()!.style.transform).toBe("")
+      } finally {
+         vi.useRealTimers()
+      }
+   })
+
+   it("does not stack a second cycle while one is still running", async () => {
+      vi.useFakeTimers()
+      try {
+         pullRun.mockImplementation(() => new Promise<void>(() => {})) // never settles
+         fullPull()
+         fullPull()
+         expect(pullRun).toHaveBeenCalledTimes(1)
+      } finally {
+         vi.useRealTimers()
+      }
    })
 })

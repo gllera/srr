@@ -151,6 +151,11 @@ const nav = vi.hoisted(() => {
 })
 vi.mock("./nav", () => nav)
 
+// list.setup registers the pull-to-refresh action (RDR11) with gestures.ts —
+// the real gestures module is harmless here (it only stores the callback), but
+// ./refresh would pull the real ./search + ./data graph in behind it.
+vi.mock("./refresh", () => ({ refreshNow: vi.fn(async () => "") }))
+
 vi.mock("./fmt", () => ({
    timeAgo: (n: number) => `${n}s`,
    srcColorIndex: (id: number) => id % 8,
