@@ -37,8 +37,9 @@ linters:
     - noctx
     # This binary shells out to operator-configured commands, parses hostile
     # HTML and writes a store, so the exec/TLS/host-key rules earn their keep.
-    # Five rules are switched off below — not as risk acceptance, but because
-    # each is answering a question this codebase answers somewhere else.
+    # Seven rules, in four groups, are switched off below — not as risk
+    # acceptance, but because each group is answering a question this codebase
+    # answers somewhere else. Each group states where.
     - gosec
     # Expected to be the noisy one and was not: 3 findings on the default check
     # set, none of them a defect, and no check needed disabling. Two were

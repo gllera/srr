@@ -308,10 +308,11 @@ func (d *HTTP) put(ctx context.Context, key string, r io.Reader, ignoreExisting 
 	})
 }
 
-// Stat returns the object's size via a HEAD request; a missing key is (0, nil)
-// per the Backend contract. A server that omits Content-Length on HEAD
-// (chunked/unknown, reported as -1) counts as 0 — accounting is best-effort on
-// plain HTTP stores.
+// Stat returns the object's size via a HEAD request. A missing key (404/410) is
+// an error wrapping fs.ErrNotExist per the Backend contract; a nil error
+// therefore PROVES the object exists. A server that omits Content-Length on HEAD
+// (chunked/unknown, reported as -1) counts as 0 — a PRESENT object of unknown
+// size, not an absent one; accounting is best-effort on plain HTTP stores.
 func (d *HTTP) Stat(ctx context.Context, key string) (int64, error) {
 	u := d.keyURL("stat", key)
 	var size int64
