@@ -68,9 +68,24 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 		bad("%s: m=%d but the root names %d", key, man.Num, core.ManifestNum)
 	}
 
-	// (1) State. Whole-group comparison — see the doc comment.
-	if !reflect.DeepEqual(man.ManifestState, core.ManifestState) {
-		bad("manifest state diverges from the loaded core: %s", diffJSON(man.ManifestState, core.ManifestState))
+	// (1) State. Whole-group comparison — see the doc comment — with fetched_at
+	// held out, exactly as manifestSig holds it out when deciding whether to
+	// publish at all. That is the same rule read from the other end: a cycle
+	// that produced nothing rewrites the ~60-byte root and mints NO generation
+	// (goal G2), so from the first idle cycle onward the manifest's stamp is
+	// legitimately older than the root's, and dormancy backoff makes those
+	// cycles routine. Comparing them for equality turned every healthy store
+	// red here — on the surface a watchdog reads.
+	//
+	// There is deliberately no direction check to replace it: loadStore — the
+	// single root resolver both the writer and this checker go through — already
+	// resolves fetched_at as max(root.t, manifest.fetched_at), so "the core's
+	// stamp is at least the manifest's" is established at load and an assertion
+	// here could never fail. The field is simply not this comparison's business.
+	gotState, wantState := man.ManifestState, core.ManifestState
+	gotState.FetchedAt, wantState.FetchedAt = 0, 0
+	if !reflect.DeepEqual(gotState, wantState) {
+		bad("manifest state diverges from the loaded core: %s", diffJSON(gotState, wantState))
 	}
 	if !reflect.DeepEqual(man.ManifestWriterState, core.ManifestWriterState) {
 		bad("manifest writer state diverges from the loaded core: %s", diffJSON(man.ManifestWriterState, core.ManifestWriterState))

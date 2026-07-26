@@ -52,11 +52,12 @@ package main
 //   - manifest generations — every step Commits; whether that MINTS a
 //     generation is the writer's own call (an idle cycle does not), so `m`
 //     advances irregularly, which is what the GC window below is measured in.
-//   - GC keep-window — --keep-manifests walked one way down {32, 8, 3, 2, 1, 0}
-//     as the run proceeds: at 0 the sweep is the harshest the rule allows
-//     (everything the current generation does not name is fair game), which is
-//     what turns "GC deleted a live object" from a rare race into a per-step
-//     assertion. One way, deliberately — see chaosKeep.
+//   - GC keep-window — --keep-manifests re-drawn per step from {32, 8, 3, 2, 1,
+//     0}: at 0 the sweep is the harshest the rule allows (everything the current
+//     generation does not name is fair game), which is what turns "GC deleted a
+//     live object" from a rare race into a per-step assertion. Both directions —
+//     WIDENING a live store's window is the ordinary operator action, and it is
+//     the one that used to break the sweep outright; see chaosKeep.
 //   - physical compaction — `srr compact` on ~1 cycle in 11 of a CHURN seed.
 //     Whether a seed churns at all is drawn once per seed (roughly half do): a
 //     churn seed adds, removes and reuses feed ids and compacts, a stable one
@@ -125,7 +126,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -153,29 +153,19 @@ var (
 	chaosMaxDeltas  = []int{0, 0, 1, 2, 3, 6, 12}
 	chaosMaxDeltaKB = []int{1, 2, 4, 16, 1024}
 	chaosExpireDays = []int{0, 0, 1, 2, 3, 7, 30}
-	// chaosKeep is the GC grace window, walked in DESCENDING order and never
-	// back up (chaosPlan holds a one-way cursor into it). The narrowing is the
-	// interesting direction — each step down makes the sweep harsher, and 0 is
-	// the harshest the rule allows (GC clamps its own cutoff to m−1, so the
-	// current generation is never swept; delta_test.go's TestGCKeepsTheLiveChain
-	// uses the same value for the same reason).
-	//
-	// The window is deliberately never WIDENED mid-store, because that walks
-	// into a rough edge it is out of this file's scope to fix. `GC` derives the
-	// oldest in-window manifest as `min(max(cutoff+1, 1), m)` WITHOUT clamping
-	// to `GCManifest+1` the way checkChronPermanence and checkOrphans both do,
-	// so a widened window asks for a manifest an earlier, narrower sweep already
-	// reclaimed and the sweep hard-errors:
-	//
-	//	gc: reading manifest 5 for the reachable set: read manifest/5.gz:
-	//	  … file does not exist
-	//
-	// (Reproduced by drawing Keep from this pool at random instead of one-way.)
-	// It is warn-only at every call site and self-heals once m outgrows the new
-	// window, and main.go floors --keep-manifests at the compile-time
-	// keepManifests so the CLI cannot narrow it below that — but RAISING it on a
-	// live store is an ordinary operator action, and every cycle until m catches
-	// up then skips its sweep, so the store leaks for the duration.
+	// chaosKeep is the GC grace window, drawn at RANDOM each step so the sweep is
+	// exercised narrowing AND widening. Narrowing is the harsher direction — 0 is
+	// the harshest the rule allows, since GC clamps its own cutoff to m−1 so the
+	// current generation is never swept (delta_test.go's TestGCKeepsTheLiveChain
+	// uses the same value for the same reason) — but WIDENING is the one an
+	// operator actually performs on a live store, and it used to walk into a real
+	// defect this pool was shaped to avoid: `GC` derived the oldest in-window
+	// manifest without clamping to `GCManifest+1`, so a widened window asked for a
+	// manifest an earlier narrower sweep had already reclaimed and hard-errored
+	// (`gc: reading manifest 5 for the reachable set: … file does not exist`) —
+	// warn-only at every call site, so the store silently stopped being swept
+	// until m outgrew the new window. Fixed in manifest.go; the random draw is
+	// what keeps it fixed.
 	chaosKeep = []int{keepManifests, 8, 3, 2, 1, 0}
 )
 
@@ -291,16 +281,12 @@ func chaosPlan(seed uint64, budget int) []chaosStep {
 
 	var steps []chaosStep
 	produced, feeds := 0, 0
-	keepAt := 0 // the one-way cursor into chaosKeep (see its comment)
 	for produced < budget {
-		if keepAt < len(chaosKeep)-1 && r.intn(4) == 0 {
-			keepAt++
-		}
 		st := chaosStep{
 			Reopen:     len(steps) > 0 && r.intn(4) == 0,
 			MaxDeltas:  choose(chaosMaxDeltas),
 			MaxDeltaKB: choose(chaosMaxDeltaKB),
-			Keep:       chaosKeep[keepAt],
+			Keep:       choose(chaosKeep), // both directions — see chaosKeep
 			Advance:    int64(1+r.intn(72)) * 3600,
 			Compact:    r.intn(11) == 0 && churn,
 		}
@@ -659,56 +645,6 @@ func (c *chaosRun) reusedFeedIDs() map[int]bool {
 	return reused
 }
 
-// manifestFetchedAtSkew reports 1 when the ONLY thing making checkManifest's
-// state comparison fail is the root's `t` having run ahead of the manifest's
-// fetched_at, and 0 otherwise (so a real divergence still fails the step).
-//
-// ⚠ This is a DEFECT IN THE CHECKER, tolerated here rather than fixed because
-// this file may not touch production code. The skew is the idle cycle, and it
-// is the root's whole reason for carrying `t` at all (docs/MANIFEST-SPEC.md
-// §4.1/§8.1, goal G2): a cycle that changed nothing a reader can see — a fully
-// backoff-thinned poll, a zero-feed maintenance cycle — rewrites the ~60-byte
-// root and deliberately does NOT mint a generation, so every reader's cached
-// manifest and the edge cache in front of it stay valid. `loadStore` then takes
-// the root's `t` as authoritative ("the root's `t` is authoritative for
-// freshness", root.go) while `checkManifest` DeepEquals the whole
-// ManifestState — fetched_at included — against that same core, and reports the
-// deliberate lag as an issue:
-//
-//	[manifest] manifest state diverges from the loaded core:
-//	    published: {"fetched_at":1700075600,"total_art":7, …}
-//	    resolved:  {"fetched_at":1700241200,"total_art":7, …}
-//
-// So `srr inspect --validate` — the cron health-check surface — goes red on a
-// healthy production store the moment a cycle polls nothing, and stays red
-// until the next article-producing cycle. The tolerance is kept as narrow as it
-// can be: fetched_at is patched and everything else must then compare EQUAL.
-func (c *chaosRun) manifestFetchedAtSkew() int {
-	core := &c.db.core
-	if core.ManifestNum == 0 {
-		return 0
-	}
-	buf, err := c.db.readGz(ctx, manifestKey(core.ManifestNum))
-	if err != nil {
-		return 0
-	}
-	var man Manifest
-	if err := json.Unmarshal(buf, &man); err != nil {
-		return 0
-	}
-	if man.FetchedAt == core.FetchedAt {
-		return 0
-	}
-	// Patch ONLY fetched_at: if that alone reconciles the two, the check is
-	// reporting the idle-cycle lag and nothing else.
-	patched := man.ManifestState
-	patched.FetchedAt = core.FetchedAt
-	if reflect.DeepEqual(patched, core.ManifestState) {
-		return 1
-	}
-	return 0
-}
-
 // chaosDBMetaAllTime matches checkDBMeta's per-feed ALL-TIME count line, the one
 // report that is a documented false positive under feed-id reuse: the check
 // compares a feed's total_art against every idx entry carrying its id, and a
@@ -743,7 +679,7 @@ func (c *chaosRun) dbMetaTolerated(detail string) int {
 // holds in memory.
 //
 // It asks for --json and asserts PER CHECK rather than on the exit code,
-// because three checks can answer non-zero for reasons that are not store
+// because two checks can answer non-zero for reasons that are not store
 // defects:
 //
 //   - unknown-feed-ids — the orphaned-entry census a removal leaves behind
@@ -753,10 +689,12 @@ func (c *chaosRun) dbMetaTolerated(detail string) int {
 //     predecessor's entries, which cmd_inspect_check.go calls out in place as a
 //     known limitation of that one comparison. Tolerated ONLY for ids the
 //     oracle knows were reused, and only for that exact line.
-//   - manifest — the idle-cycle fetched_at skew, which is a real checker defect
-//     and not a store problem; see manifestFetchedAtSkew.
 //
-// Every other check, and every other line of those three, must be silent.
+// Every other check, and every other line of those two, must be silent. The
+// `manifest` check used to need a third tolerance — the idle-cycle fetched_at
+// skew, a checker defect this file could only work around — which is fixed in
+// cmd_inspect_manifest.go: fetched_at is now held out of the state comparison
+// exactly as manifestSig holds it out of the publish decision.
 func (c *chaosRun) validate(step int) {
 	t := c.t
 	t.Helper()
@@ -780,8 +718,6 @@ func (c *chaosRun) validate(step int) {
 			tolerated = c.orphanFeedCount()
 		case "db-meta":
 			tolerated = c.dbMetaTolerated(iss.Detail)
-		case "manifest":
-			tolerated = c.manifestFetchedAtSkew()
 		}
 		if iss.Issues != tolerated {
 			t.Fatalf("%s step %d: inspect --validate [%s]: %d issue(s), %d expected from feed churn:\n%s",
