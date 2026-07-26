@@ -884,3 +884,65 @@ func TestCheckWatchNames(t *testing.T) {
 		})
 	}
 }
+
+// The roster and the patterns live in TWO objects — the floors in the manifest,
+// the specs in the mutable config.gz — so they can legitimately arrive one
+// without the other. The documented rollback (`{"v":3,"m":<older>}` over db.gz)
+// rewinds the manifest and leaves the sidecar alone; §6.4's commit window can
+// leave the same shape. What must not happen is what used to: `start` is only
+// lowered by the rules that ALREADY have a floor, so an all-unstamped roster
+// left it at TotalArticles, the early return discarded the freshly computed
+// stamps, and every later cycle re-derived the same nothing. The lane was dead
+// forever, silently — SyncWatch is warn-only.
+func TestWatchRosterRecoversWhenEveryRuleIsUnstamped(t *testing.T) {
+	defer withWatchPackSize(t, 8)()
+	db, _, _ := setupTestDB(t)
+	f := watchFeed(t, db, "F", "http://f")
+	watchSet(t, db, "cve", "title=/CVE/i")
+	watchPut(t, db, f, "CVE-1 alpha", "beta")
+
+	// The roster is lost; config.gz keeps the rules.
+	db.core.WatchFrom, db.core.WatchCovered = nil, 0
+
+	watchPut(t, db, f, "CVE-2 gamma", "delta")
+
+	from, ok := db.core.WatchFrom["cve"]
+	if !ok {
+		t.Fatalf("roster not restored: WatchFrom=%v (the lane can never begin)", db.core.WatchFrom)
+	}
+	if db.core.WatchCovered != db.core.TotalArticles {
+		t.Errorf("WatchCovered = %d, want %d", db.core.WatchCovered, db.core.TotalArticles)
+	}
+	// The floor is the batch in hand, not the head: stamping at TotalArticles
+	// would skip the very articles the run already held in memory.
+	if want := db.core.TotalArticles - 2; from != want {
+		t.Errorf("recovered floor = %d, want %d (the batch this run evaluated)", from, want)
+	}
+	if got := watchHits(t, db, "cve"); !slices.Contains(got, 2) {
+		t.Errorf("chron 2 (CVE-2) not claimed after recovery: hits=%v", got)
+	}
+}
+
+// The same divergence, on an IDLE cycle: nothing new to describe, so the run
+// takes the early return. It must still adopt the roster — that branch is
+// precisely where a recovering store lands when its rollback happened between
+// article-producing cycles.
+func TestWatchRosterAdoptedOnIdleCycle(t *testing.T) {
+	defer withWatchPackSize(t, 8)()
+	db, _, _ := setupTestDB(t)
+	f := watchFeed(t, db, "F", "http://f")
+	watchSet(t, db, "cve", "title=/CVE/i")
+	watchPut(t, db, f, "CVE-1 alpha")
+
+	db.core.WatchFrom, db.core.WatchCovered = nil, 0
+
+	if err := db.SyncWatch(ctx, nil); err != nil { // no batch: the idle path
+		t.Fatalf("SyncWatch: %v", err)
+	}
+	if _, ok := db.core.WatchFrom["cve"]; !ok {
+		t.Fatalf("idle cycle dropped the recovered roster: WatchFrom=%v", db.core.WatchFrom)
+	}
+	if db.core.WatchCovered != db.core.TotalArticles {
+		t.Errorf("WatchCovered = %d, want %d", db.core.WatchCovered, db.core.TotalArticles)
+	}
+}

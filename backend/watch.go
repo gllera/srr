@@ -272,6 +272,16 @@ func (o *DB) SyncWatch(ctx context.Context, written []ArticleData) error {
 	// this run starts from — the earliest it can honestly claim, since those are
 	// the articles it is about to read. Stamping at TotalArticles instead would
 	// skip the very batch in hand for no reason.
+	//
+	// With no STAMPED rule to lower `start`, nothing above did: the loop ranges
+	// over the rules that already have a floor, so an all-unstamped roster left
+	// `start` at `total` and the early return below then discarded the stamps
+	// entirely — a lane that never began and never would. The batch in hand is
+	// the honest floor there: it is already in memory, so claiming it costs no
+	// I/O, and it is exactly what the paragraph above refuses to skip.
+	if len(unstamped) > 0 {
+		start = min(start, max(total-len(written), c.WatchCovered))
+	}
 	for _, name := range unstamped {
 		from[name] = start
 	}
@@ -279,6 +289,15 @@ func (o *DB) SyncWatch(ctx context.Context, written []ArticleData) error {
 		// Nothing new to describe — either an idle cycle or a store whose only
 		// rules were declared at the current head. Coverage still advances: the
 		// per-rule ranges it now claims are empty, which is true.
+		//
+		// The ROSTER is adopted here too, and that is not bookkeeping: this is
+		// the branch a store reaches when config.gz holds rules the manifest has
+		// no floors for (the documented `{"v":3,"m":<older>}` rollback rewinds
+		// the manifest but not the mutable sidecar, and §6.4's two-object window
+		// can leave the same shape). Returning without it re-derived the same
+		// empty roster every cycle, so reconcileWatchRoster's "a rule with no
+		// roster entry is stamped by the caller" never actually took effect.
+		c.WatchFrom = from
 		c.WatchCovered = total
 		return nil
 	}
