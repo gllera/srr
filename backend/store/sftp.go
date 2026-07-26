@@ -439,29 +439,50 @@ func newSFTP(ctx context.Context, u *url.URL) (Backend, error) {
 		basePath = "/"
 	}
 
-	if basePath != "" && basePath != "/" {
-		// A bad base path fails this Open but does NOT touch the session: it is
-		// the memo's, it may already be serving other handles, and a missing
-		// directory says nothing about the connection.
-		info, err := sess.client.Stat(basePath)
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil, fmt.Errorf("sftp base path %q does not exist", basePath)
-			}
-			return nil, fmt.Errorf("checking sftp base path %q: %w", basePath, err)
-		}
-		if !info.IsDir() {
-			return nil, fmt.Errorf("sftp base path %q is not a directory", basePath)
-		}
-	}
-
-	return &SFTP{
+	// The handle is built BEFORE the base path is checked, so the check can run
+	// THROUGH it: this is an idempotent, body-less read and it gets the same
+	// retry+redial ladder every other read on this backend has.
+	//
+	// It needs that ladder more than any of them, because it is the FIRST thing
+	// to touch a session the memo just handed out — and the memo hands out a
+	// session whose peer died moments after its last success WITHOUT probing it
+	// (probe's trustFresh short-circuit, which exists so a busy session is never
+	// disturbed). Statting straight off sess.client therefore failed the whole
+	// Open on a corpse the very next call would have replaced, where the
+	// pre-memo code — one dial per Open — simply connected.
+	//
+	// A bad base path still fails this Open and still leaves the session alone:
+	// neither verdict below is connection-class, so retryLoop stops at the first
+	// attempt and no repeat is possible.
+	d := &SFTP{
 		path: basePath,
 		host: addr,
 		key:  key,
 		u:    u,
 		sess: sess,
-	}, nil
+	}
+
+	if basePath != "" && basePath != "/" {
+		if err := d.retry(ctx, func(c *sftp.Client) error {
+			info, err := c.Stat(basePath)
+			if err != nil {
+				if os.IsNotExist(err) {
+					return fmt.Errorf("sftp base path %q does not exist", basePath)
+				}
+				return fmt.Errorf("checking sftp base path %q: %w", basePath, err)
+			}
+			if !info.IsDir() {
+				return fmt.Errorf("sftp base path %q is not a directory", basePath)
+			}
+			return nil
+		}); err != nil {
+			// Nothing to unwind: SFTP.Close is a handle release and the session
+			// belongs to the memo either way.
+			return nil, err
+		}
+	}
+
+	return d, nil
 }
 
 // conn returns the client this handle is currently bound to.
