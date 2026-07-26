@@ -137,7 +137,7 @@ export function setup(
          const nowSaved = nav.toggleSaved(chron)
          a.classList.toggle("srr-row-saved", nowSaved)
          star.setAttribute("aria-pressed", String(nowSaved))
-         if (nav.filter.saved && !nowSaved) {
+         if (nav.isSavedFilter() && !nowSaved) {
             a.remove()
             relabelDividers() // drop a day divider the removed row may have orphaned
             if (rowsEl && !rowsEl.querySelector("a.srr-row")) showEmptyState()
@@ -485,7 +485,7 @@ export function emptyStateEl(opts: { notStarted?: boolean; startFeed?: number } 
          eyebrow("Search")
          msg.textContent = "Find any article by its title."
       }
-   } else if (nav.filter.saved) {
+   } else if (nav.isSavedFilter()) {
       // Saved is a peek mode independent of the unread-only flag (which defaults
       // ON), so its empty state must be checked BEFORE the caught-up reward below
       // — otherwise an empty Saved view mis-reads as "All caught up".
@@ -509,7 +509,7 @@ export function emptyStateEl(opts: { notStarted?: boolean; startFeed?: number } 
       // its title), not the key — "" (all/multi) stays the unscoped line.
       if (key) msg.append("Nothing unread in ", em(nav.filterLabel(key)), ".")
       else msg.textContent = "You've read everything."
-   } else if (nav.filter.active) {
+   } else if (nav.isFilterActive()) {
       // Name the scope when it's a single feed/tag (filterLabel resolves a raw id
       // to its title) — the common case for the reader's empty-feed placeholder; a
       // multi-token filter's key is "" → the unscoped line.
@@ -562,7 +562,7 @@ function relabelDividers(): void {
    // rows aren't in date order (search hits span time; saved reads in save
    // order), so day strata would repeat chaotically instead of marking a walk
    // down through the days.
-   if (nav.isSearchFilter() || nav.filter.saved) return
+   if (nav.isSearchFilter() || nav.isSavedFilter()) return
    let prev: string | null = null
    const ctx = dayLabelCtx() // hoisted: the pass walks every loaded row
    for (const row of rowsEl.querySelectorAll<HTMLElement>("a.srr-row")) {
@@ -721,9 +721,9 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    // nearest match below a non-matching anchor. ★ Saved's listAnchor already
    // returns a member (the front of the queue, or the live reader article), and
    // has no chronIdx value order to scan, so it seeds directly.
-   let seed = nav.filter.saved ? anchor : await nav.feedLeft(anchor === -1 ? data.db.total_art - 1 : anchor)
+   let seed = nav.isSavedFilter() ? anchor : await nav.feedLeft(anchor === -1 ? data.db.total_art - 1 : anchor)
    if (my !== tok) return
-   if (seed === -1 && anchor !== -1 && !nav.filter.saved) seed = await nav.feedLeft(data.db.total_art - 1)
+   if (seed === -1 && anchor !== -1 && !nav.isSavedFilter()) seed = await nav.feedLeft(data.db.total_art - 1)
    if (my !== tok) return
    if (seed === -1) {
       emptyState()
@@ -769,8 +769,8 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    // hold when display order IS chronIdx order (feed/search). ★ Saved walks by
    // save-index, so a saved chron 0 can sit mid-queue — its own walk exhaustion
    // (a -1 neighbor) is the only reliable end signal there.
-   exhaustedBottom = older.exhausted || (!nav.filter.saved && oldest === 0)
-   exhaustedTop = newer.exhausted || (!nav.filter.saved && newest === data.db.total_art - 1)
+   exhaustedBottom = older.exhausted || (!nav.isSavedFilter() && oldest === 0)
+   exhaustedTop = newer.exhausted || (!nav.isSavedFilter() && newest === data.db.total_art - 1)
 
    const chronsDesc = newer.chrons.slice().reverse().concat(older.chrons) // newest-first
    const seen = nav.getSeenMap()
@@ -1013,7 +1013,7 @@ export function refresh(): void {
    if (!rowsEl) return
    const seen = nav.getSeenMap()
    const savedSet = nav.getSavedSet()
-   const savedView = nav.filter.saved
+   const savedView = nav.isSavedFilter()
    const current = nav.currentChron()
    let removedAny = false
    rowsEl.querySelectorAll<HTMLElement>("a.srr-row").forEach((a) => {
@@ -1171,7 +1171,7 @@ async function fetchOlder(my: object): Promise<void> {
       // rejection must not advance oldest/exhaustedBottom past a batch that never
       // rendered, which would permanently skip those rows on the next page.
       oldest = chrons[chrons.length - 1]
-      if (exhausted || (!nav.filter.saved && oldest === 0)) exhaustedBottom = true // see render's note on the saved gate
+      if (exhausted || (!nav.isSavedFilter() && oldest === 0)) exhaustedBottom = true // see render's note on the saved gate
       const frag = document.createDocumentFragment()
       const older: HTMLElement[] = []
       chrons.forEach((c, k) => {
@@ -1214,7 +1214,7 @@ async function fetchNewer(my: object): Promise<void> {
       if (my !== tok) return
       // Commit the cursor only after loadMeta resolves (see fetchOlder).
       newest = chrons[chrons.length - 1]
-      if (exhausted || (!nav.filter.saved && newest === data.db.total_art - 1)) exhaustedTop = true // see render's note on the saved gate
+      if (exhausted || (!nav.isSavedFilter() && newest === data.db.total_art - 1)) exhaustedTop = true // see render's note on the saved gate
       const frag = document.createDocumentFragment()
       // chrons is ascending; prepend newest-first so the block reads top-down.
       const fresh: HTMLElement[] = []

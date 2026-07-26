@@ -367,6 +367,9 @@ function resolveMembership(tokens: string[]): Map<number, number> {
    return feeds
 }
 
+// The active filter. Its DATA FIELDS are internal to nav plus the test suites
+// that seed them — production consumers read the mode through the accessors
+// below the object (isSavedFilter / isFilterActive / isSearchFilter — ENG4).
 export const filter = {
    feeds: new Map<number, number>(),
    tokens: [] as string[],
@@ -455,6 +458,23 @@ export const filter = {
          this.feeds.set(id, Math.max(addIdx, seen + 1))
       }
    },
+}
+
+// ── Filter read accessors (finding ENG4) ─────────────────────────────────────
+// `filter`'s DATA FIELDS (feeds / tokens / anchor / saved / search and the
+// `active` getter) are internal to nav plus the test suites that seed them —
+// they are its representation, not its API. Every production consumer reads the
+// mode through an accessor instead, so the representation can evolve without
+// touching a consumer: isSearchFilter() below is the original member of this
+// set, and these two complete it for the reads list.ts makes. (`filter` itself
+// stays exported and mutable: nav.test.ts / list.test.ts / app.test.ts and
+// several e2e suites set up state by writing to it directly.)
+export function isSavedFilter(): boolean {
+   return filter.saved
+}
+// True when a feed/tag/★ Saved/search filter is active — [ALL] is inactive.
+export function isFilterActive(): boolean {
+   return filter.active
 }
 
 // After data.refresh() swapped the store snapshot: reconcile the filter and the
