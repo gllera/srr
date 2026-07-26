@@ -75,6 +75,11 @@ const nav = vi.hoisted(() => {
       // resume / oldest position with no live reader article.
       _setListAnchor: (a: number) => (anchor = a),
       isSearchFilter: vi.fn(() => filter.search),
+      // The other two filter-mode read accessors (ENG4), reading the same mock
+      // `filter` object the cases below seed — list.ts now calls these instead of
+      // reaching into nav.filter.saved / nav.filter.active.
+      isSavedFilter: vi.fn(() => filter.saved),
+      isFilterActive: vi.fn(() => filter.active),
       searchQuery: vi.fn(() => searchTerm),
       // Search snapshot cards (fe-opt#F1): default undefined so renderSearch takes
       // its defensive loadMeta fallback, matching the existing search-render tests.
