@@ -504,11 +504,23 @@ describe("handleFragmentClick", () => {
       expect(target.getAttribute("tabindex")).toBe("-1")
    })
 
-   it("leaves a fragment naming nothing in this article alone", () => {
+   it("still swallows a fragment naming nothing — the browser would write location.hash", () => {
+      // Letting this through is not "do nothing": the browser's default for a
+      // same-document fragment is to set location.hash, which the reader's own
+      // hashchange handler reads as a route (clearing the active filter and the
+      // resume position). Unresolvable fragments are the COMMON case on the
+      // archive written before the writer-side `id` allowlist existed.
       const host = mount('<a href="#nowhere">x</a>')
       const ev = new MouseEvent("click", { bubbles: true, cancelable: true })
       host.querySelector("a")!.dispatchEvent(ev)
-      expect(ev.defaultPrevented).toBe(false)
+      expect(ev.defaultPrevented).toBe(true)
+   })
+
+   it("swallows a numeric fragment, which route() would read as a position", () => {
+      const host = mount('<a href="#2">2</a>')
+      const ev = new MouseEvent("click", { bubbles: true, cancelable: true })
+      host.querySelector("a")!.dispatchEvent(ev)
+      expect(ev.defaultPrevented).toBe(true)
    })
 
    it("leaves modified clicks to the browser", () => {
