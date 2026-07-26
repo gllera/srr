@@ -5,8 +5,8 @@ Static RSS Reader -- a self-hosted RSS reader designed for static file hosting. 
 ## How It Works
 
 ```
-srr art fetch  --->  pack files (idx/ + data/ + db.gz)  --->  static SPA reader
-   (CLI)             stored on S3 / HTTP / SFTP / local       served via CDN
+srr fetch  --->  pack files (idx/ + data/ + db.gz)  --->  static SPA reader
+  (CLI)          stored on S3 / HTTP / SFTP / local       served via CDN
 ```
 
 1. **Backend CLI** fetches RSS/Atom/RDF feeds and writes articles into gzip-compressed pack series optimized for incremental sync and HTTP caching.
@@ -28,10 +28,10 @@ chmod +x srr
 ./srr feed add -t "Hacker News" -u https://hnrss.org/frontpage
 
 # Fetch articles to local directory
-./srr art fetch
+./srr fetch
 
 # Or fetch to S3
-./srr -o s3://my-bucket/feeds art fetch
+./srr -o s3://my-bucket/feeds fetch
 ```
 
 ### Serve the reader
@@ -52,7 +52,7 @@ Or self-host the reader from the same store as the packs — one origin serves b
 
 ### Automate
 
-The included GitHub Actions workflow (`cron.yml`) runs `srr art fetch` on manual dispatch, and the `cf-pages` job in `release.yml` deploys the hosted reader to Cloudflare Pages on version tags.
+The included GitHub Actions workflow (`cron.yml`) runs `srr fetch` on manual dispatch, and the `cf-pages` job in `release.yml` deploys the hosted reader to Cloudflare Pages on version tags.
 
 ## MCP
 
@@ -157,4 +157,4 @@ See [backend/README.md](backend/README.md) and [frontend/README.md](frontend/REA
 | `ci.yml` | Push to `main`, PRs | Runs `make verify` (lint, format, FE+BE tests, builds, jsdom e2e contract) and `make test-browser` (Puppeteer) in parallel jobs |
 | `release.yml` (`release` job) | `v*.*.*` tag | Cross-compiles backend binaries and bundles the SPA as `srrf.tar.gz`, creates GitHub release (`srr frontend update` installs the SPA from this asset) |
 | `release.yml` (`cf-pages` job) | `v*.*.*` tag or manual | Builds the reader with the `SRR_CDN_URL` secret and deploys it to Cloudflare Pages |
-| `cron.yml` | Manual dispatch | Downloads latest `srr` binary and runs `srr a fetch` against the configured store |
+| `cron.yml` | Manual dispatch | Downloads latest `srr` binary and runs `srr fetch` against the configured store |

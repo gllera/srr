@@ -29,7 +29,7 @@ srr <command> [flags]
 
 ### Commands
 
-Commands are grouped under `feed` (feed management), `art` (articles), `preview`, `inspect`, `config`, and `version`. Group names have short aliases (`f`, `a`, `p`, `i`, `c`).
+The most-operated verbs are top-level: `fetch` (run a fetch cycle) and `art` (list articles). The rest group under `feed` (feed management) and `store` (whole-store config export/import, the dedup default, compaction), plus `preview`, `inspect`, `config`, and `version`. Command names have short aliases (`f`, `a`, `p`, `i`, `c`).
 
 | Command            | Description                                        |
 |--------------------|----------------------------------------------------|
@@ -41,8 +41,8 @@ Commands are grouped under `feed` (feed management), `art` (articles), `preview`
 | `feed edit <id>`   | Edit a feed's JSON in `$EDITOR`                 |
 | `feed apply`       | Upsert feed(s) from JSON (`--file` or stdin)    |
 | `feed import`      | Import feeds from an OPML file                  |
-| `art fetch`        | Fetch new articles from all feeds               |
-| `art ls`           | List stored articles (filter by feed, tag, or time window) |
+| `fetch`            | Fetch new articles from all feeds               |
+| `art`              | List stored articles (filter by feed, tag, or time window) |
 | `recipe`           | Manage processing recipes (named `{ingest, pipe}` bundles) |
 | `preview`          | Preview processed feed articles in a browser       |
 | `inspect`          | Validate pack consistency / debug chronIdx lookups |
@@ -86,10 +86,10 @@ srr feed ls -g tech
 srr feed ls -f json
 
 # Fetch all feeds
-srr art fetch
+srr fetch
 
 # Fetch with 8 concurrent workers
-srr -w 8 art fetch
+srr -w 8 fetch
 
 # Import from OPML (all feeds)
 srr feed import feeds.opml -a
@@ -109,10 +109,23 @@ srr preview https://example.com/feed.xml -p "#readability" -p "#default"
 
 ## Global Flags
 
+Only five flags are global (available on every command):
+
 | Flag | Default | Description |
 |------|---------|-------------|
+| `-o, --store` | packs | Storage destination — a path/URL, or a name from the optional top-level `stores:` alias map in `srr.yaml` (an exact match substitutes the mapped value; anything else is used literally) |
 | `-w, --workers` | nproc | Concurrent downloads |
-| `-s, --pack-size` | 200 | Target pack size (KB) |
+| `--force` | false | Override DB write lock |
+| `-d, --debug` | false | Enable debug logging |
+| `--cdn-url` | (none) | Absolute CDN base URL (`SRR_CDN_URL`). Hidden from `--help`; consumed by frontend builds and **required** for syndication output (`out/`, `srr syndicate`) — syndication is skipped with a warning when unset. |
+
+### Command-scoped flags
+
+The fetch/write-cycle knobs are declared only on the commands that read them, in three shared groups: the **fetch-cycle** group on `fetch`, `serve`, `mcp`, and `config`; the **GC** group (`--keep-manifests`) additionally on `store compact`; the **network** group (`-m/--max-feed-size`, `--cmd-timeout`, `--allow-private-fetch`) additionally on `preview` and `feed add`/`upd`/`import`. A command that declares none of them runs on their default/env values. Env var names and top-level YAML keys are unchanged (below).
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--pack-size` | 200 | Target pack size (KB) |
 | `-m, --max-feed-size` | 5000 | Max feed download size (KB) |
 | `--max-asset-size` | 25000 | Max self-hosted asset object size (KB), enforced **at download** by the self-hosting mod (`#selfhost`) and passed to ingest commands as `max_asset_size`: an over-cap asset is skipped, leaving its remote URL — not stored. The upload step no longer re-checks (only the `--asset-process` output keeps a fail-soft guard at the same size). |
 | `--asset-process` | (none) | Command run on every self-hosted asset just before upload to transcode/process its bytes (e.g. `webify -m 720`, or `conv -i {input} -o {output}`); the cache-file path is substituted for each `{input}` token (or appended when absent). With an `{output}` token the command writes its result to that file and prints a `{mimetype,extension,encoding}` JSON to stdout (setting the stored Content-Type/-Encoding); without `{output}`, processed bytes are read from stdout. Non-zero exit or empty output keeps the original; skipped when the source was already uploaded. The command's stderr is captured, not passed through (so a transcoder's progress narration doesn't clutter srr's output); on failure its tail is included in the logged warning. Empty disables. |
@@ -120,32 +133,30 @@ srr preview https://example.com/feed.xml -p "#readability" -p "#default"
 | `--asset-workers` | nproc | Max assets processed concurrently across all feeds (peek/transcode/upload); independent of `--workers`. |
 | `--asset-process-timeout` | 0 (unlimited) | Timeout for a single `--asset-process` **or** `--asset-peek` command invocation (Go duration). `0` (the default) means **unlimited** — no deadline, since media transcoding can run arbitrarily long; the command is still bounded by run cancellation (SIGINT/SIGTERM). The shared `--cmd-timeout` governs ingest/mod commands only and never affects asset work. |
 | `--cache-dir` | $XDG_CACHE_HOME/srr | Download cache root for self-hosted external-ingest media |
-| `-o, --store` | packs | Storage destination |
-| `--force` | false | Override DB write lock |
-| `-d, --debug` | false | Enable debug logging |
 | `--cmd-timeout` | 5m | Timeout for a single external ingest/mod command (Go duration). Does **not** bound `--asset-process`/`--asset-peek` — those use `--asset-process-timeout`. |
 | `--allow-private-fetch` | false | Disable the SSRF guard (allow fetching feeds/media from private/loopback addresses) — security override |
-| `--cdn-url` | (none) | Absolute CDN base URL (`SRR_CDN_URL`). Hidden from `--help`; consumed by frontend builds and **required** for syndication output (`out/`, `srr syndicate`) — syndication is skipped with a warning when unset. |
 
-Global flags can also be set via environment variables (prefixed `SRR_`, e.g. `SRR_WORKERS`, `SRR_CMD_TIMEOUT`, `SRR_ALLOW_PRIVATE_FETCH`) or in a YAML config file using their long flag names as keys:
+Global and command-scoped flags can also be set via environment variables (prefixed `SRR_`, e.g. `SRR_WORKERS`, `SRR_CMD_TIMEOUT`, `SRR_ALLOW_PRIVATE_FETCH`) or in a YAML config file using their long flag names as keys — the scoped flags deliberately keep resolving from their **top-level** YAML keys, not command-nested ones, so existing config files work unchanged:
 
 ```yaml
 # $XDG_CONFIG_HOME/srr/srr.yaml (or override path with $SRR_CONFIG,
 # or pass the YAML content directly via $SRR_CONFIG_INLINE)
 workers: 4
-pack-size: 500
+pack-size: 500             # command-scoped flag — still a top-level key
 store: /path/to/packs
+stores:                    # optional --store alias map: srr -o local, srr -o prod
+  local: packs
+  prod: s3://my-bucket/feeds
 ```
 
 Precedence: CLI flags > env vars > config file > defaults. `$SRR_CONFIG_INLINE`, when set, supersedes `$SRR_CONFIG`. Run `srr config` to print the resolved values; a value's env var is shown in brackets only when its name deviates from the conventional `SRR_<FIELD>` derivation (a derivable name is omitted to cut noise).
 
-**Per-command flags** are also YAML-settable, but **nested under their command path** (using the command names, not the aliases) rather than at the top level — a top-level `interval:` is ignored, `art: { fetch: { interval: … } }` is applied:
+**Per-command flags** (the ones outside the three scoped groups above) are also YAML-settable, but **nested under their command path** (using the command names, not the aliases) rather than at the top level — a top-level `interval:` is ignored, `fetch: { interval: … }` is applied:
 
 ```yaml
 store: /path/to/packs      # global (top-level)
-art:
-  fetch:
-    interval: 30m          # art fetch --interval  (SRR_FETCH_INTERVAL)
+fetch:
+  interval: 30m            # fetch --interval      (SRR_FETCH_INTERVAL)
 serve:
   addr: localhost:8088     # serve --addr          (SRR_SERVE_ADDR)
   interval: 30m            # serve --interval      (SRR_SERVE_INTERVAL)
@@ -155,7 +166,7 @@ The command-scoped keys that carry an env var (all take a CLI flag, env var, or 
 
 | Command | Nested YAML key | Flag / env | Default | Description |
 |---------|-----------------|-----------|---------|-------------|
-| `art fetch` | `art.fetch.interval` | `--interval` / `SRR_FETCH_INTERVAL` | 0 (single run) | Run fetch in a loop at this interval (`0` = fetch once and exit). |
+| `fetch` | `fetch.interval` | `--interval` / `SRR_FETCH_INTERVAL` | 0 (single run) | Run fetch in a loop at this interval (`0` = fetch once and exit). |
 | `serve` | `serve.addr` | `--addr` / `SRR_SERVE_ADDR` | localhost:8088 | Admin GUI listen address (loopback only by default). |
 | `serve` | `serve.interval` | `--interval` / `SRR_SERVE_INTERVAL` | 0 (off) | Also run a background fetch loop at this interval. |
 | `preview` | `preview.addr` | `--addr` / `SRR_PREVIEW_ADDR` | localhost:8080 | Preview HTTP listen address. |
@@ -176,7 +187,7 @@ secrets:
 
 A scope's variables reach a command's environment only when the feed **grants** the scope — via its recipe (`srr recipe set telegram --secrets telegram …`) or a feed-level override (`srr feed upd 3 --secrets telegram`), resolved like the ingest/pipe axes (feed wins over recipe over the `default` recipe; no grant anywhere = no secrets). That containment is the point: the blast radius of one misbehaving script is the scopes it was granted, never the whole credential set. Granting a scope srr.yaml doesn't define is a fetch-time warning (recipes live in the store, secrets per box); the scope just contributes nothing. The one exception is the operator-global `--notify` hook, which gets every scope.
 
-A granted secret **overrides** any ambient process-env variable of the same name (config wins; when two granted scopes define the same name, the later grant in the list wins). Values are stored in **plaintext** in `srr.yaml`, so restrict the file (`chmod 600`). `srr config` lists the scopes and keys but masks the values (`TG_API_ID: ********`), and supports `srr config secrets` / `srr config secrets.telegram` / `srr config secrets.telegram.TG_API_ID`. Secrets are read once at startup, so restart a running `art fetch --interval` loop after editing them.
+A granted secret **overrides** any ambient process-env variable of the same name (config wins; when two granted scopes define the same name, the later grant in the list wins). Values are stored in **plaintext** in `srr.yaml`, so restrict the file (`chmod 600`). `srr config` lists the scopes and keys but masks the values (`TG_API_ID: ********`), and supports `srr config secrets` / `srr config secrets.telegram` / `srr config secrets.telegram.TG_API_ID`. Secrets are read once at startup, so restart a running `fetch --interval` loop after editing them.
 
 > **Migrating from the flat pre-scope layout** (`secrets: {NAME: value}`): wrap the entries under a scope name and grant that scope to the recipes/feeds whose commands need it. A flat section is rejected at startup with a migration hint — nothing silently runs without its credentials.
 
@@ -186,10 +197,10 @@ The output path (`-o`) determines which backend is used:
 
 | Backend | Example | Notes |
 |---------|---------|-------|
-| Local | `srr -o ./packs art fetch` | Default. Auto-creates directories. |
-| S3 | `srr -o s3://bucket/prefix art fetch` | Uses standard AWS SDK credentials. |
-| SFTP | `srr -o sftp://user@host/path art fetch` | Auth: URL password, config password, config private key, `~/.ssh/` keys, or SSH agent. |
-| HTTP | `srr -o https://host/prefix art fetch` | A WebDAV-style or S3-compatible endpoint: GET reads, PUT writes, DELETE removes. Auth: URL userinfo (basic) or config `token` (bearer). Exclusive create (the `.locked` marker) uses `If-None-Match: *`, so locking is best-effort on servers that ignore conditional requests. |
+| Local | `srr -o ./packs fetch` | Default. Auto-creates directories. |
+| S3 | `srr -o s3://bucket/prefix fetch` | Uses standard AWS SDK credentials. |
+| SFTP | `srr -o sftp://user@host/path fetch` | Auth: URL password, config password, config private key, `~/.ssh/` keys, or SSH agent. |
+| HTTP | `srr -o https://host/prefix fetch` | A WebDAV-style or S3-compatible endpoint: GET reads, PUT writes, DELETE removes. Auth: URL userinfo (basic) or config `token` (bearer). Exclusive create (the `.locked` marker) uses `If-None-Match: *`, so locking is best-effort on servers that ignore conditional requests. |
 
 ### Backend Configuration
 
