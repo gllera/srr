@@ -139,7 +139,8 @@ func looksLikeHTML(contentType string, data []byte) bool {
 // meaningful for the built-in #feed strategy; callers must skip it for external
 // ingest strategies, whose sources are not HTTP-fetchable feeds.
 func Resolve(ctx context.Context, client *http.Client, rawURL string, maxSize int) (string, error) {
-	buf := make([]byte, maxSize+1)
+	buf, release := ProbeBuf(maxSize)
+	defer release()
 	res, err := feedFetch(ctx, client, buf, Request{URL: rawURL, MaxSize: maxSize}, false)
 	if err != nil {
 		return "", err

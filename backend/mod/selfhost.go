@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"golang.org/x/net/html"
 )
 
 // #selfhost downloads an item's remote <img>/<video>/<audio> media into the
@@ -48,22 +50,22 @@ const (
 var MaxAssetSize int64
 
 func init() {
-	Register("selfhost", func() Processor {
+	RegisterDOM("selfhost", func() DOMProcessor {
 		// One SSRF-guarded client per Module (per fetch worker via procPool):
 		// media URLs come from attacker-controlled feed content, so dials to
 		// private/loopback/link-local addresses are refused.
 		client := &http.Client{Transport: SafeTransport()}
-		return func(ctx context.Context, p Params, i *RawItem) error {
+		return func(ctx context.Context, p Params, i *RawItem, body *html.Node) (bool, error) {
 			timeout, err := p.Duration("timeout", selfhostTimeout)
 			if err != nil {
-				return err
+				return false, err
 			}
 			maxBody, err := p.Bytes("maxbody", selfhostMaxBody)
 			if err != nil {
-				return err
+				return false, err
 			}
 			if err := p.only("timeout", "maxbody"); err != nil {
-				return err
+				return false, err
 			}
 			// The self-host object cap is enforced at download: clamp the download
 			// limit to it so an over-cap asset is never written to the cache (the
@@ -76,26 +78,20 @@ func init() {
 			if cacheDir == "" {
 				// No run cache dir (preview / Validate): nothing to download into
 				// and no uploader downstream. Leave content as-is.
-				return nil
-			}
-			// Cheap guard: skip the HTML parse when there is no media element.
-			if !strings.Contains(i.Content, "<img") &&
-				!strings.Contains(i.Content, "<video") &&
-				!strings.Contains(i.Content, "<audio") {
-				return nil
+				return false, nil
 			}
 
-			content, err := walkAssetAttrs(i.Content, mediaAttrs, func(val string) (string, bool, error) {
+			changed, err := walkNode(body, mediaAttrs, func(val string) (string, bool, error) {
 				marker, ok := downloadToCache(ctx, client, cacheDir, val, timeout, maxBody)
 				return marker, ok, nil // fail-open: ok=false leaves the URL; never errors
 			})
 			if err != nil {
-				// An HTML render error from the walk: fail open, keep original.
+				// Unreachable while fn is fail-open (it never errors), but kept so
+				// a future fatal condition degrades to "keep the remote URLs"
+				// rather than failing the whole feed.
 				slog.Warn("selfhost: content rewrite failed; keeping original", "link", i.Link, "err", err)
-				return nil
 			}
-			i.Content = content
-			return nil
+			return changed, nil
 		}
 	})
 }

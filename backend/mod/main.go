@@ -264,44 +264,53 @@ func Register(name string, init func() Processor) {
 }
 
 type Module struct {
-	processors map[string]Processor
-	env        []string
+	processors    map[string]Processor
+	domProcessors map[string]DOMProcessor
+	env           []string
 }
 
 // New builds a Module with every registered built-in instantiated once.
 func New() *Module {
 	m := &Module{
-		processors: make(map[string]Processor, len(registry)),
-		env:        SubprocessEnv(),
+		processors:    make(map[string]Processor, len(registry)),
+		domProcessors: make(map[string]DOMProcessor, len(domRegistry)),
+		env:           SubprocessEnv(),
 	}
 	for name, init := range registry {
 		m.processors[name] = init()
 	}
+	for name, init := range domRegistry {
+		// The two forms share one namespace, and the dispatcher picks the DOM
+		// one — so a name registered in both would silently shadow the string
+		// step. That is a programming error at init time; say so loudly.
+		if _, dup := m.processors[name]; dup {
+			panic("mod: built-in " + name + " registered in both the string and DOM forms")
+		}
+		m.domProcessors[name] = init()
+	}
 	return m
 }
 
+// Process runs one pipeline token against an item, standalone. A built-in
+// token is "#name [key=value ...]": the first whitespace field names the step,
+// the rest are its parameters (quote-aware split, so a value may carry spaces
+// — see splitParamFields); anything else (incl. shell commands whose first
+// word merely contains spaces or "=") falls through to /bin/sh -c with the
+// original args (runExternal).
+//
+// It is a one-token content session (see session.go), so a DOM-capable
+// built-in parses and re-renders exactly as it did when it owned the
+// round-trip itself. A PIPELINE should run through NewSession instead, which
+// is what shares one parse across the whole run of DOM steps.
 func (o *Module) Process(ctx context.Context, args string, i *RawItem) error {
-	// A built-in token is "#name [key=value ...]": the first whitespace field
-	// names the step, the rest are its parameters (quote-aware split, so a
-	// value may carry spaces — see splitParamFields). Only when that first
-	// field is a registered built-in do we strip params and dispatch
-	// internally; anything else (incl. shell commands whose first word merely
-	// contains spaces or "=") falls through to /bin/sh -c with the original args.
-	trimmed := strings.TrimSpace(args)
-	if fields := strings.Fields(trimmed); len(fields) > 0 {
-		if fn, ok := o.processors[fields[0]]; ok {
-			pfields, err := splitParamFields(trimmed[len(fields[0]):])
-			if err != nil {
-				return err
-			}
-			params, err := parseParams(pfields)
-			if err != nil {
-				return err
-			}
-			return fn(ctx, params, i)
-		}
-	}
+	s := o.NewSession(i)
+	defer s.Close()
+	return s.Process(ctx, args)
+}
 
+// runExternal runs a pipeline step that is not a built-in as a shell command,
+// piping the item through it as JSON.
+func (o *Module) runExternal(ctx context.Context, args string, i *RawItem) error {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
@@ -355,9 +364,13 @@ func (o *Module) Process(ctx context.Context, args string, i *RawItem) error {
 }
 
 // Builtins returns the registered built-in module names (e.g. "#sanitize"),
-// sorted, for help and validation error messages.
+// sorted, for help and validation error messages. String and DOM steps are one
+// namespace to every caller — which form a built-in is written in is an
+// implementation detail of the module, not of the pipeline.
 func Builtins() []string {
-	return slices.Sorted(maps.Keys(registry))
+	names := slices.Concat(slices.Collect(maps.Keys(registry)), slices.Collect(maps.Keys(domRegistry)))
+	slices.Sort(names)
+	return names
 }
 
 // Validate checks an already-resolved pipeline before the per-item fetch loop,
@@ -369,28 +382,27 @@ func Builtins() []string {
 func (o *Module) Validate(ctx context.Context, pipeline []string) error {
 	sentinel := &RawItem{}
 	for _, step := range pipeline {
-		trimmed := strings.TrimSpace(step)
-		fields := strings.Fields(trimmed)
-		if len(fields) == 0 {
+		if len(strings.Fields(step)) == 0 {
 			return fmt.Errorf("empty pipeline step")
 		}
-		fn, ok := o.processors[fields[0]]
+		st, ok, err := o.resolveStep(step)
 		if !ok {
-			if strings.HasPrefix(fields[0], "#") {
-				return fmt.Errorf("unknown built-in module %q", fields[0])
+			if name := strings.Fields(step)[0]; strings.HasPrefix(name, "#") {
+				return fmt.Errorf("unknown built-in module %q", name)
 			}
 			continue // external shell command: not validated here
 		}
-		pfields, err := splitParamFields(trimmed[len(fields[0]):])
-		if err != nil {
-			return fmt.Errorf("%s: %w", fields[0], err)
+		if err == nil {
+			if st.dom != nil {
+				// A DOM step is validated against its own empty body, the same
+				// throwaway the sentinel item is for a string step.
+				_, err = st.dom(ctx, st.params, sentinel, parseBodyHTML(""))
+			} else {
+				err = st.str(ctx, st.params, sentinel)
+			}
 		}
-		params, err := parseParams(pfields)
 		if err != nil {
-			return fmt.Errorf("%s: %w", fields[0], err)
-		}
-		if err := fn(ctx, params, sentinel); err != nil {
-			return fmt.Errorf("%s: %w", fields[0], err)
+			return fmt.Errorf("%s: %w", st.name, err)
 		}
 	}
 	return nil

@@ -5,6 +5,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/abadojack/whatlanggo"
+	"golang.org/x/net/html"
 )
 
 // Fail-open gate for the always-on language stamp the caller applies before
@@ -22,7 +23,15 @@ const (
 // confidence, or a detected language with no 639-1 code). The store-ready
 // form processItem stamps onto RawItem.Lang.
 func DetectLang(title, content string) string {
-	text := extractText(title, content, langMaxTextLen)
+	return DetectLangNode(title, parseBodyHTML(content))
+}
+
+// DetectLangNode is DetectLang over an already-parsed content DOM — the form
+// the caller's content session holds, so the always-on stamp costs no parse of
+// its own. A nil body (content that did not parse) classifies the title alone,
+// exactly as DetectLang did.
+func DetectLangNode(title string, body *html.Node) string {
+	text := extractTextNode(title, body, langMaxTextLen)
 	if utf8.RuneCountInString(text) < langMinTextLen {
 		return ""
 	}

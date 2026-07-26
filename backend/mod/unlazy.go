@@ -37,13 +37,12 @@ import (
 // after it the data-* attributes holding the real URLs are gone.
 
 func init() {
-	Register("unlazy", func() Processor {
-		return func(_ context.Context, p Params, i *RawItem) error {
+	RegisterDOM("unlazy", func() DOMProcessor {
+		return func(_ context.Context, p Params, _ *RawItem, body *html.Node) (bool, error) {
 			if err := p.only(); err != nil {
-				return err
+				return false, err
 			}
-			i.Content = unlazyContent(i.Content)
-			return nil
+			return unlazyContent(body), nil
 		}
 	})
 }
@@ -63,20 +62,10 @@ var (
 	lazyPlaceholderRe = regexp.MustCompile(`(?i)^data:|^about:blank$|/(1x1|blank|spacer|pixel|placeholder|loading|lazy|grey|gray|transparent)[^/]*\.(gif|png|svg|jpe?g|webp)([?#]|$)`)
 )
 
-// unlazyContent promotes lazy-load URLs in content. Returns content verbatim
-// when nothing changed (or nothing parsed), so quoting/whitespace survive the
-// no-op pass.
-func unlazyContent(content string) string {
-	lower := strings.ToLower(content)
-	if !strings.Contains(lower, "data-") && !strings.Contains(lower, "srcset") &&
-		!strings.Contains(lower, "<noscript") && !strings.Contains(lower, "<source") {
-		return content
-	}
-	body := parseBodyHTML(content)
-	if body == nil {
-		return content
-	}
-
+// unlazyContent promotes lazy-load URLs in the content DOM, reporting whether
+// it changed anything — false leaves the session's content string untouched,
+// so quoting/whitespace survive the no-op pass.
+func unlazyContent(body *html.Node) bool {
 	changed := false
 	seen := map[string]bool{} // media file IDs visible after promotion
 	var noscripts []*html.Node
@@ -112,14 +101,7 @@ func unlazyContent(content string) string {
 			changed = true
 		}
 	}
-	if !changed {
-		return content
-	}
-	out, ok := renderBodyHTML(body)
-	if !ok {
-		return content
-	}
-	return out
+	return changed
 }
 
 // promoteLazyDataSrc moves the first URL-shaped lazySrcAttrs value into src.

@@ -83,6 +83,51 @@ type FetchCmd struct {
 	// fails the cycle. Distinct from the feedFilter above: this is the GUI's
 	// exact-id path with a hard-error-on-unknown contract. Not a CLI flag.
 	only []int
+
+	// pools holds the fan-out's per-worker resources, built on first use and
+	// then reused by every cycle this command runs. See fetchPools.
+	pools *fetchPools
+}
+
+// fetchPools is the fan-out's reusable worker state, scoped to the COMMAND
+// rather than the cycle: an --interval loop runs thousands of cycles through
+// one FetchCmd, and rebuilding these every five minutes rebuilt the ingest
+// engine's dispatch map and re-seeded pools whose payloads are expensive to
+// make — a feed buffer is --max-feed-size (5 MB by default) per worker, and
+// each mod.Module compiles two bluemonday policies plus a minifier (FET14).
+//
+// The pools stay sync.Pools, so an idle loop still returns that memory to the
+// runtime at the next GC; what the hoist removes is the guaranteed rebuild.
+type fetchPools struct {
+	// buf: one feed-read buffer per worker. Pointer-like payload (SA6002): a
+	// bare slice header would be boxed into a fresh interface allocation on
+	// every Put.
+	buf sync.Pool
+	// proc: one module processor per worker. Built-in processors hold mutable
+	// state (minify reuses internal buffers and is not goroutine-safe), so a
+	// single shared *mod.Module across workers is unsafe.
+	proc sync.Pool
+	// engine is SHARED, not pooled: built-in FetchFuncs are concurrent-safe
+	// (HTTP built-ins are stateless; external shell fetchers spawn per-call
+	// subprocesses).
+	engine *ingest.Fetcher
+}
+
+// workerPools returns the command's fan-out pools, building them on first use.
+// Cycles are serial within one FetchCmd — the --interval loop, a one-shot run,
+// one GUI/MCP request each construct their own — so this needs no locking.
+func (o *FetchCmd) workerPools() *fetchPools {
+	if o.pools == nil {
+		o.pools = &fetchPools{
+			buf: sync.Pool{New: func() any {
+				buf := make([]byte, globals.MaxFeedSize*(1<<10)+1)
+				return &buf
+			}},
+			proc:   sync.Pool{New: func() any { return mod.New() }},
+			engine: ingest.New(),
+		}
+	}
+	return o.pools
 }
 
 // matchTag reports whether a feed's tag satisfies a hierarchical tag selector:
@@ -710,25 +755,9 @@ func (o *FetchCmd) fetchPhase(ctx context.Context, db *DB, client *http.Client, 
 	// (the errgroup parent below), so run shutdown still aborts a long transcode.
 	assets.baseCtx = ctx
 	assets.sem = make(chan struct{}, max(1, globals.AssetWorkers))
-	bufPool := sync.Pool{
-		// Pointer-like pool payload (SA6002): a bare slice header would be
-		// boxed into a fresh interface allocation on every Put.
-		New: func() any {
-			buf := make([]byte, globals.MaxFeedSize*(1<<10)+1)
-			return &buf
-		},
-	}
-	// Per-worker module processors: built-in processors hold mutable state
-	// (minify reuses internal buffers and is not goroutine-safe), so a single
-	// shared *mod.Module across workers is unsafe. Workers also amortize their
-	// own bluemonday/minify allocations across the items they process.
-	procPool := sync.Pool{
-		New: func() any { return mod.New() },
-	}
-	// Built-in FetchFuncs are concurrent-safe (HTTP built-ins are stateless;
-	// external shell fetchers spawn per-call subprocesses), so one
-	// *ingest.Fetcher is shared across workers.
-	engine := ingest.New()
+	// Per-worker buffers/processors and the shared ingest engine, built once
+	// per command and reused by every cycle it runs (see fetchPools).
+	pools := o.workerPools()
 
 	// One asset cache dir shared by every external-ingest feed this run,
 	// created once. Each external command runs with this as its working
@@ -753,7 +782,7 @@ func (o *FetchCmd) fetchPhase(ctx context.Context, db *DB, client *http.Client, 
 	// per-worker buf/processor are pulled from their pools inside each worker.
 	run := &fetchRun{
 		client:       client,
-		engine:       engine,
+		engine:       pools.engine,
 		assets:       assets,
 		cacheDir:     cacheDir,
 		fetchedAt:    db.core.FetchedAt,
@@ -815,10 +844,10 @@ func (o *FetchCmd) fetchPhase(ctx context.Context, db *DB, client *http.Client, 
 			release := gate.acquire(ch.URL)
 			defer release()
 
-			buf := bufPool.Get().(*[]byte)
-			defer bufPool.Put(buf)
-			processor := procPool.Get().(*mod.Module)
-			defer procPool.Put(processor)
+			buf := pools.buf.Get().(*[]byte)
+			defer pools.buf.Put(buf)
+			processor := pools.proc.Get().(*mod.Module)
+			defer pools.proc.Put(processor)
 			runFeedFetch(ch, func() { ch.Fetch(gctx, run, *buf, processor) })
 			res.progress.feedDone(ch.FetchError != "", len(ch.newItems))
 			if onFeed != nil {

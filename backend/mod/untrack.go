@@ -31,13 +31,12 @@ import (
 // <img> still carrying a lazy data-src URL, so the order is belt-and-braces).
 
 func init() {
-	Register("untrack", func() Processor {
-		return func(_ context.Context, p Params, i *RawItem) error {
+	RegisterDOM("untrack", func() DOMProcessor {
+		return func(_ context.Context, p Params, _ *RawItem, body *html.Node) (bool, error) {
 			if err := p.only(); err != nil {
-				return err
+				return false, err
 			}
-			i.Content = untrackContent(i.Content)
-			return nil
+			return untrackContent(body), nil
 		}
 	})
 }
@@ -66,19 +65,9 @@ var untrackAttrs = map[string][]string{
 	"audio": {"src"}, "source": {"src"},
 }
 
-// untrackContent applies the cleanups to content. Returns content verbatim
-// when nothing changed (or nothing parsed).
-func untrackContent(content string) string {
-	lower := strings.ToLower(content)
-	if !strings.Contains(lower, "?") && !strings.Contains(lower, "<img") &&
-		!strings.Contains(lower, "the post") {
-		return content
-	}
-	body := parseBodyHTML(content)
-	if body == nil {
-		return content
-	}
-
+// untrackContent applies the cleanups to the content DOM, reporting whether it
+// changed anything — false leaves the session's content string untouched.
+func untrackContent(body *html.Node) bool {
 	changed := false
 	var pixels []*html.Node
 	var walk func(*html.Node)
@@ -112,15 +101,7 @@ func untrackContent(content string) string {
 	if removeWPTrailer(body) {
 		changed = true
 	}
-
-	if !changed {
-		return content
-	}
-	out, ok := renderBodyHTML(body)
-	if !ok {
-		return content
-	}
-	return out
+	return changed
 }
 
 // isTrackerPixel reports whether an <img> is an analytics beacon: a known

@@ -71,17 +71,19 @@ var previewTmpl = template.Must(template.New("preview").Funcs(template.FuncMap{
 // it on a one-shot client. Shared by renderPreview (which then runs the
 // pipeline) and serve's handleResolve (which only reads the wire's metadata).
 func previewFetch(ctx context.Context, recipes map[string]Recipe, recipeName, ingestOverride, rawURL string) (ingest.Result, error) {
-	client := newFetchClient(1)
-	// One-shot per probe; the serve process calls this per request, so reclaim
-	// the transport's idle keep-alive sockets instead of leaking them ~90s each.
-	defer client.CloseIdleConnections()
+	// The shared probe client and a pooled body buffer, like every other
+	// subscribe-time probe: a client per call built a transport whose idle
+	// keep-alives had to be thrown away again (they were, deliberately) rather
+	// than reused by the next probe, and the buffer is --max-feed-size, 5 MB by
+	// default, per call (FET14).
+	buf, release := ingest.ProbeBuf(globals.MaxFeedSize * (1 << 10))
+	defer release()
 	engine := ingest.New()
 
 	r := recipeFor(recipes, recipeName)
 	def := recipeFor(recipes, defaultRecipeName)
-	buf := make([]byte, globals.MaxFeedSize*(1<<10)+1)
 	name := ingest.Select(ingestOverride, r.Ingest, def.Ingest)
-	result, err := engine.Fetch(ctx, name, client, buf, ingest.Request{URL: rawURL, MaxSize: cap(buf) - 1})
+	result, err := engine.Fetch(ctx, name, resolveClient(), buf, ingest.Request{URL: rawURL, MaxSize: len(buf) - 1})
 	if err != nil {
 		return ingest.Result{}, fmt.Errorf("ingest %q: %w", name, err)
 	}
