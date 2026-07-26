@@ -1251,6 +1251,55 @@ body.srr-view-list .srr-toolbar {
    & .srr-tag-collapsed .srr-tag-toggle::after {
       transform: rotate(-45deg);
    }
+   /* The ★ Favorites lane header (RDR9) is a plain div, not a link — the lane is
+      a VIEW of the feeds you marked, not a filter token nav can resolve, so a
+      tap on it has nothing to select. It borrows the tag header's layout plus
+      the row padding the `& a` rule above gives its link siblings. */
+   & .srr-fav-header {
+      display: flex;
+      align-items: center;
+      padding: 0.4rem 0.75rem 0.45rem;
+      font-size: var(--text-sm);
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      border-top: 1px solid var(--faint);
+      margin-top: 0.2rem;
+   }
+   /* The favorite mark on a feed row: pinned to the row's far edge by its auto
+      margin, so the inline "name ×12" phrase in the middle stays unbroken. */
+   & .srr-fav-star {
+      flex-shrink: 0;
+      margin-left: auto;
+      padding-left: 0.4rem;
+      font-size: 0.8rem;
+      color: var(--accent);
+   }
+   /* Type-to-filter's empty state (RDR9) — the one case where the panel has
+      rows but shows none, so it has to say so rather than look broken. */
+   & .srr-picker-empty {
+      padding: 1.2rem 0.75rem;
+      color: var(--muted);
+      font-size: var(--text-sm);
+      text-align: center;
+   }
+}
+
+/* Type-to-filter (RDR9) hides non-matching rows through its OWN class, so it
+   composes with the unread-only mode's .srr-hidden instead of fighting it. A
+   surviving tag group is force-expanded while a query is up — answering a
+   query with a collapsed (empty-looking) group would read as "no matches". */
+.srr-qhidden {
+   display: none !important;
+}
+.srr-picker-filter .srr-tag-group.srr-qexpand > .srr-tag-item {
+   display: flex;
+}
+/* …which also makes the collapse chevrons inert while a query is up (the
+   force-expand outranks .srr-tag-collapsed), so they come off the rows rather
+   than sit there answering taps with nothing. */
+.srr-picker-filtering .srr-tag-toggle {
+   display: none;
 }
 
 /* Feed rows + tag headers lay out as flex (the scope chips above carry their
@@ -1286,6 +1335,19 @@ body.srr-view-list .srr-toolbar {
    instead of filtering — hint the changed meaning on pointer devices. */
 .srr-picker-statsmode .srr-picker-filter a {
    cursor: help;
+}
+
+/* Favorites mode (the header ★ toggle pressed, RDR9): a FEED row tap marks it
+   instead of filtering. The unmarked rows show a ghost ★ in the slot the mark
+   would take, so the gesture's target is visible before you commit to it; the
+   rows that can't be marked (tags, scope chips) get none. */
+.srr-picker-favmode .srr-picker-filter a.srr-feed-row:not([data-fav])::after {
+   content: "★";
+   flex-shrink: 0;
+   margin-left: auto;
+   padding-left: 0.4rem;
+   font-size: 0.8rem;
+   color: var(--faint);
 }
 
 /* Title search bar — pinned atop the list while a "q:<query>" filter is active
@@ -1459,8 +1521,12 @@ body:not(.srr-view-list) .srr-open-reader {
    z-index: var(--z-sticky);
    display: flex;
    align-items: center;
-   /* The title's auto right-margin pushes the Info + Show-read toggles + ✕
-      close to the right edge, sitting together (the gap spaces them). */
+   /* The title's auto right-margin pushes the ★ + Info + Show-read toggles + ✕
+      close to the right edge, sitting together (the gap spaces them). Wrapping
+      is what puts the row-search on its own full-width line below them (and
+      lets the pills drop a line before they crush on a narrow phone) — the
+      search rides INSIDE the header so it sticks with it as the rows scroll. */
+   flex-wrap: wrap;
    gap: 0.5rem;
    max-width: 680px;
    margin: 0 auto;
@@ -1477,6 +1543,7 @@ body:not(.srr-view-list) .srr-open-reader {
    view ("Show read", was the settings menu's checkbox). A compact wire-voice
    pill: muted outline when off, accent-filled when pressed — the same
    active-pill vocabulary as the reader's next button. */
+.srr-picker-fav,
 .srr-picker-info,
 .srr-picker-showread {
    flex-shrink: 0;
@@ -1505,15 +1572,65 @@ body:not(.srr-view-list) .srr-open-reader {
       color: var(--bg);
    }
 }
-/* The Info toggle is icon-only (an ⓘ glyph in the toolbar icons' outline
-   voice; its label lives in aria-label/title), so its pill rounds up to a
-   circle: equal padding, icon centered. */
-.srr-picker-info {
+/* The Info and ★ toggles are icon-only (an ⓘ glyph in the toolbar icons'
+   outline voice, a star; their labels live in aria-label/title), so their pills
+   round up to circles: equal padding, glyph centered. */
+.srr-picker-info,
+.srr-picker-fav {
    display: flex;
    align-items: center;
    justify-content: center;
    padding: 0.35rem;
    min-width: 2.2rem;
+}
+.srr-picker-fav-icon {
+   display: block;
+   font-size: 1rem;
+   line-height: 1.2rem;
+}
+/* The row search (RDR9) — its own full-width line inside the sticky header.
+   Same magnifier + borderless input + ✕ vocabulary as the list's title-search
+   bar, so the two searches read as one gesture in two places. */
+.srr-picker-search {
+   flex: 1 0 100%;
+   display: flex;
+   align-items: center;
+   gap: 0.5rem;
+   border-top: 1px solid var(--faint);
+   padding-top: 0.4rem;
+}
+.srr-picker-search .srr-search-icon {
+   flex: 0 0 auto;
+   color: var(--muted);
+}
+.srr-picker-search-input {
+   flex: 1 1 auto;
+   min-width: 0;
+   font: inherit;
+   font-size: var(--text-base);
+   color: var(--fg);
+   background: transparent;
+   border: none;
+   padding: 0.35rem 0;
+   &:focus {
+      outline: none;
+   }
+   &::-webkit-search-cancel-button {
+      display: none;
+   }
+}
+.srr-picker-search-clear {
+   flex: 0 0 auto;
+   background: none;
+   border: none;
+   color: var(--muted);
+   font-size: 1.4rem;
+   line-height: 1;
+   padding: 0.1rem 0.45rem;
+   cursor: pointer;
+   &:hover {
+      color: var(--fg);
+   }
 }
 .srr-picker-info-icon {
    display: block;

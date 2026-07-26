@@ -29,6 +29,12 @@ export const profileTsKey = (mid: string): string => q("srr-profile-ts", mid)
 // (S38 multi-store) — a playback position keyed on chron alone would be
 // ambiguous across two mounts that both have a chron 42.
 export const playerStateKey = (mid: string): string => q("srr-player", mid)
+// RDR9 picker favorites: the feed ids pinned into the filter picker's
+// "★ Favorites" lane. Per-store for the same reason as the player state — a
+// favorite IS a feed id, and feed ids are only unique WITHIN a mount (S38
+// multi-store), so one shared list would cross-wire two stores' lanes (id 7 is
+// a different feed in every store).
+export const favoritesKey = (mid: string): string => q("srr-favorites", mid)
 
 // Global keys (one per device, not a property of a store).
 export const UNREAD_ONLY_KEY = "srr-unread-only"

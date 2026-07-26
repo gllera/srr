@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest"
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest"
 
 // picker.ts owns the filter-picker overlay (feed / tag rows + info dialogs) and
 // the renderStatus builder the settings menu borrows for its footer. It reads
@@ -67,9 +67,14 @@ type Picker = typeof import("./picker")
 const SKELETON =
    `<section class="srr-picker" hidden>` +
    `<header class="srr-picker-head"><h2 class="srr-picker-title">Feeds</h2>` +
+   `<button class="srr-picker-fav" aria-pressed="false"></button>` +
    `<button class="srr-picker-info" aria-pressed="false"></button>` +
    `<button class="srr-picker-showread" aria-pressed="false"></button>` +
-   `<button class="srr-picker-close"></button></header>` +
+   `<button class="srr-picker-close"></button>` +
+   `<div class="srr-picker-search">` +
+   `<input type="search" class="srr-picker-search-input" />` +
+   `<button class="srr-picker-search-clear" hidden></button>` +
+   `</div></header>` +
    `<div class="srr-picker-filter"></div>` +
    `</section>` +
    `<div class="srr-info-dialog">` +
@@ -105,6 +110,7 @@ async function mount(): Promise<Picker> {
 
 beforeEach(() => {
    vi.clearAllMocks()
+   localStorage.clear() // the favorites lane (RDR9) persists through keys.ts
    data.db.feeds = {} // plain shared state, not a mock — reset by hand
    nav.getCurrentFilterKey.mockReturnValue("")
    nav.savedCount.mockReturnValue(0)
@@ -118,6 +124,14 @@ beforeEach(() => {
    ;(isStale as ReturnType<typeof vi.fn>).mockReturnValue(false)
    sync.state.mockReturnValue({ on: false, okAt: 0, error: "" })
    refresh.lastRefreshError.mockReturnValue("")
+})
+
+// The info dialog installs a CAPTURE-phase Escape trap on `document`, which a
+// case that leaves a card open leaks into the next case — where it would
+// swallow the picker's own Escape before the overlay ever sees it (the
+// type-to-filter cases below are the ones that noticed). Close what's open.
+afterEach(() => {
+   document.querySelector<HTMLElement>(".srr-info-dialog.srr-open .srr-info-close")?.click()
 })
 
 describe("open / close", () => {
@@ -851,6 +865,300 @@ describe("renderStatus (the settings menu's footer)", () => {
 // docs/MULTI-STORE-SPEC.md §6.3 — the mount switcher (the store axis above
 // tags/feeds), rendered ONLY when >1 store is mounted so a single-store picker
 // is unchanged.
+// RDR9 — type-to-filter. The query narrows the rows ALREADY in the DOM (a
+// visibility pass), so the async unread badges survive it; matching folds
+// through search.ts's `fold`, the same normalizer the article index uses.
+describe("type-to-filter (RDR9)", () => {
+   const type = (v: string) => {
+      const input = $<HTMLInputElement>(".srr-picker-search-input")
+      input.value = v
+      input.dispatchEvent(new Event("input", { bubbles: true }))
+   }
+   // Every row token still on screen: a row is out either by its own hide class
+   // or by the group's (a tag group drops as a whole when nothing under it
+   // matches), so this walks ancestors rather than the row's own classList.
+   const visible = () =>
+      $$(".srr-picker-filter a[data-value]")
+         .filter((a) => a.closest(".srr-qhidden") === null)
+         .map((a) => a.dataset.value)
+
+   const threeFeeds = () =>
+      data.groupFeedsByTag.mockReturnValue({
+         tagged: new Map([["news", [feed({ id: 1, title: "Le Monde", tag: "news" })]]]),
+         sortedTags: ["news"],
+         untagged: [feed({ id: 2, title: "Ámbito Financiero" }), feed({ id: 3, title: "Hacker News" })],
+      })
+
+   it("narrows feeds by folded substring and restores the full list when cleared", async () => {
+      threeFeeds()
+      const picker = await mount()
+      picker.open()
+      expect(visible()).toEqual(["", "news", "1", "2", "3"])
+      // Diacritic-insensitive, case-insensitive — the search fold, not a
+      // hand-rolled toLowerCase.
+      type("ambito")
+      expect(visible()).toEqual(["2"])
+      type("")
+      expect(visible()).toEqual(["", "news", "1", "2", "3"])
+   })
+
+   it("filters the scope chips too, and a tag header match shows (and expands) its whole group", async () => {
+      threeFeeds()
+      nav.savedCount.mockReturnValue(2) // so ★ Saved renders beside [ALL]
+      const picker = await mount()
+      picker.open()
+      // "saved" hits the ★ Saved chip alone — [ALL] and every feed drop out.
+      type("saved")
+      expect(visible()).toEqual(["~saved"])
+      // A tag header match carries its members, and the group is force-expanded
+      // so the query doesn't answer with a collapsed (empty-looking) group.
+      type("news")
+      expect(visible()).toEqual(["news", "1", "3"]) // the tag + its member, and "Hacker News"
+      expect($(".srr-picker-filter .srr-tag-group").classList.contains("srr-qexpand")).toBe(true)
+   })
+
+   it("keeps the async unread badges through a keystroke (narrowing never re-renders)", async () => {
+      threeFeeds()
+      nav.unreadCounts.mockResolvedValue(
+         new Map([
+            [1, 3],
+            [2, 5],
+            [3, 0],
+         ]),
+      )
+      const picker = await mount()
+      picker.open()
+      await flush()
+      data.groupFeedsByTag.mockClear()
+      type("ambito")
+      // Same node, same badge — and no rebuild was asked for.
+      expect($<HTMLElement>('.srr-picker-filter a[data-value="2"]').querySelector(".srr-unread")!.textContent).toBe(
+         "×5",
+      )
+      expect(data.groupFeedsByTag).not.toHaveBeenCalled()
+   })
+
+   it("says so when nothing matches, and stops saying it once the query clears", async () => {
+      threeFeeds()
+      const picker = await mount()
+      picker.open()
+      expect($(".srr-picker-empty").hidden).toBe(true)
+      type("zzz")
+      expect(visible()).toEqual([])
+      expect($(".srr-picker-empty").hidden).toBe(false)
+      expect($(".srr-picker-empty").textContent).toContain("zzz")
+      type("le")
+      expect($(".srr-picker-empty").hidden).toBe(true)
+   })
+
+   it("Escape clears a non-empty query and keeps the overlay; a second Escape reaches app.ts", async () => {
+      threeFeeds()
+      const picker = await mount()
+      picker.open()
+      // app.ts's global handler is a document listener — the picker stopping
+      // propagation IS "handled, don't close".
+      const global = vi.fn()
+      document.addEventListener("keydown", global)
+      try {
+         type("ambito")
+         key($(".srr-picker-search-input"), "Escape")
+         expect($<HTMLInputElement>(".srr-picker-search-input").value).toBe("")
+         expect(visible()).toEqual(["", "news", "1", "2", "3"])
+         expect(global).not.toHaveBeenCalled() // the overlay stays open
+         expect(picker.isOpen()).toBe(true)
+         // Query already empty → not ours; app.ts sees it and closes the overlay.
+         key($(".srr-picker-search-input"), "Escape")
+         expect(global).toHaveBeenCalledTimes(1)
+      } finally {
+         document.removeEventListener("keydown", global)
+      }
+   })
+
+   it("a fresh open comes up unfiltered (a narrowed panel would read as missing feeds)", async () => {
+      threeFeeds()
+      const picker = await mount()
+      picker.open()
+      type("ambito")
+      picker.close()
+      picker.open()
+      expect($<HTMLInputElement>(".srr-picker-search-input").value).toBe("")
+      expect(visible()).toEqual(["", "news", "1", "2", "3"])
+   })
+
+   it("re-applies the live query to rows a re-render rebuilt", async () => {
+      threeFeeds()
+      const picker = await mount()
+      picker.open()
+      type("ambito")
+      picker.render() // e.g. the Show-read flip or a favorite mark
+      expect(visible()).toEqual(["2"])
+   })
+})
+
+// RDR9 — the overlay remembers where it was scrolled, but only while that
+// offset still describes the same panel.
+describe("scroll memory (RDR9)", () => {
+   const rows = (extra: IFeed[] = []) =>
+      data.groupFeedsByTag.mockReturnValue({
+         tagged: new Map(),
+         sortedTags: [],
+         untagged: [feed({ id: 1, title: "A" }), feed({ id: 2, title: "B" }), ...extra],
+      })
+   const el = () => $(".srr-picker")
+
+   it("restores the last offset when the row set is unchanged", async () => {
+      rows()
+      const picker = await mount()
+      picker.open()
+      expect(el().scrollTop).toBe(0) // nothing remembered yet → land at top
+      el().scrollTop = 120
+      picker.close()
+      picker.open()
+      expect(el().scrollTop).toBe(120)
+   })
+
+   it("lands at the top when the row set changed under it", async () => {
+      rows()
+      const picker = await mount()
+      picker.open()
+      el().scrollTop = 120
+      picker.close()
+      rows([feed({ id: 3, title: "C" })]) // a store refresh added a feed
+      picker.open()
+      expect(el().scrollTop).toBe(0)
+   })
+
+   it("lands at the top when a Show-read flip changed which rows apply", async () => {
+      rows()
+      nav.isUnreadOnly.mockReturnValue(false)
+      const picker = await mount()
+      picker.open()
+      el().scrollTop = 120
+      picker.close()
+      nav.isUnreadOnly.mockReturnValue(true)
+      picker.open()
+      expect(el().scrollTop).toBe(0)
+   })
+
+   it("never remembers an offset measured through a query", async () => {
+      rows()
+      const picker = await mount()
+      picker.open()
+      el().scrollTop = 120
+      const input = $<HTMLInputElement>(".srr-picker-search-input")
+      input.value = "a"
+      input.dispatchEvent(new Event("input", { bubbles: true }))
+      expect(el().scrollTop).toBe(0) // narrowing parks you at the top …
+      el().scrollTop = 40 // … and this offset is into the NARROWED list
+      picker.close()
+      picker.open()
+      expect(el().scrollTop).toBe(0)
+   })
+})
+
+// RDR9 — the ★ Favorites lane above the tag groups, marked through a third
+// header row-mode (the same idiom the per-row ⓘ buttons were replaced by).
+describe("favorites lane (RDR9)", () => {
+   const FAV_KEY = "srr-favorites" // keys.ts favoritesKey(HOME_MID) — the home store keeps the bare name
+   const twoFeeds = () =>
+      data.groupFeedsByTag.mockReturnValue({
+         tagged: new Map([["news", [feed({ id: 1, title: "A", tag: "news" })]]]),
+         sortedTags: ["news"],
+         untagged: [feed({ id: 2, title: "B" })],
+      })
+   const favMode = () => $(".srr-picker-fav").click()
+   const laneValues = () =>
+      $$(".srr-picker-filter .srr-fav-group a[data-value]").map((a) => (a as HTMLElement).dataset.value)
+
+   it("marks a feed in favorites mode, persists it, and renders the lane above the tags", async () => {
+      twoFeeds()
+      const picker = await mount()
+      picker.open()
+      expect($(".srr-picker-filter").querySelector(".srr-fav-group")).toBeNull()
+      favMode()
+      $('.srr-picker-filter a[data-value="2"]').dispatchEvent(click())
+      expect(hooks.onSelect).not.toHaveBeenCalled() // marking is not picking
+      expect($(".srr-info-dialog").classList.contains("srr-open")).toBe(false)
+      expect(JSON.parse(localStorage.getItem(FAV_KEY)!)).toEqual([2])
+      expect(laneValues()).toEqual(["2"])
+      // The lane is the FIRST group in the panel, above the tag groups …
+      const groups = $$(".srr-picker-filter .srr-tag-group")
+      expect(groups[0].classList.contains("srr-fav-group")).toBe(true)
+      // … and the feed keeps its normal row too (a favorite is a shortcut, not
+      // a re-filing), so it renders twice.
+      expect($$('.srr-picker-filter a[data-value="2"]')).toHaveLength(2)
+      // Tapping it again in favorites mode un-marks it.
+      $('.srr-picker-filter .srr-fav-group a[data-value="2"]').dispatchEvent(click())
+      expect(JSON.parse(localStorage.getItem(FAV_KEY)!)).toEqual([])
+      expect($(".srr-picker-filter").querySelector(".srr-fav-group")).toBeNull()
+   })
+
+   it("round-trips a stored lane on a fresh mount, dropping ids the store no longer has", async () => {
+      localStorage.setItem(FAV_KEY, JSON.stringify([2, 99]))
+      twoFeeds()
+      const picker = await mount()
+      picker.open()
+      expect(laneValues()).toEqual(["2"]) // 99 is gone from the store — not rendered
+      expect($$('.srr-picker-filter a[data-fav="1"]')).toHaveLength(2) // both copies wear the mark
+   })
+
+   it("survives a corrupt stored value instead of breaking the panel", async () => {
+      localStorage.setItem(FAV_KEY, "{not json")
+      twoFeeds()
+      const picker = await mount()
+      picker.open()
+      expect($(".srr-picker-filter").querySelector(".srr-fav-group")).toBeNull()
+      expect($$(".srr-picker-filter a[data-value]").length).toBeGreaterThan(0)
+   })
+
+   it("counts a favorite ONCE in [ALL] though its row renders twice", async () => {
+      localStorage.setItem(FAV_KEY, JSON.stringify([1]))
+      twoFeeds()
+      nav.unreadCounts.mockResolvedValue(
+         new Map([
+            [1, 3],
+            [2, 4],
+         ]),
+      )
+      const picker = await mount()
+      picker.open()
+      await flush()
+      expect($('.srr-picker-filter a[data-value=""]').querySelector(".srr-unread")!.textContent).toBe("×7")
+      // Both copies of the favorite still carry their own badge.
+      expect($$('.srr-picker-filter a[data-value="1"] .srr-unread').map((e) => e.textContent)).toEqual(["×3", "×3"])
+   })
+
+   it("is inert on rows that have no favorite — tags and the scope chips", async () => {
+      twoFeeds()
+      nav.savedCount.mockReturnValue(1)
+      const picker = await mount()
+      picker.open()
+      favMode()
+      $(".srr-picker-filter .srr-tag-header").dispatchEvent(click())
+      $('.srr-picker-filter a[data-value=""]').dispatchEvent(click())
+      $('.srr-picker-filter a[data-value="~saved"]').dispatchEvent(click())
+      expect(localStorage.getItem(FAV_KEY)).toBeNull()
+      expect(hooks.onSelect).not.toHaveBeenCalled()
+   })
+
+   it("the two row modes are mutually exclusive and open() resets both", async () => {
+      twoFeeds()
+      const picker = await mount()
+      picker.open()
+      favMode()
+      expect($(".srr-picker-fav").getAttribute("aria-pressed")).toBe("true")
+      expect($(".srr-picker").classList.contains("srr-picker-favmode")).toBe(true)
+      $(".srr-picker-info").click() // entering Info leaves favorites mode
+      expect($(".srr-picker-fav").getAttribute("aria-pressed")).toBe("false")
+      expect($(".srr-picker-info").getAttribute("aria-pressed")).toBe("true")
+      favMode()
+      picker.close()
+      picker.open()
+      expect($(".srr-picker-fav").getAttribute("aria-pressed")).toBe("false")
+      expect($(".srr-picker").classList.contains("srr-picker-favmode")).toBe(false)
+   })
+})
+
 describe("mount switcher (§6.3)", () => {
    const home = { mid: "0", base: new URL("http://localhost/"), cred: "same-origin", role: "home", db: { feeds: {} } }
    const peer = {

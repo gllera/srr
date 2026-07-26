@@ -137,6 +137,14 @@
          <section class="srr-picker" aria-label="Feeds" hidden>
             <header class="srr-picker-head">
                <h2 class="srr-picker-title">Feeds</h2>
+               <!-- The favorites-mode toggle (RDR9): while pressed, tapping a FEED row
+                    marks/unmarks it instead of filtering, and the marked feeds ride a
+                    "★ Favorites" lane above the tag groups. A third row mode rather
+                    than a per-row star: it costs one control instead of one per row,
+                    and it is the same idiom that replaced the per-row ⓘ buttons. -->
+               <button class="srr-picker-fav" aria-pressed="false" aria-label="Mark favorites" title="Mark favorites">
+                  <span class="srr-picker-fav-icon" aria-hidden="true">&#9733;</span>
+               </button>
                <!-- The stats-mode toggle: while pressed, tapping a filter row opens
                     its detail card (the info dialog) instead of filtering.
                     picker.ts owns the state and resets it on every open. -->
@@ -151,6 +159,15 @@
                     tracks the mode — pressed = read articles shown; picker.ts syncs it. -->
                <button class="srr-picker-showread" aria-pressed="false" title="Show read articles">Show read</button>
                <button class="srr-picker-close" aria-label="Close" title="Close">&times;</button>
+               <!-- Type-to-filter (RDR9). Wraps onto its own header line, so it sticks
+                    with the header inside the overlay's scroll. picker.ts narrows the
+                    ALREADY-RENDERED rows by folded substring (a visibility pass, never
+                    a rebuild — the async unread badges filling in behind it survive). -->
+               <div class="srr-picker-search">
+                  <span class="srr-search-icon" aria-hidden="true"></span>
+                  <input type="search" class="srr-picker-search-input" aria-label="Filter feeds and tags" placeholder="Filter feeds…" autocomplete="off" enterkeyhint="done" />
+                  <button class="srr-picker-search-clear" aria-label="Clear filter" title="Clear filter" hidden>&times;</button>
+               </div>
             </header>
             <div class="srr-picker-filter" aria-label="Filter"></div>
          </section>
