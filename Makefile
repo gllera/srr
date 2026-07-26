@@ -115,6 +115,35 @@ fuzz-be:
 	  go test $$pkg -run '^$$' -fuzz "^$$fn$$" -fuzztime=$(FUZZTIME) || exit 1; \
 	done
 
+# The chaos gate, kept OUT of verify for the same reason as fuzz-be and
+# test-race-be: it is a SEARCH, not a check. Every curated e2e fixture in this
+# repo is a store shape somebody thought of, and the bugs that shipped lived in
+# the combinatorics between them (the pack<->delta seam x expiration x feed
+# churn x GC window x compaction). This walks that space from a seed, drives the
+# real production write path, and asserts inspect --validate, chron permanence
+# against an independent oracle, every live chron's payload, and consolidation
+# equivalence against the --max-deltas=0 kill switch. A seeded walk finds
+# nothing on most runs and cannot gate a PR on wall-clock it may spend for no
+# signal, so `verify` never runs it (SRR_CHAOS gates the driver itself) and
+# .github/workflows/chaos.yml runs it nightly with a real budget.
+#
+# Every seed is PRINTED, so a nightly red replays locally with one command:
+#   make chaos-be CHAOS_SEED=<the seed the failure printed>
+# Tunables: CHAOS_SEEDS (how many random seeds), CHAOS_SEED (replay exactly
+# one), CHAOS_ARTICLES (article budget per seed), CHAOS_OUT (keep each seed's
+# store there instead of a temp dir — the CI artifact, and the fixture the
+# jsdom pass frontend/e2e/contract/chaos.e2e.test.ts reads), CHAOS_TIMEOUT.
+CHAOS_SEEDS ?= 4
+CHAOS_ARTICLES ?= 600
+CHAOS_TIMEOUT ?= 3600s
+
+.PHONY: chaos-be
+chaos-be:
+	cd backend && SRR_CHAOS=1 \
+	  SRR_CHAOS_SEEDS=$(CHAOS_SEEDS) SRR_CHAOS_ARTICLES=$(CHAOS_ARTICLES) \
+	  SRR_CHAOS_SEED=$(CHAOS_SEED) SRR_CHAOS_OUT=$(CHAOS_OUT) \
+	  go test -run '^TestChaosStore$$' -count=1 -timeout $(CHAOS_TIMEOUT) -v .
+
 # Go format gate + linter, mirroring lint-fe/format-fe/format-check-fe. Both
 # gate verify-be (format-check-be + lint-be; config in backend/.golangci.yml).
 format-be:
