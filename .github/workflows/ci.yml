@@ -13,6 +13,29 @@ permissions:
   contents: read
 
 jobs:
+  # Deliberately ONE job, not a frontend/backend split — measured 2026-07-26,
+  # don't re-litigate without new numbers.
+  #
+  # Wall time is set by the slowest job, and that is `race`, not this one
+  # (16-core warm local: race 110s, verify 53s = verify-fe 13s + verify-be 33s +
+  # test-contract 7s, browser ~45s). -race is effectively single-threaded and
+  # barely uses the extra cores, while verify runs at 4-6x parallelism and so
+  # loses MORE than race does on a 4-vCPU runner — which only widens the gap.
+  # Splitting verify therefore buys no wall time at all: the critical path stays
+  # race either way.
+  #
+  # It is not free, either. A second job pays another checkout + setup-toolchain
+  # (~40s of billable compute), and test-contract needs Go AND Node, so it
+  # cannot ride the frontend job — the backend job keeps it and remains the
+  # longer half, leaving a ~13s frontend job idling next to it.
+  #
+  # The one genuine gain is signal: verify's targets run serially, so a red
+  # verify-fe currently hides verify-be. That was judged not to be worth a
+  # permanent extra job for a two-project repo where the backend already has two
+  # jobs of its own (race, and browser builds the binary too). Revisit if verify
+  # ever overtakes race — TST4/TST6-scale additions are the plausible trigger.
+  # (The nightly chaos job landing separately runs on its own schedule and never
+  # sits on the push/PR critical path, so it does not change this arithmetic.)
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 15
