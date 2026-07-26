@@ -49,6 +49,15 @@ func (l *lcg) content(n int) string {
 // assert the delta path actually ran).
 func driveDeltaStore(t *testing.T, maxDeltas int) (string, *DBCore, int) {
 	t.Helper()
+	return driveDeltaStoreChunked(t, maxDeltas, 0)
+}
+
+// driveDeltaStoreChunked is driveDeltaStore with the --max-batch-bytes cap (in
+// KB, 0 = off) as a second axis: S69's per-pass chunking of PutArticles must be
+// byte-invisible in the store, so the same script under a chunking cap has to
+// land on a byte-identical store (TestChunkedBatchEquivalence).
+func driveDeltaStoreChunked(t *testing.T, maxDeltas, maxBatchBytes int) (string, *DBCore, int) {
+	t.Helper()
 	dir := t.TempDir()
 	globals = &Globals{
 		PackSize:      1,
@@ -58,6 +67,7 @@ func driveDeltaStore(t *testing.T, maxDeltas int) (string, *DBCore, int) {
 		CacheDir:      t.TempDir(),
 		MaxDeltas:     maxDeltas,
 		MaxDeltaBytes: 1 << 20, // keep the byte cap out of the way; the script tests the chain/boundary triggers
+		MaxBatchBytes: maxBatchBytes,
 	}
 	finalGzip = func(_ string, gz []byte) ([]byte, error) { return gz, nil }
 	metaTailMemo.reset()
@@ -173,37 +183,13 @@ func TestConsolidationEquivalence(t *testing.T) {
 	}
 	dirB, coreB, _ := driveDeltaStore(t, 0)
 
-	// The published STATE must match. Deliberately not the name table: stems
-	// come from a monotone counter, so a store that reached this point through
-	// more consolidations legitimately holds different stems for the same
-	// positions — which is exactly what the positional fingerprint below
-	// compares.
-	state := func(c *DBCore) []byte {
-		b, err := jsonEncode([]any{c.ManifestState, c.ManifestWriterState, c.Feeds})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return b
-	}
-	if jsonA, jsonB := state(coreA), state(coreB); !bytes.Equal(jsonA, jsonB) {
-		t.Errorf("published state differs:\nA: %s\nB: %s", jsonA, jsonB)
-	}
-
-	fpA := storeFingerprint(t, dirA, coreA)
-	fpB := storeFingerprint(t, dirB, coreB)
-	if len(fpA) != len(fpB) {
-		t.Errorf("published name sets differ: %d vs %d", len(fpA), len(fpB))
-	}
-	for name, a := range fpA {
-		b, ok := fpB[name]
-		if !ok {
-			t.Errorf("%s: published by the delta-driven store only", name)
-			continue
-		}
-		if !bytes.Equal(a, b) {
-			t.Errorf("%s: bytes differ (%d vs %d bytes)", name, len(a), len(b))
-		}
-	}
+	// The published STATE and the per-position bytes must match. Deliberately
+	// not the name table: stems come from a monotone counter, so a store that
+	// reached this point through more consolidations legitimately holds
+	// different stems for the same positions — which is exactly what the
+	// positional fingerprint compares (assertStoreEquivalent, shared with S69's
+	// chunking-equivalence gate in db_pack_chunk_test.go).
+	assertStoreEquivalent(t, dirA, coreA, dirB, coreB)
 }
 
 // TestDeltaCycleWritesOnlyDelta pins G1: a delta cycle publishes exactly one

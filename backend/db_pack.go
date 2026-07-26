@@ -15,6 +15,15 @@ import (
 	"srr/store"
 )
 
+// maxBatchBytesDefault is the --max-batch-bytes default, in KB (32 MiB): the
+// soft cap on how much freshly-encoded article JSONL one materialization pass
+// carries. Every other size in the writer is bounded — packs by --pack-size,
+// the delta chain by --max-delta-bytes — but a BATCH is bounded by nothing: an
+// OPML backfill or a first fetch of a long archive hands PutArticles the whole
+// import at once, and materializing it costs several times its size in
+// transient memory, under the store lock. See PutArticles for the chunking.
+const maxBatchBytesDefault = 32 << 10
+
 // ArticleData is the on-disk JSONL representation of an article (one
 // per line in data/*.gz). Short keys match what the frontend expects.
 type ArticleData struct {
@@ -240,14 +249,39 @@ func (o *DB) loadPack(ctx context.Context, key string) ([]byte, error) {
 	return gunzip(rc)
 }
 
-// packFromBytes wraps decompressed pack bytes into an appendable *pack. The
-// length guard is load-bearing: gzip.NewWriter flushes its header on the first
-// Write — including Write(nil) — so an empty pack must skip the Write to keep
-// Len()==0, the fresh-store sentinel the idx/data writers branch on.
+// packFromBytes wraps a decompressed DATA pack's bytes into an appendable
+// *pack, replaying them ONE JSONL LINE PER Write — the granularity the
+// materialization loop appends in, and the reason this is not a single Write.
+//
+// pack.Len() is the COMPRESSED length, and compress/flate advances its encoder
+// once per Write (`compressor.write` steps before each window fill), so how far
+// the emitted bytes lag the input depends on HOW the bytes were handed over: a
+// whole pack replayed in one Write leaves the encoder having emitted nothing but
+// the gzip header (Len()==10) until the next Write makes it catch up — where a
+// line-by-line run of the same content would already be a full block ahead.
+// consolidateTail rolls the data pack on exactly that number (`data.Len() >=
+// --pack-size`), so a bulk replay silently moves one roll an entry later and the
+// pack boundaries end up a function of how many times the store consolidated
+// rather than of its content. Per-line replay makes Len() a pure function of the
+// lines the pack holds, which is what lets an oversized batch be chunked
+// (PutArticles) or a delta chain be folded in any number of passes and still
+// publish byte-identical packs. The published bytes themselves never depended on
+// this — deflate's OUTPUT is a function of the byte stream alone; only the
+// in-flight Len() the roll reads was chunking-sensitive.
+//
+// The empty guard is load-bearing: gzip.NewWriter flushes its header on the
+// first Write — including Write(nil) — so an empty pack must skip the Write to
+// keep Len()==0, the fresh-store sentinel the idx/data writers branch on.
 func packFromBytes(raw []byte) (*pack, error) {
 	p := newPack()
-	if len(raw) > 0 {
-		if _, err := p.Write(raw); err != nil {
+	for len(raw) > 0 {
+		line := raw
+		if i := bytes.IndexByte(raw, '\n'); i >= 0 {
+			line, raw = raw[:i+1], raw[i+1:]
+		} else {
+			raw = nil // tolerate a missing final newline, as splitDataPack does
+		}
+		if _, err := p.Write(line); err != nil {
 			return nil, err
 		}
 	}
@@ -486,6 +520,29 @@ func (o *DB) SyncIdxSummary(ctx context.Context) error {
 // live delta chain replay through consolidateTail) or later (a delta cycle:
 // the batch publishes as one immutable delta segment and a future
 // consolidation materializes it).
+//
+// An oversized batch is CHUNKED (--max-batch-bytes, 0 = off): articles are
+// encoded, accounted for and driven through putBatch in sub-batches of at most
+// the cap's worth of JSONL, so the transient cost — the per-article `lines`
+// copy here, emitDelta's whole-segment gzip, consolidateTail's entries/
+// entryLines chain copies — is bounded by the cap rather than by the batch.
+// The split is byte-invisible in the store, which is the property
+// TestChunkedBatchEquivalence pins: the decision sequence is unchanged (each
+// sub-batch runs the same shouldConsolidate → emitDelta/consolidateTail step
+// the whole batch would have), chron order is preserved, and both paths append
+// to the same continuing byte streams — deflate's output depends on the stream
+// and not on how writes are chunked, and packFromBytes makes a tail pack saved
+// and reloaded between passes re-enter materialization in the encoder state a
+// single pass would be in (see its comment — that is what the roll trigger
+// reads). Chunking only changes how MANY passes there are, and a pass is what
+// draws object names (opaque, monotone stems) and delta segments.
+//
+// ⚠ One visible consequence: SyncMeta's exact-cover fast paths key on
+// `o.consolidated` (the LAST pass's replay slice) or on `written` covering the
+// whole missing range, so a multi-pass cycle usually misses both and rebuilds
+// the meta tail via walkArticles. That is correct — the cards derive from the
+// packs the same articles just produced — and it costs a few pack reads on the
+// rare oversized backfill, never on a steady-state cycle.
 func (o *DB) PutArticles(ctx context.Context, articles []*Item) ([]ArticleData, error) {
 	if len(articles) == 0 {
 		return nil, nil
@@ -493,49 +550,77 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) ([]ArticleData, 
 	c := &o.core
 	o.consolidated = nil
 
-	prevTotal := c.TotalArticles
+	maxBytes := int64(globals.MaxBatchBytes) << 10
 	written := make([]ArticleData, 0, len(articles))
-	lines := make([][]byte, 0, len(articles))
-	var batchBytes int64
-	for _, item := range articles {
-		ad := item.articleData(c.FetchedAt)
-		line, err := jsonEncode(&ad)
-		if err != nil {
+	for rest := articles; len(rest) > 0; {
+		prevTotal := c.TotalArticles
+		base := len(written)
+		// Preallocate for the whole remainder only with chunking off, where it
+		// IS the batch; a capped pass takes a fraction of it and append grows
+		// to fit rather than reserving the batch once per pass.
+		var lines [][]byte
+		if maxBytes <= 0 {
+			lines = make([][]byte, 0, len(rest))
+		}
+		var batchBytes int64
+		n := 0
+		for _, item := range rest {
+			ad := item.articleData(c.FetchedAt)
+			line, err := jsonEncode(&ad)
+			if err != nil {
+				return nil, err
+			}
+			written = append(written, ad)
+			lines = append(lines, line)
+			batchBytes += int64(len(line))
+			c.TotalArticles++
+			item.Feed.TotalArt++
+			item.Feed.ContentBytes += int64(len(line))
+			n++
+			// Checked AFTER the append, so a single article larger than the cap
+			// still forms one pass — the cap bounds a pass, it cannot split an
+			// article.
+			if maxBytes > 0 && batchBytes >= maxBytes {
+				break
+			}
+		}
+		if err := o.putBatch(ctx, written[base:], lines, prevTotal, batchBytes); err != nil {
 			return nil, err
 		}
-		written = append(written, ad)
-		lines = append(lines, line)
-		batchBytes += int64(len(line))
-		c.TotalArticles++
-		item.Feed.TotalArt++
-		item.Feed.ContentBytes += int64(len(line))
-	}
-
-	if o.shouldConsolidate(prevTotal, c.TotalArticles, batchBytes) {
-		if err := o.consolidateTail(ctx, written, lines, prevTotal); err != nil {
-			return nil, err
-		}
-	} else {
-		// The pre-delta writer loaded+validated the tail idx on every cycle (it
-		// had to, to append). A delta cycle never touches the tail, so a
-		// corrupt/truncated consolidated tail — a non-atomic backend's partial
-		// prior consolidation, or store tampering — would otherwise go unseen by
-		// the writer until the next consolidation up to maxDeltas cycles later,
-		// while every reader is already failing to parse it. Re-validate it here
-		// so real corruption fails fast and loud, near its cause, instead of
-		// green fetch logs during the whole window readers are broken.
-		if err := o.checkTailIntact(ctx, prevTotal-c.DeltaArticles); err != nil {
-			return nil, err
-		}
-		if err := o.emitDelta(ctx, lines, len(written), batchBytes); err != nil {
-			return nil, err
-		}
-		// SyncMeta skips delta cycles (tailCovered is unmoved), so the delta
-		// path maintains the newest-glance head projection itself — it has the
-		// cards in hand and db.gz is rewritten every cycle anyway.
-		c.extendHead(written)
+		rest = rest[n:]
 	}
 	return written, nil
+}
+
+// putBatch drives ONE materialization pass over articles the caller has already
+// encoded and accounted for: the shouldConsolidate decision and the path it
+// picks. prevTotal is the store's article total before this pass — the whole
+// batch's, with chunking off, and the pass's own otherwise, which is what keeps
+// consolidateTail's tc0 seam and the 5k-stratum force correct per pass.
+func (o *DB) putBatch(ctx context.Context, batch []ArticleData, lines [][]byte, prevTotal int, batchBytes int64) error {
+	c := &o.core
+	if o.shouldConsolidate(prevTotal, c.TotalArticles, batchBytes) {
+		return o.consolidateTail(ctx, batch, lines, prevTotal)
+	}
+	// The pre-delta writer loaded+validated the tail idx on every cycle (it
+	// had to, to append). A delta cycle never touches the tail, so a
+	// corrupt/truncated consolidated tail — a non-atomic backend's partial
+	// prior consolidation, or store tampering — would otherwise go unseen by
+	// the writer until the next consolidation up to maxDeltas cycles later,
+	// while every reader is already failing to parse it. Re-validate it here
+	// so real corruption fails fast and loud, near its cause, instead of
+	// green fetch logs during the whole window readers are broken.
+	if err := o.checkTailIntact(ctx, prevTotal-c.DeltaArticles); err != nil {
+		return err
+	}
+	if err := o.emitDelta(ctx, lines, len(batch), batchBytes); err != nil {
+		return err
+	}
+	// SyncMeta skips delta cycles (tailCovered is unmoved), so the delta
+	// path maintains the newest-glance head projection itself — it has the
+	// cards in hand and db.gz is rewritten every cycle anyway.
+	c.extendHead(batch)
+	return nil
 }
 
 // checkTailIntact re-validates the consolidated tail idx pack against db.gz on a
