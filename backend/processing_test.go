@@ -556,6 +556,75 @@ func TestProcessItemAbsolutizesRelativeURLs(t *testing.T) {
 	}
 }
 
+// processItem's post-loop normalization reads and rewrites the content STRING,
+// so the content session has to be FLUSHED before it runs — which is what the
+// explicit sess.Close() at the end of the pipeline does. Next to the deferred
+// Close guarding the function exit that call reads as redundant, and it is not:
+// with only the defer, a session still dirty when the loop ends renders its DOM
+// back into i.Content when processItem RETURNS, i.e. AFTER the strip — putting
+// exactly the control characters normalization removed back into an immutable,
+// cached-forever pack, with no repair downstream.
+//
+// Both shapes that leave the session dirty at that boundary are covered: the
+// always-on absolutizer (so a feed with no pipe at all reaches it) and a
+// pipeline whose last content-mutating step is a DOM step. #unlazy stands in
+// for the production shape ["#default", "#selfhost"], which needs the network.
+func TestProcessItemNormalizesFlushedContent(t *testing.T) {
+	// U+0001 (C0) and U+009B (C1) both ride HTML text through a parse/render
+	// round-trip untouched, so the strip is the only thing that can remove them
+	// — which is what makes their survival a clean witness for "the flush
+	// happened after the strip".
+	const controls = "a\u0001b\u009bc"
+
+	tests := []struct {
+		name string
+		pipe []string
+		body string   // markup for this case's dirtying step to act on
+		want []string // substrings the flushed, normalized content must hold
+	}{
+		{
+			// No pipeline at all: absolutizeContent rewrites the site-relative
+			// src and marks the session dirty entirely on its own.
+			name: "always-on absolutizer",
+			body: `<img src="/i.jpg">`,
+			want: []string{`src="https://ex.com/i.jpg"`},
+		},
+		{
+			// The last content-mutating step is a DOM step, so its changes are
+			// still unrendered when the loop ends.
+			name: "pipeline ending in a DOM step",
+			pipe: []string{"#unlazy"},
+			body: `<img src="/i.jpg"><img data-src="/lazy.jpg">`,
+			want: []string{`src="https://ex.com/i.jpg"`, `src="/lazy.jpg"`},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			i := &mod.RawItem{
+				Link:    "https://ex.com/post/1",
+				Content: "<p>" + controls + "</p>" + tt.body,
+			}
+			if err := processItem(context.Background(), mod.New(), tt.pipe, i, ""); err != nil {
+				t.Fatalf("processItem: %v", err)
+			}
+			for _, r := range []rune{0x01, 0x9b} {
+				if strings.ContainsRune(i.Content, r) {
+					t.Errorf("U+%04X survived in %q — the session flushed AFTER the control-character strip, so the DOM re-render undid it", r, i.Content)
+				}
+			}
+			// The other half of the same pin: the DOM's changes must actually
+			// have reached the string. A normalization that observed a stale,
+			// never-flushed content string would pass the strip check above.
+			for _, w := range tt.want {
+				if !strings.Contains(i.Content, w) {
+					t.Errorf("missing %s in %q — the DOM never reached the content string", w, i.Content)
+				}
+			}
+		})
+	}
+}
+
 // A link that cannot serve as a base leaves content byte-identical, as does
 // content with nothing relative to resolve (no re-render).
 func TestProcessItemAbsolutizeNoOp(t *testing.T) {
