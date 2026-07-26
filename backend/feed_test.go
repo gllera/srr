@@ -1437,7 +1437,8 @@ func TestUploadAssetsRewritesAndSkipsMarkerless(t *testing.T) {
 	be := tempStore(t)
 	cacheDir, marked := assetItems(t, 2)
 	plain := &Item{Content: `<p>no markers, cost #1</p>`}
-	items := append(marked, plain)
+	items := marked
+	items = append(items, plain)
 	run := &fetchRun{
 		assets:   testAssetFetcher(be, 1<<20, "", 4),
 		cacheDir: cacheDir,
