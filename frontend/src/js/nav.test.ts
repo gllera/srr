@@ -108,6 +108,15 @@ function setupIndex(entries: Array<{ feedId: number; fetchedAt?: number }>) {
    nav.filter.clear()
 }
 
+// Switch the ACTIVE mount under nav (docs/MULTI-STORE-SPEC.md §3.2). Two
+// suites need it — the §6.3 token grammar and the frontier undo's cross-mount
+// case — and both restore `data.activeStore` to `realActiveStore` in their own
+// afterEach, since the mock lives for the whole file.
+const realActiveStore = data.activeStore
+const asMid = (mid: string) => {
+   data.activeStore = () => ({ mid, base: new URL("http://localhost/") }) as ReturnType<typeof realActiveStore>
+}
+
 beforeEach(() => {
    data.db.total_art = 0
    data.db.feeds = {}
@@ -3103,6 +3112,7 @@ describe("frontier undo", () => {
    afterEach(() => {
       nav.setUnreadOnly(false)
       nav.clearFrontierUndo()
+      data.activeStore = realActiveStore
    })
 
    // feed1 {0,2,4}, feed2 {1,3} — a two-feed [ALL] lane.
@@ -3231,6 +3241,51 @@ describe("frontier undo", () => {
       nav.clearFrontierUndo()
       expect(nav.markUnreadFrom(2)).toBe(true)
       expect(nav.pendingFrontierUndo()).toBeNull()
+   })
+
+   // …and the snapshot is scoped to the MOUNT it was taken on. The reader is
+   // multi-store: `feed:1` names a different publication in every store and
+   // seenK() resolves the ACTIVE store's key lazily, at the write. The snackbar
+   // lives 8s and nothing takes it down on a switch, so this is a plain tap on
+   // a button that is still on screen — and replaying the snapshot would write
+   // store A's frontiers into srr-seen@s7, then stamp and sync them fleet-wide.
+   it("never replays a snapshot onto another mount after a store switch", async () => {
+      setupTwo()
+      seedSeen({ "feed:1": 0 })
+      await nav.goTo(4)
+      const u = nav.pendingFrontierUndo()!
+      expect(u.mid).toBe("0")
+
+      // The user switches stores while the offer is still up. Store B has its
+      // own frontier for its own feed 1 — same key, different publication.
+      asMid("s7")
+      localStorage.setItem("srr-seen@s7", JSON.stringify({ "feed:1": 3 }))
+
+      expect(nav.pendingFrontierUndo()).toBeNull()
+      expect(await nav.frontierUndoSize(u)).toBe(0)
+      expect(nav.undoFrontierMove(u)).toBe(false)
+      // B's map is byte-for-byte what it was; nothing was stamped either.
+      expect(JSON.parse(localStorage.getItem("srr-seen@s7")!)).toEqual({ "feed:1": 3 })
+      expect(localStorage.getItem("srr-seen-ts@s7")).toBeNull()
+      // …and A's own frontier is still where the raise left it, un-rewound.
+      expect(JSON.parse(localStorage.getItem("srr-seen")!)["feed:1"]).toBe(4)
+   })
+
+   // The refusal must not cost the ACTIVE store its own pending offer: the mid
+   // check has to come BEFORE undoFrontierMove's unconditional clear, or a
+   // stray foreign Undo silently consumes the offer for the lane on screen.
+   it("refusing a foreign snapshot leaves this mount's pending offer intact", async () => {
+      setupTwo()
+      seedSeen({ "feed:1": 0 })
+      await nav.goTo(4)
+      const own = nav.pendingFrontierUndo()!
+
+      // A snapshot from another mount — same shape, same keys, same `to`.
+      expect(nav.undoFrontierMove({ mid: "s7", prev: { "feed:1": 0 }, to: 4 })).toBe(false)
+
+      expect(nav.pendingFrontierUndo()).toBe(own)
+      expect(nav.undoFrontierMove(own)).toBe(true)
+      expect(JSON.parse(localStorage.getItem("srr-seen")!)["feed:1"]).toBe(0)
    })
 
    it("records nothing in the peek modes (they never move a frontier)", async () => {
@@ -3608,13 +3663,9 @@ describe("never-opened feed/tag shows the not-started placeholder (unread-only)"
 // meaning the home mount, so every existing deep link + stored srr-hash still
 // works; a peer mount rides IN the token as @<mid> ([ALL]) or @<mid>:<token>.
 describe("§6.3 mount token grammar", () => {
-   const realActive = data.activeStore
    afterEach(() => {
-      data.activeStore = realActive
+      data.activeStore = realActiveStore
    })
-   const asMid = (mid: string) => {
-      data.activeStore = () => ({ mid, base: new URL("http://localhost/") }) as ReturnType<typeof realActive>
-   }
 
    describe("parseHashMount (pure extractor)", () => {
       it("all-bare tokens ⇒ the home mount, tokens verbatim", () => {

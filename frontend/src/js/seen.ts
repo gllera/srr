@@ -222,6 +222,26 @@ export function recordSeen(article: IArticle, pos: number, scope: FrontierScope)
 // caller (app.ts) asks how many articles the move actually consumed and, past a
 // threshold, offers one Undo.
 export interface FrontierUndo {
+   // The MOUNT the raise happened on — the first thing every consumer checks.
+   //
+   // The reader mounts N stores and every per-store piece of device state is
+   // namespaced by a mount id, because chronIdx AND feed id are only unique
+   // WITHIN a mount: `feed:7` in store A is a different feed from `feed:7` in
+   // store B, and `seenK()` resolves the ACTIVE store's key lazily, at the
+   // moment of the write. A snapshot outlives its own offer by design (the
+   // snackbar answers seconds later, ./menus), and nothing invalidates it
+   // across a store switch — switchMount, a mount pick in the filter picker
+   // and a back/forward setActive all leave the snackbar up and clickable. So
+   // without this field, replaying a snapshot after a switch would write store
+   // A's frontiers into `srr-seen@<B>`, and it would not self-heal: writeSeen
+   // stamps every touched key at NOW and sync.pushSoon() publishes, so
+   // profile.ts's per-key LWW would propagate the wrong frontier fleet-wide —
+   // lowering one re-floods a lane, raising one eats an unread backlog.
+   //
+   // (list.ts's row-swipe record carries the same stamp for the same reason,
+   // and compares it first for the same reason. This is that argument for the
+   // shared path the reader itself uses.)
+   mid: string
    // Previous value per touched key; undefined = the key did not exist. Only
    // touched keys are here — an untouched member's unread is identical before
    // and after, so it cannot contribute to the size of the move.
@@ -246,8 +266,13 @@ let raiseOffered = false
 // place, and without this bit each of those would re-measure and re-announce a
 // jump that happened long ago. Reading still does not CONSUME the snapshot —
 // markFrontierUndoOffered does — so the offer's own Undo can act on it after.
+// A snapshot taken on another mount is not pending HERE: the offer names a
+// number of articles in a store the user is no longer looking at, and its keys
+// address that store's feeds. It is refused rather than cleared — the snapshot
+// stays valid for its own lane, and a switch back finds it exactly as it was.
 export function pendingFrontierUndo(): FrontierUndo | null {
-   return raiseOffered ? null : lastRaise
+   if (raiseOffered || !lastRaise) return null
+   return lastRaise.mid === data.activeStore().mid ? lastRaise : null
 }
 
 // The caller has now had its chance at the pending raise: don't offer it again.
@@ -264,6 +289,11 @@ export function markFrontierUndoOffered(): void {
 // Async and deliberately OFF the navigation path — recordSeen stays a couple of
 // localStorage writes.
 export async function frontierUndoSize(u: FrontierUndo): Promise<number> {
+   // Mount first, before `data.db.feeds` is even touched: those keys name the
+   // OTHER store's feed ids, so every feed they happen to resolve to here is a
+   // different publication and the measurement would be fiction — a plausible
+   // number for a move that never happened in this lane.
+   if (u.mid !== data.activeStore().mid) return 0
    const chs = Object.keys(u.prev)
       .map((k) => data.db.feeds[Number(k.slice("feed:".length))])
       .filter(Boolean)
@@ -291,10 +321,17 @@ export async function frontierUndoSize(u: FrontierUndo): Promise<number> {
 // Either way it clears the pending state: those frontiers have just been
 // rewritten, so any snapshot still waiting describes a store state that no
 // longer exists, and replaying it would only raise them back.
+//
+// A REFUSAL is not that, which is why both refusals sit ABOVE the clear: this
+// writes through `seenK()`, the ACTIVE store's key, so a snapshot from another
+// mount would land its keys in the wrong store's map (see FrontierUndo.mid).
+// Declining it must leave THIS store's own pending offer alone — clearing first
+// would let a stray foreign Undo silently consume the offer belonging to the
+// lane the user is actually reading.
 export function undoFrontierMove(u: FrontierUndo): boolean {
+   if (!u || u.mid !== data.activeStore().mid) return false
    lastRaise = null
    raiseOffered = false
-   if (!u) return false
    try {
       const seen = readSeen()
       const touched: string[] = []
@@ -327,10 +364,14 @@ export function clearFrontierUndo(): void {
 // after the write lands, so a failed write leaves no offer behind. A newer raise
 // always replaces an older pending one: the offer is for the last thing that
 // happened, and stacking them would let one Undo skip a step.
+//
+// The mount is stamped HERE, at the write, rather than read back at the undo —
+// that is the whole point: by the time the snackbar is answered, the active
+// store may be a different one.
 function snapshotRaise(before: Record<string, number | undefined>, touched: string[], to: number): void {
    const prev: Record<string, number | undefined> = {}
    for (const key of touched) prev[key] = before[key]
-   lastRaise = { prev, to }
+   lastRaise = { mid: data.activeStore().mid, prev, to }
    raiseOffered = false
 }
 
