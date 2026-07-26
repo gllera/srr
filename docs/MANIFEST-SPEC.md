@@ -245,10 +245,11 @@ nothing. A pristine 1M-article store's three lists total ~120 bytes (§12); the
 pathological fully-fragmented data list is ~8 KB gzipped, and a full rebuild
 re-contiguates it.
 
-**Singletons** get plain stems: `seen` (the dedup sidecar slot), `hsum` (the idx
-header summary, with the finalized count it covers), `ssum` (the meta bloom
-summary, likewise), and `deltas` (an ordered stem list of the live delta
-segments, which is the data series' `d`-kind today).
+**Singletons** get plain stems: `seen` (the dedup sidecar slot), `aref` (the
+asset reference sidecar, §4.7), `hsum` (the idx header summary, with the
+finalized count it covers), `ssum` (the meta bloom summary, likewise), and
+`deltas` (an ordered stem list of the live delta segments, which is the data
+series' `d`-kind today).
 
 Consequences, all of them deletions:
 
@@ -287,6 +288,99 @@ than a number the format constants declare. A merged series would appear as one
 more row in `PackSeries`, one more name list in the manifest, and one stride
 constant in `format.gen.ts`. **Any reviewer of S32–S35 should reject a patch
 that hard-codes the three-series shape into the manifest parser.**
+
+### 4.7 The asset reference sidecar — `names.aref`
+
+**Status:** implemented (FMT2b). This is the first feature added *after* the
+cutover, and it is written down here rather than in a spec of its own because it
+is the worked example of §6.1 doing its job: a new published object class that
+needed no ordering proof, no GC window and no grammar change.
+
+**The problem.** `assets/` keys are content hashes, so one stored object commonly
+serves several articles across several feeds. `ExpireArticles` deleted every
+`assets/…` key an expiring article referenced with **no liveness check at all**,
+so the first article to age out took the shared object with it and every
+still-live article referencing it lost its media (repairable only by
+`srr asset heal --create`). Frontend save-time pinning (S59) cannot address it:
+it protects the saving device, not the store.
+
+**The object.** One immutable, write-once, gzip-JSON object per generation that
+changed it, listed by the manifest under `names.aref`:
+
+```json
+"aref": {"s":"seen", "stem":447}
+```
+
+```json
+{"v":1, "from":0, "refs":{"assets/aa/1111111111111111.webp":{"n":3,"o":42}}}
+```
+
+`n` is the number of stored articles that reference the key; `o` is the feed
+whose fetch was charged for the upload (`Feed.AssetBytes`).
+
+Four properties, each of them a consequence of something already in this
+document rather than a new rule:
+
+- It is a **singleton with its own series** (§4.5), and the series it names is
+  `seen` — the backend-only directory that already exists. So `PackSeries`,
+  `packKeyRe`, the generated `PACK_SERIES_KINDS` and the service worker's route
+  regex are all unchanged, and there is no second backend-only object class for
+  anything to learn.
+- Its stem is drawn from that series' monotone counter and **never reused**, so
+  it is write-once like everything else and the reader-side cache story does not
+  arise (no reader fetches it — backend-only, like `config.gz` and the dedup
+  pool).
+- It is published by the **same Commit as the batch that changed it**, which is
+  the whole point: a count that becomes durable separately from the articles it
+  counts is wrong in one direction or the other at every crash. `SyncRefs` is
+  therefore FATAL to a cycle, exactly as `SyncSeen` is, and needs no ordering
+  argument of its own — §6.1 covers it.
+- **GC reaches it by the one rule** (§7): it is a name the last K manifests
+  either hold or do not. No window, no formula. The one thing that had to be
+  taught is the lenient shim `manifestNamesOf` — a name the reachable-set parse
+  skips is a name the sweep would reclaim while its generation is still
+  restorable.
+
+**Coverage — the invariant, and the failure posture.** Deleting at zero is sound
+exactly when every live article referencing the key was counted. Articles stored
+before this object existed were not, so the sidecar states from which chron its
+counts are complete (`from`), and expiration splits on it:
+
+| Region | Rule |
+|---|---|
+| `chron >= from` — COVERED | The count governs. Zero deletes; anything above zero KEEPS. A key with **no entry** is a count that should exist and does not, i.e. damage — it KEEPS too, and warns. |
+| `chron < from` — UNCOVERED | The sidecar makes no claim, so the pre-refcount rule stands for those articles unchanged. This is not "a missing count", it is "no counting was ever done here". |
+
+That split is what keeps an upgrading store reclaiming: without it, a store's
+whole pre-upgrade asset backlog would leak permanently the day this shipped. The
+uncovered region only shrinks — it drains as those articles expire.
+
+Failure posture, stated once: **inside a coverage claim, unknown means KEEP.** A
+leaked object costs bytes an operator can reclaim; a wrongly-deleted shared
+object costs media no article can get back. Consequently a sidecar the manifest
+NAMES but that will not parse is treated as damage and claims FULL coverage over
+an EMPTY table — nothing is deleted until the counts rebuild, and it says so
+loudly every cycle. A manifest that names none is the *other* state entirely (no
+counting has happened here) and takes the uncovered rule. The manifest is what
+tells the two apart, which is why the distinction is durable at all.
+
+**`ab` becomes exact.** `Feed.AssetBytes` is charged once at upload to the
+uploading feed and released once, from the **owner the sidecar recorded**, when
+the object actually leaves the store — instead of being decremented from
+whichever feed happened to expire first, which is what made it "approximate for
+cross-feed shared assets". Two narrow residuals remain and are stated in
+`db_expire.go`: an object uploaded during feed A's fetch but first *stored* in
+feed B's article is charged to A and released from B, and `srr asset heal` can
+change an object's size under the counter.
+
+**Compaction (§9.2) inherits the gate.** `rmAssets` deletes only what the sidecar
+does not count, because compaction must not be a quieter second path around the
+guarantee. It does **not** decrement: expiration already released those articles'
+references, so decrementing again would release them twice. The keys it now skips
+are the ones expiration kept plus a removed feed's id-reuse orphans (whose
+references are never released, since `ExpireArticles` walks live feeds only) —
+keeping those leaks bytes rather than breaking a live article's media, which is
+the direction this whole finding chose.
 
 ## 5. The content split
 
@@ -892,6 +986,7 @@ Store: 1,000,000 articles, 200 feeds, `--pack-size 200` (KB compressed), so
     "meta": {"b":0, "r":[[0,201]]},
     "deltas": [3005,3006,3007,3008,3009,3010,3011],
     "seen": 441,
+    "aref": {"s":"seen", "stem":447},
     "hsum": {"stem":88, "covers":20},
     "ssum": {"stem":91, "covers":200}
   },

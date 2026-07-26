@@ -190,6 +190,12 @@ type DB struct {
 	// under a fresh stem. Backend-only; the reader never sees it. Always
 	// non-nil after NewDB.
 	seen *seenPool
+	// refs is the asset reference sidecar (asset_refs.go), loaded by NewDB from
+	// the object the manifest names and written by SyncRefs under a fresh stem.
+	// It is what lets expiration prove an assets/ object is dead before deleting
+	// it, so a shared asset survives its first expiring referrer. Backend-only;
+	// the reader never sees it. Always non-nil after NewDB.
+	refs *assetRefs
 	// legacyReap holds the pre-cutover objects migrateRoot superseded and that
 	// no manifest will ever name (the db/ snapshot series, the retired seen
 	// ping/pong slots). Removed after the root flip, warn-only — see reapLegacy.
@@ -581,6 +587,13 @@ func NewDB(ctx context.Context, locked bool) (*DB, error) {
 	// the in-memory feeds.
 	db.seen = db.loadSeen(ctx)
 	db.seen.hydrateFeeds(db.core.Feeds)
+
+	// The asset reference counts ride the object the manifest names, next to the
+	// dedup pool and with the same crash story (published by the same root
+	// flip). Absence is MEANINGFUL here rather than merely legal — it is how a
+	// store that never counted is told apart from one whose counts were lost —
+	// so the three cases live in loadRefs, which never fails an open.
+	db.refs = db.loadRefs(ctx)
 
 	// Baseline for Commit's idle-cycle fast path — captured BEFORE migration, so
 	// it is set ONLY for a store already loaded from a published manifest. A

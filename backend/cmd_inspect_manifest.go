@@ -137,6 +137,9 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 	if names.Seen != nil {
 		checkStem(names.Seen.Series, names.Seen.Stem)
 	}
+	if names.ARef != nil {
+		checkStem(names.ARef.Series, names.ARef.Stem)
+	}
 	if names.HSum != nil {
 		checkStem(names.HSum.Series, names.HSum.Stem)
 	}
@@ -191,6 +194,9 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 	if names.Seen != nil {
 		probe = append(probe, names.Seen.key())
 	}
+	if names.ARef != nil {
+		probe = append(probe, names.ARef.key())
+	}
 	if names.HSum != nil {
 		probe = append(probe, names.HSum.key())
 	}
@@ -201,6 +207,23 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 	for _, k := range probe {
 		if _, err := fetch(k); err != nil {
 			bad("M4 violated: %s names %q, which is missing or corrupt: %v", key, k, err)
+		}
+	}
+
+	// (3b) The asset refcount sidecar's body. Cheap (one small object, already
+	// fetched by the probe above) and worth checking: those counts are the only
+	// thing standing between a shared assets/ object and its first expiring
+	// referrer, and a body this binary cannot read silently downgrades retention
+	// to "keep everything I cannot prove dead". A coverage start past the
+	// store's own article count would mean no article is ever covered.
+	if names.ARef != nil {
+		if buf, err := fetch(names.ARef.key()); err == nil {
+			switch p, perr := parseAssetRefs(buf); {
+			case perr != nil:
+				bad("asset refcount sidecar %s is unreadable, so expiration will stop reclaiming asset bytes: %v", names.ARef.key(), perr)
+			case p.covered > core.TotalArticles:
+				bad("asset refcount sidecar counts from chron %d, past the store's %d article(s)", p.covered, core.TotalArticles)
+			}
 		}
 	}
 

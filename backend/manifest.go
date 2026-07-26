@@ -547,6 +547,16 @@ func manifestNamesOf(buf []byte) ([]string, map[string]int, error) {
 			if json.Unmarshal(raw, &r) == nil {
 				add(r.key())
 			}
+		case "aref":
+			// The asset reference sidecar (asset_refs.go). It MUST be listed
+			// here: it is not a pack the arithmetic can rediscover, so a
+			// generation's sidecar that this shim skipped would fall below the
+			// next window's stem floor and be swept while that generation is
+			// still restorable.
+			var r StemRef
+			if json.Unmarshal(raw, &r) == nil {
+				add(r.key())
+			}
 		case "hsum", "ssum":
 			var legacy struct {
 				Key string `json:"key"`

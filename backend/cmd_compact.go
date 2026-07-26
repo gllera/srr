@@ -172,17 +172,15 @@ func (o *DB) Compact(ctx context.Context, dryRun bool) error {
 	// can re-find those keys. All-or-nothing — a delete failure aborts with the
 	// old (committed) packs still naming the keys, so a retry re-collects and
 	// re-deletes idempotently. (Rm is silent on missing, which is the common
-	// case: expiration deleted most of these already.) Like expiration, there is
-	// NO liveness check: a content-hash key an expired article shares with a
-	// still-LIVE one is deleted anyway, collapsing that media in the live article
-	// until `srr asset heal --create`. Compaction reaches this slightly more
-	// often than expiration does, because it also reclaims id-reuse orphans whose
-	// assets RemoveFeed never deleted — an accepted trade-off inherited from
-	// expiration's, not a no-op. AssetBytes is left
-	// untouched — expiration owns that counter; re-deleting an already-counted
-	// key must not double-decrement, and the id-reuse orphans that remain are the
-	// same approximate-skew class as expiration's cross-feed shared assets.
-	if err := o.rmAssets(ctx, assetKeys); err != nil {
+	// case: expiration deleted most of these already.) Like expiration, the
+	// delete passes through the refcount sidecar's liveness gate, so a
+	// content-hash key an expired article shares with a still-LIVE one survives
+	// here too — compaction is not a quieter second path around that guarantee.
+	// AssetBytes is left untouched: expiration owns that counter and already
+	// released these keys when it expired the articles, so re-deleting must not
+	// double-decrement.
+	assetsDeleted, err := o.rmAssets(ctx, assetKeys)
+	if err != nil {
 		return fmt.Errorf("compact: reclaim expired assets: %w", err)
 	}
 
@@ -198,7 +196,8 @@ func (o *DB) Compact(ctx context.Context, dryRun bool) error {
 	}
 	slog.Info("compacted store",
 		"expired_articles", totalExpired, "data_packs", len(dataExpired), "meta_shards", len(metaExpired),
-		"assets_deleted", len(assetKeys), "content_bytes_reclaimed", contentDropped, "manifest", c.ManifestNum)
+		"assets_deleted", assetsDeleted, "assets_still_referenced", len(assetKeys)-assetsDeleted,
+		"content_bytes_reclaimed", contentDropped, "manifest", c.ManifestNum)
 	return nil
 }
 
@@ -356,13 +355,33 @@ func (o *DB) rebuildMetaSummary(ctx context.Context, c *DBCore, names *ManifestN
 
 // rmAssets deletes the collected asset keys, bounded like ExpireArticles' own
 // delete phase. Rm is silent on missing, so already-expired assets cost nothing.
-func (o *DB) rmAssets(ctx context.Context, keys map[string]struct{}) error {
-	if len(keys) == 0 {
-		return nil
+//
+// It goes through the SAME liveness gate expiration does (asset_refs.go): a key
+// the refcount sidecar still counts a reference to belongs to a live article
+// somewhere and is left alone, because compaction must not be a second, quieter
+// path around the guarantee that a shared object outlives its first expiring
+// referrer. Expiration owns the release itself — these articles were already
+// expired, so their references were dropped then — which is why nothing here
+// decrements: doing so would release them twice.
+//
+// The keys this skips are the ones expiration itself kept, plus a removed
+// feed's id-reuse orphans (whose references are never released, since
+// ExpireArticles only walks live feeds). Those orphans used to be deleted here;
+// keeping them leaks bytes instead of breaking a live article's media, which is
+// the direction this whole finding chose.
+func (o *DB) rmAssets(ctx context.Context, keys map[string]struct{}) (int, error) {
+	dead := make([]string, 0, len(keys))
+	for key := range keys {
+		if !o.refs.live(key) {
+			dead = append(dead, key)
+		}
+	}
+	if len(dead) == 0 {
+		return 0, nil
 	}
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(max(1, globals.Workers))
-	for key := range keys {
+	for _, key := range dead {
 		g.Go(func() error {
 			if err := o.Rm(gctx, key); err != nil {
 				return fmt.Errorf("delete %s: %w", key, err)
@@ -370,5 +389,5 @@ func (o *DB) rmAssets(ctx context.Context, keys map[string]struct{}) error {
 			return nil
 		})
 	}
-	return g.Wait()
+	return len(dead), g.Wait()
 }
