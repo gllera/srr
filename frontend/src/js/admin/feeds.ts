@@ -586,9 +586,14 @@ function openFeedModal(f: FeedListView | null): void {
       probing = true
       status.replaceChildren(el("span", { class: "muted" }, "reading feed…"))
       try {
-         const r = (await apiGet(
-            `/api/resolve?url=${encodeURIComponent(u)}&recipe=${encodeURIComponent(recipeVal)}&ingest=${encodeURIComponent(ingestIn.value.trim())}`,
-         )) as ResolveResult
+         let qs = `url=${encodeURIComponent(u)}&recipe=${encodeURIComponent(recipeVal)}&ingest=${encodeURIComponent(ingestIn.value.trim())}`
+         // The probe simulates the feed's own fetch, so it carries the feed-level
+         // secret grant too (SEC5 is fail-closed: without it the server resolves
+         // the RECIPE's grant alone and an external ingest needing its own
+         // credentials probes as an auth failure). REPEATED param, one per scope
+         // — the server reads q["secrets"], a slice, not a joined list.
+         for (const s of splitScopes(secretsIn.value)) qs += `&secrets=${encodeURIComponent(s)}`
+         const r = (await apiGet(`/api/resolve?${qs}`)) as ResolveResult
          if (url.value.trim() !== u) return // field changed while probing — stale result
          if (r.url && r.url !== u) url.value = r.url // homepage → its discovered feed
          probed = url.value.trim()
@@ -615,6 +620,12 @@ function openFeedModal(f: FeedListView | null): void {
       }
    })
    ingestIn.addEventListener("change", () => {
+      if (url.value.trim()) checkURL(true)
+   })
+   // The grant decides what the probe can authenticate as, so editing it
+   // re-probes like the ingest field does — FORCED, because checkURL's `probed`
+   // memo is keyed on the URL alone and an unforced retry would no-op.
+   secretsIn.addEventListener("change", () => {
       if (url.value.trim()) checkURL(true)
    })
 
@@ -763,7 +774,7 @@ function openPreviewDialog(f: FeedListView): void {
       el("div", { class: "row" }, el("button", { class: "btn", onclick: () => dlg.close() }, "Close")),
    )
    dlg.showModal()
-   renderPreviewInto(out, f.url, f.recipe || "default", f.pipe, f.ingest)
+   renderPreviewInto(out, f.url, f.recipe || "default", f.pipe, f.ingest, f.secrets)
 }
 
 renderers.feeds = drawFeeds
