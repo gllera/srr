@@ -160,23 +160,34 @@ func drainClose(rc io.ReadCloser) {
 
 func (d *HTTP) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	u := d.keyURL("read", key)
-	req, err := d.newRequest(ctx, http.MethodGet, u, nil)
+	var body io.ReadCloser
+	// Only reaching the response is retried; the stream that comes back is the
+	// caller's, and bytes they have already read cannot be re-delivered. The
+	// request is rebuilt per attempt because a Do that failed has consumed it.
+	err := withRetry(ctx, func(int) error {
+		req, err := d.newRequest(ctx, http.MethodGet, u, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := d.client.Do(req) //nolint:bodyclose // closed by the deferred drainClose below
+		if err != nil {
+			return fmt.Errorf("http get %s: %w", u.Redacted(), err)
+		}
+		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+			drainClose(resp.Body)
+			return errMissing("key not found on "+u.Redacted()+":", key)
+		}
+		if resp.StatusCode < 200 || resp.StatusCode > 299 {
+			drainClose(resp.Body)
+			return fmt.Errorf("http get %s: %s", u.Redacted(), resp.Status)
+		}
+		body = resp.Body
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	resp, err := d.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("http get %s: %w", u.Redacted(), err)
-	}
-	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
-		drainClose(resp.Body)
-		return nil, errMissing("key not found on "+u.Redacted()+":", key)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		drainClose(resp.Body)
-		return nil, fmt.Errorf("http get %s: %s", u.Redacted(), resp.Status)
-	}
-	return resp.Body, nil
+	return body, nil
 }
 
 func (d *HTTP) Put(ctx context.Context, key string, r io.Reader, ignoreExisting bool) error {
@@ -251,18 +262,50 @@ func (d *HTTP) put(ctx context.Context, key string, r io.Reader, ignoreExisting 
 		req.Header.Set("Cache-Control", cacheControl)
 	}
 
-	resp, err := d.client.Do(req) //nolint:bodyclose // closed by the deferred drainClose below
-	if err != nil {
-		return fmt.Errorf("http put %s: %w", u.Redacted(), err)
+	send := func() error {
+		resp, err := d.client.Do(req) //nolint:bodyclose // closed by the deferred drainClose below
+		if err != nil {
+			return fmt.Errorf("http put %s: %w", u.Redacted(), err)
+		}
+		defer drainClose(resp.Body)
+		if resp.StatusCode == http.StatusPreconditionFailed && !ignoreExisting {
+			return fmt.Errorf("key %q already exists on %s: %w", key, u.Redacted(), os.ErrExist)
+		}
+		if resp.StatusCode < 200 || resp.StatusCode > 299 {
+			return fmt.Errorf("http put %s: %s", u.Redacted(), resp.Status)
+		}
+		return nil
 	}
-	defer drainClose(resp.Body)
-	if resp.StatusCode == http.StatusPreconditionFailed && !ignoreExisting {
-		return fmt.Errorf("key %q already exists on %s: %w", key, u.Redacted(), os.ErrExist)
+
+	if !ignoreExisting {
+		// An exclusive create is NEVER retried. This is the `.locked` lease
+		// acquire: a repeat after a PUT that landed before the connection broke
+		// would collide with the marker THIS process just wrote, report
+		// os.ErrExist against itself, and wedge the writer until a human passes
+		// --force.
+		return send()
 	}
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("http put %s: %s", u.Redacted(), resp.Status)
-	}
-	return nil
+
+	// The body replay is the stdlib's own: http.NewRequest sets GetBody exactly
+	// when it knows how to reproduce the body in FULL (a *bytes.Reader /
+	// *bytes.Buffer / *strings.Reader — how packs and manifests arrive here), and
+	// leaves it nil otherwise (a streamed *os.File asset), which is precisely the
+	// "cannot prove the retry writes the same bytes" case. Cloning also carries
+	// ContentLength across, so a retried write never silently turns into a
+	// chunked one an S3-compatible endpoint would reject.
+	getBody := req.GetBody
+	return retryLoop(ctx, func() bool { return getBody != nil }, func(attempt int) error {
+		if attempt > 1 {
+			body, err := getBody()
+			if err != nil {
+				return fmt.Errorf("rewinding body for %s: %w", u.Redacted(), err)
+			}
+			next := req.Clone(ctx)
+			next.Body = body
+			req = next
+		}
+		return send()
+	})
 }
 
 // Stat returns the object's size via a HEAD request; a missing key is (0, nil)
@@ -271,49 +314,61 @@ func (d *HTTP) put(ctx context.Context, key string, r io.Reader, ignoreExisting 
 // plain HTTP stores.
 func (d *HTTP) Stat(ctx context.Context, key string) (int64, error) {
 	u := d.keyURL("stat", key)
-	req, err := d.newRequest(ctx, http.MethodHead, u, nil)
+	var size int64
+	err := withRetry(ctx, func(int) error {
+		req, err := d.newRequest(ctx, http.MethodHead, u, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := d.client.Do(req) //nolint:bodyclose // closed by the deferred drainClose below
+		if err != nil {
+			return fmt.Errorf("http head %s: %w", u.Redacted(), err)
+		}
+		defer drainClose(resp.Body)
+		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+			slog.Debug("db not found", "key", u.Redacted())
+			return errMissing("http head "+u.Redacted()+":", key)
+		}
+		if resp.StatusCode < 200 || resp.StatusCode > 299 {
+			return fmt.Errorf("http head %s: %s", u.Redacted(), resp.Status)
+		}
+		// A server that omits Content-Length reports -1; clamp to 0. That is a
+		// PRESENT object of unknown size, not an absent one — the 404/410 arm above
+		// is the only absence answer, which is what lets a nil error prove presence.
+		size = max(0, resp.ContentLength)
+		return nil
+	})
 	if err != nil {
 		return 0, err
 	}
-	resp, err := d.client.Do(req) //nolint:bodyclose // closed by the deferred drainClose below
-	if err != nil {
-		return 0, fmt.Errorf("http head %s: %w", u.Redacted(), err)
-	}
-	defer drainClose(resp.Body)
-	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
-		slog.Debug("db not found", "key", u.Redacted())
-		return 0, errMissing("http head "+u.Redacted()+":", key)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return 0, fmt.Errorf("http head %s: %s", u.Redacted(), resp.Status)
-	}
-	// A server that omits Content-Length reports -1; clamp to 0. That is a
-	// PRESENT object of unknown size, not an absent one — the 404/410 arm above
-	// is the only absence answer, which is what lets a nil error prove presence.
-	return max(0, resp.ContentLength), nil
+	return size, nil
 }
 
 func (d *HTTP) Rm(ctx context.Context, key string) error {
 	u := d.keyURL("delete", key)
-	req, err := d.newRequest(ctx, http.MethodDelete, u, nil)
-	if err != nil {
-		return err
-	}
-	resp, err := d.client.Do(req) //nolint:bodyclose // closed by the deferred drainClose below
-	if err != nil {
-		return fmt.Errorf("http delete %s: %w", u.Redacted(), err)
-	}
-	defer drainClose(resp.Body)
-	// Rm is contractually silent on missing keys (the GC sweeps re-delete a
-	// trailing window of already-gone names on purpose).
-	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
-		slog.Debug("db not found", "key", u.Redacted())
+	return withRetry(ctx, func(int) error {
+		req, err := d.newRequest(ctx, http.MethodDelete, u, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := d.client.Do(req) //nolint:bodyclose // closed by the deferred drainClose below
+		if err != nil {
+			return fmt.Errorf("http delete %s: %w", u.Redacted(), err)
+		}
+		defer drainClose(resp.Body)
+		// Rm is contractually silent on missing keys (the GC sweeps re-delete a
+		// trailing window of already-gone names on purpose), which is also what
+		// makes a repeat of it harmless: the second delete of a key the first one
+		// removed is a success, not a 404.
+		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+			slog.Debug("db not found", "key", u.Redacted())
+			return nil
+		}
+		if resp.StatusCode < 200 || resp.StatusCode > 299 {
+			return fmt.Errorf("http delete %s: %s", u.Redacted(), resp.Status)
+		}
 		return nil
-	}
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("http delete %s: %s", u.Redacted(), resp.Status)
-	}
-	return nil
+	})
 }
 
 // Close releases this handle. It deliberately does NOT flush idle connections

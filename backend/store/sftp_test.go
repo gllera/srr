@@ -180,11 +180,12 @@ func newPipeSFTPClient(t *testing.T) (client *sftp.Client, base string, kill fun
 // setupSFTPPipe puts the production SFTP struct on top of that client. The
 // session is NOT in the sftpSessions memo, so this cleanup owns its teardown —
 // d.Close() would be a harmless no-op either way (see SFTP.Close), but nothing
-// here should rely on a handle closing anything.
+// here should rely on a handle closing anything. A nil url is what marks the
+// handle as memo-less: its retries re-use the session rather than redial.
 func setupSFTPPipe(t *testing.T) (*SFTP, string) {
 	t.Helper()
 	client, base, _ := newPipeSFTPClient(t)
-	return &SFTP{path: base, host: "test", client: client}, base
+	return &SFTP{path: base, host: "test", sess: &sftpSession{client: client}}, base
 }
 
 func TestSFTPPutGetRoundTrip(t *testing.T) {
@@ -379,7 +380,7 @@ func TestSFTPSweepTempLeftoversTakesNowFromOwnTemp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	d.sweepTempLeftovers(base, own)
+	d.sweepTempLeftovers(d.conn(), base, own)
 
 	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
 		t.Errorf("leftover survived (err=%v); the sweep aged it against this host's clock, not the server's own-temp mtime", err)
@@ -398,11 +399,11 @@ func TestSFTPSweepTempLeftoversTakesNowFromOwnTemp(t *testing.T) {
 	if err := os.Chtimes(aged, old, old); err != nil {
 		t.Fatal(err)
 	}
-	d.sweepTempLeftovers(base, "db.gz.tmp.98765.4") // never created
+	d.sweepTempLeftovers(d.conn(), base, "db.gz.tmp.98765.4") // never created
 	if _, err := os.Stat(aged); err != nil {
 		t.Errorf("an ancient leftover was swept with no reference mtime (err=%v); want no judgement", err)
 	}
-	d.sweepTempLeftovers(filepath.Join(base, "no-such-dir"), own)
+	d.sweepTempLeftovers(d.conn(), filepath.Join(base, "no-such-dir"), own)
 }
 
 // --- session memo ----------------------------------------------------------
@@ -546,6 +547,125 @@ func TestSFTPSessionConcurrentLookupsDialOnce(t *testing.T) {
 	}
 }
 
+// memoHandle is a production SFTP handle bound to a memoized session, i.e. the
+// shape newSFTP builds: it carries the identity, so a connection-class failure
+// can send it back to the memo for a redial. base stays the FIRST session's temp
+// dir on purpose — a redialed pipe session serves the same real filesystem, so
+// the handle's absolute paths keep resolving and the redial is observable as a
+// dial count rather than as a lost store.
+func memoHandle(t *testing.T, c *sftpDialCounter, key sftpSessionKey, u *url.URL) *SFTP {
+	t.Helper()
+	sess, err := sftpSessionFor(key, u)
+	if err != nil {
+		t.Fatalf("sftpSessionFor: %v", err)
+	}
+	return &SFTP{path: c.base, host: "test", key: key, u: u, sess: sess}
+}
+
+// The failure this whole step exists for: a fetch cycle opens the store ONCE and
+// runs for minutes, so a peer that goes away mid-cycle used to fail not just the
+// op that hit it but every op after it. One redial and one repeat, and the cycle
+// carries on.
+func TestSFTPRedialsAfterMidOperationConnectionLoss(t *testing.T) {
+	withFastRetry(t)
+	c := withSFTPSessionMemo(t)
+	key := sftpSessionKey{addr: "h:22", user: "alice"}
+	u := mustURL(t, "sftp://alice@h/p")
+	d := memoHandle(t, c, key, u)
+
+	if err := d.Put(ctx, "a.txt", strings.NewReader("data"), true); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	c.kill() // the peer dies with the handle still open
+
+	rc, err := d.Get(ctx, "a.txt")
+	if err != nil {
+		t.Fatalf("Get after the session died: %v — the handle never went back to the memo", err)
+	}
+	if got := readAllClose(t, rc); got != "data" {
+		t.Errorf("content = %q, want %q", got, "data")
+	}
+	if c.dials != 2 {
+		t.Errorf("dials = %d, want 2 (the redial)", c.dials)
+	}
+
+	// The handle adopted the replacement rather than redialing per op, and so did
+	// the memo — the next Open must not pay for another handshake.
+	if err := d.Put(ctx, "b.txt", strings.NewReader("more"), true); err != nil {
+		t.Fatalf("Put on the redialed session: %v", err)
+	}
+	if _, err := sftpSessionFor(key, u); err != nil {
+		t.Fatalf("sftpSessionFor: %v", err)
+	}
+	if c.dials != 2 {
+		t.Errorf("dials = %d, want 2 — the redialed session must be the memoized one", c.dials)
+	}
+}
+
+// A write recovers the same way, and it recovers WHOLE: the retry re-sends the
+// body from the start, so what lands under an immutable name is never a prefix
+// of it.
+func TestSFTPAtomicPutRetriesWithTheCompleteBody(t *testing.T) {
+	withFastRetry(t)
+	c := withSFTPSessionMemo(t)
+	key := sftpSessionKey{addr: "h:22", user: "alice"}
+	d := memoHandle(t, c, key, mustURL(t, "sftp://alice@h/p"))
+	base := c.base
+	c.kill()
+
+	if err := d.AtomicPut(ctx, "pack.gz", strings.NewReader("packbytes"), ObjectMeta{}); err != nil {
+		t.Fatalf("AtomicPut across a dead session: %v", err)
+	}
+	if c.dials != 2 {
+		t.Errorf("dials = %d, want 2 (the redial)", c.dials)
+	}
+	got, err := os.ReadFile(filepath.Join(base, "pack.gz"))
+	if err != nil {
+		t.Fatalf("reading the written object: %v", err)
+	}
+	if string(got) != "packbytes" {
+		t.Errorf("stored %q, want the complete %q", got, "packbytes")
+	}
+	// Every attempt draws its own staging name and removes it, so a retried
+	// write leaves nothing behind either.
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if isTempLeftover(e.Name()) {
+			t.Errorf("staging file %q survived the retried AtomicPut", e.Name())
+		}
+	}
+}
+
+// An exclusive create is the `.locked` lease acquire and is NEVER retried: a
+// repeat could find the marker this very process wrote a moment ago, report
+// contention against itself, and wedge the writer until a human passes --force.
+// The overwrite sibling right below it is the control — same handle, same dead
+// session, and it does redial.
+func TestSFTPExclusiveCreateIsNeverRetried(t *testing.T) {
+	withFastRetry(t)
+	c := withSFTPSessionMemo(t)
+	key := sftpSessionKey{addr: "h:22", user: "alice"}
+	d := memoHandle(t, c, key, mustURL(t, "sftp://alice@h/p"))
+	c.kill()
+
+	if err := d.Put(ctx, ".locked", strings.NewReader("{}"), false); err == nil {
+		t.Fatal("Put(ignoreExisting=false) on a dead session should fail")
+	}
+	if c.dials != 1 {
+		t.Fatalf("dials = %d, want 1 — an exclusive create must not be retried onto a fresh session", c.dials)
+	}
+
+	if err := d.Put(ctx, ".locked", strings.NewReader("{}"), true); err != nil {
+		t.Fatalf("Put(overwrite) on the same dead session: %v", err)
+	}
+	if c.dials != 2 {
+		t.Errorf("dials = %d, want 2 — an overwrite is idempotent and does retry", c.dials)
+	}
+}
+
 // Close is a ref-release, not a teardown: the session belongs to the memo, so a
 // handle that closes must leave every other handle — and the next Open — with a
 // working connection. Closing it here is exactly what made every store.Open pay
@@ -559,7 +679,7 @@ func TestSFTPCloseLeavesTheSharedSessionUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sftpSessionFor: %v", err)
 	}
-	first := &SFTP{path: c.base, host: "test", client: sess.client}
+	first := &SFTP{path: c.base, host: "test", sess: sess}
 	if err := first.Put(ctx, "a.txt", strings.NewReader("data"), true); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -577,7 +697,7 @@ func TestSFTPCloseLeavesTheSharedSessionUp(t *testing.T) {
 	if c.dials != 1 {
 		t.Errorf("dials = %d, want 1 — Close must not force a redial", c.dials)
 	}
-	second := &SFTP{path: c.base, host: "test", client: again.client}
+	second := &SFTP{path: c.base, host: "test", sess: again}
 	rc, err := second.Get(ctx, "a.txt")
 	if err != nil {
 		t.Fatalf("Get on the shared session after a peer handle closed: %v", err)
