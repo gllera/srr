@@ -410,8 +410,14 @@ func TestUploadCacheRefProcessOutputEmptyFileFailsSoft(t *testing.T) {
 	if got := string(readKey(t, cap, key)); got != jpegBytes {
 		t.Errorf("stored body = %q, want original %q (fail-soft)", got, jpegBytes)
 	}
-	if cap.gotMeta != (store.ObjectMeta{}) {
-		t.Errorf("ObjectMeta = %+v, want empty on fail-soft", cap.gotMeta)
+	// The abandoned process JSON is NOT adopted. With no asset-peek configured
+	// the type then comes from sniffing the bytes actually stored (S70), so the
+	// jpeg source types itself rather than riding the discarded image/webp.
+	if cap.gotMeta.ContentType != "image/jpeg" {
+		t.Errorf("ContentType = %q, want image/jpeg (sniffed original, not the fail-soft process JSON)", cap.gotMeta.ContentType)
+	}
+	if cap.gotMeta.ContentEncoding != "" {
+		t.Errorf("ContentEncoding = %q, want empty on fail-soft", cap.gotMeta.ContentEncoding)
 	}
 }
 
@@ -642,7 +648,7 @@ func TestUploadCacheRefStoresOversizeSourceUnchecked(t *testing.T) {
 func TestUploadCacheRefProcessOutputOversizeFailsSoft(t *testing.T) {
 	be := tempStore(t)
 	// {output} mode: write a 4 KB result + valid metadata. With a 1 KB cap the
-	// output exceeds it, so readProcOutput fails soft and the original is stored.
+	// output exceeds it, so checkProcOutput fails soft and the original is stored.
 	body := `head -c 4096 /dev/zero > "$2"` + "\n" +
 		`printf '{"mimetype":"image/webp","extension":"webp"}'`
 	af := newAssetFetcher(be, 1, fakeProcess(t, body)+" {input} {output}") // 1 KB cap
@@ -1079,5 +1085,244 @@ func TestUploadCacheRefEmptyLocalnameIsNotAsset(t *testing.T) {
 	af := newAssetFetcher(tempStore(t), 1024, "")
 	if _, _, err := af.UploadCacheRef(context.Background(), t.TempDir(), ""); !errors.Is(err, errNotAsset) {
 		t.Fatalf("err = %v, want errNotAsset for an empty localname", err)
+	}
+}
+
+// A PNG signature + IHDR head and an HTML document: enough bytes for
+// http.DetectContentType to classify them, without being real files.
+const pngBytes = "\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+const htmlBytes = "<!DOCTYPE html>\n<html><body>hi</body></html>"
+
+// shrinkAssetMemory lowers the in-memory ceiling for one test, so the
+// stream-from-disk path is exercised on a handful of bytes instead of a
+// megabyte of fixture.
+func shrinkAssetMemory(t *testing.T, max int64) {
+	t.Helper()
+	prev := assetInMemoryMax
+	assetInMemoryMax = max
+	t.Cleanup(func() { assetInMemoryMax = prev })
+}
+
+// A source at or below the ceiling is hashed and KEPT: the one read that hashes
+// it is also the upload body.
+func TestHashSourceKeepsSmallSourceInMemory(t *testing.T) {
+	dir := t.TempDir()
+	writeCacheFile(t, dir, "photo.jpg", jpegBytes)
+	full := filepath.Join(dir, "photo.jpg")
+
+	p, sum, err := hashSource(full, "photo.jpg", int64(len(jpegBytes)))
+	if err != nil {
+		t.Fatalf("hashSource: %v", err)
+	}
+	if p.path != "" {
+		t.Errorf("path = %q, want the payload held in memory", p.path)
+	}
+	if string(p.data) != jpegBytes || p.size != int64(len(jpegBytes)) {
+		t.Errorf("payload = (%q, %d), want the whole %d-byte source", p.data, p.size, len(jpegBytes))
+	}
+	if want := sha256.Sum256([]byte(jpegBytes)); sum != want {
+		t.Error("hash differs from sha256 of the source bytes")
+	}
+}
+
+// Above the ceiling the bytes are dropped and the payload is the PATH — that is
+// the whole point of the change: peak heap stops scaling with the asset.
+func TestHashSourceStreamsLargeSourceFromDisk(t *testing.T) {
+	shrinkAssetMemory(t, 8)
+	dir := t.TempDir()
+	writeCacheFile(t, dir, "clip.mp4", jpegBytes)
+	full := filepath.Join(dir, "clip.mp4")
+
+	p, sum, err := hashSource(full, "clip.mp4", int64(len(jpegBytes)))
+	if err != nil {
+		t.Fatalf("hashSource: %v", err)
+	}
+	if p.path != full || p.data != nil {
+		t.Errorf("payload = (%q, %d bytes held), want the path alone", p.path, len(p.data))
+	}
+	if p.size != int64(len(jpegBytes)) {
+		t.Errorf("size = %d, want %d", p.size, len(jpegBytes))
+	}
+	if want := sha256.Sum256([]byte(jpegBytes)); sum != want {
+		t.Error("streaming hash differs from sha256 of the source bytes")
+	}
+}
+
+// A file that GREW past the ceiling between the stat and the read leaves a
+// prefix in the capture buffer. A prefix must never be published as the whole
+// object at an immutable content-hash key — the payload falls back to the path,
+// and the hash still covers every byte read.
+func TestHashSourcePrefixNeverPassesAsWholePayload(t *testing.T) {
+	shrinkAssetMemory(t, 8)
+	dir := t.TempDir()
+	writeCacheFile(t, dir, "photo.jpg", jpegBytes)
+	full := filepath.Join(dir, "photo.jpg")
+
+	// A stat size UNDER the ceiling asks for the capture; the file is bigger.
+	p, sum, err := hashSource(full, "photo.jpg", 4)
+	if err != nil {
+		t.Fatalf("hashSource: %v", err)
+	}
+	if p.path != full || p.data != nil {
+		t.Errorf("payload = (%q, %d bytes held), want the path (the capture is only a prefix)", p.path, len(p.data))
+	}
+	if p.size != int64(len(jpegBytes)) {
+		t.Errorf("size = %d, want the %d bytes actually read", p.size, len(jpegBytes))
+	}
+	if want := sha256.Sum256([]byte(jpegBytes)); sum != want {
+		t.Error("hash covers only the captured prefix, want every byte read")
+	}
+}
+
+// End to end: an over-ceiling source is streamed from disk to the store, byte
+// for byte, under the same content-hash key, and its Content-Type is still
+// sniffed (from the file, since there are no bytes in hand).
+func TestUploadCacheRefStreamsOversizeSourceFromDisk(t *testing.T) {
+	shrinkAssetMemory(t, 8)
+	cap := &metaCaptureBackend{Backend: tempStore(t)}
+	af := newAssetFetcher(cap, 1024, "")
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "shot.png", pngBytes)
+
+	key, n, err := af.UploadCacheRef(context.Background(), cacheDir, "shot.png")
+	if err != nil {
+		t.Fatalf("UploadCacheRef: %v", err)
+	}
+	sum := sha256.Sum256([]byte(pngBytes))
+	if want := contentHashKey(".png", sum); key != want {
+		t.Errorf("key = %q, want %q", key, want)
+	}
+	if got := string(readKey(t, cap, key)); got != pngBytes {
+		t.Errorf("stored body = %q, want the streamed source verbatim", got)
+	}
+	if n != int64(len(pngBytes)) {
+		t.Errorf("uploaded bytes = %d, want %d", n, len(pngBytes))
+	}
+	if cap.gotMeta.ContentType != "image/png" {
+		t.Errorf("ContentType = %q, want image/png (sniffed off disk)", cap.gotMeta.ContentType)
+	}
+}
+
+// {output} mode uploads FROM the staging file (never slurped): the stored bytes
+// and the charged size both come from it, and it is removed only after the
+// upload has read it.
+func TestUploadCacheRefProcessOutputStreamsFromStagingFile(t *testing.T) {
+	be := tempStore(t)
+	const processed = "PROCESSED-OUTPUT-FILE-BYTES"
+	body := "printf '" + processed + "' > \"$2\"\nprintf '{\"mimetype\":\"image/webp\",\"extension\":\"webp\"}'"
+	af := newAssetFetcher(be, 1024, fakeProcess(t, body)+" {input} {output}")
+	cacheDir := t.TempDir()
+	af.procDir = filepath.Join(cacheDir, "_processed")
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+
+	key, n, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg")
+	if err != nil {
+		t.Fatalf("UploadCacheRef: %v", err)
+	}
+	if got := string(readKey(t, be, key)); got != processed {
+		t.Errorf("stored body = %q, want the staging file's bytes %q", got, processed)
+	}
+	if n != int64(len(processed)) {
+		t.Errorf("uploaded bytes = %d, want %d (the staging file's size)", n, len(processed))
+	}
+	ents, err := os.ReadDir(af.procDir)
+	if err != nil {
+		t.Fatalf("read _processed: %v", err)
+	}
+	if len(ents) != 0 {
+		t.Errorf("staging file survived the upload: %v", ents)
+	}
+}
+
+// Zero config — no asset-peek, no asset-process — used to store every asset as
+// the backend's application/octet-stream default, i.e. every self-hosted image
+// downloaded instead of rendering. The payload's own leading bytes now type it.
+func TestUploadCacheRefSniffsContentTypeWithoutPeek(t *testing.T) {
+	cap := &metaCaptureBackend{Backend: tempStore(t)}
+	af := newAssetFetcher(cap, 1024, "")
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "shot.png", pngBytes)
+
+	if _, _, err := af.UploadCacheRef(context.Background(), cacheDir, "shot.png"); err != nil {
+		t.Fatalf("UploadCacheRef: %v", err)
+	}
+	if cap.gotMeta.ContentType != "image/png" {
+		t.Errorf("ContentType = %q, want image/png (sniffed)", cap.gotMeta.ContentType)
+	}
+}
+
+// The sniff classifies what is actually STORED, not the source: a stdout-mode
+// asset-process that rewrites a jpeg into PNG bytes must be typed image/png.
+func TestUploadCacheRefSniffsProcessOutputNotSource(t *testing.T) {
+	cap := &metaCaptureBackend{Backend: tempStore(t)}
+	out := filepath.Join(t.TempDir(), "out.bin")
+	if err := os.WriteFile(out, []byte(pngBytes), 0o644); err != nil {
+		t.Fatalf("write out: %v", err)
+	}
+	af := newAssetFetcher(cap, 1024, fakeProcess(t, "cat '"+out+"'"))
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "photo.jpg", jpegBytes)
+
+	if _, _, err := af.UploadCacheRef(context.Background(), cacheDir, "photo.jpg"); err != nil {
+		t.Fatalf("UploadCacheRef: %v", err)
+	}
+	if cap.gotMeta.ContentType != "image/png" {
+		t.Errorf("ContentType = %q, want image/png (the stored process output, not the jpeg source)", cap.gotMeta.ContentType)
+	}
+}
+
+// A peek-configured install is UNCHANGED: peek is the single source of truth,
+// so a peek that reports only an extension leaves the type unset exactly as it
+// did before — the fallback is for installs with no peek command at all.
+func TestUploadCacheRefSniffSkippedWhenPeekConfigured(t *testing.T) {
+	cap := &metaCaptureBackend{Backend: tempStore(t)}
+	af := newAssetFetcher(cap, 1024, "")
+	af.peek = strings.Fields(fakePeek(t, `{"extension":"png","supported":true}`) + " {input}")
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "shot.png", pngBytes)
+
+	if _, _, err := af.UploadCacheRef(context.Background(), cacheDir, "shot.png"); err != nil {
+		t.Fatalf("UploadCacheRef: %v", err)
+	}
+	if cap.gotMeta.ContentType != "" {
+		t.Errorf("ContentType = %q, want empty (peek is configured; no sniffing)", cap.gotMeta.ContentType)
+	}
+}
+
+// The sniff adopts INERT types only. An `a href` marker can name any file, and
+// assets/ is an origin a browser would execute a text/html document on — so an
+// HTML payload keeps the octet-stream default (an inert download).
+func TestUploadCacheRefSniffRejectsActiveContentType(t *testing.T) {
+	cap := &metaCaptureBackend{Backend: tempStore(t)}
+	af := newAssetFetcher(cap, 1024, "")
+	cacheDir := t.TempDir()
+	writeCacheFile(t, cacheDir, "page.html", htmlBytes)
+
+	key, _, err := af.UploadCacheRef(context.Background(), cacheDir, "page.html")
+	if err != nil {
+		t.Fatalf("UploadCacheRef: %v", err)
+	}
+	if cap.gotMeta.ContentType != "" {
+		t.Errorf("ContentType = %q, want empty (a sniffed text/html must never be stamped)", cap.gotMeta.ContentType)
+	}
+	if got := string(readKey(t, cap, key)); got != htmlBytes {
+		t.Errorf("stored body = %q, want the file hosted as-is", got)
+	}
+}
+
+// sniffedMediaType's allowlist, stated directly.
+func TestSniffedMediaTypeAllowlist(t *testing.T) {
+	for _, ct := range []string{"image/png", "video/webm", "audio/mpeg", "application/ogg", "application/pdf"} {
+		if sniffedMediaType(ct) != ct {
+			t.Errorf("sniffedMediaType(%q) = %q, want it adopted", ct, sniffedMediaType(ct))
+		}
+	}
+	for _, ct := range []string{
+		"text/html; charset=utf-8", "text/xml; charset=utf-8", "text/plain; charset=utf-8",
+		"application/octet-stream", "application/zip", "application/wasm", "font/woff2",
+	} {
+		if got := sniffedMediaType(ct); got != "" {
+			t.Errorf("sniffedMediaType(%q) = %q, want it refused", ct, got)
+		}
 	}
 }

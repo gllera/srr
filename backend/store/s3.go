@@ -198,13 +198,14 @@ func (d *S3) PutIfVersion(ctx context.Context, key string, r io.Reader, meta Obj
 }
 
 // put is the shared write core. Content-Type comes from meta (the asset-peek /
-// asset-process mimetype), then contentTypeForKey (SRR's own gzip objects —
-// db.gz + pack-grammar names — declare application/gzip), then the
-// application/octet-stream default — SRR still never guesses an asset's type
-// from the key extension or by sniffing the bytes, since peek/process is the
-// single source of truth there. Content-Encoding is stamped only when meta
-// sets it; pack writes never set it (the reader gunzips manually — see
-// contentTypeGzip).
+// asset-process mimetype, or — with neither configured — the type the asset
+// layer sniffed from the payload's own bytes), then contentTypeForKey (SRR's own
+// gzip objects — db.gz + pack-grammar names — declare application/gzip), then
+// the application/octet-stream default. This backend still never guesses a type
+// from the key extension, and never sniffs on its own: an asset's type is
+// resolved by the asset layer and arrives here as meta. Content-Encoding is
+// stamped only when meta sets it; pack writes never set it (the reader gunzips
+// manually — see contentTypeGzip).
 //
 // ifMatch, when set, conditions the write on the object's current ETag (the
 // PutIfVersion path); it is nil for every unconditional write. It returns the
