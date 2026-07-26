@@ -218,11 +218,16 @@ export function pipeTokens(pipe?: string[]): HTMLElement {
    return el("div", { class: "pipe" }, ...kids)
 }
 
-// overrideChip marks a feed carrying feed-level {ingest, pipe} overrides on top
-// of its recipe; the tooltip says which axis. Empty string (renders as nothing)
-// when the feed has none — the common case.
-export function overrideChip(f: { ingest?: string; pipe?: string[] }): HTMLElement | string {
-   const axes = [f.ingest && "ingest", (f.pipe || []).length && "pipe"].filter(Boolean)
+// overrideChip marks a feed carrying feed-level {ingest, pipe, secrets} overrides
+// on top of its recipe; the tooltip says which axis. Empty string (renders as
+// nothing) when the feed has none — the common case. The three axes are the same
+// ones feeds.ts's advValues() enumerates behind the Advanced fold: a feed whose
+// only override is its secret grant (SEC5) must still wear the badge, or saved
+// config hides silently in the table.
+export function overrideChip(f: { ingest?: string; pipe?: string[]; secrets?: string[] }): HTMLElement | string {
+   const axes = [f.ingest && "ingest", (f.pipe || []).length && "pipe", (f.secrets || []).length && "secrets"].filter(
+      Boolean,
+   )
    if (!axes.length) return ""
    return el("span", { class: "chip recipe", title: "feed-level " + axes.join(" + ") + " override" }, "override")
 }
