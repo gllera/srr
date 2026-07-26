@@ -118,7 +118,7 @@ reproduce touch/overscroll behavior.
     sweep must never see `assets/` or mutable classes as garbage. S65 builds directly
     on the GC shape this lands.
 
-- [ ] **S65** — STO6: batch + parallelize GC deletes (`RmAll`)  ·  **P3 · S–M**  ·  from STO6 (BE-S6)
+- [x] **S65** — STO6: batch + parallelize GC deletes (`RmAll`)  ·  **P3 · S–M**  ·  from STO6 (BE-S6)
   - **Edit:** package helper `store.RmAll(ctx, be, keys, parallel)` — bounded-errgroup
     fan-out over `Rm`, with an optional per-backend override interface that S3
     implements via `DeleteObjects` (1000 keys/call, mapping per-key failures). Adopt in
@@ -133,7 +133,7 @@ reproduce touch/overscroll behavior.
   - **Risk / deps:** after S64 (one GC rework, not two). Parallel Rm keeps per-key
     silent-on-missing semantics.
 
-- [ ] **S66** — STO3: memoize SFTP sessions; isolate the HTTP transport  ·  **P3 · M**  ·  from STO3 (BE-S3)
+- [x] **S66** — STO3: memoize SFTP sessions; isolate the HTTP transport  ·  **P3 · M**  ·  from STO3 (BE-S3)
   - **Edit:** `sftp.go` — memoize dialed sessions like `s3Clients` (`s3.go:54-98`
     precedent), keyed on (config, addr, user), liveness-probed on lookup, with `Close`
     becoming a ref-release that never tears down the shared session (today `newSFTP`
@@ -249,7 +249,7 @@ reproduce touch/overscroll behavior.
     `tallyWith` — the pill only consumes counts, never re-derives them. Complements
     the applied S62 badge (app-icon) without overlap. First app.ts step — S72 follows.
 
-- [ ] **S72** — RDR7: image lightbox / tap-to-zoom  ·  **P2 · M**  ·  from RDR7 (FE-F4)
+- [x] **S72** — RDR7: image lightbox / tap-to-zoom  ·  **P2 · M**  ·  from RDR7 (FE-F4)
   - **Edit:** minimal zero-dep overlay viewer for `.srr-content img`: a new small
     `lightbox.ts` (fixed overlay, centered image, backdrop dim, transform-based zoom
     toggle on desktop; close on tap/Esc, focus-trapped via the `dropdown.ts` dialog

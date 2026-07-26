@@ -536,6 +536,12 @@ Bounded per run by `gcMaxOrphans`.
 `gcm` does not disappear with listing — it remains the fallback path's state and
 stays correct under either shape.
 
+Either shape issues its deletes through `store.RmAll` — a bounded fan-out, or
+one batched call on a backend that has one (S3's `DeleteObjects`). It reports
+the keys still present rather than a first error, because the low-water rule
+needs exactly that distinction: `gcm` advances only over a generation that
+fully cleared, while the deletes that did land stay landed.
+
 `GCLatest`, `GCSummaries`, `GCMetaSummaries` and the `db/` snapshot sweep all
 merge into this one function.
 
