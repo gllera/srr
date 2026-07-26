@@ -40,17 +40,38 @@ import (
 // with --force. That contract is unchanged; only the set of situations that
 // reach it shrank.
 //
-// A wrong steal is survivable, and that is deliberate: a stolen store still
-// cannot be double-committed, because publishManifest is an exclusive create
-// (manifest.go §6.2) and the losing writer aborts BEFORE the root flip. The
-// lease shortens outages; the manifest counter is what keeps them correct.
+// What a wrong steal costs, stated exactly, because the TTL is chosen against
+// it. A stolen store cannot be double-COMMITTED: publishManifest is an exclusive
+// create (manifest.go §6.2) and the root flip is a compare-and-swap on the root
+// the handle read (db.flipRoot), so the losing writer aborts before publishing
+// and neither generation is ever written over the other. That is the guarantee.
+//
+// It is NOT a guarantee about the OBJECTS. Two live writers reading the same
+// manifest draw the same per-series stems from names.next, and every pack write
+// is an AtomicPut — overwrite, deliberately, because a crashed cycle leaves an
+// orphan at the stem the next cycle re-draws, which makes exclusive-create
+// impossible there (db_pack.go savePack). So the loser can overwrite the
+// winner's data/<stem>.gz or idx/<stem>.gz on its way to aborting, and the
+// winner's published manifest would then name objects holding the loser's bytes:
+// idx offsets addressing another cycle's data lines.
+//
+// Which is why leaseTTL exceeding the longest possible cycle is a CORRECTNESS
+// requirement and not headroom for comfort. Stealing a lease from a writer that
+// is merely slow — not dead — is the one case this design cannot make safe;
+// --force carries the same caveat and always has.
 
-// leaseTTL bounds how long a marker outlives the process that wrote it. It must
-// exceed the longest single cycle, because a cycle holds its lease for its whole
-// duration and renews only by acquiring again next cycle: a consolidation
-// dragging a large media backlog runs tens of seconds, so 15 minutes is two
-// orders of magnitude of headroom while still unwedging a killed 5-minute loop
-// within a handful of polls.
+// leaseTTL bounds how long a marker outlives the process that wrote it. It MUST
+// exceed the longest single cycle — see the object-clobber paragraph above for
+// why that is correctness and not comfort — because a cycle holds its lease for
+// its whole duration and renews only by acquiring again next cycle. A steady-
+// state consolidation dragging a media backlog runs tens of seconds, so 15
+// minutes still unwedges a killed 5-minute loop within a handful of polls.
+//
+// The case to watch is a FIRST BACKFILL: hundreds of articles self-hosting media
+// through an external transcode can run long, and that is exactly when an
+// impatient operator runs a second srr against the same store from another box.
+// If a legitimate cycle can ever approach this bound, raise the bound — do not
+// lower it to unwedge faster.
 const leaseTTL = 15 * time.Minute
 
 // leaseNow is the lease clock, a var so the tests can age a marker without

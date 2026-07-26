@@ -2273,8 +2273,18 @@ body:not(.srr-view-list) .srr-open-reader {
    the one part that would win either way — tokens.css is @imported first — but it
    lives here with the rest for one readable print story.) */
 @media print {
+   /* Every fixed-position piece of chrome, so a print carries the article and
+      nothing else — and so the token block below is free to restore only the
+      tokens the ARTICLE uses. A transient that happens to be up when Ctrl-P is
+      pressed (the snackbar's "Marked 43 read / UNDO", a pin's progress line)
+      belongs here as much as the toolbar does: it is on screen for seconds, and
+      those are exactly the seconds someone hits print. Add new chrome here. */
    .srr-toolbar,
    .srr-popup,
+   .srr-snackbar,
+   .srr-pin-progress,
+   .srr-picker,
+   .srr-ctxmenu,
    .srr-imgproxy-dialog,
    .srr-backup-dialog,
    .srr-sync-dialog,

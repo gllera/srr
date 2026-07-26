@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"testing"
@@ -60,11 +61,29 @@ func TestCommitRefusesRootFlipAfterAPeerAdvancedIt(t *testing.T) {
 	if err := db.Commit(ctx); !errors.Is(err, store.ErrPreconditionFailed) {
 		t.Fatalf("Commit over a peer-advanced root = %v, want store.ErrPreconditionFailed", err)
 	}
-	// The peer's generation must still be the one the store points at.
-	core, err := loadStore(func(key string) ([]byte, error) { return db.readGz(ctx, key) })
-	if err == nil && core.ManifestNum != 99 {
-		t.Errorf("the refused flip still moved the root to m=%d", core.ManifestNum)
+	// The peer's generation must still be the one the store points at. Read the
+	// ROOT, not loadStore: the peer's m=99 names no manifest, so a full resolve
+	// always errors here — a check guarded on that error would be dead code that
+	// looks like coverage. This is the half the returned error cannot prove, and
+	// the half a check-then-write backend gets wrong by landing the bytes anyway.
+	if m := rootManifestNum(t, db); m != 99 {
+		t.Errorf("the refused flip still moved the root to m=%d, want the peer's 99", m)
 	}
+}
+
+// rootManifestNum reads db.gz alone and reports its manifest counter — the
+// readRootManifestNum path, which needs no resolvable manifest behind it.
+func rootManifestNum(t *testing.T, db *DB) int {
+	t.Helper()
+	data, err := db.readGz(ctx, dbFileKey)
+	if err != nil {
+		t.Fatalf("read %s: %v", dbFileKey, err)
+	}
+	var root RootState
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatalf("decode %s: %v", dbFileKey, err)
+	}
+	return root.ManifestNum
 }
 
 // A store the backend cannot version (plain HTTP) keeps the unconditional flip

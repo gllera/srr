@@ -274,6 +274,13 @@ async function syncSavedAssets(chron: number, saved: boolean): Promise<void> {
    // Warm for the article on screen; one data-pack read when the save came from
    // a list row instead.
    const article = await data.loadArticle(chron)
+   // Re-check the set: the un-save path is SYNCHRONOUS, so a star tapped twice
+   // over a cold pack runs it to completion inside this await and finds no
+   // registry entry to release yet. Pinning after that would leave an un-saved
+   // article's media in PINNED — a bucket enforceCacheBounds never touches and
+   // only a matching unpin clears — with a registry entry that also makes those
+   // names read as "still needed" when some other scope is released.
+   if (!nav.isSaved(chron)) return
    const names = extractAssetKeys(article?.c ?? "")
    if (names.length === 0) return
    pinFilter(key, names, store.mid)
