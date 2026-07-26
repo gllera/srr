@@ -95,7 +95,7 @@ reproduce touch/overscroll behavior.
     foundation; land FIRST. The assets.go edit is confined to the probe (S70 rewrites
     the buffering around it afterwards).
 
-- [ ] **S64** — STO1: add `List` to the Backend interface — retire the compensation economy  ·  **P2 · L**  ·  from STO1 (BE-S1)
+- [x] **S64** — STO1: add `List` to the Backend interface — retire the compensation economy  ·  **P2 · L**  ·  from STO1 (BE-S1)
   - **Edit:** `List(ctx, prefix string) ([]string, error)` on `Backend`
     (`store/main.go`): local = `filepath.WalkDir`, SFTP = `client.Walk`, S3 =
     paginated `ListObjectsV2`, HTTP = `errors.ErrUnsupported` (callers keep their
@@ -208,7 +208,7 @@ reproduce touch/overscroll behavior.
 
 ### assets (Track C)
 
-- [ ] **S70** — STO5: stream assets from disk; sniffed ContentType fallback  ·  **P2 · M**  ·  from STO5 (BE-S5)
+- [x] **S70** — STO5: stream assets from disk; sniffed ContentType fallback  ·  **P2 · M**  ·  from STO5 (BE-S5)
   - **Edit:** `assets.go` — hash via `io.Copy(sha256.New(), f)` instead of
     `os.ReadFile` (:218); upload from the seekable `*os.File` (re-`Seek(0)` after
     hashing — S3 signing/retries keep working), keeping bytes in memory only below a

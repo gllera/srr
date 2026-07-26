@@ -496,8 +496,12 @@ four formulas, one number. Recommended default **K = 32** (`--keep-manifests`),
 which is ≥ today's effective 27-generation tail window at `--max-deltas 12` and
 is a plain count instead of a derivation.
 
-Without `Backend.List` (STO1 open), the sweep is a **low-water drain** on the
-manifest counter, the direct heir of `gcs`:
+The sweep has **two shapes**, picked by whether the backend can list. Both
+delete the same set; they differ only in how they find it.
+
+On a store that cannot list (`Backend.List` → `errors.ErrUnsupported`, i.e.
+plain HTTP), it is a **low-water drain** on the manifest counter, the direct
+heir of `gcs`:
 
 ```
 for g in (gcm, m−K], bounded by gcMaxSweep per run:
@@ -510,11 +514,27 @@ for g in (gcm, m−K], bounded by gcMaxSweep per run:
 The low-water is normative for the same reason it is today: the sweep is
 warn-only and post-flip, so a missed or failed run must not permanently strand
 anything, and the next advancing run resumes exactly where the last stopped.
-`union(names(m−K+1 … m))` is K manifest reads per sweep — at K=32 and a
-5-minute loop that is 32 small immutable GETs per cycle, which the writer should
-memoize across the run (it already has manifest `m` in hand; the other K−1 are
-force-cacheable by the store backend's own HTTP layer). With STO1 the whole
-thing collapses to "list the store, subtract the union" and `gcm` disappears.
+`union(names(m−K+1 … m))` costs ONE manifest read, not K: opaque stems make an
+object's liveness a contiguous interval, so anything still live that a swept
+generation names is also named by the OLDEST manifest in the window.
+
+On a **listable** backend (local, SFTP, S3 — every store anyone actually runs
+this on) the sweep instead lists the store and subtracts. The candidate set is
+scoped **strictly to the pack grammar** (`store.ParsePackKey`, plus
+`manifest/`): `assets/`, `out/`, `inbox/`, `db.gz`, `config.gz`, `sitemap.txt`,
+the frontend shell and stray `.tmp.<pid>.<n>` staging files are never
+candidates, whatever a listing shows. Liveness needs the same one manifest read,
+used twice: a stem the oldest in-window manifest does not name AND that sits
+BELOW that manifest's `names.next` floor was created at or before the window
+opened, so no in-window generation can name it. A stem at or above the floor is
+left alone — which is exactly what protects a mid-window reader's tail pack and
+a concurrent writer's in-flight objects, since both draw from the same published
+counter. Superseded generations are still READ before being dropped: only a
+manifest can name the pre-cutover objects that live outside the pack grammar.
+Bounded per run by `gcMaxOrphans`.
+
+`gcm` does not disappear with listing — it remains the fallback path's state and
+stays correct under either shape.
 
 `GCLatest`, `GCSummaries`, `GCMetaSummaries` and the `db/` snapshot sweep all
 merge into this one function.
