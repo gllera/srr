@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { expandSeries, keyAt, legacyNames, manifestNames, type IManifestWire } from "./names"
+import { bootWarmNames, expandSeries, keyAt, legacyNames, manifestNames, type IManifestWire } from "./names"
 
 // The name resolver is the seam the manifest indirection hangs on
 // (docs/MANIFEST-SPEC.md §4.5): both root shapes must resolve to the SAME
@@ -119,6 +119,55 @@ describe("manifestNames", () => {
       expect(() => manifestNames({ ...manifest({}), names: undefined as unknown as Record<string, unknown> })).toThrow(
          /no names object/,
       )
+   })
+})
+
+// The service worker's periodic warm (PWA5) caches exactly this set before it
+// lets a newer root become the cached one. Getting it wrong is not a slow boot
+// but a BROKEN one: a cached root whose generation's objects were never fetched
+// cannot be served offline at all. So the membership is pinned here.
+describe("bootWarmNames", () => {
+   const names = (over: Record<string, unknown> = {}) =>
+      manifestNames(
+         manifest({
+            idx: { r: [[0, 3]], l: 2 },
+            data: { b: 1, r: [[1, 4]], l: 4 },
+            meta: { r: [[0, 5]], l: 4 },
+            deltas: { s: "data", r: [10, 11] },
+            hsum: { s: "idx", stem: 8, covers: 2 },
+            ssum: { s: "meta", stem: 9, covers: 4 },
+            ...over,
+         }),
+      )
+
+   it("takes every series' tail, the delta chain and the idx summary", () => {
+      expect(bootWarmNames(names())).toEqual([
+         "idx/2.gz",
+         "data/4.gz",
+         "meta/4.gz",
+         "data/10.gz",
+         "data/11.gz",
+         "idx/8.gz",
+      ])
+   })
+
+   it("leaves the bloom summary out — search is a foreground feature", () => {
+      // ssum is 4 KB per finalized shard; a background wake does not spend that.
+      expect(bootWarmNames(names())).not.toContain("meta/9.gz")
+   })
+
+   it("an all-delta store contributes its chain and no tails", () => {
+      // A series with no tail names nothing rather than a guaranteed 404.
+      const n = names({ idx: { r: [[0, 1]] }, data: { b: 1, r: [[1, 1]] }, meta: { r: [[0, 1]] } })
+      expect(bootWarmNames(n)).toEqual(["data/10.gz", "data/11.gz", "idx/8.gz"])
+   })
+
+   it("an empty store warms nothing", () => {
+      expect(bootWarmNames(manifestNames(manifest({})))).toEqual([])
+   })
+
+   it("takes a lagging summary too — small, live, and simply unused until it catches up", () => {
+      expect(bootWarmNames(names({ hsum: { s: "idx", stem: 8, covers: 0 } }))).toContain("idx/8.gz")
    })
 })
 

@@ -121,6 +121,33 @@ function stemKey(r: IStemRefWire | ISummaryNameWire): string {
    return `${r.s}/${r.stem}.gz`
 }
 
+// The objects a COLD, OFFLINE launch needs at a given generation: every series'
+// TAIL (the newest idx entries, the newest article bodies, the newest meta
+// cards), the live delta chain, and the idx header summary that keeps boot O(1).
+// Together with db.gz and the manifest, that is what `data.ts init()` reads
+// before it can render, plus the one data pack behind the headlines it renders;
+// everything older is fetched on demand as navigation reaches for it.
+//
+// Used by the service worker's periodic warm (sw.ts, PWA5), which must cache
+// these BEFORE it lets a newer root become the cached one — a root whose
+// generation's objects were never fetched is a root that cannot boot offline.
+// It is the boot-critical prefix of the pin enumerator's set (`data.ts`
+// `packNamesForFilter`, which starts from the same tails + deltas + summaries
+// and then walks a whole filter scope), deliberately WITHOUT the bloom summary
+// `ssum`: that one serves search — a foreground feature — at 4 KB per finalized
+// shard, which is not what an unattended background wake should spend.
+//
+// A series with no tail contributes nothing rather than a guaranteed 404, and
+// the summary is taken whatever its `covers` says: a lagging one is small, live
+// (the manifest names it) and simply unused until it catches up.
+export function bootWarmNames(names: StoreNames): string[] {
+   const out: string[] = []
+   for (const list of [names.idx, names.data, names.meta]) if (list.tail >= 0) out.push(list.keys[list.tail])
+   for (const k of names.deltas) out.push(k)
+   if (names.hsum) out.push(names.hsum.key)
+   return out
+}
+
 // The counters a legacy (pre-cutover) root derives its names from.
 export interface LegacyRoot {
    total_art: number

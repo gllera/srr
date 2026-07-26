@@ -1148,6 +1148,131 @@ describe("browser: real SPA over real packs", () => {
       }
    })
 
+   // PWA5 — periodic background sync. Everything else in this file needs a page
+   // to be running; an installed PWA is launched cold, often offline, hours after
+   // the last session. The SW's `periodicsync` handler is the one hook a CLOSED
+   // app gets, and what it must do is NOT "fetch db.gz": caching a newer root
+   // alone would leave the next offline launch booting a generation whose idx
+   // tail it has never seen. So this drives the whole warm and asserts both
+   // halves — the root moved AND the objects that root needs are cached, with no
+   // page ever having asked for them.
+   //
+   // Chrome grants `periodic-background-sync` only to installed apps, which
+   // headless cannot be, so the worker's own register() call is a no-op here —
+   // that half is deliberately NOT what this test proves (see the CDP dispatch
+   // below, which delivers the event regardless). What it proves is the handler.
+   // Rebuilds the shared store, so it runs after everything that reads it.
+   it("warms the new generation's boot objects on a periodicsync wake", async () => {
+      clearDir(packsDir)
+      feeds.set("/warm.xml", rssFeed("Warm", nItems(2, "warm")))
+      await srr(packsDir, "feed", "add", "-t", "Warm", "-u", `${feeds.url}/warm.xml`)
+      await srr(packsDir, "art", "fetch")
+      const firstM = storeM(packsDir)
+
+      const origin = new URL(baseUrl).origin
+      const ctx = await browser.createBrowserContext()
+      const page = await ctx.newPage()
+      try {
+         await page.goto(baseUrl, { waitUntil: "load" })
+         await waitList(page)
+         await page.waitForFunction(() => navigator.serviceWorker?.controller != null, { timeout: 20000 })
+         // Reload so the SW controls the page and this generation is cached.
+         await page.reload({ waitUntil: "load" })
+         await waitList(page)
+
+         // The generation the SW currently has cached, read straight out of the
+         // cached db.gz bytes — the only thing an offline launch would see.
+         const cachedM = () =>
+            page.evaluate(async () => {
+               const packs = await caches.open("srr-packs-v4")
+               const hit = await packs.match(new URL("packs/db.gz", location.href).href)
+               if (!hit) return -1
+               const root = (await new Response(hit.body!.pipeThrough(new DecompressionStream("gzip"))).json()) as {
+                  m?: number
+               }
+               return root.m ?? 0
+            })
+         const cachedPaths = () =>
+            page.evaluate(async () => {
+               const packs = await caches.open("srr-packs-v4")
+               return (await packs.keys()).map((k) => new URL(k.url).pathname)
+            })
+         expect(await cachedM()).toBe(firstM)
+
+         // The SW registration id, so CDP can deliver a periodicsync event to it.
+         const client = await page.createCDPSession()
+         const regId = await new Promise<string>((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error("no service worker registration from CDP")), 20000)
+            client.on("ServiceWorker.workerRegistrationUpdated", (e) => {
+               const reg = e.registrations.find((r) => !r.isDeleted && r.scopeURL.startsWith(origin))
+               if (reg) {
+                  clearTimeout(timer)
+                  resolve(reg.registrationId)
+               }
+            })
+            client.send("ServiceWorker.enable").catch(reject)
+         })
+
+         // Publish a new generation while the page sits idle. Nothing in the tab
+         // fetches db.gz on its own here: refresh.ts's triggers are focus,
+         // `online` and a 5-minute heartbeat, none of which fire in this window —
+         // which is what makes the assertion after the dispatch attributable.
+         feeds.set("/warm.xml", rssFeed("Warm", nItems(5, "warm")))
+         await srr(packsDir, "art", "fetch")
+         const nextM = storeM(packsDir)
+         const nextIdx = tailKey(packsDir, "idx")
+         const nextData = tailKey(packsDir, "data")
+         expect(nextM).toBeGreaterThan(firstM)
+         expect(nextIdx).not.toBe("")
+         // Precondition: the cache still holds the OLD generation, and has never
+         // seen the new one's tail objects.
+         expect(await cachedM()).toBe(firstM)
+         expect((await cachedPaths()).some((p) => p.endsWith(`/packs/${nextIdx}`))).toBe(false)
+
+         await client.send("ServiceWorker.dispatchPeriodicSyncEvent", {
+            origin,
+            registrationId: regId,
+            tag: "srr-db-warm",
+         })
+
+         // The root moved...
+         await page.waitForFunction(
+            async (want: number) => {
+               const packs = await caches.open("srr-packs-v4")
+               const hit = await packs.match(new URL("packs/db.gz", location.href).href)
+               if (!hit) return false
+               const root = (await new Response(hit.body!.pipeThrough(new DecompressionStream("gzip"))).json()) as {
+                  m?: number
+               }
+               return (root.m ?? 0) === want
+            },
+            { timeout: 20000 },
+            nextM,
+         )
+         // ...and it moved onto a generation this device can actually serve: the
+         // manifest plus the tails of every series, none of which any page here
+         // requested. That pairing IS the offline contract.
+         const after = await cachedPaths()
+         expect(after.some((p) => p.endsWith(`/packs/manifest/${nextM}.gz`))).toBe(true)
+         expect(after.some((p) => p.endsWith(`/packs/${nextIdx}`))).toBe(true)
+         expect(after.some((p) => p.endsWith(`/packs/${nextData}`))).toBe(true)
+
+         // And the payoff, which is the only assertion that proves the pairing
+         // rather than just the parts: cut the network and launch. The reader
+         // must come up on the NEW generation — impossible unless the warm
+         // stored db.gz under a key the page's own request matches AND every
+         // object that root names is cached. A miss anywhere here is an error
+         // popup, which is exactly the regression a db.gz-only warm would ship.
+         await page.setOfflineMode(true)
+         await page.reload({ waitUntil: "load" })
+         await waitList(page)
+         expect(await $rowTitles(page)).toContain("warm title 4")
+         expect(await $popupOpen(page)).toBe(false)
+      } finally {
+         await ctx.close()
+      }
+   })
+
    // Regression heir: enabling "unread only" once froze the tab — the toggle then
    // lived on a surface that hid the list (display:none), whose all-zero
    // getBoundingClientRect broke the pump's below-the-fold stop and paged the
