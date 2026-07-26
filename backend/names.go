@@ -29,7 +29,7 @@ import (
 // manifestSingletonKeys are the keys inside `names` that are NOT a pack series.
 // A series may never be called one of these; assertNamesDisjoint proves it at
 // startup so the flat encoding below can never be ambiguous.
-var manifestSingletonKeys = []string{"deltas", "seen", "hsum", "ssum", "next"}
+var manifestSingletonKeys = []string{"deltas", "seen", "aref", "hsum", "ssum", "next"}
 
 // SeriesNames is one pack series' positional name list. Entry i names the
 // object holding that series' i-th stride region; the list is dense from Base
@@ -155,6 +155,14 @@ type ManifestNames struct {
 	// Seen names the dedup sidecar object. Nil when the store has none (no
 	// dirty cycle has ever written one), so every listed name exists (M4).
 	Seen *StemRef
+	// ARef names the asset reference sidecar (asset_refs.go): the per-key live
+	// reference counts that let expiration prove an assets/ object is dead
+	// before deleting it. Nil when the store has never counted a reference —
+	// which is a MEANINGFUL state, not merely an absent one: it is how a
+	// pre-refcount store is told apart from one whose counts were lost, and the
+	// two get opposite failure postures (loadRefs). Like Seen it rides the seen
+	// series, backend-only; no reader ever fetches it.
+	ARef *StemRef
 	// HSum / SSum are the idx header summary and the meta bloom summary; nil
 	// when the store publishes none.
 	HSum *SummaryName
@@ -202,6 +210,9 @@ func (n ManifestNames) MarshalJSON() ([]byte, error) {
 	if n.Seen != nil {
 		out["seen"] = n.Seen
 	}
+	if n.ARef != nil {
+		out["aref"] = n.ARef
+	}
 	if n.HSum != nil {
 		out["hsum"] = n.HSum
 	}
@@ -227,6 +238,8 @@ func (n *ManifestNames) UnmarshalJSON(data []byte) error {
 			err = json.Unmarshal(val, &n.Deltas)
 		case "seen":
 			err = json.Unmarshal(val, &n.Seen)
+		case "aref":
+			err = json.Unmarshal(val, &n.ARef)
 		case "hsum":
 			err = json.Unmarshal(val, &n.HSum)
 		case "ssum":
@@ -301,6 +314,13 @@ func (n *ManifestNames) seenKey() string {
 		return ""
 	}
 	return n.resolve(n.Seen.key())
+}
+
+func (n *ManifestNames) arefKey() string {
+	if n.ARef == nil {
+		return ""
+	}
+	return n.resolve(n.ARef.key())
 }
 
 func (n *ManifestNames) hsumKey() string {
@@ -400,7 +420,7 @@ func (n *ManifestNames) keys() []string {
 		}
 	}
 	out = append(out, n.deltaKeys()...)
-	for _, k := range []string{n.seenKey(), n.hsumKey(), n.ssumKey()} {
+	for _, k := range []string{n.seenKey(), n.arefKey(), n.hsumKey(), n.ssumKey()} {
 		if k != "" {
 			out = append(out, k)
 		}
@@ -419,6 +439,10 @@ func (n *ManifestNames) clone() *ManifestNames {
 	if n.Seen != nil {
 		s := *n.Seen
 		out.Seen = &s
+	}
+	if n.ARef != nil {
+		s := *n.ARef
+		out.ARef = &s
 	}
 	if n.HSum != nil {
 		s := *n.HSum

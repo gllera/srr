@@ -54,10 +54,13 @@ const (
 //
 //   - "manifest" holds manifest/<m>.gz, the immutable generation manifest every
 //     Commit publishes (§4.2). The manifest counter IS the name.
-//   - "seen" holds the backend-only persistent-dedup sidecar, now a manifest-
-//     named immutable object rather than a mutable ping/pong pair (§10.2).
-//     The frontend/service-worker never fetch it; the SW's route regex simply
-//     gains an inert series.
+//   - "seen" holds the backend-only sidecars, each a manifest-named immutable
+//     object rather than a mutable slot: the persistent-dedup pool (§10.2, once
+//     a ping/pong pair) and the asset refcount table (§4.7). They share the
+//     directory and its stem counter because a manifest singleton carries its
+//     own series, so nothing here — or in the generated PACK_SERIES_KINDS, or
+//     in the SW's route regex — has to learn about a second backend-only class.
+//     The frontend/service-worker never fetch either.
 var PackSeries = []struct {
 	Name  string // series directory
 	Kinds string // kind letters valid besides the finalized bare stem ("" = bare only)

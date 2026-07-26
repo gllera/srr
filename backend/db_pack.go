@@ -571,6 +571,14 @@ func (o *DB) PutArticles(ctx context.Context, articles []*Item) ([]ArticleData, 
 			written = append(written, ad)
 			lines = append(lines, line)
 			batchBytes += int64(len(line))
+			// Count this article's assets/ references before its chron is
+			// consumed (asset_refs.go). It belongs in the accounting preamble
+			// and not in the fan-out: this is the writer's single funnel for a
+			// stored article — local, inbox-consolidated or replayed — and it
+			// runs inside the locked phase whose Commit makes the count durable
+			// with the article. Free for a store that self-hosts nothing
+			// (collectAssetRefs bails on the prefix before it parses anything).
+			o.refs.add(c.TotalArticles, ad.FeedID, ad.Content)
 			c.TotalArticles++
 			item.Feed.TotalArt++
 			item.Feed.ContentBytes += int64(len(line))

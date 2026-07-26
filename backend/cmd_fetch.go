@@ -1006,6 +1006,16 @@ func (o *FetchCmd) commitPhase(ctx context.Context, db *DB, res *fetchResults) e
 	if err := db.SyncSeen(ctx); err != nil {
 		return fmt.Errorf("sync seen pool: %w", err)
 	}
+	// Same contract for the asset refcount sidecar, and the same reason it is
+	// fatal rather than warn-only: the batch and the reference counts that
+	// describe it must become durable by ONE root flip, or a committed article
+	// leaves its assets undercounted and a later expiry deletes an object a live
+	// article still shows. Written after ExpireArticles so this cycle's releases
+	// ride the same object as its additions; write-if-dirty, so an idle cycle
+	// writes nothing and mints no generation.
+	if err := db.SyncRefs(ctx); err != nil {
+		return fmt.Errorf("sync asset refcounts: %w", err)
+	}
 	// ONE GC rule (docs/MANIFEST-SPEC.md §7): delete what the last K
 	// manifests do not name. It replaces the four per-feature sweeps and
 	// their window formulas the cutover retired. Runs BEFORE the Commit, so
