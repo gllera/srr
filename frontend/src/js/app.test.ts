@@ -154,6 +154,7 @@ const list = vi.hoisted(() => ({
    rerender: vi.fn(async () => {}),
    refresh: vi.fn(),
    invalidate: vi.fn(),
+   onStoreGrown: vi.fn(async () => {}),
    moveSelection: vi.fn(async () => 0),
    // The shared directed empty-state element; the reader mounts it for placeholders.
    // The real wording/branches are exercised in list.test.ts — here it's a marker.
@@ -1567,11 +1568,77 @@ describe("cross-device sync wiring", () => {
 })
 
 describe("live content sync wiring", () => {
+   const afterStore = () => refresh.init.mock.calls[0][1] as () => void
+   const nextBtn = () => document.querySelector(".srr-next") as HTMLButtonElement
+   const pulsing = () => nextBtn().classList.contains("srr-next-pulse")
+   const menuItems = () =>
+      dropdown.showContextMenu.mock.calls.at(-1)?.[1] as { label: string; action: () => void }[] | undefined
+   const rightClick = (sel: string) => {
+      document.querySelector(sel)!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }))
+   }
+
+   // Land in the reader on a known pending count, then run the post-store-refresh
+   // reconciliation with whatever the re-probe now reports.
+   async function refreshWith(before: number, after: number) {
+      await boot("#2") // reader surface
+      nav.fromHash.mockResolvedValue(showFeed({ has_right: true, right_count: before }))
+      hashTo("#5")
+      await flush()
+      nav.probeCurrent.mockResolvedValue(showFeed({ has_right: true, right_count: after }))
+      afterStore()()
+      await flush()
+   }
+
    it("wires refresh.init with the background guard and after-store refresh", async () => {
       await boot()
       expect(refresh.init).toHaveBeenCalledTimes(1)
       expect(typeof refresh.init.mock.calls[0][0]).toBe("function") // guardBg
       expect(typeof refresh.init.mock.calls[0][1]).toBe("function") // refreshAfterStore
+   })
+
+   // RDR3, reader half: the store growing is the ONE thing that raises the
+   // pending count on its own, and the reader has no list to prepend to — so
+   // that (and only that) earns one quiet flare on the pill.
+   it("pulses the reader's pending pill when a store refresh grew the count", async () => {
+      await refreshWith(3, 6)
+      expect((document.querySelector(".srr-next-count") as HTMLElement).textContent).toBe("6")
+      expect(pulsing()).toBe(true)
+   })
+
+   it("stays silent when the refresh brought nothing ahead (count unchanged or lower)", async () => {
+      await refreshWith(3, 3)
+      expect(pulsing()).toBe(false)
+      await refreshWith(3, 1)
+      expect(pulsing()).toBe(false)
+   })
+
+   it("does not pulse for a frontier gesture that raises the same count", async () => {
+      // Mark-unread-from-here grows the pending count too, but it is the user's
+      // own action on screen — reprobeReaderChrome only pulses for the store path.
+      await boot("#2")
+      nav.fromHash.mockResolvedValue(showFeed({ has_right: true, right_count: 2 }))
+      hashTo("#5")
+      await flush()
+      nav.isSearchFilter.mockReturnValue(false)
+      nav.currentChron.mockReturnValue(7)
+      nav.probeCurrent.mockResolvedValue(showFeed({ has_right: true, right_count: 40 }))
+      rightClick(".srr-next")
+      menuItems()!
+         .find((i) => i.label === "Mark unread from here")!
+         .action()
+      await flush()
+      expect((document.querySelector(".srr-next-count") as HTMLElement).textContent).toBe("40")
+      expect(pulsing()).toBe(false)
+   })
+
+   it("does not pulse on the list surface (the 'N new' pill is the signal there)", async () => {
+      await boot() // list surface
+      nav.probeCurrent.mockClear()
+      afterStore()()
+      await flush()
+      expect(nav.probeCurrent).not.toHaveBeenCalled()
+      expect(list.onStoreGrown).toHaveBeenCalledTimes(1)
+      expect(pulsing()).toBe(false)
    })
 })
 

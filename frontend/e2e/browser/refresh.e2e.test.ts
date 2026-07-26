@@ -110,14 +110,21 @@ describe("browser: in-place refresh via a background trigger", () => {
          { timeout: 20_000 },
       )
 
+      // RDR3: silent is not the same as unsignalled. The row landed above the
+      // fold where nobody can see it, so the overlay pill reports it.
+      const pill = await page.waitForSelector(".srr-list .srr-new-pill", { timeout: 20_000 })
+      expect(await pill!.evaluate((e) => e.textContent)).toContain("1 new")
+
       // Same page instance throughout — no reload anywhere in this flow.
       expect(await page.evaluate(() => window.__srrStamp)).toBe(1)
 
       // The viewport did not jump: "live title 1" sits at (about) the same
       // viewport Y as the reference above, the prepend compensation pinning what
-      // was already on screen. Headless sub-pixel/font rounding measured well
-      // under 1px in manual runs; ±15px keeps real margin without masking an
-      // actual jump (a single row is ~40px tall).
+      // was already on screen — measured WITH the pill up, so this doubles as
+      // the proof that the pill is a true overlay and costs the list no layout.
+      // Headless sub-pixel/font rounding measured well under 1px in manual runs;
+      // ±15px keeps real margin without masking an actual jump (a single row is
+      // ~40px tall).
       const top1After = await $rowTop(page, "live title 1")
       expect(top1After).not.toBeNull()
       expect(Math.abs(top1After! - beforeTop1!)).toBeLessThanOrEqual(15)
@@ -127,6 +134,9 @@ describe("browser: in-place refresh via a background trigger", () => {
       await page.evaluate(() => window.scrollTo(0, 0))
       await page.waitForFunction(() => window.scrollY === 0, { timeout: 20_000 })
       expect(await $rowTitles(page)).toEqual(["live title 2", "live title 1", "live title 0"])
+      // …and reaching the top organically retires the pill: the arrival is on
+      // screen, so the signal has done its job.
+      await page.waitForFunction(() => !document.querySelector(".srr-new-pill"), { timeout: 20_000 })
 
       // Deep navigation also works: total_art grew to 3, so chron 2 resolves the
       // new article in the reader.

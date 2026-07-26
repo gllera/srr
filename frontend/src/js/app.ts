@@ -497,12 +497,31 @@ function clearContentTransition() {
 // a spinner, never a ghost. The count rides the accessible name rather than a
 // separate live region — it changes on navigation, when the button is
 // re-announced anyway.
+// The count syncNextCount last painted (-1 = unknown/hidden), so the silent
+// post-refresh re-derive can tell a GROWN pending count — fresh arrivals — from
+// the ordinary tick-down of reading. Remembering it is the whole trick: nothing
+// here re-counts anything (nav.pendingRight/tallyWith owns that).
+let lastNextCount = -1
 function syncNextCount(o: IShowFeed | null) {
    const n = o ? o.right_count : -1
+   lastNextCount = n
    el.nextCount.textContent = n >= 0 ? countBadge(n) : ""
    const base = "Next article"
    el.next.setAttribute("aria-label", n >= 0 ? `${base} — ${n} remaining` : base)
    el.next.title = n >= 0 ? `${base} — ${n} remaining (→/D)` : `${base} (→/D)`
+}
+
+// One-shot pulse on the reader's pending pill — the reader-side twin of the
+// list's "N new" overlay. The reader has no list to prepend to, so the only
+// place new arrivals can show up is this number changing under you; one quiet
+// flare says it did. Re-added after a forced reflow so a second arrival
+// restarts it mid-run, and the CSS drops the animation entirely under
+// prefers-reduced-motion.
+function pulseNextPill() {
+   el.next.classList.remove("srr-next-pulse")
+   void el.next.offsetWidth
+   el.next.classList.add("srr-next-pulse")
+   setTimeout(() => el.next.classList.remove("srr-next-pulse"), 900) // > the 0.5s animation
 }
 
 // Land a freshly rendered article at the top AND resync the toolbar auto-hide
@@ -855,7 +874,13 @@ function afterFrontierMove() {
 // a Show-read flip) — no content re-render, no scroll. loadArticle(pos) is
 // cache-warm, so probeCurrent costs at most an idx/meta probe; the chron guard
 // drops a stale probe if navigation moved on in the meantime.
-function reprobeReaderChrome() {
+//
+// `pulseOnGrowth` is set by the ONE caller whose re-derive can raise the count
+// without the user doing anything — the post-store-refresh reconciliation. A
+// count that merely ticked down (reading), came back from an unknown probe
+// (-1), or moved because the user just flipped Show-read / rewound a frontier
+// is not an arrival and stays silent.
+function reprobeReaderChrome(pulseOnGrowth = false) {
    const probed = nav.currentChron()
    void nav
       .probeCurrent()
@@ -863,7 +888,9 @@ function reprobeReaderChrome() {
          if (o && view === "reader" && nav.currentChron() === probed) {
             el.prev.disabled = !o.has_left
             el.next.disabled = !o.has_right
+            const before = lastNextCount
             syncNextCount(o)
+            if (pulseOnGrowth && before >= 0 && o.right_count > before) pulseNextPill()
          }
       })
       .catch(() => {})
@@ -1549,9 +1576,14 @@ async function init() {
    // toolbar label re-derives, the reader's prev/next chrome re-probes (a cached
    // "no newer article" is exactly what new content invalidates), the list
    // reopens its top, and an open picker re-derives its rows and badges.
+   //
+   // Silent is not the same as unsignalled (RDR3): the surface you are on gets
+   // ONE non-disruptive cue that content landed — the list's overlay "N new"
+   // pill (list.onStoreGrown → the prepend that feeds it) and, in the reader,
+   // a one-shot pulse on the pending pill when its count actually grew.
    const refreshAfterStore = () => {
       refreshFeedLabel()
-      if (view === "reader") reprobeReaderChrome()
+      if (view === "reader") reprobeReaderChrome(true)
       else void list.onStoreGrown()
       if (picker.isOpen()) picker.render()
       // New articles landed: the launcher badge is the one readout that is

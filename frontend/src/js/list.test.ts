@@ -154,6 +154,9 @@ vi.mock("./fmt", () => ({
    dayLabel: (n: number) => "D" + Math.floor(n / 2),
    dayLabelCtx: () => ({ nowYear: 0, midnightNow: 0 }),
    dayLabelWith: (n: number) => "D" + Math.floor(n / 2),
+   // The real cap-at-999 readout; the "N new" pill shares it with the reader's
+   // pending count, so the mock mirrors it rather than inventing a format.
+   countBadge: (n: number) => (n > 999 ? "999+" : String(n)),
    CHECK_SVG: "<svg></svg>",
 }))
 
@@ -1623,6 +1626,102 @@ describe("list", () => {
          } finally {
             vi.unstubAllGlobals()
          }
+      })
+   })
+
+   // ── "N new" arrivals pill (RDR3) ─────────────────────────────────────────
+   // The silent prepend keeps the viewport pinned, which also makes the new rows
+   // invisible. The pill is the signal — an OVERLAY, so the list's layout (and
+   // therefore the pinning contract) is untouched — counting only what the
+   // prepend already handed it.
+   describe("new-arrivals pill", () => {
+      const $pill = () => container.querySelector<HTMLElement>(".srr-new-pill")
+
+      // Reopen an exhausted top with one fresh article waiting above it.
+      async function grow(from: number, added: number): Promise<void> {
+         setIndex(from)
+         await list.render()
+         for (let i = from; i < from + added; i++) data._arts.set(i, art({ f: 1, t: "title " + i, a: i }))
+         data.db.total_art = from + added
+         await list.onStoreGrown()
+      }
+
+      it("raises the pill only once the reopened runway actually prepends rows", async () => {
+         await grow(3, 1)
+         // The reopen itself moves nothing and says nothing.
+         expect($pill()).toBeNull()
+
+         await list.loadNewer() // the prepend the reopened runway produces
+         expect($chrons()[0]).toBe(3)
+         const pill = $pill()
+         expect(pill).not.toBeNull()
+         expect(pill!.textContent).toContain("1 new")
+         expect(pill!.tagName).toBe("BUTTON") // a control, not decoration
+         expect(pill!.getAttribute("aria-label")).toBe("1 new article — jump to the top of the list")
+      })
+
+      it("accumulates across the batches one reopened runway drains", async () => {
+         // 40 arrivals > BATCH(30): the runway pages twice before re-exhausting.
+         await grow(3, 40)
+         await list.loadNewer()
+         expect($pill()!.textContent).toContain("30 new")
+         await list.loadNewer()
+         expect($pill()!.textContent).toContain("40 new")
+         // Runway drained (top exhausted again) — a further page-in is a no-op
+         // and, crucially, nothing else counts as an arrival from here.
+         await list.loadNewer()
+         expect($pill()!.textContent).toContain("40 new")
+      })
+
+      it("stays away for ordinary upward paging (no store growth)", async () => {
+         setIndex(100)
+         nav._setAnchor(50)
+         await list.render()
+         await list.loadNewer() // the user scrolling toward rows they already know about
+         expect($chrons()[0]).toBe(99)
+         expect($pill()).toBeNull()
+      })
+
+      it("tapping it scrolls to the top and dismisses", async () => {
+         await grow(3, 1)
+         await list.loadNewer()
+         const spy = window.scrollTo as unknown as ReturnType<typeof vi.fn>
+         spy.mockClear()
+         $pill()!.click()
+         expect(spy).toHaveBeenCalledWith({ top: 0, behavior: "smooth" })
+         expect($pill()).toBeNull()
+      })
+
+      it("dismisses itself when the top is reached organically", async () => {
+         await grow(3, 1)
+         await list.loadNewer()
+         expect($pill()).not.toBeNull()
+         // jsdom parks scrollY at 0 — a scroll event there IS "reached the top".
+         window.dispatchEvent(new Event("scroll"))
+         expect($pill()).toBeNull()
+      })
+
+      it("a rebuild drops it (and its scroll listener)", async () => {
+         await grow(3, 1)
+         await list.loadNewer()
+         expect($pill()).not.toBeNull()
+         await list.rerender()
+         expect($pill()).toBeNull()
+         // The listener went with it: a scroll after the rebuild must not throw
+         // or resurrect anything.
+         window.dispatchEvent(new Event("scroll"))
+         expect($pill()).toBeNull()
+      })
+
+      it("stays out of search mode (explicit result set, and the search bar owns that strip)", async () => {
+         setIndex(3)
+         nav._setSearch("title")
+         await list.render()
+         data._arts.set(3, art({ f: 1, t: "title 3", a: 3 }))
+         data.db.total_art = 4
+         await list.onStoreGrown()
+         await list.loadNewer()
+         expect($pill()).toBeNull()
       })
    })
 })

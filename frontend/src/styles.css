@@ -1460,6 +1460,31 @@ body:not(.srr-view-list) .srr-open-reader {
       animation: none;
    }
 }
+/* Fresh-arrival pulse on the reader's pending pill (app.ts pulseNextPill) — the
+   reader-side twin of the list's "N new" overlay. A background store refresh is
+   the one thing that can raise the pending count on its own, and the reader has
+   no list to prepend to, so the number would otherwise just be different the
+   next time you looked. One quiet flare, then back to silence. (srr-edge-pulse
+   above is the opposite signal: the greyed arrow explaining a dead edge.) */
+@keyframes srr-next-pulse {
+   0%,
+   100% {
+      transform: scale(1);
+      box-shadow: none;
+   }
+   35% {
+      transform: scale(1.1);
+      box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 30%, transparent);
+   }
+}
+.srr-toolbar .srr-next-pulse {
+   animation: srr-next-pulse 0.5s ease;
+}
+@media (prefers-reduced-motion: reduce) {
+   .srr-toolbar .srr-next-pulse {
+      animation: none;
+   }
+}
 /* Per-row save star — outline by default, filled + accent on a saved row.
    A generous padding keeps the tap target ≈ the row height without widening it. */
 .srr-row-star {
@@ -1619,6 +1644,66 @@ body:not(.srr-view-list) .srr-open-reader {
 }
 .srr-list-sentinel {
    height: 1px;
+}
+
+/* "N new" arrivals pill (list.ts noteNewAbove/paintNewPill) — the list's
+   fresh-arrival signal. A store refresh prepends new rows above the fold and
+   compensates the scroll so nothing on screen moves; the pill is what tells you
+   it happened, and tapping it rides up to them.
+
+   position:fixed is load-bearing, not decoration: an OVERLAY costs the list no
+   layout, so the prepend's no-jank scroll-pinning contract stays exactly intact
+   — a pill in the flow would itself be the shift the contract forbids. It sits
+   above the sticky day dividers and the pinned search bar, and BELOW the picker
+   overlay (--z-overlay), which is meant to cover it; the list surface hiding
+   behind the reader takes the pill's fixed box with it ([hidden] → display:none
+   on the parent). */
+.srr-new-pill {
+   position: fixed;
+   top: calc(0.6rem + env(safe-area-inset-top));
+   left: 0;
+   right: 0;
+   margin: 0 auto;
+   z-index: var(--z-toolbar);
+   display: flex;
+   align-items: center;
+   gap: 0.35rem;
+   /* Shrink-to-fit, never wider than the viewport (the .srr-snackbar rule). */
+   width: fit-content;
+   max-width: calc(100% - 1.5rem);
+   padding: 0.32rem 0.85rem 0.34rem;
+   /* The wire voice, like every other label in the chrome. */
+   font-family: var(--font-mono);
+   font-size: 0.7rem;
+   font-weight: 600;
+   letter-spacing: 0.08em;
+   text-transform: uppercase;
+   color: var(--bg);
+   background: var(--accent);
+   border: none;
+   border-radius: 999px;
+   box-shadow: var(--shadow);
+   cursor: pointer;
+   animation: srr-new-pill-in 0.22s ease;
+}
+.srr-new-pill-arrow {
+   font-size: 0.85rem;
+   line-height: 1;
+}
+@keyframes srr-new-pill-in {
+   from {
+      opacity: 0;
+      transform: translateY(-0.5rem);
+   }
+   to {
+      opacity: 1;
+      transform: translateY(0);
+   }
+}
+@media (prefers-reduced-motion: reduce) {
+   .srr-new-pill {
+      animation: none;
+   }
 }
 
 /* The list's end termini (list.ts syncBottomTerminus / syncTopTerminus): an
@@ -2282,6 +2367,7 @@ body:not(.srr-view-list) .srr-open-reader {
    .srr-toolbar,
    .srr-popup,
    .srr-snackbar,
+   .srr-new-pill,
    .srr-pin-progress,
    .srr-picker,
    .srr-ctxmenu,
