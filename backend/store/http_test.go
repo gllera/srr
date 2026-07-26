@@ -222,6 +222,11 @@ func TestHTTPStat(t *testing.T) {
 func newRedirectFront(t *testing.T, f *httpFixture) *httptest.Server {
 	t.Helper()
 	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Redirecting IS what this test double is for — it stands in for the
+		// nginx/https-upgrade front the CheckRedirect policy below exists to
+		// survive. The target is the sibling fixture server's own URL, not
+		// anything the request supplied.
+		//nolint:gosec // G710: deliberate redirect fixture
 		http.Redirect(w, r, f.srv.URL+strings.TrimPrefix(r.URL.Path, "/front"), http.StatusFound)
 	}))
 	t.Cleanup(front.Close)

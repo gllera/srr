@@ -23,6 +23,13 @@ type PreviewCmd struct {
 }
 
 var previewTmpl = template.Must(template.New("preview").Funcs(template.FuncMap{
+	// Emitting the article body UNESCAPED is the entire point of `srr preview`:
+	// the operator runs it to see what a recipe's pipeline actually produces,
+	// and an escaped body would render the HTML as literal text — showing them
+	// nothing they came to look at. The page is served on localhost to the
+	// operator who invoked the command, from content they are inspecting
+	// precisely because they do not trust it yet.
+	//nolint:gosec // G203: unescaped by design; this is the preview
 	"rawHTML":  func(s string) template.HTML { return template.HTML(s) },
 	"unixTime": func(ts int64) string { return time.Unix(ts, 0).UTC().Format("2006-01-02 15:04:05 UTC") },
 }).Parse(`<!DOCTYPE html>
@@ -159,5 +166,10 @@ func (o *PreviewCmd) Run() error {
 			log.Println("template error:", err)
 		}
 	})
+	// No timeouts, deliberately: this is a foreground debugging server the
+	// operator starts to look at one render and stops with Ctrl-C, bound to
+	// localhost:8080. There is no untrusted client to slow-read it, and a
+	// read deadline on a page the operator leaves open is a worse default.
+	//nolint:gosec // G114: local, foreground, operator-lifetime preview server
 	return http.ListenAndServe(o.Addr, mux)
 }

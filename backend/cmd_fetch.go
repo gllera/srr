@@ -611,6 +611,13 @@ func sweepAssetCache(dir string, maxAge time.Duration) int {
 		if err != nil || fi.ModTime().After(cutoff) {
 			return nil
 		}
+		// G122 warns about symlink TOCTOU between WalkDir's stat and this Remove.
+		// The tree is SRR's own ingest cache, written only by this process; WalkDir
+		// does not follow symlinks and the IsRegular guard above already skips any
+		// it finds, so a swap would have to be won by something that can already
+		// write inside the cache dir. Rewriting the sweep on os.Root would buy
+		// nothing against an attacker who is by then inside the trust boundary.
+		//nolint:gosec // G122: own cache tree, symlinks already filtered
 		if err := os.Remove(p); err != nil {
 			slog.Warn("sweep asset cache: remove", "file", p, "err", err)
 			return nil

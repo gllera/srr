@@ -713,7 +713,10 @@ func (o *EditCmd) Run() error {
 	// directly; binding it to a context would add a second path that can kill it
 	// mid-edit — losing the buffer and leaving the terminal in raw mode — to
 	// solve a cancellation problem the shell has already solved.
-	//nolint:noctx // interactive editor; the tty owns its lifetime
+	// G204 likewise: `editor` is $VISUAL/$EDITOR or the "vi" fallback, i.e. the
+	// operator's own environment choosing which program to run on their own
+	// terminal. Refusing it would break the command.
+	//nolint:noctx,gosec // interactive editor; the tty owns its lifetime, $EDITOR is the operator's
 	cmd := exec.Command(editor, tmpPath)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout

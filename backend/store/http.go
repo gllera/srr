@@ -81,6 +81,11 @@ func httpTransportFor(insecure bool) *http.Transport {
 	}
 	t := base.Clone()
 	if insecure {
+		// Reached only when the operator set http.insecure (or SRR_HTTP_INSECURE),
+		// which is documented on HTTPConfig as exactly this: skip certificate
+		// verification, for a self-signed LAN endpoint. An opt-in switch whose
+		// entire purpose is the thing gosec is warning about.
+		//nolint:gosec // G402: opt-in http.insecure, documented on HTTPConfig
 		t.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
 	httpTransports[insecure] = t

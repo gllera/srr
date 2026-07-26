@@ -150,6 +150,9 @@ func artEqualStrs(a, b []string) bool {
 		return false
 	}
 	for i := range a {
+		// gosec cannot carry the length guard above into the loop, so b[i] reads
+		// as unbounded to it.
+		//nolint:gosec // G602: len(a) == len(b) is established
 		if a[i] != b[i] {
 			return false
 		}

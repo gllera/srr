@@ -35,6 +35,57 @@ linters:
     # a local unix-socket dial and an interactive editor, both suppressed at the
     # site; tests are excluded wholesale below.
     - noctx
+    # This binary shells out to operator-configured commands, parses hostile
+    # HTML and writes a store, so the exec/TLS/host-key rules earn their keep.
+    # Five rules are switched off below — not as risk acceptance, but because
+    # each is answering a question this codebase answers somewhere else.
+    - gosec
+
+  settings:
+    gosec:
+      # Triage of the full 322-finding run, rule by rule. Everything not listed
+      # here stayed ON and its findings are suppressed at the site.
+      excludes:
+        # G104 "errors unhandled" (166 findings) — errcheck, already enabled,
+        # is the same check with a curated policy behind it: the
+        # std-error-handling preset and the tests rule below. gosec honours
+        # neither, so keeping both means every unchecked-return decision has to
+        # be made twice, in two syntaxes, and the second copy has no way to say
+        # "deferred Close is fine". Duplication, not coverage.
+        - G104
+        # G115 "integer overflow conversion" (33) — the idx/seen/meta formats
+        # ARE fixed-width binary, so every narrowing here is the encoding, not
+        # a bug: feed_id is a u16 by contract and feedIDCeiling is enforced at
+        # allocation (db.go), on the CLI (db.go), and at load (root.go); idx
+        # boundaries are local indices under a 50,000 stride; the seen day
+        # stamp is unix-days, which reaches u16 in 2149; and db_meta's
+        # uint32(sum), uint32(sum>>32) IS the FNV-1a-64 double-hash split,
+        # mirrored byte-for-byte in TypeScript by the data contract. Each of
+        # the 18 production sites was read against its bound. The format's real
+        # guards are elsewhere and stronger: FuzzParseIdxPack, FuzzIdxWriteParse
+        # and `srr inspect --validate`.
+        - G115
+        # G301/G302/G306 "directory/file permissions" (12 + 1 + 46) — gosec
+        # wants 0750 and 0600. Both are actively wrong here: a local store is a
+        # directory tree a static web server reads (store/local.go, including
+        # the AtomicPut staging file that gets renamed INTO that tree), and
+        # cmd_gents.go writes a checked-in TypeScript source file the frontend
+        # build must read. The rest is tests writing fixtures.
+        - G301
+        - G302
+        - G306
+        # G304 "file inclusion via variable" (50) and its taint-analysis
+        # sibling G703 "path traversal" (7) — this is a CLI whose job is opening
+        # paths the operator named: --store, $SRR_CONFIG, the OPML argument, the
+        # edit tempfile, the local backend's own keys, a test fixture dir from
+        # $SRR_GENEXPIRE_OUT. The one path that IS attacker-influenced — an
+        # ingest command's asset marker — is guarded before the open by Lstat +
+        # EvalSymlinks + filepath.Rel containment in assets.go, which gosec
+        # cannot model and which has its own tests; note it did not flag that
+        # site under either rule. A check that cannot tell operator input from
+        # feed input flags the whole program and ranks them the same.
+        - G304
+        - G703
 
   exclusions:
     # Idiomatic ignore-on-cleanup calls (deferred Close, Flush, os.Remove,

@@ -54,6 +54,16 @@ func (o *ServeCmd) Run() error {
 		slog.Warn("serve started with --force: the store lock is disabled, so the fetch loop and GUI mutations are no longer mutually exclusive")
 	}
 
+	// No ReadHeaderTimeout (G112, Slowloris). Left as-is rather than "fixed"
+	// because the value is not obvious and this server is not the usual shape:
+	// it binds localhost:8088, its only real client is the cloudflared connector
+	// that terminates the public connection and re-originates, and hostGuard
+	// already refuses anything whose Host is not loopback. A slow-header attacker
+	// therefore needs local access first. Worth revisiting if serve is ever bound
+	// to a non-loopback --addr, where the exposure becomes real; whatever value is
+	// chosen must bound HEADER reads only, since /api/fetch is a minutes-long SSE
+	// stream and OPML import bodies are operator-sized.
+	//nolint:gosec // G112: loopback admin server behind hostGuard; see above
 	srv := &http.Server{Addr: o.Addr, Handler: newMux()}
 	done := make(chan struct{})
 	go func() {
