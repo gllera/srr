@@ -693,6 +693,91 @@ describe("reader media state survives prev/next", () => {
    })
 })
 
+// RDR7 — content images were inert (no enlargement path at all on desktop). The
+// viewer's own behavior is covered in lightbox.test.ts; what matters HERE is the
+// wiring: that the reader registers it as ONE delegated listener on the content
+// host, and that an open viewer takes the inputs the reader would otherwise act
+// on — it is a modal over the article, not a decoration on top of it.
+describe("reader image lightbox (RDR7)", () => {
+   const content = () => document.querySelector(".srr-content") as HTMLElement
+   const overlay = () => document.querySelector(".srr-lightbox")
+   const viewerOpen = () => overlay()?.classList.contains("srr-open") === true
+   const PIC = '<p>lead</p><img src="http://cdn.test/pic.png" alt="chart">'
+   const esc = () =>
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }))
+
+   const showPic = async (chron = 7) => {
+      nav.fromHash.mockResolvedValue(showFeed({ article: { f: 1, a: 0, p: 0, c: PIC } as IArticle }))
+      hashTo("#" + chron)
+      await flush()
+      const img = content().querySelector("img") as HTMLImageElement
+      img.click()
+      return img
+   }
+
+   // The viewer's document keydown trap is capture-phase; leaving one attached
+   // would swallow the next test's keys.
+   afterEach(() => (document.querySelector(".srr-lightbox-close") as HTMLButtonElement | null)?.click())
+
+   it("opens the viewer when a bare content image is clicked", async () => {
+      await boot()
+      await showPic()
+      expect(viewerOpen()).toBe(true)
+      expect(overlay()!.querySelector("img")!.getAttribute("src")).toBe("http://cdn.test/pic.png")
+   })
+
+   it("Escape closes the viewer and does NOT also drop the reader back to the list", async () => {
+      await boot()
+      const img = await showPic()
+      esc()
+      await flush()
+      expect(viewerOpen()).toBe(false)
+      // app.ts's Escape toggles reader ⇄ list; the viewer's capture-phase trap is
+      // what keeps that from firing under the same keypress.
+      expect(document.querySelector(".srr-reader")!.hasAttribute("hidden")).toBe(false)
+      expect(document.body.classList.contains("srr-view-list")).toBe(false)
+      // Focus lands back on the picture the reader was looking at.
+      expect(document.activeElement).toBe(img)
+   })
+
+   it("keeps the reader keymap from walking articles behind the image", async () => {
+      await boot()
+      await showPic()
+      nav.right.mockClear()
+      nav.left.mockClear()
+      for (const key of ["ArrowRight", "ArrowLeft", "d", "a"])
+         document.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }))
+      expect(nav.right).not.toHaveBeenCalled()
+      expect(nav.left).not.toHaveBeenCalled()
+   })
+
+   it("makes the one-finger swipe and the two-finger cycle inert", async () => {
+      await boot()
+      await showPic()
+      const reader = document.querySelector(".srr-reader") as HTMLElement
+      reader.classList.remove("srr-bell-right")
+      nav.right.mockClear()
+      nav.cycleFilter.mockClear()
+      // The gesture deps app passed to setupGestures — touch never goes through
+      // the keydown trap, so these need the isOpen() flag.
+      const deps = gestures.setupGestures.mock.calls[0][0] as { goNext: () => void; onCycle: (d: number) => void }
+      deps.goNext()
+      deps.onCycle(1)
+      expect(nav.right).not.toHaveBeenCalled()
+      expect(nav.cycleFilter).not.toHaveBeenCalled()
+      expect(reader.classList.contains("srr-bell-right")).toBe(false) // not even the edge bell
+   })
+
+   it("closes when the BROWSER navigates (back/forward), which the UI can't", async () => {
+      await boot()
+      await showPic(7)
+      expect(viewerOpen()).toBe(true)
+      hashTo("#8")
+      await flush()
+      expect(viewerOpen()).toBe(false)
+   })
+})
+
 // RDR4 — `g` ships in every pack line and nothing read it, so a Spanish body
 // inherited <html lang="en">: wrong screen-reader voice, wrong hyphenation, and
 // an undeclared-RTL body rendered LTR.
