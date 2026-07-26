@@ -54,5 +54,7 @@ export const el = {
    playerFwd15: document.querySelector(".srr-player-fwd15") as HTMLButtonElement,
    playerRate: document.querySelector(".srr-player-rate") as HTMLButtonElement,
    playerTime: document.querySelector(".srr-player-time") as HTMLElement,
+   playerNext: document.querySelector(".srr-player-next") as HTMLButtonElement,
+   playerQueue: document.querySelector(".srr-player-queue") as HTMLButtonElement,
    playerClose: document.querySelector(".srr-player-close") as HTMLButtonElement,
 }

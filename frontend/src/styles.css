@@ -819,6 +819,126 @@ body.srr-playing .srr-pin-progress {
       color: var(--fg);
    }
 }
+/* The playlist's bar chrome rides the shared controls styling above: » plays
+   the next queued entry, and the count button (player.ts fills "≡ N") opens
+   the queue panel. Both are hidden while the queue is empty, so a queue-less
+   bar is byte-identical to the pre-playlist one. */
+.srr-player-controls .srr-player-next {
+   font-size: 0.95rem;
+}
+.srr-player-controls .srr-player-queue {
+   color: var(--muted);
+   white-space: nowrap;
+   &:hover:not(:disabled) {
+      color: var(--fg);
+   }
+   &[aria-expanded="true"] {
+      background: var(--hover);
+   }
+}
+/* The queue panel: a compact popover floating above the bar. A CHILD of
+   .srr-player on purpose (player.ts appends it there) — it inherits the bar's
+   hidden state and the scrub-gesture guard (gestures.ts declines touches
+   starting inside .srr-player), and anchors with plain absolute positioning. */
+.srr-player-panel {
+   position: absolute;
+   right: 0.5rem;
+   bottom: calc(100% + 0.35rem);
+   width: min(22rem, calc(100vw - 1rem));
+   max-height: 40vh;
+   overflow-y: auto;
+   background: var(--bg);
+   border: 1px solid var(--border);
+   border-radius: var(--radius);
+   box-shadow: var(--shadow);
+}
+.srr-player-panel[hidden] {
+   display: none;
+}
+.srr-player-panel-row {
+   display: flex;
+   align-items: stretch;
+   border-bottom: 1px solid var(--faint);
+   &:last-child {
+      border-bottom: none;
+   }
+}
+.srr-player-row-play {
+   flex: 1;
+   min-width: 0;
+   display: flex;
+   flex-direction: column;
+   gap: 0.15rem;
+   padding: 0.5rem 0.6rem;
+   border: none;
+   background: none;
+   text-align: left;
+   cursor: pointer;
+   &:hover {
+      background: var(--hover);
+   }
+}
+/* The row eyebrow wears the feed's source color — the same [data-src] → --src
+   ramp the list rails and the bar itself use. */
+.srr-player-row-source {
+   font-family: var(--font-mono);
+   font-size: 0.62rem;
+   font-weight: 600;
+   text-transform: uppercase;
+   letter-spacing: 0.06em;
+   color: var(--src, var(--muted));
+   white-space: nowrap;
+   overflow: hidden;
+   text-overflow: ellipsis;
+}
+.srr-player-row-name {
+   font-size: var(--text-sm);
+   line-height: 1.35;
+   color: var(--fg);
+   overflow: hidden;
+   display: -webkit-box;
+   -webkit-line-clamp: 2;
+   -webkit-box-orient: vertical;
+}
+.srr-player-row-remove {
+   flex-shrink: 0;
+   min-width: 2.2rem;
+   border: none;
+   background: none;
+   font-size: 1rem;
+   color: var(--muted);
+   cursor: pointer;
+   &:hover {
+      color: var(--fg);
+      background: var(--hover);
+   }
+}
+/* The in-content playlist chip (player.ts injects one after each eligible
+   <audio>/<video>): reader chrome, not article content — injected after the
+   sanitizer ran, rebuilt on every render. */
+.srr-content .srr-queue-chip {
+   display: inline-flex;
+   align-items: center;
+   margin: 0.35rem 0 1rem;
+   padding: 0.2rem 0.7rem;
+   border: 1px solid var(--faint);
+   border-radius: 999px;
+   background: none;
+   font-family: var(--font-mono);
+   font-size: 0.68rem;
+   font-weight: 600;
+   letter-spacing: 0.04em;
+   color: var(--muted);
+   cursor: pointer;
+   &:hover {
+      color: var(--fg);
+      background: var(--hover);
+   }
+   &[aria-pressed="true"] {
+      color: var(--accent);
+      border-color: var(--accent);
+   }
+}
 
 /* Toolbar */
 .srr-toolbar {

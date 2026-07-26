@@ -289,8 +289,10 @@ const SKELETON = `
             <button class="srr-player-back15"></button>
             <button class="srr-player-toggle"></button>
             <button class="srr-player-fwd15"></button>
+            <button class="srr-player-next" hidden></button>
             <button class="srr-player-rate"></button>
             <span class="srr-player-time"></span>
+            <button class="srr-player-queue" hidden></button>
             <button class="srr-player-close"></button>
          </div>
       </div>

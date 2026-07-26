@@ -32,6 +32,8 @@ const packsDir = inject("packsDir")
 
 const EPISODE = "the episode"
 const NEWER = "newer story"
+const QUEUED = "queued episode"
+const SHORT = "short episode"
 
 // The marker that proves node identity across both moves. It is a `data-`
 // attribute on the element itself, so it travels with the node and cannot be
@@ -163,7 +165,14 @@ describe("browser: mini-player relocation keeps real audio playing", () => {
       // what `#enclosure` writes). A store-relative path is not an option here:
       // the backend resolves relative content URLs against the item's own link
       // while ingesting, long before the reader's PACK_BASE ever sees them.
-      feeds = await feedServer({ "/tick.wav": { body: wavBytes(120), type: "audio/wav" } })
+      // brief.wav really is 4 seconds long: the queue test plays it to its END
+      // (the server answers no Range requests, so a seek-near-the-end shortcut
+      // silently clamps to the buffered edge and the episode never ends).
+      feeds = await feedServer({
+         "/tick.wav": { body: wavBytes(120), type: "audio/wav" },
+         "/tock.wav": { body: wavBytes(120), type: "audio/wav" },
+         "/brief.wav": { body: wavBytes(4), type: "audio/wav" },
+      })
 
       const items: FeedItem[] = [
          {
@@ -182,6 +191,20 @@ describe("browser: mini-player relocation keeps real audio playing", () => {
             content: `<p>show notes</p><audio src="${feeds.url}/tick.wav" controls></audio>`,
          },
          { title: NEWER, link: "http://example.com/p/2", guid: "p-2", pubDate: pubDate(2), content: "<p>c</p>" },
+         {
+            title: QUEUED,
+            link: "http://example.com/p/3",
+            guid: "p-3",
+            pubDate: pubDate(3),
+            content: `<p>up next notes</p><audio src="${feeds.url}/tock.wav" controls></audio>`,
+         },
+         {
+            title: SHORT,
+            link: "http://example.com/p/4",
+            guid: "p-4",
+            pubDate: pubDate(4),
+            content: `<p>a four-second dispatch</p><audio src="${feeds.url}/brief.wav" controls></audio>`,
+         },
       ]
       feeds.set("/pod.xml", rssFeed("Pod", items))
 
@@ -278,6 +301,98 @@ describe("browser: mini-player relocation keeps real audio playing", () => {
          // with no way to touch it.
          expect(home!.controls).toBe(true)
          await waitAdvanced(page, home!.time, "back in content")
+      } finally {
+         await close()
+      }
+   })
+
+   // The playlist's one mechanism jsdom cannot prove: a REAL `ended` event
+   // driving a play() with no user gesture anywhere near it — the auto-advance.
+   // The unit suite dispatches synthetic ended/play; only a real browser can
+   // show the engine actually starts the next episode's clock.
+   it("queues another article's episode via its chip and auto-advances into it on ended", async () => {
+      const [page, close] = await openCtx(browser, baseUrl, waitList)
+      try {
+         // ── queue the OTHER article's episode from its chip ────────────────
+         await clickRow(page, QUEUED)
+         await waitTitle(page, QUEUED)
+         await page.waitForFunction(() => !!document.querySelector(".srr-content .srr-queue-chip"), { timeout: 20000 })
+         await page.click(".srr-content .srr-queue-chip")
+         // The READY bar: visible, counting 1, nothing claimed, nothing playing.
+         const ready = await page.evaluate(() => ({
+            barShown: !(document.querySelector(".srr-player") as HTMLElement).hidden,
+            count: document.querySelector(".srr-player-queue")?.textContent,
+            pressed: document.querySelector(".srr-queue-chip")?.getAttribute("aria-pressed"),
+            held: !!document.querySelector(".srr-player-media audio"),
+         }))
+         expect(ready.barShown).toBe(true)
+         expect(ready.count).toBe("≡ 1")
+         expect(ready.pressed).toBe("true")
+         expect(ready.held).toBe(false)
+
+         // ── play the SHORT episode and let it genuinely END ────────────────
+         // No seek shortcut: the feed server answers no Range requests, so a
+         // near-the-end seek clamps to the buffered edge and never ends. Four
+         // real seconds of playback is what makes the `ended` the browser's own.
+         await page.keyboard.press("Escape")
+         await waitList(page)
+         await clickRow(page, SHORT)
+         await waitTitle(page, SHORT)
+         await page.waitForFunction(() => !!document.querySelector(".srr-content audio"), { timeout: 20000 })
+         const err = await page.evaluate(async () => {
+            const a = document.querySelector(".srr-content audio") as HTMLAudioElement
+            try {
+               await a.play()
+               return ""
+            } catch (e) {
+               return String(e)
+            }
+         })
+         expect(err, "play() was refused").toBe("")
+         await page.waitForFunction(
+            () => (document.querySelector(".srr-content audio") as HTMLAudioElement).currentTime > 0,
+            { timeout: 20000, polling: 300 },
+         )
+
+         // ── the advance: the queued episode starts in the bar, unaided ─────
+         const handle = await page
+            .waitForFunction(
+               () => {
+                  const a = document.querySelector(".srr-player-media audio") as HTMLAudioElement | null
+                  return a && !a.paused && a.src.includes("tock.wav") && a.currentTime > 0 ? a.currentTime : false
+               },
+               { timeout: 20000, polling: 300 },
+            )
+            .catch(async (e: unknown) => {
+               // The advance never came: report each link of the chain — did the
+               // first episode actually END, and what does the bar hold?
+               const diag = await page.evaluate(() => {
+                  const c = document.querySelector(".srr-content audio") as HTMLAudioElement | null
+                  const b = document.querySelector(".srr-player-media audio") as HTMLAudioElement | null
+                  const fmt = (a: HTMLAudioElement | null) =>
+                     a
+                        ? `t=${a.currentTime.toFixed(1)}/${a.duration.toFixed(1)} paused=${a.paused} ended=${a.ended} net=${a.networkState} err=${a.error?.code ?? "-"} src=${a.src.split("/").pop()}`
+                        : "none"
+                  return `content[${fmt(c)}] bar[${fmt(b)}] count=${document.querySelector(".srr-player-queue")?.textContent}`
+               })
+               throw new Error(`${String(e)} — ${diag}`)
+            })
+         const t0 = (await handle.jsonValue()) as number
+         await handle.dispose()
+         const after = await page.evaluate(() => ({
+            name: document.querySelector(".srr-player-name")?.textContent,
+            barShown: !(document.querySelector(".srr-player") as HTMLElement).hidden,
+            queueHidden: (document.querySelector(".srr-player-queue") as HTMLElement).hidden,
+         }))
+         expect(after.name).toBe(QUEUED)
+         expect(after.barShown).toBe(true)
+         expect(after.queueHidden).toBe(true) // drained
+         // Still ADVANCING, not merely unpaused — the clock keeps moving.
+         await page.waitForFunction(
+            (t) => (document.querySelector(".srr-player-media audio") as HTMLAudioElement).currentTime > t,
+            { timeout: 20000, polling: 300 },
+            t0,
+         )
       } finally {
          await close()
       }

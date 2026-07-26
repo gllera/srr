@@ -310,6 +310,11 @@ export function render(o: IShowFeed) {
          feedId: o.article.f,
       })
       player.rehomeInto(mountedMid, mountedChron)
+      // 6. chips — the playlist add-affordance beside each eligible media
+      //    element. After rehome so the walk sees the final element set; a chip
+      //    is a <button>, never audio/video, so the index pairing the steps
+      //    above rely on is untouched.
+      player.injectQueueChips()
    } else player.noteMounted(null)
    // Reject javascript:/data:/vbscript:/file: in case the writer pipeline let one
    // through. The whole masthead row (source · date · title) is the one permalink;

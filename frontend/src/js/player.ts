@@ -68,6 +68,29 @@ interface Active extends MountedArticle {
 }
 let active: Active | null = null
 
+// The "up next" queue — strictly what plays AFTER the active episode, which is
+// never itself a member (playing an entry consumes it, manual claims included).
+// Entries carry everything needed to play with zero pack fetches: the Persisted
+// shape plus mid, because a queue outlives navigation and may hold episodes of
+// articles that are no longer rendered anywhere.
+interface QueueEntry {
+   mid: string
+   chron: number
+   index: number
+   src: string
+   kind: "audio" | "video"
+   title: string
+   feedId: number
+}
+let queue: QueueEntry[] = []
+// One-deep history for the lock screen's previoustrack (the podcast convention:
+// early in an episode, "previous" means the one before). Deliberately not a
+// full history — a reader's queue is a to-listen list, not a DJ deck.
+let lastPlayed: QueueEntry | null = null
+const QUEUE_MAX = 50
+// previoustrack past this many seconds restarts the episode instead.
+const PREV_RESTART_S = 3
+
 // Whether the active element's own article is currently on screen and in view.
 // Only meaningful while the element sits in the content host; an adopted element
 // is by definition not visible in an article, so the bar always shows for it.
@@ -90,6 +113,10 @@ let lastSave = 0
 
 // What survives a reload. `src`/`kind`/`title`/`feedId` ride along so the bar can
 // render at boot with ZERO pack fetches, preserving the reader's O(1) boot.
+// A blob may be active-only (pre-playlist builds wrote just that), active+queue,
+// or queue-only (`{queue}` with no src field at all) — restore treats the two
+// halves independently. Queue entries drop `mid`: it is implicit in the storage
+// key, which is per-mount exactly because chron is only unique within a mount.
 interface Persisted {
    chron: number
    index: number
@@ -99,6 +126,7 @@ interface Persisted {
    kind: "audio" | "video"
    title: string
    feedId: number
+   queue?: Omit<QueueEntry, "mid">[]
 }
 
 function readRate(): number {
@@ -109,23 +137,34 @@ function readRate(): number {
 }
 
 function save(): void {
-   if (!active) return
-   const m = active.media
-   const state: Persisted = {
-      chron: active.chron,
-      index: active.index,
-      time: m.currentTime,
-      rate: m.playbackRate,
-      src: m.getAttribute("src") ?? "",
-      kind: m.tagName === "VIDEO" ? "video" : "audio",
-      title: active.title,
-      feedId: active.feedId,
+   // The key follows the active episode's store, falling back to the mounted
+   // store for a queue with nothing playing. Entries of another mount stay
+   // in-memory only — a documented non-goal, not an accident.
+   const mid = active?.mid ?? data.activeStore().mid
+   const qlist = queue
+      .filter((e) => e.mid === mid)
+      .map((e) => ({ chron: e.chron, index: e.index, src: e.src, kind: e.kind, title: e.title, feedId: e.feedId }))
+   let head: Omit<Persisted, "queue"> | null = null
+   if (active) {
+      const m = active.media
+      head = {
+         chron: active.chron,
+         index: active.index,
+         time: m.currentTime,
+         rate: m.playbackRate,
+         src: m.getAttribute("src") ?? "",
+         kind: m.tagName === "VIDEO" ? "video" : "audio",
+         title: active.title,
+         feedId: active.feedId,
+      }
+      // A position of 0 is indistinguishable from "never played", and `src` is
+      // what makes the entry restorable at all.
+      if (!head.src || head.time <= 0) head = null
    }
-   // A position of 0 is indistinguishable from "never played", and `src` is what
-   // makes the entry restorable at all.
-   if (!state.src || state.time <= 0) return clearSaved(active.mid)
+   if (!head && !qlist.length) return clearSaved(mid)
+   const state = { ...(head ?? {}), ...(qlist.length ? { queue: qlist } : {}) }
    try {
-      localStorage.setItem(playerStateKey(active.mid), JSON.stringify(state))
+      localStorage.setItem(playerStateKey(mid), JSON.stringify(state))
       lastSave = Date.now()
    } catch {
       // A full or blocked localStorage must never break playback.
@@ -248,6 +287,9 @@ function onPlay(e: Event): void {
    release()
    if (outgoingAdopted) discardAdopted()
    active = { ...mounted, index, media: m }
+   // A manually played element that was sitting in the queue is now the active
+   // episode; leaving it queued would replay it later.
+   dropQueued(mounted.mid, mounted.chron, index)
    const rate = readRate()
    // Apply the device's standing speed preference, but only when it was actually
    // set: at the default 1 we leave the element alone so a rate FEB2 restored
@@ -307,22 +349,32 @@ function onPauseOrPlay(): void {
 
 function onEnded(): void {
    // A finished episode has nothing left to resume; drop it wholesale rather
-   // than leaving a bar parked at the end.
+   // than leaving a bar parked at the end — unless something is queued, in
+   // which case finishing is exactly when the playlist advances.
    const mid = active?.mid
+   const finished = active ? entryOf(active) : null
    release()
    if (mid) clearSaved(mid)
    discardAdopted()
+   if (queue.length) {
+      lastPlayed = finished
+      return advance(true)
+   }
    syncMediaSession()
    syncBar()
 }
 
 function onError(): void {
    // Old articles outlive their media hosts (the same reality collapseBrokenMedia
-   // exists for). An unplayable episode is not an app error: dismiss quietly.
+   // exists for). An unplayable episode is not an app error: dismiss quietly —
+   // or, with a queue, skip to the next entry (each attempt consumes one, so a
+   // run of dead episodes terminates at the plain dismissal). The dead episode
+   // deliberately does NOT become the prev-track target.
    const mid = active?.mid
    release()
    if (mid) clearSaved(mid)
    discardAdopted()
+   if (queue.length) return advance(true)
    syncMediaSession()
    syncBar()
 }
@@ -341,6 +393,302 @@ function watch(m: HTMLMediaElement): void {
       }
    })
    observer.observe(m)
+}
+
+// ---------------------------------------------------------------------------
+// Playlist — the "up next" queue
+// ---------------------------------------------------------------------------
+
+function isQueued(mid: string, chron: number, index: number): boolean {
+   return queue.some((e) => e.mid === mid && e.chron === chron && e.index === index)
+}
+
+// Snapshot the active episode as a queue entry (the prev-track target, and the
+// re-queue when previoustrack steps back). Null when the element carries no src
+// attribute to rebuild from — the same reason save() refuses to persist one.
+function entryOf(a: Active): QueueEntry | null {
+   const src = a.media.getAttribute("src") ?? ""
+   if (!src) return null
+   return {
+      mid: a.mid,
+      chron: a.chron,
+      index: a.index,
+      src,
+      kind: a.media.tagName === "VIDEO" ? "video" : "audio",
+      title: a.title,
+      feedId: a.feedId,
+   }
+}
+
+function dropQueued(mid: string, chron: number, index: number): void {
+   const n = queue.length
+   queue = queue.filter((e) => !(e.mid === mid && e.chron === chron && e.index === index))
+   if (queue.length !== n) afterQueueChange()
+}
+
+// Every queue mutation funnels here: the chips, the lock-screen buttons, the
+// open panel, the count button and the persisted blob must all tell one story.
+function afterQueueChange(): void {
+   syncChips()
+   syncQueueHandlers()
+   renderPanel()
+   save()
+   syncBar()
+}
+
+// Play a specific entry NOW. Claims the on-screen element when the entry's own
+// article is the mounted one (the restorePersisted live path — no second
+// element, no re-buffer); otherwise builds a detached element in the bar host
+// (the boot-restore detached path). Returns false — with the current episode
+// untouched — when the entry is unplayable, so advance() can skip it.
+function playEntry(entry: QueueEntry, autoplay: boolean): boolean {
+   const live =
+      mounted && mounted.mid === entry.mid && mounted.chron === entry.chron
+         ? mediaList(el.content)[entry.index]
+         : undefined
+   let src: string | null = null
+   if (!live) {
+      // In-session captures came off a sanitized element and persisted ones
+      // were validated at restore, but safeSrc is one call — run it anyway.
+      src = safeSrc(entry.src, data.activeStore().base)
+      if (!src) return false
+   }
+   // One episode at a time — the onPlay discipline: hand the outgoing position
+   // to FEB2, and take an adopted node out of the bar host or it would keep
+   // playing behind the new episode's chrome.
+   const outgoingAdopted = active !== null && !el.content.contains(active.media)
+   release()
+   if (outgoingAdopted) discardAdopted()
+   let m: HTMLMediaElement
+   if (live) m = live
+   else {
+      m = document.createElement(entry.kind === "video" ? "video" : "audio")
+      m.src = src as string
+      m.preload = "metadata"
+      el.playerMedia.replaceChildren(m)
+   }
+   const rate = readRate()
+   if (rate !== 1) m.playbackRate = rate
+   active = {
+      mid: entry.mid,
+      chron: entry.chron,
+      index: entry.index,
+      title: entry.title,
+      feedId: entry.feedId,
+      media: m,
+   }
+   if (live) watch(m)
+   bindMedia(m)
+   bindMediaSession()
+   syncMediaSession()
+   syncBar()
+   if (autoplay) void play()
+   return true
+}
+
+// Advance to the next playable queue entry. The outgoing active episode (if
+// still claimed — onEnded releases before calling this and sets lastPlayed
+// itself) becomes the prev-track target; unplayable entries are consumed and
+// skipped, so the loop terminates.
+function advance(autoplay: boolean): void {
+   for (let next = queue.shift(); next; next = queue.shift()) {
+      if (active) lastPlayed = entryOf(active) ?? lastPlayed
+      if (playEntry(next, autoplay)) break
+   }
+   afterQueueChange()
+}
+
+// The podcast convention: early in an episode "previous" means the one before;
+// past PREV_RESTART_S it means "start this one over". Stepping back pushes the
+// current episode onto the head of the queue, so ⏮ then ⏭ round-trips.
+function prevTrack(): void {
+   if (!active) return
+   if (active.media.currentTime > PREV_RESTART_S || !lastPlayed) return seekTo(0)
+   const prev = lastPlayed
+   const cur = entryOf(active)
+   if (!playEntry(prev, true)) return seekTo(0)
+   lastPlayed = null
+   if (cur) queue.unshift(cur)
+   afterQueueChange()
+}
+
+// The lock screen gains real track buttons ONLY while a queue exists — with
+// one, nexttrack/previoustrack step QUEUE items; without one they stay unset so
+// the platform greys them out (RDR16's original rule stands: they must never
+// map to prev/next ARTICLE and skip the listener out of an episode).
+function syncQueueHandlers(): void {
+   const ms = navigator.mediaSession
+   if (!ms) return
+   try {
+      ms.setActionHandler("nexttrack", queue.length ? () => advance(true) : null)
+   } catch {}
+   try {
+      ms.setActionHandler("previoustrack", queue.length ? prevTrack : null)
+   } catch {}
+}
+
+// ---------------------------------------------------------------------------
+// Queue chips — the in-content add affordance
+// ---------------------------------------------------------------------------
+
+function setChipState(chip: HTMLButtonElement, queued: boolean): void {
+   chip.textContent = queued ? "✓ Playlist" : "+ Playlist"
+   chip.setAttribute("aria-pressed", String(queued))
+   chip.setAttribute("aria-label", queued ? "Remove from playlist" : "Add to playlist")
+}
+
+// Called by reader.ts as step 6 of its fixed media order (after rehome): one
+// toggle chip per eligible media element, inserted AFTER it — a chip is a
+// <button>, never audio/video, so the index pairing FEB2 and rehome rely on is
+// untouched. Eligible = not the GIF idiom (a decoration must no more enter the
+// playlist than claim the transport) and carrying a src attribute (a
+// <source>-only element cannot be rebuilt detached — the same bar save() sets).
+export function injectQueueChips(): void {
+   if (!mounted) return
+   const { mid, chron } = mounted
+   const list = mediaList(el.content)
+   for (let i = 0; i < list.length; i++) {
+      const m = list[i]
+      if (m.autoplay || (m.muted && m.loop)) continue
+      if (!m.getAttribute("src")) continue
+      // On the rehome path the chip is already sitting after the element
+      // (replaceWith swaps the node, not its siblings) — re-derive its state.
+      const existing = m.nextElementSibling
+      if (existing instanceof HTMLButtonElement && existing.classList.contains("srr-queue-chip")) {
+         setChipState(existing, isQueued(mid, chron, i))
+         continue
+      }
+      const chip = document.createElement("button")
+      chip.type = "button"
+      chip.className = "srr-queue-chip"
+      const index = i
+      chip.addEventListener("click", () => toggleQueued(index))
+      setChipState(chip, isQueued(mid, chron, i))
+      m.insertAdjacentElement("afterend", chip)
+   }
+}
+
+// Re-derive every rendered chip after a queue mutation (a panel removal, a
+// consume-on-play, ✕) so a pressed state never lies about membership.
+function syncChips(): void {
+   if (!mounted) return
+   const { mid, chron } = mounted
+   const list = mediaList(el.content)
+   for (let i = 0; i < list.length; i++) {
+      const sib = list[i].nextElementSibling
+      if (sib instanceof HTMLButtonElement && sib.classList.contains("srr-queue-chip"))
+         setChipState(sib, isQueued(mid, chron, i))
+   }
+}
+
+function toggleQueued(index: number): void {
+   if (!mounted) return
+   const { mid, chron, title, feedId } = mounted
+   if (isQueued(mid, chron, index)) return dropQueued(mid, chron, index)
+   if (queue.length >= QUEUE_MAX) return
+   const m = mediaList(el.content)[index]
+   const src = m?.getAttribute("src") ?? ""
+   if (!src) return
+   queue.push({ mid, chron, index, src, kind: m.tagName === "VIDEO" ? "video" : "audio", title, feedId })
+   afterQueueChange()
+}
+
+// ---------------------------------------------------------------------------
+// Queue panel
+// ---------------------------------------------------------------------------
+
+let panel: HTMLElement | null = null
+
+function buildPanel(): HTMLElement {
+   const p = document.createElement("div")
+   p.className = "srr-player-panel"
+   p.setAttribute("role", "list")
+   p.setAttribute("aria-label", "Playlist")
+   p.tabIndex = -1
+   p.hidden = true
+   // Focused chrome: no key pressed over the panel may reach the global keymap
+   // (an unguarded 'd' would walk articles and re-render the surface under the
+   // open panel — the lightbox rule, scoped to a popover).
+   p.addEventListener("keydown", (e) => {
+      e.stopPropagation()
+      if (e.key === "Escape") {
+         e.preventDefault()
+         closePanel(true)
+      }
+   })
+   // A child of the bar: it inherits the scrub-gesture guard and the bar's
+   // hidden state, and positions above it with plain CSS.
+   el.player.appendChild(p)
+   return p
+}
+
+function renderPanel(): void {
+   if (!panel || panel.hidden) return
+   if (!queue.length) return closePanel()
+   panel.replaceChildren(
+      ...queue.map((entry) => {
+         const row = document.createElement("div")
+         row.setAttribute("role", "listitem")
+         row.className = "srr-player-panel-row"
+         const play = document.createElement("button")
+         play.type = "button"
+         play.className = "srr-player-row-play"
+         play.dataset.src = String(srcColorIndex(entry.feedId))
+         const source = document.createElement("span")
+         source.className = "srr-player-row-source"
+         source.textContent = data.feedTitle(entry.feedId)
+         const name = document.createElement("span")
+         name.className = "srr-player-row-name"
+         name.textContent = entry.title || "(untitled)"
+         play.append(source, name)
+         play.setAttribute("aria-label", `Play now — ${entry.title || "(untitled)"} · ${data.feedTitle(entry.feedId)}`)
+         play.addEventListener("click", () => {
+            queue = queue.filter((e) => e !== entry)
+            closePanel(true)
+            playEntry(entry, true) // a false return just drops the dead entry
+            afterQueueChange()
+         })
+         const remove = document.createElement("button")
+         remove.type = "button"
+         remove.className = "srr-player-row-remove"
+         remove.textContent = "×"
+         remove.setAttribute("aria-label", `Remove from playlist — ${entry.title || "(untitled)"}`)
+         remove.addEventListener("click", () => {
+            queue = queue.filter((e) => e !== entry)
+            afterQueueChange()
+         })
+         row.append(play, remove)
+         return row
+      }),
+   )
+}
+
+function onOutsidePress(e: Event): void {
+   const t = e.target as Node
+   if (panel && !panel.hidden && !panel.contains(t) && !el.playerQueue.contains(t)) closePanel()
+}
+
+function openPanel(): void {
+   if (!queue.length) return
+   panel ??= buildPanel()
+   panel.hidden = false
+   el.playerQueue.setAttribute("aria-expanded", "true")
+   renderPanel()
+   document.addEventListener("pointerdown", onOutsidePress, true)
+   panel.focus()
+}
+
+function closePanel(refocus = false): void {
+   if (!panel || panel.hidden) return
+   panel.hidden = true
+   el.playerQueue.setAttribute("aria-expanded", "false")
+   document.removeEventListener("pointerdown", onOutsidePress, true)
+   if (refocus) el.playerQueue.focus()
+}
+
+function togglePanel(): void {
+   if (panel && !panel.hidden) closePanel(true)
+   else openPanel()
 }
 
 // ---------------------------------------------------------------------------
@@ -468,16 +816,22 @@ function cycleRate(): void {
 }
 
 // The ✕. Pauses, hands the position to FEB2 (so the article still resumes) and
-// forgets the episode — including its persisted entry, since closing is an
-// explicit "I am done with this".
+// forgets the episode AND the queue — including the persisted entry, since
+// closing is an explicit "I am done with this"; a mistapped ✕ costs re-tapping
+// chips, which is cheaper than a bar that will not go away.
 function close(): void {
-   if (!active) return
-   const mid = active.mid
-   active.media.pause()
-   const wasAdopted = !el.content.contains(active.media)
+   if (!active && !queue.length) return
+   const mid = active?.mid ?? data.activeStore().mid
+   active?.media.pause()
+   const wasAdopted = active !== null && !el.content.contains(active.media)
+   queue = []
+   lastPlayed = null
    release()
    clearSaved(mid)
    if (wasAdopted) discardAdopted()
+   closePanel()
+   syncChips()
+   syncQueueHandlers()
    syncMediaSession()
    syncBar()
 }
@@ -510,9 +864,11 @@ function syncTime(): void {
 
 // The bar is shown when there IS an episode and you cannot see it playing: it is
 // adopted (its article is not rendered), or the article is hidden behind the list
-// surface, or it is scrolled out of view.
+// surface, or it is scrolled out of view. With nothing claimed but a queue built
+// up, it shows in the READY state instead — a queue must be visible to be usable
+// at all, and ✕ is how it goes away.
 function barVisible(): boolean {
-   if (!active) return false
+   if (!active) return queue.length > 0
    const adopted = !el.content.contains(active.media)
    return adopted || el.article.hidden || !inView
 }
@@ -522,7 +878,35 @@ function syncBar(): void {
    el.player.hidden = !show
    // Drives the container's bottom padding so the last paragraph clears the bar.
    document.body.classList.toggle("srr-playing", show)
-   if (!active) return
+   if (!show) closePanel()
+   // The queue chrome lives in both bar states.
+   el.playerQueue.hidden = !queue.length
+   el.playerNext.hidden = !queue.length
+   if (queue.length) {
+      el.playerQueue.textContent = `≡ ${queue.length}`
+      el.playerQueue.setAttribute("aria-label", `Playlist — ${queue.length} queued`)
+   }
+   if (!active) {
+      if (!queue.length) return
+      // READY state: nothing claimed, something queued. The bar presents the
+      // head of the queue behind a play button — the visible result of the
+      // first chip tap, without autoplay and without secretly claiming an
+      // element the user can already see in the article.
+      const q0 = queue[0]
+      el.player.dataset.kind = q0.kind
+      el.player.dataset.src = String(srcColorIndex(q0.feedId))
+      el.playerSource.textContent = data.feedTitle(q0.feedId)
+      el.playerName.textContent = q0.title || "(untitled)"
+      el.playerTitle.setAttribute("aria-label", `Go to ${q0.title || "this article"} — ${data.feedTitle(q0.feedId)}`)
+      el.playerToggle.setAttribute("aria-label", "Play")
+      el.playerToggle.setAttribute("aria-pressed", "false")
+      el.playerToggle.classList.remove("srr-player-playing")
+      el.playerRate.textContent = `${readRate()}×`
+      el.playerRate.setAttribute("aria-label", `Playback speed — ${readRate()}×`)
+      el.playerTime.textContent = ""
+      el.playerSeekFill.style.width = "0%"
+      return
+   }
    const paused = active.media.paused
    el.player.dataset.kind = active.media.tagName === "VIDEO" ? "video" : "audio"
    el.player.dataset.src = String(srcColorIndex(active.feedId))
@@ -609,7 +993,12 @@ export function setup(deps: PlayerDeps): void {
    // Capture phase: `play` does not bubble (see onPlay).
    document.addEventListener("play", onPlay, { capture: true })
    el.playerToggle.addEventListener("click", () => {
-      if (!active) return
+      if (!active) {
+         // READY state: the play button starts the head of the queue — a user
+         // gesture, so autoplay policy has nothing to refuse.
+         if (queue.length) advance(true)
+         return
+      }
       if (active.media.paused) void play()
       else pause()
    })
@@ -619,7 +1008,10 @@ export function setup(deps: PlayerDeps): void {
    el.playerClose.addEventListener("click", close)
    el.playerTitle.addEventListener("click", () => {
       if (active) d.openArticle(active.mid, active.chron)
+      else if (queue.length) d.openArticle(queue[0].mid, queue[0].chron)
    })
+   el.playerQueue.addEventListener("click", togglePanel)
+   el.playerNext.addEventListener("click", () => advance(true))
    bindSeek()
    // A reload is the one exit we can still write through.
    window.addEventListener("pagehide", save)
@@ -645,8 +1037,43 @@ export function restorePersisted(): void {
    } catch {
       return
    }
+   // The queue half first — every entry validated exactly like the active src
+   // below (localStorage is untrusted input), invalid ones dropped. Boot renders
+   // the article before this runs, so the chips need a re-derive.
+   if (Array.isArray(saved.queue)) {
+      queue = saved.queue
+         .filter(
+            (e) =>
+               !!e &&
+               typeof e.src === "string" &&
+               safeSrc(e.src, store.base) !== null &&
+               typeof e.chron === "number" &&
+               e.chron >= 0 &&
+               typeof e.index === "number" &&
+               e.index >= 0 &&
+               (e.kind === "audio" || e.kind === "video"),
+         )
+         .slice(0, QUEUE_MAX)
+         .map((e) => ({
+            mid: store.mid,
+            chron: e.chron,
+            index: e.index,
+            src: e.src,
+            kind: e.kind,
+            title: typeof e.title === "string" ? e.title : "",
+            feedId: typeof e.feedId === "number" ? e.feedId : 0,
+         }))
+      syncChips()
+      syncQueueHandlers()
+   }
    const src = typeof saved.src === "string" ? safeSrc(saved.src, store.base) : null
-   if (!src || !(saved.chron >= 0) || !(saved.time > 0)) return clearSaved(store.mid)
+   if (!src || !(saved.chron >= 0) || !(saved.time > 0)) {
+      // No restorable active half. A queue alone still presents the bar (the
+      // ready state); nothing at all clears the entry, as before.
+      if (!queue.length) return clearSaved(store.mid)
+      save()
+      return syncBar()
+   }
    const index = typeof saved.index === "number" ? saved.index : 0
    const title = typeof saved.title === "string" ? saved.title : ""
    const feedId = typeof saved.feedId === "number" ? saved.feedId : 0
