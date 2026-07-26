@@ -189,6 +189,7 @@ const dropdown = vi.hoisted(() => ({
    showSyncDialog: vi.fn(),
    showContextMenu: vi.fn(),
    showMountsDialog: vi.fn(),
+   showShortcutsDialog: vi.fn(),
 }))
 // The dialog openers are stubbed (their modals are dropdown.test.ts's business),
 // but the real wrapTabFocus passes through — the error-popup focus-trap test
@@ -1467,11 +1468,23 @@ describe("settings menu — the now-viewing readout", () => {
       // moved to the filter picker's header (see the picker toggle tests).
       expect(items.map((i) => i.label)).toEqual([
          "Search articles…",
+         "Keyboard shortcuts…",
          "Stores…",
          "Image proxy…",
          "Backup / Restore…",
          "Sync…",
       ])
+   })
+
+   // RDR10 — the shortcuts card must be reachable without already knowing the
+   // shortcut that opens it.
+   it("'Keyboard shortcuts…' opens the shortcuts card", async () => {
+      await boot()
+      openMenu()
+      menuCall()
+         .items.find((i) => i.label === "Keyboard shortcuts…")!
+         .action()
+      expect(dropdown.showShortcutsDialog).toHaveBeenCalled()
    })
 
    it("'Search articles…' leaves the menu for the list with search applied", async () => {
@@ -2204,9 +2217,9 @@ describe("search input keys — leaving / applying from the pinned bar", () => {
    })
 })
 
-// RDR8 (c) — `/` works on BOTH surfaces now, and the guard that keeps it out of
-// a text field.
-describe("surface-agnostic keys — /", () => {
+// RDR8 (c) + RDR10 — the two keys that work on BOTH surfaces, and the guard that
+// keeps them out of a text field.
+describe("surface-agnostic keys — / and ?", () => {
    beforeEach(clearServiceWorker)
    const key = (k: string, target: EventTarget = document) => {
       const e = new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true })
@@ -2270,14 +2283,35 @@ describe("surface-agnostic keys — /", () => {
       nav.searchScope.mockReturnValue("")
    })
 
-   it("/ is inert while typing in a text field", async () => {
+   it("? opens the shortcuts card from either surface", async () => {
+      await boot()
+      const e = key("?")
+      expect(e.defaultPrevented).toBe(true)
+      expect(dropdown.showShortcutsDialog).toHaveBeenCalledTimes(1)
+      hashTo("#3") // reader
+      await flush()
+      key("?")
+      expect(dropdown.showShortcutsDialog).toHaveBeenCalledTimes(2)
+   })
+
+   it("both keys are inert while typing in a text field", async () => {
       await boot()
       const input = document.querySelector(".srr-search-input") as HTMLInputElement
       nav.applyFilter.mockClear()
+      const q = key("?", input)
       const slash = key("/", input)
+      expect(dropdown.showShortcutsDialog).not.toHaveBeenCalled()
       expect(nav.applyFilter).not.toHaveBeenCalled()
-      // Not merely ignored — not swallowed either, so the character still types.
+      // Not merely ignored — not swallowed either, so the characters still type.
+      expect(q.defaultPrevented).toBe(false)
       expect(slash.defaultPrevented).toBe(false)
+   })
+
+   it("? is inert while the picker overlay is open (its own UI owns the keyboard)", async () => {
+      await boot()
+      picker.isOpen.mockReturnValue(true)
+      key("?")
+      expect(dropdown.showShortcutsDialog).not.toHaveBeenCalled()
    })
 })
 

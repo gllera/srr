@@ -10,7 +10,7 @@
 // what keeps the module graph acyclic; the shared DOM reference map lives in the
 // leaf els.ts for the same reason.
 import * as data from "./data"
-import { setProfileImportHook, wrapTabFocus } from "./dropdown"
+import { setProfileImportHook, showShortcutsDialog, wrapTabFocus } from "./dropdown"
 import { el } from "./els"
 import { collapseBrokenMedia, countBadge, handleFragmentClick } from "./fmt"
 import { setupGestures, type Gestures } from "./gestures"
@@ -870,13 +870,21 @@ async function init() {
       const target = e.target as HTMLElement
       const tag = target.tagName
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable) return
-      // SURFACE-AGNOSTIC, ahead of the per-surface maps below: `/` is search
-      // (RDR8) — on the list it toggles the bar, and from the reader it switches
-      // to the list in search mode, since search is a list filter mode and
+      // The two SURFACE-AGNOSTIC keys, ahead of the per-surface maps below.
+      // `/` is search (RDR8): on the list it toggles the bar, and from the reader
+      // it switches to the list in search mode — search is a list filter mode, so
       // reaching it from an article used to mean going back by hand first.
+      // `?` is the shortcuts card (RDR10) — the app's two keymaps had no in-UI
+      // listing at all, and a key that only works on one surface is a poor place
+      // to document keys that work on both.
       if (e.key === "/") {
          e.preventDefault()
          searchUI.toggleSearch()
+         return
+      }
+      if (e.key === "?") {
+         e.preventDefault()
+         showShortcutsDialog()
          return
       }
       // On the list, the horizontal step keys move the selected (highlighted) row

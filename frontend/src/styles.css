@@ -2429,6 +2429,7 @@ html:has(body.srr-view-list) {
 .srr-sync-dialog,
 .srr-backup-dialog,
 .srr-mounts-dialog,
+.srr-keys-dialog,
 .srr-info-dialog {
    display: none;
    position: fixed;
@@ -2446,6 +2447,7 @@ html:has(body.srr-view-list) {
 .srr-sync-card,
 .srr-backup-card,
 .srr-mounts-card,
+.srr-keys-card,
 .srr-info-card {
    max-height: calc(100dvh - 2.5rem);
    overflow-y: auto;
@@ -2461,6 +2463,7 @@ html:has(body.srr-view-list) {
 .srr-sync-title,
 .srr-backup-title,
 .srr-mounts-title,
+.srr-keys-title,
 .srr-info-title {
    margin: 0 0 0.6rem;
    font-family: var(--font-mono);
@@ -2481,6 +2484,67 @@ html:has(body.srr-view-list) {
 /* The Mounts dialog (§3, §6.3): a store list + an add-a-store input. */
 .srr-mounts-card {
    width: min(30rem, 100%);
+}
+
+/* The keyboard-shortcuts card (RDR10, dropdown.ts showShortcutsDialog): a
+   grouped keymap listing. Keys read in the wire voice (mono <kbd> chips), what
+   they do in the reading voice, so the two columns separate at a glance. The
+   <dl> is the semantic pairing; the grid is what aligns it. */
+.srr-keys-card {
+   width: min(28rem, 100%);
+}
+.srr-keys-group + .srr-keys-group {
+   margin-top: 1.1rem;
+}
+.srr-keys-group-title {
+   font-family: var(--font-mono);
+   font-size: 0.7rem;
+   font-weight: 700;
+   letter-spacing: 0.12em;
+   text-transform: uppercase;
+   color: var(--muted);
+   padding-bottom: 0.3rem;
+   border-bottom: 1px solid var(--faint);
+   margin-bottom: 0.5rem;
+}
+.srr-keys-rows {
+   margin: 0;
+   display: grid;
+   grid-template-columns: auto 1fr;
+   column-gap: 0.9rem;
+   row-gap: 0.35rem;
+   align-items: baseline;
+}
+.srr-keys-keys {
+   display: flex;
+   align-items: baseline;
+   gap: 0.3rem;
+   white-space: nowrap;
+}
+.srr-keys-keys kbd {
+   font-family: var(--font-mono);
+   font-size: 0.75rem;
+   line-height: 1.4;
+   padding: 0.1rem 0.4rem;
+   border: 1px solid var(--faint);
+   border-bottom-width: 2px;
+   border-radius: 3px;
+   background: var(--bg);
+   color: var(--fg);
+}
+.srr-keys-or {
+   font-size: 0.68rem;
+   color: var(--muted);
+}
+.srr-keys-what {
+   margin: 0;
+   font-size: var(--text-sm);
+   color: var(--fg-2);
+}
+.srr-keys-actions {
+   display: flex;
+   justify-content: flex-end;
+   margin-top: 1.2rem;
 }
 
 .srr-mounts-list {
@@ -3092,6 +3156,8 @@ html:has(body.srr-view-list) {
    .srr-imgproxy-dialog,
    .srr-backup-dialog,
    .srr-sync-dialog,
+   .srr-mounts-dialog,
+   .srr-keys-dialog,
    .srr-info-dialog {
       display: none !important;
    }

@@ -785,3 +785,75 @@ describe("mounts (stores) dialog", () => {
       expect(h.forget).toHaveBeenCalledWith("s3f9a1c22")
    })
 })
+
+// RDR10 — the keyboard-shortcuts card. Built dynamically (no index.html
+// skeleton, so design.html's drift guard is untouched) and riding the SAME modal
+// shell as every other dialog, which is what these cases pin: it is a named
+// dialog, Escape closes it, and focus comes back to whatever opened it.
+describe("keyboard shortcuts dialog", () => {
+   let dropdown: Dropdown
+   const $dialog = () => document.querySelector<HTMLElement>(".srr-keys-dialog")
+   const isOpen = () => !!$dialog()?.classList.contains("srr-open")
+
+   beforeEach(async () => {
+      document.body.innerHTML = OPENER
+      vi.resetModules()
+      dropdown = await import("./dropdown")
+   })
+   afterEach(() => {
+      if (isOpen()) key(document.body, "Escape")
+   })
+
+   it("lists BOTH surfaces' bindings, grouped", () => {
+      dropdown.showShortcutsDialog()
+      const groups = [...$dialog()!.querySelectorAll(".srr-keys-group-title")].map((e) => e.textContent)
+      expect(groups).toEqual(["Anywhere", "List", "Reader"])
+      const keys = [...$dialog()!.querySelectorAll("kbd")].map((e) => e.textContent)
+      // A sample from each group — the card is the app's whole keymap, so a
+      // binding that exists on only one surface must still show up here.
+      expect(keys).toEqual(expect.arrayContaining(["/", "?", "Esc", "Enter", "Q", "E", "B", "U", "F"]))
+      // Each row pairs its keys with what they do (a <dl>, so AT reads the pair).
+      const terms = $dialog()!.querySelectorAll(".srr-keys-rows dt")
+      expect(terms.length).toBe($dialog()!.querySelectorAll(".srr-keys-rows dd").length)
+      expect(terms.length).toBeGreaterThan(10)
+   })
+
+   it("is a NAMED modal dialog (an unnamed role=dialog announces as a bare group)", () => {
+      dropdown.showShortcutsDialog()
+      expect($dialog()!.getAttribute("role")).toBe("dialog")
+      expect($dialog()!.getAttribute("aria-modal")).toBe("true")
+      expect($dialog()!.getAttribute("aria-label")).toBe("Keyboard shortcuts")
+   })
+
+   it("closes on Escape and on the Close button, restoring focus to the opener", () => {
+      const opener = document.querySelector<HTMLButtonElement>(".srr-opener")!
+      opener.focus()
+      dropdown.showShortcutsDialog()
+      expect(isOpen()).toBe(true)
+      key(document.body, "Escape")
+      expect(isOpen()).toBe(false)
+      expect(document.activeElement).toBe(opener)
+
+      dropdown.showShortcutsDialog()
+      $dialog()!.querySelector<HTMLButtonElement>(".srr-keys-close")!.click()
+      expect(isOpen()).toBe(false)
+      expect(document.activeElement).toBe(opener)
+   })
+
+   it("re-opens without stacking a second copy of the listing", () => {
+      dropdown.showShortcutsDialog()
+      const first = $dialog()!.querySelectorAll(".srr-keys-group").length
+      key(document.body, "Escape")
+      dropdown.showShortcutsDialog()
+      expect(document.querySelectorAll(".srr-keys-dialog").length).toBe(1)
+      expect($dialog()!.querySelectorAll(".srr-keys-group").length).toBe(first)
+   })
+
+   it("shares the single modal slot — opening it closes whatever was open", () => {
+      dropdown.showMountsDialog({ list: () => [], add: () => null, remove: () => {}, forget: () => {} })
+      expect(document.querySelector(".srr-mounts-dialog")!.classList.contains("srr-open")).toBe(true)
+      dropdown.showShortcutsDialog()
+      expect(document.querySelector(".srr-mounts-dialog")!.classList.contains("srr-open")).toBe(false)
+      expect(isOpen()).toBe(true)
+   })
+})
