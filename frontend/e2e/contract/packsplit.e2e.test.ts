@@ -32,7 +32,7 @@ describe("contract: multi data-pack split", () => {
       store = makeStore()
       await srr(store, "feed", "add", "-t", "Big", "-u", `${feeds.url}/big.xml`)
       // -s 1 = 1KB target; finalized packs roll as the gzip buffer flushes.
-      await srr(store, "-s", "1", "fetch")
+      await srr(store, "fetch", "--pack-size", "1")
       reader = await mountReader(store)
    })
 

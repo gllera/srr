@@ -25,7 +25,7 @@ describe("contract: inspect cross-check", () => {
       store = makeStore()
       await srr(store, "feed", "add", "-t", "News", "-g", "world", "-u", `${feeds.url}/news.xml`)
       await srr(store, "feed", "add", "-t", "Tech", "-g", "world", "-u", `${feeds.url}/tech.xml`)
-      await srr(store, "-s", "1", "fetch") // small packs → multiple data packs
+      await srr(store, "fetch", "--pack-size", "1") // small packs → multiple data packs
    })
 
    afterAll(async () => {

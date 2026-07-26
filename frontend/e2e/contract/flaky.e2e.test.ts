@@ -42,7 +42,7 @@ describe("contract: navigation under transient pack failures", () => {
       feeds = await feedServer({ "/flaky.xml": rssFeed("Flaky", items) })
       store = makeStore()
       await srr(store, "feed", "add", "-t", "Flaky", "-u", `${feeds.url}/flaky.xml`)
-      await srr(store, "-s", "1", "fetch")
+      await srr(store, "fetch", "--pack-size", "1")
    })
 
    afterAll(async () => {

@@ -238,7 +238,7 @@ func TestScopedFlagsAreNotGlobal(t *testing.T) {
 func TestCommandTree(t *testing.T) {
 	parser := newTestParser(t)
 	rootCmds := map[string]bool{}
-	for _, c := range parser.Model.Node.Children {
+	for _, c := range parser.Model.Children {
 		rootCmds[c.Name] = true
 	}
 	for _, want := range []string{"fetch", "art", "feed", "store", "asset",
