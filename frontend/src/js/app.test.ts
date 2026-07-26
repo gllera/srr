@@ -2321,6 +2321,15 @@ describe("saved-article asset pinning", () => {
    // star and the list row) come through it.
    const savedHook = () => nav.setSavedHook.mock.calls.at(-1)?.[0] as (chron: number, saved: boolean) => void
 
+   // The live saved set the pin path re-reads after its await. A real set (not a
+   // constant) is what lets a test un-save mid-flight the way a double-tapped
+   // star does.
+   const savedSet = new Set<number>()
+   beforeEach(() => {
+      savedSet.clear()
+      nav.isSaved.mockImplementation((chron: number) => savedSet.has(chron))
+   })
+
    const KEYS = ["assets/ab/0123456789abcdef.jpg", "assets/cd/fedcba9876543210.mp4"]
 
    it("pins the article's assets on save and records the scope", async () => {
@@ -2328,10 +2337,37 @@ describe("saved-article asset pinning", () => {
          data.loadArticle.mockResolvedValue({ f: 1, a: 0, p: 0, c: "<p>x</p>" })
          vi.mocked(extractAssetKeys).mockReturnValue(KEYS)
          await boot()
+         savedSet.add(77)
          savedHook()(77, true)
          await flush()
          expect(sw.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "pin", names: KEYS }))
          expect(listPins().get("~saved:77")?.names).toEqual(KEYS)
+      })
+   })
+
+   // The un-save path is synchronous, so a star tapped twice over a COLD pack
+   // runs it to completion inside the save's await — before there is any
+   // registry entry to release. Pinning anyway would leave an un-saved article's
+   // media in the eviction-exempt PINNED bucket with a registry entry nothing
+   // ever clears, and would also make those names read as "still needed" when
+   // another scope is released.
+   it("pins nothing when the star is un-tapped while the pack is still loading", async () => {
+      await withSW(async (sw) => {
+         let land: (article: unknown) => void = () => {}
+         data.loadArticle.mockReturnValue(new Promise((r) => (land = r)))
+         vi.mocked(extractAssetKeys).mockReturnValue(KEYS)
+         await boot()
+
+         savedSet.add(77)
+         savedHook()(77, true) // the save: parked on the data pack
+         savedSet.delete(77)
+         savedHook()(77, false) // the un-save: synchronous, lands first
+         await flush()
+         land({ f: 1, a: 0, p: 0, c: "<p>x</p>" }) // now the pack arrives
+         await flush()
+
+         expect(sw.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "pin" }))
+         expect(listPins().has("~saved:77")).toBe(false)
       })
    })
 
@@ -2353,6 +2389,7 @@ describe("saved-article asset pinning", () => {
          data.loadArticle.mockResolvedValue({ f: 1, a: 0, p: 0, c: "<p>text only</p>" })
          vi.mocked(extractAssetKeys).mockReturnValue([])
          await boot()
+         savedSet.add(77)
          savedHook()(77, true)
          await flush()
          expect(sw.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "pin" }))
@@ -2369,6 +2406,7 @@ describe("saved-article asset pinning", () => {
          data.loadArticle.mockResolvedValue({ f: 1, a: 0, p: 0, c: "<p>x</p>" })
          vi.mocked(extractAssetKeys).mockReturnValue(KEYS)
          await boot()
+         savedSet.add(77)
          savedHook()(77, true)
          await flush()
          // Nothing to pin into, so nothing is claimed in the registry either —

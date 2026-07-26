@@ -154,6 +154,6 @@ Processing config lives in named `{ingest, pipe}` recipes (`DBCore.Recipes map[s
 
 ## Constraints (preserve when editing)
 
-- File-based DB lock (`.locked`) with `--force` override — a LEASE (`lock.go`): `{owner, expires}`, reclaimed when the owner is this process instance, stolen once expired, refused otherwise (and always refused for a payload-less legacy marker). See root `CLAUDE.md` → File-Based Locking
+- File-based DB lock (`.locked`) with `--force` override — a LEASE (`lock.go`): `{owner, expires}`, reclaimed when the owner is this process instance, stolen once expired, refused otherwise (and always refused for a payload-less legacy marker). **`leaseTTL` must exceed the longest possible cycle, as correctness and not headroom**: a steal only guarantees the ROOT is never double-flipped, and two live writers draw the SAME stems and overwrite each other's pack objects. See root `CLAUDE.md` → File-Based Locking
 - The root flip is a compare-and-swap (`DB.flipRoot` + `Backend.PutIfVersion`); a lost race ABORTS the cycle loudly rather than publishing over a peer's generation
 - Env vars prefixed `SRR_`
