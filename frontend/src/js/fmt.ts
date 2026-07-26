@@ -315,9 +315,16 @@ export function collapseBrokenMedia(e: Event): void {
 // jump purely visual: the URL never moves, so back/forward still walk articles
 // and a reload still lands where the reader was.
 //
-// Modified clicks (new tab/window, download) are left to the browser, as is a
-// fragment naming nothing in this article — a "#top"-style link on an article
-// that has no such target should do nothing rather than silently swallow.
+// Modified clicks (new tab/window, download) are left to the browser. An
+// UNRESOLVABLE fragment is still swallowed, and that is deliberate: "the
+// browser's default" for a same-document fragment is not "nothing", it is
+// writing location.hash — which is precisely the router write this handler
+// exists to prevent. So the preventDefault comes BEFORE the target lookup, and
+// a fragment naming nothing simply does nothing (no scroll, no focus move, no
+// hash write). The unresolvable case is not exotic: the writer-side `id`
+// allowlist (backend/mod/sanitize.go) is newer than most of the archive and
+// packs are immutable, so every article written before it has footnote anchors
+// with nothing to land on — and a numeric one ("#2") parses as a position.
 export function handleFragmentClick(e: MouseEvent): void {
    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
    const a = (e.target as Element | null)?.closest?.("a[href^='#']") as HTMLAnchorElement | null
@@ -336,8 +343,11 @@ export function handleFragmentClick(e: MouseEvent): void {
    // scan avoids building a selector out of attacker-supplied text entirely (no
    // escaping to get wrong, and an article carries a handful of ids at most).
    const target = id ? ([...host.querySelectorAll("[id]")].find((n) => n.id === id) ?? null) : host
-   if (!target) return
+   // Claim the click before deciding whether there is anywhere to go: letting an
+   // unresolvable fragment through hands location.hash to the browser, and the
+   // reader's own hashchange handler reads that as a route.
    e.preventDefault()
+   if (!target) return
    target.scrollIntoView({ block: "start", behavior: "auto" })
    // Move focus too, so a keyboard/screen-reader user actually arrives at the
    // footnote instead of just seeing the page move. tabindex=-1 makes a plain
