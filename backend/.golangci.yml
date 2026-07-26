@@ -1,6 +1,18 @@
 version: "2"
 
 linters:
+  # Beyond the v2 default set (errcheck/govet/ineffassign/staticcheck/unused),
+  # which covers none of the classes that actually bite a long-running fetcher.
+  # Each was enabled alone, its every finding read, and the residue either fixed
+  # or suppressed at the narrowest scope that works — see the rules below and
+  # the site comments they point at (TST7).
+  enable:
+    # A leaked resp.Body in a 24/7 five-minute loop is an unbounded connection
+    # leak. It cannot see through store/http.go's drainClose helper (it matches
+    # a literal Close on the body value), so those three sites are suppressed
+    # in place; every other HTTP call site in the tree passed unaided.
+    - bodyclose
+
   exclusions:
     # Idiomatic ignore-on-cleanup calls (deferred Close, Flush, os.Remove,
     # fmt.Fprint* to buffered/terminal sinks) — the stdlib error-handling set.
