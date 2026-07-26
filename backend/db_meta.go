@@ -200,8 +200,11 @@ func numFinalizedMeta(totalArticles int) int {
 // PutArticles just returned — so the common cycle builds entries from
 // memory; any other gap (first run, post-bump, failed-sync catch-up) is read
 // back from the idx+data packs. The coverage fields are set only after every
-// save succeeds and the caller's Commit publishes them — so, like
-// Seq/HdrPacks, no reader can learn a name before its content is durable.
+// save it accounts for succeeds and the caller's Commit publishes them — so,
+// like Seq/HdrPacks, no reader can learn a name before its content is durable;
+// a run interrupted after finalizing at least one shard publishes the SHORTER
+// coverage those durable shards describe rather than discarding them (see
+// salvage), which is a lag, never an overclaim.
 // SyncMeta feeds BOTH the list (data.ts loadMeta) and search (search.ts).
 // metaTailMemo caches the tail lines the last successful SyncMeta in this
 // process wrote, so the next cycle's read-back skips the meta/L<Seq-1> GET +
@@ -335,6 +338,111 @@ func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 		return nil
 	}
 
+	// publish is the run's epilogue: the tail shard holding whatever rawLines
+	// ended up with, the bloom summary when the finalized count moved, then the
+	// staged name table and the coverage it describes — adopted together, so no
+	// reader can learn a name before its content is durable. It is deliberately
+	// callable with a SHORT rawLines (salvage, below): the coverage it then
+	// publishes sits BEHIND `target`, which every consumer already models as a
+	// lag (the reader's metaReady() falls back to data/ packs, `srr inspect`
+	// warns) rather than as an overclaim. It stays all-or-nothing internally —
+	// mp finalized shards with no tail, or a summary covering fewer shards than
+	// mp, are states the checkers read as corruption, not as lag.
+	publish := func() error {
+		// The tail's position IS the finalized count, and add() only ever flushes
+		// a full shard, so on a complete run pos == nf by construction.
+		pos := start / metaPackSize
+		covered := start + len(rawLines) // the chron the series reaches
+		latest := newPack()
+		for _, line := range rawLines {
+			if _, err := latest.Write(line); err != nil {
+				return err
+			}
+		}
+		tailStem := names.alloc(metaSeries)
+		tailKey := fmt.Sprintf("%s/%d.gz", metaSeries, tailStem)
+		if err := o.savePack(ctx, tailKey, latest); err != nil {
+			return err
+		}
+		if err := names.setTail(metaSeries, pos, tailStem); err != nil {
+			return err
+		}
+
+		if pos != mp {
+			stem := names.alloc(metaSeries)
+			sum := SummaryName{Series: metaSeries, Stem: stem, Covers: pos}
+			if err := o.saveSummary(ctx, pos, func(k int) ([]byte, error) {
+				key, err := names.key(metaSeries, k)
+				if err != nil {
+					return nil, err
+				}
+				return o.readPackHeader(ctx, key, searchBloomBytes)
+			}, sum.key()); err != nil {
+				return err
+			}
+			names.SSum = &sum
+		}
+
+		// Every save succeeded: adopt the staged names and the coverage they
+		// describe together.
+		c.Names = names
+		c.MetaTail = len(rawLines)
+		// rawLines is not touched again after this point; the next cycle's
+		// memoized() hands out a copy.
+		metaTailMemo.store(tailKey, rawLines)
+
+		// Refresh the newest-glance head projection from the tail we just
+		// wrote: the newest min(headMax, tail) cards, parsed back from the very
+		// lines the pack holds so the projection can't drift from it, anchored
+		// to their explicit base chron (see DBCore.HeadBase — a later failed
+		// sync must not shift the addressing). Commit publishes it alongside
+		// mp/mt. Guarded against regression: on a catch-up cycle with a live
+		// delta chain the delta path already carried the head past the covered
+		// chron (newer resident cards) — rebuilding it from the pack-region
+		// tail would move the newest window backwards. A salvaged run reaches
+		// less far still, and the same guard covers it.
+		if c.HeadBase+len(c.Head) <= covered {
+			headLines := rawLines[max(0, len(rawLines)-headMax):]
+			head, err := parseMetaEntries(bytes.Join(headLines, nil))
+			if err != nil {
+				return fmt.Errorf("head projection: %w", err)
+			}
+			c.Head = head
+			c.HeadBase = covered - len(head)
+		}
+		return nil
+	}
+
+	// salvage returns the interrupted run's error either way, publishing the
+	// progress it leaves behind first. Every shard the run finalized IS durable
+	// — names.putAt runs strictly after saveMetaShard returns, so the staged
+	// clone names nothing the store does not hold (M4) — and publishing it lets
+	// the warn-only Commit carry that coverage forward, so the next sync resumes
+	// at the seam instead of re-paying the whole walk plus a zopfli re-encode of
+	// every shard it already wrote. The rebuild paths (first run after upgrade,
+	// the coverage self-heal above, a failed-sync catch-up) are what this is
+	// for: they are the long ones, and without it a flaky store can keep a large
+	// rebuild from ever completing.
+	//
+	// A failure that finalized NOTHING publishes NOTHING: the staged clone is
+	// then either the live table unchanged or — after the self-heal — a bare
+	// truncation of it, and adopting that would name zero meta shards while
+	// valid ones sit on the store (a store-wide search outage plus orphans the
+	// GC later reclaims). That is the merged staging invariant, and it stays.
+	salvage := func(err error) error {
+		if start/metaPackSize == mp {
+			return err
+		}
+		if perr := publish(); perr != nil {
+			slog.Warn("meta sync interrupted, partial progress not published",
+				"error", err, "publish_error", perr)
+			return err
+		}
+		slog.Warn("meta sync interrupted, published the shards that did save",
+			"mp", start/metaPackSize, "covered", start+len(rawLines), "target", target, "error", err)
+		return err
+	}
+
 	// The missing range in memory, when it lines up exactly: on a
 	// consolidation cycle o.consolidated (deltas ++ batch) covers [tc0,
 	// target); with no deltas in play, `written` covers the end of the store.
@@ -345,7 +453,7 @@ func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 	if from := start + len(rawLines); o.consolidated != nil && from+len(o.consolidated) == target {
 		for i := range o.consolidated {
 			if err := add(&o.consolidated[i]); err != nil {
-				return err
+				return salvage(err)
 			}
 		}
 	} else if c.DeltaArticles == 0 && from+len(written) == target {
@@ -355,70 +463,14 @@ func (o *DB) SyncMeta(ctx context.Context, written []ArticleData) error {
 		// it was written.
 		for i := range written {
 			if err := add(&written[i]); err != nil {
-				return err
+				return salvage(err)
 			}
 		}
 	} else if err := o.walkArticles(ctx, from, target, add); err != nil {
-		return err
+		return salvage(err)
 	}
 
-	latest := newPack()
-	for _, line := range rawLines {
-		if _, err := latest.Write(line); err != nil {
-			return err
-		}
-	}
-	tailStem := names.alloc(metaSeries)
-	tailKey := fmt.Sprintf("%s/%d.gz", metaSeries, tailStem)
-	if err := o.savePack(ctx, tailKey, latest); err != nil {
-		return err
-	}
-	if err := names.setTail(metaSeries, nf, tailStem); err != nil {
-		return err
-	}
-
-	if mp != nf {
-		stem := names.alloc(metaSeries)
-		sum := SummaryName{Series: metaSeries, Stem: stem, Covers: nf}
-		if err := o.saveSummary(ctx, nf, func(k int) ([]byte, error) {
-			key, err := names.key(metaSeries, k)
-			if err != nil {
-				return nil, err
-			}
-			return o.readPackHeader(ctx, key, searchBloomBytes)
-		}, sum.key()); err != nil {
-			return err
-		}
-		names.SSum = &sum
-	}
-
-	// Every save succeeded: adopt the staged names and the coverage they
-	// describe together.
-	c.Names = names
-	c.MetaTail = len(rawLines)
-	// rawLines is not touched again after this point; the next cycle's
-	// memoized() hands out a copy.
-	metaTailMemo.store(tailKey, rawLines)
-
-	// Refresh the newest-glance head projection from the tail we just wrote:
-	// the newest min(headMax, tail) cards, parsed back from the very lines the
-	// pack holds so the projection can't drift from it, anchored to their
-	// explicit base chron (see DBCore.HeadBase — a later failed sync must not
-	// shift the addressing). Commit publishes it alongside mp/mt. Guarded
-	// against regression: on a catch-up cycle with a live delta chain the
-	// delta path already carried the head past `target` (newer resident
-	// cards) — rebuilding it from the pack-region tail would move the newest
-	// window backwards.
-	if c.HeadBase+len(c.Head) <= target {
-		headLines := rawLines[max(0, len(rawLines)-headMax):]
-		head, err := parseMetaEntries(bytes.Join(headLines, nil))
-		if err != nil {
-			return fmt.Errorf("head projection: %w", err)
-		}
-		c.Head = head
-		c.HeadBase = target - len(head)
-	}
-	return nil
+	return publish()
 }
 
 // parseMetaEntries decodes a shard's JSONL body (bloom already stripped)
