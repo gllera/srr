@@ -2567,6 +2567,10 @@ describe("scoped search (q: + one lane token)", () => {
       yield hits
    }
 
+   // The peek-mode case below turns unread-only on; `unreadOnly` is module state
+   // that beforeEach's localStorage.clear() does not reset, so restore it here.
+   afterEach(() => nav.setUnreadOnly(false))
+
    beforeEach(() => {
       searchMod.search.mockReset()
       searchMod.loadHits.mockReset()
@@ -2701,6 +2705,38 @@ describe("scoped search (q: + one lane token)", () => {
       await nav.onStoreRefreshed()
       expect(nav.filterFeeds().get(2)).toBe(2)
       expect(await nav.feedRight(0)).toBe(3) // chron 1 is below the raised bound
+   })
+
+   // The same rule filter.set follows (resolve the scope at NATURAL add_idx,
+   // never applyUnseen) has to hold for a member that joins the lane LATER —
+   // otherwise the same query returns different results depending on when a feed
+   // was tagged into the scope, and the newcomer's already-read hits vanish.
+   it("a feed newly tagged into the scope joins at its NATURAL add_idx, even in unread-only", async () => {
+      // chron 0..3 = feed 1 (the lane's only member yet), chron 4..5 = feed 7.
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 7 }, { feedId: 7 }])
+      data.db.feeds[1].tag = "news"
+      data.db.feeds[7].add_idx = 4
+      searchMod.search.mockImplementation(() => gen([hit(1, 1), hit(4, 7), hit(5, 7)]))
+      nav.setUnreadOnly(true)
+      nav.applyFilter(["q:sc9", "news"])
+      expect([...nav.filterFeeds().keys()]).toEqual([1])
+
+      // Both feeds have been read on this device (feed 7 well past its own
+      // articles), and the operator has now tagged feed 7 into `news` — so the
+      // reconcile meets it as a brand-new member of the active scope.
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 2, "feed:7": 900 }))
+      data.db.feeds[7].tag = "news"
+      await nav.onStoreRefreshed()
+
+      // Search is a PEEK mode: the newcomer joins at its natural add_idx (4),
+      // NOT at seen+1 (901) — the member already there keeps its natural bound
+      // too, and a lane whose members answer to two different rules is exactly
+      // the divergence this pins.
+      expect(nav.filterFeeds().get(7)).toBe(4)
+      expect(nav.filterFeeds().get(1)).toBe(0)
+      // ...so feed 7's already-read hits are still in the result set.
+      expect(await nav.feedLeft(5)).toBe(5)
+      expect(await nav.feedRight(2)).toBe(4)
    })
 
    it("a THIRD token is not a scoped query — it is an ordinary multi-token filter", () => {

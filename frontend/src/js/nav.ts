@@ -582,6 +582,11 @@ export async function onStoreRefreshed(): Promise<void> {
       // multi-token filter (feed ids + tags) gets the identical union.
       const fresh = resolveMembership(members)
       const seenMap = readSeen()
+      // The SAME peek predicate the rest of nav branches on — not the raw
+      // unread-only flag — because a SCOPED QUERY reaches this loop too and
+      // search is a peek mode. Hoisted out of the loop: it is a property of the
+      // filter, not of a member.
+      const fold = unseenActive()
       for (const [id, addIdx] of fresh) {
          const old = filter.feeds.get(id)
          if (old !== undefined) {
@@ -592,7 +597,15 @@ export async function onStoreRefreshed(): Promise<void> {
             // A brand-new member: join with the same bound a fresh set()/
             // applyUnseen would give it (raised past its seen high-water only
             // in unseen-only mode; a never-seen member keeps its natural add_idx).
-            const s = unreadOnly ? (seenMap["feed:" + id] ?? -1) : -1
+            // Under a SCOPED QUERY that bound is the NATURAL add_idx even with
+            // unread-only on — filter.set deliberately skips applyUnseen there
+            // BECAUSE SEARCH IS A PEEK MODE: a query inside a lane must still
+            // find that lane's already-read articles. Branching on the raw flag
+            // instead of `fold` let a feed newly tagged into the active scope
+            // join with a seen-raised bound while every member already there
+            // kept its natural one, so the same query answered differently
+            // depending on when the feed joined the tag.
+            const s = fold ? (seenMap["feed:" + id] ?? -1) : -1
             filter.feeds.set(id, Math.max(addIdx, s + 1))
          }
       }
