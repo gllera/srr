@@ -17,6 +17,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"srr/mod"
@@ -119,6 +120,29 @@ func SetUserAgent(ua string) {
 // rather than the default.
 const acceptFeed = "application/rss+xml, application/atom+xml, application/rdf+xml;q=0.9, application/xml;q=0.8, text/xml;q=0.7, text/html;q=0.4"
 
+// probeBufs pools the body buffers of the one-off PROBE paths — subscribe-time
+// discovery (Resolve) and the preview/resolve endpoints — which are not
+// per-worker like the fetch loop's: each probe used to allocate a fresh
+// --max-feed-size buffer (5 MB by default), and an OPML import allocated one
+// per feed, concurrently (FET14). Pointer payload (SA6002); like every
+// sync.Pool it still releases the memory under GC pressure.
+var probeBufs sync.Pool
+
+// ProbeBuf borrows a maxSize+1 byte read buffer (the sizing every fetch path
+// uses — cap-1 is the real limit) from the shared probe pool, returning it
+// with the function that puts it back. A pooled buffer too small for maxSize
+// is dropped rather than grown: maxSize is a process-wide setting, so that
+// happens at most once.
+func ProbeBuf(maxSize int) ([]byte, func()) {
+	n := maxSize + 1
+	if v, ok := probeBufs.Get().(*[]byte); ok && cap(*v) >= n {
+		*v = (*v)[:n]
+		return *v, func() { probeBufs.Put(v) }
+	}
+	buf := make([]byte, n)
+	return buf, func() { probeBufs.Put(&buf) }
+}
+
 // readBody streams body into the caller's per-worker buf via io.ReadFull
 // and maps the three meaningful outcomes: oversize (entire buf filled),
 // empty body, and the expected short-read. what is the source noun used
@@ -126,7 +150,9 @@ const acceptFeed = "application/rss+xml, application/atom+xml, application/rdf+x
 func readBody(body io.Reader, buf []byte, what string) ([]byte, error) {
 	n, err := io.ReadFull(body, buf)
 	if err == nil {
-		return nil, fmt.Errorf("%s bigger than %d bytes", what, cap(buf)-1)
+		// len, not cap: a pooled probe buffer may be larger than the limit this
+		// call was sized for, and the message must name the limit that fired.
+		return nil, fmt.Errorf("%s bigger than %d bytes", what, len(buf)-1)
 	}
 	if errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("empty response from %s", what)

@@ -35,17 +35,16 @@ import (
 // clamped and cross-checked like body media.
 
 func init() {
-	Register("enclosure", func() Processor {
-		return func(_ context.Context, p Params, i *RawItem) error {
+	RegisterDOM("enclosure", func() DOMProcessor {
+		return func(_ context.Context, p Params, i *RawItem, body *html.Node) (bool, error) {
 			if err := p.only(); err != nil {
-				return err
+				return false, err
 			}
 			raw, ok := i.Raw.(RawFeedItem)
 			if !ok {
-				return nil
+				return false, nil
 			}
-			i.Content = prependEnclosures(raw, i.Content)
-			return nil
+			return prependEnclosures(raw, body), nil
 		}
 	})
 }
@@ -66,18 +65,18 @@ var enclosureExtKinds = map[string]string{
 	"mp4": "video", "m4v": "video", "webm": "video", "mov": "video",
 }
 
-// prependEnclosures prepends the entry's out-of-body media to content.
-// Returns content verbatim when there is nothing new to add.
-func prependEnclosures(raw RawFeedItem, content string) string {
+// prependEnclosures prepends the entry's out-of-body media to the content DOM,
+// reporting whether it added anything — false leaves the session's content
+// string untouched.
+func prependEnclosures(raw RawFeedItem, body *html.Node) bool {
 	cands := collectEnclosureCands(raw)
 	if len(cands) == 0 {
-		return content
+		return false
 	}
-	present := contentMediaIDs(content)
+	present := contentMediaIDs(body)
+	refs := contentRefs(body)
 	fresh := func(u string) bool {
-		return !strings.Contains(content, u) &&
-			!strings.Contains(content, html.EscapeString(u)) &&
-			!present[mediaFileID(u)]
+		return !strings.Contains(refs, u) && !present[mediaFileID(u)]
 	}
 
 	var img, vid, aud *enclosureCand
@@ -121,13 +120,17 @@ func prependEnclosures(raw RawFeedItem, content string) string {
 			Attr: []html.Attribute{{Key: "controls", Val: ""}, {Key: "src", Val: aud.url}}})
 	}
 	if block.FirstChild == nil {
-		return content
+		return false
 	}
-	out, ok := renderBodyHTML(block)
-	if !ok {
-		return content
+	// Move the blocks in front of the existing content (InsertBefore appends
+	// when the reference child is nil, i.e. when the body is empty).
+	first := body.FirstChild
+	for block.FirstChild != nil {
+		c := block.FirstChild
+		block.RemoveChild(c)
+		body.InsertBefore(c, first)
 	}
-	return out + content
+	return true
 }
 
 // collectEnclosureCands gathers media references from every place feeds
@@ -232,19 +235,38 @@ func betterEnclosureImage(a, b *enclosureCand) bool {
 	return a.area > b.area
 }
 
+// contentRefs concatenates every place a candidate URL could already be named
+// — each attribute value, each text and comment node — so "is it already in
+// the article?" stays the plain substring test the string-form version ran.
+// DOM values are UNESCAPED, which is why one search now covers what used to
+// need a second pass over html.EscapeString(u): an &amp;-carrying URL in the
+// markup reads back here as the URL itself.
+func contentRefs(body *html.Node) string {
+	var b strings.Builder
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		switch n.Type {
+		case html.TextNode, html.CommentNode:
+			b.WriteString(n.Data)
+			b.WriteByte('\n')
+		case html.ElementNode:
+			for _, a := range n.Attr {
+				b.WriteString(a.Val)
+				b.WriteByte('\n')
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(body)
+	return b.String()
+}
+
 // contentMediaIDs collects the file identities of media already visible in
 // the body, keyed like #dedupmedia's groups.
-func contentMediaIDs(content string) map[string]bool {
+func contentMediaIDs(body *html.Node) map[string]bool {
 	ids := map[string]bool{}
-	lower := strings.ToLower(content)
-	if !strings.Contains(lower, "<img") && !strings.Contains(lower, "<video") &&
-		!strings.Contains(lower, "<audio") {
-		return ids
-	}
-	body := parseBodyHTML(content)
-	if body == nil {
-		return ids
-	}
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
 		if n.Type == html.ElementNode && dedupMediaTags[n.Data] {

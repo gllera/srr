@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net/http"
 	"os"
 	"os/exec"
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 
@@ -22,13 +24,21 @@ import (
 // capture command output without spawning a subprocess.
 var stdout io.Writer = os.Stdout
 
+// resolveClient is the ONE client behind every subscribe-time probe (feed
+// add/upd -u, import, serve's /api/resolve, the MCP save path). Built on first
+// use, so it reads the resolved --workers: an OPML import probes that many URLs
+// at once. It replaces a throwaway client per probe, which built a fresh
+// transport whose idle connections nothing ever closed — a 200-feed import left
+// 200 connection pools holding sockets until their peers hung up (FET14).
+var resolveClient = sync.OnceValue(func() *http.Client { return newFetchClient(max(1, globals.Workers)) })
+
 // resolveFeedURL resolves a subscription URL to its canonical feed URL via the
 // built-in #feed fetcher's auto-discovery (a homepage URL is repointed to its
 // <link rel=alternate> feed; an unresolvable URL returns an error so callers
 // hard-fail). A package var so tests stub it offline. Only invoked when the
 // feed's effective ingest strategy is the built-in #feed (see resolvesFeed).
 var resolveFeedURL = func(ctx context.Context, rawURL string) (string, error) {
-	return ingest.Resolve(ctx, newFetchClient(1), rawURL, globals.MaxFeedSize*(1<<10))
+	return ingest.Resolve(ctx, resolveClient(), rawURL, globals.MaxFeedSize*(1<<10))
 }
 
 // resolvesFeed reports whether subscribe-time discovery applies: only when the

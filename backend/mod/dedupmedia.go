@@ -41,13 +41,12 @@ import (
 // sanitizer strips.
 
 func init() {
-	Register("dedupmedia", func() Processor {
-		return func(_ context.Context, p Params, i *RawItem) error {
+	RegisterDOM("dedupmedia", func() DOMProcessor {
+		return func(_ context.Context, p Params, _ *RawItem, body *html.Node) (bool, error) {
 			if err := p.only(); err != nil {
-				return err
+				return false, err
 			}
-			i.Content = dedupMedia(i.Content)
-			return nil
+			return dedupMedia(body), nil
 		}
 	})
 }
@@ -74,23 +73,10 @@ var (
 // glyphClasses mark an <img> as an inline text glyph (emoji renderers).
 var glyphClasses = map[string]bool{"emoji": true, "wp-smiley": true, "smiley": true}
 
-// dedupMedia removes duplicate media copies from content. It returns content
-// verbatim when nothing changed (or nothing parsed), so quoting/whitespace
-// survive the no-op pass.
-func dedupMedia(content string) string {
-	lower := strings.ToLower(content)
-	if !strings.Contains(lower, "<img") && !strings.Contains(lower, "<video") &&
-		!strings.Contains(lower, "<audio") {
-		return content
-	}
-
-	// One synthetic body over the fragment so removal and wrapper pruning
-	// treat top-level nodes like any other.
-	body := parseBodyHTML(content)
-	if body == nil {
-		return content
-	}
-
+// dedupMedia removes duplicate media copies from the content DOM, reporting
+// whether it changed anything — false leaves the session's content string
+// untouched, so quoting/whitespace survive the no-op pass.
+func dedupMedia(body *html.Node) bool {
 	type fileKey struct{ tag, file string }
 	groups := map[fileKey][]*html.Node{}
 	var collect func(*html.Node)
@@ -128,15 +114,7 @@ func dedupMedia(content string) string {
 			changed = true
 		}
 	}
-	if !changed {
-		return content
-	}
-
-	out, ok := renderBodyHTML(body)
-	if !ok {
-		return content
-	}
-	return out
+	return changed
 }
 
 // mediaFileID normalizes a media URL to the file identity behind it (see the

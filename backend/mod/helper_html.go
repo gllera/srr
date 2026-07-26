@@ -64,6 +64,13 @@ func setNodeAttr(n *html.Node, key, val string) {
 // strings.Fields token per paragraph, so truncating rather than dropping is
 // what keeps them detectable.
 func extractText(title, content string, max int) string {
+	return extractTextNode(title, parseBodyHTML(content), max)
+}
+
+// extractTextNode is extractText over an already-parsed body — the form the
+// content session holds, so the language stamp shares the pipeline's one
+// parse. A nil body (unparseable content) contributes nothing but the title.
+func extractTextNode(title string, body *html.Node, max int) string {
 	var b strings.Builder
 	appendWords := func(s string) bool {
 		for _, f := range strings.Fields(s) {
@@ -98,7 +105,6 @@ func extractText(title, content string, max int) string {
 	// must not produce: `#filter keep_lang` would drop the article, and its
 	// GUID is already in the dedup boundary, so it is gone for good. Parsing
 	// is linear and the per-article cost is bounded by the article itself.
-	body := parseBodyHTML(content)
 	if body == nil {
 		return b.String()
 	}

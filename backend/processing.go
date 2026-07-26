@@ -26,19 +26,26 @@ var titlePolicy = bluemonday.StrictPolicy()
 // so feed.fetch runs it after this returns. Callers without a store (preview,
 // tests) get the finished content directly.
 func processItem(ctx context.Context, processor *mod.Module, pipeline []string, i *mod.RawItem) error {
+	// One content session for the whole item: the always-on steps below and
+	// every DOM-capable pipeline step share ONE parse of the content, and the
+	// string is materialized only at a boundary (a string-form step, or the
+	// normalization after the loop). See mod/session.go.
+	sess := processor.NewSession(i)
+	defer sess.Close()
+
 	// Always-on URL normalization, BEFORE the pipeline: relative refs in the
 	// feed's own markup resolve against the item's link, not the pack base the
 	// reader would use (see absolutizeContent).
-	i.Content = absolutizeContent(i.Content, i.Link)
+	absolutizeContent(sess, i.Link)
 	// Always-on language stamp, BEFORE the pipeline so every step can read
 	// i.Lang — #filter keep_lang consumes it instead of detecting on its own.
 	// A confident detection fills Lang unless the ingest strategy already
 	// declared one; the fail-open path (short text, low confidence) leaves it
-	// empty. extractText strips markup, so raw pre-sanitize content detects
-	// the same as clean text.
-	preTitle, preContent := i.Title, i.Content
+	// empty. Detection reads the session's DOM (markup stripped), so raw
+	// pre-sanitize content detects the same as clean text.
+	preTitle, preRev := i.Title, sess.Rev()
 	if i.Lang == "" {
-		i.Lang = mod.DetectLang(preTitle, preContent)
+		i.Lang = mod.DetectLangNode(preTitle, sess.DOM())
 	}
 	if len(pipeline) > 0 {
 		GUID := i.GUID
@@ -48,7 +55,7 @@ func processItem(ctx context.Context, processor *mod.Module, pipeline []string, 
 			pub = *i.Published
 		}
 		for _, m := range pipeline {
-			if err := processor.Process(ctx, m, i); err != nil {
+			if err := sess.Process(ctx, m); err != nil {
 				return fmt.Errorf("module %q failed: %w", m, err)
 			}
 			if GUID != i.GUID {
@@ -66,6 +73,9 @@ func processItem(ctx context.Context, processor *mod.Module, pipeline []string, 
 			}
 		}
 	}
+	// Materialize the DOM: everything below reads and rewrites the content
+	// STRING. Close is idempotent, so the deferred one above becomes a no-op.
+	sess.Close()
 	i.Title = html.UnescapeString(titlePolicy.Sanitize(i.Title))
 	i.Title = strings.Join(strings.Fields(strings.Map(stripControlKeepWS, i.Title)), " ")
 	i.Link = strings.Map(stripControl, i.Link)
@@ -75,41 +85,47 @@ func processItem(ctx context.Context, processor *mod.Module, pipeline []string, 
 	// the content past the gate (#readability replacing a short teaser with the
 	// full article body).
 	//
-	// The guard compares DetectLang's exact INPUTS, not their sizes. Skipping
-	// is then provably safe: DetectLang is a pure function of (title, content),
-	// so unchanged inputs give the identical answer. A size comparison is not
-	// safe in either direction — the gate is a rune count of EXTRACTED TEXT,
-	// while bytes are mostly markup, so a byte-heavy text-poor teaser replaced
-	// by a byte-light text-rich body is a genuine growth that shrinks, and the
-	// retry that case exists for would be skipped.
-	if i.Lang == "" && (i.Title != preTitle || i.Content != preContent) {
+	// The guard tracks whether DetectLang's exact INPUTS changed, not their
+	// sizes. Skipping is then provably safe: DetectLang is a pure function of
+	// (title, content), so unchanged inputs give the identical answer. A size
+	// comparison is not safe in either direction — the gate is a rune count of
+	// EXTRACTED TEXT, while bytes are mostly markup, so a byte-heavy text-poor
+	// teaser replaced by a byte-light text-rich body is a genuine growth that
+	// shrinks, and the retry that case exists for would be skipped.
+	//
+	// The content side is the session's mutation counter rather than a
+	// before-image: holding one would force the pre-pipe materialization the
+	// session exists to avoid. It counts a step that rewrote the content, so
+	// it answers the same question — with one deliberate exclusion, the
+	// control-character strip just above, which cannot change a classification
+	// (control characters are not letters, and the detector folds whitespace).
+	if i.Lang == "" && (i.Title != preTitle || sess.Rev() != preRev) {
 		i.Lang = mod.DetectLang(i.Title, i.Content)
 	}
 	return nil
 }
 
-// absolutizeContent resolves relative URL references in content against the
-// item's own link. The reader resolves a relative reference against the PACK
-// BASE, so a feed shipping src="/images/x.jpg" would otherwise publish a URL
-// that 404s against the CDN forever — packs are immutable, there is no repair.
-// Runs pre-pipeline (beside the lang stamp) so every step, #selfhost included,
-// sees resolvable URLs; #readability replacing the content afterwards is fine,
-// it absolutizes its own output. Unusable link, unparseable content, and a
-// no-op pass all return content verbatim.
-func absolutizeContent(content, link string) string {
-	if content == "" {
-		return content
-	}
+// absolutizeContent resolves relative URL references in the session's content
+// against the item's own link. The reader resolves a relative reference
+// against the PACK BASE, so a feed shipping src="/images/x.jpg" would
+// otherwise publish a URL that 404s against the CDN forever — packs are
+// immutable, there is no repair. Runs pre-pipeline (beside the lang stamp) so
+// every step, #selfhost included, sees resolvable URLs; #readability replacing
+// the content afterwards is fine, it absolutizes its own output. An unusable
+// link, unparseable content, and a no-op pass all leave the content verbatim —
+// it rewrites the session's DOM in place and reports the change, so nothing is
+// re-rendered until a boundary needs the string.
+func absolutizeContent(sess *mod.Session, link string) {
 	base, err := url.Parse(strings.TrimSpace(link))
 	if err != nil || base.Host == "" || (base.Scheme != "http" && base.Scheme != "https") {
-		return content
+		return
 	}
-	nodes, err := parseBodyFragment(content)
-	if err != nil {
-		return content
+	body := sess.DOM()
+	if body == nil {
+		return
 	}
 	changed := false
-	visitAssetAttrs(nodes, func(a *xhtml.Attribute) {
+	visitAssetAttrs([]*xhtml.Node{body}, func(a *xhtml.Attribute) {
 		v := strings.TrimSpace(a.Val)
 		// "#" is both the ingest upload marker and an in-page fragment anchor;
 		// "assets/" is a self-hosted key the reader resolves against the pack
@@ -124,16 +140,9 @@ func absolutizeContent(content, link string) string {
 		a.Val = base.ResolveReference(ref).String()
 		changed = true
 	})
-	if !changed {
-		return content
+	if changed {
+		sess.Changed()
 	}
-	var b strings.Builder
-	for _, n := range nodes {
-		if err := xhtml.Render(&b, n); err != nil {
-			return content
-		}
-	}
-	return b.String()
 }
 
 // isC1 reports whether r is a C1 control (U+0080–U+009F). C1 controls have no

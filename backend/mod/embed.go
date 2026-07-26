@@ -33,13 +33,12 @@ import (
 // which will self-host the injected thumbnail like any other image.
 
 func init() {
-	Register("embed", func() Processor {
-		return func(_ context.Context, p Params, i *RawItem) error {
+	RegisterDOM("embed", func() DOMProcessor {
+		return func(_ context.Context, p Params, _ *RawItem, body *html.Node) (bool, error) {
 			if err := p.only(); err != nil {
-				return err
+				return false, err
 			}
-			i.Content = embedContent(i.Content)
-			return nil
+			return embedContent(body), nil
 		}
 	})
 }
@@ -56,17 +55,10 @@ type embedTarget struct {
 	label string // fallback label when the iframe carries no title
 }
 
-// embedContent replaces known-provider iframes in content. Returns content
-// verbatim when nothing changed (or nothing parsed).
-func embedContent(content string) string {
-	if !strings.Contains(strings.ToLower(content), "<iframe") {
-		return content
-	}
-	body := parseBodyHTML(content)
-	if body == nil {
-		return content
-	}
-
+// embedContent replaces known-provider iframes in the content DOM, reporting
+// whether it changed anything — false leaves the session's content string
+// untouched.
+func embedContent(body *html.Node) bool {
 	var frames []*html.Node
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
@@ -93,14 +85,7 @@ func embedContent(content string) string {
 		f.Parent.RemoveChild(f)
 		changed = true
 	}
-	if !changed {
-		return content
-	}
-	out, ok := renderBodyHTML(body)
-	if !ok {
-		return content
-	}
-	return out
+	return changed
 }
 
 // classifyEmbed maps a known provider's embed URL to its watch-page target.

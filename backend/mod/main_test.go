@@ -197,13 +197,33 @@ func TestModuleExternalInvalidJSON(t *testing.T) {
 func TestRegisterBuiltins(t *testing.T) {
 	m := New()
 
-	// Verify built-in processors are registered
+	// Verify built-in processors are registered. String and DOM steps are one
+	// namespace to every caller (Builtins, the pipeline, validation), so the
+	// check is "resolvable as a step", not "in a particular map".
 	builtins := []string{"#filter", "#sanitize", "#minify", "#readability", "#dedupmedia",
-		"#unlazy", "#embed", "#enclosure", "#untrack"}
+		"#unlazy", "#embed", "#enclosure", "#untrack", "#selfhost"}
 	for _, name := range builtins {
-		if _, ok := m.processors[name]; !ok {
-			t.Errorf("built-in %q not registered", name)
+		if _, ok, err := m.resolveStep(name); !ok || err != nil {
+			t.Errorf("built-in %q not registered (ok=%v err=%v)", name, ok, err)
 		}
+	}
+	if got := Builtins(); len(got) != len(registry)+len(domRegistry) {
+		t.Errorf("Builtins() = %v, want every registered name once", got)
+	}
+}
+
+// A DOM-form built-in exposes exactly the same step contract as a string one:
+// it resolves by name, rejects unknown parameters, and rewrites the content.
+func TestDOMBuiltinDispatch(t *testing.T) {
+	m := New()
+	now := time.Now()
+	item := &RawItem{GUID: 1, Title: "T", Content: `<p><img src="a.jpg"/><img src="a.jpg"/></p>`,
+		Link: "http://example.com", Published: &now}
+	if err := m.Process(context.Background(), "#dedupmedia", item); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if strings.Count(item.Content, "<img") != 1 {
+		t.Errorf("duplicate image not removed: %q", item.Content)
 	}
 }
 
