@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 )
 
 var httpCfg HTTPConfig
@@ -49,25 +50,51 @@ type HTTP struct {
 	client *http.Client
 }
 
+// httpTransports memoizes the backend's OWN transports, so an HTTP store keeps
+// one connection pool across every store.Open (one per serve API request, one
+// per fetch cycle) instead of borrowing the process-wide http.DefaultTransport.
+// Borrowing was wrong in both directions: Close() flushed DefaultTransport's
+// idle connections out from under every other user in the process (anything on
+// http.DefaultClient — `srr inspect --url`'s http.Get, an SDK's default client),
+// and this store's pool was never ours to shape.
+//
+// The key is the only config axis that shapes a transport: TLS verification.
+// Token and Headers are per-REQUEST (newRequest stamps them), so they cannot
+// fork a pool — which also keeps a credential out of a map key, and is why the
+// key is a bool rather than the whole (map-carrying, uncomparable) HTTPConfig.
+var (
+	httpTransportsMu sync.Mutex
+	httpTransports   = map[bool]*http.Transport{}
+)
+
+func httpTransportFor(insecure bool) *http.Transport {
+	httpTransportsMu.Lock()
+	defer httpTransportsMu.Unlock()
+	if t, ok := httpTransports[insecure]; ok {
+		return t
+	}
+	// Clone the stdlib defaults (proxy resolution, dial and TLS timeouts,
+	// HTTP/2, idle-conn reaping) rather than restate them — then own the copy.
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		base = &http.Transport{}
+	}
+	t := base.Clone()
+	if insecure {
+		t.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	}
+	httpTransports[insecure] = t
+	return t
+}
+
 func newHTTP(_ context.Context, u *url.URL) (Backend, error) {
 	base := *u
 	base.Path = strings.TrimRight(base.Path, "/")
 
 	// No client-level timeout: pack/asset uploads may legitimately run long and
 	// every operation already carries the caller's context (run cancellation).
-	transport := http.DefaultTransport
-	if httpCfg.Insecure {
-		t, ok := http.DefaultTransport.(*http.Transport)
-		if !ok {
-			t = &http.Transport{}
-		}
-		t = t.Clone()
-		t.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-		transport = t
-	}
-
 	client := &http.Client{
-		Transport: transport,
+		Transport: httpTransportFor(httpCfg.Insecure),
 		// net/http silently replays a 301/302/303-redirected PUT/DELETE as a
 		// bodiless GET and reports the redirected GET's status — a write or
 		// delete that never happened would read as success. Follow redirects
@@ -274,7 +301,10 @@ func (d *HTTP) Rm(ctx context.Context, key string) error {
 	return nil
 }
 
-func (d *HTTP) Close() error {
-	d.client.CloseIdleConnections()
-	return nil
-}
+// Close releases this handle. It deliberately does NOT flush idle connections
+// any more: the pool is memoized per config (httpTransportFor) and shared with
+// every other handle on this store, so flushing it here would discard live
+// keep-alives a concurrent serve request is about to reuse — the same mistake
+// the shared DefaultTransport made, one scope smaller. Idle sockets are reaped
+// by the transport's own IdleConnTimeout, and by process exit.
+func (d *HTTP) Close() error { return nil }

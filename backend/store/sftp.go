@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pkg/sftp"
@@ -37,11 +38,154 @@ func init() {
 	RegisterConfig("sftp", &sftpCfg)
 }
 
+// SFTP is a handle onto a store path. It owns no connection: the SSH session
+// and the SFTP subsystem riding it belong to the sftpSessions memo below, and
+// several handles share one concurrently (pkg/sftp multiplexes requests over the
+// single channel and its Client is safe for concurrent use).
 type SFTP struct {
-	path      string
-	host      string
+	path   string
+	host   string
+	client *sftp.Client
+}
+
+// sftpSession is one dialed SSH connection plus the SFTP subsystem on it.
+type sftpSession struct {
 	client    *sftp.Client
 	sshClient *ssh.Client
+}
+
+// close tears the session down for real. ONLY the memo calls it, and only for a
+// session a liveness probe has just found dead — see sftpSessions for who owns
+// teardown now. sshClient is nil for a session built over an already-established
+// transport (the tests' in-process pipe), which has no ssh connection to close.
+// Close errors are dropped on purpose: a corpse has nothing left to report.
+func (s *sftpSession) close() {
+	s.client.Close()
+	if s.sshClient != nil {
+		s.sshClient.Close()
+	}
+}
+
+// alive reports whether the server still answers, with one cheap round trip
+// (SSH_FXP_REALPATH of "."). A memoized session outlives the handle that dialed
+// it, so the next lookup must ASK rather than assume: a server restart, an idle
+// disconnect or a NAT eviction leaves a Client whose every op fails. One round
+// trip is nothing against the TCP connect + SSH handshake + subsystem open it
+// stands in for.
+//
+// It catches a session that died BETWEEN two Opens, not one that dies mid-op —
+// that is S67's redial, which will invalidate this memo entry on a
+// connection-class failure and come back through sftpSessionFor for a fresh
+// dial, exactly as a failed probe does here. None of that retry logic is built
+// yet; the seam is that a session's identity is its key and nothing else holds a
+// reference the memo cannot replace.
+func (s *sftpSession) alive() bool {
+	_, err := s.client.Getwd()
+	return err == nil
+}
+
+// sftpSessionKey is a session's IDENTITY: everything that decides which server
+// this is and who we are to it. The resolved SFTPConfig carries the credentials
+// and the host-key policy, addr the dialed endpoint, user the login, and
+// urlPassword the one credential that rides the store URL rather than the config
+// (sftpAuthMethods prefers it over SFTPConfig.Password). Two stores differing in
+// ANY of those must never share a session, which is what makes this a composite
+// key rather than the bare address it looks like it could be.
+type sftpSessionKey struct {
+	cfg         SFTPConfig
+	addr        string
+	user        string
+	urlPassword string
+}
+
+// sftpSessions memoizes dialed sessions per identity — s3.go's s3ClientFor
+// pattern applied to a protocol whose setup costs far more: newSFTP used to pay
+// a TCP connect, an SSH handshake and a subsystem open on EVERY store.Open, i.e.
+// once per serve API request and once per fetch cycle.
+//
+// The memo OWNS every session in it. A handle's Close releases the handle and
+// nothing else (see SFTP.Close); teardown happens here, and only when a lookup
+// finds a session dead and replaces it. Sessions therefore live for the process,
+// which is the point — and the process exit that reclaims them is the same event
+// that used to. The map holds one entry per distinct store identity, which in
+// every real deployment is one.
+var (
+	sftpSessionsMu sync.Mutex
+	sftpSessions   = map[sftpSessionKey]*sftpSession{}
+)
+
+// sftpDialSession is the dialer, a var so the memo tests can substitute
+// in-process pipe sessions and count dials without standing up an ssh server.
+var sftpDialSession = dialSFTPSession
+
+// sftpSessionFor returns the memoized session for key, dialing when there is
+// none or when the memoized one no longer answers.
+//
+// The lock spans the dial deliberately: a burst of concurrent Opens against a
+// cold memo then performs ONE handshake and shares it instead of N. The cost is
+// that an unreachable server stalls every waiting Open for the dial timeout
+// rather than only the first — the same trade s3ClientFor makes, and the right
+// one when the alternative is N simultaneous handshakes into a server that is
+// already struggling.
+func sftpSessionFor(key sftpSessionKey, u *url.URL) (*sftpSession, error) {
+	sftpSessionsMu.Lock()
+	defer sftpSessionsMu.Unlock()
+
+	if s, ok := sftpSessions[key]; ok {
+		if s.alive() {
+			return s, nil
+		}
+		// Drop the corpse BEFORE dialing, so a failed dial cannot leave it behind
+		// for the next lookup to probe all over again.
+		delete(sftpSessions, key)
+		s.close()
+	}
+
+	s, err := sftpDialSession(key, u)
+	if err != nil {
+		return nil, err
+	}
+	sftpSessions[key] = s
+	return s, nil
+}
+
+// dialSFTPSession performs the full connect: auth resolution, host-key policy,
+// SSH handshake, subsystem open. It runs only on a memo miss, which is why the
+// auth chain (reading ~/.ssh keys, dialing the agent socket) lives in here
+// rather than in newSFTP.
+func dialSFTPSession(key sftpSessionKey, u *url.URL) (_ *sftpSession, retErr error) {
+	auth, cleanup, err := sftpAuthMethods(u)
+	if err != nil {
+		return nil, err
+	}
+	// The ssh-agent socket (if any) is only needed for the handshake below.
+	defer cleanup()
+
+	hostKeyCallback, err := sftpHostKeyCallback()
+	if err != nil {
+		return nil, fmt.Errorf("loading known hosts: %w", err)
+	}
+
+	sshClient, err := ssh.Dial("tcp", key.addr, &ssh.ClientConfig{
+		User:            key.user,
+		Auth:            auth,
+		HostKeyCallback: hostKeyCallback,
+		Timeout:         30 * time.Second,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("dial sftp server %s: %w", key.addr, err)
+	}
+	defer func() {
+		if retErr != nil {
+			sshClient.Close()
+		}
+	}()
+
+	client, err := sftp.NewClient(sshClient)
+	if err != nil {
+		return nil, fmt.Errorf("create sftp client: %w", err)
+	}
+	return &sftpSession{client: client, sshClient: sshClient}, nil
 }
 
 func sftpHostKeyCallback() (ssh.HostKeyCallback, error) {
@@ -58,48 +202,25 @@ func sftpHostKeyCallback() (ssh.HostKeyCallback, error) {
 	return knownhosts.New(khFile)
 }
 
-func newSFTP(_ context.Context, u *url.URL) (_ Backend, retErr error) {
-	auth, cleanup, err := sftpAuthMethods(u)
-	if err != nil {
-		return nil, err
-	}
-	// The ssh-agent socket (if any) is only needed for the handshake below.
-	defer cleanup()
-
-	hostKeyCallback, err := sftpHostKeyCallback()
-	if err != nil {
-		return nil, fmt.Errorf("loading known hosts: %w", err)
-	}
-
+func newSFTP(_ context.Context, u *url.URL) (Backend, error) {
 	addr := u.Host
 	if u.Port() == "" {
 		addr = net.JoinHostPort(u.Hostname(), "22")
 	}
-
-	sshClient, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
-		User:            sftpUser(u),
-		Auth:            auth,
-		HostKeyCallback: hostKeyCallback,
-		Timeout:         30 * time.Second,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("dial sftp server %s: %w", addr, err)
+	urlPassword := ""
+	if u.User != nil {
+		urlPassword, _ = u.User.Password()
 	}
-	defer func() {
-		if retErr != nil {
-			sshClient.Close()
-		}
-	}()
 
-	client, err := sftp.NewClient(sshClient)
+	sess, err := sftpSessionFor(sftpSessionKey{
+		cfg:         sftpCfg,
+		addr:        addr,
+		user:        sftpUser(u),
+		urlPassword: urlPassword,
+	}, u)
 	if err != nil {
-		return nil, fmt.Errorf("create sftp client: %w", err)
+		return nil, err
 	}
-	defer func() {
-		if retErr != nil {
-			client.Close()
-		}
-	}()
 
 	basePath := strings.TrimRight(u.Path, "/")
 	if basePath == "" && strings.HasPrefix(u.Path, "/") {
@@ -107,7 +228,10 @@ func newSFTP(_ context.Context, u *url.URL) (_ Backend, retErr error) {
 	}
 
 	if basePath != "" && basePath != "/" {
-		info, err := client.Stat(basePath)
+		// A bad base path fails this Open but does NOT touch the session: it is
+		// the memo's, it may already be serving other handles, and a missing
+		// directory says nothing about the connection.
+		info, err := sess.client.Stat(basePath)
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil, fmt.Errorf("sftp base path %q does not exist", basePath)
@@ -120,10 +244,9 @@ func newSFTP(_ context.Context, u *url.URL) (_ Backend, retErr error) {
 	}
 
 	return &SFTP{
-		path:      basePath,
-		host:      addr,
-		client:    client,
-		sshClient: sshClient,
+		path:   basePath,
+		host:   addr,
+		client: sess.client,
 	}, nil
 }
 
@@ -351,14 +474,13 @@ func (d *SFTP) List(_ context.Context, prefix string) ([]string, error) {
 	return out, nil
 }
 
-func (d *SFTP) Close() error {
-	cerr := d.client.Close()
-	serr := d.sshClient.Close()
-	if cerr != nil {
-		return cerr
-	}
-	return serr
-}
+// Close releases this handle and tears NOTHING down. The session it used
+// belongs to the sftpSessions memo, is shared with every other handle on the
+// same identity, and deliberately outlives all of them — closing it here is
+// exactly what made every store.Open pay a fresh TCP connect + SSH handshake +
+// subsystem open, i.e. one per serve API request. The memo closes a session when
+// a later lookup finds it dead (sftpSession.alive); process exit closes the rest.
+func (d *SFTP) Close() error { return nil }
 
 func sftpUser(u *url.URL) string {
 	if u.User != nil && u.User.Username() != "" {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -422,6 +423,95 @@ func TestHTTPInsecureSkipsTLSVerify(t *testing.T) {
 	t.Cleanup(func() { insecure.Close() })
 	if err := insecure.Put(ctx, "obj", strings.NewReader("x"), true); err != nil {
 		t.Fatalf("Put with Insecure=true should succeed against a self-signed TLS server: %v", err)
+	}
+}
+
+// The backend must never borrow http.DefaultTransport: its Close used to flush
+// that pool's idle connections out from under every other user in the process.
+// It carries its own, memoized per config so repeated Opens (one per serve API
+// request) share ONE connection pool — and forked only by the axis that actually
+// shapes a transport, TLS verification.
+func TestHTTPTransportIsolatedPerConfig(t *testing.T) {
+	f := newHTTPFixture(t)
+	orig := httpCfg
+	t.Cleanup(func() { httpCfg = orig })
+
+	httpCfg = HTTPConfig{}
+	strict, ok := openHTTPStore(t, f).(*HTTP)
+	if !ok {
+		t.Fatal("Open did not return the HTTP backend")
+	}
+	if strict.client.Transport == http.DefaultTransport {
+		t.Error("the store borrowed http.DefaultTransport; Close would flush the whole process's keep-alives")
+	}
+	again, _ := openHTTPStore(t, f).(*HTTP)
+	if strict.client.Transport != again.client.Transport {
+		t.Error("two Opens under one config built two pools; the memo should hand out one")
+	}
+
+	httpCfg = HTTPConfig{Insecure: true}
+	insecure, _ := openHTTPStore(t, f).(*HTTP)
+	if insecure.client.Transport == strict.client.Transport {
+		t.Error("Insecure shares the verifying transport; TLS policy must fork the pool")
+	}
+
+	// Credentials are per-REQUEST, so they must NOT fork a pool (and must not
+	// end up in the memo key).
+	httpCfg = HTTPConfig{Token: "tok", Headers: map[string]string{"X-Api-Key": "k"}}
+	tokened, _ := openHTTPStore(t, f).(*HTTP)
+	if tokened.client.Transport != strict.client.Transport {
+		t.Error("a bearer token forked the connection pool; only TLS policy may")
+	}
+}
+
+// Close is a handle release, not a pool flush: the transport is shared with
+// every other handle on this store, so a closed handle must leave a concurrent
+// (or subsequent) request's keep-alive intact.
+func TestHTTPCloseKeepsIdleConnections(t *testing.T) {
+	var mu sync.Mutex
+	conns := 0
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	}))
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			mu.Lock()
+			conns++
+			mu.Unlock()
+		}
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	orig := httpCfg
+	httpCfg = HTTPConfig{}
+	t.Cleanup(func() { httpCfg = orig })
+
+	first, err := Open(ctx, srv.URL)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := first.Put(ctx, "a", strings.NewReader("x"), true); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	second, err := Open(ctx, srv.URL)
+	if err != nil {
+		t.Fatalf("Open(second): %v", err)
+	}
+	t.Cleanup(func() { second.Close() })
+	if err := second.Put(ctx, "b", strings.NewReader("x"), true); err != nil {
+		t.Fatalf("Put(second): %v", err)
+	}
+
+	mu.Lock()
+	got := conns
+	mu.Unlock()
+	if got != 1 {
+		t.Errorf("server saw %d connections, want 1 — Close flushed the pool the next handle shares", got)
 	}
 }
 
