@@ -130,6 +130,13 @@ var subprocessWaitDelay = 5 * time.Second
 func RunSubprocess(ctx context.Context, args string, env []string, dir string, stdin io.Reader) ([]byte, error) {
 	cctx, cancel := context.WithTimeout(ctx, SubprocessTimeout())
 	defer cancel()
+	// Running an operator-authored string through a shell IS the external-module
+	// contract (see backend/README.md → External mod protocol): a pipeline token
+	// that is not a "#" built-in is a shell command, by design. `args` comes from
+	// the store's recipe/feed config, which only a store writer can set — the same
+	// trust level as the binary's own flags. Feed content never reaches it; it
+	// arrives on this command's STDIN as JSON.
+	//nolint:gosec // G204: operator-configured command, the documented design
 	cmd := exec.CommandContext(cctx, "/bin/sh", "-c", args)
 	cmd.Stdin = stdin
 	cmd.Env = env
@@ -163,6 +170,10 @@ func RunCommandTimeout(ctx context.Context, timeout time.Duration, name string, 
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
+	// Same trust level as RunSubprocess above, and strictly narrower: direct
+	// exec, no shell to interpret metacharacters. name/args come from
+	// --asset-process / --asset-peek, which are operator flags.
+	//nolint:gosec // G204: operator-configured command, no shell involved
 	cmd := exec.CommandContext(ctx, name, args...)
 	tail := &tailBuffer{limit: stderrTailBytes}
 	cmd.Stderr = tail

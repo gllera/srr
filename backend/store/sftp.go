@@ -190,6 +190,10 @@ func dialSFTPSession(key sftpSessionKey, u *url.URL) (_ *sftpSession, retErr err
 
 func sftpHostKeyCallback() (ssh.HostKeyCallback, error) {
 	if sftpCfg.Insecure {
+		// The sftp.insecure opt-in, the SSH sibling of http.insecure: the operator
+		// has said not to verify the host key. Audited and deliberate — this branch
+		// exists for no other reason.
+		//nolint:gosec // G106: opt-in sftp.insecure
 		return ssh.InsecureIgnoreHostKey(), nil
 	}
 
@@ -549,7 +553,11 @@ func sftpAuthMethods(u *url.URL) ([]ssh.AuthMethod, func(), error) {
 		// while the real network call next door stays context-less would be
 		// ceremony, and it would mean threading a ctx through sftpAuthMethods that
 		// newSFTP deliberately discards.
-		//nolint:noctx // local unix socket; nothing to cancel
+		// G704 reads $SSH_AUTH_SOCK as tainted input reaching a dial and calls it
+		// SSRF. It is the ssh-agent protocol: that variable is how every SSH client
+		// finds the agent, the network is an AF_UNIX socket on this machine, and
+		// the only thing sent is a signature request.
+		//nolint:noctx,gosec // local unix socket; nothing to cancel, and G704 is not SSRF
 		if agentConn, err := net.Dial("unix", sock); err == nil {
 			methods = append(methods, ssh.PublicKeysCallback(agent.NewClient(agentConn).Signers))
 			cleanup = func() { agentConn.Close() }
