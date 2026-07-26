@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest"
 
-import { HOME_MID, pinsKey, savedKey, seenKey } from "./keys"
+import * as keys from "./keys"
+import { HOME_MID, PER_STORE_KEYS, pinsKey, savedKey, seenKey } from "./keys"
 import {
    activeMounts,
    addMount,
@@ -246,12 +247,54 @@ describe("renameStoreState + moveMount — re-host (§3.5)", () => {
    })
 })
 
-describe("forgetStoreState (§3.4 destructive)", () => {
-   it("deletes every per-store key for a mid", () => {
-      localStorage.setItem(seenKey("sZZZ"), "{}")
-      localStorage.setItem(savedKey("sZZZ"), "[]")
-      forgetStoreState("sZZZ")
-      expect(localStorage.getItem(seenKey("sZZZ"))).toBeNull()
-      expect(localStorage.getItem(savedKey("sZZZ"))).toBeNull()
+describe("the per-store key roster", () => {
+   // The roster is what a rename moves and a forget deletes. Hand-listing it in
+   // mounts.ts let two keys (srr-player, srr-favorites) go missing for a whole
+   // release, and the old test here hard-coded two keys, so it could not fail.
+   // These three derive the expectation instead.
+
+   it("PER_STORE_KEYS holds every mid-qualified builder keys.ts exports", () => {
+      // Belt and braces for the derivation: any arity-1 function export whose
+      // output for a peer mid carries the `@<mid>` suffix IS a per-store key,
+      // so it must be in the roster. Adding a builder and forgetting the roster
+      // fails right here rather than as a silent leak months later.
+      const mid = "sPROBE001"
+      const qualified = Object.entries(keys)
+         .filter(([, v]) => typeof v === "function" && (v as (m: string) => string).length === 1)
+         .filter(([, v]) => {
+            try {
+               return (v as (m: string) => string)(mid).endsWith(`@${mid}`)
+            } catch {
+               return false
+            }
+         })
+         .map(([name]) => name)
+      expect(qualified.length).toBeGreaterThan(0)
+      const rostered = new Set(PER_STORE_KEYS.map((k) => k(mid)))
+      for (const name of qualified) {
+         const built = (keys as unknown as Record<string, (m: string) => string>)[name](mid)
+         expect(rostered.has(built), `keys.${name} is per-store but missing from PER_STORE_KEYS`).toBe(true)
+      }
+   })
+
+   it("forgetStoreState deletes every per-store key for a mid", () => {
+      const mid = "sZZZ"
+      for (const k of PER_STORE_KEYS) localStorage.setItem(k(mid), "seeded")
+      // A peer's keys only — the home store's bare names must survive.
+      for (const k of PER_STORE_KEYS) localStorage.setItem(k(HOME_MID), "home")
+      forgetStoreState(mid)
+      for (const k of PER_STORE_KEYS) expect(localStorage.getItem(k(mid)), k(mid)).toBeNull()
+      for (const k of PER_STORE_KEYS) expect(localStorage.getItem(k(HOME_MID)), k(HOME_MID)).toBe("home")
+   })
+
+   it("renameStoreState moves every per-store key for a mid", () => {
+      const from = "sFROM0001"
+      const to = "sTO000001"
+      for (const k of PER_STORE_KEYS) localStorage.setItem(k(from), `v:${k(from)}`)
+      renameStoreState(from, to)
+      for (const k of PER_STORE_KEYS) {
+         expect(localStorage.getItem(k(from)), `${k(from)} should be gone`).toBeNull()
+         expect(localStorage.getItem(k(to)), `${k(to)} should have arrived`).toBe(`v:${k(from)}`)
+      }
    })
 })
