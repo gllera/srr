@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 
 	"srr/store"
 )
@@ -45,11 +46,26 @@ const keepManifests = 32
 // thousands of sequential store deletes inside a single fetch cycle.
 const gcMaxSweep = 64
 
+// gcMaxOrphans bounds the ORPHAN half of the list-mode sweep for the same
+// reason gcMaxSweep bounds the generation half: the first run against a store
+// that has been leaking crash orphans for months would otherwise issue one
+// sequential delete per orphan inside a five-minute fetch cycle. Unlike the
+// drain, nothing has to be remembered to resume — the next run lists again and
+// finds whatever is left — so the cap costs only latency to full reclamation.
+const gcMaxOrphans = 1000
+
+// manifestSeries is the series the generation manifests live in. It is a
+// PackSeries row like any other (bare stems, `manifest/<m>.gz`), which is what
+// makes manifests visible to a listing — and why the list-mode sweep has to
+// treat them by GENERATION NUMBER rather than by name reachability: no `names`
+// table ever lists a manifest.
+const manifestSeries = "manifest"
+
 // manifestKey resolves the key of generation manifest m. Its own "manifest"
 // series in the PackSeries grammar, bare stems only — the manifest counter IS
 // the name.
 func manifestKey(m int) string {
-	return fmt.Sprintf("manifest/%d.gz", m)
+	return fmt.Sprintf("%s/%d.gz", manifestSeries, m)
 }
 
 // Manifest is one complete, self-contained description of one store state
@@ -183,25 +199,35 @@ func (o *DB) readRootManifestNum(ctx context.Context) (int, error) {
 // and the four window formulas (latestKeep, gcSweepWindow, 2·maxDeltas, the
 // per-summary windows) that used to derive their cutoffs — §10.6.
 //
-// Without a store List (STO1 open) the sweep is a LOW-WATER drain on the
-// manifest counter, for exactly the reason the retired GCLatestSwept was one:
-// the sweep is warn-only, so a missed or failed run must never permanently
-// strand a name, and the next advancing run has to resume where the last one
-// stopped. `gcm` advances only over generations actually cleared, and per-run
-// work is capped at gcMaxSweep. Rm is silent on missing keys.
+// The rule is one; the SWEEP has two shapes, because "what the store holds" is
+// a question only a listable backend can answer:
+//
+//   - gcSweepList — the backend lists (local, SFTP, S3/R2, i.e. production).
+//     Ask the store what it holds, delete the pack-grammar objects no in-window
+//     generation can reach. That reclaims what the drain does AND what it never
+//     could: an object a crashed cycle wrote and no manifest ever named.
+//   - gcSweepDrain — the backend cannot list (plain HTTP). Walk the superseded
+//     generations one by one, deleting what each names and the window does not.
+//     A crash orphan stays unfindable; nothing else can be done from here.
+//
+// Both share the reachable set below, and both leave `gcm` a LOW-WATER mark
+// that advances only over generations actually cleared — the sweep is
+// warn-only, so a missed or failed run must never permanently strand a name.
+// Rm is silent on missing keys.
 func (o *DB) GC(ctx context.Context, keep int) error {
 	c := &o.core
+	if c.ManifestNum == 0 {
+		// Nothing has been published, so nothing in the store is superseded and
+		// nothing here can distinguish an orphan from an object this very cycle
+		// is about to name.
+		return nil
+	}
 	// Never sweep the current generation: clamp the cutoff to m-1. The flag is
 	// already floored at the compile-time K in main, but GC stays self-safe for
 	// any caller — a keep <= 0 would otherwise make the cutoff reach m and delete
 	// the manifest the root names, bricking the store on a crash before the
 	// republishing Commit.
 	cutoff := min(c.ManifestNum-keep, c.ManifestNum-1)
-	from := max(c.GCManifest+1, 1)
-	to := min(cutoff, from+gcMaxSweep-1)
-	if to < from {
-		return nil
-	}
 
 	// The reachable set is union(names(cutoff+1 … m)) — but it collapses to ONE
 	// manifest read, and the reason is worth stating because it is the property
@@ -221,7 +247,7 @@ func (o *DB) GC(ctx context.Context, keep int) error {
 		live[k] = true
 	}
 	oldest := min(max(cutoff+1, 1), c.ManifestNum)
-	keys, err := o.manifestObjectKeys(ctx, oldest)
+	keys, floor, err := o.manifestObjectKeys(ctx, oldest)
 	if err != nil {
 		// Nothing may be reclaimed on incomplete knowledge of what is still
 		// reachable: bail rather than delete an object a stale reader resolves.
@@ -231,9 +257,163 @@ func (o *DB) GC(ctx context.Context, keep int) error {
 		live[k] = true
 	}
 
+	err = o.gcSweepList(ctx, cutoff, live, floor)
+	if !errors.Is(err, errors.ErrUnsupported) {
+		return err
+	}
+	return o.gcSweepDrain(ctx, cutoff, live)
+}
+
+// gcSweepList is the sweep for a backend that can enumerate its own objects.
+//
+// The reachable set above is exact for objects a SUPERSEDED generation names,
+// but a listing also turns up objects created INSIDE the window — the tail
+// generation g published and generation g+1 replaced, with cutoff still below
+// both — and those are named by neither the oldest in-window manifest nor the
+// current one while a reader parked on g still needs them. Reading all K
+// manifests would settle it; one number already does:
+//
+//	Stems come from a per-series counter that only ever counts up, so an object
+//	whose stem is BELOW the oldest in-window manifest's `next` for that series
+//	was created at or before that generation. If that generation does not name
+//	it either, its contiguous liveness interval ended at or before the window
+//	opened, and NO in-window generation names it. Deletable.
+//	An object at or above that floor was created inside the window: it may be
+//	the very object a mid-window reader resolves, so it is left alone and
+//	becomes deletable on its own terms once the window slides past it.
+//
+// That floor is also what makes crash orphans reclaimable at all — a stem
+// written by a cycle that died before publishing is below the floor as soon as
+// the window moves on, and no manifest anywhere has to know it existed. And it
+// is what keeps a CONCURRENT writer safe: a peer that stole or forced the lease
+// draws its stems from the same published `names.next`, so everything it has in
+// flight sits at or above the floor and is never a candidate here.
+//
+// Cost: one listing of each series per run, i.e. per fetch cycle. That is a
+// page per ~1000 objects — single digits of requests on any store this writer
+// has produced — against a cycle that already reads and writes packs.
+//
+// Every List runs BEFORE any delete, so a backend that turns out not to support
+// listing reports errors.ErrUnsupported with the store untouched and GC falls
+// back to the drain.
+func (o *DB) gcSweepList(ctx context.Context, cutoff int, live map[string]bool, floor map[string]int) error {
+	c := &o.core
+
+	var orphans []string
+	present := map[int]bool{} // the generation manifests the store actually holds
+	for _, s := range store.PackSeries {
+		keys, err := o.List(ctx, s.Name+"/")
+		if err != nil {
+			return fmt.Errorf("gc: listing %s/: %w", s.Name, err)
+		}
+		for _, k := range keys {
+			// THE SAFETY LINE OF THIS WHOLE SWEEP: only a name the write-once pack
+			// grammar can produce is ever a candidate. Everything else a listing
+			// may turn up — an AtomicPut staging leftover, a retired kind-lettered
+			// name, anything an operator dropped in the tree — answers false and is
+			// never deleted. assets/, out/, inbox/, db.gz, config.gz, sitemap.txt
+			// and the frontend shell are outside the listed series entirely.
+			series, stem, ok := store.ParsePackKey(k)
+			if !ok || series != s.Name {
+				continue
+			}
+			if series == manifestSeries {
+				// No `names` table lists a manifest, so reachability says nothing
+				// about one: generations are swept by NUMBER, below.
+				present[stem] = true
+				continue
+			}
+			if live[k] || stem >= floor[series] {
+				continue
+			}
+			orphans = append(orphans, k)
+		}
+	}
+
+	// The objects first, then the manifests that name them: a crash in between
+	// leaves objects a still-present superseded manifest lists, which the next
+	// listing reclaims anyway — the reverse order would be the one that loses
+	// track of anything.
+	slices.Sort(orphans)
+	if len(orphans) > gcMaxOrphans {
+		// Worth an INFO: a backlog this size is a store that has been leaking,
+		// and the operator should see it drain rather than wonder why one run
+		// did not finish the job. The routine handful stays at DEBUG.
+		slog.Info("gc: more unreferenced objects than one run reclaims; draining over subsequent runs",
+			"found", len(orphans), "reclaiming", gcMaxOrphans)
+		orphans = orphans[:gcMaxOrphans]
+	} else if len(orphans) > 0 {
+		slog.Debug("gc reclaiming unreferenced objects", "objects", len(orphans))
+	}
+	for _, k := range orphans {
+		if err := o.Rm(ctx, k); err != nil {
+			return fmt.Errorf("gc: reclaiming %s: %w", k, err)
+		}
+	}
+
+	// The superseded generations, oldest first. Each is read before it is
+	// dropped, for the one thing the listing above cannot cover: a manifest may
+	// name an object OUTSIDE the pack grammar — an S32-era manifest still inside
+	// the window lists the retired kind-lettered tails, delta segments and
+	// summaries (§10.1) — and that is the only chance anything has to reclaim
+	// them. Its pack-grammar names need no second pass: a generation at or below
+	// the cutoff drew every stem it holds below the floor, so the orphan sweep
+	// already covered them.
+	swept := c.GCManifest
+	from := max(c.GCManifest+1, 1)
+	to := min(cutoff, from+gcMaxSweep-1)
+	for g := from; g <= to; g++ {
+		if present[g] {
+			keys, _, err := o.manifestObjectKeys(ctx, g)
+			if err != nil {
+				slog.Warn("gc: superseded manifest unreadable; its pack objects still reclaim by listing, any legacy names it held do not",
+					"generation", g, "error", err)
+			}
+			for _, k := range keys {
+				if live[k] {
+					continue
+				}
+				if _, _, isPack := store.ParsePackKey(k); isPack {
+					continue
+				}
+				if err := o.Rm(ctx, k); err != nil {
+					c.GCManifest = swept
+					return fmt.Errorf("gc generation %d: %w", g, err)
+				}
+			}
+			if err := o.Rm(ctx, manifestKey(g)); err != nil {
+				c.GCManifest = swept
+				return fmt.Errorf("gc manifest %d: %w", g, err)
+			}
+		}
+		swept = g
+	}
+	c.GCManifest = swept
+	return nil
+}
+
+// gcSweepDrain is the sweep for a backend that cannot list: a LOW-WATER drain
+// over the superseded generations, for exactly the reason the retired
+// GCLatestSwept was one — the sweep is warn-only, so a missed or failed run
+// must never permanently strand a name and the next advancing run has to resume
+// where the last one stopped. `gcm` advances only over generations actually
+// cleared, and per-run work is capped at gcMaxSweep.
+//
+// Its blind spot is the finding that motivated List: an object no manifest ever
+// named — what a cycle that died between writing a pack and publishing its
+// manifest leaves behind — is unreachable from here and stays in the store
+// forever.
+func (o *DB) gcSweepDrain(ctx context.Context, cutoff int, live map[string]bool) error {
+	c := &o.core
+	from := max(c.GCManifest+1, 1)
+	to := min(cutoff, from+gcMaxSweep-1)
+	if to < from {
+		return nil
+	}
+
 	swept := c.GCManifest
 	for g := from; g <= to; g++ {
-		keys, err := o.manifestObjectKeys(ctx, g)
+		keys, _, err := o.manifestObjectKeys(ctx, g)
 		if err != nil {
 			// An unreadable superseded manifest is reclaimed as itself: its
 			// objects stay as garbage rather than risking a delete on a guess.
@@ -259,27 +439,39 @@ func (o *DB) GC(ctx context.Context, keep int) error {
 	return nil
 }
 
-// manifestObjectKeys lists every object generation g names.
-//
-// It reads the `names` object LENIENTLY rather than through the typed model,
-// because the grace window can still hold S32-era manifests written before the
-// cutover — the ones whose name lists carry the retired kind-lettered keys.
-// That is precisely how those legacy tails, delta segments and summaries
-// reclaim themselves (§10.1): they are named by a manifest inside the window,
-// so this sweep reaches them. It is a read-only compatibility shim with a
-// bounded life of K generations, not a second naming model.
-func (o *DB) manifestObjectKeys(ctx context.Context, g int) ([]string, error) {
+// manifestObjectKeys lists every object generation g names, plus that
+// generation's per-series stem counters (`names.next`) — the FLOOR
+// gcSweepList's orphan rule is stated in. The two ride together because they
+// come from one read of one object, and a caller that had the keys but not the
+// floor would have to fetch the manifest twice.
+func (o *DB) manifestObjectKeys(ctx context.Context, g int) ([]string, map[string]int, error) {
 	buf, err := o.readGz(ctx, manifestKey(g))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	return manifestNamesOf(buf)
+}
+
+// manifestNamesOf reads a manifest's `names` object LENIENTLY rather than
+// through the typed model, because the grace window can still hold S32-era
+// manifests written before the cutover — the ones whose name lists carry the
+// retired kind-lettered keys. That is precisely how those legacy tails, delta
+// segments and summaries reclaim themselves (§10.1): they are named by a
+// manifest inside the window, so the sweep reaches them. It is a read-only
+// compatibility shim with a bounded life of K generations, not a second naming
+// model.
+//
+// It is a free function so the read-only checkers (`srr inspect --validate`'s
+// orphan report) can use the same lenient parse from a keyGetter.
+func manifestNamesOf(buf []byte) ([]string, map[string]int, error) {
 	var doc struct {
 		Names map[string]json.RawMessage `json:"names"`
 	}
 	if err := json.Unmarshal(buf, &doc); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var out []string
+	next := map[string]int{}
 	add := func(k string) {
 		if k != "" {
 			out = append(out, k)
@@ -295,6 +487,12 @@ func (o *DB) manifestObjectKeys(ctx context.Context, g int) ([]string, error) {
 	for key, raw := range doc.Names {
 		switch key {
 		case "next":
+			// A manifest that carries no counters (or one this shim cannot read)
+			// leaves the floor at zero, which makes every series' orphan rule
+			// vacuously false — conservative in exactly the right direction.
+			if err := json.Unmarshal(raw, &next); err != nil {
+				next = map[string]int{}
+			}
 		case "deltas":
 			var legacy []string
 			if json.Unmarshal(raw, &legacy) == nil {
@@ -343,7 +541,7 @@ func (o *DB) manifestObjectKeys(ctx context.Context, g int) ([]string, error) {
 			add(row.Tail)
 		}
 	}
-	return out, nil
+	return out, next, nil
 }
 
 // gzipJSON encodes v as gzipped JSON with the same settings every other SRR

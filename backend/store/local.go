@@ -6,10 +6,13 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -261,6 +264,49 @@ func (d *Local) Stat(_ context.Context, key string) (int64, error) {
 func (d *Local) Rm(_ context.Context, key string) error {
 	file := d.localPath("delete", key)
 	return rmErr(os.Remove(file), file)
+}
+
+// List walks the prefix's directory and returns the store-relative keys under
+// it. Only regular files count — a directory is not an object, and neither is a
+// symlink or a device node someone dropped in the tree.
+//
+// Two error decisions, both the Backend contract's: a prefix naming no
+// directory is an EMPTY set with a nil error (a prefix is not a key, so
+// fs.ErrNotExist would be a lie about a question nobody asked), and an entry
+// that vanished mid-walk — a concurrent GC deleting exactly what we are
+// enumerating — is skipped rather than failing the whole listing.
+func (d *Local) List(_ context.Context, prefix string) ([]string, error) {
+	root := filepath.Join(d.path, filepath.FromSlash(listDir(prefix)))
+	slog.Debug("db list", "url", root, "prefix", prefix)
+
+	var out []string
+	err := filepath.WalkDir(root, func(p string, e fs.DirEntry, err error) error {
+		if err != nil {
+			if isNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if !e.Type().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(d.path, p)
+		if err != nil {
+			return err
+		}
+		if key := filepath.ToSlash(rel); strings.HasPrefix(key, prefix) {
+			out = append(out, key)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing %s: %w", root, err)
+	}
+	// WalkDir's order is per-directory lexical, which is NOT lexical over the
+	// joined keys ("a.txt" sorts before "a/b" as a string but after it in the
+	// walk), so the contract's ordering is imposed here.
+	slices.Sort(out)
+	return out, nil
 }
 
 func (d *Local) Close() error {

@@ -299,6 +299,59 @@ func (d *S3) Rm(ctx context.Context, key string) error {
 	return nil
 }
 
+// listPrefix is s3path's sibling for a PREFIX rather than a key: path.Join
+// would drop the trailing slash of a directory-shaped prefix, and on S3's flat
+// key space "prefix/idx" also matches "prefix/idxfoo/3.gz". The base's own
+// trailing slash (an "s3://bucket/prefix/" store URL) is normalised away so the
+// join never doubles it.
+func (d *S3) listPrefix(prefix string) string {
+	base := strings.TrimSuffix(d.path, "/")
+	if base == "" {
+		return prefix
+	}
+	return base + "/" + prefix
+}
+
+// List pages ListObjectsV2 over the prefix and returns store-relative keys —
+// the base path stripped back off, so what comes out is what Get/Rm take. S3
+// already answers in lexicographic order and the paginator preserves it; the
+// sort in the filesystem backends is what makes that a contract rather than a
+// coincidence, so nothing here depends on the difference.
+//
+// A prefix matching nothing is an empty page set, i.e. an empty slice and a nil
+// error — the Backend contract's "a prefix is not an object", which S3 gives us
+// for free.
+func (d *S3) List(ctx context.Context, prefix string) ([]string, error) {
+	full := d.listPrefix(prefix)
+	slog.Debug("db list", "url", fmt.Sprintf("s3://%s/%s", d.bucket, full))
+	base := strings.TrimSuffix(full, prefix)
+
+	var out []string
+	p := s3.NewListObjectsV2Paginator(d.client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(d.bucket),
+		Prefix: aws.String(full),
+	})
+	for p.HasMorePages() {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			if apiErrorCode(err) == s3ErrUnauthorized {
+				return nil, fmt.Errorf("unauthorized access to s3: %w", err)
+			}
+			return nil, fmt.Errorf("s3 list %q: %w", full, err)
+		}
+		for _, obj := range page.Contents {
+			key := aws.ToString(obj.Key)
+			if !strings.HasPrefix(key, base) {
+				// A gateway answering outside the prefix it was given: drop it
+				// rather than hand back a key no other op on this handle resolves.
+				continue
+			}
+			out = append(out, strings.TrimPrefix(key, base))
+		}
+	}
+	return out, nil
+}
+
 func (d *S3) Close() error {
 	return nil
 }

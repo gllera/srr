@@ -30,7 +30,18 @@ type InspectCmd struct {
 	// log happened to go to stderr, and forced a mutex to keep concurrent
 	// requests from interleaving into each other's pipe.
 	out io.Writer
+
+	// lister enumerates the store's own objects, set by openFetcher when the
+	// inspected store can answer that at all. Nil for `--url` (an HTTP CDN read
+	// through plain GETs) and for a store whose backend declines to list, which
+	// is why the orphan report degrades to a skip rather than a failure.
+	lister keyLister
 }
+
+// keyLister is the read-only half of store.Backend.List: keys under a prefix.
+// Same contract — store-relative keys, lexicographic, an unmatched prefix is an
+// empty slice and a nil error.
+type keyLister func(prefix string) ([]string, error)
 
 // w resolves the report sink, defaulting to os.Stdout for the CLI.
 func (o *InspectCmd) w() io.Writer {
@@ -112,6 +123,9 @@ func (o *InspectCmd) openFetcher(ctx context.Context) (keyGetter, func(), error)
 	db, err := NewDB(ctx, false)
 	if err != nil {
 		return nil, nil, err
+	}
+	o.lister = func(prefix string) ([]string, error) {
+		return db.List(ctx, prefix)
 	}
 	return func(key string) ([]byte, error) {
 		return db.readGz(ctx, key)

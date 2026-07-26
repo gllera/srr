@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/pem"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -16,6 +17,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -87,10 +89,66 @@ func readPutBody(r *http.Request) ([]byte, error) {
 	return io.ReadAll(r.Body)
 }
 
+// s3FakePage is how many keys one ListObjectsV2 response carries. Deliberately
+// tiny: the production List drives an SDK paginator, and a fake that always
+// answers in one page would never exercise the continuation-token loop.
+const s3FakePage = 2
+
+type s3ListEntry struct {
+	Key  string `xml:"Key"`
+	Size int64  `xml:"Size"`
+}
+
+type s3ListResult struct {
+	XMLName     xml.Name `xml:"ListBucketResult"`
+	Name        string   `xml:"Name"`
+	Prefix      string   `xml:"Prefix"`
+	KeyCount    int      `xml:"KeyCount"`
+	MaxKeys     int      `xml:"MaxKeys"`
+	IsTruncated bool     `xml:"IsTruncated"`
+	NextToken   string   `xml:"NextContinuationToken,omitempty"`
+	Contents    []s3ListEntry
+}
+
+// list answers ListObjectsV2: keys under `prefix`, lexicographic, resumed after
+// `continuation-token` (real S3 tokens are opaque; the last key served is a
+// legal choice and keeps the fake a few lines). Called with f.mu held.
+func (f *fakeS3) list(w http.ResponseWriter, r *http.Request) {
+	prefix := r.URL.Query().Get("prefix")
+	after := r.URL.Query().Get("continuation-token")
+
+	var keys []string
+	for k := range f.objects {
+		if strings.HasPrefix(k, prefix) && k > after {
+			keys = append(keys, k)
+		}
+	}
+	slices.Sort(keys)
+
+	res := s3ListResult{Name: "bucket", Prefix: prefix, MaxKeys: s3FakePage}
+	if len(keys) > s3FakePage {
+		keys = keys[:s3FakePage]
+		res.IsTruncated = true
+		res.NextToken = keys[len(keys)-1]
+	}
+	for _, k := range keys {
+		res.Contents = append(res.Contents, s3ListEntry{Key: k, Size: int64(len(f.objects[k]))})
+	}
+	res.KeyCount = len(res.Contents)
+
+	w.Header().Set("Content-Type", "application/xml")
+	xml.NewEncoder(w).Encode(res) //nolint:errcheck // test fake
+}
+
 func (f *fakeS3) handler(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimPrefix(r.URL.Path, "/bucket/")
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	// A bucket-scoped GET with list-type=2 is ListObjectsV2, not an object read.
+	if r.Method == http.MethodGet && r.URL.Query().Get("list-type") == "2" {
+		f.list(w, r)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		body, ok := f.objects[key]

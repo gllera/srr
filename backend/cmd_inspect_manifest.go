@@ -6,6 +6,9 @@ import (
 	"maps"
 	"reflect"
 	"slices"
+	"strings"
+
+	"srr/store"
 )
 
 // checkManifest validates the store's commit model: the root, the manifest it
@@ -265,6 +268,103 @@ func (o *InspectCmd) checkConfigSidecar(fetch keyGetter, core *DBCore, expected 
 		fmt.Fprintf(o.w(), " (%d for feeds the store no longer has — inert, swept by the next config write)", stale)
 	}
 	fmt.Fprintln(o.w())
+	return 0
+}
+
+// orphanSamples caps how many orphan keys the report names. The COUNT is the
+// actionable number; a handful of examples is what tells the operator which
+// series leaked, and a store with thousands must not print thousands of lines.
+const orphanSamples = 10
+
+// checkOrphans reports pack-grammar objects the store HOLDS that no manifest in
+// the grace window names — the class the GC's low-water drain structurally
+// cannot see, since it only ever looks at names a manifest gave it. A cycle
+// killed between writing a pack and publishing the manifest that would have
+// named it leaves exactly this.
+//
+// INFORMATIONAL: it always returns 0 issues. An orphan wastes bytes and nothing
+// else — no reader can address it, no invariant mentions it — and on a listable
+// backend the GC now reclaims it on its own once the window slides past its
+// stem. Failing `--validate` on one would turn a cron health check red over
+// garbage that is already scheduled for collection.
+//
+// Unlike the GC's sweep this reads EVERY in-window manifest rather than the
+// oldest: the GC has a cutoff and a stem floor to lean on, while a report meant
+// to name leaks must not accuse an object that some mid-window generation still
+// names. `srr inspect` is an operator command, and the whole window is the
+// price of that precision.
+func (o *InspectCmd) checkOrphans(fetch keyGetter, core *DBCore) int {
+	switch {
+	case o.lister == nil:
+		fmt.Fprintln(o.w(), "[orphans] the inspected store cannot enumerate its objects (--url, or a plain HTTP store): skipped")
+		return 0
+	case core.legacyRoot != nil:
+		fmt.Fprintln(o.w(), "[orphans] pre-cutover store: no manifest chain to compare a listing against")
+		return 0
+	case core.ManifestNum == 0:
+		fmt.Fprintln(o.w(), "[orphans] empty store: nothing published to compare a listing against")
+		return 0
+	}
+
+	live := map[string]bool{}
+	for _, k := range core.Names.keys() {
+		live[k] = true
+	}
+	from := max(core.GCManifest+1, core.ManifestNum-keepManifests+1, 1)
+	for g := from; g < core.ManifestNum; g++ {
+		buf, err := fetch(manifestKey(g))
+		if err != nil {
+			continue // a hole is M2's to report (checkManifest); don't double-report
+		}
+		keys, _, err := manifestNamesOf(buf)
+		if err != nil {
+			continue
+		}
+		for _, k := range keys {
+			live[k] = true
+		}
+	}
+
+	var orphans []string
+	for _, s := range store.PackSeries {
+		keys, err := o.lister(s.Name + "/")
+		if err != nil {
+			fmt.Fprintf(o.w(), "[orphans] listing %s/ failed: %v\n", s.Name, err)
+			return 0
+		}
+		for _, k := range keys {
+			series, stem, ok := store.ParsePackKey(k)
+			if !ok || series != s.Name {
+				// Not a name the write-once grammar can produce, so not something
+				// any generation could have named — a staging leftover, a retired
+				// kind-lettered name, an operator's own file. Never an orphan by
+				// this report's definition, and never anything's to delete.
+				continue
+			}
+			if series == manifestSeries {
+				// A manifest is named by nothing, so reachability says nothing about
+				// one. Only a generation ABOVE the root's is unreachable-and-
+				// unreclaimable: that is a publish that crashed before the root flip
+				// (§6.2 overwrites it on the retry). Generations below the window are
+				// ordinary pending-GC work, not leaks.
+				if stem > core.ManifestNum {
+					orphans = append(orphans, k)
+				}
+				continue
+			}
+			if !live[k] {
+				orphans = append(orphans, k)
+			}
+		}
+	}
+
+	if len(orphans) == 0 {
+		fmt.Fprintf(o.w(), "[orphans] every pack-grammar object in the store is named by a generation in (%d, %d]\n", from-1, core.ManifestNum)
+		return 0
+	}
+	slices.Sort(orphans)
+	fmt.Fprintf(o.w(), "[orphans] %d object(s) no generation in (%d, %d] names — unreferenced bytes, not a consistency problem; a listing GC reclaims them as the window slides: %s\n",
+		len(orphans), from-1, core.ManifestNum, strings.Join(orphans[:min(len(orphans), orphanSamples)], " "))
 	return 0
 }
 

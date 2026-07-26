@@ -464,3 +464,72 @@ func TestCheckMetaDetectsCorruption(t *testing.T) {
 		}
 	})
 }
+
+// checkOrphans is the one check backed by a store LISTING rather than by
+// reading named objects, so what it must get right is the classification: name
+// the unreferenced pack objects, and NEVER accuse anything else. It reports and
+// returns 0 issues either way — unreferenced bytes are waste, not a consistency
+// failure, and a cron health check must not go red over garbage the GC is
+// already scheduled to collect.
+func TestCheckOrphans(t *testing.T) {
+	db, core, _ := setupTestDB(t)
+	ch := &Feed{Title: "feed", URL: "https://example.com/f"}
+	if err := db.AddFeed(ch); err != nil {
+		t.Fatal(err)
+	}
+	putOneArticle(t, db, ch, 1)
+	if err := db.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	fetch := func(key string) ([]byte, error) { return db.readGz(ctx, key) }
+	cmd := &InspectCmd{lister: func(prefix string) ([]string, error) { return db.List(ctx, prefix) }}
+
+	out := captureStdout(t, func() {
+		if issues := cmd.checkOrphans(fetch, core); issues != 0 {
+			t.Errorf("checkOrphans on a clean store = %d issues, want 0", issues)
+		}
+	})
+	if !strings.Contains(out, "every pack-grammar object") {
+		t.Errorf("clean store report = %q", out)
+	}
+
+	// One object no generation names, and a set of things that merely LOOK
+	// nearby: none of the latter may be reported, because a report is what an
+	// operator deletes from.
+	if err := db.Put(ctx, "data/9990.gz", strings.NewReader("orphan"), true); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{
+		"assets/ab/0123456789abcdef.jpg", "out/digest.rss", "inbox/p.gz",
+		"idx/L1.gz", "data/5.gz.tmp.4242.1", "index.html",
+	} {
+		if err := db.Put(ctx, k, strings.NewReader("not an orphan"), true); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	out = captureStdout(t, func() {
+		if issues := cmd.checkOrphans(fetch, core); issues != 0 {
+			t.Errorf("checkOrphans = %d issues, want 0 (the report is informational)", issues)
+		}
+	})
+	if !strings.Contains(out, "data/9990.gz") {
+		t.Errorf("report did not name the unreferenced object: %q", out)
+	}
+	for _, k := range []string{"assets/", "out/", "inbox/", "idx/L1.gz", ".tmp.", "index.html"} {
+		if strings.Contains(out, k) {
+			t.Errorf("report names %q, which is not a pack-grammar object: %q", k, out)
+		}
+	}
+
+	// A store that cannot enumerate itself (--url, plain HTTP) is skipped, not
+	// failed: no listing, no judgement.
+	out = captureStdout(t, func() {
+		if issues := (&InspectCmd{}).checkOrphans(fetch, core); issues != 0 {
+			t.Errorf("checkOrphans without a lister = %d issues, want 0", issues)
+		}
+	})
+	if !strings.Contains(out, "skipped") {
+		t.Errorf("no-lister report = %q, want a skip", out)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"testing/iotest"
@@ -318,6 +319,70 @@ func TestBackendMissingKeyConformance(t *testing.T) {
 						t.Errorf("Stat(present) = (%d, %v), want a nil error proving presence", n, err)
 					}
 				})
+			}
+		})
+	}
+}
+
+// TestBackendListConformance pins the List contract across every backend, one
+// statement of the rule for all four — the shape that stopped the missing-key
+// conventions drifting apart.
+//
+// What it asserts, and why each half matters to a caller that DELETES from a
+// listing: keys come back store-RELATIVE (no bucket prefix, no /base, no temp
+// dir), in lexicographic order over the joined key (which a directory walk does
+// NOT naturally produce), matched as a plain STRING prefix — so "idx/" excludes
+// a sibling "idxfoo/" while "idx" includes it, identically everywhere — and a
+// prefix that names nothing is an EMPTY SET with a nil error, never an
+// fs.ErrNotExist, because a prefix is not an object.
+func TestBackendListConformance(t *testing.T) {
+	seed := []string{
+		"idx/0.gz", "idx/10.gz", "idxfoo/3.gz",
+		"data/1.gz", "db.gz",
+		// "seen.gz" sorts BEFORE "seen/1.gz" as a string ('.' < '/') but a
+		// directory walk visits the seen/ subtree first: the pair is here to make
+		// the ordering clause fail if a backend returns walk order.
+		"seen.gz", "seen/1.gz",
+	}
+	for name, b := range backendFixtures(t) {
+		t.Run(name, func(t *testing.T) {
+			for _, k := range seed {
+				if err := b.Put(ctx, k, strings.NewReader("x"), true); err != nil {
+					t.Fatalf("Put %q: %v", k, err)
+				}
+			}
+
+			if name == "http" {
+				// Plain HTTP declines rather than guessing: there is no portable
+				// listing verb, and a caller must fall back rather than believe an
+				// empty answer.
+				if _, err := b.List(ctx, ""); !errors.Is(err, errors.ErrUnsupported) {
+					t.Fatalf("List err = %v, want errors.ErrUnsupported", err)
+				}
+				return
+			}
+
+			for _, tc := range []struct {
+				prefix string
+				want   []string
+			}{
+				{"", []string{"data/1.gz", "db.gz", "idx/0.gz", "idx/10.gz", "idxfoo/3.gz", "seen.gz", "seen/1.gz"}},
+				{"idx/", []string{"idx/0.gz", "idx/10.gz"}},
+				{"idx", []string{"idx/0.gz", "idx/10.gz", "idxfoo/3.gz"}},
+				{"idx/1", []string{"idx/10.gz"}},
+				{"seen", []string{"seen.gz", "seen/1.gz"}},
+				// A prefix naming no object and no directory: empty, nil error.
+				{"nosuch/", nil},
+				{"zzz", nil},
+			} {
+				got, err := b.List(ctx, tc.prefix)
+				if err != nil {
+					t.Errorf("List(%q) = %v, want nil error", tc.prefix, err)
+					continue
+				}
+				if !slices.Equal(got, tc.want) {
+					t.Errorf("List(%q) = %v, want %v", tc.prefix, got, tc.want)
+				}
 			}
 		})
 	}

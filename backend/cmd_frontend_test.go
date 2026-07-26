@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -316,5 +317,69 @@ func TestFrontendUpdateFailedDeleteStaysTracked(t *testing.T) {
 	want := "index.html\nstubborn.11111111.js\n"
 	if got := string(readKey(t, inner, sitemapKey)); got != want {
 		t.Errorf("final sitemap = %q, want %q (failed delete stays tracked)", got, want)
+	}
+}
+
+// TestFrontendUpdateListFindsUntrackedOrphans is what the store LIST buys here:
+// sitemap.txt is a record of past INTENT, and a record can be absent (a first
+// install that crashed, files that predate this command) while the files it
+// should have named are very much present. Asking the store instead finds them.
+//
+// The second half is the safety line: only CONTENT-HASHED names — machine-minted
+// per build, so unambiguously this command's output — are ever candidates. A
+// pack, a root, an operator's own file at the store root are untouchable, and a
+// stable-named shell file stays the sitemap's business because a listing cannot
+// tell it from an operator's.
+func TestFrontendUpdateListFindsUntrackedOrphans(t *testing.T) {
+	be := tempStore(t)
+	putKey(t, be, "orphan.11111111.js", "OLD") // hashed, and in NO sitemap
+	putKey(t, be, "index.html", "OLDHTML")
+	untouchable := []string{"db.gz", "config.gz", "idx/0.gz", "assets/ab/0123456789abcdef.jpg", "notes.txt"}
+	for _, k := range untouchable {
+		putKey(t, be, k, "keep me")
+	}
+
+	ghServer(t, "v2", map[string]string{"./index.html": "NEW", "./new.22222222.js": "NEW"})
+	if err := frontendUpdate(context.Background(), be, http.DefaultClient, "test/repo", ""); err != nil {
+		t.Fatalf("frontendUpdate: %v", err)
+	}
+	if exists(t, be, "orphan.11111111.js") {
+		t.Error("a hashed shell asset no sitemap tracked must be found by the listing and reclaimed")
+	}
+	for _, k := range untouchable {
+		if !exists(t, be, k) {
+			t.Errorf("%s was deleted; only content-hashed shell assets may ever be", k)
+		}
+	}
+	if got := string(readKey(t, be, sitemapKey)); got != "index.html\nnew.22222222.js\n" {
+		t.Errorf("sitemap = %q", got)
+	}
+}
+
+// noListStore is a store that cannot enumerate itself (plain HTTP's shape).
+type noListStore struct{ store.Backend }
+
+func (noListStore) List(context.Context, string) ([]string, error) {
+	return nil, errors.ErrUnsupported
+}
+
+// A store that cannot list keeps exactly the sitemap reconcile it always had —
+// the fallback is silent, not an error.
+func TestFrontendUpdateWithoutListUsesSitemap(t *testing.T) {
+	inner := tempStore(t)
+	putKey(t, inner, "old.11111111.js", "OLD")
+	putKey(t, inner, "untracked.33333333.js", "ORPHAN") // unfindable without List
+	putKey(t, inner, sitemapKey, "old.11111111.js\n")
+	be := noListStore{inner}
+
+	ghServer(t, "v2", map[string]string{"./index.html": "NEW"})
+	if err := frontendUpdate(context.Background(), be, http.DefaultClient, "test/repo", ""); err != nil {
+		t.Fatalf("frontendUpdate: %v", err)
+	}
+	if exists(t, inner, "old.11111111.js") {
+		t.Error("a sitemap-tracked orphan must still be reclaimed")
+	}
+	if !exists(t, inner, "untracked.33333333.js") {
+		t.Error("an untracked file cannot be discovered without a listing; it must be left alone")
 	}
 }

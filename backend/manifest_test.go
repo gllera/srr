@@ -5,11 +5,14 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"srr/store"
 )
 
 func readManifest(t *testing.T, dir string, m int) Manifest {
@@ -389,6 +392,148 @@ func TestGCReclaimsSupersededObjects(t *testing.T) {
 	}
 	assertKey(t, dir, superseded, false)
 	assertKey(t, dir, live, true)
+}
+
+// TestGCListModeReclaimsUnnamedOrphans is what the store LIST buys and the
+// low-water drain structurally cannot: an object NO manifest ever named. The
+// drain only ever deletes names a manifest handed it, so a cycle killed between
+// writing an object and publishing the generation that would have listed it
+// leaks that object forever.
+//
+// The stem floor is the safety half, and it is asserted here too: only an
+// object below the oldest in-window generation's `next` counter is provably
+// dead in every in-window generation. One above it may be exactly what a reader
+// parked on a mid-window generation is resolving, so it must survive.
+func TestGCListModeReclaimsUnnamedOrphans(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	ch := &Feed{Title: "feed", URL: "https://example.com/f"}
+	if err := db.AddFeed(ch); err != nil {
+		t.Fatal(err)
+	}
+	putOneArticle(t, db, ch, 1)
+	if err := db.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two objects nothing names. `alloc` only ever counts UP, so a stem the
+	// counter has already moved past is never re-drawn and never overwritten —
+	// which is exactly what a crashed multi-object cycle (a compaction, say)
+	// leaves behind once a later cycle publishes the advanced counter.
+	const belowFloor, aboveFloor = "data/9990.gz", "data/20000.gz"
+	for _, k := range []string{belowFloor, aboveFloor} {
+		if err := db.Put(ctx, k, strings.NewReader("orphaned bytes"), true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.Names.Next[dataSeries] = 9991
+	putOneArticle(t, db, ch, 2)
+	if err := db.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.GC(ctx, 0); err != nil { // K=0: only the current generation is reachable
+		t.Fatalf("GC: %v", err)
+	}
+	assertKey(t, dir, belowFloor, false)
+	assertKey(t, dir, aboveFloor, true)
+	// And the live generation is untouched, orphan sweep or not.
+	assertKey(t, dir, tailK(c, idxSeries), true)
+	assertKey(t, dir, tailK(c, dataSeries), true)
+	assertKey(t, dir, manifestKey(c.ManifestNum), true)
+}
+
+// TestGCListModeNeverTouchesOtherClasses is the safety-critical line of the
+// list-driven sweep, stated as a test: a listing shows the sweep EVERYTHING,
+// and only names the write-once pack grammar can produce are ever candidates.
+// Delete any of these and the damage is unrecoverable — assets/ is
+// content-hash-addressed and referenced by immutable articles, out/ and inbox/
+// are live mutable state, and the roots and the frontend shell are the store
+// itself.
+func TestGCListModeNeverTouchesOtherClasses(t *testing.T) {
+	db, _, dir := setupTestDB(t)
+	ch := &Feed{Title: "feed", URL: "https://example.com/f"}
+	if err := db.AddFeed(ch); err != nil {
+		t.Fatal(err)
+	}
+	putOneArticle(t, db, ch, 1)
+	if err := db.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	untouchable := []string{
+		"assets/ab/0123456789abcdef.jpg", // content-hashed, never manifest-named
+		"out/digest.rss",                 // mutable syndication output
+		"inbox/producer.gz",              // a producer's undrained fetch spool
+		"sitemap.txt",                    // the frontend shell's own manifest
+		"index.html",                     // and its entry point
+		"frontend.aaaaaaaa.js",           // a content-hashed shell asset
+		"idx/L1.gz",                      // a retired kind-lettered name
+		"data/5.gz.tmp.4242.1",           // an AtomicPut staging leftover
+		"idx/notes.txt",                  // anything else under a series directory
+	}
+	for _, k := range untouchable {
+		if err := db.Put(ctx, k, strings.NewReader("keep me"), true); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	putOneArticle(t, db, ch, 2)
+	if err := db.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.GC(ctx, 0); err != nil {
+		t.Fatalf("GC: %v", err)
+	}
+
+	for _, k := range append(untouchable, dbFileKey, configFileKey) {
+		assertKey(t, dir, k, true)
+	}
+}
+
+// noListBackend is a store that cannot enumerate itself — plain HTTP's shape.
+type noListBackend struct{ store.Backend }
+
+func (noListBackend) List(context.Context, string) ([]string, error) {
+	return nil, errors.ErrUnsupported
+}
+
+// TestGCFallsBackToDrainWithoutList pins the other half of the two-shape sweep:
+// a backend that declines to list keeps the low-water drain it always had —
+// superseded generations still reclaim, one manifest read at a time — and the
+// orphan an unlistable store cannot find simply stays. Nothing degrades to
+// deleting on a guess.
+func TestGCFallsBackToDrainWithoutList(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	ch := &Feed{Title: "feed", URL: "https://example.com/f"}
+	if err := db.AddFeed(ch); err != nil {
+		t.Fatal(err)
+	}
+	putOneArticle(t, db, ch, 1)
+	if err := db.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	superseded := tailK(c, idxSeries)
+
+	const orphan = "data/9990.gz"
+	if err := db.Put(ctx, orphan, strings.NewReader("orphaned bytes"), true); err != nil {
+		t.Fatal(err)
+	}
+	c.Names.Next[dataSeries] = 9991
+	putOneArticle(t, db, ch, 2)
+	if err := db.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	db.Backend = noListBackend{db.Backend}
+	if err := db.GC(ctx, 0); err != nil {
+		t.Fatalf("GC: %v", err)
+	}
+	if c.GCManifest != c.ManifestNum-1 {
+		t.Errorf("gcm=%d, want %d (the drain must still advance)", c.GCManifest, c.ManifestNum-1)
+	}
+	assertKey(t, dir, superseded, false) // a NAMED superseded object still goes
+	assertKey(t, dir, orphan, true)      // an unnamed one is unfindable from here
+	assertKey(t, dir, tailK(c, idxSeries), true)
 }
 
 // TestConfigSidecarWrittenOnConfigChangeOnly pins the write gate: config.gz is
