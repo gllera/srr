@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -50,7 +52,7 @@ type assetFetcher struct {
 	be store.Backend
 	// maxBytes is the asset size cap in bytes. The cap is ENFORCED AT DOWNLOAD
 	// (#selfhost / external ingest); here it survives only as a fail-soft OOM
-	// bound on the asset-process output read (readProcOutput), which is generated
+	// bound on the asset-process output (checkProcOutput), which is generated
 	// at upload and so isn't download-bounded. Zero disables that guard.
 	maxBytes int64
 	proc     []string // asset-process command (transcode/process bytes); see runProcess
@@ -149,6 +151,146 @@ func newAssetFetcher(be store.Backend, maxKB int, procCmd string) *assetFetcher 
 	}
 }
 
+// assetInMemoryMax is the source-size ceiling for holding an asset's bytes in
+// memory between hashing and upload. Below it the one read that hashes the file
+// also IS the upload body (most assets are images of a few hundred KB); above it
+// the bytes are dropped and the upload streams straight off disk, so a big asset
+// costs one io.Copy buffer instead of its own size. That matters because asset
+// jobs run concurrently: slurping made peak heap SRR_ASSET_WORKERS × the largest
+// asset, and a video-heavy feed spikes hundreds of MB of transient heap on an
+// 8 GB host. A var so tests can shrink it (maxOutPayload's precedent).
+var assetInMemoryMax int64 = 1 << 20
+
+// sniffLen is what http.DetectContentType reads; no more is ever consulted.
+const sniffLen = 512
+
+// assetPayload is the bytes an upload will store, in whichever form is cheapest
+// to hold: an in-memory copy (a small source, or stdout-mode asset-process
+// output, which is in memory by construction) or a FILE the upload streams from.
+// Exactly one applies — a non-empty path means "stream from disk".
+//
+// It is a plain value on purpose: it crosses the singleflight boundary, where a
+// follower's copy is never used and the leader's may outlive the caller that
+// built it, so it must not own an open descriptor.
+type assetPayload struct {
+	data []byte // the whole payload, when it is held in memory
+	path string // the file to stream from; empty when data holds the payload
+	size int64  // the stored size either way — the AssetBytes accounting
+}
+
+// open returns the reader AtomicPut writes from, plus its closer. The file form
+// hands over an *os.File, an io.ReadSeeker: the S3 backend's request signing and
+// the SDK's own retries rewind it exactly as they rewind a bytes.Reader.
+func (p assetPayload) open() (io.Reader, func(), error) {
+	if p.path == "" {
+		return bytes.NewReader(p.data), func() {}, nil
+	}
+	f, err := os.Open(p.path)
+	if err != nil {
+		return nil, nil, err
+	}
+	return f, func() { f.Close() }, nil
+}
+
+// sniffType classifies the payload by its own leading bytes
+// (http.DetectContentType — the algorithm net/http serves files with). Only the
+// no-peek Content-Type fallback in resolveAndUpload calls it.
+func (p assetPayload) sniffType() (string, error) {
+	head := p.data
+	if p.path != "" {
+		f, err := os.Open(p.path)
+		if err != nil {
+			return "", err
+		}
+		defer f.Close()
+		buf := make([]byte, sniffLen)
+		n, err := io.ReadFull(f, buf)
+		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+			return "", err
+		}
+		head = buf[:n]
+	}
+	if len(head) > sniffLen {
+		head = head[:sniffLen]
+	}
+	return http.DetectContentType(head), nil
+}
+
+// sniffedMediaType returns ct when it is an INERT type safe to stamp on a
+// self-hosted asset, else "". Sniffing is the zero-config fallback (see
+// resolveAndUpload) and is deliberately not authority to serve just anything:
+// the asset store is a separate origin a reader loads media from, so a sniffed
+// text/html would turn an attacker-influenced `a href` marker into a
+// script-execution surface on the store's own domain, where the
+// application/octet-stream default is a download and nothing more. Media, ogg
+// containers and PDFs cover every case the fallback exists for.
+func sniffedMediaType(ct string) string {
+	base, _, _ := strings.Cut(ct, ";")
+	base = strings.TrimSpace(base)
+	switch {
+	case strings.HasPrefix(base, "image/"), strings.HasPrefix(base, "video/"), strings.HasPrefix(base, "audio/"):
+		return ct
+	case base == "application/ogg", base == "application/pdf":
+		return ct
+	}
+	return ""
+}
+
+// hashSource hashes the cache file's bytes — the asset's identity — and, when it
+// is small enough to be worth one read, keeps them as the upload payload. A
+// bigger file is hashed streaming and re-opened at upload; the two reads see the
+// same bytes because a cache file is written once, before anything references
+// it, and never rewritten in place. statSize is the Lstat size, a hint for the
+// keep-or-stream decision only — the hash and the payload size come from the
+// read itself.
+func hashSource(full, localname string, statSize int64) (assetPayload, [32]byte, error) {
+	var sum [32]byte
+	f, err := os.Open(full)
+	if err != nil {
+		return assetPayload{}, sum, fmt.Errorf("open asset %q: %w", localname, err)
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	var w io.Writer = h
+	var keep *capWriter
+	if statSize <= assetInMemoryMax {
+		keep = &capWriter{max: assetInMemoryMax, buf: make([]byte, 0, statSize)}
+		w = io.MultiWriter(h, keep)
+	}
+	n, err := io.Copy(w, f)
+	if err != nil {
+		return assetPayload{}, sum, fmt.Errorf("read asset %q: %w", localname, err)
+	}
+	copy(sum[:], h.Sum(nil))
+
+	// The capture is the payload only when it is provably COMPLETE: a file that
+	// grew past the ceiling between the stat and the read leaves a prefix behind,
+	// and a prefix must never be mistaken for the whole object at an immutable
+	// content-hash key.
+	if keep != nil && int64(len(keep.buf)) == n {
+		return assetPayload{data: keep.buf, size: n}, sum, nil
+	}
+	return assetPayload{path: full, size: n}, sum, nil
+}
+
+// capWriter tees at most max bytes into buf and discards the rest, so hashing a
+// large asset costs the hash state and nothing more.
+type capWriter struct {
+	buf []byte
+	max int64
+}
+
+func (w *capWriter) Write(p []byte) (int, error) {
+	if room := w.max - int64(len(w.buf)); room > 0 {
+		if room > int64(len(p)) {
+			room = int64(len(p))
+		}
+		w.buf = append(w.buf, p[:room]...)
+	}
+	return len(p), nil
+}
+
 // UploadCacheRef resolves localname inside cacheDir and uploads the file to the
 // store under a key derived from the ORIGINAL file's content hash, returning
 // that key. It backs the end-of-pipeline upload step (inlined in feed.fetch):
@@ -212,15 +354,16 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 	// the file (the #selfhost mod or an external ingest command, via
 	// Request.MaxAssetSize) — so the cache file is trusted here and read without a
 	// re-check. Only the asset-process output, generated below and NOT
-	// download-bounded, keeps a fail-soft size guard (see readProcOutput).
+	// download-bounded, keeps a fail-soft size guard (see checkProcOutput).
 	//
 	// Key on the ORIGINAL file's content hash so an asset already in the store is
-	// recognized before the (possibly expensive) pre-upload processing runs.
-	orig, err := os.ReadFile(full)
+	// recognized before the (possibly expensive) pre-upload processing runs. The
+	// hash is a streaming pass that keeps the bytes only below assetInMemoryMax;
+	// a big asset is re-opened and streamed at upload instead of held.
+	src, sum, err := hashSource(full, localname, fi.Size())
 	if err != nil {
-		return "", 0, fmt.Errorf("read asset %q: %w", localname, err)
+		return "", 0, err
 	}
-	sum := sha256.Sum256(orig)
 
 	// Mark the source file as consumed: the post-cycle age sweep
 	// (sweepAssetCache) treats mtime as "last relevant", so touching here —
@@ -269,7 +412,7 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 		defer func() { <-a.sem }()
 		a.active.Add(1)
 		defer func() { a.active.Add(-1); a.done.Add(1) }()
-		key, n, err := a.resolveAndUpload(a.baseCtx, full, localname, orig, sum)
+		key, n, err := a.resolveAndUpload(a.baseCtx, full, localname, src, sum)
 		uploaded = n
 		return key, err
 	})
@@ -290,11 +433,12 @@ func (a *assetFetcher) UploadCacheRef(ctx context.Context, cacheDir, localname s
 // resolveAndUpload is the single-flighted body of UploadCacheRef: it identifies
 // the asset (asset-peek), checks the store for the content-hash key, and — on a
 // miss — runs asset-process and uploads, memoizing the resolved key. full is the
-// validated cache-file path, orig its bytes, sum their hash. Concurrent
-// UploadCacheRef calls for the same sum share one invocation (see flight). The
-// second return is the size of the payload it Put (0 on a store hit) — the
-// AssetBytes accounting.
-func (a *assetFetcher) resolveAndUpload(ctx context.Context, full, localname string, orig []byte, sum [32]byte) (string, int64, error) {
+// validated cache-file path, src the source payload (its bytes when they were
+// small enough to keep, else the path to stream from), sum their hash.
+// Concurrent UploadCacheRef calls for the same sum share one invocation (see
+// flight). The second return is the size of the payload it Put (0 on a store
+// hit) — the AssetBytes accounting.
+func (a *assetFetcher) resolveAndUpload(ctx context.Context, full, localname string, src assetPayload, sum [32]byte) (string, int64, error) {
 	// asset-peek (if configured) identifies the asset up front — before the dedup
 	// check — so the key reflects the post-process format while dedup still keys
 	// on the source bytes. It sets the stored extension (a transcoded asset then
@@ -356,10 +500,15 @@ func (a *assetFetcher) resolveAndUpload(ctx context.Context, full, localname str
 	// (decided before the dedup check); a process extension that disagrees only
 	// warns. Fail-soft: a command that errors or emits nothing uploads the
 	// original unchanged.
-	payload := orig
+	payload := src
 	if supported && len(a.proc) > 0 {
-		if b, pm, ok := a.runProcess(ctx, full, localname); ok {
-			payload = b
+		if p, pm, ok := a.runProcess(ctx, full, localname); ok {
+			// {output} mode hands back a staging FILE the upload streams from, so
+			// it outlives runProcess and removing it is this function's job.
+			if p.path != "" {
+				defer os.Remove(p.path)
+			}
+			payload = p
 			if pm.Mimetype != "" || pm.Encoding != "" {
 				meta = pm.objectMeta()
 			}
@@ -371,11 +520,31 @@ func (a *assetFetcher) resolveAndUpload(ctx context.Context, full, localname str
 		}
 	}
 
-	if err := a.be.AtomicPut(ctx, key, bytes.NewReader(payload), meta); err != nil {
+	// Content-Type: asset-peek and asset-process stay the single source of truth
+	// wherever they are configured — a peek-configured install behaves exactly as
+	// before, including when the peek fails soft and declares nothing. With NO
+	// peek command AND nothing declared, the object used to fall to the backend's
+	// application/octet-stream default, i.e. a zero-config install served every
+	// self-hosted image as a download. Sniff the payload's own leading bytes
+	// instead, adopting the answer only for inert types (sniffedMediaType).
+	if len(a.peek) == 0 && meta.ContentType == "" {
+		if ct, err := payload.sniffType(); err != nil {
+			slog.Warn("asset content-type sniff failed; using the store default", "asset", localname, "err", err)
+		} else if mt := sniffedMediaType(ct); mt != "" {
+			meta.ContentType = mt
+		}
+	}
+
+	body, closeBody, err := payload.open()
+	if err != nil {
+		return "", 0, fmt.Errorf("read asset %q: %w", localname, err)
+	}
+	defer closeBody()
+	if err := a.be.AtomicPut(ctx, key, body, meta); err != nil {
 		return "", 0, fmt.Errorf("store asset %q: %w", key, err)
 	}
 	a.seen.Store(sum, key)
-	return key, int64(len(payload)), nil
+	return key, payload.size, nil
 }
 
 // inputToken / outputToken mark where an asset command (process or peek)
@@ -437,13 +606,16 @@ type peekResult struct {
 }
 
 // runProcess runs the configured asset-process command on the cache file just
-// before upload, returning the processed bytes and (in {output} mode) the
+// before upload, returning the processed payload and (in {output} mode) the
 // metadata it declared. The cache file path is substituted for every {input}
 // token (per arg); with no token it is appended as the final argument. In
 // {output} mode (an arg carries {output}) SRR substitutes a fresh staging path
-// under procDir (<cache-dir>/_processed; OS temp dir when unset), reads the
-// processed bytes back from that file, and parses a metadata JSON from
-// stdout; otherwise the bytes are read from stdout (no declared metadata).
+// under procDir (<cache-dir>/_processed; OS temp dir when unset) and returns
+// THAT FILE as the payload — the upload streams from it, so a transcode's result
+// is never slurped into the heap — plus the metadata JSON parsed from stdout;
+// otherwise the bytes are read from stdout (no declared metadata). The staging
+// file is removed here on every failure path and by the CALLER on success, once
+// the upload has read it (never unlinked while open: Windows is a release target).
 // stderr is captured, not passed through — a transcoder's progress narration
 // would garble srr's own output — and its tail rides the error into the warn
 // line on failure (see mod.RunCommandTimeout). Fail-soft: it returns ok=false — the
@@ -454,7 +626,7 @@ type peekResult struct {
 // transcoding can outlast a feed/ingest command), keeping the WaitDelay and
 // capped-stdout hardening: a hung transcoder can't wedge the worker and runaway
 // output can't OOM it.
-func (a *assetFetcher) runProcess(ctx context.Context, full, localname string) ([]byte, assetMeta, bool) {
+func (a *assetFetcher) runProcess(ctx context.Context, full, localname string) (assetPayload, assetMeta, bool) {
 	hasOutput := false
 	for _, f := range a.proc {
 		if strings.Contains(f, outputToken) {
@@ -465,25 +637,31 @@ func (a *assetFetcher) runProcess(ctx context.Context, full, localname string) (
 
 	// {output} mode: a fresh staging file the command writes its result to,
 	// under <cache-dir>/_processed (procDir; OS temp dir when unset). The
-	// source extension is a hint for tools that pick a format from it; SRR reads
-	// the bytes back regardless. Removed on every path below; a leak from a
-	// crash mid-transcode ages out via the cache sweep.
+	// source extension is a hint for tools that pick a format from it; SRR takes
+	// the bytes regardless. Removed on every failure path below and by the caller
+	// after a successful upload; a leak from a crash mid-transcode ages out via
+	// the cache sweep.
 	var outPath string
+	keepOutput := false
 	if hasOutput {
 		if a.procDir != "" {
 			if err := os.MkdirAll(a.procDir, 0o700); err != nil {
 				slog.Warn("asset-process: create staging dir failed; uploading original", "asset", localname, "err", err)
-				return nil, assetMeta{}, false
+				return assetPayload{}, assetMeta{}, false
 			}
 		}
 		tmp, err := os.CreateTemp(a.procDir, "srr-asset-*"+path.Ext(localname))
 		if err != nil {
 			slog.Warn("asset-process: create output file failed; uploading original", "asset", localname, "err", err)
-			return nil, assetMeta{}, false
+			return assetPayload{}, assetMeta{}, false
 		}
 		outPath = tmp.Name()
 		tmp.Close()
-		defer os.Remove(outPath)
+		defer func() {
+			if !keepOutput {
+				os.Remove(outPath)
+			}
+		}()
 	}
 
 	argv := buildAssetArgv(a.proc, full, outPath)
@@ -493,62 +671,69 @@ func (a *assetFetcher) runProcess(ctx context.Context, full, localname string) (
 	out, err := mod.RunCommandTimeout(ctx, a.procTimeout, argv[0], argv[1:]...)
 	if err != nil {
 		slog.Warn("asset-process command failed; uploading original", "asset", localname, "cmd", a.proc[0], "err", err)
-		return nil, assetMeta{}, false
+		return assetPayload{}, assetMeta{}, false
 	}
 
 	if !hasOutput {
-		// stdout mode: the processed bytes are stdout; no declared metadata.
+		// stdout mode: the processed bytes are stdout; no declared metadata. They
+		// are in memory by construction — RunCommandTimeout already collected them.
 		if len(out) == 0 {
 			slog.Warn("asset-process command produced no output; uploading original", "asset", localname, "cmd", a.proc[0])
-			return nil, assetMeta{}, false
+			return assetPayload{}, assetMeta{}, false
 		}
-		// Same fail-soft size guard as the {output} path (readProcOutput): the
+		// Same fail-soft size guard as the {output} path (checkProcOutput): the
 		// process output is generated here and isn't download-bounded, so an
 		// over-cap result uploads the original instead. (RunCommandTimeout already
 		// bounds stdout at 64 MiB for OOM safety; this enforces --max-asset-size.)
 		if a.maxBytes > 0 && int64(len(out)) > a.maxBytes {
 			slog.Warn("asset-process output exceeds cap; uploading original", "asset", localname, "size", len(out), "cap", a.maxBytes)
-			return nil, assetMeta{}, false
+			return assetPayload{}, assetMeta{}, false
 		}
-		return out, assetMeta{}, true
+		return assetPayload{data: out, size: int64(len(out))}, assetMeta{}, true
 	}
 
-	// {output} mode: bytes from the file, metadata JSON from stdout.
-	payload, ok := a.readProcOutput(outPath, localname)
+	// {output} mode: the payload is the staging FILE, metadata JSON from stdout.
+	size, ok := a.checkProcOutput(outPath, localname)
 	if !ok {
-		return nil, assetMeta{}, false
+		return assetPayload{}, assetMeta{}, false
 	}
 	var m assetMeta
 	if err := json.Unmarshal(out, &m); err != nil {
 		slog.Warn("asset-process metadata JSON invalid; uploading original", "asset", localname, "cmd", a.proc[0], "err", err)
-		return nil, assetMeta{}, false
+		return assetPayload{}, assetMeta{}, false
 	}
-	return payload, m, true
+	keepOutput = true
+	return assetPayload{path: outPath, size: size}, m, true
 }
 
-// readProcOutput reads the {output}-mode result file, bounding the read by the
-// asset size cap so a runaway output can't OOM the worker. An empty, oversize,
-// or unreadable file fails soft.
-func (a *assetFetcher) readProcOutput(outPath, localname string) ([]byte, bool) {
-	fi, err := os.Stat(outPath)
+// checkProcOutput validates the {output}-mode result file and returns its size.
+// The upload streams from that file instead of slurping it, so what used to be
+// checks around the read are checks on an OPEN handle: opening here proves the
+// upload's own open will work (that one is a hard error, while every failure in
+// this function is fail-soft — the caller uploads the original), and statting
+// the handle makes readability and size one observation instead of two racing
+// ones. An empty, oversize, or unreadable file fails soft.
+func (a *assetFetcher) checkProcOutput(outPath, localname string) (int64, bool) {
+	f, err := os.Open(outPath)
+	if err != nil {
+		slog.Warn("asset-process: open output failed; uploading original", "asset", localname, "err", err)
+		return 0, false
+	}
+	defer f.Close()
+	fi, err := f.Stat()
 	if err != nil {
 		slog.Warn("asset-process: stat output failed; uploading original", "asset", localname, "err", err)
-		return nil, false
+		return 0, false
 	}
 	if a.maxBytes > 0 && fi.Size() > a.maxBytes {
 		slog.Warn("asset-process output exceeds cap; uploading original", "asset", localname, "size", fi.Size(), "cap", a.maxBytes)
-		return nil, false
+		return 0, false
 	}
-	payload, err := os.ReadFile(outPath)
-	if err != nil {
-		slog.Warn("asset-process: read output failed; uploading original", "asset", localname, "err", err)
-		return nil, false
-	}
-	if len(payload) == 0 {
+	if fi.Size() == 0 {
 		slog.Warn("asset-process produced no output file; uploading original", "asset", localname, "cmd", a.proc[0])
-		return nil, false
+		return 0, false
 	}
-	return payload, true
+	return fi.Size(), true
 }
 
 // runPeek runs the configured asset-peek command on the cache file to identify

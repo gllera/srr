@@ -139,12 +139,19 @@ const contentTypeGzip = "application/gzip"
 
 // contentTypeForKey returns the Content-Type a backend should attach when
 // writing key with no explicit ObjectMeta type, or "" for keys with no
-// key-derived type (assets are typed by peek/process alone — never by
-// extension or byte-sniffing; unknown keys fall to the backend's
+// key-derived type (unknown keys fall to the backend's
 // application/octet-stream default). This is grammar classification of SRR's
-// own key classes, not extension guessing: a pack key's .gz is truthful by
+// own key classes, never extension guessing: a pack key's .gz is truthful by
 // construction. Centralised next to cacheControlForKey so the writer↔CDN
 // contract stays in one place.
+//
+// An asset's type is never derived HERE. asset-peek/asset-process is its single
+// source of truth wherever either is configured, and the caller has already
+// resolved that into ObjectMeta by the time a backend asks this. With neither
+// configured the asset layer sniffs the payload's own leading bytes and stamps
+// an inert media type (assets.go sniffedMediaType) — a zero-config install would
+// otherwise serve every self-hosted image as an octet-stream download. Either
+// way the type arrives as meta; a key extension never speaks for one.
 func contentTypeForKey(key string) string {
 	if key == "db.gz" || key == "config.gz" || strings.HasPrefix(key, "inbox/") || packKeyRe.MatchString(key) {
 		return contentTypeGzip
