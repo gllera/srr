@@ -653,6 +653,14 @@ describe("browser: real SPA over real packs", () => {
          expect(shortcuts.length).toBeGreaterThan(0)
          for (const s of shortcuts) {
             expect(new URL(s.url, href).pathname).toBe(appUrl.pathname)
+            // ...and the fragment must SURVIVE the URL parse. An empty fragment
+            // collapses — `new URL("./#", href).hash` is `""` — so a shortcut
+            // written `"./#"` boots with no hash at all, falls through to the
+            // `srr-hash` localStorage restore (app.ts's init), and lands wherever
+            // the user last was instead of the lane it advertises. The list form
+            // needs the one-character `"./#!"`: `hash` is then `"#!"`, the restore
+            // is skipped, and route() canonicalizes it back to `"#"` itself.
+            expect(new URL(s.url, href).hash).not.toBe("")
          }
          // ...and that the Saved one actually carries its filter token, so a
          // path-only regression can't pass by pointing every shortcut at home.
