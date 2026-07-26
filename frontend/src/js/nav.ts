@@ -193,8 +193,8 @@ async function oldestUnread(): Promise<number> {
 }
 
 // ── Search filter mode ───────────────────────────────────────────────────────
-// A third filter mode beside feed-membership and ★ Saved: when the single
-// token is "q:<query>", navigation walks an explicit set of matching chronIdxs —
+// A third filter mode beside feed-membership and ★ Saved: when a token is
+// "q:<query>", navigation walks an explicit set of matching chronIdxs —
 // the title-search hits — exactly as ★ Saved walks the saved set. The set is
 // computed once per query by search.loadHits (cached there via cachedPromise,
 // so concurrent walks within one render dedupe); nav keeps only the sorted
@@ -204,6 +204,16 @@ async function oldestUnread(): Promise<number> {
 // cycle, or arrow-cycling leaves it — search is not part of getFilterEntries).
 // Capped at SEARCH_CAP newest hits so a broad query can't fetch the whole
 // archive; searchTruncated() flags the cap for the UI.
+//
+// RDR8 — the query may ride WITH ONE feed/tag token, its SCOPE: `#!q:x+tech` is
+// "search within tech". One query and one scope, never more (two queries have no
+// meaning, and a wider lane is what a plain multi-token URL filter already is).
+// The intersection happens inside search.ts DURING the scan rather than over the
+// finished hit list, because the scan stops at SEARCH_CAP: a common word would
+// otherwise fill the cap from other lanes and hand the scope nothing. Everything
+// else about the mode is unchanged — most of all that it stays a PEEK mode
+// (frontierScope's `peek` is `filter.search`, scoped or not), so a query never
+// moves a seen frontier however narrow its lane.
 export const SEARCH_PREFIX = "q:"
 const SEARCH_CAP = 500
 let searchSorted: number[] = [] // ascending matching chronIdxs in the snapshot
@@ -230,8 +240,27 @@ export function resetSearchStream(): void {
 
 // Derives the active search query from filter.tokens — always consistent with
 // filter.search since set() flips both synchronously (no hand-sync invariant).
+// The q: token is FOUND rather than assumed at index 0: a scoped query carries
+// its lane token alongside, in whatever order the hash spelled the two.
 function activeQuery(): string {
-   return filter.search ? filter.tokens[0].slice(SEARCH_PREFIX.length) : ""
+   if (!filter.search) return ""
+   const t = filter.tokens.find((tok) => tok.startsWith(SEARCH_PREFIX))
+   return t === undefined ? "" : t.slice(SEARCH_PREFIX.length)
+}
+
+// The identity of the loaded snapshot: the query AND the lane it is scoped to.
+// A scope change re-derives a DIFFERENT hit set out of the same query, so it has
+// to invalidate the snapshot exactly as a new query does. JSON rather than a
+// separator join — a tag name may contain whatever character a separator is.
+function searchKey(): string {
+   return filter.search ? JSON.stringify([activeQuery(), ...filter.scope]) : ""
+}
+
+// The lane an active query is scoped to — "" when it searches everything (RDR8).
+// The UI reads it to keep the scope across a re-typed query, to return to that
+// lane on leaving search, and to name it in the toolbar readout / the tab title.
+export function searchScope(): string {
+   return filter.search ? (filter.scope[0] ?? "") : ""
 }
 
 export function isSearchFilter(): boolean {
@@ -281,23 +310,29 @@ function setRight(sorted: number[], from: number): number {
 // calls for the same query, so concurrent neighbor walks within one render share
 // one in-flight load.
 async function ensureSearchSet(): Promise<void> {
+   const key = searchKey()
+   if (searchLoadedFor === key) return // snapshot already up to date
    const term = activeQuery()
-   if (searchLoadedFor === term) return // snapshot already up to date
    // An empty query has no hits — reset to the empty snapshot and mark it
    // loaded without calling loadHits (parity with search.loadHits's own
    // `if (query)` guard; tests assert it).
    if (!term) {
       resetSearchStream()
-      searchLoadedFor = term
+      searchLoadedFor = key
       return
    }
-   const { chrons, truncated, cards } = await search.loadHits(term, SEARCH_CAP)
-   if (term !== activeQuery()) return // superseded — discard stale result
+   // A scope reaches search.ts as the membership map ITSELF, so the scan applies
+   // nav's own lane rule (RDR8); its key rides along for search.ts's hit cache.
+   const scope = filter.scope.length > 0 ? { key: JSON.stringify(filter.scope), feeds: filter.feeds } : undefined
+   const { chrons, truncated, cards } = await search.loadHits(term, SEARCH_CAP, scope)
+   if (key !== searchKey()) return // superseded — discard stale result
    searchSorted = chrons
    searchSet = new Set(chrons)
-   searchCards = cards
+   // `cards` is absent only from a stubbed loadHits; an empty map keeps
+   // searchCard() answering "no card" rather than throwing on every row.
+   searchCards = cards ?? new Map()
    searchTruncatedFlag = truncated
-   searchLoadedFor = term
+   searchLoadedFor = key
 }
 
 // The value-addressed neighbor primitive: the nearest matching member ≤ `from`
@@ -367,6 +402,18 @@ function resolveMembership(tokens: string[]): Map<number, number> {
    return feeds
 }
 
+// Which tokens the active filter resolves its FEED MEMBERSHIP from: its own
+// tokens normally, the SCOPE half for a scoped query (RDR8), and null for the
+// feed-agnostic modes (★ Saved, an unscoped query) whose membership IS an
+// explicit set and whose filter.feeds must therefore stay empty. Shared by
+// filter.set and onStoreRefreshed so the two can never disagree about what a
+// lane spans — the same reason resolveMembership itself is one function.
+function membershipTokens(): string[] | null {
+   if (filter.saved) return null
+   if (filter.search) return filter.scope.length > 0 ? filter.scope : null
+   return filter.active ? filter.tokens : []
+}
+
 // The active filter. Its DATA FIELDS are internal to nav plus the test suites
 // that seed them — production consumers read the mode through the accessors
 // below the object (isSavedFilter / isFilterActive / isSearchFilter — ENG4).
@@ -388,10 +435,16 @@ export const filter = {
    // "★ Saved" mode: navigation walks the explicit srr-saved set, feed-agnostic
    // (feeds stays empty). Set by set() when the only token is SAVED_TOKEN.
    saved: false,
-   // Search mode: navigation walks the explicit title-search set (searchSorted),
-   // feed-agnostic like saved. Set by set() when the only token is "q:<query>"
-   // — see the Search filter mode section above.
+   // Search mode: navigation walks the explicit title-search set (searchSorted).
+   // Set by set() when a token is "q:<query>" — see the Search filter mode
+   // section above.
    search: false,
+   // The SCOPE half of a search filter (RDR8): the feed/tag tokens riding beside
+   // the q: token, [] for the feed-agnostic unscoped query. When it is non-empty
+   // `feeds` holds that lane's membership and the hit set is scanned inside it;
+   // when it is empty `feeds` stays empty, exactly as ★ Saved's does, because
+   // "no scope" means the query spans the store rather than spanning every feed.
+   scope: [] as string[],
    get active() {
       return this.tokens.length > 0
    },
@@ -406,6 +459,7 @@ export const filter = {
    clear() {
       this.saved = false
       this.search = false
+      this.scope = []
       this.anchor = -1
       this.feeds = resolveMembership([])
       this.tokens = []
@@ -416,24 +470,36 @@ export const filter = {
       this.tokens = tokens
       this.feeds = new Map<number, number>()
       this.anchor = -1
+      this.scope = []
       // "★ Saved" is a standalone mode, not a feed resolution: short-circuit
       // before the feed loop (which would find no feeds and clear() back
       // to [ALL]). feeds stays empty; feedLeft/feedRight/matches/showFeed all
       // branch on filter.saved.
       this.saved = tokens.length === 1 && tokens[0] === SAVED_TOKEN
-      // "q:<query>" — title-search mode (see Search filter mode above). Like
-      // ★ Saved it short-circuits the feed resolution; the matching set is loaded
-      // once by ensureSearchSet (via feedLeft/feedRight) and cached in search.ts.
-      this.search = !this.saved && tokens.length === 1 && tokens[0].startsWith(SEARCH_PREFIX)
+      // "q:<query>" — title-search mode (see Search filter mode above). The
+      // matching set is loaded once by ensureSearchSet (via feedLeft/feedRight)
+      // and cached in search.ts. RDR8: the q: token may be joined by ONE scope
+      // token, hence "find it anywhere in a list of at most two" rather than
+      // "it is the only token".
+      const q = this.saved ? -1 : tokens.findIndex((t) => t.startsWith(SEARCH_PREFIX))
+      this.search = q >= 0 && tokens.length <= 2
       if (this.saved) return
       if (this.search) {
-         const term = tokens[0].slice(SEARCH_PREFIX.length)
-         // New query: drop the snapshot so ensureSearchSet reloads it. A returning
-         // query (back/forward, term unchanged) would already have its snapshot if it
-         // loaded before; resetSearchStream just nulls searchLoadedFor so a stale or
-         // emptied snapshot doesn't strand the list on no matches (the A→B→A case:
-         // B's load emptied the set; on return to A, resetSearchStream forces reload).
-         if (term !== searchLoadedFor) resetSearchStream()
+         this.scope = tokens.filter((_, i) => i !== q)
+         // The scope resolves to feed membership exactly as a plain feed/tag
+         // filter does, but at NATURAL add_idx bounds — no applyUnseen: search is
+         // a peek mode, so a query inside a lane must still find its read
+         // articles. A scope token that resolves to nothing leaves an empty map
+         // and the query honestly finds nothing in that lane.
+         const members = membershipTokens()
+         if (members) this.feeds = resolveMembership(members)
+         // New query OR new scope: drop the snapshot so ensureSearchSet reloads
+         // it. A returning key (back/forward, nothing changed) would already have
+         // its snapshot if it loaded before; resetSearchStream just nulls
+         // searchLoadedFor so a stale or emptied snapshot doesn't strand the list
+         // on no matches (the A→B→A case: B's load emptied the set; on return to
+         // A, resetSearchStream forces the reload).
+         if (searchKey() !== searchLoadedFor) resetSearchStream()
          return
       }
       // Resolve membership at natural add_idx bounds (numeric token = a feed,
@@ -501,16 +567,20 @@ export function filterFeeds(): ReadonlyMap<number, number> {
 // them; members gone from the store leave. New articles need no bound work at
 // all — they sit above every existing bound, so matches()/findRight see them
 // automatically. pos is untouched: chronIdx is a permanent address and
-// total_art only ever grows. Saved/search have no per-feed bounds (filter.feeds
-// stays empty for them) — skipped here.
+// total_art only ever grows. ★ Saved and an UNSCOPED query have no per-feed
+// bounds (filter.feeds stays empty for them) — skipped here; a SCOPED query
+// (RDR8) does, and reconciles through the same path as any feed/tag lane.
 export async function onStoreRefreshed(): Promise<void> {
-   if (!filter.saved && !filter.search) {
+   // null = a feed-agnostic mode (★ Saved, an unscoped query): no per-feed bounds
+   // to reconcile. A SCOPED query does have them, and reconciles like any lane.
+   const members = membershipTokens()
+   if (members) {
       // Recompute the fresh membership set exactly as filter.set/clear would:
       // [ALL] (no active tokens) = every feed with total_art>0; a feed/tag
       // filter = the union its tokens resolve to (numeric ids as feeds, else a
       // tag match) — the SAME resolveMembership filter.set/clear use, so a mixed
       // multi-token filter (feed ids + tags) gets the identical union.
-      const fresh = resolveMembership(filter.active ? filter.tokens : [])
+      const fresh = resolveMembership(members)
       const seenMap = readSeen()
       for (const [id, addIdx] of fresh) {
          const old = filter.feeds.get(id)
@@ -1066,13 +1136,21 @@ export function getCurrentFilterKey(): string {
 }
 
 // Resolve a filter key (getCurrentFilterKey / getFilterEntries format) to its
-// human label: [ALL] "" → "All", the saved smart-folder → "★ Saved", a numeric
-// feed id → that feed's title, a tag name → itself. Tags are already names; only
-// untagged single-feed filters carry a raw id, so this is what keeps the toolbar
-// label, the document title, and the caught-up line from ever showing an id.
+// human label: [ALL] "" → "All", the saved smart-folder → "★ Saved", a query
+// token → "Search: <query>", a numeric feed id → that feed's title, a tag name →
+// itself. Tags are already names; only untagged single-feed filters carry a raw
+// id, so this is what keeps the toolbar label, the document title, and the
+// caught-up line from ever showing an id — and, since getCurrentFilterKey hands
+// back the raw `q:<query>` token for an unscoped query, from ever showing that
+// either. A SCOPED query's key is its scope token (nav.searchScope), so the
+// combined lane labels as the lane it is searching inside.
 export function filterLabel(key: string): string {
    if (key === "") return "All"
    if (key === SAVED_TOKEN) return "★ Saved"
+   if (key.startsWith(SEARCH_PREFIX)) {
+      const q = key.slice(SEARCH_PREFIX.length)
+      return q ? `Search: ${q}` : "Search"
+   }
    return /^\d+$/.test(key) ? data.feedTitle(Number(key)) : key
 }
 

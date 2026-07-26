@@ -433,10 +433,13 @@ let lastFeedLabel: string | null = null
 export function refreshFeedLabel() {
    // The article's source now lives in the header kicker, so the toolbar label
    // is the active-filter indicator: "All", a tag name, or a single feed.
-   // Search mode is orthogonal to the feed axis (the pinned search bar owns the
-   // query), so show the button neutral ("All", unhighlighted) instead of the raw
-   // "q:<query>" token getCurrentFilterKey returns.
-   const key = nav.isSearchFilter() ? "" : nav.getCurrentFilterKey() // "" (all/multi) | tag name | numeric feed id
+   // An UNSCOPED query is orthogonal to the feed axis (the pinned search bar owns
+   // the query), so the button stays neutral ("All", unhighlighted) rather than
+   // showing the raw "q:<query>" token getCurrentFilterKey returns. A SCOPED one
+   // (RDR8) reads as its LANE — that lane is what prev/next walk and what the
+   // back button returns to, and getCurrentFilterKey collapses the two-token
+   // filter to "" and would otherwise claim the query spans everything.
+   const key = nav.isSearchFilter() ? nav.searchScope() : nav.getCurrentFilterKey() // "" (all/multi) | tag name | numeric feed id
    // Multi-store breadcrumb (docs/MULTI-STORE-SPEC.md §6.3): prefix the readout
    // with the active mount "MOUNT · LANE" ONLY when more than one store is
    // mounted — a single-store user sees byte-identical chrome. The mount rides in

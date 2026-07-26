@@ -930,6 +930,14 @@ describe("filterLabel", () => {
    it("passes a tag-name key through unchanged (tags are already names)", () => {
       expect(nav.filterLabel("news")).toBe("news")
    })
+
+   // RDR8 — getCurrentFilterKey hands back the raw q: token for an unscoped
+   // query, so filterLabel has to be total over it: no surface may ever print
+   // "q:climate" at a reader.
+   it("names a query token rather than printing it raw", () => {
+      expect(nav.filterLabel("q:climate")).toBe("Search: climate")
+      expect(nav.filterLabel("q:")).toBe("Search")
+   })
 })
 
 describe("switchFilter", () => {
@@ -2544,6 +2552,161 @@ describe("search filter mode (q:<query>)", () => {
       expect(await nav.feedLeft(19)).toBe(11)
       release()
       await inflight.catch(() => {})
+   })
+})
+
+// RDR8 — a q: token may ride with ONE feed/tag token, the scope. The
+// intersection itself lives in search.ts's scan (nav hands it the membership
+// map), so the loadHits stand-in here applies the same rule the real scan does;
+// what these cases pin is nav's half: which tokens make a scoped query, what
+// filter.feeds becomes, the snapshot identity, the hash round-trip, the label,
+// and that the peek-mode exemption survives the scope.
+describe("scoped search (q: + one lane token)", () => {
+   const hit = (chron: number, f = 1) => ({ chron, f, w: 1000, t: "t" })
+   async function* gen(hits: ReturnType<typeof hit>[]) {
+      yield hits
+   }
+
+   beforeEach(() => {
+      searchMod.search.mockReset()
+      searchMod.loadHits.mockReset()
+      // Faithful stand-in for the scoped scan: collect the generator's hits,
+      // dropping any whose feed is outside the scope map (or below its bound) —
+      // the same test search.ts's matchShard applies.
+      searchMod.loadHits.mockImplementation(
+         async (query: string, cap: number, scope?: { key: string; feeds: Map<number, number> }) => {
+            const chrons: number[] = []
+            const cards = new Map<number, { f: number; w: number; t: string }>()
+            if (query) {
+               for await (const batch of searchMod.search(query, cap + 1) as AsyncGenerator<ReturnType<typeof hit>[]>) {
+                  for (const h of batch) {
+                     if (scope) {
+                        const bound = scope.feeds.get(h.f)
+                        if (bound === undefined || h.chron < bound) continue
+                     }
+                     if (chrons.length >= cap) break
+                     if (!cards.has(h.chron)) {
+                        chrons.push(h.chron)
+                        cards.set(h.chron, { f: h.f, w: h.w, t: h.t })
+                     }
+                  }
+               }
+            }
+            chrons.sort((a, b) => a - b)
+            return { chrons, truncated: false, cards }
+         },
+      )
+      searchMod.available.mockReturnValue(true)
+      searchMod.shortQuery.mockReturnValue(false)
+   })
+
+   // chron 0..5 alternating feeds 1/2; feed 2 also carries the tag "tech".
+   function twoFeeds() {
+      setupIndex(Array.from({ length: 6 }, (_, i) => ({ feedId: (i % 2) + 1 })))
+      data.db.feeds[2] = makeFeed({ id: 2, title: "Two", tag: "tech", total_art: 3 })
+   }
+
+   it("walks only the hits inside the scope's membership", async () => {
+      twoFeeds()
+      searchMod.search.mockImplementation(() => gen([hit(1, 2), hit(2, 1), hit(3, 2), hit(4, 1)]))
+      nav.applyFilter(["q:sc1", "2"]) // feed 2 only
+      expect(nav.isSearchFilter()).toBe(true)
+      expect(nav.searchScope()).toBe("2")
+      expect(await nav.feedLeft(5)).toBe(3)
+      expect(await nav.feedLeft(2)).toBe(1)
+      expect(await nav.feedRight(0)).toBe(1)
+      // The feed-1 hits are simply not members any more.
+      expect(nav.filter.matches(1, 2)).toBe(false)
+      expect(nav.filter.matches(2, 3)).toBe(true)
+   })
+
+   it("resolves a TAG scope to its member feeds, like any tag lane", async () => {
+      twoFeeds()
+      searchMod.search.mockImplementation(() => gen([hit(1, 2), hit(2, 1), hit(3, 2)]))
+      nav.applyFilter(["q:sc2", "tech"])
+      expect([...nav.filterFeeds().keys()]).toEqual([2])
+      expect(await nav.feedLeft(5)).toBe(3)
+      expect(await nav.feedRight(2)).toBe(3)
+   })
+
+   it("an unscoped query keeps filter.feeds empty (it spans the store, not every feed)", async () => {
+      twoFeeds()
+      searchMod.search.mockImplementation(() => gen([hit(1, 2), hit(2, 1)]))
+      nav.applyFilter(["q:sc3"])
+      expect(nav.searchScope()).toBe("")
+      expect(nav.filterFeeds().size).toBe(0)
+      expect(await nav.feedLeft(5)).toBe(2) // both feeds' hits walk
+   })
+
+   it("a scope that resolves to nothing finds nothing, rather than silently widening", async () => {
+      twoFeeds()
+      searchMod.search.mockImplementation(() => gen([hit(1, 2), hit(2, 1)]))
+      nav.applyFilter(["q:sc4", "nosuchtag"])
+      expect(nav.isSearchFilter()).toBe(true)
+      expect(nav.searchScope()).toBe("nosuchtag")
+      expect(await nav.feedLeft(5)).toBe(-1)
+   })
+
+   it("round-trips through the hash, in either token order", async () => {
+      twoFeeds()
+      searchMod.search.mockImplementation(() => gen([hit(1, 2), hit(3, 2)]))
+      nav.applyFilter(["q:c++", "tech"])
+      expect(nav.tokensSuffix()).toBe("!q%3Ac%2B%2B+tech") // ':' and '+' escaped
+      // Back from the hash with the scope FIRST — activeQuery finds the q: token
+      // wherever it sits.
+      await nav.fromHash("3!tech+q%3Ac%2B%2B")
+      expect(nav.isSearchFilter()).toBe(true)
+      expect(nav.searchQuery()).toBe("c++")
+      expect(nav.searchScope()).toBe("tech")
+      expect(nav.currentChron()).toBe(3)
+   })
+
+   it("changing the scope reloads the snapshot even though the query is unchanged", async () => {
+      twoFeeds()
+      searchMod.search.mockImplementation(() => gen([hit(1, 2), hit(2, 1), hit(3, 2), hit(4, 1)]))
+      nav.applyFilter(["q:sc5", "2"])
+      expect(await nav.feedLeft(5)).toBe(3)
+      expect(searchMod.loadHits).toHaveBeenCalledTimes(1)
+      nav.applyFilter(["q:sc5", "1"]) // same query, other lane
+      expect(await nav.feedLeft(5)).toBe(4)
+      expect(searchMod.loadHits).toHaveBeenCalledTimes(2)
+      // ...and dropping the scope entirely is a third distinct snapshot.
+      nav.applyFilter(["q:sc5"])
+      expect(await nav.feedLeft(5)).toBe(4)
+      expect(await nav.feedLeft(2)).toBe(2)
+      expect(searchMod.loadHits).toHaveBeenCalledTimes(3)
+   })
+
+   it("stays a PEEK mode — reading a scoped hit moves no frontier", async () => {
+      twoFeeds()
+      searchMod.search.mockImplementation(() => gen([hit(1, 2), hit(3, 2)]))
+      nav.applyFilter(["q:sc6", "2"])
+      await nav.goTo(3)
+      expect(nav.currentChron()).toBe(3)
+      expect(JSON.parse(localStorage.getItem("srr-seen") || "{}")).toEqual({})
+      // The explicit gestures are exempt too, scope or no scope.
+      expect(nav.markAllRead()).toBe(false)
+      expect(nav.markUnreadFrom(3)).toBe(false)
+      expect(JSON.parse(localStorage.getItem("srr-seen") || "{}")).toEqual({})
+   })
+
+   it("onStoreRefreshed reconciles the scope's bounds like any lane, then reloads the set", async () => {
+      twoFeeds()
+      searchMod.search.mockImplementation(() => gen([hit(1, 2), hit(3, 2), hit(5, 2)]))
+      nav.applyFilter(["q:sc7", "2"])
+      expect(await nav.feedLeft(5)).toBe(5)
+      // Expiration advanced feed 2 past chron 1 — the reconcile must raise the
+      // member's bound (an unscoped query has no bounds to raise; this one does).
+      data.db.feeds[2].add_idx = 2
+      await nav.onStoreRefreshed()
+      expect(nav.filterFeeds().get(2)).toBe(2)
+      expect(await nav.feedRight(0)).toBe(3) // chron 1 is below the raised bound
+   })
+
+   it("a THIRD token is not a scoped query — it is an ordinary multi-token filter", () => {
+      twoFeeds()
+      nav.applyFilter(["q:sc8", "1", "2"])
+      expect(nav.isSearchFilter()).toBe(false)
    })
 })
 
