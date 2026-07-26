@@ -21,6 +21,7 @@ import {
 } from "./fmt"
 import { setupGestures, type Gestures } from "./gestures"
 import { HASH_KEY, UNREAD_ONLY_KEY } from "./keys"
+import * as lightbox from "./lightbox"
 import * as list from "./list"
 import { addMount, forgetStoreState, loadMounts, mountLabel, removeMount, type MountRecord } from "./mounts"
 import * as nav from "./nav"
@@ -1246,6 +1247,12 @@ const INT_POS = /^-?\d+$/
 // reading position); anything else (empty, or just `!tokens`) is the list at
 // that filter.
 async function route(hash: string) {
+   // The lightbox is a modal over the reader, so nothing in the UI can navigate
+   // while it is up — but the BROWSER's back/forward can, and an enlarged image
+   // left hanging over a different article is a lie. Every routed change closes
+   // it (a no-op when it isn't open), which also hands focus back before the
+   // article it belongs to is replaced.
+   lightbox.close()
    // A URL-driven filter change (hashchange / back-forward) also supersedes any
    // pending debounced query — see selectFilter.
    clearTimeout(searchDebounce)
@@ -1414,8 +1421,9 @@ function toggleUnseenOnly() {
 function onCycle(dir: number) {
    // The two-finger cycle gesture must not re-filter the list that sits under
    // the open picker overlay (same input-leak class as the keyboard and
-   // one-finger-swipe guards).
-   if (picker.isOpen()) return
+   // one-finger-swipe guards) — nor under the open image lightbox, which is a
+   // modal over the reader and owns every input while it is up.
+   if (picker.isOpen() || lightbox.isOpen()) return
    if (nav.getFilterEntries().length <= 1) return
    // cycleToken steps relative to cycleOriginKey (a single tagged-feed filter
    // cycles by its tag) and skips ★ Saved / empty-of-unread lanes, so the list and
@@ -1465,12 +1473,16 @@ function bumpReaderEdge(side: "prev" | "next") {
 // keymap and the two-finger cycle carry (a bare view check no longer covers it
 // now that the picker isn't list-only). Gating on view !== "reader" additionally
 // makes a swipe over the LIST (where prev/next are disabled) a clean no-op.
+// The image lightbox is the same class of overlay: it covers the reader while a
+// content image is enlarged, so a swipe on it must not step the article behind.
+// (Its KEY input is already swallowed at the capture phase — lightbox.ts onKey —
+// but touch gestures reach these callbacks directly and need the flag.)
 const stepLeft = () => {
-   if (view !== "reader" || picker.isOpen()) return
+   if (view !== "reader" || picker.isOpen() || lightbox.isOpen()) return
    return el.prev.disabled ? bumpReaderEdge("prev") : guard(() => nav.left())
 }
 const stepRight = () => {
-   if (view !== "reader" || picker.isOpen()) return
+   if (view !== "reader" || picker.isOpen() || lightbox.isOpen()) return
    return el.next.disabled ? bumpReaderEdge("next") : guard(() => nav.right())
 }
 const cycle = (dir: -1 | 1) => () => nav.getFilterEntries().length > 1 && guard(() => nav.cycleFilter(dir))
@@ -1669,6 +1681,12 @@ async function init() {
    // In-page fragment links (footnotes, ToC entries) scroll instead of
    // navigating — location.hash is the reader's router, not the article's.
    el.content.addEventListener("click", handleFragmentClick)
+   // Bare content images open in the lightbox (RDR7). Delegated, like the two
+   // above: the content host's children are replaced on every navigation, so a
+   // per-image handler would be re-bound on every render. Registered AFTER the
+   // fragment handler so a linked <img> is resolved as a link first — the
+   // lightbox skips anything inside an <a href> anyway.
+   el.content.addEventListener("click", lightbox.handleContentClick)
    el.snackbarAction.addEventListener("click", () => snackbarAction?.())
    // Search lives in the settings menu (the "Search articles…" row → enterSearch);
    // the `/` key still toggles it on the list. The pinned search bar owns the input

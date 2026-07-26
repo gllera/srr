@@ -2300,6 +2300,80 @@ body:not(.srr-view-list) .srr-open-reader {
    }
 }
 
+/* Image lightbox (lightbox.ts) — the enlargement path content images never had.
+   Structurally it is the modal shell again (fixed backdrop at --z-popup, scrim
+   dim, focus trapped inside), but with no card: the picture IS the content, so
+   it sits on the scrim with a single ✕ in the corner. Built dynamically, hence
+   no index.html skeleton. Motion is CSS-only, so the global
+   prefers-reduced-motion rule below flattens the fade and the zoom for free. */
+.srr-lightbox {
+   display: none;
+   position: fixed;
+   inset: 0;
+   z-index: var(--z-popup);
+   align-items: center;
+   justify-content: center;
+   /* Room for the ✕ and a visual margin, so a full-bleed photo never runs into
+      the screen edge (or a phone's rounded corners / notch). */
+   padding: 3rem 1rem 1rem;
+   background: var(--scrim);
+   &.srr-open {
+      display: flex;
+   }
+}
+/* The stage is a <button> only so the zoom toggle is keyboard-operable; it must
+   look like nothing at all and hug the image exactly, or the backdrop-click
+   target (everything that ISN'T the image) would be wrong. */
+.srr-lightbox-stage {
+   display: flex;
+   max-width: 100%;
+   max-height: 100%;
+   padding: 0;
+   border: none;
+   background: none;
+   /* The zoomed image overflows its fitted box on purpose (transform doesn't
+      reflow); clip it to the stage so it can't spill under the ✕. */
+   overflow: hidden;
+   cursor: zoom-in;
+}
+.srr-lightbox-zoomed .srr-lightbox-stage {
+   cursor: zoom-out;
+}
+.srr-lightbox-img {
+   max-width: 100%;
+   /* The stage's own box is padding-free, so the image bounds the viewport
+      directly — 100dvh minus the overlay's vertical padding. */
+   max-height: calc(100dvh - 4rem);
+   transition: transform 0.18s ease;
+}
+.srr-lightbox-close {
+   position: absolute;
+   top: 0.75rem;
+   right: 0.75rem;
+   width: 2.25rem;
+   height: 2.25rem;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   padding: 0;
+   font-family: var(--font-mono);
+   font-size: 1rem;
+   line-height: 1;
+   color: var(--fg);
+   background: var(--surface-raised);
+   border: 1px solid var(--border);
+   border-radius: 50%;
+   box-shadow: var(--shadow);
+   cursor: pointer;
+   transition:
+      background 0.15s,
+      border-color 0.15s;
+   &:hover {
+      border-color: var(--fg);
+      background: var(--hover);
+   }
+}
+
 /* Focus */
 :focus-visible {
    outline: 2px solid var(--accent);
