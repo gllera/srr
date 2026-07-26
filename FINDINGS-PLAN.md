@@ -278,7 +278,7 @@ reproduce touch/overscroll behavior.
   - **Risk / deps:** gestures.ts + list.ts + styles.css; land BEFORE S74 (both grow
     the same single-finger tracking).
 
-- [ ] **S74** — RDR14: list-row swipe actions  ·  **P3 · M**  ·  from RDR14 (IM-I13)
+- [x] **S74** — RDR14: list-row swipe actions  ·  **P3 · M**  ·  from RDR14 (IM-I13)
   - **Edit:** one-finger horizontal swipe ON A LIST ROW — right = toggle ★ save,
     left = toggle read — extending `gestures.ts`'s single-finger tracking with the
     surface awareness the two-finger cycle already has (reader keeps horizontal

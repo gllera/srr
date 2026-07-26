@@ -749,6 +749,11 @@ async function init() {
       // retry rebuilds the list at the current anchor, same recovery as a failed
       // initial render.
       (e) => showError(e, () => void renderListSurface()),
+      // A row swipe's mark-read is a frontier move like any other, so it gets the
+      // same "Marked N read · Undo" announcement the reader's gestures get —
+      // which matters because a swipe far ahead of a feed's frontier reads
+      // everything behind it, not just that row.
+      menus.offerFrontierUndo,
    )
 
    el.prev.addEventListener("click", () => guard(() => nav.left()))

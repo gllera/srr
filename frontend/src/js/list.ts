@@ -124,17 +124,25 @@ let pillOnScroll: (() => void) | null = null
 // ARRIVALS: the same fetchNewer path serves ordinary upward paging, where the
 // rows are ones the user is deliberately scrolling toward and a pill is noise.
 let grownRunway = false
+// Injected by setup(); see the offerFrontierUndo parameter.
+let offerUndo: (() => Promise<void>) | null = null
 
 export function setup(
    el: HTMLElement,
    open: (chron: number) => void,
    onScroll?: () => void,
    onPageError?: (e: unknown) => void,
+   // The seen-frontier undo offer (menus.offerFrontierUndo), injected rather than
+   // imported: it lives behind app.ts's snackbar deps, and importing menus here
+   // would close a list↔menus cycle. Absent = no announcement, only the slot
+   // marked (see markRowRead).
+   offerFrontierUndo?: () => Promise<void>,
 ): void {
    container = el
    onOpen = open
    notifyScroll = onScroll ?? (() => {})
    onError = onPageError ?? (() => {})
+   offerUndo = offerFrontierUndo ?? null
    container.addEventListener("click", (e) => {
       const target = e.target as HTMLElement
       const a = target.closest("a.srr-row") as HTMLElement | null
@@ -449,10 +457,20 @@ function markRowRead(chron: number, feed: number): void {
       u && u.to === chron && Object.keys(u.prev).length === 1 && key in u.prev
          ? { chron, feed, to: chron, undo: u }
          : null
-   // Take the offer slot: app.ts asks for it on a READER render, which for a list
-   // swipe means minutes later on another surface, announcing a number nobody can
-   // place. The inverse swipe is this gesture's own way back (readSwipeUndo).
-   if (readSwipeUndo) nav.markFrontierUndoOffered()
+   // Answer the offer HERE, not on the next reader render — by then the swipe is
+   // minutes old and on another surface, announcing a number nobody can place.
+   //
+   // Which matters because a swipe is not necessarily one article: swiping a row
+   // that sits far ahead of its feed's frontier reads everything behind it too,
+   // and that silent bulk move is precisely what RDR1's snackbar exists to
+   // announce (offerFrontierUndo stays below its own UNDO_MIN_ARTICLES bar for
+   // the ordinary one-row case, so the common swipe stays silent). The offer also
+   // marks the slot itself, which is the only thing that has to happen — hence
+   // the fallback for a caller that wires no offer.
+   if (readSwipeUndo) {
+      if (offerUndo) void offerUndo()
+      else nav.markFrontierUndoOffered()
+   }
 }
 
 // Mark the row unread again — the inverse swipe.
