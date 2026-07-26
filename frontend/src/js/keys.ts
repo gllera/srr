@@ -42,6 +42,24 @@ export const playerStateKey = (mid: string): string => q("srr-player", mid)
 // a different feed in every store).
 export const favoritesKey = (mid: string): string => q("srr-favorites", mid)
 
+// EVERY per-store key builder, in one list. `mounts.ts` maps this to get the
+// keys a rename must move and a forget must delete — deriving that set instead
+// of re-listing it, because the hand-kept copy silently fell two behind (the
+// player state and the favorites lane were both per-store from the day they
+// landed, and both were missed). A builder added above and not added here is a
+// key a rename orphans and a forget leaks, so this array — not any consumer's
+// copy — is the one place the roster lives.
+export const PER_STORE_KEYS: ReadonlyArray<(mid: string) => string> = [
+   seenKey,
+   seenTsKey,
+   savedKey,
+   savedTsKey,
+   pinsKey,
+   profileTsKey,
+   playerStateKey,
+   favoritesKey,
+]
+
 // Global keys (one per device, not a property of a store).
 export const UNREAD_ONLY_KEY = "srr-unread-only"
 export const IMG_PROXY_KEY = "srr-img-proxy"

@@ -18,7 +18,7 @@
 // zero coordination (which is what lets the synced mount table converge, §3.4).
 
 import { HOME } from "./base"
-import { HOME_MID, MOUNTS_KEY, pinsKey, profileTsKey, savedKey, savedTsKey, seenKey, seenTsKey } from "./keys"
+import { HOME_MID, MOUNTS_KEY, PER_STORE_KEYS } from "./keys"
 
 // One mount record (§3.1). Carries NO secret — `cred` is a boolean, not a token
 // (§7.3, MS9). Presentation fields (label, ord, cred) plus a single LWW clock
@@ -276,11 +276,15 @@ export function reconcileMounts(recs: MountRecord[]): { records: MountRecord[]; 
    return { records: ensureHome(out), renames }
 }
 
-// The six per-store localStorage keys for a mount id (keys.ts). HOME_MID maps
-// to the bare legacy names; every other id is suffixed `@<mid>`. Every per-store
-// key belongs here: one left out is one a rename orphans and a forget leaks.
+// The per-store localStorage keys for a mount id, DERIVED from keys.ts's own
+// roster rather than re-listed here. HOME_MID maps to the bare legacy names;
+// every other id is suffixed `@<mid>`. The derivation is the point: this used
+// to be a hand-kept list, and it fell two keys behind (srr-player, srr-favorites
+// — both per-store since the day they landed), so a forget left them behind
+// forever and a re-mount of the same URL resurrected them. Adding a builder to
+// PER_STORE_KEYS is now the whole change; there is no second place to update.
 function storeStateKeys(mid: string): string[] {
-   return [seenKey(mid), seenTsKey(mid), savedKey(mid), savedTsKey(mid), pinsKey(mid), profileTsKey(mid)]
+   return PER_STORE_KEYS.map((k) => k(mid))
 }
 
 // True when this device holds ANY per-store state under `mid` — the guard that
