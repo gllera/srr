@@ -24,6 +24,7 @@
 //   merge (default; always for v1 — file restores) —
 //      seen  — the per-key rule above
 //      saved — union preserving local save order, appending new incoming saves
+//              (monotone on purpose: a restore adds back, it never deletes)
 //      prefs — last-writer-wins, gated by opts.prefs (opt-in checkbox)
 //   sync (mode:"sync" + v2 — a sync.ts pull) — the one-reader hybrid:
 //      seen  — the per-key rule above, but WITHOUT stamping `ts`: the change
@@ -31,18 +32,36 @@
 //              stamping would make this device "newest" and steal the saved-LWW
 //              ordering from the device where the person actually acted (same
 //              reasoning as the prefs-don't-stamp rule on profileTs below).
-//      saved+ts — last-write-wins by `ts`: a strictly newer blob replaces saved
-//              wholesale (un-saves propagate) and `ts` takes the blob's value;
-//              otherwise both stay local (a tie keeps local). Net effect: `ts`
-//              converges to max(local, blob).
+//      saved+sd — per-key LWW by the `sd` (saved-ts) side map over a blob-level
+//              base (RDR18, mergeSaved below): the base is the old rule — a
+//              strictly newer blob's array replaces local wholesale, so
+//              un-saves propagate — and each chron whose stamps differ then
+//              overrides it in either direction. That is what makes a save on
+//              one device concurrent with an un-save on another converge to
+//              the newer INTENT rather than to the newer BLOB, which used to
+//              lose one of the two. `ts` still converges to max(local, blob)
+//              and still decides the queue ORDER; per-key stamps decide only
+//              membership. A blob with no `sd` at all merges exactly as before.
 //      prefs — gated by opts.prefs exactly as in merge mode; sync.ts just
 //      always passes prefs:false (see profileTs's comment below for why).
 // The ONLY path that can LOWER seen is a strictly newer per-key `st` — the
 // explicit rewind a person asked for on some device. Everything else stays
 // raise-only: all devices belong to one reader, whose read state is the union
 // of what they read anywhere plus their latest explicit rewinds.
+// Both stamp maps obey the same adoption rule: taking a side's value takes its
+// stamp VERBATIM — never re-stamped to now, because the ordering belongs to the
+// device where the person acted.
 
-import { HOME_MID, IMG_PROXY_KEY, profileTsKey, savedKey, seenKey, seenTsKey, UNREAD_ONLY_KEY } from "./keys"
+import {
+   HOME_MID,
+   IMG_PROXY_KEY,
+   profileTsKey,
+   savedKey,
+   savedTsKey,
+   seenKey,
+   seenTsKey,
+   UNREAD_ONLY_KEY,
+} from "./keys"
 import {
    loadMounts,
    mergeMountRecords,
@@ -59,8 +78,10 @@ import { isValidHttpish, normalizeHttpish } from "./urlish"
 // bare legacy names via HOME_MID — a single-store user's blob is unchanged.
 const SEEN_KEY = seenKey(HOME_MID)
 const SEEN_TS_KEY = seenTsKey(HOME_MID)
-const SAVED_KEY = savedKey(HOME_MID)
 const PROFILE_TS_KEY = profileTsKey(HOME_MID)
+// The saved pair has no constants of its own: mergeSaved and its readers are
+// parameterized by mount id (the home store just passes HOME_MID), so one body
+// serves both the top-level fields and every peer substate.
 
 function lsGet(key: string): string {
    try {
@@ -111,15 +132,222 @@ function cleanTsMap(incoming: unknown): Record<string, number> {
 // Save order (insertion order as stored), NOT sorted: the ★ Saved queue is read
 // front-to-back and new saves append, so the order is meaningful and travels in
 // the blob. Deduped (first occurrence wins) to survive a hand-edited endpoint.
-function readSavedOrder(): number[] {
+function readSavedOrder(mid = HOME_MID): number[] {
    try {
-      const raw = lsGet(SAVED_KEY)
+      const raw = lsGet(savedKey(mid))
       const arr = raw ? JSON.parse(raw) : []
       const ints = Array.isArray(arr) ? arr.filter((n) => Number.isInteger(n)) : []
-      return [...new Set(ints)]
+      return [...new Set(ints)] as number[]
    } catch {
       return []
    }
+}
+
+// ── ★ Saved: the per-key stamps (`sd`, srr-saved-ts) — RDR18 ─────────────────
+// The saved-set cousin of `st`: unix-second of each chron's last local
+// membership mutation, stamped by saved.ts beside every srr-saved write. A
+// chron is stamped whether it was saved or UN-saved — an un-save leaves a
+// TOMBSTONE, and that is the entire point. Without one, a save on device A and
+// an un-save on device B are indistinguishable at merge time and the blob-level
+// `ts` silently drops whichever device's blob was older.
+function readSavedTs(mid = HOME_MID): Record<string, number> {
+   return cleanTsMap(parseAny(lsGet(savedTsKey(mid))))
+}
+
+// Tombstone cap. A MEMBER's stamp is never dropped (it is what defends a save
+// against a peer's older un-save); only tombstones — stamps for chrons not in
+// the set — are bounded, newest first, ties broken by chron so two devices
+// holding the same union prune to the SAME map. That determinism matters: a
+// prune the two sides disagree on reads as "the endpoint is behind" on both,
+// and would ping-pong a push between them until they converge.
+const SAVED_TOMBSTONE_CAP = 1024
+
+function capSavedTs(sd: Record<string, number>, members: Set<number>): Record<string, number> {
+   const tombs = Object.keys(sd).filter((k) => !members.has(Number(k)))
+   if (tombs.length <= SAVED_TOMBSTONE_CAP) return sd
+   tombs.sort((a, b) => sd[b] - sd[a] || Number(a) - Number(b))
+   const out = { ...sd }
+   for (const k of tombs.slice(SAVED_TOMBSTONE_CAP)) delete out[k]
+   return out
+}
+
+// The PRUNED view of one mount's saved stamps — what exportProfile publishes
+// AND what sync.ts's push trigger compares against. The two must be the same
+// map: a stamp the trigger counts as local-only but the push never sends would
+// re-fire the trigger on every single cycle.
+function savedTsView(mid = HOME_MID): Record<string, number> {
+   return capSavedTs(readSavedTs(mid), new Set(readSavedOrder(mid)))
+}
+
+// Order-independent equality for the stamp maps, so a merge that only reshuffled
+// key order doesn't rewrite localStorage on every cycle.
+function sameTsMap(a: Record<string, number>, b: Record<string, number>): boolean {
+   const ak = Object.keys(a)
+   if (ak.length !== Object.keys(b).length) return false
+   return ak.every((k) => a[k] === b[k])
+}
+
+// The incoming `sd` map, or null when the blob carried NONE — the signal that
+// its writer predates per-key saved stamps (a v1 blob, or a v2 from an older
+// build). null is NOT the same as `{}`: an empty map is a stamps-aware device
+// that has simply never saved anything, and its absent stamps legitimately
+// count as 0 in the per-key comparison.
+function tsMapOrNull(v: unknown): Record<string, number> | null {
+   if (v === null || typeof v !== "object" || Array.isArray(v)) return null
+   return cleanTsMap(v)
+}
+
+// Union preserving `order`, appending members of `incoming` it lacks — the
+// merge-mode saved rule, shared by the home store and every peer substate.
+function appendNew(order: number[], incoming: number[]): number[] {
+   const out = [...order]
+   const have = new Set(order)
+   for (const n of incoming)
+      if (!have.has(n)) {
+         have.add(n)
+         out.push(n)
+      }
+   return out
+}
+
+// The ★ Saved merge — ONE body for both import modes and every mount (RDR18).
+//
+// Two layers, and their order IS the interop story:
+//
+//  1. `base` is EXACTLY what this merge did before per-key stamps existed:
+//     sync mode takes the blob's array wholesale when its `ts` is strictly
+//     newer (so un-saves propagate) and keeps local otherwise; merge mode
+//     unions, local order first, incoming appended. A blob carrying no `sd`
+//     map — v1, or a v2 written by an older build — never reaches layer 2, so
+//     it merges exactly as it always did. That is the whole backwards-interop
+//     contract, and like `st` it needs no version bump: `sd` is additive, and
+//     an old build reading a new blob just ignores a field it does not know.
+//
+//  2. In SYNC mode, where both the incoming array and its `sd` map are
+//     present, each chron's membership is decided by the strictly newer of the
+//     two stamps —
+//     independently per key, in either direction. A save on A concurrent with
+//     an un-save on B now converges to the newer INTENT instead of to whichever
+//     blob happened to carry the newer `ts`, and two concurrent saves of
+//     DIFFERENT articles both survive (each is stamped on exactly one side, and
+//     an absent stamp reads as 0). A chron unstamped on both sides — state from
+//     before the upgrade — falls through to base, where the blob-level rule
+//     still governs because there is no finer ordering to be had.
+//
+// ORDER is load-bearing (★ Saved is a read-later queue consumed front-to-back),
+// and coexists with per-key stamps like this: the merged queue is `base`'s
+// order with non-members filtered out, then the chrons layer 2 ADDED appended
+// in the other side's order. So the sequence always comes from the blob-level
+// winner while per-key stamps decide only WHO is in the queue. Two devices
+// merging the same pair of blobs therefore compute the same queue — base is
+// "the newer-`ts` array" on both sides and the appended tail is "the older-`ts`
+// array's order" on both — and a hand-curated reading order is never scrambled
+// by making the set mergeable. (A blob-level `ts` TIE keeps each device's own
+// order, as it always has; membership still converges per key.)
+//
+// Returns whether the SET actually moved. A stamp-only convergence is not a
+// change — the ImportResult.changed contract is about what the UI shows.
+function mergeSaved(
+   mid: string,
+   incomingRaw: unknown,
+   incomingSd: Record<string, number> | null,
+   mode: "merge" | "sync",
+   adoptBlob: boolean,
+): boolean {
+   try {
+      const order = readSavedOrder(mid)
+      const localSet = new Set(order)
+      const sd = readSavedTs(mid)
+      // Only a well-formed array is an opinion about the set. A newer blob that
+      // OMITS or malforms `saved` (a truncated keepalive PUT, a hand-edited
+      // endpoint) must not zero the local star collection — a genuine
+      // un-save-everything still arrives as `saved: []`, an array.
+      const incoming = Array.isArray(incomingRaw)
+         ? ([
+              ...new Set((incomingRaw as unknown[]).filter((n) => Number.isInteger(n) && (n as number) >= 0)),
+           ] as number[])
+         : null
+      const inSet = new Set(incoming ?? [])
+
+      // Layer 1 — the pre-stamps behaviour, unchanged.
+      const tookBlob = mode === "sync" && adoptBlob && incoming !== null
+      let base: number[]
+      if (tookBlob)
+         base = incoming! // sync + strictly newer blob: it replaces the set wholesale
+      else if (mode === "sync" || !incoming)
+         base = order // sync but older/tied, or no opinion at all
+      else base = appendNew(order, incoming) // merge (file restore): the union, local order first
+      const members = new Set(base)
+
+      // Layer 2 — per-key LWW, only in sync mode and only against a
+      // stamps-aware blob. Merge mode is deliberately excluded: its base is
+      // already the union, so the only thing layer 2 could do there is DELETE,
+      // and a file restore must never delete (see the mode note above).
+      if (mode === "sync" && incoming !== null && incomingSd !== null) {
+         for (const k of savedKeyUnion(order, incoming, sd, incomingSd)) {
+            const lt = sd[k] ?? 0
+            const rt = incomingSd[k] ?? 0
+            if (lt === rt) continue // no finer ordering — base's verdict stands
+            if (rt > lt ? inSet.has(k) : localSet.has(k)) members.add(k)
+            else members.delete(k)
+         }
+      }
+
+      // Order: base's survivors, then layer-2's additions in the other side's
+      // order (a member can only come from one of the two arrays, so this is
+      // total).
+      const next = base.filter((k) => members.has(k))
+      const placed = new Set(next)
+      for (const k of tookBlob ? order : (incoming ?? []))
+         if (members.has(k) && !placed.has(k)) {
+            next.push(k)
+            placed.add(k)
+         }
+
+      // Stamps: adopt VERBATIM from whichever side's membership the merge took —
+      // never re-stamped to now, since the ordering belongs to the device where
+      // the person acted. When both sides agree on membership, the newer of the
+      // two stamps is taken (still a verbatim adoption, and it is what converges
+      // the ordering across the fleet). A stamp whose side LOST is dropped: a
+      // stamp that contradicts the membership it sits beside would answer the
+      // next merge's question wrongly.
+      const nextSd: Record<string, number> = {}
+      for (const k of savedKeyUnion(order, incoming ?? [], sd, incomingSd ?? {})) {
+         const merged = members.has(k)
+         let s = 0
+         if (localSet.has(k) === merged) s = Math.max(s, sd[k] ?? 0)
+         if (incoming !== null && inSet.has(k) === merged) s = Math.max(s, incomingSd?.[k] ?? 0)
+         if (s > 0) nextSd[k] = s
+      }
+      const capped = capSavedTs(nextSd, members)
+
+      let changed = false
+      if (JSON.stringify(next) !== JSON.stringify(order)) {
+         lsSet(savedKey(mid), JSON.stringify(next))
+         changed = true
+      }
+      if (!sameTsMap(capped, sd)) lsSet(savedTsKey(mid), JSON.stringify(capped))
+      return changed
+   } catch {
+      return false
+   }
+}
+
+// Every chron either side holds an opinion about: a member of either set, or a
+// stamp in either map. Non-numeric keys from a hand-edited blob are dropped.
+function savedKeyUnion(
+   a: number[],
+   b: number[],
+   aTs: Record<string, number>,
+   bTs: Record<string, number>,
+): Set<number> {
+   const out = new Set<number>([...a, ...b])
+   for (const map of [aTs, bTs])
+      for (const k of Object.keys(map)) {
+         const n = Number(k)
+         if (Number.isInteger(n)) out.add(n)
+      }
+   return out
 }
 
 // The LWW ordering field: unix seconds of the last local seen/saved mutation
@@ -144,6 +372,14 @@ export function localSeen(): Record<string, number> {
 // them with localSeen().
 export function localSeenTs(): Record<string, number> {
    return readSeenTs()
+}
+
+// The per-key SAVED stamps, pruned exactly as exportProfile publishes them —
+// sync.ts's saved-axis push trigger compares this against the pulled blob's
+// `sd`. It must be the published view, or the trigger would keep reporting a
+// stamp the push never carries (see savedTsView).
+export function localSavedTs(): Record<string, number> {
+   return savedTsView(HOME_MID)
 }
 
 export interface ImportResult {
@@ -217,6 +453,7 @@ interface StoreSubstate {
    seen: Record<string, number>
    st: Record<string, number>
    saved: number[]
+   sd: Record<string, number>
 }
 
 // Read one mount's substate from its namespaced keys (seen@mid / st@mid /
@@ -228,7 +465,7 @@ function readSubstate(mid: string): StoreSubstate | null {
    const tsN = Number(lsGet(profileTsKey(mid)))
    const ts = Number.isFinite(tsN) && tsN > 0 ? Math.floor(tsN) : 0
    if (Object.keys(seen).length === 0 && saved.length === 0 && ts === 0) return null
-   return { ts, seen, st, saved }
+   return { ts, seen, st, saved, sd: savedTsView(mid) }
 }
 
 function parseMap(raw: string): Record<string, number> {
@@ -262,9 +499,10 @@ function parseIntArray(raw: string): number[] {
 }
 
 // Merge one incoming peer substate into a mount's namespaced keys, by the SAME
-// rules as the home store: seen+st per-key LWW (mergeSeenMid), saved+ts LWW in
-// sync mode / union in merge mode. `mid` is never HOME_MID here (home rides the
-// top-level fields). Returns whether anything actually changed.
+// rules as the home store: seen+st per-key LWW (mergeSeenMid) and saved+sd
+// through the shared mergeSaved (per-key LWW over the blob-level base, or the
+// union in merge mode). `mid` is never HOME_MID here (home rides the top-level
+// fields). Returns whether anything actually changed.
 function mergeSubstate(mid: string, sub: unknown, mode: "merge" | "sync"): boolean {
    if (!sub || typeof sub !== "object" || Array.isArray(sub)) return false
    const o = sub as Record<string, unknown>
@@ -273,33 +511,10 @@ function mergeSubstate(mid: string, sub: unknown, mode: "merge" | "sync"): boole
    const tsRaw = o["ts"]
    const blobTs = typeof tsRaw === "number" && Number.isFinite(tsRaw) && tsRaw > 0 ? Math.floor(tsRaw) : 0
    const localTs = readSubstate(mid)?.ts ?? 0
-   const incoming = Array.isArray(o["saved"])
-      ? [...new Set((o["saved"] as unknown[]).filter((n) => Number.isInteger(n) && (n as number) >= 0) as number[])]
-      : null
-   if (mode === "sync") {
-      if (blobTs > localTs) {
-         if (incoming && JSON.stringify(incoming) !== JSON.stringify(parseIntArray(lsGet(savedKey(mid))))) {
-            lsSet(savedKey(mid), JSON.stringify(incoming))
-            changed = true
-         }
-         lsSet(profileTsKey(mid), String(blobTs))
-      }
-   } else if (incoming) {
-      // merge (file restore): union, preserving local save order.
-      const order = parseIntArray(lsGet(savedKey(mid)))
-      const seen = new Set(order)
-      let savedChanged = false
-      for (const n of incoming)
-         if (!seen.has(n)) {
-            seen.add(n)
-            order.push(n)
-            savedChanged = true
-         }
-      if (savedChanged) {
-         lsSet(savedKey(mid), JSON.stringify(order))
-         changed = true
-      }
-   }
+   if (mergeSaved(mid, o["saved"], tsMapOrNull(o["sd"]), mode, blobTs > localTs)) changed = true
+   // The blob-level ordering field still converges to max, and still only in
+   // sync mode — a peer store's ts is its own, never the home store's.
+   if (mode === "sync" && blobTs > localTs) lsSet(profileTsKey(mid), String(blobTs))
    return changed
 }
 
@@ -360,18 +575,29 @@ export function hasPeerState(): boolean {
    return mnt.some((m) => m.id !== HOME_MID && !m.del) || Object.keys(ms).length > 0
 }
 
-// exportProfile serialises all four portable keys plus the LWW `ts` and the
-// per-key seen timestamps `st` into a v:2 blob (st is additive — old builds
-// ignore it and keep their raise-only max, so the version needs no bump). The
-// multi-store `mnt`/`ms` (§4.4) ride along, also additive. srr-hash is never
-// included.
+// exportProfile serialises all four portable keys plus the LWW `ts` and the two
+// per-key ordering maps — `st` (seen) and `sd` (saved) — into a v:2 blob. Both
+// are additive, so old builds ignore them and keep their coarser rules and the
+// version needs no bump. The multi-store `mnt`/`ms` (§4.4) ride along, also
+// additive. srr-hash is never included.
 export function exportProfile(): string {
    const seen = readSeen()
    const saved = readSavedOrder()
    const unreadOnly = lsGet(UNREAD_ONLY_KEY) === "1"
    const imgProxy = lsGet(IMG_PROXY_KEY)
    const { mnt, ms } = exportMountState()
-   return JSON.stringify({ v: 2, ts: profileTs(), seen, st: readSeenTs(), saved, unreadOnly, imgProxy, mnt, ms })
+   return JSON.stringify({
+      v: 2,
+      ts: profileTs(),
+      seen,
+      st: readSeenTs(),
+      saved,
+      sd: savedTsView(HOME_MID),
+      unreadOnly,
+      imgProxy,
+      mnt,
+      ms,
+   })
 }
 
 // Merge the incoming blob's mount table + peer substate (§4.4). Applied by
@@ -460,36 +686,20 @@ export function importProfile(json: string, opts: { prefs: boolean; mode?: "merg
 
    let changed = false
    const incomingSt = cleanTsMap(obj["st"])
+   const incomingSd = tsMapOrNull(obj["sd"])
    if (opts.mode === "sync" && obj["v"] === 2) {
       // ── sync (one-reader hybrid pull) — NOT for file restores; those go
       // through the merge branch below even on a v2 blob (opts.mode unset).
       changed = mergeSeen(obj["seen"], incomingSt) // per-key rule, ts deliberately untouched
       const tsRaw = obj["ts"]
       const blobTs = typeof tsRaw === "number" && Number.isFinite(tsRaw) && tsRaw > 0 ? Math.floor(tsRaw) : 0
-      if (blobTs > profileTs()) {
-         // saved + ts — the blob is strictly newer: its saved set is the
-         // person's current intent (un-saves propagate). Identical content
-         // still converges ts but is not a "change".
-         try {
-            // Only a well-formed array replaces saved wholesale. A newer blob
-            // that OMITS/malforms `saved` (a truncated keepalive PUT, a
-            // hand-edited endpoint) must NOT zero the local star collection — a
-            // genuine un-save-everything still arrives as `saved:[]` (an array),
-            // so that intent propagates while a missing field is left alone.
-            const incoming = obj["saved"]
-            if (Array.isArray(incoming)) {
-               // Adopt the blob's save ORDER verbatim (deduped, not sorted) — the
-               // sender's queue order is the intent that propagates under LWW.
-               const cleaned = [...new Set(incoming.filter((n) => Number.isInteger(n) && n >= 0))]
-               const next = JSON.stringify(cleaned)
-               if (next !== JSON.stringify(readSavedOrder())) {
-                  lsSet(SAVED_KEY, next)
-                  changed = true
-               }
-            }
-         } catch {}
-         lsSet(PROFILE_TS_KEY, String(blobTs))
-      }
+      const adopt = blobTs > profileTs()
+      // saved + sd — mergeSaved runs UNCONDITIONALLY, not only under a newer
+      // blob: a per-key stamp can win against an older blob (that is the point
+      // of having one), and the blob-level verdict rides in as its `adoptBlob`
+      // base. `ts` itself still converges to max, and only when strictly newer.
+      if (mergeSaved(HOME_MID, obj["saved"], incomingSd, "sync", adopt)) changed = true
+      if (adopt) lsSet(PROFILE_TS_KEY, String(blobTs))
    } else {
       // ── merge (v1, or v2 without mode:"sync" — a file restore) ─────────────
 
@@ -500,26 +710,13 @@ export function importProfile(json: string, opts: { prefs: boolean; mode?: "merg
 
       // saved — union that PRESERVES local save order and APPENDS restored saves
       // not already present (in the blob's order), keeping the queue's
-      // front-to-back meaning instead of re-sorting by chronIdx.
-      try {
-         const incomingRaw = obj["saved"]
-         if (Array.isArray(incomingRaw)) {
-            const order = readSavedOrder()
-            const existingSet = new Set(order)
-            let savedChanged = false
-            for (const n of incomingRaw) {
-               if (Number.isInteger(n) && n >= 0 && !existingSet.has(n as number)) {
-                  existingSet.add(n as number)
-                  order.push(n as number)
-                  savedChanged = true
-               }
-            }
-            if (savedChanged) {
-               lsSet(SAVED_KEY, JSON.stringify(order))
-               changed = true
-            }
-         }
-      } catch {}
+      // front-to-back meaning instead of re-sorting by chronIdx. Deliberately
+      // MONOTONE even now that stamps exist: a file restore is an explicit "add
+      // this back" gesture and must never silently delete a save, which is why
+      // saved is a union here and an LWW only in sync mode. What the stamps buy
+      // here is that a restored save arrives carrying its own `sd` entry, so a
+      // later un-save anywhere in the fleet can still outrank it.
+      if (mergeSaved(HOME_MID, obj["saved"], incomingSd, "merge", false)) changed = true
 
       if (changed) touchProfile()
    }

@@ -499,6 +499,180 @@ describe("per-key seen timestamps (st) — the explicit-rewind ordering", () => 
    })
 })
 
+// RDR18 — the per-key SAVED stamps (`sd`, srr-saved-ts). The saved set used to
+// be blob-level LWW, so a save on one device concurrent with an un-save on
+// another lost one of them. Per-key stamps make it mergeable; the blob-level ts
+// keeps deciding the queue ORDER.
+describe("per-key saved stamps (sd)", () => {
+   const SD_KEY = "srr-saved-ts"
+   beforeEach(() => localStorage.clear())
+
+   // Local device state: the set, its stamps, the blob-level ordering field.
+   const seedLocal = (saved: number[], sd: Record<string, number>, ts: number) => {
+      localStorage.setItem(SAVED_KEY, JSON.stringify(saved))
+      localStorage.setItem(SD_KEY, JSON.stringify(sd))
+      touchProfile(ts)
+   }
+   const blob = (ts: number, saved: number[] | undefined, sd?: Record<string, number>) =>
+      JSON.stringify({ v: 2, ts, seen: {}, saved, sd })
+   const pull = (b: string) => importProfile(b, { prefs: false, mode: "sync" })
+   const savedNow = () => JSON.parse(localStorage.getItem(SAVED_KEY)!)
+   const sdNow = () => JSON.parse(localStorage.getItem(SD_KEY) ?? "{}")
+
+   it("exportProfile publishes the sd map alongside saved", () => {
+      seedLocal([5, 9], { 5: 100, 9: 200 }, 200)
+      const obj = JSON.parse(exportProfile())
+      expect(obj.saved).toEqual([5, 9])
+      expect(obj.sd).toEqual({ 5: 100, 9: 200 })
+   })
+
+   // THE finding's case, both directions. Device A saved chron 7 at t=100;
+   // device B un-saved it at t=110. Whichever device pulls the other's blob
+   // must land on the same answer — the newer INTENT (the un-save) — instead of
+   // on whichever blob happened to carry the newer blob-level ts.
+   it("a save and a concurrent un-save converge on the newer intent — pulling B's blob on A", () => {
+      seedLocal([7], { 7: 100 }, 100) // A
+      const r = pull(blob(110, [], { 7: 110 })) // B's newer un-save
+      expect(r.changed).toBe(true)
+      expect(savedNow()).toEqual([])
+      // The tombstone stamp is kept, verbatim: it is what makes this un-save
+      // outrank a THIRD device's older save of the same article.
+      expect(sdNow()).toEqual({ 7: 110 })
+   })
+
+   it("…and pulling A's blob on B leaves the un-save standing (same answer, no change)", () => {
+      seedLocal([], { 7: 110 }, 110) // B
+      const r = pull(blob(100, [7], { 7: 100 })) // A's older save
+      expect(r.changed).toBe(false)
+      expect(savedNow()).toEqual([])
+      expect(sdNow()).toEqual({ 7: 110 })
+      expect(profileTs()).toBe(110) // an older blob never lowers the ordering field
+   })
+
+   it("the reverse polarity converges too — a newer SAVE beats an older un-save", () => {
+      seedLocal([], { 7: 100 }, 100) // A un-saved at 100
+      expect(pull(blob(110, [7], { 7: 110 })).changed).toBe(true) // B re-saved at 110
+      expect(savedNow()).toEqual([7])
+
+      localStorage.clear()
+      seedLocal([7], { 7: 110 }, 110) // the same pair, seen from B
+      expect(pull(blob(100, [], { 7: 100 })).changed).toBe(false)
+      expect(savedNow()).toEqual([7])
+   })
+
+   // The blob-level LWW dropped one of two concurrent saves of DIFFERENT
+   // articles as well: whichever device's blob was older lost its save
+   // wholesale. Per-key, each is stamped on exactly one side, so both survive.
+   it("two concurrent saves of different articles both survive", () => {
+      seedLocal([5], { 5: 100 }, 100)
+      expect(pull(blob(110, [9], { 9: 110 })).changed).toBe(true)
+      expect(savedNow().sort()).toEqual([5, 9])
+      expect(sdNow()).toEqual({ 5: 100, 9: 110 })
+   })
+
+   // ORDER: the queue comes from the blob-level winner, with the loser's
+   // additions appended — so both devices compute the SAME sequence.
+   it("save order survives a per-key merge, and both devices compute the same queue", () => {
+      seedLocal([10, 20, 30], { 10: 90, 20: 90, 30: 90 }, 90)
+      // The newer blob re-ordered the queue AND un-saved 20; local's 40 is
+      // stamped newer than anything the blob knows.
+      localStorage.setItem(SAVED_KEY, JSON.stringify([10, 20, 30, 40]))
+      localStorage.setItem(SD_KEY, JSON.stringify({ 10: 90, 20: 90, 30: 90, 40: 500 }))
+      pull(blob(200, [30, 10], { 20: 150 }))
+      // base = the blob's order (its ts wins) minus nothing, then the chrons the
+      // per-key layer kept from local, in local's order.
+      expect(savedNow()).toEqual([30, 10, 40])
+      expect(sdNow()).toEqual({ 10: 90, 20: 150, 30: 90, 40: 500 })
+   })
+
+   it("a stamp-only convergence is not a change", () => {
+      seedLocal([7], { 7: 100 }, 100)
+      const r = pull(blob(100, [7], { 7: 200 })) // same membership, newer stamp
+      expect(r.changed).toBe(false)
+      expect(savedNow()).toEqual([7])
+      expect(sdNow()).toEqual({ 7: 200 }) // adopted verbatim, never re-stamped to now
+   })
+
+   // Backwards interop, both shapes of "the other side has no stamps".
+   it("a blob with NO sd merges exactly as before — wholesale from a newer ts", () => {
+      seedLocal([7], { 7: 500 }, 100)
+      pull(blob(999, [])) // an old build's v2 blob: newer ts, no sd at all
+      expect(savedNow()).toEqual([])
+      // The un-save was adopted from an unstamped source, so there is no stamp
+      // to keep — the same rule mergeSeen applies to an unstamped adopted value.
+      expect(sdNow()).toEqual({})
+   })
+
+   it("a v1 blob still union-merges and picks up no stamps", () => {
+      localStorage.setItem(SAVED_KEY, JSON.stringify([1]))
+      const r = importProfile(JSON.stringify({ v: 1, seen: {}, saved: [2] }), { prefs: false })
+      expect(r.changed).toBe(true)
+      expect(savedNow()).toEqual([1, 2])
+      expect(sdNow()).toEqual({})
+   })
+
+   it("a newer blob that omits saved entirely still cannot wipe the set", () => {
+      seedLocal([1, 2], { 1: 10, 2: 20 }, 100)
+      pull(blob(999, undefined, { 1: 900 })) // sd present, saved missing
+      expect(savedNow()).toEqual([1, 2])
+      expect(sdNow()).toEqual({ 1: 10, 2: 20 }) // no membership opinion ⇒ no stamp adoption
+   })
+
+   // merge mode (a file restore) stays MONOTONE — an explicit "add this back"
+   // gesture must never delete — but it does carry stamps so a later un-save
+   // anywhere in the fleet can still outrank a restored save.
+   it("merge mode never deletes, even from a newer un-save stamp", () => {
+      seedLocal([1], { 1: 500 }, 100)
+      importProfile(JSON.stringify({ v: 2, ts: 999, seen: {}, saved: [], sd: { 1: 900 } }), { prefs: false })
+      expect(savedNow()).toEqual([1])
+      expect(sdNow()).toEqual({ 1: 500 }) // the local (member) stamp stands
+   })
+
+   it("merge mode adopts an incoming save's stamp verbatim", () => {
+      importProfile(JSON.stringify({ v: 2, ts: 0, seen: {}, saved: [9], sd: { 9: 700 } }), { prefs: false })
+      expect(savedNow()).toEqual([9])
+      expect(sdNow()).toEqual({ 9: 700 })
+   })
+
+   it("bounds tombstones while never dropping a member's stamp", () => {
+      // 1200 un-saved chrons (tombstones) plus one live save: the published view
+      // keeps the member and the newest 1024 tombstones.
+      const sd: Record<string, number> = { 7: 1 }
+      for (let i = 0; i < 1200; i++) sd[1000 + i] = 1000 + i
+      seedLocal([7], sd, 100)
+      const out = JSON.parse(exportProfile()).sd as Record<string, number>
+      expect(Object.keys(out)).toHaveLength(1025)
+      expect(out["7"]).toBe(1) // the member survives its ancient stamp
+      expect(out["2199"]).toBe(2199) // newest tombstone kept
+      expect(out["1000"]).toBeUndefined() // oldest pruned
+   })
+
+   it("a device's own blob round-trips with no change", () => {
+      seedLocal([3, 1], { 3: 100, 1: 200 }, 200)
+      const r = pull(exportProfile())
+      expect(r.changed).toBe(false)
+      expect(savedNow()).toEqual([3, 1])
+      expect(sdNow()).toEqual({ 3: 100, 1: 200 })
+   })
+
+   it("peer-store substate merges by the same per-key rule", () => {
+      localStorage.setItem("srr-saved@sP", JSON.stringify([7]))
+      localStorage.setItem("srr-saved-ts@sP", JSON.stringify({ 7: 100 }))
+      localStorage.setItem("srr-profile-ts@sP", "100")
+      const incoming = JSON.stringify({
+         v: 2,
+         ts: 0,
+         seen: {},
+         saved: [],
+         mnt: [{ id: "sP", url: "https://peer/", label: "P", ord: 10, role: "peer", cred: false, ts: 9 }],
+         ms: { sP: { ts: 110, seen: {}, st: {}, saved: [], sd: { 7: 110 } } },
+      })
+      expect(importProfile(incoming, { prefs: false, mode: "sync" }).changed).toBe(true)
+      expect(JSON.parse(localStorage.getItem("srr-saved@sP")!)).toEqual([])
+      expect(JSON.parse(localStorage.getItem("srr-saved-ts@sP")!)).toEqual({ 7: 110 })
+   })
+})
+
 // docs/MULTI-STORE-SPEC.md §4.4 — the additive mnt (mount table) + ms (per-peer
 // substate). The HOME store rides the top-level fields unchanged; peers ride ms.
 describe("multi-store mnt/ms (§4.4)", () => {

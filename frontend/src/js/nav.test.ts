@@ -2191,6 +2191,25 @@ describe("saved articles", () => {
       expect(localStorage.getItem("srr-saved")).toBe("[]")
    })
 
+   // RDR18: every membership change stamps srr-saved-ts, the map profile.ts
+   // merges the set per key by. The UN-save stamps too — that tombstone is the
+   // only thing that can outrank another device's older save of the article.
+   it("toggleSaved stamps srr-saved-ts on save AND un-save", () => {
+      const stamps = () => JSON.parse(localStorage.getItem("srr-saved-ts") ?? "{}")
+      vi.useFakeTimers()
+      try {
+         vi.setSystemTime(1_700_000_000_000)
+         nav.toggleSaved(3)
+         expect(stamps()).toEqual({ 3: 1_700_000_000 })
+         vi.setSystemTime(1_700_000_060_000)
+         nav.toggleSaved(3) // un-save
+         expect(localStorage.getItem("srr-saved")).toBe("[]")
+         expect(stamps()).toEqual({ 3: 1_700_000_060 }) // tombstone, freshly stamped
+      } finally {
+         vi.useRealTimers()
+      }
+   })
+
    it("filter.set([SAVED_TOKEN]) enters a feed-agnostic saved mode", () => {
       setupIndex([{ feedId: 1 }, { feedId: 2 }])
       nav.filter.set([nav.SAVED_TOKEN])
