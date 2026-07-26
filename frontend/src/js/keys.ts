@@ -40,3 +40,12 @@ export const RELOAD_GUARD_KEY = "srr-reload-guard"
 // The mount table (JSON array of mount records). New for the multi-store work;
 // consumed by S38's mounts module (§3.3).
 export const MOUNTS_KEY = "srr-mounts"
+// The version of the SHAPE of this device's stored state (finding ENG6) — the
+// boot gate and its migration ladder live in schema.ts. Global for the same
+// reason as `srr-hash` and `srr-reload-guard` above: it is not a property of any
+// one store's content but of the layout every key in this file describes, and a
+// migration that renames or restructures a key crosses every mount in one pass.
+// A per-mount version would also be self-referential — the `@<mid>` namespacing
+// scheme is itself part of the shape a breaking change could move, so the
+// version that says whether it moved must not be addressed through it.
+export const SCHEMA_KEY = "srr-schema"
