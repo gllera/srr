@@ -138,6 +138,16 @@ func (d *HTTP) newRequest(ctx context.Context, method string, u *url.URL, body i
 
 // drainClose discards a bounded remainder of the body and closes it, letting
 // the transport reuse the connection.
+//
+// Every non-Get caller closes through here, which `bodyclose` cannot see: it
+// matches a literal Close() on the response body and does not follow the value
+// into a helper. So each `defer drainClose(resp.Body)` site carries a suppression
+// directive naming bodyclose and pointing back at this function. (Those three
+// are the only place the directive is spelled out: golangci parses the token
+// anywhere in a comment — with or without a space after the slashes — so
+// quoting it in prose here would register a fourth, malformed one.) Inlining
+// the two lines at all three call sites would satisfy the linter and lose the
+// shared drain — the connection reuse is the point, not the Close.
 func drainClose(rc io.ReadCloser) {
 	io.Copy(io.Discard, io.LimitReader(rc, 4<<10)) //nolint:errcheck // best-effort drain
 	rc.Close()
@@ -236,7 +246,7 @@ func (d *HTTP) put(ctx context.Context, key string, r io.Reader, ignoreExisting 
 		req.Header.Set("Cache-Control", cacheControl)
 	}
 
-	resp, err := d.client.Do(req)
+	resp, err := d.client.Do(req) //nolint:bodyclose // closed by the deferred drainClose below
 	if err != nil {
 		return fmt.Errorf("http put %s: %w", u.Redacted(), err)
 	}
@@ -260,7 +270,7 @@ func (d *HTTP) Stat(ctx context.Context, key string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	resp, err := d.client.Do(req)
+	resp, err := d.client.Do(req) //nolint:bodyclose // closed by the deferred drainClose below
 	if err != nil {
 		return 0, fmt.Errorf("http head %s: %w", u.Redacted(), err)
 	}
@@ -284,7 +294,7 @@ func (d *HTTP) Rm(ctx context.Context, key string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := d.client.Do(req)
+	resp, err := d.client.Do(req) //nolint:bodyclose // closed by the deferred drainClose below
 	if err != nil {
 		return fmt.Errorf("http delete %s: %w", u.Redacted(), err)
 	}
