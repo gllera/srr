@@ -43,8 +43,9 @@ type fakeS3 struct {
 	// undeletable keys answer DeleteObjects with a per-object <Error>, which is
 	// how real S3 reports a partial failure: HTTP 200 with some keys refused.
 	undeletable map[string]bool
-	deleteCalls int  // DeleteObjects requests served, i.e. the batching
-	noBatchVerb bool // answer DeleteObjects 501, as a gateway lacking it does
+	deleteCalls int    // DeleteObjects requests served, i.e. the batching
+	noBatchVerb bool   // answer DeleteObjects 501, as a gateway lacking it does
+	deleteFail  string // answer DeleteObjects with this S3 error CODE (400)
 }
 
 // s3ETag mints the fake's entity tag. Real S3 uses the content MD5 for
@@ -180,6 +181,13 @@ func (f *fakeS3) deleteObjects(w http.ResponseWriter, r *http.Request) {
 	f.deleteCalls++
 	if f.noBatchVerb {
 		s3Error(w, http.StatusNotImplemented, "NotImplemented")
+		return
+	}
+	if f.deleteFail != "" {
+		// 400, deliberately: the SDK retryer would replay a 5xx/throttle and
+		// make the test flaky. A non-retryable status is what pins the
+		// whole-call-failure arm rather than the retry ladder.
+		s3Error(w, http.StatusBadRequest, f.deleteFail)
 		return
 	}
 	body, err := readPutBody(r)
@@ -460,6 +468,48 @@ func TestS3RmBatchFallsBackWhenTheVerbIsUnimplemented(t *testing.T) {
 	}
 	if len(f.objects) != 0 {
 		t.Errorf("objects left = %v, want everything deleted one by one", slices.Sorted(maps.Keys(f.objects)))
+	}
+}
+
+// The whole-call-failure arm: the batch verb itself fails, so NOTHING in the
+// chunk was deleted. It is the arm that tells the GC a generation was NOT
+// cleared, and it had no test — the fake could refuse individual objects and
+// decline the verb, but never fail the call.
+//
+// The stakes are not the GC (its list shape re-derives orphans every run, so it
+// self-heals). They are expiration: ExpireArticles applies its refcount
+// decrements only on a nil error, so a swallowed whole-call failure permanently
+// under-counts assets that are still present in the store.
+func TestS3RmBatchReportsAWholeCallFailure(t *testing.T) {
+	for _, code := range []string{"InvalidRequest", s3ErrUnauthorized} {
+		t.Run(code, func(t *testing.T) {
+			b, f := setupFakeS3(t)
+			f.deleteFail = code
+			keys := []string{"data/0.gz", "data/1.gz", "data/2.gz"}
+			for _, k := range keys {
+				f.objects["prefix/"+k] = []byte("x")
+			}
+
+			failed, err := RmAll(ctx, b, keys, 1)
+			if err == nil {
+				t.Fatal("RmAll err = nil; a failed batch verb deleted nothing and must say so")
+			}
+			// EVERY key, not one representative: `failed` is "still in the store",
+			// and a caller subtracting it to derive successes would otherwise
+			// count two deletions that never happened.
+			slices.Sort(failed)
+			if !slices.Equal(failed, keys) {
+				t.Errorf("failed = %v, want every key %v", failed, keys)
+			}
+			for _, k := range keys {
+				if _, present := f.objects["prefix/"+k]; !present {
+					t.Errorf("%q was deleted despite the batch call failing", k)
+				}
+			}
+			if code == s3ErrUnauthorized && !strings.Contains(err.Error(), "unauthorized access to s3") {
+				t.Errorf("err = %v, want the unauthorized classification", err)
+			}
+		})
 	}
 }
 
