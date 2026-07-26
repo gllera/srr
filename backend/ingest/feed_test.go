@@ -15,7 +15,7 @@ import (
 func collectFeed(t *testing.T, data string) []*mod.RawItem {
 	t.Helper()
 	var items []*mod.RawItem
-	_, _, err := ParseFeed([]byte(data), func(item *mod.RawItem) error {
+	_, _, _, err := ParseFeed([]byte(data), func(item *mod.RawItem) error {
 		items = append(items, item)
 		return nil
 	})
@@ -44,12 +44,53 @@ func TestParseFeedTitle(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			title, _, err := ParseFeed([]byte(c.data), func(*mod.RawItem) error { return nil })
+			title, _, _, err := ParseFeed([]byte(c.data), func(*mod.RawItem) error { return nil })
 			if err != nil {
 				t.Fatalf("ParseFeed: %v", err)
 			}
 			if title != c.want {
 				t.Fatalf("title = %q, want %q", title, c.want)
+			}
+		})
+	}
+}
+
+// The feed-level language is read from the root's xml:lang or a <language>
+// directly under <channel> — never from an <item> or an <image>, which is the
+// same parent-check discipline the title branch enforces. Returned verbatim:
+// the caller normalizes and validates (mod.NormalizeLangCode), so a publisher's
+// junk tag never reaches this function's contract.
+func TestParseFeedLang(t *testing.T) {
+	cases := []struct {
+		name, data, want string
+	}{
+		{"rss-channel-language", `<rss version="2.0"><channel><language>en-us</language>` +
+			`<item><title>Item A</title></item></channel></rss>`, "en-us"},
+		{"atom-root-xml-lang", `<feed xmlns="http://www.w3.org/2005/Atom" xml:lang="fr">` +
+			`<entry><title>Entry A</title></entry></feed>`, "fr"},
+		{"rss-root-xml-lang", `<rss version="2.0" xml:lang=" DE "><channel>` +
+			`<item><title>Item A</title></item></channel></rss>`, "DE"},
+		{"rdf-dc-language", `<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"` +
+			` xmlns:dc="http://purl.org/dc/elements/1.1/"><channel>` +
+			`<dc:language>pt-BR</dc:language></channel>` +
+			`<item><title>Item A</title></item></rdf:RDF>`, "pt-BR"},
+		{"root-attribute-wins", `<rss version="2.0" xml:lang="de"><channel>` +
+			`<language>en</language></channel></rss>`, "de"},
+		{"item-language-never-leaks", `<rss version="2.0"><channel>` +
+			`<item><language>zz</language><title>Item A</title></item></channel></rss>`, ""},
+		{"image-language-skipped", `<rss version="2.0"><channel>` +
+			`<image><language>zz</language></image></channel></rss>`, ""},
+		{"no-declaration", `<rss version="2.0"><channel><title>T</title>` +
+			`<item><title>Item A</title></item></channel></rss>`, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, lang, _, err := ParseFeed([]byte(c.data), func(*mod.RawItem) error { return nil })
+			if err != nil {
+				t.Fatalf("ParseFeed: %v", err)
+			}
+			if lang != c.want {
+				t.Fatalf("lang = %q, want %q", lang, c.want)
 			}
 		})
 	}
@@ -210,7 +251,7 @@ func TestParseFeedNotFeedClassification(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, _, err := ParseFeed([]byte(c.data), func(*mod.RawItem) error { return nil })
+			_, _, _, err := ParseFeed([]byte(c.data), func(*mod.RawItem) error { return nil })
 			if err == nil {
 				t.Fatalf("expected an error for a non-feed document")
 			}
@@ -225,7 +266,7 @@ func TestParseFeedNotFeedClassification(t *testing.T) {
 // recognized-but-broken feed must surface a real error that is NOT errNotFeed
 // (so a mid-stream fault never spuriously triggers discovery).
 func TestParseFeedValidNotClassifiedNotFeed(t *testing.T) {
-	_, _, err := ParseFeed([]byte(`<rss version="2.0"><feed><item><title>A</title></item></feed></rss>`),
+	_, _, _, err := ParseFeed([]byte(`<rss version="2.0"><feed><item><title>A</title></item></feed></rss>`),
 		func(*mod.RawItem) error { return nil })
 	if err != nil {
 		t.Fatalf("valid feed returned error: %v", err)
@@ -318,7 +359,7 @@ func TestParseEmptyFeed(t *testing.T) {
 
 func TestParseCallbackError(t *testing.T) {
 	testErr := fmt.Errorf("custom callback error")
-	_, _, err := ParseFeed([]byte(`<rss version="2.0"><feed>
+	_, _, _, err := ParseFeed([]byte(`<rss version="2.0"><feed>
     <item><title>A</title></item>
   </feed></rss>`), func(*mod.RawItem) error {
 		return testErr
@@ -999,7 +1040,7 @@ func TestFeedFetchDiscoveryByBodySniff(t *testing.T) {
 // validators/watermark so the remainder is refetched instead of stranded.
 func TestParseFeedPartialOnMalformedElement(t *testing.T) {
 	var items []*mod.RawItem
-	_, partial, err := ParseFeed([]byte(`<rss version="2.0"><channel>
+	_, _, partial, err := ParseFeed([]byte(`<rss version="2.0"><channel>
     <item><guid>a</guid><title>A</title></item>
     <item><guid>b</guid><title>bad ]]> bytes</title></item>
     <item><guid>c</guid><title>C</title></item>
@@ -1017,7 +1058,7 @@ func TestParseFeedPartialOnMalformedElement(t *testing.T) {
 		t.Fatalf("items = %d, want exactly the good prefix [A]", len(items))
 	}
 
-	_, partial, err = ParseFeed([]byte(`<rss version="2.0"><channel>
+	_, _, partial, err = ParseFeed([]byte(`<rss version="2.0"><channel>
     <item><guid>a</guid><title>A</title></item>
   </channel></rss>`), func(*mod.RawItem) error { return nil })
 	if err != nil || partial {

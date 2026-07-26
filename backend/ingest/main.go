@@ -73,6 +73,16 @@ type Result struct {
 	// Consumed by serve's GET /api/resolve to pre-fill the add-feed dialog;
 	// the fetch loop ignores it (a stored feed's title is operator-owned).
 	Title string `json:"title,omitempty"`
+	// Lang is the feed's OWN declared language — the root xml:lang or the
+	// <channel><language> element ("" when the source declares none). Set by the
+	// built-in #feed fetcher; an external strategy MAY set it too — omitempty
+	// keeps the wire protocol backward-compatible. It is the LOWEST-priority
+	// language source: a per-item declared RawItem.Lang and a confident
+	// detection both beat it, so it only ever fills the short items detection
+	// abstains on (processItem owns that precedence). Unvalidated here — a
+	// publisher's junk tag is normalized away by mod.NormalizeLangCode before
+	// anything is stamped.
+	Lang string `json:"lang,omitempty"`
 	// Partial marks a response whose Items are only a prefix of the source (the
 	// #feed parser stopped at a malformed mid-feed element). The caller ingests
 	// the items normally but must neither store HTTP validators (ETag /

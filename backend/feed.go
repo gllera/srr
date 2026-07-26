@@ -603,7 +603,7 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 			continue
 		}
 
-		if err := processItem(ctx, processor, pipeline, i); err != nil {
+		if err := processItem(ctx, processor, pipeline, i, result.Lang); err != nil {
 			// One bad item must not discard the whole feed's batch. Config
 			// errors (unknown pipe token / bad params) are caught up front by
 			// Module.Validate in Feed.Fetch, so an error here is a per-item

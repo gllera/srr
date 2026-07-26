@@ -39,7 +39,7 @@ func FuzzParseFeed(f *testing.F) {
 		// `partial` is the parser's own "I streamed some items and then hit
 		// malformed bytes" signal; either answer is legal for arbitrary input, so
 		// the target judges the items instead.
-		_, _, err := ParseFeed([]byte(doc), func(i *mod.RawItem) error {
+		_, _, _, err := ParseFeed([]byte(doc), func(i *mod.RawItem) error {
 			if i == nil {
 				t.Fatal("ParseFeed streamed a nil item")
 			}
