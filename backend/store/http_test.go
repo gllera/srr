@@ -13,11 +13,14 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 )
 
 // httpFixture is an in-memory HTTP object server: GET reads, PUT writes
 // (honouring If-None-Match: * as exclusive create), DELETE removes. It records
-// the Content-Type of each PUT and the Authorization header of every request.
+// the Content-Type of each PUT and the Authorization header of every request,
+// counts requests, and can drop the next `flakes` connections mid-request (see
+// flake) to stand in for a peer that goes away.
 type httpFixture struct {
 	srv          *httptest.Server
 	mu           sync.Mutex
@@ -25,6 +28,8 @@ type httpFixture struct {
 	contentTypes map[string]string
 	lastAuth     string
 	lastHeaders  http.Header
+	requests     int
+	flakes       int
 }
 
 func newHTTPFixture(t *testing.T) *httpFixture {
@@ -35,6 +40,16 @@ func newHTTPFixture(t *testing.T) *httpFixture {
 		defer f.mu.Unlock()
 		f.lastAuth = r.Header.Get("Authorization")
 		f.lastHeaders = r.Header.Clone()
+		f.requests++
+		if f.flakes > 0 {
+			// Hijack and close: the client sees the connection die with no
+			// response, exactly as a reset mid-cycle looks.
+			f.flakes--
+			if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+				conn.Close()
+			}
+			return
+		}
 		key := r.URL.Path
 		switch r.Method {
 		case http.MethodGet:
@@ -87,6 +102,20 @@ func (f *httpFixture) object(key string) ([]byte, bool) {
 	defer f.mu.Unlock()
 	b, ok := f.objs[key]
 	return b, ok
+}
+
+// flake makes the next n requests die at the connection level, and resets the
+// request counter so a test reads "requests since the flakes were armed".
+func (f *httpFixture) flake(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.flakes, f.requests = n, 0
+}
+
+func (f *httpFixture) requestCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.requests
 }
 
 // openHTTPStore opens the backend under the /base prefix so key→URL joining is
@@ -536,5 +565,126 @@ func TestHTTPStatFollowsRedirect(t *testing.T) {
 
 	if n, err := b.Stat(ctx, "file.txt"); err != nil || n != 4 {
 		t.Errorf("Stat through redirect = (%d, %v), want (4, nil)", n, err)
+	}
+}
+
+// --- transient-failure retry (S67) -----------------------------------------
+
+// One dropped connection mid-cycle must cost a round trip, not the op: the
+// expiration pass stats every asset before deleting any, so a single flaky read
+// used to abort the whole retention run.
+func TestHTTPRetriesTransientReads(t *testing.T) {
+	withFastRetry(t)
+	f := newHTTPFixture(t)
+	b := openHTTPStore(t, f)
+	if err := b.Put(ctx, "file.txt", strings.NewReader("data"), true); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	for _, c := range []struct {
+		name string
+		run  func() error
+	}{
+		{"Get", func() error {
+			rc, err := b.Get(ctx, "file.txt")
+			if err != nil {
+				return err
+			}
+			if got := readAllClose(t, rc); got != "data" {
+				t.Errorf("content = %q, want %q", got, "data")
+			}
+			return nil
+		}},
+		{"Stat", func() error {
+			n, err := b.Stat(ctx, "file.txt")
+			if err == nil && n != 4 {
+				t.Errorf("Stat = %d, want 4", n)
+			}
+			return err
+		}},
+		{"Rm", func() error { return b.Rm(ctx, "gone.txt") }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			// Fail every attempt but the last, so the count proves OUR ladder
+			// ran: net/http replays a request of its own accord at most once,
+			// and only on a connection it had already reused.
+			f.flake(retryAttempts - 1)
+			if err := c.run(); err != nil {
+				t.Fatalf("%s across dropped connections: %v", c.name, err)
+			}
+			if got := f.requestCount(); got != retryAttempts {
+				t.Errorf("requests = %d, want %d", got, retryAttempts)
+			}
+		})
+	}
+}
+
+// An overwrite is idempotent and its body is one net/http knows how to replay,
+// so the retry re-sends it in FULL — a truncated pack under an immutable,
+// cached-forever name is the one outcome this must never have.
+func TestHTTPRetriesOverwritePutWithTheCompleteBody(t *testing.T) {
+	withFastRetry(t)
+	f := newHTTPFixture(t)
+	b := openHTTPStore(t, f)
+
+	f.flake(1)
+	if err := b.AtomicPut(ctx, "idx/7.gz", strings.NewReader("packbytes"), ObjectMeta{}); err != nil {
+		t.Fatalf("AtomicPut across a dropped connection: %v", err)
+	}
+	if got := f.requestCount(); got != 2 {
+		t.Errorf("requests = %d, want 2 (the failure and the retry)", got)
+	}
+	got, ok := f.object("/base/idx/7.gz")
+	if !ok {
+		t.Fatal("the retried write never landed")
+	}
+	if string(got) != "packbytes" {
+		t.Errorf("stored %q, want the complete %q", got, "packbytes")
+	}
+}
+
+// A body net/http cannot reproduce (no GetBody — a streamed *os.File asset) is
+// never replayed: proving the retry writes the same bytes is the precondition,
+// and without it the caller's error stands.
+func TestHTTPDoesNotRetryAnUnreplayableBody(t *testing.T) {
+	withFastRetry(t)
+	f := newHTTPFixture(t)
+	b := openHTTPStore(t, f)
+
+	f.flake(1)
+	err := b.AtomicPut(ctx, "assets/ab/cd.bin", iotest.OneByteReader(strings.NewReader("stream")), ObjectMeta{})
+	if err == nil {
+		t.Fatal("AtomicPut of an unreplayable body should surface the connection error")
+	}
+	if got := f.requestCount(); got != 1 {
+		t.Errorf("requests = %d, want 1 — an unreplayable body must not be re-sent", got)
+	}
+}
+
+// An exclusive create is the `.locked` lease acquire and is NEVER retried: a
+// repeat after a PUT that landed before the connection broke would collide with
+// the marker this very process wrote, report os.ErrExist against itself, and
+// wedge the writer until a human passes --force.
+func TestHTTPExclusiveCreateIsNeverRetried(t *testing.T) {
+	withFastRetry(t)
+	f := newHTTPFixture(t)
+	b := openHTTPStore(t, f)
+
+	f.flake(1)
+	if err := b.Put(ctx, ".locked", strings.NewReader("{}"), false); err == nil {
+		t.Fatal("Put(ignoreExisting=false) across a dropped connection should fail")
+	}
+	if got := f.requestCount(); got != 1 {
+		t.Fatalf("requests = %d, want 1 — an exclusive create must never be retried", got)
+	}
+
+	// The overwrite sibling is the control: same server, same flake, and it does
+	// retry.
+	f.flake(1)
+	if err := b.Put(ctx, ".locked", strings.NewReader("{}"), true); err != nil {
+		t.Fatalf("Put(overwrite): %v", err)
+	}
+	if got := f.requestCount(); got != 2 {
+		t.Errorf("requests = %d, want 2 — an overwrite is idempotent and does retry", got)
 	}
 }

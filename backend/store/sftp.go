@@ -42,10 +42,22 @@ func init() {
 // and the SFTP subsystem riding it belong to the sftpSessions memo below, and
 // several handles share one concurrently (pkg/sftp multiplexes requests over the
 // single channel and its Client is safe for concurrent use).
+//
+// It remembers the session's IDENTITY (key/u) as well as the session itself,
+// because a handle outlives connections: a fetch cycle opens the store once and
+// runs for minutes, so when the peer goes away mid-cycle the handle must be able
+// to go back to the memo for a redialed session (see conn/reconnect) instead of
+// failing every remaining op against a corpse.
 type SFTP struct {
-	path   string
-	host   string
-	client *sftp.Client
+	path string
+	host string
+	key  sftpSessionKey
+	u    *url.URL // nil for a handle built outside the memo (tests): no redial
+
+	// mu guards sess alone. The handle is shared across a fetch's asset
+	// workers, so the redial swap must not race their reads of it.
+	mu   sync.Mutex
+	sess *sftpSession
 }
 
 // sftpSession is one dialed SSH connection plus the SFTP subsystem on it.
@@ -73,12 +85,10 @@ func (s *sftpSession) close() {
 // trip is nothing against the TCP connect + SSH handshake + subsystem open it
 // stands in for.
 //
-// It catches a session that died BETWEEN two Opens, not one that dies mid-op —
-// that is S67's redial, which will invalidate this memo entry on a
-// connection-class failure and come back through sftpSessionFor for a fresh
-// dial, exactly as a failed probe does here. None of that retry logic is built
-// yet; the seam is that a session's identity is its key and nothing else holds a
-// reference the memo cannot replace.
+// It catches a session that died BETWEEN two Opens; one that dies mid-op is
+// caught by the same probe from the other side, via sftpSessionRefresh. Either
+// way the replacement is possible only because a session's identity is its key
+// and nothing holds a reference the memo cannot replace.
 func (s *sftpSession) alive() bool {
 	_, err := s.client.Getwd()
 	return err == nil
@@ -149,6 +159,36 @@ func sftpSessionFor(key sftpSessionKey, u *url.URL) (*sftpSession, error) {
 	return s, nil
 }
 
+// sftpSessionRefresh replaces a session a LIVE OPERATION just found broken —
+// the mid-op half of sftpSessionFor's between-Opens probe.
+//
+// The caller saw a connection-class error on dead, which is a suspicion and not
+// a verdict: a per-request failure can look like a disconnect, and the session
+// is shared, so tearing it down on one op's say-so would break every other
+// handle using it. So the corpse is confirmed the same way a stale memo entry
+// is (one probe) and dropped only while it is STILL the memoized session —
+// another goroutine racing the same reset may already have replaced it, and
+// dropping its healthy replacement would start an endless redial loop.
+func sftpSessionRefresh(key sftpSessionKey, u *url.URL, dead *sftpSession) (*sftpSession, error) {
+	if u == nil {
+		// A handle built outside the memo (the pipe-session tests) has no
+		// identity to redial to; its session is whatever it was handed.
+		return dead, nil
+	}
+
+	sftpSessionsMu.Lock()
+	if cur, ok := sftpSessions[key]; ok && cur == dead && !dead.alive() {
+		delete(sftpSessions, key)
+		dead.close()
+	}
+	sftpSessionsMu.Unlock()
+
+	// Outside the lock deliberately: sftpSessionFor takes it itself, and it is
+	// the single place that dials — a fresh entry another goroutine installed
+	// meanwhile is simply returned.
+	return sftpSessionFor(key, u)
+}
+
 // dialSFTPSession performs the full connect: auth resolution, host-key policy,
 // SSH handshake, subsystem open. It runs only on a memo miss, which is why the
 // auth chain (reading ~/.ssh keys, dialing the agent socket) lives in here
@@ -216,12 +256,13 @@ func newSFTP(_ context.Context, u *url.URL) (Backend, error) {
 		urlPassword, _ = u.User.Password()
 	}
 
-	sess, err := sftpSessionFor(sftpSessionKey{
+	key := sftpSessionKey{
 		cfg:         sftpCfg,
 		addr:        addr,
 		user:        sftpUser(u),
 		urlPassword: urlPassword,
-	}, u)
+	}
+	sess, err := sftpSessionFor(key, u)
 	if err != nil {
 		return nil, err
 	}
@@ -248,10 +289,73 @@ func newSFTP(_ context.Context, u *url.URL) (Backend, error) {
 	}
 
 	return &SFTP{
-		path:   basePath,
-		host:   addr,
-		client: sess.client,
+		path: basePath,
+		host: addr,
+		key:  key,
+		u:    u,
+		sess: sess,
 	}, nil
+}
+
+// conn returns the client this handle is currently bound to.
+func (d *SFTP) conn() *sftp.Client {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.sess.client
+}
+
+// reconnect goes back to the memo after a connection-class failure and adopts
+// whatever session it hands back — the same one when the peer turns out to be
+// alive, a redialed one when it is not.
+func (d *SFTP) reconnect() (*sftp.Client, error) {
+	d.mu.Lock()
+	dead := d.sess
+	d.mu.Unlock()
+
+	fresh, err := sftpSessionRefresh(d.key, d.u, dead)
+	if err != nil {
+		return nil, err
+	}
+
+	d.mu.Lock()
+	d.sess = fresh
+	d.mu.Unlock()
+	return fresh.client, nil
+}
+
+// clientFor resolves the client for one attempt: the bound session on the first,
+// a re-resolved (possibly redialed) one on every retry — retryLoop only comes
+// back here after a connection-class failure, which is exactly the event that
+// makes the bound session suspect.
+func (d *SFTP) clientFor(attempt int) (*sftp.Client, error) {
+	if attempt == 1 {
+		return d.conn(), nil
+	}
+	return d.reconnect()
+}
+
+// retry runs a body-less op under the store retry policy (see retry.go),
+// handing it a freshly resolved client per attempt.
+func (d *SFTP) retry(ctx context.Context, op func(*sftp.Client) error) error {
+	return withRetry(ctx, func(attempt int) error {
+		c, err := d.clientFor(attempt)
+		if err != nil {
+			return err
+		}
+		return op(c)
+	})
+}
+
+// retryBody is retry for a write: the rewinder decides whether the body can be
+// replayed at all, so a retried upload is either byte-complete or never made.
+func (d *SFTP) retryBody(ctx context.Context, r io.Reader, op func(*sftp.Client, io.Reader) error) error {
+	return withRetryBody(ctx, r, func(attempt int, body io.Reader) error {
+		c, err := d.clientFor(attempt)
+		if err != nil {
+			return err
+		}
+		return op(c, body)
+	})
 }
 
 func (d *SFTP) sftpPath(op, key string) string {
@@ -260,77 +364,108 @@ func (d *SFTP) sftpPath(op, key string) string {
 	return full
 }
 
-func (d *SFTP) ensureDir(file string) error {
+func (d *SFTP) ensureDir(c *sftp.Client, file string) error {
 	dir := path.Dir(file)
 	if dir == d.path || dir == "." || dir == "/" {
 		return nil
 	}
-	if err := d.client.MkdirAll(dir); err != nil {
+	if err := c.MkdirAll(dir); err != nil {
 		return fmt.Errorf("creating directory %s: %w", dir, err)
 	}
 	return nil
 }
 
-func (d *SFTP) Get(_ context.Context, key string) (io.ReadCloser, error) {
+func (d *SFTP) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	file := d.sftpPath("read", key)
-	fs, err := d.client.Open(file)
-	if isNotExist(err) {
-		return nil, errMissing("opening file", file)
-	}
+	var rc io.ReadCloser
+	err := d.retry(ctx, func(c *sftp.Client) error {
+		fs, err := c.Open(file)
+		if isNotExist(err) {
+			return errMissing("opening file", file)
+		}
+		if err != nil {
+			return fmt.Errorf("opening file %s: %w", file, err)
+		}
+		rc = fs
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("opening file %s: %w", file, err)
+		return nil, err
 	}
-	return fs, nil
+	// Only OPENING the file is retried. The stream itself is the caller's, and a
+	// failure part-way through it is theirs to see: we cannot re-deliver bytes
+	// they have already consumed.
+	return rc, nil
 }
 
-func (d *SFTP) Put(_ context.Context, key string, r io.Reader, ignoreExisting bool) error {
+func (d *SFTP) Put(ctx context.Context, key string, r io.Reader, ignoreExisting bool) error {
 	file := d.sftpPath("write", key)
-	if err := d.ensureDir(file); err != nil {
-		return err
-	}
-
-	fs, err := d.client.OpenFile(file, writeOpenFlags(ignoreExisting))
-	if err != nil {
-		// pkg/sftp maps EEXIST to the generic SSH_FX_FAILURE (SFTPv3 has no
-		// dedicated "already exists" status), so the raw error doesn't satisfy
-		// errors.Is(_, os.ErrExist) the way S3/HTTP/local do. On an exclusive
-		// create, re-stat: if the target now exists it was a conflict, so surface
-		// the store-lock 409 sentinel instead of a raw failure.
-		if !ignoreExisting {
-			if _, statErr := d.client.Stat(file); statErr == nil {
-				return fmt.Errorf("key %q already exists: %w", file, os.ErrExist)
-			}
+	write := func(c *sftp.Client, body io.Reader) error {
+		if err := d.ensureDir(c, file); err != nil {
+			return err
 		}
-		return fmt.Errorf("opening file %s: %w", file, err)
+
+		fs, err := c.OpenFile(file, writeOpenFlags(ignoreExisting))
+		if err != nil {
+			// pkg/sftp maps EEXIST to the generic SSH_FX_FAILURE (SFTPv3 has no
+			// dedicated "already exists" status), so the raw error doesn't satisfy
+			// errors.Is(_, os.ErrExist) the way S3/HTTP/local do. On an exclusive
+			// create, re-stat: if the target now exists it was a conflict, so surface
+			// the store-lock 409 sentinel instead of a raw failure.
+			if !ignoreExisting {
+				if _, statErr := c.Stat(file); statErr == nil {
+					return fmt.Errorf("key %q already exists: %w", file, os.ErrExist)
+				}
+			}
+			return fmt.Errorf("opening file %s: %w", file, err)
+		}
+
+		if _, err := io.Copy(fs, body); err != nil {
+			fs.Close()
+			return fmt.Errorf("writing file %s: %w", file, err)
+		}
+		if err := fs.Close(); err != nil {
+			return fmt.Errorf("closing file %s: %w", file, err)
+		}
+		return nil
 	}
 
-	if _, err := io.Copy(fs, r); err != nil {
-		fs.Close()
-		return fmt.Errorf("writing file %s: %w", file, err)
+	if !ignoreExisting {
+		// An exclusive create is NEVER retried. This is the `.locked` lease
+		// acquire: a repeat after a create that landed before the connection
+		// broke would find the marker THIS process just wrote, report os.ErrExist
+		// against itself, and wedge the writer until a human passes --force.
+		return write(d.conn(), r)
 	}
-	if err := fs.Close(); err != nil {
-		return fmt.Errorf("closing file %s: %w", file, err)
-	}
-	return nil
+	return d.retryBody(ctx, r, write)
 }
 
 // Version digests the file's bytes, for the reasons Local.Version states — an
 // SFTP server exposes no entity tag either, and its clock is not this host's.
-func (d *SFTP) Version(_ context.Context, key string) (string, error) {
+func (d *SFTP) Version(ctx context.Context, key string) (string, error) {
 	file := d.sftpPath("version", key)
-	fs, err := d.client.Open(file)
-	if os.IsNotExist(err) {
-		return "", nil
-	}
+	var version string
+	err := d.retry(ctx, func(c *sftp.Client) error {
+		fs, err := c.Open(file)
+		if os.IsNotExist(err) {
+			version = ""
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("opening file %s: %w", file, err)
+		}
+		defer fs.Close()
+		h := sha256.New()
+		if _, err := io.Copy(h, fs); err != nil {
+			return fmt.Errorf("reading file %s: %w", file, err)
+		}
+		version = hex.EncodeToString(h.Sum(nil))
+		return nil
+	})
 	if err != nil {
-		return "", fmt.Errorf("opening file %s: %w", file, err)
+		return "", err
 	}
-	defer fs.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, fs); err != nil {
-		return "", fmt.Errorf("reading file %s: %w", file, err)
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return version, nil
 }
 
 // PutIfVersion is best-effort, exactly as Local.PutIfVersion is and with the
@@ -352,44 +487,49 @@ func (d *SFTP) PutIfVersion(ctx context.Context, key string, r io.Reader, meta O
 
 // AtomicPut ignores meta: SFTP files have no stored Content-Type/-Encoding —
 // the static server stamps response headers by extension at request time.
-func (d *SFTP) AtomicPut(_ context.Context, key string, r io.Reader, _ ObjectMeta) error {
+func (d *SFTP) AtomicPut(ctx context.Context, key string, r io.Reader, _ ObjectMeta) error {
 	file := d.sftpPath("atomic write", key)
-	if err := d.ensureDir(file); err != nil {
-		return err
-	}
-	tmpFile := uniqueTempName(file)
+	// Retried as a whole: every attempt draws its OWN uniqueTempName and removes
+	// it on the way out, so a repeat can neither collide with nor inherit the
+	// staging file of the attempt that lost its connection.
+	return d.retryBody(ctx, r, func(c *sftp.Client, body io.Reader) error {
+		if err := d.ensureDir(c, file); err != nil {
+			return err
+		}
+		tmpFile := uniqueTempName(file)
 
-	fs, err := d.client.OpenFile(tmpFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
-	if err != nil {
-		return fmt.Errorf("opening file %s: %w", tmpFile, err)
-	}
-	// Sweep AFTER creating our own staging file, so the sweep can read the
-	// server's clock off it. See sweepTempLeftovers.
-	d.sweepTempLeftovers(path.Dir(file), path.Base(tmpFile))
+		fs, err := c.OpenFile(tmpFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+		if err != nil {
+			return fmt.Errorf("opening file %s: %w", tmpFile, err)
+		}
+		// Sweep AFTER creating our own staging file, so the sweep can read the
+		// server's clock off it. See sweepTempLeftovers.
+		d.sweepTempLeftovers(c, path.Dir(file), path.Base(tmpFile))
 
-	if _, err := io.Copy(fs, r); err != nil {
-		fs.Close()
-		_ = d.client.Remove(tmpFile)
-		return fmt.Errorf("writing file %s: %w", tmpFile, err)
-	}
-	// fsync before the rename, like the Local backend: a crash must not publish
-	// truncated bytes under a name that is immutable and cached forever. Sync
-	// needs the fsync@openssh.com extension, so a server without it fails here —
-	// best-effort by design, since making it fatal would break every write to
-	// such a server for a durability guarantee it simply cannot offer.
-	if err := fs.Sync(); err != nil {
-		slog.Debug("sftp fsync unavailable, writing without it", "file", tmpFile, "err", err)
-	}
-	if err := fs.Close(); err != nil {
-		_ = d.client.Remove(tmpFile)
-		return fmt.Errorf("closing file %s: %w", tmpFile, err)
-	}
+		if _, err := io.Copy(fs, body); err != nil {
+			fs.Close()
+			_ = c.Remove(tmpFile)
+			return fmt.Errorf("writing file %s: %w", tmpFile, err)
+		}
+		// fsync before the rename, like the Local backend: a crash must not publish
+		// truncated bytes under a name that is immutable and cached forever. Sync
+		// needs the fsync@openssh.com extension, so a server without it fails here —
+		// best-effort by design, since making it fatal would break every write to
+		// such a server for a durability guarantee it simply cannot offer.
+		if err := fs.Sync(); err != nil {
+			slog.Debug("sftp fsync unavailable, writing without it", "file", tmpFile, "err", err)
+		}
+		if err := fs.Close(); err != nil {
+			_ = c.Remove(tmpFile)
+			return fmt.Errorf("closing file %s: %w", tmpFile, err)
+		}
 
-	if err := d.client.PosixRename(tmpFile, file); err != nil {
-		_ = d.client.Remove(tmpFile)
-		return fmt.Errorf("renaming %s to %s: %w", tmpFile, file, err)
-	}
-	return nil
+		if err := c.PosixRename(tmpFile, file); err != nil {
+			_ = c.Remove(tmpFile)
+			return fmt.Errorf("renaming %s to %s: %w", tmpFile, file, err)
+		}
+		return nil
+	})
 }
 
 // sweepTempLeftovers is the Local backend's sweep over SFTP: it removes
@@ -401,8 +541,8 @@ func (d *SFTP) AtomicPut(_ context.Context, key string, r io.Reader, _ ObjectMet
 // never compares a remote mtime against this host's clock. Best-effort and
 // silent on errors — janitor work must never fail the AtomicPut that
 // triggered it.
-func (d *SFTP) sweepTempLeftovers(dir, ownTemp string) {
-	entries, err := d.client.ReadDir(dir)
+func (d *SFTP) sweepTempLeftovers(c *sftp.Client, dir, ownTemp string) {
+	entries, err := c.ReadDir(dir)
 	if err != nil {
 		return
 	}
@@ -421,7 +561,7 @@ func (d *SFTP) sweepTempLeftovers(dir, ownTemp string) {
 			continue
 		}
 		file := path.Join(dir, fi.Name())
-		if err := d.client.Remove(file); err == nil {
+		if err := c.Remove(file); err == nil {
 			slog.Info("removed stale atomic-write leftover", "file", file)
 		}
 	}
@@ -429,50 +569,69 @@ func (d *SFTP) sweepTempLeftovers(dir, ownTemp string) {
 
 // Stat returns the remote file's size; a missing key is (0, nil) per the
 // Backend contract.
-func (d *SFTP) Stat(_ context.Context, key string) (int64, error) {
+func (d *SFTP) Stat(ctx context.Context, key string) (int64, error) {
 	file := d.sftpPath("stat", key)
-	fi, err := d.client.Stat(file)
-	if isNotExist(err) {
-		slog.Debug("db not found", "key", file)
-		return 0, errMissing("stat file", file)
-	}
+	var size int64
+	err := d.retry(ctx, func(c *sftp.Client) error {
+		fi, err := c.Stat(file)
+		if isNotExist(err) {
+			slog.Debug("db not found", "key", file)
+			return errMissing("stat file", file)
+		}
+		if err != nil {
+			return fmt.Errorf("stat file %s: %w", file, err)
+		}
+		size = fi.Size()
+		return nil
+	})
 	if err != nil {
-		return 0, fmt.Errorf("stat file %s: %w", file, err)
+		return 0, err
 	}
-	return fi.Size(), nil
+	return size, nil
 }
 
-func (d *SFTP) Rm(_ context.Context, key string) error {
+func (d *SFTP) Rm(ctx context.Context, key string) error {
 	file := d.sftpPath("delete", key)
-	return rmErr(d.client.Remove(file), file)
+	return d.retry(ctx, func(c *sftp.Client) error {
+		return rmErr(c.Remove(file), file)
+	})
 }
 
 // List walks the prefix's directory over SFTP, mirroring Local.List exactly:
 // regular files only, a prefix naming no directory is an empty set with a nil
 // error, an entry that vanished mid-walk is skipped, and the result is sorted
 // into the contract's lexicographic order.
-func (d *SFTP) List(_ context.Context, prefix string) ([]string, error) {
+func (d *SFTP) List(ctx context.Context, prefix string) ([]string, error) {
 	root := path.Join(d.path, listDir(prefix))
 	slog.Debug("db list", "url", "sftp://"+path.Join(d.host, root), "prefix", prefix)
 
 	var out []string
-	w := d.client.Walk(root)
-	for w.Step() {
-		if err := w.Err(); err != nil {
-			if isNotExist(err) {
+	err := d.retry(ctx, func(c *sftp.Client) error {
+		// A retry re-walks from scratch: the partial result of a walk the
+		// connection cut short is never carried over.
+		out = nil
+		w := c.Walk(root)
+		for w.Step() {
+			if err := w.Err(); err != nil {
+				if isNotExist(err) {
+					continue
+				}
+				return fmt.Errorf("listing %s: %w", root, err)
+			}
+			if !w.Stat().Mode().IsRegular() {
 				continue
 			}
-			return nil, fmt.Errorf("listing %s: %w", root, err)
+			// The walker reports server-absolute paths under d.path; strip the base
+			// (and any separator it leaves) to get back to a store-relative key.
+			key := strings.TrimPrefix(strings.TrimPrefix(w.Path(), d.path), "/")
+			if strings.HasPrefix(key, prefix) {
+				out = append(out, key)
+			}
 		}
-		if !w.Stat().Mode().IsRegular() {
-			continue
-		}
-		// The walker reports server-absolute paths under d.path; strip the base
-		// (and any separator it leaves) to get back to a store-relative key.
-		key := strings.TrimPrefix(strings.TrimPrefix(w.Path(), d.path), "/")
-		if strings.HasPrefix(key, prefix) {
-			out = append(out, key)
-		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	slices.Sort(out)
 	return out, nil
