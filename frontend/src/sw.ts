@@ -41,7 +41,7 @@
 // off the network, exactly as before. Self-contained: no SRR_CDN_URL, so it works
 // under any cdn-url prefix.
 import { type IDBWire, type IManifestWire } from "./js/format.gen"
-import { bootWarmNames, manifestNames, type StoreNames } from "./js/names"
+import { bootWarmNames, listedNames, manifestNames, type StoreNames } from "./js/names"
 import { parsePackName, RE_ASSET, RE_DB, RE_SHELL_HASHED } from "./js/sw-grammar"
 
 const sw = self as unknown as ServiceWorkerGlobalScope
@@ -558,15 +558,11 @@ async function readAdoptable(dbRes: Response, root: Root): Promise<Adoptable | n
    if (man.m !== m) throw new Error(`manifest ${m}: names itself ${man.m}`)
 
    const names = manifestNames(man)
-   const listed = [
-      ...names.idx.keys,
-      ...names.data.keys,
-      ...names.meta.keys,
-      ...names.deltas,
-      ...(names.hsum ? [names.hsum.key] : []),
-      ...(names.ssum ? [names.ssum.key] : []),
-      `manifest/${m}.gz`,
-   ].filter(Boolean)
+   // Every name the generation lists, derived from the names map rather than
+   // spelled out per series (see names.ts listedNames): this is the keep-set
+   // the eviction below subtracts from, so a series missing here is a series
+   // whose objects get thrown away on every adoption.
+   const listed = [...listedNames(man), `manifest/${m}.gz`].filter(Boolean)
    return { m, names, listed }
 }
 

@@ -148,6 +148,44 @@ export function bootWarmNames(names: StoreNames): string[] {
    return out
 }
 
+// EVERY object a manifest lists, whatever series it belongs to — the reader's
+// mirror of the store's ONE GC rule ("delete what the last K manifests do not
+// name"), which is what the service worker's eviction has to compare against.
+//
+// Derived by WALKING the names map rather than naming series, because the
+// alternative is a hard-coded list that silently evicts each new series until
+// someone remembers to extend it — exactly what happened when the `watch`
+// series (FMT5) landed against a keep-set spelling out idx/data/meta/deltas/
+// hsum/ssum. §4.6 says series live in a map and nothing may assume there are
+// three of them; a keep-set is the one place where being wrong is invisible
+// until a cache goes cold, so it derives.
+//
+// Over-listing is SAFE and under-listing is not: this set decides what survives
+// eviction, so an entry for an object the reader never fetches (the
+// backend-only `seen`/`aref` sidecars) costs nothing, while a missing one
+// throws away bytes the store still serves. Unrecognized shapes are skipped,
+// and `next` — a counter map, not names — is skipped by shape for free.
+export function listedNames(man: IManifestWire): string[] {
+   const raw = man.names
+   if (!raw || typeof raw !== "object") throw new Error(`manifest ${man.m}: no names object`)
+   const out: string[] = []
+   for (const [name, row] of Object.entries(raw)) {
+      if (!row || typeof row !== "object") continue
+      const r = row as Record<string, unknown>
+      // A singleton names its OWN series (`s`) — a delta chain when `r` is a
+      // stem array, a stem/summary ref when `stem` is a number.
+      if (typeof r["s"] === "string") {
+         if (Array.isArray(r["r"])) for (const stem of r["r"] as number[]) out.push(`${r["s"] as string}/${stem}.gz`)
+         else if (typeof r["stem"] === "number") out.push(stemKey(row as IStemRefWire))
+         continue
+      }
+      // Otherwise a positional series row, keyed by its own directory. Empty
+      // slots below the base are placeholders, never keys.
+      if (Array.isArray(r["r"])) for (const k of expandSeries(row as ISeriesNamesWire, name).keys) if (k) out.push(k)
+   }
+   return out
+}
+
 // The counters a legacy (pre-cutover) root derives its names from.
 export interface LegacyRoot {
    total_art: number

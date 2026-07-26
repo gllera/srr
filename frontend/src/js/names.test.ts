@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest"
 
-import { bootWarmNames, expandSeries, keyAt, legacyNames, manifestNames, type IManifestWire } from "./names"
+import {
+   bootWarmNames,
+   expandSeries,
+   keyAt,
+   legacyNames,
+   listedNames,
+   manifestNames,
+   type IManifestWire,
+} from "./names"
 
 // The name resolver is the seam the manifest indirection hangs on
 // (docs/MANIFEST-SPEC.md §4.5): both root shapes must resolve to the SAME
@@ -126,6 +134,42 @@ describe("manifestNames", () => {
 // lets a newer root become the cached one. Getting it wrong is not a slow boot
 // but a BROKEN one: a cached root whose generation's objects were never fetched
 // cannot be served offline at all. So the membership is pinned here.
+describe("listedNames — the service worker's keep-set", () => {
+   // The regression this exists for: the keep-set used to spell out
+   // idx/data/meta/deltas/hsum/ssum, so the `watch` series (FMT5) would have
+   // been evicted on every manifest adoption. Deriving it from the map means a
+   // series nobody has written yet is still kept.
+   it("lists every object of every series, including ones it has never heard of", () => {
+      const keys = listedNames(
+         manifest({
+            idx: { b: 0, r: [[0, 2]], l: 1 },
+            data: { b: 0, r: [[5, 1]], l: 0 },
+            watch: { b: 0, r: [[9, 2]], l: 1 },
+            deltas: { s: "data", r: [11, 12] },
+            hsum: { s: "idx", stem: 88, covers: 2 },
+            seen: { s: "seen", stem: 441 },
+            next: { idx: 3, data: 13 },
+         }),
+      )
+      expect(keys).toEqual(expect.arrayContaining(["idx/0.gz", "idx/1.gz", "data/5.gz", "watch/9.gz", "watch/10.gz"]))
+      // Singletons resolve against their OWN series, and the delta chain expands.
+      expect(keys).toEqual(expect.arrayContaining(["data/11.gz", "data/12.gz", "idx/88.gz", "seen/441.gz"]))
+      // `next` is a counter map, not names — it must contribute no keys.
+      expect(keys.some((k) => k.startsWith("next/"))).toBe(false)
+   })
+
+   it("skips positions below a series base rather than emitting empty keys", () => {
+      const keys = listedNames(manifest({ meta: { b: 3, r: [[20, 1]], l: 3 } }))
+      expect(keys).toEqual(["meta/20.gz"])
+   })
+
+   it("throws when the manifest carries no names object", () => {
+      expect(() => listedNames({ ...manifest({}), names: undefined as unknown as Record<string, unknown> })).toThrow(
+         /no names object/,
+      )
+   })
+})
+
 describe("bootWarmNames", () => {
    const names = (over: Record<string, unknown> = {}) =>
       manifestNames(
