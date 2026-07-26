@@ -540,3 +540,61 @@ audit, though at 48 KB it is far smaller than the meta tail.
   `last_modified` were already moved by this pass; `bg` moved too, later, by the
   v2 ping/pong relocation above. `wm` is deliberately excluded from this list —
   it's reader-displayed and stays in db.gz by design, not an oversight.)
+
+---
+
+## 11. `bg` is NOT subsumed by the pool (FMT3, verified 2026-07-26)
+
+Once `bg` moved into this same sidecar with the same atomicity (v2 above, then
+the manifest cutover), the obvious next question was whether the pool covers
+`bg`'s whole role — "verify the dateless-guid window first, then delete `bg` and
+its 1024-cap machinery". **It does not.** Verdict recorded here so it is not
+re-litigated; the cases are pinned by tests in `seen_fetch_test.go`.
+
+The two memories share a file but not a shape:
+
+| | `bg` (BoundaryGUIDs) | the pool |
+|---|---|---|
+| what it remembers | the **last non-empty response's window**, verbatim | every `(feed, guid\|title)` **seen within `H` days** |
+| ageing | **none** — a snapshot, re-persisted unchanged forever | `evict` drops `today − when > H`, **every cycle** |
+| per-feed gate | none | `DedupDays == -1` disables it entirely |
+| bound | `maxBoundaryGUIDs` 1024, over-cap items **skipped from ingestion** | `seenFeedCap` 4096, over-cap entries **silently evicted** |
+
+Three concrete gaps, any one of which blocks the deletion:
+
+1. **The dormancy window (the "dateless-guid window" the finding named).** A 304
+   — or a backoff-thinned skip — collects no stamps (`fetchURL` resets
+   `c.seenStamps` and returns at the `NotModified` branch), while `evict` keeps
+   sweeping the whole pool: `cmd_fetch.go` says so outright ("an unfetched feed's
+   entries are retained (they age out over the horizon), while stamps come only
+   from feeds fetched this cycle"). A feed quiet for longer than `H` therefore
+   has **zero** pool entries but an intact `bg`. When it publishes again, its old
+   window comes back in the same response. Dated items below `wm` are still
+   floored — but items **at** `wm`, and every item of a **dateless** feed (no
+   pubDate ⇒ `wm` stays 0 ⇒ the `pub < wm` gate can never fire), are re-ingested.
+   For a dateless feed that is the *entire window*, duplicated. `H = 30` days is
+   well inside normal blog cadence, so this is routine, not exotic.
+2. **The per-feed off switch.** `poolOn := c.dedupDays(run.dedupDays) > 0`, and
+   `seenBefore` opens with `if !poolOn { return false }` — plus `evict` actively
+   drops a disabled feed's residual entries. For `dd = -1` (documented as "the
+   off switch") `bg` is the only GUID memory in the system, and on a dateless
+   feed the only dedup of any kind. Deleting `bg` silently redefines `dd = -1`
+   from "opt out of the persistent pool" to "opt out of dedup".
+3. **The flood cap's tie-break.** `evict` keeps the newest `seenFeedCap` by
+   `when`, breaking ties on the raw map key. Every current-window item is
+   re-stamped with today's day, so a feed whose per-cycle window exceeds 4096
+   entries has *currently present* items evicted by hash order. `bg`'s cap is the
+   opposite discipline: it retains already-stored GUIDs first and **skips
+   over-cap items from ingestion** rather than ingesting-and-forgetting them.
+
+The finding's second suspected obstacle — that `bg` also feeds the
+stale-response guard — is **not** true, and is worth narrowing rather than
+carrying forward: the guard's inputs are `Watermark`, `maxSeen` and
+`hasDateless`, all gathered over first occurrences *before* the
+`priorBoundary`/pool test. `bg` is the guard's **purpose** (rebuilding the
+snapshot from a stale copy evicts the watermark GUIDs), never its input.
+
+Nothing was deleted and nothing was narrowed. A narrowing that *looks* safe —
+"skip `bg` maintenance for feeds the pool provably covers" — isn't: the coverage
+predicate would have to be "this feed will be fetched with a 200 at least once
+every `H` days", which is a property of the publisher, not of the store.
