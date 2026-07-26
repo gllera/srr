@@ -418,6 +418,43 @@ describe("persistence", () => {
       expect(back.hasAttribute("controls")).toBe(true)
    })
 
+   it("a SYNTHETIC restore also keeps the sanitizer's attributes on rehome", () => {
+      // The twin of the case above, on the path that still builds an element:
+      // the persisted episode's article is NOT the one on screen, so restore
+      // constructs a stand-in with none of fmt.ts's forced attributes. Walking
+      // to that article later runs rehomeInto, whose replaceWith installs the
+      // stand-in permanently — so the attributes have to be carried across.
+      const OTHER = 99 // != MOUNTED.chron, so the claimed-element path is not taken
+      localStorage.setItem(
+         "srr-player",
+         JSON.stringify({
+            chron: OTHER,
+            index: 0,
+            time: 5,
+            rate: 1,
+            src: "assets/aa/0.webm",
+            kind: "video",
+            title: "Episode 99",
+            feedId: 7,
+         }),
+      )
+      player.restorePersisted()
+      expect(player.isActive()).toBe(true)
+      // It really is synthetic: held by the bar, not by any article.
+      expect(media().querySelector("video")).toBeTruthy()
+
+      // Now walk to the owning article, freshly rendered by the sanitizer.
+      player.noteMounted({ ...MOUNTED, chron: OTHER, title: "Episode 99" })
+      content().innerHTML = `<video src="assets/aa/0.webm" controls playsinline poster="assets/aa/p.jpg"></video>`
+      player.rehomeInto("0", OTHER)
+
+      const back = content().querySelector("video") as HTMLVideoElement
+      expect(content().querySelectorAll("video").length).toBe(1)
+      expect(back.hasAttribute("playsinline")).toBe(true)
+      expect(back.getAttribute("poster")).toBe("assets/aa/p.jpg")
+      expect(back.hasAttribute("controls")).toBe(true)
+   })
+
    it("restores a video as a <video>", () => {
       localStorage.setItem(
          "srr-player",
