@@ -386,10 +386,23 @@ export function rehomeInto(mid: string, chron: number): void {
    // changed pipeline). Keep playing in the bar rather than dropping the episode.
    if (!fresh) return
    // replaceWith moves the live element in and takes the fresh one out; the live
-   // element is in the document throughout, so playback continues.
+   // element is in the document throughout, so playback continues. It stays this
+   // way round even though `fresh` is the authoritative sanitized node: by now
+   // the live element may be PLAYING (the bar has a play button, and restore
+   // hands the episode back paused), and handing playback to `fresh` would
+   // reintroduce the re-buffer gap this module exists to avoid.
    fresh.replaceWith(active.media)
-   // fmt.ts forces `controls` on in-content audio (a control-less feed <audio>
-   // renders no player at all), so put back what adoptFromContent took away.
+   // So carry the sanitizer's presentation attributes across instead. On the
+   // claimed-element path this is a no-op — same node, same attributes — but the
+   // restore path's element was built by us and has none of them: fmt.ts forces
+   // `controls` on in-content audio (a control-less feed <audio> renders no
+   // player at all) and `playsinline` on non-autoplay video, without which iOS
+   // takes a returning episode fullscreen, plus whatever `poster` the feed
+   // carried. Only attributes the live element LACKS are copied, which is what
+   // keeps `src` — already set, and re-setting it would restart the load.
+   for (const a of fresh.attributes) {
+      if (!active.media.hasAttribute(a.name)) active.media.setAttribute(a.name, a.value)
+   }
    active.media.setAttribute("controls", "")
    watch(active.media)
    syncBar()
