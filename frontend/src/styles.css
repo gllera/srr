@@ -1582,13 +1582,68 @@ body:not(.srr-view-list) .srr-open-reader {
    border-bottom: 1px solid var(--faint);
    text-decoration: none;
    color: var(--fg);
+   /* Containing block for the swipe glyph below — the row box never moves, so
+      the glyph stays put while the content slides off it. */
+   position: relative;
    /* Offscreen rows skip layout/paint — virtualization without manual windowing.
-      The intrinsic-size hint keeps the scrollbar honest before they render. */
+      The intrinsic-size hint keeps the scrollbar honest before they render.
+      content-visibility also applies PAINT containment, which is what clips the
+      swiped content at the row's own edges instead of spilling over neighbours. */
    content-visibility: auto;
    contain-intrinsic-size: auto 4rem;
    &:hover {
       background: var(--hover);
    }
+}
+/* Row swipe actions (gestures.ts setRowSwipe, wired by list.setup — RDR14): a
+   horizontal drag on a row slides its CONTENT under the finger and reveals what
+   releasing would do — → toggles ★ Saved, ← toggles read.
+
+   The content translates, never the row: the row keeps the layout box whose real
+   height list.ts pinned as its contain-intrinsic-size (a swipe must not be able
+   to shift the scroll), and `transform` on the row itself stays free for the
+   keyboard edge bump. Both selectors are gated on [data-swipe] — only ever set on
+   the row under the finger — so a row at rest (and the picker's rows, which share
+   these class names) carries no transform at all, and therefore no extra
+   containing block or stacking context. The retract is instant on purpose: the
+   attribute goes with the release, and the row's new state (greyed / star filled)
+   is the confirmation. */
+.srr-row[data-swipe] .srr-row-body,
+.srr-row[data-swipe] .srr-row-star {
+   transform: translateX(var(--swipe, 0));
+}
+/* The glyph the swipe uncovers, at the edge the content came FROM. Content is
+   the outcome (list.ts picks ✓/↺/★/☆), so the row says what it will do rather
+   than what it is. Quiet until armed — past the trigger it takes the accent and
+   firms up, which is the whole "release now" signal. */
+.srr-row[data-swipe]::after {
+   content: attr(data-swipe-icon);
+   position: absolute;
+   top: 0;
+   bottom: 0;
+   display: flex;
+   width: 3.5rem;
+   align-items: center;
+   justify-content: center;
+   font-size: 1.05rem;
+   line-height: 1;
+   color: var(--muted);
+   opacity: 0.55;
+   /* It reports a gesture; it must never intercept one (the .srr-pull rule). */
+   pointer-events: none;
+}
+.srr-row[data-swipe="read"]::after {
+   right: 0;
+}
+.srr-row[data-swipe="save"]::after {
+   left: 0;
+}
+.srr-row[data-swipe].srr-row-armed::after {
+   color: var(--accent);
+   opacity: 1;
+}
+.srr-row[data-swipe].srr-row-armed {
+   background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 /* Progressive render: a row whose meta card hasn't arrived yet. Shimmer bars
    stand in for source/age/title; the row reserves ~a 2-line height so the fill
