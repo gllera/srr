@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/binary"
 	"fmt"
 	"sort"
 )
@@ -74,44 +73,66 @@ func feedSlots(core *DBCore) int {
 // tailCovered), not in any data pack.
 const deltaPackID = -1
 
-// loadDeltas fetches and parses the live delta chain — the segments the
-// manifest lists, oldest first — into one chron-ordered slice, the authority
-// for every chron at/above tailCovered. Chain CONTIGUITY was an arithmetic
-// invariant only while the names were derived from a generation range; the
-// listed chain IS the chain now (docs/MANIFEST-SPEC.md §13, DELTA-TAIL I1
-// retired as arithmetic, preserved as content). What survives verbatim is the
-// accounting cross-check: each segment non-empty, and the total line count
-// equals DeltaArticles (M6). The one delta loader shared by the writer
-// (walkArticles), inspect, and art ls.
-func loadDeltas(fetch keyGetter, core *DBCore) ([]ArticleData, error) {
+// parseDeltaChain is THE delta-chain reader: it fetches the segments the
+// manifest lists, oldest first, and returns them as one chron-ordered chain —
+// both the parsed articles and each entry's verbatim JSONL line bytes, since
+// consolidation re-emits those bytes rather than re-encoding them. It is the
+// authority for every chron at/above tailCovered.
+//
+// Chain CONTIGUITY was an arithmetic invariant only while the names were
+// derived from a generation range; the listed chain IS the chain now
+// (docs/MANIFEST-SPEC.md §13, DELTA-TAIL I1 retired as arithmetic, preserved as
+// content). What survives verbatim is the accounting cross-check: each segment
+// non-empty, and the total line count equals DeltaArticles (M6).
+//
+// Both entry points are thin wrappers over this body: the read side's
+// loadDeltas (inspect, art ls, loadIdxPacks) and the writer's memoizing
+// DB.loadDeltaChain (db_pack.go). They used to be near-identical copies of it —
+// two places to state what a valid chain is, and so two places that could
+// disagree about one.
+func parseDeltaChain(fetch keyGetter, core *DBCore) (*deltaChain, error) {
 	keys := core.Names.deltaKeys()
 	if core.DeltaArticles < 0 || core.DeltaArticles > core.TotalArticles ||
 		(len(keys) == 0) != (core.DeltaArticles == 0) {
 		return nil, fmt.Errorf("inconsistent delta chain: %d segment(s), na=%d, total_art=%d",
 			len(keys), core.DeltaArticles, core.TotalArticles)
 	}
+	chain := &deltaChain{}
 	if len(keys) == 0 {
-		return nil, nil
+		return chain, nil
 	}
-	out := make([]ArticleData, 0, core.DeltaArticles)
+	chain.Arts = make([]ArticleData, 0, core.DeltaArticles)
+	chain.Lines = make([][]byte, 0, core.DeltaArticles)
 	for _, key := range keys {
 		buf, err := fetch(key)
 		if err != nil {
 			return nil, fmt.Errorf("fetch %s: %w", key, err)
 		}
-		entries, err := parseDataPack(buf)
+		lines, entries, err := splitDataPack(buf)
 		if err != nil {
 			return nil, fmt.Errorf("parse %s: %w", key, err)
 		}
 		if len(entries) == 0 {
 			return nil, fmt.Errorf("%s: empty delta segment", key)
 		}
-		out = append(out, entries...)
+		chain.Arts = append(chain.Arts, entries...)
+		chain.Lines = append(chain.Lines, lines...)
 	}
-	if len(out) != core.DeltaArticles {
-		return nil, fmt.Errorf("delta chain holds %d articles but the store says na=%d", len(out), core.DeltaArticles)
+	if len(chain.Arts) != core.DeltaArticles {
+		return nil, fmt.Errorf("delta chain holds %d articles but the store says na=%d",
+			len(chain.Arts), core.DeltaArticles)
 	}
-	return out, nil
+	return chain, nil
+}
+
+// loadDeltas is the read side's view of the chain: the parsed articles alone.
+// The one delta loader inspect and art ls go through.
+func loadDeltas(fetch keyGetter, core *DBCore) ([]ArticleData, error) {
+	chain, err := parseDeltaChain(fetch, core)
+	if err != nil {
+		return nil, err
+	}
+	return chain.Arts, nil
 }
 
 // loadLatestIdx parses the physical tail idx pack (idx/L<tailGen>, covering
@@ -200,39 +221,30 @@ func loadIdxPacks(fetch keyGetter, core *DBCore) ([]*idxPack, []ArticleData, err
 }
 
 // parseIdxPack is the byte-for-byte mirror of
-// frontend/src/js/idx.ts makeIdxPack().parse().
+// frontend/src/js/idx.ts makeIdxPack().parse(). The BYTES are decoded by the
+// generated idxDecode (idx_layout.gen.go, emitted from the one layout
+// declaration in idx_layout.go that also emits the TS reader's decoders), so
+// what is mirrored here is only the SEMANTICS on top of them: the store
+// high-water sizing of ownFeedCounts and the chron→data-pack bounds walk.
 func parseIdxPack(buf []byte, packIndex, packSize, slots int) (*idxPack, error) {
-	if len(buf) < idxHeaderPrefix {
-		return nil, fmt.Errorf("short header: %d < %d", len(buf), idxHeaderPrefix)
+	raw, err := idxDecode(buf, packSize)
+	if err != nil {
+		return nil, err
 	}
-	numSlots := int(binary.LittleEndian.Uint32(buf[idxStateSize:]))
-	headerSize := idxHeaderPrefix + numSlots*4
-	entriesEnd := headerSize + packSize*idxEntrySize
-	if len(buf) < entriesEnd {
-		return nil, fmt.Errorf("short body: have %d, want >= %d (header+%d entries)", len(buf), entriesEnd, packSize)
-	}
-	if (len(buf)-entriesEnd)%idxBoundarySize != 0 {
-		return nil, fmt.Errorf("idx footer not whole u16 boundaries: %d trailing bytes", len(buf)-entriesEnd)
-	}
-
 	pack := &idxPack{
 		packIndex:     packIndex,
 		packSize:      packSize,
-		feedIDs:       make([]uint16, packSize),
-		packIDBase:    binary.LittleEndian.Uint32(buf[0:]),
-		packOffBase:   binary.LittleEndian.Uint32(buf[4:]),
-		numSlots:      numSlots,
-		feedCounts:    make([]uint32, numSlots),
+		feedIDs:       raw.FeedIDs,
+		packIDBase:    raw.PackIDBase,
+		packOffBase:   raw.PackOffBase,
+		numSlots:      raw.NumSlots,
+		feedCounts:    raw.FeedCounts,
 		ownFeedCounts: make([]uint32, slots),
-	}
-	for s := range numSlots {
-		pack.feedCounts[s] = binary.LittleEndian.Uint32(buf[idxHeaderPrefix+s*4:])
 	}
 
 	// Bounds come from the header bases + the boundary footer (the u16 LE local
 	// indices at which the data packId advances), reconstructed with the same
 	// push condition the old per-entry delta_pack_id decode used.
-	boundaries := parseIdxFooter(buf[entriesEnd:])
 	packID := int(pack.packIDBase)
 	packOff := int(pack.packOffBase)
 	baseChron := packIndex * idxPackSize
@@ -240,14 +252,11 @@ func parseIdxPack(buf []byte, packIndex, packSize, slots int) (*idxPack, error) 
 		pack.bounds = append(pack.bounds, idxBound{packID, baseChron - packOff})
 	}
 	bi := 0
-	for i := range packSize {
-		off := headerSize + i*idxEntrySize
-		sub := uint16(buf[off]) | uint16(buf[off+1])<<8
-		pack.feedIDs[i] = sub
+	for i, sub := range raw.FeedIDs {
 		if int(sub) < slots {
 			pack.ownFeedCounts[sub]++
 		}
-		if bi < len(boundaries) && boundaries[bi] == i {
+		if bi < len(raw.Boundaries) && raw.Boundaries[bi] == i {
 			packID++
 			bi++
 		}

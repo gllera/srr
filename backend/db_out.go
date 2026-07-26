@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -602,14 +601,13 @@ func (o *DB) outPackSkipper(ctx context.Context, include map[int]bool) func(p in
 	}
 	off := 0
 	for k := range n {
-		if off+idxHeaderPrefix > len(buf) {
+		// Stride = the header's own declared length, via the generated geometry
+		// (idx_layout.gen.go) the packs were written with.
+		span, err := idxHeaderSpan(buf[off:])
+		if err != nil {
 			return never
 		}
-		numSlots := int(binary.LittleEndian.Uint32(buf[off+idxStateSize:]))
-		end := off + idxHeaderPrefix + numSlots*4
-		if end > len(buf) {
-			return never
-		}
+		end := off + span
 		// Header-only decode (packSize 0 ⇒ no entries), so the ownFeedCounts
 		// slot width is irrelevant.
 		hdr, err := parseIdxPack(buf[off:end], k, 0, 0)

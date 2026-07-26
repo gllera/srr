@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -402,18 +401,16 @@ func (o *InspectCmd) checkIdxSummary(fetch keyGetter, core *DBCore, packs []*idx
 	issues := 0
 	off := 0
 	for k := range core.hdrPacks() {
-		if off+idxHeaderPrefix > len(buf) {
-			fmt.Fprintf(o.w(), "[idx-summary] %s: truncated at chunk %d/%d (offset %d of %d)\n",
-				key, k, core.hdrPacks(), off, len(buf))
+		// The chunk stride is the header's own declared length — generated
+		// geometry (idx_layout.gen.go), so the walk cannot drift from the
+		// headers SyncIdxSummary concatenated.
+		span, err := idxHeaderSpan(buf[off:])
+		if err != nil {
+			fmt.Fprintf(o.w(), "[idx-summary] %s: truncated at chunk %d/%d (offset %d of %d): %v\n",
+				key, k, core.hdrPacks(), off, len(buf), err)
 			return issues + 1
 		}
-		numSlots := int(binary.LittleEndian.Uint32(buf[off+idxStateSize:]))
-		end := off + idxHeaderPrefix + numSlots*4
-		if end > len(buf) {
-			fmt.Fprintf(o.w(), "[idx-summary] %s: chunk %d claims %d slots running past the buffer (%d > %d)\n",
-				key, k, numSlots, end, len(buf))
-			return issues + 1
-		}
+		end := off + span
 		// Header-only decode (packSize 0 ⇒ no entries parsed), so the
 		// ownFeedCounts slot width is irrelevant here.
 		hdr, err := parseIdxPack(buf[off:end], k, 0, 0)
