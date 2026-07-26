@@ -12,14 +12,26 @@
 // surface underneath, then the picker re-renders its own rows). The remaining
 // settings live on the now-viewing readout's anchored menu (app.ts
 // openSettingsMenu), which borrows renderStatus() below for its status footer.
+//
+// RDR9 ("picker ergonomics at scale") adds three things to that panel, all of
+// them local to this module: a type-to-filter row search in the header, a
+// remembered scroll offset across opens, and a "★ Favorites" lane above the tag
+// groups fed by a third header row-mode.
 import { VERSION } from "./base"
 import * as data from "./data"
 import { wrapTabFocus } from "./dropdown"
 import { countBadge, formatBytes, formatDate, isStale, srcColorIndex, timeAgoProse } from "./fmt"
-import { seenKey } from "./keys"
+import { favoritesKey, seenKey } from "./keys"
 import { mountLabel } from "./mounts"
 import * as nav from "./nav"
 import * as refresh from "./refresh"
+// The row search folds through search.ts's `fold` — the SAME normalizer the
+// article index uses (NFD, marks stripped, per-rune lowercase, non-alphanumerics
+// as separators, mirrored byte-for-byte with the Go writer). Typing "ambito"
+// finds "Ámbito" in the picker exactly as it does in search, and there is one
+// folding rule in the reader rather than a hand-synced second copy — the same
+// argument urlish.ts makes for its URL regexes.
+import { fold } from "./search"
 import * as sync from "./sync"
 import { URL_DENY } from "./urlish"
 
@@ -44,12 +56,40 @@ let filterBox: HTMLElement
 // The header's "Show read" toggle button — aria-pressed tracks the mode (pressed
 // = read articles shown = unread-only OFF), synced on every render().
 let showReadBtn: HTMLElement
-// The header's "Info" stats toggle — while pressed (statsMode), tapping a filter
-// row opens its detail card instead of filtering. Ephemeral: reset on every
-// open(), so the overlay always comes up in its primary picking mode.
+// The header's "Info" stats toggle — while pressed, tapping a filter row opens
+// its detail card instead of filtering.
 let statsBtn: HTMLElement
-let statsMode = false
+// The header's "★" favorites toggle (RDR9) — while pressed, tapping a FEED row
+// marks/unmarks it instead of filtering.
+let favBtn: HTMLElement
+// What a row tap MEANS. One variable, not two booleans, because the modes are
+// mutually exclusive by construction: entering one leaves the other, and a tap
+// can never mean two things at once. Ephemeral — reset to "pick" on every
+// open(), so the overlay always comes up in its primary picking mode.
+type RowMode = "pick" | "info" | "fav"
+let rowMode: RowMode = "pick"
 let hooks: PickerHooks
+// The type-to-filter row search (RDR9).
+let searchInput: HTMLInputElement
+let searchClearBtn: HTMLElement
+// The live query, already trimmed. Applied as a VISIBILITY pass over the rows
+// that are already in the DOM (applyQuery) rather than a re-render: rebuilding
+// per keystroke would restart fillUnread and drop every badge that had landed.
+let query = ""
+// Where the panel was scrolled when the query started, restored when it clears —
+// narrowing parks you at the top, un-narrowing puts you back.
+let preQueryTop = 0
+// The "no rows match" note, created with the rows so applyQuery only toggles it.
+let emptyNote: HTMLElement | null = null
+// Scroll memory across opens (RDR9). Module state, deliberately NOT
+// localStorage: it is a within-session convenience ("I was halfway down the
+// feed list a moment ago"), and after a reload the row set is rebuilt from a
+// store that may have changed underneath, so a persisted offset would land
+// somewhere arbitrary. `sig` is the row set the offset was measured against —
+// a different one lands at the top, which is the old behaviour.
+let scrollMemo: { sig: string; top: number } | null = null
+// Signature of the rows currently rendered (see rowSignature).
+let rowSig = ""
 // Focus restore target across open/close — the readout button that opened the
 // overlay (mirrors the modals' restore discipline).
 let restoreFocus: HTMLElement | null = null
@@ -76,10 +116,34 @@ export function setup(el: HTMLElement, h: PickerHooks): void {
       render()
    })
    statsBtn = el.querySelector(".srr-picker-info") as HTMLElement
-   statsBtn.addEventListener("click", () => setStatsMode(!statsMode))
+   statsBtn.addEventListener("click", () => setRowMode(rowMode === "info" ? "pick" : "info"))
+   favBtn = el.querySelector(".srr-picker-fav") as HTMLElement
+   favBtn.addEventListener("click", () => setRowMode(rowMode === "fav" ? "pick" : "fav"))
+   // The type-to-filter search (RDR9). No debounce: the work per keystroke is a
+   // class toggle over rows already in the DOM, not a fetch or a rebuild.
+   searchInput = el.querySelector(".srr-picker-search-input") as HTMLInputElement
+   searchClearBtn = el.querySelector(".srr-picker-search-clear") as HTMLElement
+   searchInput.addEventListener("input", () => setQuery(searchInput.value))
+   searchClearBtn.addEventListener("click", () => {
+      setQuery("")
+      searchInput.focus()
+   })
+   // Escape is progressive: with a query up it clears the query and the overlay
+   // STAYS — after typing, the first Escape means "undo the narrowing", not
+   // "throw the panel away". Once the query is empty it is not handled here at
+   // all, so it bubbles on to app.ts's document-level handler, which closes the
+   // overlay exactly as it always did. Bubble phase on the overlay root: app.ts
+   // listens on `document`, so stopping propagation here IS "handled".
+   root.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || query === "") return
+      e.preventDefault()
+      e.stopPropagation()
+      setQuery("")
+   })
    // Delegated filter pick: every row carries data-value (feed id / tag / "" /
    // ~saved). The tag collapse toggle stops its own click, but guard anyway.
-   // In stats mode the same tap routes to the row's detail card instead.
+   // In info mode the same tap routes to the row's detail card instead, and in
+   // favorites mode to its ★ mark.
    filterBox.addEventListener("click", (e) => {
       const t = e.target as HTMLElement
       if (t.closest(".srr-tag-toggle")) return
@@ -94,7 +158,8 @@ export function setup(el: HTMLElement, h: PickerHooks): void {
       const a = t.closest("[data-value]") as HTMLElement | null
       if (!a) return
       e.preventDefault()
-      if (statsMode) openRowInfo(a.dataset.value!)
+      if (rowMode === "info") openRowInfo(a.dataset.value!)
+      else if (rowMode === "fav") toggleFavorite(a.dataset.value!)
       else hooks.onSelect(a.dataset.value!)
    })
    infoDialog = document.querySelector(".srr-info-dialog")
@@ -111,12 +176,20 @@ export function isOpen(): boolean {
 
 export function open(): void {
    if (root.hidden) restoreFocus = document.activeElement as HTMLElement | null
-   setStatsMode(false)
+   setRowMode("pick")
+   // A query does not survive a close: a panel that comes up already narrowed
+   // reads as "my feeds are missing", the same trap statsMode avoids by
+   // resetting. The remembered SCROLL offset below is the opposite case — it
+   // hides nothing, it only picks where the same full list starts.
+   setQuery("")
    render()
    root.hidden = false
    // The overlay owns its own scroll (the list's window scroll is untouched
-   // underneath); land at the top so [ALL] / ★ Saved show first on every open.
-   root.scrollTop = 0
+   // underneath). Come back where you left off — but only when the panel still
+   // describes the same rows: a store refresh that added or dropped feeds, or a
+   // Show-read flip, makes a remembered offset point at a different lane, so
+   // those land at the top ([ALL] / ★ Saved first) exactly as before.
+   root.scrollTop = scrollMemo && scrollMemo.sig === rowSig ? scrollMemo.top : 0
    // Focus the overlay container so Escape/arrows land here without painting a
    // row pre-selected (:focus-visible fires on programmatic focus — the same
    // reasoning as the context menu's container focus).
@@ -126,6 +199,10 @@ export function open(): void {
 
 export function close(): void {
    if (root.hidden) return
+   // Remember where the panel was, against the row set that offset describes.
+   // An offset measured while a query was narrowing the list describes rows
+   // that are about to come back, so it is worth nothing — remember the top.
+   scrollMemo = { sig: rowSig, top: query === "" ? root.scrollTop : 0 }
    root.hidden = true
    restoreFocus?.focus()
    restoreFocus = null
@@ -138,13 +215,139 @@ export function render(): void {
    renderFilterList()
 }
 
-// The Info stats toggle: flips what a row tap means (pick the filter vs open the
-// row's detail card). The rows themselves don't change — the root class is a
-// styling hook for the mode's cursor/affordance.
-function setStatsMode(on: boolean): void {
-   statsMode = on
-   statsBtn.setAttribute("aria-pressed", String(on))
-   root.classList.toggle("srr-picker-statsmode", on)
+// The header mode toggles: they flip what a row tap MEANS (pick the filter /
+// open the row's detail card / mark it a favorite). The rows themselves don't
+// change — the root classes are styling hooks for each mode's cursor and
+// affordance, and the pressed button is what announces the changed meaning.
+function setRowMode(m: RowMode): void {
+   rowMode = m
+   statsBtn.setAttribute("aria-pressed", String(m === "info"))
+   favBtn.setAttribute("aria-pressed", String(m === "fav"))
+   root.classList.toggle("srr-picker-statsmode", m === "info")
+   root.classList.toggle("srr-picker-favmode", m === "fav")
+}
+
+// ── Type-to-filter (RDR9) ────────────────────────────────────────────────────
+
+// The haystack a row is matched against, folded ONCE at build time and parked on
+// the node. Not the row's textContent: that grows an "×12" unread badge as
+// fillUnread lands, which would make a numeric query match arbitrary rows and
+// would make a row's matchability depend on when you typed.
+function stampMatch(el: HTMLElement, ...parts: string[]): void {
+   el.dataset.match = fold(parts.join(" "))
+}
+
+function rowMatches(el: HTMLElement, q: string): boolean {
+   return (el.dataset.match ?? "").includes(q)
+}
+
+// Set the live query and re-run the visibility pass. Called from the input, the
+// ✕ clear, Escape, and open() (which always resets it).
+function setQuery(next: string): void {
+   const q = next.trim()
+   if (searchInput.value !== next) searchInput.value = next // programmatic clears
+   if (q === query) return
+   // Entering the narrowed view parks the scroll at the top (the matches are up
+   // there, wherever you had scrolled to); leaving it puts you back.
+   if (query === "" && q !== "") preQueryTop = root.scrollTop
+   query = q
+   searchClearBtn.hidden = q === ""
+   root.classList.toggle("srr-picker-filtering", q !== "")
+   applyQuery()
+   root.scrollTop = q === "" ? preQueryTop : 0
+}
+
+// Narrow the rendered rows to the query — a class toggle over nodes that are
+// already in the DOM, so the async unread badges (and the fill in flight behind
+// them) are untouched. `srr-qhidden` is its OWN hide reason, composing with the
+// unread-only mode's `srr-hidden` rather than fighting it: a row hidden as
+// fully-read stays hidden whether or not it matches.
+function applyQuery(): void {
+   const q = fold(query)
+   const on = q !== ""
+   let hits = 0
+   const show = (el: HTMLElement, vis: boolean) => {
+      el.classList.toggle("srr-qhidden", !vis)
+      // Only rows the MODE is also showing count as hits — otherwise a store
+      // whose matches are all fully-read would claim results and show none.
+      if (vis && !el.classList.contains("srr-hidden")) hits++
+   }
+
+   // Tag groups: a header that matches shows its whole group; otherwise the
+   // group survives on its matching members alone. Either way a surviving group
+   // is force-expanded while filtering — a collapsed group would answer a query
+   // with an empty panel.
+   for (const group of filterBox.querySelectorAll<HTMLElement>(".srr-tag-group")) {
+      const header = group.querySelector<HTMLElement>(".srr-tag-header")
+      const whole = !on || (header !== null && rowMatches(header, q))
+      let shown = 0
+      for (const item of group.querySelectorAll<HTMLElement>(".srr-tag-item")) {
+         const vis = whole || rowMatches(item, q)
+         item.classList.toggle("srr-qhidden", !vis)
+         if (vis && !item.classList.contains("srr-hidden")) shown++
+      }
+      const vis = whole || shown > 0
+      group.classList.toggle("srr-qhidden", !vis)
+      group.classList.toggle("srr-qexpand", on && vis)
+      if (vis) hits += Math.max(shown, 1)
+   }
+   // Untagged feeds and the two scope chips, each on its own.
+   for (const row of filterBox.querySelectorAll<HTMLElement>(":scope > a[data-value], .srr-scope-chip")) {
+      show(row, !on || rowMatches(row, q))
+   }
+   // The tag separator is a rule between two groups of rows; with either side
+   // filtered away it would be a stray line.
+   for (const sep of filterBox.querySelectorAll<HTMLElement>(".srr-tag-sep")) sep.classList.toggle("srr-qhidden", on)
+   // The mount switcher is deliberately NOT filtered: it is the STORE axis, not
+   // a lane, and hiding the way back to another store because its label doesn't
+   // contain a feed name would be a trap.
+   if (emptyNote) {
+      emptyNote.hidden = !on || hits > 0
+      emptyNote.textContent = `No feeds or tags match “${query}”`
+   }
+}
+
+// ── Favorites (RDR9) ─────────────────────────────────────────────────────────
+
+// The favorite feed ids, device-local and per-store (keys.ts favoritesKey — a
+// feed id only means something inside its own mount). Storage that throws
+// (private mode, disabled by policy) degrades to "no favorites"; the lane is a
+// convenience and must never be able to break the panel.
+function readFavorites(): Set<number> {
+   try {
+      const raw = localStorage.getItem(favoritesKey(data.activeStore().mid))
+      const arr: unknown = raw ? JSON.parse(raw) : []
+      return new Set(Array.isArray(arr) ? arr.filter((v): v is number => typeof v === "number") : [])
+   } catch {
+      return new Set()
+   }
+}
+
+function writeFavorites(ids: Set<number>): void {
+   try {
+      localStorage.setItem(favoritesKey(data.activeStore().mid), JSON.stringify([...ids]))
+   } catch {
+      // Full or disabled storage: the mark applies to this render and is lost
+      // on reload, which is strictly better than throwing out of a row tap.
+   }
+}
+
+// A favorites-mode row tap. Only FEEDS have favorites — a tag is already a lane
+// and the scope chips are meta filters, so both are inert here, the same way
+// ★ Saved is inert in stats mode.
+function toggleFavorite(value: string): void {
+   if (!/^\d+$/.test(value)) return
+   const id = Number(value)
+   const favs = readFavorites()
+   if (!favs.delete(id)) favs.add(id)
+   writeFavorites(favs)
+   // The lane is part of the rendered rows, so the mark rebuilds them. Hold the
+   // offset across the rebuild so the row you just tapped stays under your
+   // thumb (the lane appearing or vanishing above it still shifts the rows by
+   // its own height — that motion IS the feedback for the mark).
+   const top = root.scrollTop
+   render()
+   root.scrollTop = top
 }
 
 // ── Filter list ──────────────────────────────────────────────────────────────
@@ -153,6 +356,7 @@ function link(value: string, text: string, className?: string): HTMLAnchorElemen
    const a = document.createElement("a")
    a.href = "#"
    a.dataset.value = value
+   stampMatch(a, text)
    // Title rides in its own span so a flex row (scope chip / feed / tag
    // header — every row is one) ellipsizes it while chips / counts keep
    // their size.
@@ -196,8 +400,22 @@ function srcChip(feedId: number): HTMLSpanElement {
    return s
 }
 
-function feedLink(ch: IFeed, className: string): HTMLAnchorElement {
+function feedLink(ch: IFeed, className: string, fav: boolean): HTMLAnchorElement {
    const a = link(String(ch.id), ch.title, `${className} srr-feed-row`.trim())
+   // A feed is findable by its tag as well as its name: typing a desk shows the
+   // feeds filed under it even when the collapsed group header is off screen.
+   stampMatch(a, ch.title, ch.tag ?? "")
+   if (fav) {
+      a.dataset.fav = "1"
+      const star = document.createElement("span")
+      star.className = "srr-fav-star"
+      // aria-hidden: the ★ Favorites lane, with a real text header, is what
+      // carries this membership non-visually — the glyph would otherwise read
+      // out on every row of that lane AND its twin in the tag group.
+      star.setAttribute("aria-hidden", "true")
+      star.textContent = "★"
+      a.appendChild(star)
+   }
    const grade = feedGrade(ch)
    if (grade !== "") {
       const ferr = ch.ferr ?? ""
@@ -240,6 +458,20 @@ function activeTag(): string {
 
 let fillToken: object | null = null
 
+// The rendered row set, as a string: the ordered row tokens plus the view mode
+// that decides which of them are visible. Two opens with the same signature are
+// looking at the same panel, which is exactly when a remembered scroll offset
+// still points at the row it was measured against. (Deliberately coarse: the
+// async unread fill can hide fully-read rows WITHIN one mode without changing
+// the signature. That drift is bounded by one fill and self-corrects on the
+// next open; a signature that tracked it would have to wait for the fill,
+// which is the one thing open() must not do.)
+function rowSignature(): string {
+   const rows = filterBox.querySelectorAll<HTMLElement>("[data-value], [data-mount], .srr-fav-header")
+   const tokens = [...rows].map((e) => e.dataset.value ?? (e.dataset.mount !== undefined ? `@${e.dataset.mount}` : "★"))
+   return `${nav.isUnreadOnly() ? "u" : "a"}|${tokens.join(",")}`
+}
+
 function renderFilterList(): void {
    // When read items are shown (unread-only off) the picker also lists feeds with
    // no articles yet (never-fetched / empty), so they can be inspected or picked;
@@ -251,7 +483,8 @@ function renderFilterList(): void {
    const cls = (base: string, v: string) => (v === current ? `${base} srr-active`.trim() : base)
    const frag = document.createDocumentFragment()
    const unreadRows: [HTMLAnchorElement, IFeed][] = []
-   const headerRows: [HTMLAnchorElement, IFeed[]][] = []
+   const headerRows: [HTMLElement, IFeed[]][] = []
+   const favs = readFavorites()
 
    // The mount switcher (docs/MULTI-STORE-SPEC.md §6.3) — the store axis ABOVE
    // tags and feeds. Shown ONLY when more than one store is mounted, so a
@@ -280,6 +513,43 @@ function renderFilterList(): void {
    }
    frag.appendChild(scope)
 
+   // ★ Favorites — the pinned lane above the tag groups (RDR9). A favorite is
+   // rendered here IN ADDITION to its normal row, not moved out of it: the tag
+   // groups mirror how the feeds are FILED (the wire's own `tag`), and a header
+   // whose health tint and unread rollup describe members it no longer lists
+   // would simply be lying; the active-filter auto-expand ("show me where I
+   // am") also has to find the feed inside its tag. A favorite is a shortcut,
+   // not a re-filing — so it appears twice, and the one place that would
+   // double-count it (the [ALL] total) sums over distinct feeds instead.
+   const favFeeds = [...sortedTags.flatMap((t) => tagged.get(t)!), ...untagged].filter((ch) => favs.has(ch.id))
+   if (favFeeds.length > 0) {
+      const groupDiv = div("srr-tag-group srr-fav-group")
+      // A plain div, not a link: the lane is a VIEW of feeds you marked, not a
+      // filter token nav can resolve, so a tap on it has nothing to select.
+      const header = div("srr-tag-header srr-fav-header")
+      const title = document.createElement("span")
+      title.className = "srr-row-title"
+      title.textContent = "★ Favorites"
+      header.appendChild(title)
+      stampMatch(header, "★ Favorites")
+      headerRows.push([header, favFeeds])
+      const toggle = document.createElement("span")
+      toggle.className = "srr-tag-toggle"
+      toggle.addEventListener("click", (e) => {
+         e.preventDefault()
+         e.stopPropagation()
+         groupDiv.classList.toggle("srr-tag-collapsed")
+      })
+      header.appendChild(toggle)
+      groupDiv.appendChild(header)
+      for (const ch of favFeeds) {
+         const item = feedLink(ch, cls("srr-tag-item", String(ch.id)), true)
+         unreadRows.push([item, ch])
+         groupDiv.appendChild(item)
+      }
+      frag.appendChild(groupDiv)
+   }
+
    for (const tag of sortedTags) {
       const group = tagged.get(tag)!
       const expanded = tag === currentTag && tag !== current
@@ -304,7 +574,7 @@ function renderFilterList(): void {
       header.appendChild(toggle)
       groupDiv.appendChild(header)
       for (const ch of group) {
-         const item = feedLink(ch, cls("srr-tag-item", String(ch.id)))
+         const item = feedLink(ch, cls("srr-tag-item", String(ch.id)), favs.has(ch.id))
          unreadRows.push([item, ch])
          groupDiv.appendChild(item)
       }
@@ -313,12 +583,26 @@ function renderFilterList(): void {
 
    if (sortedTags.length > 0 && untagged.length > 0) frag.appendChild(div("srr-tag-sep"))
    for (const ch of untagged) {
-      const item = feedLink(ch, cls("", String(ch.id)))
+      const item = feedLink(ch, cls("", String(ch.id)), favs.has(ch.id))
       unreadRows.push([item, ch])
       frag.appendChild(item)
    }
 
+   // The row-search's empty state, built with the rows so applyQuery only has to
+   // toggle it. role=status so a narrowing that finds nothing is announced.
+   emptyNote = div("srr-picker-empty")
+   emptyNote.setAttribute("role", "status")
+   emptyNote.hidden = true
+   frag.appendChild(emptyNote)
+
    filterBox.replaceChildren(frag)
+   // The signature the scroll memory is compared against — every row token in
+   // render order (favorites duplicate deliberately: gaining or losing the lane
+   // IS a different panel) plus the view mode.
+   rowSig = rowSignature()
+   // Re-apply the live query: render() is also called with one up (the Show-read
+   // flip, a favorite mark), and the fresh rows come out unfiltered.
+   applyQuery()
    void fillUnread(unreadRows, headerRows, allRow)
 }
 
@@ -400,29 +684,34 @@ function renderMounts(stores: data.Store[]): HTMLElement {
 // close orphans a stale pass). When unread-only is on, fully-read rows/tags hide.
 async function fillUnread(
    rows: [HTMLAnchorElement, IFeed][],
-   headers: [HTMLAnchorElement, IFeed[]][],
+   headers: [HTMLElement, IFeed[]][],
    allRow: HTMLAnchorElement,
 ) {
    const my = {}
    fillToken = my
    try {
-      const counts = await nav.unreadCounts(rows.map(([, ch]) => ch))
+      // DISTINCT feeds: the ★ Favorites lane renders a favorite a second time,
+      // so both the count request and — critically — [ALL]'s total have to be
+      // taken over the set, not the rows. Summing the rows would count every
+      // favorite twice and put the picker's headline number above the reader's
+      // pending pill, the exact class of bug the badge↔pill oracle exists for.
+      const distinct = [...new Map(rows.map(([, ch]) => [ch.id, ch])).values()]
+      const counts = await nav.unreadCounts(distinct)
       if (my !== fillToken) return
       // [ALL]'s number is the whole backlog — the sum over every listed feed
       // (rows the mode hides as fully-read contribute 0). Absent at zero, like
       // every row's badge.
-      const total = nav.tagUnreadFromCounts(
-         rows.map(([, ch]) => ch),
-         counts,
-      )
+      const total = nav.tagUnreadFromCounts(distinct, counts)
       if (total > 0) allRow.appendChild(unreadBadge(total))
       const hideRead = nav.isUnreadOnly()
       const activeKey = nav.getCurrentFilterKey()
       for (const [a, ch] of rows) {
          const n = counts.get(ch.id)!
          // Flex rows: the count sits inline right after the (shrink-to-fit)
-         // title — "Source ×12" — so the title ellipsizes ahead of it.
-         if (n > 0) a.appendChild(unreadBadge(n))
+         // title — "Source ×12" — so the title ellipsizes ahead of it. On a
+         // favorite the trailing ★ is pinned to the row's far edge, so the badge
+         // goes BEFORE it and the "name ×N" phrase stays unbroken.
+         if (n > 0) a.insertBefore(unreadBadge(n), a.querySelector(".srr-fav-star"))
          if (hideRead && n === 0 && String(ch.id) !== activeKey) a.classList.add("srr-hidden")
       }
       headers.forEach(([h, group]) => {
@@ -436,6 +725,10 @@ async function fillUnread(
          )
             h.closest(".srr-tag-group")?.classList.add("srr-hidden")
       })
+      // The fill just changed which rows the MODE shows, and the query's
+      // "nothing matches" note counts only rows both passes agree on — so
+      // re-run the narrowing over the settled row set.
+      if (query !== "") applyQuery()
    } catch {
       // Best-effort decoration; the list works without badges.
    }
