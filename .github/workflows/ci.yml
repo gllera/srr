@@ -64,6 +64,44 @@ jobs:
           puppeteer-${{ runner.os }}-
     - run: make test-browser
 
+  # The coverage RATCHET (TST8): re-runs the backend suite instrumented and
+  # fails when any area in scripts/coverage-floors.tsv drops below its floor.
+  #
+  # Its own job for the reason the split above was REJECTED, applied in reverse:
+  # the critical path is `race` (~110s), and an instrumented backend run is well
+  # under that, so this job is free wall-clock — where folding it into `verify`
+  # would have made the shortest job longer for no gain. Go only: cover-be runs
+  # `go test ./...` directly, which compiles against the committed placeholder
+  # backend/webui/dist, so it needs neither Node nor golangci.
+  #
+  # The actual-vs-floor delta table is echoed into the job summary as well as
+  # the log, so a drift shows on the run's front page rather than only to
+  # whoever expands the step.
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+    - uses: actions/checkout@v6
+    - uses: ./.github/actions/setup-toolchain
+      with:
+        node: "false"
+        lint: "false"
+    - name: Coverage ratchet
+      run: |
+        set -o pipefail
+        make cover-be 2>&1 | tee cover.log
+    # Runs on failure too — a shortfall is exactly when the table is worth
+    # reading, and the step above has already printed it.
+    - name: Publish coverage table
+      if: always()
+      run: |
+        {
+          echo '### Backend coverage'
+          echo '```'
+          sed -n '/^area /,$p' cover.log || true
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+
   # The concurrency gate, its own job because -race is ~2-5x slower than the
   # plain suite and verify must stay fast. -shuffle=on is half the value: it
   # catches tests that only pass in declaration order (it found a shared-fixture
