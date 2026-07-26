@@ -172,6 +172,21 @@ var scopedYAMLFlags = func() map[string]bool {
 	return m
 }()
 
+// resolveStoreAlias maps --store through srr.yaml's optional top-level
+// `stores:` alias table (exact-name match → the mapped path/URL). A miss, a
+// non-string target, or an alias mapped to "" keeps the literal value —
+// aliasing must never turn a valid literal store into nothing.
+func resolveStoreAlias(root map[string]any, store string) string {
+	m, ok := root["stores"].(map[string]any)
+	if !ok {
+		return store
+	}
+	if v, ok := m[store].(string); ok && v != "" {
+		return v
+	}
+	return store
+}
+
 // configResolver wraps the kong-yaml resolver with the two SRR-specific rules:
 // (1) an explicitly-set, non-empty SRR_* env var wins over the config file,
 // restoring the documented precedence (CLI flag > env var > config file >
@@ -274,6 +289,11 @@ func main() {
 	if globals.Debug {
 		slog.SetLogLoggerLevel(slog.LevelDebug)
 	}
+
+	// `stores:` alias map: `-o local` instead of remembering `-o packs` vs the
+	// prod URL. Runs after Parse, so the flag/env/yaml-resolved value is what
+	// gets aliased.
+	globals.Store = resolveStoreAlias(rootCfg, globals.Store)
 
 	if globals.Store == "" {
 		fatal("store path is required")

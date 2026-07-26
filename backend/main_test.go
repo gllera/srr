@@ -191,3 +191,36 @@ func TestExitCodeForClassifiesFailures(t *testing.T) {
 		})
 	}
 }
+
+// resolveStoreAlias: srr.yaml's optional top-level `stores:` map lets
+// `-o local` name a store. Exact-name match substitutes; anything else —
+// no section, no match, non-string or empty target — keeps the literal.
+func TestResolveStoreAlias(t *testing.T) {
+	root := map[string]any{
+		"stores": map[string]any{
+			"local": "packs",
+			"prod":  "s3://srr/",
+			"bad":   7,
+			"empty": "",
+		},
+	}
+	cases := []struct{ in, want string }{
+		{"local", "packs"},
+		{"prod", "s3://srr/"},
+		{"packs", "packs"}, // no alias -> literal
+		{"s3://other/", "s3://other/"},
+		{"bad", "bad"},     // non-string target -> literal
+		{"empty", "empty"}, // empty target -> literal
+	}
+	for _, c := range cases {
+		if got := resolveStoreAlias(root, c.in); got != c.want {
+			t.Errorf("resolveStoreAlias(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	if got := resolveStoreAlias(nil, "local"); got != "local" {
+		t.Errorf("nil root: got %q, want literal", got)
+	}
+	if got := resolveStoreAlias(map[string]any{"stores": "junk"}, "local"); got != "local" {
+		t.Errorf("non-map stores section: got %q, want literal", got)
+	}
+}
