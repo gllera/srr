@@ -46,10 +46,19 @@ var errExpireDone = errors.New("expire walk done")
 // feed charged for the upload — not from whichever feed happened to expire it.
 // That is what makes Feed.AssetBytes track a feed's own live footprint: bytes
 // are charged once at upload and released once when the object actually leaves
-// the store, by the same feed. (Two residual skews, both narrow and both
-// pre-existing: an object uploaded during feed A's fetch but first STORED in
-// feed B's article is charged to A and released from B, and `srr asset heal`
-// can change an object's size under the counter — see cmd_asset.go.)
+// the store, by the same feed. (Three residual skews, all narrow: an object
+// uploaded during feed A's fetch but first STORED in feed B's article is
+// charged to A and released from B — which a DISCARDED fan-out record is one
+// route into, since applyFetched charges the uploader whose articles never
+// landed; `srr asset heal` can change an object's size under the counter — see
+// cmd_asset.go; and two cycles that concurrently upload the SAME content hash
+// with both store-existence probes missing charge one object twice. The last is
+// the deliberate cost of charging on the discard path — see applyFetched in
+// cmd_fetch.go — traded against an unbounded UNDER-count, the worse direction
+// because this counter is only ever adjusted, never recomputed, and clamps at
+// 0. Note a discarded upload that nothing ever re-references is NOT a skew: it
+// stays in the store forever, since the sidecar's liveness gate keeps an
+// unknown key at or above `from`, so charging it is exact.)
 //
 // All-or-nothing: any walk or delete failure returns before ANY AddIdx/
 // Expired/AssetBytes/refcount change is applied, so the next cycle recomputes

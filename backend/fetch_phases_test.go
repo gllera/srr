@@ -150,7 +150,8 @@ func TestApplyFetchedPersistsDiscoveryRepoint(t *testing.T) {
 
 // TestApplyFetchedDiscardsURLRepoint: the operator repointed the feed while the
 // fan-out ran — the results describe a different source and must be discarded,
-// leaving the live feed untouched.
+// leaving the live feed untouched EXCEPT for its asset-bytes charge, which is
+// not discardable (see TestApplyFetchedChargesAssetBytesOnDiscard).
 func TestApplyFetchedDiscardsURLRepoint(t *testing.T) {
 	db, _, _ := setupTestDB(t)
 	live := &Feed{Title: "A", URL: "http://x/feed"}
@@ -158,6 +159,7 @@ func TestApplyFetchedDiscardsURLRepoint(t *testing.T) {
 
 	snap, rec := snapFeed(live)
 	snap.LastOK = 111
+	snap.AssetBytes = 40 // the fan-out uploaded 40 bytes before the repoint
 	snap.newItems = []*Item{{Feed: snap, Title: "n1"}}
 	snap.seenStamps = []uint32{7}
 	live.URL = "http://y/other" // concurrent operator repoint
@@ -172,6 +174,10 @@ func TestApplyFetchedDiscardsURLRepoint(t *testing.T) {
 	}
 	if db.seen.has(live.id, 7) {
 		t.Fatal("discarded record must not stamp the pool")
+	}
+	if live.AssetBytes != 40 {
+		t.Fatalf("AssetBytes = %d, want 40 — the fan-out's uploads are in the store"+
+			" whatever happened to its articles, so a discard must still charge them", live.AssetBytes)
 	}
 }
 
@@ -202,6 +208,7 @@ func TestApplyFetchedDiscardsConcurrentAdvance(t *testing.T) {
 
 	snap, rec := snapFeed(live)
 	snap.LastOK = 111
+	snap.AssetBytes = 40 // the fan-out uploaded 40 bytes before losing the race
 	snap.newItems = []*Item{{Feed: snap, Title: "n1"}}
 	live.LastOK = 555 // the other fetch's fold advanced the live state
 
@@ -212,6 +219,88 @@ func TestApplyFetchedDiscardsConcurrentAdvance(t *testing.T) {
 	}
 	if live.LastOK != 555 {
 		t.Fatalf("LastOK = %d, want the other fetch's state kept", live.LastOK)
+	}
+	if live.AssetBytes != 40 {
+		t.Fatalf("AssetBytes = %d, want 40 — the fan-out's uploads are in the store"+
+			" whatever happened to its articles, so a discard must still charge them", live.AssetBytes)
+	}
+}
+
+// TestApplyFetchedChargesAssetBytesOnDiscard is the accounting half of the two
+// discard guards above, stated once as its own case because the property is not
+// about either guard in particular: an assets/ object is content-hash-addressed
+// and was AtomicPut during the lock-free fan-out, so it is durably in the store
+// before applyFetched ever runs. Whether the record that referenced it lands is
+// irrelevant to the store's footprint, so `ab` must move either way.
+//
+// What made the old apply-only charge PERMANENT rather than merely late: the
+// bytes are never re-offered. A later cycle referencing the same content hash
+// takes UploadCacheRef's store-existence branch, which reports 0 uploaded bytes,
+// so no feed ever charges them again — while the reference sidecar still records
+// an owner, and expiration still decrements that owner by the object's real size
+// when it leaves. Every discarded upload therefore ate a permanent hole in some
+// feed's counter, clamped at 0 and never recomputed.
+//
+// The charge is RELATIVE here too, so it composes with a peer's expiration the
+// same way the apply path does.
+func TestApplyFetchedChargesAssetBytesOnDiscard(t *testing.T) {
+	cases := []struct {
+		name string
+		// race mutates the live feed the way the racing writer would, producing
+		// the discard this case is about.
+		race func(live *Feed)
+	}{
+		{"url repoint", func(live *Feed) { live.URL = "http://y/other" }},
+		{"concurrent advance", func(live *Feed) { live.LastOK = 555 }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, _, _ := setupTestDB(t)
+			live := &Feed{Title: "A", URL: "http://x/feed"}
+			seedFeed(t, db, live)
+			live.AssetBytes = 1000
+
+			snap, rec := snapFeed(live) // baseline 1000
+			snap.AssetBytes = 1040      // the fan-out uploaded 40 bytes of new assets
+			snap.newItems = []*Item{{Feed: snap, Title: "n1"}}
+
+			live.AssetBytes = 100 // a peer's expiration released 900 in between
+			tc.race(live)
+
+			if items := db.applyFetched([]fetchedFeed{rec}, 19000); len(items) != 0 {
+				t.Fatalf("items = %v, want the record discarded", items)
+			}
+			if live.AssetBytes != 140 {
+				t.Fatalf("AssetBytes = %d, want 140 = the live 100 + the fan-out's 40-byte"+
+					" upload delta; a discarded record's uploads are still in the store,"+
+					" and charging only on the apply path under-counts `ab` permanently",
+					live.AssetBytes)
+			}
+		})
+	}
+}
+
+// TestApplyFetchedRemovedFeedChargesNobody is the stated exception: a feed
+// deleted during the fan-out has no counter left to charge, so its uploads go
+// unaccounted by construction. Pinned so the asymmetry is a decision on the
+// record rather than something a later reader has to rediscover.
+func TestApplyFetchedRemovedFeedChargesNobody(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	live := &Feed{Title: "A", URL: "http://x/feed"}
+	seedFeed(t, db, live)
+	live.AssetBytes = 100
+
+	snap, rec := snapFeed(live)
+	snap.id = 99 // removed and gone from db.core.Feeds
+	snap.AssetBytes = 40
+	snap.newItems = []*Item{{Feed: snap, Title: "n1"}}
+
+	if items := db.applyFetched([]fetchedFeed{rec}, 19000); len(items) != 0 {
+		t.Fatalf("items = %v, want none for a removed feed", items)
+	}
+	if live.AssetBytes != 100 {
+		t.Fatalf("AssetBytes = %d, want the surviving feed 100 untouched —"+
+			" a removed feed's uploads must not be charged to a bystander", live.AssetBytes)
 	}
 }
 
