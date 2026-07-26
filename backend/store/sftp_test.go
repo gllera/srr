@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"io"
 	"io/fs"
@@ -418,14 +419,16 @@ type sftpDialCounter struct {
 // withSFTPSessionMemo isolates the package session memo for one test and swaps
 // in a dialer handing out in-process pipe sessions, so a test can count dials
 // without standing up an ssh server. The counter is written inside
-// sftpSessionFor's critical section, so the concurrent test reads it race-free
-// once its goroutines have joined.
+// the ENTRY's critical section, so the concurrent test — which hammers a single
+// identity, i.e. a single entry — reads it race-free once its goroutines have
+// joined. A test dialing several identities concurrently would need its own
+// synchronisation; TestSFTPWedgedIdentityDoesNotBlockOthers has it.
 func withSFTPSessionMemo(t *testing.T) *sftpDialCounter {
 	t.Helper()
 	savedSessions, savedDial := sftpSessions, sftpDialSession
-	sftpSessions = map[sftpSessionKey]*sftpSession{}
+	sftpSessions = map[sftpSessionKey]*sftpEntry{}
 	c := &sftpDialCounter{}
-	sftpDialSession = func(sftpSessionKey, *url.URL) (*sftpSession, error) {
+	sftpDialSession = func(context.Context, sftpSessionKey, *url.URL) (*sftpSession, error) {
 		client, base, kill := newPipeSFTPClient(t)
 		c.dials++
 		c.base, c.kill = base, kill
@@ -447,11 +450,11 @@ func TestSFTPSessionMemoizedPerIdentity(t *testing.T) {
 	key := sftpSessionKey{addr: "h:22", user: "alice"}
 	u := mustURL(t, "sftp://alice@h/p")
 
-	first, err := sftpSessionFor(key, u)
+	first, err := sftpSessionFor(ctx, key, u)
 	if err != nil {
 		t.Fatalf("sftpSessionFor: %v", err)
 	}
-	second, err := sftpSessionFor(key, u)
+	second, err := sftpSessionFor(ctx, key, u)
 	if err != nil {
 		t.Fatalf("sftpSessionFor(again): %v", err)
 	}
@@ -469,7 +472,7 @@ func TestSFTPSessionMemoizedPerIdentity(t *testing.T) {
 		"url password": {addr: "h:22", user: "alice", urlPassword: "pw"},
 	}
 	for name, other := range others {
-		s, err := sftpSessionFor(other, u)
+		s, err := sftpSessionFor(ctx, other, u)
 		if err != nil {
 			t.Fatalf("sftpSessionFor(%s): %v", name, err)
 		}
@@ -482,6 +485,50 @@ func TestSFTPSessionMemoizedPerIdentity(t *testing.T) {
 	}
 }
 
+// Containment: a peer that accepts the connection and then answers nothing must
+// stall only the goroutines that want THAT identity. The memo used to hold one
+// process-global mutex across the probe and the dial, so a single black-holed
+// server queued every store.Open in the process behind it — including ones for
+// unrelated backends — with no context to cancel and no deadline to expire.
+func TestSFTPWedgedIdentityDoesNotBlockOthers(t *testing.T) {
+	savedSessions, savedDial := sftpSessions, sftpDialSession
+	sftpSessions = map[sftpSessionKey]*sftpEntry{}
+	t.Cleanup(func() { sftpSessions, sftpDialSession = savedSessions, savedDial })
+
+	wedged := sftpSessionKey{addr: "wedged:22", user: "alice"}
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	var once sync.Once
+	sftpDialSession = func(_ context.Context, key sftpSessionKey, _ *url.URL) (*sftpSession, error) {
+		if key == wedged {
+			once.Do(func() { close(entered) })
+			<-release // the peer never answers
+		}
+		client, _, _ := newPipeSFTPClient(t)
+		return &sftpSession{client: client}, nil
+	}
+	t.Cleanup(func() { close(release) })
+
+	go func() { _, _ = sftpSessionFor(ctx, wedged, mustURL(t, "sftp://alice@wedged/p")) }()
+	<-entered // the wedged dial is now inside its critical section
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := sftpSessionFor(ctx, sftpSessionKey{addr: "healthy:22", user: "alice"},
+			mustURL(t, "sftp://alice@healthy/p"))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("healthy identity: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a wedged identity's dial blocked an unrelated identity's Open — " +
+			"the memo is serializing peer I/O on a process-global lock")
+	}
+}
+
 // A memoized session outlives the handle that dialed it, so a server restart or
 // an idle disconnect leaves a corpse in the map. The liveness probe is what
 // keeps it from being handed out.
@@ -490,7 +537,7 @@ func TestSFTPSessionRedialedWhenDead(t *testing.T) {
 	key := sftpSessionKey{addr: "h:22", user: "alice"}
 	u := mustURL(t, "sftp://alice@h/p")
 
-	dead, err := sftpSessionFor(key, u)
+	dead, err := sftpSessionFor(ctx, key, u)
 	if err != nil {
 		t.Fatalf("sftpSessionFor: %v", err)
 	}
@@ -499,7 +546,7 @@ func TestSFTPSessionRedialedWhenDead(t *testing.T) {
 		t.Fatal("the probe still calls a session with no peer alive")
 	}
 
-	live, err := sftpSessionFor(key, u)
+	live, err := sftpSessionFor(ctx, key, u)
 	if err != nil {
 		t.Fatalf("sftpSessionFor(after death): %v", err)
 	}
@@ -529,7 +576,7 @@ func TestSFTPSessionConcurrentLookupsDialOnce(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			got[i], errs[i] = sftpSessionFor(key, u)
+			got[i], errs[i] = sftpSessionFor(ctx, key, u)
 		}()
 	}
 	wg.Wait()
@@ -555,7 +602,7 @@ func TestSFTPSessionConcurrentLookupsDialOnce(t *testing.T) {
 // dial count rather than as a lost store.
 func memoHandle(t *testing.T, c *sftpDialCounter, key sftpSessionKey, u *url.URL) *SFTP {
 	t.Helper()
-	sess, err := sftpSessionFor(key, u)
+	sess, err := sftpSessionFor(ctx, key, u)
 	if err != nil {
 		t.Fatalf("sftpSessionFor: %v", err)
 	}
@@ -594,7 +641,7 @@ func TestSFTPRedialsAfterMidOperationConnectionLoss(t *testing.T) {
 	if err := d.Put(ctx, "b.txt", strings.NewReader("more"), true); err != nil {
 		t.Fatalf("Put on the redialed session: %v", err)
 	}
-	if _, err := sftpSessionFor(key, u); err != nil {
+	if _, err := sftpSessionFor(ctx, key, u); err != nil {
 		t.Fatalf("sftpSessionFor: %v", err)
 	}
 	if c.dials != 2 {
@@ -675,7 +722,7 @@ func TestSFTPCloseLeavesTheSharedSessionUp(t *testing.T) {
 	key := sftpSessionKey{addr: "h:22", user: "alice"}
 	u := mustURL(t, "sftp://alice@h/p")
 
-	sess, err := sftpSessionFor(key, u)
+	sess, err := sftpSessionFor(ctx, key, u)
 	if err != nil {
 		t.Fatalf("sftpSessionFor: %v", err)
 	}
@@ -687,7 +734,7 @@ func TestSFTPCloseLeavesTheSharedSessionUp(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	again, err := sftpSessionFor(key, u)
+	again, err := sftpSessionFor(ctx, key, u)
 	if err != nil {
 		t.Fatalf("sftpSessionFor(after Close): %v", err)
 	}

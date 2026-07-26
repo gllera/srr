@@ -61,10 +61,27 @@ type SFTP struct {
 }
 
 // sftpSession is one dialed SSH connection plus the SFTP subsystem on it.
+// conn is the raw transport, kept ONLY so alive() can put a deadline on its
+// probe; it is nil for a session built over an already-established transport
+// (the tests' in-process pipe), which then probes undeadlined.
 type sftpSession struct {
 	client    *sftp.Client
 	sshClient *ssh.Client
+	conn      net.Conn
 }
+
+// sftpProbeTimeout bounds the liveness probe. A black-holed peer — a NAT that
+// evicted the mapping without sending an RST is the ordinary cause — answers
+// nothing and closes nothing, so an undeadlined Getwd waits out the kernel's
+// full TCP retransmit schedule (minutes). The probe stands in for a dial, so
+// anything longer than a dial's own budget is the wrong trade.
+const sftpProbeTimeout = 10 * time.Second
+
+// sftpDialTimeout bounds the whole connect — TCP, SSH handshake AND subsystem
+// open. ssh.ClientConfig.Timeout covers only the net.Dial, so relying on it
+// left the handshake and sftp.NewClient unbounded; dialSFTPSession therefore
+// drives the sequence itself with a deadline on the conn.
+const sftpDialTimeout = 30 * time.Second
 
 // close tears the session down for real. ONLY the memo calls it, and only for a
 // session a liveness probe has just found dead — see sftpSessions for who owns
@@ -89,7 +106,18 @@ func (s *sftpSession) close() {
 // caught by the same probe from the other side, via sftpSessionRefresh. Either
 // way the replacement is possible only because a session's identity is its key
 // and nothing holds a reference the memo cannot replace.
+//
+// The probe is DEADLINED (sftpProbeTimeout). A deadline on the conn is the
+// right instrument rather than racing the call against a timer: a timed-out
+// goroutine would stay parked on the dead socket for the full retransmit
+// window, holding the entry lock it was supposed to release. A deadline hit
+// reads as "not alive", so the corpse is dropped and redialed — which is the
+// correct answer for a peer that cannot answer a one-round-trip question.
 func (s *sftpSession) alive() bool {
+	if s.conn != nil {
+		_ = s.conn.SetDeadline(time.Now().Add(sftpProbeTimeout))
+		defer func() { _ = s.conn.SetDeadline(time.Time{}) }()
+	}
 	_, err := s.client.Getwd()
 	return err == nil
 }
@@ -119,43 +147,79 @@ type sftpSessionKey struct {
 // which is the point — and the process exit that reclaims them is the same event
 // that used to. The map holds one entry per distinct store identity, which in
 // every real deployment is one.
+//
+// The map holds ENTRIES, not sessions: the process-global mutex below guards
+// map access alone, and each entry's own mutex guards that identity's probe and
+// dial. Peer I/O under a process-global lock is what this shape exists to
+// prevent — see sftpSessionFor.
+
+// An entry is one identity's slot.
+type sftpEntry struct {
+	mu   sync.Mutex
+	sess *sftpSession
+}
+
 var (
+	// sftpSessionsMu guards the MAP only. Never hold it across peer I/O.
 	sftpSessionsMu sync.Mutex
-	sftpSessions   = map[sftpSessionKey]*sftpSession{}
+	sftpSessions   = map[sftpSessionKey]*sftpEntry{}
 )
 
 // sftpDialSession is the dialer, a var so the memo tests can substitute
 // in-process pipe sessions and count dials without standing up an ssh server.
 var sftpDialSession = dialSFTPSession
 
+// sftpEntryFor returns key's slot, creating an empty one on first sight. The
+// process-global lock is held for this map operation ALONE — never across the
+// probe or the dial below.
+func sftpEntryFor(key sftpSessionKey) *sftpEntry {
+	sftpSessionsMu.Lock()
+	defer sftpSessionsMu.Unlock()
+	e, ok := sftpSessions[key]
+	if !ok {
+		e = &sftpEntry{}
+		sftpSessions[key] = e
+	}
+	return e
+}
+
 // sftpSessionFor returns the memoized session for key, dialing when there is
 // none or when the memoized one no longer answers.
 //
-// The lock spans the dial deliberately: a burst of concurrent Opens against a
-// cold memo then performs ONE handshake and shares it instead of N. The cost is
-// that an unreachable server stalls every waiting Open for the dial timeout
-// rather than only the first — the same trade s3ClientFor makes, and the right
-// one when the alternative is N simultaneous handshakes into a server that is
-// already struggling.
-func sftpSessionFor(key sftpSessionKey, u *url.URL) (*sftpSession, error) {
-	sftpSessionsMu.Lock()
-	defer sftpSessionsMu.Unlock()
+// The ENTRY's lock spans the probe and the dial deliberately: a burst of
+// concurrent Opens against a cold memo then performs ONE handshake and shares
+// it instead of N. The cost is that an unreachable server stalls every waiting
+// Open for THAT identity for the dial timeout rather than only the first — the
+// same trade s3ClientFor makes, and the right one when the alternative is N
+// simultaneous handshakes into a server that is already struggling.
+//
+// What the entry lock buys over the map lock it replaced is containment: a peer
+// that accepts the connection and then answers nothing used to park the first
+// caller inside the process-global critical section, queueing every store.Open
+// and every redial in the process behind it — including ones for entirely
+// different backends — un-interruptible by SIGTERM. Now a wedged identity
+// stalls only the goroutines that want that identity, and the probe and dial it
+// stalls in are themselves deadline-bounded.
+func sftpSessionFor(ctx context.Context, key sftpSessionKey, u *url.URL) (*sftpSession, error) {
+	e := sftpEntryFor(key)
+	e.mu.Lock()
+	defer e.mu.Unlock()
 
-	if s, ok := sftpSessions[key]; ok {
+	if s := e.sess; s != nil {
 		if s.alive() {
 			return s, nil
 		}
 		// Drop the corpse BEFORE dialing, so a failed dial cannot leave it behind
 		// for the next lookup to probe all over again.
-		delete(sftpSessions, key)
+		e.sess = nil
 		s.close()
 	}
 
-	s, err := sftpDialSession(key, u)
+	s, err := sftpDialSession(ctx, key, u)
 	if err != nil {
 		return nil, err
 	}
-	sftpSessions[key] = s
+	e.sess = s
 	return s, nil
 }
 
@@ -169,31 +233,32 @@ func sftpSessionFor(key sftpSessionKey, u *url.URL) (*sftpSession, error) {
 // is (one probe) and dropped only while it is STILL the memoized session —
 // another goroutine racing the same reset may already have replaced it, and
 // dropping its healthy replacement would start an endless redial loop.
-func sftpSessionRefresh(key sftpSessionKey, u *url.URL, dead *sftpSession) (*sftpSession, error) {
+func sftpSessionRefresh(ctx context.Context, key sftpSessionKey, u *url.URL, dead *sftpSession) (*sftpSession, error) {
 	if u == nil {
 		// A handle built outside the memo (the pipe-session tests) has no
 		// identity to redial to; its session is whatever it was handed.
 		return dead, nil
 	}
 
-	sftpSessionsMu.Lock()
-	if cur, ok := sftpSessions[key]; ok && cur == dead && !dead.alive() {
-		delete(sftpSessions, key)
+	e := sftpEntryFor(key)
+	e.mu.Lock()
+	if e.sess == dead && dead != nil && !dead.alive() {
+		e.sess = nil
 		dead.close()
 	}
-	sftpSessionsMu.Unlock()
+	e.mu.Unlock()
 
-	// Outside the lock deliberately: sftpSessionFor takes it itself, and it is
-	// the single place that dials — a fresh entry another goroutine installed
-	// meanwhile is simply returned.
-	return sftpSessionFor(key, u)
+	// Outside the entry lock deliberately: sftpSessionFor takes it itself, and it
+	// is the single place that dials — a fresh session another goroutine
+	// installed meanwhile is simply returned.
+	return sftpSessionFor(ctx, key, u)
 }
 
 // dialSFTPSession performs the full connect: auth resolution, host-key policy,
 // SSH handshake, subsystem open. It runs only on a memo miss, which is why the
 // auth chain (reading ~/.ssh keys, dialing the agent socket) lives in here
 // rather than in newSFTP.
-func dialSFTPSession(key sftpSessionKey, u *url.URL) (_ *sftpSession, retErr error) {
+func dialSFTPSession(ctx context.Context, key sftpSessionKey, u *url.URL) (_ *sftpSession, retErr error) {
 	auth, cleanup, err := sftpAuthMethods(u)
 	if err != nil {
 		return nil, err
@@ -206,15 +271,35 @@ func dialSFTPSession(key sftpSessionKey, u *url.URL) (_ *sftpSession, retErr err
 		return nil, fmt.Errorf("loading known hosts: %w", err)
 	}
 
-	sshClient, err := ssh.Dial("tcp", key.addr, &ssh.ClientConfig{
-		User:            key.user,
-		Auth:            auth,
-		HostKeyCallback: hostKeyCallback,
-		Timeout:         30 * time.Second,
-	})
+	// Driven step by step rather than through ssh.Dial because that helper's
+	// ClientConfig.Timeout bounds the net.Dial ALONE: the SSH handshake and the
+	// subsystem open that follow it are unbounded, so a peer that completes a TCP
+	// connect and then goes quiet hangs here forever. One deadline on the conn
+	// covers all three, and is cleared before the session is handed out (an
+	// absolute deadline left in place would later kill live transfers).
+	conn, err := (&net.Dialer{Timeout: sftpDialTimeout}).DialContext(ctx, "tcp", key.addr)
 	if err != nil {
 		return nil, fmt.Errorf("dial sftp server %s: %w", key.addr, err)
 	}
+	defer func() {
+		if retErr != nil {
+			conn.Close()
+		}
+	}()
+	if err := conn.SetDeadline(time.Now().Add(sftpDialTimeout)); err != nil {
+		return nil, fmt.Errorf("dial sftp server %s: %w", key.addr, err)
+	}
+
+	sshConn, chans, reqs, err := ssh.NewClientConn(conn, key.addr, &ssh.ClientConfig{
+		User:            key.user,
+		Auth:            auth,
+		HostKeyCallback: hostKeyCallback,
+		Timeout:         sftpDialTimeout,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("sftp handshake with %s: %w", key.addr, err)
+	}
+	sshClient := ssh.NewClient(sshConn, chans, reqs)
 	defer func() {
 		if retErr != nil {
 			sshClient.Close()
@@ -225,7 +310,10 @@ func dialSFTPSession(key sftpSessionKey, u *url.URL) (_ *sftpSession, retErr err
 	if err != nil {
 		return nil, fmt.Errorf("create sftp client: %w", err)
 	}
-	return &sftpSession{client: client, sshClient: sshClient}, nil
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		return nil, fmt.Errorf("clearing dial deadline for %s: %w", key.addr, err)
+	}
+	return &sftpSession{client: client, sshClient: sshClient, conn: conn}, nil
 }
 
 func sftpHostKeyCallback() (ssh.HostKeyCallback, error) {
@@ -246,7 +334,7 @@ func sftpHostKeyCallback() (ssh.HostKeyCallback, error) {
 	return knownhosts.New(khFile)
 }
 
-func newSFTP(_ context.Context, u *url.URL) (Backend, error) {
+func newSFTP(ctx context.Context, u *url.URL) (Backend, error) {
 	addr := u.Host
 	if u.Port() == "" {
 		addr = net.JoinHostPort(u.Hostname(), "22")
@@ -262,7 +350,7 @@ func newSFTP(_ context.Context, u *url.URL) (Backend, error) {
 		user:        sftpUser(u),
 		urlPassword: urlPassword,
 	}
-	sess, err := sftpSessionFor(key, u)
+	sess, err := sftpSessionFor(ctx, key, u)
 	if err != nil {
 		return nil, err
 	}
@@ -307,12 +395,12 @@ func (d *SFTP) conn() *sftp.Client {
 // reconnect goes back to the memo after a connection-class failure and adopts
 // whatever session it hands back — the same one when the peer turns out to be
 // alive, a redialed one when it is not.
-func (d *SFTP) reconnect() (*sftp.Client, error) {
+func (d *SFTP) reconnect(ctx context.Context) (*sftp.Client, error) {
 	d.mu.Lock()
 	dead := d.sess
 	d.mu.Unlock()
 
-	fresh, err := sftpSessionRefresh(d.key, d.u, dead)
+	fresh, err := sftpSessionRefresh(ctx, d.key, d.u, dead)
 	if err != nil {
 		return nil, err
 	}
@@ -327,18 +415,18 @@ func (d *SFTP) reconnect() (*sftp.Client, error) {
 // a re-resolved (possibly redialed) one on every retry — retryLoop only comes
 // back here after a connection-class failure, which is exactly the event that
 // makes the bound session suspect.
-func (d *SFTP) clientFor(attempt int) (*sftp.Client, error) {
+func (d *SFTP) clientFor(ctx context.Context, attempt int) (*sftp.Client, error) {
 	if attempt == 1 {
 		return d.conn(), nil
 	}
-	return d.reconnect()
+	return d.reconnect(ctx)
 }
 
 // retry runs a body-less op under the store retry policy (see retry.go),
 // handing it a freshly resolved client per attempt.
 func (d *SFTP) retry(ctx context.Context, op func(*sftp.Client) error) error {
 	return withRetry(ctx, func(attempt int) error {
-		c, err := d.clientFor(attempt)
+		c, err := d.clientFor(ctx, attempt)
 		if err != nil {
 			return err
 		}
@@ -350,7 +438,7 @@ func (d *SFTP) retry(ctx context.Context, op func(*sftp.Client) error) error {
 // replayed at all, so a retried upload is either byte-complete or never made.
 func (d *SFTP) retryBody(ctx context.Context, r io.Reader, op func(*sftp.Client, io.Reader) error) error {
 	return withRetryBody(ctx, r, func(attempt int, body io.Reader) error {
-		c, err := d.clientFor(attempt)
+		c, err := d.clientFor(ctx, attempt)
 		if err != nil {
 			return err
 		}
@@ -567,8 +655,9 @@ func (d *SFTP) sweepTempLeftovers(c *sftp.Client, dir, ownTemp string) {
 	}
 }
 
-// Stat returns the remote file's size; a missing key is (0, nil) per the
-// Backend contract.
+// Stat returns the remote file's size. A missing key is an error wrapping
+// fs.ErrNotExist per the Backend contract; a nil error therefore PROVES the
+// file exists, zero-byte included.
 func (d *SFTP) Stat(ctx context.Context, key string) (int64, error) {
 	file := d.sftpPath("stat", key)
 	var size int64
@@ -660,7 +749,7 @@ func sftpUser(u *url.URL) string {
 
 // sftpAuthMethods returns the auth methods plus a cleanup func the caller must
 // invoke once the SSH handshake is done. The ssh-agent Unix socket is only
-// needed during auth, but it must stay open across ssh.Dial; returning a closer
+// needed during auth, but it must stay open across the handshake; returning a closer
 // (instead of closing it here) prevents the fd leak of the never-closed socket.
 func sftpAuthMethods(u *url.URL) ([]ssh.AuthMethod, func(), error) {
 	var methods []ssh.AuthMethod
@@ -707,8 +796,8 @@ func sftpAuthMethods(u *url.URL) ([]ssh.AuthMethod, func(), error) {
 	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
 		// A connect to a local AF_UNIX socket completes or fails immediately —
 		// there is no blocking phase for a context to cancel. The dial that CAN
-		// hang is ssh.Dial in newSFTP, a remote TCP handshake bounded by its own
-		// 30s Timeout, and noctx does not recognise it; honouring the linter here
+		// hang is the connect in dialSFTPSession, a remote TCP handshake bounded
+		// by sftpDialTimeout, and noctx does not recognise it; honouring the linter here
 		// while the real network call next door stays context-less would be
 		// ceremony, and it would mean threading a ctx through sftpAuthMethods that
 		// newSFTP deliberately discards.
