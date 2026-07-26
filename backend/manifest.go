@@ -266,7 +266,14 @@ func (o *DB) GC(ctx context.Context, keep int) error {
 	for _, k := range c.Names.keys() {
 		live[k] = true
 	}
-	oldest := min(max(cutoff+1, 1), c.ManifestNum)
+	// Floor the window at the oldest generation that can still EXIST. `cutoff+1`
+	// alone is not that: a sweep deletes the manifests it clears and records how
+	// far it got in `gcm`, so everything at or below `gcm` is already gone. Raise
+	// --keep-manifests past the number of surviving generations and cutoff+1 dives
+	// below `gcm`, this read 404s, and — since the call site is warn-only — the
+	// store silently stops being swept for good. Same clamp the three
+	// cmd_inspect_manifest.go walks already apply, for the same reason.
+	oldest := min(max(cutoff+1, c.GCManifest+1, 1), c.ManifestNum)
 	keys, floor, err := o.manifestObjectKeys(ctx, oldest)
 	if err != nil {
 		// Nothing may be reclaimed on incomplete knowledge of what is still

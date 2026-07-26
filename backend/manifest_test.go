@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -968,4 +969,34 @@ func TestConfigClearOnLiveFeedIsNotARemoval(t *testing.T) {
 		t.Fatalf("removing the feed: got changed=%v removals=%v, want changed=true removals=true", changed, removals)
 	}
 	dbB.Close(ctx)
+}
+
+// Raising --keep-manifests past the number of generations that still exist must
+// be a no-op, not a permanent stop. A sweep DELETES the manifests it clears and
+// records how far it got in `gcm`, so a widened window whose cutoff+1 dives
+// below `gcm` asks for an object an earlier narrower sweep already reclaimed.
+// The read 404'd, GC returned an error, and — the call site being warn-only —
+// the store silently stopped being swept until `m` outgrew the new window.
+func TestGCKeepRaisedPastSurvivingGenerations(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	f := watchFeed(t, db, "F", "http://f")
+	for i := range 6 {
+		watchPut(t, db, f, fmt.Sprintf("a%d", i))
+	}
+	if err := db.GC(ctx, 2); err != nil { // a narrow sweep reclaims the early generations
+		t.Fatalf("GC(keep=2): %v", err)
+	}
+	if err := db.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if db.core.GCManifest == 0 {
+		t.Fatalf("the narrow sweep cleared nothing (gcm=0); the test proves nothing")
+	}
+	if err := db.GC(ctx, 200); err != nil {
+		t.Fatalf("GC(keep=200) after a narrower sweep: %v", err)
+	}
+	// And it must still be usable afterwards, not wedged.
+	if err := db.GC(ctx, 2); err != nil {
+		t.Fatalf("GC(keep=2) again: %v", err)
+	}
 }

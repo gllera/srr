@@ -533,3 +533,55 @@ func TestCheckOrphans(t *testing.T) {
 		t.Errorf("no-lister report = %q, want a skip", out)
 	}
 }
+
+// A cycle that ingested nothing rewrites the ~60-byte root and mints NO
+// generation (goal G2 — manifestSig excludes fetched_at for exactly that
+// reason), so from the first idle cycle onward the manifest's stamp is
+// legitimately older than the root's. Dormancy backoff makes those cycles
+// routine, and --validate is what a watchdog reads: comparing the two for
+// equality reported every healthy store as broken.
+func TestValidateAcceptsIdleCycleClockDrift(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	f := watchFeed(t, db, "F", "http://f")
+	watchPut(t, db, f, "one", "two")
+
+	before := db.core.ManifestNum
+	db.core.FetchedAt += 300 // the next 5-minute cycle, which ingested nothing
+	if err := db.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if db.core.ManifestNum != before {
+		t.Fatalf("the idle cycle minted generation %d (was %d); this test no longer covers the drift",
+			db.core.ManifestNum, before)
+	}
+
+	var buf bytes.Buffer
+	if err := (&InspectCmd{Chron: -1, Validate: true, out: &buf}).Run(); err != nil {
+		t.Errorf("--validate red on a healthy idle store: %v\n%s", err, buf.String())
+	}
+}
+
+// Nothing replaces the equality check in the other direction, and this pins why:
+// loadStore resolves fetched_at as max(root.t, manifest.fetched_at), so a root
+// stamped BEHIND the manifest it names is clamped up at load and never reaches
+// the checker. If that resolution ever changes, this fails and checkManifest
+// needs a direction check it does not need today.
+func TestLoadStoreClampsARootClockBehindItsManifest(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	f := watchFeed(t, db, "F", "http://f")
+	db.core.FetchedAt = 5000
+	watchPut(t, db, f, "one")
+
+	db.core.FetchedAt = 100 // an idle cycle stamping the root BEFORE its manifest
+	if err := db.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewDB(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close(ctx)
+	if got := reopened.core.FetchedAt; got != 5000 {
+		t.Errorf("resolved fetched_at = %d, want 5000 (the manifest's, clamped up from the root's 100)", got)
+	}
+}
