@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pkg/sftp"
@@ -61,21 +62,46 @@ type SFTP struct {
 }
 
 // sftpSession is one dialed SSH connection plus the SFTP subsystem on it.
-// conn is the raw transport, kept ONLY so alive() can put a deadline on its
-// probe; it is nil for a session built over an already-established transport
-// (the tests' in-process pipe), which then probes undeadlined.
+// conn is the raw transport, kept for the DIAL deadline alone (see
+// dialSFTPSession); it is nil for a session built over an already-established
+// transport (the tests' in-process pipe). lastOK is the last time an operation
+// on this session actually succeeded — the freshness the probe short-circuits
+// on.
 type sftpSession struct {
 	client    *sftp.Client
 	sshClient *ssh.Client
 	conn      net.Conn
+	lastOK    atomic.Int64 // unix nanos, 0 = never
 }
+
+// markOK records that this session just answered. Called on every successful
+// op, so a busy session is provably alive without asking.
+func (s *sftpSession) markOK() { s.lastOK.Store(time.Now().UnixNano()) }
 
 // sftpProbeTimeout bounds the liveness probe. A black-holed peer — a NAT that
 // evicted the mapping without sending an RST is the ordinary cause — answers
-// nothing and closes nothing, so an undeadlined Getwd waits out the kernel's
+// nothing and closes nothing, so an unbounded Getwd waits out the kernel's
 // full TCP retransmit schedule (minutes). The probe stands in for a dial, so
 // anything longer than a dial's own budget is the wrong trade.
 const sftpProbeTimeout = 10 * time.Second
+
+// sftpFreshWindow is how recently an op must have succeeded for the probe to
+// skip the round trip. It exists for the case with something to lose: a session
+// carrying live traffic is exactly the one a probe must not disturb, and one
+// that answered a moment ago cannot have died since in any way that matters —
+// the very next op will find out, and sftpSessionRefresh handles that.
+const sftpFreshWindow = 5 * time.Second
+
+// sessionHealth is the probe's answer. Three states, not two, because "did not
+// answer in time" is NOT "dead": a merely slow or busy peer must not have its
+// session torn down under the goroutines still using it.
+type sessionHealth int
+
+const (
+	sessionHealthy      sessionHealth = iota
+	sessionDead                       // answered with an error — a corpse, safe to close
+	sessionUnresponsive               // did not answer in time — replace, but do NOT close
+)
 
 // sftpDialTimeout bounds the whole connect — TCP, SSH handshake AND subsystem
 // open. ssh.ClientConfig.Timeout covers only the net.Dial, so relying on it
@@ -107,19 +133,50 @@ func (s *sftpSession) close() {
 // way the replacement is possible only because a session's identity is its key
 // and nothing holds a reference the memo cannot replace.
 //
-// The probe is DEADLINED (sftpProbeTimeout). A deadline on the conn is the
-// right instrument rather than racing the call against a timer: a timed-out
-// goroutine would stay parked on the dead socket for the full retransmit
-// window, holding the entry lock it was supposed to release. A deadline hit
-// reads as "not alive", so the corpse is dropped and redialed — which is the
-// correct answer for a peer that cannot answer a one-round-trip question.
-func (s *sftpSession) alive() bool {
-	if s.conn != nil {
-		_ = s.conn.SetDeadline(time.Now().Add(sftpProbeTimeout))
-		defer func() { _ = s.conn.SetDeadline(time.Time{}) }()
+// The probe is BOUNDED, but NOT by a deadline on the conn. That conn is shared:
+// pkg/sftp multiplexes every handle's requests over one SSH channel, so
+// SetDeadline is not the probe's to arm — an absolute deadline applies to all
+// pending and future I/O on the connection, so a probe that takes its full
+// budget times out another worker's in-flight asset upload. (Verified: a
+// SetDeadline on one end of a net.Pipe fails a concurrent Read with i/o
+// timeout.) Bound the CALL instead, and let the shared transport alone.
+//
+// trustFresh short-circuits on lastOK for the case that has something to lose:
+// a session carrying live traffic is exactly the one not to disturb, and one
+// that succeeded moments ago cannot have died since in any way that matters —
+// the next op finds out, and sftpSessionRefresh handles it. Refresh itself
+// passes false: it is asking BECAUSE an op just failed, so a stale success is
+// no answer.
+//
+// A timeout is sessionUnresponsive, deliberately distinct from sessionDead. The
+// caller replaces the session but must NOT close it: a slow peer is not a dead
+// one, and the goroutines still using it would lose their transfers. The parked
+// Getwd goroutine is left to its fate — it holds a buffered channel, so it can
+// always finish and be collected, and leaking one goroutine per black-holed
+// peer is the cheap side of this trade.
+func (s *sftpSession) probe(trustFresh bool) sessionHealth {
+	if trustFresh {
+		if last := s.lastOK.Load(); last != 0 && time.Since(time.Unix(0, last)) < sftpFreshWindow {
+			return sessionHealthy
+		}
 	}
-	_, err := s.client.Getwd()
-	return err == nil
+	res := make(chan error, 1) // buffered: a late answer must never park the sender
+	go func() {
+		_, err := s.client.Getwd()
+		res <- err
+	}()
+	t := time.NewTimer(sftpProbeTimeout)
+	defer t.Stop()
+	select {
+	case err := <-res:
+		if err != nil {
+			return sessionDead
+		}
+		s.markOK()
+		return sessionHealthy
+	case <-t.C:
+		return sessionUnresponsive
+	}
 }
 
 // sftpSessionKey is a session's IDENTITY: everything that decides which server
@@ -206,13 +263,21 @@ func sftpSessionFor(ctx context.Context, key sftpSessionKey, u *url.URL) (*sftpS
 	defer e.mu.Unlock()
 
 	if s := e.sess; s != nil {
-		if s.alive() {
+		switch s.probe(true) {
+		case sessionHealthy:
 			return s, nil
+		case sessionDead:
+			// Drop the corpse BEFORE dialing, so a failed dial cannot leave it
+			// behind for the next lookup to probe all over again.
+			e.sess = nil
+			s.close()
+		case sessionUnresponsive:
+			// Replace it, but leave it OPEN: it did not answer in time, which is
+			// not proof it is dead, and closing it would break whatever traffic
+			// the goroutines still holding it have in flight. Unreferenced once
+			// they finish.
+			e.sess = nil
 		}
-		// Drop the corpse BEFORE dialing, so a failed dial cannot leave it behind
-		// for the next lookup to probe all over again.
-		e.sess = nil
-		s.close()
 	}
 
 	s, err := sftpDialSession(ctx, key, u)
@@ -242,9 +307,19 @@ func sftpSessionRefresh(ctx context.Context, key sftpSessionKey, u *url.URL, dea
 
 	e := sftpEntryFor(key)
 	e.mu.Lock()
-	if e.sess == dead && dead != nil && !dead.alive() {
-		e.sess = nil
-		dead.close()
+	// trustFresh=false: this is asked BECAUSE an op just failed, so a success a
+	// second ago proves nothing. Same three-way answer — an unresponsive session
+	// is replaced but left open for whoever else is mid-transfer on it.
+	if e.sess == dead && dead != nil {
+		switch dead.probe(false) {
+		case sessionDead:
+			e.sess = nil
+			dead.close()
+		case sessionUnresponsive:
+			e.sess = nil
+		case sessionHealthy:
+			// Alive after all — one op's failure was not the connection's fault.
+		}
 	}
 	e.mu.Unlock()
 
@@ -430,8 +505,23 @@ func (d *SFTP) retry(ctx context.Context, op func(*sftp.Client) error) error {
 		if err != nil {
 			return err
 		}
-		return op(c)
+		err = op(c)
+		if err == nil {
+			d.markOK()
+		}
+		return err
 	})
+}
+
+// markOK stamps the bound session's freshness. A session with recent successful
+// I/O is provably alive, which is what lets probe() skip disturbing a busy one.
+func (d *SFTP) markOK() {
+	d.mu.Lock()
+	s := d.sess
+	d.mu.Unlock()
+	if s != nil {
+		s.markOK()
+	}
 }
 
 // retryBody is retry for a write: the rewinder decides whether the body can be
@@ -442,7 +532,11 @@ func (d *SFTP) retryBody(ctx context.Context, r io.Reader, op func(*sftp.Client,
 		if err != nil {
 			return err
 		}
-		return op(c, body)
+		err = op(c, body)
+		if err == nil {
+			d.markOK()
+		}
+		return err
 	})
 }
 
