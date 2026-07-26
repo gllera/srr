@@ -245,8 +245,16 @@ func applyConfigDoc(ctx context.Context, db *DB, doc *configDoc) error {
 		if db.core.Watch[name] == doc.Watch[name] {
 			continue
 		}
+		// Guarded INDEPENDENTLY, like setWatchRule: the two maps live in two
+		// different objects (patterns in config.gz, floors in the manifest) and
+		// can legitimately arrive one without the other — a root pointed back at
+		// an older generation keeps the sidecar's rules while losing its roster.
+		// One guard covering both then wrote into a nil map and panicked.
 		if db.core.Watch == nil {
-			db.core.Watch, db.core.WatchFrom = map[string]string{}, map[string]int{}
+			db.core.Watch = map[string]string{}
+		}
+		if db.core.WatchFrom == nil {
+			db.core.WatchFrom = map[string]int{}
 		}
 		db.core.Watch[name] = doc.Watch[name]
 		db.core.WatchFrom[name] = db.core.TotalArticles

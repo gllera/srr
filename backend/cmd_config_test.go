@@ -229,3 +229,27 @@ func TestMaskSecretMap(t *testing.T) {
 		t.Errorf("maskSecret(populated map) = %v, want ********", got)
 	}
 }
+
+// `srr import` against a store whose config.gz holds watch rules the manifest
+// has no floors for. The two maps live in two objects and can arrive one
+// without the other (the documented `{"v":3,"m":<older>}` rollback rewinds the
+// manifest, not the mutable sidecar), so a single nil-guard covering both wrote
+// into a nil map and panicked the restore.
+func TestConfigImportWatchWithNilRoster(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	if err := setWatchRule(ctx, db, "cve", `title=/CVE/i`); err != nil {
+		t.Fatal(err)
+	}
+	db.core.WatchFrom = nil // the roster the manifest lost
+
+	doc := &configDoc{Watch: map[string]string{"cve": `title=/CVE-\d{4}/i`}}
+	if err := applyConfigDoc(ctx, db, doc); err != nil {
+		t.Fatalf("applyConfigDoc: %v", err)
+	}
+	if got := db.core.Watch["cve"]; got != `title=/CVE-\d{4}/i` {
+		t.Errorf("spec = %q, want the imported one", got)
+	}
+	if _, ok := db.core.WatchFrom["cve"]; !ok {
+		t.Errorf("import did not stamp a coverage floor: WatchFrom=%v", db.core.WatchFrom)
+	}
+}
