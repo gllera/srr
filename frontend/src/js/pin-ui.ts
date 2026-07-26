@@ -62,7 +62,7 @@ function showPinProgress(done: number, total: number, cached?: number): void {
 // (raised bounds enumerate only the unread tail), so the key must encode it too.
 function pinKey(): string {
    const base = nav.filterKey()
-   return nav.isUnreadOnly() && nav.filter.active ? base + " #unread" : base
+   return nav.isUnreadOnly() && nav.isFilterActive() ? base + " #unread" : base
 }
 
 // Enumerate the packs for the current filter and cache them in the SW's
@@ -76,12 +76,12 @@ async function pinCurrentFilter(): Promise<void> {
    const key = pinKey()
    // [ALL] => empty Map, the documented fast path; a populated map is a feed/tag
    // scope (filter.feeds is fully populated even for [ALL], so pass empty here).
-   const feeds = nav.filter.active ? nav.filter.feeds : new Map<number, number>()
+   const feeds = nav.isFilterActive() ? nav.filterFeeds() : new Map<number, number>()
    const names = await data.packNamesForFilter(feeds)
    if (names.length === 0) return
    // Track whether this pin was taken in unread-only mode so the completion
    // message can surface the snapshot caveat (new unread won't auto-update).
-   pinIsUnreadSnapshot = nav.isUnreadOnly() && nav.filter.active
+   pinIsUnreadSnapshot = nav.isUnreadOnly() && nav.isFilterActive()
    const { port1, port2 } = new MessageChannel()
    port1.onmessage = (e: MessageEvent<{ type: string; done: number; total: number; cached?: number }>) => {
       if (e.data?.type !== "pin-progress") return
@@ -219,7 +219,7 @@ export function postMounts(): void {
 // orchestrator.
 export function pinMenuEntry(onError: (e: unknown) => void): { label: string; action: () => void } | null {
    if (!navigator.serviceWorker?.controller) return null
-   if (nav.filter.saved || nav.filter.search) return null
+   if (nav.isSavedFilter() || nav.isSearchFilter()) return null
    const key = pinKey()
    if (isPinned(key, data.activeStore().mid)) {
       return { label: "Remove offline copy", action: unpinCurrentFilter }

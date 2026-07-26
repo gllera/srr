@@ -108,7 +108,7 @@ export async function offerFrontierUndo(): Promise<void> {
 // mirroring refreshAfterStore's reader branch.
 function afterFrontierMove() {
    if (nav.isUnreadOnly()) {
-      nav.applyFilter([...nav.filter.tokens])
+      nav.applyFilter([...nav.filterTokens()])
       if (d.view() === "list") void list.rerender()
       else list.invalidate()
    } else if (d.view() === "list") {
@@ -152,9 +152,9 @@ export function markUnreadFromHere(): void {
 // seen-neutral peek modes — no items, and the gesture falls through to the
 // browser's own menu.
 function frontierMenuItems(): { label: string; action: () => void }[] {
-   if (nav.filter.saved || nav.isSearchFilter()) return []
+   if (nav.isSavedFilter() || nav.isSearchFilter()) return []
    const items: { label: string; action: () => void }[] = []
-   if (nav.filter.feeds.size > 0) items.push({ label: "Mark all read", action: markAllRead })
+   if (nav.filterFeeds().size > 0) items.push({ label: "Mark all read", action: markAllRead })
    if (nav.currentChron() >= 0) items.push({ label: "Mark unread from here", action: markUnreadFromHere })
    return items
 }

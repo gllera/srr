@@ -37,7 +37,7 @@ const nav = vi.hoisted(() => {
       has_right: false,
       right_count: 0,
    })
-   return {
+   const mock = {
       SAVED_TOKEN: "~saved",
       SEARCH_PREFIX: "q:",
       pruneSeen: vi.fn(),
@@ -122,7 +122,20 @@ const nav = vi.hoisted(() => {
       seek: vi.fn(async () => 0),
       filterKey: vi.fn(() => ""),
       filter: { feeds: new Map<number, number>(), saved: false, search: false, active: false, tokens: [] as string[] },
+      // The ENG4 filter read accessors, reading the same mock `filter` the cases
+      // seed — so a case that sets `nav.filter.saved = true` drives app/menus/
+      // pin-ui exactly as it did when those modules read the field directly.
+      // They go through `mock.filter` at CALL time rather than closing over the
+      // object: two cases below REPLACE nav.filter wholesale (`nav.filter = {…}`,
+      // the unread-only pin setup and the frontier-gesture badge setup), and an
+      // accessor bound to the original object would keep answering for the old
+      // one — which is exactly how this mock first went wrong.
+      isSavedFilter: vi.fn(() => mock.filter.saved),
+      isFilterActive: vi.fn(() => mock.filter.active),
+      filterTokens: vi.fn(() => mock.filter.tokens),
+      filterFeeds: vi.fn(() => mock.filter.feeds),
    }
+   return mock
 })
 vi.mock("./nav", () => nav)
 
