@@ -13,7 +13,7 @@ import (
 // InspectCmd mirrors the frontend's bounds-based pack lookup so a pass
 // here means the read path the browser uses is consistent with the pack
 // files on disk. The idx parse + addressing mirror itself lives in
-// idx_read.go (shared with `srr art ls`).
+// idx_read.go (shared with `srr art`).
 type InspectCmd struct {
 	URL      string `optional:"" help:"HTTP base URL (e.g., http://localhost:3000). Overrides --store."`
 	Chron    int    `default:"-1" help:"Inspect a specific chronIdx; omit for other modes."`

@@ -126,7 +126,7 @@ func cmpString(a, b string) int {
 	return 0
 }
 
-// ImportAllCmd restores a document written by `srr export`.
+// ImportAllCmd restores a document written by `srr store export`.
 type ImportAllCmd struct {
 	File string `short:"f" type:"path" help:"Read JSON from PATH instead of stdin."`
 

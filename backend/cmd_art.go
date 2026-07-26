@@ -58,10 +58,8 @@ type ArtCmd struct {
 	Limit  int      `short:"l" default:"50" help:"Max articles to return."`
 	Before *int     `short:"b" optional:"" help:"Return articles before this artID (exclusive). Omit for newest."`
 	Query  string   `short:"q" optional:"" help:"Only articles whose title contains this text (accent- and case-insensitive)."`
-	// No short flags: kong flattens the globals into every command, and -s/-u
-	// are already spoken for there.
-	Since string `optional:"" help:"Only articles fetched at or after this time (inclusive): a duration before now (24h, 7d, 2w), a date (2026-07-15), or an RFC3339 instant."`
-	Until string `optional:"" help:"Only articles fetched before this time (exclusive; same forms as --since)."`
+	Since  string   `short:"s" optional:"" help:"Only articles fetched at or after this time (inclusive): a duration before now (24h, 7d, 2w), a date (2026-07-15), or an RFC3339 instant."`
+	Until  string   `short:"u" optional:"" help:"Only articles fetched before this time (exclusive; same forms as --since)."`
 }
 
 // window resolves --since/--until into the half-open [since, until) window's
@@ -124,7 +122,7 @@ type artQuery struct {
 	query  string
 }
 
-// listArticles is the whole `srr art ls` collection body, factored out so
+// listArticles is the whole `srr art` collection body, factored out so
 // other consumers (the MCP tool layer) wrap it instead of forking it. The
 // caller owns the DB scope — this acquires no lock.
 func listArticles(ctx context.Context, db *DB, q artQuery) (*articlesOutput, error) {

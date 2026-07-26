@@ -79,23 +79,23 @@ type FeedGroup struct {
 	Export ExportCmd `cmd:"" help:"Export feeds as OPML (inverse of import)."`
 }
 
-type ArtGroup struct {
-	Fetch FetchCmd `cmd:"" help:"Fetch feed articles."`
-	Ls    ArtCmd   `cmd:"" help:"List stored articles."`
+type StoreGroup struct {
+	Export  ExportAllCmd `cmd:"" help:"Write the whole store configuration (feeds, recipes, syndication, dedup default) as JSON."`
+	Import  ImportAllCmd `cmd:"" help:"Restore a configuration written by 'srr store export' (feeds matched by url; fetch state untouched)."`
+	Dedup   DedupCmd     `cmd:"" help:"Print or set the store-wide default dedup horizon (config.gz 'dd', in days)."`
+	Compact CompactCmd   `cmd:"" help:"Physically reclaim the payload bytes of already-expired articles (opt-in; the one op that removes bytes)."`
 }
 
 type CLI struct {
 	Globals
+	Fetch     FetchCmd       `cmd:"" help:"Fetch feed articles (one cycle, or a loop with --interval)."`
+	Art       ArtCmd         `cmd:"" aliases:"a" help:"List stored articles."`
 	Feed      FeedGroup      `cmd:"" aliases:"f" help:"Feed management."`
-	Art       ArtGroup       `cmd:"" aliases:"a" help:"Article management."`
+	StoreCmd  StoreGroup     `cmd:"" name:"store" help:"Store-level operations: config export/import, dedup default, compaction."`
 	Asset     AssetGroup     `cmd:"" help:"Self-hosted asset tooling (repair a published object)."`
 	Syndicate SyndicateGroup `cmd:"" help:"Manage syndication output feeds (out/*)."`
 	Recipe    RecipeGroup    `cmd:"" help:"Manage processing recipes (named {ingest, pipe} bundles)."`
 	Watch     WatchGroup     `cmd:"" help:"Manage keyword watchlists (named per-article match rules)."`
-	Export    ExportAllCmd   `cmd:"" help:"Write the whole store configuration (feeds, recipes, syndication, dedup default) as JSON."`
-	Import    ImportAllCmd   `cmd:"" help:"Restore a configuration written by 'srr export' (feeds matched by url; fetch state untouched)."`
-	Dedup     DedupCmd       `cmd:"" help:"Print or set the store-wide default dedup horizon (db.gz 'dd', in days)."`
-	Compact   CompactCmd     `cmd:"" help:"Physically reclaim the payload bytes of already-expired articles (opt-in; the one op that removes bytes)."`
 	Preview   PreviewCmd     `cmd:"" aliases:"p" help:"Preview processed feed articles in a browser."`
 	Serve     ServeCmd       `cmd:"" help:"Serve a local web admin GUI for managing feeds, recipes, syndication."`
 	Mcp       McpCmd         `cmd:"" help:"Serve the SRR MCP tool interface over stdio."`

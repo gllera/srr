@@ -37,7 +37,7 @@ export function srrBin(): string {
 }
 
 // Run `srr -o <storeDir> <args...>` and return stdout. Async (execFile, not
-// execFileSync) is REQUIRED: `art fetch` reaches back to feedServer() which runs
+// execFileSync) is REQUIRED: `srr fetch` reaches back to feedServer() which runs
 // in this same Node process — a synchronous spawn would block the event loop and
 // the feed server could never answer, so every fetch would time out. Throws on
 // non-zero exit, surfacing stderr so a CLI failure is legible.
@@ -167,7 +167,7 @@ export interface FeedRoute {
 
 export interface FeedServer {
    url: string
-   // Replace/add a route's body so a second `srr art fetch` sees new content.
+   // Replace/add a route's body so a second `srr fetch` sees new content.
    set(path: string, body: string | FeedRoute): void
    // Drop a route so subsequent fetches 404 (e.g. to provoke a ferr on a feed
    // that had to resolve validly at `feed add` time).

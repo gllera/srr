@@ -634,7 +634,7 @@ describe("reader titleless feeds (Telegram-style: title duplicates the body)", (
 describe("reader compaction tombstone (§9.3 — expired article, no stored content)", () => {
    it("renders 'no longer stored' when the article payload is absent, keeping source + date", async () => {
       await boot()
-      // `srr compact` drops c/t/l and keeps f/a/p — the wire line has no `c`.
+      // `srr store compact` drops c/t/l and keeps f/a/p — the wire line has no `c`.
       nav.fromHash.mockResolvedValue(showFeed({ article: { f: 1, a: 0, p: 1700000000 } as unknown as IArticle }))
       hashTo("#42")
       await flush()

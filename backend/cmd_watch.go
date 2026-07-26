@@ -86,7 +86,7 @@ func (o *WatchSetCmd) Run() error {
 }
 
 // setWatchRule validates and upserts, then commits. The whole point of doing it
-// under the store lock — rather than as a config-only edit like `srr dedup` —
+// under the store lock — rather than as a config-only edit like `srr store dedup` —
 // is the coverage stamp: WatchFrom rides the MANIFEST, so the rule and the
 // statement of where its lane begins become durable together.
 //

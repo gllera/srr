@@ -28,14 +28,14 @@ describe("contract: latest-pack GC grace window", () => {
       feeds = await feedServer({ "/a.xml": rssFeed("GC", all.slice(0, 2)) })
       store = makeStore()
       await srr(store, "feed", "add", "-t", "GC", "-u", `${feeds.url}/a.xml`)
-      await srr(store, "art", "fetch")
+      await srr(store, "fetch")
 
       // Three more fetches, each re-presenting everything + 2 new items
       // (watermark dedup appends new-only, so each fetch publishes one
       // generation).
       for (const n of [4, 6, 8]) {
          feeds.set("/a.xml", rssFeed("GC", all.slice(0, n)))
-         await srr(store, "art", "fetch")
+         await srr(store, "fetch")
       }
       reader = await mountReader(store)
    })

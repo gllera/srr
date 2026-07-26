@@ -30,7 +30,7 @@ describe("contract: meta shard boundary (5,001 articles)", () => {
       feeds = await feedServer({ "/big.xml": rssFeed("Big", nItems(N, "meta", 0, START)) })
       store = makeStore()
       await srr(store, "feed", "add", "-t", "Big", "-u", `${feeds.url}/big.xml`)
-      await srr(store, "art", "fetch")
+      await srr(store, "fetch")
       reader = await mountReader(store)
       // Same fresh module registry as the mounted data/nav (import order
       // matters — after mountReader's resetModules), so search.ts sees the

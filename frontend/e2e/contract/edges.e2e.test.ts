@@ -39,7 +39,7 @@ describe("contract: robustness edges", () => {
       await srr(store, "feed", "add", "-t", "News", "-g", "world", "-u", `${feeds.url}/news.xml`)
       await srr(store, "feed", "add", "-t", "Tech", "-u", `${feeds.url}/tech.xml`)
       await srr(store, "feed", "add", "-t", "Sport", "-g", "world", "-u", `${feeds.url}/sport.xml`)
-      await srr(store, "art", "fetch")
+      await srr(store, "fetch")
    })
 
    afterAll(async () => {

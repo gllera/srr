@@ -60,7 +60,7 @@ describe("contract: search", () => {
       feeds = await feedServer({ "/feed.xml": rssFeed("Feed", items()) })
       store = makeStore()
       await srr(store, "feed", "add", "-t", "Feed", "-u", `${feeds.url}/feed.xml`)
-      await srr(store, "art", "fetch")
+      await srr(store, "fetch")
       reader = await mountReader(store)
       // Same fresh module registry as the mounted data/nav, so search.ts sees
       // the same data.ts instance and the same fetch shim.
@@ -120,7 +120,7 @@ describe("contract: search", () => {
             },
          ]),
       )
-      await srr(store, "art", "fetch")
+      await srr(store, "fetch")
       reader = await mountReader(store)
       search = await import("../../src/js/search")
 

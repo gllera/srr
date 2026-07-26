@@ -70,11 +70,11 @@ describe("contract: multi-store mounting", () => {
       homeDir = makeStore()
       await srr(homeDir, "feed", "add", "-t", "Alpha", "-u", `${homeFeeds.url}/alpha.xml`)
       await srr(homeDir, "feed", "add", "-t", "Beta", "-u", `${homeFeeds.url}/beta.xml`)
-      await srr(homeDir, "art", "fetch")
+      await srr(homeDir, "fetch")
 
       peerDir = makeStore()
       await srr(peerDir, "feed", "add", "-t", "Gamma", "-u", `${peerFeeds.url}/gamma.xml`)
-      await srr(peerDir, "art", "fetch")
+      await srr(peerDir, "fetch")
 
       // Mount table: home (bare) + the peer at its sub-path base. Written BEFORE
       // the data module is imported, so data.init() adopts it.
@@ -168,7 +168,7 @@ describe("contract: multi-store — one mount down degrades gracefully", () => {
       homeFeeds = await feedServer({ "/alpha.xml": rssFeed("Alpha", nItems(2, "alpha", 0, 0)) })
       homeDir = makeStore()
       await srr(homeDir, "feed", "add", "-t", "Alpha", "-u", `${homeFeeds.url}/alpha.xml`)
-      await srr(homeDir, "art", "fetch")
+      await srr(homeDir, "fetch")
 
       localStorage.clear()
       localStorage.setItem(

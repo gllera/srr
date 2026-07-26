@@ -247,7 +247,7 @@ func validateOutPayload(format string, data []byte) error {
 // default applied here).
 // validateOutShape checks everything about an OutFeed that does NOT depend on
 // the store's feed ids: the name grammar, the format, and the external-slot
-// constraints. Split out so `srr import` can validate a document's out[] before
+// constraints. Split out so `srr store import` can validate a document's out[] before
 // the feeds it references have been created (ids are store-local) without
 // duplicating — and drifting from — these rules.
 func validateOutShape(in OutFeed) error {

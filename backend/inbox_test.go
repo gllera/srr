@@ -215,7 +215,7 @@ func TestSpoolSlotValidation(t *testing.T) {
 // The end-to-end shape: a spooled cycle drained into the writer produces a
 // store that passes the full consistency sweep, with the drained articles
 // carrying the CONSOLIDATOR's fetched_at (the chron-monotone invariant the
-// expiration walk and `art ls --since` binary search both rely on) while
+// expiration walk and `art --since` binary search both rely on) while
 // keeping the producer's published times.
 func TestDrainedCycleValidates(t *testing.T) {
 	db, _, _ := setupTestDB(t)

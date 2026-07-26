@@ -226,7 +226,7 @@ func TestMaskSecretMap(t *testing.T) {
 	}
 }
 
-// `srr import` against a store whose config.gz holds watch rules the manifest
+// `srr store import` against a store whose config.gz holds watch rules the manifest
 // has no floors for. The two maps live in two objects and can arrive one
 // without the other (the documented `{"v":3,"m":<older>}` rollback rewinds the
 // manifest, not the mutable sidecar), so a single nil-guard covering both wrote

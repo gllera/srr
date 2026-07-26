@@ -42,11 +42,11 @@ import (
 // the 5k/50k strides are all unchanged by construction — the universal crash
 // argument (§6.1) and every existing invariant carry over verbatim.
 //
-// It is deliberately OPT-IN (`srr compact`, default off) and never something a
+// It is deliberately OPT-IN (`srr store compact`, default off) and never something a
 // fetch cycle does silently: it is the only op that drops payload bytes, so an
 // operator asks for it explicitly.
 
-// CompactCmd is `srr compact`.
+// CompactCmd is `srr store compact`.
 type CompactCmd struct {
 	GC gcFlags `embed:"" group:"GC flags:"`
 

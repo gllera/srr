@@ -43,7 +43,7 @@ type ServeCmd struct {
 	SyncDir  string        `default:"${syncDir}" env:"SRR_SYNC_DIR" help:"Directory holding the cross-device reader-profile blobs served at /sync/<name> (GET the last-stored profile or 404, PUT to store it). Device state, kept out of the pack store on purpose. Empty disables the endpoint."`
 
 	// feedFilter scopes the background fetch loop to a subset of feeds (same
-	// SRR_FETCH_* env/flags as `srr art fetch`), copied into the FetchCmd below.
+	// SRR_FETCH_* env/flags as `srr fetch`), copied into the FetchCmd below.
 	feedFilter
 }
 
@@ -86,7 +86,7 @@ func (o *ServeCmd) Run() error {
 	}()
 
 	// Optional background fetch loop: when --interval is set, serve runs the same
-	// all-feeds cycle as `srr art fetch --interval`, in-process, sharing the
+	// all-feeds cycle as `srr fetch --interval`, in-process, sharing the
 	// server's signal context so one Ctrl-C/SIGTERM stops both. A running cycle
 	// holds the store lock for its duration, so a concurrent GUI mutation gets a
 	// 409 (msgLockContention) — the same contract as a separate fetch process.

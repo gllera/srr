@@ -745,7 +745,7 @@ func (o *DB) DrainDeltas(ctx context.Context) error {
 //
 // The fetch, the parse and the accounting invariant are parseDeltaChain's
 // (idx_read.go), shared verbatim with the read-side loadDeltas that inspect and
-// art ls go through; what is the WRITER's alone — and all that lives here — is
+// art go through; what is the WRITER's alone — and all that lives here — is
 // the memo.
 func (o *DB) loadDeltaChain(ctx context.Context) (*deltaChain, error) {
 	c := &o.core

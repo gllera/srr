@@ -25,7 +25,7 @@ package main
 //
 // It drives the REAL production write path — PutArticles → SyncIdxSummary →
 // SyncMeta → ExpireArticles → SyncSeen → GC → Commit, cmd_fetch.go's order and
-// cmd_fetch.go's functions, with RemoveFeed/AddFeed and `srr compact` woven in
+// cmd_fetch.go's functions, with RemoveFeed/AddFeed and `srr store compact` woven in
 // — exactly as genbig_test.go does. Nothing here hand-writes a pack byte.
 //
 // Gated, like genbig_test.go and gen_expire_test.go: SRR_CHAOS must be set, so
@@ -58,7 +58,7 @@ package main
 //     live object" from a rare race into a per-step assertion. Both directions —
 //     WIDENING a live store's window is the ordinary operator action, and it is
 //     the one that used to break the sweep outright; see chaosKeep.
-//   - physical compaction — `srr compact` on ~1 cycle in 11 of a CHURN seed.
+//   - physical compaction — `srr store compact` on ~1 cycle in 11 of a CHURN seed.
 //     Whether a seed churns at all is drawn once per seed (roughly half do): a
 //     churn seed adds, removes and reuses feed ids and compacts, a stable one
 //     subscribes its whole feed set up front and leaves it. Both are real
@@ -176,7 +176,7 @@ var (
 // script and be compared afterwards.
 type chaosStep struct {
 	// Reopen closes the DB and opens a fresh one before the step, modelling the
-	// process boundary between two `srr art fetch` invocations.
+	// process boundary between two `srr fetch` invocations.
 	Reopen bool
 	// RemoveFeed removes the live feed at RemovePick (mod the live count) before
 	// anything else, so a freed id is available for AddFeeds to reuse in the
@@ -267,7 +267,7 @@ func chaosLinkAt(gidx int) string { return fmt.Sprintf("https://example.com/chao
 // without knowing which id it will take.
 //
 // One decision is made per SEED rather than per cycle: whether this is a CHURN
-// seed (feeds come and go, ids get reused, `srr compact` runs) or a STABLE one
+// seed (feeds come and go, ids get reused, `srr store compact` runs) or a STABLE one
 // (every feed subscribed up front, none ever added or removed, no compaction).
 // The split exists because it is exactly the line along which the byte-level
 // deployment shapes divide: a store whose subscription list is stable, and one
@@ -374,7 +374,7 @@ func newChaosRun(t *testing.T, label string, seed uint64, dir string, killSwitch
 
 // applyGlobals points the process globals at this run's store with this step's
 // knobs. Fresh per step: --max-deltas, --max-delta-bytes and --keep-manifests
-// are all re-drawn, and `srr compact` reads globals.KeepManifests itself.
+// are all re-drawn, and `srr store compact` reads globals.KeepManifests itself.
 func (c *chaosRun) applyGlobals(st chaosStep) {
 	maxDeltas := st.MaxDeltas
 	if c.killSwitch {
@@ -570,7 +570,7 @@ func (c *chaosRun) removeFeed(step int, st chaosStep) {
 	c.cov.Removals++
 }
 
-// compact drains the chain, then runs the real `srr compact`.
+// compact drains the chain, then runs the real `srr store compact`.
 //
 // The drain is deliberate and it is what keeps the equivalence compare honest:
 // compaction touches the CONSOLIDATED region only (docs/MANIFEST-SPEC.md §9.2 —

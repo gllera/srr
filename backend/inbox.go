@@ -69,7 +69,7 @@ type inboxState struct {
 // pre-encoded data-pack line: ArticleData.FetchedAt must be stamped by the
 // CONSOLIDATOR's cycle, not the producer's, or a batch mixing the two loses the
 // chron-monotone fetched_at that ExpireArticles' contiguous-prefix model and
-// `srr art ls --since/--until`'s binary search both depend on. Published — the
+// `srr art --since/--until`'s binary search both depend on. Published — the
 // timestamp a reader sees — is the producer's and rides through verbatim.
 type inboxItem struct {
 	Title     string `json:"t,omitempty"`

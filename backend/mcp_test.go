@@ -26,7 +26,7 @@ import (
 // mcpTestStore commits three fetch cycles of two articles each against two
 // tagged feeds, so chron 0..5 carries three distinct fetched_at stamps (the
 // window clock) and one accented title (the folded-query probe). Cycle stamps
-// are shared with the `srr art ls` window tests (artCycleTimes).
+// are shared with the `srr art` window tests (artCycleTimes).
 func mcpTestStore(t *testing.T) (*DB, *Feed, *Feed) {
 	t.Helper()
 	db, _, _ := setupTestDB(t)

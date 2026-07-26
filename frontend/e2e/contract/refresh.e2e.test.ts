@@ -33,7 +33,7 @@ describe("contract: in-place refresh across a fetch cycle", () => {
       feeds = await feedServer({ "/a.xml": rssFeed("Alpha", all.slice(0, 3)) })
       store = makeStore()
       await srr(store, "feed", "add", "-t", "Alpha", "-u", `${feeds.url}/a.xml`)
-      await srr(store, "art", "fetch")
+      await srr(store, "fetch")
       reader = await mountReader(store)
    })
 
@@ -50,7 +50,7 @@ describe("contract: in-place refresh across a fetch cycle", () => {
    it("adopts a new fetch cycle in place: totals, generation, and new-article navigation", async () => {
       const before = reader.data.db.m ?? 0
       feeds.set("/a.xml", rssFeed("Alpha", all))
-      await srr(store, "art", "fetch")
+      await srr(store, "fetch")
       expect(await reader.data.refresh()).toBe("updated")
       expect(reader.data.db.total_art).toBe(all.length)
       expect(reader.data.db.m ?? 0).toBeGreaterThan(before)
@@ -75,7 +75,7 @@ describe("contract: in-place refresh across a fetch cycle", () => {
       // so items 0..4 of this call are byte-identical to `all` — only index 5 is new.
       const extra = nItems(6, "alpha")
       feeds.set("/a.xml", rssFeed("Alpha", extra))
-      await srr(store, "art", "fetch")
+      await srr(store, "fetch")
 
       // Take the tail idx pack the NEW generation names away, so applyDb's
       // fetch of it 404s. The name is listed, so read it from the manifest.

@@ -135,7 +135,7 @@ func (l *legacyCore) state() *DBCore {
 // deltas, summaries) have no bare-stem form and are listed here under their
 // LEGACY keys, which migrateRoot then re-publishes under fresh stems.
 //
-// It is used unmigrated by the read-only tools (`srr inspect`, `srr art ls`
+// It is used unmigrated by the read-only tools (`srr inspect`, `srr art`
 // against a store no locked session has touched yet), which resolve names
 // through the table like everything else and never publish it.
 func namesFromLegacy(l *legacyCore) (*ManifestNames, []legacyObject) {
@@ -219,7 +219,7 @@ type legacyObject struct{ from, to string }
 
 // loadStore resolves the store root through whichever shape it carries and
 // returns the in-memory core, INCLUDING its object-name table. It is the single
-// root resolver: NewDB and the read-only tools (`srr inspect`, `srr art ls`)
+// root resolver: NewDB and the read-only tools (`srr inspect`, `srr art`)
 // both go through it, so the writer and the checkers can never disagree about
 // what a store's objects are called.
 //

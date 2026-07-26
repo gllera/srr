@@ -82,7 +82,7 @@ describe("browser: content image lightbox", () => {
 
       clearDir(packsDir)
       await srr(packsDir, "feed", "add", "-t", "Pics", "-u", `${feeds.url}/pics.xml`)
-      await srr(packsDir, "art", "fetch")
+      await srr(packsDir, "fetch")
 
       browser = await launchBrowser()
    })

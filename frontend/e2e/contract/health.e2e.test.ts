@@ -40,13 +40,13 @@ describe("contract: fetch-health vitals", () => {
       store = makeStore()
       await srr(store, "feed", "add", "-t", "Stable", "-u", `${feeds.url}/stable.xml`)
       await srr(store, "feed", "add", "-t", "Flaky", "-u", `${feeds.url}/flaky.xml`)
-      await srr(store, "art", "fetch")
+      await srr(store, "fetch")
       healthy = readDb<RawDb>(store)
 
       // Second cycle: the flaky feed's route is gone (404). Per-feed errors are
       // non-fatal — the cycle exits 0 and still commits the vitals.
       feeds.remove("/flaky.xml")
-      await srr(store, "art", "fetch")
+      await srr(store, "fetch")
    })
 
    afterAll(async () => {

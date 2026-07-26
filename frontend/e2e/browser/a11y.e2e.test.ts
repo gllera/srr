@@ -147,7 +147,7 @@ describe("browser: a11y (axe-core)", () => {
       clearDir(packsDir)
       await srr(packsDir, "feed", "add", "-t", "News", "-g", "world", "-u", `${feeds.url}/news.xml`)
       await srr(packsDir, "feed", "add", "-t", "Sport", "-u", `${feeds.url}/sport.xml`)
-      await srr(packsDir, "art", "fetch")
+      await srr(packsDir, "fetch")
       browser = await launchBrowser()
    })
 

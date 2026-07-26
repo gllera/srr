@@ -260,7 +260,7 @@ func importRecipes(ctx context.Context) (map[string]Recipe, error) {
 }
 
 // commitImportedFeeds normalizes and adds each resolved feed, then commits.
-// Shared by `srr import` and the HTTP import handler; call it inside a
+// Shared by `srr store import` and the HTTP import handler; call it inside a
 // withDB(true)/withDBCtx(…, true) scope.
 func commitImportedFeeds(ctx context.Context, db *DB, feeds []*Feed) error {
 	for _, c := range feeds {

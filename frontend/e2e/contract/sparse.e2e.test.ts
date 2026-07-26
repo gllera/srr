@@ -64,7 +64,7 @@ describe("contract: sparse articles (omitempty wire fields)", () => {
       feeds = await feedServer({ "/sparse.xml": rssFeed("Sparse", items) })
       store = makeStore()
       await srr(store, "feed", "add", "-t", "Sparse", "-u", `${feeds.url}/sparse.xml`)
-      await srr(store, "art", "fetch")
+      await srr(store, "fetch")
       reader = await mountReader(store)
       search = await import("../../src/js/search")
       for (let i = 0; i < items.length; i++) {

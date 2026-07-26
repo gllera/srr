@@ -208,10 +208,10 @@ func TestScopedFlagsAreNotGlobal(t *testing.T) {
 			t.Errorf("--%s is a root (global) flag; it must live on its embedding commands only", name)
 		}
 	}
-	fetch := nodeFlags(findCmd(t, parser.Model.Node, "art", "fetch"))
+	fetch := nodeFlags(findCmd(t, parser.Model.Node, "fetch"))
 	for _, name := range scopedFlagNamesList {
 		if !fetch[name] {
-			t.Errorf("the fetch command is missing --%s", name)
+			t.Errorf("srr fetch is missing --%s", name)
 		}
 	}
 	feedRm := nodeFlags(findCmd(t, parser.Model.Node, "feed", "rm"))
@@ -220,15 +220,54 @@ func TestScopedFlagsAreNotGlobal(t *testing.T) {
 			t.Errorf("srr feed rm --help still carries --%s", name)
 		}
 	}
-	compact := nodeFlags(findCmd(t, parser.Model.Node, "compact"))
+	compact := nodeFlags(findCmd(t, parser.Model.Node, "store", "compact"))
 	if !compact["keep-manifests"] {
-		t.Error("compact is missing --keep-manifests")
+		t.Error("srr store compact is missing --keep-manifests")
 	}
 	if compact["asset-process"] {
-		t.Error("compact must not carry cycleFlags")
+		t.Error("srr store compact must not carry cycleFlags")
 	}
 	preview := nodeFlags(findCmd(t, parser.Model.Node, "preview"))
 	if !preview["max-feed-size"] || preview["pack-size"] {
 		t.Error("srr preview must carry netFlags and not cycleFlags")
+	}
+}
+
+// The approved tree: fetch top-level, art lists directly, the store group
+// holds export/import/dedup/compact, and the old top-level forms are GONE.
+func TestCommandTree(t *testing.T) {
+	parser := newTestParser(t)
+	rootCmds := map[string]bool{}
+	for _, c := range parser.Model.Node.Children {
+		rootCmds[c.Name] = true
+	}
+	for _, want := range []string{"fetch", "art", "feed", "store", "asset",
+		"syndicate", "recipe", "watch", "preview", "serve", "mcp", "frontend",
+		"config", "inspect", "version"} {
+		if !rootCmds[want] {
+			t.Errorf("top-level command %q missing", want)
+		}
+	}
+	for _, gone := range []string{"export", "import", "dedup", "compact"} {
+		if rootCmds[gone] {
+			t.Errorf("top-level command %q must have moved under store", gone)
+		}
+	}
+	store := findCmd(t, parser.Model.Node, "store")
+	for _, want := range []string{"export", "import", "dedup", "compact"} {
+		findCmd(t, store, want)
+	}
+	// art is a leaf now (the old ls/fetch children are gone).
+	art := findCmd(t, parser.Model.Node, "art")
+	if len(art.Children) != 0 {
+		t.Errorf("art must be a leaf command, has children: %v", art.Children)
+	}
+	// The reclaimed shorts.
+	artFlags := map[string]rune{}
+	for _, f := range art.Flags {
+		artFlags[f.Name] = f.Short
+	}
+	if artFlags["since"] != 's' || artFlags["until"] != 'u' {
+		t.Errorf("art --since/--until shorts = %q/%q, want s/u", artFlags["since"], artFlags["until"])
 	}
 }

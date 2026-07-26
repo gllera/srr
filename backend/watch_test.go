@@ -18,7 +18,7 @@ import (
 //  1. ALIGNMENT. Bit i of the object at position p means chron p*watchPackSize+i
 //     and nothing else, across a pack split, across the pack↔delta seam, and
 //     across both operations that remove articles without renumbering them
-//     (expiration, `srr compact`). That is invariant M8 wearing this feature's
+//     (expiration, `srr store compact`). That is invariant M8 wearing this feature's
 //     clothes, and it is the property everything else is built on.
 //  2. COVERAGE. A rule's lane starts where the operator declared it and ends
 //     where the last successful sync reached — never wider, in either direction.

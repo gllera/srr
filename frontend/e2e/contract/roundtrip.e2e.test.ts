@@ -34,7 +34,7 @@ describe("contract: round-trip", () => {
       store = makeStore()
       await srr(store, "feed", "add", "-t", "Alpha", "-u", `${feeds.url}/alpha.xml`)
       await srr(store, "feed", "add", "-t", "Beta", "-u", `${feeds.url}/beta.xml`)
-      await srr(store, "art", "fetch")
+      await srr(store, "fetch")
 
       alpha.forEach((it, i) =>
          expected.push({ feedId: 0, title: it.title, link: it.link, content: it.content, p: pubUnix(i) }),

@@ -83,7 +83,7 @@ func handleResolve(w http.ResponseWriter, r *http.Request) {
 
 // handleDedup sets the store-wide default seen.gz dedup horizon (db.gz
 // DBCore.DedupDays), backing the Tools-tab control — the GUI twin of
-// `srr dedup --days N`. Days in [0, 36500]; 0 resets to the built-in default.
+// `srr store dedup --days N`. Days in [0, 36500]; 0 resets to the built-in default.
 // The store default has no off switch — a per-feed -1 disables the pool. Echoes
 // the *effective* default so the UI re-displays the built-in after a 0 reset.
 func handleDedup(w http.ResponseWriter, r *http.Request) {
@@ -110,7 +110,7 @@ func handleDedup(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleExport serves the feed list as OPML (default, the interop format) or —
-// with ?format=json — the LOSSLESS whole-configuration document `srr export`
+// with ?format=json — the LOSSLESS whole-configuration document `srr store export`
 // writes: OPML's leaf carries only title+url, so it is a backup that silently
 // restores the wrong processing config.
 func handleExport(w http.ResponseWriter, r *http.Request) {
@@ -149,7 +149,7 @@ func handleExport(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
-// handleImport imports every feed in the uploaded OPML body (like `srr import -a`).
+// handleImport imports every feed in the uploaded OPML body (like `srr store import -a`).
 // Optional query params: tag (override OPML group tags), recipe (stamp all),
 // dry_run=1 (preview only). Subscribe-time discovery resolves homepage URLs.
 // The webui only calls the dry run — its review sheet commits the operator's

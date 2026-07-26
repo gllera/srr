@@ -34,7 +34,7 @@ describe("browser: reader edge states", () => {
       clearDir(packsDir)
       await srr(packsDir, "feed", "add", "-t", "News", "-u", `${feeds.url}/news.xml`)
       await srr(packsDir, "feed", "add", "-t", "Sport", "-u", `${feeds.url}/sport.xml`)
-      await srr(packsDir, "art", "fetch")
+      await srr(packsDir, "fetch")
       browser = await launchBrowser()
    })
 

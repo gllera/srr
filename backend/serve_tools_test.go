@@ -326,7 +326,7 @@ func TestInspectFromHashMissingParam(t *testing.T) {
 	}
 }
 
-// TestSetStoreDedupDefault drives PUT /api/dedup — the GUI twin of `srr dedup
+// TestSetStoreDedupDefault drives PUT /api/dedup — the GUI twin of `srr store dedup
 // --days N`: it persists the store-wide default and echoes the effective value,
 // with 0 resetting to the built-in default.
 func TestSetStoreDedupDefault(t *testing.T) {

@@ -47,7 +47,7 @@ import (
 //	immutable, chrons do not move. An expired article's bit stays set and stays
 //	pointed at the same article; every reader already filters chron < add_idx,
 //	so the lane hides it for the same reason the list does. Nothing to do.
-//	COMPACTION (`srr compact`) rewrites data lines and meta cards under fresh
+//	COMPACTION (`srr store compact`) rewrites data lines and meta cards under fresh
 //	stems and leaves idx/ — and this series — entirely untouched, precisely
 //	because it must not renumber. So the bits stay aligned by construction, and
 //	watch/ needs no entry in the compaction plan at all.

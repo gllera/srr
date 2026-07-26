@@ -49,7 +49,7 @@ func TestFeedUpdRejectsInvalidDedupDays(t *testing.T) {
 	wantErr(t, (&UpdCmd{ID: 0, DedupDays: intPtr(-2)}).Run(), "dedup days")
 }
 
-// `srr dedup --days N` sets the store-wide default horizon in db.gz; a negative
+// `srr store dedup --days N` sets the store-wide default horizon in db.gz; a negative
 // value is rejected (only a per-feed -1 disables, never the store default).
 func TestDedupCmdSetsStoreDefault(t *testing.T) {
 	setupEmptyDB(t)

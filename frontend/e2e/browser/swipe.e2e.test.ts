@@ -53,7 +53,7 @@ describe("browser: row swipe actions", () => {
       feeds = await feedServer({ "/swipe.xml": rssFeed("Swipe", items) })
       clearDir(packsDir)
       await srr(packsDir, "feed", "add", "-t", "Swipe", "-u", `${feeds.url}/swipe.xml`)
-      await srr(packsDir, "art", "fetch")
+      await srr(packsDir, "fetch")
       browser = await launchBrowser()
    })
 

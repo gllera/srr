@@ -37,7 +37,7 @@ describe("browser: in-place refresh via a background trigger", () => {
       feeds = await feedServer({ "/live.xml": rssFeed("Live", items.slice(0, 2)) })
       clearDir(packsDir)
       await srr(packsDir, "feed", "add", "-t", "Live", "-u", `${feeds.url}/live.xml`)
-      await srr(packsDir, "art", "fetch")
+      await srr(packsDir, "fetch")
       browser = await launchBrowser()
       page = await browser.newPage()
       // Short viewport: a 2-3 row store is shorter than a default-size viewport,
@@ -82,7 +82,7 @@ describe("browser: in-place refresh via a background trigger", () => {
       // Publish the third item as a second backend fetch cycle — no reload, no
       // adoption yet (that only happens once a refresh trigger fires).
       feeds.set("/live.xml", rssFeed("Live", items))
-      await srr(packsDir, "art", "fetch")
+      await srr(packsDir, "fetch")
 
       // Reference point for the "no visual jump" check below, captured with the
       // list on screen BEFORE the trigger: the prepend compensation must hold
@@ -175,7 +175,7 @@ describe("browser: in-place refresh via a background trigger", () => {
          // A fourth article lands in the store while the tab sits on the list.
          const grown = nItems(4, "live")
          feeds.set("/live.xml", rssFeed("Live", grown))
-         await srr(packsDir, "art", "fetch")
+         await srr(packsDir, "fetch")
 
          // Pull: start inside the list container, drag down past the 72px
          // trigger in steps (Chrome coalesces touchmoves, so one big jump is not

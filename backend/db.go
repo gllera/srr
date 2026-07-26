@@ -377,7 +377,7 @@ type StoreConfig struct {
 	// A negative store default is invalid config (there is no store-wide off
 	// switch — a per-feed -1 is that lever); (*Feed).dedupDays treats <= 0 as
 	// unset. Backend-only, like Recipes/Out — the frontend/service-worker ignore
-	// it. omitempty; managed via `srr dedup --days N`.
+	// it. omitempty; managed via `srr store dedup --days N`.
 	DedupDays int `json:"dd,omitempty"`
 	// Out is the list of named syndication output feeds written by SyncOutFeeds
 	// during each fetch cycle. Each OutFeed maps chosen tags/feed ids to one

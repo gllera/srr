@@ -29,7 +29,7 @@ describe("contract: deleted feed tombstone", () => {
       store = makeStore()
       await srr(store, "feed", "add", "-t", "Doomed", "-u", `${feeds.url}/doomed.xml`)
       await srr(store, "feed", "add", "-t", "Keeper", "-u", `${feeds.url}/keeper.xml`)
-      await srr(store, "art", "fetch")
+      await srr(store, "fetch")
       // --force: removing a feed that already has stored articles is the
       // irreversible case the CLI now guards (its idx entries stay in the
       // immutable packs as orphans) — which is exactly what this suite pins.
@@ -85,7 +85,7 @@ describe("contract: deleted feed tombstone", () => {
       // inherits the old feed's entries, which sit below its add_idx.
       feeds.set("/phoenix.xml", rssFeed("Phoenix", nItems(2, "phoenix", 0, 20)))
       await srr(store, "feed", "add", "-t", "Phoenix", "-u", `${feeds.url}/phoenix.xml`)
-      await srr(store, "art", "fetch")
+      await srr(store, "fetch")
 
       const raw = readDb<{ feeds: Record<string, { title: string; add_idx: number; total_art: number }> }>(store)
       expect(raw.feeds["0"].title).toBe("Phoenix")

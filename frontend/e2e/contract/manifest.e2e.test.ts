@@ -50,11 +50,11 @@ describe("contract: generation-manifest root", () => {
       await srr(store, "feed", "add", "-t", "Manifest", "-g", "news", "-u", `${feeds.url}/a.xml`)
       // Cycle 1: consolidate, so the store really has tail packs.
       process.env.SRR_MAX_DELTAS = "0"
-      await srr(store, "art", "fetch")
+      await srr(store, "fetch")
       // Cycle 2: the delta default, so a live segment rides on the tail.
       delete process.env.SRR_MAX_DELTAS
       feeds.set("/a.xml", rssFeed("Manifest", [...batch2, ...batch1]))
-      await srr(store, "art", "fetch")
+      await srr(store, "fetch")
    })
 
    afterAll(async () => {
@@ -159,7 +159,7 @@ describe("contract: generation-manifest root", () => {
 
       const extra = nItems(2, "manifest-c", 0, 6)
       feeds.set("/a.xml", rssFeed("Manifest", [...extra, ...batch2, ...batch1]))
-      await srr(store, "art", "fetch")
+      await srr(store, "fetch")
       const grown = (readRoot(store).m as number) ?? 0
       expect(grown).toBeGreaterThan(m)
 

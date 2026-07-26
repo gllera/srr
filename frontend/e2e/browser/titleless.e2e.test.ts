@@ -83,7 +83,7 @@ describe("browser: titleless feeds (reader hides the duplicate heading)", () => 
       await srr(packsDir, "feed", "apply", "-f", wallFile)
       // News is left untagged → its desk stays empty/hidden.
       await srr(packsDir, "feed", "add", "-t", "News", "-u", `${feeds.url}/news.xml`)
-      await srr(packsDir, "art", "fetch")
+      await srr(packsDir, "fetch")
       rmSync(applyDir, { recursive: true, force: true })
 
       browser = await launchBrowser()

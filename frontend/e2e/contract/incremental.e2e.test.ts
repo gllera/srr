@@ -23,7 +23,7 @@ describe("contract: incremental fetch + dedup", () => {
       feeds = await feedServer({ "/a.xml": rssFeed("Alpha", all.slice(0, 3)) }) // items 0,1,2
       store = makeStore()
       await srr(store, "feed", "add", "-t", "Alpha", "-u", `${feeds.url}/a.xml`)
-      await srr(store, "art", "fetch")
+      await srr(store, "fetch")
 
       const r1 = await mountReader(store)
       m1 = r1.data.db.m ?? 0
@@ -31,7 +31,7 @@ describe("contract: incremental fetch + dedup", () => {
 
       // Re-present all old items + 2 new + a duplicate GUID of item 2.
       feeds.set("/a.xml", rssFeed("Alpha", [...all, all[2]]))
-      await srr(store, "art", "fetch")
+      await srr(store, "fetch")
       reader = await mountReader(store)
    })
 

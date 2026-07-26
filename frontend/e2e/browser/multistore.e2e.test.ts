@@ -70,13 +70,13 @@ describe("browser: multi-store — SW caches a cross-origin peer (PWA0 fix)", ()
       clearDir(packsDir)
       homeFeeds = await feedServer({ "/home.xml": rssFeed("Home", nItems(3, "home", 0, 10)) })
       await srr(packsDir, "feed", "add", "-t", "Home", "-u", `${homeFeeds.url}/home.xml`)
-      await srr(packsDir, "art", "fetch")
+      await srr(packsDir, "fetch")
 
       // The cross-origin PEER store, on its own port + CORS.
       peerDir = mkdtempSync(join(tmpdir(), "srr-e2e-peer-"))
       peerFeeds = await feedServer({ "/gamma.xml": rssFeed("Gamma", nItems(3, "gamma", 0, 0)) })
       await srr(peerDir, "feed", "add", "-t", "Gamma", "-u", `${peerFeeds.url}/gamma.xml`)
-      await srr(peerDir, "art", "fetch")
+      await srr(peerDir, "fetch")
       // Allow the reader origin (strip the trailing slash — an Origin header has none).
       const readerOrigin = new URL(baseUrl).origin
       ;({ server: peerServer, base: peerBase } = await startCorsServer(peerDir, readerOrigin))

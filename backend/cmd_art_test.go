@@ -89,7 +89,7 @@ func TestParseTimeBound(t *testing.T) {
 }
 
 // artTestStore builds and commits a small multi-data-pack store used by the
-// `srr art ls` tests: two feeds (news/tech), five interleaved articles at
+// `srr art` tests: two feeds (news/tech), five interleaved articles at
 // chron 0..4. Content is padded past the 1 KB PackSize floor so PutArticles
 // splits it across several data packs, exercising getPackRef + loadContent's
 // per-pack dataCache. Returns the (still open) db and the two seeded feeds.

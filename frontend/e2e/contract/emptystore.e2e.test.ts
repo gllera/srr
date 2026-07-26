@@ -36,7 +36,7 @@ describe("contract: empty store boot + first-batch transition", () => {
       feeds = await feedServer({ "/empty.xml": rssFeed("Empty", []) })
       store = makeStore()
       await srr(store, "feed", "add", "-t", "Empty", "-u", `${feeds.url}/empty.xml`)
-      await srr(store, "art", "fetch") // zero items — nothing published
+      await srr(store, "fetch") // zero items — nothing published
       emptyValidate = await inspectValidate(store) // captured while still empty
       reader = await mountReader(store)
    })
@@ -80,7 +80,7 @@ describe("contract: empty store boot + first-batch transition", () => {
 
    it("the first article-producing fetch publishes generation 1 and refresh() adopts it", async () => {
       feeds.set("/empty.xml", rssFeed("Empty", nItems(2, "first")))
-      await srr(store, "art", "fetch")
+      await srr(store, "fetch")
 
       // The first article-producing cycle publishes one delta segment.
       expect(storeNames(store).deltas).toHaveLength(1)

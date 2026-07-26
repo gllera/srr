@@ -103,7 +103,7 @@ describe("browser: real SPA over real packs", () => {
       await srr(packsDir, "feed", "add", "-t", "News", "-g", "world", "-u", `${feeds.url}/news.xml`)
       await srr(packsDir, "feed", "add", "-t", "Tech", "-g", "world", "-u", `${feeds.url}/tech.xml`)
       await srr(packsDir, "feed", "add", "-t", "Sport", "-g", "play", "-u", `${feeds.url}/sport.xml`)
-      await srr(packsDir, "art", "fetch")
+      await srr(packsDir, "fetch")
       ;[idxKey, dataKey, metaKey] = [tailKey(packsDir, "idx"), tailKey(packsDir, "data"), tailKey(packsDir, "meta")]
 
       browser = await launchBrowser()
@@ -1098,7 +1098,7 @@ describe("browser: real SPA over real packs", () => {
       clearDir(packsDir)
       feeds.set("/seq.xml", rssFeed("Seq", nItems(2, "seq")))
       await srr(packsDir, "feed", "add", "-t", "Seq", "-u", `${feeds.url}/seq.xml`)
-      await srr(packsDir, "art", "fetch")
+      await srr(packsDir, "fetch")
       const firstIdx = tailKey(packsDir, "idx")
       const firstData = tailKey(packsDir, "data")
       const firstM = storeM(packsDir)
@@ -1126,7 +1126,7 @@ describe("browser: real SPA over real packs", () => {
          // the first generation's tail packs outside the kept set.
          for (const n of [5, 8]) {
             feeds.set("/seq.xml", rssFeed("Seq", nItems(n, "seq")))
-            await srr(packsDir, "art", "fetch")
+            await srr(packsDir, "fetch")
             await page.reload({ waitUntil: "load" })
             await waitTitle(page, "seq title 0")
          }
@@ -1177,7 +1177,7 @@ describe("browser: real SPA over real packs", () => {
       clearDir(packsDir)
       feeds.set("/warm.xml", rssFeed("Warm", nItems(2, "warm")))
       await srr(packsDir, "feed", "add", "-t", "Warm", "-u", `${feeds.url}/warm.xml`)
-      await srr(packsDir, "art", "fetch")
+      await srr(packsDir, "fetch")
       const firstM = storeM(packsDir)
 
       const origin = new URL(baseUrl).origin
@@ -1229,7 +1229,7 @@ describe("browser: real SPA over real packs", () => {
          // `online` and a 5-minute heartbeat, none of which fire in this window —
          // which is what makes the assertion after the dispatch attributable.
          feeds.set("/warm.xml", rssFeed("Warm", nItems(5, "warm")))
-         await srr(packsDir, "art", "fetch")
+         await srr(packsDir, "fetch")
          const nextM = storeM(packsDir)
          const nextIdx = tailKey(packsDir, "idx")
          const nextData = tailKey(packsDir, "data")
@@ -1299,7 +1299,7 @@ describe("browser: real SPA over real packs", () => {
       clearDir(packsDir)
       feeds.set("/warm2.xml", rssFeed("Warm2", nItems(2, "warm2")))
       await srr(packsDir, "feed", "add", "-t", "Warm2", "-u", `${feeds.url}/warm2.xml`)
-      await srr(packsDir, "art", "fetch")
+      await srr(packsDir, "fetch")
       const firstM = storeM(packsDir)
 
       const origin = new URL(baseUrl).origin
@@ -1339,7 +1339,7 @@ describe("browser: real SPA over real packs", () => {
 
          // A new generation the device has never seen...
          feeds.set("/warm2.xml", rssFeed("Warm2", nItems(5, "warm2")))
-         await srr(packsDir, "art", "fetch")
+         await srr(packsDir, "fetch")
          const nextM = storeM(packsDir)
          expect(nextM).toBeGreaterThan(firstM)
 
@@ -1401,7 +1401,7 @@ describe("browser: real SPA over real packs", () => {
       clearDir(packsDir)
       feeds.set("/bulk.xml", rssFeed("Bulk", nItems(100, "bulk")))
       await srr(packsDir, "feed", "add", "-t", "Bulk", "-u", `${feeds.url}/bulk.xml`)
-      await srr(packsDir, "art", "fetch")
+      await srr(packsDir, "fetch")
 
       const ctx = await browser.createBrowserContext()
       const page = await ctx.newPage()

@@ -28,7 +28,7 @@ import (
 
 // feedFilter restricts a fetch cycle to a subset of feeds by tag and/or feed
 // id, with both include and exclude logic. It is embedded in FetchCmd (backs
-// `srr art fetch`) and ServeCmd (backs `srr serve --interval`) so the same
+// `srr fetch`) and ServeCmd (backs `srr serve --interval`) so the same
 // SRR_FETCH_* env reaches the persistent loop. All four are sep:"," slices, so
 // each accepts comma-separated values AND repeats (`--tag a,b` ≡ `--tag a
 // --tag b`), and kong splits env values on the same separator. Tag selectors
@@ -580,7 +580,7 @@ func (o *FetchCmd) Run() error {
 // cancelled, returning nil on clean shutdown and logging (not propagating) a
 // failed cycle so a transient error never tears the loop down. With a
 // non-positive interval it runs a single cycle and returns its result. Shared
-// by `srr art fetch --interval` and `srr serve --interval`; the supplied client
+// by `srr fetch --interval` and `srr serve --interval`; the supplied client
 // is reused across every cycle so its idle-conn pool isn't orphaned per cycle.
 func (o *FetchCmd) fetchLoop(ctx context.Context, client *http.Client) error {
 	if o.Interval <= 0 {
@@ -945,7 +945,7 @@ func (o *FetchCmd) commitPhase(ctx context.Context, db *DB, res *fetchResults) e
 	// The write phase's OWN stamp: PutArticles stamps each article with
 	// core.FetchedAt, and a peer may have committed a later batch between the
 	// phases — re-stamping keeps fetched_at chron-monotone (the property
-	// ExpireArticles' contiguous-prefix model and `art ls --since`'s binary
+	// ExpireArticles' contiguous-prefix model and `art --since`'s binary
 	// search need), the same reason the inbox consolidator stamps drained
 	// items itself.
 	db.core.FetchedAt = time.Now().UTC().Unix()

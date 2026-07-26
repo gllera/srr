@@ -249,7 +249,7 @@ export function render(o: IShowFeed) {
    el.content.style.transition = "none"
    el.content.style.opacity = "0"
    el.content.style.transform = "translateY(6px)"
-   // §9.3 (docs/MANIFEST-SPEC.md): `srr compact` replaces an expired article's
+   // §9.3 (docs/MANIFEST-SPEC.md): `srr store compact` replaces an expired article's
    // payload with a tombstone that keeps f/a/p and DROPS c/t/l — so `c` is
    // absent on the wire (`c` is typed string, but omitempty means undefined at
    // runtime for a compacted line). Reachable only via a ★-Saved / deep-linked

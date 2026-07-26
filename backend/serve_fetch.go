@@ -10,7 +10,7 @@ import (
 )
 
 // handleFetch runs one fetch cycle over every feed in parallel and streams
-// per-feed progress as SSE — the same all-feeds cycle as `srr art fetch`. The
+// per-feed progress as SSE — the same all-feeds cycle as `srr fetch`. The
 // triggered fetch holds the store lock for its duration; if another process
 // holds it, the stream carries an in-band `event: error` (SSE has already sent
 // 200, so contention can't be a 409 here).

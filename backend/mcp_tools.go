@@ -26,7 +26,7 @@ import (
 // --- shared limits ----------------------------------------------------------
 
 const (
-	// mcpDefaultArticleLimit mirrors `srr art ls -l`'s default.
+	// mcpDefaultArticleLimit mirrors `srr art -l`'s default.
 	mcpDefaultArticleLimit = 50
 	// mcpMaxArticleLimit caps one tool response. Article content is large and a
 	// tool result is a context-window payload, not a file download.
@@ -54,7 +54,7 @@ func truncateRunes(s string, maxRunes int) (string, bool) {
 }
 
 // parseMCPWindow resolves the tool-level since/until strings into the same
-// half-open [since, until) unix-second window `srr art ls` uses, over the
+// half-open [since, until) unix-second window `srr art` uses, over the
 // shared parseTimeBound grammar. Its own wording (field names, not flag names)
 // keeps ArtCmd.window's test-pinned messages untouched.
 func parseMCPWindow(sinceStr, untilStr string, now time.Time) (since, until *int64, err error) {
@@ -471,7 +471,7 @@ type fetchOut struct {
 	Feeds       []feedProgress `json:"feeds" jsonschema:"Per-feed outcome, sorted by feed id: id, title, new (articles ingested) and error (empty when the feed succeeded)."`
 }
 
-// mcpFetch wraps the very cycle `srr art fetch` and the GUI's fetch button
+// mcpFetch wraps the very cycle `srr fetch` and the GUI's fetch button
 // run: runFetch under runCycleSafe (so a bad cycle returns an error instead of
 // taking the process down), on a per-call SSRF-guarded client.
 //

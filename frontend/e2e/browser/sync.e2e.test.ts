@@ -50,7 +50,7 @@ describe("browser: cross-device profile sync", () => {
       feeds = await feedServer({ "/wire.xml": rssFeed("Wire", wire) })
       clearDir(packsDir)
       await srr(packsDir, "feed", "add", "-t", "Wire", "-u", `${feeds.url}/wire.xml`)
-      await srr(packsDir, "art", "fetch")
+      await srr(packsDir, "fetch")
       browser = await launchBrowser()
    })
 

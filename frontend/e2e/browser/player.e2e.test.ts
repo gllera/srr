@@ -209,7 +209,7 @@ describe("browser: mini-player relocation keeps real audio playing", () => {
       feeds.set("/pod.xml", rssFeed("Pod", items))
 
       await srr(packsDir, "feed", "add", "-t", "Pod", "-u", `${feeds.url}/pod.xml`)
-      await srr(packsDir, "art", "fetch")
+      await srr(packsDir, "fetch")
       browser = await launchAudioBrowser()
    })
 

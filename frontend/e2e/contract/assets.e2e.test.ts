@@ -59,7 +59,7 @@ describe("contract: self-hosted assets round-trip", () => {
          "-p",
          "#selfhost",
       )
-      await srr(store, "art", "fetch")
+      await srr(store, "fetch")
       reader = await mountReader(store)
    })
 

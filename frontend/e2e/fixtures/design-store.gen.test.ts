@@ -77,7 +77,7 @@ describe("design fixture store", () => {
          "/food.xml": rss("Cooking Weekly", [{ title: "Best bread", body: "<p>Bread.</p>", guid: "f1", ageH: 52 }]),
          "/gone.xml": rss("Soon Deleted", [{ title: "Vanishing source", body: "<p>Gone.</p>", guid: "g1", ageH: 28 }]),
          // /broken.xml resolves validly (empty) at `feed add` time — the backend
-         // rejects an unresolvable add — then gets removed below so `art fetch`
+         // rejects an unresolvable add — then gets removed below so `srr fetch`
          // 404s and records the ferr.
          "/broken.xml": rss("Broken Feed", []),
       })
@@ -90,8 +90,8 @@ describe("design fixture store", () => {
          await srr(OUT, "feed", "add", "-t", "Cooking Weekly", "-g", "topics", "-u", `${feeds.url}/food.xml`)
          await srr(OUT, "feed", "add", "-t", "Soon Deleted", "-u", `${feeds.url}/gone.xml`)
          await srr(OUT, "feed", "add", "-t", "Broken Feed", "-u", `${feeds.url}/broken.xml`)
-         feeds.remove("/broken.xml") // now 404s → art fetch records the ferr
-         await srr(OUT, "art", "fetch")
+         feeds.remove("/broken.xml") // now 404s → srr fetch records the ferr
+         await srr(OUT, "fetch")
 
          // Validate the fully-consistent store BEFORE the deletion (feed rm only
          // edits db.gz; the immutable packs are unchanged after it).

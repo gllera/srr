@@ -42,7 +42,7 @@ func effectiveStoreDedup(stored int) int {
 
 // validateStoreDedupDays bounds the store-wide default to [0, 36500]. Unlike a
 // per-feed override there is no off switch — a per-feed -1 disables the pool,
-// the store default cannot. Shared by `srr dedup --days` and PUT /api/dedup.
+// the store default cannot. Shared by `srr store dedup --days` and PUT /api/dedup.
 func validateStoreDedupDays(d int) error {
 	if d < 0 || d > 36500 {
 		return fmt.Errorf("store default dedup days must be in [0, 36500] (got %d); a per-feed -1 disables the pool, the store default cannot", d)

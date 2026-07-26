@@ -37,7 +37,7 @@ describe("contract: delta-segment tail", () => {
       feeds = await feedServer({ "/a.xml": rssFeed("Delta", all.slice(0, 2)) })
       store = makeStore()
       await srr(store, "feed", "add", "-t", "Delta", "-u", `${feeds.url}/a.xml`)
-      await srr(store, "art", "fetch") // cycle 1 → data/d1.gz (all-delta store, no tail packs yet)
+      await srr(store, "fetch") // cycle 1 → data/d1.gz (all-delta store, no tail packs yet)
       reader = await mountReader(store)
    })
 
@@ -88,7 +88,7 @@ describe("contract: delta-segment tail", () => {
 
    it("a second delta cycle reaches an open tab as db.gz + delta segments only", async () => {
       feeds.set("/a.xml", rssFeed("Delta", all.slice(0, 4)))
-      await srr(store, "art", "fetch") // cycle 2 → data/d2.gz (nd=2)
+      await srr(store, "fetch") // cycle 2 → data/d2.gz (nd=2)
 
       reader.fetchMock.mock.calls.length = 0
       expect(await reader.data.refresh()).toBe("updated")
@@ -109,7 +109,7 @@ describe("contract: delta-segment tail", () => {
    it("the chain-cap cycle consolidates into fresh tail packs and the tab adopts it", async () => {
       const before = storeNames(store)
       feeds.set("/a.xml", rssFeed("Delta", all))
-      await srr(store, "art", "fetch") // cycle 3: nd == MAX_DELTAS → consolidation
+      await srr(store, "fetch") // cycle 3: nd == MAX_DELTAS → consolidation
 
       expect(await reader.data.refresh()).toBe("updated")
       expect(reader.data.db.nd ?? 0).toBe(0)
@@ -149,7 +149,7 @@ describe("contract: delta-segment tail", () => {
       const store2 = makeStore()
       try {
          await srr(store2, "feed", "add", "-t", "Gone", "-u", `${feeds2.url}/a.xml`)
-         await srr(store2, "art", "fetch")
+         await srr(store2, "fetch")
          rmSync(join(store2, storeNames(store2).deltas[0]))
          await expect(mountReader(store2)).rejects.toThrow(/pack fetch failed: 404/)
       } finally {
@@ -181,7 +181,7 @@ describe("contract: delta chain survives a failed refresh", () => {
       feeds = await feedServer({ "/a.xml": rssFeed("Delta", all.slice(0, 2)) })
       store = makeStore()
       await srr(store, "feed", "add", "-t", "Delta", "-u", `${feeds.url}/a.xml`)
-      await srr(store, "art", "fetch") // cycle 1 → data/d1.gz (na=2, all-delta)
+      await srr(store, "fetch") // cycle 1 → data/d1.gz (na=2, all-delta)
    })
 
    afterAll(async () => {
@@ -196,7 +196,7 @@ describe("contract: delta chain survives a failed refresh", () => {
 
       // A newer snapshot lands, but the network drops on the delta segments.
       feeds.set("/a.xml", rssFeed("Delta", all.slice(0, 4)))
-      await srr(store, "art", "fetch") // cycle 2 → data/d2.gz (na=4)
+      await srr(store, "fetch") // cycle 2 → data/d2.gz (na=4)
       failDeltas = true
       await expect(reader.data.refresh()).rejects.toThrow(/simulated network failure/)
 

@@ -11,7 +11,7 @@ import (
 
 // TestFetchLoopSingleShot verifies that fetchLoop with a non-positive interval
 // runs exactly one fetch cycle and returns runFetch's result directly — the
-// behaviour `srr art fetch` (no --interval) relies on.
+// behaviour `srr fetch` (no --interval) relies on.
 func TestFetchLoopSingleShot(t *testing.T) {
 	db, _, _ := setupTestDB(t)
 	allowLoopback(t)
@@ -30,7 +30,7 @@ func TestFetchLoopSingleShot(t *testing.T) {
 
 // TestFetchLoopRepeatsUntilCancel verifies that fetchLoop with a positive
 // interval keeps fetching on every tick and returns nil once the context is
-// cancelled — the loop shared by `srr art fetch --interval` and the new
+// cancelled — the loop shared by `srr fetch --interval` and the new
 // `srr serve --interval`.
 func TestFetchLoopRepeatsUntilCancel(t *testing.T) {
 	allowLoopback(t)

@@ -37,7 +37,7 @@ describe("contract: meta fallback to data/", () => {
       feeds = await feedServer({ "/feed.xml": rssFeed("Feed", ITEMS) })
       store = makeStore()
       await srr(store, "feed", "add", "-t", "Feed", "-u", `${feeds.url}/feed.xml`)
-      await srr(store, "art", "fetch")
+      await srr(store, "fetch")
       reader = await mountReader(store)
    })
 

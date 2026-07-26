@@ -9,7 +9,7 @@ import (
 // db_pack.go). parseIdxPack is the byte-for-byte Go mirror of
 // frontend/src/js/idx.ts makeIdxPack().parse(); getPackRef mirrors
 // frontend/src/js/data.ts getPackRef(). Every read-side command
-// (inspect/check/report, art ls) goes through this one parser, so the
+// (inspect/check/report, art) goes through this one parser, so the
 // format has exactly one Go reader to keep in sync with the frontend.
 
 // keyGetter abstracts "fetch + gunzip a store key" so the same read path
@@ -86,7 +86,7 @@ const deltaPackID = -1
 // non-empty, and the total line count equals DeltaArticles (M6).
 //
 // Both entry points are thin wrappers over this body: the read side's
-// loadDeltas (inspect, art ls, loadIdxPacks) and the writer's memoizing
+// loadDeltas (inspect, art, loadIdxPacks) and the writer's memoizing
 // DB.loadDeltaChain (db_pack.go). They used to be near-identical copies of it —
 // two places to state what a valid chain is, and so two places that could
 // disagree about one.
@@ -126,7 +126,7 @@ func parseDeltaChain(fetch keyGetter, core *DBCore) (*deltaChain, error) {
 }
 
 // loadDeltas is the read side's view of the chain: the parsed articles alone.
-// The one delta loader inspect and art ls go through.
+// The one delta loader inspect and art go through.
 func loadDeltas(fetch keyGetter, core *DBCore) ([]ArticleData, error) {
 	chain, err := parseDeltaChain(fetch, core)
 	if err != nil {
