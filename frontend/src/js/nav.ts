@@ -1,16 +1,58 @@
 import * as data from "./data"
-import { extractPrefetchMedia } from "./fmt"
-import { HOME_MID, savedKey, seenKey, seenTsKey, UNREAD_ONLY_KEY } from "./keys"
+import { UNREAD_ONLY_KEY } from "./keys"
+import { abortPrefetch, prefetchTarget, releasePrefetch, schedulePrefetch } from "./prefetch"
+import {
+   hashPos,
+   parseHashMount,
+   parseHashTokens,
+   tokensSuffix as encodeTokens,
+   updateHash as writeHash,
+} from "./route"
+import {
+   clearSavedGhost,
+   isSaved,
+   SAVED_TOKEN,
+   savedAhead,
+   savedCount,
+   savedNeighbor,
+   savedOrder,
+   toggleSaved as toggleSavedSet,
+} from "./saved"
 import * as search from "./search"
-import * as sync from "./sync"
+import {
+   getSeen,
+   markAllRead as raiseFilterRead,
+   markUnreadFrom as lowerFilterFrom,
+   readSeen,
+   recordSeen,
+   tagUnreadFromCounts,
+   tallyWith,
+   unreadCounts,
+   type FrontierScope,
+} from "./seen"
 
-// The seen/saved keys are per-store (docs/MULTI-STORE-SPEC.md §4.2): they are
-// namespaced by the ACTIVE store's mid, the lane nav is reading. For the home
-// store (mid "0") these resolve to the bare legacy names (srr-seen / srr-seen-ts
-// / srr-saved), so a single-store user's state is unchanged.
-const seenK = () => seenKey(data.activeStore().mid)
-const seenTsK = () => seenTsKey(data.activeStore().mid)
-const savedK = () => savedKey(data.activeStore().mid)
+// nav is the FACADE over the four modules split out of it (finding ENG3):
+// ./seen (frontier persistence, the explicit gestures, the unread tallies),
+// ./saved (the ★ Saved set and its queue arithmetic), ./prefetch (the neighbor
+// media warm-up — the one DOM-touching concern, which is why nav itself is
+// DOM-free), and ./route (the #pos[!tokens] grammar). Everything they used to
+// export from here is re-exported unchanged, so no consumer moved; none of them
+// imports nav back, so the module graph stays acyclic. The shared mutable state
+// that stays here — pos, filter, unreadOnly — reaches them as explicit
+// arguments (a FrontierScope, a toggle context, a token list), never by import.
+export { getSavedSet, setSavedHook } from "./saved"
+export {
+   clearFrontierUndo,
+   frontierUndoSize,
+   getSeenMap,
+   isRowUnread,
+   markFrontierUndoOffered,
+   pendingFrontierUndo,
+   pruneSeen,
+   undoFrontierMove,
+} from "./seen"
+export type { FrontierUndo } from "./seen"
+export { hashPos, isSaved, parseHashMount, parseHashTokens, SAVED_TOKEN, savedCount, tagUnreadFromCounts, unreadCounts }
 
 let pos = -1
 // Feed id of the article currently on screen (-1 = none). app.ts reads it via
@@ -47,111 +89,20 @@ export function setUnreadOnly(on: boolean) {
    applyFilter([...filter.tokens])
 }
 
-// Saved articles ("★ Saved") — a per-article collection orthogonal to the
-// feed/tag axes and the positional seen frontier. Stored device-local as a
-// chronIdx set in localStorage (srr-saved), like srr-seen. chronIdx is a
-// permanent article address — finalized packs are immutable and never GC'd — so
-// a saved id stays loadable indefinitely (it survives even its feed being
-// deleted; data.feedTitle then shows the "[DELETED]" tombstone). "★ Saved" is
-// a distinct nav MODE (filter.saved): navigation walks the explicit set, not the
-// idx packs, so it needs no fetch and is feed-agnostic. The reserved token
-// "~saved" addresses the mode in the #hash and the filter rotation; a
-// (vanishingly unlikely) real tag literally named "~saved" is shadowed by it.
-export const SAVED_TOKEN = "~saved"
-
-// Re-read on each access (no module-level cache): the set is small and
-// user-curated, so the localStorage parse is cheap, and reading fresh stays
-// correct across tabs and keeps tests/`vi.resetModules` free of stale state.
-function readSavedSet(): Set<number> {
-   try {
-      const raw = localStorage.getItem(savedK())
-      const arr = raw ? JSON.parse(raw) : []
-      return new Set(Array.isArray(arr) ? arr.filter((n) => Number.isInteger(n)) : [])
-   } catch {
-      return new Set()
-   }
-}
-// Save order (Set iteration == insertion order): the ★ Saved queue read
-// front-to-back. NOT sorted by chronIdx — new saves append to the end.
-function savedOrder(): number[] {
-   return [...readSavedSet()]
-}
-// ★ Saved unsave-of-current anchor (the saved cousin of filter.anchor). Un-saving
-// the article on screen drops it from the queue but leaves it in the reader
-// (toggleSave is a state flip, not a navigation). Its save-index neighbors then
-// vanish — savedNeighbor(pos) can't find a chron that left the set — so prev/next
-// would dead-end on "no right match". Remember the just-unsaved chron plus the
-// queue neighbors and ahead-count it held, so savedNeighbor/pendingRight still
-// answer for it until the reader steps off (resolve) or the filter changes
-// (resolveNoMatch). Set by toggleSaved, cleared on any landing. null = none.
-let savedGhost: { chron: number; older: number; newer: number; ahead: number } | null = null
-// Save-order neighbor of member `chron`: "older" = the earlier save (toward the
-// front of the queue, lower index), "newer" = the later save (higher index,
-// toward the newest save). -1 at the ends or if `chron` isn't saved. Steps by
-// save-INDEX, so — unlike the chronIdx ±1 trick the value seam uses — it never
-// aliases two numerically-adjacent saved articles. A `chron` no longer in the set
-// falls back to savedGhost (the article was just un-saved on screen).
-function savedNeighbor(chron: number, dir: "older" | "newer"): number {
-   const order = savedOrder()
-   const i = order.indexOf(chron)
-   if (i < 0) return savedGhost?.chron === chron ? savedGhost[dir] : -1
-   return dir === "older" ? (order[i - 1] ?? -1) : (order[i + 1] ?? -1)
-}
-
-export function isSaved(chron: number): boolean {
-   return readSavedSet().has(chron)
-}
-// The bulk-read twin of getSeenMap: one parse for a whole render/refresh pass
-// (list.ts threads it through rowEl) instead of a localStorage read per row.
-export function getSavedSet(): Set<number> {
-   return readSavedSet()
-}
-export function savedCount(): number {
-   return readSavedSet().size
-}
-// Toggle one article's saved state; returns the new state. A save APPENDS to the
-// queue (Set.add keeps insertion order — written unsorted), so the ★ Saved view
-// reads in save order. Clears the neighbor-prefetch slots since the saved
-// queue's neighbors may have shifted.
+// Toggle one article's saved state; returns the new state (./saved owns the set
+// and the queue arithmetic). The two nav facts it needs are passed in: the
+// active MODE and the article on screen, for the unsave-of-current ghost — and
+// the neighbor-cache drop, since the saved queue's neighbors may have shifted.
 export function toggleSaved(chron: number): boolean {
-   const set = readSavedSet()
-   const nowSaved = !set.has(chron)
-   // Un-saving the article currently on screen in ★ Saved mode: capture its queue
-   // neighbors + ahead-count from the pre-removal order so the reader can still
-   // step off it (savedGhost, consulted by savedNeighbor/pendingRight while pos is
-   // a non-member). Re-saving that same article — or any state flip that returns
-   // it to the set — drops the ghost.
-   if (!nowSaved && filter.saved && chron === pos) {
-      const order = [...set]
-      const i = order.indexOf(chron)
-      savedGhost = { chron, older: order[i - 1] ?? -1, newer: order[i + 1] ?? -1, ahead: order.length - 1 - i }
-   } else if (savedGhost?.chron === chron) {
-      savedGhost = null
-   }
-   if (nowSaved) set.add(chron)
-   else set.delete(chron)
-   try {
-      localStorage.setItem(savedK(), JSON.stringify([...set]))
-   } catch {}
-   sync.pushSoon()
-   next.left = next.right = undefined
-   savedHook?.(chron, nowSaved)
-   return nowSaved
+   return toggleSavedSet(chron, {
+      savedMode: filter.saved,
+      pos,
+      onQueueChange: () => {
+         next.left = next.right = undefined
+      },
+   })
 }
 
-// The saved-set transition hook (FMT2a). ★ Saved keeps an article's TEXT forever
-// — packs are immutable — but its self-hosted images and media are deleted when
-// the feed's retention window passes, so a read-later queue quietly rots into
-// text with broken pictures. The backend cannot help: the saved set is
-// device-local, so only this device knows which assets to keep, and only the
-// service worker can keep them. Both save paths (the reader's star and the
-// list row's) come through toggleSaved, so this is the one seam; app.ts owns
-// what actually happens, since talking to the SW is not nav's job.
-let savedHook: ((chron: number, saved: boolean) => void) | null = null
-
-export function setSavedHook(fn: (chron: number, saved: boolean) => void): void {
-   savedHook = fn
-}
 // The chronIdx of the article currently in the reader (-1 = none), so app.ts can
 // reflect its saved state on the star toggle without threading pos into IShowFeed.
 export function currentChron(): number {
@@ -579,46 +530,6 @@ function unseenActive(): boolean {
    return unreadOnly && !filter.saved && !filter.search
 }
 
-// One member's unread given its seen index: its articles strictly after that
-// position, or — when the feed was NEVER seen on this device (undefined) —
-// its full backlog (countAll). A never-seen feed counts as fully unread so
-// its row badge matches its tag header (tagUnreadFromCounts) and the
-// unseen-only nav that would walk its whole history; a fresh device thus
-// shows a count on every feed, not a blank. Both terms come from the same idx
-// counting (countAll − countLeft) so db.gz total_art drift can't skew it, and
-// the boundary pack is the resident latest pack whenever seen is recent (zero
-// fetches; the never-seen branch is sync countAll — no fetch at all). Shared
-// by unreadCounts and (through tallyWith's rare fallback) pendingRight.
-//
-// Accounted on ENTER, not on leave: the article you open is marked seen on
-// ARRIVAL (recordSeen), so it drops out of this count the instant you read it —
-// there is no "current article" pad holding it as still-unread until you step
-// away. The badge is the plain true unread — and the reader's pending pill is
-// these same counts with each frontier floored at the cursor (pendingRight),
-// identical on every recorded landing. It also agrees with the list's
-// per-row read/unread dots (isRowUnread), which already treat the current
-// article as read. Switching filters lands on an already-seen resume article
-// and records nothing (switchFilter resolves record:false), so a switch never
-// moves this count — only reading forward does.
-async function feedUnread(ch: IFeed, seenIdx: number | undefined): Promise<number> {
-   const map = new Map([[ch.id, ch.add_idx ?? 0]])
-   if (seenIdx === undefined) return data.countAll(map)
-   const upTo = Math.min(seenIdx + 1, data.db.total_art)
-   return Math.max(0, data.countAll(map) - (await data.countLeft(upTo, map)))
-}
-
-// The one tally body shared by the badges and the pill: the batched latest-tail
-// pass (data.unreadTally) with the per-feed feedUnread oracle as the `rare`
-// fallback, parameterized on the seen accessor so pendingRight can floor each
-// frontier at the cursor while unreadCounts reads the map verbatim. Keeping
-// both callers on one body is what makes badge↔pill drift structurally
-// impossible — they can only differ by the seenOf they pass.
-async function tallyWith(chs: IFeed[], seenOf: (id: number) => number | undefined): Promise<Map<number, number>> {
-   const { counts, rare } = data.unreadTally(chs, seenOf)
-   await Promise.all(rare.map(async (ch) => counts.set(ch.id, await feedUnread(ch, seenOf(ch.id)))))
-   return counts
-}
-
 // The reader's pending readout: what the next pill displays. ★ Saved counts its
 // queue by save-index (the saves still AHEAD of pos — a front-to-back countdown);
 // search counts hits strictly after pos (its set is chronIdx-ordered). Both are
@@ -645,12 +556,7 @@ async function tallyWith(chs: IFeed[], seenOf: (id: number) => number | undefine
 // armed not-started placeholder) floors nothing: the pill is the members'
 // whole backlog, the badge itself.
 async function pendingRight(seenMap?: Record<string, number>): Promise<number> {
-   if (filter.saved) {
-      const order = savedOrder()
-      const i = order.indexOf(pos)
-      if (i < 0) return savedGhost?.chron === pos ? savedGhost.ahead : 0
-      return order.length - 1 - i
-   }
+   if (filter.saved) return savedAhead(pos)
    if (filter.search) {
       await ensureSearchSet()
       return searchSorted.filter((c) => c > pos).length
@@ -732,7 +638,7 @@ async function resolve(target: number, replace = false, record = true): Promise<
    if (unseenActive() && !filter.matches(article.f, target)) filter.anchor = target
    // Any real landing moves off the just-unsaved ghost article onto a genuine
    // member (or another article entirely), so the saved ghost is spent.
-   savedGhost = null
+   clearSavedGhost()
    next.left = next.right = undefined
    // Arriving at the article being prefetched must NOT abort it: its in-flight
    // loads are exactly what the rendered content is about to attach to (same-URL
@@ -740,431 +646,31 @@ async function resolve(target: number, replace = false, record = true): Promise<
    // image from scratch, which made the prefetch useless for any neighbor whose
    // images hadn't all finished). Drop the refs instead; the rendered elements
    // own the loads from here. Any other navigation aborts as before.
-   if (currentPrefetch?.target === target) currentPrefetch = null
+   if (prefetchTarget() === target) releasePrefetch()
    else abortPrefetch()
    updateHash(replace)
-   const seen = record ? recordSeen(article) : undefined
+   const seen = record ? recordSeen(article, pos, frontierScope()) : undefined
    return showFeed(article, seen)
 }
 
-// Caps on the neighbor prefetch. Uncapped, an image-stuffed neighbor (live
-// store measured articles with 300+ <img> tags) floods the connection with
-// low-priority downloads that split bandwidth so thin none completes before
-// the user steps — and competes with the on-screen article's own lazy loads.
-// The rendered article only needs its first viewport immediately (its images
-// are loading=lazy), so warm just that many; a capped prefetch actually
-// finishes within a normal reading dwell. Videos are metadata-only fetches
-// (duration/dimensions/first frame — cheap for faststart assets), 2 is plenty.
-const PREFETCH_IMAGES = 6
-const PREFETCH_VIDEOS = 2
-
-// Holds refs to the last neighbor's prefetched media so we can both abort
-// their in-flight loads (src = "" — the WHATWG image-update steps for <img>,
-// the media-load algorithm's abort for <video>) and drop the references,
-// bounding memory to one neighbor at a time. `target` lets resolve() tell
-// arrival at the prefetched article apart from navigating elsewhere. Object
-// identity also acts as the freshness token: a pending idle callback that
-// finds `my !== currentPrefetch` bails instead of pushing into a stale record.
-interface Prefetch {
-   target: number
-   imgs: HTMLImageElement[]
-   vids: HTMLVideoElement[]
-}
-let currentPrefetch: Prefetch | null = null
-
-function abortPrefetch() {
-   if (currentPrefetch) {
-      for (const img of currentPrefetch.imgs) img.src = ""
-      for (const vid of currentPrefetch.vids) vid.src = ""
-   }
-   currentPrefetch = null
+// What ./seen's frontier writes need to know about the ACTIVE FILTER, which nav
+// owns: the peek modes (★ Saved / search) never move a frontier at all, and a
+// raise applies across the filter's whole membership — the "navigation list"
+// you are reading. Passed as an argument rather than imported back, so ./seen
+// stays independent of nav.
+function frontierScope(): FrontierScope {
+   return { peek: filter.search || filter.saved, members: filter.feeds.keys() }
 }
 
-function schedulePrefetch(target: number) {
-   if (target === -1) return
-   const my: Prefetch = { target, imgs: [], vids: [] }
-   currentPrefetch = my
-   const run = async () => {
-      if (my !== currentPrefetch) return
-      try {
-         const art = await data.loadArticle(target)
-         if (my !== currentPrefetch) return
-         const media = extractPrefetchMedia(art.c, data.activeStore().base)
-         for (const url of media.images.slice(0, PREFETCH_IMAGES)) {
-            const img = new Image()
-            img.fetchPriority = "low"
-            img.decoding = "async"
-            img.src = url
-            my.imgs.push(img)
-         }
-         for (const url of media.videos.slice(0, PREFETCH_VIDEOS)) {
-            // preload must be set before src: assigning src invokes the media
-            // load algorithm, which reads the preload hint.
-            const vid = document.createElement("video")
-            vid.preload = "metadata"
-            vid.src = url
-            my.vids.push(vid)
-         }
-      } catch {
-         // Best-effort; errors surface on user nav.
-      }
-   }
-   // WebKit has no requestIdleCallback — without the timeout fallback every
-   // iOS reader would stall at each data-pack boundary instead of prefetching.
-   if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(run, { timeout: 500 })
-   else setTimeout(run, 200)
-}
-
-function readSeen(): Record<string, number> {
-   try {
-      const raw = localStorage.getItem(seenK())
-      return raw ? JSON.parse(raw) : {}
-   } catch {
-      return {}
-   }
-}
-
-// Persist a mutated seen map and stamp the per-key ordering timestamps
-// (srr-seen-ts, profile.ts's `st`) for the keys this mutation touched — the
-// unix-second that lets sync order a key's latest local action (raise or
-// explicit rewind) against other devices. Every seen write goes through here
-// so no mutation ships unordered.
-function writeSeen(seen: Record<string, number>, touched: string[]): void {
-   localStorage.setItem(seenK(), JSON.stringify(seen))
-   try {
-      const raw = localStorage.getItem(seenTsK())
-      const st: Record<string, number> = raw ? JSON.parse(raw) : {}
-      const now = Math.floor(Date.now() / 1000)
-      for (const k of touched) st[k] = now
-      localStorage.setItem(seenTsK(), JSON.stringify(st))
-   } catch {}
-}
-
-// A feed stores its own seen position — its read high-water (the newest chron
-// ever marked seen for it; recordSeen only raises it, markUnreadFrom is the
-// explicit rewind). A tag has no position of its own: it resumes from the oldest seen
-// position (min seen chronIdx) among its member feeds, so opening the tag
-// drops you at the least-recently-read member and no member's unread (each of
-// which sits at or after that member's own seen position) is skipped to the
-// left. Reading on still advances the tag, since the min only rises once that
-// furthest-behind member is read on. undefined === never seen on this device
-// (feed) / no member feed seen yet (tag).
-function getSeen(token: string): number | undefined {
-   const seen = readSeen()
-   const n = Number(token)
-   if (Number.isFinite(n)) return seen["feed:" + n]
-   let min: number | undefined
-   for (const ch of Object.values(data.db.feeds))
-      if (ch.tag === token) {
-         const s = seen["feed:" + ch.id]
-         if (s !== undefined && (min === undefined || s < min)) min = s
-      }
-   return min
-}
-
-// Returns the parsed (and, when anything moved, persisted) seen map so the caller
-// (resolve → showFeed → pendingRight) can reuse it without re-reading srr-seen in
-// the same tick; undefined when nothing was read (a peek mode or an unknown feed)
-// or the read threw, in which case pendingRight falls back to a fresh read.
-function recordSeen(article: IArticle): Record<string, number> | undefined {
-   // Peek modes never touch the seen frontier. Search (q:) jumps to hits, not a
-   // contiguous read-through — advancing here would mark everything up to the
-   // hit as seen. ★ Saved is the same shape: re-reading an archived item is not
-   // resuming its feed. A saved/search article you peek at stays unread until
-   // you actually read it in its feed.
-   if (filter.search || filter.saved) return
-   const ch = data.db.feeds[article.f]
-   if (!ch) return
-   try {
-      const seen = readSeen()
-      const touched: string[] = []
-      // Opening an article marks every OLDER article in the navigation list as
-      // seen: for the article's own feed AND each other feed in the active
-      // filter (the list you're reading), raise its seen frontier to pos so
-      // all of its articles at-or-below pos read as seen — the chronological
-      // "everything before here is caught up" the reader expects. A one-way
-      // raise for EVERY feed, the current one included: stepping back to an
-      // older article re-reads it without un-marking anything — read progress
-      // only rewinds through the explicit markUnreadFrom gesture. (The own feed
-      // is raised outside the loop because a deep-linked article's feed can
-      // sit outside the filter membership.) Search and saved both returned
-      // above, so this only fires for feed/tag/[ALL] navigation — the
-      // contiguous read-throughs where a "previous = seen" frontier across
-      // feeds is meaningful.
-      const before: Record<string, number | undefined> = {}
-      const raise = (feedId: number) => {
-         const key = "feed:" + feedId
-         if (!(key in before)) before[key] = seen[key]
-         writeFrontier(seen, touched, feedId, (prev) => prev === undefined || prev < pos, pos)
-      }
-      raise(article.f)
-      for (const feedId of filter.feeds.keys()) if (feedId !== article.f) raise(feedId)
-      if (touched.length > 0) {
-         writeSeen(seen, touched)
-         snapshotRaise(before, touched, pos)
-         sync.pushSoon()
-      }
-      return seen
-   } catch {}
-}
-
-// RDR1/RDR2 — reversibility for the frontier RAISES.
-//
-// The frontier model is deliberate and stays: opening an article marks
-// everything older across the filter as read, because that is what "I'm caught
-// up to here" means. What erodes trust in the unread numbers is that the big
-// version of it — tapping the newest headline on [ALL], or Mark all read —
-// is silent AND irreversible: a backlog you meant to keep is gone with no
-// signal that anything happened and no way back.
-//
-// So a raise snapshots the frontiers it moved. Nothing else changes: no
-// per-article read set, no confirm dialog in the way of the common case. The
-// caller (app.ts) asks how many articles the move actually consumed and, past a
-// threshold, offers one Undo.
-export interface FrontierUndo {
-   // Previous value per touched key; undefined = the key did not exist. Only
-   // touched keys are here — an untouched member's unread is identical before
-   // and after, so it cannot contribute to the size of the move.
-   prev: Record<string, number | undefined>
-   // Where those frontiers were moved TO, so the size can be measured after the
-   // fact without having counted anything on the hot path.
-   to: number
-}
-
-let lastRaise: FrontierUndo | null = null
-// Whether the caller has already had its chance to offer lastRaise. The
-// snapshot OUTLIVES the offer — the snackbar's Undo fires seconds later, and
-// undoFrontierMove still has to work then — so "offered" is a second bit rather
-// than just clearing the snapshot.
-let raiseOffered = false
-
-// The raise still WAITING to be offered, if any — asked once per raise.
-//
-// It has to be once, because the caller asks on every render: a render that
-// moved no frontier of its own (stepping BACKWARDS, a filter switch, any read
-// in the peek modes, which never raise at all) leaves the previous snapshot in
-// place, and without this bit each of those would re-measure and re-announce a
-// jump that happened long ago. Reading still does not CONSUME the snapshot —
-// markFrontierUndoOffered does — so the offer's own Undo can act on it after.
-export function pendingFrontierUndo(): FrontierUndo | null {
-   return raiseOffered ? null : lastRaise
-}
-
-// The caller has now had its chance at the pending raise: don't offer it again.
-// Called whether or not the offer was actually shown — a move too small to
-// mention is still a move already considered, and re-measuring it on every
-// subsequent render is the same waste for none of the value.
-export function markFrontierUndoOffered(): void {
-   raiseOffered = true
-}
-
-// How many articles a raise actually consumed: the filter's unread before the
-// move minus its unread after. Both sides go through the same tally the badges
-// use, so the number the snackbar reports is the number the badges just lost.
-// Async and deliberately OFF the navigation path — recordSeen stays a couple of
-// localStorage writes.
-export async function frontierUndoSize(u: FrontierUndo): Promise<number> {
-   const chs = Object.keys(u.prev)
-      .map((k) => data.db.feeds[Number(k.slice("feed:".length))])
-      .filter(Boolean)
-   if (chs.length === 0) return 0
-   const before = await tallyWith(chs, (id) => u.prev["feed:" + id])
-   const after = await tallyWith(chs, () => u.to)
-   let n = 0
-   for (const ch of chs) n += Math.max(0, (before.get(ch.id) ?? 0) - (after.get(ch.id) ?? 0))
-   return n
-}
-
-// Put the snapshotted frontiers back. It writes through writeSeen like every
-// other mutation, so the per-key `st` stamps are refreshed to NOW — an undo is
-// itself the newest thing that happened to those keys, and only a newer stamp
-// makes profile.ts's per-key LWW propagate a lowering instead of letting another
-// device's stale raise win. (That is also why a key that did not exist is
-// restored as -1 rather than deleted: markUnreadFrom's precedent — -1 reads as
-// never-seen everywhere, and keeping the key keeps its stamp.)
-//
-// The snapshot is the CALLER'S, passed in rather than read from lastRaise: the
-// offer is shown at one moment and answered at another, and a raise landing in
-// between must not silently re-point the button. "Undo" undoes the move whose
-// size it announced, or nothing.
-//
-// Either way it clears the pending state: those frontiers have just been
-// rewritten, so any snapshot still waiting describes a store state that no
-// longer exists, and replaying it would only raise them back.
-export function undoFrontierMove(u: FrontierUndo): boolean {
-   lastRaise = null
-   raiseOffered = false
-   if (!u) return false
-   try {
-      const seen = readSeen()
-      const touched: string[] = []
-      for (const [key, prev] of Object.entries(u.prev)) {
-         const want = prev ?? -1
-         if (seen[key] === want) continue
-         seen[key] = want
-         touched.push(key)
-      }
-      if (touched.length === 0) return false
-      writeSeen(seen, touched)
-      sync.pushSoon()
-      return true
-   } catch {
-      return false
-   }
-}
-
-// Drop the pending offer outright. Any newer raise replaces it anyway, so this
-// exists for the callers that need a known-empty slot rather than for the normal
-// lifecycle: the tests' per-case isolation, and any future caller that wants to
-// abandon a raise instead of offering it (markFrontierUndoOffered is the
-// "offered, don't repeat" half).
-export function clearFrontierUndo(): void {
-   lastRaise = null
-   raiseOffered = false
-}
-
-// Record a raise as undoable, keeping only the keys it actually moved. Called
-// after the write lands, so a failed write leaves no offer behind. A newer raise
-// always replaces an older pending one: the offer is for the last thing that
-// happened, and stacking them would let one Undo skip a step.
-function snapshotRaise(before: Record<string, number | undefined>, touched: string[], to: number): void {
-   const prev: Record<string, number | undefined> = {}
-   for (const key of touched) prev[key] = before[key]
-   lastRaise = { prev, to }
-   raiseOffered = false
-}
-
-// One feed's seen-frontier write: set seen[key]=value and record the key in
-// `touched` when shouldMove(prev) holds. The shared primitive behind BOTH
-// recordSeen's per-feed raise and the two explicit frontier gestures below, so
-// the seen-write discipline (key shape, touched bookkeeping) lives in one place.
-function writeFrontier(
-   seen: Record<string, number>,
-   touched: string[],
-   feedId: number,
-   shouldMove: (prev: number | undefined) => boolean,
-   value: number,
-): void {
-   const key = "feed:" + feedId
-   const prev = seen[key]
-   if (shouldMove(prev)) {
-      seen[key] = value
-      touched.push(key)
-   }
-}
-
-// The loop-and-commit body shared by markAllRead/markUnreadFrom: move every
-// filter member's frontier to `value` where shouldMove(prev) holds, then persist
-// + push. Peek modes (saved/search) have no frontier to move. Returns whether
-// anything actually changed (the caller only rebuilds / re-counts when it did).
-// `undoable` is set for the RAISES only. The rewind (markUnreadFrom) is already
-// the explicit, deliberate gesture — it is what an undo would be — so offering
-// to undo it would just be a second way to spend the same intent, and it would
-// overwrite the raise snapshot the user actually wants back.
-function moveFrontier(shouldMove: (prev: number | undefined) => boolean, value: number, undoable: boolean): boolean {
-   if (filter.search || filter.saved) return false
-   try {
-      const seen = readSeen()
-      const touched: string[] = []
-      const before: Record<string, number | undefined> = {}
-      for (const feedId of filter.feeds.keys()) {
-         before["feed:" + feedId] = seen["feed:" + feedId]
-         writeFrontier(seen, touched, feedId, shouldMove, value)
-      }
-      if (touched.length === 0) return false
-      writeSeen(seen, touched)
-      if (undoable) snapshotRaise(before, touched, value)
-      sync.pushSoon()
-      return true
-   } catch {
-      return false
-   }
-}
-
-// Mark the whole current feed/tag/[ALL] selection read: raise every filter
-// member's seen frontier to the newest chron in the store — the same one-way
-// high-water recordSeen writes for "other" feeds, so a foreign chron as the
-// frontier is the established shape. Pure raise ⇒ trivially compatible with
-// sync's merge. Peek modes (saved/search) have no frontier to move and return
-// untouched. Returns whether anything actually changed (the caller only
-// rebuilds the list / re-counts when it did).
+// Mark the whole current feed/tag/[ALL] selection read (./seen owns the write).
 export function markAllRead(): boolean {
-   if (data.db.total_art === 0) return false
-   const top = data.db.total_art - 1
-   return moveFrontier((prev) => prev === undefined || prev < top, top, true)
+   return raiseFilterRead(frontierScope())
 }
 
-// The explicit unread rewind — the ONLY path that lowers a seen frontier:
-// mark everything from `chron` (inclusive) to the latest article unread under
-// the current selection, by lowering every filter member's frontier to
-// chron−1 (members already below stay put — their older unread is untouched).
-// −1 (chron 0) is stored, not deleted: a stored −1 reads exactly like
-// never-seen everywhere, and keeping the key preserves the per-key timestamp
-// that lets this rewind outrank older raises on other devices (writeSeen
-// stamps it; profile.ts's per-key LWW propagates it). Peek modes are exempt,
-// mirroring recordSeen. Returns whether anything changed.
+// The explicit unread rewind — the ONLY path that lowers a seen frontier
+// (./seen owns the write).
 export function markUnreadFrom(chron: number): boolean {
-   if (chron < 0) return false
-   const floor = chron - 1
-   return moveFrontier((prev) => prev !== undefined && prev > floor, floor, false)
-}
-
-// Batched per-feed unread: reads the seen map once and tallies EVERY feed in
-// one synchronous latest-tail pass (data.unreadTally — the old path re-scanned
-// the same resident pack once per feed, O(feeds × tail) on every lane-cycle
-// keypress in unread-only mode and every picker open). Feeds whose seen
-// frontier predates the latest pack come back in `rare` and fall back to the
-// per-feed feedUnread oracle — the exact formula the pass mirrors, kept as
-// the in-code source of truth (and the differential test's anchor) so the
-// badge↔pill agreement can't drift. Maps feed id → unread (a never-seen feed
-// maps to its full backlog).
-export function unreadCounts(chs: IFeed[]): Promise<Map<number, number>> {
-   const seenMap = readSeen()
-   return tallyWith(chs, (id) => seenMap["feed:" + id])
-}
-
-// The tag-header aggregate the dropdown displays as the tag badge: the sum of
-// its members' per-feed unread, read straight from the `unreadCounts` map
-// already computed for the row badges (no recount — the previous async
-// tagUnreadCount re-ran feedUnread for every tag member, so tagged feeds were
-// scanned twice per menu open). feedUnread already counts a never-seen member as
-// its full backlog and (in unseen-only mode) the unread article you're sitting
-// on as still-unread, so the badge is a plain sum and the row badges beneath the
-// header add up to it. A tag has no count of its own; this derives it from its
-// members. Synchronous: the counts are already resolved. Returns ≥ 0 (0 =
-// nothing unseen). The Math.max guards any stray negative / a member missing
-// from the map down to 0.
-export function tagUnreadFromCounts(group: IFeed[], counts: Map<number, number>): number {
-   return group.reduce((sum, ch) => sum + Math.max(0, counts.get(ch.id) ?? 0), 0)
-}
-
-export function pruneSeen() {
-   try {
-      const seen = readSeen()
-      let changed = false
-      for (const key of Object.keys(seen)) {
-         // tag: entries are legacy — a tag's position now derives from its
-         // member feeds, so any stored tag: key is dead weight. A feed: key
-         // for a deleted feed goes too.
-         const stale = key.startsWith("tag:") || (key.startsWith("feed:") && !data.db.feeds[Number(key.slice(5))])
-         if (stale) {
-            delete seen[key]
-            changed = true
-         }
-      }
-      if (changed) localStorage.setItem(seenK(), JSON.stringify(seen))
-      // The per-key ordering timestamps shadow the seen map — any st key whose
-      // seen entry is gone (pruned above, or never existed) is dead weight too.
-      const rawSt = localStorage.getItem(seenTsK())
-      const st: Record<string, number> = rawSt ? JSON.parse(rawSt) : {}
-      let stChanged = false
-      for (const key of Object.keys(st))
-         if (seen[key] === undefined) {
-            delete st[key]
-            stChanged = true
-         }
-      if (stChanged) localStorage.setItem(seenTsK(), JSON.stringify(st))
-   } catch {}
+   return lowerFilterFrom(chron, frontierScope())
 }
 
 // The reader's no-article state. `notStarted` picks which unread-only message the
@@ -1176,7 +682,7 @@ function resolveNoMatch(replace = false, notStarted = false): IShowFeed {
    // Same cleanup as resolve(): the cached neighbor probes, the saved ghost, and
    // any in-flight media prefetch belong to the PREVIOUS filter's article and are
    // now stale.
-   savedGhost = null
+   clearSavedGhost()
    next.left = next.right = undefined
    abortPrefetch()
    updateHash(replace)
@@ -1510,94 +1016,11 @@ export function filterKey(): string {
    return filter.tokens.join(" ")
 }
 
-const encTok = (t: string): string => encodeURIComponent(t).replaceAll("+", "%2B")
-
 // The `!tokens` hash suffix for the active filter ("" when inactive) — shared by
 // updateHash (reader `#pos!tokens`) and the list surface (`#!tokens`, no pos).
-// `+` joins tokens, so a literal `+` inside one (e.g. a search query "c++") is
-// escaped to %2B — encodeURIComponent leaves `+` alone — and decoded back after
-// the split on the read side (route/fromHash).
-//
-// Multi-store (docs/MULTI-STORE-SPEC.md §6.3): the active mount rides IN the
-// token grammar. The HOME mount emits BARE tokens exactly as before, so every
-// existing deep link and stored srr-hash keeps working untouched; a PEER mount
-// prefixes each token with `@<mid>:`, and a peer [ALL] (no tokens) emits a bare
-// `@<mid>` marker so the mount survives.
+// ./route owns the grammar; nav supplies the active tokens.
 export function tokensSuffix(): string {
-   const mid = data.activeStore().mid
-   if (mid === HOME_MID) {
-      return filter.active ? "!" + filter.tokens.map(encTok).join("+") : ""
-   }
-   if (!filter.active) return "!@" + mid
-   return "!" + filter.tokens.map((t) => "@" + mid + ":" + encTok(t)).join("+")
-}
-
-// Extract the mount + the bare filter tokens from a hash's decoded token list
-// (§6.3). All-bare tokens ⇒ the home mount. A peer token is `@<mid>` ([ALL]) or
-// `@<mid>:<token>`. All tokens must share ONE mount prefix; a MIXED hash keeps
-// the first mount's tokens and drops the rest (the same forgiving posture as a
-// malformed escape). The `@`/`:` are literal in the fragment; the token VALUE
-// after the first `:` is already decoded, so a token containing `:` (a search
-// `q:…`, a tag with a colon) survives — only the FIRST colon splits.
-export function parseHashMount(rawTokens: string[]): { mid: string; tokens: string[] } {
-   if (rawTokens.length === 0 || !rawTokens[0].startsWith("@")) {
-      return { mid: HOME_MID, tokens: rawTokens }
-   }
-   const parseTok = (t: string): { mid: string; tok: string } => {
-      const colon = t.indexOf(":")
-      return colon === -1 ? { mid: t.slice(1), tok: "" } : { mid: t.slice(1, colon), tok: t.slice(colon + 1) }
-   }
-   const mid = parseTok(rawTokens[0]).mid
-   const tokens: string[] = []
-   for (const raw of rawTokens) {
-      if (!raw.startsWith("@")) break // a bare token after a peer prefix — mixed, stop
-      const p = parseTok(raw)
-      if (p.mid !== mid) break // a different mount — first mount wins, drop the rest
-      if (p.tok) tokens.push(p.tok)
-   }
-   return { mid, tokens }
-}
-
-// The position part of a `#pos[!tokens]` hash — everything before the first
-// `!` (the whole hash when there is none). "" means no position (a list hash);
-// an integer routes to the reader; anything else is a foreign hash (app.ts's
-// boot guard drops those). parseHashTokens below is the suffix half.
-export function hashPos(hash: string): string {
-   const bang = hash.indexOf("!")
-   return bang === -1 ? hash : hash.substring(0, bang)
-}
-
-// Parse the `!tokens` segment of a hash into an array of decoded token strings.
-// Called by both app.ts route() (the list path) and fromHash() (the reader path).
-// A malformed %-escape passes through verbatim rather than crashing navigation.
-export function parseHashTokens(hash: string): string[] {
-   const bang = hash.indexOf("!")
-   if (bang === -1) return []
-   return hash
-      .substring(bang + 1)
-      .split("+")
-      .filter((t) => t.length > 0)
-      .map((t) => {
-         try {
-            return decodeURIComponent(t)
-         } catch {
-            return t
-         }
-      })
-}
-
-// The parsed seen map (feed key → last-viewed chronIdx). Exposed for the
-// list surface's per-row read/unread dot; nav owns the localStorage shape.
-export function getSeenMap(): Record<string, number> {
-   return readSeen()
-}
-
-// A row is unread when its feed was never seen on this device, or the row's
-// chronIdx is strictly after the feed's seen high-water — the same rule
-// unreadCount/feedUnread count by (never-seen = all unread).
-export function isRowUnread(chronIdx: number, feedId: number, seenMap: Record<string, number>): boolean {
-   const s = seenMap["feed:" + feedId]
-   return s === undefined || chronIdx > s
+   return encodeTokens(filter.tokens)
 }
 
 // Map current filter state to a key matching getFilterEntries() format (""|"tagName"|"id")
@@ -1677,6 +1100,5 @@ export async function cycleFilter(dir: number): Promise<IShowFeed> {
 }
 
 function updateHash(replace = false) {
-   const hash = pos >= 0 ? `#${pos}${tokensSuffix()}` : `#${tokensSuffix()}`
-   history[replace ? "replaceState" : "pushState"](null, "", hash)
+   writeHash(pos, filter.tokens, replace)
 }
