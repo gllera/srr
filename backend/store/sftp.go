@@ -82,8 +82,10 @@ func (s *sftpSession) markOK() { s.lastOK.Store(time.Now().UnixNano()) }
 // evicted the mapping without sending an RST is the ordinary cause — answers
 // nothing and closes nothing, so an unbounded Getwd waits out the kernel's
 // full TCP retransmit schedule (minutes). The probe stands in for a dial, so
-// anything longer than a dial's own budget is the wrong trade.
-const sftpProbeTimeout = 10 * time.Second
+// anything longer than a dial's own budget is the wrong trade. A var, not a
+// const, only so a test can shrink it: the timer arm below is unreachable in a
+// fast test otherwise.
+var sftpProbeTimeout = 10 * time.Second
 
 // sftpFreshWindow is how recently an op must have succeeded for the probe to
 // skip the round trip. It exists for the case with something to lose: a session
@@ -106,8 +108,10 @@ const (
 // sftpDialTimeout bounds the whole connect — TCP, SSH handshake AND subsystem
 // open. ssh.ClientConfig.Timeout covers only the net.Dial, so relying on it
 // left the handshake and sftp.NewClient unbounded; dialSFTPSession therefore
-// drives the sequence itself with a deadline on the conn.
-const sftpDialTimeout = 30 * time.Second
+// drives the sequence itself with a deadline on the conn. A var, not a const,
+// only so a test can shrink it: both the handshake bound and the deadline CLEAR
+// below are otherwise unobservable in under 30 seconds.
+var sftpDialTimeout = 30 * time.Second
 
 // close tears the session down for real. ONLY the memo calls it, and only for a
 // session a liveness probe has just found dead — see sftpSessions for who owns

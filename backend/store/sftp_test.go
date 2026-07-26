@@ -2,6 +2,9 @@ package store
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"io"
 	"io/fs"
@@ -17,6 +20,7 @@ import (
 	"time"
 
 	"github.com/pkg/sftp"
+	"golang.org/x/crypto/ssh"
 )
 
 // --- pure-function tests (no server) ---------------------------------------
@@ -831,5 +835,347 @@ func TestSFTPCloseLeavesTheSharedSessionUp(t *testing.T) {
 	}
 	if got := readAllClose(t, rc); got != "data" {
 		t.Errorf("content = %q, want %q", got, "data")
+	}
+}
+
+// --- the real dial path (in-process ssh server) -----------------------------
+
+// withDialTimeout shrinks the connect budget for one test. The production 30s
+// is a correctness bound — it must exceed the longest real handshake — so it is
+// not a number a test can wait out; and both halves of the conn deadline (armed
+// before the handshake, cleared after it) are only observable by outlasting it.
+func withDialTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	saved := sftpDialTimeout
+	sftpDialTimeout = d
+	t.Cleanup(func() { sftpDialTimeout = saved })
+}
+
+// withProbeTimeout does the same for the liveness probe, whose timer arm is
+// simply unreachable in a fast test at the production 10s.
+func withProbeTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	saved := sftpProbeTimeout
+	sftpProbeTimeout = d
+	t.Cleanup(func() { sftpProbeTimeout = saved })
+}
+
+// newSSHSFTPServer stands up a REAL ssh server on loopback — ed25519 host key,
+// password auth, the "sftp" subsystem — and returns its address.
+//
+// Every other test in this file substitutes the dialer through the
+// sftpDialSession seam and hands out in-process pipe sessions, which is right
+// for the memo tests but leaves dialSFTPSession itself with ZERO executed
+// coverage: auth resolution, host-key policy, DialContext, ssh.NewClientConn,
+// sftp.NewClient, and the two ends of the dial deadline. The server is ~50
+// lines and the handshake is a few milliseconds on loopback, which is a cheap
+// price for the one code path whose failure mode is invisible until production.
+func newSSHSFTPServer(t *testing.T, password string) string {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("ed25519.GenerateKey: %v", err)
+	}
+	signer, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatalf("ssh.NewSignerFromKey: %v", err)
+	}
+	cfg := &ssh.ServerConfig{
+		PasswordCallback: func(_ ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) {
+			if string(pass) != password {
+				return nil, errors.New("bad password")
+			}
+			return nil, nil
+		},
+	}
+	cfg.AddHostKey(signer)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+
+	go func() {
+		for {
+			nc, err := ln.Accept()
+			if err != nil {
+				return // the listener closed with the test
+			}
+			go serveSSHSFTP(nc, cfg)
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// serveSSHSFTP is the server half: one ssh connection, session channels only,
+// pkg/sftp bolted onto whichever one asks for the "sftp" subsystem. Errors are
+// dropped rather than reported — this is a peer, not an assertion, and it is
+// routinely torn down mid-handshake when a test's listener closes.
+func serveSSHSFTP(nc net.Conn, cfg *ssh.ServerConfig) {
+	defer nc.Close()
+	sc, chans, reqs, err := ssh.NewServerConn(nc, cfg)
+	if err != nil {
+		return
+	}
+	defer sc.Close()
+	go ssh.DiscardRequests(reqs)
+
+	for newCh := range chans {
+		if newCh.ChannelType() != "session" {
+			_ = newCh.Reject(ssh.UnknownChannelType, "session only")
+			continue
+		}
+		ch, chReqs, err := newCh.Accept()
+		if err != nil {
+			return
+		}
+		go func() {
+			for req := range chReqs {
+				// A subsystem request's payload is the length-prefixed name.
+				ok := req.Type == "subsystem" && len(req.Payload) > 4 && string(req.Payload[4:]) == "sftp"
+				if req.WantReply {
+					_ = req.Reply(ok, nil)
+				}
+				if !ok {
+					continue
+				}
+				srv, err := sftp.NewServer(ch)
+				if err != nil {
+					_ = ch.Close()
+					return
+				}
+				go func() {
+					_ = srv.Serve()
+					_ = srv.Close()
+					_ = ch.Close()
+				}()
+			}
+		}()
+	}
+}
+
+// The last line of dialSFTPSession is conn.SetDeadline(time.Time{}) — the CLEAR
+// of the dial deadline — and nothing covered it. The deadline is ABSOLUTE and
+// the conn it sits on is the session's for life (pkg/sftp multiplexes every
+// handle over it), so losing that one line does not fail a dial: it kills every
+// SFTP session exactly sftpDialTimeout after it was opened, i.e. 30s into a
+// fetch cycle, in production only.
+func TestSFTPDialClearsTheDialDeadline(t *testing.T) {
+	withSFTPCfg(t, SFTPConfig{Insecure: true})
+	t.Setenv("HOME", t.TempDir()) // no ~/.ssh keys: the URL password alone
+	withDialTimeout(t, 200*time.Millisecond)
+
+	addr := newSSHSFTPServer(t, "pw")
+	u := mustURL(t, "sftp://u:pw@"+addr+"/")
+	key := sftpSessionKey{cfg: sftpCfg, addr: addr, user: "u", urlPassword: "pw"}
+
+	sess, err := dialSFTPSession(ctx, key, u)
+	if err != nil {
+		t.Fatalf("dialSFTPSession against a real ssh server: %v", err)
+	}
+	t.Cleanup(sess.close)
+	if sess.client == nil || sess.sshClient == nil || sess.conn == nil {
+		t.Fatalf("session = %+v, want client, sshClient and conn all set", sess)
+	}
+
+	// Outlast the dial budget by a wide margin: a surviving absolute deadline
+	// has fired by now and taken the shared transport down with it.
+	time.Sleep(3 * sftpDialTimeout)
+
+	if _, err := sess.client.Getwd(); err != nil {
+		t.Fatalf("Getwd on a session dialed %v ago: %v — the dial deadline was never cleared, "+
+			"so every SFTP session dies sftpDialTimeout after it is dialed", 3*sftpDialTimeout, err)
+	}
+}
+
+// The other end of the same deadline: it must be ARMED before the handshake.
+// ssh.ClientConfig.Timeout bounds net.Dial and nothing else (x/crypto/ssh spends
+// it in ssh.Dial's net.DialTimeout call — ssh.NewClientConn never reads it), so
+// a peer that completes the TCP connect and then never sends its version banner
+// leaves the handshake blocked with nothing left to interrupt it.
+func TestSFTPDialGivesUpOnASilentPeer(t *testing.T) {
+	withSFTPCfg(t, SFTPConfig{Insecure: true})
+	t.Setenv("HOME", t.TempDir())
+	withDialTimeout(t, 200*time.Millisecond)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+
+	// Accept and then say nothing at all — and stay open, so the client waits on
+	// a live connection rather than an EOF.
+	held := make(chan net.Conn, 1)
+	go func() {
+		nc, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		held <- nc
+	}()
+	t.Cleanup(func() {
+		select {
+		case nc := <-held:
+			nc.Close()
+		default:
+		}
+	})
+
+	addr := ln.Addr().String()
+	u := mustURL(t, "sftp://u:pw@"+addr+"/")
+	key := sftpSessionKey{cfg: sftpCfg, addr: addr, user: "u", urlPassword: "pw"}
+
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		s, err := dialSFTPSession(ctx, key, u)
+		if s != nil {
+			s.close()
+		}
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("dialing a peer that never speaks should fail, not succeed")
+		}
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Errorf("dial took %v against a %v budget", elapsed, sftpDialTimeout)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("dialSFTPSession did not return within 5s against a %v dial budget — "+
+			"the handshake is unbounded. ssh.ClientConfig.Timeout covers net.Dial only, "+
+			"so the conn deadline is the only thing that can interrupt ssh.NewClientConn",
+			sftpDialTimeout)
+	}
+}
+
+// Host-key policy is the other thing only dialSFTPSession runs, and its SAFE
+// default is the one that must never quietly become a no-op: with sftp.insecure
+// unset, a server whose key is in no known_hosts must be refused. Nothing could
+// observe this before — the pipe sessions every other test uses are handed an
+// already-established transport and have no host key at all.
+func TestSFTPDialRejectsAnUnknownHostKey(t *testing.T) {
+	kh := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(kh, nil, 0o600); err != nil { // well-formed, and lists nobody
+		t.Fatal(err)
+	}
+	withSFTPCfg(t, SFTPConfig{KnownHostsFile: kh}) // Insecure deliberately false
+	t.Setenv("HOME", t.TempDir())
+	withDialTimeout(t, 2*time.Second)
+
+	addr := newSSHSFTPServer(t, "pw")
+	u := mustURL(t, "sftp://u:pw@"+addr+"/")
+	key := sftpSessionKey{cfg: sftpCfg, addr: addr, user: "u", urlPassword: "pw"}
+
+	s, err := dialSFTPSession(ctx, key, u)
+	if err == nil {
+		s.close()
+		t.Fatal("dialed a server whose host key appears in no known_hosts file — " +
+			"the default host-key policy is not reaching the handshake")
+	}
+	if !strings.Contains(err.Error(), "handshake") {
+		t.Errorf("err = %v, want the SSH handshake to be what refused it", err)
+	}
+}
+
+// --- the probe's third state ------------------------------------------------
+
+// healthName spells a sessionHealth out in a failure message. The whole point
+// of this arm is which of three states it is, and "probe = 1" says nothing.
+func healthName(h sessionHealth) string {
+	switch h {
+	case sessionHealthy:
+		return "sessionHealthy"
+	case sessionDead:
+		return "sessionDead"
+	case sessionUnresponsive:
+		return "sessionUnresponsive"
+	}
+	return "sessionHealth(?)"
+}
+
+// newStuckSFTPClient returns a real *sftp.Client whose peer completed the
+// protocol handshake and then went quiet: every request after it is read and
+// never answered. That is the black-holed-peer shape — a NAT that dropped the
+// mapping without sending an RST — and it is the only thing that reaches
+// probe's timer arm. closed fires if and ONLY if something closes the client,
+// and it fires before that Close returns, so the assertion needs no settle.
+func newStuckSFTPClient(t *testing.T) (*sftp.Client, <-chan struct{}) {
+	t.Helper()
+	cr, sw := io.Pipe() // client reads ← server writes
+	sr, cw := io.Pipe() // server reads ← client writes
+
+	closed := make(chan struct{})
+	go func() {
+		defer sw.Close()
+		defer close(closed) // LIFO: signalled before the client's recv loop can exit
+		// SSH_FXP_INIT: a uint32 length, then the payload.
+		var hdr [4]byte
+		if _, err := io.ReadFull(sr, hdr[:]); err != nil {
+			return
+		}
+		if _, err := io.CopyN(io.Discard, sr, int64(binary.BigEndian.Uint32(hdr[:]))); err != nil {
+			return
+		}
+		// SSH_FXP_VERSION(3), no extensions — the last thing this peer ever says.
+		if _, err := sw.Write([]byte{0, 0, 0, 5, 2, 0, 0, 0, 3}); err != nil {
+			return
+		}
+		// Drain forever, so the client's writes never block, and answer nothing.
+		_, _ = io.Copy(io.Discard, sr)
+	}()
+
+	client, err := sftp.NewClientPipe(cr, cw)
+	if err != nil {
+		t.Fatalf("sftp.NewClientPipe: %v", err)
+	}
+	t.Cleanup(func() { cw.Close(); cr.Close() })
+	return client, closed
+}
+
+// probe answers in three states, and the third had no test at all: the timer
+// never fires inside a unit test at the production 10s budget. The distinction
+// is load-bearing — sessionUnresponsive means "replace it, do NOT close it",
+// because a peer that is merely slow still has other goroutines' transfers
+// multiplexed over that same SSH channel, and closing it loses them. Collapsing
+// the arm into sessionDead would be invisible to every other test in this file.
+func TestSFTPProbeUnresponsivePeerIsNotDead(t *testing.T) {
+	withProbeTimeout(t, 100*time.Millisecond)
+	stuck, closed := newStuckSFTPClient(t)
+	s := &sftpSession{client: stuck}
+
+	if got := s.probe(false); got != sessionUnresponsive {
+		t.Fatalf("probe = %s, want sessionUnresponsive — a peer that accepts and never answers "+
+			"is not a corpse, and calling it dead tears down transfers that are still live",
+			healthName(got))
+	}
+
+	// ...and the memo must act on the distinction: replace, but leave it open.
+	c := withSFTPSessionMemo(t)
+	key := sftpSessionKey{addr: "stuck:22", user: "alice"}
+	e := sftpEntryFor(key)
+	e.mu.Lock()
+	e.sess = s
+	e.mu.Unlock()
+
+	fresh, err := sftpSessionFor(ctx, key, mustURL(t, "sftp://alice@stuck/p"))
+	if err != nil {
+		t.Fatalf("sftpSessionFor: %v", err)
+	}
+	if fresh == s {
+		t.Error("the unresponsive session was handed back out; it must be replaced")
+	}
+	if c.dials != 1 {
+		t.Errorf("dials = %d, want 1 (the replacement)", c.dials)
+	}
+	select {
+	case <-closed:
+		t.Error("the unresponsive session was CLOSED. Not answering in time is not proof of " +
+			"death, and the conn is shared: closing it kills the transfers still in flight on it")
+	default:
 	}
 }
