@@ -45,6 +45,13 @@
 # suite exercises through it. That is the conservative reading and the useful
 # one for a ratchet — it cannot be inflated by an integration test that merely
 # walks through a package.
+#
+# THE FLOORS FILE IS PARSED STRICTLY, for the same reason an area matching no
+# path is a FAIL rather than a pass. A row that is not exactly three columns, or
+# whose floor column is not a number, exits 2 — it is not skipped. A skipped row
+# retires that area's gate leaving no trace in the report, and a floor coerced
+# from a non-number to 0 passes anything. Blank and comment-only lines stay
+# legal; everything else must parse.
 
 set -euo pipefail
 
@@ -61,7 +68,20 @@ BEGIN {
   while ((getline line < floorfile) > 0) {
     sub(/#.*/, "", line)                       # strip comments
     gsub(/^[ \t]+|[ \t]+$/, "", line)          # and surrounding whitespace
-    if (split(line, f, /[ \t]+/) < 3) continue # blank / short lines
+    if (line == "") continue                   # blank / comment-only: legal
+    # A MALFORMED row is not a blank one. Skipping it would silently retire the
+    # gate for that area — the same vacuity the no-match check below guards
+    # against, and invisible in the report because the row simply is not there.
+    # `!= 3` also catches a stray fourth column, which would otherwise be lost.
+    if (split(line, f, /[ \t]+/) != 3) {
+      print "check-coverage: malformed floors row (want 3 columns): " line > "/dev/stderr"
+      exit 2
+    }
+    # And a non-numeric floor must not coerce to 0, which passes everything.
+    if (f[3] !~ /^[0-9]+(\.[0-9]+)?$/) {
+      print "check-coverage: non-numeric floor \"" f[3] "\" for area " f[1] > "/dev/stderr"
+      exit 2
+    }
     n++; area[n] = f[1]; pat[n] = f[2]; floor[n] = f[3] + 0
     if (length(area[n]) > width) width = length(area[n])
   }

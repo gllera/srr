@@ -192,10 +192,13 @@ cover-be: | dist
 
 # check-coverage-test: the ratchet's own test. It runs in verify (not just
 # beside cover-be) because it is pure bash+awk and takes milliseconds, and
-# because the thing it protects is a GATE: check-coverage.sh's three
+# because the thing it protects is a GATE: check-coverage.sh's four
 # anti-vacuity guards — no-match area FAILS, empty profile EXITS 2, blocks
-# deduped by span — all lived in one awk program that nothing exercised, so
-# deleting any of them left `make cover-be` reporting green over nothing.
+# deduped by span, malformed floors row EXITS 2 — all lived in one awk program
+# that nothing exercised, so deleting any of them left `make cover-be`
+# reporting green over nothing. (The fourth was added after the first three:
+# they were all on the PROFILE side, while the FLOORS parser could retire an
+# area's gate just as silently by skipping a row it could not split.)
 check-coverage-test:
 	scripts/check-coverage.test.sh
 
