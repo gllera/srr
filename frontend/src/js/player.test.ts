@@ -576,6 +576,68 @@ describe("the seek bar", () => {
       expect(m.currentTime).toBe(0)
    })
 
+   // The ARIA slider pattern puts ↑/↓ on the value axis. app.ts's global keymap
+   // maps them to cyclePrev/cycleNext, so unhandled they stepped the FILTER
+   // while the seek bar had focus; handled here they seek and (below) never
+   // reach the document at all.
+   it("steps the value on ArrowUp/ArrowDown, the ARIA slider axis", () => {
+      const [m] = putAudio()
+      withDuration(m, 200)
+      claim(m)
+      m.currentTime = 50
+      const seek = q<HTMLElement>(".srr-player-seek")
+
+      seek.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }))
+      expect(m.currentTime).toBe(55)
+      seek.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }))
+      expect(m.currentTime).toBe(50)
+   })
+
+   // The seek bar is a tabindex=0 role=slider DIV, so app.ts's document-level
+   // keydown — bubble-phase, typing-guarded on tag names only, with no
+   // defaultPrevented check — sees every key it handles. A key that ALSO ran
+   // the global action would seek AND step to the next article. Every key the
+   // handler claims must therefore stop at the bar.
+   it("never lets a handled key reach app.ts's document-level keymap", () => {
+      const [m] = putAudio()
+      withDuration(m, 200)
+      claim(m)
+      m.currentTime = 50
+      const seek = q<HTMLElement>(".srr-player-seek")
+
+      const globalKeymap = vi.fn()
+      document.addEventListener("keydown", globalKeymap)
+      try {
+         for (const key of ["ArrowRight", "ArrowLeft", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home"]) {
+            seek.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }))
+            expect(
+               globalKeymap,
+               `${key} reached the document keymap — it would also run the global action`,
+            ).not.toHaveBeenCalled()
+         }
+      } finally {
+         document.removeEventListener("keydown", globalKeymap)
+      }
+   })
+
+   // ...while a key it does NOT claim must still reach the global keymap: the
+   // guard above is scoped to the slider's own axis, not a blanket swallow (a
+   // modal owns every key — lightbox.ts — but a CONTROL owns only its own).
+   it("lets an unhandled key through to the global keymap", () => {
+      const [m] = putAudio()
+      claim(m)
+      const seek = q<HTMLElement>(".srr-player-seek")
+
+      const globalKeymap = vi.fn()
+      document.addEventListener("keydown", globalKeymap)
+      try {
+         seek.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))
+         expect(globalKeymap).toHaveBeenCalledTimes(1)
+      } finally {
+         document.removeEventListener("keydown", globalKeymap)
+      }
+   })
+
    it("shows a live clock, and only a duration once one is known", () => {
       const [m] = putAudio()
       claim(m)

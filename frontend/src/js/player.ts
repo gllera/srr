@@ -563,11 +563,25 @@ function bindSeek(): void {
       // buttons is a bitmask: nonzero means a button is still held (a drag).
       if (e.buttons) seekFromPointer(e)
    })
+   // stopPropagation beside every preventDefault — the dialog discipline
+   // dropdown.ts / search-ui.ts / lightbox.ts already spell out, applied to a
+   // control instead of a modal. The seek bar is a tabindex=0 role=slider DIV,
+   // so it takes focus from Tab AND from a plain press on the track, and
+   // app.ts's document-level keydown is bubble-phase with a tag-name-only
+   // typing guard (INPUT/TEXTAREA/SELECT/contentEditable) and no
+   // defaultPrevented check — a slider DIV walks straight through it. Without
+   // this, one ArrowRight both seeks +5s AND runs the global action: in the
+   // reader it steps to the NEXT ARTICLE, navigating away from the episode
+   // being scrubbed. This is the keyboard half of the guard gestures.ts
+   // already installs for touch (`.srr-player` stops touchstart, or a scrub
+   // reads as a prev/next swipe). ArrowUp/ArrowDown are in the step set for
+   // the same reason AND for the ARIA slider pattern, which expects them to
+   // step the value — unhandled, they fell through to the filter cycle.
    el.playerSeek.addEventListener("keydown", (e) => {
       const step =
-         e.key === "ArrowRight"
+         e.key === "ArrowRight" || e.key === "ArrowUp"
             ? 5
-            : e.key === "ArrowLeft"
+            : e.key === "ArrowLeft" || e.key === "ArrowDown"
               ? -5
               : e.key === "PageUp"
                 ? 60
@@ -576,9 +590,11 @@ function bindSeek(): void {
                   : 0
       if (step) {
          e.preventDefault()
+         e.stopPropagation()
          skip(step)
       } else if (e.key === "Home") {
          e.preventDefault()
+         e.stopPropagation()
          seekTo(0)
       }
    })
