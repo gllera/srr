@@ -186,7 +186,7 @@ reproduce touch/overscroll behavior.
     coverage untouched; `make test-be`.
   - **Risk / deps:** none — db_meta.go only, independent of every other step.
 
-- [ ] **S69** — GRO7: chunk oversized batches through materialization  ·  **P3 · M**  ·  from GRO7 (BE-G7)
+- [x] **S69** — GRO7: chunk oversized batches through materialization  ·  **P3 · M**  ·  from GRO7 (BE-G7)
   - **Edit:** `db_pack.go PutArticles` — when the batch's encoded bytes exceed a cap
     (new flag, e.g. `--max-batch-bytes`, default ~32 MiB, 0 = off), split the articles
     into sub-batches and drive each through the existing accounting + `shouldConsolidate`

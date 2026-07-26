@@ -441,6 +441,7 @@ re-resolve from the SW/HTTP cache for free.
 |---|---|---|---|
 | `maxDeltas` | `--max-deltas` / `SRR_MAX_DELTAS` | 12 | Chain cap (≈1 h at 5-min cycles). **0 = kill switch**: every dirty cycle consolidates — byte-identical behavior to today (§12.1 pins this). |
 | `maxDeltaBytes` | `--max-delta-bytes` / `SRR_MAX_DELTA_BYTES` | 256 KiB | Cap on Σ uncompressed delta bytes (`dby`) — bounds cold-boot delta payload (G4). |
+| `maxBatchBytes` | `--max-batch-bytes` / `SRR_MAX_BATCH_BYTES` | 32 MiB | Cap on the encoded JSONL a single `PutArticles` pass materializes. An oversized batch (a backfill import) is split into sub-batches, each driven through the same `shouldConsolidate` → `emitDelta`/`consolidateTail` decision, so peak transient memory follows the cap instead of the batch. Byte-invisible in the store (`TestChunkedBatchEquivalence`); 0 = off, one pass, byte-identical to the pre-chunking writer. |
 
 ## 12. Testing plan
 
