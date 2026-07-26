@@ -1674,6 +1674,27 @@ describe("list", () => {
          expect(nav.getSeenMap()["feed:1"]).toBe(1) // exactly where it was
       })
 
+      // A swipe far ahead of a feed's frontier reads everything behind it, which
+      // is exactly the silent bulk move RDR1's snackbar exists to announce — so
+      // the mark-read routes through the SAME offer the reader's gestures use
+      // (app.ts injects menus.offerFrontierUndo), instead of merely consuming the
+      // slot. The offer marks the slot itself and applies its own size bar, so an
+      // ordinary one-row swipe still says nothing.
+      it("routes the mark-read through the injected frontier-undo offer", async () => {
+         const offer = vi.fn(async () => {})
+         list.setup(container, (c) => opened.push(c), undefined, undefined, offer)
+         setIndex(6)
+         nav._setSeen({ "feed:1": 1 })
+         await list.render()
+         const row = $rows().find((r) => r.dataset.chron === "5")!
+         swipe(row, READ)
+         expect(offer).toHaveBeenCalledTimes(1)
+         // The offer owns marking the slot; the swipe must not double-answer it.
+         expect(nav.markFrontierUndoOffered).not.toHaveBeenCalled()
+         // Re-wire the default (no offer) so later cases keep the fallback path.
+         list.setup(container, (c) => opened.push(c))
+      })
+
       it("falls back to the rewind when the frontier moved since the swipe", async () => {
          setIndex(6)
          nav._setSeen({ "feed:1": 1 })
