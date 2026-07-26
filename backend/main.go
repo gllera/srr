@@ -89,6 +89,7 @@ type CLI struct {
 	Asset     AssetGroup     `cmd:"" help:"Self-hosted asset tooling (repair a published object)."`
 	Syndicate SyndicateGroup `cmd:"" help:"Manage syndication output feeds (out/*)."`
 	Recipe    RecipeGroup    `cmd:"" help:"Manage processing recipes (named {ingest, pipe} bundles)."`
+	Watch     WatchGroup     `cmd:"" help:"Manage keyword watchlists (named per-article match rules)."`
 	Export    ExportAllCmd   `cmd:"" help:"Write the whole store configuration (feeds, recipes, syndication, dedup default) as JSON."`
 	Import    ImportAllCmd   `cmd:"" help:"Restore a configuration written by 'srr export' (feeds matched by url; fetch state untouched)."`
 	Dedup     DedupCmd       `cmd:"" help:"Print or set the store-wide default dedup horizon (db.gz 'dd', in days)."`

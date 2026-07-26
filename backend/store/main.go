@@ -61,6 +61,14 @@ const (
 //     own series, so nothing here — or in the generated PACK_SERIES_KINDS, or
 //     in the SW's route regex — has to learn about a second backend-only class.
 //     The frontend/service-worker never fetch either.
+//   - "watch" holds the keyword-watchlist bitmaps (§4.8, backend/watch.go): one
+//     chron-aligned object per stride region, one bit per article per watch
+//     rule. It is a POSITIONAL series of its own rather than a seen/ singleton
+//     because it is indexed by chron like idx/ and meta/ are, and because it is
+//     the one backend-written sidecar a reader is meant to fetch (the "⚡ watch"
+//     lane); having it in the grammar is what makes the SW route it. A store
+//     with no watch rules never writes one, and the manifest then carries no
+//     row for it at all.
 var PackSeries = []struct {
 	Name  string // series directory
 	Kinds string // kind letters valid besides the finalized bare stem ("" = bare only)
@@ -70,6 +78,7 @@ var PackSeries = []struct {
 	{"meta", ""},
 	{"manifest", ""},
 	{"seen", ""},
+	{"watch", ""},
 }
 
 // packKeyRe matches the write-once pack names, built from PackSeries.

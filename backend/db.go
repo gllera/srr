@@ -335,6 +335,31 @@ type ManifestState struct {
 	// range while the new chrons fall through to the meta/data path.
 	// omitempty; 0 is the natural base for a store under headMax articles.
 	HeadBase int `json:"hb,omitempty"`
+	// WatchFrom is the keyword-watchlist ROSTER and its coverage floor: rule
+	// name → the first chron whose bit that rule's plane describes (watch.go,
+	// docs/MANIFEST-SPEC.md §4.8). Reader-facing — the lane labels and where
+	// each lane legitimately starts — while the rules' PATTERNS stay in the
+	// backend-only config.gz, because publishing what an operator watches for
+	// is exactly the class of leak the store-visibility split closed.
+	//
+	// It is APPLY-FORWARD-ONLY: `srr watch set` stamps the store's current
+	// article count here, in the same locked Commit that publishes the rule, and
+	// nothing ever lowers it. That is the FMT2b answer to the same question — an
+	// explicit coverage watermark rather than a lock-held walk of the whole data
+	// series, which on a large store can approach the 15-minute lease TTL that
+	// is a correctness bound and not headroom. The cost is stated rather than
+	// hidden: a new rule's lane begins at the moment it was declared, and there
+	// is deliberately no backfill verb.
+	// omitempty; absent == this store has no watch rules.
+	WatchFrom map[string]int `json:"wf,omitempty"`
+	// WatchCovered is the exclusive UPPER end of that coverage: bits are
+	// published for every chron in [WatchFrom[r], WatchCovered) of every rule r.
+	// It exists because SyncWatch is warn-only like SyncMeta — a failed sync
+	// leaves a committed batch whose bits were never written, and a watermark
+	// that only advances on success is what lets the next cycle re-evaluate
+	// exactly the gap instead of leaving a permanent hole in the lane.
+	// omitempty; absent == nothing published.
+	WatchCovered int `json:"wc,omitempty"`
 }
 
 // StoreConfig is the store-wide operator configuration: everything that moves
@@ -362,6 +387,12 @@ type StoreConfig struct {
 	// the frontend/service-worker ignores the `out` field entirely (backend-only
 	// config and output key space).
 	Out []OutFeed `json:"out,omitempty"`
+	// Watch is the keyword-watchlist rule set: rule name → its #filter-syntax
+	// match specification (watch.go). The PATTERNS live here — backend-only,
+	// never fetched by the reader — while the roster and per-rule coverage ride
+	// the manifest (ManifestState.WatchFrom): a lane needs a label, but what an
+	// operator watches for is theirs. omitempty; managed via `srr watch`.
+	Watch map[string]string `json:"watch,omitempty"`
 }
 
 // ManifestWriterState is the writer-private bookkeeping that rides the manifest

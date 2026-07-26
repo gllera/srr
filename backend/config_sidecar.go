@@ -166,7 +166,7 @@ func canonicalConfig(c configSidecar) any {
 	for _, id := range feedIDs {
 		feeds = append(feeds, []any{id, c.Feeds[id]})
 	}
-	return []any{c.Version, c.Recipes, c.DedupDays, c.Out, feeds}
+	return []any{c.Version, c.Recipes, c.DedupDays, c.Out, c.Watch, feeds}
 }
 
 // syncConfig writes config.gz under its own advisory marker. Callers hold

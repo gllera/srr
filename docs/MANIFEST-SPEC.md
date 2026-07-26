@@ -382,6 +382,129 @@ references are never released, since `ExpireArticles` walks live feeds only) —
 keeping those leaks bytes rather than breaking a live article's media, which is
 the direction this whole finding chose.
 
+### 4.8 The keyword-watchlist bitmaps — the `watch` series
+
+**Status:** implemented, backend only (FMT5). §4.7 was the worked example of a
+new *singleton* needing no ordering proof; this is the worked example of a new
+**positional series** needing no new GC rule, no purge discipline and no change
+to the commit protocol. Reader lane still owed — see the end of this section.
+
+**The problem.** Every classification the store had was per FEED: a tag groups
+subscriptions, so that is the only lane a reader can offer. The thing an
+operator actually watches for — a price drop, a name they track, a CVE keyword —
+cuts ACROSS feeds and lands on individual articles. There was no per-article
+axis at all.
+
+**The three pieces**, each in the object that owns its kind of truth:
+
+| Piece | Lives in | Why there |
+|---|---|---|
+| the RULES — name → `#filter`-syntax match spec | `config.gz` (`StoreConfig.Watch`) | Operator configuration, exactly like recipes, dedup tuning and the syndication slots. Publishing *what someone watches for* is the leak the store-visibility split was taken to close. |
+| the ROSTER — name → coverage floor, plus the store-wide coverage end | the manifest (`ManifestState.WatchFrom` / `WatchCovered`) | A lane needs a label and a reader needs to know where the lane legitimately begins. Reader-facing, unlike the pattern. |
+| the BITS | the `watch` series, one object per stride region | Chron-indexed, so positional like `idx`/`meta` — not a singleton. |
+
+```json
+"watch": {"b":0, "r":[[0,3]], "l":2}
+```
+
+```json
+{"v":1, "base":0, "n":50000, "bits":{"cve":"<base64>","price":"<base64>"}}
+```
+
+Bit `i` of the object at position `p` describes chron `p*watchPackSize + i`,
+LSB-first within each byte; `watchPackSize` equals `idxPackSize`, so
+chron→watch-position is the same division a reader already did for `idx`. A rule
+with no hit in a region contributes no plane. One rule costs 6,250 bytes per
+full region and gzips to nearly nothing while the plane is sparse — which a
+watchlist is by definition.
+
+**Why a new series and not `seen/`.** §4.7 rides `seen` because it is a
+backend-only singleton. This is neither: it is positional, and it is the one
+backend-written sidecar a reader is *meant* to fetch. So it takes a `PackSeries`
+row, which is what teaches `packKeyRe`, `cacheControlForKey`, `ParsePackKey`
+(and therefore the GC's candidate scoping) and — via the generated
+`PACK_SERIES_KINDS` — the service worker's route regex, all from one
+declaration. §4.6's constraint is honoured throughout: nothing anywhere assumes
+how many series there are.
+
+**Everything else follows from what is already here.** Objects are write-once
+under fresh stems from the series' own monotone counter; the manifest lists
+them; §6.1 covers the crash story with no proof of its own; §7's one rule
+reclaims them. Removing the last rule drops the series ROW entirely (its stem
+counter stays, so a rule declared later comes back on fresh names), which makes
+every object unreachable and the next sweep reclaims them.
+
+**Chron alignment is the whole design, and it is invariant M8 wearing this
+feature's clothes.** The axis survives both operations that remove articles
+without moving them, and it survives them by construction rather than by
+handling:
+
+- **Expiration** is logical — `add_idx` advances, packs and idx headers are
+  immutable, chrons do not move. An expired article's bit stays set and stays
+  pointed at the same article; every reader already filters `chron < add_idx`,
+  so a lane hides it for the same reason the list does.
+- **Compaction (§9.2)** rewrites `data/` lines and `meta/` cards under fresh
+  stems and leaves `idx/` — and this series — entirely untouched, *precisely
+  because it must not renumber*. So `watch/` needs no entry in the compaction
+  plan at all.
+
+The one honest residual: the rebuild path below re-derives bits from the data
+packs, and a compacted article's tombstone has no title or content, so a rebuild
+over an already-compacted region would clear those bits. Only expired chrons
+compact and expired chrons are already filtered out of every lane, so the effect
+is invisible — it is written down because the next person to widen either
+feature needs to know the two interact at all.
+
+**Rule changes are APPLY-FORWARD-ONLY, and that is the load-bearing decision.**
+`srr watch set` stamps `WatchFrom[rule]` at the store's current article count,
+in the same locked Commit that publishes the rule; nothing ever lowers it.
+Changing a rule's spec re-stamps the floor (the published bits describe a
+predicate that no longer exists, and re-stamping is how the store says so out
+loud instead of serving them as if they meant the new rule); re-declaring an
+identical spec is a no-op, so the lane does not restart.
+
+The rejected alternative is a backfill: walking the whole `data/` series under
+`.locked` to evaluate a new rule over history. §4.7 refused the same thing for
+the same reason and the reasoning is unchanged — that walk grows with the store
+and can approach the 15-minute lease TTL, which is a **correctness bound**, not
+headroom (a stolen lease lets two writers draw the same stems and overwrite each
+other's packs). The cost is stated rather than hidden: a new rule's lane begins
+where it was declared, and there is deliberately no backfill verb.
+
+**Coverage has two ends, and each has its own job.** `WatchFrom[r]` is the
+lower one (per rule, above); `WatchCovered` is the upper one — bits are
+published for every chron in `[WatchFrom[r], WatchCovered)` of every rule `r`.
+The upper end exists because `SyncWatch` is **warn-only** like `SyncMeta`, for
+the same reason: a derived index must never discard a durable article batch. A
+watermark that advances only on success is what turns a failed sync into an
+exact, self-healing gap instead of a permanent hole — the next run re-evaluates
+precisely `[WatchCovered, TotalArticles)`, from the batch in hand when it still
+covers that range and from `walkArticles` when it does not.
+
+**Failure posture: a damaged lane is never a wrong lane.** The bitmap parser is
+strict (version, `base`, `n`, plane length), because adopting a half-understood
+body would carry wrong bits forward into objects that are immutable. A read-back
+that fails rebuilds that region from its own base out of the data packs rather
+than republishing an object missing bits it used to carry. A rule whose spec
+will not compile — only reachable by hand-editing `config.gz`, since the CLI
+rejects it at declaration — is warned about and dropped from the roster, so the
+lane disappears rather than being published with nothing maintaining it. Nothing
+here can lose or misattribute an article: the worst outcome is no lane.
+
+**Two-object divergence.** The rules and the roster are written by one Commit as
+TWO objects, so §6.4's window can leave a roster entry with no pattern (forget
+it) or a pattern with no roster entry (stamp it at this run's start chron — the
+same apply-forward answer `srr watch set` gives). `SyncWatch` reconciles both
+every cycle; `srr inspect --validate` reports either while it lasts.
+
+**Owed, for the reader lane** (deliberately not landed with the backend):
+`sw.ts`'s `checkManifest` builds its live set from `names.idx/data/meta/deltas/
+hsum/ssum` and evicts every cached pack object outside it, so a reader that
+fetched `watch/` objects would have them evicted on every manifest adoption
+until `names.watch` is added to that set. `names.ts` already ignores the extra
+series safely (it looks series up by name), and the SW's route regex already
+matches `watch/<stem>.gz` via `PACK_SERIES_KINDS`.
+
 ## 5. The content split
 
 ### 5.1 `DBCore` field-by-field
