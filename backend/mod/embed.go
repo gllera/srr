@@ -17,10 +17,16 @@ import (
 // rewrites iframes of known providers into sanitizer-survivable markup
 // first: the provider's derivable thumbnail wrapped in a link to the watch
 // page (YouTube, Dailymotion), or a plain labelled link when no thumbnail
-// URL can be derived (Vimeo, Spotify). The iframe's title attribute becomes
-// the link label when present. A text link always accompanies a thumbnail —
-// the thumbnail may 404 and the frontend collapses broken images, so the
-// target stays reachable either way.
+// URL can be derived (Vimeo, Spotify, TikTok, Twitch, SoundCloud,
+// Streamable, Bandcamp). The iframe's title attribute becomes the link
+// label when present. A text link always accompanies a thumbnail — the
+// thumbnail may 404 and the frontend collapses broken images, so the target
+// stays reachable either way.
+//
+// TikTok and Bandcamp are the two providers whose link is the normalized
+// PLAYER page rather than a watch page: their embed URLs carry no author or
+// artist, so no watch page is derivable from them — see embedTikTok and
+// embedBandcamp.
 //
 // Unknown iframes are left untouched (the sanitizer removes them as before):
 // converting arbitrary embeds — ad frames included — into links would add
@@ -46,6 +52,9 @@ func init() {
 var (
 	embedIDRe     = regexp.MustCompile(`^[A-Za-z0-9_-]{4,}$`)
 	embedDigitsRe = regexp.MustCompile(`^[0-9]+$`)
+	// A Twitch login is its own grammar, narrower than embedIDRe (no dashes)
+	// and length-bounded — it is interpolated into a bare twitch.tv/<name>.
+	embedTwitchLoginRe = regexp.MustCompile(`^[A-Za-z0-9_]{3,25}$`)
 )
 
 // embedTarget is the link a recognized iframe collapses to.
@@ -140,6 +149,116 @@ func classifyEmbed(src string) (embedTarget, bool) {
 				label: "Listen on Spotify",
 			}, true
 		}
+	case "streamable.com":
+		// /e/<id>, /o/<id> and /s/<id> are the three player paths; the watch
+		// page is the same id at the root.
+		if len(parts) >= 2 && (parts[0] == "e" || parts[0] == "o" || parts[0] == "s") &&
+			embedIDRe.MatchString(parts[1]) {
+			return embedTarget{
+				link:  "https://streamable.com/" + parts[1],
+				label: "Watch on Streamable",
+			}, true
+		}
+	case "tiktok.com":
+		return embedTikTok(parts)
+	case "player.twitch.tv", "clips.twitch.tv":
+		return embedTwitch(host, parts, u.Query())
+	case "w.soundcloud.com":
+		return embedSoundCloud(parts, u.Query())
+	case "bandcamp.com":
+		return embedBandcamp(parts)
+	}
+	return embedTarget{}, false
+}
+
+// embedTikTok maps a TikTok player iframe. This is one of the two providers
+// (Bandcamp is the other) whose link is the PLAYER page rather than a watch
+// page, and for the same reason on both: the canonical
+// tiktok.com/@<author>/video/<id> URL needs the author handle and the embed
+// URL does not carry it, so the target is the normalized player page — which
+// is itself a real, playable page.
+func embedTikTok(parts []string) (embedTarget, bool) {
+	var id string
+	switch {
+	case len(parts) >= 3 && parts[0] == "embed" && parts[1] == "v2": // /embed/v2/<id>
+		id = parts[2]
+	case len(parts) >= 3 && parts[0] == "player" && parts[1] == "v1": // /player/v1/<id>
+		id = parts[2]
+	case len(parts) >= 2 && parts[0] == "embed": // /embed/<id>
+		id = parts[1]
+	}
+	if !embedDigitsRe.MatchString(id) {
+		return embedTarget{}, false
+	}
+	return embedTarget{
+		link:  "https://www.tiktok.com/embed/v2/" + id,
+		label: "Watch on TikTok",
+	}, true
+}
+
+// embedTwitch maps the two Twitch player hosts: a VOD or a live channel on
+// player.twitch.tv, a clip on clips.twitch.tv. A `collection=` player plays
+// several videos in sequence and so has no single target — it stays
+// unrecognized rather than linking an arbitrary member.
+func embedTwitch(host string, parts []string, q url.Values) (embedTarget, bool) {
+	var link string
+	switch {
+	case host == "clips.twitch.tv":
+		// /embed?clip=<slug>; a clip's page is that slug on the same host.
+		if len(parts) > 0 && parts[0] == "embed" && embedIDRe.MatchString(q.Get("clip")) {
+			link = "https://clips.twitch.tv/" + q.Get("clip")
+		}
+	case q.Get("video") != "":
+		// VOD ids appear both bare (123456) and v-prefixed (v123456).
+		if id := strings.TrimPrefix(q.Get("video"), "v"); embedDigitsRe.MatchString(id) {
+			link = "https://www.twitch.tv/videos/" + id
+		}
+	case embedTwitchLoginRe.MatchString(q.Get("channel")):
+		link = "https://www.twitch.tv/" + q.Get("channel")
+	}
+	if link == "" {
+		return embedTarget{}, false
+	}
+	return embedTarget{link: link, label: "Watch on Twitch"}, true
+}
+
+// embedSoundCloud maps the SoundCloud widget, whose track rides the `url`
+// query param. Only a public soundcloud.com page is derivable: the widget is
+// just as often pointed at api.soundcloud.com/tracks/<id>, which needs an API
+// call to resolve to a page, so those stay unrecognized. The link is the
+// RE-SERIALIZED parsed URL — the raw param is attacker-supplied text and this
+// value is rendered as an href.
+func embedSoundCloud(parts []string, q url.Values) (embedTarget, bool) {
+	if len(parts) == 0 || parts[0] != "player" {
+		return embedTarget{}, false
+	}
+	t, err := url.Parse(q.Get("url"))
+	if err != nil || (t.Scheme != "http" && t.Scheme != "https") {
+		return embedTarget{}, false
+	}
+	if strings.TrimPrefix(strings.ToLower(t.Hostname()), "www.") != "soundcloud.com" {
+		return embedTarget{}, false
+	}
+	return embedTarget{link: t.String(), label: "Listen on SoundCloud"}, true
+}
+
+// embedBandcamp maps the Bandcamp player, whose path is a run of key=value
+// segments (EmbeddedPlayer/album=123456/size=large/…). Like TikTok it names
+// no artist, so no album or track page is derivable from it and the link is
+// the normalized player page for the id it does carry.
+func embedBandcamp(parts []string) (embedTarget, bool) {
+	if len(parts) == 0 || parts[0] != "EmbeddedPlayer" {
+		return embedTarget{}, false
+	}
+	for _, seg := range parts[1:] {
+		k, v, ok := strings.Cut(seg, "=")
+		if !ok || (k != "album" && k != "track") || !embedDigitsRe.MatchString(v) {
+			continue
+		}
+		return embedTarget{
+			link:  "https://bandcamp.com/EmbeddedPlayer/" + k + "=" + v + "/",
+			label: "Listen on Bandcamp",
+		}, true
 	}
 	return embedTarget{}, false
 }
