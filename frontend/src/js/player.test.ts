@@ -349,6 +349,75 @@ describe("persistence", () => {
       expect(m.src).toBe("https://cdn.example/store/assets/aa/0.mp3")
    })
 
+   it("claims the article's OWN element when the persisted episode is the mounted article", () => {
+      // The normal case, not an exotic one: `srr-hash` restores the last reading
+      // position, so closing the tab mid-episode boots straight back into that
+      // article — reader.ts renders its <audio> and THEN app.ts calls this.
+      // Building a second element here gives one episode two transports and lets
+      // a later rehomeInto substitute the synthetic node for the sanitized one.
+      const [live] = putAudio()
+      localStorage.setItem(
+         "srr-player",
+         JSON.stringify({
+            chron: 42, // === MOUNTED.chron
+            index: 0,
+            time: 75,
+            rate: 1,
+            src: "assets/aa/0.mp3",
+            kind: "audio",
+            title: "Episode 12",
+            feedId: 7,
+         }),
+      )
+      player.restorePersisted()
+      expect(player.isActive()).toBe(true)
+      // No second element anywhere, and the claim is the node already on screen.
+      expect(media().children.length).toBe(0)
+      expect(content().querySelectorAll("audio").length).toBe(1)
+      expect(content().querySelector("audio")).toBe(live)
+      // You can see it, so the bar stays down.
+      expect(bar().hidden).toBe(true)
+      expect(document.body.classList.contains("srr-playing")).toBe(false)
+      // Still seeks, and still never autoplays.
+      live.dispatchEvent(new Event("loadedmetadata"))
+      expect(live.currentTime).toBe(75)
+      expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled()
+      // And it is genuinely the claimed episode: adopting relocates THIS node.
+      player.adoptFromContent()
+      expect(media().firstElementChild).toBe(live)
+   })
+
+   it("a re-claimed element keeps the sanitizer's attributes across adopt -> rehome", () => {
+      // The second-order cost of a synthetic element: rehomeInto swaps
+      // active.media in for the freshly parsed one, so a stripped stand-in would
+      // permanently replace the real element — losing the playsinline/poster
+      // fmt.ts force-sets (on iOS, losing playsinline means fullscreen takeover).
+      content().innerHTML = `<video src="assets/aa/0.webm" controls playsinline poster="assets/aa/p.jpg"></video>`
+      localStorage.setItem(
+         "srr-player",
+         JSON.stringify({
+            chron: 42,
+            index: 0,
+            time: 5,
+            rate: 1,
+            src: "assets/aa/0.webm",
+            kind: "video",
+            title: "Episode 12",
+            feedId: 7,
+         }),
+      )
+      player.restorePersisted()
+      player.adoptFromContent()
+      // A fresh render of the same article, then the rehome.
+      content().innerHTML = `<video src="assets/aa/0.webm" controls playsinline poster="assets/aa/p.jpg"></video>`
+      player.rehomeInto("0", 42)
+      const back = content().querySelector("video") as HTMLVideoElement
+      expect(content().querySelectorAll("video").length).toBe(1)
+      expect(back.hasAttribute("playsinline")).toBe(true)
+      expect(back.getAttribute("poster")).toBe("assets/aa/p.jpg")
+      expect(back.hasAttribute("controls")).toBe(true)
+   })
+
    it("restores a video as a <video>", () => {
       localStorage.setItem(
          "srr-player",

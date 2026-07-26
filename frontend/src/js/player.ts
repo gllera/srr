@@ -597,10 +597,15 @@ export function setup(deps: PlayerDeps): void {
    syncBar()
 }
 
-// Restore a persisted episode into a PAUSED bar. Never autoplays: browsers block
-// it without a gesture, and audio starting by itself on a cold boot is the exact
+// Re-claim a persisted episode, PAUSED. Never autoplays: browsers block it
+// without a gesture, and audio starting by itself on a cold boot is the exact
 // behaviour people disable autoplay to avoid — so this offers the episode back
 // rather than resuming it.
+//
+// Two paths, and picking the right one is the whole subtlety (see below): when
+// the episode's own article is the one reader.ts just rendered, the element is
+// ALREADY in the document and gets claimed in place (no bar — you can see it);
+// only when it is not does the bar get a detached element to hold.
 export function restorePersisted(): void {
    const store = data.activeStore()
    let saved: Persisted
@@ -613,6 +618,46 @@ export function restorePersisted(): void {
    }
    const src = typeof saved.src === "string" ? safeSrc(saved.src, store.base) : null
    if (!src || !(saved.chron >= 0) || !(saved.time > 0)) return clearSaved(store.mid)
+   const index = typeof saved.index === "number" ? saved.index : 0
+   const title = typeof saved.title === "string" ? saved.title : ""
+   const feedId = typeof saved.feedId === "number" ? saved.feedId : 0
+   const seek = (m: HTMLMediaElement): void => {
+      if (RATES.includes(saved.rate)) m.playbackRate = saved.rate
+      const apply = (): void => {
+         try {
+            m.currentTime = saved.time
+         } catch {}
+         syncBar()
+      }
+      // HAVE_METADATA. A live in-content element may already be past it.
+      if (m.readyState >= 1) apply()
+      else m.addEventListener("loadedmetadata", apply, { once: true })
+   }
+
+   // The persisted episode's OWN article may already be on screen — and that is
+   // the normal case, not an exotic one: `srr-hash` restores the last reading
+   // position, so someone who closed the tab mid-episode boots straight back
+   // into it. reader.ts has already rendered its sanitized <audio>/<video> by
+   // the time this runs, so building a second element here would give one
+   // episode two transports (the bar shows, because a synthetic node is not in
+   // el.content and therefore reads as "adopted"), and the later rehomeInto
+   // would substitute the synthetic node for the article's real one — dropping
+   // the playsinline/poster/controls the sanitizer force-sets. Claim the
+   // element that is already there instead. There is no second element.
+   if (mounted && mounted.mid === store.mid && mounted.chron === saved.chron) {
+      const live = mediaList(el.content)[index]
+      if (live) {
+         active = { ...mounted, index, media: live }
+         seek(live)
+         bindMedia(live)
+         watch(live)
+         bindMediaSession()
+         syncMediaSession()
+         syncBar()
+         return
+      }
+   }
+
    // No upper bound check on the chron: the store may have been compacted or the
    // article expired since, and nav already clamps an unaddressable chron to the
    // last article. The bar's own label comes from the persisted title, so a stale
@@ -620,26 +665,9 @@ export function restorePersisted(): void {
    const m = document.createElement(saved.kind === "video" ? "video" : "audio")
    m.src = src
    m.preload = "metadata"
-   if (RATES.includes(saved.rate)) m.playbackRate = saved.rate
-   m.addEventListener(
-      "loadedmetadata",
-      () => {
-         try {
-            m.currentTime = saved.time
-         } catch {}
-         syncBar()
-      },
-      { once: true },
-   )
+   seek(m)
    el.playerMedia.replaceChildren(m)
-   active = {
-      mid: store.mid,
-      chron: saved.chron,
-      index: typeof saved.index === "number" ? saved.index : 0,
-      title: typeof saved.title === "string" ? saved.title : "",
-      feedId: typeof saved.feedId === "number" ? saved.feedId : 0,
-      media: m,
-   }
+   active = { mid: store.mid, chron: saved.chron, index, title, feedId, media: m }
    bindMedia(m)
    bindMediaSession()
    syncMediaSession()
