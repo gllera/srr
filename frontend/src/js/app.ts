@@ -808,7 +808,7 @@ function refreshFeedLabel() {
    // mounted — a single-store user sees byte-identical chrome. The mount rides in
    // the early-return cache key so a mount switch repaints even at the same lane.
    const mountName = activeMountName()
-   const cacheKey = mountName + " " + key
+   const cacheKey = mountName + "\0" + key
    if (cacheKey === lastFeedLabel) return
    lastFeedLabel = cacheKey
 
