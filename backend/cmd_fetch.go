@@ -565,7 +565,14 @@ func (o *FetchCmd) fetchLoop(ctx context.Context, client *http.Client) error {
 		// shutdown forever; a second signal still hard-kills (NotifyContext restores
 		// default handling after the first).
 		cycleCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-		stopGrace := context.AfterFunc(ctx, func() { time.AfterFunc(shutdownGrace, cancel) })
+		// Read the grace HERE, not inside the callback: context.AfterFunc runs its
+		// func on its own goroutine at cancellation, and stopGrace() cannot unrun
+		// one already started — so reading the package var in there races anything
+		// that writes it (the tests, which shrink it and restore it in Cleanup).
+		// Sampling it per cycle is also the honest semantics: the bound in force is
+		// the one that was configured when the cycle began.
+		grace := shutdownGrace
+		stopGrace := context.AfterFunc(ctx, func() { time.AfterFunc(grace, cancel) })
 		err := runCycleSafe(func() error { return o.runFetch(cycleCtx, client, nil) })
 		stopGrace()
 		cancel()
