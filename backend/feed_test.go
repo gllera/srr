@@ -1827,3 +1827,60 @@ func TestFeedFetchSecretScopeGrant(t *testing.T) {
 		t.Errorf("ungranted feed: pipe saw %q, want ambient %q", got, "ambient")
 	}
 }
+
+// grantSecrets (feed.go) is the SECOND, hand-written copy of the grant above —
+// the one the PROBE surfaces use (renderPreview, GET /api/resolve,
+// srr_resolve_feed), where Feed.Fetch inlines the same steps because it already
+// holds the resolved recipes. Both must resolve the same axis, and neither can
+// report its own failure: the grant is fail-CLOSED, so an unstamped ctx merges
+// nothing and a wrongly-widened one merges everything, with no error either way.
+// This pins the resolution itself by asking mod.SubprocessEnv what the
+// subprocess WOULD see; the three surface tests (TestRenderPreviewSecretScopeGrant,
+// TestResolveSecretScopeGrant, TestMCPResolveFeedSecretScopeGrant) pin that each
+// call site actually reaches it.
+func TestGrantSecretsResolvesRecipeAxis(t *testing.T) {
+	t.Setenv("SRR_TEST_SCOPED", "ambient")
+	t.Cleanup(func() { mod.SetSecrets(nil) })
+	mod.SetSecrets(map[string]map[string]string{
+		"tg":  {"SRR_TEST_SCOPED": "granted"},
+		"def": {"SRR_TEST_SCOPED": "from-default"},
+	})
+
+	// What the merged environment would hand an external command: the granted
+	// scope's value wins over the ambient one, and no grant leaves it ambient.
+	saw := func(recipes map[string]Recipe, name string, override []string) string {
+		t.Helper()
+		for _, kv := range mod.SubprocessEnv(grantSecrets(context.Background(), recipes, name, override)) {
+			if v, ok := strings.CutPrefix(kv, "SRR_TEST_SCOPED="); ok {
+				return v
+			}
+		}
+		t.Fatal("SRR_TEST_SCOPED absent from the merged environment")
+		return ""
+	}
+
+	granting := map[string]Recipe{
+		defaultRecipeName: {Secrets: []string{"def"}},
+		"r":               {Secrets: []string{"tg"}},
+		"plain":           {},
+	}
+	if got := saw(granting, "plain", []string{"tg"}); got != "granted" {
+		t.Errorf("override grant = %q, want %q (the feed axis wins)", got, "granted")
+	}
+	if got := saw(granting, "r", nil); got != "granted" {
+		t.Errorf("recipe grant = %q, want %q", got, "granted")
+	}
+	if got := saw(granting, "plain", nil); got != "from-default" {
+		t.Errorf("default-recipe grant = %q, want %q", got, "from-default")
+	}
+
+	// Nothing granted anywhere ⇒ NO secrets. An unknown recipe name resolves to
+	// `default`, which grants nothing here either.
+	bare := map[string]Recipe{defaultRecipeName: {}, "plain": {}}
+	if got := saw(bare, "plain", nil); got != "ambient" {
+		t.Errorf("ungranted = %q, want the ambient %q (fail-closed)", got, "ambient")
+	}
+	if got := saw(bare, "no-such-recipe", nil); got != "ambient" {
+		t.Errorf("unknown recipe = %q, want the ambient %q", got, "ambient")
+	}
+}

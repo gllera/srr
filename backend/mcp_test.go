@@ -391,6 +391,40 @@ func TestMCPFetchStoreBusy(t *testing.T) {
 	wantErr(t, err, msgMCPStoreBusy)
 }
 
+// srr_resolve_feed probes through a recipe's ingest, so — like the GUI's
+// /api/resolve and a real fetch — it must stamp the caller's secret-scope grant
+// onto the probe's ctx. The gate (grantSecrets, feed.go) is FAIL-CLOSED: a
+// dropped or wrongly-resolved grant surfaces no error at all, it just hands the
+// external ingest command every credential the box holds or none of them. So
+// the assertion has to observe the subprocess environment itself, which the
+// seedSecretEchoRecipe fixture (serve_tools_test.go) reports back as the wire's
+// title.
+func TestMCPResolveFeedSecretScopeGrant(t *testing.T) {
+	setupTestDB(t)
+	setSecretScopeFixture(t)
+	seedSecretEchoRecipe(t, "probe")
+
+	resolve := func(secrets []string) string {
+		t.Helper()
+		// The URL is never dereferenced (the external ingest ignores it) but must
+		// still clear mcpResolveFeed's validFeedURL gate.
+		_, out, err := mcpResolveFeed(ctx, nil, resolveFeedIn{
+			URL: "https://x.example/f", Recipe: "probe", Secrets: secrets,
+		})
+		if err != nil {
+			t.Fatalf("mcpResolveFeed: %v", err)
+		}
+		return out.Title
+	}
+
+	if got := resolve([]string{"tg"}); got != "granted" {
+		t.Errorf("granted scope: ingest command saw %q, want %q", got, "granted")
+	}
+	if got := resolve(nil); got != "ambient" {
+		t.Errorf("ungranted resolve: ingest command saw %q, want the ambient %q", got, "ambient")
+	}
+}
+
 // --- layer 2: HTTP transport ------------------------------------------------
 
 // mcpReq POSTs one JSON-RPC message to /mcp with the headers the streamable

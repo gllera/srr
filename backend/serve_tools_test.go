@@ -3,9 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"srr/mod"
 )
 
 const sampleRSS = `<?xml version="1.0"?><rss version="2.0"><channel>
@@ -404,5 +409,135 @@ func TestServeExportJSONFormat(t *testing.T) {
 	}
 	if !strings.Contains(opml.Body.String(), "<opml") {
 		t.Errorf("default export is not OPML: %s", opml.Body)
+	}
+}
+
+// --- SEC5: the PROBE surfaces' secret-scope gate ----------------------------
+//
+// grantSecrets (feed.go) is SEC5's second, hand-written gate — the one the
+// probe surfaces use, where Feed.Fetch inlines the same steps for the real
+// fetch. Three call sites depend on it: renderPreview (cmd_preview.go),
+// handleResolve (serve_tools.go) and mcpResolveFeed (mcp_tools.go).
+//
+// It is UNTESTABLE BY ACCIDENT, and that is the whole reason these fixtures
+// exist. The grant is fail-CLOSED by design — an unstamped ctx merges no
+// secrets at all (mod.WithSecretScopes / mod.SubprocessEnv) — so every way of
+// getting it wrong is SILENT: dropping the call, or resolving the wrong scope
+// list, raises no error anywhere. It merely hands a third-party ingest/pipe
+// command either every credential the box holds or none of them. Line coverage
+// is actively misleading here: grantSecrets EXECUTES on all three paths, so it
+// reads ~83% covered while nothing observes its EFFECT.
+//
+// The only observable is the subprocess environment itself, so both fixtures
+// below make an external command REPORT what it sees: the pipe step writes the
+// scoped var to a file, the ingest strategy returns it as the wire's title.
+
+// secretScopeEnv is the var srr.yaml's "tg" scope overrides. It is set in the
+// ambient environment too, so "granted" vs "ambient" distinguishes a real
+// grant from a merely-inherited process env — an over-grant and a revocation
+// are then two different wrong answers rather than one absent value.
+// G101 reads any const whose name contains "secret" as a leaked credential.
+// This is the NAME of an environment variable, in a test; the values it
+// carries ("granted"/"ambient") are the assertion, not a secret.
+//
+//nolint:gosec // G101: an env-var name, not a credential
+const secretScopeEnv = "SRR_TEST_SCOPED"
+
+// setSecretScopeFixture declares one srr.yaml scope ("tg") that overrides
+// secretScopeEnv, plus the ambient value it must beat.
+func setSecretScopeFixture(t *testing.T) {
+	t.Helper()
+	t.Setenv(secretScopeEnv, "ambient")
+	t.Cleanup(func() { mod.SetSecrets(nil) })
+	mod.SetSecrets(map[string]map[string]string{"tg": {secretScopeEnv: "granted"}})
+}
+
+// seedSecretEchoRecipe commits a recipe whose INGEST is an external command
+// echoing the scoped var back as the feed's own title. previewFetch — the only
+// thing the two resolve surfaces run — never executes a pipe, so the ingest
+// strategy is the sole place their subprocess environment is observable.
+func seedSecretEchoRecipe(t *testing.T, name string) {
+	t.Helper()
+	cmd := fmt.Sprintf(`printf '{"title":"%%s","items":[]}' "$%s"`, secretScopeEnv)
+	if err := withDB(true, func(ctx context.Context, db *DB) error {
+		return setRecipe(ctx, db, name, cmd, nil, nil)
+	}); err != nil {
+		t.Fatalf("seed %q recipe: %v", name, err)
+	}
+}
+
+// renderPreview stamps the grant onto ctx before both the ingest probe and the
+// pipe, exactly as a real fetch does — so an external PIPE step sees a scoped
+// secret only when the caller's secretsOverride (the feed-level axis) or the
+// recipe grants it. Ungranted, the very same command sees only the ambient
+// value.
+func TestRenderPreviewSecretScopeGrant(t *testing.T) {
+	setupTestDB(t)
+	allowLoopback(t)
+	feedURL := rssServer(t)
+	setSecretScopeFixture(t)
+
+	// The recipe grants nothing, so whatever the step sees came from the
+	// secretsOverride argument alone.
+	recipes := map[string]Recipe{defaultRecipeName: {Pipe: []string{"#sanitize"}}}
+
+	run := func(secretsOverride []string) string {
+		t.Helper()
+		out := filepath.Join(t.TempDir(), "v.txt")
+		// Trailing `cat` republishes the item verbatim on stdout — the external
+		// mod protocol's no-op — so the capture step observes and changes nothing.
+		step := fmt.Sprintf(`printf '%%s' "$%s" > %q; cat`, secretScopeEnv, out)
+		items, err := renderPreview(ctx, recipes, defaultRecipeName, []string{step}, "", secretsOverride, feedURL)
+		if err != nil {
+			t.Fatalf("renderPreview: %v", err)
+		}
+		if len(items) != 1 {
+			t.Fatalf("got %d items, want 1 (the capture step is a no-op)", len(items))
+		}
+		data, err := os.ReadFile(out)
+		if err != nil {
+			t.Fatalf("read captured env: %v", err)
+		}
+		return string(data)
+	}
+
+	if got := run([]string{"tg"}); got != "granted" {
+		t.Errorf("granted override: pipe step saw %q, want %q", got, "granted")
+	}
+	if got := run(nil); got != "ambient" {
+		t.Errorf("ungranted preview: pipe step saw %q, want the ambient %q", got, "ambient")
+	}
+}
+
+// GET /api/resolve probes a URL through a recipe's ingest and must resolve the
+// same grant the real fetch would: an external ingest needing its credentials
+// has to get them here too, and only the scopes the request names.
+func TestResolveSecretScopeGrant(t *testing.T) {
+	setupTestDB(t)
+	setSecretScopeFixture(t)
+	seedSecretEchoRecipe(t, "probe")
+
+	// The URL is never dereferenced — the external ingest ignores it — but it
+	// still has to clear handleResolve's validFeedURL gate.
+	title := func(extra string) string {
+		t.Helper()
+		rec := doReq(t, newMux(), "GET", "/api/resolve?url=https://x.example/f&recipe=probe"+extra, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
+		}
+		var got struct {
+			Title string `json:"title"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return got.Title
+	}
+
+	if got := title("&secrets=tg"); got != "granted" {
+		t.Errorf("granted scope: ingest command saw %q, want %q", got, "granted")
+	}
+	if got := title(""); got != "ambient" {
+		t.Errorf("ungranted resolve: ingest command saw %q, want the ambient %q", got, "ambient")
 	}
 }
