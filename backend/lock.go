@@ -133,6 +133,17 @@ func acquireMarker(ctx context.Context, b store.Backend, key string) error {
 	held, present, rerr := readLease(ctx, b, key)
 	switch {
 	case rerr != nil:
+		// The two error operands carry different verbs on purpose, and errorlint
+		// cannot tell that apart from an oversight. os.ErrExist is this error's
+		// dispatch IDENTITY — exitCodeFor maps it to exit 3, serve and the MCP
+		// layer to 409 / "store busy" — and it is the only identity a caller may
+		// match on: the store is locked, full stop. rerr is why we could not name
+		// the holder, which is diagnostic, and %v already puts every byte of it in
+		// the message. Promoting it to a second %w would add a cause nothing
+		// dispatches on to the most classification-sensitive error in the tree —
+		// no information gained, one more way for a future classifier that tests
+		// cancellation before contention to answer the wrong question.
+		//nolint:errorlint // %v is deliberate; see above
 		return fmt.Errorf("%s exists and could not be read to classify its holder (%v); if no srr is running, clear it with --force: %w", key, rerr, os.ErrExist)
 	case !present:
 		// Released between our create and this read — one clean retry, and any

@@ -1351,6 +1351,10 @@ func TestUploadCacheRefFollowerBailsOnOwnCtx(t *testing.T) {
 	cancelFollower() // the follower's feed cancels; it must not wait for the leader
 	select {
 	case err := <-followerRes:
+		// Identity, not errors.Is: the follower must bail on its OWN ctx and
+		// return context.Canceled bare. The leader's failure path wraps, so
+		// errors.Is would accept exactly the outcome this test rules out.
+		//nolint:errorlint // deliberate identity check
 		if err != context.Canceled {
 			t.Fatalf("follower err = %v, want context.Canceled (bailed on own ctx)", err)
 		}

@@ -184,6 +184,9 @@ func TestRunCycleSafeRecoversPanic(t *testing.T) {
 		t.Fatal("panic was not converted to an error")
 	}
 	sentinel := fmt.Errorf("plain cycle error")
+	// Identity, not errors.Is: "passes through unchanged" is the assertion, and
+	// errors.Is would still pass if runCycleSafe wrapped the error.
+	//nolint:errorlint // deliberate identity check
 	if got := runCycleSafe(func() error { return sentinel }); got != sentinel {
 		t.Fatalf("runCycleSafe passthrough = %v, want %v", got, sentinel)
 	}
