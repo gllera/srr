@@ -207,6 +207,7 @@ func main() {
 			"maxBatchBytes": fmt.Sprint(maxBatchBytesDefault),
 			"keepManifests": fmt.Sprint(keepManifests),
 			"cacheDir":      defaultCacheDir(),
+			"syncDir":       defaultSyncDir(),
 		},
 		kong.Name("srr"),
 		kong.Description("Static RSS Reader backend."),

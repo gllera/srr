@@ -36,6 +36,7 @@ var webuiFS embed.FS
 type ServeCmd struct {
 	Addr     string        `short:"a" default:"localhost:8088" env:"SRR_SERVE_ADDR" help:"Address to listen on (loopback only by default)."`
 	Interval time.Duration `help:"Also run a background fetch loop at this interval (e.g. 30m); 0 disables." default:"0" env:"SRR_SERVE_INTERVAL"`
+	SyncDir  string        `default:"${syncDir}" env:"SRR_SYNC_DIR" help:"Directory holding the cross-device reader-profile blobs served at /sync/<name> (GET the last-stored profile or 404, PUT to store it). Device state, kept out of the pack store on purpose. Empty disables the endpoint."`
 
 	// feedFilter scopes the background fetch loop to a subset of feeds (same
 	// SRR_FETCH_* env/flags as `srr art fetch`), copied into the FetchCmd below.
@@ -63,6 +64,12 @@ func (o *ServeCmd) Run() error {
 	// to a non-loopback --addr, where the exposure becomes real; whatever value is
 	// chosen must bound HEADER reads only, since /api/fetch is a minutes-long SSE
 	// stream and OPML import bodies are operator-sized.
+	// Resolve the profile-sync store once, before anything can serve a request
+	// (serve_sync.go owns the rest). Process-wide like `globals` rather than a
+	// newMux parameter, so the handler wiring — and every test that builds a mux
+	// — keeps its zero-argument shape.
+	syncBlobDir = o.SyncDir
+
 	//nolint:gosec // G112: loopback admin server behind hostGuard; see above
 	srv := &http.Server{Addr: o.Addr, Handler: newMux()}
 	done := make(chan struct{})
@@ -124,6 +131,10 @@ func newMux() http.Handler {
 	for _, m := range []string{http.MethodPost, http.MethodGet, http.MethodDelete} {
 		mux.Handle(m+" /mcp", mcpHandler)
 	}
+	// The first-party reader-profile sync blob (RDR18), inside the same
+	// hostGuard and registered method-by-method for the same ServeMux-conflict
+	// reason as /mcp. Rationale, storage and the deployment note: serve_sync.go.
+	registerSync(mux)
 	// The static file server stays (this is NOT "serve becomes API-only"): it now
 	// serves the Parcel-built bundle embedded above instead of hand-written
 	// sources. "GET /mcp" still beats this "GET /" wildcard on path specificity.
