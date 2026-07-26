@@ -42,17 +42,31 @@ const keepManifests = 32
 
 // gcMaxSweep bounds how many generations one GC run reclaims, so a large
 // one-time backlog (a long-missed warn-only sweep, or the first run after a
-// lowered --keep-manifests) drains over several runs instead of issuing
-// thousands of sequential store deletes inside a single fetch cycle.
+// lowered --keep-manifests) drains over several runs instead of stretching a
+// single fetch cycle. The deletes themselves fan out (store.RmAll), but each
+// generation still costs its own manifest READ, and those stay sequential
+// because the low-water mark advances one generation at a time.
 const gcMaxSweep = 64
 
 // gcMaxOrphans bounds the ORPHAN half of the list-mode sweep for the same
 // reason gcMaxSweep bounds the generation half: the first run against a store
-// that has been leaking crash orphans for months would otherwise issue one
-// sequential delete per orphan inside a five-minute fetch cycle. Unlike the
-// drain, nothing has to be remembered to resume — the next run lists again and
-// finds whatever is left — so the cap costs only latency to full reclamation.
+// that has been leaking crash orphans for months should not spend a
+// five-minute fetch cycle reclaiming them all at once. Unlike the drain,
+// nothing has to be remembered to resume — the next run lists again and finds
+// whatever is left — so the cap costs only latency to full reclamation.
 const gcMaxOrphans = 1000
+
+// rmParallel is the fan-out width every reclaim path hands store.RmAll (the
+// GC sweeps, expiration's asset deletes, `srr frontend update`'s orphan
+// removal): the same bound the rest of the writer puts on its concurrent store
+// round-trips. The floor covers the paths kong never ran — Workers is 0, and
+// globals itself is nil, when a test drives one of these functions directly.
+func rmParallel() int {
+	if globals == nil {
+		return 1
+	}
+	return max(1, globals.Workers)
+}
 
 // manifestSeries is the series the generation manifests live in. It is a
 // PackSeries row like any other (bare stems, `manifest/<m>.gz`), which is what
@@ -214,6 +228,12 @@ func (o *DB) readRootManifestNum(ctx context.Context) (int, error) {
 // that advances only over generations actually cleared — the sweep is
 // warn-only, so a missed or failed run must never permanently strand a name.
 // Rm is silent on missing keys.
+//
+// Both also issue their deletes through store.RmAll, which is what makes that
+// low-water rule cheap to honour: one bounded fan-out per group of dead keys
+// (one batched DeleteObjects call on S3) reporting WHICH keys survived, so a
+// partial failure leaves the generation uncleared without discarding the
+// deletes that did land.
 func (o *DB) GC(ctx context.Context, keep int) error {
 	c := &o.core
 	if c.ManifestNum == 0 {
@@ -345,10 +365,12 @@ func (o *DB) gcSweepList(ctx context.Context, cutoff int, live map[string]bool, 
 	} else if len(orphans) > 0 {
 		slog.Debug("gc reclaiming unreferenced objects", "objects", len(orphans))
 	}
-	for _, k := range orphans {
-		if err := o.Rm(ctx, k); err != nil {
-			return fmt.Errorf("gc: reclaiming %s: %w", k, err)
-		}
+	if failed, err := store.RmAll(ctx, o.Backend, orphans, rmParallel()); err != nil {
+		// Whatever did delete stays deleted; the next run lists again and finds
+		// only what is left. The generation half is skipped for this run —
+		// nothing may advance the low-water mark on a store that just refused a
+		// delete.
+		return fmt.Errorf("gc: reclaiming %d of %d unreferenced object(s): %w", len(failed), len(orphans), err)
 	}
 
 	// The superseded generations, oldest first. Each is read before it is
@@ -369,6 +391,7 @@ func (o *DB) gcSweepList(ctx context.Context, cutoff int, live map[string]bool, 
 				slog.Warn("gc: superseded manifest unreadable; its pack objects still reclaim by listing, any legacy names it held do not",
 					"generation", g, "error", err)
 			}
+			var legacy []string
 			for _, k := range keys {
 				if live[k] {
 					continue
@@ -376,10 +399,14 @@ func (o *DB) gcSweepList(ctx context.Context, cutoff int, live map[string]bool, 
 				if _, _, isPack := store.ParsePackKey(k); isPack {
 					continue
 				}
-				if err := o.Rm(ctx, k); err != nil {
-					c.GCManifest = swept
-					return fmt.Errorf("gc generation %d: %w", g, err)
-				}
+				legacy = append(legacy, k)
+			}
+			if _, err := store.RmAll(ctx, o.Backend, legacy, rmParallel()); err != nil {
+				// A generation only counts as cleared when EVERY name it holds
+				// is gone: leave gcm below it so the next run retries exactly
+				// this generation.
+				c.GCManifest = swept
+				return fmt.Errorf("gc generation %d: %w", g, err)
 			}
 			if err := o.Rm(ctx, manifestKey(g)); err != nil {
 				c.GCManifest = swept
@@ -420,14 +447,17 @@ func (o *DB) gcSweepDrain(ctx context.Context, cutoff int, live map[string]bool)
 			slog.Warn("gc: superseded manifest unreadable; dropping it without sweeping its objects",
 				"generation", g, "error", err)
 		}
+		dead := make([]string, 0, len(keys))
 		for _, k := range keys {
-			if live[k] {
-				continue
+			if !live[k] {
+				dead = append(dead, k)
 			}
-			if err := o.Rm(ctx, k); err != nil {
-				c.GCManifest = swept
-				return fmt.Errorf("gc generation %d: %w", g, err)
-			}
+		}
+		if _, err := store.RmAll(ctx, o.Backend, dead, rmParallel()); err != nil {
+			// Same rule as the list shape: a generation with a surviving name is
+			// not cleared, so gcm stays where the last clean run left it.
+			c.GCManifest = swept
+			return fmt.Errorf("gc generation %d: %w", g, err)
 		}
 		if err := o.Rm(ctx, manifestKey(g)); err != nil {
 			c.GCManifest = swept

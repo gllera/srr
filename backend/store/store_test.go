@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -385,6 +386,134 @@ func TestBackendListConformance(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestBackendRmAllConformance pins the batched delete across every backend,
+// which is also the only place both of RmAll's shapes are stated together: the
+// parallel Rm fan-out (local/SFTP/HTTP) and S3's native DeleteObjects. The rule
+// is the same either way — every listed key gone, an ABSENT key counted as
+// success (the GC re-deletes a trailing window of already-gone names on
+// purpose, to self-heal crash orphans), and nothing outside the list touched.
+func TestBackendRmAllConformance(t *testing.T) {
+	for name, b := range backendFixtures(t) {
+		t.Run(name, func(t *testing.T) {
+			const keep = "data/keep.gz"
+			victims := []string{"idx/0.gz", "idx/1.gz", "meta/0.gz"}
+			for _, k := range append(slices.Clone(victims), keep) {
+				if err := b.Put(ctx, k, strings.NewReader("x"), true); err != nil {
+					t.Fatalf("Put %q: %v", k, err)
+				}
+			}
+
+			keys := append(slices.Clone(victims), "idx/never-written.gz")
+			failed, err := RmAll(ctx, b, keys, 3)
+			if err != nil || failed != nil {
+				t.Fatalf("RmAll = (%v, %v), want (nil, nil) — a missing key is success", failed, err)
+			}
+			for _, k := range victims {
+				if _, err := b.Stat(ctx, k); !errors.Is(err, fs.ErrNotExist) {
+					t.Errorf("Stat(%q) after RmAll = %v, want gone", k, err)
+				}
+			}
+			if _, err := b.Stat(ctx, keep); err != nil {
+				t.Errorf("Stat(%q) = %v, want the unlisted object untouched", keep, err)
+			}
+			// Empty input never reaches the backend at all.
+			if failed, err := RmAll(ctx, b, nil, 3); err != nil || failed != nil {
+				t.Errorf("RmAll(nil) = (%v, %v), want (nil, nil)", failed, err)
+			}
+		})
+	}
+}
+
+// rmFailBackend fails Rm for the keys its predicate picks and records every
+// delete attempted, which is what lets a test observe RmAll's central promise:
+// a failure neither aborts the run nor cancels the siblings whose deletes are
+// the caller's real work.
+type rmFailBackend struct {
+	Backend
+	fail  func(string) bool
+	mu    sync.Mutex
+	tried []string
+}
+
+func (f *rmFailBackend) Rm(ctx context.Context, key string) error {
+	f.mu.Lock()
+	f.tried = append(f.tried, key)
+	f.mu.Unlock()
+	if f.fail(key) {
+		return errors.New("injected delete failure for " + key)
+	}
+	return f.Backend.Rm(ctx, key)
+}
+
+// A partial failure must report WHICH keys survived without losing the deletes
+// that landed — the GC's low-water mark and `srr frontend update`'s sitemap
+// both decide on exactly that distinction.
+func TestRmAllReportsPartialFailure(t *testing.T) {
+	inner, _ := setupLocalStore(t)
+	keys := []string{"a.gz", "b.gz", "c.gz", "d.gz"}
+	for _, k := range keys {
+		if err := inner.Put(ctx, k, strings.NewReader("x"), true); err != nil {
+			t.Fatalf("Put %q: %v", k, err)
+		}
+	}
+	be := &rmFailBackend{Backend: inner, fail: func(k string) bool { return k == "b.gz" || k == "d.gz" }}
+
+	failed, err := RmAll(ctx, be, keys, 0) // 0 clamps to a serial fan-out
+	if err == nil {
+		t.Fatal("RmAll err = nil, want the joined per-key causes")
+	}
+	if want := []string{"b.gz", "d.gz"}; !slices.Equal(failed, want) {
+		t.Errorf("failed = %v, want %v (sorted, whatever the interleaving)", failed, want)
+	}
+	for _, k := range failed {
+		if !strings.Contains(err.Error(), k) {
+			t.Errorf("err = %v, want it to name %q", err, k)
+		}
+	}
+	for _, k := range []string{"a.gz", "c.gz"} {
+		if _, err := inner.Stat(ctx, k); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%q survived: a failure elsewhere must not cancel a sibling delete", k)
+		}
+	}
+	slices.Sort(be.tried)
+	if !slices.Equal(be.tried, keys) {
+		t.Errorf("attempted = %v, want every key %v (no first-error abort)", be.tried, keys)
+	}
+}
+
+// batchBackend is a BatchRemover whose RmBatch deletes nothing, so a test can
+// prove RmAll took that path and never fell through to the per-key fan-out.
+type batchBackend struct {
+	Backend
+	got []string
+}
+
+func (b *batchBackend) RmBatch(_ context.Context, keys []string) ([]string, error) {
+	b.got = slices.Clone(keys)
+	return []string{"reported-by-the-batch"}, errors.New("batch failure")
+}
+
+// A backend with a native multi-key delete owns the whole operation: RmAll
+// hands it every key at once and returns its answer verbatim.
+func TestRmAllPrefersBatchRemover(t *testing.T) {
+	inner, _ := setupLocalStore(t)
+	if err := inner.Put(ctx, "a.gz", strings.NewReader("x"), true); err != nil {
+		t.Fatal(err)
+	}
+	be := &batchBackend{Backend: inner}
+
+	failed, err := RmAll(ctx, be, []string{"a.gz", "b.gz"}, 4)
+	if err == nil || !slices.Equal(failed, []string{"reported-by-the-batch"}) {
+		t.Fatalf("RmAll = (%v, %v), want the BatchRemover's own answer", failed, err)
+	}
+	if !slices.Equal(be.got, []string{"a.gz", "b.gz"}) {
+		t.Errorf("RmBatch got %v, want every key in one call", be.got)
+	}
+	if _, err := inner.Stat(ctx, "a.gz"); err != nil {
+		t.Errorf("the per-key fan-out ran anyway: %q was deleted", "a.gz")
 	}
 }
 

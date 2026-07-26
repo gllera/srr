@@ -8,16 +8,20 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"net/url"
 	"os"
 	"path"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/sync/errgroup"
 	"gopkg.in/yaml.v3"
 )
 
@@ -540,6 +544,86 @@ func rmErr(err error, file string) error {
 		return nil
 	}
 	return fmt.Errorf("removing %s: %w", file, err)
+}
+
+// BatchRemover is the optional Backend extension for a store whose own protocol
+// deletes MANY keys per round-trip. RmAll uses it when the backend implements
+// it and falls back to its parallel Rm fan-out otherwise, so a backend
+// implements it only when the protocol offers something concurrency cannot:
+// S3's DeleteObjects takes 1000 keys per request, which turns a thousand-object
+// sweep into one call instead of a thousand.
+//
+// It is deliberately NOT on Backend. Every backend must answer Rm; only some
+// have a batch verb, and a default implementation on the interface would be the
+// fan-out RmAll already provides.
+type BatchRemover interface {
+	// RmBatch deletes every key, batching as its protocol allows, and reports
+	// the keys still in the store. Same contract as RmAll — which is the only
+	// caller — down to never stopping at the first failure.
+	RmBatch(ctx context.Context, keys []string) (failed []string, err error)
+}
+
+// RmAll deletes every key in keys and reports the ones that are still there.
+//
+// It NEVER stops at the first failure and never cancels a sibling delete,
+// because every caller is a reclaim path whose SUCCESSES are real work that
+// must not be lost or misreported: the GC's `gcm` low-water mark may advance
+// only over a generation it fully cleared, and `srr frontend update` keeps a
+// failed delete tracked in its sitemap so the next run retries exactly it.
+// "These keys are gone, those are not" is the answer both need, and a
+// first-error abort cannot express it.
+//
+// Per-key semantics are Rm's, unchanged — in particular deleting an ABSENT key
+// is success. The GC deliberately re-deletes a trailing window of already-gone
+// names to self-heal crash-leaked objects, so a missing key reported as a
+// failure would wedge the sweep permanently.
+//
+// failed is sorted and err is non-nil exactly when failed is non-empty, joining
+// every per-key cause (the backends name the key in their own errors, so
+// nothing is re-wrapped here). parallel bounds the fan-out; it is ignored by a
+// BatchRemover, whose batching IS its concurrency.
+func RmAll(ctx context.Context, be Backend, keys []string, parallel int) ([]string, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	if br, ok := be.(BatchRemover); ok {
+		return br.RmBatch(ctx, keys)
+	}
+
+	var mu sync.Mutex
+	causes := map[string]error{}
+	g := new(errgroup.Group) // no WithContext: a failure must not cancel the rest
+	g.SetLimit(max(1, parallel))
+	for _, k := range keys {
+		g.Go(func() error {
+			if err := be.Rm(ctx, k); err != nil {
+				mu.Lock()
+				causes[k] = err
+				mu.Unlock()
+			}
+			// Failures ride causes, never the group: returning one here would
+			// make Wait's arbitrary first error the whole answer.
+			return nil
+		})
+	}
+	_ = g.Wait() // every goroutine returns nil, by construction above
+
+	return joinFailures(causes)
+}
+
+// joinFailures turns a key→cause map into the (sorted keys, joined error) pair
+// RmAll and RmBatch both answer with. Sorted so the report — and the joined
+// message — is deterministic however the concurrent deletes interleaved.
+func joinFailures(causes map[string]error) ([]string, error) {
+	if len(causes) == 0 {
+		return nil, nil
+	}
+	failed := slices.Sorted(maps.Keys(causes))
+	errs := make([]error, len(failed))
+	for i, k := range failed {
+		errs[i] = causes[k]
+	}
+	return failed, errors.Join(errs...)
 }
 
 func Open(ctx context.Context, outputPath string) (Backend, error) {

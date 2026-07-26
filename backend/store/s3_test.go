@@ -13,6 +13,7 @@ import (
 	"hash/crc32"
 	"io"
 	"io/fs"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -39,6 +40,11 @@ type fakeS3 struct {
 	mu      sync.Mutex
 	objects map[string][]byte
 	headers map[string]http.Header // last successful PUT's request headers per key
+	// undeletable keys answer DeleteObjects with a per-object <Error>, which is
+	// how real S3 reports a partial failure: HTTP 200 with some keys refused.
+	undeletable map[string]bool
+	deleteCalls int  // DeleteObjects requests served, i.e. the batching
+	noBatchVerb bool // answer DeleteObjects 501, as a gateway lacking it does
 }
 
 // s3ETag mints the fake's entity tag. Real S3 uses the content MD5 for
@@ -140,6 +146,69 @@ func (f *fakeS3) list(w http.ResponseWriter, r *http.Request) {
 	xml.NewEncoder(w).Encode(res) //nolint:errcheck // test fake
 }
 
+// The DeleteObjects request/response bodies, only as far as the production
+// RmBatch speaks them: a list of keys in, the refused ones back out.
+type s3DeleteRequest struct {
+	XMLName xml.Name `xml:"Delete"`
+	Quiet   bool     `xml:"Quiet"`
+	Objects []struct {
+		Key string `xml:"Key"`
+	} `xml:"Object"`
+}
+
+type s3DeletedKey struct {
+	Key string `xml:"Key"`
+}
+
+type s3DeleteFailure struct {
+	Key     string `xml:"Key"`
+	Code    string `xml:"Code"`
+	Message string `xml:"Message"`
+}
+
+type s3DeleteResult struct {
+	XMLName xml.Name          `xml:"DeleteResult"`
+	Deleted []s3DeletedKey    `xml:"Deleted"`
+	Errors  []s3DeleteFailure `xml:"Error"`
+}
+
+// deleteObjects answers a POST /bucket?delete= multi-object delete: every key
+// goes unless it is marked undeletable, and a refused key comes back as a
+// per-object <Error> inside an otherwise successful 200 — the partial-failure
+// shape S3.RmBatch must map back to logical keys. Called with f.mu held.
+func (f *fakeS3) deleteObjects(w http.ResponseWriter, r *http.Request) {
+	f.deleteCalls++
+	if f.noBatchVerb {
+		s3Error(w, http.StatusNotImplemented, "NotImplemented")
+		return
+	}
+	body, err := readPutBody(r)
+	if err != nil {
+		s3Error(w, http.StatusBadRequest, "MalformedBody")
+		return
+	}
+	var req s3DeleteRequest
+	if err := xml.Unmarshal(body, &req); err != nil {
+		s3Error(w, http.StatusBadRequest, "MalformedXML")
+		return
+	}
+
+	var res s3DeleteResult
+	for _, o := range req.Objects {
+		if f.undeletable[o.Key] {
+			res.Errors = append(res.Errors, s3DeleteFailure{Key: o.Key, Code: "AccessDenied", Message: "Access Denied"})
+			continue
+		}
+		// Like real S3, deleting a key that is not there is a success.
+		delete(f.objects, o.Key)
+		if !req.Quiet {
+			res.Deleted = append(res.Deleted, s3DeletedKey{Key: o.Key})
+		}
+	}
+	w.Header().Set("Content-Type", "application/xml")
+	xml.NewEncoder(w).Encode(res) //nolint:errcheck // test fake
+}
+
 func (f *fakeS3) handler(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimPrefix(r.URL.Path, "/bucket/")
 	f.mu.Lock()
@@ -147,6 +216,11 @@ func (f *fakeS3) handler(w http.ResponseWriter, r *http.Request) {
 	// A bucket-scoped GET with list-type=2 is ListObjectsV2, not an object read.
 	if r.Method == http.MethodGet && r.URL.Query().Get("list-type") == "2" {
 		f.list(w, r)
+		return
+	}
+	// A bucket-scoped POST with ?delete is the multi-object delete.
+	if r.Method == http.MethodPost && r.URL.Query().Has("delete") {
+		f.deleteObjects(w, r)
 		return
 	}
 	switch r.Method {
@@ -208,7 +282,11 @@ func (f *fakeS3) handler(w http.ResponseWriter, r *http.Request) {
 // without any production-code seam.
 func setupFakeS3(t *testing.T) (Backend, *fakeS3) {
 	t.Helper()
-	f := &fakeS3{objects: map[string][]byte{}, headers: map[string]http.Header{}}
+	f := &fakeS3{
+		objects:     map[string][]byte{},
+		headers:     map[string]http.Header{},
+		undeletable: map[string]bool{},
+	}
 	srv := httptest.NewTLSServer(http.HandlerFunc(f.handler))
 	t.Cleanup(srv.Close)
 
@@ -318,6 +396,70 @@ func TestS3RmExistingAndMissing(t *testing.T) {
 	// S3 DeleteObject is unconditional: removing a missing key must not error.
 	if err := b.Rm(ctx, "f.txt"); err != nil {
 		t.Errorf("Rm(missing) = %v, want nil", err)
+	}
+}
+
+// TestS3RmBatchBatchesAndMapsPerKeyFailures is why BatchRemover exists: the GC
+// sweep's thousand dead objects cost one DeleteObjects round-trip per
+// s3DeleteBatch keys instead of a thousand sequential DELETEs. It pins the two
+// halves the fan-out cannot give for free — the chunking, and the per-object
+// error mapped back to the LOGICAL key (the response names the prefixed one).
+func TestS3RmBatchBatchesAndMapsPerKeyFailures(t *testing.T) {
+	b, f := setupFakeS3(t)
+	saved := s3DeleteBatch
+	s3DeleteBatch = 2 // 5 keys => 3 calls, without minting a thousand objects
+	t.Cleanup(func() { s3DeleteBatch = saved })
+
+	var keys []string
+	for i := range 5 {
+		k := fmt.Sprintf("data/%d.gz", i)
+		keys = append(keys, k)
+		f.objects["prefix/"+k] = []byte("x")
+	}
+	f.undeletable["prefix/data/3.gz"] = true
+
+	failed, err := RmAll(ctx, b, keys, 1)
+	if err == nil {
+		t.Fatal("RmAll err = nil, want the refused key reported")
+	}
+	if want := []string{"data/3.gz"}; !slices.Equal(failed, want) {
+		t.Errorf("failed = %v, want %v (logical keys, not the prefixed ones)", failed, want)
+	}
+	if !strings.Contains(err.Error(), "AccessDenied") || !strings.Contains(err.Error(), "data/3.gz") {
+		t.Errorf("err = %v, want the key and the S3 error code", err)
+	}
+	if f.deleteCalls != 3 {
+		t.Errorf("DeleteObjects calls = %d, want 3 (5 keys at %d per call)", f.deleteCalls, s3DeleteBatch)
+	}
+	for _, k := range keys {
+		_, present := f.objects["prefix/"+k]
+		if want := k == "data/3.gz"; present != want {
+			t.Errorf("%q present = %v, want %v", k, present, want)
+		}
+	}
+
+	// Re-deleting what is already gone is success: the GC deliberately re-issues
+	// a trailing window of deletes to self-heal crash orphans.
+	if failed, err := RmAll(ctx, b, []string{"data/0.gz", "data/1.gz"}, 1); err != nil || failed != nil {
+		t.Errorf("RmAll(already gone) = (%v, %v), want (nil, nil)", failed, err)
+	}
+}
+
+// An S3-COMPATIBLE endpoint that does not implement the multi-object delete
+// must not cost the callers their reclamation: a wedged expiration cycle would
+// never advance retention again. RmBatch falls back to one delete per key.
+func TestS3RmBatchFallsBackWhenTheVerbIsUnimplemented(t *testing.T) {
+	b, f := setupFakeS3(t)
+	f.noBatchVerb = true
+	f.objects["prefix/data/0.gz"] = []byte("x")
+	f.objects["prefix/data/1.gz"] = []byte("x")
+
+	failed, err := RmAll(ctx, b, []string{"data/0.gz", "data/1.gz"}, 2)
+	if err != nil || failed != nil {
+		t.Fatalf("RmAll = (%v, %v), want (nil, nil) via the per-key fallback", failed, err)
+	}
+	if len(f.objects) != 0 {
+		t.Errorf("objects left = %v, want everything deleted one by one", slices.Sorted(maps.Keys(f.objects)))
 	}
 }
 

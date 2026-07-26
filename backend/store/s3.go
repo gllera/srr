@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"slices"
 	"strings"
 	"sync"
 
@@ -27,6 +28,11 @@ const (
 	s3ErrNotFound           = "NotFound"
 	s3ErrUnauthorized       = "Unauthorized"
 	s3ErrPreconditionFailed = "PreconditionFailed"
+	// The two codes an S3-COMPATIBLE endpoint answers a verb it does not
+	// implement with — RmBatch's signal to fall back to one delete per key
+	// rather than report a whole batch as undeletable.
+	s3ErrNotImplemented   = "NotImplemented"
+	s3ErrMethodNotAllowed = "MethodNotAllowed"
 )
 
 var s3Cfg S3Config
@@ -297,6 +303,76 @@ func (d *S3) Rm(ctx context.Context, key string) error {
 		return fmt.Errorf("s3 delete %q: %w", key, err)
 	}
 	return nil
+}
+
+// s3DeleteBatch is how many keys one DeleteObjects call carries — the API's own
+// per-request limit. A var so a test can shrink it and exercise the chunk loop
+// without minting a thousand objects.
+var s3DeleteBatch = 1000
+
+// RmBatch is the BatchRemover implementation, and the reason that interface
+// exists: DeleteObjects removes up to s3DeleteBatch keys per round-trip, so a
+// GC sweep of a thousand dead objects costs ONE request instead of a thousand
+// sequential ones inside a five-minute fetch cycle.
+//
+// Per-key semantics stay Rm's: S3 treats deleting a missing key as success, so
+// an absent key never lands in failed.
+//
+// Two failure shapes, both reported per key and neither aborting the remaining
+// chunks (RmAll's contract — the caller's successes are real work): the CALL
+// fails, in which case every key it carried is still in the store; or the call
+// succeeds and reports per-object errors, which is S3's partial-failure shape.
+func (d *S3) RmBatch(ctx context.Context, keys []string) ([]string, error) {
+	causes := map[string]error{}
+	for chunk := range slices.Chunk(keys, max(1, s3DeleteBatch)) {
+		// The response names objects by their FULL path, so keep the mapping
+		// back to the logical key the caller handed us — nothing above this
+		// layer knows about the store URL's path prefix.
+		logical := make(map[string]string, len(chunk))
+		objs := make([]types.ObjectIdentifier, len(chunk))
+		for i, k := range chunk {
+			full := path.Join(d.path, k)
+			logical[full] = k
+			objs[i] = types.ObjectIdentifier{Key: aws.String(full)}
+		}
+		slog.Debug("db delete batch", "url", fmt.Sprintf("s3://%s/%s", d.bucket, d.path), "objects", len(chunk))
+
+		res, err := d.client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+			Bucket: aws.String(d.bucket),
+			// Quiet drops the per-key Deleted echo: the caller derives the
+			// successes by subtraction, so the only useful half is Errors.
+			Delete: &types.Delete{Objects: objs, Quiet: aws.Bool(true)},
+		})
+		if err != nil {
+			switch apiErrorCode(err) {
+			case s3ErrUnauthorized:
+				err = fmt.Errorf("unauthorized access to s3: %w", err)
+			case s3ErrNotImplemented, s3ErrMethodNotAllowed:
+				// An S3-COMPATIBLE endpoint that does not implement the batch
+				// verb. Deleting one key at a time still works there, and the
+				// callers must not lose reclamation over an optimisation: a
+				// wedged expiration cycle never advances retention again.
+				for _, k := range chunk {
+					if err := d.Rm(ctx, k); err != nil {
+						causes[k] = err
+					}
+				}
+				continue
+			}
+			for _, k := range chunk {
+				causes[k] = fmt.Errorf("s3 delete %q (batch of %d): %w", k, len(chunk), err)
+			}
+			continue
+		}
+		for _, e := range res.Errors {
+			key := aws.ToString(e.Key)
+			if k, ok := logical[key]; ok {
+				key = k
+			}
+			causes[key] = fmt.Errorf("s3 delete %q: %s (%s)", key, aws.ToString(e.Message), aws.ToString(e.Code))
+		}
+	}
+	return joinFailures(causes)
 }
 
 // listPrefix is s3path's sibling for a PREFIX rather than a key: path.Join
