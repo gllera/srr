@@ -96,6 +96,36 @@ func TestApplyFetchedFoldsResultsOntoFreshFeeds(t *testing.T) {
 	}
 }
 
+// The AssetBytes fold is a DELTA, and every other case in this file passes just
+// as well against an absolute `live.AssetBytes = snap.AssetBytes`: in all of
+// them nothing touched the live feed between the phases, so prior == live and
+// the two forms agree. This is the case that separates them — a peer's
+// ExpireArticles landing in between, the one thing that lowers the counter.
+//
+// The snapshot's total predates that release, so assigning it would resurrect
+// the freed bytes into `ab`, permanently: nothing recomputes the counter, it is
+// only ever adjusted, so the store's reported footprint would drift up by the
+// expired bytes on every cycle that raced an expiration. Relative composes.
+func TestApplyFetchedFoldsAssetBytesRelatively(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	live := &Feed{Title: "A", URL: "http://x/feed"}
+	seedFeed(t, db, live)
+	live.AssetBytes = 1000
+
+	snap, rec := snapFeed(live) // baseline 1000
+	snap.AssetBytes = 1040      // the fan-out uploaded 40 bytes of new assets
+	snap.newItems = []*Item{{Feed: snap, Title: "n1"}}
+	live.AssetBytes = 100 // a peer's expiration released 900 between the phases
+
+	if items := db.applyFetched([]fetchedFeed{rec}, 19000); len(items) != 1 {
+		t.Fatalf("items = %v, want the record applied (the guard is fetch state, not AssetBytes)", items)
+	}
+	if live.AssetBytes != 140 {
+		t.Fatalf("AssetBytes = %d, want 140 = the live 100 + the fan-out's 40-byte upload delta"+
+			" (an absolute assignment answers the snapshot's stale 1040)", live.AssetBytes)
+	}
+}
+
 // TestApplyFetchedPersistsDiscoveryRepoint: our own fan-out repointing the URL
 // (subscribe-time discovery on an HTML page) is not a conflict — the live feed
 // still holds the pre-fan-out URL, and the repoint must persist.
