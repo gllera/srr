@@ -150,7 +150,7 @@ reproduce touch/overscroll behavior.
     concurrent-safe); dead-session invalidation pairs with S67's redial — land S66
     first. P3 because prod is S3/R2.
 
-- [ ] **S67** — STO4: `withRetry` on transient store errors; SFTP redial  ·  **P3 · M**  ·  from STO4 (BE-S4)
+- [x] **S67** — STO4: `withRetry` on transient store errors; SFTP redial  ·  **P3 · M**  ·  from STO4 (BE-S4)
   - **Edit:** small `withRetry(ctx, op)` in `store/` — 2-3 attempts, jittered backoff,
     connection-class errors only (`net.Error` timeout, ECONNRESET, pre-response EOF,
     `sftp.ErrSSHFxConnectionLost`); **never** exclusive-create Put (a retried lock
