@@ -2,7 +2,9 @@ package store
 
 import (
 	"encoding/base64"
+	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -108,33 +110,12 @@ func TestHTTPPutGetRoundTrip(t *testing.T) {
 	if _, ok := f.object("/base/sub/dir/file.txt"); !ok {
 		t.Fatal("PUT did not land under the store base path")
 	}
-	rc, err := b.Get(ctx, "sub/dir/file.txt", false)
+	rc, err := b.Get(ctx, "sub/dir/file.txt")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	if got := readAllClose(t, rc); got != "data" {
 		t.Errorf("content = %q, want %q", got, "data")
-	}
-}
-
-func TestHTTPGetMissingIgnored(t *testing.T) {
-	b := openHTTPStore(t, newHTTPFixture(t))
-
-	rc, err := b.Get(ctx, "missing.txt", true)
-	if err != nil || rc != nil {
-		t.Errorf("Get(missing, ignoreMissing=true) = (%v, %v), want (nil, nil)", rc, err)
-	}
-}
-
-func TestHTTPGetMissingErrors(t *testing.T) {
-	b := openHTTPStore(t, newHTTPFixture(t))
-
-	rc, err := b.Get(ctx, "missing.txt", false)
-	if rc != nil {
-		rc.Close()
-	}
-	if err == nil {
-		t.Error("Get(missing, ignoreMissing=false) should return error")
 	}
 }
 
@@ -150,7 +131,7 @@ func TestHTTPPutExclusiveCreate(t *testing.T) {
 	if err := b.Put(ctx, "file.txt", strings.NewReader("third"), true); err != nil {
 		t.Errorf("Put(ignoreExisting=true) overwrite: %v", err)
 	}
-	rc, _ := b.Get(ctx, "file.txt", false)
+	rc, _ := b.Get(ctx, "file.txt")
 	if got := readAllClose(t, rc); got != "third" {
 		t.Errorf("content = %q, want %q", got, "third")
 	}
@@ -226,9 +207,12 @@ func TestHTTPStat(t *testing.T) {
 	if n, err := b.Stat(ctx, "obj.bin"); err != nil || n != 5 {
 		t.Errorf("Stat = (%d, %v), want (5, nil)", n, err)
 	}
-	// A missing key is (0, nil) per the Backend contract (silent like Rm).
-	if n, err := b.Stat(ctx, "missing.bin"); err != nil || n != 0 {
-		t.Errorf("Stat(missing) = (%d, %v), want (0, nil)", n, err)
+	// A missing key is an fs.ErrNotExist-wrapped error, never a silent
+	// zero — a nil error from Stat has to PROVE presence. Pinned for all
+	// four backends at once in TestBackendMissingKeyConformance; kept here
+	// so a single-backend edit trips its own test too.
+	if _, err := b.Stat(ctx, "missing.bin"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Stat(missing) err = %v, want errors.Is(err, fs.ErrNotExist)", err)
 	}
 }
 
@@ -290,7 +274,7 @@ func TestHTTPGetFollowsRedirect(t *testing.T) {
 	}
 	t.Cleanup(func() { b.Close() })
 
-	rc, err := b.Get(ctx, "file.txt", false)
+	rc, err := b.Get(ctx, "file.txt")
 	if err != nil {
 		t.Fatalf("Get through redirect: %v", err)
 	}
@@ -396,7 +380,7 @@ func TestHTTPGetServerErrorWrapped(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(func() { b.Close() })
-	rc, err := b.Get(ctx, "obj", false)
+	rc, err := b.Get(ctx, "obj")
 	if rc != nil {
 		rc.Close()
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -52,7 +53,7 @@ func TestLocalPutCreatesSubdirectories(t *testing.T) {
 	if err := b.Put(ctx, "sub/dir/file.txt", strings.NewReader("data"), true); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	rc, err := b.Get(ctx, "sub/dir/file.txt", false)
+	rc, err := b.Get(ctx, "sub/dir/file.txt")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -84,7 +85,7 @@ func TestLocalAtomicPutNoTempFileRemains(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "atomic.txt.tmp")); !os.IsNotExist(err) {
 		t.Error("temp file should not remain after AtomicPut")
 	}
-	rc, _ := b.Get(ctx, "atomic.txt", false)
+	rc, _ := b.Get(ctx, "atomic.txt")
 	if got := readAllClose(t, rc); got != "content" {
 		t.Errorf("content = %q, want %q", got, "content")
 	}
@@ -253,24 +254,72 @@ func TestIsTempLeftover(t *testing.T) {
 	}
 }
 
-func TestLocalGetMissingIgnored(t *testing.T) {
-	b, _ := setupLocalStore(t)
-
-	rc, err := b.Get(ctx, "missing.txt", true)
-	if err != nil || rc != nil {
-		t.Errorf("Get(missing, ignoreMissing=true) = (%v, %v), want (nil, nil)", rc, err)
+// backendFixtures returns one live instance of every backend, so a contract
+// test can state a rule ONCE and have all four answer for it. The four used to
+// each carry their own copy of the missing-key tests, which is exactly how they
+// drifted into three different absence conventions in the first place.
+func backendFixtures(t *testing.T) map[string]Backend {
+	t.Helper()
+	local, _ := setupLocalStore(t)
+	s3b, _ := setupFakeS3(t)
+	sftpb, _ := setupSFTPPipe(t)
+	return map[string]Backend{
+		"local": local,
+		"s3":    s3b,
+		"sftp":  sftpb,
+		"http":  openHTTPStore(t, newHTTPFixture(t)),
 	}
 }
 
-func TestLocalGetMissingErrors(t *testing.T) {
-	b, _ := setupLocalStore(t)
+// TestBackendMissingKeyConformance pins the ONE missing-key contract across
+// every backend: absence is errors.Is(err, fs.ErrNotExist) from Get and Stat,
+// silence from Rm, and — the half that actually bit — a PRESENT object is never
+// reported as absent, INCLUDING a zero-byte one. `Stat == 0` used to be the
+// absence test at three call sites; on an empty object or a store whose HEAD
+// omits Content-Length it answered "gone" about a file that was right there.
+func TestBackendMissingKeyConformance(t *testing.T) {
+	for name, b := range backendFixtures(t) {
+		t.Run(name, func(t *testing.T) {
+			const missing = "sub/no-such-key.txt"
 
-	rc, err := b.Get(ctx, "missing.txt", false)
-	if rc != nil {
-		rc.Close()
-	}
-	if err == nil {
-		t.Error("Get(missing, ignoreMissing=false) should return error")
+			rc, err := b.Get(ctx, missing)
+			if rc != nil {
+				rc.Close()
+			}
+			if !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("Get(missing) err = %v, want errors.Is(err, fs.ErrNotExist)", err)
+			}
+			if err != nil && !strings.Contains(err.Error(), "no-such-key") {
+				t.Errorf("Get(missing) err = %v, want it to name the key", err)
+			}
+			if _, err := b.Stat(ctx, missing); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("Stat(missing) err = %v, want errors.Is(err, fs.ErrNotExist)", err)
+			}
+			// Rm is the deliberate exception: deleting an absent key IS success,
+			// so an idempotent retry after a crash re-deletes freely.
+			if err := b.Rm(ctx, missing); err != nil {
+				t.Errorf("Rm(missing) = %v, want nil (silent-on-missing)", err)
+			}
+
+			for _, tc := range []struct{ name, key, body string }{
+				{"nonempty", "sub/present.txt", "data"},
+				{"zero-byte", "sub/empty.txt", ""},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					if err := b.Put(ctx, tc.key, strings.NewReader(tc.body), true); err != nil {
+						t.Fatalf("Put: %v", err)
+					}
+					rc, err := b.Get(ctx, tc.key)
+					if err != nil {
+						t.Fatalf("Get(present) = %v, want nil", err)
+					}
+					rc.Close()
+					if n, err := b.Stat(ctx, tc.key); err != nil {
+						t.Errorf("Stat(present) = (%d, %v), want a nil error proving presence", n, err)
+					}
+				})
+			}
+		})
 	}
 }
 

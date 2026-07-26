@@ -147,7 +147,7 @@ func TestAssetHealDryRunCreate(t *testing.T) {
 	if !strings.Contains(out.String(), "would be CREATED") {
 		t.Errorf("missing the create notice:\n%s", out.String())
 	}
-	rc, err := be.Get(context.Background(), key, true)
+	rc, err := getOptional(context.Background(), be, key)
 	if err != nil {
 		t.Fatal(err)
 	}

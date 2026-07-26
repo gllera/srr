@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"regexp"
@@ -172,7 +174,7 @@ func (o *SyndicateFetchCmd) Run() error {
 			return err
 		}
 		key := outFileKey(*entry)
-		rc, err := db.Get(ctx, key, true)
+		rc, err := getOptional(ctx, db.Backend, key)
 		if err != nil {
 			return fmt.Errorf("read %s: %w", key, err)
 		}
@@ -362,20 +364,23 @@ func removeOutFeed(ctx context.Context, db *DB, name string) error {
 }
 
 // rmIfPresent deletes a syndication output file, tolerating a Rm failure only
-// when the store can prove the object is not there. Rm is contractually silent
+// when the store can PROVE the object is not there. Rm is contractually silent
 // on a missing key, but a backend may still error on one — an http:// store
 // whose server answers DELETE with 405/403 instead of 404 — and a hard failure
-// there would wedge the command forever on a file that never existed. Stat is
-// silent on missing, so a 0 size means "nothing to strand" and the error is
-// downgraded to a warning; anything else stays fatal, because a file that IS
-// present and could not be deleted must keep its config entry (nothing can
-// delete it once the config forgets it — the store has no List).
+// there would wedge the command forever on a file that never existed.
+//
+// Only fs.ErrNotExist is proof of absence. It used to be `statErr == nil && n
+// == 0`, which reads a PRESENT object as absent on any store whose HEAD omits
+// Content-Length (and on a genuinely empty file): the entry was then dropped
+// from the config while its file stayed in the store, unnameable and therefore
+// undeletable forever, since there is no List. A file that is present, or whose
+// presence we could not determine, keeps its config entry.
 func rmIfPresent(ctx context.Context, db *DB, key string) error {
 	rmErr := db.Rm(ctx, key)
 	if rmErr == nil {
 		return nil
 	}
-	if n, statErr := db.Stat(ctx, key); statErr == nil && n == 0 {
+	if _, statErr := db.Stat(ctx, key); errors.Is(statErr, fs.ErrNotExist) {
 		slog.Warn("ignoring delete failure for absent syndication output file", "key", key, "error", rmErr)
 		return nil
 	}

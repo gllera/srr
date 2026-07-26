@@ -71,7 +71,7 @@ reproduce touch/overscroll behavior.
 
 ### store/ — the contract foundation (Track A)
 
-- [ ] **S63** — STO2: unify missing-key semantics on `fs.ErrNotExist`; fix `Stat` conflation  ·  **P2 · M**  ·  from STO2 (BE-S2)
+- [x] **S63** — STO2: unify missing-key semantics on `fs.ErrNotExist`; fix `Stat` conflation  ·  **P2 · M**  ·  from STO2 (BE-S2)
   - **Edit:** every backend wraps missing-key errors in `fs.ErrNotExist`: `s3.go:139`
     (Get's unwrapped `"key %q not found on s3"`) and the HeadObject not-found arms;
     `http.go:134` (Get 404/410); local/SFTP already surface `fs.ErrNotExist` — pin it.

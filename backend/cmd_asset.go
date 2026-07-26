@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"mime"
 	"os"
@@ -59,25 +61,24 @@ func healAsset(ctx context.Context, be store.Backend, key, file, contentType str
 	if !assetKeyRe.MatchString(key) {
 		return fmt.Errorf("key %q is not an assets/<2-hex>/<16-hex><ext> key", key)
 	}
-	rc, err := be.Get(ctx, key, true)
-	if err != nil {
+	// One Stat answers both questions. Existence, because a nil error proves
+	// presence and fs.ErrNotExist proves absence — anything else is "could not
+	// tell", which must NOT read as "does not exist" here: --create would then
+	// happily publish a brand-new object over a transient outage. And oldSize,
+	// because a heal that CHANGES the size skews the owning feed's AssetBytes
+	// counter (see the accepted-skew note below), so both numbers belong in the
+	// log line and in the preview. (This used to be a body-carrying Get plus a
+	// Stat — two round-trips, the first pulling bytes only to drop them.)
+	oldSize, err := be.Stat(ctx, key)
+	exists := err == nil
+	switch {
+	case exists:
+	case !errors.Is(err, fs.ErrNotExist):
 		return fmt.Errorf("check %q: %w", key, err)
-	}
-	if rc == nil && !create {
+	case !create:
 		return fmt.Errorf("key %q does not exist — pass --create if an article really references it", key)
-	}
-	exists := rc != nil
-	if rc != nil {
-		rc.Close()
-	}
-	// The size the object had before this heal. A heal that CHANGES the size
-	// skews the owning feed's AssetBytes counter (see the accepted-skew note
-	// below), so both numbers belong in the log line and in the preview.
-	var oldSize int64
-	if exists {
-		if n, err := be.Stat(ctx, key); err == nil {
-			oldSize = n
-		}
+	default:
+		oldSize = 0
 	}
 
 	if contentType == "" {

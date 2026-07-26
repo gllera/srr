@@ -287,7 +287,7 @@ func frontendUpdate(ctx context.Context, backend store.Backend, client *http.Cli
 // readSitemap parses the store-root manifest into the set of keys this command
 // owns. A missing manifest (first install) is an empty set, not an error.
 func readSitemap(ctx context.Context, backend store.Backend) ([]string, error) {
-	rc, err := backend.Get(ctx, sitemapKey, true)
+	rc, err := getOptional(ctx, backend, sitemapKey)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", sitemapKey, err)
 	}

@@ -143,11 +143,11 @@ func (d *SFTP) ensureDir(file string) error {
 	return nil
 }
 
-func (d *SFTP) Get(_ context.Context, key string, ignoreMissing bool) (io.ReadCloser, error) {
+func (d *SFTP) Get(_ context.Context, key string) (io.ReadCloser, error) {
 	file := d.sftpPath("read", key)
 	fs, err := d.client.Open(file)
-	if os.IsNotExist(err) && ignoreMissing {
-		return nil, nil
+	if isNotExist(err) {
+		return nil, errMissing("opening file", file)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("opening file %s: %w", file, err)
@@ -304,9 +304,9 @@ func (d *SFTP) sweepTempLeftovers(dir, ownTemp string) {
 func (d *SFTP) Stat(_ context.Context, key string) (int64, error) {
 	file := d.sftpPath("stat", key)
 	fi, err := d.client.Stat(file)
-	if os.IsNotExist(err) {
+	if isNotExist(err) {
 		slog.Debug("db not found", "key", file)
-		return 0, nil
+		return 0, errMissing("stat file", file)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("stat file %s: %w", file, err)

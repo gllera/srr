@@ -396,7 +396,7 @@ func TestDBLocalCRUD(t *testing.T) {
 	if err := db.Put(ctx, "test.txt", strings.NewReader("hello"), false); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	rc, err := db.Get(ctx, "test.txt", false)
+	rc, err := db.Get(ctx, "test.txt")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -413,19 +413,19 @@ func TestDBLocalCRUD(t *testing.T) {
 	if err := db.Put(ctx, "test.txt", strings.NewReader("world"), true); err != nil {
 		t.Fatalf("Put(overwrite): %v", err)
 	}
-	rc, _ = db.Get(ctx, "test.txt", false)
+	rc, _ = db.Get(ctx, "test.txt")
 	if got := readAllClose(t, rc); got != "world" {
 		t.Errorf("Get after overwrite = %q, want %q", got, "world")
 	}
 
 	// Get missing file with ignoreMissing=true
-	rc, err = db.Get(ctx, "missing.txt", true)
+	rc, err = getOptional(ctx, db.Backend, "missing.txt")
 	if err != nil || rc != nil {
 		t.Errorf("Get(missing, ignore): rc=%v, err=%v", rc, err)
 	}
 
 	// Get missing file with ignoreMissing=false
-	_, err = db.Get(ctx, "missing.txt", false)
+	_, err = db.Get(ctx, "missing.txt")
 	if err == nil {
 		t.Error("expected error for missing file with ignoreMissing=false")
 	}
@@ -434,7 +434,7 @@ func TestDBLocalCRUD(t *testing.T) {
 	if err := db.Rm(ctx, "test.txt"); err != nil {
 		t.Fatalf("Rm: %v", err)
 	}
-	rc, _ = db.Get(ctx, "test.txt", true)
+	rc, _ = getOptional(ctx, db.Backend, "test.txt")
 	if rc != nil {
 		rc.Close()
 		t.Error("file still exists after Rm")

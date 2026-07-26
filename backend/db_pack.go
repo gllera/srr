@@ -229,7 +229,7 @@ func (o *DB) loadPack(ctx context.Context, key string) ([]byte, error) {
 	if key == "" {
 		return nil, nil
 	}
-	rc, err := o.Get(ctx, key, true)
+	rc, err := getOptional(ctx, o.Backend, key)
 	if err != nil {
 		return nil, err
 	}
@@ -384,7 +384,7 @@ func checkLatestIdx(key string, raw []byte, totalArticles int) (entriesEnd int, 
 // the search shards' fixed-size bloom headers; idx packs use readIdxHeader,
 // whose header is variable-length.
 func (o *DB) readPackHeader(ctx context.Context, key string, size int) ([]byte, error) {
-	rc, err := o.Get(ctx, key, false)
+	rc, err := o.Get(ctx, key)
 	if err != nil {
 		return nil, err
 	}
@@ -404,7 +404,7 @@ func (o *DB) readPackHeader(ctx context.Context, key string, size int) ([]byte, 
 // readIdxHeader decompresses just the variable-length header of an idx pack:
 // the fixed prefix, then numSlots×4 cumulative-count bytes.
 func (o *DB) readIdxHeader(ctx context.Context, key string) ([]byte, error) {
-	rc, err := o.Get(ctx, key, false)
+	rc, err := o.Get(ctx, key)
 	if err != nil {
 		return nil, err
 	}

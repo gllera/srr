@@ -7,9 +7,11 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -187,31 +189,12 @@ func TestS3GetHit(t *testing.T) {
 	b, f := setupFakeS3(t)
 	f.objects["prefix/hello.txt"] = []byte("hi")
 
-	rc, err := b.Get(ctx, "hello.txt", false)
+	rc, err := b.Get(ctx, "hello.txt")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	if got := readAllClose(t, rc); got != "hi" {
 		t.Errorf("content = %q, want %q", got, "hi")
-	}
-}
-
-func TestS3GetMissingIgnored(t *testing.T) {
-	b, _ := setupFakeS3(t)
-	rc, err := b.Get(ctx, "missing.txt", true)
-	if err != nil || rc != nil {
-		t.Errorf("Get(missing, ignoreMissing=true) = (%v, %v), want (nil, nil)", rc, err)
-	}
-}
-
-func TestS3GetMissingErrors(t *testing.T) {
-	b, _ := setupFakeS3(t)
-	rc, err := b.Get(ctx, "missing.txt", false)
-	if rc != nil {
-		rc.Close()
-	}
-	if err == nil || !strings.Contains(err.Error(), "missing.txt") {
-		t.Errorf("err = %v, want not-found error naming the key", err)
 	}
 }
 
@@ -267,9 +250,12 @@ func TestS3RmExistingAndMissing(t *testing.T) {
 	if err := b.Rm(ctx, "f.txt"); err != nil {
 		t.Fatalf("Rm: %v", err)
 	}
-	rc, err := b.Get(ctx, "f.txt", true)
-	if err != nil || rc != nil {
-		t.Errorf("Get after Rm = (%v, %v), want (nil, nil)", rc, err)
+	rc, err := b.Get(ctx, "f.txt")
+	if rc != nil {
+		rc.Close()
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Get after Rm err = %v, want errors.Is(err, fs.ErrNotExist)", err)
 	}
 	// S3 DeleteObject is unconditional: removing a missing key must not error.
 	if err := b.Rm(ctx, "f.txt"); err != nil {
@@ -351,7 +337,7 @@ func TestS3PutGetRoundTripBody(t *testing.T) {
 	if got := string(f.objects["prefix/big.bin"]); got != payload {
 		t.Fatalf("stored bytes differ: %d vs %d chars", len(got), len(payload))
 	}
-	rc, err := b.Get(ctx, "big.bin", false)
+	rc, err := b.Get(ctx, "big.bin")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -367,10 +353,12 @@ func TestS3Stat(t *testing.T) {
 	if n, err := b.Stat(ctx, "obj.bin"); err != nil || n != 5 {
 		t.Errorf("Stat = (%d, %v), want (5, nil)", n, err)
 	}
-	// A missing key is (0, nil) per the Backend contract — exercised against
-	// the bodyless-404 "NotFound" code HeadObject really returns (not NoSuchKey).
-	if n, err := b.Stat(ctx, "missing.bin"); err != nil || n != 0 {
-		t.Errorf("Stat(missing) = (%d, %v), want (0, nil)", n, err)
+	// A missing key is an fs.ErrNotExist-wrapped error, never a silent
+	// zero — a nil error from Stat has to PROVE presence. Pinned for all
+	// four backends at once in TestBackendMissingKeyConformance; kept here
+	// so a single-backend edit trips its own test too.
+	if _, err := b.Stat(ctx, "missing.bin"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Stat(missing) err = %v, want errors.Is(err, fs.ErrNotExist)", err)
 	}
 }
 

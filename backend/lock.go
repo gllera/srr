@@ -153,7 +153,7 @@ func acquireMarker(ctx context.Context, b store.Backend, key string) error {
 
 // readLease reads a marker. present is false when the key vanished under us.
 func readLease(ctx context.Context, b store.Backend, key string) (l storeLease, present bool, err error) {
-	rc, err := b.Get(ctx, key, true)
+	rc, err := getOptional(ctx, b, key)
 	if err != nil {
 		return l, false, err
 	}

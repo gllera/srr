@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,8 +115,11 @@ func TestLocalStat(t *testing.T) {
 	if n, err := b.Stat(ctx, "sub/obj.bin"); err != nil || n != 5 {
 		t.Errorf("Stat = (%d, %v), want (5, nil)", n, err)
 	}
-	// A missing key is (0, nil) per the Backend contract (silent like Rm).
-	if n, err := b.Stat(ctx, "missing.bin"); err != nil || n != 0 {
-		t.Errorf("Stat(missing) = (%d, %v), want (0, nil)", n, err)
+	// A missing key is an fs.ErrNotExist-wrapped error, never a silent
+	// zero — a nil error from Stat has to PROVE presence. Pinned for all
+	// four backends at once in TestBackendMissingKeyConformance; kept here
+	// so a single-backend edit trips its own test too.
+	if _, err := b.Stat(ctx, "missing.bin"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Stat(missing) err = %v, want errors.Is(err, fs.ErrNotExist)", err)
 	}
 }

@@ -41,11 +41,11 @@ func (d *Local) localPath(op, key string) string {
 	return full
 }
 
-func (d *Local) Get(_ context.Context, key string, ignoreMissing bool) (io.ReadCloser, error) {
+func (d *Local) Get(_ context.Context, key string) (io.ReadCloser, error) {
 	file := d.localPath("read", key)
 	f, err := os.Open(file)
-	if os.IsNotExist(err) && ignoreMissing {
-		return nil, nil
+	if isNotExist(err) {
+		return nil, errMissing("opening file", file)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("opening file %s: %w", file, err)
@@ -248,9 +248,9 @@ func sweepTempLeftovers(dir, ownTemp string) {
 func (d *Local) Stat(_ context.Context, key string) (int64, error) {
 	file := d.localPath("stat", key)
 	fi, err := os.Stat(file)
-	if os.IsNotExist(err) {
+	if isNotExist(err) {
 		slog.Debug("db not found", "key", file)
-		return 0, nil
+		return 0, errMissing("stat file", file)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("stat file %s: %w", file, err)

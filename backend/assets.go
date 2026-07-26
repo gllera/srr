@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path"
@@ -331,25 +332,19 @@ func (a *assetFetcher) resolveAndUpload(ctx context.Context, full, localname str
 
 	// Already uploaded? Skip the asset-process command and the upload — the common
 	// case for an image reused across articles or feeds. (asset-peek still ran, to
-	// fix the key extension; it is the cheap probe.) Stat proves the hit without
-	// pulling the object body, but its missing-key contract is (0, nil) — a HEAD
-	// can't tell absence from a zero-byte stored asset or an HTTP store that omits
-	// Content-Length — so only size > 0 is trusted; size == 0 falls through to the
-	// body-carrying Get probe, the authoritative check for those degenerate cases.
-	if size, err := a.be.Stat(ctx, key); err != nil {
-		return "", 0, fmt.Errorf("check asset %q: %w", key, err)
-	} else if size > 0 {
+	// fix the key extension; it is the cheap probe.) A nil error from Stat now
+	// PROVES presence, so this is the whole check: absence is fs.ErrNotExist and
+	// nothing else is. The size is deliberately not consulted — a zero-byte
+	// stored asset and an HTTP store that omits Content-Length both report 0 and
+	// are both present. That ambiguity is what used to force a second,
+	// body-carrying Get on EVERY first upload of every asset; it is gone.
+	switch _, err := a.be.Stat(ctx, key); {
+	case err == nil:
 		slog.Debug("asset already stored, skipping process+upload", "asset", localname, "key", key)
 		a.seen.Store(sum, key)
 		return key, 0, nil
-	}
-	if rc, err := a.be.Get(ctx, key, true); err != nil {
+	case !errors.Is(err, fs.ErrNotExist):
 		return "", 0, fmt.Errorf("check asset %q: %w", key, err)
-	} else if rc != nil {
-		rc.Close()
-		slog.Debug("asset already stored, skipping process+upload", "asset", localname, "key", key)
-		a.seen.Store(sum, key)
-		return key, 0, nil
 	}
 	slog.Debug("asset store miss, processing+uploading", "asset", localname, "key", key)
 

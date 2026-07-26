@@ -116,7 +116,7 @@ func drainClose(rc io.ReadCloser) {
 	rc.Close()
 }
 
-func (d *HTTP) Get(ctx context.Context, key string, ignoreMissing bool) (io.ReadCloser, error) {
+func (d *HTTP) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	u := d.keyURL("read", key)
 	req, err := d.newRequest(ctx, http.MethodGet, u, nil)
 	if err != nil {
@@ -128,10 +128,7 @@ func (d *HTTP) Get(ctx context.Context, key string, ignoreMissing bool) (io.Read
 	}
 	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
 		drainClose(resp.Body)
-		if ignoreMissing {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("key %q not found on %s", key, u.Redacted())
+		return nil, errMissing("key not found on "+u.Redacted()+":", key)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		drainClose(resp.Body)
@@ -230,11 +227,14 @@ func (d *HTTP) Stat(ctx context.Context, key string) (int64, error) {
 	defer drainClose(resp.Body)
 	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
 		slog.Debug("db not found", "key", u.Redacted())
-		return 0, nil
+		return 0, errMissing("http head "+u.Redacted()+":", key)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return 0, fmt.Errorf("http head %s: %s", u.Redacted(), resp.Status)
 	}
+	// A server that omits Content-Length reports -1; clamp to 0. That is a
+	// PRESENT object of unknown size, not an absent one — the 404/410 arm above
+	// is the only absence answer, which is what lets a nil error prove presence.
 	return max(0, resp.ContentLength), nil
 }
 

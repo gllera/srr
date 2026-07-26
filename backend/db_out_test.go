@@ -1038,7 +1038,7 @@ func TestSyncOutFeedsSkipsExternalEntries(t *testing.T) {
 		t.Fatalf("SyncOutFeeds: %v", err)
 	}
 
-	rc, err := db.Get(ctx, "out/x.rss", false)
+	rc, err := db.Get(ctx, "out/x.rss")
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}

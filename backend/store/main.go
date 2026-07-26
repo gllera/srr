@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/url"
 	"os"
@@ -152,13 +153,32 @@ func contentTypeForKey(key string) string {
 }
 
 // Backend defines the storage operations used by the application.
+//
+// MISSING KEYS ARE ONE CONTRACT: every read op reports an absent key as an
+// error satisfying errors.Is(err, fs.ErrNotExist), and NOTHING else may. That
+// is the whole point — three ad-hoc absence conventions (Get's ignoreMissing
+// flag, Stat's silent (0, nil), Rm's silence) let a transient network error
+// impersonate absence, and a caller that mistakes "I could not tell" for "it is
+// not there" makes an irreversible decision on a lie: it drops the config
+// naming a file it failed to delete, or re-uploads an object it already has.
+// Callers ask the question with errors.Is and get a truthful answer or an error.
+//
+// Rm stays the one deliberate exception: deleting an absent key IS success, so
+// it returns nil rather than an absence error (an idempotent retry after a
+// crash re-deletes names its predecessor already removed).
 type Backend interface {
-	Get(ctx context.Context, key string, ignoreMissing bool) (io.ReadCloser, error)
+	// Get streams key's body. A missing key is an error wrapping fs.ErrNotExist
+	// — check with errors.Is, do not string-match.
+	Get(ctx context.Context, key string) (io.ReadCloser, error)
 	// Stat returns the stored size of key in bytes without reading the body
-	// (filesystem stat, S3 HeadObject, HTTP HEAD). A missing key is (0, nil) —
-	// silent like Rm: the caller (expiration's per-feed asset-bytes accounting)
-	// treats absent as zero, and a retried expire cycle re-stats keys an
-	// aborted predecessor already deleted.
+	// (filesystem stat, S3 HeadObject, HTTP HEAD). A missing key is an error
+	// wrapping fs.ErrNotExist; a nil error therefore PROVES the object exists,
+	// which is what lets the asset uploader skip its body-carrying Get probe.
+	// Callers that want absent-as-zero (expiration's asset-bytes accounting)
+	// say so explicitly with errors.Is.
+	//
+	// A size of 0 with a nil error is a legal answer — a zero-byte object, or a
+	// store whose HEAD omits Content-Length. It is NOT absence.
 	Stat(ctx context.Context, key string) (int64, error)
 	Put(ctx context.Context, key string, r io.Reader, ignoreExisting bool) error
 	// AtomicPut writes via temp-then-rename (local/SFTP) or overwrite (S3). meta
@@ -186,6 +206,26 @@ type Backend interface {
 	PutIfVersion(ctx context.Context, key string, r io.Reader, meta ObjectMeta, want string) (string, error)
 	Rm(ctx context.Context, key string) error
 	Close() error
+}
+
+// errMissing is the ONE missing-key error every backend returns, so the whole
+// codebase asks the absence question exactly one way: errors.Is(err,
+// fs.ErrNotExist). The key rides the message because a bare sentinel names
+// nothing when it surfaces three layers up in a warn line.
+func errMissing(op, key string) error {
+	return fmt.Errorf("%s %s: %w", op, key, fs.ErrNotExist)
+}
+
+// isNotExist reports whether a backend's underlying error means "no such key".
+//
+// os.IsNotExist alone is NOT enough and neither is errors.Is alone: the former
+// unwraps only *PathError/*LinkError/*SyscallError and misses a sentinel-based
+// error (pkg/sftp maps SSH_FX_NO_SUCH_FILE to one), while the latter misses a
+// bare syscall.ENOENT that never got wrapped. Backends funnel through here and
+// then re-wrap with errMissing, so what leaves the package is uniform however
+// it arrived.
+func isNotExist(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || os.IsNotExist(err)
 }
 
 // ErrPreconditionFailed reports that a conditional write did not land because
