@@ -1,324 +1,316 @@
 # Findings Apply Plan
 
-**Sources:** 1 — `docs/FINDINGS-2026-07-20.md`, its **Do first** list (2026-07-25 revision)
-·  **Net actionable:** 18 step(s), S45–S62 (19 findings; POL1–POL4 share one step)
-**Coverage:** PARTIAL by design — user-directed selection of the six Do-first rows:
-**TST1, TST4, FMT2(a), FEB1–FEB4 + RDR4 + POL1–POL5, RDR1 + RDR2, REL3, PWA1 + PWA2 +
-RDR12**. Every other open finding remains in `docs/FINDINGS-2026-07-20.md`. The prior
-batch S30–S44 (manifest cutover, multi-store, admin console, MCP) is fully applied,
-released (v4.8.0/v4.8.1) and deployed; it was dropped when this plan was regenerated,
-and numbering continues at S45 so plain-text references to S1–S44 elsewhere stay
-unambiguous.
+**Sources:** 1 — `docs/FINDINGS-2026-07-20.md` (2026-07-25 revision)
+·  **Net actionable:** 12 step(s), S63–S74
+**Coverage:** PARTIAL by design — user-directed selection of **GRO6, GRO7, STO1–STO6,
+RDR3, RDR7, RDR11, RDR14**. Every other open finding remains in
+`docs/FINDINGS-2026-07-20.md`. Numbering continues at S63 so plain-text references to
+S1–S62 elsewhere stay unambiguous.
 
 > Regenerable plan; the findings doc is the living backlog (planned entries are removed
 > from it — user rule 2026-07-20). Apply with `/apply-findings --apply` (or `--apply -i`).
 >
-> All 19 findings were re-verified against HEAD (`c51bd9a`) on 2026-07-25: **all
-> ACTIONABLE**. Ground-truth shifts folded into the steps: the reader render site (now
-> also hosting the §9.3 tombstone) is the same `replaceChildren` block FEB2/RDR4 must
-> edit (`app.ts:416-423`); app.ts already has a `controllerchange` listener (mounts
-> re-post) that S61's toast must EXTEND, not race; pins are per-mount since S38, so
-> S59/S60 key the pinned-asset work by store.
+> All 12 findings were re-verified against HEAD (`3601ba8`) on 2026-07-26: **all
+> ACTIONABLE**. Ground-truth shifts folded into the steps: the merged
+> `fix/manifest-review-findings` work made SyncMeta's rebuild strictly all-or-nothing on
+> a staged `names` clone (S68 must preserve its zero-progress-rebuild safety, not undo
+> it); STO2's cited `db_meta.go:290` consequence is OBSOLETE (that path was rewritten at
+> the cutover — the surviving hazards are `rmIfPresent`'s Stat==0-as-absence and the
+> assets HEAD+GET double probe); STO5's `DetectContentType` half now contradicts the
+> documented "assets are typed by peek/process alone — never by extension or
+> byte-sniffing" convention (store/main.go, s3.go, backend/CLAUDE.md) — S70 overturns it
+> for the no-peek case only and updates those comments in the same step. Frontend
+> shifts: the S45–S62 batch grew app.ts to ~1,858 lines — anchor on symbols (the
+> content error-capture is now `app.ts:1636`, the silent `onStoreGrown` call
+> `app.ts:1555`); RDR1's undo machinery (S57, `nav.pendingFrontierUndo`) now exists, so
+> S74's swipe read-toggle rides it instead of being irreversible.
 
-## Sequencing at a glance
+## Previously applied batches (dropped from this plan's step list)
 
-Two independent tracks; steps inside each are ordered.
+- **S30–S44** — manifest cutover, compaction, multi-store, admin console, MCP: applied,
+  released (v4.8.0/v4.8.1), deployed.
+- **S45–S62** — crash harness + fuzzers, lease lock + CAS root flip, reading-surface
+  batch, undo, saved-asset pins, PWA badge/toast: applied on local main (`ebe9367` +
+  three review rounds), all gates green, **not yet released or deployed**.
 
-**Backend track:** S45 (crash harness) → S46 (fuzzers) — the safety net — then S47
-(lease lock) → S48 (CAS root flip), the write-path change the net exists for. S50
-(sanitizer `id`) lands with/after its reader half S49.
+## Sequencing at a glance — four parallel batches
 
-**Frontend track:** S49 (fragment anchors + `id` tolerance — reader-first) ⇢ pairs with
-S50; S51–S56 are the reading-surface batch (natural single PR together with S49/S50);
-S57 → S58 (undo machinery, then its second consumer); S59 → S60 (saved-asset pinning,
-then `persist()`); S61 and S62 fit anywhere.
+Four tracks: **A (store contract)** S63 → S64 → S65 → S66 → S67, strictly sequential
+(same `store/` files, each step builds on the previous shape); **B (writer)** S68 ∥ S69,
+independent of everything; **C (assets)** S70, after S63 only (S63 rewrites the same
+probe region in assets.go); **D (frontend reader)** S71 → S72 → S73 → S74, sequential
+within itself (S71/S72 share app.ts, S73/S74 grow the same gestures.ts touch state
+machine) but fully parallel with the backend tracks — one frontend step rides each
+batch.
 
-**Couplings:** S49 lands WITH or BEFORE S50 (reader-first: the reader must tolerate
-`id`-bearing content before the writer bakes it into immutable packs). S58 needs S57's
-snapshot machinery. S60's `persist()` call sites include S59's new pin path. Nothing
-here touches the idx/data/meta wire format; S49+S50 touch **sanitizer parity** → full
-`make verify` plus the sanitizer-parity review lens on the pair.
+Execution batches (worktree-agent friendly, disjoint files within each batch; run the
+FULL `make verify` after each batch lands, plus `make test-race-be` for batches 1, 3, 4
+and `make test-browser` for every batch carrying a frontend step — the browser layer is
+NOT inside `make verify`):
+
+| Batch | Steps in parallel | Files |
+|---|---|---|
+| 1 | **S63** ∥ **S68** ∥ **S69** ∥ **S71** | store/* + Get/Stat call sites ∥ db_meta.go ∥ db_pack.go ∥ list.ts + app.ts + styles.css |
+| 2 | **S64** ∥ **S70** ∥ **S72** | store/* + manifest.go + cmd_inspect* + cmd_frontend.go ∥ assets.go ∥ app.ts + lightbox.ts (new) + styles.css |
+| 3 | **S65** ∥ **S66** ∥ **S73** | store/main.go + s3.go + manifest.go + db_expire.go ∥ sftp.go + http.go ∥ gestures.ts + list.ts + styles.css |
+| 4 | **S67** ∥ **S74** | store/* (wraps the settled shape) ∥ gestures.ts + list.ts + styles.css |
+
+**Couplings:** S64 needs S63's error contract (List's missing/unsupported semantics
+follow it). S65 completes the GC rework S64 starts — never reorder them or the sweep is
+rewritten twice. S67 needs S63 (retry classifies wrapped sentinels) and S66 (redial
+invalidates the session memo). S70 needs S63 (probe region overlap). S72 follows S71
+(both edit app.ts); S74 follows S73 (both extend gestures.ts single-finger tracking —
+land the vertical pull first, then the horizontal row swipe, so the two never race in
+one diff). S74 consumes S57's undo machinery (already applied). Nothing here touches
+the idx/data/meta wire format, gen-ts atoms, or sanitizer parity — but batch
+verification stays `make verify` (full) per the parallel-execution rule, and the
+gesture steps (S73, S74) additionally need an on-device sanity pass: headless cannot
+reproduce touch/overscroll behavior.
 
 ## Apply order
 
-### backend — tests first (the safety net)
+### store/ — the contract foundation (Track A)
 
-- [x] **S45** — TST1: mechanize the stop-anytime crash audit  ·  **P1 · M**  ·  from TST1 (BE-V1)
-  - **Edit:** new `backend/crash_test.go`: a `stopAfterN{k}` Backend wrapper erroring
-    every mutation past the k-th (embed-and-override like `metaTPutFailBackend`/
-    `statFailBackend`/`gateBackend`); loop k = 1..K over a scripted multi-batch fetch
-    (delta cycles + a consolidation + an expiration + a GC); after each halt: reopen,
-    `validateAll` + delta-chain check, re-run to convergence, assert zero article loss
-    and chron permanence (M8). ~150 lines on `setupTestDB`.
-  - **Why:** the commit protocol spans ≥5 ordered store mutations per dirty cycle and was
-    just rewritten (S31–S35) with only hand-run crash audits; every new write silently
-    adds crash points nobody hand-writes a test for.
-  - **Verify:** `make test-be` (the new test runs inside it).
-  - **Risk / deps:** none — pure test add. Land FIRST: it guards S47/S48.
+- [ ] **S63** — STO2: unify missing-key semantics on `fs.ErrNotExist`; fix `Stat` conflation  ·  **P2 · M**  ·  from STO2 (BE-S2)
+  - **Edit:** every backend wraps missing-key errors in `fs.ErrNotExist`: `s3.go:139`
+    (Get's unwrapped `"key %q not found on s3"`) and the HeadObject not-found arms;
+    `http.go:134` (Get 404/410); local/SFTP already surface `fs.ErrNotExist` — pin it.
+    Change `Stat`'s contract from missing=(0, nil) to missing=`fs.ErrNotExist`-wrapped
+    error, and update every call site by intent: `cmd_syndicate.go:378` `rmIfPresent`
+    treats ONLY `errors.Is(statErr, fs.ErrNotExist)` as proof-of-absence (fixes the
+    present-but-undeletable out-file getting its config dropped when an HTTP HEAD omits
+    Content-Length); `assets.go:339-353` probe — a nil-error Stat now proves presence, so
+    **delete the body-carrying Get fallback** (the HEAD+full-GET tax on every new asset);
+    `cmd_asset.go:78`, `cmd_fetch.go:733` (inbox probe), `config_sidecar.go:146`,
+    `db_expire.go`'s stat phase (absent-as-zero stays, now via `errors.Is`). Retire
+    `Get`'s `ignoreMissing` flag — callers use `errors.Is` on the returned error. Add a
+    shared conformance test in `store_test.go` pinning missing-key behavior for
+    Get/Stat/Rm across all four backends.
+  - **Why:** three ad-hoc absence contracts let a transient error impersonate absence;
+    `rmIfPresent` can strand a real file forever, and every asset upload pays a
+    redundant GET.
+  - **Verify:** `make verify-be`; new conformance test + an `rmIfPresent`
+    undeletable-but-present test.
+  - **Risk / deps:** touches every backend and ~all Get/Stat call sites — the track's
+    foundation; land FIRST. The assets.go edit is confined to the probe (S70 rewrites
+    the buffering around it afterwards).
 
-- [x] **S46** — TST4: fuzz the untrusted parsers + sanitizer  ·  **P2 · S each**  ·  from TST4 (BE-V2 + IM-I23 + AR-T1)
-  - **Edit:** `FuzzParseFeed` (never panics; invariants hold), `FuzzParseIdxPack`,
-    `FuzzParseSeen`, a sanitizer target, and round-trip `FuzzIdxWriteParse`; seed the
-    corpus from the existing corruption tests (`idx_read_test.go:149-165`,
-    `seen_test.go:287`) and check it in; add `make fuzz-be` (short `-fuzztime` smoke) +
-    a nightly scheduled CI job.
-  - **Why:** zero fuzz targets guard a store that must never corrupt; `ParseFeed` chews
-    hostile network bytes every 5 minutes in prod.
-  - **Verify:** `make fuzz-be` smoke locally + `make verify-be`.
-  - **Risk / deps:** none; independent of S45.
+- [ ] **S64** — STO1: add `List` to the Backend interface — retire the compensation economy  ·  **P2 · L**  ·  from STO1 (BE-S1)
+  - **Edit:** `List(ctx, prefix string) ([]string, error)` on `Backend`
+    (`store/main.go`): local = `filepath.WalkDir`, SFTP = `client.Walk`, S3 =
+    paginated `ListObjectsV2`, HTTP = `errors.ErrUnsupported` (callers keep their
+    fallback). Adopt where the compensation economy lives: (a) `GC`
+    (`manifest.go:192-260`) gains a list-and-delete mode when List is supported —
+    reachable set unchanged (current names ∪ oldest-in-window manifest), deletable set
+    **strictly scoped to the pack grammar** (`packKeyRe` prefixes + `manifest/`), never
+    `assets/`/`out/`/`inbox/`/roots/frontend-shell keys; the `gcm` low-water drain stays
+    as the ErrUnsupported fallback. (b) `srr inspect --validate` reports orphaned
+    pack-grammar objects no in-window manifest names (informational). (c)
+    `cmd_frontend.go` prefers List over the `sitemap.txt` superset dance when supported
+    (sitemap path kept for HTTP stores).
+  - **Why:** the missing List is why the GC drains instead of listing (its own comment
+    names this finding), why `sitemap.txt` exists, and why orphaned assets are
+    permanently unfindable. Three of four backends list natively.
+  - **Verify:** List conformance test over all four backends; GC list-mode unit test
+    (orphan reclaimed, non-pack classes untouched); `make verify-be`.
+  - **Risk / deps:** after S63 (same files; List's semantics follow the unified error
+    contract). The deletable-set scoping is the safety-critical line — a List-driven
+    sweep must never see `assets/` or mutable classes as garbage. S65 builds directly
+    on the GC shape this lands.
 
-### backend — REL3, kill the SIGKILL wedge (db.go, store/)
+- [ ] **S65** — STO6: batch + parallelize GC deletes (`RmAll`)  ·  **P3 · S–M**  ·  from STO6 (BE-S6)
+  - **Edit:** package helper `store.RmAll(ctx, be, keys, parallel)` — bounded-errgroup
+    fan-out over `Rm`, with an optional per-backend override interface that S3
+    implements via `DeleteObjects` (1000 keys/call, mapping per-key failures). Adopt in
+    `GC`'s sweep (both the low-water drain and S64's list-and-delete), preserving
+    "advance `gcm` only over generations actually cleared" on partial failure; adopt in
+    `db_expire.go`'s delete phase (replacing its hand-rolled errgroup) and
+    `cmd_frontend.go`'s orphan removal.
+  - **Why:** the sweep issues one sequential round-trip per dead key — `gcMaxSweep=64`
+    exists purely to bound that; `db_expire.go` already proved the fan-out pattern.
+  - **Verify:** `make test-race-be`; GC partial-failure test (gcm unadvanced); S3 fake
+    DeleteObjects test.
+  - **Risk / deps:** after S64 (one GC rework, not two). Parallel Rm keeps per-key
+    silent-on-missing semantics.
 
-- [x] **S47** — REL3(a): lease lock — owner, expiry, steal  ·  **P1 · M**  ·  from REL3 (AR-R3 + BE-A3)
-  - **Edit:** `.locked` (`db.go:23`, `storeWriter` `db.go:421-447`) gains a JSON payload
-    `{owner, expires}`: written on acquire, renewed each cycle, and **stealable** once
-    `expires` has passed (steal logged loudly). Keep `--force`, the
-    `context.WithoutCancel` release, and the `os.ErrExist` → 409 semantics for live
-    contention. Same treatment for `.config.locked` (shared helper).
-  - **Why:** SIGKILL leaves the marker behind and wedges the 5-min loop until a human
-    passes `--force` — the known v4.6.0 residual, unchanged by the cutover.
-  - **Verify:** new unit tests (stale-lease steal, live-lease refusal, renew path) +
-    `make verify-be`.
-  - **Risk / deps:** after S45 (harness in place — this is write-path work). The payload
-    is additive: an old binary reading a lease file still sees "exists" (safe).
+- [ ] **S66** — STO3: memoize SFTP sessions; isolate the HTTP transport  ·  **P3 · M**  ·  from STO3 (BE-S3)
+  - **Edit:** `sftp.go` — memoize dialed sessions like `s3Clients` (`s3.go:54-98`
+    precedent), keyed on (config, addr, user), liveness-probed on lookup, with `Close`
+    becoming a ref-release that never tears down the shared session (today `newSFTP`
+    pays TCP + SSH handshake + subsystem on EVERY `store.Open`, i.e. per serve API
+    request). `http.go` — give the backend its own cloned per-config transport instead
+    of the shared `http.DefaultTransport`, so `Close()`'s `CloseIdleConnections()`
+    (`http.go:264-267`) stops flushing keep-alives for every DefaultTransport user in
+    the process.
+  - **Why:** per-request SSH handshakes and a process-wide connection flush are both
+    accidental; the S3 backend already shows the intended shape.
+  - **Verify:** sftp test counting dials across two Opens; HTTP transport-isolation
+    test; `make verify-be`.
+  - **Risk / deps:** session sharing across concurrent serve scopes (pkg sftp client is
+    concurrent-safe); dead-session invalidation pairs with S67's redial — land S66
+    first. P3 because prod is S3/R2.
 
-- [x] **S48** — REL3(b): conditional write (CAS) on the root flip  ·  **P1 · M**  ·  from REL3
-  - **Edit:** add conditional-write support to `Backend` (`store/main.go:154-171`) —
-    a `PutIf(ctx, key, r, precondition)` (or an `AtomicPut` precondition option):
-    S3/R2 = `If-Match`/`If-None-Match` on PUT, local = `O_EXCL`/rename dance, SFTP =
-    rename dance, HTTP = `ErrUnsupported` → callers fall back to today's behavior.
-    `Commit` CASes db.gz against the `m` it loaded; a lost race re-reads and retries
-    cleanly instead of last-write-wins.
-  - **Why:** correctness today is only advisory; the ~60-byte manifest root pointer is
-    the one object where a blind overwrite can silently drop a competing writer's
-    generation. The lock becomes an optimization; races become clean retries.
-  - **Verify:** backend-conformance test additions across all 4 backends + full
-    `make verify` (commit path touched).
-  - **Risk / deps:** after S47. The interface change ripples through 4 backends + test
-    fakes — mechanical but wide; run the backend-conformance-checker lens.
+- [ ] **S67** — STO4: `withRetry` on transient store errors; SFTP redial  ·  **P3 · M**  ·  from STO4 (BE-S4)
+  - **Edit:** small `withRetry(ctx, op)` in `store/` — 2-3 attempts, jittered backoff,
+    connection-class errors only (`net.Error` timeout, ECONNRESET, pre-response EOF,
+    `sftp.ErrSSHFxConnectionLost`); **never** exclusive-create Put (a retried lock
+    create sees its own `os.ErrExist` and self-deadlocks), never `ErrPreconditionFailed`,
+    never `fs.ErrNotExist`. Wrap Get/Stat/Rm/AtomicPut/overwrite-Put (and S64's List) on
+    SFTP and HTTP; S3 keeps the SDK retryer, local needs none. SFTP: a connection-class
+    failure invalidates the S66 memo entry and redials once.
+  - **Why:** one mid-cycle TCP reset currently fails every subsequent SFTP op;
+    expiration is all-or-nothing so one flaky Stat aborts the whole retention pass.
+  - **Verify:** fail-then-succeed fake backend tests incl. the exclusive-create
+    exclusion; SFTP redial test; `make test-race-be`.
+  - **Risk / deps:** last in the track — wraps the final shape (S63 sentinels, S66
+    memo). All wrapped ops are idempotent by construction.
 
-### FEB1 — footnote round-trips, both sides (fmt.ts ⇢ mod/sanitize.go)
+### backend writer (Track B — parallel with everything)
 
-- [x] **S49** — FEB1(reader): in-page fragment anchors; tolerate `id`  ·  **P1 · M**  ·  from FEB1 (FE-B1)
-  - **Edit:** `fmt.ts` anchor branch (~`:166-180`): a bare-`#` href stays a fragment —
-    exempt it from `setPackRelative`, set `target="_self"` (overriding
-    `<base target="_blank">`), and let it resolve in-page; keep a validated `id`
-    attribute through the reader-side sanitize walk (mirror S50's pattern) instead of
-    stripping it.
-  - **Why:** every longform/academic/newsletter article with footnotes has broken
-    round-trips: `#frag` gets pack-base-resolved and opens a dead new tab.
-  - **Verify:** fmt unit tests (fragment href survives + navigates in-page; `id` kept) +
-    full `make verify` (sanitizer parity is a contract boundary).
-  - **Risk / deps:** land WITH or BEFORE S50 (reader-first). Sanitizer-parity review on
-    the S49+S50 pair.
+- [ ] **S68** — GRO6: adopt meta-sync progress per saved shard  ·  **P3 · S**  ·  from GRO6 (BE-G6)
+  - **Edit:** `db_meta.go SyncMeta` — on a mid-sync failure after ≥1 newly finalized
+    shard saved, adopt the staged `names` clone and its coverage for the shards that DID
+    save (`c.Names = names`, `c.MetaTail = 0`) before returning the error, so the
+    cycle's warn-only Commit publishes partial progress and the next sync resumes at
+    `mp'·5000` instead of re-paying the full-store walk + zopfli. Safe by construction:
+    `names.putAt` runs strictly AFTER `saveMetaShard` succeeds, so the staged clone
+    only ever names durable objects (M4). **Preserve the merged staging invariant**: a
+    failure with ZERO new shards saved leaves `c.Names` untouched — never adopt a bare
+    truncation (the exact hazard the `fix/manifest-review-findings` staging fix closed).
+    `SSum` may lag (`covers ≤ mp`) — legal, readers fall back to eager loading.
+  - **Why:** the rebuild paths (pre-meta first run, coverage-inconsistency self-heal,
+    failed-sync catch-up) are all-or-nothing; a transient error at shard 190/200
+    discards everything, and a flaky store can make the rebuild never complete.
+  - **Verify:** new unit test — backend failing at shard k of n (`metaTPutFailBackend`
+    precedent), next SyncMeta resumes from k, and a zero-progress rebuild failure leaves
+    coverage untouched; `make test-be`.
+  - **Risk / deps:** none — db_meta.go only, independent of every other step.
 
-- [x] **S50** — FEB1(writer): allowlist a validated `id`  ·  **P1 · M**  ·  from FEB1
-  - **Edit:** `backend/mod/sanitize.go`: `policy.AllowAttrs("id").Matching(<conservative
-    token regexp>).Globally()` — reject exotic values; follow the file's existing
-    Matching-regexp style (:36-45).
-  - **Why:** the backend strips footnote targets at write time — the writer half of the
-    round-trip. Only helps articles fetched after it ships (packs are immutable).
-  - **Verify:** sanitize unit table + full `make verify`.
-  - **Risk / deps:** with/after S49. Content `id`s can't collide with reader chrome —
-    they live scoped inside `.srr-content`.
+- [ ] **S69** — GRO7: chunk oversized batches through materialization  ·  **P3 · M**  ·  from GRO7 (BE-G7)
+  - **Edit:** `db_pack.go PutArticles` — when the batch's encoded bytes exceed a cap
+    (new flag, e.g. `--max-batch-bytes`, default ~32 MiB, 0 = off), split the articles
+    into sub-batches and drive each through the existing accounting + `shouldConsolidate`
+    → `emitDelta`/`consolidateTail` decision sequentially, building `lines` (the JSONL
+    copy) **per sub-batch** so peak transient memory is bounded by the cap instead of
+    the batch (today: `written`+`lines` dual copy at :497-512, the full in-memory delta
+    gzip at :594-610, and the `entries`/`entryLines` chain copies at :734-737). Return
+    the concatenated `written` slice (SyncMeta's input, unchanged). SyncMeta's
+    exact-cover fast paths may miss on a multi-chunk cycle and fall back to
+    `walkArticles` — correct, and only on the rare oversized backfill; document that at
+    the split site.
+  - **Why:** steady-state packs are bounded but the batch is not — a backfill import
+    yields ~3-4× the batch in transient RSS, under the lock, on an 8 GB SBC.
+  - **Verify:** new chunked-vs-unchunked byte-equivalence test (the
+    `TestConsolidationEquivalence` pattern — chunking must be byte-invisible in the
+    store); `make test-be` + `make test-race-be`.
+  - **Risk / deps:** none on other steps (db_pack.go only). Zero format impact by
+    construction; the equivalence test is the gate.
 
-### frontend/src/js/app.ts — the reader render block
+### assets (Track C)
 
-- [x] **S51** — FEB2: playing media survives prev/next  ·  **P1 · M**  ·  from FEB2 (FE-B2)
-  - **Edit:** around `el.content.replaceChildren` (`app.ts:416-423`): before replacing,
-    harvest `currentTime`/`playbackRate`/paused of any `<audio>/<video>` in the outgoing
-    content, keyed by chronIdx in a session Map; after rendering a chron with saved
-    state, restore it onto the matching element. Minimum viable: resume on returning to
-    the article; the full mini-player is RDR16 (stays in the findings doc).
-  - **Why:** backend `#enclosure` injects podcast `<audio controls>`, so the path is
-    live: a swipe kills a playing podcast dead with no resume.
-  - **Verify:** unit where practical + manual repro (play → next → prev → position
-    restored); `make verify-fe`.
-  - **Risk / deps:** same block as S52 — apply S51 first, S52 adjacent.
+- [ ] **S70** — STO5: stream assets from disk; sniffed ContentType fallback  ·  **P2 · M**  ·  from STO5 (BE-S5)
+  - **Edit:** `assets.go` — hash via `io.Copy(sha256.New(), f)` instead of
+    `os.ReadFile` (:218); upload from the seekable `*os.File` (re-`Seek(0)` after
+    hashing — S3 signing/retries keep working), keeping bytes in memory only below a
+    small threshold (~1 MiB); in `{output}` mode upload from the staging file (size
+    guard via `os.Stat`) instead of `readProcOutput`'s slurp (:547). The singleflight
+    body's `orig []byte` parameter becomes path+size+sum. ContentType: when NO peek is
+    configured and meta is empty, fall back to `http.DetectContentType` on the first
+    512 bytes — **a deliberate convention change** for the zero-config case only
+    (S3 objects currently default to `application/octet-stream`); update the "never by
+    sniffing" comments (`store/main.go` contentTypeForKey, `s3.go` put,
+    `backend/CLAUDE.md`) in the same edit so the docs and code can't disagree.
+    Peek-configured installs are unchanged — peek stays the single source of truth.
+  - **Why:** peak heap ≈ `SRR_ASSET_WORKERS × (orig + payload)` for stream-shaped work —
+    video-heavy Telegram feeds spike hundreds of MB of transient heap on the 8 GB
+    hosts; zero-config installs serve every asset as `octet-stream`.
+  - **Verify:** existing asset tests + new streaming/threshold + DetectContentType
+    tests; `make test-be`.
+  - **Risk / deps:** after S63 lands (it rewrites the Stat/Get probe in the same
+    function). The corrupt-media guard and peek paths already take the file path —
+    unaffected.
 
-- [x] **S52** — RDR4: consume `g` — lang, dir, hyphens  ·  **P1 · S**  ·  from RDR4 (AR-D4 + IM-I04 + FE-F1 + FE-D2)
-  - **Edit:** at the same render site: stamp `el.content.lang = article.g || ""` and
-    `dir="auto"` on the content host; enable `hyphens: auto` on `.srr-content` prose in
-    `styles.css` (only correct once lang is stamped — same change set).
-  - **Why:** `g` ships in every pack line and no frontend code reads it (`<html
-    lang="en">` hardcoded): wrong screen-reader voice for non-English bodies, wrong
-    hyphenation, undeclared-RTL renders LTR.
-  - **Verify:** contract-layer or unit assertion (a `g`-bearing fixture renders with
-    `lang`) + `make verify-fe`.
-  - **Risk / deps:** after S51 (same block). `g` is absent for pre-2026-07-19 articles →
-    empty lang falls back to the page default, which is correct.
+### frontend reader (Track D — one step per batch, parallel with the backend)
 
-### frontend/src/js/fmt.ts — content mechanics
+- [ ] **S71** — RDR3: "N new" pill + pending-pill pulse  ·  **P2 · M**  ·  from RDR3 (FE-M3)
+  - **Edit:** list surface — a tappable "N new" pill overlaid at the list top, shown
+    when `onStoreGrown` (`list.ts:954`, called silently from `app.ts:1555`) prepends
+    rows above the fold while the user is scrolled down (the scroll-pinned prepend
+    already computes the inserted-above count); tap = smooth scroll-to-top + dismiss;
+    auto-dismiss when the user reaches the top organically. Reader surface — a subtle
+    one-shot pulse on the pending/next pill when its count grows (the silent re-derive
+    around `app.ts:834-913`). The pill is an overlay signal, never a layout shift —
+    the documented no-jank scroll-pinning contract stays intact. No persistence.
+  - **Why:** fresh arrivals are undiscoverable without scrolling up on a hunch —
+    silence is the documented contract, but it lacks any signal.
+  - **Verify:** `make verify` + `make test-browser`; visual check of the pulse via the
+    design harness (`make design-shots`) or on-device.
+  - **Risk / deps:** list.ts + app.ts + styles.css; counting stays in nav.ts's
+    `tallyWith` — the pill only consumes counts, never re-derives them. Complements
+    the applied S62 badge (app-icon) without overlap. First app.ts step — S72 follows.
 
-- [x] **S53** — FEB3: broken image keeps its alt text  ·  **P2 · S**  ·  from FEB3 (FE-B3)
-  - **Edit:** `collapseBrokenMedia` (`fmt.ts:235-244`): for an IMG with non-empty `alt`,
-    swap in a small caption placeholder (`.srr-broken-alt`, styled in styles.css)
-    instead of the bare display:none collapse; alt-less media keep today's collapse
-    (deliberate).
-  - **Verify:** fmt unit test + `make verify-fe`.
-  - **Risk / deps:** none.
+- [ ] **S72** — RDR7: image lightbox / tap-to-zoom  ·  **P2 · M**  ·  from RDR7 (FE-F4)
+  - **Edit:** minimal zero-dep overlay viewer for `.srr-content img`: a new small
+    `lightbox.ts` (fixed overlay, centered image, backdrop dim, transform-based zoom
+    toggle on desktop; close on tap/Esc, focus-trapped via the `dropdown.ts` dialog
+    patterns), hooked by ONE delegated click listener on `el.content` next to the
+    existing error capture (`app.ts:1636` — today the only content listener). An
+    `<img>` wrapped in a content `<a href>` keeps its link behavior — the lightbox
+    claims only bare images (the common case).
+  - **Why:** content images are inert; desktop has no enlargement path at all.
+  - **Verify:** `make verify` + `make test-browser` (click opens, Esc closes, focus
+    returns); keyboard/a11y pass by hand (no automated axe yet — TST11 open).
+  - **Risk / deps:** after S71 lands (same app.ts; batches are sequential so no race).
+    Keep the viewer outside `nav.ts`/`fmt.ts` — pure UI module.
 
-- [x] **S54** — FEB4: force controls on non-autoplay video  ·  **P2 · S**  ·  from FEB4 (FE-B4)
-  - **Edit:** fmt.ts VIDEO branch (`:194-199`): when not `autoplay`, set `controls` +
-    `playsinline` — the exact treatment the AUDIO branch already applies (`:200-207`).
-  - **Why:** a feed video lacking `controls` renders as a dead frame.
-  - **Verify:** fmt unit test + `make verify-fe`.
-  - **Risk / deps:** none.
+- [ ] **S73** — RDR11: pull-to-refresh on the list  ·  **P2 · M**  ·  from RDR11 (FE-F8)
+  - **Edit:** `gestures.ts` gains an opt-in overscroll pull on the LIST surface: a
+    one-finger downward drag starting at `scrollTop == 0`, past a threshold with a
+    small progress affordance, calls `refresh.refreshNow()` (`refresh.ts:41` — exists,
+    post-dates the "no refresh button" decision; a gesture honors that decision rather
+    than reopening it). Compose with the existing state machine (must not fire the
+    horizontal swipe, the two-finger cycle, or fight the pinch guard) and set
+    `overscroll-behavior-y: contain` on the list so Chrome Android's native
+    pull-to-reload doesn't double-fire.
+  - **Why:** the only manual refresh today is a full page reload.
+  - **Verify:** `make verify` + `make test-browser` where expressible; **on-device
+    check mandatory** — headless cannot reproduce touch/overscroll.
+  - **Risk / deps:** gestures.ts + list.ts + styles.css; land BEFORE S74 (both grow
+    the same single-finger tracking).
 
-- [x] **S55** — POL5: demote in-content `h1`s  ·  **P3 · S**  ·  from POL5 (FE-D6)
-  - **Edit:** in `sanitizeFragment`'s element walk: rewrite content `h1` → `h2` so the
-    masthead `<h1 class="srr-title">` stays the only h1 for AT outlines; visual scale is
-    already handled by CSS.
-  - **Verify:** fmt unit test + `make verify-fe`.
-  - **Risk / deps:** same file as S49/S53/S54 — apply bottom-up within fmt.ts.
-
-### frontend/src/styles.css — content polish batch (one PR with S51–S55)
-
-- [x] **S56** — POL1–POL4: `dl` styles, img height clamp, dark dimming, light print
-  ·  **P2–P3 · S**  ·  from POL1 (FE-D1) + POL2 (FE-D3) + POL3 (FE-D4) + POL4 (FE-D5)
-  - **Edit:** (1) `dl/dt/dd` spacing/rhythm rules in the `.srr-content` block to match
-    `ul/ol`; (2) `.srr-content img { max-height: 85vh }` — parity with the video clamp
-    (`styles.css:66-72`); (3) `@media (prefers-color-scheme: dark) { .srr-content img {
-    filter: brightness(.85) } }`; (4) force the light token set inside `@media print`
-    (`styles.css:2159-2175` currently only hides chrome).
-  - **Verify:** `make design-shots` eyeball + `make verify-fe`.
-  - **Risk / deps:** none; pure CSS.
-
-### frontend/src/js/nav.ts (+ app.ts) — read-state trust
-
-- [x] **S57** — RDR1: undo snackbar on large frontier jumps  ·  **P1 · M**  ·  from RDR1 (FE-M1)
-  - **Edit:** `recordSeen` (`nav.ts:854`): before a raise that flips more than a
-    threshold of articles across the filter's members, snapshot the touched frontier
-    keys (+ their `st` timestamps); expose `nav.undoLastFrontierMove()`; app.ts shows a
-    transient "Marked N read — Undo" snackbar (reuse `.srr-popup`) whose tap restores
-    the snapshot and recounts. Keep the frontier model itself — this adds
-    reversibility, not per-article sets.
-  - **Why:** tapping the newest headline on `[ALL]` silently consumes entire backlogs;
-    deliberate model, but silent + irreversible is what erodes trust in unread numbers.
-  - **Verify:** nav unit tests (snapshot/restore round-trip against the counting
-    oracle) + `make verify-fe`. **Do not touch `tallyWith`'s logic** (Appendix C).
-  - **Risk / deps:** restore must write through the same setters the seen-sync uses, so
-    profile-blob sync (`st` per-key timestamps) sees the undo.
-
-- [x] **S58** — RDR2: "Mark all read" rides the same undo  ·  **P1 · S**  ·  from RDR2 (FE-M2)
-  - **Edit:** `markAllRead` (`nav.ts:936`, called from `app.ts:629,655`) snapshots via
-    S57's machinery and triggers the same snackbar; no separate confirm dialog.
-  - **Verify:** unit + `make verify-fe`.
-  - **Risk / deps:** after S57.
-
-### frontend pin path — saved-article durability (pin.ts, sw.ts, nav.ts)
-
-- [x] **S59** — FMT2(a): save-time asset pinning  ·  **P1 · S–M**  ·  from FMT2 (AR-D2 + IM-I11)
-  - **Edit:** on ★-save: collect the article's pack-relative `assets/…` URLs from its
-    content and post them to the service worker's pinned bucket (extend the `pin.ts` /
-    `srr-pinned-v1` message protocol with an asset-pin type, keyed by mount per the
-    post-S38 multi-store model); on un-save, release them. Hook the saved-set
-    transitions in nav.ts.
-  - **Why:** a ★-saved article keeps its text forever (immutable packs) but silently
-    loses images/media once the feed's `exp` window passes; the backend cannot exempt
-    them (the saved set is device-local). With PWA0 fixed, the pinned bucket finally
-    works in production — this makes the read-later queue actually durable. No contract
-    change.
-  - **Verify:** `make verify-fe` + `make test-browser` (SW behavior is browser-layer).
-  - **Risk / deps:** S60 hooks its `persist()` call into this path — land S59 first.
-
-- [x] **S60** — PWA2: request storage persistence on first pin  ·  **P1 · S**  ·  from PWA2 (FE-P2)
-  - **Edit:** call `navigator.storage?.persist()` (fire-and-forget, log the result) the
-    first time either pin path is used — filter pin (`pin.ts`) or S59's save-pin.
-  - **Why:** pinned packs are eviction-exempt only inside the SW's own logic; the
-    browser can still evict the whole origin under pressure. One call protects the
-    entire offline-pin feature.
-  - **Verify:** unit-mockable + manual check in the installed PWA; `make verify-fe`.
-  - **Risk / deps:** after S59 (its call sites include the new path).
-
-### PWA earn-out (app.ts, sw.ts, manifest.webmanifest)
-
-- [x] **S61** — PWA1: update toast + navigation preload  ·  **P1 · S**  ·  from PWA1 (AR-U2 + FE-P1)
-  - **Edit:** EXTEND the existing `controllerchange` listener (app.ts ~`:1144` — it
-    re-posts mounts today; keep that first) to also show a lightweight "Reader updated —
-    reload" toast (`.srr-popup`), suppressed on first install; enable
-    `registration.navigationPreload` in sw.ts's activate (`skipWaiting`/`claim` stay).
-  - **Why:** a new worker takes over mid-session with zero signal — fine until a
-    pack-grammar change isn't; preload speeds cold-SW first paint.
-  - **Verify:** `make test-browser` + `make verify-fe`.
-  - **Risk / deps:** do NOT add a second `controllerchange` listener — extend the
-    existing one.
-
-- [x] **S62** — RDR12: unread badge + manifest shortcuts  ·  **P2 · S**  ·  from RDR12 (IM-I09 + FE-F9)
-  - **Edit:** `navigator.setAppBadge(unreadTotal)` (feature-detected, cleared at zero)
-    wherever unread tallies refresh (the 5-min refresh + seen changes), a `(N)`
-    document-title suffix, and `shortcuts` entries for ★ Saved and Unread in
-    `frontend/src/manifest.webmanifest` (hash URLs).
-  - **Why:** the tally already exists (`nav.unreadCounts`); best effort-to-value on the
-    feature list and the cheap 80% of Web Push (RDR17, stays in the findings doc).
-  - **Verify:** `make verify-fe` + manual badge check in the installed PWA.
-  - **Risk / deps:** none.
-
-## Applied — 2026-07-25
-
-All 18 steps (S45–S62) are applied. Gates run green after the batch: `make verify`,
-`make test-browser`, `make test-race-be`, and a `make fuzz-be` smoke over all five new
-targets.
-
-Notes worth carrying (the plan's own text is the record of intent; these are what the
-work actually turned up):
-
-- **S45 found the wedge S47 fixes, immediately.** The crash harness's first full run
-  failed on all 53 halt points with one error: a halted cycle leaves `.locked`/
-  `.config.locked` behind and the next cycle cannot open the store. That IS REL3, and
-  the harness stays as its regression net (it asserts the store is writable again after
-  every halt, not merely readable).
-- **S45's grace window is the production one.** `main()` floors `--keep-manifests` at
-  the compile-time `keepManifests`, explicitly so `srr inspect`'s fixed-K window cannot
-  false-alarm — so the harness warms the store past that window instead of shrinking K,
-  and snapshots the warm state once rather than replaying it per halt.
-- **S47 changed what "another writer" means in two tests.** `TestDBLocking` and
-  `TestMCPFetchStoreBusy` faked cross-process contention with a second locked handle in
-  the SAME process; the owner rule now (correctly) reclaims that. Both were rewritten to
-  plant a foreign live lease, which is what a real peer writes.
-- **S48 is a REAL CAS only on S3/R2** (ETag + `If-Match`) — which is where the
-  production store lives. Local/SFTP are documented best-effort check-then-rename; plain
-  HTTP declines with `errors.ErrUnsupported` rather than pretend, and `flipRoot` falls
-  back to the unconditional write on that signal.
-- **S49 needed a click interceptor, not just an href fix.** `location.hash` is the
-  reader's router, so letting a footnote link navigate would fire a hashchange `route()`
-  reads as a nonsense position. `fmt.handleFragmentClick` scrolls instead, and the URL
-  never moves.
-- **S51 needed a pending-restore guard.** `currentTime` is only settable once metadata
-  lands, so a second render of the same article before then harvested the still-zero
-  position over the real one.
-- **S57's snackbar is a new non-modal element, not `.srr-popup`.** The popup is a modal
-  that takes focus — right for an error you must acknowledge, wrong for a notice you may
-  ignore, and a single slot both would fight over. S61's update toast reuses the same
-  snackbar.
-- **S57 does NOT restore the snapshotted `st` stamps.** An undo is itself the newest
-  thing to happen to those keys; restoring old stamps would let another device's stale
-  raise win the per-key LWW and silently re-consume the backlog.
-- **S62's title count LEADS rather than trails** (`(7) SRR · …`): a tab title truncates
-  from the right, so a trailing number is a notification nobody can see.
+- [ ] **S74** — RDR14: list-row swipe actions  ·  **P3 · M**  ·  from RDR14 (IM-I13)
+  - **Edit:** one-finger horizontal swipe ON A LIST ROW — right = toggle ★ save,
+    left = toggle read — extending `gestures.ts`'s single-finger tracking with the
+    surface awareness the two-finger cycle already has (reader keeps horizontal
+    prev/next nav untouched); row visual affordance (translate + icon reveal) in
+    list.ts/styles.css. The read-toggle rides the applied S57 undo machinery
+    (`nav.pendingFrontierUndo`) so an accidental swipe is reversible, matching RDR1's
+    snackbar contract.
+  - **Why:** the standard mobile reader idiom; the star and frontier menu cover the
+    functionality today, but less ergonomically.
+  - **Verify:** `make verify` + `make test-browser`; on-device check mandatory (swipe
+    thresholds/feel).
+  - **Risk / deps:** after S73 (same touch state machine). Horizontal row swipe must
+    not swallow vertical list scrolling — axis-lock like the existing swipe handler.
 
 ## Stale / unverified — needs re-check (NOT auto-applied)
 
-None — all 19 findings re-verified ACTIONABLE against `c51bd9a` on 2026-07-25.
+*(none — all 12 findings re-verified ACTIONABLE against `3601ba8`)*
 
 ## Skipped
 
-None. (FMT2's backend half **(b)** — the refcount sidecar — was NOT selected; it stays
-in the findings doc as the remaining FMT2 entry.)
+- **STO2's `db_meta.go:290` consequence** ("treats a transient Stat error as absence") —
+  OBSOLETE: that path was rewritten at the manifest cutover; the meta series no longer
+  Stats. The nearest surviving relative (`config_sidecar.go:146`) fails SAFE (a
+  transient error merely forces a harmless config rewrite). The finding's other
+  consequences remain and are covered by S63.
 
 ## Coverage detail
 
-- Source: `docs/FINDINGS-2026-07-20.md`, **Do first** section only (user-directed).
-  The findings doc remains the living backlog for everything else; this plan is NOT
-  exhaustive of it.
-- Re-verification evidence (2026-07-25, HEAD `c51bd9a`): `sanitize.go` has no `id`
-  allowlist; no fuzz targets or crash harness exist (`func Fuzz`/`stopAfterN`
-  grep-empty); `.locked` is a nil-payload marker and `Backend` has no conditional put;
-  `fmt.ts` pack-base-resolves bare fragments, forces controls on audio but not video,
-  and hides alt text on collapse; `app.ts:416-423` `replaceChildren`s with no
-  media-state carry-over and no lang stamping (`<html lang="en">` hardcoded);
-  `nav.ts` `recordSeen`/`markAllRead` have no snapshot/undo; `pin.ts` has no
-  saved-asset or `persist()` path; `sw.ts` has `skipWaiting`+`claim`, no
-  `navigationPreload`; `manifest.webmanifest` has no `shortcuts` and `setAppBadge` is
-  unused; `styles.css` lacks `dl` rules, an img height clamp, dark image dimming, and a
-  light-print override.
+- FINDINGS-2026-07-20 (user-selected subset: GRO6, GRO7, STO1–STO6, RDR3, RDR7, RDR11,
+  RDR14) — this plan covers only those 12 entries. STO7 (`HTTP.AtomicPut` atomicity)
+  was NOT selected and stays in the findings doc; its temp-name+MOVE idea composes with
+  S64's List if picked up later. The remaining RDR entries (RDR5, RDR6, RDR8–RDR10,
+  RDR13, RDR15–RDR18) stay open in the findings doc.
+- Reminder: S45–S62 are applied but **not released/deployed** — releasing this batch
+  ships them too.
