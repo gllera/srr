@@ -6,6 +6,11 @@ import { describe, it, expect, vi, beforeEach } from "vitest"
 // timeAgo is stubbed to a deterministic string.
 
 const data = vi.hoisted(() => {
+   // The ACTIVE mount id. Per-store device state is namespaced by it (chronIdx
+   // and feed ids are only unique within one store), and list.ts stamps the
+   // row-swipe undo snapshot with it — so the mock is settable, and the swipe
+   // block's beforeEach resets it to home.
+   let mid = "0"
    const mock = {
       db: { total_art: 0, feeds: {} } as IDB,
       _arts: new Map<number, IArticle>(),
@@ -40,6 +45,9 @@ const data = vi.hoisted(() => {
       // Resident after the anchor walk; the list reads it to sync nav.select's
       // feed arg when it makes the resolved anchor the current selection.
       getFeedId: vi.fn(async (chron: number) => mock._arts.get(chron)!.f),
+      // Only `.mid` is read by list.ts (the row-swipe undo's mount stamp).
+      activeStore: vi.fn(() => ({ mid })),
+      _setMid: (m: string) => (mid = m),
    }
    return mock
 })
@@ -1704,6 +1712,9 @@ describe("list", () => {
          nav.undoFrontierMove.mockClear()
          nav.toggleSaved.mockClear()
          nav._undo = null
+         // Same reason: the mount id lives for the whole file, and the
+         // cross-mount case below switches lanes mid-test.
+         data._setMid("0")
       })
 
       it("a left swipe marks an unread row read — its own feed's frontier only", async () => {
@@ -1799,6 +1810,28 @@ describe("list", () => {
          swipe(row, READ)
          expect(nav.undoFrontierMove).not.toHaveBeenCalled()
          expect(seenMod.markUnreadFrom).toHaveBeenCalledTimes(1)
+      })
+
+      // …and likewise when the frontier did NOT move but the LANE did. The reader
+      // is multi-store: chrons and feed ids are only unique within one mount, and
+      // nav's seen map is the ACTIVE mount's. So a snapshot taken on store A can
+      // match every other term of the guard on store B — same row number, same
+      // feed number, B's own frontier sitting at the same value — and replaying it
+      // would write A's frontier into B. The mount stamp is what rules it out.
+      it("never replays another mount's snapshot after a store switch", async () => {
+         setIndex(6)
+         nav._setSeen({ "feed:1": 1 })
+         await list.render()
+         const row = $rows().find((r) => r.dataset.chron === "5")!
+         swipe(row, READ) // the snapshot is taken on the home mount
+         expect(nav.getSeenMap()["feed:1"]).toBe(5)
+         // Switch lanes. Everything else the guard checks still matches — this is
+         // the whole point: only the mid distinguishes the two stores.
+         data._setMid("7")
+         swipe(row, READ)
+         expect(nav.undoFrontierMove).not.toHaveBeenCalled()
+         expect(seenMod.markUnreadFrom).toHaveBeenCalledTimes(1)
+         expect([...seenMod.markUnreadFrom.mock.calls[0][1].members]).toEqual([1])
       })
 
       it("a right swipe toggles ★ Saved without opening the reader", async () => {

@@ -324,7 +324,18 @@ let swipeClickGuard = false
 // verbatim (nav.undoFrontierMove) as long as the frontier is still exactly where
 // the swipe left it. That equality test is the whole validity rule; anything else
 // falls back to the explicit rewind.
-let readSwipeUndo: { chron: number; feed: number; to: number; undo: nav.FrontierUndo } | null = null
+//
+// It carries the MOUNT it was taken on, and the guard compares it first. The
+// reader mounts N stores and every per-store piece of device state is namespaced
+// by a mount id, because chronIdx AND feed id are only unique WITHIN a mount —
+// feed 7 in store A is a different feed from feed 7 in store B, and nav's seen
+// map is the ACTIVE store's. Without the mid, a swipe-back on store B could match
+// a snapshot taken on store A (same chron, same feed number, and B's frontier
+// happening to sit at that value) and replay A's frontier onto B. This module is
+// the one consumer of the record, so the invariant stays local to it: a snapshot
+// from another lane simply fails the guard and falls through to the explicit
+// rewind, which is exactly what a caller with no valid snapshot should do.
+let readSwipeUndo: { mid: string; chron: number; feed: number; to: number; undo: nav.FrontierUndo } | null = null
 
 // ★ Saved / search are peek modes: ./seen exempts them from every frontier write,
 // so the read toggle has nothing to act on there. swipeAction declines the
@@ -461,7 +472,7 @@ function markRowRead(chron: number, feed: number): void {
    const u = nav.pendingFrontierUndo()
    readSwipeUndo =
       u && u.to === chron && Object.keys(u.prev).length === 1 && key in u.prev
-         ? { chron, feed, to: chron, undo: u }
+         ? { mid: data.activeStore().mid, chron, feed, to: chron, undo: u }
          : null
    // Answer the offer HERE, not on the next reader render — by then the swipe is
    // minutes old and on another surface, announcing a number nobody can place.
@@ -484,10 +495,19 @@ function markRowUnread(chron: number, feed: number): void {
    const u = readSwipeUndo
    readSwipeUndo = null
    // Exact restore while this row's own mark-read swipe is still the last thing
-   // that touched the feed's frontier. If anything moved it since (reading in the
-   // reader, another swipe, a sync merge), replaying the snapshot would un-read
-   // articles that have since been read — so the explicit rewind takes over.
-   if (u && u.chron === chron && u.feed === feed && nav.getSeenMap()["feed:" + feed] === u.to) {
+   // that touched the feed's frontier — ON THE MOUNT IT WAS TAKEN ON (the mid
+   // term is first because everything after it is only meaningful within one
+   // store: chrons and feed ids are per-mount, and getSeenMap() is the ACTIVE
+   // mount's map). If anything moved it since (reading in the reader, another
+   // swipe, a sync merge), replaying the snapshot would un-read articles that
+   // have since been read — so the explicit rewind takes over.
+   if (
+      u &&
+      u.mid === data.activeStore().mid &&
+      u.chron === chron &&
+      u.feed === feed &&
+      nav.getSeenMap()["feed:" + feed] === u.to
+   ) {
       if (nav.undoFrontierMove(u.undo)) return
    }
    // The explicit rewind, scoped to this row's feed: this chron and everything
