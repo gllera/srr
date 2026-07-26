@@ -1,5 +1,5 @@
 import * as data from "./data"
-import { timeAgo, srcColorIndex, dayLabelCtx, dayLabelWith, CHECK_SVG } from "./fmt"
+import { timeAgo, srcColorIndex, dayLabelCtx, dayLabelWith, countBadge, CHECK_SVG } from "./fmt"
 import * as nav from "./nav"
 
 // The list surface — the app's home: a scannable feed of headlines under the
@@ -84,6 +84,33 @@ let observer: IntersectionObserver | null = null
 // Programmatic scrolls (window.scrollTo) don't fire these, so they don't trip it.
 let userScrolled = false
 
+// ── "N new" arrivals pill ────────────────────────────────────────────────────
+// A store refresh prepends fresh rows ABOVE the fold and compensates the scroll
+// so nothing you are looking at moves (fetchNewer, the no-jank contract). The
+// price of that silence is that the arrivals are undiscoverable — you have to
+// scroll up on a hunch. The pill is the missing SIGNAL and nothing more:
+//
+//  - it is an OVERLAY (position:fixed, styles.css) — it takes no layout, so the
+//    scroll-pinning contract it advertises stays exactly intact;
+//  - it COUNTS NOTHING of its own: it consumes the batch sizes the prepend
+//    already produced (article counting lives in nav.tallyWith, not here);
+//  - it does not persist — a rebuild, a filter change or reaching the top
+//    organically all drop it.
+//
+// Known gap, deliberate: onStoreGrown only reopens a top that was EXHAUSTED, so
+// arrivals landing while the loaded window's top edge is already open (paged
+// away from the newest end) are not signalled — there is no cheap count for
+// them, and the pill must never invent one.
+const PILL_TOP_EPS = 4 // px from the document top that still counts as "at the top"
+let newAbove = 0 // rows a store-grown prepend put above the fold, still unseen
+let pillEl: HTMLElement | null = null
+let pillOnScroll: (() => void) | null = null
+// Open between a store-grown top reopen and the moment that reopened runway is
+// drained (exhaustedTop again). Only prepends inside that window are FRESH
+// ARRIVALS: the same fetchNewer path serves ordinary upward paging, where the
+// rows are ones the user is deliberately scrolling toward and a pill is noise.
+let grownRunway = false
+
 export function setup(
    el: HTMLElement,
    open: (chron: number) => void,
@@ -135,6 +162,75 @@ function el(tag: string, className: string): HTMLElement {
    const e = document.createElement(tag)
    e.className = className
    return e
+}
+
+// Count `n` freshly prepended rows toward the arrivals pill and (re)paint it.
+// Search is exempt: its rows are an explicit query result rather than a wire
+// that grows, and the pinned search bar owns the strip of viewport the pill
+// would sit in.
+function noteNewAbove(n: number): void {
+   if (n <= 0 || nav.isSearchFilter()) return
+   newAbove += n
+   paintNewPill()
+}
+
+function paintNewPill(): void {
+   if (!pillEl) {
+      const b = document.createElement("button")
+      b.type = "button"
+      b.className = "srr-new-pill"
+      // It reports something that already happened off-screen — which is what a
+      // polite live region is for. It is still a real <button> (keyboard
+      // reachable, labelled), not decoration.
+      b.setAttribute("aria-live", "polite")
+      const arrow = el("span", "srr-new-pill-arrow")
+      arrow.setAttribute("aria-hidden", "true")
+      arrow.textContent = "↑"
+      b.append(arrow, el("span", "srr-new-pill-label"))
+      b.addEventListener("click", jumpToNew)
+      pillEl = b
+      // First child of the list container: the pill is the top-of-list control,
+      // so DOM order matches where it paints (it is fixed, so this costs the
+      // rows no layout either way).
+      container.insertBefore(b, container.firstChild)
+      pillOnScroll = () => {
+         // Reaching the top by hand IS the dismissal — the arrivals are on
+         // screen, so the signal has done its job.
+         if (window.scrollY <= PILL_TOP_EPS) resetNewPill()
+      }
+      window.addEventListener("scroll", pillOnScroll, { passive: true })
+   }
+   const badge = countBadge(newAbove)
+   pillEl.querySelector(".srr-new-pill-label")!.textContent = `${badge} new`
+   const name = `${badge} new ${newAbove === 1 ? "article" : "articles"} — jump to the top of the list`
+   pillEl.setAttribute("aria-label", name)
+   pillEl.title = name
+}
+
+// Tap/Enter on the pill: ride up to the arrivals and drop the signal. Smooth,
+// because the whole point is showing you the rows travel past — except under
+// prefers-reduced-motion, where the same jump happens instantly (the CSS can't
+// reach a scroll behavior, so this one check lives here).
+function jumpToNew(): void {
+   resetNewPill()
+   const reduced =
+      typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches
+   if (reduced) window.scrollTo(0, 0)
+   else window.scrollTo({ top: 0, behavior: "smooth" })
+   notifyScroll()
+}
+
+// Drop the pill, its listener and its count. Every rebuild/collapse path goes
+// through here, so a filter change can't leave a detached node's scroll
+// listener alive or a stale count to be added onto.
+function resetNewPill(): void {
+   newAbove = 0
+   if (pillOnScroll) {
+      window.removeEventListener("scroll", pillOnScroll)
+      pillOnScroll = null
+   }
+   pillEl?.remove()
+   pillEl = null
 }
 
 // One headline row: a source-colored rail + ("source · age" eyebrow over the
@@ -297,6 +393,10 @@ function trimWindow(side: "top" | "bottom"): void {
       newest = Number(kept[0].dataset.chron)
       exhaustedTop = false
       syncTopTerminus() // no compensate: the bracket below covers this removal too
+      // The rows the pill points at just left the window (paged far enough down
+      // that the recycler reclaimed them), so "jump to the top" would no longer
+      // land on them. A pointer that has lost its referent is dropped, not kept.
+      resetNewPill()
    } else {
       oldest = Number(kept[kept.length - 1].dataset.chron)
       exhaustedBottom = false
@@ -432,6 +532,7 @@ function emptyState(): void {
 // empty state, dropping the observer so a stale sentinel can't keep firing.
 function showEmptyState(): void {
    teardownObserver()
+   resetNewPill() // nothing left above the fold to point at
    rowsEl = null
    container.replaceChildren()
    emptyState()
@@ -597,6 +698,10 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    pumping = false
    builtKey = nav.filterKey()
    rowsEl = null
+   // A rebuild lays a fresh window: whatever the pill was pointing at is gone
+   // with the old rows, and no reopened runway is in flight any more.
+   resetNewPill()
+   grownRunway = false
    container.replaceChildren()
 
    if (data.db.total_art === 0) {
@@ -969,6 +1074,10 @@ export async function onStoreGrown(): Promise<void> {
       if (my !== tok || found === -1) return // superseded by a rebuild, or nothing newer
       exhaustedTop = false
       syncTopTerminus(true)
+      // Open the arrivals window: every batch the reopened runway prepends from
+      // here until the top re-exhausts is fresh content the user has not seen,
+      // so fetchNewer counts it toward the "N new" pill (noteNewAbove).
+      grownRunway = true
       // Kick the observer: IntersectionObserver only fires on intersection
       // CHANGES, and at the usual exhaustedTop position (parked at scroll 0) the
       // top sentinel is ALREADY intersecting — removing the terminus doesn't
@@ -1139,11 +1248,17 @@ async function fetchNewer(my: object): Promise<void> {
          window.scrollTo(0, window.scrollY + shift)
          notifyScroll()
       }
+      // The compensation above is exactly what makes these rows invisible when
+      // they are fresh arrivals — so that is where the pill's count comes from.
+      // Ordinary upward paging (grownRunway false) stays silent as before.
+      if (grownRunway) noteNewAbove(chrons.length)
       trimWindow("bottom") // paged up: recycle the far end below
    } finally {
       if (my === tok) {
          loadingTop = false
          syncTopTerminus(true) // prepend the terminus the moment we page off the newest end
+         // The reopened runway is drained — later prepends are the user paging.
+         if (exhaustedTop) grownRunway = false
       }
    }
 }
