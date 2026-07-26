@@ -244,8 +244,25 @@ func frontendUpdate(ctx context.Context, backend store.Backend, client *http.Cli
 	}
 	newKeys := sortedKeys(newFiles)
 
-	// Record intent before mutating: a pending manifest = old ∪ new tracks every
-	// file about to exist, so a crash mid-upload leaves nothing untracked.
+	// Prefer the STORE over the bookkeeping: sitemap.txt exists only because
+	// there was no way to ask a store what it holds, and a manifest of past
+	// intent is wrong in exactly the ways a listing is not — it was never
+	// written (an interrupted first install), it was deleted, or the files
+	// predate this command entirely. Whatever the listing finds is folded into
+	// the old set, so those orphans get reclaimed on this run instead of never.
+	listed, err := listHashedShellAssets(ctx, backend)
+	if err != nil {
+		return err
+	}
+	oldKeys = union(oldKeys, listed)
+
+	// The pending-superset write STAYS, on a listable store too. It is one tiny
+	// PUT, and it covers the one class the listing deliberately cannot: a
+	// STABLE-named file (index.html, manifest.webmanifest, an unhashed icon a
+	// future bundle drops) is indistinguishable from an operator's own root
+	// object, so only a record of having uploaded it can ever authorise its
+	// deletion. Old ∪ new tracks every file about to exist, so a crash
+	// mid-upload still leaves nothing untracked.
 	if err := writeSitemap(ctx, backend, union(oldKeys, newKeys)); err != nil {
 		return fmt.Errorf("writing pending sitemap: %w", err)
 	}
@@ -282,6 +299,36 @@ func frontendUpdate(ctx context.Context, backend store.Backend, client *http.Cli
 	}
 	slog.Info("frontend updated", "version", rel.Tag, "files", len(newKeys), "removed", removed)
 	return nil
+}
+
+// listHashedShellAssets asks the store which CONTENT-HASHED frontend assets it
+// holds at the root. That class and no other: a hashed name is machine-minted
+// per build (`frontend.5730a221.js`), so it is unambiguously this command's
+// output and it is the class that ACCUMULATES — every release mints new ones
+// and strands the last release's. `store.HashedFrontendAsset`'s grammar is
+// slash-free and anchored, so a pack key, db.gz, config.gz, sitemap.txt or an
+// operator's own root file can never match, and this function can therefore
+// never propose deleting one.
+//
+// A backend that cannot list is not an error: `srr frontend update` keeps the
+// sitemap path it always had. Neither is the cost — the listing walks the whole
+// store, which on a large one is many pages, but this is a manual command run
+// once per release.
+func listHashedShellAssets(ctx context.Context, backend store.Backend) ([]string, error) {
+	keys, err := backend.List(ctx, "")
+	if errors.Is(err, errors.ErrUnsupported) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("listing the store root: %w", err)
+	}
+	var out []string
+	for _, k := range keys {
+		if store.HashedFrontendAsset(k) {
+			out = append(out, k)
+		}
+	}
+	return out, nil
 }
 
 // readSitemap parses the store-root manifest into the set of keys this command

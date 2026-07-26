@@ -40,6 +40,7 @@ func (o *InspectCmd) validateAll(fetch keyGetter, core *DBCore, packs []*idxPack
 		{"meta", func() int { return o.checkMeta(fetch, core) }},
 		{"manifest", func() int { return o.checkManifest(fetch, core) }},
 		{"chron-permanence", func() int { return o.checkChronPermanence(fetch, core) }},
+		{"orphans", func() int { return o.checkOrphans(fetch, core) }},
 	}
 
 	if o.JSON {

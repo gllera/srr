@@ -163,6 +163,19 @@ func (d *HTTP) PutIfVersion(context.Context, string, io.Reader, ObjectMeta, stri
 	return "", errors.ErrUnsupported
 }
 
+// List is UNSUPPORTED for the same reason, one level up: HTTP has no portable
+// listing verb. WebDAV's PROPFIND is an extension a plain object endpoint need
+// not implement, an S3-compatible one wants a query string this backend does
+// not speak, and a directory-index HTML page is a rendering, not an API.
+// Guessing wrong here is worse than declining: a sweep that believes an empty
+// listing means an empty store deletes nothing today and, in a caller less
+// careful than the GC, could conclude the opposite tomorrow. Callers keep the
+// fallback they had — the GC its low-water drain, `srr frontend update` its
+// sitemap.
+func (d *HTTP) List(context.Context, string) ([]string, error) {
+	return nil, errors.ErrUnsupported
+}
+
 // put is the shared write core, mirroring S3's: Content-Type from meta, then
 // contentTypeForKey (db.gz + pack names → application/gzip), then the
 // application/octet-stream default; Content-Encoding only when meta sets it

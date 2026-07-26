@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -317,6 +318,37 @@ func (d *SFTP) Stat(_ context.Context, key string) (int64, error) {
 func (d *SFTP) Rm(_ context.Context, key string) error {
 	file := d.sftpPath("delete", key)
 	return rmErr(d.client.Remove(file), file)
+}
+
+// List walks the prefix's directory over SFTP, mirroring Local.List exactly:
+// regular files only, a prefix naming no directory is an empty set with a nil
+// error, an entry that vanished mid-walk is skipped, and the result is sorted
+// into the contract's lexicographic order.
+func (d *SFTP) List(_ context.Context, prefix string) ([]string, error) {
+	root := path.Join(d.path, listDir(prefix))
+	slog.Debug("db list", "url", "sftp://"+path.Join(d.host, root), "prefix", prefix)
+
+	var out []string
+	w := d.client.Walk(root)
+	for w.Step() {
+		if err := w.Err(); err != nil {
+			if isNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("listing %s: %w", root, err)
+		}
+		if !w.Stat().Mode().IsRegular() {
+			continue
+		}
+		// The walker reports server-absolute paths under d.path; strip the base
+		// (and any separator it leaves) to get back to a store-relative key.
+		key := strings.TrimPrefix(strings.TrimPrefix(w.Path(), d.path), "/")
+		if strings.HasPrefix(key, prefix) {
+			out = append(out, key)
+		}
+	}
+	slices.Sort(out)
+	return out, nil
 }
 
 func (d *SFTP) Close() error {

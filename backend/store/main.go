@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"path"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -82,12 +83,43 @@ var packKeyRe = func() *regexp.Regexp {
 	return regexp.MustCompile(`^(?:` + strings.Join(alts, "|") + `)[0-9]+\.gz$`)
 }()
 
+// ParsePackKey splits a write-once pack-grammar key into the series it belongs
+// to and its opaque stem, reporting false for anything the grammar cannot
+// produce. It is the only reader of packKeyRe outside this file, and it exists
+// so a sweep driven by a store LISTING (the GC's list mode) can ask "is this
+// object mine to delete?" without any caller re-deriving the shape.
+//
+// Everything else answers false — assets/, out/, inbox/, the roots, the
+// frontend shell, an AtomicPut staging leftover, a retired kind-lettered
+// name — and that is exactly the safety property the list-driven sweep rests on.
+func ParsePackKey(key string) (series string, stem int, ok bool) {
+	if !packKeyRe.MatchString(key) {
+		return "", 0, false
+	}
+	series, rest, _ := strings.Cut(key, "/")
+	stem, err := strconv.Atoi(strings.TrimSuffix(rest, ".gz"))
+	if err != nil {
+		// The grammar allows an arbitrarily long digit run; one that overflows an
+		// int is not a stem any counter here ever handed out.
+		return "", 0, false
+	}
+	return series, stem, true
+}
+
 // feHashedRe matches a content-hashed frontend asset at the store root —
 // "<name>.<8+ hex>.<ext>" with no path separator. Parcel emits such names
 // (frontend.5730a221.css, sw.57d1d92e.js, icon-192.936dab90.png); the hash
 // changes per build, so the bytes are write-once and may be cached forever.
 // Anchored and slash-free so it never matches a pack key (idx/0.gz) or db.gz.
 var feHashedRe = regexp.MustCompile(`^[^/]+\.[0-9a-f]{8,}\.[a-z0-9]+$`)
+
+// HashedFrontendAsset reports whether key is a content-hashed frontend asset at
+// the store root. `srr frontend update` uses it to recognise, in a store
+// LISTING, the one frontend class whose names are machine-minted per build and
+// therefore accumulate across upgrades — as opposed to db.gz, config.gz, an
+// operator's own root file, or the stable-named shell files, none of which a
+// listing may ever classify as an upgrade orphan.
+func HashedFrontendAsset(key string) bool { return feHashedRe.MatchString(key) }
 
 // cacheControlForKey returns the HTTP Cache-Control directive a backend should
 // attach when writing key, or "" for keys with no caching policy (e.g. the
@@ -212,7 +244,31 @@ type Backend interface {
 	// errors.ErrUnsupported when the backend cannot express the condition.
 	PutIfVersion(ctx context.Context, key string, r io.Reader, meta ObjectMeta, want string) (string, error)
 	Rm(ctx context.Context, key string) error
+	// List returns the store-relative keys of every object whose key starts with
+	// prefix, in lexicographic order. It is what lets a sweep ask the store what
+	// it HOLDS instead of inferring it from what some record says it should —
+	// the absence of which is why the GC drains generation by generation, why
+	// `srr frontend update` keeps a sitemap, and why a crash-leaked object is
+	// otherwise unfindable forever.
+	//
+	// A PREFIX IS NOT AN OBJECT: one that matches nothing — including one naming
+	// a directory that does not exist — returns an empty slice and a NIL error,
+	// never fs.ErrNotExist. Absence is a fact about a key; a prefix names a set,
+	// and an empty set is a perfectly good answer.
+	//
+	// errors.ErrUnsupported when the backend cannot enumerate (plain HTTP has no
+	// portable listing verb), and callers then keep whatever fallback they had.
+	List(ctx context.Context, prefix string) ([]string, error)
 	Close() error
+}
+
+// listDir is the directory part of a listing prefix — what a filesystem-shaped
+// backend must walk to answer it. "idx/" and "idx/17" both walk "idx/"; "" walks
+// the store root. The caller still filters the walk's results by the full
+// prefix, so the split is a cost optimisation, never a semantic one.
+func listDir(prefix string) string {
+	dir, _ := path.Split(prefix)
+	return dir
 }
 
 // errMissing is the ONE missing-key error every backend returns, so the whole
