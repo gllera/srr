@@ -31,6 +31,13 @@ export default async function setup({ provide }: GlobalSetupContext) {
    const appDir = resolve(cwd, "../dist/srrf") // build output dir (passed via --dist-dir)
    const packsDir = mkdtempSync(join(tmpdir(), "srr-e2e-browser-"))
 
+   // Wipe the output dir first. This build invokes Parcel DIRECTLY (it needs a
+   // custom env the npm script can't carry), so it bypasses the `npm run build`
+   // wipe — and Parcel never cleans, so every local `make test-browser` used to
+   // leave another orphaned frontend.<hash>.js behind in the dir the release
+   // job tars and deploys.
+   rmSync(appDir, { recursive: true, force: true })
+
    // Build the real bundle pointed at the same-origin /packs/ path. Force
    // NODE_ENV=production: vitest sets NODE_ENV=test on this (global-setup)
    // process, and `parcel build` keeps an already-set NODE_ENV rather than
