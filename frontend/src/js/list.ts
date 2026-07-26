@@ -1,11 +1,20 @@
 import * as data from "./data"
 import { timeAgo, srcColorIndex, dayLabelCtx, dayLabelWith, countBadge, CHECK_SVG } from "./fmt"
-import { setPullRefresh } from "./gestures"
+import { ROW_SWIPE_TRIGGER, setPullRefresh, setRowSwipe } from "./gestures"
 import * as nav from "./nav"
 // Named, NOT `import * as refresh`: this module exports its own refresh(), and a
 // namespace binding of that name is shadowed by the local function declaration —
 // silently, since the collision only shows up when the callback below runs.
 import { refreshNow } from "./refresh"
+// The two frontier-write primitives, taken from ./seen rather than through nav's
+// facade — the one place in the reader that does so, and deliberately:
+// nav.markAllRead/markUnreadFrom bake in the ACTIVE FILTER's scope (that is what
+// nav owns), while a row gesture's scope is one feed and one chron. The
+// FrontierScope argument is exactly the seam ENG3 created for a caller that
+// knows its own scope, so the row swipe passes its own instead of adding a
+// second frontier-write path. Everything else — the tallies, the seen map, the
+// undo machinery — still comes through nav.
+import { markUnreadFrom as lowerFeedFrom, recordSeen as raiseFeedTo } from "./seen"
 
 // The list surface — the app's home: a scannable feed of headlines under the
 // current filter, newest-first, source-keyed with read/unread weighting. Tapping a row
@@ -135,19 +144,18 @@ export function setup(
       // route in-SPA instead (covers a star tap too: the star lives inside <a>).
       e.preventDefault()
       const chron = Number(a.dataset.chron)
+      // A committed row swipe (RDR14) has already acted on this row; the
+      // finger-lift's click must not ALSO open the reader. Engines differ on
+      // whether a canceled touchmove sequence still synthesizes the click, so
+      // the guard is here rather than assumed away.
+      if (swipeClickGuard) {
+         swipeClickGuard = false
+         return
+      }
       // The save star toggles in place; it does NOT open the reader. In the
       // Saved view, un-saving drops the row from the feed straight away.
-      const star = target.closest(".srr-row-star")
-      if (star) {
-         const nowSaved = nav.toggleSaved(chron)
-         a.classList.toggle("srr-row-saved", nowSaved)
-         star.setAttribute("aria-pressed", String(nowSaved))
-         if (nav.isSavedFilter() && !nowSaved) {
-            a.remove()
-            relabelDividers() // drop a day divider the removed row may have orphaned
-            if (rowsEl && !rowsEl.querySelector("a.srr-row")) showEmptyState()
-            else syncRovingTab() // the removed row may have held the lone Tab stop
-         }
+      if (target.closest(".srr-row-star")) {
+         toggleRowSave(a)
          return
       }
       onOpen(chron)
@@ -161,6 +169,18 @@ export function setup(
    container.ownerDocument.addEventListener("wheel", markScrolled, { passive: true })
    container.ownerDocument.addEventListener("touchstart", markScrolled, { passive: true })
    container.ownerDocument.addEventListener("keydown", markScrolled)
+   // A new touch means the previous gesture's synthesized click can no longer
+   // arrive, so the swipe's click guard has done its job (or was never needed —
+   // engines differ on whether a canceled touchmove sequence still produces the
+   // click). Clearing it HERE rather than on a timer is what keeps a swipe that
+   // produced no click from swallowing the next genuine tap.
+   container.ownerDocument.addEventListener(
+      "touchstart",
+      () => {
+         swipeClickGuard = false
+      },
+      { passive: true },
+   )
    // Pull to refresh (RDR11): an overscroll pull that STARTS on this container
    // runs one refresh cycle. The touch machine is gestures.ts's — one state
    // machine, so the pull axis-locks against the horizontal swipe and the
@@ -170,6 +190,15 @@ export function setup(
    // triggers use and carries app.ts's guardBg mutex inside it, so this adds a
    // trigger, never a second concurrency path.
    setPullRefresh(container, () => refreshNow())
+   // Row swipe actions (RDR14): → toggles ★ Saved, ← toggles read. Same
+   // registration story as the pull — the touch machine is gestures.ts's (one
+   // machine, so the row swipe axis-locks against the pull and the reader's
+   // prev/next instead of racing them), the rows and the actions are the list's.
+   setRowSwipe(container, {
+      row: (t) => (t instanceof Element ? t.closest<HTMLElement>("a.srr-row") : null),
+      move: paintRowSwipe,
+      end: endRowSwipe,
+   })
 }
 
 function el(tag: string, className: string): HTMLElement {
@@ -245,6 +274,203 @@ function resetNewPill(): void {
    }
    pillEl?.remove()
    pillEl = null
+}
+
+// ── Row swipe actions (RDR14) ────────────────────────────────────────────────
+// A one-finger horizontal swipe on a row acts on THAT row: → toggles ★ Saved
+// (the star's own action, with the whole row as the target), ← toggles read. The
+// touch state machine and the axis lock live in gestures.ts (one machine, or the
+// row swipe could not lock against the pull and the reader's prev/next); what
+// lives here is the row shape, the affordance, and the two actions.
+//
+// The affordance is a CSS custom property, not a class per state: the row's
+// children translate by --swipe while the row box itself stays put, revealing a
+// pseudo-element glyph at the edge the finger came from (styles.css). That
+// division matters twice — the row keeps its layout box (pinHeights' measured
+// intrinsic size stays exact, so a swipe can never shift the scroll) and the
+// bump/edge animations that own `transform` on the row are untouched.
+
+// How far the row travels, and how hard it resists past the arm point: 1:1 with
+// the finger up to the trigger (so the arm point is a distance you can feel),
+// then damped — a committed release should read as hitting a wall, not as a row
+// sliding off the screen.
+const SWIPE_MAX = 96
+const SWIPE_RESIST = 0.35
+
+// A committed swipe suppresses the finger-lift's click on the row (which would
+// otherwise open the reader — see setup's click handler).
+let swipeClickGuard = false
+
+// One step of EXACT reversibility for the read toggle — RDR14 riding S57's undo
+// machinery. Marking a row read raises its feed's frontier to that row, which
+// reads everything older in that feed with it; "swipe back" therefore cannot be
+// expressed as "lower to chron−1", which would leave the swallowed backlog read,
+// silently and for good. So the mark-read swipe keeps the FrontierUndo snapshot
+// ./seen took of its own raise, and the inverse swipe on the same row restores it
+// verbatim (nav.undoFrontierMove) as long as the frontier is still exactly where
+// the swipe left it. That equality test is the whole validity rule; anything else
+// falls back to the explicit rewind.
+let readSwipeUndo: { chron: number; feed: number; to: number; undo: nav.FrontierUndo } | null = null
+
+// ★ Saved / search are peek modes: ./seen exempts them from every frontier write,
+// so the read toggle has nothing to act on there. swipeAction declines the
+// direction outright (no affordance for an inert action), and the scope still
+// carries the flag — the exemption stays structural in ./seen rather than resting
+// on this module's gate.
+const frontierPeek = () => nav.isSavedFilter() || nav.isSearchFilter()
+
+interface RowAction {
+   // Which edge the affordance reveals, and what it means (styles.css).
+   kind: "read" | "save"
+   // The OUTCOME of releasing now, not the current state.
+   icon: string
+   run: () => void
+}
+
+// What a swipe in `dir` would do to this row, or null when it would do nothing —
+// which is also how the affordance learns to stay still (paintRowSwipe).
+function swipeAction(row: HTMLElement, dir: -1 | 1): RowAction | null {
+   const chron = Number(row.dataset.chron)
+   if (!Number.isFinite(chron)) return null
+   if (dir > 0) {
+      // → ★ Saved. Addressed by chron alone, so it works on a still-skeleton row
+      // and in every mode (in the Saved view it un-saves and the row leaves).
+      const saved = nav.isSaved(chron)
+      return { kind: "save", icon: saved ? "☆" : "★", run: () => toggleRowSave(row) }
+   }
+   // ← the read toggle. Read state is per FEED, so a skeleton row whose meta card
+   // hasn't landed yet has no frontier to move.
+   if (frontierPeek()) return null
+   const feed = Number(row.dataset.feed)
+   if (!Number.isFinite(feed)) return null
+   const unread = nav.isRowUnread(chron, feed, nav.getSeenMap())
+   return {
+      kind: "read",
+      icon: unread ? "✓" : "↺",
+      run: () => (unread ? markRowRead(chron, feed) : markRowUnread(chron, feed)),
+   }
+}
+
+// The resolved action for the gesture in flight. It is cached for two reasons:
+// the affordance must not change its mind mid-drag, and swipeAction reads the
+// seen map (a localStorage parse) which has no business running on every
+// touchmove. Keyed on the row AND the direction, so a finger that crosses back
+// over zero gets the other action honestly.
+let swipeCache: { row: HTMLElement; dir: -1 | 1; act: RowAction | null } | null = null
+
+function actionFor(row: HTMLElement, dir: -1 | 1): RowAction | null {
+   if (swipeCache && swipeCache.row === row && swipeCache.dir === dir) return swipeCache.act
+   swipeCache = { row, dir, act: swipeAction(row, dir) }
+   return swipeCache.act
+}
+
+function paintRowSwipe(row: HTMLElement, dx: number, armed: boolean): void {
+   const act = actionFor(row, dx < 0 ? -1 : 1)
+   // Nothing to do in this direction: the row simply doesn't move, which reads as
+   // "there is nothing here" rather than promising an action that no-ops.
+   if (!act) {
+      clearRowSwipe(row)
+      return
+   }
+   row.dataset.swipe = act.kind
+   row.dataset.swipeIcon = act.icon
+   row.classList.toggle("srr-row-armed", armed)
+   row.style.setProperty("--swipe", swipeOffset(dx) + "px")
+}
+
+function swipeOffset(dx: number): number {
+   const a = Math.abs(dx)
+   const d =
+      a <= ROW_SWIPE_TRIGGER ? a : Math.min(ROW_SWIPE_TRIGGER + (a - ROW_SWIPE_TRIGGER) * SWIPE_RESIST, SWIPE_MAX)
+   return dx < 0 ? -d : d
+}
+
+function clearRowSwipe(row: HTMLElement): void {
+   delete row.dataset.swipe
+   delete row.dataset.swipeIcon
+   row.classList.remove("srr-row-armed")
+   row.style.removeProperty("--swipe")
+}
+
+// The gesture ended (dir 0 = retracted or cancelled). The affordance comes off
+// first, so a row the action removes is never left mid-swipe.
+function endRowSwipe(row: HTMLElement, dir: -1 | 0 | 1): void {
+   const act = dir === 0 ? null : actionFor(row, dir)
+   clearRowSwipe(row)
+   // gestures.ts calls end() for a commit AND for every retract/cancel, so this
+   // is the one exit where the gesture's cached action can be dropped.
+   swipeCache = null
+   if (!act) return
+   swipeClickGuard = true
+   act.run()
+   // A frontier move reads across the row's whole feed and a save can drop the
+   // row, so re-derive the loaded window from live state instead of patching one
+   // row. Deliberately NOT a rebuild: under unread-only the membership has
+   // changed, but re-snapshotting it here would move the ground out from under a
+   // gesture aimed at a single row — so the swiped row greys in place, exactly as
+   // a row read in the reader does on the way back (show() → refresh()), and the
+   // membership re-derives on the next natural rebuild.
+   refresh()
+}
+
+// The ★ Saved toggle, shared by the star tap and the → swipe so the two cannot
+// drift — the swipe is the same action with the whole row as its target.
+function toggleRowSave(a: HTMLElement): void {
+   const chron = Number(a.dataset.chron)
+   const nowSaved = nav.toggleSaved(chron)
+   a.classList.toggle("srr-row-saved", nowSaved)
+   a.querySelector(".srr-row-star")?.setAttribute("aria-pressed", String(nowSaved))
+   if (nav.isSavedFilter() && !nowSaved) {
+      a.remove()
+      relabelDividers() // drop a day divider the removed row may have orphaned
+      if (rowsEl && !rowsEl.querySelector("a.srr-row")) showEmptyState()
+      else syncRovingTab() // the removed row may have held the lone Tab stop
+   }
+}
+
+// Mark the row read: raise its feed's seen frontier to this chron.
+//
+// recordSeen is ./seen's raise primitive — it raises `article.f`'s frontier to
+// `pos` plus every member of the scope, stamps the per-key ordering timestamp,
+// pushes to sync, and snapshots the move for S57's undo. An EMPTY membership is
+// exactly the single-feed raise this gesture means: OPENING a row makes the same
+// statement across the whole navigation list, and a row gesture is about one row.
+// Going through that body keeps one owner for the seen write, the sync push and
+// the snapshot. Only `.f` is read off the article, hence the minimal literal.
+function markRowRead(chron: number, feed: number): void {
+   const key = "feed:" + feed
+   raiseFeedTo({ f: feed, a: 0, p: 0, t: "", l: "", c: "" }, chron, { peek: frontierPeek(), members: [] })
+   // Adopt the snapshot only if it is unmistakably the raise just made (this
+   // feed's key alone, moved to this chron) — pendingFrontierUndo() otherwise
+   // still holds whatever came before, e.g. when the feed is unknown to the store
+   // and the raise did nothing.
+   const u = nav.pendingFrontierUndo()
+   readSwipeUndo =
+      u && u.to === chron && Object.keys(u.prev).length === 1 && key in u.prev
+         ? { chron, feed, to: chron, undo: u }
+         : null
+   // Take the offer slot: app.ts asks for it on a READER render, which for a list
+   // swipe means minutes later on another surface, announcing a number nobody can
+   // place. The inverse swipe is this gesture's own way back (readSwipeUndo).
+   if (readSwipeUndo) nav.markFrontierUndoOffered()
+}
+
+// Mark the row unread again — the inverse swipe.
+function markRowUnread(chron: number, feed: number): void {
+   const u = readSwipeUndo
+   readSwipeUndo = null
+   // Exact restore while this row's own mark-read swipe is still the last thing
+   // that touched the feed's frontier. If anything moved it since (reading in the
+   // reader, another swipe, a sync merge), replaying the snapshot would un-read
+   // articles that have since been read — so the explicit rewind takes over.
+   if (u && u.chron === chron && u.feed === feed && nav.getSeenMap()["feed:" + feed] === u.to) {
+      if (nav.undoFrontierMove(u.undo)) return
+   }
+   // The explicit rewind, scoped to this row's feed: this chron and everything
+   // after it become unread for it again. ./seen's markUnreadFrom is the one path
+   // allowed to LOWER a frontier and is deliberately not itself undoable — the
+   // rewind IS the undo.
+   lowerFeedFrom(chron, { peek: frontierPeek(), members: [feed] })
 }
 
 // One headline row: a source-colored rail + ("source · age" eyebrow over the

@@ -41,9 +41,14 @@ export interface Gestures {
 // the handlers of a second (test) instance would share this state rather than
 // racing a second pull — see pullEnd's pullBusy guard.
 
-// Finger travel before the gesture commits to an axis. Small enough that the
+// Finger travel before a gesture commits to an axis. Small enough that the
 // browser hasn't started its own overscroll, big enough to survive a thumb roll.
-const PULL_SLOP = 8
+//
+// SHARED with the row swipe below, and it has to be shared: the two axis locks
+// are the same comparison read in opposite directions, so a different slop on
+// each side would leave a band of gestures that BOTH machines claim (or that
+// neither does).
+const AXIS_SLOP = 8
 // Downward travel that arms the refresh.
 const PULL_TRIGGER = 72
 // The badge follows at half the finger's distance (the rubber-band feel every
@@ -132,7 +137,7 @@ function pullMove(e: Event, x: number, y: number): void {
       // Axis lock, half one: a gesture that commits to the HORIZONTAL axis
       // belongs to the swipe for the rest of its life — the pull can never
       // claim it back mid-drag, whatever the finger does afterwards.
-      if (dx > PULL_SLOP && dx >= Math.abs(dy)) {
+      if (dx > AXIS_SLOP && dx >= Math.abs(dy)) {
          pullEligible = false
          return
       }
@@ -144,7 +149,7 @@ function pullMove(e: Event, x: number, y: number): void {
          pullAnchorY = y
          return
       }
-      if (dy < PULL_SLOP) return
+      if (dy < AXIS_SLOP) return
       pulling = true
    } else if (y < pullAnchorY) {
       // Dragged back up past the anchor: the affordance retracts to zero instead
@@ -251,9 +256,163 @@ function hidePull(): void {
    pullEl.style.opacity = ""
 }
 
-// setupGestures wires touch swipes (one-finger left/right = prev/next,
-// one-finger downward overscroll on the list = pull to refresh, two-finger
-// vertical = cycle filter) and scroll-based toolbar hide.
+// ── Row swipe actions (RDR14) ────────────────────────────────────────────────
+// A one-finger HORIZONTAL swipe on a list ROW acts on that row (the surface
+// decides what: → toggles ★ Saved, ← toggles read). It is the mirror image of
+// the pull above and shares everything structural with it:
+//
+//  - ONE state machine. A second one could not axis-lock against this one —
+//    each would only see its own gesture and both would fire.
+//  - The same registration seam. gestures.ts imports nothing, so the ACTION
+//    (and the row-shaped DOM it acts on) is injected by the surface that owns
+//    the rows — list.ts — and stays a plain callback this module never inspects.
+//  - The same one-test gating: the touch must START inside the registered,
+//    visible surface, which by construction excludes the filter picker and the
+//    image lightbox (elements laid OVER the list) and the reader (whose list
+//    container is `hidden`) — the exclusion the keymap spells out as
+//    picker.isOpen() / lightbox.isOpen(), without importing either.
+//
+// The axis lock has THREE faces here too, pointed the other way:
+//   1. a gesture that commits to the VERTICAL axis can never become a row swipe
+//      — it is a scroll, and at the top of the list it may be the pull;
+//   2. an engaged row swipe preventDefaults every subsequent move, so the list
+//      cannot scroll away under a finger that is dragging a row;
+//   3. rowEnd() reports "this WAS a row swipe" so touchend skips the reader's
+//      prev/next branch entirely — the same double-fire pullEnd() prevents.
+// Faces 1 and 2 make the two machines mutually exclusive on the first move past
+// the slop: the pull vetoes itself at dx >= |dy| and the row swipe engages only
+// at |dx| > |dy| (with the tie going to neither), all measured against the one
+// AXIS_SLOP above.
+//
+// Module-level state for the pull's reason: setRowSwipe has no gesture instance
+// to hang it on.
+
+// Horizontal travel that ARMS the row action — deliberately past the reader's
+// 50px prev/next threshold, so the two horizontal gestures can't both read as
+// committed on the same drag. Exported because the surface paints the row's
+// progress against it and a second copy of the number would drift.
+export const ROW_SWIPE_TRIGGER = 64
+
+// What the surface that owns the rows hands over. gestures.ts never touches the
+// row itself: it owns the geometry (which axis, how far, armed or not) and the
+// surface owns the DOM and the meaning.
+export interface RowSwipe {
+   // The row a touch landed on, or null when it landed on something else (the
+   // "N new" pill, a day divider, a terminus, the empty state) — the surface
+   // resolves it because a row's shape is its business, not this module's.
+   row(target: EventTarget | null): HTMLElement | null
+   // Live affordance while the finger is down: `dx` is the signed horizontal
+   // travel, `armed` is "releasing now commits". A direction the surface cannot
+   // act on simply doesn't move — declining to paint is how availability is
+   // expressed, which keeps the geometry here action-agnostic.
+   move(row: HTMLElement, dx: number, armed: boolean): void
+   // The gesture ended: -1 = swiped left, +1 = swiped right, 0 = retracted
+   // without committing (short of the trigger, or cancelled). The surface clears
+   // its own affordance in every case — this module painted nothing.
+   end(row: HTMLElement, dir: -1 | 0 | 1): void
+}
+
+let rowSpec: RowSwipe | null = null
+let rowSurface: HTMLElement | null = null
+// The row this gesture landed on, while it may still become a swipe.
+let rowNode: HTMLElement | null = null
+// This gesture began on a row and hasn't been vetoed by the vertical axis lock.
+let rowEligible = false
+// The swipe is ENGAGED: it owns the gesture, and the scroll can no longer have it.
+let rowSwiping = false
+// Which way a release would commit right now (0 = not far enough).
+let rowDir: -1 | 0 | 1 = 0
+// The gesture that just ended WAS a row swipe — kept past the lift so rowEnd's
+// answer is stable for every caller, exactly like pullConsumed.
+let rowConsumed = false
+let rowStartX = 0
+let rowStartY = 0
+
+// Register the row actions: `surface` is the element a swipe must START inside,
+// `spec` the row resolver + affordance + action. list.ts calls this from setup().
+export function setRowSwipe(surface: HTMLElement, spec: RowSwipe): void {
+   // Cancel FIRST, against the outgoing spec: a row mid-swipe is that spec's DOM,
+   // and it is the one that has to be told to retract the affordance.
+   rowCancel()
+   rowSurface = surface
+   rowSpec = spec
+}
+
+function rowStart(target: EventTarget | null, x: number, y: number): void {
+   rowNode = null
+   rowEligible = false
+   rowSwiping = false
+   rowDir = 0
+   rowConsumed = false
+   rowStartX = x
+   rowStartY = y
+   if (!rowSurface || !rowSpec || rowSurface.hidden) return
+   if (!(target instanceof Node) || !rowSurface.contains(target)) return
+   rowNode = rowSpec.row(target)
+   rowEligible = !!rowNode
+}
+
+function rowMove(e: Event, x: number, y: number): void {
+   if (!rowEligible || !rowSpec || !rowNode) return
+   const dx = x - rowStartX
+   const dy = y - rowStartY
+   if (!rowSwiping) {
+      // Axis lock, half one (mirrored): a gesture that commits to the VERTICAL
+      // axis belongs to the scroll — or, at the top of the list, to the pull —
+      // for the rest of its life. The row can never claim it back mid-drag.
+      if (Math.abs(dy) > AXIS_SLOP && Math.abs(dy) >= Math.abs(dx)) {
+         rowEligible = false
+         rowNode = null
+         return
+      }
+      if (Math.abs(dx) <= AXIS_SLOP) return
+      rowSwiping = true
+   }
+   // Half two: an engaged swipe owns the gesture, which means owning the scroll
+   // the finger would otherwise be doing. (touchmove is the non-passive
+   // listener, for the pull's sake — see setupGestures.)
+   e.preventDefault()
+   rowDir = Math.abs(dx) >= ROW_SWIPE_TRIGGER ? (dx < 0 ? -1 : 1) : 0
+   rowSpec.move(rowNode, dx, rowDir !== 0)
+}
+
+// The gesture ended. Returns true when it WAS a row swipe, in which case the
+// caller must not also evaluate it as a reader prev/next swipe — the third face
+// of the axis lock.
+function rowEnd(): boolean {
+   if (!rowSwiping) {
+      rowEligible = false
+      rowNode = null
+      return rowConsumed
+   }
+   const row = rowNode
+   const dir = rowDir
+   rowSwiping = false
+   rowEligible = false
+   rowConsumed = true
+   rowNode = null
+   rowDir = 0
+   if (row && rowSpec) rowSpec.end(row, dir)
+   return true
+}
+
+function rowCancel(): void {
+   const row = rowNode
+   const engaged = rowSwiping
+   rowEligible = false
+   rowSwiping = false
+   rowConsumed = false
+   rowNode = null
+   rowDir = 0
+   // The affordance is the surface's, so a cancellation has to be handed over —
+   // otherwise a row stays parked mid-swipe with no gesture left to close it.
+   if (engaged && row && rowSpec) rowSpec.end(row, 0)
+}
+
+// setupGestures wires touch swipes (one-finger left/right = prev/next, or a row
+// action when it starts on a list row, one-finger downward overscroll on the
+// list = pull to refresh, two-finger vertical = cycle filter) and scroll-based
+// toolbar hide.
 export function setupGestures(deps: GestureDeps): Gestures {
    let touchStartX = 0
    let touchStartY = 0
@@ -268,14 +427,16 @@ export function setupGestures(deps: GestureDeps): Gestures {
    // can't fire a spurious prev/next off a stale touchStartX.
    let mode: "none" | "single" | "two" = "none"
 
-   // `target` is the node the touch STARTED on — the pull's eligibility test.
-   // The two-finger→one-finger re-seed passes null on purpose: a gesture that
-   // began with two fingers is a cycle/pinch that lost a finger, never a pull.
+   // `target` is the node the touch STARTED on — the eligibility test for BOTH
+   // surface-aware gestures (the pull and the row swipe). The two-finger→
+   // one-finger re-seed passes null on purpose: a gesture that began with two
+   // fingers is a cycle/pinch that lost a finger, never a pull or a row action.
    const trackSingle = (t: Touch, target: EventTarget | null) => {
       mode = "single"
       touchStartX = t.clientX
       touchStartY = t.clientY
       pullStart(target, t.clientX, t.clientY)
+      rowStart(target, t.clientX, t.clientY)
    }
 
    // Gesture guard (RDR16): the player bar's seek control is a horizontal
@@ -306,15 +467,18 @@ export function setupGestures(deps: GestureDeps): Gestures {
             )
             twoFingerDy = 0
             pinch = false
-            // A second finger landing mid-pull hands the gesture to the cycle /
-            // pinch guard — retract the affordance rather than leaving it hanging.
+            // A second finger landing mid-pull (or mid-row-swipe) hands the
+            // gesture to the cycle / pinch guard — retract the affordances rather
+            // than leaving one hanging.
             pullCancel()
+            rowCancel()
          } else if (e.touches.length === 1) {
             trackSingle(e.touches[0], e.target)
          } else {
             // 3+ fingers: not a gesture we handle.
             mode = "none"
             pullCancel()
+            rowCancel()
          }
       },
       { passive: true },
@@ -338,10 +502,14 @@ export function setupGestures(deps: GestureDeps): Gestures {
             e.preventDefault()
             twoFingerDy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - twoFingerStartY
          } else if (mode === "single" && e.touches.length === 1) {
-            // The pull tracks (and, once engaged, preventDefaults) here — which
-            // is why this listener is the non-passive one. An un-engaged pull
-            // touches nothing, so ordinary list scrolling is untouched.
+            // The pull and the row swipe both track (and, once engaged,
+            // preventDefault) here — which is why this listener is the
+            // non-passive one. Neither touches anything before it engages, so
+            // ordinary list scrolling is untouched; and the pull's horizontal
+            // veto runs against the same AXIS_SLOP as the row swipe's engage
+            // test, so at most one of them can ever claim a given gesture.
             pullMove(e, e.touches[0].clientX, e.touches[0].clientY)
+            rowMove(e, e.touches[0].clientX, e.touches[0].clientY)
          }
       },
       { passive: false },
@@ -368,6 +536,12 @@ export function setupGestures(deps: GestureDeps): Gestures {
          // so evaluating it as a swipe as well is exactly the double-fire the
          // axis lock exists to prevent.
          if (pullEnd()) return
+         // Likewise a row swipe: it IS the horizontal gesture, aimed at one row
+         // rather than at the article on screen, so the reader step must not also
+         // fire. (app.ts's stepLeft/stepRight are view-gated and inert on the list
+         // anyway — the lock belongs here, beside the other two faces, rather
+         // than resting on a guard in another module.)
+         if (rowEnd()) return
          const dx = e.changedTouches[0].clientX - touchStartX
          const dy = e.changedTouches[0].clientY - touchStartY
          if (Math.abs(dx) < 50 || Math.abs(dy) > Math.abs(dx)) return
@@ -383,6 +557,7 @@ export function setupGestures(deps: GestureDeps): Gestures {
       () => {
          mode = "none"
          pullCancel()
+         rowCancel()
       },
       { passive: true },
    )

@@ -8,7 +8,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest"
 // `instanceof TouchEvent`, so a synthesized Event with those props defined
 // drives the whole machine here — no browser needed.
 
-import { setPullRefresh, setupGestures, type Gestures } from "./gestures"
+import { ROW_SWIPE_TRIGGER, setPullRefresh, setRowSwipe, setupGestures, type Gestures } from "./gestures"
 
 const setScrollY = (y: number) => Object.defineProperty(window, "scrollY", { value: y, configurable: true })
 // jsdom has no layout, so the scroll handler's at-bottom check needs explicit
@@ -21,28 +21,44 @@ const scroll = () => window.dispatchEvent(new Event("scroll"))
 
 let toolbar: HTMLElement
 let listEl: HTMLElement
+let rowA: HTMLElement
 let g: Gestures
 let goPrev: ReturnType<typeof vi.fn>
 let goNext: ReturnType<typeof vi.fn>
 let onCycle: ReturnType<typeof vi.fn>
 let pullRun: ReturnType<typeof vi.fn>
+let rowMove: ReturnType<typeof vi.fn>
+let rowAct: ReturnType<typeof vi.fn>
 
 function mount(): void {
    // body's own class list survives an innerHTML reset (only its children are
    // replaced), so it's cleared explicitly to keep srr-toolbar-hidden from
    // leaking a stale value across tests.
    document.body.className = ""
-   document.body.innerHTML = `<nav class="srr-toolbar"></nav><div class="srr-list"></div><div class="srr-player"></div>`
+   document.body.innerHTML =
+      `<nav class="srr-toolbar"></nav>` +
+      `<div class="srr-list"><a class="srr-row"><span class="srr-row-title">t</span></a></div>` +
+      `<div class="srr-player"></div>`
    toolbar = document.querySelector(".srr-toolbar")!
    listEl = document.querySelector(".srr-list")!
+   rowA = document.querySelector("a.srr-row")!
    goPrev = vi.fn()
    goNext = vi.fn()
    onCycle = vi.fn()
    pullRun = vi.fn(async () => "")
+   rowMove = vi.fn()
+   rowAct = vi.fn()
    // What list.setup does at boot: hand gestures the list container + the
    // refresh cycle a committed overscroll pull runs. Re-registering also resets
    // the module-level pull state, so tests don't leak into each other.
    setPullRefresh(listEl, pullRun)
+   // The row actions ride the same surface; the spec is the list's half (row
+   // resolution + affordance + action), which is what the mocks stand in for.
+   setRowSwipe(listEl, {
+      row: (t) => (t instanceof Element ? t.closest<HTMLElement>("a.srr-row") : null),
+      move: rowMove,
+      end: rowAct,
+   })
    g = setupGestures({ toolbar, goPrev, goNext, onCycle })
 }
 
@@ -487,5 +503,160 @@ describe("pull to refresh", () => {
       } finally {
          vi.useRealTimers()
       }
+   })
+})
+
+// Row swipe actions (RDR14): a one-finger HORIZONTAL drag that starts on a row
+// of the registered surface. The mirror image of the pull above, so the cases
+// mirror it too — commit, sub-threshold, the three faces of the axis lock, and
+// every way a gesture can be taken away mid-drag.
+describe("row swipe actions", () => {
+   // A drag from (x0, y0) to (x1, y1) in one move, dispatched on `target` so the
+   // spec's row resolution sees it.
+   const on = (target: EventTarget = rowA) => ({
+      start: (x: number, y = 300) => dispatchTouch("touchstart", [{ clientX: x, clientY: y }], undefined, target),
+      move: (x: number, y = 300) => dispatchTouch("touchmove", [{ clientX: x, clientY: y }], undefined, target),
+      end: (x: number, y = 300) => dispatchTouch("touchend", [], [{ clientX: x, clientY: y }], target),
+   })
+   // Past the trigger and released — the gesture as a thumb performs it.
+   const swipe = (dx: number, target: EventTarget = rowA) => {
+      const t = on(target)
+      t.start(200)
+      t.move(200 + Math.sign(dx) * 20) // engaged (past the slop), short of the trigger
+      t.move(200 + dx)
+      t.end(200 + dx)
+   }
+
+   it("a left swipe past the trigger commits with dir -1", () => {
+      swipe(-(ROW_SWIPE_TRIGGER + 20))
+      expect(rowAct).toHaveBeenCalledTimes(1)
+      expect(rowAct).toHaveBeenCalledWith(rowA, -1)
+   })
+
+   it("a right swipe past the trigger commits with dir +1", () => {
+      swipe(ROW_SWIPE_TRIGGER + 20)
+      expect(rowAct).toHaveBeenCalledWith(rowA, 1)
+   })
+
+   it("retracts without committing when the swipe stops short of the trigger", () => {
+      const t = on()
+      t.start(200)
+      t.move(240) // engaged, never armed
+      t.end(240)
+      expect(rowAct).toHaveBeenCalledWith(rowA, 0)
+   })
+
+   it("reports live progress and flips to armed at the trigger", () => {
+      const t = on()
+      t.start(200)
+      t.move(230)
+      expect(rowMove).toHaveBeenLastCalledWith(rowA, 30, false)
+      t.move(200 + ROW_SWIPE_TRIGGER)
+      expect(rowMove).toHaveBeenLastCalledWith(rowA, ROW_SWIPE_TRIGGER, true)
+   })
+
+   it("claims the gesture from the scroll once engaged", () => {
+      const t = on()
+      t.start(200)
+      const m = t.move(240)
+      expect(m.defaultPrevented).toBe(true)
+   })
+
+   it("stays out of an ordinary scroll: no preventDefault inside the slop", () => {
+      const t = on()
+      t.start(200)
+      const m = t.move(204) // 4px, inside the shared axis slop
+      expect(m.defaultPrevented).toBe(false)
+      expect(rowMove).not.toHaveBeenCalled()
+   })
+
+   it("axis lock: a vertical-dominant drag never becomes a row swipe (the pull takes it)", () => {
+      const t = on()
+      t.start(200, 100)
+      t.move(210, 200) // dy=100 dominates dx=10 → the row is vetoed for good
+      t.move(320, 210) // a later horizontal drift must not revive it
+      t.end(320, 210)
+      expect(rowMove).not.toHaveBeenCalled()
+      expect(rowAct).not.toHaveBeenCalled()
+      expect(pullRun).toHaveBeenCalledTimes(1) // the same gesture WAS a pull
+   })
+
+   it("axis lock: an engaged row swipe never also steps the reader", () => {
+      swipe(-(ROW_SWIPE_TRIGGER + 60)) // well past the reader's own 50px threshold
+      expect(rowAct).toHaveBeenCalledWith(rowA, -1)
+      expect(goNext).not.toHaveBeenCalled()
+      expect(goPrev).not.toHaveBeenCalled()
+   })
+
+   it("axis lock: an engaged row swipe never becomes a pull, even drifting down", () => {
+      const t = on()
+      t.start(200, 100)
+      t.move(280, 104) // horizontal: the row owns it
+      t.move(280, 260) // a later downward drift must not start a pull
+      t.end(280, 260)
+      expect(pullRun).not.toHaveBeenCalled()
+      expect(rowAct).toHaveBeenCalledWith(rowA, 1)
+   })
+
+   it("is inert on a touch that starts off a row (the surface's own chrome)", () => {
+      swipe(-(ROW_SWIPE_TRIGGER + 20), listEl) // the container, not a row
+      expect(rowMove).not.toHaveBeenCalled()
+      expect(rowAct).not.toHaveBeenCalled()
+   })
+
+   it("is inert while the reader is up (the list container is hidden)", () => {
+      listEl.hidden = true
+      swipe(-(ROW_SWIPE_TRIGGER + 20))
+      expect(rowAct).not.toHaveBeenCalled()
+   })
+
+   it("is inert under an overlay — a touch starting outside the list surface", () => {
+      // Same one-test gating as the pull: the picker and the lightbox are laid
+      // OVER the list, so their rows-shaped content is not inside the surface.
+      const overlay = document.createElement("div")
+      overlay.className = "srr-picker"
+      overlay.innerHTML = '<a class="srr-row"></a>'
+      document.body.appendChild(overlay)
+      swipe(-(ROW_SWIPE_TRIGGER + 20), overlay.querySelector("a")!)
+      expect(rowAct).not.toHaveBeenCalled()
+   })
+
+   it("touchcancel retracts an engaged swipe and leaves the lift inert", () => {
+      const t = on()
+      t.start(200)
+      t.move(280) // armed
+      dispatchTouch("touchcancel", [])
+      expect(rowAct).toHaveBeenCalledWith(rowA, 0) // retracted, not committed
+      t.end(280)
+      expect(rowAct).toHaveBeenCalledTimes(1)
+   })
+
+   it("a second finger hands the gesture to the two-finger machine", () => {
+      const t = on()
+      t.start(200)
+      t.move(280) // armed
+      start([
+         { clientX: 100, clientY: 300 },
+         { clientX: 200, clientY: 300 },
+      ])
+      expect(rowAct).toHaveBeenCalledWith(rowA, 0) // retracted when the finger landed
+      end(
+         [],
+         [
+            { clientX: 100, clientY: 300 },
+            { clientX: 200, clientY: 300 },
+         ],
+      )
+      expect(rowAct).toHaveBeenCalledTimes(1)
+   })
+
+   it("re-registration retracts an engaged swipe (the rows it tracked are gone)", () => {
+      const t = on()
+      t.start(200)
+      t.move(280)
+      setRowSwipe(listEl, { row: () => null, move: rowMove, end: rowAct })
+      expect(rowAct).toHaveBeenCalledWith(rowA, 0)
+      t.end(280)
+      expect(rowAct).toHaveBeenCalledTimes(1)
    })
 })

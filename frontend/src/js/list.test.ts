@@ -106,6 +106,18 @@ const nav = vi.hoisted(() => {
          const v = s["feed:" + feed]
          return v === undefined || chron > v
       }),
+      // The S57 undo machinery nav re-exports from ./seen. The row-swipe read
+      // toggle (RDR14) keeps the snapshot of its OWN raise so the inverse swipe
+      // restores the frontier exactly; the ./seen mock below writes `_undo` the
+      // way snapshotRaise does.
+      _undo: null as null | { prev: Record<string, number | undefined>; to: number },
+      pendingFrontierUndo: vi.fn(() => nav._undo),
+      markFrontierUndoOffered: vi.fn(),
+      undoFrontierMove: vi.fn((u: { prev: Record<string, number | undefined>; to: number }) => {
+         for (const [k, prev] of Object.entries(u.prev)) seen[k] = prev ?? -1
+         nav._undo = null
+         return true
+      }),
       isSaved: vi.fn((chron: number) => saved.has(chron)),
       getSavedSet: vi.fn(() => new Set(saved)),
       toggleSaved: vi.fn((chron: number) => {
@@ -150,6 +162,41 @@ const nav = vi.hoisted(() => {
    }
 })
 vi.mock("./nav", () => nav)
+
+// The two frontier-write primitives list.ts takes straight from ./seen for the
+// row-swipe read toggle (RDR14) — a row gesture's scope is one feed and one
+// chron, which nav's filter-scoped markAllRead/markUnreadFrom cannot express.
+// The mocks apply the SAME writes to the nav mock's seen map (a raise to `pos`
+// for the article's feed plus the scope's members; a rewind to chron−1 for each
+// member) and record the snapshot recordSeen would have taken, so the tests
+// exercise list's own logic rather than a reimplementation of ./seen's.
+const seenMod = vi.hoisted(() => ({
+   recordSeen: vi.fn((article: IArticle, pos: number, scope: { peek: boolean; members: Iterable<number> }) => {
+      if (scope.peek) return
+      const map = nav.getSeenMap()
+      const prev: Record<string, number | undefined> = {}
+      for (const id of [article.f, ...scope.members]) {
+         const k = "feed:" + id
+         if (map[k] !== undefined && map[k] >= pos) continue
+         prev[k] = map[k]
+         map[k] = pos
+      }
+      if (Object.keys(prev).length > 0) nav._undo = { prev, to: pos }
+   }),
+   markUnreadFrom: vi.fn((chron: number, scope: { peek: boolean; members: Iterable<number> }) => {
+      if (scope.peek) return false
+      const map = nav.getSeenMap()
+      let moved = false
+      for (const id of scope.members) {
+         const k = "feed:" + id
+         if (map[k] === undefined || map[k] <= chron - 1) continue
+         map[k] = chron - 1
+         moved = true
+      }
+      return moved
+   }),
+}))
+vi.mock("./seen", () => seenMod)
 
 // list.setup registers the pull-to-refresh action (RDR11) with gestures.ts —
 // the real gestures module is harmless here (it only stores the callback), but
@@ -1519,6 +1566,227 @@ describe("list", () => {
       data.loadMeta.mockImplementation(async (c: number) => {
          const a = data._arts.get(c)!
          return { f: a.f, w: a.p || a.a, t: a.t }
+      })
+   })
+
+   // ── Row swipe actions (RDR14) ────────────────────────────────────────────
+   // Driven through the REAL gestures.ts state machine (the module list.setup
+   // registered its spec with, imported fresh by the outer beforeEach's
+   // resetModules), because the registration itself is what has broken before:
+   // a wrong import in list.ts only shows up when the callback runs. setupGestures
+   // has to be called here as well — it is what installs the touch listeners.
+   describe("row swipe actions", () => {
+      // Same synthesized-touch machinery as gestures.test.ts: the handlers read
+      // only .length and [i].clientX/clientY off touches/changedTouches.
+      const touch = (type: string, pts: { clientX: number; clientY: number }[], target: EventTarget) => {
+         const e = new Event(type, { bubbles: true, cancelable: true })
+         Object.defineProperty(e, "touches", { value: type === "touchend" ? [] : pts, configurable: true })
+         Object.defineProperty(e, "changedTouches", { value: pts, configurable: true })
+         target.dispatchEvent(e)
+         return e
+      }
+      const pt = (x: number, y = 300) => [{ clientX: x, clientY: y }]
+      // A committed horizontal swipe on `row`: engage, cross the 64px trigger,
+      // release. `dx < 0` is a left swipe (read), `dx > 0` a right one (★).
+      const swipe = (row: HTMLElement, dx: number) => {
+         touch("touchstart", pt(200), row)
+         touch("touchmove", pt(200 + Math.sign(dx) * 20), row)
+         touch("touchmove", pt(200 + dx), row)
+         touch("touchend", pt(200 + dx), row)
+      }
+      const READ = -90 // past ROW_SWIPE_TRIGGER (64)
+      const SAVE = 90
+
+      beforeEach(async () => {
+         // The list's own touchstart listeners are already registered by setup();
+         // this installs the gesture machine's, on the same fresh module instance
+         // list.ts holds (resetModules ran in the outer beforeEach).
+         const gestures = await import("./gestures")
+         const bar = document.createElement("nav")
+         document.body.appendChild(bar)
+         gestures.setupGestures({ toolbar: bar, goPrev: vi.fn(), goNext: vi.fn(), onCycle: vi.fn() })
+         // The hoisted mocks live for the whole FILE (only modules are reset), and
+         // every case here asserts on call counts — clear the frontier ones per
+         // case rather than reading another test's history.
+         seenMod.recordSeen.mockClear()
+         seenMod.markUnreadFrom.mockClear()
+         nav.pendingFrontierUndo.mockClear()
+         nav.markFrontierUndoOffered.mockClear()
+         nav.undoFrontierMove.mockClear()
+         nav.toggleSaved.mockClear()
+         nav._undo = null
+      })
+
+      it("a left swipe marks an unread row read — its own feed's frontier only", async () => {
+         setIndex(4, (c) => (c < 2 ? 1 : 2)) // chrons 0,1 → feed 1; 2,3 → feed 2
+         await list.render()
+         const row = $rows().find((r) => Number(r.dataset.chron) === 1)!
+         expect(row.classList.contains("srr-row-unread")).toBe(true)
+         swipe(row, READ)
+         // ./seen's raise primitive, with an EMPTY membership: opening the row
+         // would raise the whole navigation list, a row gesture raises one feed.
+         expect(seenMod.recordSeen).toHaveBeenCalledTimes(1)
+         const [article, pos, scope] = seenMod.recordSeen.mock.calls[0]
+         expect(article.f).toBe(1)
+         expect(pos).toBe(1)
+         expect([...scope.members]).toEqual([])
+         expect(scope.peek).toBe(false)
+         // The row (and the older one of the same feed) re-derive as read; the
+         // other feed's rows are untouched.
+         expect(row.classList.contains("srr-row-unread")).toBe(false)
+         expect(
+            $rows()
+               .find((r) => r.dataset.chron === "0")!
+               .classList.contains("srr-row-unread"),
+         ).toBe(false)
+         expect(
+            $rows()
+               .find((r) => r.dataset.chron === "2")!
+               .classList.contains("srr-row-unread"),
+         ).toBe(true)
+      })
+
+      it("a left swipe on a read row rewinds that feed alone (the explicit rewind)", async () => {
+         setIndex(3)
+         nav._setSeen({ "feed:1": 2 }) // everything read
+         await list.render()
+         const row = $rows().find((r) => r.dataset.chron === "1")!
+         swipe(row, READ)
+         expect(seenMod.recordSeen).not.toHaveBeenCalled()
+         expect(seenMod.markUnreadFrom).toHaveBeenCalledWith(1, expect.objectContaining({ peek: false }))
+         expect([...seenMod.markUnreadFrom.mock.calls[0][1].members]).toEqual([1])
+         expect(row.classList.contains("srr-row-unread")).toBe(true)
+      })
+
+      it("the inverse swipe restores the frontier EXACTLY (S57's snapshot, not chron−1)", async () => {
+         setIndex(6)
+         nav._setSeen({ "feed:1": 1 }) // read up to chron 1, four unread above
+         await list.render()
+         const row = $rows().find((r) => r.dataset.chron === "5")!
+         swipe(row, READ) // raises feed:1 from 1 to 5 — four articles consumed
+         expect(nav.getSeenMap()["feed:1"]).toBe(5)
+         // The offer slot is taken here: app.ts asks for it on a READER render,
+         // which for a list swipe is another surface, minutes later.
+         expect(nav.markFrontierUndoOffered).toHaveBeenCalledTimes(1)
+         swipe(row, READ) // the same row again: undo, not "lower to chron−1"
+         expect(nav.undoFrontierMove).toHaveBeenCalledTimes(1)
+         expect(seenMod.markUnreadFrom).not.toHaveBeenCalled()
+         expect(nav.getSeenMap()["feed:1"]).toBe(1) // exactly where it was
+      })
+
+      it("falls back to the rewind when the frontier moved since the swipe", async () => {
+         setIndex(6)
+         nav._setSeen({ "feed:1": 1 })
+         await list.render()
+         const row = $rows().find((r) => r.dataset.chron === "5")!
+         swipe(row, READ)
+         expect(nav.getSeenMap()["feed:1"]).toBe(5)
+         // A later raise moves the frontier past where the swipe left it (reading
+         // in the reader, a Mark-all-read, a sync merge — all write a high-water
+         // that may be a foreign chron). The snapshot no longer describes the live
+         // frontier, so replaying it would un-read what has been read since.
+         nav.getSeenMap()["feed:1"] = 7
+         swipe(row, READ)
+         expect(nav.undoFrontierMove).not.toHaveBeenCalled()
+         expect(seenMod.markUnreadFrom).toHaveBeenCalledTimes(1)
+      })
+
+      it("a right swipe toggles ★ Saved without opening the reader", async () => {
+         setIndex(3)
+         await list.render()
+         const row = $rows().find((r) => r.dataset.chron === "2")!
+         swipe(row, SAVE)
+         expect(nav.toggleSaved).toHaveBeenCalledWith(2)
+         expect(row.classList.contains("srr-row-saved")).toBe(true)
+         expect(row.querySelector(".srr-row-star")!.getAttribute("aria-pressed")).toBe("true")
+         expect(opened).toEqual([])
+      })
+
+      it("the finger-lift's click after a committed swipe does not open the reader", async () => {
+         setIndex(3)
+         await list.render()
+         const row = $rows().find((r) => r.dataset.chron === "2")!
+         swipe(row, SAVE)
+         row.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }))
+         expect(opened).toEqual([])
+         // …and the guard is spent: a real tap right after still opens.
+         row.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }))
+         expect(opened).toEqual([2])
+      })
+
+      it("paints the outcome while the finger is down and clears it on release", async () => {
+         setIndex(3)
+         await list.render()
+         const row = $rows().find((r) => r.dataset.chron === "2")!
+         touch("touchstart", pt(200), row)
+         touch("touchmove", pt(170), row) // 30px left: engaged, not yet armed
+         expect(row.dataset.swipe).toBe("read")
+         expect(row.dataset.swipeIcon).toBe("✓") // an unread row will be marked read
+         expect(row.style.getPropertyValue("--swipe")).toBe("-30px")
+         expect(row.classList.contains("srr-row-armed")).toBe(false)
+         touch("touchmove", pt(110), row) // 90px: armed, and damped past the trigger
+         expect(row.classList.contains("srr-row-armed")).toBe(true)
+         expect(parseFloat(row.style.getPropertyValue("--swipe"))).toBeGreaterThan(-90)
+         touch("touchend", pt(110), row)
+         expect(row.dataset.swipe).toBeUndefined()
+         expect(row.style.getPropertyValue("--swipe")).toBe("")
+      })
+
+      it("stays still for the read toggle in a peek mode (★ Saved / search)", async () => {
+         setIndex(3)
+         nav._setSearch("title")
+         await list.render()
+         const row = $rows().find((r) => r.dataset.chron === "2")!
+         touch("touchstart", pt(200), row)
+         touch("touchmove", pt(110), row)
+         expect(row.dataset.swipe).toBeUndefined() // no affordance for an inert action
+         touch("touchend", pt(110), row)
+         expect(seenMod.recordSeen).not.toHaveBeenCalled()
+         expect(seenMod.markUnreadFrom).not.toHaveBeenCalled()
+      })
+
+      it("is inert on a skeleton row (read state is per feed, and its feed is unknown)", async () => {
+         setIndex(3)
+         let release: (() => void) | null = null
+         const gate = new Promise<void>((r) => (release = () => r()))
+         data.loadMeta.mockImplementation(async (chron: number) => {
+            await gate
+            const a = data._arts.get(chron)!
+            return { f: a.f, w: a.p || a.a, t: a.t }
+         })
+         const p = list.render()
+         try {
+            await new Promise((r) => setTimeout(r, 0))
+            const row = $rows()[0]
+            expect(row.classList.contains("srr-row-skeleton")).toBe(true)
+            swipe(row, READ)
+            expect(seenMod.recordSeen).not.toHaveBeenCalled()
+            // The ★ direction still works: it is addressed by chron alone.
+            swipe(row, SAVE)
+            expect(nav.toggleSaved).toHaveBeenCalled()
+         } finally {
+            // Ungate in a finally: a failed assertion here would otherwise leave
+            // loadMeta blocked for every later case in the file.
+            release!()
+            await p
+            data.loadMeta.mockImplementation(async (chron: number) => {
+               const a = data._arts.get(chron)!
+               return { f: a.f, w: a.p || a.a, t: a.t }
+            })
+         }
+      })
+
+      it("a vertical drag on a row is a scroll, never a row action", async () => {
+         setIndex(3)
+         await list.render()
+         const row = $rows().find((r) => r.dataset.chron === "2")!
+         touch("touchstart", [{ clientX: 200, clientY: 300 }], row)
+         touch("touchmove", [{ clientX: 210, clientY: 400 }], row) // dy dominates
+         touch("touchmove", [{ clientX: 320, clientY: 410 }], row) // a late horizontal drift
+         touch("touchend", [{ clientX: 320, clientY: 410 }], row)
+         expect(row.dataset.swipe).toBeUndefined()
+         expect(seenMod.recordSeen).not.toHaveBeenCalled()
+         expect(nav.toggleSaved).not.toHaveBeenCalled()
       })
    })
 
