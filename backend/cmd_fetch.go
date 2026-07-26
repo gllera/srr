@@ -402,6 +402,80 @@ func (g *hostGate) acquire(u string) func() {
 	return func() { <-ch }
 }
 
+// fetchedFeed pairs a fan-out feed (the read-only snapshot object the workers
+// mutated) with the pre-fan-out values the locked write phase guards on: the
+// URL the live store should still hold, the fetch state that must not have
+// advanced underneath, and the AssetBytes baseline the upload delta is
+// measured from.
+type fetchedFeed struct {
+	feed            *Feed
+	priorURL        string
+	priorState      inboxState
+	priorAssetBytes int64
+}
+
+// applyFetched folds the lock-free fan-out's per-feed results onto the freshly
+// (re-)loaded DB — the local sibling of applyInbox, with the same discard
+// discipline (unknown feed, repointed URL) plus one guard applyInbox does not
+// need: another fetch of the SAME feed may have committed between the snapshot
+// and this write phase (a GUI single-feed fetch racing the interval loop —
+// spooled partitions are disjoint by rule, overlapping local cycles are not).
+// Its fold advanced the live fetch state, so our items were deduped against a
+// superseded bg/watermark/pool and would re-ingest its articles as duplicates
+// into immutable packs; discarding the whole record is the safe side, and the
+// next cycle re-fetches against the winner's state. Discards are warn-only —
+// onFeed/progress already reported the fan-out's counts, which may therefore
+// overcount by the discarded feeds (same advisory contract as a spool).
+//
+// Applied records adopt the fan-out's state wholesale like applyInbox, plus
+// the pieces the envelope does not carry: a discovery repoint of the URL
+// (guarded against the LIVE feed above, so only our own fan-out's repoint can
+// land), and the AssetBytes upload delta (relative, so it composes with an
+// expiration that ran in between). Items are repointed at the live feed —
+// PutArticles bumps TotalArt/ContentBytes on it — and returned for the batch.
+func (db *DB) applyFetched(fetched []fetchedFeed, today uint16) []*Item {
+	var articles []*Item
+	for _, f := range fetched {
+		snap := f.feed
+		live, ok := db.core.Feeds[snap.id]
+		if !ok {
+			slog.Warn("feed removed during the fan-out; discarding its fetch",
+				"feed_id", snap.id, "url", snap.URL)
+			continue
+		}
+		if live.URL != f.priorURL {
+			slog.Warn("feed URL repointed during the fan-out; discarding its fetch",
+				"feed", live, "fetched_url", f.priorURL, "feed_url", live.URL)
+			continue
+		}
+		if !fetchState(live).equal(f.priorState) {
+			slog.Warn("another fetch advanced this feed during the fan-out; discarding this cycle's result",
+				"feed", live)
+			continue
+		}
+
+		live.URL = snap.URL
+		live.Watermark = snap.Watermark
+		live.BoundaryGUIDs = snap.BoundaryGUIDs
+		live.ETag = snap.ETag
+		live.LastModified = snap.LastModified
+		live.FetchError = snap.FetchError
+		live.LastOK = snap.LastOK
+		live.FailStreak = snap.FailStreak
+		live.LastNew = snap.LastNew
+		live.AssetBytes += snap.AssetBytes - f.priorAssetBytes
+
+		for _, h := range snap.seenStamps {
+			db.seen.stamp(live.id, h, today)
+		}
+		for _, it := range snap.newItems {
+			it.Feed = live
+			articles = append(articles, it)
+		}
+	}
+	return articles
+}
+
 // feedProgress reports one feed's outcome to a runFetch caller (the SSE handler).
 type feedProgress struct {
 	ID    int    `json:"id"`
@@ -517,329 +591,436 @@ func newFetchClient(workers int) *http.Client {
 	}
 }
 
+// fetchResults carries the read-only fetch phase's outcome across the store
+// scopes of runFetch: the snapshot feeds the fan-out mutated (plus their
+// pre-fan-out guard records for applyFetched), and the run-scoped objects the
+// locked write phase still reports on (notify, asset counters, the progress
+// line, the cache dir for the post-commit sweep).
+type fetchResults struct {
+	feeds    []*Feed
+	fetched  []fetchedFeed
+	notify   *notifyState
+	assets   *assetFetcher
+	progress *fetchProgress
+	cacheDir string
+}
+
+// checkStoreBusy is the fetch phase's advisory fail-fast probe. With the lock
+// held only by the short write phase, a cycle against a store whose writer is
+// alive elsewhere would otherwise burn a whole network fan-out before
+// discovering the contention at commit time — so a LIVE foreign lease is
+// refused up front with the same os.ErrExist contract acquireMarker answers
+// (serve's 409, MCP's "store busy"). Everything else — absent, this process's
+// own (the in-process storeWriter gate queues us properly), expired, legacy,
+// unreadable — falls through: the write phase's real acquire stays the single
+// authority, and this probe is advisory by construction (a lease may still
+// appear in the gap; the write phase then answers exactly as before).
+func checkStoreBusy(ctx context.Context, db *DB) error {
+	if globals.Force {
+		return nil
+	}
+	held, present, err := readLease(ctx, db.Backend, dbLockKey)
+	if err != nil || !present {
+		return nil
+	}
+	if held.Owner != "" && held.Owner != leaseOwner && !held.expired(leaseNow()) {
+		return fmt.Errorf("%s is held by %s until %s: %w", dbLockKey, held.Owner, held.until(), os.ErrExist)
+	}
+	return nil
+}
+
 // runFetch runs one fetch cycle over every feed, invoking onFeed (if non-nil)
 // once per feed as it finishes; onFeed may run from worker goroutines, so
 // callers must guard it.
+//
+// The cycle is TWO store scopes (FET5): a read-only phase — snapshot the feed
+// set, recipes and dedup view, then run the whole network fan-out (feed GETs,
+// pipelines, #readability fetches, asset transcodes/uploads) with NO store
+// lock held — and a short LOCKED write phase that re-loads the store, folds
+// the results back per feed (applyFetched, discarding any feed the store
+// advanced underneath), and runs the existing PutArticles→Commit chain. The
+// lock hold drops from the whole fan-out (minutes on a slow cycle) to the
+// write phase (seconds), so an operator mutation no longer 409s against a
+// running cycle — and the .locked lease is stamped far inside its TTL. A
+// producer (--spool) runs only the first phase: it publishes its results as
+// an inbox envelope instead of folding them, and never locks at all.
 func (o *FetchCmd) runFetch(ctx context.Context, client *http.Client, onFeed func(feedProgress)) error {
-	// A producer opens the store read-only and takes NO lock: it writes exactly
-	// one object (its own spool slot) plus content-hash assets, both safe from
-	// any box. Only the consolidator writes packs.
-	return withDBCtx(ctx, !o.Spool, func(ctx context.Context, db *DB) error {
-		db.core.FetchedAt = time.Now().UTC().Unix()
+	res := &fetchResults{}
+	// The progress line spans both phases. finish() is idempotent, so this one
+	// defer covers every error return alongside commitPhase's own pre-summary
+	// call; nil when the fetch phase failed before starting the line.
+	defer func() {
+		if res.progress != nil {
+			res.progress.finish()
+		}
+	}()
+	if err := withDBCtx(ctx, false, func(ctx context.Context, db *DB) error {
+		return o.fetchPhase(ctx, db, client, onFeed, res)
+	}); err != nil || o.Spool {
+		return err
+	}
+	return withDBCtx(ctx, true, func(ctx context.Context, db *DB) error {
+		return o.commitPhase(ctx, db, res)
+	})
+}
 
-		var spoolName string
-		if o.Spool {
-			var err error
-			if spoolName, err = o.spoolSlot(); err != nil {
-				return err
-			}
-			// Single-slot backpressure: an undrained previous spool means this
-			// producer's read-only view of the dedup state is already one cycle
-			// ahead of the store, so fetching again would re-ingest against stale
-			// state. Skip the cycle entirely instead.
-			size, err := db.Stat(ctx, inboxKey(spoolName))
-			if err != nil {
-				return fmt.Errorf("probe spool slot: %w", err)
-			}
-			if size > 0 {
-				slog.Info("previous spool not yet drained; skipping cycle", "producer", spoolName)
-				return nil
-			}
-		}
-		// Asset uploader for the end-of-pipeline self-hosting step, shared across
-		// workers (the store backend is concurrent-safe). It reads files an ingest
-		// strategy left in the run's cache dir and uploads them under a
-		// content-hash key — no outbound HTTP of its own.
-		assets := newAssetFetcher(db.Backend, globals.MaxAssetSize, globals.AssetProcess)
-		assets.peek = strings.Fields(globals.AssetPeek)
-		assets.procTimeout = globals.AssetProcessTimeout
-		// Run-global asset worker pool + run/shutdown ctx for the singleflight body:
-		// the slot is held by the leader job only (see assetFetcher), and the body
-		// is decoupled from any single feed's errgroup so one feed's cancellation
-		// can't poison a follower feed sharing an asset. ctx here is the fetch ctx
-		// (the errgroup parent below), so run shutdown still aborts a long transcode.
-		assets.baseCtx = ctx
-		assets.sem = make(chan struct{}, max(1, globals.AssetWorkers))
-		bufPool := sync.Pool{
-			// Pointer-like pool payload (SA6002): a bare slice header would be
-			// boxed into a fresh interface allocation on every Put.
-			New: func() any {
-				buf := make([]byte, globals.MaxFeedSize*(1<<10)+1)
-				return &buf
-			},
-		}
-		// Per-worker module processors: built-in processors hold mutable state
-		// (minify reuses internal buffers and is not goroutine-safe), so a single
-		// shared *mod.Module across workers is unsafe. Workers also amortize their
-		// own bluemonday/minify allocations across the items they process.
-		procPool := sync.Pool{
-			New: func() any { return mod.New() },
-		}
-		// Built-in FetchFuncs are concurrent-safe (HTTP built-ins are stateless;
-		// external shell fetchers spawn per-call subprocesses), so one
-		// *ingest.Fetcher is shared across workers.
-		engine := ingest.New()
+// fetchPhase is the read-only half of a cycle: it snapshots the feed set and
+// everything the fan-out reads (recipes, the dedup pool, the store-default
+// horizon), runs the network fan-out over the snapshot Feed objects, and — in
+// producer mode — publishes the spool envelope and ends the cycle. It holds
+// no lock: the snapshot is consistent by construction (an atomic root naming
+// immutable manifests), the fan-out writes only content-hash assets (safe
+// from any box, like a producer), and every per-feed mutation lands on
+// snapshot objects the write phase folds back explicitly.
+func (o *FetchCmd) fetchPhase(ctx context.Context, db *DB, client *http.Client, onFeed func(feedProgress), res *fetchResults) error {
+	db.core.FetchedAt = time.Now().UTC().Unix()
 
-		// One asset cache dir shared by every external-ingest feed this run,
-		// created once. Each external command runs with this as its working
-		// directory and chooses its own file layout inside it. Creation is
-		// mandatory: handing a command an empty working dir would run it in SRR's
-		// own cwd (littering it, and its self-hosted files would never upload), so
-		// a dir we can't create is a hard error, not a silent disable. Override
-		// the location with --cache-dir/SRR_CACHE_DIR if the default is unwritable.
-		// globals.CacheDir is always set (kong ${cacheDir} default + the
-		// post-parse floor in main; tests set it in setupTestDB), so the shared
-		// cache dir needs no fallback resolution here.
-		cacheDir := globals.CacheDir
-		if err := os.MkdirAll(cacheDir, 0o700); err != nil {
-			return fmt.Errorf("create asset cache dir %q: %w", cacheDir, err)
-		}
-		// Stage asset-process {output} files inside the cache tree (not the OS
-		// temp dir): big transcodes can't fill a tmpfs /tmp, and a crash-leaked
-		// output is reclaimed by the post-cycle age sweep below.
-		assets.procDir = filepath.Join(cacheDir, "_processed")
-
-		// Run-scoped deps shared across all workers (all concurrent-safe). The
-		// per-worker buf/processor are pulled from their pools inside each worker.
-		run := &fetchRun{
-			client:       client,
-			engine:       engine,
-			assets:       assets,
-			cacheDir:     cacheDir,
-			fetchedAt:    db.core.FetchedAt,
-			recipes:      db.core.Recipes,
-			maxAssetSize: int(assets.maxBytes),
-			// Persistent dedup pool + its store-default horizon, read-only during
-			// the fan-out; the collected stamps are merged into it after g.Wait().
-			seen:      db.seen,
-			dedupDays: db.core.DedupDays,
-		}
-
-		// The cycle's feed set: the GUI single-feed fetch (o.only), the
-		// include/exclude filter, or every feed. The filter scopes the fan-out
-		// and the progress / summary counts below — a stale FetchError on an
-		// unselected feed must not count as this cycle's failure.
-		feeds, err := o.selectFeeds(db)
-		if err != nil {
+	var spoolName string
+	if o.Spool {
+		var err error
+		if spoolName, err = o.spoolSlot(); err != nil {
 			return err
 		}
-
-		// Pre-fetch failure streaks, so the summary phase can spot the
-		// threshold crossings and recoveries this cycle produced. nil (and inert)
-		// unless a notify command is configured.
-		notify := snapshotNotify(feeds)
-
-		// Live stats on the terminal status line while the cycle runs (feeds
-		// done/total, new articles, failures, asset jobs). No-op when stderr
-		// isn't a tty (service/cron runs), so logs stay clean.
-		progress := startFetchProgress(len(feeds), assets)
-		defer progress.finish()
-
-		g, gctx := errgroup.WithContext(ctx)
-		g.SetLimit(globals.Workers)
-
-		// Politeness: at most perHostConns feeds of one hostname in flight,
-		// whatever --workers allows overall.
-		gate := &hostGate{}
-
-		for _, ch := range feeds {
-			if ctx.Err() != nil {
-				break
-			}
-			g.Go(func() error {
-				release := gate.acquire(ch.URL)
-				defer release()
-
-				buf := bufPool.Get().(*[]byte)
-				defer bufPool.Put(buf)
-				processor := procPool.Get().(*mod.Module)
-				defer procPool.Put(processor)
-				runFeedFetch(ch, func() { ch.Fetch(gctx, run, *buf, processor) })
-				progress.feedDone(ch.FetchError != "", len(ch.newItems))
-				if onFeed != nil {
-					onFeed(feedProgress{ID: ch.id, Title: ch.Title, Error: ch.FetchError, New: len(ch.newItems)})
-				}
-				return nil
-			})
+		// Single-slot backpressure: an undrained previous spool means this
+		// producer's read-only view of the dedup state is already one cycle
+		// ahead of the store, so fetching again would re-ingest against stale
+		// state. Skip the cycle entirely instead.
+		size, err := db.Stat(ctx, inboxKey(spoolName))
+		if err != nil {
+			return fmt.Errorf("probe spool slot: %w", err)
 		}
-		_ = g.Wait() // workers never return an error — per-feed failures ride ch.FetchError
-		// Feed fan-out done; the rest of the cycle writes packs/summaries
-		// (zopfli-grade finalization can take a while on a big batch).
-		progress.setSaving()
-
-		// Producer mode ends here: publish the cycle as one write-once envelope
-		// and touch nothing else. No packs, no summaries, no expiration, no GC —
-		// all of that belongs to the lock-holding consolidator.
-		if o.Spool {
-			env := spoolEnvelope(spoolName, db.core.FetchedAt, feeds)
-			if err := writeInbox(ctx, db.Backend, spoolName, env); err != nil {
-				return err
-			}
-			spooled := 0
-			for _, rec := range env.Feeds {
-				spooled += len(rec.Items)
-			}
-			slog.Info("spooled fetch cycle", "producer", spoolName,
-				"cycle_id", env.CycleID, "feeds", len(env.Feeds), "articles", spooled)
+		if size > 0 {
+			slog.Info("previous spool not yet drained; skipping cycle", "producer", spoolName)
 			return nil
 		}
+	} else if err := checkStoreBusy(ctx, db); err != nil {
+		return err
+	}
+	// Asset uploader for the end-of-pipeline self-hosting step, shared across
+	// workers (the store backend is concurrent-safe). It reads files an ingest
+	// strategy left in the run's cache dir and uploads them under a
+	// content-hash key — no outbound HTTP of its own.
+	assets := newAssetFetcher(db.Backend, globals.MaxAssetSize, globals.AssetProcess)
+	assets.peek = strings.Fields(globals.AssetPeek)
+	assets.procTimeout = globals.AssetProcessTimeout
+	// Run-global asset worker pool + run/shutdown ctx for the singleflight body:
+	// the slot is held by the leader job only (see assetFetcher), and the body
+	// is decoupled from any single feed's errgroup so one feed's cancellation
+	// can't poison a follower feed sharing an asset. ctx here is the fetch ctx
+	// (the errgroup parent below), so run shutdown still aborts a long transcode.
+	assets.baseCtx = ctx
+	assets.sem = make(chan struct{}, max(1, globals.AssetWorkers))
+	bufPool := sync.Pool{
+		// Pointer-like pool payload (SA6002): a bare slice header would be
+		// boxed into a fresh interface allocation on every Put.
+		New: func() any {
+			buf := make([]byte, globals.MaxFeedSize*(1<<10)+1)
+			return &buf
+		},
+	}
+	// Per-worker module processors: built-in processors hold mutable state
+	// (minify reuses internal buffers and is not goroutine-safe), so a single
+	// shared *mod.Module across workers is unsafe. Workers also amortize their
+	// own bluemonday/minify allocations across the items they process.
+	procPool := sync.Pool{
+		New: func() any { return mod.New() },
+	}
+	// Built-in FetchFuncs are concurrent-safe (HTTP built-ins are stateless;
+	// external shell fetchers spawn per-call subprocesses), so one
+	// *ingest.Fetcher is shared across workers.
+	engine := ingest.New()
 
-		// The seen-pool day stamp, shared by the inbox drain below and this
-		// cycle's own stamp merge further down.
-		today := uint16(db.core.FetchedAt / 86400)
+	// One asset cache dir shared by every external-ingest feed this run,
+	// created once. Each external command runs with this as its working
+	// directory and chooses its own file layout inside it. Creation is
+	// mandatory: handing a command an empty working dir would run it in SRR's
+	// own cwd (littering it, and its self-hosted files would never upload), so
+	// a dir we can't create is a hard error, not a silent disable. Override
+	// the location with --cache-dir/SRR_CACHE_DIR if the default is unwritable.
+	// globals.CacheDir is always set (kong ${cacheDir} default + the
+	// post-parse floor in main; tests set it in setupTestDB), so the shared
+	// cache dir needs no fallback resolution here.
+	cacheDir := globals.CacheDir
+	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+		return fmt.Errorf("create asset cache dir %q: %w", cacheDir, err)
+	}
+	// Stage asset-process {output} files inside the cache tree (not the OS
+	// temp dir): big transcodes can't fill a tmpfs /tmp, and a crash-leaked
+	// output is reclaimed by the post-cycle age sweep below.
+	assets.procDir = filepath.Join(cacheDir, "_processed")
 
-		// Fold in any producer spools BEFORE the batch is assembled, so drained
-		// articles ride this cycle's published-sort and — crucially — its
-		// fetched_at stamp, keeping fetched_at chron-monotone (see
-		// docs/INBOX-SPEC.md).
-		articles, drainedSlots := db.drainInbox(ctx, o.InboxProducers, today)
+	// Run-scoped deps shared across all workers (all concurrent-safe). The
+	// per-worker buf/processor are pulled from their pools inside each worker.
+	run := &fetchRun{
+		client:       client,
+		engine:       engine,
+		assets:       assets,
+		cacheDir:     cacheDir,
+		fetchedAt:    db.core.FetchedAt,
+		recipes:      db.core.Recipes,
+		maxAssetSize: int(assets.maxBytes),
+		// Persistent dedup pool + its store-default horizon, read-only during
+		// the fan-out; the collected stamps are merged into it after g.Wait().
+		seen:      db.seen,
+		dedupDays: db.core.DedupDays,
+	}
 
-		for _, ch := range feeds {
-			articles = append(articles, ch.newItems...)
+	// The cycle's feed set: the GUI single-feed fetch (o.only), the
+	// include/exclude filter, or every feed. The filter scopes the fan-out
+	// and the progress / summary counts below — a stale FetchError on an
+	// unselected feed must not count as this cycle's failure.
+	feeds, err := o.selectFeeds(db)
+	if err != nil {
+		return err
+	}
+
+	// The write phase's guard records, captured BEFORE the fan-out mutates the
+	// snapshot feeds: the URL and fetch state the live store should still hold
+	// when the results fold back, and the AssetBytes baseline the upload delta
+	// is measured from.
+	fetched := make([]fetchedFeed, len(feeds))
+	for i, ch := range feeds {
+		fetched[i] = fetchedFeed{
+			feed:            ch,
+			priorURL:        ch.URL,
+			priorState:      fetchState(ch),
+			priorAssetBytes: ch.AssetBytes,
 		}
-		sort.SliceStable(articles, func(i, j int) bool {
-			return articles[i].Published < articles[j].Published
+	}
+
+	// Pre-fetch failure streaks, so the summary phase can spot the
+	// threshold crossings and recoveries this cycle produced. nil (and inert)
+	// unless a notify command is configured.
+	notify := snapshotNotify(feeds)
+
+	// Live stats on the terminal status line while the cycle runs (feeds
+	// done/total, new articles, failures, asset jobs). No-op when stderr
+	// isn't a tty (service/cron runs), so logs stay clean. Assigned to res
+	// up front so runFetch's deferred finish covers the spool path and the
+	// error returns below.
+	res.progress = startFetchProgress(len(feeds), assets)
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(globals.Workers)
+
+	// Politeness: at most perHostConns feeds of one hostname in flight,
+	// whatever --workers allows overall.
+	gate := &hostGate{}
+
+	for _, ch := range feeds {
+		if ctx.Err() != nil {
+			break
+		}
+		g.Go(func() error {
+			release := gate.acquire(ch.URL)
+			defer release()
+
+			buf := bufPool.Get().(*[]byte)
+			defer bufPool.Put(buf)
+			processor := procPool.Get().(*mod.Module)
+			defer procPool.Put(processor)
+			runFeedFetch(ch, func() { ch.Fetch(gctx, run, *buf, processor) })
+			res.progress.feedDone(ch.FetchError != "", len(ch.newItems))
+			if onFeed != nil {
+				onFeed(feedProgress{ID: ch.id, Title: ch.Title, Error: ch.FetchError, New: len(ch.newItems)})
+			}
+			return nil
 		})
+	}
+	_ = g.Wait() // workers never return an error — per-feed failures ride ch.FetchError
+	// Feed fan-out done; the rest of the cycle writes packs/summaries
+	// (zopfli-grade finalization can take a while on a big batch).
+	res.progress.setSaving()
 
-		// Merge the persistent-dedup stamps each fetched feed buffered during the
-		// (lock-free) fan-out into the pool, single-threaded like the articles
-		// aggregation above, then apply the age/cap/dead-feed eviction. Runs every
-		// cycle including the GUI single-feed fetch (o.only) — evict is global
-		// maintenance, like ExpireArticles: it uses the full live feeds map so an
-		// unfetched feed's entries are retained (they age out over the horizon),
-		// while stamps come only from feeds fetched this cycle. SyncSeen (before
-		// Commit, below) persists it; the pool's dirty flag skips the write on an
-		// idle cycle that changed nothing.
-		for _, ch := range feeds {
-			for _, h := range ch.seenStamps {
-				db.seen.stamp(ch.id, h, today)
-			}
-		}
-		db.seen.evict(today, func(fid int) int {
-			return db.core.Feeds[fid].dedupDays(db.core.DedupDays)
-		}, seenFeedCap, db.core.Feeds)
-
-		written, err := db.PutArticles(ctx, articles)
-		if err != nil {
+	// Producer mode ends here: publish the cycle as one write-once envelope
+	// and touch nothing else. No packs, no summaries, no expiration, no GC —
+	// all of that belongs to the lock-holding consolidator.
+	if o.Spool {
+		env := spoolEnvelope(spoolName, db.core.FetchedAt, feeds)
+		if err := writeInbox(ctx, db.Backend, spoolName, env); err != nil {
 			return err
 		}
-		// Warn-only: the batch is already durable in L<Seq+1>, so a failed
-		// ~1KB summary write must not discard it. HdrPacks stays behind,
-		// readers fall back to eager idx loading, and the next run retries
-		// the rebuild. Runs unconditionally (zero-article runs included) so a
-		// pre-summary store migrates on its first fetch cycle.
-		if err := db.SyncIdxSummary(ctx); err != nil {
-			slog.Warn("sync idx summary", "error", err)
+		spooled := 0
+		for _, rec := range env.Feeds {
+			spooled += len(rec.Items)
 		}
-		// Same warn-only contract: the meta series is a derived index, so a
-		// failed sync must not discard the durable batch. Coverage fields stay
-		// behind, readers keep search disabled (or miss only the newest tail),
-		// and the next run reconciles. PutArticles' return lets the common
-		// cycle build its entries from memory instead of re-reading the packs
-		// just written.
-		if err := db.SyncMeta(ctx, written); err != nil {
-			slog.Warn("sync meta", "error", err)
-		}
-		// Warn-only: retention is maintenance — a failed walk or asset delete
-		// must not block committing the durable article batch. ExpireArticles
-		// applies nothing on failure, so the next cycle recomputes the same
-		// window and retries idempotently (Rm is silent on missing). The
-		// AddIdx/Expired bumps it does apply ride this cycle's Commit; runs
-		// before the out-feed sync so the same cycle's syndication already
-		// excludes what just expired. Expiration deliberately runs on every
-		// cycle including the GUI's single-feed fetch (o.only) — it's global
-		// maintenance, like SyncIdxSummary/SyncMeta.
-		if err := db.ExpireArticles(ctx, db.core.FetchedAt); err != nil {
-			slog.Warn("expire articles", "error", err)
-		}
-		// Warn-only: a syndication write failure must not discard the durable
-		// article batch. SyncOutFeeds is a no-op when core.Out is empty (the
-		// default) or SRR_CDN_URL is unset (degrades with a warning). Skip the
-		// store walk on a truly-idle cycle — no new articles AND unchanged
-		// syndication inputs (out config + feed tags/AddIdx) since the last
-		// sync — so the --interval loop doesn't rewrite byte-identical out/*
-		// every cycle, while still materializing config/tag edits made during
-		// the lock-free idle sleep and this cycle's expiration bumps (gating on
-		// len(written) alone would skip those — a stale-output bug).
-		sig := db.outFeedsSig()
-		if len(written) > 0 || sig != o.lastOutSig {
-			if err := db.SyncOutFeeds(ctx); err != nil {
-				// Leave lastOutSig unadvanced so the next cycle retries the failed
-				// output(s), rather than skipping until the signature next changes.
-				slog.Warn("sync out feeds", "error", err)
-			} else {
-				o.lastOutSig = sig
-			}
-		}
-		// Persist the dedup pool (pool + bg) to the inactive seen slot and flip
-		// SeenFlag BEFORE the commit, so db.gz publishes the article batch and the
-		// pointer to its matching dedup state atomically. Fatal to the cycle on
-		// failure: bg is load-bearing, so a committed batch must never outrun the
-		// slot that dedups its GUIDs. Idle cycles write nothing (write-if-dirty).
-		if err := db.SyncSeen(ctx); err != nil {
-			return fmt.Errorf("sync seen pool: %w", err)
-		}
-		// ONE GC rule (docs/MANIFEST-SPEC.md §7): delete what the last K
-		// manifests do not name. It replaces the four per-feature sweeps and
-		// their window formulas the cutover retired. Runs BEFORE the Commit, so
-		// the low-water advance rides this cycle's own root flip instead of
-		// forcing a second commit; everything it deletes is already superseded
-		// and referenced by nothing. Warn-only, idempotent (Rm is silent on
-		// missing), and a missed run resumes from the low-water rather than
-		// stranding anything.
-		if err := db.GC(ctx, globals.KeepManifests); err != nil {
-			slog.Warn("gc", "error", err)
-		}
-		if err := db.Commit(ctx); err != nil {
-			return err
-		}
-		gcCtx := context.WithoutCancel(ctx)
-		// The drained watermark is durable now, so the slots can go. Warn-only
-		// and idempotent: a slot that survives is SKIPPED (never re-applied) next
-		// cycle by the watermark check, and reaped then.
-		reapInbox(gcCtx, db.Backend, drainedSlots)
-
-		// The ingest cache is self-maintaining: a download is consumed (uploaded
-		// to the store under its content-hash key) within the cycle that fetched
-		// it, so files unused past the age window are garbage — dropped items'
-		// media, interrupted-run debris, consumed downloads nothing re-references.
-		// Swept only after a successful Commit; both cache consumers refresh a
-		// file's mtime on reuse, so a warming retry never loses its cache.
-		if n := sweepAssetCache(cacheDir, globals.CacheMaxAge); n > 0 {
-			slog.Info("asset cache swept", "removed", n)
-		}
-
-		// Aggregate asset-pipeline health: each peek/process failure and each
-		// declined corrupt asset already warned per asset, but a systemic cause
-		// (webify missing from the service PATH, a broken transcoder) drowns in
-		// per-asset noise while every asset silently degrades to an unprocessed
-		// original — surface it once per cycle, loudly.
-		if pf := assets.procFailed.Load(); pf > 0 {
-			slog.Warn("asset processing degraded this cycle — check the asset-peek/asset-process commands (PATH?)",
-				"failed_commands", pf, "asset_jobs", assets.done.Load())
-		}
-		if c := assets.corrupt.Load(); c > 0 {
-			slog.Warn("corrupt media assets declined this cycle (published without media)", "count", c)
-		}
-
-		failed := 0
-		for _, ch := range feeds {
-			if ch.FetchError != "" {
-				failed++
-			}
-		}
-		totalFeeds := len(feeds)
-		progress.finish()
-		slog.Info("fetch complete",
-			"new_articles", len(articles),
-			"fetched", totalFeeds-failed,
-			"failed", failed,
-		)
-		// Alert on the outages/recoveries this cycle produced. Last, after the
-		// batch is durable: an operator's notify command must never be able to
-		// affect what got stored. WithoutCancel so a shutdown mid-summary still
-		// delivers the alert the cycle already decided to send.
-		notify.fire(context.WithoutCancel(ctx), feeds)
+		slog.Info("spooled fetch cycle", "producer", spoolName,
+			"cycle_id", env.CycleID, "feeds", len(env.Feeds), "articles", spooled)
 		return nil
+	}
+
+	res.feeds = feeds
+	res.fetched = fetched
+	res.notify = notify
+	res.assets = assets
+	res.cacheDir = cacheDir
+	return nil
+}
+
+// commitPhase is the locked half of a cycle: it re-loads the store (this db
+// handle is fresh — the fetch phase's snapshot may be a generation behind),
+// folds the fan-out's results back per feed, and runs the batch through the
+// existing PutArticles→Commit chain. Everything here is store round-trips and
+// CPU; the network is behind us, so the lock hold is seconds.
+func (o *FetchCmd) commitPhase(ctx context.Context, db *DB, res *fetchResults) error {
+	// The write phase's OWN stamp: PutArticles stamps each article with
+	// core.FetchedAt, and a peer may have committed a later batch between the
+	// phases — re-stamping keeps fetched_at chron-monotone (the property
+	// ExpireArticles' contiguous-prefix model and `art ls --since`'s binary
+	// search need), the same reason the inbox consolidator stamps drained
+	// items itself.
+	db.core.FetchedAt = time.Now().UTC().Unix()
+
+	// The seen-pool day stamp, shared by the inbox drain below and the fold's
+	// own stamp merge.
+	today := uint16(db.core.FetchedAt / 86400)
+
+	// Fold in any producer spools BEFORE the batch is assembled, so drained
+	// articles ride this cycle's published-sort and — crucially — its
+	// fetched_at stamp, keeping fetched_at chron-monotone (see
+	// docs/INBOX-SPEC.md).
+	articles, drainedSlots := db.drainInbox(ctx, o.InboxProducers, today)
+
+	// Fold the local fan-out's results onto the freshly-loaded feeds — the
+	// same shape as the inbox drain above, including the per-feed dedup-stamp
+	// merge (single-threaded here, like the articles aggregation).
+	articles = append(articles, db.applyFetched(res.fetched, today)...)
+	sort.SliceStable(articles, func(i, j int) bool {
+		return articles[i].Published < articles[j].Published
 	})
+
+	// Age/cap/dead-feed eviction over the pool the folds above stamped. Runs
+	// every cycle including the GUI single-feed fetch (o.only) — evict is
+	// global maintenance, like ExpireArticles: it uses the full live feeds map
+	// so an unfetched feed's entries are retained (they age out over the
+	// horizon), while stamps come only from feeds fetched this cycle. SyncSeen
+	// (before Commit, below) persists it; the pool's dirty flag skips the
+	// write on an idle cycle that changed nothing.
+	db.seen.evict(today, func(fid int) int {
+		return db.core.Feeds[fid].dedupDays(db.core.DedupDays)
+	}, seenFeedCap, db.core.Feeds)
+
+	written, err := db.PutArticles(ctx, articles)
+	if err != nil {
+		return err
+	}
+	// Warn-only: the batch is already durable in L<Seq+1>, so a failed
+	// ~1KB summary write must not discard it. HdrPacks stays behind,
+	// readers fall back to eager idx loading, and the next run retries
+	// the rebuild. Runs unconditionally (zero-article runs included) so a
+	// pre-summary store migrates on its first fetch cycle.
+	if err := db.SyncIdxSummary(ctx); err != nil {
+		slog.Warn("sync idx summary", "error", err)
+	}
+	// Same warn-only contract: the meta series is a derived index, so a
+	// failed sync must not discard the durable batch. Coverage fields stay
+	// behind, readers keep search disabled (or miss only the newest tail),
+	// and the next run reconciles. PutArticles' return lets the common
+	// cycle build its entries from memory instead of re-reading the packs
+	// just written.
+	if err := db.SyncMeta(ctx, written); err != nil {
+		slog.Warn("sync meta", "error", err)
+	}
+	// Warn-only: retention is maintenance — a failed walk or asset delete
+	// must not block committing the durable article batch. ExpireArticles
+	// applies nothing on failure, so the next cycle recomputes the same
+	// window and retries idempotently (Rm is silent on missing). The
+	// AddIdx/Expired bumps it does apply ride this cycle's Commit; runs
+	// before the out-feed sync so the same cycle's syndication already
+	// excludes what just expired. Expiration deliberately runs on every
+	// cycle including the GUI's single-feed fetch (o.only) — it's global
+	// maintenance, like SyncIdxSummary/SyncMeta.
+	if err := db.ExpireArticles(ctx, db.core.FetchedAt); err != nil {
+		slog.Warn("expire articles", "error", err)
+	}
+	// Warn-only: a syndication write failure must not discard the durable
+	// article batch. SyncOutFeeds is a no-op when core.Out is empty (the
+	// default) or SRR_CDN_URL is unset (degrades with a warning). Skip the
+	// store walk on a truly-idle cycle — no new articles AND unchanged
+	// syndication inputs (out config + feed tags/AddIdx) since the last
+	// sync — so the --interval loop doesn't rewrite byte-identical out/*
+	// every cycle, while still materializing config/tag edits made during
+	// the lock-free idle sleep and this cycle's expiration bumps (gating on
+	// len(written) alone would skip those — a stale-output bug).
+	sig := db.outFeedsSig()
+	if len(written) > 0 || sig != o.lastOutSig {
+		if err := db.SyncOutFeeds(ctx); err != nil {
+			// Leave lastOutSig unadvanced so the next cycle retries the failed
+			// output(s), rather than skipping until the signature next changes.
+			slog.Warn("sync out feeds", "error", err)
+		} else {
+			o.lastOutSig = sig
+		}
+	}
+	// Persist the dedup pool (pool + bg) to the inactive seen slot and flip
+	// SeenFlag BEFORE the commit, so db.gz publishes the article batch and the
+	// pointer to its matching dedup state atomically. Fatal to the cycle on
+	// failure: bg is load-bearing, so a committed batch must never outrun the
+	// slot that dedups its GUIDs. Idle cycles write nothing (write-if-dirty).
+	if err := db.SyncSeen(ctx); err != nil {
+		return fmt.Errorf("sync seen pool: %w", err)
+	}
+	// ONE GC rule (docs/MANIFEST-SPEC.md §7): delete what the last K
+	// manifests do not name. It replaces the four per-feature sweeps and
+	// their window formulas the cutover retired. Runs BEFORE the Commit, so
+	// the low-water advance rides this cycle's own root flip instead of
+	// forcing a second commit; everything it deletes is already superseded
+	// and referenced by nothing. Warn-only, idempotent (Rm is silent on
+	// missing), and a missed run resumes from the low-water rather than
+	// stranding anything.
+	if err := db.GC(ctx, globals.KeepManifests); err != nil {
+		slog.Warn("gc", "error", err)
+	}
+	if err := db.Commit(ctx); err != nil {
+		return err
+	}
+	gcCtx := context.WithoutCancel(ctx)
+	// The drained watermark is durable now, so the slots can go. Warn-only
+	// and idempotent: a slot that survives is SKIPPED (never re-applied) next
+	// cycle by the watermark check, and reaped then.
+	reapInbox(gcCtx, db.Backend, drainedSlots)
+
+	// The ingest cache is self-maintaining: a download is consumed (uploaded
+	// to the store under its content-hash key) within the cycle that fetched
+	// it, so files unused past the age window are garbage — dropped items'
+	// media, interrupted-run debris, consumed downloads nothing re-references.
+	// Swept only after a successful Commit; both cache consumers refresh a
+	// file's mtime on reuse, so a warming retry never loses its cache.
+	if n := sweepAssetCache(res.cacheDir, globals.CacheMaxAge); n > 0 {
+		slog.Info("asset cache swept", "removed", n)
+	}
+
+	// Aggregate asset-pipeline health: each peek/process failure and each
+	// declined corrupt asset already warned per asset, but a systemic cause
+	// (webify missing from the service PATH, a broken transcoder) drowns in
+	// per-asset noise while every asset silently degrades to an unprocessed
+	// original — surface it once per cycle, loudly.
+	if pf := res.assets.procFailed.Load(); pf > 0 {
+		slog.Warn("asset processing degraded this cycle — check the asset-peek/asset-process commands (PATH?)",
+			"failed_commands", pf, "asset_jobs", res.assets.done.Load())
+	}
+	if c := res.assets.corrupt.Load(); c > 0 {
+		slog.Warn("corrupt media assets declined this cycle (published without media)", "count", c)
+	}
+
+	// Failure counting stays on the SNAPSHOT feeds — the fan-out's outcome is
+	// what this cycle did, whether or not every record survived the fold.
+	failed := 0
+	for _, ch := range res.feeds {
+		if ch.FetchError != "" {
+			failed++
+		}
+	}
+	res.progress.finish()
+	slog.Info("fetch complete",
+		"new_articles", len(articles),
+		"fetched", len(res.feeds)-failed,
+		"failed", failed,
+	)
+	// Alert on the outages/recoveries this cycle produced. Last, after the
+	// batch is durable: an operator's notify command must never be able to
+	// affect what got stored. WithoutCancel so a shutdown mid-summary still
+	// delivers the alert the cycle already decided to send.
+	res.notify.fire(context.WithoutCancel(ctx), res.feeds)
+	return nil
 }
