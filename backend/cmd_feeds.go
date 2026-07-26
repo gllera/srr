@@ -157,7 +157,8 @@ func normalizeFeed(ch *Feed, recipes map[string]Recipe) error {
 	// Apply the normalizations the checks above validated.
 	ch.Ingest = strings.TrimSpace(ch.Ingest)
 	ch.Pipe = filterPipe(ch.Pipe)
-	return nil
+	ch.Secrets = filterPipe(ch.Secrets)
+	return validateSecretScopes(ch.Secrets)
 }
 
 // validateRecipeRef accepts an empty name (⇒ default) or any existing recipe;
@@ -195,13 +196,14 @@ func validateTag(tag string) error {
 }
 
 type AddCmd struct {
-	Title  *string  `short:"t" required:"" help:"Feed title."`
-	URL    *string  `short:"u" required:"" help:"Feed RSS url."`
-	Tag    *string  `short:"g" optional:"" help:"Feed tag."`
-	Recipe *string  `short:"r" optional:"" help:"Recipe name (must exist). Empty inherits 'default'."`
-	Ingest *string  `short:"i" optional:"" help:"Feed-level ingest override: built-in ('#feed') or shell command. Empty inherits the recipe's."`
-	Pipe   []string `short:"p" sep:"none" optional:"" help:"Feed-level pipeline step; repeat -p per step. Overrides the recipe's pipe; #default expands to the recipe's effective pipe."`
-	Expire *int     `short:"e" name:"expire-days" optional:"" help:"Expire articles after N days (0 = keep forever)."`
+	Title   *string  `short:"t" required:"" help:"Feed title."`
+	URL     *string  `short:"u" required:"" help:"Feed RSS url."`
+	Tag     *string  `short:"g" optional:"" help:"Feed tag."`
+	Recipe  *string  `short:"r" optional:"" help:"Recipe name (must exist). Empty inherits 'default'."`
+	Ingest  *string  `short:"i" optional:"" help:"Feed-level ingest override: built-in ('#feed') or shell command. Empty inherits the recipe's."`
+	Pipe    []string `short:"p" sep:"none" optional:"" help:"Feed-level pipeline step; repeat -p per step. Overrides the recipe's pipe; #default expands to the recipe's effective pipe."`
+	Secrets []string `name:"secrets" sep:"none" optional:"" help:"Secret scope granted to this feed's external commands; repeat per scope. Overrides the recipe's grant."`
+	Expire  *int     `short:"e" name:"expire-days" optional:"" help:"Expire articles after N days (0 = keep forever)."`
 	// DedupDays / DedupTitle tune the persistent seen.gz dedup pool per feed.
 	DedupDays  *int  `name:"dedup-days" optional:"" help:"Dedup horizon in days for this feed (0 = store default, -1 = disable the pool)."`
 	DedupTitle *bool `name:"dedup-title" optional:"" help:"Also dedup by folded title (catches a re-promotion with a fresh guid but the same headline)."`
@@ -228,6 +230,7 @@ func (o *AddCmd) Run() error {
 		v.Ingest = *o.Ingest
 	}
 	v.Pipe = o.Pipe
+	v.Secrets = o.Secrets
 	if o.Expire != nil {
 		v.ExpireDays = *o.Expire
 	}
@@ -259,14 +262,17 @@ func (o *AddCmd) Run() error {
 // feed = one URL: the URL is a flat field; the last fetch error (if any)
 // rides alongside it as a read-only `error` for visibility.
 type feedView struct {
-	ID         *int     `json:"id,omitempty" yaml:"id,omitempty"`
-	Title      string   `json:"title"        yaml:"title"`
-	URL        string   `json:"url"          yaml:"url"`
-	Error      string   `json:"error,omitempty" yaml:"error,omitempty"`
-	Tag        string   `json:"tag,omitempty" yaml:"tag,omitempty"`
-	Recipe     string   `json:"recipe,omitempty" yaml:"recipe,omitempty"`
-	Ingest     string   `json:"ingest,omitempty" yaml:"ingest,omitempty"`
-	Pipe       []string `json:"pipe,omitempty" yaml:"pipe,omitempty"`
+	ID     *int     `json:"id,omitempty" yaml:"id,omitempty"`
+	Title  string   `json:"title"        yaml:"title"`
+	URL    string   `json:"url"          yaml:"url"`
+	Error  string   `json:"error,omitempty" yaml:"error,omitempty"`
+	Tag    string   `json:"tag,omitempty" yaml:"tag,omitempty"`
+	Recipe string   `json:"recipe,omitempty" yaml:"recipe,omitempty"`
+	Ingest string   `json:"ingest,omitempty" yaml:"ingest,omitempty"`
+	Pipe   []string `json:"pipe,omitempty" yaml:"pipe,omitempty"`
+	// Secrets is the feed-level secret-scope grant override (srr.yaml scopes
+	// whose vars reach the feed's external commands); empty inherits the recipe's.
+	Secrets    []string `json:"secrets,omitempty" yaml:"secrets,omitempty"`
 	NoTitle    bool     `json:"no_title,omitempty" yaml:"no_title,omitempty"`
 	ExpireDays int      `json:"expire_days,omitempty" yaml:"expire_days,omitempty"`
 	// DedupDays / DedupTitle are the per-feed seen.gz pool overrides (0 inherits
@@ -295,6 +301,7 @@ func viewOf(ch *Feed) *feedView {
 		Recipe:       ch.Recipe,
 		Ingest:       ch.Ingest,
 		Pipe:         ch.Pipe,
+		Secrets:      ch.Secrets,
 		NoTitle:      ch.NoTitle,
 		ExpireDays:   ch.ExpireDays,
 		DedupDays:    ch.DedupDays,
@@ -306,21 +313,22 @@ func viewOf(ch *Feed) *feedView {
 }
 
 type UpdCmd struct {
-	ID     int      `arg:""                help:"Feed id to update."`
-	Title  *string  `short:"t" optional:"" help:"Feed title (empty rejected)."`
-	URL    *string  `short:"u" optional:"" help:"Feed RSS url. Changing it resets the feed's fetch state (etag/watermark/dedup)."`
-	Tag    *string  `short:"g" optional:"" help:"Feed tag. Empty (\"\") to clear."`
-	Recipe *string  `short:"r" optional:"" help:"Recipe name (must exist). Empty (\"\") to clear (⇒ default)."`
-	Ingest *string  `short:"i" optional:"" help:"Feed-level ingest override. Empty (\"\") to clear (⇒ recipe's)."`
-	Pipe   []string `short:"p" sep:"none" optional:"" help:"Feed-level pipeline step; repeat -p per step (#default expands to the recipe's effective pipe). A single -p \"\" clears (⇒ recipe's)."`
-	Expire *int     `short:"e" name:"expire-days" optional:"" help:"Expire articles after N days (0 = keep forever)."`
+	ID      int      `arg:""                help:"Feed id to update."`
+	Title   *string  `short:"t" optional:"" help:"Feed title (empty rejected)."`
+	URL     *string  `short:"u" optional:"" help:"Feed RSS url. Changing it resets the feed's fetch state (etag/watermark/dedup)."`
+	Tag     *string  `short:"g" optional:"" help:"Feed tag. Empty (\"\") to clear."`
+	Recipe  *string  `short:"r" optional:"" help:"Recipe name (must exist). Empty (\"\") to clear (⇒ default)."`
+	Ingest  *string  `short:"i" optional:"" help:"Feed-level ingest override. Empty (\"\") to clear (⇒ recipe's)."`
+	Pipe    []string `short:"p" sep:"none" optional:"" help:"Feed-level pipeline step; repeat -p per step (#default expands to the recipe's effective pipe). A single -p \"\" clears (⇒ recipe's)."`
+	Secrets []string `name:"secrets" sep:"none" optional:"" help:"Secret scope granted to this feed's external commands; repeat per scope. Overrides the recipe's grant. A single --secrets \"\" clears (⇒ recipe's)."`
+	Expire  *int     `short:"e" name:"expire-days" optional:"" help:"Expire articles after N days (0 = keep forever)."`
 	// DedupDays / DedupTitle tune the persistent seen.gz dedup pool per feed.
 	DedupDays  *int  `name:"dedup-days" optional:"" help:"Dedup horizon in days for this feed (0 = store default, -1 = disable the pool)."`
 	DedupTitle *bool `name:"dedup-title" optional:"" help:"Also dedup by folded title (catches a re-promotion with a fresh guid but the same headline)."`
 }
 
 func (o *UpdCmd) Run() error {
-	if o.Title == nil && o.Tag == nil && o.Recipe == nil && o.Ingest == nil && o.Pipe == nil && o.URL == nil && o.Expire == nil && o.DedupDays == nil && o.DedupTitle == nil {
+	if o.Title == nil && o.Tag == nil && o.Recipe == nil && o.Ingest == nil && o.Pipe == nil && o.Secrets == nil && o.URL == nil && o.Expire == nil && o.DedupDays == nil && o.DedupTitle == nil {
 		return fmt.Errorf("nothing to update")
 	}
 
@@ -347,6 +355,10 @@ func (o *UpdCmd) Run() error {
 		if o.Pipe != nil {
 			// normalizeFeed's filterPipe turns a lone -p "" into nil = cleared.
 			ch.Pipe = o.Pipe
+		}
+		if o.Secrets != nil {
+			// Same clear sentinel as Pipe: a lone --secrets "" filters to nil.
+			ch.Secrets = o.Secrets
 		}
 		if o.Expire != nil {
 			ch.ExpireDays = *o.Expire
@@ -631,6 +643,7 @@ func writeFeedView(ch *Feed, v *feedView) {
 	ch.Recipe = v.Recipe
 	ch.Ingest = v.Ingest
 	ch.Pipe = v.Pipe
+	ch.Secrets = v.Secrets
 	ch.NoTitle = v.NoTitle
 	ch.ExpireDays = v.ExpireDays
 	ch.DedupDays = v.DedupDays

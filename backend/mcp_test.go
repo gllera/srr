@@ -315,6 +315,42 @@ func TestMCPUpdateFeedMergesOnAbsent(t *testing.T) {
 	}
 }
 
+// The secret-scope grant follows the same merge-on-absent contract: absent
+// keeps the stored grant, an explicit empty array clears it.
+func TestMCPUpdateFeedSecretsMergeAndClear(t *testing.T) {
+	setupTestDB(t)
+	stubPassthroughResolve()
+
+	_, added, err := mcpAddFeed(ctx, nil, addFeedIn{
+		Title:   "News",
+		URL:     "https://n.example/feed",
+		Secrets: []string{"telegram"},
+	})
+	if err != nil {
+		t.Fatalf("mcpAddFeed: %v", err)
+	}
+	id := added.Feed.ID
+
+	// Absent ⇒ keep.
+	_, upd, err := mcpUpdateFeed(ctx, nil, updateFeedIn{ID: id, Tag: strPtr("news")})
+	if err != nil {
+		t.Fatalf("mcpUpdateFeed: %v", err)
+	}
+	if want := []string{"telegram"}; !slices.Equal(upd.Feed.Secrets, want) {
+		t.Errorf("Secrets = %v, want %v (absent means keep)", upd.Feed.Secrets, want)
+	}
+
+	// Explicit empty array ⇒ clear.
+	empty := []string{}
+	_, cleared, err := mcpUpdateFeed(ctx, nil, updateFeedIn{ID: id, Secrets: &empty})
+	if err != nil {
+		t.Fatalf("mcpUpdateFeed clear: %v", err)
+	}
+	if len(cleared.Feed.Secrets) != 0 {
+		t.Errorf("Secrets = %v, want cleared by the explicit empty array", cleared.Feed.Secrets)
+	}
+}
+
 // An unknown feed id is reported with the id in the message, on both the read
 // (update) and the write-cycle (fetch) path — the caller composed that number,
 // so it has to see which one was wrong.

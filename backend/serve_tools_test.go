@@ -46,7 +46,7 @@ func TestRenderPreviewDropsFilteredItem(t *testing.T) {
 	url := rssServer(t)
 
 	recipes := map[string]Recipe{"default": {Pipe: []string{"#sanitize", "#minify"}}}
-	items, err := renderPreview(ctx, recipes, "default", []string{"#filter drop_title=/Hello/"}, "", url)
+	items, err := renderPreview(ctx, recipes, "default", []string{"#filter drop_title=/Hello/"}, "", nil, url)
 	if err != nil {
 		t.Fatalf("renderPreview: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestRenderPreviewDefaultOverrideResolvesRecipe(t *testing.T) {
 		"default": {Pipe: []string{"#sanitize", "#minify"}},
 		"dropper": {Pipe: []string{"#filter drop_title=/Hello/"}},
 	}
-	dropped, err := renderPreview(ctx, recipes, "dropper", []string{"#default"}, "", url)
+	dropped, err := renderPreview(ctx, recipes, "dropper", []string{"#default"}, "", nil, url)
 	if err != nil {
 		t.Fatalf("renderPreview dropper: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestRenderPreviewDefaultOverrideResolvesRecipe(t *testing.T) {
 		t.Fatalf("got %d items, want 0 (#default expanded to dropper's filtering pipe)", len(dropped))
 	}
 
-	kept, err := renderPreview(ctx, recipes, "default", []string{"#default"}, "", url)
+	kept, err := renderPreview(ctx, recipes, "default", []string{"#default"}, "", nil, url)
 	if err != nil {
 		t.Fatalf("renderPreview default: %v", err)
 	}

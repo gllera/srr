@@ -226,3 +226,13 @@ export function overrideChip(f: { ingest?: string; pipe?: string[] }): HTMLEleme
    if (!axes.length) return ""
    return el("span", { class: "chip recipe", title: "feed-level " + axes.join(" + ") + " override" }, "override")
 }
+
+// splitScopes parses a comma/space-separated secret-scope input into the
+// string[] the API takes — trimmed, empties dropped. Shared by the feed and
+// recipe modals (both bodies are full-replace, so the field always ships).
+export function splitScopes(value: string): string[] {
+   return value
+      .split(/[\s,]+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+}

@@ -8,15 +8,16 @@ import (
 func putRecipe(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	var body struct {
-		Ingest string   `json:"ingest"`
-		Pipe   []string `json:"pipe"`
+		Ingest  string   `json:"ingest"`
+		Pipe    []string `json:"pipe"`
+		Secrets []string `json:"secrets"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeErr(w, err)
 		return
 	}
 	err := withDBCtx(r.Context(), true, func(ctx context.Context, db *DB) error {
-		return setRecipe(ctx, db, name, body.Ingest, body.Pipe)
+		return setRecipe(ctx, db, name, body.Ingest, body.Pipe, body.Secrets)
 	})
 	if err != nil {
 		writeErr(w, err)

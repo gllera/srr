@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -502,6 +503,71 @@ func TestServeFeedSaveRejectsBadDedupDays(t *testing.T) {
 	setupTestDB(t)
 	stubPassthroughResolve()
 	body := `{"title":"X","url":"https://x.example/feed","dedup_days":-2}`
+	rec := doReq(t, newMux(), "POST", "/api/feeds", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (%s)", rec.Code, rec.Body)
+	}
+}
+
+// The secret-scope grant round-trips through the API — projection, echo, and
+// store — and a full-replace body that omits it clears it: the reason the webui
+// modal must always send the field (mirrors TestServeFeedSaveRoundTripsDedup).
+func TestServeFeedSaveRoundTripsSecrets(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	stubPassthroughResolve()
+	seedFeed(t, db, &Feed{Title: "Chan", URL: "https://t.example.com/feed"})
+
+	rec := doReq(t, newMux(), "PUT", "/api/feeds/0",
+		`{"title":"Chan","url":"https://t.example.com/feed","secrets":["telegram","github"]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	var got feedListView
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !slices.Equal(got.Secrets, []string{"telegram", "github"}) {
+		t.Fatalf("echo secrets=%v, want [telegram github]", got.Secrets)
+	}
+	if err := withDB(false, func(_ context.Context, d *DB) error {
+		ch, e := d.FeedByID(0)
+		if e != nil {
+			return e
+		}
+		if !slices.Equal(ch.Secrets, []string{"telegram", "github"}) {
+			t.Fatalf("stored secrets=%v", ch.Secrets)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Full replace: a body without the field clears the grant.
+	rec = doReq(t, newMux(), "PUT", "/api/feeds/0",
+		`{"title":"Chan","url":"https://t.example.com/feed"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	if err := withDB(false, func(_ context.Context, d *DB) error {
+		ch, e := d.FeedByID(0)
+		if e != nil {
+			return e
+		}
+		if ch.Secrets != nil {
+			t.Fatalf("secrets not cleared: %v", ch.Secrets)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A grant entry carrying '.' can never match a srr.yaml scope (parseSecrets
+// forbids '.' there) — rejected offline (400), like a bad pipe token.
+func TestServeFeedSaveRejectsDottedSecretScope(t *testing.T) {
+	setupTestDB(t)
+	stubPassthroughResolve()
+	body := `{"title":"X","url":"https://x.example/feed","secrets":["a.b"]}`
 	rec := doReq(t, newMux(), "POST", "/api/feeds", body)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (%s)", rec.Code, rec.Body)

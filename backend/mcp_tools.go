@@ -199,6 +199,7 @@ type previewFeedIn struct {
 	Recipe          string   `json:"recipe,omitempty" jsonschema:"Preview as if the feed used this named recipe. Omit for the reserved default recipe. Names come from srr_overview's recipes."`
 	Ingest          string   `json:"ingest,omitempty" jsonschema:"Ad-hoc ingest override with feed-level semantics (wins over the recipe's): the built-in \"#feed\" or an external shell command."`
 	Pipe            []string `json:"pipe,omitempty" jsonschema:"Ad-hoc processing pipeline override with feed-level semantics (replaces the recipe's pipe), one step per entry. Built-ins start with # (#sanitize, #minify, #readability, #filter, #dedupmedia, #unlazy, #embed, #enclosure, #untrack, #selfhost); #default expands inline to the recipe's effective pipe; anything else is a shell command."`
+	Secrets         []string `json:"secrets,omitempty" jsonschema:"Ad-hoc secret-scope grant override with feed-level semantics (wins over the recipe's): srr.yaml secret scopes whose vars the external commands may see. Values are scope NAMES, never secret values."`
 	Limit           int      `json:"limit,omitempty" jsonschema:"Maximum articles to return from the preview. Default 5. The whole feed is still fetched and processed; this bounds the reply only."`
 	MaxContentChars int      `json:"max_content_chars,omitempty" jsonschema:"Truncate each article's content to this many characters (never mid-character). Default 5000; a negative value disables truncation."`
 }
@@ -232,7 +233,7 @@ func mcpPreviewFeed(ctx context.Context, _ *mcp.CallToolRequest, in previewFeedI
 	var items []*Item
 	err := withDBCtx(ctx, false, func(ctx context.Context, db *DB) error {
 		var e error
-		items, e = renderPreview(ctx, db.core.Recipes, in.Recipe, in.Pipe, in.Ingest, in.URL)
+		items, e = renderPreview(ctx, db.core.Recipes, in.Recipe, in.Pipe, in.Ingest, in.Secrets, in.URL)
 		return e
 	})
 	if err != nil {
@@ -259,9 +260,10 @@ func mcpPreviewFeed(ctx context.Context, _ *mcp.CallToolRequest, in previewFeedI
 // --- srr_resolve_feed -------------------------------------------------------
 
 type resolveFeedIn struct {
-	URL    string `json:"url" jsonschema:"Feed or homepage URL to probe. PERFORMS AN OUTBOUND REQUEST to this URL. A homepage advertising a feed via <link rel=alternate> folds to that feed's URL."`
-	Recipe string `json:"recipe,omitempty" jsonschema:"Probe through this named recipe's ingest strategy. Omit for the reserved default recipe."`
-	Ingest string `json:"ingest,omitempty" jsonschema:"Ad-hoc ingest override with feed-level semantics (wins over the recipe's): the built-in \"#feed\" or an external shell command."`
+	URL     string   `json:"url" jsonschema:"Feed or homepage URL to probe. PERFORMS AN OUTBOUND REQUEST to this URL. A homepage advertising a feed via <link rel=alternate> folds to that feed's URL."`
+	Recipe  string   `json:"recipe,omitempty" jsonschema:"Probe through this named recipe's ingest strategy. Omit for the reserved default recipe."`
+	Ingest  string   `json:"ingest,omitempty" jsonschema:"Ad-hoc ingest override with feed-level semantics (wins over the recipe's): the built-in \"#feed\" or an external shell command."`
+	Secrets []string `json:"secrets,omitempty" jsonschema:"Ad-hoc secret-scope grant override with feed-level semantics (wins over the recipe's). Scope NAMES from srr.yaml's secrets section, never values."`
 }
 
 type resolveFeedOut struct {
@@ -280,6 +282,9 @@ func mcpResolveFeed(ctx context.Context, _ *mcp.CallToolRequest, in resolveFeedI
 	}
 	var out resolveFeedOut
 	err := withDBCtx(ctx, false, func(ctx context.Context, db *DB) error {
+		// Same grant the real fetch would resolve — an external ingest needing
+		// its credentials must get them for the probe too.
+		ctx = grantSecrets(ctx, db.core.Recipes, in.Recipe, in.Secrets)
 		res, e := previewFetch(ctx, db.core.Recipes, in.Recipe, in.Ingest, in.URL)
 		if e != nil {
 			return e
@@ -314,6 +319,7 @@ type addFeedIn struct {
 	Recipe     string   `json:"recipe,omitempty" jsonschema:"Name of an existing recipe to process this feed with. Omit for the reserved default recipe; an unknown name is rejected."`
 	Ingest     string   `json:"ingest,omitempty" jsonschema:"Feed-level ingest override on top of the recipe: the built-in \"#feed\" or an external shell command."`
 	Pipe       []string `json:"pipe,omitempty" jsonschema:"Feed-level processing pipeline override on top of the recipe, one step per entry. #default expands inline to the recipe's effective pipe."`
+	Secrets    []string `json:"secrets,omitempty" jsonschema:"Feed-level secret-scope grant override on top of the recipe: srr.yaml secret scopes whose vars this feed's external commands may see. Scope NAMES, never values. No grant anywhere means no secrets."`
 	NoTitle    bool     `json:"no_title,omitempty" jsonschema:"Mark as a titleless microblog-style feed; the reader then hides the per-article heading."`
 	ExpireDays int      `json:"expire_days,omitempty" jsonschema:"Retention window in days: articles ingested longer ago than this are expired each cycle. 0 (default) keeps forever; maximum 36500."`
 	DedupDays  int      `json:"dedup_days,omitempty" jsonschema:"Per-feed dedup horizon in days. 0 (default) inherits the store-wide default; -1 disables the persistent dedup pool for this feed."`
@@ -332,6 +338,7 @@ func mcpAddFeed(ctx context.Context, _ *mcp.CallToolRequest, in addFeedIn) (*mcp
 			Recipe:     in.Recipe,
 			Ingest:     in.Ingest,
 			Pipe:       in.Pipe,
+			Secrets:    in.Secrets,
 			NoTitle:    in.NoTitle,
 			ExpireDays: in.ExpireDays,
 			DedupDays:  in.DedupDays,
@@ -350,6 +357,7 @@ type updateFeedIn struct {
 	Recipe     *string   `json:"recipe,omitempty" jsonschema:"Name of an existing recipe; pass \"\" to fall back to the reserved default. Omit to keep the current one."`
 	Ingest     *string   `json:"ingest,omitempty" jsonschema:"Feed-level ingest override; pass \"\" to clear it (inheriting the recipe's). Omit to keep the current one."`
 	Pipe       *[]string `json:"pipe,omitempty" jsonschema:"Feed-level pipeline override, one step per entry; pass an empty array to clear it (inheriting the recipe's). Omit to keep the current one."`
+	Secrets    *[]string `json:"secrets,omitempty" jsonschema:"Feed-level secret-scope grant override (scope NAMES from srr.yaml); pass an empty array to clear it (inheriting the recipe's). Omit to keep the current one."`
 	NoTitle    *bool     `json:"no_title,omitempty" jsonschema:"Titleless microblog-style flag. Omit to keep the current value."`
 	ExpireDays *int      `json:"expire_days,omitempty" jsonschema:"Retention window in days; 0 keeps forever, maximum 36500. Omit to keep the current value."`
 	DedupDays  *int      `json:"dedup_days,omitempty" jsonschema:"Per-feed dedup horizon in days; 0 inherits the store default, -1 disables the pool. Omit to keep the current value."`
@@ -400,6 +408,9 @@ func overlayUpdateFeed(v *feedView, in updateFeedIn) {
 	}
 	if in.Pipe != nil {
 		v.Pipe = *in.Pipe
+	}
+	if in.Secrets != nil {
+		v.Secrets = *in.Secrets
 	}
 	if in.NoTitle != nil {
 		v.NoTitle = *in.NoTitle

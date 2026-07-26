@@ -92,11 +92,14 @@ func TestConfigKeyResolvesInactiveScheme(t *testing.T) {
 	}
 }
 
-// `srr config` (no arg) appends a masked `secrets:` section: keys listed, values
-// rendered as the shared maskSecret placeholder so the raw value never leaks.
+// `srr config` (no arg) appends a masked `secrets:` section: scopes and their
+// keys listed, values rendered as the shared maskSecret placeholder so the raw
+// value never leaks.
 func TestConfigSecretsMaskedNoArg(t *testing.T) {
 	globals = &Globals{Store: "packs"}
-	secrets = map[string]string{"TOKEN": "supersecret", "API_HASH": "deadbeef"}
+	secrets = map[string]map[string]string{
+		"telegram": {"TOKEN": "supersecret", "API_HASH": "deadbeef"},
+	}
 	t.Cleanup(func() { secrets = nil })
 
 	out := captureStdout(t, func() {
@@ -104,8 +107,8 @@ func TestConfigSecretsMaskedNoArg(t *testing.T) {
 			t.Fatalf("Run: %v", err)
 		}
 	})
-	if !strings.Contains(out, "secrets:\n") {
-		t.Errorf("missing secrets section\n--- got ---\n%s", out)
+	if !strings.Contains(out, "secrets:\n") || !strings.Contains(out, "telegram:\n") {
+		t.Errorf("missing secrets section / scope\n--- got ---\n%s", out)
 	}
 	if !strings.Contains(out, "TOKEN: ********") {
 		t.Errorf("TOKEN not masked\n--- got ---\n%s", out)
@@ -130,11 +133,12 @@ func TestConfigNoSecretsOmitsSection(t *testing.T) {
 	}
 }
 
-// `srr config secrets` prints the masked section; `srr config secrets.KEY` prints
-// just the masked value; an unknown sub-key errors.
+// `srr config secrets` prints the masked section; `srr config secrets.<scope>`
+// one scope's masked entries; `srr config secrets.<scope>.<NAME>` just the
+// masked value; an unknown scope or sub-key errors.
 func TestConfigSecretsKeyLookup(t *testing.T) {
 	globals = &Globals{Store: "packs"}
-	secrets = map[string]string{"TOKEN": "supersecret"}
+	secrets = map[string]map[string]string{"telegram": {"TOKEN": "supersecret"}}
 	t.Cleanup(func() { secrets = nil })
 
 	section := captureStdout(t, func() {
@@ -142,13 +146,22 @@ func TestConfigSecretsKeyLookup(t *testing.T) {
 			t.Fatalf("Run(secrets): %v", err)
 		}
 	})
-	if !strings.Contains(section, "TOKEN: ********") || strings.Contains(section, "supersecret") {
+	if !strings.Contains(section, "telegram:") || !strings.Contains(section, "TOKEN: ********") || strings.Contains(section, "supersecret") {
 		t.Errorf("section lookup not masked\n--- got ---\n%s", section)
 	}
 
+	scope := captureStdout(t, func() {
+		if err := (&ConfigCmd{Key: "secrets.telegram"}).Run(); err != nil {
+			t.Fatalf("Run(secrets.telegram): %v", err)
+		}
+	})
+	if !strings.Contains(scope, "TOKEN: ********") || strings.Contains(scope, "supersecret") {
+		t.Errorf("scope lookup not masked\n--- got ---\n%s", scope)
+	}
+
 	single := captureStdout(t, func() {
-		if err := (&ConfigCmd{Key: "secrets.TOKEN"}).Run(); err != nil {
-			t.Fatalf("Run(secrets.TOKEN): %v", err)
+		if err := (&ConfigCmd{Key: "secrets.telegram.TOKEN"}).Run(); err != nil {
+			t.Fatalf("Run(secrets.telegram.TOKEN): %v", err)
 		}
 	})
 	if !strings.Contains(single, "********") || strings.Contains(single, "supersecret") {
@@ -156,6 +169,9 @@ func TestConfigSecretsKeyLookup(t *testing.T) {
 	}
 
 	if err := (&ConfigCmd{Key: "secrets.NOPE"}).Run(); err == nil {
+		t.Error("unknown secret scope should error")
+	}
+	if err := (&ConfigCmd{Key: "secrets.telegram.NOPE"}).Run(); err == nil {
 		t.Error("unknown secret key should error")
 	}
 }

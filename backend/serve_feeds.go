@@ -14,13 +14,17 @@ import (
 // no_title checkbox, expire_days, the dedup pool overrides, and the ingest/pipe
 // override values).
 type feedListView struct {
-	ID         int      `json:"id"`
-	Title      string   `json:"title"`
-	URL        string   `json:"url"`
-	Tag        string   `json:"tag,omitempty"`
-	Recipe     string   `json:"recipe,omitempty"`
-	Ingest     string   `json:"ingest,omitempty"`
-	Pipe       []string `json:"pipe,omitempty"`
+	ID     int      `json:"id"`
+	Title  string   `json:"title"`
+	URL    string   `json:"url"`
+	Tag    string   `json:"tag,omitempty"`
+	Recipe string   `json:"recipe,omitempty"`
+	Ingest string   `json:"ingest,omitempty"`
+	Pipe   []string `json:"pipe,omitempty"`
+	// Secrets is the feed-level secret-scope grant override. Scope NAMES only —
+	// values never leave srr.yaml — and it must round-trip like DedupDays so the
+	// GUI's full-replace save doesn't silently wipe it.
+	Secrets    []string `json:"secrets,omitempty"`
 	NoTitle    bool     `json:"no_title,omitempty"`
 	Error      string   `json:"error,omitempty"`
 	FailStreak int      `json:"fail_streak"`
@@ -49,6 +53,7 @@ func listViewOf(ch *Feed) feedListView {
 		Recipe:       ch.Recipe,
 		Ingest:       ch.Ingest,
 		Pipe:         ch.Pipe,
+		Secrets:      ch.Secrets,
 		NoTitle:      ch.NoTitle,
 		Error:        ch.FetchError,
 		FailStreak:   ch.FailStreak,

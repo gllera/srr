@@ -125,29 +125,37 @@ func TestExternalFetcherEnvPassthrough(t *testing.T) {
 	}
 }
 
-// TestExternalFetcherSecretEnv proves the srr.yaml `secrets:` map (mod.SetSecrets)
-// is merged into the external fetcher's environment AND overrides an ambient
-// process-env var of the same name (secrets win). SetSecrets must precede New(),
-// which snapshots the environment.
+// TestExternalFetcherSecretEnv proves a GRANTED secret scope (mod.SetSecrets +
+// mod.WithSecretScopes on the fetch ctx) is merged into the external fetcher's
+// environment AND overrides an ambient process-env var of the same name
+// (secrets win) — while an ungranted ctx keeps the ambient value (SEC5
+// containment).
 func TestExternalFetcherSecretEnv(t *testing.T) {
 	requireSh(t)
 
 	t.Setenv("SRR_TEST_SECRET", "ambient") // ambient value the secret must beat
 	t.Cleanup(func() { mod.SetSecrets(nil) })
-	mod.SetSecrets(map[string]string{"SRR_TEST_SECRET": "from-yaml"})
+	mod.SetSecrets(map[string]map[string]string{"tg": {"SRR_TEST_SECRET": "from-yaml"}})
 
-	out := filepath.Join(t.TempDir(), "secret.txt")
-	cmd := fmt.Sprintf(`cat > /dev/null; printf '%%s' "$SRR_TEST_SECRET" > %s; echo '{"items":[]}'`, out)
+	run := func(ctx context.Context) string {
+		t.Helper()
+		out := filepath.Join(t.TempDir(), "secret.txt")
+		cmd := fmt.Sprintf(`cat > /dev/null; printf '%%s' "$SRR_TEST_SECRET" > %s; echo '{"items":[]}'`, out)
+		if _, err := New().Fetch(ctx, cmd, nil, nil, Request{URL: "https://x"}); err != nil {
+			t.Fatalf("fetch: %v", err)
+		}
+		data, err := os.ReadFile(out)
+		if err != nil {
+			t.Fatalf("read secret: %v", err)
+		}
+		return string(data)
+	}
 
-	if _, err := New().Fetch(context.Background(), cmd, nil, nil, Request{URL: "https://x"}); err != nil {
-		t.Fatalf("fetch: %v", err)
+	if got := run(mod.WithSecretScopes(context.Background(), []string{"tg"})); got != "from-yaml" {
+		t.Errorf("granted secret not merged into command env: got %q, want %q", got, "from-yaml")
 	}
-	data, err := os.ReadFile(out)
-	if err != nil {
-		t.Fatalf("read secret: %v", err)
-	}
-	if string(data) != "from-yaml" {
-		t.Errorf("secret not merged into command env: got %q, want %q", string(data), "from-yaml")
+	if got := run(context.Background()); got != "ambient" {
+		t.Errorf("ungranted fetcher should see only the ambient value: got %q, want %q", got, "ambient")
 	}
 }
 

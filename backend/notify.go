@@ -75,7 +75,10 @@ func (n *notifyState) fire(ctx context.Context, feeds []*Feed) {
 }
 
 func (n *notifyState) run(ctx context.Context, ch *Feed, event notifyEvent) {
-	env := append(mod.SubprocessEnv(),
+	// The notify hook is operator-global config (--notify), trusted like the
+	// srr.yaml that declares it — it gets EVERY secret scope, unlike per-feed
+	// pipe/ingest commands, whose grant is the feed's `secrets` axis.
+	env := append(mod.SubprocessEnv(mod.WithSecretScopes(ctx, mod.AllScopes())),
 		"SRR_NOTIFY_EVENT="+string(event),
 		"SRR_NOTIFY_FEED="+ch.Title,
 		"SRR_NOTIFY_FEED_ID="+strconv.Itoa(ch.id),

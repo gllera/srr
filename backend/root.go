@@ -369,6 +369,7 @@ func applyFeedConfig(f *Feed, c FeedConfig) {
 	f.Recipe = c.Recipe
 	f.Ingest = c.Ingest
 	f.Pipe = c.Pipe
+	f.Secrets = c.Secrets
 	f.DedupDays = c.DedupDays
 	f.DedupTitle = c.DedupTitle
 }

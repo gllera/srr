@@ -17,6 +17,9 @@ export interface FeedListView {
    recipe?: string
    ingest?: string
    pipe?: string[]
+   // Secret-scope grant override (scope NAMES from srr.yaml — never values).
+   // Must round-trip through the edit modal: the save body is full-replace.
+   secrets?: string[]
    no_title?: boolean
    error?: string
    fail_streak: number
@@ -39,10 +42,12 @@ export interface TagCount {
    articles: number
 }
 
-// A named {ingest, pipe} processing recipe (backend Recipe).
+// A named {ingest, pipe, secrets} processing recipe (backend Recipe).
 export interface Recipe {
    ingest?: string
    pipe?: string[]
+   // Secret scopes granted to the recipe's external commands (names only).
+   secrets?: string[]
 }
 
 // One syndication output slot (backend OutFeed).

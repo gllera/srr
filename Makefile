@@ -21,12 +21,14 @@ verify-be: vet-be format-check-be lint-be build-be test-be generate-check
 
 # frontend/src/js/format.gen.ts is generated from the backend's Go
 # data-contract declarations (srr gen-ts). generate rewrites it;
-# generate-check (in verify-be) fails when it is stale.
+# generate-check (in verify-be) fails when it is stale. SRR_CONFIG_INLINE={}
+# pins an empty config: the generator must not depend on — or fail on — the
+# host's ~/.config/srr/srr.yaml (e.g. a pre-scope secrets: section).
 generate:
-	cd backend && go generate .
+	cd backend && SRR_CONFIG_INLINE='{}' go generate .
 
 generate-check:
-	cd backend && go run . gen-ts --check
+	cd backend && SRR_CONFIG_INLINE='{}' go run . gen-ts --check
 
 # End-to-end (writer<->reader contract). All layers run the real srr binary
 # ($SRR_BIN, built by build-be) and read its packs with the real frontend code.

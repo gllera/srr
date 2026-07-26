@@ -63,6 +63,11 @@ type FeedConfig struct {
 	Recipe string   `json:"recipe,omitempty"`
 	Ingest string   `json:"ingest,omitempty"`
 	Pipe   []string `json:"pipe,omitempty"`
+	// Secrets is the feed-level secret-scope grant — which srr.yaml credential
+	// bundles this feed's external commands may see. Backend-only by
+	// construction: publishing even the scope NAMES would hand a public-store
+	// reader a map of what credentials exist.
+	Secrets []string `json:"secrets,omitempty"`
 	// DedupDays / DedupTitle tune the persistent seen.gz pool per feed.
 	DedupDays  int  `json:"dd,omitempty"`
 	DedupTitle bool `json:"dt,omitempty"`
@@ -95,6 +100,7 @@ func feedConfigOf(f *Feed) FeedConfig {
 		Recipe:     f.Recipe,
 		Ingest:     f.Ingest,
 		Pipe:       f.Pipe,
+		Secrets:    f.Secrets,
 		DedupDays:  f.DedupDays,
 		DedupTitle: f.DedupTitle,
 	}
@@ -104,5 +110,5 @@ func feedConfigOf(f *Feed) FeedConfig {
 // can omit its entry entirely (§4.3: an absent entry means "all defaults", the
 // same thing an all-zero entry would mean).
 func (c FeedConfig) isZero() bool {
-	return c.Recipe == "" && c.Ingest == "" && len(c.Pipe) == 0 && c.DedupDays == 0 && !c.DedupTitle
+	return c.Recipe == "" && c.Ingest == "" && len(c.Pipe) == 0 && len(c.Secrets) == 0 && c.DedupDays == 0 && !c.DedupTitle
 }
