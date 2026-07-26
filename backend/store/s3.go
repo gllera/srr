@@ -266,8 +266,11 @@ func (d *S3) put(ctx context.Context, key string, r io.Reader, ignoreExisting bo
 	return aws.ToString(res.ETag), nil
 }
 
-// Stat returns the object's size via HeadObject (no body transfer); a missing
-// key is (0, nil) per the Backend contract.
+// Stat returns the object's size via HeadObject (no body transfer). A missing
+// key is an error wrapping fs.ErrNotExist per the Backend contract — note S3
+// answers a bodyless HEAD with NotFound, not NoSuchKey — and a nil error
+// therefore PROVES the object exists, zero-byte included. That proof is what
+// lets the upload dedup probe settle existence in one bodyless call.
 func (d *S3) Stat(ctx context.Context, key string) (int64, error) {
 	key = d.s3path("stat", key)
 

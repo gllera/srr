@@ -497,13 +497,14 @@ it) or a pattern with no roster entry (stamp it at this run's start chron — th
 same apply-forward answer `srr watch set` gives). `SyncWatch` reconciles both
 every cycle; `srr inspect --validate` reports either while it lasts.
 
-**Owed, for the reader lane** (deliberately not landed with the backend):
-`sw.ts`'s `checkManifest` builds its live set from `names.idx/data/meta/deltas/
-hsum/ssum` and evicts every cached pack object outside it, so a reader that
-fetched `watch/` objects would have them evicted on every manifest adoption
-until `names.watch` is added to that set. `names.ts` already ignores the extra
-series safely (it looks series up by name), and the SW's route regex already
-matches `watch/<stem>.gz` via `PACK_SERIES_KINDS`.
+**Owed, for the reader lane** (deliberately not landed with the backend): the
+LANE itself — reading a plane through the `wf`/`wc` coverage gate and offering
+it as a filter. Everything under it is in place: `names.ts` looks series up by
+name and so ignores an extra one safely, the SW's route regex already matches
+`watch/<stem>.gz` via `PACK_SERIES_KINDS`, and `sw.ts`'s `checkManifest` now
+DERIVES its live set from the manifest's names map (`names.ts listedNames`)
+rather than spelling out `idx/data/meta/deltas/hsum/ssum` — so a cached
+`watch/` object survives manifest adoption, as will any series added later.
 
 ## 5. The content split
 

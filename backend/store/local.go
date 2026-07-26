@@ -246,8 +246,9 @@ func sweepTempLeftovers(dir, ownTemp string) {
 	}
 }
 
-// Stat returns the file's size; a missing key is (0, nil) per the Backend
-// contract.
+// Stat returns the file's size. A missing key is an error wrapping
+// fs.ErrNotExist per the Backend contract; a nil error therefore PROVES the
+// file exists, zero-byte included.
 func (d *Local) Stat(_ context.Context, key string) (int64, error) {
 	file := d.localPath("stat", key)
 	fi, err := os.Stat(file)

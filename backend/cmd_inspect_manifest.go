@@ -296,15 +296,6 @@ func (o *InspectCmd) checkManifest(fetch keyGetter, core *DBCore) int {
 	return issues
 }
 
-// checkConfigSidecar validates config.gz. It is the ONLY source of the
-// operator's configuration now, so there is nothing to cross-check it against —
-// what is checkable is that it parses, that this binary can represent it, and
-// that every per-feed entry names a feed the store actually has. A stale entry
-// is INERT by §4.3 (it is what makes the two-object mutations of §6.4 safe
-// without a distributed commit), so it is reported and not counted as an issue.
-//
-// `expected` is whether the store should have published one at all: a store on
-// the v2 root always has, and its absence is then a real gap; a store still on
 // checkWatchNames validates the keyword-watchlist axis's structure: the roster,
 // its coverage window, and the positional list that has to line up with it
 // (watch.go, docs/MANIFEST-SPEC.md §4.8).
@@ -367,6 +358,15 @@ func (o *InspectCmd) checkWatchNames(bad func(string, ...any), names *ManifestNa
 	}
 }
 
+// checkConfigSidecar validates config.gz. It is the ONLY source of the
+// operator's configuration now, so there is nothing to cross-check it against —
+// what is checkable is that it parses, that this binary can represent it, and
+// that every per-feed entry names a feed the store actually has. A stale entry
+// is INERT by §4.3 (it is what makes the two-object mutations of §6.4 safe
+// without a distributed commit), so it is reported and not counted as an issue.
+//
+// `expected` is whether the store should have published one at all: a store on
+// the v2 root always has, and its absence is then a real gap; a store still on
 // the pre-cutover root legitimately has none (absence means "all defaults",
 // which is exactly how the store behaves without it).
 func (o *InspectCmd) checkConfigSidecar(fetch keyGetter, core *DBCore, expected bool) int {
