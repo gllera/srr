@@ -474,21 +474,51 @@ type fetchedFeed struct {
 // overcount by the discarded feeds (same advisory contract as a spool).
 //
 // Applied records adopt the fan-out's state wholesale like applyInbox, plus
-// the pieces the envelope does not carry: a discovery repoint of the URL
+// one piece the envelope does not carry: a discovery repoint of the URL
 // (guarded against the LIVE feed above, so only our own fan-out's repoint can
-// land), and the AssetBytes upload delta (relative, so it composes with an
-// expiration that ran in between). Items are repointed at the live feed —
-// PutArticles bumps TotalArt/ContentBytes on it — and returned for the batch.
+// land). Items are repointed at the live feed — PutArticles bumps
+// TotalArt/ContentBytes on it — and returned for the batch. The AssetBytes
+// delta is charged ABOVE the discard guards; see there for why.
 func (db *DB) applyFetched(fetched []fetchedFeed, today uint16) []*Item {
 	var articles []*Item
 	for _, f := range fetched {
 		snap := f.feed
 		live, ok := db.core.Feeds[snap.id]
 		if !ok {
+			// The one discard with no live feed to charge: the bytes this
+			// fan-out uploaded for a feed that has since been REMOVED stay
+			// uncharged by construction. Accepted — there is no counter left
+			// to hold them, and `ab` is per-feed by definition.
 			slog.Warn("feed removed during the fan-out; discarding its fetch",
 				"feed_id", snap.id, "url", snap.URL)
 			continue
 		}
+
+		// Charge the fan-out's asset uploads BEFORE the two discard guards
+		// below, because the uploads are not discardable: assets/ objects are
+		// content-hash-addressed and were AtomicPut during the fan-out, so they
+		// are durably in the store whether or not this record's articles land.
+		// Charging only on the apply path lost them permanently — a later cycle
+		// referencing the same hash gets a store-existence hit, for which
+		// UploadCacheRef reports 0 bytes, so nobody ever charges them — while
+		// expiration still DECREMENTS the object's size from the owner the
+		// reference sidecar recorded when it eventually leaves. `ab` then drifts
+		// down without bound (clamped at 0) against a store that really holds
+		// the bytes.
+		//
+		// This is NOT exact, and the trade is deliberate. When the cycle that
+		// WON the race also missed the store-existence probe and led its own Put
+		// of the same bytes, both cycles charge for one object — a bounded
+		// over-count of one object's size per racing pair. Against that: the old
+		// behavior was an unbounded, permanent UNDER-count, and the counter is
+		// never recomputed, only adjusted, so an under-count clamps to 0 and
+		// hides real footprint while an over-count merely overstates it.
+		//
+		// RELATIVE, never absolute: the snapshot's total predates any expiration
+		// a peer ran between the phases, so assigning it would resurrect the
+		// released bytes (TestApplyFetchedFoldsAssetBytesRelatively).
+		live.AssetBytes += snap.AssetBytes - f.priorAssetBytes
+
 		if live.URL != f.priorURL {
 			slog.Warn("feed URL repointed during the fan-out; discarding its fetch",
 				"feed", live, "fetched_url", f.priorURL, "feed_url", live.URL)
@@ -509,7 +539,6 @@ func (db *DB) applyFetched(fetched []fetchedFeed, today uint16) []*Item {
 		live.LastOK = snap.LastOK
 		live.FailStreak = snap.FailStreak
 		live.LastNew = snap.LastNew
-		live.AssetBytes += snap.AssetBytes - f.priorAssetBytes
 
 		for _, h := range snap.seenStamps {
 			db.seen.stamp(live.id, h, today)
