@@ -431,7 +431,22 @@ export function setupGestures(deps: GestureDeps): Gestures {
    // surface-aware gestures (the pull and the row swipe). The two-finger→
    // one-finger re-seed passes null on purpose: a gesture that began with two
    // fingers is a cycle/pinch that lost a finger, never a pull or a row action.
+   // A drag that STARTS on a media scrubber is a seek, never a swipe. Native
+   // media controls are shadow DOM, so the event retargets to the <audio>/
+   // <video> host — `closest` from there is the whole test.
+   const onScrubber = (target: EventTarget | null): boolean =>
+      target instanceof Element && target.closest("audio, video, .srr-player") !== null
+
    const trackSingle = (t: Touch, target: EventTarget | null) => {
+      // Declining the gesture outright (rather than stopping propagation at one
+      // element) is what makes this cover in-content media as well as the bar —
+      // see the guard note below.
+      if (onScrubber(target)) {
+         mode = "none"
+         pullCancel()
+         rowCancel()
+         return
+      }
       mode = "single"
       touchStartX = t.clientX
       touchStartY = t.clientY
@@ -439,21 +454,23 @@ export function setupGestures(deps: GestureDeps): Gestures {
       rowStart(target, t.clientX, t.clientY)
    }
 
-   // Gesture guard (RDR16): the player bar's seek control is a horizontal
-   // drag, and the touchstart/touchmove/touchend listeners below are bound to
-   // `document` with no target filtering — any 50px horizontal drag reads as
-   // a swipe and fires prev/next, so scrubbing the seek bar would navigate
-   // away instead of seeking. Stopping propagation at `.srr-player` keeps the
-   // touch from ever reaching the document-level handlers below. This also
-   // fixes the same latent problem for today's in-content `<audio controls>`
-   // scrubber — a horizontal drag inside its native seek control is exactly
-   // as indistinguishable from a swipe to these handlers. Queried
-   // defensively: `.srr-player` ships in index.html so this always finds it,
-   // but a null query here must not throw at setup — nothing below depends
-   // on the player module having run first.
-   document.querySelector(".srr-player")?.addEventListener("touchstart", (e) => e.stopPropagation(), {
-      passive: true,
-   })
+   // Gesture guard (RDR16): a seek control is a horizontal drag, and the
+   // touchstart/touchmove/touchend listeners below are bound to `document`
+   // with no target filtering — any 50px horizontal drag reads as a swipe and
+   // fires prev/next, so scrubbing would navigate away instead of seeking.
+   //
+   // This USED to be one `stopPropagation` listener on `.srr-player`, whose
+   // comment claimed it covered the in-content `<audio controls>` scrubber
+   // too. It did not, and could not: `fmt.ts` force-sets `controls` on content
+   // audio (the #enclosure podcast case), and that element lives in
+   // `.srr-content`, so its touches never passed through a listener bound to
+   // the bar. Scrubbing a podcast inside the article navigated away from it —
+   // the pointer twin of the keymap bug fixed alongside this, and hidden for
+   // as long as it was because the comment asserted the opposite.
+   //
+   // The test now lives in `trackSingle` (`onScrubber`) instead, so it covers
+   // the bar, in-content media, and any future scrubber, with no element to
+   // remember to bind.
 
    document.addEventListener(
       "touchstart",

@@ -232,11 +232,10 @@ describe("one-finger swipe", () => {
    })
 })
 
-// RDR16: the player bar's seek control is a horizontal drag identical in
-// shape to a swipe, and the document handlers above have no target
-// filtering — without the guard, scrubbing would fire prev/next instead of
-// seeking. `.srr-player` stops the touchstart from ever reaching them.
-describe("player gesture guard (RDR16)", () => {
+// RDR16: a seek control is a horizontal drag identical in shape to a swipe,
+// and the document handlers above have no target filtering — without the
+// guard, scrubbing fires prev/next instead of seeking.
+describe("scrubber gesture guard (RDR16)", () => {
    it("a touchstart inside .srr-player stops an otherwise-qualifying swipe from firing", () => {
       const player = document.querySelector(".srr-player")!
       dispatchTouch("touchstart", [{ clientX: 200, clientY: 300 }], undefined, player)
@@ -245,7 +244,30 @@ describe("player gesture guard (RDR16)", () => {
       expect(goPrev).not.toHaveBeenCalled()
    })
 
-   it("an identical swipe starting outside .srr-player still navigates", () => {
+   // The half that was missing. The guard used to be a stopPropagation listener
+   // bound to `.srr-player`, and its comment claimed it covered in-content media
+   // too — it could not, because fmt.ts force-sets `controls` on content audio
+   // (the #enclosure podcast case) and that element is in `.srr-content`, not in
+   // the bar. Scrubbing a podcast inside the article navigated away from it.
+   //
+   // Native media controls are shadow DOM, so a touch on the scrubber retargets
+   // to the <audio>/<video> host — which is exactly what these dispatch.
+   for (const tag of ["audio", "video"]) {
+      it(`a touchstart on an in-content <${tag}> scrubber does not navigate`, () => {
+         const content = document.createElement("div")
+         content.className = "srr-content"
+         const media = document.createElement(tag)
+         content.appendChild(media)
+         document.body.appendChild(content)
+
+         dispatchTouch("touchstart", [{ clientX: 200, clientY: 300 }], undefined, media)
+         end([], [{ clientX: 100, clientY: 300 }]) // dx = -100
+         expect(goNext).not.toHaveBeenCalled()
+         expect(goPrev).not.toHaveBeenCalled()
+      })
+   }
+
+   it("an identical swipe starting outside any scrubber still navigates", () => {
       start([{ clientX: 200, clientY: 300 }])
       end([], [{ clientX: 100, clientY: 300 }]) // dx = -100
       expect(goNext).toHaveBeenCalledTimes(1)
