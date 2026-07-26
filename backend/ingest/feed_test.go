@@ -327,6 +327,9 @@ func TestParseCallbackError(t *testing.T) {
 	if err == nil {
 		t.Error("expected callback error to propagate")
 	}
+	// Identity, not errors.Is: a callback error must reach the caller verbatim,
+	// and errors.Is would pass just as happily if ParseFeed wrapped it.
+	//nolint:errorlint // deliberate identity check
 	if err != testErr {
 		t.Errorf("got error %v, want %v", err, testErr)
 	}

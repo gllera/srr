@@ -91,6 +91,9 @@ func TestRewriteAttrsPropagatesFnError(t *testing.T) {
 		calls++
 		return "", false, wantErr
 	})
+	// Identity, not errors.Is: "surfaced verbatim" is the contract under test,
+	// and errors.Is would pass just as happily on a wrapped error.
+	//nolint:errorlint // deliberate identity check
 	if err != wantErr {
 		t.Fatalf("err = %v, want %v", err, wantErr)
 	}

@@ -1,5 +1,16 @@
 version: "2"
 
+# golangci defaults to max-issues-per-linter: 50 and max-same-issues: 3, which
+# silently TRUNCATE the report. That is reasonable for a codebase being brought
+# under a linter and actively wrong for one that gates at zero: this repo's
+# lint-be must stay clean, so every hidden issue is work that looks done. It
+# also makes triage lie — enabling bodyclose surfaced exactly 3 identical
+# findings, the cap, and errorlint's 4th `!=` comparison only appeared after the
+# first three were fixed. Unlimited (0) is the only honest setting here.
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
 linters:
   # Beyond the v2 default set (errcheck/govet/ineffassign/staticcheck/unused),
   # which covers none of the classes that actually bite a long-running fetcher.
@@ -12,6 +23,13 @@ linters:
     # a literal Close on the body value), so those three sites are suppressed
     # in place; every other HTTP call site in the tree passed unaided.
     - bodyclose
+    # The store layer dispatches on sentinels (os.ErrExist for lock contention,
+    # store.ErrPreconditionFailed for a lost root CAS, errors.ErrUnsupported for
+    # a backend declining a verb), and a `==` where errors.Is belongs silently
+    # unclassifies a wrapped one. Every surviving `==` is a test asserting an
+    # error propagates by IDENTITY, suppressed at the site — errors.Is there
+    # would accept exactly the wrapping the test exists to rule out.
+    - errorlint
 
   exclusions:
     # Idiomatic ignore-on-cleanup calls (deferred Close, Flush, os.Remove,

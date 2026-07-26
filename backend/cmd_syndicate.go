@@ -225,7 +225,7 @@ func validateOutPayload(format string, data []byte) error {
 	root := ""
 	for {
 		tok, err := dec.Token()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
