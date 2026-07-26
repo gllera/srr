@@ -536,6 +536,87 @@ func TestGCFallsBackToDrainWithoutList(t *testing.T) {
 	assertKey(t, dir, tailK(c, idxSeries), true)
 }
 
+// TestGCOrphanFailureKeepsTheLowWaterAndTheSuccesses is the batched sweep's
+// partial-failure contract (store.RmAll): one refused delete must neither
+// abort the deletes that landed nor advance `gcm` past a generation this run
+// did not finish. The sweep is warn-only, so the next run has to be able to
+// resume exactly here.
+func TestGCOrphanFailureKeepsTheLowWaterAndTheSuccesses(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	ch := &Feed{Title: "feed", URL: "https://example.com/f"}
+	if err := db.AddFeed(ch); err != nil {
+		t.Fatal(err)
+	}
+	putOneArticle(t, db, ch, 1)
+	if err := db.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	const reclaimable, stubborn = "data/9990.gz", "data/9991.gz"
+	for _, k := range []string{reclaimable, stubborn} {
+		if err := db.Put(ctx, k, strings.NewReader("orphaned bytes"), true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.Names.Next[dataSeries] = 9992
+	putOneArticle(t, db, ch, 2)
+	if err := db.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	db.Backend = &failRmBackend{Backend: db.Backend, failKey: stubborn}
+	if err := db.GC(ctx, 0); err == nil {
+		t.Fatal("GC = nil, want the refused delete reported")
+	}
+	assertKey(t, dir, reclaimable, false) // the delete that landed stays landed
+	assertKey(t, dir, stubborn, true)
+	if c.GCManifest != 0 {
+		t.Errorf("gcm=%d, want 0 — a run that refused a delete clears no generation", c.GCManifest)
+	}
+	assertKey(t, dir, manifestKey(1), true) // so the superseded generation is still there to retry
+}
+
+// The same rule one level down: inside the drain, a generation whose objects
+// did not ALL go is not cleared, so the low-water mark stays below it — while
+// the earlier generation this run did finish stays cleared.
+func TestGCGenerationFailureHoldsTheLowWater(t *testing.T) {
+	db, c, dir := setupTestDB(t)
+	ch := &Feed{Title: "feed", URL: "https://example.com/f"}
+	if err := db.AddFeed(ch); err != nil {
+		t.Fatal(err)
+	}
+	putOneArticle(t, db, ch, 1)
+	if err := db.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	gen1Idx := tailK(c, idxSeries)
+
+	putOneArticle(t, db, ch, 2)
+	if err := db.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	gen2Idx, gen2Data := tailK(c, idxSeries), tailK(c, dataSeries)
+
+	putOneArticle(t, db, ch, 3)
+	if err := db.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// The drain shape, so the generation loop is the one issuing the deletes.
+	db.Backend = noListBackend{&failRmBackend{Backend: db.Backend, failKey: gen2Idx}}
+	if err := db.GC(ctx, 0); err == nil {
+		t.Fatal("GC = nil, want the refused delete reported")
+	}
+	if c.GCManifest != 1 {
+		t.Fatalf("gcm=%d, want 1 (generation 1 cleared, generation 2 not)", c.GCManifest)
+	}
+	assertKey(t, dir, gen1Idx, false)
+	assertKey(t, dir, manifestKey(1), false)
+	assertKey(t, dir, gen2Data, false) // the sibling delete still landed
+	assertKey(t, dir, gen2Idx, true)
+	assertKey(t, dir, manifestKey(2), true) // never dropped without its objects
+}
+
 // TestConfigSidecarWrittenOnConfigChangeOnly pins the write gate: config.gz is
 // bootstrapped on the first commit and then rewritten ONLY when configuration
 // actually changed — an ordinary fetch cycle must not touch it.

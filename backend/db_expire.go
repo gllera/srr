@@ -6,11 +6,15 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 
 	"golang.org/x/net/html"
 	"golang.org/x/sync/errgroup"
+
+	"srr/store"
 )
 
 // errExpireDone stops the expiration walk at the first article young enough
@@ -137,16 +141,16 @@ func (o *DB) ExpireArticles(ctx context.Context, now int64) error {
 	// only here — retry idempotence needs it, and a real error still aborts
 	// with nothing deleted); a mid-delete Rm failure
 	// therefore loses the decrement for the keys it did delete — accepted skew,
-	// same class as the no-liveness-check trade-off. Each phase fans out over a
-	// bounded errgroup — the per-key calls are independent WAN round-trips made
-	// while the fetch cycle holds the store lock, and the sums commute — with
-	// the Wait between the phases preserving the no-Rm-before-every-Stat
-	// boundary the all-or-nothing retry depends on.
+	// same class as the no-liveness-check trade-off. Both phases fan their
+	// independent per-key round-trips out under one bound — they are WAN calls
+	// made while the fetch cycle holds the store lock, and the sums commute —
+	// with the measure phase completing in full first, which is the
+	// no-Rm-before-every-Stat boundary the all-or-nothing retry depends on.
 	freed := map[int]int64{}
 	var freedBytes int64
 	var mu sync.Mutex
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(max(1, globals.Workers)) // Workers is 0 when the CLI didn't run (tests)
+	g.SetLimit(rmParallel())
 	for key, owner := range assetOwner {
 		g.Go(func() error {
 			size, err := o.Stat(gctx, key)
@@ -165,18 +169,12 @@ func (o *DB) ExpireArticles(ctx context.Context, now int64) error {
 	if err := g.Wait(); err != nil {
 		return err
 	}
-	g, gctx = errgroup.WithContext(ctx)
-	g.SetLimit(max(1, globals.Workers))
-	for key := range assetOwner {
-		g.Go(func() error {
-			if err := o.Rm(gctx, key); err != nil {
-				return fmt.Errorf("delete %s: %w", key, err)
-			}
-			return nil
-		})
-	}
-	if err := g.Wait(); err != nil {
-		return err
+	// The delete phase is store.RmAll's shape exactly (a bounded fan-out, one
+	// batched call where the backend has one), and unlike the measure phase it
+	// wants every delete ATTEMPTED rather than a first-error abort: the ones
+	// that land are bytes genuinely reclaimed, and the retry re-stats the rest.
+	if _, err := store.RmAll(ctx, o.Backend, slices.Sorted(maps.Keys(assetOwner)), rmParallel()); err != nil {
+		return fmt.Errorf("deleting expired assets: %w", err)
 	}
 
 	expired := 0

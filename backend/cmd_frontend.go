@@ -278,21 +278,21 @@ func frontendUpdate(ctx context.Context, backend store.Backend, client *http.Cli
 	}
 
 	// Delete the previous version's orphans. A failed delete stays tracked (it is
-	// kept in the final manifest) so the next run retries it — never dropped.
+	// kept in the final manifest) so the next run retries it — never dropped,
+	// which is exactly the per-key answer store.RmAll reports: the keys still in
+	// the store, with the successes already gone.
 	newSet := toSet(newKeys)
-	var failed []string
-	removed := 0
+	var stale []string
 	for _, key := range oldKeys {
-		if newSet[key] {
-			continue
+		if !newSet[key] {
+			stale = append(stale, key)
 		}
-		if err := backend.Rm(ctx, key); err != nil {
-			slog.Warn("frontend: removing stale file failed", "key", key, "err", err)
-			failed = append(failed, key)
-			continue
-		}
-		removed++
 	}
+	failed, rmErr := store.RmAll(ctx, backend, stale, rmParallel())
+	if rmErr != nil {
+		slog.Warn("frontend: removing stale files failed", "keys", failed, "err", rmErr)
+	}
+	removed := len(stale) - len(failed)
 
 	if err := writeSitemap(ctx, backend, union(newKeys, failed)); err != nil {
 		return fmt.Errorf("writing sitemap: %w", err)
