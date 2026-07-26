@@ -5,11 +5,13 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -529,6 +531,84 @@ func TestSFTPWedgedIdentityDoesNotBlockOthers(t *testing.T) {
 	}
 }
 
+// The probe must not be able to break the traffic it is asking about. A session
+// is SHARED — pkg/sftp multiplexes every handle's requests over one SSH channel
+// — so bounding the probe with conn.SetDeadline was the wrong instrument: an
+// absolute deadline applies to all pending and future I/O on the connection, so
+// a probe taking its full budget times out another worker's in-flight upload.
+// (Reproduced directly: a SetDeadline on one end of a net.Pipe fails a
+// concurrent Read with i/o timeout.)
+//
+// The invariant is asserted directly — "the probe never sets a deadline on the
+// shared conn" — rather than through timing. A behavioural version is a trap: a
+// probe that answers quickly clears its own deadline before the concurrent read
+// notices, so the test passes against the very bug it exists to catch. The
+// damage only lands when the probe is SLOW, which is precisely the case a fast
+// unit test does not reproduce. So count the calls instead.
+func TestSFTPProbeDoesNotDeadlineTheSharedTransport(t *testing.T) {
+	client, _, kill := newPipeSFTPClient(t)
+	a, b := net.Pipe()
+	t.Cleanup(func() { a.Close(); b.Close() })
+	spy := &deadlineSpy{Conn: a}
+	s := &sftpSession{client: client, conn: spy}
+
+	if got := s.probe(false); got != sessionHealthy {
+		t.Fatalf("probe = %v, want sessionHealthy (the pipe server answers)", got)
+	}
+	// ...and on the unhealthy path too, which is where a deadline would be most
+	// tempting and most destructive.
+	kill()
+	if got := s.probe(false); got == sessionHealthy {
+		t.Fatalf("probe = %v, want a non-healthy answer after the peer died", got)
+	}
+
+	if n := spy.deadlines.Load(); n != 0 {
+		t.Errorf("probe() called SetDeadline %d time(s) on the shared transport; want 0 — "+
+			"the conn carries every other handle's in-flight I/O, so an absolute deadline "+
+			"armed here times out their transfers, not just this probe", n)
+	}
+	_ = b
+}
+
+// deadlineSpy counts deadline calls on a conn without changing its behaviour.
+type deadlineSpy struct {
+	net.Conn
+	deadlines atomic.Int32
+}
+
+func (c *deadlineSpy) SetDeadline(t time.Time) error {
+	c.deadlines.Add(1)
+	return c.Conn.SetDeadline(t)
+}
+
+func (c *deadlineSpy) SetReadDeadline(t time.Time) error {
+	c.deadlines.Add(1)
+	return c.Conn.SetReadDeadline(t)
+}
+
+func (c *deadlineSpy) SetWriteDeadline(t time.Time) error {
+	c.deadlines.Add(1)
+	return c.Conn.SetWriteDeadline(t)
+}
+
+// The freshness short-circuit: a session that answered moments ago is not
+// probed at all. That is what keeps the probe away from exactly the sessions
+// with live traffic to lose — and it must NOT apply to sftpSessionRefresh,
+// which asks precisely because an op just failed.
+func TestSFTPProbeTrustsRecentSuccess(t *testing.T) {
+	client, _, kill := newPipeSFTPClient(t)
+	s := &sftpSession{client: client}
+	s.markOK()
+	kill() // the peer is gone, but the stamp is fresh
+
+	if got := s.probe(true); got != sessionHealthy {
+		t.Errorf("probe(trustFresh) = %v, want sessionHealthy from the recent-success stamp", got)
+	}
+	if got := s.probe(false); got == sessionHealthy {
+		t.Error("probe(false) trusted the stamp; refresh must do the real round trip")
+	}
+}
+
 // A memoized session outlives the handle that dialed it, so a server restart or
 // an idle disconnect leaves a corpse in the map. The liveness probe is what
 // keeps it from being handed out.
@@ -542,7 +622,7 @@ func TestSFTPSessionRedialedWhenDead(t *testing.T) {
 		t.Fatalf("sftpSessionFor: %v", err)
 	}
 	c.kill() // the peer went away between two Opens
-	if dead.alive() {
+	if dead.probe(false) == sessionHealthy {
 		t.Fatal("the probe still calls a session with no peer alive")
 	}
 
@@ -556,7 +636,7 @@ func TestSFTPSessionRedialedWhenDead(t *testing.T) {
 	if c.dials != 2 {
 		t.Errorf("dials = %d, want 2 (the redial)", c.dials)
 	}
-	if !live.alive() {
+	if live.probe(false) != sessionHealthy {
 		t.Error("the replacement session does not answer")
 	}
 }
