@@ -18,9 +18,12 @@ import (
 
 // maxBoundaryGUIDs caps the persisted per-feed BoundaryGUIDs array. Real
 // publishers expose at most a few hundred items per response; without a cap,
-// one misbehaving feed (thousands of dateless or same-second items) bloats
-// db.gz — the one no-cache object every reader polls — permanently. See the
-// cap logic in fetchURL for the over-cap semantics.
+// one misbehaving feed (thousands of dateless or same-second items) bloats the
+// dedup sidecar permanently. (The cap predates the relocation, when bg rode in
+// db.gz — the one no-cache object every reader polls; it is now a bound on the
+// backend-only seen/ object, which is why the cap is a cost question rather
+// than a reader-bandwidth one.) See the cap logic in fetchURL for the over-cap
+// semantics.
 const maxBoundaryGUIDs = 1024
 
 // pipeDefault is the token expanded inline to the next pipe down the fallback
@@ -105,6 +108,22 @@ type Feed struct {
 	// rebuilds bg on the next fetch, and Watermark (which STAYS in db.gz, also
 	// reader-displayed) floors dated duplicates meanwhile, so at most one cycle
 	// of dateless/at-watermark items could re-ingest once.
+	//
+	// NOT subsumed by the seen pool it shares the sidecar with (FMT3, verified
+	// 2026-07-26 — do not delete it as "redundant"). The two have different
+	// shapes and cover different failures:
+	//   - bg is a SNAPSHOT, persisted verbatim and NEVER aged. A 304 or a
+	//     backoff-thinned cycle collects no pool stamp but re-persists bg
+	//     unchanged, so bg survives arbitrarily long dormancy.
+	//   - the pool is AGE-BOUNDED: cmd_fetch's evict sweeps the whole pool every
+	//     cycle, so a feed that 304s longer than its horizon has no pool entries
+	//     left. That is deliberate, and it is exactly the window bg covers.
+	//   - the pool is also GATED PER FEED: DedupDays == -1 turns it off entirely
+	//     (poolOn below), leaving bg as the only GUID memory that feed has.
+	// On a dateless feed (no pubDate ⇒ Watermark stays 0 ⇒ no watermark floor)
+	// either gap means re-ingesting the whole window. Pinned by
+	// TestFetchDatelessWindowDedupedByBgAfterPoolHorizon and
+	// TestFetchDisabledPoolDedupsDatelessWindowViaBgOnly.
 	BoundaryGUIDs []uint32 `json:"-"`
 	FetchError    string   `json:"ferr,omitempty"`
 	// LastOK is the unix-second of the last successful fetch (including 304
@@ -501,6 +520,12 @@ func (c *Feed) fetchURL(ctx context.Context, run *fetchRun, buf []byte, processo
 	// preserving Watermark/BoundaryGUIDs and the HTTP validators. Dateless
 	// items bypass the watermark by design, so any dateless presence means
 	// the response may carry new content and disables the guard.
+	//
+	// Its INPUTS are Watermark and the response's own dates alone — maxSeen and
+	// hasDateless are gathered above over first occurrences of every GUID,
+	// before the priorBoundary/pool test, so bg reaches the condition nowhere.
+	// bg is the guard's PURPOSE, not its input (FMT3; pinned by
+	// TestStaleResponseGuardDoesNotConsultBg).
 	if maxSeen > 0 && maxSeen < priorWatermark && !hasDateless {
 		slog.Warn("ignoring stale feed response", "url", c.URL, "newest", maxSeen, "watermark", priorWatermark)
 		return nil, nil

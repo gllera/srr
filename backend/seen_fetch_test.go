@@ -470,3 +470,160 @@ func TestFetchSeenPoolOverCapPoolHitStaysRemembered(t *testing.T) {
 		t.Errorf("R's pool clock = %d, want 130 (a pooled over-cap item must stay remembered, not age out)", got)
 	}
 }
+
+// FMT3 — the dateless-guid window bg covers and the seen pool does NOT.
+//
+// The finding "bg is likely subsumed by the seen pool" asked for this window to
+// be verified before deleting bg. It is not subsumed: the two memories have
+// different SHAPES, and this is the case that separates them.
+//
+//   - bg is a SNAPSHOT of the last non-empty response's window, persisted
+//     verbatim and never aged. A 304 (or a backoff-thinned skip) returns from
+//     fetchURL before any stamp is collected — `c.seenStamps = nil` then the
+//     NotModified return — while applyFetched's `live.BoundaryGUIDs =
+//     snap.BoundaryGUIDs` + SyncSeen re-persist bg unchanged. So bg survives
+//     arbitrarily long dormancy.
+//   - the pool is an AGE-BOUNDED memory. cmd_fetch's evict runs every cycle over
+//     the WHOLE pool, deliberately: "an unfetched feed's entries are retained
+//     (they age out over the horizon), while stamps come only from feeds fetched
+//     this cycle". A feed that 304s for longer than its horizon therefore has NO
+//     pool entries left — by design, not by accident.
+//
+// A DATELESS feed (no pubDate ⇒ Watermark stays 0 ⇒ the watermark floor can
+// never fire, feed.go's `pubUnix != 0 && pubUnix < priorWatermark` gate) that
+// goes quiet past its horizon and then serves the same window again has exactly
+// one thing between it and re-ingesting that whole window: bg. Pinned both ways
+// — bg suppresses, and the counterfactual with bg deleted duplicates.
+func TestFetchDatelessWindowDedupedByBgAfterPoolHorizon(t *testing.T) {
+	const window = `<item><title>A</title><guid>a</guid><link>https://e/a</link></item>` +
+		`<item><title>B</title><guid>b</guid><link>https://e/b</link></item>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `<rss version="2.0"><feed>%s</feed></rss>`, window)
+	}))
+	defer srv.Close()
+
+	const horizon, day1 = 30, uint16(100)
+	const day2 = day1 + horizon + 1 // one day past the horizon: evict drops day1's stamps
+
+	// run does fetch1 → age the pool past the horizon → fetch2, reporting how
+	// many items fetch2 ingested and how many pool entries survived the ageing.
+	// dropBg models bg's deletion (the finding's proposal).
+	run := func(dropBg bool) (ingested, poolLeft int) {
+		pool := newSeenPool()
+		ch := &Feed{Title: "T"}
+		if got := fetchWithPool(t, ch, srv, pool, horizon, day1); len(got) != 2 {
+			t.Fatalf("fetch1: got %d, want 2 (both dateless items new)", len(got))
+		}
+		if ch.Watermark != 0 {
+			t.Fatalf("Watermark = %d, want 0 — a dateless feed has no watermark floor, which is the premise here", ch.Watermark)
+		}
+		// The feed goes quiet: cycles keep running (304 ⇒ no stamps) while evict
+		// sweeps the whole pool, so this feed's entries age out.
+		pool.evict(day2, func(int) int { return horizon }, seenFeedCap, map[int]*Feed{ch.id: ch})
+		poolLeft = len(pool.m)
+		if dropBg {
+			ch.BoundaryGUIDs = nil
+		}
+		return len(fetchWithPool(t, ch, srv, pool, horizon, day2)), poolLeft
+	}
+
+	got, poolLeft := run(false)
+	if poolLeft != 0 {
+		t.Fatalf("pool retained %d entries past the horizon, want 0 — the premise of this test", poolLeft)
+	}
+	if got != 0 {
+		t.Errorf("fetch2 ingested %d, want 0 (bg still holds the window the pool aged out)", got)
+	}
+	if got, _ := run(true); got != 2 {
+		t.Errorf("fetch2 without bg ingested %d, want 2 — deleting bg re-ingests a dormant dateless feed's whole window as duplicates", got)
+	}
+}
+
+// FMT3 — the seen pool is GATED PER FEED and bg is the ungated fallback, so bg
+// is not redundant for a feed that opted out. `Feed.DedupDays == -1`
+// (dedupDisabled) makes `poolOn` false, seenBefore short-circuits to "not seen"
+// and evict actively drops the feed's residual entries — the documented off
+// switch. For such a feed bg is the ONLY GUID memory there is, and on a dateless
+// feed (no watermark floor) it is the only dedup of any kind.
+//
+// TestFetchSeenPoolDisabledFallsBackToBg pins that the pool does not suppress
+// here; this pins the other half — that bg does, and that nothing else would.
+func TestFetchDisabledPoolDedupsDatelessWindowViaBgOnly(t *testing.T) {
+	const window = `<item><title>A</title><guid>a</guid><link>https://e/a</link></item>` +
+		`<item><title>B</title><guid>b</guid><link>https://e/b</link></item>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `<rss version="2.0"><feed>%s</feed></rss>`, window)
+	}))
+	defer srv.Close()
+
+	run := func(dropBg bool) (ingested, pooled int) {
+		pool := newSeenPool()
+		ch := &Feed{Title: "T", DedupDays: dedupDisabled} // the operator's off switch
+		if got := fetchWithPool(t, ch, srv, pool, 30, 100); len(got) != 2 {
+			t.Fatalf("fetch1: got %d, want 2", len(got))
+		}
+		if dropBg {
+			ch.BoundaryGUIDs = nil
+		}
+		return len(fetchWithPool(t, ch, srv, pool, 30, 100)), len(pool.m)
+	}
+
+	got, pooled := run(false)
+	if pooled != 0 {
+		t.Fatalf("disabled feed stamped %d pool entries, want 0 — the premise of this test", pooled)
+	}
+	if got != 0 {
+		t.Errorf("fetch2 ingested %d, want 0 (bg is the disabled feed's only dedup)", got)
+	}
+	if got, _ := run(true); got != 2 {
+		t.Errorf("fetch2 without bg ingested %d, want 2 — deleting bg leaves a `--dedup-days -1` dateless feed with NO dedup at all", got)
+	}
+}
+
+// FMT3 — the stale-response guard does NOT consult bg, so bg's deletion would
+// not break the guard's decision (the finding's second suspected obstacle,
+// narrowed). Its inputs are Watermark and the response's own dates: `maxSeen`
+// and `hasDateless` are gathered over first occurrences of every GUID BEFORE the
+// `priorBoundary`/pool test, so nothing bg holds reaches the condition.
+//
+// What bg is to the guard is its PURPOSE, not its input: the guard exists
+// because rebuilding the bg snapshot from a stale cache copy evicts the
+// watermark items' GUIDs, so the fresh copy one cycle later re-ingests them.
+// Pinned by firing the guard with an EMPTY bg — the response's own item is not
+// remembered anywhere, yet the response is still ignored wholesale (bg is not
+// rebuilt from it and its ETag is not adopted).
+func TestStaleResponseGuardDoesNotConsultBg(t *testing.T) {
+	// Newest dated item is Jan 01; the watermark sits a day above it.
+	const stale = `<rss version="2.0"><feed><item><title>OLD</title><guid>old</guid>` +
+		`<pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item></feed></rss>`
+	const watermark int64 = 1704153600 // 2024-01-02, strictly above the item's pub
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("ETag", `"stale-copy"`)
+		fmt.Fprint(w, stale)
+	}))
+	defer srv.Close()
+
+	pool := newSeenPool()
+	ch := &Feed{Title: "T", Watermark: watermark} // bg deliberately empty
+
+	if got := fetchWithPool(t, ch, srv, pool, 30, 100); len(got) != 0 {
+		t.Fatalf("stale fetch ingested %d, want 0", len(got))
+	}
+	// The guard returns before the tail, so bg is never rebuilt from the stale
+	// window. Without it, bg would come back as the single opt-class GUID.
+	if len(ch.BoundaryGUIDs) != 0 {
+		t.Errorf("BoundaryGUIDs = %v, want empty — the guard must fire on a watermark/date comparison alone, with no bg to consult", ch.BoundaryGUIDs)
+	}
+	// Same reason the ETag is withheld: the response is ignored wholesale, so the
+	// next cycle refetches instead of being answered 304 from a stale generation.
+	if ch.ETag != "" {
+		t.Errorf("ETag = %q, want empty (a guarded stale response must not advance the validators)", ch.ETag)
+	}
+	if ch.Watermark != watermark {
+		t.Errorf("Watermark = %d, want %d (preserved)", ch.Watermark, watermark)
+	}
+	if len(pool.m) != 0 {
+		t.Errorf("stale response stamped %d pool entries, want 0", len(pool.m))
+	}
+}

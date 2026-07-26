@@ -22,6 +22,12 @@ import (
 // watermark (the re-dated pub sits above it) nor bg (the GUID aged out) can.
 // The reader never fetches it; a missing/corrupt pool degrades to watermark-only
 // dedup (bg rides here too now), never an article loss. See backend/SEEN-POOL-PLAN.md.
+//
+// Sharing the sidecar with bg does NOT make bg redundant (FMT3, §11 of the plan):
+// the pool is age-bounded (evict runs every cycle over the whole pool, so a feed
+// that 304s past its horizon keeps nothing) and gated per feed (DedupDays == -1
+// turns it off), while bg is an un-aged, ungated snapshot of the last window.
+// They cover complementary failures — see Feed.BoundaryGUIDs for the full case.
 
 const (
 	// seenLegacyKey is the pre-ping-pong single-object name. Read once as a
