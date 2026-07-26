@@ -454,6 +454,131 @@ func TestSyncMetaInconsistentCoverageFailureKeepsNames(t *testing.T) {
 	}
 }
 
+// metaCountPutBackend counts the meta/ writes a sync attempts and can fail the
+// nth of them, so a test can interrupt a sync PARTWAY — after some shards are
+// already durable — instead of at its very first write (metaTPutFailBackend).
+// Pack saves route through AtomicPut, so that is the only method to intercept.
+type metaCountPutBackend struct {
+	store.Backend
+	failAt int // 1-based meta/ write to fail; 0 = fail none
+	puts   int // meta/ writes attempted
+}
+
+func (b *metaCountPutBackend) AtomicPut(ctx context.Context, key string, r io.Reader, meta store.ObjectMeta) error {
+	if !strings.HasPrefix(key, metaSeries+"/") {
+		return b.Backend.AtomicPut(ctx, key, r, meta)
+	}
+	b.puts++
+	if b.puts == b.failAt {
+		return errMetaTPutFail
+	}
+	return b.Backend.AtomicPut(ctx, key, r, meta)
+}
+
+// A sync interrupted after finalizing at least one shard must PUBLISH what it
+// wrote — those shards are durable (putAt runs strictly after saveMetaShard),
+// so discarding them makes the next run re-pay the whole walk + re-encode, and
+// on a flaky store a large rebuild then never completes. The published state is
+// a lag, never an overclaim: fewer shards than the store has finalized, a tail
+// matching mt, and a summary covering exactly mp.
+func TestSyncMetaPartialProgressAdopted(t *testing.T) {
+	db, dir := setupSplitBoundaryDB(t, 2*metaPackSize)
+	c := &db.core
+
+	// Shard 0 finalizes, shard 1's save fails; the salvage path then writes the
+	// tail (write 3) and the one-shard summary (write 4).
+	be := &metaCountPutBackend{Backend: db.Backend, failAt: 2}
+	db.Backend = be
+
+	if err := db.SyncMeta(ctx, nil); !errors.Is(err, errMetaTPutFail) {
+		t.Fatalf("SyncMeta err = %v, want the injected failure", err)
+	}
+	if c.metaPacks() != 1 || c.MetaTail != metaPackSize {
+		t.Fatalf("salvaged coverage = (%d, %d), want (1, %d)", c.metaPacks(), c.MetaTail, metaPackSize)
+	}
+	if c.Names.SSum == nil || c.Names.SSum.Covers != 1 {
+		t.Fatalf("summary = %+v, want one covering the single salvaged shard", c.Names.SSum)
+	}
+	shard0 := posK(c, metaSeries, 0)
+	if shard0 == "" {
+		t.Fatal("the salvaged shard is not named")
+	}
+	// Everything the salvaged table names must be on the store, and the tail
+	// must hold exactly the entries mt claims (M4 + the checker's contract).
+	for _, key := range []string{shard0, tailK(c, metaSeries), c.Names.ssumKey()} {
+		assertKey(t, dir, key, true)
+	}
+	if entries := readMetaEntries(t, dir, tailK(c, metaSeries), false); len(entries) != c.MetaTail {
+		t.Fatalf("tail holds %d entries, mt claims %d", len(entries), c.MetaTail)
+	}
+	// The salvaged generation must be a LEGAL published state, not merely a
+	// smaller one: `srr inspect --validate` reads a lagging mp as a warning but
+	// a tail-less or under-covered summary as corruption, which is why salvage
+	// publishes the tail and the summary rather than the shards alone.
+	if err := db.SyncIdxSummary(ctx); err != nil {
+		t.Fatalf("SyncIdxSummary: %v", err)
+	}
+	if err := db.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := (&InspectCmd{Chron: -1, Validate: true}).Run(); err != nil {
+		t.Fatalf("inspect --validate on the salvaged generation: %v", err)
+	}
+
+	// The next sync resumes at the seam: it re-finalizes only shard 1 and
+	// republishes the tail + summary — 3 meta writes, not the 4 a from-scratch
+	// rebuild would cost — and leaves the salvaged shard's name untouched.
+	be.failAt, be.puts = 0, 0
+	if err := db.SyncMeta(ctx, nil); err != nil {
+		t.Fatalf("SyncMeta (resume): %v", err)
+	}
+	if be.puts != 3 {
+		t.Fatalf("resumed sync wrote %d meta objects, want 3 (shard 1 + tail + summary)", be.puts)
+	}
+	if got := posK(c, metaSeries, 0); got != shard0 {
+		t.Fatalf("resumed sync re-finalized shard 0 (%q, was %q)", got, shard0)
+	}
+	if c.metaPacks() != 2 || c.MetaTail != 1 {
+		t.Fatalf("resumed coverage = (%d, %d), want (2, 1)", c.metaPacks(), c.MetaTail)
+	}
+	entries := readMetaEntries(t, dir, posK(c, metaSeries, 1), true)
+	if len(entries) != metaPackSize || entries[0].Title != fmt.Sprintf("A%d", metaPackSize) {
+		t.Fatalf("shard 1 = %d entries starting %q, want %d starting A%d",
+			len(entries), entries[0].Title, metaPackSize, metaPackSize)
+	}
+}
+
+// The other half of the same rule: a failure that finalized NOTHING adopts
+// nothing and does not even try to publish — the staged clone is then a bare
+// truncation of a valid series, and committing it would name zero meta shards
+// while valid ones sit on the store.
+func TestSyncMetaZeroProgressFailureAdoptsNothing(t *testing.T) {
+	db, _ := setupMetaBoundaryDB(t)
+	c := &db.core
+
+	if err := db.SyncMeta(ctx, nil); err != nil {
+		t.Fatalf("SyncMeta (baseline): %v", err)
+	}
+	before, beforeTail := c.metaPacks(), tailK(c, metaSeries)
+
+	// Trip the inconsistent-coverage rebuild, then fail its very first write.
+	c.MetaTail = metaPackSize + 5
+	metaTailMemo.reset()
+	be := &metaCountPutBackend{Backend: db.Backend, failAt: 1}
+	db.Backend = be
+
+	if err := db.SyncMeta(ctx, nil); !errors.Is(err, errMetaTPutFail) {
+		t.Fatalf("SyncMeta err = %v, want the injected failure", err)
+	}
+	if be.puts != 1 {
+		t.Fatalf("%d meta writes attempted, want 1 (no publish after zero progress)", be.puts)
+	}
+	if c.metaPacks() != before || tailK(c, metaSeries) != beforeTail {
+		t.Fatalf("names moved on a zero-progress failure: mp=%d tail=%q, want %d / %q",
+			c.metaPacks(), tailK(c, metaSeries), before, beforeTail)
+	}
+}
+
 // SyncMeta trusts a read-back tail only when its line count matches MetaTail.
 // This exercises the count-MISMATCH branch (an existing but wrong-length tail),
 // distinct from the missing-tail read-ERROR branch (TestSyncMetaRebuildsMissingTail):
