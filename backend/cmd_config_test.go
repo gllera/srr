@@ -32,6 +32,7 @@ func TestCacheDirDefaultResolved(t *testing.T) {
 		"maxBatchBytes": "1",
 		"keepManifests": "1",
 		"cacheDir":      defaultCacheDir(),
+		"syncDir":       defaultSyncDir(),
 	})
 	if err != nil {
 		t.Fatalf("kong.New: %v", err)

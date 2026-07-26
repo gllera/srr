@@ -102,6 +102,22 @@ Use a `headersHelper` in `.mcp.json` instead of literal `--header` values to kee
 - **`srr_list_articles`' exact `Total` with `query` reads every data pack inside the window.** Pair `query` with `since` (e.g. `"7d"`) on a large store.
 - The endpoint inherits serve's loopback Host guard, and `/mcp` exposes a strict subset of what `/api/*` already offers the same caller — there is no separate on/off flag.
 
+## Profile sync
+
+The reader can sync its device-local profile — read frontiers, the ★ Saved queue and their per-key timestamps — between devices over one HTTP endpoint. `srr serve` provides that endpoint first-party, so there is no KV worker to stand up:
+
+```
+GET  /sync/<name>   →  200 + the last-stored profile JSON, or 404 when none is stored yet
+PUT  /sync/<name>   →  204, storing the body verbatim
+```
+
+Point a reader at it from the reader's own settings menu → **Sync…** → the full endpoint URL (e.g. `https://reader.example.com/sync/phone`). Each `<name>` is a separate slot, so several people (or several profiles) share one server.
+
+- **Where the blob lives**: a file under `--sync-dir` (default `~/.config/srr/sync/<name>.json`), **not** the pack store. The profile is device state, not store state — it is deliberately absent from the manifest and the writer↔reader pack contract — and a store may be public by explicit choice, where a reading history has no business being. `SRR_SYNC_DIR=` (empty) turns the endpoint off; it then reports itself disabled.
+- **Concurrency is last-writer-wins**, whole-blob. That is what the reader already assumes: every sync cycle pulls and merges before it pushes, and it pushes whenever the endpoint is *behind* — so a device whose state an overwrite clobbered republishes it on its next cycle. Writes are atomic (temp file + rename), so a reader never sees a half-written profile.
+- **Bounds**: a PUT body must be a JSON object of at most 1 MiB; anything else is rejected without touching the stored blob.
+- **Same origin, by design.** The endpoint sits behind the same loopback `hostGuard` as `/api/*` and `/mcp`, which refuses a browser request that is not same-origin. So route the reader and `/sync/` under **one hostname** — e.g. one Cloudflare tunnel ingress rule sending `/sync/*` to `srr serve` (with the usual `httpHostHeader: localhost:8088` rewrite) and the rest to wherever the reader is hosted. A reader on a different hostname than the endpoint is refused, and that is the guard working, not a bug. Put an auth layer (Access, basic auth) in front: the reader's fetches carry `credentials: "include"`.
+
 ## Project Structure
 
 ```
