@@ -1261,7 +1261,7 @@ export function groupFeedsByTag(includeEmpty = false, store: Store = active): Gr
 // matchAll finds every reference in a data pack's articles.
 const ASSET_REF_RE = /assets\/[0-9a-f]{2}\/[0-9a-f]{16}(?:\.\w+)?/gi
 
-export async function packNamesForFilter(feeds: Map<number, number>, store: Store = active): Promise<string[]> {
+export async function packNamesForFilter(feeds: ReadonlyMap<number, number>, store: Store = active): Promise<string[]> {
    if (store.db.total_art === 0) return []
 
    const nfIdx = numFinalizedIdx(store)

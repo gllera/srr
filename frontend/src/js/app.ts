@@ -205,7 +205,7 @@ function reReadReader() {
       reader.reprobeReaderChrome()
       return
    }
-   if (nav.filter.active && nav.filter.tokens.length > 1) return
+   if (nav.isFilterActive() && nav.filterTokens().length > 1) return
    void guard(() => nav.switchFilter(nav.getCurrentFilterKey()))
 }
 
@@ -611,7 +611,7 @@ async function init() {
       if (mountsChanged) menus.afterMountChange(loadMounts())
       nav.pruneSeen()
       refreshSaveButton(!el.save.disabled)
-      if (view === "list" && !hasInteracted && !nav.filter.saved && !nav.filter.search) {
+      if (view === "list" && !hasInteracted && !nav.isSavedFilter() && !nav.isSearchFilter()) {
          // The BOOT pull changed the profile before anything was touched — the
          // device-switch moment, and the navigator half of the sync feature
          // (the profile syncs on page load; there is deliberately no button):
@@ -622,7 +622,7 @@ async function init() {
          // gentle: that position is a restored mid-article read or a shared
          // deep link — swapping the on-screen article out from under the reader
          // would be wrong in both cases.
-         nav.applyFilter([...nav.filter.tokens])
+         nav.applyFilter([...nav.filterTokens()])
          void list.render()
       } else if (view !== "reader") {
          void list.rerender()

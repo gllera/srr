@@ -466,15 +466,30 @@ export const filter = {
 // they are its representation, not its API. Every production consumer reads the
 // mode through an accessor instead, so the representation can evolve without
 // touching a consumer: isSearchFilter() below is the original member of this
-// set, and these two complete it for the reads list.ts makes. (`filter` itself
-// stays exported and mutable: nav.test.ts / list.test.ts / app.test.ts and
-// several e2e suites set up state by writing to it directly.)
+// set, and these complete it for every production read. (`filter` itself stays
+// exported and mutable: nav.test.ts / list.test.ts / app.test.ts and several
+// e2e suites set up state by writing to it directly.)
 export function isSavedFilter(): boolean {
    return filter.saved
 }
 // True when a feed/tag/★ Saved/search filter is active — [ALL] is inactive.
 export function isFilterActive(): boolean {
    return filter.active
+}
+// The active filter's tokens. Returned `readonly` so a consumer that wants to
+// hand them back to applyFilter (the "re-snapshot the current filter" move, in
+// app.ts's boot-merge re-anchor and menus.ts's post-frontier-gesture rebuild)
+// must copy them first — spreading a live nav array straight back into the
+// setter would otherwise read as safe while aliasing nav's own state.
+export function filterTokens(): readonly string[] {
+   return filter.tokens
+}
+// The active filter's members (feed id → lower bound). A ReadonlyMap: this is
+// nav's live map, not a copy — callers only ever read `.size` or walk it, and
+// copying on every call would cost real work on the pin path at [ALL] scale.
+// The type is what makes the no-write contract enforceable at zero runtime cost.
+export function filterFeeds(): ReadonlyMap<number, number> {
+   return filter.feeds
 }
 
 // After data.refresh() swapped the store snapshot: reconcile the filter and the
