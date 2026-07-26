@@ -116,8 +116,10 @@ format-check-be:
 lint-be:
 	cd backend && golangci-lint run ./...
 
-.PHONY: bench-be
+.PHONY: bench-be cover-be
 
+# The measurement targets, both kept OUT of verify.
+#
 # bench-be: the store hot paths (backend/bench_test.go, TST5) — gzipBest per
 # series, the delta-chain consolidation fold, the meta bloom build, the search
 # fold. Not in verify because a benchmark has no pass/fail: it produces numbers
@@ -133,6 +135,20 @@ BENCH ?= .
 
 bench-be:
 	cd backend && go test ./... -run '^$$' -bench '$(BENCH)' -benchtime=$(BENCHTIME) -benchmem
+
+# cover-be: the coverage RATCHET (TST8). `go test` with a profile, then
+# scripts/check-coverage.sh asserts every area in scripts/coverage-floors.tsv is
+# at or above its committed floor and prints the actual-vs-floor delta. Not in
+# verify because it re-runs the whole backend suite instrumented (roughly double
+# test-be's wall time) to gate a P3 ratchet — the point is that the number
+# cannot silently rot, not that every commit pays for it. Ratcheting a floor up
+# is a one-line diff in the .tsv.
+COVER_PROFILE ?= dist/coverage-be.out
+COVER_FLOORS ?= scripts/coverage-floors.tsv
+
+cover-be: | dist
+	cd backend && go test -coverprofile=../$(COVER_PROFILE) -covermode=set ./...
+	scripts/check-coverage.sh $(COVER_PROFILE) $(COVER_FLOORS)
 
 dist:
 	@mkdir -p $@

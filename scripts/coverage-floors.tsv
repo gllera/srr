@@ -1,0 +1,47 @@
+# coverage-floors.tsv — the committed floors scripts/check-coverage.sh enforces
+# (TST8). Three whitespace-separated columns:
+#
+#   <area>   a label, printed in the report
+#   <regex>  a POSIX ERE matched against the profile's import path
+#            (`srr/db_pack.go`, `srr/store/s3.go`) — the line:col span is
+#            stripped before matching, so patterns are plain path regexes
+#   <floor>  the minimum statement coverage percentage for that area
+#
+# Areas may overlap: `db` is also counted inside `total`. An area whose regex
+# matches NOTHING fails loudly — a renamed file must not silently retire its
+# own floor.
+#
+# THE MARGIN. Every floor is the LOWEST value measured across three runs of the
+# tree that introduced it, truncated to a whole percent and then dropped one
+# more point — so the slack is between 1.0 and 2.0 points depending on where the
+# measurement fell. Chosen against three things. Two are honest ways a change
+# moves the number down: adding an uncovered error branch to a hot file, and
+# DELETING well-covered code (which raises the untested remainder's share of a
+# smaller denominator). The third is measured, not hypothetical — the suite is
+# not coverage-deterministic, which is why the floors were set off three runs
+# and not one: `db` came in at 84.8 / 84.6 / 84.8 and `ingest` at 89.1 / 90.1 /
+# 89.1, so part of the slack is simply the suite disagreeing with itself. (The
+# statement COUNTS are stable — check-coverage.sh deduplicates blocks, see its
+# header; before it did, the counts tripled depending on the build cache.) Much
+# more slack and it stops being a ratchet; much less and every refactor becomes
+# a floors edit, which trains people to lower them reflexively — the failure
+# mode that kills coverage gates.
+#
+# Ratcheting up is a one-line diff here, and that is the point: when a batch of
+# tests lands, truncate the new measurement and commit it.
+#
+# The areas are the risk surface, not the package list: `db` and `seen` are the
+# store's byte-level writers (a regression there corrupts immutable objects
+# under names cached forever), `store` the four backends behind them.
+
+# The trailing comment on each row is the LOWEST of the three measurements the
+# floor was derived from, on ce6825d (2026-07-26).
+#
+# area      pattern                  floor    measured
+
+total       .                         84.0  # 85.1  every package in the profile
+db          ^srr/db[^/]*\.go$         83.0  # 84.6  the pack/meta/expire/out writers
+seen        ^srr/seen\.go$            88.0  # 89.7  the dedup sidecar's binary codec
+store       ^srr/store/               79.0  # 80.4  the four storage backends
+mod         ^srr/mod/                 94.0  # 95.7  the content pipeline
+ingest      ^srr/ingest/              88.0  # 89.1  the feed parser + external protocol
