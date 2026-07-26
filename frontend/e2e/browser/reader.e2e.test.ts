@@ -1,3 +1,6 @@
+import { renameSync } from "node:fs"
+import { join } from "node:path"
+
 import { afterAll, beforeAll, describe, expect, inject, it } from "vitest"
 import type { Browser, Page } from "puppeteer"
 
@@ -1268,6 +1271,110 @@ describe("browser: real SPA over real packs", () => {
          await waitList(page)
          expect(await $rowTitles(page)).toContain("warm title 4")
          expect(await $popupOpen(page)).toBe(false)
+      } finally {
+         await ctx.close()
+      }
+   })
+
+   // PWA5's ORDERING, which is the actual feature: cache the objects, THEN flip
+   // the root — the store's own commit discipline run on the client. The happy
+   // path above cannot distinguish it from a warm that cached db.gz first (or
+   // only), and that variant is exactly the regression the design warns about:
+   // a cached root naming a generation whose tail the device never fetched is an
+   // error popup on the next offline launch.
+   //
+   // So this makes one of the new generation's boot objects unfetchable and
+   // asserts the cached root did NOT move. The second half — restore it,
+   // dispatch again, watch it move — is what makes the non-move attributable to
+   // the missing object rather than to a dispatch that quietly did nothing.
+   it("abandons the periodicsync warm without moving the root when a boot object is missing", async () => {
+      clearDir(packsDir)
+      feeds.set("/warm2.xml", rssFeed("Warm2", nItems(2, "warm2")))
+      await srr(packsDir, "feed", "add", "-t", "Warm2", "-u", `${feeds.url}/warm2.xml`)
+      await srr(packsDir, "art", "fetch")
+      const firstM = storeM(packsDir)
+
+      const origin = new URL(baseUrl).origin
+      const ctx = await browser.createBrowserContext()
+      const page = await ctx.newPage()
+      try {
+         await page.goto(baseUrl, { waitUntil: "load" })
+         await waitList(page)
+         await page.waitForFunction(() => navigator.serviceWorker?.controller != null, { timeout: 20000 })
+         await page.reload({ waitUntil: "load" })
+         await waitList(page)
+
+         const cachedM = () =>
+            page.evaluate(async () => {
+               const packs = await caches.open("srr-packs-v4")
+               const hit = await packs.match(new URL("packs/db.gz", location.href).href)
+               if (!hit) return -1
+               const root = (await new Response(hit.body!.pipeThrough(new DecompressionStream("gzip"))).json()) as {
+                  m?: number
+               }
+               return root.m ?? 0
+            })
+         expect(await cachedM()).toBe(firstM)
+
+         const client = await page.createCDPSession()
+         const regId = await new Promise<string>((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error("no service worker registration from CDP")), 20000)
+            client.on("ServiceWorker.workerRegistrationUpdated", (e) => {
+               const reg = e.registrations.find((r) => !r.isDeleted && r.scopeURL.startsWith(origin))
+               if (reg) {
+                  clearTimeout(timer)
+                  resolve(reg.registrationId)
+               }
+            })
+            client.send("ServiceWorker.enable").catch(reject)
+         })
+
+         // A new generation the device has never seen...
+         feeds.set("/warm2.xml", rssFeed("Warm2", nItems(5, "warm2")))
+         await srr(packsDir, "art", "fetch")
+         const nextM = storeM(packsDir)
+         expect(nextM).toBeGreaterThan(firstM)
+
+         // ...with one of its boot objects moved out from under the warm. The
+         // idx tail is in bootWarmNames, so the warm's cache-first pass 404s.
+         const idxTail = tailKey(packsDir, "idx")
+         const idxPath = join(packsDir, idxTail)
+         const stashed = join(packsDir, "stashed-idx-tail.gz")
+         renameSync(idxPath, stashed)
+
+         await client.send("ServiceWorker.dispatchPeriodicSyncEvent", {
+            origin,
+            registrationId: regId,
+            tag: "srr-db-warm",
+         })
+
+         // Asserting a non-event, so give the handler real time to get it wrong.
+         // A warm that cached db.gz first would already have moved the root here.
+         await new Promise((r) => setTimeout(r, 3000))
+         expect(await cachedM()).toBe(firstM)
+
+         // Attribution: put the object back, wake again, and the same dispatch
+         // now does move the root. Without this the test would also pass against
+         // a periodicsync that never fired at all.
+         renameSync(stashed, idxPath)
+         await client.send("ServiceWorker.dispatchPeriodicSyncEvent", {
+            origin,
+            registrationId: regId,
+            tag: "srr-db-warm",
+         })
+         await page.waitForFunction(
+            async (want: number) => {
+               const packs = await caches.open("srr-packs-v4")
+               const hit = await packs.match(new URL("packs/db.gz", location.href).href)
+               if (!hit) return false
+               const root = (await new Response(hit.body!.pipeThrough(new DecompressionStream("gzip"))).json()) as {
+                  m?: number
+               }
+               return (root.m ?? 0) === want
+            },
+            { timeout: 20000 },
+            nextM,
+         )
       } finally {
          await ctx.close()
       }
