@@ -33,6 +33,14 @@ export { IDX_PACK_SIZE, META_PACK_SIZE }
 // wedges ALL navigation until the page is reloaded — the reported "swipe stops
 // working until refresh". On timeout abort() errors res.body, so the pending
 // read rejects; cachedPromise then drops the slot so a retry refetches.
+//
+// INVARIANT (ENG7): app.ts's BUSY_STUCK_MS (60s) — the age at which its mutex
+// treats a hold as dead and lets the next caller reclaim it — is only sound
+// because this bound exists and sits well below it. A store fetch is the longest
+// bounded operation a mutex holder awaits, so RAISING this value requires
+// raising BUSY_STUCK_MS with it; otherwise a fetch still legitimately in flight
+// ages past the staleness threshold and a second caller steals the mutex from a
+// live holder. Named here so the coupling is findable from both sides.
 const FETCH_TIMEOUT_MS = 30_000
 
 async function fetchTimed<T>(

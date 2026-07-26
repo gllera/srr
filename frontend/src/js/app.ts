@@ -25,6 +25,7 @@ import { clearAllPins } from "./pin"
 import * as pinUI from "./pin-ui"
 import * as reader from "./reader"
 import * as refresh from "./refresh"
+import { ensureSchema } from "./schema"
 import * as searchUI from "./search-ui"
 import * as sync from "./sync"
 
@@ -47,6 +48,17 @@ let gestures: Gestures | null = null
 let busy = false
 let busyToken = 0
 let busyAt = 0
+// INVARIANT (ENG7): this must stay comfortably ABOVE data.ts's FETCH_TIMEOUT_MS
+// (30s), the abort budget every store fetch is armed with. That is the whole
+// reason 60s is safe to treat as "stale": the longest bounded thing a mutex
+// holder can be waiting on is a store fetch, so a hold older than this cannot be
+// live work — it is a wedged await. Raising FETCH_TIMEOUT_MS without raising
+// this would make a slow-but-honest fetch look dead and let a second caller
+// reclaim the mutex underneath it. Documented rather than derived
+// (`2 * data.FETCH_TIMEOUT_MS`) on purpose: app.test.ts replaces the whole
+// ./data module with a mock factory, so a derived value would read undefined
+// there and quietly disable the mutex in every test. Appendix D of the findings
+// puts it as "document, don't narrow".
 const BUSY_STUCK_MS = 60_000
 // Held by a LIVE owner? A stale hold (past BUSY_STUCK_MS) reads as free so the
 // next caller reclaims it. Shared by acquire() and the pre-mutation bail-outs
@@ -540,6 +552,15 @@ const KEY_ACTIONS: Record<string, () => void> = {
 }
 
 async function init() {
+   // Gate the device's stored SHAPE before anything reads it (ENG6): stamp a
+   // device that has never run this build, walk the migration ladder for one on
+   // an older shape. It must come first — postMounts() below derives the SW's
+   // roots from the mount table, data.init() reconciles that table, and every
+   // reader after them (pruneSeen, the unread-only default, the HASH_KEY restore
+   // feeding route(), sync's profile merge) assumes the shape is settled. Never
+   // throws, and outside the try below on purpose: a migration failure is warned
+   // internally, not a boot error the popup should offer to reload past.
+   ensureSchema()
    // Tell the SW its mounted roots BEFORE data.init() (the PWA0 fix, §5.1): the
    // roots come from the mount TABLE (valid pre-init), so a peer store's boot
    // fetches — kicked inside data.init() — are already routed + cached by the SW
