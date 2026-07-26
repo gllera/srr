@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -249,4 +250,139 @@ func TestFetchMutationDuringFanOutNotBlocked(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+// --- checkStoreBusy (the FET5 fail-fast probe) -----------------------------
+
+// checkStoreBusy is what stops a cycle burning a whole network fan-out it can
+// never commit. It had NO test in any suite, and the one that looks like its
+// coverage — TestMCPFetchStoreBusy — is not: the write phase's own acquireMarker
+// produces the same os.ErrExist, so that test passes with this function deleted.
+// The assertion that distinguishes them is whether the FAN-OUT ran, which is why
+// every case below counts feed-server hits.
+//
+// The dangerous direction is OVER-refusal. Drop the `!held.expired(...)`
+// conjunct and every cycle of the 5-minute loop aborts before fetching on a
+// SIGKILLed predecessor's stale marker — logging rather than failing, so the
+// store silently stops updating. That is the wedge the lease design removed, and
+// case "expired foreign lease" is what keeps it removed.
+func TestCheckStoreBusyProbe(t *testing.T) {
+	live := storeLease{Owner: "otherhost/999/deadbeef", Expires: time.Now().Add(time.Hour).Unix()}
+	expired := storeLease{Owner: "otherhost/999/deadbeef", Expires: time.Now().Add(-time.Second).Unix()}
+	own := storeLease{Owner: leaseOwner, Expires: time.Now().Add(time.Hour).Unix()}
+
+	cases := []struct {
+		name     string
+		payload  func(t *testing.T) []byte // nil = plant no marker at all
+		wantHits int32                     // feed-server requests, i.e. did the fan-out run
+		wantErr  bool
+	}{
+		{"no marker", nil, 1, false},
+		{
+			"live foreign lease", func(t *testing.T) []byte { return marshalLease(t, live) },
+			0, true, // refused BEFORE the fan-out — the whole point
+		},
+		{
+			"expired foreign lease", func(t *testing.T) []byte { return marshalLease(t, expired) },
+			1, false, // the SIGKILL unwedge: steal it and commit
+		},
+		{
+			"own lease", func(t *testing.T) []byte { return marshalLease(t, own) },
+			1, false, // this process instance; the in-process gate is the real serializer
+		},
+		{
+			// The clearest separation of probe from acquire in the whole table:
+			// the fan-out RAN (the probe declined to judge a marker whose liveness
+			// is genuinely unknowable) and the cycle still failed — from the write
+			// phase's acquireMarker, the single authority. wantHits is what makes
+			// this case unable to pass if the two were ever collapsed.
+			"payload-less legacy marker", func(*testing.T) []byte { return nil },
+			1, true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, _, _ := setupTestDB(t)
+			allowLoopback(t)
+
+			var hits atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				hits.Add(1)
+				w.Header().Set("Content-Type", "application/rss+xml")
+				w.Write([]byte(sampleRSS))
+			}))
+			t.Cleanup(srv.Close)
+			seedFeed(t, db, &Feed{Title: "Live", URL: srv.URL})
+
+			if tc.payload != nil {
+				writeMarker(t, db.Backend, dbLockKey, tc.payload(t))
+			}
+
+			err := (&FetchCmd{}).fetchLoop(ctx, newFetchClient(1))
+			switch {
+			case tc.wantErr && err == nil:
+				t.Fatal("cycle succeeded against a marker it must refuse")
+			case tc.wantErr && !errors.Is(err, os.ErrExist):
+				t.Fatalf("cycle error = %v, want one wrapping os.ErrExist (serve's 409 / MCP's \"store busy\")", err)
+			case !tc.wantErr && err != nil:
+				t.Fatalf("fetchLoop: %v", err)
+			}
+			if got := hits.Load(); got != tc.wantHits {
+				t.Errorf("feed fetched %d time(s), want %d — the probe ran the fan-out it should have skipped (or skipped one it should have run)", got, tc.wantHits)
+			}
+		})
+	}
+}
+
+// The other half of the expired-lease case: the cycle does not merely proceed,
+// it COMMITS. A probe that refused here would leave the 5-min loop logging
+// forever after any hard kill, with the store frozen and nothing failing.
+func TestCheckStoreBusyExpiredLeaseStillCommits(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	allowLoopback(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		w.Write([]byte(sampleRSS))
+	}))
+	t.Cleanup(srv.Close)
+	seedFeed(t, db, &Feed{Title: "Live", URL: srv.URL})
+
+	stale := storeLease{Owner: "otherhost/999/deadbeef", Expires: time.Now().Add(-time.Hour).Unix()}
+	writeMarker(t, db.Backend, dbLockKey, marshalLease(t, stale))
+
+	if err := (&FetchCmd{}).fetchLoop(ctx, newFetchClient(1)); err != nil {
+		t.Fatalf("fetchLoop against an expired lease: %v", err)
+	}
+	withDB(false, func(_ context.Context, d *DB) error {
+		if d.core.TotalArticles != 1 {
+			t.Fatalf("TotalArticles = %d, want 1 — the cycle did not commit past a dead writer's marker", d.core.TotalArticles)
+		}
+		return nil
+	})
+}
+
+// --force is the documented escape from any marker, live lease included.
+func TestCheckStoreBusyForceOverridesLiveLease(t *testing.T) {
+	db, _, _ := setupTestDB(t)
+	allowLoopback(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		w.Write([]byte(sampleRSS))
+	}))
+	t.Cleanup(srv.Close)
+	seedFeed(t, db, &Feed{Title: "Live", URL: srv.URL})
+
+	held := storeLease{Owner: "otherhost/999/deadbeef", Expires: time.Now().Add(time.Hour).Unix()}
+	writeMarker(t, db.Backend, dbLockKey, marshalLease(t, held))
+
+	saved := globals.Force
+	globals.Force = true
+	t.Cleanup(func() { globals.Force = saved })
+
+	if err := (&FetchCmd{}).fetchLoop(ctx, newFetchClient(1)); err != nil {
+		t.Fatalf("fetchLoop with --force: %v", err)
+	}
 }
