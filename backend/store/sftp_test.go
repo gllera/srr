@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net"
@@ -835,6 +836,104 @@ func TestSFTPCloseLeavesTheSharedSessionUp(t *testing.T) {
 	}
 	if got := readAllClose(t, rc); got != "data" {
 		t.Errorf("content = %q, want %q", got, "data")
+	}
+}
+
+// --- base-path validation ----------------------------------------------------
+
+// newSFTP validates the store's base path THROUGH the handle it just built, so
+// that one idempotent read gets the retry+redial ladder every other read on
+// this backend has. It needs the ladder more than any of them: it is the FIRST
+// thing to touch a session the memo hands out, and the memo hands one out
+// WITHOUT probing whenever its last success is recent (probe's trustFresh
+// short-circuit, which exists so a busy session is never disturbed). A peer
+// that died in that window therefore reaches an unretried Stat, and store.Open
+// fails outright — where the pre-memo code, which dialed once per Open, simply
+// connected.
+func TestSFTPOpenRedialsWhenAFreshStampHidesADeadPeer(t *testing.T) {
+	withFastRetry(t)
+	withSFTPCfg(t, SFTPConfig{})
+	c := withSFTPSessionMemo(t)
+
+	// A real directory: the pipe sessions serve this host's filesystem, so the
+	// store URL's path resolves for real on whichever session ends up answering.
+	base := t.TempDir()
+	u := mustURL(t, "sftp://alice@h"+base)
+	key := sftpSessionKey{cfg: sftpCfg, addr: "h:22", user: "alice"}
+
+	sess, err := sftpSessionFor(ctx, key, u)
+	if err != nil {
+		t.Fatalf("sftpSessionFor: %v", err)
+	}
+	sess.markOK() // an op just succeeded...
+	c.kill()      // ...and the peer went away right after it
+
+	if got := sess.probe(true); got != sessionHealthy {
+		t.Fatalf("probe(trustFresh) = %s; this test needs the freshness short-circuit to hand "+
+			"the dead session out unprobed", healthName(got))
+	}
+
+	b, err := newSFTP(ctx, u)
+	if err != nil {
+		t.Fatalf("newSFTP over a fresh-stamped dead session: %v — the base-path check statted "+
+			"the memoized session directly instead of going through d.retry, so store.Open "+
+			"fails where one redial would have served it", err)
+	}
+	t.Cleanup(func() { b.Close() })
+	if c.dials != 2 {
+		t.Errorf("dials = %d, want 2 — the base-path check's retry is what forces the redial", c.dials)
+	}
+
+	// The Open did not merely survive: the handle adopted the replacement, so it
+	// comes back connected.
+	if err := b.Put(ctx, "a.txt", strings.NewReader("data"), true); err != nil {
+		t.Fatalf("Put on the reopened handle: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(base, "a.txt")); err != nil || string(got) != "data" {
+		t.Errorf("stored (%q, %v), want (%q, nil)", got, err, "data")
+	}
+}
+
+// The other half of routing that check through the retry: neither of its two
+// verdicts may become a repeat. Both are definitive answers about the STORE's
+// layout, not about the connection, and both messages are the ones an operator
+// reads when a store URL is wrong — so they are pinned verbatim.
+func TestSFTPOpenBadBasePathIsAnsweredOnce(t *testing.T) {
+	withFastRetry(t)
+	withSFTPCfg(t, SFTPConfig{})
+	c := withSFTPSessionMemo(t)
+
+	dir := t.TempDir()
+	file := filepath.Join(dir, "regular")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(dir, "nope")
+
+	cases := []struct {
+		name, path, want string
+	}{
+		{"missing", missing, fmt.Sprintf("sftp base path %q does not exist", missing)},
+		{"not a directory", file, fmt.Sprintf("sftp base path %q is not a directory", file)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := newSFTP(ctx, mustURL(t, "sftp://alice@h"+tc.path))
+			if b != nil {
+				b.Close()
+			}
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("newSFTP err = %v, want exactly %q", err, tc.want)
+			}
+			if retryable(ctx, err) {
+				t.Errorf("err = %v is classified retryable; a verdict about the store's layout "+
+					"must never be repeated as though it were a dropped connection", err)
+			}
+		})
+	}
+	if c.dials != 1 {
+		t.Errorf("dials = %d, want 1 — a bad base path says nothing about the connection "+
+			"and must not redial", c.dials)
 	}
 }
 
