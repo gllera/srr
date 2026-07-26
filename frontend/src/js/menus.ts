@@ -66,6 +66,13 @@ const UNDO_MIN_ARTICLES = 10
 
 export async function offerFrontierUndo(): Promise<void> {
    const pending = nav.pendingFrontierUndo()
+   // The MOUNT the offer is being made on, captured beside the snapshot itself.
+   // The snackbar lives SNACKBAR_MS (8s) and nothing takes it down on a store
+   // switch — app.ts's switchMount, a mount pick, and route()'s back/forward
+   // setActive all leave it up and clickable — so by the time the button is
+   // pressed the active lane may be a different store, where this snapshot's
+   // feed keys and chrons mean different things entirely.
+   const mid = data.activeStore().mid
    if (!pending) return
    let consumed: number
    try {
@@ -88,10 +95,13 @@ export async function offerFrontierUndo(): Promise<void> {
       label: "Undo",
       run: () => {
          d.hideSnackbar()
-         // `pending`, not "whatever is pending now": the button undoes the move
-         // whose size it is showing, even if reading has moved a frontier again
-         // in the seconds it has been up.
-         if (nav.undoFrontierMove(pending)) afterFrontierMove()
+         // The mount comes FIRST — every term after it is only meaningful
+         // within one store, and afterFrontierMove() reconciles whichever lane
+         // is showing NOW, not the one the raise happened in. `pending`, not
+         // "whatever is pending now": the button undoes the move whose size it
+         // is showing, even if reading has moved a frontier again in the
+         // seconds it has been up.
+         if (mid === data.activeStore().mid && nav.undoFrontierMove(pending)) afterFrontierMove()
       },
    })
 }
