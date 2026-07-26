@@ -263,7 +263,7 @@ reproduce touch/overscroll behavior.
   - **Risk / deps:** after S71 lands (same app.ts; batches are sequential so no race).
     Keep the viewer outside `nav.ts`/`fmt.ts` — pure UI module.
 
-- [ ] **S73** — RDR11: pull-to-refresh on the list  ·  **P2 · M**  ·  from RDR11 (FE-F8)
+- [x] **S73** — RDR11: pull-to-refresh on the list  ·  **P2 · M**  ·  from RDR11 (FE-F8)
   - **Edit:** `gestures.ts` gains an opt-in overscroll pull on the LIST surface: a
     one-finger downward drag starting at `scrollTop == 0`, past a threshold with a
     small progress affordance, calls `refresh.refreshNow()` (`refresh.ts:41` — exists,
