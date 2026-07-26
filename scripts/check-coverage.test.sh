@@ -3,7 +3,7 @@
 # check-coverage.test.sh — the ratchet's own test.
 #
 # check-coverage.sh is a gate, and a gate that cannot fail is worse than no gate:
-# it reports "every area is at or above its floor" over nothing at all. Its three
+# it reports "every area is at or above its floor" over nothing at all. Its four
 # anti-vacuity properties live in one awk program that nothing exercised —
 # deleting any of them left `make cover-be` green:
 #
@@ -14,6 +14,11 @@
 #   3. blocks are DEDUPLICATED by their path:line.col span, so the percentage is
 #      a property of the tree rather than of which packages the build cache
 #      replayed
+#   4. the FLOORS side is parsed strictly: a row that is not three columns, or
+#      whose floor is not a number, EXITS 2 rather than being skipped (skipped
+#      == that area is no longer gated) or coerced to a floor of 0 (== passes
+#      everything). Properties 1-3 were all on the PROFILE side; the floors
+#      parser could degrade with nothing noticing.
 #
 # Plus the ordinary ones: below-floor fails, at-floor passes.
 #
@@ -127,6 +132,50 @@ run "mode: set
 srr/a.go:1.1,2.2 1 1
 srr/a.go:1.1,2.2 1 0" 'a	^srr/a	100.0'
 check "a block hit in any binary counts as covered" 0 "every area is at or above its floor"
+
+# --- anti-vacuity 4: the FLOORS side --------------------------------------
+#
+# 1-3 all live on the PROFILE side. The floors PARSER can degrade just as
+# vacuously and even more quietly: it is the thing that decides which areas are
+# gated at all. A row that loses its floor column used to be indistinguishable
+# from a blank line — skipped, no error — so a mangled row RETIRED that area's
+# gate and the report simply had one fewer line in it. And a floor that is not a
+# number used to be coerced by `+ 0` to 0.0, which every measurement clears.
+
+run "$PROFILE" 'a	^srr/a'
+check "a floors row missing its floor exits 2" 2 "malformed floors row"
+
+# It must be caught even behind a well-formed row — the mangled row must not be
+# lost among healthy ones, exactly as with a broken pattern.
+run "$PROFILE" 'a	^srr/a	70.0
+b	^srr/b'
+check "a malformed row behind a healthy one exits 2" 2 "malformed floors row"
+
+# A stray fourth column is malformed too: it used to be silently ignored, and
+# the thing most likely to produce one is an unmarked comment on the row.
+run "$PROFILE" 'a	^srr/a	70.0	oops'
+check "a floors row with a fourth column exits 2" 2 "malformed floors row"
+
+# The floor must be a NUMBER. Use a genuinely non-numeric token: awk parses
+# "84.O" as 84, so a test written with that would pass with the guard removed
+# and therefore assert nothing.
+run "$PROFILE" 'a	^srr/a	seventy'
+check "a word where the floor belongs exits 2" 2 "non-numeric floor"
+
+# The realistic typo — a letter O for a zero — which without the guard coerces
+# to 0.0 and silently passes every measurement.
+run "$PROFILE" 'a	^srr/a	O84'
+check "a floor that coerces to 0 exits 2" 2 "non-numeric floor"
+
+# The strictness must stop at rows that carry data: blanks, comment-only lines
+# and trailing row comments are how the real floors file is written, so they
+# stay legal. (A decimal floor is the normal case and must survive the regex.)
+run "$PROFILE" '# the floors
+a	^srr/a	70.5  # a trailing note
+
+# another comment
+'
+check "blanks, comments and a decimal floor stay legal" 0 "every area is at or above its floor"
 
 # --- argument handling ------------------------------------------------------
 

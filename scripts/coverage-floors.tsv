@@ -35,13 +35,30 @@
 # under names cached forever), `store` the four backends behind them.
 
 # The trailing comment on each row is the LOWEST of the three measurements the
-# floor was derived from, on ce6825d (2026-07-26).
+# floor was derived from, on ce6825d (2026-07-26) — EXCEPT where the row says
+# otherwise. A row carrying its own re-derivation note supersedes this line for
+# that row alone; silently refreshing one number in place would leave this line
+# lying about every other one.
+#
+# STORE, re-derived at HEAD (2026-07-26). The store tests in this push took the
+# area 80.4 -> 85.8, which left the 79.0 floor 6.8 points low — gating none of
+# them, and none of the next regression either. Ratcheted to 84.0: 1.8 points of
+# slack, the TOP of the 1.0-2.0 band rather than the middle, because this is ONE
+# measurement and not the three the other rows rest on. A single sample cannot
+# see the ~1-point run-to-run spread the note above records, and more backend
+# tests were landing alongside this edit. Those can only push the number UP
+# (coverage rises when tests are added, and _test.go files are not instrumented
+# into the profile), so what the extra slack pads against is the suite
+# disagreeing with itself, not the concurrent work. Confirmed immediately after:
+# the run that verified this edit read 87.8, i.e. 3.8 of slack — but its store
+# suite was RED (an sftp redial test still landing), so that sample is not a
+# derivation. Re-derive on a green tree and this row has a second point to give.
 #
 # area      pattern                  floor    measured
 
 total       .                         84.0  # 85.1  every package in the profile
 db          ^srr/db[^/]*\.go$         83.0  # 84.6  the pack/meta/expire/out writers
 seen        ^srr/seen\.go$            88.0  # 89.7  the dedup sidecar's binary codec
-store       ^srr/store/               79.0  # 80.4  the four storage backends
+store       ^srr/store/               84.0  # 85.8  the four storage backends (STORE, above)
 mod         ^srr/mod/                 94.0  # 95.7  the content pipeline
 ingest      ^srr/ingest/              88.0  # 89.1  the feed parser + external protocol
