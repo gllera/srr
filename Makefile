@@ -66,9 +66,20 @@ frontend/node_modules/.package-lock.json: frontend/package-lock.json
 lint-fe format-check-fe format-fe test-fe smoke-fe dev-fe: frontend/node_modules/.package-lock.json
 	cd frontend && npm run $(@:-fe=)
 
+# The npm `build` script wipes ../dist/srrf before running Parcel — Parcel never
+# cleans, so every content-hash change used to leave its predecessor behind and
+# the dir grew without bound (129 frontend.*.js at the 2026-07-20 audit). That
+# matters because the whole dir SHIPS: release.yml tars it into srrf.tar.gz and
+# Direct-Uploads it to Cloudflare Pages, so the pile was deployed too. The wipe
+# lives in package.json (next to build-admin's identical rm -f, and so it also
+# covers a bare `npm run build`) and is scoped to dist/srrf, NEVER dist/ — the
+# release job runs `make release` BEFORE `make build-fe`, so wiping dist/ would
+# delete the cross-compiled dist/srr-* binaries it is about to attach.
+#
 # build-fe also copies frontend/_headers into the bundle (Parcel has no
 # public-dir copy) — the reader CSP header layer for the cf-pages deploy;
-# rides srrf.tar.gz too, where it is inert at a store root.
+# rides srrf.tar.gz too, where it is inert at a store root. It runs AFTER the
+# build, so the wipe can't take it with it.
 build-fe: frontend/node_modules/.package-lock.json
 	cd frontend && npm run build
 	cp frontend/_headers dist/srrf/_headers
