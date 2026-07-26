@@ -19,17 +19,23 @@
 //              lowers a frontier is an explicit rewind (nav.markUnreadFrom),
 //              whose fresher `st` outranks the older raise on every device —
 //              intent, ordered like saved, not lost progress.
-//   saved+ts — last-write-wins by `ts` (profile.ts's ordering field, stamped on
-//              every local seen/saved mutation): the saved set is the person's
-//              current intent, so un-saves propagate.
+//   saved+sd — per-key LWW by the `sd` stamps (saved.ts writes one on every
+//              save AND un-save) over the blob-level `ts` base: the base still
+//              replaces the set wholesale from a strictly newer blob, so
+//              un-saves propagate, and each chron whose stamps differ then
+//              overrides it in either direction. A save on device A concurrent
+//              with an un-save on device B therefore keeps BOTH intents instead
+//              of losing whichever rode the older blob (RDR18); `ts` still
+//              decides the queue ORDER, per-key stamps only membership.
 // The push needs no guard: after the merge, local ⊒ the just-pulled remote on
 // seen (per-key: the newer-ordered or higher value everywhere) and holds the
-// LWW-newest saved/ts, so a PUT can never cost the endpoint state. And it
-// fires whenever the endpoint is actually BEHIND (its seen missing local
-// progress or ordering / its ts older / a 404 to seed) — derived from the
-// pulled blob, not just the in-memory dirty flag, because a reload loses that
-// flag and an endpoint regressed by a stale tab's flush or an old-build LWW
-// device must heal on any device's next cycle. The one surviving guard
+// per-key-newest saved plus the LWW-newest ts, so a PUT can never cost the
+// endpoint state. And it fires whenever the endpoint is actually BEHIND (its
+// seen missing local progress or ordering / a saved chron local stamped more
+// recently / its ts older / a 404 to seed) — derived from the pulled blob, not
+// just the in-memory dirty flag, because a reload loses that flag and an
+// endpoint regressed by a stale tab's flush or an old-build LWW device must
+// heal on any device's next cycle. The one surviving guard
 // (`flush`, below) only protects the endpoint from a stale tab's blind PUT —
 // and flush fires on the same delta (not just `dirty`), so a page-hide still
 // delivers progress the endpoint is missing when the flag was lost or a
@@ -44,7 +50,16 @@
 // fmt.ts) so it unit-tests without a pack server or the base.ts URL side effect.
 
 import { SYNC_URL_KEY } from "./keys"
-import { exportProfile, hasPeerState, importProfile, localSeen, localSeenTs, profileTs, touchProfile } from "./profile"
+import {
+   exportProfile,
+   hasPeerState,
+   importProfile,
+   localSavedTs,
+   localSeen,
+   localSeenTs,
+   profileTs,
+   touchProfile,
+} from "./profile"
 import { isValidHttpish, normalizeHttpish } from "./urlish"
 
 // Push settles PUSH_DEBOUNCE_MS after the last seen/saved change (a reading
@@ -64,6 +79,7 @@ let lastError = ""
 let lastRemoteTs = -1 // ts of the last successfully pulled remote (-1 = never pulled)
 let lastRemoteSeen: Record<string, number> | null = null // its seen map, for flush()'s stale-tab guard
 let lastRemoteSt: Record<string, number> = {} // its per-key seen timestamps, paired with lastRemoteSeen
+let lastRemoteSd: Record<string, number> = {} // its per-key SAVED timestamps, for flush()'s saved-axis trigger
 
 export function getSyncUrl(): string {
    try {
@@ -87,6 +103,7 @@ export function setSyncUrl(value: string): void {
    lastRemoteTs = -1
    lastRemoteSeen = null
    lastRemoteSt = {}
+   lastRemoteSd = {}
 }
 
 export function enabled(): boolean {
@@ -146,11 +163,32 @@ export function seenBehind(
    return false
 }
 
+// True when `b` is MISSING a SAVED-set opinion that `a` holds: some chron
+// carries a strictly newer per-key stamp on `a`'s side (profile.ts's `sd`,
+// stamped by saved.ts on every save AND un-save). Pure stamp comparison — a
+// chron neither side stamped is pre-upgrade state the blob-level `ts` still
+// governs, exactly as before.
+//
+// It exists because the `ts` comparison alone CANNOT see this axis any more.
+// Once saved merges per key, a device that saves an article while another
+// device un-saves a different one pulls the peer's newer blob, merges both
+// intents correctly, adopts the peer's newer `ts` — and would then read as even
+// with the endpoint while its own save has never been published. Without this
+// trigger the endpoint keeps a set no device holds until something else pushes,
+// which is precisely the self-heal property the seen axis already has.
+export function savedBehind(aTs: Record<string, number>, bTs: Record<string, number>): boolean {
+   for (const [k, at] of Object.entries(aTs)) if (at > (bTs[k] ?? 0)) return true
+   return false
+}
+
 interface RemoteBlob {
    v: 1 | 2
    ts: number
    seen: Record<string, number>
    st: Record<string, number>
+   // The remote's per-key SAVED stamps — {} on a v1 or pre-upgrade blob, where
+   // the saved axis then falls back to the blob-level `ts` comparison alone.
+   sd: Record<string, number>
    // Whether the remote carried the multi-store mount table (§4.4). A new build
    // always writes `mnt` (exportProfile includes it unconditionally), so its
    // ABSENCE means an old build wrote this blob — force one upgrade push, the
@@ -186,14 +224,23 @@ async function pullRemote(url: string): Promise<RemoteBlob | null> {
    if (seenRaw !== null && typeof seenRaw === "object" && !Array.isArray(seenRaw))
       for (const [k, val] of Object.entries(seenRaw as Record<string, unknown>))
          if (typeof val === "number" && Number.isFinite(val)) seen[k] = val
-   // The per-key seen timestamps (absent on v1 / pre-upgrade v2 blobs → {} —
-   // every comparison then degrades to the legacy progress-only rule).
-   const st: Record<string, number> = {}
-   const stRaw = obj["st"]
-   if (stRaw !== null && typeof stRaw === "object" && !Array.isArray(stRaw))
-      for (const [k, val] of Object.entries(stRaw as Record<string, unknown>))
-         if (typeof val === "number" && Number.isFinite(val) && val > 0) st[k] = Math.floor(val)
-   return { v: v as 1 | 2, ts, seen, st, hasMnt: Array.isArray(obj["mnt"]), raw }
+   // The two per-key stamp maps — seen (`st`) and saved (`sd`). Absent on v1 /
+   // pre-upgrade v2 blobs → {}, and every comparison then degrades to its
+   // legacy rule (progress-only for seen, blob-level `ts` for saved).
+   const st = numberMap(obj["st"])
+   const sd = numberMap(obj["sd"])
+   return { v: v as 1 | 2, ts, seen, st, sd, hasMnt: Array.isArray(obj["mnt"]), raw }
+}
+
+// A blob's `st`/`sd` side map, cleaned to positive integer stamps; anything
+// malformed (or absent) degrades to {}, i.e. "no ordering info", which every
+// comparison already handles by falling back to its legacy rule.
+function numberMap(raw: unknown): Record<string, number> {
+   const out: Record<string, number> = {}
+   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return out
+   for (const [k, val] of Object.entries(raw as Record<string, unknown>))
+      if (typeof val === "number" && Number.isFinite(val) && val > 0) out[k] = Math.floor(val)
+   return out
 }
 
 async function put(url: string, keepalive = false): Promise<void> {
@@ -229,6 +276,7 @@ export async function syncNow(opts: { manual?: boolean } = {}): Promise<boolean>
          lastRemoteTs = remote.ts
          lastRemoteSeen = remote.seen
          lastRemoteSt = remote.st
+         lastRemoteSd = remote.sd
          const r = importProfile(remote.raw, { prefs: false, mode: remote.v === 1 ? "merge" : "sync" })
          if (!r.ok) throw new Error(r.error ?? "invalid profile")
          changed = r.changed === true
@@ -246,6 +294,7 @@ export async function syncNow(opts: { manual?: boolean } = {}): Promise<boolean>
          lastRemoteTs = -1
          lastRemoteSeen = null
          lastRemoteSt = {}
+         lastRemoteSd = {}
       }
       if (changed) onMerged?.(mountsChanged)
       // Push whenever the endpoint is behind, derived from the pulled blob
@@ -259,7 +308,9 @@ export async function syncNow(opts: { manual?: boolean } = {}): Promise<boolean>
          opts.manual ||
          dirty ||
          (remote
-            ? seenBehind(localSeen(), localSeenTs(), remote.seen, remote.st) || profileTs() > remote.ts
+            ? seenBehind(localSeen(), localSeenTs(), remote.seen, remote.st) ||
+              savedBehind(localSavedTs(), remote.sd) ||
+              profileTs() > remote.ts
             : profileTs() > 0 || Object.keys(localSeen()).length > 0)
       if (wantPush) {
          await put(url)
@@ -268,6 +319,7 @@ export async function syncNow(opts: { manual?: boolean } = {}): Promise<boolean>
          lastRemoteTs = profileTs()
          lastRemoteSeen = localSeen()
          lastRemoteSt = localSeenTs()
+         lastRemoteSd = localSavedTs()
       }
       lastOkAt = Math.floor(Date.now() / 1000)
       lastError = ""
@@ -305,9 +357,10 @@ export function pushSoon(): void {
 // (its catch never re-armed the flag, and a delta-driven push never set it) or
 // a reload that lost it outright. So also push when local is provably ahead of
 // the last remembered remote — its seen regressive against local, or a newer
-// local ts. A tab that never pulled (lastRemoteTs < 0) has no remote to compare
-// and so still needs `dirty` to have something worth sending; local == remote ⇒
-// no PUT, so the common quiet tab-switch stays quiet.
+// local ts, or a saved chron it stamped more recently. A tab that never pulled
+// (lastRemoteTs < 0) has no remote to compare and so still needs `dirty` to have
+// something worth sending; local == remote ⇒ no PUT, so the common quiet
+// tab-switch stays quiet.
 //
 // GUARD — a blind PUT from a stale tab could still LOWER the endpoint: its seen
 // can sit below the endpoint's (nav.pruneSeen legitimately drops a deleted
@@ -317,7 +370,11 @@ export function pushSoon(): void {
 // next full cycle — which pulls first — resolves it. And even if a stale
 // snapshot lets a regressive flush through, the raise-only merge means any
 // device holding the higher value re-raises the endpoint next cycle — flush
-// mistakes heal.
+// mistakes heal. The saved axis is deliberately in the TRIGGER but NOT in this
+// guard: local's `sd` is the pruned view (profile.savedTsView bounds tombstones),
+// so it can legitimately hold FEWER stamps than the remote, and a guard reading
+// that as a regression would skip every flush on a device with a long un-save
+// history. The ts guard above already bounds what a saved-axis flush can cost.
 export function flush(): void {
    const url = getSyncUrl()
    if (!url) return
@@ -331,6 +388,7 @@ export function flush(): void {
       dirty ||
       (lastRemoteTs >= 0 &&
          ((lastRemoteSeen !== null && seenBehind(seen, seenTs, lastRemoteSeen, lastRemoteSt)) ||
+            savedBehind(localSavedTs(), lastRemoteSd) ||
             profileTs() > lastRemoteTs))
    if (!behind) return
    clearTimeout(pushTimer)

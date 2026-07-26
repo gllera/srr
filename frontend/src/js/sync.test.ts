@@ -360,6 +360,83 @@ describe("explicit rewind round-trip (per-key st)", () => {
    })
 })
 
+// RDR18 — the saved axis. Once the saved set merges per key, the blob-level
+// `ts` no longer sees a saved divergence: a device merges the peer's intents
+// correctly, adopts the peer's newer ts, and would read as even with an
+// endpoint that has never heard of its own save. savedBehind is what keeps the
+// self-heal property on that axis.
+describe("saved-set divergence (per-key sd)", () => {
+   const SD_KEY = "srr-saved-ts"
+   beforeEach(() => sync.setSyncUrl(URL))
+
+   it("savedBehind reports a strictly newer local stamp, and only that", () => {
+      expect(sync.savedBehind({ 7: 100 }, { 7: 100 })).toBe(false) // even
+      expect(sync.savedBehind({ 7: 100 }, {})).toBe(true) // b never heard of it
+      expect(sync.savedBehind({}, { 7: 100 })).toBe(false) // b is AHEAD, not behind
+      expect(sync.savedBehind({ 7: 100 }, { 7: 200 })).toBe(false) // b's is newer
+      expect(sync.savedBehind({ 7: 200 }, { 7: 100 })).toBe(true)
+   })
+
+   it("pushes when only the saved axis diverges — seen and ts say 'even'", async () => {
+      // Local saved chron 7 at t=100. The endpoint carries a NEWER blob (ts 200)
+      // that saved a different article and knows nothing of 7 — so after the
+      // merge local's ts equals the remote's and seen is identical. Only the
+      // per-key saved stamp can tell that the endpoint is missing something.
+      localStorage.setItem(SAVED_KEY, JSON.stringify([7]))
+      localStorage.setItem(SD_KEY, JSON.stringify({ 7: 100 }))
+      localStorage.setItem(PROFILE_TS_KEY, "100")
+      fetchMock.mockImplementation(async (_u, init) =>
+         (init as RequestInit)?.method === "PUT"
+            ? res(200)
+            : res(200, JSON.stringify({ v: 2, ts: 200, seen: {}, st: {}, saved: [9], sd: { 9: 200 } })),
+      )
+
+      await sync.syncNow()
+
+      const puts = fetchMock.mock.calls.filter((c) => c[1]?.method === "PUT")
+      expect(puts).toHaveLength(1)
+      const body = JSON.parse(puts[0][1].body)
+      // Both intents published: the merge kept 7 and adopted 9.
+      expect(body.saved.sort()).toEqual([7, 9])
+      expect(body.sd).toEqual({ 7: 100, 9: 200 })
+   })
+
+   it("stays quiet when the endpoint already holds every local saved stamp", async () => {
+      localStorage.setItem(SAVED_KEY, JSON.stringify([7]))
+      localStorage.setItem(SD_KEY, JSON.stringify({ 7: 100 }))
+      localStorage.setItem(PROFILE_TS_KEY, "100")
+      fetchMock.mockResolvedValue(
+         res(200, JSON.stringify({ v: 2, ts: 100, seen: {}, st: {}, saved: [7], sd: { 7: 100 } })),
+      )
+      await sync.syncNow()
+      expect(fetchMock.mock.calls.filter((c) => c[1]?.method === "PUT")).toHaveLength(0)
+   })
+
+   it("flush delivers a saved divergence a failed background push left behind", async () => {
+      vi.setSystemTime(400_000)
+      localStorage.setItem(SAVED_KEY, JSON.stringify([7]))
+      localStorage.setItem(SD_KEY, JSON.stringify({ 7: 100 }))
+      localStorage.setItem(PROFILE_TS_KEY, "100")
+      // The cycle's own push fails, so `dirty` is never set; the remembered
+      // remote still lacks chron 7's stamp.
+      fetchMock.mockImplementation(async (_u, init) =>
+         (init as RequestInit)?.method === "PUT"
+            ? res(500)
+            : res(200, JSON.stringify({ v: 2, ts: 200, seen: {}, st: {}, saved: [9], sd: { 9: 200 } })),
+      )
+      await sync.syncNow()
+      expect(fetchMock.mock.calls.filter((c) => c[1]?.method === "PUT")).toHaveLength(1) // the failed one
+
+      fetchMock.mockImplementation(async () => res(200))
+      sync.flush()
+      await vi.advanceTimersByTimeAsync(0)
+      const puts = fetchMock.mock.calls.filter((c) => c[1]?.method === "PUT")
+      expect(puts).toHaveLength(2)
+      expect(puts[1][1].keepalive).toBe(true)
+      expect(JSON.parse(puts[1][1].body).sd).toEqual({ 7: 100, 9: 200 })
+   })
+})
+
 describe("flush guard (stale-tab protection)", () => {
    beforeEach(() => sync.setSyncUrl(URL))
 

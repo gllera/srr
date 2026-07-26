@@ -22,6 +22,12 @@ const q = (base: string, mid: string): string => (mid === HOME_MID ? base : `${b
 export const seenKey = (mid: string): string => q("srr-seen", mid)
 export const seenTsKey = (mid: string): string => q("srr-seen-ts", mid)
 export const savedKey = (mid: string): string => q("srr-saved", mid)
+// The ★ Saved set's per-key ordering map (RDR18) — the saved cousin of
+// srr-seen-ts, stamped by saved.ts beside every srr-saved write. A chron is
+// stamped whether it was SAVED or UN-SAVED, so an un-save leaves a tombstone
+// the merge can order against a peer's older save. Per-store for the same
+// reason srr-saved is: chronIdx is only unique WITHIN a mount.
+export const savedTsKey = (mid: string): string => q("srr-saved-ts", mid)
 export const pinsKey = (mid: string): string => q("srr-pins", mid)
 export const profileTsKey = (mid: string): string => q("srr-profile-ts", mid)
 // RDR16 podcast mini-player: the persisted episode (chron, index, playback

@@ -16,7 +16,7 @@
 // "~saved" addresses the mode in the #hash and the filter rotation; a
 // (vanishingly unlikely) real tag literally named "~saved" is shadowed by it.
 import * as data from "./data"
-import { savedKey } from "./keys"
+import { savedKey, savedTsKey } from "./keys"
 import * as sync from "./sync"
 
 // Per-store key (docs/MULTI-STORE-SPEC.md §4.2): namespaced by the ACTIVE
@@ -24,6 +24,7 @@ import * as sync from "./sync"
 // resolves to the bare legacy name (srr-saved), so a single-store user's state
 // is unchanged.
 const savedK = () => savedKey(data.activeStore().mid)
+const savedTsK = () => savedTsKey(data.activeStore().mid)
 
 export const SAVED_TOKEN = "~saved"
 
@@ -84,6 +85,29 @@ export function savedAhead(pos: number): number {
    return order.length - 1 - i
 }
 
+// Stamp this chron's membership change (RDR18) — the exact seam writeSeen is
+// for the seen frontier: srr-saved-ts records the unix-second of each chron's
+// last LOCAL save/un-save, and profile.ts merges the set per key by it, in
+// EITHER direction. That is what makes a save on one device and an un-save of
+// the same article on another converge to the newer intent instead of to
+// whichever blob happened to carry the newer blob-level `ts` (which silently
+// dropped one of them). An UN-save stamps too, leaving a TOMBSTONE: its stamp
+// is the only record that the removal is newer than a peer's still-live save.
+// Best-effort like every other localStorage write here — a device that cannot
+// stamp degrades to exactly the blob-level ordering it had before.
+function stampSaved(chron: number): void {
+   try {
+      const raw = localStorage.getItem(savedTsK())
+      const parsed: unknown = raw ? JSON.parse(raw) : {}
+      const map =
+         parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+            ? (parsed as Record<string, number>)
+            : {}
+      map[chron] = Math.floor(Date.now() / 1000)
+      localStorage.setItem(savedTsK(), JSON.stringify(map))
+   } catch {}
+}
+
 export function isSaved(chron: number): boolean {
    return readSavedSet().has(chron)
 }
@@ -126,6 +150,7 @@ export function toggleSaved(
    try {
       localStorage.setItem(savedK(), JSON.stringify([...set]))
    } catch {}
+   stampSaved(chron)
    sync.pushSoon()
    ctx.onQueueChange()
    savedHook?.(chron, nowSaved)
