@@ -80,17 +80,86 @@ describe("stampContentHost", () => {
 
 describe("buildContent", () => {
    it("returns the sanitized article nodes", () => {
-      const frag = buildContent({ f: 1, a: 1, c: "<p>hello</p>" }, "https://cdn.example/", { inert: false })
+      const frag = buildContent({ f: 1, a: 1, c: "<p>hello</p>" }, new URL("https://cdn.example/"), { inert: false })
       const host = document.createElement("div")
       host.append(frag)
       expect(host.querySelector("p")?.textContent).toBe("hello")
    })
 
    it("returns the compaction tombstone when content is absent", () => {
-      const frag = buildContent({ f: 1, a: 1 } as IArticleWire, "https://cdn.example/", { inert: false })
+      const frag = buildContent({ f: 1, a: 1 } as IArticleWire, new URL("https://cdn.example/"), { inert: false })
       const host = document.createElement("div")
       host.append(frag)
       expect(host.textContent).not.toContain("undefined")
       expect(host.textContent!.length).toBeGreaterThan(0)
+   })
+})
+
+describe("buildContent inert media", () => {
+   const html =
+      '<p>before</p><audio src="https://cdn.example/ep.mp3" controls></audio>' +
+      '<video src="https://cdn.example/v.mp4" poster="https://cdn.example/p.jpg" width="640" height="360"></video>' +
+      '<img src="https://cdn.example/i.jpg"><p>after</p>'
+
+   function build(inert: boolean): HTMLElement {
+      const host = document.createElement("div")
+      host.append(buildContent({ f: 1, a: 1, c: html }, new URL("https://cdn.example/"), { inert }))
+      return host
+   }
+
+   it("emits no audio or video elements", () => {
+      expect(build(true).querySelectorAll("audio, video")).toHaveLength(0)
+   })
+
+   it("emits one stub per replaced element, in place", () => {
+      const stubs = build(true).querySelectorAll(".srr-media-stub")
+      expect(stubs).toHaveLength(2)
+   })
+
+   it("keeps images real — they are the article's substance and are already prefetched", () => {
+      expect(build(true).querySelectorAll("img")).toHaveLength(1)
+   })
+
+   it("carries the video poster and its intrinsic box onto the stub", () => {
+      const stub = build(true).querySelectorAll(".srr-media-stub")[1] as HTMLElement
+      expect(stub.style.aspectRatio).toBe("640 / 360")
+      expect(stub.style.backgroundImage).toContain("p.jpg")
+   })
+
+   it("gives an audio stub its own class rather than a video box", () => {
+      const stub = build(true).querySelectorAll(".srr-media-stub")[0] as HTMLElement
+      expect(stub.classList.contains("srr-media-stub-audio")).toBe(true)
+      expect(stub.style.aspectRatio).toBe("")
+   })
+
+   it("falls back to a 16:9 box when the video declares no intrinsic size", () => {
+      const host = document.createElement("div")
+      host.append(
+         buildContent(
+            { f: 1, a: 1, c: '<video src="https://cdn.example/v.mp4"></video>' },
+            new URL("https://cdn.example/"),
+            {
+               inert: true,
+            },
+         ),
+      )
+      expect((host.querySelector(".srr-media-stub") as HTMLElement).style.aspectRatio).toBe("16 / 9")
+   })
+
+   it("hides the stub from assistive tech — it stands in for nothing announceable", () => {
+      expect(build(true).querySelector(".srr-media-stub")?.getAttribute("aria-hidden")).toBe("true")
+   })
+
+   it("leaves media untouched when not inert", () => {
+      const host = build(false)
+      expect(host.querySelectorAll("audio, video")).toHaveLength(2)
+      expect(host.querySelectorAll(".srr-media-stub")).toHaveLength(0)
+   })
+
+   it("preserves surrounding document order", () => {
+      const kinds = [...build(true).children].map(
+         (n) => n.tagName.toLowerCase() + (n.className ? "." + n.className : ""),
+      )
+      expect(kinds).toEqual(["p", "div.srr-media-stub srr-media-stub-audio", "div.srr-media-stub", "img", "p"])
    })
 })

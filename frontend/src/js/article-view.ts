@@ -95,9 +95,39 @@ export function buildContent(article: IArticleWire, base: URL, opts: { inert: bo
    return frag
 }
 
-// Task 2 fills this in.
+// Replace every <audio>/<video> with a same-box stub. THREE independent reasons,
+// any one sufficient (spec §2):
+//   - FEB2's harvest/restore and player.ts's adopt/rehome pair state to elements
+//     BY INDEX over querySelectorAll("audio,video"), and player.ts claims
+//     playback from ONE capture-phase `play` listener on the document. A live
+//     duplicate in a second surface is exactly the hazard the original
+//     masthead-only pane avoided by previewing nothing at all.
+//   - A page you may abandon must not open a second media stream. On mobile data
+//     that is the difference between a gesture and a download.
+//   - Swiping back toward a playing episode would otherwise build a duplicate of
+//     a node that currently lives in .srr-player-media.
+// Images stay real: prefetch.ts already warmed them, and they are the article's
+// visual substance — a preview without them would not be the article.
+//
+// The stub takes the element's RESTING BOX, not just its place: the handoff in
+// pager.ts swaps this surface for the real one, so a stub of the wrong size would
+// reflow everything below it at exactly the moment the design exists to smooth.
 function makeMediaInert(frag: DocumentFragment): void {
-   void frag
+   for (const m of [...frag.querySelectorAll("audio, video")]) {
+      const stub = document.createElement("div")
+      stub.className = "srr-media-stub"
+      stub.setAttribute("aria-hidden", "true")
+      const w = Number(m.getAttribute("width"))
+      const h = Number(m.getAttribute("height"))
+      if (m.tagName === "AUDIO") stub.classList.add("srr-media-stub-audio")
+      else if (w > 0 && h > 0) stub.style.aspectRatio = `${w} / ${h}`
+      else stub.style.aspectRatio = "16 / 9"
+      const poster = m.getAttribute("poster")
+      // The poster is already sanitizer-approved: sanitizeFragment resolved and
+      // bounds-checked it on the way in, so this re-reads a trusted value.
+      if (poster) stub.style.backgroundImage = `url("${poster}")`
+      m.replaceWith(stub)
+   }
 }
 
 // The §9.3 compaction tombstone body: an expired article whose payload `srr
