@@ -12,15 +12,27 @@
 // hash, the title, the save button) and the two cross-surface follow-ups (the
 // frontier-undo offer, the unread badge) arrive through ReaderDeps, so the
 // module graph stays acyclic with app.ts at the top.
+import { buildContent, paintMasthead, stampContentHost, type ArticleRefs } from "./article-view"
 import { makeLRU } from "./cache"
 import * as data from "./data"
 import { el } from "./els"
-import { countBadge, readerDateline, sanitizeFragment, srcColorIndex } from "./fmt"
+import { countBadge, srcColorIndex } from "./fmt"
 import * as list from "./list"
 import { mountLabel } from "./mounts"
 import * as nav from "./nav"
 import * as player from "./player"
-import { URL_DENY } from "./urlish"
+
+// The real reader's nodes in article-view's shape. index.html declares these; the
+// pager builds its own set with the same classes.
+const readerRefs: ArticleRefs = {
+   root: el.article,
+   titleRow: el.titleRow,
+   source: el.source,
+   desk: el.desk,
+   date: el.date,
+   title: el.title,
+   content: el.content,
+}
 
 export interface ReaderDeps {
    // Which surface is showing. A silent chrome re-probe must not paint over a
@@ -135,16 +147,6 @@ function pulseNextPill() {
 function scrollReaderTop() {
    window.scrollTo(0, 0)
    d.resetScroll()
-}
-
-// The §9.3 compaction tombstone body: an expired article whose payload `srr
-// compact` reclaimed. A sibling of the "[DELETED]" feed tombstone (feedTitle) —
-// the source · date masthead still renders correctly, only the content is gone.
-function expiredTombstone(): HTMLElement {
-   const p = document.createElement("p")
-   p.className = "srr-expired-note"
-   p.textContent = "This article is no longer stored"
-   return p
 }
 
 // FEB2 — playing media survives prev/next.
@@ -267,17 +269,10 @@ export function render(o: IShowFeed) {
    if (o.placeholder) return renderEmptyReader(o)
    el.article.classList.remove("srr-reader-empty")
    const feed = data.db.feeds[o.article.f]
-   // Titleless feeds (Telegram-style: the title is just the content's first
-   // line) hide the <h1> in the reader so the body isn't shown twice; the home
-   // list still uses the title as its row label. The masthead permalink stands
-   // in for the hidden title's link.
-   el.article.classList.toggle("srr-reader-titleless", !!feed?.nt)
-   // Desk/section: the feed's tag as a hashtag ("#" is real text so it shares
-   // the tag's ink; the "·" separator is CSS). Empty for an untagged feed →
-   // the .srr-desk row is hidden (:not(:empty)).
-   el.desk.textContent = feed?.tag ? "#" + feed.tag : ""
-   // t/l are omitempty on the wire — an untitled article must not render "undefined"
-   el.title.textContent = o.article.t ?? ""
+   // Source tint, source name, desk, title, permalink and dateline in one call —
+   // shared with the pager's preview page, so the two surfaces cannot drift (the
+   // per-field prose lives in article-view.ts paintMasthead).
+   paintMasthead(readerRefs, o.article, feed)
    // The slide's arrival is already animated (flag consumed above); every other
    // entry dims first and fades in over the two rAFs below.
    if (slide) clearContentTransition()
@@ -286,15 +281,6 @@ export function render(o: IShowFeed) {
       el.content.style.opacity = "0"
       el.content.style.transform = "translateY(6px)"
    }
-   // §9.3 (docs/MANIFEST-SPEC.md): `srr store compact` replaces an expired article's
-   // payload with a tombstone that keeps f/a/p and DROPS c/t/l — so `c` is
-   // absent on the wire (`c` is typed string, but omitempty means undefined at
-   // runtime for a compacted line). Reachable only via a ★-Saved / deep-linked
-   // expired chron (normal nav filters chron < add_idx). Render an explicit
-   // "no longer stored" state — source · date intact, a sibling of feedTitle's
-   // "[DELETED]" feed tombstone — instead of the literal "undefined"
-   // sanitizeFragment(undefined) would produce.
-   const body = o.article.c as string | undefined
    // RDR16 — the five steps below run in a FIXED order, and the order is not
    // recoverable by reading any one of them alone:
    //
@@ -311,28 +297,12 @@ export function render(o: IShowFeed) {
    // shift every index after it and misalign the whole article's saved positions.
    harvestMediaState()
    player.adoptFromContent()
-   // The article's own language (`g` on the wire, from the backend's always-on
-   // detection). Without it the whole reader inherits <html lang="en">: a
-   // screen reader pronounces a Spanish body in an English voice, hyphenation
-   // applies English patterns, and an undeclared-RTL body renders LTR.
-   //
-   // `g` is absent for anything the detector wasn't confident about and for
-   // every article written before 2026-07-19, and the fallback is `lang=""` —
-   // which declares the language UNKNOWN, not "inherit". That distinction is
-   // the point, and it is deliberate: unknown is what stops `hyphens: auto`
-   // (styles.css) from breaking possibly-non-English prose on English patterns,
-   // where REMOVING the attribute would inherit <html lang="en"> and do exactly
-   // that. renderEmptyReader removes it instead, because reader chrome IS ours
-   // to declare.
-   //
-   // dir=auto lets the browser infer direction from the first strong character,
-   // which is the only honest answer when the feed declares none.
-   el.content.lang = o.article.g ?? ""
-   el.content.dir = "auto"
-   // Adopt the sanitized nodes directly — an innerHTML string round-trip would
-   // re-parse the whole article on every prev/next step (see sanitizeFragment).
-   if (body == null) el.content.replaceChildren(expiredTombstone())
-   else el.content.replaceChildren(sanitizeFragment(body, data.activeStore().base))
+   // The article's own language + direction, stamped on the host this surface
+   // owns (article-view.ts stampContentHost documents why `lang=""` rather than
+   // no attribute; renderEmptyReader REMOVES it instead, because reader chrome
+   // IS ours to declare).
+   stampContentHost(el.content, o.article)
+   el.content.replaceChildren(buildContent(o.article, data.activeStore().base, { inert: false }))
    mountedChron = nav.currentChron()
    mountedMid = data.activeStore().mid
    if (mountedChron >= 0) {
@@ -353,33 +323,10 @@ export function render(o: IShowFeed) {
       //    above rely on is untouched.
       player.injectQueueChips()
    } else player.noteMounted(null)
-   // Reject javascript:/data:/vbscript:/file: in case the writer pipeline let one
-   // through. The whole masthead row (source · date · title) is the one permalink;
-   // an href makes it a link, its absence leaves it inert chrome (titleless feeds
-   // hide the <h1> but the source · date kicker still carries the link).
-   const safeLink = o.article.l && !URL_DENY.test(o.article.l) ? o.article.l : ""
-   if (safeLink) el.titleRow.href = safeLink
-   else el.titleRow.removeAttribute("href")
    el.prev.disabled = !o.has_left
    el.next.disabled = !o.has_right
    syncNextCount(o)
 
-   // p is omitted (=> undefined) when the writer couldn't parse a date
-   const currentPublished = o.article.p ?? 0
-   // A recent article leads with its relative age ("5h ago"); an older one leads
-   // with the absolute date (an archived dispatch's real date matters more than
-   // "5h ago"). Either way the other form is on the hover title — see readerDateline.
-   const dateline = currentPublished ? readerDateline(currentPublished) : null
-   el.date.textContent = dateline ? dateline.text : ""
-   el.date.title = dateline ? dateline.title : ""
-   // Hide the date (and its leading "·" separator) in the kicker when undated,
-   // so the source name doesn't trail a dangling middot.
-   el.date.hidden = !currentPublished
-
-   // Key the reader's masthead to the article's source color (same ramp as the
-   // list rails — see styles.css [data-src]).
-   el.article.dataset.src = String(srcColorIndex(o.article.f))
-   el.source.textContent = data.feedTitle(o.article.f)
    refreshFeedLabel()
    d.refreshSaveButton(!o.placeholder)
 
@@ -441,7 +388,8 @@ function renderEmptyReader(o: IShowFeed) {
    // language, so the host goes back to INHERITING <html lang> rather than
    // keeping the last article's. Removing the attribute is what inherits;
    // `lang=""` would declare the language unknown, which is the right answer for
-   // an article of uncertain origin (see render) and the wrong one for our own
+   // an article of uncertain origin (see article-view.ts stampContentHost) and
+   // the wrong one for our own
    // words — it would leave assistive tech picking a fallback voice to read
    // "All caught up" in. `dir` goes with it for the same reason.
    el.content.removeAttribute("lang")
