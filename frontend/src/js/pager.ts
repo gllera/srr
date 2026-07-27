@@ -71,6 +71,14 @@ function ensurePane(): HTMLElement {
 
 function engage(s: PagerSide): "page" | "resist" | "skip" {
    if (committing) return "skip"
+   // A settle armed by the PREVIOUS gesture must not fire into this one: its
+   // rest() would clear the transform this drag is about to write (a one-frame
+   // flash back to origin mid-drag) or, worse, land during a commit's slide-out
+   // and leave the arriving article a bare snap. A new gesture cycle owns the
+   // surface, so it invalidates the old timer rather than racing it. (Cleared
+   // AFTER the committing check: a skipped drag changes nothing and must leave
+   // an in-flight settle alone.)
+   clearTimeout(settleTimer)
    side = s
    // The neighbor probes already answered availability — the disabled state IS
    // has_left/has_right (reader.render/showList keep it current).
