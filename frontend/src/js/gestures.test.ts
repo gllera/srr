@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest"
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 
 // Two halves, both driven in jsdom: the scroll-linked toolbar hide/show +
 // resetScroll, and the touch state machine (one-finger swipe = prev/next,
@@ -8,7 +8,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest"
 // `instanceof TouchEvent`, so a synthesized Event with those props defined
 // drives the whole machine here — no browser needed.
 
-import { ROW_SWIPE_TRIGGER, setPullRefresh, setRowSwipe, setupGestures, type Gestures } from "./gestures"
+import { ROW_SWIPE_TRIGGER, setPullRefresh, setRowSwipe, setPager, setupGestures, type Gestures } from "./gestures"
 
 const setScrollY = (y: number) => Object.defineProperty(window, "scrollY", { value: y, configurable: true })
 // jsdom has no layout, so the scroll handler's at-bottom check needs explicit
@@ -29,6 +29,11 @@ let onCycle: ReturnType<typeof vi.fn>
 let pullRun: ReturnType<typeof vi.fn>
 let rowMove: ReturnType<typeof vi.fn>
 let rowAct: ReturnType<typeof vi.fn>
+let readerEl: HTMLElement
+let pagerEngage: ReturnType<typeof vi.fn>
+let pagerMoveFn: ReturnType<typeof vi.fn>
+let pagerEndFn: ReturnType<typeof vi.fn>
+let pagerCancelFn: ReturnType<typeof vi.fn>
 
 function mount(): void {
    // body's own class list survives an innerHTML reset (only its children are
@@ -38,6 +43,7 @@ function mount(): void {
    document.body.innerHTML =
       `<nav class="srr-toolbar"></nav>` +
       `<div class="srr-list"><a class="srr-row"><span class="srr-row-title">t</span></a></div>` +
+      `<article class="srr-reader"><p class="srr-reader-p">body</p></article>` +
       `<div class="srr-player"></div>`
    toolbar = document.querySelector(".srr-toolbar")!
    listEl = document.querySelector(".srr-list")!
@@ -59,6 +65,14 @@ function mount(): void {
       move: rowMove,
       end: rowAct,
    })
+   readerEl = document.querySelector(".srr-reader")!
+   pagerEngage = vi.fn(() => "page" as const)
+   pagerMoveFn = vi.fn()
+   pagerEndFn = vi.fn()
+   pagerCancelFn = vi.fn()
+   // What pager.setup does at boot: hand gestures the reader surface + the
+   // pane/commit spec. Re-registering also resets the module-level pager state.
+   setPager(readerEl, { engage: pagerEngage, move: pagerMoveFn, end: pagerEndFn, cancel: pagerCancelFn })
    g = setupGestures({ toolbar, goPrev, goNext, onCycle })
 }
 
@@ -680,5 +694,149 @@ describe("row swipe actions", () => {
       expect(rowAct).toHaveBeenCalledWith(rowA, 0)
       t.end(280)
       expect(rowAct).toHaveBeenCalledTimes(1)
+   })
+})
+
+describe("reader pager (geometry)", () => {
+   const inReader = () => document.querySelector(".srr-reader-p")!
+   const pStart = (x: number, y: number) =>
+      dispatchTouch("touchstart", [{ clientX: x, clientY: y }], undefined, inReader())
+   const pMove = (x: number, y: number, ms = 16) => {
+      vi.advanceTimersByTime(ms)
+      return moveTo([{ clientX: x, clientY: y }])
+   }
+   const pEnd = (x: number, y: number) => end([], [{ clientX: x, clientY: y }])
+
+   beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["performance", "setTimeout", "clearTimeout"] })
+   })
+   afterEach(() => {
+      vi.useRealTimers()
+   })
+
+   it("engages past the slop, reports the side, tracks moves, and owns the scroll", () => {
+      pStart(200, 300)
+      const e = pMove(150, 300) // dx=-50: leftward = next
+      expect(pagerEngage).toHaveBeenCalledWith("next")
+      expect(pagerMoveFn).toHaveBeenCalledWith(-50)
+      expect(e.defaultPrevented).toBe(true)
+      pMove(120, 300)
+      expect(pagerMoveFn).toHaveBeenLastCalledWith(-80)
+   })
+
+   it("a rightward drag engages as prev", () => {
+      pStart(100, 300)
+      pMove(160, 300)
+      expect(pagerEngage).toHaveBeenCalledWith("prev")
+   })
+
+   it("a vertical-dominant move vetoes the pager for the gesture's life", () => {
+      pStart(200, 300)
+      pMove(205, 400) // dy dominant
+      pMove(80, 400) // now horizontal — too late
+      expect(pagerEngage).not.toHaveBeenCalled()
+      expect(pagerMoveFn).not.toHaveBeenCalled()
+   })
+
+   it("commits at 25% of the viewport width", () => {
+      // jsdom: surface clientWidth is 0, so the machine falls back to
+      // window.innerWidth (1024 default) — threshold 256px.
+      pStart(500, 300)
+      for (const x of [440, 340, 240, 180]) pMove(x, 300)
+      pEnd(180, 300) // dx=-320
+      expect(pagerEndFn).toHaveBeenCalledWith(-320, true)
+   })
+
+   it("short of the threshold and slow: no commit", () => {
+      pStart(500, 300)
+      pMove(450, 300, 100)
+      pMove(400, 300, 100) // 50px per 100ms = 0.5... keep below: see next move
+      pMove(390, 300, 100) // last segment 10px/100ms = 0.1 px/ms
+      pEnd(390, 300) // dx=-110 < 256, vx 0.1 < 0.5
+      expect(pagerEndFn).toHaveBeenCalledWith(-110, false)
+   })
+
+   it("a flick commits below the distance threshold", () => {
+      pStart(500, 300)
+      pMove(470, 300, 16)
+      pMove(420, 300, 16) // last segment 50px/16ms ≈ 3.1 px/ms
+      pEnd(420, 300) // dx=-80 < 256 but flicked
+      expect(pagerEndFn).toHaveBeenCalledWith(-80, true)
+   })
+
+   it("resist mode never commits, whatever the distance", () => {
+      pagerEngage.mockReturnValue("resist")
+      pStart(500, 300)
+      for (const x of [400, 200, 60]) pMove(x, 300)
+      pEnd(60, 300) // dx=-440
+      expect(pagerEndFn).toHaveBeenCalledWith(-440, false)
+   })
+
+   it("skip declines the gesture: no further moves, no end", () => {
+      pagerEngage.mockReturnValue("skip")
+      pStart(500, 300)
+      pMove(400, 300)
+      pMove(300, 300)
+      pEnd(300, 300)
+      expect(pagerMoveFn).not.toHaveBeenCalled()
+      expect(pagerEndFn).not.toHaveBeenCalled()
+   })
+
+   it("a drag that returns past its origin does not commit against the engaged side", () => {
+      pStart(300, 300)
+      pMove(240, 300) // engaged as next
+      pMove(600, 300) // reversed: dx now +300
+      pEnd(600, 300)
+      expect(pagerEndFn).toHaveBeenCalledWith(300, false)
+   })
+
+   it("a second finger cancels an engaged drag", () => {
+      pStart(300, 300)
+      pMove(240, 300)
+      dispatchTouch("touchstart", [
+         { clientX: 240, clientY: 300 },
+         { clientX: 400, clientY: 300 },
+      ])
+      expect(pagerCancelFn).toHaveBeenCalledTimes(1)
+   })
+
+   it("touchcancel cancels an engaged drag", () => {
+      pStart(300, 300)
+      pMove(240, 300)
+      dispatchTouch("touchcancel", [])
+      expect(pagerCancelFn).toHaveBeenCalledTimes(1)
+   })
+
+   it("a touch starting OUTSIDE the surface never engages (overlays are inert structurally)", () => {
+      const overlay = document.createElement("div")
+      document.body.appendChild(overlay)
+      dispatchTouch("touchstart", [{ clientX: 500, clientY: 300 }], undefined, overlay)
+      pMove(100, 300)
+      pEnd(100, 300)
+      expect(pagerEngage).not.toHaveBeenCalled()
+   })
+
+   it("a hidden surface never engages (the reader behind the list)", () => {
+      readerEl.hidden = true
+      pStart(500, 300)
+      pMove(100, 300)
+      expect(pagerEngage).not.toHaveBeenCalled()
+   })
+
+   it("a touch inside a horizontally scrollable element is that element's scroll", () => {
+      const pre = document.createElement("pre")
+      readerEl.appendChild(pre)
+      Object.defineProperty(pre, "scrollWidth", { value: 900, configurable: true })
+      Object.defineProperty(pre, "clientWidth", { value: 300, configurable: true })
+      dispatchTouch("touchstart", [{ clientX: 500, clientY: 300 }], undefined, pre)
+      pMove(100, 300)
+      expect(pagerEngage).not.toHaveBeenCalled()
+   })
+
+   it("a touch starting on a scrubber declines the pager too", () => {
+      const bar = document.querySelector(".srr-player")!
+      dispatchTouch("touchstart", [{ clientX: 500, clientY: 300 }], undefined, bar)
+      pMove(100, 300)
+      expect(pagerEngage).not.toHaveBeenCalled()
    })
 })

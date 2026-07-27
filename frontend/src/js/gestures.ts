@@ -409,6 +409,153 @@ function rowCancel(): void {
    if (engaged && row && rowSpec) rowSpec.end(row, 0)
 }
 
+// ── Reader pager (spec docs/superpowers/specs/2026-07-27-reader-swipe-pager-design.md) ──
+// A one-finger HORIZONTAL drag on the READER surface pages prev/next with the
+// article tracking the finger. Fourth client of the one state machine, and the
+// same division of labor as the row swipe: this module owns the geometry (axis,
+// distance, velocity, the commit decision), the surface module (pager.ts) owns
+// the DOM and the meaning. The same three-face axis lock: a vertical-dominant
+// move vetoes for the gesture's life, an engaged drag preventDefaults every
+// move, and pagerEnd() reports "this WAS a pager drag" so touchend evaluates
+// nothing else.
+
+// Release past this fraction of the surface width commits the page turn.
+const PAGE_COMMIT_FRACTION = 0.25
+// ...or a flick: last-segment velocity in the drag's own direction, px/ms.
+const PAGE_FLICK_VX = 0.5
+
+export type PagerSide = "prev" | "next"
+
+export interface Pager {
+   // How this drag behaves, decided at engage: "page" tracks toward a live
+   // neighbor, "resist" is the damped dead-edge drag, "skip" declines the
+   // gesture entirely (a drag arriving while a prior commit is still animating).
+   engage(side: PagerSide): "page" | "resist" | "skip"
+   // Signed horizontal travel from the touch start; the surface clamps painting
+   // to the engaged direction.
+   move(dx: number): void
+   // The finger lifted. commit is this module's call: "page" mode AND travel in
+   // the engaged direction AND (past the fraction OR flicked).
+   end(dx: number, commit: boolean): void
+   cancel(): void
+}
+
+let pagerSpec: Pager | null = null
+let pagerSurface: HTMLElement | null = null
+let pagerEligible = false
+let pagerActive = false
+let pagerConsumed = false
+let pagerSide: PagerSide = "next"
+let pagerMode: "page" | "resist" = "page"
+let pagerStartX = 0
+let pagerStartY = 0
+let pagerDx = 0
+// Last-segment velocity (px/ms): the flick test reads the finger's speed at
+// lift, not the drag's average — a drag that travels fast then STOPS before
+// lifting is a considered release, not a flick.
+let pagerVx = 0
+let pagerLastX = 0
+let pagerLastT = 0
+
+// Register the pager: `surface` is the element a drag must START inside (the
+// reader <article>, hidden when the list is showing, which is the whole
+// view-gating story, like the pull's), `spec` the pane + commit half.
+export function setPager(surface: HTMLElement, spec: Pager): void {
+   pagerCancel() // against the outgoing spec, the row swipe's precedent
+   pagerSurface = surface
+   pagerSpec = spec
+}
+
+// A touch starting inside content that itself scrolls horizontally (a wide
+// <pre>, a table) belongs to that element's own scrolling. This also fixes a
+// pre-existing bug: the old blind swipe fired prev/next off a code-block pan.
+function inHScrollable(target: EventTarget | null, stop: HTMLElement): boolean {
+   let n = target instanceof Element ? target : null
+   while (n && n !== stop) {
+      if (n instanceof HTMLElement && n.scrollWidth > n.clientWidth + 1) return true
+      n = n.parentElement
+   }
+   return false
+}
+
+function pagerStart(target: EventTarget | null, x: number, y: number): void {
+   pagerEligible =
+      !!pagerSpec &&
+      !!pagerSurface &&
+      !pagerSurface.hidden &&
+      target instanceof Node &&
+      pagerSurface.contains(target) &&
+      !inHScrollable(target, pagerSurface)
+   pagerActive = false
+   pagerConsumed = false
+   pagerStartX = x
+   pagerStartY = y
+}
+
+function pagerMove(e: Event, x: number, y: number): void {
+   if (!pagerEligible || !pagerSpec) return
+   const dx = x - pagerStartX
+   const dy = y - pagerStartY
+   if (!pagerActive) {
+      // Axis lock, half one: vertical-dominant past the slop = a scroll for the
+      // rest of the gesture's life, measured against the ONE shared AXIS_SLOP.
+      if (Math.abs(dy) > AXIS_SLOP && Math.abs(dy) >= Math.abs(dx)) {
+         pagerEligible = false
+         return
+      }
+      if (Math.abs(dx) <= AXIS_SLOP) return
+      pagerSide = dx > 0 ? "prev" : "next"
+      const mode = pagerSpec.engage(pagerSide)
+      if (mode === "skip") {
+         pagerEligible = false
+         return
+      }
+      pagerMode = mode
+      pagerActive = true
+      pagerVx = 0
+      pagerLastX = x
+      pagerLastT = performance.now()
+   }
+   // Half two: an engaged drag owns the gesture, which means owning the scroll.
+   e.preventDefault()
+   const now = performance.now()
+   const dt = now - pagerLastT
+   if (dt > 0) pagerVx = (x - pagerLastX) / dt
+   pagerLastX = x
+   pagerLastT = now
+   pagerDx = dx
+   pagerSpec.move(dx)
+}
+
+// The gesture ended. Returns true when it WAS a pager drag — the third face of
+// the axis lock: touchend must not also evaluate it as anything else.
+function pagerEnd(): boolean {
+   if (!pagerActive) {
+      pagerEligible = false
+      return pagerConsumed
+   }
+   const spec = pagerSpec
+   const dx = pagerDx
+   pagerActive = false
+   pagerEligible = false
+   pagerConsumed = true
+   // jsdom reports clientWidth 0; the viewport is the honest fallback.
+   const width = pagerSurface?.clientWidth || window.innerWidth
+   const dirOk = pagerSide === "prev" ? dx > 0 : dx < 0
+   const flick = dirOk && Math.sign(pagerVx) === Math.sign(dx) && Math.abs(pagerVx) >= PAGE_FLICK_VX
+   const commit = pagerMode === "page" && dirOk && (Math.abs(dx) >= width * PAGE_COMMIT_FRACTION || flick)
+   spec?.end(dx, commit)
+   return true
+}
+
+function pagerCancel(): void {
+   const engaged = pagerActive
+   pagerEligible = false
+   pagerActive = false
+   pagerConsumed = false
+   if (engaged) pagerSpec?.cancel()
+}
+
 // setupGestures wires touch swipes (one-finger left/right = prev/next, or a row
 // action when it starts on a list row, one-finger downward overscroll on the
 // list = pull to refresh, two-finger vertical = cycle filter) and scroll-based
@@ -445,6 +592,7 @@ export function setupGestures(deps: GestureDeps): Gestures {
          mode = "none"
          pullCancel()
          rowCancel()
+         pagerCancel()
          return
       }
       mode = "single"
@@ -452,6 +600,7 @@ export function setupGestures(deps: GestureDeps): Gestures {
       touchStartY = t.clientY
       pullStart(target, t.clientX, t.clientY)
       rowStart(target, t.clientX, t.clientY)
+      pagerStart(target, t.clientX, t.clientY)
    }
 
    // Gesture guard (RDR16): a seek control is a horizontal drag, and the
@@ -489,6 +638,7 @@ export function setupGestures(deps: GestureDeps): Gestures {
             // than leaving one hanging.
             pullCancel()
             rowCancel()
+            pagerCancel()
          } else if (e.touches.length === 1) {
             trackSingle(e.touches[0], e.target)
          } else {
@@ -496,6 +646,7 @@ export function setupGestures(deps: GestureDeps): Gestures {
             mode = "none"
             pullCancel()
             rowCancel()
+            pagerCancel()
          }
       },
       { passive: true },
@@ -527,6 +678,7 @@ export function setupGestures(deps: GestureDeps): Gestures {
             // test, so at most one of them can ever claim a given gesture.
             pullMove(e, e.touches[0].clientX, e.touches[0].clientY)
             rowMove(e, e.touches[0].clientX, e.touches[0].clientY)
+            pagerMove(e, e.touches[0].clientX, e.touches[0].clientY)
          }
       },
       { passive: false },
@@ -559,6 +711,9 @@ export function setupGestures(deps: GestureDeps): Gestures {
          // anyway — the lock belongs here, beside the other two faces, rather
          // than resting on a guard in another module.)
          if (rowEnd()) return
+         // Likewise a pager drag — it is the reader's horizontal gesture and has
+         // already decided commit-or-snap; the blind swipe below must not re-read it.
+         if (pagerEnd()) return
          const dx = e.changedTouches[0].clientX - touchStartX
          const dy = e.changedTouches[0].clientY - touchStartY
          if (Math.abs(dx) < 50 || Math.abs(dy) > Math.abs(dx)) return
@@ -575,6 +730,7 @@ export function setupGestures(deps: GestureDeps): Gestures {
          mode = "none"
          pullCancel()
          rowCancel()
+         pagerCancel()
       },
       { passive: true },
    )
