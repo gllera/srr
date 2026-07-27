@@ -950,7 +950,10 @@ async function init() {
    })
    // The reader swipe pager: gestures owns the drag geometry, pager.ts the pane
    // and visuals, and this seam hands a committed drag to the nav mutex.
-   pager.setup({ commit: pagerCommit })
+   // `abandon` is the pager giving up on a step that outran its watchdog while
+   // pagerCommit's own finally is still blocked on it: the slide is over, so the
+   // arrival that eventually lands should fade in like any other entry.
+   pager.setup({ commit: pagerCommit, abandon: () => reader.setEntryTransition(null) })
 
    let hash = location.hash.substring(1)
    // Reject foreign hashes (e.g., OAuth implicit-flow tokens injected by an

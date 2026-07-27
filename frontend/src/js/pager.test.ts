@@ -26,6 +26,7 @@ import type { Pager } from "./gestures"
 let pager: typeof import("./pager")
 let spec: Pager
 let commit: ReturnType<typeof vi.fn>
+let abandon: ReturnType<typeof vi.fn>
 const article = () => document.querySelector(".srr-reader") as HTMLElement
 const pane = () => document.querySelector(".srr-pager-pane") as HTMLElement | null
 const nextBtn = () => document.querySelector(".srr-next") as HTMLButtonElement
@@ -40,8 +41,9 @@ beforeEach(async () => {
    document.body.innerHTML =
       `<article class="srr-reader"></article>` + `<button class="srr-prev"></button><button class="srr-next"></button>`
    commit = vi.fn(async () => true)
+   abandon = vi.fn()
    pager = await import("./pager")
-   pager.setup({ commit })
+   pager.setup({ commit, abandon })
    spec = mocks.setPager.mock.calls.at(-1)![1] as Pager
 })
 
@@ -234,6 +236,37 @@ describe("commit", () => {
       // ...and the pager is usable again rather than skip-locked behind a
       // commit that is never coming back.
       expect(spec.engage("next")).toBe("page")
+      // The step is STILL in flight, so app.ts's finally has not cleared the
+      // "slide" it armed before awaiting. settleBack just undid that slide, so
+      // the render whenever the step lands would consume the flag, suppress the
+      // fade, and swap with no transition at all. Handing it back is what makes
+      // the late arrival fade in like any keyboard step.
+      expect(abandon).toHaveBeenCalledTimes(1)
+   })
+
+   // The other half of that distinction: a step that ANSWERS false has settled,
+   // so app.ts's finally already ran and the flag is clear. Abandoning there
+   // would be a second clear of something nobody armed — harmless today, but it
+   // would make the signal mean "snapped back" instead of "still in flight", and
+   // the next reader of this code would wire it to the wrong thing.
+   it("a commit that answers false has settled — nothing to abandon", async () => {
+      vi.useFakeTimers()
+      commit.mockResolvedValueOnce(false)
+      spec.engage("next")
+      spec.move(-300)
+      spec.end(-300, true)
+      await vi.advanceTimersByTimeAsync(300)
+      expect(article().style.transform).toBe("")
+      expect(abandon).not.toHaveBeenCalled()
+   })
+
+   it("a successful commit never abandons its own slide", async () => {
+      vi.useFakeTimers()
+      spec.engage("next")
+      spec.move(-300)
+      spec.end(-300, true)
+      await vi.advanceTimersByTimeAsync(300)
+      expect(abandon).not.toHaveBeenCalled()
    })
 
    it("a drag arriving mid-commit is skipped", () => {

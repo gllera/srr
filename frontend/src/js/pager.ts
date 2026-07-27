@@ -18,6 +18,12 @@ export interface PagerDeps {
    // app.ts's guarded step. Resolves false when nothing moved — a busy mutex or
    // a failed load (guard owns the error popup) — which is the snap-back signal.
    commit: (side: PagerSide) => Promise<boolean>
+   // "Stop expecting a slide arrival": called ONLY when the watchdog gives up on
+   // a commit still in flight (see commitStep). app.ts set the reader's entry
+   // transition before awaiting and clears it in a finally that has not run yet,
+   // so without this the eventual render consumes a "slide" whose slide we have
+   // already undone — arriving with no transition at all instead of the fade.
+   abandon: () => void
 }
 
 // Dead-edge damping: the article follows at 0.3× the finger, capped, so the
@@ -171,8 +177,20 @@ async function commitStep(s: PagerSide): Promise<void> {
       // mutex is what makes this the only window there is. The late step still
       // lands and renders through the normal path.
       const ok = await Promise.race([d.commit(s), stalled()])
-      if (ok) rest()
-      else settleBack()
+      // STALLED and a plain `false` snap back identically but leave the ENTRY
+      // TRANSITION in opposite states, which is the whole reason the watchdog
+      // answers with its own value rather than a second `false`. A `false` from
+      // the step means it SETTLED — app.ts's finally has already run and the
+      // "slide" flag is clear. STALLED means it is still in flight with that
+      // flag armed, and the slide it names is about to be undone by settleBack:
+      // whenever the step finally lands, its render would consume "slide",
+      // suppress the fade, and swap with NO transition at all. Handing the flag
+      // back makes that late arrival fade in like any keyboard step.
+      if (ok === true) rest()
+      else {
+         if (ok === STALLED) d.abandon()
+         settleBack()
+      }
    } catch {
       settleBack()
    } finally {
@@ -181,12 +199,15 @@ async function commitStep(s: PagerSide): Promise<void> {
    }
 }
 
+// The watchdog's answer — deliberately not `false`; see the race above.
+const STALLED = Symbol("pager-commit-stalled")
+
 // The watchdog half of that race. A plain timer, so a commit that resolves
 // first simply clears it in the finally above; a late rejection from the loser
 // stays handled (Promise.race attached to it) and its resolution is ignored.
-function stalled(): Promise<false> {
+function stalled(): Promise<typeof STALLED> {
    return new Promise((r) => {
-      commitTimer = setTimeout(() => r(false), COMMIT_WAIT_MS)
+      commitTimer = setTimeout(() => r(STALLED), COMMIT_WAIT_MS)
    })
 }
 

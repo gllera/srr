@@ -60,8 +60,7 @@ function clearContentTransition() {
 // The arrival transition the NEXT render should use: "slide" while a committed
 // pager drag is driving the step (app.ts brackets the guarded nav call with
 // it), null for every other entry — keyboard, buttons, deep links — which keep
-// the fade. TWO things clear it, and both are needed because they cover
-// different holes:
+// the fade. THREE things clear it, and each covers a hole the others cannot:
 //   - render() CONSUMES it (reads, then immediately nulls), so a set can never
 //     outlive the ONE render it was meant for. app.ts's finally alone could not
 //     promise that: it only runs when its guarded step settles, and a pager
@@ -72,7 +71,12 @@ function clearContentTransition() {
 //   - app.ts still clears it in a finally, for the case where NO render happens
 //     at all — a guard() that skips on a busy mutex, or a step that rejects —
 //     which consume-on-read cannot see.
-// Neither is redundant; dropping either one reopens its own hole.
+//   - app.ts ALSO clears it from pager.ts's `abandon`, when the pager's watchdog
+//     gives up on a step still in flight. Neither of the above reaches that: the
+//     finally is still blocked on the step, and consume-on-read would fire on
+//     the render that eventually lands — suppressing the fade for a slide the
+//     pager has by then undone, so the article would swap with NO transition.
+// None is redundant; dropping any one reopens its own hole.
 let entryTransition: "slide" | null = null
 export function setEntryTransition(t: "slide" | null): void {
    entryTransition = t
