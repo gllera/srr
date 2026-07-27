@@ -422,8 +422,10 @@ function rowCancel(): void {
 // pullEnd/rowEnd, and so the lock is already closed if a fifth machine is ever
 // added after it.
 
-// Release past this fraction of the surface width commits the page turn.
-const PAGE_COMMIT_FRACTION = 0.25
+// Release past this fraction of the surface width commits the page turn. 0.20
+// rather than 0.25: a quarter of a 390px phone is ~98px, a long pull for a thumb
+// pivoting from the edge.
+const PAGE_COMMIT_FRACTION = 0.2
 // ...or a flick: last-segment velocity in the drag's own direction, px/ms.
 const PAGE_FLICK_VX = 0.5
 
@@ -438,8 +440,10 @@ export interface Pager {
    // to the engaged direction.
    move(dx: number): void
    // The finger lifted. commit is this module's call: "page" mode AND travel in
-   // the engaged direction AND (past the fraction OR flicked).
-   end(dx: number, commit: boolean): void
+   // the engaged direction AND (past the fraction OR flicked). `vx` is the
+   // last-segment velocity in px/ms, signed — the surface carries it into the
+   // settle duration so a flick lands faster than a considered release.
+   end(dx: number, commit: boolean, vx: number): void
    cancel(): void
 }
 
@@ -520,6 +524,28 @@ function pagerMove(e: Event, x: number, y: number): void {
       pagerLastX = x
       pagerLastT = performance.now()
    }
+   // Reversal: a finger that crosses back through the origin is asking for the
+   // other neighbour, not for the article to sit at 0. Re-engage from scratch —
+   // side, mode and the preview all have to be re-derived, and engage() is what
+   // owns that. A "skip" answer ends the gesture, exactly as at first engage.
+   //
+   // This is the pager's alone and cannot leak into the other three clients:
+   // they are separate state machines over the same touch stream, none of them
+   // reads pagerSide, and the shared AXIS_SLOP is untouched — a drag that
+   // reverses here was already horizontal-dominant, so the pull had vetoed
+   // itself and the row swipe had claimed (or declined) the gesture on the very
+   // first move past the slop, long before any sign change.
+   const wantSide: PagerSide = dx > 0 ? "prev" : "next"
+   if (pagerActive && dx !== 0 && wantSide !== pagerSide) {
+      const mode = pagerSpec.engage(wantSide)
+      if (mode === "skip") {
+         pagerEligible = false
+         pagerActive = false
+         return
+      }
+      pagerSide = wantSide
+      pagerMode = mode
+   }
    // Half two: an engaged drag owns the gesture, which means owning the scroll.
    e.preventDefault()
    const now = performance.now()
@@ -550,7 +576,7 @@ function pagerEnd(): boolean {
    const dirOk = pagerSide === "prev" ? dx > 0 : dx < 0
    const flick = dirOk && Math.sign(pagerVx) === Math.sign(dx) && Math.abs(pagerVx) >= PAGE_FLICK_VX
    const commit = pagerMode === "page" && dirOk && (Math.abs(dx) >= width * PAGE_COMMIT_FRACTION || flick)
-   spec?.end(dx, commit)
+   spec?.end(dx, commit, pagerVx)
    return true
 }
 

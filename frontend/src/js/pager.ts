@@ -48,6 +48,17 @@ let committing = false
 let fillTok = 0
 let settleTimer: ReturnType<typeof setTimeout> | undefined
 let commitTimer: ReturnType<typeof setTimeout> | undefined
+// The finger's speed at the lift (px/ms, signed), handed over by gestures.ts.
+// Recorded here rather than passed down because the settle it feeds is not the
+// call that receives it: the release is one act, the animation that carries it
+// out is another, and commitStep/settleBack are both reached without it.
+//
+// Written and not yet read: the geometry half of the feel pass landed first, and
+// the velocity-carried settle that consumes this is its own change. The
+// suppression goes with that change — if it is still here once the settle reads
+// the value, delete the comment, not the variable.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+let releaseVx = 0
 
 export function setup(deps: PagerDeps): void {
    d = deps
@@ -144,7 +155,8 @@ function move(dx: number): void {
    box.style.transform = side === "prev" ? `translateX(calc(-100% + ${cl}px))` : `translateX(calc(100% + ${cl}px))`
 }
 
-function end(dx: number, commit: boolean): void {
+function end(dx: number, commit: boolean, vx: number): void {
+   releaseVx = vx
    if (mode === "page" && commit) void commitStep(side)
    else settleBack()
 }

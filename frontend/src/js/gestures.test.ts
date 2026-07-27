@@ -764,13 +764,18 @@ describe("reader pager (geometry)", () => {
       expect(pagerMoveFn).not.toHaveBeenCalled()
    })
 
-   it("commits at 25% of the viewport width", () => {
+   it("commits at 20% of the surface width, not 25%", () => {
       // jsdom: surface clientWidth is 0, so the machine falls back to
-      // window.innerWidth (1024 default) — threshold 256px.
+      // window.innerWidth (1024 default) — 20% is 204.8px, 25% was 256px. The
+      // release below sits BETWEEN them, so this case is what discriminates the
+      // two fractions; the slow last segment keeps the flick path out of it.
       pStart(500, 300)
-      for (const x of [440, 340, 240, 180]) pMove(x, 300)
-      pEnd(180, 300) // dx=-320
-      expect(pagerEndFn).toHaveBeenCalledWith(-320, true)
+      pMove(460, 300, 100)
+      pMove(380, 300, 100)
+      pMove(285, 300, 100)
+      pMove(280, 300, 100) // last segment 5px/100ms = 0.05 px/ms — no flick
+      pEnd(280, 300) // dx=-220
+      expect(pagerEndFn).toHaveBeenCalledWith(-220, true, expect.any(Number))
    })
 
    it("short of the threshold and slow: no commit", () => {
@@ -778,16 +783,16 @@ describe("reader pager (geometry)", () => {
       pMove(450, 300, 100)
       pMove(400, 300, 100) // 50px per 100ms = 0.5... keep below: see next move
       pMove(390, 300, 100) // last segment 10px/100ms = 0.1 px/ms
-      pEnd(390, 300) // dx=-110 < 256, vx 0.1 < 0.5
-      expect(pagerEndFn).toHaveBeenCalledWith(-110, false)
+      pEnd(390, 300) // dx=-110 < 204.8, vx 0.1 < 0.5
+      expect(pagerEndFn).toHaveBeenCalledWith(-110, false, expect.any(Number))
    })
 
    it("a flick commits below the distance threshold", () => {
       pStart(500, 300)
       pMove(470, 300, 16)
       pMove(420, 300, 16) // last segment 50px/16ms ≈ 3.1 px/ms
-      pEnd(420, 300) // dx=-80 < 256 but flicked
-      expect(pagerEndFn).toHaveBeenCalledWith(-80, true)
+      pEnd(420, 300) // dx=-80 < 204.8 but flicked
+      expect(pagerEndFn).toHaveBeenCalledWith(-80, true, expect.any(Number))
    })
 
    it("resist mode never commits, whatever the distance", () => {
@@ -795,7 +800,7 @@ describe("reader pager (geometry)", () => {
       pStart(500, 300)
       for (const x of [400, 200, 60]) pMove(x, 300)
       pEnd(60, 300) // dx=-440
-      expect(pagerEndFn).toHaveBeenCalledWith(-440, false)
+      expect(pagerEndFn).toHaveBeenCalledWith(-440, false, expect.any(Number))
    })
 
    it("skip declines the gesture: no further moves, no end", () => {
@@ -806,14 +811,6 @@ describe("reader pager (geometry)", () => {
       pEnd(300, 300)
       expect(pagerMoveFn).not.toHaveBeenCalled()
       expect(pagerEndFn).not.toHaveBeenCalled()
-   })
-
-   it("a drag that returns past its origin does not commit against the engaged side", () => {
-      pStart(300, 300)
-      pMove(240, 300) // engaged as next
-      pMove(600, 300) // reversed: dx now +300
-      pEnd(600, 300)
-      expect(pagerEndFn).toHaveBeenCalledWith(300, false)
    })
 
    it("a second finger cancels an engaged drag", () => {
@@ -897,5 +894,69 @@ describe("reader pager (geometry)", () => {
       dispatchTouch("touchstart", [{ clientX: 500, clientY: 300 }], undefined, pre)
       pMove(100, 300)
       expect(pagerEngage).not.toHaveBeenCalled()
+   })
+
+   // The velocity handoff and mid-drag reversal. Nested so the pStart/pMove/pEnd
+   // helpers and the fake-timer clock above are the same ones the geometry cases
+   // run on — the reversal is geometry, and the velocity it hands over is the
+   // same last-segment measurement the flick test already leans on.
+   describe("tuning: velocity handoff + mid-drag reversal", () => {
+      it("hands the signed release velocity to the surface", () => {
+         pStart(500, 300)
+         pMove(460, 300) // the engage move opens the segment; it measures nothing
+         pMove(380, 300, 160) // -80px over 160ms = -0.5 px/ms exactly
+         pEnd(380, 300)
+         expect(pagerEndFn).toHaveBeenCalledWith(-120, true, -0.5)
+      })
+
+      it("re-engages the other side when the finger crosses back through the origin", () => {
+         pStart(300, 300)
+         pMove(240, 300) // leftward → next
+         expect(pagerEngage).toHaveBeenLastCalledWith("next")
+         pMove(420, 300) // back through the origin, now rightward → prev
+         expect(pagerEngage).toHaveBeenLastCalledWith("prev")
+         // Once only: the side is re-derived on the SIGN CHANGE, not on every
+         // move, so a drag that keeps going right asks the surface nothing more.
+         pMove(480, 300)
+         expect(pagerEngage).toHaveBeenCalledTimes(2)
+      })
+
+      // The behaviour the reversal replaces: this release used to be reported as
+      // an uncommitted drag against the side it started on. It is now a committed
+      // page turn toward the side it ended on.
+      it("a reversed drag commits toward the side it ended on", () => {
+         pStart(300, 300)
+         pMove(240, 300, 100) // engaged as next
+         pMove(400, 300, 100) // reversed → prev
+         pMove(555, 300, 100)
+         pMove(560, 300, 100) // slow last segment: distance, not flick, decides
+         pEnd(560, 300) // dx=+260, past 20% of 1024
+         expect(pagerEngage).toHaveBeenLastCalledWith("prev")
+         expect(pagerEndFn).toHaveBeenCalledWith(260, true, expect.any(Number))
+      })
+
+      it("a reversal short of the threshold on the new side still snaps back", () => {
+         pStart(300, 300)
+         pMove(240, 300, 100) // engaged as next
+         pMove(340, 300, 100) // reversed → prev, but only 40px past the origin
+         pMove(345, 300, 100)
+         pEnd(345, 300) // dx=+45
+         expect(pagerEndFn).toHaveBeenCalledWith(45, false, expect.any(Number))
+      })
+
+      // A re-engage is a real engage, so it can be declined for the same reason
+      // the first one can (a prior commit still in flight) — and a declined
+      // gesture is over: no more moves, and no end for the surface to settle.
+      it("a skip on reversal ends the gesture, exactly as at first engage", () => {
+         pStart(300, 300)
+         pMove(240, 300)
+         expect(pagerMoveFn).toHaveBeenCalledTimes(1)
+         pagerEngage.mockReturnValue("skip")
+         pMove(420, 300) // reversal asks again; the surface declines
+         pMove(500, 300)
+         pEnd(500, 300)
+         expect(pagerMoveFn).toHaveBeenCalledTimes(1)
+         expect(pagerEndFn).not.toHaveBeenCalled()
+      })
    })
 })
