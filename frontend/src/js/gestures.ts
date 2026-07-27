@@ -44,10 +44,11 @@ export interface Gestures {
 // Finger travel before a gesture commits to an axis. Small enough that the
 // browser hasn't started its own overscroll, big enough to survive a thumb roll.
 //
-// SHARED with the row swipe below, and it has to be shared: the two axis locks
-// are the same comparison read in opposite directions, so a different slop on
-// each side would leave a band of gestures that BOTH machines claim (or that
-// neither does).
+// SHARED across all three horizontal/vertical clients below (the pull, the row
+// swipe, the reader pager), and it has to be shared: every axis lock is the
+// same comparison read in its own direction, so a different slop on any one
+// side would leave a band of gestures that two machines both claim (or that
+// none does).
 const AXIS_SLOP = 8
 // Downward travel that arms the refresh.
 const PULL_TRIGGER = 72

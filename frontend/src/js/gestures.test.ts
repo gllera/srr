@@ -730,6 +730,14 @@ describe("reader pager (geometry)", () => {
       expect(pagerEngage).toHaveBeenCalledWith("prev")
    })
 
+   it("stays out of an ordinary scroll: no preventDefault inside the slop", () => {
+      pStart(200, 300)
+      const e = pMove(204, 300) // 4px, inside the shared axis slop
+      expect(e.defaultPrevented).toBe(false)
+      expect(pagerEngage).not.toHaveBeenCalled()
+      expect(pagerMoveFn).not.toHaveBeenCalled()
+   })
+
    it("a vertical-dominant move vetoes the pager for the gesture's life", () => {
       pStart(200, 300)
       pMove(205, 400) // dy dominant
@@ -754,6 +762,12 @@ describe("reader pager (geometry)", () => {
       pMove(390, 300, 100) // last segment 10px/100ms = 0.1 px/ms
       pEnd(390, 300) // dx=-110 < 256, vx 0.1 < 0.5
       expect(pagerEndFn).toHaveBeenCalledWith(-110, false)
+      // axis lock, face 3: pagerEnd() reports "this WAS a pager drag" whatever
+      // `commit` came out as, so the blind swipe below never also fires — dx
+      // here (-110) is well past its 50px threshold, the case a `return commit`
+      // regression would slip through.
+      expect(goPrev).not.toHaveBeenCalled()
+      expect(goNext).not.toHaveBeenCalled()
    })
 
    it("a flick commits below the distance threshold", () => {
