@@ -523,17 +523,18 @@ function onCycle(dir: number) {
 // Each step/cycle key has an arrow + letter alias; define the action once and
 // point both keys at it. step toward a dead edge rings the reader margin bell;
 // cycle is a no-op when the filter rotation has a single entry.
-// stepLeft/stepRight back BOTH the reader keymap and the one-finger swipe
-// (gestures' goPrev/goNext). They act only on the reader surface. The picker
-// overlay can be open OVER the reader (via the reader's filter button, view
-// stays "reader"), so a swipe on it must be inert too — the same guard the
-// keymap and the two-finger cycle carry (a bare view check no longer covers it
-// now that the picker isn't list-only). Gating on view !== "reader" additionally
-// makes a swipe over the LIST (where prev/next are disabled) a clean no-op.
+// stepLeft/stepRight back the reader KEYMAP alone (ArrowLeft/a, ArrowRight/d) —
+// touch prev/next is the pager's and commits through pagerCommit below, and the
+// toolbar's prev/next buttons have their own listeners (they are `disabled` at a
+// dead edge, so they never need the bell). They act only on the reader surface.
+// The picker overlay can be open OVER the reader (via the reader's filter
+// button, view stays "reader"), so a key pressed under it must be inert too —
+// a bare view check no longer covers it now that the picker isn't list-only.
+// Gating on view !== "reader" additionally makes them a clean no-op on the LIST.
 // The image lightbox is the same class of overlay: it covers the reader while a
-// content image is enlarged, so a swipe on it must not step the article behind.
-// (Its KEY input is already swallowed at the capture phase — lightbox.ts onKey —
-// but touch gestures reach these callbacks directly and need the flag.)
+// content image is enlarged, so it must not step the article behind. (Its key
+// input is already swallowed at the capture phase — lightbox.ts onKey — so that
+// flag is belt to this brace; pagerCommit mirrors both guards for the drag.)
 const stepLeft = () => {
    if (view !== "reader" || picker.isOpen() || lightbox.isOpen()) return
    return el.prev.disabled ? reader.bumpReaderEdge("prev") : guard(() => nav.left())
@@ -938,8 +939,6 @@ async function init() {
 
    gestures = setupGestures({
       toolbar: el.toolbar,
-      goPrev: stepLeft,
-      goNext: stepRight,
       onCycle,
    })
    // The reader swipe pager: gestures owns the drag geometry, pager.ts the pane

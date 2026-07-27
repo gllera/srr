@@ -839,21 +839,29 @@ describe("reader image lightbox (RDR7)", () => {
       expect(nav.left).not.toHaveBeenCalled()
    })
 
-   it("makes the one-finger swipe and the two-finger cycle inert", async () => {
+   it("makes the two-finger cycle inert", async () => {
       await boot()
       await showPic()
-      const reader = document.querySelector(".srr-reader") as HTMLElement
-      reader.classList.remove("srr-bell-right")
-      nav.right.mockClear()
       nav.cycleFilter.mockClear()
       // The gesture deps app passed to setupGestures — touch never goes through
-      // the keydown trap, so these need the isOpen() flag.
-      const deps = gestures.setupGestures.mock.calls[0][0] as { goNext: () => void; onCycle: (d: number) => void }
-      deps.goNext()
+      // the keydown trap, so this needs the isOpen() flag. (The reader's touch
+      // prev/next is the pager's now; its own lightbox guard is pinned in the
+      // pagerCommit describe below.)
+      const deps = gestures.setupGestures.mock.calls[0][0] as { onCycle: (d: number) => void }
       deps.onCycle(1)
-      expect(nav.right).not.toHaveBeenCalled()
       expect(nav.cycleFilter).not.toHaveBeenCalled()
-      expect(reader.classList.contains("srr-bell-right")).toBe(false) // not even the edge bell
+   })
+
+   // The touch half of the same claim, now that a reader swipe is a pager drag:
+   // gestures can't see the lightbox (it imports nothing), so the guard lives at
+   // the commit seam — the twin of the picker case in the pagerCommit describe.
+   it("makes a committed pager drag inert", async () => {
+      await boot()
+      await showPic()
+      nav.right.mockClear()
+      const commit = pagerMock.setup.mock.calls.at(-1)![0].commit as (s: "prev" | "next") => Promise<boolean>
+      expect(await commit("next")).toBe(false)
+      expect(nav.right).not.toHaveBeenCalled()
    })
 
    it("closes when the BROWSER navigates (back/forward), which the UI can't", async () => {
@@ -1362,25 +1370,6 @@ describe("reader edge — margin bell", () => {
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }))
       expect(reader.classList.contains("srr-bell-right")).toBe(true)
       expect(nav.right).not.toHaveBeenCalled()
-   })
-
-   // The reader's filter button can open the picker OVER the reader (view stays
-   // "reader"), so a one-finger swipe on the overlay must not step/bell the reader
-   // underneath — same guard the keymap and two-finger cycle already have.
-   it("a one-finger swipe is inert while the picker overlay is open", async () => {
-      await boot()
-      hashTo("#2")
-      await flush()
-      const reader = document.querySelector(".srr-reader") as HTMLElement
-      reader.classList.remove("srr-bell-right")
-      nav.right.mockClear()
-      picker.isOpen.mockReturnValue(true)
-      // The gesture deps app passed to setupGestures — goNext IS the committed swipe.
-      const deps = gestures.setupGestures.mock.calls[0][0] as { goNext: () => void }
-      deps.goNext()
-      expect(nav.right).not.toHaveBeenCalled()
-      expect(reader.classList.contains("srr-bell-right")).toBe(false)
-      picker.isOpen.mockReturnValue(false)
    })
 })
 

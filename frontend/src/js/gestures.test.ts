@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 
 // Two halves, both driven in jsdom: the scroll-linked toolbar hide/show +
-// resetScroll, and the touch state machine (one-finger swipe = prev/next,
-// two-finger vertical = cycle filter, pinch discrimination, finger-lift re-seed,
-// touchcancel). jsdom has no real Touch dispatch, but the handlers only read
+// resetScroll, and the touch state machine (its three single-finger clients —
+// pull to refresh, row swipe, reader pager — plus two-finger vertical = cycle
+// filter, pinch discrimination, finger-lift re-seed, touchcancel). jsdom has no
+// real Touch dispatch, but the handlers only read
 // plain {clientX,clientY} off e.touches/e.changedTouches and never test
 // `instanceof TouchEvent`, so a synthesized Event with those props defined
 // drives the whole machine here — no browser needed.
@@ -23,8 +24,6 @@ let toolbar: HTMLElement
 let listEl: HTMLElement
 let rowA: HTMLElement
 let g: Gestures
-let goPrev: ReturnType<typeof vi.fn>
-let goNext: ReturnType<typeof vi.fn>
 let onCycle: ReturnType<typeof vi.fn>
 let pullRun: ReturnType<typeof vi.fn>
 let rowMove: ReturnType<typeof vi.fn>
@@ -48,8 +47,6 @@ function mount(): void {
    toolbar = document.querySelector(".srr-toolbar")!
    listEl = document.querySelector(".srr-list")!
    rowA = document.querySelector("a.srr-row")!
-   goPrev = vi.fn()
-   goNext = vi.fn()
    onCycle = vi.fn()
    pullRun = vi.fn(async () => "")
    rowMove = vi.fn()
@@ -73,7 +70,7 @@ function mount(): void {
    // What pager.setup does at boot: hand gestures the reader surface + the
    // pane/commit spec. Re-registering also resets the module-level pager state.
    setPager(readerEl, { engage: pagerEngage, move: pagerMoveFn, end: pagerEndFn, cancel: pagerCancelFn })
-   g = setupGestures({ toolbar, goPrev, goNext, onCycle })
+   g = setupGestures({ toolbar, onCycle })
 }
 
 beforeEach(() => {
@@ -195,67 +192,25 @@ const moveTo = (touches: Pt[]) => dispatchTouch("touchmove", touches)
 // (the swipe delta reads changedTouches[0]).
 const end = (remaining: Pt[], lifted: Pt[]) => dispatchTouch("touchend", remaining, lifted)
 
-describe("one-finger swipe", () => {
-   it("a left swipe (finger moves left) steps to the next article", () => {
-      start([{ clientX: 200, clientY: 300 }])
-      end([], [{ clientX: 100, clientY: 300 }]) // dx = -100
-      expect(goNext).toHaveBeenCalledTimes(1)
-      expect(goPrev).not.toHaveBeenCalled()
-   })
-
-   it("a right swipe steps to the previous article", () => {
-      start([{ clientX: 100, clientY: 300 }])
-      end([], [{ clientX: 200, clientY: 300 }]) // dx = +100
-      expect(goPrev).toHaveBeenCalledTimes(1)
-      expect(goNext).not.toHaveBeenCalled()
-   })
-
-   it("ignores a sub-threshold horizontal move (<50px)", () => {
-      start([{ clientX: 100, clientY: 300 }])
-      end([], [{ clientX: 135, clientY: 300 }]) // dx = 35
-      expect(goPrev).not.toHaveBeenCalled()
-      expect(goNext).not.toHaveBeenCalled()
-   })
-
-   it("ignores a vertical-dominant move even past the threshold (|dy| > |dx|)", () => {
-      start([{ clientX: 100, clientY: 300 }])
-      end([], [{ clientX: 170, clientY: 420 }]) // dx=70, dy=120
-      expect(goPrev).not.toHaveBeenCalled()
-      expect(goNext).not.toHaveBeenCalled()
-   })
-
-   it("does not fire off a stale start after a 3+-finger touch", () => {
-      // 3 fingers = not a gesture we handle (mode → none); the lift must not read
-      // a stale touchStartX and fire a spurious prev/next.
-      start([
-         { clientX: 100, clientY: 300 },
-         { clientX: 200, clientY: 300 },
-         { clientX: 300, clientY: 300 },
-      ])
-      end([], [{ clientX: 400, clientY: 300 }]) // would be a big swipe, but ignored
-      expect(goPrev).not.toHaveBeenCalled()
-      expect(goNext).not.toHaveBeenCalled()
-   })
-
-   it("resets on touchcancel so the following lift is inert", () => {
-      start([{ clientX: 100, clientY: 300 }])
-      dispatchTouch("touchcancel", [])
-      end([], [{ clientX: 220, clientY: 300 }]) // dx=+120, but cancelled
-      expect(goPrev).not.toHaveBeenCalled()
-      expect(goNext).not.toHaveBeenCalled()
-   })
-})
-
-// RDR16: a seek control is a horizontal drag identical in shape to a swipe,
-// and the document handlers above have no target filtering — without the
-// guard, scrubbing fires prev/next instead of seeking.
+// RDR16: a seek control is a horizontal drag identical in shape to a reader
+// page turn, and the document handlers above have no target filtering — an
+// in-content scrubber sits INSIDE the pager's own surface, so without the guard
+// scrubbing pages the article instead of seeking.
 describe("scrubber gesture guard (RDR16)", () => {
-   it("a touchstart inside .srr-player stops an otherwise-qualifying swipe from firing", () => {
-      const player = document.querySelector(".srr-player")!
-      dispatchTouch("touchstart", [{ clientX: 200, clientY: 300 }], undefined, player)
-      end([], [{ clientX: 100, clientY: 300 }]) // dx = -100, would be goNext anywhere else
-      expect(goNext).not.toHaveBeenCalled()
-      expect(goPrev).not.toHaveBeenCalled()
+   // A drag that WOULD page the reader if it weren't declined: horizontal, past
+   // the axis slop, starting on `target`. (The move is what makes these cases
+   // load-bearing — the pager engages on the first move past the slop, not on
+   // the lift, so a start+end pair alone would pass with no guard at all.)
+   const dragFrom = (target: EventTarget) => {
+      dispatchTouch("touchstart", [{ clientX: 200, clientY: 300 }], undefined, target)
+      moveTo([{ clientX: 100, clientY: 300 }]) // dx = -100
+      end([], [{ clientX: 100, clientY: 300 }])
+   }
+
+   it("a touchstart inside .srr-player declines the gesture outright", () => {
+      dragFrom(document.querySelector(".srr-player")!)
+      expect(pagerEngage).not.toHaveBeenCalled()
+      expect(pagerEndFn).not.toHaveBeenCalled()
    })
 
    // The half that was missing. The guard used to be a stopPropagation listener
@@ -267,25 +222,26 @@ describe("scrubber gesture guard (RDR16)", () => {
    // Native media controls are shadow DOM, so a touch on the scrubber retargets
    // to the <audio>/<video> host — which is exactly what these dispatch.
    for (const tag of ["audio", "video"]) {
-      it(`a touchstart on an in-content <${tag}> scrubber does not navigate`, () => {
+      it(`a touchstart on an in-content <${tag}> scrubber does not page the reader`, () => {
          const content = document.createElement("div")
          content.className = "srr-content"
          const media = document.createElement(tag)
          content.appendChild(media)
-         document.body.appendChild(content)
+         // Mounted INSIDE the reader, where `.srr-content` really lives: that is
+         // what puts it in the pager's surface and makes onScrubber the only
+         // thing standing between a scrub and a page turn.
+         readerEl.appendChild(content)
 
-         dispatchTouch("touchstart", [{ clientX: 200, clientY: 300 }], undefined, media)
-         end([], [{ clientX: 100, clientY: 300 }]) // dx = -100
-         expect(goNext).not.toHaveBeenCalled()
-         expect(goPrev).not.toHaveBeenCalled()
+         dragFrom(media)
+         expect(pagerEngage).not.toHaveBeenCalled()
+         expect(pagerEndFn).not.toHaveBeenCalled()
       })
    }
 
-   it("an identical swipe starting outside any scrubber still navigates", () => {
-      start([{ clientX: 200, clientY: 300 }])
-      end([], [{ clientX: 100, clientY: 300 }]) // dx = -100
-      expect(goNext).toHaveBeenCalledTimes(1)
-      expect(goPrev).not.toHaveBeenCalled()
+   it("an identical drag starting outside any scrubber still pages", () => {
+      dragFrom(document.querySelector(".srr-reader-p")!)
+      expect(pagerEngage).toHaveBeenCalledWith("next")
+      expect(pagerEndFn).toHaveBeenCalledTimes(1)
    })
 })
 
@@ -365,13 +321,12 @@ describe("two-finger vertical cycle", () => {
       expect(onCycle).not.toHaveBeenCalled()
    })
 
-   it("re-seeds a single swipe when one finger lifts before the other", () => {
+   it("does not fire a stale cycle when one finger lifts before the other", () => {
       twoStart()
-      // one finger lifts, one remains at x=100 → re-seed as a fresh single swipe
+      // one finger lifts, one remains at x=100 → re-seeded as a fresh single
+      // gesture, so the second lift is not read as the two-finger pan's end.
       end([{ clientX: 100, clientY: 300 }], [{ clientX: 200, clientY: 300 }])
-      // the remaining finger swipes right and lifts
-      end([], [{ clientX: 200, clientY: 300 }]) // dx = +100 from the re-seeded start
-      expect(goPrev).toHaveBeenCalledTimes(1)
+      end([], [{ clientX: 200, clientY: 300 }])
       expect(onCycle).not.toHaveBeenCalled() // no stale cycle off the two-finger dy
    })
 })
@@ -451,20 +406,18 @@ describe("pull to refresh", () => {
       const t = on(listEl)
       t.start(100)
       t.move(200) // vertical: the pull takes the gesture
-      t.end(200, 280) // dx=+130 > |dy|=100 — a committed right swipe, but for the lock
+      t.end(200, 280) // dx=+130 > |dy|=100 — horizontal at the lift, but for the lock
       expect(pullRun).toHaveBeenCalledTimes(1)
-      expect(goPrev).not.toHaveBeenCalled()
-      expect(goNext).not.toHaveBeenCalled()
+      expect(pagerEndFn).not.toHaveBeenCalled()
    })
 
-   it("axis lock: a horizontal swipe keeps the gesture even if it later drifts down", () => {
+   it("axis lock: a horizontal drag vetoes the pull for good, even if it later drifts down", () => {
       const t = on(listEl)
       t.start(100)
-      t.move(104, 230) // dx=80 dominates → the swipe owns it from here
+      t.move(104, 230) // dx=80 dominates → the horizontal axis owns it from here
       t.move(220, 230) // a later downward drift must not start a pull
-      t.end(110, 240) // dx=+90, |dy|=10 → the swipe still lands
+      t.end(110, 240) // dx=+90, |dy|=10
       expect(pullRun).not.toHaveBeenCalled()
-      expect(goPrev).toHaveBeenCalledTimes(1)
    })
 
    it("a second finger hands the gesture to the two-finger machine", () => {
@@ -618,10 +571,9 @@ describe("row swipe actions", () => {
    })
 
    it("axis lock: an engaged row swipe never also steps the reader", () => {
-      swipe(-(ROW_SWIPE_TRIGGER + 60)) // well past the reader's own 50px threshold
+      swipe(-(ROW_SWIPE_TRIGGER + 60)) // a long horizontal drag, the pager's own shape
       expect(rowAct).toHaveBeenCalledWith(rowA, -1)
-      expect(goNext).not.toHaveBeenCalled()
-      expect(goPrev).not.toHaveBeenCalled()
+      expect(pagerEndFn).not.toHaveBeenCalled()
    })
 
    it("axis lock: an engaged row swipe never becomes a pull, even drifting down", () => {
@@ -762,12 +714,6 @@ describe("reader pager (geometry)", () => {
       pMove(390, 300, 100) // last segment 10px/100ms = 0.1 px/ms
       pEnd(390, 300) // dx=-110 < 256, vx 0.1 < 0.5
       expect(pagerEndFn).toHaveBeenCalledWith(-110, false)
-      // axis lock, face 3: pagerEnd() reports "this WAS a pager drag" whatever
-      // `commit` came out as, so the blind swipe below never also fires — dx
-      // here (-110) is well past its 50px threshold, the case a `return commit`
-      // regression would slip through.
-      expect(goPrev).not.toHaveBeenCalled()
-      expect(goNext).not.toHaveBeenCalled()
    })
 
    it("a flick commits below the distance threshold", () => {

@@ -1,11 +1,10 @@
+// What setupGestures needs from the app. The reader's touch prev/next is NOT
+// here any more: a one-finger horizontal drag on the reader is the PAGER's (the
+// spec registered through setPager below — a tracked drag that decides its own
+// commit and calls back through app.ts's guarded step). The only reader action
+// this interface still carries is the two-finger filter cycle.
 export interface GestureDeps {
    toolbar: HTMLElement
-   // A committed one-finger swipe steps the reader: toward a live neighbor it
-   // navigates, toward a dead edge (prev/next disabled) it rings the margin bell.
-   // app.ts owns both the navigation guard and the bell, so it passes the composed
-   // step in — the same goPrev/goNext the keyboard prev/next keys use.
-   goPrev: () => void
-   goNext: () => void
    // Two-finger vertical swipe = step the filter. The handler is surface-aware
    // (reader → cycle to next filter's article; list → re-filter the list), so
    // app.ts owns it rather than calling nav.cycleFilter directly.
@@ -557,22 +556,20 @@ function pagerCancel(): void {
    if (engaged) pagerSpec?.cancel()
 }
 
-// setupGestures wires touch swipes (one-finger left/right = prev/next, or a row
-// action when it starts on a list row, one-finger downward overscroll on the
-// list = pull to refresh, two-finger vertical = cycle filter) and scroll-based
-// toolbar hide.
+// setupGestures wires the touch machines (one-finger horizontal = a reader page
+// turn on the reader surface, or a row action when it starts on a list row,
+// one-finger downward overscroll on the list = pull to refresh, two-finger
+// vertical = cycle filter) and scroll-based toolbar hide.
 export function setupGestures(deps: GestureDeps): Gestures {
-   let touchStartX = 0
-   let touchStartY = 0
    let twoFingerStartY = 0
    let twoFingerStartDist = 0
    let twoFingerDy = 0
    // Set once a two-finger gesture is recognised as a pinch-zoom rather than a
    // vertical pan, so the move handler stops claiming it and touchend doesn't cycle.
    let pinch = false
-   // The tracked gesture, if any. A swipe is only evaluated when it began as
-   // a single-finger gesture ("single"), so a 3+-finger tap/lift ("none")
-   // can't fire a spurious prev/next off a stale touchStartX.
+   // The tracked gesture, if any. The three single-finger machines below are
+   // only moved and only settled when the gesture began as a single-finger one
+   // ("single"), so a 3+-finger tap/lift ("none") can't drive or commit one.
    let mode: "none" | "single" | "two" = "none"
 
    // `target` is the node the touch STARTED on — the eligibility test for BOTH
@@ -597,8 +594,6 @@ export function setupGestures(deps: GestureDeps): Gestures {
          return
       }
       mode = "single"
-      touchStartX = t.clientX
-      touchStartY = t.clientY
       pullStart(target, t.clientX, t.clientY)
       rowStart(target, t.clientX, t.clientY)
       pagerStart(target, t.clientX, t.clientY)
@@ -606,8 +601,9 @@ export function setupGestures(deps: GestureDeps): Gestures {
 
    // Gesture guard (RDR16): a seek control is a horizontal drag, and the
    // touchstart/touchmove/touchend listeners below are bound to `document`
-   // with no target filtering — any 50px horizontal drag reads as a swipe and
-   // fires prev/next, so scrubbing would navigate away instead of seeking.
+   // with no target filtering — an in-content scrubber sits INSIDE the pager's
+   // own surface, so its horizontal drag would page the article instead of
+   // seeking.
    //
    // This USED to be one `stopPropagation` listener on `.srr-player`, whose
    // comment claimed it covered the in-content `<audio controls>` scrubber
@@ -712,16 +708,12 @@ export function setupGestures(deps: GestureDeps): Gestures {
          // anyway — the lock belongs here, beside the other two faces, rather
          // than resting on a guard in another module.)
          if (rowEnd()) return
-         // Likewise a pager drag — it is the reader's horizontal gesture and has
-         // already decided commit-or-snap; the blind swipe below must not re-read it.
-         if (pagerEnd()) return
-         const dx = e.changedTouches[0].clientX - touchStartX
-         const dy = e.changedTouches[0].clientY - touchStartY
-         if (Math.abs(dx) < 50 || Math.abs(dy) > Math.abs(dx)) return
-         // Past the threshold dx is a committed left/right swipe; goPrev/goNext
-         // navigate toward a live neighbor or ring the margin bell at a dead edge.
-         if (dx > 0) deps.goPrev()
-         else deps.goNext()
+         // Finally the pager, which IS the reader's horizontal gesture: it
+         // decided commit-or-snap at the lift itself. Its "this WAS a pager
+         // drag" answer has no consumer here because nothing follows it — the
+         // blind 50px swipe this used to guard is gone, replaced by the tracked
+         // drag above — so the call is unconditional.
+         pagerEnd()
       },
       { passive: true },
    )

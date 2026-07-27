@@ -1701,7 +1701,7 @@ describe("list", () => {
          const gestures = await import("./gestures")
          const bar = document.createElement("nav")
          document.body.appendChild(bar)
-         gestures.setupGestures({ toolbar: bar, goPrev: vi.fn(), goNext: vi.fn(), onCycle: vi.fn() })
+         gestures.setupGestures({ toolbar: bar, onCycle: vi.fn() })
          // The hoisted mocks live for the whole FILE (only modules are reset), and
          // every case here asserts on call counts — clear the frontier ones per
          // case rather than reading another test's history.
