@@ -133,7 +133,7 @@ The fetch/write-cycle knobs are declared only on the commands that read them, in
 | `--asset-workers` | nproc | Max assets processed concurrently across all feeds (peek/transcode/upload); independent of `--workers`. |
 | `--asset-process-timeout` | 0 (unlimited) | Timeout for a single `--asset-process` **or** `--asset-peek` command invocation (Go duration). `0` (the default) means **unlimited** — no deadline, since media transcoding can run arbitrarily long; the command is still bounded by run cancellation (SIGINT/SIGTERM). The shared `--cmd-timeout` governs ingest/mod commands only and never affects asset work. |
 | `--cache-dir` | $XDG_CACHE_HOME/srr | Download cache root for self-hosted external-ingest media |
-| `--cmd-timeout` | 5m | Timeout for a single external ingest/mod command (Go duration). Does **not** bound `--asset-process`/`--asset-peek` — those use `--asset-process-timeout`. |
+| `--cmd-timeout` | 0 (unlimited) | Timeout for a single external ingest/mod command (Go duration). `0` (the default) means **unlimited** — no deadline; the command is still bounded by run cancellation (SIGINT/SIGTERM). Does **not** bound `--asset-process`/`--asset-peek` — those use `--asset-process-timeout`. |
 | `--allow-private-fetch` | false | Disable the SSRF guard (allow fetching feeds/media from private/loopback addresses) — security override |
 
 Global and command-scoped flags can also be set via environment variables (prefixed `SRR_`, e.g. `SRR_WORKERS`, `SRR_CMD_TIMEOUT`, `SRR_ALLOW_PRIVATE_FETCH`) or in a YAML config file using their long flag names as keys — the scoped flags deliberately keep resolving from their **top-level** YAML keys, not command-nested ones, so existing config files work unchanged:
@@ -347,7 +347,7 @@ The command reads it, fetches its source, and prints exactly one response object
 - A **non-zero exit code** fails the fetch for that feed only (the error is recorded in the feed's `ferr`); all other feeds still fetch and commit.
 - **Empty stdout is an error** — emit at least `{"items":[]}` (or `{"not_modified":true}`).
 - stdout is capped at 64 MiB; exceeding it fails the fetch.
-- The command is killed if it runs longer than the subprocess time budget — 5m by default, overridable via the `--cmd-timeout` flag / `SRR_CMD_TIMEOUT` env (a Go duration; ≤ 0 falls back to the 5m default). A killed command fails the fetch for that feed, so long-running sources must finish within the budget or raise it. The command must not block waiting for more stdin after consuming the single request object.
+- The command is **unbounded by default** — no time budget; it runs until it exits or the whole run is cancelled (SIGINT/SIGTERM). The `--cmd-timeout` flag / `SRR_CMD_TIMEOUT` env (a Go duration; ≤ 0 = unlimited) opts into a budget, after which the command is killed and the fetch fails for that feed. The command must not block waiting for more stdin after consuming the single request object.
 - `not_modified: true` (or a response with zero `items`) **preserves** the feed's dedup state, so a transient empty response won't drop it.
 
 ### Self-hosting files
@@ -488,7 +488,7 @@ Printing nothing (or only whitespace) leaves the item exactly as received.
 **Behavior contract.**
 
 - stdout is capped at 64 MiB; exceeding it errors.
-- The command is killed if it runs longer than the subprocess time budget — 5m by default, overridable via the `--cmd-timeout` flag / `SRR_CMD_TIMEOUT` env (a Go duration; ≤ 0 falls back to the 5m default).
+- The command is **unbounded by default** — no time budget; it runs until it exits or the whole run is cancelled (SIGINT/SIGTERM). The `--cmd-timeout` flag / `SRR_CMD_TIMEOUT` env (a Go duration; ≤ 0 = unlimited) opts into a budget, after which the command is killed.
 - A **non-zero exit code**, an **unmarshalable** stdout, or a mod that **changes `guid` or `published`** does *not* fail the feed: SRR logs a WARN and **drops just that one item**, then continues with the rest of the batch.
 
 A minimal reference mod — lowercase every title — using `jq`:

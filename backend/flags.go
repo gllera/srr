@@ -79,7 +79,7 @@ func (f *gcFlags) AfterApply() error {
 // (preview, subscribe-time discovery in feed add/upd -u/import).
 type netFlags struct {
 	MaxFeedSize       int           `short:"m" default:"${maxFeedSize}"     env:"SRR_MAX_FEED_SIZE" help:"Max feed download size in KB."`
-	CmdTimeout        time.Duration `default:"5m" env:"SRR_CMD_TIMEOUT" help:"Timeout for a single external ingest/mod command (Go duration)."`
+	CmdTimeout        time.Duration `default:"0" env:"SRR_CMD_TIMEOUT" help:"Timeout for a single external ingest/mod command (Go duration). 0 (the default) means unlimited — no deadline; the command is still bounded by run cancellation (SIGINT/SIGTERM)."`
 	AllowPrivateFetch bool          `env:"SRR_ALLOW_PRIVATE_FETCH" help:"Disable the SSRF guard, allowing fetches from private/loopback addresses. Security override — leave off unless you fetch LAN/localhost feeds."`
 }
 
@@ -145,7 +145,7 @@ func seedScopedDefaults(g *Globals) {
 	g.NotifyAfter = envInt("SRR_NOTIFY_AFTER", 5)
 	g.KeepManifests = envInt("SRR_KEEP_MANIFESTS", keepManifests)
 	g.MaxFeedSize = envInt("SRR_MAX_FEED_SIZE", defaultMaxFeedSize)
-	g.CmdTimeout = envDur("SRR_CMD_TIMEOUT", 5*time.Minute)
+	g.CmdTimeout = envDur("SRR_CMD_TIMEOUT", 0)
 	g.AllowPrivateFetch = envBool("SRR_ALLOW_PRIVATE_FETCH", false)
 	g.floorScoped()
 }

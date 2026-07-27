@@ -34,9 +34,9 @@ import (
 // Parameters tune the per-asset fetch (defaults below): "timeout" (Go duration)
 // and "maxbody" (byte size). A malformed/unknown parameter is a hard error.
 //
-//	#selfhost timeout=120s maxbody=128MiB
+//	#selfhost timeout=10m maxbody=128MiB
 const (
-	selfhostTimeout   = 120 * time.Second
+	selfhostTimeout   = 10 * time.Minute
 	selfhostMaxBody   = 128 << 20
 	selfhostUserAgent = "Mozilla/5.0 (compatible; SRR/1.0; +media-self-host)"
 )

@@ -83,27 +83,21 @@ func (t *tailBuffer) Tail() string {
 	return strings.Join(lines, "; ")
 }
 
-// CmdTimeout overrides the external-command timeout when > 0. main sets it from
-// the resolved --cmd-timeout / SRR_CMD_TIMEOUT global after parsing; a zero
-// value (e.g. when mod is used directly in tests) falls back to
-// defaultCmdTimeout.
+// CmdTimeout bounds a single external (shell) command invocation when > 0.
+// main sets it from the resolved --cmd-timeout / SRR_CMD_TIMEOUT global after
+// parsing; zero or negative (the default) means UNLIMITED.
 var CmdTimeout time.Duration
 
-const defaultCmdTimeout = 5 * time.Minute
-
-// SubprocessTimeout bounds a single external (shell) command invocation so a
-// command that blocks forever — waiting on stdin, sleeping, trapping SIGPIPE
-// after the output cap fires — can't wedge a fetch worker for the life of the
-// process. The fetch context carries no deadline (it cancels only on
-// SIGINT/SIGTERM), so without this an external module or ingest command hang is
-// unbounded. Generous default; override with the --cmd-timeout flag /
-// SRR_CMD_TIMEOUT env. Shared with the ingest package, whose external-fetcher
-// exec has the same exposure.
+// SubprocessTimeout is the effective external-command bound: --cmd-timeout /
+// SRR_CMD_TIMEOUT when > 0, else <= 0 = UNLIMITED — the default, matching
+// --asset-process-timeout's philosophy: a legitimate source (a slow archive
+// backfill, a big media download inside an ingest command) can outlast any
+// fixed budget, and the command is still bounded by run cancellation
+// (SIGINT/SIGTERM) plus the WaitDelay/output-cap hardening. An operator who
+// wants a hang guard opts in with --cmd-timeout. Shared with the ingest
+// package, whose external-fetcher exec has the same exposure.
 func SubprocessTimeout() time.Duration {
-	if CmdTimeout > 0 {
-		return CmdTimeout
-	}
-	return defaultCmdTimeout
+	return CmdTimeout
 }
 
 // subprocessWaitDelay is the grace period os/exec gives a subprocess to drain
@@ -116,20 +110,25 @@ var subprocessWaitDelay = 5 * time.Second
 
 // RunSubprocess runs `/bin/sh -c args` with the given env and working directory
 // (dir == "" inherits the process cwd), feeding stdin and capturing stdout
-// capped at MaxSubprocessOutput. The command is bounded by SubprocessTimeout so
-// a hang can't wedge the worker forever. Returns the whitespace-trimmed stdout
-// bytes; the caller decides what an empty result means (a no-op vs an error) and
-// how to wrap a run failure. Shared by the built-in shell-module path and the
-// ingest external-fetcher path, which run the same exec with different policies.
+// capped at MaxSubprocessOutput. The command is bounded by SubprocessTimeout
+// when --cmd-timeout is set (> 0); unlimited by default, bounded only by ctx
+// cancellation. Returns the whitespace-trimmed stdout bytes; the caller decides
+// what an empty result means (a no-op vs an error) and how to wrap a run
+// failure. Shared by the built-in shell-module path and the ingest
+// external-fetcher path, which run the same exec with different policies.
 //
-// subprocessWaitDelay ensures the bound holds even when a shell mod backgrounds
-// a child process that inherits stdout: without it, cmd.Run() would block until
-// the grandchild exits (keeping the pipe open), ignoring the timeout and
-// returning err=nil. With WaitDelay, os/exec force-closes the pipe after
-// cancellation and cmd.Run() returns promptly with a non-nil error.
+// subprocessWaitDelay ensures cancellation holds even when a shell mod
+// backgrounds a child process that inherits stdout: without it, cmd.Run() would
+// block until the grandchild exits (keeping the pipe open), ignoring the
+// timeout and returning err=nil. With WaitDelay, os/exec force-closes the pipe
+// after cancellation and cmd.Run() returns promptly with a non-nil error.
 func RunSubprocess(ctx context.Context, args string, env []string, dir string, stdin io.Reader) ([]byte, error) {
-	cctx, cancel := context.WithTimeout(ctx, SubprocessTimeout())
-	defer cancel()
+	cctx := ctx
+	if t := SubprocessTimeout(); t > 0 {
+		var cancel context.CancelFunc
+		cctx, cancel = context.WithTimeout(ctx, t)
+		defer cancel()
+	}
 	// Running an operator-authored string through a shell IS the external-module
 	// contract (see backend/README.md → External mod protocol): a pipeline token
 	// that is not a "#" built-in is a shell command, by design. `args` comes from

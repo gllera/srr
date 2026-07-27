@@ -40,8 +40,8 @@ func TestSeedScopedDefaults(t *testing.T) {
 		if g.CacheMaxAge != 72*time.Hour {
 			t.Errorf("CacheMaxAge = %v, want 72h", g.CacheMaxAge)
 		}
-		if g.CmdTimeout != 5*time.Minute {
-			t.Errorf("CmdTimeout = %v, want 5m", g.CmdTimeout)
+		if g.CmdTimeout != 0 {
+			t.Errorf("CmdTimeout = %v, want 0 (unlimited)", g.CmdTimeout)
 		}
 		if g.AssetWorkers != runtime.NumCPU() {
 			t.Errorf("AssetWorkers = %d, want nproc", g.AssetWorkers)
@@ -83,8 +83,8 @@ func TestSeedScopedDefaults(t *testing.T) {
 		if g.PackSize != defaultPackSize {
 			t.Errorf("PackSize = %d, want default on malformed env", g.PackSize)
 		}
-		if g.CmdTimeout != 5*time.Minute {
-			t.Errorf("CmdTimeout = %v, want default on malformed env", g.CmdTimeout)
+		if g.CmdTimeout != 0 {
+			t.Errorf("CmdTimeout = %v, want default (0, unlimited) on malformed env", g.CmdTimeout)
 		}
 	})
 
