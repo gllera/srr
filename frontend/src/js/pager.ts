@@ -201,12 +201,36 @@ function engage(s: PagerSide): "page" | "resist" | "skip" {
    // a commit is in flight. The skip branch is inert; the clear belongs to a
    // real gesture cycle.)
    clearTimeout(settleTimer)
+   // ENGAGE IS RE-ENTRANT WITHIN ONE GESTURE. Since the reversal tuning,
+   // gestures.ts calls this again mid-drag when the finger crosses back through
+   // the origin — no end(), no cancel(), the same touch — because the other
+   // neighbour is what the finger is now asking for. So this is not "start of a
+   // drag" code any more; it is "re-derive everything this side implies", and
+   // anything the previous side left on the surface is stale from here down.
+   //
+   // Invalidating the fill is therefore unconditional rather than something the
+   // page path does on its way past: it is a property of engage, not of filling.
+   // fillPage bumps again on its own (`const my = ++fillTok`), so the page path
+   // pays one redundant increment — the alternative is a rule that has to be
+   // re-derived for every future mode, and the resist mode is exactly the one
+   // that already got it wrong.
+   fillTok++
    side = s
    // The neighbor probes already answered availability — the disabled state IS
    // has_left/has_right (reader.render/showList keep it current).
    const dead = s === "prev" ? el.prev.disabled : el.next.disabled
    mode = dead ? "resist" : "page"
    if (mode === "page") void fillPage(s)
+   // The other half of that re-derivation, and the reason the bump alone is not
+   // enough: a resist drag's move() returns before it touches the box, so
+   // nothing else would ever take the preview down. Reversing from a live side
+   // onto a dead one would leave the PREVIOUS neighbour's page still displayed,
+   // frozen at the previous side's transform — and settleBack's
+   // "is it shown?" test would then slide that stale content out along the NEW
+   // side's axis, sweeping the wrong article across the viewport on release.
+   // Hiding rather than tearing down keeps the built subtree for a reversal back
+   // toward the live side, which refills it through fillPage as usual.
+   else page?.box.classList.remove("srr-pager-show")
    return mode
 }
 

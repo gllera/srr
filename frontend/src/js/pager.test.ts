@@ -190,6 +190,63 @@ describe("resist mode", () => {
    })
 })
 
+// gestures.ts re-invokes engage() MID-DRAG when the finger crosses back through
+// the origin — no intervening end/cancel — so engage is re-entrant within one
+// gesture and everything the previous side left on the surface is stale. The
+// dead-edge reversal is the case that bites: resist mode's move() returns before
+// it touches the box, so nothing else on that path would ever take the preview
+// down. Reachable in normal use at any list/filter boundary — sit on the newest
+// article, peek prev, reverse.
+describe("mid-gesture reversal", () => {
+   it("takes the preview down when the reversal lands on a dead edge", async () => {
+      nextBtn().disabled = true // the scene: newest article, next is the wall
+      spec.engage("prev")
+      await flush()
+      spec.move(80)
+      const peeked = page()!
+      expect(peeked.classList.contains("srr-pager-show")).toBe(true)
+      expect(peeked.querySelector(".srr-title")!.textContent).toBe("Neighbor title")
+      const peekTransform = peeked.style.transform
+
+      // The finger crosses back through the origin: gestures re-engages the
+      // other side, which here is the dead one.
+      expect(spec.engage("next")).toBe("resist")
+      expect(page()!.classList.contains("srr-pager-show")).toBe(false)
+
+      // ...and the resist drag that follows must not resurrect it.
+      spec.move(-40)
+      expect(page()!.classList.contains("srr-pager-show")).toBe(false)
+
+      spec.end(-40, false, -0.2)
+      // No wrong-axis slide: settleBack must not have written the NEW side's
+      // exit transform onto a box still holding the PREVIOUS side's content —
+      // that is stale content sweeping the wrong way across the viewport.
+      expect(page()!.style.transform).toBe(peekTransform)
+      await settle()
+      expect(page()).toBeNull() // teardown still runs on the settle
+      expect(article().style.transform).toBe("")
+   })
+
+   it("orphans the previous side's in-flight fill", async () => {
+      nextBtn().disabled = true
+      let release!: (a: { f: number; a: number; t: string; c: string }) => void
+      mocks.loadArticle.mockReturnValueOnce(new Promise((r) => (release = r)))
+      spec.engage("prev")
+      await flush()
+      spec.move(80)
+      // The meta card landed (masthead + skeleton); the article has not.
+      expect(page()!.querySelector(".srr-pager-skeleton")).not.toBeNull()
+
+      spec.engage("next") // reversal onto the dead edge
+      release({ f: 4, a: 1, t: "Stale", c: "<p>stale body</p>" })
+      await flush()
+      // The fill belonged to the side we left. Painting it now would put the
+      // OTHER neighbour's article in a page this gesture no longer wants.
+      expect(page()!.querySelector(".srr-content p")).toBeNull()
+      expect(page()!.querySelector(".srr-pager-skeleton")).not.toBeNull()
+   })
+})
+
 // Every branch above is the "next" half of a ternary. The prev half is its
 // mirror and is currently correct — these cover it so a future transposition
 // slip in one of those ternaries can't ship green.
