@@ -414,10 +414,13 @@ function rowCancel(): void {
 // article tracking the finger. Fourth client of the one state machine, and the
 // same division of labor as the row swipe: this module owns the geometry (axis,
 // distance, velocity, the commit decision), the surface module (pager.ts) owns
-// the DOM and the meaning. The same three-face axis lock: a vertical-dominant
-// move vetoes for the gesture's life, an engaged drag preventDefaults every
-// move, and pagerEnd() reports "this WAS a pager drag" so touchend evaluates
-// nothing else.
+// the DOM and the meaning. Two faces of the axis lock are the row swipe's
+// exactly: a vertical-dominant move vetoes for the gesture's life, and an
+// engaged drag preventDefaults every move. The third — pagerEnd()'s "this WAS a
+// pager drag" answer — has no reader here: the pager is evaluated LAST in
+// touchend, so there is nothing left to skip. It is kept for symmetry with
+// pullEnd/rowEnd, and so the lock is already closed if a fifth machine is ever
+// added after it.
 
 // Release past this fraction of the surface width commits the page turn.
 const PAGE_COMMIT_FRACTION = 0.25
@@ -444,7 +447,9 @@ let pagerSpec: Pager | null = null
 let pagerSurface: HTMLElement | null = null
 let pagerEligible = false
 let pagerActive = false
-let pagerConsumed = false
+// No pagerConsumed twin of pullConsumed/rowConsumed: that flag exists so a
+// SECOND caller of pullEnd/rowEnd reads the same answer as the first, and the
+// pager has no first caller to be consistent with (see pagerEnd).
 let pagerSide: PagerSide = "next"
 let pagerMode: "page" | "resist" = "page"
 let pagerStartX = 0
@@ -487,7 +492,6 @@ function pagerStart(target: EventTarget | null, x: number, y: number): void {
       pagerSurface.contains(target) &&
       !inHScrollable(target, pagerSurface)
    pagerActive = false
-   pagerConsumed = false
    pagerStartX = x
    pagerStartY = y
 }
@@ -527,18 +531,20 @@ function pagerMove(e: Event, x: number, y: number): void {
    pagerSpec.move(dx)
 }
 
-// The gesture ended. Returns true when it WAS a pager drag — the third face of
-// the axis lock: touchend must not also evaluate it as anything else.
+// The gesture ended. Returns true when it WAS a pager drag — the shape pullEnd
+// and rowEnd have, kept deliberately even though NOTHING reads it today: the
+// pager is evaluated last in touchend, so the axis lock's third face has
+// nothing left to guard. It stays so the three machines read alike and so the
+// answer is already correct if anything is ever added after this call.
 function pagerEnd(): boolean {
    if (!pagerActive) {
       pagerEligible = false
-      return pagerConsumed
+      return false
    }
    const spec = pagerSpec
    const dx = pagerDx
    pagerActive = false
    pagerEligible = false
-   pagerConsumed = true
    // jsdom reports clientWidth 0; the viewport is the honest fallback.
    const width = pagerSurface?.clientWidth || window.innerWidth
    const dirOk = pagerSide === "prev" ? dx > 0 : dx < 0
@@ -552,7 +558,6 @@ function pagerCancel(): void {
    const engaged = pagerActive
    pagerEligible = false
    pagerActive = false
-   pagerConsumed = false
    if (engaged) pagerSpec?.cancel()
 }
 
@@ -712,7 +717,9 @@ export function setupGestures(deps: GestureDeps): Gestures {
          // decided commit-or-snap at the lift itself. Its "this WAS a pager
          // drag" answer has no consumer here because nothing follows it — the
          // blind 50px swipe this used to guard is gone, replaced by the tracked
-         // drag above — so the call is unconditional.
+         // drag above — so the call is unconditional. The boolean it still
+         // returns is symmetry with the two above, nothing more (its docblock
+         // says so too).
          pagerEnd()
       },
       { passive: true },

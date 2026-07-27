@@ -9,7 +9,24 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 // `instanceof TouchEvent`, so a synthesized Event with those props defined
 // drives the whole machine here — no browser needed.
 
-import { ROW_SWIPE_TRIGGER, setPullRefresh, setRowSwipe, setPager, setupGestures, type Gestures } from "./gestures"
+import type { Gestures } from "./gestures"
+
+// ONE FRESH MODULE INSTANCE PER TEST (the list.test.ts / search.test.ts /
+// dropdown.test.ts pattern). setupGestures registers document + window
+// listeners and hands back no teardown, so every mount leaves its set live for
+// the rest of the file. Sharing ONE module instance with them meant each
+// dispatched event re-drove the same state machine once per accumulated
+// listener set — which is not a theoretical worry: it MASKED a mutation check
+// on this very suite, a whole-file run passing while the isolated `-t` run
+// correctly failed. Resetting the module orphans the old listeners instead:
+// they still fire, but against their own now-detached surfaces and the previous
+// test's mocks, so they can neither engage nor touch what this test asserts on.
+type G = typeof import("./gestures")
+let ROW_SWIPE_TRIGGER: G["ROW_SWIPE_TRIGGER"]
+let setPullRefresh: G["setPullRefresh"]
+let setRowSwipe: G["setRowSwipe"]
+let setPager: G["setPager"]
+let setupGestures: G["setupGestures"]
 
 const setScrollY = (y: number) => Object.defineProperty(window, "scrollY", { value: y, configurable: true })
 // jsdom has no layout, so the scroll handler's at-bottom check needs explicit
@@ -34,7 +51,14 @@ let pagerMoveFn: ReturnType<typeof vi.fn>
 let pagerEndFn: ReturnType<typeof vi.fn>
 let pagerCancelFn: ReturnType<typeof vi.fn>
 
-function mount(): void {
+async function mount(): Promise<void> {
+   vi.resetModules()
+   const mod = await import("./gestures")
+   ROW_SWIPE_TRIGGER = mod.ROW_SWIPE_TRIGGER
+   setPullRefresh = mod.setPullRefresh
+   setRowSwipe = mod.setRowSwipe
+   setPager = mod.setPager
+   setupGestures = mod.setupGestures
    // body's own class list survives an innerHTML reset (only its children are
    // replaced), so it's cleared explicitly to keep srr-toolbar-hidden from
    // leaking a stale value across tests.
@@ -73,11 +97,11 @@ function mount(): void {
    g = setupGestures({ toolbar, onCycle })
 }
 
-beforeEach(() => {
+beforeEach(async () => {
    setScrollY(0)
    setInnerHeight(800)
    setScrollHeight(4000) // a tall page: the hide/show tests are far from the bottom
-   mount()
+   await mount()
 })
 
 describe("scroll-driven toolbar hide/show", () => {
@@ -207,6 +231,12 @@ describe("scrubber gesture guard (RDR16)", () => {
       end([], [{ clientX: 100, clientY: 300 }])
    }
 
+   // DOCUMENTATION, not regression coverage, and labelled as such so nobody
+   // reads it as the latter: the bar is a SIBLING of .srr-reader (here and in
+   // production), so pagerStart's own surface containment test already declines
+   // it — deleting onScrubber entirely leaves this green (verified). It records
+   // that the bar is exempt; the in-content cases below are what actually pin
+   // the guard, and the generic outside-the-surface case is in the pager block.
    it("a touchstart inside .srr-player declines the gesture outright", () => {
       dragFrom(document.querySelector(".srr-player")!)
       expect(pagerEngage).not.toHaveBeenCalled()
@@ -323,10 +353,18 @@ describe("two-finger vertical cycle", () => {
 
    it("does not fire a stale cycle when one finger lifts before the other", () => {
       twoStart()
+      // The pan MUST travel past the 50px cycle threshold first: with a
+      // motionless gesture twoFingerDy stays 0 and the second lift could not
+      // cycle whether the re-seed happened or not, which is exactly what made
+      // an earlier cut of this case vacuous.
+      moveTo([
+         { clientX: 100, clientY: 372 },
+         { clientX: 200, clientY: 372 },
+      ]) // dy = +72, a pan that WOULD cycle if the second lift settled it
       // one finger lifts, one remains at x=100 → re-seeded as a fresh single
       // gesture, so the second lift is not read as the two-finger pan's end.
-      end([{ clientX: 100, clientY: 300 }], [{ clientX: 200, clientY: 300 }])
-      end([], [{ clientX: 200, clientY: 300 }])
+      end([{ clientX: 100, clientY: 372 }], [{ clientX: 200, clientY: 372 }])
+      end([], [{ clientX: 200, clientY: 372 }])
       expect(onCycle).not.toHaveBeenCalled() // no stale cycle off the two-finger dy
    })
 })
@@ -402,13 +440,19 @@ describe("pull to refresh", () => {
       expect(pullRun).not.toHaveBeenCalled()
    })
 
-   it("axis lock: an engaged pull never also fires the horizontal swipe", () => {
+   // The PAGER half of this lock is not assertable from the list surface: the
+   // reader is a sibling of the list, so pagerEligible is false from pagerStart
+   // however the pull behaves — an `expect(pagerEndFn).not.toHaveBeenCalled()`
+   // here passed even with touchend's consume checks removed outright
+   // (verified), i.e. it read as coverage while testing nothing. What IS
+   // load-bearing is the half below: a horizontal delta at the LIFT cannot take
+   // the gesture back from a pull that already engaged.
+   it("axis lock: a horizontal delta at the lift can't take an engaged pull away", () => {
       const t = on(listEl)
       t.start(100)
       t.move(200) // vertical: the pull takes the gesture
       t.end(200, 280) // dx=+130 > |dy|=100 — horizontal at the lift, but for the lock
       expect(pullRun).toHaveBeenCalledTimes(1)
-      expect(pagerEndFn).not.toHaveBeenCalled()
    })
 
    it("axis lock: a horizontal drag vetoes the pull for good, even if it later drifts down", () => {
@@ -570,10 +614,13 @@ describe("row swipe actions", () => {
       expect(pullRun).toHaveBeenCalledTimes(1) // the same gesture WAS a pull
    })
 
-   it("axis lock: an engaged row swipe never also steps the reader", () => {
-      swipe(-(ROW_SWIPE_TRIGGER + 60)) // a long horizontal drag, the pager's own shape
+   // Same note as the pull's lift case: the reader surface is unreachable from a
+   // list row (the two containers are mutually exclusive siblings), so asserting
+   // the pager stayed out of it would test nothing here. The row half is what
+   // there is to pin — over a drag long enough to be the pager's own shape.
+   it("axis lock: a long, pager-shaped horizontal drag still commits to the row", () => {
+      swipe(-(ROW_SWIPE_TRIGGER + 60))
       expect(rowAct).toHaveBeenCalledWith(rowA, -1)
-      expect(pagerEndFn).not.toHaveBeenCalled()
    })
 
    it("axis lock: an engaged row swipe never becomes a pull, even drifting down", () => {
@@ -636,6 +683,25 @@ describe("row swipe actions", () => {
          ],
       )
       expect(rowAct).toHaveBeenCalledTimes(1)
+   })
+
+   // touchstart's 3+-finger branch (mode = "none" plus the three cancels) lost
+   // its only cover when the one-finger-swipe describe was deleted. This is the
+   // two-finger case above pointed at that branch: it fails if the branch stops
+   // retracting (rowAct never called with 0) AND if it stops parking the mode
+   // (the lift would then commit the swipe as -1, a second rowAct call).
+   it("a third finger drops the gesture entirely", () => {
+      const t = on()
+      t.start(200)
+      t.move(280) // engaged
+      start([
+         { clientX: 100, clientY: 300 },
+         { clientX: 200, clientY: 300 },
+         { clientX: 300, clientY: 300 },
+      ])
+      expect(rowAct).toHaveBeenCalledWith(rowA, 0) // retracted when the third finger landed
+      t.end(280)
+      expect(rowAct).toHaveBeenCalledTimes(1) // and the lift commits nothing
    })
 
    it("re-registration retracts an engaged swipe (the rows it tracked are gone)", () => {
@@ -760,6 +826,19 @@ describe("reader pager (geometry)", () => {
       expect(pagerCancelFn).toHaveBeenCalledTimes(1)
    })
 
+   // The pager's half of that same 3+-finger branch — the cancel added for this
+   // machine, which the row case above cannot speak for.
+   it("a third finger cancels an engaged drag", () => {
+      pStart(300, 300)
+      pMove(240, 300)
+      dispatchTouch("touchstart", [
+         { clientX: 240, clientY: 300 },
+         { clientX: 400, clientY: 300 },
+         { clientX: 500, clientY: 300 },
+      ])
+      expect(pagerCancelFn).toHaveBeenCalledTimes(1)
+   })
+
    it("touchcancel cancels an engaged drag", () => {
       pStart(300, 300)
       pMove(240, 300)
@@ -789,13 +868,6 @@ describe("reader pager (geometry)", () => {
       Object.defineProperty(pre, "scrollWidth", { value: 900, configurable: true })
       Object.defineProperty(pre, "clientWidth", { value: 300, configurable: true })
       dispatchTouch("touchstart", [{ clientX: 500, clientY: 300 }], undefined, pre)
-      pMove(100, 300)
-      expect(pagerEngage).not.toHaveBeenCalled()
-   })
-
-   it("a touch starting on a scrubber declines the pager too", () => {
-      const bar = document.querySelector(".srr-player")!
-      dispatchTouch("touchstart", [{ clientX: 500, clientY: 300 }], undefined, bar)
       pMove(100, 300)
       expect(pagerEngage).not.toHaveBeenCalled()
    })
