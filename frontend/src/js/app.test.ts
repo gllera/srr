@@ -258,6 +258,13 @@ const gestures = vi.hoisted(() => {
 })
 vi.mock("./gestures", () => gestures)
 
+// pager.ts's real body would call the mocked gestures' setPager, absent from
+// that mock factory above — stub the module wholesale. What app.ts wires into
+// it (pagerCommit) is this file's business below; pager.ts's own pane/drag
+// behavior is pager.test.ts's.
+const pagerMock = vi.hoisted(() => ({ setup: vi.fn() }))
+vi.mock("./pager", () => pagerMock)
+
 const SKELETON = `
    <div class="srr-popup"><span class="srr-popup-text"></span>
       <button class="srr-popup-retry srr-hidden">Retry</button>
@@ -933,6 +940,130 @@ describe("pager slide entry (reader.setEntryTransition)", () => {
       } finally {
          reader.setEntryTransition(null)
       }
+   })
+})
+
+// The seam pager.ts drives through app.ts: pager.setup's captured `commit`
+// (the mocked module's one call) IS pagerCommit — the same guard(nav.left/
+// right) step the keyboard uses. "Success is the cursor moved" is the whole
+// contract, so these drive nav.left/right's mock to actually move
+// nav.currentChron() (never hand-count calls — reader.render itself reads
+// currentChron() too, at a point these tests don't want to have to track).
+describe("pagerCommit — app.ts's seam to the pager", () => {
+   const getCommit = () => {
+      const call = pagerMock.setup.mock.calls.at(-1)
+      return call![0].commit as (side: "prev" | "next") => Promise<boolean>
+   }
+   // Some cases below drive nav.currentChron() as stateful (mockImplementation);
+   // restore the plain default so a later, unrelated test never inherits it.
+   afterEach(() => nav.currentChron.mockReturnValue(-1))
+
+   it("commits through the same guarded nav call the keyboard uses, and reports true once the cursor moved", async () => {
+      await boot()
+      hashTo("#2")
+      await flush()
+      let chron = 2
+      nav.currentChron.mockImplementation(() => chron)
+      nav.right.mockImplementationOnce(async () => {
+         chron = 3 // resolve() commits pos only on success — this IS that commit
+         return showFeed()
+      })
+      const ok = await getCommit()("next")
+      expect(nav.right).toHaveBeenCalledTimes(1)
+      expect(nav.left).not.toHaveBeenCalled()
+      expect(ok).toBe(true)
+   })
+
+   it("refuses off the reader surface without ever touching nav.left/right", async () => {
+      await boot() // no hash — view stays "list"
+      const ok = await getCommit()("next")
+      expect(ok).toBe(false)
+      expect(nav.right).not.toHaveBeenCalled()
+      expect(nav.left).not.toHaveBeenCalled()
+   })
+
+   it("refuses while the picker overlay is open over the reader", async () => {
+      await boot()
+      hashTo("#2")
+      await flush()
+      picker.isOpen.mockReturnValue(true)
+      const ok = await getCommit()("prev")
+      expect(ok).toBe(false)
+      expect(nav.left).not.toHaveBeenCalled()
+      picker.isOpen.mockReturnValue(false)
+   })
+
+   it("sets the slide entry transition for the guarded step, then restores the ordinary fade afterward", async () => {
+      await boot()
+      hashTo("#2")
+      await flush()
+      const content = document.querySelector(".srr-content") as HTMLElement
+      let chron = 2
+      nav.currentChron.mockImplementation(() => chron)
+      nav.right.mockImplementationOnce(async () => {
+         chron = 3
+         return showFeed()
+      })
+      await getCommit()("next")
+      // The commit's own render must not dim — the drag already animated the
+      // arrival (reader.ts's slide branch, the same one the previous describe
+      // block pins directly).
+      expect(content.style.opacity).toBe("")
+
+      // A later, ORDINARY navigation — not through the pager — must fade again:
+      // proof the flag didn't leak "slide" past the guarded step's finally.
+      hashTo("#4")
+      await flush()
+      expect(content.style.opacity).toBe("0")
+   })
+
+   it("still clears the slide entry transition when the guarded step is refused by a busy mutex", async () => {
+      await boot()
+      hashTo("#2")
+      await flush() // lands in the reader; mutex free again
+      const content = document.querySelector(".srr-content") as HTMLElement
+
+      // Hold the mutex open with a second, stalled navigation — guard() drops
+      // the pager's step (busy) without ever calling nav.right, which is the
+      // ONLY way to reach pagerCommit's finally with no render in between.
+      nav.fromHash.mockImplementationOnce(() => new Promise<never>(() => {}))
+      hashTo("#3")
+      await flush()
+      nav.right.mockClear()
+      const ok = await getCommit()("next")
+      expect(ok).toBe(false)
+      expect(nav.right).not.toHaveBeenCalled()
+
+      // Reclaim the wedged mutex (same self-heal as "guard() — busy mutex")
+      // and confirm the next render fades normally instead of the pager's
+      // still-"slide" flag leaking past a busy refusal.
+      try {
+         vi.useFakeTimers()
+         vi.setSystemTime(Date.now() + 10 * 60_000)
+         nav.fromHash.mockResolvedValue(showFeed())
+         hashTo("#5")
+         await vi.advanceTimersByTimeAsync(0)
+      } finally {
+         vi.useRealTimers()
+      }
+      expect(content.style.opacity).toBe("0")
+   })
+
+   it("still clears the slide entry transition when the guarded step rejects", async () => {
+      await boot()
+      hashTo("#2")
+      await flush()
+      const content = document.querySelector(".srr-content") as HTMLElement
+
+      nav.right.mockRejectedValueOnce(new Error("pack fetch failed"))
+      const ok = await getCommit()("next")
+      expect(ok).toBe(false) // guard() swallows the rejection into the error popup
+
+      // A later ordinary render must still fade — the finally ran despite the
+      // rejection, so nothing was left stuck at "slide".
+      hashTo("#4")
+      await flush()
+      expect(content.style.opacity).toBe("0")
    })
 })
 

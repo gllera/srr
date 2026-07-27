@@ -20,6 +20,7 @@ import * as list from "./list"
 import * as menus from "./menus"
 import { loadMounts } from "./mounts"
 import * as nav from "./nav"
+import * as pager from "./pager"
 import * as picker from "./picker"
 import { clearAllPins } from "./pin"
 import * as pinUI from "./pin-ui"
@@ -545,6 +546,24 @@ const cycle = (dir: -1 | 1) => () => nav.getFilterEntries().length > 1 && guard(
 const cyclePrev = cycle(-1)
 const cycleNext = cycle(1)
 
+// The pager's committed drag: the SAME guarded step the keyboard uses. Success
+// is "the cursor moved" — resolve() commits pos only on success, guard() owns
+// its own error popup, and a busy mutex returns without stepping — so an
+// unchanged chron covers busy AND failure with one signal, and the pane knows
+// to snap back. The overlay guards mirror stepLeft/stepRight's: a drag that
+// somehow ends under the picker/lightbox must not step the reader beneath.
+async function pagerCommit(side: "prev" | "next"): Promise<boolean> {
+   if (view !== "reader" || picker.isOpen() || lightbox.isOpen()) return false
+   const before = nav.currentChron()
+   reader.setEntryTransition("slide")
+   try {
+      await guard(() => (side === "prev" ? nav.left() : nav.right()))
+   } finally {
+      reader.setEntryTransition(null)
+   }
+   return nav.currentChron() !== before
+}
+
 const KEY_ACTIONS: Record<string, () => void> = {
    ArrowLeft: stepLeft,
    a: stepLeft,
@@ -923,6 +942,9 @@ async function init() {
       goNext: stepRight,
       onCycle,
    })
+   // The reader swipe pager: gestures owns the drag geometry, pager.ts the pane
+   // and visuals, and this seam hands a committed drag to the nav mutex.
+   pager.setup({ commit: pagerCommit })
 
    let hash = location.hash.substring(1)
    // Reject foreign hashes (e.g., OAuth implicit-flow tokens injected by an
