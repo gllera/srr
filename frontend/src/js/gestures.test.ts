@@ -846,6 +846,33 @@ describe("reader pager (geometry)", () => {
       expect(pagerCancelFn).toHaveBeenCalledTimes(1)
    })
 
+   // The two-finger→one-finger re-seed, the pager's half of the case the pull
+   // and the cycle each own above. It is deliberately dispatched ON the reader,
+   // so containment is NOT what declines it: the touchend branch re-seeds the
+   // surviving finger with a NULL target, and that is the whole reason a gesture
+   // that began with two fingers can never become a page turn. Without it a
+   // finger left over from a pinch-zoom would engage on its next move and page
+   // the article out from under the zoom.
+   it("a gesture that began with two fingers never becomes a pager drag", () => {
+      dispatchTouch(
+         "touchstart",
+         [
+            { clientX: 300, clientY: 300 },
+            { clientX: 400, clientY: 300 },
+         ],
+         undefined,
+         inReader(),
+      )
+      // One lifts, one stays down at x=300 → re-seeded as a fresh single gesture.
+      // Dispatched on the reader too (not the `end` helper's document default),
+      // so `e.target` IS inside the surface: the explicit null is then the only
+      // thing declining, and swapping it for `e.target` fails this case.
+      dispatchTouch("touchend", [{ clientX: 300, clientY: 300 }], [{ clientX: 400, clientY: 300 }], inReader())
+      pMove(120, 300) // a drag that engages on its own from a real single start
+      expect(pagerEngage).not.toHaveBeenCalled()
+      expect(pagerMoveFn).not.toHaveBeenCalled()
+   })
+
    it("a touch starting OUTSIDE the surface never engages (overlays are inert structurally)", () => {
       const overlay = document.createElement("div")
       document.body.appendChild(overlay)
