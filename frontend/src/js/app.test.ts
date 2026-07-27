@@ -910,7 +910,8 @@ describe("reader language stamping (the article's `g`)", () => {
 
 // The pager's committed drag already animated the arrival (the slide), so the
 // render it triggers must not ALSO dim-and-fade — reader.setEntryTransition
-// is app.ts's one-shot signal around the guarded step.
+// is app.ts's per-step signal bracketing the guarded call (deliberately NOT
+// one-shot — see reader.ts).
 describe("pager slide entry (reader.setEntryTransition)", () => {
    it("a slide-entry render never dims the content host", async () => {
       await boot()
