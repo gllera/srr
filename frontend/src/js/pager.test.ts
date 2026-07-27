@@ -46,9 +46,15 @@ const article = () => document.querySelector("body > .srr-reader") as HTMLElemen
 const page = () => document.querySelector(".srr-pager-page") as HTMLElement | null
 const nextBtn = () => document.querySelector(".srr-next") as HTMLButtonElement
 const flush = () => new Promise((r) => setTimeout(r))
+// Long enough to outlast ANY settle. The settle is velocity-carried now — 120ms
+// at the flick floor up to 260ms at the considered-release ceiling — and its
+// teardown timer sits SETTLE_CLOSE_PAD_MS (50ms) past that, so the worst case is
+// 310ms and this clears it with room. Cases that want to pin an exact duration
+// do it on the transition string; this is only ever "wait for it to be over".
+const PAST_SETTLE_MS = 400
 // The settle is closed by a timer a hair past the transition, not transitionend
 // (jsdom never fires it) — so waiting for the surface to go means waiting that out.
-const settle = () => new Promise((r) => setTimeout(r, 300))
+const settle = () => new Promise((r) => setTimeout(r, PAST_SETTLE_MS))
 // Drain the microtask queue WITHOUT letting a macrotask run. `flush`/`settle`
 // both yield to the timer queue, which is exactly what an atomicity assertion
 // must not do: work deferred by a setTimeout(…, 0) would have happened by then
@@ -227,7 +233,7 @@ describe("prev direction (the mirrored branches)", () => {
       spec.move(80)
       spec.end(80, false, 0.1)
       expect(page()!.style.transform).toBe("translateX(-100%)")
-      await vi.advanceTimersByTimeAsync(300)
+      await vi.advanceTimersByTimeAsync(PAST_SETTLE_MS)
       expect(article().style.transform).toBe("")
       expect(page()).toBeNull()
    })
@@ -250,7 +256,7 @@ describe("commit", () => {
       spec.engage("next")
       spec.move(-300)
       spec.end(-300, true, -0.4)
-      await vi.advanceTimersByTimeAsync(300)
+      await vi.advanceTimersByTimeAsync(PAST_SETTLE_MS)
       expect(article().style.transform).toBe("")
       expect(page()).toBeNull()
    })
@@ -260,7 +266,7 @@ describe("commit", () => {
       spec.engage("next")
       spec.move(-80)
       spec.end(-80, false, -0.1)
-      await vi.advanceTimersByTimeAsync(300)
+      await vi.advanceTimersByTimeAsync(PAST_SETTLE_MS)
       expect(commit).not.toHaveBeenCalled()
       expect(article().style.transform).toBe("")
    })
@@ -271,7 +277,7 @@ describe("commit", () => {
       spec.engage("next")
       spec.move(-300)
       spec.end(-300, true, -0.4)
-      await vi.advanceTimersByTimeAsync(300)
+      await vi.advanceTimersByTimeAsync(PAST_SETTLE_MS)
       // guard() owns the error popup; the page's job is to not leave itself over
       // a half-slid surface.
       expect(article().style.transform).toBe("")
@@ -291,7 +297,7 @@ describe("commit", () => {
       spec.end(-300, true, -0.4)
       expect(article().style.transform).toBe("translateX(-100%)")
       // Past the pager's watchdog, still far short of BUSY_STUCK_MS.
-      await vi.advanceTimersByTimeAsync(15_000 + 300)
+      await vi.advanceTimersByTimeAsync(15_000 + PAST_SETTLE_MS)
       expect(article().style.transform).toBe("")
       expect(page()).toBeNull()
       // ...and the pager is usable again rather than skip-locked behind a
@@ -316,7 +322,7 @@ describe("commit", () => {
       spec.engage("next")
       spec.move(-300)
       spec.end(-300, true, -0.4)
-      await vi.advanceTimersByTimeAsync(300)
+      await vi.advanceTimersByTimeAsync(PAST_SETTLE_MS)
       expect(article().style.transform).toBe("")
       expect(abandon).not.toHaveBeenCalled()
    })
@@ -326,7 +332,7 @@ describe("commit", () => {
       spec.engage("next")
       spec.move(-300)
       spec.end(-300, true, -0.4)
-      await vi.advanceTimersByTimeAsync(300)
+      await vi.advanceTimersByTimeAsync(PAST_SETTLE_MS)
       expect(abandon).not.toHaveBeenCalled()
    })
 
@@ -396,7 +402,7 @@ describe("commit handoff", () => {
       spec.engage("next")
       await vi.advanceTimersByTimeAsync(0)
       spec.end(-200, true, -0.4)
-      await vi.advanceTimersByTimeAsync(15_000 + 400)
+      await vi.advanceTimersByTimeAsync(15_000 + PAST_SETTLE_MS)
       expect(abandon).toHaveBeenCalledTimes(1)
       expect(page()).toBeNull()
       vi.useRealTimers()
@@ -440,7 +446,8 @@ describe("cold neighbour", () => {
 describe("gesture handoff", () => {
    it("a settle armed by the previous drag never fires into the next one", async () => {
       vi.useFakeTimers()
-      // Drag A releases short of the threshold — a 250ms settle is now armed.
+      // Drag A releases short of the threshold, slowly — 80px at the 0.1px/ms
+      // velocity floor clamps to the 260ms ceiling, so a 310ms settle is armed.
       spec.engage("next")
       spec.move(-80)
       spec.end(-80, false, -0.1)
@@ -451,9 +458,125 @@ describe("gesture handoff", () => {
       // Past drag A's deadline: its rest() must not clear drag B's tracking (or,
       // had B committed, snap the article back mid slide-out) — and above all
       // must not tear down the page drag B is peeking into.
-      await vi.advanceTimersByTimeAsync(200)
+      await vi.advanceTimersByTimeAsync(PAST_SETTLE_MS)
       expect(article().style.transform).toBe("translateX(-120px)")
       expect(page()!.classList.contains("srr-pager-show")).toBe(true)
+   })
+})
+
+// The settle CARRIES the release velocity: how long the remaining travel takes
+// is decided by how fast the finger was still moving when it left the glass. One
+// fixed duration made a hard flick decelerate exactly like a slow deliberate
+// lift, which is the rubbery tell this replaced — so these pin the arithmetic at
+// both bounds AND between them, since a fit that only ever reports a bound is
+// indistinguishable from two constants.
+describe("settle duration", () => {
+   const EASE = "cubic-bezier(0.2, 0, 0, 1)"
+   // The commit settle measures what is LEFT of a full surface width, so the
+   // surface needs one — jsdom reports offsetWidth 0 for every element.
+   const setSurfaceWidth = (px: number) =>
+      Object.defineProperty(article(), "offsetWidth", { value: px, configurable: true })
+
+   it("a hard flick commits at the floor", async () => {
+      setSurfaceWidth(400)
+      spec.engage("next")
+      await flush()
+      spec.move(-200)
+      // 200px still to travel at 4px/ms = 50ms — under the 120ms floor, which is
+      // there because a page turn that lands in one frame reads as a glitch.
+      spec.end(-200, true, -4)
+      expect(article().style.transition).toBe(`transform 120ms ${EASE}`)
+      expect(page()!.style.transition).toBe(`transform 120ms ${EASE}`)
+      await flush()
+   })
+
+   it("a slow release commits at the ceiling", async () => {
+      setSurfaceWidth(400)
+      spec.engage("next")
+      await flush()
+      spec.move(-200)
+      // 200px at the 0.1px/ms velocity floor = 2000ms, clamped to 260ms.
+      spec.end(-200, true, -0.05)
+      expect(article().style.transition).toBe(`transform 260ms ${EASE}`)
+      await flush()
+   })
+
+   it("scales with the remaining travel between the two bounds", async () => {
+      setSurfaceWidth(400)
+      spec.engage("next")
+      await flush()
+      spec.move(-100)
+      // 300px left at 2px/ms = 150ms — inside the clamp, so what shows here is
+      // the division itself rather than either bound.
+      spec.end(-100, true, -2)
+      expect(article().style.transition).toBe(`transform 150ms ${EASE}`)
+      await flush()
+   })
+
+   it("a snap-back carries the velocity too, over the distance back to origin", async () => {
+      spec.engage("next")
+      await flush()
+      spec.move(-100)
+      // Snapping back, so the travel is the offset reached: 100px at 0.4px/ms.
+      spec.end(-100, false, -0.4)
+      expect(article().style.transition).toBe(`transform 250ms ${EASE}`)
+      expect(page()!.style.transition).toBe(`transform 250ms ${EASE}`)
+   })
+
+   it("measures a dead-edge resist settle from its own damped offset", async () => {
+      nextBtn().disabled = true
+      spec.engage("next")
+      spec.move(-400) // damped to -64px, RESIST_MAX
+      // lastDx is the RAW offset the finger reached, recorded above the branch
+      // split so the resist path is measured at all: 400px at 2.5px/ms = 160ms.
+      spec.end(-400, false, -2.5)
+      expect(article().style.transition).toBe(`transform 160ms ${EASE}`)
+   })
+
+   it("a dead-stop release settles at the ceiling rather than never", async () => {
+      vi.useFakeTimers()
+      spec.engage("next")
+      await vi.advanceTimersByTimeAsync(0)
+      spec.move(-100)
+      // The 0.1px/ms floor's reason for existing: unfloored, 100/0 is Infinity —
+      // a transition that never ends with `settleTimer` armed at Infinity, so the
+      // opaque preview would stay parked over the reader for good.
+      spec.end(-100, false, 0)
+      expect(article().style.transition).toBe(`transform 260ms ${EASE}`)
+      await vi.advanceTimersByTimeAsync(PAST_SETTLE_MS)
+      expect(page()).toBeNull()
+   })
+
+   it("closes the settle a pad past the COMPUTED duration, not a constant", async () => {
+      vi.useFakeTimers()
+      spec.engage("next")
+      await vi.advanceTimersByTimeAsync(0)
+      spec.move(-100)
+      spec.end(-100, false, -2) // 50ms → floored to 120ms, so teardown at 170ms
+      expect(article().style.transition).toBe(`transform 120ms ${EASE}`)
+      await vi.advanceTimersByTimeAsync(169)
+      expect(page()).not.toBeNull()
+      await vi.advanceTimersByTimeAsync(2)
+      expect(page()).toBeNull()
+   })
+
+   it("reduced motion writes no duration at all — nothing moves after the lift", async () => {
+      vi.useFakeTimers()
+      const mm = vi.fn(() => ({ matches: true }) as MediaQueryList)
+      Object.defineProperty(window, "matchMedia", { value: mm, configurable: true })
+      setSurfaceWidth(400)
+      // Held mid-flight, so what is asserted is what commitStep WROTE rather
+      // than what rest() cleared on the way out.
+      commit.mockReturnValueOnce(new Promise(() => {}))
+      spec.engage("next")
+      await vi.advanceTimersByTimeAsync(0)
+      spec.move(-200)
+      spec.end(-200, true, -1)
+      // move() leaves "none" behind; what must never appear is a timed
+      // transition. The drag tracked the finger (direct manipulation), but
+      // nothing may move on its own once the finger is gone.
+      expect(article().style.transition).not.toMatch(/ms/)
+      expect(page()!.style.transition).not.toMatch(/ms/)
    })
 })
 

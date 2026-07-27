@@ -34,7 +34,19 @@ export interface PagerDeps {
 // wall is FELT rather than announced after the fact (the bell stays for keys).
 const PAGE_RESIST = 0.3
 const RESIST_MAX = 64
-const SETTLE_MS = 200
+// The settle is velocity-CARRIED, not fixed: the finger's release speed decides
+// how long the remaining travel takes, so a hard flick lands crisply and a
+// considered release eases out. One fixed duration for both was the last rubbery
+// tell in this gesture — a flick decelerated exactly like a slow deliberate lift,
+// which reads as the surface having its own idea of the pace rather than
+// finishing the movement the hand started. The curve is the matching half: an
+// ease-out starts at full speed and decays, which is what a released flick
+// actually does, where the old symmetric ease-out lingered at the end.
+const SETTLE_MIN_MS = 120
+const SETTLE_MAX_MS = 260
+const SETTLE_EASE = "cubic-bezier(0.2, 0, 0, 1)"
+// The timer that closes a settle, a hair past the longest it can run.
+const SETTLE_CLOSE_PAD_MS = 50
 // How long a committed step may hold the surface parked off-screen before the
 // pager takes it back (see commitStep). Comfortably under app.ts's
 // BUSY_STUCK_MS (60s) — that relationship is the point, not the number: raising
@@ -58,13 +70,16 @@ let commitTimer: ReturnType<typeof setTimeout> | undefined
 // Recorded here rather than passed down because the settle it feeds is not the
 // call that receives it: the release is one act, the animation that carries it
 // out is another, and commitStep/settleBack are both reached without it.
-//
-// Written and not yet read: the geometry half of the feel pass landed first, and
-// the velocity-carried settle that consumes this is its own change. The
-// suppression goes with that change — if it is still here once the settle reads
-// the value, delete the comment, not the variable.
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 let releaseVx = 0
+// The drag's last offset — the other half of settleDuration's input, since a
+// speed alone cannot say how far is left to go. It lives here, and is written by
+// move() rather than end(), for the same reason releaseVx does and one more:
+// `cancel` (a second finger, a touchcancel) reaches settleBack carrying NO
+// offset at all, and a cancelled drag has still travelled the distance it has to
+// settle over. Reading it from end()'s dx would leave exactly that path
+// measuring from 0 and snapping a fully-dragged article back at the floor
+// duration.
+let lastDx = 0
 
 export function setup(deps: PagerDeps): void {
    d = deps
@@ -81,6 +96,26 @@ export function setup(deps: PagerDeps): void {
 
 function reducedMotion(): boolean {
    return typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches
+}
+
+// Remaining travel ÷ release speed, clamped: "carry on at the pace the finger
+// was already going". That is what makes the animation read as the CONTINUATION
+// of the drag rather than a separate act performed on it — the whole point of
+// spending a velocity on this at all.
+//
+// The 0.1 px/ms floor is load-bearing, not a rounding nicety. A dead-stop
+// release — holding still for a moment before lifting, which is what a careful
+// gesture looks like — arrives with `vx` at or near 0, and the unfloored
+// quotient is then Infinity: a transition that never visibly ends, with
+// `settleTimer` armed at Infinity so the preview page is never torn down and
+// stays parked opaque over the reader. The clamp alone does NOT save it, because
+// the degenerate case is not only large: a dead-stop release with no travel at
+// all is 0/0 = NaN, and Math.max/Math.min propagate NaN straight into the style
+// string and into setTimeout. The floor turns both back into arithmetic, and the
+// clamp then only has to express taste.
+function settleDuration(dist: number, vx: number): number {
+   const ms = Math.abs(dist) / Math.max(Math.abs(vx), 0.1)
+   return Math.max(SETTLE_MIN_MS, Math.min(SETTLE_MAX_MS, ms))
 }
 
 // Built lazily and reused, never declared in index.html — the lightbox/pull
@@ -216,6 +251,11 @@ async function fillPage(s: PagerSide): Promise<void> {
 
 function move(dx: number): void {
    if (committing) return
+   // Above the branch split on purpose, so it covers BOTH: a dead-edge resist
+   // drag settles too (from its damped offset, at most RESIST_MAX), and
+   // recording only in the page branch would hand that settle whatever distance
+   // the last PAGE drag happened to end on.
+   lastDx = dx
    el.article.style.transition = "none"
    if (mode === "resist") {
       const damped = Math.max(-RESIST_MAX, Math.min(RESIST_MAX, dx * PAGE_RESIST))
@@ -247,12 +287,17 @@ async function commitStep(s: PagerSide): Promise<void> {
    // page would leave the viewport bare for exactly the window this exists to
    // close.
    box.classList.add("srr-pager-show")
-   // Still the fixed SETTLE_MS ease-out at this task — the velocity-carried
-   // duration that consumes `releaseVx` is its own change. Do not reach for
-   // settleDuration/SETTLE_EASE here; they do not exist yet.
+   // The remaining travel is whatever is LEFT of a full surface width: the
+   // article still has to clear the viewport entirely, and the finger already
+   // did |lastDx| of that work, so a release at 90% of the way across finishes
+   // in the time the last 10% deserves instead of restarting the movement.
+   // (Where the surface reports no width — jsdom — this reads as a plain
+   // magnitude, which is also the right answer for a drag that ran past the
+   // surface's own width.)
+   const dur = settleDuration(el.article.offsetWidth - Math.abs(lastDx), releaseVx)
    if (!reducedMotion()) {
-      el.article.style.transition = `transform ${SETTLE_MS}ms ease-out`
-      box.style.transition = `transform ${SETTLE_MS}ms ease-out`
+      el.article.style.transition = `transform ${dur}ms ${SETTLE_EASE}`
+      box.style.transition = `transform ${dur}ms ${SETTLE_EASE}`
    }
    // Finish the turn visually. The preview lands OPAQUE and covering, which is
    // what makes the rest of this invisible: the guarded step renders the real
@@ -318,18 +363,24 @@ function stalled(): Promise<typeof STALLED> {
 function settleBack(): void {
    fillTok++
    if (reducedMotion()) return rest()
-   el.article.style.transition = `transform ${SETTLE_MS}ms ease-out`
+   // Snapping back, so the remaining travel simply IS the offset the drag
+   // reached — the mirror of commitStep's "what is left of a surface width".
+   const dur = settleDuration(lastDx, releaseVx)
+   el.article.style.transition = `transform ${dur}ms ${SETTLE_EASE}`
    el.article.style.transform = ""
    if (page?.box.classList.contains("srr-pager-show")) {
-      page.box.style.transition = `transform ${SETTLE_MS}ms ease-out`
+      page.box.style.transition = `transform ${dur}ms ${SETTLE_EASE}`
       page.box.style.transform = side === "prev" ? "translateX(-100%)" : "translateX(100%)"
    }
    clearTimeout(settleTimer)
    // transitionend is unreliable (jsdom never fires it; a mid-flight rebuild
    // detaches the node) — a timer a hair past the transition is the settle. It
    // is also the page's teardown, via rest(): the preview must not outlive the
-   // animation that carried it back off-screen.
-   settleTimer = setTimeout(rest, SETTLE_MS + 50)
+   // animation that carried it back off-screen. The pad rides the COMPUTED
+   // duration rather than a constant now, so a 120ms flick-back tears down at
+   // 170ms instead of waiting out the old worst case, and a 260ms one is still
+   // never cut off mid-animation.
+   settleTimer = setTimeout(rest, dur + SETTLE_CLOSE_PAD_MS)
 }
 
 function rest(): void {
