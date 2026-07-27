@@ -2088,6 +2088,39 @@ body:not(.srr-view-list) .srr-open-reader {
       animation: none;
    }
 }
+/* Reader swipe pager — the incoming masthead-only preview pane (built lazily
+   in JS, like the lightbox; spec 2026-07-27-reader-swipe-pager-design.md).
+   Position is driven by inline transforms tracking the finger; these rules are
+   its skin and stacking. pointer-events off: it previews, it is never a target. */
+.srr-pager-pane {
+   position: fixed;
+   top: 30vh;
+   left: 0;
+   right: 0;
+   z-index: var(--z-sticky);
+   padding: var(--space-4) var(--space-5);
+   background: var(--bg);
+   pointer-events: none;
+   display: none;
+   will-change: transform;
+
+   &.srr-pager-show {
+      display: block;
+   }
+
+   & .srr-pager-kicker {
+      font-family: var(--font-mono);
+      font-size: var(--text-sm);
+      color: var(--src, inherit);
+      display: flex;
+      gap: var(--space-2);
+   }
+
+   & .srr-pager-title {
+      font-family: var(--font-sans);
+      margin: var(--space-2) 0 0;
+   }
+}
 /* Fresh-arrival pulse on the reader's pending pill (app.ts pulseNextPill) — the
    reader-side twin of the list's "N new" overlay. A background store refresh is
    the one thing that can raise the pending count on its own, and the reader has
