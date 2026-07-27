@@ -101,8 +101,11 @@ function showList() {
    picker.close()
    el.article.hidden = true
    el.listView.hidden = false
-   // Disable the reader-only nav so a one-finger swipe / arrow key is a no-op
-   // while the list scrolls natively (the buttons are also hidden via CSS).
+   // Disable the reader-only nav so an arrow key is a no-op while the list
+   // scrolls natively (the buttons are also hidden via CSS). The touch path
+   // needs no disabling here: the pager only engages inside el.article, which
+   // is hidden on this view — and the disabled state is what its dead-edge
+   // resistance reads when the reader IS showing.
    el.prev.disabled = true
    el.next.disabled = true
 }
