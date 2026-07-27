@@ -1,13 +1,17 @@
 // pager.ts — the DOM half of the reader swipe pager (spec
-// docs/superpowers/specs/2026-07-27-reader-swipe-pager-design.md).
+// docs/superpowers/specs/2026-07-27-reader-pager-carousel-design.md).
 //
 // gestures.ts owns the geometry (axis lock, thresholds, the commit decision);
 // this module owns what the drag LOOKS like and what a commit DOES: the reader
-// <article> tracking the finger, the lazily built masthead-only preview pane
-// (never content — that is what keeps FEB2's audio/video index pairing and the
-// mini-player entirely out of this feature), the damped dead-edge resistance,
-// and the handoff to app.ts's guarded step. The commit path is the SAME
-// guard(nav.left/right) the keyboard uses — zero navigation-semantics change.
+// <article> tracking the finger, the lazily built preview PAGE — a real
+// `.srr-reader` subtree inside a fixed clip box, showing the neighbour's ACTUAL
+// content with every <audio>/<video> replaced by an inert same-box stub
+// (article-view.ts makeMediaInert, which is what keeps FEB2's audio/video index
+// pairing and the mini-player entirely out of this feature) — the damped
+// dead-edge resistance, and the handoff to app.ts's guarded step. The commit
+// path is the SAME guard(nav.left/right) the keyboard uses — zero
+// navigation-semantics change.
+import { buildContent, paintMasthead, stampContentHost, type ArticleRefs } from "./article-view"
 import * as data from "./data"
 import { el } from "./els"
 import { srcColorIndex, timeAgo } from "./fmt"
@@ -38,12 +42,14 @@ const SETTLE_MS = 200
 const COMMIT_WAIT_MS = 15_000
 
 let d: PagerDeps
-let pane: HTMLElement | null = null
+// The preview page and the nodes inside it, kept together: the box is what
+// moves and what gets torn down, the refs are what article-view paints into.
+let page: { box: HTMLElement; refs: ArticleRefs } | null = null
 let side: PagerSide = "next"
 let mode: "page" | "resist" = "page"
 // A committed step is still animating/loading — a new drag must not fight it.
 let committing = false
-// Freshness token: a pane fill that resolves after its drag ended (or after a
+// Freshness token: a page fill that resolves after its drag ended (or after a
 // newer drag began) must not paint over the newer state.
 let fillTok = 0
 let settleTimer: ReturnType<typeof setTimeout> | undefined
@@ -62,6 +68,12 @@ let releaseVx = 0
 
 export function setup(deps: PagerDeps): void {
    d = deps
+   // A re-registration means a fresh surface (a rebuilt document, a test's next
+   // case). Any page built against the OLD one is orphaned chrome — and this one
+   // is opaque and full-viewport, so leaving it would sit over the reader and
+   // make the app look dead. Every other exit path tears it down too; this is
+   // the one that has no gesture to reach it.
+   teardownPage()
    // `cancel` is settleBack unguarded, unlike engage/move: it leans on gestures
    // calling it only for an ENGAGED drag, never a skipped one.
    setPager(el.article, { engage, move, end, cancel: settleBack })
@@ -73,25 +85,73 @@ function reducedMotion(): boolean {
 
 // Built lazily and reused, never declared in index.html — the lightbox/pull
 // precedent, which also keeps it out of design.html's skeleton drift guard.
-function ensurePane(): HTMLElement {
-   if (pane?.isConnected) return pane
+//
+// The inner subtree uses the SAME classes index.html declares for the reader,
+// which is the load-bearing decision of this whole feature: identical classes
+// mean identical typography, measure and spacing by construction, so the commit
+// handoff (commitStep) can swap this for the real article without a visible
+// shift. A parallel skin would drift, and the drift would show up as exactly the
+// jump this replaced.
+function ensurePage(): { box: HTMLElement; refs: ArticleRefs } {
+   if (page?.box.isConnected) return page
    const box = document.createElement("div")
-   box.className = "srr-pager-pane"
+   box.className = "srr-pager-page"
    // Decorative during the drag; the committed article announces itself.
    box.setAttribute("aria-hidden", "true")
+   // ...and `inert` because aria-hidden alone is only half of it: the masthead
+   // row is an <a href> and buildContent's prose carries the article's own
+   // links, so the subtree holds focusable nodes — a Tab trap the user cannot
+   // see, and the aria-hidden-focus violation axe would raise if it ever caught
+   // the page up. `inert` takes the whole subtree out of the tab order and out
+   // of hit-testing in one declaration, which is why it is here rather than a
+   // tabindex on each node the fill might produce. (jsdom ignores the attribute;
+   // in a browser without support it is simply inert-as-in-no-op.)
+   box.setAttribute("inert", "")
+   const root = document.createElement("article")
+   root.className = "srr-reader"
+   const titleRow = document.createElement("a")
+   titleRow.className = "srr-title-row"
+   titleRow.rel = "noreferrer"
    const kicker = document.createElement("div")
-   kicker.className = "srr-pager-kicker"
+   kicker.className = "srr-kicker"
    const source = document.createElement("span")
-   source.className = "srr-pager-source"
-   const date = document.createElement("span")
-   date.className = "srr-pager-date"
-   kicker.append(source, date)
-   const title = document.createElement("h2")
-   title.className = "srr-pager-title"
-   box.append(kicker, title)
+   source.className = "srr-source"
+   const desk = document.createElement("span")
+   desk.className = "srr-desk"
+   const date = document.createElement("time")
+   date.className = "srr-date"
+   kicker.append(source, desk, date)
+   const title = document.createElement("h1")
+   title.className = "srr-title"
+   titleRow.append(kicker, title)
+   const content = document.createElement("div")
+   content.className = "srr-content"
+   root.append(titleRow, content)
+   box.append(root)
    document.body.appendChild(box)
-   pane = box
-   return box
+   page = { box, refs: { root, titleRow, source, desk, date, title, content } }
+   return page
+}
+
+// Remove the preview entirely. Called from EVERY exit path — rest, settleBack's
+// completion, cancel, and setup's re-registration — because a leaked page is an
+// opaque full-viewport element sitting over the reader, the highest-severity
+// failure this design can have.
+function teardownPage(): void {
+   page?.box.remove()
+   page = null
+}
+
+// Three dim bars standing in for prose, so a cold page reads as a page that is
+// loading rather than an article with no body.
+function skeleton(): DocumentFragment {
+   const frag = document.createDocumentFragment()
+   for (let i = 0; i < 3; i++) {
+      const bar = document.createElement("div")
+      bar.className = "srr-pager-skeleton"
+      frag.append(bar)
+   }
+   return frag
 }
 
 function engage(s: PagerSide): "page" | "resist" | "skip" {
@@ -111,29 +171,46 @@ function engage(s: PagerSide): "page" | "resist" | "skip" {
    // has_left/has_right (reader.render/showList keep it current).
    const dead = s === "prev" ? el.prev.disabled : el.next.disabled
    mode = dead ? "resist" : "page"
-   if (mode === "page") void fillPane(s)
+   if (mode === "page") void fillPage(s)
    return mode
 }
 
-// Masthead-only, best-effort: a probe/meta blip leaves the skeleton pane, and
-// the commit still renders the real article through the normal path.
-async function fillPane(s: PagerSide): Promise<void> {
+// Best-effort: a probe/meta blip leaves the skeleton, and the commit still
+// renders the real article through the normal path.
+async function fillPage(s: PagerSide): Promise<void> {
    const my = ++fillTok
-   const box = ensurePane()
-   box.querySelector(".srr-pager-source")!.textContent = ""
-   box.querySelector(".srr-pager-date")!.textContent = ""
-   box.querySelector(".srr-pager-title")!.textContent = ""
-   delete box.dataset.src
+   const { box, refs } = ensurePage()
+   refs.source.textContent = ""
+   refs.desk.textContent = ""
+   refs.date.textContent = ""
+   refs.title.textContent = ""
+   refs.content.replaceChildren()
+   delete refs.root.dataset.src
+   box.classList.remove("srr-pager-filled")
    try {
       const from = nav.currentChron()
       const target = await (s === "prev" ? nav.neighborOlder(from) : nav.neighborNewer(from))
       if (my !== fillTok || target < 0) return
+      // The article is normally already warm — prefetch.ts loads the speculative
+      // neighbour after every step — but not always (a deep link, a filter
+      // change, an evicted entry). So paint the masthead from the cheap meta card
+      // FIRST and show a skeleton, rather than holding an empty page on the
+      // uncommon path. Today's masthead-only pane is now the degraded state.
       const card = await data.loadMeta(target)
       if (my !== fillTok) return
-      box.dataset.src = String(srcColorIndex(card.f))
-      box.querySelector(".srr-pager-source")!.textContent = data.feedTitle(card.f)
-      box.querySelector(".srr-pager-date")!.textContent = timeAgo(card.w)
-      box.querySelector(".srr-pager-title")!.textContent = card.t ?? ""
+      refs.root.dataset.src = String(srcColorIndex(card.f))
+      refs.source.textContent = data.feedTitle(card.f)
+      refs.date.textContent = timeAgo(card.w)
+      refs.title.textContent = card.t ?? ""
+      refs.content.replaceChildren(skeleton())
+      const article = await data.loadArticle(target)
+      if (my !== fillTok) return
+      const feed = data.db.feeds[article.f]
+      paintMasthead(refs, article, feed)
+      stampContentHost(refs.content, article)
+      // inert: the preview never holds live audio/video (article-view §2).
+      refs.content.replaceChildren(buildContent(article, data.activeStore().base, { inert: true }))
+      box.classList.add("srr-pager-filled")
    } catch {}
 }
 
@@ -149,7 +226,7 @@ function move(dx: number): void {
    // reversed finger parks at 0 rather than dragging the article the wrong way.
    const cl = side === "prev" ? Math.max(0, dx) : Math.min(0, dx)
    el.article.style.transform = `translateX(${cl}px)`
-   const box = ensurePane()
+   const { box } = ensurePage()
    box.classList.add("srr-pager-show")
    box.style.transition = "none"
    box.style.transform = side === "prev" ? `translateX(calc(-100% + ${cl}px))` : `translateX(calc(100% + ${cl}px))`
@@ -163,15 +240,27 @@ function end(dx: number, commit: boolean, vx: number): void {
 
 async function commitStep(s: PagerSide): Promise<void> {
    committing = true
-   fillTok++ // the pane now shows what it shows; a late fill must not repaint it
-   const box = ensurePane()
+   fillTok++ // the page now shows what it shows; a late fill must not repaint it
+   const { box } = ensurePage()
+   // Normally move() already revealed it, but a commit is allowed to arrive
+   // without one and the covering guarantee below is unconditional — an unshown
+   // page would leave the viewport bare for exactly the window this exists to
+   // close.
+   box.classList.add("srr-pager-show")
+   // Still the fixed SETTLE_MS ease-out at this task — the velocity-carried
+   // duration that consumes `releaseVx` is its own change. Do not reach for
+   // settleDuration/SETTLE_EASE here; they do not exist yet.
    if (!reducedMotion()) {
       el.article.style.transition = `transform ${SETTLE_MS}ms ease-out`
       box.style.transition = `transform ${SETTLE_MS}ms ease-out`
    }
-   // Finish the turn visually while the guarded step loads underneath; when
-   // render() lands (fade suppressed — reader.setEntryTransition) the pane
-   // lifts off an already-painted article whose masthead matches it.
+   // Finish the turn visually. The preview lands OPAQUE and covering, which is
+   // what makes the rest of this invisible: the guarded step renders the real
+   // article and scrolls it to the top underneath a page that already shows
+   // exactly that article at exactly that geometry. A slow load holds a correct
+   // page longer instead of showing a blank screen — the failure mode this
+   // replaced. The watchdog below is unchanged in mechanism and its guarantee is
+   // strengthened, not replaced: while it waits the surface is COVERED, not bare.
    el.article.style.transform = s === "prev" ? "translateX(100%)" : "translateX(-100%)"
    box.style.transform = "translateX(0)"
    try {
@@ -231,13 +320,15 @@ function settleBack(): void {
    if (reducedMotion()) return rest()
    el.article.style.transition = `transform ${SETTLE_MS}ms ease-out`
    el.article.style.transform = ""
-   if (pane?.classList.contains("srr-pager-show")) {
-      pane.style.transition = `transform ${SETTLE_MS}ms ease-out`
-      pane.style.transform = side === "prev" ? "translateX(-100%)" : "translateX(100%)"
+   if (page?.box.classList.contains("srr-pager-show")) {
+      page.box.style.transition = `transform ${SETTLE_MS}ms ease-out`
+      page.box.style.transform = side === "prev" ? "translateX(-100%)" : "translateX(100%)"
    }
    clearTimeout(settleTimer)
    // transitionend is unreliable (jsdom never fires it; a mid-flight rebuild
-   // detaches the node) — a timer a hair past the transition is the settle.
+   // detaches the node) — a timer a hair past the transition is the settle. It
+   // is also the page's teardown, via rest(): the preview must not outlive the
+   // animation that carried it back off-screen.
    settleTimer = setTimeout(rest, SETTLE_MS + 50)
 }
 
@@ -245,9 +336,10 @@ function rest(): void {
    clearTimeout(settleTimer)
    el.article.style.transition = ""
    el.article.style.transform = ""
-   if (pane) {
-      pane.classList.remove("srr-pager-show")
-      pane.style.transition = ""
-      pane.style.transform = ""
-   }
+   // Same frame as the transform clear: on the commit path the real article is
+   // already rendered and scrolled underneath, so the page and the surface it
+   // covers show the same content at the same geometry and removing the cover is
+   // invisible. Splitting the two — clearing the transform now and removing the
+   // page a task later, or the reverse — is what a blink looks like.
+   teardownPage()
 }

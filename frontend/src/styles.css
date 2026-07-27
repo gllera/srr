@@ -2105,37 +2105,96 @@ body:not(.srr-view-list) .srr-open-reader {
 .srr-reader {
    min-height: calc(100dvh - 6.5rem - env(safe-area-inset-top));
 }
-/* Reader swipe pager — the incoming masthead-only preview pane (built lazily
-   in JS, like the lightbox; spec 2026-07-27-reader-swipe-pager-design.md).
-   Position is driven by inline transforms tracking the finger; these rules are
-   its skin and stacking. pointer-events off: it previews, it is never a target. */
-.srr-pager-pane {
+/* Inert stand-in for an <audio>/<video> inside the pager's preview page
+   (article-view.ts makeMediaInert). It is never in the committed article — the
+   real element renders there — so this only ever shows for the length of a drag.
+   It claims the element's RESTING BOX (aspect-ratio from the intrinsic
+   attributes, or a fixed row for audio) because the commit swaps this surface
+   for the real one: a stub of the wrong height would reflow the whole article
+   under the reader's eye at exactly the moment we are trying to be seamless. */
+.srr-media-stub {
+   width: 100%;
+   border-radius: var(--radius);
+   background-color: var(--faint);
+   background-size: cover;
+   background-position: center;
+
+   &.srr-media-stub-audio {
+      aspect-ratio: auto;
+      height: 3rem;
+   }
+}
+/* Reader swipe pager — the incoming preview PAGE (built lazily in JS, like the
+   lightbox; spec 2026-07-27-reader-pager-carousel-design.md). Position is driven
+   by inline transforms tracking the finger; these rules are its skin, clip and
+   stacking.
+
+   Opaque and full-viewport is what makes the commit seamless: it covers the real
+   reader while the guarded step renders and scrolls underneath, so the load has
+   no blank window and the scrollTo(0,0) has no visible jump.
+
+   --z-sticky (1) is BELOW --z-toolbar (6), so the bottom toolbar and the
+   .srr-player bar stay above the turning pages. They are chrome, not page.
+   pointer-events off: it previews, it is never a target. overflow hidden: it is
+   a preview, you do not scroll it.
+
+   The padding restates html's own (top/side), and the inner .srr-reader restates
+   .srr-container's column, because the two surfaces must break every line of
+   prose in the SAME places: a different measure or a different top offset would
+   re-flow the whole article across the handoff, which is the one thing this
+   design exists to prevent. The <=500px block near the end of this file re-pairs
+   the padding with the narrower mobile page padding, exactly as the source spine
+   does. */
+.srr-pager-page {
    position: fixed;
-   top: 30vh;
-   left: 0;
-   right: 0;
+   inset: 0;
    z-index: var(--z-sticky);
-   padding: var(--space-4) var(--space-5);
+   overflow: hidden;
+   padding: max(1.5rem, env(safe-area-inset-top)) 1.5rem 0;
    background: var(--bg);
    pointer-events: none;
    display: none;
    will-change: transform;
+   /* The seam: a hairline plus a cast shadow on BOTH leading edges, so the two
+      pages read as stacked sheets rather than one surface swapping contents.
+      Which edge is leading depends on the direction, so both are drawn — the
+      off-screen one is invisible by definition. The cast is --shadow rather than
+      a literal rgba: dark mode needs a heavier veil to read at all against
+      --bg, and the token already carries that. */
+   box-shadow:
+      1px 0 0 var(--border),
+      -1px 0 0 var(--border),
+      var(--shadow);
 
    &.srr-pager-show {
       display: block;
    }
 
-   & .srr-pager-kicker {
-      font-family: var(--font-mono);
-      font-size: var(--text-sm);
-      color: var(--src, inherit);
-      display: flex;
-      gap: var(--space-2);
+   /* The inner .srr-reader inherits the reader's own rules; it needs only the
+      content column .srr-container would have given it.
+      The min-height reset is not cosmetic: .srr-reader carries
+      `min-height: calc(100dvh - 6.5rem - env(safe-area-inset-top))` so the REAL
+      reader's drag surface stays reachable under a short article. Inside a fixed
+      clip box that fights the box — the page is already exactly one viewport,
+      and the preview is not a gesture surface at all (pointer-events: none). */
+   & .srr-reader {
+      min-height: 0;
+      max-width: 680px;
+      margin-inline: auto;
    }
 
-   & .srr-pager-title {
-      font-family: var(--font-sans);
-      margin: var(--space-2) 0 0;
+   /* Cold-neighbour stand-in: prose-shaped bars while the article loads. No
+      animation — it is on screen for a fraction of a drag, and a pulse would
+      draw the eye to the one part of the page that is not real. */
+   & .srr-pager-skeleton {
+      height: 1em;
+      margin-bottom: var(--space-3);
+      border-radius: var(--radius);
+      background: var(--faint);
+
+      &:last-child {
+         width: 60%;
+      }
    }
 }
 /* Fresh-arrival pulse on the reader's pending pill (app.ts pulseNextPill) — the
@@ -3133,6 +3192,14 @@ html:has(body.srr-view-list) {
    .srr-reader[data-src] .srr-title-row {
       padding-left: 0.75rem;
       margin-left: -0.75rem;
+   }
+   /* Same argument for the pager's preview page, which restates html's padding
+      so its prose lands on the real reader's baseline and measure. Left on the
+      desktop values here it would inset the preview 0.75rem further per side
+      than the article it hands off to — a narrower measure, so every line breaks
+      somewhere else and the commit reflows the whole body. */
+   .srr-pager-page {
+      padding: max(1.25rem, env(safe-area-inset-top)) 0.75rem 0;
    }
    /* The mini-player on a phone. Six controls, a clock and an episode title do
       not fit one 360px line: measured, the transport eats ~250px and leaves the
