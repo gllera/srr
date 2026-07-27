@@ -908,6 +908,33 @@ describe("reader language stamping (the article's `g`)", () => {
    })
 })
 
+// The pager's committed drag already animated the arrival (the slide), so the
+// render it triggers must not ALSO dim-and-fade — reader.setEntryTransition
+// is app.ts's one-shot signal around the guarded step.
+describe("pager slide entry (reader.setEntryTransition)", () => {
+   it("a slide-entry render never dims the content host", async () => {
+      await boot()
+      // reader.ts is real (unmocked) and holds this as module state, so — like
+      // dropdown.ts/search.ts — the live instance app.ts is driving must be
+      // fetched via a post-boot dynamic import, not the file's own top-level
+      // static one (boot()'s vi.resetModules() leaves those as two different
+      // module instances).
+      const reader = await import("./reader")
+      reader.setEntryTransition("slide")
+      try {
+         hashTo("#2")
+         await flush()
+         const content = document.querySelector(".srr-content") as HTMLElement
+         // Without the flag render writes opacity:0 + translateY(6px) and clears
+         // them two rAFs later; with it, nothing is ever written.
+         expect(content.style.opacity).toBe("")
+         expect(content.style.transform).toBe("")
+      } finally {
+         reader.setEntryTransition(null)
+      }
+   })
+})
+
 // RDR1/RDR2 — the offer is deliberately quiet: ordinary reading (one article)
 // says nothing, a backlog-swallowing jump says what it took and hands back one
 // way to undo it.

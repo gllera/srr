@@ -57,6 +57,16 @@ function clearContentTransition() {
    el.content.style.transform = ""
 }
 
+// The arrival transition the NEXT render should use: "slide" while a committed
+// pager drag is driving the step (app.ts brackets the guarded nav call with
+// it), null for every other entry — keyboard, buttons, deep links — which keep
+// the fade. Not one-shot on purpose: app.ts clears it in a finally, so a
+// guard() that skips (busy) or rejects cannot strand the flag.
+let entryTransition: "slide" | null = null
+export function setEntryTransition(t: "slide" | null): void {
+   entryTransition = t
+}
+
 // The next pill's pending readout: how much is UNREAD AND AHEAD under the
 // active filter — the picker badges' own count with each frontier floored at
 // the cursor (nav.pendingRight), so it matches the picker on every recorded
@@ -246,9 +256,15 @@ export function render(o: IShowFeed) {
    el.desk.textContent = feed?.tag ? "#" + feed.tag : ""
    // t/l are omitempty on the wire — an untitled article must not render "undefined"
    el.title.textContent = o.article.t ?? ""
-   el.content.style.transition = "none"
-   el.content.style.opacity = "0"
-   el.content.style.transform = "translateY(6px)"
+   // A slide entry (a committed pager drag) already animated the transition;
+   // dimming for the fade would double-transition the arrival.
+   const slide = entryTransition === "slide"
+   if (slide) clearContentTransition()
+   else {
+      el.content.style.transition = "none"
+      el.content.style.opacity = "0"
+      el.content.style.transform = "translateY(6px)"
+   }
    // §9.3 (docs/MANIFEST-SPEC.md): `srr store compact` replaces an expired article's
    // payload with a tombstone that keeps f/a/p and DROPS c/t/l — so `c` is
    // absent on the wire (`c` is typed string, but omitempty means undefined at
@@ -358,7 +374,7 @@ export function render(o: IShowFeed) {
 
    // Double rAF: first ensures the browser has painted with opacity:0, second
    // re-enables transitions so the fade-in animates.
-   requestAnimationFrame(() => requestAnimationFrame(clearContentTransition))
+   if (!slide) requestAnimationFrame(() => requestAnimationFrame(clearContentTransition))
 
    d.persistHash(location.hash)
    // If this landing consumed a backlog, say so and offer one way back (RDR1).
