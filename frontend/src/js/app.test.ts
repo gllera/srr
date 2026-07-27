@@ -309,6 +309,20 @@ const SKELETON = `
    </main>`
 
 const flush = () => new Promise((r) => setTimeout(r))
+// Drain the reader's fade-clear, which `flush` does NOT wait for: render()
+// schedules clearContentTransition behind a DOUBLE requestAnimationFrame, and
+// jsdom drives rAF off a ~16ms real timer, so after a landing render those two
+// callbacks are still pending while a 0ms macrotask has long since resolved.
+// They also survive vi.useFakeTimers() — installing fake timers replaces the
+// timer functions but cannot unschedule what the real ones already queued — so
+// any later assertion on content.style.opacity races them in REAL wall-clock
+// time: on a fast machine the assertion wins, on a loaded 2-core CI runner the
+// stale clear lands first and a fade reads as "". That is a flake in the tests
+// expecting "0", and worse in the ones expecting "" (a leaked clear would make
+// a BROKEN slide branch pass). Awaiting two frames drains them in queue order:
+// the render's first callback runs before ours, so by the time this resolves
+// its second one — the actual clear — has already run.
+const settleFade = () => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())))
 const hashTo = (h: string) => {
    window.location.hash = h
    window.dispatchEvent(new Event("hashchange"))
@@ -948,6 +962,10 @@ describe("pager slide entry (reader.setEntryTransition)", () => {
       await boot()
       hashTo("#2")
       await flush()
+      // This landing's own fade is still clearing itself two frames from now —
+      // drain it here so it can't land on top of an assertion below (and so it
+      // can't make one pass for the wrong reason). See settleFade.
+      await settleFade()
       return await import("./reader")
    }
 
@@ -1044,6 +1062,7 @@ describe("pagerCommit — app.ts's seam to the pager", () => {
       await boot()
       hashTo("#2")
       await flush()
+      await settleFade() // this landing's own fade clear must not land on an assertion below
       const content = document.querySelector(".srr-content") as HTMLElement
       let chron = 2
       nav.currentChron.mockImplementation(() => chron)
@@ -1068,6 +1087,7 @@ describe("pagerCommit — app.ts's seam to the pager", () => {
       await boot()
       hashTo("#2")
       await flush() // lands in the reader; mutex free again
+      await settleFade() // ...and its fade clear is drained, so the assertion below owns the style
       const content = document.querySelector(".srr-content") as HTMLElement
 
       // Hold the mutex open with a second, stalled navigation — guard() drops
@@ -1100,6 +1120,7 @@ describe("pagerCommit — app.ts's seam to the pager", () => {
       await boot()
       hashTo("#2")
       await flush()
+      await settleFade() // this landing's own fade clear must not land on an assertion below
       const content = document.querySelector(".srr-content") as HTMLElement
 
       nav.right.mockRejectedValueOnce(new Error("pack fetch failed"))
