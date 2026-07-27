@@ -25,6 +25,11 @@ export interface PagerDeps {
 const PAGE_RESIST = 0.3
 const RESIST_MAX = 64
 const SETTLE_MS = 200
+// How long a committed step may hold the surface parked off-screen before the
+// pager takes it back (see commitStep). Comfortably under app.ts's
+// BUSY_STUCK_MS (60s) — that relationship is the point, not the number: raising
+// this past the stale-mutex window reopens the invisible-article hole below it.
+const COMMIT_WAIT_MS = 15_000
 
 let d: PagerDeps
 let pane: HTMLElement | null = null
@@ -36,6 +41,7 @@ let committing = false
 // newer drag began) must not paint over the newer state.
 let fillTok = 0
 let settleTimer: ReturnType<typeof setTimeout> | undefined
+let commitTimer: ReturnType<typeof setTimeout> | undefined
 
 export function setup(deps: PagerDeps): void {
    d = deps
@@ -151,14 +157,37 @@ async function commitStep(s: PagerSide): Promise<void> {
    el.article.style.transform = s === "prev" ? "translateX(100%)" : "translateX(-100%)"
    box.style.transform = "translateX(0)"
    try {
-      const ok = await d.commit(s)
+      // Whichever settles first wins. The watchdog is not a nicety: while we
+      // wait, `el.article` is parked fully off-screen, and rest()/settleBack()
+      // are the ONLY writers of that transform anywhere in the frontend — so
+      // anything that repaints the reader meanwhile paints into an invisible
+      // surface. app.ts's guard() treats a mutex hold past BUSY_STUCK_MS (60s)
+      // as stale and lets the next arrow/button reclaim it; that reclaimed step
+      // renders the right article INTO our parked <article> and leaves it
+      // invisible until our own step finally settles, with `committing` still
+      // skip-locking the pager on top. Releasing at 15s means the surface is
+      // never parked by the time that reclaim becomes possible — and since
+      // reader.render()'s ONE call site is inside guard(), holding the live
+      // mutex is what makes this the only window there is. The late step still
+      // lands and renders through the normal path.
+      const ok = await Promise.race([d.commit(s), stalled()])
       if (ok) rest()
       else settleBack()
    } catch {
       settleBack()
    } finally {
+      clearTimeout(commitTimer)
       committing = false
    }
+}
+
+// The watchdog half of that race. A plain timer, so a commit that resolves
+// first simply clears it in the finally above; a late rejection from the loser
+// stays handled (Promise.race attached to it) and its resolution is ignored.
+function stalled(): Promise<false> {
+   return new Promise((r) => {
+      commitTimer = setTimeout(() => r(false), COMMIT_WAIT_MS)
+   })
 }
 
 // Animate everything back to rest, then clear the inline styles. Under reduced

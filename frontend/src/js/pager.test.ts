@@ -215,6 +215,27 @@ describe("commit", () => {
       expect(pane()!.classList.contains("srr-pager-show")).toBe(false)
    })
 
+   it("a STALLED commit gives the surface back before the mutex can be reclaimed", async () => {
+      vi.useFakeTimers()
+      // A step whose fetch chain wedges — the real shape of the hazard, not a
+      // slow-but-settling one. The article is parked fully off-screen while we
+      // wait, and rest()/settleBack() are its only writers, so a reader repaint
+      // in this window (app.ts's guard() reclaims a mutex held past 60s and
+      // renders through it) would paint into an invisible surface.
+      commit.mockReturnValueOnce(new Promise(() => {}))
+      spec.engage("next")
+      spec.move(-300)
+      spec.end(-300, true)
+      expect(article().style.transform).toBe("translateX(-100%)")
+      // Past the pager's watchdog, still far short of BUSY_STUCK_MS.
+      await vi.advanceTimersByTimeAsync(15_000 + 300)
+      expect(article().style.transform).toBe("")
+      expect(pane()!.classList.contains("srr-pager-show")).toBe(false)
+      // ...and the pager is usable again rather than skip-locked behind a
+      // commit that is never coming back.
+      expect(spec.engage("next")).toBe("page")
+   })
+
    it("a drag arriving mid-commit is skipped", () => {
       let release!: (v: boolean) => void
       commit.mockReturnValueOnce(new Promise((r) => (release = r)))
