@@ -39,6 +39,8 @@ let settleTimer: ReturnType<typeof setTimeout> | undefined
 
 export function setup(deps: PagerDeps): void {
    d = deps
+   // `cancel` is settleBack unguarded, unlike engage/move: it leans on gestures
+   // calling it only for an ENGAGED drag, never a skipped one.
    setPager(el.article, { engage, move, end, cancel: settleBack })
 }
 
@@ -75,9 +77,11 @@ function engage(s: PagerSide): "page" | "resist" | "skip" {
    // rest() would clear the transform this drag is about to write (a one-frame
    // flash back to origin mid-drag) or, worse, land during a commit's slide-out
    // and leave the arriving article a bare snap. A new gesture cycle owns the
-   // surface, so it invalidates the old timer rather than racing it. (Cleared
-   // AFTER the committing check: a skipped drag changes nothing and must leave
-   // an in-flight settle alone.)
+   // surface, so it invalidates the old timer rather than racing it. (Below the
+   // committing check only because no timer can be live there anyway: gestures
+   // withholds move/end/cancel from a skipped drag, so nothing can arm one while
+   // a commit is in flight. The skip branch is inert; the clear belongs to a
+   // real gesture cycle.)
    clearTimeout(settleTimer)
    side = s
    // The neighbor probes already answered availability — the disabled state IS
