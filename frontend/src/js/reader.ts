@@ -60,8 +60,19 @@ function clearContentTransition() {
 // The arrival transition the NEXT render should use: "slide" while a committed
 // pager drag is driving the step (app.ts brackets the guarded nav call with
 // it), null for every other entry — keyboard, buttons, deep links — which keep
-// the fade. Not one-shot on purpose: app.ts clears it in a finally, so a
-// guard() that skips (busy) or rejects cannot strand the flag.
+// the fade. TWO things clear it, and both are needed because they cover
+// different holes:
+//   - render() CONSUMES it (reads, then immediately nulls), so a set can never
+//     outlive the ONE render it was meant for. app.ts's finally alone could not
+//     promise that: it only runs when its guarded step settles, and a pager
+//     step can chain two 30s-bounded fetches — right at BUSY_STUCK_MS, past
+//     which a different action reclaims the stale mutex and renders through a
+//     flag still reading "slide" (and a step that never settles would strand it
+//     for the life of the page).
+//   - app.ts still clears it in a finally, for the case where NO render happens
+//     at all — a guard() that skips on a busy mutex, or a step that rejects —
+//     which consume-on-read cannot see.
+// Neither is redundant; dropping either one reopens its own hole.
 let entryTransition: "slide" | null = null
 export function setEntryTransition(t: "slide" | null): void {
    entryTransition = t
@@ -242,6 +253,13 @@ export function render(o: IShowFeed) {
    // timer fires applySearchQuery under the now-hidden list and rewrites the
    // reader's hash to the positionless #!q:<query>, losing the resume position.
    d.clearSearchDebounce()
+   // A slide entry (a committed pager drag) already animated the transition;
+   // dimming for the fade would double-transition the arrival. Reading the flag
+   // CONSUMES it (see setEntryTransition above) — it names exactly one render,
+   // and this is that render whatever it turns out to be, the placeholder branch
+   // below included (the empty state clears the transition either way).
+   const slide = entryTransition === "slide"
+   entryTransition = null
    if (o.placeholder) return renderEmptyReader(o)
    el.article.classList.remove("srr-reader-empty")
    const feed = data.db.feeds[o.article.f]
@@ -256,9 +274,8 @@ export function render(o: IShowFeed) {
    el.desk.textContent = feed?.tag ? "#" + feed.tag : ""
    // t/l are omitempty on the wire — an untitled article must not render "undefined"
    el.title.textContent = o.article.t ?? ""
-   // A slide entry (a committed pager drag) already animated the transition;
-   // dimming for the fade would double-transition the arrival.
-   const slide = entryTransition === "slide"
+   // The slide's arrival is already animated (flag consumed above); every other
+   // entry dims first and fades in over the two rAFs below.
    if (slide) clearContentTransition()
    else {
       el.content.style.transition = "none"

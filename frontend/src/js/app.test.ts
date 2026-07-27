@@ -925,26 +925,65 @@ describe("reader language stamping (the article's `g`)", () => {
 
 // The pager's committed drag already animated the arrival (the slide), so the
 // render it triggers must not ALSO dim-and-fade — reader.setEntryTransition
-// is app.ts's per-step signal bracketing the guarded call (deliberately NOT
-// one-shot — see reader.ts).
+// is app.ts's per-step signal bracketing the guarded call. It is CONSUMED by
+// the render it was set for (see reader.ts); app.ts's finally clears it for
+// the case where that render never happens at all.
 describe("pager slide entry (reader.setEntryTransition)", () => {
-   it("a slide-entry render never dims the content host", async () => {
+   const content = () => document.querySelector(".srr-content") as HTMLElement
+   // ONE route, and therefore exactly one render. hashTo() is worth two: jsdom
+   // queues its OWN hashchange when the assignment changes the hash, on top of
+   // the one the helper dispatches. That is invisible to every other case here,
+   // but a flag the render CONSUMES is spent by the first of the pair — and
+   // which render honors it is the whole subject below — so these cases land in
+   // the reader first and then re-route the same hash by hand.
+   const rerender = async () => {
+      window.dispatchEvent(new Event("hashchange"))
+      await flush()
+   }
+   // reader.ts is real (unmocked) and holds the flag as module state, so — like
+   // dropdown.ts/search.ts — the live instance app.ts is driving must be fetched
+   // via a post-boot dynamic import, not the file's own top-level static one
+   // (boot()'s vi.resetModules() leaves those as two different module instances).
+   const enterReader = async () => {
       await boot()
-      // reader.ts is real (unmocked) and holds this as module state, so — like
-      // dropdown.ts/search.ts — the live instance app.ts is driving must be
-      // fetched via a post-boot dynamic import, not the file's own top-level
-      // static one (boot()'s vi.resetModules() leaves those as two different
-      // module instances).
-      const reader = await import("./reader")
+      hashTo("#2")
+      await flush()
+      return await import("./reader")
+   }
+
+   it("a slide-entry render never dims the content host", async () => {
+      const reader = await enterReader()
       reader.setEntryTransition("slide")
       try {
-         hashTo("#2")
-         await flush()
-         const content = document.querySelector(".srr-content") as HTMLElement
+         await rerender()
          // Without the flag render writes opacity:0 + translateY(6px) and clears
          // them two rAFs later; with it, nothing is ever written.
-         expect(content.style.opacity).toBe("")
-         expect(content.style.transform).toBe("")
+         expect(content().style.opacity).toBe("")
+         expect(content().style.transform).toBe("")
+      } finally {
+         reader.setEntryTransition(null)
+      }
+   })
+
+   // The consume is what bounds a STALE flag. app.ts's finally only runs once
+   // its guarded step settles, and a pager step can chain two 30s-bounded
+   // fetches — right at guard()'s BUSY_STUCK_MS, past which a DIFFERENT action
+   // reclaims the stale mutex and renders while the flag still reads "slide"
+   // (and a step that never settles would strand it for the life of the page).
+   // So the flag must buy exactly one render, not every render until something
+   // clears it — here the second landing is that unrelated render.
+   it("spends the slide on the first render, so a second one fades normally", async () => {
+      const reader = await enterReader()
+      reader.setEntryTransition("slide")
+      try {
+         await rerender()
+         expect(content().style.opacity).toBe("")
+
+         // Nothing cleared the flag in between — this render is the one that
+         // must NOT inherit the drag's suppression.
+         await rerender()
+         expect(content().style.opacity).toBe("0")
+         expect(content().style.transform).toBe("translateY(6px)")
       } finally {
          reader.setEntryTransition(null)
       }

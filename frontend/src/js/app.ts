@@ -553,6 +553,10 @@ const cycleNext = cycle(1)
 // unchanged chron covers busy AND failure with one signal, and the pane knows
 // to snap back. The overlay guards mirror stepLeft/stepRight's: a drag that
 // somehow ends under the picker/lightbox must not step the reader beneath.
+// The finally is NOT redundant with reader.ts consuming the flag on read: the
+// consume bounds a stale "slide" to one render, this clears it when the step
+// produces NO render at all (guard() skipped it on a busy mutex, or it
+// rejected). Neither covers the other's case — see reader.ts entryTransition.
 async function pagerCommit(side: "prev" | "next"): Promise<boolean> {
    if (view !== "reader" || picker.isOpen() || lightbox.isOpen()) return false
    const before = nav.currentChron()
