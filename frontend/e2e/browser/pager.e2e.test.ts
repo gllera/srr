@@ -159,6 +159,18 @@ describe("browser: reader swipe pager", () => {
          expect(commitPx).toBeGreaterThan(96) // 80px must stay short of it
          expect(commitPx).toBeLessThan(240) // 300px must stay well past it
 
+         // The surface's HEIGHT is a gesture concern too: gestures.ts engages
+         // only on a touch that STARTS inside it, so an <article> sized to its
+         // content would leave a short article a dead band underneath. Asserted
+         // as the COMPUTED min-height rather than the measured box, which every
+         // article in this fixture clears on its own (they each carry a 300-word
+         // <pre>) and which would therefore pass with the rule deleted.
+         const minH = await p.evaluate(() => {
+            const v = getComputedStyle(document.querySelector(".srr-reader")!).minHeight
+            return { px: parseFloat(v), vh: window.innerHeight }
+         })
+         expect(minH.px).toBeGreaterThan(minH.vh / 2)
+
          // ── dead edge: at the newest article, a leftward (next) drag resists ──
          // Deliberately the FAST drag: it lifts as a flick, the one input that
          // commits below the distance bar — and must still not, because engage()

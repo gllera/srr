@@ -2088,6 +2088,23 @@ body:not(.srr-view-list) .srr-open-reader {
       animation: none;
    }
 }
+/* The pager's drag surface IS this element: gestures.ts only engages on a touch
+   that STARTS inside the registered surface (that containment test is also what
+   makes the list, the picker and the lightbox inert), so an <article> sized to
+   its content leaves a dead band under a SHORT article where a swipe does
+   nothing. The blind 50px swipe the pager replaced had no such hole — it read
+   any horizontal drag on the document — so without this the feature would be a
+   narrowing on exactly the articles that fit on one screen.
+   The subtraction is the page's own vertical chrome, so a short article still
+   doesn't grow the document: html's padding (top max(1.5rem, safe-area) +
+   bottom 1rem) plus .srr-container's 4rem bottom pad, which already reserves
+   for the fixed toolbar. Erring SHORT is the safe direction (html forces
+   overflow-y: scroll, so the gutter is there regardless), which is why the
+   safe-area term is subtracted rather than ignored. No background here, so a
+   taller box is invisible — it only extends what the thumb can grab. */
+.srr-reader {
+   min-height: calc(100dvh - 6.5rem - env(safe-area-inset-top));
+}
 /* Reader swipe pager — the incoming masthead-only preview pane (built lazily
    in JS, like the lightbox; spec 2026-07-27-reader-swipe-pager-design.md).
    Position is driven by inline transforms tracking the finger; these rules are
