@@ -32,7 +32,13 @@ const clickAt = (el: Element, x = 0, y = 0, detail = 1) =>
 function stubSizes(natural: number, shown: number): void {
    Object.defineProperty($img(), "naturalWidth", { value: natural, configurable: true })
    Object.defineProperty($img(), "clientWidth", { value: shown, configurable: true })
-   $img().getBoundingClientRect = () => ({ left: 0, top: 0, width: shown, height: shown }) as DOMRect
+   Object.defineProperty($img(), "clientHeight", { value: shown, configurable: true })
+   const box = () => ({ left: 0, top: 0, width: shown, height: shown }) as DOMRect
+   $img().getBoundingClientRect = box
+   // The pinch math anchors on the STAGE's box: the stage hugs the image and
+   // never carries the transform, so its rect stays the fitted geometry even
+   // while the image is scaled.
+   $stage().getBoundingClientRect = box
 }
 
 describe("image lightbox", () => {
@@ -242,8 +248,10 @@ describe("image lightbox", () => {
          seed(`<img src="http://cdn.test/pic.png">`).click()
          stubSizes(1200, 400) // 3x available
          clickAt($stage(), 100, 300)
-         expect($img().style.transform).toBe("scale(3)")
-         expect($img().style.transformOrigin).toBe("25% 75%")
+         // Tap at 25%/75% of a 400px box, 3x: the pressed point stays put, which
+         // in the shared translate+scale model (center origin — pan and pinch
+         // ride the same coordinates) is t = (center − point) · (k − 1).
+         expect($img().style.transform).toBe("translate(200px, -200px) scale(3)")
          expect($overlay()!.classList.contains("srr-lightbox-zoomed")).toBe(true)
          expect($stage().getAttribute("aria-label")).toBe("shrink image")
 
@@ -258,14 +266,16 @@ describe("image lightbox", () => {
          seed(`<img src="http://cdn.test/pic.png">`).click()
          stubSizes(1200, 400)
          clickAt($stage(), 0, 0, 0) // detail 0 = Enter/Space on the stage button
-         expect($img().style.transformOrigin).toBe("50% 50%")
+         expect($img().style.transform).toBe("translate(0px, 0px) scale(3)")
       })
 
       it("caps the enlargement", () => {
          seed(`<img src="http://cdn.test/pic.png">`).click()
          stubSizes(9000, 300) // 30x asked for
          clickAt($stage(), 0, 0)
-         expect($img().style.transform).toBe("scale(4)")
+         // Corner tap at the 4x cap: the pan clamps exactly at the picture's
+         // edge — 300 · (4 − 1) / 2 = 450 — so no scrim shows through.
+         expect($img().style.transform).toBe("translate(450px, 450px) scale(4)")
       })
 
       it("dismisses instead of zooming when the image is already shown full size", () => {
@@ -284,6 +294,148 @@ describe("image lightbox", () => {
          img.click()
          expect($img().style.transform).toBe("")
          expect($overlay()!.classList.contains("srr-lightbox-zoomed")).toBe(false)
+      })
+   })
+
+   describe("touch gestures (pinch zoom + pan)", () => {
+      type Pt = { clientX: number; clientY: number }
+      // gestures.test.ts's idiom: jsdom has no Touch/TouchEvent constructors,
+      // but the handlers only read `.length` and `clientX`/`clientY` off
+      // `touches`/`changedTouches`, so a plain Event with those defined drives
+      // them exactly as the browser would.
+      function touch(type: string, touches: Pt[], changed: Pt[] = touches): Event {
+         const e = new Event(type, { bubbles: true, cancelable: true })
+         Object.defineProperty(e, "touches", { value: touches, configurable: true })
+         Object.defineProperty(e, "changedTouches", { value: changed, configurable: true })
+         $stage().dispatchEvent(e)
+         return e
+      }
+      const pt = (clientX: number, clientY: number): Pt => ({ clientX, clientY })
+
+      // Open the viewer over a 400px box (stage rect 0,0→400,400) with 3x
+      // natural headroom, unless a case says otherwise.
+      function openAt(natural = 1200, shown = 400): void {
+         seed(`<img src="http://cdn.test/pic.png">`).click()
+         stubSizes(natural, shown)
+      }
+      // A symmetric spread about (200,200): dist 100 → 200, so 2x with the
+      // midpoint (= the stage center) unmoved.
+      function pinchTo2x(): void {
+         touch("touchstart", [pt(150, 200), pt(250, 200)])
+         touch("touchmove", [pt(100, 200), pt(300, 200)])
+         touch("touchend", [], [pt(100, 200), pt(300, 200)])
+      }
+
+      it("a pinch zooms about the finger midpoint and holds after the lift", () => {
+         openAt()
+         touch("touchstart", [pt(150, 200), pt(250, 200)])
+         const move = touch("touchmove", [pt(100, 200), pt(300, 200)])
+         // Ours, not the browser's page zoom — native zoom would scale the
+         // scrim and the ✕ too, and leave the PAGE zoomed after close.
+         expect(move.defaultPrevented).toBe(true)
+         expect($img().style.transform).toBe("translate(0px, 0px) scale(2)")
+         expect($overlay()!.classList.contains("srr-lightbox-zoomed")).toBe(true)
+         touch("touchend", [], [pt(100, 200), pt(300, 200)])
+         expect($img().style.transform).toBe("translate(0px, 0px) scale(2)")
+      })
+
+      it("the image point under the pinch follows the midpoint — zoom and pan in one gesture", () => {
+         openAt()
+         touch("touchstart", [pt(150, 200), pt(250, 200)])
+         // Same 2x spread, but the midpoint drifted 50px right: the picture
+         // follows the fingers instead of zooming about a fixed center.
+         touch("touchmove", [pt(150, 200), pt(350, 200)])
+         expect($img().style.transform).toBe("translate(50px, 0px) scale(2)")
+         touch("touchend", [], [pt(150, 200), pt(350, 200)])
+      })
+
+      it("caps the pinch at 4x and clamps a pan to the picture's edges", () => {
+         openAt()
+         touch("touchstart", [pt(190, 200), pt(210, 200)]) // dist 20
+         touch("touchmove", [pt(0, 200), pt(400, 200)]) // dist 400 → 20x asked
+         expect($img().style.transform).toBe("translate(0px, 0px) scale(4)")
+         touch("touchend", [], [pt(0, 200), pt(400, 200)])
+         // Drag far past the edge: clamped at 400 · (4 − 1) / 2 = 600, so the
+         // scrim never shows through a gap.
+         touch("touchstart", [pt(200, 200)])
+         touch("touchmove", [pt(-800, 200)])
+         expect($img().style.transform).toBe("translate(-600px, 0px) scale(4)")
+         touch("touchend", [], [pt(-800, 200)])
+      })
+
+      it("a one-finger drag pans a zoomed image and owns the touch", () => {
+         openAt()
+         pinchTo2x()
+         touch("touchstart", [pt(200, 200)])
+         const move = touch("touchmove", [pt(150, 180)])
+         // The article behind the scrim must not scroll under the pan.
+         expect(move.defaultPrevented).toBe(true)
+         expect($img().style.transform).toBe("translate(-50px, -20px) scale(2)")
+         touch("touchend", [], [pt(150, 180)])
+      })
+
+      it("a pinch released a hair above fitted snaps back", () => {
+         openAt()
+         touch("touchstart", [pt(150, 200), pt(250, 200)])
+         touch("touchmove", [pt(149.5, 200), pt(250.5, 200)]) // 1.01x — under ZOOM_EPS
+         expect($img().style.transform).toBe("translate(0px, 0px) scale(1.01)")
+         touch("touchend", [], [pt(149.5, 200), pt(250.5, 200)])
+         expect($img().style.transform).toBe("")
+         expect($overlay()!.classList.contains("srr-lightbox-zoomed")).toBe(false)
+      })
+
+      it("a pinch that loses one finger continues as a pan", () => {
+         openAt()
+         touch("touchstart", [pt(150, 200), pt(250, 200)])
+         touch("touchmove", [pt(100, 200), pt(300, 200)]) // 2x
+         touch("touchend", [pt(300, 200)], [pt(100, 200)]) // left finger lifted
+         touch("touchmove", [pt(250, 180)])
+         expect($img().style.transform).toBe("translate(-50px, -20px) scale(2)")
+         touch("touchend", [], [pt(250, 180)])
+      })
+
+      it("the drag's finger-lift click is swallowed — a pan is not a tap", () => {
+         openAt()
+         pinchTo2x()
+         touch("touchstart", [pt(200, 200)])
+         touch("touchmove", [pt(150, 180)])
+         touch("touchend", [], [pt(150, 180)])
+         clickAt($stage(), 150, 180) // the click the lift synthesizes
+         expect(lightbox.isOpen()).toBe(true)
+         expect($img().style.transform).toBe("translate(-50px, -20px) scale(2)") // not un-zoomed
+         clickAt($stage(), 200, 200) // a clean tap afterwards still toggles
+         expect($img().style.transform).toBe("")
+      })
+
+      it("a drag at fitted size still owns the touch but leaves tap semantics alone", () => {
+         openAt()
+         touch("touchstart", [pt(200, 200)])
+         const move = touch("touchmove", [pt(200, 260)])
+         expect(move.defaultPrevented).toBe(true) // no scroll-behind through the scrim
+         expect($img().style.transform).toBe("") // nothing to pan at 1x
+         touch("touchend", [], [pt(200, 260)])
+         clickAt($stage(), 200, 200) // the drag's own click is swallowed…
+         expect(lightbox.isOpen()).toBe(true)
+         expect($img().style.transform).toBe("")
+         touch("touchstart", [pt(200, 200)])
+         touch("touchend", [], [pt(200, 200)])
+         clickAt($stage(), 200, 200) // …a clean tap still zooms
+         expect($img().style.transform).toBe("translate(0px, 0px) scale(3)")
+      })
+
+      it("touches inside the viewer never reach the document's gesture machine", () => {
+         const seen = vi.fn()
+         const types = ["touchstart", "touchmove", "touchend"]
+         for (const t of types) document.addEventListener(t, seen)
+         try {
+            openAt()
+            touch("touchstart", [pt(150, 200), pt(250, 200)])
+            touch("touchmove", [pt(100, 200), pt(300, 200)])
+            touch("touchend", [], [pt(100, 200), pt(300, 200)])
+            expect(seen).not.toHaveBeenCalled()
+         } finally {
+            for (const t of types) document.removeEventListener(t, seen)
+         }
       })
    })
 })

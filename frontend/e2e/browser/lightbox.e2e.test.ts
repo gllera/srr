@@ -151,7 +151,9 @@ describe("browser: content image lightbox", () => {
                flagged: document.querySelector(".srr-lightbox")!.classList.contains("srr-lightbox-zoomed"),
             }
          })
-         expect(zoomed.transform).toMatch(/^scale\(/)
+         // translate + scale since the pinch/pan work: tap zoom, pinch and pan
+         // all share one center-origin translate+scale model.
+         expect(zoomed.transform).toMatch(/scale\(/)
          expect(zoomed.flagged).toBe(true)
          // Still open — a zoom toggle is not a dismissal.
          expect(await $viewerOpen(page)).toBe(true)

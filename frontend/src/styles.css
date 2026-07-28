@@ -3353,6 +3353,13 @@ html:has(body.srr-view-list) {
       the screen edge (or a phone's rounded corners / notch). */
    padding: 3rem 1rem 1rem;
    background: var(--scrim);
+   /* The viewer implements pinch-zoom and pan itself (lightbox.ts): the
+      browser's native page zoom would scale the scrim and the ✕ along with the
+      picture and leave the page zoomed after close, and a one-finger drag must
+      pan the image, never scroll the reader behind the scrim. Declarative half
+      of the claim — the JS preventDefault is the brace (the scrubber rail's
+      precedent above). */
+   touch-action: none;
    &.srr-open {
       display: flex;
    }
