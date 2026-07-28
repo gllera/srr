@@ -55,14 +55,6 @@ const PAST_SETTLE_MS = 400
 // The settle is closed by a timer a hair past the transition, not transitionend
 // (jsdom never fires it) — so waiting for the surface to go means waiting that out.
 const settle = () => new Promise((r) => setTimeout(r, PAST_SETTLE_MS))
-// Drain the microtask queue WITHOUT letting a macrotask run. `flush`/`settle`
-// both yield to the timer queue, which is exactly what an atomicity assertion
-// must not do: work deferred by a setTimeout(…, 0) would have happened by then
-// and the test would pass on code that blinks.
-const microtasks = async () => {
-   for (let i = 0; i < 8; i++) await Promise.resolve()
-}
-
 beforeEach(async () => {
    vi.useRealTimers()
    vi.clearAllMocks()
@@ -280,6 +272,12 @@ describe("prev direction (the mirrored branches)", () => {
       expect(page()!.style.transform).toBe("translateX(0)")
       release(true)
       await flush()
+      // The step resolved INSIDE the settle — the warm-neighbour norm — so the
+      // cover stays on while the slide finishes. Tearing down here is the sudden
+      // swap at the lift that the settle exists to remove.
+      expect(page()).not.toBeNull()
+      expect(article().style.transform).toBe("translateX(100%)")
+      await settle()
       expect(article().style.transform).toBe("")
       expect(page()).toBeNull()
    })
@@ -302,7 +300,7 @@ describe("commit", () => {
       spec.move(-300)
       spec.end(-300, true, -0.4)
       expect(commit).toHaveBeenCalledWith("next")
-      await flush()
+      await settle()
       expect(article().style.transform).toBe("")
       expect(page()).toBeNull()
    })
@@ -424,20 +422,79 @@ describe("commit handoff", () => {
       expect(page()).toBeNull()
    })
 
-   it("removes the preview and clears the article transform together", async () => {
-      let release!: (v: boolean) => void
-      commit.mockReturnValueOnce(new Promise((r) => (release = r)))
+   it("holds the cover until the slide lands when the step resolves first", async () => {
+      vi.useFakeTimers()
+      // The common case: the preview fill already warmed the article and nav's
+      // probes are cached, so the guarded step resolves in a handful of
+      // microtasks — far inside the settle. 200px at 0.4px/ms clamps to the
+      // 260ms ceiling, so the teardown is due at 310ms.
       spec.engage("next")
-      await flush()
+      await vi.advanceTimersByTimeAsync(0)
+      spec.move(-200)
       spec.end(-200, true, -0.4)
-      await flush()
-      release(true)
-      // Microtasks ONLY. rest() runs in the continuation of the awaited step, so
-      // BOTH halves of the handoff have to be observable before the next
-      // macrotask gets a turn. Deferring the teardown by even one task leaves a
-      // frame with the transform cleared and the cover still on — the blink this
-      // test exists to forbid — and a settle()-style wait would hide it.
-      await microtasks()
+      await vi.advanceTimersByTimeAsync(0)
+      // The step is done; the slide is not. Tearing down NOW is the blink this
+      // test exists to forbid: the page jumps from wherever the finger left it
+      // straight to centre, a sudden swap right at the lift.
+      expect(page()).not.toBeNull()
+      expect(page()!.classList.contains("srr-pager-show")).toBe(true)
+      expect(article().style.transform).toBe("translateX(-100%)")
+      await vi.advanceTimersByTimeAsync(309)
+      expect(page()).not.toBeNull()
+      await vi.advanceTimersByTimeAsync(2)
+      expect(article().style.transform).toBe("")
+      expect(page()).toBeNull()
+   })
+
+   it("removes the preview and clears the article transform together", async () => {
+      vi.useFakeTimers()
+      spec.engage("next")
+      await vi.advanceTimersByTimeAsync(0)
+      spec.move(-200)
+      spec.end(-200, true, -0.4) // 260ms settle → teardown due at 310ms
+      // Probe due at the teardown's own instant but REGISTERED after it:
+      // same-time timers fire in registration order, so this runs immediately
+      // after rest()'s task — and BEFORE any task a split-teardown mutant would
+      // have deferred half the work to. Deferring the page removal by even one
+      // task leaves a frame with the transform cleared and the cover still on —
+      // the blink this probe exists to forbid — and a settle()-style wait after
+      // the fact would hide it.
+      let snap: { transform: string; page: boolean } | null = null
+      setTimeout(() => (snap = { transform: article().style.transform, page: page() !== null }), 310)
+      await vi.advanceTimersByTimeAsync(310)
+      expect(snap).toEqual({ transform: "", page: false })
+   })
+
+   it("a drag arriving during the settle hold interrupts it and engages fresh", async () => {
+      vi.useFakeTimers()
+      spec.engage("next")
+      await vi.advanceTimersByTimeAsync(0)
+      spec.move(-200)
+      spec.end(-200, true, -0.4)
+      await vi.advanceTimersByTimeAsync(0) // step resolved; hold running
+      // The article underneath is already final — only the cover's animation
+      // remains — so a new drag belongs to the user: the hold finishes the swap
+      // instantly (rest, synchronously, BEFORE the new drag builds its page) and
+      // the drag engages rather than being skip-locked for the hold's tail.
+      expect(spec.engage("next")).toBe("page")
+      expect(article().style.transform).toBe("")
+      spec.move(-40)
+      expect(article().style.transform).toBe("translateX(-40px)")
+      // The old hold's timer must not fire into the new gesture's tracking.
+      await vi.advanceTimersByTimeAsync(PAST_SETTLE_MS)
+      expect(article().style.transform).toBe("translateX(-40px)")
+      expect(page()!.classList.contains("srr-pager-show")).toBe(true)
+   })
+
+   it("reduced motion tears down with the step — there is no settle to wait out", async () => {
+      vi.useFakeTimers()
+      const mm = vi.fn(() => ({ matches: true }) as MediaQueryList)
+      Object.defineProperty(window, "matchMedia", { value: mm, configurable: true })
+      spec.engage("next")
+      await vi.advanceTimersByTimeAsync(0)
+      spec.move(-200)
+      spec.end(-200, true, -0.4)
+      await vi.advanceTimersByTimeAsync(0)
       expect(article().style.transform).toBe("")
       expect(page()).toBeNull()
    })

@@ -66,6 +66,10 @@ let committing = false
 let fillTok = 0
 let settleTimer: ReturnType<typeof setTimeout> | undefined
 let commitTimer: ReturnType<typeof setTimeout> | undefined
+// A successful commit past its step but still sliding — the HOLD (see
+// commitStep). Non-null exactly while it runs; calling it finishes the swap
+// (rest) synchronously and releases the awaiting commitStep.
+let holdRest: (() => void) | null = null
 // The finger's speed at the lift (px/ms, signed), handed over by gestures.ts.
 // Recorded here rather than passed down because the settle it feeds is not the
 // call that receives it: the release is one act, the animation that carries it
@@ -87,7 +91,9 @@ export function setup(deps: PagerDeps): void {
    // case). Any page built against the OLD one is orphaned chrome — and this one
    // is opaque and full-viewport, so leaving it would sit over the reader and
    // make the app look dead. Every other exit path tears it down too; this is
-   // the one that has no gesture to reach it.
+   // the one that has no gesture to reach it. A live settle hold is released
+   // first, so its timer can't fire a stale rest() into the new registration.
+   holdRest?.()
    teardownPage()
    // `cancel` is settleBack unguarded, unlike engage/move: it leans on gestures
    // calling it only for an ENGAGED drag, never a skipped one.
@@ -191,6 +197,12 @@ function skeleton(): DocumentFragment {
 
 function engage(s: PagerSide): "page" | "resist" | "skip" {
    if (committing) return "skip"
+   // A commit past its step but still in its settle HOLD: the article
+   // underneath is already final, only the cover's animation remains, so a new
+   // drag belongs to the user — finish the swap right now (rest, synchronously,
+   // so the teardown lands BEFORE this gesture builds its own page below) and
+   // engage fresh instead of skip-locking for the hold's tail.
+   holdRest?.()
    // A settle armed by the PREVIOUS gesture must not fire into this one: its
    // rest() would clear the transform this drag is about to write (a one-frame
    // flash back to origin mid-drag) or, worse, land during a commit's slide-out
@@ -319,7 +331,8 @@ async function commitStep(s: PagerSide): Promise<void> {
    // magnitude, which is also the right answer for a drag that ran past the
    // surface's own width.)
    const dur = settleDuration(el.article.offsetWidth - Math.abs(lastDx), releaseVx)
-   if (!reducedMotion()) {
+   const reduced = reducedMotion()
+   if (!reduced) {
       el.article.style.transition = `transform ${dur}ms ${SETTLE_EASE}`
       box.style.transition = `transform ${dur}ms ${SETTLE_EASE}`
    }
@@ -332,6 +345,12 @@ async function commitStep(s: PagerSide): Promise<void> {
    // strengthened, not replaced: while it waits the surface is COVERED, not bare.
    el.article.style.transform = s === "prev" ? "translateX(100%)" : "translateX(-100%)"
    box.style.transform = "translateX(0)"
+   // The slide's own completion, armed WITH the animation so the deadline is the
+   // animation's end (arming it on the step's resolution would re-start the
+   // clock and overhold the cover behind a slow step). A pure timer with no side
+   // effects: the success branch below is the only reader, so on the snap-back
+   // paths it resolves into nothing.
+   const slid = reduced ? null : new Promise<void>((r) => setTimeout(r, dur + SETTLE_CLOSE_PAD_MS))
    try {
       // Whichever settles first wins. The watchdog is not a nicety: while we
       // wait, `el.article` is parked fully off-screen, and rest()/settleBack()
@@ -356,8 +375,44 @@ async function commitStep(s: PagerSide): Promise<void> {
       // whenever the step finally lands, its render would consume "slide",
       // suppress the fade, and swap with NO transition at all. Handing the flag
       // back makes that late arrival fade in like any keyboard step.
-      if (ok === true) rest()
-      else {
+      //
+      // A successful step does NOT rest() at once: it routinely resolves well
+      // INSIDE the settle — the preview fill already warmed the article and
+      // nav's neighbor probes are cached — and tearing down at that moment cuts
+      // the animation short, blinking the page from wherever the finger left it
+      // straight to centre: a sudden swap right at the lift, the very thing the
+      // settle exists to remove. So the teardown waits for whichever of the two
+      // finishes LAST — the step keeps rendering underneath the covering page
+      // meanwhile, which is what the cover is FOR. The step-in-flight skip-lock
+      // is released first: during the hold only the animation remains, so a new
+      // drag interrupts it (engage calls holdRest, which rests synchronously
+      // and resolves this wait) rather than meeting a dead surface. Under
+      // reduced motion nothing is sliding, so nothing waits.
+      if (ok === true) {
+         clearTimeout(commitTimer)
+         committing = false
+         if (!slid) rest()
+         else
+            await new Promise<void>((resolve) => {
+               // rest() runs INSIDE finish — exactly once, synchronously with
+               // whichever caller fires first — because the interrupt case must
+               // tear the old page down BEFORE the new gesture builds its own,
+               // and a second rest() from this continuation would clobber that
+               // new drag's freshly written transforms. The deadline half only
+               // attaches to `slid` HERE, after the step succeeded: attaching it
+               // any earlier would let the timer rest() while the step was still
+               // in flight, baring the parked article the cover exists to hide.
+               const finish = () => {
+                  holdRest = null
+                  rest()
+                  resolve()
+               }
+               holdRest = finish
+               void slid.then(() => {
+                  if (holdRest === finish) finish()
+               })
+            })
+      } else {
          if (ok === STALLED) d.abandon()
          settleBack()
       }
