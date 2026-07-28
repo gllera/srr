@@ -3274,12 +3274,11 @@ html:has(body.srr-view-list) {
       pin-progress offsets), and the clock dropping to its own line under the
       keys — the first cut of this layout — read as wrapping too and went
       with it (user call, 2026-07-28). What a phone bar shows is the episode
-      identity, the keys, and a hairline of progress; everything else is one
+      identity, the seek rail under it, and the keys; everything else is one
       title-tap away in the article.
       So: the keys hold one nowrap row on a 2rem × 2.2rem target (secondary
       transport keys inside a bar whose primary action is the accent toggle —
-      shrinking them is what pays for the title), the CLOCK hides, and the
-      seek rail becomes the 2px read-only hairline below.
+      shrinking them is what pays for the title), and the CLOCK hides.
       The transport track is stated OUTRIGHT (10.5rem — five 2rem buttons plus
       slack) rather than left `auto`, so the column can never quietly grow to
       its max-content width at the title's expense. */
@@ -3314,26 +3313,11 @@ html:has(body.srr-view-list) {
    .srr-player[data-kind="video"] .srr-player-media {
       width: 0;
    }
-   /* The seek rail as a HAIRLINE — the mini-player idiom. Crushed under
-      200px the tappable rail read as broken, and the clock is gone, so this
-      2px strip across the bar's top edge is the phone's whole progress
-      display: read-only to the finger (pointer-events, and at 2px a scrub
-      would be a lottery anyway — ±15 and the article's own scrubber seek),
-      but still the real slider to the keyboard, and player.ts keeps writing
-      the same fill width either way. Absolute against the bar (fixed, so it
-      is the containing block), out of the body column's flow — which is what
-      actually frees the rail's row for the two-line title. background none:
-      the un-played remainder shows nothing, the accent fill IS the display. */
-   .srr-player-seek {
-      position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      height: 2px;
-      padding: 0;
-      background: none;
-      pointer-events: none;
-   }
+   /* The seek rail is deliberately NOT restyled here: it keeps desktop's
+      tappable rail under the title, and with the clock gone it is the
+      phone's one progress display. (A 2px read-only top-edge hairline was
+      built and rejected — user call, 2026-07-28: keep the progress bar as
+      before.) */
    /* nowrap is the structural half of "nothing wraps": with the clock hidden
       the keys are the column's only content, and a font or count that
       overgrows the track must overflow invisibly rather than mint the second

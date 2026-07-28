@@ -474,18 +474,17 @@ describe("browser: mini-player relocation keeps real audio playing", () => {
 
          // The phone declutter: NOTHING wraps in the controls column (user
          // call, 2026-07-28) — the clock hides rather than dropping to a
-         // second line, the seek rail becomes the mini-player idiom's 2px
-         // read-only hairline across the bar's edge (progress feedback at
-         // zero layout cost), and a video's miniature collapses to the same
-         // zero-width box audio already rides — the TITLE is the bar's
-         // identity, and the 64px thumbnail plus its gap was exactly the
-         // space it was missing. Width, not display, for the miniature: the
-         // element must stay rendered for playback to survive, the same
-         // argument the base .srr-player-media rule states.
+         // second line, while the seek rail stays exactly the rail it is on
+         // desktop (user call too, after a 2px top-edge hairline round was
+         // rejected): under the title, tappable, the phone's one progress
+         // display. A video's miniature collapses to the same zero-width box
+         // audio already rides — the TITLE is the bar's identity, and the
+         // 64px thumbnail plus its gap was exactly the space it was missing.
+         // Width, not display, for the miniature: the element must stay
+         // rendered for playback to survive, the same argument the base
+         // .srr-player-media rule states.
          expect(narrow.time, "the clock must not wrap under the keys on the phone").toBe(false)
-         expect(narrow.seekH, "the phone hairline must still paint").toBeGreaterThan(0)
-         expect(narrow.seekH, "the phone seek is a hairline, not the rail").toBeLessThanOrEqual(3)
-         expect(narrow.seekW, "the hairline spans the whole bar").toBeGreaterThanOrEqual(350)
+         expect(narrow.seekH, "the phone keeps the real seek rail").toBeGreaterThanOrEqual(4)
          const mediaWidth = await page.evaluate(() => {
             const bar = document.querySelector(".srr-player") as HTMLElement
             bar.dataset.kind = "video"
