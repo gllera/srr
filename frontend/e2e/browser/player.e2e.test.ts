@@ -437,6 +437,7 @@ describe("browser: mini-player relocation keeps real audio playing", () => {
                   rows: new Set(keys.map((b) => Math.round(b.getBoundingClientRect().top))).size,
                   next: getComputedStyle(bar.querySelector(".srr-player-next")!).display !== "none",
                   queue: getComputedStyle(bar.querySelector(".srr-player-queue")!).display !== "none",
+                  seek: getComputedStyle(bar.querySelector(".srr-player-seek")!).display !== "none",
                }
             })
 
@@ -446,6 +447,7 @@ describe("browser: mini-player relocation keeps real audio playing", () => {
          expect(wide.barShown).toBe(true)
          expect(wide.next).toBe(true)
          expect(wide.queue).toBe(true)
+         expect(wide.seek, "the desktop bar keeps its seek rail").toBe(true)
          expect(wide.rows, "desktop transport wrapped").toBe(1)
 
          // Phone: the ≤500px layout trades » away (the panel's per-row play
@@ -458,6 +460,21 @@ describe("browser: mini-player relocation keeps real audio playing", () => {
          expect(narrow.rows, "phone transport wrapped onto a second row").toBe(1)
          // ~4rem plus the hairline; anything near 90px is the wrapped bar.
          expect(narrow.barHeight, "the bar outgrew the ~4rem the lane offsets assume").toBeLessThanOrEqual(72)
+
+         // The phone declutter: the seek rail hides (±15, the clock and the
+         // full player one tap away cover it) and a video's miniature
+         // collapses to the same zero-width box audio already rides — the
+         // TITLE is the bar's identity, and the 64px thumbnail plus its gap
+         // was exactly the space it was missing. width, not display: the
+         // element must stay rendered for playback to survive, the same
+         // argument the base .srr-player-media rule states.
+         expect(narrow.seek, "the seek rail must hide on the phone").toBe(false)
+         const mediaWidth = await page.evaluate(() => {
+            const bar = document.querySelector(".srr-player") as HTMLElement
+            bar.dataset.kind = "video"
+            return (bar.querySelector(".srr-player-media") as HTMLElement).offsetWidth
+         })
+         expect(mediaWidth, "the video miniature must collapse on the phone").toBe(0)
       } finally {
          await close()
       }

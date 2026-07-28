@@ -3308,6 +3308,22 @@ html:has(body.srr-view-list) {
    .srr-player-controls .srr-player-next {
       display: none;
    }
+   /* The phone declutter, same argument continued: the TITLE is the bar's
+      identity, and the two things worth trading for it are the video
+      miniature (64px of cover-crop identifies nothing — the real frame is one
+      title-tap away, where rehome puts the element back full-width) and the
+      seek rail (crushed under 200px it reads as broken; ±15, the clock and
+      the article's own scrubber cover seeking). The miniature collapses by
+      WIDTH into the same zero-width box audio already rides — never
+      display:none, the element must stay rendered for playback to survive
+      (the base .srr-player-media rule's argument) — which hands the title the
+      thumbnail plus its grid gap back. */
+   .srr-player[data-kind="video"] .srr-player-media {
+      width: 0;
+   }
+   .srr-player-seek {
+      display: none;
+   }
    .srr-player-controls {
       flex-wrap: wrap;
       justify-content: flex-end;
