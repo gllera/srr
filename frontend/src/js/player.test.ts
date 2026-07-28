@@ -33,7 +33,7 @@ const SKELETON = `
 
 type Player = typeof import("./player")
 let player: Player
-const deps = { openArticle: vi.fn(), rememberPosition: vi.fn() }
+const deps = { openArticle: vi.fn(), rememberPosition: vi.fn(), readPosition: vi.fn() }
 
 const q = <T extends Element>(sel: string) => document.querySelector(sel) as T
 const bar = () => q<HTMLElement>(".srr-player")
@@ -74,10 +74,12 @@ beforeEach(async () => {
    localStorage.clear()
    HTMLMediaElement.prototype.play = vi.fn().mockResolvedValue(undefined)
    HTMLMediaElement.prototype.pause = vi.fn()
+   HTMLMediaElement.prototype.load = vi.fn()
    vi.resetModules()
    player = await import("./player")
    deps.openArticle.mockClear()
    deps.rememberPosition.mockClear()
+   deps.readPosition.mockReset() // default: no remembered position
    player.setup(deps)
    player.noteMounted(MOUNTED)
 })
@@ -293,9 +295,11 @@ describe("transport", () => {
       expect(localStorage.getItem("srr-player")).toBeNull()
    })
 
-   it("an unplayable episode dismisses quietly (old articles outlive their media hosts)", () => {
+   it("an unplayable episode dismisses quietly after its one retry (old articles outlive their media hosts)", () => {
       const [m] = putAudio()
       claim(m)
+      m.dispatchEvent(new Event("error"))
+      expect(player.isActive()).toBe(true) // first error: retrying, not dead yet
       m.dispatchEvent(new Event("error"))
       expect(player.isActive()).toBe(false)
       expect(bar().hidden).toBe(true)
@@ -616,12 +620,14 @@ describe("playlist", () => {
       expect(queueBtn().hidden).toBe(true)
    })
 
-   it("an erroring episode skips to the next queued entry instead of dismissing", () => {
+   it("an erroring episode skips to the next queued entry once its retry is spent", () => {
       const [a] = putAudio(2)
       player.injectQueueChips()
       chips()[1].click()
       claim(a)
-      a.dispatchEvent(new Event("error"))
+      a.dispatchEvent(new Event("error")) // first: retry in place, nothing skipped
+      expect(queueBtn().hidden).toBe(false)
+      a.dispatchEvent(new Event("error")) // second: give up, advance
       expect(player.isActive()).toBe(true)
       expect(queueBtn().hidden).toBe(true)
    })
@@ -812,6 +818,323 @@ describe("playlist", () => {
       expect(queueBtn().textContent).toBe("≡ 2")
       expect(chips()[1].getAttribute("aria-pressed")).toBe("true")
       expect(a.currentTime).toBe(0)
+   })
+})
+
+describe("queue panel — reorder and swipe", () => {
+   const queueBtn = () => q<HTMLButtonElement>(".srr-player-queue")
+   const panel = () => q<HTMLElement>(".srr-player-panel")
+   const rows = () => [...panel().querySelectorAll<HTMLElement>(".srr-player-panel-row")]
+   const names = () => rows().map((r) => r.querySelector(".srr-player-row-name")?.textContent)
+   const up = (r: Element) => r.querySelector(".srr-player-row-up") as HTMLButtonElement
+   const down = (r: Element) => r.querySelector(".srr-player-row-down") as HTMLButtonElement
+
+   // The panel's rows sit inside .srr-player, which gestures.ts declines
+   // outright (the scrubber guard) — so the swipe here is the panel's own, and
+   // like gestures' machine it only reads {clientX,clientY} off touches.
+   const touch = (t: EventTarget, type: string, x: number, y: number) => {
+      const e = new Event(type, { bubbles: true, cancelable: true })
+      const pt = [{ clientX: x, clientY: y }]
+      Object.defineProperty(e, "touches", { value: type === "touchend" ? [] : pt, configurable: true })
+      Object.defineProperty(e, "changedTouches", { value: pt, configurable: true })
+      t.dispatchEvent(e)
+      return e
+   }
+
+   // Three distinct articles' episodes queued: titles B, C, D in queue order.
+   const queueThree = () => {
+      for (const [chron, title] of [
+         [43, "B"],
+         [44, "C"],
+         [45, "D"],
+      ] as const) {
+         player.noteMounted({ ...MOUNTED, chron, title })
+         putAudio(1)
+         player.injectQueueChips()
+         content().querySelector<HTMLButtonElement>(".srr-queue-chip")?.click()
+      }
+   }
+
+   it("▲/▼ reorder the queue, persist the order, and re-label the ready head", () => {
+      queueThree()
+      expect(q(".srr-player-name").textContent).toBe("B") // READY head
+      queueBtn().click()
+      expect(names()).toEqual(["B", "C", "D"])
+      // The dead directions are disabled, the live ones are not.
+      expect(up(rows()[0]).disabled).toBe(true)
+      expect(down(rows()[2]).disabled).toBe(true)
+      expect(up(rows()[1]).disabled).toBe(false)
+
+      up(rows()[1]).click() // C to the head
+      expect(names()).toEqual(["C", "B", "D"])
+      expect(q(".srr-player-name").textContent).toBe("C") // the READY bar follows
+      const saved = JSON.parse(localStorage.getItem("srr-player") as string)
+      expect(saved.queue.map((e: { title: string }) => e.title)).toEqual(["C", "B", "D"])
+      // The panel re-rendered under the press; the keyboard stays on the moved row.
+      expect(rows()[0].contains(document.activeElement)).toBe(true)
+
+      down(rows()[0]).click() // and back
+      expect(names()).toEqual(["B", "C", "D"])
+   })
+
+   it("a horizontal swipe past the trigger removes the row", () => {
+      queueThree()
+      queueBtn().click()
+      const row = rows()[0]
+      touch(row, "touchstart", 200, 100)
+      touch(row, "touchmove", 160, 102) // engaged: horizontal past the slop
+      touch(row, "touchmove", 120, 103) // past the 64px trigger
+      touch(row, "touchend", 120, 103)
+      expect(names()).toEqual(["C", "D"])
+      const saved = JSON.parse(localStorage.getItem("srr-player") as string)
+      expect(saved.queue).toHaveLength(2)
+   })
+
+   it("a short drag snaps back, and its finger-lift click does not play the row", () => {
+      queueThree()
+      queueBtn().click()
+      const row = rows()[0]
+      touch(row, "touchstart", 200, 100)
+      touch(row, "touchmove", 170, 101) // engaged but under the trigger
+      touch(row, "touchend", 170, 101)
+      expect(names()).toEqual(["B", "C", "D"]) // nothing removed
+      const play = row.querySelector(".srr-player-row-play") as HTMLButtonElement
+      play.click() // the lift's synthesized click — a drag is not a tap
+      expect(player.isActive()).toBe(false)
+      play.click() // a real tap right after still plays
+      expect(player.isActive()).toBe(true)
+   })
+
+   it("a vertical drag stays a scroll — the queue is untouched, taps unharmed", () => {
+      queueThree()
+      queueBtn().click()
+      const row = rows()[0]
+      touch(row, "touchstart", 200, 100)
+      touch(row, "touchmove", 202, 160) // vertical-dominant: vetoed for good
+      touch(row, "touchmove", 120, 165) // late horizontal must not re-engage
+      touch(row, "touchend", 120, 165)
+      expect(names()).toEqual(["B", "C", "D"])
+      const play = row.querySelector(".srr-player-row-play") as HTMLButtonElement
+      play.click() // no guard armed — a scroll's tail is not a swipe
+      expect(player.isActive()).toBe(true)
+   })
+})
+
+// A 2-second network blip mid-commute must not end a 90-minute episode: the
+// first error keeps the claim and retries the SAME element after a beat; only
+// the second error takes the old dismissal / queue-skip path.
+describe("error retry", () => {
+   const toggle = () => q<HTMLButtonElement>(".srr-player-toggle")
+   const busy = () => toggle().classList.contains("srr-player-buffering")
+
+   it("a first error retries in place: reload after a beat, reseek, resume", () => {
+      vi.useFakeTimers()
+      try {
+         const [m] = putAudio()
+         claim(m)
+         m.currentTime = 500
+         m.classList.add("srr-broken") // what collapseBrokenMedia did on the same error
+         m.dispatchEvent(new Event("error"))
+         // Still claimed, spinner up — the blip gets a moment to pass first (an
+         // immediate reload would land inside the same outage).
+         expect(player.isActive()).toBe(true)
+         expect(busy()).toBe(true)
+         expect(HTMLMediaElement.prototype.load).not.toHaveBeenCalled()
+         vi.advanceTimersByTime(2000)
+         expect(HTMLMediaElement.prototype.load).toHaveBeenCalledTimes(1)
+         // load() resets the element; the position comes back at metadata and
+         // playback resumes because it WAS playing when the error hit.
+         m.currentTime = 0
+         withDuration(m, 3600)
+         m.dispatchEvent(new Event("loadedmetadata"))
+         expect(m.currentTime).toBe(500)
+         expect(HTMLMediaElement.prototype.play).toHaveBeenCalled()
+         expect(m.classList.contains("srr-broken")).toBe(false) // un-hidden on success
+      } finally {
+         vi.useRealTimers()
+      }
+   })
+
+   it("an episode PAUSED at the error retries silently and stays paused", () => {
+      vi.useFakeTimers()
+      try {
+         const [m] = putAudio()
+         claim(m)
+         m.currentTime = 500
+         playing(m, false)
+         m.dispatchEvent(new Event("error"))
+         expect(player.isActive()).toBe(true)
+         expect(busy()).toBe(false) // nothing is waiting on data, so no spinner
+         vi.advanceTimersByTime(2000)
+         expect(HTMLMediaElement.prototype.load).toHaveBeenCalledTimes(1)
+         m.currentTime = 0
+         withDuration(m, 3600)
+         m.dispatchEvent(new Event("loadedmetadata"))
+         expect(m.currentTime).toBe(500)
+         expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled()
+      } finally {
+         vi.useRealTimers()
+      }
+   })
+
+   it("a second error during the wait gives up and cancels the pending reload", () => {
+      vi.useFakeTimers()
+      try {
+         const [m] = putAudio()
+         claim(m)
+         m.dispatchEvent(new Event("error"))
+         m.dispatchEvent(new Event("error"))
+         expect(player.isActive()).toBe(false)
+         vi.advanceTimersByTime(5000)
+         expect(HTMLMediaElement.prototype.load).not.toHaveBeenCalled()
+      } finally {
+         vi.useRealTimers()
+      }
+   })
+
+   it("closing during the retry wait cancels the reload", () => {
+      vi.useFakeTimers()
+      try {
+         const [m] = putAudio()
+         claim(m)
+         m.dispatchEvent(new Event("error"))
+         q<HTMLButtonElement>(".srr-player-close").click()
+         vi.advanceTimersByTime(5000)
+         expect(HTMLMediaElement.prototype.load).not.toHaveBeenCalled()
+         expect(player.isActive()).toBe(false)
+      } finally {
+         vi.useRealTimers()
+      }
+   })
+
+   it("a refused resume drops the spinner instead of spinning over a paused bar", async () => {
+      vi.useFakeTimers()
+      const [m] = putAudio()
+      try {
+         HTMLMediaElement.prototype.play = vi.fn().mockRejectedValue(new Error("blocked"))
+         claim(m)
+         m.currentTime = 500
+         m.dispatchEvent(new Event("error"))
+         expect(busy()).toBe(true)
+         vi.advanceTimersByTime(2000)
+         playing(m, false) // load() reset the element — it is no longer playing
+         m.dispatchEvent(new Event("loadedmetadata"))
+      } finally {
+         vi.useRealTimers()
+      }
+      await new Promise((r) => setTimeout(r)) // let the play() rejection settle
+      expect(busy()).toBe(false)
+   })
+})
+
+describe("buffering feedback", () => {
+   const toggle = () => q<HTMLButtonElement>(".srr-player-toggle")
+   const busy = () => toggle().classList.contains("srr-player-buffering")
+
+   it("waiting marks the toggle busy; playing clears it", () => {
+      const [m] = putAudio()
+      claim(m) // playing
+      m.dispatchEvent(new Event("waiting"))
+      expect(busy()).toBe(true)
+      expect(toggle().getAttribute("aria-busy")).toBe("true")
+      m.dispatchEvent(new Event("playing"))
+      expect(busy()).toBe(false)
+      expect(toggle().getAttribute("aria-busy")).toBe("false")
+   })
+
+   it("canplay also clears it — engines differ on which fires first", () => {
+      const [m] = putAudio()
+      claim(m)
+      m.dispatchEvent(new Event("stalled"))
+      expect(busy()).toBe(true)
+      m.dispatchEvent(new Event("canplay"))
+      expect(busy()).toBe(false)
+   })
+
+   it("a stall while PAUSED shows no spinner — a preload hiccup is not a wait", () => {
+      const [m] = putAudio()
+      claim(m)
+      playing(m, false)
+      m.dispatchEvent(new Event("stalled"))
+      expect(busy()).toBe(false)
+   })
+
+   it("pausing mid-stall drops the spinner — nothing is coming that anyone asked for", () => {
+      const [m] = putAudio()
+      claim(m)
+      m.dispatchEvent(new Event("waiting"))
+      expect(busy()).toBe(true)
+      playing(m, false)
+      m.dispatchEvent(new Event("pause"))
+      expect(busy()).toBe(false)
+   })
+
+   it("the spinner never survives into the next episode", () => {
+      const [a, b] = putAudio(2)
+      claim(a)
+      a.dispatchEvent(new Event("waiting"))
+      expect(busy()).toBe(true)
+      claim(b)
+      expect(busy()).toBe(false)
+   })
+})
+
+describe("queue resume — FEB2 positions", () => {
+   const chips = () => [...content().querySelectorAll<HTMLButtonElement>(".srr-queue-chip")]
+
+   // Queue an episode of article 43 while it is mounted, then finish an episode
+   // on article 42 so the auto-advance builds 43's element DETACHED in the bar.
+   const advanceIntoDetached = () => {
+      player.noteMounted({ ...MOUNTED, chron: 43, title: "Episode 13" })
+      putAudio(1)
+      player.injectQueueChips()
+      chips()[0].click()
+      player.noteMounted(MOUNTED)
+      const [m] = putAudio(1)
+      claim(m)
+      m.dispatchEvent(new Event("ended"))
+      return media().querySelector("audio") as HTMLMediaElement
+   }
+
+   it("a detached queue entry resumes from FEB2's remembered position", () => {
+      deps.readPosition.mockImplementation((_mid: string, chron: number) =>
+         chron === 43 ? { time: 300, rate: 1 } : undefined,
+      )
+      const built = advanceIntoDetached()
+      expect(built).toBeTruthy()
+      expect(deps.readPosition).toHaveBeenCalledWith("0", 43, 0)
+      // currentTime is only settable once duration is known (the FEB2 pattern).
+      withDuration(built, 3600)
+      built.dispatchEvent(new Event("loadedmetadata"))
+      expect(built.currentTime).toBe(300)
+   })
+
+   it("a remembered position at the very end starts the entry over instead", () => {
+      // onEnded hands the FINISHED position to FEB2 (time == duration), so a
+      // re-queued finished episode would otherwise re-end instantly and cascade
+      // through the whole queue.
+      deps.readPosition.mockReturnValue({ time: 3599, rate: 1 })
+      const built = advanceIntoDetached()
+      withDuration(built, 3600)
+      built.dispatchEvent(new Event("loadedmetadata"))
+      expect(built.currentTime).toBe(0)
+   })
+
+   it("a live in-place claim never re-seeks — the on-screen element already carries its truth", () => {
+      // The entry's own article is mounted: playEntry claims the element that is
+      // already there (restoreMediaState applied any position at render), so a
+      // remembered value must not yank it.
+      deps.readPosition.mockReturnValue({ time: 300, rate: 1 })
+      const [a, b] = putAudio(2)
+      player.injectQueueChips()
+      const chipsNow = [...content().querySelectorAll<HTMLButtonElement>(".srr-queue-chip")]
+      chipsNow[1].click() // queue b (same article)
+      claim(a)
+      a.dispatchEvent(new Event("ended"))
+      expect(player.isActive()).toBe(true)
+      withDuration(b, 3600)
+      b.dispatchEvent(new Event("loadedmetadata"))
+      expect(b.currentTime).toBe(0)
    })
 })
 

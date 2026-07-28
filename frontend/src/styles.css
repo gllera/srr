@@ -793,6 +793,30 @@ body.srr-playing .srr-pin-progress {
    border-width: 0 0.2rem;
    border-color: currentColor;
 }
+/* Buffering (player.ts sets it with aria-busy): the glyph becomes a spinner
+   ring so a stalled network reads as "working on it", not a frozen bar. AFTER
+   the playing rule on purpose — equal specificity, and a stalled episode is
+   usually mid-playback, so this must win the ::before. */
+.srr-player-toggle.srr-player-buffering::before {
+   width: 0.62rem;
+   height: 0.62rem;
+   margin-left: 0;
+   border: 0.14rem solid currentColor;
+   border-top-color: transparent;
+   border-radius: 50%;
+   animation: srr-player-spin 0.8s linear infinite;
+}
+@keyframes srr-player-spin {
+   to {
+      transform: rotate(360deg);
+   }
+}
+@media (prefers-reduced-motion: reduce) {
+   .srr-player-toggle.srr-player-buffering::before {
+      /* The broken ring alone marks the state; nothing moves on its own. */
+      animation: none;
+   }
+}
 /* Elapsed / duration — metadata, so it stays muted and NOT a tap target; it
    collapses entirely until the element has reported a duration. */
 .srr-player-time {
@@ -859,8 +883,22 @@ body.srr-playing .srr-pin-progress {
    display: flex;
    align-items: stretch;
    border-bottom: 1px solid var(--faint);
+   /* The row's own swipe-to-remove (player.ts attachRowSwipe): vertical pans
+      stay the browser's scroll, horizontal ones reach the handlers; the
+      transition carries the sub-trigger snap-back (the drag itself runs under
+      an inline transition: none). */
+   touch-action: pan-y;
+   transition: transform 0.15s ease;
+   background: var(--bg);
    &:last-child {
       border-bottom: none;
+   }
+}
+@media (prefers-reduced-motion: reduce) {
+   .srr-player-panel-row {
+      /* The drag still tracks the finger (direct manipulation); only the
+         post-lift snap-back stops animating — the pager's settle rule. */
+      transition: none;
    }
 }
 .srr-player-row-play {
@@ -899,6 +937,27 @@ body.srr-playing .srr-pin-progress {
    display: -webkit-box;
    -webkit-line-clamp: 2;
    -webkit-box-orient: vertical;
+}
+/* The ▲/▼ reorder handles: quiet mono arrows between the play area and the ×,
+   disabled (not hidden) at their dead ends so the row keeps one geometry. */
+.srr-player-row-up,
+.srr-player-row-down {
+   flex-shrink: 0;
+   min-width: 1.8rem;
+   border: none;
+   background: none;
+   font-family: var(--font-mono);
+   font-size: 0.78rem;
+   color: var(--muted);
+   cursor: pointer;
+   &:hover:not(:disabled) {
+      color: var(--fg);
+      background: var(--hover);
+   }
+   &:disabled {
+      opacity: 0.2;
+      cursor: default;
+   }
 }
 .srr-player-row-remove {
    flex-shrink: 0;

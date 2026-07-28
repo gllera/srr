@@ -793,6 +793,35 @@ describe("reader media state survives prev/next", () => {
       back[1].dispatchEvent(new Event("loadedmetadata"))
       expect(back[1].currentTime).toBe(99) // and index 1 kept index 1's position
    })
+
+   // The read half of the FEB2 seam: a queued episode played DETACHED (its
+   // article no longer mounted) resumes from the position the harvest stored,
+   // through the readPosition dep app.ts wires into the player.
+   it("a queued episode resumes from the position the harvest remembered", async () => {
+      const proto = HTMLMediaElement.prototype
+      const origPlay = proto.play
+      proto.play = vi.fn().mockResolvedValue(undefined)
+      try {
+         await boot()
+         await showAt(1, PODCAST)
+         // Queue the episode via its chip, leave a listening position, step away.
+         ;(content().querySelector(".srr-queue-chip") as HTMLButtonElement).click()
+         const episode = content().querySelector("audio") as HTMLMediaElement
+         episode.currentTime = 45
+         await showAt(2, "<p>next article</p>") // harvest stores 45 for (chron 1, index 0)
+
+         // Nothing active + a queue = the READY bar; its play button starts the
+         // head detached, and it must pick up where the harvest left off.
+         ;(document.querySelector(".srr-player-toggle") as HTMLButtonElement).click()
+         const built = document.querySelector(".srr-player-media audio") as HTMLMediaElement
+         expect(built).toBeTruthy()
+         Object.defineProperty(built, "duration", { value: 3600, configurable: true })
+         built.dispatchEvent(new Event("loadedmetadata"))
+         expect(built.currentTime).toBe(45)
+      } finally {
+         proto.play = origPlay
+      }
+   })
 })
 
 // RDR7 — content images were inert (no enlargement path at all on desktop). The

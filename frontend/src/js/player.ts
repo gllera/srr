@@ -33,6 +33,7 @@
 import * as data from "./data"
 import { el } from "./els"
 import { srcColorIndex } from "./fmt"
+import { ROW_SWIPE_TRIGGER } from "./gestures"
 import { PLAYER_RATE_KEY, playerStateKey } from "./keys"
 import { URL_DENY } from "./urlish"
 
@@ -43,6 +44,11 @@ export interface PlayerDeps {
    // injected rather than imported). Closing the bar therefore still leaves the
    // article resumable exactly as if you had never opened the player.
    rememberPosition: (mid: string, chron: number, index: number, s: { time: number; rate: number }) => void
+   // The read half of the same store: what FEB2 last saw for that element, so a
+   // half-listened episode played from the QUEUE resumes instead of restarting.
+   // Only the detached playEntry path consults it — a live in-content element
+   // already carries its truth (restoreMediaState applied it at render).
+   readPosition: (mid: string, chron: number, index: number) => { time: number; rate: number } | undefined
 }
 
 let d: PlayerDeps
@@ -65,6 +71,9 @@ let mounted: MountedArticle | null = null
 interface Active extends MountedArticle {
    index: number
    media: HTMLMediaElement
+   // One retry per claim: set by the first `error`, so the second one takes the
+   // dismissal path. Fresh claims build fresh Active objects, which resets it.
+   retried?: boolean
 }
 let active: Active | null = null
 
@@ -97,6 +106,11 @@ const PREV_RESTART_S = 3
 let inView = false
 let observer: IntersectionObserver | null = null
 
+// Whether the active episode is stalled waiting on the network. Between play()
+// and audio actually flowing the bar otherwise looks frozen — the "is it
+// broken?" moment on a slow connection. Rendered as a spinner on the toggle.
+let buffering = false
+
 // The speed ladder the rate button cycles. 1 is first so the cycle returns to
 // normal rather than dead-ending at 2x.
 const RATES = [1, 1.25, 1.5, 2]
@@ -106,6 +120,10 @@ const SKIP_SECONDS = 15
 // hour for a value nobody reads until the next boot.
 const SAVE_INTERVAL_MS = 5000
 let lastSave = 0
+// The beat before an error retry reloads: an immediate reload would land inside
+// the same network blip that caused the error.
+const RETRY_DELAY_MS = 2000
+let retryTimer = 0
 
 // ---------------------------------------------------------------------------
 // Persistence
@@ -316,6 +334,11 @@ function release(): void {
    observer?.unobserve(m)
    active = null
    inView = false
+   buffering = false
+   if (retryTimer) {
+      clearTimeout(retryTimer)
+      retryTimer = 0
+   }
 }
 
 function bindMedia(m: HTMLMediaElement): void {
@@ -325,6 +348,10 @@ function bindMedia(m: HTMLMediaElement): void {
    m.addEventListener("ended", onEnded)
    m.addEventListener("error", onError)
    m.addEventListener("loadedmetadata", syncBar)
+   m.addEventListener("waiting", onBufferStall)
+   m.addEventListener("stalled", onBufferStall)
+   m.addEventListener("playing", onBufferClear)
+   m.addEventListener("canplay", onBufferClear)
 }
 
 function unbindMedia(m: HTMLMediaElement): void {
@@ -334,6 +361,10 @@ function unbindMedia(m: HTMLMediaElement): void {
    m.removeEventListener("ended", onEnded)
    m.removeEventListener("error", onError)
    m.removeEventListener("loadedmetadata", syncBar)
+   m.removeEventListener("waiting", onBufferStall)
+   m.removeEventListener("stalled", onBufferStall)
+   m.removeEventListener("playing", onBufferClear)
+   m.removeEventListener("canplay", onBufferClear)
 }
 
 function onTimeUpdate(): void {
@@ -342,8 +373,25 @@ function onTimeUpdate(): void {
 }
 
 function onPauseOrPlay(): void {
+   // A pause drops any spinner: the wait is over because nobody is waiting.
+   if (active?.media.paused) buffering = false
    save()
    syncMediaSession()
+   syncBar()
+}
+
+// `waiting` = playback stopped for data; `stalled` = the fetch went quiet. Both
+// only matter while something is actually trying to play — a preload hiccup on
+// a paused element must not spin the bar.
+function onBufferStall(): void {
+   if (!active || active.media.paused) return
+   buffering = true
+   syncBar()
+}
+
+function onBufferClear(): void {
+   if (!buffering) return
+   buffering = false
    syncBar()
 }
 
@@ -365,6 +413,46 @@ function onEnded(): void {
 }
 
 function onError(): void {
+   // One retry before giving up: a transient network blip mid-commute must not
+   // end a 90-minute episode. The first error keeps the claim and retries the
+   // SAME element in place — reload after a beat, reseek at metadata, resume if
+   // it was playing. The second error falls through to the dismissal below.
+   if (active && !active.retried) {
+      const a = active
+      const m = a.media
+      a.retried = true
+      const t = m.currentTime
+      const wasPlaying = !m.paused
+      if (wasPlaying) {
+         // The bar reads as "working on it", not frozen — the same spinner a
+         // plain stall shows. A paused element waits silently.
+         buffering = true
+         syncBar()
+      }
+      retryTimer = window.setTimeout(() => {
+         retryTimer = 0
+         if (active !== a) return
+         m.addEventListener(
+            "loadedmetadata",
+            () => {
+               if (active !== a) return
+               if (t > 0) {
+                  try {
+                     m.currentTime = t
+                  } catch {}
+               }
+               // collapseBrokenMedia hid an in-content <video> on the same
+               // error event; a working retry earns the frame back.
+               m.classList.remove("srr-broken")
+               if (wasPlaying) void play()
+               syncBar()
+            },
+            { once: true },
+         )
+         m.load()
+      }, RETRY_DELAY_MS)
+      return
+   }
    // Old articles outlive their media hosts (the same reality collapseBrokenMedia
    // exists for). An unplayable episode is not an app error: dismiss quietly —
    // or, with a queue, skip to the next entry (each attempt consumes one, so a
@@ -465,6 +553,7 @@ function playEntry(entry: QueueEntry, autoplay: boolean): boolean {
       m = document.createElement(entry.kind === "video" ? "video" : "audio")
       m.src = src as string
       m.preload = "metadata"
+      resumeRemembered(m, entry)
       el.playerMedia.replaceChildren(m)
    }
    const rate = readRate()
@@ -484,6 +573,29 @@ function playEntry(entry: QueueEntry, autoplay: boolean): boolean {
    syncBar()
    if (autoplay) void play()
    return true
+}
+
+// A remembered position this close to the end reads as "finished" — start over.
+const RESUME_END_S = 2
+
+// Seek a freshly built (detached) element to where FEB2 last saw this episode,
+// so a half-listened queue entry resumes instead of restarting. Positions at
+// the very end are ignored: onEnded hands FEB2 the finished position (time ==
+// duration), and resuming there would re-end instantly and cascade the queue.
+function resumeRemembered(m: HTMLMediaElement, entry: QueueEntry): void {
+   const pos = d.readPosition(entry.mid, entry.chron, entry.index)
+   if (!pos || !(pos.time > 0)) return
+   const apply = (): void => {
+      const dur = m.duration
+      if (Number.isFinite(dur) && pos.time >= dur - RESUME_END_S) return
+      try {
+         m.currentTime = pos.time
+      } catch {}
+   }
+   // currentTime is only settable once metadata is known (the FEB2 pattern) —
+   // and the end guard needs the duration anyway.
+   if (m.readyState >= 1) apply()
+   else m.addEventListener("loadedmetadata", apply, { once: true })
 }
 
 // Advance to the next playable queue entry. The outgoing active episode (if
@@ -626,7 +738,7 @@ function renderPanel(): void {
    if (!panel || panel.hidden) return
    if (!queue.length) return closePanel()
    panel.replaceChildren(
-      ...queue.map((entry) => {
+      ...queue.map((entry, i) => {
          const row = document.createElement("div")
          row.setAttribute("role", "listitem")
          row.className = "srr-player-panel-row"
@@ -657,9 +769,114 @@ function renderPanel(): void {
             queue = queue.filter((e) => e !== entry)
             afterQueueChange()
          })
-         row.append(play, remove)
+         row.append(play, moveBtn(entry, -1, i === 0), moveBtn(entry, 1, i === queue.length - 1), remove)
+         attachRowSwipe(row, entry)
          return row
       }),
+   )
+}
+
+// A ▲/▼ reorder handle. Disabled at its dead end rather than hidden, so the
+// four-button row keeps one geometry and a tap never lands on the wrong role.
+function moveBtn(entry: QueueEntry, delta: -1 | 1, dead: boolean): HTMLButtonElement {
+   const b = document.createElement("button")
+   b.type = "button"
+   b.className = delta < 0 ? "srr-player-row-up" : "srr-player-row-down"
+   b.textContent = delta < 0 ? "↑" : "↓"
+   b.disabled = dead
+   b.setAttribute("aria-label", `${delta < 0 ? "Move up" : "Move down"} — ${entry.title || "(untitled)"}`)
+   b.addEventListener("click", () => moveQueued(entry, delta))
+   return b
+}
+
+function moveQueued(entry: QueueEntry, delta: -1 | 1): void {
+   const i = queue.indexOf(entry)
+   const j = i + delta
+   if (i < 0 || j < 0 || j >= queue.length) return
+   queue.splice(i, 1)
+   queue.splice(j, 0, entry)
+   afterQueueChange()
+   // The panel just re-rendered under the press: keep the keyboard on the row
+   // that moved — the same-direction handle so repeated presses keep walking,
+   // its opposite when the row just hit a dead end.
+   const row = panel?.querySelectorAll(".srr-player-panel-row")[j]
+   const same = row?.querySelector<HTMLButtonElement>(delta < 0 ? ".srr-player-row-up" : ".srr-player-row-down")
+   if (same && !same.disabled) same.focus()
+   else row?.querySelector<HTMLButtonElement>(delta < 0 ? ".srr-player-row-down" : ".srr-player-row-up")?.focus()
+}
+
+// The panel rows' swipe-to-remove. LOCAL touch handling on purpose, not a
+// gestures.ts registration: the document machine declines any touch starting
+// inside .srr-player (the scrubber guard), so it can never reach these rows —
+// and that is right, a drag here must never read as a reader page turn. The
+// axis lock restates the machine's own three faces at the same slop.
+const PANEL_AXIS_SLOP = 8 // gestures.ts's AXIS_SLOP, restated for the same feel
+function attachRowSwipe(row: HTMLElement, entry: QueueEntry): void {
+   let x0 = 0
+   let y0 = 0
+   let dx = 0
+   let mode: "idle" | "drag" | "veto" = "veto"
+   let swallow = false
+   const settle = (): void => {
+      // Clearing the inline "none" first lets the CSS transition carry the
+      // snap-back instead of teleporting the row home.
+      row.style.transition = ""
+      row.style.transform = ""
+   }
+   row.addEventListener("touchstart", (e) => {
+      swallow = false
+      if (e.touches.length !== 1) {
+         mode = "veto"
+         return settle()
+      }
+      mode = "idle"
+      dx = 0
+      x0 = e.touches[0].clientX
+      y0 = e.touches[0].clientY
+   })
+   row.addEventListener("touchmove", (e) => {
+      if (mode === "veto" || !e.touches.length) return
+      dx = e.touches[0].clientX - x0
+      const dy = e.touches[0].clientY - y0
+      if (mode === "idle") {
+         // Vertical-dominant past the slop is a scroll for the gesture's life.
+         if (Math.abs(dy) > PANEL_AXIS_SLOP && Math.abs(dy) >= Math.abs(dx)) {
+            mode = "veto"
+            return
+         }
+         if (Math.abs(dx) <= PANEL_AXIS_SLOP || Math.abs(dx) <= Math.abs(dy)) return
+         mode = "drag"
+         row.style.transition = "none"
+      }
+      // An engaged swipe owns the finger — the panel must not scroll under it.
+      e.preventDefault()
+      row.style.transform = `translateX(${dx}px)`
+   })
+   row.addEventListener("touchend", () => {
+      if (mode !== "drag") return
+      mode = "veto"
+      // The finger-lift's synthesized click lands on a row button; a drag is
+      // not a tap (list.ts's swipeClickGuard, scoped to this row).
+      swallow = true
+      if (Math.abs(dx) >= ROW_SWIPE_TRIGGER) {
+         queue = queue.filter((e) => e !== entry)
+         return afterQueueChange()
+      }
+      settle()
+   })
+   row.addEventListener("touchcancel", () => {
+      mode = "veto"
+      settle()
+   })
+   row.addEventListener(
+      "click",
+      (e) => {
+         if (!swallow) return
+         swallow = false
+         e.preventDefault()
+         e.stopPropagation()
+      },
+      true,
    )
 }
 
@@ -778,6 +995,9 @@ async function play(): Promise<void> {
       // Autoplay policy refused, or the source is gone. Staying paused IS the
       // correct outcome and is not a fault worth a popup.
    }
+   // A refusal leaves the element paused with nothing on the way — a spinner
+   // over a paused bar would be a lie (the same rule onBufferStall applies).
+   if (active?.media.paused) buffering = false
    syncMediaSession()
    syncBar()
 }
@@ -879,6 +1099,11 @@ function syncBar(): void {
    // Drives the container's bottom padding so the last paragraph clears the bar.
    document.body.classList.toggle("srr-playing", show)
    if (!show) closePanel()
+   // The buffering spinner replaces the toggle glyph; aria-busy is the same
+   // state for assistive tech (the accessible name stays Play/Pause).
+   const stalled = buffering && active !== null
+   el.playerToggle.classList.toggle("srr-player-buffering", stalled)
+   el.playerToggle.setAttribute("aria-busy", String(stalled))
    // The queue chrome lives in both bar states.
    el.playerQueue.hidden = !queue.length
    el.playerNext.hidden = !queue.length

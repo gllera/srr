@@ -226,6 +226,13 @@ export function rememberPosition(mid: string, chron: number, index: number, s: M
    mediaStates.put(key, out)
 }
 
+// The read half of the same seam: player.ts's detached playEntry path asks for
+// the position the harvest (or a release) stored, so a half-listened queued
+// episode resumes instead of restarting. Injected like rememberPosition.
+export function readPosition(mid: string, chron: number, index: number): MediaState | undefined {
+   return mediaStates.get(stateKey(mid, chron))?.[index]
+}
+
 function restoreMediaState(mid: string, chron: number): void {
    const saved = mediaStates.get(stateKey(mid, chron))
    if (!saved) return

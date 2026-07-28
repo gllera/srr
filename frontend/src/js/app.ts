@@ -747,6 +747,7 @@ async function init() {
          })()
       },
       rememberPosition: reader.rememberPosition,
+      readPosition: reader.readPosition,
    })
    menus.setup({
       view: () => view,
