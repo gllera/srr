@@ -727,6 +727,14 @@ body.srr-playing .srr-pin-progress {
    align-items: center;
    gap: 0.15rem;
 }
+/* player.ts drives » and the ≡ N chip with the `hidden` attribute, and the
+   display rule below would silently defeat the UA's [hidden]{display:none}
+   (author origin wins — the same cascade trap .srr-player[hidden] restates
+   above). This restatement is what actually blanks the playlist chrome while
+   the queue is empty; without it both buttons paint on every bar. */
+.srr-player-controls button[hidden] {
+   display: none;
+}
 .srr-player-controls button {
    display: inline-flex;
    align-items: center;
@@ -3284,6 +3292,21 @@ html:has(body.srr-view-list) {
       grid-template-columns: auto minmax(0, 1fr) 10.5rem;
       padding-left: 0.35rem;
       padding-right: 0.35rem;
+   }
+   /* The playlist amendment to "nothing is hidden": a non-empty queue adds »
+      and the ≡ N chip, and seven keys (~14.5rem unwrapped) can NEVER hold one
+      line in a phone bar — wrapping them is not an option (the one-row
+      argument above), and a 14.5rem track would starve the title. So the
+      phone trades » away — the panel's per-row play buttons, auto-advance and
+      the lock screen's nexttrack all cover "skip to next" — and widens the
+      track to 12.5rem, which the six remaining keys genuinely fit (12.2rem)
+      with the same slack the five-key track carries. Keyed off the ≡ chip's
+      own visibility so an empty-queue bar keeps the original geometry. */
+   .srr-player:has(.srr-player-queue:not([hidden])) {
+      grid-template-columns: auto minmax(0, 1fr) 12.5rem;
+   }
+   .srr-player-controls .srr-player-next {
+      display: none;
    }
    .srr-player-controls {
       flex-wrap: wrap;

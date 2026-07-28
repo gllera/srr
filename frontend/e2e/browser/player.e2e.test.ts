@@ -282,6 +282,17 @@ describe("browser: mini-player relocation keeps real audio playing", () => {
          // article is no longer rendered.
          expect(moved!.controls).toBe(false)
          expect(moved!.barShown).toBe(true)
+         // The queue is empty here, so the playlist chrome must not PAINT. The
+         // `hidden` property alone cannot prove that: the author-origin
+         // `display: inline-flex` on `.srr-player-controls button` beats the UA
+         // sheet's [hidden]{display:none} (the same cascade trap .srr-player
+         // itself documents), so styles.css restates it per button — and only a
+         // computed-style read can see whether the restatement holds.
+         const chrome = await page.evaluate(() => ({
+            next: getComputedStyle(document.querySelector(".srr-player-next")!).display,
+            queue: getComputedStyle(document.querySelector(".srr-player-queue")!).display,
+         }))
+         expect(chrome, "an empty-queue bar paints playlist chrome").toEqual({ next: "none", queue: "none" })
          // And it is still PLAYING, not merely un-paused.
          const t1 = await waitAdvanced(page, Math.max(t0, moved!.time), "in the bar")
 
@@ -393,6 +404,60 @@ describe("browser: mini-player relocation keeps real audio playing", () => {
             { timeout: 20000, polling: 300 },
             t0,
          )
+      } finally {
+         await close()
+      }
+   })
+
+   // Pure layout, no audio — jsdom has none, hence this layer. The transport
+   // must hold ONE row of keys at both widths: every fixed-bottom lane in
+   // styles.css (.srr-snackbar, .srr-pin-progress, the container's 7.5rem
+   // clearance) is stated against a ~4rem bar, so a wrapped transport doesn't
+   // just look broken, it breaks that arithmetic. The READY bar (chip-queued
+   // entry, nothing playing) shows the fullest chrome the bar ever carries.
+   it("keeps the transport keys on one row at phone width with the queue chrome up", async () => {
+      const [page, close] = await openCtx(browser, baseUrl, waitList)
+      try {
+         await clickRow(page, QUEUED)
+         await waitTitle(page, QUEUED)
+         await page.waitForFunction(() => !!document.querySelector(".srr-content .srr-queue-chip"), {
+            timeout: 20000,
+         })
+         await page.click(".srr-content .srr-queue-chip")
+
+         const layout = () =>
+            page.evaluate(() => {
+               const bar = document.querySelector(".srr-player") as HTMLElement
+               const keys = [...bar.querySelectorAll<HTMLElement>(".srr-player-controls button")].filter(
+                  (b) => getComputedStyle(b).display !== "none",
+               )
+               return {
+                  barShown: !bar.hidden,
+                  barHeight: bar.offsetHeight,
+                  rows: new Set(keys.map((b) => Math.round(b.getBoundingClientRect().top))).size,
+                  next: getComputedStyle(bar.querySelector(".srr-player-next")!).display !== "none",
+                  queue: getComputedStyle(bar.querySelector(".srr-player-queue")!).display !== "none",
+               }
+            })
+
+         // Desktop (the launcher's 800×600 default): the full seven keys on one
+         // line, playlist chrome included.
+         const wide = await layout()
+         expect(wide.barShown).toBe(true)
+         expect(wide.next).toBe(true)
+         expect(wide.queue).toBe(true)
+         expect(wide.rows, "desktop transport wrapped").toBe(1)
+
+         // Phone: the ≤500px layout trades » away (the panel's per-row play
+         // buttons, auto-advance and Media Session all cover "next") for a
+         // track the six remaining keys genuinely fit on one line.
+         await page.setViewport({ width: 390, height: 844 })
+         const narrow = await layout()
+         expect(narrow.queue, "the queue chip must survive the phone layout").toBe(true)
+         expect(narrow.next, "» is traded away on the phone").toBe(false)
+         expect(narrow.rows, "phone transport wrapped onto a second row").toBe(1)
+         // ~4rem plus the hairline; anything near 90px is the wrapped bar.
+         expect(narrow.barHeight, "the bar outgrew the ~4rem the lane offsets assume").toBeLessThanOrEqual(72)
       } finally {
          await close()
       }
