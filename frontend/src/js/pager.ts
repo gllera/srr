@@ -66,10 +66,15 @@ let committing = false
 let fillTok = 0
 let settleTimer: ReturnType<typeof setTimeout> | undefined
 let commitTimer: ReturnType<typeof setTimeout> | undefined
-// A successful commit past its step but still sliding — the HOLD (see
-// commitStep). Non-null exactly while it runs; calling it finishes the swap
-// (rest) synchronously and releases the awaiting commitStep.
-let holdRest: (() => void) | null = null
+// Fast-forward for a commit still in its slide (see commitStep): lands the
+// cover instantly and releases the pre-step wait. Non-null exactly while the
+// slide runs; a new drag's engage() calls it so the step can render and rest
+// at once instead of the drag dying against the animation's tail.
+let hurry: (() => void) | null = null
+// Registration token: a commitStep continuation that resumes after setup() has
+// re-registered the surface (a rebuilt document, a test's next case) must not
+// call into the new deps or write transforms on the fresh surface.
+let gen = 0
 // The finger's speed at the lift (px/ms, signed), handed over by gestures.ts.
 // Recorded here rather than passed down because the settle it feeds is not the
 // call that receives it: the release is one act, the animation that carries it
@@ -91,9 +96,12 @@ export function setup(deps: PagerDeps): void {
    // case). Any page built against the OLD one is orphaned chrome — and this one
    // is opaque and full-viewport, so leaving it would sit over the reader and
    // make the app look dead. Every other exit path tears it down too; this is
-   // the one that has no gesture to reach it. A live settle hold is released
-   // first, so its timer can't fire a stale rest() into the new registration.
-   holdRest?.()
+   // the one that has no gesture to reach it. The token is bumped BEFORE a
+   // pending slide is released: its commitStep continuation then sees a foreign
+   // generation and bails instead of stepping the new deps or writing transforms
+   // onto the fresh surface.
+   gen++
+   hurry?.()
    teardownPage()
    // `cancel` is settleBack unguarded, unlike engage/move: it leans on gestures
    // calling it only for an ENGAGED drag, never a skipped one.
@@ -196,13 +204,16 @@ function skeleton(): DocumentFragment {
 }
 
 function engage(s: PagerSide): "page" | "resist" | "skip" {
-   if (committing) return "skip"
-   // A commit past its step but still in its settle HOLD: the article
-   // underneath is already final, only the cover's animation remains, so a new
-   // drag belongs to the user — finish the swap right now (rest, synchronously,
-   // so the teardown lands BEFORE this gesture builds its own page below) and
-   // engage fresh instead of skip-locking for the hold's tail.
-   holdRest?.()
+   if (committing) {
+      // A commit is mid-flight and the step has not rendered underneath yet, so
+      // there is nothing to hand this drag synchronously. But the drag is the
+      // user asking for the surface: fast-forward a still-running slide (land
+      // the cover now) so the step renders and rests within a task or two —
+      // gestures.ts retries engage on each further move, and the drag claims
+      // the surface the moment it is free instead of being eaten whole.
+      hurry?.()
+      return "skip"
+   }
    // A settle armed by the PREVIOUS gesture must not fire into this one: its
    // rest() would clear the transform this drag is about to write (a one-frame
    // flash back to origin mid-drag) or, worse, land during a commit's slide-out
@@ -317,6 +328,7 @@ function end(dx: number, commit: boolean, vx: number): void {
 async function commitStep(s: PagerSide): Promise<void> {
    committing = true
    fillTok++ // the page now shows what it shows; a late fill must not repaint it
+   const g = gen
    const { box } = ensurePage()
    // Normally move() already revealed it, but a commit is allowed to arrive
    // without one and the covering guarantee below is unconditional — an unshown
@@ -341,17 +353,42 @@ async function commitStep(s: PagerSide): Promise<void> {
    // article and scrolls it to the top underneath a page that already shows
    // exactly that article at exactly that geometry. A slow load holds a correct
    // page longer instead of showing a blank screen — the failure mode this
-   // replaced. The watchdog below is unchanged in mechanism and its guarantee is
-   // strengthened, not replaced: while it waits the surface is COVERED, not bare.
+   // replaced.
    el.article.style.transform = s === "prev" ? "translateX(100%)" : "translateX(-100%)"
    box.style.transform = "translateX(0)"
-   // The slide's own completion, armed WITH the animation so the deadline is the
-   // animation's end (arming it on the step's resolution would re-start the
-   // clock and overhold the cover behind a slow step). A pure timer with no side
-   // effects: the success branch below is the only reader, so on the snap-back
-   // paths it resolves into nothing.
-   const slid = reduced ? null : new Promise<void>((r) => setTimeout(r, dur + SETTLE_CLOSE_PAD_MS))
    try {
+      // The slide runs to the END before the step is asked for anything. The
+      // step re-renders the real article and scrolls it to the top, and
+      // el.article is still VISIBLE — sliding out beside the incoming cover —
+      // until the cover is at centre: asked concurrently (the previous shape of
+      // this code), the warm-step norm resolved mid-slide and swapped the
+      // OUTGOING article's content to the incoming one in plain view. So the
+      // cover lands first, the step renders underneath a page that now fully
+      // covers it, and rest() below then reveals content identical to what the
+      // cover already shows. The step is warm in the common case (the preview
+      // fill loaded the article, nav's probes are cached), so the reveal
+      // follows the landing by a task or two. `hurry` is the escape hatch: a
+      // new drag mid-slide lands the cover instantly instead of waiting out
+      // the animation's tail (see engage). Under reduced motion nothing is
+      // sliding, so nothing waits.
+      if (!reduced)
+         await new Promise<void>((resolve) => {
+            const timer = setTimeout(land, dur + SETTLE_CLOSE_PAD_MS)
+            function land(): void {
+               clearTimeout(timer)
+               hurry = null
+               resolve()
+            }
+            hurry = () => {
+               // Dropping the transitions mid-flight snaps both elements to the
+               // final transforms already written above: the cover is at centre
+               // NOW, and the step below is safe to render under it.
+               el.article.style.transition = "none"
+               box.style.transition = "none"
+               land()
+            }
+         })
+      if (g !== gen) return // setup() re-registered mid-slide; not our surface
       // Whichever settles first wins. The watchdog is not a nicety: while we
       // wait, `el.article` is parked fully off-screen, and rest()/settleBack()
       // are the ONLY writers of that transform anywhere in the frontend — so
@@ -366,6 +403,7 @@ async function commitStep(s: PagerSide): Promise<void> {
       // mutex is what makes this the only window there is. The late step still
       // lands and renders through the normal path.
       const ok = await Promise.race([d.commit(s), stalled()])
+      if (g !== gen) return
       // STALLED and a plain `false` snap back identically but leave the ENTRY
       // TRANSITION in opposite states, which is the whole reason the watchdog
       // answers with its own value rather than a second `false`. A `false` from
@@ -375,49 +413,13 @@ async function commitStep(s: PagerSide): Promise<void> {
       // whenever the step finally lands, its render would consume "slide",
       // suppress the fade, and swap with NO transition at all. Handing the flag
       // back makes that late arrival fade in like any keyboard step.
-      //
-      // A successful step does NOT rest() at once: it routinely resolves well
-      // INSIDE the settle — the preview fill already warmed the article and
-      // nav's neighbor probes are cached — and tearing down at that moment cuts
-      // the animation short, blinking the page from wherever the finger left it
-      // straight to centre: a sudden swap right at the lift, the very thing the
-      // settle exists to remove. So the teardown waits for whichever of the two
-      // finishes LAST — the step keeps rendering underneath the covering page
-      // meanwhile, which is what the cover is FOR. The step-in-flight skip-lock
-      // is released first: during the hold only the animation remains, so a new
-      // drag interrupts it (engage calls holdRest, which rests synchronously
-      // and resolves this wait) rather than meeting a dead surface. Under
-      // reduced motion nothing is sliding, so nothing waits.
-      if (ok === true) {
-         clearTimeout(commitTimer)
-         committing = false
-         if (!slid) rest()
-         else
-            await new Promise<void>((resolve) => {
-               // rest() runs INSIDE finish — exactly once, synchronously with
-               // whichever caller fires first — because the interrupt case must
-               // tear the old page down BEFORE the new gesture builds its own,
-               // and a second rest() from this continuation would clobber that
-               // new drag's freshly written transforms. The deadline half only
-               // attaches to `slid` HERE, after the step succeeded: attaching it
-               // any earlier would let the timer rest() while the step was still
-               // in flight, baring the parked article the cover exists to hide.
-               const finish = () => {
-                  holdRest = null
-                  rest()
-                  resolve()
-               }
-               holdRest = finish
-               void slid.then(() => {
-                  if (holdRest === finish) finish()
-               })
-            })
-      } else {
+      if (ok === true) rest()
+      else {
          if (ok === STALLED) d.abandon()
          settleBack()
       }
    } catch {
-      settleBack()
+      if (g === gen) settleBack()
    } finally {
       clearTimeout(commitTimer)
       committing = false

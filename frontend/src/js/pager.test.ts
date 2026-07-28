@@ -266,18 +266,19 @@ describe("prev direction (the mirrored branches)", () => {
       spec.engage("prev")
       spec.move(300)
       spec.end(300, true, 0.4)
-      expect(commit).toHaveBeenCalledWith("prev")
+      // The slide has the surface first; the step is asked once the cover lands.
+      expect(commit).not.toHaveBeenCalled()
       // Mid-flight: the outgoing article leaves toward the right, page to centre.
       expect(article().style.transform).toBe("translateX(100%)")
       expect(page()!.style.transform).toBe("translateX(0)")
-      release(true)
-      await flush()
-      // The step resolved INSIDE the settle — the warm-neighbour norm — so the
-      // cover stays on while the slide finishes. Tearing down here is the sudden
-      // swap at the lift that the settle exists to remove.
+      await settle()
+      expect(commit).toHaveBeenCalledWith("prev")
+      // The slide landed but the step is still rendering underneath — the cover
+      // stays on until there is something identical behind it.
       expect(page()).not.toBeNull()
       expect(article().style.transform).toBe("translateX(100%)")
-      await settle()
+      release(true)
+      await flush()
       expect(article().style.transform).toBe("")
       expect(page()).toBeNull()
    })
@@ -299,8 +300,8 @@ describe("commit", () => {
       spec.engage("next")
       spec.move(-300)
       spec.end(-300, true, -0.4)
-      expect(commit).toHaveBeenCalledWith("next")
       await settle()
+      expect(commit).toHaveBeenCalledWith("next")
       expect(article().style.transform).toBe("")
       expect(page()).toBeNull()
    })
@@ -311,7 +312,9 @@ describe("commit", () => {
       spec.engage("next")
       spec.move(-300)
       spec.end(-300, true, -0.4)
-      await vi.advanceTimersByTimeAsync(PAST_SETTLE_MS)
+      // Failure paths pay two settles now: the slide out (the step is only
+      // asked once the cover lands), then the snap back.
+      await vi.advanceTimersByTimeAsync(2 * PAST_SETTLE_MS)
       expect(article().style.transform).toBe("")
       expect(page()).toBeNull()
    })
@@ -332,7 +335,7 @@ describe("commit", () => {
       spec.engage("next")
       spec.move(-300)
       spec.end(-300, true, -0.4)
-      await vi.advanceTimersByTimeAsync(PAST_SETTLE_MS)
+      await vi.advanceTimersByTimeAsync(2 * PAST_SETTLE_MS)
       // guard() owns the error popup; the page's job is to not leave itself over
       // a half-slid surface.
       expect(article().style.transform).toBe("")
@@ -351,8 +354,9 @@ describe("commit", () => {
       spec.move(-300)
       spec.end(-300, true, -0.4)
       expect(article().style.transform).toBe("translateX(-100%)")
-      // Past the pager's watchdog, still far short of BUSY_STUCK_MS.
-      await vi.advanceTimersByTimeAsync(15_000 + PAST_SETTLE_MS)
+      // Past the pager's watchdog (armed once the slide lands, so the slide's
+      // 310ms rides on top), still far short of BUSY_STUCK_MS.
+      await vi.advanceTimersByTimeAsync(15_000 + 2 * PAST_SETTLE_MS)
       expect(article().style.transform).toBe("")
       expect(page()).toBeNull()
       // ...and the pager is usable again rather than skip-locked behind a
@@ -377,7 +381,7 @@ describe("commit", () => {
       spec.engage("next")
       spec.move(-300)
       spec.end(-300, true, -0.4)
-      await vi.advanceTimersByTimeAsync(PAST_SETTLE_MS)
+      await vi.advanceTimersByTimeAsync(2 * PAST_SETTLE_MS)
       expect(article().style.transform).toBe("")
       expect(abandon).not.toHaveBeenCalled()
    })
@@ -422,26 +426,29 @@ describe("commit handoff", () => {
       expect(page()).toBeNull()
    })
 
-   it("holds the cover until the slide lands when the step resolves first", async () => {
+   it("does not ask the step until the cover fully lands", async () => {
       vi.useFakeTimers()
-      // The common case: the preview fill already warmed the article and nav's
-      // probes are cached, so the guarded step resolves in a handful of
-      // microtasks — far inside the settle. 200px at 0.4px/ms clamps to the
-      // 260ms ceiling, so the teardown is due at 310ms.
+      // The step re-renders the real article and scrolls it to the top — and
+      // until the cover is at centre, the real article is still VISIBLE,
+      // sliding out beside it. Asked concurrently (the previous shape of this
+      // code), a warm step resolved mid-slide and the OUTGOING article's
+      // content swapped to the incoming one in plain view. So the ask itself
+      // waits for the landing: 200px at 0.4px/ms clamps to the 260ms ceiling,
+      // so the cover lands (and the step fires) at 310ms.
       spec.engage("next")
       await vi.advanceTimersByTimeAsync(0)
       spec.move(-200)
       spec.end(-200, true, -0.4)
       await vi.advanceTimersByTimeAsync(0)
-      // The step is done; the slide is not. Tearing down NOW is the blink this
-      // test exists to forbid: the page jumps from wherever the finger left it
-      // straight to centre, a sudden swap right at the lift.
+      expect(commit).not.toHaveBeenCalled()
       expect(page()).not.toBeNull()
       expect(page()!.classList.contains("srr-pager-show")).toBe(true)
       expect(article().style.transform).toBe("translateX(-100%)")
       await vi.advanceTimersByTimeAsync(309)
+      expect(commit).not.toHaveBeenCalled()
       expect(page()).not.toBeNull()
       await vi.advanceTimersByTimeAsync(2)
+      expect(commit).toHaveBeenCalledWith("next")
       expect(article().style.transform).toBe("")
       expect(page()).toBeNull()
    })
@@ -465,25 +472,26 @@ describe("commit handoff", () => {
       expect(snap).toEqual({ transform: "", page: false })
    })
 
-   it("a drag arriving during the settle hold interrupts it and engages fresh", async () => {
+   it("a drag arriving mid-slide fast-forwards the landing and frees the surface", async () => {
       vi.useFakeTimers()
       spec.engage("next")
       await vi.advanceTimersByTimeAsync(0)
       spec.move(-200)
-      spec.end(-200, true, -0.4)
-      await vi.advanceTimersByTimeAsync(0) // step resolved; hold running
-      // The article underneath is already final — only the cover's animation
-      // remains — so a new drag belongs to the user: the hold finishes the swap
-      // instantly (rest, synchronously, BEFORE the new drag builds its page) and
-      // the drag engages rather than being skip-locked for the hold's tail.
-      expect(spec.engage("next")).toBe("page")
+      spec.end(-200, true, -0.4) // 260ms settle armed; the step not yet asked
+      expect(commit).not.toHaveBeenCalled()
+      // The step has not rendered underneath yet, so there is nothing to hand
+      // this drag synchronously — it is declined. But it is also the user
+      // asking for the surface: the slide fast-forwards (the cover lands NOW),
+      // so the step renders and rests within a task or two, and gestures.ts
+      // retries engage on the drag's next move instead of eating the gesture.
+      expect(spec.engage("next")).toBe("skip")
+      expect(article().style.transition).toBe("none")
+      await vi.advanceTimersByTimeAsync(0)
+      expect(commit).toHaveBeenCalledWith("next")
       expect(article().style.transform).toBe("")
-      spec.move(-40)
-      expect(article().style.transform).toBe("translateX(-40px)")
-      // The old hold's timer must not fire into the new gesture's tracking.
-      await vi.advanceTimersByTimeAsync(PAST_SETTLE_MS)
-      expect(article().style.transform).toBe("translateX(-40px)")
-      expect(page()!.classList.contains("srr-pager-show")).toBe(true)
+      expect(page()).toBeNull()
+      // The surface is free again — 310ms early — for the drag's retry.
+      expect(spec.engage("next")).toBe("page")
    })
 
    it("reduced motion tears down with the step — there is no settle to wait out", async () => {
@@ -504,7 +512,8 @@ describe("commit handoff", () => {
       spec.engage("next")
       await flush()
       spec.end(-200, true, -0.4)
-      await settle()
+      await settle() // the slide out
+      await settle() // ...and the snap back the refusal earns
       expect(page()).toBeNull()
       expect(article().style.transform).toBe("")
       expect(abandon).not.toHaveBeenCalled()
@@ -516,7 +525,7 @@ describe("commit handoff", () => {
       spec.engage("next")
       await vi.advanceTimersByTimeAsync(0)
       spec.end(-200, true, -0.4)
-      await vi.advanceTimersByTimeAsync(15_000 + PAST_SETTLE_MS)
+      await vi.advanceTimersByTimeAsync(15_000 + 2 * PAST_SETTLE_MS)
       expect(abandon).toHaveBeenCalledTimes(1)
       expect(page()).toBeNull()
       vi.useRealTimers()

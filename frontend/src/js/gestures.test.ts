@@ -803,7 +803,7 @@ describe("reader pager (geometry)", () => {
       expect(pagerEndFn).toHaveBeenCalledWith(-440, false, expect.any(Number))
    })
 
-   it("skip declines the gesture: no further moves, no end", () => {
+   it("a surface that keeps declining gets no moves and no end", () => {
       pagerEngage.mockReturnValue("skip")
       pStart(500, 300)
       pMove(400, 300)
@@ -811,6 +811,24 @@ describe("reader pager (geometry)", () => {
       pEnd(300, 300)
       expect(pagerMoveFn).not.toHaveBeenCalled()
       expect(pagerEndFn).not.toHaveBeenCalled()
+   })
+
+   it("skip is a decline-for-now: the drag engages the moment the surface frees up", () => {
+      // The surface answers "skip" while a prior commit is mid-flight — and the
+      // pager fast-forwards that commit the moment a new drag asks (pager.ts
+      // engage). Killing the whole gesture on the first ask would eat exactly
+      // the follow-up flick that fast-forward exists to serve, so the decline
+      // holds for ONE move and the next one asks again.
+      pagerEngage.mockReturnValueOnce("skip")
+      pStart(500, 300)
+      pMove(400, 300) // asked, declined — the gesture stays alive
+      expect(pagerMoveFn).not.toHaveBeenCalled()
+      pMove(300, 300) // the commit rested in between; asked again, claimed
+      expect(pagerEngage).toHaveBeenCalledTimes(2)
+      expect(pagerMoveFn).toHaveBeenCalledWith(-200)
+      pMove(280, 300)
+      pEnd(280, 300) // dx=-220, past 20% of 1024
+      expect(pagerEndFn).toHaveBeenCalledWith(-220, true, expect.any(Number))
    })
 
    it("a second finger cancels an engaged drag", () => {

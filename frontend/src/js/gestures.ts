@@ -433,8 +433,10 @@ export type PagerSide = "prev" | "next"
 
 export interface Pager {
    // How this drag behaves, decided at engage: "page" tracks toward a live
-   // neighbor, "resist" is the damped dead-edge drag, "skip" declines the
-   // gesture entirely (a drag arriving while a prior commit is still animating).
+   // neighbor, "resist" is the damped dead-edge drag, "skip" declines FOR NOW
+   // (a drag arriving while a prior commit is still animating/rendering — the
+   // surface fast-forwards that commit when asked, so this module retries the
+   // engage on later moves and the drag claims the surface the moment it rests).
    engage(side: PagerSide): "page" | "resist" | "skip"
    // Signed horizontal travel from the touch start; the surface clamps painting
    // to the engaged direction.
@@ -515,7 +517,13 @@ function pagerMove(e: Event, x: number, y: number): void {
       pagerSide = dx > 0 ? "prev" : "next"
       const mode = pagerSpec.engage(pagerSide)
       if (mode === "skip") {
-         pagerEligible = false
+         // A decline-for-now, not a veto: the surface answers "skip" while a
+         // prior commit is mid-flight AND fast-forwards it on the ask, so the
+         // gesture stays eligible and the NEXT move asks again. Ending the
+         // gesture here instead would eat exactly the quick follow-up flick the
+         // fast-forward exists to serve. (The reversal's skip below still ends
+         // the gesture: mid-drag no commit can be in flight, so that answer is
+         // kept as the hard decline it always was.)
          return
       }
       pagerMode = mode
