@@ -3369,6 +3369,8 @@ html:has(body.srr-view-list) {
    target (everything that ISN'T the image) would be wrong. */
 .srr-lightbox-stage {
    display: flex;
+   align-items: center;
+   justify-content: center;
    max-width: 100%;
    max-height: 100%;
    padding: 0;
@@ -3381,6 +3383,14 @@ html:has(body.srr-view-list) {
 }
 .srr-lightbox-zoomed .srr-lightbox-stage {
    cursor: zoom-out;
+   /* Zoomed, the stage stops hugging the fitted image and takes the whole
+      overlay: the clip window grows with the picture, so the enlargement has
+      somewhere to show — a 300px-wide image zoomed 3x through its own 300px
+      window was pointless. The image keeps its fitted LAYOUT box (its bounds
+      were the overlay's content box all along), so the transform math is
+      untouched; lightbox.ts clamps the pan against this grown box instead. */
+   width: 100%;
+   height: 100%;
 }
 .srr-lightbox-img {
    max-width: 100%;

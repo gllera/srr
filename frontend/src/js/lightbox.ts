@@ -166,27 +166,41 @@ function fitted(): { w: number; h: number } {
    return { w: viewImg?.clientWidth ?? 0, h: viewImg?.clientHeight ?? 0 }
 }
 
-// Keep the scaled image covering its own box: at zoom k the overhang per side
-// is size · (k − 1) / 2, and a pan past it would pull the picture's edge inside
-// the stage and show scrim through the gap.
-function clampPan(v: number, size: number, k: number): number {
-   const m = (size * (k - 1)) / 2
+// Keep the scaled image covering the clip WINDOW: the overhang per side is
+// (scaled − window) / 2, and a pan past it would pull the picture's edge
+// inside the window and show scrim through the gap. An image smaller than the
+// window on an axis (a wide picture whose scaled height still fits) clamps to
+// 0 — centered, nothing to pan.
+function clampPan(v: number, size: number, win: number, k: number): number {
+   const m = Math.max(0, (size * k - win) / 2)
    return Math.min(m, Math.max(-m, v))
 }
 
 // The stage center in client coordinates — the anchor every gesture measures
-// from. The stage hugs the image and never carries the transform, so its rect
-// is the fitted geometry even mid-pinch (the image's own rect is not).
+// from. The stage never carries the transform, so its rect is layout geometry
+// even mid-pinch (the image's own rect is not) — and whether it hugs the
+// fitted image (un-zoomed) or fills the overlay (zoomed), both boxes center on
+// the same point.
 function stageCenter(): { x: number; y: number } {
    const r = stage!.getBoundingClientRect()
    return { x: r.left + r.width / 2, y: r.top + r.height / 2 }
 }
 
+// The ONE view writer: every gesture sets zoom + desired pan and lands here.
 function applyView(): void {
    if (!viewImg || !overlay || !stage) return
-   viewImg.style.transform = zoom === 1 ? "" : `translate(${panX}px, ${panY}px) scale(${zoom})`
+   // Class first: styles.css grows the stage to the whole overlay while
+   // zoomed (the clip window must enlarge with the picture — zooming through
+   // the fitted box showed a 3x image through its own small window), so the
+   // clamp below has to read the box AFTER the toggle takes effect.
    overlay.classList.toggle("srr-lightbox-zoomed", zoom !== 1)
    stage.setAttribute("aria-label", zoom === 1 ? "enlarge image" : "shrink image")
+   const { w, h } = fitted()
+   // `|| size` — a zero client box (jsdom without stubs, a mid-layout read)
+   // degrades to the fitted box, the tight clamp.
+   panX = clampPan(panX, w, stage.clientWidth || w, zoom)
+   panY = clampPan(panY, h, stage.clientHeight || h, zoom)
+   viewImg.style.transform = zoom === 1 ? "" : `translate(${panX}px, ${panY}px) scale(${zoom})`
 }
 
 // Apply a zoom level with its origin (percentages within the image). Origin
@@ -196,8 +210,8 @@ function setZoom(k: number, ox = 50, oy = 50): void {
    if (!viewImg || !overlay || !stage) return
    zoom = k
    const { w, h } = fitted()
-   panX = k === 1 ? 0 : clampPan((0.5 - ox / 100) * w * (k - 1), w, k)
-   panY = k === 1 ? 0 : clampPan((0.5 - oy / 100) * h * (k - 1), h, k)
+   panX = k === 1 ? 0 : (0.5 - ox / 100) * w * (k - 1)
+   panY = k === 1 ? 0 : (0.5 - oy / 100) * h * (k - 1)
    applyView()
 }
 
@@ -270,9 +284,8 @@ function onTouchMove(e: TouchEvent): void {
       // The picture point the fingers closed on stays under their midpoint, so
       // moving both fingers pans while spreading them zooms — one gesture.
       const c = stageCenter()
-      const { w, h } = fitted()
-      panX = clampPan((a.clientX + b.clientX) / 2 - c.x - pinchRelX * zoom, w, zoom)
-      panY = clampPan((a.clientY + b.clientY) / 2 - c.y - pinchRelY * zoom, h, zoom)
+      panX = (a.clientX + b.clientX) / 2 - c.x - pinchRelX * zoom
+      panY = (a.clientY + b.clientY) / 2 - c.y - pinchRelY * zoom
       applyView()
    } else if (touchMode === "pan" && e.touches.length === 1) {
       // Own the touch even at fitted size: the reader is still there behind the
@@ -282,9 +295,8 @@ function onTouchMove(e: TouchEvent): void {
       const dy = e.touches[0].clientY - panStartY
       if (Math.abs(dx) > TAP_SLOP || Math.abs(dy) > TAP_SLOP) touchMoved = true
       if (zoom === 1) return // nothing to pan
-      const { w, h } = fitted()
-      panX = clampPan(panBaseX + dx, w, zoom)
-      panY = clampPan(panBaseY + dy, h, zoom)
+      panX = panBaseX + dx
+      panY = panBaseY + dy
       applyView()
    }
 }

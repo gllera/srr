@@ -35,10 +35,22 @@ function stubSizes(natural: number, shown: number): void {
    Object.defineProperty($img(), "clientHeight", { value: shown, configurable: true })
    const box = () => ({ left: 0, top: 0, width: shown, height: shown }) as DOMRect
    $img().getBoundingClientRect = box
-   // The pinch math anchors on the STAGE's box: the stage hugs the image and
-   // never carries the transform, so its rect stays the fitted geometry even
-   // while the image is scaled.
+   // The pinch math anchors on the STAGE's box (it never carries the
+   // transform), and the pan clamp measures the scaled image against it —
+   // stubbed here to the image's own box, i.e. a viewport with no room to
+   // grow; stubWindow describes a roomier one.
    $stage().getBoundingClientRect = box
+   Object.defineProperty($stage(), "clientWidth", { value: shown, configurable: true })
+   Object.defineProperty($stage(), "clientHeight", { value: shown, configurable: true })
+}
+
+// A zoomed stage stops hugging the image and takes the whole overlay
+// (styles.css) — this describes that grown clip window, centered on the same
+// point (200,200) the 400px image stubs put the picture at.
+function stubWindow(w: number, h: number): void {
+   Object.defineProperty($stage(), "clientWidth", { value: w, configurable: true })
+   Object.defineProperty($stage(), "clientHeight", { value: h, configurable: true })
+   $stage().getBoundingClientRect = () => ({ left: 200 - w / 2, top: 200 - h / 2, width: w, height: h }) as DOMRect
 }
 
 describe("image lightbox", () => {
@@ -421,6 +433,20 @@ describe("image lightbox", () => {
          touch("touchend", [], [pt(200, 200)])
          clickAt($stage(), 200, 200) // …a clean tap still zooms
          expect($img().style.transform).toBe("translate(0px, 0px) scale(3)")
+      })
+
+      it("pan bounds follow the grown clip window, not the fitted box", () => {
+         openAt()
+         // Zoomed, the stage takes the whole overlay (styles.css): an 800×400
+         // viewport window around the 400×400 picture. At 2x the scaled image
+         // (800×800) exactly fills the window's width — no x pan left — while
+         // 200px per side overhang the height.
+         pinchTo2x()
+         stubWindow(800, 400)
+         touch("touchstart", [pt(200, 200)])
+         touch("touchmove", [pt(50, -50)])
+         expect($img().style.transform).toBe("translate(0px, -200px) scale(2)")
+         touch("touchend", [], [pt(50, -50)])
       })
 
       it("touches inside the viewer never reach the document's gesture machine", () => {

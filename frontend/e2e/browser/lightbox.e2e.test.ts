@@ -145,16 +145,23 @@ describe("browser: content image lightbox", () => {
          await clickArticleImage(page)
 
          const zoomed = await page.evaluate(() => {
-            ;(document.querySelector(".srr-lightbox-stage") as HTMLElement).click()
+            const stage = document.querySelector(".srr-lightbox-stage") as HTMLElement
+            stage.click()
             return {
                transform: (document.querySelector(".srr-lightbox-img") as HTMLElement).style.transform,
                flagged: document.querySelector(".srr-lightbox")!.classList.contains("srr-lightbox-zoomed"),
+               stageW: stage.getBoundingClientRect().width,
+               viewportW: window.innerWidth,
             }
          })
          // translate + scale since the pinch/pan work: tap zoom, pinch and pan
          // all share one center-origin translate+scale model.
          expect(zoomed.transform).toMatch(/scale\(/)
          expect(zoomed.flagged).toBe(true)
+         // The clip window grows with the zoom: the stage stops hugging the
+         // fitted image and takes the whole overlay (viewport minus padding) —
+         // only a real layout engine can vouch for this.
+         expect(zoomed.stageW).toBeGreaterThan(zoomed.viewportW * 0.9)
          // Still open — a zoom toggle is not a dismissal.
          expect(await $viewerOpen(page)).toBe(true)
 
