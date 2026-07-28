@@ -431,15 +431,25 @@ describe("browser: mini-player relocation keeps real audio playing", () => {
                const keys = [...bar.querySelectorAll<HTMLElement>(".srr-player-controls button")].filter(
                   (b) => getComputedStyle(b).display !== "none",
                )
+               const seek = bar.querySelector(".srr-player-seek") as HTMLElement
                return {
                   barShown: !bar.hidden,
                   barHeight: bar.offsetHeight,
                   rows: new Set(keys.map((b) => Math.round(b.getBoundingClientRect().top))).size,
                   next: getComputedStyle(bar.querySelector(".srr-player-next")!).display !== "none",
                   queue: getComputedStyle(bar.querySelector(".srr-player-queue")!).display !== "none",
-                  seek: getComputedStyle(bar.querySelector(".srr-player-seek")!).display !== "none",
+                  time: getComputedStyle(bar.querySelector(".srr-player-time")!).display !== "none",
+                  seekH: seek.offsetHeight,
+                  seekW: seek.offsetWidth,
                }
             })
+
+         // The READY bar has no media, so the clock is empty and its `:empty`
+         // rule hides it regardless of viewport — fill it so the display
+         // checks below measure the LAYOUT's verdict, not emptiness.
+         await page.evaluate(() => {
+            ;(document.querySelector(".srr-player-time") as HTMLElement).textContent = "1:00 / 2:00"
+         })
 
          // Desktop (the launcher's 800×600 default): the full seven keys on one
          // line, playlist chrome included.
@@ -447,7 +457,8 @@ describe("browser: mini-player relocation keeps real audio playing", () => {
          expect(wide.barShown).toBe(true)
          expect(wide.next).toBe(true)
          expect(wide.queue).toBe(true)
-         expect(wide.seek, "the desktop bar keeps its seek rail").toBe(true)
+         expect(wide.time, "the desktop bar keeps its clock").toBe(true)
+         expect(wide.seekH, "the desktop bar keeps its tappable seek rail").toBeGreaterThanOrEqual(4)
          expect(wide.rows, "desktop transport wrapped").toBe(1)
 
          // Phone: the ≤500px layout trades » away (the panel's per-row play
@@ -461,14 +472,20 @@ describe("browser: mini-player relocation keeps real audio playing", () => {
          // ~4rem plus the hairline; anything near 90px is the wrapped bar.
          expect(narrow.barHeight, "the bar outgrew the ~4rem the lane offsets assume").toBeLessThanOrEqual(72)
 
-         // The phone declutter: the seek rail hides (±15, the clock and the
-         // full player one tap away cover it) and a video's miniature
-         // collapses to the same zero-width box audio already rides — the
-         // TITLE is the bar's identity, and the 64px thumbnail plus its gap
-         // was exactly the space it was missing. width, not display: the
+         // The phone declutter: NOTHING wraps in the controls column (user
+         // call, 2026-07-28) — the clock hides rather than dropping to a
+         // second line, the seek rail becomes the mini-player idiom's 2px
+         // read-only hairline across the bar's edge (progress feedback at
+         // zero layout cost), and a video's miniature collapses to the same
+         // zero-width box audio already rides — the TITLE is the bar's
+         // identity, and the 64px thumbnail plus its gap was exactly the
+         // space it was missing. Width, not display, for the miniature: the
          // element must stay rendered for playback to survive, the same
          // argument the base .srr-player-media rule states.
-         expect(narrow.seek, "the seek rail must hide on the phone").toBe(false)
+         expect(narrow.time, "the clock must not wrap under the keys on the phone").toBe(false)
+         expect(narrow.seekH, "the phone hairline must still paint").toBeGreaterThan(0)
+         expect(narrow.seekH, "the phone seek is a hairline, not the rail").toBeLessThanOrEqual(3)
+         expect(narrow.seekW, "the hairline spans the whole bar").toBeGreaterThanOrEqual(350)
          const mediaWidth = await page.evaluate(() => {
             const bar = document.querySelector(".srr-player") as HTMLElement
             bar.dataset.kind = "video"
