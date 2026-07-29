@@ -164,6 +164,8 @@ vi.mock("./data", () => data)
 
 const list = vi.hoisted(() => ({
    setup: vi.fn(),
+   setScroller: vi.fn(),
+   followCursor: vi.fn(),
    show: vi.fn(async () => {}),
    render: vi.fn(async () => {}),
    rerender: vi.fn(async () => {}),

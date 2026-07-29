@@ -28,7 +28,9 @@ import * as player from "./player"
 import * as reader from "./reader"
 import * as refresh from "./refresh"
 import { ensureSchema } from "./schema"
+import { elementScroller, windowScroller } from "./scroller"
 import * as searchUI from "./search-ui"
+import { initSplit, isSplit, onSplitChange } from "./split"
 import * as sync from "./sync"
 
 // Which surface is showing. The list is home; the reader is the drill-down.
@@ -91,7 +93,7 @@ function showReader() {
    view = "reader"
    document.body.classList.remove("srr-view-list")
    picker.close()
-   el.listView.hidden = true
+   el.listView.hidden = !isSplit()
    el.article.hidden = false
 }
 
@@ -99,8 +101,15 @@ function showList() {
    view = "list"
    document.body.classList.add("srr-view-list")
    picker.close()
-   el.article.hidden = true
    el.listView.hidden = false
+   if (isSplit()) {
+      // Split view: both panes stay live — the reader keeps its article beside
+      // the list (blank only before the first open of the session) and its
+      // toolbar prev/next stay usable.
+      el.article.hidden = nav.currentChron() < 0
+      return
+   }
+   el.article.hidden = true
    // Disable the reader-only nav so an arrow key is a no-op while the list
    // scrolls natively (the buttons are also hidden via CSS). The touch path
    // needs no disabling here: the pager only engages inside el.article, which
@@ -174,7 +183,12 @@ async function guard(fn: () => Promise<IShowFeed>) {
       const o = await fn()
       // If this op was reclaimed as stale mid-flight (see acquire), a newer holder
       // now owns the surface — don't paint our stale result / error over it.
-      if (token === busyToken) reader.render(o)
+      if (token === busyToken) {
+         reader.render(o)
+         // Split view: the list is on screen beside the reader — bring its
+         // cursor row along (highlight + nudge into the pane's live band).
+         if (isSplit()) list.followCursor()
+      }
    } catch (e) {
       if (token === busyToken) showError(e, () => guard(fn))
    } finally {
@@ -392,6 +406,11 @@ async function route(hash: string) {
    const posStr = nav.hashPos(hash)
    if (posStr !== "" && INT_POS.test(posStr)) {
       await guard(() => nav.fromHash(hash))
+      // Split view: the list pane boots beside the article. After the guarded
+      // resolve so the anchor (nav.pos) is settled; list.show's own freshness
+      // token absorbs a superseding navigation, and its errors stay silent here
+      // (guard() already owns the article's error surface).
+      if (isSplit()) await list.show(true).catch(() => {})
       return
    }
    // The list hash carries the mount too (§6.3) — extract it and switch the
@@ -561,7 +580,7 @@ const cycleNext = cycle(1)
 // produces NO render at all (guard() skipped it on a busy mutex, or it
 // rejected). Neither covers the other's case — see reader.ts entryTransition.
 async function pagerCommit(side: "prev" | "next"): Promise<boolean> {
-   if (view !== "reader" || picker.isOpen() || lightbox.isOpen()) return false
+   if ((view !== "reader" && !isSplit()) || picker.isOpen() || lightbox.isOpen()) return false
    const before = nav.currentChron()
    reader.setEntryTransition("slide")
    try {
@@ -608,6 +627,18 @@ async function init() {
    // throws, and outside the try below on purpose: a migration failure is warned
    // internally, not a boot error the popup should offer to reload past.
    ensureSchema()
+   // Split view (two-pane desktop): stamp body.srr-split before anything
+   // renders, hand the list its scroller for the mode, and rebuild both
+   // surfaces on a breakpoint crossing (rare — a window drag across 1000px).
+   initSplit()
+   const applyScroller = () => list.setScroller(isSplit() ? elementScroller(el.listView) : windowScroller())
+   applyScroller()
+   onSplitChange(() => {
+      applyScroller()
+      list.invalidate()
+      gestures?.resetScroll()
+      void route(location.hash.substring(1))
+   })
    // Tell the SW its mounted roots BEFORE data.init() (the PWA0 fix, §5.1): the
    // roots come from the mount TABLE (valid pre-init), so a peer store's boot
    // fetches — kicked inside data.init() — are already routed + cached by the SW

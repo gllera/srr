@@ -141,7 +141,13 @@ async function applySearchQuery(q: string): Promise<void> {
 // entered from the settings menu's "Search articles…" row, not a toolbar button.)
 export function syncSearchBar(): void {
    const on = nav.isSearchFilter()
-   document.body.classList.toggle("srr-searching", on && d.view() === "list")
+   // Split view: search is a list-pane mode and the pane is always on screen,
+   // so the bar shows whatever surface has key focus (class check, not an
+   // import — the same dependency-free idiom gestures.ts uses).
+   document.body.classList.toggle(
+      "srr-searching",
+      on && (d.view() === "list" || document.body.classList.contains("srr-split")),
+   )
    if (!on) {
       el.searchNote.hidden = true
       return
