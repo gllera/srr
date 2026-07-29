@@ -1766,9 +1766,9 @@ body.srr-view-list.srr-searching .srr-searchbar {
 /* View mode: on the list, hide the reader-only controls (prev/next/save);
    the back button is meaningless on the list it returns to. The filter opener
    is NOT here — it shows on both surfaces. */
-.srr-view-list .srr-prev,
-.srr-view-list .srr-next,
-.srr-view-list .srr-save,
+body.srr-view-list:not(.srr-split) .srr-prev,
+body.srr-view-list:not(.srr-split) .srr-next,
+body.srr-view-list:not(.srr-split) .srr-save,
 .srr-view-list .srr-back {
    display: none;
 }
@@ -1778,7 +1778,7 @@ body.srr-view-list.srr-searching .srr-searchbar {
    readout), and its chrome stays down to reading controls — settings live one
    tap away behind the back button. (The pinned search bar is already
    display:none without .srr-searching.) */
-body:not(.srr-view-list) .srr-feed,
+body:not(.srr-view-list):not(.srr-split) .srr-feed,
 body:not(.srr-view-list) .srr-open-reader {
    display: none;
 }
@@ -3737,4 +3737,73 @@ html:has(body.srr-view-list) {
 }
 .srr-player-demo .srr-player-seek-fill {
    width: 38%;
+}
+
+/* ══ Split view — two-pane desktop (body.srr-split) ═════════════════════════
+   JS stamps body.srr-split from ONE matchMedia (split.ts, min-width: 1000px);
+   every rule here keys off the class so CSS and JS can never disagree about
+   the breakpoint. Below it nothing in this block applies — the phone layout
+   is untouched.
+   Layout model: the LIST becomes a fixed, self-scrolling left pane (list.ts
+   swaps its scroll seam to the pane element via scroller.ts), while the READER
+   keeps the window scroll it has always had, its column centered in the
+   remaining width. The pane MUST anchor at the viewport top (top: 0): list.ts
+   mixes viewport-relative rects with the pane's scrollTop and assumes the two
+   share an origin. */
+body.srr-split {
+   & .srr-container {
+      margin-left: var(--split-pane-w);
+   }
+   & .srr-list {
+      position: fixed;
+      top: 0;
+      left: 0;
+      bottom: 0;
+      width: var(--split-pane-w);
+      overflow-y: auto;
+      /* The pane owns its overscroll — a flicked list must not chain into the
+         window (reader) scroll behind it. */
+      overscroll-behavior-y: contain;
+      border-right: 1px solid var(--border);
+      /* Bottom padding clears the fixed toolbar, as .srr-container's 4rem does
+         for the reader column; side padding replaces the page gutter the pane
+         no longer inherits. */
+      padding: 0 0.75rem 5rem;
+   }
+   /* The player bar overlays the pane bottom too — mirror the room
+      body.srr-playing .srr-container reserves. */
+   &.srr-playing .srr-list {
+      padding-bottom: 9rem;
+   }
+   /* Surface-transition chrome has no meaning when both surfaces are always on
+      screen: back returns to a list that never left, open-article opens a
+      reader that is already open. */
+   & .srr-back,
+   & .srr-open-reader {
+      display: none;
+   }
+   /* Union toolbar: readout (settings anchor, keeps the free space) + the
+      reader controls + the filter opener. */
+   & .srr-toolbar {
+      grid-template-columns: minmax(0, 1fr) auto auto auto auto;
+   }
+   /* The pinned search bar rides the PANE, not the reader column — fixed over
+      the pane's top at its width (sticky can't stick to a sibling's scroll).
+      Shows in BOTH views: search-ui keeps srr-searching on under split
+      whatever the focus surface. list.ts's stickyOffset counts it via
+      getClientRects(), which sees fixed as well as sticky positioning. */
+   &.srr-searching .srr-searchbar {
+      display: block;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: var(--split-pane-w);
+      z-index: var(--z-searchbar);
+      background: var(--bg);
+      border-bottom: 1px solid var(--faint);
+      padding: 0.4rem 0.25rem;
+   }
+   &.srr-searching .srr-list {
+      padding-top: 3.2rem;
+   }
 }

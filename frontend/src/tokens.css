@@ -17,6 +17,7 @@
    --hover: rgba(0, 0, 0, 0.04);
    --accent: #b35650;
    --radius: 4px;
+   --split-pane-w: 380px; /* split view (two-pane desktop): the list pane's fixed width */
    --shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 12px 28px rgba(0, 0, 0, 0.08);
    /* modal backdrop — a FIXED dark veil, not --fg (which inverts to a pale fog in dark mode) */
    --scrim: rgba(0, 0, 0, 0.5);
