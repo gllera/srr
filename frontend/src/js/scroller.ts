@@ -12,6 +12,10 @@ export interface Scroller {
    // box's absolute coordinate space — what "scroll position that puts this rect
    // at the top" means for this scroller.
    absTop(rectTop: number): number
+   // Total scrollable length of the scrolled box — what a "did content above the
+   // viewport grow?" compensation must measure. document scrollHeight for the
+   // window, the host's own for a pane.
+   extent(): number
    // IntersectionObserver root for the list's sentinels (null = the viewport).
    root(): Element | null
 }
@@ -23,6 +27,7 @@ export function windowScroller(): Scroller {
       smoothTo: (y) => window.scrollTo({ top: y, behavior: "smooth" }),
       viewportH: () => window.innerHeight || 900,
       absTop: (rectTop) => rectTop + window.scrollY,
+      extent: () => (document.scrollingElement ?? document.documentElement).scrollHeight,
       root: () => null,
    }
 }
@@ -44,6 +49,7 @@ export function elementScroller(host: HTMLElement): Scroller {
       },
       viewportH: () => host.clientHeight || window.innerHeight || 900,
       absTop: (rectTop) => rectTop - host.getBoundingClientRect().top + host.scrollTop,
+      extent: () => host.scrollHeight,
       root: () => host,
    }
 }

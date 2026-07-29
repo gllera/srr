@@ -1016,6 +1016,22 @@ describe("list", () => {
       expect(data.findRight).not.toHaveBeenCalled()
    })
 
+   describe("followCursor", () => {
+      it("re-derives the highlight and scrolls the cursor row when it is rendered", async () => {
+         setIndex(4)
+         await list.render()
+         const chron = Number(document.querySelector<HTMLElement>("a.srr-row")!.dataset.chron)
+         nav._setPos(chron) // point the reader cursor at that rendered row
+         list.followCursor()
+         expect(document.querySelector(".srr-row-current")?.getAttribute("data-chron")).toBe(String(chron))
+      })
+
+      it("is inert with no current article", () => {
+         // beforeEach leaves pos at -1: no current article, nothing to follow.
+         expect(() => list.followCursor()).not.toThrow()
+      })
+   })
+
    it("anchors at the current position: newer ('next') rows above, older below", async () => {
       setIndex(10)
       nav._setAnchor(5) // the reader's article

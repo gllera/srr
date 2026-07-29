@@ -12,6 +12,7 @@ import { refreshNow } from "./refresh"
 // on screen. search.ts stays DOM-free — it hands back raw-string ranges and the
 // element building lives below.
 import { matchSpans } from "./search"
+import { windowScroller, type Scroller } from "./scroller"
 // The two frontier-write primitives, taken from ./seen rather than through nav's
 // facade — the one place in the reader that does so, and deliberately:
 // nav.markAllRead/markUnreadFrom bake in the ACTIVE FILTER's scope (that is what
@@ -85,6 +86,14 @@ let notifyScroll: () => void = () => {}
 // stop growing with no feedback. app wires this to its retry-able error popup.
 let onError: (e: unknown) => void = () => {}
 
+// The scroll seam (split view): window below the breakpoint, the pane element
+// in split. Swapped by app.ts via setScroller on init and on every breakpoint
+// crossing (which also invalidates + re-renders, so the IO root is re-read).
+let sc: Scroller = windowScroller()
+export function setScroller(s: Scroller): void {
+   sc = s
+}
+
 // Freshness token: a new render() reassigns it so any in-flight load (or pending
 // observer callback) from the prior filter bails before touching the DOM — the
 // same discipline as dropdown's fill tokens and nav's prefetch.
@@ -101,7 +110,7 @@ let builtKey: string | null = null // filterKey() the current DOM was built for
 let observer: IntersectionObserver | null = null
 // Set by a genuine user scroll gesture (wheel/touch/key) during a render, so the
 // post-fill anchor re-assert never yanks the page out from under the reader.
-// Programmatic scrolls (window.scrollTo) don't fire these, so they don't trip it.
+// Programmatic scrolls (sc.to) don't fire these, so they don't trip it.
 let userScrolled = false
 
 // ── "N new" arrivals pill ────────────────────────────────────────────────────
@@ -175,7 +184,7 @@ export function setup(
       onOpen(chron)
    })
    // A genuine scroll gesture during a progressive render disables the post-fill
-   // anchor re-assert (the user's position wins). Programmatic window.scrollTo
+   // anchor re-assert (the user's position wins). A programmatic sc.to
    // fires "scroll" but NOT these, so it never trips the flag.
    const markScrolled = () => {
       userScrolled = true
@@ -253,9 +262,10 @@ function paintNewPill(): void {
       pillOnScroll = () => {
          // Reaching the top by hand IS the dismissal — the arrivals are on
          // screen, so the signal has done its job.
-         if (window.scrollY <= PILL_TOP_EPS) resetNewPill()
+         if (sc.y() <= PILL_TOP_EPS) resetNewPill()
       }
       window.addEventListener("scroll", pillOnScroll, { passive: true })
+      container.addEventListener("scroll", pillOnScroll, { passive: true })
    }
    const badge = countBadge(newAbove)
    pillEl.querySelector(".srr-new-pill-label")!.textContent = `${badge} new`
@@ -272,8 +282,8 @@ function jumpToNew(): void {
    resetNewPill()
    const reduced =
       typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches
-   if (reduced) window.scrollTo(0, 0)
-   else window.scrollTo({ top: 0, behavior: "smooth" })
+   if (reduced) sc.to(0)
+   else sc.smoothTo(0)
    notifyScroll()
 }
 
@@ -284,6 +294,7 @@ function resetNewPill(): void {
    newAbove = 0
    if (pillOnScroll) {
       window.removeEventListener("scroll", pillOnScroll)
+      container.removeEventListener("scroll", pillOnScroll)
       pillOnScroll = null
    }
    pillEl?.remove()
@@ -667,7 +678,7 @@ function rowBudget(rows: HTMLElement[]): number {
    for (let i = 0; i < sample; i++) total += rows[i].offsetHeight
    const mean = sample ? total / sample : 0
    if (!mean) return MIN_WINDOW_ROWS // no layout (jsdom): fall back to a count
-   return Math.max(MIN_WINDOW_ROWS, Math.ceil((WINDOW_VIEWPORTS * (window.innerHeight || 900)) / mean))
+   return Math.max(MIN_WINDOW_ROWS, Math.ceil((WINDOW_VIEWPORTS * sc.viewportH()) / mean))
 }
 
 // Drop rows past the budget from the FAR side of the direction just paged.
@@ -717,7 +728,7 @@ function trimWindow(side: "top" | "bottom"): void {
 
    const shift = anchor.getBoundingClientRect().top - anchorBefore
    if (shift) {
-      window.scrollTo(0, window.scrollY + shift)
+      sc.to(sc.y() + shift)
       notifyScroll()
    }
 }
@@ -927,8 +938,7 @@ function syncTopTerminus(compensate = false): void {
    if (!rowsEl) return
    const existing = rowsEl.querySelector(".srr-wire-top")
    if (exhaustedTop === !!existing) return // already in the desired state
-   const scroller = document.scrollingElement ?? document.documentElement
-   const before = compensate ? scroller.scrollHeight : 0
+   const before = compensate ? sc.extent() : 0
    if (!exhaustedTop) {
       existing!.remove()
    } else {
@@ -939,9 +949,9 @@ function syncTopTerminus(compensate = false): void {
       rowsEl.insertBefore(top, rowsEl.firstChild)
    }
    if (compensate) {
-      const delta = scroller.scrollHeight - before
+      const delta = sc.extent() - before
       if (delta) {
-         window.scrollTo(0, window.scrollY + delta)
+         sc.to(sc.y() + delta)
          notifyScroll()
       }
    }
@@ -1118,7 +1128,7 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    // (-1) is plain top.
    const landOnceMode = anchoredMid && !anchorNow
    if (anchoredMid && anchorNow) scrollChronToView(seed)
-   else window.scrollTo(0, 0)
+   else sc.to(0)
    notifyScroll()
    userScrolled = false
    onInteractive?.()
@@ -1272,7 +1282,7 @@ async function renderSearch(my: object, onInteractive?: () => void): Promise<voi
    syncBottomTerminus()
    syncTopTerminus()
    syncRovingTab() // the newest hit (selected by renderSearch) is the lone Tab stop
-   window.scrollTo(0, 0)
+   sc.to(0)
    notifyScroll()
    userScrolled = false
    onInteractive?.()
@@ -1323,6 +1333,23 @@ export async function show(anchorNow = false, onInteractive?: () => void): Promi
       return
    }
    await render(anchorNow, onInteractive)
+}
+
+// Split view: after a reader-pane step, bring the list along — re-derive the
+// row highlight and nudge the cursor row into the pane's live band without
+// re-centering on every keypress. A cursor that stepped outside the loaded
+// window falls back to show(true)'s bounded rebuild (whose fast path is
+// exactly this scroll when the row exists).
+export function followCursor(): void {
+   const chron = nav.currentChron()
+   if (chron < 0) return
+   const row = findRow(chron)
+   if (!row) {
+      void show(true).catch(() => {})
+      return
+   }
+   refresh()
+   scrollRowIntoView(row)
 }
 
 // Re-derive read/unread dots + saved stars + the current-article highlight from
@@ -1423,13 +1450,13 @@ function findRow(chron: number): HTMLElement | null {
 // Scroll the row for `chron` into view: its vertical midpoint lands at the
 // center of the area below the sticky search bar — keep the anchored article in
 // the middle, with context above and below, on every list arrival (reader
-// return, filter change, boot). window.scrollTo clamps to [0, maxScroll], so an
+// return, filter change, boot). sc.to clamps to [0, maxScroll], so an
 // anchor near the top or bottom of the feed lands as close to centered as the
 // content allows. A no-op if the row isn't rendered (e.g. saved view dropped it
 // on return) — the caller then keeps the current scroll.
 function scrollChronToView(chron: number): void {
    const target = chronScrollTarget(chron)
-   if (target !== null) window.scrollTo(0, target)
+   if (target !== null) sc.to(target)
 }
 
 // The clamped scrollY that would center `chron`'s row — the pure computation
@@ -1442,13 +1469,13 @@ function chronScrollTarget(chron: number): number | null {
    const row = findRow(chron)
    if (!row) return null
    const rect = row.getBoundingClientRect()
-   const top = rect.top + window.scrollY
-   return Math.max(0, top + rect.height / 2 - (window.innerHeight + stickyOffset()) / 2)
+   const top = sc.absTop(rect.top)
+   return Math.max(0, top + rect.height / 2 - (sc.viewportH() + stickyOffset()) / 2)
 }
 
 function stickyOffset(): number {
    const bar = document.querySelector<HTMLElement>(".srr-searchbar")
-   return bar && bar.offsetParent !== null ? bar.offsetHeight : 0
+   return bar && bar.getClientRects().length > 0 ? bar.offsetHeight : 0
 }
 
 // The day-strata dividers are sticky at the top of the list viewport
@@ -1565,7 +1592,7 @@ async function fetchNewer(my: object): Promise<void> {
       pinHeights(fresh)
       const shift = anchor ? anchor.getBoundingClientRect().top - anchorBefore : 0
       if (shift) {
-         window.scrollTo(0, window.scrollY + shift)
+         sc.to(sc.y() + shift)
          notifyScroll()
       }
       // The compensation above is exactly what makes these rows invisible when
@@ -1611,7 +1638,7 @@ function observe(my: object): void {
             else pump(my).catch((err) => reportPageError(my, err))
          }
       },
-      { rootMargin: ROOT_MARGIN },
+      { rootMargin: ROOT_MARGIN, root: sc.root() },
    )
    observer.observe(topSentinel)
    observer.observe(bottomSentinel)
@@ -1640,7 +1667,7 @@ async function pump(my: object): Promise<void> {
          // when the list is shown and the sentinel intersects.
          if (!bottomSentinel.getClientRects().length) break
          const rect = bottomSentinel.getBoundingClientRect()
-         if (rect.top > window.innerHeight + 800) break
+         if (rect.top > sc.viewportH() + 800) break
          const before = rowsEl.childElementCount
          await fetchOlder(my)
          // No progress and not exhausted (a transient fetchOlder no-op) — stop to
@@ -1803,7 +1830,7 @@ function clippedAbove(row: HTMLElement, inset: number): boolean {
 // but only when it isn't already there (a keyboard step shouldn't recenter on
 // every press, unlike the return-from-reader centering). Without the bottom inset
 // a row stepped downward parks flush against the viewport bottom, hidden behind
-// the toolbar (which selectRow's notifyScroll always reveals). window.scrollTo
+// the toolbar (which selectRow's notifyScroll always reveals). sc.to
 // clamps to [0, maxScroll].
 //
 // Both ends land the row FLUSH against the chrome (no inner margin): the row's own
@@ -1814,11 +1841,10 @@ function clippedAbove(row: HTMLElement, inset: number): boolean {
 function scrollRowIntoView(row: HTMLElement): void {
    const rect = row.getBoundingClientRect()
    const top = topInset()
-   const bottom = window.innerHeight - toolbarInset()
+   const bottom = sc.viewportH() - toolbarInset()
    const margin = 8 // snap tolerance: how close to the chrome before re-aligning flush
-   if (rect.top < top + margin || clippedAbove(row, top))
-      window.scrollTo(0, Math.max(0, window.scrollY + rect.top - top))
-   else if (rect.bottom > bottom - margin) window.scrollTo(0, window.scrollY + rect.bottom - bottom)
+   if (rect.top < top + margin || clippedAbove(row, top)) sc.to(Math.max(0, sc.y() + rect.top - top))
+   else if (rect.bottom > bottom - margin) sc.to(sc.y() + rect.bottom - bottom)
 }
 
 // Height the bottom-fixed toolbar occupies. selectRow reveals it after every move

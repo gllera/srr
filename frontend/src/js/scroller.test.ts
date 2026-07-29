@@ -33,6 +33,13 @@ describe("scroller", () => {
       expect(sc.viewportH()).toBe(window.innerHeight || 900)
    })
 
+   it("extent() measures the scrolled box: the host's own scrollHeight, the document's for the window", () => {
+      const host = document.createElement("div")
+      Object.defineProperty(host, "scrollHeight", { value: 1234 })
+      expect(elementScroller(host).extent()).toBe(1234)
+      expect(windowScroller().extent()).toBe((document.scrollingElement ?? document.documentElement).scrollHeight)
+   })
+
    it("elementScroller.smoothTo degrades to an instant jump when scrollTo throws", () => {
       const host = document.createElement("div")
       host.scrollTo = () => {
