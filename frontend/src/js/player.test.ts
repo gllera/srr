@@ -550,6 +550,52 @@ describe("playlist", () => {
       expect(chips()).toHaveLength(2)
    })
 
+   it("chips read the live queue position and renumber when an earlier entry leaves", () => {
+      putAudio(2)
+      player.injectQueueChips()
+      expect(chips()[0].textContent).toBe("+")
+      chips()[0].click()
+      chips()[1].click()
+      expect(chips()[0].textContent).toBe("1")
+      expect(chips()[1].textContent).toBe("2")
+      expect(chips()[1].getAttribute("aria-label")).toBe("Remove from playlist — position 2")
+      // Unqueue the first — the second renumbers through syncChips.
+      chips()[0].click()
+      expect(chips()[0].textContent).toBe("+")
+      expect(chips()[1].textContent).toBe("1")
+   })
+
+   it("a full queue turns spare chips into the ≡ door, whose tap opens the panel instead of adding", () => {
+      putAudio(51)
+      player.injectQueueChips()
+      for (const chip of chips().slice(0, 50)) chip.click()
+      const spare = chips()[50]
+      expect(spare.textContent).toBe("≡")
+      expect(spare.getAttribute("aria-pressed")).toBe("false")
+      expect(spare.getAttribute("aria-label")).toBe("Playlist full — open playlist")
+      // Queued chips stay live toggles — removal must always work at the cap.
+      expect(chips()[0].textContent).toBe("1")
+      spare.click()
+      const panel = q<HTMLElement>(".srr-player-panel")
+      expect(panel.hidden).toBe(false)
+      const saved = JSON.parse(localStorage.getItem("srr-player") as string)
+      expect(saved.queue).toHaveLength(50)
+   })
+
+   it("a video's corner chip goes offstage while the video plays and returns on pause", () => {
+      content().innerHTML = `<video src="v.webm" controls></video>`
+      player.injectQueueChips()
+      const chip = chips()[0]
+      expect(chip.classList.contains("srr-chip-offstage")).toBe(false)
+      const v = content().querySelector("video") as HTMLMediaElement
+      playing(v)
+      v.dispatchEvent(new Event("play"))
+      expect(chip.classList.contains("srr-chip-offstage")).toBe(true)
+      playing(v, false)
+      v.dispatchEvent(new Event("pause"))
+      expect(chip.classList.contains("srr-chip-offstage")).toBe(false)
+   })
+
    it("queueing while idle raises the READY bar — visible, head-labeled, never autoplaying", () => {
       putAudio(1)
       player.injectQueueChips()

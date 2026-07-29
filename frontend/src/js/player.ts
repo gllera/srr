@@ -643,10 +643,52 @@ function syncQueueHandlers(): void {
 // Queue chips — the in-content add affordance
 // ---------------------------------------------------------------------------
 
-function setChipState(chip: HTMLButtonElement, queued: boolean): void {
-   chip.textContent = queued ? "✓ Playlist" : "+ Playlist"
-   chip.setAttribute("aria-pressed", String(queued))
-   chip.setAttribute("aria-label", queued ? "Remove from playlist" : "Add to playlist")
+function queuePos(mid: string, chron: number, index: number): number {
+   return queue.findIndex((e) => e.mid === mid && e.chron === chron && e.index === index)
+}
+
+// One chip, a glyph vocabulary: "+" add, the entry's 1-based queue POSITION
+// while queued (every chip re-derives after every queue mutation via syncChips,
+// so the numeral can never lie), and "≡" when the queue is full — the door
+// state: toggleQueued opens the panel to prune instead of dead-ending, so the
+// cap never reads as a broken button. aria-pressed stays the toggle truth.
+function setChipState(chip: HTMLButtonElement, pos: number): void {
+   const door = pos < 0 && queue.length >= QUEUE_MAX
+   chip.classList.toggle("srr-chip-door", door)
+   chip.textContent = pos >= 0 ? String(pos + 1) : door ? "≡" : "+"
+   chip.setAttribute("aria-pressed", String(pos >= 0))
+   chip.setAttribute(
+      "aria-label",
+      pos >= 0
+         ? `Remove from playlist — position ${pos + 1}`
+         : door
+           ? "Playlist full — open playlist"
+           : "Add to playlist",
+   )
+}
+
+// The video CORNER chip exists only while its video is stopped (queueing is a
+// decision about a video you haven't started); audio chips never hide. The
+// class is inert under the @supports fallback, where the chip sits below the
+// frame and occludes nothing.
+function syncChipOffstage(m: HTMLMediaElement, chip: HTMLElement): void {
+   chip.classList.toggle("srr-chip-offstage", m.tagName === "VIDEO" && !m.paused)
+}
+
+// play/pause don't bubble (the onPlay rule), so the offstage sync rides its own
+// capture-phase pair instead of per-element listeners a re-render would re-bind.
+function onMediaStateForChips(e: Event): void {
+   const t = e.target
+   if (!(t instanceof HTMLMediaElement) || t.tagName !== "VIDEO") return
+   const sib = t.nextElementSibling
+   if (sib instanceof HTMLElement && sib.classList.contains("srr-queue-chip")) syncChipOffstage(t, sib)
+}
+
+function pulseOnce(n: Element | null): void {
+   if (!(n instanceof HTMLElement)) return
+   n.classList.remove("srr-chip-pop")
+   void n.offsetWidth
+   n.classList.add("srr-chip-pop")
 }
 
 // Called by reader.ts as step 6 of its fixed media order (after rehome): one
@@ -667,7 +709,8 @@ export function injectQueueChips(): void {
       // (replaceWith swaps the node, not its siblings) — re-derive its state.
       const existing = m.nextElementSibling
       if (existing instanceof HTMLButtonElement && existing.classList.contains("srr-queue-chip")) {
-         setChipState(existing, isQueued(mid, chron, i))
+         setChipState(existing, queuePos(mid, chron, i))
+         syncChipOffstage(m, existing)
          continue
       }
       const chip = document.createElement("button")
@@ -675,8 +718,9 @@ export function injectQueueChips(): void {
       chip.className = "srr-queue-chip"
       const index = i
       chip.addEventListener("click", () => toggleQueued(index))
-      setChipState(chip, isQueued(mid, chron, i))
+      setChipState(chip, queuePos(mid, chron, i))
       m.insertAdjacentElement("afterend", chip)
+      syncChipOffstage(m, chip)
    }
 }
 
@@ -689,7 +733,7 @@ function syncChips(): void {
    for (let i = 0; i < list.length; i++) {
       const sib = list[i].nextElementSibling
       if (sib instanceof HTMLButtonElement && sib.classList.contains("srr-queue-chip"))
-         setChipState(sib, isQueued(mid, chron, i))
+         setChipState(sib, queuePos(mid, chron, i))
    }
 }
 
@@ -697,12 +741,20 @@ function toggleQueued(index: number): void {
    if (!mounted) return
    const { mid, chron, title, feedId } = mounted
    if (isQueued(mid, chron, index)) return dropQueued(mid, chron, index)
-   if (queue.length >= QUEUE_MAX) return
+   // The cap as a DOOR: a full queue opens the panel to prune instead of
+   // silently eating the tap (the chip already reads ≡ / "Playlist full").
+   // Edge accepted: with the bar hidden — an active on-screen episode — the
+   // panel (its child) can't show, and the tap stays a no-op like before.
+   if (queue.length >= QUEUE_MAX) return openPanel()
    const m = mediaList(el.content)[index]
    const src = m?.getAttribute("src") ?? ""
    if (!src) return
    queue.push({ mid, chron, index, src, kind: m.tagName === "VIDEO" ? "video" : "audio", title, feedId })
    afterQueueChange()
+   // Feedback at both ends of the gesture: the chip pops under the finger, the
+   // bar's ≡ count pulses where the episode went.
+   pulseOnce(m.nextElementSibling)
+   pulseOnce(el.playerQueue)
 }
 
 // ---------------------------------------------------------------------------
@@ -1217,6 +1269,9 @@ export function setup(deps: PlayerDeps): void {
    d = deps
    // Capture phase: `play` does not bubble (see onPlay).
    document.addEventListener("play", onPlay, { capture: true })
+   // The video corner chip's offstage sync (same capture rule, its own pair).
+   document.addEventListener("play", onMediaStateForChips, { capture: true })
+   document.addEventListener("pause", onMediaStateForChips, { capture: true })
    el.playerToggle.addEventListener("click", () => {
       if (!active) {
          // READY state: the play button starts the head of the queue — a user

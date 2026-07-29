@@ -980,30 +980,133 @@ body.srr-playing .srr-pin-progress {
       background: var(--hover);
    }
 }
-/* The in-content playlist chip (player.ts injects one after each eligible
+/* The in-content playlist circle (player.ts injects one after each eligible
    <audio>/<video>): reader chrome, not article content — injected after the
-   sanitizer ran, rebuilt on every render. */
+   sanitizer ran, rebuilt on every render. AUDIO: the circle shares the player's
+   row wearing the native player's own material (a borderless fill, sized to its
+   height), so player + button read as one control cluster. States are a glyph
+   vocabulary: "+" add, the entry's 1-based queue POSITION while queued (syncChips
+   re-derives every chip after every queue mutation, so the numeral can't lie),
+   and "≡" when the queue is full — the door state, whose tap opens the panel to
+   prune instead of dead-ending (player.ts toggleQueued). */
+.srr-content audio:has(+ .srr-queue-chip) {
+   display: inline-block;
+   width: calc(100% - 3.85rem);
+   vertical-align: middle;
+   margin: 0.35rem 0 1rem;
+}
 .srr-content .srr-queue-chip {
    display: inline-flex;
    align-items: center;
-   margin: 0.35rem 0 1rem;
-   padding: 0.2rem 0.7rem;
-   border: 1px solid var(--faint);
-   border-radius: 999px;
-   background: none;
+   justify-content: center;
+   width: 3.25rem;
+   height: 3.25rem;
+   box-sizing: border-box;
+   margin: 0.35rem 0 1rem 0.6rem;
+   vertical-align: middle;
+   border: none;
+   border-radius: 50%;
+   background: color-mix(in srgb, var(--fg) 7%, transparent);
    font-family: var(--font-mono);
-   font-size: 0.68rem;
+   font-variant-numeric: tabular-nums;
+   font-size: 1rem;
    font-weight: 600;
-   letter-spacing: 0.04em;
-   color: var(--muted);
+   color: var(--fg-2);
    cursor: pointer;
+   transition:
+      background-color 0.15s ease-out,
+      color 0.15s ease-out;
    &:hover {
+      background: color-mix(in srgb, var(--fg) 12%, transparent);
       color: var(--fg);
-      background: var(--hover);
    }
    &[aria-pressed="true"] {
+      background: color-mix(in srgb, var(--accent) 15%, transparent);
       color: var(--accent);
-      border-color: var(--accent);
+   }
+   &.srr-chip-door {
+      color: var(--muted);
+   }
+}
+/* The subtle fill needs an edge once the palette hardens. */
+@media (prefers-contrast: more) {
+   .srr-content .srr-queue-chip {
+      border: 1px solid var(--border);
+   }
+}
+/* VIDEO: the frame keeps the whole column, so the chip docks below it, flush
+   right (this rule alone is the @supports fallback) — and where anchor
+   positioning exists it becomes the CORNER chip instead: anchored to the
+   frame's top-right (the native control strip is bottom-only), wearing scrim
+   material over imagery (one fixed dark look in both themes — the lightbox
+   rule), and OFFSTAGE while the video plays (player.ts toggles
+   .srr-chip-offstage from capture-phase play/pause listeners): queueing is a
+   decision about a video you haven't started, so the control exists exactly
+   when the decision does. Anchor positioning keeps the injector's sibling DOM —
+   no wrapper — and the shared anchor-name resolves each chip to its nearest
+   preceding video. */
+.srr-content video + .srr-queue-chip {
+   display: flex;
+   margin: 0.4rem 0 1rem auto;
+}
+@supports (anchor-name: --a) {
+   .srr-content video:has(+ .srr-queue-chip) {
+      anchor-name: --srr-qmedia;
+   }
+   .srr-content video + .srr-queue-chip {
+      position: absolute;
+      position-anchor: --srr-qmedia;
+      top: calc(anchor(top) + 0.5rem);
+      right: calc(anchor(right) + 0.5rem);
+      width: 2.75rem;
+      height: 2.75rem;
+      margin: 0;
+      background: rgba(16, 16, 15, 0.55);
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+      color: #fff;
+      transition:
+         opacity 0.2s ease-out,
+         background-color 0.15s ease-out;
+      &:hover {
+         background: rgba(16, 16, 15, 0.75);
+         color: #fff;
+      }
+      &[aria-pressed="true"] {
+         background: color-mix(in srgb, var(--accent) 82%, #000);
+         color: #fff;
+      }
+      &.srr-chip-door {
+         color: rgba(255, 255, 255, 0.9);
+      }
+      &.srr-chip-offstage {
+         opacity: 0;
+         pointer-events: none;
+      }
+   }
+}
+/* One add = feedback at both ends: the tapped chip pops, and the bar's ≡ count
+   pulses (player.ts pulseOnce — the srr-next-pulse idea pointed at the queue). */
+@keyframes srr-chip-pop {
+   0% {
+      transform: scale(1);
+   }
+   40% {
+      transform: scale(1.14);
+   }
+   100% {
+      transform: scale(1);
+   }
+}
+.srr-chip-pop {
+   animation: srr-chip-pop 0.22s ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+   .srr-chip-pop {
+      animation: none;
+   }
+   .srr-content video + .srr-queue-chip {
+      transition: none;
    }
 }
 
