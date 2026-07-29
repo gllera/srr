@@ -584,6 +584,9 @@ const KEY_ACTIONS: Record<string, () => void> = {
    q: () => guard(() => nav.first()),
    e: () => guard(() => nav.last()),
    b: () => !el.save.disabled && toggleSave(),
+   // The playlist toggle's keyboard path (parity with b-for-save): the article's
+   // first enclosure, via the chip's own click; no enclosure = quiet no-op.
+   p: () => player.queueKey(),
    // The unread rewind's direct power-user path (its pointer home is the
    // frontier menu); markUnreadFromHere no-ops without an article / in peek modes.
    u: () => menus.markUnreadFromHere(),

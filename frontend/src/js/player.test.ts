@@ -10,6 +10,10 @@ const data = vi.hoisted(() => ({
 }))
 vi.mock("./data", () => data)
 vi.mock("./fmt", () => ({ srcColorIndex: () => 3 }))
+// The chip's long-press menu goes through the shared anchored card; mocking it
+// keeps this suite off dropdown's DOM and lets tests invoke item actions.
+const dropdown = vi.hoisted(() => ({ showContextMenu: vi.fn() }))
+vi.mock("./dropdown", () => dropdown)
 
 const SKELETON = `
    <article class="srr-reader" hidden><div class="srr-content"></div></article>
@@ -80,9 +84,14 @@ beforeEach(async () => {
    deps.openArticle.mockClear()
    deps.rememberPosition.mockClear()
    deps.readPosition.mockReset() // default: no remembered position
+   dropdown.showContextMenu.mockClear()
    player.setup(deps)
    player.noteMounted(MOUNTED)
 })
+
+// The long-press/right-click menu's item list, as handed to the (mocked) card.
+type ChipMenuItem = { label: string; action: () => void; disabled?: boolean }
+const menuItems = (call = 0) => dropdown.showContextMenu.mock.calls[call][1] as ChipMenuItem[]
 
 describe("claiming an episode", () => {
    it("claims a played in-content element and labels the bar from the mounted article", () => {
@@ -580,6 +589,60 @@ describe("playlist", () => {
       expect(panel.hidden).toBe(false)
       const saved = JSON.parse(localStorage.getItem("srr-player") as string)
       expect(saved.queue).toHaveLength(50)
+   })
+
+   it("long-press menu: Play next moves or inserts the enclosure at the queue head", () => {
+      putAudio(3)
+      player.injectQueueChips()
+      chips()[0].click()
+      chips()[1].click()
+      // Right-click the third (unqueued) chip and take Play next.
+      chips()[2].dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }))
+      expect(dropdown.showContextMenu).toHaveBeenCalledTimes(1)
+      expect(dropdown.showContextMenu.mock.calls[0][0]).toBe(chips()[2])
+      expect(menuItems().map((i) => i.label)).toEqual(["Play next", "Play now"])
+      menuItems()[0].action()
+      expect(chips()[2].textContent).toBe("1")
+      expect(chips()[0].textContent).toBe("2")
+      expect(chips()[1].textContent).toBe("3")
+      // A QUEUED entry moves to the head rather than duplicating.
+      chips()[1].dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }))
+      menuItems(1)[0].action()
+      expect(chips()[1].textContent).toBe("1")
+      expect(chips()[2].textContent).toBe("2")
+      expect(chips()[0].textContent).toBe("3")
+      const saved = JSON.parse(localStorage.getItem("srr-player") as string)
+      expect(saved.queue).toHaveLength(3)
+   })
+
+   it("long-press menu: Play now plays the element and never grows the queue", () => {
+      putAudio(2)
+      player.injectQueueChips()
+      chips()[0].click()
+      chips()[1].dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }))
+      menuItems()[1].action()
+      expect(HTMLMediaElement.prototype.play).toHaveBeenCalledTimes(1)
+      const saved = JSON.parse(localStorage.getItem("srr-player") as string)
+      expect(saved.queue).toHaveLength(1)
+   })
+
+   it("at the cap the menu disables Play next but keeps Play now — the door's escape hatch", () => {
+      putAudio(51)
+      player.injectQueueChips()
+      for (const chip of chips().slice(0, 50)) chip.click()
+      chips()[50].dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }))
+      expect(menuItems()[0].disabled).toBe(true)
+      expect(menuItems()[1].disabled).toBeUndefined()
+   })
+
+   it("queueKey (the p key) toggles the article's first enclosure", () => {
+      putAudio(2)
+      player.injectQueueChips()
+      player.queueKey()
+      expect(chips()[0].getAttribute("aria-pressed")).toBe("true")
+      expect(chips()[1].getAttribute("aria-pressed")).toBe("false")
+      player.queueKey()
+      expect(chips()[0].getAttribute("aria-pressed")).toBe("false")
    })
 
    it("a video's corner chip goes offstage while the video plays and returns on pause", () => {

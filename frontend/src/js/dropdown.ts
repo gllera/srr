@@ -380,6 +380,7 @@ const SHORTCUT_GROUPS: ReadonlyArray<{ title: string; rows: ReadonlyArray<[strin
          [["Q"], "Oldest article in this filter"],
          [["E"], "Newest article in this filter"],
          [["B"], "Save / unsave (★)"],
+         [["P"], "Add / remove the enclosure in the playlist"],
          [["U"], "Mark unread from here"],
          [["F"], "Open the original in a new tab"],
       ],

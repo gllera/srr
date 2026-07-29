@@ -31,6 +31,7 @@
 // also has to TELL us what is on screen (noteMounted), because the chron of the
 // mounted article is its state, not ours.
 import * as data from "./data"
+import { showContextMenu, type MenuItem } from "./dropdown"
 import { el } from "./els"
 import { srcColorIndex } from "./fmt"
 import { ROW_SWIPE_TRIGGER } from "./gestures"
@@ -691,6 +692,104 @@ function pulseOnce(n: Element | null): void {
    n.classList.add("srr-chip-pop")
 }
 
+// The chip's long-press menu — the power layer over the tap (append): "Play
+// next" puts the enclosure at the HEAD of the queue (the podcast verb the
+// panel's reorder arrows only reach one step at a time; a queued entry MOVES,
+// never duplicates), "Play now" plays it outright through the element's own
+// play() — the capture-phase claim then consumes any queued copy, identical to
+// pressing play on the element, which also makes it the door state's escape
+// hatch (it never grows the queue, so it stays live at the cap). Items derive
+// at open and RE-CHECK at action: showContextMenu outlives this tick, and an
+// auto-advance or a navigation can move the queue (or the article) under an
+// open menu.
+function chipMenuItems(index: number): MenuItem[] {
+   if (!mounted) return []
+   const m = mediaList(el.content)[index]
+   if (!m?.getAttribute("src")) return []
+   const { mid, chron, title, feedId } = mounted
+   const stale = (): boolean => !mounted || mounted.mid !== mid || mounted.chron !== chron
+   return [
+      {
+         label: "Play next",
+         // A NEW head entry would breach the cap; a queued one just moves.
+         disabled: queuePos(mid, chron, index) < 0 && queue.length >= QUEUE_MAX,
+         action: () => {
+            if (stale()) return
+            const media = mediaList(el.content)[index]
+            const src = media?.getAttribute("src") ?? ""
+            if (!src) return
+            const pos = queuePos(mid, chron, index)
+            if (pos < 0 && queue.length >= QUEUE_MAX) return
+            if (pos >= 0) queue.splice(pos, 1)
+            queue.unshift({
+               mid,
+               chron,
+               index,
+               src,
+               kind: media.tagName === "VIDEO" ? "video" : "audio",
+               title,
+               feedId,
+            })
+            afterQueueChange()
+            pulseOnce(media.nextElementSibling)
+            if (pos < 0) pulseOnce(el.playerQueue)
+         },
+      },
+      {
+         label: "Play now",
+         action: () => {
+            if (stale()) return
+            void mediaList(el.content)[index]?.play()
+         },
+      },
+   ]
+}
+
+// bindFrontierMenu's wiring restated (menus.ts is app-side chrome player must
+// not import — the attachRowSwipe precedent): desktop right-click, Android
+// long-press and Shift+F10 all arrive as `contextmenu`; iOS Safari fires none
+// on non-links, so a 500ms touch-hold covers it, with `held` swallowing the
+// finger-lift click (it would otherwise also toggle the queue) and a late
+// native contextmenu (Android fires both).
+function bindChipMenu(chip: HTMLButtonElement, index: number): void {
+   let hold = 0
+   let held = false
+   const open = (): boolean => {
+      const items = chipMenuItems(index)
+      if (items.length > 0) showContextMenu(chip, items)
+      return items.length > 0
+   }
+   chip.addEventListener("contextmenu", (e) => {
+      clearTimeout(hold)
+      if (held || open()) e.preventDefault()
+   })
+   chip.addEventListener("pointerdown", (e) => {
+      if (e.pointerType !== "touch") return
+      held = false
+      clearTimeout(hold)
+      hold = window.setTimeout(() => (held = open()), 500)
+   })
+   for (const ev of ["pointerup", "pointercancel", "pointerleave"]) chip.addEventListener(ev, () => clearTimeout(hold))
+   chip.addEventListener(
+      "click",
+      (e) => {
+         if (!held) return
+         held = false
+         e.preventDefault()
+         e.stopImmediatePropagation()
+      },
+      true,
+   )
+}
+
+// The reader's `p` key (app.ts KEY_ACTIONS): toggle the article's FIRST
+// enclosure in the playlist — keyboard parity with b-for-save, so queueing
+// never needs a pointer. Routed through the chip's own click so there is ONE
+// path (the full-queue door included); a no-enclosure article is a quiet no-op.
+export function queueKey(): void {
+   el.content.querySelector<HTMLButtonElement>(".srr-queue-chip")?.click()
+}
+
 // Called by reader.ts as step 6 of its fixed media order (after rehome): one
 // toggle chip per eligible media element, inserted AFTER it — a chip is a
 // <button>, never audio/video, so the index pairing FEB2 and rehome rely on is
@@ -718,6 +817,7 @@ export function injectQueueChips(): void {
       chip.className = "srr-queue-chip"
       const index = i
       chip.addEventListener("click", () => toggleQueued(index))
+      bindChipMenu(chip, index)
       setChipState(chip, queuePos(mid, chron, i))
       m.insertAdjacentElement("afterend", chip)
       syncChipOffstage(m, chip)
