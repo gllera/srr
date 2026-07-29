@@ -121,7 +121,9 @@ function pullReady(target: EventTarget | null): boolean {
 }
 
 function pullStart(target: EventTarget | null, x: number, y: number): void {
-   pullEligible = pullReady(target)
+   // Split view: pull-to-refresh is a phone gesture, and in split the window's
+   // top belongs to the reader — a downward drag in the pane is a pane scroll.
+   pullEligible = pullReady(target) && !document.body.classList.contains("srr-split")
    pulling = false
    pullArmed = false
    pullConsumed = false
@@ -796,6 +798,10 @@ export function setupGestures(deps: GestureDeps): Gestures {
    window.addEventListener(
       "scroll",
       () => {
+         // Split view: the window scroll belongs to the READER pane and the
+         // toolbar is permanent chrome — never auto-hide. A class check, not an
+         // import: this module deliberately imports nothing.
+         if (document.body.classList.contains("srr-split")) return
          const y = window.scrollY
          const goingDown = y > lastScrollY
          lastScrollY = y
