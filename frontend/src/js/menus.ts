@@ -30,6 +30,7 @@ import * as picker from "./picker"
 import { listPins } from "./pin"
 import { pinMenuEntry, postMounts } from "./pin-ui"
 import { enterSearch } from "./search-ui"
+import { isSplit } from "./split"
 
 export interface MenuDeps {
    // Which surface is showing — the frontier reconciliation rebuilds the list only
@@ -117,12 +118,18 @@ export async function offerFrontierUndo(): Promise<void> {
 // An open reader re-probes its chrome silently (prev/next + the pending pill
 // re-derive from the re-raised bounds; no content re-render, no scroll),
 // mirroring refreshAfterStore's reader branch.
+// Split view flips "is the list the visible surface?" from a question about
+// `view` to a question about the layout: the pane is on screen whatever surface
+// holds focus, so both branches below must treat it as visible or it keeps
+// showing the pre-move row set (stale membership under unread-only, stale dots
+// otherwise) with its observer torn down and no rebuild scheduled.
 function afterFrontierMove() {
+   const listVisible = d.view() === "list" || isSplit()
    if (nav.isUnreadOnly()) {
       nav.applyFilter([...nav.filterTokens()])
-      if (d.view() === "list") void list.rerender()
+      if (listVisible) void list.rerender()
       else list.invalidate()
-   } else if (d.view() === "list") {
+   } else if (listVisible) {
       list.refresh()
    }
    void d.syncUnreadBadge()

@@ -121,7 +121,12 @@ async function applySearchQuery(q: string): Promise<void> {
    clearTimeout(searchDebounce)
    // Defense in depth against a debounce that fired after the user already left
    // search (e.g. opened an article): only the list-search surface owns the query.
-   if (d.view() !== "list" || !nav.isSearchFilter()) return
+   // Split view widens "the search surface is up" exactly as syncSearchBar does:
+   // the bar rides the pane and stays visible when `view` flips to "reader"
+   // (stepping the reader pane through hits with the toolbar arrows does that),
+   // and the strict gate would then swallow every further keystroke into a bar
+   // that is still on screen and focusable.
+   if ((d.view() !== "list" && !isSplit()) || !nav.isSearchFilter()) return
    nav.applyFilter(searchTokens(q, nav.searchScope()))
    const h = "#" + nav.tokensSuffix()
    history.replaceState(null, "", h)

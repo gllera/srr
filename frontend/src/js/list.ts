@@ -1361,7 +1361,15 @@ export async function show(anchorNow = false, onInteractive?: () => void): Promi
 export function followCursor(): void {
    const chron = nav.currentChron()
    if (chron < 0) return
-   const row = findRow(chron)
+   // The same freshness gate show() applies, and for the same reason: a window
+   // built for another filter — or invalidated (builtKey === null) — must
+   // REBUILD, never merely be scrolled. Without this an invalidate() that is
+   // NOT followed by a render lands here on the fast path over a stale row set
+   // whose observer invalidate() just tore down, leaving the pane on screen with
+   // infinite scroll permanently dead. The breakpoint crossing is exactly that
+   // sequence: onSplitChange invalidates, then route() reaches this through
+   // guard()'s render path.
+   const row = builtKey === nav.filterKey() ? findRow(chron) : null
    if (!row) {
       void show(true).catch(() => {})
       return

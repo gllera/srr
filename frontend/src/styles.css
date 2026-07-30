@@ -989,7 +989,11 @@ body.srr-playing .srr-pin-progress {
    re-derives every chip after every queue mutation, so the numeral can't lie),
    and "≡" when the queue is full — the door state, whose tap opens the panel to
    prune instead of dead-ending (player.ts toggleQueued). */
-.srr-content audio:has(+ .srr-queue-chip) {
+/* `:not(.srr-broken)` is load-bearing, not defensive: this selector is (0,2,1)
+   and .srr-content's own `.srr-broken { display: none }` is only (0,2,0), so
+   without it a chipped <audio> whose bytes are gone WINS the display cascade and
+   stays on the page as a dead player that can never play. */
+.srr-content audio:has(+ .srr-queue-chip):not(.srr-broken) {
    display: inline-block;
    width: calc(100% - 3.85rem);
    vertical-align: middle;
@@ -1085,6 +1089,22 @@ body.srr-playing .srr-pin-progress {
       }
    }
 }
+/* Media whose bytes are gone is display:none (fmt.ts collapseBrokenMedia stamps
+   .srr-broken on an `error`), and its chip has to go with it. For VIDEO that is
+   the whole bug: a display:none anchor makes the `anchor()` in top/right invalid
+   at computed-value time, so the still-absolutely-positioned chip falls back to
+   its STATIC position — a loose circle sitting on top of the prose. For AUDIO it
+   would merely be an add button for something that can never play. Outranks both
+   chip rules on class count (0,3,0 vs 0,2,1), so it holds wherever it sits.
+   The queue ENTRY, if the article was already queued, deliberately survives: the
+   playlist panel stays the one place a queued item is removed, and an `error`
+   can be a transient CDN blip — silently dropping a persisted user choice is the
+   worse failure. `collapseBrokenMedia` only inserts its caption sibling for an
+   <img alt>, so the chip is still the immediate next sibling here. */
+.srr-content .srr-broken + .srr-queue-chip {
+   display: none;
+}
+
 /* One add = feedback at both ends: the tapped chip pops, and the bar's ≡ count
    pulses (player.ts pulseOnce — the srr-next-pulse idea pointed at the queue). */
 @keyframes srr-chip-pop {
@@ -3754,8 +3774,12 @@ body.srr-split {
    /* Reserve the pane's width at the PAGE level (body padding), so the reader
       column's own `margin: 0 auto` centers it in the REMAINING width — a
       margin-left on .srr-container would pin it against the pane instead (the
-      auto right margin absorbs all the slack). Fixed-position chrome (pane,
-      toolbar, player, search bar, snackbar) is viewport-anchored and unmoved. */
+      auto right margin absorbs all the slack).
+      Body padding moves IN-FLOW content only: a position:fixed box resolves
+      against the viewport, so every fixed bar needs its own left edge moved
+      (below) or it stays centered in the whole window — half a pane width off
+      the column it controls, and painting OVER the pane at any viewport
+      narrower than pane + 2*column. */
    padding-left: var(--split-pane-w);
    /* The pager's preview page must restate the same geometry, or a split-view
       drag would preview the column ~a-gutter to the left of where the commit
@@ -3774,15 +3798,12 @@ body.srr-split {
          window (reader) scroll behind it. */
       overscroll-behavior-y: contain;
       border-right: 1px solid var(--border);
-      /* Bottom padding clears the fixed toolbar, as .srr-container's 4rem does
-         for the reader column; side padding replaces the page gutter the pane
-         no longer inherits. */
-      padding: 0 0.75rem 5rem;
-   }
-   /* The player bar overlays the pane bottom too — mirror the room
-      body.srr-playing .srr-container reserves. */
-   &.srr-playing .srr-list {
-      padding-bottom: 9rem;
+      /* Side padding replaces the page gutter the pane no longer inherits; the
+         bottom tail is breathing room under the last row, NOT chrome clearance
+         — the toolbar and player now start at the pane's right edge (see the
+         left-edge rules below), so neither one covers the pane and reserving
+         their heights here would just be an unexplained blank strip. */
+      padding: 0 0.75rem 1rem;
    }
    /* Surface-transition chrome has no meaning when both surfaces are always on
       screen: back returns to a list that never left, open-article opens a
@@ -3795,6 +3816,25 @@ body.srr-split {
       reader controls + the filter opener. */
    & .srr-toolbar {
       grid-template-columns: minmax(0, 1fr) auto auto auto auto;
+   }
+   /* The READER's fixed chrome, re-centered over the reader area. Each of these
+      is `left: 0; right: 0; max-width: <column>; margin: 0 auto` in the spine,
+      so moving the left edge to the pane's inner edge is the whole fix: the
+      auto margins then center them in exactly the box .srr-container centers
+      in. Without it they sit half a pane width to the LEFT of the column and,
+      below ~1440px, cover the pane's bottom rows. */
+   & .srr-toolbar,
+   & .srr-player,
+   & .srr-snackbar,
+   & .srr-pin-progress {
+      left: var(--split-pane-w);
+   }
+   /* The arrivals pill is the LIST's affordance (a .srr-list child), so it goes
+      the other way — pinned over the PANE. `right` on a fixed box resolves
+      against the viewport, so this insets the right edge to the pane's width
+      and the pill's own auto margins center it there. */
+   & .srr-new-pill {
+      right: calc(100% - var(--split-pane-w));
    }
    /* The pinned search bar rides the PANE, not the reader column — fixed over
       the pane's top at its width (sticky can't stick to a sibling's scroll).

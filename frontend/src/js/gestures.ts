@@ -493,6 +493,15 @@ function inHScrollable(target: EventTarget | null, stop: HTMLElement): boolean {
 
 function pagerStart(target: EventTarget | null, x: number, y: number): void {
    pagerEligible =
+      // Split view: the drag stands down, like pull-to-refresh above. The
+      // reader is in normal flow, so its drag transform paints in the
+      // positioned layer ABOVE the z-auto fixed list pane with nothing to clip
+      // it — the article would slide straight across the list, interleaving
+      // prose with rows. Clipping it would need a wrapper element spanning the
+      // reader area (body's padding box can't be clipped to), which is a
+      // structural change; and split already has both toolbar arrows and the
+      // keyboard for stepping, so the gesture buys nothing here.
+      !document.body.classList.contains("srr-split") &&
       !!pagerSpec &&
       !!pagerSurface &&
       !pagerSurface.hidden &&

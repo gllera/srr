@@ -458,8 +458,24 @@ async function selectTokens(tokens: string[]) {
    // the debounce window lets the stale applySearchQuery fire ~200ms later and
    // bounce the list back into search. Typing itself never routes through here.
    searchUI.clearSearchDebounce()
+   const beforeChron = nav.currentChron()
    nav.applyFilter(tokens)
    await goToList(true)
+   // Split view: the reader pane never left, so a moved cursor cannot stay
+   // invisible. list.render() makes the new filter's anchor the CURRENT cursor
+   // (nav.select — list.ts) exactly when the article on screen is NOT a member of
+   // the filter just picked; nav.listAnchor keeps the cursor untouched whenever it
+   // still matches, so this fires only on a genuine lane change. On the phone that
+   // move is invisible — the reader is hidden and re-derives on its next open. Here
+   // it would leave the reader showing an article outside the active filter while
+   // the still-live toolbar arrows stepped from a position nothing on screen names,
+   // so land the pane on that anchor with the same call a list row tap makes.
+   // Requires an article already on screen: a pane still blank before the
+   // session's first open stays blank (the v1 contract).
+   const after = nav.currentChron()
+   if (isSplit() && beforeChron >= 0 && after >= 0 && after !== beforeChron) {
+      await guard(() => nav.goTo(after))
+   }
 }
 
 async function selectFilter(token: string) {
@@ -504,14 +520,17 @@ async function switchMount(mid: string) {
 // chrome against the shifted bounds. The picker re-renders its own rows itself.
 function toggleUnseenOnly() {
    nav.setUnreadOnly(!nav.isUnreadOnly())
-   if (view === "list") void list.rerender()
-   else {
-      list.invalidate()
-      // The reader re-derives for the new mode: a real article re-probes its
-      // chrome; a placeholder (pos < 0) re-runs the switch (reprobeReaderChrome
-      // would no-op and leave it stale). Shared with menus' afterFrontierMove.
-      reReadReader()
-   }
+   // "Visible" is the real condition, not `view === "list"`: under split the list
+   // pane is on screen whatever the focus surface says, so the zero-row-heights
+   // reason for deferring does not apply and a bare invalidate() would leave a
+   // stale row set — read rows that should now show, or vice versa — beside the
+   // reader, with the observer torn down and no rebuild coming.
+   if (view === "list" || isSplit()) void list.rerender()
+   else list.invalidate()
+   // The reader re-derives for the new mode: a real article re-probes its
+   // chrome; a placeholder (pos < 0) re-runs the switch (reprobeReaderChrome
+   // would no-op and leave it stale). Shared with menus' afterFrontierMove.
+   if (view !== "list") reReadReader()
 }
 
 // Two-finger vertical swipe = step the filter. In the reader, cycle to the next
@@ -577,8 +596,12 @@ const cycleNext = cycle(1)
 // consume bounds a stale "slide" to one render, this clears it when the step
 // produces NO render at all (guard() skipped it on a busy mutex, or it
 // rejected). Neither covers the other's case — see reader.ts entryTransition.
+// Not split-relaxed, deliberately: pagerStart stands the drag down entirely
+// under split (gestures.ts — an unclipped slide would cross the list pane), so
+// this is only ever reached from the single-surface layout, where "reader" is
+// the only view a drag can start in.
 async function pagerCommit(side: "prev" | "next"): Promise<boolean> {
-   if ((view !== "reader" && !isSplit()) || picker.isOpen() || lightbox.isOpen()) return false
+   if (view !== "reader" || picker.isOpen() || lightbox.isOpen()) return false
    const before = nav.currentChron()
    reader.setEntryTransition("slide")
    try {
