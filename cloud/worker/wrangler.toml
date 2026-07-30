@@ -1,0 +1,27 @@
+# SRR Cloud phase-1 edge worker (spec: docs/superpowers/specs/
+# 2026-07-30-srr-cloud-phase1-edge-auth-design.md).
+#
+# run_worker_first is deliberate: EVERY request goes through the Worker, so
+# the assets layer can never serve index.html (or anything) around the auth
+# gate. html_handling "none" keeps ASSETS.fetch exact-path (no directory-index
+# rewrites). The route is inert until an operator-initiated deploy.
+name = "srr-cloud"
+main = "src/index.ts"
+compatibility_date = "2026-07-01"
+workers_dev = false
+
+routes = [{ pattern = "cloud.32b.io/*", zone_name = "32b.io" }]
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+html_handling = "none"
+not_found_handling = "none"
+run_worker_first = true
+
+[[r2_buckets]]
+binding = "STORE"
+bucket_name = "srr-cloud"
+
+[vars]
+LOGIN_URL = "https://www.32b.io/login"

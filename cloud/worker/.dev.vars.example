@@ -1,0 +1,4 @@
+# Copy to .dev.vars (gitignored). For wrangler dev / the smoke test any value
+# works; to accept REAL 32b.io sessions it must equal the 32b Pages project's
+# SESSION_SECRET (copy in ~/ws/32b/.dev.vars) — never commit that value.
+SESSION_SECRET=dev-secret-change-me

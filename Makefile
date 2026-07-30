@@ -1,4 +1,4 @@
-.PHONY: verify verify-fe verify-be check-admin-placeholder check-coverage-test fuzz-be lint-fe format-check-fe format-fe test-fe build-fe build-admin smoke-fe dev-fe vet-be lint-be format-check-be format-be build-be test-be test-race-be test-contract test-browser test-stress test-e2e generate generate-check release clean design-fixture design design-shots
+.PHONY: verify verify-fe verify-be check-admin-placeholder check-coverage-test fuzz-be lint-fe format-check-fe format-fe test-fe build-fe build-admin smoke-fe dev-fe vet-be lint-be format-check-be format-be build-be test-be test-race-be test-contract test-browser test-stress test-e2e generate generate-check release clean design-fixture design design-shots build-cloud verify-cloud smoke-cloud deploy-cloud
 
 SHELL := /bin/bash -e
 
@@ -87,6 +87,32 @@ build-fe: frontend/node_modules/.package-lock.json
 # The boot smoke reads the build output, so it must run after build-fe (the
 # order-only prereq holds even under parallel make).
 smoke-fe: build-fe
+
+# --- SRR Cloud (cloud/worker) ---------------------------------------------
+# build-cloud stages the store-root reader bundle (dist/srrf, relative
+# PACK_BASE — the `srr frontend update` shell) as the Worker's static assets.
+# _headers is a Pages artifact; the Worker sets its own headers, so it is
+# dropped rather than served as a file.
+cloud/worker/node_modules/.package-lock.json: cloud/worker/package-lock.json
+	cd cloud/worker && npm ci
+
+build-cloud: build-fe
+	rm -rf cloud/worker/public
+	mkdir -p cloud/worker/public
+	cp -r dist/srrf/. cloud/worker/public/
+	rm -f cloud/worker/public/_headers
+
+verify-cloud: build-cloud cloud/worker/node_modules/.package-lock.json
+	cd cloud/worker && npm run check && npm run test
+
+# Opt-in end-to-end smoke: real srr store → local R2 → wrangler dev → HTTP
+# checks per route class. Needs the srr binary and the staged bundle.
+smoke-cloud: build-cloud build-be cloud/worker/node_modules/.package-lock.json
+	node cloud/e2e/smoke.mjs
+
+# DEPLOY IS MANUAL AND CURRENTLY DEFERRED — see the phase-1 plan's runbook.
+deploy-cloud: verify-cloud
+	cd cloud/worker && npx wrangler deploy
 
 vet-be test-be:
 	cd backend && go $(@:-be=) ./...
