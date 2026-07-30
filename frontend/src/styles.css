@@ -1128,6 +1128,18 @@ body.srr-playing .srr-pin-progress {
    }
 }
 
+/* TTS narration sync (tts.ts): the block currently being read aloud, and
+   the click-to-seek affordance while narration is live. Colors ride
+   --accent so both themes get it for free. */
+.srr-tts-current {
+   background: color-mix(in srgb, var(--accent) 14%, transparent);
+   border-radius: 4px;
+   transition: background 0.25s ease;
+}
+.srr-tts-live [data-tts] {
+   cursor: pointer;
+}
+
 /* Toolbar */
 .srr-toolbar {
    position: fixed;

@@ -22,6 +22,7 @@ import { mountLabel } from "./mounts"
 import * as nav from "./nav"
 import * as player from "./player"
 import { isSplit } from "./split"
+import { wireTTS } from "./tts"
 
 // The real reader's nodes in article-view's shape. index.html declares these; the
 // pager builds its own set with the same classes.
@@ -331,7 +332,13 @@ export function render(o: IShowFeed) {
       //    is a <button>, never audio/video, so the index pairing the steps
       //    above rely on is untouched.
       player.injectQueueChips()
-   } else player.noteMounted(null)
+      // 7. narration sync — after rehome so the scan sees the final element
+      //    set (a relocated narration element included).
+      wireTTS({ title: el.title, content: el.content })
+   } else {
+      player.noteMounted(null)
+      wireTTS({ title: el.title, content: el.content }) // clears any old binding
+   }
    el.prev.disabled = !o.has_left
    el.next.disabled = !o.has_right
    syncNextCount(o)
