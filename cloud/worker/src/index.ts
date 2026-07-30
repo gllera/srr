@@ -22,6 +22,29 @@ const json = (status: number, error: string) =>
 
 const notFound = () => new Response("not found", { status: 404 })
 
+// Store and sync bytes are FEED-SOURCED or client-written, and here they are
+// served from the app's OWN origin under the tenant prefix — the one assumption
+// backend/assets.go's inert-type rule (sniffedMediaType) explicitly does NOT
+// make: it refuses to adopt a sniffed text/html because "the asset store is a
+// separate origin a reader loads media from". True of the Pages/CDN deploy,
+// false of this Worker. Restore the guarantee at the edge, on every user byte:
+//
+//   nosniff — no MIME confusion promoting a declared type into a document;
+//   sandbox — a NAVIGATED object lands in an opaque origin with scripting off,
+//             so an image/svg+xml a feed talked the asset pipeline into storing
+//             reaches neither this origin's cookies nor its store.
+//
+// Both are inert for SUBRESOURCE loads (<img>, <audio>, fetch): CSP sandbox is
+// only enforced when the response is a document, so the reader is unaffected.
+// Stamped on the way OUT (dispatch), so a cache hit, a fresh R2 read, a 304 and
+// an error body all carry them without each return site remembering to.
+function userContent(res: Response): Response {
+   const headers = new Headers(res.headers)
+   headers.set("x-content-type-options", "nosniff")
+   headers.set("content-security-policy", "sandbox")
+   return new Response(res.body, { status: res.status, statusText: res.statusText, headers })
+}
+
 const isNavigation = (request: Request) =>
    request.headers.get("sec-fetch-mode") === "navigate" || (request.headers.get("accept") || "").includes("text/html")
 
@@ -68,7 +91,14 @@ async function serveStore(
 ): Promise<Response> {
    const objectKey = `u/${uid}/${key}`
    const ranged = request.headers.has("range")
-   const conditional = request.headers.has("if-none-match") || request.headers.has("if-modified-since")
+   // Two different kinds of condition, and onlyIf below forwards BOTH: cache
+   // validators (the conditional GET the reader itself sends) and strong
+   // preconditions (If-Match / If-Unmodified-Since). Either one has to bypass
+   // the edge cache — answering a precondition out of a cached 200 ignores it —
+   // and they fail with different statuses.
+   const validator = request.headers.has("if-none-match") || request.headers.has("if-modified-since")
+   const precondition = request.headers.has("if-match") || request.headers.has("if-unmodified-since")
+   const conditional = validator || precondition
 
    if (!ranged && !conditional) {
       try {
@@ -96,7 +126,14 @@ async function serveStore(
    headers.set("etag", obj.httpEtag)
    headers.set("accept-ranges", "bytes")
 
-   if (!("body" in obj) || !obj.body) return new Response(null, { status: 304, headers })
+   // R2 answers ANY failed condition with a bodyless object and never says which
+   // one failed. Only a strong precondition was sent ⇒ 412; anything carrying a
+   // cache validator ⇒ 304. With both present the two are genuinely
+   // indistinguishable here (RFC 9110 evaluates If-Match first, so a strict
+   // reading would 412) — 304 is the benign answer, and no SRR client sends both.
+   if (!("body" in obj) || !obj.body) {
+      return new Response(null, { status: precondition && !validator ? 412 : 304, headers })
+   }
 
    let status = 200
    const r = obj.range
@@ -135,6 +172,12 @@ const SYNC_MAX_BYTES = 256 * 1024
 async function serveSync(request: Request, env: Env, uid: string): Promise<Response> {
    const key = `u/${uid}/sync.json`
    if (request.method === "PUT") {
+      // Cap BEFORE buffering: arrayBuffer() makes the whole body resident in the
+      // isolate, so an oversized PUT was paid for in full and only then refused.
+      // Content-Length is a hint, not the authority — absent under chunked
+      // encoding and a client may simply lie — so the post-buffer check stays.
+      const declared = Number(request.headers.get("content-length"))
+      if (Number.isFinite(declared) && declared > SYNC_MAX_BYTES) return json(413, "sync blob too large")
       const body = await request.arrayBuffer()
       if (body.byteLength > SYNC_MAX_BYTES) return json(413, "sync blob too large")
       await env.STORE.put(key, body, {
@@ -197,13 +240,13 @@ async function dispatch(
          return serveShellAsset(request, env, route.name)
       case "sync":
          if (!authorizedFor(route.uid)) return deny(request, env, authenticated)
-         return serveSync(request, env, route.uid)
+         return userContent(await serveSync(request, env, route.uid))
       case "denied":
          // Backend-only object classes 404 even for the owner (store-visibility split).
          return notFound()
       case "store":
          if (!authorizedFor(route.uid)) return deny(request, env, authenticated)
-         return serveStore(request, env, ctx, route.uid, route.key)
+         return userContent(await serveStore(request, env, ctx, route.uid, route.key))
       case "none":
          return notFound()
    }

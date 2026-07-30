@@ -146,6 +146,32 @@ describe("store objects", () => {
          api({ cookie: await sessCookie(t1email), "if-none-match": etag }),
       )
       expect(res.status).toBe(304)
+      // The guards are stamped on EGRESS, so even a bodyless answer carries them.
+      expect(res.headers.get("x-content-type-options")).toBe("nosniff")
+   })
+
+   it("412s a failed If-Match — a precondition is not a cache validator", async () => {
+      await env.STORE.put("u/t1/db.gz", gz)
+      const res = await SELF.fetch(
+         `${BASE}/u/t1/db.gz`,
+         api({ cookie: await sessCookie(t1email), "if-match": '"not-the-etag"' }),
+      )
+      expect(res.status).toBe(412)
+   })
+
+   // The store is served from the APP's origin here, so a feed-sourced object
+   // that a browser would treat as a document must not be able to script it.
+   it("stamps nosniff + sandbox on store bytes", async () => {
+      await env.STORE.put("u/t1/assets/ab/0123456789abcdef.svg", "<svg xmlns='http://www.w3.org/2000/svg'/>", {
+         httpMetadata: { contentType: "image/svg+xml" },
+      })
+      const res = await SELF.fetch(
+         `${BASE}/u/t1/assets/ab/0123456789abcdef.svg`,
+         api({ cookie: await sessCookie(t1email) }),
+      )
+      expect(res.status).toBe(200)
+      expect(res.headers.get("x-content-type-options")).toBe("nosniff")
+      expect(res.headers.get("content-security-policy")).toBe("sandbox")
    })
 
    it("honors Range (media seeking)", async () => {
@@ -195,6 +221,15 @@ describe("sync.json", () => {
       expect(get.headers.get("cache-control")).toBe("no-cache")
       expect(get.headers.get("content-type")).toBe("application/json")
       expect(await get.text()).toBe(blob)
+   })
+
+   it("413s a declared oversize Content-Length, before the body is buffered", async () => {
+      const res = await SELF.fetch(`${BASE}/u/t1/sync.json`, {
+         method: "PUT",
+         headers: { cookie: await sessCookie(t1email), "content-length": String(256 * 1024 + 1) },
+         body: "{}",
+      })
+      expect(res.status).toBe(413)
    })
 
    it("413s an oversize body", async () => {
