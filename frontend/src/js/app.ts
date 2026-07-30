@@ -406,11 +406,9 @@ async function route(hash: string) {
    const posStr = nav.hashPos(hash)
    if (posStr !== "" && INT_POS.test(posStr)) {
       await guard(() => nav.fromHash(hash))
-      // Split view: the list pane boots beside the article. After the guarded
-      // resolve so the anchor (nav.pos) is settled; list.show's own freshness
-      // token absorbs a superseding navigation, and its errors stay silent here
-      // (guard() already owns the article's error surface).
-      if (isSplit()) await list.show(true).catch(() => {})
+      // Split view: deliberately no list call here — guard()'s render path runs
+      // list.followCursor(), whose not-yet-built fallback is show(true), so a
+      // deep link/restore already builds the list pane beside the article.
       return
    }
    // The list hash carries the mount too (§6.3) — extract it and switch the

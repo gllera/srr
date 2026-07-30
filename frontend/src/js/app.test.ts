@@ -422,6 +422,74 @@ describe("route() — surface selection from the hash", () => {
    })
 })
 
+// Split view (two-pane desktop): isSplit() reads body.srr-split back rather
+// than caching a boolean, so stamping the class directly drives every split
+// branch with no matchMedia stub (jsdom has none, so initSplit() no-ops and
+// can't clear it). The class MUST come off in afterEach — every other suite
+// in this file depends on narrow mode.
+describe("split view (body.srr-split)", () => {
+   const reader = () => document.querySelector(".srr-reader") as HTMLElement
+   const listPane = () => document.querySelector(".srr-list") as HTMLElement
+   const prevBtn = () => document.querySelector(".srr-prev") as HTMLButtonElement
+   const nextBtn = () => document.querySelector(".srr-next") as HTMLButtonElement
+
+   beforeEach(() => document.body.classList.add("srr-split"))
+   afterEach(() => {
+      document.body.classList.remove("srr-split")
+      // clearAllMocks resets calls, not mockReturnValue — pin the default back
+      // (the stateful-currentChron describes below do the same).
+      nav.currentChron.mockReturnValue(-1)
+   })
+
+   it("keeps both panes visible when an article opens, without force-disabling prev/next", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
+      hashTo("#2")
+      await flush()
+      expect(reader().hasAttribute("hidden")).toBe(false)
+      expect(listPane().hasAttribute("hidden")).toBe(false) // narrow showReader would hide it
+      expect(prevBtn().disabled).toBe(false) // render() set them from has_left/has_right…
+      expect(nextBtn().disabled).toBe(false) // …and nothing re-disabled them
+   })
+
+   it("returning to the list keeps the open article beside it, and hides it when none is open", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
+      hashTo("#2")
+      await flush()
+      // An article is on screen (per the mocked nav) — the reader pane stays.
+      nav.currentChron.mockReturnValue(2)
+      hashTo("#!news")
+      await flush()
+      expect(document.body.classList.contains("srr-view-list")).toBe(true)
+      expect(listPane().hasAttribute("hidden")).toBe(false)
+      expect(reader().hasAttribute("hidden")).toBe(false)
+      // Narrow showList force-disables prev/next; the split branch must not.
+      expect(prevBtn().disabled).toBe(false)
+      expect(nextBtn().disabled).toBe(false)
+      // No article on screen (-1): the reader pane hides — the deliberate
+      // blank right side before the session's first open.
+      nav.currentChron.mockReturnValue(-1)
+      hashTo("#!other")
+      await flush()
+      expect(reader().hasAttribute("hidden")).toBe(true)
+   })
+
+   it("brings the list cursor along after a guarded navigation — split only", async () => {
+      await boot()
+      list.followCursor.mockClear()
+      hashTo("#2")
+      await flush()
+      expect(list.followCursor).toHaveBeenCalled()
+      // Narrow: the same navigation must NOT touch the hidden list.
+      document.body.classList.remove("srr-split")
+      list.followCursor.mockClear()
+      hashTo("#3")
+      await flush()
+      expect(list.followCursor).not.toHaveBeenCalled()
+   })
+})
+
 // The reader's programmatic scroll-to-top on every render must ALSO resync the
 // toolbar auto-hide baseline (gestures.resetScroll), so the bottom bar is
 // revealed on arrival instead of leaking the hidden state from the previous

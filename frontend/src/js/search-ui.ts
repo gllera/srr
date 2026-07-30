@@ -23,6 +23,7 @@
 import { el } from "./els"
 import * as list from "./list"
 import * as nav from "./nav"
+import { isSplit } from "./split"
 
 export interface SearchDeps {
    // Which surface is showing. Search is a LIST filter mode: a pending debounce
@@ -142,12 +143,8 @@ async function applySearchQuery(q: string): Promise<void> {
 export function syncSearchBar(): void {
    const on = nav.isSearchFilter()
    // Split view: search is a list-pane mode and the pane is always on screen,
-   // so the bar shows whatever surface has key focus (class check, not an
-   // import — the same dependency-free idiom gestures.ts uses).
-   document.body.classList.toggle(
-      "srr-searching",
-      on && (d.view() === "list" || document.body.classList.contains("srr-split")),
-   )
+   // so the bar shows whatever surface has key focus.
+   document.body.classList.toggle("srr-searching", on && (d.view() === "list" || isSplit()))
    if (!on) {
       el.searchNote.hidden = true
       return
