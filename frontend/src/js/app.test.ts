@@ -441,8 +441,12 @@ describe("split view (body.srr-split)", () => {
    afterEach(() => {
       document.body.classList.remove("srr-split")
       // clearAllMocks resets calls, not mockReturnValue — pin the default back
-      // (the stateful-currentChron describes below do the same).
+      // (the stateful-currentChron describes below do the same). Resetting HERE
+      // rather than at the end of a case matters: a failing assertion skips the
+      // rest of its body, so an in-body reset would leak the mock into every
+      // case after it and turn one real failure into a cascade.
       nav.currentChron.mockReturnValue(-1)
+      nav.isSearchFilter.mockReturnValue(false)
    })
 
    it("keeps both panes visible when an article opens, without force-disabling prev/next", async () => {
@@ -542,6 +546,140 @@ describe("split view (body.srr-split)", () => {
       expect(reader().hasAttribute("hidden")).toBe(false)
       expect(reader().classList.contains("srr-reader-empty")).toBe(false)
       expect(document.querySelector(".srr-title")!.textContent).toBe(title)
+   })
+
+   // Under split the reader never leaves the screen, so Escape back into it is a
+   // FOCUS change. Routing it through nav.goTo re-rendered the article that was
+   // already there — tearing down its DOM and scrolling it back to the top — so
+   // glancing at the list and returning threw away your place in a long article
+   // that had been visible the whole time.
+   it("re-entering the reader on the article it already shows is a focus change, not a render", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
+      // Before the render: the MOUNTED chron is stamped as the article paints.
+      nav.currentChron.mockReturnValue(2)
+      hashTo("#2")
+      await flush()
+      hashTo("#!news") // the LIST takes focus; the article stays in the pane
+      await flush()
+      const mounted = document.querySelector(".srr-content")!.firstElementChild
+      expect(mounted).not.toBeNull()
+
+      nav.goTo.mockClear()
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }))
+      await flush()
+      expect(document.body.classList.contains("srr-view-list")).toBe(false)
+      expect(nav.goTo).not.toHaveBeenCalled()
+      // Node IDENTITY: a re-render replaces the content host's children.
+      expect(document.querySelector(".srr-content")!.firstElementChild).toBe(mounted)
+   })
+
+   // …but landing somewhere NEW is a real navigation and must still render. The
+   // guard is the MOUNTED chron, not nav.pos: the list moves that cursor too.
+   it("still renders when the cursor has moved off the article the pane shows", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
+      nav.currentChron.mockReturnValue(2)
+      hashTo("#2") // the pane mounts chron 2…
+      await flush()
+      hashTo("#!news")
+      await flush()
+      nav.currentChron.mockReturnValue(7) // …and the list stepped the shared cursor off it
+      nav.goTo.mockClear()
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }))
+      await flush()
+      expect(nav.goTo).toHaveBeenCalledWith(7)
+   })
+
+   // The resting pane's Next is the "start reading" affordance its own copy
+   // advertises, and nav.restingState builds that panel for a cursor of -1. But
+   // the pane only exists beside a list that has ALREADY seeded the shared cursor
+   // at its anchor, so a nav.right() step landed one past it: the panel offered
+   // the backlog and opened its second article, marking the first read behind you.
+   it("starts reading AT the highlighted article from the resting pane, not past it", async () => {
+      await boot()
+      nav.currentChron.mockReturnValue(-1)
+      hashTo("#!news")
+      await flush()
+      expect(reader().classList.contains("srr-reader-empty")).toBe(true)
+      expect(nextBtn().disabled).toBe(false)
+
+      // The list's anchor seed lands: the shared cursor now names the top unread.
+      nav.currentChron.mockReturnValue(4)
+      nav.right.mockClear()
+      nav.goTo.mockClear()
+      nextBtn().click()
+      await flush()
+      expect(nav.right).not.toHaveBeenCalled() // would have opened chron 5
+      expect(nav.goTo).toHaveBeenCalledWith(4)
+   })
+
+   // A real placeholder in the READER surface is the opposite case: pos is -1
+   // (nav.switchFilter put it there) and a →-step resolves the first match
+   // itself, so Next must keep stepping.
+   it("keeps Next stepping on a reader-surface placeholder", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue({ ...showFeed({ has_right: true }), placeholder: true, notStarted: true })
+      hashTo("#0") // a POSITIONED hash routes to the reader surface
+      await flush()
+      expect(document.body.classList.contains("srr-view-list")).toBe(false)
+      expect(reader().classList.contains("srr-reader-empty")).toBe(true)
+      nav.right.mockClear()
+      nextBtn().click()
+      await flush()
+      expect(nav.right).toHaveBeenCalled()
+   })
+
+   // The pane keeps its article while a query changes under it (a query is a list
+   // presentation mode, not a landing) — but its arrows and pill went on
+   // describing the filter that was replaced. Next stayed armed for a lane that
+   // no longer existed, and pressing it raised the raw internal "no right match"
+   // in the error dialog.
+   it("re-derives the pane's chrome when the list switches to a search filter", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true, right_count: 25 }))
+      hashTo("#2")
+      await flush()
+      nav.currentChron.mockReturnValue(2)
+      hashTo("#!news")
+      await flush()
+      expect(nextBtn().disabled).toBe(false)
+      expect(document.querySelector(".srr-next-count")!.textContent).toBe("25")
+
+      // Entering search: the query matches nothing, so the pane's Next is dead.
+      nav.isSearchFilter.mockReturnValue(true)
+      nav.probeCurrent.mockResolvedValue(showFeed({ has_left: false, has_right: false, right_count: 0 }))
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "/", bubbles: true, cancelable: true }))
+      await flush()
+      expect(nextBtn().disabled).toBe(true)
+      expect(document.querySelector(".srr-next-count")!.textContent).toBe("0")
+   })
+
+   // …and on EVERY query change, not just on entering search. A single
+   // re-derive at entry would freeze the empty-query answer — Next dead — over
+   // every query typed after it, which is the same staleness pointing the other
+   // way. (Enter applies straight through; the 200ms debounce rides "input".)
+   it("re-derives the pane's chrome on every query change, not just at search entry", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true, right_count: 25 }))
+      nav.currentChron.mockReturnValue(2)
+      hashTo("#2")
+      await flush()
+      hashTo("#!news")
+      await flush()
+      expect(document.querySelector(".srr-next-count")!.textContent).toBe("25")
+
+      nav.isSearchFilter.mockReturnValue(true)
+      // A query WITH hits: the pane keeps its article, but its arrows point into
+      // the hit set now — 15 ahead, nothing behind.
+      nav.probeCurrent.mockResolvedValue(showFeed({ has_left: false, has_right: true, right_count: 15 }))
+      const input = document.querySelector(".srr-search-input") as HTMLInputElement
+      input.value = "sport"
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }))
+      await flush()
+      expect(document.querySelector(".srr-next-count")!.textContent).toBe("15")
+      expect(prevBtn().disabled).toBe(true)
+      expect(nextBtn().disabled).toBe(false)
    })
 
    it("brings the list cursor along after a guarded navigation — split only", async () => {

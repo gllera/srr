@@ -38,6 +38,11 @@ export interface SearchDeps {
    listTitle: () => string
    // The retryable error popup.
    showError: (e: unknown, retry?: () => void) => void
+   // Split view: the reader pane keeps the article it is showing while a query
+   // changes under it (a query is a list presentation mode, not a landing), so
+   // its arrows and pending pill have to be re-derived against the new hit set.
+   // A no-op off split / with no article in the pane — app.ts owns that test.
+   reprobeReader: () => void
 }
 
 let d: SearchDeps
@@ -143,6 +148,9 @@ async function applySearchQuery(q: string): Promise<void> {
       return
    }
    syncSearchBar()
+   // The hit set just moved under the split view's reader pane; its arrows and
+   // pill describe neighbours in THIS query now.
+   d.reprobeReader()
 }
 
 // Reflect the active search state into the bar: show/hide it (CSS gates display

@@ -670,14 +670,21 @@ function unseenActive(): boolean {
 //    pill counts what → still has. Without the floor the first recorded step
 //    dropped the pill by 2 at once (the entry article AND the landing are
 //    both marked on ENTER); with it, the first step ticks −1 like every other.
-// The last article reads 0 — nothing is ahead, recorded or not. pos −1 (the
-// armed not-started placeholder) floors nothing: the pill is the members'
+// The last article reads 0 — nothing is ahead, recorded or not. A floor of −1
+// (the armed not-started placeholder) floors nothing: the pill is the members'
 // whole backlog, the badge itself.
-async function pendingRight(seenMap?: Record<string, number>): Promise<number> {
-   if (filter.saved) return savedAhead(pos)
+//
+// `floor` defaults to the cursor but is EXPLICIT for restingState, which needs
+// the whole-backlog answer under a cursor the list has already seeded. Reading
+// `pos` directly made that answer a race: the split view's resting pane got 31
+// at boot only because it painted before the list's anchor seed landed, and 30
+// after any repaint — a backlog count that quietly dropped an article for no
+// reason the user could see.
+async function pendingRight(seenMap?: Record<string, number>, floor = pos): Promise<number> {
+   if (filter.saved) return savedAhead(floor)
    if (filter.search) {
       await ensureSearchSet()
-      return searchSorted.filter((c) => c > pos).length
+      return searchSorted.filter((c) => c > floor).length
    }
    const members: IFeed[] = []
    for (const id of filter.feeds.keys()) {
@@ -691,8 +698,8 @@ async function pendingRight(seenMap?: Record<string, number>): Promise<number> {
    const seen = seenMap ?? readSeen()
    const eff = (id: number): number | undefined => {
       const s = seen["feed:" + id]
-      if (pos < 0) return s
-      return Math.max(s ?? -1, pos)
+      if (floor < 0) return s
+      return Math.max(s ?? -1, floor)
    }
    return tagUnreadFromCounts(members, await tallyWith(members, eff))
 }
@@ -837,10 +844,14 @@ export async function restingState(): Promise<IShowFeed> {
       // has anything at all, since a →-step from pos = -1 resolves the first
       // match itself (and reports its own no-match placeholder if there is none).
       has_right: data.db.total_art > 0,
-      // pos is -1, so the pill has no cursor to floor at and reads the lane's
-      // whole unread backlog — the picker badge, which is the right readout for
-      // "here is what is waiting".
-      right_count: await pendingRight().catch(() => -1),
+      // Floored at -1, NOT at pos: the pill reads the lane's whole unread
+      // backlog — the picker badge, the right readout for "here is what is
+      // waiting". The floor is passed rather than inherited because this panel's
+      // premise ("nothing is open, so there is no cursor") is exactly what the
+      // split view breaks: the LIST seeds the shared cursor at its anchor long
+      // before anyone opens anything, and an inherited floor then hid the
+      // highlighted article from its own backlog count.
+      right_count: await pendingRight(undefined, -1).catch(() => -1),
       placeholder: true,
       notStarted,
       startFeed: anchor >= 0 ? await Promise.resolve(data.getFeedId(anchor)).catch(() => undefined) : undefined,

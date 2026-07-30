@@ -637,6 +637,81 @@ describe("browser: split view (two-pane desktop)", () => {
       }
    })
 
+   // Under split the reader never leaves the screen, so Escape back into it is a
+   // FOCUS change. Routing it through a render tore the mounted article down and
+   // scrolled it to the top: glance at the list and come back, and you had lost
+   // your place in an article that was visible the whole time.
+   it("re-entering the reader keeps the mounted article and its scroll", async () => {
+      const ctx = await browser.createBrowserContext()
+      try {
+         const p = await ctx.newPage()
+         await p.setViewport({ width: 1280, height: 700 })
+         await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
+         await waitList(p)
+         await clickRow(p, "news title 5")
+         await waitReader(p)
+         // The shared fixture's articles are one line long, so give this one a
+         // tall marker: it makes the reader column genuinely window-scrollable
+         // AND is destroyed by a re-render (the content host's children are
+         // replaced), so one node answers both halves of the contract.
+         await p.evaluate(() => {
+            const tall = document.createElement("div")
+            tall.dataset.e2eMark = "kept"
+            tall.style.height = "2000px"
+            document.querySelector(".srr-content")!.append(tall)
+            window.scrollTo(0, 300)
+         })
+         await new Promise((r) => setTimeout(r, 300))
+         const scrolled = await p.evaluate(() => Math.round(scrollY))
+         expect(scrolled).toBeGreaterThan(0)
+
+         await p.keyboard.press("Escape") // → the list surface
+         await p.waitForFunction(() => document.body.classList.contains("srr-view-list"), { timeout: 10_000 })
+         await p.keyboard.press("Escape") // → back into the reader
+         await p.waitForFunction(() => !document.body.classList.contains("srr-view-list"), { timeout: 10_000 })
+         await new Promise((r) => setTimeout(r, 400))
+
+         expect(
+            await p.evaluate(() => ({
+               kept: !!document.querySelector(".srr-content [data-e2e-mark='kept']"),
+               title: document.querySelector(".srr-title")?.textContent,
+               y: Math.round(scrollY),
+            })),
+         ).toEqual({ kept: true, title: "news title 5", y: scrolled })
+      } finally {
+         await ctx.close()
+      }
+   })
+
+   // The resting pane's Next is the "start reading" affordance its own copy
+   // advertises. nav.restingState builds that panel for a cursor of -1, but the
+   // pane only exists beside a list that has ALREADY seeded the shared cursor at
+   // its anchor — so the step landed one PAST it, opening the backlog's second
+   // article and marking the first read behind you.
+   it("starts reading at the article the list highlights, from the resting pane", async () => {
+      const ctx = await browser.createBrowserContext()
+      try {
+         const p = await ctx.newPage()
+         await p.setViewport({ width: 1280, height: 900 })
+         await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
+         await waitList(p)
+         // A list-only boot rests the pane; the list seeds its anchor row.
+         await p.waitForFunction(() => !!document.querySelector(".srr-reader.srr-reader-empty"), { timeout: 10_000 })
+         await p.waitForFunction(() => !!document.querySelector(".srr-row-current"), { timeout: 10_000 })
+         const highlighted = await p.evaluate(
+            () => document.querySelector(".srr-row-current .srr-row-title")?.textContent,
+         )
+
+         await p.evaluate(() => (document.querySelector(".srr-next") as HTMLButtonElement).click())
+         await waitReader(p)
+         // The panel offered the backlog; it must open the article it was
+         // pointing at, not the one after it.
+         expect(await p.evaluate(() => document.querySelector(".srr-title")?.textContent)).toBe(highlighted)
+      } finally {
+         await ctx.close()
+      }
+   })
+
    it("stays single-surface below the breakpoint (regression)", async () => {
       const ctx = await browser.createBrowserContext()
       try {

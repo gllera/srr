@@ -161,6 +161,17 @@ async function paintRestingPane(): Promise<void> {
 // filter's oldest-unseen article (start of the backlog), else its newest.
 async function enterReader() {
    const chron = nav.currentChron()
+   // Split view: the reader never left. When the pane is ALREADY mounted on the
+   // article being asked for, "entering" it is a focus change and nothing more —
+   // re-rendering would tear down the mounted DOM and scroll it back to its top,
+   // so glancing at the list and coming back (Escape, Escape) threw away your
+   // place in a long article that had been on screen the whole time. The test is
+   // the MOUNTED chron, not nav.pos: the list moves that cursor too, and landing
+   // somewhere new is a real navigation that must still render.
+   if (isSplit() && chron >= 0 && reader.mountedArticle() === chron) {
+      showReader()
+      return
+   }
    if (chron >= 0) return guard(() => nav.goTo(chron))
    const anchor = await nav.listAnchor() // oldest unseen, else -1 (newest)
    return anchor >= 0 ? guard(() => nav.goTo(anchor)) : guard(() => nav.last())
@@ -249,6 +260,23 @@ async function guardBg(fn: () => Promise<void>): Promise<boolean> {
    } finally {
       release(token)
    }
+}
+
+// Split view: a filter change deliberately leaves the pane's article on screen
+// (selectTokens explains why for a query) while its arrows and pill go on
+// describing the filter that was REPLACED. Open search from the list and the
+// toolbar kept advertising "25 ›" for a lane that no longer existed, Next armed;
+// pressing it — button or → — ran nav.right() against a query matching nothing
+// and put the raw internal "no right match" up in the error dialog. Re-derive
+// against the new bounds instead: probeCurrent answers for the article the pane
+// is SHOWING, so an empty query disarms Next and a real one points it at the
+// next hit. Every filter-change path needs this, the per-keystroke one included
+// — a single re-derive at search ENTRY would just freeze the empty-query answer
+// (Next dead) over every query typed after it.
+// A no-op off split and whenever the pane holds no article, so callers need no
+// layout test of their own.
+function reprobePaneChrome() {
+   if (readerLive()) reader.reprobeReaderChrome()
 }
 
 // Re-derive the reader after its filter bounds/mode shifted (a frontier gesture
@@ -528,6 +556,8 @@ async function selectTokens(tokens: string[]) {
    // about row order, not a landing), and it is typed WHILE reading. Following it
    // would yank the pane onto the newest hit at every keystroke — and onto the
    // no-match placeholder the moment the bar opens empty.
+   // …but exempt from the LANDING is not exempt from the CHROME (reprobePaneChrome).
+   if (nav.isSearchFilter()) reprobePaneChrome()
    if (readerLive() && !nav.isSearchFilter()) {
       const anchor = await nav.listAnchor()
       // replace, not push: goToList already pushed this filter change, and a
@@ -982,7 +1012,16 @@ async function init() {
    )
 
    el.prev.addEventListener("click", () => guard(() => nav.left()))
-   el.next.addEventListener("click", () => guard(() => nav.right()))
+   // Next STEPS the cursor everywhere except the split view's resting pane,
+   // where the same button is the "start reading" affordance its own copy
+   // advertises ("Tap Next to start reading"). nav.restingState builds that panel
+   // for a cursor of -1, from which a →-step resolves the FIRST match itself —
+   // but the pane only exists beside a list that has already seeded the shared
+   // cursor at its anchor, so the step landed one past it: the panel offered the
+   // backlog and then opened its second article, marking the first read behind
+   // you. enterReader resolves the same answer Escape and a row tap give, which
+   // is also the row the list is highlighting as it says this.
+   el.next.addEventListener("click", () => (reader.isResting() ? void enterReader() : guard(() => nav.right())))
    // The frontier menu rides the reader's next pill as a secondary gesture —
    // its only anchor; see menus.frontierMenuItems.
    menus.bindFrontierMenu(el.next)
@@ -1024,6 +1063,7 @@ async function init() {
       setTitle,
       listTitle,
       showError,
+      reprobeReader: reprobePaneChrome,
    })
    el.save.addEventListener("click", () => !el.save.disabled && toggleSave())
    el.popupClose.addEventListener("click", closePopup)

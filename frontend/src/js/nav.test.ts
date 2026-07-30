@@ -705,6 +705,33 @@ describe("right_count", () => {
 // both numbers are mode-independent for the same (seen, pos). Any future edit
 // to pendingRight, recordSeen, unreadCounts, or the frontier gestures that
 // re-breaks any of the reported behaviors fails here, whatever the scenario.
+// The split view's resting pane. Its panel and pill are built for "nothing is
+// open", and the module used to spell that as "pos is -1" by reading the cursor
+// directly. Under split that premise is false: the LIST seeds the shared cursor
+// at its anchor long before anyone opens anything, so the count floored at it
+// and hid the highlighted article from its own backlog — 31 at boot (the paint
+// won a race against the seed) and 30 after any repaint, for no reason the user
+// could see. The floor is passed explicitly now, so the answer is the same
+// whatever the cursor happens to be.
+describe("restingState — the backlog count is cursor-independent", () => {
+   it("counts the whole unread backlog, cursor or no cursor", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      // Nothing read: all four are waiting.
+      expect((await nav.restingState()).right_count).toBe(4)
+      // The list's anchor seed lands on the oldest unread. The panel still
+      // describes the same backlog — including the article the list highlights.
+      await nav.goTo(0, false, true)
+      expect(nav.currentChron()).toBe(0)
+      expect((await nav.restingState()).right_count).toBe(4)
+   })
+
+   it("still follows the frontier — a read prefix leaves the pane counting the rest", async () => {
+      setupIndex([{ feedId: 1 }, { feedId: 1 }, { feedId: 1 }, { feedId: 1 }])
+      localStorage.setItem("srr-seen", JSON.stringify({ "feed:1": 1 })) // chrons 0,1 read
+      expect((await nav.restingState()).right_count).toBe(2)
+   })
+})
+
 describe("badge↔pill differential oracle", () => {
    afterEach(() => nav.setUnreadOnly(false))
 

@@ -277,6 +277,7 @@ export function render(o: IShowFeed) {
    entryTransition = null
    if (o.placeholder) return renderEmptyReader(o)
    painted = true
+   restingPane = false
    el.article.classList.remove("srr-reader-empty")
    const feed = data.db.feeds[o.article.f]
    // Source tint, source name, desk, title, permalink and dateline in one call —
@@ -385,6 +386,7 @@ export function render(o: IShowFeed) {
 // grab — are skipped. Everything above them is the same panel either way.
 function renderEmptyReader(o: IShowFeed, resting = false) {
    painted = false
+   restingPane = resting
    el.article.classList.add("srr-reader-empty")
    el.article.classList.remove("srr-reader-titleless")
    delete el.article.dataset.src
@@ -448,6 +450,28 @@ function renderEmptyReader(o: IShowFeed, resting = false) {
 let painted = false
 export function hasArticle(): boolean {
    return painted && !el.article.hidden && !el.article.classList.contains("srr-reader-empty")
+}
+
+// The chron this surface has MOUNTED, or -1 when it holds no article. Not
+// nav.pos: that is the shared cursor the list moves too, so under split the two
+// come apart routinely. The question this answers is narrower and physical —
+// "are these exact bytes already on screen?" — which is what lets split's
+// Escape treat re-entering the reader as a focus change rather than a
+// navigation, instead of re-rendering an article that never left.
+export function mountedArticle(): number {
+   return painted ? mountedChron : -1
+}
+
+// Is the pane showing the split view's RESTING panel (renderResting), as opposed
+// to a navigational placeholder in the reader surface? The two paint the same
+// panel and differ in what their armed Next MEANS: on a real placeholder pos is
+// -1 (nav.switchFilter put it there) and a →-step resolves the first match
+// itself, while the resting pane sits beside a list that has already seeded the
+// shared cursor — so stepping from it would skip whatever the list highlights.
+// app.ts routes the two apart on this flag; see its el.next handler.
+let restingPane = false
+export function isResting(): boolean {
+   return restingPane
 }
 
 // The split view's RESTING pane. Both surfaces are on screen there, so "nothing
