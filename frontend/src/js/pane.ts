@@ -5,24 +5,31 @@
 // this owns how wide the pane is and whether it is on screen. Imports only
 // keys.ts, so it stays unit-testable without a running pack server.
 //
-// STAGED, NOT YET WIRED: nothing calls this module and the CSS half lands with
-// the layout task, so today it writes a property nothing reads and toggles a
-// class nothing styles — no observable effect until both arrive. What that task
-// owes, stated as the requirements they are rather than as description:
+// STAGED: the CSS half has landed, but nothing CALLS this module yet — the grip
+// and the toolbar toggle arrive with the controls task. Until they do it writes
+// a property the stylesheet does read and toggles a class the stylesheet does
+// style, from nowhere.
+// Two custom properties, one written here and one derived in CSS:
 //   --split-pane-open-w  the width the pane is SET to. Written on <html> here,
-//                        never zero. tokens.css MUST carry the default, because
+//                        never zero. tokens.css carries the default, because
 //                        nothing writes this property before restorePane() runs
 //                        (and nothing writes it at all if storage is blocked).
-//   --split-pane-w       the width the page RESERVES. MUST be declared ON BODY,
-//                        as `var(--split-pane-open-w)`, with the 0px override
-//                        under body.srr-pane-hidden on that SAME element, so the
-//                        cascade alone chooses between them. Body is where it
-//                        belongs because body's own padding-left is what reserves
-//                        the pane; keeping the derivation and its override
-//                        together there is what makes hiding ONE class toggle —
-//                        no JS layout pass, no re-measure. Today tokens.css
-//                        instead hardcodes --split-pane-w at :root; replacing
-//                        that is the layout task's job, not this module's.
+//   --split-pane-w       the width the page RESERVES: `var(--split-pane-open-w)`
+//                        on body.srr-split, 0px on body.srr-split.srr-pane-hidden.
+//                        Both states are declared on BODY — not because :root
+//                        could not reach it (custom properties inherit, so a
+//                        body-level override would still win over an inherited
+//                        :root value), but because body's own padding-left is
+//                        what reserves the pane, and keeping the derivation and
+//                        its override in one rule scope beside that declaration
+//                        is what makes the whole hidden state readable in one
+//                        place instead of split across tokens.css and styles.css.
+//                        That is also what makes hiding ONE class toggle — no JS
+//                        layout pass, no re-measure.
+// Scoping matters in the other direction too: restorePane() stamps the hidden
+// class at ANY viewport (it is state independent of the breakpoint, which split.ts
+// owns on its own schedule), so a phone can legitimately carry it over from a
+// desktop session — which is why the 0px override is scoped under body.srr-split.
 // Every pre-existing split rule already reads --split-pane-w and stays untouched.
 import { PANE_HIDDEN_KEY, PANE_WIDTH_KEY } from "./keys"
 
