@@ -594,6 +594,49 @@ describe("browser: split view (two-pane desktop)", () => {
       }
    })
 
+   // The same crossing made from the LIST surface, which is where it broke. The
+   // single-surface layout HIDES the article and DISABLES the reader-only
+   // prev/next; readerLive() reads that hidden flag, so on the way back the
+   // question was being asked of a pane still marked hidden by the layout being
+   // left. It answered "no article here" for a reader holding a perfectly good
+   // one, and the resting paint replaced it with "Not started" — and the arrows
+   // stayed disabled underneath, because the split branch deliberately doesn't
+   // touch the chrome the narrow branch turned off.
+   it("keeps the open article — and its chrome — when the LIST surface re-enters split", async () => {
+      const ctx = await browser.createBrowserContext()
+      try {
+         const p = await ctx.newPage()
+         await p.setViewport({ width: 1280, height: 900 })
+         await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
+         await waitList(p)
+         await clickRow(p, "news title 5")
+         await waitReader(p)
+         // Back to the LIST surface, article still beside it.
+         await p.keyboard.press("Escape")
+         await p.waitForFunction(() => document.body.classList.contains("srr-view-list"), { timeout: 10_000 })
+         const chrome = () =>
+            p.evaluate(() => ({
+               title: document.querySelector(".srr-title")?.textContent,
+               resting: !!document.querySelector(".srr-reader.srr-reader-empty"),
+               prev: (document.querySelector(".srr-prev") as HTMLButtonElement).disabled,
+               next: (document.querySelector(".srr-next") as HTMLButtonElement).disabled,
+            }))
+         const before = await chrome()
+         expect(before.resting).toBe(false)
+
+         await p.setViewport({ width: 800, height: 900 })
+         await new Promise((r) => setTimeout(r, 400))
+         await p.setViewport({ width: 1280, height: 900 })
+         await new Promise((r) => setTimeout(r, 700))
+
+         // Byte-for-byte the state it left with: the crossing re-asserts the
+         // layout, it does not re-decide what the reader is showing.
+         expect(await chrome()).toEqual(before)
+      } finally {
+         await ctx.close()
+      }
+   })
+
    it("stays single-surface below the breakpoint (regression)", async () => {
       const ctx = await browser.createBrowserContext()
       try {

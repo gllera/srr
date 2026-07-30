@@ -21,6 +21,7 @@ import * as list from "./list"
 import { mountLabel } from "./mounts"
 import * as nav from "./nav"
 import * as player from "./player"
+import { isSplit } from "./split"
 
 // The real reader's nodes in article-view's shape. index.html declares these; the
 // pager builds its own set with the same classes.
@@ -274,6 +275,7 @@ export function render(o: IShowFeed) {
    const slide = entryTransition === "slide"
    entryTransition = null
    if (o.placeholder) return renderEmptyReader(o)
+   painted = true
    el.article.classList.remove("srr-reader-empty")
    const feed = data.db.feeds[o.article.f]
    // Source tint, source name, desk, title, permalink and dateline in one call —
@@ -375,6 +377,7 @@ export function render(o: IShowFeed) {
 // belong to an arrival — the document title, the reader's scroll, and the focus
 // grab — are skipped. Everything above them is the same panel either way.
 function renderEmptyReader(o: IShowFeed, resting = false) {
+   painted = false
    el.article.classList.add("srr-reader-empty")
    el.article.classList.remove("srr-reader-titleless")
    delete el.article.dataset.src
@@ -419,14 +422,22 @@ function renderEmptyReader(o: IShowFeed, resting = false) {
    d.persistHash(location.hash)
 }
 
-// Is an ARTICLE mounted in the reader right now? Read off the DOM this module
-// owns — render() unhides the host and drops .srr-reader-empty, every
-// placeholder path adds it back — rather than inferred from nav.pos, which is
-// the shared cursor the LIST also moves (its anchor seed, its keyboard row
-// selection). Under split those two questions come apart constantly: pos can
-// name an article the pane has never rendered.
+// Has an article been PAINTED into this surface and not replaced since? Set by
+// render()'s article branch, cleared by every placeholder path — rather than
+// inferred from nav.pos, which is the shared cursor the LIST also moves (its
+// anchor seed, its keyboard row selection). Under split those two questions come
+// apart constantly: pos can name an article the pane has never rendered.
+//
+// The flag is what makes the answer true only where a render actually happened.
+// The DOM alone cannot say so at BOOT: index.html ships `.srr-reader` empty, with
+// neither an article in it nor `.srr-reader-empty` on it, so a pure class test
+// reads a never-painted surface as holding an article — and split's showList,
+// which unhides the host before asking, would then skip the resting paint and
+// leave the pane blank. The class test stays beside it: it is the invariant a
+// stray class toggle would otherwise break silently.
+let painted = false
 export function hasArticle(): boolean {
-   return !el.article.hidden && !el.article.classList.contains("srr-reader-empty")
+   return painted && !el.article.hidden && !el.article.classList.contains("srr-reader-empty")
 }
 
 // The split view's RESTING pane. Both surfaces are on screen there, so "nothing
@@ -514,12 +525,22 @@ export function refreshFeedLabel() {
 // count that merely ticked down (reading), came back from an unknown probe
 // (-1), or moved because the user just flipped Show-read / rewound a frontier
 // is not an arrival and stays silent.
+//
+// "Is there a reader to re-derive?" is a LAYOUT question under split, and this
+// is the site that WRITES the answer: every caller asks it because the pane's
+// arrows and pill went stale, and gating the write on `view` discarded the probe
+// whenever the LIST held focus — which is most of the time, since the pane is
+// always on screen. That silently defeated all four callers at once (a
+// mark-all-read made from the list left "13 ›" armed beside an All-caught-up
+// list; a Show-read flip left ‹ dead). hasArticle() is the same reader-owned
+// test readerLive() uses, and it excludes the resting panel, which owns its own
+// chrome via renderResting.
 export function reprobeReaderChrome(pulseOnGrowth = false) {
    const probed = nav.currentChron()
    void nav
       .probeCurrent()
       .then((o) => {
-         if (o && d.view() === "reader" && nav.currentChron() === probed) {
+         if (o && (d.view() === "reader" || (isSplit() && hasArticle())) && nav.currentChron() === probed) {
             el.prev.disabled = !o.has_left
             el.next.disabled = !o.has_right
             const before = lastNextCount

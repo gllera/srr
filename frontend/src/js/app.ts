@@ -122,8 +122,17 @@ function showList() {
       // the list, and its toolbar prev/next stay usable. With nothing open the
       // pane shows the reader's own resting panel rather than a blank third of
       // the window (paintRestingPane).
-      if (readerLive()) el.article.hidden = false
-      else void paintRestingPane()
+      //
+      // Unhide FIRST, then ask. readerLive() reads `el.article.hidden` (through
+      // reader.hasArticle), and the single-surface layout sets that flag on the
+      // list — so on a narrow → wide crossing the question was being asked of a
+      // pane still marked hidden by the layout we are leaving. It answered "no
+      // article here" for a reader holding a perfectly good one, and the resting
+      // paint below then destroyed it: read an article, go back to the list,
+      // drag the window under 1000px and back, and it was replaced by "Not
+      // started". The order is the whole fix.
+      el.article.hidden = false
+      if (!readerLive()) void paintRestingPane()
       return
    }
    el.article.hidden = true
@@ -523,8 +532,22 @@ async function selectTokens(tokens: string[]) {
       const anchor = await nav.listAnchor()
       // replace, not push: goToList already pushed this filter change, and a
       // second entry would make the first browser-back a visual no-op.
-      if (anchor !== beforeChron)
+      if (anchor !== beforeChron) {
          await guard(() => (anchor < 0 ? nav.last(true, false) : nav.goTo(anchor, false, true)))
+         // The follow-up is the PANE catching up with a pick made on the list —
+         // it must not be mistaken for going to the reader. Two things do
+         // mistake it: guard()'s render path calls showReader(), and the landing
+         // rewrites the `#!tokens` entry goToList just pushed into a reader
+         // `#pos!tokens`. Left alone, picking a lane from the list moved focus
+         // into the article and made a reload open it, against both this
+         // surface's contract ("you land back on the headlines under the new
+         // lane") and the resting pane's. Put both back — showList() is
+         // idempotent and keeps the pane's article on screen.
+         showList()
+         const listHash = "#" + nav.tokensSuffix()
+         history.replaceState(null, "", listHash)
+         persistHash(listHash)
+      }
    }
 }
 
@@ -711,6 +734,8 @@ async function init() {
    initSplit()
    const applyScroller = () => list.setScroller(isSplit() ? elementScroller(el.listView) : windowScroller())
    applyScroller()
+   // Who owns the shared cursor when the list rebuilds (list.mayClaimCursor).
+   list.setCursorOwner(readerLive)
    onSplitChange(() => {
       applyScroller()
       list.invalidate()
@@ -732,6 +757,14 @@ async function init() {
       // pane hidden while the scroller had already been swapped to it).
       if (view === "reader") showReader()
       else showList()
+      // A crossing INTO split on the list surface arrives from a layout that
+      // DISABLED the reader-only prev/next (showList's single-surface branch).
+      // Its split branch re-asserts visibility but deliberately not that chrome,
+      // so an article that survived the crossing would sit under two dead
+      // arrows. Re-derive it for whatever the pane is actually holding — a
+      // resting panel owns its own chrome and reprobeReaderChrome's hasArticle()
+      // test leaves it alone.
+      if (isSplit() && view === "list") reader.reprobeReaderChrome()
       // Then rebuild only what the new layout actually needs: the reader keeps
       // its article and the pane comes along beside it (followCursor's own
       // fallback builds it); the list surface re-renders through its normal

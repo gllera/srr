@@ -219,22 +219,40 @@ describe("browser: in-place refresh via a background trigger", () => {
    // "N new" pill, until some unrelated rebuild happened by. Both halves are
    // owed here, so this asserts the LIST half from the READER surface.
    it("grows the split list pane from a store refresh while the reader has focus", async () => {
+      // A LONG lane, deliberately: the reopened runway used to be handed to the
+      // IntersectionObserver alone, whose "re-observing re-delivers the current
+      // intersection" trick only works from a list parked at its TOP. An
+      // anchored list sits centered on the article being read — under split that
+      // is the normal resting position — and from there the top sentinel is
+      // outside ROOT_MARGIN, so nothing paged and no pill painted. A 2-row
+      // fixture cannot tell the two apart: its sentinel is always in range.
+      // 25 is chosen against the window budget: enough rows that the anchored
+      // pane sits well past ROOT_MARGIN from its top edge, few enough that the
+      // whole lane still fits the loaded window — so the top is EXHAUSTED, which
+      // is the state onStoreGrown reopens. A longer lane leaves the top merely
+      // unpaged, where ordinary upward paging already covers the arrivals.
+      // Serve it BEFORE adding it: `feed add` probes the URL to resolve the feed.
+      feeds.set("/long.xml", rssFeed("Long", nItems(25, "long", 0, 100)))
+      await srr(packsDir, "feed", "add", "-t", "Long", "-u", `${feeds.url}/long.xml`)
+      await srr(packsDir, "fetch")
+
       const ctx = await browser.createBrowserContext()
       try {
          const p = await ctx.newPage()
-         // Wide enough for split, short enough that the pane scrolls (same
-         // reserve reasoning as the shared page's 500x200 viewport).
-         await p.setViewport({ width: 1280, height: 320 })
+         await p.setViewport({ width: 1280, height: 700 })
          await p.goto(`${baseUrl}#`, { waitUntil: "load" })
          await waitList(p)
          await p.evaluate(() => (window.__srrStamp = 1))
          expect(await p.evaluate(() => document.body.classList.contains("srr-split"))).toBe(true)
 
-         // Read the oldest article: the READER surface, the normal split state.
-         await p.evaluate(() => (location.hash = "#0"))
+         // Read an article well down the lane: the READER surface with the pane
+         // anchored on it — the normal split state, and the one that broke.
+         await p.evaluate(() => (location.hash = "#4"))
          await waitReader(p)
          await p.waitForFunction(() => !document.body.classList.contains("srr-view-list"), { timeout: 20_000 })
          const rowsBefore = await p.evaluate(() => document.querySelectorAll(".srr-list a.srr-row").length)
+         // The pane really is away from its top edge (else this proves nothing).
+         expect(await p.evaluate(() => document.querySelector(".srr-list")!.scrollTop)).toBeGreaterThan(800)
 
          feeds.set("/live.xml", rssFeed("Live", nItems(5, "live")))
          await srr(packsDir, "fetch")
@@ -247,9 +265,13 @@ describe("browser: in-place refresh via a background trigger", () => {
             { timeout: 20_000 },
             rowsBefore,
          )
+         // …and SAID so: rows landing above the fold are exactly what the pill
+         // exists to announce, and one that waits for you to scroll to the top
+         // announces rows you can already see.
+         await p.waitForFunction(() => !!document.querySelector(".srr-new-pill"), { timeout: 20_000 })
          // …with no reload, and the reader still on its article.
          expect(await p.evaluate(() => window.__srrStamp)).toBe(1)
-         expect(await p.evaluate(() => location.hash.startsWith("#0"))).toBe(true)
+         expect(await p.evaluate(() => location.hash.startsWith("#4"))).toBe(true)
       } finally {
          await ctx.close()
       }

@@ -95,6 +95,16 @@ export function setScroller(s: Scroller): void {
    sc = s
 }
 
+// "Is a LIVE reader holding the shared cursor?" — app.ts's readerLive, injected
+// for the same reason the scroller is: this module sits below the controllers
+// and cannot import one (reader.ts already imports this, so the edge would be a
+// cycle). The default answers "no reader", which is the single-surface truth and
+// the one a unit test gets for free.
+let readerHoldsCursor: () => boolean = () => false
+export function setCursorOwner(fn: () => boolean): void {
+   readerHoldsCursor = fn
+}
+
 // Freshness token: a new render() reassigns it so any in-flight load (or pending
 // observer callback) from the prior filter bails before touching the DOM — the
 // same discipline as dropdown's fill tokens and nav's prefetch.
@@ -1030,8 +1040,15 @@ async function runPool<T>(items: T[], limit: number, worker: (item: T) => Promis
 // claims the cursor only when nothing holds it: the single-surface layout (the
 // list IS the cursor there) or a split pane with no article open. Explicit
 // navigation — a row tap, a picker lane pick, the arrows — still moves it.
+//
+// The test is "a live READER holds it", not "the cursor is set". `pos >= 0` was
+// the first cut and it is not the same thing: this module's own anchor seed sets
+// pos at boot, so from the first paint onward the list could never re-seed
+// ITSELF — pick a lane beside a resting pane and the rebuilt rows carried no
+// .srr-row-current at all, the cursor still naming an article from the lane you
+// had just left.
 function mayClaimCursor(): boolean {
-   return !isSplit() || nav.currentChron() < 0
+   return !isSplit() || !readerHoldsCursor()
 }
 
 export async function render(anchorNow = false, onInteractive?: () => void): Promise<void> {
@@ -1475,18 +1492,28 @@ export async function onStoreGrown(): Promise<void> {
       // so fetchNewer counts it toward the "N new" pill (noteNewAbove).
       grownRunway = true
       // Kick the observer: IntersectionObserver only fires on intersection
-      // CHANGES, and at the usual exhaustedTop position (parked at scroll 0) the
-      // top sentinel is ALREADY intersecting — removing the terminus doesn't
-      // change that, and from scroll 0 there is no upward scroll left to create
-      // a re-entry edge. Re-observing re-delivers the sentinel's CURRENT
-      // intersection state, so the reopened runway still pages in through the
-      // normal fetchNewer path (loadingTop + tok + scroll compensation keep it
-      // silent: the viewport stays pinned, the new rows become visible when the
-      // user scrolls up).
+      // CHANGES, and at the parked-at-scroll-0 position the top sentinel is
+      // ALREADY intersecting — removing the terminus doesn't change that, and
+      // from scroll 0 there is no upward scroll left to create a re-entry edge.
+      // Re-observing re-delivers the sentinel's CURRENT intersection state, so
+      // the reopened runway pages in through the normal fetchNewer path.
       if (observer) {
          observer.unobserve(topSentinel)
          observer.observe(topSentinel)
       }
+      // …and then page the first batch OURSELVES, because "parked at scroll 0"
+      // is only one of the two resting positions. A list is anchored CENTERED on
+      // the article being read, and re-delivering the sentinel's state is worth
+      // nothing when that state is "a viewport and a half above the top edge",
+      // outside ROOT_MARGIN: the arrivals never paged in and the pill that
+      // exists to announce them never painted — measured under split (store
+      // 31 → 34 while reading, pane stuck at 31 rows, no pill) where a centered
+      // list is the NORMAL resting position, not an edge case. fetchNewer keeps
+      // this exactly as silent as the observer path: same freshness token, same
+      // loadingTop guard (so the kick above and this call cannot both prepend
+      // the same batch), and its viewport-anchored scroll compensation means
+      // nothing the user is looking at moves.
+      await fetchNewer(my)
    } finally {
       growing = false
    }

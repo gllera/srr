@@ -168,6 +168,7 @@ vi.mock("./data", () => data)
 const list = vi.hoisted(() => ({
    setup: vi.fn(),
    setScroller: vi.fn(),
+   setCursorOwner: vi.fn(),
    followCursor: vi.fn(),
    show: vi.fn(async () => {}),
    render: vi.fn(async () => {}),
@@ -488,6 +489,61 @@ describe("split view (body.srr-split)", () => {
       expect(document.activeElement).not.toBe(reader().querySelector(".srr-content"))
    })
 
+   // Every caller that re-derives the reader's chrome does so BECAUSE the pane
+   // went stale, and under split the pane is on screen whichever surface has
+   // focus. reader.ts gated the WRITE on `view === "reader"`, so the probe
+   // resolved and was thrown away whenever the list held focus — defeating all
+   // four callers at once. `nav.probeCurrent` being called is not the assertion:
+   // it always was. What must land is the DOM.
+   it("writes the re-derived reader chrome while the LIST surface has focus", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true, right_count: 13 }))
+      hashTo("#2")
+      await flush()
+      nav.currentChron.mockReturnValue(2)
+      hashTo("#!news") // the LIST takes focus; the article stays in the pane
+      await flush()
+      expect(nextBtn().disabled).toBe(false)
+
+      // Mark-all-read's shape: nothing is unread ahead any more.
+      nav.probeCurrent.mockResolvedValue(showFeed({ has_left: false, has_right: false, right_count: 0 }))
+      nav.isUnreadOnly.mockReturnValue(true)
+      pickerHooks()!.onToggleShowRead()
+      await flush()
+      expect(nextBtn().disabled).toBe(true)
+      expect(prevBtn().disabled).toBe(true)
+      expect(document.querySelector(".srr-next-count")!.textContent).toBe("0")
+   })
+
+   // readerLive() reads el.article.hidden (via reader.hasArticle), and the
+   // single-surface layout sets that flag on the list — so the question was being
+   // asked of a pane still marked hidden by the layout being left. It answered
+   // "nothing here" for a reader holding a perfectly good article, and the
+   // resting paint destroyed it: read something, go back to the list, drag the
+   // window under 1000px and back, and it was replaced by "Not started".
+   it("keeps the article when the list surface re-enters split from the narrow layout", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
+      hashTo("#2")
+      await flush()
+      nav.currentChron.mockReturnValue(2)
+      const title = document.querySelector(".srr-title")!.textContent
+
+      // Narrow: the single-surface list hides the article (and disables its nav).
+      document.body.classList.remove("srr-split")
+      hashTo("#!news")
+      await flush()
+      expect(reader().hasAttribute("hidden")).toBe(true)
+
+      // …and back. The article must survive, not be replaced by the resting panel.
+      document.body.classList.add("srr-split")
+      hashTo("#!other")
+      await flush()
+      expect(reader().hasAttribute("hidden")).toBe(false)
+      expect(reader().classList.contains("srr-reader-empty")).toBe(false)
+      expect(document.querySelector(".srr-title")!.textContent).toBe(title)
+   })
+
    it("brings the list cursor along after a guarded navigation — split only", async () => {
       await boot()
       list.followCursor.mockClear()
@@ -588,6 +644,26 @@ describe("split view (body.srr-split)", () => {
          pickerHooks()!.onSelect("42")
          await flush()
          expect(nav.goTo).toHaveBeenCalledWith(40, false, true) // record = false, replace = true
+      })
+
+      // The follow-up is the PANE catching up, not a trip to the reader. Two
+      // things mistook it for one: guard()'s render path calls showReader(), and
+      // the landing rewrote the `#!tokens` entry goToList had just pushed into a
+      // reader `#pos!tokens` — so a lane picked from the list moved focus into
+      // the article, and a reload opened it.
+      it("keeps the LIST surface and its list hash", async () => {
+         await withArticleOpen()
+         nav.listAnchor.mockResolvedValue(40)
+         nav.tokensSuffix.mockReturnValue("!42")
+         pickerHooks()!.onSelect("42")
+         await flush()
+         expect(document.body.classList.contains("srr-view-list")).toBe(true)
+         const replaced = (history.replaceState as unknown as { mock: { calls: unknown[][] } }).mock.calls
+         expect(replaced[replaced.length - 1][2]).toBe("#!42")
+         expect(localStorage.getItem("srr-hash")).toBe("#!42")
+         // …and the pane is still holding the article it was brought to.
+         expect(reader().hasAttribute("hidden")).toBe(false)
+         expect(reader().classList.contains("srr-reader-empty")).toBe(false)
       })
 
       it("does nothing when the open article is still a member of the new lane", async () => {

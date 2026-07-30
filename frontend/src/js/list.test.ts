@@ -1110,13 +1110,26 @@ describe("list", () => {
    // article while the reader showed another — with the toolbar arrows stepping
    // from the highlight (measured: 20 → 25, skipping four).
    describe("split view: a rebuild must not claim the reader's cursor", () => {
-      beforeEach(() => document.body.classList.add("srr-split"))
-      afterEach(() => document.body.classList.remove("srr-split"))
+      // Who holds the shared cursor is app.ts's readerLive, injected (setCursorOwner).
+      // These cases drive it directly, because the distinction that matters —
+      // "a LIVE READER holds it" vs "it is merely set" — is invisible in nav.pos:
+      // the list's own anchor seed sets pos too.
+      let readerLive = false
+      beforeEach(() => {
+         document.body.classList.add("srr-split")
+         readerLive = false
+         list.setCursorOwner(() => readerLive)
+      })
+      afterEach(() => {
+         document.body.classList.remove("srr-split")
+         list.setCursorOwner(() => false)
+      })
 
       it("leaves the cursor on the open article when the rebuild re-anchors", async () => {
          setIndex(10, (c) => c)
-         nav._setPos(7) // the reader's live article
-         nav._setListAnchor(3) // …and the rebuild would anchor somewhere else
+         readerLive = true // an article is mounted in the pane
+         nav._setPos(7) // …and it is the one the cursor names
+         nav._setListAnchor(3) // …while the rebuild would anchor somewhere else
          nav.select.mockClear()
          await list.render()
          expect(nav.select).not.toHaveBeenCalled()
@@ -1132,8 +1145,25 @@ describe("list", () => {
          expect(nav.select).toHaveBeenCalledWith(3, 3)
       })
 
+      it("re-seeds beside a RESTING pane even though the cursor is already set", async () => {
+         // The list's own anchor seed sets pos at boot, so "pos >= 0" says nothing
+         // about the reader. Reading it as ownership meant the list could never
+         // re-seed ITSELF: a lane picked beside a resting pane rebuilt its rows
+         // with no .srr-row-current at all, the cursor still naming the lane just
+         // left. The owner — not the cursor's value — decides.
+         setIndex(10, (c) => c)
+         readerLive = false // the pane is resting; the LIST set pos, at boot
+         nav._setPos(7)
+         nav._setListAnchor(3)
+         nav.select.mockClear()
+         await list.render()
+         expect(nav.select).toHaveBeenCalledWith(3, 3)
+         expect($rows().filter((a) => a.classList.contains("srr-row-current")).length).toBe(1)
+      })
+
       it("leaves the cursor alone on a search rebuild too (the query is typed while reading)", async () => {
          setIndex(10, (c) => c)
+         readerLive = true
          nav._setPos(7)
          nav._setSearch("title")
          nav.select.mockClear()
@@ -2027,10 +2057,11 @@ describe("list", () => {
    // top, on the next upward scroll otherwise. Exception: an empty state
    // (nothing on screen to disturb) rebuilds instead.
    describe("onStoreGrown", () => {
-      it("reopens an exhausted top when a newer match exists (terminus off, no rebuild)", async () => {
+      it("reopens an exhausted top and pages the arrivals in, without rebuilding", async () => {
          setIndex(3) // chrons 0..2, anchored at newest → exhaustedTop, LATEST terminus
          await list.render()
          expect($top()).not.toBeNull()
+         const keptRow = $rows()[0] // the node that was on top before
          const rowsBefore = $rows().length
 
          // Grow the store: article 3 lands above the current window.
@@ -2038,13 +2069,14 @@ describe("list", () => {
          data.db.total_art = 4
 
          await list.onStoreGrown()
-         expect($top()).toBeNull() // reopened
-         expect($rows().length).toBe(rowsBefore) // no prepend — fully silent
-         // The top is genuinely live again (exhaustedTop cleared, not just the
-         // terminus DOM): an explicit page-in prepends the new article and
-         // re-exhausts at the new newest end.
-         await list.loadNewer()
+         // The reopen PAGES: the observer it also kicks only re-delivers an
+         // intersection that is already true, i.e. only for a list parked at its
+         // top — and an anchored list sits centered on the article being read.
          expect($chrons()[0]).toBe(3)
+         expect($rows().length).toBe(rowsBefore + 1)
+         // Prepended, not rebuilt: the surrounding rows are the same nodes.
+         expect($rows()[1]).toBe(keptRow)
+         // …and the top re-exhausted at the new newest end.
          expect($top()).not.toBeNull()
       })
 
@@ -2153,12 +2185,13 @@ describe("list", () => {
          await list.onStoreGrown()
       }
 
-      it("raises the pill only once the reopened runway actually prepends rows", async () => {
+      it("raises the pill with the arrivals the reopened runway prepends", async () => {
+         // The reopen prepends its first batch itself, so the announcement lands
+         // with the rows rather than waiting for a scroll that may never come —
+         // the pill exists precisely for arrivals the reader would not otherwise
+         // notice, and one that only appears once you have scrolled to the top
+         // announces rows already on screen.
          await grow(3, 1)
-         // The reopen itself moves nothing and says nothing.
-         expect($pill()).toBeNull()
-
-         await list.loadNewer() // the prepend the reopened runway produces
          expect($chrons()[0]).toBe(3)
          const pill = $pill()
          expect(pill).not.toBeNull()
@@ -2169,8 +2202,7 @@ describe("list", () => {
 
       it("accumulates across the batches one reopened runway drains", async () => {
          // 40 arrivals > BATCH(30): the runway pages twice before re-exhausting.
-         await grow(3, 40)
-         await list.loadNewer()
+         await grow(3, 40) // the reopen pages the first batch
          expect($pill()!.textContent).toContain("30 new")
          await list.loadNewer()
          expect($pill()!.textContent).toContain("40 new")
