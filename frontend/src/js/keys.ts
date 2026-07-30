@@ -87,3 +87,10 @@ export const PLAYER_RATE_KEY = "srr-player-rate"
 // scheme is itself part of the shape a breaking change could move, so the
 // version that says whether it moved must not be addressed through it.
 export const SCHEMA_KEY = "srr-schema"
+// Split-view (desktop) layout preferences. GLOBAL, not per-store: a pane width
+// is a property of THIS SCREEN, not of any store's content. They are also
+// deliberately absent from the portable profile (profile.ts) — syncing a 27"
+// monitor's 560px pane onto a laptop is a worse default than the clamp
+// pane.ts applies on every read.
+export const PANE_WIDTH_KEY = "srr-pane-w"
+export const PANE_HIDDEN_KEY = "srr-pane-hidden"
