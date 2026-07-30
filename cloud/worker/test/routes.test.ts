@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest"
-import { SELF } from "cloudflare:test"
+import { SELF, env } from "cloudflare:test"
 import { ROSTER } from "../src/roster"
 import { sessCookie } from "./helpers"
 
 const t1email = Object.entries(ROSTER).find(([, v]) => v.uid === "t1")![0]
+const t2email = Object.entries(ROSTER).find(([, v]) => v.uid === "t2")![0]
 
 const BASE = "https://cloud.32b.io"
 
@@ -99,6 +100,76 @@ describe("method gate", () => {
       ] as const) {
          const res = await SELF.fetch(`${BASE}${path}`, { method, headers: { cookie }, redirect: "manual" })
          expect(res.status, `${method} ${path}`).toBe(405)
+      }
+   })
+})
+
+describe("store objects", () => {
+   const gz = new Uint8Array([0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 3]) // gzip magic + junk
+
+   it("serves an object with its stored metadata to its owner", async () => {
+      await env.STORE.put("u/t1/db.gz", gz, {
+         httpMetadata: { contentType: "application/gzip", cacheControl: "no-cache, must-revalidate" },
+      })
+      const res = await SELF.fetch(`${BASE}/u/t1/db.gz`, api({ cookie: await sessCookie(t1email) }))
+      expect(res.status).toBe(200)
+      expect(res.headers.get("content-type")).toBe("application/gzip")
+      expect(res.headers.get("cache-control")).toBe("no-cache, must-revalidate")
+      expect(res.headers.get("etag")).toBeTruthy()
+      expect(new Uint8Array(await res.arrayBuffer())).toEqual(gz)
+   })
+
+   it("404s a missing object", async () => {
+      const res = await SELF.fetch(`${BASE}/u/t1/idx/999.gz`, api({ cookie: await sessCookie(t1email) }))
+      expect(res.status).toBe(404)
+   })
+
+   it("cross-tenant reads 403 both ways", async () => {
+      await env.STORE.put("u/t1/db.gz", gz)
+      await env.STORE.put("u/t2/db.gz", gz)
+      expect((await SELF.fetch(`${BASE}/u/t2/db.gz`, api({ cookie: await sessCookie(t1email) }))).status).toBe(403)
+      expect((await SELF.fetch(`${BASE}/u/t1/db.gz`, api({ cookie: await sessCookie(t2email) }))).status).toBe(403)
+   })
+
+   it("anonymous object fetch 401s (JSON, not a redirect)", async () => {
+      const res = await SELF.fetch(`${BASE}/u/t1/db.gz`, api())
+      expect(res.status).toBe(401)
+      expect(((await res.json()) as { error: string }).error).toBe("auth required")
+   })
+
+   it("answers If-None-Match with 304", async () => {
+      await env.STORE.put("u/t1/db.gz", gz)
+      const first = await SELF.fetch(`${BASE}/u/t1/db.gz`, api({ cookie: await sessCookie(t1email) }))
+      const etag = first.headers.get("etag")!
+      const res = await SELF.fetch(
+         `${BASE}/u/t1/db.gz`,
+         api({ cookie: await sessCookie(t1email), "if-none-match": etag }),
+      )
+      expect(res.status).toBe(304)
+   })
+
+   it("honors Range (media seeking)", async () => {
+      const bytes = new Uint8Array(100).map((_, i) => i)
+      await env.STORE.put("u/t1/assets/ab/0123456789abcdef.mp4", bytes, {
+         httpMetadata: { contentType: "video/mp4", cacheControl: "public, max-age=31536000, immutable" },
+      })
+      const res = await SELF.fetch(
+         `${BASE}/u/t1/assets/ab/0123456789abcdef.mp4`,
+         api({ cookie: await sessCookie(t1email), range: "bytes=10-19" }),
+      )
+      expect(res.status).toBe(206)
+      expect(res.headers.get("content-range")).toBe("bytes 10-19/100")
+      expect(new Uint8Array(await res.arrayBuffer())).toEqual(bytes.slice(10, 20))
+   })
+
+   it("denied backend-only classes 404 even for the owner", async () => {
+      await env.STORE.put("u/t1/config.gz", gz)
+      await env.STORE.put("u/t1/seen/441.gz", gz)
+      await env.STORE.put("u/t1/inbox/gw.gz", gz)
+      const cookie = await sessCookie(t1email)
+      for (const key of ["config.gz", "seen/441.gz", "inbox/gw.gz"]) {
+         const res = await SELF.fetch(`${BASE}/u/t1/${key}`, api({ cookie }))
+         expect(res.status, key).toBe(404)
       }
    })
 })

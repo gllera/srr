@@ -54,6 +54,11 @@ async function serveShellAsset(request: Request, env: Env, name: string): Promis
    return new Response(res.body, { status: res.status, headers })
 }
 
+// Serve a store object from R2 with its stored metadata (the engine stamps
+// Cache-Control/Content-Type at Put — cacheControlForKey). Immutable objects
+// are edge-cached POST-auth via caches.default: the URL embeds the uid and
+// every immutable name is write-once, so a cache hit can never cross tenants
+// or serve stale bytes. Ranged and conditional requests bypass the cache.
 async function serveStore(
    request: Request,
    env: Env,
@@ -61,7 +66,66 @@ async function serveStore(
    uid: string,
    key: string,
 ): Promise<Response> {
-   return json(501, "not implemented") // store serving lands next task
+   const objectKey = `u/${uid}/${key}`
+   const ranged = request.headers.has("range")
+   const conditional = request.headers.has("if-none-match") || request.headers.has("if-modified-since")
+
+   if (!ranged && !conditional) {
+      try {
+         const hit = await caches.default.match(request.url)
+         if (hit) return hit
+      } catch {
+         // cache API is best-effort (absent in some local modes)
+      }
+   }
+
+   let obj: R2Object | R2ObjectBody | null
+   try {
+      obj = await env.STORE.get(objectKey, {
+         range: ranged ? request.headers : undefined,
+         onlyIf: request.headers,
+      })
+   } catch {
+      // R2 throws on an unsatisfiable range.
+      return ranged ? new Response("range not satisfiable", { status: 416 }) : json(500, "store error")
+   }
+   if (!obj) return notFound()
+
+   const headers = new Headers()
+   obj.writeHttpMetadata(headers)
+   headers.set("etag", obj.httpEtag)
+   headers.set("accept-ranges", "bytes")
+
+   if (!("body" in obj) || !obj.body) return new Response(null, { status: 304, headers })
+
+   let status = 200
+   const r = obj.range
+   // Gate on the REQUEST being ranged: some runtimes populate obj.range with
+   // the full extent on a plain get, which must stay a 200.
+   if (ranged && r) {
+      let start: number
+      let end: number
+      if ("suffix" in r && r.suffix !== undefined) {
+         start = obj.size - r.suffix
+         end = obj.size - 1
+      } else {
+         const rr = r as { offset?: number; length?: number }
+         start = rr.offset ?? 0
+         end = rr.length !== undefined ? start + rr.length - 1 : obj.size - 1
+      }
+      headers.set("content-range", `bytes ${start}-${end}/${obj.size}`)
+      status = 206
+   }
+
+   const res = new Response(obj.body, { status, headers })
+   if (status === 200 && (headers.get("cache-control") || "").includes("immutable")) {
+      try {
+         ctx.waitUntil(caches.default.put(request.url, res.clone()))
+      } catch {
+         // best-effort, same as match above
+      }
+   }
+   return res
 }
 
 async function serveSync(request: Request, env: Env, uid: string): Promise<Response> {
