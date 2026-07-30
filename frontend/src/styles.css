@@ -1130,11 +1130,21 @@ body.srr-playing .srr-pin-progress {
 
 /* TTS narration sync (tts.ts): the block currently being read aloud, and
    the click-to-seek affordance while narration is live. Colors ride
-   --accent so both themes get it for free. */
-.srr-tts-current {
+   --accent so both themes get it for free. The transition sits on this base
+   rule (every possible highlight target) rather than on .srr-tts-current
+   itself, so the tint fades both ON and OFF — scoped to .srr-tts-current
+   alone it would fade in but snap off the instant the class is removed. */
+.srr-content [data-tts],
+.srr-title {
+   transition: background 0.25s ease;
+}
+/* Doubled as `.srr-content .srr-tts-current` (0,2,0): the bare class alone
+   (0,1,0) loses to element-scoped prose rules like `.srr-content pre`
+   (0,1,1), leaving the highlight invisible on a stamped pre/th/td. */
+.srr-tts-current,
+.srr-content .srr-tts-current {
    background: color-mix(in srgb, var(--accent) 14%, transparent);
    border-radius: 4px;
-   transition: background 0.25s ease;
 }
 .srr-tts-live [data-tts] {
    cursor: pointer;

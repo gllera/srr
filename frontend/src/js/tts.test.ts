@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { wireTTS } from "./tts"
 
@@ -68,6 +68,12 @@ describe("highlight follow", () => {
       tick(audio, 1)
       expect(content.querySelector(".srr-tts-current")).toBeNull()
    })
+
+   it("a decreasing table -> inert", () => {
+      const { content, audio } = mount("0,5,3", '<p data-tts="1">a</p>')
+      tick(audio, 1)
+      expect(content.querySelector(".srr-tts-current")).toBeNull()
+   })
 })
 
 describe("click to seek", () => {
@@ -80,11 +86,40 @@ describe("click to seek", () => {
       expect(audio.currentTime).toBe(10)
    })
 
-   it("clicking the title seeks to 0 when the title owns segment 0", () => {
-      const { title, audio } = mount("0,5", '<p data-tts="1">a</p>')
-      tick(audio, 4)
+   it("title clicks stay permalink clicks — never a seek", () => {
+      // Production masthead: the h1 sits inside the a.srr-title-row permalink.
+      const row = document.createElement("a")
+      row.className = "srr-title-row"
+      const title = document.createElement("h1")
+      row.append(title)
+      const content = document.createElement("div")
+      content.innerHTML = '<p><audio data-tts-t="0,5" src="x.wav"></audio></p><p data-tts="1">a</p>'
+      document.body.replaceChildren(row, content)
+      wireTTS({ title, content })
+      const audio = content.querySelector("audio") as HTMLAudioElement
+      audio.currentTime = 4
+      audio.dispatchEvent(new Event("timeupdate"))
+      expect(title.classList.contains("srr-tts-current")).toBe(true) // highlight still works
       title.dispatchEvent(new Event("click", { bubbles: true }))
-      expect(audio.currentTime).toBe(0)
+      expect(audio.currentTime).toBe(4) // click untouched — the permalink owns it
+   })
+
+   it("duplicate stamps: the first claims the highlight, but any duplicate seeks by its own attribute", () => {
+      const { content, audio } = mount("0,5,10", '<p data-tts="1">a</p><p data-tts="1">b</p>')
+      tick(audio, 6) // segment 1 is current
+      const dupes = content.querySelectorAll('[data-tts="1"]')
+      expect(content.querySelector(".srr-tts-current")).toBe(dupes[0]) // first claim wins the map
+      dupes[1].dispatchEvent(new Event("click", { bubbles: true }))
+      expect(audio.currentTime).toBe(5) // the losing duplicate still seeks by ITS OWN attribute
+   })
+
+   it("seeking while paused stays paused", () => {
+      const { content, audio } = mount("0,5,10", '<p data-tts="1">a</p><p data-tts="2">b</p>')
+      tick(audio, 1) // started, still paused (jsdom never actually plays)
+      const play = vi.spyOn(audio, "play")
+      content.querySelector('[data-tts="2"]')!.dispatchEvent(new Event("click", { bubbles: true }))
+      expect(audio.currentTime).toBe(10)
+      expect(play).not.toHaveBeenCalled()
    })
 
    it("never seeks before the narration has started", () => {

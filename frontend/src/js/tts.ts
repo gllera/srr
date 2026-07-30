@@ -6,7 +6,12 @@
 // narration <audio> carries data-tts-t="0,4.2,…" (segment start seconds),
 // and each narrated block carries data-tts="<segment index>". Segment 0 is
 // the article TITLE when the item has one — no content element carries 0
-// then, and this module highlights the caller's title node instead.
+// then, and this module gives the caller's title node the segment-0
+// highlight. Clicks on the title stay what they already are — the article
+// permalink — never a seek: in the real DOM the <h1> sits inside
+// a.srr-title-row, which the interactive-descendant guard below would
+// refuse anyway, so the title gets no click listener at all. Seek-to-start
+// stays reachable through the audio element's own native controls.
 //
 // A LEAF module by the article-view.ts rule: nodes arrive as arguments, no
 // controller imports. reader.ts calls wireTTS once per mount, AFTER
@@ -83,13 +88,16 @@ function onSeekClick(e: Event): void {
    if (!t || t.closest(INTERACTIVE)) return
    const sel = window.getSelection()
    if (sel && !sel.isCollapsed) return // a selection gesture, not a seek
-   let idx: number | null = null
    const block = t.closest("[data-tts]")
-   if (block && b.refs.content.contains(block)) idx = Number(block.getAttribute("data-tts"))
-   // The title node seeks to 0 only when it OWNS segment 0 — i.e. wireTTS
-   // installed it as the fallback because no content block carries the stamp.
-   else if (b.refs.title.contains(t) && b.targets.get(0) === b.refs.title) idx = 0
-   if (idx === null || !(idx in b.starts)) return
+   if (!block || !b.refs.content.contains(block)) return
+   // #sanitize strips data-tts to a bare non-negative integer server-side;
+   // this mirrors that on the raw attribute as defense-in-depth (mirrors the
+   // table validation in wireTTS below) — an untrusted or hand-edited stamp
+   // must not parse as a false segment 0 (Number("") is 0).
+   const raw = block.getAttribute("data-tts")
+   if (!raw || !/^\d+$/.test(raw)) return
+   const idx = Number(raw)
+   if (!(idx in b.starts)) return
    b.audio.currentTime = b.starts[idx]
    paint()
 }
@@ -103,7 +111,6 @@ function unbind(): void {
    b.audio.removeEventListener("ended", onEnded)
    b.audio.removeEventListener("emptied", onEnded)
    b.refs.content.removeEventListener("click", onSeekClick)
-   b.refs.title.removeEventListener("click", onSeekClick)
    b = null
 }
 
@@ -119,8 +126,11 @@ export function wireTTS(refs: TTSRefs): void {
    if (!starts.length || starts.some((s, i) => !Number.isFinite(s) || s < 0 || (i > 0 && s < starts[i - 1]))) return
    const targets = new Map<number, HTMLElement>()
    for (const el of refs.content.querySelectorAll<HTMLElement>("[data-tts]")) {
-      const i = Number(el.getAttribute("data-tts"))
-      if (Number.isInteger(i) && i >= 0 && !targets.has(i)) targets.set(i, el)
+      // #sanitize strips this to a bare non-negative integer server-side;
+      // mirror that on the raw attribute so a stray data-tts="" (Number("")
+      // is 0) can't steal segment 0 away from the title fallback below.
+      const raw = el.getAttribute("data-tts")
+      if (raw && /^\d+$/.test(raw) && !targets.has(Number(raw))) targets.set(Number(raw), el)
    }
    if (!targets.has(0)) targets.set(0, refs.title) // the title segment
    b = { refs, audio, starts, targets, current: null }
@@ -130,5 +140,4 @@ export function wireTTS(refs: TTSRefs): void {
    audio.addEventListener("ended", onEnded)
    audio.addEventListener("emptied", onEnded)
    refs.content.addEventListener("click", onSeekClick)
-   refs.title.addEventListener("click", onSeekClick)
 }

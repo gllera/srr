@@ -337,7 +337,7 @@ export function render(o: IShowFeed) {
       wireTTS({ title: el.title, content: el.content })
    } else {
       player.noteMounted(null)
-      wireTTS({ title: el.title, content: el.content }) // clears any old binding
+      wireTTS({ title: el.title, content: el.content }) // rebind or clear for this surface
    }
    el.prev.disabled = !o.has_left
    el.next.disabled = !o.has_right
