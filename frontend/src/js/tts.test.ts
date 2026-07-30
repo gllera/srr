@@ -113,4 +113,18 @@ describe("re-wiring", () => {
       tick(first.audio, 1)
       expect(second.content.querySelector(".srr-tts-current")).toBeNull()
    })
+
+   it("re-wiring an empty surface clears the old binding and classes", () => {
+      const first = mount("0,5", '<p data-tts="1">a</p>')
+      tick(first.audio, 6)
+      expect(first.content.classList.contains("srr-tts-live")).toBe(true)
+      const title = document.createElement("h1")
+      const content = document.createElement("div")
+      document.body.replaceChildren(title, content)
+      wireTTS({ title, content }) // no narration audio here
+      tick(first.audio, 7) // old audio still playing somewhere (mini-player)
+      expect(first.content.classList.contains("srr-tts-live")).toBe(false)
+      expect(content.classList.contains("srr-tts-live")).toBe(false)
+      expect(document.querySelector(".srr-tts-current")).toBeNull()
+   })
 })

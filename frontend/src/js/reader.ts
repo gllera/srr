@@ -416,6 +416,9 @@ function renderEmptyReader(o: IShowFeed, resting = false) {
    el.content.removeAttribute("lang")
    el.content.removeAttribute("dir")
    el.content.replaceChildren(list.emptyStateEl({ notStarted: o.notStarted, startFeed: o.startFeed }))
+   // Narration sync: the empty state has no narration; drop any binding so a
+   // mini-player-adopted episode can't paint or ghost-seek this surface.
+   wireTTS({ title: el.title, content: el.content })
 
    refreshFeedLabel()
    if (resting) return
