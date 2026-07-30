@@ -155,24 +155,43 @@ async function paintRestingPane(): Promise<void> {
    reader.renderResting(o)
 }
 
+// The ONE door to "put this article on the reader surface", shared by the row
+// tap (list.setup) and enterReader below — two affordances for a single act,
+// which under split answer it differently unless they share a body.
+//
+// Split view: the reader never left. When the pane is ALREADY mounted on the
+// article being asked for, "opening" it is a focus change and nothing more —
+// re-rendering would tear down the mounted DOM and scroll it back to its top,
+// so glancing at the list and coming back (Escape, Escape), or clicking the row
+// the pane is already showing, threw away your place in a long article that had
+// been on screen the whole time. The test is the MOUNTED chron AND the cursor:
+// the list moves that cursor too, so landing somewhere new — or on an article
+// the pane holds but nav has since left behind — is a real navigation that must
+// still render.
+//
+// The HASH still moves. It is the URL you would copy and the key a reload
+// restores from, and a focus-only re-entry that skipped it left both naming the
+// LIST: Escape, Escape, reload landed you on an empty resting pane instead of
+// the article that had been on screen throughout, and a copied link shared the
+// lane rather than what you were reading. pushState, not replace, mirroring
+// nav.goTo — goToList pushed on the way out, so back still steps the pair.
+function openArticle(chron: number): Promise<void> {
+   if (isSplit() && chron >= 0 && nav.currentChron() === chron && reader.mountedArticle()?.chron === chron) {
+      nav.publishHash()
+      persistHash(location.hash)
+      showReader()
+      return Promise.resolve()
+   }
+   return guard(() => nav.goTo(chron))
+}
+
 // The shared "go to the article surface" resolver, reused by every → reader
 // transition (Escape from the list, the open-article toolbar button). Opens the
 // reader at the current reader/selected article when there is one, else the
 // filter's oldest-unseen article (start of the backlog), else its newest.
 async function enterReader() {
    const chron = nav.currentChron()
-   // Split view: the reader never left. When the pane is ALREADY mounted on the
-   // article being asked for, "entering" it is a focus change and nothing more —
-   // re-rendering would tear down the mounted DOM and scroll it back to its top,
-   // so glancing at the list and coming back (Escape, Escape) threw away your
-   // place in a long article that had been on screen the whole time. The test is
-   // the MOUNTED chron, not nav.pos: the list moves that cursor too, and landing
-   // somewhere new is a real navigation that must still render.
-   if (isSplit() && chron >= 0 && reader.mountedArticle()?.chron === chron) {
-      showReader()
-      return
-   }
-   if (chron >= 0) return guard(() => nav.goTo(chron))
+   if (chron >= 0) return openArticle(chron)
    const anchor = await nav.listAnchor() // oldest unseen, else -1 (newest)
    return anchor >= 0 ? guard(() => nav.goTo(anchor)) : guard(() => nav.last())
 }
@@ -323,13 +342,21 @@ function paintSaveButton(saved: boolean) {
 }
 
 // Toggle the current article's saved state from the reader. A local state flip
-// (localStorage + the button), not a navigation — it stays off the guard mutex,
-// and the list re-derives stars from the live set when you return to it.
+// (localStorage + the button), not a navigation — it stays off the guard mutex.
+//
+// "The list re-derives stars from the live set when you return to it" was the
+// whole of this function's list story, and split view deletes the return: the
+// row for this very article is on screen beside the reader, painting its star
+// from the same set. refresh() IS that re-derive — stars, aria, and in the
+// ★ Saved lane dropping the row an un-save just took out of the lane, which
+// otherwise sat there fully starred in a lane it no longer belonged to, one
+// click from re-opening an article the lane does not contain.
 function toggleSave() {
    const chron = nav.currentChron()
    if (chron < 0) return
    const saved = nav.toggleSaved(chron)
    paintSaveButton(saved)
+   if (isSplit()) list.refresh()
 }
 
 // RDR12 — the unread total, surfaced where an installed app is actually looked
@@ -766,6 +793,13 @@ async function init() {
    applyScroller()
    // Who owns the shared cursor when the list rebuilds (list.mayClaimCursor).
    list.setCursorOwner(readerLive)
+   // A row's ★ writes the set the reader's save button paints from. Only the
+   // article that button describes can be affected — a star on any OTHER row
+   // must leave it alone — and `!el.save.disabled` carries the enablement
+   // through unchanged, the same re-derive refreshAfterMerge uses.
+   list.setSavedSink((chron) => {
+      if (isSplit() && chron === nav.currentChron()) refreshSaveButton(!el.save.disabled)
+   })
    onSplitChange(() => {
       applyScroller()
       list.invalidate()
@@ -1013,7 +1047,7 @@ async function init() {
    // baseline after the list's anchor jump / prepend compensation.
    list.setup(
       el.listView,
-      (chron) => guard(() => nav.goTo(chron)),
+      (chron) => void openArticle(chron),
       () => gestures?.resetScroll(),
       // A scroll-paging failure (meta pack 404 / network drop) surfaces here; the
       // retry rebuilds the list at the current anchor, same recovery as a failed

@@ -683,6 +683,93 @@ describe("browser: split view (two-pane desktop)", () => {
       }
    })
 
+   // The row tap is the same act as Escape above, through the other affordance —
+   // and it went straight to nav.goTo, so tapping the row the pane was already
+   // showing re-rendered the article and threw the scroll away. It must also
+   // leave the URL naming the article: a focus-only re-entry that skips the hash
+   // write is what makes Escape, Escape, reload land on an empty resting pane.
+   it("tapping the row the pane already shows keeps its scroll, and names it in the URL", async () => {
+      const ctx = await browser.createBrowserContext()
+      try {
+         const p = await ctx.newPage()
+         await p.setViewport({ width: 1280, height: 700 })
+         await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
+         await waitList(p)
+         await clickRow(p, "news title 5")
+         await waitReader(p)
+         // Same tall marker as the case above: scrollable AND destroyed by a
+         // re-render, so one node answers both halves.
+         await p.evaluate(() => {
+            const tall = document.createElement("div")
+            tall.dataset.e2eMark = "kept"
+            tall.style.height = "2000px"
+            document.querySelector(".srr-content")!.append(tall)
+            window.scrollTo(0, 300)
+         })
+         await new Promise((r) => setTimeout(r, 300))
+         const scrolled = await p.evaluate(() => Math.round(scrollY))
+         expect(scrolled).toBeGreaterThan(0)
+
+         await p.keyboard.press("Escape") // → the list surface, hash drops the position
+         await p.waitForFunction(() => document.body.classList.contains("srr-view-list"), { timeout: 10_000 })
+         await clickRow(p, "news title 5") // …and back in through the ROW
+         await p.waitForFunction(() => !document.body.classList.contains("srr-view-list"), { timeout: 10_000 })
+         await new Promise((r) => setTimeout(r, 400))
+
+         expect(
+            await p.evaluate(() => ({
+               kept: !!document.querySelector(".srr-content [data-e2e-mark='kept']"),
+               y: Math.round(scrollY),
+               pos: location.hash.slice(1).split("!")[0],
+               stored: (localStorage.getItem("srr-hash") ?? "").slice(1).split("!")[0],
+            })),
+         ).toEqual({ kept: true, y: scrolled, pos: "5", stored: "5" })
+      } finally {
+         await ctx.close()
+      }
+   })
+
+   // ONE saved set, TWO paints on screen at once — and each toggle path repainted
+   // only its own, on the premise that the other re-derives "when you return to
+   // it". Under split there is no return: the row and the toolbar sat asserting
+   // opposite things about one article, and a second toggle composed them into a
+   // state neither showed.
+   it("the row's ★ and the reader's save button agree, both ways", async () => {
+      const ctx = await browser.createBrowserContext()
+      try {
+         const p = await ctx.newPage()
+         await p.setViewport({ width: 1280, height: 900 })
+         await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
+         await waitList(p)
+         await clickRow(p, "news title 5")
+         await waitReader(p)
+
+         const state = () =>
+            p.evaluate(() => {
+               const row = document.querySelector(".srr-list a.srr-row.srr-row-current")
+               return {
+                  rowStar: !!row?.classList.contains("srr-row-saved"),
+                  rowAria: row?.querySelector(".srr-row-star")?.getAttribute("aria-pressed") ?? null,
+                  button: !!document.querySelector(".srr-save")?.classList.contains("srr-saved"),
+               }
+            })
+
+         // …from the reader's button.
+         await p.click(".srr-save")
+         await p.waitForFunction(() => !!document.querySelector(".srr-row-current.srr-row-saved"), { timeout: 10_000 })
+         expect(await state()).toEqual({ rowStar: true, rowAria: "true", button: true })
+
+         // …and back from the row's own star.
+         await p.click(".srr-row-current .srr-row-star")
+         await p.waitForFunction(() => !document.querySelector(".srr-save")?.classList.contains("srr-saved"), {
+            timeout: 10_000,
+         })
+         expect(await state()).toEqual({ rowStar: false, rowAria: "false", button: false })
+      } finally {
+         await ctx.close()
+      }
+   })
+
    // The resting pane's Next is the "start reading" affordance its own copy
    // advertises. nav.restingState builds that panel for a cursor of -1, but the
    // pane only exists beside a list that has ALREADY seeded the shared cursor at

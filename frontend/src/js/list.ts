@@ -105,6 +105,19 @@ export function setCursorOwner(fn: () => boolean): void {
    readerHoldsCursor = fn
 }
 
+// "A row's ★ just moved" — injected for the same reason readerHoldsCursor is
+// (reader.ts already imports this module, so an edge back to the controller
+// would be a cycle). Under split the reader's own save button is on screen and
+// may be describing this very article, and the row star and that button are two
+// paints of ONE set: the row's toggle alone left the button asserting the
+// opposite, and a second toggle from the button then composed the two into a
+// state neither of them showed. The default is the single-surface truth — no
+// reader on screen to tell, and the button re-derives on its next render.
+let notifySavedChanged: (chron: number) => void = () => {}
+export function setSavedSink(fn: (chron: number) => void): void {
+   notifySavedChanged = fn
+}
+
 // Freshness token: a new render() reassigns it so any in-flight load (or pending
 // observer callback) from the prior filter bails before touching the DOM — the
 // same discipline as dropdown's fill tokens and nav's prefetch.
@@ -467,6 +480,9 @@ function toggleRowSave(a: HTMLElement): void {
    const nowSaved = nav.toggleSaved(chron)
    a.classList.toggle("srr-row-saved", nowSaved)
    a.querySelector(".srr-row-star")?.setAttribute("aria-pressed", String(nowSaved))
+   // Before the Saved-lane removal below, so the sink still fires for the row it
+   // is about to drop — that is exactly the case the reader's button is stale in.
+   notifySavedChanged(chron)
    if (nav.isSavedFilter() && !nowSaved) {
       a.remove()
       relabelDividers() // drop a day divider the removed row may have orphaned

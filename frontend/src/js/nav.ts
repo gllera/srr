@@ -1275,3 +1275,13 @@ export async function cycleFilter(dir: number): Promise<IShowFeed> {
 function updateHash(replace = false) {
    writeHash(pos, filter.tokens, replace)
 }
+
+// Publish the CURRENT cursor + filter into the fragment WITHOUT navigating —
+// the split view's focus-only re-entry (app.ts openArticle), where the pane is
+// already mounted on the article being "opened" so nothing resolves, renders or
+// records, but the URL and the stored restore key must still name what is on
+// screen. Every other writer of the hash is a landing; this one is the landing
+// that already happened.
+export function publishHash(replace = false): void {
+   updateHash(replace)
+}

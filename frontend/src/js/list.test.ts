@@ -1315,6 +1315,26 @@ describe("list", () => {
       expect($star(2).getAttribute("aria-pressed")).toBe("true")
    })
 
+   // The reader's save button paints the SAME set, and under split it is on
+   // screen beside these rows — so the row's toggle has to say so. The sink is
+   // injected (app.ts owns that button; this module sits below it), and it must
+   // fire for the ★ Saved lane's removal case too, which is exactly the one the
+   // stale button was most visible in.
+   it("announces a row's ★ toggle to the other surface", async () => {
+      const seen: number[] = []
+      list.setSavedSink((chron) => seen.push(chron))
+      try {
+         setIndex(3)
+         await list.render()
+         tapStar(2)
+         expect(seen).toEqual([2])
+         tapStar(2)
+         expect(seen).toEqual([2, 2])
+      } finally {
+         list.setSavedSink(() => {})
+      }
+   })
+
    it("the saved view renders only saved chrons, in save order (newest save on top)", async () => {
       setIndex(6)
       nav._setSaved([0, 2, 4]) // saved in that order → same as chronIdx order here

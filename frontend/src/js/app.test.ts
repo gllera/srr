@@ -114,6 +114,9 @@ const nav = vi.hoisted(() => {
       currentFeedId: vi.fn(() => -1),
       isSaved: vi.fn(() => false),
       toggleSaved: vi.fn(() => true),
+      // The focus-only re-entry's hash write (openArticle): no landing, so
+      // nothing else in the mock moves — only that the URL was published.
+      publishHash: vi.fn(),
       goTo: vi.fn(async () => sf()),
       left: vi.fn(async () => sf()),
       right: vi.fn(async () => sf()),
@@ -169,6 +172,7 @@ const list = vi.hoisted(() => ({
    setup: vi.fn(),
    setScroller: vi.fn(),
    setCursorOwner: vi.fn(),
+   setSavedSink: vi.fn(),
    followCursor: vi.fn(),
    show: vi.fn(async () => {}),
    render: vi.fn(async () => {}),
@@ -572,6 +576,95 @@ describe("split view (body.srr-split)", () => {
       expect(nav.goTo).not.toHaveBeenCalled()
       // Node IDENTITY: a re-render replaces the content host's children.
       expect(document.querySelector(".srr-content")!.firstElementChild).toBe(mounted)
+   })
+
+   // A focus change still has to move the URL. It is what a copied link shares
+   // and what a reload restores from, and skipping it left both naming the LIST
+   // — Escape, Escape, reload landed on an empty resting pane instead of the
+   // article that had been on screen throughout.
+   it("publishes the article hash on a focus-only re-entry", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
+      nav.currentChron.mockReturnValue(2)
+      hashTo("#2")
+      await flush()
+      hashTo("#!news")
+      await flush()
+
+      nav.publishHash.mockClear()
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }))
+      await flush()
+      expect(nav.goTo).not.toHaveBeenCalled() // still not a render…
+      expect(nav.publishHash).toHaveBeenCalled() // …but the URL followed the surface
+   })
+
+   // The row tap is the OTHER affordance for "put this article on the reader",
+   // and it went straight to nav.goTo — so clicking the row the pane was already
+   // showing re-rendered it and threw the scroll to the top, while Escape on the
+   // same article kept your place. Two ways to do one thing, disagreeing.
+   it("a row tap on the article the pane already shows is a focus change too", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
+      nav.currentChron.mockReturnValue(2)
+      hashTo("#2")
+      await flush()
+      hashTo("#!news")
+      await flush()
+      const mounted = document.querySelector(".srr-content")!.firstElementChild
+
+      const openRow = list.setup.mock.calls[0][1] as (chron: number) => void
+      nav.goTo.mockClear()
+      openRow(2)
+      await flush()
+      expect(nav.goTo).not.toHaveBeenCalled()
+      expect(document.querySelector(".srr-content")!.firstElementChild).toBe(mounted)
+      expect(document.body.classList.contains("srr-view-list")).toBe(false)
+
+      // …and a tap on any OTHER row is still a real navigation.
+      openRow(9)
+      await flush()
+      expect(nav.goTo).toHaveBeenCalledWith(9)
+   })
+
+   // The ★ set has TWO paints on screen at once here — the row's star and the
+   // reader's save button — and each toggle path used to repaint only its own,
+   // on the premise that the other re-derives "when you return to it". Under
+   // split there is no return: the toolbar and the row sat asserting opposite
+   // things about one article, and a second toggle then composed them into a
+   // state neither showed.
+   it("a save from the reader re-derives the pane's stars", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
+      nav.currentChron.mockReturnValue(2)
+      hashTo("#2")
+      await flush()
+
+      list.refresh.mockClear()
+      ;(document.querySelector(".srr-save") as HTMLButtonElement).click()
+      await flush()
+      expect(nav.toggleSaved).toHaveBeenCalledWith(2)
+      // refresh() is the whole re-derive: stars, aria, and in the ★ Saved lane
+      // dropping the row the un-save just took out of the lane.
+      expect(list.refresh).toHaveBeenCalled()
+   })
+
+   it("a row's ★ re-derives the reader's save button — but only for the article it shows", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
+      nav.currentChron.mockReturnValue(2)
+      hashTo("#2")
+      await flush()
+      const save = document.querySelector(".srr-save") as HTMLButtonElement
+      const sink = list.setSavedSink.mock.calls[0][0] as (chron: number) => void
+
+      nav.isSaved.mockReturnValue(true)
+      sink(9) // some other row's star — the button describes chron 2, not this
+      expect(save.classList.contains("srr-saved")).toBe(false)
+
+      sink(2)
+      expect(save.classList.contains("srr-saved")).toBe(true)
+      expect(save.getAttribute("aria-pressed")).toBe("true")
+      nav.isSaved.mockReturnValue(false)
    })
 
    // …but landing somewhere NEW is a real navigation and must still render. The
