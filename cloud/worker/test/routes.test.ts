@@ -173,3 +173,71 @@ describe("store objects", () => {
       }
    })
 })
+
+describe("sync.json", () => {
+   it("GET 404s before the first push (sync.ts's seed signal)", async () => {
+      await env.STORE.delete("u/t1/sync.json")
+      const res = await SELF.fetch(`${BASE}/u/t1/sync.json`, api({ cookie: await sessCookie(t1email) }))
+      expect(res.status).toBe(404)
+   })
+
+   it("PUT then GET round-trips the blob, no-cache", async () => {
+      const blob = JSON.stringify({ v: 2, ts: 123, seen: {} })
+      const cookie = await sessCookie(t1email)
+      const put = await SELF.fetch(`${BASE}/u/t1/sync.json`, {
+         method: "PUT",
+         headers: { cookie, "content-type": "application/json" },
+         body: blob,
+      })
+      expect(put.status).toBe(204)
+      const get = await SELF.fetch(`${BASE}/u/t1/sync.json`, api({ cookie }))
+      expect(get.status).toBe(200)
+      expect(get.headers.get("cache-control")).toBe("no-cache")
+      expect(get.headers.get("content-type")).toBe("application/json")
+      expect(await get.text()).toBe(blob)
+   })
+
+   it("413s an oversize body", async () => {
+      const res = await SELF.fetch(`${BASE}/u/t1/sync.json`, {
+         method: "PUT",
+         headers: { cookie: await sessCookie(t1email) },
+         body: "x".repeat(256 * 1024 + 1),
+      })
+      expect(res.status).toBe(413)
+   })
+
+   it("requires auth and the right tenant", async () => {
+      expect((await SELF.fetch(`${BASE}/u/t1/sync.json`, { method: "PUT", body: "{}" })).status).toBe(401)
+      expect(
+         (
+            await SELF.fetch(`${BASE}/u/t1/sync.json`, {
+               method: "PUT",
+               headers: { cookie: await sessCookie(t2email) },
+               body: "{}",
+            })
+         ).status,
+      ).toBe(403)
+   })
+
+   it("no-write invariant: PUT to every other route class is refused", async () => {
+      const cookie = await sessCookie(t1email)
+      for (const path of [
+         "/u/t1/db.gz",
+         "/u/t1/idx/0.gz",
+         "/u/t1/",
+         "/u/t1/config.gz",
+         "/u/t1/frontend.abcdef12.js",
+         "/",
+      ]) {
+         const res = await SELF.fetch(`${BASE}${path}`, {
+            method: "PUT",
+            headers: { cookie },
+            body: "x",
+            redirect: "manual",
+         })
+         expect(res.status, `PUT ${path}`).toBe(405)
+      }
+      // …and the store bytes did not change behind the 405s.
+      expect(await env.STORE.get("u/t1/idx/0.gz")).toBeNull()
+   })
+})

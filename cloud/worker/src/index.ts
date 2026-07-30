@@ -128,8 +128,26 @@ async function serveStore(
    return res
 }
 
+// The ONE write path in the product: the reader's cross-device sync blob
+// (sync.ts GET-or-404 / PUT contract). Size-capped; stored no-cache.
+const SYNC_MAX_BYTES = 256 * 1024
+
 async function serveSync(request: Request, env: Env, uid: string): Promise<Response> {
-   return json(501, "not implemented") // sync lands after store serving
+   const key = `u/${uid}/sync.json`
+   if (request.method === "PUT") {
+      const body = await request.arrayBuffer()
+      if (body.byteLength > SYNC_MAX_BYTES) return json(413, "sync blob too large")
+      await env.STORE.put(key, body, {
+         httpMetadata: { contentType: "application/json", cacheControl: "no-cache" },
+      })
+      return new Response(null, { status: 204 })
+   }
+   const obj = await env.STORE.get(key)
+   if (!obj) return notFound()
+   const headers = new Headers()
+   obj.writeHttpMetadata(headers)
+   headers.set("cache-control", "no-cache")
+   return new Response(obj.body, { status: 200, headers })
 }
 
 export default {
