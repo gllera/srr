@@ -125,6 +125,39 @@ describe("browser: split view (two-pane desktop)", () => {
       expect(await page.$eval("article.srr-reader", (e) => (e as HTMLElement).hidden)).toBe(false)
    })
 
+   it("an open right after boot is not yanked by the deferred anchor landing", async () => {
+      // Land-once is armed on a fresh [ALL] boot (anchoredMid = the oldest
+      // unread) and commits its centered scroll only AFTER fonts.ready + a
+      // bounded settle loop. In split view the list stays visible, so the
+      // reader-open cancellation (container.hidden) never trips — an immediate
+      // row open used to be yanked when that stale landing parked the pane at
+      // the BOOT anchor's centered position, leaving the opened row far above
+      // the view. The armedChron guard makes the landing yield to followCursor:
+      // the opened row must still sit inside the pane well after the settle
+      // window. Fresh context — the shared page carries the ordered sequence's
+      // history.
+      const ctx = await browser.createBrowserContext()
+      try {
+         const p = await ctx.newPage()
+         await p.setViewport({ width: 1280, height: 900 })
+         await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
+         await waitList(p)
+         await clickRow(p, "sport title 5") // immediately — before the deferred landing
+         await waitReader(p)
+         await new Promise((r) => setTimeout(r, 1200)) // past the bounded ~20-frame settle
+         const ok = await p.evaluate(() => {
+            const pane = document.querySelector<HTMLElement>(".srr-list")!
+            const row = document.querySelector<HTMLElement>(".srr-row-current")
+            if (!row) return false
+            const r = row.getBoundingClientRect()
+            return r.top >= 0 && r.bottom <= pane.clientHeight
+         })
+         expect(ok).toBe(true)
+      } finally {
+         await ctx.close()
+      }
+   })
+
    it("stays single-surface below the breakpoint (regression)", async () => {
       const ctx = await browser.createBrowserContext()
       try {
@@ -138,6 +171,51 @@ describe("browser: split view (two-pane desktop)", () => {
          await waitReader(p)
          // Narrow: opening the reader hides the list, exactly as before.
          expect(await visible(p, ".srr-list")).toBe(false)
+      } finally {
+         await ctx.close()
+      }
+   })
+
+   it("a live viewport crossing rewires both directions", async () => {
+      // The breakpoint owner (split.ts) re-routes on a LIVE resize — no reload,
+      // no goto. Crossing split→narrow from the reader view must land the plain
+      // single-surface reader (the list hidden, its pane observer/pill torn down
+      // by invalidate), and crossing back must bring both panes up with the
+      // cursor row highlighted — and leave the mutex/nav live, proven by a
+      // keyboard step actually advancing the hash afterwards.
+      const ctx = await browser.createBrowserContext()
+      try {
+         const p = await ctx.newPage()
+         await p.setViewport({ width: 1280, height: 900 })
+         await p.goto(`${baseUrl}#!`, { waitUntil: "load" })
+         await waitList(p)
+         await clickRow(p, "news title 0")
+         await waitReader(p)
+         expect(await visible(p, ".srr-list")).toBe(true)
+
+         // Split → narrow on the live page: single surface, reader keeps the view.
+         await p.setViewport({ width: 420, height: 900 })
+         await p.waitForFunction(
+            () => !document.body.classList.contains("srr-split") && !document.body.classList.contains("srr-loading"),
+            { timeout: 20_000 },
+         )
+         expect(await visible(p, "article.srr-reader")).toBe(true)
+         expect(await visible(p, ".srr-list")).toBe(false)
+
+         // Narrow → split: both panes return, the pane highlights the open article.
+         await p.setViewport({ width: 1280, height: 900 })
+         await p.waitForFunction(
+            () => document.body.classList.contains("srr-split") && !document.body.classList.contains("srr-loading"),
+            { timeout: 20_000 },
+         )
+         await p.waitForFunction(() => !!document.querySelector(".srr-list .srr-row-current"), { timeout: 20_000 })
+         expect(await visible(p, ".srr-list")).toBe(true)
+         expect(await visible(p, "article.srr-reader")).toBe(true)
+
+         // The re-route released the mutex and nav is live: a step advances.
+         const before = await p.evaluate(() => Number(location.hash.slice(1).split("!")[0]))
+         await p.keyboard.press("ArrowRight")
+         await p.waitForFunction((b) => Number(location.hash.slice(1).split("!")[0]) > b, { timeout: 20_000 }, before)
       } finally {
          await ctx.close()
       }

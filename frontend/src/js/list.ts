@@ -1127,6 +1127,14 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
    // they paint/reflow taller is exactly the visible "bump". The newest-default
    // (-1) is plain top.
    const landOnceMode = anchoredMid && !anchorNow
+   // The cursor as land-once is ARMED. A normal boot never moves it again before
+   // the deferred landing (the anchoredMid select above already ran; -1 stays -1,
+   // a filter-change resume stays put), so the landing commits exactly as before.
+   // Any reader open or cursor step meanwhile moves it — and in SPLIT view the
+   // list stays visible, so the container.hidden bail below never trips — leaving
+   // a landing computed for the OLD anchor: it must yield to followCursor instead
+   // of overwriting it (the checkpoints below compare against this).
+   const armedChron = nav.currentChron()
    if (anchoredMid && anchorNow) scrollChronToView(seed)
    else sc.to(0)
    notifyScroll()
@@ -1200,8 +1208,9 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
          // would yank the article view off the top it just scrolled to. Skip the
          // scroll when we're no longer the visible surface; still start the observer
          // so infinite scroll is live when the list returns (its offscreen guard
-         // no-ops paging while hidden).
-         if (!container.hidden && !userScrolled) {
+         // no-ops paging while hidden). A moved cursor (armedChron) bails the same
+         // way: split view keeps the list visible, so it is the only tell there.
+         if (!container.hidden && !userScrolled && nav.currentChron() === armedChron) {
             scrollChronToView(seed)
             notifyScroll()
             userScrolled = false
@@ -1214,9 +1223,10 @@ export async function render(anchorNow = false, onInteractive?: () => void): Pro
          let tries = 0
          const tick = (): void => {
             if (my !== tok) return
-            // Stop the settle loop early once the reader has opened over us (commit
-            // then skips the scroll but still starts the observer).
-            if (container.hidden || userScrolled || !rowsEl) return commit()
+            // Stop the settle loop early once the reader has opened over us, or the
+            // cursor has moved off the armed anchor (commit then skips the scroll
+            // but still starts the observer).
+            if (container.hidden || userScrolled || !rowsEl || nav.currentChron() !== armedChron) return commit()
             pinHeights(allRows()) // re-measure true (post-paint/post-font) heights
             const target = chronScrollTarget(seed) ?? -1
             if (target === lastTarget) stable++
@@ -1313,6 +1323,14 @@ async function renderSearch(my: object, onInteractive?: () => void): Promise<voi
 // heights, so invalidate now, rebuild on return.
 export function invalidate(): void {
    builtKey = null
+   // Also drop the live observer and the arrivals pill NOW, not at the next
+   // render: a split→narrow crossing in the reader view re-routes without
+   // rendering the list, so the pane-rooted IntersectionObserver and the pill's
+   // window/container scroll listeners would otherwise dangle until the list is
+   // next shown. Strictly cleaner for every caller (frontier moves, mount
+   // changes) — the rebuild this claims recreates both anyway.
+   teardownObserver()
+   resetNewPill()
 }
 
 // Re-show an already-built list (same filter). When the reader's article is
