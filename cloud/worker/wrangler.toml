@@ -7,7 +7,8 @@
 # rewrites). The route is inert until an operator-initiated deploy.
 name = "srr-cloud"
 main = "src/index.ts"
-compatibility_date = "2026-07-01"
+# Matches the workerd the pinned vitest pool ships (newer dates fall back noisily).
+compatibility_date = "2025-10-11"
 workers_dev = false
 
 routes = [{ pattern = "cloud.32b.io/*", zone_name = "32b.io" }]
