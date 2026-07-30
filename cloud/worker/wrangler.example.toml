@@ -33,7 +33,16 @@ bucket_name = "srr-cloud"
 [vars]
 # Where an anonymous navigation is sent to sign in. The Worker never mints
 # sessions; it only verifies the cookie that app sets (src/auth.ts).
-LOGIN_URL = "https://login.example.com/login"
+#
+# It redirects to `<LOGIN_URL>?next=<the URL asked for>`, so WHATEVER path this
+# names must itself be the login form and must honour `next`. A bare origin is
+# the cleanest shape — and only correct when `/` on that host IS the form. Point
+# it at a host whose root is gated by its own login and the user arrives at
+# `<origin>/?next=…`, gets bounced to the real form with the original `next`
+# NESTED inside the new one, and lands on that host's home page after signing in
+# instead of the page they asked for. Nothing errors; the return path just
+# silently goes to the wrong place.
+LOGIN_URL = "https://auth.example.com"
 
 # NOT here: SESSION_SECRET and ROSTER. Both are secrets in production
 # (`wrangler secret put …`) and live in .dev.vars locally — the roster because it
