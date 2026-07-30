@@ -56,6 +56,9 @@ describe("shell", () => {
          expect(body).toContain("<script")
          expect(res.headers.get("cache-control")).toBe("no-cache")
          expect(res.headers.get("content-security-policy")).toContain("script-src 'self'")
+         expect(res.headers.get("x-content-type-options")).toBe("nosniff")
+         // NOT the store's sandbox policy — that would stop the reader running.
+         expect(res.headers.get("content-security-policy")).not.toContain("sandbox")
       }
    })
 
@@ -78,6 +81,10 @@ describe("shell", () => {
       const res = await SELF.fetch(`${BASE}/u/t1/${js}`, api())
       expect(res.status).toBe(200)
       expect(res.headers.get("cache-control")).toContain("immutable")
+      // nosniff BLOCKS a script that is not served as a JS MIME type, so the
+      // type is load-bearing the moment the header is set — pin both together.
+      expect(res.headers.get("x-content-type-options")).toBe("nosniff")
+      expect(res.headers.get("content-type")).toMatch(/javascript/)
       const mf = await SELF.fetch(`${BASE}/u/t1/manifest.webmanifest`, api())
       expect(mf.status).toBe(200)
       expect(mf.headers.get("cache-control")).toBe("no-cache")

@@ -60,11 +60,16 @@ function deny(request: Request, env: Env, authenticated: boolean): Response {
    return json(401, "auth required")
 }
 
+// The shell gets nosniff but NEVER userContent(): its `sandbox` would drop the
+// reader into an opaque origin with scripting off — the app would simply not
+// run. Two different jobs sharing one header name is exactly the trap, so the
+// shell sets its own and the store keeps its own.
 async function serveShellIndex(request: Request, env: Env): Promise<Response> {
    const res = await env.ASSETS.fetch(new URL("/index.html", request.url))
    const headers = new Headers(res.headers)
    headers.set("cache-control", "no-cache")
    headers.set("content-security-policy", CSP)
+   headers.set("x-content-type-options", "nosniff")
    return new Response(res.body, { status: res.status, headers })
 }
 
@@ -74,6 +79,10 @@ async function serveShellAsset(request: Request, env: Env, name: string): Promis
    const headers = new Headers(res.headers)
    // Content-hashed names are immutable; the webmanifest is the one stable name.
    headers.set("cache-control", name === "manifest.webmanifest" ? "no-cache" : "public, max-age=31536000, immutable")
+   // Safe only because these are OUR bundle's bytes under correct types: nosniff
+   // BLOCKS a script served as anything but a JS MIME type (and a stylesheet as
+   // anything but text/css), so the asset test pins the type alongside it.
+   headers.set("x-content-type-options", "nosniff")
    return new Response(res.body, { status: res.status, headers })
 }
 
