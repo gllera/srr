@@ -58,6 +58,23 @@ func init() {
 		policy.AllowAttrs("controls").Matching(regexp.MustCompile(`(?i)^(|controls)$`)).OnElements("audio")
 		policy.AllowElements("audio")
 
+		// srr-tts narration sync (paragraph highlight + click-to-seek in the
+		// reader): data-tts-t on the narration <audio> is the segment
+		// start-time table, data-tts on a block is its segment index. Values
+		// are a comma-joined decimal list / a bounded digit run — nothing
+		// else, so the pair carries no markup, URL or script surface. The
+		// element list is the intersection of srr-tts's BLOCK_TAGS with what
+		// this policy already allows (a stamp on e.g. <header> dies with its
+		// element, and the reader treats the missing index as "no highlight").
+		// A feed could stamp its own content pre-pipeline; the worst that
+		// buys is a click seeking its own <audio> — accepted.
+		policy.AllowAttrs("data-tts-t").Matching(regexp.MustCompile(`^[0-9]+(\.[0-9]+)?(,[0-9]+(\.[0-9]+)?)*$`)).OnElements("audio")
+		policy.AllowAttrs("data-tts").Matching(regexp.MustCompile(`^[0-9]{1,4}$`)).OnElements(
+			"p", "div", "li", "ul", "ol", "dl", "dt", "dd", "blockquote", "pre",
+			"table", "tr", "td", "th", "caption", "figure", "figcaption",
+			"article", "section", "aside", "summary", "details",
+			"h1", "h2", "h3", "h4", "h5", "h6")
+
 		policy.RequireParseableURLs(true)
 		policy.AllowRelativeURLs(true)
 		// Kept in lockstep with the frontend's ANCHOR_ABS_OK allowlist

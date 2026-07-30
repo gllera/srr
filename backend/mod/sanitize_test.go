@@ -121,3 +121,34 @@ func TestSanitizeKeepsFootnoteRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// srr-tts's narration sync: data-tts stamps a narrated block with its
+// segment index, data-tts-t on the narration <audio> carries the segment
+// start-time table. Both are display hints the reader consumes; the value
+// regexes are what keeps them from ever smuggling markup — anything but a
+// bounded digit run / a comma-joined decimal list is stripped.
+func TestSanitizeKeepsTTSSyncAttrs(t *testing.T) {
+	m := New()
+	item := &RawItem{Content: `<audio controls preload="none" data-tts-t="0,4.2,11.8" src="#/tts/abc.wav"></audio>` +
+		`<p data-tts="1">a</p><h2 data-tts="2">b</h2><li data-tts="3">c</li>`}
+	if err := m.Process(context.Background(), "#sanitize", item); err != nil {
+		t.Fatalf("sanitize: %v", err)
+	}
+	for _, want := range []string{`data-tts-t="0,4.2,11.8"`, `<p data-tts="1">`, `<h2 data-tts="2">`, `data-tts="3"`} {
+		if !strings.Contains(item.Content, want) {
+			t.Errorf("missing %q in %q", want, item.Content)
+		}
+	}
+}
+
+func TestSanitizeRejectsMalformedTTSSyncAttrs(t *testing.T) {
+	m := New()
+	item := &RawItem{Content: `<audio controls data-tts-t="1,evil()" src="https://e.com/a.mp3"></audio>` +
+		`<p data-tts="x">a</p><p data-tts="12345">b</p><span data-tts="1">inline</span>`}
+	if err := m.Process(context.Background(), "#sanitize", item); err != nil {
+		t.Fatalf("sanitize: %v", err)
+	}
+	if strings.Contains(item.Content, "data-tts") {
+		t.Errorf("malformed/misplaced tts attr survived: %q", item.Content)
+	}
+}
