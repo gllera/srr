@@ -625,6 +625,26 @@ describe("split view (body.srr-split)", () => {
       })
    })
 
+   // A Show-read flip or a frontier gesture made from the LIST surface shifts the
+   // bounds the READER's arrows and pending pill are derived from — and under
+   // split that reader is on screen, so leaving it un-derived left a next-count
+   // that no longer matched the lane.
+   it("re-derives the live pane's chrome when the bounds shift from the list surface", async () => {
+      await boot()
+      nav.fromHash.mockResolvedValue(showFeed({ has_left: true, has_right: true }))
+      hashTo("#2")
+      await flush()
+      nav.currentChron.mockReturnValue(2)
+      hashTo("#!news") // list surface, article still in the pane
+      await flush()
+      nav.probeCurrent.mockClear()
+      list.rerender.mockClear()
+      pickerHooks()!.onToggleShowRead()
+      await flush()
+      expect(list.rerender).toHaveBeenCalled() // the pane rebuilds…
+      expect(nav.probeCurrent).toHaveBeenCalled() // …and the reader re-probes
+   })
+
    // …and with NOTHING in the pane the list keeps its own row stepping: there is
    // no article to step, and the resting panel is not a cursor.
    it("keeps the list's row stepping when the split pane is resting", async () => {

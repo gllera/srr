@@ -246,7 +246,12 @@ async function guardBg(fn: () => Promise<void>): Promise<boolean> {
 // (URL-only, e.g. #!5+9) filter to "", which switchFilter("") would misread as
 // [ALL] and teleport the reader off its lane, so leave that rare placeholder be.
 function reReadReader() {
-   if (view !== "reader") return
+   // "The reader needs re-deriving" is a LAYOUT question under split: the pane
+   // is on screen with its arrows and pending pill live even while the LIST has
+   // focus, so a frontier gesture or a Show-read flip made from there left both
+   // stale — a next-count that no longer matched the lane, arrows armed against
+   // bounds that had moved.
+   if (view !== "reader" && !readerLive()) return
    if (nav.currentChron() >= 0) {
       reader.reprobeReaderChrome()
       return
@@ -568,7 +573,9 @@ function toggleUnseenOnly() {
    // The reader re-derives for the new mode: a real article re-probes its
    // chrome; a placeholder (pos < 0) re-runs the switch (reprobeReaderChrome
    // would no-op and leave it stale). Shared with menus' afterFrontierMove.
-   if (view !== "list") reReadReader()
+   // Under split BOTH panes are on screen, so both halves run whichever surface
+   // the picker was opened from — reReadReader itself is the layout-aware gate.
+   if (view !== "list" || readerLive()) reReadReader()
 }
 
 // Two-finger vertical swipe = step the filter. In the reader, cycle to the next

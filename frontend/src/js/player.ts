@@ -739,7 +739,14 @@ function chipMenuItems(index: number): MenuItem[] {
          label: "Play now",
          action: () => {
             if (stale()) return
-            void mediaList(el.content)[index]?.play()
+            // `void` discards the promise but not its REJECTION: play() rejects
+            // on media whose bytes never arrive (and on an autoplay refusal),
+            // which surfaced as an unhandled rejection in the console. The
+            // element's own `error` handling owns the user-facing recovery, so
+            // the catch here is deliberately silent.
+            mediaList(el.content)
+               [index]?.play()
+               .catch(() => {})
          },
       },
    ]
